@@ -7,14 +7,17 @@
 //! - a `#fragment` on a Markdown target must equal one of its heading anchors,
 //!   generated with GitHub's rules (see [`slug`]) and compared case-sensitively.
 //!
-//! Query strings are dropped and percent-encoding is decoded before the path
-//! is resolved. Code blocks, code spans and HTML comments contain no links, so
-//! they are never checked.
+//! `href` and `src` attributes in raw HTML count as links too; the HTML is
+//! tokenized per the HTML standard. Query strings are dropped and
+//! percent-encoding is decoded before the path is resolved. Code blocks, code
+//! spans, HTML comments and `script` / `style` bodies contain no links, so they
+//! are never checked.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use html5gum::{DefaultEmitter, Token, Tokenizer};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use unicode_normalization::char::is_combining_mark;
 
@@ -50,8 +53,9 @@ fn options() -> Options {
         | Options::ENABLE_TASKLISTS
 }
 
-/// GitHub's heading anchor: lowercase, keep letters, digits, combining marks,
-/// `-` and `_`, turn spaces into `-`, drop everything else.
+/// GitHub's heading anchor (github-slugger): lowercase, keep letters, marks,
+/// numbers, connector punctuation (`_`, `‿`, ...) and `-`, turn spaces into
+/// `-`, drop everything else.
 pub fn slug(text: &str) -> String {
     // Lowercase the whole string: some letters (e.g. final sigma) depend on
     // their neighbours.
@@ -59,11 +63,20 @@ pub fn slug(text: &str) -> String {
         .chars()
         .filter_map(|c| match c {
             ' ' => Some('-'),
-            '-' | '_' => Some(c),
-            c if c.is_alphanumeric() || is_combining_mark(c) => Some(c),
+            '-' => Some(c),
+            c if c.is_alphanumeric() || is_combining_mark(c) || is_connector(c) => Some(c),
             _ => None,
         })
         .collect()
+}
+
+/// Unicode general category Pc (connector punctuation).
+fn is_connector(c: char) -> bool {
+    matches!(
+        c,
+        '_' | '\u{203f}' | '\u{2040}' | '\u{2054}' | '\u{fe33}' | '\u{fe34}' | '\u{fe4d}'
+            ..='\u{fe4f}' | '\u{ff3f}'
+    )
 }
 
 /// Anchors for headings in document order. A repeated slug takes the first
@@ -113,121 +126,26 @@ pub fn is_markdown(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
 
-/// Decode the HTML character references an attribute value may contain:
-/// the common named ones and numeric `&#NN;` / `&#xHH;`.
-fn decode_entities(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        rest = &rest[i..];
-        let Some(end) = rest.find(';').filter(|&e| e <= 10) else {
-            out.push('&');
-            rest = &rest[1..];
-            continue;
-        };
-        let name = &rest[1..end];
-        let ch = match name {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "nbsp" => Some('\u{a0}'),
-            _ => name
-                .strip_prefix("#x")
-                .or_else(|| name.strip_prefix("#X"))
-                .and_then(|h| u32::from_str_radix(h, 16).ok())
-                .or_else(|| name.strip_prefix('#').and_then(|d| d.parse().ok()))
-                .and_then(char::from_u32),
-        };
-        match ch {
-            Some(c) => {
-                out.push(c);
-                rest = &rest[end + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// `href` and `src` values in a piece of raw HTML, with HTML comments removed.
-fn html_destinations(html: &str) -> Vec<String> {
-    let mut text = String::new();
-    let mut rest = html;
-    while let Some(start) = rest.find("<!--") {
-        text.push_str(&rest[..start]);
-        rest = rest[start..]
-            .find("-->")
-            .map_or("", |end| &rest[start + end + 3..]);
-    }
-    text.push_str(rest);
-    // Walk the tags and their attributes, so a quoted value that merely
-    // contains `href=` is not mistaken for an attribute.
+/// `href` and `src` values in a piece of raw HTML, with their byte offsets
+/// in `html`. html5gum tokenizes it as the HTML standard does: character
+/// references are decoded, comments are skipped, and the bodies of `script`,
+/// `style` and other raw-text elements are not read as tags.
+fn html_destinations(html: &str) -> Vec<(usize, String)> {
+    let mut emitter = DefaultEmitter::<usize>::new_with_span();
+    emitter.naively_switch_states(true);
     let mut out = Vec::new();
-    let mut chars = text.char_indices().peekable();
-    while let Some((_, c)) = chars.next() {
-        if c != '<' {
+    for token in Tokenizer::new_with_emitter(html, emitter) {
+        let Ok(Token::StartTag(tag)) = token else {
             continue;
-        }
-        // Tag name; skip closing tags, declarations and processing instructions.
-        match chars.peek() {
-            Some((_, c)) if c.is_ascii_alphabetic() => {}
-            _ => continue,
-        }
-        while chars
-            .next_if(|(_, c)| !c.is_whitespace() && *c != '>' && *c != '/')
-            .is_some()
-        {}
-        loop {
-            while chars
-                .next_if(|(_, c)| c.is_whitespace() || *c == '/')
-                .is_some()
-            {}
-            match chars.peek() {
-                None => break,
-                Some((_, '>')) => {
-                    chars.next();
-                    break;
-                }
-                _ => {}
-            }
-            let mut name = String::new();
-            while let Some((_, c)) =
-                chars.next_if(|(_, c)| !c.is_whitespace() && !matches!(c, '=' | '>' | '/'))
+        };
+        for name in [&b"href"[..], b"src"] {
+            if let Some(value) = tag.attributes.get(name)
+                && !value.value.is_empty()
             {
-                name.push(c.to_ascii_lowercase());
-            }
-            while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
-            if chars.next_if(|(_, c)| *c == '=').is_none() {
-                continue;
-            }
-            while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
-            let mut value = String::new();
-            match chars.peek().map(|(_, c)| *c) {
-                Some(q @ ('"' | '\'')) => {
-                    chars.next();
-                    for (_, c) in chars.by_ref() {
-                        if c == q {
-                            break;
-                        }
-                        value.push(c);
-                    }
-                }
-                _ => {
-                    while let Some((_, c)) = chars.next_if(|(_, c)| !c.is_whitespace() && *c != '>')
-                    {
-                        value.push(c);
-                    }
-                }
-            }
-            if (name == "href" || name == "src") && !value.is_empty() {
-                out.push(decode_entities(&value));
+                out.push((
+                    tag.span.start,
+                    String::from_utf8_lossy(&value.value).into_owned(),
+                ));
             }
         }
     }
@@ -238,18 +156,42 @@ fn html_destinations(html: &str) -> Vec<String> {
 /// links and `href` / `src` attributes in raw HTML.
 pub fn links(markdown: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
+    // An HTML block arrives one line per event. Tokenize the whole block, so a
+    // tag or comment spanning lines is read as one; `pieces` maps offsets in
+    // `block` back to the source.
+    let mut block: Option<(String, Vec<(usize, usize)>)> = None;
     for (event, range) in Parser::new_ext(markdown, options()).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
                 out.push((range.start, dest_url.into_string()));
             }
-            Event::Html(html) | Event::InlineHtml(html) => {
-                out.extend(
+            Event::Start(Tag::HtmlBlock) => block = Some(Default::default()),
+            Event::Html(html) => match block.as_mut() {
+                Some((text, pieces)) => {
+                    pieces.push((text.len(), range.start));
+                    text.push_str(&html);
+                }
+                None => out.extend(
                     html_destinations(&html)
                         .into_iter()
-                        .map(|d| (range.start, d)),
-                );
+                        .map(|(at, d)| (range.start + at, d)),
+                ),
+            },
+            Event::End(TagEnd::HtmlBlock) => {
+                let Some((text, pieces)) = block.take() else {
+                    continue;
+                };
+                for (at, dest) in html_destinations(&text) {
+                    let i = pieces.partition_point(|&(start, _)| start <= at);
+                    let (start, source) = pieces[i.saturating_sub(1)];
+                    out.push((source + at - start, dest));
+                }
             }
+            Event::InlineHtml(html) => out.extend(
+                html_destinations(&html)
+                    .into_iter()
+                    .map(|(at, d)| (range.start + at, d)),
+            ),
             _ => {}
         }
     }
@@ -416,6 +358,15 @@ pub fn check_tracked(
                     continue;
                 }
             };
+            // The symlink may be tracked while its target is not.
+            if let Some(set) = &tracked
+                && let Ok(rel_dest) = dest.strip_prefix(&root)
+                && !rel_dest.as_os_str().is_empty()
+                && !set.contains(rel_dest)
+            {
+                errors.push(broken("not tracked by git".into()));
+                continue;
+            }
             let Some(fragment) = fragment else { continue };
             if fragment.is_empty() || !is_markdown(&dest) || !dest.is_file() {
                 continue;
@@ -592,6 +543,48 @@ mod tests {
         let errors = repo.check(&["b.md"]);
         let targets: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(targets, ["x.md"]);
+    }
+
+    #[test]
+    fn all_named_entities_are_decoded() {
+        let repo = TempRepo::new(&[
+            ("café.md", "# C\n"),
+            ("b.md", "<a href=\"caf&eacute;.md\">ok</a>\n"),
+        ]);
+        assert_eq!(repo.check(&["b.md"]), []);
+    }
+
+    #[test]
+    fn html_blocks_are_tokenized_whole() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            concat!(
+                "<div>\n<a\nhref=\"missing.md\">x</a>\n<!--\n<a href=\"commented.md\">y</a>\n-->\n",
+                "<script>const x = '<a href=\"script.md\">';</script>\n",
+                "<style>a[href=\"style.md\"] {}</style>\n</div>\n",
+            ),
+        )]);
+        let errors = repo.check(&["b.md"]);
+        let got: Vec<_> = errors.iter().map(|e| (e.line, e.target.as_str())).collect();
+        assert_eq!(got, [(2, "missing.md")]);
+    }
+
+    #[test]
+    fn connector_punctuation_stays_in_slugs() {
+        assert_eq!(slug("a‿b"), "a‿b");
+        assert_eq!(slug("snake_case"), "snake_case");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tracked_symlink_to_untracked_file_fails() {
+        let repo = TempRepo::new(&[("gen/out.md", "# Out\n"), ("c.md", "[x](link.md)\n")]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("gen/out.md", base.join("link.md")).unwrap();
+        let tracked: Vec<PathBuf> = ["c.md", "link.md"].iter().map(PathBuf::from).collect();
+        let errors = check_tracked(&base, &[PathBuf::from("c.md")], Some(&tracked));
+        let got: Vec<_> = errors.iter().map(|e| e.reason.as_str()).collect();
+        assert_eq!(got, ["not tracked by git"]);
     }
 
     #[test]

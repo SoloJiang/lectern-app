@@ -11,6 +11,7 @@ publish.workspace = true
 layer = "tool"
 
 [dependencies]
+html5gum.workspace = true
 pulldown-cmark.workspace = true
 unicode-normalization.workspace = true
 

@@ -7,7 +7,8 @@
 
 ## 边界
 
-- Markdown 用 pulldown-cmark 按 CommonMark 解析，不自己写正则：链接、标题、代码块、代码片段、HTML 注释的识别都以解析器为准。
+- Markdown 用 pulldown-cmark 按 CommonMark 解析，Markdown 里的原始 HTML 用 html5gum 按 HTML 标准分词，不自己写正则或扫描器：链接、标题、代码块、代码片段、HTML 注释、字符引用、`script` / `style` 的内容都以解析器为准。一个 HTML 块整体分词，跨行的标签和注释按一个处理。
+- 目标必须受 git 跟踪；目标是符号链接时，解析后的真实路径也必须受跟踪。
 - 锚点按 GitHub 的规则生成，区分大小写；链接不能指向仓库之外。
 - 只读文件，不改文件，不访问网络。
 
