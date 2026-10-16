@@ -10,7 +10,7 @@ labels: task
 
 ## 设计文档
 
-<!-- docs/design/<crate>.md。先写设计，经人审阅后再写代码 -->
+<!-- docs/design/<crate>.md。先写设计，设计文档 PR 合并后再写代码 -->
 
 ## 验收标准
 

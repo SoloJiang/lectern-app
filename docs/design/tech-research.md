@@ -280,7 +280,7 @@ Lectern 本身主要由 coding agent 写，因此仓库要先具备让 agent 自
 
 - **分层的 AGENTS.md**：根目录写全局规则（四层依赖方向、性能预算、禁止事项），每个 crate 一份写本模块职责和测试方式；CLAUDE.md 用软链接指向它，与 `cloudprint-miniapps` 的做法一致。
 - **决策记录（ADR）**：`docs/adr/` 下每个决策一个文件，本文「关键决策」一节就是第一批。agent 提出要改变路线时，先让它对照 ADR。
-- **模块设计文档**：`docs/design/<crate>.md` 写接口和数据结构，先让 agent 写设计、人审过再写代码。
+- **模块设计文档**：`docs/design/<crate>.md` 写接口和数据结构，先让 agent 写设计，设计文档 PR 合并后再写代码。
 - **复用现成技能**：gpui-component 仓库自带 agent 技能（如 `new-component`、`gpui-style-guide`），可直接引入 `.claude/skills/`；再自建「新增一种语言」「新增一个视图」「跑性能基准」等技能。
 
 ### 2. 构建与测试反馈

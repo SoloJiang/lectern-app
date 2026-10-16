@@ -1,15 +1,15 @@
 # AGENTS.md
 
-本仓库主要由 coding agent 开发。动手前先读本文件、[docs/design/interaction.md](docs/design/interaction.md) 和 [docs/design/tech-research.md](docs/design/tech-research.md)。
-`CLAUDE.md` 是指向本文件的软链接。各 crate 目录下会有自己的 AGENTS.md，写该模块的职责和测试方式。
+本仓库主要由 coding agent 开发。开始工作前先读本文件、[docs/design/interaction.md](docs/design/interaction.md) 和 [docs/design/tech-research.md](docs/design/tech-research.md)。
+`CLAUDE.md` 是指向本文件的软链接。各 crate 目录下有各自的 AGENTS.md，记录该 crate 的职责和测试方式。
 
 ## 产品原则
 
 - Lectern 以阅读和审阅为主：AI 写代码，人负责浏览、审 Diff、切换会话。编辑和终端为审阅服务。
 - 入口是项目或文件夹，不以编辑器为中心。界面分三层（常驻 / 按需 / 收起），新增界面元素前先对照 [交互规范](docs/design/interaction.md) 和 [ADR 0012](docs/adr/0012.md)。
-- 界面英文优先，支持简体中文（[ADR 0013](docs/adr/0013.md)）。所有界面字符串走 `i18n` crate 的 Fluent 资源文件，en 与 zh-CN 同时提供，不允许硬编码。
+- 界面英文优先，支持简体中文（[ADR 0013](docs/adr/0013.md)）。所有界面字符串走 `i18n` crate 的 Fluent 资源文件，en 与 zh-CN 同时提供，不得硬编码。
 - 视觉与动效按 macOS 原生标准（[ADR 0015](docs/adr/0015.md)）：只用系统字体、系统语义色和系统控件；动画用 `ui` crate 的统一原语，时长与曲线见 [交互规范「动效」](docs/design/interaction.md#动效)，不在视图里自定义。
-- 性能是第一约束。任何改动不得让 [性能预算](docs/design/tech-research.md#性能预算) 超标：冷启动 20ms、空闲内存 60MB（[ADR 0017](docs/adr/0017.md)）。首帧之前不做任何非必要的工作，新功能默认在首帧之后初始化。安装包 ≤ 80 MB（[ADR 0018](docs/adr/0018.md)）：新功能先判断是否属于审阅闭环的核心，不是的做成插件市场里的可选插件。
+- 性能是第一约束。任何改动不得让 [性能预算](docs/design/tech-research.md#性能预算) 超标：冷启动 20 ms、空闲内存 60 MB（[ADR 0017](docs/adr/0017.md)）。首帧之前不做任何非必要的工作，新功能默认在首帧之后初始化。安装包 ≤ 80 MB（[ADR 0018](docs/adr/0018.md)）：新功能先判断是否属于审阅闭环的核心，不属于核心的做成插件市场里的可选插件。
 
 ## 架构规则（违反即 CI 失败）
 
@@ -44,15 +44,15 @@ just fmt     # 格式化
 
 在 Linux 上这些命令只覆盖不依赖 GPUI 的 crate，在 macOS 上覆盖整个工作区。
 
-只改领域逻辑时用 `cargo check -p <crate>`，不必编译 GPUI。
+只改不依赖 GPUI 的 crate（领域、基础设施、kernel 层）时，可以先用 `cargo check -p <crate>` 快速检查，不必编译 GPUI；提交前仍要跑上面的入口。
 
 CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
 
 ## 合并规则
 
-负责推进的 agent 可以直接合并 PR（squash），条件全部满足才合：
+负责推进的 agent 可以直接合并 PR（squash），以下条件全部满足时才能合并：
 
-1. Codex 已审阅当前最新提交，并在 PR 上留下 👍 reaction（审阅中是 👀，有意见时会留评论）。
+1. Codex 已审阅当前最新提交，并在 PR 上留下 👍 reaction（审阅中是 👀，有意见时会留评论）。只改文档的 PR 不需要满足这一条；设计文档 PR 除外，它按代码 PR 的标准，需要 Codex 的 👍。
 2. CI 全部通过，没有合并冲突。
 3. 所有审阅讨论串都已回复并解决。
 
@@ -60,6 +60,18 @@ CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
 
 ## 工作方式
 
-- 一个任务一个 worktree、一个 issue、一个分支、一个 PR，粒度控制在一个 crate 内。
-- 先写 `docs/design/<crate>.md`（接口与数据结构），人审过再写代码。
+- 一个任务一个 issue，粒度控制在一个 crate 内。需要设计文档的任务分两个阶段，各用自己的 worktree、分支和 PR：先是设计文档 PR（`Refs #<n>`），合并后再开实现 PR（`Closes #<n>`）。不需要设计文档的任务只有一个 PR。一个 issue 涉及多个 crate 时（如 #32 同时涉及 `usage`、`usage_view`、`platform`），各 crate 分别提 PR，只有最后完成的那个写 `Closes #<n>`，其余写 `Refs #<n>`。
+- 先写 `docs/design/<crate>.md`（接口与数据结构，按[模板](docs/design/TEMPLATE.md)），设计文档 PR 按合并规则合并后再写代码。需要产品决定的问题写进文档的「未决问题」并告诉人，其余由负责推进的 agent 决定。
+- 新增 crate 时同时写 `crates/<name>/AGENTS.md`（职责、边界、测试方式），并建软链接 `CLAUDE.md -> AGENTS.md`。
 - 领域逻辑用单元测试 + insta 快照验收；视图用 `#[gpui::test]`；视觉效果用 UI 探针。
+
+## 技能
+
+Claude Code 自动加载 `.claude/skills/` 下的技能；其他 agent 直接读对应的 `SKILL.md`。
+
+| 技能 | 用途 |
+|---|---|
+| [design-doc](.claude/skills/design-doc/SKILL.md) | 按模板写模块设计文档，提设计文档 PR |
+| [adr](.claude/skills/adr/SKILL.md) | 写新 ADR 并更新索引 |
+| [ship-pr](.claude/skills/ship-pr/SKILL.md) | 从提交到合并：检查、开 PR、Codex 审阅、处理意见、squash 合并 |
+| [gpui](.claude/skills/gpui/SKILL.md) | 写 GPUI 与 gpui-component 代码：按锁定版本读上游指南，Lectern 规则优先 |
