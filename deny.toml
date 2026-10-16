@@ -4,7 +4,8 @@
 
 [graph]
 targets = ["aarch64-apple-darwin"]
-all-features = false
+# Check optional dependencies too, so a GPL crate behind a feature still fails.
+all-features = true
 
 [licenses]
 allow = [

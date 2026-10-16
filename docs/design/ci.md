@@ -25,7 +25,9 @@
 1. 每个 crate 声明了 `[package.metadata.lectern] layer`。
 2. 依赖自上而下：`app` → `view` → `domain` → `infra`；`kernel` 层可被任何层依赖，自身只依赖 kernel 层；只有 `app` 可以依赖 `tool` 层。
 3. `domain`、`infra`、`kernel` 层的依赖图（含间接依赖）里没有 GPUI。
-4. macOS 系统绑定（objc2、core-foundation、fsevent、security-framework 等）只能是 `platform` 的直接依赖。
+4. macOS 系统绑定（按名字前缀匹配：objc*、cocoa*、core-foundation*、security-framework*、metal*、dispatch* 等）只能是 `platform` 的直接依赖。
+
+检查用 `cargo metadata --all-features`，藏在可选 feature 后面的依赖也算在内。
 
 `--gpui-free-packages` 输出不依赖 GPUI 的 crate 列表，Linux 任务用它决定 clippy 与测试的范围，新增 crate 不用改 CI。
 
@@ -39,7 +41,7 @@ python3 scripts/check_architecture.py
 
 ## 许可证与来源
 
-`deny.toml`：只允许宽松许可证（MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 等）和文件级弱 copyleft 的 MPL-2.0；GPL、LGPL、AGPL 不在允许列表里，出现即失败。依赖只能来自 crates.io，不允许未知的 git 源。安全公告由 `cargo deny check advisories` 检查。
+`deny.toml`（`all-features = true`，可选依赖也检查）：只允许宽松许可证（MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 等）和文件级弱 copyleft 的 MPL-2.0；GPL、LGPL、AGPL 不在允许列表里，出现即失败。依赖只能来自 crates.io，不允许未知的 git 源。安全公告由 `cargo deny check advisories` 检查。
 
 ## Metal
 

@@ -43,7 +43,8 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       - name: Metal toolchain
-        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+        # Run metal: on Xcode 26 the launcher can exist without the toolchain.
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
