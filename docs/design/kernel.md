@@ -257,7 +257,8 @@ pub struct PluginHandle { /* Weak<Kernel>, 插件 ID, 激活代数 */ }
 impl PluginHandle {
     /// 交给 kernel 保管，停用时 drop。检查和插入在这次激活的守卫表的互斥锁内完成，与 `on`、`own_with` 相同：
     /// 撤销第 4 步先把表标为关闭再取出全部守卫，所以 `own` 要么在关闭之前插入（随撤销 drop），要么看到关闭返回 false，不会在 `Active` drop 之后留下守卫。
-    /// 这次激活已停用时返回 false，释放锁之后把 `guard` 送到 kernel 线程上 drop。
+    /// 这次激活已停用时返回 false，释放锁之后在调用线程上于 `contain` 里当场 drop `guard`，不排到 kernel 线程：调用方可能正持有准入，
+    /// 撤销第 3 步在等它，排队的话守卫会晚于 `Active` 才 drop。
     /// `shutdown` 完成、kernel 线程退出之后，被拒绝的守卫在调用线程上 drop，所以守卫必须能在任意线程上安全 drop；
     /// 这次 drop 同样用 `catch_unwind` 包住，panic 只记日志，不会展开到调用方的线程；
     /// kernel 线程只保证 `shutdown` 之前的 drop 是串行的。
@@ -283,7 +284,8 @@ impl PluginHandle {
     /// 在 `contain` 里 drop 句柄，已经被撤销取走就什么也不做。所以句柄要么由撤销按顺序在 `Active` 之前 drop，要么由 kernel 线程回收，
     /// 不会在撤销或 `shutdown` 完成之后才在别的线程上 drop；kernel 线程已经退出时放不进请求，这时 `shutdown` 已经取走并 drop 了全部登记。所以反复提交一次性任务（扫描、刷新、收到事件后的工作）
     /// 时，守卫表只保留还在运行的任务，不会随激活的时长一直增长；`start` 一个任务也没提交（没申请槽位）时，第 3 步封住闸门后立即放回收请求。
-    /// `start` 用 `catch_unwind` 包住：panic 时关闭闸门，按 `fail` 的方式让这次激活失效
+    /// `start` 用保留 payload 的 `kernel::catch` 包住：panic 时先关闭闸门并唤醒槽位（已提交的任务由 executor 在工作线程上丢弃，
+    /// 它们持有的资源随之释放），再 `dispose` payload，所以 payload 的 `Drop` 等这些资源时不会卡住；然后按 `fail` 的方式让这次激活失效
     /// （插件进入 `Failed`，连带停用的插件同步失效），返回 false，panic 不会展开到调用方。
     /// 在 `started` 里调用时（token 还是 `Pending`），`start` 暂存到 token 变为 `Live` 之后再调用，激活失败时丢弃，返回 true 表示已经接受。
     /// `start` 收到一个 `SubmitGate`，提交任务时交给 executor（见「撤销」里的后台任务）：任务在闸门打开之前不会被 poll，
