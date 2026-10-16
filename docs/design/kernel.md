@@ -137,8 +137,9 @@ impl PluginHandle {
     /// 交给 kernel 保管，停用时 drop。这次激活已停用时立即 drop `guard` 并返回 false。
     pub fn own(&self, guard: impl Send + 'static) -> bool;
 
-    /// 订阅事件，停用时移除。这次激活已停用时不订阅并返回 false。
-    pub fn on<E: Event>(&self, handler: impl Fn(&E) + Send + Sync + 'static) -> bool;
+    /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
+    /// 调用 `Subscription::keep()` 则一直保留到这次激活停用。这次激活已停用时不订阅并返回 None。
+    pub fn on<E: Event>(&self, handler: impl Fn(&E) + Send + Sync + 'static) -> Option<Subscription>;
 
     /// 声明有尚未完成的工作，守卫移进任务，任务结束时 drop（见「静止」）。这次激活已停用时返回 None。
     pub fn busy(&self) -> Option<BusyGuard>;
@@ -146,6 +147,29 @@ impl PluginHandle {
     /// 带激活代数的 Emitter：这次激活停用后（包括之后重新激活），通过它发出的事件直接丢弃。
     pub fn emitter(&self) -> Emitter;
     pub fn is_active(&self) -> bool;
+
+    /// 受限的 kernel 控制句柄，供需要驱动激活的插件使用（`project` 调 `workspace_changed`，
+    /// `workspace` 调 `lazy_commands` 和 `command`）。插件在 `PluginSet` 里构造时还没有 `Arc<Kernel>`，
+    /// 所以通过这里取得。不包含 `start`、`set_enabled` 和 `shutdown`，这些只给 `app`。
+    pub fn control(&self) -> KernelControl;
+}
+
+#[derive(Clone)]
+pub struct KernelControl { /* Weak<Kernel> */ }
+
+impl KernelControl {
+    pub fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>);
+    pub fn activate(&self, id: &str);
+    pub fn lazy_commands(&self) -> Vec<Name>;
+    pub fn command(&self, name: &str, done: impl FnOnce(Result<(), PluginError>) + Send + 'static);
+}
+
+/// 事件订阅。drop 时退订。
+pub struct Subscription { /* ... */ }
+
+impl Subscription {
+    /// 不再单独退订，保留到这次激活停用。
+    pub fn keep(self);
 }
 ```
 
@@ -186,10 +210,10 @@ impl Kernel {
 
     /// 以下生命周期方法都只把请求放进 kernel 线程的队列，立即返回，可以在任何线程调用。
 
-    /// 项目模型就绪或变化时由 `project` 插件调用：激活匹配的 Workspace 插件。
+    /// 项目模型就绪或变化时由 `project` 插件（通过 `KernelControl`）调用：激活匹配的 Workspace 插件。
     pub fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>);
 
-    /// 激活清单里带 `Manual` 的插件。
+    /// 激活清单里带 `Manual` 的插件。依赖的服务还没有就绪时，请求被记下，依赖就绪后再激活（见「依赖与自动启停」）。
     pub fn activate(&self, id: &str);
 
     /// 所有插件清单里的 `Command` 名称，供视图层预先注册代理 Action（见「按命令激活」）。
@@ -253,13 +277,13 @@ impl Emitter {
 - 一个服务（不论 `MULTIPLE` 是否为 true）的最后一个已激活的提供者停用时，依赖它的插件先停用（依赖者先于被依赖者）。
 - `MULTIPLE = true` 的服务：依赖者激活后，提供者的增减不重新激活依赖者。依赖者通过 `ServiceSet<S>` 读取当前集合，集合在提供者增减时随即更新；需要在变化时做额外处理的，订阅 `ServiceAdded<S>` 和 `ServiceRemoved<S>` 事件（带提供者的插件 ID）。
 - 依赖者不得把 `ServiceSet::current()` 里的 `Arc<S>` 保存到本次调用之外，否则提供者停用后仍会被调用。
-- 激活条件满足后保持有效：`Workspace` 和 `Command` 一旦满足，在本次运行中一直视为满足。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
+- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除这些记录。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
 
 ### 激活的提交
 
 - `activate` 执行期间，`provide`、`on`、`own` 登记的内容只暂存在本次激活里：服务不进入 `ServiceSet` 和 `service()` 的结果，监听不参与分发。
 - `activate` 返回 `Ok` 后，kernel 先检查清单 `provides` 里的每个服务都已 `provide`；缺任何一个都按激活失败处理（`PluginError::MissingService`），否则依赖者会因为等不到这个服务而一直不激活。
-- 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布，调用 `started`，然后按依赖顺序激活后续插件。
+- 检查通过后，kernel 先调用 `started`。`started` 期间通过 `PluginHandle` 登记的内容也进入同一份暂存，这次激活的服务和监听对其他插件仍不可见。`started` 正常返回后，kernel 在一次加锁里把暂存的服务和监听全部发布，然后按依赖顺序激活后续插件。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
 - 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 满足这一点：新注册的视图、Action、快捷键要到下一帧才应用到界面上，激活失败时守卫在这之前已经 drop，失败的注册不会出现在界面上。`workspace` 本身是插件，收到注册时用自己的 `PluginHandle::busy()` 取一个守卫，在主线程上应用完这批注册后 drop，所以 kernel 在界面注册生效之前不会报告静止。
@@ -288,7 +312,7 @@ impl Emitter {
   - 其他插件不受影响。
 - panic 由 `catch_unwind` 捕获，所以发布构建保持 `panic = "unwind"`（当前默认）。改成 `abort` 前，先修改本节的设计。
 - 事件监听里的 panic 同样被捕获：这个监听被移除，插件进入 `Failed` 并停用。
-- `started` 里的 panic 同样被捕获：插件进入 `Failed`，已发布的服务和监听按「撤销」一节撤销。
+- `started` 里的 panic 同样被捕获：暂存的服务和监听不发布，`started` 期间交出的守卫按相反顺序 drop，插件进入 `Failed`。其他插件从头到尾看不到这次激活。
 - `Failed` 的插件在本次运行中不再自动激活；用户在设置里重新启用会重试一次。
 
 ### 事件分发
@@ -323,8 +347,8 @@ impl Emitter {
 
 用户第一次用快捷键或菜单触发一个由 `Command` 激活的插件提供的 Action 时，这个 Action 还没有注册。处理方式：
 
-1. `workspace` 启动后从 `Kernel::lazy_commands()` 取得所有这类命令名，为每个命令预先注册一个代理 Action（不依赖插件）。
-2. 代理 Action 被触发时调用 `kernel.command(name, done)`。
+1. `workspace` 在 `started` 里从 `handle.control().lazy_commands()` 取得所有这类命令名，为每个命令预先注册一个代理 Action（不依赖插件）。
+2. 代理 Action 被触发时调用 `control.command(name, done)`。
 3. 插件激活提交后 `done` 被调用；`workspace` 把它转到主线程，等这次激活的 `Contributions` 注册在下一帧应用之后，注销代理并重新分发原来的 Action。用户只需触发一次。
 4. 激活失败时，`done` 收到错误，`workspace` 显示一次提示，代理保留。
 
@@ -356,7 +380,7 @@ impl Emitter {
 - 激活的提交：
   - `activate` 先 `provide` 再返回错误时，并发的依赖者和事件分发都看不到这个提供者和它的监听，`started` 不被调用；
   - `activate` 返回 `Ok` 但缺少清单里声明的服务时，按失败处理。
-- 句柄：停用后旧的 `PluginHandle` 上 `own` 立即 drop 守卫并返回 false，`on` 不订阅，`busy` 返回 None，从它取得的 `Emitter` 发出的事件被丢弃；重新激活后旧句柄仍然无效。
+- 句柄：`on` 返回的 `Subscription` drop 后，下一次 `emit` 起不再调用；停用后旧的 `PluginHandle` 上 `own` 立即 drop 守卫并返回 false，`on` 不订阅，`busy` 返回 None，从它取得的 `Emitter` 发出的事件被丢弃；重新激活后旧句柄仍然无效。
 - 退出：`shutdown` 的 `done` 在全部撤销完成、kernel 线程退出后调用；需要在主线程 drop 的守卫在等待期间完成。
 - 静止与界面注册：只注册了 `Contributions` 的插件，在注册应用到界面之前 kernel 不静止。
 - 线程：所有 `activate` / `started` / 守卫 drop 都在 kernel 线程上执行，公开方法在调用线程上立即返回。
@@ -382,7 +406,8 @@ impl Emitter {
 - 激活条件：
   - `Workspace` 用模拟的 `WorkspaceFacts` 触发；
   - `Command` 第二次调用不重复激活；
-  - `Manual` 插件只在 `Kernel::activate(id)` 时激活。
+  - `Manual` 插件只在 `activate(id)` 时激活；依赖未就绪时请求被保留，依赖就绪后激活。
+  - `started` panic 时，这次激活的服务和监听从未对其他插件可见。
 - 生命周期的结果（激活顺序、停用顺序、状态）用 insta 快照记录。
 
 测试辅助放在 `test-support` feature 下：
