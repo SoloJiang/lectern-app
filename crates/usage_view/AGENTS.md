@@ -1,11 +1,11 @@
 # usage_view（`lectern-usage-view`）
 
-Usage 页：额度卡片、每日 token 柱状图、按会话与模型的明细，当前项目 / 所有项目与 7D / 14D / 30D 切换。
+Usage 页：额度卡片、每日 token 柱状图、按 MR 与模型的明细（未开 MR 的分支一并列出），当前项目 / 所有项目与 7D / 14D / 30D 切换（[ADR 0020](../../docs/adr/0020.md)）。
 
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
 - 设计文档：`docs/design/usage_view.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#32](https://github.com/SoloJiang/lectern-app/issues/32)
-- ADR：[0014](../../docs/adr/0014.md)
+- ADR：[0014](../../docs/adr/0014.md)、[0020](../../docs/adr/0020.md)
 
 ## 边界
 

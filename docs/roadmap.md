@@ -25,7 +25,7 @@
 - [ ] 项目主页：项目侧栏（Sessions / Packages）、Needs review、会话外的改动
 - [ ] 终端：portable-pty + libghostty-vt，会话 resume（Conversation 的 Terminal 页）
 - [ ] Agent 会话发现：Claude Code / Codex JSONL 解析，按 cwd 匹配到项目
-- [ ] 会话与每轮 token 统计：去重、聚合入 SQLite，显示在会话卡片、会话简报和每轮标题
+- [ ] MR 级别的 token 统计：去重、按改动归属到分支 / MR、聚合入 SQLite，显示在并行 worktree 总览、会话简报和每轮标题（[ADR 0020](adr/0020.md)）
 - [ ] Git 与 Diff：gix + imara-diff，统一 / 双栏视图
 - [ ] 审阅视图：会话简报、按轮次的改动叙事、「为什么改」、已看进度、Drifted 标记
 - [ ] 审阅意见：行内写意见、攒批、带文件与行号发回会话
@@ -39,7 +39,7 @@
 - [ ] Java 解析器：package / import / 内部类，Maven 与 Gradle
 - [ ] 跨子项目导航：TS 包名、Maven 模块间依赖
 - [ ] 上下文面板：调用方、相关测试、改动历史（影响面）
-- [ ] Usage 页与额度：每日用量、按会话 / 模型明细、额度提醒，Claude Code statusline 默认接入
+- [ ] Usage 页与额度：每日用量、按 MR / 模型明细、额度提醒，Claude Code statusline 默认接入
 - [ ] 结构化 Diff：忽略纯格式变化、识别移动代码
 - [ ] 文件浏览（侧栏 Files）与完整文件阅读、编辑（第三层）
 

@@ -30,7 +30,7 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 | 02 | Overview | 侧栏：Overview、Sessions、Packages、Worktrees / Files / Merge Requests，底部 Usage 额度条。主区：大标题一句话说明待审数量，下面是分组列表 Needs Review（每行：agent 圆点、标题、状态与信号两行灰字、已看进度环）、Outside Any Session、Recently Done |
 | 03 | Review（可交互原型） | 顶部会话简报；按轮次的改动叙事；文件头圆形勾选；行内审阅意见；Drifted 提示；右侧检查器（Files / Conversation）；点符号滑出上下文面板（Callers / Tests / History）；底部浮条发送审阅意见 |
 | 04 | Worktrees | 分组列表 Active / Idle；右侧检查器对比所选 worktree 与 main，并提示与其他 worktree 是否有文件重叠 |
-| 05 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；按会话明细；当前项目 / 所有项目，7D / 14D / 30D |
+| 05 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；按 MR 明细（未开 MR 的分支一并列出）；当前项目 / 所有项目，7D / 14D / 30D |
 
 ## 窗口结构
 
@@ -73,7 +73,7 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 
 ## 用量
 
-用量按会话和项目展示（[ADR 0014](../adr/0014.md)）：会话卡片和会话简报显示 token 数，每轮标题显示该轮 token 和占比，Conversation 显示上下文窗口占用，项目侧栏底部的 Usage 入口带最紧张的额度窗口进度条。费用一律标为 API-equivalent，订阅用户显示额度百分比。
+用量以 MR 为主要统计单位（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）：一个 MR 由哪些会话、哪些轮次完成，就把它们的 token 加在一起，还没开 MR 的按分支统计。并行 worktree 列表和检查器显示当前分支所属 MR 的累计 token；会话简报显示所属 MR 的累计 token 和本会话的占比；每轮标题显示该轮 token，作为最细的明细；会话卡片不显示 token。Conversation 显示上下文窗口占用，项目侧栏底部的 Usage 入口带最紧张的额度窗口进度条。费用一律标为 API-equivalent，订阅用户显示额度百分比。
 
 ## 状态与异常
 
