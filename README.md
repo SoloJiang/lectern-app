@@ -39,12 +39,12 @@ Everything is a plugin: the kernel only loads plugins and manages their lifecycl
 
 | Metric | Budget |
 |---|---|
-| Cold start to first frame | < 150 ms |
+| Cold start to first frame | < 20 ms |
 | Open project to project home | < 100 ms |
 | Open file to highlighted first screen | < 16 ms |
 | Open a session's diff | < 50 ms |
 | Switch worktree / branch | < 100 ms |
-| Idle memory | < 150 MB |
+| Idle memory | < 60 MB empty window, < 100 MB with a monorepo open |
 | Scrolling and input | steady 120 fps |
 
 ## Roadmap
