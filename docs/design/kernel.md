@@ -211,6 +211,9 @@ impl GateSlot {
     /// 所以任务 panic 不会展开到 executor 的工作线程，也不会让插件在初始化中断后仍显示为 `Active`、被报告为静止。
     /// 这个方法先把当前槽位从闸门上摘掉（不再参与之后的唤醒），然后才让激活失效、唤醒其余槽位：executor 可能在 `wake` 里同步 poll，
     /// 如果当前任务还在唤醒名单里，会重新进入这个正在展开或已部分 drop 的任务；摘掉之后，这个任务只由 executor 在 panic 路径上收尾丢弃。
+    /// 摘掉槽位撤不回别的线程已经克隆走的 waker，所以不能只靠它：`executor` 对每个任务维护「空闲 / 运行中 / 已结束」三种状态，
+    /// 唤醒一个运行中的任务只设一个「待重新 poll」标记，由正在运行的那次 poll 返回后再调度，唤醒已结束的任务直接忽略，
+    /// 所以任何时候一个任务都不会被重入 poll，panic 路径上的任务在标为已结束之后也不会再被 poll。这是 `executor` 对 kernel 的约定，有测试覆盖。
     /// 激活已经失效时只记日志。`payload` 由这个方法接管：先取出可读的消息（`&str` / `String`）记入日志，
     /// 再在 `catch_unwind` 里 drop；这次 drop 又 panic 时，第二个 payload 用 `mem::forget` 泄漏，不再 drop，
     /// 所以 `Drop` 会 panic 的 payload 也不会展开到 executor 或 kernel 线程。executor 自己不保留、不 drop 这个 payload。
@@ -232,7 +235,7 @@ impl PluginHandle {
 
     /// 先检查这次激活仍然存活，再调用 `start` 提交工作（如 `executor.spawn`），把返回的句柄交给 kernel 保管。
     /// 分三步，都不等待准入计数，所以在监听里调用（此时已持有准入）也不会与等待准入归零的停用互相等待：
-    /// 1. 取这次激活的守卫表的互斥锁，表已关闭或 token 为 `Dead` 时释放锁、不调用 `start`，返回 false；否则新建一个关着的闸门，释放锁。
+    /// 1. 取这次激活的守卫表的互斥锁，表已关闭或 token 为 `Dead` 时释放锁、不调用 `start`，在 `contain` 里 drop `start` 闭包（它捕获的值的 `Drop` 可能 panic），返回 false；否则新建一个关着的闸门，释放锁。
     /// 2. 不持锁调用 `start`，所以 `start` 里可以调用这个句柄的其他方法（`own`、`own_with`、`busy`），不会在同一把锁上死锁。
     /// 3. 再取这把锁：表仍未关闭、token 不是 `Dead` 时登记返回的句柄，释放锁之后才打开闸门（唤醒槽位时可能同步 poll 任务，
     ///    任务的第一次 poll 可以调用这个句柄的 `own`、`own_with`，持锁打开会死锁），返回 true；
@@ -586,6 +589,8 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 暂存封口：`started` 返回、token 换成 `Live` 的同时，另一个线程用克隆的句柄发事件、`own_with`：事件恰好送达一次，`start` 恰好调用一次。
 - 任务结果的应用 panic：主线程不展开，插件进入 `Failed`。
 - 并发失去提供者：一个 `MULTIPLE` 服务的最后两个提供者在两个线程上同时 `fail`，依赖者的 token 一定变为 `Dead`（重复上万次）。
+- 被拒绝的 `own_with`：旧句柄在激活失效后调用 `own_with`，`start` 捕获的值 drop 时 panic，调用方不展开。
+- 克隆走的 waker：另一个线程在任务 panic 期间调用之前克隆的 waker，任务不会被重入 poll。
 - 任务 panic 时的重入：executor 在 `wake` 里同步 poll，任务 panic 触发失效后不会重新 poll 这个任务，也不死锁。
 - 任务句柄回收：同一次激活里反复 `own_with` 一万个立即完成的任务，守卫表的长度回到 0；future 在取消、完成后被 drop 时 panic，插件进入 `Failed`、工作线程继续运行。
 - 界面注册的应用 panic：主线程不展开，注册一项都没有插入，插件进入 `Failed`。
