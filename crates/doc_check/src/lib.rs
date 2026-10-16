@@ -185,7 +185,7 @@ fn scan(markdown: &str) -> Scan {
     };
     let is_heading = |name: &[u8]| matches!(name, [b'h', b'1'..=b'6']);
     let mut out = Scan::default();
-    let mut heading: Option<String> = None;
+    let mut heading: Option<(Vec<u8>, String)> = None;
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
     emitter.naively_switch_states(true);
     for token in Tokenizer::new_with_emitter(rendered.html.as_str(), emitter) {
@@ -198,7 +198,7 @@ fn scan(markdown: &str) -> Scan {
                             .checked_sub(1)
                             .is_some_and(|a| rendered.headings.contains(&a)))
                 {
-                    heading = Some(String::new());
+                    heading = Some((tag.name.to_vec(), String::new()));
                 }
                 for (attr, only_a) in [(&b"id"[..], false), (b"name", true)] {
                     if (!only_a || &tag.name[..] == b"a")
@@ -228,14 +228,19 @@ fn scan(markdown: &str) -> Scan {
                 }
             }
             Ok(Token::EndTag(tag)) => {
-                if is_heading(&tag.name)
-                    && let Some(text) = heading.take()
+                // Only the generated end tag of the same level closes the
+                // heading: a raw `</h2>` inside `# Hello </h2> world` is text
+                // to the slug.
+                if heading
+                    .as_ref()
+                    .is_some_and(|(name, _)| name[..] == tag.name[..])
+                    && let Some((_, text)) = heading.take()
                 {
                     out.headings.push(text);
                 }
             }
             Ok(Token::String(text)) => {
-                if let Some(h) = heading.as_mut() {
+                if let Some((_, h)) = heading.as_mut() {
                     h.push_str(&String::from_utf8_lossy(&text.value));
                 }
             }
@@ -336,6 +341,54 @@ fn has_absolute_symlink(path: &Path) -> bool {
         }
     }
     false
+}
+
+/// Whether every path met while resolving `path` (absolute, under `root`) is
+/// in `tracked`: each lexical component, and for a symlink each component of
+/// its target, as git checks them out. A tracked directory symlink
+/// `docs -> real-docs` reaches the tracked `real-docs/guide.md` through
+/// `docs/guide.md`, which git cannot list itself.
+fn tracked_route(root: &Path, path: &Path, tracked: &HashSet<PathBuf>) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    let mut todo: Vec<PathBuf> = rel
+        .components()
+        .rev()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .collect();
+    let mut current = PathBuf::new();
+    let mut hops = 0;
+    while let Some(part) = todo.pop() {
+        match part.components().next() {
+            Some(Component::ParentDir) => {
+                if !current.pop() {
+                    return false;
+                }
+            }
+            Some(Component::CurDir) | None => {}
+            Some(_) => {
+                current.push(&part);
+                if !tracked.contains(&current) {
+                    return false;
+                }
+                if let Ok(target) = fs::read_link(root.join(&current)) {
+                    hops += 1;
+                    if target.is_absolute() || hops > 40 {
+                        return false;
+                    }
+                    current.pop();
+                    todo.extend(
+                        target
+                            .components()
+                            .rev()
+                            .map(|c| PathBuf::from(c.as_os_str())),
+                    );
+                }
+            }
+        }
+    }
+    true
 }
 
 fn is_external(target: &str) -> bool {
@@ -511,32 +564,24 @@ pub fn check_tracked(
                 ));
                 continue;
             }
-            if let Some(set) = &tracked
-                && let Ok(rel_dest) = dest.strip_prefix(&root)
-                && !rel_dest.as_os_str().is_empty()
-                && !set.contains(rel_dest)
-            {
-                errors.push(broken("not tracked by git".into()));
-                continue;
-            }
             // A symlink inside the repository may point outside it: check the
             // real target too, and never read a file outside the repository.
-            let dest = match fs::canonicalize(&dest) {
+            let real = match fs::canonicalize(&dest) {
                 Ok(real) if real.starts_with(&root) => real,
                 _ => {
                     errors.push(broken("points outside the repository".into()));
                     continue;
                 }
             };
-            // The symlink may be tracked while its target is not.
+            // Every path the link passes through must be tracked: the
+            // destination, each symlink on the way and what it points to.
             if let Some(set) = &tracked
-                && let Ok(rel_dest) = dest.strip_prefix(&root)
-                && !rel_dest.as_os_str().is_empty()
-                && !set.contains(rel_dest)
+                && !tracked_route(&root, &dest, set)
             {
                 errors.push(broken("not tracked by git".into()));
                 continue;
             }
+            let dest = real;
             let Some(fragment) = fragment else { continue };
             if fragment.is_empty() || !is_markdown(&dest) || !dest.is_file() {
                 continue;
@@ -870,6 +915,12 @@ mod tests {
     }
 
     #[test]
+    fn raw_end_tags_of_another_level_stay_in_the_heading() {
+        assert_eq!(headings("# Hello </h2> world\n"), ["Hello  world"]);
+        assert!(anchors("# Hello </h2> world\n").contains("hello--world"));
+    }
+
+    #[test]
     fn swallowed_headings_are_not_anchors() {
         let md = "Text <script>\n\n# Fake\n\n</script>\n\n# Real\n";
         let set = anchors(md);
@@ -910,6 +961,46 @@ mod tests {
         let errors = check_tracked(&base, &[PathBuf::from("c.md")], Some(&tracked));
         let got: Vec<_> = errors.iter().map(|e| e.reason.as_str()).collect();
         assert_eq!(got, ["not tracked by git"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_through_tracked_directory_symlinks_pass() {
+        let repo = TempRepo::new(&[
+            ("real-docs/guide.md", "# Guide\n"),
+            ("loose/guide.md", "# Guide\n"),
+            (
+                "c.md",
+                "[ok](docs/guide.md#guide)\n[hop](hop/guide.md)\n[bad](docs/guide.md#nope)\n",
+            ),
+        ]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("real-docs", base.join("docs")).unwrap();
+        // `hop` is tracked but points through `stray`, an untracked symlink.
+        std::os::unix::fs::symlink("loose", base.join("stray")).unwrap();
+        std::os::unix::fs::symlink("stray", base.join("hop")).unwrap();
+        let tracked: Vec<PathBuf> = [
+            "c.md",
+            "docs",
+            "hop",
+            "real-docs/guide.md",
+            "loose/guide.md",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let errors = check_tracked(&base, &[PathBuf::from("c.md")], Some(&tracked));
+        let got: Vec<_> = errors
+            .iter()
+            .map(|e| (e.target.as_str(), e.reason.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("hop/guide.md", "not tracked by git"),
+                ("docs/guide.md#nope", "no heading with anchor #nope"),
+            ]
+        );
     }
 
     #[cfg(unix)]
