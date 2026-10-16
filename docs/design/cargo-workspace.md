@@ -59,6 +59,7 @@ layer = "domain"
 | infra | `i18n` | Fluent 资源与语言切换（[ADR 0013](../adr/0013.md)） |
 | tool | `bench` | 性能预算基准 |
 | tool | `ui_probe` | UI 探针，只在调试和测试构建中编译 |
+| tool | `doc_check` | 文档链接检查，`just check` 运行 |
 
 本 issue 只建空 crate（带一行职责说明的 `lib.rs`），不写功能代码；依赖在各自的 issue 里按需加入。
 

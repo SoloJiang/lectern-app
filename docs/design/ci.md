@@ -57,7 +57,7 @@ python3 scripts/check_architecture.py
 
 ## 文档链接检查
 
-`scripts/check_docs.py` 检查仓库里所有 Markdown 文件的相对链接：目标文件必须存在，`#锚点` 必须对应目标文件里的某个标题（按 GitHub 生成锚点的规则计算）。代码块和行内代码里的链接、外部 URL 不检查。设计文档、ADR、AGENTS.md 之间的链接改名或删节后失效，这一步会让 `just check` 失败。`scripts/test_check_docs.py` 是它的单元测试。
+tool crate `lectern-doc-check`（`cargo run -p lectern-doc-check`）检查仓库里所有受 git 跟踪的 Markdown 文件的相对链接：目标文件必须存在且在仓库之内，`#锚点` 必须对应目标文件里的某个标题（按 GitHub 生成锚点的规则计算，区分大小写）。Markdown 用 pulldown-cmark 按 CommonMark 解析，所以引用式链接、容器里的标题、代码块与代码片段、HTML 注释都按渲染结果处理，不靠正则逐条适配。外部 URL 不检查，查询参数在查找文件前去掉。设计文档、ADR、AGENTS.md 之间的链接改名或删节后失效，这一步会让 `just check` 失败。单元测试在 crate 里，随 `just test` 运行。
 
 ## 许可证与来源
 
@@ -74,9 +74,9 @@ GPUI 在构建时编译 Metal shader。Xcode 26 起 Metal 工具链需单独下�
 - 在 Linux 上运行 `just check` 通过。
 - 临时加入不写理由的 `#[allow(dead_code)]` 和 `dbg!` 时，clippy 报两个错误。
 - 删掉某个 crate 的 `[lints] workspace = true` 时，架构检查失败，报错指向本文件。
-- `python3 scripts/test_check_docs.py` 覆盖行内链接、引用式链接、setext 标题、嵌套代码块、重复标题的锚点和百分号编码；`check_docs.py` 在 main 和当时打开的各个 PR 分支上都通过。
+- `lectern-doc-check` 的单元测试覆盖行内与引用式链接、带括号和尖括号的路径、查询参数、百分号编码、仓库外的路径、引用块和列表里的标题、setext 标题、缩进与围栏代码块、跨行代码片段、HTML 注释、脚注、重复标题的锚点和锚点大小写；在 README 里临时加一条指向不存在锚点的链接时报错；在 main 和当时打开的各个 PR 分支上都通过。
 - macOS 上的 `just check` 由 CI 的 macOS 任务运行。
 
 ## 与设计的差异
 
-[#34](https://github.com/SoloJiang/lectern-app/pull/34) 与 [#36](https://github.com/SoloJiang/lectern-app/pull/36) 的实现没有记录差异。[#50](https://github.com/SoloJiang/lectern-app/pull/50) 新增的规则 5、Lint、文档链接检查三处在本文对应小节里直接写成设计，没有偏离已有设计的地方。
+[#34](https://github.com/SoloJiang/lectern-app/pull/34) 与 [#36](https://github.com/SoloJiang/lectern-app/pull/36) 的实现没有记录差异。[#50](https://github.com/SoloJiang/lectern-app/pull/50) 新增的规则 5、Lint、文档链接检查三处在本文对应小节里直接写成设计。文档链接检查最初是 Python 脚本，用正则识别 Markdown；审阅中陆续发现引用式链接、容器、代码片段等写法无法逐条覆盖，改为基于 CommonMark 解析器的 tool crate。

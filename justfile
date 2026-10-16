@@ -23,8 +23,7 @@ check:
     cargo fmt --all --check
     python3 scripts/test_check_architecture.py
     python3 scripts/check_architecture.py
-    python3 scripts/test_check_docs.py
-    python3 scripts/check_docs.py
+    cargo run -q --locked -p lectern-doc-check
     cargo clippy --locked {{packages}} --all-targets --all-features -- -D warnings
 
 # Run tests with cargo-nextest. `-p` (also `-pNAME`), `--package` or

@@ -30,6 +30,7 @@ members = [
     "crates/i18n",
     "crates/bench",
     "crates/ui_probe",
+    "crates/doc_check",
 ]
 
 [workspace.package]
