@@ -125,8 +125,9 @@ impl Context<'_> {
     pub fn service<S: Service + ?Sized>(&self) -> Arc<S>;               // MULTIPLE = false
     pub fn service_set<S: Service + ?Sized>(&self) -> ServiceSet<S>;    // MULTIPLE = true
 
-    /// 订阅事件。
-    pub fn on<E: Event>(&mut self, handler: impl Fn(&E) + Send + Sync + 'static);
+    /// 订阅事件。监听在提交时发布，可能早于 `started` 被调用，所以每次调用都带上本次激活的
+    /// `PluginHandle`（与随后交给 `started` 的是同一个激活代数），监听里可以直接取 `busy`、`emitter`。
+    pub fn on<E: Event>(&mut self, handler: impl Fn(&E, &PluginHandle) + Send + Sync + 'static);
 
     /// 交给 kernel 保管的守卫。只用于创建时没有副作用的守卫；任务句柄在 `started` 里通过 `PluginHandle::own` 交出。
     pub fn own(&mut self, guard: impl Send + 'static);
@@ -169,7 +170,7 @@ impl PluginHandle {
 
     /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
     /// 调用 `Subscription::keep()` 则一直保留到这次激活停用。这次激活已停用时不订阅并返回 None。
-    pub fn on<E: Event>(&self, handler: impl Fn(&E) + Send + Sync + 'static) -> Option<Subscription>;
+    pub fn on<E: Event>(&self, handler: impl Fn(&E, &PluginHandle) + Send + Sync + 'static) -> Option<Subscription>;
 
     /// 声明有尚未完成的工作，守卫移进任务，任务结束时 drop（见「静止」）。这次激活已停用时返回 None。
     pub fn busy(&self) -> Option<BusyGuard>;
@@ -177,6 +178,10 @@ impl PluginHandle {
     /// 带激活代数的 Emitter：这次激活停用后（包括之后重新激活），通过它发出的事件直接丢弃。
     pub fn emitter(&self) -> Emitter;
     pub fn is_active(&self) -> bool;
+
+    /// 这次激活的 `ActivationToken`，与 `Staged::commit` 收到的是同一个。`started` 之后的界面注册带上它，
+    /// 主线程调用注册的回调前检查（见「撤销」）。
+    pub fn token(&self) -> ActivationToken;
 
     /// 报告这次激活在后台初始化时失败（如打开 SQLite 失败）：插件进入 `Failed`，按「失败」一节停用。
     /// 这次激活已停用时不做任何事。
@@ -340,6 +345,11 @@ impl Emitter {
 
 视图层的注册也走守卫。例如 `workspace` 提供一个服务 `dyn Contributions`（接口在 `services`），它的 `register_view` / `register_action` / `bind_key` 返回一个守卫，drop 时注销。`activate` 期间的注册只能通过 `ctx.own_staged` 交出，按上文的 `ActivationToken` 规则应用；`started` 之后的注册直接生效，守卫交给 `PluginHandle::own`。`ctx.own` 只接收创建时没有可见副作用的守卫，不用于界面注册。kernel 因此不依赖 GPUI 的类型。守卫的 drop 若需要在主线程执行，由提供守卫的一方负责转到主线程。
 
+界面注册的守卫在 kernel 线程上 drop 时，只是把注销排到主线程，kernel 可能先完成撤销并 drop `Active`。这段时间里界面不能调用到已停用的激活，也不能让 kernel 先报告静止：
+
+- 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）之前检查 token，不是 `Live` 就不调用。停用的第一步就把 token 置为 `Dead`，早于撤销的其他步骤。
+- `dyn Contributions` 的守卫在 drop 时用 `workspace` 自己的 `PluginHandle::busy()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
+
 后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后提交任务，用 `PluginHandle::own` 交出句柄。停用后，任务不再向视图交出结果；停用之后才提交的任务，`own` 返回 false 并立即取消。
 
 ### 失败
@@ -362,7 +372,8 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 分发前先取出监听列表的快照（`Arc<[Handler]>`），不持注册表的锁调用。监听里可以订阅、退订、发事件：
   - 订阅与退订从下一次 `emit` 起生效；
   - 监听里发出的事件排在当前分发之后，在同一线程上依次处理，不会递归。
-- 快照里可能有已停用插件的监听。每个监听带上所属插件的存活标记（读写锁保护的布尔值）：
+- 快照里可能有已停用插件的监听。每个监听带上所属激活的存活标记（读写锁保护的布尔值）：
+  - 存活标记属于一次激活，不属于插件：每次激活新建一个，停用时置为 false 后不再恢复；插件重新激活时用新的标记。所以分发线程即使拿着旧快照、在取读锁之前停顿，等到插件重新激活后再检查，看到的仍是旧激活的 false，不会调用上一次激活的监听；
   - 存活标记是原子布尔值，配一把读写锁：调用前取读锁并检查标记，插件已停用就跳过，调用期间一直持有读锁；
   - 停用时第 3 步取写锁把标记置为 false，因此会等这个插件正在执行的监听返回，此后快照里它的监听都会被跳过；
   - 监听里请求的生命周期操作（包括停用自己所属的插件）排队到当前分发结束后执行，不会在持有读锁时等待写锁；
