@@ -25,7 +25,7 @@
 - [ ] 项目主页：项目侧栏（Sessions / Packages）、Needs review、会话外的改动
 - [ ] 终端：portable-pty + libghostty-vt，会话 resume（Conversation 的 Terminal 页）
 - [ ] Agent 会话发现：Claude Code / Codex JSONL 解析，按 cwd 匹配到项目
-- [ ] 项目与 MR 级别的 token 统计：去重、按改动归属到分支 / MR、聚合入 SQLite，显示在项目侧栏、并行 worktree 总览、会话简报和每轮标题（[ADR 0020](adr/0020.md)）
+- [ ] 项目与分支级别的 token 统计：去重、按改动归属到项目和分支、聚合入 SQLite，显示在项目侧栏、并行 worktree 总览、会话简报和每轮标题；关联到 MR 在 P3 随 MR 视图完成（[ADR 0020](adr/0020.md)）
 - [ ] Git 与 Diff：gix + imara-diff，统一 / 双栏视图
 - [ ] 审阅视图：会话简报、按轮次的改动叙事、「为什么改」、已看进度、Drifted 标记
 - [ ] 审阅意见：行内写意见、攒批、带文件与行号发回会话
@@ -47,6 +47,6 @@
 
 - [ ] Conversation 面板：ACP 结构化对话（agent-client-protocol）
 - [ ] 权限请求 UI
-- [ ] MR 视图：GitHub 与 GitLab（含自部署），CI 状态
+- [ ] MR 视图：GitHub 与 GitLab（含自部署），CI 状态；分支用量关联到 MR（[ADR 0020](adr/0020.md)）
 - [ ] 依赖源码跳转（-sources.jar）与可选 jdtls / SCIP 精确语义
 - [ ] 第三方插件：stdio JSON-RPC 接口与 Seatbelt 沙箱
