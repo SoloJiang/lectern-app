@@ -8,7 +8,7 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 
 1. **Open folder**：打开任意文件夹或仓库。
 2. **Project home**：看这个项目里待审的会话、运行中的 agent、会话外的改动。
-3. **Review**：顶部是会话简报（值得先看的几处），下面按轮次读 prompt、agent 说明和改动。
+3. **Review**：顶部是会话简报（值得先看的几处），下面按轮次读 prompt、agent 说明和改动。简报默认由规则生成；执行 Analyze 才调用本机的 Claude Code 或 Codex 做补充分析（[ADR 0019](../adr/0019.md)）。
 4. 改动无误：**Looks good**，全部标记已看，进入提交或开 MR（GitHub / GitLab）。
 5. 改动有问题：在行上写 **Review notes**，汇总成一批后用 ⌘↩ 发回会话；agent 的修改作为新一轮出现，回到第 3 步只看新轮次。
 

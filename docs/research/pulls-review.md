@@ -257,9 +257,9 @@ Action 推荐用 `pull_request_target` 触发，理由是它只通过 API 读 di
 - **只跑 lint 的 CI、浮动版本的复用工作流、不设审阅门槛**：Lectern 现有的 `just ci`、cargo-deny 和 Codex 审阅更严格，保持不变。
 - **以最终 diff 为唯一阅读顺序**：Lectern 保留按轮次阅读。pulls.review 的按提交查看（`?commit=<sha>`）是它最接近轮次视图的功能。
 
-## 未决问题
+## 决定
 
-以下问题涉及产品方向，需要人决定。
+2026-10-16 人确认按本文的推荐处理，记录在 [ADR 0019](../adr/0019.md)：
 
-1. 会话简报是否调用模型？可选的做法有：只用规则（风险路径、没被更新的调用方、Drifted、噪声文件）；规则加可选的模型分析，由用户点击触发；或者打开会话时自动分析。调用模型会消耗用户 Claude Code 或 Codex 的额度。
-2. MR 视图是否读取 pulls.review 写在 PR 里的共享分析评论？读取只需要解析一种评论格式，可以让已经用 pulls.review Action 的仓库在 Lectern 里直接看到分组。Lectern 是否也把自己的分析写回 PR，是另一个问题。
+1. 会话简报默认只用规则生成。模型分析由用户执行 Analyze 时触发，调用本机已登录的 Claude Code 或 Codex，只读运行，不自动调用。
+2. MR 视图只读取 pulls.review 的共享分析评论，作为分组参考显示。Lectern 不向 PR 写入自己的分析结果。

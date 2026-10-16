@@ -5,11 +5,12 @@
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
 - 设计文档：`docs/design/review_view.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#22](https://github.com/SoloJiang/lectern-app/issues/22)
-- ADR：[0012](../../docs/adr/0012.md)
+- ADR：[0012](../../docs/adr/0012.md)、[0019](../../docs/adr/0019.md)
 
 ## 边界
 
 - 归因、片段对齐、已看状态都在 `review` 里计算；本视图只读快照、发命令。
+- 简报上的 Analyze（[ADR 0019](../../docs/adr/0019.md)）：执行时发命令给领域层，显示进行中、可取消；离开审阅页或关闭项目时发出取消命令；结果、失败原因和「不可用」的原因都从领域层的快照读取；领域层判定结果的指纹或会话修订号（被分析会话的轮次数与最后一条记录的哈希）与当前不一致时，显示为「基于较早的版本」并提供重新分析。
 - 打开一个会话的 Diff < 50 ms；滚动稳定 120 fps，长 diff 用虚拟滚动。
 
 ## 测试
