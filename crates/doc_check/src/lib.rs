@@ -452,7 +452,13 @@ fn srcset_urls(srcset: &str) -> Vec<String> {
 fn valid_srcset_descriptors(descriptors: &[String]) -> bool {
     let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
     let positive_int = |s: &str| digits(s) && s.bytes().any(|b| b != b'0');
+    // HTML's floating-point syntax allows a leading `-`; a density must not be
+    // below zero, so only a negative zero (`-0x`) keeps the sign.
     let float = |s: &str| {
+        let (negative, s) = match s.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, s),
+        };
         let (mantissa, exponent) = match s.find(['e', 'E']) {
             Some(i) => (&s[..i], Some(&s[i + 1..])),
             None => (s, None),
@@ -462,7 +468,9 @@ fn valid_srcset_descriptors(descriptors: &[String]) -> bool {
             None => digits(mantissa),
         };
         let exponent_ok = exponent.is_none_or(|e| digits(e.strip_prefix(['+', '-']).unwrap_or(e)));
-        mantissa_ok && exponent_ok
+        mantissa_ok
+            && exponent_ok
+            && !(negative && mantissa.bytes().any(|b| (b'1'..=b'9').contains(&b)))
     };
     let (mut width, mut density, mut height) = (false, false, false);
     for d in descriptors {
@@ -1584,14 +1592,14 @@ mod tests {
     fn invalid_srcset_candidates_are_dropped() {
         let repo = TempRepo::new(&[(
             "b.md",
-            "<img src=\"b.md\" srcset=\"q.png 2q, h.png 50h, wx.png 100w 2x, n.png -1x, z.png 0w, ok-w.png 100w 50h, gone.png .5x\">\n",
+            "<img src=\"b.md\" srcset=\"q.png 2q, h.png 50h, wx.png 100w 2x, n.png -1x, z.png 0w, ok-w.png 100w 50h, gone.png .5x, neg-zero.png -0x\">\n",
         )]);
         let got: Vec<_> = repo
             .check(&["b.md"])
             .iter()
             .map(|e| e.target.clone())
             .collect();
-        assert_eq!(got, ["ok-w.png", "gone.png"]);
+        assert_eq!(got, ["ok-w.png", "gone.png", "neg-zero.png"]);
     }
 
     #[cfg(unix)]
