@@ -205,8 +205,8 @@ impl GateSlot {
     pub fn poll(&self, cx: &mut std::task::Context<'_>) -> GatePoll;
 
     /// executor 在 poll 任务的 future 时用 `catch_unwind` 包住。panic 时顺序固定：先把任务标为已结束，在 `contain` 里 drop 它的 future
-    /// （future 持有的锁、许可等资源随之释放），保留 panic 的 payload，最后才调用这个方法；所以这个方法唤醒的同一闸门上的其他任务
-    /// 不会卡在仍被这个 future 占着的资源上。
+    /// （future 持有的锁、许可等资源随之释放），再处理 panic 的 payload：取出可读的消息，在 `contain` 里 drop payload（`panic_any` 抛出的 payload 也可能持有许可等资源），
+    /// 最后才用这条消息调用这个方法；所以这个方法唤醒的同一闸门上的其他任务不会卡在仍被这个 future 或它的 payload 占着的资源上。
     /// future 的每一次最终 drop 都用 `catch_unwind` 包住，不只是 poll panic 之后：`poll` 返回 `Drop`（取消、闸门关闭、token 为 `Dead`）、
     /// future 返回 `Ready` 之后、executor 关闭时丢弃未完成的任务，都一样；drop panic 时同样调用这个方法。
     /// kernel 按 `fail` 的方式让这个任务所属的激活失效：插件进入 `Failed`，连带停用的插件同步失效，
@@ -216,10 +216,11 @@ impl GateSlot {
     /// 摘掉槽位撤不回别的线程已经克隆走的 waker，所以不能只靠它：`executor` 对每个任务维护「空闲 / 运行中 / 已结束」三种状态，
     /// 唤醒一个运行中的任务只设一个「待重新 poll」标记，由正在运行的那次 poll 返回后再调度，唤醒已结束的任务直接忽略，
     /// 所以任何时候一个任务都不会被重入 poll，panic 路径上的任务在标为已结束之后也不会再被 poll。这是 `executor` 对 kernel 的约定，有测试覆盖。
-    /// 激活已经失效时只记日志。`payload` 由这个方法接管：先取出可读的消息（`&str` / `String`）记入日志，
-    /// 再在 `catch_unwind` 里 drop；这次 drop 又 panic 时，第二个 payload 用 `mem::forget` 泄漏，不再 drop，
-    /// 所以 `Drop` 会 panic 的 payload 也不会展开到 executor 或 kernel 线程。executor 自己不保留、不 drop 这个 payload。
-    pub fn panicked(&self, payload: Box<dyn std::any::Any + Send>);
+    /// 激活已经失效时只记日志。这个方法只接收消息，不接收 payload：executor 用 `kernel::contain` 包住 poll 和 drop，
+    /// `contain` 捕获到 panic 时当场取出可读的消息（`&str` / `String`），在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时
+    /// 第二个 payload 用 `mem::forget` 泄漏，然后返回 `Err(消息)`；所以调用这个方法时 payload 已经释放，
+    /// `Drop` 会 panic 的 payload 也不会展开到 executor 或 kernel 线程。
+    pub fn panicked(&self, message: String);
 }
 
 /// 一次激活的长期句柄：从 `started` 起有效，到这次激活停用为止。可以克隆并保存在插件的状态里，
@@ -257,7 +258,8 @@ impl PluginHandle {
     pub fn own_with<G: Send + 'static>(&self, start: impl FnOnce(SubmitGate) -> G + Send + 'static) -> bool;
 
     /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
-    /// 调用 `Subscription::keep()` 则一直保留到这次激活停用。这次激活已停用时不订阅并返回 None。
+    /// 调用 `Subscription::keep()` 则一直保留到这次激活停用。这次激活已停用时不订阅并返回 None，
+    /// 被拒绝的 `handler` 在释放守卫表的锁之后于 `contain` 里 drop（它捕获的值的 `Drop` 可能 panic），不展开到调用方的线程。
     /// 检查和插入都在这次激活的守卫表的互斥锁内完成，监听登记成这张表里的一项：撤销第 4 步取同一把锁、先把表标为关闭再移除全部监听，
     /// 所以 `on` 要么在关闭之前插入（随后被撤销移除），要么看到关闭返回 None，不会在撤销之后留下监听。
     pub fn on<E: Event>(&self, handler: impl Fn(&E, &PluginHandle) + Send + Sync + 'static) -> Option<Subscription>;
@@ -486,7 +488,7 @@ impl Emitter {
 
 ### 失败
 
-kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。每一处 `catch_unwind` 捕获到的 payload 都按 `GateSlot::panicked` 的方式处理：取出可读的消息记日志，再在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，所以 `Drop` 会 panic 的 payload（`panic_any` 抛出）也不会在调用方或 kernel 线程上引发第二次展开。kernel 用一个共用的 `contain(f)` 包住全部边界，不在各处各写一遍。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
+kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。kernel 用一个共用的公开函数 `contain(f) -> Result<T, String>` 包住全部边界，不在各处各写一遍，executor 也用它：捕获到 panic 时当场取出可读的消息，在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，然后只返回消息，所以 payload 持有的资源在调用方做后续处理（让激活失效、唤醒其他任务）之前已经释放，`Drop` 会 panic 的 payload（`panic_any` 抛出）也不会在调用方或 kernel 线程上引发第二次展开。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
 
 - `activate` 返回错误或 panic：
   - 这次激活已登记的内容全部撤销；
@@ -547,12 +549,12 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - kernel 线程已经处理完启动时的激活；
 - 生命周期操作的队列为空，kernel 线程上没有正在执行的生命周期操作（激活、提交、`started`、停用与撤销、`shutdown`）；
 - 没有正在进行的事件分发（kernel 计数各线程上进行中的 `emit`，监听可能正要取 `BusyGuard`）；
-- 没有持有中的准入：`ServiceRef::get`、`ServiceSet` 的调用、主线程的界面回调和结果应用都持有 `Admission`，kernel 对所有激活的准入另外维护一个全局计数，`enter()` 成功时与本激活的计数一起加一，所以插件代码正在运行、还没来得及取 `BusyGuard` 时也不会报告静止；
+- 没有持有中的准入：`ServiceRef::get`、`ServiceSet` 的调用、主线程的界面回调和结果应用都持有 `Admission`，kernel 对所有激活的准入另外维护一个全局计数，`enter()` 成功时与本激活的计数一起加一，所以插件代码正在运行、还没来得及取 `BusyGuard` 时也不会报告静止（分发 `Busy` / `Quiescent` 时调用监听用的准入除外，见下文）；
 - 没有未 drop 的 `BusyGuard` 和 `PendingGuard`（排到主线程、尚未完成的界面注册或注销）。
 
 插件把初始化工作（扫描会话目录、打开 SQLite、建索引）交给 executor 时，用 `PluginHandle::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`PluginHandle` 在 `started` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）在等待期间不取守卫，但每一轮实际工作（一次刷新：读文件、解析、更新状态）开始时取一个 `BusyGuard`，这一轮结束、结果交给主线程并应用之后才 drop（见「撤销」里排到主线程的结果），所以刷新进行中时 kernel 不报告静止。插件停用时，它的任务句柄被 drop、任务被要求取消，但取消是协作式的：任务真正结束、守卫被 drop 之前，守卫仍然计入，kernel 不报告静止。
 
-每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件；每次从静止变为忙碌，发出一次 `Busy` 事件。两个事件都带上这次转换的序号（与 `quiescent_epoch()` 同一个单调计数器，转换在计数器上原子递增时取得），`emit` 在不同线程上同步执行，事件到达监听的顺序可能和转换的顺序不同，所以监听按序号判断：序号不大于已经处理过的最大序号的事件是过时的，直接忽略。bench 因此不会被一个迟到的 `Busy` 取消计时、又等不到下一个 `Quiescent`。这两个事件本身的分发不计入进行中的 `emit`，否则发出 `Quiescent` 会让 kernel 重新变忙。bench 收到 `Quiescent` 后等 5 秒再采样，期间收到 `Busy` 就重新开始等待。采样前后各读一次 `quiescent_epoch()`：两次都是同一个 `Some(n)` 时样本有效，否则（采样期间有过哪怕很短的忙碌）丢弃这次样本，重新等待静止。`Quiescent` 的用途：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
+每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件；每次从静止变为忙碌，发出一次 `Busy` 事件。两个事件都带上这次转换的序号（与 `quiescent_epoch()` 同一个单调计数器，转换在计数器上原子递增时取得），`emit` 在不同线程上同步执行，事件到达监听的顺序可能和转换的顺序不同，所以监听按序号判断：序号不大于已经处理过的最大序号的事件是过时的，直接忽略。bench 因此不会被一个迟到的 `Busy` 取消计时、又等不到下一个 `Quiescent`。这两个事件本身的分发不计入进行中的 `emit`，调用它们的监听时取的准入也不计入全局准入计数（仍计入所属激活自己的计数，停用照常等它结束），否则调用 `Quiescent` 的监听就会让 kernel 重新变忙、发出 `Busy`，释放后又发出 `Quiescent`，循环下去。监听里再做的事（取服务、发事件、取 `BusyGuard`）照常计入，所以这两个事件的监听只记录序号和时间，bench 的监听就是这样；在监听里做实际工作会如实引起一次新的忙碌和静止。bench 收到 `Quiescent` 后等 5 秒再采样，期间收到 `Busy` 就重新开始等待。采样前后各读一次 `quiescent_epoch()`：两次都是同一个 `Some(n)` 时样本有效，否则（采样期间有过哪怕很短的忙碌）丢弃这次样本，重新等待静止。`Quiescent` 的用途：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
 
 ## 性能
 
@@ -605,7 +607,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 任务 panic 时的重入：executor 在 `wake` 里同步 poll，任务 panic 触发失效后不会重新 poll 这个任务，也不死锁。
 - 任务句柄回收：同一次激活里反复 `own_with` 一万个立即完成的任务，守卫表的长度回到 0；future 在取消、完成后被 drop 时 panic，插件进入 `Failed`、工作线程继续运行。
 - 界面注册的应用 panic：主线程不展开，注册一项都没有插入，插件进入 `Failed`。
-- 闸门唤醒：executor 在 `wake` 里同步 poll 任务时不死锁，任务第一次 poll 就调用同一个句柄的 `own_with` 也不死锁；`manifest`、`activate`、监听、守卫的 drop 以 `Drop` 会 panic 的 payload panic 时，kernel 线程继续运行；任务以 `Drop` 会 panic 的 payload panic 时，executor 和 kernel 线程都继续运行。
+- 闸门唤醒：executor 在 `wake` 里同步 poll 任务时不死锁，任务第一次 poll 就调用同一个句柄的 `own_with` 也不死锁；`manifest`、`activate`、监听、守卫的 drop 以 `Drop` 会 panic 的 payload panic 时，kernel 线程继续运行；任务以 `Drop` 会 panic 的 payload panic 时，executor 和 kernel 线程都继续运行；任务 panic 的 payload 持有同一闸门上另一个任务需要的许可时，payload 在唤醒那个任务之前已经 drop，不死锁；`Quiescent` 的监听只记录序号时，kernel 停在静止，不反复发出 `Busy` / `Quiescent`；通过已停用的句柄调用 `on`、`handler` 的 `Drop` panic 时不展开到调用方。
 - 主线程回调 panic：Action 或视图工厂 panic 时主线程没有展开，插件进入 `Failed`，之后不再被调用。
 - 孤儿任务：`start` 提交任务后 panic，任务一次也没有被 poll 就被丢弃；已经挂起（返回 `Pending`）的任务在激活失效时被唤醒并丢弃，它持有的 `BusyGuard` 随之释放，kernel 能回到静止。
 - 暂存闭包的 drop：丢弃的暂存 `start` 闭包在 drop 时 panic，kernel 线程继续运行，撤销照常完成。
