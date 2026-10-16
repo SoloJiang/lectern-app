@@ -130,14 +130,6 @@ pub fn is_markdown(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
-/// `href` and `src` values in a piece of raw HTML, with their byte offsets
-/// in `html`. html5gum tokenizes it as the HTML standard does: character
-/// references are decoded, comments are skipped, and the bodies of `script`,
-/// `style` and other raw-text elements are not read as tags.
-fn html_destinations(html: &str) -> Vec<(usize, String)> {
-    html_scan(html, None).0
-}
-
 /// Elements whose content the HTML tokenizer reads as text, not tags.
 const RAW_TEXT: [&[u8]; 9] = [
     b"script",
@@ -173,27 +165,40 @@ fn raw_text_end(html: &str, name: &[u8]) -> Option<usize> {
     None
 }
 
-/// Like [`html_destinations`], starting inside the raw-text element `open`
-/// (left open by an earlier piece of inline HTML) and returning the raw-text
-/// element still open at the end.
-fn html_scan(html: &str, open: Option<Vec<u8>>) -> (Vec<(usize, String)>, Option<Vec<u8>>) {
+/// Link destinations (`href` / `src`, with byte offsets), anchor ids and
+/// the raw-text element still open at the end of a piece of raw HTML,
+/// starting inside the raw-text element `open` left by earlier raw HTML.
+/// html5gum tokenizes it as the HTML standard does: character references are
+/// decoded, comments are skipped, and raw-text bodies are not read as tags.
+fn html_scan(html: &str, open: Option<Vec<u8>>) -> HtmlScan {
     let mut open = open;
     let html = match &open {
         // Inside an element opened by an earlier piece: skip to its end tag.
         // `plaintext` never ends: everything after it is text.
-        Some(name) if name.as_slice() == b"plaintext" => return (Vec::new(), open),
+        Some(name) if name.as_slice() == b"plaintext" => {
+            return HtmlScan {
+                open,
+                ..Default::default()
+            };
+        }
         Some(name) => match raw_text_end(html, name) {
             Some(i) => {
                 open = None;
                 &html[i..]
             }
-            None => return (Vec::new(), open),
+            None => {
+                return HtmlScan {
+                    open,
+                    ..Default::default()
+                };
+            }
         },
         None => html,
     };
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
     emitter.naively_switch_states(true);
     let mut out = Vec::new();
+    let mut ids = Vec::new();
     for token in Tokenizer::new_with_emitter(html, emitter) {
         let tag = match token {
             Ok(Token::StartTag(tag)) => tag,
@@ -207,6 +212,15 @@ fn html_scan(html: &str, open: Option<Vec<u8>>) -> (Vec<(usize, String)>, Option
         };
         if RAW_TEXT.contains(&&tag.name[..]) && !tag.self_closing {
             open = Some(tag.name.to_vec());
+        }
+        // `id` on any element and `name` on `<a>` are link targets too.
+        for (attr, only_a) in [(&b"id"[..], false), (b"name", true)] {
+            if (!only_a || &tag.name[..] == b"a")
+                && let Some(value) = tag.attributes.get(attr)
+                && !value.value.is_empty()
+            {
+                ids.push(String::from_utf8_lossy(&value.value).into_owned());
+            }
         }
         for name in [&b"href"[..], b"src"] {
             if let Some(value) = tag.attributes.get(name)
@@ -228,24 +242,60 @@ fn html_scan(html: &str, open: Option<Vec<u8>>) -> (Vec<(usize, String)>, Option
             }
         }
     }
-    (out, open)
+    HtmlScan {
+        dests: out,
+        ids,
+        open,
+    }
+}
+
+/// What a piece of raw HTML contributes: link destinations (with offsets),
+/// anchor ids, and the raw-text element still open at its end.
+#[derive(Default)]
+struct HtmlScan {
+    dests: Vec<(usize, String)>,
+    ids: Vec<String>,
+    open: Option<Vec<u8>>,
+}
+
+/// Links and raw-HTML anchors of a Markdown document.
+#[derive(Default)]
+struct Scan {
+    links: Vec<(usize, String)>,
+    ids: Vec<String>,
 }
 
 /// Destinations of all links and images, with their byte offsets: Markdown
 /// links and `href` / `src` attributes in raw HTML.
 pub fn links(markdown: &str) -> Vec<(usize, String)> {
-    let mut out = Vec::new();
+    scan(markdown).links
+}
+
+/// Anchors a document defines: GitHub heading slugs plus `id` / `<a name>`
+/// attributes in its raw HTML.
+pub fn anchors(markdown: &str) -> HashSet<String> {
+    let mut set: HashSet<String> = unique_slugs(headings(markdown)).into_iter().collect();
+    set.extend(scan(markdown).ids);
+    set
+}
+
+fn scan(markdown: &str) -> Scan {
+    let mut out = Scan::default();
     // An HTML block arrives one line per event. Tokenize the whole block, so a
     // tag or comment spanning lines is read as one; `pieces` maps offsets in
     // `block` back to the source.
     let mut block: Option<(String, Vec<(usize, usize)>)> = None;
-    // A raw-text element opened by inline HTML (`<script>` in a paragraph)
-    // stays open across the following inline events until its end tag.
-    let mut inline_open: Option<Vec<u8>> = None;
+    // A raw-text element (`<script>`, `<style>`, ...) left open by raw HTML
+    // swallows everything after it, across paragraphs and blocks, until its
+    // end tag appears in later raw HTML; Markdown links inside it render as
+    // text, not links. `plaintext` never closes.
+    let mut open: Option<Vec<u8>> = None;
     for (event, range) in Parser::new_ext(markdown, options()).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
-                out.push((range.start, dest_url.into_string()));
+                if open.is_none() {
+                    out.links.push((range.start, dest_url.into_string()));
+                }
             }
             Event::Start(Tag::HtmlBlock) => block = Some(Default::default()),
             Event::Html(html) => match block.as_mut() {
@@ -253,29 +303,33 @@ pub fn links(markdown: &str) -> Vec<(usize, String)> {
                     pieces.push((text.len(), range.start));
                     text.push_str(&html);
                 }
-                None => out.extend(
-                    html_destinations(&html)
-                        .into_iter()
-                        .map(|(at, d)| (range.start + at, d)),
-                ),
+                None => {
+                    let found = html_scan(&html, open.take());
+                    open = found.open;
+                    out.ids.extend(found.ids);
+                    out.links
+                        .extend(found.dests.into_iter().map(|(at, d)| (range.start + at, d)));
+                }
             },
             Event::End(TagEnd::HtmlBlock) => {
                 let Some((text, pieces)) = block.take() else {
                     continue;
                 };
-                for (at, dest) in html_destinations(&text) {
+                let found = html_scan(&text, open.take());
+                open = found.open;
+                out.ids.extend(found.ids);
+                for (at, dest) in found.dests {
                     let i = pieces.partition_point(|&(start, _)| start <= at);
                     let (start, source) = pieces[i.saturating_sub(1)];
-                    out.push((source + at - start, dest));
+                    out.links.push((source + at - start, dest));
                 }
             }
             Event::InlineHtml(html) => {
-                let (found, open) = html_scan(&html, inline_open.take());
-                inline_open = open;
-                out.extend(found.into_iter().map(|(at, d)| (range.start + at, d)));
-            }
-            Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::TableCell) => {
-                inline_open = None;
+                let found = html_scan(&html, open.take());
+                open = found.open;
+                out.ids.extend(found.ids);
+                out.links
+                    .extend(found.dests.into_iter().map(|(at, d)| (range.start + at, d)));
             }
             _ => {}
         }
@@ -560,7 +614,7 @@ pub fn check_tracked(
             }
             let set = anchors.entry(dest.clone()).or_insert_with(|| {
                 fs::read_to_string(&dest)
-                    .map(|t| unique_slugs(headings(&t)).into_iter().collect())
+                    .map(|t| self::anchors(&t))
                     .unwrap_or_default()
             });
             if !set.contains(&fragment) {
@@ -845,6 +899,34 @@ mod tests {
             got,
             [("b.md".to_string(), true), ("alias.md".to_string(), true)]
         );
+    }
+
+    #[test]
+    fn raw_text_stays_open_across_paragraphs() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "Text <script>\n\n<a href=\"missing.md\">x</a> [md](gone.md)\n\n</script>\n\n[after](nope.md)\n",
+        )]);
+        let errors = repo.check(&["b.md"]);
+        let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(got, ["nope.md"]);
+    }
+
+    #[test]
+    fn html_ids_are_anchors() {
+        let repo = TempRepo::new(&[
+            (
+                "a.md",
+                "<h2 id=\"setup\">Setup</h2>\n\nText <a name=\"old-name\"></a>.\n",
+            ),
+            (
+                "b.md",
+                "[s](a.md#setup) [o](a.md#old-name) [x](a.md#nope)\n",
+            ),
+        ]);
+        let errors = repo.check(&["b.md"]);
+        let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(got, ["a.md#nope"]);
     }
 
     #[test]
