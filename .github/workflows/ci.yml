@@ -33,6 +33,8 @@ jobs:
         run: just deny
       - name: Tests
         run: just test --profile ci
+      - name: Doctests
+        run: just doctest
 
   # Full workspace, including GPUI, on Apple Silicon.
   macos:
@@ -53,6 +55,8 @@ jobs:
         run: just check
       - name: Tests
         run: just test --profile ci
+      - name: Doctests
+        run: just doctest
       - name: Build app
         run: cargo build --locked -p lectern-app
       - name: Performance budget benchmarks

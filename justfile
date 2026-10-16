@@ -9,11 +9,9 @@ set lazy
 # Pass recipe arguments as "$@" so arguments with spaces stay whole.
 set positional-arguments
 
-# Use sccache when it is installed and the caller has not set a wrapper of
-# their own; it shares builds across worktrees. Never export an empty
-# RUSTC_WRAPPER: Cargo reads that as "no wrapper" and drops a configured one.
-sccache := `command -v sccache || true`
-cargo := if env("RUSTC_WRAPPER", "") != "" { "cargo" } else if sccache != "" { "RUSTC_WRAPPER=sccache cargo" } else { "cargo" }
+# No compiler wrapper is set here, so a RUSTC_WRAPPER, CARGO_BUILD_RUSTC_WRAPPER
+# or build.rustc-wrapper you configured is always respected. To share builds
+# across worktrees, set `build.rustc-wrapper = "sccache"` in ~/.cargo/config.toml.
 
 # Crates that build without GPUI (all of them on macOS).
 packages := if os() == "macos" { "--workspace" } else { `python3 scripts/check_architecture.py --gpui-free-packages` }
@@ -22,29 +20,33 @@ default: check
 
 # Format check, architecture rules, clippy with warnings as errors.
 check:
-    {{cargo}} fmt --all --check
+    cargo fmt --all --check
     python3 scripts/test_check_architecture.py
     python3 scripts/check_architecture.py
-    {{cargo}} clippy --locked {{packages}} --all-targets --all-features -- -D warnings
+    cargo clippy --locked {{packages}} --all-targets --all-features -- -D warnings
 
 # Run tests with cargo-nextest. `-p` (also `-pNAME`), `--package` or
 # `--workspace` in the arguments replace the default package set.
 test *args:
-    {{cargo}} nextest run --locked {{ if args =~ '(^|\s)(-p|--package|--workspace)' { "" } else { packages } }} --all-features --no-tests=pass "$@"
+    cargo nextest run --locked {{ if args =~ '(^|\s)(-p|--package|--workspace)' { "" } else { packages } }} --all-features --no-tests=pass "$@"
+
+# Doctests (nextest does not run them).
+doctest:
+    cargo test --locked --doc {{packages}} --all-features
 
 # Performance budget benchmarks.
 bench:
-    {{cargo}} bench --locked -p lectern-bench --all-features
+    cargo bench --locked -p lectern-bench --all-features
 
 # Licenses, sources and advisories.
 deny:
-    {{cargo}} deny --locked check
+    cargo deny --locked check
 
 # Everything CI runs on this platform.
-ci: check deny (test "--profile" "ci")
-    {{ if os() == "macos" { cargo + " build --locked -p lectern-app" } else { "true" } }}
+ci: check deny (test "--profile" "ci") doctest
+    {{ if os() == "macos" { "cargo build --locked -p lectern-app" } else { "true" } }}
     {{ if os() == "macos" { "just bench" } else { "true" } }}
 
 # Format the code.
 fmt:
-    {{cargo}} fmt --all
+    cargo fmt --all

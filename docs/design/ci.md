@@ -9,13 +9,14 @@
 | Checks | `ubuntu-latest` | 格式、架构规则、cargo-deny、不依赖 GPUI 的 crate 的 clippy 与测试 | 快：不编译 GPUI，几十秒出结果，agent 改领域逻辑时先看这个 |
 | macOS | `macos-15`（Apple Silicon） | 整个工作区的 clippy、测试、构建 `lectern` | GPUI 与视图层只能在 macOS 编译 |
 
-两个任务都是必需检查，步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`，macOS 上另有 `just bench`），本地和 CI 跑的是同一套命令。`RUSTFLAGS=-D warnings`，clippy 警告即失败。clippy 与测试都带 `--all-features`，feature 后面的代码也编译和测试。
+两个任务都是必需检查，步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`、`just doctest`，macOS 上另有 `just bench`），本地和 CI 跑的是同一套命令。`RUSTFLAGS=-D warnings`，clippy 警告即失败。clippy 与测试都带 `--all-features`，feature 后面的代码也编译和测试。
 
 ## 构建配置
 
 - 开发构建：依赖用 `opt-level = 2`（GPUI 在 0 级下慢到不能用），本仓库的 crate 保持 0 级，增量编译快；`debug = "limited"`，`split-debuginfo = "unpacked"`。
 - 发布构建：`lto = "thin"`，`codegen-units = 1`。
-- 装了 `sccache` 时 `just` 自动用它作为 `RUSTC_WRAPPER`，多个 worktree 共享编译结果；调用方已设置 `RUSTC_WRAPPER` 时不覆盖，没装 `sccache` 时什么都不设。
+- `just` 不设置编译器 wrapper，开发者自己配置的 `RUSTC_WRAPPER`、`CARGO_BUILD_RUSTC_WRAPPER` 或 `build.rustc-wrapper` 都照常生效。要用 `sccache` 在多个 worktree 间共享编译结果，在 `~/.cargo/config.toml` 里设置 `build.rustc-wrapper = "sccache"`。
+- nextest 不跑 doctest，另有 `just doctest`（`cargo test --doc`），CI 两个任务都跑。
 - nextest：默认只完整打印失败的测试；CI 用 `ci` profile，不提前停止。
 
 ## 架构规则检查

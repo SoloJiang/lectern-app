@@ -30,11 +30,12 @@
 
 ## 命令
 
-只用以下入口（需要 `just`、`cargo-nextest`、`cargo-deny`；装了 `sccache` 会自动使用）：
+只用以下入口（需要 `just`、`cargo-nextest`、`cargo-deny`；要在多个 worktree 间共享编译结果，在 `~/.cargo/config.toml` 里设置 `build.rustc-wrapper = "sccache"`）：
 
 ```sh
 just check   # 格式 + 架构规则 + clippy（警告即失败）
 just test    # cargo nextest；参数透传，如 just test -p lectern-review
+just doctest # 文档测试（nextest 不跑）
 just bench   # 性能预算基准
 just deny    # 许可证、来源、安全公告
 just ci      # 本平台上 CI 跑的全部内容
