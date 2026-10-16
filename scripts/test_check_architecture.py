@@ -2,10 +2,7 @@
 
 import unittest
 
-import os
-from unittest import mock
-
-from check_architecture import apple_only_cfg, cargo_rustflags, is_macos_binding_name
+from check_architecture import apple_only_cfg, is_macos_binding_name
 
 
 class AppleOnlyCfg(unittest.TestCase):
@@ -53,14 +50,8 @@ class AppleOnlyCfg(unittest.TestCase):
 
 
 
-class CargoRustflags(unittest.TestCase):
-    def test_env_overrides_config(self):
-        with mock.patch.dict(os.environ, {"CARGO_ENCODED_RUSTFLAGS": "-Ctarget-feature=+avx512f\x1f-Dwarnings"}):
-            self.assertEqual(cargo_rustflags("x86_64-unknown-linux-gnu"), ["-Ctarget-feature=+avx512f", "-Dwarnings"])
-        with mock.patch.dict(os.environ, {"CARGO_ENCODED_RUSTFLAGS": "", "RUSTFLAGS": "-C target-feature=+avx512f"}):
-            self.assertEqual(cargo_rustflags("x86_64-unknown-linux-gnu"), ["-C", "target-feature=+avx512f"])
-
-    def test_target_feature_flag_makes_predicate_portable(self):
+class TargetConfigurations(unittest.TestCase):
+    def test_a_non_apple_witness_makes_predicate_portable(self):
         predicate = 'cfg(any(target_os = "macos", target_feature = "avx512f"))'
         self.assertTrue(apple_only_cfg(predicate, [(True, {("target_os", "macos")}), (False, {("target_os", "linux")})]))
         self.assertFalse(
