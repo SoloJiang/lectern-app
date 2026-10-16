@@ -15,7 +15,7 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 
 ## 2. 开 PR
 
-- 标题用 `<范围>: <做了什么>`，正文写改了什么、为什么、怎么验证，末尾写 issue：实现 PR 和不需要设计的 PR 用 `Closes #<issue>`；设计文档 PR 用 `Refs #<issue>`，issue 留给后续的实现 PR 关闭。
+- 标题用 `<范围>: <做了什么>`，正文写改了什么、为什么、怎么验证，末尾写 issue：实现 PR 和不需要设计的 PR 用 `Closes #<issue>`；设计文档 PR 用 `Refs #<issue>`，issue 留给后续的实现 PR 关闭。一个 issue 涉及多个 crate 时，只有最后完成的那个实现 PR 用 `Closes`，其余用 `Refs`（AGENTS.md「工作方式」）。
 - 叠在其他分支上的 PR，base 设为下面那个分支，正文写明依赖关系。
 
 ## 3. 等待审阅
@@ -74,4 +74,4 @@ gh api -X PUT $R/pulls/$N/merge -f merge_method=squash -f sha=<最新提交>
 
 - 叠放的 PR：先合底层，再把上层的 base 改为 `main`（`gh api -X PATCH $R/pulls/<上层> -f base=main`），合并 `origin/main` 解决冲突后重新走第 3 步。
 - GitHub 的 stack 功能管理的 PR 不能用 API 合并或改 base，请人在网页上操作。
-- 合并后删除 worktree 和本地分支。
+- 合并后先 `cd` 到另一个保留的 checkout（如主 checkout），再 `git worktree remove` 删除这个 worktree 和本地分支；不要在要删除的目录里执行删除。
