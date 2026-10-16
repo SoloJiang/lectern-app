@@ -1,0 +1,11 @@
+[package]
+name = "lectern-terminal"
+description = "PTY and libghostty-vt terminal state on a dedicated thread."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "domain"

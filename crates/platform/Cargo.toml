@@ -1,0 +1,11 @@
+[package]
+name = "lectern-platform"
+description = "macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "infra"

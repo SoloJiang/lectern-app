@@ -1,0 +1,11 @@
+[package]
+name = "lectern-code-intel"
+description = "tree-sitter symbol index, Java and TypeScript resolution, dependency sources."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "domain"

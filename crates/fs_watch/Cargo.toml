@@ -1,0 +1,11 @@
+[package]
+name = "lectern-fs-watch"
+description = "Platform-neutral file watching, filtered by the git index; the FSEvents backend lives in platform."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "infra"

@@ -1,0 +1,11 @@
+[package]
+name = "lectern-file-reader"
+description = "Full-file reading and editing (third tier)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "view"

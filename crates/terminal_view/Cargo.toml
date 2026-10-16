@@ -1,0 +1,11 @@
+[package]
+name = "lectern-terminal-view"
+description = "Terminal grid rendering for the conversation's Terminal page."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "view"

@@ -1,0 +1,11 @@
+[package]
+name = "lectern-usage"
+description = "Token dedupe and aggregation, price table and limit snapshots."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "domain"

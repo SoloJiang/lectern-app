@@ -1,0 +1,11 @@
+[package]
+name = "lectern-bench"
+description = "Performance budget benchmarks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "tool"
