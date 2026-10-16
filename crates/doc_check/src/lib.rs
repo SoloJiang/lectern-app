@@ -233,8 +233,9 @@ fn scan(markdown: &str) -> Scan {
                 // `href` on a `div` is not a link.
                 let link_attrs: &[&[u8]] = match &tag.name[..] {
                     b"a" | b"area" | b"link" => &[b"href"],
-                    b"img" | b"iframe" | b"embed" | b"source" | b"track" | b"audio" | b"video"
-                    | b"script" => &[b"src"],
+                    // The tree builder renames `<image>` to `<img>`.
+                    b"img" | b"image" | b"iframe" | b"embed" | b"source" | b"track" | b"audio"
+                    | b"video" | b"script" => &[b"src"],
                     // `src` applies only to the Image Button state; task list
                     // checkboxes and other inputs have no destination.
                     b"input"
@@ -755,7 +756,7 @@ pub fn check_tracked(
                     None => continue,
                 }
             }
-            if !(is_markdown(&lexical) || is_markdown(&dest)) || !dest.is_file() {
+            if !is_markdown(&lexical) || !dest.is_file() {
                 continue;
             }
             let set = anchors.entry(dest.clone()).or_insert_with(|| {
@@ -1280,6 +1281,29 @@ mod tests {
             .map(|e| e.target.clone())
             .collect();
         assert_eq!(got, ["<template>", "<select>", "<iframe>"]);
+    }
+
+    #[test]
+    fn image_is_an_img() {
+        let repo = TempRepo::new(&[("b.md", "<image src=\"missing.png\">\n")]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["missing.png"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_markdown_names_skip_fragments_even_through_symlinks() {
+        let repo = TempRepo::new(&[
+            ("real.md", "# Real\n"),
+            ("b.md", "[x](alias.txt#anything)\n"),
+        ]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("real.md", base.join("alias.txt")).unwrap();
+        assert_eq!(repo.check(&["b.md"]), []);
     }
 
     #[test]
