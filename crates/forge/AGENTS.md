@@ -5,12 +5,13 @@ GitHub 与 GitLab（含自部署）的 MR 与 CI 状态。
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
 - 设计文档：`docs/design/forge.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#25](https://github.com/SoloJiang/lectern-app/issues/25)
-- ADR：[0008](../../docs/adr/0008.md)
+- ADR：[0008](../../docs/adr/0008.md)、[0020](../../docs/adr/0020.md)
 
 ## 边界
 
 - MVP 调用 `gh` / `glab` 命令行工具，复用它们已有的登录态（[ADR 0008](../../docs/adr/0008.md)），本 crate 不保存凭据；命令行进程按需启动、用完即退。改成直接持有凭据要先修订 ADR 0008。
 - 网络请求在后台任务里执行，离线时返回缓存或明确的离线状态。
+- 为用量统计（ADR 0020）提供分支与 MR 的对应：每个 MR 的编号、标题、源分支、目标分支、创建时间、合并或关闭时间，包括已经合并和关闭的 MR，以便按 MR 的存续时间切分历史用量。
 
 ## 测试
 
