@@ -33,7 +33,7 @@ Single-process Rust, macOS (Apple Silicon) first.
 | Forges | GitHub and GitLab (including self-hosted) |
 | UI strings | Fluent, en + zh-CN |
 
-Everything is a plugin: the kernel only loads plugins and manages their lifecycle. Built-in plugins are linked at compile time; third-party plugins run as separate processes.
+Everything is a plugin: the kernel only loads plugins and manages their lifecycle. The core review loop ships in the app; other language packs, precise Java semantics and extra forge or agent adapters are downloaded on demand from the plugin marketplace when a project needs them. Downloaded plugins run as separate sandboxed processes.
 
 ## Performance budget (Apple Silicon, targets)
 
@@ -45,6 +45,7 @@ Everything is a plugin: the kernel only loads plugins and manages their lifecycl
 | Open a session's diff | < 50 ms |
 | Switch worktree / branch | < 100 ms |
 | Idle memory | < 60 MB empty window, < 100 MB with a monorepo open |
+| App size | ≤ 80 MB installed (target 50 MB), ≤ 40 MB download |
 | Scrolling and input | steady 120 fps |
 
 ## Roadmap
