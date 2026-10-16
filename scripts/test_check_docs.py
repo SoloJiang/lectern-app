@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 
-from check_docs import check, slug
+from check_docs import check, headings, slug, unique_slugs
 
 
 class Slug(unittest.TestCase):
@@ -20,6 +20,23 @@ class Slug(unittest.TestCase):
         for heading, expected in cases.items():
             with self.subTest(heading=heading):
                 self.assertEqual(slug(heading), expected)
+
+
+class Headings(unittest.TestCase):
+    def test_atx_and_setext(self):
+        lines = ["# One", "", "Two", "===", "", "Three", "---", "", "- [ ] item", "", "| a |", "|---|"]
+        self.assertEqual(headings(lines), ["One", "Two", "Three"])
+
+    def test_inline_code_kept_for_slug(self):
+        self.assertEqual(unique_slugs(headings(["## `kernel` 设计"])), ["kernel-设计"])
+
+    def test_nested_fence(self):
+        lines = ["````md", "```", "# Not a heading", "```", "````", "# Real"]
+        self.assertEqual(headings(lines), ["Real"])
+
+    def test_unique_slugs(self):
+        self.assertEqual(unique_slugs(["Foo", "Foo-1", "Foo"]), ["foo", "foo-1", "foo-2"])
+        self.assertEqual(unique_slugs(["A", "A", "A"]), ["a", "a-1", "a-2"])
 
 
 class Check(unittest.TestCase):
@@ -47,6 +64,21 @@ class Check(unittest.TestCase):
         self.assertEqual(len(errors), 2)
         self.assertIn("file not found", errors[0])
         self.assertIn("#没有", errors[1])
+
+    def test_reference_definitions(self):
+        errors = self.run_check({
+            "a.md": "# 标题\n",
+            "b.md": "[ok][x] [bad][y]\n\n[x]: a.md#标题\n[y]: missing.md\n",
+        })
+        self.assertEqual(len(errors), 1)
+        self.assertIn("missing.md", errors[0])
+
+    def test_percent_encoded(self):
+        errors = self.run_check({
+            "design notes.md": "# 性能预算\n",
+            "b.md": "[x](design%20notes.md#%E6%80%A7%E8%83%BD%E9%A2%84%E7%AE%97)\n",
+        })
+        self.assertEqual(errors, [])
 
     def test_code_is_ignored(self):
         errors = self.run_check({

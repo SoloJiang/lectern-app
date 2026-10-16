@@ -1,6 +1,6 @@
 # CI 与约束检查
 
-状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)）。
+状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。
 
 对应 issue [#4](https://github.com/SoloJiang/lectern-app/issues/4)。规则以脚本执行，违反时构建立即失败（[技术调研](tech-research.md)「约束检查」）。
 
@@ -66,3 +66,17 @@ python3 scripts/check_architecture.py
 ## Metal
 
 GPUI 在构建时编译 Metal shader。Xcode 26 起 Metal 工具链需单独下载，macOS 任务在缺失时执行 `xcodebuild -downloadComponent MetalToolchain`。
+
+## 实际验证
+
+[#50](https://github.com/SoloJiang/lectern-app/pull/50) 加入的 lint 继承检查、规则出处和文档链接检查：
+
+- 在 Linux 上运行 `just check` 通过。
+- 临时加入不写理由的 `#[allow(dead_code)]` 和 `dbg!` 时，clippy 报两个错误。
+- 删掉某个 crate 的 `[lints] workspace = true` 时，架构检查失败，报错指向本文件。
+- `python3 scripts/test_check_docs.py` 覆盖行内链接、引用式链接、setext 标题、嵌套代码块、重复标题的锚点和百分号编码；`check_docs.py` 在 main 和当时打开的各个 PR 分支上都通过。
+- macOS 上的 `just check` 由 CI 的 macOS 任务运行。
+
+## 与设计的差异
+
+[#34](https://github.com/SoloJiang/lectern-app/pull/34) 与 [#36](https://github.com/SoloJiang/lectern-app/pull/36) 的实现没有记录差异。[#50](https://github.com/SoloJiang/lectern-app/pull/50) 新增的规则 5、Lint、文档链接检查三处在本文对应小节里直接写成设计，没有偏离已有设计的地方。

@@ -6,8 +6,11 @@ Every tracked *.md file is scanned. For each relative link `[text](target)`:
   - a `#fragment` must match a heading anchor in the target Markdown file,
     using GitHub's slug rules (see `slug`).
 
-Links inside fenced code blocks and inline code are ignored, as are absolute
-URLs (http, https, mailto) and links to the repository root. Symlinked files
+Inline links and reference definitions (`[label]: target`) are checked;
+percent-encoded paths and fragments are decoded first. Headings are ATX
+(`## Title`) or setext (a line underlined with === or ---). Links inside fenced
+code blocks and inline code are ignored, as are absolute URLs (http, https,
+mailto) and links to the repository root. Symlinked files
 (crates/*/CLAUDE.md) are checked once, through the file they point to.
 
 Exit status is 1 when any link is broken.
@@ -18,10 +21,13 @@ import re
 import subprocess
 import sys
 import unicodedata
+from urllib.parse import unquote
 
 LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)|!\[[^\]]*\]\(([^)\s]+)\)")
-HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
-FENCE = re.compile(r"^\s*(```|~~~)")
+REFERENCE = re.compile(r"^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)>?")
+HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
+SETEXT = re.compile(r"^ {0,3}(=+|-+)\s*$")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 INLINE_CODE = re.compile(r"`[^`]*`")
 EXTERNAL = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
@@ -40,31 +46,67 @@ def slug(heading):
     return "".join(out)
 
 
-def strip_code(lines):
-    """Yield (line_number, text) outside fenced blocks, with inline code removed."""
-    fenced = False
+def outside_fences(lines):
+    """Yield (line_number, line) for lines outside fenced code blocks.
+
+    A fence closes only on the same character repeated at least as many times
+    as the opening, with nothing after it, as in CommonMark."""
+    fence = None
     for i, line in enumerate(lines, 1):
-        if FENCE.match(line):
-            fenced = not fenced
+        m = FENCE.match(line)
+        if fence is None:
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
+                continue
+            yield i, line
+        elif m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
+            fence = None
+
+
+def strip_code(lines):
+    """Lines outside fenced blocks, with inline code removed."""
+    for i, line in outside_fences(lines):
+        yield i, INLINE_CODE.sub("", line)
+
+
+def headings(lines):
+    """Heading texts in document order: ATX headings and setext headings."""
+    out = []
+    prev = None
+    for _, line in outside_fences(lines):
+        m = HEADING.match(line)
+        if m:
+            out.append(m.group(2))
+            prev = None
             continue
-        if not fenced:
-            yield i, INLINE_CODE.sub("", line)
+        if SETEXT.match(line) and prev and prev.strip():
+            out.append(prev.strip())
+            prev = None
+            continue
+        prev = line
+    return out
+
+
+def unique_slugs(texts):
+    """GitHub's anchors for headings in order: a repeated slug gets the first
+    free -N suffix, counting slugs that already end in -N."""
+    seen = {}
+    found = []
+    for text in texts:
+        base = slug(text)
+        result = base
+        while result in seen:
+            seen[base] += 1
+            result = f"{base}-{seen[base]}"
+        seen[result] = 0
+        found.append(result)
+    return found
 
 
 def anchors(path, cache):
     if path not in cache:
-        seen = {}
-        found = set()
         with open(path, encoding="utf-8") as f:
-            for _, line in strip_code(f.read().splitlines()):
-                m = HEADING.match(line)
-                if not m:
-                    continue
-                base = slug(m.group(2))
-                n = seen.get(base, 0)
-                seen[base] = n + 1
-                found.add(base if n == 0 else f"{base}-{n}")
-        cache[path] = found
+            cache[path] = set(unique_slugs(headings(f.read().splitlines())))
     return cache[path]
 
 
@@ -81,11 +123,15 @@ def check(root, files):
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
         for lineno, line in strip_code(lines):
-            for m in LINK.finditer(line):
-                target = m.group(1) or m.group(2)
+            targets = [m.group(1) or m.group(2) for m in LINK.finditer(line)]
+            ref = REFERENCE.match(line)
+            if ref:
+                targets.append(ref.group(1))
+            for target in targets:
                 if EXTERNAL.match(target) or target.startswith("/"):
                     continue
                 file_part, _, fragment = target.partition("#")
+                file_part, fragment = unquote(file_part), unquote(fragment)
                 dest = os.path.normpath(os.path.join(os.path.dirname(path), file_part)) if file_part else path
                 if not os.path.exists(dest):
                     errors.append(f"{shown}:{lineno}: {target}: file not found")
