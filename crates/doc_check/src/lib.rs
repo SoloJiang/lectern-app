@@ -180,6 +180,8 @@ fn html_scan(html: &str, open: Option<Vec<u8>>) -> (Vec<(usize, String)>, Option
     let mut open = open;
     let html = match &open {
         // Inside an element opened by an earlier piece: skip to its end tag.
+        // `plaintext` never ends: everything after it is text.
+        Some(name) if name.as_slice() == b"plaintext" => return (Vec::new(), open),
         Some(name) => match raw_text_end(html, name) {
             Some(i) => {
                 open = None;
@@ -281,7 +283,7 @@ pub fn links(markdown: &str) -> Vec<(usize, String)> {
     out
 }
 
-fn percent_decode(s: &str) -> String {
+fn percent_decode(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -298,7 +300,59 @@ fn percent_decode(s: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
+}
+
+/// A path from raw bytes: on Unix any bytes are a valid file name.
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Whether resolving `path` passes through a symlink whose target is
+/// absolute. Such a link only works on the machine that created it.
+fn has_absolute_symlink(path: &Path) -> bool {
+    let mut todo: Vec<PathBuf> = path
+        .components()
+        .rev()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .collect();
+    let mut current = PathBuf::new();
+    let mut hops = 0;
+    while let Some(part) = todo.pop() {
+        match part.components().next() {
+            Some(Component::ParentDir) => {
+                current.pop();
+            }
+            Some(Component::CurDir) | None => {}
+            Some(_) => {
+                current.push(&part);
+                if let Ok(target) = fs::read_link(&current) {
+                    if target.is_absolute() {
+                        return true;
+                    }
+                    hops += 1;
+                    if hops > 40 {
+                        return false;
+                    }
+                    current.pop();
+                    todo.extend(
+                        target
+                            .components()
+                            .rev()
+                            .map(|c| PathBuf::from(c.as_os_str())),
+                    );
+                }
+            }
+        }
+    }
+    false
 }
 
 fn is_external(target: &str) -> bool {
@@ -371,6 +425,17 @@ pub fn check_tracked(
     let mut errors = Vec::new();
     for rel in files {
         let joined = root.join(rel);
+        if has_absolute_symlink(&joined) {
+            errors.push(BrokenLink {
+                file: rel.clone(),
+                line: 1,
+                target: rel.display().to_string(),
+                reason:
+                    "file is a symlink with an absolute target, which breaks in other checkouts"
+                        .into(),
+            });
+            continue;
+        }
         let path = fs::canonicalize(&joined).unwrap_or(joined);
         // A tracked Markdown symlink pointing outside the repository is not
         // read: its content would come from the machine, not the commit.
@@ -434,11 +499,16 @@ pub fn check_tracked(
                 reason,
             };
             let (without_fragment, fragment) = match target.split_once('#') {
-                Some((p, f)) => (p, Some(percent_decode(f))),
+                Some((p, f)) => (
+                    p,
+                    Some(String::from_utf8_lossy(&percent_decode(f)).into_owned()),
+                ),
                 None => (target.as_str(), None),
             };
-            let file_part = percent_decode(without_fragment.split('?').next().unwrap_or(""));
-            let dest = if file_part.is_empty() {
+            let file_part = path_from_bytes(&percent_decode(
+                without_fragment.split('?').next().unwrap_or(""),
+            ));
+            let dest = if file_part.as_os_str().is_empty() {
                 path.clone()
             } else {
                 normalize(&dir.join(&file_part))
@@ -449,6 +519,13 @@ pub fn check_tracked(
             }
             if !dest.exists() {
                 errors.push(broken("file not found".into()));
+                continue;
+            }
+            if has_absolute_symlink(&dest) {
+                errors.push(broken(
+                    "goes through a symlink with an absolute target, which breaks in other checkouts"
+                        .into(),
+                ));
                 continue;
             }
             if let Some(set) = &tracked
@@ -635,7 +712,7 @@ mod tests {
         let repo = TempRepo::new(&[("outside.md", "[x](nope.md)\n")]);
         let base = repo.0.join("repo");
         fs::rename(base.join("outside.md"), repo.0.join("outside.md")).unwrap();
-        std::os::unix::fs::symlink(repo.0.join("outside.md"), base.join("alias.md")).unwrap();
+        std::os::unix::fs::symlink("../outside.md", base.join("alias.md")).unwrap();
         let errors = repo.check(&["alias.md"]);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].reason.contains("outside the repository"));
@@ -729,6 +806,48 @@ mod tests {
     }
 
     #[test]
+    fn plaintext_never_closes() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "Text <plaintext></plaintext><a href=\"missing.md\">x</a>\n",
+        )]);
+        assert_eq!(repo.check(&["b.md"]), []);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn percent_encoded_non_utf8_bytes_reach_the_file_name() {
+        use std::os::unix::ffi::OsStrExt;
+        let repo = TempRepo::new(&[("b.md", "[x](asset-%FF.bin)\n")]);
+        let name = std::ffi::OsStr::from_bytes(b"asset-\xff.bin");
+        fs::write(repo.0.join("repo").join(name), "x").unwrap();
+        assert_eq!(repo.check(&["b.md"]), []);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_symlink_targets_fail() {
+        let repo = TempRepo::new(&[("guide.md", "# G\n"), ("b.md", "[x](link.md)\n")]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink(base.join("guide.md"), base.join("link.md")).unwrap();
+        std::os::unix::fs::symlink(base.join("b.md"), base.join("alias.md")).unwrap();
+        let errors = repo.check(&["b.md", "alias.md"]);
+        let got: Vec<_> = errors
+            .iter()
+            .map(|e| {
+                (
+                    e.file.display().to_string(),
+                    e.reason.contains("absolute target"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [("b.md".to_string(), true), ("alias.md".to_string(), true)]
+        );
+    }
+
+    #[test]
     fn backslash_network_reference_is_external() {
         let repo = TempRepo::new(&[("b.md", "<a href=\"\\\\example.com\\guide\">x</a>\n")]);
         assert_eq!(repo.check(&["b.md"]), []);
@@ -814,7 +933,7 @@ mod tests {
         let base = repo.0.join("repo");
         fs::create_dir_all(base.join("docs")).unwrap();
         fs::rename(base.join("outside.md"), repo.0.join("outside.md")).unwrap();
-        std::os::unix::fs::symlink(repo.0.join("outside.md"), base.join("docs/out.md")).unwrap();
+        std::os::unix::fs::symlink("../../outside.md", base.join("docs/out.md")).unwrap();
         let errors = repo.check(&["b.md"]);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].reason, "points outside the repository");
