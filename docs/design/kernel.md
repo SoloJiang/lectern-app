@@ -154,6 +154,11 @@ pub struct ActivationToken { /* Arc<AtomicU8>：待定 / 成功 / 已失效 */ }
 impl ActivationToken {
     /// `Pending`：激活还没结束；`Live`：已完全成功且尚未停用；`Dead`：失败或已停用。
     pub fn state(&self) -> TokenState;
+
+    /// 取一个由 kernel 直接计数的守卫，表示还有排到其他线程、尚未完成的撤销工作（如主线程上注销界面注册）。
+    /// 守卫 drop 之前 kernel 不报告静止。它不属于任何插件的激活，所以提供注册的插件（如 `workspace`）
+    /// 自己正在停用时也能取到。
+    pub fn pending_removal(&self) -> RemovalGuard;
 }
 
 pub enum TokenState { Pending, Live, Dead }
@@ -263,7 +268,8 @@ impl Kernel {
     /// 所有插件清单里的 `Command` 名称，供视图层预先注册代理 Action（见「按命令激活」）。
     pub fn lazy_commands(&self) -> Vec<Name>;
 
-    /// 激活声明了这个命令的插件。激活提交（或失败）后在 kernel 线程上调用 `done`；
+    /// 激活声明了这个命令的插件。激活完全成功（`started` 正常返回、这次激活仍然存活，token 为 `Live`）后，
+    /// 或者激活失败后，在 kernel 线程上调用 `done`；提交之后 `started` panic 或调用 `fail` 时，`done` 收到那个错误；
     /// 已激活时也在 kernel 线程上调用。`done` 用 `catch_unwind` 包住，panic 只记日志，不影响 kernel 线程。
     pub fn command(&self, name: &str, done: impl FnOnce(Result<(), PluginError>) + Send + 'static);
 
@@ -330,6 +336,7 @@ impl Emitter {
 - `activate` 返回 `Ok` 后，kernel 先检查清单 `provides` 里的每个服务都已 `provide`；缺任何一个都按激活失败处理（`PluginError::MissingService`），否则依赖者会因为等不到这个服务而一直不激活。
 - 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布（提交），然后调用 `started`。`started` 正常返回、而且期间没有通过 `fail` 或监听 panic 把插件标为失败时，kernel 才把因它而满足条件的后续插件放进队列；否则按失败停用，后续插件不激活。
 - 提供者在依赖者激活期间失败时（例如提供者的监听在其他线程上 panic，或 `fail` 被调用），kernel 在当前线程上立即把提供者这次激活的存活标记置为 false（见「事件分发」）。依赖者的激活还在 kernel 线程上进行时没有可清除的标记，所以 kernel 在提交依赖者之前、以及调用它的 `started` 之前，各检查一次它 `requires` 的每个服务是否还有存活的提供者。检查不通过时中止这次激活：暂存的内容全部丢弃（已经提交的按「撤销」一节撤销），依赖者回到「等待依赖」，不进入 `Failed`。
+- 调用 `started` 之前，kernel 同时检查这次激活自己的存活标记：它刚发布的监听可能已经在其他线程上 panic，把标记置为 false。标记已为 false 时不调用 `started`，直接按失败撤销。检查通过之后才发生的失败，按提交之后的失败处理；`started` 期间提交的任务和登记都经过 `PluginHandle`，标记为 false 之后 `own` 立即返回 false 并取消任务，所以不会留下运行中的副作用。
 - 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只开始后台工作（提交任务、发事件），这些副作用都发生在提交之后，不会出现「副作用已经发生、激活却回滚」的情况。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
@@ -352,7 +359,7 @@ impl Emitter {
 界面注册的守卫在 kernel 线程上 drop 时，只是把注销排到主线程，kernel 可能先完成撤销并 drop `Active`。这段时间里界面不能调用到已停用的激活，也不能让 kernel 先报告静止：
 
 - 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）之前检查 token，不是 `Live` 就不调用。停用的第一步就把 token 置为 `Dead`，早于撤销的其他步骤。
-- `dyn Contributions` 的守卫在 drop 时用 `workspace` 自己的 `PluginHandle::busy()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
+- `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending_removal()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程的队列被丢弃时守卫随之 drop。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
 
 后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后提交任务，用 `PluginHandle::own` 交出句柄。停用后，任务不再向视图交出结果；停用之后才提交的任务，`own` 返回 false 并立即取消。
 
@@ -406,7 +413,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 
 1. `workspace` 在 `started` 里从 `handle.control().lazy_commands()` 取得所有这类命令名，为每个命令注册一个常驻的代理 Action（不依赖插件）。命令的 Action 只有这一个；插件通过 `Contributions::handle_command(name, handler)` 登记处理函数，而不是另外注册同名的 Action。
 2. 代理 Action 被触发时：处理函数已登记就直接调用；否则调用 `control.command(name, done)`。
-3. 插件激活提交后 `done` 被调用；`workspace` 把它转到主线程，等这次激活的处理函数在下一帧登记之后调用它。用户只需触发一次。
+3. 插件激活完全成功（`started` 正常返回）后 `done` 被调用；`workspace` 把它转到主线程，等这次激活的处理函数在下一帧登记之后调用它。用户只需触发一次。
 4. 激活失败时，`done` 收到错误，`workspace` 显示一次提示。
    激活成功、但下一帧应用完注册后仍没有这个命令的处理函数时（插件漏了 `handle_command` 或名字写错），`workspace` 同样提示一次、记录错误，这次触发作废，不会一直等待。
 5. 插件停用时，处理函数的守卫被 drop，代理仍然在。用户重新启用插件后再次触发命令，代理照常走第 2 步激活它。
@@ -418,7 +425,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - kernel 线程已经处理完启动时的激活；
 - 生命周期操作的队列为空，kernel 线程上没有正在执行的生命周期操作（激活、提交、`started`、停用与撤销、`shutdown`）；
 - 没有正在进行的事件分发（kernel 计数各线程上进行中的 `emit`，监听可能正要取 `BusyGuard`）；
-- 没有未 drop 的 `BusyGuard`。
+- 没有未 drop 的 `BusyGuard` 和 `RemovalGuard`（排到主线程、尚未完成的界面注销）。
 
 插件把初始化工作（扫描会话目录、打开 SQLite、建索引）交给 executor 时，用 `PluginHandle::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`PluginHandle` 在 `started` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）不取守卫。插件停用时，它的任务句柄被 drop、任务被要求取消，但取消是协作式的：任务真正结束、守卫被 drop 之前，守卫仍然计入，kernel 不报告静止。
 
@@ -462,7 +469,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 重新启用：项目没变时，停用后重新启用的 `Workspace` 插件按保存的 `WorkspaceFacts` 重新激活。
 - 命令：激活成功但没有登记处理函数时，`workspace` 报错，代理不会一直等待。
 - 状态对象：`started` 收到的是 `activate` 返回的同一个 `Active`；停用后它被 drop。
-- 按命令激活：`command` 的 `done` 在激活提交后被调用一次；已激活时立即调用；失败时收到错误；`done` panic 后 kernel 线程继续处理后续请求。
+- 按命令激活：`command` 的 `done` 在激活完全成功后被调用一次，`started` panic 时收到错误而不是成功；已激活时立即调用；失败时收到错误；`done` panic 后 kernel 线程继续处理后续请求。
 - 控制句柄：插件停用后，它之前取得的 `KernelControl` 发出的 `workspace_changed`、`activate` 被忽略，`command` 的 `done` 收到 `Stale`。
 - 状态：激活条件已满足、但依赖未就绪的插件，`status()` 显示 `Waiting`，并列出缺少的服务。
 - 守卫：停用后通过旧句柄 `own` 的守卫在 kernel 线程上 drop。
