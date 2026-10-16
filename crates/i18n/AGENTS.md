@@ -3,7 +3,7 @@
 Fluent 资源与语言切换：en 与 zh-CN，默认跟随系统语言（[ADR 0013](../../docs/adr/0013.md)）。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：`docs/design/i18n.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 设计文档：[docs/design/i18n.md](../../docs/design/i18n.md)
 - issue：[#28](https://github.com/SoloJiang/lectern-app/issues/28)
 - ADR：[0013](../../docs/adr/0013.md)
 
