@@ -19,7 +19,8 @@ use std::path::{Component, Path, PathBuf};
 
 use html5gum::{DefaultEmitter, Token, Tokenizer};
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
-use unicode_normalization::char::is_combining_mark;
+
+mod slug_table;
 
 /// A link that does not resolve.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,9 +54,8 @@ fn options() -> Options {
         | Options::ENABLE_TASKLISTS
 }
 
-/// GitHub's heading anchor (github-slugger): lowercase, keep letters, marks,
-/// numbers, connector punctuation (`_`, `‿`, ...) and `-`, turn spaces into
-/// `-`, drop everything else.
+/// GitHub's heading anchor (github-slugger 2.0.0): lowercase, drop every
+/// character in [`slug_table::REMOVED`], turn spaces into `-`.
 pub fn slug(text: &str) -> String {
     // Lowercase the whole string: some letters (e.g. final sigma) depend on
     // their neighbours.
@@ -63,20 +63,24 @@ pub fn slug(text: &str) -> String {
         .chars()
         .filter_map(|c| match c {
             ' ' => Some('-'),
-            '-' => Some(c),
-            c if c.is_alphanumeric() || is_combining_mark(c) || is_connector(c) => Some(c),
-            _ => None,
+            c if is_removed(c) => None,
+            c => Some(c),
         })
         .collect()
 }
 
-/// Unicode general category Pc (connector punctuation).
-fn is_connector(c: char) -> bool {
-    matches!(
-        c,
-        '_' | '\u{203f}' | '\u{2040}' | '\u{2054}' | '\u{fe33}' | '\u{fe34}' | '\u{fe4d}'
-            ..='\u{fe4f}' | '\u{ff3f}'
-    )
+fn is_removed(c: char) -> bool {
+    slug_table::REMOVED
+        .binary_search_by(|&(lo, hi)| {
+            if hi < c {
+                std::cmp::Ordering::Less
+            } else if lo > c {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
 }
 
 /// Anchors for headings in document order. A repeated slug takes the first
@@ -131,23 +135,72 @@ pub fn is_markdown(path: &Path) -> bool {
 /// references are decoded, comments are skipped, and the bodies of `script`,
 /// `style` and other raw-text elements are not read as tags.
 fn html_destinations(html: &str) -> Vec<(usize, String)> {
+    html_scan(html, None).0
+}
+
+/// Elements whose content the HTML tokenizer reads as text, not tags.
+const RAW_TEXT: [&[u8]; 9] = [
+    b"script",
+    b"style",
+    b"textarea",
+    b"title",
+    b"xmp",
+    b"iframe",
+    b"noembed",
+    b"noframes",
+    b"plaintext",
+];
+
+/// Like [`html_destinations`], starting inside the raw-text element `open`
+/// (left open by an earlier piece of inline HTML) and returning the raw-text
+/// element still open at the end.
+fn html_scan(html: &str, open: Option<Vec<u8>>) -> (Vec<(usize, String)>, Option<Vec<u8>>) {
+    let mut open = open;
+    let html = match &open {
+        // Inside an element opened by an earlier piece: skip to its end tag.
+        Some(name) => {
+            let lower = html.to_ascii_lowercase();
+            let end = format!("</{}", String::from_utf8_lossy(name));
+            match lower.find(&end) {
+                Some(i) => {
+                    open = None;
+                    &html[i..]
+                }
+                None => return (Vec::new(), open),
+            }
+        }
+        None => html,
+    };
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
     emitter.naively_switch_states(true);
     let mut out = Vec::new();
     for token in Tokenizer::new_with_emitter(html, emitter) {
-        let Ok(Token::StartTag(tag)) = token else {
-            continue;
+        let tag = match token {
+            Ok(Token::StartTag(tag)) => tag,
+            Ok(Token::EndTag(end)) => {
+                if open.as_deref() == Some(&end.name[..]) {
+                    open = None;
+                }
+                continue;
+            }
+            _ => continue,
         };
+        if RAW_TEXT.contains(&&tag.name[..]) && !tag.self_closing {
+            open = Some(tag.name.to_vec());
+        }
         for name in [&b"href"[..], b"src"] {
             if let Some(value) = tag.attributes.get(name)
                 && !value.value.is_empty()
             {
                 // URL parsing strips leading and trailing C0 controls and
                 // spaces, and removes tabs and newlines anywhere.
+                // A backslash is a slash for web URLs, so `\\host\x` is a
+                // network-path reference like `//host/x`.
                 let url: String = String::from_utf8_lossy(&value.value)
                     .trim_matches(|c: char| c <= ' ')
                     .chars()
                     .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+                    .map(|c| if c == '\\' { '/' } else { c })
                     .collect();
                 if !url.is_empty() {
                     out.push((tag.span.start, url));
@@ -155,7 +208,7 @@ fn html_destinations(html: &str) -> Vec<(usize, String)> {
             }
         }
     }
-    out
+    (out, open)
 }
 
 /// Destinations of all links and images, with their byte offsets: Markdown
@@ -166,6 +219,9 @@ pub fn links(markdown: &str) -> Vec<(usize, String)> {
     // tag or comment spanning lines is read as one; `pieces` maps offsets in
     // `block` back to the source.
     let mut block: Option<(String, Vec<(usize, usize)>)> = None;
+    // A raw-text element opened by inline HTML (`<script>` in a paragraph)
+    // stays open across the following inline events until its end tag.
+    let mut inline_open: Option<Vec<u8>> = None;
     for (event, range) in Parser::new_ext(markdown, options()).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
@@ -193,11 +249,14 @@ pub fn links(markdown: &str) -> Vec<(usize, String)> {
                     out.push((source + at - start, dest));
                 }
             }
-            Event::InlineHtml(html) => out.extend(
-                html_destinations(&html)
-                    .into_iter()
-                    .map(|(at, d)| (range.start + at, d)),
-            ),
+            Event::InlineHtml(html) => {
+                let (found, open) = html_scan(&html, inline_open.take());
+                inline_open = open;
+                out.extend(found.into_iter().map(|(at, d)| (range.start + at, d)));
+            }
+            Event::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::TableCell) => {
+                inline_open = None;
+            }
             _ => {}
         }
     }
@@ -619,6 +678,31 @@ mod tests {
         let errors = repo.check(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| (e.line, e.target.as_str())).collect();
         assert_eq!(got, [(2, "missing.md")]);
+    }
+
+    #[test]
+    fn slugs_drop_what_github_drops() {
+        assert_eq!(slug("x²"), "x");
+        assert_eq!(slug("Ⅻ 章"), "ⅻ-章");
+        assert_eq!(slug("a 😀 b"), "a--b");
+        assert_eq!(slug("x—y"), "xy");
+    }
+
+    #[test]
+    fn inline_raw_text_spans_events() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "Text <script>const x = '<a href=\"missing.md\">';</script> and <a href=\"gone.md\">x</a>.\n",
+        )]);
+        let errors = repo.check(&["b.md"]);
+        let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(got, ["gone.md"]);
+    }
+
+    #[test]
+    fn backslash_network_reference_is_external() {
+        let repo = TempRepo::new(&[("b.md", "<a href=\"\\\\example.com\\guide\">x</a>\n")]);
+        assert_eq!(repo.check(&["b.md"]), []);
     }
 
     #[test]
