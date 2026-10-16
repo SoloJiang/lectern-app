@@ -94,15 +94,21 @@ pub enum Activation {
 /// 清单由方法返回，以后的进程插件可以用同一个类型。
 pub trait Plugin: Send + Sync + 'static {
     /// 纯内存操作，不得做 IO。进程插件的清单文件由插件宿主（#39）在 executor 上预先读好，再构造插件对象。
+    /// kernel 用 `catch_unwind` 包住每次调用；panic 时这个插件进入 `Failed`，其余插件照常检查和激活。
     fn manifest(&self) -> Manifest;
 
     /// 第一阶段：只登记，不产生任何副作用（不启动任务、不发事件、不读写文件）。
     /// 在 kernel 线程上执行，耗时计入本插件的激活预算。
-    fn activate(&self, ctx: &mut Context<'_>) -> Result<(), PluginError>;
+    /// 返回这次激活的状态对象：缓存的服务、`ServiceSet`、插件自己的数据都放在里面。
+    fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError>;
+}
 
+/// 一次激活的状态，由 kernel 持有：提交后调用 `started`，停用时在撤销完监听和守卫之后最后 drop。
+/// `Plugin` 对象本身不保存激活期间的状态。
+pub trait Active: Send + 'static {
     /// 第二阶段：激活提交（服务和监听已发布）之后在 kernel 线程上调用一次，副作用从这里开始，
     /// 如向 executor 提交任务。任务句柄和之后的注册通过 `handle` 交给 kernel。
-    fn started(&self, handle: PluginHandle) {}
+    fn started(&mut self, handle: PluginHandle) {}
 }
 ```
 
@@ -185,7 +191,7 @@ impl PluginSet {
     pub fn new() -> Self;
     pub fn with(self, plugin: impl Plugin) -> Self;
 
-    /// 检查依赖图：插件 ID 不重复；每个服务的稳定 ID 只对应一个 TypeId 和一种 MULTIPLE；
+    /// 检查依赖图：插件 ID 不重复；`Command` 激活条件里的命令名在所有插件间不重复；每个服务的稳定 ID 只对应一个 TypeId 和一种 MULTIPLE；
     /// 每个 requires 在本集合里都有提供者；MULTIPLE = false 的服务只有一个提供者；
     /// activation 不为空；没有环。
     /// `app` 为每个 profile 写一个调用它的单元测试，依赖图有误时 CI 失败。
@@ -281,7 +287,7 @@ impl Emitter {
 - 一个服务（不论 `MULTIPLE` 是否为 true）的最后一个已激活的提供者停用时，依赖它的插件先停用（依赖者先于被依赖者）。
 - `MULTIPLE = true` 的服务：依赖者激活后，提供者的增减不重新激活依赖者。依赖者通过 `ServiceSet<S>` 读取当前集合，集合在提供者增减时随即更新；需要在变化时做额外处理的，订阅 `ServiceAdded<S>` 和 `ServiceRemoved<S>` 事件（带提供者的插件 ID）。
 - 依赖者不得把 `ServiceSet::current()` 里的 `Arc<S>` 保存到本次调用之外，否则提供者停用后仍会被调用。
-- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除这些记录。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
+- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除这些记录；还在等待的 `command` 回调立即收到 `PluginError::Disabled`，`shutdown` 时收到 `PluginError::ShuttingDown`，不会一直挂起。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
 
 ### 激活的提交
 
@@ -291,7 +297,7 @@ impl Emitter {
 - 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只开始后台工作（提交任务、发事件），这些副作用都发生在提交之后，不会出现「副作用已经发生、激活却回滚」的情况。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
-- 激活期间的状态（缓存的 `Arc<S>`、`ServiceSet`、插件自己的数据）放在激活内创建的状态对象里，由监听闭包、任务和 `own` 的守卫持有；停用时这些都被撤销，状态随之释放。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
+- 激活期间的状态（缓存的 `Arc<S>`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
 - 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 满足这一点：新注册的视图、Action、快捷键要到下一帧才应用到界面上，激活失败时守卫在这之前已经 drop，失败的注册不会出现在界面上。`workspace` 本身是插件，收到注册时用自己的 `PluginHandle::busy()` 取一个守卫，在主线程上应用完这批注册后 drop，所以 kernel 在界面注册生效之前不会报告静止。
 
 ### 撤销
@@ -370,7 +376,7 @@ impl Emitter {
 
 插件把初始化工作（扫描会话目录、打开 SQLite、建索引）交给 executor 时，用 `PluginHandle::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`PluginHandle` 在 `started` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）不取守卫。插件停用时，它尚未 drop 的守卫不再计入。
 
-每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件；每次从静止变为忙碌，发出一次 `Busy` 事件。bench 收到 `Quiescent` 后等 5 秒再采样，期间收到 `Busy` 就重新开始等待，采样前再用 `is_quiescent()` 确认一次。`Quiescent` 的用途：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
+每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件；每次从静止变为忙碌，发出一次 `Busy` 事件。这两个事件本身的分发不计入进行中的 `emit`，否则发出 `Quiescent` 会让 kernel 重新变忙。bench 收到 `Quiescent` 后等 5 秒再采样，期间收到 `Busy` 就重新开始等待，采样前再用 `is_quiescent()` 确认一次。`Quiescent` 的用途：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
 
 ## 性能
 
@@ -392,6 +398,10 @@ impl Emitter {
 - 退出：`shutdown` 的 `done` 在全部撤销完成、kernel 线程退出后调用；需要在主线程 drop 的守卫在等待期间完成。
 - 静止与界面注册：只注册了 `Contributions` 的插件，在注册应用到界面之前 kernel 不静止。
 - 线程：所有 `activate` / `started` / 守卫 drop 都在 kernel 线程上执行，公开方法在调用线程上立即返回。
+- 清单：某个插件的 `manifest` panic 时，它进入 `Failed`，其余插件照常激活。
+- 命令：两个插件声明同一个命令名时 `validate` 报错；停用一个正在等待依赖的命令插件，挂起的 `done` 收到 `Disabled`。
+- 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
+- 状态对象：`started` 收到的是 `activate` 返回的同一个 `Active`；停用后它被 drop。
 - 按命令激活：`command` 的 `done` 在激活提交后被调用一次；已激活时立即调用；失败时收到错误；`done` panic 后 kernel 线程继续处理后续请求。
 - 控制句柄：插件停用后，它之前取得的 `KernelControl` 发出的 `workspace_changed`、`activate` 被忽略，`command` 的 `done` 收到 `Stale`。
 - 状态：激活条件已满足、但依赖未就绪的插件，`status()` 显示 `Waiting`，并列出缺少的服务。
