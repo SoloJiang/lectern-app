@@ -58,8 +58,11 @@ MACOS_ONLY_PREFIXES = (
 # A dependency compiled for macOS but not for Linux is a macOS binding
 # whatever its name, e.g. [target.'cfg(target_os = "macos")'.dependencies].
 # Cargo evaluates the cfg predicates (--filter-platform); we compare results.
-LINUX_TARGET = "x86_64-unknown-linux-gnu"
+LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 MACOS_TARGET = "aarch64-apple-darwin"
+# Same CPU as MACOS_TARGET, so only the OS differs in the comparison and an
+# aarch64-only dependency is not mistaken for a macOS binding.
+LINUX_SAME_ARCH = "aarch64-unknown-linux-gnu"
 PLATFORM_CRATE = "lectern-platform"
 
 
@@ -115,7 +118,7 @@ def main():
         print(" ".join(f"-p {name}" for name in gpui_free_packages(metadata(LINUX_TARGET))))
         return 0
     meta = metadata()
-    on_macos, on_linux = direct_deps(metadata(MACOS_TARGET)), direct_deps(metadata(LINUX_TARGET))
+    on_macos, on_linux = direct_deps(metadata(MACOS_TARGET)), direct_deps(metadata(LINUX_SAME_ARCH))
     packages = {p["id"]: p for p in meta["packages"]}
     members = set(meta["workspace_members"])
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
