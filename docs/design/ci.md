@@ -18,7 +18,7 @@
 1. 每个 crate 声明了 `[package.metadata.lectern] layer`。
 2. 依赖自上而下：`app` → `view` → `domain` → `infra`；`kernel` 层可被任何层依赖，自身只依赖 kernel 层；只有 `app` 可以依赖 `tool` 层，而且只能是 dev-dependency 或不在 `default` feature 里的可选依赖：检查读 Cargo 按默认 feature 解析出的依赖图，tool crate 不进入发布构建。
 3. `domain`、`infra`、`kernel` 层的依赖图（含间接依赖）里没有 GPUI。
-4. macOS 系统绑定只能是 `platform` 的直接依赖。绑定按两种方式识别：名字（前缀 objc*、cocoa*、core-foundation*、security-framework*、metal*、dispatch*、screencapturekit* 等，或名字里按 - 和 _ 切出的词含 macos、darwin、appkit、metal 等），以及 target 条件只在 Apple 平台成立的依赖，不论名字：脚本用 `rustc --print cfg` 取得 rustc 已知的全部 target 的真实 cfg（按 rustc 版本缓存在 `target/` 下），条件在某个 Apple target 上成立、在其他 target 上都不成立即为 Apple 专属；与 Cargo 一致，target 不设置的 cfg（`feature`、`test`、`proc_macro` 等）一律为假；Cargo 配置的 rustflags（环境变量或 `.cargo/config.toml`）会一并传给 rustc，并计入缓存键。工作区内的 crate 也按名字检查。`scripts/test_check_architecture.py` 是这部分的单元测试，CI 先跑它。
+4. macOS 系统绑定只能是 `platform` 的直接依赖。绑定按两种方式识别：名字（前缀 objc*、cocoa*、core-foundation*、security-framework*、metal*、dispatch*、screencapturekit* 等，或名字里按 - 和 _ 切出的词含 macos、darwin、appkit、metal 等），以及 target 条件只在 Apple 平台成立的依赖，不论名字：脚本用 `rustc --print cfg` 取得 rustc 已知的全部 target 的真实 cfg（按 rustc 版本缓存在 `target/` 下），条件在某个 Apple target 上成立、在其他 target 上都不成立即为 Apple 专属；与 Cargo 一致，target 不设置的 cfg（`feature`、`test`、`proc_macro` 等）一律为假；target 按默认配置取，不应用本机的 rustflags，同一个提交在任何机器和 CI 上结果一致。工作区内的 crate 也按名字检查。`scripts/test_check_architecture.py` 是这部分的单元测试，CI 先跑它。
 
 检查用 `cargo metadata --all-features`，藏在可选 feature 后面的依赖也算在内。每个 crate 自己的 dev-dependencies 也检查（会编译进测试和基准），依赖的 dev-dependencies 不会被编译，跳过。
 

@@ -29,7 +29,6 @@ import hashlib
 import json
 import os
 import re
-import tomllib
 import subprocess
 import sys
 
@@ -71,7 +70,9 @@ MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "ob
 # against the real cfg of every target (rustc --print cfg), so aliases such as
 # `unix` / target_family = "unix", multi-valued keys and Mac Catalyst are exact.
 # Names no target sets (feature, test, proc_macro, ...) are false, as in Cargo:
-# they cannot select target dependencies. Configured rustflags are applied.
+# they cannot select target dependencies. Targets are taken with their default
+# configuration, without local rustflags, so the check gives the same answer on
+# every machine and in CI.
 LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 PLATFORM_CRATE = "lectern-platform"
 
@@ -136,55 +137,24 @@ def parse_cfg(text):
 _TARGET_CFGS = None
 
 
-def cargo_rustflags(triple):
-    """The rustflags Cargo would use for `triple`: CARGO_ENCODED_RUSTFLAGS,
-    else RUSTFLAGS, else build.rustflags / target.<triple>.rustflags from the
-    Cargo config files (this directory and its parents, then CARGO_HOME)."""
-    if os.environ.get("CARGO_ENCODED_RUSTFLAGS"):
-        return [f for f in os.environ["CARGO_ENCODED_RUSTFLAGS"].split("\x1f") if f]
-    if os.environ.get("RUSTFLAGS"):
-        return os.environ["RUSTFLAGS"].split()
-    dirs, cur = [], os.path.abspath(".")
-    while True:
-        dirs.append(cur)
-        parent = os.path.dirname(cur)
-        if parent == cur:
-            break
-        cur = parent
-    home = os.environ.get("CARGO_HOME", os.path.expanduser("~/.cargo"))
-    files = [os.path.join(d, ".cargo", n) for d in dirs for n in ("config.toml", "config")] + [
-        os.path.join(home, n) for n in ("config.toml", "config")
-    ]
-    flags = []
-    for path in files:
-        if not os.path.isfile(path):
-            continue
-        with open(path, "rb") as f:
-            conf = tomllib.load(f)
-        for value in ((conf.get("target") or {}).get(triple, {}).get("rustflags"), (conf.get("build") or {}).get("rustflags")):
-            if value:
-                flags += value.split() if isinstance(value, str) else list(value)
-    return flags
-
-
 def target_cfgs():
     """[(is_apple, {(key, value_or_None), ...})] for every target rustc knows,
-    with Cargo's rustflags applied. Cached under target/, keyed by the rustc
-    version and the flags."""
+    in its default configuration. Cached under target/ per rustc version."""
     global _TARGET_CFGS
     if _TARGET_CFGS is not None:
         return _TARGET_CFGS
     version = subprocess.run(["rustc", "-vV"], check=True, capture_output=True, text=True).stdout
     triples = subprocess.run(["rustc", "--print", "target-list"], check=True, capture_output=True, text=True).stdout.split()
-    flags = {t: cargo_rustflags(t) for t in triples}
-    key = hashlib.sha256((version + json.dumps(flags, sort_keys=True)).encode()).hexdigest()[:16]
+    key = hashlib.sha256(version.encode()).hexdigest()[:16]
     cache = os.path.join("target", f"lectern-target-cfgs-{key}.json")
     if os.path.exists(cache):
         with open(cache) as f:
             raw = json.load(f)
     else:
         def cfg_of(triple):
-            out = subprocess.run(["rustc", *flags[triple], "--print", "cfg", "--target", triple], capture_output=True, text=True)
+            # No RUSTFLAGS: rustc reads none from the environment, and Cargo's
+            # are deliberately not applied (see the note above).
+            out = subprocess.run(["rustc", "--print", "cfg", "--target", triple], capture_output=True, text=True)
             return out.stdout.splitlines() if out.returncode == 0 else None
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
