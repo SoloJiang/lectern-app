@@ -65,7 +65,7 @@ layer = "domain"
 - **Rust**：`rust-toolchain.toml` 锁定 `1.97.0`，带 rustfmt、clippy 和 `aarch64-apple-darwin` 目标。edition 2024。
 - **GPUI**：不再用 git 依赖锁 Zed commit。Zed 现在把 GPUI 快照发布到 crates.io 的 `gpui-pre`，gpui-component 0.7.3 用 `=0.3.9` 精确锁定它（Zed `93d7456`）。我们跟随 gpui-component：
   - `gpui = { package = "gpui-pre", version = "=0.3.9" }`
-  - `gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9" }`
+  - `gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }`：macOS 上必须开 `font-kit`，否则 `gpui_macos` 退回空文字系统，界面不显示任何文字
   - `gpui-component = "=0.7.3"`
   - 三者只能一起升级，并且必须是 gpui-component 发布时使用的同一个快照。`Cargo.lock` 提交到仓库。
 - **libghostty-vt**：在 [#5](https://github.com/SoloJiang/lectern-app/issues/5) 中加入，届时锁定版本与 vendored Ghostty 源码。
