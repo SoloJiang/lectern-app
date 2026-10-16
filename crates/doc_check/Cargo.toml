@@ -1,0 +1,18 @@
+[package]
+name = "lectern-doc-check"
+description = "Checks that relative links and anchors in the repository's Markdown files resolve."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "tool"
+
+[dependencies]
+html5gum.workspace = true
+pulldown-cmark.workspace = true
+
+[lints]
+workspace = true

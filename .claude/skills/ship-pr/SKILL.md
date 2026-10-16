@@ -12,6 +12,7 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 - 一个 PR 只做一个 issue，改动尽量在一个 crate 内。
 - 本地跑 `just ci`。在 Linux 上它只覆盖不依赖 GPUI 的 crate；改了视图层或 `app` 的，结果以 macOS CI 为准。
 - 新增界面字符串时，en 与 zh-CN 都要提供；新增依赖时，`just deny` 要通过。
+- 实现 PR 改了某个 crate 的接口、数据结构或验收条件时，diff 里要有 `docs/design/<crate>.md` 的对应修改、更新后的状态行，以及「实际验证」「与设计的差异」两节；影响到 ADR 的同时更新 ADR。
 
 ## 2. 开 PR
 
@@ -20,8 +21,8 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 
 ## 3. 等待审阅
 
-- 只改文档的 PR 不需要等 Codex 的 👍，满足第 5 步的其余条件即可合并；设计文档 PR 除外，按代码 PR 的标准等 Codex 的 👍。Codex 在文档 PR 上留下的意见照常处理。
-- 其余 PR 等 Codex 审阅当前最新提交：PR 上的 reaction 是 👀 表示审阅中，👍 表示没有意见，有意见时留行内评论。reaction 不带提交号，推送新提交后旧的 👍 不会立即消失，所以「Codex 已审阅最新提交」以 Codex 汇总评论里的审阅状态为准：`sha` 等于 PR 的 head、`status` 为 `completed`、`findings` 为 `false`。
+- 只改文档的 PR 不需要等 Codex，满足第 5 步的其余条件即可合并；设计文档 PR 除外。Codex 在文档 PR 上留下的意见照常处理。
+- 其余 PR 等 Codex 审阅当前最新提交：PR 上的 reaction 是 👀 表示审阅中，有意见时留行内评论，没有意见时通常留 👍，但 👍 并不稳定，有时审阅完成也没有。「Codex 已审阅最新提交」以 Codex 汇总评论里的审阅状态为准：`sha` 等于 PR 的 head、`status` 为 `completed`。
 
   ```sh
   gh api $R/pulls/$N --jq .head.sha
@@ -32,15 +33,18 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
   gh api --paginate $R/pulls/$N/comments --jq '.[]|"\(.id) \(.user.login) \(.path):\(.line) \(.body)"'
   ```
 
-- Codex 审阅失败，或推送新提交后长时间没有更新时，在 PR 上评论 `@codex review` 重新触发。
-- 每次推送后，之前的 👍 失效，需要等 Codex 审阅新的提交。
+- Codex 审阅失败，或推送新提交后长时间没有更新时，在 PR 上评论 `@codex review` 重新触发。不要只为了拿到 👍 重新触发：重新审阅同一个提交常常会找出新的边界情况。
+- 每次推送都会触发一次新的审阅，所以一轮意见攒齐、一起修完再推送，不要一条一推。
 
 ## 4. 处理意见
 
-逐条核实，不要直接照改：
+先核实，再按级别和代价决定，不要直接照改。「意见成立」不等于「现在值得改」：
 
-- 成立：修复，推送，在讨论串里回复修复的提交和做法。
-- 不成立或不在本 PR 范围：回复理由；不在范围但值得做的，开 issue 并在回复里给出链接。
+- P0、P1（数据、安全边界、架构规则、产品原则、常用流程的错误结果）：修复。
+- P2：只在改动小、属于本 PR 范围、不让文档或代码变复杂时修。少见的边界情况、在上一轮修复之上继续追加的细化、超出威胁模型的攻击，回复理由后解决：设计文档里记为「已知限制」（一句话，不展开算法），或回复「实现阶段处理」，值得跟进的开 issue 并给出链接。
+- 不成立：回复理由。
+- 同一根因的几条意见合并成一次修复。设计文档和 ADR 只写决策和关键约束，不为了回应边界情况把规则写成完整算法；同一类意见反复出现时，修根因（如收窄支持范围、明确威胁模型），不逐条打补丁。
+- 一轮的意见全部处理完再推送一次。
 - 回复后解决这个讨论串，只解决自己处理过的那一条：
 
   ```sh
@@ -63,7 +67,7 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 
 以下条件全部满足时才能合并：
 
-1. Codex 已审阅最新提交且没有意见：汇总评论里的 `sha` 等于 head、`status` 为 `completed`、`findings` 为 `false`，并且有 👍。设计文档以外的只改文档的 PR 整条免除，不需要 Codex 的汇总评论；设计文档 PR 不免。
+1. Codex 已审阅最新提交：汇总评论里的 `sha` 等于 head、`status` 为 `completed`；它在这次和之前留下的意见都已处理（修复，或回复理由）。不要求 👍。设计文档以外的只改文档的 PR 整条免除，不需要 Codex 的汇总评论；设计文档 PR 不免。
 2. CI 全部通过：`gh api --paginate $R/commits/<sha>/check-runs --jq '.check_runs[]|[.name,.status,.conclusion]|@tsv'` 的结果里必须有 `.github/workflows/ci.yml` 定义的两个任务 `Checks (Linux, GPUI-free crates)` 和 `Build and test (macOS arm64)`，而且每一行都是 `completed` 和 `success`。结果为空或缺任何一个任务都不算通过：推送后 GitHub 登记检查需要几秒到几十秒。列表类的接口默认每页 30 条，都要带 `--paginate`。
 3. 没有合并冲突：`gh api $R/pulls/$N --jq .mergeable_state` 为 `clean`。
 4. 没有未解决的讨论串（`ccr/review_threads` 或 GraphQL 的 `reviewThreads`）。

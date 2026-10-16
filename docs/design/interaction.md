@@ -8,7 +8,7 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 
 1. **Open folder**：打开任意文件夹或仓库。
 2. **Project home**：看这个项目里待审的会话、运行中的 agent、会话外的改动。
-3. **Review**：顶部是会话简报（值得先看的几处），下面按轮次读 prompt、agent 说明和改动。
+3. **Review**：顶部是会话简报（值得先看的几处），下面按轮次读 prompt、agent 说明和改动。简报默认由规则生成；执行 Analyze 才调用本机的 Claude Code 或 Codex 做补充分析（[ADR 0019](../adr/0019.md)）。
 4. 改动无误：**Looks good**，全部标记已看，进入提交或开 MR（GitHub / GitLab）。
 5. 改动有问题：在行上写 **Review notes**，汇总成一批后用 ⌘↩ 发回会话；agent 的修改作为新一轮出现，回到第 3 步只看新轮次。
 
@@ -30,7 +30,7 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 | 02 | Overview | 侧栏：Overview、Sessions、Packages、Worktrees / Files / Merge Requests，底部 Usage 额度条。主区：大标题一句话说明待审数量，下面是分组列表 Needs Review（每行：agent 圆点、标题、状态与信号两行灰字、已看进度环）、Outside Any Session、Recently Done |
 | 03 | Review（可交互原型） | 顶部会话简报；按轮次的改动叙事；文件头圆形勾选；行内审阅意见；Drifted 提示；右侧检查器（Files / Conversation）；点符号滑出上下文面板（Callers / Tests / History）；底部浮条发送审阅意见 |
 | 04 | Worktrees | 分组列表 Active / Idle；右侧检查器对比所选 worktree 与 main，并提示与其他 worktree 是否有文件重叠 |
-| 05 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；按会话明细；当前项目 / 所有项目，7D / 14D / 30D |
+| 05 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；当前项目：项目合计、按分支明细（P3 起按 MR，未开 MR 的分支一并列出；「不属于任何 MR」单独一行）和按模型明细（普通文件夹没有分支明细，按模型明细照常显示）；所有项目：各项目合计与占比，加上「其他」一行（还没有打开对应项目的用量）；标为「路径已不存在」的项目行有「合并到…」操作（行尾按钮与右键菜单），在弹出的列表里选择现在的项目，确认后以前的用量并入它，合并过的行显示「已合并」并可以撤销；同一路径上身份无法确定、暂列为临时项目的行（根提交或主远端地址变了，又没有代码平台的仓库 ID）有「是同一个项目」和「是新项目」两个确认操作，同样可以撤销；7D / 14D / 30D |
 
 ## 窗口结构
 
@@ -73,7 +73,7 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 
 ## 用量
 
-用量按会话和项目展示（[ADR 0014](../adr/0014.md)）：会话卡片和会话简报显示 token 数，每轮标题显示该轮 token 和占比，Conversation 显示上下文窗口占用，项目侧栏底部的 Usage 入口带最紧张的额度窗口进度条。费用一律标为 API-equivalent，订阅用户显示额度百分比。
+用量按项目和 MR 两级统计（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）：项目合计按 7 / 14 / 30 天的时间窗口统计；一个 MR 由哪些会话、哪些轮次完成，就把它们的 token 加在一起，还没开 MR 的按分支统计。项目侧栏底部的 Usage 入口显示本项目最近 7 天的合计。并行 worktree 列表和检查器显示当前分支的累计 token（P1 称为分支用量，关联到 MR 后称为 MR 用量）；会话简报为本会话改到的每个分支各显示一行累计 token 和本会话的占比，关联到 MR 后每个 MR 一行（一个分支同时对应几个 MR 时各占一行，注明共用的分支）；每轮标题显示该轮 token，作为最细的明细；会话卡片不显示 token。Conversation 显示上下文窗口占用，Usage 入口同时带最紧张的额度窗口进度条。费用一律标为 API-equivalent，订阅用户显示额度百分比。
 
 ## 状态与异常
 

@@ -1,5 +1,7 @@
 # 工作区与 crate 划分
 
+状态：已实现（[#33](https://github.com/SoloJiang/lectern-app/pull/33)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。
+
 对应 issue [#1](https://github.com/SoloJiang/lectern-app/issues/1)。架构规则见 [AGENTS.md](../../AGENTS.md)，分层理由见 [技术调研](tech-research.md)「技术路线与架构」。
 
 ## 目录
@@ -57,6 +59,7 @@ layer = "domain"
 | infra | `i18n` | Fluent 资源与语言切换（[ADR 0013](../adr/0013.md)） |
 | tool | `bench` | 性能预算基准 |
 | tool | `ui_probe` | UI 探针，只在调试和测试构建中编译 |
+| tool | `doc_check` | 文档链接检查，`just check` 运行 |
 
 本 issue 只建空 crate（带一行职责说明的 `lib.rs`），不写功能代码；依赖在各自的 issue 里按需加入。
 
@@ -82,3 +85,15 @@ layer = "domain"
 - `cargo metadata` 能列出全部 crate，每个 crate 都有 `layer`。
 - `cargo check` 能通过领域层与基础设施层的全部 crate。
 - `Cargo.lock` 里 `gpui-pre` 为 `0.3.9`、`gpui-component` 为 `0.7.3`。
+
+## 实际验证
+
+[#50](https://github.com/SoloJiang/lectern-app/pull/50) 新增 tool crate `doc_check`，并让每个 crate 继承工作区 lint：
+
+- 在 Linux 上运行 `just check` 通过，架构检查报告 30 个 crate；`just test -p lectern-doc-check` 和 `just deny` 通过。
+- `doc_check` 属于 tool 层，不进入发布构建；它在 Linux CI 的 GPUI-free 范围内编译和测试。
+- macOS 上的构建由 CI 的 macOS 任务运行。
+
+## 与设计的差异
+
+[#33](https://github.com/SoloJiang/lectern-app/pull/33) 没有记录差异。[#50](https://github.com/SoloJiang/lectern-app/pull/50) 在 crate 表的 tool 层里增加了 `doc_check`，并在每个 crate 的 `Cargo.toml` 里加上 `[lints] workspace = true`，其余结构与上文一致。
