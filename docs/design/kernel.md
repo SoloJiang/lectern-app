@@ -56,7 +56,8 @@ pub trait Service: Send + Sync + 'static {
 }
 // 服务方法出错时返回 `Err`，不得 panic：调用方拿到的是 trait 对象，kernel 不在每次调用外面包 `catch_unwind`。
 // 服务方法真的 panic 时，展开到调用方，由调用方所在的边界处理（在另一个插件的监听或 `started` 里时，算作那个插件失败）。
-// 服务实现的测试覆盖错误路径；`debug_assertions` 下 `Admitted` 的 `Deref` 调用用 `catch_unwind` 检测，记录是哪个提供者 panic。
+// 服务实现的测试覆盖错误路径；`Admitted` 的 `Drop` 用 `std::thread::panicking()` 判断是否正在展开，是时记录持有的是哪个提供者的准入，
+// 日志里能看出 panic 来自哪个服务实现（调用方插件仍按它自己的边界处理）。
 
 /// 运行时的服务键：TypeId、稳定 ID 和 `MULTIPLE`。类型擦除后无法再从 TypeId 取回关联常量，
 /// 所以 `service::<S>()` 构造时把 `S::MULTIPLE` 一并存进键里，`validate` 据此检查单实现服务。
@@ -126,7 +127,7 @@ impl Context<'_> {
     /// 查找依赖的服务。key 必须在清单的 requires 里：依赖都写进清单，才能在启动前检查。
     /// 两个方法各自在函数体里用 `const { assert!(...) }` 检查 `S::MULTIPLE`：`service` 只接受 MULTIPLE = false 的服务，
     /// `service_set` 只接受 MULTIPLE = true 的服务，用错时编译失败，不会在运行时拿到某一个提供者的 `Arc`。
-    pub fn service<S: Service + ?Sized>(&self) -> Arc<S>;               // MULTIPLE = false
+    pub fn service<S: Service + ?Sized>(&self) -> ServiceRef<S>;        // MULTIPLE = false
     pub fn service_set<S: Service + ?Sized>(&self) -> ServiceSet<S>;    // MULTIPLE = true
 
     /// 订阅事件。监听在提交时发布，但这次激活的 token 变为 `Live`（所有 `commit` 和 `started` 都成功）之前，
@@ -196,7 +197,8 @@ impl PluginHandle {
     /// （此时已持有准入）也不会与等待准入归零的停用互相等待。撤销第 4 步取同一把互斥锁后先把表标为关闭，
     /// 之后的 `own_with` 看到关闭或 token 为 `Dead` 时不调用 `start`，返回 false。`start` 只做提交，不得再调用 `own_with`。
     /// 插件提交后台任务应使用这个方法，而不是先提交再 `own`。
-    pub fn own_with<G: Send + 'static>(&self, start: impl FnOnce() -> G) -> bool;
+    /// 在 `started` 里调用时（token 还是 `Pending`），`start` 暂存到 token 变为 `Live` 之后再调用，激活失败时丢弃，返回 true 表示已经接受。
+    pub fn own_with<G: Send + 'static>(&self, start: impl FnOnce() -> G + Send + 'static) -> bool;
 
     /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
     /// 调用 `Subscription::keep()` 则一直保留到这次激活停用。这次激活已停用时不订阅并返回 None。
@@ -205,7 +207,8 @@ impl PluginHandle {
     /// 声明有尚未完成的工作，守卫移进任务，任务结束时 drop（见「静止」）。这次激活已停用时返回 None。
     pub fn busy(&self) -> Option<BusyGuard>;
 
-    /// 带激活代数的 Emitter：这次激活停用后（包括之后重新激活），通过它发出的事件直接丢弃。
+    /// 带激活代数的 Emitter：这次激活停用后（包括之后重新激活），通过它发出的事件直接丢弃；
+    /// token 还是 `Pending`（在 `started` 里）时，事件暂存到 token 变为 `Live` 之后再发出，激活失败时丢弃。
     pub fn emitter(&self) -> Emitter;
     pub fn is_active(&self) -> bool;
 
@@ -261,6 +264,18 @@ impl PluginSet {
     pub fn validate(&self) -> Result<(), Vec<GraphError>>;
 }
 
+/// 单实现服务的句柄，可以保存在 `Active` 里长期使用。每次调用前用 `get()` 取得提供者的准入，
+/// 准入持有到返回的 `Admitted` 被 drop：提供者已失效时返回 None，提供者的撤销会等正在进行的调用结束。
+#[derive(Clone)]
+pub struct ServiceRef<S: Service + ?Sized> { /* 提供者的 Arc<S> 与它那次激活的 ActivationToken */ }
+
+impl<S: Service + ?Sized> ServiceRef<S> {
+    pub fn get(&self) -> Option<Admitted<S>>;
+}
+
+/// 持有一个提供者准入的服务引用，通过 `Deref` 调用服务。只在一次调用内使用，不要另外保存。
+pub struct Admitted<S: Service + ?Sized> { /* Arc<S> + Admission */ }
+
 /// 多实现服务的当前提供者集合。kernel 在提供者增减时整体替换内部的快照，
 /// 所以句柄可以在 `activate` 里取一次并长期保存。
 #[derive(Clone)]
@@ -313,6 +328,10 @@ impl Kernel {
 
     /// 当前是否静止（见「静止」）。kernel 每次从忙碌变为静止时发出 `Quiescent` 事件。
     pub fn is_quiescent(&self) -> bool;
+
+    /// 静止时返回当前的静止代数，忙碌时返回 None。每次从忙碌变为静止，代数加一，所以两次调用返回同一个值，
+    /// 说明这两次调用之间 kernel 一直静止，中间没有出现过忙碌（哪怕很短）。
+    pub fn quiescent_epoch(&self) -> Option<u64>;
 }
 
 /// 项目文件的不可变快照。`project` 在后台读 git index 建好后再交给 kernel；
@@ -358,7 +377,7 @@ impl Emitter {
 - 一个插件激活后，kernel 检查依赖它所提供服务的插件，满足条件的接着激活（按拓扑顺序，同一层按 `PluginSet` 里的顺序，结果确定）。
 - 一个服务（不论 `MULTIPLE` 是否为 true）的最后一个已激活的提供者停用时，依赖它的插件先停用（依赖者先于被依赖者）。
 - `MULTIPLE = true` 的服务：依赖者激活后，提供者的增减不重新激活依赖者。依赖者通过 `ServiceSet<S>` 读取当前集合，集合在提供者增减时随即更新；需要在变化时做额外处理的，订阅 `ServiceAdded<S>` 和 `ServiceRemoved<S>` 事件（带提供者的插件 ID）。
-- 依赖者不得把 `ServiceSet::current()` 里的 `Arc<S>` 保存到本次调用之外，否则提供者停用后仍会被调用。
+- 依赖者通过 `ServiceRef::get()` 和 `ServiceSet::current()` 调用服务，每次调用都持有提供者的准入；不得把 `Admitted` 保存到本次调用之外（否则会拖住提供者的撤销），也拿不到可以绕过准入的裸 `Arc<S>`。
 - 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除 `Command` 和 `Manual` 的记录；`Workspace` 条件不记在插件上，kernel 保存最近一次的 `WorkspaceFacts`，插件重新启用（包括 `Failed` 后在设置里重试）时用它重新判断。保存的 facts 属于提交它的那次激活（`KernelControl` 带激活代数）：那次激活停用时，kernel 清除这份 facts，等新的 `workspace_changed` 再判断。还在等待的 `command` 回调立即收到 `PluginError::Disabled`，`shutdown` 时收到 `PluginError::ShuttingDown`；插件所依赖的某个服务当前没有可激活的提供者时，收到 `PluginError::DependencyUnavailable`。「可激活」沿依赖链递归判断：提供者已启用、没有 `Failed`、自己的激活条件已经满足，而且它依赖的每个服务也都有可激活的提供者；命令不会替依赖去满足它们的激活条件（如替 `Workspace` 插件假定项目匹配）。回调不会一直挂起。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
 
 ### 激活的提交
@@ -367,11 +386,11 @@ impl Emitter {
 - `activate` 返回 `Ok` 后，kernel 先检查清单 `provides` 里的每个服务都已 `provide`；缺任何一个都按激活失败处理（`PluginError::MissingService`），否则依赖者会因为等不到这个服务而一直不激活。
 - 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布（提交），然后调用 `started`。发布之后、token 变为 `Live` 之前，`ServiceSet::current()` 和 `enter()` 都不会返回这次激活，`ServiceAdded<S>` 也在 token 变为 `Live` 之后才发出，所以已在运行的依赖者看不到 `started` 可能失败的新提供者。`started` 正常返回、而且期间没有通过 `fail` 或监听 panic 把插件标为失败时，kernel 才把因它而满足条件的后续插件放进队列；否则按失败停用，后续插件不激活。
 - 提供者在依赖者激活期间失败时（例如提供者的监听在其他线程上 panic，或 `fail` 被调用），kernel 在当前线程上立即把提供者这次激活的 token 置为 `Dead`（见「事件分发」）。依赖者的激活还在 kernel 线程上进行时还没有发布任何东西，所以 kernel 在提交依赖者之前、以及调用它的 `started` 之前，各检查一次它 `requires` 的每个服务是否还有 token 为 `Live` 的提供者。检查不通过时中止这次激活：暂存的内容全部丢弃（已经提交的按「撤销」一节撤销），依赖者回到「等待依赖」，不进入 `Failed`。
-- `started` 返回后，kernel 用 compare-exchange 把 token 从 `Pending` 换成 `Live`。`started` 期间其他线程调用 `fail` 已经把 token 置为 `Dead` 时交换失败，按激活失败撤销，`Dead` 不会被覆盖。`started` 期间提交的任务和登记都经过 `PluginHandle`，token 为 `Dead` 之后 `own` 立即返回 false 并取消任务，所以不会留下运行中的副作用。（`Pending` 期间监听不会被调用，所以 `started` 之前不会有监听 panic。）
-- 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只开始后台工作（提交任务、发事件），这些副作用都发生在提交之后，不会出现「副作用已经发生、激活却回滚」的情况。
+- `started` 返回后，kernel 用 compare-exchange 把 token 从 `Pending` 换成 `Live`。`started` 期间其他线程调用 `fail` 已经把 token 置为 `Dead` 时交换失败，按激活失败撤销，`Dead` 不会被覆盖。`started` 不直接做 IO，也不直接改外部状态，只通过 `PluginHandle` 发事件、提交任务；token 还是 `Pending` 时，这些操作暂存在这次激活里：`emit` 的事件按顺序排队，`own_with` 的 `start` 先不调用。compare-exchange 成功、token 变为 `Live` 后，kernel 在 kernel 线程上依次发出这些事件、调用这些 `start`；交换失败或 `started` panic 时全部丢弃。所以 `started` 之后失败的激活不会留下已经送达的事件或已经开始的任务。（`Pending` 期间监听不会被调用，所以 `started` 之前不会有监听 panic。）
+- 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只安排后台工作（提交任务、发事件），按上一条在 token 变为 `Live` 之后才真正发生，不会出现「副作用已经发生、激活却回滚」的情况。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
-- 激活期间的状态（缓存的 `Arc<S>`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Active` 的 drop 同样用 `catch_unwind` 包住，panic 时记录错误、插件标为 `Failed`，撤销照常完成。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
+- 激活期间的状态（`ServiceRef`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Active` 的 drop 同样用 `catch_unwind` 包住，panic 时记录错误、插件标为 `Failed`，撤销照常完成。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
 - 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：`commit` 只把注册连同 `ActivationToken` 排到主线程；主线程每帧检查 `token.state()`：`Pending` 时留到下一帧再看，`Live` 时应用，`Dead` 时丢弃。所以注册只在所有 `commit` 和 `started` 都成功之后应用，也不会因为主线程比激活先跑到而丢失。激活在任何一步失败（`activate`、某个 `commit` panic、`started` panic 或调用 `fail`），token 都不会变为有效，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`commit` 在排队之前用 `token.pending()` 取一个守卫（`shutdown` 之后返回 None，注册直接丢弃），随注册一起排到主线程，注册应用或丢弃之后才 drop。所以从排队到主线程收到注册之间，kernel 也不会报告静止，界面注册生效之前不静止。
 
 ### 撤销
@@ -465,14 +484,14 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 
 插件把初始化工作（扫描会话目录、打开 SQLite、建索引）交给 executor 时，用 `PluginHandle::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`PluginHandle` 在 `started` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）在等待期间不取守卫，但每一轮实际工作（一次刷新：读文件、解析、更新状态）开始时取一个 `BusyGuard`，这一轮结束、结果交给主线程并应用之后才 drop（见「撤销」里排到主线程的结果），所以刷新进行中时 kernel 不报告静止。插件停用时，它的任务句柄被 drop、任务被要求取消，但取消是协作式的：任务真正结束、守卫被 drop 之前，守卫仍然计入，kernel 不报告静止。
 
-每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件；每次从静止变为忙碌，发出一次 `Busy` 事件。这两个事件本身的分发不计入进行中的 `emit`，否则发出 `Quiescent` 会让 kernel 重新变忙。bench 收到 `Quiescent` 后等 5 秒再采样，期间收到 `Busy` 就重新开始等待，采样前再用 `is_quiescent()` 确认一次。`Quiescent` 的用途：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
+每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件；每次从静止变为忙碌，发出一次 `Busy` 事件。这两个事件本身的分发不计入进行中的 `emit`，否则发出 `Quiescent` 会让 kernel 重新变忙。bench 收到 `Quiescent` 后等 5 秒再采样，期间收到 `Busy` 就重新开始等待。采样前后各读一次 `quiescent_epoch()`：两次都是同一个 `Some(n)` 时样本有效，否则（采样期间有过哪怕很短的忙碌）丢弃这次样本，重新等待静止。`Quiescent` 的用途：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
 
 ## 性能
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
 - 激活耗时：每个插件的 `manifest()`（`Kernel::start` 时调用一次）、`activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按四者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
 - 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件需要一份匹配它们全部 pattern 的 `WorkspaceFacts`：bench 在两次启动里都加入同一个合成的 `bench-facts` 插件（`Startup` 激活，在 `started` 里通过 `control().workspace_changed` 提交这份 facts，`test-support` feature 提供），两次的差不受它影响；`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
-- 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `Arc`，保存在激活内的状态对象里（见「激活的提交」），使用时直接用保存的 `Arc`。
+- 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `ServiceRef` / `ServiceSet`，保存在激活内的状态对象里（见「激活的提交」）。每次调用的开销是一次准入（两次原子操作）。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
 
 ## 测试
@@ -500,6 +519,9 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 命令：依赖的服务再也不会就绪时，挂起的 `done` 收到 `DependencyUnavailable`。
 - 命令：两个插件声明同一个命令名时 `validate` 报错；停用一个正在等待依赖的命令插件，挂起的 `done` 收到 `Disabled`。
 - 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
+- 静止代数：两次 `quiescent_epoch()` 之间取过再释放一个 `BusyGuard` 时，两次返回值不同。
+- `started` 暂存：`started` 里发事件、提交任务后再 panic 或被 `fail`，事件没有送达任何监听，`start` 没有被调用；`started` 成功时它们在 token 变为 `Live` 之后按顺序发生。
+- 单实现服务：提供者失效后 `ServiceRef::get()` 返回 None；提供者的撤销等正在进行的 `Admitted` 调用结束。
 - 准入：token 为 `Dead` 之后 `enter()` 返回 None；停用在准入计数归零之前不 drop 守卫和 `Active`（主线程回调、服务调用、监听各一个测试）；在监听里调用同一插件的服务、在监听里调用 `fail` 都不死锁。
 - token 状态：`started` 期间另一个线程调用 `fail` 时，`started` 返回后 token 仍为 `Dead`，激活按失败处理，`done` 收到那个错误。
 - 新提供者：`MULTIPLE` 服务的第二个提供者在 `started` 成功之前不出现在已激活依赖者的 `ServiceSet::current()` 里，`ServiceAdded` 在它变为 `Live` 之后才发出；`started` 失败时依赖者从头到尾看不到它。
@@ -576,4 +598,4 @@ pub mod testing {
 - `PluginSet::validate`、自动启停、撤销、失败隔离、事件分发的测试全部通过，结果有 insta 快照。
 - kernel 不依赖 GPUI 和 kernel 层以外的 crate（`just check` 的架构检查通过）。
 - `TestKernel` 能注入模拟服务并单独激活一个插件。
-- `status()` 给出每个插件的激活耗时，`Quiescent` 事件和 `is_quiescent()` 给出静止信号，供 #7 的 bench 读取。
+- `status()` 给出每个插件的激活耗时，`Quiescent` 事件、`is_quiescent()` 和 `quiescent_epoch()` 给出静止信号，供 #7 的 bench 读取。
