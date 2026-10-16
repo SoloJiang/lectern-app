@@ -100,7 +100,7 @@ pub trait Plugin: Send + Sync + 'static {
     /// 在 kernel 线程上执行，耗时计入本插件的激活预算。
     fn activate(&self, ctx: &mut Context<'_>) -> Result<(), PluginError>;
 
-    /// 第二阶段：激活提交之后在 kernel 线程上调用一次，副作用从这里开始，
+    /// 第二阶段：激活提交（服务和监听已发布）之后在 kernel 线程上调用一次，副作用从这里开始，
     /// 如向 executor 提交任务。任务句柄和之后的注册通过 `handle` 交给 kernel。
     fn started(&self, handle: PluginHandle) {}
 }
@@ -134,7 +134,9 @@ impl Context<'_> {
 pub struct PluginHandle { /* Weak<Kernel>, 插件 ID, 激活代数 */ }
 
 impl PluginHandle {
-    /// 交给 kernel 保管，停用时 drop。这次激活已停用时返回 false，`guard` 送到 kernel 线程上 drop（所有守卫都在 kernel 线程上 drop）。
+    /// 交给 kernel 保管，停用时 drop。这次激活已停用时返回 false，`guard` 送到 kernel 线程上 drop。
+    /// `shutdown` 完成、kernel 线程退出之后，被拒绝的守卫在调用线程上 drop，所以守卫必须能在任意线程上安全 drop；
+    /// kernel 线程只保证 `shutdown` 之前的 drop 是串行的。
     pub fn own(&self, guard: impl Send + 'static) -> bool;
 
     /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
@@ -251,6 +253,7 @@ pub struct PluginStatus {
     pub id: Name,
     pub state: PluginState,                 // Inactive / Waiting { missing: Vec<ServiceKey> } / Active / Disabled / Failed(PluginError)
     pub activate_time: Option<Duration>,    // 最近一次 activate 的耗时
+    pub commit_time: Option<Duration>,      // 最近一次提交的耗时
     pub started_time: Option<Duration>,     // 最近一次 started 的耗时（只算同步执行的部分）
 }
 ```
@@ -284,9 +287,11 @@ impl Emitter {
 
 - `activate` 执行期间，`provide`、`on`、`own` 登记的内容只暂存在本次激活里：服务不进入 `ServiceSet` 和 `service()` 的结果，监听不参与分发。
 - `activate` 返回 `Ok` 后，kernel 先检查清单 `provides` 里的每个服务都已 `provide`；缺任何一个都按激活失败处理（`PluginError::MissingService`），否则依赖者会因为等不到这个服务而一直不激活。
-- 检查通过后，kernel 先调用 `started`。`started` 期间通过 `PluginHandle` 登记的内容也进入同一份暂存，这次激活的服务和监听对其他插件仍不可见。`started` 正常返回后，kernel 在一次加锁里把暂存的服务和监听全部发布，然后按依赖顺序激活后续插件。
+- 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布（提交），然后调用 `started`，再按依赖顺序激活后续插件。
+- 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只开始后台工作（提交任务、发事件），这些副作用都发生在提交之后，不会出现「副作用已经发生、激活却回滚」的情况。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
+- 激活期间的状态（缓存的 `Arc<S>`、`ServiceSet`、插件自己的数据）放在激活内创建的状态对象里，由监听闭包、任务和 `own` 的守卫持有；停用时这些都被撤销，状态随之释放。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
 - 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 满足这一点：新注册的视图、Action、快捷键要到下一帧才应用到界面上，激活失败时守卫在这之前已经 drop，失败的注册不会出现在界面上。`workspace` 本身是插件，收到注册时用自己的 `PluginHandle::busy()` 取一个守卫，在主线程上应用完这批注册后 drop，所以 kernel 在界面注册生效之前不会报告静止。
 
 ### 撤销
@@ -313,7 +318,7 @@ impl Emitter {
   - 其他插件不受影响。
 - panic 由 `catch_unwind` 捕获，所以发布构建保持 `panic = "unwind"`（当前默认）。改成 `abort` 前，先修改本节的设计。
 - 事件监听里的 panic 同样被捕获：这个监听被移除，插件进入 `Failed` 并停用。
-- `started` 里的 panic 同样被捕获：暂存的服务和监听不发布，`started` 期间交出的守卫按相反顺序 drop，插件进入 `Failed`。其他插件从头到尾看不到这次激活。
+- `started` 里的 panic 同样被捕获：此时激活已经提交，按提交之后的失败处理，即插件进入 `Failed` 并按「撤销」一节停用（依赖者先停用）。与监听 panic 的处理相同。
 - `Failed` 的插件在本次运行中不再自动激活；用户在设置里重新启用会重试一次。
 
 ### 事件分发
@@ -348,10 +353,11 @@ impl Emitter {
 
 用户第一次用快捷键或菜单触发一个由 `Command` 激活的插件提供的 Action 时，这个 Action 还没有注册。处理方式：
 
-1. `workspace` 在 `started` 里从 `handle.control().lazy_commands()` 取得所有这类命令名，为每个命令预先注册一个代理 Action（不依赖插件）。
-2. 代理 Action 被触发时调用 `control.command(name, done)`。
-3. 插件激活提交后 `done` 被调用；`workspace` 把它转到主线程，等这次激活的 `Contributions` 注册在下一帧应用之后，注销代理并重新分发原来的 Action。用户只需触发一次。
-4. 激活失败时，`done` 收到错误，`workspace` 显示一次提示，代理保留。
+1. `workspace` 在 `started` 里从 `handle.control().lazy_commands()` 取得所有这类命令名，为每个命令注册一个常驻的代理 Action（不依赖插件）。命令的 Action 只有这一个；插件通过 `Contributions::handle_command(name, handler)` 登记处理函数，而不是另外注册同名的 Action。
+2. 代理 Action 被触发时：处理函数已登记就直接调用；否则调用 `control.command(name, done)`。
+3. 插件激活提交后 `done` 被调用；`workspace` 把它转到主线程，等这次激活的处理函数在下一帧登记之后调用它。用户只需触发一次。
+4. 激活失败时，`done` 收到错误，`workspace` 显示一次提示。
+5. 插件停用时，处理函数的守卫被 drop，代理仍然在。用户重新启用插件后再次触发命令，代理照常走第 2 步激活它。
 
 ### 静止
 
@@ -359,19 +365,20 @@ impl Emitter {
 
 - kernel 线程已经处理完启动时的激活；
 - 生命周期操作的队列为空，没有正在执行的 `activate` 或 `started`；
+- 没有正在进行的事件分发（kernel 计数各线程上进行中的 `emit`，监听可能正要取 `BusyGuard`）；
 - 没有未 drop 的 `BusyGuard`。
 
 插件把初始化工作（扫描会话目录、打开 SQLite、建索引）交给 executor 时，用 `PluginHandle::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`PluginHandle` 在 `started` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）不取守卫。插件停用时，它尚未 drop 的守卫不再计入。
 
-每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
+每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件；每次从静止变为忙碌，发出一次 `Busy` 事件。bench 收到 `Quiescent` 后等 5 秒再采样，期间收到 `Busy` 就重新开始等待，采样前再用 `is_quiescent()` 确认一次。`Quiescent` 的用途：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
 
 ## 性能
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
-- 激活耗时：每个插件的 `activate` 和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按两者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
+- 激活耗时：每个插件的 `activate`、提交（检查清单、发布服务和监听、更新快照、为后续插件排队）和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按三者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
 - 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
-- 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出并保存需要的 `Arc`，使用时直接用保存的 `Arc`。
-- 事件分发不分配内存（监听快照是 `Arc` 克隆），没有监听时只有一次查表。
+- 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `Arc`，保存在激活内的状态对象里（见「激活的提交」），使用时直接用保存的 `Arc`。
+- 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
 
 ## 测试
 
@@ -411,7 +418,10 @@ impl Emitter {
   - `Workspace` 用模拟的 `WorkspaceFacts` 触发；
   - `Command` 第二次调用不重复激活；
   - `Manual` 插件只在 `activate(id)` 时激活；依赖未就绪时请求被保留，依赖就绪后激活。
-  - `started` panic 时，这次激活的服务和监听从未对其他插件可见。
+  - `started` panic 时，插件按提交之后的失败停用，依赖者先停用。
+- 状态释放：插件停用后，它缓存的其他插件服务的 `Arc` 被释放（测试检查提供者的强引用数回到停用前的基线）。
+- 静止：有正在进行的 `emit` 时不静止；静止后又变忙时发出 `Busy`。
+- 按命令激活：停用后重新启用的命令插件，再次触发命令仍能激活。
 - 生命周期的结果（激活顺序、停用顺序、状态）用 insta 快照记录。
 
 测试辅助放在 `test-support` feature 下：
