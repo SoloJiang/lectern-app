@@ -131,7 +131,8 @@ impl Context<'_> {
     /// 每次调用都带上本次激活的 `PluginHandle`，监听里可以直接取 `busy`、`emitter`。
     pub fn on<E: Event>(&mut self, handler: impl Fn(&E, &PluginHandle) + Send + Sync + 'static);
 
-    /// 交给 kernel 保管的守卫。只用于创建时没有副作用的守卫；任务句柄在 `started` 里通过 `PluginHandle::own` 交出。
+    /// 交给 kernel 保管的守卫。只用于创建时没有副作用的守卫；后台任务在 `started` 或之后通过 `PluginHandle::own_with` 提交，
+    /// 不先提交再交出句柄（见「撤销」）。
     pub fn own(&mut self, guard: impl Send + 'static);
 
     /// 交给 kernel 保管、需要在提交时才生效的守卫，如 `dyn Contributions` 的注册。
@@ -302,6 +303,8 @@ impl Kernel {
 
 /// 项目文件的不可变快照。`project` 在后台读 git index 建好后再交给 kernel；
 /// `contains` 只查内存里的数据，不做 IO，在任何线程上调用都可以。
+/// 提交方可能保留 `Arc` 的克隆，最后一个引用可能在任意线程上释放，所以实现的 `Drop` 不得 panic
+/// （与服务、监听闭包、事件值的要求相同）；kernel 线程上的 drop 仍用 `catch_unwind` 包住。
 pub trait WorkspaceFacts: Send + Sync {
     /// 当前项目里是否有匹配 pattern 的文件。
     fn contains(&self, pattern: &str) -> bool;
@@ -367,7 +370,7 @@ impl Emitter {
 3. 移除它的事件监听，并等待它正在执行的监听返回（见「事件分发」）。
 4. 按与登记相反的顺序 drop 守卫。每个守卫的 drop 单独用 `catch_unwind` 包住：某个守卫的 drop panic 时，记录错误、插件标为 `Failed`，然后继续 drop 剩下的守卫，撤销总是完整执行。
 
-视图层的注册也走守卫。例如 `workspace` 提供一个服务 `dyn Contributions`（接口在 `services`），它的 `register_view` / `register_action` / `bind_key` 返回一个守卫，drop 时注销。`activate` 期间的注册只能通过 `ctx.own_staged` 交出，按上文的 `ActivationToken` 规则应用；`started` 之后的注册直接生效，守卫交给 `PluginHandle::own`。`ctx.own` 只接收创建时没有可见副作用的守卫，不用于界面注册。kernel 因此不依赖 GPUI 的类型。守卫的 drop 若需要在主线程执行，由提供守卫的一方负责转到主线程。
+视图层的注册也走守卫。例如 `workspace` 提供一个服务 `dyn Contributions`（接口在 `services`），它的 `register_view` / `register_action` / `bind_key` 返回一个守卫，drop 时注销。`activate` 期间的注册只能通过 `ctx.own_staged` 交出，按上文的 `ActivationToken` 规则应用；`started` 之后的注册（在 `started`、监听或后台回调里）同样排到主线程应用：`dyn Contributions` 在排队之前用这次激活的 `token.pending()` 取一个守卫，随注册带到主线程，应用或丢弃之后才 drop，所以注册还在队列里时 kernel 不报告静止；返回的注销守卫交给 `PluginHandle::own`。`ctx.own` 只接收创建时没有可见副作用的守卫，不用于界面注册。kernel 因此不依赖 GPUI 的类型。守卫的 drop 若需要在主线程执行，由提供守卫的一方负责转到主线程。
 
 界面注册的守卫在 kernel 线程上 drop 时，只是把注销排到主线程，kernel 可能先完成撤销并 drop `Active`。这段时间里界面不能调用到已停用的激活，也不能让 kernel 先报告静止：
 
@@ -452,8 +455,8 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 ## 性能
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
-- 激活耗时：每个插件的 `activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按三者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
-- 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足目标插件的激活条件，否则测到的只是没激活的插件对象：`Workspace` 插件提交一份匹配的 `WorkspaceFacts`，`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认目标插件进入 `Active` 后再等静止、采样。依赖闭包那一次同样提交这份事实，两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
+- 激活耗时：每个插件的 `manifest()`（`Kernel::start` 时调用一次）、`activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按四者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
+- 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件提交一份匹配它们全部 pattern 的 `WorkspaceFacts`，`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `Arc`，保存在激活内的状态对象里（见「激活的提交」），使用时直接用保存的 `Arc`。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
 
@@ -467,7 +470,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
   - `activate` 返回 `Ok` 但缺少清单里声明的服务时，按失败处理。
 - 句柄：`on` 返回的 `Subscription` drop 后，下一次 `emit` 起不再调用；停用后旧的 `PluginHandle` 上 `own` 立即 drop 守卫并返回 false，`on` 不订阅，`busy` 返回 None，从它取得的 `Emitter` 发出的事件被丢弃；重新激活后旧句柄仍然无效。
 - 退出：`shutdown` 的 `done` 在全部撤销完成、kernel 线程退出后调用；需要在主线程 drop 的守卫在等待期间完成。
-- 静止与界面注册：只注册了 `Contributions` 的插件，在注册应用到界面之前 kernel 不静止，包括注册已排队、主线程尚未收到的那段时间。
+- 静止与界面注册：只注册了 `Contributions` 的插件，在注册应用到界面之前 kernel 不静止，包括注册已排队、主线程尚未收到的那段时间；`started` 或监听里注册的界面内容同样如此。
 - 线程：所有 `activate` / `started` 和 `shutdown` 之前的守卫 drop 都在 kernel 线程上执行，公开方法在调用线程上立即返回；`shutdown` 之后被拒绝的守卫在调用线程上 drop。
 - 界面注册：`started` panic 或调用 `fail` 时，已经 `commit` 的界面注册不会被应用（token 为 `Dead`）；主线程在 token 为 `Pending` 时先处理，注册不会丢失，激活成功后下一帧应用。
 - 连带失效：提供者的监听 panic 后，同一次分发里依赖它的插件的监听也不再被调用。
