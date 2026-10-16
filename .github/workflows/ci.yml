@@ -56,4 +56,4 @@ jobs:
       - name: Build app
         run: cargo build --locked -p lectern-app
       - name: Performance budget benchmarks
-        run: cargo bench --locked -p lectern-bench
+        run: just bench

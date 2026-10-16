@@ -37,6 +37,7 @@ deny:
 # Everything CI runs on this platform.
 ci: check deny (test "--profile" "ci")
     {{ if os() == "macos" { "cargo build --locked -p lectern-app" } else { "true" } }}
+    {{ if os() == "macos" { "just bench" } else { "true" } }}
 
 # Format the code.
 fmt:
