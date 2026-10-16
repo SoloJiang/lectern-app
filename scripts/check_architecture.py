@@ -8,7 +8,9 @@ Rules checked:
      tool crates may depend on anything; only app may depend on a tool crate.
   3. Crates in the domain, infra and kernel layers never depend on GPUI,
      directly or transitively.
-  4. macOS system bindings are direct dependencies of `platform` only.
+  4. macOS system bindings are direct dependencies of `platform` only. A
+     binding is a crate matching MACOS_ONLY_PREFIXES, or any dependency
+     declared only for Apple targets.
 
 Optional dependencies are included (`cargo metadata --all-features`), so a
 rule broken behind a feature flag still fails. A crate's own dev-dependencies
@@ -44,13 +46,29 @@ MACOS_ONLY_PREFIXES = (
     "io-kit",
     "mach2",
     "mach-sys",
+    "mac-notification",
+    "screencapturekit",
+    "system-configuration",
+    "tao-core-video",
+    "coreaudio",
+    "cidre",
+    "icrate",
+    "apple-",
 )
+# A dependency declared only for Apple targets is a macOS binding whatever
+# its name, e.g. [target.'cfg(target_os = "macos")'.dependencies].
+APPLE_TARGET_MARKERS = ("macos", "apple", "darwin", "ios")
+LINUX_TARGET = "x86_64-unknown-linux-gnu"
 PLATFORM_CRATE = "lectern-platform"
 
 
-def metadata():
+def metadata(platform=None):
+    cmd = ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features"]
+    if platform:
+        # Keep only the dependencies that are compiled for this target.
+        cmd += ["--filter-platform", platform]
     out = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features"],
+        cmd,
         check=True,
         capture_output=True,
         text=True,
@@ -84,10 +102,12 @@ def gpui_free_packages(meta):
 
 
 def main():
-    meta = metadata()
     if "--gpui-free-packages" in sys.argv:
-        print(" ".join(f"-p {name}" for name in gpui_free_packages(meta)))
+        # What the Linux job compiles: a GPUI dependency declared only for
+        # macOS does not keep a crate out of Linux validation.
+        print(" ".join(f"-p {name}" for name in gpui_free_packages(metadata(LINUX_TARGET))))
         return 0
+    meta = metadata()
     packages = {p["id"]: p for p in meta["packages"]}
     members = set(meta["workspace_members"])
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -105,6 +125,13 @@ def main():
         for dep in nodes[pid]["deps"]:
             if any(k["kind"] in (None, "build") for k in dep["dep_kinds"]):
                 yield dep["pkg"]
+
+    def apple_only(pid, dep_pkg):
+        for dep in nodes[pid]["deps"]:
+            if dep["pkg"] == dep_pkg:
+                targets = [k["target"] for k in dep["dep_kinds"]]
+                return all(t and any(m in t for m in APPLE_TARGET_MARKERS) for t in targets)
+        return False
 
     def own_deps(pid):
         """A workspace crate's direct dependencies, dev-dependencies included:
@@ -128,7 +155,7 @@ def main():
                     errors.append(f"{name} ({mine}) -> {dep_name} ({theirs}): dependencies must point downwards")
                 elif mine == "kernel" and theirs not in ("kernel", None):
                     errors.append(f"{name} (kernel) -> {dep_name} ({theirs}): kernel crates depend only on kernel crates")
-            elif dep_name.startswith(MACOS_ONLY_PREFIXES) and packages[pid]["name"] != PLATFORM_CRATE:
+            elif (dep_name.startswith(MACOS_ONLY_PREFIXES) or apple_only(pid, dep)) and name != PLATFORM_CRATE:
                 errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE}")
 
     for pid in members:
