@@ -13,9 +13,9 @@ Lectern is a native macOS app for Apple Silicon. You use it to review the code t
 
 A project in Lectern is a folder or a git repository. When you open one, the project page lists three groups:
 
-- agent sessions that have finished and are waiting for review;
-- sessions that are still running;
-- changes in the working tree that don't belong to any session.
+- **Needs Review:** agent sessions with changes you haven't reviewed yet. Sessions that are still running are listed here too, with their status.
+- **Outside Any Session:** changes in the working tree that don't belong to any agent session.
+- **Recently Done:** sessions you have finished reviewing.
 
 Monorepos and multiple git worktrees are supported without extra configuration.
 
@@ -64,7 +64,7 @@ Lectern is developed against the following budgets ([ADR 0017](docs/adr/0017.md)
 ## Supported tools
 
 - **Agents:** Claude Code and Codex. Lectern reads their local session files.
-- **Code hosts:** GitHub and GitLab, including self-hosted GitLab.
+- **Code hosts:** GitHub and GitLab, including self-hosted instances of either.
 - **Interface languages:** English and Simplified Chinese.
 - **Hardware:** Macs with Apple Silicon.
 

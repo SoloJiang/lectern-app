@@ -13,9 +13,9 @@ Lectern 是一个原生 macOS 应用，运行在 Apple Silicon 上，用来审�
 
 Lectern 以文件夹或 git 仓库为单位打开项目。打开后，项目主页分三组列出：
 
-- 已经结束、等待审阅的 agent 会话；
-- 还在运行的会话；
-- 工作区里不属于任何会话的改动。
+- **Needs Review：** 有未审阅改动的 agent 会话。还在运行的会话也列在这里，并显示运行状态。
+- **Outside Any Session：** 工作区里不属于任何 agent 会话的改动。
+- **Recently Done：** 已经审阅完的会话。
 
 monorepo 和多个 git worktree 不需要额外配置。
 
@@ -64,7 +64,7 @@ Lectern 按以下预算开发（[ADR 0017](docs/adr/0017.md)、[ADR 0018](docs/a
 ## 支持的工具
 
 - **Agent：** Claude Code 与 Codex。Lectern 读取它们的本地会话文件。
-- **代码平台：** GitHub 与 GitLab，包括自部署的 GitLab。
+- **代码平台：** GitHub 与 GitLab，包括两者的自部署版本。
 - **界面语言：** English 与简体中文。
 - **硬件：** 搭载 Apple Silicon 的 Mac。
 
