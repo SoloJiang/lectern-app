@@ -5,13 +5,13 @@ Claude Code / Codex 会话发现与解析，按 cwd 归位到项目和 worktree�
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
 - 设计文档：`docs/design/agents.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#13](https://github.com/SoloJiang/lectern-app/issues/13)、[#23](https://github.com/SoloJiang/lectern-app/issues/23)
-- ADR：[0012](../../docs/adr/0012.md)、[0014](../../docs/adr/0014.md)
+- ADR：[0012](../../docs/adr/0012.md)、[0014](../../docs/adr/0014.md)、[0020](../../docs/adr/0020.md)
 
 ## 边界
 
 - 会话 JSONL 流式读取、增量解析，不整文件读入内存。
 - 格式随 agent 版本变化：每个版本在 fixtures 里留一份脱敏样本，遇到不认识的记录跳过并计数，不报错退出。
-- token 统计在 `usage`，本 crate 只交出原始用量记录。
+- token 统计在 `usage`，本 crate 交出原始用量记录，以及按顺序排列的每个产生改动的工具调用的结果事件（时间戳、会话与轮次、目标路径），供 `usage` 在每次调用之后采样分支和 HEAD（[ADR 0020](../../docs/adr/0020.md)）。
 
 ## 测试
 

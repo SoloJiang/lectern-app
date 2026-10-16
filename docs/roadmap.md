@@ -39,7 +39,7 @@
 - [ ] Java 解析器：package / import / 内部类，Maven 与 Gradle
 - [ ] 跨子项目导航：TS 包名、Maven 模块间依赖
 - [ ] 上下文面板：调用方、相关测试、改动历史（影响面）
-- [ ] Usage 页与额度：每日用量、按项目 / MR / 模型明细、额度提醒，Claude Code statusline 默认接入
+- [ ] Usage 页与额度：每日用量、按项目 / 分支 / 模型明细（标为「分支用量」，P3 起按 MR）、额度提醒，Claude Code statusline 默认接入
 - [ ] 结构化 Diff：忽略纯格式变化、识别移动代码
 - [ ] 文件浏览（侧栏 Files）与完整文件阅读、编辑（第三层）
 
