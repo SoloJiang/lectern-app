@@ -134,7 +134,7 @@ impl Context<'_> {
 pub struct PluginHandle { /* Weak<Kernel>, 插件 ID, 激活代数 */ }
 
 impl PluginHandle {
-    /// 交给 kernel 保管，停用时 drop。这次激活已停用时立即 drop `guard` 并返回 false。
+    /// 交给 kernel 保管，停用时 drop。这次激活已停用时返回 false，`guard` 送到 kernel 线程上 drop（所有守卫都在 kernel 线程上 drop）。
     pub fn own(&self, guard: impl Send + 'static) -> bool;
 
     /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
@@ -151,11 +151,12 @@ impl PluginHandle {
     /// 受限的 kernel 控制句柄，供需要驱动激活的插件使用（`project` 调 `workspace_changed`，
     /// `workspace` 调 `lazy_commands` 和 `command`）。插件在 `PluginSet` 里构造时还没有 `Arc<Kernel>`，
     /// 所以通过这里取得。不包含 `start`、`set_enabled` 和 `shutdown`，这些只给 `app`。
+    /// 句柄带这次激活的插件 ID 和代数：这次激活停用后，通过它发出的请求都被忽略（`command` 的 `done` 收到 `PluginError::Stale`）。
     pub fn control(&self) -> KernelControl;
 }
 
 #[derive(Clone)]
-pub struct KernelControl { /* Weak<Kernel> */ }
+pub struct KernelControl { /* Weak<Kernel>, 插件 ID, 激活代数 */ }
 
 impl KernelControl {
     pub fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>);
@@ -220,7 +221,7 @@ impl Kernel {
     pub fn lazy_commands(&self) -> Vec<Name>;
 
     /// 激活声明了这个命令的插件。激活提交（或失败）后在 kernel 线程上调用 `done`；
-    /// 已激活时立即调用。
+    /// 已激活时也在 kernel 线程上调用。`done` 用 `catch_unwind` 包住，panic 只记日志，不影响 kernel 线程。
     pub fn command(&self, name: &str, done: impl FnOnce(Result<(), PluginError>) + Send + 'static);
 
     /// 用户在设置里停用或重新启用插件。停用会连带停用依赖它所提供服务的插件。
@@ -248,7 +249,7 @@ pub trait WorkspaceFacts: Send + Sync {
 
 pub struct PluginStatus {
     pub id: Name,
-    pub state: PluginState,                 // Inactive / Active / Disabled / Failed(PluginError)
+    pub state: PluginState,                 // Inactive / Waiting { missing: Vec<ServiceKey> } / Active / Disabled / Failed(PluginError)
     pub activate_time: Option<Duration>,    // 最近一次 activate 的耗时
     pub started_time: Option<Duration>,     // 最近一次 started 的耗时（只算同步执行的部分）
 }
@@ -368,7 +369,7 @@ impl Emitter {
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
 - 激活耗时：每个插件的 `activate` 和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按两者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
-- 常驻内存在同一进程里无法准确地按插件区分。bench 用只含一个插件（及其依赖）的 `PluginSet` 启动，所得 `phys_footprint` 减去空集合的值；`PluginSet` 支持这种组合。
+- 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出并保存需要的 `Arc`，使用时直接用保存的 `Arc`。
 - 事件分发不分配内存（监听快照是 `Arc` 克隆），没有监听时只有一次查表。
 
@@ -384,7 +385,10 @@ impl Emitter {
 - 退出：`shutdown` 的 `done` 在全部撤销完成、kernel 线程退出后调用；需要在主线程 drop 的守卫在等待期间完成。
 - 静止与界面注册：只注册了 `Contributions` 的插件，在注册应用到界面之前 kernel 不静止。
 - 线程：所有 `activate` / `started` / 守卫 drop 都在 kernel 线程上执行，公开方法在调用线程上立即返回。
-- 按命令激活：`command` 的 `done` 在激活提交后被调用一次；已激活时立即调用；失败时收到错误。
+- 按命令激活：`command` 的 `done` 在激活提交后被调用一次；已激活时立即调用；失败时收到错误；`done` panic 后 kernel 线程继续处理后续请求。
+- 控制句柄：插件停用后，它之前取得的 `KernelControl` 发出的 `workspace_changed`、`activate` 被忽略，`command` 的 `done` 收到 `Stale`。
+- 状态：激活条件已满足、但依赖未就绪的插件，`status()` 显示 `Waiting`，并列出缺少的服务。
+- 守卫：停用后通过旧句柄 `own` 的守卫在 kernel 线程上 drop。
 - 启动：`Kernel::start` 之前没有任何插件代码运行。
 - 自动启停：
   - A 依赖 B，B 依赖 C：激活顺序是 C、B、A；
