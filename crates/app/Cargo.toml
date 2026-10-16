@@ -17,3 +17,6 @@ layer = "app"
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+
+[lints]
+workspace = true
