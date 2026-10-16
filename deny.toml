@@ -73,4 +73,6 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # direct dependencies: the current ones (instant, paste, rustybuzz,
 # ttf-parser) come in through GPUI and cannot be replaced from here.
 unmaintained = "workspace"
+# Unsound code fails anywhere in the graph, not only in direct dependencies.
+unsound = "all"
 yanked = "warn"

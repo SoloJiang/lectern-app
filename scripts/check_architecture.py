@@ -96,7 +96,8 @@ def is_macos_binding_name(name):
 
 def parse_cfg(text):
     """Parse a cfg predicate (the part inside cfg(...)) into nested tuples:
-    ("all"|"any", [preds]), ("not", pred), ("atom", key, value_or_None)."""
+    ("all"|"any", [preds]), ("not", pred), ("atom", key, value_or_None),
+    ("const", bool) for the true / false literals."""
     tokens = re.findall(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[(),=]', text)
     pos = 0
 
@@ -122,12 +123,29 @@ def parse_cfg(text):
         if pos < len(tokens) and tokens[pos] == "=":
             take("=")
             return ("atom", name, take().strip('"'))
+        if name in ("true", "false"):
+            return ("const", name == "true")
         return ("atom", name, None)
 
     result = pred()
     if pos != len(tokens):
         raise ValueError(f"trailing tokens in {text!r}")
     return result
+
+
+# Values that only Apple targets have, beyond target_os / target_vendor: Mac
+# Catalyst (macabi) and the simulators (sim).
+APPLE_ONLY_VALUES = {
+    "target_os": APPLE_OSES,
+    "target_vendor": {"apple"},
+    "target_env": {"macabi", "sim"},
+    "target_abi": {"macabi", "sim"},
+}
+MAX_FLAGS = 16
+
+
+class TooComplex(Exception):
+    """The predicate has too many atoms to decide by enumeration."""
 
 
 def apple_only_cfg(target):
@@ -144,7 +162,7 @@ def apple_only_cfg(target):
     def collect(node):
         if node[0] == "atom":
             atoms.add(node[1:])
-        else:
+        elif node[0] != "const":
             for child in node[1] if node[0] in ("all", "any") else [node[1]]:
                 collect(child)
 
@@ -156,11 +174,13 @@ def apple_only_cfg(target):
     full = {key: sorted(values) + [None] for key, values in keyed.items()}
     flags = sorted({(key, value) for key, value in atoms if value is None or key not in SINGLE_VALUED_CFG_KEYS}, key=str)
     keys = sorted(full)
-    if len(flags) > 10 or any(len(d) > 16 for d in full.values()):
-        return False  # too large to enumerate; treat as portable
+    if len(flags) > MAX_FLAGS or any(len(d) > 16 for d in full.values()):
+        raise TooComplex(target)  # fail closed: the caller reports it
 
     def holds(node, env):
         kind = node[0]
+        if kind == "const":
+            return node[1]
         if kind == "atom":
             key, value = node[1], node[2]
             if key in SINGLE_VALUED_CFG_KEYS and value is not None:
@@ -182,8 +202,7 @@ def apple_only_cfg(target):
 
         return any(holds(tree, env) for env in assignments(0, {}))
 
-    banned = {"target_os": APPLE_OSES, "target_vendor": {"apple"}}
-    non_apple = {key: [v for v in values if v not in banned.get(key, ())] for key, values in full.items()}
+    non_apple = {key: [v for v in values if v not in APPLE_ONLY_VALUES.get(key, ())] for key, values in full.items()}
     # Compiled somewhere (e.g. not cfg(any())) and nowhere outside Apple.
     return satisfiable(full) and not satisfiable(non_apple)
 
@@ -242,7 +261,14 @@ def main():
         for dep in nodes[pid]["deps"]:
             if dep["pkg"] == dep_pkg:
                 targets = [k["target"] for k in dep["dep_kinds"]]
-                return all(t and apple_only_cfg(t) for t in targets)
+                try:
+                    return all(t and apple_only_cfg(t) for t in targets)
+                except TooComplex as e:
+                    errors.append(
+                        f"{packages[pid]['name']} -> {packages[dep_pkg]['name']}: target predicate too complex to classify "
+                        f"({e}); simplify it or move the dependency to {PLATFORM_CRATE}"
+                    )
+                    return False
         return False
 
     def own_deps(pid):
@@ -267,7 +293,9 @@ def main():
                     errors.append(f"{name} ({mine}) -> {dep_name} ({theirs}): dependencies must point downwards")
                 elif mine == "kernel" and theirs not in ("kernel", None):
                     errors.append(f"{name} (kernel) -> {dep_name} ({theirs}): kernel crates depend only on kernel crates")
-            elif (is_macos_binding_name(dep_name) or apple_only(pid, dep)) and name != PLATFORM_CRATE:
+            # Workspace crates too: native code moved into another member must
+            # not bypass platform isolation.
+            if name != PLATFORM_CRATE and dep_name != PLATFORM_CRATE and (is_macos_binding_name(dep_name) or apple_only(pid, dep)):
                 errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE}")
 
     for pid in members:
