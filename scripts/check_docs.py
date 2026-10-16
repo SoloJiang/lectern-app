@@ -6,8 +6,11 @@ Every tracked *.md file is scanned. For each relative link `[text](target)`:
   - a `#fragment` must match a heading anchor in the target Markdown file,
     using GitHub's slug rules (see `slug`).
 
-Inline links and reference definitions (`[label]: target`) are checked;
-percent-encoded paths and fragments are decoded first. Headings are ATX
+Inline links (including `<angle bracket>` destinations) and reference
+definitions (`[label]: target`, not `[^1]:` footnotes) are checked;
+percent-encoded paths and fragments are decoded first, and fragments match
+case-sensitively. HTML comments and code spans of any backtick length are
+skipped. Headings are ATX
 (`## Title`) or setext (a line underlined with === or ---). Links inside fenced
 code blocks and inline code are ignored, as are absolute URLs (http, https,
 mailto) and links to the repository root. Symlinked files
@@ -23,12 +26,16 @@ import sys
 import unicodedata
 from urllib.parse import unquote
 
-LINK = re.compile(r"(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)|!\[[^\]]*\]\(([^)\s]+)\)")
-REFERENCE = re.compile(r"^ {0,3}\[[^\]]+\]:\s*<?([^\s>]+)>?")
+LINK = re.compile(r"!?\[[^\]]*\]\(\s*(<[^>\n]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\s*\)")
+# Reference definitions; `[^1]:` footnotes are prose, not links.
+REFERENCE = re.compile(r"^ {0,3}\[(?!\^)[^\]]+\]:\s*(<[^>\n]*>|\S+)")
 HEADING = re.compile(r"^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$")
 SETEXT = re.compile(r"^ {0,3}(=+|-+)\s*$")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-INLINE_CODE = re.compile(r"`[^`]*`")
+# A code span opens and closes with backtick runs of the same length.
+INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)")
+COMMENT_OPEN = "<!--"
+COMMENT_CLOSE = "-->"
 EXTERNAL = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 
 
@@ -63,9 +70,35 @@ def outside_fences(lines):
             fence = None
 
 
-def strip_code(lines):
-    """Lines outside fenced blocks, with inline code removed."""
+def visible(lines):
+    """Lines outside fenced blocks, with HTML comments (single or multi-line) removed."""
+    in_comment = False
     for i, line in outside_fences(lines):
+        out = []
+        rest = line
+        while rest:
+            if in_comment:
+                end = rest.find(COMMENT_CLOSE)
+                if end < 0:
+                    rest = ""
+                else:
+                    rest = rest[end + len(COMMENT_CLOSE):]
+                    in_comment = False
+            else:
+                start = rest.find(COMMENT_OPEN)
+                if start < 0:
+                    out.append(rest)
+                    rest = ""
+                else:
+                    out.append(rest[:start])
+                    rest = rest[start + len(COMMENT_OPEN):]
+                    in_comment = True
+        yield i, "".join(out)
+
+
+def strip_code(lines):
+    """Visible lines with inline code spans removed."""
+    for i, line in visible(lines):
         yield i, INLINE_CODE.sub("", line)
 
 
@@ -73,7 +106,7 @@ def headings(lines):
     """Heading texts in document order: ATX headings and setext headings."""
     out = []
     prev = None
-    for _, line in outside_fences(lines):
+    for _, line in visible(lines):
         m = HEADING.match(line)
         if m:
             out.append(m.group(2))
@@ -123,11 +156,13 @@ def check(root, files):
         with open(path, encoding="utf-8") as f:
             lines = f.read().splitlines()
         for lineno, line in strip_code(lines):
-            targets = [m.group(1) or m.group(2) for m in LINK.finditer(line)]
+            targets = [m.group(1) for m in LINK.finditer(line)]
             ref = REFERENCE.match(line)
             if ref:
                 targets.append(ref.group(1))
             for target in targets:
+                if target.startswith("<") and target.endswith(">"):
+                    target = target[1:-1]
                 if EXTERNAL.match(target) or target.startswith("/"):
                     continue
                 file_part, _, fragment = target.partition("#")
@@ -137,7 +172,8 @@ def check(root, files):
                     errors.append(f"{shown}:{lineno}: {target}: file not found")
                     continue
                 if fragment and dest.endswith(".md") and os.path.isfile(dest):
-                    if fragment.lower() not in anchors(dest, cache):
+                    # Fragments match case-sensitively, like the browser does.
+                    if fragment not in anchors(dest, cache):
                         errors.append(f"{shown}:{lineno}: {target}: no heading with anchor #{fragment}")
     return errors
 

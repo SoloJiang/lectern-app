@@ -80,6 +80,27 @@ class Check(unittest.TestCase):
         })
         self.assertEqual(errors, [])
 
+    def test_markdown_edge_cases(self):
+        errors = self.run_check({
+            "my guide.md": "# Performance Budget\n",
+            "b.md": (
+                "<!-- [retired](deleted.md) -->\n"
+                "<!--\n[also retired](gone.md)\n-->\n"
+                "[angle](<my guide.md>)\n"
+                "`` `[x](missing.md)` ``\n"
+                "Text.[^1]\n\n[^1]: This is a note.\n"
+            ),
+        })
+        self.assertEqual(errors, [])
+
+    def test_fragment_case(self):
+        errors = self.run_check({
+            "a.md": "# Performance Budget\n",
+            "b.md": "[ok](a.md#performance-budget) [bad](a.md#Performance-Budget)\n",
+        })
+        self.assertEqual(len(errors), 1)
+        self.assertIn("#Performance-Budget", errors[0])
+
     def test_code_is_ignored(self):
         errors = self.run_check({
             "a.md": "`[x](nope.md)`\n\n```\n[y](nope.md)\n```\n",
