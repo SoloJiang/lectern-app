@@ -24,19 +24,15 @@ jobs:
       - name: Install toolchain from rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Architecture rules
-        run: python3 scripts/check_architecture.py
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          tool: just,cargo-deny,cargo-nextest
+      - name: Check (fmt, architecture rules, clippy)
+        run: just check
       - name: Licenses, sources and advisories
-        run: cargo deny --locked check
-      - name: Clippy
-        run: cargo clippy --locked $(python3 scripts/check_architecture.py --gpui-free-packages) --all-targets -- -D warnings
+        run: just deny
       - name: Tests
-        run: cargo test --locked $(python3 scripts/check_architecture.py --gpui-free-packages)
+        run: just test --profile ci
 
   # Full workspace, including GPUI, on Apple Silicon.
   macos:
@@ -49,9 +45,12 @@ jobs:
       - name: Metal toolchain
         run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
       - uses: Swatinem/rust-cache@v2
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest
+      - name: Check (fmt, architecture rules, clippy)
+        run: just check
       - name: Tests
-        run: cargo test --locked --workspace
+        run: just test --profile ci
       - name: Build app
         run: cargo build --locked -p lectern-app

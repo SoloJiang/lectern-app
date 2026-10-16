@@ -9,7 +9,14 @@
 | Checks | `ubuntu-latest` | 格式、架构规则、cargo-deny、不依赖 GPUI 的 crate 的 clippy 与测试 | 快：不编译 GPUI，几十秒出结果，agent 改领域逻辑时先看这个 |
 | macOS | `macos-15`（Apple Silicon） | 整个工作区的 clippy、测试、构建 `lectern` | GPUI 与视图层只能在 macOS 编译 |
 
-两个任务都是必需检查。`RUSTFLAGS=-D warnings`，clippy 警告即失败。
+两个任务都是必需检查，步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`），本地和 CI 跑的是同一套命令。`RUSTFLAGS=-D warnings`，clippy 警告即失败。
+
+## 构建配置
+
+- 开发构建：依赖用 `opt-level = 2`（GPUI 在 0 级下慢到不能用），本仓库的 crate 保持 0 级，增量编译快；`debug = "limited"`，`split-debuginfo = "unpacked"`。
+- 发布构建：`lto = "thin"`，`codegen-units = 1`。
+- 装了 `sccache` 时 `just` 自动设置 `RUSTC_WRAPPER`，多个 worktree 共享编译结果。
+- nextest：默认只完整打印失败的测试；CI 用 `ci` profile，不提前停止。
 
 ## 架构规则检查
 

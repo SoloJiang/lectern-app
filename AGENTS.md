@@ -30,18 +30,22 @@
 
 ## 命令
 
-脚手架完成后只用以下入口（P0 第一周提供）：
+只用以下入口（需要 `just`、`cargo-nextest`、`cargo-deny`；装了 `sccache` 会自动使用）：
 
 ```sh
-just check   # 编译检查 + clippy（警告即失败）
-just test    # cargo nextest
+just check   # 格式 + 架构规则 + clippy（警告即失败）
+just test    # cargo nextest；参数透传，如 just test -p lectern-review
 just bench   # 性能预算基准
-just ci      # 全量，等同 CI
+just deny    # 许可证、来源、安全公告
+just ci      # 本平台上 CI 跑的全部内容
+just fmt     # 格式化
 ```
+
+在 Linux 上这些命令只覆盖不依赖 GPUI 的 crate，在 macOS 上覆盖整个工作区。
 
 只改领域逻辑时用 `cargo check -p <crate>`，不必编译 GPUI。
 
-架构规则检查：`python3 scripts/check_architecture.py`；许可证与来源：`cargo deny check`。CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
+CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
 
 ## 工作方式
 
