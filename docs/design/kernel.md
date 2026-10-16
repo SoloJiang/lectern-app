@@ -72,7 +72,7 @@ pub struct Manifest {
     pub id: &'static str,
     pub provides: Vec<ServiceKey>,
     pub requires: Vec<ServiceKey>,
-    /// 满足任一条件即可激活；为空时不自动激活。
+    /// 满足任一条件即可激活。不能为空（`validate` 报错）；只想手动激活的插件写 `Manual`。
     pub activation: Vec<Activation>,
 }
 
@@ -83,10 +83,14 @@ pub enum Activation {
     Workspace(&'static [&'static str]),
     /// 用户第一次触发这个命令时激活，如 "terminal.open"。
     Command(&'static str),
+    /// 只在调用 `Kernel::activate(id)` 时激活，如设置页里「立即启用」、调试工具。
+    Manual,
 }
 
-/// 清单由方法返回：以后的进程插件从安装目录里的清单文件读出它。
+/// 清单由方法返回，以后的进程插件可以用同一个类型。
 pub trait Plugin: Send + Sync + 'static {
+    /// 纯内存操作，不得做 IO：`Kernel::start` 可能在主线程上调用它。
+    /// 进程插件的清单文件由插件宿主（#39）在 executor 上预先读好，再构造插件对象。
     fn manifest(&self) -> Manifest;
 
     /// 在调用线程上同步执行，只做注册，不做 IO 和解析：耗时的工作交给 executor，
@@ -99,6 +103,9 @@ pub trait Plugin: Send + Sync + 'static {
 
 ```rust
 impl Context<'_> {
+    // `provide`、`on`、`own` 登记的内容先暂存在本次激活里，`activate` 返回 `Ok` 后才一次性发布
+    //（见「激活的提交」）。
+
     /// 提供服务。key 必须在清单的 provides 里，否则返回错误。
     pub fn provide<S: Service + ?Sized>(&mut self, service: Arc<S>) -> Result<(), PluginError>;
 
@@ -106,9 +113,9 @@ impl Context<'_> {
     pub fn service<S: Service + ?Sized>(&self) -> Arc<S>;               // MULTIPLE = false
     pub fn service_set<S: Service + ?Sized>(&self) -> ServiceSet<S>;    // MULTIPLE = true
 
-    /// 声明本插件有尚未完成的初始化工作（通常是交给 executor 的任务）。
-    /// 守卫移进任务，任务结束时 drop；所有守卫都 drop 后 kernel 才算静止（见「静止」）。
-    pub fn busy(&self) -> BusyGuard;
+    /// 本插件的活动句柄，可以克隆并保存在插件的状态里，激活之后随时取 `BusyGuard`
+    ///（如打开项目后开始扫描时）。插件停用后取到的守卫不计入（见「静止」）。
+    pub fn activity(&self) -> Activity;
 
     /// 订阅事件。
     pub fn on<E: Event>(&mut self, handler: impl Fn(&E) + Send + Sync + 'static);
@@ -131,8 +138,9 @@ impl PluginSet {
     pub fn new() -> Self;
     pub fn with(self, plugin: impl Plugin) -> Self;
 
-    /// 检查依赖图：ID 不重复；每个 requires 在本集合里都有提供者；
-    /// MULTIPLE = false 的服务只有一个提供者；没有环。
+    /// 检查依赖图：插件 ID 不重复；每个服务的稳定 ID 只对应一个 TypeId 和一种 MULTIPLE；
+    /// 每个 requires 在本集合里都有提供者；MULTIPLE = false 的服务只有一个提供者；
+    /// activation 不为空；没有环。
     /// `app` 为每个 profile 写一个调用它的单元测试，依赖图有误时 CI 失败。
     pub fn validate(&self) -> Result<(), Vec<GraphError>>;
 }
@@ -147,6 +155,14 @@ impl<S: Service + ?Sized> ServiceSet<S> {
     pub fn current(&self) -> Arc<[Arc<S>]>;
 }
 
+#[derive(Clone)]
+pub struct Activity { /* Weak<Kernel> + 插件 ID */ }
+
+impl Activity {
+    /// 声明有尚未完成的工作（通常是交给 executor 的任务）。守卫移进任务，任务结束时 drop。
+    pub fn busy(&self) -> BusyGuard;
+}
+
 /// `Send + Sync`，`app` 持有 `Arc<Kernel>`。
 pub struct Kernel { /* ... */ }
 
@@ -157,6 +173,9 @@ impl Kernel {
 
     /// 项目模型就绪或变化时由 `project` 插件调用：激活匹配的 Workspace 插件。
     pub fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>);
+
+    /// 激活清单里带 `Manual` 的插件。已激活时立即返回。
+    pub fn activate(&self, id: &str);
 
     /// 命令第一次被触发前由视图层调用：激活声明了这个命令的插件。已激活时立即返回。
     pub fn command(&self, name: &str);
@@ -174,8 +193,10 @@ impl Kernel {
     pub fn is_quiescent(&self) -> bool;
 }
 
+/// 项目文件的不可变快照。`project` 在后台读 git index 建好后再交给 kernel；
+/// `contains` 只查内存里的数据，不做 IO，在任何线程上调用都可以。
 pub trait WorkspaceFacts: Send + Sync {
-    /// 当前项目里是否有匹配 pattern 的文件。由 `project` 实现，读 git index，不遍历目录。
+    /// 当前项目里是否有匹配 pattern 的文件。
     fn contains(&self, pattern: &str) -> bool;
 }
 
@@ -211,6 +232,13 @@ impl Emitter {
 - 依赖者不得把 `ServiceSet::current()` 里的 `Arc<S>` 保存到本次调用之外，否则提供者停用后仍会被调用。
 - 激活条件满足后保持有效：`Workspace` 和 `Command` 一旦满足，在本次运行中一直视为满足。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
 
+### 激活的提交
+
+- `activate` 执行期间，`provide`、`on`、`own` 登记的内容只暂存在本次激活里：服务不进入 `ServiceSet` 和 `service()` 的结果，监听不参与分发。
+- `activate` 返回 `Ok` 后，kernel 在一次加锁里把暂存的服务和监听全部发布，然后按依赖顺序激活后续插件。
+- 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
+- 视图层的注册由提供守卫的服务负责同样的语义：`dyn Contributions` 在下一帧才把新注册的视图、Action、快捷键应用到界面上，激活失败时守卫在这之前已经 drop，失败的注册不会出现在界面上。
+
 ### 撤销
 
 每个已激活的插件有一张注册表，保存它提供的服务、它的事件监听，以及它通过 `own` 交出的守卫。
@@ -220,7 +248,7 @@ impl Emitter {
 1. 依赖它所提供的单实现服务的插件先停用（见上一节）。
 2. 移除它提供的服务：`ServiceSet` 的快照更新，`service()` 查不到，之后不会有新的调用到达。已经在进行的调用可以执行完；服务实现要能在插件停用过程中返回错误，而不是假定自己的守卫都还在。
 3. 移除它的事件监听，并等待它正在执行的监听返回（见「事件分发」）。
-4. 按与登记相反的顺序 drop 守卫。
+4. 按与登记相反的顺序 drop 守卫。每个守卫的 drop 单独用 `catch_unwind` 包住：某个守卫的 drop panic 时，记录错误、插件标为 `Failed`，然后继续 drop 剩下的守卫，撤销总是完整执行。
 
 视图层的注册也走守卫。例如 `workspace` 提供一个服务 `dyn Contributions`（接口在 `services`），它的 `register_view` / `register_action` / `bind_key` 返回一个守卫，drop 时注销；插件把守卫交给 `ctx.own`。kernel 因此不依赖 GPUI 的类型。守卫的 drop 若需要在主线程执行，由提供守卫的一方负责转到主线程。
 
@@ -264,7 +292,7 @@ impl Emitter {
 - 生命周期操作的队列为空，没有正在执行的 `activate`；
 - 没有未 drop 的 `BusyGuard`。
 
-插件把首帧后的初始化工作（扫描会话目录、打开 SQLite、建索引）交给 executor 时，用 `ctx.busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）不取守卫。
+插件把初始化工作（扫描会话目录、打开 SQLite、建索引）交给 executor 时，用 `Activity::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`Activity` 在 `activate` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）不取守卫。插件停用时，它尚未 drop 的守卫不再计入。
 
 每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
 - `activate` 在调用生命周期操作的线程上执行。它可能在主线程上执行，所以不得做 IO 和解析（AGENTS.md 禁止事项）。是否超出预算由 bench 检查（见「性能」）。
@@ -281,14 +309,15 @@ impl Emitter {
 
 全部测试在 Linux 上运行（`just test -p lectern-kernel`）：
 
-- 依赖图：`validate` 对缺提供者、重复 ID、单实现服务有两个提供者、环，分别给出对应的错误。
+- 依赖图：`validate` 对缺提供者、重复插件 ID、两个服务共用一个稳定 ID、单实现服务有两个提供者、空的激活条件、环，分别给出对应的错误。
+- 激活的提交：`activate` 先 `provide` 再返回错误时，并发的依赖者和事件分发都看不到这个提供者和它的监听。
 - 自动启停：
   - A 依赖 B，B 依赖 C：激活顺序是 C、B、A；
   - 停用 C 连带停用 A、B，停用顺序是 A、B、C；
   - 重新启用 C 后 B、A 恢复；
   - `MULTIPLE` 服务的提供者增减时，依赖者不重新激活，`ServiceSet::current()` 随即反映变化，并发出 `ServiceAdded` / `ServiceRemoved`；
   - 停用一个多实现服务的提供者后，依赖者通过 `ServiceSet` 不再调用到它。
-- 撤销：用记录 drop 顺序的守卫，检查服务、监听、守卫按登记的相反顺序撤销，撤销后服务查不到、事件收不到。
+- 撤销：用记录 drop 顺序的守卫，检查服务、监听、守卫按规定的顺序撤销，撤销后服务查不到、事件收不到；某个守卫的 drop panic 时，其余守卫仍被 drop，插件进入 `Failed`。
 - 失败：
   - `activate` 返回错误或 panic 时，部分注册被撤销，插件进入 `Failed`；
   - 依赖者不激活；
@@ -298,11 +327,11 @@ impl Emitter {
   - 插件在分发进行中被停用（另一个监听 panic，或另一个线程停用它）后，快照里它的监听不再被调用；停用会等它正在执行的监听返回；
   - 监听里停用自己所属的插件不死锁；
   - 多线程同时 `emit`、同时触发生命周期操作时不死锁（压力测试）。
-- 静止：`BusyGuard` 未 drop 时不静止；全部 drop 后发出一次 `Quiescent`；之后有新的激活时重新变为忙碌，再次静止时再发一次。
+- 静止：`BusyGuard` 未 drop 时不静止；全部 drop 后发出一次 `Quiescent`；之后有新的激活，或已激活的插件通过保存的 `Activity` 取了新守卫时，重新变为忙碌，再次静止时再发一次；插件停用后它的守卫不再计入。
 - 激活条件：
   - `Workspace` 用模拟的 `WorkspaceFacts` 触发；
   - `Command` 第二次调用不重复激活；
-  - 激活条件为空的插件不会自动激活。
+  - `Manual` 插件只在 `Kernel::activate(id)` 时激活。
 - 生命周期的结果（激活顺序、停用顺序、状态）用 insta 快照记录。
 
 测试辅助放在 `test-support` feature 下：
