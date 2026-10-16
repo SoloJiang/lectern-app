@@ -3,12 +3,12 @@
 后台任务：UI 线程之外的 IO、解析和 git 操作。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：`docs/design/executor.md`，尚未编写。写代码前先按[模板](../../docs/design/TEMPLATE.md)写好，人审过再动手。
+- 设计文档：`docs/design/executor.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
 - ADR：[0017](../../docs/adr/0017.md)
 
 ## 边界
 
-- 任务可以取消，取消后不再向视图交结果。
+- 任务可以取消，取消后不再向视图返回结果。
 - 首帧之前不提交任务（[ADR 0017](../../docs/adr/0017.md)）。
 
 ## 测试

@@ -1,16 +1,16 @@
 # terminal（`lectern-terminal`）
 
-portable-pty + libghostty-vt 的终端状态，跑在独占线程上；会话 resume。
+portable-pty + libghostty-vt 的终端状态，运行在独占线程上；会话 resume。
 
-- 层：领域层。可以依赖领域、基础设施和 kernel 层；不依赖 GPUI，直接和间接都不行（架构规则 2）。
-- 设计文档：`docs/design/terminal.md`，尚未编写。写代码前先按[模板](../../docs/design/TEMPLATE.md)写好，人审过再动手。
+- 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
+- 设计文档：`docs/design/terminal.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
 - issue：[#5](https://github.com/SoloJiang/lectern-app/issues/5)、[#12](https://github.com/SoloJiang/lectern-app/issues/12)
 - ADR：[0002](../../docs/adr/0002.md)
 
 ## 边界
 
 - 终端内核只接 libghostty-vt（[ADR 0002](../../docs/adr/0002.md)）；libghostty 用 vendored 源码，升级先确认。
-- 向视图交出网格快照，不让视图直接读写 PTY。
+- 向视图提供网格快照；视图不直接读写 PTY。
 
 ## 测试
 

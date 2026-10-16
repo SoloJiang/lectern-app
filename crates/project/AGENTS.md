@@ -2,15 +2,15 @@
 
 项目模型：仓库 → worktree → 子项目；清单解析（npm / yarn / pnpm、Maven、Gradle、Go、Cargo）。
 
-- 层：领域层。可以依赖领域、基础设施和 kernel 层；不依赖 GPUI，直接和间接都不行（架构规则 2）。
-- 设计文档：`docs/design/project.md`，尚未编写。写代码前先按[模板](../../docs/design/TEMPLATE.md)写好，人审过再动手。
+- 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
+- 设计文档：`docs/design/project.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
 - issue：[#9](https://github.com/SoloJiang/lectern-app/issues/9)
 - ADR：[0006](../../docs/adr/0006.md)、[0007](../../docs/adr/0007.md)
 
 ## 边界
 
 - 文件列表读 git index，不遍历目录。
-- 识别出的文件类型与清单交给插件市场做激活匹配（[ADR 0018](../../docs/adr/0018.md)），匹配本身不在这里。
+- 识别出的文件类型与清单交给插件市场做激活匹配（[ADR 0018](../../docs/adr/0018.md)），匹配不在本 crate 实现。
 
 ## 测试
 

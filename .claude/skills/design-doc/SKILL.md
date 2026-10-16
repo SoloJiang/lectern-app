@@ -5,7 +5,7 @@ description: Write the module design doc docs/design/<crate>.md for a Lectern cr
 
 # 写模块设计文档
 
-Lectern 的规则是先写设计、人审过再写代码（AGENTS.md「工作方式」）。本技能产出一份 `docs/design/<crate>.md` 和一个只含这份文档的 PR。
+Lectern 先写设计、人审过再写代码（AGENTS.md「工作方式」）。产出是一份 `docs/design/<crate>.md` 和一个只含这份文档的 PR。
 
 ## 步骤
 
@@ -14,14 +14,14 @@ Lectern 的规则是先写设计、人审过再写代码（AGENTS.md「工作方
    - 对应的 issue（`gh api repos/SoloJiang/lectern-app/issues/<n>`）。
    - [交互规范](../../../docs/design/interaction.md)和[技术调研](../../../docs/design/tech-research.md)里相关的章节，以及 crate AGENTS.md 列出的 ADR。
    - 依赖的其他 crate 的设计文档（已经写了的）。
-2. 新建 worktree 和分支：`git worktree add -b design/<crate> ../lectern-design-<crate> origin/main`。
+2. 新建 worktree 和分支，并进入新的 worktree：`git worktree add -b design/<crate> ../lectern-design-<crate> origin/main && cd ../lectern-design-<crate>`。后面的步骤都在这个目录里执行，不要在原来的 checkout 里写文档。
 3. 复制 [模板](../../../docs/design/TEMPLATE.md) 为 `docs/design/<crate>.md`，<crate> 用目录名。按小节填写，删掉不适用的小节和模板开头的注释。
    - 接口写 Rust 签名，标明调用线程和是否阻塞。
    - 解析外部格式的，写明格式来源和版本，并说明 fixtures 放什么。
    - 列出受影响的性能预算和需要的基准。
    - 拿不准、需要人决定的放进「未决问题」，不要自己定。改变架构、依赖选型或性能预算的，另写 ADR（技能 `adr`）。
 4. 更新 `crates/<crate>/AGENTS.md` 的「设计文档」一行，改成指向新文档的链接。
-5. 提 PR：标题 `docs(<crate>): design`，正文写 `Refs #<n>`，列出未决问题。只改文档的 PR 不需要 Codex 审阅，等人审。
+5. 提 PR：标题 `docs(<crate>): design`，正文写 `Refs #<n>`，列出未决问题。只改文档的 PR 不需要等 Codex 的 👍，但设计文档 PR 必须等人审过才能合并；Codex 留下的意见照常逐条处理。
 6. 人审通过并合并后，再按设计写代码；实现中发现设计要变，先改文档。
 
 ## 检查

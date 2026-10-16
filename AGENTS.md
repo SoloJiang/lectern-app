@@ -1,15 +1,15 @@
 # AGENTS.md
 
-本仓库主要由 coding agent 开发。动手前先读本文件、[docs/design/interaction.md](docs/design/interaction.md) 和 [docs/design/tech-research.md](docs/design/tech-research.md)。
-`CLAUDE.md` 是指向本文件的软链接。各 crate 目录下会有自己的 AGENTS.md，写该模块的职责和测试方式。
+本仓库主要由 coding agent 开发。开始工作前先读本文件、[docs/design/interaction.md](docs/design/interaction.md) 和 [docs/design/tech-research.md](docs/design/tech-research.md)。
+`CLAUDE.md` 是指向本文件的软链接。各 crate 目录下有各自的 AGENTS.md，记录该 crate 的职责和测试方式。
 
 ## 产品原则
 
 - Lectern 以阅读和审阅为主：AI 写代码，人负责浏览、审 Diff、切换会话。编辑和终端为审阅服务。
 - 入口是项目或文件夹，不以编辑器为中心。界面分三层（常驻 / 按需 / 收起），新增界面元素前先对照 [交互规范](docs/design/interaction.md) 和 [ADR 0012](docs/adr/0012.md)。
-- 界面英文优先，支持简体中文（[ADR 0013](docs/adr/0013.md)）。所有界面字符串走 `i18n` crate 的 Fluent 资源文件，en 与 zh-CN 同时提供，不允许硬编码。
+- 界面英文优先，支持简体中文（[ADR 0013](docs/adr/0013.md)）。所有界面字符串走 `i18n` crate 的 Fluent 资源文件，en 与 zh-CN 同时提供，不得硬编码。
 - 视觉与动效按 macOS 原生标准（[ADR 0015](docs/adr/0015.md)）：只用系统字体、系统语义色和系统控件；动画用 `ui` crate 的统一原语，时长与曲线见 [交互规范「动效」](docs/design/interaction.md#动效)，不在视图里自定义。
-- 性能是第一约束。任何改动不得让 [性能预算](docs/design/tech-research.md#性能预算) 超标：冷启动 20ms、空闲内存 60MB（[ADR 0017](docs/adr/0017.md)）。首帧之前不做任何非必要的工作，新功能默认在首帧之后初始化。安装包 ≤ 80 MB（[ADR 0018](docs/adr/0018.md)）：新功能先判断是否属于审阅闭环的核心，不是的做成插件市场里的可选插件。
+- 性能是第一约束。任何改动不得让 [性能预算](docs/design/tech-research.md#性能预算) 超标：冷启动 20 ms、空闲内存 60 MB（[ADR 0017](docs/adr/0017.md)）。首帧之前不做任何非必要的工作，新功能默认在首帧之后初始化。安装包 ≤ 80 MB（[ADR 0018](docs/adr/0018.md)）：新功能先判断是否属于审阅闭环的核心，不属于核心的做成插件市场里的可选插件。
 
 ## 架构规则（违反即 CI 失败）
 
@@ -45,9 +45,9 @@ just ci      # 全量，等同 CI
 
 ## 合并规则
 
-负责推进的 agent 可以直接合并 PR（squash），条件全部满足才合：
+负责推进的 agent 可以直接合并 PR（squash），以下条件全部满足时才能合并：
 
-1. Codex 已审阅当前最新提交，并在 PR 上留下 👍 reaction（审阅中是 👀，有意见时会留评论）。只改文档的 PR 免这一条。
+1. Codex 已审阅当前最新提交，并在 PR 上留下 👍 reaction（审阅中是 👀，有意见时会留评论）。只改文档的 PR 不需要满足这一条；其中的设计文档 PR 还要等人审过才能合并。
 2. CI 全部通过，没有合并冲突。
 3. 所有审阅讨论串都已回复并解决。
 
@@ -62,7 +62,7 @@ just ci      # 全量，等同 CI
 
 ## 技能
 
-`.claude/skills/` 下的技能，Claude Code 自动加载；其他 agent 直接读对应的 `SKILL.md`：
+Claude Code 自动加载 `.claude/skills/` 下的技能；其他 agent 直接读对应的 `SKILL.md`。
 
 | 技能 | 用途 |
 |---|---|

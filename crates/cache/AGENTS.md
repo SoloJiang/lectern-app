@@ -3,7 +3,7 @@
 内容寻址的 SQLite 缓存：解析、高亮、索引、diff 等派生数据以 git blob OID 为键（架构规则 5）。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：`docs/design/cache.md`，尚未编写。写代码前先按[模板](../../docs/design/TEMPLATE.md)写好，人审过再动手。
+- 设计文档：`docs/design/cache.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
 - issue：[#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)
 - ADR：[0006](../../docs/adr/0006.md)、[0017](../../docs/adr/0017.md)
 

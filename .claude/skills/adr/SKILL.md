@@ -9,7 +9,7 @@ description: Record an architecture decision for Lectern as a new ADR in docs/ad
 
 ## 步骤
 
-1. 读 [docs/adr/README.md](../../../docs/adr/README.md) 的索引，找出相关的已有 ADR 并读全文。新决策与已有 ADR 冲突时，新 ADR 要写明「修订：ADR xxxx」，并把旧 ADR 在索引里的状态改为「已被 xxxx 修订」。
+1. 读 [docs/adr/README.md](../../../docs/adr/README.md) 的索引，找出相关的已有 ADR 并读全文。新决策与已有 ADR 冲突时，新 ADR 要写明「修订：ADR xxxx」，并同时更新两处：旧 ADR 文件自身的状态行（如 `- 状态：已接受，已被 [ADR NNNN](NNNN.md) 修订`，参照 0003、0005、0010），以及索引里的状态（「已被 NNNN 修订」）。只读旧文件的 agent 也要能看出它已被修订。
 2. 用下一个编号新建 `docs/adr/<NNNN>.md`，格式与现有文件一致：
 
    ```markdown
