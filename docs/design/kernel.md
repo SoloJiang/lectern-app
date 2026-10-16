@@ -230,7 +230,10 @@ impl PluginHandle {
     /// 分三步，都不等待准入计数，所以在监听里调用（此时已持有准入）也不会与等待准入归零的停用互相等待：
     /// 1. 取这次激活的守卫表的互斥锁，表已关闭或 token 为 `Dead` 时释放锁、不调用 `start`，返回 false；否则新建一个关着的闸门，释放锁。
     /// 2. 不持锁调用 `start`，所以 `start` 里可以调用这个句柄的其他方法（`own`、`own_with`、`busy`），不会在同一把锁上死锁。
-    /// 3. 再取这把锁：表仍未关闭、token 不是 `Dead` 时登记返回的句柄、打开闸门，返回 true；
+    /// 3. 再取这把锁：表仍未关闭、token 不是 `Dead` 时登记返回的句柄，释放锁之后才打开闸门（唤醒槽位时可能同步 poll 任务，
+    ///    任务的第一次 poll 可以调用这个句柄的 `own`、`own_with`，持锁打开会死锁），返回 true；
+    ///    打开只把闸门从「未打开」换成「打开」，释放锁之后撤销已经关闭了闸门的，保持关闭；即使闸门已经打开，
+    ///    撤销第 1 步写下的 `Dead` 也让 `GateSlot::poll` 返回 `Drop`，任务不会在撤销之后运行；
     ///    否则（`start` 运行期间撤销第 4 步已把表标为关闭）释放锁后关闭闸门、在 `catch_unwind` 里 drop 句柄，返回 false。
     ///    闸门一直关着，所以这时已经提交的任务一次也没运行，随闸门关闭被丢弃。
     /// 插件提交后台任务应使用这个方法，而不是先提交再 `own`。
@@ -469,7 +472,7 @@ impl Emitter {
 
 ### 失败
 
-kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
+kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。每一处 `catch_unwind` 捕获到的 payload 都按 `GateSlot::panicked` 的方式处理：取出可读的消息记日志，再在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，所以 `Drop` 会 panic 的 payload（`panic_any` 抛出）也不会在调用方或 kernel 线程上引发第二次展开。kernel 用一个共用的 `contain(f)` 包住全部边界，不在各处各写一遍。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
 
 - `activate` 返回错误或 panic：
   - 这次激活已登记的内容全部撤销；
@@ -573,7 +576,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - `own_with` 的 `start` panic：闸门关闭、任务一次也没运行，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
 - `own_with` 的 `start` 里调用同一个句柄的 `own`、`own_with`：不死锁，守卫都登记上；`start` 运行期间另一个线程完成撤销：返回的句柄被 drop、闸门关闭，任务一次也没运行，`own_with` 返回 false。
 - 嵌套事件的来源：A 的监听通过 B 的 `Emitter` 发出事件后 B 失效、A 仍存活：排队的事件被丢弃；A 失效、B 仍存活：事件照常送达。
-- 闸门唤醒：executor 在 `wake` 里同步 poll 任务时不死锁；任务以 `Drop` 会 panic 的 payload panic 时，executor 和 kernel 线程都继续运行。
+- 闸门唤醒：executor 在 `wake` 里同步 poll 任务时不死锁，任务第一次 poll 就调用同一个句柄的 `own_with` 也不死锁；`manifest`、`activate`、监听、守卫的 drop 以 `Drop` 会 panic 的 payload panic 时，kernel 线程继续运行；任务以 `Drop` 会 panic 的 payload panic 时，executor 和 kernel 线程都继续运行。
 - 主线程回调 panic：Action 或视图工厂 panic 时主线程没有展开，插件进入 `Failed`，之后不再被调用。
 - 孤儿任务：`start` 提交任务后 panic，任务一次也没有被 poll 就被丢弃；已经挂起（返回 `Pending`）的任务在激活失效时被唤醒并丢弃，它持有的 `BusyGuard` 随之释放，kernel 能回到静止。
 - 暂存闭包的 drop：丢弃的暂存 `start` 闭包在 drop 时 panic，kernel 线程继续运行，撤销照常完成。
