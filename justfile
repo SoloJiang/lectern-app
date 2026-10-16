@@ -19,12 +19,12 @@ default: check
 check:
     cargo fmt --all --check
     python3 scripts/check_architecture.py
-    cargo clippy --locked {{packages}} --all-targets -- -D warnings
+    cargo clippy --locked {{packages}} --all-targets --all-features -- -D warnings
 
 # Run tests with cargo-nextest. `-p`, `--package` or `--workspace` in the
 # arguments replace the default package set.
 test *args:
-    cargo nextest run --locked {{ if args =~ '(^|\s)(-p|--package|--workspace)(\s|=|$)' { "" } else { packages } }} --no-tests=pass {{args}}
+    cargo nextest run --locked {{ if args =~ '(^|\s)(-p|--package|--workspace)(\s|=|$)' { "" } else { packages } }} --all-features --no-tests=pass {{args}}
 
 # Performance budget benchmarks.
 bench:
