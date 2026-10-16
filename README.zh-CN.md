@@ -45,7 +45,7 @@ Lectern 按会话发生的顺序显示内容。每一轮依次是你的 prompt�
 
 ## Token 用量与额度
 
-Lectern 按 MR 统计 token：一个 MR 由哪些会话、哪些轮次完成，就把它们的 token 加在一起，并按 API 价格估算成本；还没开 MR 的按分支统计。每个会话、每一轮的用量作为明细保留。Lectern 同时显示 Codex 和 Claude Code 的使用额度已经用了多少。Claude Code 的状态栏会把数据发给 Lectern，所以它的额度窗口实时更新。
+Lectern 按项目和 MR 两级统计 token，并按 API 价格估算成本。项目合计按 7 天、14 天或 30 天统计；一个 MR 由哪些会话、哪些轮次完成，就把它们的 token 加在一起，还没开 MR 的按分支统计。每个会话、每一轮的用量作为明细保留。Lectern 同时显示 Codex 和 Claude Code 的使用额度已经用了多少。Claude Code 的状态栏会把数据发给 Lectern，所以它的额度窗口实时更新。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/usage-dark.png">

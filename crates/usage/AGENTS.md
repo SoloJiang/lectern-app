@@ -1,6 +1,6 @@
 # usage（`lectern-usage`）
 
-token 用量去重、按 MR 归属与聚合（入 SQLite）、价格表、额度快照；Claude Code 额度来自 statusline，Codex 额度来自日志（[ADR 0014](../../docs/adr/0014.md)、[ADR 0020](../../docs/adr/0020.md)）。
+token 用量去重、按项目和 MR 归属与聚合（入 SQLite）、价格表、额度快照；Claude Code 额度来自 statusline，Codex 额度来自日志（[ADR 0014](../../docs/adr/0014.md)、[ADR 0020](../../docs/adr/0020.md)）。
 
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
 - 设计文档：`docs/design/usage.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
@@ -9,7 +9,7 @@ token 用量去重、按 MR 归属与聚合（入 SQLite）、价格表、额度
 
 ## 边界
 
-- 主要统计单位是 MR（ADR 0020）：有改动的轮次按改动所在 worktree 的分支归属，一轮改了多个分支时按改动行数分摊；没有改动的轮次按日志记录的分支归属。会话和轮次是 MR 之下的明细。归属规则逐条有 fixtures 覆盖，包括跨 worktree 改动和同名分支复用。
+- 统计分项目和 MR 两级（ADR 0020）：项目合计按时间窗口统计，包含它的全部 MR、未开 MR 的分支、不属于任何 MR 的用量和 Lectern 自己的分析；cwd 不在任何已打开项目里的会话归入「其他」。MR 的归属规则：有改动的轮次按改动所在 worktree 的分支归属，一轮改了多个分支时按改动行数分摊；没有改动的轮次按日志记录的分支归属。会话和轮次是 MR 之下的明细。归属规则逐条有 fixtures 覆盖，包括跨 worktree 改动和同名分支复用。
 - 去重与解析规则以 ADR 0014 为准（Claude Code 按 `message.id` + `requestId` 去重，Codex 子 agent 只计 `task_started` 之后），每条规则都有 fixtures 覆盖；ccusage 的 `--json` 输出只在测试里做对照。
 - 聚合结果写入 Lectern 自己的 SQLite（Claude Code 默认删除 30 天前的会话文件）；statusline 的安装在 `platform`，本 crate 只解析它存下的 JSON。
 

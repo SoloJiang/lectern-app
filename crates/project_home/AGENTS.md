@@ -11,7 +11,7 @@
 
 - 打开项目到主页可用 < 100 ms：文件列表直接读 git index，不遍历目录（[性能预算](../../docs/design/tech-research.md#性能预算)）。
 - 会话归位、改动统计由 `project`、`agents`、`review` 计算，本视图只显示快照。
-- 会话卡片不显示 token；用量以 MR 为单位，显示在并行 worktree 总览和 Usage 页（[ADR 0020](../../docs/adr/0020.md)）。
+- 会话卡片不显示 token。侧栏底部的 Usage 入口显示本项目最近 7 天的 token 与费用；MR 的用量显示在并行 worktree 总览和 Usage 页（[ADR 0020](../../docs/adr/0020.md)）。
 
 ## 测试
 

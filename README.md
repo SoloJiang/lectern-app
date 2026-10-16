@@ -45,7 +45,7 @@ When several agents run at the same time in separate git worktrees, Lectern list
 
 ## Token usage and limits
 
-Lectern counts tokens per merge request: it adds up every session and turn that went into an MR and estimates the cost at API prices. Branches without an MR yet are counted the same way. Per-session and per-turn numbers remain available as a breakdown. Lectern also shows how much of your Codex and Claude Code usage limits you have used. Claude Code's status line sends its data to Lectern, so its limit windows update in real time.
+Lectern counts tokens per project and per merge request, and estimates the cost at API prices. Project totals cover the last 7, 14 or 30 days. An MR's total adds up every session and turn that went into it; branches without an MR yet are counted the same way. Per-session and per-turn numbers remain available as a breakdown. Lectern also shows how much of your Codex and Claude Code usage limits you have used. Claude Code's status line sends its data to Lectern, so its limit windows update in real time.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/usage-dark.png">
