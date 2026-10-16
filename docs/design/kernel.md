@@ -233,19 +233,21 @@ impl GateSlot {
     pub fn panicked(&self, message: String);
 }
 
-/// `catch` 捕获到的 panic payload，原样保留到持有者决定释放的时刻。
+/// `catch` 捕获到的 panic payload。
 pub struct PanicPayload { /* Box<dyn Any + Send> */ }
 
 impl PanicPayload {
-    /// 取出可读的消息（`&str` / `String`），在 `catch_unwind` 里 drop payload；这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，
-    /// 所以 `Drop` 会 panic 的 payload 也不会展开到调用方。`PanicPayload` 自己的 `Drop` 做同样的事，忘了调用也不会展开。
+    /// 取出可读的消息（`&str` / `String`），然后把 payload 交给 kernel 的一个专用回收线程 drop，不在调用线程上 drop：
+    /// payload 的 `Drop` 可能 panic，也可能等某个资源，在回收线程上它只会卡住或展开那个线程（在 `catch_unwind` 里 drop，
+    /// 第二个 panic 的 payload 用 `mem::forget` 泄漏），executor 的工作线程、kernel 线程和主线程都不等它。所以调用方拿到消息后
+    /// 可以立刻让激活失效、唤醒其他任务，不必安排 payload 和 future 的释放顺序。`PanicPayload` 自己的 `Drop` 做同样的事。
     pub fn dispose(self) -> String;
 }
 
 /// 用 `catch_unwind` 运行 `f`，panic 时保留 payload 返回。
 pub fn catch<T>(f: impl FnOnce() -> T) -> Result<T, PanicPayload>;
 
-/// 等于 `catch(f).map_err(PanicPayload::dispose)`：捕获到 panic 时当场释放 payload，只返回消息。kernel 的其余边界都用它（见「失败与 panic」）。
+/// 等于 `catch(f).map_err(PanicPayload::dispose)`：捕获到 panic 时把 payload 交给回收线程，只返回消息。kernel 的其余边界都用它（见「失败与 panic」）。
 pub fn contain<T>(f: impl FnOnce() -> T) -> Result<T, String>;
 
 /// 一次激活的长期句柄：从 `started` 起有效，到这次激活停用为止。可以克隆并保存在插件的状态里，
@@ -334,7 +336,7 @@ impl KernelControl {
     pub fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>);
     pub fn activate(&self, id: &str);
     pub fn lazy_commands(&self) -> Vec<Name>;
-    pub fn command(&self, name: &str, done: impl FnOnce(Result<(), PluginError>) + Send + 'static);
+    pub fn command(&self, name: &str, done: impl FnOnce(Result<ActivationToken, PluginError>) + Send + 'static);
 }
 
 /// 事件订阅。drop 时退订。
@@ -416,7 +418,8 @@ impl Kernel {
     /// 激活声明了这个命令的插件。激活完全成功（`started` 正常返回、这次激活仍然存活，token 为 `Live`）后，
     /// 或者激活失败后，在 kernel 线程上调用 `done`；提交之后 `started` panic 或调用 `fail` 时，`done` 收到那个错误；
     /// 已激活时也在 kernel 线程上调用。`done` 用 `catch_unwind` 包住，panic 只记日志，不影响 kernel 线程。
-    pub fn command(&self, name: &str, done: impl FnOnce(Result<(), PluginError>) + Send + 'static);
+    /// 成功时 `done` 收到目标插件这次激活的 `ActivationToken`，`workspace` 用它等这次激活的界面注册应用完、在激活失效时丢弃重放（见「按命令激活」）。
+    pub fn command(&self, name: &str, done: impl FnOnce(Result<ActivationToken, PluginError>) + Send + 'static);
 
     /// 用户在设置里停用或重新启用插件。停用会连带停用依赖它所提供服务的插件。
     pub fn set_enabled(&self, id: &str, enabled: bool);
