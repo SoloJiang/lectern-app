@@ -5,7 +5,8 @@ Rules checked:
   1. Every workspace crate declares [package.metadata.lectern] layer.
   2. Dependencies point downwards: app -> view -> domain -> infra.
      kernel crates (kernel, services) may be used by any layer.
-     tool crates may depend on anything; only app may depend on a tool crate.
+     tool crates may depend on anything; only app may depend on a tool crate,
+     and only as a dev-dependency or an optional (feature-gated) one.
   3. Crates in the domain, infra and kernel layers never depend on GPUI,
      directly or transitively.
   4. macOS system bindings are direct dependencies of `platform` only. A
@@ -23,7 +24,10 @@ With --gpui-free-packages, print `-p <crate>` for every crate that builds
 and tests without GPUI instead (used by the Linux CI job).
 """
 
+import concurrent.futures
+import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -60,18 +64,13 @@ MACOS_ONLY_PREFIXES = (
 # Name tokens (split on - and _) that mark an Apple binding wherever they
 # appear, e.g. accesskit_macos, raw-window-metal, objc2-app-kit.
 MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "objc", "objc2", "coreaudio", "corefoundation"}
-# A dependency whose target predicates can only hold on Apple platforms is a
-# macOS binding whatever its name, e.g.
-# [target.'cfg(target_os = "macos")'.dependencies]. The predicate is parsed and
-# checked for satisfiability with every Apple OS ruled out (see apple_only_cfg).
-APPLE_OSES = {"macos", "ios", "tvos", "watchos", "visionos"}
-# cfg keys that hold exactly one value per target. Every other key (feature,
-# target_feature, target_family, target_has_atomic, ...) can hold several, so
-# each of its key = "value" pairs is an independent flag.
-SINGLE_VALUED_CFG_KEYS = {
-    "target_os", "target_vendor", "target_arch", "target_env", "target_abi",
-    "target_endian", "target_pointer_width", "panic",
-}
+# A dependency whose target predicate holds on some Apple target and on no
+# other target rustc knows is a macOS binding whatever its name, e.g.
+# [target.'cfg(target_os = "macos")'.dependencies]. Predicates are evaluated
+# against the real cfg of every target (rustc --print cfg), so aliases such as
+# `unix` / target_family = "unix", multi-valued keys and Mac Catalyst are exact.
+# Only cfg names no target sets (feature = "...", test, ...) are free flags.
+MAX_FREE_FLAGS = 12
 LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 PLATFORM_CRATE = "lectern-platform"
 
@@ -133,78 +132,92 @@ def parse_cfg(text):
     return result
 
 
-# Values that only Apple targets have, beyond target_os / target_vendor: Mac
-# Catalyst (macabi) and the simulators (sim).
-APPLE_ONLY_VALUES = {
-    "target_os": APPLE_OSES,
-    "target_vendor": {"apple"},
-    "target_env": {"macabi", "sim"},
-    "target_abi": {"macabi", "sim"},
-}
-MAX_FLAGS = 16
-
-
 class TooComplex(Exception):
-    """The predicate has too many atoms to decide by enumeration."""
+    """The predicate has too many free flags to decide by enumeration."""
 
 
-def apple_only_cfg(target):
+_TARGET_CFGS = None
+
+
+def target_cfgs():
+    """[(is_apple, {(key, value_or_None), ...})] for every target rustc knows.
+    Computed once per rustc version and cached under target/."""
+    global _TARGET_CFGS
+    if _TARGET_CFGS is not None:
+        return _TARGET_CFGS
+    version = subprocess.run(["rustc", "-vV"], check=True, capture_output=True, text=True).stdout
+    cache = os.path.join("target", f"lectern-target-cfgs-{hashlib.sha256(version.encode()).hexdigest()[:16]}.json")
+    if os.path.exists(cache):
+        with open(cache) as f:
+            raw = json.load(f)
+    else:
+        triples = subprocess.run(["rustc", "--print", "target-list"], check=True, capture_output=True, text=True).stdout.split()
+
+        def cfg_of(triple):
+            out = subprocess.run(["rustc", "--print", "cfg", "--target", triple], capture_output=True, text=True)
+            return out.stdout.splitlines() if out.returncode == 0 else None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+            raw = {t: lines for t, lines in zip(triples, pool.map(cfg_of, triples)) if lines is not None}
+        os.makedirs("target", exist_ok=True)
+        with open(cache, "w") as f:
+            json.dump(raw, f)
+    result = []
+    for lines in raw.values():
+        cfg = set()
+        for line in lines:
+            key, _, value = line.partition("=")
+            cfg.add((key, value.strip('"') if value else None))
+        result.append((("target_vendor", "apple") in cfg, cfg))
+    _TARGET_CFGS = result
+    return result
+
+
+def apple_only_cfg(target, targets=None):
     """True when a dependency's target (a cfg(...) predicate or a target
-    triple) can only be true on Apple platforms: the predicate is
-    unsatisfiable once target_os is not an Apple OS and target_vendor is not
-    "apple". Every other atom is left free, so unrelated conditions (arch,
-    family, features) never make a portable dependency look Apple-only."""
+    triple) holds on at least one Apple target and on no other target. cfg
+    names that no target sets (feature = "...", test, ...) are free flags and
+    are tried both ways; too many of them fails closed with TooComplex."""
     if not target.startswith("cfg("):
         return "-apple-" in target
+    targets = target_cfgs() if targets is None else targets
     tree = parse_cfg(target[4:-1])
+    target_keys = {key for _, cfg in targets for key, _ in cfg}
     atoms = set()
 
     def collect(node):
         if node[0] == "atom":
             atoms.add(node[1:])
-        elif node[0] != "const":
-            for child in node[1] if node[0] in ("all", "any") else [node[1]]:
+        elif node[0] in ("all", "any"):
+            for child in node[1]:
                 collect(child)
+        elif node[0] == "not":
+            collect(node[1])
 
     collect(tree)
-    keyed = {}
-    for key, value in atoms:
-        if value is not None and key in SINGLE_VALUED_CFG_KEYS:
-            keyed.setdefault(key, set()).add(value)
-    full = {key: sorted(values) + [None] for key, values in keyed.items()}
-    flags = sorted({(key, value) for key, value in atoms if value is None or key not in SINGLE_VALUED_CFG_KEYS}, key=str)
-    keys = sorted(full)
-    if len(flags) > MAX_FLAGS or any(len(d) > 16 for d in full.values()):
-        raise TooComplex(target)  # fail closed: the caller reports it
+    free = sorted((a for a in atoms if a[0] not in target_keys), key=str)
+    if len(free) > MAX_FREE_FLAGS:
+        raise TooComplex(target)
 
-    def holds(node, env):
+    def holds(node, cfg, flags):
         kind = node[0]
         if kind == "const":
             return node[1]
         if kind == "atom":
-            key, value = node[1], node[2]
-            if key in SINGLE_VALUED_CFG_KEYS and value is not None:
-                return env[key] == value
-            return env[(key, value)]
+            atom = node[1:]
+            return flags[atom] if atom in flags else atom in cfg
         if kind == "not":
-            return not holds(node[1], env)
-        results = (holds(child, env) for child in node[1])
+            return not holds(node[1], cfg, flags)
+        results = (holds(child, cfg, flags) for child in node[1])
         return all(results) if kind == "all" else any(results)
 
-    def satisfiable(domains):
-        def assignments(i, env):
-            if i == len(keys):
-                for bits in range(1 << len(flags)):
-                    yield {**env, **{f: bool(bits >> j & 1) for j, f in enumerate(flags)}}
-                return
-            for value in domains[keys[i]]:
-                yield from assignments(i + 1, {**env, keys[i]: value})
+    def possible(cfg):
+        return any(
+            holds(tree, cfg, {a: bool(bits >> i & 1) for i, a in enumerate(free)}) for bits in range(1 << len(free))
+        )
 
-        return any(holds(tree, env) for env in assignments(0, {}))
-
-    non_apple = {key: [v for v in values if v not in APPLE_ONLY_VALUES.get(key, ())] for key, values in full.items()}
-    # Compiled somewhere (e.g. not cfg(any())) and nowhere outside Apple.
-    return satisfiable(full) and not satisfiable(non_apple)
+    on_apple = any(possible(cfg) for apple, cfg in targets if apple)
+    return on_apple and not any(possible(cfg) for apple, cfg in targets if not apple)
 
 
 def gpui_free_packages(meta):
@@ -257,6 +270,13 @@ def main():
             if any(k["kind"] in (None, "build") for k in dep["dep_kinds"]):
                 yield dep["pkg"]
 
+    def in_release_build(pid, dep_name):
+        """A normal or build dependency that is not optional is always compiled."""
+        return any(
+            d["name"] == dep_name and d["kind"] in (None, "build") and not d["optional"]
+            for d in packages[pid]["dependencies"]
+        )
+
     def apple_only(pid, dep_pkg):
         for dep in nodes[pid]["deps"]:
             if dep["pkg"] == dep_pkg:
@@ -289,6 +309,11 @@ def main():
                     errors.append(f"{name} -> {dep_name}: nothing may depend on the app crate")
                 elif theirs == "tool" and mine != "app":
                     errors.append(f"{name} -> {dep_name}: only the app crate may depend on a tool crate")
+                elif theirs == "tool" and in_release_build(pid, dep_name):
+                    errors.append(
+                        f"{name} -> {dep_name}: tool crates stay out of release builds; "
+                        "use a dev-dependency or an optional, feature-gated dependency"
+                    )
                 elif mine in RANK and theirs in RANK and RANK[theirs] > RANK[mine]:
                     errors.append(f"{name} ({mine}) -> {dep_name} ({theirs}): dependencies must point downwards")
                 elif mine == "kernel" and theirs not in ("kernel", None):
