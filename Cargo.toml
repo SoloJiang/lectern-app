@@ -59,7 +59,7 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = 
 gpui-component = "=0.7.3"
 # Used only by the lectern-doc-check tool crate.
 html5gum = { version = "0.8", default-features = false }
-pulldown-cmark = { version = "0.13", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # Debug builds: optimize dependencies (GPUI is unusably slow at opt-level 0)
 # but keep our own crates at opt-level 0 so incremental rebuilds stay fast.

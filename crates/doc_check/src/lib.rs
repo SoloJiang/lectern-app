@@ -18,7 +18,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use html5gum::{DefaultEmitter, Token, Tokenizer};
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 
 mod slug_table;
 
@@ -104,237 +104,166 @@ pub fn unique_slugs<I: IntoIterator<Item = String>>(texts: I) -> Vec<String> {
     out
 }
 
-/// Rendered text of every heading, in order: text, inline code and link text
-/// count; markup and link destinations do not.
-pub fn headings(markdown: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current: Option<String> = None;
-    for event in Parser::new_ext(markdown, options()) {
-        match event {
-            Event::Start(Tag::Heading { .. }) => current = Some(String::new()),
-            Event::End(TagEnd::Heading(_)) => out.extend(current.take()),
-            Event::Text(t) | Event::Code(t) => {
-                if let Some(h) = current.as_mut() {
-                    h.push_str(&t);
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
 /// Whether `path` has a Markdown extension (`.md` or `.markdown`, any case).
 pub fn is_markdown(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
-/// Elements whose content the HTML tokenizer reads as text, not tags.
-const RAW_TEXT: [&[u8]; 9] = [
-    b"script",
-    b"style",
-    b"textarea",
-    b"title",
-    b"xmp",
-    b"iframe",
-    b"noembed",
-    b"noframes",
-    b"plaintext",
-];
-
-/// Byte offset of the end tag that closes the raw-text element `name` in
-/// `html`: `</name` (any case) followed by whitespace, `/`, `>` or the end of
-/// the input, as the HTML tokenizer requires. `</scriptx>` does not close
-/// `script`.
-fn raw_text_end(html: &str, name: &[u8]) -> Option<usize> {
-    let bytes = html.as_bytes();
-    let mut from = 0;
-    while let Some(i) = html[from..].find("</").map(|i| from + i) {
-        let after = i + 2 + name.len();
-        if bytes.len() >= after
-            && bytes[i + 2..after].eq_ignore_ascii_case(name)
-            && bytes
-                .get(after)
-                .is_none_or(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
-        {
-            return Some(i);
-        }
-        from = i + 2;
-    }
-    None
+/// A document rendered to HTML the way GitHub's Markdown pipeline does, with
+/// enough bookkeeping to map positions back to the source.
+struct Rendered {
+    html: String,
+    /// `(html offset, source offset)` at the start of each Markdown event, in
+    /// order.
+    map: Vec<(usize, usize)>,
+    /// HTML offsets where a Markdown heading starts (raw `<h2>` in the
+    /// source does not get an automatic anchor on GitHub).
+    headings: HashSet<usize>,
 }
 
-/// Link destinations (`href` / `src`, with byte offsets), anchor ids and
-/// the raw-text element still open at the end of a piece of raw HTML,
-/// starting inside the raw-text element `open` left by earlier raw HTML.
-/// html5gum tokenizes it as the HTML standard does: character references are
-/// decoded, comments are skipped, and raw-text bodies are not read as tags.
-fn html_scan(html: &str, open: Option<Vec<u8>>) -> HtmlScan {
-    let mut open = open;
-    let html = match &open {
-        // Inside an element opened by an earlier piece: skip to its end tag.
-        // `plaintext` never ends: everything after it is text.
-        Some(name) if name.as_slice() == b"plaintext" => {
-            return HtmlScan {
-                open,
-                ..Default::default()
-            };
-        }
-        Some(name) => match raw_text_end(html, name) {
-            Some(i) => {
-                open = None;
-                &html[i..]
-            }
-            None => {
-                return HtmlScan {
-                    open,
-                    ..Default::default()
-                };
-            }
-        },
-        None => html,
-    };
-    let mut emitter = DefaultEmitter::<usize>::new_with_span();
-    emitter.naively_switch_states(true);
-    let mut out = Vec::new();
-    let mut ids = Vec::new();
-    for token in Tokenizer::new_with_emitter(html, emitter) {
-        let tag = match token {
-            Ok(Token::StartTag(tag)) => tag,
-            Ok(Token::EndTag(end)) => {
-                if open.as_deref() == Some(&end.name[..]) {
-                    open = None;
-                }
-                continue;
-            }
-            _ => continue,
-        };
-        if RAW_TEXT.contains(&&tag.name[..]) && !tag.self_closing {
-            open = Some(tag.name.to_vec());
-        }
-        // `id` on any element and `name` on `<a>` are link targets too.
-        for (attr, only_a) in [(&b"id"[..], false), (b"name", true)] {
-            if (!only_a || &tag.name[..] == b"a")
-                && let Some(value) = tag.attributes.get(attr)
-                && !value.value.is_empty()
-            {
-                ids.push(String::from_utf8_lossy(&value.value).into_owned());
-            }
-        }
-        for name in [&b"href"[..], b"src"] {
-            if let Some(value) = tag.attributes.get(name)
-                && !value.value.is_empty()
-            {
-                // URL parsing strips leading and trailing C0 controls and
-                // spaces, and removes tabs and newlines anywhere.
-                // A backslash is a slash for web URLs, so `\\host\x` is a
-                // network-path reference like `//host/x`.
-                let url: String = String::from_utf8_lossy(&value.value)
-                    .trim_matches(|c: char| c <= ' ')
-                    .chars()
-                    .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-                    .map(|c| if c == '\\' { '/' } else { c })
-                    .collect();
-                if !url.is_empty() {
-                    out.push((tag.span.start, url));
-                }
-            }
+fn render(markdown: &str) -> Rendered {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct Sink(Rc<RefCell<String>>);
+    impl std::fmt::Write for Sink {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0.borrow_mut().push_str(s);
+            Ok(())
         }
     }
-    HtmlScan {
-        dests: out,
-        ids,
-        open,
+
+    let html = Rc::new(RefCell::new(String::new()));
+    let map = RefCell::new(Vec::new());
+    let headings = RefCell::new(HashSet::new());
+    let events = Parser::new_ext(markdown, options())
+        .into_offset_iter()
+        .map(|(event, range)| {
+            let at = html.borrow().len();
+            map.borrow_mut().push((at, range.start));
+            if matches!(event, Event::Start(Tag::Heading { .. })) {
+                headings.borrow_mut().insert(at);
+            }
+            event
+        });
+    // Writing to a String cannot fail.
+    let _ = pulldown_cmark::html::write_html_fmt(Sink(html.clone()), events);
+    let html = html.borrow().clone();
+    Rendered {
+        html,
+        map: map.into_inner(),
+        headings: headings.into_inner(),
     }
 }
 
-/// What a piece of raw HTML contributes: link destinations (with offsets),
-/// anchor ids, and the raw-text element still open at its end.
-#[derive(Default)]
-struct HtmlScan {
-    dests: Vec<(usize, String)>,
-    ids: Vec<String>,
-    open: Option<Vec<u8>>,
-}
-
-/// Links and raw-HTML anchors of a Markdown document.
+/// Links, anchors and heading texts of a document, read from its rendered
+/// HTML in one pass of an HTML-standard tokenizer (html5gum). Raw HTML and
+/// Markdown are therefore seen exactly as a browser sees them: character
+/// references are decoded, comments are skipped, and everything inside
+/// `script`, `style` and other raw-text elements (including an unclosed or
+/// self-closed one, and the escaped states of `script`) is text, so links and
+/// headings there do not exist. `plaintext` swallows the rest of the document.
 #[derive(Default)]
 struct Scan {
+    /// Destinations with source byte offsets.
     links: Vec<(usize, String)>,
+    /// `id` attributes and `<a name>` values.
     ids: Vec<String>,
-}
-
-/// Destinations of all links and images, with their byte offsets: Markdown
-/// links and `href` / `src` attributes in raw HTML.
-pub fn links(markdown: &str) -> Vec<(usize, String)> {
-    scan(markdown).links
-}
-
-/// Anchors a document defines: GitHub heading slugs plus `id` / `<a name>`
-/// attributes in its raw HTML.
-pub fn anchors(markdown: &str) -> HashSet<String> {
-    let mut set: HashSet<String> = unique_slugs(headings(markdown)).into_iter().collect();
-    set.extend(scan(markdown).ids);
-    set
+    /// Text of each Markdown heading, in order.
+    headings: Vec<String>,
 }
 
 fn scan(markdown: &str) -> Scan {
+    let rendered = render(markdown);
+    let source_offset = |at: usize| {
+        let i = rendered.map.partition_point(|&(start, _)| start <= at);
+        match i.checked_sub(1).map(|i| rendered.map[i]) {
+            Some((start, source)) => source + (at - start).min(markdown.len() - source),
+            None => 0,
+        }
+    };
+    let is_heading = |name: &[u8]| matches!(name, [b'h', b'1'..=b'6']);
     let mut out = Scan::default();
-    // An HTML block arrives one line per event. Tokenize the whole block, so a
-    // tag or comment spanning lines is read as one; `pieces` maps offsets in
-    // `block` back to the source.
-    let mut block: Option<(String, Vec<(usize, usize)>)> = None;
-    // A raw-text element (`<script>`, `<style>`, ...) left open by raw HTML
-    // swallows everything after it, across paragraphs and blocks, until its
-    // end tag appears in later raw HTML; Markdown links inside it render as
-    // text, not links. `plaintext` never closes.
-    let mut open: Option<Vec<u8>> = None;
-    for (event, range) in Parser::new_ext(markdown, options()).into_offset_iter() {
-        match event {
-            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
-                if open.is_none() {
-                    out.links.push((range.start, dest_url.into_string()));
+    let mut heading: Option<String> = None;
+    let mut emitter = DefaultEmitter::<usize>::new_with_span();
+    emitter.naively_switch_states(true);
+    for token in Tokenizer::new_with_emitter(rendered.html.as_str(), emitter) {
+        match token {
+            Ok(Token::StartTag(tag)) => {
+                let at = tag.span.start;
+                if is_heading(&tag.name)
+                    && (rendered.headings.contains(&at)
+                        || at
+                            .checked_sub(1)
+                            .is_some_and(|a| rendered.headings.contains(&a)))
+                {
+                    heading = Some(String::new());
+                }
+                for (attr, only_a) in [(&b"id"[..], false), (b"name", true)] {
+                    if (!only_a || &tag.name[..] == b"a")
+                        && let Some(value) = tag.attributes.get(attr)
+                        && !value.value.is_empty()
+                    {
+                        out.ids
+                            .push(String::from_utf8_lossy(&value.value).into_owned());
+                    }
+                }
+                for attr in [&b"href"[..], b"src"] {
+                    if let Some(value) = tag.attributes.get(attr) {
+                        // URL parsing strips leading and trailing C0 controls
+                        // and spaces, and removes tabs and newlines anywhere. A
+                        // backslash is a slash for web URLs, so `\\host\x` is a
+                        // network-path reference like `//host/x`.
+                        let url: String = String::from_utf8_lossy(&value.value)
+                            .trim_matches(|c: char| c <= ' ')
+                            .chars()
+                            .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+                            .map(|c| if c == '\\' { '/' } else { c })
+                            .collect();
+                        if !url.is_empty() {
+                            out.links.push((source_offset(at), url));
+                        }
+                    }
                 }
             }
-            Event::Start(Tag::HtmlBlock) => block = Some(Default::default()),
-            Event::Html(html) => match block.as_mut() {
-                Some((text, pieces)) => {
-                    pieces.push((text.len(), range.start));
-                    text.push_str(&html);
-                }
-                None => {
-                    let found = html_scan(&html, open.take());
-                    open = found.open;
-                    out.ids.extend(found.ids);
-                    out.links
-                        .extend(found.dests.into_iter().map(|(at, d)| (range.start + at, d)));
-                }
-            },
-            Event::End(TagEnd::HtmlBlock) => {
-                let Some((text, pieces)) = block.take() else {
-                    continue;
-                };
-                let found = html_scan(&text, open.take());
-                open = found.open;
-                out.ids.extend(found.ids);
-                for (at, dest) in found.dests {
-                    let i = pieces.partition_point(|&(start, _)| start <= at);
-                    let (start, source) = pieces[i.saturating_sub(1)];
-                    out.links.push((source + at - start, dest));
+            Ok(Token::EndTag(tag)) => {
+                if is_heading(&tag.name)
+                    && let Some(text) = heading.take()
+                {
+                    out.headings.push(text);
                 }
             }
-            Event::InlineHtml(html) => {
-                let found = html_scan(&html, open.take());
-                open = found.open;
-                out.ids.extend(found.ids);
-                out.links
-                    .extend(found.dests.into_iter().map(|(at, d)| (range.start + at, d)));
+            Ok(Token::String(text)) => {
+                if let Some(h) = heading.as_mut() {
+                    h.push_str(&String::from_utf8_lossy(&text.value));
+                }
             }
             _ => {}
         }
     }
     out
+}
+
+/// Rendered text of every Markdown heading, in order: text, inline code and
+/// link text count; markup and link destinations do not.
+pub fn headings(markdown: &str) -> Vec<String> {
+    scan(markdown).headings
+}
+
+/// Destinations of all links and images with their source byte offsets:
+/// Markdown links and `href` / `src` attributes in raw HTML, as rendered.
+pub fn links(markdown: &str) -> Vec<(usize, String)> {
+    scan(markdown).links
+}
+
+/// Anchors a document defines: GitHub heading slugs plus `id` / `<a name>`
+/// attributes in its HTML.
+pub fn anchors(markdown: &str) -> HashSet<String> {
+    let found = scan(markdown);
+    let mut set: HashSet<String> = unique_slugs(found.headings).into_iter().collect();
+    set.extend(found.ids);
+    set
 }
 
 fn percent_decode(s: &str) -> Vec<u8> {
@@ -927,6 +856,36 @@ mod tests {
         let errors = repo.check(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(got, ["a.md#nope"]);
+    }
+
+    #[test]
+    fn self_closed_raw_text_stays_open() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "Text <script/>\n\n[example](missing.md)\n\n</script>\n\n[after](nope.md)\n",
+        )]);
+        let errors = repo.check(&["b.md"]);
+        let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(got, ["nope.md"]);
+    }
+
+    #[test]
+    fn swallowed_headings_are_not_anchors() {
+        let md = "Text <script>\n\n# Fake\n\n</script>\n\n# Real\n";
+        let set = anchors(md);
+        assert!(set.contains("real"));
+        assert!(!set.contains("fake"));
+    }
+
+    #[test]
+    fn script_escaped_states_follow_the_tokenizer() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<script>\n<!-- <script> x </script> <a href=\"missing.md\"> -->\n</script>\n\n<a href=\"nope.md\">x</a>\n",
+        )]);
+        let errors = repo.check(&["b.md"]);
+        let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(got, ["nope.md"]);
     }
 
     #[test]
