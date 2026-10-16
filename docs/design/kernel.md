@@ -194,9 +194,13 @@ pub struct SubmitGate { /* Arc<{ Mutex<{ 状态, 槽位里的 waker }>, Activati
 /// 监听、界面回调里调用 `fail`）都不会在当前调用栈里运行或销毁插件的 future。
 impl SubmitGate {
     /// executor 在提交任务的调用里同步申请槽位（`spawn` 返回之前），不推迟到别的线程。`start` 返回时 `own_with` 在闸门的锁内把它封住，
-    /// 之后再申请返回 None，executor 不 poll 这个任务、在 `contain` 里直接丢弃。所以 `start` 返回之后，这次提交的任务集合就固定了，
+    /// 之后再申请返回 None，executor 不 poll 这个任务、在 `contain` 里直接丢弃；这次丢弃 panic 时调用 `SubmitGate::panicked(message)`，
+    /// 按与 `GateSlot::panicked` 相同的方式让所属激活失效（闸门持有 token 和插件 ID），不会因为没有槽位就漏报。所以 `start` 返回之后，这次提交的任务集合就固定了，
     /// 闸门「已封住、槽位归零」时登记才可以移除，不会有迟到的任务在登记移除之后申请到槽位、在没有句柄的情况下运行。
     pub fn slot(&self) -> Option<GateSlot>;
+
+    /// 没有申请到槽位的任务在丢弃时 panic，executor 用它报告，效果与 `GateSlot::panicked` 相同。
+    pub fn panicked(&self, message: String);
 }
 
 /// 一个任务在闸门上的槽位，存放这个任务最近一次的 waker，drop 时从闸门移除。
@@ -504,7 +508,7 @@ impl Emitter {
 3. 移除它的事件监听，并等这次激活的准入计数归零：正在执行的监听、主线程上的界面回调与结果应用、通过 `ServiceSet` 进行的服务调用都返回之后才继续（见「事件分发」）。第 1 步之前 token 已经是 `Dead`，所以不会有新的准入。
 4. 按与登记相反的顺序 drop 守卫。每个守卫的 drop 单独用 `catch_unwind` 包住：某个守卫的 drop panic 时，记录错误、插件标为 `Failed`，然后继续 drop 剩下的守卫，撤销总是完整执行。
 
-视图层的注册也走守卫。例如 `workspace` 提供一个服务 `dyn Contributions`（接口在 `services`），它的 `register_view` / `register_action` / `bind_key` 返回一个守卫，drop 时注销。`activate` 期间的注册只能通过 `ctx.own_staged` 交出，按上文的 `ActivationToken` 规则应用；`started` 之后的注册（在 `started`、监听或后台回调里）同样排到主线程应用：`dyn Contributions` 在排队之前用这次激活的 `token.pending()` 取一个守卫（`shutdown` 之后为 None，注册直接丢弃），随注册带到主线程，应用或丢弃之后才 drop，所以注册还在队列里时 kernel 不报告静止；返回的注销守卫交给 `PluginHandle::own`。`ctx.own` 只接收创建时没有可见副作用的守卫，不用于界面注册。kernel 因此不依赖 GPUI 的类型。守卫的 drop 若需要在主线程执行，由提供守卫的一方负责转到主线程。
+视图层的注册也走守卫。例如 `workspace` 提供一个服务 `dyn Contributions`（接口在 `services`），它的 `register_view` / `register_action` / `bind_key` 返回一个守卫，drop 时注销。`activate` 期间的注册只能通过 `ctx.own_staged` 交出，按上文的 `ActivationToken` 规则应用；`started` 之后的注册（在 `started`、监听或后台回调里）同样排到主线程应用：`dyn Contributions` 在排队之前用这次激活的 `token.pending()` 取一个守卫（`shutdown` 之后为 None，注册直接丢弃），随注册带到主线程，应用或丢弃之后才 drop，所以注册还在队列里时 kernel 不报告静止；返回的注销守卫通过应用时持有的准入登记（`Admission::own`，与暂存注册相同），不走 `PluginHandle::own`，所以应用期间并发的失效也不会让守卫被拒绝、晚于 `Active` 才 drop。`ctx.own` 只接收创建时没有可见副作用的守卫，不用于界面注册。kernel 因此不依赖 GPUI 的类型。守卫的 drop 若需要在主线程执行，由提供守卫的一方负责转到主线程。
 
 界面注册的守卫在 kernel 线程上 drop 时，只是把注销排到主线程，kernel 可能先完成撤销并 drop `Active`。这段时间里界面不能调用到已停用的激活，也不能让 kernel 先报告静止：
 
