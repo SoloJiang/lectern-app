@@ -419,12 +419,14 @@ impl Emitter {
 
 界面注册的守卫在 kernel 线程上 drop 时，只是把注销排到主线程，kernel 可能先完成撤销并 drop `Active`。这段时间里界面不能调用到已停用的激活，也不能让 kernel 先报告静止：
 
-- 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）时先 `token.enter()`，取不到就不调用，取到的准入持有到回调返回。停用的第一步就把 token 置为 `Dead`，第 3 步等准入归零，所以回调不会与守卫和 `Active` 的 drop 同时进行。
+- 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）时先 `token.enter()`，取不到就不调用，取到的准入持有到回调返回。回调在准入范围内用 `catch_unwind` 包住：panic 时先按 `fail` 的方式让这次激活同步失效（插件进入 `Failed`，连带停用的插件一起失效），展开结束后才释放准入，panic 不会展开到主线程，插件也不会在失效后继续被调用。停用的第一步就把 token 置为 `Dead`，第 3 步等准入归零，所以回调不会与守卫和 `Active` 的 drop 同时进行。
 - `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程的队列被丢弃时守卫随之 drop。`shutdown` 关闭准入之后取不到守卫，说明主线程的队列已经不再处理，注销请求直接丢弃。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
 
-后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。
+后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。`executor` 的提交接口带上这次激活的 `ActivationToken`，任务每次被 poll 之前检查 token，为 `Dead` 时直接丢弃 future（等同取消），所以即使 `start` 在提交之后、返回句柄之前 panic，句柄没交到 kernel 手里，这个任务也会在下一次 poll 前被丢弃，不会成为孤儿。
 
-监听 panic 或调用 `fail` 时，token 由当前线程直接原子写为 `Dead`，不等准入归零（等待会让持有准入的调用方自己卡住，见「事件分发」）。所以在写入前一刻已经取得准入的工作（其他线程上的监听、界面回调，或刚由 `own_with` 提交的任务）仍会执行完，kernel 不中途打断它们；撤销第 3 步等它们返回之后才 drop 守卫和 `Active`。这类工作的约束相同：任务在撤销时被取消，取消是协作式的；它交给主线程的结果按下面的规则取准入，失效后不会生效；插件代码要能在插件已标为 `Failed` 时运行完毕。
+任务不持有准入，撤销不等任务结束：任务需要的状态由它自己持有（`Active` 或其中部分的 `Arc` 克隆），所以撤销 drop kernel 那份 `Active` 之后，任务用到的状态仍然有效，直到任务结束或在下一次 poll 前被丢弃。任务不能假定插件的守卫（界面注册、文件监听等）在它运行期间仍然存在。
+
+监听 panic 或调用 `fail` 时，token 由当前线程直接原子写为 `Dead`，不等准入归零（等待会让持有准入的调用方自己卡住，见「事件分发」）。所以在写入前一刻已经取得准入的工作（其他线程上的监听、界面回调）仍会执行完，kernel 不中途打断它们；撤销第 3 步等它们返回之后才 drop 守卫和 `Active`。任务不在此列：它们按上一段持有自己的状态，正在进行的那一次 poll 执行完，之后不再被 poll。约束相同：它交给主线程的结果按下面的规则取准入，失效后不会生效；插件代码要能在插件已标为 `Failed` 时运行完毕。
 
 任务把结果排到主线程交给视图时，任务可能已经结束，取消对它不再起作用。所以排到主线程的结果带上这次激活的 `ActivationToken` 和一个 `BusyGuard`（任务把自己的守卫移进去，或者用 `PluginHandle::busy()` 新取一个）：主线程应用结果时先 `token.enter()`，取不到就丢弃，取到的准入持有到应用完；守卫在结果应用或丢弃之后才 drop，所以结果还在队列里时 kernel 不报告静止。
 
@@ -477,7 +479,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 用户第一次用快捷键或菜单触发一个由 `Command` 激活的插件提供的 Action 时，这个 Action 还没有注册。处理方式：
 
 1. `workspace` 在 `started` 里从 `handle.control().lazy_commands()` 取得所有这类命令名，为每个命令注册一个常驻的代理 Action（不依赖插件）。命令的 Action 只有这一个；插件通过 `Contributions::handle_command(name, handler)` 登记处理函数，而不是另外注册同名的 Action。
-2. 代理 Action 被触发时：处理函数已登记就直接调用；否则调用 `control.command(name, done)`。
+2. 代理 Action 被触发时：查找处理函数时跳过 token 已不是 `Live` 的登记（插件已失效、注销还没在主线程上执行）；找到就在准入内直接调用，`enter()` 失败时同样当作没有登记；没有登记时调用 `control.command(name, done)`，由它重新激活插件或在 `done` 里返回 `Disabled` 等错误，用户的操作不会被悄悄丢掉。
 3. 插件激活完全成功（`started` 正常返回）后 `done` 被调用；`workspace` 把它转到主线程，等这次激活的处理函数在下一帧登记之后调用它。用户只需触发一次。
 4. 激活失败时，`done` 收到错误，`workspace` 显示一次提示。
    激活成功、但下一帧应用完注册后仍没有这个命令的处理函数时（插件漏了 `handle_command` 或名字写错），`workspace` 同样提示一次、记录错误，这次触发作废，不会一直等待。
@@ -532,6 +534,9 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
 - 暂存效果：暂存的第一个事件让这次激活失效后，后面暂存的事件不再发出、`start` 不再调用（已经发出的第一个事件不回滚，激活按 `Live` 之后的失败停用）；暂存的 `start` panic 时插件进入 `Failed`，kernel 线程继续运行。
 - `own_with` 的 `start` panic：互斥锁没有中毒，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
+- 主线程回调 panic：Action 或视图工厂 panic 时主线程没有展开，插件进入 `Failed`，之后不再被调用。
+- 孤儿任务：`start` 提交任务后 panic，任务在下一次 poll 前被丢弃。
+- 失效中的命令：插件已失效、注销还没执行时触发代理 Action，走 `control.command`，`done` 收到错误或插件重新激活。
 - 界面注册与失效竞争：主线程应用注册时另一线程调用 `fail`，撤销在注册应用完之后才 drop 守卫和 `Active`，注册随后被注销。
 - 发出方失效：后台任务的 `emit` 与 `fail` 并发时，`fail` 返回之后开始的分发不会把事件送给任何监听。
 - 静止代数：两次 `quiescent_epoch()` 之间取过再释放一个 `BusyGuard` 时，两次返回值不同。
