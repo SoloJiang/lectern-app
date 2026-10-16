@@ -3,7 +3,7 @@
 插件内核：插件装载、服务注册表、事件总线、生命周期（[ADR 0010](../../docs/adr/0010.md)）。插件按服务依赖自动激活与停用；插件注册的内容记入该插件自己的注册表，停用时全部撤销。
 
 - 层：kernel 层。只依赖 kernel 层，不依赖 GPUI；任何层都可以依赖本 crate。
-- 设计文档：`docs/design/kernel.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 设计文档：[docs/design/kernel.md](../../docs/design/kernel.md)
 - issue：[#8](https://github.com/SoloJiang/lectern-app/issues/8)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#40](https://github.com/SoloJiang/lectern-app/issues/40)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)
 - ADR：[0010](../../docs/adr/0010.md)、[0018](../../docs/adr/0018.md)
 
