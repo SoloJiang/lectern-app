@@ -200,12 +200,16 @@ fn scan(markdown: &str) -> Scan {
     let is_heading = |name: &[u8]| matches!(name, [b'h', b'1'..=b'6']);
     let mut out = Scan::default();
     let mut heading: Option<(Vec<u8>, String)> = None;
+    let mut media_depth = 0usize;
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
     emitter.naively_switch_states(true);
     for token in Tokenizer::new_with_emitter(rendered.html.as_str(), emitter) {
         match token {
             Ok(Token::StartTag(tag)) => {
                 let at = tag.span.start;
+                if matches!(&tag.name[..], b"audio" | b"video") && !tag.self_closing {
+                    media_depth += 1;
+                }
                 if UNSUPPORTED_ELEMENTS.contains(&&tag.name[..]) {
                     out.unsupported.push((
                         source_offset(at),
@@ -234,8 +238,11 @@ fn scan(markdown: &str) -> Scan {
                 let link_attrs: &[&[u8]] = match &tag.name[..] {
                     b"a" | b"area" | b"link" => &[b"href"],
                     // The tree builder renames `<image>` to `<img>`.
-                    b"img" | b"image" | b"iframe" | b"embed" | b"source" | b"track" | b"audio"
-                    | b"video" | b"script" => &[b"src"],
+                    b"img" | b"image" | b"iframe" | b"embed" | b"track" | b"audio" | b"video"
+                    | b"script" => &[b"src"],
+                    // In `picture`, a `source` selects from `srcset`; its `src`
+                    // only fetches inside `audio` or `video`.
+                    b"source" if media_depth > 0 => &[b"src"],
                     // `src` applies only to the Image Button state; task list
                     // checkboxes and other inputs have no destination.
                     b"input"
@@ -276,6 +283,9 @@ fn scan(markdown: &str) -> Scan {
                 }
             }
             Ok(Token::EndTag(tag)) => {
+                if matches!(&tag.name[..], b"audio" | b"video") {
+                    media_depth = media_depth.saturating_sub(1);
+                }
                 // Only the generated end tag of the same level closes the
                 // heading: a raw `</h2>` inside `# Hello </h2> world` is text
                 // to the slug.
@@ -522,6 +532,30 @@ fn is_external(target: &str) -> bool {
     }
 }
 
+/// `base` (under `root`) joined with the relative `rel`, normalized
+/// lexically; None as soon as a `..` would step above `root`.
+fn resolve_within(root: &Path, base: &Path, rel: &Path) -> Option<PathBuf> {
+    let mut parts: Vec<PathBuf> = base
+        .strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .collect();
+    for c in rel.components() {
+        match c {
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::CurDir => {}
+            Component::Normal(name) => parts.push(PathBuf::from(name)),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    let mut out = root.to_path_buf();
+    out.extend(parts);
+    Some(out)
+}
+
 /// Lexically normalize `path` (no filesystem access), so `..` can be checked
 /// against the repository root.
 fn normalize(path: &Path) -> PathBuf {
@@ -672,12 +706,18 @@ pub fn check_tracked(
             let file_part = path_from_bytes(&percent_decode(
                 without_fragment.split('?').next().unwrap_or(""),
             ));
+            // `..` must not leave the repository even if a later component
+            // comes back in (`../<checkout name>/README.md`).
             let dest = if file_part.as_os_str().is_empty() {
-                path.clone()
+                Some(path.clone())
             } else if let Ok(from_root) = file_part.strip_prefix("/") {
-                normalize(&root.join(from_root))
+                resolve_within(&root, &root, from_root)
             } else {
-                normalize(&dir.join(&file_part))
+                resolve_within(&root, &dir, &file_part)
+            };
+            let Some(dest) = dest.filter(|d| d.starts_with(&root)) else {
+                errors.push(broken("points outside the repository".into()));
+                continue;
             };
             if !dest.starts_with(&root) {
                 errors.push(broken("points outside the repository".into()));
@@ -1281,6 +1321,40 @@ mod tests {
             .map(|e| e.target.clone())
             .collect();
         assert_eq!(got, ["<template>", "<select>", "<iframe>"]);
+    }
+
+    #[test]
+    fn source_src_counts_only_in_media() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<picture><source src=\"missing.png\"></picture>\n\n<video><source src=\"gone.mp4\"></video>\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["gone.mp4"]);
+    }
+
+    #[test]
+    fn links_may_not_leave_and_reenter_the_repository() {
+        let repo = TempRepo::new(&[
+            ("a.md", "# A\n"),
+            ("b.md", "[x](../repo/a.md)\n[y](sub/../a.md)\n"),
+        ]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| (e.target.clone(), e.reason.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [(
+                "../repo/a.md".to_string(),
+                "points outside the repository".to_string()
+            )]
+        );
     }
 
     #[test]
