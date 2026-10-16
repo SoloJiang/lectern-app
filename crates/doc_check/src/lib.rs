@@ -286,6 +286,23 @@ fn scan(markdown: &str) -> Scan {
                 {
                     urls.extend(srcset_urls(&String::from_utf8_lossy(&value.value)));
                 }
+                // A responsive image preload fetches from `imagesrcset`.
+                let attr_is = |name: &[u8], want: &[u8]| {
+                    tag.attributes
+                        .get(name)
+                        .is_some_and(|v| v.value.eq_ignore_ascii_case(want))
+                };
+                if &tag.name[..] == b"link"
+                    && attr_is(b"as", b"image")
+                    && tag.attributes.get(&b"rel"[..]).is_some_and(|v| {
+                        v.value
+                            .split(|b| b.is_ascii_whitespace())
+                            .any(|t| t.eq_ignore_ascii_case(b"preload"))
+                    })
+                    && let Some(value) = tag.attributes.get(&b"imagesrcset"[..])
+                {
+                    urls.extend(srcset_urls(&String::from_utf8_lossy(&value.value)));
+                }
                 for raw in urls {
                     let url = clean_url(&raw);
                     if !url.is_empty() {
@@ -413,19 +430,21 @@ fn srcset_urls(srcset: &str) -> Vec<String> {
             urls.push(url.trim_end_matches(',').to_string());
             continue;
         }
-        let mut depth = 0usize;
+        // HTML's "in parens" state does not nest: a second `(` is text and
+        // the first `)` ends it.
+        let mut in_parens = false;
         let mut cut = rest.len();
         let mut descriptors = Vec::new();
         let mut current = String::new();
         for (i, c) in rest.char_indices() {
             match c {
-                '(' => depth += 1,
-                ')' => depth = depth.saturating_sub(1),
-                ',' if depth == 0 => {
+                '(' => in_parens = true,
+                ')' => in_parens = false,
+                ',' if !in_parens => {
                     cut = i + 1;
                     break;
                 }
-                c if depth == 0 && is_space(c) => {
+                c if !in_parens && is_space(c) => {
                     if !current.is_empty() {
                         descriptors.push(std::mem::take(&mut current));
                     }
@@ -452,13 +471,10 @@ fn srcset_urls(srcset: &str) -> Vec<String> {
 fn valid_srcset_descriptors(descriptors: &[String]) -> bool {
     let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
     let positive_int = |s: &str| digits(s) && s.bytes().any(|b| b != b'0');
-    // HTML's floating-point syntax allows a leading `-`; a density must not be
-    // below zero, so only a negative zero (`-0x`) keeps the sign.
-    let float = |s: &str| {
-        let (negative, s) = match s.strip_prefix('-') {
-            Some(rest) => (true, rest),
-            None => (false, s),
-        };
+    // HTML's floating-point syntax allows a leading `-`; the parsed value
+    // (rounded, so `-1e-9999` is zero) must not be below zero.
+    let float = |text: &str| {
+        let s = text.strip_prefix('-').unwrap_or(text);
         let (mantissa, exponent) = match s.find(['e', 'E']) {
             Some(i) => (&s[..i], Some(&s[i + 1..])),
             None => (s, None),
@@ -468,9 +484,7 @@ fn valid_srcset_descriptors(descriptors: &[String]) -> bool {
             None => digits(mantissa),
         };
         let exponent_ok = exponent.is_none_or(|e| digits(e.strip_prefix(['+', '-']).unwrap_or(e)));
-        mantissa_ok
-            && exponent_ok
-            && !(negative && mantissa.bytes().any(|b| (b'1'..=b'9').contains(&b)))
+        mantissa_ok && exponent_ok && text.parse::<f64>().is_ok_and(|v| v >= 0.0)
     };
     let (mut width, mut density, mut height) = (false, false, false);
     for d in descriptors {
@@ -1589,17 +1603,40 @@ mod tests {
     }
 
     #[test]
-    fn invalid_srcset_candidates_are_dropped() {
+    fn image_preload_imagesrcset_is_checked() {
         let repo = TempRepo::new(&[(
             "b.md",
-            "<img src=\"b.md\" srcset=\"q.png 2q, h.png 50h, wx.png 100w 2x, n.png -1x, z.png 0w, ok-w.png 100w 50h, gone.png .5x, neg-zero.png -0x\">\n",
+            "<link rel=\"preload\" as=\"image\" imagesrcset=\"missing.png 1x\">\n\n<link rel=\"stylesheet\" imagesrcset=\"ignored.png\" href=\"b.md\">\n",
         )]);
         let got: Vec<_> = repo
             .check(&["b.md"])
             .iter()
             .map(|e| e.target.clone())
             .collect();
-        assert_eq!(got, ["ok-w.png", "gone.png", "neg-zero.png"]);
+        assert_eq!(got, ["missing.png"]);
+    }
+
+    #[test]
+    fn invalid_srcset_candidates_are_dropped() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<img src=\"b.md\" srcset=\"q.png 2q, h.png 50h, wx.png 100w 2x, n.png -1x, z.png 0w, ok-w.png 100w 50h, gone.png .5x, neg-zero.png -0x, tiny.png -1e-9999x, p.png foo((bar), after.png 1x\">\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "ok-w.png",
+                "gone.png",
+                "neg-zero.png",
+                "tiny.png",
+                "after.png"
+            ]
+        );
     }
 
     #[cfg(unix)]
