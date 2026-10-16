@@ -15,7 +15,7 @@ Lectern 先写设计、设计文档 PR 合并后再写代码（AGENTS.md「工�
    - 对应的 issue（`gh api repos/SoloJiang/lectern-app/issues/<n>`）。
    - [交互规范](../../../docs/design/interaction.md)和[技术调研](../../../docs/design/tech-research.md)里相关的章节，以及 crate AGENTS.md 列出的 ADR。
    - 依赖的其他 crate 的设计文档（已经写了的）。
-3. 复制 [模板](../../../docs/design/TEMPLATE.md) 为 `docs/design/<crate>.md`，<crate> 用目录名。按小节填写，删掉不适用的小节和模板开头的注释。
+3. `docs/design/<crate>.md` 不存在时，复制[模板](../../../docs/design/TEMPLATE.md)为这个文件（<crate> 用目录名），按小节填写，删掉不适用的小节和模板开头的注释。已经存在时直接修改现有文档，不要用模板覆盖。
    - 接口写 Rust 签名，标明调用线程和是否阻塞。
    - 解析外部格式的，写明格式来源和版本，并说明 fixtures 放什么。
    - 列出受影响的性能预算和需要的基准。

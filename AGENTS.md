@@ -60,7 +60,7 @@ CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
 
 ## 工作方式
 
-- 一个任务一个 issue，粒度控制在一个 crate 内。需要设计文档的任务分两个阶段，各用自己的 worktree、分支和 PR：先是设计文档 PR（`Refs #<n>`），合并后再开实现 PR（`Closes #<n>`）。不需要设计文档的任务只有一个 PR。
+- 一个任务一个 issue，粒度控制在一个 crate 内。需要设计文档的任务分两个阶段，各用自己的 worktree、分支和 PR：先是设计文档 PR（`Refs #<n>`），合并后再开实现 PR（`Closes #<n>`）。不需要设计文档的任务只有一个 PR。一个 issue 涉及多个 crate 时（如 #32 同时涉及 `usage`、`usage_view`、`platform`），各 crate 分别提 PR，只有最后完成的那个写 `Closes #<n>`，其余写 `Refs #<n>`。
 - 先写 `docs/design/<crate>.md`（接口与数据结构，按[模板](docs/design/TEMPLATE.md)），设计文档 PR 按合并规则合并后再写代码。需要产品决定的问题写进文档的「未决问题」并告诉人，其余由负责推进的 agent 决定。
 - 新增 crate 时同时写 `crates/<name>/AGENTS.md`（职责、边界、测试方式），并建软链接 `CLAUDE.md -> AGENTS.md`。
 - 领域逻辑用单元测试 + insta 快照验收；视图用 `#[gpui::test]`；视觉效果用 UI 探针。
