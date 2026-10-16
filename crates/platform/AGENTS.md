@@ -11,7 +11,7 @@ macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名�
 
 - 实现其他 crate 定义的接口（`fs_watch`、`kernel` 的插件宿主等），由 `app` 注入；不依赖这些 crate 的实现。
 - statusline 默认开启：用户已有 statusline 时保留原命令，Lectern 的脚本保存一份输入，再原样转发给原命令，关闭时恢复原配置（[ADR 0014](../../docs/adr/0014.md)）。
-- 为 Analyze 调用的 agent 命令行生成 Seatbelt 配置（[ADR 0019](../../docs/adr/0019.md)）：只读本次分析的输入、被审阅版本的只读快照（已提交的文件从 git 对象写出，叠加的工作区改动用 clonefile 并带 `CLONE_NOFOLLOW`，卷不支持时用 `copyfile` 带 `COPYFILE_NOFOLLOW_SRC` 复制，符号链接都重建为链接；只含受跟踪文件和本次改动的文件）、该 agent 的安装目录、运行它所需的解释器与依赖和固定的 macOS 运行时路径（`/System`、`/usr/lib`、`/bin`、`/usr/bin` 等）；子模块只写成空目录，不复制它的工作区；写出前检测只在大小写或 Unicode 规范化上不同的路径，有冲突时不生成快照；凭据文件和钥匙串一律拒绝，拒绝查看其他进程的信息（`process-info*`）；快照里的符号链接不跟随（ADR 0019）；网络只允许连接 `agents` 的凭据转发端点。
+- 为 Analyze 调用的 agent 命令行生成 Seatbelt 配置（[ADR 0019](../../docs/adr/0019.md)）：只读本次分析的输入、被审阅版本的只读快照（已提交的文件从 git 对象写出，叠加的工作区改动用 clonefile 并带 `CLONE_NOFOLLOW`，卷不支持时用 `copyfile` 带 `COPYFILE_NOFOLLOW_SRC` 复制，符号链接都重建为链接；只含受跟踪文件和本次改动的文件）、该 agent 的安装目录、运行它所需的解释器与依赖和固定的 macOS 运行时路径（`/System`、`/usr/lib`、`/bin`、`/usr/bin` 等）；子模块只写成空目录，不复制它的工作区；克隆后移除扩展属性、资源分叉和 ACL；只接受普通文件和符号链接（`lstat` 判断，FIFO、socket、设备文件不打开）；写出前对 git 树路径和叠加路径的并集检测只在大小写或 Unicode 规范化上不同的路径，有冲突时不生成快照；可写的只有本次分析的临时目录；凭据文件和钥匙串一律拒绝，拒绝查看其他进程的信息（`process-info*`）；快照里的符号链接不跟随（ADR 0019）；网络只允许连接 `agents` 的凭据转发端点。
 
 ## 测试
 
