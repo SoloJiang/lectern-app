@@ -2,7 +2,10 @@
 
 import unittest
 
-from check_architecture import TooComplex, apple_only_cfg, is_macos_binding_name
+import os
+from unittest import mock
+
+from check_architecture import apple_only_cfg, cargo_rustflags, is_macos_binding_name
 
 
 class AppleOnlyCfg(unittest.TestCase):
@@ -20,7 +23,8 @@ class AppleOnlyCfg(unittest.TestCase):
             'cfg(any(target_os = "macos", false))',
             'cfg(all(target_os = "macos", true))',
             'cfg(any(target_os = "macos", all(unix, not(target_family = "unix"))))',
-            'cfg(all(target_os = "macos", feature = "metal"))',
+            'cfg(any(target_os = "macos", feature = "metal"))',
+            'cfg(any(target_os = "macos", test))',
         ):
             with self.subTest(target=target):
                 self.assertTrue(apple_only_cfg(target))
@@ -36,7 +40,7 @@ class AppleOnlyCfg(unittest.TestCase):
             'cfg(all(target_os = "macos", target_os = "linux"))',
             "x86_64-unknown-linux-gnu",
             'cfg(all(unix, target_family = "unix", target_family = "wasm"))',
-            'cfg(any(target_os = "macos", feature = "x"))',
+            'cfg(all(target_os = "macos", feature = "metal"))',
             'cfg(any(target_os = "linux", false))',
             "cfg(true)",
             "cfg(false)",
@@ -47,10 +51,24 @@ class AppleOnlyCfg(unittest.TestCase):
                 self.assertFalse(apple_only_cfg(target))
 
 
-    def test_too_complex_fails_closed(self):
-        features = ", ".join(f'feature = "f{i}"' for i in range(20))
-        with self.assertRaises(TooComplex):
-            apple_only_cfg(f'cfg(all(target_os = "macos", any({features})))')
+
+
+class CargoRustflags(unittest.TestCase):
+    def test_env_overrides_config(self):
+        with mock.patch.dict(os.environ, {"CARGO_ENCODED_RUSTFLAGS": "-Ctarget-feature=+avx512f\x1f-Dwarnings"}):
+            self.assertEqual(cargo_rustflags("x86_64-unknown-linux-gnu"), ["-Ctarget-feature=+avx512f", "-Dwarnings"])
+        with mock.patch.dict(os.environ, {"CARGO_ENCODED_RUSTFLAGS": "", "RUSTFLAGS": "-C target-feature=+avx512f"}):
+            self.assertEqual(cargo_rustflags("x86_64-unknown-linux-gnu"), ["-C", "target-feature=+avx512f"])
+
+    def test_target_feature_flag_makes_predicate_portable(self):
+        predicate = 'cfg(any(target_os = "macos", target_feature = "avx512f"))'
+        self.assertTrue(apple_only_cfg(predicate, [(True, {("target_os", "macos")}), (False, {("target_os", "linux")})]))
+        self.assertFalse(
+            apple_only_cfg(
+                predicate,
+                [(True, {("target_os", "macos")}), (False, {("target_os", "linux"), ("target_feature", "avx512f")})],
+            )
+        )
 
 
 class BindingNames(unittest.TestCase):
