@@ -14,7 +14,7 @@
 - blob OID 按仓库的哈希算法取完整长度（SHA-1 为 40 位、SHA-256 为 64 位），不假定固定长度。
 - 工作区 diff 包含未跟踪文件，但不写用户的 index。单个文件的 diff 超过大小上限时，只保留文件头和增删行数，并标记为截断；Analyze 需要时，截断文件改动前的那一版按版本取出（ADR 0019）。整个 diff 也有上限（默认 5000 个文件、合计 50 MB patch），超过时其余文件只列出路径和改动类型，显示截断的数量。
 - 读取仓库时不执行仓库配置的任何外部程序（textconv、外部 diff、clean / process 过滤器、`core.fsmonitor` 钩子），直接读对象和工作区文件；index 的 stat 信息只用来跳过能确定未改动的文件，不能确定时（如 racy-clean 的条目）比较内容。git 内置、不执行外部程序的转换（`text` / `eol` 换行、`ident`、`working-tree-encoding`）用 gix 按属性在比较前应用；设置了 clean / process 过滤器的文件（如 Git LFS）在不执行过滤器时无法与 index 正确比较，标为「使用了过滤器，暂不支持比较」，不按原始字节生成 diff。不得不调用 git 命令行时，除了 `--no-ext-diff --no-textconv` 还要关闭 fsmonitor 和过滤器，或者在不能执行仓库程序的沙箱里运行。
-- 读工作区文件时用 `O_NOFOLLOW | O_NONBLOCK` 打开，对这个描述符 `fstat` 判断类型，之后从同一个描述符读取，不按路径再打开一次；只读普通文件和符号链接（`ELOOP` 时用 `readlinkat`），FIFO、socket、设备文件拒绝（`O_NONBLOCK` 让 FIFO 的打开不会阻塞），diff 里标为「不支持的文件类型」。
+- 读工作区文件时从 worktree 根目录描述符出发，用 `O_NOFOLLOW_ANY | O_NONBLOCK` 打开（路径中间某一级被换成符号链接时打开失败，不读到 worktree 之外），对这个描述符 `fstat` 判断类型，之后从同一个描述符读取，不按路径再打开一次；只读普通文件和符号链接（`ELOOP` 时用 `readlinkat`），FIFO、socket、设备文件拒绝（`O_NONBLOCK` 让 FIFO 的打开不会阻塞），diff 里标为「不支持的文件类型」。
 - 不往仓库的对象库里写任何东西：未跟踪文件直接读出来与空内容比较，不用 `git add --intent-to-add`。
 - 工作区的指纹由基准树 OID 和每个改动文件的路径、改动状态、新旧文件模式、完整内容（符号链接为目标）的哈希组成，在按上限截断 diff 之前计算，被截断、只列出路径的文件也计入，用来判断缓存的结果是否过期。Analyze 用的 diff 和指纹从它的快照计算，不从可能还在变化的工作区计算（ADR 0019）。设计依据见 [pulls.review 调研](../../docs/research/pulls-review.md#对-lectern-的建议)。
 
