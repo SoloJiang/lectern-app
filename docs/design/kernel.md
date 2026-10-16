@@ -200,14 +200,16 @@ pub enum GatePoll { Run, Wait, Drop }
 impl GateSlot {
     /// 一个原子操作，不拆成「先查状态、再登记」：在闸门的互斥锁内先把 `cx.waker()` 存进槽位（替换上一次的），
     /// 再读闸门状态和 token，然后才释放锁。kernel 改变状态时先写入新状态（闸门打开或关闭在同一把锁内写，
-    /// token 的 `Dead` 是原子写），再取这把锁、唤醒全部槽位里的 waker。所以检查和状态变化无论怎样交错，
+    /// token 的 `Dead` 是原子写），再取这把锁、把全部槽位里的 waker 克隆出来，释放锁之后才逐个调用 `wake`（executor 可能在 `wake` 里同步调度甚至 poll，重新进入 `GateSlot::poll`，持锁唤醒会死锁）。所以检查和状态变化无论怎样交错，
     /// 这次 `poll` 要么已经看到新状态，要么它登记的 waker 一定会被唤醒，不会漏掉唤醒、一直停在 `Pending`。
     pub fn poll(&self, cx: &mut std::task::Context<'_>) -> GatePoll;
 
     /// executor 在 poll 任务的 future 时用 `catch_unwind` 包住，panic 时调用这个方法再丢弃 future（丢弃同样用 `catch_unwind` 包住）。
     /// kernel 按 `fail` 的方式让这个任务所属的激活失效：插件进入 `Failed`，连带停用的插件同步失效，
     /// 所以任务 panic 不会展开到 executor 的工作线程，也不会让插件在初始化中断后仍显示为 `Active`、被报告为静止。
-    /// 激活已经失效时只记日志。
+    /// 激活已经失效时只记日志。`payload` 由这个方法接管：先取出可读的消息（`&str` / `String`）记入日志，
+    /// 再在 `catch_unwind` 里 drop；这次 drop 又 panic 时，第二个 payload 用 `mem::forget` 泄漏，不再 drop，
+    /// 所以 `Drop` 会 panic 的 payload 也不会展开到 executor 或 kernel 线程。executor 自己不保留、不 drop 这个 payload。
     pub fn panicked(&self, payload: Box<dyn std::any::Any + Send>);
 }
 
@@ -225,11 +227,14 @@ impl PluginHandle {
     pub fn own(&self, guard: impl Send + 'static) -> bool;
 
     /// 先检查这次激活仍然存活，再调用 `start` 提交工作（如 `executor.spawn`），把返回的句柄交给 kernel 保管。
-    /// 检查、调用和登记都在这次激活的守卫表的互斥锁内完成，不等待准入计数，所以在监听里调用
-    /// （此时已持有准入）也不会与等待准入归零的停用互相等待。撤销第 4 步取同一把互斥锁后先把表标为关闭，
-    /// 之后的 `own_with` 看到关闭或 token 为 `Dead` 时不调用 `start`，返回 false。`start` 只做提交，不得再调用 `own_with`。
+    /// 分三步，都不等待准入计数，所以在监听里调用（此时已持有准入）也不会与等待准入归零的停用互相等待：
+    /// 1. 取这次激活的守卫表的互斥锁，表已关闭或 token 为 `Dead` 时释放锁、不调用 `start`，返回 false；否则新建一个关着的闸门，释放锁。
+    /// 2. 不持锁调用 `start`，所以 `start` 里可以调用这个句柄的其他方法（`own`、`own_with`、`busy`），不会在同一把锁上死锁。
+    /// 3. 再取这把锁：表仍未关闭、token 不是 `Dead` 时登记返回的句柄、打开闸门，返回 true；
+    ///    否则（`start` 运行期间撤销第 4 步已把表标为关闭）释放锁后关闭闸门、在 `catch_unwind` 里 drop 句柄，返回 false。
+    ///    闸门一直关着，所以这时已经提交的任务一次也没运行，随闸门关闭被丢弃。
     /// 插件提交后台任务应使用这个方法，而不是先提交再 `own`。
-    /// `start` 在互斥锁内用 `catch_unwind` 包住：panic 时先正常释放互斥锁（不让锁中毒），再按 `fail` 的方式让这次激活失效
+    /// `start` 用 `catch_unwind` 包住：panic 时关闭闸门，按 `fail` 的方式让这次激活失效
     /// （插件进入 `Failed`，连带停用的插件同步失效），返回 false，panic 不会展开到调用方。
     /// 在 `started` 里调用时（token 还是 `Pending`），`start` 暂存到 token 变为 `Live` 之后再调用，激活失败时丢弃，返回 true 表示已经接受。
     /// `start` 收到一个 `SubmitGate`，提交任务时交给 executor（见「撤销」里的后台任务）：任务在闸门打开之前不会被 poll，
@@ -390,7 +395,7 @@ pub struct PluginStatus {
     pub manifest_time: Option<Duration>,    // `Kernel::start` 时调用 manifest 的耗时（只调用一次）
     pub activate_time: Option<Duration>,    // 最近一次 activate 的耗时
     pub commit_time: Option<Duration>,      // 最近一次提交的耗时
-    pub started_time: Option<Duration>,     // 最近一次 started 的耗时（同步执行的部分，加上之后发出暂存事件、调用暂存 start 的时间）
+    pub started_time: Option<Duration>,     // 最近一次 started 的耗时（同步执行的部分，加上之后发出暂存事件、调用暂存 start、同步发出 ServiceAdded 并执行其监听的时间）
 }
 ```
 
@@ -403,7 +408,7 @@ pub struct PluginStatus {
 pub trait Event: Send + Sync + 'static {}
 
 #[derive(Clone)]
-pub struct Emitter { /* Weak<Kernel> */ }
+pub struct Emitter { /* Weak<Kernel>, Option<ActivationToken>（来自 PluginHandle 时为发出方这次激活的 token，app 的为 None） */ }
 
 impl Emitter {
     /// 来自 `PluginHandle::emitter()` 的 Emitter 在分发期间持有发出方这次激活的准入（`token.enter()`）：
@@ -481,7 +486,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - `emit` 在调用线程上同步分发，按订阅顺序调用监听。
 - 分发前先取出监听列表的快照（`Arc<[Handler]>`），不持注册表的锁调用。监听里可以订阅、退订、发事件：
   - 订阅与退订从下一次 `emit` 起生效；
-  - 监听里发出的事件排在当前分发之后，在同一线程上依次处理，不会递归。排队的事件带上发出它的监听所属激活的 token，轮到它分发时先 `token.enter()` 取准入，取到的准入持有到这次分发的全部监听返回为止；取不到（发出它的激活已经失效，例如那个监听随后 panic）时丢弃，不通知其他插件。只检查状态不够：检查之后、分发期间，另一个线程可能让发出它的激活失效，持有准入时停用的第 3 步会等这次分发结束，失效之后的事件不会再送达。
+  - 监听里发出的事件排在当前分发之后，在同一线程上依次处理，不会递归。排队的事件带上发出它的那个 `Emitter` 的 token（不是正在执行的监听的 token：A 的监听通过服务方法调用了 B 的 `Emitter` 时，排队的是 B 的 token），轮到它分发时先 `token.enter()` 取准入，取到的准入持有到这次分发的全部监听返回为止；取不到（发出方这次激活已经失效）时丢弃，不通知其他插件。`app` 的 `Emitter` 没有 token，它的排队事件不受任何插件失效影响。只检查状态不够：检查之后、分发期间，另一个线程可能让发出它的激活失效，持有准入时停用的第 3 步会等这次分发结束，失效之后的事件不会再送达。
 - 快照里可能有已停用插件的监听。每个监听带上所属激活的 `ActivationToken`，调用前取准入（`token.enter()`）：
   - token 属于一次激活，不属于插件：每次激活新建一个，变为 `Dead` 后不再恢复；插件重新激活时用新的 token。所以分发线程即使拿着旧快照停顿，等插件重新激活后再检查，看到的仍是旧激活的 `Dead`，不会调用上一次激活的监听；
   - 取不到准入（token 是 `Pending` 或 `Dead`）就跳过这个监听；取到就调用，调用期间一直持有准入；
@@ -534,7 +539,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 ## 性能
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
-- 激活耗时：每个插件的 `manifest()`（`Kernel::start` 时调用一次）、`activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分，加上 token 变为 `Live` 之后在 kernel 线程上发出暂存事件、调用暂存 `start` 的时间）由 kernel 分别计时，结果在 `status()` 里，预算按四者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
+- 激活耗时：每个插件的 `manifest()`（`Kernel::start` 时调用一次）、`activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分，加上 token 变为 `Live` 之后在 kernel 线程上发出暂存事件、调用暂存 `start`，以及为这次激活提供的服务同步发出 `ServiceAdded` 并执行其监听的时间）由 kernel 分别计时，结果在 `status()` 里，预算按四者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
 - 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件需要一份匹配它们全部 pattern 的 `WorkspaceFacts`：bench 在两次启动里都加入同一个合成的 `bench-facts` 插件（`AfterFirstFrame` 激活，在 `started` 里通过 `control().workspace_changed` 提交这份 facts，`test-support` feature 提供），两次的差不受它影响；`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `ServiceRef` / `ServiceSet`，保存在激活内的状态对象里（见「激活的提交」）。`ServiceRef::get()` 的开销是一次准入（两次原子操作）；`ServiceSet::for_each` 每个提供者一次准入、不分配；`ServiceSet::current()` 另外分配一个 `Vec`。两种多实现路径都在 bench 里按 1、4、16 个提供者测量。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
@@ -565,7 +570,10 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 命令：两个插件声明同一个命令名时 `validate` 报错；停用一个正在等待依赖的命令插件，挂起的 `done` 收到 `Disabled`。
 - 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
 - 暂存效果：暂存的第一个事件让这次激活失效后，后面暂存的事件不再发出、`start` 不再调用（已经发出的第一个事件不回滚，激活按 `Live` 之后的失败停用）；暂存的 `start` panic 时插件进入 `Failed`，kernel 线程继续运行。
-- `own_with` 的 `start` panic：互斥锁没有中毒，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
+- `own_with` 的 `start` panic：闸门关闭、任务一次也没运行，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
+- `own_with` 的 `start` 里调用同一个句柄的 `own`、`own_with`：不死锁，守卫都登记上；`start` 运行期间另一个线程完成撤销：返回的句柄被 drop、闸门关闭，任务一次也没运行，`own_with` 返回 false。
+- 嵌套事件的来源：A 的监听通过 B 的 `Emitter` 发出事件后 B 失效、A 仍存活：排队的事件被丢弃；A 失效、B 仍存活：事件照常送达。
+- 闸门唤醒：executor 在 `wake` 里同步 poll 任务时不死锁；任务以 `Drop` 会 panic 的 payload panic 时，executor 和 kernel 线程都继续运行。
 - 主线程回调 panic：Action 或视图工厂 panic 时主线程没有展开，插件进入 `Failed`，之后不再被调用。
 - 孤儿任务：`start` 提交任务后 panic，任务一次也没有被 poll 就被丢弃；已经挂起（返回 `Pending`）的任务在激活失效时被唤醒并丢弃，它持有的 `BusyGuard` 随之释放，kernel 能回到静止。
 - 暂存闭包的 drop：丢弃的暂存 `start` 闭包在 drop 时 panic，kernel 线程继续运行，撤销照常完成。
