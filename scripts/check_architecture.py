@@ -10,6 +10,9 @@ Rules checked:
      directly or transitively.
   4. macOS system bindings are direct dependencies of `platform` only.
 
+Optional dependencies are included (`cargo metadata --all-features`), so a
+rule broken behind a feature flag still fails.
+
 Exit status is 1 when any rule is broken.
 
 With --gpui-free-packages, print `-p <crate>` for every crate that builds
@@ -23,28 +26,30 @@ import sys
 RANK = {"app": 4, "view": 3, "domain": 2, "infra": 1}
 GPUI_FREE_LAYERS = {"domain", "infra", "kernel"}
 GPUI_PREFIXES = ("gpui",)
-MACOS_ONLY = {
+# macOS system bindings, matched by name prefix so that -sys crates and new
+# objc2-* framework crates are covered without listing each one.
+MACOS_ONLY_PREFIXES = (
     "objc",
-    "objc2",
-    "objc2-foundation",
-    "objc2-app-kit",
     "cocoa",
-    "cocoa-foundation",
     "core-foundation",
-    "core-foundation-sys",
     "core-graphics",
     "core-text",
+    "core-video",
     "fsevent",
-    "fsevent-sys",
     "security-framework",
     "metal",
-}
+    "dispatch",
+    "block2",
+    "io-kit",
+    "mach2",
+    "mach-sys",
+)
 PLATFORM_CRATE = "lectern-platform"
 
 
 def metadata():
     out = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked"],
+        ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features"],
         check=True,
         capture_output=True,
         text=True,
@@ -110,7 +115,7 @@ def main():
                     errors.append(f"{name} ({mine}) -> {dep_name} ({theirs}): dependencies must point downwards")
                 elif mine == "kernel" and theirs not in ("kernel", None):
                     errors.append(f"{name} (kernel) -> {dep_name} ({theirs}): kernel crates depend only on kernel crates")
-            elif dep_name in MACOS_ONLY and packages[pid]["name"] != PLATFORM_CRATE:
+            elif dep_name.startswith(MACOS_ONLY_PREFIXES) and packages[pid]["name"] != PLATFORM_CRATE:
                 errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE}")
 
     for pid in members:
