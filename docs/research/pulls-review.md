@@ -153,7 +153,7 @@ pulls.review 是 pnpm workspace，包含四个包：
 
 - 一次 `fetch` 并行请求 PR 信息、文件列表（分页，GitHub 上限 3000 个文件）和提交列表（上限 250 个）。
 - 文件没有 `patch` 字段时，拉一次完整的 `.diff` 重新解析；GitHub 对超大 PR 返回 406 时，取两个版本的 blob 在本地计算 diff。
-- `fingerprint` 就是 `head.sha`。
+- `fingerprint` 就是 `head.sha`。base 分支前进而 PR 没有新提交时，head 不变，但合并基点和显示的改动可能已经变了，这种情况下缓存的分析仍被当作最新。
 - 没有 ETag、条件请求、重试和退避，遇到限流直接报错。
 
 ### 本地 git 来源
@@ -161,7 +161,7 @@ pulls.review 是 pnpm workspace，包含四个包：
 `packages/core/src/local/source.ts` 和 `git.ts`：
 
 - 调用 `git` 不经过 shell，设置 `LC_ALL=C`，diff 参数固定：`-c core.quotePath=false diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ --full-index -M`。`--full-index` 输出完整的 blob OID（SHA-1 仓库 40 位，SHA-256 仓库 64 位），所以哈希算法相同时，本地和 GitHub 上的已看标记可以互相匹配。
-- 包含未跟踪文件的方法是：把 `.git/index` 复制到临时文件，通过 `GIT_INDEX_FILE` 对副本执行 `git add --intent-to-add`，再做 diff。用户的 index 不受影响。
+- 包含未跟踪文件的方法是：用 `git rev-parse --git-path index` 找到当前 worktree 的 index（linked worktree 的 index 不在 `.git/index`），复制到临时文件，复制失败时（如还没有提交的新仓库）从空 index 开始；再通过 `GIT_INDEX_FILE` 对副本执行 `git add --intent-to-add`，然后做 diff。用户的 index 不受影响。
 - 单个文件的 patch 超过 512 KB 时，只保留文件头和增删行数，标记 `truncated`。
 - 工作区的指纹是 `worktree:` 加上 sha256(基准 + diff 文本)，任何编辑或 HEAD 移动都会改变它。
 - `loadFile` 拒绝解析到仓库外的路径。
@@ -231,16 +231,16 @@ Action 推荐用 `pull_request_target` 触发，理由是它只通过 API 读 di
 | 已看标记的键包含审阅对象（会话或比较范围）、路径和改动前后两个 blob OID；同一审阅对象和路径的新 OID 变化时，标为「审过之后又被改过」，界面显示为第三种状态并提供重新标记。OID 按仓库的哈希算法取完整长度，不假定 40 位 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 标为已看后折叠该文件，与快捷键 V 的跳转配合 | `review_view` | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 维护一份噪声文件模式列表（生成文件、lockfile、快照），同时用于默认折叠、规则分组和模型输入 | `review` 或 `git` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#21](https://github.com/SoloJiang/lectern-app/issues/21) |
-| 全量高亮：hunk 用完整文件的高亮结果切片，不单独高亮 hunk；完整文件的高亮按 blob OID 缓存 | `git` 设计文档 | [#14](https://github.com/SoloJiang/lectern-app/issues/14) |
+| 全量高亮：hunk 用完整文件的高亮结果切片，不单独高亮 hunk；完整文件的高亮按 blob OID 加语言和 grammar / 高亮查询的版本缓存，同样的内容在不同语言的文件里不会命中错误的结果，grammar 升级后旧结果失效 | `git` 设计文档 | [#14](https://github.com/SoloJiang/lectern-app/issues/14) |
 | 工作区 diff 包含未跟踪文件，但不写用户的 index；单文件设大小上限并标记截断；工作区指纹用基准树 OID 加 diff 内容的哈希 | `git` 设计文档 | [#14](https://github.com/SoloJiang/lectern-app/issues/14) |
 | 识别不了会话日志、或改动不属于任何会话时，用有序 glob 规则表分组，取代平铺的文件列表；规则用 `globset` 实现，首帧后计算 | `review`、`project_home` | [#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#30](https://github.com/SoloJiang/lectern-app/issues/30) |
 | 会话简报里「值得先看的几处」采用 `critical` 加文件备注、行备注的结构；行备注只挂在 diff 里显示的行上 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 任何模型输出都走同一套校验：结构校验、覆盖检查、一次纠错重试、对账、未分类兜底 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
-| 调用 Claude Code、Codex 生成简报时，用只读参数启动无界面进程，在单独的会话里运行，不续接正在审阅的会话，避免在该会话里多出审阅轮次。这个辅助会话不能出现在会话列表里：可用时用不保存会话的调用方式（如 Claude Code 的 `--no-session-persistence`），否则记录它的会话 ID，会话发现时过滤掉 | `agents` 或 `executor` 设计文档 | [#13](https://github.com/SoloJiang/lectern-app/issues/13) |
+| 调用 Claude Code、Codex 生成简报时，用只读参数启动无界面进程，在单独的会话里运行，不续接正在审阅的会话，避免在该会话里多出审阅轮次。这个辅助会话不能出现在会话列表里：可用时用不保存会话的调用方式（如 Claude Code 的 `--no-session-persistence`），否则记录它的会话 ID，会话发现时过滤掉。pulls.review 不限制这类进程的轮数和时长，Lectern 要设超时，用户离开或取消时终止子进程并回收 | `agents` 或 `executor` 设计文档 | [#13](https://github.com/SoloJiang/lectern-app/issues/13) |
 | 模型结果的缓存键是完整分析请求的哈希：规范化后的提示词（含标题、描述、prompt 摘录、输出语言）、排序后的（路径，blob OID）列表、schema 版本和模型 ID；只缓存模型结果，规则结果每次重算 | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
 | 缓存放在 `~/Library/Caches` 下，按仓库的 git 公共目录路径区分，同一仓库的 worktree 共用，且不在用户的 `.git` 里写文件（pulls.review 写在 `.git` 公共目录下） | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
 | 来源接口按能力定义：必需的取 diff，加上可选的指纹、加载完整文件、审阅评论、共享结果；视图按能力决定功能 | `forge` 设计文档 | [#25](https://github.com/SoloJiang/lectern-app/issues/25) |
-| MR 视图请求 GitHub 时处理限流和条件请求，pulls.review 没有做 | `forge` 设计文档 | [#25](https://github.com/SoloJiang/lectern-app/issues/25) |
+| MR 视图请求 GitHub 时处理限流和条件请求，pulls.review 没有做。MR 的指纹同时包含 head 和 base（或合并基点），base 前进时缓存的结果按过期处理 | `forge` 设计文档 | [#25](https://github.com/SoloJiang/lectern-app/issues/25) |
 | 设计文档模板增加状态行（计划中、进行中、已实现并列出 PR）、每步的「完成标准」、「实际验证过什么」（区分 Linux CI 和 macOS 实测）、实现后的「与设计的差异」 | `docs/design/TEMPLATE.md` | 无 |
 | AGENTS.md 写明实现以已合并的设计文档为准：实现中需要改设计时，在同一个 PR 里修改设计文档（改架构的另写 ADR）并写明原因，不让代码先偏离设计再补文档。pulls.review 反过来以代码为准，它的文档因此持续落后于代码，而 Lectern 要求设计先经审阅。CI 检查文档间的链接都能打开 | `AGENTS.md`、`just check` | 无 |
 | clippy 的 `disallowed-methods`、`disallowed-types` 在 `reason` 里写明对应的架构规则或 ADR；开启 `allow_attributes_without_reason` | `clippy.toml`、`just check` | 无 |
