@@ -51,7 +51,7 @@ layer = "domain"
 | domain | `usage` | token 去重与聚合、价格表、额度快照（[ADR 0014](../adr/0014.md)） |
 | domain | `forge` | GitHub 与 GitLab 的 MR 与 CI 状态 |
 | infra | `cache` | 内容寻址 SQLite 缓存 |
-| infra | `fs_watch` | FSEvents 监听，按 git index 过滤 |
+| infra | `fs_watch` | 与平台无关的文件监听接口，事件按 git index 过滤；FSEvents 后端由 `platform` 实现这个接口，`app` 装配时注入 |
 | infra | `executor` | 后台任务，UI 线程之外的 IO 与解析 |
 | infra | `platform` | macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、statusline 安装 |
 | infra | `i18n` | Fluent 资源与语言切换（[ADR 0013](../adr/0013.md)） |
