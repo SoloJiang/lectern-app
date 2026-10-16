@@ -143,6 +143,7 @@ impl PluginHandle {
     /// 声明有尚未完成的工作，守卫移进任务，任务结束时 drop（见「静止」）。这次激活已停用时返回 None。
     pub fn busy(&self) -> Option<BusyGuard>;
 
+    /// 带激活代数的 Emitter：这次激活停用后（包括之后重新激活），通过它发出的事件直接丢弃。
     pub fn emitter(&self) -> Emitter;
     pub fn is_active(&self) -> bool;
 }
@@ -201,9 +202,12 @@ impl Kernel {
     /// 用户在设置里停用或重新启用插件。停用会连带停用依赖它所提供服务的插件。
     pub fn set_enabled(&self, id: &str, enabled: bool);
 
-    /// 退出时按依赖的相反顺序停用全部插件。
-    pub fn shutdown(&self);
+    /// 退出时按依赖的相反顺序停用全部插件。撤销全部完成、kernel 线程退出后调用 `done`。
+    /// `app` 在 `applicationShouldTerminate:` 里返回 `NSTerminateLater`，`done` 被调用（或等满 2 秒）后
+    /// 再 `replyToApplicationShouldTerminate:`。等待期间主线程照常运行，需要在主线程上执行的守卫 drop 不会死锁。
+    pub fn shutdown(&self, done: impl FnOnce() + Send + 'static);
 
+    /// 不属于任何插件的 Emitter（`app` 用），不随插件停用失效。
     pub fn emitter(&self) -> Emitter;
     pub fn status(&self) -> Vec<PluginStatus>;   // 设置页和 bench 读取
 
@@ -221,7 +225,8 @@ pub trait WorkspaceFacts: Send + Sync {
 pub struct PluginStatus {
     pub id: Name,
     pub state: PluginState,                 // Inactive / Active / Disabled / Failed(PluginError)
-    pub activation_time: Option<Duration>,  // 最近一次 activate 的耗时
+    pub activate_time: Option<Duration>,    // 最近一次 activate 的耗时
+    pub started_time: Option<Duration>,     // 最近一次 started 的耗时（只算同步执行的部分）
 }
 ```
 
@@ -257,7 +262,7 @@ impl Emitter {
 - 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布，调用 `started`，然后按依赖顺序激活后续插件。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
-- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 满足这一点：新注册的视图、Action、快捷键要到下一帧才应用到界面上，激活失败时守卫在这之前已经 drop，失败的注册不会出现在界面上。
+- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 满足这一点：新注册的视图、Action、快捷键要到下一帧才应用到界面上，激活失败时守卫在这之前已经 drop，失败的注册不会出现在界面上。`workspace` 本身是插件，收到注册时用自己的 `PluginHandle::busy()` 取一个守卫，在主线程上应用完这批注册后 drop，所以 kernel 在界面注册生效之前不会报告静止。
 
 ### 撤销
 
@@ -338,7 +343,7 @@ impl Emitter {
 ## 性能
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
-- 激活耗时：每个插件的 `activate` 由 kernel 计时，结果在 `status()` 里。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
+- 激活耗时：每个插件的 `activate` 和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按两者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
 - 常驻内存在同一进程里无法准确地按插件区分。bench 用只含一个插件（及其依赖）的 `PluginSet` 启动，所得 `phys_footprint` 减去空集合的值；`PluginSet` 支持这种组合。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出并保存需要的 `Arc`，使用时直接用保存的 `Arc`。
 - 事件分发不分配内存（监听快照是 `Arc` 克隆），没有监听时只有一次查表。
@@ -351,7 +356,9 @@ impl Emitter {
 - 激活的提交：
   - `activate` 先 `provide` 再返回错误时，并发的依赖者和事件分发都看不到这个提供者和它的监听，`started` 不被调用；
   - `activate` 返回 `Ok` 但缺少清单里声明的服务时，按失败处理。
-- 句柄：停用后旧的 `PluginHandle` 上 `own` 立即 drop 守卫并返回 false，`on` 不订阅，`busy` 返回 None；重新激活后旧句柄仍然无效。
+- 句柄：停用后旧的 `PluginHandle` 上 `own` 立即 drop 守卫并返回 false，`on` 不订阅，`busy` 返回 None，从它取得的 `Emitter` 发出的事件被丢弃；重新激活后旧句柄仍然无效。
+- 退出：`shutdown` 的 `done` 在全部撤销完成、kernel 线程退出后调用；需要在主线程 drop 的守卫在等待期间完成。
+- 静止与界面注册：只注册了 `Contributions` 的插件，在注册应用到界面之前 kernel 不静止。
 - 线程：所有 `activate` / `started` / 守卫 drop 都在 kernel 线程上执行，公开方法在调用线程上立即返回。
 - 按命令激活：`command` 的 `done` 在激活提交后被调用一次；已激活时立即调用；失败时收到错误。
 - 启动：`Kernel::start` 之前没有任何插件代码运行。
