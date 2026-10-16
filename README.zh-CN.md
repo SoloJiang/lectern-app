@@ -4,7 +4,7 @@
 
 **读懂 agent 写的代码。**
 
-Lectern 是一个原生 macOS 应用，用来审阅 Claude Code 和 Codex 替你写的代码。它不是编辑器，而是你坐下来读代码的地方：你让它做什么，它做了什么，做得对不对。
+Lectern 是一个原生 macOS 应用（Apple Silicon），用来审阅 Claude Code 和 Codex 替你写的代码。它不是编辑器，而是你坐下来读代码的地方：你让它做什么，它做了什么，做得对不对。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
@@ -24,7 +24,7 @@ Lectern 是一个原生 macOS 应用，用来审阅 Claude Code 和 Codex 替你
 
 会话按轮次展开：你的 prompt、agent 的说明、它产生的 diff，依次排列。改动对应到引发它的那一轮，很少需要猜某一行为什么变了。会话结束后被人改过的行会单独标出，你知道哪些不是 agent 写的；Lectern 不认识的会话格式会退回到按文件的普通 diff。
 
-- **看到影响面。** 上下文面板列出每个改动符号的调用方和测试，并标出 agent 漏改的调用方。
+- **看到影响面。** 上下文面板列出改动符号的调用方和测试，并标出 agent 没有同步修改的调用方。它基于本地的快速索引；Java 的精确结果来自你手动开启的可选语言服务器。
 - **把意见发回去。** 边读边在代码行上写意见，攒成一批，带着文件和行号一次发回会话，agent 下一轮就能接着改。
 - **滤掉噪音。** 只改格式的部分自动折叠，看过的文件保持标记。
 
@@ -51,7 +51,7 @@ Lectern 是一个原生 macOS 应用，用来审阅 Claude Code 和 Codex 替你
 以下是 Lectern 开发时遵守的预算（[ADR 0017](docs/adr/0017.md)、[ADR 0018](docs/adr/0018.md)），CI 基准会用它们检查每一次改动。
 
 - **秒开。** 20 ms 内画出第一帧，其余内容随后加载。
-- **轻。** 打开窗口时内存低于 60 MB，打开大型 monorepo 也低于 100 MB；后台不常驻语言服务器或运行时。
+- **轻。** 打开窗口时内存低于 60 MB，打开大型 monorepo 也低于 100 MB；语言服务器只在你开启时启动、空闲即关，也没有常驻的运行时。
 - **小。** 安装包不到 80 MB。其他语言、代码平台和 agent 适配在项目需要时才从插件市场下载，运行代码的插件都在沙箱里，只拥有它声明的权限。
 - **原生。** 系统字体、系统颜色和系统控件，浅色与深色，动效遵循 macOS。
 
@@ -60,6 +60,7 @@ Lectern 是一个原生 macOS 应用，用来审阅 Claude Code 和 Codex 替你
 - **Agent：** Claude Code 与 Codex，读取它们的本地会话文件
 - **代码平台：** GitHub 与 GitLab（含自部署）
 - **界面语言：** English 与简体中文
+- **Mac：** Apple Silicon
 
 ## 状态
 

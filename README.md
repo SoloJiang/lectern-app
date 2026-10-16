@@ -4,7 +4,7 @@ English · [简体中文](README.zh-CN.md)
 
 **Read what your agents wrote.**
 
-Lectern is a native macOS app for reviewing the code that Claude Code and Codex write for you. It isn't an editor. It's where you sit down to read: what you asked for, what the agent did, and whether it's right.
+Lectern is a native macOS app (Apple Silicon) for reviewing the code that Claude Code and Codex write for you. It isn't an editor. It's where you sit down to read: what you asked for, what the agent did, and whether it's right.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
@@ -24,7 +24,7 @@ Open a folder or repository and Lectern shows what needs your attention: the age
 
 Each session unfolds turn by turn: your prompt, the agent's explanation, and the diff it produced, in that order. Changes are tied to the turn that caused them, so you rarely have to guess why a line moved. Lines edited after the session are marked as such, so you know what the agent didn't write; sessions in a format Lectern doesn't recognize fall back to a plain file-by-file diff.
 
-- **See the impact.** The context panel lists callers and tests of every changed symbol, and flags callers the agent missed.
+- **See the impact.** The context panel lists callers and tests of changed symbols, and flags callers the agent didn't update. It works from a fast local index; for Java, precise results come from an optional language server you turn on.
 - **Send notes back.** Comment on lines as you read. Notes collect into one batch and go back to the session with file and line, ready for the agent's next turn.
 - **Hide the noise.** Formatting-only changes fold away, and files you've reviewed stay marked.
 
@@ -51,7 +51,7 @@ Tokens per session and per turn, the API-equivalent cost, and how much of your C
 These are the budgets Lectern is built against ([ADR 0017](docs/adr/0017.md), [ADR 0018](docs/adr/0018.md)); CI benchmarks will hold every change to them.
 
 - **Opens instantly.** First frame on screen in under 20 ms; everything else loads after.
-- **Light.** Under 60 MB of memory with a window open, under 100 MB with a large monorepo. No language servers or runtimes running in the background.
+- **Light.** Under 60 MB of memory with a window open, under 100 MB with a large monorepo. No language server starts unless you ask for one, and it shuts down when idle; no runtimes stay resident.
 - **Small.** The app is under 80 MB. Extra languages, forges and agent adapters download from the plugin marketplace only when a project needs them, and plugins that run code are sandboxed to the permissions they declare.
 - **Native.** System fonts, colors and controls, light and dark, with motion that follows macOS.
 
@@ -60,6 +60,7 @@ These are the budgets Lectern is built against ([ADR 0017](docs/adr/0017.md), [A
 - **Agents:** Claude Code and Codex, read from their local session files
 - **Forges:** GitHub and GitLab, including self-hosted
 - **Languages:** English and Simplified Chinese
+- **Macs:** Apple Silicon
 
 ## Status
 
