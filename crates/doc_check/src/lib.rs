@@ -158,12 +158,15 @@ fn render(markdown: &str) -> Rendered {
 }
 
 /// Links, anchors and heading texts of a document, read from its rendered
-/// HTML in one pass of an HTML-standard tokenizer (html5gum). Raw HTML and
-/// Markdown are therefore seen exactly as a browser sees them: character
-/// references are decoded, comments are skipped, and everything inside
-/// `script`, `style` and other raw-text elements (including an unclosed or
-/// self-closed one, and the escaped states of `script`) is text, so links and
-/// headings there do not exist. `plaintext` swallows the rest of the document.
+/// HTML in one pass of an HTML-standard tokenizer (html5gum) with naive state
+/// switching: character references are decoded, comments are skipped, and
+/// everything inside `script`, `style` and other raw-text elements (including
+/// an unclosed or self-closed one, and the escaped states of `script`) is text,
+/// so links and headings there do not exist. `plaintext` swallows the rest of
+/// the document. Tree construction is not modelled, which only matters inside
+/// foreign content: `<svg>` and `<math>` change how CDATA and raw-text elements
+/// are parsed. Those are reported instead of being read the wrong way (see
+/// [`foreign_content`]).
 #[derive(Default)]
 struct Scan {
     /// Destinations with source byte offsets.
@@ -172,6 +175,8 @@ struct Scan {
     ids: Vec<String>,
     /// Text of each Markdown heading, in order.
     headings: Vec<String>,
+    /// Source byte offsets of `<svg>` and `<math>` start tags.
+    foreign: Vec<usize>,
 }
 
 fn scan(markdown: &str) -> Scan {
@@ -192,6 +197,9 @@ fn scan(markdown: &str) -> Scan {
         match token {
             Ok(Token::StartTag(tag)) => {
                 let at = tag.span.start;
+                if matches!(&tag.name[..], b"svg" | b"math") {
+                    out.foreign.push(source_offset(at));
+                }
                 if is_heading(&tag.name)
                     && (rendered.headings.contains(&at)
                         || at
@@ -248,6 +256,15 @@ fn scan(markdown: &str) -> Scan {
         }
     }
     out
+}
+
+/// Source byte offsets of inline `<svg>` and `<math>` elements. Their content
+/// is parsed as foreign content, which a tokenizer without tree construction
+/// cannot follow (CDATA sections, `style` and `script` that are not raw text),
+/// so links inside could be missed; the checker rejects them and documents use
+/// image files instead.
+pub fn foreign_content(markdown: &str) -> Vec<usize> {
+    scan(markdown).foreign
 }
 
 /// Rendered text of every Markdown heading, in order: text, inline code and
@@ -391,6 +408,31 @@ fn tracked_route(root: &Path, path: &Path, tracked: &HashSet<PathBuf>) -> bool {
     true
 }
 
+/// The Markdown README GitHub shows for `dir`: `README.md` or
+/// `README.markdown` in any letter case, tracked when `tracked` is given; the
+/// first in byte order when several exist.
+fn directory_readme(
+    root: &Path,
+    dir: &Path,
+    tracked: Option<&HashSet<PathBuf>>,
+) -> Option<PathBuf> {
+    let mut names: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.eq_ignore_ascii_case("readme.md") || n.eq_ignore_ascii_case("readme.markdown")
+            })
+        })
+        .filter(|p| match tracked {
+            Some(set) => p.strip_prefix(root).is_ok_and(|r| set.contains(r)),
+            None => true,
+        })
+        .collect();
+    names.sort();
+    names.into_iter().next()
+}
+
 fn is_external(target: &str) -> bool {
     // A scheme is letters, digits, `+`, `-`, `.` before the first `:`, and
     // comes before any `/`, `?` or `#`.
@@ -484,6 +526,21 @@ pub fn check_tracked(
             });
             continue;
         }
+        // A tracked Markdown symlink must reach a tracked file through tracked
+        // paths only, or it is broken in a fresh checkout. Checked on the name
+        // given, before deduplication, so an untracked hop is not hidden by
+        // canonicalization.
+        if let Some(set) = &tracked
+            && !tracked_route(&root, &normalize(&root.join(rel)), set)
+        {
+            errors.push(BrokenLink {
+                file: rel.clone(),
+                line: 1,
+                target: rel.display().to_string(),
+                reason: "file is a symlink to a file not tracked by git".into(),
+            });
+            continue;
+        }
         // Each file once, whichever name reached it first.
         if !done.insert(path.clone()) {
             continue;
@@ -498,16 +555,6 @@ pub fn check_tracked(
             target: rel.display().to_string(),
             reason,
         };
-        // A tracked Markdown symlink must point at a tracked file, or it is
-        // broken in a fresh checkout.
-        if let Some(set) = &tracked
-            && !set.contains(&rel)
-        {
-            errors.push(input_error(
-                "file is a symlink to a file not tracked by git".into(),
-            ));
-            continue;
-        }
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             // Deleted in the working tree but not yet committed: nothing to check.
@@ -523,8 +570,19 @@ pub fn check_tracked(
             }
         };
         let dir = path.parent().unwrap_or(&root).to_path_buf();
+        for offset in foreign_content(&text) {
+            errors.push(BrokenLink {
+                file: rel.clone(),
+                line: text[..offset].matches('\n').count() + 1,
+                target: "<svg>/<math>".into(),
+                reason: "inline SVG or MathML cannot be checked for links; use an image file"
+                    .into(),
+            });
+        }
         for (offset, target) in links(&text) {
-            if is_external(&target) || target.starts_with('/') {
+            // `//host/x` is a network-path reference; a single leading slash
+            // is relative to the repository root on GitHub.
+            if is_external(&target) || target.starts_with("//") {
                 continue;
             }
             let line = text[..offset].matches('\n').count() + 1;
@@ -546,6 +604,8 @@ pub fn check_tracked(
             ));
             let dest = if file_part.as_os_str().is_empty() {
                 path.clone()
+            } else if let Ok(from_root) = file_part.strip_prefix("/") {
+                normalize(&root.join(from_root))
             } else {
                 normalize(&dir.join(&file_part))
             };
@@ -581,9 +641,20 @@ pub fn check_tracked(
                 errors.push(broken("not tracked by git".into()));
                 continue;
             }
-            let dest = real;
+            let mut dest = real;
             let Some(fragment) = fragment else { continue };
-            if fragment.is_empty() || !is_markdown(&dest) || !dest.is_file() {
+            if fragment.is_empty() {
+                continue;
+            }
+            // GitHub renders a directory's README below its listing, so
+            // `docs/#section` points into that README.
+            if dest.is_dir() {
+                match directory_readme(&root, &dest, tracked.as_ref()) {
+                    Some(readme) => dest = readme,
+                    None => continue,
+                }
+            }
+            if !is_markdown(&dest) || !dest.is_file() {
                 continue;
             }
             let set = anchors.entry(dest.clone()).or_insert_with(|| {
@@ -1007,6 +1078,90 @@ mod tests {
                 ("hop/guide.md", "not tracked by git"),
                 ("docs/guide.md#nope", "no heading with anchor #nope"),
             ]
+        );
+    }
+
+    #[test]
+    fn root_relative_links_resolve_from_the_repository_root() {
+        let repo = TempRepo::new(&[
+            ("docs/guide.md", "# Guide\n"),
+            (
+                "sub/b.md",
+                "[ok](/docs/guide.md#guide)\n[gone](/missing.md)\n[net](//example.com/x)\n",
+            ),
+        ]);
+        let got: Vec<_> = repo
+            .check(&["sub/b.md"])
+            .iter()
+            .map(|e| (e.target.clone(), e.reason.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [("/missing.md".to_string(), "file not found".to_string())]
+        );
+    }
+
+    #[test]
+    fn inline_svg_and_math_are_reported() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "Text\n\n<svg><![CDATA[x > <a href=\"missing.md\">]]></svg>\n\n<math></math>\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| (e.line, e.target.clone()))
+            .collect();
+        assert_eq!(
+            got[..2],
+            [
+                (3, "<svg>/<math>".to_string()),
+                (5, "<svg>/<math>".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_fragments_check_the_readme() {
+        let repo = TempRepo::new(&[
+            ("docs/README.md", "# Docs\n"),
+            ("plain/a.txt", "x"),
+            (
+                "b.md",
+                "[ok](docs/#docs)\n[bad](docs/#nope)\n[skip](plain/#x)\n",
+            ),
+        ]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["docs/#nope"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn markdown_symlinks_through_untracked_hops_fail() {
+        let repo = TempRepo::new(&[("real.md", "# Real\n")]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("real.md", base.join("intermediate.md")).unwrap();
+        std::os::unix::fs::symlink("intermediate.md", base.join("alias.md")).unwrap();
+        let tracked: Vec<PathBuf> = ["alias.md", "real.md"].iter().map(PathBuf::from).collect();
+        let errors = check_tracked(
+            &base,
+            &[PathBuf::from("alias.md"), PathBuf::from("real.md")],
+            Some(&tracked),
+        );
+        let got: Vec<_> = errors
+            .iter()
+            .map(|e| (e.file.display().to_string(), e.reason.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [(
+                "alias.md".to_string(),
+                "file is a symlink to a file not tracked by git"
+            )]
         );
     }
 
