@@ -54,7 +54,7 @@ AI 让写代码的成本大幅下降，人的时间转移到读懂和把关上�
 | P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析、影响面、结构化 Diff、评论回传 | G3：Java 跳转可日常用 |
 | P3 Agent 原生化 | 4 周起 | ACP 对话面板、MR 视图、依赖源码、权限请求 UI | — |
 
-进度见 [Milestones](https://github.com/SoloJiang/lectern/milestones) 与 [docs/roadmap.md](docs/roadmap.md)。
+进度见 [Milestones](https://github.com/SoloJiang/lectern-app/milestones) 与 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 文档
 
