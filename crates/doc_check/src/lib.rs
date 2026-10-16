@@ -848,7 +848,14 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         let repo = TempRepo::new(&[("b.md", "[x](asset-%FF.bin)\n")]);
         let name = std::ffi::OsStr::from_bytes(b"asset-\xff.bin");
-        fs::write(repo.0.join("repo").join(name), "x").unwrap();
+        if let Err(e) = fs::write(repo.0.join("repo").join(name), "x") {
+            // APFS and HFS+ store only UTF-8 names, so such a path cannot
+            // exist on macOS; the byte handling is covered on Linux.
+            if cfg!(target_vendor = "apple") {
+                return;
+            }
+            panic!("{e}");
+        }
         assert_eq!(repo.check(&["b.md"]), []);
     }
 
