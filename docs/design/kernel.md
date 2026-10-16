@@ -70,9 +70,9 @@ pub fn service<S: Service + ?Sized>() -> ServiceKey;
 /// 名称：内置插件用 `&'static str`，进程插件用从清单文件读出的 `String`，不泄漏内存。
 pub type Name = Cow<'static, str>;
 
+/// 插件的 ID 不在清单里，而是在加入 `PluginSet` 时给出（见「内核」），
+/// 这样 `manifest()` panic 时 kernel 仍知道是哪个插件失败了。
 pub struct Manifest {
-    /// 全局唯一，如 "lang-java"、"session-claude-code"。
-    pub id: Name,
     /// 激活成功时必须全部提供（见「激活的提交」）。
     pub provides: Vec<ServiceKey>,
     pub requires: Vec<ServiceKey>,
@@ -201,7 +201,8 @@ pub struct PluginSet { /* Vec<Arc<dyn Plugin>> */ }
 
 impl PluginSet {
     pub fn new() -> Self;
-    pub fn with(self, plugin: impl Plugin) -> Self;
+    /// `id` 全局唯一，如 "lang-java"、"session-claude-code"；进程插件的 ID 由插件宿主从安装目录取得。
+    pub fn with(self, id: impl Into<Name>, plugin: impl Plugin) -> Self;
 
     /// 检查依赖图：插件 ID 不重复；`Command` 激活条件里的命令名在所有插件间不重复；每个服务的稳定 ID 只对应一个 TypeId 和一种 MULTIPLE；
     /// 每个 requires 在本集合里都有提供者；MULTIPLE = false 的服务只有一个提供者；
@@ -299,13 +300,13 @@ impl Emitter {
 - 一个服务（不论 `MULTIPLE` 是否为 true）的最后一个已激活的提供者停用时，依赖它的插件先停用（依赖者先于被依赖者）。
 - `MULTIPLE = true` 的服务：依赖者激活后，提供者的增减不重新激活依赖者。依赖者通过 `ServiceSet<S>` 读取当前集合，集合在提供者增减时随即更新；需要在变化时做额外处理的，订阅 `ServiceAdded<S>` 和 `ServiceRemoved<S>` 事件（带提供者的插件 ID）。
 - 依赖者不得把 `ServiceSet::current()` 里的 `Arc<S>` 保存到本次调用之外，否则提供者停用后仍会被调用。
-- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除 `Command` 和 `Manual` 的记录；`Workspace` 条件不记在插件上，kernel 保存最近一次的 `WorkspaceFacts`，插件重新启用（包括 `Failed` 后在设置里重试）时用它重新判断。还在等待的 `command` 回调立即收到 `PluginError::Disabled`，`shutdown` 时收到 `PluginError::ShuttingDown`，不会一直挂起。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
+- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除 `Command` 和 `Manual` 的记录；`Workspace` 条件不记在插件上，kernel 保存最近一次的 `WorkspaceFacts`，插件重新启用（包括 `Failed` 后在设置里重试）时用它重新判断。还在等待的 `command` 回调立即收到 `PluginError::Disabled`，`shutdown` 时收到 `PluginError::ShuttingDown`；插件所依赖的某个服务的所有提供者都已 `Failed` 或被停用（本次运行中不会再就绪）时，收到 `PluginError::DependencyUnavailable`。回调不会一直挂起。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
 
 ### 激活的提交
 
 - `activate` 执行期间，`provide`、`on`、`own` 登记的内容只暂存在本次激活里：服务不进入 `ServiceSet` 和 `service()` 的结果，监听不参与分发。
 - `activate` 返回 `Ok` 后，kernel 先检查清单 `provides` 里的每个服务都已 `provide`；缺任何一个都按激活失败处理（`PluginError::MissingService`），否则依赖者会因为等不到这个服务而一直不激活。
-- 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布（提交），然后调用 `started`，再按依赖顺序激活后续插件。
+- 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布（提交），然后调用 `started`。`started` 正常返回、而且期间没有通过 `fail` 或监听 panic 把插件标为失败时，kernel 才把因它而满足条件的后续插件放进队列；否则按失败停用，后续插件不激活。
 - 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只开始后台工作（提交任务、发事件），这些副作用都发生在提交之后，不会出现「副作用已经发生、激活却回滚」的情况。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
@@ -328,6 +329,8 @@ impl Emitter {
 后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后提交任务，用 `PluginHandle::own` 交出句柄。停用后，任务不再向视图交出结果；停用之后才提交的任务，`own` 返回 false 并立即取消。
 
 ### 失败
+
+kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时），以及 kernel 释放的插件对象的 drop（服务实现、守卫、`Active`）。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
 
 - `activate` 返回错误或 panic：
   - 这次激活已登记的内容全部撤销；
@@ -394,7 +397,7 @@ impl Emitter {
 ## 性能
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
-- 激活耗时：每个插件的 `activate`、提交（检查清单、发布服务和监听、更新快照、为后续插件排队）和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按三者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
+- 激活耗时：每个插件的 `activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按三者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
 - 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `Arc`，保存在激活内的状态对象里（见「激活的提交」），使用时直接用保存的 `Arc`。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
@@ -411,7 +414,10 @@ impl Emitter {
 - 退出：`shutdown` 的 `done` 在全部撤销完成、kernel 线程退出后调用；需要在主线程 drop 的守卫在等待期间完成。
 - 静止与界面注册：只注册了 `Contributions` 的插件，在注册应用到界面之前 kernel 不静止。
 - 线程：所有 `activate` / `started` / 守卫 drop 都在 kernel 线程上执行，公开方法在调用线程上立即返回。
-- 清单：某个插件的 `manifest` panic 时，它进入 `Failed`，其余插件照常激活。
+- 清单：某个插件的 `manifest` panic 时，按 `PluginSet` 里给出的 ID 把它标为 `Failed`，其余插件照常激活。
+- panic 隔离：`Staged::commit`、服务实现的 drop 各自 panic 时，插件进入 `Failed`，撤销照常完成。
+- 后续插件：`started` 里调用 `fail` 时，依赖它的插件不会被激活。
+- 命令：依赖的服务再也不会就绪时，挂起的 `done` 收到 `DependencyUnavailable`。
 - 命令：两个插件声明同一个命令名时 `validate` 报错；停用一个正在等待依赖的命令插件，挂起的 `done` 收到 `Disabled`。
 - 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
 - 失败：监听 panic 后，同一次分发里它所属插件后面的监听不再被调用；`PluginHandle::fail` 让插件进入 `Failed` 并停用；`Active` 的 drop panic 时撤销照常完成。
