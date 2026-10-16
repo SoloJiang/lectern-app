@@ -120,10 +120,10 @@ pub fn headings(markdown: &str) -> Vec<String> {
     out
 }
 
-/// Whether `path` has a Markdown extension (`.md`, any case).
+/// Whether `path` has a Markdown extension (`.md` or `.markdown`, any case).
 pub fn is_markdown(path: &Path) -> bool {
     path.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        .is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
 /// `href` and `src` values in a piece of raw HTML, with their byte offsets
@@ -142,10 +142,16 @@ fn html_destinations(html: &str) -> Vec<(usize, String)> {
             if let Some(value) = tag.attributes.get(name)
                 && !value.value.is_empty()
             {
-                out.push((
-                    tag.span.start,
-                    String::from_utf8_lossy(&value.value).into_owned(),
-                ));
+                // URL parsing strips leading and trailing C0 controls and
+                // spaces, and removes tabs and newlines anywhere.
+                let url: String = String::from_utf8_lossy(&value.value)
+                    .trim_matches(|c: char| c <= ' ')
+                    .chars()
+                    .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+                    .collect();
+                if !url.is_empty() {
+                    out.push((tag.span.start, url));
+                }
             }
         }
     }
@@ -570,6 +576,25 @@ mod tests {
         let errors = repo.check(&["b.md"]);
         let targets: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(targets, ["x.md"]);
+    }
+
+    #[test]
+    fn markdown_extension_is_recognized() {
+        assert!(is_markdown(Path::new("README.markdown")));
+        assert!(is_markdown(Path::new("GUIDE.MD")));
+        assert!(!is_markdown(Path::new("notes.txt")));
+    }
+
+    #[test]
+    fn html_url_whitespace_is_stripped() {
+        let repo = TempRepo::new(&[
+            ("guide.md", "# G\n"),
+            (
+                "b.md",
+                "<a href=\" guide.md \">ok</a> <a href=\"gu\nide.md\">ok</a>\n",
+            ),
+        ]);
+        assert_eq!(repo.check(&["b.md"]), []);
     }
 
     #[test]

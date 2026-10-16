@@ -57,7 +57,7 @@ python3 scripts/check_architecture.py
 
 ## 文档链接检查
 
-tool crate `lectern-doc-check`（`cargo run -p lectern-doc-check`）检查仓库里所有受 git 跟踪的 Markdown 文件的相对链接：目标文件必须存在且在仓库之内，`#锚点` 必须对应目标文件里的某个标题（按 GitHub 生成锚点的规则计算，区分大小写）。Markdown 用 pulldown-cmark 按 CommonMark 解析，所以引用式链接、容器里的标题、代码块与代码片段、HTML 注释都按渲染结果处理；原始 HTML 里的 `href` / `src` 用 html5gum 按 HTML 标准分词后检查。不靠正则逐条适配。目标必须受 git 跟踪，符号链接按解析后的路径再检查一次。外部 URL 不检查，查询参数在查找文件前去掉。设计文档、ADR、AGENTS.md 之间的链接改名或删节后失效，这一步会让 `just check` 失败。单元测试在 crate 里，随 `just test` 运行。
+tool crate `lectern-doc-check`（`cargo run -p lectern-doc-check`）检查仓库里所有受 git 跟踪的 Markdown 文件（`.md`、`.markdown`，不分大小写）的相对链接：目标文件必须存在且在仓库之内，`#锚点` 必须对应目标文件里的某个标题（按 GitHub 生成锚点的规则计算，区分大小写）。Markdown 用 pulldown-cmark 按 CommonMark 解析，所以引用式链接、容器里的标题、代码块与代码片段、HTML 注释都按渲染结果处理；原始 HTML 里的 `href` / `src` 用 html5gum 按 HTML 标准分词后检查。不靠正则逐条适配（依赖选型见 [ADR 0021](../adr/0021.md)）。目标必须受 git 跟踪，符号链接按解析后的路径再检查一次。外部 URL 不检查，查询参数在查找文件前去掉。设计文档、ADR、AGENTS.md 之间的链接改名或删节后失效，这一步会让 `just check` 失败。单元测试在 crate 里，随 `just test` 运行。
 
 ## 许可证与来源
 

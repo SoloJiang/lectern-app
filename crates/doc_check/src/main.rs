@@ -29,7 +29,8 @@ fn path_from_bytes(bytes: &[u8]) -> PathBuf {
 
 fn main() -> ExitCode {
     let result = git(&["rev-parse", "--show-toplevel"]).and_then(|root| {
-        let root = path_from_bytes(root.trim_ascii_end());
+        // Drop only git's newline: a directory name may end in spaces.
+        let root = path_from_bytes(root.strip_suffix(b"\n").unwrap_or(&root));
         // List every tracked file and filter by extension here: pathspecs are
         // case-sensitive, so `*.md` would miss `GUIDE.MD`.
         let list = Command::new("git")
