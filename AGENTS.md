@@ -41,6 +41,8 @@ just ci      # 全量，等同 CI
 
 只改领域逻辑时用 `cargo check -p <crate>`，不必编译 GPUI。
 
+架构规则检查：`python3 scripts/check_architecture.py`；许可证与来源：`cargo deny check`。CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
+
 ## 工作方式
 
 - 一个任务一个 worktree、一个 issue、一个分支、一个 PR，粒度控制在一个 crate 内。

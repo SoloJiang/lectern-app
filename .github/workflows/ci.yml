@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Fast checks that do not need macOS: formatting, architecture rules,
+  # licenses, and clippy + tests for every crate that builds without GPUI.
+  checks:
+    name: Checks (Linux, GPUI-free crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Architecture rules
+        run: python3 scripts/check_architecture.py
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Licenses, sources and advisories
+        run: cargo deny --locked check
+      - name: Clippy
+        run: cargo clippy --locked $(python3 scripts/check_architecture.py --gpui-free-packages) --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked $(python3 scripts/check_architecture.py --gpui-free-packages)
+
+  # Full workspace, including GPUI, on Apple Silicon.
+  macos:
+    name: Build and test (macOS arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Metal toolchain
+        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked --workspace
+      - name: Build app
+        run: cargo build --locked -p lectern-app

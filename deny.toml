@@ -1,0 +1,49 @@
+# cargo-deny configuration. Run with `cargo deny check`.
+# AGENTS.md rule 8: no GPL code. Only permissive licenses (and MPL-2.0,
+# which is file-level copyleft and safe to link) are allowed.
+
+[graph]
+targets = ["aarch64-apple-darwin"]
+all-features = false
+
+[licenses]
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "BSL-1.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+# Vulnerabilities always fail. "Unmaintained" notices only fail for our own
+# direct dependencies: the current ones (instant, paste, rustybuzz,
+# ttf-parser) come in through GPUI and cannot be replaced from here.
+unmaintained = "workspace"
+yanked = "warn"
