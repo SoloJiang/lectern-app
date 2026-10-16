@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use unicode_normalization::char::is_combining_mark;
 
 /// A link that does not resolve.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,15 +50,15 @@ fn options() -> Options {
         | Options::ENABLE_TASKLISTS
 }
 
-/// GitHub's heading anchor: lowercase, keep letters, digits, `-` and `_`,
-/// turn spaces into `-`, drop everything else.
+/// GitHub's heading anchor: lowercase, keep letters, digits, combining marks,
+/// `-` and `_`, turn spaces into `-`, drop everything else.
 pub fn slug(text: &str) -> String {
     text.chars()
         .flat_map(char::to_lowercase)
         .filter_map(|c| match c {
             ' ' => Some('-'),
             '-' | '_' => Some(c),
-            c if c.is_alphanumeric() => Some(c),
+            c if c.is_alphanumeric() || is_combining_mark(c) => Some(c),
             _ => None,
         })
         .collect()
@@ -174,17 +175,25 @@ fn normalize(path: &Path) -> PathBuf {
 
 /// Check the given Markdown files (paths relative to `root`).
 pub fn check(root: &Path, files: &[PathBuf]) -> Vec<BrokenLink> {
-    let root = normalize(&std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()));
+    // Work with canonical paths throughout, so a symlinked file (crates/*/CLAUDE.md
+    // -> AGENTS.md) resolves its links from where its target lives.
+    let root = fs::canonicalize(root).unwrap_or_else(|_| {
+        normalize(&std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf()))
+    });
     let mut anchors: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     let mut done = HashSet::new();
     let mut errors = Vec::new();
     for rel in files {
-        let path = root.join(rel);
-        // crates/*/CLAUDE.md are symlinks to AGENTS.md: check each file once.
-        let real = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        if !done.insert(real) {
+        let joined = root.join(rel);
+        let path = fs::canonicalize(&joined).unwrap_or(joined);
+        // Each file once, whichever name reached it first.
+        if !done.insert(path.clone()) {
             continue;
         }
+        let rel = path
+            .strip_prefix(&root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| rel.clone());
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
         };
@@ -278,6 +287,7 @@ mod tests {
             slug("Build and test (macOS arm64)"),
             "build-and-test-macos-arm64"
         );
+        assert_eq!(slug("Cafe\u{301}"), "cafe\u{301}");
         let s = |v: &[&str]| unique_slugs(v.iter().map(|s| s.to_string()));
         assert_eq!(s(&["Foo", "Foo-1", "Foo"]), ["foo", "foo-1", "foo-2"]);
         assert_eq!(s(&["A", "A", "A"]), ["a", "a-1", "a-2"]);
@@ -322,6 +332,22 @@ mod tests {
             ),
         ]);
         assert_eq!(repo.check(&["a.md", "docs/b.md"]), []);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_file_resolves_from_its_target() {
+        let repo = TempRepo::new(&[
+            ("docs/guide.md", "[child](child.md)\n"),
+            ("a/child.md", "# Decoy\n"),
+        ]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("../docs/guide.md", base.join("a/alias.md")).unwrap();
+        // The alias comes first. Its link resolves next to docs/guide.md, where
+        // child.md is missing, not next to the alias, where a decoy exists.
+        let errors = repo.check(&["a/alias.md", "docs/guide.md"]);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].file, PathBuf::from("docs/guide.md"));
     }
 
     #[test]
