@@ -2,109 +2,75 @@
 
 [English](README.md) · 简体中文
 
-> AI 写，人读。打开项目，先看 agent 改了什么。
+**读懂 agent 写的代码。**
 
-AI 让写代码的成本大幅下降，人的时间转移到读懂和把关上。Lectern（讲台 / 阅读架）是一个原生 macOS 应用，用来审阅 coding agent 写的代码。它不是编辑器：打开项目或文件夹后，首先看到的是这个项目里等你审的 Claude Code / Codex 会话；审阅时按轮次读「你说了什么 → agent 做了什么 → 改了哪些代码」，有问题就把审阅意见批量发回会话。原生支持 monorepo 与多 worktree，界面英文优先、支持中文。
-
-**状态：P0 搭建中，尚无可用版本。**
-
-## 设计稿
-
-以下是[交互设计](docs/design/interaction.md)的设计稿截图，应用本身尚未实现。截图随系统的浅色 / 深色设置切换。
-
-**审阅会话.** 按轮次读一个会话：你的 prompt、agent 的说明、它产生的 diff。在代码行上写审阅意见；上下文面板列出改动符号的调用方与测试。
+Lectern 是一个原生 macOS 应用，用来审阅 Claude Code 和 Codex 替你写的代码。它不是编辑器，而是你坐下来读代码的地方：你让它做什么，它做了什么，做得对不对。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
-  <img src="docs/images/review-light.png" alt="审阅会话">
+  <img src="docs/images/review-light.png" alt="在 Lectern 里审阅一个 Claude Code 会话">
 </picture>
 
-**项目主页.** 打开项目后先看到等你审的会话、还在运行的 agent，以及不属于任何会话的改动。
+## 从项目开始
+
+打开一个文件夹或仓库，Lectern 先告诉你哪里需要你：等你审的 agent 会话、还在运行的会话，以及不属于任何会话的改动。monorepo 和 git worktree 开箱即用。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/overview-dark.png">
-  <img src="docs/images/overview-light.png" alt="项目主页">
+  <img src="docs/images/overview-light.png" alt="项目主页：等待审阅的会话">
 </picture>
 
-**并行总览.** 多个 worktree 里并行运行的 agent，改动并排对比，有重叠时提示。
+## 像读故事一样读会话
+
+会话按轮次展开：你的 prompt、agent 的说明、它产生的 diff，依次排列。每处改动都对应引发它的那一轮，不用猜某一行为什么变了。会话结束后被人改过的行会单独标出，你知道哪些不是 agent 写的。
+
+- **看到影响面。** 上下文面板列出每个改动符号的调用方和测试，并标出 agent 漏改的调用方。
+- **把意见发回去。** 边读边在代码行上写意见，攒成一批，带着文件和行号一次发回会话，agent 下一轮就能接着改。
+- **滤掉噪音。** 只改格式的部分自动折叠，看过的文件保持标记。
+
+## 看着多个 agent 并行
+
+在不同 worktree 里同时跑几个 agent，并排看它们：各自改了什么、领先多少提交、有没有两个在改同一批文件。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">
-  <img src="docs/images/worktrees-light.png" alt="并行总览">
+  <img src="docs/images/worktrees-light.png" alt="多个 worktree 并行运行 agent">
 </picture>
 
-**用量.** 每天、每个会话的 token，API 等价成本，以及 Codex 与 Claude Code 的额度窗口。
+## 知道花了多少
+
+每个会话、每一轮的 token，API 等价成本，以及 Codex 和 Claude Code 的额度用了多少。Claude Code 的状态栏直接把数据交给 Lectern，额度窗口实时更新。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/usage-dark.png">
-  <img src="docs/images/usage-light.png" alt="用量">
+  <img src="docs/images/usage-light.png" alt="用量：每天的 token 与额度窗口">
 </picture>
 
-**打开项目.** 从文件夹或仓库开始；agent 历史里出现过的项目也会列出来。
+## 快，而且是地道的 Mac 应用
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/welcome-dark.png">
-  <img src="docs/images/welcome-light.png" alt="打开项目">
-</picture>
+- **秒开。** 20 ms 内画出第一帧，其余内容随后加载。
+- **轻。** 打开窗口时内存低于 60 MB，打开大型 monorepo 也低于 100 MB；后台不常驻语言服务器或运行时。
+- **小。** 安装包不到 80 MB。其他语言、代码平台和 agent 适配在项目需要时才从插件市场下载，运行代码的插件都在沙箱里，只拥有它声明的权限。
+- **原生。** 系统字体、系统颜色和系统控件，浅色与深色，动效遵循 macOS。
 
-## 它帮你回答这些问题
+## 支持
 
-| 问题 | Lectern 的做法 | 阶段 |
-|---|---|---|
-| 改了什么？ | 按 agent 会话、按轮次切分改动，从 Claude Code / Codex 的会话记录还原每次修改 | P1 |
-| 为什么改？ | 每个改动块旁显示触发它的 prompt 和 agent 的说明，可跳回会话原文 | P1 |
-| 影响到哪？ | 对改动涉及的符号自动列出调用方与相关测试 | P2 |
-| 花了多少？ | 每个会话、每一轮的 token；Codex 与 Claude Code 的额度窗口 | P1 / P2 |
-| 改得对不对？ | 结构化 Diff、逐文件标记「已看」、终端里一键跑测试 | P2 |
-| 怎么让 agent 改？ | 在代码行上写审阅意见，攒成一批，带文件与行号一次发回会话 | P1 |
+- **Agent：** Claude Code 与 Codex，读取它们的本地会话文件
+- **代码平台：** GitHub 与 GitLab（含自部署）
+- **界面语言：** English 与简体中文
 
-## 技术路线
+## 状态
 
-单进程纯 Rust，首发只支持 macOS（Apple Silicon）。
+Lectern 处于早期开发阶段，还不能使用。上面的截图来自[交互设计](docs/design/interaction.md)，随系统的浅色 / 深色设置切换。
 
-| 层 | 选型 |
-|---|---|
-| UI 框架 / 组件 | [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) + [gpui-component](https://github.com/longbridge/gpui-component) |
-| 终端 | [libghostty-vt](https://github.com/ghostty-org/ghostty) 内核 + GPUI 自绘网格 |
-| 高亮 / 索引 | tree-sitter |
-| Git / Diff | gix + imara-diff |
-| Agent | 解析 Claude Code / Codex 本地 JSONL 会话；后期接 ACP |
-| 代码平台 | GitHub 与 GitLab（含自部署） |
+## 参与开发
 
-架构「一切皆插件」：内核只管插件装载、依赖和生命周期，内置插件编译期链接，第三方插件以独立进程接入。
-
-## 性能预算（M 系列 Mac，目标值）
-
-| 指标 | 预算 |
-|---|---|
-| 冷启动到首帧 | < 150 ms |
-| 打开项目到项目主页可用 | < 100 ms |
-| 打开文件到首屏高亮 | < 16 ms |
-| 打开一个会话的 Diff | < 50 ms |
-| 切换 worktree / 分支 | < 100 ms |
-| 空闲内存 | < 150 MB |
-| 滚动与输入 | 稳定 120 fps |
-
-## 路线图
-
-| 阶段 | 工期 | 内容 | 出口关卡 |
-|---|---|---|---|
-| P0 搭建与验证 | 1–2 周 | agent 友好的工程脚手架、i18n、libghostty-vt 网格渲染、UI 探针、性能基准 | G1：三项验证都跑通 |
-| P1 MVP | 4–6 周 | 打开项目、项目主页、按轮次审阅、审阅意见回传、终端 + 会话 resume、项目模型 | G2：自己能日常使用 |
-| P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析、上下文抽屉（影响面）、结构化 Diff、完整文件阅读与编辑 | G3：Java 跳转可日常用 |
-| P3 Agent 原生化 | 4 周起 | ACP 对话面板、MR 视图、依赖源码、权限请求 UI | — |
-
-进度见 [Milestones](https://github.com/SoloJiang/lectern-app/milestones) 与 [docs/roadmap.md](docs/roadmap.md)。
-
-## 文档
+Lectern 用 Rust 编写，基于 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) 与 [gpui-component](https://github.com/longbridge/gpui-component)，以及 tree-sitter、gix 和 [libghostty-vt](https://github.com/ghostty-org/ghostty)。
 
 - [交互规范](docs/design/interaction.md)（[交互设计画布](https://claude.ai/artifact/LVSXNi9xPviRgzdycnskp9)）
-- [技术调研：Rust + GPUI 实现方案](docs/design/tech-research.md)
-- [架构决策记录（ADR）](docs/adr/)
-- [AGENTS.md](AGENTS.md)：给 coding agent 的仓库规则
+- [技术调研](docs/design/tech-research.md) · [架构决策记录](docs/adr/)
+- [AGENTS.md](AGENTS.md)：coding agent 在本仓库的工作规则
 
 ## 许可证
 
-MIT 或 Apache-2.0 双许可，任选其一。见 [LICENSE-MIT](LICENSE-MIT) 与 [LICENSE-APACHE](LICENSE-APACHE)。
-
-本项目只参考 Zed 的思路，不复制其 GPL 代码。
+MIT 或 Apache-2.0，任选其一。见 [LICENSE-MIT](LICENSE-MIT) 与 [LICENSE-APACHE](LICENSE-APACHE)。Lectern 参考了 Zed 的思路，但不复制其 GPL 代码。
