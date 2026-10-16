@@ -274,30 +274,22 @@ fn scan(markdown: &str) -> Scan {
                     }
                     _ => &[],
                 };
-                for &attr in link_attrs {
-                    if let Some(value) = tag.attributes.get(attr) {
-                        // URL parsing strips leading and trailing C0 controls
-                        // and spaces, and removes tabs and newlines anywhere. A
-                        // backslash is a slash for web URLs before the fragment,
-                        // so `\\host\x` is a network-path reference like
-                        // `//host/x`; in the fragment it stays a backslash.
-                        let cleaned: String = String::from_utf8_lossy(&value.value)
-                            .trim_matches(|c: char| c <= ' ')
-                            .chars()
-                            .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-                            .collect();
-                        let (before, fragment) = match cleaned.split_once('#') {
-                            Some((b, f)) => (b, Some(f)),
-                            None => (cleaned.as_str(), None),
-                        };
-                        let mut url = before.replace('\\', "/");
-                        if let Some(f) = fragment {
-                            url.push('#');
-                            url.push_str(f);
-                        }
-                        if !url.is_empty() {
-                            out.links.push((source_offset(at), url));
-                        }
+                let mut urls: Vec<String> = link_attrs
+                    .iter()
+                    .filter_map(|&attr| tag.attributes.get(attr))
+                    .map(|v| String::from_utf8_lossy(&v.value).into_owned())
+                    .collect();
+                // A browser may fetch any `srcset` candidate. A stray `source`
+                // outside `picture` is inert but checked anyway.
+                if matches!(&tag.name[..], b"img" | b"image" | b"source")
+                    && let Some(value) = tag.attributes.get(&b"srcset"[..])
+                {
+                    urls.extend(srcset_urls(&String::from_utf8_lossy(&value.value)));
+                }
+                for raw in urls {
+                    let url = clean_url(&raw);
+                    if !url.is_empty() {
+                        out.links.push((source_offset(at), url));
                     }
                 }
             }
@@ -378,6 +370,66 @@ const UNSUPPORTED_ELEMENTS: &[&[u8]] = &[
     b"th",
     b"td",
 ];
+
+/// URL parsing strips leading and trailing C0 controls and spaces, and removes
+/// tabs and newlines anywhere. A backslash is a slash for web URLs before the
+/// fragment, so `\\host\x` is a network-path reference like `//host/x`; in the
+/// fragment it stays a backslash.
+fn clean_url(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    let (before, fragment) = match cleaned.split_once('#') {
+        Some((b, f)) => (b, Some(f)),
+        None => (cleaned.as_str(), None),
+    };
+    let mut url = before.replace('\\', "/");
+    if let Some(f) = fragment {
+        url.push('#');
+        url.push_str(f);
+    }
+    url
+}
+
+/// URLs of the image candidates in a `srcset`, following the HTML parsing
+/// rules: candidates are separated by commas, a URL runs to the next
+/// whitespace (trailing commas end the candidate), and descriptors such as
+/// `2x` or `100w` run to the next comma outside parentheses.
+fn srcset_urls(srcset: &str) -> Vec<String> {
+    let is_space = |c: char| matches!(c, ' ' | '\t' | '\n' | '\x0c' | '\r');
+    let mut urls = Vec::new();
+    let mut rest = srcset;
+    loop {
+        rest = rest.trim_start_matches(|c: char| is_space(c) || c == ',');
+        if rest.is_empty() {
+            return urls;
+        }
+        let end = rest.find(is_space).unwrap_or(rest.len());
+        let (url, after) = rest.split_at(end);
+        rest = after;
+        if url.ends_with(',') {
+            urls.push(url.trim_end_matches(',').to_string());
+            continue;
+        }
+        urls.push(url.to_string());
+        let mut depth = 0usize;
+        let mut cut = rest.len();
+        for (i, c) in rest.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    cut = i + 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        rest = &rest[cut..];
+    }
+}
 
 /// Source byte offsets and names of the [`UNSUPPORTED_ELEMENTS`] used as raw
 /// HTML; the checker reports them so links around them cannot be misread.
@@ -826,6 +878,12 @@ pub fn check_tracked(
                                 continue;
                             }
                         };
+                        // A README symlink to a directory renders nothing, so
+                        // it defines no anchors.
+                        if !real.is_file() {
+                            errors.push(broken("the directory's README is not a file".into()));
+                            continue;
+                        }
                         if let Some(set) = &tracked
                             && !tracked_route(&root, &readme, set)
                         {
@@ -1451,6 +1509,45 @@ mod tests {
             .map(|e| e.target.clone())
             .collect();
         assert_eq!(got, ["plain/#missing"]);
+    }
+
+    #[test]
+    fn srcset_candidates_are_links() {
+        let repo = TempRepo::new(&[
+            ("ok.png", ""),
+            (
+                "b.md",
+                "<picture><source media=\"(x)\" srcset=\"gone-dark.png\"><img src=\"ok.png\" srcset=\"ok.png 1x, gone@2x.png 2x,missing,, a.png?(1) 100w\"></picture>\n",
+            ),
+        ]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(
+            got,
+            ["gone-dark.png", "gone@2x.png", "missing", "a.png?(1)"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readme_symlinks_to_directories_fail() {
+        let repo = TempRepo::new(&[("docs/sub/a.txt", "x"), ("b.md", "[x](docs/#missing)\n")]);
+        std::os::unix::fs::symlink("sub", repo.0.join("repo/docs/README.md")).unwrap();
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| (e.target.clone(), e.reason.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [(
+                "docs/#missing".to_string(),
+                "the directory's README is not a file".to_string()
+            )]
+        );
     }
 
     #[cfg(unix)]
