@@ -237,9 +237,10 @@ impl GateSlot {
 pub struct PanicPayload { /* Box<dyn Any + Send> */ }
 
 impl PanicPayload {
-    /// 取出可读的消息（`&str` / `String`），然后把 payload 交给 kernel 的一个专用回收线程 drop，不在调用线程上 drop：
-    /// payload 的 `Drop` 可能 panic，也可能等某个资源，在回收线程上它只会卡住或展开那个线程（在 `catch_unwind` 里 drop，
-    /// 第二个 panic 的 payload 用 `mem::forget` 泄漏），executor 的工作线程、kernel 线程和主线程都不等它。所以调用方拿到消息后
+    /// 取出可读的消息，然后释放 payload。`panic!` 产生的 payload 只有 `&'static str` 和 `String` 两种，`Drop` 不会阻塞也不会 panic，
+    /// 在调用线程上直接释放；其他类型（`panic_any` 传入的自定义值）的 `Drop` 可能 panic，也可能等某个资源，每个交给一个新建的回收线程 drop，
+    /// 不在调用线程上 drop，几个 payload 之间也互不等待：它只会卡住或展开自己的回收线程（在 `catch_unwind` 里 drop，
+    /// 第二个 panic 的 payload 用 `mem::forget` 泄漏），executor 的工作线程、kernel 线程、主线程和其他 payload 的释放都不等它。所以调用方拿到消息后
     /// 可以立刻让激活失效、唤醒其他任务，不必安排 payload 和 future 的释放顺序。`PanicPayload` 自己的 `Drop` 做同样的事。
     pub fn dispose(self) -> String;
 }
@@ -247,7 +248,7 @@ impl PanicPayload {
 /// 用 `catch_unwind` 运行 `f`，panic 时保留 payload 返回。
 pub fn catch<T>(f: impl FnOnce() -> T) -> Result<T, PanicPayload>;
 
-/// 等于 `catch(f).map_err(PanicPayload::dispose)`：捕获到 panic 时把 payload 交给回收线程，只返回消息。kernel 的其余边界都用它（见「失败与 panic」）。
+/// 等于 `catch(f).map_err(PanicPayload::dispose)`：捕获到 panic 时按上面的方式释放 payload，只返回消息。kernel 的其余边界都用它（见「失败与 panic」）。
 pub fn contain<T>(f: impl FnOnce() -> T) -> Result<T, String>;
 
 /// 一次激活的长期句柄：从 `started` 起有效，到这次激活停用为止。可以克隆并保存在插件的状态里，
@@ -325,7 +326,9 @@ impl PluginHandle {
     /// 受限的 kernel 控制句柄，供需要驱动激活的插件使用（`project` 调 `workspace_changed`，
     /// `workspace` 调 `lazy_commands` 和 `command`）。插件在 `PluginSet` 里构造时还没有 `Arc<Kernel>`，
     /// 所以通过这里取得。不包含 `start`、`set_enabled` 和 `shutdown`，这些只给 `app`。
-    /// 句柄带这次激活的插件 ID 和代数：这次激活停用后，通过它发出的请求都被忽略（`command` 的 `done` 收到 `PluginError::Stale`）。
+    /// 句柄带这次激活的插件 ID 和代数：这次激活停用后，通过它发出的请求都被忽略。
+    /// `command` 的 `done` 在请求方这次激活的准入内调用（`enter()` 不阻塞）：请求方已经失效时（包括发出请求之后、目标插件还在激活时失效），
+    /// `done` 不被调用，在 `contain` 里 drop，所以失效之后不会再运行它的代码，也不会经它排入重放。
     pub fn control(&self) -> KernelControl;
 }
 
@@ -633,9 +636,10 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
 - 暂存效果：暂存的第一个事件让这次激活失效后，后面暂存的事件不再发出、`start` 不再调用（已经发出的第一个事件不回滚，激活按 `Live` 之后的失败停用）；暂存的 `start` panic 时插件进入 `Failed`，kernel 线程继续运行。
 - `own_with` 的 `start` panic：闸门关闭、任务一次也没运行，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
-- `own_with` 的 `start` 里调用同一个句柄的 `own`、`own_with`：不死锁，守卫都登记上；`start` 运行期间另一个线程完成撤销：返回的句柄被 drop、闸门关闭，任务一次也没运行，`own_with` 返回 false。
+- `own_with` 的 `start` 里调用同一个句柄的 `own`、`own_with`：不死锁，守卫都登记上；`start` 运行期间另一个线程让这次激活失效（只做同步的 token 失效）：`own_with` 返回 false，返回的句柄被 drop、闸门关闭，任务一次也没运行；撤销在 `start` 返回、句柄处理完、准入释放之后才完成。
 - 嵌套事件的来源：A 的监听通过 B 的 `Emitter` 发出事件后 B 失效、A 仍存活：排队的事件被丢弃；A 失效、B 仍存活：事件照常送达。
 - 暂存封口：`started` 返回、token 换成 `Live` 的同时，另一个线程用克隆的句柄发事件、`own_with`：事件恰好送达一次，`start` 恰好调用一次。
+- payload 释放：一个自定义 panic payload 的 `Drop` 一直阻塞时，之后的 panic 照常处理，其他 payload 照常释放，撤销和 `shutdown` 不受影响。
 - 任务结果的应用 panic：主线程不展开，插件进入 `Failed`。
 - 并发失去提供者：一个 `MULTIPLE` 服务的最后两个提供者在两个线程上同时 `fail`，依赖者的 token 一定变为 `Dead`（重复上万次）。
 - 被拒绝的 `own_with`：旧句柄在激活失效后调用 `own_with`，`start` 捕获的值 drop 时 panic，调用方不展开。
@@ -676,9 +680,9 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 命令：激活成功但没有登记处理函数时，`workspace` 报错，代理不会一直等待。
 - 状态对象：`started` 收到的是 `activate` 返回的同一个 `Active`；停用后它被 drop。
 - 按命令激活：`command` 的 `done` 在激活完全成功后被调用一次，`started` panic 时收到错误而不是成功；已激活时立即调用；失败时收到错误；`done` panic 后 kernel 线程继续处理后续请求。
-- 控制句柄：插件停用后，它之前取得的 `KernelControl` 发出的 `workspace_changed`、`activate` 被忽略，`command` 的 `done` 收到 `Stale`。
+- 控制句柄：插件停用后，它之前取得的 `KernelControl` 发出的 `workspace_changed`、`activate` 被忽略，`command` 的 `done` 不被调用；请求发出后、目标插件激活期间请求方失效，`done` 同样不被调用。
 - 状态：激活条件已满足、但依赖未就绪的插件，`status()` 显示 `Waiting`，并列出缺少的服务。
-- 守卫：停用后通过旧句柄 `own` 的守卫在 kernel 线程上 drop。
+- 守卫：停用后通过旧句柄 `own` 的守卫被拒绝，在调用线程上当场 drop；停用之前登记的守卫在 kernel 线程上 drop。
 - 启动：`Kernel::start` 之前没有任何插件代码运行。
 - 自动启停：
   - A 依赖 B，B 依赖 C：激活顺序是 C、B、A；
