@@ -2,7 +2,7 @@
 
 2026-10-16 · @SoloJiang
 
-> 本文是项目立项时的技术调研快照，原名 LightIDE，现定名 Lectern。原文（含交互图）：[Claude 文档](https://claude.ai/artifact/9PrndEEHBCBymuZs17Hrvw)。后续变更以 `docs/adr/` 为准。
+> 项目立项时的技术调研快照。项目原名 LightIDE，现定名 Lectern。原文（含交互图）：[Claude 文档](https://claude.ai/artifact/9PrndEEHBCBymuZs17Hrvw)。后续变更以 `docs/adr/` 为准。
 >
 > 2026-10-16 更新：按 [ADR 0012](../adr/0012.md)（以项目为入口、不以编辑器为中心）与 [ADR 0013](../adr/0013.md)（英文优先、支持中文）修订了产品原则、界面结构、crate 划分和路线图。交互规范见 [interaction.md](interaction.md)。
 
@@ -10,7 +10,7 @@
 
 产品定位：AI 写、人读，代码查看与审阅是第一优先级。入口是项目或文件夹，打开后先看到这个项目里待审的 agent 会话；Lectern 不以编辑器为中心，编辑收在第三层。界面英文优先，支持简体中文。性能是第一约束，原生支持 monorepo 与多 worktree，首发只做 macOS。推荐路线：GPUI + gpui-component 做 UI，libghostty-vt 做终端内核，tree-sitter 做高亮，gix + imara-diff 做 Git/Diff，直接解析 Claude Code / Codex 的本地 JSONL 会话。整套是纯 Rust（终端内核经 C ABI 链入），技术上可行，3 个月内能出可用的 MVP。
 
-- **UI 框架用 GPUI**：Zed 自研的 GPU 渲染框架，Apache-2.0，可独立使用，但仍是 pre-1.0，需要锁版本：通过 crates.io 的 `gpui-pre` 快照精确锁定（[ADR 0016](../adr/0016.md)）。
+- **UI 框架用 GPUI**：Zed 自研的 GPU 渲染框架，Apache-2.0，可独立使用，但仍是 pre-1.0，需要通过 crates.io 的 `gpui-pre` 快照精确锁定版本（[ADR 0016](../adr/0016.md)）。
 - **组件库和编辑器都用 gpui-component**（Longbridge 出品）：60+ 组件，并自带支持 tree-sitter 与 LSP 的代码编辑器（20 万行内性能稳定），用于完整文件阅读和按需编辑（第三层功能），不必自己写编辑器内核。
 - **终端接入 Ghostty 内核**：用 libghostty-vt（Rust 绑定 libghostty-rs）做终端状态机，在 GPUI 里自绘字符网格；不用 Zed 的 alacritty_terminal。
 - **代码导航以本地索引为主**：tree-sitter 符号索引保证打开即可跳转，Java 额外做 package / import 解析和依赖 sources.jar 跳转，jdtls 只做后台增强。
@@ -23,7 +23,7 @@
 ## 关键决策
 
 - 开源：是。不复用 Zed 的整体方案，按 Lectern 自己的取舍设计。
-- 「连接 Ghostty」= 接入内核（libghostty-vt），不嵌入 Ghostty 渲染器。
+- 「连接 Ghostty」指接入内核（libghostty-vt），不嵌入 Ghostty 渲染器。
 - 不以编辑器为中心：入口是项目或文件夹，项目主页先列待审的 agent 会话，审阅按轮次读改动；完整文件与编辑收在第三层。
 - 首发只支持 macOS。
 - 产品核心是代码查看与审阅 AI 改动，编辑和终端为它服务。
@@ -32,7 +32,7 @@
 - MR 支持 GitHub 与 GitLab（含自部署版）。
 - 界面英文优先，同时支持简体中文；人和 agent 写的内容不翻译。
 - 许可证不再影响技术路线；倾向 MIT + Apache-2.0 双许可。
-- 架构完全可插拔：参考 DeepSeek Harness，内核只管插件生命周期，功能全部是插件。
+- 架构完全可插拔：参考 DeepSeek Harness，内核只负责插件生命周期，功能全部是插件。
 
 ## 产品原则：以代码审阅为核心
 
@@ -52,10 +52,10 @@ AI 让写代码的成本大幅下降，人的时间转移到读懂和把关上�
 
 由此确定的设计取舍：
 
-- **以项目为入口**：打开文件夹进入项目主页，首先看到这个项目里待审的会话、运行中的 agent 和会话外的改动；侧栏是项目结构（会话按 worktree 分组、子项目、Files 入口），不是常驻文件树。
+- **以项目为入口**：打开文件夹进入项目主页，首先看到这个项目里待审的会话、运行中的 agent 和会话外的改动；侧栏显示项目结构（会话按 worktree 分组、子项目、Files 入口），不放常驻文件树。
 - **审阅按叙事读**：选中会话后按轮次读「prompt → agent 说明 → 改动」，文件只作为右侧进度列表；顶部是会话简报（值得先看的几处）。
-- **代码按需呼出**：在 Diff 里点符号打开上下文抽屉（调用方、相关测试、改动历史）；完整文件阅读和编辑放在第三层。
-- **界面分三层**：常驻（项目主页、审阅、已看进度、审阅意见）、按需（上下文抽屉、对话面板、⌘K、并行总览、Files）、收起（完整文件、编辑、终端原始输出）。不做活动栏、文件标签页、状态栏和底部终端停靠。
+- **代码按需呼出**：在 Diff 里点符号打开上下文面板（调用方、相关测试、改动历史）；完整文件阅读和编辑放在第三层。
+- **界面分三层**：常驻（项目主页、审阅、已看进度、审阅意见）、按需（上下文面板、对话面板、⌘K、并行总览、Files）、收起（完整文件、编辑、终端原始输出）。不做活动栏、文件标签页、状态栏和底部终端停靠。
 - **归因会过期**：agent 改完后文件可能又被人或其他会话改过，需要用当前内容重新对齐修改片段，对不上的标记为「已漂移」，不做猜测性归因。
 
 ## 性能预算
@@ -193,7 +193,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 |---|---|---|
 | 入口 | `lectern-app` | App 启动、按 profile 装配插件、启动快照恢复；内核是单独的 kernel crate，下表其余 crate 都以插件形式注册 |
 | 视图 | `workspace`、`ui` | 窗口骨架、面板、系统色 token 与动画原语（[ADR 0015](../adr/0015.md)），封装 gpui-component |
-| 视图 | `welcome`、`project_home`、`review_view`、`context_drawer`、`conversation`、`worktrees`、`file_reader` | 打开项目、项目主页、按轮次审阅、上下文抽屉、与 agent 对话（含终端页）、并行总览、完整文件阅读与编辑 |
+| 视图 | `welcome`、`project_home`、`review_view`、`context_drawer`、`conversation`、`worktrees`、`file_reader` | 打开项目、项目主页、按轮次审阅、上下文面板、与 agent 对话（含终端页）、并行总览、完整文件阅读与编辑 |
 | 领域 | `review` | 会话改动归因、片段对齐、「已看」状态、评论回传 |
 | 领域 | `project` | 仓库 → worktree → 子项目模型；清单解析（npm/yarn/pnpm、Maven、Gradle、Go、Cargo） |
 | 领域 | `code_intel` | tree-sitter 符号索引、Java/TS 解析、依赖源码、按需语言服务器 |
@@ -213,9 +213,9 @@ Lectern 采用「一切皆插件」的设计：内核只负责插件的装载、
 
 [DeepSeek Harness](https://thenewstack.io/deepseek-harness-open-source-plugins/) 建立在 Cordis 框架上（源自 Koishi 机器人生态），插件设计有五个要点：
 
-- **内核没有特权**：模型适配、工具注册、会话日志、agent 循环都是插件，扩展的方式是增加一个插件，而不是修改内核。
-- **按服务依赖自动启停**：插件声明所需的服务，服务就绪时自动激活，服务消失时自动停用，不需要手写启动顺序。Cordis 称为空间可组合。
-- **卸载即撤销**：框架记录插件注册的事件监听、提示片段、工具定义，插件卸载时一并撤销。Cordis 称为时间可组合。
+- **内核没有特权**：模型适配、工具注册、会话日志、agent 循环都是插件，扩展功能时增加插件，不修改内核。
+- **按服务依赖自动启停**：插件声明所需的服务，服务就绪时自动激活，服务消失时自动停用，不需要手写启动顺序。Cordis 称之为空间可组合。
+- **卸载即撤销**：框架记录插件注册的事件监听、提示片段、工具定义，插件卸载时一并撤销。Cordis 称之为时间可组合。
 - **通过服务键访问能力**：插件使用 `ctx.tools`、`ctx.llm` 这类稳定入口，不直接引用某个实现。
 - **状态可从日志重建**：进入模型请求的内容都能从追加写的会话日志重建；运行配置（web、headless、sdk 等）决定启动时加载哪些插件。
 
@@ -280,14 +280,14 @@ Lectern 本身主要由 coding agent 写，因此仓库要先具备让 agent 自
 
 - **分层的 AGENTS.md**：根目录写全局规则（四层依赖方向、性能预算、禁止事项），每个 crate 一份写本模块职责和测试方式；CLAUDE.md 用软链接指向它，与 `cloudprint-miniapps` 的做法一致。
 - **决策记录（ADR）**：`docs/adr/` 下每个决策一个文件，本文「关键决策」一节就是第一批。agent 提出要改变路线时，先让它对照 ADR。
-- **模块设计文档**：`docs/design/<crate>.md` 写接口和数据结构，先让 agent 写设计、人审过再写代码。
+- **模块设计文档**：`docs/design/<crate>.md` 写接口和数据结构，先让 agent 写设计，设计文档 PR 合并后再写代码。
 - **复用现成技能**：gpui-component 仓库自带 agent 技能（如 `new-component`、`gpui-style-guide`），可直接引入 `.claude/skills/`；再自建「新增一种语言」「新增一个视图」「跑性能基准」等技能。
 
 ### 2. 构建与测试反馈
 
 Rust 编译耗时是 agent 开发的主要瓶颈，GPUI 依赖体量大，编译尤其慢。
 
-- **领域层与 GPUI 隔离**：只改领域逻辑时 `cargo check -p review` 不编译 GPUI，反馈从分钟级降到秒级；这是「领域层不依赖 GPUI」规则的另一个收益。
+- **领域层与 GPUI 隔离**：只改领域逻辑时 `cargo check -p lectern-review` 不编译 GPUI，反馈从分钟级降到秒级；这是「领域层不依赖 GPUI」规则的另一个收益。
 - **统一入口命令**：用 `just`（或 `cargo xtask`）提供 `just check`、`just test`、`just bench`、`just ci`，AGENTS.md 里只写这几个命令，agent 不必猜参数。
 - **编译提速**：细粒度 crate、dev profile 对依赖开优化、`sccache` 共享缓存。多个 agent 并行在不同 worktree 工作时，共享缓存能避免每个 worktree 重编一遍 GPUI。
 - **cargo-nextest**：并行跑测试，失败输出简洁，适合 agent 读。
@@ -331,7 +331,7 @@ agent 无法直接观察界面，验收结果需要能被程序自动判定。
 - **只通过 Action 操作**：GPUI 的 Action 是带名字的结构体，探针可列出并触发它们；比模拟坐标点击更稳定，也顺带保证所有功能都能用快捷键完成。
 - **零性能成本**：`ui_probe` 是独立 crate，用 Cargo feature 开关，只在调试和测试构建中编译，发布构建不包含它。
 - **同一套接口服务三种场景**：agent 开发时连运行中的应用；`#[gpui::test]` 里直接调用同样的函数做断言；CI 里把语义树存成 insta 快照，布局变化会变成可读的文本 diff。
-- **后续可接系统无障碍树**：Zed 在 2026 年已带「实验性 accessibility」开关。若 GPUI 稳定支持 macOS 无障碍树，语义节点可以直接映射过去，既服务读屏用户，也让通用的 computer-use 工具能读懂 Lectern。
+- **后续可接系统无障碍树**：Zed 在 2026 年已带「实验性 accessibility」开关。若 GPUI 稳定支持 macOS 无障碍树，语义节点可以直接映射过去，既服务读屏用户，也让通用的 computer-use 工具能读取 Lectern 的界面结构。
 
 P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 能否靠它们独立完成一个视图；其余工具在 P1 补齐。
 
@@ -353,10 +353,10 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 ### 2. 终端（libghostty-vt 内核）
 
 1. `portable-pty` 创建 PTY 并启动 shell 或 `claude --resume <id>`。
-1. 专属线程持有 libghostty-vt 的 `Terminal`，读 PTY 字节喂给它，按帧生成渲染快照发给 UI 线程。
+1. 专属线程持有 libghostty-vt 的 `Terminal`，读取 PTY 字节传给它，按帧生成渲染快照发给 UI 线程。
 1. GPUI 侧实现一个自定义 `Element`：按行合并同样式的字符批量绘制，光标、选区、超链接作为叠加层。
 1. 键盘与鼠标经 libghostty-vt 的 `KeyEncoder` / `MouseEncoder` 编码后写回 PTY。
-1. 「在外部 Ghostty 打开」作为补充入口：macOS 用 `open -na Ghostty --args --working-directory=<dir>`（参数需按你装的 Ghostty 版本验证）。
+1. 「在外部 Ghostty 打开」作为补充入口：macOS 用 `open -na Ghostty --args --working-directory=<dir>`（参数需按已安装的 Ghostty 版本验证）。
 
 ### 3. 代码与 Diff 查看
 
@@ -371,9 +371,9 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 
 ## 代码导航与编辑
 
-导航结果只通过上下文抽屉和 ⌘K 呈现，界面上不显示导航层、索引或语言服务器的状态。导航分四层：靠前的层响应快，靠后的层结果准；后面的层未就绪时，前面的层照常工作。这一设计针对 Zed 的不足：Zed 没有项目模型、不建索引，Java 跳转完全依赖 jdtls；而 jdtls 要求 JDK 21、需先导入 Maven / Gradle 工程，跳进库代码时还返回 `jdt://` 私有 URI，任一环节出问题跳转就失效。
+导航结果只通过上下文面板和 ⌘K 呈现，界面上不显示导航层、索引或语言服务器的状态。导航分四层：靠前的层响应快，靠后的层结果准；后面的层未就绪时，前面的层照常工作。这一设计针对 Zed 的不足：Zed 没有项目模型、不建索引，Java 跳转完全依赖 jdtls；而 jdtls 要求 JDK 21、需先导入 Maven / Gradle 工程，跳进库代码时还返回 `jdt://` 私有 URI，任一环节出问题跳转就失效。
 
-| 层 | 实现 | 预期可用时机 | 解决什么 |
+| 层 | 实现 | 预期可用时机 | 解决的问题 |
 |---|---|---|---|
 | 1. 语法索引 | tree-sitter tags 查询抽取定义与引用，存入本地 SQLite；`notify` 增量更新 | 打开项目后数秒 | 所有语言的类、函数、字段按名跳转 |
 | 2. Java 解析器 | 读 package / import / 内部类，全限定名映射到文件；同名方法按所在类与参数个数消歧 | 与第 1 层同时 | 项目内 Java 跳转基本准确，无需编译 |
@@ -406,7 +406,7 @@ Maven 与 Gradle 都要支持，但两者的难度不同。Maven 的 pom.xml 是
 |---|---|---|---|
 | P0 搭建与验证 | 1–2 周 | 脚手架 · AGENTS · CI · i18n；libghostty-vt 网格渲染；截图调试 · 性能基准 | G1：三项验证都跑通 |
 | P1 MVP | 4–6 周 | 打开项目 + 项目主页；按轮次审阅 + 审阅意见回传；终端 + 会话 resume；会话与每轮 token | G2：自己能日常使用 |
-| P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析；上下文抽屉（影响面）· 结构化 Diff；完整文件阅读与编辑；Usage 页与额度 | G3：Java 跳转可日常用 |
+| P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析；上下文面板（影响面）· 结构化 Diff；完整文件阅读与编辑；Usage 页与额度 | G3：Java 跳转可日常用 |
 | P3 Agent 原生化 | 4 周起 | ACP 对话面板；MR 视图 · 依赖源码；权限请求 UI | — |
 
 P0 第一周先搭好面向 agent 的工程脚手架（见「工程搭建」一节），再用 libghostty-vt 验证网格渲染，P1 交付自绘终端；P1 的核心是项目主页和按轮次归因的审阅，项目模型（monorepo、worktree）和性能基准也在 P1 落地，因为后面所有功能都建在它们之上；代码导航索引在 P2 建好，同时服务于跳转和「影响面」分析。工期为估算，P0 结束时应按实际速度重排。
