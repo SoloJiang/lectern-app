@@ -8,7 +8,7 @@ Agents write most of the code now; your time goes into reading it and deciding w
 
 **Status: P0, scaffolding. Nothing usable yet.**
 
-## Five questions it answers
+## Questions it answers
 
 | Question | How Lectern answers it | Phase |
 |---|---|---|
@@ -17,6 +17,7 @@ Agents write most of the code now; your time goes into reading it and deciding w
 | How do I get the agent to fix it? | Review notes on lines, batched and sent back to the session with file and line | P1 |
 | What else does it affect? | Callers and related tests for changed symbols, in a context drawer | P2 |
 | Is it right? | Structural diff, per-file "reviewed" marks, tests run in the terminal | P2 |
+| What did it cost? | Tokens per session and turn; Codex and Claude Code limit windows | P1 / P2 |
 
 ## How it's built
 

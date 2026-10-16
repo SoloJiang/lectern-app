@@ -17,7 +17,7 @@ Lectern 不是编辑器：打开项目，先看 agent 改了什么。入口是�
 | 层 | 内容 | 规则 |
 |---|---|---|
 | 常驻 | Project sidebar（Overview、Sessions、Packages）、Project home、Review（会话简报 + 改动叙事）、Progress、Review notes 发送栏 | 打开就看得到，占据主要空间 |
-| 按需呼出 | Context drawer（调用方、测试、历史）、Conversation（⌘\）、⌘K、Worktrees、Files | 从当前视图触发，Esc 回到原处 |
+| 按需呼出 | Context drawer（调用方、测试、历史）、Conversation（⌘\）、⌘K、Worktrees、Files、Usage | 从当前视图触发，Esc 回到原处 |
 | 收起 | 完整文件阅读（⌘⇧O）、编辑（Edit… / ⌘E）、终端原始输出（Conversation 的 Terminal 页） | 存在，但不出现在默认界面 |
 
 不做的 IDE 元素：活动栏、文件标签页、常驻文件树、状态栏、底部终端停靠、编辑器 / 索引 / 语言服务器状态、生效的 agent 指令。
@@ -32,6 +32,7 @@ Lectern 不是编辑器：打开项目，先看 agent 改了什么。入口是�
 | 04 | Context drawer | 在 Diff 里点符号打开；Definition / Callers / Tests / History；标出未跟着改的调用方，可直接加审阅意见；Open full file 和 Edit 是次要按钮 |
 | 05 | Conversation | 结构化对话、工具调用、已发出的审阅意见、权限请求；Terminal 页是原始输出；输入框 |
 | 06 | Worktrees | 每个 worktree 一张卡片；右侧对比所选 worktree 与 main，并提示与其他 worktree 是否有文件重叠 |
+| 07 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；按会话、按模型的明细；当前项目 / 所有项目 |
 
 ## 窗口结构
 
@@ -71,6 +72,10 @@ Lectern 不是编辑器：打开项目，先看 agent 改了什么。入口是�
 - 相对时间、数量、复数按语言格式化（`2/6 reviewed` ↔ `已看 2/6`）。
 - 文案集中在 Fluent（.ftl）资源文件，CI 检查 en 与 zh-CN 的键一致。
 - 字体：IBM Plex Sans，中文回退 PingFang SC；代码用 IBM Plex Mono。
+
+## 用量
+
+用量跟着会话和项目走（[ADR 0014](../adr/0014.md)）：会话卡片和会话简报显示 token 数，每轮标题显示该轮 token 和占比，Conversation 显示上下文窗口占用，项目侧栏底部的 Usage 入口带最紧张的额度窗口进度条。费用一律标为 API-equivalent，订阅用户看额度百分比。
 
 ## 状态与异常
 

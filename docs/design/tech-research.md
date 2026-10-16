@@ -199,6 +199,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | 领域 | `git` | gix 读仓库，imara-diff 与结构化 diff |
 | 领域 | `terminal` | portable-pty + libghostty-vt，独占线程 |
 | 领域 | `agents` | Claude Code / Codex 会话解析、ACP 客户端 |
+| 领域 | `usage` | token 去重与聚合、价格表、额度快照（[ADR 0014](../adr/0014.md)） |
 | 领域 | `forge` | GitHub 与 GitLab（含自部署）MR 与 CI 状态 |
 | 基础设施 | `cache`、`fs_watch`、`executor`、`platform`、`i18n` | 内容寻址 SQLite 缓存、FSEvents 监听、后台任务、macOS 系统能力、界面文案与语言切换 |
 | 工具 | `bench` | 性能预算基准，CI 中超标即失败；另有 ui_probe：调试构建专用的 UI 探针，发布构建不包含 |
@@ -403,8 +404,8 @@ Maven 与 Gradle 都要支持，但两者的难度不同。Maven 的 pom.xml 是
 | 阶段 | 工期（一人全职估算） | 内容 | 出口关卡 |
 |---|---|---|---|
 | P0 搭建与验证 | 1–2 周 | 脚手架 · AGENTS · CI · i18n；libghostty-vt 网格渲染；截图调试 · 性能基准 | G1：三项验证都跑通 |
-| P1 MVP | 4–6 周 | 打开项目 + 项目主页；按轮次审阅 + 审阅意见回传；终端 + 会话 resume | G2：自己能日常使用 |
-| P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析；上下文抽屉（影响面）· 结构化 Diff；完整文件阅读与编辑 | G3：Java 跳转可日常用 |
+| P1 MVP | 4–6 周 | 打开项目 + 项目主页；按轮次审阅 + 审阅意见回传；终端 + 会话 resume；会话与每轮 token | G2：自己能日常使用 |
+| P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析；上下文抽屉（影响面）· 结构化 Diff；完整文件阅读与编辑；Usage 页与额度 | G3：Java 跳转可日常用 |
 | P3 Agent 原生化 | 4 周起 | ACP 对话面板；MR 视图 · 依赖源码；权限请求 UI | — |
 
 P0 第一周先搭好面向 agent 的工程脚手架（见「工程搭建」一节），再用 libghostty-vt 验证网格渲染，P1 交付自绘终端；P1 的核心是项目主页和按轮次归因的审阅，项目模型（monorepo、worktree）和性能基准也在 P1 落地，因为后面所有功能都建在它们之上；代码导航索引在 P2 建好，同时服务于跳转和「影响面」分析。工期为估算，P0 结束时应按实际速度重排。
