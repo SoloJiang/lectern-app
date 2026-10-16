@@ -201,13 +201,28 @@ def apple_only_cfg(target, targets=None):
     return on_apple and not any(holds(tree, cfg) for apple, cfg in targets if not apple)
 
 
+def gpui_in_own_build(name, target="all"):
+    """Whether building `name` on its own (tests included, all features) pulls
+    in a GPUI crate. `cargo metadata` unifies features across the whole
+    workspace, so a view crate enabling an optional GPUI feature of a shared
+    dependency would make a domain crate look GPUI-dependent. `cargo tree -p`
+    resolves features for that one package, so it is the authority whenever
+    the workspace-wide graph shows only an indirect path."""
+    out = subprocess.run(
+        ["cargo", "tree", "--locked", "-p", name, "--all-features", "-e", "normal,build,dev",
+         "--target", target, "--prefix", "none", "-f", "{p}"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return any(line.split(" ")[0].startswith(GPUI_PREFIXES) for line in out.splitlines() if line)
+
+
 def gpui_free_packages(meta):
     """Workspace crates that build, tests included, without any GPUI crate."""
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     free = []
     for pid in meta["workspace_members"]:
-        seen, stack, uses_gpui = set(), [pid], False
+        seen, stack, uses_gpui, direct = set(), [pid], False, False
         while stack and not uses_gpui:
             cur = stack.pop()
             # The crate's own dev-dependencies are compiled for its tests;
@@ -218,9 +233,11 @@ def gpui_free_packages(meta):
                     continue
                 seen.add(dep["pkg"])
                 if packages[dep["pkg"]]["name"].startswith(GPUI_PREFIXES):
-                    uses_gpui = True
+                    uses_gpui, direct = True, cur == pid
                     break
                 stack.append(dep["pkg"])
+        if uses_gpui and not direct:
+            uses_gpui = gpui_in_own_build(packages[pid]["name"], LINUX_TARGET)
         if not uses_gpui:
             free.append(packages[pid]["name"])
     return sorted(free)
@@ -317,9 +334,12 @@ def main():
                     continue
                 seen.add(dep)
                 if packages[dep]["name"].startswith(GPUI_PREFIXES):
-                    errors.append(
-                        f"{packages[pid]['name']} ({layer[pid]}): depends on {packages[dep]['name']}; this layer must not use GPUI"
-                    )
+                    # An indirect path may only come from workspace-wide
+                    # feature unification; confirm it with this crate alone.
+                    if cur == pid or gpui_in_own_build(packages[pid]["name"]):
+                        errors.append(
+                            f"{packages[pid]['name']} ({layer[pid]}): depends on {packages[dep]['name']}; this layer must not use GPUI"
+                        )
                     stack.clear()
                     break
                 stack.append(dep)
