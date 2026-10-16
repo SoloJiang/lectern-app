@@ -18,18 +18,14 @@ fn git(args: &[&str]) -> Result<String, String> {
 fn main() -> ExitCode {
     let result = git(&["rev-parse", "--show-toplevel"]).and_then(|root| {
         let root = PathBuf::from(root.trim());
-        let list = git(&[
-            "-C",
-            &root.to_string_lossy(),
-            "ls-files",
-            "-z",
-            "--",
-            "*.md",
-        ])?;
+        // List every tracked file and filter by extension here: pathspecs are
+        // case-sensitive, so `*.md` would miss `GUIDE.MD`.
+        let list = git(&["-C", &root.to_string_lossy(), "ls-files", "-z"])?;
         let files: Vec<PathBuf> = list
             .split('\0')
             .filter(|f| !f.is_empty())
             .map(PathBuf::from)
+            .filter(|p| lectern_doc_check::is_markdown(p))
             .collect();
         Ok(lectern_doc_check::check(&root, &files))
     });

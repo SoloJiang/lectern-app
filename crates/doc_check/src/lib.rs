@@ -105,17 +105,72 @@ pub fn headings(markdown: &str) -> Vec<String> {
     out
 }
 
-/// Destinations of all links and images, with their byte offsets.
-pub fn links(markdown: &str) -> Vec<(usize, String)> {
-    Parser::new_ext(markdown, options())
-        .into_offset_iter()
-        .filter_map(|(event, range)| match event {
-            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
-                Some((range.start, dest_url.into_string()))
+/// Whether `path` has a Markdown extension (`.md`, any case).
+pub fn is_markdown(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+}
+
+/// `href` and `src` values in a piece of raw HTML, with HTML comments removed.
+fn html_destinations(html: &str) -> Vec<String> {
+    let mut text = String::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<!--") {
+        text.push_str(&rest[..start]);
+        rest = rest[start..]
+            .find("-->")
+            .map_or("", |end| &rest[start + end + 3..]);
+    }
+    text.push_str(rest);
+    let lower = text.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for attr in ["href", "src"] {
+        let mut from = 0;
+        while let Some(i) = lower[from..].find(attr) {
+            let at = from + i;
+            from = at + attr.len();
+            // Must be a whole attribute name followed by `=`.
+            let before_ok = at == 0 || lower.as_bytes()[at - 1].is_ascii_whitespace();
+            let after = lower[from..].trim_start();
+            if !before_ok || !after.starts_with('=') {
+                continue;
             }
-            _ => None,
-        })
-        .collect()
+            let value = text[text.len() - after.len() + 1..].trim_start();
+            let dest = match value.chars().next() {
+                Some(q @ ('"' | '\'')) => value[1..].split(q).next().unwrap_or(""),
+                _ => value
+                    .split(|c: char| c.is_whitespace() || c == '>')
+                    .next()
+                    .unwrap_or(""),
+            };
+            if !dest.is_empty() {
+                out.push(dest.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Destinations of all links and images, with their byte offsets: Markdown
+/// links and `href` / `src` attributes in raw HTML.
+pub fn links(markdown: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (event, range) in Parser::new_ext(markdown, options()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                out.push((range.start, dest_url.into_string()));
+            }
+            Event::Html(html) | Event::InlineHtml(html) => {
+                out.extend(
+                    html_destinations(&html)
+                        .into_iter()
+                        .map(|d| (range.start, d)),
+                );
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn percent_decode(s: &str) -> String {
@@ -227,9 +282,17 @@ pub fn check(root: &Path, files: &[PathBuf]) -> Vec<BrokenLink> {
                 errors.push(broken("file not found".into()));
                 continue;
             }
+            // A symlink inside the repository may point outside it: check the
+            // real target too, and never read a file outside the repository.
+            let dest = match fs::canonicalize(&dest) {
+                Ok(real) if real.starts_with(&root) => real,
+                _ => {
+                    errors.push(broken("points outside the repository".into()));
+                    continue;
+                }
+            };
             let Some(fragment) = fragment else { continue };
-            if fragment.is_empty() || dest.extension().is_none_or(|e| e != "md") || !dest.is_file()
-            {
+            if fragment.is_empty() || !is_markdown(&dest) || !dest.is_file() {
                 continue;
             }
             let set = anchors.entry(dest.clone()).or_insert_with(|| {
@@ -348,6 +411,41 @@ mod tests {
         let errors = repo.check(&["a/alias.md", "docs/guide.md"]);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].file, PathBuf::from("docs/guide.md"));
+    }
+
+    #[test]
+    fn raw_html_links_are_checked() {
+        let repo = TempRepo::new(&[
+            ("a.md", "# A\n"),
+            (
+                "b.md",
+                "<p align=\"center\"><a href=\"a.md#a\">ok</a> <img src=\"missing.png\"></p>\n\n<!-- <a href=\"gone.md\">x</a> -->\n\nText <a href='nope.md'>inline</a>.\n",
+            ),
+        ]);
+        let errors = repo.check(&["b.md"]);
+        let targets: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(targets, ["missing.png", "nope.md"]);
+    }
+
+    #[test]
+    fn uppercase_extension_is_markdown() {
+        let repo = TempRepo::new(&[("GUIDE.MD", "# Guide\n"), ("b.md", "[x](GUIDE.MD#nope)\n")]);
+        let errors = repo.check(&["b.md"]);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].reason.contains("#nope"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_out_of_the_repository_is_rejected() {
+        let repo = TempRepo::new(&[("b.md", "[out](docs/out.md)\n"), ("outside.md", "# Out\n")]);
+        let base = repo.0.join("repo");
+        fs::create_dir_all(base.join("docs")).unwrap();
+        fs::rename(base.join("outside.md"), repo.0.join("outside.md")).unwrap();
+        std::os::unix::fs::symlink(repo.0.join("outside.md"), base.join("docs/out.md")).unwrap();
+        let errors = repo.check(&["b.md"]);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].reason, "points outside the repository");
     }
 
     #[test]

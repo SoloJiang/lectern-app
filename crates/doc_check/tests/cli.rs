@@ -90,7 +90,7 @@ fn lists_tracked_markdown_through_git_and_passes() {
         calls,
         [
             format!("{repo}|rev-parse --show-toplevel"),
-            format!("{repo}|-C {repo} ls-files -z -- *.md")
+            format!("{repo}|-C {repo} ls-files -z")
         ]
     );
 }
