@@ -182,15 +182,33 @@ impl ActivationToken {
 pub enum TokenState { Pending, Live, Dead }
 
 /// 一次 `own_with` 提交的闸门，由 kernel 定义，`executor` 依赖它（基础设施层可以依赖 kernel 层）。
-/// executor 在 `is_open()` 为 true 之前不 poll 这个任务；闸门关闭（`start` panic、激活失效）后任务直接丢弃。
-/// executor 用 `register_waker` 登记任务的 waker：闸门打开或关闭、token 变为 `Dead` 时 kernel 唤醒它，
-/// 所以挂起中（上次 poll 返回 `Pending`）的任务也会被立即调度一次，看到关闭后被丢弃，不会一直挂着守卫和状态。
-pub struct SubmitGate { /* Arc<{ 状态, ActivationToken, wakers }> */ }
+/// executor 为提交的每个任务向闸门申请一个 `GateSlot`，之后每次 poll 任务的 future 之前先调用 `GateSlot::poll`，按结果处理：
+/// `Run` 才 poll future；`Wait`（闸门还没打开）返回 `Pending`；`Drop`（闸门关闭：`start` panic、激活失效，或 token 为 `Dead`）丢弃 future。
+/// 闸门打开或关闭、token 变为 `Dead` 时 kernel 唤醒全部槽位里的 waker，所以挂起中的任务（等闸门打开，
+/// 或闸门已开、future 自己返回了 `Pending`）也会被立即调度一次，看到关闭后被丢弃，不会一直挂着守卫和状态。
+pub struct SubmitGate { /* Arc<{ Mutex<{ 状态, 槽位里的 waker }>, ActivationToken, Weak<Kernel>, 插件 ID }> */ }
 
 impl SubmitGate {
-    pub fn is_open(&self) -> bool;
-    pub fn is_closed(&self) -> bool;
-    pub fn register_waker(&self, waker: &std::task::Waker);
+    pub fn slot(&self) -> GateSlot;
+}
+
+/// 一个任务在闸门上的槽位，存放这个任务最近一次的 waker，drop 时从闸门移除。
+pub struct GateSlot { /* Arc<闸门>, 槽位序号 */ }
+
+pub enum GatePoll { Run, Wait, Drop }
+
+impl GateSlot {
+    /// 一个原子操作，不拆成「先查状态、再登记」：在闸门的互斥锁内先把 `cx.waker()` 存进槽位（替换上一次的），
+    /// 再读闸门状态和 token，然后才释放锁。kernel 改变状态时先写入新状态（闸门打开或关闭在同一把锁内写，
+    /// token 的 `Dead` 是原子写），再取这把锁、唤醒全部槽位里的 waker。所以检查和状态变化无论怎样交错，
+    /// 这次 `poll` 要么已经看到新状态，要么它登记的 waker 一定会被唤醒，不会漏掉唤醒、一直停在 `Pending`。
+    pub fn poll(&self, cx: &mut std::task::Context<'_>) -> GatePoll;
+
+    /// executor 在 poll 任务的 future 时用 `catch_unwind` 包住，panic 时调用这个方法再丢弃 future（丢弃同样用 `catch_unwind` 包住）。
+    /// kernel 按 `fail` 的方式让这个任务所属的激活失效：插件进入 `Failed`，连带停用的插件同步失效，
+    /// 所以任务 panic 不会展开到 executor 的工作线程，也不会让插件在初始化中断后仍显示为 `Active`、被报告为静止。
+    /// 激活已经失效时只记日志。
+    pub fn panicked(&self, payload: Box<dyn std::any::Any + Send>);
 }
 
 /// 一次激活的长期句柄：从 `started` 起有效，到这次激活停用为止。可以克隆并保存在插件的状态里，
@@ -436,7 +454,7 @@ impl Emitter {
 - 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）时先 `token.enter()`，取不到就不调用，取到的准入持有到回调返回。回调在准入范围内用 `catch_unwind` 包住：panic 时先按 `fail` 的方式让这次激活同步失效（插件进入 `Failed`，连带停用的插件一起失效），展开结束后才释放准入，panic 不会展开到主线程，插件也不会在失效后继续被调用。停用的第一步就把 token 置为 `Dead`，第 3 步等准入归零，所以回调不会与守卫和 `Active` 的 drop 同时进行。
 - `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程的队列被丢弃时守卫随之 drop。`shutdown` 关闭准入之后取不到守卫，说明主线程的队列已经不再处理，注销请求直接丢弃。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
 
-后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。`executor` 的提交接口带上 `own_with` 给的 `SubmitGate`：闸门打开之前任务不会被 poll，`own_with` 在 `start` 正常返回、句柄登记完之后才打开它，所以 `start` 在提交之后、返回句柄之前 panic 时任务一次也没运行，闸门关闭后直接丢弃。任务每次被 poll 之前检查闸门和 token，关闭或为 `Dead` 时丢弃 future（等同取消）；executor 把任务的 waker 登记到闸门上，token 变为 `Dead` 时 kernel 唤醒这些 waker，所以停在 `Pending` 上的任务也会被调度一次并丢弃，不会一直持有 `BusyGuard` 和状态、挡住静止。
+后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。`executor` 的提交接口带上 `own_with` 给的 `SubmitGate`：闸门打开之前任务不会被 poll，`own_with` 在 `start` 正常返回、句柄登记完之后才打开它，所以 `start` 在提交之后、返回句柄之前 panic 时任务一次也没运行，闸门关闭后直接丢弃。任务每次被 poll 之前调用 `GateSlot::poll`：它在闸门的锁内登记 waker 并检查闸门和 token，关闭或为 `Dead` 时丢弃 future（等同取消）。token 变为 `Dead` 时 kernel 唤醒全部槽位，所以停在 `Pending` 上的任务也会被调度一次并丢弃，不会一直持有 `BusyGuard` 和状态、挡住静止。任务的 future 在某次 poll 里 panic 时，executor 捕获这个 panic、调用 `GateSlot::panicked`，这次激活按 `fail` 失效，插件进入 `Failed`；所以初始化任务中途 panic 不会让插件留在 `Active` 并被报告为静止。`executor` 的测试覆盖这两点：闸门在检查和登记之间打开时任务仍被调度；future panic 时插件进入 `Failed`、工作线程继续运行。
 
 任务不持有准入，撤销不等任务结束：任务需要的状态由它自己持有（`Active` 或其中部分的 `Arc` 克隆），所以撤销 drop kernel 那份 `Active` 之后，任务用到的状态仍然有效，直到任务结束或在下一次 poll 前被丢弃。任务不能假定插件的守卫（界面注册、文件监听等）在它运行期间仍然存在。
 
@@ -446,7 +464,7 @@ impl Emitter {
 
 ### 失败
 
-kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
+kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
 
 - `activate` 返回错误或 panic：
   - 这次激活已登记的内容全部撤销；
@@ -463,7 +481,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - `emit` 在调用线程上同步分发，按订阅顺序调用监听。
 - 分发前先取出监听列表的快照（`Arc<[Handler]>`），不持注册表的锁调用。监听里可以订阅、退订、发事件：
   - 订阅与退订从下一次 `emit` 起生效；
-  - 监听里发出的事件排在当前分发之后，在同一线程上依次处理，不会递归。排队的事件带上发出它的监听所属激活的 token，轮到它分发之前再检查一次：发出它的激活已经失效（例如那个监听随后 panic）时丢弃，不通知其他插件。
+  - 监听里发出的事件排在当前分发之后，在同一线程上依次处理，不会递归。排队的事件带上发出它的监听所属激活的 token，轮到它分发时先 `token.enter()` 取准入，取到的准入持有到这次分发的全部监听返回为止；取不到（发出它的激活已经失效，例如那个监听随后 panic）时丢弃，不通知其他插件。只检查状态不够：检查之后、分发期间，另一个线程可能让发出它的激活失效，持有准入时停用的第 3 步会等这次分发结束，失效之后的事件不会再送达。
 - 快照里可能有已停用插件的监听。每个监听带上所属激活的 `ActivationToken`，调用前取准入（`token.enter()`）：
   - token 属于一次激活，不属于插件：每次激活新建一个，变为 `Dead` 后不再恢复；插件重新激活时用新的 token。所以分发线程即使拿着旧快照停顿，等插件重新激活后再检查，看到的仍是旧激活的 `Dead`，不会调用上一次激活的监听；
   - 取不到准入（token 是 `Pending` 或 `Dead`）就跳过这个监听；取到就调用，调用期间一直持有准入；
