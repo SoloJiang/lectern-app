@@ -13,6 +13,8 @@ class AppleOnlyCfg(unittest.TestCase):
             'cfg(any(target_os = "macos", target_os = "ios"))',
             'cfg(all(target_os = "macos", target_arch = "aarch64"))',
             "aarch64-apple-darwin",
+            'cfg(all(target_os = "macos", target_has_atomic = "8", target_has_atomic = "ptr"))',
+            'cfg(all(target_os = "macos", target_feature = "neon", target_feature = "aes"))',
         ):
             with self.subTest(target=target):
                 self.assertTrue(apple_only_cfg(target))
@@ -27,6 +29,8 @@ class AppleOnlyCfg(unittest.TestCase):
             "cfg(any())",
             'cfg(all(target_os = "macos", target_os = "linux"))',
             "x86_64-unknown-linux-gnu",
+            'cfg(all(unix, target_family = "unix", target_family = "wasm"))',
+            'cfg(any(target_os = "macos", feature = "x"))',
         ):
             with self.subTest(target=target):
                 self.assertFalse(apple_only_cfg(target))

@@ -65,6 +65,13 @@ MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "ob
 # [target.'cfg(target_os = "macos")'.dependencies]. The predicate is parsed and
 # checked for satisfiability with every Apple OS ruled out (see apple_only_cfg).
 APPLE_OSES = {"macos", "ios", "tvos", "watchos", "visionos"}
+# cfg keys that hold exactly one value per target. Every other key (feature,
+# target_feature, target_family, target_has_atomic, ...) can hold several, so
+# each of its key = "value" pairs is an independent flag.
+SINGLE_VALUED_CFG_KEYS = {
+    "target_os", "target_vendor", "target_arch", "target_env", "target_abi",
+    "target_endian", "target_pointer_width", "panic",
+}
 LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 PLATFORM_CRATE = "lectern-platform"
 
@@ -144,10 +151,10 @@ def apple_only_cfg(target):
     collect(tree)
     keyed = {}
     for key, value in atoms:
-        if value is not None:
+        if value is not None and key in SINGLE_VALUED_CFG_KEYS:
             keyed.setdefault(key, set()).add(value)
     full = {key: sorted(values) + [None] for key, values in keyed.items()}
-    flags = sorted({key for key, value in atoms if value is None})
+    flags = sorted({(key, value) for key, value in atoms if value is None or key not in SINGLE_VALUED_CFG_KEYS}, key=str)
     keys = sorted(full)
     if len(flags) > 10 or any(len(d) > 16 for d in full.values()):
         return False  # too large to enumerate; treat as portable
@@ -156,7 +163,9 @@ def apple_only_cfg(target):
         kind = node[0]
         if kind == "atom":
             key, value = node[1], node[2]
-            return env[key] if value is None else env[key] == value
+            if key in SINGLE_VALUED_CFG_KEYS and value is not None:
+                return env[key] == value
+            return env[(key, value)]
         if kind == "not":
             return not holds(node[1], env)
         results = (holds(child, env) for child in node[1])
