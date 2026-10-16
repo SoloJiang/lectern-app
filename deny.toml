@@ -36,6 +36,22 @@ confidence-threshold = 0.9
 multiple-versions = "allow"
 wildcards = "deny"
 allow-wildcard-paths = true
+# AGENTS.md rule 3: single process, no resident runtime. No embedded
+# JavaScript (Node / V8), JVM or WASM hosts.
+deny = [
+    { crate = "v8", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "deno_core", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "deno_runtime", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "napi", reason = "no Node runtime (rule 3)" },
+    { crate = "neon", reason = "no Node runtime (rule 3)" },
+    { crate = "jni", reason = "no JVM (rule 3)" },
+    { crate = "j4rs", reason = "no JVM (rule 3)" },
+    { crate = "wasmtime", reason = "no WASM host (rule 3)" },
+    { crate = "wasmer", reason = "no WASM host (rule 3)" },
+    { crate = "wasmi", reason = "no WASM host (rule 3)" },
+    { crate = "wasm3", reason = "no WASM host (rule 3)" },
+    { crate = "wasmedge-sdk", reason = "no WASM host (rule 3)" },
+]
 
 [sources]
 unknown-registry = "deny"
