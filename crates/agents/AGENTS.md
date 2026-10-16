@@ -16,7 +16,7 @@ Claude Code / Codex 会话发现与解析，按 cwd 归位到项目和 worktree�
 - 查找命令行时依次用设置里的绝对路径、登录 shell 的 `PATH`（查询一次并缓存）和常见安装目录；找不到时返回明确的不可用状态，界面据此提示。
 - Analyze 的工作目录是空的临时目录，快照作为额外可读目录传入，并关闭项目指令发现（Claude Code `--add-dir`，Codex `-c project_doc_max_bytes=0`），可被自动加载的配置（`CLAUDE.md`、`AGENTS.md`、`.claude/`、`.codex/`、`.mcp.json` 等）不放进快照目录，换成中性路径另放一份作为数据；配置目录（`CLAUDE_CONFIG_DIR`、`CODEX_HOME`）也指向临时目录，辅助会话写在这里并随之删除。
 - Analyze 的用量由凭据转发端点按每个响应的用量字段记录，每个请求一条原始用量记录交给 `usage`，取消和失败的分析也计入；没收到最终用量就被中断的请求，输入按请求体、输出按已转发的流式片段估算，标为「估算」。
-- 命令行以后台优先级（`PRIO_DARWIN_BG`）运行，每个进程用 `setrlimit` 限制 CPU 时间和内存；按沙箱识别这次分析的全部进程（`platform` 用 `sandbox_check` 检查本次临时目录与哨兵路径的权限，换进程组、`setsid` 或 double fork 都改不掉），统计它们的进程数、常驻内存和 CPU 时间合计，超限、超时、取消或结束时全部终止。
+- 命令行以后台优先级（`PRIO_DARWIN_BG`）运行，每个进程用 `setrlimit` 限制 CPU 时间和内存；按沙箱识别这次分析的全部进程（`platform` 用 `sandbox_check` 检查本次临时目录与哨兵路径的权限，换进程组、`setsid` 或 double fork 都改不掉），统计它们的进程数、常驻内存和 CPU 时间合计，超限、超时、取消或结束时全部终止：先反复扫描并 `SIGSTOP` 直到没有还在运行的成员，再全部 `SIGKILL`。命令行的标准输出和标准错误边读边计数，单条 JSON 行上限 1 MB，合计 64 MB，超过时同样终止。
 - 测试启动命令行的代码时，在 PATH 最前面放一个假命令，记录参数、标准输入和工作目录，按夹具回放 JSON 行输出。
 
 ## 测试
