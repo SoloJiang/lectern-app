@@ -1,0 +1,78 @@
+# cargo-deny configuration. Run with `cargo deny check`.
+# AGENTS.md rule 8: no GPL code. Only permissive licenses (and MPL-2.0,
+# which is file-level copyleft and safe to link) are allowed.
+
+[graph]
+# The app targets; plus the Linux CI runner, which builds the GPUI-free crates.
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+# Check optional dependencies too, so a GPL crate behind a feature still fails.
+all-features = true
+
+[licenses]
+# Dev and build dependencies count too: rule 8 covers test and bench code.
+include-dev = true
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "BSL-1.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+# AGENTS.md rule 3: single process, no resident runtime. No embedded
+# JavaScript (Node / V8), JVM or WASM hosts.
+deny = [
+    { crate = "v8", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "deno_core", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "deno_runtime", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "boa_engine", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "boa_runtime", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "rquickjs", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "rquickjs-sys", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "quick-js", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "libquickjs-sys", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "mozjs", reason = "no embedded JavaScript runtime (rule 3)" },
+    { crate = "napi", reason = "no Node runtime (rule 3)" },
+    { crate = "napi-sys", reason = "no Node runtime (rule 3)" },
+    { crate = "neon", reason = "no Node runtime (rule 3)" },
+    { crate = "jni", reason = "no JVM (rule 3)" },
+    { crate = "jni-sys", reason = "no JVM (rule 3)" },
+    { crate = "j4rs", reason = "no JVM (rule 3)" },
+    { crate = "wasmtime", reason = "no WASM host (rule 3)" },
+    { crate = "wasmer", reason = "no WASM host (rule 3)" },
+    { crate = "wasmer-vm", reason = "no WASM host (rule 3)" },
+    { crate = "wasmi", reason = "no WASM host (rule 3)" },
+    { crate = "wasm3", reason = "no WASM host (rule 3)" },
+    { crate = "wasmedge-sdk", reason = "no WASM host (rule 3)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[advisories]
+# Vulnerabilities always fail. "Unmaintained" notices only fail for our own
+# direct dependencies: the current ones (instant, paste, rustybuzz,
+# ttf-parser) come in through GPUI and cannot be replaced from here.
+unmaintained = "workspace"
+# Unsound code fails anywhere in the graph, not only in direct dependencies.
+unsound = "all"
+yanked = "warn"
