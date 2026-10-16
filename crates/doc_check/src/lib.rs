@@ -200,21 +200,12 @@ fn scan(markdown: &str) -> Scan {
     let is_heading = |name: &[u8]| matches!(name, [b'h', b'1'..=b'6']);
     let mut out = Scan::default();
     let mut heading: Option<(Vec<u8>, String)> = None;
-    // Open non-void elements, innermost last; only a matching end tag closes
-    // one. Implied end tags are not modelled, so a stale entry can only hide a
-    // `source` from the check, never add one.
-    let mut open: Vec<Vec<u8>> = Vec::new();
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
     emitter.naively_switch_states(true);
     for token in Tokenizer::new_with_emitter(rendered.html.as_str(), emitter) {
         match token {
             Ok(Token::StartTag(tag)) => {
                 let at = tag.span.start;
-                // `source` must see its own parent, so the stack is updated
-                // after the link attributes are read.
-                let parent_is_media = open
-                    .last()
-                    .is_some_and(|n| matches!(&n[..], b"audio" | b"video"));
                 if UNSUPPORTED_ELEMENTS.contains(&&tag.name[..]) {
                     out.unsupported.push((
                         source_offset(at),
@@ -243,11 +234,10 @@ fn scan(markdown: &str) -> Scan {
                 let link_attrs: &[&[u8]] = match &tag.name[..] {
                     b"a" | b"area" | b"link" => &[b"href"],
                     // The tree builder renames `<image>` to `<img>`.
-                    b"img" | b"image" | b"iframe" | b"embed" | b"track" | b"audio" | b"video"
-                    | b"script" => &[b"src"],
-                    // In `picture`, a `source` selects from `srcset`; its `src`
-                    // only fetches as a direct child of `audio` or `video`.
-                    b"source" if parent_is_media => &[b"src"],
+                    // `source` and `track` only fetch `src` inside `audio` or
+                    // `video`, which are unsupported; in `picture` a `source`
+                    // selects from `srcset`.
+                    b"img" | b"image" | b"embed" => &[b"src"],
                     // `src` applies only to the Image Button state; task list
                     // checkboxes and other inputs have no destination.
                     b"input"
@@ -286,17 +276,8 @@ fn scan(markdown: &str) -> Scan {
                         }
                     }
                 }
-                // HTML ignores the self-closing flag on non-void elements, so
-                // `<audio/>` still opens one.
-                if !VOID_ELEMENTS.contains(&&tag.name[..]) {
-                    open.push(tag.name.to_vec());
-                }
             }
             Ok(Token::EndTag(tag)) => {
-                // An unmatched `</video>` inside `<audio>` is ignored.
-                if let Some(i) = open.iter().rposition(|n| n[..] == tag.name[..]) {
-                    open.truncate(i);
-                }
                 // Only the generated end tag of the same level closes the
                 // heading: a raw `</h2>` inside `# Hello </h2> world` is text
                 // to the slug.
@@ -326,19 +307,15 @@ fn scan(markdown: &str) -> Scan {
     out
 }
 
-/// Elements that never have children or an end tag. `image` is renamed to
-/// `img` by the tree builder.
-const VOID_ELEMENTS: &[&[u8]] = &[
-    b"area", b"base", b"br", b"col", b"embed", b"hr", b"image", b"img", b"input", b"keygen",
-    b"link", b"meta", b"param", b"source", b"track", b"wbr",
-];
-
 /// Raw HTML elements whose effect on parsing or rendering needs HTML tree
 /// construction, which a tokenizer cannot follow: foreign content (`svg`,
 /// `math`: CDATA, non-raw-text `style`), raw-text and RCDATA elements that
 /// can swallow the rest of the document (`script`, `style`, `iframe`, ...),
-/// inert `template` contents and `select` (which ignores some start tags).
-/// Documents do not need them; diagrams are image files.
+/// inert `template` contents and `select` (which ignores some start tags),
+/// `audio` and `video` (which `source` or `track` loads depends on the tree
+/// and on end tags the parser may ignore), and `form` (a nested form start tag
+/// is dropped with its `id`). Documents do not need them; diagrams are image
+/// files and recordings are links.
 const UNSUPPORTED_ELEMENTS: &[&[u8]] = &[
     b"svg",
     b"math",
@@ -357,6 +334,9 @@ const UNSUPPORTED_ELEMENTS: &[&[u8]] = &[
     b"object",
     b"frame",
     b"frameset",
+    b"audio",
+    b"video",
+    b"form",
 ];
 
 /// Source byte offsets and names of the [`UNSUPPORTED_ELEMENTS`] used as raw
@@ -1355,17 +1335,31 @@ mod tests {
     }
 
     #[test]
-    fn source_src_counts_only_in_media() {
+    fn media_and_forms_are_unsupported() {
         let repo = TempRepo::new(&[(
             "b.md",
-            "<picture><source src=\"missing.png\"></picture>\n\n<video><source src=\"gone.mp4\"></video>\n\n<audio/><source src=\"gone.mp3\"></audio>\n",
+            "<audio><p></audio></p><source src=\"a.mp3\"></audio>\n\n<video src=\"v.mp4\"></video>\n\n<form><form id=\"ghost\"></form></form>\n",
         )]);
         let got: Vec<_> = repo
             .check(&["b.md"])
             .iter()
             .map(|e| e.target.clone())
             .collect();
-        assert_eq!(got, ["gone.mp4", "gone.mp3"]);
+        assert_eq!(got, ["<audio>", "<video>", "<form>", "<form>"]);
+    }
+
+    #[test]
+    fn source_and_track_src_are_not_links() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<picture><source src=\"missing.png\"><img src=\"gone.png\"></picture>\n\n<div><track src=\"missing.vtt\"></div>\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["gone.png"]);
     }
 
     #[test]
@@ -1386,34 +1380,6 @@ mod tests {
                 "points outside the repository".to_string()
             )]
         );
-    }
-
-    #[test]
-    fn unmatched_media_end_tags_are_ignored() {
-        let repo = TempRepo::new(&[(
-            "b.md",
-            "<audio></video><source src=\"missing.mp3\"></audio>\n",
-        )]);
-        let got: Vec<_> = repo
-            .check(&["b.md"])
-            .iter()
-            .map(|e| e.target.clone())
-            .collect();
-        assert_eq!(got, ["missing.mp3"]);
-    }
-
-    #[test]
-    fn nested_source_is_inert() {
-        let repo = TempRepo::new(&[(
-            "b.md",
-            "<audio><div><source src=\"inert.mp3\"></div><source src=\"gone.mp3\"></audio>\n",
-        )]);
-        let got: Vec<_> = repo
-            .check(&["b.md"])
-            .iter()
-            .map(|e| e.target.clone())
-            .collect();
-        assert_eq!(got, ["gone.mp3"]);
     }
 
     #[test]
