@@ -19,6 +19,8 @@ class AppleOnlyCfg(unittest.TestCase):
             'cfg(target_abi = "sim")',
             'cfg(any(target_os = "macos", false))',
             'cfg(all(target_os = "macos", true))',
+            'cfg(any(target_os = "macos", all(unix, not(target_family = "unix"))))',
+            'cfg(all(target_os = "macos", feature = "metal"))',
         ):
             with self.subTest(target=target):
                 self.assertTrue(apple_only_cfg(target))
@@ -38,13 +40,15 @@ class AppleOnlyCfg(unittest.TestCase):
             'cfg(any(target_os = "linux", false))',
             "cfg(true)",
             "cfg(false)",
+            'cfg(target_family = "unix")',
+            'cfg(any(target_os = "macos", target_os = "android"))',
         ):
             with self.subTest(target=target):
                 self.assertFalse(apple_only_cfg(target))
 
 
     def test_too_complex_fails_closed(self):
-        features = ", ".join(f'target_feature = "f{i}"' for i in range(20))
+        features = ", ".join(f'feature = "f{i}"' for i in range(20))
         with self.assertRaises(TooComplex):
             apple_only_cfg(f'cfg(all(target_os = "macos", any({features})))')
 
