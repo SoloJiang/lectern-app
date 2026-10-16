@@ -209,6 +209,8 @@ impl GateSlot {
     /// future 返回 `Ready` 之后、executor 关闭时丢弃未完成的任务，都一样；drop panic 时同样调用这个方法。
     /// kernel 按 `fail` 的方式让这个任务所属的激活失效：插件进入 `Failed`，连带停用的插件同步失效，
     /// 所以任务 panic 不会展开到 executor 的工作线程，也不会让插件在初始化中断后仍显示为 `Active`、被报告为静止。
+    /// 这个方法先把当前槽位从闸门上摘掉（不再参与之后的唤醒），然后才让激活失效、唤醒其余槽位：executor 可能在 `wake` 里同步 poll，
+    /// 如果当前任务还在唤醒名单里，会重新进入这个正在展开或已部分 drop 的任务；摘掉之后，这个任务只由 executor 在 panic 路径上收尾丢弃。
     /// 激活已经失效时只记日志。`payload` 由这个方法接管：先取出可读的消息（`&str` / `String`）记入日志，
     /// 再在 `catch_unwind` 里 drop；这次 drop 又 panic 时，第二个 payload 用 `mem::forget` 泄漏，不再 drop，
     /// 所以 `Drop` 会 panic 的 payload 也不会展开到 executor 或 kernel 线程。executor 自己不保留、不 drop 这个 payload。
@@ -584,6 +586,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 暂存封口：`started` 返回、token 换成 `Live` 的同时，另一个线程用克隆的句柄发事件、`own_with`：事件恰好送达一次，`start` 恰好调用一次。
 - 任务结果的应用 panic：主线程不展开，插件进入 `Failed`。
 - 并发失去提供者：一个 `MULTIPLE` 服务的最后两个提供者在两个线程上同时 `fail`，依赖者的 token 一定变为 `Dead`（重复上万次）。
+- 任务 panic 时的重入：executor 在 `wake` 里同步 poll，任务 panic 触发失效后不会重新 poll 这个任务，也不死锁。
 - 任务句柄回收：同一次激活里反复 `own_with` 一万个立即完成的任务，守卫表的长度回到 0；future 在取消、完成后被 drop 时 panic，插件进入 `Failed`、工作线程继续运行。
 - 界面注册的应用 panic：主线程不展开，注册一项都没有插入，插件进入 `Failed`。
 - 闸门唤醒：executor 在 `wake` 里同步 poll 任务时不死锁，任务第一次 poll 就调用同一个句柄的 `own_with` 也不死锁；`manifest`、`activate`、监听、守卫的 drop 以 `Drop` 会 panic 的 payload panic 时，kernel 线程继续运行；任务以 `Drop` 会 panic 的 payload panic 时，executor 和 kernel 线程都继续运行。
