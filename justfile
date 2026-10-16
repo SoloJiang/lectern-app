@@ -33,7 +33,7 @@ test *args:
 
 # Performance budget benchmarks.
 bench:
-    {{cargo}} bench --locked -p lectern-bench
+    {{cargo}} bench --locked -p lectern-bench --all-features
 
 # Licenses, sources and advisories.
 deny:
