@@ -491,7 +491,7 @@ impl Emitter {
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
 - 激活期间的状态（`ServiceRef`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Active` 的 drop 同样用 `catch_unwind` 包住，panic 时记录错误、插件标为 `Failed`，撤销照常完成。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
-- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：`commit` 只把注册连同 `ActivationToken` 排到主线程；主线程每帧检查 `token.state()`：`Pending` 时留到下一帧再看；否则用 `token.enter()` 取准入，取到就在持有准入期间应用注册并把注销守卫交给 kernel，取不到（`Dead`）就丢弃；丢弃同样在 `contain` 里进行，注册捕获的插件值的 `Drop` panic 不会展开到主线程。应用一次注册是一个整体，也在 `contain` 里执行：`dyn Contributions` 先调用注册里由插件提供的代码（构造菜单项、快捷键表等），全部成功后才一次性插入自己的表；插件代码 panic 时什么都不插入，按 `fail` 让这次激活失效，panic 不会展开到主线程，也不会留下只应用了一半的注册。界面回调之后的调用照常按下文的规则取准入、`contain`。应用与撤销因此不会交错：撤销第 3 步等准入归零，之后才 drop 守卫和 `Active`。所以注册只在所有 `commit` 和 `started` 都成功之后应用，也不会因为主线程比激活先跑到而丢失。激活在任何一步失败（`activate`、某个 `commit` panic、`started` panic 或调用 `fail`），token 都不会变为有效，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`commit` 在排队之前用 `token.pending()` 取一个守卫（`shutdown` 之后返回 None，注册直接丢弃），随注册一起排到主线程，注册应用或丢弃之后才 drop。所以从排队到主线程收到注册之间，kernel 也不会报告静止，界面注册生效之前不静止。
+- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：`commit` 只把注册连同 `ActivationToken` 排到主线程；主线程每帧检查 `token.state()`：`Pending` 时留到下一帧再看；否则用 `token.enter()` 取准入，取到就在持有准入期间应用注册并把注销守卫交给 kernel：交接用持有的这个准入登记守卫（`Admission::own`），只看守卫表是否已关闭，不看 token 是否已经变成 `Dead`。这个准入没释放时撤销停在第 3 步，表不会关闭，所以即使应用期间另一线程让激活失效，注销守卫也一定进入表里，随撤销第 4 步在 `Active` 之前 drop，不会走 `own` 被拒绝后排到 kernel 线程、晚于 `Active` 才 drop 的路径；取不到（`Dead`）就丢弃；丢弃同样在 `contain` 里进行，注册捕获的插件值的 `Drop` panic 不会展开到主线程。应用一次注册是一个整体，也在 `contain` 里执行：`dyn Contributions` 先调用注册里由插件提供的代码（构造菜单项、快捷键表等），全部成功后才一次性插入自己的表；插件代码 panic 时什么都不插入，按 `fail` 让这次激活失效，panic 不会展开到主线程，也不会留下只应用了一半的注册。界面回调之后的调用照常按下文的规则取准入、`contain`。应用与撤销因此不会交错：撤销第 3 步等准入归零，之后才 drop 守卫和 `Active`。所以注册只在所有 `commit` 和 `started` 都成功之后应用，也不会因为主线程比激活先跑到而丢失。激活在任何一步失败（`activate`、某个 `commit` panic、`started` panic 或调用 `fail`），token 都不会变为有效，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`commit` 在排队之前用 `token.pending()` 取一个守卫（`shutdown` 之后返回 None，注册直接丢弃），随注册一起排到主线程，注册应用或丢弃之后才 drop。所以从排队到主线程收到注册之间，kernel 也不会报告静止，界面注册生效之前不静止。
 
 ### 撤销
 
@@ -650,6 +650,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 任务 panic 的顺序：payload 的 `Drop` 要等 future 持有的锁时，future 先被 drop，payload 随后释放，工作线程不卡住；`start` 把闸门交给另一个线程、`start` 返回后才申请槽位时得到 None，任务不运行；登记的回收与撤销并发时，句柄只 drop 一次且在 `Active` 之前；`own` 与撤销并发时守卫不会留在 `Active` 之后。
 - `own_with` 与撤销：`start` 卡住期间激活失效时，句柄在撤销 drop `Active` 之前被 drop；`started` 里调用 `busy()` 能取到守卫。
 - 静止事件与锁：持有插件锁时 `busy()` 或 drop 最后一个守卫、同一插件的 `Busy` / `Quiescent` 监听取同一把锁，不死锁；`started` 里调用 `own_with` 的任务在激活变为 `Live` 后运行；命令重放排在这次激活的界面注册应用之后。
+- 注册应用与失效：主线程应用注册时另一线程调用 `fail`，注销守卫仍登记进守卫表，并在 `Active` 之前 drop。
 - 失效与唤醒：失效唤醒的任务被丢弃、future 的 drop 调用 `fail` 时不死锁；`busy()` 与 `fail` 并发时，要么返回 None，要么守卫在撤销完成之前创建；主线程注销时闭包的 `Drop` panic 不展开到主线程。
 - 界面注册与失效竞争：主线程应用注册时另一线程调用 `fail`，撤销在注册应用完之后才 drop 守卫和 `Active`，注册随后被注销。
 - 发出方失效：后台任务的 `emit` 与 `fail` 并发时，`fail` 返回之后开始的分发不会把事件送给任何监听。
