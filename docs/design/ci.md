@@ -25,7 +25,7 @@
 1. 每个 crate 声明了 `[package.metadata.lectern] layer`。
 2. 依赖自上而下：`app` → `view` → `domain` → `infra`；`kernel` 层可被任何层依赖，自身只依赖 kernel 层；只有 `app` 可以依赖 `tool` 层。
 3. `domain`、`infra`、`kernel` 层的依赖图（含间接依赖）里没有 GPUI。
-4. macOS 系统绑定只能是 `platform` 的直接依赖。绑定按两种方式识别：名字前缀（objc*、cocoa*、core-foundation*、security-framework*、metal*、dispatch*、screencapturekit* 等），以及 Cargo 为 macOS 编译、不为 Linux 编译的依赖，不论名字（用 `cargo metadata --filter-platform` 让 Cargo 求值 cfg 条件，再比较两个平台的结果）。
+4. macOS 系统绑定只能是 `platform` 的直接依赖。绑定按两种方式识别：名字（前缀 objc*、cocoa*、core-foundation*、security-framework*、metal*、dispatch*、screencapturekit* 等，或名字里按 - 和 _ 切出的词含 macos、darwin、appkit、metal 等），以及 Cargo 为 macOS 编译、不为 Linux 编译的依赖，不论名字（用 `cargo metadata --filter-platform` 让 Cargo 求值 cfg 条件，再比较两个平台的结果）。
 
 检查用 `cargo metadata --all-features`，藏在可选 feature 后面的依赖也算在内。每个 crate 自己的 dev-dependencies 也检查（会编译进测试和基准），依赖的 dev-dependencies 不会被编译，跳过。
 
