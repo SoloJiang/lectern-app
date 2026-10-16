@@ -9,6 +9,7 @@
 ## 边界
 
 - FSEvents 后端在 `platform`，由 `app` 装配时注入；本 crate 不出现 macOS 专属代码（架构规则 6）。
+- 按 worktree 维护单调递增的修订号：不被 `.gitignore` 忽略的路径上每到一批事件加一，并提供「先交付已发生的事件再读修订号」的接口（FSEvents 后端用 `FSEventStreamFlushSync`），供 Analyze 判断结果显示前的指纹计算期间工作区有没有变（[ADR 0019](../../docs/adr/0019.md)）。
 - 测试用内存里的模拟后端驱动事件。
 
 ## 测试
