@@ -47,7 +47,7 @@ just ci      # 全量，等同 CI
 
 负责推进的 agent 可以直接合并 PR（squash），条件全部满足才合：
 
-1. Codex 已审阅当前最新提交，并在 PR 上留下 👍 reaction（审阅中是 👀，有意见时会留评论）。
+1. Codex 已审阅当前最新提交，并在 PR 上留下 👍 reaction（审阅中是 👀，有意见时会留评论）。只改文档的 PR 免这一条。
 2. CI 全部通过，没有合并冲突。
 3. 所有审阅讨论串都已回复并解决。
 
@@ -56,5 +56,17 @@ just ci      # 全量，等同 CI
 ## 工作方式
 
 - 一个任务一个 worktree、一个 issue、一个分支、一个 PR，粒度控制在一个 crate 内。
-- 先写 `docs/design/<crate>.md`（接口与数据结构），人审过再写代码。
+- 先写 `docs/design/<crate>.md`（接口与数据结构，按[模板](docs/design/TEMPLATE.md)），人审过再写代码。
+- 新增 crate 时同时写 `crates/<name>/AGENTS.md`（职责、边界、测试方式），并建软链接 `CLAUDE.md -> AGENTS.md`。
 - 领域逻辑用单元测试 + insta 快照验收；视图用 `#[gpui::test]`；视觉效果用 UI 探针。
+
+## 技能
+
+`.claude/skills/` 下的技能，Claude Code 自动加载；其他 agent 直接读对应的 `SKILL.md`：
+
+| 技能 | 用途 |
+|---|---|
+| [design-doc](.claude/skills/design-doc/SKILL.md) | 按模板写模块设计文档，提文档 PR 给人审 |
+| [adr](.claude/skills/adr/SKILL.md) | 写新 ADR 并更新索引 |
+| [ship-pr](.claude/skills/ship-pr/SKILL.md) | 从提交到合并：检查、开 PR、Codex 审阅、处理意见、squash 合并 |
+| [gpui](.claude/skills/gpui/SKILL.md) | 写 GPUI 与 gpui-component 代码：按锁定版本读上游指南，Lectern 规则优先 |
