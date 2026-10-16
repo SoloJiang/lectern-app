@@ -4,9 +4,9 @@
 
 ## P0 搭建与验证（1–2 周）
 
-出口关卡 G1：脚手架、终端网格渲染、UI 探针三项验证都跑通。
+出口关卡 G1：脚手架、终端网格渲染、UI 探针三项验证全部通过。
 
-- [ ] Cargo workspace 骨架与四层 crate 划分，锁定工具链与 GPUI / gpui-component commit
+- [ ] Cargo workspace 骨架与四层 crate 划分，锁定工具链与 GPUI / gpui-component 版本
 - [ ] 分层 AGENTS.md、ADR 目录、模块设计文档模板、agent 技能
 - [ ] 统一命令入口（just）、nextest、sccache、dev profile 优化
 - [ ] 架构规则检查脚本、cargo-deny 许可证检查、macOS CI
@@ -18,13 +18,13 @@
 
 ## P1 MVP（4–6 周）
 
-出口关卡 G2：自己能日常使用，开始用 Lectern 审 Lectern。界面结构见 [交互规范](design/interaction.md)。
+出口关卡 G2：可以日常自用，开始用 Lectern 审阅 Lectern 自身的改动。界面结构见 [交互规范](design/interaction.md)。
 
 - [ ] 项目模型：仓库 → worktree → 子项目，清单解析
 - [ ] Welcome：最近项目、打开文件夹、发现有 agent 会话的文件夹
 - [ ] 项目主页：项目侧栏（Sessions / Packages）、Needs review、会话外的改动
 - [ ] 终端：portable-pty + libghostty-vt，会话 resume（Conversation 的 Terminal 页）
-- [ ] Agent 会话发现：Claude Code / Codex JSONL 解析，按 cwd 归位
+- [ ] Agent 会话发现：Claude Code / Codex JSONL 解析，按 cwd 匹配到项目
 - [ ] 会话与每轮 token 统计：去重、聚合入 SQLite，显示在会话卡片、会话简报和每轮标题
 - [ ] Git 与 Diff：gix + imara-diff，统一 / 双栏视图
 - [ ] 审阅视图：会话简报、按轮次的改动叙事、「为什么改」、已看进度、Drifted 标记
@@ -33,12 +33,12 @@
 
 ## P2 理解与反馈（约 4 周）
 
-出口关卡 G3：Java 跳转可日常用。
+出口关卡 G3：Java 跳转可日常使用。
 
 - [ ] 语法索引：tree-sitter tags → SQLite，增量更新
 - [ ] Java 解析器：package / import / 内部类，Maven 与 Gradle
 - [ ] 跨子项目导航：TS 包名、Maven 模块间依赖
-- [ ] 上下文抽屉：调用方、相关测试、改动历史（影响面）
+- [ ] 上下文面板：调用方、相关测试、改动历史（影响面）
 - [ ] Usage 页与额度：每日用量、按会话 / 模型明细、额度提醒，Claude Code statusline 默认接入
 - [ ] 结构化 Diff：忽略纯格式变化、识别移动代码
 - [ ] 文件浏览（侧栏 Files）与完整文件阅读、编辑（第三层）
