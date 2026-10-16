@@ -24,8 +24,8 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 - 其余 PR 等 Codex 审阅当前最新提交：PR 上的 reaction 是 👀 表示审阅中，👍 表示没有意见，有意见时留行内评论。
 
   ```sh
-  gh api $R/issues/$N/reactions --jq '.[]|"\(.user.login) \(.content)"'
-  gh api $R/pulls/$N/comments --jq '.[]|"\(.id) \(.user.login) \(.path):\(.line) \(.body)"'
+  gh api --paginate $R/issues/$N/reactions --jq '.[]|"\(.user.login) \(.content)"'
+  gh api --paginate $R/pulls/$N/comments --jq '.[]|"\(.id) \(.user.login) \(.path):\(.line) \(.body)"'
   ```
 
 - Codex 审阅失败，或推送新提交后长时间没有更新时，在 PR 上评论 `@codex review` 重新触发。
@@ -60,7 +60,7 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 以下条件全部满足时才能合并：
 
 1. Codex 对最新提交给了 👍（文档 PR 免）。
-2. CI 全部通过：`gh api $R/commits/<sha>/check-runs --jq '.check_runs[]|[.name,.conclusion]|@tsv'`。
+2. CI 全部通过：`gh api --paginate $R/commits/<sha>/check-runs --jq '.check_runs[]|[.name,.status,.conclusion]|@tsv'`，每一行都是 `completed` 和 `success`。列表类的接口默认每页 30 条，都要带 `--paginate`。
 3. 没有合并冲突：`gh api $R/pulls/$N --jq .mergeable_state` 为 `clean`。
 4. 没有未解决的讨论串（`ccr/review_threads` 或 GraphQL 的 `reviewThreads`）。
 
