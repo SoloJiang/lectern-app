@@ -9,7 +9,7 @@
 ## 边界
 
 - FSEvents 后端在 `platform`，由 `app` 装配时注入；本 crate 不出现 macOS 专属代码（架构规则 6）。
-- 按 worktree 维护单调递增的修订号：不被 `.gitignore` 忽略的路径上每到一批事件加一，worktree 的 git 目录里的 `HEAD`、`index`，以及公共目录里的 `refs/`、`packed-refs`（linked worktree 的 `HEAD`、`index` 在 `<公共目录>/worktrees/<名字>/` 下）上的事件同样加一（提交、`reset`、`update-index` 不写工作区文件也会改变基准），并提供「先交付已发生的事件再读修订号」的接口（FSEvents 后端用 `FSEventStreamFlushSync`），供 Analyze 判断结果显示前的指纹计算期间工作区有没有变（[ADR 0019](../../docs/adr/0019.md)）。
+- 按 worktree 维护单调递增的修订号：不被 `.gitignore` 忽略的路径上每到一批事件加一，worktree 的 git 目录里的 `HEAD`、`index`，以及公共目录里的 `refs/`、`packed-refs`，以及影响 diff 和快照内容的仓库配置：`config`（含 linked worktree 的 `config.worktree`）、`info/exclude`、`info/attributes` 和 `core.excludesFile`、`core.attributesFile` 指向的文件（linked worktree 的 `HEAD`、`index`、`config.worktree` 在 `<公共目录>/worktrees/<名字>/` 下）上的事件同样加一（提交、`reset`、`update-index` 不写工作区文件也会改变基准），并提供「先交付已发生的事件再读修订号」的接口（FSEvents 后端用 `FSEventStreamFlushSync`），供 Analyze 判断结果显示前的指纹计算期间工作区有没有变（[ADR 0019](../../docs/adr/0019.md)）。
 - 测试用内存里的模拟后端驱动事件。
 
 ## 测试
