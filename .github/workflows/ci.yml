@@ -56,3 +56,5 @@ jobs:
         run: cargo test --locked --workspace --all-features
       - name: Build app
         run: cargo build --locked -p lectern-app
+      - name: Performance budget benchmarks
+        run: cargo bench --locked -p lectern-bench

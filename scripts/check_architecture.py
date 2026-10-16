@@ -9,7 +9,8 @@ Rules checked:
   3. Crates in the domain, infra and kernel layers never depend on GPUI,
      directly or transitively.
   4. macOS system bindings are direct dependencies of `platform` only. A
-     binding is a crate matching MACOS_ONLY_PREFIXES, or any dependency that
+     binding is a crate whose name matches MACOS_ONLY_PREFIXES or contains a
+     MACOS_NAME_TOKENS token, or any dependency that
      Cargo compiles for macOS but not for Linux.
 
 Optional dependencies are included (`cargo metadata --all-features`), so a
@@ -23,6 +24,7 @@ and tests without GPUI instead (used by the Linux CI job).
 """
 
 import json
+import re
 import subprocess
 import sys
 
@@ -55,6 +57,9 @@ MACOS_ONLY_PREFIXES = (
     "icrate",
     "apple-",
 )
+# Name tokens (split on - and _) that mark an Apple binding wherever they
+# appear, e.g. accesskit_macos, raw-window-metal, objc2-app-kit.
+MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "objc", "objc2", "coreaudio", "corefoundation"}
 # A dependency compiled for macOS but not for Linux is a macOS binding
 # whatever its name, e.g. [target.'cfg(target_os = "macos")'.dependencies].
 # Cargo evaluates the cfg predicates (--filter-platform); we compare results.
@@ -78,6 +83,10 @@ def metadata(platform=None):
         text=True,
     ).stdout
     return json.loads(out)
+
+
+def is_macos_binding_name(name):
+    return name.startswith(MACOS_ONLY_PREFIXES) or bool(MACOS_NAME_TOKENS & set(re.split(r"[-_]", name)))
 
 
 def direct_deps(meta):
@@ -162,7 +171,7 @@ def main():
                     errors.append(f"{name} ({mine}) -> {dep_name} ({theirs}): dependencies must point downwards")
                 elif mine == "kernel" and theirs not in ("kernel", None):
                     errors.append(f"{name} (kernel) -> {dep_name} ({theirs}): kernel crates depend only on kernel crates")
-            elif (dep_name.startswith(MACOS_ONLY_PREFIXES) or apple_only(pid, dep)) and name != PLATFORM_CRATE:
+            elif (is_macos_binding_name(dep_name) or apple_only(pid, dep)) and name != PLATFORM_CRATE:
                 errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE}")
 
     for pid in members:
