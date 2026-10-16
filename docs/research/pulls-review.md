@@ -161,7 +161,7 @@ pulls.review 是 pnpm workspace，包含四个包：
 `packages/core/src/local/source.ts` 和 `git.ts`：
 
 - 调用 `git` 不经过 shell，设置 `LC_ALL=C`，diff 参数固定：`-c core.quotePath=false diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ --full-index -M`。`--full-index` 输出完整的 blob OID（SHA-1 仓库 40 位，SHA-256 仓库 64 位），所以哈希算法相同时，本地和 GitHub 上的已看标记可以互相匹配。参数里没有 `--no-textconv`：仓库为某类文件配置了 textconv 时，`git diff` 仍会执行那个外部命令。
-- 包含未跟踪文件的方法是：用 `git rev-parse --git-path index` 找到当前 worktree 的 index（linked worktree 的 index 不在 `.git/index`），复制到临时文件，复制失败时（如还没有提交的新仓库）从空 index 开始；再通过 `GIT_INDEX_FILE` 对副本执行 `git add --intent-to-add`，然后做 diff。用户的 index 不受影响。
+- 包含未跟踪文件的方法是：用 `git rev-parse --git-path index` 找到当前 worktree 的 index（linked worktree 的 index 不在 `.git/index`），复制到临时文件，复制失败时（如还没有提交的新仓库）从空 index 开始；再通过 `GIT_INDEX_FILE` 对副本执行 `git add --intent-to-add`，然后做 diff。用户的 index 不受影响，但仓库里还没有空 blob 对象时，`--intent-to-add` 仍会把它写进用户的 `.git/objects`。
 - 单个文件的 patch 超过 512 KB 时，只保留文件头和增删行数，标记 `truncated`。
 - 工作区的指纹是 `worktree:` 加上 sha256(基准 + diff 文本)，任何编辑或 HEAD 移动都会改变它。
 - `loadFile` 拒绝解析到仓库外的路径。
@@ -228,16 +228,16 @@ Action 推荐用 `pull_request_target` 触发，理由是它只通过 API 读 di
 
 | 建议 | 落在哪里 | 相关 issue |
 |---|---|---|
-| 已看标记的键包含审阅对象（会话或比较范围）、路径和改动前后两个 blob OID；改动前后的文件模式（如可执行位）和改动状态也计入。同一审阅对象和路径的改动前或改动后 OID、模式、状态任一变化时（如 base 前进后只有改动前的一侧变了，或只改了可执行位），标为「审过之后又被改过」，界面显示为第三种状态并提供重新标记。OID 按仓库的哈希算法取完整长度，不假定 40 位 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
+| 已看标记的键包含审阅对象（会话或比较范围）、路径和改动前后两个 blob OID；改动前后的文件模式（如可执行位）、改动状态，以及重命名时的新旧两个路径也计入，按任一路径都能查到。同一审阅对象和路径的改动前或改动后 OID、模式、状态任一变化时（如 base 前进后只有改动前的一侧变了，或只改了可执行位），标为「审过之后又被改过」，界面显示为第三种状态并提供重新标记。OID 按仓库的哈希算法取完整长度，不假定 40 位 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 标为已看后折叠该文件，与快捷键 V 的跳转配合 | `review_view` | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 维护一份噪声文件模式列表（生成文件、lockfile、快照），同时用于默认折叠、规则分组和模型输入 | `review` 或 `git` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#21](https://github.com/SoloJiang/lectern-app/issues/21) |
 | 全量高亮：hunk 用完整文件的高亮结果切片，不单独高亮 hunk；完整文件的高亮按 blob OID 加语言和 grammar / 高亮查询的版本缓存，同样的内容在不同语言的文件里不会命中错误的结果，grammar 升级后旧结果失效 | `git` 设计文档 | [#14](https://github.com/SoloJiang/lectern-app/issues/14) |
-| 工作区 diff 包含未跟踪文件，但不写用户的 index；单文件设大小上限并标记截断；工作区指纹用基准树 OID 加 diff 内容的哈希；不执行仓库配置的 textconv 和外部 diff 程序（调用 git 命令行时加 `--no-ext-diff --no-textconv`） | `git` 设计文档 | [#14](https://github.com/SoloJiang/lectern-app/issues/14) |
+| 工作区 diff 包含未跟踪文件，但不写用户的 index，也不往仓库的对象库里写任何东西：未跟踪文件直接读出来与空内容比较，不用 `git add --intent-to-add`；单文件设大小上限并标记截断；工作区指纹用基准树 OID 加 diff 内容的哈希。读取仓库时不执行仓库配置的任何外部程序：textconv、外部 diff、clean / process 过滤器、`core.fsmonitor` 钩子。用 gix 直接读对象和工作区文件、按原始字节比较；不得不调用 git 命令行时，除了 `--no-ext-diff --no-textconv` 还要关闭 `core.fsmonitor` 和过滤器，或者放进不能执行仓库程序的沙箱 | `git` 设计文档 | [#14](https://github.com/SoloJiang/lectern-app/issues/14) |
 | 识别不了会话日志、或改动不属于任何会话时，用有序 glob 规则表分组，取代平铺的文件列表；规则用 `globset` 实现，首帧后计算 | `review`、`project_home` | [#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#30](https://github.com/SoloJiang/lectern-app/issues/30) |
 | 会话简报里「值得先看的几处」采用 `critical` 加文件备注、行备注的结构；行备注只挂在 diff 里显示的行上 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 任何模型输出都走同一套校验：结构校验、覆盖检查、一次纠错重试、对账、未分类兜底 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
-| 调用 Claude Code、Codex 生成简报时，用只读参数启动无界面进程，在单独的会话里运行，不续接正在审阅的会话，避免在该会话里多出审阅轮次。这个辅助会话不能出现在会话列表里：可用时用不保存会话的调用方式（如 Claude Code 的 `--no-session-persistence`），否则记录它的会话 ID，会话发现时过滤掉。pulls.review 不限制这类进程的轮数和时长，Lectern 要设超时，用户离开或取消时终止子进程并回收。只读参数只禁止写入，不限制读取，被审阅的内容可能诱导 agent 读取仓库外的文件，所以进程要在系统级沙箱里运行，只允许读取本次分析的输入、被审阅的仓库和该 agent 登录所需的凭据（凭据文件或钥匙串条目，按 agent 逐个列出），并且不加载用户的其他配置和 MCP 服务器。沙箱的生成属于 macOS 专属能力，由 `platform` 提供接口，`agents` 和 `executor` 负责进程的启动与生命周期 | `agents`、`executor`、`platform` 设计文档 | [#13](https://github.com/SoloJiang/lectern-app/issues/13) |
-| 模型结果的缓存键是完整分析请求的哈希：规范化后的提示词（含标题、描述、prompt 摘录、输出语言）、排序后的（路径，改动前 blob OID，改动后 blob OID）列表、schema 版本和模型 ID。diff 超过内联上限时模型通过工具读取 diff，提示词里没有 diff 正文，所以两侧 OID 都要进键。agent 能读仓库里未改动的文件时，键还要包含被审阅 worktree 的指纹（基准树 OID 加工作区 diff 的哈希），否则未改动文件的变化不会让结果失效；只缓存模型结果，规则结果每次重算 | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
+| 调用 Claude Code、Codex 生成简报时，用只读参数启动无界面进程，在单独的会话里运行，不续接正在审阅的会话，避免在该会话里多出审阅轮次。这个辅助会话不能出现在会话列表里：可用时用不保存会话的调用方式（如 Claude Code 的 `--no-session-persistence`），否则记录它的会话 ID，会话发现时过滤掉。pulls.review 不限制这类进程的轮数和时长，Lectern 要设超时，用户离开或取消时终止子进程并回收。只读参数只禁止写入，不限制读取，被审阅的内容可能诱导 agent 读取仓库外的文件，所以进程要在系统级沙箱里运行，只允许读取本次分析的输入、被审阅仓库的一份只读快照和该 agent 登录所需的凭据（凭据文件或钥匙串条目，按 agent 逐个列出）。快照只含受 git 跟踪的文件和本次改动的文件（用 APFS 的 clonefile 生成，几乎不占空间），不含 `.env` 这类被忽略或无关的未跟踪文件，被注入的指令也读不到仓库里的密钥。进程不加载用户的其他配置和 MCP 服务器。沙箱的生成属于 macOS 专属能力，由 `platform` 提供接口，`agents` 和 `executor` 负责进程的启动与生命周期 | `agents`、`executor`、`platform` 设计文档 | [#13](https://github.com/SoloJiang/lectern-app/issues/13) |
+| 模型结果的缓存键是完整分析请求的哈希：规范化后的提示词（含标题、描述、prompt 摘录、输出语言）、每个文件规范化后的完整 patch 的哈希（包含新旧路径、新旧 blob OID、新旧文件模式和改动状态）、schema 版本和模型 ID。diff 超过内联上限时模型通过工具读取 diff，提示词里没有 diff 正文，所以要对模型能读到的 patch 本身取哈希，只列 OID 会漏掉文件模式的方向等差别。agent 能读仓库里未改动的文件时，键还要包含被审阅 worktree 的指纹（基准树 OID 加工作区 diff 的哈希），否则未改动文件的变化不会让结果失效；只缓存模型结果，规则结果每次重算 | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
 | 缓存放在 `~/Library/Caches` 下，按仓库的 git 公共目录的绝对路径区分（`git rev-parse --path-format=absolute --git-common-dir`，或解析后取规范路径；默认输出常常是相对路径 `.git`，不同仓库会撞在一起），同一仓库的 worktree 共用，且不在用户的 `.git` 里写文件（pulls.review 写在 `.git` 公共目录下） | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
 | 来源接口按能力定义：必需的取 diff，加上可选的指纹、加载完整文件、审阅评论、共享结果；视图按能力决定功能 | `forge` 设计文档 | [#25](https://github.com/SoloJiang/lectern-app/issues/25) |
 | MR 视图请求 GitHub 时处理限流和条件请求，pulls.review 没有做。MR 的指纹同时包含 head 和 base（或合并基点），以及进入分析的 MR 元数据（标题、描述）的哈希；任一变化时缓存的结果按过期处理 | `forge` 设计文档 | [#25](https://github.com/SoloJiang/lectern-app/issues/25) |
