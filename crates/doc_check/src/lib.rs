@@ -200,19 +200,21 @@ fn scan(markdown: &str) -> Scan {
     let is_heading = |name: &[u8]| matches!(name, [b'h', b'1'..=b'6']);
     let mut out = Scan::default();
     let mut heading: Option<(Vec<u8>, String)> = None;
-    // Open media elements, innermost last; only a matching end tag closes one.
-    let mut media: Vec<Vec<u8>> = Vec::new();
+    // Open non-void elements, innermost last; only a matching end tag closes
+    // one. Implied end tags are not modelled, so a stale entry can only hide a
+    // `source` from the check, never add one.
+    let mut open: Vec<Vec<u8>> = Vec::new();
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
     emitter.naively_switch_states(true);
     for token in Tokenizer::new_with_emitter(rendered.html.as_str(), emitter) {
         match token {
             Ok(Token::StartTag(tag)) => {
                 let at = tag.span.start;
-                // HTML ignores the self-closing flag on non-void elements, so
-                // `<audio/>` still opens one.
-                if matches!(&tag.name[..], b"audio" | b"video") {
-                    media.push(tag.name.to_vec());
-                }
+                // `source` must see its own parent, so the stack is updated
+                // after the link attributes are read.
+                let parent_is_media = open
+                    .last()
+                    .is_some_and(|n| matches!(&n[..], b"audio" | b"video"));
                 if UNSUPPORTED_ELEMENTS.contains(&&tag.name[..]) {
                     out.unsupported.push((
                         source_offset(at),
@@ -244,8 +246,8 @@ fn scan(markdown: &str) -> Scan {
                     b"img" | b"image" | b"iframe" | b"embed" | b"track" | b"audio" | b"video"
                     | b"script" => &[b"src"],
                     // In `picture`, a `source` selects from `srcset`; its `src`
-                    // only fetches inside `audio` or `video`.
-                    b"source" if !media.is_empty() => &[b"src"],
+                    // only fetches as a direct child of `audio` or `video`.
+                    b"source" if parent_is_media => &[b"src"],
                     // `src` applies only to the Image Button state; task list
                     // checkboxes and other inputs have no destination.
                     b"input"
@@ -284,11 +286,16 @@ fn scan(markdown: &str) -> Scan {
                         }
                     }
                 }
+                // HTML ignores the self-closing flag on non-void elements, so
+                // `<audio/>` still opens one.
+                if !VOID_ELEMENTS.contains(&&tag.name[..]) {
+                    open.push(tag.name.to_vec());
+                }
             }
             Ok(Token::EndTag(tag)) => {
                 // An unmatched `</video>` inside `<audio>` is ignored.
-                if let Some(i) = media.iter().rposition(|n| n[..] == tag.name[..]) {
-                    media.truncate(i);
+                if let Some(i) = open.iter().rposition(|n| n[..] == tag.name[..]) {
+                    open.truncate(i);
                 }
                 // Only the generated end tag of the same level closes the
                 // heading: a raw `</h2>` inside `# Hello </h2> world` is text
@@ -318,6 +325,13 @@ fn scan(markdown: &str) -> Scan {
     }
     out
 }
+
+/// Elements that never have children or an end tag. `image` is renamed to
+/// `img` by the tree builder.
+const VOID_ELEMENTS: &[&[u8]] = &[
+    b"area", b"base", b"br", b"col", b"embed", b"hr", b"image", b"img", b"input", b"keygen",
+    b"link", b"meta", b"param", b"source", b"track", b"wbr",
+];
 
 /// Raw HTML elements whose effect on parsing or rendering needs HTML tree
 /// construction, which a tokenizer cannot follow: foreign content (`svg`,
@@ -1386,6 +1400,20 @@ mod tests {
             .map(|e| e.target.clone())
             .collect();
         assert_eq!(got, ["missing.mp3"]);
+    }
+
+    #[test]
+    fn nested_source_is_inert() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<audio><div><source src=\"inert.mp3\"></div><source src=\"gone.mp3\"></audio>\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["gone.mp3"]);
     }
 
     #[test]
