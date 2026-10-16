@@ -11,6 +11,9 @@
 
 - gix 读取对象与 index 的调用都在后台任务里执行，不在 UI 线程上。
 - diff 结果以两端 blob OID 为键缓存。
+- blob OID 按仓库的哈希算法取完整长度（SHA-1 为 40 位、SHA-256 为 64 位），不假定固定长度。
+- 工作区 diff 包含未跟踪文件，但不写用户的 index。单个文件的 diff 超过大小上限时，只保留文件头和增删行数，并标记为截断。
+- 工作区的指纹由基准树 OID 和 diff 内容的哈希组成，用来判断缓存的结果是否过期。设计依据见 [pulls.review 调研](../../docs/research/pulls-review.md#对-lectern-的建议)。
 
 ## 测试
 

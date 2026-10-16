@@ -5,12 +5,14 @@
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
 - 设计文档：`docs/design/cache.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)
-- ADR：[0006](../../docs/adr/0006.md)、[0017](../../docs/adr/0017.md)
+- ADR：[0006](../../docs/adr/0006.md)、[0017](../../docs/adr/0017.md)、[0019](../../docs/adr/0019.md)
 
 ## 边界
 
 - 首帧之后才打开数据库。
 - SQLite 页缓存 8 MB，缓存按字节 LRU；缓存可以随时删除重建，不存只有这里才有的数据。
+- 缓存放在 `platform` 提供的应用缓存目录下，按仓库的 git 公共目录区分，同一仓库的 worktree 共用，不在用户的 `.git` 里写文件。
+- 模型分析结果的键是完整分析请求的哈希：规范化后的提示词、排序后的路径与 blob OID 列表、schema 版本、模型 ID（[ADR 0019](../../docs/adr/0019.md)）。规则生成的结果不缓存，每次重算。
 
 ## 测试
 
