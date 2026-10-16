@@ -5,7 +5,7 @@ description: Write the module design doc docs/design/<crate>.md for a Lectern cr
 
 # 写模块设计文档
 
-Lectern 先写设计、人审过再写代码（AGENTS.md「工作方式」）。产出是一份 `docs/design/<crate>.md` 和一个只含这份文档的 PR。
+Lectern 先写设计、人审过再写代码（AGENTS.md「工作方式」）。产出是一份 `docs/design/<crate>.md`，以及一个只改文档的 PR：其中包含这份设计文档和第 4 步对 `crates/<crate>/AGENTS.md` 的更新。
 
 ## 步骤
 
@@ -14,7 +14,7 @@ Lectern 先写设计、人审过再写代码（AGENTS.md「工作方式」）。
    - 对应的 issue（`gh api repos/SoloJiang/lectern-app/issues/<n>`）。
    - [交互规范](../../../docs/design/interaction.md)和[技术调研](../../../docs/design/tech-research.md)里相关的章节，以及 crate AGENTS.md 列出的 ADR。
    - 依赖的其他 crate 的设计文档（已经写了的）。
-2. 新建 worktree 和分支，并进入新的 worktree：`git worktree add -b design/<crate> ../lectern-design-<crate> origin/main && cd ../lectern-design-<crate>`。后面的步骤都在这个目录里执行，不要在原来的 checkout 里写文档。
+2. 新建 worktree 和分支，并进入新的 worktree：`git fetch origin main && git worktree add -b design/<crate> ../lectern-design-<crate> origin/main && cd ../lectern-design-<crate>`。后面的步骤都在这个目录里执行，不要在原来的 checkout 里写文档。
 3. 复制 [模板](../../../docs/design/TEMPLATE.md) 为 `docs/design/<crate>.md`，<crate> 用目录名。按小节填写，删掉不适用的小节和模板开头的注释。
    - 接口写 Rust 签名，标明调用线程和是否阻塞。
    - 解析外部格式的，写明格式来源和版本，并说明 fixtures 放什么。
