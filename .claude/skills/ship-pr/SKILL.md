@@ -64,7 +64,7 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 以下条件全部满足时才能合并：
 
 1. Codex 已审阅最新提交且没有意见：汇总评论里的 `sha` 等于 head、`status` 为 `completed`、`findings` 为 `false`，并且有 👍（设计文档以外的文档 PR 免）。
-2. CI 全部通过：`gh api --paginate $R/commits/<sha>/check-runs --jq '.check_runs[]|[.name,.status,.conclusion]|@tsv'`，每一行都是 `completed` 和 `success`。列表类的接口默认每页 30 条，都要带 `--paginate`。
+2. CI 全部通过：`gh api --paginate $R/commits/<sha>/check-runs --jq '.check_runs[]|[.name,.status,.conclusion]|@tsv'` 的结果里必须有 `.github/workflows/ci.yml` 定义的两个任务 `Checks (Linux, GPUI-free crates)` 和 `Build and test (macOS arm64)`，而且每一行都是 `completed` 和 `success`。结果为空或缺任何一个任务都不算通过：推送后 GitHub 登记检查需要几秒到几十秒。列表类的接口默认每页 30 条，都要带 `--paginate`。
 3. 没有合并冲突：`gh api $R/pulls/$N --jq .mergeable_state` 为 `clean`。
 4. 没有未解决的讨论串（`ccr/review_threads` 或 GraphQL 的 `reviewThreads`）。
 

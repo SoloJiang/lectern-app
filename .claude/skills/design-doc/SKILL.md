@@ -9,20 +9,20 @@ Lectern 先写设计、设计文档 PR 合并后再写代码（AGENTS.md「工�
 
 ## 步骤
 
-1. 读上下文，按顺序：
+1. 新建 worktree 和分支，并进入新的 worktree：`git fetch origin main && git worktree add -b design/<crate> ../lectern-design-<crate> origin/main && cd ../lectern-design-<crate>`。后面的步骤都在这个目录里执行：上下文从最新的 main 读，文档也写在这里，不在原来的 checkout 里。
+2. 在新的 worktree 里读上下文，按顺序：
    - 根目录 `AGENTS.md`，以及 `crates/<crate>/AGENTS.md`（职责、边界、层）。
    - 对应的 issue（`gh api repos/SoloJiang/lectern-app/issues/<n>`）。
    - [交互规范](../../../docs/design/interaction.md)和[技术调研](../../../docs/design/tech-research.md)里相关的章节，以及 crate AGENTS.md 列出的 ADR。
    - 依赖的其他 crate 的设计文档（已经写了的）。
-2. 新建 worktree 和分支，并进入新的 worktree：`git fetch origin main && git worktree add -b design/<crate> ../lectern-design-<crate> origin/main && cd ../lectern-design-<crate>`。后面的步骤都在这个目录里执行，不要在原来的 checkout 里写文档。
 3. 复制 [模板](../../../docs/design/TEMPLATE.md) 为 `docs/design/<crate>.md`，<crate> 用目录名。按小节填写，删掉不适用的小节和模板开头的注释。
    - 接口写 Rust 签名，标明调用线程和是否阻塞。
    - 解析外部格式的，写明格式来源和版本，并说明 fixtures 放什么。
    - 列出受影响的性能预算和需要的基准。
-   - 拿不准、需要人决定的放进「未决问题」，不要自己定。改变架构、依赖选型或性能预算的，另写 ADR（技能 `adr`）。
+   - 需要产品决定的问题（定位、目标用户、界面结构的大改）放进「未决问题」，写明选项和默认选项；技术问题自己决定。改变架构、依赖选型或性能预算的，另写 ADR（技能 `adr`）。
 4. 更新 `crates/<crate>/AGENTS.md` 的「设计文档」一行，改成指向新文档的链接。
 5. 提 PR：标题 `docs(<crate>): design`，正文写 `Refs #<n>`，列出未决问题。设计文档 PR 按合并规则处理：等 Codex 的 👍、CI 通过、讨论串全部解决后合并（技能 `ship-pr`）。需要产品决定的未决问题同时告诉人；不阻塞合并的，按文档里写明的默认选项实现。
-6. 合并后再按设计写代码；实现中发现设计要变，先改文档。
+6. 合并后再按设计写代码：实现另开 worktree、分支和 PR，与设计文档 PR 共用同一个 issue（设计 PR 写 `Refs #<n>`，实现 PR 写 `Closes #<n>`）。实现中发现设计要变，先改文档。
 
 ## 检查
 
