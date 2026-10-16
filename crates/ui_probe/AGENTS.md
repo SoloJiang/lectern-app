@@ -3,7 +3,7 @@
 UI 探针：导出语义树（`ui_tree`）和带元素标注的截图（`screenshot`），让 agent 能读取和操作运行中的 Lectern（[技术调研「UI 结构探针」](../../docs/design/tech-research.md#6-ui-结构探针)）。
 
 - 层：tool 层，只用于调试与测试构建，可以依赖任何层。只有 `app` 可以依赖本 crate，本 crate 不进入发布构建。
-- 设计文档：`docs/design/ui_probe.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
+- 设计文档：`docs/design/ui_probe.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#6](https://github.com/SoloJiang/lectern-app/issues/6)
 
 ## 边界

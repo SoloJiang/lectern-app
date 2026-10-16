@@ -3,7 +3,7 @@
 上下文面板：点符号后滑出，显示调用方、相关测试、改动历史（影响面）。属于按需呼出层，Esc 回到原处。
 
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：`docs/design/context_drawer.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
+- 设计文档：`docs/design/context_drawer.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#20](https://github.com/SoloJiang/lectern-app/issues/20)
 - ADR：[0012](../../docs/adr/0012.md)
 

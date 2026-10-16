@@ -3,7 +3,7 @@
 与平台无关的文件监听接口，事件按 git index 过滤。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：`docs/design/fs_watch.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
+- 设计文档：`docs/design/fs_watch.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - ADR：[0006](../../docs/adr/0006.md)
 
 ## 边界

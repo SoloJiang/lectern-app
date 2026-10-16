@@ -3,7 +3,7 @@
 系统色 token、动画原语和通用控件，封装 gpui-component。视图里的颜色、字体、动画都从这里取（[ADR 0015](../../docs/adr/0015.md)）。
 
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：`docs/design/ui.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
+- 设计文档：`docs/design/ui.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#6](https://github.com/SoloJiang/lectern-app/issues/6)
 - ADR：[0015](../../docs/adr/0015.md)、[0016](../../docs/adr/0016.md)
 

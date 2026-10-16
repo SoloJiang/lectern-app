@@ -5,7 +5,7 @@ description: Write the module design doc docs/design/<crate>.md for a Lectern cr
 
 # 写模块设计文档
 
-Lectern 先写设计、人审过再写代码（AGENTS.md「工作方式」）。产出是一份 `docs/design/<crate>.md`，以及一个只改文档的 PR：其中包含这份设计文档和第 4 步对 `crates/<crate>/AGENTS.md` 的更新。
+Lectern 先写设计、设计文档 PR 合并后再写代码（AGENTS.md「工作方式」）。产出是一份 `docs/design/<crate>.md`，以及一个只改文档的 PR：其中包含这份设计文档和第 4 步对 `crates/<crate>/AGENTS.md` 的更新。
 
 ## 步骤
 
@@ -21,8 +21,8 @@ Lectern 先写设计、人审过再写代码（AGENTS.md「工作方式」）。
    - 列出受影响的性能预算和需要的基准。
    - 拿不准、需要人决定的放进「未决问题」，不要自己定。改变架构、依赖选型或性能预算的，另写 ADR（技能 `adr`）。
 4. 更新 `crates/<crate>/AGENTS.md` 的「设计文档」一行，改成指向新文档的链接。
-5. 提 PR：标题 `docs(<crate>): design`，正文写 `Refs #<n>`，列出未决问题。只改文档的 PR 不需要等 Codex 的 👍，但设计文档 PR 必须等人审过才能合并；Codex 留下的意见照常逐条处理。
-6. 人审通过并合并后，再按设计写代码；实现中发现设计要变，先改文档。
+5. 提 PR：标题 `docs(<crate>): design`，正文写 `Refs #<n>`，列出未决问题。设计文档 PR 按合并规则处理：等 Codex 的 👍、CI 通过、讨论串全部解决后合并（技能 `ship-pr`）。需要产品决定的未决问题同时告诉人；不阻塞合并的，按文档里写明的默认选项实现。
+6. 合并后再按设计写代码；实现中发现设计要变，先改文档。
 
 ## 检查
 

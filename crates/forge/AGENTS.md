@@ -3,7 +3,7 @@
 GitHub 与 GitLab（含自部署）的 MR 与 CI 状态。
 
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
-- 设计文档：`docs/design/forge.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，人审过再写代码。
+- 设计文档：`docs/design/forge.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#25](https://github.com/SoloJiang/lectern-app/issues/25)
 - ADR：[0008](../../docs/adr/0008.md)
 
