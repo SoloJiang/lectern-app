@@ -9,7 +9,7 @@
 - 入口是项目或文件夹，不以编辑器为中心。界面分三层（常驻 / 按需 / 收起），新增界面元素前先对照 [交互规范](docs/design/interaction.md) 和 [ADR 0012](docs/adr/0012.md)。
 - 界面英文优先，支持简体中文（[ADR 0013](docs/adr/0013.md)）。所有界面字符串走 `i18n` crate 的 Fluent 资源文件，en 与 zh-CN 同时提供，不允许硬编码。
 - 视觉与动效按 macOS 原生标准（[ADR 0015](docs/adr/0015.md)）：只用系统字体、系统语义色和系统控件；动画用 `ui` crate 的统一原语，时长与曲线见 [交互规范「动效」](docs/design/interaction.md#动效)，不在视图里自定义。
-- 性能是第一约束。任何改动不得让 [性能预算](docs/design/tech-research.md#性能预算) 超标。
+- 性能是第一约束。任何改动不得让 [性能预算](docs/design/tech-research.md#性能预算) 超标：冷启动 20ms、空闲内存 60MB（[ADR 0017](docs/adr/0017.md)）。首帧之前不做任何非必要的工作，新功能默认在首帧之后初始化。安装包 ≤ 80 MB（[ADR 0018](docs/adr/0018.md)）：新功能先判断是否属于审阅闭环的核心，不是的做成插件市场里的可选插件。
 
 ## 架构规则（违反即 CI 失败）
 
@@ -42,6 +42,16 @@ just ci      # 全量，等同 CI
 只改领域逻辑时用 `cargo check -p <crate>`，不必编译 GPUI。
 
 架构规则检查：`python3 scripts/check_architecture.py`；许可证与来源：`cargo deny check`。CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
+
+## 合并规则
+
+负责推进的 agent 可以直接合并 PR（squash），条件全部满足才合：
+
+1. Codex 已审阅当前最新提交，并在 PR 上留下 👍 reaction（审阅中是 👀，有意见时会留评论）。
+2. CI 全部通过，没有合并冲突。
+3. 所有审阅讨论串都已回复并解决。
+
+审阅意见先逐条核实：成立的修复后推送，不成立或不在本 PR 范围的回复理由。Codex 审阅失败或没有更新时，在 PR 上评论 `@codex review` 重新触发。叠在其他分支上的 PR，先合底层，再把上层的 base 改为 `main`。
 
 ## 工作方式
 
