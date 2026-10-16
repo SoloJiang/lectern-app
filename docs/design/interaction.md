@@ -69,7 +69,7 @@ Lectern 不是编辑器：打开项目，先看 agent 改了什么。入口是�
 - 先按英文排版，再用中文验证；按钮不定宽，关键标签不截断。
 - 相对时间、数量、复数按语言格式化（`2/6 reviewed` ↔ `已看 2/6`）。
 - 文案集中在 Fluent（.ftl）资源文件，CI 检查 en 与 zh-CN 的键一致。
-- 字体：IBM Plex Sans，中文回退 PingFang SC；代码用 IBM Plex Mono。
+- 字体：系统字体 SF Pro，中文回退苹方；代码用 SF Mono（[ADR 0015](../adr/0015.md)）。
 
 ## 用量
 
