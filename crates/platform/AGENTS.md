@@ -11,7 +11,7 @@ macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名�
 
 - 实现其他 crate 定义的接口（`fs_watch`、`kernel` 的插件宿主等），由 `app` 注入；不依赖这些 crate 的实现。
 - statusline 默认开启：用户已有 statusline 时保留原命令，Lectern 的脚本保存一份输入，再原样转发给原命令，关闭时恢复原配置（[ADR 0014](../../docs/adr/0014.md)）。
-- 为 Analyze 调用的 agent 命令行生成 Seatbelt 配置（[ADR 0019](../../docs/adr/0019.md)）：只读本次分析的输入、被审阅版本的只读快照（已提交的文件从 git 对象写出，叠加的工作区改动用 clonefile 并带 `CLONE_NOFOLLOW`，卷不支持时复制；只含受跟踪文件和本次改动的文件）和该 agent 的安装目录；凭据文件一律拒绝，只允许 agent 通过系统接口读取自己的钥匙串条目；快照里的符号链接不跟随（ADR 0019）；网络只经本机代理访问该 agent 的模型服务主机。
+- 为 Analyze 调用的 agent 命令行生成 Seatbelt 配置（[ADR 0019](../../docs/adr/0019.md)）：只读本次分析的输入、被审阅版本的只读快照（已提交的文件从 git 对象写出，叠加的工作区改动用 clonefile 并带 `CLONE_NOFOLLOW`，卷不支持时用 `copyfile` 带 `COPYFILE_NOFOLLOW_SRC` 复制，符号链接都重建为链接；只含受跟踪文件和本次改动的文件）和该 agent 的安装目录；凭据文件和钥匙串一律拒绝，拒绝查看其他进程的信息（`process-info*`）；快照里的符号链接不跟随（ADR 0019）；网络只允许连接 `agents` 的凭据转发端点。
 
 ## 测试
 
