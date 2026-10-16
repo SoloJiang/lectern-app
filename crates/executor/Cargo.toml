@@ -1,0 +1,11 @@
+[package]
+name = "lectern-executor"
+description = "Background tasks for IO and parsing off the UI thread."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "infra"

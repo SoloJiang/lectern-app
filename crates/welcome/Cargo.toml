@@ -1,0 +1,11 @@
+[package]
+name = "lectern-welcome"
+description = "The open-a-project window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "view"

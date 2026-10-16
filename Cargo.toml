@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/app",
+    "crates/kernel",
+    "crates/services",
+    "crates/ui",
+    "crates/workspace",
+    "crates/welcome",
+    "crates/project_home",
+    "crates/review_view",
+    "crates/context_drawer",
+    "crates/conversation",
+    "crates/terminal_view",
+    "crates/worktrees",
+    "crates/usage_view",
+    "crates/file_reader",
+    "crates/project",
+    "crates/agents",
+    "crates/review",
+    "crates/git",
+    "crates/code_intel",
+    "crates/terminal",
+    "crates/usage",
+    "crates/forge",
+    "crates/cache",
+    "crates/fs_watch",
+    "crates/executor",
+    "crates/platform",
+    "crates/i18n",
+    "crates/bench",
+    "crates/ui_probe",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# GPUI comes from Zed's crates.io snapshots (gpui-pre 0.3.9 = zed@93d7456),
+# pinned to the exact snapshot gpui-component 0.7.3 was built against.
+# Upgrade all three together. See docs/design/workspace.md.
+gpui = { package = "gpui-pre", version = "=0.3.9" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9" }
+gpui-component = "=0.7.3"

@@ -1,0 +1,11 @@
+[package]
+name = "lectern-context-drawer"
+description = "Context panel for a symbol: callers, tests and history."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "view"

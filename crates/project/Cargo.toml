@@ -1,0 +1,11 @@
+[package]
+name = "lectern-project"
+description = "Repository, worktree and sub-project model; manifest parsing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "domain"

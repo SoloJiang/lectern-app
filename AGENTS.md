@@ -24,7 +24,7 @@
 
 ## 禁止事项
 
-- 未经确认不得升级 GPUI、gpui-component（二者锁同一个 Zed commit）、libghostty、Rust 工具链。
+- 未经确认不得升级 GPUI、gpui-component（二者锁同一个 gpui-pre 快照，见 [ADR 0016](docs/adr/0016.md)）、libghostty、Rust 工具链。
 - 不得自行改变架构、依赖选型或性能预算。需要改变时，先对照 [docs/adr/](docs/adr/)，提出新 ADR 交给人决定。
 - UI 线程上不做 IO、解析或 git 操作。
 

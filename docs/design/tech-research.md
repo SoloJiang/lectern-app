@@ -10,7 +10,7 @@
 
 产品定位：AI 写、人读，代码查看与审阅是第一优先级。入口是项目或文件夹，打开后先看到这个项目里待审的 agent 会话；Lectern 不以编辑器为中心，编辑收在第三层。界面英文优先，支持简体中文。性能是第一约束，原生支持 monorepo 与多 worktree，首发只做 macOS。推荐路线：GPUI + gpui-component 做 UI，libghostty-vt 做终端内核，tree-sitter 做高亮，gix + imara-diff 做 Git/Diff，直接解析 Claude Code / Codex 的本地 JSONL 会话。整套是纯 Rust（终端内核经 C ABI 链入），技术上可行，3 个月内能出可用的 MVP。
 
-- **UI 框架用 GPUI**：Zed 自研的 GPU 渲染框架，Apache-2.0，可独立使用，但仍是 pre-1.0，需要按 Zed commit 锁版本。
+- **UI 框架用 GPUI**：Zed 自研的 GPU 渲染框架，Apache-2.0，可独立使用，但仍是 pre-1.0，需要锁版本：通过 crates.io 的 `gpui-pre` 快照精确锁定（[ADR 0016](../adr/0016.md)）。
 - **组件库和编辑器都用 gpui-component**（Longbridge 出品）：60+ 组件，并自带支持 tree-sitter 与 LSP 的代码编辑器（20 万行内性能稳定），用于完整文件阅读和按需编辑（第三层功能），不必自己写编辑器内核。
 - **终端接入 Ghostty 内核**：用 libghostty-vt（Rust 绑定 libghostty-rs）做终端状态机，在 GPUI 里自绘字符网格；不用 Zed 的 alacritty_terminal。
 - **代码导航以本地索引为主**：tree-sitter 符号索引保证打开即可跳转，Java 额外做 package / import 解析和依赖 sources.jar 跳转，jdtls 只做后台增强。
@@ -148,7 +148,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 
 | 层 | 推荐 | 备选 | 选择理由 |
 |---|---|---|---|
-| UI 框架 | [GPUI](https://github.com/zed-industries/zed/blob/main/crates/gpui/README.md)（git 依赖，锁 Zed commit） | Iced、egui、Tauri | 与 Zed 同源，GPU 渲染，macOS 用 Metal；学习资料主要是 Zed 源码 |
+| UI 框架 | [GPUI](https://github.com/zed-industries/zed/blob/main/crates/gpui/README.md)（crates.io `gpui-pre` 快照，精确锁版本） | Iced、egui、Tauri | 与 Zed 同源，GPU 渲染，macOS 用 Metal；学习资料主要是 Zed 源码 |
 | 组件库 | [gpui-component](https://github.com/longbridge/gpui-component) | 自己写 | Dock 布局、虚拟化 List/Table、Markdown、主题系统都现成 |
 | 终端内核 | [libghostty-vt](https://docs.rs/libghostty-vt) via [libghostty-rs](https://github.com/Uzaaft/libghostty-rs) | alacritty_terminal（Zed 同款） | 「连接 Ghostty」的产品定位；解析、滚动缓冲、reflow、按键编码都由它处理 |
 | 终端渲染 | 自己在 GPUI 里画网格 | [gpui-libghostty](https://docs.rs/crate/gpui-libghostty/latest/source/README.md)（原生 Metal/OpenGL surface） | 自绘能叠加 GPUI 浮层、选区、搜索；原生 surface 是 alpha 且浮层要靠截图回读 |
@@ -305,7 +305,7 @@ agent 无法直接观察界面，验收结果需要能被程序自动判定。
 
 ### 4. 约束检查
 
-- **锁定工具链与依赖**：`rust-toolchain.toml` 固定编译器版本；GPUI 与 gpui-component 锁同一个 Zed commit；libghostty 用 vendored 源码并固定 Zig 版本。AGENTS.md 规定：未经确认不得升级这些依赖。
+- **锁定工具链与依赖**：`rust-toolchain.toml` 固定编译器版本；GPUI 与 gpui-component 锁同一个 `gpui-pre` 快照；libghostty 用 vendored 源码并固定 Zig 版本。AGENTS.md 规定：未经确认不得升级这些依赖。
 - **架构规则自动检查**：CI 检查领域层 crate 的依赖里没有 gpui；`cargo-deny` 检查许可证（拒绝 GPL）；clippy 以警告即失败的模式运行。规则以脚本执行，违反时构建立即失败。
 - **CI 在 macOS 上跑**：GitHub Actions 的 Apple Silicon runner 跑全量检查、测试与基准。
 
@@ -415,7 +415,7 @@ P0 第一周先搭好面向 agent 的工程脚手架（见「工程搭建」一�
 | 风险 | 影响 | 应对 |
 |---|---|---|
 | 误引入 GPL 代码 | 宽松许可的项目一旦混入 Zed 的 GPL 代码，就必须整体改为 GPL | 只参考 Zed 的思路、不复制代码；CI 里用 cargo-deny 检查依赖许可证，出现 GPL 即构建失败 |
-| GPUI pre-1.0、无稳定版本 | 升级时 API 频繁破坏 | 锁定 Zed commit，gpui-component 必须锁同一 commit；季度性集中升级 |
+| GPUI pre-1.0、无稳定版本 | 升级时 API 频繁破坏 | 用 `=` 精确锁定 `gpui-pre` 快照，与 gpui-component 使用的版本一致；随 gpui-component 发布集中升级 |
 | libghostty 未打版本 | C API 变动导致绑定失效 | 用 libghostty-rs 的 vendored 构建锁定 Ghostty 源码；构建链需 Zig |
 | 自研 Java 解析器的准确率 | 重载、泛型、静态导入等场景会跳错 | 只承诺「项目内按类跳转」准确；其余场景由 jdtls / SCIP 兜底并标注来源 |
 | jdtls 环境要求 | 用户机器没有 JDK 21 时第 4 层不可用 | 自动探测 JDK，缺失时提示一键下载；第 1–3 层不依赖它 |
