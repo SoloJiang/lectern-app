@@ -259,8 +259,9 @@ impl Kernel {
 
     /// 以下生命周期方法都只把请求放进 kernel 线程的队列，立即返回，可以在任何线程调用。
 
-    /// 项目模型就绪或变化时由 `project` 插件（通过 `KernelControl`）调用：激活匹配的 Workspace 插件。
-    pub fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>);
+    // 项目事实只能通过 `KernelControl::workspace_changed` 提交（由 `project` 插件调用）：
+    // 那里带着提交者的插件 ID 和激活代数，kernel 才能在提交者停用时清除这份事实、
+    // 并把 `WorkspaceFacts::contains` 的 panic 归到提交者。`Kernel` 本身不提供这个入口。
 
     /// 激活清单里带 `Manual` 的插件。依赖的服务还没有就绪时，请求被记下，依赖就绪后再激活（见「依赖与自动启停」）。
     pub fn activate(&self, id: &str);
@@ -361,7 +362,9 @@ impl Emitter {
 - 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）之前检查 token，不是 `Live` 就不调用。停用的第一步就把 token 置为 `Dead`，早于撤销的其他步骤。
 - `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending_removal()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程的队列被丢弃时守卫随之 drop。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
 
-后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后提交任务，用 `PluginHandle::own` 交出句柄。停用后，任务不再向视图交出结果；停用之后才提交的任务，`own` 返回 false 并立即取消。
+后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后提交任务，用 `PluginHandle::own` 交出句柄。停用之后才提交的任务，`own` 返回 false 并立即取消。
+
+任务把结果排到主线程交给视图时，任务可能已经结束，取消对它不再起作用。所以排到主线程的结果带上这次激活的 `ActivationToken` 和一个 `BusyGuard`（任务把自己的守卫移进去，或者用 `PluginHandle::busy()` 新取一个）：主线程应用结果之前检查 token，不是 `Live` 就丢弃；守卫在结果应用或丢弃之后才 drop，所以结果还在队列里时 kernel 不报告静止。
 
 ### 失败
 
@@ -436,7 +439,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
 - 激活耗时：每个插件的 `activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按三者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
-- 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
+- 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足目标插件的激活条件，否则测到的只是没激活的插件对象：`Workspace` 插件提交一份匹配的 `WorkspaceFacts`，`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认目标插件进入 `Active` 后再等静止、采样。依赖闭包那一次同样提交这份事实，两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `Arc`，保存在激活内的状态对象里（见「激活的提交」），使用时直接用保存的 `Arc`。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
 
