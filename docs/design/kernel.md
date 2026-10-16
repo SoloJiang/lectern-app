@@ -181,6 +181,18 @@ impl ActivationToken {
 
 pub enum TokenState { Pending, Live, Dead }
 
+/// 一次 `own_with` 提交的闸门，由 kernel 定义，`executor` 依赖它（基础设施层可以依赖 kernel 层）。
+/// executor 在 `is_open()` 为 true 之前不 poll 这个任务；闸门关闭（`start` panic、激活失效）后任务直接丢弃。
+/// executor 用 `register_waker` 登记任务的 waker：闸门打开或关闭、token 变为 `Dead` 时 kernel 唤醒它，
+/// 所以挂起中（上次 poll 返回 `Pending`）的任务也会被立即调度一次，看到关闭后被丢弃，不会一直挂着守卫和状态。
+pub struct SubmitGate { /* Arc<{ 状态, ActivationToken, wakers }> */ }
+
+impl SubmitGate {
+    pub fn is_open(&self) -> bool;
+    pub fn is_closed(&self) -> bool;
+    pub fn register_waker(&self, waker: &std::task::Waker);
+}
+
 /// 一次激活的长期句柄：从 `started` 起有效，到这次激活停用为止。可以克隆并保存在插件的状态里，
 /// 用于激活之后开始的工作（打开项目后的扫描、收到事件后提交的任务）。
 /// 句柄带激活代数：插件停用后（包括停用后又重新激活），旧句柄上的操作都不再生效。
@@ -202,7 +214,9 @@ impl PluginHandle {
     /// `start` 在互斥锁内用 `catch_unwind` 包住：panic 时先正常释放互斥锁（不让锁中毒），再按 `fail` 的方式让这次激活失效
     /// （插件进入 `Failed`，连带停用的插件同步失效），返回 false，panic 不会展开到调用方。
     /// 在 `started` 里调用时（token 还是 `Pending`），`start` 暂存到 token 变为 `Live` 之后再调用，激活失败时丢弃，返回 true 表示已经接受。
-    pub fn own_with<G: Send + 'static>(&self, start: impl FnOnce() -> G + Send + 'static) -> bool;
+    /// `start` 收到一个 `SubmitGate`，提交任务时交给 executor（见「撤销」里的后台任务）：任务在闸门打开之前不会被 poll，
+    /// `own_with` 在 `start` 正常返回、句柄登记进守卫表之后才打开闸门；`start` panic 或激活失效时闸门随之关闭，任务直接丢弃。
+    pub fn own_with<G: Send + 'static>(&self, start: impl FnOnce(SubmitGate) -> G + Send + 'static) -> bool;
 
     /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
     /// 调用 `Subscription::keep()` 则一直保留到这次激活停用。这次激活已停用时不订阅并返回 None。
@@ -397,7 +411,7 @@ impl Emitter {
 - `activate` 返回 `Ok` 后，kernel 先检查清单 `provides` 里的每个服务都已 `provide`；缺任何一个都按激活失败处理（`PluginError::MissingService`），否则依赖者会因为等不到这个服务而一直不激活。
 - 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布（提交），然后调用 `started`。发布之后、token 变为 `Live` 之前，`ServiceSet::current()` 和 `enter()` 都不会返回这次激活，`ServiceAdded<S>` 也在 token 变为 `Live` 之后才发出，所以已在运行的依赖者看不到 `started` 可能失败的新提供者。`started` 正常返回、而且期间没有通过 `fail` 或监听 panic 把插件标为失败时，kernel 才把因它而满足条件的后续插件放进队列；否则按失败停用，后续插件不激活。
 - 提供者在依赖者激活期间失败时（例如提供者的监听在其他线程上 panic，或 `fail` 被调用），kernel 在当前线程上立即把提供者这次激活的 token 置为 `Dead`（见「事件分发」）。依赖者的激活还在 kernel 线程上进行时还没有发布任何东西，所以 kernel 在提交依赖者之前、以及调用它的 `started` 之前，各检查一次它 `requires` 的每个服务是否还有 token 为 `Live` 的提供者。检查不通过时中止这次激活：暂存的内容全部丢弃（已经提交的按「撤销」一节撤销），依赖者回到「等待依赖」，不进入 `Failed`。
-- `started` 返回后，kernel 用 compare-exchange 把 token 从 `Pending` 换成 `Live`。`started` 期间其他线程调用 `fail` 已经把 token 置为 `Dead` 时交换失败，按激活失败撤销，`Dead` 不会被覆盖。`started` 不直接做 IO，也不直接改外部状态，只通过 `PluginHandle` 发事件、提交任务；token 还是 `Pending` 时，这些操作暂存在这次激活里：`emit` 的事件按顺序排队，`own_with` 的 `start` 先不调用。compare-exchange 成功、token 变为 `Live` 后，kernel 在 kernel 线程上依次发出这些事件、调用这些 `start`：每一项之前都先 `token.enter()`，取不到（前一个事件的监听 panic 或调用了 `fail`，把这次激活连带置为 `Dead`）就丢弃剩下的全部；每个 `start` 单独用 `catch_unwind` 包住，panic 时这个插件进入 `Failed`，按「失败」一节撤销，剩下的项丢弃。交换失败或 `started` panic 时全部丢弃，所以 `started` 本身失败的激活不会留下已经送达的事件或已经开始的任务。token 变为 `Live` 时激活就算成功：发出暂存事件、调用暂存 `start` 的过程中再失败，按激活之后的失败处理（停用并撤销），已经送达的事件和已经提交的任务不回滚，与 `Live` 之后任何时刻的失败相同。（`Pending` 期间监听不会被调用，所以 `started` 之前不会有监听 panic。）
+- `started` 返回后，kernel 用 compare-exchange 把 token 从 `Pending` 换成 `Live`。`started` 期间其他线程调用 `fail` 已经把 token 置为 `Dead` 时交换失败，按激活失败撤销，`Dead` 不会被覆盖。`started` 不直接做 IO，也不直接改外部状态，只通过 `PluginHandle` 发事件、提交任务；token 还是 `Pending` 时，这些操作暂存在这次激活里：`emit` 的事件按顺序排队，`own_with` 的 `start` 先不调用。compare-exchange 成功、token 变为 `Live` 后，kernel 在 kernel 线程上依次发出这些事件、调用这些 `start`：每一项之前都先 `token.enter()`，取不到（前一个事件的监听 panic 或调用了 `fail`，把这次激活连带置为 `Dead`）就丢弃剩下的全部；每个 `start` 单独用 `catch_unwind` 包住，panic 时这个插件进入 `Failed`，按「失败」一节撤销，剩下的项丢弃。交换失败或 `started` panic 时全部丢弃，所以 `started` 本身失败的激活不会留下已经送达的事件或已经开始的任务。丢弃暂存的 `start` 闭包和事件值时逐个用 `catch_unwind` 包住它们的 drop，闭包捕获的值与守卫、事件值一样，`Drop` 不得 panic。token 变为 `Live` 时激活就算成功：发出暂存事件、调用暂存 `start` 的过程中再失败，按激活之后的失败处理（停用并撤销），已经送达的事件和已经提交的任务不回滚，与 `Live` 之后任何时刻的失败相同。（`Pending` 期间监听不会被调用，所以 `started` 之前不会有监听 panic。）
 - 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只安排后台工作（提交任务、发事件），按上一条在 token 变为 `Live` 之后才真正发生，不会出现「副作用已经发生、激活却回滚」的情况。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
@@ -422,7 +436,7 @@ impl Emitter {
 - 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）时先 `token.enter()`，取不到就不调用，取到的准入持有到回调返回。回调在准入范围内用 `catch_unwind` 包住：panic 时先按 `fail` 的方式让这次激活同步失效（插件进入 `Failed`，连带停用的插件一起失效），展开结束后才释放准入，panic 不会展开到主线程，插件也不会在失效后继续被调用。停用的第一步就把 token 置为 `Dead`，第 3 步等准入归零，所以回调不会与守卫和 `Active` 的 drop 同时进行。
 - `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程的队列被丢弃时守卫随之 drop。`shutdown` 关闭准入之后取不到守卫，说明主线程的队列已经不再处理，注销请求直接丢弃。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
 
-后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。`executor` 的提交接口带上这次激活的 `ActivationToken`，任务每次被 poll 之前检查 token，为 `Dead` 时直接丢弃 future（等同取消），所以即使 `start` 在提交之后、返回句柄之前 panic，句柄没交到 kernel 手里，这个任务也会在下一次 poll 前被丢弃，不会成为孤儿。
+后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。`executor` 的提交接口带上 `own_with` 给的 `SubmitGate`：闸门打开之前任务不会被 poll，`own_with` 在 `start` 正常返回、句柄登记完之后才打开它，所以 `start` 在提交之后、返回句柄之前 panic 时任务一次也没运行，闸门关闭后直接丢弃。任务每次被 poll 之前检查闸门和 token，关闭或为 `Dead` 时丢弃 future（等同取消）；executor 把任务的 waker 登记到闸门上，token 变为 `Dead` 时 kernel 唤醒这些 waker，所以停在 `Pending` 上的任务也会被调度一次并丢弃，不会一直持有 `BusyGuard` 和状态、挡住静止。
 
 任务不持有准入，撤销不等任务结束：任务需要的状态由它自己持有（`Active` 或其中部分的 `Arc` 克隆），所以撤销 drop kernel 那份 `Active` 之后，任务用到的状态仍然有效，直到任务结束或在下一次 poll 前被丢弃。任务不能假定插件的守卫（界面注册、文件监听等）在它运行期间仍然存在。
 
@@ -432,7 +446,7 @@ impl Emitter {
 
 ### 失败
 
-kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
+kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
 
 - `activate` 返回错误或 panic：
   - 这次激活已登记的内容全部撤销；
@@ -535,7 +549,8 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 暂存效果：暂存的第一个事件让这次激活失效后，后面暂存的事件不再发出、`start` 不再调用（已经发出的第一个事件不回滚，激活按 `Live` 之后的失败停用）；暂存的 `start` panic 时插件进入 `Failed`，kernel 线程继续运行。
 - `own_with` 的 `start` panic：互斥锁没有中毒，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
 - 主线程回调 panic：Action 或视图工厂 panic 时主线程没有展开，插件进入 `Failed`，之后不再被调用。
-- 孤儿任务：`start` 提交任务后 panic，任务在下一次 poll 前被丢弃。
+- 孤儿任务：`start` 提交任务后 panic，任务一次也没有被 poll 就被丢弃；已经挂起（返回 `Pending`）的任务在激活失效时被唤醒并丢弃，它持有的 `BusyGuard` 随之释放，kernel 能回到静止。
+- 暂存闭包的 drop：丢弃的暂存 `start` 闭包在 drop 时 panic，kernel 线程继续运行，撤销照常完成。
 - 失效中的命令：插件已失效、注销还没执行时触发代理 Action，走 `control.command`，`done` 收到错误或插件重新激活。
 - 界面注册与失效竞争：主线程应用注册时另一线程调用 `fail`，撤销在注册应用完之后才 drop 守卫和 `Active`，注册随后被注销。
 - 发出方失效：后台任务的 `emit` 与 `fail` 并发时，`fail` 返回之后开始的分发不会把事件送给任何监听。
