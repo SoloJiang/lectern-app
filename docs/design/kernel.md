@@ -204,7 +204,9 @@ impl GateSlot {
     /// 这次 `poll` 要么已经看到新状态，要么它登记的 waker 一定会被唤醒，不会漏掉唤醒、一直停在 `Pending`。
     pub fn poll(&self, cx: &mut std::task::Context<'_>) -> GatePoll;
 
-    /// executor 在 poll 任务的 future 时用 `catch_unwind` 包住，panic 时调用这个方法再丢弃 future。
+    /// executor 在 poll 任务的 future 时用 `catch_unwind` 包住。panic 时顺序固定：先把任务标为已结束，在 `contain` 里 drop 它的 future
+    /// （future 持有的锁、许可等资源随之释放），保留 panic 的 payload，最后才调用这个方法；所以这个方法唤醒的同一闸门上的其他任务
+    /// 不会卡在仍被这个 future 占着的资源上。
     /// future 的每一次最终 drop 都用 `catch_unwind` 包住，不只是 poll panic 之后：`poll` 返回 `Drop`（取消、闸门关闭、token 为 `Dead`）、
     /// future 返回 `Ready` 之后、executor 关闭时丢弃未完成的任务，都一样；drop panic 时同样调用这个方法。
     /// kernel 按 `fail` 的方式让这个任务所属的激活失效：插件进入 `Failed`，连带停用的插件同步失效，
@@ -256,6 +258,8 @@ impl PluginHandle {
 
     /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
     /// 调用 `Subscription::keep()` 则一直保留到这次激活停用。这次激活已停用时不订阅并返回 None。
+    /// 检查和插入都在这次激活的守卫表的互斥锁内完成，监听登记成这张表里的一项：撤销第 4 步取同一把锁、先把表标为关闭再移除全部监听，
+    /// 所以 `on` 要么在关闭之前插入（随后被撤销移除），要么看到关闭返回 None，不会在撤销之后留下监听。
     pub fn on<E: Event>(&self, handler: impl Fn(&E, &PluginHandle) + Send + Sync + 'static) -> Option<Subscription>;
 
     /// 声明有尚未完成的工作，守卫移进任务，任务结束时 drop（见「静止」）。这次激活已停用时返回 None。
@@ -543,6 +547,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - kernel 线程已经处理完启动时的激活；
 - 生命周期操作的队列为空，kernel 线程上没有正在执行的生命周期操作（激活、提交、`started`、停用与撤销、`shutdown`）；
 - 没有正在进行的事件分发（kernel 计数各线程上进行中的 `emit`，监听可能正要取 `BusyGuard`）；
+- 没有持有中的准入：`ServiceRef::get`、`ServiceSet` 的调用、主线程的界面回调和结果应用都持有 `Admission`，kernel 对所有激活的准入另外维护一个全局计数，`enter()` 成功时与本激活的计数一起加一，所以插件代码正在运行、还没来得及取 `BusyGuard` 时也不会报告静止；
 - 没有未 drop 的 `BusyGuard` 和 `PendingGuard`（排到主线程、尚未完成的界面注册或注销）。
 
 插件把初始化工作（扫描会话目录、打开 SQLite、建索引）交给 executor 时，用 `PluginHandle::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`PluginHandle` 在 `started` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）在等待期间不取守卫，但每一轮实际工作（一次刷新：读文件、解析、更新状态）开始时取一个 `BusyGuard`，这一轮结束、结果交给主线程并应用之后才 drop（见「撤销」里排到主线程的结果），所以刷新进行中时 kernel 不报告静止。插件停用时，它的任务句柄被 drop、任务被要求取消，但取消是协作式的：任务真正结束、守卫被 drop 之前，守卫仍然计入，kernel 不报告静止。
@@ -594,6 +599,9 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - `shutdown` 返回之后：仍在 poll 的任务完成并尝试排出结果，主线程队列里不会出现新的工作。
 - 转换事件乱序：一个 `Busy` 的分发在另一个线程上卡住、之后的 `Quiescent` 先送达，bench 忽略迟到的 `Busy`，照常采样。
 - 激活失效后丢弃排队的界面注册时，注册捕获的值 drop panic，主线程不展开。
+- 任务 panic 时持有同一闸门上兄弟任务需要的锁：兄弟任务被唤醒时锁已经释放，不会卡住。
+- 准入与静止：一个 `ServiceRef::get` 正在执行、所有守卫计数为 0 时，kernel 不报告静止。
+- `on` 与撤销并发：撤销完成之后注册表里没有这次激活的监听。
 - 任务 panic 时的重入：executor 在 `wake` 里同步 poll，任务 panic 触发失效后不会重新 poll 这个任务，也不死锁。
 - 任务句柄回收：同一次激活里反复 `own_with` 一万个立即完成的任务，守卫表的长度回到 0；future 在取消、完成后被 drop 时 panic，插件进入 `Failed`、工作线程继续运行。
 - 界面注册的应用 panic：主线程不展开，注册一项都没有插入，插件进入 `Failed`。
