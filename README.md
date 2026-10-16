@@ -1,69 +1,73 @@
 # Lectern
 
-> AI 写，人读。一个以代码审阅为核心的原生 IDE。
->
-> A reading-first, review-first native IDE for the AI coding era.
+English · [简体中文](README.zh-CN.md)
 
-AI 让写代码的成本大幅下降，人的时间转移到读懂和把关上。Lectern（讲台 / 阅读架）把「审阅 AI 改动」放在第一位：按 agent 会话归因的 Diff、内嵌 Ghostty 内核终端、轻量编辑、原生 monorepo 与多 worktree 支持，编辑和终端都为审阅服务。
+> A reading-first native IDE for reviewing AI-written code. Rust + GPUI, macOS.
 
-**状态：P0 搭建中，尚无可用版本。**
+Agents write most of the code now; your time goes into reading it and deciding whether it's right. Lectern is a native macOS app built for that job. It is not an editor. Open a project or folder and you first see the Claude Code and Codex sessions waiting for your review. Read each session turn by turn — what you asked, what the agent said, what it changed — and send review notes back to the session in one batch when something is off. Monorepos and multiple git worktrees are first-class. The UI is English-first, with Simplified Chinese.
 
-## 它帮你回答五个问题
+**Status: P0, scaffolding. Nothing usable yet.**
 
-| 问题 | Lectern 的做法 | 阶段 |
+## Five questions it answers
+
+| Question | How Lectern answers it | Phase |
 |---|---|---|
-| 改了什么？ | 按 agent 会话、按轮次切分改动，从 Claude Code / Codex 的会话记录还原每次修改 | P1 |
-| 为什么改？ | 每个改动块旁显示触发它的 prompt 和 agent 的说明，可跳回会话原文 | P1 |
-| 影响到哪？ | 对改动涉及的符号自动列出调用方与相关测试 | P2 |
-| 改得对不对？ | 结构化 Diff、逐文件标记「已看」、终端里一键跑测试 | P2 |
-| 怎么让 agent 改？ | 在代码行上写评论，带文件与行号一键发回对应会话 | P2 |
+| What changed? | Changes split by agent session and turn, rebuilt from Claude Code edits and Codex patches | P1 |
+| Why? | Each hunk shows the prompt that caused it and the agent's explanation | P1 |
+| How do I get the agent to fix it? | Review notes on lines, batched and sent back to the session with file and line | P1 |
+| What else does it affect? | Callers and related tests for changed symbols, in a context drawer | P2 |
+| Is it right? | Structural diff, per-file "reviewed" marks, tests run in the terminal | P2 |
 
-## 技术路线
+## How it's built
 
-单进程纯 Rust，首发只支持 macOS（Apple Silicon）。
+Single-process Rust, macOS (Apple Silicon) first.
 
-| 层 | 选型 |
+| Layer | Choice |
 |---|---|
-| UI 框架 / 组件 | [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) + [gpui-component](https://github.com/longbridge/gpui-component) |
-| 终端 | [libghostty-vt](https://github.com/ghostty-org/ghostty) 内核 + GPUI 自绘网格 |
-| 高亮 / 索引 | tree-sitter |
-| Git / Diff | gix + imara-diff |
-| Agent | 解析 Claude Code / Codex 本地 JSONL 会话；后期接 ACP |
-| 代码平台 | GitHub 与 GitLab（含自部署） |
+| UI | [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) + [gpui-component](https://github.com/longbridge/gpui-component) |
+| Terminal | [libghostty-vt](https://github.com/ghostty-org/ghostty) core, grid drawn in GPUI |
+| Highlighting / index | tree-sitter |
+| Git / diff | gix + imara-diff |
+| Agents | Local Claude Code / Codex JSONL sessions; ACP later |
+| Forges | GitHub and GitLab (including self-hosted) |
+| UI strings | Fluent, en + zh-CN |
 
-架构「一切皆插件」：内核只管插件装载、依赖和生命周期，内置插件编译期链接，第三方插件以独立进程接入。
+Everything is a plugin: the kernel only loads plugins and manages their lifecycle. Built-in plugins are linked at compile time; third-party plugins run as separate processes.
 
-## 性能预算（M 系列 Mac，目标值）
+## Performance budget (Apple Silicon, targets)
 
-| 指标 | 预算 |
+| Metric | Budget |
 |---|---|
-| 冷启动到首帧 | < 150 ms |
-| 打开项目到文件树可用 | < 100 ms |
-| 打开文件到首屏高亮 | < 16 ms |
-| 打开一个会话的 Diff | < 50 ms |
-| 切换 worktree / 分支 | < 100 ms |
-| 空闲内存 | < 150 MB |
-| 滚动与输入 | 稳定 120 fps |
+| Cold start to first frame | < 150 ms |
+| Open project to project home | < 100 ms |
+| Open file to highlighted first screen | < 16 ms |
+| Open a session's diff | < 50 ms |
+| Switch worktree / branch | < 100 ms |
+| Idle memory | < 150 MB |
+| Scrolling and input | steady 120 fps |
 
-## 路线图
+## Roadmap
 
-| 阶段 | 工期 | 内容 | 出口关卡 |
+| Phase | Time | Scope | Exit gate |
 |---|---|---|---|
-| P0 搭建与验证 | 1–2 周 | agent 友好的工程脚手架、libghostty-vt 网格渲染、UI 探针、性能基准 | G1：三项验证都跑通 |
-| P1 MVP | 4–6 周 | 文件树 + 轻量编辑、终端 + 会话 resume、按会话归因的 Diff、项目模型 | G2：自己能日常使用 |
-| P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析、影响面、结构化 Diff、评论回传 | G3：Java 跳转可日常用 |
-| P3 Agent 原生化 | 4 周起 | ACP 对话面板、MR 视图、依赖源码、权限请求 UI | — |
+| P0 Setup | 1–2 weeks | Agent-friendly scaffolding, i18n, libghostty-vt grid rendering, UI probe, benchmarks | G1: all three spikes work |
+| P1 MVP | 4–6 weeks | Open project, project home, turn-by-turn review, review notes, terminal + session resume, project model | G2: usable daily |
+| P2 Understand | ~4 weeks | Symbol index + Java parsing, context drawer (impact), structural diff, full-file reading and editing | G3: Java navigation usable daily |
+| P3 Agent-native | 4+ weeks | ACP conversation panel, MR view, dependency sources, permission prompts | — |
 
-进度见 [Milestones](https://github.com/SoloJiang/lectern-app/milestones) 与 [docs/roadmap.md](docs/roadmap.md)。
+Progress: [Milestones](https://github.com/SoloJiang/lectern-app/milestones) · [docs/roadmap.md](docs/roadmap.md)
 
-## 文档
+## Docs
 
-- [技术调研：Rust + GPUI 实现方案](docs/design/tech-research.md)
-- [架构决策记录（ADR）](docs/adr/)
-- [AGENTS.md](AGENTS.md)：给 coding agent 的仓库规则
+Design docs are in Chinese for now.
 
-## 许可证
+- [Interaction spec](docs/design/interaction.md) · [design canvas](https://claude.ai/artifact/LVSXNi9xPviRgzdycnskp9)
+- [Technical research: Rust + GPUI](docs/design/tech-research.md)
+- [Architecture decision records](docs/adr/)
+- [AGENTS.md](AGENTS.md): rules for coding agents working in this repo
 
-MIT 或 Apache-2.0 双许可，任选其一。见 [LICENSE-MIT](LICENSE-MIT) 与 [LICENSE-APACHE](LICENSE-APACHE)。
+## License
 
-本项目只参考 Zed 的思路，不复制其 GPL 代码。
+Dual-licensed under MIT or Apache-2.0, at your option. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+
+Lectern borrows ideas from Zed but copies none of its GPL code.

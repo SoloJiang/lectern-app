@@ -1,11 +1,13 @@
 # AGENTS.md
 
-本仓库主要由 coding agent 开发。动手前先读本文件和 [docs/design/tech-research.md](docs/design/tech-research.md)。
+本仓库主要由 coding agent 开发。动手前先读本文件、[docs/design/interaction.md](docs/design/interaction.md) 和 [docs/design/tech-research.md](docs/design/tech-research.md)。
 `CLAUDE.md` 是指向本文件的软链接。各 crate 目录下会有自己的 AGENTS.md，写该模块的职责和测试方式。
 
 ## 产品原则
 
 - Lectern 以阅读和审阅为主：AI 写代码，人负责浏览、审 Diff、切换会话。编辑和终端为审阅服务。
+- 入口是项目或文件夹，不以编辑器为中心。界面分三层（常驻 / 按需 / 收起），新增界面元素前先对照 [交互规范](docs/design/interaction.md) 和 [ADR 0012](docs/adr/0012.md)。
+- 界面英文优先，支持简体中文（[ADR 0013](docs/adr/0013.md)）。所有界面字符串走 `i18n` crate 的 Fluent 资源文件，en 与 zh-CN 同时提供，不允许硬编码。
 - 性能是第一约束。任何改动不得让 [性能预算](docs/design/tech-research.md#性能预算) 超标。
 
 ## 架构规则（违反即 CI 失败）

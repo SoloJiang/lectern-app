@@ -3,13 +3,15 @@
 2026-10-16 · @SoloJiang
 
 > 本文是项目立项时的技术调研快照，原名 LightIDE，现定名 Lectern。原文（含交互图）：[Claude 文档](https://claude.ai/artifact/9PrndEEHBCBymuZs17Hrvw)。后续变更以 `docs/adr/` 为准。
+>
+> 2026-10-16 更新：按 [ADR 0012](../adr/0012.md)（以项目为入口、不以编辑器为中心）与 [ADR 0013](../adr/0013.md)（英文优先、支持中文）修订了产品原则、界面结构、crate 划分和路线图。交互规范见 [interaction.md](interaction.md)。
 
 ## 结论速览
 
-产品定位：AI 写、人读，代码查看与审阅是第一优先级，性能是第一约束，原生支持 monorepo 与多 worktree，首发只做 macOS。推荐路线：GPUI + gpui-component 做 UI，libghostty-vt 做终端内核，tree-sitter 做高亮，gix + imara-diff 做 Git/Diff，直接解析 Claude Code / Codex 的本地 JSONL 会话。整套是纯 Rust（终端内核经 C ABI 链入），技术上可行，3 个月内能出可用的 MVP。
+产品定位：AI 写、人读，代码查看与审阅是第一优先级。入口是项目或文件夹，打开后先看到这个项目里待审的 agent 会话；Lectern 不以编辑器为中心，编辑收在第三层。界面英文优先，支持简体中文。性能是第一约束，原生支持 monorepo 与多 worktree，首发只做 macOS。推荐路线：GPUI + gpui-component 做 UI，libghostty-vt 做终端内核，tree-sitter 做高亮，gix + imara-diff 做 Git/Diff，直接解析 Claude Code / Codex 的本地 JSONL 会话。整套是纯 Rust（终端内核经 C ABI 链入），技术上可行，3 个月内能出可用的 MVP。
 
 - **UI 框架用 GPUI**：Zed 自研的 GPU 渲染框架，Apache-2.0，可独立使用，但仍是 pre-1.0，需要按 Zed commit 锁版本。
-- **组件库和编辑器都用 gpui-component**（Longbridge 出品）：60+ 组件，并自带支持 tree-sitter 与 LSP 的代码编辑器（20 万行内性能稳定），正好对应「轻量编辑」，不必自己写编辑器内核。
+- **组件库和编辑器都用 gpui-component**（Longbridge 出品）：60+ 组件，并自带支持 tree-sitter 与 LSP 的代码编辑器（20 万行内性能稳定），用于完整文件阅读和按需编辑（第三层功能），不必自己写编辑器内核。
 - **终端接入 Ghostty 内核**：用 libghostty-vt（Rust 绑定 libghostty-rs）做终端状态机，在 GPUI 里自绘字符网格；不用 Zed 的 alacritty_terminal。
 - **代码导航以本地索引为主**：tree-sitter 符号索引保证打开即可跳转，Java 额外做 package / import 解析和依赖 sources.jar 跳转，jdtls 只做后台增强。
 - **Agent 集成分两层**：第一层只读本地会话文件 + 在内嵌终端里 `claude --resume` / `codex resume`；第二层再考虑接 ACP 协议，把 agent 对话做成原生面板。
@@ -22,12 +24,13 @@
 
 - 开源：是。不复用 Zed 的整体方案，按 Lectern 自己的取舍设计。
 - 「连接 Ghostty」= 接入内核（libghostty-vt），不嵌入 Ghostty 渲染器。
-- 代码视图支持轻量编辑，不做传统编辑器的重逻辑。
+- 不以编辑器为中心：入口是项目或文件夹，项目主页先列待审的 agent 会话，审阅按轮次读改动；完整文件与编辑收在第三层。
 - 首发只支持 macOS。
 - 产品核心是代码查看与审阅 AI 改动，编辑和终端为它服务。
 - Monorepo 与多 worktree 原生支持；极致性能是第一约束。
 - Java 项目同时支持 Maven 与 Gradle。
 - MR 支持 GitHub 与 GitLab（含自部署版）。
+- 界面英文优先，同时支持简体中文；人和 agent 写的内容不翻译。
 - 许可证不再影响技术路线；倾向 MIT + Apache-2.0 双许可。
 - 架构完全可插拔：参考 DeepSeek Harness，内核只管插件生命周期，功能全部是插件。
 
@@ -45,12 +48,14 @@ AI 让写代码的成本大幅下降，人的时间转移到读懂和把关上�
 | 为什么改？ | 无 | 每个改动块旁显示触发它的 prompt 和 agent 的说明，可跳回会话原文 | P1 |
 | 影响到哪？ | 手动查引用 | 对改动涉及的符号自动列出调用方与相关测试，复用代码导航索引 | P2 |
 | 改得对不对？ | 从头读完整 diff | 结构化 Diff（忽略纯格式变化、识别移动的代码，参考 difftastic 基于 tree-sitter 的做法）；逐文件标记「已看」；终端里一键跑测试 | P2 |
-| 怎么让 agent 改？ | 复制粘贴到聊天框 | 在代码行上写评论，带文件与行号一键发给对应会话的终端或 ACP 面板 | P2 |
+| 怎么让 agent 改？ | 复制粘贴到聊天框 | 在代码行上写审阅意见，攒成一批，带文件与行号一次发回对应会话 | P1 |
 
 由此确定的设计取舍：
 
-- **打开项目先看「最近改动」**，按会话列出 agent 改了哪些文件，文件树退到侧栏。
-- **阅读体验优先于编辑**：吸顶的作用域标题、符号大纲、大文件和大 diff 的虚拟滚动，打开文件要做到瞬时。
+- **以项目为入口**：打开文件夹进入项目主页，首先看到这个项目里待审的会话、运行中的 agent 和会话外的改动；侧栏是项目结构（会话按 worktree 分组、子项目、Files 入口），不是常驻文件树。
+- **审阅按叙事读**：选中会话后按轮次读「prompt → agent 说明 → 改动」，文件只作为右侧进度列表；顶部是会话简报（值得先看的几处）。
+- **代码按需呼出**：在 Diff 里点符号打开上下文抽屉（调用方、相关测试、改动历史）；完整文件阅读和编辑放在第三层。
+- **界面分三层**：常驻（项目主页、审阅、已看进度、审阅意见）、按需（上下文抽屉、对话面板、⌘K、并行总览、Files）、收起（完整文件、编辑、终端原始输出）。不做活动栏、文件标签页、状态栏和底部终端停靠。
 - **归因会过期**：agent 改完后文件可能又被人或其他会话改过，需要用当前内容重新对齐修改片段，对不上的标记为「已漂移」，不做猜测性归因。
 
 ## 性能预算
@@ -60,7 +65,7 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 | 指标（M 系列 Mac） | 预算 | 主要手段 |
 |---|---|---|
 | 冷启动到首帧 | < 150 ms | 启动时不扫描磁盘、不起子进程；恢复上次布局只读本地快照 |
-| 打开项目到文件树可用 | < 100 ms | 文件列表直接读 git index，不遍历目录 |
+| 打开项目到项目主页可用 | < 100 ms | 文件列表直接读 git index，不遍历目录 |
 | 打开文件到首屏高亮 | < 16 ms（一帧） | mmap 读取；只解析可见区域，整文件 tree-sitter 解析放后台 |
 | 打开一个会话的 Diff | < 50 ms | 改动从会话 JSONL 增量提取并缓存；diff 结果按 blob OID 缓存 |
 | 切换 worktree / 分支 | < 100 ms | 所有缓存以 git blob OID 为键，内容相同即命中 |
@@ -73,7 +78,7 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 
 - **不默认启动语言服务器**：jdtls、tsserver 只在用户请求精确跳转时按需拉起，空闲一段时间后自动关闭。
 - **不做进程内的动态插件运行时**：Zed 用 WASM 扩展，VS Code 用 Node 扩展进程，Lectern 两者都不采用；内置插件编译期链接，第三方插件以独立进程接入，见「插件架构」一节。
-- **不全量遍历工作区**：被 .gitignore 忽略的目录（node_modules、target、.next）默认不进文件树、不建索引、不监听，展开时再加载。
+- **不全量遍历工作区**：被 .gitignore 忽略的目录（node_modules、target、.next）默认不进文件列表、不建索引、不监听，展开时再加载。
 - **不同步阻塞 UI**：所有 IO、解析、git 操作都在后台线程，UI 线程只读快照。
 
 ### 实测样例
@@ -100,7 +105,7 @@ AI 时代的仓库有三个特征：多语言混合的 monorepo、每个子项�
 |---|---|---|
 | 仓库 | 共享同一个 .git 对象库的所有目录 | 一个入口看全部 worktree 和会话 |
 | worktree | `git worktree list`；标记已失效（prunable）的条目 | 每个并行 agent 的工作区，可横向对比 |
-| 子项目 | package.json workspaces、pnpm-workspace.yaml、pom.xml modules、settings.gradle、go.work、Cargo workspace；不在声明中但有自己清单文件的目录也算 | 文件树分组、搜索范围、影响面分析 |
+| 子项目 | package.json workspaces、pnpm-workspace.yaml、pom.xml modules、settings.gradle、go.work、Cargo workspace；不在声明中但有自己清单文件的目录也算 | 侧栏 Packages 分组、搜索范围、影响面分析 |
 
 子项目只从清单文件读出，不跑 `yarn`、`mvn` 等构建工具，毫秒级完成。例如 `apps/miniapp-console/frontend` 有自己的 package.json 却不在 workspaces 里，依然要识别为独立子项目。
 
@@ -108,7 +113,6 @@ AI 时代的仓库有三个特征：多语言混合的 monorepo、每个子项�
 
 - **会话归属**：会话的 cwd 可能是仓库根、某个子项目或某个 worktree；统一映射到「仓库 + worktree + 子项目」，这样在 worktree 里跑的会话也能在主仓库入口看到。
 - **并行 agent 总览**：一个视图列出每个 worktree 的分支、最近会话、未提交改动量，点击后显示该 worktree 相对主干的 Diff。
-- **指令链可见**：打开文件时在侧栏显示对它生效的 AGENTS.md / CLAUDE.md 链（从根目录到所在子项目），审阅时能对照 agent 当时遵循的规则。
 
 ### 跨子项目导航
 
@@ -129,9 +133,9 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 
 | Lectern 功能 | Zed 中对应的模块（只读参考） | Lectern 的做法 | 复杂度 |
 |---|---|---|---|
-| 窗口、面板、快捷键 | `gpui`、`workspace`、`ui` | GPUI + gpui-component 的 Dock 布局 | 中 |
-| 文件树 | `project_panel`、`worktree` | gpui-component 虚拟列表 + `ignore` crate 遍历 + `notify` 监听 | 低 |
-| 代码查看 + 轻量编辑 | `editor`、`text`、`rope`、`language` | gpui-component 的 Editor，去掉多光标、重构等功能 | 中 |
+| 窗口、面板、快捷键 | `gpui`、`workspace`、`ui` | 项目侧栏 + 阅读栏 + 右侧抽屉，不用 Dock 布局 | 中 |
+| 文件浏览（按需） | `project_panel`、`worktree` | 侧栏 Files 入口，按需展开；文件列表读 git index | 低 |
+| 完整文件阅读 + 编辑（第三层） | `editor`、`text`、`rope`、`language` | gpui-component 的 Editor，默认只读，去掉多光标、重构等功能 | 中 |
 | Diff / MR 查看 | `buffer_diff`、`git_ui`、`multi_buffer` | gix 读仓库 + imara-diff 算差异，自绘双栏/统一视图 | 高 |
 | 内嵌终端 | `terminal`（alacritty_terminal）、`terminal_view` | libghostty-vt 内核 + GPUI 自绘网格 | 高 |
 | 识别 Claude Code / Codex 项目 | `agent_servers`、`acp_thread` | 扫描 `~/.claude/projects`、`~/.codex/sessions` 的 JSONL | 低 |
@@ -155,6 +159,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | MR 数据 | `octocrab`（GitHub）/ GitLab REST | 调用 `gh` / `glab` CLI | 支持 GitHub 与 GitLab（含自部署版）；按 remote 的域名识别平台，自部署实例由用户配置域名与 API 地址；MVP 调 gh / glab CLI，复用已有登录态 |
 | 文件监听 | `notify` + `ignore` | `watchman` | 跨平台；`ignore` 自动遵守 .gitignore |
 | Agent 协议 | [`agent-client-protocol`](https://agentclientprotocol.com) crate | 直接解析 JSONL | Zed、JetBrains 等都在用 ACP，Claude Code 与 Codex 都有适配器 |
+| 界面文案 | [Fluent](https://projectfluent.org)（`fluent-rs`） | `rust-i18n` | 支持复数、语序变化；en 与 zh-CN 的键一致由 CI 检查 |
 
 ### 终端：接入 libghostty-vt 内核
 
@@ -185,9 +190,9 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 
 | 层 | crate | 职责 |
 |---|---|---|
-| 入口 | `lightide` | App 启动、按 profile 装配插件、启动快照恢复；内核是单独的 kernel crate，下表其余 crate 都以插件形式注册 |
-| 视图 | `workspace`、`ui` | Dock 布局与主题，封装 gpui-component |
-| 视图 | `review_view`、`code_view`、`terminal_view`、`agent_panel`、`navigator` | 审阅台、代码视图、终端、Agent 面板、文件树与 worktree 总览 |
+| 入口 | `lectern-app` | App 启动、按 profile 装配插件、启动快照恢复；内核是单独的 kernel crate，下表其余 crate 都以插件形式注册 |
+| 视图 | `workspace`、`ui` | 窗口骨架、抽屉与主题，封装 gpui-component |
+| 视图 | `welcome`、`project_home`、`review_view`、`context_drawer`、`conversation`、`worktrees`、`file_reader` | 打开项目、项目主页、按轮次审阅、上下文抽屉、与 agent 对话（含终端页）、并行总览、完整文件阅读与编辑 |
 | 领域 | `review` | 会话改动归因、片段对齐、「已看」状态、评论回传 |
 | 领域 | `project` | 仓库 → worktree → 子项目模型；清单解析（npm/yarn/pnpm、Maven、Gradle、Go、Cargo） |
 | 领域 | `code_intel` | tree-sitter 符号索引、Java/TS 解析、依赖源码、按需语言服务器 |
@@ -195,7 +200,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | 领域 | `terminal` | portable-pty + libghostty-vt，独占线程 |
 | 领域 | `agents` | Claude Code / Codex 会话解析、ACP 客户端 |
 | 领域 | `forge` | GitHub 与 GitLab（含自部署）MR 与 CI 状态 |
-| 基础设施 | `cache`、`fs_watch`、`executor`、`platform` | 内容寻址 SQLite 缓存、FSEvents 监听、后台任务、macOS 系统能力 |
+| 基础设施 | `cache`、`fs_watch`、`executor`、`platform`、`i18n` | 内容寻址 SQLite 缓存、FSEvents 监听、后台任务、macOS 系统能力、界面文案与语言切换 |
 | 工具 | `bench` | 性能预算基准，CI 中超标即失败；另有 ui_probe：调试构建专用的 UI 探针，发布构建不包含 |
 
 ## 插件架构
@@ -362,9 +367,9 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 
 用 `agent-client-protocol` crate 做客户端，子进程启动 `@zed-industries/claude-agent-acp` 或 `codex-acp`，通过 stdio 通信。这样能拿到结构化的消息、工具调用、权限请求，做出结构化的对话视图。Zed 的 `acp_thread` / `agent_ui` 是现成的参考实现（注意 GPL）。
 
-## 代码导航与轻量编辑
+## 代码导航与编辑
 
-导航分四层：靠前的层响应快，靠后的层结果准；后面的层未就绪时，前面的层照常工作。这一设计针对 Zed 的不足：Zed 没有项目模型、不建索引，Java 跳转完全依赖 jdtls；而 jdtls 要求 JDK 21、需先导入 Maven / Gradle 工程，跳进库代码时还返回 `jdt://` 私有 URI，任一环节出问题跳转就失效。
+导航结果只通过上下文抽屉和 ⌘K 呈现，界面上不显示导航层、索引或语言服务器的状态。导航分四层：靠前的层响应快，靠后的层结果准；后面的层未就绪时，前面的层照常工作。这一设计针对 Zed 的不足：Zed 没有项目模型、不建索引，Java 跳转完全依赖 jdtls；而 jdtls 要求 JDK 21、需先导入 Maven / Gradle 工程，跳进库代码时还返回 `jdt://` 私有 URI，任一环节出问题跳转就失效。
 
 | 层 | 实现 | 预期可用时机 | 解决什么 |
 |---|---|---|---|
@@ -379,10 +384,11 @@ Maven 与 Gradle 都要支持，但两者的难度不同。Maven 的 pom.xml 是
 - **直接扫缓存**：`~/.gradle/caches/modules-2/files-2.1/<group>/<artifact>/<version>/` 下已下载的 `-sources.jar` 按类名建索引，不必知道依赖是怎么声明的。
 - **可选的精确模式**：用户主动触发时在后台跑一次 Gradle 依赖解析，结果按构建文件的哈希缓存，平时不跑。
 
-交互规则：跳转立即用 1–3 层结果响应；第 4 层稍后返回不同结果时，在侧边提示「精确结果」，不打断当前视图。第 2 层的做法可以推广到 Go、Kotlin、TypeScript 等有清晰模块规则的语言。
+交互规则：跳转立即用 1–3 层结果响应；第 4 层结果与前面不同时才在抽屉里原地更新，结果相同不提示。第 2 层的做法可以推广到 Go、Kotlin、TypeScript 等有清晰模块规则的语言。
 
-### 轻量编辑范围
+### 编辑范围（第三层）
 
+- **默认只读**：完整文件阅读器默认只读，通过 Edit… 或 ⌘E 进入编辑。
 - **基于 gpui-component 的 `Editor`**：已有 tree-sitter 高亮、折叠、Go to Definition 钩子，20 万行内性能稳定；导航结果通过它的定义跳转钩子接入。
 - **保留**：撤销重做、查找替换、自动缩进、括号补全、保存时调用项目已有的 formatter。
 - **不做**：多光标、宏、重构；代码补全默认关闭，写代码主要交给 agent。
@@ -396,12 +402,12 @@ Maven 与 Gradle 都要支持，但两者的难度不同。Maven 的 pom.xml 是
 
 | 阶段 | 工期（一人全职估算） | 内容 | 出口关卡 |
 |---|---|---|---|
-| P0 搭建与验证 | 1–2 周 | 脚手架 · AGENTS · CI；libghostty-vt 网格渲染；截图调试 · 性能基准 | G1：三项验证都跑通 |
-| P1 MVP | 4–6 周 | 文件树 + 轻量编辑；终端 + 会话 resume；按会话归因的 Diff | G2：自己能日常使用 |
-| P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析；影响面 · 结构化 Diff；评论回传 agent | G3：Java 跳转可日常用 |
+| P0 搭建与验证 | 1–2 周 | 脚手架 · AGENTS · CI · i18n；libghostty-vt 网格渲染；截图调试 · 性能基准 | G1：三项验证都跑通 |
+| P1 MVP | 4–6 周 | 打开项目 + 项目主页；按轮次审阅 + 审阅意见回传；终端 + 会话 resume | G2：自己能日常使用 |
+| P2 理解与反馈 | 约 4 周 | 语法索引 + Java 解析；上下文抽屉（影响面）· 结构化 Diff；完整文件阅读与编辑 | G3：Java 跳转可日常用 |
 | P3 Agent 原生化 | 4 周起 | ACP 对话面板；MR 视图 · 依赖源码；权限请求 UI | — |
 
-P0 第一周先搭好面向 agent 的工程脚手架（见「工程搭建」一节），再用 libghostty-vt 验证网格渲染，P1 交付自绘终端；P1 的核心是按会话归因的 Diff，项目模型（monorepo、worktree）和性能基准也在 P1 落地，因为后面所有功能都建在它们之上；代码导航索引在 P2 建好，同时服务于跳转和「影响面」分析。工期为估算，P0 结束时应按实际速度重排。
+P0 第一周先搭好面向 agent 的工程脚手架（见「工程搭建」一节），再用 libghostty-vt 验证网格渲染，P1 交付自绘终端；P1 的核心是项目主页和按轮次归因的审阅，项目模型（monorepo、worktree）和性能基准也在 P1 落地，因为后面所有功能都建在它们之上；代码导航索引在 P2 建好，同时服务于跳转和「影响面」分析。工期为估算，P0 结束时应按实际速度重排。
 
 ## 风险
 
