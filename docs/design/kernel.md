@@ -176,6 +176,11 @@ impl PluginHandle {
     /// kernel 线程只保证 `shutdown` 之前的 drop 是串行的。
     pub fn own(&self, guard: impl Send + 'static) -> bool;
 
+    /// 先检查这次激活仍然存活，再调用 `start` 提交工作（如 `executor.spawn`），把返回的句柄交给 kernel 保管。
+    /// 检查、调用和登记在同一次读锁内完成；激活已停用或失败时不调用 `start`，返回 false。
+    /// 插件提交后台任务应使用这个方法，而不是先提交再 `own`。
+    pub fn own_with<G: Send + 'static>(&self, start: impl FnOnce() -> G) -> bool;
+
     /// 订阅事件。返回的 `Subscription` drop 时退订（从下一次 `emit` 起生效）；
     /// 调用 `Subscription::keep()` 则一直保留到这次激活停用。这次激活已停用时不订阅并返回 None。
     pub fn on<E: Event>(&self, handler: impl Fn(&E, &PluginHandle) + Send + Sync + 'static) -> Option<Subscription>;
@@ -362,7 +367,9 @@ impl Emitter {
 - 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）之前检查 token，不是 `Live` 就不调用。停用的第一步就把 token 置为 `Dead`，早于撤销的其他步骤。
 - `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending_removal()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程的队列被丢弃时守卫随之 drop。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
 
-后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后提交任务，用 `PluginHandle::own` 交出句柄。停用之后才提交的任务，`own` 返回 false 并立即取消。
+后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。
+
+监听 panic 时，失效标记由发生 panic 的线程直接原子写入，不取写锁（取写锁会等其他线程上正在执行的监听，见「事件分发」）。所以在标记写入前一刻通过检查的工作（`started` 本身，或刚由 `own_with` 提交的任务）仍会开始执行，这与 panic 发生时其他线程上已在执行的监听属于同一种情况：kernel 不中途打断它们。这类工作的约束相同：任务在撤销时被取消，取消是协作式的；它交给主线程的结果按下面的规则检查 token，失效后不会生效；插件代码要能在插件已标为 `Failed` 时运行完毕。
 
 任务把结果排到主线程交给视图时，任务可能已经结束，取消对它不再起作用。所以排到主线程的结果带上这次激活的 `ActivationToken` 和一个 `BusyGuard`（任务把自己的守卫移进去，或者用 `PluginHandle::busy()` 新取一个）：主线程应用结果之前检查 token，不是 `Live` 就丢弃；守卫在结果应用或丢弃之后才 drop，所以结果还在队列里时 kernel 不报告静止。
 
