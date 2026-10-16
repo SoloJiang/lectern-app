@@ -3,6 +3,9 @@
 # whole workspace.
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
+# Evaluate variables only when a recipe uses them, so `just fmt` and
+# `just --list` work even when Cargo.lock is out of date.
+set lazy
 
 # Use sccache when it is installed; it shares builds across worktrees.
 export RUSTC_WRAPPER := `command -v sccache || true`
@@ -31,7 +34,7 @@ deny:
     cargo deny --locked check
 
 # Everything CI runs on this platform.
-ci: check deny test
+ci: check deny (test "--profile" "ci")
     {{ if os() == "macos" { "cargo build --locked -p lectern-app" } else { "true" } }}
 
 # Format the code.
