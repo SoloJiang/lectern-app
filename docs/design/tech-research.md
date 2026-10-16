@@ -17,7 +17,7 @@
 - **Agent 集成分两层**：第一层只读本地会话文件 + 在内嵌终端里 `claude --resume` / `codex resume`；第二层再考虑接 ACP 协议，把 agent 对话做成原生面板。
 - **许可证不再影响技术路线**：不复用 Zed 的 GPL 代码后，全部依赖都是宽松许可（GPUI、gpui-component 为 Apache-2.0，libghostty、tree-sitter 为 MIT），选哪种许可证都兼容。建议用 Rust 社区惯例 MIT + Apache-2.0 双许可，降低企业用户的采用门槛。
 
-- **性能取舍**：不默认启动语言服务器、不做进程内的动态插件运行时、不遍历被忽略的目录，文件列表直接读 git index，所有缓存以 git blob OID 为键。目标是冷启动 20 ms 内出首帧、空闲内存 60 MB 以内、打开文件不超过一帧（[ADR 0017](../adr/0017.md)）。
+- **性能取舍**：不默认启动语言服务器、不做进程内的动态插件运行时（唯一例外是经审查、签名的 tree-sitter grammar 库，见 [ADR 0018](../adr/0018.md)）、不遍历被忽略的目录，文件列表直接读 git index，所有缓存以 git blob OID 为键。目标是冷启动 20 ms 内出首帧、空闲内存 60 MB 以内、打开文件不超过一帧（[ADR 0017](../adr/0017.md)）。
 - **原生支持 Monorepo**：项目模型分三层（仓库 → worktree → 子项目），只读清单文件、不跑构建工具；agent 会话按 cwd 归位到对应的 worktree 和子项目。
 
 ## 关键决策
@@ -78,7 +78,7 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 ### 排除的功能
 
 - **不默认启动语言服务器**：jdtls、tsserver 只在用户请求精确跳转时按需拉起，空闲一段时间后自动关闭。
-- **不做进程内的动态插件运行时**：Zed 用 WASM 扩展，VS Code 用 Node 扩展进程，Lectern 两者都不采用；内置插件编译期链接，第三方插件以独立进程接入，见「插件架构」一节。
+- **不做进程内的动态插件运行时**：Zed 用 WASM 扩展，VS Code 用 Node 扩展进程，Lectern 两者都不采用；内置插件编译期链接，可下载的代码插件以独立进程接入，见「插件架构」一节。唯一在进程内加载的下载内容是 tree-sitter grammar 库：只有官方审查过源码、由我们构建签名的版本，没有插件 API，只提供解析表和 scanner（[ADR 0018](../adr/0018.md)）。
 - **不全量遍历工作区**：被 .gitignore 忽略的目录（node_modules、target、.next）默认不进文件列表、不建索引、不监听，展开时再加载。
 - **不同步阻塞 UI**：所有 IO、解析、git 操作都在后台线程，UI 线程只读快照。
 
@@ -207,7 +207,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 
 ## 插件架构
 
-Lectern 采用「一切皆插件」的设计：内核只负责插件的装载、依赖和生命周期，审阅台、终端、语言支持、会话来源等功能全部是插件。设计参考 DeepSeek Harness，差别在于内置插件在编译期链接，第三方插件以独立进程接入。
+Lectern 采用「一切皆插件」的设计：内核只负责插件的装载、依赖和生命周期，审阅台、终端、语言支持、会话来源等功能全部是插件。设计参考 DeepSeek Harness，差别在于内置插件在编译期链接，可下载的插件以独立进程接入；tree-sitter grammar 库是唯一的进程内例外，只接受官方审查、构建并签名的版本（[ADR 0018](../adr/0018.md)）。
 
 ### 参考：DeepSeek Harness
 
@@ -262,7 +262,7 @@ Harness 是 TypeScript 写的 agent 运行时，插件可以在进程内自由�
 
 - **内置插件编译期链接**：Rust 没有稳定 ABI，动态库插件既不安全也不稳定。内置插件是 workspace 里的 crate，由 profile 和配置决定是否激活，调用走静态分发或一次虚函数调用。
 - **按需激活**：插件声明激活条件（出现 .java 文件、出现 pom.xml、用户打开终端），冷启动只激活审阅台所需的最小集合，未激活的插件不占启动时间。
-- **第三方插件独立进程运行**：通过 stdio JSON-RPC 实现 `SessionSource`、`ForgeProvider`、`ProjectDetector`、`NavigationProvider` 等数据类接口，结果显示在内置视图里，接入方式与 MCP、ACP 一致。第一版不开放第三方绘制界面。外部进程用 macOS Seatbelt 限制文件与网络访问，Harness 对其 agent 子进程也是这样处理的。
+- **第三方插件独立进程运行**（grammar 库除外，它没有第三方档，见 ADR 0018）：通过 stdio JSON-RPC 实现 `SessionSource`、`ForgeProvider`、`ProjectDetector`、`NavigationProvider` 等数据类接口，结果显示在内置视图里，接入方式与 MCP、ACP 一致。第一版不开放第三方绘制界面。外部进程用 macOS Seatbelt 限制文件与网络访问，Harness 对其 agent 子进程也是这样处理的。
 - **每个插件有性能预算**：`bench` 记录每个插件的激活耗时和常驻内存，超标即 CI 失败。
 
 ### 与 agent 开发的关系
