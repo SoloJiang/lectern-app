@@ -581,6 +581,9 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - `own_with` 的 `start` panic：闸门关闭、任务一次也没运行，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
 - `own_with` 的 `start` 里调用同一个句柄的 `own`、`own_with`：不死锁，守卫都登记上；`start` 运行期间另一个线程完成撤销：返回的句柄被 drop、闸门关闭，任务一次也没运行，`own_with` 返回 false。
 - 嵌套事件的来源：A 的监听通过 B 的 `Emitter` 发出事件后 B 失效、A 仍存活：排队的事件被丢弃；A 失效、B 仍存活：事件照常送达。
+- 暂存封口：`started` 返回、token 换成 `Live` 的同时，另一个线程用克隆的句柄发事件、`own_with`：事件恰好送达一次，`start` 恰好调用一次。
+- 任务结果的应用 panic：主线程不展开，插件进入 `Failed`。
+- 并发失去提供者：一个 `MULTIPLE` 服务的最后两个提供者在两个线程上同时 `fail`，依赖者的 token 一定变为 `Dead`（重复上万次）。
 - 任务句柄回收：同一次激活里反复 `own_with` 一万个立即完成的任务，守卫表的长度回到 0；future 在取消、完成后被 drop 时 panic，插件进入 `Failed`、工作线程继续运行。
 - 界面注册的应用 panic：主线程不展开，注册一项都没有插入，插件进入 `Failed`。
 - 闸门唤醒：executor 在 `wake` 里同步 poll 任务时不死锁，任务第一次 poll 就调用同一个句柄的 `own_with` 也不死锁；`manifest`、`activate`、监听、守卫的 drop 以 `Drop` 会 panic 的 payload panic 时，kernel 线程继续运行；任务以 `Drop` 会 panic 的 payload panic 时，executor 和 kernel 线程都继续运行。
