@@ -8,6 +8,45 @@ AI 让写代码的成本大幅下降，人的时间转移到读懂和把关上�
 
 **状态：P0 搭建中，尚无可用版本。**
 
+## 设计稿
+
+以下是[交互设计](docs/design/interaction.md)的设计稿截图，应用本身尚未实现。截图随系统的浅色 / 深色设置切换。
+
+**审阅会话.** 按轮次读一个会话：你的 prompt、agent 的说明、它产生的 diff。在代码行上写审阅意见；上下文面板列出改动符号的调用方与测试。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
+  <img src="docs/images/review-light.png" alt="审阅会话">
+</picture>
+
+**项目主页.** 打开项目后先看到等你审的会话、还在运行的 agent，以及不属于任何会话的改动。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/overview-dark.png">
+  <img src="docs/images/overview-light.png" alt="项目主页">
+</picture>
+
+**并行总览.** 多个 worktree 里并行运行的 agent，改动并排对比，有重叠时提示。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">
+  <img src="docs/images/worktrees-light.png" alt="并行总览">
+</picture>
+
+**用量.** 每天、每个会话的 token，API 等价成本，以及 Codex 与 Claude Code 的额度窗口。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/usage-dark.png">
+  <img src="docs/images/usage-light.png" alt="用量">
+</picture>
+
+**打开项目.** 从文件夹或仓库开始；agent 历史里出现过的项目也会列出来。
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/welcome-dark.png">
+  <img src="docs/images/welcome-light.png" alt="打开项目">
+</picture>
+
 ## 它帮你回答这些问题
 
 | 问题 | Lectern 的做法 | 阶段 |

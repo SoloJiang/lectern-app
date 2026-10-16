@@ -8,6 +8,45 @@ Agents write most of the code now; your time goes into reading it and deciding w
 
 **Status: P0, scaffolding. Nothing usable yet.**
 
+## Design
+
+Mockups from the [interaction design](docs/design/interaction.md); the app itself isn't built yet. Screenshots follow your light or dark setting.
+
+**Review a session.** Read a session turn by turn: the prompt, the agent's explanation, and the diff it produced. Leave notes on lines; the context panel shows callers and tests of the changed symbol.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/review-dark.png">
+  <img src="docs/images/review-light.png" alt="Review a session">
+</picture>
+
+**Project overview.** Opening a project shows the sessions waiting for review, what's still running, and changes made outside any session.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/overview-dark.png">
+  <img src="docs/images/overview-light.png" alt="Project overview">
+</picture>
+
+**Worktrees.** Agents running in parallel worktrees, with their changes side by side and overlap warnings.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">
+  <img src="docs/images/worktrees-light.png" alt="Worktrees">
+</picture>
+
+**Usage.** Tokens per day and per session, API-equivalent cost, and the Codex and Claude Code limit windows.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/usage-dark.png">
+  <img src="docs/images/usage-light.png" alt="Usage">
+</picture>
+
+**Open a project.** Start from a folder or repository; projects found in agent history are listed too.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/welcome-dark.png">
+  <img src="docs/images/welcome-light.png" alt="Open a project">
+</picture>
+
 ## Questions it answers
 
 | Question | How Lectern answers it | Phase |
