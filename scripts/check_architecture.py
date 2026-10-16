@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import tomllib
 import subprocess
 import sys
 
@@ -69,8 +70,8 @@ MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "ob
 # [target.'cfg(target_os = "macos")'.dependencies]. Predicates are evaluated
 # against the real cfg of every target (rustc --print cfg), so aliases such as
 # `unix` / target_family = "unix", multi-valued keys and Mac Catalyst are exact.
-# Only cfg names no target sets (feature = "...", test, ...) are free flags.
-MAX_FREE_FLAGS = 12
+# Names no target sets (feature, test, proc_macro, ...) are false, as in Cargo:
+# they cannot select target dependencies. Configured rustflags are applied.
 LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 PLATFORM_CRATE = "lectern-platform"
 
@@ -132,29 +133,58 @@ def parse_cfg(text):
     return result
 
 
-class TooComplex(Exception):
-    """The predicate has too many free flags to decide by enumeration."""
-
-
 _TARGET_CFGS = None
 
 
+def cargo_rustflags(triple):
+    """The rustflags Cargo would use for `triple`: CARGO_ENCODED_RUSTFLAGS,
+    else RUSTFLAGS, else build.rustflags / target.<triple>.rustflags from the
+    Cargo config files (this directory and its parents, then CARGO_HOME)."""
+    if os.environ.get("CARGO_ENCODED_RUSTFLAGS"):
+        return [f for f in os.environ["CARGO_ENCODED_RUSTFLAGS"].split("\x1f") if f]
+    if os.environ.get("RUSTFLAGS"):
+        return os.environ["RUSTFLAGS"].split()
+    dirs, cur = [], os.path.abspath(".")
+    while True:
+        dirs.append(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    home = os.environ.get("CARGO_HOME", os.path.expanduser("~/.cargo"))
+    files = [os.path.join(d, ".cargo", n) for d in dirs for n in ("config.toml", "config")] + [
+        os.path.join(home, n) for n in ("config.toml", "config")
+    ]
+    flags = []
+    for path in files:
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as f:
+            conf = tomllib.load(f)
+        for value in ((conf.get("target") or {}).get(triple, {}).get("rustflags"), (conf.get("build") or {}).get("rustflags")):
+            if value:
+                flags += value.split() if isinstance(value, str) else list(value)
+    return flags
+
+
 def target_cfgs():
-    """[(is_apple, {(key, value_or_None), ...})] for every target rustc knows.
-    Computed once per rustc version and cached under target/."""
+    """[(is_apple, {(key, value_or_None), ...})] for every target rustc knows,
+    with Cargo's rustflags applied. Cached under target/, keyed by the rustc
+    version and the flags."""
     global _TARGET_CFGS
     if _TARGET_CFGS is not None:
         return _TARGET_CFGS
     version = subprocess.run(["rustc", "-vV"], check=True, capture_output=True, text=True).stdout
-    cache = os.path.join("target", f"lectern-target-cfgs-{hashlib.sha256(version.encode()).hexdigest()[:16]}.json")
+    triples = subprocess.run(["rustc", "--print", "target-list"], check=True, capture_output=True, text=True).stdout.split()
+    flags = {t: cargo_rustflags(t) for t in triples}
+    key = hashlib.sha256((version + json.dumps(flags, sort_keys=True)).encode()).hexdigest()[:16]
+    cache = os.path.join("target", f"lectern-target-cfgs-{key}.json")
     if os.path.exists(cache):
         with open(cache) as f:
             raw = json.load(f)
     else:
-        triples = subprocess.run(["rustc", "--print", "target-list"], check=True, capture_output=True, text=True).stdout.split()
-
         def cfg_of(triple):
-            out = subprocess.run(["rustc", "--print", "cfg", "--target", triple], capture_output=True, text=True)
+            out = subprocess.run(["rustc", *flags[triple], "--print", "cfg", "--target", triple], capture_output=True, text=True)
             return out.stdout.splitlines() if out.returncode == 0 else None
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
@@ -175,49 +205,28 @@ def target_cfgs():
 
 def apple_only_cfg(target, targets=None):
     """True when a dependency's target (a cfg(...) predicate or a target
-    triple) holds on at least one Apple target and on no other target. cfg
-    names that no target sets (feature = "...", test, ...) are free flags and
-    are tried both ways; too many of them fails closed with TooComplex."""
+    triple) holds on at least one Apple target and on no other target. Each
+    predicate has one value per target: names a target does not set
+    (feature, test, proc_macro, ...) are false, exactly as Cargo evaluates
+    target-dependency tables."""
     if not target.startswith("cfg("):
         return "-apple-" in target
     targets = target_cfgs() if targets is None else targets
     tree = parse_cfg(target[4:-1])
-    target_keys = {key for _, cfg in targets for key, _ in cfg}
-    atoms = set()
 
-    def collect(node):
-        if node[0] == "atom":
-            atoms.add(node[1:])
-        elif node[0] in ("all", "any"):
-            for child in node[1]:
-                collect(child)
-        elif node[0] == "not":
-            collect(node[1])
-
-    collect(tree)
-    free = sorted((a for a in atoms if a[0] not in target_keys), key=str)
-    if len(free) > MAX_FREE_FLAGS:
-        raise TooComplex(target)
-
-    def holds(node, cfg, flags):
+    def holds(node, cfg):
         kind = node[0]
         if kind == "const":
             return node[1]
         if kind == "atom":
-            atom = node[1:]
-            return flags[atom] if atom in flags else atom in cfg
+            return node[1:] in cfg
         if kind == "not":
-            return not holds(node[1], cfg, flags)
-        results = (holds(child, cfg, flags) for child in node[1])
+            return not holds(node[1], cfg)
+        results = (holds(child, cfg) for child in node[1])
         return all(results) if kind == "all" else any(results)
 
-    def possible(cfg):
-        return any(
-            holds(tree, cfg, {a: bool(bits >> i & 1) for i, a in enumerate(free)}) for bits in range(1 << len(free))
-        )
-
-    on_apple = any(possible(cfg) for apple, cfg in targets if apple)
-    return on_apple and not any(possible(cfg) for apple, cfg in targets if not apple)
+    on_apple = any(holds(tree, cfg) for apple, cfg in targets if apple)
+    return on_apple and not any(holds(tree, cfg) for apple, cfg in targets if not apple)
 
 
 def gpui_free_packages(meta):
@@ -281,14 +290,7 @@ def main():
         for dep in nodes[pid]["deps"]:
             if dep["pkg"] == dep_pkg:
                 targets = [k["target"] for k in dep["dep_kinds"]]
-                try:
-                    return all(t and apple_only_cfg(t) for t in targets)
-                except TooComplex as e:
-                    errors.append(
-                        f"{packages[pid]['name']} -> {packages[dep_pkg]['name']}: target predicate too complex to classify "
-                        f"({e}); simplify it or move the dependency to {PLATFORM_CRATE}"
-                    )
-                    return False
+                return all(t and apple_only_cfg(t) for t in targets)
         return False
 
     def own_deps(pid):
