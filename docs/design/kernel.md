@@ -190,7 +190,10 @@ pub enum TokenState { Pending, Live, Dead }
 pub struct SubmitGate { /* Arc<{ Mutex<{ 状态, 槽位里的 waker }>, ActivationToken, Weak<Kernel>, 插件 ID }> */ }
 
 impl SubmitGate {
-    pub fn slot(&self) -> GateSlot;
+    /// executor 在提交任务的调用里同步申请槽位（`spawn` 返回之前），不推迟到别的线程。`start` 返回时 `own_with` 在闸门的锁内把它封住，
+    /// 之后再申请返回 None，executor 不 poll 这个任务、在 `contain` 里直接丢弃。所以 `start` 返回之后，这次提交的任务集合就固定了，
+    /// 闸门「已封住、槽位归零」时登记才可以移除，不会有迟到的任务在登记移除之后申请到槽位、在没有句柄的情况下运行。
+    pub fn slot(&self) -> Option<GateSlot>;
 }
 
 /// 一个任务在闸门上的槽位，存放这个任务最近一次的 waker，drop 时从闸门移除。
@@ -205,9 +208,10 @@ impl GateSlot {
     /// 这次 `poll` 要么已经看到新状态，要么它登记的 waker 一定会被唤醒，不会漏掉唤醒、一直停在 `Pending`。
     pub fn poll(&self, cx: &mut std::task::Context<'_>) -> GatePoll;
 
-    /// executor 在 poll 任务的 future 时用 `catch_unwind` 包住。panic 时顺序固定：先把任务标为已结束，在 `contain` 里 drop 它的 future
-    /// （future 持有的锁、许可等资源随之释放），再处理 panic 的 payload：取出可读的消息，在 `contain` 里 drop payload（`panic_any` 抛出的 payload 也可能持有许可等资源），
-    /// 最后才用这条消息调用这个方法；所以这个方法唤醒的同一闸门上的其他任务不会卡在仍被这个 future 或它的 payload 占着的资源上。
+    /// executor 用 `kernel::catch` 包住每次 poll（不用 `contain`：`contain` 在返回之前就处理掉 payload，executor 来不及先 drop future）。
+    /// panic 时 `catch` 返回 `Err(PanicPayload)`，payload 原样保留，顺序固定：先把任务标为已结束，在 `contain` 里 drop 它的 future
+    /// （future 持有的锁、许可等资源随之释放；payload 的 `Drop` 可能要等这些资源），再调用 `PanicPayload::dispose` 取出消息、释放 payload
+    /// （`panic_any` 抛出的 payload 也可能持有许可等资源），最后才用这条消息调用这个方法；所以这个方法唤醒的同一闸门上的其他任务不会卡在仍被这个 future 或它的 payload 占着的资源上。
     /// future 的每一次最终 drop 都用 `catch_unwind` 包住，不只是 poll panic 之后：`poll` 返回 `Drop`（取消、闸门关闭、token 为 `Dead`）、
     /// future 返回 `Ready` 之后、executor 关闭时丢弃未完成的任务，都一样；drop panic 时同样调用这个方法。
     /// kernel 按 `fail` 的方式让这个任务所属的激活失效：插件进入 `Failed`，连带停用的插件同步失效，
@@ -217,12 +221,25 @@ impl GateSlot {
     /// 摘掉槽位撤不回别的线程已经克隆走的 waker，所以不能只靠它：`executor` 对每个任务维护「空闲 / 运行中 / 已结束」三种状态，
     /// 唤醒一个运行中的任务只设一个「待重新 poll」标记，由正在运行的那次 poll 返回后再调度，唤醒已结束的任务直接忽略，
     /// 所以任何时候一个任务都不会被重入 poll，panic 路径上的任务在标为已结束之后也不会再被 poll。这是 `executor` 对 kernel 的约定，有测试覆盖。
-    /// 激活已经失效时只记日志。这个方法只接收消息，不接收 payload：executor 用 `kernel::contain` 包住 poll 和 drop，
-    /// `contain` 捕获到 panic 时当场取出可读的消息（`&str` / `String`），在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时
-    /// 第二个 payload 用 `mem::forget` 泄漏，然后返回 `Err(消息)`；所以调用这个方法时 payload 已经释放，
-    /// `Drop` 会 panic 的 payload 也不会展开到 executor 或 kernel 线程。
+    /// 激活已经失效时只记日志。这个方法只接收消息，不接收 payload，调用它时 payload 已经释放。
+    /// future 的 drop 不需要先做别的事，executor 直接用 `kernel::contain` 包住。
     pub fn panicked(&self, message: String);
 }
+
+/// `catch` 捕获到的 panic payload，原样保留到持有者决定释放的时刻。
+pub struct PanicPayload { /* Box<dyn Any + Send> */ }
+
+impl PanicPayload {
+    /// 取出可读的消息（`&str` / `String`），在 `catch_unwind` 里 drop payload；这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，
+    /// 所以 `Drop` 会 panic 的 payload 也不会展开到调用方。`PanicPayload` 自己的 `Drop` 做同样的事，忘了调用也不会展开。
+    pub fn dispose(self) -> String;
+}
+
+/// 用 `catch_unwind` 运行 `f`，panic 时保留 payload 返回。
+pub fn catch<T>(f: impl FnOnce() -> T) -> Result<T, PanicPayload>;
+
+/// 等于 `catch(f).map_err(PanicPayload::dispose)`：捕获到 panic 时当场释放 payload，只返回消息。kernel 的其余边界都用它（见「失败与 panic」）。
+pub fn contain<T>(f: impl FnOnce() -> T) -> Result<T, String>;
 
 /// 一次激活的长期句柄：从 `started` 起有效，到这次激活停用为止。可以克隆并保存在插件的状态里，
 /// 用于激活之后开始的工作（打开项目后的扫描、收到事件后提交的任务）。
@@ -231,7 +248,9 @@ impl GateSlot {
 pub struct PluginHandle { /* Weak<Kernel>, 插件 ID, 激活代数 */ }
 
 impl PluginHandle {
-    /// 交给 kernel 保管，停用时 drop。这次激活已停用时返回 false，`guard` 送到 kernel 线程上 drop。
+    /// 交给 kernel 保管，停用时 drop。检查和插入在这次激活的守卫表的互斥锁内完成，与 `on`、`own_with` 相同：
+    /// 撤销第 4 步先把表标为关闭再取出全部守卫，所以 `own` 要么在关闭之前插入（随撤销 drop），要么看到关闭返回 false，不会在 `Active` drop 之后留下守卫。
+    /// 这次激活已停用时返回 false，释放锁之后把 `guard` 送到 kernel 线程上 drop。
     /// `shutdown` 完成、kernel 线程退出之后，被拒绝的守卫在调用线程上 drop，所以守卫必须能在任意线程上安全 drop；
     /// 这次 drop 同样用 `catch_unwind` 包住，panic 只记日志，不会展开到调用方的线程；
     /// kernel 线程只保证 `shutdown` 之前的 drop 是串行的。
@@ -248,9 +267,11 @@ impl PluginHandle {
     ///    否则（`start` 运行期间撤销第 4 步已把表标为关闭）释放锁后关闭闸门、在 `catch_unwind` 里 drop 句柄，返回 false。
     ///    闸门一直关着，所以这时已经提交的任务一次也没运行，随闸门关闭被丢弃。
     /// 插件提交后台任务应使用这个方法，而不是先提交再 `own`。
-    /// 句柄登记时带上闸门：这次提交的所有任务都结束后（每个任务的 `GateSlot` 在任务完成或被丢弃时 drop，闸门看到槽位归零且已经打开过），
-    /// 闸门把这条登记从守卫表里移除，句柄送到 kernel 线程上在 `contain` 里 drop。所以反复提交一次性任务（扫描、刷新、收到事件后的工作）
-    /// 时，守卫表只保留还在运行的任务，不会随激活的时长一直增长；`start` 一个任务也没提交（没申请槽位）时，句柄在第 3 步之后立即移除。
+    /// 句柄登记时带上闸门：这次提交的所有任务都结束后（每个任务的 `GateSlot` 在任务完成或被丢弃时 drop，闸门看到已封住且槽位归零），
+    /// 闸门向 kernel 线程的队列放一个回收请求（激活代数加登记序号），不在 executor 线程上动守卫表；kernel 线程处理请求时，登记还在就移除它、
+    /// 在 `contain` 里 drop 句柄，已经被撤销取走就什么也不做。所以句柄要么由撤销按顺序在 `Active` 之前 drop，要么由 kernel 线程回收，
+    /// 不会在撤销或 `shutdown` 完成之后才在别的线程上 drop；kernel 线程已经退出时放不进请求，这时 `shutdown` 已经取走并 drop 了全部登记。所以反复提交一次性任务（扫描、刷新、收到事件后的工作）
+    /// 时，守卫表只保留还在运行的任务，不会随激活的时长一直增长；`start` 一个任务也没提交（没申请槽位）时，第 3 步封住闸门后立即放回收请求。
     /// `start` 用 `catch_unwind` 包住：panic 时关闭闸门，按 `fail` 的方式让这次激活失效
     /// （插件进入 `Failed`，连带停用的插件同步失效），返回 false，panic 不会展开到调用方。
     /// 在 `started` 里调用时（token 还是 `Pending`），`start` 暂存到 token 变为 `Live` 之后再调用，激活失败时丢弃，返回 true 表示已经接受。
@@ -492,7 +513,7 @@ impl Emitter {
 
 ### 失败
 
-kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。kernel 用一个共用的公开函数 `contain(f) -> Result<T, String>` 包住全部边界，不在各处各写一遍，executor 也用它：捕获到 panic 时当场取出可读的消息，在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，然后只返回消息，所以 payload 持有的资源在调用方做后续处理（让激活失效、唤醒其他任务）之前已经释放，`Drop` 会 panic 的 payload（`panic_any` 抛出）也不会在调用方或 kernel 线程上引发第二次展开。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
+kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。kernel 用一个共用的公开函数 `contain(f) -> Result<T, String>` 包住全部边界，不在各处各写一遍，executor 包住 future 的 drop 时也用它（poll 用保留 payload 的 `catch`，见 `GateSlot::panicked`）：捕获到 panic 时当场取出可读的消息，在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，然后只返回消息，所以 payload 持有的资源在调用方做后续处理（让激活失效、唤醒其他任务）之前已经释放，`Drop` 会 panic 的 payload（`panic_any` 抛出）也不会在调用方或 kernel 线程上引发第二次展开。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
 
 - `activate` 返回错误或 panic：
   - 这次激活已登记的内容全部撤销；
@@ -617,6 +638,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 暂存闭包的 drop：丢弃的暂存 `start` 闭包在 drop 时 panic，kernel 线程继续运行，撤销照常完成。
 - 失效中的命令：插件已失效、注销还没执行时触发代理 Action，走 `control.command`，`done` 收到错误或插件重新激活。
 - 命令重放与静止：按命令激活成功、重放还在主线程队列里时 kernel 不报告静止；`workspace` 在重放之前停用时重放被丢弃。
+- 任务 panic 的顺序：payload 的 `Drop` 要等 future 持有的锁时，future 先被 drop，payload 随后释放，工作线程不卡住；`start` 把闸门交给另一个线程、`start` 返回后才申请槽位时得到 None，任务不运行；登记的回收与撤销并发时，句柄只 drop 一次且在 `Active` 之前；`own` 与撤销并发时守卫不会留在 `Active` 之后。
 - 失效与唤醒：失效唤醒的任务在 `wake` 里被同步丢弃、future 的 drop 调用 `fail` 时不死锁；`busy()` 与 `fail` 并发时，要么返回 None，要么守卫在撤销完成之前创建；主线程注销时闭包的 `Drop` panic 不展开到主线程。
 - 界面注册与失效竞争：主线程应用注册时另一线程调用 `fail`，撤销在注册应用完之后才 drop 守卫和 `Active`，注册随后被注销。
 - 发出方失效：后台任务的 `emit` 与 `fail` 并发时，`fail` 返回之后开始的分发不会把事件送给任何监听。
