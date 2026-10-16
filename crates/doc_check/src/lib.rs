@@ -207,7 +207,9 @@ fn scan(markdown: &str) -> Scan {
         match token {
             Ok(Token::StartTag(tag)) => {
                 let at = tag.span.start;
-                if matches!(&tag.name[..], b"audio" | b"video") && !tag.self_closing {
+                // HTML ignores the self-closing flag on non-void elements, so
+                // `<audio/>` still opens one.
+                if matches!(&tag.name[..], b"audio" | b"video") {
                     media_depth += 1;
                 }
                 if UNSUPPORTED_ELEMENTS.contains(&&tag.name[..]) {
@@ -1327,14 +1329,14 @@ mod tests {
     fn source_src_counts_only_in_media() {
         let repo = TempRepo::new(&[(
             "b.md",
-            "<picture><source src=\"missing.png\"></picture>\n\n<video><source src=\"gone.mp4\"></video>\n",
+            "<picture><source src=\"missing.png\"></picture>\n\n<video><source src=\"gone.mp4\"></video>\n\n<audio/><source src=\"gone.mp3\"></audio>\n",
         )]);
         let got: Vec<_> = repo
             .check(&["b.md"])
             .iter()
             .map(|e| e.target.clone())
             .collect();
-        assert_eq!(got, ["gone.mp4"]);
+        assert_eq!(got, ["gone.mp4", "gone.mp3"]);
     }
 
     #[test]
