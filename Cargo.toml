@@ -30,6 +30,7 @@ members = [
     "crates/i18n",
     "crates/bench",
     "crates/ui_probe",
+    "crates/doc_check",
 ]
 
 [workspace.package]
@@ -38,6 +39,14 @@ edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 publish = false
+
+# Every crate inherits these with `[lints] workspace = true`; the architecture
+# check fails when a crate doesn't. See docs/design/ci.md.
+[workspace.lints.clippy]
+# An #[allow] or #[expect] must say why: #[allow(lint, reason = "...")].
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+undocumented_unsafe_blocks = "warn"
 
 [workspace.dependencies]
 # GPUI comes from Zed's crates.io snapshots (gpui-pre 0.3.9 = zed@93d7456),
@@ -48,6 +57,9 @@ gpui = { package = "gpui-pre", version = "=0.3.9" }
 # text system and renders no text.
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }
 gpui-component = "=0.7.3"
+# Used only by the lectern-doc-check tool crate.
+html5gum = { version = "0.8", default-features = false }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 # Debug builds: optimize dependencies (GPUI is unusably slow at opt-level 0)
 # but keep our own crates at opt-level 0 so incremental rebuilds stay fast.
