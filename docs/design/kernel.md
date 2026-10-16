@@ -56,8 +56,8 @@ pub trait Service: Send + Sync + 'static {
 }
 // 服务方法出错时返回 `Err`，不得 panic：调用方拿到的是 trait 对象，kernel 不在每次调用外面包 `catch_unwind`。
 // 服务方法真的 panic 时，展开到调用方，由调用方所在的边界处理（在另一个插件的监听或 `started` 里时，算作那个插件失败）。
-// 服务实现的测试覆盖错误路径；`Admitted` 的 `Drop` 用 `std::thread::panicking()` 判断是否正在展开，是时记录持有的是哪个提供者的准入，
-// 日志里能看出 panic 来自哪个服务实现（调用方插件仍按它自己的边界处理）。
+// 服务实现的测试覆盖错误路径。`Admitted` 的 `Drop` 用 `std::thread::panicking()` 判断是否正在展开，是时在日志里记下
+// 「展开时持有哪个提供者的准入」，只作为排查的上下文：panic 可能来自服务方法，也可能来自调用方自己的代码，日志不据此判定来源。
 
 /// 运行时的服务键：TypeId、稳定 ID 和 `MULTIPLE`。类型擦除后无法再从 TypeId 取回关联常量，
 /// 所以 `service::<S>()` 构造时把 `S::MULTIPLE` 一并存进键里，`validate` 据此检查单实现服务。
@@ -285,7 +285,12 @@ impl<S: Service + ?Sized> ServiceSet<S> {
     /// 当前提供者，每一项都持有那个提供者这次激活的 `Admission`，通过 `Deref` 调用服务。
     /// 只取 token 为 `Live` 的提供者：还在 `Pending`（`started` 尚未成功）的新提供者和已失效的提供者都不出现。
     /// 准入持有到返回的 `Vec` 被 drop 为止，提供者的撤销会等这些调用结束，所以只在一次调用内使用，不要另外保存。
+    /// 每次调用分配一个 `Vec`，并对每个提供者各做一次准入。
     pub fn current(&self) -> Vec<Admitted<S>>;
+
+    /// 依次对每个 `Live` 的提供者调用 `f`：不分配，同一时间只持有一个提供者的准入（调用 `f` 期间）。
+    /// 热路径用这个方法。
+    pub fn for_each(&self, f: impl FnMut(&S));
 }
 
 /// `Send + Sync`，`app` 持有 `Arc<Kernel>`。
@@ -349,7 +354,7 @@ pub struct PluginStatus {
     pub manifest_time: Option<Duration>,    // `Kernel::start` 时调用 manifest 的耗时（只调用一次）
     pub activate_time: Option<Duration>,    // 最近一次 activate 的耗时
     pub commit_time: Option<Duration>,      // 最近一次提交的耗时
-    pub started_time: Option<Duration>,     // 最近一次 started 的耗时（只算同步执行的部分）
+    pub started_time: Option<Duration>,     // 最近一次 started 的耗时（同步执行的部分，加上之后发出暂存事件、调用暂存 start 的时间）
 }
 ```
 
@@ -365,6 +370,8 @@ pub trait Event: Send + Sync + 'static {}
 pub struct Emitter { /* Weak<Kernel> */ }
 
 impl Emitter {
+    /// 来自 `PluginHandle::emitter()` 的 Emitter 在分发期间持有发出方这次激活的准入（`token.enter()`）：
+    /// 取不到就丢弃事件，所以发出方的 `fail` 或监听 panic 与这次分发之间不会交错，失效之后开始的分发不会把事件送给其他插件。
     pub fn emit<E: Event>(&self, event: E);
 }
 ```
@@ -386,7 +393,7 @@ impl Emitter {
 - `activate` 返回 `Ok` 后，kernel 先检查清单 `provides` 里的每个服务都已 `provide`；缺任何一个都按激活失败处理（`PluginError::MissingService`），否则依赖者会因为等不到这个服务而一直不激活。
 - 检查通过后，kernel 在一次加锁里把暂存的服务和监听全部发布（提交），然后调用 `started`。发布之后、token 变为 `Live` 之前，`ServiceSet::current()` 和 `enter()` 都不会返回这次激活，`ServiceAdded<S>` 也在 token 变为 `Live` 之后才发出，所以已在运行的依赖者看不到 `started` 可能失败的新提供者。`started` 正常返回、而且期间没有通过 `fail` 或监听 panic 把插件标为失败时，kernel 才把因它而满足条件的后续插件放进队列；否则按失败停用，后续插件不激活。
 - 提供者在依赖者激活期间失败时（例如提供者的监听在其他线程上 panic，或 `fail` 被调用），kernel 在当前线程上立即把提供者这次激活的 token 置为 `Dead`（见「事件分发」）。依赖者的激活还在 kernel 线程上进行时还没有发布任何东西，所以 kernel 在提交依赖者之前、以及调用它的 `started` 之前，各检查一次它 `requires` 的每个服务是否还有 token 为 `Live` 的提供者。检查不通过时中止这次激活：暂存的内容全部丢弃（已经提交的按「撤销」一节撤销），依赖者回到「等待依赖」，不进入 `Failed`。
-- `started` 返回后，kernel 用 compare-exchange 把 token 从 `Pending` 换成 `Live`。`started` 期间其他线程调用 `fail` 已经把 token 置为 `Dead` 时交换失败，按激活失败撤销，`Dead` 不会被覆盖。`started` 不直接做 IO，也不直接改外部状态，只通过 `PluginHandle` 发事件、提交任务；token 还是 `Pending` 时，这些操作暂存在这次激活里：`emit` 的事件按顺序排队，`own_with` 的 `start` 先不调用。compare-exchange 成功、token 变为 `Live` 后，kernel 在 kernel 线程上依次发出这些事件、调用这些 `start`；交换失败或 `started` panic 时全部丢弃。所以 `started` 之后失败的激活不会留下已经送达的事件或已经开始的任务。（`Pending` 期间监听不会被调用，所以 `started` 之前不会有监听 panic。）
+- `started` 返回后，kernel 用 compare-exchange 把 token 从 `Pending` 换成 `Live`。`started` 期间其他线程调用 `fail` 已经把 token 置为 `Dead` 时交换失败，按激活失败撤销，`Dead` 不会被覆盖。`started` 不直接做 IO，也不直接改外部状态，只通过 `PluginHandle` 发事件、提交任务；token 还是 `Pending` 时，这些操作暂存在这次激活里：`emit` 的事件按顺序排队，`own_with` 的 `start` 先不调用。compare-exchange 成功、token 变为 `Live` 后，kernel 在 kernel 线程上依次发出这些事件、调用这些 `start`：每一项之前都先 `token.enter()`，取不到（前一个事件的监听 panic 或调用了 `fail`，把这次激活连带置为 `Dead`）就丢弃剩下的全部；每个 `start` 单独用 `catch_unwind` 包住，panic 时这个插件进入 `Failed`，按「失败」一节撤销，剩下的项丢弃。交换失败或 `started` panic 时全部丢弃。所以 `started` 之后失败的激活不会留下已经送达的事件或已经开始的任务。（`Pending` 期间监听不会被调用，所以 `started` 之前不会有监听 panic。）
 - 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只安排后台工作（提交任务、发事件），按上一条在 token 变为 `Live` 之后才真正发生，不会出现「副作用已经发生、激活却回滚」的情况。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
@@ -489,9 +496,9 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 ## 性能
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
-- 激活耗时：每个插件的 `manifest()`（`Kernel::start` 时调用一次）、`activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分）由 kernel 分别计时，结果在 `status()` 里，预算按四者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
+- 激活耗时：每个插件的 `manifest()`（`Kernel::start` 时调用一次）、`activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分，加上 token 变为 `Live` 之后在 kernel 线程上发出暂存事件、调用暂存 `start` 的时间）由 kernel 分别计时，结果在 `status()` 里，预算按四者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
 - 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件需要一份匹配它们全部 pattern 的 `WorkspaceFacts`：bench 在两次启动里都加入同一个合成的 `bench-facts` 插件（`Startup` 激活，在 `started` 里通过 `control().workspace_changed` 提交这份 facts，`test-support` feature 提供），两次的差不受它影响；`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
-- 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `ServiceRef` / `ServiceSet`，保存在激活内的状态对象里（见「激活的提交」）。每次调用的开销是一次准入（两次原子操作）。
+- 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `ServiceRef` / `ServiceSet`，保存在激活内的状态对象里（见「激活的提交」）。`ServiceRef::get()` 的开销是一次准入（两次原子操作）；`ServiceSet::for_each` 每个提供者一次准入、不分配；`ServiceSet::current()` 另外分配一个 `Vec`。两种多实现路径都在 bench 里按 1、4、16 个提供者测量。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
 
 ## 测试
@@ -519,6 +526,8 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 命令：依赖的服务再也不会就绪时，挂起的 `done` 收到 `DependencyUnavailable`。
 - 命令：两个插件声明同一个命令名时 `validate` 报错；停用一个正在等待依赖的命令插件，挂起的 `done` 收到 `Disabled`。
 - 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
+- 暂存效果：暂存的第一个事件让这次激活失效后，后面暂存的事件不再发出、`start` 不再调用；暂存的 `start` panic 时插件进入 `Failed`，kernel 线程继续运行。
+- 发出方失效：后台任务的 `emit` 与 `fail` 并发时，`fail` 返回之后开始的分发不会把事件送给任何监听。
 - 静止代数：两次 `quiescent_epoch()` 之间取过再释放一个 `BusyGuard` 时，两次返回值不同。
 - `started` 暂存：`started` 里发事件、提交任务后再 panic 或被 `fail`，事件没有送达任何监听，`start` 没有被调用；`started` 成功时它们在 token 变为 `Live` 之后按顺序发生。
 - 单实现服务：提供者失效后 `ServiceRef::get()` 返回 None；提供者的撤销等正在进行的 `Admitted` 调用结束。
