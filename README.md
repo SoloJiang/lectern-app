@@ -33,7 +33,7 @@ Single-process Rust, macOS (Apple Silicon) first.
 | Forges | GitHub and GitLab (including self-hosted) |
 | UI strings | Fluent, en + zh-CN |
 
-Everything is a plugin: the kernel only loads plugins and manages their lifecycle. The core review loop ships in the app; other language packs, precise Java semantics and extra forge or agent adapters are downloaded on demand from the plugin marketplace when a project needs them. Downloaded plugins run as separate sandboxed processes.
+Everything is a plugin: the kernel only loads plugins and manages their lifecycle. The core review loop ships in the app; other language packs, precise Java semantics and extra forge or agent adapters are downloaded on demand from the plugin marketplace when a project needs them. Downloaded plugins either run as separate sandboxed processes, or, for language grammars, are signed libraries built by us and loaded into the app.
 
 ## Performance budget (Apple Silicon, targets)
 
