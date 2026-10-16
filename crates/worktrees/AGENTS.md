@@ -10,7 +10,7 @@
 ## 边界
 
 - 切换 worktree / 分支 < 100 ms，依赖以 blob OID 为键的缓存命中。
-- 每个 worktree 显示当前分支所属 MR 的累计 token 与 API-equivalent 费用，数据来自 `usage` 的快照（[ADR 0020](../../docs/adr/0020.md)）。
+- 每个 worktree 显示当前分支的累计 token 与 API-equivalent 费用（P1 标为分支用量，P3 起为所属 MR 的用量），数据来自 `usage` 的快照（[ADR 0020](../../docs/adr/0020.md)）。
 
 ## 测试
 
