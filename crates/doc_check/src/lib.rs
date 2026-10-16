@@ -113,6 +113,49 @@ pub fn is_markdown(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("md"))
 }
 
+/// Decode the HTML character references an attribute value may contain:
+/// the common named ones and numeric `&#NN;` / `&#xHH;`.
+fn decode_entities(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let Some(end) = rest.find(';').filter(|&e| e <= 10) else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        let name = &rest[1..end];
+        let ch = match name {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "nbsp" => Some('\u{a0}'),
+            _ => name
+                .strip_prefix("#x")
+                .or_else(|| name.strip_prefix("#X"))
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .or_else(|| name.strip_prefix('#').and_then(|d| d.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        match ch {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `href` and `src` values in a piece of raw HTML, with HTML comments removed.
 fn html_destinations(html: &str) -> Vec<String> {
     let mut text = String::new();
@@ -184,7 +227,7 @@ fn html_destinations(html: &str) -> Vec<String> {
                 }
             }
             if (name == "href" || name == "src") && !value.is_empty() {
-                out.push(value);
+                out.push(decode_entities(&value));
             }
         }
     }
@@ -270,6 +313,29 @@ fn normalize(path: &Path) -> PathBuf {
 
 /// Check the given Markdown files (paths relative to `root`).
 pub fn check(root: &Path, files: &[PathBuf]) -> Vec<BrokenLink> {
+    check_tracked(root, files, None)
+}
+
+/// Like [`check`], and when `tracked` is given (every path git tracks,
+/// relative to `root`), a destination must also be tracked: a file in the
+/// list, or a directory containing one. Ignored and untracked files (build
+/// output under `target/`, local notes) do not exist on GitHub.
+pub fn check_tracked(
+    root: &Path,
+    files: &[PathBuf],
+    tracked: Option<&[PathBuf]>,
+) -> Vec<BrokenLink> {
+    let tracked: Option<HashSet<PathBuf>> = tracked.map(|list| {
+        let mut set = HashSet::new();
+        for path in list {
+            let mut p = path.clone();
+            set.insert(p.clone());
+            while p.pop() && !p.as_os_str().is_empty() {
+                set.insert(p.clone());
+            }
+        }
+        set
+    });
     // Work with canonical paths throughout, so a symlinked file (crates/*/CLAUDE.md
     // -> AGENTS.md) resolves its links from where its target lives.
     let root = fs::canonicalize(root).unwrap_or_else(|_| {
@@ -331,6 +397,14 @@ pub fn check(root: &Path, files: &[PathBuf]) -> Vec<BrokenLink> {
             }
             if !dest.exists() {
                 errors.push(broken("file not found".into()));
+                continue;
+            }
+            if let Some(set) = &tracked
+                && let Ok(rel_dest) = dest.strip_prefix(&root)
+                && !rel_dest.as_os_str().is_empty()
+                && !set.contains(rel_dest)
+            {
+                errors.push(broken("not tracked by git".into()));
                 continue;
             }
             // A symlink inside the repository may point outside it: check the
@@ -504,6 +578,44 @@ mod tests {
         let errors = repo.check(&["alias.md"]);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].reason.contains("outside the repository"));
+    }
+
+    #[test]
+    fn html_entities_are_decoded() {
+        let repo = TempRepo::new(&[
+            ("guide&notes.md", "# G\n"),
+            (
+                "b.md",
+                "<a href=\"guide&amp;notes.md\">ok</a> <a href=\"x&#x2e;md\">bad</a>\n",
+            ),
+        ]);
+        let errors = repo.check(&["b.md"]);
+        let targets: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(targets, ["x.md"]);
+    }
+
+    #[test]
+    fn untracked_destinations_fail_when_tracking_is_known() {
+        let repo = TempRepo::new(&[
+            ("a.md", "# A\n"),
+            ("docs/b.md", "# B\n"),
+            ("target/out.md", "# Out\n"),
+            ("c.md", "[a](a.md) [dir](docs) [built](target/out.md)\n"),
+        ]);
+        let tracked: Vec<PathBuf> = ["a.md", "docs/b.md", "c.md"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let errors = check_tracked(
+            &repo.0.join("repo"),
+            &[PathBuf::from("c.md")],
+            Some(&tracked),
+        );
+        let got: Vec<_> = errors
+            .iter()
+            .map(|e| (e.target.as_str(), e.reason.as_str()))
+            .collect();
+        assert_eq!(got, [("target/out.md", "not tracked by git")]);
     }
 
     #[test]

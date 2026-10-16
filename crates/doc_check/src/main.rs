@@ -21,13 +21,21 @@ fn main() -> ExitCode {
         // List every tracked file and filter by extension here: pathspecs are
         // case-sensitive, so `*.md` would miss `GUIDE.MD`.
         let list = git(&["-C", &root.to_string_lossy(), "ls-files", "-z"])?;
-        let files: Vec<PathBuf> = list
+        let tracked: Vec<PathBuf> = list
             .split('\0')
             .filter(|f| !f.is_empty())
             .map(PathBuf::from)
-            .filter(|p| lectern_doc_check::is_markdown(p))
             .collect();
-        Ok(lectern_doc_check::check(&root, &files))
+        let files: Vec<PathBuf> = tracked
+            .iter()
+            .filter(|p| lectern_doc_check::is_markdown(p))
+            .cloned()
+            .collect();
+        Ok(lectern_doc_check::check_tracked(
+            &root,
+            &files,
+            Some(&tracked),
+        ))
     });
     match result {
         Ok(errors) if errors.is_empty() => {

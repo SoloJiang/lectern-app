@@ -11,8 +11,8 @@ publish.workspace = true
 layer = "tool"
 
 [dependencies]
-pulldown-cmark = { version = "0.13", default-features = false }
-unicode-normalization = "0.1"
+pulldown-cmark.workspace = true
+unicode-normalization.workspace = true
 
 [lints]
 workspace = true
