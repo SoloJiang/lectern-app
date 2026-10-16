@@ -128,9 +128,17 @@ impl Context<'_> {
     /// 订阅事件。
     pub fn on<E: Event>(&mut self, handler: impl Fn(&E) + Send + Sync + 'static);
 
-    /// 交给 kernel 保管的守卫。只用于创建时没有副作用的守卫，如 `dyn Contributions`
-    /// 的注册（下一帧才生效）；任务句柄在 `started` 里通过 `PluginHandle::own` 交出。
+    /// 交给 kernel 保管的守卫。只用于创建时没有副作用的守卫；任务句柄在 `started` 里通过 `PluginHandle::own` 交出。
     pub fn own(&mut self, guard: impl Send + 'static);
+
+    /// 交给 kernel 保管、需要在提交时才生效的守卫，如 `dyn Contributions` 的注册。
+    /// kernel 在发布服务和监听的同一步里调用每个守卫的 `commit`；激活失败时不调用，直接 drop。
+    pub fn own_staged(&mut self, guard: impl Staged);
+}
+
+/// 提交时才生效的守卫。`commit` 在 kernel 线程上调用，只做排队等轻量工作。
+pub trait Staged: Send + 'static {
+    fn commit(&mut self);
 }
 
 /// 一次激活的长期句柄：从 `started` 起有效，到这次激活停用为止。可以克隆并保存在插件的状态里，
@@ -155,6 +163,10 @@ impl PluginHandle {
     /// 带激活代数的 Emitter：这次激活停用后（包括之后重新激活），通过它发出的事件直接丢弃。
     pub fn emitter(&self) -> Emitter;
     pub fn is_active(&self) -> bool;
+
+    /// 报告这次激活在后台初始化时失败（如打开 SQLite 失败）：插件进入 `Failed`，按「失败」一节停用。
+    /// 这次激活已停用时不做任何事。
+    pub fn fail(&self, error: PluginError);
 
     /// 受限的 kernel 控制句柄，供需要驱动激活的插件使用（`project` 调 `workspace_changed`，
     /// `workspace` 调 `lazy_commands` 和 `command`）。插件在 `PluginSet` 里构造时还没有 `Arc<Kernel>`，
@@ -287,7 +299,7 @@ impl Emitter {
 - 一个服务（不论 `MULTIPLE` 是否为 true）的最后一个已激活的提供者停用时，依赖它的插件先停用（依赖者先于被依赖者）。
 - `MULTIPLE = true` 的服务：依赖者激活后，提供者的增减不重新激活依赖者。依赖者通过 `ServiceSet<S>` 读取当前集合，集合在提供者增减时随即更新；需要在变化时做额外处理的，订阅 `ServiceAdded<S>` 和 `ServiceRemoved<S>` 事件（带提供者的插件 ID）。
 - 依赖者不得把 `ServiceSet::current()` 里的 `Arc<S>` 保存到本次调用之外，否则提供者停用后仍会被调用。
-- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除这些记录；还在等待的 `command` 回调立即收到 `PluginError::Disabled`，`shutdown` 时收到 `PluginError::ShuttingDown`，不会一直挂起。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
+- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除 `Command` 和 `Manual` 的记录；`Workspace` 条件不记在插件上，kernel 保存最近一次的 `WorkspaceFacts`，插件重新启用（包括 `Failed` 后在设置里重试）时用它重新判断。还在等待的 `command` 回调立即收到 `PluginError::Disabled`，`shutdown` 时收到 `PluginError::ShuttingDown`，不会一直挂起。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
 
 ### 激活的提交
 
@@ -297,8 +309,8 @@ impl Emitter {
 - 服务在提交时必须已经可用：服务对象需要的内存中的状态在 `activate` 里建好（不做 IO）。`started` 只开始后台工作（提交任务、发事件），这些副作用都发生在提交之后，不会出现「副作用已经发生、激活却回滚」的情况。
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
-- 激活期间的状态（缓存的 `Arc<S>`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
-- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 满足这一点：新注册的视图、Action、快捷键要到下一帧才应用到界面上，激活失败时守卫在这之前已经 drop，失败的注册不会出现在界面上。`workspace` 本身是插件，收到注册时用自己的 `PluginHandle::busy()` 取一个守卫，在主线程上应用完这批注册后 drop，所以 kernel 在界面注册生效之前不会报告静止。
+- 激活期间的状态（缓存的 `Arc<S>`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Active` 的 drop 同样用 `catch_unwind` 包住，panic 时记录错误、插件标为 `Failed`，撤销照常完成。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
+- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：注册在守卫的 `commit` 被调用之前不会进入界面，`commit` 只把它排到主线程的下一帧。激活失败时 `commit` 不会被调用，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`workspace` 本身是插件，收到注册时用自己的 `PluginHandle::busy()` 取一个守卫，在主线程上应用完这批注册后 drop，所以 kernel 在界面注册生效之前不会报告静止。
 
 ### 撤销
 
@@ -334,10 +346,10 @@ impl Emitter {
   - 订阅与退订从下一次 `emit` 起生效；
   - 监听里发出的事件排在当前分发之后，在同一线程上依次处理，不会递归。
 - 快照里可能有已停用插件的监听。每个监听带上所属插件的存活标记（读写锁保护的布尔值）：
-  - 调用前取读锁并检查标记，插件已停用就跳过，调用期间一直持有读锁；
+  - 存活标记是原子布尔值，配一把读写锁：调用前取读锁并检查标记，插件已停用就跳过，调用期间一直持有读锁；
   - 停用时第 3 步取写锁把标记置为 false，因此会等这个插件正在执行的监听返回，此后快照里它的监听都会被跳过；
   - 监听里请求的生命周期操作（包括停用自己所属的插件）排队到当前分发结束后执行，不会在持有读锁时等待写锁；
-  - 监听 panic 时，先释放读锁，再按「失败」一节停用插件。
+  - 监听 panic 时，先释放读锁，立即在当前线程上把存活标记置为 false（原子写，不等写锁），再把停用请求放进 kernel 线程的队列。这样同一次分发里这个插件后面的监听、其他线程上的分发，都不会再调用它。
 - 监听必须快速返回：只更新状态或把工作交给 executor。事件总线用于插件之间的通知，如会话新增一轮、项目模型变化；视图内部的状态变化用 GPUI 自身的订阅。
 - 没有监听的事件直接丢弃，不缓存。
 
@@ -363,6 +375,7 @@ impl Emitter {
 2. 代理 Action 被触发时：处理函数已登记就直接调用；否则调用 `control.command(name, done)`。
 3. 插件激活提交后 `done` 被调用；`workspace` 把它转到主线程，等这次激活的处理函数在下一帧登记之后调用它。用户只需触发一次。
 4. 激活失败时，`done` 收到错误，`workspace` 显示一次提示。
+   激活成功、但下一帧应用完注册后仍没有这个命令的处理函数时（插件漏了 `handle_command` 或名字写错），`workspace` 同样提示一次、记录错误，这次触发作废，不会一直等待。
 5. 插件停用时，处理函数的守卫被 drop，代理仍然在。用户重新启用插件后再次触发命令，代理照常走第 2 步激活它。
 
 ### 静止
@@ -401,6 +414,10 @@ impl Emitter {
 - 清单：某个插件的 `manifest` panic 时，它进入 `Failed`，其余插件照常激活。
 - 命令：两个插件声明同一个命令名时 `validate` 报错；停用一个正在等待依赖的命令插件，挂起的 `done` 收到 `Disabled`。
 - 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
+- 失败：监听 panic 后，同一次分发里它所属插件后面的监听不再被调用；`PluginHandle::fail` 让插件进入 `Failed` 并停用；`Active` 的 drop panic 时撤销照常完成。
+- 提交门：`own_staged` 的守卫只在提交时 `commit`，激活失败时不 `commit`。
+- 重新启用：项目没变时，停用后重新启用的 `Workspace` 插件按保存的 `WorkspaceFacts` 重新激活。
+- 命令：激活成功但没有登记处理函数时，`workspace` 报错，代理不会一直等待。
 - 状态对象：`started` 收到的是 `activate` 返回的同一个 `Active`；停用后它被 drop。
 - 按命令激活：`command` 的 `done` 在激活提交后被调用一次；已激活时立即调用；失败时收到错误；`done` panic 后 kernel 线程继续处理后续请求。
 - 控制句柄：插件停用后，它之前取得的 `KernelControl` 发出的 `workspace_changed`、`activate` 被忽略，`command` 的 `done` 收到 `Stale`。
