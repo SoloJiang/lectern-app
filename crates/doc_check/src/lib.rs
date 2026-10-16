@@ -217,18 +217,35 @@ fn scan(markdown: &str) -> Scan {
                             .push(String::from_utf8_lossy(&value.value).into_owned());
                     }
                 }
-                for attr in [&b"href"[..], b"src"] {
+                // Only attributes HTML gives link or fetch semantics; an
+                // `href` on a `div` is not a link.
+                let link_attrs: &[&[u8]] = match &tag.name[..] {
+                    b"a" | b"area" | b"link" => &[b"href"],
+                    b"img" | b"iframe" | b"embed" | b"source" | b"track" | b"audio" | b"video"
+                    | b"input" | b"script" => &[b"src"],
+                    _ => &[],
+                };
+                for &attr in link_attrs {
                     if let Some(value) = tag.attributes.get(attr) {
                         // URL parsing strips leading and trailing C0 controls
                         // and spaces, and removes tabs and newlines anywhere. A
-                        // backslash is a slash for web URLs, so `\\host\x` is a
-                        // network-path reference like `//host/x`.
-                        let url: String = String::from_utf8_lossy(&value.value)
+                        // backslash is a slash for web URLs before the fragment,
+                        // so `\\host\x` is a network-path reference like
+                        // `//host/x`; in the fragment it stays a backslash.
+                        let cleaned: String = String::from_utf8_lossy(&value.value)
                             .trim_matches(|c: char| c <= ' ')
                             .chars()
                             .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-                            .map(|c| if c == '\\' { '/' } else { c })
                             .collect();
+                        let (before, fragment) = match cleaned.split_once('#') {
+                            Some((b, f)) => (b, Some(f)),
+                            None => (cleaned.as_str(), None),
+                        };
+                        let mut url = before.replace('\\', "/");
+                        if let Some(f) = fragment {
+                            url.push('#');
+                            url.push_str(f);
+                        }
                         if !url.is_empty() {
                             out.links.push((source_offset(at), url));
                         }
@@ -650,7 +667,35 @@ pub fn check_tracked(
             // `docs/#section` points into that README.
             if dest.is_dir() {
                 match directory_readme(&root, &dest, tracked.as_ref()) {
-                    Some(readme) => dest = readme,
+                    Some(readme) => {
+                        // The README may itself be a symlink: same checks as
+                        // any destination before reading its anchors.
+                        if has_absolute_symlink(&readme) {
+                            errors.push(broken(
+                                "the directory's README is a symlink with an absolute target"
+                                    .into(),
+                            ));
+                            continue;
+                        }
+                        let real = match fs::canonicalize(&readme) {
+                            Ok(real) if real.starts_with(&root) => real,
+                            _ => {
+                                errors.push(broken(
+                                    "the directory's README points outside the repository".into(),
+                                ));
+                                continue;
+                            }
+                        };
+                        if let Some(set) = &tracked
+                            && !tracked_route(&root, &readme, set)
+                        {
+                            errors.push(broken(
+                                "the directory's README is not tracked by git".into(),
+                            ));
+                            continue;
+                        }
+                        dest = real;
+                    }
                     None => continue,
                 }
             }
@@ -1119,6 +1164,45 @@ mod tests {
                 (5, "<svg>/<math>".to_string())
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_readme_symlinks_are_checked() {
+        let repo = TempRepo::new(&[
+            ("local.md", "# Docs\n"),
+            ("docs/a.txt", "x"),
+            ("b.md", "[x](docs/#docs)\n"),
+        ]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("../local.md", base.join("docs/README.md")).unwrap();
+        let tracked: Vec<PathBuf> = ["b.md", "docs/a.txt", "docs/README.md"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let errors = check_tracked(&base, &[PathBuf::from("b.md")], Some(&tracked));
+        let got: Vec<_> = errors.iter().map(|e| e.reason.as_str()).collect();
+        assert_eq!(got, ["the directory's README is not tracked by git"]);
+    }
+
+    #[test]
+    fn only_link_attributes_of_link_elements_count() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<div href=\"missing.md\"></div><span src=\"missing.png\"></span>\n\n<img src=\"gone.png\">\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["gone.png"]);
+    }
+
+    #[test]
+    fn fragments_keep_backslashes() {
+        let repo = TempRepo::new(&[("b.md", "<span id=\"a\\b\"></span><a href=\"#a\\b\">x</a>\n")]);
+        assert_eq!(repo.check(&["b.md"]), []);
     }
 
     #[test]
