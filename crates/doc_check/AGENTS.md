@@ -9,7 +9,7 @@
 ## 边界
 
 - 先用 pulldown-cmark 按 CommonMark 把整篇 Markdown 渲染成 HTML（记下每段输出对应的源码位置），再用 html5gum 按 HTML 标准对渲染结果整体分词一次，不自己写正则或扫描器：链接（Markdown 链接和原始 HTML 的 `href` / `src`）、标题、`id` 与 `<a name>` 锚点、注释、字符引用都以分词结果为准。`script`、`style` 等原始文本元素（包括未闭合的、自闭合写法的，以及 `script` 的转义状态）里的内容都是文本，其中的链接和标题不算；`plaintext` 之后的全部内容都是文本。分词器不做树构建，跟不上需要树构建才能确定解析方式或含义的原始 HTML 元素：外来内容（`svg`、`math`）、可能吞掉后文的原始文本和 RCDATA 元素（`script`、`style`、`iframe`、`textarea`、`title` 等）、内容不渲染的 `template`、会忽略部分开始标签的 `select`，以及 `object`、`frame`。文档里出现这些元素直接报错，图示用图片文件。`href` 只认 `a`、`area`、`link` 上的，`src` 只认嵌入和加载资源的元素上的（`input` 只在 `type=image` 时，`source` 只在 `audio`、`video` 里时）。Markdown 标题只在 pulldown-cmark 生成的结束标签处结束；目标是不是 Markdown 按链接里写的名字判断（`alias.md` 指向 `real.txt` 时仍按 Markdown 检查片段）。
-- 以 `/` 开头的链接（不是 `//`）按 GitHub 的规则相对仓库根目录解析。指向目录、带片段的链接（`docs/#section`）检查这个目录里 GitHub 会显示的 `README.md`。
+- 以 `/` 开头的链接（不是 `//`）按 GitHub 的规则相对仓库根目录解析。指向目录、带片段的链接（`docs/#section`）检查这个目录里 GitHub 会显示的 `README.md`；目录里没有 Markdown README 时没有锚点，这类链接算失败。只有片段的链接（`#section`）按当前文件本身的名字判断是否是 Markdown。
 - 目标必须受 git 跟踪，而且沿途每一级都要受跟踪：经过符号链接时，链接本身和它指向的每一级路径都要受跟踪。作为输入的 Markdown 文件是符号链接时同样按它给出的路径逐级检查，读不出来的输入报错，不跳过（工作区里已删除、尚未提交的文件除外）。
 - git 输出的路径按原始字节处理，不要求是 UTF-8。
 - 锚点按 GitHub 的规则从标题生成，区分大小写；原始 HTML 里的 `id` 和 `<a name>` 也算锚点；原始 HTML 写的 `<h2>` 没有自动锚点（GitHub 只给 Markdown 标题生成）。链接不能指向仓库之外，`..` 一旦越过仓库根目录就算越界，即使后面又回到同一个目录（`../<检出目录名>/README.md`）。

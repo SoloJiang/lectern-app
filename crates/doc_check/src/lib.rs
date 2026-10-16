@@ -200,7 +200,8 @@ fn scan(markdown: &str) -> Scan {
     let is_heading = |name: &[u8]| matches!(name, [b'h', b'1'..=b'6']);
     let mut out = Scan::default();
     let mut heading: Option<(Vec<u8>, String)> = None;
-    let mut media_depth = 0usize;
+    // Open media elements, innermost last; only a matching end tag closes one.
+    let mut media: Vec<Vec<u8>> = Vec::new();
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
     emitter.naively_switch_states(true);
     for token in Tokenizer::new_with_emitter(rendered.html.as_str(), emitter) {
@@ -210,7 +211,7 @@ fn scan(markdown: &str) -> Scan {
                 // HTML ignores the self-closing flag on non-void elements, so
                 // `<audio/>` still opens one.
                 if matches!(&tag.name[..], b"audio" | b"video") {
-                    media_depth += 1;
+                    media.push(tag.name.to_vec());
                 }
                 if UNSUPPORTED_ELEMENTS.contains(&&tag.name[..]) {
                     out.unsupported.push((
@@ -244,7 +245,7 @@ fn scan(markdown: &str) -> Scan {
                     | b"script" => &[b"src"],
                     // In `picture`, a `source` selects from `srcset`; its `src`
                     // only fetches inside `audio` or `video`.
-                    b"source" if media_depth > 0 => &[b"src"],
+                    b"source" if !media.is_empty() => &[b"src"],
                     // `src` applies only to the Image Button state; task list
                     // checkboxes and other inputs have no destination.
                     b"input"
@@ -285,8 +286,9 @@ fn scan(markdown: &str) -> Scan {
                 }
             }
             Ok(Token::EndTag(tag)) => {
-                if matches!(&tag.name[..], b"audio" | b"video") {
-                    media_depth = media_depth.saturating_sub(1);
+                // An unmatched `</video>` inside `<audio>` is ignored.
+                if let Some(i) = media.iter().rposition(|n| n[..] == tag.name[..]) {
+                    media.truncate(i);
                 }
                 // Only the generated end tag of the same level closes the
                 // heading: a raw `</h2>` inside `# Hello </h2> world` is text
@@ -608,6 +610,8 @@ pub fn check_tracked(
     let mut done = HashSet::new();
     let mut errors = Vec::new();
     for rel in files {
+        // The name the input was given; a fragment-only link resolves against it.
+        let input_name = root.join(rel);
         let joined = root.join(rel);
         if has_absolute_symlink(&joined) {
             errors.push(BrokenLink {
@@ -755,7 +759,11 @@ pub fn check_tracked(
             }
             // Whether the target is Markdown follows the name the link uses
             // (`alias.md -> real.txt` is rendered as Markdown on GitHub).
-            let mut lexical = dest;
+            let mut lexical = if file_part.as_os_str().is_empty() {
+                input_name.clone()
+            } else {
+                dest
+            };
             let mut dest = real;
             let Some(fragment) = fragment else { continue };
             if fragment.is_empty() {
@@ -795,7 +803,14 @@ pub fn check_tracked(
                         lexical = readme;
                         dest = real;
                     }
-                    None => continue,
+                    // No README is rendered, so the directory page has no
+                    // heading anchors.
+                    None => {
+                        errors.push(broken(format!(
+                            "no heading with anchor #{fragment} (the directory has no Markdown README)"
+                        )));
+                        continue;
+                    }
                 }
             }
             if !is_markdown(&lexical) || !dest.is_file() {
@@ -1360,6 +1375,45 @@ mod tests {
     }
 
     #[test]
+    fn unmatched_media_end_tags_are_ignored() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<audio></video><source src=\"missing.mp3\"></audio>\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["missing.mp3"]);
+    }
+
+    #[test]
+    fn directory_fragments_without_readme_fail() {
+        let repo = TempRepo::new(&[("plain/a.txt", "x"), ("b.md", "[x](plain/#missing)\n")]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["plain/#missing"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn self_fragments_use_the_input_name() {
+        let repo = TempRepo::new(&[("real.txt", "# Real\n\n[x](#missing)\n")]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("real.txt", base.join("alias.md")).unwrap();
+        let got: Vec<_> = repo
+            .check(&["alias.md"])
+            .iter()
+            .map(|e| e.reason.clone())
+            .collect();
+        assert_eq!(got, ["no heading with anchor #missing"]);
+    }
+
+    #[test]
     fn image_is_an_img() {
         let repo = TempRepo::new(&[("b.md", "<image src=\"missing.png\">\n")]);
         let got: Vec<_> = repo
@@ -1425,7 +1479,7 @@ mod tests {
             ("plain/a.txt", "x"),
             (
                 "b.md",
-                "[ok](docs/#docs)\n[bad](docs/#nope)\n[skip](plain/#x)\n",
+                "[ok](docs/#docs)\n[bad](docs/#nope)\n[none](plain/#x)\n",
             ),
         ]);
         let got: Vec<_> = repo
@@ -1433,7 +1487,7 @@ mod tests {
             .iter()
             .map(|e| e.target.clone())
             .collect();
-        assert_eq!(got, ["docs/#nope"]);
+        assert_eq!(got, ["docs/#nope", "plain/#x"]);
     }
 
     #[cfg(unix)]
