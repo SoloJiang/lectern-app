@@ -413,9 +413,10 @@ fn srcset_urls(srcset: &str) -> Vec<String> {
             urls.push(url.trim_end_matches(',').to_string());
             continue;
         }
-        urls.push(url.to_string());
         let mut depth = 0usize;
         let mut cut = rest.len();
+        let mut descriptors = Vec::new();
+        let mut current = String::new();
         for (i, c) in rest.char_indices() {
             match c {
                 '(' => depth += 1,
@@ -424,11 +425,59 @@ fn srcset_urls(srcset: &str) -> Vec<String> {
                     cut = i + 1;
                     break;
                 }
+                c if depth == 0 && is_space(c) => {
+                    if !current.is_empty() {
+                        descriptors.push(std::mem::take(&mut current));
+                    }
+                    continue;
+                }
                 _ => {}
             }
+            current.push(c);
+        }
+        if !current.is_empty() {
+            descriptors.push(current);
         }
         rest = &rest[cut..];
+        // The browser drops a candidate whose descriptors are invalid.
+        if valid_srcset_descriptors(&descriptors) {
+            urls.push(url.to_string());
+        }
     }
+}
+
+/// HTML's descriptor rules for a `srcset` candidate: at most one width
+/// (`100w`, a positive integer) or density (`2x`, a non-negative number), and
+/// a height (`50h`) only together with a width.
+fn valid_srcset_descriptors(descriptors: &[String]) -> bool {
+    let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+    let positive_int = |s: &str| digits(s) && s.bytes().any(|b| b != b'0');
+    let float = |s: &str| {
+        let (mantissa, exponent) = match s.find(['e', 'E']) {
+            Some(i) => (&s[..i], Some(&s[i + 1..])),
+            None => (s, None),
+        };
+        let mantissa_ok = match mantissa.split_once('.') {
+            Some((int, frac)) => (int.is_empty() || digits(int)) && digits(frac),
+            None => digits(mantissa),
+        };
+        let exponent_ok = exponent.is_none_or(|e| digits(e.strip_prefix(['+', '-']).unwrap_or(e)));
+        mantissa_ok && exponent_ok
+    };
+    let (mut width, mut density, mut height) = (false, false, false);
+    for d in descriptors {
+        let Some(unit) = d.chars().last() else {
+            return false;
+        };
+        let value = &d[..d.len() - unit.len_utf8()];
+        match unit {
+            'w' if !width && !density && positive_int(value) => width = true,
+            'x' if !width && !density && !height && float(value) => density = true,
+            'h' if !height && !density && positive_int(value) => height = true,
+            _ => return false,
+        }
+    }
+    !height || width
 }
 
 /// Source byte offsets and names of the [`UNSUPPORTED_ELEMENTS`] used as raw
@@ -1529,6 +1578,20 @@ mod tests {
             got,
             ["gone-dark.png", "gone@2x.png", "missing", "a.png?(1)"]
         );
+    }
+
+    #[test]
+    fn invalid_srcset_candidates_are_dropped() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<img src=\"b.md\" srcset=\"q.png 2q, h.png 50h, wx.png 100w 2x, n.png -1x, z.png 0w, ok-w.png 100w 50h, gone.png .5x\">\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["ok-w.png", "gone.png"]);
     }
 
     #[cfg(unix)]
