@@ -23,6 +23,7 @@ default: check
 # Format check, architecture rules, clippy with warnings as errors.
 check:
     {{cargo}} fmt --all --check
+    python3 scripts/test_check_architecture.py
     python3 scripts/check_architecture.py
     {{cargo}} clippy --locked {{packages}} --all-targets --all-features -- -D warnings
 
