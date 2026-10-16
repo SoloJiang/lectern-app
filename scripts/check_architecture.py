@@ -11,7 +11,8 @@ Rules checked:
   4. macOS system bindings are direct dependencies of `platform` only.
 
 Optional dependencies are included (`cargo metadata --all-features`), so a
-rule broken behind a feature flag still fails.
+rule broken behind a feature flag still fails. A crate's own dev-dependencies
+count too; those of its dependencies are never compiled and are skipped.
 
 Exit status is 1 when any rule is broken.
 
@@ -105,9 +106,17 @@ def main():
             if any(k["kind"] in (None, "build") for k in dep["dep_kinds"]):
                 yield dep["pkg"]
 
+    def own_deps(pid):
+        """A workspace crate's direct dependencies, dev-dependencies included:
+        they are compiled into its tests, examples and benchmarks. The
+        dev-dependencies of its dependencies are never compiled."""
+        for dep in nodes[pid]["deps"]:
+            if any(k["kind"] in (None, "build", "dev") for k in dep["dep_kinds"]):
+                yield dep["pkg"]
+
     for pid in members:
         name, mine = packages[pid]["name"], layer[pid]
-        for dep in normal_deps(pid):
+        for dep in own_deps(pid):
             dep_name = packages[dep]["name"]
             if dep in members:
                 theirs = layer[dep]
@@ -128,7 +137,7 @@ def main():
         seen, stack = set(), [pid]
         while stack:
             cur = stack.pop()
-            for dep in normal_deps(cur):
+            for dep in (own_deps if cur == pid else normal_deps)(cur):
                 if dep in seen:
                     continue
                 seen.add(dep)

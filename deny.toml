@@ -3,7 +3,8 @@
 # which is file-level copyleft and safe to link) are allowed.
 
 [graph]
-targets = ["aarch64-apple-darwin"]
+# The app targets; plus the Linux CI runner, which builds the GPUI-free crates.
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Check optional dependencies too, so a GPL crate behind a feature still fails.
 all-features = true
 
@@ -30,9 +31,6 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
-
-[licenses.private]
-ignore = true
 
 [bans]
 multiple-versions = "allow"
