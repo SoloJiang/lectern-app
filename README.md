@@ -36,7 +36,7 @@ While reviewing, you can:
 
 ## Parallel worktrees
 
-When several agents run at the same time in separate git worktrees, Lectern lists them side by side. For each worktree it shows the files changed, the number of commits ahead of the base branch, and whether two worktrees are changing the same files.
+When several agents run at the same time in separate git worktrees, Lectern lists the worktrees in two groups, Active and Idle. Selecting a worktree opens it in the inspector, which compares it with main: the files changed, the number of commits ahead, and whether any of those files are also changed in another worktree.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">

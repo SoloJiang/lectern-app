@@ -36,7 +36,7 @@ Lectern 按会话发生的顺序显示内容。每一轮依次是你的 prompt�
 
 ## 并行 worktree
 
-多个 agent 同时在不同的 git worktree 里运行时，Lectern 把它们并排列出。每个 worktree 显示改动的文件、比基准分支多出的提交数，以及是否和其他 worktree 改动了相同的文件。
+多个 agent 同时在不同的 git worktree 里运行时，Lectern 把这些 worktree 分成 Active 和 Idle 两组列出。选中一个 worktree，右侧检查器把它与 main 对比：改动的文件、领先的提交数，以及其中是否有文件也在其他 worktree 里被改动。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">
