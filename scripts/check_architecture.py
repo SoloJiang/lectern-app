@@ -16,7 +16,7 @@ rule broken behind a feature flag still fails.
 Exit status is 1 when any rule is broken.
 
 With --gpui-free-packages, print `-p <crate>` for every crate that builds
-without GPUI instead (used by the Linux CI job).
+and tests without GPUI instead (used by the Linux CI job).
 """
 
 import json
@@ -58,15 +58,19 @@ def metadata():
 
 
 def gpui_free_packages(meta):
-    """Workspace crates whose normal dependency graph contains no GPUI crate."""
+    """Workspace crates that build, tests included, without any GPUI crate."""
     packages = {p["id"]: p for p in meta["packages"]}
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
     free = []
     for pid in meta["workspace_members"]:
         seen, stack, uses_gpui = set(), [pid], False
         while stack and not uses_gpui:
-            for dep in nodes[stack.pop()]["deps"]:
-                if dep["pkg"] in seen or not any(k["kind"] in (None, "build") for k in dep["dep_kinds"]):
+            cur = stack.pop()
+            # The crate's own dev-dependencies are compiled for its tests;
+            # those of its dependencies are not.
+            kinds = (None, "build", "dev") if cur == pid else (None, "build")
+            for dep in nodes[cur]["deps"]:
+                if dep["pkg"] in seen or not any(k["kind"] in kinds for k in dep["dep_kinds"]):
                     continue
                 seen.add(dep["pkg"])
                 if packages[dep["pkg"]]["name"].startswith(GPUI_PREFIXES):

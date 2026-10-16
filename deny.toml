@@ -8,6 +8,8 @@ targets = ["aarch64-apple-darwin"]
 all-features = true
 
 [licenses]
+# Dev and build dependencies count too: rule 8 covers test and bench code.
+include-dev = true
 allow = [
     "MIT",
     "MIT-0",

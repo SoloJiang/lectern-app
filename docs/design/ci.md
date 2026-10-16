@@ -9,7 +9,7 @@
 | Checks | `ubuntu-latest` | 格式、架构规则、cargo-deny、不依赖 GPUI 的 crate 的 clippy 与测试 | 快：不编译 GPUI，几十秒出结果，agent 改领域逻辑时先看这个 |
 | macOS | `macos-15`（Apple Silicon） | 整个工作区的 clippy、测试、构建 `lectern` | GPUI 与视图层只能在 macOS 编译 |
 
-两个任务都是必需检查。`RUSTFLAGS=-D warnings`，clippy 警告即失败。
+两个任务都是必需检查。`RUSTFLAGS=-D warnings`，clippy 警告即失败。clippy 与测试都带 `--all-features`，feature 后面的代码也编译和测试。
 
 ## 架构规则检查
 
@@ -22,7 +22,7 @@
 
 检查用 `cargo metadata --all-features`，藏在可选 feature 后面的依赖也算在内。
 
-`--gpui-free-packages` 输出不依赖 GPUI 的 crate 列表，Linux 任务用它决定 clippy 与测试的范围，新增 crate 不用改 CI。
+`--gpui-free-packages` 输出不依赖 GPUI 的 crate 列表（含 crate 自身的 dev-dependencies，测试也不编译 GPUI），Linux 任务用它决定 clippy 与测试的范围，新增 crate 不用改 CI。
 
 本地运行：
 
@@ -34,7 +34,7 @@ python3 scripts/check_architecture.py
 
 ## 许可证与来源
 
-`deny.toml`（`all-features = true`，可选依赖也检查）：只允许宽松许可证（MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 等）和文件级弱 copyleft 的 MPL-2.0；GPL、LGPL、AGPL 不在允许列表里，出现即失败。依赖只能来自 crates.io，不允许未知的 git 源。安全公告由 `cargo deny check advisories` 检查。
+`deny.toml`（`all-features = true` 与 `include-dev = true`，可选依赖和 dev-dependencies 也检查）：只允许宽松许可证（MIT、Apache-2.0、BSD、ISC、Zlib、Unicode 等）和文件级弱 copyleft 的 MPL-2.0；GPL、LGPL、AGPL 不在允许列表里，出现即失败。依赖只能来自 crates.io，不允许未知的 git 源。安全公告由 `cargo deny check advisories` 检查。
 
 ## Metal
 
