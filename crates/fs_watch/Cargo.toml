@@ -1,6 +1,6 @@
 [package]
 name = "lectern-fs-watch"
-description = "FSEvents file watching filtered by the git index."
+description = "Platform-neutral file watching, filtered by the git index; the FSEvents backend lives in platform."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
