@@ -11,7 +11,7 @@ macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名�
 
 - 实现其他 crate 定义的接口（`fs_watch`、`kernel` 的插件宿主等），由 `app` 注入；不依赖这些 crate 的实现。
 - statusline 默认开启：用户已有 statusline 时保留原命令，Lectern 的脚本保存一份输入，再原样转发给原命令，关闭时恢复原配置（[ADR 0014](../../docs/adr/0014.md)）。
-- 为 Analyze 调用的 agent 命令行生成 Seatbelt 配置（[ADR 0019](../../docs/adr/0019.md)）：只读本次分析的输入、被审阅的 worktree、该 agent 的安装目录和登录凭据（凭据文件或钥匙串条目），网络只经本机代理访问该 agent 的模型服务主机。
+- 为 Analyze 调用的 agent 命令行生成 Seatbelt 配置（[ADR 0019](../../docs/adr/0019.md)）：只读本次分析的输入、被审阅仓库的只读快照（只含受跟踪文件和本次改动的文件，用 APFS clonefile 生成）、该 agent 的安装目录和登录凭据（凭据文件或钥匙串条目），网络只经本机代理访问该 agent 的模型服务主机。
 
 ## 测试
 
