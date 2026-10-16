@@ -26,9 +26,20 @@ check:
     cargo clippy --locked {{packages}} --all-targets --all-features -- -D warnings
 
 # Run tests with cargo-nextest. `-p` (also `-pNAME`), `--package` or
-# `--workspace` in the arguments replace the default package set.
+# `--workspace` before any `--` replace the default package set; arguments
+# after `--` go to the test binaries and are never treated as selectors.
 test *args:
-    cargo nextest run --locked {{ if args =~ '(^|\s)(-p|--package|--workspace)' { "" } else { packages } }} --all-features --no-tests=pass "$@"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    selection=({{packages}})
+    for arg in "$@"; do
+        [[ $arg == -- ]] && break
+        if [[ $arg == -p* || $arg == --package || $arg == --package=* || $arg == --workspace ]]; then
+            selection=()
+            break
+        fi
+    done
+    cargo nextest run --locked "${selection[@]}" --all-features --no-tests=pass "$@"
 
 # Doctests (nextest does not run them).
 doctest:
