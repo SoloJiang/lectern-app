@@ -22,7 +22,7 @@ Open a folder or repository and Lectern shows what needs your attention: the age
 
 ## Read a session like a story
 
-Each session unfolds turn by turn: your prompt, the agent's explanation, and the diff it produced, in that order. Every change is tied to the turn that caused it, so you never have to guess why a line moved. Lines edited after the session are marked, so you know what the agent didn't write.
+Each session unfolds turn by turn: your prompt, the agent's explanation, and the diff it produced, in that order. Changes are tied to the turn that caused them, so you rarely have to guess why a line moved. Lines edited after the session are marked as such, so you know what the agent didn't write; sessions in a format Lectern doesn't recognize fall back to a plain file-by-file diff.
 
 - **See the impact.** The context panel lists callers and tests of every changed symbol, and flags callers the agent missed.
 - **Send notes back.** Comment on lines as you read. Notes collect into one batch and go back to the session with file and line, ready for the agent's next turn.
@@ -48,7 +48,9 @@ Tokens per session and per turn, the API-equivalent cost, and how much of your C
 
 ## Fast, and at home on the Mac
 
-- **Opens instantly.** The first frame is on screen in under 20 ms; everything else loads after.
+These are the budgets Lectern is built against ([ADR 0017](docs/adr/0017.md), [ADR 0018](docs/adr/0018.md)); CI benchmarks will hold every change to them.
+
+- **Opens instantly.** First frame on screen in under 20 ms; everything else loads after.
 - **Light.** Under 60 MB of memory with a window open, under 100 MB with a large monorepo. No language servers or runtimes running in the background.
 - **Small.** The app is under 80 MB. Extra languages, forges and agent adapters download from the plugin marketplace only when a project needs them, and plugins that run code are sandboxed to the permissions they declare.
 - **Native.** System fonts, colors and controls, light and dark, with motion that follows macOS.
