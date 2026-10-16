@@ -10,8 +10,8 @@ Rules checked:
      directly or transitively.
   4. macOS system bindings are direct dependencies of `platform` only. A
      binding is a crate whose name matches MACOS_ONLY_PREFIXES or contains a
-     MACOS_NAME_TOKENS token, or any dependency that
-     Cargo compiles for macOS but for none of NON_APPLE_TARGETS.
+     MACOS_NAME_TOKENS token, or any dependency whose
+     target predicates can only hold on Apple platforms (apple_only_cfg).
 
 Optional dependencies are included (`cargo metadata --all-features`), so a
 rule broken behind a feature flag still fails. A crate's own dev-dependencies
@@ -60,16 +60,12 @@ MACOS_ONLY_PREFIXES = (
 # Name tokens (split on - and _) that mark an Apple binding wherever they
 # appear, e.g. accesskit_macos, raw-window-metal, objc2-app-kit.
 MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "objc", "objc2", "coreaudio", "corefoundation"}
-# A dependency compiled for macOS but for none of the non-Apple targets below
-# is a macOS binding whatever its name, e.g.
-# [target.'cfg(target_os = "macos")'.dependencies].
-# Cargo evaluates the cfg predicates (--filter-platform); we compare results.
+# A dependency whose target predicates can only hold on Apple platforms is a
+# macOS binding whatever its name, e.g.
+# [target.'cfg(target_os = "macos")'.dependencies]. The predicate is parsed and
+# checked for satisfiability with every Apple OS ruled out (see apple_only_cfg).
+APPLE_OSES = {"macos", "ios", "tvos", "watchos", "visionos"}
 LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
-MACOS_TARGET = "aarch64-apple-darwin"
-# Same CPU as MACOS_TARGET, so only the OS differs and an aarch64-only
-# dependency is not mistaken for a macOS binding. Several OSes, so that e.g.
-# cfg(not(target_os = "linux")) still counts as portable.
-NON_APPLE_TARGETS = ("aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "aarch64-unknown-freebsd")
 PLATFORM_CRATE = "lectern-platform"
 
 
@@ -91,10 +87,96 @@ def is_macos_binding_name(name):
     return name.startswith(MACOS_ONLY_PREFIXES) or bool(MACOS_NAME_TOKENS & set(re.split(r"[-_]", name)))
 
 
-def direct_deps(meta):
-    """Workspace crate id -> ids of its direct dependencies (any kind)."""
-    members = set(meta["workspace_members"])
-    return {n["id"]: {d["pkg"] for d in n["deps"]} for n in meta["resolve"]["nodes"] if n["id"] in members}
+def parse_cfg(text):
+    """Parse a cfg predicate (the part inside cfg(...)) into nested tuples:
+    ("all"|"any", [preds]), ("not", pred), ("atom", key, value_or_None)."""
+    tokens = re.findall(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[(),=]', text)
+    pos = 0
+
+    def take(expected=None):
+        nonlocal pos
+        tok = tokens[pos]
+        if expected is not None and tok != expected:
+            raise ValueError(f"expected {expected!r}, got {tok!r} in {text!r}")
+        pos += 1
+        return tok
+
+    def pred():
+        name = take()
+        if name in ("all", "any", "not") and pos < len(tokens) and tokens[pos] == "(":
+            take("(")
+            items = []
+            while tokens[pos] != ")":
+                items.append(pred())
+                if tokens[pos] == ",":
+                    take(",")
+            take(")")
+            return ("not", items[0]) if name == "not" else (name, items)
+        if pos < len(tokens) and tokens[pos] == "=":
+            take("=")
+            return ("atom", name, take().strip('"'))
+        return ("atom", name, None)
+
+    result = pred()
+    if pos != len(tokens):
+        raise ValueError(f"trailing tokens in {text!r}")
+    return result
+
+
+def apple_only_cfg(target):
+    """True when a dependency's target (a cfg(...) predicate or a target
+    triple) can only be true on Apple platforms: the predicate is
+    unsatisfiable once target_os is not an Apple OS and target_vendor is not
+    "apple". Every other atom is left free, so unrelated conditions (arch,
+    family, features) never make a portable dependency look Apple-only."""
+    if not target.startswith("cfg("):
+        return "-apple-" in target
+    tree = parse_cfg(target[4:-1])
+    atoms = set()
+
+    def collect(node):
+        if node[0] == "atom":
+            atoms.add(node[1:])
+        else:
+            for child in node[1] if node[0] in ("all", "any") else [node[1]]:
+                collect(child)
+
+    collect(tree)
+    keyed = {}
+    for key, value in atoms:
+        if value is not None:
+            keyed.setdefault(key, set()).add(value)
+    full = {key: sorted(values) + [None] for key, values in keyed.items()}
+    flags = sorted({key for key, value in atoms if value is None})
+    keys = sorted(full)
+    if len(flags) > 10 or any(len(d) > 16 for d in full.values()):
+        return False  # too large to enumerate; treat as portable
+
+    def holds(node, env):
+        kind = node[0]
+        if kind == "atom":
+            key, value = node[1], node[2]
+            return env[key] if value is None else env[key] == value
+        if kind == "not":
+            return not holds(node[1], env)
+        results = (holds(child, env) for child in node[1])
+        return all(results) if kind == "all" else any(results)
+
+    def satisfiable(domains):
+        def assignments(i, env):
+            if i == len(keys):
+                for bits in range(1 << len(flags)):
+                    yield {**env, **{f: bool(bits >> j & 1) for j, f in enumerate(flags)}}
+                return
+            for value in domains[keys[i]]:
+                yield from assignments(i + 1, {**env, keys[i]: value})
+
+        return any(holds(tree, env) for env in assignments(0, {}))
+
+    banned = {"target_os": APPLE_OSES, "target_vendor": {"apple"}}
+    non_apple = {key: [v for v in values if v not in banned.get(key, ())] for key, values in full.items()}
+    # Compiled somewhere (e.g. not cfg(any())) and nowhere outside Apple.
+    return satisfiable(full) and not satisfiable(non_apple)
 
 
 def gpui_free_packages(meta):
@@ -129,8 +211,6 @@ def main():
         print(" ".join(f"-p {name}" for name in gpui_free_packages(metadata(LINUX_TARGET))))
         return 0
     meta = metadata()
-    on_macos = direct_deps(metadata(MACOS_TARGET))
-    elsewhere = [direct_deps(metadata(t)) for t in NON_APPLE_TARGETS]
     packages = {p["id"]: p for p in meta["packages"]}
     members = set(meta["workspace_members"])
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -150,7 +230,11 @@ def main():
                 yield dep["pkg"]
 
     def apple_only(pid, dep_pkg):
-        return dep_pkg in on_macos.get(pid, ()) and not any(dep_pkg in deps.get(pid, ()) for deps in elsewhere)
+        for dep in nodes[pid]["deps"]:
+            if dep["pkg"] == dep_pkg:
+                targets = [k["target"] for k in dep["dep_kinds"]]
+                return all(t and apple_only_cfg(t) for t in targets)
+        return False
 
     def own_deps(pid):
         """A workspace crate's direct dependencies, dev-dependencies included:

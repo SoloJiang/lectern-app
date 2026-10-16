@@ -27,7 +27,7 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Architecture rules
-        run: python3 scripts/check_architecture.py
+        run: python3 scripts/test_check_architecture.py && python3 scripts/check_architecture.py
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
