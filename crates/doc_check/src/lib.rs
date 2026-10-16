@@ -123,6 +123,8 @@ struct Rendered {
     /// HTML offsets of the generated end tags of Markdown headings, so a raw
     /// `</h1>` inside `# Hello </h1> world` does not end the heading.
     heading_ends: HashSet<usize>,
+    /// Indices into `map` of raw HTML events, which are copied verbatim.
+    raw: HashSet<usize>,
 }
 
 fn render(markdown: &str) -> Rendered {
@@ -141,10 +143,14 @@ fn render(markdown: &str) -> Rendered {
     let map = RefCell::new(Vec::new());
     let headings = RefCell::new(HashSet::new());
     let heading_ends = RefCell::new(HashSet::new());
+    let raw = RefCell::new(HashSet::new());
     let events = Parser::new_ext(markdown, options())
         .into_offset_iter()
         .map(|(event, range)| {
             let at = html.borrow().len();
+            if matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
+                raw.borrow_mut().insert(map.borrow().len());
+            }
             map.borrow_mut().push((at, range.start));
             if matches!(event, Event::Start(Tag::Heading { .. })) {
                 headings.borrow_mut().insert(at);
@@ -162,6 +168,7 @@ fn render(markdown: &str) -> Rendered {
         map: map.into_inner(),
         headings: headings.into_inner(),
         heading_ends: heading_ends.into_inner(),
+        raw: raw.into_inner(),
     }
 }
 
@@ -190,13 +197,27 @@ struct Scan {
 
 fn scan(markdown: &str) -> Scan {
     let rendered = render(markdown);
-    let source_offset = |at: usize| {
-        let i = rendered.map.partition_point(|&(start, _)| start <= at);
-        match i.checked_sub(1).map(|i| rendered.map[i]) {
-            Some((start, source)) => source + (at - start).min(markdown.len() - source),
-            None => 0,
-        }
+    let event_at = |at: usize| {
+        rendered
+            .map
+            .partition_point(|&(start, _)| start <= at)
+            .checked_sub(1)
     };
+    // Exact inside raw HTML, which is copied verbatim; elsewhere the rendered
+    // text can be longer than the source (`&lt;`), so stay on a character.
+    let source_offset = |at: usize| match event_at(at).map(|i| rendered.map[i]) {
+        Some((start, source)) => {
+            let mut offset = source + (at - start).min(markdown.len() - source);
+            while !markdown.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            offset
+        }
+        None => 0,
+    };
+    // Generated HTML (Markdown tables, lists) is well formed; only raw HTML
+    // from the source can use the unsupported elements.
+    let is_raw = |at: usize| event_at(at).is_some_and(|i| rendered.raw.contains(&i));
     let is_heading = |name: &[u8]| matches!(name, [b'h', b'1'..=b'6']);
     let mut out = Scan::default();
     let mut heading: Option<(Vec<u8>, String)> = None;
@@ -206,7 +227,8 @@ fn scan(markdown: &str) -> Scan {
         match token {
             Ok(Token::StartTag(tag)) => {
                 let at = tag.span.start;
-                if UNSUPPORTED_ELEMENTS.contains(&&tag.name[..]) {
+                let unsupported = is_raw(at) && UNSUPPORTED_ELEMENTS.contains(&&tag.name[..]);
+                if unsupported {
                     out.unsupported.push((
                         source_offset(at),
                         String::from_utf8_lossy(&tag.name).into_owned(),
@@ -221,7 +243,9 @@ fn scan(markdown: &str) -> Scan {
                     heading = Some((tag.name.to_vec(), String::new()));
                 }
                 for (attr, only_a) in [(&b"id"[..], false), (b"name", true)] {
-                    if (!only_a || &tag.name[..] == b"a")
+                    // An ignored `<head id>` defines nothing.
+                    if !unsupported
+                        && (!only_a || &tag.name[..] == b"a")
                         && let Some(value) = tag.attributes.get(attr)
                         && !value.value.is_empty()
                     {
@@ -313,9 +337,12 @@ fn scan(markdown: &str) -> Scan {
 /// can swallow the rest of the document (`script`, `style`, `iframe`, ...),
 /// inert `template` contents and `select` (which ignores some start tags),
 /// `audio` and `video` (which `source` or `track` loads depends on the tree
-/// and on end tags the parser may ignore), and `form` (a nested form start tag
-/// is dropped with its `id`). Documents do not need them; diagrams are image
-/// files and recordings are links.
+/// and on end tags the parser may ignore), `form` (a nested form start tag
+/// is dropped with its `id`), and the elements whose start tags the in-body
+/// insertion mode ignores or merges (`html`, `head`, `body`, and table parts
+/// outside a table; raw tables also foster-parent their contents). Documents
+/// do not need them: diagrams are image files, recordings are links, and
+/// tables are Markdown tables.
 const UNSUPPORTED_ELEMENTS: &[&[u8]] = &[
     b"svg",
     b"math",
@@ -337,6 +364,19 @@ const UNSUPPORTED_ELEMENTS: &[&[u8]] = &[
     b"audio",
     b"video",
     b"form",
+    b"html",
+    b"head",
+    b"body",
+    b"table",
+    b"caption",
+    b"colgroup",
+    b"col",
+    b"thead",
+    b"tbody",
+    b"tfoot",
+    b"tr",
+    b"th",
+    b"td",
 ];
 
 /// Source byte offsets and names of the [`UNSUPPORTED_ELEMENTS`] used as raw
@@ -1346,6 +1386,26 @@ mod tests {
             .map(|e| e.target.clone())
             .collect();
         assert_eq!(got, ["<audio>", "<video>", "<form>", "<form>"]);
+    }
+
+    #[test]
+    fn ignored_structure_and_raw_tables_are_unsupported() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<head id=\"ghost\"></head><a href=\"#ghost\">x</a>\n\n<td id=\"cell\">x</td>\n\n| a |\n|---|\n| [ok](#x) |\n\n# X\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["<head>", "<td>", "#ghost"]);
+    }
+
+    #[test]
+    fn markdown_tables_with_multibyte_text_are_supported() {
+        let repo = TempRepo::new(&[("b.md", "| 文件 | 说明 |\n|---|---|\n| `a` | 改动 |\n")]);
+        assert!(repo.check(&["b.md"]).is_empty());
     }
 
     #[test]
