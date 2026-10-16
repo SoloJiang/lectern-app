@@ -10,7 +10,7 @@ token 用量去重与聚合（入 SQLite）、价格表、额度快照；Claude 
 ## 边界
 
 - 去重与解析规则以 ADR 0014 为准（Claude Code 按 `message.id` + `requestId` 去重，Codex 子 agent 只计 `task_started` 之后），每条规则都有 fixtures 覆盖；ccusage 的 `--json` 输出只在测试里做对照。
-- 除了会话日志，`agents` 会交来 Analyze 调用的原始用量记录（[ADR 0019](../../docs/adr/0019.md)）：凭据转发端点每个模型请求一条，带分析 ID，取消和失败的分析也有；没收到用量就中断的请求标为「估算」。辅助会话不写入用户的会话目录，所以不会与日志重复。
+- 除了会话日志，`agents` 会交来 Analyze 调用的原始用量记录（[ADR 0019](../../docs/adr/0019.md)）：凭据转发端点每个模型请求一条，带分析 ID，转发之前就落盘为按上限估算的待定记录，收到用量后替换，取消和失败的分析也有；没收到用量就中断（包括 Lectern 崩溃）的请求保留为「估算（上限）」。辅助会话不写入用户的会话目录，所以不会与日志重复。
 - 聚合结果写入 Lectern 自己的 SQLite（Claude Code 默认删除 30 天前的会话文件）；statusline 的安装在 `platform`，本 crate 只解析它存下的 JSON。
 
 ## 测试
