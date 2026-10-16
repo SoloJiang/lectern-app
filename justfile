@@ -18,11 +18,13 @@ packages := if os() == "macos" { "--workspace" } else { `python3 scripts/check_a
 
 default: check
 
-# Format check, architecture rules, clippy with warnings as errors.
+# Format check, architecture rules, doc links, clippy with warnings as errors.
 check:
     cargo fmt --all --check
     python3 scripts/test_check_architecture.py
     python3 scripts/check_architecture.py
+    python3 scripts/test_check_docs.py
+    python3 scripts/check_docs.py
     cargo clippy --locked {{packages}} --all-targets --all-features -- -D warnings
 
 # Run tests with cargo-nextest. `-p` (also `-pNAME`), `--package` or

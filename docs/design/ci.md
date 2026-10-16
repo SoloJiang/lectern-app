@@ -1,5 +1,7 @@
 # CI 与约束检查
 
+状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)）。
+
 对应 issue [#4](https://github.com/SoloJiang/lectern-app/issues/4)。规则以脚本执行，违反时构建立即失败（[技术调研](tech-research.md)「约束检查」）。
 
 ## 两个任务
@@ -27,6 +29,9 @@
 2. 依赖自上而下：`app` → `view` → `domain` → `infra`；`kernel` 层可被任何层依赖，自身只依赖 kernel 层；只有 `app` 可以依赖 `tool` 层，且只能是 dev-dependency 或不在 `default` feature 里的可选依赖。这一项读取 Cargo 按默认 feature 解析出的依赖图，保证 tool crate 不进入发布构建。
 3. `domain`、`infra`、`kernel` 层的依赖图（含间接依赖）里没有 GPUI。`cargo metadata` 会在整个工作区统一 feature，所以只经过间接依赖的 GPUI 路径会再用 `cargo tree -p <crate>` 单独解析确认，避免别的 crate 打开的 feature 造成误报。
 4. macOS 系统绑定只能是 `platform` 的直接依赖。绑定按两种方式识别。一是名字：前缀 objc*、cocoa*、core-foundation*、security-framework*、metal*、dispatch*、screencapturekit* 等，或名字里按 - 和 _ 切出的词含 macos、darwin、appkit、metal 等。二是 target 条件只在 Apple 平台成立的依赖，不论名字。脚本用 `rustc --print cfg` 取得 rustc 已知的全部 target 的真实 cfg（按 rustc 版本缓存在 `target/` 下），条件在某个 Apple target 上成立、在其他 target 上都不成立，即为 Apple 专属。与 Cargo 一致，target 不设置的 cfg（`feature`、`test`、`proc_macro` 等）一律为假。target 按默认配置取，不应用本机的 rustflags，因此同一个提交在任何机器和 CI 上结果一致。工作区内的 crate 也按名字检查。`scripts/test_check_architecture.py` 是这部分的单元测试，CI 先跑它。
+5. 每个 crate 的 `Cargo.toml` 写有 `[lints] workspace = true`，继承工作区的 lint 配置（见「Lint」）。
+
+每条报错末尾的方括号写明规则出处（AGENTS.md 的规则编号或设计文档），agent 可以直接找到规则原文。
 
 检查用 `cargo metadata --all-features`，可选 feature 引入的依赖也计入。每个 crate 自己的 dev-dependencies 也检查（它们会编译进测试和基准）；依赖项的 dev-dependencies 不会被编译，不检查。
 
@@ -39,6 +44,20 @@ python3 scripts/check_architecture.py
 ```
 
 规则 7（插件之间不直接依赖）在 kernel 定义出插件与接口 crate 后加入检查（[#8](https://github.com/SoloJiang/lectern-app/issues/8)）。
+
+## Lint
+
+工作区的 `[workspace.lints.clippy]` 在 clippy 默认规则之外增加三条，`-D warnings` 下都是错误：
+
+- `allow_attributes_without_reason`：`#[allow]` 和 `#[expect]` 必须写 `reason = "..."`，说明为什么关掉这条规则。
+- `dbg_macro`：提交的代码里不留 `dbg!`。
+- `undocumented_unsafe_blocks`：每个 `unsafe` 块前用 `// SAFETY:` 注释说明为什么安全。
+
+今后用 `clippy.toml` 的 `disallowed-methods`、`disallowed-types` 禁用某个 API 时，`reason` 写明对应的架构规则或 ADR，例如 `reason = "视图层不做 IO（AGENTS.md 架构规则 4）"`。
+
+## 文档链接检查
+
+`scripts/check_docs.py` 检查仓库里所有 Markdown 文件的相对链接：目标文件必须存在，`#锚点` 必须对应目标文件里的某个标题（按 GitHub 生成锚点的规则计算）。代码块和行内代码里的链接、外部 URL 不检查。设计文档、ADR、AGENTS.md 之间的链接改名或删节后失效，这一步会让 `just check` 失败。`scripts/test_check_docs.py` 是它的单元测试。
 
 ## 许可证与来源
 

@@ -1,8 +1,10 @@
 """Unit tests for check_architecture.py. Run: python3 scripts/test_check_architecture.py"""
 
+import os
+import tempfile
 import unittest
 
-from check_architecture import apple_only_cfg, is_macos_binding_name
+from check_architecture import apple_only_cfg, inherits_workspace_lints, is_macos_binding_name
 
 
 class AppleOnlyCfg(unittest.TestCase):
@@ -70,6 +72,23 @@ class BindingNames(unittest.TestCase):
         for name in ("serde", "memchr", "gpui-pre", "lectern-platform", "lectern-review", "block-buffer"):
             with self.subTest(name=name):
                 self.assertFalse(is_macos_binding_name(name))
+
+
+class WorkspaceLints(unittest.TestCase):
+    def test_manifests(self):
+        cases = {
+            '[package]\nname = "a"\n\n[lints]\nworkspace = true\n': True,
+            '[package]\nname = "a"\n': False,
+            '[package]\nname = "a"\n\n[lints.clippy]\ndbg_macro = "warn"\n': False,
+            '[package]\nname = "a"\n\n[lints]\nworkspace = false\n': False,
+        }
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "Cargo.toml")
+            for text, expected in cases.items():
+                with self.subTest(text=text):
+                    with open(path, "w") as f:
+                        f.write(text)
+                    self.assertIs(inherits_workspace_lints(path), expected)
 
 
 if __name__ == "__main__":

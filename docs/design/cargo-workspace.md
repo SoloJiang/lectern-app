@@ -1,5 +1,7 @@
 # 工作区与 crate 划分
 
+状态：已实现（[#33](https://github.com/SoloJiang/lectern-app/pull/33)）。
+
 对应 issue [#1](https://github.com/SoloJiang/lectern-app/issues/1)。架构规则见 [AGENTS.md](../../AGENTS.md)，分层理由见 [技术调研](tech-research.md)「技术路线与架构」。
 
 ## 目录
