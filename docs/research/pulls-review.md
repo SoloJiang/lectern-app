@@ -228,7 +228,7 @@ Action 推荐用 `pull_request_target` 触发，理由是它只通过 API 读 di
 
 | 建议 | 落在哪里 | 相关 issue |
 |---|---|---|
-| 已看标记的键包含审阅对象（会话或比较范围）、路径和改动前后两个 blob OID；同一审阅对象和路径的改动前或改动后 OID 任一变化时（如 base 前进后只有改动前的一侧变了），标为「审过之后又被改过」，界面显示为第三种状态并提供重新标记。OID 按仓库的哈希算法取完整长度，不假定 40 位 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
+| 已看标记的键包含审阅对象（会话或比较范围）、路径和改动前后两个 blob OID；改动前后的文件模式（如可执行位）和改动状态也计入。同一审阅对象和路径的改动前或改动后 OID、模式、状态任一变化时（如 base 前进后只有改动前的一侧变了，或只改了可执行位），标为「审过之后又被改过」，界面显示为第三种状态并提供重新标记。OID 按仓库的哈希算法取完整长度，不假定 40 位 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 标为已看后折叠该文件，与快捷键 V 的跳转配合 | `review_view` | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 维护一份噪声文件模式列表（生成文件、lockfile、快照），同时用于默认折叠、规则分组和模型输入 | `review` 或 `git` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#21](https://github.com/SoloJiang/lectern-app/issues/21) |
 | 全量高亮：hunk 用完整文件的高亮结果切片，不单独高亮 hunk；完整文件的高亮按 blob OID 加语言和 grammar / 高亮查询的版本缓存，同样的内容在不同语言的文件里不会命中错误的结果，grammar 升级后旧结果失效 | `git` 设计文档 | [#14](https://github.com/SoloJiang/lectern-app/issues/14) |
@@ -236,11 +236,11 @@ Action 推荐用 `pull_request_target` 触发，理由是它只通过 API 读 di
 | 识别不了会话日志、或改动不属于任何会话时，用有序 glob 规则表分组，取代平铺的文件列表；规则用 `globset` 实现，首帧后计算 | `review`、`project_home` | [#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#30](https://github.com/SoloJiang/lectern-app/issues/30) |
 | 会话简报里「值得先看的几处」采用 `critical` 加文件备注、行备注的结构；行备注只挂在 diff 里显示的行上 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
 | 任何模型输出都走同一套校验：结构校验、覆盖检查、一次纠错重试、对账、未分类兜底 | `review` 设计文档 | [#15](https://github.com/SoloJiang/lectern-app/issues/15) |
-| 调用 Claude Code、Codex 生成简报时，用只读参数启动无界面进程，在单独的会话里运行，不续接正在审阅的会话，避免在该会话里多出审阅轮次。这个辅助会话不能出现在会话列表里：可用时用不保存会话的调用方式（如 Claude Code 的 `--no-session-persistence`），否则记录它的会话 ID，会话发现时过滤掉。pulls.review 不限制这类进程的轮数和时长，Lectern 要设超时，用户离开或取消时终止子进程并回收。只读参数只禁止写入，不限制读取，被审阅的内容可能诱导 agent 读取仓库外的文件，所以进程要在系统级沙箱里运行，只允许读取本次分析的输入和被审阅的仓库，并且不加载用户的 MCP 配置 | `agents` 或 `executor` 设计文档 | [#13](https://github.com/SoloJiang/lectern-app/issues/13) |
-| 模型结果的缓存键是完整分析请求的哈希：规范化后的提示词（含标题、描述、prompt 摘录、输出语言）、排序后的（路径，改动前 blob OID，改动后 blob OID）列表、schema 版本和模型 ID。diff 超过内联上限时模型通过工具读取 diff，提示词里没有 diff 正文，所以两侧 OID 都要进键；只缓存模型结果，规则结果每次重算 | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
-| 缓存放在 `~/Library/Caches` 下，按仓库的 git 公共目录路径区分，同一仓库的 worktree 共用，且不在用户的 `.git` 里写文件（pulls.review 写在 `.git` 公共目录下） | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
+| 调用 Claude Code、Codex 生成简报时，用只读参数启动无界面进程，在单独的会话里运行，不续接正在审阅的会话，避免在该会话里多出审阅轮次。这个辅助会话不能出现在会话列表里：可用时用不保存会话的调用方式（如 Claude Code 的 `--no-session-persistence`），否则记录它的会话 ID，会话发现时过滤掉。pulls.review 不限制这类进程的轮数和时长，Lectern 要设超时，用户离开或取消时终止子进程并回收。只读参数只禁止写入，不限制读取，被审阅的内容可能诱导 agent 读取仓库外的文件，所以进程要在系统级沙箱里运行，只允许读取本次分析的输入、被审阅的仓库和该 agent 登录所需的凭据（凭据文件或钥匙串条目，按 agent 逐个列出），并且不加载用户的其他配置和 MCP 服务器。沙箱的生成属于 macOS 专属能力，由 `platform` 提供接口，`agents` 和 `executor` 负责进程的启动与生命周期 | `agents`、`executor`、`platform` 设计文档 | [#13](https://github.com/SoloJiang/lectern-app/issues/13) |
+| 模型结果的缓存键是完整分析请求的哈希：规范化后的提示词（含标题、描述、prompt 摘录、输出语言）、排序后的（路径，改动前 blob OID，改动后 blob OID）列表、schema 版本和模型 ID。diff 超过内联上限时模型通过工具读取 diff，提示词里没有 diff 正文，所以两侧 OID 都要进键。agent 能读仓库里未改动的文件时，键还要包含被审阅 worktree 的指纹（基准树 OID 加工作区 diff 的哈希），否则未改动文件的变化不会让结果失效；只缓存模型结果，规则结果每次重算 | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
+| 缓存放在 `~/Library/Caches` 下，按仓库的 git 公共目录的绝对路径区分（`git rev-parse --path-format=absolute --git-common-dir`，或解析后取规范路径；默认输出常常是相对路径 `.git`，不同仓库会撞在一起），同一仓库的 worktree 共用，且不在用户的 `.git` 里写文件（pulls.review 写在 `.git` 公共目录下） | `cache` 设计文档 | [#17](https://github.com/SoloJiang/lectern-app/issues/17) |
 | 来源接口按能力定义：必需的取 diff，加上可选的指纹、加载完整文件、审阅评论、共享结果；视图按能力决定功能 | `forge` 设计文档 | [#25](https://github.com/SoloJiang/lectern-app/issues/25) |
-| MR 视图请求 GitHub 时处理限流和条件请求，pulls.review 没有做。MR 的指纹同时包含 head 和 base（或合并基点），base 前进时缓存的结果按过期处理 | `forge` 设计文档 | [#25](https://github.com/SoloJiang/lectern-app/issues/25) |
+| MR 视图请求 GitHub 时处理限流和条件请求，pulls.review 没有做。MR 的指纹同时包含 head 和 base（或合并基点），以及进入分析的 MR 元数据（标题、描述）的哈希；任一变化时缓存的结果按过期处理 | `forge` 设计文档 | [#25](https://github.com/SoloJiang/lectern-app/issues/25) |
 | 设计文档模板增加状态行（计划中、进行中、已实现并列出 PR）、每步的「完成标准」、「实际验证过什么」（区分 Linux CI 和 macOS 实测）、实现后的「与设计的差异」 | `docs/design/TEMPLATE.md` | 无 |
 | AGENTS.md 写明实现以已合并的设计文档为准：实现中需要改设计时，在同一个 PR 里修改设计文档（改架构的另写 ADR）并写明原因，不让代码先偏离设计再补文档。pulls.review 反过来以代码为准，它的文档因此持续落后于代码，而 Lectern 要求设计先经审阅。CI 检查文档间的链接都能打开 | `AGENTS.md`、`just check` | 无 |
 | clippy 的 `disallowed-methods`、`disallowed-types` 在 `reason` 里写明对应的架构规则或 ADR；开启 `allow_attributes_without_reason` | `clippy.toml`、`just check` | 无 |
