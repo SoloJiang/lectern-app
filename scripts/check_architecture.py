@@ -61,6 +61,8 @@ MACOS_ONLY_PREFIXES = (
     "icrate",
     "apple-",
 )
+# Exact names: these would be too broad as prefixes (block-buffer is not one).
+MACOS_ONLY_NAMES = {"block", "block-sys"}
 # Name tokens (split on - and _) that mark an Apple binding wherever they
 # appear, e.g. accesskit_macos, raw-window-metal, objc2-app-kit.
 MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "objc", "objc2", "coreaudio", "corefoundation"}
@@ -92,7 +94,7 @@ def metadata(platform=None, all_features=True):
 
 
 def is_macos_binding_name(name):
-    return name.startswith(MACOS_ONLY_PREFIXES) or bool(MACOS_NAME_TOKENS & set(re.split(r"[-_]", name)))
+    return name in MACOS_ONLY_NAMES or name.startswith(MACOS_ONLY_PREFIXES) or bool(MACOS_NAME_TOKENS & set(re.split(r"[-_]", name)))
 
 
 def parse_cfg(text):

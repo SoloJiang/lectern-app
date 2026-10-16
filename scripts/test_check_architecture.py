@@ -64,10 +64,10 @@ class TargetConfigurations(unittest.TestCase):
 
 class BindingNames(unittest.TestCase):
     def test_names(self):
-        for name in ("accesskit_macos", "raw-window-metal", "objc2-app-kit", "core-foundation-sys", "lectern-objc-bridge"):
+        for name in ("accesskit_macos", "raw-window-metal", "objc2-app-kit", "core-foundation-sys", "lectern-objc-bridge", "block", "block-sys"):
             with self.subTest(name=name):
                 self.assertTrue(is_macos_binding_name(name))
-        for name in ("serde", "memchr", "gpui-pre", "lectern-platform", "lectern-review"):
+        for name in ("serde", "memchr", "gpui-pre", "lectern-platform", "lectern-review", "block-buffer"):
             with self.subTest(name=name):
                 self.assertFalse(is_macos_binding_name(name))
 
