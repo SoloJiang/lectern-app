@@ -120,6 +120,9 @@ struct Rendered {
     /// HTML offsets where a Markdown heading starts (raw `<h2>` in the
     /// source does not get an automatic anchor on GitHub).
     headings: HashSet<usize>,
+    /// HTML offsets of the generated end tags of Markdown headings, so a raw
+    /// `</h1>` inside `# Hello </h1> world` does not end the heading.
+    heading_ends: HashSet<usize>,
 }
 
 fn render(markdown: &str) -> Rendered {
@@ -137,6 +140,7 @@ fn render(markdown: &str) -> Rendered {
     let html = Rc::new(RefCell::new(String::new()));
     let map = RefCell::new(Vec::new());
     let headings = RefCell::new(HashSet::new());
+    let heading_ends = RefCell::new(HashSet::new());
     let events = Parser::new_ext(markdown, options())
         .into_offset_iter()
         .map(|(event, range)| {
@@ -144,6 +148,9 @@ fn render(markdown: &str) -> Rendered {
             map.borrow_mut().push((at, range.start));
             if matches!(event, Event::Start(Tag::Heading { .. })) {
                 headings.borrow_mut().insert(at);
+            }
+            if matches!(event, Event::End(pulldown_cmark::TagEnd::Heading(_))) {
+                heading_ends.borrow_mut().insert(at);
             }
             event
         });
@@ -154,6 +161,7 @@ fn render(markdown: &str) -> Rendered {
         html,
         map: map.into_inner(),
         headings: headings.into_inner(),
+        heading_ends: heading_ends.into_inner(),
     }
 }
 
@@ -163,10 +171,10 @@ fn render(markdown: &str) -> Rendered {
 /// everything inside `script`, `style` and other raw-text elements (including
 /// an unclosed or self-closed one, and the escaped states of `script`) is text,
 /// so links and headings there do not exist. `plaintext` swallows the rest of
-/// the document. Tree construction is not modelled, which only matters inside
-/// foreign content: `<svg>` and `<math>` change how CDATA and raw-text elements
-/// are parsed. Those are reported instead of being read the wrong way (see
-/// [`foreign_content`]).
+/// the document. Tree construction is not modelled, so elements whose parsing
+/// or meaning depends on it (foreign content, raw-text and template contents,
+/// `select`, form controls) are reported instead of being read the wrong way
+/// (see [`unsupported_html`]).
 #[derive(Default)]
 struct Scan {
     /// Destinations with source byte offsets.
@@ -175,8 +183,9 @@ struct Scan {
     ids: Vec<String>,
     /// Text of each Markdown heading, in order.
     headings: Vec<String>,
-    /// Source byte offsets of `<svg>` and `<math>` start tags.
-    foreign: Vec<usize>,
+    /// Source byte offsets and names of raw HTML elements the checker cannot
+    /// follow.
+    unsupported: Vec<(usize, String)>,
 }
 
 fn scan(markdown: &str) -> Scan {
@@ -197,8 +206,11 @@ fn scan(markdown: &str) -> Scan {
         match token {
             Ok(Token::StartTag(tag)) => {
                 let at = tag.span.start;
-                if matches!(&tag.name[..], b"svg" | b"math") {
-                    out.foreign.push(source_offset(at));
+                if UNSUPPORTED_ELEMENTS.contains(&&tag.name[..]) {
+                    out.unsupported.push((
+                        source_offset(at),
+                        String::from_utf8_lossy(&tag.name).into_owned(),
+                    ));
                 }
                 if is_heading(&tag.name)
                     && (rendered.headings.contains(&at)
@@ -222,7 +234,17 @@ fn scan(markdown: &str) -> Scan {
                 let link_attrs: &[&[u8]] = match &tag.name[..] {
                     b"a" | b"area" | b"link" => &[b"href"],
                     b"img" | b"iframe" | b"embed" | b"source" | b"track" | b"audio" | b"video"
-                    | b"input" | b"script" => &[b"src"],
+                    | b"script" => &[b"src"],
+                    // `src` applies only to the Image Button state; task list
+                    // checkboxes and other inputs have no destination.
+                    b"input"
+                        if tag
+                            .attributes
+                            .get(&b"type"[..])
+                            .is_some_and(|v| v.value.eq_ignore_ascii_case(b"image")) =>
+                    {
+                        &[b"src"]
+                    }
                     _ => &[],
                 };
                 for &attr in link_attrs {
@@ -256,9 +278,16 @@ fn scan(markdown: &str) -> Scan {
                 // Only the generated end tag of the same level closes the
                 // heading: a raw `</h2>` inside `# Hello </h2> world` is text
                 // to the slug.
+                // A raw `</h1>` inside `# Hello </h1> world` has the same name
+                // but is not the end tag pulldown-cmark generated.
+                let at = tag.span.start;
                 if heading
                     .as_ref()
                     .is_some_and(|(name, _)| name[..] == tag.name[..])
+                    && (rendered.heading_ends.contains(&at)
+                        || at
+                            .checked_sub(1)
+                            .is_some_and(|a| rendered.heading_ends.contains(&a)))
                     && let Some((_, text)) = heading.take()
                 {
                     out.headings.push(text);
@@ -275,13 +304,36 @@ fn scan(markdown: &str) -> Scan {
     out
 }
 
-/// Source byte offsets of inline `<svg>` and `<math>` elements. Their content
-/// is parsed as foreign content, which a tokenizer without tree construction
-/// cannot follow (CDATA sections, `style` and `script` that are not raw text),
-/// so links inside could be missed; the checker rejects them and documents use
-/// image files instead.
-pub fn foreign_content(markdown: &str) -> Vec<usize> {
-    scan(markdown).foreign
+/// Raw HTML elements whose effect on parsing or rendering needs HTML tree
+/// construction, which a tokenizer cannot follow: foreign content (`svg`,
+/// `math`: CDATA, non-raw-text `style`), raw-text and RCDATA elements that
+/// can swallow the rest of the document (`script`, `style`, `iframe`, ...),
+/// inert `template` contents and `select` (which ignores some start tags).
+/// Documents do not need them; diagrams are image files.
+const UNSUPPORTED_ELEMENTS: &[&[u8]] = &[
+    b"svg",
+    b"math",
+    b"script",
+    b"style",
+    b"iframe",
+    b"noembed",
+    b"noframes",
+    b"noscript",
+    b"xmp",
+    b"plaintext",
+    b"textarea",
+    b"title",
+    b"template",
+    b"select",
+    b"object",
+    b"frame",
+    b"frameset",
+];
+
+/// Source byte offsets and names of the [`UNSUPPORTED_ELEMENTS`] used as raw
+/// HTML; the checker reports them so links around them cannot be misread.
+pub fn unsupported_html(markdown: &str) -> Vec<(usize, String)> {
+    scan(markdown).unsupported
 }
 
 /// Rendered text of every Markdown heading, in order: text, inline code and
@@ -587,12 +639,12 @@ pub fn check_tracked(
             }
         };
         let dir = path.parent().unwrap_or(&root).to_path_buf();
-        for offset in foreign_content(&text) {
+        for (offset, name) in unsupported_html(&text) {
             errors.push(BrokenLink {
                 file: rel.clone(),
                 line: text[..offset].matches('\n').count() + 1,
-                target: "<svg>/<math>".into(),
-                reason: "inline SVG or MathML cannot be checked for links; use an image file"
+                target: format!("<{name}>"),
+                reason: "raw HTML element the link checker cannot follow; leave it out (use an image file for diagrams)"
                     .into(),
             });
         }
@@ -658,6 +710,9 @@ pub fn check_tracked(
                 errors.push(broken("not tracked by git".into()));
                 continue;
             }
+            // Whether the target is Markdown follows the name the link uses
+            // (`alias.md -> real.txt` is rendered as Markdown on GitHub).
+            let mut lexical = dest;
             let mut dest = real;
             let Some(fragment) = fragment else { continue };
             if fragment.is_empty() {
@@ -694,12 +749,13 @@ pub fn check_tracked(
                             ));
                             continue;
                         }
+                        lexical = readme;
                         dest = real;
                     }
                     None => continue,
                 }
             }
-            if !is_markdown(&dest) || !dest.is_file() {
+            if !(is_markdown(&lexical) || is_markdown(&dest)) || !dest.is_file() {
                 continue;
             }
             let set = anchors.entry(dest.clone()).or_insert_with(|| {
@@ -734,6 +790,15 @@ mod tests {
                 fs::write(path, text).unwrap();
             }
             TempRepo(root)
+        }
+
+        /// Link errors only: raw HTML the checker rejects is reported
+        /// separately and covered by its own test.
+        fn check_links(&self, files: &[&str]) -> Vec<BrokenLink> {
+            self.check(files)
+                .into_iter()
+                .filter(|e| !e.reason.starts_with("raw HTML element"))
+                .collect()
         }
 
         fn check(&self, files: &[&str]) -> Vec<BrokenLink> {
@@ -914,7 +979,7 @@ mod tests {
                 "<style>a[href=\"style.md\"] {}</style>\n</div>\n",
             ),
         )]);
-        let errors = repo.check(&["b.md"]);
+        let errors = repo.check_links(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| (e.line, e.target.as_str())).collect();
         assert_eq!(got, [(2, "missing.md")]);
     }
@@ -933,7 +998,7 @@ mod tests {
             "b.md",
             "Text <script>const x = '<a href=\"missing.md\">';</script> and <a href=\"gone.md\">x</a>.\n",
         )]);
-        let errors = repo.check(&["b.md"]);
+        let errors = repo.check_links(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(got, ["gone.md"]);
     }
@@ -944,7 +1009,7 @@ mod tests {
             "b.md",
             "Text <script>ignored </scriptx><a href=\"missing.md\"></a></script> then <a href=\"gone.md\">x</a>.\n",
         )]);
-        let errors = repo.check(&["b.md"]);
+        let errors = repo.check_links(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(got, ["gone.md"]);
     }
@@ -955,7 +1020,7 @@ mod tests {
             "b.md",
             "Text <plaintext></plaintext><a href=\"missing.md\">x</a>\n",
         )]);
-        assert_eq!(repo.check(&["b.md"]), []);
+        assert_eq!(repo.check_links(&["b.md"]), []);
     }
 
     #[cfg(unix)]
@@ -1004,7 +1069,7 @@ mod tests {
             "b.md",
             "Text <script>\n\n<a href=\"missing.md\">x</a> [md](gone.md)\n\n</script>\n\n[after](nope.md)\n",
         )]);
-        let errors = repo.check(&["b.md"]);
+        let errors = repo.check_links(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(got, ["nope.md"]);
     }
@@ -1032,7 +1097,7 @@ mod tests {
             "b.md",
             "Text <script/>\n\n[example](missing.md)\n\n</script>\n\n[after](nope.md)\n",
         )]);
-        let errors = repo.check(&["b.md"]);
+        let errors = repo.check_links(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(got, ["nope.md"]);
     }
@@ -1057,7 +1122,7 @@ mod tests {
             "b.md",
             "<script>\n<!-- <script> x </script> <a href=\"missing.md\"> -->\n</script>\n\n<a href=\"nope.md\">x</a>\n",
         )]);
-        let errors = repo.check(&["b.md"]);
+        let errors = repo.check_links(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(got, ["nope.md"]);
     }
@@ -1159,10 +1224,7 @@ mod tests {
             .collect();
         assert_eq!(
             got[..2],
-            [
-                (3, "<svg>/<math>".to_string()),
-                (5, "<svg>/<math>".to_string())
-            ]
+            [(3, "<svg>".to_string()), (5, "<math>".to_string())]
         );
     }
 
@@ -1203,6 +1265,57 @@ mod tests {
     fn fragments_keep_backslashes() {
         let repo = TempRepo::new(&[("b.md", "<span id=\"a\\b\"></span><a href=\"#a\\b\">x</a>\n")]);
         assert_eq!(repo.check(&["b.md"]), []);
+    }
+
+    #[test]
+    fn unsupported_raw_html_is_reported() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<template><a href=\"missing.md\">x</a></template>\n\n<select><iframe></select><a href=\"gone.md\">x</a>\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .filter(|e| e.reason.starts_with("raw HTML element"))
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["<template>", "<select>", "<iframe>"]);
+    }
+
+    #[test]
+    fn input_src_counts_only_for_image_buttons() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<input src=\"missing.png\"> <input type=\"IMAGE\" src=\"gone.png\">\n\n- [x] done\n",
+        )]);
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        assert_eq!(got, ["gone.png"]);
+    }
+
+    #[test]
+    fn raw_same_level_end_tags_stay_in_the_heading() {
+        assert_eq!(headings("# Hello </h1> world\n"), ["Hello  world"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn markdown_symlinks_to_other_names_check_fragments() {
+        let repo = TempRepo::new(&[
+            ("real.txt", "# Real\n"),
+            ("b.md", "[x](alias.md#missing)\n"),
+        ]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("real.txt", base.join("alias.md")).unwrap();
+        let got: Vec<_> = repo
+            .check(&["b.md"])
+            .iter()
+            .map(|e| e.reason.clone())
+            .collect();
+        assert_eq!(got, ["no heading with anchor #missing"]);
     }
 
     #[test]
