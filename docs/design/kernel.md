@@ -204,7 +204,9 @@ impl GateSlot {
     /// 这次 `poll` 要么已经看到新状态，要么它登记的 waker 一定会被唤醒，不会漏掉唤醒、一直停在 `Pending`。
     pub fn poll(&self, cx: &mut std::task::Context<'_>) -> GatePoll;
 
-    /// executor 在 poll 任务的 future 时用 `catch_unwind` 包住，panic 时调用这个方法再丢弃 future（丢弃同样用 `catch_unwind` 包住）。
+    /// executor 在 poll 任务的 future 时用 `catch_unwind` 包住，panic 时调用这个方法再丢弃 future。
+    /// future 的每一次最终 drop 都用 `catch_unwind` 包住，不只是 poll panic 之后：`poll` 返回 `Drop`（取消、闸门关闭、token 为 `Dead`）、
+    /// future 返回 `Ready` 之后、executor 关闭时丢弃未完成的任务，都一样；drop panic 时同样调用这个方法。
     /// kernel 按 `fail` 的方式让这个任务所属的激活失效：插件进入 `Failed`，连带停用的插件同步失效，
     /// 所以任务 panic 不会展开到 executor 的工作线程，也不会让插件在初始化中断后仍显示为 `Active`、被报告为静止。
     /// 激活已经失效时只记日志。`payload` 由这个方法接管：先取出可读的消息（`&str` / `String`）记入日志，
@@ -237,6 +239,9 @@ impl PluginHandle {
     ///    否则（`start` 运行期间撤销第 4 步已把表标为关闭）释放锁后关闭闸门、在 `catch_unwind` 里 drop 句柄，返回 false。
     ///    闸门一直关着，所以这时已经提交的任务一次也没运行，随闸门关闭被丢弃。
     /// 插件提交后台任务应使用这个方法，而不是先提交再 `own`。
+    /// 句柄登记时带上闸门：这次提交的所有任务都结束后（每个任务的 `GateSlot` 在任务完成或被丢弃时 drop，闸门看到槽位归零且已经打开过），
+    /// 闸门把这条登记从守卫表里移除，句柄送到 kernel 线程上在 `contain` 里 drop。所以反复提交一次性任务（扫描、刷新、收到事件后的工作）
+    /// 时，守卫表只保留还在运行的任务，不会随激活的时长一直增长；`start` 一个任务也没提交（没申请槽位）时，句柄在第 3 步之后立即移除。
     /// `start` 用 `catch_unwind` 包住：panic 时关闭闸门，按 `fail` 的方式让这次激活失效
     /// （插件进入 `Failed`，连带停用的插件同步失效），返回 false，panic 不会展开到调用方。
     /// 在 `started` 里调用时（token 还是 `Pending`），`start` 暂存到 token 变为 `Live` 之后再调用，激活失败时丢弃，返回 true 表示已经接受。
@@ -442,7 +447,7 @@ impl Emitter {
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
 - 激活期间的状态（`ServiceRef`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Active` 的 drop 同样用 `catch_unwind` 包住，panic 时记录错误、插件标为 `Failed`，撤销照常完成。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
-- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：`commit` 只把注册连同 `ActivationToken` 排到主线程；主线程每帧检查 `token.state()`：`Pending` 时留到下一帧再看；否则用 `token.enter()` 取准入，取到就在持有准入期间应用注册并把注销守卫交给 kernel，取不到（`Dead`）就丢弃。应用与撤销因此不会交错：撤销第 3 步等准入归零，之后才 drop 守卫和 `Active`。所以注册只在所有 `commit` 和 `started` 都成功之后应用，也不会因为主线程比激活先跑到而丢失。激活在任何一步失败（`activate`、某个 `commit` panic、`started` panic 或调用 `fail`），token 都不会变为有效，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`commit` 在排队之前用 `token.pending()` 取一个守卫（`shutdown` 之后返回 None，注册直接丢弃），随注册一起排到主线程，注册应用或丢弃之后才 drop。所以从排队到主线程收到注册之间，kernel 也不会报告静止，界面注册生效之前不静止。
+- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：`commit` 只把注册连同 `ActivationToken` 排到主线程；主线程每帧检查 `token.state()`：`Pending` 时留到下一帧再看；否则用 `token.enter()` 取准入，取到就在持有准入期间应用注册并把注销守卫交给 kernel，取不到（`Dead`）就丢弃。应用一次注册是一个整体，也在 `contain` 里执行：`dyn Contributions` 先调用注册里由插件提供的代码（构造菜单项、快捷键表等），全部成功后才一次性插入自己的表；插件代码 panic 时什么都不插入，按 `fail` 让这次激活失效，panic 不会展开到主线程，也不会留下只应用了一半的注册。界面回调之后的调用照常按下文的规则取准入、`contain`。应用与撤销因此不会交错：撤销第 3 步等准入归零，之后才 drop 守卫和 `Active`。所以注册只在所有 `commit` 和 `started` 都成功之后应用，也不会因为主线程比激活先跑到而丢失。激活在任何一步失败（`activate`、某个 `commit` panic、`started` panic 或调用 `fail`），token 都不会变为有效，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`commit` 在排队之前用 `token.pending()` 取一个守卫（`shutdown` 之后返回 None，注册直接丢弃），随注册一起排到主线程，注册应用或丢弃之后才 drop。所以从排队到主线程收到注册之间，kernel 也不会报告静止，界面注册生效之前不静止。
 
 ### 撤销
 
@@ -576,6 +581,8 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - `own_with` 的 `start` panic：闸门关闭、任务一次也没运行，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
 - `own_with` 的 `start` 里调用同一个句柄的 `own`、`own_with`：不死锁，守卫都登记上；`start` 运行期间另一个线程完成撤销：返回的句柄被 drop、闸门关闭，任务一次也没运行，`own_with` 返回 false。
 - 嵌套事件的来源：A 的监听通过 B 的 `Emitter` 发出事件后 B 失效、A 仍存活：排队的事件被丢弃；A 失效、B 仍存活：事件照常送达。
+- 任务句柄回收：同一次激活里反复 `own_with` 一万个立即完成的任务，守卫表的长度回到 0；future 在取消、完成后被 drop 时 panic，插件进入 `Failed`、工作线程继续运行。
+- 界面注册的应用 panic：主线程不展开，注册一项都没有插入，插件进入 `Failed`。
 - 闸门唤醒：executor 在 `wake` 里同步 poll 任务时不死锁，任务第一次 poll 就调用同一个句柄的 `own_with` 也不死锁；`manifest`、`activate`、监听、守卫的 drop 以 `Drop` 会 panic 的 payload panic 时，kernel 线程继续运行；任务以 `Drop` 会 panic 的 payload panic 时，executor 和 kernel 线程都继续运行。
 - 主线程回调 panic：Action 或视图工厂 panic 时主线程没有展开，插件进入 `Failed`，之后不再被调用。
 - 孤儿任务：`start` 提交任务后 panic，任务一次也没有被 poll 就被丢弃；已经挂起（返回 `Pending`）的任务在激活失效时被唤醒并丢弃，它持有的 `BusyGuard` 随之释放，kernel 能回到静止。
