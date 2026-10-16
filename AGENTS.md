@@ -8,6 +8,7 @@
 - Lectern 以阅读和审阅为主：AI 写代码，人负责浏览、审 Diff、切换会话。编辑和终端为审阅服务。
 - 入口是项目或文件夹，不以编辑器为中心。界面分三层（常驻 / 按需 / 收起），新增界面元素前先对照 [交互规范](docs/design/interaction.md) 和 [ADR 0012](docs/adr/0012.md)。
 - 界面英文优先，支持简体中文（[ADR 0013](docs/adr/0013.md)）。所有界面字符串走 `i18n` crate 的 Fluent 资源文件，en 与 zh-CN 同时提供，不允许硬编码。
+- 视觉与动效按 macOS 原生标准（[ADR 0015](docs/adr/0015.md)）：只用系统字体、系统语义色和系统控件；动画用 `ui` crate 的统一原语，时长与曲线见 [交互规范「动效」](docs/design/interaction.md#动效)，不在视图里自定义。
 - 性能是第一约束。任何改动不得让 [性能预算](docs/design/tech-research.md#性能预算) 超标。
 
 ## 架构规则（违反即 CI 失败）

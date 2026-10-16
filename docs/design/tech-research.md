@@ -191,7 +191,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | 层 | crate | 职责 |
 |---|---|---|
 | 入口 | `lectern-app` | App 启动、按 profile 装配插件、启动快照恢复；内核是单独的 kernel crate，下表其余 crate 都以插件形式注册 |
-| 视图 | `workspace`、`ui` | 窗口骨架、抽屉与主题，封装 gpui-component |
+| 视图 | `workspace`、`ui` | 窗口骨架、面板、系统色 token 与动画原语（[ADR 0015](../adr/0015.md)），封装 gpui-component |
 | 视图 | `welcome`、`project_home`、`review_view`、`context_drawer`、`conversation`、`worktrees`、`file_reader` | 打开项目、项目主页、按轮次审阅、上下文抽屉、与 agent 对话（含终端页）、并行总览、完整文件阅读与编辑 |
 | 领域 | `review` | 会话改动归因、片段对齐、「已看」状态、评论回传 |
 | 领域 | `project` | 仓库 → worktree → 子项目模型；清单解析（npm/yarn/pnpm、Maven、Gradle、Go、Cargo） |

@@ -26,25 +26,23 @@ Lectern 不是编辑器：打开项目，先看 agent 改了什么。入口是�
 
 | 画板 | 屏幕 | 要点 |
 |---|---|---|
-| 01 | Welcome | 最近项目；Open folder / Clone；从 Claude Code 与 Codex 历史里发现的、有会话但未打开过的文件夹；语言选择 |
-| 02 | Project home | 侧栏：Overview、Sessions（按 worktree 分组）、Packages（今天改动数）、Worktrees / Files / MR。主区：Needs review（会话卡片带信号：公共包改动、API 变化、已漂移、测试结果）、Outside any session、Recently done |
-| 03 | Review | 会话简报；按轮次的改动叙事；文件头勾选已看；行内 Review note；Drifted 提示；右侧 Progress；底部发送栏 |
-| 04 | Context drawer | 在 Diff 里点符号打开；Definition / Callers / Tests / History；标出未跟着改的调用方，可直接加审阅意见；Open full file 和 Edit 是次要按钮 |
-| 05 | Conversation | 结构化对话、工具调用、已发出的审阅意见、权限请求；Terminal 页是原始输出；输入框 |
-| 06 | Worktrees | 每个 worktree 一张卡片；右侧对比所选 worktree 与 main，并提示与其他 worktree 是否有文件重叠 |
-| 07 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；按会话、按模型的明细；当前项目 / 所有项目 |
+| 01 | Welcome | 仿 Xcode 欢迎窗口：左侧应用名、Open Folder（⌘O）/ Clone、语言选择；右侧最近项目，以及从 Claude Code 与 Codex 历史里发现、尚未打开过的文件夹 |
+| 02 | Overview | 侧栏：Overview、Sessions、Packages、Worktrees / Files / Merge Requests，底部 Usage 额度条。主区：大标题一句话说明待审数量，下面是分组列表 Needs Review（每行：agent 圆点、标题、状态与信号两行灰字、已看进度环）、Outside Any Session、Recently Done |
+| 03 | Review（可交互原型） | 顶部会话简报；按轮次的改动叙事；文件头圆形勾选；行内审阅意见；Drifted 提示；右侧检查器（Files / Conversation）；点符号滑出上下文面板（Callers / Tests / History）；底部浮条发送审阅意见 |
+| 04 | Worktrees | 分组列表 Active / Idle；右侧检查器对比所选 worktree 与 main，并提示与其他 worktree 是否有文件重叠 |
+| 05 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；按会话明细；当前项目 / 所有项目，7D / 14D / 30D |
 
 ## 窗口结构
 
-| 区域 | 内容 |
+| 区域 | 规格 |
 |---|---|
-| Welcome | 没有打开项目时出现 |
-| Title bar | 项目切换、⌘K、New session；审阅时显示返回项目和会话名 |
-| Project sidebar（左） | 项目主页常驻；进入审阅后收起 |
-| 阅读栏（中） | 最大宽度 960px，从上往下读 |
-| Progress（右） | 审阅时显示本会话文件和已看状态 |
-| 抽屉（右侧覆盖） | Context 或 Conversation，同一时间只开一个 |
-| 底部栏 | 只在审阅时出现：审阅意见数量和发送按钮 |
+| Welcome | 没有打开项目时出现，820pt 宽的独立窗口 |
+| Sidebar | 半透明（vibrancy），248pt；Overview 常驻，审阅时隐藏 |
+| Toolbar | 52pt，标题 + 副标题；右侧最多 3 个控件；审阅时左侧是返回按钮（⌘[） |
+| Content | 阅读栏最宽 760pt，居中，从上往下读 |
+| Inspector | 300pt，分段控件切换 Files / Conversation（⌥⌘I 显示 / 隐藏） |
+| Panel | 上下文面板浮在检查器上方，圆角 14pt，带阴影，不加遮罩 |
+| Floating bar | 只在审阅时出现，贴底居中：审阅意见数、Looks Good、发送 |
 
 ## 快捷键
 
@@ -56,11 +54,11 @@ Lectern 不是编辑器：打开项目，先看 agent 改了什么。入口是�
 | J / K | 下一处 / 上一处改动块 |
 | V | 标记已看，跳到下一个未看文件 |
 | C | 在当前行加审阅意见 |
-| ⌘↵ | 把攒下的审阅意见发给 agent |
-| Space | 光标在符号上时打开 Context drawer |
-| ⌘\ | 打开 / 关闭 Conversation |
-| ⌘⇧O · ⌘E | 打开完整文件 · 编辑 |
-| Esc | 关闭抽屉；再按一次回到项目主页 |
+| ⌘↩ | 把攒下的审阅意见发给 agent |
+| Space | 光标在符号上时打开上下文面板 |
+| ⌥⌘I · ⌘\ | 显示检查器 · 切到 Conversation |
+| ⇧⌘O · ⌘E | 打开完整文件 · 编辑 |
+| Esc · ⌘[ | 关闭面板 · 返回 Overview |
 
 每个操作都是一个具名 Action，都能绑定快捷键，也能被 UI 探针触发。
 
@@ -90,4 +88,38 @@ Lectern 不是编辑器：打开项目，先看 agent 改了什么。入口是�
 
 ## 视觉
 
-深色界面：背景 `#111214`，面板 `#17181B` / `#1C1D21`，边框 `#2C2E34`，正文 `#ECEAE4`，次要文字 `#A3A5AC`，强调色黄铜 `#E3A857`。增删行用绿 / 红底色并带 `+` / `−` 符号，不只靠颜色区分。
+按 macOS 原生应用的标准设计（[ADR 0015](../adr/0015.md)）：系统字体、系统颜色、标准窗口结构，层级靠留白和分组。
+
+| 项 | 规格 |
+|---|---|
+| 字体 | SF Pro（正文 13pt，标题 22 / 26pt，大标题 40pt），代码 SF Mono 12pt，中文回退苹方 |
+| 颜色 | 系统语义色（label、secondaryLabel、separator、controlBackground 等）；强调色跟随系统设置；浅色 / 深色跟随系统，不做自有主题 |
+| agent 标识 | 8pt 圆点：Claude Code 橙（浅 `#D9790A` / 深 `#C77A1A`），Codex 靛（浅 `#5856D6` / 深 `#6260D8`），两种模式都通过色觉辨识校验 |
+| 分组 | 圆角 12pt 的分组列表，0.5pt 分隔线；状态用圆点或一行次要文字表达，不用彩色标签块 |
+| Diff | 增删行用系统绿 / 红的淡底色，并带 `+` / `−` 符号，不只靠颜色区分 |
+| 控件 | 只用系统控件：分段控件、开关、圆形勾选、按钮（高 24–30pt） |
+
+## 动效
+
+动画只用来说明东西从哪来、到哪去。下表是实现标准，交互设计画布的 03 画板是可点击的参考。
+
+| 交互 | 动画 | 时长与曲线 |
+|---|---|---|
+| 打开上下文面板 | 从右侧滑入；阅读栏不动、不加遮罩 | 380ms · `cubic-bezier(0.32, 0.72, 0, 1)` |
+| 关闭面板 | 原路滑出 | 280ms · 同上 |
+| 进入会话 | 列表行的标题平移、放大成审阅页标题，其余内容淡入 | spring · response 0.35 · damping 0.86 |
+| 勾选已看 | 圆圈填色，对勾描出；文件名变为次要色 | 180ms 填色 · 220ms 对勾，延迟 60ms |
+| 已看进度 | 进度条宽度增长 | 360ms · `cubic-bezier(0.32, 0.72, 0, 1)` |
+| V：已看并下一个 | 勾选动画结束后，阅读栏滚到下一个文件顶部 | 滚动 300ms · ease-out |
+| 展开评论框 | 在当前行下方撑开，内容淡入，下方代码顺滑下移 | 280ms 高度 · 200ms 透明度 |
+| 分段控件 | 滑块平移到新选项 | 260ms · `cubic-bezier(0.32, 0.72, 0, 1)` |
+| 开关 | 滑钮移动，末端轻微回弹 | 240ms · `cubic-bezier(0.34, 1.3, 0.64, 1)` |
+| Agent 新一轮到达 | 新轮次从下方 8pt 淡入；侧栏会话行的圆点轻闪一次 | 240ms · ease-out |
+| 悬停 | 背景淡入，离开时稍慢 | 进入 120ms · 离开 200ms |
+
+规则：
+
+- **随时可打断**：动画进行中再次操作，从当前位置接着走，不排队、不跳回起点。键盘和鼠标走同一套动画。
+- **结果先到**：勾选、加意见、切换会话立刻生效，写盘在后台。100ms 内完成的操作不出现加载态。
+- **只动便宜的属性**：动画只改位移、透明度和裁剪，不触发重排，稳定 120 fps。
+- **减弱动态效果**：系统开启该选项时，位移改为淡入淡出，时长减半。
