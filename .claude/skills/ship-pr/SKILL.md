@@ -15,7 +15,7 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 
 ## 2. 开 PR
 
-- 标题用 `<范围>: <做了什么>`，正文写改了什么、为什么、怎么验证，末尾 `Closes #<issue>`。
+- 标题用 `<范围>: <做了什么>`，正文写改了什么、为什么、怎么验证，末尾写 issue：实现 PR 和不需要设计的 PR 用 `Closes #<issue>`；设计文档 PR 用 `Refs #<issue>`，issue 留给后续的实现 PR 关闭。
 - 叠在其他分支上的 PR，base 设为下面那个分支，正文写明依赖关系。
 
 ## 3. 等待审阅
@@ -63,7 +63,7 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 
 以下条件全部满足时才能合并：
 
-1. Codex 已审阅最新提交且没有意见：汇总评论里的 `sha` 等于 head、`status` 为 `completed`、`findings` 为 `false`，并且有 👍（设计文档以外的文档 PR 免）。
+1. Codex 已审阅最新提交且没有意见：汇总评论里的 `sha` 等于 head、`status` 为 `completed`、`findings` 为 `false`，并且有 👍。设计文档以外的只改文档的 PR 整条免除，不需要 Codex 的汇总评论；设计文档 PR 不免。
 2. CI 全部通过：`gh api --paginate $R/commits/<sha>/check-runs --jq '.check_runs[]|[.name,.status,.conclusion]|@tsv'` 的结果里必须有 `.github/workflows/ci.yml` 定义的两个任务 `Checks (Linux, GPUI-free crates)` 和 `Build and test (macOS arm64)`，而且每一行都是 `completed` 和 `success`。结果为空或缺任何一个任务都不算通过：推送后 GitHub 登记检查需要几秒到几十秒。列表类的接口默认每页 30 条，都要带 `--paginate`。
 3. 没有合并冲突：`gh api $R/pulls/$N --jq .mergeable_state` 为 `clean`。
 4. 没有未解决的讨论串（`ccr/review_threads` 或 GraphQL 的 `reviewThreads`）。

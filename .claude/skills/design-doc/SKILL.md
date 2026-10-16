@@ -22,7 +22,7 @@ Lectern 先写设计、设计文档 PR 合并后再写代码（AGENTS.md「工�
    - 需要产品决定的问题（定位、目标用户、界面结构的大改）放进「未决问题」，写明选项和默认选项；技术问题自己决定。改变架构、依赖选型或性能预算的，另写 ADR（技能 `adr`）。
 4. 更新 `crates/<crate>/AGENTS.md` 的「设计文档」一行，改成指向新文档的链接。
 5. 提 PR：标题 `docs(<crate>): design`，正文写 `Refs #<n>`，列出未决问题。设计文档 PR 按合并规则处理：等 Codex 的 👍、CI 通过、讨论串全部解决后合并（技能 `ship-pr`）。需要产品决定的未决问题同时告诉人；不阻塞合并的，按文档里写明的默认选项实现。
-6. 合并后再按设计写代码：实现另开 worktree、分支和 PR，与设计文档 PR 共用同一个 issue（设计 PR 写 `Refs #<n>`，实现 PR 写 `Closes #<n>`）。实现中发现设计要变，先改文档。
+6. 合并后再按设计写代码：先 `git fetch origin main`，从更新后的 `origin/main` 另开 worktree、分支和 PR（这样才包含刚合并的设计文档和 crate AGENTS.md），与设计文档 PR 共用同一个 issue（设计 PR 写 `Refs #<n>`，实现 PR 写 `Closes #<n>`）。实现中发现设计要变，先改文档。
 
 ## 检查
 
