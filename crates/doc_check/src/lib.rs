@@ -53,8 +53,10 @@ fn options() -> Options {
 /// GitHub's heading anchor: lowercase, keep letters, digits, combining marks,
 /// `-` and `_`, turn spaces into `-`, drop everything else.
 pub fn slug(text: &str) -> String {
-    text.chars()
-        .flat_map(char::to_lowercase)
+    // Lowercase the whole string: some letters (e.g. final sigma) depend on
+    // their neighbours.
+    text.to_lowercase()
+        .chars()
         .filter_map(|c| match c {
             ' ' => Some('-'),
             '-' | '_' => Some(c),
@@ -122,29 +124,67 @@ fn html_destinations(html: &str) -> Vec<String> {
             .map_or("", |end| &rest[start + end + 3..]);
     }
     text.push_str(rest);
-    let lower = text.to_ascii_lowercase();
+    // Walk the tags and their attributes, so a quoted value that merely
+    // contains `href=` is not mistaken for an attribute.
     let mut out = Vec::new();
-    for attr in ["href", "src"] {
-        let mut from = 0;
-        while let Some(i) = lower[from..].find(attr) {
-            let at = from + i;
-            from = at + attr.len();
-            // Must be a whole attribute name followed by `=`.
-            let before_ok = at == 0 || lower.as_bytes()[at - 1].is_ascii_whitespace();
-            let after = lower[from..].trim_start();
-            if !before_ok || !after.starts_with('=') {
+    let mut chars = text.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        if c != '<' {
+            continue;
+        }
+        // Tag name; skip closing tags, declarations and processing instructions.
+        match chars.peek() {
+            Some((_, c)) if c.is_ascii_alphabetic() => {}
+            _ => continue,
+        }
+        while chars
+            .next_if(|(_, c)| !c.is_whitespace() && *c != '>' && *c != '/')
+            .is_some()
+        {}
+        loop {
+            while chars
+                .next_if(|(_, c)| c.is_whitespace() || *c == '/')
+                .is_some()
+            {}
+            match chars.peek() {
+                None => break,
+                Some((_, '>')) => {
+                    chars.next();
+                    break;
+                }
+                _ => {}
+            }
+            let mut name = String::new();
+            while let Some((_, c)) =
+                chars.next_if(|(_, c)| !c.is_whitespace() && !matches!(c, '=' | '>' | '/'))
+            {
+                name.push(c.to_ascii_lowercase());
+            }
+            while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
+            if chars.next_if(|(_, c)| *c == '=').is_none() {
                 continue;
             }
-            let value = text[text.len() - after.len() + 1..].trim_start();
-            let dest = match value.chars().next() {
-                Some(q @ ('"' | '\'')) => value[1..].split(q).next().unwrap_or(""),
-                _ => value
-                    .split(|c: char| c.is_whitespace() || c == '>')
-                    .next()
-                    .unwrap_or(""),
-            };
-            if !dest.is_empty() {
-                out.push(dest.to_string());
+            while chars.next_if(|(_, c)| c.is_whitespace()).is_some() {}
+            let mut value = String::new();
+            match chars.peek().map(|(_, c)| *c) {
+                Some(q @ ('"' | '\'')) => {
+                    chars.next();
+                    for (_, c) in chars.by_ref() {
+                        if c == q {
+                            break;
+                        }
+                        value.push(c);
+                    }
+                }
+                _ => {
+                    while let Some((_, c)) = chars.next_if(|(_, c)| !c.is_whitespace() && *c != '>')
+                    {
+                        value.push(c);
+                    }
+                }
+            }
+            if (name == "href" || name == "src") && !value.is_empty() {
+                out.push(value);
             }
         }
     }
@@ -241,6 +281,17 @@ pub fn check(root: &Path, files: &[PathBuf]) -> Vec<BrokenLink> {
     for rel in files {
         let joined = root.join(rel);
         let path = fs::canonicalize(&joined).unwrap_or(joined);
+        // A tracked Markdown symlink pointing outside the repository is not
+        // read: its content would come from the machine, not the commit.
+        if !path.starts_with(&root) {
+            errors.push(BrokenLink {
+                file: rel.clone(),
+                line: 1,
+                target: path.display().to_string(),
+                reason: "file is a symlink that points outside the repository".into(),
+            });
+            continue;
+        }
         // Each file once, whichever name reached it first.
         if !done.insert(path.clone()) {
             continue;
@@ -425,6 +476,34 @@ mod tests {
         let errors = repo.check(&["b.md"]);
         let targets: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
         assert_eq!(targets, ["missing.png", "nope.md"]);
+    }
+
+    #[test]
+    fn html_attributes_respect_quotes() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "<div data-note=\"x href=missing.md\" title='src=gone.md'><a class=x href=nope.md>y</a></div>\n",
+        )]);
+        let errors = repo.check(&["b.md"]);
+        let targets: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(targets, ["nope.md"]);
+    }
+
+    #[test]
+    fn final_sigma_lowercases_like_github() {
+        assert_eq!(slug("ΟΣ"), "ος");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn markdown_symlink_out_of_the_repository_is_rejected() {
+        let repo = TempRepo::new(&[("outside.md", "[x](nope.md)\n")]);
+        let base = repo.0.join("repo");
+        fs::rename(base.join("outside.md"), repo.0.join("outside.md")).unwrap();
+        std::os::unix::fs::symlink(repo.0.join("outside.md"), base.join("alias.md")).unwrap();
+        let errors = repo.check(&["alias.md"]);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].reason.contains("outside the repository"));
     }
 
     #[test]
