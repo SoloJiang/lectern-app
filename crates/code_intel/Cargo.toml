@@ -9,3 +9,6 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "domain"
+
+[lints]
+workspace = true

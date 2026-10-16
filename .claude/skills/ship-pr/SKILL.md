@@ -12,6 +12,7 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
 - 一个 PR 只做一个 issue，改动尽量在一个 crate 内。
 - 本地跑 `just ci`。在 Linux 上它只覆盖不依赖 GPUI 的 crate；改了视图层或 `app` 的，结果以 macOS CI 为准。
 - 新增界面字符串时，en 与 zh-CN 都要提供；新增依赖时，`just deny` 要通过。
+- 实现 PR 改了某个 crate 的接口、数据结构或验收条件时，diff 里要有 `docs/design/<crate>.md` 的对应修改、更新后的状态行，以及「实际验证」「与设计的差异」两节；影响到 ADR 的同时更新 ADR。
 
 ## 2. 开 PR
 

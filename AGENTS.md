@@ -33,7 +33,7 @@
 只用以下入口（需要 `just`、`cargo-nextest`、`cargo-deny`；要在多个 worktree 间共享编译结果，在 `~/.cargo/config.toml` 里设置 `build.rustc-wrapper = "sccache"`）：
 
 ```sh
-just check   # 格式 + 架构规则 + clippy（警告即失败）
+just check   # 格式 + 架构规则 + 文档链接 + clippy（警告即失败）
 just test    # cargo nextest；参数透传，如 just test -p lectern-review
 just doctest # 文档测试（nextest 不跑）
 just bench   # 性能预算基准
@@ -62,8 +62,10 @@ CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
 
 - 一个任务一个 issue，粒度控制在一个 crate 内。需要设计文档的任务分两个阶段，各用自己的 worktree、分支和 PR：先是设计文档 PR（`Refs #<n>`），合并后再开实现 PR（`Closes #<n>`）。不需要设计文档的任务只有一个 PR。一个 issue 涉及多个 crate 时（如 #32 同时涉及 `usage`、`usage_view`、`platform`），各 crate 分别提 PR，只有最后完成的那个写 `Closes #<n>`，其余写 `Refs #<n>`。
 - 先写 `docs/design/<crate>.md`（接口与数据结构，按[模板](docs/design/TEMPLATE.md)），设计文档 PR 按合并规则合并后再写代码。需要产品决定的问题写进文档的「未决问题」并告诉人，其余由负责推进的 agent 决定。
+- 实现以已合并的设计文档为准。实现中需要改设计时，在同一个 PR 里修改设计文档（改变架构的另写 ADR），在「与设计的差异」里写明原因，不让代码先偏离设计再补文档。每个实现 PR 同时更新设计文档开头的状态行，并填写「实际验证」。发现文档与已合并的代码不一致时，先判断哪一方是错的，在一个 PR 里改正。
 - 新增 crate 时同时写 `crates/<name>/AGENTS.md`（职责、边界、测试方式），并建软链接 `CLAUDE.md -> AGENTS.md`。
 - 领域逻辑用单元测试 + insta 快照验收；视图用 `#[gpui::test]`；视觉效果用 UI 探针。
+- 调用外部命令行工具（git、gh、glab、claude、codex、jdtls 等）的代码，测试时把一个假命令放在 PATH 最前面：它记录收到的参数、标准输入和工作目录，按夹具回放输出。测试不依赖真实工具、网络和登录状态。
 
 ## 技能
 

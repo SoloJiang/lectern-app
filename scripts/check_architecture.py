@@ -13,6 +13,10 @@ Rules checked:
      binding is a crate whose name matches MACOS_ONLY_PREFIXES or contains a
      MACOS_NAME_TOKENS token, or any dependency whose
      target predicates can only hold on Apple platforms (apple_only_cfg).
+  5. Every workspace crate inherits the workspace lints
+     (`[lints] workspace = true`).
+
+Each error names the rule's source (AGENTS.md or a design doc) in brackets.
 
 Optional dependencies are included (`cargo metadata --all-features`), so a
 rule broken behind a feature flag still fails. A crate's own dev-dependencies
@@ -31,6 +35,7 @@ import os
 import re
 import subprocess
 import sys
+import tomllib
 
 RANK = {"app": 4, "view": 3, "domain": 2, "infra": 1}
 GPUI_FREE_LAYERS = {"domain", "infra", "kernel"}
@@ -243,6 +248,12 @@ def gpui_free_packages(meta):
     return sorted(free)
 
 
+def inherits_workspace_lints(manifest_path):
+    """Whether the crate's Cargo.toml sets `[lints] workspace = true`."""
+    with open(manifest_path, "rb") as f:
+        return tomllib.load(f).get("lints", {}).get("workspace") is True
+
+
 def main():
     if "--gpui-free-packages" in sys.argv:
         # What the Linux job compiles: a GPUI dependency declared only for
@@ -260,7 +271,9 @@ def main():
         pkg = packages[pid]
         value = (pkg.get("metadata") or {}).get("lectern", {}).get("layer")
         if value not in (*RANK, "kernel", "tool"):
-            errors.append(f"{pkg['name']}: missing or unknown layer {value!r}")
+            errors.append(f"{pkg['name']}: missing or unknown layer {value!r} [docs/design/cargo-workspace.md]")
+        if not inherits_workspace_lints(pkg["manifest_path"]):
+            errors.append(f"{pkg['name']}: add `[lints] workspace = true` to its Cargo.toml [docs/design/ci.md]")
         layer[pid] = value
 
     def normal_deps(pid):
@@ -306,22 +319,22 @@ def main():
             if dep in members:
                 theirs = layer[dep]
                 if theirs == "app":
-                    errors.append(f"{name} -> {dep_name}: nothing may depend on the app crate")
+                    errors.append(f"{name} -> {dep_name}: nothing may depend on the app crate [docs/design/cargo-workspace.md]")
                 elif theirs == "tool" and mine != "app":
-                    errors.append(f"{name} -> {dep_name}: only the app crate may depend on a tool crate")
+                    errors.append(f"{name} -> {dep_name}: only the app crate may depend on a tool crate [docs/design/cargo-workspace.md]")
                 elif theirs == "tool" and in_release_build(pid, dep_name):
                     errors.append(
                         f"{name} -> {dep_name}: tool crates stay out of release builds; "
-                        "use a dev-dependency or an optional dependency outside the default features"
+                        "use a dev-dependency or an optional dependency outside the default features [docs/design/cargo-workspace.md]"
                     )
                 elif mine in RANK and theirs in RANK and RANK[theirs] > RANK[mine]:
-                    errors.append(f"{name} ({mine}) -> {dep_name} ({theirs}): dependencies must point downwards")
+                    errors.append(f"{name} ({mine}) -> {dep_name} ({theirs}): dependencies must point downwards [AGENTS.md architecture rule 1]")
                 elif mine == "kernel" and theirs not in ("kernel", None):
-                    errors.append(f"{name} (kernel) -> {dep_name} ({theirs}): kernel crates depend only on kernel crates")
+                    errors.append(f"{name} (kernel) -> {dep_name} ({theirs}): kernel crates depend only on kernel crates [docs/design/cargo-workspace.md]")
             # Workspace crates too: native code moved into another member must
             # not bypass platform isolation.
             if name != PLATFORM_CRATE and dep_name != PLATFORM_CRATE and (is_macos_binding_name(dep_name) or apple_only(pid, dep)):
-                errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE}")
+                errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE} [AGENTS.md architecture rule 6]")
 
     for pid in members:
         if layer[pid] not in GPUI_FREE_LAYERS:
@@ -338,7 +351,7 @@ def main():
                     # feature unification; confirm it with this crate alone.
                     if cur == pid or gpui_in_own_build(packages[pid]["name"]):
                         errors.append(
-                            f"{packages[pid]['name']} ({layer[pid]}): depends on {packages[dep]['name']}; this layer must not use GPUI"
+                            f"{packages[pid]['name']} ({layer[pid]}): depends on {packages[dep]['name']}; this layer must not use GPUI [AGENTS.md architecture rule 2]"
                         )
                     stack.clear()
                     break
