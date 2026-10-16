@@ -19,7 +19,7 @@
 
 ```sh
 just test -p lectern-app
-cargo build --locked -p lectern-app   # 与 macOS CI 的构建步骤相同
+just ci                 # macOS 上包含构建 lectern 与性能基准，与 CI 相同
 ```
 
 - 冷启动、空闲内存由 `bench` 测量（[#7](https://github.com/SoloJiang/lectern-app/issues/7)），安装包体积由 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 检查。

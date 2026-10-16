@@ -48,8 +48,10 @@ description: Take a Lectern change from branch to squash-merged PR under the rep
   `ccr/…` 路由只在 Claude Code 的云端会话里可用。在其他环境（如 Codex、本地的 `gh`）里用 GitHub GraphQL：
 
   ```sh
-  gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId}}}}}}}' \
-    -F o=SoloJiang -F r=lectern-app -F n=$N
+  gh api graphql --paginate \
+    -f query='query($o:String!,$r:String!,$n:Int!,$endCursor:String){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100,after:$endCursor){nodes{id isResolved comments(first:1){nodes{databaseId}}} pageInfo{hasNextPage endCursor}}}}}' \
+    -F o=SoloJiang -F r=lectern-app -F n=$N \
+    --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved|not)'
   gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -F id=<thread_id>
   ```
 
