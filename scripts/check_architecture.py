@@ -9,8 +9,8 @@ Rules checked:
   3. Crates in the domain, infra and kernel layers never depend on GPUI,
      directly or transitively.
   4. macOS system bindings are direct dependencies of `platform` only. A
-     binding is a crate matching MACOS_ONLY_PREFIXES, or any dependency
-     declared only for Apple targets.
+     binding is a crate matching MACOS_ONLY_PREFIXES, or any dependency that
+     Cargo compiles for macOS but not for Linux.
 
 Optional dependencies are included (`cargo metadata --all-features`), so a
 rule broken behind a feature flag still fails. A crate's own dev-dependencies
@@ -55,10 +55,11 @@ MACOS_ONLY_PREFIXES = (
     "icrate",
     "apple-",
 )
-# A dependency declared only for Apple targets is a macOS binding whatever
-# its name, e.g. [target.'cfg(target_os = "macos")'.dependencies].
-APPLE_TARGET_MARKERS = ("macos", "apple", "darwin", "ios")
+# A dependency compiled for macOS but not for Linux is a macOS binding
+# whatever its name, e.g. [target.'cfg(target_os = "macos")'.dependencies].
+# Cargo evaluates the cfg predicates (--filter-platform); we compare results.
 LINUX_TARGET = "x86_64-unknown-linux-gnu"
+MACOS_TARGET = "aarch64-apple-darwin"
 PLATFORM_CRATE = "lectern-platform"
 
 
@@ -74,6 +75,12 @@ def metadata(platform=None):
         text=True,
     ).stdout
     return json.loads(out)
+
+
+def direct_deps(meta):
+    """Workspace crate id -> ids of its direct dependencies (any kind)."""
+    members = set(meta["workspace_members"])
+    return {n["id"]: {d["pkg"] for d in n["deps"]} for n in meta["resolve"]["nodes"] if n["id"] in members}
 
 
 def gpui_free_packages(meta):
@@ -108,6 +115,7 @@ def main():
         print(" ".join(f"-p {name}" for name in gpui_free_packages(metadata(LINUX_TARGET))))
         return 0
     meta = metadata()
+    on_macos, on_linux = direct_deps(metadata(MACOS_TARGET)), direct_deps(metadata(LINUX_TARGET))
     packages = {p["id"]: p for p in meta["packages"]}
     members = set(meta["workspace_members"])
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -127,11 +135,7 @@ def main():
                 yield dep["pkg"]
 
     def apple_only(pid, dep_pkg):
-        for dep in nodes[pid]["deps"]:
-            if dep["pkg"] == dep_pkg:
-                targets = [k["target"] for k in dep["dep_kinds"]]
-                return all(t and any(m in t for m in APPLE_TARGET_MARKERS) for t in targets)
-        return False
+        return dep_pkg in on_macos.get(pid, ()) and dep_pkg not in on_linux.get(pid, ())
 
     def own_deps(pid):
         """A workspace crate's direct dependencies, dev-dependencies included:
