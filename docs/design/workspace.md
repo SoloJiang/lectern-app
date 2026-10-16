@@ -1,6 +1,6 @@
 # 工作区与 crate 划分
 
-对应 issue [#1](https://github.com/SoloJiang/lectern-app/issues/1)。本文定义 Cargo workspace 的结构、每个 crate 所在的层，以及工具链与 GPUI 的锁定方式。架构规则见 [AGENTS.md](../../AGENTS.md)，分层理由见 [技术调研](tech-research.md)「技术路线与架构」。
+对应 issue [#1](https://github.com/SoloJiang/lectern-app/issues/1)。架构规则见 [AGENTS.md](../../AGENTS.md)，分层理由见 [技术调研](tech-research.md)「技术路线与架构」。
 
 ## 目录
 
@@ -24,7 +24,7 @@ layer = "domain"
 
 ## crate 与层
 
-依赖只能从上往下：`app` → `view` → `domain` → `infra`。`kernel` 和 `services` 是插件机制本身，任何层都可以依赖。`tool` 只给调试与测试构建用，不进入发布构建。
+依赖只能从上往下：`app` → `view` → `domain` → `infra`。`kernel` 和 `services` 构成插件机制，任何层都可以依赖。`tool` 只用于调试与测试构建，不进入发布构建。
 
 | 层 | crate | 职责 |
 |---|---|---|
@@ -63,9 +63,9 @@ layer = "domain"
 ## 工具链与 GPUI 锁定
 
 - **Rust**：`rust-toolchain.toml` 锁定 `1.97.0`，带 rustfmt、clippy 和 `aarch64-apple-darwin` 目标。edition 2024。
-- **GPUI**：不再用 git 依赖锁 Zed commit。Zed 现在把 GPUI 快照发布到 crates.io 的 `gpui-pre`，gpui-component 0.7.3 用 `=0.3.9` 精确锁定它（Zed `93d7456`）。我们跟随 gpui-component：
+- **GPUI**：Zed 把 GPUI 快照发布到 crates.io 的 `gpui-pre`，gpui-component 0.7.3 用 `=0.3.9` 精确锁定它（Zed `93d7456`）。工作区跟随 gpui-component 的锁定，不再用 git 依赖锁 Zed commit：
   - `gpui = { package = "gpui-pre", version = "=0.3.9" }`
-  - `gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }`：macOS 上必须开 `font-kit`，否则 `gpui_macos` 退回空文字系统，界面不显示任何文字
+  - `gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit"] }`：macOS 上必须开启 `font-kit`，否则 `gpui_macos` 退回空文字系统，界面不显示任何文字
   - `gpui-component = "=0.7.3"`
   - 三者只能一起升级，并且必须是 gpui-component 发布时使用的同一个快照。`Cargo.lock` 提交到仓库。
 - **libghostty-vt**：在 [#5](https://github.com/SoloJiang/lectern-app/issues/5) 中加入，届时锁定版本与 vendored Ghostty 源码。
@@ -75,7 +75,7 @@ layer = "domain"
 ## 构建范围
 
 - 领域层与基础设施层不依赖 GPUI，在任何平台都能 `cargo check -p <crate>`。
-- 视图层和 `app` 依赖 GPUI，只在 macOS 上编译；CI 在 Apple Silicon runner 上跑（[#4](https://github.com/SoloJiang/lectern-app/issues/4)）。
+- 视图层和 `app` 依赖 GPUI，只在 macOS 上编译；CI 在 Apple Silicon runner 上运行（[#4](https://github.com/SoloJiang/lectern-app/issues/4)）。
 
 ## 验收
 
