@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
-fn git(args: &[&str]) -> Result<String, String> {
+/// Git's stdout as raw bytes: tracked paths need not be UTF-8.
+fn git(args: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new("git")
         .args(args)
         .output()
@@ -12,19 +13,39 @@ fn git(args: &[&str]) -> Result<String, String> {
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }
-    String::from_utf8(out.stdout).map_err(|e| e.to_string())
+    Ok(out.stdout)
+}
+
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
 fn main() -> ExitCode {
     let result = git(&["rev-parse", "--show-toplevel"]).and_then(|root| {
-        let root = PathBuf::from(root.trim());
+        let root = path_from_bytes(root.trim_ascii_end());
         // List every tracked file and filter by extension here: pathspecs are
         // case-sensitive, so `*.md` would miss `GUIDE.MD`.
-        let list = git(&["-C", &root.to_string_lossy(), "ls-files", "-z"])?;
+        let list = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["ls-files", "-z"])
+            .output()
+            .map_err(|e| format!("cannot run git: {e}"))?;
+        if !list.status.success() {
+            return Err(String::from_utf8_lossy(&list.stderr).into_owned());
+        }
         let tracked: Vec<PathBuf> = list
-            .split('\0')
+            .stdout
+            .split(|&b| b == 0)
             .filter(|f| !f.is_empty())
-            .map(PathBuf::from)
+            .map(path_from_bytes)
             .collect();
         let files: Vec<PathBuf> = tracked
             .iter()

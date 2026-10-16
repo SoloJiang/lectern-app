@@ -308,8 +308,35 @@ pub fn check_tracked(
             .strip_prefix(&root)
             .map(Path::to_path_buf)
             .unwrap_or_else(|_| rel.clone());
-        let Ok(text) = fs::read_to_string(&path) else {
+        let input_error = |reason: String| BrokenLink {
+            file: rel.clone(),
+            line: 1,
+            target: rel.display().to_string(),
+            reason,
+        };
+        // A tracked Markdown symlink must point at a tracked file, or it is
+        // broken in a fresh checkout.
+        if let Some(set) = &tracked
+            && !set.contains(&rel)
+        {
+            errors.push(input_error(
+                "file is a symlink to a file not tracked by git".into(),
+            ));
             continue;
+        }
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            // Deleted in the working tree but not yet committed: nothing to check.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && !fs::symlink_metadata(&path).is_ok_and(|m| m.is_symlink()) =>
+            {
+                continue;
+            }
+            Err(e) => {
+                errors.push(input_error(format!("cannot read file: {e}")));
+                continue;
+            }
         };
         let dir = path.parent().unwrap_or(&root).to_path_buf();
         for (offset, target) in links(&text) {
@@ -585,6 +612,29 @@ mod tests {
         let errors = check_tracked(&base, &[PathBuf::from("c.md")], Some(&tracked));
         let got: Vec<_> = errors.iter().map(|e| e.reason.as_str()).collect();
         assert_eq!(got, ["not tracked by git"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn markdown_symlink_to_untracked_file_fails() {
+        let repo = TempRepo::new(&[("generated.md", "[x](nope.md)\n")]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("generated.md", base.join("alias.md")).unwrap();
+        let tracked = vec![PathBuf::from("alias.md")];
+        let errors = check_tracked(&base, &[PathBuf::from("alias.md")], Some(&tracked));
+        let got: Vec<_> = errors.iter().map(|e| e.reason.as_str()).collect();
+        assert_eq!(got, ["file is a symlink to a file not tracked by git"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn markdown_symlink_with_missing_target_fails() {
+        let repo = TempRepo::new(&[("a.md", "# A\n")]);
+        let base = repo.0.join("repo");
+        std::os::unix::fs::symlink("gone.md", base.join("alias.md")).unwrap();
+        let errors = repo.check(&["alias.md"]);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].reason.starts_with("cannot read file"));
     }
 
     #[test]
