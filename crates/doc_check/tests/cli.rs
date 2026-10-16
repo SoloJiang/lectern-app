@@ -21,6 +21,10 @@ impl Fixture {
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
+        // Resolve symlinks in the temp path (macOS: /var -> /private/var): the
+        // fake git's shell reports the physical working directory.
+        fs::create_dir_all(&dir).unwrap();
+        let dir = fs::canonicalize(&dir).unwrap();
         let repo = dir.join("repo");
         for (path, text) in files {
             let p = repo.join(path);
