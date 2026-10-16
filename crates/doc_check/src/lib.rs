@@ -151,6 +151,28 @@ const RAW_TEXT: [&[u8]; 9] = [
     b"plaintext",
 ];
 
+/// Byte offset of the end tag that closes the raw-text element `name` in
+/// `html`: `</name` (any case) followed by whitespace, `/`, `>` or the end of
+/// the input, as the HTML tokenizer requires. `</scriptx>` does not close
+/// `script`.
+fn raw_text_end(html: &str, name: &[u8]) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let mut from = 0;
+    while let Some(i) = html[from..].find("</").map(|i| from + i) {
+        let after = i + 2 + name.len();
+        if bytes.len() >= after
+            && bytes[i + 2..after].eq_ignore_ascii_case(name)
+            && bytes
+                .get(after)
+                .is_none_or(|b| b.is_ascii_whitespace() || matches!(b, b'/' | b'>'))
+        {
+            return Some(i);
+        }
+        from = i + 2;
+    }
+    None
+}
+
 /// Like [`html_destinations`], starting inside the raw-text element `open`
 /// (left open by an earlier piece of inline HTML) and returning the raw-text
 /// element still open at the end.
@@ -158,17 +180,13 @@ fn html_scan(html: &str, open: Option<Vec<u8>>) -> (Vec<(usize, String)>, Option
     let mut open = open;
     let html = match &open {
         // Inside an element opened by an earlier piece: skip to its end tag.
-        Some(name) => {
-            let lower = html.to_ascii_lowercase();
-            let end = format!("</{}", String::from_utf8_lossy(name));
-            match lower.find(&end) {
-                Some(i) => {
-                    open = None;
-                    &html[i..]
-                }
-                None => return (Vec::new(), open),
+        Some(name) => match raw_text_end(html, name) {
+            Some(i) => {
+                open = None;
+                &html[i..]
             }
-        }
+            None => return (Vec::new(), open),
+        },
         None => html,
     };
     let mut emitter = DefaultEmitter::<usize>::new_with_span();
@@ -693,6 +711,17 @@ mod tests {
         let repo = TempRepo::new(&[(
             "b.md",
             "Text <script>const x = '<a href=\"missing.md\">';</script> and <a href=\"gone.md\">x</a>.\n",
+        )]);
+        let errors = repo.check(&["b.md"]);
+        let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
+        assert_eq!(got, ["gone.md"]);
+    }
+
+    #[test]
+    fn raw_text_end_tag_needs_a_boundary() {
+        let repo = TempRepo::new(&[(
+            "b.md",
+            "Text <script>ignored </scriptx><a href=\"missing.md\"></a></script> then <a href=\"gone.md\">x</a>.\n",
         )]);
         let errors = repo.check(&["b.md"]);
         let got: Vec<_> = errors.iter().map(|e| e.target.as_str()).collect();
