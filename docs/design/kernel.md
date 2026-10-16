@@ -138,7 +138,19 @@ impl Context<'_> {
 
 /// 提交时才生效的守卫。`commit` 在 kernel 线程上调用，只做排队等轻量工作。
 pub trait Staged: Send + 'static {
-    fn commit(&mut self);
+    /// `token` 表示这次激活是否已经完全成功：所有守卫的 `commit` 和 `started` 都正常结束后才变为有效，
+    /// 激活失败或之后停用时变为无效。守卫排到其他线程的工作（如主线程上应用界面注册）在执行前检查 `token`，
+    /// 无效就丢弃。
+    fn commit(&mut self, token: ActivationToken);
+}
+
+/// 一次激活的成功标记，可以克隆后带到其他线程。
+#[derive(Clone)]
+pub struct ActivationToken { /* Arc<AtomicU8>：待定 / 成功 / 已失效 */ }
+
+impl ActivationToken {
+    /// 激活已完全成功且尚未停用。
+    pub fn is_live(&self) -> bool;
 }
 
 /// 一次激活的长期句柄：从 `started` 起有效，到这次激活停用为止。可以克隆并保存在插件的状态里，
@@ -300,7 +312,7 @@ impl Emitter {
 - 一个服务（不论 `MULTIPLE` 是否为 true）的最后一个已激活的提供者停用时，依赖它的插件先停用（依赖者先于被依赖者）。
 - `MULTIPLE = true` 的服务：依赖者激活后，提供者的增减不重新激活依赖者。依赖者通过 `ServiceSet<S>` 读取当前集合，集合在提供者增减时随即更新；需要在变化时做额外处理的，订阅 `ServiceAdded<S>` 和 `ServiceRemoved<S>` 事件（带提供者的插件 ID）。
 - 依赖者不得把 `ServiceSet::current()` 里的 `Arc<S>` 保存到本次调用之外，否则提供者停用后仍会被调用。
-- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除 `Command` 和 `Manual` 的记录；`Workspace` 条件不记在插件上，kernel 保存最近一次的 `WorkspaceFacts`，插件重新启用（包括 `Failed` 后在设置里重试）时用它重新判断。还在等待的 `command` 回调立即收到 `PluginError::Disabled`，`shutdown` 时收到 `PluginError::ShuttingDown`；插件所依赖的某个服务的所有提供者都已 `Failed` 或被停用（本次运行中不会再就绪）时，收到 `PluginError::DependencyUnavailable`。回调不会一直挂起。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
+- 激活条件满足后保持有效：`Workspace`、`Command` 和 `Manual`（调用过 `activate(id)`）一旦满足，在本次运行中一直视为满足；依赖暂未就绪时，等依赖就绪再激活，`status()` 显示为「等待依赖」。用户在设置里停用插件时清除 `Command` 和 `Manual` 的记录；`Workspace` 条件不记在插件上，kernel 保存最近一次的 `WorkspaceFacts`，插件重新启用（包括 `Failed` 后在设置里重试）时用它重新判断。保存的 facts 属于提交它的那次激活（`KernelControl` 带激活代数）：那次激活停用时，kernel 清除这份 facts，等新的 `workspace_changed` 再判断。还在等待的 `command` 回调立即收到 `PluginError::Disabled`，`shutdown` 时收到 `PluginError::ShuttingDown`；插件所依赖的某个服务当前没有可激活的提供者时，收到 `PluginError::DependencyUnavailable`。「可激活」指提供者已启用、没有 `Failed`，而且自己的激活条件已经满足；命令不会替依赖去满足它们的激活条件（如替 `Workspace` 插件假定项目匹配）。回调不会一直挂起。P0 只有一个窗口；多窗口时按项目分别计算，届时修订本节。
 
 ### 激活的提交
 
@@ -311,7 +323,7 @@ impl Emitter {
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
 - 激活期间的状态（缓存的 `Arc<S>`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Active` 的 drop 同样用 `catch_unwind` 包住，panic 时记录错误、插件标为 `Failed`，撤销照常完成。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
-- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：注册在守卫的 `commit` 被调用之前不会进入界面，`commit` 只把它排到主线程的下一帧。激活失败时 `commit` 不会被调用，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`workspace` 本身是插件，收到注册时用自己的 `PluginHandle::busy()` 取一个守卫，在主线程上应用完这批注册后 drop，所以 kernel 在界面注册生效之前不会报告静止。
+- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：`commit` 只把注册连同 `ActivationToken` 排到主线程；主线程应用前检查 `token.is_live()`，只有所有 `commit` 和 `started` 都成功之后才应用。激活在任何一步失败（`activate`、某个 `commit` panic、`started` panic 或调用 `fail`），token 都不会变为有效，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`workspace` 本身是插件，收到注册时用自己的 `PluginHandle::busy()` 取一个守卫，在主线程上应用完这批注册后 drop，所以 kernel 在界面注册生效之前不会报告静止。
 
 ### 撤销
 
@@ -320,7 +332,7 @@ impl Emitter {
 停用时按以下顺序撤销：
 
 1. 它停用后会失去全部提供者的服务（单实现服务，以及它是最后一个提供者的多实现服务），依赖这些服务的插件先停用。
-2. 移除它提供的服务：`ServiceSet` 的快照更新，`service()` 查不到，之后不会有新的调用到达。已经在进行的调用可以执行完；服务实现要能在插件停用过程中返回错误，而不是假定自己的守卫都还在。
+2. 移除它提供的服务：`ServiceSet` 的快照更新，`service()` 查不到，之后不会有新的调用到达。已经在进行的调用可以执行完；服务实现要能在插件停用过程中返回错误，而不是假定自己的守卫都还在。正在进行的调用可能持有服务的最后一个 `Arc`，服务实现因此可能在调用方的线程上 drop：服务实现的 `Drop` 不得 panic，并且必须能在任意线程上执行。kernel 线程上的 drop 仍按「失败」一节隔离。
 3. 移除它的事件监听，并等待它正在执行的监听返回（见「事件分发」）。
 4. 按与登记相反的顺序 drop 守卫。每个守卫的 drop 单独用 `catch_unwind` 包住：某个守卫的 drop panic 时，记录错误、插件标为 `Failed`，然后继续 drop 剩下的守卫，撤销总是完整执行。
 
@@ -361,7 +373,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - kernel 有一个自己的线程（kernel 线程，`Kernel::start` 时创建，`shutdown` 后退出）。所有生命周期操作都在这个线程上串行执行：读取清单、检查依赖图、`activate`、`started`、停用与撤销。公开的生命周期方法只把请求放进队列，立即返回，所以主线程上不会执行激活（[ADR 0017](../adr/0017.md) 规定插件激活在后台线程上进行）。
 - 生命周期操作期间产生的新请求（如激活时发出的事件导致另一个插件需要激活），以及事件分发期间监听里发出的请求，都进入同一个队列，按顺序执行。
 - `emit` 在调用线程上同步分发（见「事件分发」），与 kernel 线程无关。
-- 守卫的 drop 在 kernel 线程上执行；需要在主线程执行的（如注销视图层的注册），由提供守卫的一方负责转到主线程。
+- `shutdown` 完成之前，守卫的 drop 在 kernel 线程上执行；kernel 线程退出之后，通过旧句柄被拒绝的守卫在调用线程上 drop（见 `PluginHandle::own`）。需要在主线程执行的（如注销视图层的注册），由提供守卫的一方负责转到主线程。
 
 ### 启动
 
@@ -386,7 +398,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 [ADR 0017](../adr/0017.md) 的内存基准和 UI 探针要等「kernel 发出已静止信号」再采样。kernel 在以下条件同时成立时为静止：
 
 - kernel 线程已经处理完启动时的激活；
-- 生命周期操作的队列为空，没有正在执行的 `activate` 或 `started`；
+- 生命周期操作的队列为空，kernel 线程上没有正在执行的生命周期操作（激活、提交、`started`、停用与撤销、`shutdown`）；
 - 没有正在进行的事件分发（kernel 计数各线程上进行中的 `emit`，监听可能正要取 `BusyGuard`）；
 - 没有未 drop 的 `BusyGuard`。
 
@@ -413,7 +425,11 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 句柄：`on` 返回的 `Subscription` drop 后，下一次 `emit` 起不再调用；停用后旧的 `PluginHandle` 上 `own` 立即 drop 守卫并返回 false，`on` 不订阅，`busy` 返回 None，从它取得的 `Emitter` 发出的事件被丢弃；重新激活后旧句柄仍然无效。
 - 退出：`shutdown` 的 `done` 在全部撤销完成、kernel 线程退出后调用；需要在主线程 drop 的守卫在等待期间完成。
 - 静止与界面注册：只注册了 `Contributions` 的插件，在注册应用到界面之前 kernel 不静止。
-- 线程：所有 `activate` / `started` / 守卫 drop 都在 kernel 线程上执行，公开方法在调用线程上立即返回。
+- 线程：所有 `activate` / `started` 和 `shutdown` 之前的守卫 drop 都在 kernel 线程上执行，公开方法在调用线程上立即返回；`shutdown` 之后被拒绝的守卫在调用线程上 drop。
+- 界面注册：`started` panic 或调用 `fail` 时，已经 `commit` 的界面注册不会被应用（token 无效）。
+- 静止：停用与撤销进行中时不静止。
+- workspace facts：提交 facts 的 `project` 激活停用后，保存的 facts 被清除。
+- 命令：依赖的唯一提供者激活条件不满足时，`done` 收到 `DependencyUnavailable`。
 - 清单：某个插件的 `manifest` panic 时，按 `PluginSet` 里给出的 ID 把它标为 `Failed`，其余插件照常激活。
 - panic 隔离：`Staged::commit`、服务实现的 drop 各自 panic 时，插件进入 `Failed`，撤销照常完成。
 - 后续插件：`started` 里调用 `fail` 时，依赖它的插件不会被激活。
