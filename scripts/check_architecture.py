@@ -11,7 +11,7 @@ Rules checked:
   4. macOS system bindings are direct dependencies of `platform` only. A
      binding is a crate whose name matches MACOS_ONLY_PREFIXES or contains a
      MACOS_NAME_TOKENS token, or any dependency that
-     Cargo compiles for macOS but not for Linux.
+     Cargo compiles for macOS but for none of NON_APPLE_TARGETS.
 
 Optional dependencies are included (`cargo metadata --all-features`), so a
 rule broken behind a feature flag still fails. A crate's own dev-dependencies
@@ -60,14 +60,16 @@ MACOS_ONLY_PREFIXES = (
 # Name tokens (split on - and _) that mark an Apple binding wherever they
 # appear, e.g. accesskit_macos, raw-window-metal, objc2-app-kit.
 MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "objc", "objc2", "coreaudio", "corefoundation"}
-# A dependency compiled for macOS but not for Linux is a macOS binding
-# whatever its name, e.g. [target.'cfg(target_os = "macos")'.dependencies].
+# A dependency compiled for macOS but for none of the non-Apple targets below
+# is a macOS binding whatever its name, e.g.
+# [target.'cfg(target_os = "macos")'.dependencies].
 # Cargo evaluates the cfg predicates (--filter-platform); we compare results.
 LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 MACOS_TARGET = "aarch64-apple-darwin"
-# Same CPU as MACOS_TARGET, so only the OS differs in the comparison and an
-# aarch64-only dependency is not mistaken for a macOS binding.
-LINUX_SAME_ARCH = "aarch64-unknown-linux-gnu"
+# Same CPU as MACOS_TARGET, so only the OS differs and an aarch64-only
+# dependency is not mistaken for a macOS binding. Several OSes, so that e.g.
+# cfg(not(target_os = "linux")) still counts as portable.
+NON_APPLE_TARGETS = ("aarch64-unknown-linux-gnu", "aarch64-pc-windows-msvc", "aarch64-unknown-freebsd")
 PLATFORM_CRATE = "lectern-platform"
 
 
@@ -127,7 +129,8 @@ def main():
         print(" ".join(f"-p {name}" for name in gpui_free_packages(metadata(LINUX_TARGET))))
         return 0
     meta = metadata()
-    on_macos, on_linux = direct_deps(metadata(MACOS_TARGET)), direct_deps(metadata(LINUX_SAME_ARCH))
+    on_macos = direct_deps(metadata(MACOS_TARGET))
+    elsewhere = [direct_deps(metadata(t)) for t in NON_APPLE_TARGETS]
     packages = {p["id"]: p for p in meta["packages"]}
     members = set(meta["workspace_members"])
     nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
@@ -147,7 +150,7 @@ def main():
                 yield dep["pkg"]
 
     def apple_only(pid, dep_pkg):
-        return dep_pkg in on_macos.get(pid, ()) and dep_pkg not in on_linux.get(pid, ())
+        return dep_pkg in on_macos.get(pid, ()) and not any(dep_pkg in deps.get(pid, ()) for deps in elsewhere)
 
     def own_deps(pid):
         """A workspace crate's direct dependencies, dev-dependencies included:
