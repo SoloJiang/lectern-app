@@ -13,7 +13,7 @@
 - diff 结果以两端 blob OID 为键缓存。
 - blob OID 按仓库的哈希算法取完整长度（SHA-1 为 40 位、SHA-256 为 64 位），不假定固定长度。
 - 工作区 diff 包含未跟踪文件，但不写用户的 index。单个文件的 diff 超过大小上限时，只保留文件头和增删行数，并标记为截断。
-- 读取仓库时不执行仓库配置的任何外部程序（textconv、外部 diff、clean / process 过滤器、`core.fsmonitor` 钩子），直接读对象和工作区文件；未改动的文件按 index 里的 stat 信息判断。设置了 clean / process 过滤器的文件（如 Git LFS）在不执行过滤器时无法与 index 正确比较，标为「使用了过滤器，暂不支持比较」，不按原始字节生成 diff。不得不调用 git 命令行时，除了 `--no-ext-diff --no-textconv` 还要关闭 fsmonitor 和过滤器，或者在不能执行仓库程序的沙箱里运行。
+- 读取仓库时不执行仓库配置的任何外部程序（textconv、外部 diff、clean / process 过滤器、`core.fsmonitor` 钩子），直接读对象和工作区文件；index 的 stat 信息只用来跳过能确定未改动的文件，不能确定时（如 racy-clean 的条目）比较内容。设置了 clean / process 过滤器的文件（如 Git LFS）在不执行过滤器时无法与 index 正确比较，标为「使用了过滤器，暂不支持比较」，不按原始字节生成 diff。不得不调用 git 命令行时，除了 `--no-ext-diff --no-textconv` 还要关闭 fsmonitor 和过滤器，或者在不能执行仓库程序的沙箱里运行。
 - 不往仓库的对象库里写任何东西：未跟踪文件直接读出来与空内容比较，不用 `git add --intent-to-add`。
 - 工作区的指纹由基准树 OID 和 diff 内容的哈希组成，用来判断缓存的结果是否过期。设计依据见 [pulls.review 调研](../../docs/research/pulls-review.md#对-lectern-的建议)。
 
