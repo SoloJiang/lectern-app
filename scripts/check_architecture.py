@@ -6,7 +6,7 @@ Rules checked:
   2. Dependencies point downwards: app -> view -> domain -> infra.
      kernel crates (kernel, services) may be used by any layer.
      tool crates may depend on anything; only app may depend on a tool crate,
-     and only as a dev-dependency or an optional (feature-gated) one.
+     and only as a dev-dependency or an optional one outside `default`.
   3. Crates in the domain, infra and kernel layers never depend on GPUI,
      directly or transitively.
   4. macOS system bindings are direct dependencies of `platform` only. A
@@ -76,8 +76,8 @@ LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 PLATFORM_CRATE = "lectern-platform"
 
 
-def metadata(platform=None):
-    cmd = ["cargo", "metadata", "--format-version", "1", "--locked", "--all-features"]
+def metadata(platform=None, all_features=True):
+    cmd = ["cargo", "metadata", "--format-version", "1", "--locked"] + (["--all-features"] if all_features else [])
     if platform:
         # Keep only the dependencies that are compiled for this target.
         cmd += ["--filter-platform", platform]
@@ -279,12 +279,21 @@ def main():
             if any(k["kind"] in (None, "build") for k in dep["dep_kinds"]):
                 yield dep["pkg"]
 
+    release = None
+
     def in_release_build(pid, dep_name):
-        """A normal or build dependency that is not optional is always compiled."""
-        return any(
-            d["name"] == dep_name and d["kind"] in (None, "build") and not d["optional"]
-            for d in packages[pid]["dependencies"]
-        )
+        """Whether a plain `cargo build` (default features) compiles dep_name
+        as a normal or build dependency of pid. Reads Cargo's own resolve, so
+        optional dependencies switched on by `default` count too."""
+        nonlocal release
+        if release is None:
+            meta = metadata(all_features=False)
+            names = {p["id"]: p["name"] for p in meta["packages"]}
+            release = {
+                n["id"]: {names[d["pkg"]] for d in n["deps"] if any(k["kind"] in (None, "build") for k in d["dep_kinds"])}
+                for n in meta["resolve"]["nodes"]
+            }
+        return dep_name in release.get(pid, ())
 
     def apple_only(pid, dep_pkg):
         for dep in nodes[pid]["deps"]:
@@ -314,7 +323,7 @@ def main():
                 elif theirs == "tool" and in_release_build(pid, dep_name):
                     errors.append(
                         f"{name} -> {dep_name}: tool crates stay out of release builds; "
-                        "use a dev-dependency or an optional, feature-gated dependency"
+                        "use a dev-dependency or an optional dependency outside the default features"
                     )
                 elif mine in RANK and theirs in RANK and RANK[theirs] > RANK[mine]:
                     errors.append(f"{name} ({mine}) -> {dep_name} ({theirs}): dependencies must point downwards")
