@@ -15,7 +15,7 @@
 
 - 开发构建：依赖用 `opt-level = 2`（GPUI 在 0 级下慢到不能用），本仓库的 crate 保持 0 级，增量编译快；`debug = "limited"`，`split-debuginfo = "unpacked"`。
 - 发布构建：`lto = "thin"`，`codegen-units = 1`。
-- 装了 `sccache` 时 `just` 自动设置 `RUSTC_WRAPPER`，多个 worktree 共享编译结果。
+- 装了 `sccache` 时 `just` 自动用它作为 `RUSTC_WRAPPER`，多个 worktree 共享编译结果；调用方已设置 `RUSTC_WRAPPER` 时不覆盖，没装 `sccache` 时什么都不设。
 - nextest：默认只完整打印失败的测试；CI 用 `ci` profile，不提前停止。
 
 ## 架构规则检查
