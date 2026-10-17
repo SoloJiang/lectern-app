@@ -389,10 +389,12 @@ pub struct Change {
     pub generated: bool,             // `.gitattributes` 的 `linguist-generated`
     /// 新一侧是 index 里没有的工作区文件。只出现在 `Added` 上。
     pub untracked: bool,
-    /// index 里这个路径的 OID，只在它与工作区一侧不同时为 Some（工作区一侧是 `Blob` 或已不存在时才比较）：
-    /// 提交会记录暂存的版本，与磁盘上的内容不一样。视图据此提示，P1 不单独显示暂存区的 diff。
-    pub staged: Option<Oid>,
+    /// index 里这个路径的条目，只在它的 OID 或模式与工作区一侧不同时为 Some（工作区一侧是 `Blob` 或已不存在时才比较）：
+    /// 提交会记录暂存的版本，与磁盘上的不一样（包括只暂存了可执行位的变化）。视图据此提示，P1 不单独显示暂存区的 diff。
+    pub staged: Option<Staged>,
 }
+
+pub struct Staged { pub oid: Oid, pub mode: Mode }
 
 pub enum Status {
     Added, Deleted, Modified, TypeChanged,
@@ -472,7 +474,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 - index I：没有、等于基准、或与基准不同（记为 S；基准没有时 index 里的任何条目都算 S）。
 - 工作区 W：没有（含路径上是目录、而这个条目不是子模块：`p` 被换成了目录 `p/`）、等于 index、等于基准、其他内容（记为 C）、或不是文件（FIFO、socket、设备文件）。
 
-「等于」指 OID 和模式都相同。W 由下面的第 1–3 步确定。判定规则：基准与 index 不同、或基准与工作区不同时报告；报告的改动在 index 的 OID 与工作区一侧不同（工作区没有也算不同）时带 `staged = Some(index 的 OID)`。基准与工作区相同、只有 index 不同时，报告的是基准 → index 的改动，`Detail::StagedOnly`，新一侧取 index 的条目。完整的表：
+「等于」指 OID 和模式都相同。W 由下面的第 1–3 步确定。判定规则：基准与 index 不同、或基准与工作区不同时报告；报告的改动在 index 的 OID 或模式与工作区一侧不同（工作区没有也算不同）时带 `staged = Some(index 的 OID 和模式)`。基准与工作区相同、只有 index 不同时，报告的是基准 → index 的改动，`Detail::StagedOnly`，新一侧取 index 的条目。完整的表：
 
 | B | I | W | 结果 | `staged` |
 |---|---|---|---|---|
@@ -497,7 +499,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 
 确定 W 的步骤与其余处理：
 
-1. **过滤器先判定**：按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的：stat 与 index 一致、不是 racy-clean，并且 index 的 OID 与基准相同时 W = I（未改动）；其余情况（包括刚暂存了更新、index 与基准不同）W 是 `Unavailable::Filtered`，不把 index 的 blob 当作工作区的完整内容；`raw` 按第 3 步的读取上限计算。
+1. **过滤器先判定**：按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的：stat 与 index 一致、不是 racy-clean、index 的 OID 与基准相同，并且这个路径的转换规则在这一次比较里没有变化（见下文 stat 缓存）时 W = I（未改动）；其余情况（包括刚暂存了更新、index 与基准不同）W 是 `Unavailable::Filtered`，不把 index 的 blob 当作工作区的完整内容；`raw` 按第 3 步的读取上限计算。
 2. **stat 跳过**：`SafeRoot::stat` 报告路径不存在时 W 为没有。index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时 W = I，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。
 3. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID。`Unavailable::Missing` 只用于对象库里缺对象，不用于工作区里没有文件。
 4. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每一项都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取；FIFO、socket、设备文件的新一侧是 `Mode::Special` + `UnsupportedType`，未跟踪的目录里有 `.git` 时只列出这个目录，新一侧是 `Mode::Special` + `NestedRepository`。
@@ -512,7 +514,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
 - 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。超过保留上限的文件没有字节可用，明确标为 `NotRetained`，不落盘另存。
 
-`Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID、计算时刻），stat 没变时不重新读取和计算；文件的 mtime 不早于缓存项的计算时刻时（与 racy-clean 同理，同一时刻内的两次同长度写入 stat 相同）不命中缓存，照常读取内容；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存；并且这一次比较里，转换规则（按新旧两份属性和配置分别求出的 `eol`、`text`、`ident`、`working-tree-encoding`、`filter`）有变化的跟踪路径跳过第 2 步的 stat 跳过，按第 3 步读取并重新计算 OID。规则没变的路径照常走 stat 跳过。
+`Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID、计算时刻），stat 没变时不重新读取和计算；文件的 mtime 不早于缓存项的计算时刻时（与 racy-clean 同理，同一时刻内的两次同长度写入 stat 相同）不命中缓存，照常读取内容；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存；并且这一次比较里，转换规则（按新旧两份属性和配置分别求出的 `eol`、`text`、`ident`、`working-tree-encoding`、`filter`）有变化的跟踪路径跳过第 1 步的过滤器快路径和第 2 步的 stat 跳过：新规则有过滤器的按第 1 步是 `Filtered`，其余按第 3 步读取并重新计算 OID。规则没变的路径照常走 stat 跳过。
 
 ### 上限与截断
 
@@ -605,7 +607,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`p` 被 `.gitignore` 忽略时只有 `Deleted`，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`；未暂存的 `rm` 得到 `Deleted`；HEAD 删除、对方修改的冲突得到没有 `old` 的 `Conflicted`；只改 `.gitattributes`、文件 stat 不变时 `refresh(Full)` 按新规则重新计算 OID；没有改动的跟踪文件不会作为未跟踪文件出现；二进制和只改模式的文件也计入 5000 个文件的上限。
 - 截断：单文件、整体、保留内容三种上限的边界值；`NotRetained` 保留原来的 `Detail`：文本文件是带增删行数的 `Truncated`，二进制文件是 `Binary`，行级 diff 过大的是 `TooLarge`。
 - 过滤器与目录：LFS 文件暂存了更新、stat 与 index 一致时仍是 `Filtered`；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`；未初始化的子模块不是改动。
-- 暂存：「工作区比较」表的每一行各有一个测试（用 `TestRepo` 分别构造 B、I、W），检查 `Status`、两侧、`Detail` 和 `staged`；其中包括 `git add p; rm p` 得到 `StagedOnly` 的 `Added`。
+- 暂存：「工作区比较」表的每一行各有一个测试（用 `TestRepo` 分别构造 B、I、W），检查 `Status`、两侧、`Detail` 和 `staged`；其中包括 `git add p; rm p` 得到 `StagedOnly` 的 `Added`，只暂存了可执行位、工作区又改了内容时 `staged` 带 index 的模式。
 - 模式：未跟踪的 FIFO 和嵌套仓库的新一侧是 `Mode::Special`；跟踪的文件被换成 FIFO 时是 `TypeChanged`。
 - sparse 展开：超过 `EntryLimits` 时 `tracked` 返回 `TooManyEntries`，`cancel` 置位时返回 `Cancelled`；`index_checksum` 与 `TrackedPaths::checksum` 相同，并且不展开条目（sparse index 夹具上用计数钩子检查）。
 - prunable 的 worktree：根目录不存在时 `root` 是 `gitdir` 记录的路径去掉 `/.git` 后字面归并的结果。
