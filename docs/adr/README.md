@@ -27,5 +27,6 @@
 | [0021](0021.md) | 文档链接检查用 pulldown-cmark 与 html5gum 解析 | 已接受 |
 | [0022](0022.md) | 用量只统计 token 与额度，不估算费用 | 已接受 |
 | [0023](0023.md) | 清单解析用 serde_json、toml、quick-xml、glob，YAML 与 Gradle 只解析需要的子集 | 已接受 |
+| [0025](0025.md) | 插件 crate 用 `plugin = true` 标记，只与 kernel 层和非插件的库 crate 相连 | 已接受 |
 
 新 ADR 用下一个编号，格式参照现有文件：标题、状态、日期、背景、决策、影响、（已知限制）、来源。ADR 只记录决策、理由和关键约束，一般不超过 3000 字；实现算法和边界情况的处理写进对应 crate 的设计文档（见 [adr 技能](../../.claude/skills/adr/SKILL.md)「ADR 写什么」）。

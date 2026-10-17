@@ -1,0 +1,10 @@
+---
+source: crates/i18n/src/strings.rs
+expression: text
+---
+en    Reviewing <FSI>src/main.rs<PDI>
+zh-CN 正在审阅 <FSI>src/main.rs<PDI>
+en    Reviewing <FSI>مجلد/ملف.rs<PDI>
+zh-CN 正在审阅 <FSI>مجلد/ملف.rs<PDI>
+en    Reviewing <FSI>תיקייה (2)<PDI>
+zh-CN 正在审阅 <FSI>תיקייה (2)<PDI>

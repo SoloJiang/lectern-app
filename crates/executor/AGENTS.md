@@ -3,7 +3,7 @@
 后台任务：UI 线程之外的 IO、解析和 git 操作。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：`docs/design/executor.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 设计文档：[docs/design/executor.md](../../docs/design/executor.md)
 - ADR：[0017](../../docs/adr/0017.md)
 
 ## 边界

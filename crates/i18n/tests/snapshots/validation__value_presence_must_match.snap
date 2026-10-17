@@ -1,0 +1,5 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"value-presence-differs\")"
+---
+zh-CN/app.ftl:1: app-field: has no value here but has a value in en (en/app.ftl:1)

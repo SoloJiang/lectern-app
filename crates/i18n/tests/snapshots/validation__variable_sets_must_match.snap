@@ -1,0 +1,5 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"variable-sets-differ\")"
+---
+zh-CN/app.ftl:1: app-progress: uses variables $all, $reviewed but en uses variables $reviewed, $total

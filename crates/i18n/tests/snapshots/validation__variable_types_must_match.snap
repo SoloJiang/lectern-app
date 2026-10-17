@@ -1,0 +1,5 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"variable-types-differ\")"
+---
+zh-CN/app.ftl:1: app-kind: $kind is a string here but a number in en; one Args value cannot satisfy both

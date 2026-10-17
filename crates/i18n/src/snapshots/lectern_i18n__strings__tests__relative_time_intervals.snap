@@ -1,0 +1,83 @@
+---
+source: crates/i18n/src/strings.rs
+expression: text
+---
+0 s
+en    just now
+zh-CN 刚刚
+
+59 s
+en    just now
+zh-CN 刚刚
+
+1 min
+en    1 min ago
+zh-CN 1 分钟前
+
+59 min 59 s
+en    59 min ago
+zh-CN 59 分钟前
+
+1 h
+en    1 hour ago
+zh-CN 1 小时前
+
+2 h
+en    2 hours ago
+zh-CN 2 小时前
+
+23 h 59 min
+en    23 hours ago
+zh-CN 23 小时前
+
+1 d
+en    1 day ago
+zh-CN 1 天前
+
+2 d
+en    2 days ago
+zh-CN 2 天前
+
+6 d 23 h
+en    6 days ago
+zh-CN 6 天前
+
+7 d
+en    1 week ago
+zh-CN 1 周前
+
+14 d
+en    2 weeks ago
+zh-CN 2 周前
+
+29 d
+en    4 weeks ago
+zh-CN 4 周前
+
+30 d
+en    1 month ago
+zh-CN 1 个月前
+
+60 d
+en    2 months ago
+zh-CN 2 个月前
+
+364 d
+en    12 months ago
+zh-CN 12 个月前
+
+365 d
+en    1 year ago
+zh-CN 1 年前
+
+730 d
+en    2 years ago
+zh-CN 2 年前
+
+10 y
+en    10 years ago
+zh-CN 10 年前
+
+u64::MAX s
+en    584942417355 years ago
+zh-CN 584942417355 年前
