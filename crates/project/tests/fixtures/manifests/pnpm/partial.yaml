@@ -1,0 +1,6 @@
+defaults: &defaults
+  - 'packages/*'
+packages:
+  - *defaults
+  - 'apps/*'
+  - [nested, list]

@@ -1,0 +1,31 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PomXml, & fixture(\"pom/pom_4_1_0.xml\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "billing",
+        ),
+        group: Some(
+            "com.acme.billing",
+        ),
+        workspace: true,
+        members: [
+            Path {
+                path: "billing-core",
+                name: None,
+            },
+            Path {
+                path: "billing-web",
+                name: None,
+            },
+            Path {
+                path: "billing-bench",
+                name: None,
+            },
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

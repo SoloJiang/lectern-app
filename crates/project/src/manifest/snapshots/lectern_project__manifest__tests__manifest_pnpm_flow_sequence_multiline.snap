@@ -1,0 +1,21 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PnpmWorkspace, & fixture(\"pnpm/flow_multiline.yaml\"))"
+---
+Ok(
+    Parsed {
+        name: None,
+        group: None,
+        workspace: true,
+        members: [
+            Glob(
+                "packages/*",
+            ),
+            Glob(
+                "apps/*",
+            ),
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

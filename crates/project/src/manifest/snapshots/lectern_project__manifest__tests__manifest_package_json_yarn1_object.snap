@@ -1,0 +1,23 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PackageJson, &\nfixture(\"package_json/yarn1_object.json\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "acme-mobile",
+        ),
+        group: None,
+        workspace: true,
+        members: [
+            Glob(
+                "packages/*",
+            ),
+            Glob(
+                "example",
+            ),
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

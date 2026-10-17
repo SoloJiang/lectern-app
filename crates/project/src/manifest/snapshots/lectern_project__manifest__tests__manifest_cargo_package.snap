@@ -1,0 +1,16 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: CargoToml, & fixture(\"cargo/package.toml\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "acme-core",
+        ),
+        group: None,
+        workspace: false,
+        members: [],
+        excludes: [],
+        partial: false,
+    },
+)

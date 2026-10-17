@@ -1,0 +1,51 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: GradleSettings, &\nfixture(\"gradle/settings_kotlin.gradle.kts\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "acme-server",
+        ),
+        group: None,
+        workspace: true,
+        members: [
+            Path {
+                path: "api",
+                name: Some(
+                    "api",
+                ),
+            },
+            Path {
+                path: "service/billing",
+                name: Some(
+                    "billing",
+                ),
+            },
+            Path {
+                path: "service/search",
+                name: Some(
+                    "search",
+                ),
+            },
+            Path {
+                path: "db/migrations",
+                name: Some(
+                    "migrations",
+                ),
+            },
+            Path {
+                path: "optional",
+                name: Some(
+                    "optional",
+                ),
+            },
+            Path {
+                path: "build-logic",
+                name: None,
+            },
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

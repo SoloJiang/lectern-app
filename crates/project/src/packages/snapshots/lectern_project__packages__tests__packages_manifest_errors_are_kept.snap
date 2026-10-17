@@ -1,0 +1,18 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"errors\"))"
+---
+<root>  name="errors" files=7 parent=- [workspace-root]
+    PackageJson package.json
+broken  name="broken" files=2 parent=<root> []
+    PomXml broken/pom.xml error=Syntax { line: 1 }
+broken/child  name="child" files=1 parent=broken []
+    PomXml broken/child/pom.xml name="child"
+packages/bad  name="bad" files=1 parent=<root> [declared]
+    PackageJson packages/bad/package.json error=Syntax { line: 3 }
+packages/good  name="good" files=1 parent=<root> [declared]
+    PackageJson packages/good/package.json name="good"
+packages/locked  name="locked" files=1 parent=<root> [declared]
+    PackageJson packages/locked/package.json error=Unreadable
+rust  name="rust" files=1 parent=<root> []
+    CargoToml rust/Cargo.toml error=TooLarge

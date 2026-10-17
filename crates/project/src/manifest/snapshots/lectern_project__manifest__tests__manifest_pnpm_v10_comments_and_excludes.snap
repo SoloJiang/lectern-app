@@ -1,0 +1,31 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PnpmWorkspace, & fixture(\"pnpm/pnpm10.yaml\"))"
+---
+Ok(
+    Parsed {
+        name: None,
+        group: None,
+        workspace: true,
+        members: [
+            Glob(
+                "packages/*",
+            ),
+            Glob(
+                "components/**",
+            ),
+            Glob(
+                "apps/*",
+            ),
+        ],
+        excludes: [
+            Glob(
+                "**/test/**",
+            ),
+            Glob(
+                "packages/it's-old",
+            ),
+        ],
+        partial: false,
+    },
+)

@@ -1,0 +1,13 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"android\"))"
+---
+<root>  name="android" files=7 parent=- [workspace-root]
+    GradleBuild build.gradle
+    GradleSettings settings.gradle name="android"
+app  name="app" files=1 parent=<root> [declared]
+    GradleBuild app/build.gradle
+build-logic  name="build-logic" files=2 parent=<root> [declared, workspace-root]
+    GradleSettings build-logic/settings.gradle name="build-logic"
+docs  name="docs" files=1 parent=<root> [declared]
+feature/login  name="login" files=1 parent=<root> [declared]

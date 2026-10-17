@@ -1,0 +1,24 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PnpmWorkspace, & fixture(\"pnpm/flow.yaml\"))"
+---
+Ok(
+    Parsed {
+        name: None,
+        group: None,
+        workspace: true,
+        members: [
+            Glob(
+                "packages/*",
+            ),
+            Glob(
+                "apps/*",
+            ),
+            Glob(
+                "tools/cli",
+            ),
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

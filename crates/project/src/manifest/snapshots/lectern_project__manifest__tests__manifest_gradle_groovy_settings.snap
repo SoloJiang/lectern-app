@@ -1,0 +1,61 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: GradleSettings, &\nfixture(\"gradle/settings_groovy.gradle\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "acme-android",
+        ),
+        group: None,
+        workspace: true,
+        members: [
+            Path {
+                path: "app",
+                name: Some(
+                    "app",
+                ),
+            },
+            Path {
+                path: "feature/login",
+                name: Some(
+                    "login",
+                ),
+            },
+            Path {
+                path: "feature/settings",
+                name: Some(
+                    "settings",
+                ),
+            },
+            Path {
+                path: "libraries/network",
+                name: Some(
+                    "network",
+                ),
+            },
+            Path {
+                path: "core/ui",
+                name: Some(
+                    "ui",
+                ),
+            },
+            Path {
+                path: "../acme-shared",
+                name: Some(
+                    "acme-shared",
+                ),
+            },
+            Path {
+                path: "../acme-build-logic",
+                name: None,
+            },
+            Path {
+                path: "gradle/plugins",
+                name: None,
+            },
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

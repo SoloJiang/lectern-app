@@ -1,0 +1,43 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PomXml, & fixture(\"pom/pom_4_0_0.xml\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "console-backend",
+        ),
+        group: Some(
+            "com.acme.platform",
+        ),
+        workspace: true,
+        members: [
+            Path {
+                path: "console-api",
+                name: None,
+            },
+            Path {
+                path: "console-service",
+                name: None,
+            },
+            Path {
+                path: "../shared/acme-common",
+                name: None,
+            },
+            Path {
+                path: "tools/pom-codegen.xml",
+                name: None,
+            },
+            Path {
+                path: "console-it",
+                name: None,
+            },
+            Path {
+                path: "console-docs",
+                name: None,
+            },
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

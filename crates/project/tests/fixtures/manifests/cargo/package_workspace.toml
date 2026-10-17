@@ -1,0 +1,15 @@
+[package]
+name = "acme-cli"
+version = "1.2.0"
+edition = "2021"
+
+[workspace]
+members = ["plugins/*"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+acme-core = { path = "plugins/core" }
+
+[[bin]]
+name = "acme"
+path = "src/main.rs"

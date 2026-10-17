@@ -1,0 +1,20 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"lectern\"))"
+---
+<root>  name="lectern" files=8 parent=- [workspace-root]
+    CargoToml Cargo.toml
+bad  name="bad" files=1 parent=<root> [workspace-root]
+    CargoToml bad/Cargo.toml partial
+crates/a  name="a" files=2 parent=<root> [declared]
+    CargoToml crates/a/Cargo.toml name="a"
+crates/a/nested  name="nested" files=1 parent=crates/a []
+    CargoToml crates/a/nested/Cargo.toml name="nested"
+crates/experimental  name="experimental" files=2 parent=<root> []
+    CargoToml crates/experimental/Cargo.toml name="experimental"
+crates/experimental/keep  name="keep" files=1 parent=crates/experimental [declared]
+    CargoToml crates/experimental/keep/Cargo.toml name="keep"
+crates/skip  name="skip" files=1 parent=<root> []
+    CargoToml crates/skip/Cargo.toml name="skip"
+tools/xtask  name="xtask" files=1 parent=<root> [declared]
+    CargoToml tools/xtask/Cargo.toml name="xtask"

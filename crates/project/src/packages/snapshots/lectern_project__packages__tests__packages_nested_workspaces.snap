@@ -1,0 +1,23 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"repo\"))"
+---
+<root>  name="root" files=12 parent=- [workspace-root]
+    PackageJson package.json name="root"
+    PnpmWorkspace pnpm-workspace.yaml
+native  name="native" files=5 parent=<root> [workspace-root]
+    CargoToml native/Cargo.toml
+native/crates/.hidden  name="hidden" files=1 parent=native [declared]
+    CargoToml native/crates/.hidden/Cargo.toml name="hidden"
+native/crates/core  name="native-core" files=2 parent=native [declared]
+    CargoToml native/crates/core/Cargo.toml name="native-core"
+native/crates/js  name="js-in-crates" files=1 parent=native []
+    PackageJson native/crates/js/package.json name="js-in-crates"
+packages/a  name="a" files=1 parent=<root> [declared]
+    PackageJson packages/a/package.json name="a"
+packages/old  name="old" files=1 parent=<root> []
+    PackageJson packages/old/package.json name="old"
+tools  name="tools" files=3 parent=<root> [declared, workspace-root]
+    PackageJson tools/package.json name="tools"
+tools/lint  name="lint" files=2 parent=tools [declared]
+    PackageJson tools/lint/package.json name="lint"

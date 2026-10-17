@@ -1,0 +1,6 @@
+{
+  "name": "broken",
+  "workspaces": [
+    "packages/*",
+  ]
+}

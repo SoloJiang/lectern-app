@@ -1,0 +1,16 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PackageJson, & fixture(\"package_json/plain.json\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "@acme/ui-button",
+        ),
+        group: None,
+        workspace: false,
+        members: [],
+        excludes: [],
+        partial: false,
+    },
+)

@@ -1,0 +1,14 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"poly\"))"
+---
+<root>  name="poly" files=7 parent=- [workspace-root]
+    GradleSettings settings.gradle.kts name="poly"
+other  name="example.com/other" files=2 parent=<root> []
+    GoMod other/go.mod name="example.com/other"
+    PomXml other/pom.xml name="other-maven"
+service  name="service-npm" files=4 parent=<root> [declared]
+    GradleBuild service/build.gradle.kts
+    GoMod service/go.mod name="example.com/service"
+    PackageJson service/package.json name="service-npm"
+    PomXml service/pom.xml name="service-maven"

@@ -1,6 +1,6 @@
 # project 设计
 
-状态：已接受，尚未实现。
+状态：实现中。第 1 步（清单解析与成员解析）已实现，第 2–5 步尚未实现（见「验收」）。
 
 对应 issue [#9](https://github.com/SoloJiang/lectern-app/issues/9)。`project` 把用户打开的路径解析成项目模型：仓库 → worktree → 子项目（[ADR 0006](../adr/0006.md)、[技术调研「Monorepo 与多 worktree 支持」](tech-research.md#monorepo-与多-worktree-支持)），以不可变快照交给视图和其他插件，并通过 `KernelControl::workspace_changed` 提交 `WorkspaceFacts`，驱动 `Activation::Workspace` 的插件（[kernel「依赖与自动启停」](kernel.md#依赖与自动启停)）。
 
@@ -38,9 +38,9 @@
 | `lectern-git` | 发现仓库、列 worktree、读 index 路径、读工作区文件、算 blob OID | gix 只在 `git` 里用；接口见下文 |
 | `lectern-fs-watch` | worktree 与 git 元数据的变化通知 | 接口见下文；实例由 `app` 创建，经 `ProjectDeps` 传入 |
 | `lectern-executor` | 后台任务 | UI 线程不做 IO；实例由 `app` 创建，经 `ProjectDeps` 传入 |
-| `serde` 1 + `serde_json` 1 | package.json | MIT / Apache-2.0；只反序列化需要的字段 |
-| `toml` 0.9（`parse`、`serde`） | Cargo.toml | MIT / Apache-2.0 |
-| `quick-xml` 0.38 | pom.xml | MIT；流式读取，只依赖 `memchr` |
+| `serde` 1（`derive`）+ `serde_json` 1 | package.json、Cargo.toml 的反序列化 | MIT / Apache-2.0；只反序列化需要的字段 |
+| `toml` 1.1（`std`、`parse`、`serde`，不开 `display`） | Cargo.toml | MIT / Apache-2.0 |
+| `quick-xml` 0.42（不开任何 feature） | pom.xml | MIT；流式读取，只依赖 `memchr` |
 | `glob` 0.3 | 工作区成员与 `WorkspaceFacts` 的模式匹配 | MIT / Apache-2.0，无传递依赖；Cargo 用它解析 `members` |
 
 选型与放弃的方案见 [ADR 0023](../adr/0023.md)。pnpm-workspace.yaml、settings.gradle(.kts)、go.work、go.mod 用手写的子集解析。版本取实现时 crates.io 上的最新兼容版本，由 Cargo.lock 锁定。
@@ -157,17 +157,43 @@ impl ProjectPlugin {
 
 /// 纯函数，供测试和 bench 直接调用；不做 IO，任何线程。
 pub mod manifest {
-    /// 一个清单的解析结果：名字、成员声明（glob、排除项或显式路径，按「清单格式」表）、是否 partial。
-    pub struct Parsed { /* name, members: Vec<Member>, excludes, partial */ }
+    /// 超过这个大小的清单不解析（`ManifestError::TooLarge`），也是 `read_worktree_file` 的 limit。
+    pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
+
+    /// 一个清单的解析结果。成员与排除项相对清单所在目录、按原样保存（只去掉引号），归并在 `resolve_packages` 里做。
+    pub struct Parsed {
+        pub name: Option<Arc<str>>,  // 按「清单格式」表的名字字段
+        pub group: Option<Arc<str>>, // Maven `groupId`，缺省时取 `parent` 的
+        pub workspace: bool,         // 清单声明了工作区（即使为空），决定 `Package::workspace_root`
+        pub members: Vec<Member>,
+        pub excludes: Vec<Exclude>,
+        pub partial: bool,
+    }
+    pub enum Member {
+        Glob(Box<str>),                                     // npm、pnpm、Cargo `members`
+        Path { path: Box<str>, name: Option<Arc<str>> },    // Maven、Gradle、go.work；name 是声明给的名字（Gradle 路径的最后一段）
+    }
+    pub enum Exclude {
+        Glob(Box<str>), // pnpm 与 npm 的 `!pattern`
+        Path(Box<str>), // Cargo `exclude`：这个目录及其下的一切
+    }
     pub fn parse(kind: ManifestKind, bytes: &[u8]) -> Result<Parsed, ManifestError>;
 }
+
+impl ManifestKind {
+    /// 按文件名（路径最后一段）识别清单，不是清单时为 None。
+    pub fn from_file_name(name: &str) -> Option<ManifestKind>;
+}
+
+pub type ManifestResult = Result<Arc<Parsed>, ManifestError>;
+
 /// `manifest(path)`：None 表示工作区里没有这个文件（已删除，不算清单）；Some(Err) 是读取或解析失败，
 /// 子项目照常列出并把错误填进 `Manifest.error`。
 /// `root_name`：项目显示名（`ProjectSnapshot::name`），根目录的子项目没有清单名字时（如 Cargo 虚拟清单）用它。
 pub fn resolve_packages(
     files: &FileList,
     root_name: &str,
-    manifest: &dyn Fn(&str) -> Option<Result<Arc<Parsed>, ManifestError>>,
+    manifest: &dyn Fn(&str) -> Option<ManifestResult>,
 ) -> Vec<Package>;
 pub fn workspace_facts(trees: Vec<Arc<FileList>>) -> Arc<dyn WorkspaceFacts>;
 
@@ -341,11 +367,15 @@ pub struct Resolved {
 pub struct FileList { /* buf: Box<str>, ends: Box<[u32]>, kinds: Box<[FileKind]>, skipped: u32 */ }
 
 impl FileList {
+    pub fn builder() -> FileListBuilder;
     pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
     pub fn get(&self, i: usize) -> Option<(&str, FileKind)>;
     pub fn iter(&self) -> impl Iterator<Item = (&str, FileKind)> + '_;
     /// `dir` 下全部文件的下标范围，二分查找。`dir` 为 "" 时是全部。
     pub fn range_under(&self, dir: &str) -> Range<usize>;
+    /// 这个路径是不是列表里的文件，二分查找。
+    pub fn find(&self, path: &str) -> Option<FileKind>;
     /// 因不是 UTF-8 等原因没有收入的条目数。
     pub fn skipped(&self) -> u32;
     /// 文件夹项目的遍历达到上限时为 true。
@@ -353,6 +383,17 @@ impl FileList {
 }
 
 pub enum FileKind { File, Executable, Symlink, Submodule }
+
+/// 按 index 顺序 push 时不排序；乱序时 `build` 排序。同一路径只收第一条；
+/// 空路径、以 `/` 开头或结尾、含 `.` 或 `..` 段的路径记入 `skipped`。
+pub struct FileListBuilder { /* … */ }
+
+impl FileListBuilder {
+    pub fn push(&mut self, path: &str, kind: FileKind);
+    pub fn skip(&mut self);          // 没有收入的条目（如不是 UTF-8）
+    pub fn set_truncated(&mut self); // 文件夹遍历达到上限
+    pub fn build(self) -> FileList;
+}
 ```
 
 - git 项目：来自 index，同一路径的多个合并阶段（冲突中）只收一条。index 里没有的文件（未跟踪的新文件）不在列表里。
@@ -398,11 +439,13 @@ impl ManifestKind {
 }
 
 pub enum ManifestError {
-    TooLarge,             // 超过 1 MB，不解析
-    Syntax { line: u32 }, // 解析失败的位置
+    TooLarge,             // 超过 1 MB（`MAX_MANIFEST_BYTES`），不解析
+    Syntax { line: u32 }, // 解析失败的位置，从 1 开始
     Unreadable,           // 读取失败，或是符号链接等非普通文件
 }
 ```
+
+`Syntax` 包括：JSON、TOML、XML 语法错误；package.json 与 Cargo.toml 里读取的字段类型不对（如 `"workspaces": 3`）；JSON 与 TOML 不是 UTF-8；pnpm-workspace.yaml 的引号未闭合、流序列未闭合、`packages` 键重复（pnpm 用的 js-yaml 拒绝重复键）；Gradle 脚本的字符串或块注释未闭合；go.work / go.mod 的字符串或块未闭合、多余的 `)`、go.mod 重复的 `module`。pom.xml 与手写解析的格式按 UTF-8 宽松解码（无效字节换成 U+FFFD）：老 pom 常带 ISO-8859-1 的注释，而要读的字段都是 ASCII。开头的 UTF-8 BOM 一律跳过。
 
 不变量：`dir` 不重复，列表按 `dir` 的字节序排序；`parent` 指向的子项目的 `dir` 是本 `dir` 的真前缀（按 `/` 分段）；`manifests` 为空时 `declared` 一定为 true（未声明的子项目来自自己目录里的清单）。
 
@@ -410,8 +453,8 @@ pub enum ManifestError {
 
 | 文件 | 格式来源与版本 | 读取的内容 | 成员如何声明 |
 |---|---|---|---|
-| `package.json` | npm 7+ [workspaces](https://docs.npmjs.com/cli/using-npm/workspaces)；yarn 1 的对象写法 `{ "packages": [...] }`；yarn 2+、bun 与 npm 相同 | `name`、`workspaces` | glob，相对本文件所在目录，只匹配有 `package.json` 的目录 |
-| `pnpm-workspace.yaml` | [pnpm 7–10](https://pnpm.io/pnpm-workspace_yaml) | `packages` | glob，`!` 开头的为排除；同目录的 package.json 是根子项目 |
+| `package.json` | npm 7+ [workspaces](https://docs.npmjs.com/cli/using-npm/workspaces)；yarn 1 的对象写法 `{ "packages": [...] }`；yarn 2+、bun 与 npm 相同 | `name`、`workspaces` | glob，相对本文件所在目录，只匹配有 `package.json` 的目录；`!` 开头的为排除 |
+| `pnpm-workspace.yaml` | [pnpm 7–10](https://pnpm.io/pnpm-workspace_yaml) | 顶层 `packages`：块序列（缩进可与键相同）或流序列（可跨行），纯量、单引号、双引号，注释 | glob，`!` 开头的为排除；同目录的 package.json 是根子项目；锚点、别名、标签、块纯量、嵌套集合不展开，标为 partial |
 | `Cargo.toml` | [Cargo workspaces](https://doc.rust-lang.org/cargo/reference/workspaces.html)（与 edition 无关） | `package.name`、`workspace.members`、`workspace.exclude` | `members` 为 glob，`exclude` 为路径，只匹配有 `Cargo.toml` 的目录 |
 | `pom.xml` | POM 4.0.0（Maven 3）与 4.1.0（Maven 4，[`subprojects`](https://maven.apache.org/whatsnewinmaven4.html)） | `artifactId`、`groupId`（缺省时取 `parent`）、`modules/module`、`subprojects/subproject`，含 `profiles` 里的 | 相对路径，指向目录或另一个 pom 文件；无法判断哪个 profile 生效，全部计入 |
 | `settings.gradle`、`settings.gradle.kts` | Gradle 7–9 的 [settings 脚本](https://docs.gradle.org/current/userguide/multi_project_builds.html) | `rootProject.name`、`include`、`includeFlat`、`includeBuild` 的字面量参数，`project(":x").projectDir = file("...")` | `":a:b"` 对应 `a/b`，`includeFlat "x"` 对应 `../x`，`projectDir` 覆盖默认目录；子项目目录不要求有构建文件 |
@@ -426,9 +469,9 @@ fixtures：每行至少一份真实写法的样本（脱敏），格式随版本
 `resolve_packages` 是纯函数，输入文件列表和每个清单的解析结果：
 
 1. 候选：文件列表里每个清单文件（`FileKind::File` 或 `Executable`，符号链接不算）所在的目录。`manifest(path)` 返回 None 的不算；返回 Err 的照常是候选，只是它声明的成员无法展开。
-2. 声明：每个工作区清单按上表的规则把成员模式展开成目录。glob 相对声明它的清单所在目录，`*` 不跨 `/`，`**` 匹配任意层；去掉 `./` 前缀和末尾的 `/`；`..` 按字面路径归并，越出 worktree 的丢弃。npm、pnpm、Cargo 的 glob 只匹配同生态有清单的候选目录；Maven、Gradle、go.work 的显式路径只要目录下有受跟踪文件就成立。
+2. 声明：每个工作区清单按上表的规则把成员模式展开成目录。glob 相对声明它的清单所在目录，`*` 不跨 `/`，`**` 匹配任意层；去掉 `./` 前缀和末尾的 `/`；`..` 按字面路径归并，越出 worktree 的丢弃，绝对路径也丢弃。npm、pnpm、Cargo 的 glob 只匹配同生态有清单的候选目录（npm 与 pnpm 是有 `package.json` 的目录，Cargo 是有 `Cargo.toml` 的目录）；npm 与 pnpm 的通配符不匹配以 `.` 开头的目录，Cargo 的匹配（与 Cargo 相同）。含通配符的 glob 不匹配 worktree 根目录本身（`*` 能匹配空串，但工作区不会把自己的根声明为成员）。排除项只作用于同一个清单的 glob：pnpm / npm 的 `!` 排除匹配到的目录；Cargo 的 `exclude` 排除这个目录及其下的一切，但不含通配符的 `members` 项优先于 `exclude`（与 Cargo 相同）。不合法的 glob 跳过，所在清单的 `Manifest.partial` 标为 true。Maven、Gradle、go.work 的显式路径只要目录下有受跟踪文件就成立；Maven 的路径正好是列表里的一个文件时（指向另一个 pom 文件），取它所在的目录。
 3. 合并：每个目录一个 `Package`。被声明的标 `declared`；没有自己清单的被声明目录也收入，`manifests` 为空，名字取声明里的名字（Gradle 的 `:a:b` 取最后一段）或目录名。未被声明的候选目录也收入，除非路径里有 `node_modules`、`vendor`、`fixtures`、`__fixtures__`、`testdata` 这几段之一（测试样本里的清单不是子项目）；被声明的目录不受这条排除。
-4. 层级：按 `dir` 排序后，用栈算出每项的 `parent`；用 `FileList::range_under` 算出 `files`。
+4. 层级：按 `dir` 的字节序排序后，对每项从近到远查它的上级目录（`a/b/c` → `a/b` → `a` → 根），第一个在列表里的就是 `parent`。不用栈：字节序下 `a-b` 排在 `a` 与 `a/c` 之间，栈会把 `a` 弹出。用 `FileList::range_under` 算出 `files`。
 
 `cloudprint-miniapps` 的形状（yarn workspaces + Maven 多模块，`apps/miniapp-console/frontend` 有 package.json 却不在 workspaces 里）作为快照测试的样例：后者是 `declared: false` 的子项目。
 
@@ -555,6 +598,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
    - `just deny` 通过；`cargo tree -p lectern-project -e normal --depth 1` 只列出「依赖」表里已用到的 crate。
    - `rg -n 'std::process|Command::new' crates/project/src` 没有结果（不运行构建工具）。
 2. 服务接口（`services`）：
+   - 第 1 步在 `project` 里定义的数据类型（`FileList`、`FileListBuilder`、`FileKind`、`Package`、`Manifest`、`ManifestKind`、`Ecosystem`、`ManifestError`、`RelPath`）移到 `services` 的 `project` 模块，`lectern-project` 重新导出，原有路径不变。`manifest::Parsed`、`Member`、`Exclude` 和 `resolve_packages` 留在 `project`。
    - `cargo check -p lectern-services` 通过；`rg -n 'pub trait Projects' crates/services/src` 有一处。
    - `just test -p lectern-services` 里检查 `dyn Projects` 的 `ID == "projects"`、`MULTIPLE == false` 的测试通过。
    - `python3 scripts/check_architecture.py` 通过（`services` 仍只依赖 kernel 层）。
@@ -567,3 +611,30 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 5. 基准（`bench`，`Closes #9`）：
    - `just bench` 里 `project/*` 全部在「性能」表的预算内，预算写进 bench 的预算表。
    - 本文状态行改为「已实现」并列出五个 PR，填写「实际验证」。
+
+## 实际验证
+
+第 1 步（清单解析与成员解析），在 Linux 上运行（本 crate 不依赖 GPUI，macOS 上是同一份代码；没有在 macOS 上实测）：
+
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-project`（47 个测试）、`just doctest`、`just deny` 全部通过。新增依赖的许可证：`serde`、`serde_json`、`toml` 及其传递依赖为 MIT / Apache-2.0，`quick-xml`、`winnow`、`zmij` 为 MIT，`memchr` 为 Unlicense / MIT，都在 `deny.toml` 的允许列表里；Cargo.lock 里新出现的只有 `quick-xml` 0.42（0.41 由 GPUI 在 Linux 上经 `xcb` 引入，不进 macOS 的发布包）。
+- `cargo tree -p lectern-project -e normal --depth 1` 只列出 `glob`、`quick-xml`、`serde`、`serde_json`、`toml`。
+- `rg -n 'std::process|Command::new' crates/project/src` 没有结果。
+- 「清单格式」表逐行有 insta 快照（`crates/project/src/manifest/snapshots/`，样本在 `crates/project/tests/fixtures/manifests/`）：package.json（npm 数组写法含 `!` 排除、yarn 1 对象写法、普通包）、pnpm-workspace.yaml（pnpm 10 带 catalog 与注释、pnpm 7 与键同缩进的序列、单行与跨行流序列、锚点与嵌套集合标为 partial）、Cargo.toml（虚拟清单与 `exclude`、包加工作区、普通包）、pom.xml（4.0.0 含 profile 里的 modules 与指向 pom 文件的模块、4.1.0 的 subprojects 与 CDATA、从 parent 取 groupId、属性插值的模块标为 partial）、settings.gradle（Groovy：多参数跨行、`includeFlat`、`projectDir`、`includeBuild`，注释和字符串里的 `include` 不算）、settings.gradle.kts（Kotlin）、变量与插值写法标为 partial、go.work 块与单行写法、go.mod。build.gradle 不读内容：`manifest_gradle_build_is_not_read`。
+- 错误：`manifest_syntax_errors_report_the_line`（每种格式一个样本，检查行号）、`manifest_syntax_errors_inline`、`manifest_too_large_is_not_parsed`（每种格式超过 1 MB 都是 `TooLarge`，正好 1 MB 照常解析）、`manifest_invalid_utf8`、`manifest_utf8_bom_is_skipped`。
+- 不 panic：`manifest_garbage_input_does_not_panic` 把每个样本在每个字节处截断后解析，再做 4000 轮随机变异（替换、插入、删除语法字符）和随机字节输入，每种格式都跑；`manifest_deep_nesting_does_not_overflow` 对每种格式喂 10 万层 `[`、`{`、`(`、`<a>`、`"${`、`- `。手写解析器对输入不递归（Gradle 插值嵌套超过 32 层按语法错误处理），对恶意输入保持线性。
+- 成员解析的快照（`crates/project/src/packages/snapshots/`）覆盖「测试」一节列出的场景：`packages_cloudprint_shape`（`apps/miniapp-console/frontend` 为 `declared: false`）、`packages_nested_workspaces`、`packages_one_directory_several_manifests`、`packages_gradle_projects_without_build_files`、`packages_manifest_errors_are_kept`、`packages_maven_modules_outside_their_directory`、`packages_paths_outside_the_worktree_are_dropped`、`packages_sample_directories_are_not_packages`、`packages_cargo_virtual_root_and_exclude`（根子项目的名字取 `root_name`）、`packages_only_regular_present_manifests_are_candidates`（符号链接、已删除的清单不是候选）；每个场景都检查「子项目与清单」的不变量。`cloudprint` 形状按本文的描述合成，没有用真实仓库的数据。
+
+没有验证到的：「性能」一节的 `project/packages_cloudprint` 等基准属于第 5 步。
+
+## 与设计的差异
+
+第 1 步：
+
+- 数据类型暂时定义在 `project`：设计把 `Package`、`Manifest`、`FileList` 等放在 `services`，但 `services` 是第 2 步。第 2 步把它们移过去，`project` 重新导出（已写进「验收」第 2 步）。
+- 版本：`toml` 用 1.1、`quick-xml` 用 0.42，不是「依赖」表原来写的 0.9 与 0.38。按「版本取实现时 crates.io 上的最新兼容版本」，这两个是实现时的最新版本；`toml` 1.1 已经在 Cargo.lock 里（GPUI 的构建依赖），不多一份。`serde` 需要 `derive`，表里补上了。
+- `Parsed` 的字段写全（上文「本 crate 的公开项」）：增加 `group`（「清单格式」表要求读 `groupId`）和 `workspace`（`Package::workspace_root` 要按「清单声明了工作区」判断，空的 `[workspace]` 或 `<modules/>` 也算，只看 `members` 是否为空判断不出来）。`Member`、`Exclude` 两个枚举是新增的。
+- `FileList` 增加 `builder()`、`is_empty()`、`find()` 和 `FileListBuilder`：成员解析的测试要在内存里构造文件列表，第 3 步从 index 构造也用它；`find` 用来判断 Maven 模块是不是指向 pom 文件。
+- `resolve_packages` 的回调类型写成 `ManifestResult` 别名（clippy 的 `type_complexity`），类型不变。
+- 层级不用栈，改为逐级查上级目录：字节序下 `a-b` 排在 `a` 和 `a/c` 之间，栈算出的 `a/c` 没有 `parent`（`packages_parent_skips_byte_order_neighbours`）。
+- 设计没有写到、实现时定下的规则，都已写进上文「清单格式」与「成员解析」：package.json 的 `!` 排除（npm 的 workspaces 也支持取反模式）；pnpm 流序列可以跨行；含通配符的 glob 不匹配根目录（否则 `"workspaces": ["*"]` 会把根声明为自己的成员）；npm 与 pnpm 的通配符不匹配点目录；Cargo 不含通配符的 `members` 优先于 `exclude`；不合法的 glob 让清单标为 partial；Maven 模块指向文件时取它的目录；绝对路径丢弃；各格式算作 `Syntax` 的情形与宽松解码。
+- Gradle `include ':a:b'` 只声明 `a/b`，不声明 Gradle 隐式创建的上级项目 `:a`，与「清单格式」表一致；`:a` 的目录有自己的清单时仍按未声明的候选收入。
