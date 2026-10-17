@@ -50,7 +50,7 @@ layer = "domain"
 | domain | `git` | gix 读仓库、imara-diff、结构化 diff |
 | domain | `code_intel` | tree-sitter 符号索引、Java / TS 解析、依赖源码 |
 | domain | `terminal` | portable-pty + libghostty-vt，独占线程 |
-| domain | `usage` | token 去重与聚合、价格表、额度快照（[ADR 0014](../adr/0014.md)） |
+| domain | `usage` | token 去重与聚合、额度快照（[ADR 0014](../adr/0014.md)、[ADR 0022](../adr/0022.md)） |
 | domain | `forge` | GitHub 与 GitLab 的 MR 与 CI 状态 |
 | infra | `cache` | 内容寻址 SQLite 缓存 |
 | infra | `fs_watch` | 与平台无关的文件监听接口，事件按 git index 过滤；FSEvents 后端由 `platform` 实现这个接口，`app` 装配时注入 |

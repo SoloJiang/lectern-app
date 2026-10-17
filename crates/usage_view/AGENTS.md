@@ -5,7 +5,7 @@ Usage 页：额度卡片、每日 token 柱状图；当前项目显示项目合�
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
 - 设计文档：`docs/design/usage_view.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#32](https://github.com/SoloJiang/lectern-app/issues/32)
-- ADR：[0014](../../docs/adr/0014.md)、[0020](../../docs/adr/0020.md)
+- ADR：[0014](../../docs/adr/0014.md)、[0020](../../docs/adr/0020.md)、[0022](../../docs/adr/0022.md)
 
 ## 边界
 

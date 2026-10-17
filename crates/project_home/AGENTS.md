@@ -5,13 +5,13 @@
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
 - 设计文档：`docs/design/project_home.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#30](https://github.com/SoloJiang/lectern-app/issues/30)
-- ADR：[0012](../../docs/adr/0012.md)
+- ADR：[0012](../../docs/adr/0012.md)、[0022](../../docs/adr/0022.md)
 
 ## 边界
 
 - 打开项目到主页可用 < 100 ms：文件列表直接读 git index，不遍历目录（[性能预算](../../docs/design/tech-research.md#性能预算)）。
 - 会话归位、改动统计由 `project`、`agents`、`review` 计算，本视图只显示快照。
-- 会话卡片不显示 token。侧栏底部的 Usage 入口显示本项目最近 7 天的 token 与费用；MR 的用量显示在并行 worktree 总览和 Usage 页（[ADR 0020](../../docs/adr/0020.md)）。
+- 会话卡片不显示 token。侧栏底部的 Usage 入口显示本项目最近 7 天的 token（不显示费用，[ADR 0022](../../docs/adr/0022.md)）；MR 的用量显示在并行 worktree 总览和 Usage 页（[ADR 0020](../../docs/adr/0020.md)）。
 
 ## 测试
 

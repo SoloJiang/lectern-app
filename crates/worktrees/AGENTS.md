@@ -5,12 +5,12 @@
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
 - 设计文档：`docs/design/worktrees.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#16](https://github.com/SoloJiang/lectern-app/issues/16)
-- ADR：[0006](../../docs/adr/0006.md)
+- ADR：[0006](../../docs/adr/0006.md)、[0022](../../docs/adr/0022.md)
 
 ## 边界
 
 - 切换 worktree / 分支 < 100 ms，依赖以 blob OID 为键的缓存命中。
-- 每个 worktree 显示当前分支的累计 token 与 API-equivalent 费用（P1 标为分支用量，P3 起为所属 MR 的用量；一个分支同时对应几个开着的 MR 时，每个 MR 各列一项自己区间内的用量，并注明与哪些 MR 共用这个分支，不只显示其中一个），数据来自 `usage` 的快照（[ADR 0020](../../docs/adr/0020.md)）。
+- 每个 worktree 显示当前分支的累计 token（不显示费用，[ADR 0022](../../docs/adr/0022.md)；P1 标为分支用量，P3 起为所属 MR 的用量；一个分支同时对应几个开着的 MR 时，每个 MR 各列一项自己区间内的用量，并注明与哪些 MR 共用这个分支，不只显示其中一个），数据来自 `usage` 的快照（[ADR 0020](../../docs/adr/0020.md)）。
 
 ## 测试
 
