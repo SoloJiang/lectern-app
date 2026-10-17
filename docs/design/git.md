@@ -125,7 +125,12 @@ impl Oid {
 pub struct RepoPath(Arc<[u8]>);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode { File, Executable, Symlink, Gitlink }
+pub enum Mode {
+    File, Executable, Symlink, Gitlink,
+    /// 只出现在工作区一侧：git 不能记录的条目（FIFO、socket、设备文件、未跟踪的嵌套仓库目录）。
+    /// 这时 `content` 一定是 `Unavailable`（`UnsupportedType` 或 `NestedRepository`）。
+    Special,
+}
 
 /// 完整的引用名，如 `refs/heads/main`。
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -251,7 +256,8 @@ impl Worktree {
     /// 重新读 HEAD（HEAD 文件加一次引用解析）。`agents` / `usage` 在工具调用后观察分支时调用（ADR 0020）。
     pub fn head(&self) -> Result<HeadState, GitError>;
     /// index 里的全部路径，按 index 的顺序（路径字节序）。index 文件没变时返回同一个 Arc。没有 index 文件时为空。
-    pub fn tracked(&self) -> Result<Arc<TrackedPaths>, GitError>;
+    /// 展开 sparse 目录条目时受 `limits` 约束、检查 `cancel`；超过上限时返回 `GitError::TooManyEntries`。
+    pub fn tracked(&self, limits: &EntryLimits, cancel: &AtomicBool) -> Result<Arc<TrackedPaths>, GitError>;
     /// 从工作区根出发、经 `SafeRoot` 读一个文件的原始字节（不做转换），最多 `max` 字节。
     /// 供 `project` 读清单文件等不需要 git 语义的读取，与本 crate 自己的读取遵守同样的安全规则。
     pub fn read_file(&self, path: &RepoPath, max: u64) -> Result<WorktreeFile, GitError>;   // File | Symlink | TooLarge | Unavailable
@@ -276,7 +282,7 @@ pub struct TrackedEntry {
 }
 ```
 
-sparse index（`index.sparse`）里，sparse checkout 之外的目录只有一个模式为 `040000` 的目录条目，记录的是树 OID。gix 0.88 读 index 时不展开它们，本 crate 自己在内存里展开：按目录条目的树 OID 从对象库读出其中的全部文件，作为 `skip_worktree` 的条目放进 `TrackedPaths`，与完整 index 里的 skip-worktree 条目相同。展开只在内存里进行，不写回 index，index 文件的 sparse 状态不变；展开的条目数计入 `EntryLimits`，读树时检查 `cancel`。所以「基准树 ∪ index」的比较（见「工作区比较」）看到的是逐个文件的条目，sparse 目录下的文件不会被当成删除。
+sparse index（`index.sparse`）里，sparse checkout 之外的目录只有一个模式为 `040000` 的目录条目，记录的是树 OID。gix 0.88 读 index 时不展开它们，本 crate 自己在内存里展开：按目录条目的树 OID 从对象库读出其中的全部文件，作为 `skip_worktree` 的条目放进 `TrackedPaths`，与完整 index 里的 skip-worktree 条目相同。展开只在内存里进行，不写回 index，index 文件的 sparse 状态不变；展开的条目数计入调用方传入的 `EntryLimits`，读树时检查 `cancel`；`changes` / `refresh` 内部读 index 时用 `Limits::entries` 和它们自己的 `cancel`。`Repo::worktree` 只读 HEAD 和配置，不读 index，所以不需要这两个参数。所以「基准树 ∪ index」的比较（见「工作区比较」）看到的是逐个文件的条目，sparse 目录下的文件不会被当成删除。
 
 `fs_watch` 是基础设施层，不依赖本 crate：`app` 把 `TrackedPaths` 包成 `fs_watch` 定义的过滤接口传进去。
 
@@ -359,6 +365,7 @@ pub enum GitError {
     NoMergeBase,
     ObjectMissing(Oid),
     TooLarge { size: u64 },
+    TooManyEntries,
     Corrupt(String),
     Io(io::Error),
     Cancelled,
@@ -404,9 +411,9 @@ pub enum Unavailable {
     /// 设置了 clean / process 过滤器（如 Git LFS）：「使用了过滤器，暂不支持比较」。
     /// `raw` 是工作区原始字节的身份，用来判断内容是否变了（基准一侧来自对象库，照常是 `Blob`）。
     Filtered { raw: RawIdentity },
-    UnsupportedType,     // FIFO、socket、设备文件
+    UnsupportedType,     // FIFO、socket、设备文件；模式为 `Mode::Special`
     PathThroughSymlink,  // 路径中间一级是符号链接
-    NestedRepository,    // 未跟踪的目录里有自己的 `.git`
+    NestedRepository,    // 未跟踪的目录里有自己的 `.git`；模式为 `Mode::Special`
     Missing,             // 对象库里没有（如部分克隆）
     Unreadable,          // 读取失败
     /// 超过改动集保留工作区内容的上限（32 MiB）：比较时读过、算过 OID，但字节没有保留。
@@ -447,7 +454,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 
 不变量：
 
-- `files` 按（`path` 的字节序，`untracked`）排序。同一路径最多一项，唯一的例外是「工作区比较」第 4 步的情况：同一路径上一项是 `Deleted`，另一项是 `untracked` 的 `Added`。重命名只出现在新路径上，所以重命名的旧路径上重新出现的文件只有一项未跟踪的 `Added`，`Renamed` 本身不受影响。
+- `files` 按（`path` 的字节序，`untracked`）排序。同一路径最多一项，唯一的例外是「工作区比较」表里 B = A、I 没有、W 有的那一行：同一路径上一项是 `Deleted`，另一项是 `untracked` 的 `Added`。重命名只出现在新路径上，所以重命名的旧路径上重新出现的文件只有一项未跟踪的 `Added`，`Renamed` 本身不受影响。
 - `Status` 与两侧一致：`Added` 只有 `new`，`Deleted` 只有 `old`，`Modified`、`TypeChanged`、`Renamed` 两侧都有。`Conflicted` 的两侧按实际状态：基准里没有这个路径时没有 `old`（如 HEAD 删除、对方修改的冲突），工作区里没有文件时没有 `new`，两侧都没有的冲突不出现。`TypeChanged` 是普通文件、符号链接、子模块之间的变化。
 - 截断只影响 `Detail`，不影响改动的判定、`Status` 和两侧的 `Content`：被截断、只列出的文件也有完整的 OID。
 - 有一侧是 `Unavailable` 的改动，`Detail` 为 `NoDiff`（被整体上限截到时为 `Listed`），唯一的例外是 `NotRetained`：它保留超过保留上限之前算出的 `Detail`（`Binary`、`TooLarge`，或带增删行数的 `Truncated`）。
@@ -456,29 +463,48 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 
 ### 工作区比较
 
-目标是工作区时，`changes` 对「基准树的路径 ∪ index 的路径」逐个比较，再加上未跟踪文件。一个路径是否跟踪只看 index：
+目标是工作区时，`changes` 对「基准树的路径 ∪ index 的路径」逐个判定，再加上未跟踪文件。每个路径有三个状态：
 
-| 基准树 | index | 结果 |
-|---|---|---|
-| 有 | 有 | 按第 1–3 步比较工作区内容与基准 |
-| 有 | 没有 | `Deleted`（已从 index 删除，如 `git rm --cached`），不看工作区里同一路径上有没有文件 |
-| 没有 | 有 | `Added`，新一侧按第 1–3 步取工作区内容 |
-| 没有 | 没有 | 不是跟踪的路径；工作区里有文件时按第 4 步作为未跟踪文件 |
+- 基准 B：没有，或 A。
+- index I：没有、等于基准、或与基准不同（记为 S；基准没有时 index 里的任何条目都算 S）。
+- 工作区 W：没有（含路径上是目录、而这个条目不是子模块：`p` 被换成了目录 `p/`）、等于 index、等于基准、其他内容（记为 C）、或不是文件（FIFO、socket、设备文件）。
 
-0. **工作区里没有**：`SafeRoot::stat` 报告路径不存在（含中间某一级目录不存在）时，不做后面的比较：基准里有这个路径就是 `Deleted`（未暂存的 `rm`），基准里也没有（暂存了新增后又删掉文件）就不是改动。`Unavailable::Missing` 只用于对象库里缺对象，不用于这种情况。跟踪的非子模块路径 `p` 在工作区里变成了目录时同样按「没有」处理（`Deleted` 或不是改动），这个条目不设 `UPTODATE`，`p/` 下的文件由第 4 步作为未跟踪的 `Added` 列出；子模块路径是目录属于正常情况，按子模块处理。
-1. **过滤器先判定**：按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的：stat 与 index 一致、不是 racy-clean、且 index 的 OID 等于基准的 OID 时是未改动；其余情况（stat 不一致、racy-clean、或已暂存的改动）新一侧是 `Unavailable::Filtered`，不把 index 的 blob 当作工作区的完整内容；`raw` 按第 3 步的读取上限计算。
-2. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时，工作区内容就是 index 里的 blob，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
-3. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。
-4. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给第 0–3 步处理过、工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每个文件都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
+「等于」指 OID 和模式都相同。W 由下面的第 1–3 步确定。判定规则：基准与 index 不同、或基准与工作区不同时报告；报告的改动在 index 的 OID 与工作区一侧不同（工作区没有也算不同）时带 `staged = Some(index 的 OID)`。基准与工作区相同、只有 index 不同时，报告的是基准 → index 的改动，`Detail::StagedOnly`，新一侧取 index 的条目。完整的表：
+
+| B | I | W | 结果 | `staged` |
+|---|---|---|---|---|
+| 没有 | 没有 | 有 | 不是跟踪的路径，由第 4 步作为未跟踪的 `Added` 列出 | — |
+| 没有 | S | 没有 | `Added`，新一侧取 index，`StagedOnly`（`git add p; rm p`） | S |
+| 没有 | S | = I | `Added` | None |
+| 没有 | S | C | `Added`，新一侧为 C | S |
+| 没有 | S | 不是文件 | `Added`，新一侧为 `Mode::Special` + `UnsupportedType` | S |
+| A | 没有 | 没有 | `Deleted` | None |
+| A | 没有 | 有 | `Deleted`，另由第 4 步列出一项未跟踪的 `Added`（`git rm --cached p` 后文件还在），两项独立 | None |
+| A | = A | 没有 | `Deleted`（未暂存的 `rm`） | A |
+| A | = A | = A | 不报告 | — |
+| A | = A | C | `Modified` | A |
+| A | = A | 不是文件 | `TypeChanged`，新一侧为 `Mode::Special` + `UnsupportedType` | A |
+| A | S | 没有 | `Deleted` | S |
+| A | S | = I | `Modified`，新一侧为 S | None |
+| A | S | = A | `Modified`，新一侧取 index（S），`StagedOnly` | S |
+| A | S | C | `Modified`，新一侧为 C | S |
+| A | S | 不是文件 | `TypeChanged`，新一侧为 `Mode::Special` + `UnsupportedType` | S |
+
+`Modified` 与 `TypeChanged` 按两侧的模式区分（普通文件、符号链接、子模块之间的变化是 `TypeChanged`）。W 是 `Filtered` 或 `Unhashed`、没有 OID 时，按 C 处理，`staged` 为 None（无法比较）。index 里有未解决的冲突条目的路径不查这张表，报告为 `Conflicted`（见「数据结构」的不变量）。路径被换成目录时，这个条目不设 `UPTODATE`，目录下的文件由第 4 步作为未跟踪的 `Added` 列出。
+
+确定 W 的步骤与其余处理：
+
+1. **过滤器先判定**：按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的：stat 与 index 一致且不是 racy-clean 时 W = I；其余情况 W 是 `Unavailable::Filtered`，不把 index 的 blob 当作工作区的完整内容；`raw` 按第 3 步的读取上限计算。
+2. **stat 跳过**：`SafeRoot::stat` 报告路径不存在时 W 为没有。index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时 W = I，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。
+3. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID。`Unavailable::Missing` 只用于对象库里缺对象，不用于工作区里没有文件。
+4. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每一项都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取；FIFO、socket、设备文件的新一侧是 `Mode::Special` + `UnsupportedType`，未跟踪的目录里有 `.git` 时只列出这个目录，新一侧是 `Mode::Special` + `NestedRepository`。
 5. **重命名**：删除与新增之间先按 OID 找精确重命名，精确重命名不受任何上限限制，总是检测。剩下的删除（来源）与新增（目标）再按相似度（不低于 50%）找重命名，上限规则与 git 的 `too_many_rename_candidates` 相同：来源数 × 目标数超过 `diff.renameLimit` 的平方时跳过相似度检测（默认 1000，即 100 万对；40 × 40 的重构照常检测）。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
-
-6. **暂存与工作区不同**：跟踪的路径上，index 的 OID 与基准不同、而工作区又改回了基准的内容时（基准 A、index B、工作区 A），这个路径仍然报告：`Status::Modified`，两侧内容相同，`Detail::StagedOnly`，`staged = Some(B)`。其他报告出来的改动只要 index 的 OID 与工作区一侧不同，也带上 `staged`。
 
 其余规则：
 
 - 模式：`core.fileMode=false` 时可执行位取 index 里的值；符号链接的内容是 `readlinkat` 读出的目标。
-- 子模块：工作区一侧的提交是子模块自己的 HEAD（只读地打开它的 git 目录）；子模块内部的未提交改动不计算。子模块没有初始化（克隆时没带 `--recurse-submodules`，或 `deinit` 之后：路径是空目录，没有仓库和 HEAD）时，工作区一侧取 index 里的 gitlink OID，按未改动处理，不标为 `Unavailable`。
-- `skip_worktree` 的条目（含从 sparse 目录展开的条目）不 stat、不读工作区，工作区一侧取 index 里的 OID：与基准相同时不是改动，不同时按已暂存的改动处理。`git add -N` 的条目按新增处理。
+- 子模块：工作区一侧的提交是子模块自己的 HEAD（只读地打开它的 git 目录）；子模块内部的未提交改动不计算。子模块没有初始化（克隆时没带 `--recurse-submodules`，或 `deinit` 之后：路径是空目录，没有仓库和 HEAD）时，W = I（index 里的 gitlink OID），不标为 `Unavailable`。
+- `skip_worktree` 的条目（含从 sparse 目录展开的条目）不 stat、不读工作区，W = I（按上面的表：index 与基准相同时不报告，不同时是 `Modified`、`staged` 为 None）。`git add -N` 的条目按新增处理。
 - 路径的大小写与 Unicode 规范化按仓库的 `core.ignoreCase`、`core.precomposeUnicode`（gix 的文件系统能力）。
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
 - 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。超过保留上限的文件没有字节可用，明确标为 `NotRetained`，不落盘另存。
@@ -576,7 +602,9 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`；未暂存的 `rm` 得到 `Deleted`；HEAD 删除、对方修改的冲突得到没有 `old` 的 `Conflicted`；只改 `.gitattributes`、文件 stat 不变时 `refresh(Full)` 按新规则重新计算 OID；没有改动的跟踪文件不会作为未跟踪文件出现；二进制和只改模式的文件也计入 5000 个文件的上限。
 - 截断：单文件、整体、保留内容三种上限的边界值；`NotRetained` 的 `Detail` 是带增删行数的 `Truncated`。
 - 过滤器与目录：LFS 文件暂存了更新、stat 与 index 一致时仍是 `Filtered`；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`；未初始化的子模块不是改动。
-- 暂存：基准 A、index B、工作区 A 时报告 `StagedOnly` 且 `staged = Some(B)`；暂存后又改了工作区时带 `staged`；index 与工作区相同时 `staged` 为 None。
+- 暂存：「工作区比较」表的每一行各有一个测试（用 `TestRepo` 分别构造 B、I、W），检查 `Status`、两侧、`Detail` 和 `staged`；其中包括 `git add p; rm p` 得到 `StagedOnly` 的 `Added`。
+- 模式：未跟踪的 FIFO 和嵌套仓库的新一侧是 `Mode::Special`；跟踪的文件被换成 FIFO 时是 `TypeChanged`。
+- sparse 展开：超过 `EntryLimits` 时 `tracked` 返回 `TooManyEntries`，`cancel` 置位时返回 `Cancelled`。
 - prunable 的 worktree：根目录不存在时 `root` 是 `gitdir` 记录的路径去掉 `/.git` 后字面归并的结果。
 - 句柄：一次顶层调用返回后，当前线程上没有留下 gix 句柄（测试用计数钩子检查）。
 - 路径：index 里含 `..`、`.`、空名字、NUL 或以 `/` 开头的条目不被打开，记在 `Totals::invalid_paths` 里；`RelPath::new` 拒绝这些写法；Linux 上 `SafeRoot` 对 `..` 和绝对路径的解析被 `RESOLVE_BENEATH` 拒绝（`platform` 的测试）。
