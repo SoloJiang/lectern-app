@@ -303,15 +303,16 @@ pub struct Location {
     pub package: PackageMatch,
 }
 
-/// 包含这个路径的最深子项目。`locate` 只看内存里已有的子项目列表，不拿当前 worktree 的列表去套其他 worktree
-///（各分支可能增删或移动了子项目）。
+/// 包含这个路径的最深子项目。`locate` 只用当前 worktree（文件夹项目为根目录）快照里的子项目列表，
+/// 它由监听保持最新；不拿它去套其他 worktree（各分支可能增删或移动了子项目），也不读非当前 worktree 的缓存
+///（那些 worktree 只监听 HEAD，未暂存的清单修改不会让缓存失效）。
 pub enum PackageMatch {
     /// 匹配到的子项目目录。
     Found(RelPath),
-    /// 这个 worktree 的子项目已知，路径不在任何子项目里。
+    /// 当前 worktree 的子项目已就绪，路径不在任何子项目里。
     None,
-    /// 这个 worktree 的子项目不在内存里（非当前 worktree 且没有缓存，或当前 worktree 的子项目还是 `Pending`）。
-    /// 需要时在 executor 上调 `resolve_package`。文件夹项目不会出现这一项（子项目就绪之前除外）。
+    /// 路径在非当前 worktree（总是这一项），或当前 worktree 的子项目还是 `Pending`。
+    /// 需要时在 executor 上调 `resolve_package`，由它检查缓存是否过期。
     NotLoaded,
 }
 
@@ -470,7 +471,12 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
   - 任一 worktree 的 `HEAD` 变了：只更新那个 worktree 的 `head`；当前 worktree 的 `index` 通常会一起变，按上一条处理。
   - `worktrees/` 下有增减：重新列 worktree；当前 worktree 被删除时切到主 worktree（没有时第一个可用的），`ChangedParts.active` 为 true。
 - 清单内容从工作区读（用户和 agent 看到的版本，未暂存的修改也算），缓存键是这份字节的 blob OID（`hash_blob`，按仓库的哈希算法；文件夹项目用 SHA-1），值是 `Result<Arc<Parsed>, ManifestError>`：语法错误同样按 OID 缓存，`TooLarge` 和 `Unreadable` 没有可哈希的内容，不缓存。缓存在进程内、所有项目和 worktree 共享，按字节 LRU，上限 2 MB（[ADR 0017](../adr/0017.md)「内存的具体约束」）。切换 worktree 时，各分支内容相同的清单直接命中。
-- 非当前 worktree 的子项目（`resolve_package`）：按需算一次，键是 worktree 的 git 目录加它的 index 校验和；每次调用先读 index 校验和（`GitAccess::index_checksum`，只读文件末尾），没变就直接用缓存。缓存只存子项目列表、不存文件列表，最多 16 个 worktree，按最近使用淘汰，`locate` 也读这份缓存。同一个 worktree 的并发请求合并成一次计算。
+- 非当前 worktree 的子项目（`resolve_package`）：按需计算，缓存按 worktree 的 git 目录存放，内容是子项目列表、算出它时的 index 校验和，以及参与计算的每个清单的 stat 指纹（路径、大小、修改时间、inode）。缓存不存文件列表，最多 16 个 worktree，按最近使用淘汰；只有 `resolve_package` 读它，`locate` 不读。每次调用都校验缓存：
+  - 先读 index 校验和（`GitAccess::index_checksum`，只读文件末尾）。变了就重读 index 并重算整份列表（文件列表变了，成员条件和 `Package.files` 都可能变）。
+  - 没变就对指纹里的每个清单做一次 `lstat`（`std::fs::symlink_metadata`，不跟随符号链接）。有不一致的（未暂存的修改、删除）只重读这几个文件，内容的 blob OID 命中解析缓存就不重新解析，然后重做成员解析（内存计算，文件计数沿用）。
+  - 都一致才直接返回缓存的结果。
+  - 同一个 worktree 的并发请求合并成一次计算。
+  - 不在缓存检查范围内的变化：index 里没有的新清单在 `git add` 之前本来就不算（与当前 worktree 相同）。修改时间精度内、大小不变的连续写入可能漏掉一次，下次 stat 变化时纠正。
 - 切换当前 worktree：先发布 `files: Pending` 的新快照（视图立即显示骨架），旧 worktree 的 `FileList` 随旧快照释放，只保留它的元数据。
 - 插件停用时，kernel 丢弃扫描任务；视图手里的快照仍然有效，只是不再更新。
 
@@ -482,7 +488,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 | 同上，再到子项目就绪（约 25 个清单） | 再加 < 15 ms | `project/packages_cloudprint` |
 | 大仓库：10 万个文件、2,000 个清单，到文件列表就绪 / 子项目就绪 | < 80 ms / 再加 < 150 ms | `project/open_100k` |
 | 切换当前 worktree（清单缓存已热），`cloudprint` 形状 | < 30 ms | `project/switch_worktree` |
-| `resolve_package`，非当前 worktree：index 未变（缓存命中）/ 未命中、清单缓存已热，`cloudprint` 形状 / 未命中，10 万文件 | < 1 ms / < 20 ms / < 150 ms | `project/resolve_package` |
+| `resolve_package`，非当前 worktree：缓存命中（读 index 校验和，加上约 25 个清单各一次 `lstat`）/ 未命中、清单缓存已热，`cloudprint` 形状 / 未命中，10 万文件 | < 1 ms / < 20 ms / < 150 ms | `project/resolve_package` |
 | `index` 变化后的刷新（重建文件列表与 facts、重算成员解析，清单缓存已热），`cloudprint` 形状 / 10 万文件 | < 15 ms / < 60 ms | `project/refresh_index` |
 | `contains`：文件名与 `*.ext` 模式 / 含 `/` 的模式（10 万文件，未缓存） | < 1 µs / < 5 ms | `project/facts_contains` |
 | 常驻内存：`cloudprint` 形状 / 10 万文件（含 16 个非当前 worktree 的子项目列表缓存） | < 2 MB / < 12 MB | 静止后按 kernel「性能」一节测插件内存 |
@@ -513,7 +519,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 
 - 清单解析（`manifest_*`）：`tests/fixtures/manifests/<格式>/` 下每个样本的解析结果用 insta 快照；含 yarn 1 对象写法、pnpm 的 `!` 排除与注释、Cargo 虚拟清单（根子项目的名字取 `root_name`）与 `exclude`、POM 4.0.0 / 4.1.0 与 profile 里的 modules、Groovy / Kotlin 的 settings（`include` 多参数跨行、`projectDir`、`includeBuild`、变量写法标为 partial）、go.work 块写法；超过 1 MB、语法错误各一例。
 - 成员解析（`packages_*`）：内存里构造文件列表，快照验收。场景：`cloudprint` 形状、嵌套工作区、同一目录多种清单、没有构建文件的 Gradle 子项目（`manifests` 为空）、语法错误与超大清单的错误保留在 `Manifest.error`、Maven 模块指向 `../`、越出 worktree 的路径、样本目录排除、未声明但有清单的目录。
-- 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（内存里的仓库、worktree、index 与工作区文件，记录每次调用）。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable（根目录已删除，键仍来自管理目录）/ locked / detached / unborn、文件夹项目的上限与跳过规则、`locate` 取最深的子项目，以及父仓库和其中单独打开的子模块都包含路径时 `locate` 返回子模块的项目；路径在非当前 worktree 时 `locate` 返回 `NotLoaded`，`resolve_package` 按那个 worktree 自己的子项目给出结果（它比当前 worktree 多一个、少一个、移动了一个子项目各一例），index 未变时第二次调用命中缓存、不读清单。
+- 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（内存里的仓库、worktree、index 与工作区文件，记录每次调用）。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable（根目录已删除，键仍来自管理目录）/ locked / detached / unborn、文件夹项目的上限与跳过规则、`locate` 取最深的子项目，以及父仓库和其中单独打开的子模块都包含路径时 `locate` 返回子模块的项目；路径在非当前 worktree 时 `locate` 返回 `NotLoaded`，`resolve_package` 按那个 worktree 自己的子项目给出结果（它比当前 worktree 多一个、少一个、移动了一个子项目各一例），index 与清单都未变时第二次调用命中缓存、不读清单；未暂存地修改或删除那个 worktree 的一个清单后，下一次 `resolve_package` 只重读这一个文件并给出新结果；已经填过缓存之后 `locate` 对非当前 worktree 仍返回 `NotLoaded`。
 - 刷新（`refresh_*`）：用 fs_watch 的模拟后端驱动事件；连续事件合并为一轮、扫描中到达的事件触发下一轮、只改普通文件内容不重读 index、新增普通受跟踪文件后 `Package.files` 更新而已有清单不重新解析、清单 OID 未变不重新解析、删除当前 worktree 后的切换、generation 严格递增。
 - facts（`facts_*`）：模式语义逐条覆盖；多个项目的并集；不合法的模式返回 false。
 - 插件（`plugin_*`）：用 kernel 的 `TestKernel`。`activate` 之后、`open` 之前 `FakeGit` 没有收到任何调用；`open` 之后提交的 facts 让一个 `Workspace(["pom.xml"])` 的测试插件激活；事件顺序为 `Opened` → `Changed`。
