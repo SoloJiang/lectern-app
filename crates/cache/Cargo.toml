@@ -10,5 +10,20 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "infra"
 
+[features]
+# testing::ManualClock and fault injection (a page limit on the write
+# connection, a hook inside write transactions), for the tests of this crate
+# and of the crates that use it.
+test-support = []
+
+[dependencies]
+rusqlite.workspace = true
+ruzstd.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+
 [lints]
 workspace = true

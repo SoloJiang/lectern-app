@@ -142,8 +142,8 @@ pub struct ProjectPlugin { /* deps */ }
 pub struct ProjectDeps {
     /// 由 app 创建并传入，类型随 executor 设计。
     pub executor: /* executor 句柄 */,
-    /// 由 app 创建并传入（FSEvents 后端由 platform 实现），类型随 fs_watch 设计。
-    pub watcher: /* fs_watch 的监听接口 */,
+    /// 由 app 创建并传入（FSEvents 后端由 platform 实现），见 [fs_watch 设计](fs_watch.md)。
+    pub watcher: lectern_fs_watch::Watcher,
     /// 用户主目录，判断「主目录被当作 dotfiles 仓库」（见「项目标识」）。由 app 从 platform 取得。
     pub home: PathBuf,
 }
@@ -220,6 +220,10 @@ pub(crate) trait GitAccess: Send + Sync {
     fn read_worktree_file(&self, root: &Path, rel: &str, limit: u64) -> Result<Option<Vec<u8>>, GitError>;
     /// 按仓库的哈希算法计算 blob OID（与 `git hash-object` 相同），作为解析缓存的键。
     fn hash_blob(&self, kind: HashKind, bytes: &[u8]) -> ObjectId;
+    /// 当前 worktree 交给 `fs_watch::RepoWatch::watch_worktree` 的过滤器与配置来源。生产实现打开这个 worktree
+    /// （`Repo::worktree`）后调 `Worktree::watch_source`，与 `index_paths` 共用同一个 `Worktree` 句柄；
+    /// `FakeGit` 返回按它内存里的 index 和忽略规则回答的 `fs_watch::testing::FakeSource`。只读 HEAD 和配置，不读 index。
+    fn watch_source(&self, git_dir: &Path) -> Result<Arc<dyn WorktreeSource>, GitError>;
 }
 
 pub(crate) struct Discovered { worktree_root: Option<PathBuf>, git_dir: PathBuf, common_dir: PathBuf, bare: bool, hash: HashKind }
@@ -512,7 +516,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 
 - 所有 IO（discover、读 index、读清单、遍历文件夹）都在 executor 上，经 `PluginHandle::own_with` 提交，每一轮扫描持有一个 `BusyGuard`，结束、快照替换并发出事件后才释放（kernel「静止」）。
 - UI 线程只调 `snapshot`、`locate`、`open_projects`（取锁复制 `Arc` 或在内存里比较），以及立即返回的 `open`、`close`、`set_active_worktree`。
-- 快照存在每个项目的 `Mutex<Arc<ProjectSnapshot>>` 里，只有这个项目的扫描任务替换它。每个项目同时最多一个扫描任务；运行期间来的事件只标记脏，结束后再跑一轮。一批事件到达后等 50 ms 再开始，合并 agent 连续写文件产生的多批事件。
+- 快照存在每个项目的 `Mutex<Arc<ProjectSnapshot>>` 里，只有这个项目的扫描任务替换它。每个项目同时最多一个扫描任务；运行期间来的事件只标记脏，结束后再跑一轮。一批事件到达后等 50 ms 再开始，合并 agent 连续写文件产生的多批事件；这段等待由 `fs_watch` 的合并实现（`Coalesce::WORKTREE`），本 crate 收到批次后不再另外等待。
 - 增量刷新按变化的内容决定做什么：
   - 只有普通文件的内容变了：什么都不做（文件列表来自 index，内容变化不改变它）。
   - `index` 变了：重读 index 路径；校验和未变时跳过；变了就重建 `FileList` 和 facts，并重做成员解析。普通文件的增减也会改变 `Package.files` 和「显式路径的目录下有受跟踪文件」这类成员条件，所以只要 `FileList` 变了就重算。重算只读新出现的清单；已有清单沿用以 blob OID 为键的解析结果，只有 fs_watch 报告变化的才重读；成员解析本身是内存里的计算。

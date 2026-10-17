@@ -25,5 +25,8 @@ cargo check -p lectern-cache     # 只改本 crate 时最快的反馈
 just test -p lectern-cache
 ```
 
-- 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
-- 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。
+- 测试在 `src/tests/`（按设计文档「测试」的前缀分文件），用 `tempfile` 的临时目录和合成数据，不需要夹具。时钟和故障注入用本 crate 的 `test-support` feature（`testing::ManualClock`、`Partition::set_max_page_count`、`Partition::set_write_hook`），其他 crate 的测试也用它；检查文件内容时测试自己开一个 rusqlite 连接（`support::raw`），相当于另一个进程。
+- 自建线程的测试代码只放在 `src/tests/` 下：验收检查 `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 要求库代码里没有。
+- `crash_*` 用同一个测试二进制做子进程（`current_exe` 加 `--exact`），子进程的入口没有环境变量时直接返回。
+- 结构化输出（键的编码、文件布局、PRAGMA）用 insta 快照验收，快照改动要在 PR 里逐个看过。
+- 性能：`cargo test --release -p lectern-cache -- --ignored perf_smoke --nocapture`，结果写进设计文档的「实际验证」。

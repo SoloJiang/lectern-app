@@ -18,7 +18,7 @@
   - 内置转换、OID 计算、stat 比较本身、按路径缓存：`git`。
   - 写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。
 - 本文不覆盖，以后在本文增加小节或另写设计文档，设计合并之前不写对应的代码：
-  - FSEvents 后端（实现 `fs_watch` 的接口，随 `fs_watch` 的设计）。
+  - FSEvents 与 kqueue 后端（实现 `fs_watch` 的接口）：设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)。
   - `open -a`、钥匙串、代码签名校验、线程 QoS（[executor 设计](executor.md)的线程启动钩子）。
   - Seatbelt 配置、受限进程的启动与监护、磁盘映像、快照写出（[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#66](https://github.com/SoloJiang/lectern-app/issues/66)，ADR 0019）。
   - Claude Code statusline 的安装与恢复（[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[ADR 0014](../adr/0014.md)）。

@@ -1,0 +1,8 @@
+---
+source: crates/cache/src/tests/basics.rs
+expression: layout
+---
+app: app.sqlite
+repo: repo/41eebc9c6088456ac0e89fc0c7eba177.sqlite
+folder (same path): folder/93a8cf54766656adf9cdf4f302566360.sqlite
+another repo: repo/38001a3c0969cb6bf5c9366bd72c0e2d.sqlite
