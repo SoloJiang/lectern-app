@@ -3,21 +3,24 @@
 //!
 //! Locks, always taken in this order: `session` (read for calls, write to
 //! open, close or rebuild), then the session's connection mutexes, then
-//! `state`. `state` is never held across IO.
+//! `state`. `state` is never held across IO. Opening a project partition
+//! takes the `session` write lock of the partition it swaps out while
+//! holding its own: the swapped-out one was opened earlier, so the waits
+//! never form a cycle. `Shared::swept` and the pool's lock come last.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, Weak};
 
 use rusqlite::{Connection, ErrorCode};
 
-use crate::codec::{self, Raw};
-use crate::db::{self, Check, Identity, Op, WriteParams};
+use crate::codec;
+use crate::db::{self, Check, Found, Identity, Op, WriteParams};
 use crate::stats::{DisableReason, PartitionKind, PartitionState, PartitionStats};
 use crate::util::{lock, log, read, write};
-use crate::{Dropped, Entry, Key, MAX_KEY, Namespace, Shared, Written, clock};
+use crate::{Dropped, Entry, Key, MAX_KEY, Namespace, Shared, Written, clock, sweep};
 
 /// Writes are not tried for this long after `SQLITE_FULL`.
 const FULL_PAUSE_MS: u64 = 60_000;
@@ -27,6 +30,12 @@ const IO_ERRORS_MAX: u32 = 3;
 const CORRUPTIONS_MAX: u32 = 2;
 /// Undecodable entries remembered for deletion; more are found again later.
 const BAD_MAX: usize = 4096;
+/// A hit on an entry whose access time is older than this many minutes
+/// writes the access time back.
+const TOUCH_AFTER_MIN: i64 = 60;
+/// Entries waiting for their access time to be written back (32 KiB of IDs);
+/// hits beyond it are not recorded.
+pub(crate) const TOUCHED_MAX: usize = 4096;
 /// `max_page_count` when no limit is set.
 #[cfg(any(test, feature = "test-support"))]
 const NO_PAGE_LIMIT: u64 = 4_294_967_294;
@@ -35,9 +44,14 @@ pub(crate) type Hook = Arc<dyn Fn() + Send + Sync>;
 
 pub(crate) struct Slot {
     pub(crate) shared: Arc<Shared>,
+    /// This slot, for the pool of open project partitions.
+    pub(crate) me: Weak<Slot>,
     kind: PartitionKind,
     path: Option<PathBuf>,
     pub(crate) file: PathBuf,
+    /// `Shared::ticks` at the latest call: the least recently used project
+    /// partition is swapped out.
+    pub(crate) last_used: Arc<AtomicU64>,
     session: RwLock<Option<Session>>,
     state: Mutex<State>,
     io_errors: AtomicU32,
@@ -69,6 +83,9 @@ pub(crate) struct Session {
     namespaces: Mutex<Vec<(Namespace, i64)>>,
     /// Entries that failed to decode, deleted by the next write transaction.
     bad: Mutex<Vec<i64>>,
+    /// Entries hit with an old access time, sorted; written back by the next
+    /// write transaction, `close` and swapping out.
+    touched: Mutex<Vec<i64>>,
 }
 
 impl Session {
@@ -93,6 +110,19 @@ impl Drop for Session {
         self.shared
             .connections
             .fetch_sub(1 + usize::from(reader), Ordering::Relaxed);
+        self.shared.pool.release(self.id);
+    }
+}
+
+/// Records `ids` in a sorted set of at most `TOUCHED_MAX`.
+fn touch(set: &mut Vec<i64>, ids: impl IntoIterator<Item = i64>) {
+    for id in ids {
+        if set.len() >= TOUCHED_MAX {
+            return;
+        }
+        if let Err(at) = set.binary_search(&id) {
+            set.insert(at, id);
+        }
     }
 }
 
@@ -156,16 +186,18 @@ impl Slot {
         kind: PartitionKind,
         path: Option<PathBuf>,
         file: PathBuf,
-    ) -> Slot {
+    ) -> Arc<Slot> {
         let budget = match kind {
             PartitionKind::App => shared.budgets.app,
             PartitionKind::Repo | PartitionKind::Folder => shared.budgets.project,
         };
-        Slot {
+        Arc::new_cyclic(|me| Slot {
             shared,
+            me: me.clone(),
             kind,
             path,
             file,
+            last_used: Arc::new(AtomicU64::new(0)),
             session: RwLock::new(None),
             state: Mutex::new(State {
                 open: false,
@@ -178,7 +210,7 @@ impl Slot {
             io_errors: AtomicU32::new(0),
             #[cfg(any(test, feature = "test-support"))]
             hooks: Mutex::new(Hooks::default()),
-        }
+        })
     }
 
     pub(crate) fn kind(&self) -> PartitionKind {
@@ -217,11 +249,44 @@ impl Slot {
         Written::Dropped(reason)
     }
 
-    /// Closes the connections; waits for calls in progress.
-    pub(crate) fn close(&self) {
-        let mut session = write(&self.session);
-        *session = None;
+    /// Closes the connections; waits for calls in progress. With
+    /// `write_back`, pending access times are written first (`Cache::close`;
+    /// not when the last `Cache` is dropped).
+    pub(crate) fn close(&self, write_back: bool) {
+        let mut guard = write(&self.session);
+        if write_back && let Some(session) = guard.as_ref() {
+            self.write_back(session);
+        }
+        *guard = None;
         lock(&self.state).open = false;
+    }
+
+    /// Swaps out session `id` to make room for another project partition:
+    /// writes the access times back and closes the connections, after the
+    /// calls in progress. Nothing when another session has replaced it.
+    fn swap_out(&self, id: u64) {
+        let mut guard = write(&self.session);
+        if let Some(session) = guard.as_ref().filter(|s| s.id == id) {
+            self.write_back(session);
+            *guard = None;
+            lock(&self.state).open = false;
+        }
+    }
+
+    /// Writes pending access times in a transaction of their own. Failures
+    /// only lose LRU precision; the next open handles a broken file.
+    fn write_back(&self, session: &Session) {
+        let ids = std::mem::take(&mut *lock(&session.touched));
+        if ids.is_empty() || lock(&self.state).disabled.is_some() {
+            return;
+        }
+        let atime = (self.shared.clock.now_ms() / 60_000) as i64;
+        let _ = db::touch(&mut lock(&session.writer), &ids, atime);
+    }
+
+    fn used(&self) {
+        let tick = self.shared.ticks.fetch_add(1, Ordering::Relaxed);
+        self.last_used.store(tick, Ordering::Relaxed);
     }
 
     /// Reads entries of one type. Counts a hit or a miss per key.
@@ -235,6 +300,7 @@ impl Slot {
             counters.miss(keys.len() as u64);
             return out;
         }
+        self.used();
         let Ok(guard) = self.session() else {
             counters.miss(keys.len() as u64);
             return out;
@@ -262,15 +328,20 @@ impl Slot {
                 return out;
             }
         };
+        let now = (self.shared.clock.now_ms() / 60_000) as i64;
         let mut hits = 0;
+        let mut stale = Vec::new();
         for (i, row) in wanted.iter().zip(found) {
-            let Some((id, raw)) = row else {
+            let Some(Found { id, atime, raw }) = row else {
                 continue;
             };
             match codec::decode::<E>(raw) {
                 Some(value) => {
                     out[*i] = Some(value);
                     hits += 1;
+                    if now - atime > TOUCH_AFTER_MIN {
+                        stale.push(id);
+                    }
                 }
                 None => {
                     counters.decode_failure();
@@ -280,6 +351,9 @@ impl Slot {
                     }
                 }
             }
+        }
+        if !stale.is_empty() {
+            touch(&mut lock(&session.touched), stale);
         }
         drop(guard);
         self.succeeded();
@@ -293,7 +367,7 @@ impl Slot {
         session: &Session,
         ns: &Namespace,
         keys: &[&[u8]],
-    ) -> Result<Vec<Option<(i64, Raw)>>, ReadError> {
+    ) -> Result<Vec<Option<Found>>, ReadError> {
         let mut reader = lock(&session.reader);
         if reader.is_none() {
             let conn = db::open_reader(&self.file, self.shared.budgets.page_cache)
@@ -339,6 +413,7 @@ impl Slot {
             }
             st.budget
         };
+        self.used();
         let guard = match self.session() {
             Ok(guard) => guard,
             Err(reason) => return self.dropped(reason),
@@ -351,12 +426,14 @@ impl Slot {
             .map(|op| session.namespace(&op.namespace))
             .collect();
         let bad: Vec<i64> = lock(&session.bad).clone();
+        let touched = std::mem::take(&mut *lock(&session.touched));
         let result = {
             let mut conn = lock(&session.writer);
             self.prepare_writer(&conn).and_then(|hook| {
                 let params = WriteParams {
                     ops,
                     known: &known,
+                    touched: &touched,
                     bad: &bad,
                     budget,
                     atime: (now / 60_000) as i64,
@@ -387,6 +464,7 @@ impl Slot {
                 Written::Committed
             }
             Err(e) => {
+                touch(&mut lock(&session.touched), touched);
                 let id = session.id;
                 drop(guard);
                 let reason = self.fail(id, &e);
@@ -427,13 +505,36 @@ impl Slot {
         }
     }
 
-    /// Opens the write connection and checks the file, rebuilding it when it
-    /// belongs to something else or is corrupt. Runs under the session's
-    /// write lock; failures are handled here.
+    /// Opens the partition under the session's write lock: swaps out the
+    /// least recently used project partition when this one would exceed
+    /// `Budgets::open_projects`, sweeps the directory on the first open of
+    /// the run, then opens the file.
     fn open(&self) -> Result<Session, Dropped> {
         if lock(&self.state).disabled.is_some() {
             return Err(Dropped::Unavailable);
         }
+        let shared = &self.shared;
+        let id = shared.sessions.fetch_add(1, Ordering::Relaxed);
+        if self.kind != PartitionKind::App {
+            let cap = shared.budgets.open_projects;
+            if let Some((victim, session)) = shared.pool.reserve(self, id, cap)
+                && !Weak::ptr_eq(&victim, &self.me)
+                && let Some(victim) = victim.upgrade()
+            {
+                victim.swap_out(session);
+            }
+        }
+        shared.sweep_once();
+        let opened = self.open_file(id);
+        if opened.is_err() {
+            shared.pool.release(id);
+        }
+        opened
+    }
+
+    /// Opens the write connection and checks the file, rebuilding it when it
+    /// belongs to something else or is corrupt. Failures are handled here.
+    fn open_file(&self, id: u64) -> Result<Session, Dropped> {
         // At most: a mismatch rebuilt, then a corrupt new file rebuilt.
         for _ in 0..3 {
             let failure = match self.try_open() {
@@ -447,12 +548,13 @@ impl Slot {
                     let shared = self.shared.clone();
                     shared.connections.fetch_add(1, Ordering::Relaxed);
                     return Ok(Session {
-                        id: shared.sessions.fetch_add(1, Ordering::Relaxed),
+                        id,
                         shared,
                         writer: Mutex::new(writer),
                         reader: Mutex::new(None),
                         namespaces: Mutex::new(Vec::new()),
                         bad: Mutex::new(Vec::new()),
+                        touched: Mutex::new(Vec::new()),
                     });
                 }
                 Err(OpenError::Mismatch) => {
@@ -582,16 +684,7 @@ impl Slot {
     }
 
     fn remove_files(&self) -> io::Result<()> {
-        for suffix in ["", "-wal", "-shm"] {
-            let mut name = self.file.clone().into_os_string();
-            name.push(suffix);
-            match fs::remove_file(&name) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
+        sweep::remove(&self.file)
     }
 
     /// Pauses writes and lowers this run's budget to 75% of the current size.
@@ -657,6 +750,13 @@ impl Slot {
         read(&self.session)
             .as_ref()
             .map_or(0, |s| lock(&s.bad).len())
+    }
+
+    /// Access times waiting to be written back.
+    pub(crate) fn pending_touched(&self) -> usize {
+        read(&self.session)
+            .as_ref()
+            .map_or(0, |s| lock(&s.touched).len())
     }
 }
 

@@ -34,6 +34,7 @@ const BENCHES: &[Bench] = &[
     cache::OPEN_NEW,
     cache::PUT_4K,
     cache::BATCH_1000,
+    cache::EVICT,
     cache::ZSTD_1M,
     executor::SPAWN_10K,
     executor::WAKE_1000X100,
