@@ -12,12 +12,27 @@ layer = "infra"
 
 [dependencies]
 rustix.workspace = true
+# Implements its `Backend` (docs/design/fs_watch.md「platform 后端」). Also on
+# Linux: the FSEvents event conversion is a pure function whose unit tests run
+# on every platform.
+lectern-fs-watch = { path = "../fs_watch" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The kqueue thread runs through `Executor::run_dedicated`.
+lectern-executor = { path = "../executor" }
+# kqueue for `Scope::Entries` targets.
+rustix = { workspace = true, features = ["event"] }
+# `proc_pid_rusage` (`process::phys_footprint`); the tests also create a
+# FIFO with it.
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-libc.workspace = true
+# `BusyGuard`, to implement `lectern_fs_watch::Sink` in the test that drives
+# the backend through a real `Watcher`.
+lectern-kernel = { path = "../kernel" }
 
 [lints]
 workspace = true

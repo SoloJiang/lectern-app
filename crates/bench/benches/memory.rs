@@ -1,6 +1,10 @@
 //! In-process memory benchmarks: live bytes counted by `CountingAlloc`,
 //! the global allocator of this target only (docs/design/bench.md「基准目标」).
+//! `cache/memory` measures the resident size of a child process instead:
+//! SQLite's memory is not allocated through `CountingAlloc`.
 
+#[path = "memory/cache.rs"]
+mod cache;
 #[path = "fixtures/git_worktree.rs"]
 mod git_worktree;
 
@@ -88,8 +92,13 @@ fn git_changes_capped_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> 
     )])
 }
 
-const BENCHES: &[Bench] = &[GIT_CHANGES_CAPPED_BYTES, GIT_RESIDENT];
+const BENCHES: &[Bench] = &[cache::MEMORY, GIT_CHANGES_CAPPED_BYTES, GIT_RESIDENT];
 
 fn main() -> ExitCode {
+    // The child process of `cache/memory`.
+    if let Some(root) = std::env::var_os(cache::CHILD) {
+        let entries = cache::entries(std::env::args().nth(1));
+        return cache::child(root.as_ref(), entries);
+    }
     lectern_bench::main(Target::Memory, env!("CARGO_TARGET_TMPDIR"), BENCHES)
 }

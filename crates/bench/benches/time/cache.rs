@@ -1,6 +1,7 @@
 //! `cache/*` (docs/design/cache.md「性能」): reads and writes on an open
-//! partition, and opening a partition, with the entry types and values of
-//! `lectern_cache::testing`. The system file cache is warm.
+//! partition, opening a partition, and a write that evicts, with the entry
+//! types and values of `lectern_cache::testing`. The system file cache is
+//! warm. `cache/memory` is in `benches/memory/cache.rs`.
 
 use std::cell::Cell;
 use std::hint::black_box;
@@ -11,9 +12,13 @@ use lectern_cache::testing::{Raw, Zstd, noise, text};
 use lectern_cache::{Budgets, Cache, Config, Key, MAX_BATCH, Partition, Written};
 
 fn cache(root: &Path) -> Cache {
+    cache_with(root, Budgets::default())
+}
+
+fn cache_with(root: &Path, budgets: Budgets) -> Cache {
     Cache::new(Config {
         root: root.to_path_buf(),
-        budgets: Budgets::default(),
+        budgets,
         ui_thread: None,
     })
 }
@@ -133,7 +138,7 @@ fn open_existing(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 
 /// Caps the samples of a write benchmark, so that what it writes stays far
 /// below the partition's 512 MiB budget and no sample pays for eviction
-/// (`cache/evict_16m` measures that).
+/// (`cache/evict` measures that).
 fn writes_at_most(ctx: &mut Ctx, samples: usize) {
     ctx.config(SampleConfig {
         max_samples: samples,
@@ -264,6 +269,73 @@ fn get_1m(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         p.get::<Raw>(black_box(&key("large", next % n)))
     });
     Ok(vec![Measured::new("cache/get_1m", Value::Time(time))])
+}
+
+const MIB: u64 = 1 << 20;
+
+/// A small `put` into a partition over its budget: the write transaction
+/// also evicts 1 MiB of the oldest 1 KiB entries and, once more than 32 MiB
+/// of pages are free, returns 2 MiB of them to the file system. Filled under
+/// the default budget; the next run's budget is 32 MiB, so every sample
+/// evicts.
+pub const EVICT: Bench = Bench {
+    id: "cache/evict",
+    run: evict,
+};
+
+fn evict(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let root = ctx.scratch().join("cache");
+    let len = 1 << 10;
+    let (filled, budget) = ctx.scale((320 * MIB, 32 * MIB), (3 * MIB, MIB));
+    fill(
+        &cache(&root).repo(&repo(0)),
+        "evict",
+        filled / (len as u64 + 80),
+        len,
+    )?;
+    let cache = cache_with(
+        &root,
+        Budgets {
+            project: budget,
+            ..Budgets::default()
+        },
+    );
+    let p = cache.repo(&repo(0));
+    if p.get::<Raw>(&key("evict", 0)).is_none() {
+        return Err(BenchError::new("a stored entry was not found"));
+    }
+    // Each call evicts 1 MiB: stay well within the 288 MiB over the budget,
+    // warm-up included.
+    ctx.config(SampleConfig {
+        max_samples: 150,
+        warmup_time: std::time::Duration::from_millis(50),
+        ..SampleConfig::default()
+    });
+    let writes = Writes::new();
+    let value = Raw(vec![1]);
+    let mut next = 0;
+    let time = ctx.time_with_setup(
+        || {
+            next += 1;
+            key("write", next)
+        },
+        |k| writes.check(p.put(&k, black_box(&value))),
+    );
+    writes.result()?;
+    // Still over the budget: every call evicted.
+    let left = cache
+        .stats()
+        .partitions
+        .iter()
+        .map(|s| s.bytes)
+        .max()
+        .unwrap_or(0);
+    if left <= budget {
+        return Err(BenchError::new(
+            "the partition got within its budget while sampling",
+        ));
+    }
+    Ok(vec![Measured::new("cache/evict", Value::Time(time))])
 }
 
 /// `put` and `get` of 1 MiB of text in a `Zstd` namespace: compression and

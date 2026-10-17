@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)）；列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -12,13 +12,14 @@
   - `Meta`、`FileKind`：git 的 stat 比较需要的全部字段。
   - 读取结果的分类：普通文件、符号链接（读出目标，不跟随）、超过上限、不读取的类型（目录、FIFO、socket、设备文件）；错误分为不存在、路径中间是符号链接、其他 IO 错误。
   - 三个实现：Linux 的 `openat2`、macOS 的 `O_NOFOLLOW_ANY` 与 `AT_SYMLINK_NOFOLLOW_ANY`、两个平台共用的逐级 `openat`（Linux 没有 `openat2` 时的后备，也是出错时判定原因的实现）。
+  - `process::phys_footprint`：一个进程在活动监视器里的「内存」，供 `lectern-bench` 测量（见「进程」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
   - 内置转换、OID 计算、stat 比较本身、按路径缓存：`git`。
   - 写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。
 - 本文不覆盖，以后在本文增加小节或另写设计文档，设计合并之前不写对应的代码：
-  - FSEvents 与 kqueue 后端（实现 `fs_watch` 的接口）：设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)。
+  - FSEvents 与 kqueue 后端（实现 `fs_watch` 的接口，模块 `fs_events`）：设计、实际验证和与设计的差异都在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)。
   - `open -a`、钥匙串、代码签名校验、线程 QoS（[executor 设计](executor.md)的线程启动钩子）。
   - Seatbelt 配置、受限进程的启动与监护、磁盘映像、快照写出（[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#66](https://github.com/SoloJiang/lectern-app/issues/66)，ADR 0019）。
   - Claude Code statusline 的安装与恢复（[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[ADR 0014](../adr/0014.md)）。
@@ -29,7 +30,11 @@
 |---|---|---|
 | `rustix` 1.1（`default-features = false`，`std`、`fs`） | `openat2`、`openat`、`fstatat`、`fstat`、`readlinkat`、`read` | 见下 |
 | `tempfile`（dev） | 测试用的临时目录 | 已在 Cargo.lock（3.27，经 `insta`），MIT OR Apache-2.0 |
-| `libc`（dev） | 测试里在 macOS 上创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190）；只在测试代码里用 |
+| `libc`（只在 macOS 上） | `proc_pid_rusage`（`process::phys_footprint`）；测试里创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190）；rustix 没有 `proc_pid_rusage` |
+| `lectern-fs-watch` | `fs_events` 实现它的 `Backend`；事件转换是纯函数，在所有平台上编译和测试 | 基础设施层，方向向下（[fs_watch 设计「依赖」](fs_watch.md#依赖)） |
+| `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
+| `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
+| `lectern-kernel`（dev，只在 macOS） | 经真实 `Watcher` 驱动后端的测试实现 `Sink` 要用 `BusyGuard` | kernel 层 |
 
 选 `rustix`，不选 `libc`、`nix`、`cap-std`：
 
@@ -360,6 +365,22 @@ pub enum FileKind {
 
 `git` 的工作区测试（FIFO 为 `UnsupportedType`、中间一级是符号链接为 `PathThroughSymlink`）在 Linux 上经本模块的 Linux 实现运行。
 
+## 进程
+
+`lectern_platform::process`，供 `lectern-bench` 测量进程的内存（[bench 设计「需要其他 crate 提供的接口」](bench.md#需要其他-crate-提供的接口)）。目前只有 `phys_footprint`，随 `cache` 第 2 步的 `cache/memory` 加入；`start_time`、`children` 随 bench 第 2 步在本节补充。
+
+```rust
+pub mod process {
+    /// 进程 `pid` 的 physical footprint，即活动监视器里的「内存」。macOS 上是
+    /// `proc_pid_rusage(pid, RUSAGE_INFO_V2)` 的 `ri_phys_footprint`；进程不存在或无权查看时返回系统的错误。
+    /// 其他平台返回 `ErrorKind::Unsupported`。不分配、不建线程，任何线程可调用。
+    pub fn phys_footprint(pid: u32) -> io::Result<u64>;
+}
+```
+
+- 模块在所有平台上编译，macOS 的实现在 `#[cfg(target_os = "macos")]` 后面，是本 crate 里除测试外唯一的 `unsafe`（一次 FFI 调用和读取它填好的结构体）。
+- 测试（`process_*`）：macOS 上，分配并写满 64 MiB 后本进程的 `phys_footprint` 至少增加 60 MiB；不存在的 pid 返回错误。Linux 上返回 `Unsupported`。
+
 ## 未决问题
 
 没有需要产品决定的问题。技术问题都已在上文决定。
@@ -369,7 +390,7 @@ pub enum FileKind {
 一个实现 PR，写 `Refs #14`（#14 由 `review_view` 的最后一个 PR 关闭）。合并后 `git` 设计的验收第 1 步的前置条件成立。
 
 - 根 `Cargo.toml` 的 `[workspace.dependencies]` 有 `rustix`（`default-features = false`，`std`、`fs`），`crates/platform/Cargo.toml` 用 `workspace = true` 引用；`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果（不新增 crate）。
-- `cargo tree -p lectern-platform -e normal --depth 1` 只列出 `rustix`。
+- `cargo tree -p lectern-platform -e normal --depth 1` 只列出 `rustix`（安全读取这一步；FSEvents 后端加入后另有 `lectern-fs-watch`，macOS 上还有 `lectern-executor`，见「依赖」）。
 - `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有 `relpath_*`、`stat_*`、`symlink_*`、`read_*`、`fifo_*`、`socket_*`、`device_*`、`race_*`、`fd_*`、`send_sync`、`walk_*`，Linux 上另有 `openat2_rejects_escape`、`linux_backend_choice`，macOS 上另有 `nofollow_any_*`。
 - `rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`（测试里创建 FIFO 的 `libc::mkfifo`）：实现代码没有 `unsafe`。
 - `rg 'O_NOFOLLOW_ANY|NOFOLLOW_ANY' crates --glob '!crates/platform/**'` 没有结果（架构规则 6）。

@@ -541,23 +541,26 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // A small write into a partition over its budget: evicts 1 MiB, and
+    // returns 2 MiB of free pages once more than 32 MiB is free.
     share(
-        "cache/evict_16m",
+        "cache/evict",
         &[median(Limit::TimeBelow(ms(30)))],
         CACHE,
-        State::Planned("cache 第 2 步"),
+        ACTIVE,
         Time,
     ),
     // Checked before a namespace picks `Zstd`, against the user's budget.
     share("cache/zstd_1m/put", RECORD, CACHE, ACTIVE, Time),
     share("cache/zstd_1m/get", RECORD, CACHE, ACTIVE, Time),
     // The app partition and 2 repository partitions open, 50 MiB read from
-    // each: resident growth.
+    // each: resident growth of a child process (VmRSS on Linux,
+    // phys_footprint on macOS), as SQLite's memory bypasses CountingAlloc.
     share(
         "cache/memory",
         &[median(Limit::BytesAtMost(8 * MB))],
         CACHE,
-        State::Planned("cache 第 2 步"),
+        ACTIVE,
         Memory,
     ),
     share(
