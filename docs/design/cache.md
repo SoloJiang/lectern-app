@@ -1,6 +1,6 @@
 # cache 设计
 
-状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)（见「验收」）。
+状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)，第 3 步（自定义表）[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`crates/cache/AGENTS.md` 列出的两个 issue；本 crate 是它们的前置，不单独关闭其中任何一个）。`cache` 是派生数据的本地持久缓存：解析、diff、索引这类可以从 git 对象或会话日志重新算出的结果，以内容的身份为键存进 SQLite，下次启动、切换 worktree 时直接命中（架构规则 5，[技术调研「性能要点」](tech-research.md#性能要点)）。存储选型见 [ADR 0027](../adr/0027.md)。
 
@@ -9,6 +9,7 @@
 - 做：
   - 两类分库：项目分库，每个仓库（按 git 公共目录区分，同一仓库的 worktree 共用）或文件夹项目一个；应用级分库，只有一个，不属于任何仓库。
   - 键值接口：按命名空间和键读写字节值，值的编码由使用方的类型实现；多条写入在一个事务里提交。
+  - 自定义表：使用方在分库里建自己的表，表里的行属于一个个单元，单元与条目一起计入预算和 LRU，按命名空间另有配额（见「自定义表」）。第一个使用方是 `code_intel` 的符号索引（[#17](https://github.com/SoloJiang/lectern-app/issues/17)，[code_intel 设计「存储表」](code_intel.md#存储表)）。
   - 按字节的 LRU 淘汰：每个分库一个预算，所有分库的文件另有一个总预算。
   - 生命周期：首帧之后第一次使用时才打开；版本不符、文件损坏时删除重建；磁盘写满、被其他进程占用时放弃写入，不让调用方失败。
   - 内存上限：连接数和每个连接的页缓存（[ADR 0017](../adr/0017.md)）。
@@ -20,7 +21,6 @@
   - 缓存键的含义和有效性判断：使用方负责。例如轮次索引是否仍有效由 `agents` 按值里的游标判断（[ADR 0026](../adr/0026.md)）。
   - 应用缓存目录的位置：`platform` 提供，`app` 传入（见「接口」）。
 - 本 issue 之外：
-  - `code_intel` 的符号索引（[#17](https://github.com/SoloJiang/lectern-app/issues/17)）：按名字查询需要自己的表和索引，键值接口不够。code_intel 的设计文档确定查询之后，在本文增加「自定义表」一节，表仍在仓库分库里、计入同一个字节预算、可以删除重建。
   - Analyze 的模型结果和基准快照（[ADR 0019](../adr/0019.md)、[#66](https://github.com/SoloJiang/lectern-app/issues/66)）：结果按完整分析请求的哈希存进仓库分库的 `analyze.result` 命名空间（本文预留名字）；快照是磁盘映像里的目录树，带引用计数，它的字节 LRU 随 #66 设计，不进 SQLite。
 
 本 crate 在基础设施层，是普通的库 crate，不是插件：不实现 `Plugin`，不注册服务。`app` 创建一个 `Cache`，在构造插件时传入（[ADR 0025](../adr/0025.md)「进程级的共享资源」）；插件 crate 和领域 crate 直接依赖本 crate。
@@ -213,6 +213,7 @@ impl Key {
 | `agents.turns` | 应用 | `agents` | 来源 ID、会话 ID、适配器版本（索引格式版本是命名空间版本） | 轮次索引和生成它时的游标；Codex 来源会话的轮次 ID 集合由 `agents` 决定放进同一个值，或在同一批写入里另写一条 | `agents` 按基准决定 |
 | `agents.summary` | 应用 | `agents` | 来源 ID、会话 ID、压缩文件的设备号、inode、大小、修改时间、适配器版本（摘要格式版本是命名空间版本） | 补齐后的会话摘要 | 不压缩 |
 | `analyze.result` | 仓库 | Analyze（#66） | 完整分析请求的哈希（ADR 0019，构成见 `crates/cache/AGENTS.md`） | 校验后的分析结果 | 随 #66 决定 |
+| `code_intel.tags` | 仓库、文件夹 | `code_intel` | OID、语言、grammar 版本、查询版本（表结构和单元的键是命名空间版本） | 没有值：单元，行在 `ci_ext`、`ci_def`、`ci_ref` 三张自定义表里（「自定义表」，[code_intel 设计「存储表」](code_intel.md#存储表)）；配额 256 MiB | 不使用 |
 
 规则生成的简报不缓存（ADR 0019）。`agents` 的两个命名空间不在 git 里、没有 blob OID，键按 ADR 0026。
 
@@ -235,7 +236,7 @@ impl Key {
 
 ```sql
 PRAGMA application_id = 1279480899;   -- 0x4C435443，"LCTC"
-PRAGMA user_version = 1;              -- SCHEMA_VERSION，表结构变化时加一
+PRAGMA user_version = 2;              -- SCHEMA_VERSION，表结构变化时加一（2：custom 表与外键）
 PRAGMA auto_vacuum = INCREMENTAL;     -- 建表之前设置
 
 CREATE TABLE meta (
@@ -262,6 +263,14 @@ CREATE TABLE entry (
   UNIQUE (ns, key)
 );
 CREATE INDEX entry_atime ON entry (atime);
+
+CREATE TABLE custom (                 -- 已建的自定义表，见「自定义表」
+  ns      INTEGER PRIMARY KEY,        -- 单元的 namespace.id
+  name    TEXT NOT NULL UNIQUE,
+  version INTEGER NOT NULL,
+  bytes   INTEGER NOT NULL,           -- 这个命名空间的 entry.size 之和
+  tables  TEXT NOT NULL               -- schema 建出的表名，每行一个
+);
 ```
 
 - `entry` 用有 rowid 的表：值可能有几 MB，SQLite 文档说明 `WITHOUT ROWID` 只适合单行不超过页大小约 1/20 的表。
@@ -274,6 +283,7 @@ CREATE INDEX entry_atime ON entry (atime);
 
 ```sql
 PRAGMA journal_mode = WAL;            -- 只需在建库时设置一次，之后持久
+PRAGMA foreign_keys = ON;             -- 删除单元的条目时级联删除它在自定义表里的行
 PRAGMA synchronous = NORMAL;          -- WAL 下提交不 fsync，检查点才 fsync；进程崩溃不丢已提交的事务
 PRAGMA cache_size = -1024;            -- Budgets::page_cache，单位 KiB
 PRAGMA busy_timeout = 100;
@@ -284,7 +294,7 @@ PRAGMA cell_size_check = ON;          -- 读页时多做一次检查，损坏更
 PRAGMA query_only = ON;               -- 只在读连接上
 ```
 
-预编译语句缓存每个连接 16 条（rusqlite 的 `cache` feature）。
+预编译语句缓存每个连接 32 条（rusqlite 的 `cache` feature）。写连接上本 crate 自己的语句约 22 条，加上自定义表使用方的写入语句（code_intel 3 条）；读连接上本 crate 2 条，加上使用方的查询（code_intel 约 9 条）。第 1、2 步是 16 条。
 
 ### 统计
 
@@ -343,8 +353,156 @@ pub enum DisableReason {
 - 每个写事务在提交前检查 `meta.bytes`：超过预算时按 `atime` 从旧到新删除，删到预算的 90% 为止；每个事务最多删本事务写入的字节数（`entry.size` 之和），但至少 1 MiB、至多 16 MiB；没删够的留给下一个写事务。超出预算时每个事务删掉的不少于它写入的（单次写入最多 `MAX_BATCH`），所以分库最多短暂超出预算 16 MiB，之后只减不增；淘汰的开销与这次写入的开销同一量级。
 - 旧版本命名空间（`retired = 1`）的条目，每个写事务另外删最多 256 条，不论是否超出预算。命名空间升级后不需要一次性清掉旧数据。
 - 空闲页：`freelist_count × page_size` 超过 32 MiB 时，在同一个事务里执行 `PRAGMA incremental_vacuum(512)`，每次最多把 2 MiB 还给文件系统（文件在下一次检查点时变小）。
-- 访问时间：读命中时，若条目的 `atime` 比现在早 60 分钟以上，把它的 `id` 记进这个分库在内存里的待写集合（最多 4096 个，满了不再记）；待写集合在下一个写事务开头写回，`close` 和换出分库时也写回，写回的 `atime` 是写回的时刻：读和写回之间没有别的写入，所以与其他条目的先后不变。所以读命中通常不产生写入，LRU 的精度是 1 小时；进程崩溃、最后一个 `Cache` drop 时丢掉没写回的访问时间，只影响淘汰顺序。
+- 访问时间：读命中时，若条目的 `atime` 比现在早 60 分钟以上，把它的 `id` 记进这个分库在内存里的待写集合（最多 4096 个，满了不再记；自定义表的 `touch` 满时写回，见「自定义表」）；待写集合在下一个写事务开头写回，`close` 和换出分库时也写回，写回的 `atime` 是写回的时刻：读和写回之间没有别的写入，所以与其他条目的先后不变。写回只更新 `atime` 早于写回时刻 60 分钟以上的条目，读命中记下的条目都满足这一条。所以读命中通常不产生写入，LRU 的精度是 1 小时；进程崩溃、最后一个 `Cache` drop 时丢掉没写回的访问时间，只影响淘汰顺序。
 - 目录清理：每次运行第一次打开任何分库时，在打开它的文件之前，列出 `repo/` 和 `folder/` 下的文件：一个项目分库的修改时间取它三个文件中最新的，早于 90 天的删除；全部分库文件（含 `-wal`、`-shm` 和应用级分库的文件）合计超过 `Budgets::total` 时，按修改时间从旧到新删除项目分库，直到不超过。当前打开或正在打开的分库和应用级分库不删除；同时打开的其他分库等清理完成后再打开文件。不是分库的文件不动；删除失败写一行 stderr，不停用分库。列目录和 `stat` 只涉及几十个文件，在这次调用里完成。
+
+## 自定义表
+
+`code_intel` 的符号索引要按名字查询定义和引用，键值接口不够。自定义表让使用方在分库里建自己的表：表里的每一行属于一个**单元**，单元是 `entry` 表里的一个条目，有命名空间和键，没有值。单元与其他条目一样计入 `meta.bytes`、按访问时间淘汰；单元被删除时，它在自定义表里的行经外键级联在同一条语句里删除。自定义表与其他缓存数据一样可以随时删除重建。
+
+### 接口
+
+```rust
+/// 一组自定义表的登记。使用方定义成 `static`，一组表对应一个命名空间。
+pub struct Tables {
+    /// 单元的命名空间，登记在「命名空间」表里。`version` 同时是表的版本：表结构、语句用到的列、
+    /// 单元的键任何一项变化时加一。`compression` 不使用（单元没有值）。
+    pub namespace: Namespace,
+    /// 建表和建索引的语句，第一次使用时在一个写事务里按顺序执行（「登记的规则」）。
+    pub schema: &'static [&'static str],
+    /// `TableRead::query` 和 `TableWrite::execute` 能执行的语句。
+    pub statements: &'static [&'static str],
+    /// 这个命名空间的单元在一个分库里最多占的字节数（`entry.size` 之和）。
+    pub quota: u64,
+}
+
+impl Partition {
+    /// 这组表在这个分库里的句柄。不做 IO，任何线程可调用。
+    pub fn tables(&self, tables: &'static Tables) -> TableSet;
+}
+
+/// `Clone + Send + Sync`，不持有连接。
+#[derive(Clone)]
+pub struct TableSet { /* 分库句柄、登记、淘汰代数 */ }
+
+impl TableSet {
+    /// 淘汰代数（「淘汰代数」）。只读一个原子变量，任何线程可调用，不阻塞。
+    pub fn evictions(&self) -> u64;
+    /// 在读连接上开一个读事务，把它交给 `f`。阻塞，只在 executor 的任务里调用；第一次使用时建表。
+    /// 分库不可用、建表失败或 `f` 里任何一条查询失败时返回 None，`f` 看到的结果不完整。
+    pub fn read<T>(&self, f: impl FnOnce(&mut TableRead<'_>) -> T) -> Option<T>;
+    /// 标记单元被访问，不读 `entry`，访问时间的规则与读命中相同。通常只写内存，
+    /// 待写集合满时在这次调用里写回。阻塞，只在 executor 的任务里调用。
+    pub fn touch(&self, units: &[Unit]);
+    /// 开始一次写入。不做 IO。
+    pub fn write(&self) -> TableWrite;
+}
+
+pub struct TableRead<'a> { /* 读连接 */ }
+
+impl TableRead<'_> {
+    /// 执行一条登记过的只读语句，每一行调用一次 `row`，`row` 返回 false 时停止。
+    /// 失败时返回 false，同一次 `read` 里之后的查询不再执行，`read` 返回 None。
+    pub fn query(&mut self, sql: &'static str, params: &[Param<'_>],
+                 row: impl FnMut(&Row<'_>) -> bool) -> bool;
+}
+
+pub struct Row<'a> { /* 当前行 */ }
+
+impl Row<'_> {
+    /// 第 `column` 列（从 0 开始）。NULL、类型不符或没有这一列时返回 None。
+    pub fn int(&self, column: usize) -> Option<i64>;
+    pub fn bytes(&self, column: usize) -> Option<&[u8]>;
+    /// 不是合法 UTF-8 时也返回 None。
+    pub fn text(&self, column: usize) -> Option<&str>;
+    pub fn unit(&self, column: usize) -> Option<Unit>;
+}
+
+/// 语句的参数，依次绑定到 ?1、?2……
+#[derive(Clone, Copy, Debug)]
+pub enum Param<'a> {
+    Null,
+    Int(i64),
+    Bytes(&'a [u8]),
+    Text(&'a str),
+    /// 同一个 `TableWrite` 里 `create` 建的单元，提交时换成它的 ID。用在 `query` 里时查询失败。
+    New(NewUnit),
+}
+
+/// 已提交的单元：它的 `entry.id`。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Unit(/* i64 */);
+impl Unit {
+    pub fn from_id(id: i64) -> Unit;
+    pub fn id(self) -> i64;
+}
+
+/// 一次写入里新建的单元。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NewUnit(/* 这次写入里的序号 */);
+
+/// 一次写入，`commit` 时在一个写事务里全部生效或全部不生效。`Send`，可以在一个任务里攒好再提交。
+pub struct TableWrite { /* 记下的操作，参数复制进一个缓冲区 */ }
+
+impl TableWrite {
+    /// 新建一个单元，计入预算的字节数是 `len(key) + bytes + 64`。这个键已有单元时先删除它和它的行。不做 IO。
+    pub fn create(&mut self, key: &Key, bytes: u64) -> NewUnit;
+    /// 记下一条登记过的语句和它的参数，提交时按记下的顺序执行。不做 IO。
+    pub fn execute(&mut self, sql: &'static str, params: &[Param<'_>]) -> &mut TableWrite;
+    /// 删除这个键的单元和它的行；没有时什么也不做。
+    pub fn remove(&mut self, key: &Key) -> &mut TableWrite;
+    /// 删除这个命名空间的一个单元和它的行。
+    pub fn remove_unit(&mut self, unit: Unit) -> &mut TableWrite;
+    /// 已记下的字节数：键加参数（整数按 8 字节），调用方据此分批，不超过 `MAX_BATCH`。
+    pub fn bytes(&self) -> u64;
+    /// 在一个写事务里提交。阻塞，只在 executor 的任务里调用。结果与 `Batch::commit` 相同，见「写入、配额与淘汰」。
+    pub fn commit(self) -> Written;
+}
+```
+
+公开接口里没有 rusqlite 的类型；`Row` 只在 `query` 的回调里有效。
+
+### 登记的规则
+
+- `schema` 只建表和建在这些表上的索引：不建触发器和视图，不在本 crate 的表（`meta`、`namespace`、`entry`、`custom`）上建索引。表名带使用方自己的前缀（code_intel 是 `ci_`），不与本 crate 的表和其他登记重复。
+- 每张表有一列声明为 `REFERENCES entry (id) ON DELETE CASCADE`（列名由使用方定，code_intel 是 `unit`），并且这一列上有索引，或者它就是这张表的 `INTEGER PRIMARY KEY`。每个连接都打开外键（`PRAGMA foreign_keys = ON`）：删除 `entry` 的一行时，SQLite 在同一条语句里按这一列找到并删除引用它的行，没有索引就要扫整张表；插入引用不存在的单元的行违反外键，这次写入整个回滚。所以任何一条删除条目的路径（预算淘汰、`retired` 清理、解码失败、`remove`）都不会留下不属于单元的行，也不依赖进程里有没有这组登记。
+- 建表时检查：新建的对象只有表和这些表上的索引；每张表有符合上一条的列（`PRAGMA foreign_key_list`），`SELECT 1 FROM <表> WHERE <列> = ?` 的查询计划不是全表扫描（`EXPLAIN QUERY PLAN`）；`statements` 的每一条都能预编译。任何一项不满足时建表的事务回滚，向 stderr 写一行，这次读返回 None、写返回 `Dropped::Io`；分库照常可用，下一次使用时再检查一遍。
+- `query` 只执行只读语句（`sqlite3_stmt_readonly`），写语句在 `query` 里不执行、直接失败：读连接是 `query_only`，在它上面执行写语句会报 `SQLITE_READONLY`，按「状态与异常」会停用分库。
+- 语句是静态文本，参数个数固定。可变长的列表（code_intel 的存在检查 `oid IN (…)`，最多 500 个）写成固定个数的占位符，用不到的绑定 NULL：`IN` 里的 NULL 不匹配任何值。
+- 语句只读写使用方自己的表；`entry` 的行只经本节的接口建立和删除。登记过的命名空间不再用作 `Entry` 的命名空间。
+- 单元 ID 是 `entry.id`（rowid），单元删除之后这个 ID 可能分配给新单元。使用方在淘汰代数变化之后，不再沿用之前读到的单元 ID。
+
+### 建表与版本
+
+- 一个会话里一组登记第一次经 `TableSet` 读或写时，在写连接上按名字查 `custom`：版本相同就使用；没有记录或版本不同时开一个写事务：删除旧版本的表（`DROP TABLE`）和它在 `entry` 上的部分索引，把旧版本的命名空间标为 `retired`，然后执行 `schema`、做上一节的检查、建部分索引 `entry_ns<id>`（`ON entry (atime) WHERE ns = <id>`，配额淘汰用）、写入 `custom`。读也会触发建表：表还不存在时，建表和这次读在同一次调用里完成。
+- 旧版本的单元在表删除之后已经没有行，查询看不见它们；它们与其他 `retired` 命名空间的条目一样，每个写事务删最多 256 条（「淘汰」），不在建表的事务里一次删完，单个事务的工作量仍有上限。
+- 一个分库只保留一个版本：旧版本程序打开新版本建过表的分库时，同样删掉新版本的表、建自己的。两个版本交替运行时每次切换都重建，只损失命中率。
+- 建部分索引要扫一遍 `entry`：已有 20 万个条目的分库约 45 ms（见「实际验证」），每个分库每个版本一次，在使用方的后台任务里。
+- `custom` 表和外键设置让 `SCHEMA_VERSION` 升为 2，第 2 步写的文件打开时整份重建。旧版本程序（`SCHEMA_VERSION` 为 1，不打开外键）打开新文件时同样因版本不符而重建，不会在有自定义表的文件里删除条目而留下行。
+
+### 写入、配额与淘汰
+
+- `TableWrite::commit` 是一个写事务，依次：写回访问时间、删除解码失败的条目（与「数据流与线程」相同）、按记下的顺序执行 `create`、`execute`、`remove`、删除 `retired` 命名空间的条目、配额淘汰、预算淘汰、归还空闲页、更新 `meta.bytes` 和 `custom.bytes`。全部生效或全部不生效。
+- 单元的字节数由使用方声明（code_intel 按行估算），计入 `entry.size`、`meta.bytes` 和 `custom.bytes`；本 crate 不核对行的实际大小。
+- 失败时的结果与 `Batch::commit` 相同。另外，使用方的语句出错（违反约束、引用不存在的单元、类型不符、参数个数不对、语法错误、表不存在）时整次回滚，返回 `Dropped::Io`，向 stderr 写一行，但不计入「连续 3 次其他 IO 错误」：这类错误来自使用方的代码，不说明文件有问题，不停用分库。
+- `bytes()` 超过 `MAX_BATCH` 或任何一个键超过 `MAX_KEY` 时整次返回 `TooLarge`，不打开分库；没有记下任何操作的写入直接返回 `Committed`。
+- 配额：提交前，这个命名空间的 `custom.bytes` 加上本事务的变化超过 `quota` 时，按 `atime` 从旧到新删除它自己的单元（经部分索引，连同它们的行），删到配额的 90% 为止；每个事务最多删本事务写入的字节数，但至少 256 KiB、至多 16 MiB。配额淘汰只在这个命名空间自己的写入里进行：只有它自己的写入会让它变大。超出配额时每次写入删掉的不少于它写入的，所以这个命名空间最多短暂超出配额 16 MiB，之后只减不增。下限比预算淘汰的 1 MiB 低：单元带着行，按 1 MiB 的下限，一次只写一个单元的写入要删约 240 个单元、1.5 万行（`testing::tags` 的形状），实测 39 ms（见「与设计的差异」第 3 步）。
+- 预算淘汰的规则不变（「淘汰」）：单元与条目一起按 `atime` 排序。配额淘汰删掉的字节计入同一个事务的预算淘汰上限。配额淘汰先于预算淘汰，`code_intel.tags` 不超过 256 MiB，所以只有其他命名空间合计超过「分库预算 − 配额」（512 − 256 = 256 MiB）时才会触发预算淘汰：hunk 缓存在 256 MiB 以内时不会因为符号索引被淘汰。
+- 任何写事务（包括 `Partition::put` 引起的预算淘汰）删除单元时，`custom.bytes` 在同一个事务里减少，并记下这个命名空间有单元被删除（「淘汰代数」）。
+- 外键的代价：分库里有自定义表时，删除任何条目（包括 hunk）都要按外键列在每张自定义表里查一次。`cache/evict` 的夹具里另有 2000 个单元时，淘汰 1 MiB 的 1 KiB 条目从 6.5 ms 变为约 10 ms，仍在 30 ms 的预算内。
+
+### 访问时间
+
+- `touch` 把单元 ID 并进分库的待写集合（与读命中共用，最多 4096 个），不读 `entry`。集合满时在这次调用里写回（一个只更新访问时间的写事务），再接着记录余下的 ID；写回失败时丢掉这次调用余下的 ID，只影响淘汰顺序。所以标记 10 万个单元最多写回 25 次，待写集合仍不超过 32 KiB。
+- 写回只更新 `atime` 早于写回时刻 60 分钟以上的条目（`… WHERE id = ? AND atime < ?`），所以一小时内重复标记的单元不改变文件，精度与读命中相同。
+- 写回可能发生在 `touch` 的调用里。用户等待结果的路径（code_intel 的查询命中）先交出结果再调用 `touch`，或把它交给 `Background` 任务。
+
+### 淘汰代数
+
+- 每个分库为取过 `TableSet` 的每个命名空间保留一个 `AtomicU64`，同一分库同一命名空间的句柄共用它，`evictions()` 只读一次原子变量。
+- 加一：这个进程的写事务提交时删除了这个命名空间的单元（预算淘汰、配额淘汰、`remove`、`create` 替换同键的单元）；建表时删除了这个命名空间另一个版本的表。分库删除重建（版本或身份不符、损坏）、停用，或本次运行已经打开过的分库再打开时发现是新文件（目录清理删掉了它，或用户删除了缓存目录）时，这个分库的全部代数加一。
+- 不加一：读、`touch`、只新增单元的写入、换出和 `close`（文件和数据都还在）、本次运行第一次打开时新建文件（之前没有可以失效的结果）。
+- 另一个进程（同时运行的另一个 Lectern）删除的单元不改变这个进程的代数：使用方据代数认为仍在的单元，读的时候可能已经不在，按未命中处理。这是已知限制。
 
 ## 生命周期
 
@@ -386,10 +544,12 @@ pub enum DisableReason {
 | 写入（后台） | `put` 一条 4 KiB < 1 ms；1000 条 1 KiB 一批 < 15 ms；超出预算的分库里一次小写入（淘汰 1 MiB，空闲页超过 32 MiB 时归还 2 MiB）< 30 ms | `cache/put_4k`、`cache/batch_1000`、`cache/evict` |
 | 空闲内存（空窗口 < 60 MB；monorepo < 100 MB） | 页缓存合计 ≤ 6 MiB（6 个连接 × 1 MiB），只开应用级分库时 ≤ 2 MiB；另有每个连接的预编译语句和 SQLite 自身结构，约 0.2 MiB；待写访问时间 ≤ 32 KiB | `cache/memory`：打开应用级分库和 2 个项目分库、各读 50 MiB 之后，常驻增量 ≤ 8 MiB |
 | 安装包 ≤ 80 MB | SQLite 与 rusqlite 约 2 MB（ADR 0027） | #38 |
+| 自定义表的写入（后台） | 一次写入 64 个单元及其行（每个单元 20 个定义、40 个引用，参数约 100 KB，code_intel 的一批）< 15 ms；同样一批写进超出配额的命名空间（同时淘汰同样多字节的单元和行）< 30 ms；`touch` 5000 个访问时间超过 1 小时的单元（调用里写回 4096 个）< 20 ms | `cache/tables_write`、`cache/tables_evict`、`cache/tables_touch` |
+| 跳转与查找引用（code_intel 的名字查找 ≤ 2 ms、`ci_ref` 查找 ≤ 5 ms） | 分库和表已打开时，一次 `read` 执行一条按索引查找、返回 1 行的语句（1 万个单元、20 万个定义）< 50 µs | `cache/tables_read` |
 
 - `get` 一条 4 KiB < 50 µs（`cache/get_4k`）。
 - 命名空间选 `Zstd` 之前，先用 `cache/zstd_1m/put`、`cache/zstd_1m/get`（1 MiB 文本的压缩与解压，只记录）确认读取仍在使用方的预算内。
-- 上表各项是 `lectern-bench` 的基准（`just bench cache/`，[bench 设计「迁移」](bench.md#迁移)），夹具用 `test-support` 下的 `testing::Raw`、`testing::Zstd`、`testing::noise`、`testing::text`。`cache/evict` 和 `cache/memory` 随第 2 步生效。`cache/memory` 在 bench 的 `memory` 目标里用子进程测量：SQLite 的页缓存和连接用 C 的分配器，计数分配器看不到，所以测的是子进程打开分库、读完之后的常驻增量（Linux 的 `VmRSS`，macOS 的 `phys_footprint`，见 [bench 设计「进程内基准」](bench.md#进程内基准)）。第 1 步的实现 PR 用 `#[ignore]` 的 `perf_smoke_cache` 测量，bench 第 1 步把它移进 `crates/bench` 后删除。
+- 上表各项是 `lectern-bench` 的基准（`just bench cache/`，[bench 设计「迁移」](bench.md#迁移)），夹具用 `test-support` 下的 `testing::Raw`、`testing::Zstd`、`testing::noise`、`testing::text`，自定义表用 `testing::tags`（code_intel 形状的三张表，`TABLES` 的配额 256 MiB，`SMALL_QUOTA` 是同一组表、配额 8 MiB）。`cache/evict` 和 `cache/memory` 随第 2 步生效，`cache/tables_*` 随第 3 步生效。`cache/memory` 在 bench 的 `memory` 目标里用子进程测量：SQLite 的页缓存和连接用 C 的分配器，计数分配器看不到，所以测的是子进程打开分库、读完之后的常驻增量（Linux 的 `VmRSS`，macOS 的 `phys_footprint`，见 [bench 设计「进程内基准」](bench.md#进程内基准)）。第 1 步的实现 PR 用 `#[ignore]` 的 `perf_smoke_cache` 测量，bench 第 1 步把它移进 `crates/bench` 后删除。
 
 ## 测试
 
@@ -411,6 +571,13 @@ pub enum DisableReason {
 - 内存（`memory_*`）：每个连接的 `PRAGMA cache_size` 是 `-1024`，读连接的 `query_only` 为 1。
 - 崩溃（`crash_*`）：子进程写入并提交后 `std::process::abort()`，父进程重新打开，已提交的条目都在、`PRAGMA integrity_check` 为 `ok`。
 - 压缩（`compression_*`）：`Zstd` 命名空间的大值压缩存储、读回一致；小于 4 KiB 或压不下来的值以原样存储（`codec = 0`）。
+- 自定义表（`tables_*`，夹具是测试里 code_intel 形状的三张表，检查文件时用 `PRAGMA foreign_key_check` 找不属于单元的行）：
+  - 登记：取句柄不做 IO；第一次读时建表、`custom` 记下表名、建部分索引；版本加一后旧表删除、旧版本的命名空间为 `retired`、它的单元在之后的写事务里删除、`meta.bytes` 随之减少、代数加一，旧版本程序再打开时同样重建；违反规则的登记（没有外键、外键不级联、外键列没有索引、建了触发器、语句或 `schema` 编译失败）什么也不建，读 None、写 `Io`，分库不停用。
+  - 读写：写入后按名字读回，`Param::New` 换成单元 ID，固定占位符里的 NULL 不匹配，`Row` 的类型不符时为 None；`create` 替换同键的单元和它的行；`remove`、`remove_unit` 删除单元和它的行；使用方的语句出错（引用不存在的单元、违反 UNIQUE、参数个数不对）时整次回滚、返回 `Io`，连续 5 次之后分库仍可用；`query` 里的写语句和 `Param::New` 失败、不停用分库；超过 `MAX_KEY`、`MAX_BATCH` 时 `TooLarge` 且不打开分库；UI 线程上不做 IO。`meta.bytes` 等于 `entry.size` 之和，`custom.bytes` 等于这个命名空间的 `entry.size` 之和。
+  - 访问时间：一小时内的 `touch` 被记下，但写回不改变 `atime`；超过一小时的由下一个写事务写回；5000 个单元的 `touch` 在调用里写回 4096 个，余下的由下一个写事务写回。
+  - 淘汰：普通条目的写入引起的预算淘汰删除最旧的单元和它们的行，代数加一；256 KiB 配额的命名空间写入 2 MiB 之后，`custom.bytes` 始终不超过配额，留下的是最新的单元，同一分库里 512 KiB 的条目一条也没有被淘汰；配额降低后，一次小写入删 256 KiB，大写入删它写入的字节数，命名空间不增长，之后回到配额以内。
+  - 代数：读、`touch`、只新增单元、`close` 之后再打开不改变代数；文件在关闭期间被删除、`user_version` 不符被重建时加一；同一分库的另一个句柄读到同样的值，下一次运行从 0 开始。
+  - 回滚与崩溃：写入中途 `SQLITE_FULL` 时三张表的行数、单元数都不变，没有不属于单元的行；子进程在写事务提交之前 `abort()`，父进程重新打开后只有已提交的单元和行，`PRAGMA integrity_check` 为 `ok`，`custom.bytes`、`meta.bytes` 与条目一致。
 
 ## 未决问题
 
@@ -424,7 +591,7 @@ pub enum DisableReason {
 
 ## 验收
 
-分两步实现，每步一个 PR，都写 `Refs #17` 和 `Refs #31`（本 crate 不关闭这两个 issue）。每一步都要 `just check`、`just test -p lectern-cache`、`just deny` 通过。
+分三步实现，每步一个 PR，都写 `Refs #17` 和 `Refs #31`（本 crate 不关闭这两个 issue）。每一步都要 `just check`、`just test -p lectern-cache`、`just deny` 通过。第 3 步是 code_intel 的前置条件 C（[code_intel 设计「验收」](code_intel.md#验收)）。
 
 1. **存储、键值接口与生命周期**（[#82](https://github.com/SoloJiang/lectern-app/pull/82)）：根 `Cargo.toml` 按 ADR 0027 加入 `rusqlite`。
    - `just test -p lectern-cache` 里 `new_*`、`ui_thread_*`、`roundtrip_*`、`namespace_*`、`batch_*`、`open_*`、`disk_full_*`、`busy_*`、`concurrency_*`、`crash_*`、`compression_*`、`memory_*` 通过。
@@ -435,6 +602,11 @@ pub enum DisableReason {
 2. **淘汰、访问时间与分库管理**：
    - `evict_*`、`touch_*`、`partitions_*`、`sweep_*` 通过。
    - 加入 bench 的 `cache/evict` 与 `cache/memory` 两项基准（`cache/evict` 原为 `cache/evict_16m`，见「与设计的差异」第 2 步），在 `crates/bench/src/budgets.rs` 里改为生效，在预算内。
+3. **自定义表**（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+   - `tables_*` 通过，第 1、2 步的测试照常通过（`memory_*` 的 PRAGMA 快照多了 `foreign_keys = 1`，`user_version` 为 2）。
+   - `cargo tree -i rusqlite -e normal --depth 1` 仍只列出 `lectern-cache`；没有新增依赖。
+   - `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果。
+   - bench 的 `cache/tables_write`、`cache/tables_read`、`cache/tables_touch`、`cache/tables_evict` 加入预算表并生效，在预算内；第 1、2 步的 `cache/*` 仍在预算内。
 
 接入由使用方各自的 PR 完成：`agents` 设计的第 4 步（`index_cache_*`、`complete_*`），`git` 的 hunk 缓存（`hunk_cache_*`）。`bench` 的 `cache/*` 基准随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 加入。
 
@@ -488,6 +660,27 @@ pub enum DisableReason {
 - `platform::process::phys_footprint` 的 macOS 实现由 `cargo clippy -p lectern-platform --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 交叉检查通过，没有运行；`process_*` 测试在 Linux 上只有返回 `Unsupported` 的一个。
 - 没有验证的：macOS 上没有运行，`cache/*` 由 macOS CI 判定。
 
+第 3 步，同一台机器。
+
+- `just check`、`just test`（整个工作区 1070 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过；`just bench cache/` 的冒烟运行通过。
+- `just test -p lectern-cache`：88 个测试通过。第 1、2 步的 67 个照常通过，`memory_connection_settings` 的写连接和读连接两个 PRAGMA 快照多了 `foreign_keys = Integer(1)`、`user_version` 从 1 变为 2，逐个看过；新增 `tables_*` 21 个（其中 `tables_crash_child_aborts_inside_a_write` 是子进程的入口，没有环境变量时直接返回），连续运行 5 次没有失败。
+- `cargo tree -i rusqlite -e normal --depth 1` 只列出 `lectern-cache`；`rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果；`python3 scripts/check_architecture.py` 通过；没有新增依赖，Cargo.lock 不变。
+- bench 的 `cache/tables_*`（`just bench --measure cache/tables`，运行三次；p95 和样本数取第三次）：
+
+  | 项 | 预算（M 系列 Mac） | 中位数 | p95 | 样本数 |
+  |---|---|---|---|---|
+  | `tables_write`：64 个单元及其行一次写入 | < 15 ms | 8.7–10.1 ms | 29 ms | 75 |
+  | `tables_read`：一次 `read`，按索引取 1 行 | < 50 µs | 7.4–10.4 µs | 8.2 µs | 1033 |
+  | `tables_touch`：5000 个过期单元，调用里写回 4096 个 | < 20 ms | 8.4–8.6 ms | 24 ms | 94 |
+  | `tables_evict`：同一批写进超出配额的命名空间 | < 30 ms | 13.1–13.6 ms | 34 ms | 57 |
+
+  p95 超出预算的样本与其他写入一样，是提交时的自动检查点（要 fsync）。`tables_evict` 比 `tables_write` 多出的约 4.5 ms 是淘汰约 64 个单元和它们的 4000 行。同一次 `just bench --measure cache/` 里第 1、2 步的各项仍在预算内，数字与第 2 步相近：`get_4k` 3.75 µs、`get_many_50` 97 µs、`get_1m` 1.04 ms、`open_existing` 0.45 ms、`open_new` 3.75 ms、`put_4k` 58 µs、`batch_1000` 5.7 ms、`evict` 6.53 ms、`memory` 4.29 MB。
+- 没有进 bench 的测量：
+  - 外键的代价：在 `cache/evict` 的夹具里另写 2000 个单元（`testing::tags`）之后，`cache/evict` 中位数 10.0–10.6 ms（两次运行），没有自定义表时 6.5 ms。
+  - 配额淘汰的下限：按 1 MiB 的下限，一次写一个单元带 1 MiB 的配额淘汰，中位数 39.4 ms，因此改为 256 KiB（「与设计的差异」第 3 步）。
+  - 第一次建表：分库里已有 20 万个 300 字节的条目时，第一次 `read`（建表、检查、建部分索引）44 ms；之后的 `read` 3.4 µs（release 构建，一次性的测试，没有提交）。
+- 没有验证的：macOS 上没有运行，`cache/tables_*` 由 macOS CI 判定；code_intel 真实的表和语句由 code_intel 第 2 步接入时验证（`store_*`）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -518,3 +711,13 @@ pub enum DisableReason {
 - 目录清理的细节：一个项目分库的修改时间取三个文件里最新的（WAL 模式下写入先到 `-wal`）；总量计入应用级分库的文件，但不删除它；`repo/`、`folder/` 下不是分库的文件不动；删除失败只写一行 stderr。清理在第一次打开的调用里、打开文件之前做，同时打开的其他分库等它完成，所以不会删掉正在打开的文件。
 - 测试的 `ManualClock` 改为从真实的当前时刻开始（第 1 步是固定的 2027 年 1 月）：目录清理拿文件的修改时间与这个时钟比较，固定的起点会让测试里刚建的文件看起来已有 90 天。
 - `cache/memory` 在子进程里测常驻增量（bench 的 `memory` 目标再启动自己，见 [bench 设计「进程内基准」](bench.md#进程内基准)），不用 `memory` 目标的计数分配器：SQLite 的页缓存用 C 的分配器，计数分配器看不到（同一个子进程里只增加 5.6 KB，常驻增量约 3.9 MB）；用子进程而不是本进程的常驻大小，是因为在写过夹具的进程里，读取会复用写入时释放的堆，增量偏小（同一进程里测得 0.1 MiB）。macOS 上的 `phys_footprint` 经 `platform` 新增的 `process::phys_footprint`（架构规则 6，[platform 设计「进程」](platform.md#进程)），Linux 上直接读 `/proc/self/status`。
+
+第 3 步（「自定义表」一节在本 PR 里写成，与实现同时合并；下面是它与 [code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)里 `cache` 一项的差异，以及实现时补上的细节）：
+
+- 要求第 1 条写「版本变化时删掉旧表和它的全部单元后重建」：表在建表的事务里删除，旧单元因此没有行、查询看不见，单元本身按 `retired` 命名空间的规则每个写事务删 256 条，不在建表的事务里一次删完。理由与命名空间升级相同：单个事务的工作量有上限，10 万个单元不在一次调用里删除。
+- 要求第 2 条允许「外键级联，或使用方登记的删除语句」，选了外键级联：删除条目的路径（预算淘汰、`retired` 清理、解码失败、`remove`）出现在任何写事务里，包括这次运行里没有取过 `TableSet` 的分库；登记的删除语句只在进程里，外键在文件里，任何路径都留不下行。代价是每个连接 `PRAGMA foreign_keys = ON`，以及删除条目时按外键列查各张自定义表（「写入、配额与淘汰」的实测）。code_intel 设计「存储表」的建表语句已在本 PR 里补上外键子句。
+- 要求第 3 条的配额淘汰沿用预算淘汰的「每个事务最多删本事务写入的字节数」，但下限从 1 MiB 改为 256 KiB：按 1 MiB 的下限实测（`cache/tables_evict` 的早期版本，一次写一个单元），中位数 39 ms，超过 30 ms；单元带行，同样的字节数比条目多很多行。`cache/tables_evict` 改为测 code_intel 的一批（64 个单元）写进超出配额的命名空间，中位数 13 ms。
+- 要求第 5 条的 `touch` 不读 `entry.atime`，所以写回语句加了「`atime` 早于写回时刻 60 分钟以上」的条件；读命中记下的条目本来满足这个条件，第 2 步的行为不变。待写集合满时 `touch` 在调用里写回，而不是像读命中那样不再记录：热启动时 10 万个单元都要标记，只记 4096 个会让其余单元按旧的访问时间被淘汰。
+- 要求第 8 条只写了「被淘汰或删除、或分库被删除重建时加一」。另外在分库停用时，以及本次运行打开过的分库再打开时发现是新文件（目录清理或用户删除了文件）时加一：这两种情况下之前的单元同样不在了。本次运行第一次打开时新建文件不加一。
+- 设计没有写的：单元 ID 是 rowid，删除后可能重用（测试 `tables_create_replaces_the_unit_of_a_key` 里新单元拿到了旧单元的 ID），所以「登记的规则」要求代数变化后不再沿用旧 ID；`Row::unit`、`Unit::from_id` 和 `TableWrite::remove_unit` 是为使用方从自己的表里读出单元 ID 后使用而加的；登记违规时只写 stderr、不 panic，测试可以检查这时什么也没建。`Stats` 没有新增计数：表的读不计入 `hits` / `misses`，写入计入 `written` 和 `dropped`，淘汰计入 `evicted_bytes`。
+- `testing` 增加 `tags`（code_intel 形状的三张表和写入一个单元的函数），供 bench 的 `cache/tables_*` 使用；`crates/cache/src/tests/tables.rs` 的测试用自己的登记（多个前缀和配额）。
