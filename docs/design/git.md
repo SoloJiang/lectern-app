@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 实现。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -913,7 +913,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 与 git 的对照：`watch_source_ignores_match_git` 的期望值（git 判为忽略的路径，即 `git check-ignore --no-index` 会列出的）是按 gitignore(5) 的规则手工推出的，没有用真实的 git 生成夹具：这次的环境不允许在 worktree 之外运行 git（生成脚本要在临时目录里 `git init`、`git check-ignore`）。gix-ignore 的匹配结果与推导完全一致。以后可以按「测试」里归档夹具的做法补一份由 `git check-ignore` 生成的目录夹具。
 - 没有验证的：构造过滤器的耗时和忽略规则的内存（fs_watch「性能」里没有对应的基准条目，没有测量；遍历与「工作区比较」第 4 步相同，代价同 `git/changes_clean` 里的未跟踪文件枚举）；`core.precomposeUnicode` 的规范化没有测试；macOS 上没有运行。
 
-`Worktree::canonical_oid`（[code_intel 设计](code_intel.md#对其他-crate-的要求)前置条件 E，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），同一台机器：
+`Worktree::canonical_oid`（[code_intel 设计](code_intel.md#对其他-crate-的要求)前置条件 E，[#110](https://github.com/SoloJiang/lectern-app/pull/110)），同一台机器：
 
 - `just check`、`just test`、`just doctest`、`just deny` 全部通过。`just test -p lectern-git` 共 213 个测试，新增 `canonical_*` 6 个；`no_external_programs` 增加两次 `canonical_oid` 调用（配置了 clean / process 的 `b.f` 返回 None，`a.t` 返回原始字节的 OID），之后标记文件仍不存在。
 - `canonical_matches_git_for_the_conversion_fixture` 用的期望值是 `tests/fixtures/worktree_conversions` 里 git 2.43 `git add` 记录的 OID（已有夹具，测试不运行 git）：三个 `core.autocrlf` 变体下 15 个文件全部相同，包括 UTF-16LE、带 BOM 的 UTF-16、`ident`、混合换行、单独的 CR 和带 NUL 的 `text=auto`。
