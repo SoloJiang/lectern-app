@@ -3254,6 +3254,12 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 [[package]]
 name = "lectern-agents"
 version = "0.0.0"
+dependencies = [
+ "insta",
+ "lectern-services",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "lectern-app"
@@ -3266,6 +3272,10 @@ dependencies = [
 [[package]]
 name = "lectern-bench"
 version = "0.0.0"
+dependencies = [
+ "lectern-agents",
+ "lectern-services",
+]
 
 [[package]]
 name = "lectern-cache"

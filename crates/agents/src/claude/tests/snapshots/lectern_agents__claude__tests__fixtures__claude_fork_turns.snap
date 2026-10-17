@@ -1,0 +1,74 @@
+---
+source: crates/agents/src/claude/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "aaaaaaaa-0000-4000-8000-000000000045",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1790845300700,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1790845303721,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 2763,
+                len: 445,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt in the fork: try another approach.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_f001",
+                    ),
+                    name: "Bash",
+                    kind: Execute {
+                        command: "git status --short",
+                        workdir: "/Users/dev/fixture/repo",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1790845301707,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845302714,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 3209,
+                        len: 868,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 4078,
+                            len: 540,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 4619,
+                    len: 782,
+                    part: 0,
+                },
+            ),
+        ],
+    },
+]

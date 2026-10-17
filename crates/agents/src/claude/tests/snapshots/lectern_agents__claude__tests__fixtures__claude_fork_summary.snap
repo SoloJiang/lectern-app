@@ -1,0 +1,45 @@
+---
+source: crates/agents/src/claude/tests/fixtures.rs
+expression: "(summary, stats)"
+---
+(
+    SessionSummary {
+        key: SessionKey {
+            source: SourceId(
+                "session-claude-code",
+            ),
+            id: "22222222-2222-4222-8222-222222222222",
+        },
+        agent: ClaudeCode,
+        parent: None,
+        file: "22222222-2222-4222-8222-222222222222.jsonl",
+        cwd: "/Users/dev/fixture/repo",
+        place: Pending,
+        started_at: Timestamp(
+            1790845300700,
+        ),
+        last_activity: Timestamp(
+            1790845303721,
+        ),
+        title: Some(
+            "Placeholder prompt in the fork: try another approach.",
+        ),
+        agent_version: Some(
+            "2.1.302",
+        ),
+        logged_branch: Some(
+            "feature/fixture",
+        ),
+        open_turn: false,
+        tail_pending: false,
+        archived: false,
+        inheritance_unknown: false,
+        format: Known,
+    },
+    ParseStats {
+        unknown_types: [],
+        bad_lines: 0,
+        oversized_lines: 0,
+        unknown_tools: [],
+    },
+)

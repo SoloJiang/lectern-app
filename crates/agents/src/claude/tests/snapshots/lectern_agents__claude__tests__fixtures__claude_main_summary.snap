@@ -1,0 +1,45 @@
+---
+source: crates/agents/src/claude/tests/fixtures.rs
+expression: "(summary, stats)"
+---
+(
+    SessionSummary {
+        key: SessionKey {
+            source: SourceId(
+                "session-claude-code",
+            ),
+            id: "11111111-1111-4111-8111-111111111111",
+        },
+        agent: ClaudeCode,
+        parent: None,
+        file: "11111111-1111-4111-8111-111111111111.jsonl",
+        cwd: "/Users/dev/fixture/repo",
+        place: Pending,
+        started_at: Timestamp(
+            1790845200000,
+        ),
+        last_activity: Timestamp(
+            1790845253371,
+        ),
+        title: Some(
+            "Placeholder prompt one: add the fixture module.",
+        ),
+        agent_version: Some(
+            "2.1.302",
+        ),
+        logged_branch: Some(
+            "feature/fixture",
+        ),
+        open_turn: false,
+        tail_pending: false,
+        archived: false,
+        inheritance_unknown: false,
+        format: Known,
+    },
+    ParseStats {
+        unknown_types: [],
+        bad_lines: 0,
+        oversized_lines: 0,
+        unknown_tools: [],
+    },
+)

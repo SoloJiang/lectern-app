@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：实现中。第 1 步（`services` 的会话接口，[#71](https://github.com/SoloJiang/lectern-app/pull/71)）已实现，第 2–4 步尚未实现（见「验收」）。
+状态：实现中。第 1–2 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），第 3–4 步尚未实现（见「验收」）。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -179,6 +179,55 @@ pub mod testing {
 }
 ```
 
+适配器的库层（第 2 步）：按会话文件工作，不持有会话列表；第 4 步的 `SessionSource` 实现按 `SessionKey` 找到文件后调用它。Codex 适配器（第 3 步）用同样的形状。
+
+```rust
+pub mod claude {
+    pub const SOURCE_ID: &str = "session-claude-code";
+    /// 解析规则或游标状态布局变化时加一：旧游标从头读（`Batch::reset`），旧索引不再命中。
+    pub const ADAPTER_VERSION: u32;
+
+    /// 文件归属（「外部格式」的「继承前缀」）。
+    pub enum Owner { Main { session_id: Arc<str> }, Subagent { parent_session_id: Arc<str>, agent_id: Arc<str> } }
+    pub struct SessionFile { pub key: SessionKey, pub path: Arc<Path>, pub owner: Owner }
+    /// `read` 的结果：`Batch` 加上要并进会话与全局 `Diagnostics` 的计数。
+    pub struct Parsed { pub batch: Batch, pub stats: ParseStats }
+    /// 游标里的解析器状态记下的末尾字段（「数据流与线程」第 2 步：增量读取中的文件不再读末尾）。
+    pub struct Activity { pub last_activity: Option<Timestamp>, pub open_turn: bool }
+
+    pub struct ClaudeCode { /* SourceId */ }
+    impl ClaudeCode {
+        pub fn new(source: SourceId) -> Self;
+        pub fn source(&self) -> &SourceId;
+        /// `<sessionId>.jsonl` 或某个 `subagents/` 之下（可再嵌套）的 `agent-<agentId>.jsonl`；其余为 None。
+        pub fn session_file(&self, path: &Path) -> Option<SessionFile>;
+        /// 以下都阻塞，只在 executor 上调用。
+        pub fn read(&self, file: &SessionFile, from: &Cursor, max_bytes: u64) -> Result<Parsed, SessionError>;
+        pub fn turns(&self, file: &SessionFile) -> Result<TurnIndex, SessionError>;
+        /// 从已有索引的游标继续，游标失效时从头重建（第 4 步的索引缓存用它）。
+        pub fn turns_after(&self, file: &SessionFile, prev: Option<&TurnIndex>) -> Result<TurnIndex, SessionError>;
+        /// 一遍解析得到全部记录和索引（`testing::parse_file`）。
+        pub fn parse_all(&self, file: &SessionFile) -> Result<(Parsed, TurnIndex), SessionError>;
+        pub fn load(&self, file: &SessionFile, at: &ContentRef) -> Result<Content, SessionError>;
+        /// 读开头、末尾和 `meta.json`；`place` 为 `Pending`。读不到任何 cwd 时返回 `Unrecognized`（不列出，只计数）。
+        pub fn summarize(&self, file: &SessionFile) -> Result<(SessionSummary, ParseStats), SessionError>;
+        /// 不阻塞。
+        pub fn resume(&self, summary: &SessionSummary) -> Option<ResumeCommand>;
+        pub fn activity(&self, cursor: &Cursor) -> Option<Activity>;
+    }
+}
+
+/// 被跳过的行与归入 `ToolKind::Other` 的工具名。`unknown_tools` 只进日志（`Diagnostics` 没有这一项）。
+pub struct ParseStats {
+    pub unknown_types: Vec<(Arc<str>, u32)>, // 最多 32 种
+    pub bad_lines: u32,
+    pub oversized_lines: u32,
+    pub unknown_tools: Vec<(Arc<str>, u32)>, // 最多 32 种
+}
+```
+
+`ContentRef::part` 在 Claude Code 里是 `message.content` 内容块的下标，`u16::MAX` 指整条消息的文本（字符串内容，或全部 `text` 块用换行拼接）：prompt 与 `Injected` 用后者，`AgentText` 和工具调用的输入、结果用前者。
+
 ## 数据结构
 
 ### 会话与列表
@@ -319,7 +368,8 @@ pub struct Batch {
     pub reset: bool,
     pub records: Vec<Positioned<Record>>,
     pub cursor: Cursor,
-    /// 游标之后已没有完整的行（包括只剩一行还没写完的情况）。为 false 时 `cursor` 一定严格大于调用时的 `from`。
+    /// 游标之后已没有完整的行（包括只剩一行还没写完的情况）。为 false 时 `cursor` 一定严格大于调用时的 `from`；
+    /// `reset` 的一批例外（从头回放，游标可以小于 `from`），之后的批照常前进。
     pub at_end: bool,
 }
 
@@ -737,7 +787,14 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
   - `session_tool_and_usage_types_round_trip`、`session_turn_index_round_trips`（`TurnItem` 每个变体、已结束与未结束的 `ToolCall` 和 `Turn`、`ContentRef` 的极值）、`session_content_round_trips`（`Content` 与 `EditOp` 每个变体）。
 - `services` 没有用 insta：类型都是手写的样本，用相等断言验收。
 
-没有验证到的：第 2–4 步的验收条件。
+第 2 步（Claude Code 适配器与增量读取），在 Linux 上运行（`agents` 不依赖 GPUI；没有在 macOS 上实测）：
+
+- `just check`、`just test`（Linux 上不依赖 GPUI 的全部 crate，395 个测试通过，2 个忽略）、`just doctest`、`just deny`、`python3 scripts/check_architecture.py` 全部通过；`rg gpui crates/agents/Cargo.toml` 没有结果；`rg 'serde_json::Value' crates/agents/src` 只出现在 `#[cfg(test)]` 的 `redact.rs`。
+- `just test -p lectern-agents`：64 个通过，1 个忽略（手动运行的 `redact_file_from_env`）。验收要求的前缀：`claude_*` 6 个（含 12 个快照：4 份 fixture 各自的 `Record` 序列、`TurnIndex`、`SessionSummary`，逐个看过）、`incremental_*` 2 个（每份 fixture 8 个种子的随机切分，含行中间，每段之后用随机的 `max_bytes` 读到末尾，游标经 `to_bytes` / `from_bytes` 和 serde 往返；记录、游标和用 `turns_after` 逐段追加的索引都与一次读完相同）、`reset_*` 4 个、`progress_*` 4 个（含现场生成的 16 MB 以上的行）、`source_*` 1 个、`subagent_*` 2 个、`usage_keys_*` 2 个、`tool_kind_*` 8 个（Claude Code 分类表每一行一个，表外工具名计数，结果状态）、`format_*` 8 个、`resume_*` 1 个、`tail_*` 10 个、`inherited_*` 3 个（Claude Code 的分叉与子 agent）。另有 `redact_*` 5 个（白名单脱敏工具）和行读取、游标状态编码、时间戳的单元测试。
+- `crates/agents/tests/fixtures/claude-code/2.1.302/SOURCE.md` 写明 fixtures 是合成的、模拟的版本和覆盖的记录。
+- `just bench`（Linux 容器，x86_64，release，单线程；不是预算规定的 M 系列）：`agents/parse_throughput` 296 MB/s（预算 ≥ 200 MB/s），`agents/append_4k` 0.014 ms（追加 4250 字节，预算 < 1 ms），都达标。fixtures 的行短（几百字节），比带大段工具结果的真实会话解析得慢，这个吞吐是偏保守的估计。
+
+没有验证到的：第 3–4 步的验收条件；bench 没有在 macOS 上运行；没有拿真实的 Claude Code 日志验证（fixtures 是合成的，见下面「与设计的差异」）。
 
 ## 与设计的差异
 
@@ -749,3 +806,25 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - `SessionList::get` 是线性查找，`in_project` 收 `Place::Located` 与 `Place::Resolved`，已写进上文。它们与 `Cursor` 的编码是 `services::session` 里仅有的方法实现，`crates/services/AGENTS.md`「边界」的例外里补上了。
 - `SessionFilter` 和 `testing::parse_file` 不在 `services`：它们是上文「本 crate 的公开项」，属于 `agents`（`SessionFilter` 带锁和行为），在第 4 步、第 2 步实现。
 - 模块划分：`services::session` 分为 `list`（键、`SessionList`、`SessionSummary`、`Place` 等）、`read`（`Cursor`、`Batch`、`Positioned`）、`record`（`Record` 与工具、用量、额度类型）、`turns`（轮次索引、`ContentRef`、`Content`、`FileEdit`），全部从 `lectern_services::session` 导出；`SessionSource`、`SessionError`、`ResumeCommand`、`SessionsChanged` 在模块根。只是文件划分，接口不变。
+
+第 2 步：
+
+- **fixtures 是合成的，脱敏的真实样本推迟。** 设计要求每个版本一份脱敏的真实样本；这一步的 `claude-code/2.1.302/` 全部按「外部格式」记下的记录形状和公开的 Claude Code JSONL 格式手工构造（占位文本、假 ID、假模型名，路径在 `/Users/dev/fixture/` 下），`SOURCE.md` 写明了这一点。人提供真实日志之后再补。字段白名单脱敏工具已经按设计实现为测试辅助（`src/redact.rs`，`#[cfg(test)]`）：保留结构、取值为枚举的字段、数字、时间戳和 token 数，ID 换成形状相同、同值同换的假 ID，路径移到 `/Users/dev/fixture/` 下、每级换成等长的占位名，文本换成等长的占位内容并保留解析器依赖的开头标记；在合成输入上做了单元测试，并验证脱敏前后的 fixtures 解析出同样的记录形状和计数。用被忽略的测试 `redact_file_from_env` 手动生成。
+- **库层，不实现 `SessionSource`。** 第 2 步交出「本 crate 的公开项」里的 `claude::ClaudeCode`：按会话文件读取、建索引、读正文、生成摘要；按 `SessionKey` 找文件、会话列表、`SessionsChanged` 和插件都在第 4 步。为此 `read` 返回 `Parsed`（`Batch` 加 `ParseStats`），`summarize` 返回摘要和计数，由第 4 步并进 `Diagnostics`。`source_*` 里「`SessionsChanged::source` 与键的 `source` 一致」随事件一起移到第 4 步；这一步测了键带提供者的来源 ID、另一个来源的游标从头读、用量键与来源无关。`tail_*` 里「已在增量读取的文件不再读末尾」是第 4 步发现时的选择；这一步提供 `activity(cursor)`，并测了它与读末尾的结果相同。「数据流与线程」第 7 步（`read` 顺带更新内存与 `cache` 里的索引）同样在第 4 步，这一步提供 `turns_after` 从已有索引的游标继续。
+- **`reset` 的一批游标可以小于 `from`。** 「游标与批量读取」原来写 `at_end` 为 false 时游标一定大于 `from`；从头回放的第一批做不到，已在上文改为 reset 的一批例外。`services` 里 `Batch::at_end` 的文档注释还是旧说法，留给下一个改 `services` 的 PR 一并改。
+- **表外工具名的计数在 `ParseStats::unknown_tools`。** `Diagnostics` 没有这一项，`services` 不在这一步改动；它只进日志，不使格式变成 `Partial`（没有记录被跳过）。所有归入 `Other` 的名字都计数，最多 32 种。
+- **轮次划分的补充。** `[Request interrupted by user` 开头的 `user` 文本（中断说明）不开新轮次，按 `Injected` 处理。子 agent 文件里自己的第一条 `user` 记录总是第 1 轮的 prompt。没有 `uuid` 的 prompt 当作 `Injected`。自己的第一个 prompt 之前的内容不进索引，记录的 `turn` 为 None。
+- **记录引用的轮次。** 继承前缀里的记录引用继承前缀里的轮次，自己的记录引用自己的轮次，两边分开记，所以 `usage` 排除继承记录后不会把自己的用量归到继承的轮次。
+- **继承前缀之后补一条 `Context`。** 上一条 `Context` 是在继承前缀里给出的，而自己的第一条记录上下文没变时，也给出一条不标 `inherited` 的 `Context`：只看自己记录的消费方同样有 cwd 和模型。
+- **结果状态的判断顺序与识别方式。** 设计没写怎样识别「权限被拒」。实现：`toolUseResult.interrupted` 为 true 或结果文本以 `[Request interrupted by user for tool use]` 开头是 `Interrupted`；否则结果文本以 `The user doesn't want to proceed with this tool use` 开头或 `toolUseResult` 是 `User rejected tool use` 是 `Denied`；否则 `is_error` 为 true 是 `Failed`；其余 `Completed`。
+- **`open_turn` 的具体规则。** 取最后一条 `user` / `assistant` 记录：`assistant` 的 `stop_reason` 不是 `end_turn` 时为 true（有工具调用没结果时 `stop_reason` 是 `tool_use`，已包含在内）；`user` 记录（工具结果、prompt、通知）为 true，`isMeta`、本地命令输出的包装和中断说明为 false（`/exit` 之后的会话不显示为进行中）。读取时的解析器状态和读末尾用同一条规则。读末尾时一直读到文件开头也没找到消息，同样按回退规则处理。
+- **Claude Code 轮次的 `ended_at`。** 设计只说 Claude Code 没有明确的轮次结束。实现：`stop_reason` 为 `end_turn` 的 `assistant` 记录、且这一轮没有还在等结果的工具调用时，记为它的时间戳；之后这一轮又出现工具调用时清空。被中断的轮次为 None。
+- **摘要读开头时找齐就停。** 发现 1000 个会话要在 500 ms 内，所以开头只读到找齐会话头、自己的第一条记录和第一个 prompt 为止（仍不超过 256 KB），摘要的 `format` 和计数只反映读过的行；末尾的超长记录计入 `oversized_lines`，使格式为 `Partial`。`cwd`、`started_at`、`agent_version`、`logged_branch` 取自己的第一条 `user` / `assistant` 记录，没有时取会话头；标题取自己的第一个 prompt，没有时取第一个 prompt（分叉会话的标题是它自己的 prompt）。
+- **认不出格式时的读取。** 会话头之前的 `user` / `assistant` 记录计为坏行（没有 cwd 和归属就无法交出）。在 256 KB 之后开始的行仍没见过会话头时，`read` 交出空的一批、游标不动（`reset` 时为 `START`）、`at_end` 为 true；读到末尾还没有会话头时（含空文件），`turns` 返回 `Unrecognized`。
+- **`load` 的细节。** 引用对不上文件（越界、不在行首、没有这一部分）返回 `SessionError::Io`。`Write` 的输入看不出是否新建，`created` 为 false；结果里 `toolUseResult` 的 `type` 是 `create` / `update` 时给出 `Write`（`originalFile` 为 null 是新建），否则有 `structuredPatch` 时给出 `Patch`。`NotebookEdit` 的输入和其他工具的输入给出原样的 JSON 文本，失败的调用给出结果文本。
+- **advisor 的模型。** 设计写「模型取 `advisorModel`」，没写在哪一层：依次取 `iterations[]` 那一项的 `advisorModel`、记录顶层的 `advisorModel`、那一项的 `model`；都没有时不给出 `advisor`。
+- **路径在词法上规范化。** 相对路径按 cwd 拼接之后，再在词法上去掉 `.` 和 `..`（不访问文件系统）。
+- **`serde_json` 打开 `raw_value` feature。** 不是新依赖：工具输入以借用的原样 JSON 保留，只有分类表里的工具才解析，`load` 原样交出。没有新增依赖，`just deny` 通过。
+- **`testing::parse_file`。** Codex 在第 3 步之前返回 `Unrecognized`；单元测试里不打开 `test-support` 也能用。
+- **插件标记。** ADR 0025 规定在第一个实现 `Plugin` 的 PR 里加 `plugin = true`，所以这一步不加，第 4 步加。
+- **bench 的形式。** `bench` crate 还没有设计文档和基准框架；这一步加了一个 `harness = false` 的 `benches/agents.rs`，打印实测值和预算，超出时以非零状态退出。`agents/parse_throughput` 用的是重复拼接到 50 MB 的合成 fixtures。

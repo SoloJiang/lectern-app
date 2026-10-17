@@ -30,4 +30,6 @@ just test -p lectern-agents
 ```
 
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
-- 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。
+- 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。脱敏用 `src/redact.rs` 的字段白名单工具（被忽略的测试 `redact_file_from_env`），生成后逐行看过再提交。
+- 现在的 `tests/fixtures/claude-code/2.1.302/` 是合成数据（见它的 `SOURCE.md`），不要从本机的 `~/.claude`、`~/.codex` 等用户目录复制任何内容进仓库。超长行、坏行、没写完的行在测试的临时目录里生成，不提交大文件。
+- `test-support` feature 提供 `testing::parse_file`，供 `lectern-bench` 的 `agents/*` 基准使用。

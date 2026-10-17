@@ -10,5 +10,16 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "tool"
 
+[dev-dependencies]
+lectern-agents = { path = "../agents", features = ["test-support"] }
+lectern-services = { path = "../services" }
+
+# Each bench prints its measurement next to its budget and exits non-zero when
+# a budget is exceeded. Budgets are for an M-series Mac, single thread, release
+# build (`cargo bench` uses the release profile).
+[[bench]]
+name = "agents"
+harness = false
+
 [lints]
 workspace = true
