@@ -19,7 +19,7 @@
 4. 数据单向流动：视图只读不可变快照、只发命令，不直接改状态，也不做 IO。
 5. 派生数据（解析、高亮、索引、diff）以 git blob OID 为键缓存。
 6. macOS 专属能力只出现在 `platform` crate。
-7. 插件 crate（`[package.metadata.lectern] plugin = true`）只依赖 kernel 层和非插件的库 crate；插件之间不直接依赖，只经 `services` 的接口交互；只有 `app` 依赖插件 crate（[ADR 0025](docs/adr/0025.md)）。
+7. 插件 crate（`[package.metadata.lectern] plugin = true`）只依赖 kernel 层和非插件的库 crate；插件之间不直接依赖，只经 `services` 的接口交互；只有 `app` 和 tool 层依赖插件 crate（[ADR 0025](docs/adr/0025.md)）。
 8. 不得复制 Zed 的 GPL 代码；`cargo-deny` 拒绝 GPL 依赖。
 
 ## 禁止事项
