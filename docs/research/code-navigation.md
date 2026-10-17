@@ -8,7 +8,7 @@
 
 现有设计已经定下的前提：
 
-- 文件列表来自 git index，不遍历目录（[project 设计「文件列表」](../design/project.md#文件列表)）；派生数据以 blob OID 为键缓存（架构规则 5），存进 SQLite 的 `cache`（[cache 设计](../design/cache.md)）；`fs_watch` 交付按 index 过滤、合并过的批次（[fs_watch 设计「批次」](../design/fs_watch.md#批次)）；工作区文件只经 `SafeRoot` 读取，不用 mmap（[platform 设计「读取上限」](../design/platform.md#读取上限)）。
+- 文件列表来自 git index，不遍历目录（[project 设计「文件列表」](../design/project.md#文件列表)）；未跟踪、未被忽略的文件由工作区比较给出（[git 设计「工作区比较」](../design/git.md)），`fs_watch` 也交付它们的事件（[fs_watch 设计「路径分类」](../design/fs_watch.md#路径分类)第 9 步）。agent 新建的文件在 `git add` 之前就是这一类，导航的语料要把它们并进来（见第 2、4 节）。派生数据以 blob OID 为键缓存（架构规则 5），存进 SQLite 的 `cache`（[cache 设计](../design/cache.md)）；`fs_watch` 交付按 index 过滤、合并过的批次（[fs_watch 设计「批次」](../design/fs_watch.md#批次)）；工作区文件只经 `SafeRoot` 读取，不用 mmap（[platform 设计「读取上限」](../design/platform.md#读取上限)）。
 - 导航分四层：语法索引、Java 解析器、依赖源码、可选的 jdtls / SCIP；结果只通过上下文面板和 ⌘K 呈现，界面不显示索引和语言服务器的状态（[技术调研「代码导航与编辑」](../design/tech-research.md#代码导航与编辑)）。
 - 预算：冷启动 20 ms、空窗口空闲 60 MB、monorepo 空闲 100 MB、打开文件到首屏高亮一帧（[ADR 0017](../adr/0017.md)、[性能预算](../design/tech-research.md#性能预算)）。
 
@@ -106,6 +106,7 @@ IntelliJ 的 dumb mode 正是 Lectern 要避免的形态：索引没好时功能
 
 - 本文实测是 nucleo-matcher 的 3–4 倍；作者在 140 万条路径上的数字与此一致。它是 MIT 许可，没有运行时依赖，2026-08 仍在发布。
 - 并行由 Lectern 在 `executor` 上做：把路径切成若干片，每片一个任务调 `match_list`，片之间检查取消标志，各片取前 k 个再归并。不调 `match_list_parallel`，因为它每次调用都新开操作系统线程，而后台线程只由 `executor` 管理（[executor 设计](../design/executor.md)）。同理不用高层 `nucleo`，它自带 rayon 线程池。
+- 语料是 `FileList` 加上工作区比较给出的未跟踪、未被忽略的文件。后者另存一个小数组，随工作区比较的结果和 `fs_watch` 的未跟踪路径事件更新，匹配时两部分一起分片；agent 新建、还没暂存的文件因此在 ⌘K 和 Files 里都能找到。
 - 弱点是不做 Unicode 规范化。macOS 上输入的文件名可能是 NFD，git index 里的路径在开启 `core.precomposeUnicode` 时是 NFC；查询串和路径在进入匹配器前统一成 NFC 即可。
 - 备选是 nucleo-matcher（MPL-2.0）：Unicode 处理更完整，但最后一次发布在 2024-02，速度慢 3–4 倍。
 
@@ -164,12 +165,12 @@ IntelliJ 的 dumb mode 正是 Lectern 要避免的形态：索引没好时功能
 
 ### 选择
 
-- **抽取**：tree-sitter tags 查询，每个 blob 一次，输出定义（名字、种类、行列、所在作用域）和引用名。Java 解析器（第 2 层）同样只读一个文件，按 blob 缓存 package、import 和顶层类型。两者都满足 IntelliJ 的那条规则：结果只取决于文件内容。
+- **抽取**：tree-sitter tags 查询，每个（blob、语言、grammar 版本、查询版本）组合一次，输出定义（名字、种类、行列、所在作用域）和引用名。语言由路径决定：同一份内容放在 `.js` 和 `.ts` 下是同一个 OID，要用不同的解析器和查询，所以键里必须有语言和版本，与 `project` 的清单解析缓存把格式放进键里的做法相同。Java 解析器（第 2 层）同样只读一个文件，按（blob、解析器版本）缓存 package、import 和顶层类型。两者都满足 IntelliJ 的那条规则：结果只取决于键里的输入。
 - **存储**：`cache` 的仓库分库里加自定义表，这是 cache 设计已经预留的做法（[cache 设计「范围」](../design/cache.md#范围)）。要点：
-  - 一张 blob 表：OID、语言、grammar 和查询的版本、最后一次出现在任何 worktree 里的时间。
+  - 一张抽取记录表，主键是（OID、语言、grammar 版本、查询版本），另记最后一次出现在任何 worktree 里的时间。定义表和引用表以这个组合为外键。
   - 定义表按小写名字建 B-tree 索引；引用表只存「名字 + blob」，每个 blob 每个名字一行，不存位置。位置在打开抽屉时对候选文件现场抽取。
   - 语料里引用约是定义的 2.9 倍（本文实测），不存位置可以把引用表压到与定义表同一量级。
-- **按 worktree 过滤**：`git` 的 `TrackedPaths` 每条带 OID（[git 设计「index」](../design/git.md#index)），未暂存的修改由工作区比较算出 OID。当前 worktree 在内存里保留一份「blob → 路径」的映射（估算每条 12–32 字节，10 万文件 1–3 MB）。查询先按名字取出所有 blob，再只留当前 worktree 里有的。11 个 worktree 共用同一份索引，只有内容不同的文件各索引一次。
+- **按 worktree 过滤**：`git` 的 `TrackedPaths` 每条带 OID（[git 设计「index」](../design/git.md#index)），未暂存的修改和未跟踪、未被忽略的文件由工作区比较算出 OID，一起进入映射和建索引的队列。当前 worktree 在内存里保留一份「blob → 路径」的映射（估算每条 12–32 字节，10 万文件 1–3 MB）。查询先按名字取出所有 blob，再只留当前 worktree 里有的。11 个 worktree 共用同一份索引，只有内容不同的文件各索引一次。
 - **⌘K 的符号搜索**：第一次打开 ⌘K 时，从定义表取出当前 worktree 的去重名字，放进一个连续数组，用与文件查找相同的 frizbee 匹配。2.9 万个名字的子序列匹配，`fst` 要 7–9 ms，按第 2 节的吞吐估算 frizbee 在 1 ms 以内。
 - **不引入 `fst`**：精确和前缀查找 SQLite 已经够快，模糊查找 frizbee 更快，而 `fst` 不可修改，增量更新要另做分段合并。等实测发现 SQLite 查找超出预算再考虑。
 - **不建三元组索引**：名字的子串搜索由模糊匹配覆盖；对文件内容建三元组索引约为语料的 3.5 倍，不属于审阅闭环的核心。全文搜索按需扫描文件，见第 5 节。
@@ -196,7 +197,8 @@ IntelliJ 的 dumb mode 正是 Lectern 要避免的形态：索引没好时功能
 
 ### 调度与取消
 
-- 任务在 `executor` 的 `Background` 优先级上运行，每批约 64 个文件或 50 ms，批之间检查取消标志并让出，交互任务插队。macOS 上后台线程用低 QoS（由 `platform` 提供），用户操作时不与渲染争 CPU。
+- 任务在 `executor` 的 `Background` 优先级上运行，每批约 64 个文件或 50 ms，批之间检查取消标志并让出，交互任务插队。
+- 现有的 `executor` 做不到 QoS 隔离：`Interactive` 和 `Background` 共用同一组工作线程，线程启动钩子只能给整组线程设一个 QoS（[executor 设计](../design/executor.md)）。整组调低会拖慢文件和 diff 的交互任务，不调低则几个分钟级的索引任务与渲染争 CPU。所以要先给 `executor` 加一组低 QoS（macOS 的 utility 或 background 级别，由 `platform` 设置）、线程数较少的后台线程，长时间运行的批量工作只投到这一组；这是 executor 设计的改动，列在「对现有设计的影响」。
 - 单个文件的解析带截止时间，用 tree-sitter 的进度回调取消（与 [ADR 0018](../adr/0018.md) 对 UI 路径 8 ms 截止时间的做法相同）。超时的文件记下 OID，不再自动重试，只在被打开时按需抽取。超过大小上限（建议 1 MB）的文件只在被打开时抽取。
 - 切换 worktree 或分支时队列整体重排；已完成的结果按 OID 留在缓存里，不浪费。
 
@@ -260,17 +262,22 @@ kernel 设计把「建索引」列为要持有 `BusyGuard` 的初始化工作（
 
 过滤和消歧：
 
-- 只留同语言的候选，丢掉其他文件里的私有符号。
+- 只留可互相引用的语言的候选：按兼容组过滤，不按语言严格相等。首发的组：JS / JSX / TS / TSX（TS 常直接导入 JS 模块）；Java / Kotlin；C / C++ / Objective-C 的头文件。丢掉其他文件里的私有符号。
 - 按调用位置的语法种类筛选：调用处找函数或方法，类型位置和 `new` 后面找类型。
 - Java 同名方法按所在类和参数个数消歧（[技术调研「代码导航与编辑」](../design/tech-research.md#代码导航与编辑)）。
 - 本次审阅改到的文件里的定义在同层内优先：审阅时被点的符号多半与本次改动有关。
 
-第一层只有一个候选时直接跳转，否则在抽屉里列出全部候选，第一项预选。
+直接跳转要有绑定依据，不能只靠「同名且只剩一个」：
+
+- 有依据：局部作用域解析到的定义（tags 的 locals 查询）、经 import 解析到的文件里的定义、Java 按全限定名唯一确定的类型。这些情况只有一个候选时直接跳转。
+- 没有依据：只按名字排序得到的候选，即使只有一个，也在抽屉里列出并预选，不直接跳；方法调用和接收者类型不明的成员访问都属于这一类。Java 的这类调用同样触发下面的 jdtls 升级，语义结果与列出的候选不同时原地更新。
+
+多个候选时在抽屉里列出全部候选，第一项预选。
 
 ### 何时升级到 jdtls 或 SCIP
 
-- 仓库里有与 HEAD 对应的 SCIP 索引文件（例如 CI 用 scip-java 生成）：直接导入，不需要启动进程。
-- Java 的方法调用经过上述分层后，第一层仍有多个候选（重载、接口的多个实现），或用户执行「查找实现」：按需启动 jdtls（可选插件，空闲即关，[ADR 0018](../adr/0018.md)），结果与前面不同时原地更新抽屉。
+- 仓库里有与 HEAD 对应的 SCIP 索引文件（例如 CI 用 scip-java 生成）：导入，不需要启动进程。审阅的正是相对 HEAD 改过的代码，所以 SCIP 只用于当前内容的 OID 仍与 HEAD 相同的文件；改过的文件和未跟踪的文件一律用 blob 索引的结果，SCIP 的结果不覆盖它们。
+- Java 的方法调用经过上述分层后仍有多个候选（重载、接口的多个实现），或只有一个没有绑定依据的候选，或用户执行「查找实现」：按需启动 jdtls（可选插件，空闲即关，[ADR 0018](../adr/0018.md)），结果与前面不同时原地更新抽屉。
 - 其他语言暂不接语言服务器。
 
 ## 7. 预测与预先计算
@@ -323,8 +330,8 @@ kernel 设计把「建索引」列为要持有 `BusyGuard` 的初始化工作（
 | 路径分层 | 完全相同 > 文件名命中 > 路径命中；文件名命中对 `FileList` 里的文件名切片单独跑一遍 | 同上 |
 | 路径语料 | 20 万条以内沿用 `FileList`；更大的仓库改为按目录去重或前缀压缩，先在 bench 里用 100 万条的合成仓库测 | `project` |
 | 目录表 | 文件列表就绪后在后台建，供 Files 展开 | `project` |
-| 符号抽取 | tree-sitter tags，按 blob 一次；Java 的 package、import 同样按 blob | `code_intel` |
-| 符号存储 | `cache` 仓库分库里的自定义表：blob 表、定义表（小写名字 B-tree）、引用表（名字 + blob） | `code_intel`、`cache` |
+| 符号抽取 | tree-sitter tags，按（blob、语言、grammar 版本、查询版本）一次；Java 的 package、import 按（blob、解析器版本） | `code_intel` |
+| 符号存储 | `cache` 仓库分库里的自定义表：抽取记录表（上述组合为主键）、定义表（小写名字 B-tree）、引用表（名字 + 抽取记录） | `code_intel`、`cache` |
 | 符号查询 | 名字 → blob → 当前 worktree 的路径；⌘K 用去重名字数组 + frizbee | `code_intel` |
 | 不采用 | `fst`、FTS5 trigram、内容三元组索引、高层 `nucleo`、Zed `fuzzy` | — |
 
@@ -332,7 +339,8 @@ kernel 设计把「建索引」列为要持有 `BusyGuard` 的初始化工作（
 
 - ⌘K 排序：分层，层内按「审阅改动 > agent 写过 > 最近打开 > agent 读过 > 同一子项目 > 路径距离」加分，加分随查询变长减小；噪声文件降权。
 - ⌘K 空查询：本次审阅的改动文件、最近打开的文件、当前文件的测试或源文件。
-- 跳转：候选按「本文件 > import > 同包 > 同子项目 > 依赖的子项目 > 其余」分层；唯一候选直接跳，多个候选在抽屉里列出。
+- 跳转：候选按「本文件 > import > 同包 > 同子项目 > 依赖的子项目 > 其余」分层，按语言兼容组过滤；有绑定依据的唯一候选直接跳，其余在抽屉里列出；SCIP 只用于内容与 HEAD 相同的文件。
+- 语料：文件列表、⌘K 和符号索引都包含未跟踪、未被忽略的文件。
 - 索引未完成：按第 5 节的顺序回答，结果追加，不显示状态。
 - 文件树：目录表加虚拟列表，Finder 排序，单子目录折叠，改动圆点，被忽略的目录按需列出。
 
@@ -359,6 +367,7 @@ kernel 设计把「建索引」列为要持有 `BusyGuard` 的初始化工作（
 | 新 ADR：后台索引与静止 | 第 5 节的冲突：哪些后台工作不持有 `BusyGuard`，内存基准在什么状态下采样；修订 ADR 0017 的测量方式和 [kernel 设计「静止」](../design/kernel.md#静止) |
 | [技术调研「代码导航与编辑」](../design/tech-research.md#代码导航与编辑) | 第 1 层的「`notify` 增量更新」改为经 `fs_watch`（fs_watch 不用 `notify`）；「打开项目后数秒」改为按第 5 节的优先级分段；补充「索引不完整时」的回答顺序 |
 | [技术调研「性能预算」](../design/tech-research.md#性能预算)、`crates/file_reader/AGENTS.md` | 「打开文件：mmap 读取」与 platform 设计「不用 mmap」（并发截短会触发 SIGBUS）矛盾，应以 platform 为准，改为经 `SafeRoot` 读取 |
+| [executor 设计](../design/executor.md) | 增加一组低 QoS、线程数较少的后台线程（或按任务切换 QoS），长时间的批量工作（建索引）只投到这一组，交互任务所在的线程组 QoS 不变 |
 | [cache 设计](../design/cache.md) | 增加「自定义表」一节：符号表的结构、在仓库分库内的单独份额（避免挤掉 hunk 缓存）、按「最后一次出现在 worktree 里」淘汰 blob 的规则 |
 | [project 设计](../design/project.md) | 目录表；文件列表超过 20 万条时的布局与内存预算；`bench` 增加 100 万条路径的合成仓库 |
 | [交互规范](../design/interaction.md) | ⌘K 的分层排序、空查询内容、结果分组；Files 的折叠、改动圆点、被忽略文件的开关；后退、前进的快捷键 |
