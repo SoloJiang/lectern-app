@@ -795,6 +795,74 @@ pub(crate) fn refresh(
     }
 }
 
+/// `Worktree::canonical_oid` (docs/design/git.md「规范内容的 OID」): the
+/// blob OID `git add` would store for `bytes` at `path`, with the attribute
+/// files and conversions of the worktree comparison. None when a configured
+/// clean / process filter applies. Reads the index (the snapshot `changes`
+/// shares) and the `.gitattributes` of `path`'s directories through
+/// `SafeRoot`; runs nothing and writes nothing.
+pub(crate) fn canonical_oid(
+    subject: &Subject<'_>,
+    path: &RepoPath,
+    bytes: &[u8],
+) -> Result<Option<Oid>, GitError> {
+    let handle = Handle::open(subject.git_dir, subject.repo.scope())?;
+    let hash = subject.repo.hash();
+    let limits = Limits::default();
+    let index = snapshot(subject, &handle, &limits, &AtomicBool::new(false))?;
+
+    // The attribute files that can apply: one per directory from the root
+    // down to `path`'s, chosen as phase C of `run` chooses them.
+    let mut files = Vec::new();
+    let full = path.as_bytes();
+    let dirs = std::iter::once(0).chain(
+        full.iter()
+            .enumerate()
+            .filter(|&(_, &b)| b == b'/')
+            .map(|(i, _)| i + 1),
+    );
+    for end in dirs {
+        let mut name = full[..end].to_vec();
+        name.extend_from_slice(b".gitattributes");
+        let Some(attr_path) = RepoPath::new(&name) else {
+            continue;
+        };
+        match index.find(&name) {
+            Some(item) => {
+                let Some((Mode::File | Mode::Executable, oid)) = item.entry else {
+                    continue;
+                };
+                if item.conflict.is_some() {
+                    continue;
+                }
+                let content = if item.skip_worktree {
+                    None
+                } else {
+                    read_attr_file(subject.root, &attr_path, limits.read_bytes)
+                };
+                files.push(attr_file(hash, &attr_path, oid, content));
+            }
+            None => {
+                if let Some(content) = read_attr_file(subject.root, &attr_path, limits.read_bytes) {
+                    let oid = Oid::for_blob(hash, &content);
+                    files.push(attr_file(hash, &attr_path, oid, Some(content)));
+                }
+            }
+        }
+    }
+
+    let mut attrs = WorktreeAttrs::new(&handle, hash, &files)?;
+    if attrs.get(path)?.filtered {
+        return Ok(None);
+    }
+    let index_blob = index.find(full).and_then(|item| match item.entry {
+        Some((Mode::File | Mode::Executable, oid)) => Some(oid),
+        _ => None,
+    });
+    let canonical = attrs.canonical(path, bytes.to_vec(), index_blob)?;
+    Ok(Some(Oid::for_blob(hash, &canonical)))
+}
+
 enum Rules<'h> {
     Same,
     All,
