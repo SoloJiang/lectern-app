@@ -108,16 +108,44 @@ def plugin_errors(crates):
 IMPL_PLUGIN = re.compile(r"\bimpl\b(?:\s*<[^>{]*>)?\s+(?:\w+::)*Plugin\s+for\b")
 
 
+# `#[cfg(test)]`, `#[cfg(any(test, feature = "test-support"))]` and the like.
+CFG_TEST = re.compile(r"#\[cfg\([^\]]*\btest\b[^\]]*\)\]")
+
+
+def strip_cfg_test(src):
+    """Remove items gated on a test cfg: the attribute and the item after it,
+    up to its `;` or its matching closing brace."""
+    out, pos = [], 0
+    while (m := CFG_TEST.search(src, pos)) is not None:
+        out.append(src[pos : m.start()])
+        i = m.end()
+        while i < len(src) and src[i] not in "{;":
+            i += 1
+        if i < len(src) and src[i] == "{":
+            depth = 0
+            while i < len(src):
+                depth += {"{": 1, "}": -1}.get(src[i], 0)
+                i += 1
+                if depth == 0:
+                    break
+        else:
+            i += 1
+        pos = i
+    out.append(src[pos:])
+    return "".join(out)
+
+
 def implements_plugin(src_dir):
     """Whether any non-test Rust source under src_dir implements
     `kernel::Plugin`. Test plugins live in a `tests` or `testing` directory,
-    or a `tests.rs` or `testing.rs` file, and are skipped."""
+    a `tests.rs` or `testing.rs` file, or an item gated on a test cfg, and
+    are skipped."""
     for root, dirs, files in os.walk(src_dir):
         dirs[:] = [d for d in dirs if d not in ("tests", "testing")]
         for file in files:
             if file.endswith(".rs") and file not in ("tests.rs", "testing.rs"):
                 with open(os.path.join(root, file), encoding="utf-8") as f:
-                    if IMPL_PLUGIN.search(f.read()):
+                    if IMPL_PLUGIN.search(strip_cfg_test(f.read())):
                         return True
     return False
 

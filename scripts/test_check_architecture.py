@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 import check_architecture
-from check_architecture import IMPL_PLUGIN, apple_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
+from check_architecture import IMPL_PLUGIN, apple_only_cfg, strip_cfg_test, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -68,6 +68,26 @@ class PluginRule(unittest.TestCase):
             plugin_errors(crates),
             ["lectern-project-home -> lectern-project: only the app and tool crates may depend on a plugin crate [AGENTS.md architecture rule 7]"],
         )
+
+    def test_cfg_test_items_are_ignored(self):
+        src = """
+pub struct Real;
+
+#[cfg(test)]
+mod tests {
+    struct Fake;
+    impl Plugin for Fake { fn id(&self) -> &str { "fake" } }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl kernel::Plugin for Mock {}
+
+#[cfg(test)]
+mod more;
+"""
+        self.assertFalse(IMPL_PLUGIN.search(strip_cfg_test(src)))
+        self.assertIn("pub struct Real;", strip_cfg_test(src))
+        self.assertTrue(IMPL_PLUGIN.search(strip_cfg_test(src + "impl Plugin for Real {}")))
 
     def test_impl_plugin_pattern(self):
         for src in ("impl Plugin for Projects {", "impl kernel::Plugin for X", "impl<T: Send> lectern_kernel::Plugin for Source<T>"):
