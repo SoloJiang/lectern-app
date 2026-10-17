@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（#PR）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
