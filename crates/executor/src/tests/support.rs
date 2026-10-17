@@ -19,8 +19,15 @@ use crate::{Config, Executor};
 pub(crate) const LIMIT: Duration = Duration::from_secs(10);
 
 pub(crate) fn executor(workers: usize) -> Executor {
+    pools(workers, 1)
+}
+
+/// An executor with `workers` worker threads and `batch_workers` batch
+/// threads.
+pub(crate) fn pools(workers: usize, batch_workers: usize) -> Executor {
     Executor::new(Config {
         workers,
+        batch_workers,
         on_thread_start: None,
     })
 }

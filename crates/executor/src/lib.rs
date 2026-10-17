@@ -1,7 +1,9 @@
 //! Background tasks for IO and parsing off the UI thread.
 //!
 //! A fixed pool of worker threads runs futures and blocking closures from two
-//! priority queues; long-blocking work gets a thread of its own. Plugins
+//! priority queues; a smaller batch pool runs pausable background work
+//! (`Priority::Batch`, ADR 0029) from a queue of its own; long-blocking work
+//! gets a thread of its own. Plugins
 //! submit through the kernel's [`SubmitGate`], so their tasks are dropped when
 //! the activation dies and a panic fails the plugin. The design is in
 //! `docs/design/executor.md`.
@@ -32,8 +34,10 @@ type Hook = Arc<dyn Fn(ThreadKind) + Send + Sync>;
 /// The background executor. `Clone + Send + Sync`; `app` creates one after the
 /// startup barrier is released and hands it to the services that need it.
 ///
-/// Creating it starts no thread: the workers start on the first submission
-/// (ADR 0017: nothing is submitted before the first frame).
+/// Creating it starts no thread: the workers start on the first
+/// `Interactive` or `Background` submission and the batch threads on the
+/// first `Batch` submission (ADR 0017: nothing is submitted before the first
+/// frame; ADR 0029).
 #[derive(Clone)]
 pub struct Executor {
     inner: Arc<Inner>,
@@ -42,19 +46,33 @@ pub struct Executor {
 /// Executor settings.
 pub struct Config {
     /// Number of worker threads. Defaults to
-    /// `clamp(available_parallelism - 1, 2, 6)`.
+    /// `clamp(available_parallelism - 1, 2, 6)`. 0 counts as 1; with a single
+    /// worker no thread is reserved for `Interactive` tasks.
     pub workers: usize,
-    /// Called on every worker and dedicated thread when it starts, on that
-    /// thread. `app` uses it to set the QoS class from `platform`. A panic is
+    /// Number of batch threads, which run only `Priority::Batch` tasks.
+    /// Defaults to `clamp(available_parallelism / 4, 1, 3)`; 0 counts as 1
+    /// (ADR 0029).
+    pub batch_workers: usize,
+    /// Called on every worker, batch and dedicated thread when it starts, on
+    /// that thread. `app` uses it to set the QoS class from `platform`:
+    /// utility for `ThreadKind::Batch`, unchanged for the others. A panic is
     /// logged and the thread works as usual.
     pub on_thread_start: Option<Arc<dyn Fn(ThreadKind) + Send + Sync>>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        let parallelism = thread::available_parallelism().map_or(1, |n| n.get());
+        Config::for_parallelism(thread::available_parallelism().map_or(1, |n| n.get()))
+    }
+}
+
+impl Config {
+    /// The default settings for a machine with `parallelism` hardware
+    /// threads.
+    fn for_parallelism(parallelism: usize) -> Config {
         Config {
             workers: parallelism.saturating_sub(1).clamp(2, 6),
+            batch_workers: (parallelism / 4).clamp(1, 3),
             on_thread_start: None,
         }
     }
@@ -64,6 +82,7 @@ impl fmt::Debug for Config {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Config")
             .field("workers", &self.workers)
+            .field("batch_workers", &self.batch_workers)
             .field("on_thread_start", &self.on_thread_start.is_some())
             .finish()
     }
@@ -72,7 +91,11 @@ impl fmt::Debug for Config {
 /// Which kind of thread [`Config::on_thread_start`] is called on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ThreadKind {
+    /// A worker thread (`executor-N`): `Interactive` and `Background` tasks.
     Worker,
+    /// A batch thread (`executor-batch-N`): `Batch` tasks only.
+    Batch,
+    /// A dedicated thread, named by the caller.
     Dedicated,
 }
 
@@ -82,24 +105,33 @@ pub enum Priority {
     /// A result the user is waiting for: the diff of the current review
     /// session, an opened file. One worker only takes these.
     Interactive,
-    /// Scans, indexing, refreshes.
+    /// Scans, refreshes, and indexing that holds a `BusyGuard`.
     Background,
+    /// Pausable long-running batch work (ADR 0029). Runs only on the batch
+    /// threads, which start on the first `Batch` submission; never queued
+    /// with `Interactive` or `Background` and never on a worker.
+    Batch,
 }
 
 /// Result of [`Executor::shutdown`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shutdown {
-    /// Every worker exited.
+    /// Every worker and batch thread exited.
     Clean,
-    /// The timeout passed with this many workers still running (a task did
-    /// not finish).
+    /// The timeout passed with this many worker and batch threads still
+    /// running (a task did not finish).
     TimedOut { busy_workers: usize },
 }
 
 impl Executor {
     pub fn new(config: Config) -> Executor {
         Executor {
-            inner: Inner::new(config.workers, config.on_thread_start, false),
+            inner: Inner::new(
+                config.workers,
+                config.batch_workers,
+                config.on_thread_start,
+                false,
+            ),
         }
     }
 
@@ -186,8 +218,9 @@ impl Executor {
 
     /// Stops accepting tasks (later submissions return cancelled handles) and
     /// cancels every unfinished task in the live registry, suspended ones
-    /// included; their futures are dropped by the workers under `contain`,
-    /// not on this thread. Waits up to `timeout` for the workers to exit.
+    /// included; their futures are dropped by the worker and batch threads
+    /// under `contain`, not on this thread. Waits up to `timeout` for those
+    /// threads to exit.
     /// Dedicated threads are not waited for: one still waiting for its gate
     /// is woken and drops its closure; a running closure exits its thread
     /// when it returns.
@@ -241,13 +274,13 @@ impl Executor {
     /// thread. Dedicated tasks still get their own threads.
     pub fn manual() -> Executor {
         Executor {
-            inner: Inner::new(1, None, true),
+            inner: Inner::new(1, 1, None, true),
         }
     }
 
     /// Runs queued tasks until the queues are empty, `Interactive` before
-    /// `Background` and each queue in submission order. Returns the number of
-    /// steps run.
+    /// `Background` before `Batch` and each queue in submission order.
+    /// Returns the number of steps run.
     pub fn run_until_idle(&self) -> usize {
         self.inner.run_until_idle()
     }

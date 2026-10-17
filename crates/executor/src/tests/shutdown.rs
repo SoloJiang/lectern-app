@@ -57,6 +57,7 @@ fn shutdown_returns_after_the_workers_exit() {
     let e = exited.clone();
     let exec = Executor::new(Config {
         workers: 3,
+        batch_workers: 1,
         on_thread_start: Some(Arc::new(move |_| {
             EXIT.with(|probe| *probe.borrow_mut() = Some(ExitProbe(e.clone())));
         })),
@@ -148,6 +149,7 @@ fn shutdown_drops_a_dedicated_task_still_waiting_for_its_gate() {
     let started_tx = Mutex::new(started_tx);
     let exec = Executor::new(Config {
         workers: 1,
+        batch_workers: 1,
         on_thread_start: Some(Arc::new(move |_| {
             let _ = started_tx.lock().unwrap().send(());
         })),
@@ -183,6 +185,7 @@ fn a_shutdown_during_worker_startup_stops_further_spawns_and_joins_the_started_w
     let (s, e) = (started.clone(), exited.clone());
     let exec = Executor::new(Config {
         workers: 3,
+        batch_workers: 1,
         on_thread_start: Some(Arc::new(move |_| {
             let name = thread::current().name().unwrap_or("").to_owned();
             s.lock().unwrap().push(name);
@@ -193,7 +196,7 @@ fn a_shutdown_during_worker_startup_stops_further_spawns_and_joins_the_started_w
     // the test resumes it.
     let (at_spawn_tx, at_spawn) = mpsc::channel();
     let (resume_tx, resume) = mpsc::channel::<()>();
-    *lock(&exec.inner.before_spawn) = Some(Box::new(move |index| {
+    *lock(&exec.inner.before_spawn) = Some(Box::new(move |_kind, index| {
         if index == 1 {
             let _ = at_spawn_tx.send(());
             let _ = resume.recv_timeout(LIMIT);
@@ -227,5 +230,5 @@ fn a_shutdown_during_worker_startup_stops_further_spawns_and_joins_the_started_w
     // joined, its thread-local destructors already run.
     assert_eq!(*started.lock().unwrap(), vec!["executor-0".to_owned()]);
     assert_eq!(*exited.lock().unwrap(), 1);
-    assert!(lock(&exec.inner.sched).threads.is_empty());
+    assert!(lock(&exec.inner.sched).workers.threads.is_empty());
 }

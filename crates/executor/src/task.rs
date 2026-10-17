@@ -312,7 +312,13 @@ impl<T: Send + 'static> Handle<T> for TaskCell<T> {
     }
 
     fn abandon(&self) {
-        self.output.abandon(&self.exec);
+        // A batch task's result is dropped on the batch pool, which is
+        // already running; any other result on a worker.
+        let priority = match self.priority {
+            Priority::Batch => Priority::Batch,
+            Priority::Interactive | Priority::Background => Priority::Background,
+        };
+        self.output.abandon(&self.exec, priority);
     }
 }
 

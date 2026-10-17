@@ -4,7 +4,7 @@
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
 - 设计文档：[docs/design/executor.md](../../docs/design/executor.md)
-- ADR：[0017](../../docs/adr/0017.md)
+- ADR：[0017](../../docs/adr/0017.md)、[0029](../../docs/adr/0029.md)（批量线程组）
 
 ## 边界
 
