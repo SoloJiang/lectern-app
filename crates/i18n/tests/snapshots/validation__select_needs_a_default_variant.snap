@@ -1,0 +1,5 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"missing-default-variant\")"
+---
+en/app.ftl:4: syntax error: The select expression must have a default variant

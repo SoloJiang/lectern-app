@@ -60,6 +60,16 @@ gpui-component = "=0.7.3"
 # Used only by the lectern-doc-check tool crate.
 html5gum = { version = "0.8", default-features = false }
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# lectern-i18n: fluent-syntax runs only in build.rs (and tests); fluent-bundle,
+# intl_pluralrules and unic-langid are the reference implementation in tests.
+# None of them reach the app binary. See docs/design/i18n.md.
+fluent-syntax = "0.12"
+fluent-bundle = "0.16"
+intl_pluralrules = "7.0"
+unic-langid = "0.9"
+# Test-only.
+insta = "1.49"
+trybuild = "1.0"
 
 # Debug builds: optimize dependencies (GPUI is unusably slow at opt-level 0)
 # but keep our own crates at opt-level 0 so incremental rebuilds stay fast.

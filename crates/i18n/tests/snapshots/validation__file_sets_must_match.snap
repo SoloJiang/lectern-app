@@ -1,0 +1,6 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"file-sets-differ\")"
+---
+zh-CN/extra.ftl: missing: en/extra.ftl has no zh-CN counterpart
+zh-CN/other.ftl: en/other.ftl does not exist

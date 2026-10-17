@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/format_with_key.rs:4:44
+  |
+4 |     let _ = Strings::of(Locale::En).format(keys::review::LOOKS_GOOD, &Args::new());
+  |                                     ------ ^^^^^^^^^^^^^^^^^^^^^^^^ expected `FmtKey`, found `Key`
+  |                                     |
+  |                                     arguments to this method are incorrect
+  |
+note: method defined here
+ --> src/strings.rs
+  |
+  |     pub fn format(&self, key: FmtKey, args: &Args<'_>) -> String {
+  |            ^^^^^^

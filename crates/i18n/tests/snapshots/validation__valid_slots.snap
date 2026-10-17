@@ -1,0 +1,16 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: names
+---
+[
+    "app-title",
+    "app-hello",
+    "app-hello.tooltip",
+    "app-files",
+    "app-kind",
+    "app-nested",
+    "app-ref",
+    "app-literal",
+    "app-only-attrs.label",
+    "app-default-only",
+]

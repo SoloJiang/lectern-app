@@ -1,0 +1,33 @@
+---
+source: crates/i18n/src/strings.rs
+expression: text
+---
+count = 0
+en    0 files changed
+zh-CN 0 个文件有改动
+en    No comments
+zh-CN 没有审阅意见
+
+count = 1
+en    1 file changed
+zh-CN 1 个文件有改动
+en    1 comment
+zh-CN 1 条审阅意见
+
+count = 2
+en    2 files changed
+zh-CN 2 个文件有改动
+en    2 comments
+zh-CN 2 条审阅意见
+
+count = 5
+en    5 files changed
+zh-CN 5 个文件有改动
+en    5 comments
+zh-CN 5 条审阅意见
+
+count = 1.5
+en    1.5 files changed
+zh-CN 1.5 个文件有改动
+en    1.5 comments
+zh-CN 1.5 条审阅意见

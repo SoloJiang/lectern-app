@@ -1,0 +1,6 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"locale-directories\")"
+---
+ja: unknown locale directory (supported: en, zh-CN)
+zh-CN: missing locale directory

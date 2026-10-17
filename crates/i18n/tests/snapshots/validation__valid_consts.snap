@@ -1,0 +1,16 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: consts
+---
+[
+    "TITLE",
+    "HELLO",
+    "HELLO_TOOLTIP",
+    "FILES",
+    "KIND",
+    "NESTED",
+    "REF",
+    "LITERAL",
+    "ONLY_ATTRS_LABEL",
+    "DEFAULT_ONLY",
+]

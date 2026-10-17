@@ -1,0 +1,6 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"attribute-sets-differ\")"
+---
+zh-CN/app.ftl:1: app-button.tooltip: missing attribute (defined at en/app.ftl:2)
+zh-CN/app.ftl:2: app-button.label: attribute is not in en (en/app.ftl:1)

@@ -10,5 +10,20 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "infra"
 
+# No runtime dependencies: the resources are compiled into static tables by
+# build.rs, so the binary contains no Fluent parser (docs/design/i18n.md).
+
+[build-dependencies]
+fluent-syntax.workspace = true
+
+[dev-dependencies]
+# The validation tests include build/compile.rs, which parses with fluent-syntax.
+fluent-syntax.workspace = true
+fluent-bundle.workspace = true
+intl_pluralrules.workspace = true
+unic-langid.workspace = true
+insta.workspace = true
+trybuild.workspace = true
+
 [lints]
 workspace = true

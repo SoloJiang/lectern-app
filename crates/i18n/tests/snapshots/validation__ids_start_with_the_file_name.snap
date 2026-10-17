@@ -1,0 +1,12 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"prefix-mismatch\")"
+---
+en/Bad Name.ftl: file names must start with a lowercase letter and use only a-z, 0-9, - and _
+en/Bad Name.ftl:1: x: IDs in Bad Name.ftl must start with `Bad Name-`
+en/app.ftl:2: review-title: IDs in app.ftl must start with `app-`
+en/app.ftl:3: app-2fa: the part after `app-` must start with a letter
+zh-CN/Bad Name.ftl: file names must start with a lowercase letter and use only a-z, 0-9, - and _
+zh-CN/Bad Name.ftl:1: x: IDs in Bad Name.ftl must start with `Bad Name-`
+zh-CN/app.ftl:2: review-title: IDs in app.ftl must start with `app-`
+zh-CN/app.ftl:3: app-2fa: the part after `app-` must start with a letter

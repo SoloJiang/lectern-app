@@ -1,0 +1,5 @@
+error[E0451]: field `index` of struct `Key` is private
+ --> tests/ui/construct_key.rs:4:19
+  |
+4 |     let _ = Key { index: 0 };
+  |                   ^^^^^ private field
