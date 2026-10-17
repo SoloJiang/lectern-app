@@ -16,8 +16,9 @@ Rules checked:
   5. Every workspace crate inherits the workspace lints
      (`[lints] workspace = true`).
   6. Plugin crates (`[package.metadata.lectern] plugin = true`) never depend
-     on another plugin crate, and only app depends on a plugin crate
-     (dev-dependencies included).
+     on another plugin crate, and only app and tool crates depend on a plugin
+     crate (dev-dependencies included). A crate whose sources contain
+     `impl Plugin for` must carry the marker.
 
 Each error names the rule's source (AGENTS.md or a design doc) in brackets.
 
@@ -98,9 +99,27 @@ def plugin_errors(crates):
                 continue
             if crates[name][0]:
                 errors.append(f"{name} -> {dep}: plugin crates must not depend on each other [AGENTS.md architecture rule 7]")
-            elif mine != "app":
-                errors.append(f"{name} -> {dep}: only the app crate may depend on a plugin crate [AGENTS.md architecture rule 7]")
+            elif mine not in ("app", "tool"):
+                errors.append(f"{name} -> {dep}: only the app and tool crates may depend on a plugin crate [AGENTS.md architecture rule 7]")
     return errors
+
+
+# `impl Plugin for X`, `impl<T> kernel::Plugin for X`, `impl lectern_kernel::Plugin for X`.
+IMPL_PLUGIN = re.compile(r"\bimpl\b(?:\s*<[^>{]*>)?\s+(?:\w+::)*Plugin\s+for\b")
+
+
+def implements_plugin(src_dir):
+    """Whether any non-test Rust source under src_dir implements
+    `kernel::Plugin`. Test plugins live in a `tests` directory or a
+    `tests.rs` file and are skipped."""
+    for root, dirs, files in os.walk(src_dir):
+        dirs[:] = [d for d in dirs if d != "tests"]
+        for file in files:
+            if file.endswith(".rs") and file != "tests.rs":
+                with open(os.path.join(root, file), encoding="utf-8") as f:
+                    if IMPL_PLUGIN.search(f.read()):
+                        return True
+    return False
 
 
 def metadata(platform=None, all_features=True):
@@ -296,6 +315,8 @@ def main():
         plugin[pid] = lectern.get("plugin", False)
         if not isinstance(plugin[pid], bool):
             errors.append(f"{pkg['name']}: `plugin` must be true or false [docs/adr/0025.md]")
+        elif plugin[pid] is False and pkg["name"] != "lectern-kernel" and implements_plugin(os.path.join(os.path.dirname(pkg["manifest_path"]), "src")):
+            errors.append(f"{pkg['name']}: implements Plugin; add `plugin = true` to [package.metadata.lectern] [docs/adr/0025.md]")
         if not inherits_workspace_lints(pkg["manifest_path"]):
             errors.append(f"{pkg['name']}: add `[lints] workspace = true` to its Cargo.toml [docs/design/ci.md]")
         layer[pid] = value

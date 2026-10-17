@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 import check_architecture
-from check_architecture import apple_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
+from check_architecture import IMPL_PLUGIN, apple_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -49,6 +49,7 @@ class PluginRule(unittest.TestCase):
         "lectern-executor": (False, "infra", []),
         "lectern-services": (False, "kernel", []),
         "lectern-project-home": (False, "view", ["lectern-services", "lectern-git"]),
+        "lectern-bench": (False, "tool", ["lectern-project", "lectern-agents"]),
     }
 
     def test_allowed(self):
@@ -65,8 +66,16 @@ class PluginRule(unittest.TestCase):
         crates = dict(self.CRATES, **{"lectern-project-home": (False, "view", ["lectern-project"])})
         self.assertEqual(
             plugin_errors(crates),
-            ["lectern-project-home -> lectern-project: only the app crate may depend on a plugin crate [AGENTS.md architecture rule 7]"],
+            ["lectern-project-home -> lectern-project: only the app and tool crates may depend on a plugin crate [AGENTS.md architecture rule 7]"],
         )
+
+    def test_impl_plugin_pattern(self):
+        for src in ("impl Plugin for Projects {", "impl kernel::Plugin for X", "impl<T: Send> lectern_kernel::Plugin for Source<T>"):
+            with self.subTest(src=src):
+                self.assertTrue(IMPL_PLUGIN.search(src))
+        for src in ("impl PluginSet {", "impl From<Plugin> for X", "// a Plugin for each source", "impl MyPlugin for X"):
+            with self.subTest(src=src):
+                self.assertFalse(IMPL_PLUGIN.search(src))
 
 
 class AppleOnlyCfg(unittest.TestCase):
