@@ -14,7 +14,7 @@
   - 按 cwd 归位：经 `services` 的 `Projects::resolve` 得到项目与 worktree。
   - 增量读取：游标之后的新行，供多个消费方各自按游标拉取。
   - 交给 `usage` 的三类记录：原始用量、工具调用的开始与结果事件（ADR 0020）、Codex 的额度快照。
-  - 恢复会话的命令（`claude --resume <id>`、`codex resume <id>`），供 `terminal` 使用。
+  - 恢复会话用哪个已登记的 agent 命令（`ResumeCommand`），供 `terminal` 映射成 `claude --resume <id>`、`codex resume <id>`。
 - 不做：
   - 用量去重、规范化、归属与聚合：`usage`。本 crate 交出日志里的原始数值和去重用的键。
   - 命令文本里 `cd`、`pushd`、`git -C` 的解析：`usage`（`crates/usage/AGENTS.md`）。
@@ -101,8 +101,13 @@ pub trait SessionSource: Send + Sync {
     /// 按偏移定位、读一行并解析，与文件大小无关。`.jsonl.zst` 会话从它的解压副本里定位（见「压缩会话的随机读取」）。
     fn load(&self, session: &SessionKey, at: &ContentRef) -> Result<Content, SessionError>;
 
-    /// 恢复这个会话的命令。不阻塞。子 agent 会话和格式无法识别的会话返回 None。
-    fn resume(&self, session: &SessionKey) -> Option<ResumeSpec>;
+    /// 恢复这个会话用哪个已登记的 agent 命令。不阻塞。子 agent 会话和格式无法识别的会话返回 None。
+    /// 只返回数据，不返回可执行的命令行（见下面的 `ResumeCommand`）。
+    fn resume(&self, session: &SessionKey) -> Option<ResumeCommand>;
+
+    /// 请求补齐这些会话的待定字段（`SessionSummary::tail_pending`）。立即返回，任何线程可调用，视图在会话行
+    /// 显示出来或被打开时调用；补齐在后台进行，完成后随 `SessionsChanged` 送达。已补齐或不待定的会话忽略。
+    fn complete(&self, sessions: &[SessionKey]);
 }
 
 pub enum SessionError {
@@ -114,12 +119,21 @@ pub enum SessionError {
     Unrecognized,
 }
 
-pub struct ResumeSpec {
-    pub program: Arc<str>,      // "claude" / "codex"，由 terminal 在用户的 shell 里解析
-    pub args: Arc<[Arc<str>]>,  // ["--resume", id] / ["resume", id]
-    pub cwd: Arc<Path>,         // 会话开始时的 cwd
+/// 恢复会话的命令只能是宿主登记的几种，来源只给出会话 ID，不给程序名和参数。
+pub enum ResumeCommand {
+    /// `terminal` 映射为 `claude --resume <session_id>`。
+    ClaudeCode { session_id: Arc<str> },
+    /// `terminal` 映射为 `codex resume <session_id>`。
+    Codex { session_id: Arc<str> },
 }
 ```
+
+恢复命令是安全边界（[ADR 0018](../adr/0018.md)「能力声明」）：`terminal` 在插件的 Seatbelt 之外、以用户身份运行它，所以：
+
+- 程序名和固定参数由 `terminal` 按枚举映射，来源不能给出任意程序、参数或环境变量。
+- `session_id` 必须是 UUID 的规范写法（两种 agent 的会话 ID 都是 UUID），不是时 `terminal` 拒绝，所以它不会被解析成选项或注入别的参数。
+- 工作目录不取自来源：`terminal` 用这个会话在 `SessionList` 里的 `cwd`，并要求它在一个已打开项目的 worktree 里，否则不恢复。
+- `terminal` 只接受内置来源（本 crate 的 "session-claude-code"、"session-codex"，以后内置的 ACP 来源）的 `ResumeCommand`；第三方进程插件来源的 `resume` 结果一律忽略，直到它们有对应的能力声明（另写 ADR）。
 
 调用方：
 
@@ -127,7 +141,8 @@ pub struct ResumeSpec {
 - `welcome`、`project_home`、`worktrees` 在渲染时调 `sessions()`；收到 `SessionsChanged` 后安排重绘。
 - `usage` 收到 `SessionsChanged` 后在 executor 上对变化的会话调 `read`，把记录和新游标在同一个 SQLite 事务里写入，所以重启后从自己的游标继续，不重复也不遗漏。
 - `review` 在 executor 上调 `turns` 和 `load`，`review_view` 只读 `review` 的快照。
-- `terminal` 调 `resume`。
+- `terminal` 调 `resume`，按上面的规则映射成命令。
+- `project_home`、`welcome` 在显示或打开 `tail_pending` 的会话行时调 `complete`。
 
 ### 事件
 
@@ -212,7 +227,7 @@ pub struct SessionSummary {
     /// `stop_reason` 不是 `end_turn`，或有工具调用没有结果。界面据此和 `last_activity` 判断是否在运行。
     pub open_turn: bool,
     /// 取自文件末尾的字段（`last_activity`、`open_turn`）还没有算出：只发生在第一次见到、摘要缓存里也没有的 `.jsonl.zst`
-    /// （见「数据流与线程」第 2 步）。此时 `last_activity` 暂取文件修改时间，`open_turn` 为 false；后台补齐后随下一次 `SessionsChanged` 更新。
+    /// （见「数据流与线程」第 2 步）。此时 `last_activity` 暂取文件修改时间，`open_turn` 为 false；只主动补齐最近的几个，其余在 `SessionSource::complete` 之后补齐，随下一次 `SessionsChanged` 更新。
     pub tail_pending: bool,
     /// Codex `archived_sessions/` 下的会话。
     pub archived: bool,
@@ -398,10 +413,20 @@ pub enum UsageKey {
     /// `total` 是会话内的累计值，不是唯一标识，所以键带上游线程 ID（`session_meta.id`）：同一线程里重复写出的同一个累计值
     /// 合为一条，不同线程（重复的工作流、分叉）各自计数。分叉和子 agent 重放的父会话 `token_count` 带的是新线程的 ID，
     /// 靠 `inherited` 标记排除（ADR 0014），不靠键。
-    CodexTokenCount { thread_id: Arc<str>, total: RawTokens },
-    /// 顶层 `token_usage_record`（压缩上下文的用量）。`response_id` 由模型服务端生成、全局唯一；同样带上 `thread_id`，与上一项一致。
+    /// `superseded`：这个线程此前已出现过 `token_usage_record`（见下面的「只用一路用量」）。
+    CodexTokenCount { thread_id: Arc<str>, total: RawTokens, superseded: bool },
+    /// 顶层 `token_usage_record`：每个完成的响应一条，`tokens` 取它的 `usage`。`response_id` 由模型服务端生成、全局唯一；同样带上 `thread_id`，与上一项一致。
     CodexResponse { thread_id: Arc<str>, response_id: Arc<str> },
 }
+```
+
+只用一路用量：Codex 按线程决定。在 `3b8f43a`，每个完成的响应先写一条 `token_usage_record`，同一个响应的用量又累加进随后的 `token_count`（`codex-rs/core/src/session/mod.rs` 的 `record_response_token_usage` 与 `update_token_usage_info`），两路都计会重复。规则：
+
+- 一个线程（`thread_id`）里只要出现过一条 `CodexResponse`，这个线程的用量只取 `CodexResponse`，它的 `CodexTokenCount` 全部不计；没有任何 `token_usage_record` 的线程（旧版本的日志）才用 `token_count` 的 `last_token_usage`。
+- 本 crate 两路都交出（续读时不知道文件后面会不会出现 `token_usage_record`），并在游标的解析器状态里记下这个线程是否已出现过 `token_usage_record`：出现之后交出的 `CodexTokenCount` 标 `superseded: true`。`usage` 在汇总时按上一条规则选取，所以文件中途才出现第一条 `token_usage_record` 时，之前已落盘的 `token_count` 也随之不计。
+- `token_count` 无论哪种情况都照常交出 `RateLimits`。
+
+```rust
 
 pub struct RateLimitSample {
     pub at: Timestamp,
@@ -500,7 +525,7 @@ pub enum EditOp {
 - `assistant`：`requestId`，`message.{id, model, stop_reason, usage, content[]}`；内容块 `text`、`tool_use{id, name, input}`、`thinking`（不读）。一次响应的每个内容块各写一行，重复同一份 `usage`。
 - `user`：`message.content` 是字符串或内容块数组；`tool_result{tool_use_id, is_error}` 块配合顶层 `toolUseResult`（`structuredPatch`、`originalFile`、`interrupted` 等）；`origin.kind`（`human`、`task-notification`、`peer` 等，旧版本没有）。
 - 轮次：一轮从一条人写的 prompt 开始：`type: "user"`，`isMeta` 不为 true，内容是文本且不含 `tool_result`，`origin.kind` 为 `human` 或没有 `origin`；`isCompactSummary` 的摘要和本地命令输出的包装（`<local-command-stdout>` 等）不开新轮次。其他 `user` 文本是 `Injected`。子 agent 会话的第一条 `user` 记录是父 agent 给的任务，作为第 1 轮的 prompt。
-- 继承前缀：`sessionId` 与文件所属会话不同的记录（分叉、续接时复制进来的历史），标为 `inherited`，不进入轮次索引。
+- 继承前缀：先确定文件的归属，再比较每条记录。主会话文件归属于文件名里的 `sessionId`，没有 `agentId`；子 agent 文件（`subagents/` 下的 `agent-<agentId>.jsonl`）里的记录带的是**父会话**的 `sessionId`（本机 2.1.30x 的全部子 agent 文件逐行核对过），归属于（父会话目录名、文件名里的 `agentId`）。记录的 `sessionId` 与归属的会话不同、或在子 agent 文件里 `agentId` 与文件的不同（分叉、续接时复制进来的历史），标为 `inherited`，不进入轮次索引；子 agent 文件里带父会话 `sessionId` 和自己 `agentId` 的记录是它自己的，照常计入。
 
 **Codex**（来源：[openai/codex](https://github.com/openai/codex) 提交 `3b8f43a`（2026-10-17）的 `codex-rs/history/src/lib.rs`（`RolloutLine`、`RolloutItem`）、`codex-rs/protocol/src/protocol.rs`（`SessionMeta`、`EventMsg`、`TokenCountEvent`）、`codex-rs/protocol/src/models.rs`（`ResponseItem`）、`codex-rs/protocol/src/items.rs`（`TurnItem`）、`codex-rs/rollout/src/policy.rs`（哪些条目写入文件）、`codex-rs/rollout/src/compression.rs`（`.zst`））
 
@@ -510,7 +535,7 @@ pub enum EditOp {
 - `turn_context`：`turn_id`、`cwd`、`model`。
 - 轮次：`event_msg` 的 `task_started`（别名 `turn_started`）到同一 `turn_id` 的 `task_complete`（`turn_complete`）或 `turn_aborted`。prompt 和 agent 说明：`legacy` 模式取 `event_msg` 的 `user_message` / `agent_message`；`paginated` 模式取 `item_completed` 里的 `UserMessage` / `AgentMessage`。`response_item` 里 `role: "user"` 的消息含环境说明和指令文件，不作为 prompt。
 - 工具：两种模式都从 `response_item` 取 `function_call{name, arguments, call_id}`、`custom_tool_call{name, input, call_id}`、`local_shell_call`，结果取 `function_call_output` / `custom_tool_call_output`。`exec_command_begin/end`、`patch_apply_begin` 不写入文件；改动另取 `legacy` 的 `patch_apply_end.changes` 或 `paginated` 的 `item_completed` / `FileChange`。
-- 用量：`event_msg` / `token_count` 的 `info.{last_token_usage, total_token_usage}`，模型取最近一条 `turn_context`；额度取同一事件的 `rate_limits.{primary, secondary}`。
+- 用量：顶层 `token_usage_record{thread_id, turn_id, response_id, usage}`（每个响应一条），以及 `event_msg` / `token_count` 的 `info.{last_token_usage, total_token_usage}`；两路只用一路，规则见「记录」里的「只用一路用量」。模型取最近一条 `turn_context`；额度取 `token_count` 的 `rate_limits.{primary, secondary}`。
 - 继承前缀：子 agent 与分叉会话先重放来源的历史。有 `subagent_history_start_ordinal` 时，`ordinal` 小于它的行是继承前缀；否则到第一条自己的 `task_started`（或 `trigger_turn: true` 的 `inter_agent_communication_metadata`）为止（ADR 0014）。
 
 兼容策略：适配器按记录形状判断，不按版本号分支；字段缺失时按上表的旧写法再试一次（如 `resets_in_seconds`、没有 `origin`），仍不行就跳过这一行并计数。上游格式变化时，加 fixtures、改适配器、在本节记下来源提交或版本。
@@ -538,7 +563,11 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 ## 数据流与线程
 
 1. 插件在首帧之后激活（`AfterFirstFrame`），`started` 里通过 `own_with` 提交发现任务（`Background`）。首帧之前不做任何事。
-2. 发现：枚举会话目录（只列目录项，不读 `.prefix.json` 等无关文件），每个会话文件读开头最多 256 KB（找会话头、cwd、第一个 prompt）和末尾最多 64 KB（最后活动时间、`open_turn`），得到摘要。不读整个文件。`.zst` 没有办法直接读末尾：先查摘要缓存（见「压缩会话的随机读取」），命中就用；没命中时只流式解压开头 256 KB，用开头和文件的 `stat` 生成摘要、标 `tail_pending`，照常发布。整份解压补齐末尾字段的工作排在列表发布之后，作为单独的 `Background` 任务逐个进行，补齐一批就按第 4 步再发布一次，并写入摘要缓存。
+2. 发现：枚举会话目录（只列目录项，不读 `.prefix.json` 等无关文件），每个会话文件读开头最多 256 KB（找会话头、cwd、第一个 prompt）和末尾的完整记录（最后活动时间、`open_turn`），得到摘要。不读整个文件。
+   - 末尾：从文件末尾按 64 KB 的块向前读，按换行切出完整的行，从最后一行往前逐行解析，直到找到决定 `open_turn` 的记录（Claude Code：最后一条 `user` 或 `assistant` 记录；Codex：最后一条 `task_started` / `task_complete` / `turn_aborted`）。单行最长 16 MB，所以一行比 64 KB 大时继续向前读到它前面的换行；向前合计最多读 16 MB 或 64 行。`last_activity` 取读到的最后一条带时间戳的记录。
+   - 回退：最后一行超过 16 MB，或在上限内没找到决定 `open_turn` 的记录时，`last_activity` 取文件修改时间，`open_turn` 为 true（末尾是超长的工具结果时，这一轮通常还没结束），计入 `oversized_lines`。
+   - 已经在增量读取的文件（第 5 步）不再读末尾，这两个字段从解析器状态里直接取。
+   - `.zst` 没有办法直接读末尾：先查摘要缓存（见「压缩会话的随机读取」），命中就用；没命中时只流式解压开头 256 KB，用开头和文件的 `stat` 生成摘要、标 `tail_pending`，照常发布。补齐末尾字段要整份解压，按需进行：列表发布后只主动补齐修改时间最近的 8 个压缩会话（M 系列上约 3 s，之后不再有后台工作，kernel 能在首帧后 30 秒内静止，[ADR 0017](../adr/0017.md)），其余等视图调 `complete`（会话行显示出来或被打开）时才补齐；同时最多 2 个补齐任务，补齐后按第 4 步再发布，并写入摘要缓存。冷的归档历史不会让应用一直忙碌。
 3. 归位：对去重后的 cwd 调 `Projects::resolve`（阻塞，在 executor 上），结果按 cwd 缓存到下一次目录变化；cwd 不存在时为 `Missing`。
 4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。
 5. 监听：`fs_watch` 递归监听每个会话目录，事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件从列表移除。处理完再按第 4 步发布。
@@ -547,7 +576,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 
 线程：
 
-- `sessions()`、`resume()`、`SessionFilter::hide` 不阻塞，任何线程可调用。
+- `sessions()`、`resume()`、`complete()`、`SessionFilter::hide` 不阻塞，任何线程可调用。
 - `read`、`turns`、`load` 阻塞，只在 executor 上调用；调用方选优先级（`review` 打开会话时用 `Interactive`，`usage` 的补录用 `Background`）。
 - 同一个会话的 `read` 可以被多个消费方同时调用，互不影响：解析状态在游标里，本 crate 不为消费方保存进度。
 - 读取不持有任何锁；列表替换和索引 LRU 各用一把只在内存操作时短暂持有的锁。
@@ -583,7 +612,11 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 读取进度：`max_bytes` 为 1 时每次调用仍消费一行；下一行比 `max_bytes` 大、但不到 16 MB 时整行返回；超过 16 MB 的行被跳过、计数、游标越过它；任何返回 `at_end == false` 的调用，新游标都大于旧游标（`progress_*`）。
 - 压缩：同一份 Codex fixture 的 `.jsonl` 与 `.jsonl.zst` 记录相同；压缩前取的游标在压缩后继续有效；第一次 `turns` 建好解压副本，之后 `load` 不再解码；压缩文件身份变化后副本重建；副本合计超过上限时按 LRU 删除、不删正在读取的副本；副本目录不可写时 `load` 结果不变（`zst_*`、`decoded_*`）。
 - 路由：两个来源报告相同的会话 ID 时得到两个不同的 `SessionKey`；`SessionsChanged::source` 与键的 `source` 一致（`source_*`）。
-- 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次（`inherited_*`）。
+- 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次；Claude Code 子 agent 文件里带父会话 `sessionId` 和自己 `agentId` 的记录不标 `inherited`，它的轮次和用量完整交出（`inherited_*`）。
+- Codex 用量只取一路：有 `token_usage_record` 的线程，其后的 `CodexTokenCount` 标 `superseded`；没有的线程不标；`token_usage_record` 在文件中途才出现时，之前的记录不重标，由 `usage` 按线程规则排除（`codex_usage_stream_*`）。
+- 恢复命令：`resume` 只给出 `ResumeCommand`；非 UUID 的会话 ID 被 `terminal` 拒绝的规则在 `terminal` 测试，本 crate 测试子 agent 和认不出格式的会话返回 None（`resume_*`）。
+- 末尾字段：最后一条记录大于 64 KB（至 16 MB）时仍能取到它的时间戳和 `open_turn`；末尾跟着非消息记录时向前找到最后一条消息记录；最后一条记录超过 16 MB 时按「数据流与线程」第 2 步的回退规则；已在增量读取的文件不再读末尾（`tail_*`）。
+- 压缩会话的补齐：冷缓存下发现 100 个 `.zst` 之后，只补齐最近的 8 个，kernel 在补齐完成后静止；对其余会话调 `complete` 才补齐（`complete_*`）。
 - 子 agent：父会话、`toolUseId` 关联，`meta.json` 缺失时 `tool_call` 为 None（`subagent_*`）。
 - 去重键：Claude Code 同一响应的多行给出相同的 `UsageKey`；两个 Codex 线程写出相同的 `total_token_usage` 时键不同，同一线程重复写出的相同累计值键相同；键里没有 `SourceId`；`info` 为 null 的 `token_count` 只给出 `RateLimits`（`usage_keys_*`）。
 - 工具分类：分类表每一行一个用例，表外工具名归 `Other` 并计数（`tool_kind_*`）。
@@ -616,14 +649,14 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - `SessionSource`、`SessionsChanged` 和「数据结构」里的类型在 `services::session` 里，`cargo check -p lectern-services` 通过。
    - 每个类型的 JSON 往返测试通过（`just test -p lectern-services` 的 `session_*`）。
 2. **Claude Code 适配器与增量读取**
-   - `just test -p lectern-agents` 里 `claude_*`、`incremental_*`、`reset_*`、`progress_*`、`source_*`、`subagent_*`、`usage_keys_*`、`tool_kind_*`、`format_*` 通过，快照已逐个看过。
+   - `just test -p lectern-agents` 里 `claude_*`、`incremental_*`、`reset_*`、`progress_*`、`source_*`、`subagent_*`、`usage_keys_*`、`tool_kind_*`、`format_*`、`resume_*`、`tail_*` 通过，快照已逐个看过；Claude Code 部分的 `inherited_*` 通过。
    - `crates/agents/tests/fixtures/claude-code/` 下每个版本目录都有 `SOURCE.md`。
    - `rg 'serde_json::Value' crates/agents/src` 只出现在测试代码里。
    - `just bench` 的 `agents/parse_throughput`、`agents/append_4k` 达到「性能」里的目标。
 3. **Codex 适配器**
-   - `codex_*`、`zst_*`、`decoded_*`、`inherited_*` 通过；`just deny` 通过（`ruzstd`）。
+   - `codex_*`、`codex_usage_stream_*`、`zst_*`、`decoded_*`、`inherited_*` 通过；`just deny` 通过（`ruzstd`）。
    - `agents/zst_throughput`、`agents/zst_load_decoded` 达标。
 4. **发现、监听、归位与插件**（依赖 `fs_watch` 的目录监听和 `cache` 的应用级分库）
-   - `discover_*`、`watch_*`、`place_*`、`index_cache_*`、`plugin_*` 通过。
+   - `discover_*`、`watch_*`、`place_*`、`index_cache_*`、`complete_*`、`plugin_*` 通过。
    - `python3 scripts/check_architecture.py` 通过；`rg gpui crates/agents/Cargo.toml` 没有结果。
    - `agents/discover_1000`、`agents/turns_cached_50mb` 达标；macOS 上冷启动基准（#7）不因本插件变化。
