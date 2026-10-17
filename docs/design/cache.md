@@ -1,6 +1,6 @@
 # cache 设计
 
-状态：实现中。第 1 步已实现（存储、键值接口与生命周期，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），第 2 步尚未实现（见「验收」）。
+状态：实现中。第 1 步已实现（存储、键值接口与生命周期，[#82](https://github.com/SoloJiang/lectern-app/pull/82)），第 2 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`crates/cache/AGENTS.md` 列出的两个 issue；本 crate 是它们的前置，不单独关闭其中任何一个）。`cache` 是派生数据的本地持久缓存：解析、diff、索引这类可以从 git 对象或会话日志重新算出的结果，以内容的身份为键存进 SQLite，下次启动、切换 worktree 时直接命中（架构规则 5，[技术调研「性能要点」](tech-research.md#性能要点)）。存储选型见 [ADR 0027](../adr/0027.md)。
 
@@ -426,7 +426,7 @@ pub enum DisableReason {
 
 分两步实现，每步一个 PR，都写 `Refs #17` 和 `Refs #31`（本 crate 不关闭这两个 issue）。每一步都要 `just check`、`just test -p lectern-cache`、`just deny` 通过。
 
-1. **存储、键值接口与生命周期**（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：根 `Cargo.toml` 按 ADR 0027 加入 `rusqlite`。
+1. **存储、键值接口与生命周期**（[#82](https://github.com/SoloJiang/lectern-app/pull/82)）：根 `Cargo.toml` 按 ADR 0027 加入 `rusqlite`。
    - `just test -p lectern-cache` 里 `new_*`、`ui_thread_*`、`roundtrip_*`、`namespace_*`、`batch_*`、`open_*`、`disk_full_*`、`busy_*`、`concurrency_*`、`crash_*`、`compression_*`、`memory_*` 通过。
    - `cargo tree -i rusqlite -e normal --depth 1` 只列出 `lectern-cache`。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、`platform`、`executor`。
