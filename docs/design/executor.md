@@ -1,6 +1,6 @@
 # executor 设计
 
-状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。关闭回调 `on_shutdown`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）在 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 实现。
+状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。关闭回调 `on_shutdown`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）在 [#109](https://github.com/SoloJiang/lectern-app/pull/109) 实现。
 
 `executor` 运行 UI 线程之外的 IO、解析和 git 操作（[技术调研「不同步阻塞 UI」](tech-research.md)）。它实现 kernel 对执行器的约定（[kernel 设计](kernel.md)「撤销」里的后台任务、`SubmitGate`、`GateSlot`），让插件提交的任务随激活失效而丢弃、任务 panic 时插件进入 `Failed`。
 
@@ -284,7 +284,7 @@ struct TaskCell<T> {
 - `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-executor`（45 个测试）、`just doctest`、`just deny` 全部通过。`rg unsafe crates/executor/src` 没有结果。
 - `just test -p lectern-executor` 连续运行 40 次、用 `taskset -c 0` 限制在单核上再运行 15 次，全部通过；`cargo test`（所有测试在同一进程的多个线程里）也通过。
 - 批量线程组（[#106](https://github.com/SoloJiang/lectern-app/pull/106)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 61 个测试；同样连续运行 40 次、`taskset -c 0` 单核 15 次，`cargo test` 同一进程，全部通过。`just bench --measure executor/` 改动前后在同一台 4 核 Linux 容器上各跑 3 次，中位数：`executor/spawn_10k` 改动前 21.1、36.3、18.3 ms，改动后 12.5、14.3、17.2 ms（两边都标为 noisy）；`executor/wake_1000x100` 改动前 64.2、69.6、73.9 ms，改动后 64.0、53.1、55.2 ms。差别在同一版本多次运行的波动之内，没有变慢（只记录，不设预算）。两项都只提交 `Background` 任务，不创建批量线程。
-- 关闭回调（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 68 个测试；`just test -p lectern-executor hooks` 连续运行 40 次、`taskset -c 0` 单核 15 次，全部通过。只增加登记表和 `shutdown` 开头的一次加锁，没有改提交和调度路径，没有重跑基准。
+- 关闭回调（[#109](https://github.com/SoloJiang/lectern-app/pull/109)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 68 个测试；`just test -p lectern-executor hooks` 连续运行 40 次、`taskset -c 0` 单核 15 次，全部通过。只增加登记表和 `shutdown` 开头的一次加锁，没有改提交和调度路径，没有重跑基准。
 - 测试用真实的 `lectern-kernel`（dev-dependency 打开 `test-support`，用 `Kernel::start` 和 `Kernel::barrier`），等待一律用通道或 `block_on`，超时只作为失败保护；只有插件状态、kernel 静止这类没有事件可等的地方按 1 ms 间隔轮询，上限 10 秒。
 
 「测试」一节逐条对应（`crates/executor/src/tests/`）：
@@ -340,6 +340,6 @@ struct TaskCell<T> {
   - 默认线程数由私有的 `Config::for_parallelism(n)` 计算，`Default` 用本机的 `available_parallelism` 调用它，测试注入并行度。
   - 测试专用的 `before_spawn` 钩子多带一个 `ThreadKind`，用来让批量线程组的启动停在建第二个线程之前。
   - `Config` 多了一个字段，`fs_watch` 测试里两处 `Config { .. }` 字面量补上 `batch_workers`。
-- 关闭回调（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+- 关闭回调（[#109](https://github.com/SoloJiang/lectern-app/pull/109)）：
   - 接口按 [code_intel 设计](code_intel.md#对其他-crate-的要求)，参数是 `Box<dyn FnOnce() + Send>`。code_intel 设计没有规定的部分在本文「关闭回调」里补全：`shutdown` 开始之后的登记立即在登记线程上调用（不拒绝），drop 不等已被取走的回调，回调按登记顺序调用。选择立即调用而不拒绝：调用方只需要一条路径，拒绝时它仍要自己调用同一个停止函数。
   - 登记表单独一把锁（`ShutdownHooks`），不放进 `Sched`：回调的登记和注销不与任务调度争用同一把锁。
