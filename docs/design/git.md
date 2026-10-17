@@ -146,13 +146,18 @@ impl Repo {
     pub fn worktree(&self, id: &WorktreeId) -> Result<Worktree, GitError>;
 }
 
-/// `main` 表示主 worktree，其余是 `<公共目录>/worktrees/<名字>` 的名字。
+/// 带标签的 ID：主 worktree 与名字恰好是 `main` 的 linked worktree（`<公共目录>/worktrees/main`）不会相同。
+/// 排序时 `Main` 在前，linked worktree 按名字的字节序。
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub struct WorktreeId(Arc<str>);
+pub enum WorktreeId {
+    Main,
+    /// `<公共目录>/worktrees/<名字>` 的目录名，原样保存。
+    Linked(Arc<str>),
+}
 
 pub struct WorktreeInfo {
     pub id: WorktreeId,
-    pub is_main: bool,
+    pub is_main: bool,                 // 与 `id == WorktreeId::Main` 等价，方便调用方
     pub root: PathBuf,                 // 工作区根，规范路径
     pub git_dir: PathBuf,              // 主 worktree 为公共目录，linked worktree 为 `<公共目录>/worktrees/<名字>`
     pub head: HeadState,
@@ -237,12 +242,22 @@ impl TrackedPaths {
     /// index 文件末尾的校验和（index 用的哈希算法），作为文件列表派生数据的缓存键；没有 index 文件时为 None。
     pub fn checksum(&self) -> Option<Oid>;
     pub fn len(&self) -> usize;
-    /// 按 index 的顺序；冲突路径的各个 stage 只出现一次。
-    pub fn iter(&self) -> impl Iterator<Item = (&RepoPath, Mode)>;
+    /// 按路径字节序；冲突路径的各个 stage 只出现一次。sparse index 的目录条目已展开为其中的文件（见下）。
+    pub fn iter(&self) -> impl Iterator<Item = &TrackedEntry>;
     pub fn contains(&self, path: &[u8]) -> bool;            // 二分查找
     pub fn contains_dir(&self, dir: &[u8]) -> bool;         // 有路径在这个目录下
 }
+
+pub struct TrackedEntry {
+    pub path: RepoPath,
+    pub mode: Mode,
+    pub oid: Oid,
+    /// skip-worktree 条目，以及从 sparse 目录条目展开出来的条目：不在工作区里，按未改动处理，不报告为删除。
+    pub skip_worktree: bool,
+}
 ```
+
+sparse index（`index.sparse`）里，sparse checkout 之外的目录只有一个模式为 `040000` 的目录条目，记录的是树 OID。gix 0.88 读 index 时不展开它们，本 crate 自己在内存里展开：按目录条目的树 OID 从对象库读出其中的全部文件，作为 `skip_worktree` 的条目放进 `TrackedPaths`，与完整 index 里的 skip-worktree 条目相同。展开只在内存里进行，不写回 index，index 文件的 sparse 状态不变；展开的条目数计入 `EntryLimits`，读树时检查 `cancel`。所以「基准树 ∪ index」的比较（见「工作区比较」）看到的是逐个文件的条目，sparse 目录下的文件不会被当成删除。
 
 `fs_watch` 是基础设施层，不依赖本 crate：`app` 把 `TrackedPaths` 包成 `fs_watch` 定义的过滤接口传进去。
 
@@ -341,13 +356,17 @@ pub enum OverlaySource {
     /// 子模块：写成空目录，提交 OID 只出现在 patch 里。
     Gitlink(Oid),
     /// 使用了过滤器、超过读取上限、不支持的文件类型：不写出，Analyze 标为部分内容未提供。
-    Omitted(Unavailable),
+    /// 带着改动集里新一侧的 `Content`（`Unhashed` 或 `Unavailable`，含 `Filtered` 的原始字节摘要）。
+    Omitted(Content),
 }
 
 pub struct WrittenEntry {
     pub path: RepoPath,
     pub mode: Mode,
-    pub content: Content,                         // 写出内容的 blob OID，或 Omitted 的原因
+    /// 写出内容的 blob OID；`Omitted` 的条目原样带回 `OverlaySource::Omitted` 里的 `Content`，
+    /// 所以 `from_written` 算出的指纹与工作区改动集的指纹用同一个内容标识。
+    pub content: Content,
+    pub untracked: bool,                          // 原样带回 `Change::untracked`
     pub source: Arc<dyn WrittenContent>,          // 读取已写出的内容，生成 patch 用
 }
 
@@ -355,6 +374,8 @@ pub trait WrittenContent: Send + Sync {
     fn read(&self, max: u64) -> io::Result<Arc<[u8]>>;
 }
 ```
+
+`overlay` 按 `files` 的顺序给出条目，同一路径上的 `Deleted` 排在未跟踪的 `Added` 之前，写出方按顺序应用，快照里这个路径上最终是工作区里的文件。
 
 截断文件和二进制文件改动前的版本由写出方按 `Change::old` 的 OID 用 `Repo::blob` 取出（ADR 0019）。保留目录、平铺、名字冲突检查都在写出方。
 
@@ -385,6 +406,8 @@ pub struct Change {
     pub new: Option<Side>,           // 目标一侧，删除时为 None
     pub detail: Detail,
     pub generated: bool,             // `.gitattributes` 的 `linguist-generated`
+    /// 新一侧是 index 里没有的工作区文件。只出现在 `Added` 上。
+    pub untracked: bool,
 }
 
 pub enum Status {
@@ -404,12 +427,19 @@ pub enum Content {
 }
 
 pub enum Unavailable {
-    Filtered,            // 设置了 clean / process 过滤器（如 Git LFS）：「使用了过滤器，暂不支持比较」
+    /// 设置了 clean / process 过滤器（如 Git LFS）：「使用了过滤器，暂不支持比较」。
+    /// `raw` 是工作区原始字节的身份，指纹用它（基准一侧来自对象库，照常是 `Blob`）。
+    Filtered { raw: RawIdentity },
     UnsupportedType,     // FIFO、socket、设备文件
     PathThroughSymlink,  // 路径中间一级是符号链接
     NestedRepository,    // 未跟踪的目录里有自己的 `.git`
     Missing,             // 对象库里没有（如部分克隆）
     Unreadable,          // 读取失败
+}
+
+pub enum RawIdentity {
+    Sha256([u8; 32]),                                    // 不超过 64 MB 时，原始字节的 SHA-256
+    Stat { size: u64, mtime_ns: i128, inode: u64 },      // 超过 64 MB 时不读内容
 }
 
 pub enum Detail {
@@ -438,7 +468,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 
 不变量：
 
-- `files` 按 `path` 的字节序排序，同一路径最多一项；重命名只出现在新路径上。
+- `files` 按（`path` 的字节序，`untracked`）排序。同一路径最多一项，唯一的例外是「工作区比较」第 3 步的情况：同一路径上一项是 `Deleted`，另一项是 `untracked` 的 `Added`。重命名只出现在新路径上，所以重命名的旧路径上重新出现的文件只有一项未跟踪的 `Added`，`Renamed` 本身不受影响。
 - `Status` 与两侧一致：`Added` 只有 `new`，`Deleted` 只有 `old`，其余两侧都有。`TypeChanged` 是普通文件、符号链接、子模块之间的变化。
 - 截断只影响 `Detail`，不影响改动的判定、`Status` 和两侧的 `Content`：被截断、只列出的文件也有完整的 OID。
 - `Content::Blob` 的 OID 与 `git add` 之后对象库里会有的 OID 相同，所以只是被 touch 过、内容未变的文件不算改动，内容相同的文件在不同 worktree 之间命中同一份缓存。
@@ -446,18 +476,25 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 
 ### 工作区比较
 
-目标是工作区时，`changes` 对「基准树的路径 ∪ index 的路径」逐个比较，再加上未跟踪文件：
+目标是工作区时，`changes` 对「基准树的路径 ∪ index 的路径」逐个比较，再加上未跟踪文件。一个路径是否跟踪只看 index：
+
+| 基准树 | index | 结果 |
+|---|---|---|
+| 有 | 有 | 按第 1、2 步比较工作区内容与基准 |
+| 有 | 没有 | `Deleted`（已从 index 删除，如 `git rm --cached`），不看工作区里同一路径上有没有文件 |
+| 没有 | 有 | `Added`，新一侧按第 1、2 步取工作区内容 |
+| 没有 | 没有 | 不是跟踪的路径；工作区里有文件时按第 3 步作为未跟踪文件 |
 
 1. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean（条目的 mtime 早于 index 文件的 mtime）时，工作区内容就是 index 里的 blob，不读文件。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
-2. **比较内容**：stat 不一致、racy-clean、或 index 里没有这个路径时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）的文件不转换，标为 `Filtered`，不按原始字节生成 diff。
-3. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出未跟踪文件（相当于 `-uall`），内容按第 2 步处理。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
-4. **重命名**：删除与新增之间先按 OID 找精确重命名，再按相似度（不低于 50%，候选不超过 1000 对，即 `diff.renameLimit` 的默认值）找重命名。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
+2. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）的文件不转换，标为 `Filtered`，不按原始字节生成 diff。
+3. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`），每个都是 `Added` 且 `untracked = true`，内容按第 2 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
+4. **重命名**：删除与新增之间先按 OID 找精确重命名，再按相似度（不低于 50%，候选不超过 1000 对，即 `diff.renameLimit` 的默认值）找重命名。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
 
 其余规则：
 
 - 模式：`core.fileMode=false` 时可执行位取 index 里的值；符号链接的内容是 `readlinkat` 读出的目标。
 - 子模块：工作区一侧的提交是子模块自己的 HEAD（只读地打开它的 git 目录）；子模块内部的未提交改动不计算。
-- sparse checkout 中标为 skip-worktree 的条目按未改动处理；`git add -N` 的条目按新增处理。
+- `skip_worktree` 的条目（含从 sparse 目录展开的条目）不 stat、不读工作区，工作区一侧取 index 里的 OID：与基准相同时不是改动，不同时按已暂存的改动处理。`git add -N` 的条目按新增处理。
 - 路径的大小写与 Unicode 规范化按仓库的 `core.ignoreCase`、`core.precomposeUnicode`（gix 的文件系统能力）。
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
 - 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。
@@ -489,8 +526,9 @@ pub struct Fingerprint {
 }
 ```
 
-- 输入：格式版本号、基准树 OID，以及 `files` 里每一项的（路径、重命名的旧路径、状态、新旧模式、两侧的内容标识），按路径顺序，每个字段带长度前缀。
-- 内容标识：`Blob` 用 OID；`Unhashed` 用大小、mtime 和 inode，不在每次刷新时读超大文件；`Filtered` 用原始字节的 SHA-256（不超过 64 MB 时），其余 `Unavailable` 用原因。
+- 输入：格式版本号、基准树 OID，以及 `files` 里每一项的（路径、重命名的旧路径、状态、`untracked`、新旧模式、两侧的内容标识），按 `files` 的顺序，每个字段带长度前缀。
+- 内容标识：`Blob` 用 OID；`Unhashed` 用大小、mtime 和 inode，不在每次刷新时读超大文件；`Filtered` 用它的 `RawIdentity`；其余 `Unavailable` 用原因。
+- 工作区改动集和 `from_written` 得到的改动集用同一套规则：没写进快照的条目在 `WrittenEntry` 里带回原来的 `Content`，所以快照没变时两者的指纹相同，过滤器文件的原始字节变了时指纹随之改变。
 - 在截断之前、对全部改动文件计算，被截断和只列出的文件也计入；只改可执行位也会改变指纹。
 - 由 `ChangeSet` 已有的数据算出，不再读工作区。Analyze 用 `from_written` 得到的改动集的指纹。
 
@@ -560,15 +598,15 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 测试仓库有两种来源：
 
 - **构造器**：`TestRepo`，不调用 git 命令行。用 gix 的写入接口在临时目录里建仓库（普通、裸、SHA-1 / SHA-256）、写 blob / 树 / 提交 / 引用 / index，直接写 linked worktree 的管理文件（`<公共目录>/worktrees/<名字>/{HEAD,gitdir,commondir,locked}` 和工作区里的 `.git` 文件）来增加、锁定或制造 prunable 的 worktree，用标准库写工作区文件，提供符号链接、可执行位、FIFO、改 mtime（制造 racy-clean）等操作。放在 `test-support` feature 下导出，供 `project`、`review` 和 `bench` 的测试使用。
-- **归档夹具**：需要 git 自己生成的格式放在 `tests/fixtures/<名字>.tar`，由同名的 `tests/fixtures/scripts/<名字>.sh` 用真实的 git 生成，脚本头部记录 git 版本；同时保存 `git diff --no-ext-diff --no-textconv -M --histogram --numstat` 等命令的输出作为对照。CI 只解包，不运行 git；git 升级导致格式变化时新增一份样本，不覆盖旧的。包括：linked worktree（锁定、prunable）、SHA-256 仓库、packed-refs、index v4 与 split index、`core.autocrlf` 与 `eol`、UTF-16 的 `working-tree-encoding`、`ident`、Git LFS 属性与过滤器配置、子模块、未解决的冲突、reftable 仓库、各种 reflog 消息。
+- **归档夹具**：需要 git 自己生成的格式放在 `tests/fixtures/<名字>.tar`，由同名的 `tests/fixtures/scripts/<名字>.sh` 用真实的 git 生成，脚本头部记录 git 版本；同时保存 `git diff --no-ext-diff --no-textconv -M --histogram --numstat` 等命令的输出作为对照。CI 只解包，不运行 git；git 升级导致格式变化时新增一份样本，不覆盖旧的。包括：linked worktree（锁定、prunable）、SHA-256 仓库、packed-refs、index v4 与 split index、sparse index（`index.sparse` 加 cone 模式的 sparse checkout）、`core.autocrlf` 与 `eol`、UTF-16 的 `working-tree-encoding`、`ident`、Git LFS 属性与过滤器配置、子模块、未解决的冲突、reftable 仓库、各种 reflog 消息。
 
 场景：
 
-- 仓库与引用：`discover` 在子目录、linked worktree、git 目录、普通文件夹里的结果；`worktrees` 的锁定和 prunable；SHA-256 仓库的 OID 是 64 位；reftable 仓库返回 `Unsupported`；`default_branch`、上游与推送目标的解析表；reflog 消息分类逐条覆盖，认不出的是 `Other`。
+- 仓库与引用：`discover` 在子目录、linked worktree、git 目录、普通文件夹里的结果；`worktrees` 的锁定和 prunable；名为 `main` 的 linked worktree 与主 worktree 的 ID 不同，`Repo::worktree` 各自打开正确的那一个；SHA-256 仓库的 OID 是 64 位；reftable 仓库返回 `Unsupported`；`default_branch`、上游与推送目标的解析表；reflog 消息分类逐条覆盖，认不出的是 `Other`。
 - 树 diff：新增、删除、修改、模式变化、类型变化、精确与相似重命名、二进制、子模块；`--numstat` 与归档里 git 的输出一致。
-- 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`。
+- 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`。
 - 截断：单文件、整体、保留内容三种上限的边界值；截断前后 `fingerprint` 不变。
-- 指纹：只改可执行位、只改符号链接目标、重命名都改变指纹；`from_written` 在内容相同时得到与工作区改动集相同的指纹。
+- 指纹：只改可执行位、只改符号链接目标、重命名都改变指纹；`from_written` 在内容相同时得到与工作区改动集相同的指纹，包括带 `Omitted` 条目（过滤器文件、超大文件）的快照；过滤器文件的原始字节改变后指纹不同。
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
 - 不执行外部程序：夹具仓库配置 `diff.external`、`diff.<名>.textconv`、`filter.<名>.clean` / `process`、`core.fsmonitor`，指向会写标记文件的脚本，PATH 最前面放一个记录调用的假 `git`（AGENTS.md「工作方式」）；跑完全部工作区和树 diff 场景后，标记文件不存在、假 `git` 没有被调用。
 - 展示行与词级差异：配对、折叠、hunk 相邻时合并上下文，用 insta 快照。
