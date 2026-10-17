@@ -441,3 +441,4 @@ P0 第一周先搭好面向 agent 的工程脚手架（见「工程搭建」一�
 - [Claude Code JSONL 会话格式说明](https://claude-dev.tools/docs/jsonl-format)
 - [Claude Code 与 Codex 会话存储位置](https://labuladong.online/en/ai-coding/claude-code/session-storage/)
 - [pulls.review 调研](../research/pulls-review.md)：按意图分组的 PR 审阅工具，已看状态、模型输出校验和本地 agent 调用的参考
+- [代码导航与文件索引调研](../research/code-navigation.md)：⌘K 的模糊匹配与排序、按 blob 的符号索引、建索引的优先级与降级、文件树
