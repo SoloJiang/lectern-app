@@ -110,12 +110,12 @@ IMPL_PLUGIN = re.compile(r"\bimpl\b(?:\s*<[^>{]*>)?\s+(?:\w+::)*Plugin\s+for\b")
 
 def implements_plugin(src_dir):
     """Whether any non-test Rust source under src_dir implements
-    `kernel::Plugin`. Test plugins live in a `tests` directory or a
-    `tests.rs` file and are skipped."""
+    `kernel::Plugin`. Test plugins live in a `tests` or `testing` directory,
+    or a `tests.rs` or `testing.rs` file, and are skipped."""
     for root, dirs, files in os.walk(src_dir):
-        dirs[:] = [d for d in dirs if d != "tests"]
+        dirs[:] = [d for d in dirs if d not in ("tests", "testing")]
         for file in files:
-            if file.endswith(".rs") and file != "tests.rs":
+            if file.endswith(".rs") and file not in ("tests.rs", "testing.rs"):
                 with open(os.path.join(root, file), encoding="utf-8") as f:
                     if IMPL_PLUGIN.search(f.read()):
                         return True
