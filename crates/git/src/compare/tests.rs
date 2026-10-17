@@ -1764,6 +1764,148 @@ fn read_only_worktree_contents_stay_out_of_the_object_database() {
     }
 }
 
+// ---- canonical_* -----------------------------------------------------------------
+
+fn canonical(t: &TestRepo, path: &str, bytes: &[u8]) -> Option<Oid> {
+    read_only(t, || {
+        main_worktree(t).canonical_oid(&rp(path), bytes).unwrap()
+    })
+}
+
+/// The OIDs git recorded for the conversion fixture (`git add` under each
+/// `core.autocrlf`): text / eol, `text=auto`, `-text`, ident and
+/// working-tree-encoding, from the raw worktree bytes.
+#[test]
+fn canonical_matches_git_for_the_conversion_fixture() {
+    let dir = fixture("worktree_conversions");
+    for autocrlf in ["false", "true", "input"] {
+        let t = TestRepo::new();
+        t.append_config(&format!("[core]\n\tautocrlf = {autocrlf}\n"));
+        let paths = t.import_worktree_fixture(&dir);
+        let expected = ls_files(&dir.join(format!("expected/autocrlf={autocrlf}/ls-files")));
+        assert_eq!(expected.len(), paths.len());
+        for path in &paths {
+            let raw = std::fs::read(t.root().join(path)).unwrap();
+            let oid = canonical(&t, path, &raw).unwrap();
+            assert_eq!(
+                oid.to_hex(),
+                expected[path].1,
+                "{path} under core.autocrlf = {autocrlf}"
+            );
+        }
+    }
+}
+
+#[test]
+fn canonical_lf_and_crlf_with_text_auto_or_eol_give_the_index_oid() {
+    let attrs: &[u8] = b"*.auto text=auto\n*.eol eol=lf\n*.txt text eol=lf\n";
+    let lf: &[u8] = b"one\ntwo\n";
+    let crlf: &[u8] = b"one\r\ntwo\r\n";
+    let files: &[(&str, &[u8])] = &[
+        (".gitattributes", attrs),
+        ("a.auto", lf),
+        ("b.eol", lf),
+        ("c.txt", lf),
+        ("d.none", lf),
+        ("e.auto", crlf),
+    ];
+    let t = clean_repo(files);
+    let index = |path: &str| {
+        main_worktree(&t)
+            .tracked(&EntryLimits::default(), &no_cancel())
+            .unwrap()
+            .iter()
+            .find(|e| e.path == rp(path))
+            .unwrap()
+            .oid
+    };
+    for path in ["a.auto", "b.eol", "c.txt"] {
+        assert_eq!(canonical(&t, path, lf), Some(index(path)), "{path} LF");
+        assert_eq!(canonical(&t, path, crlf), Some(index(path)), "{path} CRLF");
+    }
+    // No attribute and `core.autocrlf` unset: the bytes as they are.
+    assert_eq!(canonical(&t, "d.none", lf), Some(index("d.none")));
+    assert_eq!(
+        canonical(&t, "d.none", crlf),
+        Some(Oid::for_blob(HashKind::Sha1, crlf))
+    );
+    // `text=auto` leaves CRLF alone when the index blob already has CRs, as
+    // git does.
+    assert_eq!(canonical(&t, "e.auto", crlf), Some(index("e.auto")));
+    // A path not in the index converts the same way.
+    assert_eq!(
+        canonical(&t, "new.auto", crlf),
+        Some(Oid::for_blob(HashKind::Sha1, lf))
+    );
+}
+
+#[test]
+fn canonical_collapses_ident() {
+    let stored: &[u8] = b"version $Id$\nplain\n";
+    let t = clean_repo(&[(".gitattributes", b"*.c ident\n"), ("x.c", stored)]);
+    let expanded: &[u8] = b"version $Id: 0123456789abcdef0123456789abcdef01234567 $\nplain\n";
+    let want = Some(Oid::for_blob(HashKind::Sha1, stored));
+    assert_eq!(canonical(&t, "x.c", expanded), want);
+    assert_eq!(canonical(&t, "x.c", stored), want);
+    // Without the attribute the expanded keyword stays.
+    assert_eq!(
+        canonical(&t, "x.h", expanded),
+        Some(Oid::for_blob(HashKind::Sha1, expanded))
+    );
+}
+
+#[test]
+fn canonical_with_a_clean_or_process_filter_is_none() {
+    let t = TestRepo::new();
+    t.append_config(LFS_CONFIG);
+    t.append_config(
+        "[filter \"proc\"]\n\tprocess = proc-filter\n[filter \"smudge-only\"]\n\tsmudge = cat\n",
+    );
+    t.write_file(
+        ".gitattributes",
+        b"*.bin filter=lfs -text\n*.p filter=proc\n*.s filter=smudge-only\n*.u filter=unknown\n",
+    );
+    let bytes: &[u8] = b"content\n";
+    let raw = Some(Oid::for_blob(HashKind::Sha1, bytes));
+    assert_eq!(canonical(&t, "a.bin", bytes), None);
+    assert_eq!(canonical(&t, "dir/a.bin", bytes), None);
+    assert_eq!(canonical(&t, "a.p", bytes), None);
+    // A driver without clean / process, or one that isn't configured,
+    // changes nothing on the way in, as in git.
+    assert_eq!(canonical(&t, "a.s", bytes), raw);
+    assert_eq!(canonical(&t, "a.u", bytes), raw);
+    assert_eq!(canonical(&t, "a.txt", bytes), raw);
+}
+
+#[test]
+fn canonical_uses_the_attribute_files_of_every_directory_level() {
+    let lf: &[u8] = b"one\ntwo\n";
+    let crlf: &[u8] = b"one\r\ntwo\r\n";
+    let t = clean_repo(&[("gone/.gitattributes", b"*.txt text eol=lf\n")]);
+    // Untracked, two levels down.
+    t.write_file("d/e/.gitattributes", b"*.txt text eol=lf\n");
+    // Tracked but deleted from the worktree: the index blob applies, as in
+    // git's check-in order.
+    t.remove("gone/.gitattributes");
+    let want = Some(Oid::for_blob(HashKind::Sha1, lf));
+    assert_eq!(canonical(&t, "d/e/a.txt", crlf), want);
+    assert_eq!(canonical(&t, "d/e/f/a.txt", crlf), want);
+    assert_eq!(canonical(&t, "gone/a.txt", crlf), want);
+    // Outside those directories nothing applies.
+    let raw = Some(Oid::for_blob(HashKind::Sha1, crlf));
+    assert_eq!(canonical(&t, "d/a.txt", crlf), raw);
+    assert_eq!(canonical(&t, "a.txt", crlf), raw);
+}
+
+#[test]
+fn canonical_on_sha256_has_the_full_length() {
+    let t = TestRepo::sha256();
+    t.write_file(".gitattributes", b"*.txt text eol=lf\n");
+    let oid = canonical(&t, "a.txt", b"one\r\n").unwrap();
+    assert_eq!(oid, Oid::for_blob(HashKind::Sha256, b"one\n"));
+    assert_eq!(oid.to_hex().len(), 64);
+}
+
 // ---- no_external_programs -------------------------------------------------------
 
 /// Repository configuration names every external program git could run,
@@ -1847,6 +1989,17 @@ fn no_external_programs() {
     t.write_file("c.txt", b"plain two\n");
     t.write_file("new.t", b"new\n");
     t.write_file("new.f", b"new\n");
+    let wt = main_worktree(&t);
+    let canonical = read_only(&t, || {
+        (
+            wt.canonical_oid(&rp("b.f"), b"filtered two\n").unwrap(),
+            wt.canonical_oid(&rp("a.t"), b"text two\n").unwrap(),
+        )
+    });
+    assert_eq!(
+        canonical,
+        (None, Some(Oid::for_blob(HashKind::Sha1, b"text two\n")))
+    );
 
     let repo = t.repo();
     let wt = main_worktree(&t);

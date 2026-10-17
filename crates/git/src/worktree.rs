@@ -195,6 +195,22 @@ impl Worktree {
         Arc::new(crate::watch::Source::new(self.clone()))
     }
 
+    /// The blob OID `git add` would store for `bytes` as the regular file at
+    /// `path`: git's built-in to-git conversions (`text` / `eol` / `crlf`
+    /// and `core.autocrlf`, `ident`, `working-tree-encoding`) under the
+    /// attributes and configuration the worktree comparison uses, without
+    /// writing the object database. None when a configured clean or process
+    /// filter applies to `path` (e.g. Git LFS): no external program is ever
+    /// run, and without it the content can't be made canonical. Reads the
+    /// index (shared with [`changes`](Self::changes) while it is unchanged)
+    /// and, through `SafeRoot`, the `.gitattributes` in `path`'s
+    /// directories; `bytes` themselves are not read from the worktree. A
+    /// conversion that fails (bytes invalid in the declared encoding)
+    /// leaves the content raw, as the comparison does.
+    pub fn canonical_oid(&self, path: &RepoPath, bytes: &[u8]) -> Result<Option<Oid>, GitError> {
+        compare::canonical_oid(&self.subject(), path, bytes)
+    }
+
     pub(crate) fn safe_root(&self) -> &SafeRoot {
         &self.0.root
     }
