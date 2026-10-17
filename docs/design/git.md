@@ -554,12 +554,12 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 
 `bench` 增加的基准（[#7](https://github.com/SoloJiang/lectern-app/issues/7)），夹具由本 crate 的测试仓库构造器生成：
 
-- `git_open`：`discover` + `worktrees`（11 个 worktree）+ `tracked`。
-- `git_open_handle`：打开一次 gix 句柄的耗时（每次顶层调用都要付出）。
-- `git_changes_clean` / `git_changes_50`：没有改动、50 个文件改动时的 `changes`。
-- `git_refresh_one`：改动一个文件后的 `refresh(Paths)`。
-- `git_diff_50_cold` / `git_diff_50_warm`：50 个文件、平均 300 行的 hunk 计算，缓存未命中与命中。
-- `git_changes_capped`：10 000 个改动文件时整体截断生效，耗时 < 1 s，`ChangeSet` 的内存不超过上限之和。
+- `git/open`：`discover` + `worktrees`（11 个 worktree）+ `tracked`。
+- `git/open_handle`：打开一次 gix 句柄的耗时（每次顶层调用都要付出）。
+- `git/changes_clean` / `git/changes_50`：没有改动、50 个文件改动时的 `changes`。
+- `git/refresh_one`：改动一个文件后的 `refresh(Paths)`。
+- `git/diff_50_cold` / `git/diff_50_warm`：50 个文件、平均 300 行的 hunk 计算，缓存未命中与命中。
+- `git/changes_capped`：10 000 个改动文件时整体截断生效，耗时 < 1 s，`ChangeSet` 的内存不超过上限之和。
 - 内存：打开 11 个 worktree 的仓库并对当前 worktree 做一次 `changes` 后，本 crate 的常驻增量。
 
 ## 状态与异常
@@ -637,12 +637,12 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
    - 前置：`platform` 的安全读取（Linux 与 macOS 实现）已合并。
    - `just test -p lectern-git` 里 `repo_*`、`worktrees_*`、`refs_*`、`reflog_*`、`tracked_*`、`read_file_*` 测试通过，其中有 SHA-256 夹具和 reftable 夹具；`TestRepo` 在 `test-support` feature 下可用，`rg 'Command::new' crates/git/src` 没有结果。
    - `cargo tree -i gix -e normal --depth 1` 只列出 `lectern-git`。
-   - `bench` 的 `git_open` 在预算内。
+   - `bench` 的 `git/open` 在预算内。
 2. **树之间的改动集、hunk 与展示行**：
    - `diff_trees_*`、`rename_*`、`binary_*`、`truncate_*`、`rows_*`、`inline_*`、`hunk_cache_*` 测试通过，结构化输出有 insta 快照；`numstat_matches_git` 对全部归档夹具通过。
-   - `git_diff_50_cold` / `git_diff_50_warm` 在预算内。
+   - `git/diff_50_cold` / `git/diff_50_warm` 在预算内。
 3. **工作区比较**：
    - `worktree_*`、`read_only_*`、`no_external_programs` 测试通过。
    - `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' crates/git/src` 没有结果：工作区只经 `SafeRoot` 读取。
-   - `git_changes_clean`、`git_changes_50`、`git_refresh_one`、`git_changes_capped` 和内存基准在预算内。
+   - `git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/changes_capped` 和内存基准在预算内。
 4. **改动来源接口**：`services` 的设计文档合并后，为本地仓库实现它的改动来源接口（取 diff、加载完整文件；指纹随 #66），按那份文档的验收条件测试。由哪个插件把它注册为服务按 #47 的结论处理，不在本 crate。
