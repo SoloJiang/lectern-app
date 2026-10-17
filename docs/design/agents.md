@@ -380,7 +380,7 @@ pub enum ToolStatus { Completed, Failed, Denied, Interrupted }
 | `Search` | `Grep`、`Glob`（`path`）、`LS` | 无（同上） |
 | `SpawnAgent` | `Task`、`Agent` | 派出子 agent 的工具（`spawn_agent` 一类，按 fixtures 补全） |
 
-结果状态：Claude Code 的 `tool_result.is_error` 为 true 是 `Failed`，`toolUseResult.interrupted` 为 true 是 `Interrupted`，权限被拒是 `Denied`；Codex 的 `function_call_output.output.success == false` 是 `Failed`；`local_shell_call` 没有对应的 output 记录，结束事件取它自带的 `status`：同一 `call_id` 出现 `completed` 时发 `ToolFinished`（`Ok`），`incomplete` 时发 `ToolFinished`（`Interrupted`），`in_progress` 只发开始。
+结果状态：Claude Code 的 `tool_result.is_error` 为 true 是 `Failed`，`toolUseResult.interrupted` 为 true 是 `Interrupted`，权限被拒是 `Denied`；Codex 的 `function_call_output.output.success == false` 是 `Failed`；`local_shell_call` 没有对应的 output 记录，结束事件取它自带的 `status`：同一 `call_id` 出现 `completed` 时发 `ToolFinished`（`Completed`），`incomplete` 时发 `ToolFinished`（`Interrupted`），`in_progress` 只发开始。
 
 用量与额度（ADR 0014、ADR 0022）：
 
