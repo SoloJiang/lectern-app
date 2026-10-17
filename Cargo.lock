@@ -3367,6 +3367,8 @@ name = "lectern-services"
 version = "0.0.0"
 dependencies = [
  "lectern-kernel",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

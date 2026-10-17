@@ -4,6 +4,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use super::RelPath;
 
 /// Manifests larger than this are not parsed (`ManifestError::TooLarge`).
@@ -12,7 +14,7 @@ pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// One directory's sub-project. Several manifests in one directory (say
 /// package.json and pom.xml) make one package.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Package {
     pub dir: RelPath,
     /// The first of: package.json `name`, Cargo `package.name`, go.mod
@@ -30,7 +32,7 @@ pub struct Package {
     pub files: u32,
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Manifest {
     pub kind: ManifestKind,
     pub path: RelPath,
@@ -42,7 +44,7 @@ pub struct Manifest {
 }
 
 /// The manifest file formats `project` understands.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum ManifestKind {
     PackageJson,
     PnpmWorkspace,
@@ -55,7 +57,7 @@ pub enum ManifestKind {
 }
 
 /// The build ecosystem a manifest belongs to.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum Ecosystem {
     Npm,
     Cargo,
@@ -93,7 +95,7 @@ impl ManifestKind {
 }
 
 /// Why a manifest has no parse result.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum ManifestError {
     /// Larger than `MAX_MANIFEST_BYTES`; not parsed.
     TooLarge,

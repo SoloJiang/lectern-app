@@ -52,7 +52,7 @@
 
 ### 服务接口（`lectern-services` 的 `project` 模块）
 
-接口和数据类型放在 `services`，由本 crate 实现。类型都是不含行为的数据（`FileList` 的查找方法除外），能通过 JSON-RPC 序列化（serde 派生方式随 `services` 设计）；`services` 的设计文档引用本节，不重复定义。第 2 步不派生 serde：还没有进程插件读项目模型（[#39](https://github.com/SoloJiang/lectern-app/issues/39)），序列化的形式随 `services` 的设计一起定。各类型派生 `Clone`、`PartialEq`、`Eq`、`Debug`，键与小的值类型另派生 `Hash`。
+接口和数据类型放在 `services`，由本 crate 实现。类型都是不含行为的数据（`FileList` 的查找方法除外），能通过 JSON-RPC 序列化（[ADR 0018](../adr/0018.md)）；`services` 的设计文档引用本节，不重复定义。所有数据类型派生 serde 的 `Serialize`、`Deserialize`（`Arc<str>`、`Arc<[T]>` 用 serde 的 `rc` feature），按 serde 的默认外部标记表示枚举；`FileList` 例外，见「文件列表」。`Projects` trait 本身不序列化，进程插件的调用协议见 [#39](https://github.com/SoloJiang/lectern-app/issues/39)。各类型另派生 `Clone`、`PartialEq`、`Eq`、`Debug`，键与小的值类型另派生 `Hash`。
 
 ```rust
 /// 单实现服务，`project` 插件提供。
@@ -398,6 +398,7 @@ impl FileListBuilder {
 - git 项目：来自 index，同一路径的多个合并阶段（冲突中）只收一条。index 里没有的文件（未跟踪的新文件）不在列表里。
 - 文件夹项目：从根目录遍历，不跟随符号链接；跳过以 `.` 开头的目录和 `node_modules`、`target`、`build`、`dist`、`out`、`vendor`、`venv`、`__pycache__`；最多 20,000 个条目，超过时停止并标记 `truncated`。
 - 不带 blob OID：P1 的消费者（⌘K、Files、`WorkspaceFacts`、子项目）只要路径。需要时（`code_intel`，P2）另加，不改现有字段。
+- 序列化：`{ "entries": [[路径, 类型], …], "skipped": n, "truncated": b }`，不暴露内部的缓冲与偏移。反序列化经 `FileListBuilder`：来自其他进程的乱序、重复或不合法的路径按构造器的规则排序、去重、记入 `skipped`，偏移不会越界，查找不会 panic。
 
 ### 子项目与清单
 
@@ -629,9 +630,9 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 
 第 2 步（服务接口），在 Linux 上运行（`services` 与 `project` 不依赖 GPUI）：
 
-- `just check`、`just test`（Linux 上不依赖 GPUI 的全部 crate）、`just doctest`、`just deny`、`cargo run -q --locked -p lectern-doc-check` 全部通过；`python3 scripts/check_architecture.py` 通过，`cargo tree -p lectern-services -e normal` 只有 `lectern-kernel`。
+- `just check`、`just test`（Linux 上不依赖 GPUI 的全部 crate）、`just doctest`、`just deny`、`cargo run -q --locked -p lectern-doc-check` 全部通过；`python3 scripts/check_architecture.py` 通过，`cargo tree -p lectern-services -e normal` 只有 `lectern-kernel` 和 `serde`（及 `serde_derive` 的过程宏依赖）；工作区的 `serde` 加了 `rc` feature，`lectern-project` 的测试与快照不受影响。
 - `rg -n 'pub trait Projects' crates/services/src` 有一处（`crates/services/src/project/mod.rs`）。
-- `just test -p lectern-services`（7 个测试）：`projects_service_id_and_multiple` 检查 `<dyn Projects as Service>::ID == "projects"`、`MULTIPLE == false`（编译期断言），以及 `service::<dyn Projects>()` 的键；`projects_is_a_shared_trait_object` 用一个空实现确认 `Arc<dyn Projects>` 可用、快照与查找结果是 `Send + Sync`；`project_event_shape` 构造 `ProjectEvent` 的每个变体，确认它实现 `Event` 和 `Clone`（`TestKernel::emitted` 需要）、`ChangedParts::default()` 全为 false；`project_keys_compare_by_kind_and_path`；`manifest_kinds_by_file_name_and_ecosystem`；以及随 `FileList` 移过来的 `files_range_under_covers_only_the_directory`、`files_builder_sorts_dedups_and_skips_invalid_paths`。
+- `just test -p lectern-services`（10 个测试）：`projects_service_id_and_multiple` 检查 `<dyn Projects as Service>::ID == "projects"`、`MULTIPLE == false`（编译期断言），以及 `service::<dyn Projects>()` 的键；`projects_is_a_shared_trait_object` 用一个空实现确认 `Arc<dyn Projects>` 可用、快照与查找结果是 `Send + Sync`；`project_event_shape` 构造 `ProjectEvent` 的每个变体，确认它实现 `Event` 和 `Clone`（`TestKernel::emitted` 需要）、`ChangedParts::default()` 全为 false；`project_keys_compare_by_kind_and_path`；`manifest_kinds_by_file_name_and_ecosystem`；`project_snapshot_round_trips`（有两个 worktree、文件与子项目都就绪、含清单错误的 git 快照，`Unavailable` / `Pending` 的文件夹快照，以及 `Location`、`Resolved`，经 serde_json 往返后相等）；`project_events_round_trip`（`ProjectEvent` 的每个变体，含成功与失败的 `Opened`）；`file_list_deserializes_through_the_builder`（乱序、重复、不合法的条目反序列化后满足 `FileList` 的不变量）；以及随 `FileList` 移过来的 `files_range_under_covers_only_the_directory`、`files_builder_sorts_dedups_and_skips_invalid_paths`。
 - `just test -p lectern-project`：第 1 步的其余 46 个测试照常通过，insta 快照没有变化（`Debug` 输出不含模块路径）。第 1 步的 48 个测试里有 2 个是 `FileList` 的单元测试，随代码移到 `services`，合计仍是 48 个。
 
 ## 与设计的差异
@@ -651,6 +652,6 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 
 - `ManifestKind::from_file_name` 随 `ManifestKind` 移到 `services`：固有方法只能定义在类型所在的 crate。原来写在「本 crate 的公开项」里，已改到「子项目与清单」；调用路径 `ManifestKind::from_file_name` 不变。
 - `MAX_MANIFEST_BYTES` 定义在 `services`，`project::manifest` 重新导出、路径不变：`ManifestError` 的 `Display` 要用它，常量只保留一份。
-- 不派生 serde（理由见「服务接口」）；派生的标准 trait 已写进「服务接口」。设计没有写 `OpenError`、`ScanError` 等的派生，实现定为 `Clone`、`PartialEq`、`Eq`、`Hash`、`Debug`，测试和视图要比较它们。
+- 设计没有写 `OpenError`、`ScanError` 等的标准派生，实现定为 `Clone`、`PartialEq`、`Eq`、`Hash`、`Debug`，测试和视图要比较它们；已写进「服务接口」。`FileList` 的序列化形式是新定的，写进了「文件列表」。
 - `services` 的 `project` 模块分为 `files`（`FileList` 及其构造器，第 1 步原样移入）、`packages`（`Package`、`Manifest`、`ManifestKind`、`Ecosystem`、`ManifestError`）、`snapshot`（键、快照、`Location`、`Resolved`），全部从 `lectern_services::project` 导出；`Projects`、`OpenRequest`、`OpenError`、`ProjectEvent`、`ChangedParts` 在模块根。只是文件划分，接口不变。
 - 第 2 步没有测试用的假 `Projects`：设计没有要求，消费方需要时（`project_home`、`agents` 的测试）在 `services` 的 `test-support` 里补。

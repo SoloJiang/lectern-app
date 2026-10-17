@@ -69,8 +69,9 @@ intl_pluralrules = "7.0"
 unic-langid = "0.9"
 # Manifest parsing, used only by lectern-project (docs/adr/0023.md). Default
 # features off: toml without `display` (no writer), quick-xml without
-# encoding or serde support.
-serde = { version = "1.0", default-features = false, features = ["std", "derive"] }
+# encoding or serde support. lectern-services also uses serde for its data
+# types (JSON-RPC, ADR 0018); `rc` serializes their `Arc<str>` / `Arc<[T]>`.
+serde = { version = "1.0", default-features = false, features = ["std", "derive", "rc"] }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
 toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"] }
 quick-xml = { version = "0.42", default-features = false }

@@ -172,3 +172,184 @@ fn manifest_kinds_by_file_name_and_ecosystem() {
         format!("manifest is larger than {MAX_MANIFEST_BYTES} bytes")
     );
 }
+
+/// Serializes to JSON (the process plugin protocol is JSON-RPC, ADR 0018)
+/// and back.
+fn round_trip<T>(value: &T) -> T
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let json = serde_json::to_string(value).expect("serializes");
+    serde_json::from_str(&json).expect("deserializes")
+}
+
+fn sample_snapshot() -> ProjectSnapshot {
+    let mut files = FileList::builder();
+    for (p, kind) in [
+        ("Cargo.toml", FileKind::File),
+        ("crates/a/Cargo.toml", FileKind::File),
+        ("crates/a/run.sh", FileKind::Executable),
+        ("link", FileKind::Symlink),
+        ("vendor/sub", FileKind::Submodule),
+    ] {
+        files.push(p, kind);
+    }
+    files.skip();
+    let files = Arc::new(files.build());
+    let manifest = |path: &str, error| Manifest {
+        kind: ManifestKind::CargoToml,
+        path: Arc::from(path),
+        name: None,
+        partial: false,
+        error,
+    };
+    let packages: Arc<[Package]> = Arc::from(vec![
+        Package {
+            dir: Arc::from(""),
+            name: Arc::from("r"),
+            manifests: Arc::from(vec![manifest("Cargo.toml", None)]),
+            declared: false,
+            workspace_root: true,
+            parent: None,
+            files: 5,
+        },
+        Package {
+            dir: Arc::from("crates/a"),
+            name: Arc::from("a"),
+            manifests: Arc::from(vec![manifest(
+                "crates/a/Cargo.toml",
+                Some(ManifestError::Syntax { line: 3 }),
+            )]),
+            declared: true,
+            workspace_root: false,
+            parent: Some(0),
+            files: 2,
+        },
+    ]);
+    let main = WorktreeKey(path("/r/.git"));
+    ProjectSnapshot {
+        key: ProjectKey::Git {
+            common_dir: path("/r/.git"),
+        },
+        generation: 3,
+        name: Arc::from("r"),
+        worktrees: Arc::from(vec![
+            Worktree {
+                key: main.clone(),
+                root: path("/r"),
+                is_main: true,
+                head: Head::Branch(Arc::from("refs/heads/main")),
+                locked: false,
+                prunable: false,
+            },
+            Worktree {
+                key: WorktreeKey(path("/r/.git/worktrees/gone")),
+                root: path("/gone"),
+                is_main: false,
+                head: Head::Detached(Arc::from("0123456789abcdef0123456789abcdef01234567")),
+                locked: true,
+                prunable: true,
+            },
+        ]),
+        active: Some(ActiveTree {
+            root: path("/r"),
+            worktree: Some(main),
+            opened_at: Arc::from("crates/a"),
+            files: Scan::Ready(files),
+            packages: Scan::Ready(packages),
+        }),
+    }
+}
+
+#[test]
+fn project_snapshot_round_trips() {
+    let snapshot = sample_snapshot();
+    let back = round_trip(&snapshot);
+    assert_eq!(back, snapshot);
+    let Some(ActiveTree {
+        files: Scan::Ready(files),
+        ..
+    }) = &back.active
+    else {
+        panic!("active tree with files");
+    };
+    assert_eq!(files.skipped(), 1);
+    assert_eq!(files.find("crates/a/run.sh"), Some(FileKind::Executable));
+
+    let folder = ProjectSnapshot {
+        key: ProjectKey::Folder { root: path("/f") },
+        worktrees: Arc::from(Vec::new()),
+        active: Some(ActiveTree {
+            root: path("/f"),
+            worktree: None,
+            opened_at: Arc::from(""),
+            files: Scan::Unavailable(ScanError::IndexUnreadable(Arc::from("bad index"))),
+            packages: Scan::Pending,
+        }),
+        ..snapshot
+    };
+    assert_eq!(round_trip(&folder), folder);
+
+    let location = Location {
+        project: folder.key.clone(),
+        worktree: None,
+        rel: Arc::from("a/b"),
+        package: PackageMatch::Found(Arc::from("a")),
+    };
+    assert_eq!(round_trip(&location), location);
+    let resolved = Resolved {
+        project: folder.key,
+        worktree: Some(WorktreeKey(path("/r/.git"))),
+        rel: Arc::from(""),
+    };
+    assert_eq!(round_trip(&resolved), resolved);
+}
+
+#[test]
+fn project_events_round_trip() {
+    let key = ProjectKey::Git {
+        common_dir: path("/r/.git"),
+    };
+    let events = [
+        ProjectEvent::Opened {
+            request: OpenRequest(1),
+            result: Ok(key.clone()),
+        },
+        ProjectEvent::Opened {
+            request: OpenRequest(2),
+            result: Err(OpenError::NotFound),
+        },
+        ProjectEvent::Opened {
+            request: OpenRequest(3),
+            result: Err(OpenError::RepoUnreadable(Arc::from("gitdir missing"))),
+        },
+        ProjectEvent::Changed {
+            project: key.clone(),
+            generation: 9,
+            parts: ChangedParts {
+                worktrees: true,
+                active: false,
+                files: true,
+                packages: false,
+            },
+        },
+        ProjectEvent::Closed { project: key },
+    ];
+    for event in events {
+        assert_eq!(round_trip(&event), event);
+    }
+}
+
+#[test]
+fn file_list_deserializes_through_the_builder() {
+    // Unsorted, duplicated and invalid entries from another process.
+    let json = r#"{"entries":[["b","File"],["a","Executable"],["a","File"],["../x","File"],["","File"]],"skipped":1,"truncated":true}"#;
+    let files: FileList = serde_json::from_str(json).expect("deserializes");
+    assert_eq!(
+        files.iter().collect::<Vec<_>>(),
+        [("a", FileKind::Executable), ("b", FileKind::File)]
+    );
+    assert_eq!(files.skipped(), 3);
+    assert!(files.truncated());
+    assert_eq!(files.range_under(""), 0..2);
+}

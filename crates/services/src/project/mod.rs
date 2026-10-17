@@ -9,6 +9,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use lectern_kernel::{Event, Service};
 
 mod files;
@@ -86,10 +88,10 @@ impl Service for dyn Projects {
 }
 
 /// Identifies one `Projects::open` call in its `ProjectEvent::Opened`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct OpenRequest(pub u64);
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum OpenError {
     NotFound,
     NotADirectory,
@@ -108,7 +110,7 @@ pub type ResolveError = OpenError;
 /// A successful `Opened` is followed by at least one `Changed` (the file
 /// list is ready or unavailable). Views call `Projects::snapshot` on
 /// `Changed`; `generation` only serves to drop stale notifications.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum ProjectEvent {
     Opened {
         request: OpenRequest,
@@ -127,7 +129,7 @@ pub enum ProjectEvent {
 impl Event for ProjectEvent {}
 
 /// What a `ProjectEvent::Changed` changed.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct ChangedParts {
     /// Worktrees added or removed, or a HEAD, locked or prunable changed.
     pub worktrees: bool,

@@ -4,7 +4,10 @@
 use std::fmt;
 use std::ops::Range;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum FileKind {
     File,
     Executable,
@@ -15,7 +18,13 @@ pub enum FileKind {
 /// A worktree's tracked files, sorted by bytes (index order), so the files
 /// under a directory are one contiguous range. Paths are relative, `/`
 /// separated, with no empty, `.` or `..` segments.
-#[derive(Clone, PartialEq, Eq, Default)]
+///
+/// Serialized as `{ entries: [[path, kind], ...], skipped, truncated }`.
+/// Deserializing goes through `FileListBuilder`, so input from another
+/// process cannot break the invariants: invalid paths are counted in
+/// `skipped`, unsorted entries are sorted, duplicates kept once.
+#[derive(Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(from = "Wire")]
 pub struct FileList {
     buf: Box<str>,
     ends: Box<[u32]>,
@@ -101,6 +110,42 @@ fn cmp_prefixed(path: &str, dir: &str, sep: u8) -> bool {
         std::cmp::Ordering::Greater => false,
         // Equal so far: compare the next byte of path with the separator.
         std::cmp::Ordering::Equal => p.get(d.len()).is_none_or(|&b| b < sep),
+    }
+}
+
+impl Serialize for FileList {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        struct Entries<'a>(&'a FileList);
+        impl Serialize for Entries<'_> {
+            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.collect_seq(self.0.iter())
+            }
+        }
+        let mut s = serializer.serialize_struct("FileList", 3)?;
+        s.serialize_field("entries", &Entries(self))?;
+        s.serialize_field("skipped", &self.skipped)?;
+        s.serialize_field("truncated", &self.truncated)?;
+        s.end()
+    }
+}
+
+/// The serialized form of a `FileList`.
+#[derive(Deserialize)]
+struct Wire {
+    entries: Vec<(Box<str>, FileKind)>,
+    skipped: u32,
+    truncated: bool,
+}
+
+impl From<Wire> for FileList {
+    fn from(wire: Wire) -> Self {
+        let mut b = FileList::builder();
+        for (path, kind) in &wire.entries {
+            b.push(path, *kind);
+        }
+        b.skipped = b.skipped.saturating_add(wire.skipped);
+        b.truncated = wire.truncated;
+        b.build()
     }
 }
 
