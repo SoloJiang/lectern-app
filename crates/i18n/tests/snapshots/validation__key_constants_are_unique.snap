@@ -1,0 +1,6 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"key-constant-collision\")"
+---
+en/app.ftl:3: app-looks-good-tooltip: key constant LOOKS_GOOD_TOOLTIP is already used by app-looks-good.tooltip
+en/app.ftl:5: app-a_b: key constant A_B is already used by app-a-b

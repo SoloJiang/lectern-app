@@ -1,0 +1,5 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"syntax-error\")"
+---
+en/app.ftl:3: syntax error: Expected a token starting with "}"

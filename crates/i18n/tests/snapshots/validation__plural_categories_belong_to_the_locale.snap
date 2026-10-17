@@ -1,0 +1,6 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"plural-category-not-in-locale\")"
+---
+en/app.ftl:2: app-files: plural category [few] does not exist in en (its categories: one, other)
+zh-CN/app.ftl:2: app-files: plural category [one] does not exist in zh-CN (its categories: other)

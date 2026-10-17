@@ -1,0 +1,5 @@
+error[E0425]: cannot find value `NO_SUCH_KEY` in module `keys::review`
+ --> tests/ui/mistyped_key.rs:4:55
+  |
+4 |     let _ = Strings::of(Locale::En).get(keys::review::NO_SUCH_KEY);
+  |                                                       ^^^^^^^^^^^ not found in `keys::review`
