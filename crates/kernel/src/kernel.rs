@@ -60,8 +60,13 @@ pub(crate) enum Request {
         seq: u64,
     },
     Transition(Transition),
-    /// Only `Kernel::barrier` (tests and `test-support`) sends this.
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "only `Kernel::barrier` (tests and `test-support`) sends this"
+        )
+    )]
     Barrier(Sender<()>),
     Shutdown(Box<dyn FnOnce() + Send>),
 }
