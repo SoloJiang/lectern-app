@@ -4351,6 +4351,9 @@ dependencies = [
 name = "lectern-platform"
 version = "0.0.0"
 dependencies = [
+ "lectern-executor",
+ "lectern-fs-watch",
+ "lectern-kernel",
  "libc",
  "rustix",
  "tempfile",
