@@ -176,29 +176,50 @@ pub(crate) fn analyze(entries: &[(Name, Option<&Manifest>)]) -> GraphReport {
         }
     }
 
-    // Kahn's algorithm over edges provider -> dependent.
+    // Topological order. Each requirement lists its providers; providers of
+    // one service are alternatives, so a requirement is met once any of them
+    // is placed. Nodes whose every provider is placed go first, which keeps
+    // providers ahead of their dependents whenever the graph allows it; the
+    // weaker rule only breaks ties that would otherwise look like a cycle
+    // (a `MULTIPLE` provider that itself depends on the consumer).
     let n = entries.len();
-    let mut dependencies: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (index, (_, manifest)) in entries.iter().enumerate() {
-        let Some(manifest) = manifest else { continue };
-        for key in &manifest.requires {
-            for p in providers(key) {
-                if p != index && !dependencies[index].contains(&p) {
-                    dependencies[index].push(p);
-                }
-            }
-        }
-    }
+    let requirements: Vec<Vec<Vec<usize>>> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, (_, manifest))| {
+            manifest
+                .map(|m| {
+                    m.requires
+                        .iter()
+                        .map(|key| providers(key).into_iter().filter(|&p| p != index).collect())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
     let mut placed = vec![false; n];
     let mut order = Vec::new();
     loop {
-        let next = (0..n).find(|&i| {
+        let candidate = |i: usize, strict: bool| {
             !placed[i]
                 && entries[i].1.is_some()
-                && dependencies[i]
-                    .iter()
-                    .all(|&p| placed[p] || entries[p].1.is_none())
-        });
+                && requirements[i].iter().all(|alternatives| {
+                    let usable: Vec<usize> = alternatives
+                        .iter()
+                        .copied()
+                        .filter(|&p| entries[p].1.is_some())
+                        .collect();
+                    usable.is_empty()
+                        || if strict {
+                            usable.iter().all(|&p| placed[p])
+                        } else {
+                            usable.iter().any(|&p| placed[p])
+                        }
+                })
+        };
+        let next = (0..n)
+            .find(|&i| candidate(i, true))
+            .or_else(|| (0..n).find(|&i| candidate(i, false)));
         match next {
             Some(i) => {
                 placed[i] = true;

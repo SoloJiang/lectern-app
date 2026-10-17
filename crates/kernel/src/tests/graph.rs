@@ -159,3 +159,46 @@ fn startup_fails_plugins_in_a_cycle_and_keeps_the_rest() {
     assert_eq!(state(&kernel, "a"), PluginState::Active);
     shutdown(&kernel);
 }
+
+#[test]
+fn providers_of_a_multi_provider_service_are_alternatives() {
+    // b provides Source on its own; a provides Source but needs SvcC, which c
+    // provides; c consumes Source. b -> c -> a is a valid order, not a cycle.
+    let log = Log::default();
+    let source = |name: &'static str, requires: Vec<crate::ServiceKey>, log: &Log| {
+        let log = log.clone();
+        TestPlugin::new(manifest(
+            vec![service::<dyn Source>()],
+            requires,
+            after_first_frame(),
+        ))
+        .activate(move |ctx| {
+            log.push(format!("activate {name}"));
+            ctx.provide::<dyn Source>(std::sync::Arc::new(Named(name.to_owned())))?;
+            Ok(Box::new(()))
+        })
+    };
+    let set = PluginSet::new()
+        .with("a", source("a", vec![service::<dyn SvcC>()], &log))
+        .with("b", source("b", vec![], &log))
+        .with(
+            "c",
+            chain_plugin(
+                "c",
+                &log,
+                vec![service::<dyn SvcC>()],
+                vec![service::<dyn Source>()],
+                after_first_frame(),
+            ),
+        );
+    assert_eq!(set.validate(), Ok(()));
+    let kernel = start(set);
+    assert_eq!(
+        log.snapshot(),
+        vec!["activate b", "activate c", "started c", "activate a"]
+    );
+    for id in ["a", "b", "c"] {
+        assert_eq!(state(&kernel, id), PluginState::Active, "{id}");
+    }
+    shutdown(&kernel);
+}

@@ -760,7 +760,7 @@ impl Kernel {
 
 在 Linux 上运行（kernel 不依赖 GPUI，macOS 上行为相同）：
 
-- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-kernel`（75 个测试）、`just doctest`、`just deny` 全部通过；`cargo nextest run -p lectern-kernel --all-features` 连续运行 15 次全部通过。
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-kernel`（76 个测试）、`just doctest`、`just deny` 全部通过；`cargo nextest run -p lectern-kernel --all-features` 连续运行 15 次全部通过。
 - 依赖图、自动启停、撤销顺序、失败隔离、事件分发的结果用 insta 快照记录（`crates/kernel/src/tests/snapshots/`）。
 - 「测试」一节中属于 kernel 自身的条目都有对应测试，分在 `crates/kernel/src/tests/` 的 `graph`、`lifecycle`、`events`、`services`、`handles`、`failure`、`quiescence`、`commands`、`workspace`、`gates`、`shutdown`、`testing` 里。`gates` 用测试里的最小执行器（`tests/executor.rs`）验证 `SubmitGate` / `GateSlot` 与执行器约定的配合：闸门打开前任务不运行、`start` panic 时任务一次也没运行、任务 panic 时插件进入 `Failed` 且工作线程继续运行、激活失效时挂起的任务被唤醒并丢弃、一次性任务的登记被回收。
 - 并发：一个 `MULTIPLE` 服务的最后两个提供者在两个线程上同时 `fail`，依赖者一定变为 `Dead`，重复 300 次（设计写「上万次」，单次测试要启动一个 kernel，300 次已覆盖交错，测试时间控制在 1 秒内）；多线程同时 `emit` 和反复停用、启用不死锁。
@@ -776,7 +776,7 @@ impl Kernel {
 - 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。
 - `PluginError` 的变体按实现需要列全：`Failed`（插件报告）、`Panicked`、`MissingService`、`UndeclaredService`、`DuplicateService`、`InvalidGraph`、`DependencyUnavailable`、`Disabled`、`ShuttingDown`、`UnknownCommand`。设计里提到的 `Stale` 没有用到（请求方失效时 `done` 不被调用），不提供。
 - `Context::service` / `service_set` 收到不在 `requires` 里的服务时 panic，由 `activate` 的边界捕获、插件进入 `Failed`，错误信息写明原因；设计只写了「必须在 requires 里」。
-- 启动时的依赖图检查只让出错的插件进入 `Failed`；`MissingProvider` 不让依赖者失败（提供者可能只是清单 panic），依赖者停在 `Waiting`。`validate` 仍报告全部错误。依赖环之外、依赖环里插件的依赖者也按环处理（进入 `Failed`），实现更简单，`validate` 的单元测试会先在 CI 里拦下环。
+- 启动时的依赖图检查只让出错的插件进入 `Failed`；`MissingProvider` 不让依赖者失败（提供者可能只是清单 panic），依赖者停在 `Waiting`。`validate` 仍报告全部错误。依赖环之外、依赖环里插件的依赖者也按环处理（进入 `Failed`），实现更简单，`validate` 的单元测试会先在 CI 里拦下环。判断环时，一个多实现服务的多个提供者互为替代：只要有一个提供者能排在前面就不算环（例如提供者 A 依赖消费者 C、另一个提供者 B 独立时，顺序是 B、C、A）。
 - 日志写到 stderr（kernel 只用标准库，没有日志依赖），由 `app` 重定向到日志文件。
 - `ServiceRemoved` 只为发出过 `ServiceAdded` 的激活发出：`started` 失败的提供者从头到尾不被依赖者看到，与「新提供者」一条一致。
 
