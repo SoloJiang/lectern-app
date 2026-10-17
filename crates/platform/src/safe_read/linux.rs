@@ -8,7 +8,16 @@ use std::os::fd::{BorrowedFd, OwnedFd};
 use rustix::fs::{Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 
-use super::{Backend, Target};
+use super::Backend;
+
+/// What a one-step open opens.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Target {
+    /// The parent directory of an entry, for `fstatat`.
+    Dir,
+    /// The entry itself, to `fstat` and read it through the same descriptor.
+    Entry,
+}
 
 const RESOLVE: ResolveFlags = ResolveFlags::BENEATH.union(ResolveFlags::NO_SYMLINKS);
 

@@ -1,0 +1,466 @@
+use std::hint::black_box;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+use super::*;
+use crate::report::Status;
+use crate::runner::{Run, run};
+use crate::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
+
+fn time(ms: u64) -> Value {
+    Value::Time(Samples(vec![Duration::from_millis(ms); 5]))
+}
+
+fn status<'a>(run: &'a Run<'_>, id: &str) -> &'a crate::report::Entry<'a> {
+    run.report
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .find(|e| e.id == id)
+        .unwrap_or_else(|| panic!("no entry for {id}"))
+}
+
+static ONE: &[Budget] = &[budget("fake/a", UNDER_1_MS, State::Active, Target::Time)];
+
+#[test]
+fn runner_retries_once_and_a_passing_retry_is_ok() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn flaky(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        // Over budget the first time, within it the second.
+        let ms = if CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            2
+        } else {
+            0
+        };
+        Ok(vec![Measured::new("fake/a", time(ms))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: flaky,
+    }];
+    let run = run(
+        &options(ONE, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    assert_eq!(run.exit, 0, "{}", run.text);
+    let entry = status(&run, "fake/a");
+    assert_eq!(entry.status, Status::Ok);
+    assert_eq!(entry.attempts.len(), 2, "both attempts are in the report");
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+    let json = run.report.as_ref().unwrap().to_json();
+    assert_eq!(json["results"][0]["attempts"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn runner_over_budget_twice_exits_1() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn slow(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("fake/a", time(2))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: slow,
+    }];
+    let run = run(
+        &options(ONE, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    assert_eq!(run.exit, 1, "{}", run.text);
+    let entry = status(&run, "fake/a");
+    assert_eq!(entry.status, Status::Over);
+    assert_eq!(entry.attempts.len(), 2);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn runner_smoke_mode_and_other_platforms_never_fail_on_budgets() {
+    fn slow(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        Ok(vec![Measured::new("fake/a", time(2))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: slow,
+    }];
+    // Smoke mode on the gating platform.
+    let smoke = run(&options(ONE, Target::Time, &[], dir.path()), &benches);
+    assert_eq!(smoke.exit, 0);
+    assert_eq!(status(&smoke, "fake/a").status, Status::Smoke);
+    // Measure mode elsewhere: reported over budget, not judged, no retry.
+    let mut elsewhere = options(ONE, Target::Time, &["--bench"], dir.path());
+    elsewhere.apple_silicon = false;
+    let measured = run(&elsewhere, &benches);
+    assert_eq!(measured.exit, 0);
+    let entry = status(&measured, "fake/a");
+    assert_eq!(entry.status, Status::Over);
+    assert_eq!(entry.attempts.len(), 1);
+    assert!(!measured.report.as_ref().unwrap().gated);
+}
+
+#[test]
+fn runner_errors_and_panics_exit_2_in_every_mode() {
+    fn fails(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        Err(BenchError::new("the fixture could not be built"))
+    }
+    fn panics(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        panic!("boom")
+    }
+    static TWO: &[Budget] = &[
+        budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
+        budget("fake/b", UNDER_1_MS, State::Active, Target::Time),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [
+        Bench {
+            id: "fake/a",
+            run: fails,
+        },
+        Bench {
+            id: "fake/b",
+            run: panics,
+        },
+    ];
+    for args in [&[][..], &["--bench"][..]] {
+        let run = run(&options(TWO, Target::Time, args, dir.path()), &benches);
+        assert_eq!(run.exit, 2, "{args:?}");
+        let a = status(&run, "fake/a");
+        assert_eq!(a.status, Status::Error);
+        assert_eq!(a.reason.as_deref(), Some("the fixture could not be built"));
+        let b = status(&run, "fake/b");
+        assert_eq!(b.status, Status::Error);
+        assert!(b.reason.as_deref().unwrap().contains("boom"));
+    }
+}
+
+#[test]
+fn runner_missing_budget_benchmark_stops_before_running() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn counted(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("fake/a", time(0))])
+    }
+    static TABLE: &[Budget] = &[
+        budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
+        budget("fake/b", UNDER_1_MS, State::Active, Target::Time),
+        // Another target's budget is not this target's concern.
+        budget("other/m", UNDER_1_MS, State::Active, Target::Memory),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: counted,
+    }];
+    // Smoke mode checks the correspondence too.
+    let run = run(&options(TABLE, Target::Time, &[], dir.path()), &benches);
+    assert_eq!(run.exit, 2);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 0, "nothing ran");
+    assert_eq!(status(&run, "fake/b").status, Status::Error);
+    assert_eq!(status(&run, "fake/a").status, Status::Skipped);
+    let report = run.report.as_ref().unwrap();
+    assert!(report.entries.iter().all(|e| e.id != "other/m"));
+    assert!(
+        report.errors.iter().any(|e| e.contains("fake/b")),
+        "{:?}",
+        report.errors
+    );
+    assert!(run.text.contains("fake/b"));
+}
+
+#[test]
+fn runner_extra_benchmark_stops_before_running() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn counted(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("fake/a", time(0))])
+    }
+    static TABLE: &[Budget] = &[
+        budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
+        budget(
+            "fake/planned",
+            UNDER_1_MS,
+            State::Planned("test"),
+            Target::Time,
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    for extra in ["fake/unknown", "fake/planned"] {
+        let benches = [
+            Bench {
+                id: "fake/a",
+                run: counted,
+            },
+            Bench {
+                id: extra,
+                run: counted,
+            },
+        ];
+        let run = run(
+            &options(TABLE, Target::Time, &["--bench"], dir.path()),
+            &benches,
+        );
+        assert_eq!(run.exit, 2, "{extra}");
+        let errors = &run.report.as_ref().unwrap().errors;
+        assert!(errors.iter().any(|e| e.contains(extra)), "{errors:?}");
+    }
+    assert_eq!(CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn runner_results_outside_the_table_are_errors() {
+    fn strays(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        Ok(vec![
+            Measured::new("fake/a", time(0)),
+            Measured::new("fake/a/unknown", time(0)),
+            Measured::new("other/m", time(0)),
+        ])
+    }
+    static TABLE: &[Budget] = &[
+        budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
+        budget("other/m", UNDER_1_MS, State::Active, Target::Memory),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: strays,
+    }];
+    let run = run(
+        &options(TABLE, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    assert_eq!(run.exit, 2);
+    assert_eq!(status(&run, "fake/a").status, Status::Ok);
+    let errors = &run.report.as_ref().unwrap().errors;
+    assert!(
+        errors.iter().any(|e| e.contains("fake/a/unknown")),
+        "{errors:?}"
+    );
+    assert!(errors.iter().any(|e| e.contains("other/m")), "{errors:?}");
+}
+
+#[test]
+fn runner_bench_flag_selects_the_mode() {
+    static MODES: Mutex<Vec<Mode>> = Mutex::new(Vec::new());
+    fn record(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        MODES.lock().unwrap().push(ctx.mode());
+        Ok(vec![Measured::new("fake/a", time(0))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: record,
+    }];
+    let smoke = run(&options(ONE, Target::Time, &[], dir.path()), &benches);
+    let measure = run(
+        &options(ONE, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    assert_eq!(*MODES.lock().unwrap(), [Mode::Smoke, Mode::Measure]);
+    assert_eq!(smoke.report.unwrap().mode, Mode::Smoke);
+    assert_eq!(measure.report.unwrap().mode, Mode::Measure);
+}
+
+#[test]
+fn runner_filters_by_id_substring() {
+    static A: AtomicUsize = AtomicUsize::new(0);
+    static B: AtomicUsize = AtomicUsize::new(0);
+    fn a(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        A.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("fake/a", time(0))])
+    }
+    fn b(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        B.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("other/b", time(0))])
+    }
+    static TABLE: &[Budget] = &[
+        budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
+        budget("other/b", UNDER_1_MS, State::Active, Target::Time),
+        budget(
+            "other/planned",
+            UNDER_1_MS,
+            State::Planned("test"),
+            Target::Time,
+        ),
+        budget(
+            "fake/planned",
+            UNDER_1_MS,
+            State::Planned("test"),
+            Target::Time,
+        ),
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [
+        Bench {
+            id: "fake/a",
+            run: a,
+        },
+        Bench {
+            id: "other/b",
+            run: b,
+        },
+    ];
+    let run = run(
+        &options(TABLE, Target::Time, &["fake/"], dir.path()),
+        &benches,
+    );
+    assert_eq!(run.exit, 0, "{}", run.text);
+    assert_eq!((A.load(Ordering::SeqCst), B.load(Ordering::SeqCst)), (1, 0));
+    assert_eq!(status(&run, "fake/a").status, Status::Smoke);
+    assert_eq!(status(&run, "other/b").status, Status::Filtered);
+    assert_eq!(status(&run, "other/planned").status, Status::Filtered);
+    assert_eq!(status(&run, "fake/planned").status, Status::Planned);
+}
+
+#[test]
+fn runner_list_prints_the_budgets_without_running() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn counted(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("fake/a", time(0))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: counted,
+    }];
+    let run = run(
+        &options(ONE, Target::Time, &["--list"], dir.path()),
+        &benches,
+    );
+    assert_eq!(run.exit, 0);
+    assert!(run.report.is_none());
+    assert_eq!(
+        run.text,
+        "fake/a  median < 1 ms  active  docs/design/bench.md#测试\n"
+    );
+    assert_eq!(CALLS.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn runner_time_of_constant_work_is_not_zero() {
+    static MEDIAN: Mutex<Option<Duration>> = Mutex::new(None);
+    fn work(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        // A computation on a constant input that returns its result: the
+        // runner's black_box keeps it from being optimised away.
+        let samples = ctx.time(|| {
+            (0..black_box(64u64)).fold(0u64, |acc, x| acc.wrapping_mul(31).wrapping_add(x))
+        });
+        let mut sorted = samples.0.clone();
+        sorted.sort();
+        *MEDIAN.lock().unwrap() = Some(sorted[sorted.len() / 2]);
+        Ok(vec![Measured::new("fake/a", Value::Time(samples))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: work,
+    }];
+    let mut options = options(ONE, Target::Time, &["--bench"], dir.path());
+    options.apple_silicon = false;
+    run(&options, &benches);
+    assert!(MEDIAN.lock().unwrap().unwrap() > Duration::ZERO);
+}
+
+#[test]
+fn runner_time_with_setup_calls_setup_once_per_sample() {
+    static COUNTS: Mutex<(usize, usize, usize)> = Mutex::new((0, 0, 0));
+    fn stateful(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        let mut prepared = 0;
+        let mut runs = 0;
+        let mut fresh = true;
+        let samples = ctx.time_with_setup(
+            || {
+                prepared += 1;
+                prepared
+            },
+            |input| {
+                runs += 1;
+                // Each call meets the input prepared right before it.
+                fresh &= input == runs;
+                input
+            },
+        );
+        assert!(fresh);
+        *COUNTS.lock().unwrap() = (prepared, runs, samples.0.len());
+        Ok(vec![Measured::new("fake/a", Value::Time(samples))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: stateful,
+    }];
+    let mut options = options(ONE, Target::Time, &["--bench"], dir.path());
+    options.apple_silicon = false;
+    run(&options, &benches);
+    let (prepared, runs, samples) = *COUNTS.lock().unwrap();
+    assert_eq!(prepared, runs);
+    // Warm-up calls plus one call per sample.
+    assert!(
+        samples >= 5 && runs >= samples + 3,
+        "{prepared} {runs} {samples}"
+    );
+}
+
+#[test]
+fn runner_scratch_is_fresh_and_removed() {
+    static SEEN: Mutex<Vec<(std::path::PathBuf, bool)>> = Mutex::new(Vec::new());
+    fn scratch(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        let dir = ctx.scratch().to_owned();
+        let empty = std::fs::read_dir(&dir)?.next().is_none();
+        std::fs::write(dir.join("fixture"), b"x")?;
+        SEEN.lock().unwrap().push((dir, empty));
+        Ok(vec![Measured::new("fake/a", time(2))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: scratch,
+    }];
+    run(
+        &options(ONE, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    let seen = SEEN.lock().unwrap();
+    assert_eq!(seen.len(), 2, "over budget, so retried");
+    for (path, empty) in seen.iter() {
+        assert!(*empty, "a retry gets a new fixture directory");
+        assert!(path.ends_with("scratch/fake/a"), "{}", path.display());
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn runner_process_target_is_skipped_off_macos() {
+    static TABLE: &[Budget] = &[
+        budget("app/x", UNDER_1_MS, State::Active, Target::Process),
+        budget(
+            "app/later",
+            UNDER_1_MS,
+            State::Planned("test"),
+            Target::Process,
+        ),
+    ];
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn counted(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("app/x", time(0))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "app",
+        run: counted,
+    }];
+    let mut options = options(TABLE, Target::Process, &[], dir.path());
+    options.macos = false;
+    let run = run(&options, &benches);
+    assert_eq!(run.exit, 0);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 0);
+    let x = status(&run, "app/x");
+    assert_eq!(x.status, Status::Skipped);
+    assert_eq!(x.reason.as_deref(), Some("只在 macOS 运行"));
+    assert_eq!(status(&run, "app/later").status, Status::Planned);
+}

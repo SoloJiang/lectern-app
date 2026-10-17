@@ -110,18 +110,7 @@ pub(super) fn key(i: u64) -> Key {
     Key::new().str("k").u64(i)
 }
 
-/// `len` bytes from a xorshift generator: incompressible.
-pub(super) fn noise(seed: u64, len: usize) -> Vec<u8> {
-    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x as u8
-        })
-        .collect()
-}
+pub(super) use crate::testing::noise;
 
 /// A connection of the test's own to a partition file, as another process
 /// would open it.

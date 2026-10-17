@@ -2,7 +2,6 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 
 use crate::attrs::Attrs;
 use crate::changes::{Assembler, Pending, PendingSide};
@@ -947,108 +946,4 @@ fn hunk_cache_skips_additions_and_type_changes() {
     // A type change counts like git: every old line out, every new line in.
     assert_eq!(detail_str(&set.files()[0].detail), "text +1 -1 [0..1>0..1]");
     assert_eq!(set.files()[0].status, Status::TypeChanged);
-}
-
-// ---- timing -------------------------------------------------------------------
-
-/// 50 changed files of about 300 lines (docs/design/git.md「性能」: hunks
-/// computed < 20 ms, from the cache < 2 ms). Each cold run uses contents no
-/// earlier run produced, so every hunk misses the cache; the warm run
-/// repeats the last pair of trees. Prints median and slowest.
-/// Run with `cargo test --release -p lectern-git -- --ignored perf_smoke`.
-#[test]
-#[ignore = "timing; run in release"]
-fn perf_smoke_git_diff_50() {
-    let t = TestRepo::new();
-    let file = |n: usize, round: usize, edited: bool| -> Vec<u8> {
-        let mut out = Vec::new();
-        for line in 0..300 {
-            let text = if edited && line % 30 == 7 {
-                format!("    let changed_{n}_{line} = compute({round}, {line});\n")
-            } else {
-                format!("    let value_{n}_{line} = compute({round}, {line});\n")
-            };
-            out.extend_from_slice(text.as_bytes());
-        }
-        out
-    };
-    // 728 tracked files, as in the git_open measurement; 50 of them change.
-    let unchanged: Vec<(String, Vec<u8>)> = (0..678)
-        .map(|i| {
-            (
-                format!("packages/p{:02}/src/file{i:03}.ts", i % 25),
-                file(1000 + i, 0, false),
-            )
-        })
-        .collect();
-    let trees = |round: usize| {
-        let mut files: Vec<(String, Vec<u8>)> = unchanged.clone();
-        let mut olds = files.clone();
-        for n in 0..50 {
-            let path = format!("src/module{n:02}.rs");
-            olds.push((path.clone(), file(n, round, false)));
-            files.push((path, file(n, round, true)));
-        }
-        let old: Vec<(&str, &[u8])> = olds
-            .iter()
-            .map(|(p, c)| (p.as_str(), c.as_slice()))
-            .collect();
-        let new: Vec<(&str, &[u8])> = files
-            .iter()
-            .map(|(p, c)| (p.as_str(), c.as_slice()))
-            .collect();
-        (t.tree(&old), t.tree(&new))
-    };
-    let repo = t.repo();
-    let cancel = no_cancel();
-    let rounds = 30;
-    let pairs: Vec<(Oid, Oid)> = (0..rounds).map(trees).collect();
-    let mut cold = Vec::new();
-    for (old, new) in &pairs {
-        let start = Instant::now();
-        let set = repo
-            .diff_trees(*old, *new, &Limits::default(), &cancel)
-            .unwrap();
-        cold.push(start.elapsed());
-        assert_eq!(set.files().len(), 50);
-        assert_eq!(set.totals().added, 500);
-    }
-    let (old, new) = pairs[rounds - 1];
-    let mut warm = Vec::new();
-    for _ in 0..200 {
-        let start = Instant::now();
-        let set = repo
-            .diff_trees(old, new, &Limits::default(), &cancel)
-            .unwrap();
-        warm.push(start.elapsed());
-        assert_eq!(set.files().len(), 50);
-    }
-    cold.sort();
-    warm.sort();
-    println!(
-        "git_diff_50_cold (diff_trees, 50 x 300 lines, cache misses): median {:?}, max {:?}",
-        cold[cold.len() / 2],
-        cold[cold.len() - 1]
-    );
-    println!(
-        "git_diff_50_warm (diff_trees, cache hits): median {:?}, p95 {:?}, max {:?}",
-        warm[warm.len() / 2],
-        warm[warm.len() * 95 / 100],
-        warm[warm.len() - 1]
-    );
-    // Rows for one visible file, from its texts.
-    let set = repo
-        .diff_trees(old, new, &Limits::default(), &cancel)
-        .unwrap();
-    let start = Instant::now();
-    let texts = set.texts(&repo, 0).unwrap();
-    let Detail::Text(d) = &set.files()[0].detail else {
-        panic!()
-    };
-    let rows = crate::rows(d, &texts, 3);
-    println!(
-        "texts + rows for one file: {:?} ({} rows)",
-        start.elapsed(),
-        rows.len()
-    );
 }

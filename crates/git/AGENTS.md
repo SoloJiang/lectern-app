@@ -35,4 +35,4 @@ just test -p lectern-git
 - 测试仓库用 `testing::TestRepo`（`test-support` feature）构造，不调用 git 命令行；发现仓库用 `testing::discover`，只读仓库自己的配置，不受机器上的 git 配置影响。
 - git 目录里的管理文件只在 `src/gitdir.rs` 里按路径读；工作区文件只经 `SafeRoot`。
 - 工作区比较的测试（`compare/tests.rs`）每次比较前后对 git 目录做快照，必须相同（只读）；用 `hook::reads` 检查哪些文件被读了。和 git 的转换结果对照的工作区夹具见[夹具说明](tests/fixtures/README.md)「工作区夹具」。
-- 计时：`cargo test --release -p lectern-git --all-features -- --ignored perf_smoke --test-threads=1`（`git_open`、`git_diff_50_cold` / `warm`、`git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/changes_capped` 和内存；内存用计数分配器量，要单线程）。bench 的 runner 合并后移进 `crates/bench`。
+- 计时：`lectern-bench` 的 `git/open`、`git/open_handle`、`git/diff_50_cold`、`git/diff_50_warm`、`git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/refresh_full`、`git/changes_capped`（`time` 目标）和 `git/changes_capped_bytes`、`git/resident`（`memory` 目标），夹具由 `TestRepo` 生成：`just bench git/`（Linux 上是冒烟运行，`just bench --measure git/` 采样并打印实测值）。`bench` 只经公开接口和 `testing`（如 `testing::open_handle`）调用本 crate。

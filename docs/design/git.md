@@ -442,6 +442,9 @@ pub enum ReflogParseError { Oid, Identity, Time }
 
 /// `test-support`：只读仓库自己的配置（不读系统、XDG、`~/.gitconfig`）的 `Repo::discover`，测试结果不受机器配置影响。
 pub mod testing { pub fn discover(path: &Path, ceilings: &[PathBuf]) -> Result<Option<Discovered>, GitError>; pub struct TestRepo; /* … */ }
+
+/// `test-support`：bench 的 `git/open_handle`（[bench 设计「迁移」](bench.md#迁移)）。在公共目录上按只读仓库自身配置打开一个 gix 句柄，随即 drop。
+pub mod testing { pub fn open_handle(common_dir: &Path) -> Result<(), GitError>; }
 ```
 
 `Unavailable` 与 `RawIdentity` 按「数据结构」一节的定义在第 1 步加入（`WorktreeFile` 用到前者）。
@@ -725,7 +728,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - `git/open_handle`：打开一次 gix 句柄的耗时（每次顶层调用都要付出）。
 - `git/changes_clean` / `git/changes_50`：没有改动、50 个文件改动时的 `changes`。
 - `git/refresh_one`：改动一个文件后的 `refresh(Paths)`。
-- `git/diff_50_cold` / `git/diff_50_warm`：50 个文件、平均 300 行的 hunk 计算，缓存未命中与命中。
+- `git/diff_50_cold` / `git/diff_50_warm`：728 个文件的两棵树，其中 50 个约 300 行的文件各改 10 行，整个 `diff_trees`（读树、属性、重命名检测、读 blob、hunk），hunk 缓存未命中与命中。比只算 hunk 多出读树、属性和对象头的时间，结果偏保守。
 - `git/changes_capped`：10 000 个改动文件时整体截断生效，耗时 < 1 s，`ChangeSet` 的内存不超过上限之和。
 - 内存：打开 11 个 worktree 的仓库并对当前 worktree 做一次 `changes` 后，本 crate 的常驻增量。
 
@@ -804,7 +807,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
    - 前置：`platform` 的安全读取（Linux 与 macOS 实现）已合并。
    - `just test -p lectern-git` 里 `repo_*`、`worktrees_*`、`refs_*`、`reflog_*`、`tracked_*`、`read_file_*` 测试通过，其中有 SHA-256 夹具和 reftable 夹具；`TestRepo` 在 `test-support` feature 下可用，`rg 'Command::new' crates/git/src` 没有结果。
    - `cargo tree -i gix -e normal --depth 1` 只列出 `lectern-git`。
-   - `bench` 的 `git/open` 在预算内。bench 的设计文档（#7）合并之前不写基准代码，先由 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量（见「与设计的差异」）。
+   - `bench` 的 `git/open` 在预算内。bench 的设计文档（#7）合并之前不写基准代码，先由 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量（见「与设计的差异」）。bench 第 1 步之后由 `just bench git/` 测量，macOS CI 判定。
 2. **树之间的改动集、hunk 与展示行**：
    - `diff_trees_*`、`rename_*`、`binary_*`、`truncate_*`、`rows_*`、`inline_*`、`hunk_cache_*` 测试通过，结构化输出有 insta 快照；`numstat_matches_git` 对全部归档夹具通过。
    - `git/diff_50_cold` / `git/diff_50_warm` 在预算内。
@@ -868,7 +871,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 
 第 1 步：
 
-- `bench` 的 `git/open` 没有加入：`crates/bench/AGENTS.md` 要求 bench 的设计文档（#7）合并之后才写基准代码。在那之前用 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量，结果见「实际验证」；bench 设计合并后再把 `git/open` 加进 `crates/bench`。
+- `bench` 的 `git/open` 没有加入：`crates/bench/AGENTS.md` 要求 bench 的设计文档（#7）合并之后才写基准代码。在那之前用 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量，结果见「实际验证」。bench 第 1 步（[bench 设计「迁移」](bench.md#迁移)）已把它测的两项移进 `crates/bench` 的 `git/open` 和 `git/open_handle`，后者用新增的 `testing::open_handle`，`perf_smoke_git_open` 随之删除。
 - 夹具在测试里用 `TestRepo` 构造，没有用归档。容器里的 git 是 2.43，还不支持 reftable（2.45 起），工作区也没有解包 tar 的依赖。reftable 夹具按 `git init --ref-format=reftable` 留下的布局逐项写出：版本 1 加 `extensions.refStorage = reftable`、HEAD 指向 `refs/heads/.invalid`、`refs/heads` 是普通文件、`reftable/tables.list` 列出一张表（表里只有 reftable 文件头，本 crate 不读它）。sparse index 由 gix 写出：先写含目录条目的 index，再读回、重写一次，gix 就加上 `sdir` 扩展，与 `index.sparse = true` 时 git 写出的结构相同。需要和 git 输出对照的归档夹具（`numstat_matches_git` 等）随第 2 步加入。
 - 依赖表里的「`gix`（dev，额外开写入用的 feature）」不需要：gix 0.88 在 ADR 0024 的 feature 下已能写对象、引用文件和 index。`TestRepo` 只多用一个可选的 `tempfile`（`test-support` 打开），已改依赖表。
 - `discover` 的 ceiling：gix 0.88 会检查 ceiling 目录本身，git 不会进入 ceiling（只检查起点本身就是 ceiling 的情况）。gix 找到的仓库所在目录恰好是起点之上的某个 ceiling 时，本 crate 返回 `Ok(None)`，与 git 一致。
@@ -904,7 +907,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - `ChangeSet::texts` 的 `file` 越界时返回 `GitError::Io(InvalidInput)`，不 panic。基准一侧和对象库里的新一侧都按 `Limits::diff_bytes` 读，超过时是 `SideText::TooLarge`。
 - 「第 2 步补全的类型」一节列出的类型设计没有写定义：`Limits`、`Target`、`Totals`、`FileTexts`、`SideText`、`Text`、`InlineChanges`；另外新增 `Oid::empty_tree`（根提交的基准，gix 不需要这个对象）、`Content::oid` 和 `testing::TestRepo::import_fixture`。
 - 归档夹具是目录格式，不是 tar：工作区没有解包 tar 的依赖，只为测试引入一个不值得；目录里的文件也能在 PR 里直接审阅。格式和生成方法见 [夹具说明](../../crates/git/tests/fixtures/README.md)，「测试」一节已改。git 的输出用 `-z` 保存（重命名的路径不经 `{a => b}` 压缩），并另存 `--raw --no-abbrev`，把模式、OID、状态和相似度也拿来对照。`numstat_matches_git` 把子模块按 git 的方式计数（每一侧一行「Subproject commit」）。生成脚本不改 git 的配置环境变量，而是用 `-c` 显式给出影响输出的设置。
-- `bench` 的 `git_diff_50_cold` / `git_diff_50_warm` 没有加入，理由与第 1 步的 `git_open` 相同；由 `#[ignore]` 的 `perf_smoke_git_diff_50` 在 release 下测量，结果见「实际验证」。它测的是整个 `diff_trees`，比只算 hunk 的基准多出读树、属性和对象头的时间。
+- `bench` 的 `git_diff_50_cold` / `git_diff_50_warm` 没有加入，理由与第 1 步的 `git_open` 相同；由 `#[ignore]` 的 `perf_smoke_git_diff_50` 在 release 下测量，结果见「实际验证」。它测的是整个 `diff_trees`，比只算 hunk 的基准多出读树、属性和对象头的时间。bench 第 1 步把它移进 `crates/bench` 的 `git/diff_50_cold`、`git/diff_50_warm`，测量的内容不变（「性能」已按此改写），`perf_smoke_git_diff_50` 随之删除。
 
 第 3 步：
 
