@@ -198,6 +198,7 @@ fn budgets_belong_to_the_documented_targets() {
         } else if budget.id.ends_with("_bytes")
             || budget.id == "git/resident"
             || budget.id == "cache/memory"
+            || budget.id == "fs_watch/resident"
         {
             Target::Memory
         } else if ["app/", "plugin/", "lsp/", "baseline/"]

@@ -85,8 +85,14 @@ impl FakeBackend {
     /// Injects one raw batch into every armed target at `target`. Panics
     /// when none is armed.
     pub fn emit(&self, target: &Path, events: &[(&str, Flags)]) {
-        let batch = raw(events);
-        let sinks: Vec<EventSink> = {
+        self.emit_batch(target, raw(events));
+    }
+
+    /// Like `emit`, with a raw batch built by the caller: a benchmark builds
+    /// its events outside the clock and times only what fs_watch does with
+    /// them.
+    pub fn emit_batch(&self, target: &Path, batch: RawBatch) {
+        let mut sinks: Vec<EventSink> = {
             let mut state = lock(&self.state);
             let ids: Vec<(u64, EventSink)> = state
                 .armed
@@ -108,9 +114,11 @@ impl FakeBackend {
             }
             ids.into_iter().map(|(_, sink)| sink).collect()
         };
+        let last = sinks.pop().expect("at least one target, asserted above");
         for sink in sinks {
             sink.send(batch.clone());
         }
+        last.send(batch);
     }
 
     /// Events injected at `target` from now on stay in the backend until the
