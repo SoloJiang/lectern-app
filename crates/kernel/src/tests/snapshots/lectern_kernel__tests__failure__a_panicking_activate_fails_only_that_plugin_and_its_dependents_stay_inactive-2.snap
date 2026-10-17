@@ -1,0 +1,7 @@
+---
+source: crates/kernel/src/tests/failure.rs
+expression: log.text()
+---
+drop guard partial
+activate other
+started other
