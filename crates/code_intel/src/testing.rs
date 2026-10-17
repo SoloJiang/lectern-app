@@ -48,7 +48,10 @@ impl Clock for ManualClock {
 /// A watchdog whose thread runs on `executor`'s dedicated thread
 /// [`WATCHDOG_THREAD`], started on the first registration. The returned slot
 /// receives the thread's task handle once it starts; the thread keeps it
-/// alive too (dropping a `Task` cancels it), until it exits.
+/// alive too (dropping a `Task` cancels it), until it exits. As the plugin
+/// will, the starter registers the watchdog's `stop` with
+/// `Executor::on_shutdown` (the executor does not wait for dedicated
+/// threads) and unregisters it when the thread exits.
 pub fn watchdog(executor: &Executor, clock: Arc<dyn Clock>) -> (Watchdog, WatchdogTask) {
     let task = WatchdogTask(Arc::new(Mutex::new(None)));
     let slot = task.0.clone();
@@ -56,10 +59,13 @@ pub fn watchdog(executor: &Executor, clock: Arc<dyn Clock>) -> (Watchdog, Watchd
     let watchdog = Watchdog::new(
         clock,
         Box::new(move |body| {
+            let stop = body.watchdog();
+            let hook = executor.on_shutdown(Box::new(move || stop.stop()));
             let mut handle = slot.lock().unwrap_or_else(PoisonError::into_inner);
             let keep = slot.clone();
             *handle = Some(executor.run_dedicated(WATCHDOG_THREAD, move || {
                 body.run();
+                drop(hook);
                 drop(keep);
             }));
         }),
@@ -113,7 +119,7 @@ impl FakeGrammars {
     pub fn install(&self, lang: &str, extensions: &[&str], grammar: LoadedGrammar) {
         let kind = {
             let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            if state.packs.contains_key(&LangName::new(lang)) {
+            if state.packs.contains_key(&crate::lang_name(lang)) {
                 GrammarChangeKind::Updated
             } else {
                 GrammarChangeKind::Installed
@@ -121,7 +127,7 @@ impl FakeGrammars {
         };
         self.change(lang, kind, |packs| {
             packs.insert(
-                LangName::new(lang),
+                crate::lang_name(lang),
                 (
                     extensions.iter().map(|e| (*e).to_owned()).collect(),
                     grammar,
@@ -132,7 +138,7 @@ impl FakeGrammars {
 
     pub fn remove(&self, lang: &str) {
         self.change(lang, GrammarChangeKind::Removed, |packs| {
-            packs.remove(&LangName::new(lang));
+            packs.remove(&crate::lang_name(lang));
         });
     }
 
@@ -153,7 +159,7 @@ impl FakeGrammars {
             state.generation += 1;
             let change = GrammarChange {
                 generation: state.generation,
-                lang: LangName::new(lang),
+                lang: crate::lang_name(lang),
                 kind,
             };
             (change, state.subscribers.clone())
@@ -182,7 +188,7 @@ impl GrammarSource for FakeGrammars {
             .filter(|(_, (exts, _))| exts.iter().any(|e| e == ext))
             .map(|(name, _)| name)
             .collect();
-        claims.sort();
+        claims.sort_by(|a, b| a.0.cmp(&b.0));
         claims.first().map(|n| (*n).clone())
     }
 

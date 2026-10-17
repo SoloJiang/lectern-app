@@ -250,6 +250,14 @@ pub struct WatchdogRun {
 }
 
 impl WatchdogRun {
+    /// The watchdog this loop belongs to: the starter registers its
+    /// [`stop`](Watchdog::stop) with `Executor::on_shutdown`.
+    pub fn watchdog(&self) -> Watchdog {
+        Watchdog {
+            shared: self.shared.clone(),
+        }
+    }
+
     /// Runs until the watchdog stops: with extractions in flight, checks them
     /// every [`CHECK_INTERVAL`]; otherwise waits without a timeout.
     pub fn run(self) {

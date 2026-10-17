@@ -295,7 +295,7 @@ fn site_kind_table() {
         table.get("ts").unwrap(),
     );
     let accepted = |lang, syntax| -> Vec<DefKind> {
-        DefKind::ALL
+        crate::DEF_KINDS
             .into_iter()
             .filter(|k| accepts(lang, syntax, *k))
             .collect()
@@ -318,7 +318,7 @@ fn site_kind_table() {
         accepted(rust, RefSyntax::Member),
         [Method, Constant, Field, Variable]
     );
-    assert_eq!(accepted(rust, RefSyntax::Plain), DefKind::ALL);
+    assert_eq!(accepted(rust, RefSyntax::Plain), crate::DEF_KINDS);
     // Go conversions are call syntax naming a type.
     assert_eq!(
         accepted(go, RefSyntax::Call),

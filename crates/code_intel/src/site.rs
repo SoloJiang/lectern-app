@@ -16,6 +16,7 @@ use std::time::Instant;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, ParseOptions, Parser, QueryCursor, QueryCursorOptions, Tree};
 
+pub use crate::Position;
 use crate::extract::{Def, Lang};
 use crate::lang::{Capture, Dialect, TagClass};
 use crate::rules::{self, FileDef, RawTag};
@@ -30,13 +31,6 @@ pub enum ParseError {
     Cancelled,
     /// The grammar or its queries do not compile.
     Unsupported,
-}
-
-/// A position: row and byte column, both from 0.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Position {
-    pub line: u32,
-    pub column: u32,
 }
 
 /// What is at a position.
@@ -691,24 +685,25 @@ fn syntax_at(dialect: Dialect, node: Node<'_>) -> RefSyntax {
 
 // ---- the syntax-kind table -------------------------------------------------
 
-const ALL_KINDS: u16 = (1 << DefKind::ALL.len()) - 1;
-const CALLABLE: u16 = DefKind::Function.bit()
-    | DefKind::Method.bit()
-    | DefKind::Macro.bit()
-    | DefKind::Class.bit()
-    | DefKind::Struct.bit();
-const CONSTRUCTIBLE: u16 = DefKind::Class.bit() | DefKind::Struct.bit();
-const TYPES: u16 = DefKind::Class.bit()
-    | DefKind::Interface.bit()
-    | DefKind::Struct.bit()
-    | DefKind::Enum.bit()
-    | DefKind::Trait.bit()
-    | DefKind::Type.bit()
-    | DefKind::Module.bit();
-const MEMBERS: u16 = DefKind::Field.bit()
-    | DefKind::Method.bit()
-    | DefKind::Constant.bit()
-    | DefKind::Variable.bit();
+const ALL_KINDS: u16 = (1 << crate::DEF_KINDS.len()) - 1;
+const CALLABLE: u16 = crate::def_kind_bit(DefKind::Function)
+    | crate::def_kind_bit(DefKind::Method)
+    | crate::def_kind_bit(DefKind::Macro)
+    | crate::def_kind_bit(DefKind::Class)
+    | crate::def_kind_bit(DefKind::Struct);
+const CONSTRUCTIBLE: u16 =
+    crate::def_kind_bit(DefKind::Class) | crate::def_kind_bit(DefKind::Struct);
+const TYPES: u16 = crate::def_kind_bit(DefKind::Class)
+    | crate::def_kind_bit(DefKind::Interface)
+    | crate::def_kind_bit(DefKind::Struct)
+    | crate::def_kind_bit(DefKind::Enum)
+    | crate::def_kind_bit(DefKind::Trait)
+    | crate::def_kind_bit(DefKind::Type)
+    | crate::def_kind_bit(DefKind::Module);
+const MEMBERS: u16 = crate::def_kind_bit(DefKind::Field)
+    | crate::def_kind_bit(DefKind::Method)
+    | crate::def_kind_bit(DefKind::Constant)
+    | crate::def_kind_bit(DefKind::Variable);
 
 /// The definition kinds a reference syntax accepts in a language, as a
 /// [`DefKind::bit`] set (docs/design/code_intel.md「候选的分层与过滤」).
@@ -723,7 +718,9 @@ pub fn accepted_kinds(lang: &Lang, syntax: RefSyntax) -> u16 {
     // Go: a conversion `Meters(value)` or `units.Meters(value)` is call
     // syntax whose target is a type.
     let extra = match (lang.dialect(), syntax) {
-        (Dialect::Go, RefSyntax::Call | RefSyntax::MemberCall) => DefKind::Type.bit(),
+        (Dialect::Go, RefSyntax::Call | RefSyntax::MemberCall) => {
+            crate::def_kind_bit(DefKind::Type)
+        }
         _ => 0,
     };
     default | extra
@@ -731,5 +728,5 @@ pub fn accepted_kinds(lang: &Lang, syntax: RefSyntax) -> u16 {
 
 /// Whether a reference of `syntax` in `lang` can name a definition of `kind`.
 pub fn accepts(lang: &Lang, syntax: RefSyntax, kind: DefKind) -> bool {
-    accepted_kinds(lang, syntax) & kind.bit() != 0
+    accepted_kinds(lang, syntax) & crate::def_kind_bit(kind) != 0
 }

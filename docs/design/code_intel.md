@@ -562,9 +562,23 @@ impl Watchdog {
 }
 /// 线程的循环：有在途抽取时每 10 ms（`CHECK_INTERVAL`）检查一次，没有时不带超时地等待，`stop` 之后返回。
 pub struct WatchdogRun { /* … */ }
-impl WatchdogRun { pub fn run(self); }
+impl WatchdogRun {
+    pub fn run(self);
+    /// 启动方用它把 `stop` 登记到 `Executor::on_shutdown`，线程退出时 drop 登记。
+    pub fn watchdog(&self) -> Watchdog;
+}
 pub trait Clock: Send + Sync { fn now(&self) -> Instant; }
 pub struct SystemClock;
+
+/// `services::code_intel` 的 `LangName`、`DefKind`、`RefSyntax`、`Position` 在本 crate 的根模块重新导出。
+/// 这些类型在 `services` 里没有方法，本 crate 用自由函数补上需要的部分。
+pub use lectern_services::code_intel::{DefKind, LangName, Position, RefSyntax};
+pub fn lang_name(name: &str) -> LangName;
+/// 声明顺序，即 `NameTable::kinds` 的位序号和 `ci_def.kind` 的编码。
+pub const DEF_KINDS: [DefKind; 14];
+pub fn def_kind_from_tag(kind: &str) -> DefKind;
+pub const fn def_kind_bit(kind: DefKind) -> u16;
+pub fn def_kind_name(kind: DefKind) -> &'static str;
 
 /// 按需解析一个文件和位置分析（见「抽取结果」的 `ParsedFile`、「跳转到定义」第 1 步）。
 /// 供查询（第 4 步）、测试和 bench 使用。
@@ -1241,13 +1255,13 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 第 1 步，在 Linux（x86_64，4 核 Xeon 2.1 GHz，内核 6.18）上运行。本 crate 不依赖 GPUI，也没有 macOS 专属代码；macOS 上的结果由 macOS CI 给出。
 
-- `just check`、`just test`（整个工作区 1083 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
-- `just test -p lectern-code-intel`：34 个测试通过。按前缀：`lang_*` 9（含 `lang_grammar_versions_match_lock`）、`extract_*` 10、`deadline_*` 7、`site_*` 8。insta 快照 8 个，每种首发语言至少一个（`ts`、`tsx`、`js` 两个、`rust`、`java`、`python`、`go`），逐个看过。`site_parsed_defs_match_extraction` 检查 `ParsedFile` 自己跑查询得到的定义与 tree-sitter-tags 的抽取结果逐条相同。
+- `just check`、`just test`（rebase 到包含 #108、#109、#110 的 main 之后，整个工作区 1112 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `just test -p lectern-code-intel`：35 个测试通过。按前缀：`lang_*` 9（含 `lang_grammar_versions_match_lock`）、`extract_*` 10、`deadline_*` 8、`site_*` 8。insta 快照 8 个，每种首发语言至少一个（`ts`、`tsx`、`js` 两个、`rust`、`java`、`python`、`go`），逐个看过。`site_parsed_defs_match_extraction` 检查 `ParsedFile` 自己跑查询得到的定义与 tree-sitter-tags 的抽取结果逐条相同。
 - `deadline_*` 用真实的看门狗线程（`testing::watchdog` 在 `Executor::manual()` 的专用线程上运行它）：1 MiB 的病态输入（2000 层嵌套的数组、一行 1 MiB）在 1 ms 截止时间下返回 `TimedOut`，用时 < 500 ms；解析途中置位取消标志、暂停探针返回 true、丢弃 `stop_guard()` 都让 4 MiB 的病态输入返回 `Cancelled`，`stop` 之后线程退出、之后的抽取立即取消、不再启动线程；`ManualClock` 不推进时看门狗检查但不置位，推进过截止时刻后置位；没有在途抽取时看门狗的循环计数在 100 ms 内不变。
 - `cargo tree -e features -i tree-sitter` 里没有 `wasm`（只有 `default` 和 `std`，`default` 由 tree-sitter-tags 打开）；`cargo tree -i tree-sitter-tags -e normal --depth 1` 只列出 `lectern-code-intel`。Cargo.lock 新增 `tree-sitter` 0.27.1、`tree-sitter-tags` 0.27.1、`tree-sitter-language` 0.1.9、`streaming-iterator` 0.1.9 和六个 grammar crate（`tree-sitter-typescript` 0.23.2、`tree-sitter-javascript` 0.25.0、`tree-sitter-rust` 0.24.2、`tree-sitter-java` 0.23.5、`tree-sitter-python` 0.25.0、`tree-sitter-go` 0.25.0），都是 MIT（`streaming-iterator` 为 MIT OR Apache-2.0），`just deny` 通过；已有依赖的版本没有变化。六个 grammar 都是各自在 crates.io 上的最新版本，ABI 是 14（typescript、java）或 15，在 tree-sitter 0.27.1 支持的 13–15 之内。
-- `code_intel/extract_throughput`（`just bench --measure code_intel/`，三次）：中位数 2.08–2.29 MB/s（MB 为 2^20 字节），在这台机器上低于 4 MB/s 的预算；Linux 上不判定，M 系列上没有测量，由 macOS CI 判定。同一台机器上的拆分（release，每种语言约 1 MiB 夹具）：只解析 4.4–5.5 MiB/s；tags 抽取 TS 2.0、TSX 2.5–2.6、JS 2.0、Rust 3.0 MiB/s；上游的 Rust tags 查询（不带 locals）3.5 MiB/s；去掉 locals 查询快约 15%–30%，去掉 `@local.reference` 的模式没有变化。吞吐主要受解析速度限制，抽取的查询匹配约占一半。调研在同类 Xeon 上测得 4.3 MB/s，预算按「M 系列可能快一倍」估算，M 系列上的结果要看 macOS CI。
+- `code_intel/extract_throughput`（`just bench --measure code_intel/`，三次）：中位数 2.08–2.29 MB/s（MB 为 2^20 字节），在这台机器上低于 4 MB/s 的预算；Linux 上不判定，M 系列上没有测量，由 macOS CI 判定；预算保持设计的 4 MB/s，没有因 Linux 的结果调低。同一台机器（4 核 Xeon 2.1 GHz）上的拆分（release，每种语言约 1 MiB 夹具）：只解析 4.4–5.5 MiB/s；tags 抽取 TS 2.0、TSX 2.5–2.6、JS 2.0、Rust 3.0 MiB/s；上游的 Rust tags 查询（不带 locals）3.5 MiB/s；去掉 locals 查询快约 15%–30%，去掉 `@local.reference` 的模式没有变化。吞吐主要受解析速度限制，抽取的查询匹配约占一半。调研在同类 Xeon 上测得 4.3 MB/s，预算按「M 系列可能快一倍」估算，M 系列上的结果要看 macOS CI。
 - 安装包体积（ADR 0018 的 80 MB）：在 Linux x86_64 上把 tree-sitter 运行时、tree-sitter-tags 和六个 grammar 链接进一个 release 二进制（thin LTO、strip），与只链接运行时的二进制相比多 6.9 MiB（7.27 MiB 对 0.34 MiB），gzip -9 之后多 1.2 MB（DMG 的 40 MB 目标）。各 grammar 的代码与数据：`tsx` 1.44 MB、`ts` 1.41 MB、`rust` 1.11 MB、`python` 0.46 MB、`java` 0.41 MB、`js` 0.41 MB、`go` 0.21 MB，运行时 0.21 MB，其余是 tags、`regex` 和绑定代码。解析表是数据，arm64 上的大小应当相近；macOS 上没有测量，正式数字由 #38 的 `app/bundle_size` 给出。「未决问题」1 选 (b) 时少 Rust、Python、Go 三个 grammar，约 1.8 MB。
-- 没有验证的：M 系列上的吞吐；macOS 上的体积；`watchdog_*`（看门狗随插件停用、`Executor::shutdown` 退出，属于第 4 步）。
+- 没有验证的：M 系列上的吞吐；macOS 上的体积；`watchdog_*`（看门狗随插件停用退出、激活 20 次后最多一个线程，属于第 4 步；`Executor::shutdown` 让看门狗退出已由 `deadline_executor_shutdown_stops_the_watchdog` 经 `testing::watchdog` 检查）。
 
 ## 与设计的差异
 
@@ -1261,7 +1275,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 第 1 步：
 
-- `LangName`、`DefKind`、`RefSyntax` 暂时定义在本 crate 的根模块：它们属于 `services::code_intel`（前置条件 A），第 1 步不需要前置条件。A 合并后移到 `services`，本 crate 改为重新导出。`DefKind` 另有 `ALL`、`from_tag_kind`、`code`、`bit`、`as_str`。
+- `LangName`、`DefKind`、`RefSyntax` 和位置分析用的 `Position` 用 `services::code_intel`（前置条件 A）里的类型，本 crate 在根模块重新导出，没有自己的副本。`services` 里的这些类型没有方法，`LangName` 也不派生 `Ord`、不实现 `Display`；本 crate 需要的部分写成自由函数（`lang_name`、`DEF_KINDS`、`def_kind_from_tag`、`def_kind_bit`、`def_kind_name`，见「本 crate 的公开项」），日志和测试里的名字取 `.0`。形状都与 `services` 相同，这个 PR 不改 `services`。
 - `extract` 的签名：`deadline` 改为 `&Deadline`，`cancel` 改为 `&Arc<AtomicBool>`。tree-sitter-tags 只接受一个取消标志，所以每个在途抽取在看门狗登记自己的标志，由看门狗把截止时刻、调用方的取消标志、暂停探针和 `stop` 汇总到这个标志上；看门狗线程要持有调用方的取消标志，只能是共享的 `Arc`。`Deadline` 同时带上大小上限（后台 1 MiB、交互 4 MiB），因为两者总是成对出现。「接口」已改。
 - `ExtractStatus` 增加 `Unsupported`（grammar 或查询编译失败，不写入缓存）：设计在「状态与异常」里规定这种语言停用，但抽取函数没有对应的返回值。
 - tree-sitter-tags 只在两次匹配都还在队列里时去重，实测 Rust 的方法会再作为函数出现一次（`impl` 里带泛型参数的方法），所以抽取后按名字节点再去重一次（「抽取结果」已补）。定义自己的名字不进入引用名。
@@ -1272,7 +1286,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 查询版本另外包含 tree-sitter 和 tree-sitter-tags 的版本（「语言与抽取键」已改）。
 - 语法种类表里 Go 的 `MemberCall` 也接受 `Type`：`units.Meters(value)` 和 `Meters(value)` 一样是类型转换。
 - `site` 模块（`ParsedFile`、位置分析、语法种类表）是公开的，供第 4 步的查询、测试和以后的 `code_intel/goto_indexed` 使用；设计原来只说内部使用 `ParsedFile`。
-- `Watchdog` 以 `Starter` 回调启动线程：本 crate 第 1 步没有插件，测试和 bench 经 `testing::watchdog` 在 `Executor::run_dedicated` 的专用线程上运行它，第 4 步的插件改用 `own_with` 和 `run_dedicated_gated`。`stop` 和 `stop_guard` 已实现；向 `Executor::on_shutdown` 登记 `stop` 要等前置条件 D 提供这个接口，随第 4 步的插件加入。看门狗的到期表（名字表的延迟重建）随第 4 步的名字表加入。
-- `lectern-executor` 在第 1 步是可选依赖，只有 `test-support`（`testing::watchdog`）打开它；第 3 步起是普通依赖。`lectern-kernel` 等其他依赖随用到它们的步骤加入。
+- `Watchdog` 以 `Starter` 回调启动线程：本 crate 第 1 步没有插件，测试和 bench 经 `testing::watchdog` 在 `Executor::run_dedicated` 的专用线程上运行它，第 4 步的插件改用 `own_with` 和 `run_dedicated_gated`。`stop` 和 `stop_guard` 已实现。启动方经 `WatchdogRun::watchdog` 把 `stop` 登记到 `Executor::on_shutdown`（前置条件 D，[#109](https://github.com/SoloJiang/lectern-app/pull/109)），线程退出时 drop 登记：第 1 步由 `testing::watchdog` 这样做（`deadline_executor_shutdown_stops_the_watchdog`），第 4 步的插件在 `run_dedicated_gated` 的启动方里做同样的登记。看门狗的到期表（名字表的延迟重建）随第 4 步的名字表加入。
+- `lectern-executor` 在第 1 步是可选依赖，只有 `test-support`（`testing::watchdog`）打开它；第 3 步起是普通依赖。`lectern-services` 第 1 步起是普通依赖（上面的共享类型）。`lectern-kernel` 等其他依赖随用到它们的步骤加入。
 - `testing` 第 1 步只有 `ManualClock`、`FakeGrammars`（安装、更新、移除、计数加载次数）、`java_pack`、`watchdog`、语言夹具 `FIXTURES` 与 `corpus`、病态输入 `pathological_js`；其余替身随用到它们的步骤加入。
 - 「性能」里本 crate 的其余分项预算还没有登记进 bench 的预算表，随实现它们的步骤登记。

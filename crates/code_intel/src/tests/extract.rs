@@ -42,7 +42,7 @@ fn render(extraction: &Extraction) -> String {
             d.line + 1,
             d.column,
             d.end_line + 1,
-            d.kind.as_str(),
+            crate::def_kind_name(d.kind),
             d.name
         );
         if let Some(scope) = &d.scope {

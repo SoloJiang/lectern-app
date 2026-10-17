@@ -25,9 +25,12 @@ fn extract_throughput(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let mut blobs = Vec::new();
     for lang in table.iter() {
         if !lang.prepare() {
-            return Err(BenchError::new(format!("{} does not compile", lang.name())));
+            return Err(BenchError::new(format!(
+                "{} does not compile",
+                lang.name().0
+            )));
         }
-        blobs.push((lang.clone(), corpus(lang.name().as_str(), len)));
+        blobs.push((lang.clone(), corpus(&lang.name().0, len)));
     }
     let bytes: u64 = blobs.iter().map(|(_, b)| b.len() as u64).sum();
     let executor = Executor::manual();
@@ -51,7 +54,7 @@ fn extract_throughput(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     };
     if let Some((lang, status)) = run() {
         watchdog.stop();
-        return Err(BenchError::new(format!("{lang}: {status:?}")));
+        return Err(BenchError::new(format!("{}: {status:?}", lang.0)));
     }
     let time = ctx.time(run);
     watchdog.stop();

@@ -20,6 +20,8 @@ test-support = ["dep:lectern-executor"]
 # Only testing::watchdog uses it until the plugin (step 4) starts the
 # watchdog through Executor::run_dedicated_gated.
 lectern-executor = { path = "../executor", optional = true }
+# The shared code_intel types (LangName, DefKind, RefSyntax, Position).
+lectern-services = { path = "../services" }
 streaming-iterator.workspace = true
 tree-sitter.workspace = true
 tree-sitter-tags.workspace = true

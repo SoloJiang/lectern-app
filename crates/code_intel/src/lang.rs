@@ -194,7 +194,7 @@ struct LangInner {
 impl Lang {
     fn core(spec: &CoreSpec) -> Lang {
         Lang(Arc::new(LangInner {
-            name: LangName::new(spec.name),
+            name: crate::lang_name(spec.name),
             dialect: spec.dialect,
             grammar_version: core_grammar_version(spec),
             query_version: query_version(spec.tags_query, spec.locals_query),
@@ -272,7 +272,7 @@ impl Lang {
                 Err(error) => {
                     log(format_args!(
                         "the {} grammar or its queries do not compile, the language is disabled: {error}",
-                        self.0.name
+                        self.0.name.0
                     ));
                     None
                 }
@@ -403,7 +403,7 @@ impl Compiled {
                 ),
                 None => TagClass::Ref,
             };
-            classes.push([reference, TagClass::Def(DefKind::from_tag_kind(kind))]);
+            classes.push([reference, TagClass::Def(crate::def_kind_from_tag(kind))]);
         }
         let captures = tags
             .query
@@ -547,7 +547,7 @@ fn core_for_extension(ext: &str) -> Option<&'static CoreSpec> {
 pub fn language_for_path(path: &str, packs: &dyn GrammarSource) -> Option<LangName> {
     let ext = extension(path)?;
     match core_for_extension(ext) {
-        Some(spec) => Some(LangName::new(spec.name)),
+        Some(spec) => Some(crate::lang_name(spec.name)),
         None => packs.language_for_extension(ext),
     }
 }

@@ -12,7 +12,7 @@ use crate::util::fnv64;
 use crate::{LangName, NoGrammarPacks};
 
 fn name(s: &str) -> LangName {
-    LangName::new(s)
+    crate::lang_name(s)
 }
 
 fn lang_of(path: &str) -> Option<String> {
@@ -82,10 +82,10 @@ fn lang_compatibility_groups() {
 #[test]
 fn lang_core_queries_compile() {
     let table = LanguageTable::core();
-    let names: Vec<&str> = table.iter().map(|l| l.name().as_str()).collect();
+    let names: Vec<&str> = table.iter().map(|l| &*l.name().0).collect();
     assert_eq!(names, ["ts", "tsx", "js", "rust", "java", "python", "go"]);
     for lang in table.iter() {
-        assert!(lang.prepare(), "{}", lang.name());
+        assert!(lang.prepare(), "{}", lang.name().0);
     }
 }
 

@@ -188,6 +188,20 @@ fn deadline_stop_cancels_in_flight_and_exits() {
 }
 
 #[test]
+fn deadline_executor_shutdown_stops_the_watchdog() {
+    let executor = Executor::manual();
+    let (watchdog, task) = watchdog(&executor, Arc::new(SystemClock));
+    let registration = watchdog.register(Instant::now() + MINUTE, None, None);
+    assert!(task.started());
+    // The executor does not wait for dedicated threads; its shutdown hook
+    // stops the watchdog, which cancels what is in flight and exits.
+    executor.shutdown(Duration::from_secs(1));
+    assert!(watchdog.is_stopped());
+    assert_eq!(registration.slot().tripped(), Some(Trip::Stopped));
+    assert!(eventually(|| task.is_finished()));
+}
+
+#[test]
 fn deadline_stop_before_start_starts_no_thread() {
     let executor = Executor::manual();
     let (watchdog, task) = watchdog(&executor, Arc::new(SystemClock));

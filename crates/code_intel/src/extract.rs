@@ -251,7 +251,7 @@ pub fn extract(
         Ok(tags) => tags,
         Err(TagsError::Cancelled) => return interrupted(&registration),
         Err(error) => {
-            log(format_args!("extracting {} failed: {error}", lang.name()));
+            log(format_args!("extracting {} failed: {error}", lang.name().0));
             return Extraction::empty(ExtractStatus::Unsupported);
         }
     };

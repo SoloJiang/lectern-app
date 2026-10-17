@@ -4265,6 +4265,7 @@ version = "0.0.0"
 dependencies = [
  "insta",
  "lectern-executor",
+ "lectern-services",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-go",
