@@ -1,6 +1,6 @@
 # executor 设计
 
-状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 实现。
+状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。
 
 `executor` 运行 UI 线程之外的 IO、解析和 git 操作（[技术调研「不同步阻塞 UI」](tech-research.md)）。它实现 kernel 对执行器的约定（[kernel 设计](kernel.md)「撤销」里的后台任务、`SubmitGate`、`GateSlot`），让插件提交的任务随激活失效而丢弃、任务 panic 时插件进入 `Failed`。
 
@@ -264,7 +264,7 @@ struct TaskCell<T> {
 
 - `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-executor`（45 个测试）、`just doctest`、`just deny` 全部通过。`rg unsafe crates/executor/src` 没有结果。
 - `just test -p lectern-executor` 连续运行 40 次、用 `taskset -c 0` 限制在单核上再运行 15 次，全部通过；`cargo test`（所有测试在同一进程的多个线程里）也通过。
-- 批量线程组（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 61 个测试；同样连续运行 40 次、`taskset -c 0` 单核 15 次，`cargo test` 同一进程，全部通过。`just bench --measure executor/` 改动前后在同一台 4 核 Linux 容器上各跑 3 次，中位数：`executor/spawn_10k` 改动前 21.1、36.3、18.3 ms，改动后 12.5、14.3、17.2 ms（两边都标为 noisy）；`executor/wake_1000x100` 改动前 64.2、69.6、73.9 ms，改动后 64.0、53.1、55.2 ms。差别在同一版本多次运行的波动之内，没有变慢（只记录，不设预算）。两项都只提交 `Background` 任务，不创建批量线程。
+- 批量线程组（[#106](https://github.com/SoloJiang/lectern-app/pull/106)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 61 个测试；同样连续运行 40 次、`taskset -c 0` 单核 15 次，`cargo test` 同一进程，全部通过。`just bench --measure executor/` 改动前后在同一台 4 核 Linux 容器上各跑 3 次，中位数：`executor/spawn_10k` 改动前 21.1、36.3、18.3 ms，改动后 12.5、14.3、17.2 ms（两边都标为 noisy）；`executor/wake_1000x100` 改动前 64.2、69.6、73.9 ms，改动后 64.0、53.1、55.2 ms。差别在同一版本多次运行的波动之内，没有变慢（只记录，不设预算）。两项都只提交 `Background` 任务，不创建批量线程。
 - 测试用真实的 `lectern-kernel`（dev-dependency 打开 `test-support`，用 `Kernel::start` 和 `Kernel::barrier`），等待一律用通道或 `block_on`，超时只作为失败保护；只有插件状态、kernel 静止这类没有事件可等的地方按 1 ms 间隔轮询，上限 10 秒。
 
 「测试」一节逐条对应（`crates/executor/src/tests/`）：
@@ -312,7 +312,7 @@ struct TaskCell<T> {
 - 增加了设计没写的细节：`TaskError` 实现 `Display` 和 `Error`；`Task` 标 `#[must_use]`（drop 即取消）；`Task` 在结果被取走后再次 poll 得到 `Err(Cancelled)`，不 panic；专用线程建不起来时记日志、在调用线程上于 `contain` 里丢弃闭包、句柄为已取消；`executor-reclaim` 线程建不起来时记日志并泄漏这个任务（与 kernel 的 payload 回收相同），不在提交线程上 drop。
 - 「性能」一节的两项基准没有加：`bench` crate 还没有设计文档和基准框架（`crates/bench/AGENTS.md`），随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 一起加入。bench 第 1 步已加入 `executor/spawn_10k`、`executor/wake_1000x100`（只记录），只用公开接口。
 - 日志写到 stderr（`lectern-executor:` 前缀），与 kernel 相同，由 `app` 重定向。
-- 批量线程组（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+- 批量线程组（[#106](https://github.com/SoloJiang/lectern-app/pull/106)）：
   - 两组线程各自按需启动：工作线程在第一次提交 `Interactive` / `Background` 时启动，不再是「第一次提交任何任务」。只有 `Batch` 工作时不建工作线程，空闲内存和线程数都更少。启动、退出的记账从 `Sched` 移到每组一个的 `PoolState`，两组的规则相同。
   - `Batch` 任务的句柄放弃时，已存好的结果交给批量线程 drop（设计只写了「交给执行器另排一个 `Background` 任务」）：批量线程组这时一定已经启动，交给 `Background` 会只为 drop 一个结果去启动工作线程。
   - `shutdown` 之后工作线程也不取 `Batch` 任务：被取消的 `Batch` 任务只由批量线程 drop，与「工作线程不取 `Batch` 任务」一致；只启动了工作线程时不会有 `Batch` 任务存活。`TimedOut { busy_workers }` 计入批量线程。
