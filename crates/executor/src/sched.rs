@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use lectern_kernel::contain;
 
+use crate::hooks::ShutdownHooks;
 use crate::util::{lock, log, wait, wait_timeout};
 use crate::{Hook, Priority, Shutdown, ThreadKind};
 
@@ -136,6 +137,8 @@ pub(crate) struct Inner {
     pub(crate) hook: Option<Hook>,
     manual: bool,
     next_id: AtomicU64,
+    /// Callbacks registered with `Executor::on_shutdown`.
+    pub(crate) shutdown_hooks: Arc<ShutdownHooks>,
     /// Called before each worker is spawned, outside every lock.
     #[cfg(test)]
     pub(crate) before_spawn: Mutex<Option<BeforeSpawn>>,
@@ -168,6 +171,7 @@ impl Inner {
             hook,
             manual,
             next_id: AtomicU64::new(0),
+            shutdown_hooks: Arc::default(),
             #[cfg(test)]
             before_spawn: Mutex::new(None),
         })
@@ -359,6 +363,8 @@ impl Inner {
 
     pub(crate) fn shutdown(&self, timeout: Duration) -> Shutdown {
         let deadline = Instant::now() + timeout;
+        // First, before any task is cancelled or thread joined.
+        self.shutdown_hooks.run_all();
         let (pool, dedicated) = {
             let mut sched = lock(&self.sched);
             sched.shutdown = true;

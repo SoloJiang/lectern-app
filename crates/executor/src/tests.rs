@@ -6,6 +6,7 @@ mod batch;
 mod cancel;
 mod dedicated;
 mod gates;
+mod hooks;
 mod kernel;
 mod manual;
 mod panics;

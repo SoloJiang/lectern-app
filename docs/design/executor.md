@@ -1,6 +1,6 @@
 # executor 设计
 
-状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。
+状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。关闭回调 `on_shutdown`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）在 [#109](https://github.com/SoloJiang/lectern-app/pull/109) 实现。
 
 `executor` 运行 UI 线程之外的 IO、解析和 git 操作（[技术调研「不同步阻塞 UI」](tech-research.md)）。它实现 kernel 对执行器的约定（[kernel 设计](kernel.md)「撤销」里的后台任务、`SubmitGate`、`GateSlot`），让插件提交的任务随激活失效而丢弃、任务 panic 时插件进入 `Failed`。
 
@@ -13,6 +13,7 @@
   - 插件经 `SubmitGate` 提交的任务：每次 poll 之前检查闸门，按 kernel 的约定处理 panic。
   - 长时间阻塞的工作（等外部进程、监听文件）用单独的线程，不占工作线程。
   - 退出时停止接收任务、丢弃未完成的任务、等工作线程结束。
+  - 关闭回调：`shutdown` 开始时调用已登记的回调，专用线程上的循环（`code_intel` 的看门狗）靠它得知 executor 正在关闭。
   - 测试用的手动执行器：不启动线程，由测试逐步运行任务。
 - 不做：
   - 把结果交给主线程：由视图层的主线程队列负责（GPUI 的前台执行器）。按 kernel 设计，排到主线程之前取 `PendingGuard`，主线程应用前取准入；executor 不知道主线程。
@@ -96,8 +97,15 @@ impl Executor {
     /// 停止接收新任务（之后的提交返回已取消的句柄），按存活任务登记表取消所有未结束的任务，包括挂起的任务；
     /// 它们的 future 由工作线程在 `contain` 里 drop，不在调用 `shutdown` 的线程上 drop。等工作线程退出，最多等 `timeout`。
     /// 专用线程不等：还在等闸门的专用任务被唤醒并丢弃闭包，正在运行的闭包结束时线程自行退出。
+    /// 第一步调用 `on_shutdown` 登记的回调，见下文「关闭回调」。
     pub fn shutdown(&self, timeout: Duration) -> Shutdown;
+
+    /// 登记一个在 `shutdown` 开始时调用的回调。任意线程调用，不阻塞。
+    pub fn on_shutdown(&self, f: Box<dyn FnOnce() + Send>) -> ShutdownHook;
 }
+
+/// `on_shutdown` 的登记。drop 时注销：回调不再调用，在 drop 的线程上于 `contain` 里丢弃。`Send + Sync`，`#[must_use]`。
+pub struct ShutdownHook { /* Weak<ShutdownHooks> 与登记序号；登记时已调用的为空 */ }
 
 /// `busy_workers` 是超时时还没退出的工作线程和批量线程数之和。
 pub enum Shutdown { Clean, TimedOut { busy_workers: usize } }
@@ -123,6 +131,16 @@ pub enum TaskError {
     Panicked(String),
 }
 ```
+
+### 关闭回调
+
+- 调用时机：`shutdown` 的第一步，在设 `shutdown` 标记、取消任务、等待和 join 线程之前。回调在调用 `shutdown` 的线程上按登记顺序依次调用，每个最多一次。
+- 每个回调在 `contain` 里调用：panic 只记日志，其余回调照常调用，`shutdown` 照常进行。
+- 回调不得阻塞：它只通知池外的工作（专用线程上的循环）停止，比如置位标志并 `notify_all`，不等那些工作结束。回调的耗时计入 `shutdown` 的 `timeout`。
+- 注销：`ShutdownHook` drop 时从登记表里移除回调，在 drop 的线程上于 `contain` 里丢弃它，不调用。`shutdown` 已经取走的回调照常调用，drop 不等它。executor 已经释放时 drop 什么也不做。
+- `shutdown` 开始之后登记：回调在 `on_shutdown` 里、登记线程上立即于 `contain` 里调用，返回的 `ShutdownHook` 不持有登记，drop 时什么也不做。所以与 `shutdown` 并发的登记也恰好调用一次：要么被 `shutdown` 取走，要么在登记时调用。调用方在 `on_shutdown` 里不得持有回调要取的锁（比如看门狗的状态锁），否则这种情况下会死锁。
+- 第二次及之后的 `shutdown` 不再调用任何回调：第一次已经取走全部回调，并把登记表标为已开始。
+- `manual()` 的执行器规则相同。
 
 测试辅助在 `test-support` feature 下：
 
@@ -243,6 +261,7 @@ struct TaskCell<T> {
 - 队列通知不丢失：多个线程并发提交、工作线程反复在空队列上等待，所有任务都运行完，没有任务停在队列里。
 - shutdown：挂起的任务（不在任何队列里、等着被唤醒）也被丢弃，future 在工作线程上 drop；`shutdown` 在工作线程退出后返回；任务阻塞不结束时返回 `TimedOut`。
 - shutdown 之后提交：`spawn` 立即返回已取消的句柄；future 的 `Drop` 阻塞在一把锁上时，提交线程不受影响，drop 发生在 `executor-reclaim` 线程上。
+- 关闭回调：回调在调用 `shutdown` 的线程上、等待工作线程之前调用，恰好一次（再次 `shutdown` 不再调用）；能让专用线程上的循环退出；drop 的 `ShutdownHook` 不调用，回调在 drop 时丢弃；`shutdown` 开始之后登记的回调在登记线程上立即调用，之后 drop 和 `shutdown` 都不再调用；与 `shutdown` 并发的登记恰好调用一次；一个回调 panic 时其余回调照常按登记顺序调用，`shutdown` 返回 `Clean`；`manual()` 同样调用。
 - 带闸门的专用任务：闸门未打开时闭包不运行；打开后运行；闸门关闭或激活失效时闭包被丢弃、没有运行；闭包 panic 时插件进入 `Failed`；闸门封住后提交返回已取消的句柄，没有新建线程。
 - `manual()`：`run_until_idle` 按入队顺序运行，结果确定。
 - 首帧：`Executor::new` 之后、第一次提交之前，进程里没有 `executor-*` 线程。
@@ -265,6 +284,7 @@ struct TaskCell<T> {
 - `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-executor`（45 个测试）、`just doctest`、`just deny` 全部通过。`rg unsafe crates/executor/src` 没有结果。
 - `just test -p lectern-executor` 连续运行 40 次、用 `taskset -c 0` 限制在单核上再运行 15 次，全部通过；`cargo test`（所有测试在同一进程的多个线程里）也通过。
 - 批量线程组（[#106](https://github.com/SoloJiang/lectern-app/pull/106)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 61 个测试；同样连续运行 40 次、`taskset -c 0` 单核 15 次，`cargo test` 同一进程，全部通过。`just bench --measure executor/` 改动前后在同一台 4 核 Linux 容器上各跑 3 次，中位数：`executor/spawn_10k` 改动前 21.1、36.3、18.3 ms，改动后 12.5、14.3、17.2 ms（两边都标为 noisy）；`executor/wake_1000x100` 改动前 64.2、69.6、73.9 ms，改动后 64.0、53.1、55.2 ms。差别在同一版本多次运行的波动之内，没有变慢（只记录，不设预算）。两项都只提交 `Background` 任务，不创建批量线程。
+- 关闭回调（[#109](https://github.com/SoloJiang/lectern-app/pull/109)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 68 个测试；`just test -p lectern-executor hooks` 连续运行 40 次、`taskset -c 0` 单核 15 次，全部通过。只增加登记表和 `shutdown` 开头的一次加锁，没有改提交和调度路径，没有重跑基准。
 - 测试用真实的 `lectern-kernel`（dev-dependency 打开 `test-support`，用 `Kernel::start` 和 `Kernel::barrier`），等待一律用通道或 `block_on`，超时只作为失败保护；只有插件状态、kernel 静止这类没有事件可等的地方按 1 ms 间隔轮询，上限 10 秒。
 
 「测试」一节逐条对应（`crates/executor/src/tests/`）：
@@ -288,6 +308,7 @@ struct TaskCell<T> {
 - 队列通知不丢失：`scheduling::concurrent_submissions_all_run_while_workers_keep_going_idle`（20 轮，每轮 4 个线程各提交 50 个会自我唤醒的任务，轮与轮之间工作线程回到空队列上等待）。
 - shutdown：`shutdown::shutdown_drops_suspended_tasks_on_a_worker`、`shutdown::shutdown_returns_after_the_workers_exit`（钩子在每个工作线程上放一个线程局部变量，`shutdown` 返回时三个析构都已运行）、`shutdown::shutdown_times_out_while_a_task_blocks`、`shutdown::shutdown_drops_a_dedicated_task_still_waiting_for_its_gate`、`shutdown::a_shutdown_during_worker_startup_stops_further_spawns_and_joins_the_started_workers`（用测试专用的 `before_spawn` 钩子让第一次提交停在建第二个线程之前，在这时 `shutdown`：它等启动结束才返回 `Clean`，之后没有再建线程，建出的那个已 join）。
 - shutdown 之后提交：`shutdown::a_submission_after_shutdown_is_cancelled_and_dropped_on_the_reclaim_thread`。
+- 关闭回调（`hooks.rs`）：`hooks::a_callback_runs_once_on_the_shutdown_thread_before_the_workers_are_joined`（一个工作线程阻塞到回调放开它，`shutdown` 在名为 `closer` 的线程上调用两次，都返回 `Clean`，回调只在 `closer` 上调用一次）、`hooks::a_callback_stops_a_dedicated_loop`、`hooks::a_dropped_hook_does_not_run_and_its_callback_is_dropped_at_once`（回调捕获的值在 drop 句柄的线程上 drop，另一个保留的回调照常调用）、`hooks::registering_after_shutdown_started_runs_the_callback_at_once`、`hooks::a_registration_racing_shutdown_runs_exactly_once`（200 轮，登记线程与 `shutdown` 用 `Barrier` 同时开始）、`hooks::a_panicking_callback_stops_neither_the_others_nor_the_shutdown`（三个回调，中间一个 panic）、`hooks::the_manual_executor_runs_callbacks_on_shutdown`。
 - 带闸门的专用任务：`dedicated::a_gated_dedicated_closure_waits_for_the_gate_then_runs`、`dedicated::a_gated_dedicated_closure_is_dropped_unrun_when_the_gate_closes`、`dedicated::a_gated_dedicated_closure_is_dropped_unrun_when_the_activation_dies`、`dedicated::a_panicking_gated_dedicated_closure_fails_the_plugin`、`dedicated::run_dedicated_gated_on_a_sealed_gate_starts_no_thread`，另有句柄 drop 时丢弃等闸门的闭包。
 - `manual()`：`manual::run_until_idle_runs_tasks_in_queue_order`。
 - 首帧：`scheduling::no_thread_starts_before_the_first_submission`（用线程启动钩子计数，各平台都跑）；`crates/executor/tests/first_frame.rs` 在 Linux 上读 `/proc/self/task/*/comm`，确认第一次提交前没有 `executor-*` 线程、`shutdown` 之后线程消失。它单独一个测试二进制，不和其他测试共用进程。
@@ -319,3 +340,6 @@ struct TaskCell<T> {
   - 默认线程数由私有的 `Config::for_parallelism(n)` 计算，`Default` 用本机的 `available_parallelism` 调用它，测试注入并行度。
   - 测试专用的 `before_spawn` 钩子多带一个 `ThreadKind`，用来让批量线程组的启动停在建第二个线程之前。
   - `Config` 多了一个字段，`fs_watch` 测试里两处 `Config { .. }` 字面量补上 `batch_workers`。
+- 关闭回调（[#109](https://github.com/SoloJiang/lectern-app/pull/109)）：
+  - 接口按 [code_intel 设计](code_intel.md#对其他-crate-的要求)，参数是 `Box<dyn FnOnce() + Send>`。code_intel 设计没有规定的部分在本文「关闭回调」里补全：`shutdown` 开始之后的登记立即在登记线程上调用（不拒绝），drop 不等已被取走的回调，回调按登记顺序调用。选择立即调用而不拒绝：调用方只需要一条路径，拒绝时它仍要自己调用同一个停止函数。
+  - 登记表单独一把锁（`ShutdownHooks`），不放进 `Sched`：回调的登记和注销不与任务调度争用同一把锁。

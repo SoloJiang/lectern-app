@@ -9,6 +9,7 @@
 //! `docs/design/executor.md`.
 
 mod dedicated;
+mod hooks;
 mod output;
 mod sched;
 mod task;
@@ -27,6 +28,7 @@ use crate::sched::{Inner, Job};
 use crate::task::TaskCell;
 use crate::util::log;
 
+pub use crate::hooks::ShutdownHook;
 pub use crate::task::{Task, TaskError};
 
 type Hook = Arc<dyn Fn(ThreadKind) + Send + Sync>;
@@ -224,8 +226,26 @@ impl Executor {
     /// Dedicated threads are not waited for: one still waiting for its gate
     /// is woken and drops its closure; a running closure exits its thread
     /// when it returns.
+    ///
+    /// The first thing it does is run the callbacks registered with
+    /// [`on_shutdown`](Self::on_shutdown).
     pub fn shutdown(&self, timeout: Duration) -> Shutdown {
         self.inner.shutdown(timeout)
+    }
+
+    /// Registers `f` to run when [`shutdown`](Self::shutdown) starts: on the
+    /// thread calling `shutdown`, before any task is cancelled or thread
+    /// joined, in registration order, each once and under `contain` (a panic
+    /// is logged; the other callbacks and the shutdown go on). Callbacks
+    /// must not block: they only signal work that does not belong to the
+    /// pools, such as a dedicated thread's loop, to stop.
+    ///
+    /// Dropping the returned hook unregisters `f`, which is then dropped
+    /// unrun. If shutdown has already started, `f` runs right here on the
+    /// calling thread and the hook is inert, so `f` runs exactly once either
+    /// way; the caller must not hold a lock `f` takes.
+    pub fn on_shutdown(&self, f: Box<dyn FnOnce() + Send>) -> ShutdownHook {
+        self.inner.shutdown_hooks.register(f)
     }
 
     fn submit<T: Send + 'static>(
