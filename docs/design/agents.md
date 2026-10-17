@@ -140,7 +140,7 @@ pub enum ResumeCommand {
 - 路由：消费方通过 `ServiceSet<dyn SessionSource>` 拿到全部提供者，按 `SessionKey::source` 找 `id()` 相同的那一个调用 `read` / `turns` / `load` / `resume`；找不到（提供者已停用）就当作 `NotFound`，不改调用别的提供者。同一个上游会话可以同时出现在两个来源里（如本地日志和 P3 的 ACP），它们是两个不同的 `SessionKey`；`usage` 按与来源无关的 `UsageKey` 去重，不会重复计数。
 - `welcome`、`project_home`、`worktrees` 在渲染时调 `sessions()`；收到 `SessionsChanged` 后安排重绘。
 - `usage` 收到 `SessionsChanged` 后在 executor 上对变化的会话调 `read`，把记录和新游标在同一个 SQLite 事务里写入，所以重启后从自己的游标继续，不重复也不遗漏。
-- 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即补读不持有 `BusyGuard`，按批次让出，剩余的历史在空闲时继续。每批的大小和节奏由 `usage` 的设计文档规定。追加到正在进行的会话的新内容不受这条限制。
+- 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即正在运行的一批持有 `BusyGuard`，这一批的结果写入、游标提交之后才释放；批与批之间不持有守卫，剩余的历史不预先排队，等 kernel 发出 `Quiescent` 事件后再调度下一批。所以每一批都计入忙碌，kernel 只在批与批之间报告静止。每批的大小和节奏由 `usage` 的设计文档规定。追加到正在进行的会话的新内容不受这条限制。
 - `review` 在 executor 上调 `turns` 和 `load`，`review_view` 只读 `review` 的快照。
 - `terminal` 调 `resume`，按上面的规则映射成命令。
 - `project_home`、`welcome` 在显示或打开 `tail_pending` 的会话行时调 `complete`。
