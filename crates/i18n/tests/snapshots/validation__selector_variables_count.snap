@@ -1,0 +1,5 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"selector-variables-count\")"
+---
+zh-CN/app.ftl:1: app-files: uses no variables but en uses variables $count

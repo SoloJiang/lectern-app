@@ -1,0 +1,6 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"message-sets-differ\")"
+---
+zh-CN/app.ftl: app-only-en: missing message (defined at en/app.ftl:2)
+zh-CN/app.ftl:2: app-only-zh: message is not in en/app.ftl

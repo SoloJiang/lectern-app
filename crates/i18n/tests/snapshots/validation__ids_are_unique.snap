@@ -1,0 +1,9 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"duplicate-ids\")"
+---
+en/app.ftl:2: app-hello: duplicate message ID (first defined at en/app.ftl:1)
+en/app.ftl:4: -term: duplicate term ID (first defined at en/app.ftl:3)
+en/app.ftl:7: app-attr.tooltip: duplicate attribute
+zh-CN/more.ftl:2: app-hello: IDs in more.ftl must start with `more-`
+zh-CN/more.ftl:2: app-hello: duplicate message ID (first defined at zh-CN/app.ftl:1)

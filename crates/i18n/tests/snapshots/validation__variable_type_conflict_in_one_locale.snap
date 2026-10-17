@@ -1,0 +1,5 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"variable-type-conflict-in-one-locale\")"
+---
+en/app.ftl:1: app-x: $x is used both as a number (plural or number keys) and as a string (string keys)

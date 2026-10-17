@@ -1,0 +1,8 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"circular-references\")"
+---
+en/app.ftl:2: app-b: circular reference: app-a -> app-b -> app-a
+en/app.ftl:1: app-a: circular reference: app-b -> app-a -> app-b
+en/app.ftl:3: app-self: circular reference: app-self -> app-self
+en/app.ftl:5: -loop: circular reference: app-term -> -loop -> -loop
