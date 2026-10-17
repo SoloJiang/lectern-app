@@ -134,7 +134,7 @@ pub enum ResumeCommand {
 
 - 程序名和固定参数由 `terminal` 按枚举映射，来源不能给出任意程序、参数或环境变量。
 - `session_id` 必须是 UUID 的规范写法（两种 agent 的会话 ID 都是 UUID），不是时 `terminal` 拒绝，所以它不会被解析成选项或注入别的参数。
-- 工作目录不取自来源：`terminal` 用这个会话在 `SessionList` 里的 `cwd`，并要求它在一个已打开项目的 worktree 里，否则不恢复。
+- 工作目录不取自来源：`terminal` 用这个会话在 `SessionList` 里的 `cwd`，并要求它在一个已打开项目的 worktree 根或已打开的文件夹项目根之内，否则不恢复。
 - `terminal` 只接受内置来源（本 crate 的 "session-claude-code"、"session-codex"，以后内置的 ACP 来源）的 `ResumeCommand`；第三方进程插件来源的 `resume` 结果一律忽略，直到它们有对应的能力声明（另写 ADR）。
 
 调用方：
@@ -142,7 +142,7 @@ pub enum ResumeCommand {
 - 路由：消费方通过 `ServiceSet<dyn SessionSource>` 拿到全部提供者，按 `SessionKey::source` 找 `id()` 相同的那一个调用 `read` / `turns` / `load` / `resume`；找不到（提供者已停用）就当作 `NotFound`，不改调用别的提供者。同一个上游会话可以同时出现在两个来源里（如本地日志和 P3 的 ACP），它们是两个不同的 `SessionKey`；`usage` 按与来源无关的 `UsageKey` 去重，不会重复计数。
 - `welcome`、`project_home`、`worktrees` 在渲染时调 `sessions()`；收到 `SessionsChanged` 后安排重绘。
 - `usage` 收到 `SessionsChanged` 后在 executor 上对变化的会话调 `read`，把记录和新游标在同一个 SQLite 事务里写入，所以重启后从自己的游标继续，不重复也不遗漏。
-- 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即正在运行的一批持有 `BusyGuard`，这一批的结果写入、游标提交之后才释放；批与批之间不持有守卫，剩余的历史不预先排队，等 kernel 发出 `Quiescent` 事件后再调度下一批。所以每一批都计入忙碌，kernel 只在批与批之间报告静止。每批的大小和节奏由 `usage` 的设计文档规定。追加到正在进行的会话的新内容不受这条限制。
+- 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即正在运行的一批持有 `BusyGuard`，这一批的结果写入、游标提交之后才释放；批与批之间不持有守卫，剩余的历史不预先排队，等 kernel 发出 `Quiescent` 事件、并且静止持续 10 秒（长于 [kernel 设计](kernel.md)「静止」里内存采样要求的 5 秒连续静止）后才调度下一批；其间出现忙碌就重新计时。所以每一批都计入忙碌，批与批之间留出完整的采样窗口。每批的大小和节奏由 `usage` 的设计文档规定。追加到正在进行的会话的新内容不受这条限制。
 - `review` 在 executor 上调 `turns` 和 `load`，`review_view` 只读 `review` 的快照。
 - `terminal` 调 `resume`，按上面的规则映射成命令。
 - `project_home`、`welcome` 在显示或打开 `tail_pending` 的会话行时调 `complete`。
@@ -298,8 +298,11 @@ pub struct Batch {
 }
 
 pub struct Positioned<T> {
-    /// 这一行在（解压后的）文件里的字节偏移。同一会话内严格递增，是记录的顺序。
+    /// 这一行在（解压后的）文件里的字节偏移。不同行的 pos 严格递增；同一行产生的多条记录 pos 相同，
+    /// 用 `seq` 区分。记录的顺序是 (pos, seq)，与 `Batch` 里的顺序一致。
     pub pos: u64,
+    /// 同一行内的序号，从 0 开始。
+    pub seq: u16,
     /// 继承自父会话或分叉来源的前缀（见「子 agent 与继承前缀」）。
     pub inherited: bool,
     pub value: T,
@@ -377,7 +380,7 @@ pub enum ToolStatus { Completed, Failed, Denied, Interrupted }
 | `Search` | `Grep`、`Glob`（`path`）、`LS` | 无（同上） |
 | `SpawnAgent` | `Task`、`Agent` | 派出子 agent 的工具（`spawn_agent` 一类，按 fixtures 补全） |
 
-结果状态：Claude Code 的 `tool_result.is_error` 为 true 是 `Failed`，`toolUseResult.interrupted` 为 true 是 `Interrupted`，权限被拒是 `Denied`；Codex 的 `function_call_output.output.success == false` 是 `Failed`。
+结果状态：Claude Code 的 `tool_result.is_error` 为 true 是 `Failed`，`toolUseResult.interrupted` 为 true 是 `Interrupted`，权限被拒是 `Denied`；Codex 的 `function_call_output.output.success == false` 是 `Failed`；`local_shell_call` 没有对应的 output 记录，结束事件取它自带的 `status`：同一 `call_id` 出现 `completed` 时发 `ToolFinished`（`Ok`），`incomplete` 时发 `ToolFinished`（`Interrupted`），`in_progress` 只发开始。
 
 用量与额度（ADR 0014、ADR 0022）：
 
