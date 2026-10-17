@@ -4227,6 +4227,18 @@ dependencies = [
 [[package]]
 name = "lectern-bench"
 version = "0.0.0"
+dependencies = [
+ "insta",
+ "lectern-agents",
+ "lectern-executor",
+ "lectern-git",
+ "lectern-i18n",
+ "lectern-kernel",
+ "lectern-platform",
+ "lectern-services",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-cache"

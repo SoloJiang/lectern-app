@@ -267,8 +267,8 @@ pub enum FileKind {
 
 基准：
 
-- 实现 PR 提供 `#[ignore]` 的 `perf_smoke` 测试：对同一棵 728 个文件的目录树各做 10 000 次 `stat`、`read`，与 `symlink_metadata`、`std::fs::read` 对比，打印比值，在 macOS 上运行一次并把结果写进 PR 描述。
-- `bench` 实现后（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）加入 `platform/safe_stat`、`platform/safe_read_4k`，按上面的比值设预算，只测 `SafeRoot::open` 选中的生产后端；`perf_smoke` 随之删除（[bench 设计「迁移」](bench.md#迁移)）。`git` 的 `git/changes_clean` 包含它们的成本。
+- `bench` 的 `platform/safe_stat`、`platform/safe_read_4k`（[bench 设计「迁移」](bench.md#迁移)）：bench 自己生成 728 个 4 KiB 文件、深度 4 的目录树，与同一路径上的 `symlink_metadata`、`std::fs::read` 交替采样，按上面的比值判定；只测 `SafeRoot::open` 选中的生产后端（macOS 上是 `NofollowAny`，Linux 上是 `Openat2`），`Walk` 不设基准。`git` 的 `git/changes_clean` 包含它们的成本。
+- 实现 PR 里的 `#[ignore]` 测试 `perf_smoke`（对每个后端各做 10 000 次 `stat`、`read` 并打印比值）已由 bench 第 1 步删除，它在 Linux 上的结果见「实际验证」。
 
 ## 状态与异常
 

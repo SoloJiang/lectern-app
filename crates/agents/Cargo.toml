@@ -11,7 +11,8 @@ publish.workspace = true
 layer = "domain"
 
 [features]
-# `testing::parse_file`, for tests and lectern-bench (docs/design/agents.md).
+# `testing::parse_file` and the synthetic sessions, for tests and lectern-bench
+# (docs/design/agents.md).
 test-support = []
 
 [dependencies]
@@ -25,10 +26,6 @@ ruzstd.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
-
-[[test]]
-name = "perf_smoke"
-required-features = ["test-support"]
 
 [lints]
 workspace = true

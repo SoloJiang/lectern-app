@@ -176,6 +176,11 @@ impl SessionFilter {
 /// 测试与 bench 用：不经过插件，直接解析一个文件（`test-support` feature）。
 pub mod testing {
     pub fn parse_file(agent: Agent, path: &Path) -> Result<(Vec<Positioned<Record>>, TurnIndex), SessionError>;
+    /// bench 的夹具（[bench 设计「迁移」](bench.md#迁移)）：fixtures 用 `include_bytes!` 嵌入，重复拼接到不少于 `len` 字节。
+    pub fn synthetic_session(len: usize) -> Vec<u8>;   // Claude Code 的全部会话文件
+    pub fn append_chunk() -> &'static [u8];            // 开头到第一个不早于 4096 字节的行尾
+    pub fn synthetic_rollout(len: usize) -> Vec<u8>;   // Codex 的两个主会话
+    pub fn compress_zst(data: &[u8]) -> Vec<u8>;       // ruzstd 最快档，一个帧
 }
 ```
 
@@ -872,7 +877,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - **`serde_json` 打开 `raw_value` feature。** 不是新依赖：工具输入以借用的原样 JSON 保留，只有分类表里的工具才解析，`load` 原样交出。没有新增依赖，`just deny` 通过。
 - **`testing::parse_file`。** Codex 在第 3 步之前返回 `Unrecognized`；单元测试里不打开 `test-support` 也能用。
 - **插件标记。** ADR 0025 规定在第一个实现 `Plugin` 的 PR 里加 `plugin = true`，所以这一步不加，第 4 步加。
-- **bench 的形式。** `bench` crate 的设计文档（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）还没有写，按 `crates/bench/AGENTS.md` 不能先加基准代码。这一步把 `agents/parse_throughput`、`agents/append_4k` 写成 `crates/agents/tests/perf_smoke.rs` 里被忽略的测试（`required-features = ["test-support"]`），打印实测值和预算，超出时失败；`bench` 的设计文档合并后再移进 `lectern-bench`。`agents/parse_throughput` 用的是重复拼接到 50 MB 的合成 fixtures。
+- **bench 的形式。** `bench` crate 的设计文档（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）还没有写，按 `crates/bench/AGENTS.md` 不能先加基准代码。这一步把 `agents/parse_throughput`、`agents/append_4k` 写成 `crates/agents/tests/perf_smoke.rs` 里被忽略的测试（`required-features = ["test-support"]`），打印实测值和预算，超出时失败；`bench` 的设计文档合并后再移进 `lectern-bench`。`agents/parse_throughput` 用的是重复拼接到 50 MB 的合成 fixtures。bench 第 1 步已把它们移进 `crates/bench`（[bench 设计「迁移」](bench.md#迁移)），拼接会话和取约 4 KB 完整行的代码在 `testing::synthetic_session`、`testing::append_chunk`，`tests/perf_smoke.rs` 随之删除。
 
 第 3 步：
 
@@ -890,4 +895,4 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - **键的顺序。** 读取路径按 Codex 的写法先读 `type` 再按它选结构，不缓存；`type` 不在第一个键时（文件被别的工具重新序列化过，如脱敏工具）先留下其余键值的原样 JSON 再读，结果相同。
 - **`ruzstd` 的版本与 feature。** `Cargo.lock` 里原来没有 `ruzstd`，取实现时 crates.io 上的最新版本 0.9.1，默认 feature（`std`，以及 `hash` 用 `twox-hash` 2.1.5 校验帧的校验和），都是 MIT，`just deny` 通过。测试还用它的编码器生成归档。
 - **共用的代码。** `Parsed`、`Activity` 移到 `read` 模块（`claude`、`codex` 和 crate 根各自导出，`claude::Parsed` 的路径不变），词法路径拼接移到 `path` 模块；`IndexBuilder` 加了 Codex 用的「后补 prompt」「结果改指向改动记录」「明确结束轮次」，`finish_tool` 的结果引用改为可选。Claude Code 的行为不变（第 2 步的测试和快照不变）。
-- **bench 的形式。** 与第 2 步相同，`agents/zst_throughput`、`agents/zst_load_decoded` 写在 `tests/perf_smoke.rs` 里；归档是合成的 Codex fixtures 重复拼接到 50 MB 后用 `ruzstd` 最快档压缩的。`agents/zst_throughput` 用不建副本的适配器（`testing::parse_file`）从头解压并解析一遍。
+- **bench 的形式。** 与第 2 步相同，`agents/zst_throughput`、`agents/zst_load_decoded` 写在 `tests/perf_smoke.rs` 里；归档是合成的 Codex fixtures 重复拼接到 50 MB 后用 `ruzstd` 最快档压缩的。`agents/zst_throughput` 用不建副本的适配器（`testing::parse_file`）从头解压并解析一遍。bench 第 1 步把这两项一并移进 `crates/bench`，归档由 `testing::synthetic_rollout` 和 `testing::compress_zst` 生成。

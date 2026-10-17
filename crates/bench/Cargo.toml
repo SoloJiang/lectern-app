@@ -10,5 +10,47 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "tool"
 
+# `cargo bench` and `cargo test --benches` (`just bench`) run only the three
+# benchmark targets; the unit tests run under `just test`.
+[lib]
+bench = false
+
+[[bin]]
+name = "lectern-bench-report"
+bench = false
+
+[dependencies]
+# The JSON reports (docs/design/bench.md「依赖」).
+serde_json.workspace = true
+
+# The crates under test, with their `testing` modules
+# (docs/design/bench.md「夹具与 test-support」). Only compiled into the
+# benchmark targets and tests.
+[dev-dependencies]
+insta.workspace = true
+lectern-agents = { path = "../agents", features = ["test-support"] }
+lectern-executor = { path = "../executor" }
+lectern-git = { path = "../git", features = ["test-support"] }
+lectern-i18n = { path = "../i18n", features = ["test-support"] }
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+lectern-platform = { path = "../platform" }
+lectern-services = { path = "../services" }
+tempfile.workspace = true
+
+# In-process timing; the counting allocator stays out of it.
+[[bench]]
+name = "time"
+harness = false
+
+# In-process live bytes, with `CountingAlloc` as the global allocator.
+[[bench]]
+name = "memory"
+harness = false
+
+# Process-level benchmarks: app/*, plugin/*, lsp/*, baseline/*.
+[[bench]]
+name = "process"
+harness = false
+
 [lints]
 workspace = true

@@ -283,5 +283,5 @@ struct TaskCell<T> {
 - `run_until_idle` 先运行 `Interactive` 再运行 `Background`，同一队列按入队顺序；设计写的是「按入队顺序」，与工作线程的取任务顺序保持一致更容易对照。`manual()` 的 `shutdown` 在调用线程上运行被取消的任务（没有工作线程可以做这件事），专用任务在 `manual()` 下仍然建线程。
 - `Config::workers` 为 0 时按 1 处理；只有 1 个工作线程时不保留 `Interactive` 线程，否则 `Background` 任务永远没有线程运行。
 - 增加了设计没写的细节：`TaskError` 实现 `Display` 和 `Error`；`Task` 标 `#[must_use]`（drop 即取消）；`Task` 在结果被取走后再次 poll 得到 `Err(Cancelled)`，不 panic；专用线程建不起来时记日志、在调用线程上于 `contain` 里丢弃闭包、句柄为已取消；`executor-reclaim` 线程建不起来时记日志并泄漏这个任务（与 kernel 的 payload 回收相同），不在提交线程上 drop。
-- 「性能」一节的两项基准没有加：`bench` crate 还没有设计文档和基准框架（`crates/bench/AGENTS.md`），随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 一起加入。
+- 「性能」一节的两项基准没有加：`bench` crate 还没有设计文档和基准框架（`crates/bench/AGENTS.md`），随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 一起加入。bench 第 1 步已加入 `executor/spawn_10k`、`executor/wake_1000x100`（只记录），只用公开接口。
 - 日志写到 stderr（`lectern-executor:` 前缀），与 kernel 相同，由 `app` 重定向。

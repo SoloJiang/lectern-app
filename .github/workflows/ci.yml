@@ -35,6 +35,10 @@ jobs:
         run: just test --profile ci
       - name: Doctests
         run: just doctest
+      # A smoke run: every in-process benchmark once on small inputs, so a
+      # broken benchmark or an unregistered budget fails here.
+      - name: Performance budget benchmarks (smoke)
+        run: just bench
 
   # Full workspace, including GPUI, on Apple Silicon.
   macos:
@@ -61,3 +65,11 @@ jobs:
         run: cargo build --locked -p lectern-app
       - name: Performance budget benchmarks
         run: just bench
+      # The report is uploaded even when a budget is exceeded.
+      - name: Upload the benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lectern-bench-report
+          path: target/lectern-bench/report.json
+          if-no-files-found: warn

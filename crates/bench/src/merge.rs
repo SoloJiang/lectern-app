@@ -1,0 +1,308 @@
+//! `lectern-bench-report merge`: merges the targets' reports into
+//! `report.json` and decides `just bench`'s exit code
+//! (docs/design/bench.md「报告」).
+
+use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use serde_json::{Map, Value as Json, json};
+
+use crate::budgets::{BUDGETS, Budget, Target};
+use crate::report::{self, VERSION};
+
+const USAGE: &str = "usage: lectern-bench-report merge [--require package] <dir>";
+
+/// The binary's entry point; `args` without the program name.
+pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
+    let args: Vec<String> = args.into_iter().collect();
+    let Some((command, rest)) = args.split_first() else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    if command != "merge" {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+    let mut require_package = false;
+    let mut dir = None;
+    let mut rest = rest.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--require" => match rest.next().map(String::as_str) {
+                Some("package") => require_package = true,
+                _ => {
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
+            path if dir.is_none() && !path.starts_with('-') => dir = Some(PathBuf::from(path)),
+            _ => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let Some(dir) = dir else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    let merged = merge(
+        &dir,
+        BUDGETS,
+        require_package,
+        std::env::var("GITHUB_SHA").ok(),
+    );
+    print!("{}", merged.text);
+    let text = serde_json::to_string_pretty(&merged.report).unwrap_or_default();
+    if let Err(error) = std::fs::write(dir.join("report.json"), text + "\n") {
+        eprintln!("lectern-bench-report: could not write report.json: {error}");
+        return ExitCode::from(2);
+    }
+    if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(summary)
+            .and_then(|mut f| f.write_all(merged.markdown.as_bytes()));
+        if let Err(error) = written {
+            eprintln!("lectern-bench-report: could not append the step summary: {error}");
+        }
+    }
+    ExitCode::from(merged.exit)
+}
+
+pub(crate) struct Merged {
+    pub report: Json,
+    pub text: String,
+    pub markdown: String,
+    pub exit: u8,
+}
+
+/// One target's report as read from disk.
+struct Read {
+    target: Target,
+    json: Json,
+}
+
+fn read(dir: &Path, target: Target) -> Result<Option<Read>, String> {
+    let path = dir.join(report::file_name(target));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("读不了 {}：{error}", path.display())),
+    };
+    let json: Json = serde_json::from_str(&text)
+        .map_err(|e| format!("{} 不是合法的 JSON：{e}", path.display()))?;
+    if json["version"] != json!(VERSION) {
+        return Err(format!("{} 的版本不是 {VERSION}", path.display()));
+    }
+    if json["target"] != json!(target.name()) {
+        return Err(format!(
+            "{} 的 target 不是 {}",
+            path.display(),
+            target.name()
+        ));
+    }
+    Ok(Some(Read { target, json }))
+}
+
+fn strings(json: &Json) -> Vec<String> {
+    json.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every ID the reports must contain once: each budget, with `plugin/*`
+/// expanded over `plugins` and `lsp/*` over `language_servers` (a plugin
+/// with its own entry uses that entry); an empty list leaves the wildcard
+/// entry itself.
+pub(crate) fn expected<'a>(
+    budgets: &'a [Budget],
+    plugins: &[String],
+    language_servers: &[String],
+) -> Vec<(String, &'a Budget)> {
+    let mut out = Vec::new();
+    for budget in budgets {
+        if !budget.is_wildcard() {
+            out.push((budget.id.to_owned(), budget));
+            continue;
+        }
+        let list = if budget.id.starts_with("plugin/") {
+            plugins
+        } else if budget.id.starts_with("lsp/") {
+            language_servers
+        } else {
+            &[]
+        };
+        if list.is_empty() {
+            out.push((budget.id.to_owned(), budget));
+            continue;
+        }
+        for name in list {
+            let id = budget.id.replacen('*', name, 1);
+            if budgets.iter().any(|b| b.id == id) {
+                continue;
+            }
+            out.push((id, budget));
+        }
+    }
+    out
+}
+
+fn placeholder(id: &str, budget: &Budget, status: &str, reason: &str) -> Json {
+    json!({
+        "id": id,
+        "status": status,
+        "reason": reason,
+        "budget": budget.describe(),
+        "source": budget.source,
+        "measured": "",
+        "attempts": [],
+        "noisy": false,
+    })
+}
+
+pub(crate) fn merge(
+    dir: &Path,
+    budgets: &[Budget],
+    require_package: bool,
+    commit: Option<String>,
+) -> Merged {
+    let mut errors: Vec<String> = Vec::new();
+    let mut reports: Vec<Read> = Vec::new();
+    for target in Target::ALL {
+        match read(dir, target) {
+            Ok(Some(r)) => reports.push(r),
+            Ok(None) if target == Target::Package => {
+                if require_package {
+                    errors.push(format!(
+                        "缺少 {}（带 --require package 时必须有）",
+                        report::file_name(target)
+                    ));
+                }
+            }
+            Ok(None) => errors.push(format!(
+                "缺少 {}：这个目标没有编译成功或中途崩溃",
+                report::file_name(target)
+            )),
+            Err(error) => errors.push(error),
+        }
+    }
+    let has_package = reports.iter().any(|r| r.target == Target::Package);
+
+    // Mode and gating must agree across the benchmark targets.
+    let benchmarked: Vec<&Read> = reports
+        .iter()
+        .filter(|r| r.target != Target::Package)
+        .collect();
+    let mode = benchmarked
+        .first()
+        .and_then(|r| r.json["mode"].as_str())
+        .unwrap_or("smoke")
+        .to_owned();
+    let gated = benchmarked
+        .first()
+        .and_then(|r| r.json["gated"].as_bool())
+        .unwrap_or(false);
+    for r in &benchmarked {
+        if r.json["mode"].as_str() != Some(&mode) || r.json["gated"].as_bool() != Some(gated) {
+            errors.push(format!(
+                "{} 的 mode 或 gated 与其他报告不同",
+                report::file_name(r.target)
+            ));
+        }
+    }
+    let host = benchmarked
+        .first()
+        .map(|r| r.json["host"].clone())
+        .unwrap_or(Json::Null);
+
+    let process = reports.iter().find(|r| r.target == Target::Process);
+    let plugins = process.map_or_else(Vec::new, |r| strings(&r.json["plugins"]));
+    let language_servers = process.map_or_else(Vec::new, |r| strings(&r.json["language_servers"]));
+
+    // Every result, by ID, with the report it came from.
+    let mut found: BTreeMap<String, Vec<(Target, Json)>> = BTreeMap::new();
+    for r in &reports {
+        for error in strings(&r.json["errors"]) {
+            errors.push(format!("{}：{error}", report::file_name(r.target)));
+        }
+        for result in r.json["results"].as_array().into_iter().flatten() {
+            let id = result["id"].as_str().unwrap_or("").to_owned();
+            found
+                .entry(id)
+                .or_default()
+                .push((r.target, result.clone()));
+        }
+    }
+
+    let mut results = Vec::new();
+    for (id, budget) in expected(budgets, &plugins, &language_servers) {
+        let occurrences = found.remove(&id).unwrap_or_default();
+        match occurrences.as_slice() {
+            [] if budget.target == Target::Package && !has_package => {
+                results.push(placeholder(&id, budget, "skipped", "未打包"));
+            }
+            [] => {
+                errors.push(format!("{id} 不在 {} 里", report::file_name(budget.target)));
+                results.push(placeholder(&id, budget, "error", "报告里缺少这一项"));
+            }
+            [(target, result)] if *target == budget.target => results.push(result.clone()),
+            [(target, result)] => {
+                errors.push(format!(
+                    "{id} 出现在 {}，应在 {}",
+                    report::file_name(*target),
+                    report::file_name(budget.target)
+                ));
+                results.push(result.clone());
+            }
+            [(_, result), ..] => {
+                let files: Vec<String> = occurrences
+                    .iter()
+                    .map(|(t, _)| report::file_name(*t))
+                    .collect();
+                errors.push(format!("{id} 出现了多次：{}", files.join("、")));
+                results.push(result.clone());
+            }
+        }
+    }
+    for (id, occurrences) in found {
+        for (target, _) in occurrences {
+            errors.push(format!(
+                "{} 里的 {id} 不在预算表里（或插件、语言服务器列表里没有它）",
+                report::file_name(target)
+            ));
+        }
+    }
+
+    let exit = if !errors.is_empty() || results.iter().any(|r| r["status"] == "error") {
+        2
+    } else if gated && results.iter().any(|r| r["status"] == "over") {
+        1
+    } else {
+        0
+    };
+    let title = report::title("report", &mode, gated);
+    let text = report::text_table(&title, &results, &errors);
+    let markdown = report::markdown(&title, &results, &errors);
+    let mut out = Map::new();
+    out.insert("version".into(), json!(VERSION));
+    out.insert("mode".into(), json!(mode));
+    out.insert("gated".into(), json!(gated));
+    out.insert("host".into(), host);
+    out.insert("commit".into(), json!(commit));
+    out.insert("results".into(), Json::Array(results));
+    out.insert("errors".into(), json!(errors));
+    Merged {
+        report: Json::Object(out),
+        text,
+        markdown,
+        exit,
+    }
+}

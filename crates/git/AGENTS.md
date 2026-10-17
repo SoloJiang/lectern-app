@@ -32,4 +32,4 @@ just test -p lectern-git
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。需要和 git 输出对照的夹具是目录格式（[说明](tests/fixtures/README.md)），由 `tests/fixtures/scripts/` 用真实的 git 生成一次；测试只用 `TestRepo::import_fixture` 导入，不运行 git。
 - 测试仓库用 `testing::TestRepo`（`test-support` feature）构造，不调用 git 命令行；发现仓库用 `testing::discover`，只读仓库自己的配置，不受机器上的 git 配置影响。
 - git 目录里的管理文件只在 `src/gitdir.rs` 里按路径读；工作区文件只经 `SafeRoot`。
-- 计时：`cargo test --release -p lectern-git --all-features -- --ignored perf_smoke`（`git_open`、`git_diff_50_cold` / `warm`；`bench` 的 git 基准等 bench 的设计文档合并后加入）。
+- 计时：`lectern-bench` 的 `git/open`、`git/open_handle`、`git/diff_50_cold`、`git/diff_50_warm`，夹具由 `TestRepo` 生成：`just bench git/`（Linux 上是冒烟运行，`just bench --measure git/` 采样并打印实测值）。`bench` 只经公开接口和 `testing`（如 `testing::open_handle`）调用本 crate。
