@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lectern_platform::{FileKind, Meta, Read, SafeError, SafeRoot, Timestamp};
@@ -110,6 +110,8 @@ pub(crate) struct IndexSnapshot {
     /// In path order; sparse directory entries expanded.
     items: Vec<IndexItem>,
     invalid: Vec<Arc<[u8]>>,
+    /// See `folded()`.
+    folded: OnceLock<Vec<(Box<[u8]>, usize)>>,
 }
 
 struct IndexItem {
@@ -279,9 +281,18 @@ pub(crate) fn run(
     if let Some((prev, origin, paths)) = refresh {
         let stale_head = *base == Base::Head
             && resolve_base(subject, &handle, base, cancel)? != prev.base_tree();
+        // A reported directory stands for everything beneath it, so an
+        // attribute file the previous comparison loaded from there counts
+        // as reported too.
         let touches_rules = paths.iter().any(|p| {
             let name = basename(p.as_bytes());
-            name == b".gitattributes" || name == b".gitignore"
+            name == b".gitattributes"
+                || name == b".gitignore"
+                || origin
+                    .conversion
+                    .files
+                    .iter()
+                    .any(|f| Scope(vec![p.clone()]).contains(&f.path))
         });
         if stale_head || origin.index_checksum != index.checksum || touches_rules {
             refresh = None;
@@ -437,6 +448,15 @@ pub(crate) fn run(
         (found.entries, found.capped)
     };
     if let Some((_, origin, _)) = refresh {
+        // A new `.gitattributes` beneath a reported directory changes the
+        // rules the previous conversion state doesn't have: compare
+        // everything.
+        if untracked
+            .iter()
+            .any(|(p, _)| basename(p.as_bytes()) == b".gitattributes")
+        {
+            return run(subject, base, limits, cancel, None);
+        }
         untracked_capped |= origin.untracked_capped;
     }
 
@@ -874,6 +894,7 @@ fn snapshot(
             state: gix::index::State::new(hash.to_gix()),
             items: Vec::new(),
             invalid: Vec::new(),
+            folded: OnceLock::new(),
         },
         Some((file, checksum)) => {
             let state: gix::index::State = file.into();
@@ -883,6 +904,7 @@ fn snapshot(
                 state,
                 items,
                 invalid,
+                folded: OnceLock::new(),
             }
         }
     };
@@ -1001,15 +1023,54 @@ fn index_items(
     Ok((items, invalid))
 }
 
+impl IndexSnapshot {
+    /// The items' paths ASCII-lowercased, sorted, with their item index;
+    /// built the first time a case-insensitive lookup needs it.
+    fn folded(&self) -> &[(Box<[u8]>, usize)] {
+        self.folded.get_or_init(|| {
+            let mut out: Vec<(Box<[u8]>, usize)> = self
+                .items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| (item.path.as_bytes().to_ascii_lowercase().into(), i))
+                .collect();
+            out.sort();
+            out
+        })
+    }
+}
+
 impl untracked::Index for IndexSnapshot {
-    fn entry(&self, path: &[u8]) -> Option<Mode> {
-        let item = self.find(path)?;
+    fn entry(&self, path: &[u8], fold: bool) -> Option<Mode> {
+        let item = if fold {
+            let folded = self.folded();
+            let key = path.to_ascii_lowercase();
+            let at = folded.partition_point(|(p, _)| p[..] < key[..]);
+            let (p, i) = folded.get(at)?;
+            if p[..] != key[..] {
+                return None;
+            }
+            &self.items[*i]
+        } else {
+            self.find(path)?
+        };
         item.entry.map(|e| e.0).or(item.conflict)
     }
 
-    fn has_beneath(&self, dir: &[u8]) -> bool {
-        let mut prefix = dir.to_vec();
+    fn has_beneath(&self, dir: &[u8], fold: bool) -> bool {
+        let mut prefix = if fold {
+            dir.to_ascii_lowercase()
+        } else {
+            dir.to_vec()
+        };
         prefix.push(b'/');
+        if fold {
+            let folded = self.folded();
+            let start = folded.partition_point(|(p, _)| p[..] < prefix[..]);
+            return folded
+                .get(start)
+                .is_some_and(|(p, _)| p.starts_with(&prefix));
+        }
         let start = self
             .items
             .partition_point(|i| i.path.as_bytes() < prefix.as_slice());
@@ -1255,32 +1316,36 @@ impl Reader<'_> {
             Err(SafeError::NotFound) => return Seen::SameAsIndex,
             Ok(Read::File { bytes, .. }) => {
                 // `gitdir: …` of an absorbed submodule: only a directory under
-                // this repository's `modules/` is read (a git directory, by
-                // path), never one the worktree file points elsewhere.
+                // this repository's `modules/` is read, never one the worktree
+                // file points elsewhere, and only through a `SafeRoot` at the
+                // common directory: a symbolic link at any level of
+                // `modules/<name>/…` makes it unreadable.
                 let Some(target) = bytes.trim_ascii_end().strip_prefix(b"gitdir:") else {
                     return unreadable();
                 };
                 let dir = rela(self.root_path, path.as_bytes());
                 let git_dir = normalize(&dir.join(rela(Path::new(""), target.trim_ascii())));
-                if !git_dir.starts_with(self.common_dir.join("modules")) {
+                let Some(beneath) = git_dir
+                    .strip_prefix(self.common_dir)
+                    .ok()
+                    .filter(|rel| rel.starts_with("modules"))
+                    .and_then(|rel| rel.to_str())
+                    .map(|rel| rel.as_bytes().to_vec())
+                else {
                     return unreadable();
-                }
+                };
+                let Ok(common) = SafeRoot::open(self.common_dir) else {
+                    return unreadable();
+                };
                 resolve_head(self.hash, &mut |name: &[u8]| {
-                    crate::gitdir::read(&rela(&git_dir, name)).ok().flatten()
+                    read_git_file(&common, &beneath, name)
                 })
             }
             // A `.git` directory in the worktree: read through `SafeRoot`.
             Ok(Read::Unsupported { meta }) if meta.kind == FileKind::Dir => {
                 let root = self.root;
                 resolve_head(self.hash, &mut |name: &[u8]| {
-                    let mut rel = dot_git.as_bytes().to_vec();
-                    rel.push(b'/');
-                    rel.extend_from_slice(name);
-                    let rel = RepoPath::new(&rel)?;
-                    match root.read(rel.as_rel()?, MAX) {
-                        Ok(Read::File { bytes, .. }) => Some(bytes),
-                        _ => None,
-                    }
+                    read_git_file(root, dot_git.as_bytes(), name)
                 })
             }
             _ => return unreadable(),
@@ -1303,10 +1368,30 @@ enum Head {
     Unreadable,
 }
 
+/// One file of a git directory: Ok(None) when it doesn't exist, Err when it
+/// can't be used (a symbolic link at any level, not a regular file, an
+/// error).
+type GitFile = Result<Option<Vec<u8>>, ()>;
+
+/// `<dir>/<name>` beneath `root`, a regular file read without following a
+/// symbolic link at any level.
+fn read_git_file(root: &SafeRoot, dir: &[u8], name: &[u8]) -> GitFile {
+    const MAX: u64 = 1024 * 1024;
+    let mut rel = dir.to_vec();
+    rel.push(b'/');
+    rel.extend_from_slice(name);
+    let rel = RepoPath::new(&rel).ok_or(())?;
+    match root.read(rel.as_rel().ok_or(())?, MAX) {
+        Ok(Read::File { bytes, .. }) => Ok(Some(bytes)),
+        Err(SafeError::NotFound) => Ok(None),
+        _ => Err(()),
+    }
+}
+
 /// A repository's HEAD from its files (`HEAD`, a loose reference or
 /// `packed-refs`), read by `read`, following up to five symbolic levels.
-fn resolve_head(hash: HashKind, read: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> Head {
-    let Some(head) = read(b"HEAD") else {
+fn resolve_head(hash: HashKind, read: &mut dyn FnMut(&[u8]) -> GitFile) -> Head {
+    let Ok(Some(head)) = read(b"HEAD") else {
         return Head::Unreadable;
     };
     let mut content = head;
@@ -1323,11 +1408,18 @@ fn resolve_head(hash: HashKind, read: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) 
         {
             return Head::Unreadable;
         }
-        if let Some(next) = read(&name) {
-            content = next;
-            continue;
+        match read(&name) {
+            Ok(Some(next)) => {
+                content = next;
+                continue;
+            }
+            Ok(None) => {}
+            Err(()) => return Head::Unreadable,
         }
-        let packed = read(b"packed-refs").unwrap_or_default();
+        let Ok(packed) = read(b"packed-refs") else {
+            return Head::Unreadable;
+        };
+        let packed = packed.unwrap_or_default();
         let found = packed.split(|&b| b == b'\n').find_map(|line| {
             let space = line.iter().position(|&b| b == b' ')?;
             let (hex, rest) = (&line[..space], &line[space + 1..]);

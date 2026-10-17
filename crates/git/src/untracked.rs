@@ -28,12 +28,14 @@ pub(crate) enum Kind {
     Repository,
 }
 
-/// How the index knows a path.
+/// How the index knows a path. With `fold` (`core.ignoreCase`) paths are
+/// compared with ASCII case folding, as git's case-insensitive index lookup
+/// (`index_file_exists` with `icase`) does.
 pub(crate) trait Index {
     /// The stage-0 (or conflict) entry's mode at `path`, if any.
-    fn entry(&self, path: &[u8]) -> Option<Mode>;
+    fn entry(&self, path: &[u8], fold: bool) -> Option<Mode>;
     /// Whether any index path lies beneath directory `dir`.
-    fn has_beneath(&self, dir: &[u8]) -> bool;
+    fn has_beneath(&self, dir: &[u8], fold: bool) -> bool;
 }
 
 /// Which paths a walk covers: each scope path and everything beneath it
@@ -136,6 +138,10 @@ fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
 }
 
 impl Walker<'_> {
+    fn fold(&self) -> bool {
+        self.case == Case::Fold
+    }
+
     /// Walks directory `dir` (empty for the root). Returns false once the
     /// limit is reached.
     fn dir(&mut self, dir: &[u8]) -> Result<bool, GitError> {
@@ -214,7 +220,10 @@ impl Walker<'_> {
                 }
                 continue;
             }
-            if !covered || self.index.entry(&path).is_some() || self.excluded(&path, false)? {
+            if !covered
+                || self.index.entry(&path, self.fold()).is_some()
+                || self.excluded(&path, false)?
+            {
                 continue;
             }
             let kind = match entry.kind {
@@ -233,7 +242,7 @@ impl Walker<'_> {
     fn directory(&mut self, path: &[u8], covered: bool) -> Result<bool, GitError> {
         // A submodule's worktree isn't walked. A tracked file replaced by a
         // directory is: its files are untracked.
-        if self.index.entry(path) == Some(Mode::Gitlink) {
+        if self.index.entry(path, self.fold()) == Some(Mode::Gitlink) {
             return Ok(true);
         }
         // Untracked files beneath an ignored directory are ignored too, even
@@ -241,7 +250,7 @@ impl Walker<'_> {
         if self.excluded(path, true)? {
             return Ok(true);
         }
-        if covered && !self.index.has_beneath(path) && self.is_repository(path) {
+        if covered && !self.index.has_beneath(path, self.fold()) && self.is_repository(path) {
             return Ok(self.push(path, Kind::Repository));
         }
         self.dir(path)

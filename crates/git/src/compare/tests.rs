@@ -1001,6 +1001,112 @@ fn worktree_staged_mv_then_removed_is_not_a_rename() {
 }
 
 #[test]
+#[cfg(unix)]
+fn worktree_absorbed_submodule_symlinks_under_modules_are_not_followed() {
+    let t = TestRepo::new();
+    let outside = t.base().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    // A HEAD that names a commit, outside the repository.
+    let foreign = Oid::for_blob(HashKind::Sha1, b"foreign");
+    std::fs::write(outside.join("HEAD"), format!("{}\n", foreign.to_hex())).unwrap();
+    let modules = t.common_dir().join("modules");
+    // `modules/linkhead`: a real git directory whose HEAD is a link outside.
+    std::fs::create_dir_all(modules.join("linkhead")).unwrap();
+    std::os::unix::fs::symlink(outside.join("HEAD"), modules.join("linkhead/HEAD")).unwrap();
+    // `modules/linkdir`: the git directory itself is a link outside.
+    std::os::unix::fs::symlink(&outside, modules.join("linkdir")).unwrap();
+    t.write_file("a/.git", b"gitdir: ../.git/modules/linkhead\n");
+    t.write_file("b/.git", b"gitdir: ../.git/modules/linkdir\n");
+    let recorded = t.blob(b"recorded");
+    let tree = t.tree_entries(&[
+        ("a", Mode::Gitlink, recorded),
+        ("b", Mode::Gitlink, recorded),
+    ]);
+    let commit = t.commit(tree, &[], "c");
+    t.set_ref("refs/heads/main", commit);
+    t.write_index(
+        t.common_dir(),
+        &[
+            IndexEntry::new("a", Mode::Gitlink, recorded),
+            IndexEntry::new("b", Mode::Gitlink, recorded),
+        ],
+    );
+    let r = short(recorded);
+    assert_eq!(
+        lines(&changes(&t)),
+        [
+            format!("M a g:{r} -> g:unreadable no-diff"),
+            format!("M b g:{r} -> g:unreadable no-diff"),
+        ]
+    );
+}
+
+#[test]
+fn worktree_ignore_case_matches_index_paths_without_case() {
+    for ignore_case in [true, false] {
+        let t = clean_repo(&[("Readme.md", b"r\n"), ("Docs/a.md", b"a\n")]);
+        t.append_config(&format!("[core]\n\tignorecase = {ignore_case}\n"));
+        // The worktree spells them differently, as a case-insensitive file
+        // system may report them.
+        std::fs::rename(t.root().join("Readme.md"), t.root().join("README.md")).unwrap();
+        std::fs::rename(t.root().join("Docs"), t.root().join("docs")).unwrap();
+        let set = changes(&t);
+        let untracked: Vec<&[u8]> = set
+            .files()
+            .iter()
+            .filter(|c| c.untracked)
+            .map(|c| c.path.as_bytes())
+            .collect();
+        if ignore_case {
+            assert!(untracked.is_empty(), "{:#?}", lines(&set));
+        } else {
+            assert_eq!(
+                untracked,
+                [&b"README.md"[..], b"docs/a.md"],
+                "{:#?}",
+                lines(&set)
+            );
+        }
+    }
+}
+
+#[test]
+fn worktree_refresh_paths_of_a_directory_reloads_its_attributes() {
+    let crlf: &[u8] = b"one\r\ntwo\r\n";
+    // A tracked `d/.gitattributes` that the first comparison loads.
+    let t = clean_repo(&[("d/.gitattributes", b"# none\n"), ("d/a.txt", crlf)]);
+    let wt = main_worktree(&t);
+    let cancel = no_cancel();
+    let first = wt.changes(Base::Head, &Limits::default(), &cancel).unwrap();
+    assert_eq!(lines(&first), Vec::<String>::new());
+    t.write_file("d/.gitattributes", b"*.txt text eol=lf\n");
+    let set = wt
+        .refresh(&first, Refresh::Paths(&[rp("d")]), &cancel)
+        .unwrap();
+    let l = lines(&set);
+    assert!(
+        l.iter()
+            .any(|l| l.starts_with("M d/a.txt") && l.contains(&b7(b"one\ntwo\n"))),
+        "{l:#?}"
+    );
+
+    // A new, untracked `.gitattributes` beneath a reported directory.
+    let t = clean_repo(&[("e/a.txt", crlf)]);
+    let wt = main_worktree(&t);
+    let first = wt.changes(Base::Head, &Limits::default(), &cancel).unwrap();
+    t.write_file("e/.gitattributes", b"*.txt text eol=lf\n");
+    let set = wt
+        .refresh(&first, Refresh::Paths(&[rp("e")]), &cancel)
+        .unwrap();
+    let l = lines(&set);
+    assert!(
+        l.iter()
+            .any(|l| l.starts_with("M e/a.txt") && l.contains(&b7(b"one\ntwo\n"))),
+        "{l:#?}"
+    );
+}
+
+#[test]
 fn worktree_submodule_gitdir_outside_modules_is_not_read() {
     let t = TestRepo::new();
     // An absorbed submodule whose `.git` file points outside `modules/`.
