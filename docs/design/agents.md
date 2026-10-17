@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：已接受，尚未实现。
+状态：实现中。第 1 步（`services` 的会话接口，#PR）已实现，第 2–4 步尚未实现（见「验收」）。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -69,7 +69,7 @@ pub fn plugins(deps: AgentsDeps) -> [(Name, Box<dyn Plugin>); 2];
 
 ### 服务接口（`lectern-services` 的 `session` 模块）
 
-类型都是不含行为的数据，能通过 JSON-RPC 序列化（serde 派生方式随 `services` 设计），以后的进程插件可以实现同一个接口。进程插件的单条消息上限是 4 MB（[ADR 0018](../adr/0018.md)）：经进程插件实现时，超过这个上限的单条正文由 `load` 返回 `SessionError::TooLarge(len)`，`read` 跳过该记录并计入 `oversized_lines`、游标越过它；分块传输留给进程插件宿主的设计。内置来源在进程内，不受此限。
+类型都是不含行为的数据，能通过 JSON-RPC 序列化（与 `services::project` 一样派生 `Serialize`、`Deserialize`，外部标记的枚举；都派生 `Clone`、`PartialEq`、`Debug`，不含浮点数的另派生 `Eq`，`RateWindow` 的 `used_percent` 是 `f32`，所以含它的 `RateLimitSample`、`Record`、`Batch` 只有 `PartialEq`），以后的进程插件可以实现同一个接口。进程插件的单条消息上限是 4 MB（[ADR 0018](../adr/0018.md)）：经进程插件实现时，超过这个上限的单条正文由 `load` 返回 `SessionError::TooLarge(len)`，`read` 跳过该记录并计入 `oversized_lines`、游标越过它；分块传输留给进程插件宿主的设计。内置来源在进程内，不受此限。
 
 ```rust
 /// 多实现服务：每种 agent 一个提供者，ACP（P3）和第三方会话来源再各加一个。
@@ -206,8 +206,9 @@ pub struct SessionList {
 }
 
 impl SessionList {
+    /// 线性查找。
     pub fn get(&self, key: &SessionKey) -> Option<&SessionSummary>;
-    /// 归位到这个项目的会话（含子 agent 会话），按 `last_activity` 从新到旧。
+    /// 归位到这个项目的会话（`Place::Located` 或 `Place::Resolved`，含子 agent 会话），按 `last_activity` 从新到旧。
     pub fn in_project<'a>(&'a self, project: &'a ProjectKey) -> impl Iterator<Item = &'a SessionSummary> + 'a;
 }
 
@@ -287,11 +288,21 @@ pub struct Diagnostics {
 ### 游标与批量读取
 
 ```rust
-/// 不透明，可序列化。消费方原样保存，不解读。
+/// 不透明，可序列化（serde 形式是 `to_bytes` 的字节）。消费方原样保存，不解读。
 pub struct Cursor { /* 见下 */ }
 
 impl Cursor {
     pub const START: Cursor;
+    /// 以下供提供者使用：外层的来源 ID、适配器版本和偏移由 `services` 编码，
+    /// `state`（偏移之前的 256 字节副本、解析器状态）是提供者自己的字节，`services` 不解读。
+    pub fn new(source: SourceId, adapter_version: u32, offset: u64, state: impl Into<Box<[u8]>>) -> Cursor;
+    pub fn is_start(&self) -> bool;
+    pub fn source(&self) -> Option<&SourceId>;      // `START` 为 None
+    pub fn adapter_version(&self) -> Option<u32>;   // `START` 为 None
+    pub fn offset(&self) -> u64;                    // `START` 为 0
+    pub fn state(&self) -> &[u8];                   // `START` 为空
+    /// 版本字节（1）；`START` 到此为止，否则依次是来源 ID（u16 LE 长度加 UTF-8）、
+    /// 适配器版本（u32 LE）、偏移（u64 LE），其余为 `state`。
     pub fn to_bytes(&self) -> Vec<u8>;
     /// 序列化格式不认识时返回 None，调用方从 `START` 读。游标里还记着生成它的来源 ID 和适配器版本，
     /// 但这里不检查：版本是否与当前提供者一致由 `SessionSource::read` 判断，不一致时从头读并在 `Batch::reset` 里告诉消费方
@@ -521,8 +532,16 @@ pub struct ToolCall {
     pub result: Option<ContentRef>,
 }
 
-/// 指向文件里的一行和行内的一个部分。不透明。
+/// 指向文件里的一行和行内的一个部分。不透明：消费方只把它交回 `load`。
 pub struct ContentRef { /* pos: u64, len: u32, part: u16 */ }
+
+impl ContentRef {
+    /// 以下供提供者使用。
+    pub fn new(pos: u64, len: u32, part: u16) -> ContentRef;
+    pub fn pos(&self) -> u64;
+    pub fn line_len(&self) -> u32;
+    pub fn part(&self) -> u16;
+}
 
 pub enum Content {
     Text(Arc<str>),
@@ -685,7 +704,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 
 分四步，每步一个 PR。前三步写 `Refs #13`，最后一步写 `Closes #13`。
 
-1. **`services` 的会话接口**（改 `lectern-services`）
+1. **`services` 的会话接口**（改 `lectern-services`，#PR）
    - `SessionSource`、`SessionsChanged` 和「数据结构」里的类型在 `services::session` 里，`cargo check -p lectern-services` 通过。
    - 每个类型的 JSON 往返测试通过（`just test -p lectern-services` 的 `session_*`）。
 2. **Claude Code 适配器与增量读取**
@@ -700,3 +719,33 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - `discover_*`、`watch_*`、`place_*`、`index_cache_*`、`complete_*`、`plugin_*` 通过。
    - `python3 scripts/check_architecture.py` 通过；`rg gpui crates/agents/Cargo.toml` 没有结果。
    - `agents/discover_1000`、`agents/turns_cached_50mb` 达标；macOS 上冷启动基准（#7）不因本插件变化。
+
+## 实际验证
+
+第 1 步（`services` 的会话接口），在 Linux 上运行（`services` 不依赖 GPUI，macOS 上是同一份代码；没有在 macOS 上实测）：
+
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test`（Linux 上不依赖 GPUI 的全部 crate，301 个测试）、`just doctest`、`just deny` 全部通过；`cargo check -p lectern-services` 没有警告。没有新增依赖，`services` 仍只依赖 `lectern-kernel` 和 `serde`。
+- `just test -p lectern-services`（21 个测试，其中 11 个 `session_*`）：
+  - `session_source_service_id_and_multiple`：`<dyn SessionSource as Service>::ID == "session-source"`、`MULTIPLE == true`（编译期断言），以及 `service::<dyn SessionSource>()` 的键。
+  - `session_source_is_a_shared_trait_object`：一个空实现确认 `Arc<dyn SessionSource>` 的每个方法可调用，`SessionList`、`Batch`、`TurnIndex`、`Content` 是 `Send + Sync`。
+  - `session_events_round_trip`：`SessionsChanged` 实现 `Event` 与 `Clone`，经 serde_json 往返后相等。
+  - `session_errors_and_resume_commands_round_trip`：`SessionError`、`ResumeCommand` 的每个变体。
+  - `session_list_round_trips`：含 `Place` 每个变体、`Agent` 每个变体、`Format` 每个变体、带与不带 `tool_call` 的 `Parent`、非空 `Diagnostics` 的 `SessionList`，以及空列表、`Timestamp`、`SourceId`、`SessionKey`。
+  - `session_list_get_and_in_project`：`get` 按来源和 ID 查找；`in_project` 收 `Located` 与 `Resolved`、含子 agent 会话、保持从新到旧的顺序。
+  - `session_cursor_bytes_round_trip`：`START` 与带状态的游标经 `to_bytes` / `from_bytes` 和 serde 往返；空输入、其他版本、固定字段的每一种截断、非 UTF-8 的来源 ID 返回 None，serde 反序列化报错。
+  - `session_batch_round_trips`：`Record` 每个变体（`ToolKind`、`ToolStatus`、`UsageKey`、`RawTokens` 各变体，带与不带 `advisor`、`RateLimitSample` 带与不带窗口）包在 `Positioned` 里的 `Batch`。
+  - `session_tool_and_usage_types_round_trip`、`session_turn_index_round_trips`（`TurnItem` 每个变体、已结束与未结束的 `ToolCall` 和 `Turn`、`ContentRef` 的极值）、`session_content_round_trips`（`Content` 与 `EditOp` 每个变体）。
+- `services` 没有用 insta：类型都是手写的样本，用相等断言验收。
+
+没有验证到的：第 2–4 步的验收条件。
+
+## 与设计的差异
+
+第 1 步：
+
+- `Cursor` 的编码定在 `services`：`from_bytes` 只检查序列化格式、`read` 检查来源 ID 和适配器版本（上文「游标与批量读取」），所以外层格式只能由 `services` 规定。外层是版本字节、来源 ID、适配器版本和偏移；偏移之前的 256 字节副本和解析器状态是适配器自己的 `state` 字节。为此加了供提供者使用的 `new` 与访问方法，已写进上文。`offset` 也让测试能检查「新游标大于旧游标」。serde 形式是 `to_bytes` 的字节（JSON 里是数字数组），不认识的格式反序列化报错。
+- `ContentRef` 加了供提供者使用的 `new` 与访问方法，已写进上文。行长度的访问方法叫 `line_len`，不叫 `len`（clippy 的 `len_without_is_empty`）。
+- 标准派生：设计没有写，按 `services::project` 的做法定下，已写进上文「服务接口」。`Diagnostics`、`SessionList` 另派生 `Default`（提供者启动时的空列表）。
+- `SessionList::get` 是线性查找，`in_project` 收 `Place::Located` 与 `Place::Resolved`，已写进上文。它们与 `Cursor` 的编码是 `services::session` 里仅有的方法实现，`crates/services/AGENTS.md`「边界」的例外里补上了。
+- `SessionFilter` 和 `testing::parse_file` 不在 `services`：它们是上文「本 crate 的公开项」，属于 `agents`（`SessionFilter` 带锁和行为），在第 4 步、第 2 步实现。
+- 模块划分：`services::session` 分为 `list`（键、`SessionList`、`SessionSummary`、`Place` 等）、`read`（`Cursor`、`Batch`、`Positioned`）、`record`（`Record` 与工具、用量、额度类型）、`turns`（轮次索引、`ContentRef`、`Content`、`FileEdit`），全部从 `lectern_services::session` 导出；`SessionSource`、`SessionError`、`ResumeCommand`、`SessionsChanged` 在模块根。只是文件划分，接口不变。

@@ -6,5 +6,8 @@
 //!
 //! - [`project`]: the project model (`dyn Projects`), designed in
 //!   `docs/design/project.md`.
+//! - [`session`]: agent session sources (`dyn SessionSource`), designed in
+//!   `docs/design/agents.md`.
 
 pub mod project;
+pub mod session;
