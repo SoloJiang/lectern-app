@@ -47,6 +47,9 @@ impl std::error::Error for TaskError {}
 pub(crate) trait Handle<T>: Send + Sync {
     fn output(&self) -> &Output<T>;
     fn cancel(self: Arc<Self>);
+    /// The handle is going away: a result already stored is handed to the
+    /// executor to drop, never dropped on the calling thread.
+    fn abandon(&self);
 }
 
 /// Handle to a task. Dropping it cancels the task: it is not polled again and
@@ -75,8 +78,7 @@ impl<T> Task<T> {
     /// kept by the kernel.
     pub fn detach(mut self) {
         if let Some(handle) = self.handle.take() {
-            let unread = handle.output().abandon();
-            drop(unread);
+            handle.abandon();
         }
     }
 
@@ -103,9 +105,8 @@ impl<T> Future for Task<T> {
 impl<T> Drop for Task<T> {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
-            let unread = handle.output().abandon();
+            handle.abandon();
             handle.cancel();
-            drop(unread);
         }
     }
 }
@@ -308,6 +309,10 @@ impl<T: Send + 'static> Handle<T> for TaskCell<T> {
 
     fn cancel(self: Arc<Self>) {
         Job::cancel(self);
+    }
+
+    fn abandon(&self) {
+        self.output.abandon(&self.exec);
     }
 }
 

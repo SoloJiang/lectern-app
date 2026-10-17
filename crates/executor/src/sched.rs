@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,9 @@ use crate::util::{lock, log, wait, wait_timeout};
 use crate::{Hook, Priority, Shutdown, ThreadKind};
 
 pub(crate) type TaskId = u64;
+
+#[cfg(test)]
+pub(crate) type BeforeSpawn = Box<dyn Fn(usize) + Send>;
 
 /// A task the scheduler knows about: a pool task or a dedicated task.
 pub(crate) trait Job: Send + Sync {
@@ -37,8 +40,13 @@ pub(crate) struct Sched {
     pub(crate) shutdown: bool,
     /// Set by the first submission, which starts the workers.
     started: bool,
+    /// Set while the first submission is still starting workers; `shutdown`
+    /// waits for it to clear.
+    starting: bool,
     /// Workers that have been started and have not exited.
     alive: usize,
+    /// Handles of the started workers, recorded before `starting` clears.
+    pub(crate) threads: Vec<JoinHandle<()>>,
 }
 
 pub(crate) struct Inner {
@@ -53,7 +61,9 @@ pub(crate) struct Inner {
     pub(crate) hook: Option<Hook>,
     manual: bool,
     next_id: AtomicU64,
-    threads: Mutex<Vec<JoinHandle<()>>>,
+    /// Called before each worker is spawned, outside every lock.
+    #[cfg(test)]
+    pub(crate) before_spawn: Mutex<Option<BeforeSpawn>>,
 }
 
 impl Inner {
@@ -66,7 +76,9 @@ impl Inner {
                 dedicated: HashMap::new(),
                 shutdown: false,
                 started: false,
+                starting: false,
                 alive: 0,
+                threads: Vec::new(),
             }),
             work: Condvar::new(),
             reserved: Condvar::new(),
@@ -75,7 +87,8 @@ impl Inner {
             hook,
             manual,
             next_id: AtomicU64::new(0),
-            threads: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            before_spawn: Mutex::new(None),
         })
     }
 
@@ -104,7 +117,7 @@ impl Inner {
             let start = !self.manual && !sched.started;
             if start {
                 sched.started = true;
-                sched.alive = self.workers;
+                sched.starting = true;
             }
             start
         };
@@ -132,6 +145,10 @@ impl Inner {
             Priority::Background => {
                 sched.background.push_back(job);
                 self.work.notify_one();
+                if sched.shutdown {
+                    // The reserved worker helps drain after shutdown.
+                    self.reserved.notify_one();
+                }
             }
         }
     }
@@ -169,23 +186,54 @@ impl Inner {
         drop(removed);
     }
 
+    /// Starts the workers one by one. Each one is counted in `alive` before
+    /// it is spawned and its handle is recorded before `starting` clears, so
+    /// `shutdown` waits for all of them and joins every one. A shutdown that
+    /// begins meanwhile stops further spawns; the first worker is still
+    /// started when cancelled tasks are left to drop.
     fn start_workers(self: &Arc<Self>) {
         let reserve = self.workers >= 2;
         for index in 0..self.workers {
+            #[cfg(test)]
+            if let Some(before_spawn) = &*lock(&self.before_spawn) {
+                before_spawn(index);
+            }
+            {
+                let mut sched = lock(&self.sched);
+                if sched.shutdown && (index > 0 || sched.live.is_empty()) {
+                    break;
+                }
+                sched.alive += 1;
+            }
             let inner = self.clone();
             let reserved = reserve && index == 0;
             let spawned = thread::Builder::new()
                 .name(format!("executor-{index}"))
                 .spawn(move || worker(inner, reserved));
+            let mut sched = lock(&self.sched);
             match spawned {
-                Ok(handle) => lock(&self.threads).push(handle),
+                Ok(handle) => sched.threads.push(handle),
                 Err(error) => {
+                    sched.alive -= 1;
+                    drop(sched);
                     log(format_args!("could not start worker {index}: {error}"));
-                    lock(&self.sched).alive -= 1;
-                    self.exited.notify_all();
                 }
             }
         }
+        lock(&self.sched).starting = false;
+        self.exited.notify_all();
+    }
+
+    /// Hands a value to a worker to drop under `contain` (after shutdown, to
+    /// the reclaim thread), so the calling thread never runs its `Drop`.
+    pub(crate) fn drop_later(self: &Arc<Self>, value: Box<dyn Send>) {
+        let id = self.next_id();
+        let job = Arc::new(Unread {
+            id,
+            value: Mutex::new(Some(value)),
+            exec: Arc::downgrade(self),
+        });
+        self.submit(id, Priority::Background, job);
     }
 
     /// Runs queued tasks on the calling thread until the queues are empty.
@@ -228,7 +276,7 @@ impl Inner {
             return Shutdown::Clean;
         }
         let mut sched = lock(&self.sched);
-        while sched.alive > 0 {
+        while sched.starting || sched.alive > 0 {
             let now = Instant::now();
             if now >= deadline {
                 return Shutdown::TimedOut {
@@ -237,10 +285,10 @@ impl Inner {
             }
             sched = wait_timeout(&self.exited, sched, deadline - now);
         }
+        // Startup is over and every worker has left its loop; joining waits
+        // only for the threads to finish exiting.
+        let threads = std::mem::take(&mut sched.threads);
         drop(sched);
-        // Every worker has left its loop; joining waits only for the threads
-        // to finish exiting.
-        let threads = std::mem::take(&mut *lock(&self.threads));
         for thread in threads {
             let _ = thread.join();
         }
@@ -262,7 +310,9 @@ fn worker(inner: Arc<Inner>, reserved: bool) {
     loop {
         let job = match sched.interactive.pop_front() {
             Some(job) => Some(job),
-            None if !reserved => sched.background.pop_front(),
+            // After shutdown only cancelled tasks are left; the reserved
+            // worker helps drop them (it may be the only one started).
+            None if !reserved || sched.shutdown => sched.background.pop_front(),
             None => None,
         };
         if let Some(job) = job {
@@ -283,6 +333,38 @@ fn worker(inner: Arc<Inner>, reserved: bool) {
     }
     sched.alive -= 1;
     inner.exited.notify_all();
+}
+
+/// A task result nobody will read, waiting to be dropped.
+struct Unread {
+    id: TaskId,
+    value: Mutex<Option<Box<dyn Send>>>,
+    exec: Weak<Inner>,
+}
+
+impl Unread {
+    fn release(&self) {
+        let value = lock(&self.value).take();
+        if let Err(message) = contain(move || drop(value)) {
+            log(format_args!("dropping a task result panicked: {message}"));
+        }
+    }
+}
+
+impl Job for Unread {
+    fn run(self: Arc<Self>) {
+        self.release();
+        if let Some(exec) = self.exec.upgrade() {
+            exec.finished(self.id);
+        }
+    }
+
+    /// Already queued; dropping the value is all it does.
+    fn cancel(self: Arc<Self>) {}
+
+    fn discard(self: Arc<Self>) {
+        self.release();
+    }
 }
 
 /// Every panic inside a step is already caught; this is a last guard so a bug

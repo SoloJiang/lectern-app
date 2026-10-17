@@ -36,7 +36,13 @@ fn executor_threads_exist_only_between_the_first_submission_and_shutdown() {
     })
     .detach();
     done.recv_timeout(LIMIT).expect("task ran");
-    assert_eq!(executor_threads(), vec!["executor-0", "executor-1"]);
+    // Each worker names itself once it runs, so the idle one may show up a
+    // moment after the task finished.
+    let deadline = Instant::now() + LIMIT;
+    while executor_threads() != ["executor-0", "executor-1"] {
+        assert!(Instant::now() < deadline, "{:?}", executor_threads());
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     assert_eq!(exec.shutdown(LIMIT), Shutdown::Clean);
     // `shutdown` joined the workers; the kernel may list a thread for a

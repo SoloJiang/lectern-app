@@ -1,8 +1,9 @@
 //! Cancellation by dropping the handle, awaiting cancelled tasks, detach.
 
 use std::future::poll_fn;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::task::Poll;
+use std::thread;
 
 use lectern_kernel::PluginError;
 
@@ -87,4 +88,69 @@ fn a_detached_task_runs_to_completion() {
     .detach();
     assert_eq!(exec.run_until_idle(), 3);
     assert_eq!(done.get(), 1);
+}
+
+/// Runs `f` on a new thread named `ui` and waits for it.
+fn on_ui_thread(f: impl FnOnce() + Send + 'static) {
+    thread::Builder::new()
+        .name("ui".to_owned())
+        .spawn(f)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn an_unread_result_is_dropped_by_the_executor_not_by_the_thread_dropping_the_handle() {
+    let exec = Executor::manual();
+    let log = Log::default();
+    let (l1, l2) = (log.clone(), log.clone());
+    let dropped = exec.run(Priority::Background, move || DropProbe::new("dropped", &l1));
+    let detached = exec.run(Priority::Background, move || {
+        DropProbe::new("detached", &l2)
+    });
+    let panicking = exec.run(Priority::Background, || PanicOnDrop);
+    assert_eq!(exec.run_until_idle(), 3);
+    assert!(dropped.is_finished() && detached.is_finished() && panicking.is_finished());
+
+    // The results are already stored; giving up the handles only queues them.
+    on_ui_thread(move || {
+        drop(dropped);
+        detached.detach();
+        drop(panicking);
+    });
+    assert!(log.snapshot().is_empty());
+
+    // Dropped by the executor under `contain`: the panic stays there.
+    assert_eq!(exec.run_until_idle(), 3);
+    let here = thread::current();
+    let here = here.name().unwrap_or("unnamed");
+    assert_eq!(
+        log.snapshot(),
+        vec![
+            format!("dropped dropped on {here}"),
+            format!("dropped detached on {here}"),
+        ]
+    );
+}
+
+/// Sends the name of the thread it is dropped on.
+struct SendOnDrop(mpsc::Sender<String>);
+
+impl Drop for SendOnDrop {
+    fn drop(&mut self) {
+        let name = thread::current().name().unwrap_or("unnamed").to_owned();
+        let _ = self.0.send(name);
+    }
+}
+
+#[test]
+fn an_unread_result_left_after_shutdown_is_dropped_on_the_reclaim_thread() {
+    let exec = Executor::manual();
+    let (dropped_tx, dropped) = mpsc::channel();
+    let task = exec.run(Priority::Interactive, move || SendOnDrop(dropped_tx));
+    assert_eq!(exec.run_until_idle(), 1);
+    assert_eq!(exec.shutdown(LIMIT), crate::Shutdown::Clean);
+    on_ui_thread(move || drop(task));
+    assert_eq!(recv(&dropped, "result dropped"), "executor-reclaim");
 }

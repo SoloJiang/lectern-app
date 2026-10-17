@@ -137,6 +137,10 @@ impl<T: Send + 'static> Handle<T> for DedicatedCell<T> {
     fn cancel(self: Arc<Self>) {
         Job::cancel(self);
     }
+
+    fn abandon(&self) {
+        self.output.abandon(&self.exec);
+    }
 }
 
 /// The waker of a dedicated thread waiting for its gate.

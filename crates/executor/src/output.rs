@@ -1,11 +1,12 @@
 //! The result slot shared by a task and its [`Task`](crate::Task) handle.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
 use lectern_kernel::contain;
 
 use crate::TaskError;
+use crate::sched::Inner;
 use crate::util::{lock, log};
 
 pub(crate) struct Output<T> {
@@ -59,13 +60,35 @@ impl<T> Output<T> {
         }
     }
 
-    /// Called when the handle goes away. Returns a result that was already
-    /// stored, for the caller to drop outside the lock.
-    pub(crate) fn abandon(&self) -> Option<Result<T, TaskError>> {
-        let mut state = lock(&self.state);
-        state.abandoned = true;
-        state.waker = None;
-        state.result.take()
+    /// Called when the handle goes away (dropped or detached). A value that
+    /// was already stored is handed to `exec` to drop on a worker (after
+    /// shutdown, on the reclaim thread) under `contain`, so the handle's
+    /// thread never runs its `Drop`. Errors carry only a message, and values
+    /// without drop glue run no code, so both are dropped here.
+    pub(crate) fn abandon(&self, exec: &Weak<Inner>)
+    where
+        T: Send + 'static,
+    {
+        let (stored, waker) = {
+            let mut state = lock(&self.state);
+            state.abandoned = true;
+            (state.result.take(), state.waker.take())
+        };
+        drop(waker);
+        let Some(Ok(value)) = stored else { return };
+        if !std::mem::needs_drop::<T>() {
+            return;
+        }
+        match exec.upgrade() {
+            Some(exec) => exec.drop_later(Box::new(value)),
+            // The executor is gone (a dropped `manual()` executor): nowhere
+            // else to drop it.
+            None => {
+                if let Err(message) = contain(move || drop(value)) {
+                    log(format_args!("dropping a task result panicked: {message}"));
+                }
+            }
+        }
     }
 
     pub(crate) fn is_finished(&self) -> bool {

@@ -8,6 +8,7 @@ use std::thread;
 use std::time::Duration;
 
 use super::support::*;
+use crate::util::lock;
 use crate::{Config, Executor, Priority, Shutdown, TaskError};
 
 #[test]
@@ -173,4 +174,58 @@ fn shutdown_drops_a_dedicated_task_still_waiting_for_its_gate() {
     let task = stash.lock().unwrap().take().unwrap();
     assert_eq!(block_on(task), Err(TaskError::Cancelled));
     assert_eq!(log.snapshot(), vec!["dropped closure on gated-shutdown"]);
+}
+
+#[test]
+fn a_shutdown_during_worker_startup_stops_further_spawns_and_joins_the_started_workers() {
+    let started = Arc::new(Mutex::new(Vec::new()));
+    let exited = Arc::new(Mutex::new(0));
+    let (s, e) = (started.clone(), exited.clone());
+    let exec = Executor::new(Config {
+        workers: 3,
+        on_thread_start: Some(Arc::new(move |_| {
+            let name = thread::current().name().unwrap_or("").to_owned();
+            s.lock().unwrap().push(name);
+            EXIT.with(|probe| *probe.borrow_mut() = Some(ExitProbe(e.clone())));
+        })),
+    });
+    // The first submission stops before spawning the second worker until
+    // the test resumes it.
+    let (at_spawn_tx, at_spawn) = mpsc::channel();
+    let (resume_tx, resume) = mpsc::channel::<()>();
+    *lock(&exec.inner.before_spawn) = Some(Box::new(move |index| {
+        if index == 1 {
+            let _ = at_spawn_tx.send(());
+            let _ = resume.recv_timeout(LIMIT);
+        }
+    }));
+    let (ran_tx, ran) = mpsc::channel();
+    let submitting = exec.clone();
+    let submitter = thread::spawn(move || {
+        submitting
+            .run(Priority::Interactive, move || {
+                let _ = ran_tx.send(());
+            })
+            .detach();
+    });
+    recv(&at_spawn, "second spawn");
+    recv(&ran, "task ran on the first worker");
+
+    let (result_tx, result) = mpsc::channel();
+    let shutting = exec.clone();
+    thread::spawn(move || {
+        let _ = result_tx.send(shutting.shutdown(LIMIT));
+    });
+    wait_until("shutdown flag", || lock(&exec.inner.sched).shutdown);
+    // Startup is still in progress, so shutdown cannot have finished.
+    assert!(result.try_recv().is_err());
+
+    drop(resume_tx);
+    submitter.join().unwrap();
+    assert_eq!(recv(&result, "shutdown"), Shutdown::Clean);
+    // No worker was spawned after shutdown began, and the one that was is
+    // joined, its thread-local destructors already run.
+    assert_eq!(*started.lock().unwrap(), vec!["executor-0".to_owned()]);
+    assert_eq!(*exited.lock().unwrap(), 1);
+    assert!(lock(&exec.inner.sched).threads.is_empty());
 }
