@@ -1,6 +1,6 @@
 [package]
 name = "lectern-platform"
-description = "macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
+description = "Safe reads beneath a directory root; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,15 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "infra"
+
+[dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+libc.workspace = true
 
 [lints]
 workspace = true

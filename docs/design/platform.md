@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：已接受，尚未实现。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -49,6 +49,7 @@
 ```rust
 /// 一个目录根的描述符。`Send + Sync`，不可克隆，调用方需要共享时放进 `Arc`。
 /// 绑定的是打开时的那个目录：根路径之后被改名或替换，调用仍作用在原来的目录上（目录已删除时为 `NotFound`）。
+#[derive(Debug)]
 pub struct SafeRoot { /* fd: OwnedFd, backend: Backend */ }
 
 impl SafeRoot {
@@ -77,6 +78,7 @@ impl<'a> RelPath<'a> {
     pub fn as_bytes(self) -> &'a [u8];
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Read {
     File { meta: Meta, bytes: Vec<u8> },
     /// `target` 是 `readlinkat` 读出的目标字节，不受 `max` 限制（长度受系统的路径长度上限约束）。
@@ -223,6 +225,8 @@ pub enum FileKind {
    - `ENOENT`、`ENOTDIR`：`NotFound`。
    - 其他错误：`fstatat(dir, 名字, AT_SYMLINK_NOFOLLOW)` 判定：符号链接时 `readlinkat(dir, 名字)`，返回 `Symlink { meta, target }`；socket、设备文件、FIFO、其他类型返回 `Unsupported { meta }`；普通文件或目录（如没有读权限）为 `Io(原来的错误)`。
 
+`fstatat` 的结果与它之前那次打开的错误矛盾时，条目在两次调用之间被替换了，这一级重做（打开、判定），最多 8 次，仍矛盾时才按上面的规则返回 `Io(原来的错误)`。矛盾指：类型是目录或普通文件，而打开返回的是只有符号链接（`ELOOP`；Linux 的 `O_PATH | O_DIRECTORY` 为 `ENOTDIR`）、以 `O_DIRECTORY` 打开的非目录（`ENOTDIR`）或 socket（`ENXIO`、`EOPNOTSUPP`）才会有的错误；以及类型是符号链接而 `readlinkat` 返回 `EINVAL`。否则目录 `a` 与符号链接 `a` 来回交换时，偶尔会在 `PathThroughSymlink` 和内容之外得到 `Io`（`race_swap_never_escapes`）。
+
 `Symlink` 的 `meta` 和 `target` 来自同一个父目录描述符上的两次调用（`fstatat`、`readlinkat`），链接在两次调用之间被替换时两者可能属于不同的链接；两者都不跟随，不影响「不读到根目录之外」，`git` 在下一次刷新时按新的 stat 重新读取。
 
 ### Linux 的实现选择
@@ -232,7 +236,7 @@ pub enum FileKind {
 ### 读取上限
 
 - `fstat` 得到的 `size` 大于 `max`：返回 `TooLarge { meta }`，不读。
-- 否则用 `try_reserve` 预留 `size` 字节（分配失败为 `Io(OutOfMemory)`），循环 `read` 直到 EOF，最多读 `max` 字节；读满 `max` 字节后再读 1 字节，读到数据（文件在 `fstat` 之后变长了）时丢弃已读内容，返回 `TooLarge { meta }`。`max` 包含在内：恰好 `max` 字节的文件是 `File`。`max = 0` 时只有空文件是 `File`。
+- 否则用 `try_reserve_exact` 预留 `size + 1` 字节（多 1 字节让发现 EOF 的那次 `read` 不必再分配；分配失败为 `Io(OutOfMemory)`），读满后按倍增扩容、总量不超过 `max + 1`，循环 `read` 直到 EOF，最多读 `max` 字节；读满 `max` 字节后再读 1 字节，读到数据（文件在 `fstat` 之后变长了）时丢弃已读内容，返回 `TooLarge { meta }`。`max` 包含在内：恰好 `max` 字节的文件是 `File`。`max = 0` 时只有空文件是 `File`。
 - `EINTR` 时重试同一次 `read`。
 - `size` 为 0 但有内容的文件（如 procfs）照样读到 EOF，受 `max` 约束。
 - 文件在读取期间被截短时返回读到的字节，`bytes.len()` 可能小于 `meta.size`；`meta` 是读取之前的那次 `fstat`。调用方按 `bytes` 计算内容，按 `meta` 做 stat 缓存；内容变了的文件的 mtime 在下一次 stat 时不同，`git` 会重新读取（同一时刻内的写入由 racy-clean 规则处理）。
@@ -338,3 +342,31 @@ pub enum FileKind {
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`platform` 不依赖 GPUI）。
 - `just test -p lectern-platform -- --ignored perf_smoke` 在 macOS 上运行一次，PR 描述里记录 `stat` 与 `symlink_metadata`、`read` 与 `std::fs::read` 的比值，在「性能」的预算之内。
 - 本文的状态行改为「已实现」并附 PR 编号，填写「实际验证」；`crates/platform/Cargo.toml` 的 `description` 加上安全读取。
+
+## 实际验证
+
+在 Linux（x86_64，内核 6.18，`openat2` 可用）上运行。macOS 专属的部分（`NofollowAny`、`nofollow_any_*`、macOS 上的 `perf_smoke`）没有在 macOS 上运行过，由 macOS CI 验证：
+
+- `cargo check -p lectern-platform --target aarch64-apple-darwin` 和 `cargo clippy -p lectern-platform --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 在 Linux 上交叉检查通过：macOS 的代码（`OFlags::NOFOLLOW_ANY`、`dev_t` 为 `i32`、`mode_t` 为 `u16`、测试里的 `libc::mkfifo`）通过了类型检查和 clippy，但没有运行。
+- `just check`、`just test`（整个工作区 331 个测试通过，跳过 1 个 `#[ignore]`）、`just doctest`、`just deny`、`python3 scripts/check_architecture.py` 全部通过。
+- `just test -p lectern-platform`：30 个测试通过，跳过 `perf_smoke`。其中 27 个在两个平台上都运行，`openat2_rejects_escape`、`linux_backend_choice`、`read_procfs_file_with_size_zero_to_eof` 只在 Linux 上运行；macOS 上另有 5 个 `nofollow_any_*`（共 32 个）。行为测试对 `Openat2` 和 `Walk` 各运行一次；`linux_backend_choice` 确认这台机器的内核上 `SafeRoot::open` 选的是 `Openat2`。
+- `race_*`、`fifo_*`、`send_sync` 连续运行 40 次都通过；`race_swap_never_escapes` 每次运行中三种结果（根目录之内的内容、`NotFound`、`PathThroughSymlink`）都出现。
+- 测试环境以 root 运行，`walk_permission_denied_is_io` 在 root 下不检查（root 不受权限位限制）；用 `setpriv` 以 `nobody` 运行测试二进制时它通过，其余测试也都通过。
+- 验收的检查：`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果（只给 `lectern-platform` 加了 `libc`、`rustix`、`tempfile` 三条依赖，都是 Cargo.lock 里已有的版本）；`cargo tree -p lectern-platform -e normal --depth 1` 只列出 `rustix v1.1.5`；`rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`（macOS 上的 `libc::mkfifo`；Linux 的测试用 rustix 的 `mknodat` 创建 FIFO）。`rg 'O_NOFOLLOW_ANY|NOFOLLOW_ANY' crates --glob '!crates/platform/**'` 只匹配 `crates/git/AGENTS.md` 里解释这条规则的一句文字，`rg -t rust` 没有结果：代码里只有本 crate 用到这个标志。
+- `perf_smoke`（release，728 个 4 KiB 文件，深度 4，各 10 000 次，连续 3 次运行）在 Linux 上的结果：
+
+  | 实现 | `stat` | `symlink_metadata` | 比值 | `read` 4 KiB | `std::fs::read` | 比值 |
+  |---|---|---|---|---|---|---|
+  | `Openat2` | 1.13–1.18 µs | 0.54–0.59 µs | 2.0–2.1 | 2.05–2.53 µs | 2.37–2.53 µs | 0.87–1.05 |
+  | `Walk` | 2.20–2.37 µs | 0.54–0.59 µs | 4.0–4.1 | 3.92–4.11 µs | 2.37–2.53 µs | 1.6–1.7 |
+
+  Linux 默认的 `Openat2` 在「性能」的预算之内。`Walk` 只在 `openat2` 不可用或一步打开出错时使用，不在预算的范围内。预算按 M 系列 Mac 制定，macOS 上的数字随 macOS 上的那次运行写进 PR 描述。
+
+## 与设计的差异
+
+- `Walk` 在 `fstatat` 的结果与之前那次打开的错误矛盾时重做这一级，最多 8 次（见「Walk」）。设计写的是直接返回 `Io(原来的错误)`：目录与符号链接来回交换时，这种做法偶尔会让 `race_swap_never_escapes` 得到 `Io`，而这个测试只允许三种结果。重做不改变「不读到根目录之外」，只让并发替换时的结果与某一时刻的状态一致。
+- `read` 预留 `size + 1` 字节，不是 `size`：读完 `size` 字节后还要再读一次才能确认 EOF，多 1 字节让这次读取不必重新分配。文件在 `fstat` 之后变长（或像 procfs 那样报告大小为 0）时按倍增扩容，总量不超过 `max + 1`，避免 `max` 很大时按固定大小的块反复重新分配。
+- `Read` 派生 `Clone, PartialEq, Eq, Debug`，`SafeRoot` 派生 `Debug`（设计没有写派生）：测试要比较多个线程的结果，调用方也需要打印它们。已改在「接口」里。
+- `fd_count_is_unchanged_after_many_calls`：在 nextest（`just test`，每个测试一个进程）里断言描述符数完全不变；在 `cargo test` 里，其他测试在同一进程的线程上同时打开描述符，改为断言增加的数量小于调用轮数的一半（任何一条路径泄漏，每轮至少多一个描述符）。
+- `SafeRoot::open_with` 只在 `#[cfg(test)]` 下编译：除测试外没有调用方。Analyze 快照（#66）复用的是 `walk` 和一步打开的 `pub(crate)` 函数，不需要它。
+- 增加了设计没有列出的测试：`stat_after_the_root_is_deleted_is_not_found`、`stat_overlong_name_is_io`、`walk_permission_denied_is_io`、`read_procfs_file_with_size_zero_to_eof`（Linux）、`errors_convert_to_io_errors`、`timestamp_as_nanos_handles_times_before_1970`、`file_kind_follows_the_mode`，分别对应「状态与异常」「读取上限」里的条目和 `SafeError` 的转换。
