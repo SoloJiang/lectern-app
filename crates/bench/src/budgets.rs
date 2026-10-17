@@ -153,6 +153,7 @@ const PROJECT: &str = "docs/design/project.md#性能";
 const PLATFORM: &str = "docs/design/platform.md#性能";
 const EXECUTOR: &str = "docs/design/executor.md#性能";
 const I18N: &str = "docs/design/i18n.md#性能";
+const FS_WATCH: &str = "docs/design/fs_watch.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -647,6 +648,47 @@ pub static BUDGETS: &[Budget] = &[
         State::Planned("project 第 5 步"),
         Time,
     ),
+    // ---- fs_watch (docs/design/fs_watch.md「性能」) ----
+    // FakeBackend and the manual driver, without backend latency.
+    share(
+        "fs_watch/classify_burst",
+        &[median(Limit::TimeBelow(ms(100)))],
+        FS_WATCH,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "fs_watch/reflog_append",
+        &[median(Limit::TimeBelow(ms(1)))],
+        FS_WATCH,
+        ACTIVE,
+        Time,
+    ),
+    // The real backend on macOS, once `app` injects it.
+    share(
+        "fs_watch/flush_idle",
+        &[median(Limit::TimeBelow(ms(5)))],
+        FS_WATCH,
+        State::Planned("fs_watch 第 4 步"),
+        Time,
+    ),
+    share(
+        "fs_watch/write_to_deliver",
+        &[median(Limit::TimeBelow(ms(120)))],
+        FS_WATCH,
+        State::Planned("fs_watch 第 4 步"),
+        Time,
+    ),
+    // `watch_repo` plus the current worktree's `watch_worktree` on an
+    // 11-worktree repository, at rest; the filter's file list not included.
+    share(
+        "fs_watch/resident",
+        &[median(Limit::BytesBelow(MB))],
+        FS_WATCH,
+        State::Planned("fs_watch 第 4 步"),
+        Memory,
+    ),
+    // ---- end fs_watch ----
     share(
         "platform/safe_stat",
         &[

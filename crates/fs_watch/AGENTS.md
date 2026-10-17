@@ -28,3 +28,4 @@ just test -p lectern-fs-watch
 - reflog 和配置清单的测试用 `tempfile` 的真实目录（`FakeBackend::arm` 对不存在的路径返回 `NotFound`）；不读本机真实的 git 配置或会话目录。
 - 静止测试用 kernel 的 `TestKernel` 取真实的守卫；`RecordingSink` 在 `take` 之前一直持有守卫。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。
+- 性能预算的基准在 `crates/bench/benches/time/fs_watch.rs`（`fs_watch/classify_burst`、`fs_watch/reflog_append`），同样经 `testing::manual`、`FakeBackend` 和 `FakeSource` 驱动；事件在计时之外构造，用 `FakeBackend::emit_batch` 注入。改动分类、reflog 读取或 `testing` 时运行 `just bench --measure fs_watch/`（Linux 上只报告，macOS CI 判定预算）。

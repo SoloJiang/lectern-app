@@ -4232,6 +4232,7 @@ dependencies = [
  "lectern-agents",
  "lectern-cache",
  "lectern-executor",
+ "lectern-fs-watch",
  "lectern-git",
  "lectern-i18n",
  "lectern-kernel",
