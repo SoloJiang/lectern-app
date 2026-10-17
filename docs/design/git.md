@@ -33,7 +33,7 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `gix` =0.88.0 | 对象库、引用、index、配置、属性与忽略规则、内置转换（`text` / `eol` / `ident` / `working-tree-encoding`）、树 diff 与重命名检测；工作区的目录遍历不用它（[ADR 0028](../adr/0028.md)） | 纯 Rust，MIT OR Apache-2.0；feature 与使用边界见 [ADR 0024](../adr/0024.md)；release 约 3 MB，`just deny` 通过 |
+| `gix` =0.88.0 | 对象库、引用、index、配置、属性与忽略规则、内置转换（`text` / `eol` / `ident` / `working-tree-encoding`）、树 diff 与重命名检测；工作区的目录遍历不用它，`dirwalk` feature 已去掉（[ADR 0028](../adr/0028.md)） | 纯 Rust，MIT OR Apache-2.0；feature 与使用边界见 [ADR 0024](../adr/0024.md)，`dirwalk` 除外；release 约 3 MB，`just deny` 通过 |
 | `gix::diff::blob`（`gix-imara-diff` 0.3） | 行 diff 与词级 diff，Histogram 算法 | gix 维护的 imara-diff 副本，Apache-2.0；随 gix 一起升级，不再引入上游 `imara-diff`（ADR 0024） |
 | `lectern-platform` | 安全读取和列出工作区文件（见「安全读取」） | 架构规则 6 |
 | `lectern-cache` | hunk 的持久缓存 | 架构规则 5；`cache` 实现之前只用进程内的 LRU |
