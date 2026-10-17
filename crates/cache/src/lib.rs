@@ -11,8 +11,10 @@ mod clock;
 mod codec;
 mod db;
 mod key;
+mod pool;
 mod slot;
 mod stats;
+mod sweep;
 mod util;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -31,6 +33,7 @@ use sha2::{Digest, Sha256};
 
 use crate::clock::Clock;
 use crate::db::Op;
+use crate::pool::Pool;
 use crate::slot::Slot;
 use crate::stats::Counters;
 use crate::util::lock;
@@ -112,6 +115,12 @@ pub(crate) struct Shared {
     closed: AtomicBool,
     /// Ever-increasing number of the next opened session, across partitions.
     pub(crate) sessions: AtomicU64,
+    /// Ever-increasing count of calls, for `Slot::last_used`.
+    pub(crate) ticks: AtomicU64,
+    /// The open project partitions.
+    pub(crate) pool: Pool,
+    /// Whether this run has swept the directory.
+    swept: Mutex<bool>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) ui_thread_panics: AtomicBool,
 }
@@ -144,6 +153,18 @@ impl Shared {
         }
     }
 
+    /// Sweeps the directory on the first open of the run, before that
+    /// partition's file is opened. Later opens wait for it, so the sweep
+    /// never deletes a file being opened.
+    pub(crate) fn sweep_once(&self) {
+        let mut swept = lock(&self.swept);
+        if !*swept {
+            *swept = true;
+            let now = clock::to_system(self.clock.now_ms());
+            sweep::sweep(&self.root, now, self.budgets.total, &self.pool.files());
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     fn ui_thread_panics(&self) -> bool {
         self.ui_thread_panics.load(Ordering::Relaxed)
@@ -164,9 +185,9 @@ struct Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         self.shared.closed.store(true, Ordering::Release);
-        self.app.close();
+        self.app.close(false);
         for slot in lock(&self.projects).values() {
-            slot.close();
+            slot.close(false);
         }
     }
 }
@@ -187,15 +208,18 @@ impl Cache {
             connections: AtomicUsize::new(0),
             closed: AtomicBool::new(false),
             sessions: AtomicU64::new(1),
+            ticks: AtomicU64::new(1),
+            pool: Pool::default(),
+            swept: Mutex::new(false),
             #[cfg(any(test, feature = "test-support"))]
             ui_thread_panics: AtomicBool::new(true),
         });
-        let app = Arc::new(Slot::new(
+        let app = Slot::new(
             shared.clone(),
             PartitionKind::App,
             None,
             shared.root.join("app.sqlite"),
-        ));
+        );
         Cache {
             inner: Arc::new(Inner {
                 shared,
@@ -237,12 +261,7 @@ impl Cache {
                     .root
                     .join(kind.dir())
                     .join(format!("{}.sqlite", file_stem(kind, path)));
-                Arc::new(Slot::new(
-                    shared.clone(),
-                    kind,
-                    Some(path.to_path_buf()),
-                    file,
-                ))
+                Slot::new(shared.clone(), kind, Some(path.to_path_buf()), file)
             })
             .clone();
         Partition { slot }
@@ -260,17 +279,19 @@ impl Cache {
             .snapshot(shared.connections.load(Ordering::Relaxed), partitions)
     }
 
-    /// Closes every connection. Blocking; background threads only. Optional:
-    /// `app` may call it after the kernel's `shutdown`; dropping the cache is
-    /// just as safe. Later reads and writes open the partitions again.
+    /// Writes pending access times back and closes every connection.
+    /// Blocking; background threads only. Optional: `app` may call it after
+    /// the kernel's `shutdown`; dropping the cache is just as safe and only
+    /// loses those access times. Later reads and writes open the partitions
+    /// again.
     pub fn close(&self) {
         if !self.inner.shared.may_block() {
             return;
         }
-        self.inner.app.close();
+        self.inner.app.close(true);
         let projects: Vec<_> = lock(&self.inner.projects).values().cloned().collect();
         for slot in projects {
-            slot.close();
+            slot.close(true);
         }
     }
 }

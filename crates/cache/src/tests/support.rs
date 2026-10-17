@@ -1,7 +1,7 @@
 //! Entry types, fixtures and direct SQLite inspection for the tests.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -78,7 +78,9 @@ impl Fixture {
 
     pub(super) fn with_budgets(budgets: Budgets) -> Fixture {
         let dir = tempfile::tempdir().expect("temporary directory");
-        let clock = ManualClock::new(UNIX_EPOCH + Duration::from_secs(1_800_000_000));
+        // Real time: the directory sweep compares file modification times
+        // with this clock.
+        let clock = ManualClock::new(SystemTime::now());
         let cache = Cache::with_clock(config(&dir.path().join("cache"), budgets), clock.clone());
         Fixture { dir, clock, cache }
     }
@@ -89,8 +91,14 @@ impl Fixture {
 
     /// Another cache on the same root, as in the next run.
     pub(super) fn reopen(&mut self) {
-        self.cache =
-            Cache::with_clock(config(&self.root(), Budgets::default()), self.clock.clone());
+        self.reopen_with(Budgets::default());
+    }
+
+    /// The next run, with other budgets. The old cache is dropped first, so
+    /// its connections are closed (and checkpointed) before anything opens.
+    pub(super) fn reopen_with(&mut self, budgets: Budgets) {
+        let next = Cache::with_clock(config(&self.root(), budgets), self.clock.clone());
+        drop(std::mem::replace(&mut self.cache, next));
     }
 
     pub(super) fn repo(&self) -> Partition {
@@ -144,6 +152,31 @@ pub(super) fn meta_bytes(conn: &Connection) -> u64 {
         r.get::<_, i64>(0)
     })
     .expect("meta.bytes") as u64
+}
+
+/// `entry.atime` of a key of `ns`, in minutes since the Unix epoch.
+pub(super) fn atime(conn: &Connection, ns: &Namespace, key: &Key) -> Option<i64> {
+    conn.query_row(
+        "SELECT e.atime FROM entry e JOIN namespace n ON e.ns = n.id
+         WHERE n.name = ?1 AND n.version = ?2 AND e.key = ?3",
+        rusqlite::params![ns.name, ns.version, key.as_bytes()],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+/// The clock's time in `entry.atime` units.
+pub(super) fn minute(clock: &ManualClock) -> i64 {
+    (clock.now_ms() / 60_000) as i64
+}
+
+/// `PRAGMA page_count` and `PRAGMA freelist_count`.
+pub(super) fn pages(conn: &Connection) -> (u64, u64) {
+    let pragma = |name: &str| -> u64 {
+        conn.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+            .expect("pragma") as u64
+    };
+    (pragma("page_count"), pragma("freelist_count"))
 }
 
 pub(super) fn sum_sizes(conn: &Connection) -> u64 {
