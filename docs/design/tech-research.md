@@ -200,7 +200,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | 领域 | `git` | gix 读仓库，imara-diff 与结构化 diff |
 | 领域 | `terminal` | portable-pty + libghostty-vt，独占线程 |
 | 领域 | `agents` | Claude Code / Codex 会话解析、ACP 客户端 |
-| 领域 | `usage` | token 去重与聚合、价格表、额度快照（[ADR 0014](../adr/0014.md)） |
+| 领域 | `usage` | token 去重与聚合、额度快照（[ADR 0014](../adr/0014.md)、[ADR 0022](../adr/0022.md)） |
 | 领域 | `forge` | GitHub 与 GitLab（含自部署）MR 与 CI 状态 |
 | 基础设施 | `cache`、`fs_watch`、`executor`、`platform`、`i18n` | 内容寻址 SQLite 缓存、文件监听接口与过滤（FSEvents 后端在 `platform`）、后台任务、macOS 系统能力、界面文案与语言切换 |
 | 工具 | `bench` | 性能预算基准，CI 中超标即失败；另有 ui_probe：调试构建专用的 UI 探针，发布构建不包含 |

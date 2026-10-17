@@ -1,1 +1,1 @@
-//! Token dedupe and aggregation, price table and limit snapshots.
+//! Token dedupe and aggregation and limit snapshots.
