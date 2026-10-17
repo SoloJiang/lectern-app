@@ -1,6 +1,6 @@
 # cache 设计
 
-状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)，第 3 步（自定义表）[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)（见「验收」）。
+状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)，第 3 步（自定义表）[#111](https://github.com/SoloJiang/lectern-app/pull/111)（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`crates/cache/AGENTS.md` 列出的两个 issue；本 crate 是它们的前置，不单独关闭其中任何一个）。`cache` 是派生数据的本地持久缓存：解析、diff、索引这类可以从 git 对象或会话日志重新算出的结果，以内容的身份为键存进 SQLite，下次启动、切换 worktree 时直接命中（架构规则 5，[技术调研「性能要点」](tech-research.md#性能要点)）。存储选型见 [ADR 0027](../adr/0027.md)。
 
@@ -602,7 +602,7 @@ impl TableWrite {
 2. **淘汰、访问时间与分库管理**：
    - `evict_*`、`touch_*`、`partitions_*`、`sweep_*` 通过。
    - 加入 bench 的 `cache/evict` 与 `cache/memory` 两项基准（`cache/evict` 原为 `cache/evict_16m`，见「与设计的差异」第 2 步），在 `crates/bench/src/budgets.rs` 里改为生效，在预算内。
-3. **自定义表**（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+3. **自定义表**（[#111](https://github.com/SoloJiang/lectern-app/pull/111)）：
    - `tables_*` 通过，第 1、2 步的测试照常通过（`memory_*` 的 PRAGMA 快照多了 `foreign_keys = 1`，`user_version` 为 2）。
    - `cargo tree -i rusqlite -e normal --depth 1` 仍只列出 `lectern-cache`；没有新增依赖。
    - `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果。
