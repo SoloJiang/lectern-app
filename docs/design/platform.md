@@ -11,7 +11,7 @@
   - `RelPath`：根目录之下的相对路径，构造时校验，排除 `..`、`.`、空名字、NUL 和绝对路径。
   - `Meta`、`FileKind`：git 的 stat 比较需要的全部字段。
   - 读取结果的分类：普通文件、符号链接（读出目标，不跟随）、超过上限、不读取的类型（目录、FIFO、socket、设备文件）；错误分为不存在、路径中间是符号链接、其他 IO 错误。
-  - 三个实现：Linux 的 `openat2`、macOS 的 `O_NOFOLLOW_ANY`、两个平台共用的逐级 `openat`（Linux 没有 `openat2` 时的后备，也是出错时判定原因的实现）。
+  - 三个实现：Linux 的 `openat2`、macOS 的 `O_NOFOLLOW_ANY` 与 `AT_SYMLINK_NOFOLLOW_ANY`、两个平台共用的逐级 `openat`（Linux 没有 `openat2` 时的后备，也是出错时判定原因的实现）。
 - 不做：
   - 目录遍历和未跟踪文件的枚举：`git` 用 gix 的遍历（ADR 0024「已知限制」）。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -38,13 +38,13 @@
 选 `rustix`，不选 `libc`、`nix`、`cap-std`：
 
 - 已在依赖图里：Cargo.lock 已有 rustix 1.1.5，两个 target（`aarch64-apple-darwin`、`x86_64-unknown-linux-gnu`）上都经 GPUI 的 `async-io` / `polling` 打开了 `fs` feature，所以发布构建不新增任何 crate；gix-index 在 unix 上也以同样的 feature（`std`、`fs`）依赖它，`git` 接入 gix 后同样共用。许可证 `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`，在 `deny.toml` 的允许列表里。
-- 接口是安全的：返回 `OwnedFd`，错误是 `Errno`，`openat2` 和 `ResolveFlags` 有类型化的封装，Apple 平台有 `OFlags::NOFOLLOW_ANY`。本模块因此不需要 `unsafe`。`libc` 要对每个调用写 `unsafe`，`openat2` 只能经 `syscall(SYS_openat2, …)` 和手工填写的 `open_how`。
+- 接口是安全的：返回 `OwnedFd`，错误是 `Errno`，`openat2` 和 `ResolveFlags` 有类型化的封装，Apple 平台有 `OFlags::NOFOLLOW_ANY`。`fstatat` 的 `AT_SYMLINK_NOFOLLOW_ANY`（`<sys/fcntl.h>` 里的 `0x0800`，`fstatat` 从 macOS 13 起接受，更早的版本返回 `EINVAL`）rustix 1.1 和 libc 0.2 都没有定义，用 `AtFlags::from_bits_retain(0x0800)` 传入：`AtFlags` 保留它没有命名的位（`const _ = !0`），原样交给 `fstatat`。本模块因此不需要 `unsafe`。`libc` 要对每个调用写 `unsafe`，`openat2` 只能经 `syscall(SYS_openat2, …)` 和手工填写的 `open_how`。
 - Linux 上 rustix 默认直接发系统调用（`linux_raw` 后端），`openat2` 不依赖 glibc 是否提供包装函数。
 - `nix`、`cap-std` 不在 Cargo.lock 里；`cap-std` 自带一套能力模型和路径解析，超出这里需要的四个系统调用。
 
 不写 ADR：rustix 不改变架构和依赖方向，不进入任何公开接口（公开类型都是本 crate 自己定义的），发布构建不新增 crate，以后换成 `libc` 只改本模块。根 `Cargo.toml` 的 `[workspace.dependencies]` 加 `rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }`，`crates/platform/Cargo.toml` 用 `workspace = true` 引用。
 
-所在层与依赖方向见 [crate AGENTS.md](../../crates/platform/AGENTS.md)：基础设施层，不依赖 GPUI。安全读取不是 macOS 专属能力：模块在所有 unix target 上编译，macOS 专属的部分（`O_NOFOLLOW_ANY`）放在 `#[cfg(target_os = "macos")]` 后面，Linux 专属的部分（`openat2`）放在 `#[cfg(target_os = "linux")]` 后面，两者都只出现在本 crate（架构规则 6）。
+所在层与依赖方向见 [crate AGENTS.md](../../crates/platform/AGENTS.md)：基础设施层，不依赖 GPUI。安全读取不是 macOS 专属能力：模块在所有 unix target 上编译，macOS 专属的部分（`O_NOFOLLOW_ANY`、`AT_SYMLINK_NOFOLLOW_ANY`）放在 `#[cfg(target_os = "macos")]` 后面，Linux 专属的部分（`openat2`）放在 `#[cfg(target_os = "linux")]` 后面，两者都只出现在本 crate（架构规则 6）。
 
 ## 接口
 
@@ -184,13 +184,14 @@ pub enum FileKind {
 
 ## 实现
 
-三个实现只在「打开根目录之下的一个条目或它的父目录」上不同，最后一级的处理（`fstatat`、打开、`fstat`、`readlinkat`、读取）共用：
+三个实现只在「一步解析根目录之下的一个条目或它的父目录」上不同，最后一级的处理（`fstatat`、打开、`fstat`、`readlinkat`、读取）共用：
 
 | 实现 | 平台 | 一步打开 | 何时使用 |
 |---|---|---|---|
 | `Openat2` | Linux | `openat2(root, 路径, …, RESOLVE_BENEATH \| RESOLVE_NO_SYMLINKS)` | `SafeRoot::open` 的探测成功 |
-| `NofollowAny` | macOS | `openat(root, 路径, … \| O_NOFOLLOW_ANY)` | 总是（Apple Silicon 只运行 macOS 11 及以上，`O_NOFOLLOW_ANY` 从 11 起可用） |
-| `Walk` | 所有 unix | 从根描述符出发逐级 `openat(dir, 名字, O_DIRECTORY \| O_NOFOLLOW)` | Linux 探测失败；以及上面两个实现的一步打开出错时，用它重做这次调用并判定原因 |
+| `NofollowAny` | macOS 13 起 | `read`：`openat(root, 路径, … \| O_NOFOLLOW_ANY)`；`stat`：`fstatat(root, 路径, AT_SYMLINK_NOFOLLOW \| AT_SYMLINK_NOFOLLOW_ANY)` | `SafeRoot::open` 的探测没有返回 `EINVAL`（见「macOS 的实现选择」） |
+| `NofollowAnyParent` | macOS 11、12 | `read` 同 `NofollowAny`；`stat`：`openat(root, 父目录, O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW_ANY)` | 探测返回 `EINVAL`：`fstatat` 不认识 `AT_SYMLINK_NOFOLLOW_ANY`。Apple Silicon 只运行 macOS 11 及以上，`O_NOFOLLOW_ANY` 从 11 起可用 |
+| `Walk` | 所有 unix | 从根描述符出发逐级 `openat(dir, 名字, O_DIRECTORY \| O_NOFOLLOW)` | Linux 探测失败；以及上面的一步实现出错时，用它重做这次调用并判定原因 |
 
 所有描述符都带 `O_CLOEXEC`（ADR 0019：子进程不继承 Lectern 打开的描述符），由 `OwnedFd` 持有，出错路径上也随 drop 关闭。
 
@@ -200,11 +201,18 @@ pub enum FileKind {
 
 ### stat
 
-1. 打开父目录：路径只有一级时父目录就是根描述符，不打开；否则用一步打开（`Openat2`：`O_PATH | O_DIRECTORY`；`NofollowAny`：`O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY`）。
+`Openat2`、`NofollowAnyParent`：
+
+1. 打开父目录：路径只有一级时父目录就是根描述符，不打开；否则用一步打开（`Openat2`：`O_PATH | O_DIRECTORY`；`NofollowAnyParent`：`O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY`）。
 2. `fstatat(父目录, 最后一级, AT_SYMLINK_NOFOLLOW)`，得到 `Meta`。
 3. 第 1 步返回 `ENOENT` 时为 `NotFound`；返回其他错误（`ELOOP`、`ENOTDIR`、`EAGAIN`、`ENAMETOOLONG`、`EXDEV` 等）时，用 `Walk` 重做整个调用，以它的结果为准。第 2 步的 `ENOENT`、`ENOTDIR` 为 `NotFound`，其他为 `Io`。
 
-系统调用数：一级路径 1 次；更深的路径 3 次（打开、`fstatat`、关闭），与深度无关。
+`NofollowAny`：
+
+1. 一次 `fstatat(root, 整个路径, AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)`，路径只有一级时也一样。`AT_SYMLINK_NOFOLLOW_ANY` 让内核在要跟随任何一级符号链接时返回 `ELOOP`；`AT_SYMLINK_NOFOLLOW` 让最后一级与 `lstat` 一样不跟随，是符号链接时返回链接本身的元数据。
+2. 成功时得到 `Meta`；`ENOENT` 为 `NotFound`；其他错误（中间一级是符号链接的 `ELOOP`、中间一级是普通文件的 `ENOTDIR`、`EACCES`、`ENAMETOOLONG` 等）用 `Walk` 重做整个调用，以它的结果为准，与 `read` 的一步打开出错时相同。内核若对最后一级的符号链接也返回 `ELOOP`，`Walk` 照样返回链接的元数据，结果不变。
+
+系统调用数：`Openat2`、`NofollowAnyParent` 一级路径 1 次，更深的路径 3 次（打开、`fstatat`、关闭）；`NofollowAny` 任何深度都是 1 次。都与深度无关。
 
 ### read
 
@@ -237,6 +245,10 @@ pub enum FileKind {
 
 `SafeRoot::open` 打开根目录后探测一次：`openat2(root, ".", O_PATH | O_DIRECTORY | O_CLOEXEC, RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`。返回 `ENOSYS`（5.6 之前的内核）、`EPERM`（seccomp 拦截了这个系统调用，部分容器运行时如此）、`EINVAL` 或 `E2BIG` 时，这个 `SafeRoot` 用 `Walk`；其余结果用 `Openat2`。选择存在 `SafeRoot` 自己的字段里，创建后不变，没有全局状态。运行中 `openat2` 再返回这些错误时，按「其他错误」交给 `Walk`，结果仍然正确。
 
+### macOS 的实现选择
+
+`SafeRoot::open` 打开根目录后探测一次：`fstatat(root, ".", AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)`。`"."` 对打开着的目录总是合法的名字，路径里也没有可拒绝的符号链接，所以 `EINVAL` 只能表示内核不认识 `AT_SYMLINK_NOFOLLOW_ANY`（macOS 11、12），这个 `SafeRoot` 用 `NofollowAnyParent`；其余结果用 `NofollowAny`。与 Linux 一样，选择存在 `SafeRoot` 自己的字段里，创建后不变，没有全局状态；探测只看 `"."`，之后某次 `stat` 因为别的原因返回 `EINVAL` 时只交给 `Walk` 重做这一次调用，不改变选择。探测是每个 `SafeRoot` 1 次系统调用，`SafeRoot::open` 在 `git` 的后台任务里，每个工作区一次。
+
 ### 读取上限
 
 - `fstat` 得到的 `size` 大于 `max`：返回 `TooLarge { meta }`，不读。
@@ -265,14 +277,14 @@ pub enum FileKind {
 | 打开一个会话的 Diff < 50 ms | `git` 的 `changes` 对全部跟踪文件 `stat`：728 个文件的 `stat` 合计 < 5 ms（M 系列 Mac） |
 | 安装包 ≤ 80 MB（[ADR 0018](../adr/0018.md)） | rustix 已在发布构建里（经 GPUI），不新增 crate；本模块的代码在几十 KB 量级 |
 
-与 `std::fs` 的对比：`std::fs::symlink_metadata` 是 1 次 `lstat`，但它跟随中间一级的符号链接，不能直接用。`stat` 的路径解析工作与 `lstat` 相同（父目录一次解析、最后一级一次查找），额外的是 1 次打开和 1 次关闭；只有一级的路径与 `lstat` 一样是 1 次系统调用。普通文件的 `read` 与 `std::fs::read`（`open`、`statx` / `fstat`、`read`、`close`）的系统调用数相同。符号链接、socket、中间一级出错的路径走 `Walk`，系统调用数随深度增长，这些路径在仓库里少见。
+与 `std::fs` 的对比：`std::fs::symlink_metadata` 是 1 次 `lstat`，但它跟随中间一级的符号链接，不能直接用。`stat` 的路径解析工作与 `lstat` 相同（父目录一次解析、最后一级一次查找）：macOS 13 起与 `lstat` 一样是 1 次系统调用；Linux 和 macOS 11、12 上额外是 1 次打开和 1 次关闭，只有一级的路径是 1 次。普通文件的 `read` 与 `std::fs::read`（`open`、`statx` / `fstat`、`read`、`close`）的系统调用数相同。符号链接、socket、中间一级出错的路径走 `Walk`，系统调用数随深度增长，这些路径在仓库里少见。
 
-预算（M 系列 Mac，路径深度 4，页缓存已热）：`stat` 的中位数不超过同一路径上 `symlink_metadata` 的 3 倍且 < 10 µs；4 KiB 文件的 `read` 不超过 `std::fs::read` 的 1.5 倍。超出时先考虑在一次 `changes` 内复用父目录描述符（index 按路径排序，相邻路径常在同一目录），这要改接口，另改本文。
+预算（M 系列 Mac，macOS 13 及以上，路径深度 4，页缓存已热）：`stat` 的中位数不超过同一路径上 `symlink_metadata` 的 3 倍且 < 10 µs；4 KiB 文件的 `read` 不超过 `std::fs::read` 的 1.5 倍。超出时先考虑在一次 `changes` 内复用父目录描述符（index 按路径排序，相邻路径常在同一目录），这要改接口，另改本文。
 
 基准：
 
-- 实现 PR 提供 `#[ignore]` 的 `perf_smoke` 测试：对同一棵 728 个文件的目录树各做 10 000 次 `stat`、`read`，与 `symlink_metadata`、`std::fs::read` 对比，打印比值，在 macOS 上运行一次并把结果写进 PR 描述。
-- `bench` 实现后（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）加入 `platform/safe_stat`、`platform/safe_read_4k`，按上面的比值设预算，只测 `SafeRoot::open` 选中的生产后端；`perf_smoke` 随之删除（[bench 设计「迁移」](bench.md#迁移)）。`git` 的 `git/changes_clean` 包含它们的成本。
+- `bench` 的 `platform/safe_stat`、`platform/safe_read_4k`（[bench 设计「迁移」](bench.md#迁移)）：bench 自己生成 728 个 4 KiB 文件、深度 4 的目录树，与同一路径上的 `symlink_metadata`、`std::fs::read` 交替采样，按上面的比值判定；只测 `SafeRoot::open` 选中的生产后端（macOS 上是 `NofollowAny`，Linux 上是 `Openat2`），`Walk` 不设基准。`git` 的 `git/changes_clean` 包含它们的成本。
+- 实现 PR 里的 `#[ignore]` 测试 `perf_smoke`（对每个后端各做 10 000 次 `stat`、`read` 并打印比值）已由 bench 第 1 步删除，它在 Linux 上的结果见「实际验证」。
 
 ## 状态与异常
 
@@ -297,12 +309,13 @@ pub enum FileKind {
 - 并发修改：每次调用的结果对应调用期间某一时刻的状态。目录在一次调用的解析期间被移到根目录之外时，这次调用可能读到移走之后的内容。做到这一点要以用户身份在本机运行程序，不在威胁模型内（AGENTS.md「Review guidelines」、ADR 0024「已知限制」）；调用之间把目录换成符号链接的情况由下一次调用正确报告为 `PathThroughSymlink`。
 - 挂载点：`RESOLVE_BENEATH` 不阻止跨越根目录之下的挂载点（没有加 `RESOLVE_NO_XDEV`），macOS 同样。根目录之下的挂载由用户自己设置，内容仍在根目录的路径之下。
 - 设备文件在 `fstat` 之前被打开（`O_NONBLOCK | O_NOCTTY`，不读）。在工作区里创建设备文件需要 root 权限。
-- macOS 的目录用 `O_RDONLY` 打开，需要目录的读权限：只有搜索权限（如 `0711`）的目录下的条目为 `Io(PermissionDenied)`，而 `lstat` 能成功。git 检出的目录不会这样。
+- macOS 的 `Walk` 和 `NofollowAnyParent` 的父目录用 `O_RDONLY` 打开，需要目录的读权限。只有搜索权限（如 `0711`）的目录下的条目，`NofollowAny` 的 `stat`（一次 `fstatat`）和 `read` 的一步打开只需要搜索权限，能成功；macOS 11、12 上的 `stat`，以及一步调用出错而交给 `Walk` 的（如这种目录下的符号链接、socket）为 `Io(PermissionDenied)`，而 `lstat` 能成功。git 检出的目录不会这样。
+- macOS 11、12 上 `stat` 是 3 次系统调用（`NofollowAnyParent`），bench 只在 CI 的 macOS 版本（13 及以上）上判定预算；11、12 上的比值预计与改为一次 `fstatat` 之前在 macOS CI 上测得的 3.94–4.16 倍相近，高于 3 倍预算，没有测量。
 - 路径超过 `PATH_MAX`（macOS 1024、Linux 4096）时一步打开失败，交给 `Walk` 逐级打开，照常成功；单个名字超过 `NAME_MAX`（255）时为 `Io`。
 
 ## 测试
 
-全部写在 `crates/platform/src/safe_read/tests.rs`（`#[cfg(test)] mod tests;`）里，用 `tempfile` 的临时目录。行为测试对当前平台可用的每个实现各运行一次：Linux 上是 `Openat2` 和 `Walk`，macOS 上是 `NofollowAny` 和 `Walk`（测试用 `pub(crate)` 的 `SafeRoot::open_with(root, Backend)` 强制选择）。
+全部写在 `crates/platform/src/safe_read/tests.rs`（`#[cfg(test)] mod tests;`）里，用 `tempfile` 的临时目录。行为测试对当前平台可用的每个实现各运行一次：Linux 上是 `Openat2` 和 `Walk`，macOS 上是 `NofollowAny`、`NofollowAnyParent` 和 `Walk`（测试用 `pub(crate)` 的 `SafeRoot::open_with(root, Backend)` 强制选择；强制 `NofollowAnyParent` 让 macOS 11、12 的路径在更新版本的 CI 上也有测试）。
 
 在 Linux CI 和 macOS CI 上都运行：
 
@@ -326,7 +339,7 @@ pub enum FileKind {
 
 只在 macOS 上运行：
 
-- `nofollow_any_*`：上面的 `symlink_*`、`race_*`、`walk_*` 在 `NofollowAny` 上各自通过；`O_NOFOLLOW_ANY` 的一步打开对中间一级和最后一级的符号链接都返回错误，不跟随。
+- `nofollow_any_*`：上面的 `symlink_*`、`race_*`、`walk_*` 在 `NofollowAny` 和 `NofollowAnyParent` 上各自通过；探测结果到实现的映射是纯函数（`EINVAL` 选 `NofollowAnyParent`，成功和其他错误选 `NofollowAny`），`sw_vers` 报告 13 及以上时 `SafeRoot::open` 选的是 `NofollowAny`，更早时是 `NofollowAnyParent`；`O_NOFOLLOW_ANY` 打开父目录时对符号链接返回错误；`O_NOFOLLOW_ANY` 的一步打开对中间一级和最后一级的符号链接都返回错误，不跟随；`stat` 的一步 `fstatat` 对多级路径上的普通文件和目录一次成功（不落到 `Walk`），元数据与 `symlink_metadata` 一致，对中间一级的符号链接（含悬空链接）返回 `ENOENT` 以外的错误，最后一级是符号链接时返回链接本身的元数据或 `ENOENT` 以外的错误，从不返回链接目标的元数据。
 
 `git` 的工作区测试（FIFO 为 `UnsupportedType`、中间一级是符号链接为 `PathThroughSymlink`）在 Linux 上经本模块的 Linux 实现运行。
 
@@ -344,7 +357,7 @@ pub enum FileKind {
 - `rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`（测试里创建 FIFO 的 `libc::mkfifo`）：实现代码没有 `unsafe`。
 - `rg 'O_NOFOLLOW_ANY|NOFOLLOW_ANY' crates --glob '!crates/platform/**'` 没有结果（架构规则 6）。
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`platform` 不依赖 GPUI）。
-- `just test -p lectern-platform -- --ignored perf_smoke` 在 macOS 上运行一次，PR 描述里记录 `stat` 与 `symlink_metadata`、`read` 与 `std::fs::read` 的比值，在「性能」的预算之内。
+- `just test -p lectern-platform -- --ignored perf_smoke` 在 macOS 上运行一次，PR 描述里记录 `stat` 与 `symlink_metadata`、`read` 与 `std::fs::read` 的比值，在「性能」的预算之内。（实现 PR 的验收。这个测试已由 bench 第 1 步删除，现在由 `just bench platform/` 测量，macOS CI 判定。）
 - 本文的状态行改为「已实现」并附 PR 编号，填写「实际验证」；`crates/platform/Cargo.toml` 的 `description` 加上安全读取。
 
 ## 实际验证
@@ -353,7 +366,7 @@ pub enum FileKind {
 
 - `cargo check -p lectern-platform --target aarch64-apple-darwin` 和 `cargo clippy -p lectern-platform --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 在 Linux 上交叉检查通过：macOS 的代码（`OFlags::NOFOLLOW_ANY`、`dev_t` 为 `i32`、`mode_t` 为 `u16`、测试里的 `libc::mkfifo`）通过了类型检查和 clippy，但没有运行。
 - `just check`、`just test`（整个工作区 331 个测试通过，跳过 1 个 `#[ignore]`）、`just doctest`、`just deny`、`python3 scripts/check_architecture.py` 全部通过。
-- `just test -p lectern-platform`：30 个测试通过，跳过 `perf_smoke`。其中 27 个在两个平台上都运行，`openat2_rejects_escape`、`linux_backend_choice`、`read_procfs_file_with_size_zero_to_eof` 只在 Linux 上运行；macOS 上另有 5 个 `nofollow_any_*`（共 32 个）。行为测试对 `Openat2` 和 `Walk` 各运行一次；`linux_backend_choice` 确认这台机器的内核上 `SafeRoot::open` 选的是 `Openat2`。
+- `just test -p lectern-platform`：30 个测试通过，跳过 `perf_smoke`。其中 27 个在两个平台上都运行，`openat2_rejects_escape`、`linux_backend_choice`、`read_procfs_file_with_size_zero_to_eof` 只在 Linux 上运行；macOS 上另有 6 个 `nofollow_any_*`（共 33 个）。行为测试对 `Openat2` 和 `Walk` 各运行一次；`linux_backend_choice` 确认这台机器的内核上 `SafeRoot::open` 选的是 `Openat2`。
 - `race_*`、`fifo_*`、`send_sync` 连续运行 40 次都通过；`race_swap_never_escapes` 每次运行中三种结果（根目录之内的内容、`NotFound`、`PathThroughSymlink`）都出现。
 - 测试环境以 root 运行，`walk_permission_denied_is_io` 在 root 下不检查（root 不受权限位限制）；用 `setpriv` 以 `nobody` 运行测试二进制时它通过，其余测试也都通过。
 - 验收的检查：`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果（只给 `lectern-platform` 加了 `libc`、`rustix`、`tempfile` 三条依赖，都是 Cargo.lock 里已有的版本）；`cargo tree -p lectern-platform -e normal --depth 1` 只列出 `rustix v1.1.5`；`rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`（macOS 上的 `libc::mkfifo`；Linux 的测试用 rustix 的 `mknodat` 创建 FIFO）。`rg 'O_NOFOLLOW_ANY|NOFOLLOW_ANY' crates --glob '!crates/platform/**'` 只匹配 `crates/git/AGENTS.md` 里解释这条规则的一句文字，`rg -t rust` 没有结果：代码里只有本 crate 用到这个标志。
@@ -365,6 +378,7 @@ pub enum FileKind {
   | `Walk` | 2.20–2.37 µs | 0.54–0.59 µs | 4.0–4.1 | 3.92–4.11 µs | 2.37–2.53 µs | 1.6–1.7 |
 
   Linux 默认的 `Openat2` 在「性能」的预算之内。`Walk` 只在 `openat2` 不可用或一步打开出错时使用，不在预算的范围内。预算按 M 系列 Mac 制定，macOS 上的数字随 macOS 上的那次运行写进 PR 描述。
+- macOS 的 `stat` 改为一次 `fstatat`（见「与设计的差异」）之后：`cargo check -p lectern-platform --target aarch64-apple-darwin` 和 `cargo clippy -p lectern-platform --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 在 Linux 上交叉检查通过，`just check`、`just test`、`just deny` 在 Linux 上通过（Linux 的实现没有改）。新增的 `nofollow_any_one_step_stat_follows_no_symlink`、`nofollow_any_backend_choice` 和其余 `nofollow_any_*` 没有在 macOS 上运行过，由 macOS CI 运行；比值由 macOS CI 的 `platform/safe_stat` 判定。macOS 11、12 的 `NofollowAnyParent` 由测试强制选择后在 CI 上运行，没有在 11、12 上运行过；`nofollow_any_backend_choice` 在 CI 上确认探测成功、选中 `NofollowAny`。
 
 ## 与设计的差异
 
@@ -373,4 +387,5 @@ pub enum FileKind {
 - `Read` 派生 `Clone, PartialEq, Eq, Debug`，`SafeRoot` 派生 `Debug`（设计没有写派生）：测试要比较多个线程的结果，调用方也需要打印它们。已改在「接口」里。
 - `fd_count_is_unchanged_after_many_calls`：在 nextest（`just test`，每个测试一个进程）里断言描述符数完全不变；在 `cargo test` 里，其他测试在同一进程的线程上同时打开描述符，改为断言增加的数量小于调用轮数的一半（任何一条路径泄漏，每轮至少多一个描述符）。
 - `SafeRoot::open_with` 只在 `#[cfg(test)]` 下编译：除测试外没有调用方。Analyze 快照（#66）复用的是 `walk` 和一步打开的 `pub(crate)` 函数，不需要它。
+- macOS 的 `stat` 改为一次 `fstatat(root, 路径, AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)`（见「stat」），原设计是以 `O_NOFOLLOW_ANY` 打开父目录、`fstatat`、关闭，共 3 次系统调用。bench 第 1 步（[#83](https://github.com/SoloJiang/lectern-app/pull/83)）的 `platform/safe_stat` 在 macOS CI 的 arm64 托管机器上测得原做法的中位数为 8.1–8.8 µs，是同一路径上 `symlink_metadata` 的 3.94–4.16 倍，超出「性能」的 3 倍预算；Linux 的 `Openat2` 为 1.19 倍，没有改。成功时的 `Meta`、`ENOENT` 为 `NotFound`、其他错误交给 `Walk` 重做，都与原做法相同；结果只在一种情况下不同：只有搜索权限的目录（如 `0711`）下的条目由 `Io(PermissionDenied)` 变为成功，与 `lstat` 一致（「已知限制」已改）。`fstatat` 从 macOS 13 起才接受 `AT_SYMLINK_NOFOLLOW_ANY`，macOS 11、12 上返回 `EINVAL`；那里的 `stat` 保留原做法，作为单独的实现 `NofollowAnyParent`，由 `SafeRoot::open` 探测选择（见「macOS 的实现选择」），不交给 `Walk`。`Target`（一步打开父目录还是条目）随之只在 Linux 上使用，移进 `linux.rs`。
 - 增加了设计没有列出的测试：`stat_after_the_root_is_deleted_is_not_found`、`stat_overlong_name_is_io`、`walk_permission_denied_is_io`、`read_procfs_file_with_size_zero_to_eof`（Linux）、`errors_convert_to_io_errors`、`timestamp_as_nanos_handles_times_before_1970`、`file_kind_follows_the_mode`，分别对应「状态与异常」「读取上限」里的条目和 `SafeError` 的转换。

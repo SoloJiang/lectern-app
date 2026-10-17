@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 
 use crate::testing::{IndexEntry, IndexOptions, TestHead, TestRepo};
 use crate::*;
@@ -491,77 +490,5 @@ fn read_file_in_a_linked_worktree_stays_in_its_root() {
         WorktreeFile::File {
             bytes: b"f".to_vec()
         }
-    );
-}
-
-// ---- timing ---------------------------------------------------------------
-
-/// `discover` + `worktrees` (11 worktrees) + `tracked` (728 files) on the
-/// `cloudprint-miniapps` shape (docs/design/git.md「性能」, budget < 15 ms).
-/// Prints the median and the slowest run. The `git_open` bench in
-/// `crates/bench` replaces it once the bench design (#7) is merged.
-/// Run with `cargo test --release -p lectern-git -- --ignored perf_smoke`.
-#[test]
-#[ignore = "timing; run in release"]
-fn perf_smoke_git_open() {
-    let t = TestRepo::new();
-    let blob = t.blob(b"export const x = 1;\n");
-    let entries: Vec<IndexEntry> = (0..728)
-        .map(|i| {
-            IndexEntry::new(
-                &format!("packages/p{:02}/src/file{i:03}.ts", i % 25),
-                Mode::File,
-                blob,
-            )
-        })
-        .collect();
-    t.write_index(t.common_dir(), &entries);
-    let tree = t.tree(&[("README.md", b"x")]);
-    let commit = t.commit(tree, &[], "c");
-    t.set_ref("refs/heads/main", commit);
-    for i in 0..10 {
-        let branch = format!("refs/heads/wt{i}");
-        t.set_ref(&branch, commit);
-        let admin = t.add_worktree(
-            &format!("wt{i}"),
-            &t.base().join(format!("wt{i}")),
-            TestHead::Branch(&branch),
-        );
-        t.write_index(&admin, &entries);
-    }
-    let cancel = no_cancel();
-    let mut runs = Vec::new();
-    for _ in 0..200 {
-        let start = Instant::now();
-        let d = crate::testing::discover(t.root(), &[]).unwrap().unwrap();
-        let worktrees = d.repo.worktrees().unwrap();
-        assert_eq!(worktrees.len(), 11);
-        let wt = d.repo.worktree(&WorktreeId::Main).unwrap();
-        let tracked = wt.tracked(&EntryLimits::default(), &cancel).unwrap();
-        assert_eq!(tracked.len(), 728);
-        runs.push(start.elapsed());
-    }
-    runs.sort();
-    println!(
-        "git_open (discover + worktrees x11 + tracked x728): median {:?}, p95 {:?}, max {:?}",
-        runs[runs.len() / 2],
-        runs[runs.len() * 95 / 100],
-        runs[runs.len() - 1]
-    );
-    // One gix handle on the common directory (budget < 1 ms per top-level call).
-    let mut opens = Vec::new();
-    for _ in 0..200 {
-        let start = Instant::now();
-        let handle =
-            crate::handle::Handle::open(t.common_dir(), crate::handle::ConfigScope::RepositoryOnly)
-                .unwrap();
-        drop(handle);
-        opens.push(start.elapsed());
-    }
-    opens.sort();
-    println!(
-        "git_open_handle: median {:?}, max {:?}",
-        opens[opens.len() / 2],
-        opens[opens.len() - 1]
     );
 }

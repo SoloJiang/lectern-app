@@ -1,0 +1,22 @@
+---
+source: crates/bench/src/tests/report.rs
+expression: markdown
+---
+### lectern-bench report: measure, gated
+
+| ID | Measured | Budget | Status | Source |
+|---|---|---|---|---|
+| `fake/time` | median 1.25 ms; median 950 µs | median < 1 ms | ok | docs/design/bench.md#测试 |
+| `fake/throughput` | 164 MB/s (median) | throughput ≥ 200 MB/s (median) | OVER | docs/design/bench.md#测试 |
+| `fake/ratio` | ratio 2 (median), median 2 µs | ratio ≤ 3 (median), median < 10 µs | ok | docs/design/bench.md#测试 |
+| `fake/bytes` | median 41 MB | median < 60 MB | ok | docs/design/bench.md#测试 |
+| `fake/frames` | max 5 ms, interval 1 refresh periods (max) | max ≤ 8.3 ms, interval ≤ 1.5 refresh periods (max) | ok | docs/design/bench.md#测试 |
+| `fake/record` | median 11 µs | record | record | docs/design/bench.md#测试 |
+| `fake/noisy` | median 300 µs | median < 1 ms | ok, noisy | docs/design/bench.md#测试 |
+| `fake/error` |  | median < 1 ms | error (panic：boom) | docs/design/bench.md#测试 |
+| `fake/skipped` |  | median < 1 ms | skipped (只在 macOS 运行) | docs/design/bench.md#测试 |
+| `fake/filtered` |  | median < 1 ms | filtered | docs/design/bench.md#测试 |
+| `fake/planned` |  | median < 1 ms | planned (由 fake 第 2 步 加入) | docs/design/bench.md#测试 |
+| `fake/smoke` | median 1.5 ms | median < 1 ms | smoke | docs/design/bench.md#测试 |
+
+- error: 基准 fake/extra 不对应本目标的任何预算

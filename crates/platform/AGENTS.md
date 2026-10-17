@@ -24,6 +24,7 @@ cargo check -p lectern-platform
 just test -p lectern-platform   # macOS 上覆盖全部代码
 ```
 
-- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY` 的实现在 macOS CI 上测试。
+- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY`（`read`）与 `AT_SYMLINK_NOFOLLOW_ANY`（`stat`）的实现在 macOS CI 上测试。
+- 计时：`lectern-bench` 的 `platform/safe_stat`、`platform/safe_read_4k`（`just bench platform/`），只测 `SafeRoot::open` 选中的生产后端。
 - 文件监听后端：`fsevents_convert_*` 在所有平台上运行；`fsevents_*`、`kqueue_*` 只在 macOS CI 上运行，用真实的临时目录，经 `MacBackend::arm_with` 把批次交给记录用的闭包。FSEvents 是异步的：按期限等待（`Recorder::wait_until`，每次等待之间 `flush`），流刚启动时先写探针文件直到报告出现（`wait_live`），不用固定的 sleep 判断结果。在 Linux 上至少交叉检查：`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings`。
 - 其余调用系统 API 的行为只能在 macOS CI 上验证；能抽成纯函数的部分（如生成 Seatbelt 配置、合并 statusline 配置）写单元测试和 insta 快照，在任何平台上都能运行。

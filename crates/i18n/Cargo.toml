@@ -13,6 +13,10 @@ layer = "infra"
 # No runtime dependencies: the resources are compiled into static tables by
 # build.rs, so the binary contains no Fluent parser (docs/design/i18n.md).
 
+[features]
+# `testing::frame_strings`, for lectern-bench (docs/design/i18n.md「性能」).
+test-support = []
+
 [build-dependencies]
 fluent-syntax.workspace = true
 

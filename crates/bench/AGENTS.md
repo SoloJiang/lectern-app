@@ -20,7 +20,9 @@
 just test -p lectern-bench   # 运行器、预算表、报告协议、进程调度的单元测试
 just bench                   # macOS（Apple 芯片）上判定预算；其他平台是冒烟运行
 just bench agents/           # 只运行 ID 含 agents/ 的基准
+just bench --measure git/    # Linux 上也按规则采样，只报告、不判定
 ```
 
-- 基准报告列出每项的实测值、预算和出处，写入 `target/lectern-bench/report.json`；CI 的 macOS 任务判定预算，Linux 任务只做冒烟。
+- 基准目标：`benches/time.rs`（按被测 crate 分模块，在 `benches/time/` 下）、`benches/memory.rs`（注册 `CountingAlloc`）、`benches/process.rs`。新增基准时在预算表里把对应条目改为 `Active`，否则运行器在开始前以 2 退出。
+- 每个目标写自己的 `target/lectern-bench/report-<target>.json`，`lectern-bench-report merge` 合并成 `report.json` 并决定 `just bench` 的退出码。报告列出每项的实测值、预算和出处；CI 的 macOS 任务判定预算，Linux 任务只做冒烟。
 - 夹具由被测 crate 的 `testing` 在运行时生成（如 `cloudprint` 形状的合成仓库），不提交大型样例项目；`tests/fixtures/` 只放本 crate 自己的小样本。
