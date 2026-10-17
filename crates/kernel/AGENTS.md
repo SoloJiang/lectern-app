@@ -4,7 +4,7 @@
 
 - 层：kernel 层。只依赖 kernel 层，不依赖 GPUI；任何层都可以依赖本 crate。
 - 设计文档：[docs/design/kernel.md](../../docs/design/kernel.md)
-- issue：[#8](https://github.com/SoloJiang/lectern-app/issues/8)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#40](https://github.com/SoloJiang/lectern-app/issues/40)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)
+- issue：[#8](https://github.com/SoloJiang/lectern-app/issues/8)、[#7](https://github.com/SoloJiang/lectern-app/issues/7)（bench 用的插件集合闭包与裁剪）、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#40](https://github.com/SoloJiang/lectern-app/issues/40)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)
 - ADR：[0010](../../docs/adr/0010.md)、[0018](../../docs/adr/0018.md)
 
 ## 边界

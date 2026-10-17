@@ -1,11 +1,69 @@
 //! 测试与 bench 用：不经过插件，直接解析一个文件（docs/design/agents.md「本 crate 的公开项」）。
 
 use std::path::Path;
+use std::sync::Arc;
 
-use lectern_services::session::{Agent, Positioned, Record, SessionError, SourceId, TurnIndex};
+use lectern_cache::Cache;
+use lectern_services::project::Projects;
+use lectern_services::session::{
+    Agent, Positioned, Record, SessionError, SessionSource, SourceId, TurnIndex,
+};
 
 use crate::claude::{self, ClaudeCode, Owner, SessionFile};
 use crate::codex::{self, Codex};
+use crate::filter::SessionFilter;
+use crate::plugin::ListLineage;
+use crate::roots::AgentRoots;
+use crate::source::place::ProjectsRef;
+use crate::source::{Engine, Setup};
+
+/// 不经过插件的会话来源（bench 与集成测试用）：返回之前在调用线程上同步完成第一次发现，不监听目录，
+/// 不发事件；`complete` 也在调用线程上同步补齐。插件在后台任务里把轮次索引写进 `cache`，这里在 drop
+/// 时写。`projects` 为 None 时不归位（`place` 都是 `Pending`），
+/// `cache` 为 None 时不读写持久缓存。`Agent::Other` 返回 None。
+pub fn source(
+    agent: Agent,
+    roots: &AgentRoots,
+    cache: Option<&Cache>,
+    projects: Option<Arc<dyn Projects>>,
+    decoded_dir: &Path,
+) -> Option<Arc<dyn SessionSource>> {
+    let setup = |roots: Vec<std::path::PathBuf>, adapter_version| Setup {
+        roots,
+        executor: None,
+        cache: cache.map(Cache::app),
+        watcher: None,
+        projects: match projects.clone() {
+            Some(p) => ProjectsRef::Direct(p),
+            None => ProjectsRef::None,
+        },
+        filter: SessionFilter::new(),
+        adapter_version,
+    };
+    match agent {
+        Agent::ClaudeCode => {
+            let engine = Engine::new(
+                |_| ClaudeCode::new(SourceId(claude::SOURCE_ID.into())),
+                setup(roots.claude_sessions(), claude::ADAPTER_VERSION),
+            );
+            engine.start(None);
+            Some(engine)
+        }
+        Agent::Codex => {
+            let decoded = decoded_dir.to_path_buf();
+            let engine = Engine::new(
+                move |me| {
+                    Codex::new(SourceId(codex::SOURCE_ID.into()), decoded)
+                        .with_lineage(Arc::new(ListLineage(me.clone())))
+                },
+                setup(roots.codex_sessions(), codex::ADAPTER_VERSION),
+            );
+            engine.start(None);
+            Some(engine)
+        }
+        Agent::Other(_) => None,
+    }
+}
 
 /// 解析整个文件，交出全部记录和轮次索引。
 ///
@@ -112,6 +170,19 @@ pub fn synthetic_session(len: usize) -> Vec<u8> {
     repeat(&CLAUDE_SAMPLE, len)
 }
 
+/// 一个形状接近真实长会话的 Claude Code 会话，不少于 `len` 字节：fixtures 的主会话（11 次工具调用）之后跟
+/// 约 330 KB 的已知忽略记录（`file-history-snapshot`，代替真实会话里的大段工具结果），重复拼接。工具调用的
+/// 密度与设计里的参照相同（56 MB 约 1600 次，「性能」），所以轮次索引的大小接近真实会话的。供 bench 的
+/// `agents/turns_cached_50mb`。
+pub fn synthetic_long_session(len: usize) -> Vec<u8> {
+    let pad = format!(
+        "{{\"type\":\"file-history-snapshot\",\"messageId\":\"pad\",\"snapshot\":{{\"padding\":\"{}\"}},\"isSnapshotUpdate\":false}}\n",
+        "x".repeat(33_000)
+    );
+    let padding = pad.repeat(10);
+    repeat(&[CLAUDE_SAMPLE[0], padding.as_bytes()], len)
+}
+
 /// 约 4 KB 的完整行：[`synthetic_session`] 开头到第一个不早于 4096 字节的行尾，追加到会话末尾后
 /// 仍是合法的会话。
 pub fn append_chunk() -> &'static [u8] {
@@ -133,4 +204,21 @@ pub fn synthetic_rollout(len: usize) -> Vec<u8> {
 /// 用 `ruzstd` 的最快档压缩成一个 zstd 帧，即 `.jsonl.zst` 文件的内容。
 pub fn compress_zst(data: &[u8]) -> Vec<u8> {
     ruzstd::encoding::compress_to_vec(data, ruzstd::encoding::CompressionLevel::Fastest)
+}
+
+/// 在 `projects`（Claude Code 配置目录下的 `projects/`）里写 `sessions` 个会话文件，每 20 个一个项目目录：
+/// 每个文件是 fixtures 的主会话，`sessionId` 换成文件名里的新 ID。返回写下的会话 ID。供 bench 的
+/// `agents/discover_1000`。
+pub fn synthetic_projects(projects: &Path, sessions: usize) -> std::io::Result<Vec<String>> {
+    const MAIN: &str = "11111111-1111-4111-8111-111111111111";
+    let sample = std::str::from_utf8(CLAUDE_SAMPLE[0]).expect("the fixture is UTF-8");
+    let mut ids = Vec::with_capacity(sessions);
+    for n in 0..sessions {
+        let id = format!("{n:08x}-1111-4111-8111-111111111111");
+        let dir = projects.join(format!("-Users-dev-fixture-repo-{}", n / 20));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join(format!("{id}.jsonl")), sample.replace(MAIN, &id))?;
+        ids.push(id);
+    }
+    Ok(ids)
 }

@@ -15,7 +15,7 @@ use crate::plugin::{
 };
 use crate::registry::{ErasedProvider, Garbage, Registry, drop_garbage};
 use crate::service::ServiceKey;
-use crate::set::{PluginSet, analyze};
+use crate::set::{PluginSet, Plugins, PreparedSet, analyze, manifest_failure, read_manifest};
 use crate::token::{
     ActivationToken, Counters, Entry, StagedItem, TokenState, Transition, drop_rejected,
 };
@@ -255,10 +255,18 @@ impl Kernel {
     /// `AfterFirstFrame` plugin in dependency order. Call it only after the
     /// startup barrier is released.
     pub fn start(plugins: PluginSet) -> Arc<Kernel> {
-        Kernel::start_with_tap(plugins, None)
+        Kernel::start_with_tap(Plugins::Set(plugins), None)
     }
 
-    pub(crate) fn start_with_tap(plugins: PluginSet, tap: Option<Name>) -> Arc<Kernel> {
+    /// Like [`start`](Kernel::start), but with the manifests and timings
+    /// [`PluginSet::prepare`] and [`PreparedSet::with`] already took:
+    /// `manifest()` is not called again, `status()` reports those timings as
+    /// `manifest_time`, and a plugin whose `manifest()` panicked is `Failed`.
+    pub fn start_prepared(plugins: PreparedSet) -> Arc<Kernel> {
+        Kernel::start_with_tap(Plugins::Prepared(plugins), None)
+    }
+
+    pub(crate) fn start_with_tap(plugins: Plugins, tap: Option<Name>) -> Arc<Kernel> {
         let counters = Arc::new(Counters::new());
         let (sender, receiver) = mpsc::channel();
         let shared = Arc::new(Shared {
@@ -422,30 +430,53 @@ struct Lifecycle {
     facts: Option<(Arc<dyn WorkspaceFacts>, ActivationToken)>,
 }
 
-fn run(shared: Arc<Shared>, plugins: PluginSet, receiver: Receiver<Request>) {
-    let mut lifecycle = Lifecycle {
-        shared: shared.clone(),
-        slots: plugins
+impl Slot {
+    fn new(id: Name, plugin: Arc<dyn Plugin>) -> Slot {
+        Slot {
+            id,
+            plugin: Some(plugin),
+            manifest: None,
+            enabled: true,
+            failed: None,
+            command_met: false,
+            manual_met: false,
+            workspace_met: false,
+            current: None,
+            generation: 0,
+            waiters: Vec::new(),
+            manifest_time: None,
+            activate_time: None,
+            commit_time: None,
+            started_time: None,
+        }
+    }
+}
+
+fn run(shared: Arc<Shared>, plugins: Plugins, receiver: Receiver<Request>) {
+    let slots = match plugins {
+        Plugins::Set(set) => set
             .plugins
             .into_iter()
-            .map(|(id, plugin)| Slot {
-                id,
-                plugin: Some(plugin),
-                manifest: None,
-                enabled: true,
-                failed: None,
-                command_met: false,
-                manual_met: false,
-                workspace_met: false,
-                current: None,
-                generation: 0,
-                waiters: Vec::new(),
-                manifest_time: None,
-                activate_time: None,
-                commit_time: None,
-                started_time: None,
+            .map(|(id, plugin)| Slot::new(id, plugin))
+            .collect(),
+        // Already read: `start` sees `manifest_time` and skips these.
+        Plugins::Prepared(set) => set
+            .plugins
+            .into_iter()
+            .map(|prepared| {
+                let mut slot = Slot::new(prepared.id, prepared.plugin);
+                slot.manifest_time = Some(prepared.time);
+                match prepared.manifest {
+                    Ok(manifest) => slot.manifest = Some(manifest),
+                    Err(message) => slot.failed = Some(manifest_failure(&message)),
+                }
+                slot
             })
             .collect(),
+    };
+    let mut lifecycle = Lifecycle {
+        shared: shared.clone(),
+        slots,
         order: Vec::new(),
         started: false,
         shutting_down: false,
@@ -561,19 +592,18 @@ impl Lifecycle {
 
     fn start(&mut self) {
         for slot in &mut self.slots {
+            // A prepared slot already has its manifest (or failure) and time.
+            if slot.manifest_time.is_some() {
+                continue;
+            }
             let Some(plugin) = slot.plugin.clone() else {
                 continue;
             };
-            let begin = Instant::now();
-            let result = contain(|| plugin.manifest());
-            slot.manifest_time = Some(begin.elapsed());
+            let (result, time) = read_manifest(plugin.as_ref());
+            slot.manifest_time = Some(time);
             match result {
                 Ok(manifest) => slot.manifest = Some(manifest),
-                Err(message) => {
-                    slot.failed = Some(PluginError::Panicked(format!(
-                        "manifest panicked: {message}"
-                    )))
-                }
+                Err(message) => slot.failed = Some(manifest_failure(&message)),
             }
         }
 

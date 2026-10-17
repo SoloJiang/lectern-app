@@ -32,7 +32,7 @@ pub use plugin::{
 };
 pub use registry::{Admitted, ServiceRef, ServiceSet};
 pub use service::{Service, ServiceKey, service};
-pub use set::PluginSet;
+pub use set::{PluginSet, PreparedSet};
 pub use token::{ActivationToken, Admission, BusyGuard, PendingGuard, TokenState};
 
 #[cfg(test)]

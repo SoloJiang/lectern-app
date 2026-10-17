@@ -1,6 +1,6 @@
 # bench 设计
 
-状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）已实现；第 2–5 步尚未实现（见「验收」）。
+状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2、4、5 步尚未实现（见「验收」）。
 
 对应 issue [#7](https://github.com/SoloJiang/lectern-app/issues/7)；安装包体积检查 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 复用本 crate 的运行器和预算表。`bench` 测量[性能预算](tech-research.md#性能预算)、[ADR 0017](../adr/0017.md)、[ADR 0018](../adr/0018.md) 和各 crate 设计文档「性能」一节里的每一项，打印实测值与预算，在 Apple 芯片的 macOS 上超标即以非 0 退出码让 CI 失败。
 
@@ -362,7 +362,7 @@ pub mod host {
 
 其中 `process::phys_footprint` 已随 `cache` 第 2 步加入（`cache/memory` 用它，见「进程内基准」，[platform 设计「进程」](platform.md#进程)），其余接口仍随第 2 步。
 
-`kernel`（普通的公开接口，不放在 `test-support` 下：发布构建里没有调用方，测量用的构建因此不需要打开 kernel 的 `test-support`）：
+`kernel`（普通的公开接口，不放在 `test-support` 下：发布构建里没有调用方，测量用的构建因此不需要打开 kernel 的 `test-support`；已随第 3 步实现，细节以 [kernel 设计「插件集合的闭包与裁剪」](kernel.md#插件集合的闭包与裁剪)为准）：
 
 ```rust
 impl PluginSet {
@@ -371,17 +371,19 @@ impl PluginSet {
     pub fn prepare(self) -> PreparedSet;
 }
 
-pub struct PreparedSet { /* Vec<(Name, Arc<dyn Plugin>, Result<Manifest, PluginError>, Duration)> */ }
+pub struct PreparedSet { /* Vec<{ Name, Arc<dyn Plugin>, Result<Manifest, String>, Duration }> */ }
 
 impl PreparedSet {
-    /// 已取得的清单，不再调用 `manifest()`；探针用它找出激活条件。
-    pub fn manifests(&self) -> &[(Name, Manifest)];
+    /// 已取得的清单，不再调用 `manifest()`；探针用它找出激活条件。清单 panic 的插件不出现。
+    pub fn manifests(&self) -> impl Iterator<Item = (&Name, &Manifest)>;
     /// `id` 依赖的服务的提供者，传递闭包，不含 `id` 自己。只读已取得的清单。
     pub fn dependency_closure(&self, id: &str) -> Result<Vec<Name>, Vec<GraphError>>;
     /// 只保留 `keep` 返回 true 的插件。
     pub fn retain(self, keep: impl FnMut(&str) -> bool) -> Self;
     /// 加入一个插件，它的 `manifest()` 同样在这里调用一次并计时。
     pub fn with(self, id: impl Into<Name>, plugin: impl Plugin) -> Self;
+    /// `PluginSet::validate` 的检查，只读已取得的清单。
+    pub fn validate(&self) -> Result<(), Vec<GraphError>>;
 }
 
 impl Kernel {
@@ -789,6 +791,27 @@ CI：
 - `cache/*` 的中位数与 `perf_smoke_cache` 在同一台机器上的结果（[cache 设计「实际验证」](cache.md#实际验证)）同一量级，写入的长尾仍来自提交时的自动检查点。`cache/get_1m` 在完整运行里一次是 1.39 ms，单独运行两次是 0.50 和 0.57 ms，与 `perf_smoke_cache` 的 0.48–0.53 ms 一致。
 - 没有验证的：macOS 上的判定和重试（只由 `runner_*` 用假基准覆盖）、`GITHUB_STEP_SUMMARY` 和 `report.json` 的上传（由 CI 运行）。
 
+第 3 步（kernel 的插件集合闭包与裁剪），在同一类 Linux 虚拟机（x86_64，4 核）上运行：
+
+- `just test -p lectern-kernel` 的 `set_closure_*` 7 个、`set_prepare_*` 3 个通过（kernel 共 86 个测试），对应验收的四项和三项：多层依赖、`MULTIPLE` 服务的多个提供者、缺提供者返回 `GraphError`（另有清单 panic、单实现服务多个提供者、未知 ID）、`retain` 之后 `validate` 通过；`prepare` → `dependency_closure` → `retain` → `with` → `validate` → `start_prepared` → `shutdown` 之后每个插件的 `manifest()` 恰好调用一次（含被 `retain` 去掉的插件），`status()` 的 `manifest_time` 与 `prepare` / `with` 记下的耗时相等，`manifest()` panic 的插件进入 `Failed`、状态与 `Kernel::start` 相同。详见 [kernel 设计「实际验证」](kernel.md#实际验证)。
+- `just check`、`just test`、`just doctest`、`just deny` 通过。
+- kernel 在冷启动路径上，`Kernel::start` 不能变慢。`kernel/*` 基准测的是服务查找和事件分发，不经过本步改动的代码。把 `origin/main` 导出到 `target/` 下，与本分支交替各运行三次 `just bench --measure kernel/`（中位数，三次依次列出），前后的差别在同一侧三次之间的波动以内：
+
+  | ID | 改动前 | 改动后 |
+  |---|---|---|
+  | `kernel/service_get` | 510 / 703 / 703 ns | 331 / 633 / 709 ns |
+  | `kernel/service_for_each/1` | 234 / 633 / 724 ns | 717 / 654 / 601 ns |
+  | `kernel/service_for_each/4` | 0.97 / 2.08 / 3.02 µs | 2.81 / 2.11 / 2.19 µs |
+  | `kernel/service_for_each/16` | 4.55 / 9.4 / 10.8 µs | 5.5 / 11.2 / 10.7 µs |
+  | `kernel/service_current/1` | 299 / 818 / 647 ns | 697 / 684 / 661 ns |
+  | `kernel/service_current/4` | 0.61 / 1.21 / 1.2 µs | 1.21 / 1.26 / 1.19 µs |
+  | `kernel/service_current/16` | 2.3 / 3.03 / 3.93 µs | 3.85 / 2.95 / 3.69 µs |
+  | `kernel/emit` | 448 / 632 / 630 ns | 440 / 668 / 728 ns |
+  | `kernel/emit_nested` | 0.81 / 1.49 / 1.48 µs | 1.4 / 1.45 / 1.44 µs |
+
+  `Kernel::start` 本身另用一个临时测试（不提交）测量，见 [kernel 设计「实际验证」](kernel.md#实际验证)：改动前后中位数都在 80–100 µs（20 个插件，含 `barrier`）。
+- 没有验证的：探针怎样用这组接口（第 4 步），macOS 上的运行（kernel 不依赖 GPUI，行为与 Linux 相同）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -807,3 +830,9 @@ CI：
 - `benches/time/*.rs` 用 `#[path]` 引入：基准目标的根是 `benches/time.rs`，按 Rust 的模块规则子模块默认在 `benches/` 下。`[lib]` 和 `[[bin]]` 设了 `bench = false`，否则 `cargo test --benches` 会把库的单元测试再跑一遍，`cargo bench` 也会把库当作 libtest 基准运行。
 - `process` 和 `memory` 目标在这一步没有基准：它们的预算都还是计划中的。`process` 目标的报告只有 `planned` 条目和空的 `plugins`、`language_servers`；「`process` 目标的生效条目都是 `skipped`」这条规则由 `runner_process_target_is_skipped_off_macos` 用假预算表验证。`just bench` 在 macOS 上构建 `empty_window` 和测量用 `lectern` 的两行、两个 `LECTERN_BENCH_*` 环境变量，随第 4、5 步加入。
 - 帧判定的测试（60 Hz、9 ms、阻塞两个周期、120 Hz）是 `stats_frames_*`：判定在统计模块里，不依赖进程调度；`time_with_setup` 每个样本调用一次 `setup` 的测试是 `runner_time_with_setup_calls_setup_once_per_sample`。本文把这两组列在 `process_*` 下。`budgets_*` 另检查了 ID 的写法、`Tier::Share` 的出处是某份设计文档的「性能」、每条预算属于「基准目标」一节规定的目标、`CountAbove` 只与 `CountAtMost` 配合。
+
+第 3 步（kernel，详见 [kernel 设计「与设计的差异」](kernel.md#与设计的差异)）：
+
+- `PreparedSet::manifests` 返回 `impl Iterator<Item = (&Name, &Manifest)>`，不是切片：集合里每一项还带插件对象、耗时和 panic 消息，返回切片要另存一份清单。探针只遍历它。「需要其他 crate 提供的接口」已改。
+- 新增 `PreparedSet::validate`：第 3 步的验收要求 `retain` 之后 `validate` 通过，而 `PluginSet::validate` 会再调用一次 `manifest()`。新增 `GraphError::UnknownPlugin`，`dependency_closure` 收到集合里没有的 ID 时返回它。
+- 只留闭包（`closure:<id>`）的集合在一种情况下不能激活：`MULTIPLE` 服务的某个提供者反过来依赖 `<id>`。这时闭包里有这个提供者，却没有它依赖的 `<id>`，探针等不到 `Ready`、基准记为出错。记为已知限制（[kernel 设计「插件集合的闭包与裁剪」](kernel.md#插件集合的闭包与裁剪)第 3 条）。

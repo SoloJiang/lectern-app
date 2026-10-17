@@ -1,10 +1,12 @@
-//! The plugin set and the dependency graph check.
+//! The plugin set, the dependency graph check, and prepared sets with their
+//! dependency closures.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::panic::contain;
-use crate::plugin::{Activation, GraphError, Manifest, Name, Plugin};
+use crate::plugin::{Activation, GraphError, Manifest, Name, Plugin, PluginError};
 use crate::service::ServiceKey;
 
 /// The plugins of one profile, chosen by `app`.
@@ -32,31 +34,223 @@ impl PluginSet {
     /// `app` calls this in a unit test for each profile, so a broken graph
     /// fails CI. Calls `manifest()` on this thread.
     pub fn validate(&self) -> Result<(), Vec<GraphError>> {
-        let mut errors = Vec::new();
-        let manifests: Vec<(Name, Option<Manifest>)> = self
+        let manifests: Vec<(Name, Result<Manifest, String>)> = self
             .plugins
             .iter()
-            .map(|(id, plugin)| match contain(|| plugin.manifest()) {
-                Ok(manifest) => (id.clone(), Some(manifest)),
+            .map(|(id, plugin)| (id.clone(), contain(|| plugin.manifest())))
+            .collect();
+        check(
+            manifests
+                .iter()
+                .map(|(id, manifest)| (id, manifest.as_ref().map_err(String::as_str))),
+        )
+    }
+
+    /// Calls `manifest()` once on every plugin, on this thread, timed and
+    /// under `catch_unwind` the same way [`Kernel::start`](crate::Kernel::start)
+    /// does on the kernel thread. A panic is kept, and the plugin starts as
+    /// `Failed` from [`Kernel::start_prepared`](crate::Kernel::start_prepared).
+    ///
+    /// For callers that need the manifests before the kernel starts (the
+    /// bench probe prunes the set by them); `app` uses `Kernel::start`.
+    pub fn prepare(self) -> PreparedSet {
+        PreparedSet {
+            plugins: self
+                .plugins
+                .into_iter()
+                .map(|(id, plugin)| Prepared::read(id, plugin))
+                .collect(),
+        }
+    }
+}
+
+/// Calls `manifest()` under `contain` and times it. `Kernel::start` and
+/// `PluginSet::prepare` both go through here, so their timings agree.
+pub(crate) fn read_manifest(plugin: &dyn Plugin) -> (Result<Manifest, String>, Duration) {
+    let begin = Instant::now();
+    let result = contain(|| plugin.manifest());
+    (result, begin.elapsed())
+}
+
+/// How a panicking `manifest()` shows in the plugin's state.
+pub(crate) fn manifest_failure(message: &str) -> PluginError {
+    PluginError::Panicked(format!("manifest panicked: {message}"))
+}
+
+/// One plugin of a [`PreparedSet`].
+pub(crate) struct Prepared {
+    pub(crate) id: Name,
+    pub(crate) plugin: Arc<dyn Plugin>,
+    /// The manifest, or the panic message.
+    pub(crate) manifest: Result<Manifest, String>,
+    /// Time spent in that one `manifest()` call.
+    pub(crate) time: Duration,
+}
+
+impl Prepared {
+    fn read(id: Name, plugin: Arc<dyn Plugin>) -> Prepared {
+        let (manifest, time) = read_manifest(plugin.as_ref());
+        Prepared {
+            id,
+            plugin,
+            manifest,
+            time,
+        }
+    }
+}
+
+/// A plugin set whose manifests have been read, each exactly once, by
+/// [`PluginSet::prepare`] or [`PreparedSet::with`]. Nothing here calls
+/// `manifest()` again; [`Kernel::start_prepared`](crate::Kernel::start_prepared)
+/// starts the kernel with these manifests and timings.
+pub struct PreparedSet {
+    pub(crate) plugins: Vec<Prepared>,
+}
+
+impl PreparedSet {
+    /// The manifests read, in set order. Plugins whose `manifest()` panicked
+    /// are left out.
+    pub fn manifests(&self) -> impl Iterator<Item = (&Name, &Manifest)> {
+        self.plugins
+            .iter()
+            .filter_map(|p| p.manifest.as_ref().ok().map(|m| (&p.id, m)))
+    }
+
+    /// The providers of the services `id` requires and of the services those
+    /// require, transitively, in set order and without `id` itself. Every
+    /// provider of a `MULTIPLE` service is included, so keeping the closure
+    /// and `id` of a set that passes `validate` leaves a set that passes
+    /// `validate` too. Keeping the closure alone does as well, unless a
+    /// plugin in it requires a service of `id` (a `MULTIPLE` provider that
+    /// depends back on `id`); `validate` on that set reports it.
+    ///
+    /// Errors: `id` is not in the set or its manifest panicked; a requirement
+    /// in the closure has no provider (a plugin whose manifest panicked
+    /// provides nothing); a single-provider service has several providers.
+    pub fn dependency_closure(&self, id: &str) -> Result<Vec<Name>, Vec<GraphError>> {
+        let Some(root) = self.plugins.iter().position(|p| p.id == id) else {
+            return Err(vec![GraphError::UnknownPlugin(Name::Owned(id.to_owned()))]);
+        };
+        let n = self.plugins.len();
+        let mut errors = Vec::new();
+        let mut reached = vec![false; n];
+        reached[root] = true;
+        // Breadth first; `next` is the head of the queue.
+        let mut queue = vec![root];
+        let mut next = 0;
+        let mut reported: Vec<ServiceKey> = Vec::new();
+        while let Some(&index) = queue.get(next) {
+            next += 1;
+            let entry = &self.plugins[index];
+            let manifest = match &entry.manifest {
+                Ok(manifest) => manifest,
                 Err(message) => {
                     errors.push(GraphError::ManifestPanicked {
-                        plugin: id.clone(),
-                        message,
+                        plugin: entry.id.clone(),
+                        message: message.clone(),
                     });
-                    (id.clone(), None)
+                    continue;
                 }
-            })
-            .collect();
-        let entries: Vec<(Name, Option<&Manifest>)> = manifests
-            .iter()
-            .map(|(id, manifest)| (id.clone(), manifest.as_ref()))
-            .collect();
-        errors.extend(analyze(&entries).errors);
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors)
+            };
+            for key in &manifest.requires {
+                // A plugin does not meet its own requirement, as in `validate`.
+                let providers: Vec<usize> = (0..n)
+                    .filter(|&p| {
+                        p != index
+                            && self.plugins[p]
+                                .manifest
+                                .as_ref()
+                                .is_ok_and(|m| m.provides.contains(key))
+                    })
+                    .collect();
+                if providers.is_empty() {
+                    errors.push(GraphError::MissingProvider {
+                        plugin: entry.id.clone(),
+                        service: key.id(),
+                    });
+                }
+                if !key.multiple() && providers.len() > 1 && !reported.contains(key) {
+                    reported.push(*key);
+                    errors.push(GraphError::MultipleProviders {
+                        service: key.id(),
+                        plugins: providers
+                            .iter()
+                            .map(|&p| self.plugins[p].id.clone())
+                            .collect(),
+                    });
+                }
+                for p in providers {
+                    if !reached[p] {
+                        reached[p] = true;
+                        queue.push(p);
+                    }
+                }
+            }
         }
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+        Ok((0..n)
+            .filter(|&i| reached[i] && i != root)
+            .map(|i| self.plugins[i].id.clone())
+            .collect())
+    }
+
+    /// Keeps only the plugins for which `keep(id)` returns true.
+    pub fn retain(mut self, mut keep: impl FnMut(&str) -> bool) -> Self {
+        self.plugins.retain(|p| keep(&p.id));
+        self
+    }
+
+    /// Adds a plugin and calls its `manifest()` once, here, timed like
+    /// [`prepare`](PluginSet::prepare).
+    pub fn with(mut self, id: impl Into<Name>, plugin: impl Plugin) -> Self {
+        self.plugins
+            .push(Prepared::read(id.into(), Arc::new(plugin)));
+        self
+    }
+
+    /// [`PluginSet::validate`] over the manifests already read, without
+    /// calling `manifest()`.
+    pub fn validate(&self) -> Result<(), Vec<GraphError>> {
+        check(
+            self.plugins
+                .iter()
+                .map(|p| (&p.id, p.manifest.as_ref().map_err(String::as_str))),
+        )
+    }
+}
+
+/// What the kernel thread starts from: a plain set, whose manifests it reads
+/// itself, or a prepared one.
+pub(crate) enum Plugins {
+    Set(PluginSet),
+    Prepared(PreparedSet),
+}
+
+/// The checks of `validate` over manifests already read (`Err` holds the
+/// panic message).
+fn check<'a>(
+    manifests: impl Iterator<Item = (&'a Name, Result<&'a Manifest, &'a str>)>,
+) -> Result<(), Vec<GraphError>> {
+    let mut errors = Vec::new();
+    let entries: Vec<(Name, Option<&Manifest>)> = manifests
+        .map(|(id, manifest)| match manifest {
+            Ok(manifest) => (id.clone(), Some(manifest)),
+            Err(message) => {
+                errors.push(GraphError::ManifestPanicked {
+                    plugin: id.clone(),
+                    message: message.to_owned(),
+                });
+                (id.clone(), None)
+            }
+        })
+        .collect();
+    errors.extend(analyze(&entries).errors);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
     }
 }
 

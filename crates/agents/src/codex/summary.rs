@@ -19,6 +19,7 @@ use super::parse::{Boundary, Parse, State};
 use super::{Codex, SessionFile, decoded};
 use crate::index::IndexBuilder;
 use crate::lines::{HEAD, Lines, Next};
+use crate::read::Summarized;
 use crate::read::io_error;
 use crate::stats::ParseStats;
 use crate::tail::{TailEnd, scan_back};
@@ -119,9 +120,16 @@ struct Head {
     first_at: Option<Timestamp>,
 }
 
-fn head(codex: &Codex, reader: impl Read) -> Result<Head, SessionError> {
-    // 只用已缓存的来源集合：发现阶段不解压、不扫描祖先会话。
-    let lineage = |thread: &str| codex.cached_source_turns(thread);
+fn head(codex: &Codex, reader: impl Read, scan_sources: bool) -> Result<Head, SessionError> {
+    // 发现阶段只用已缓存的来源集合：不解压、不扫描祖先会话。读过这个分叉之后（`scan_sources`）
+    // 才按需扫描来源文件。
+    let lineage = |thread: &str| {
+        if scan_sources {
+            codex.source_turns(thread)
+        } else {
+            codex.cached_source_turns(thread)
+        }
+    };
     let mut index = IndexBuilder::default();
     let mut parse = Parse {
         state: State::default(),
@@ -177,7 +185,8 @@ pub(super) fn summarize(
     codex: &Codex,
     file: &SessionFile,
     complete: bool,
-) -> Result<(SessionSummary, ParseStats), SessionError> {
+    scan_sources: bool,
+) -> Result<Summarized, SessionError> {
     let meta = std::fs::metadata(&file.path).map_err(io_error)?;
     let mtime = meta
         .modified()
@@ -188,7 +197,11 @@ pub(super) fn summarize(
         });
 
     let (head, tail, tail_pending) = if file.compressed {
-        let head = head(codex, decoded::decoder(&file.path).map_err(io_error)?)?;
+        let head = head(
+            codex,
+            decoded::decoder(&file.path).map_err(io_error)?,
+            scan_sources,
+        )?;
         if complete {
             let (tail, oversized) = tail_forward(decoded::decoder(&file.path).map_err(io_error)?)?;
             let mut head = head;
@@ -204,7 +217,7 @@ pub(super) fn summarize(
         }
     } else {
         let mut f = File::open(&file.path).map_err(io_error)?;
-        let head = head(codex, &mut f)?;
+        let head = head(codex, &mut f, scan_sources)?;
         let tail = tail_back(&mut f, meta.len())?;
         (head, tail, false)
     };
@@ -254,5 +267,13 @@ pub(super) fn summarize(
         inheritance_unknown: matches!(head.state.boundary, Boundary::Unknown { .. }),
         format,
     };
-    Ok((summary, stats))
+    let lineage = match &head.state.boundary {
+        Boundary::Turns { source, .. } | Boundary::Unknown { source } => Some(source.clone()),
+        Boundary::None | Boundary::Ordinal(_) => None,
+    };
+    Ok(Summarized {
+        summary,
+        stats,
+        lineage,
+    })
 }

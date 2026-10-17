@@ -12,6 +12,7 @@ mod handles;
 mod lifecycle;
 mod quiescence;
 mod services;
+mod set;
 mod shutdown;
 mod testing;
 mod workspace;
