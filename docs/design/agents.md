@@ -90,7 +90,8 @@ pub trait SessionSource: Send + Sync {
     /// `max_bytes` 是软上限：只要游标之后还有一个完整的行，这次调用至少消费一行（哪怕它比 `max_bytes` 大），
     /// 所以返回时要么 `at_end` 为 true，要么新游标严格大于 `from`，调用方反复调用不会原地打转。调用方怎样分批、何时停下见「调用方」里对消费方的约束。
     /// 超过 16 MB 的行不缓存进内存，边读边丢弃到下一个换行，计入 `Diagnostics::oversized_lines`，游标越过它（也算消费了一行）。
-    /// 游标与文件对不上（被截断、被替换）时从头读，`Batch::reset` 为 true。
+    /// 游标与文件对不上（被截断、被替换），或游标里记的来源 ID、适配器版本与当前提供者不同时，从头读，`Batch::reset` 为 true。
+    /// 版本检查在这里做：`Cursor::from_bytes` 与来源无关，只检查序列化格式。
     fn read(&self, session: &SessionKey, from: &Cursor, max_bytes: u64) -> Result<Batch, SessionError>;
 
     /// 轮次索引。阻塞，只在 executor 上调用：内存命中时只复制 `Arc`；否则读 `cache` 里的索引、
@@ -189,7 +190,7 @@ pub enum Agent { ClaudeCode, Codex, Other(Arc<str>) }
 pub struct SourceId(pub Arc<str>);
 
 /// 会话的全局键：来源加来源内的会话 ID。`id` 只在同一来源内唯一。
-/// 本 crate 的 `id`：Claude Code 为 `sessionId`（文件名去掉 `.jsonl`），子 agent 为 `agent-<agentId>`；Codex 为 `session_meta.id`（线程 ID）。
+/// 本 crate 的 `id`：Claude Code 为 `sessionId`（文件名去掉 `.jsonl`），子 agent 为 `<父会话 sessionId>/agent-<agentId>`（不同父会话里的同名 `agentId` 是不同的会话，与「子 agent 与继承前缀」里按（父会话目录，agentId）认定归属一致）；Codex 为 `session_meta.id`（线程 ID）。
 pub struct SessionKey { pub source: SourceId, pub id: Arc<str> }
 
 /// UTC 毫秒。
@@ -284,8 +285,9 @@ pub struct Cursor { /* 见下 */ }
 impl Cursor {
     pub const START: Cursor;
     pub fn to_bytes(&self) -> Vec<u8>;
-    /// 版本不认识时返回 None，调用方从 `START` 读。序列化的游标带适配器版本：版本与当前不同
-    /// （适配器升级后能解析更多记录或修正了映射）时也返回 None，消费方从头重读，按稳定键覆盖已有数据。
+    /// 序列化格式不认识时返回 None，调用方从 `START` 读。游标里还记着生成它的来源 ID 和适配器版本，
+    /// 但这里不检查：版本是否与当前提供者一致由 `SessionSource::read` 判断，不一致时从头读并在 `Batch::reset` 里告诉消费方
+    /// （适配器升级后能解析更多记录或修正了映射），消费方按稳定键覆盖已有数据。
     pub fn from_bytes(bytes: &[u8]) -> Option<Cursor>;
 }
 
