@@ -158,7 +158,8 @@ pub enum PluginState {
 pub struct PluginStatus {
     pub id: Name,
     pub state: PluginState,
-    /// Time spent in `manifest()` at startup (called once).
+    /// Time spent in `manifest()` (called once): at startup, or in
+    /// `PluginSet::prepare` / `PreparedSet::with` for `Kernel::start_prepared`.
     pub manifest_time: Option<Duration>,
     /// Time spent in the latest `activate`.
     pub activate_time: Option<Duration>,
@@ -195,6 +196,9 @@ pub enum GraphError {
         plugin: Name,
         message: String,
     },
+    /// [`PreparedSet::dependency_closure`](crate::PreparedSet::dependency_closure)
+    /// was asked about a plugin that is not in the set.
+    UnknownPlugin(Name),
 }
 
 impl fmt::Display for GraphError {
@@ -222,6 +226,7 @@ impl fmt::Display for GraphError {
             GraphError::ManifestPanicked { plugin, message } => {
                 write!(f, "manifest of {plugin} panicked: {message}")
             }
+            GraphError::UnknownPlugin(id) => write!(f, "no plugin {id} in the set"),
         }
     }
 }
