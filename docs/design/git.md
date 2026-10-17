@@ -635,12 +635,12 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 
 `bench` 增加的基准（[#7](https://github.com/SoloJiang/lectern-app/issues/7)），夹具由本 crate 的测试仓库构造器生成：
 
-- `git_open`：`discover` + `worktrees`（11 个 worktree）+ `tracked`。
-- `git_open_handle`：打开一次 gix 句柄的耗时（每次顶层调用都要付出）。
-- `git_changes_clean` / `git_changes_50`：没有改动、50 个文件改动时的 `changes`。
-- `git_refresh_one`：改动一个文件后的 `refresh(Paths)`。
-- `git_diff_50_cold` / `git_diff_50_warm`：50 个文件、平均 300 行的 hunk 计算，缓存未命中与命中。
-- `git_changes_capped`：10 000 个改动文件时整体截断生效，耗时 < 1 s，`ChangeSet` 的内存不超过上限之和。
+- `git/open`：`discover` + `worktrees`（11 个 worktree）+ `tracked`。
+- `git/open_handle`：打开一次 gix 句柄的耗时（每次顶层调用都要付出）。
+- `git/changes_clean` / `git/changes_50`：没有改动、50 个文件改动时的 `changes`。
+- `git/refresh_one`：改动一个文件后的 `refresh(Paths)`。
+- `git/diff_50_cold` / `git/diff_50_warm`：50 个文件、平均 300 行的 hunk 计算，缓存未命中与命中。
+- `git/changes_capped`：10 000 个改动文件时整体截断生效，耗时 < 1 s，`ChangeSet` 的内存不超过上限之和。
 - 内存：打开 11 个 worktree 的仓库并对当前 worktree 做一次 `changes` 后，本 crate 的常驻增量。
 
 ## 状态与异常
@@ -718,14 +718,14 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
    - 前置：`platform` 的安全读取（Linux 与 macOS 实现）已合并。
    - `just test -p lectern-git` 里 `repo_*`、`worktrees_*`、`refs_*`、`reflog_*`、`tracked_*`、`read_file_*` 测试通过，其中有 SHA-256 夹具和 reftable 夹具；`TestRepo` 在 `test-support` feature 下可用，`rg 'Command::new' crates/git/src` 没有结果。
    - `cargo tree -i gix -e normal --depth 1` 只列出 `lectern-git`。
-   - `bench` 的 `git_open` 在预算内。bench 的设计文档（#7）合并之前不写基准代码，先由 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量（见「与设计的差异」）。
+   - `bench` 的 `git/open` 在预算内。bench 的设计文档（#7）合并之前不写基准代码，先由 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量（见「与设计的差异」）。
 2. **树之间的改动集、hunk 与展示行**：
    - `diff_trees_*`、`rename_*`、`binary_*`、`truncate_*`、`rows_*`、`inline_*`、`hunk_cache_*` 测试通过，结构化输出有 insta 快照；`numstat_matches_git` 对全部归档夹具通过。
-   - `git_diff_50_cold` / `git_diff_50_warm` 在预算内。
+   - `git/diff_50_cold` / `git/diff_50_warm` 在预算内。
 3. **工作区比较**：
    - `worktree_*`、`read_only_*`、`no_external_programs` 测试通过。
    - `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' crates/git/src --glob '!gitdir.rs' --glob '!testing.rs' --glob '!**/tests.rs'` 没有结果：工作区只经 `SafeRoot` 读取。git 目录里的管理文件（`HEAD`、`commondir`、`gitdir`、`locked`、`config`、index 末尾的校验和）都在 `gitdir.rs` 里读；`testing.rs` 和测试代码构造夹具。
-   - `git_changes_clean`、`git_changes_50`、`git_refresh_one`、`git_changes_capped` 和内存基准在预算内。
+   - `git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/changes_capped` 和内存基准在预算内。
 4. **改动来源接口**：`services` 的设计文档合并后，为本地仓库实现它的改动来源接口（取 diff、加载完整文件；指纹随 #66），按那份文档的验收条件测试。由哪个插件把它注册为服务按 #47 的结论处理，不在本 crate。
 
 ## 实际验证
@@ -741,13 +741,13 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 计数钩子：`repo_handles_never_outlive_a_call` 在每次顶层调用后检查当前线程上没有存活的 gix 句柄；`tracked_index_checksum_reads_only_the_trailer` 在 sparse index 夹具上检查 `index_checksum` 不解析条目、不展开目录、不打开句柄，且与 `TrackedPaths::checksum` 相同。
 - ceiling 的语义用真实的 git 2.43 手工对照过（不进入测试）：`GIT_CEILING_DIRECTORIES=<worktree 根>` 时在子目录里找不到仓库，在根目录本身里能找到；`repo_discover_stops_at_ceilings` 断言相同的结果。
 - `perf_smoke_git_open`（`cargo test --release -p lectern-git -- --ignored perf_smoke`，728 个跟踪文件、11 个 worktree、每个 worktree 都有自己的 index，200 次）：`discover` + `worktrees` + `worktree(Main)` + `tracked` 中位数 0.46 ms，p95 0.56–0.70 ms，最慢 0.8 ms；打开一次 gix 句柄中位数 48 µs，最慢 0.18 ms。预算（M 系列 Mac）是 < 15 ms 和 < 1 ms。测量用的是只读仓库自身配置的 `testing::discover`；生产路径另外读系统和用户的配置文件。没有在 macOS 上测量。
-- 没有验证的：`bench` 的 `git_open` 没有写（见「与设计的差异」）；macOS 上没有运行。
+- 没有验证的：`bench` 的 `git/open` 没有写（见「与设计的差异」）；macOS 上没有运行。
 
 ## 与设计的差异
 
 第 1 步：
 
-- `bench` 的 `git_open` 没有加入：`crates/bench/AGENTS.md` 要求 bench 的设计文档（#7）合并之后才写基准代码。在那之前用 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量，结果见「实际验证」；bench 设计合并后再把 `git_open` 加进 `crates/bench`。
+- `bench` 的 `git/open` 没有加入：`crates/bench/AGENTS.md` 要求 bench 的设计文档（#7）合并之后才写基准代码。在那之前用 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量，结果见「实际验证」；bench 设计合并后再把 `git/open` 加进 `crates/bench`。
 - 夹具在测试里用 `TestRepo` 构造，没有用归档。容器里的 git 是 2.43，还不支持 reftable（2.45 起），工作区也没有解包 tar 的依赖。reftable 夹具按 `git init --ref-format=reftable` 留下的布局逐项写出：版本 1 加 `extensions.refStorage = reftable`、HEAD 指向 `refs/heads/.invalid`、`refs/heads` 是普通文件、`reftable/tables.list` 列出一张表（表里只有 reftable 文件头，本 crate 不读它）。sparse index 由 gix 写出：先写含目录条目的 index，再读回、重写一次，gix 就加上 `sdir` 扩展，与 `index.sparse = true` 时 git 写出的结构相同。需要和 git 输出对照的归档夹具（`numstat_matches_git` 等）随第 2 步加入。
 - 依赖表里的「`gix`（dev，额外开写入用的 feature）」不需要：gix 0.88 在 ADR 0024 的 feature 下已能写对象、引用文件和 index。`TestRepo` 只多用一个可选的 `tempfile`（`test-support` 打开），已改依赖表。
 - `discover` 的 ceiling：gix 0.88 会检查 ceiling 目录本身，git 不会进入 ceiling（只检查起点本身就是 ceiling 的情况）。gix 找到的仓库所在目录恰好是起点之上的某个 ceiling 时，本 crate 返回 `Ok(None)`，与 git 一致。
