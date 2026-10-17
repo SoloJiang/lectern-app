@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -12,6 +12,7 @@
   - `Meta`、`FileKind`：git 的 stat 比较需要的全部字段。
   - 读取结果的分类：普通文件、符号链接（读出目标，不跟随）、超过上限、不读取的类型（目录、FIFO、socket、设备文件）；错误分为不存在、路径中间是符号链接、其他 IO 错误。
   - 三个实现：Linux 的 `openat2`、macOS 的 `O_NOFOLLOW_ANY` 与 `AT_SYMLINK_NOFOLLOW_ANY`、两个平台共用的逐级 `openat`（Linux 没有 `openat2` 时的后备，也是出错时判定原因的实现）。
+  - `process::phys_footprint`：一个进程在活动监视器里的「内存」，供 `lectern-bench` 测量（见「进程」）。
 - 不做：
   - 目录遍历和未跟踪文件的枚举：`git` 用 gix 的遍历（ADR 0024「已知限制」）。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -29,7 +30,7 @@
 |---|---|---|
 | `rustix` 1.1（`default-features = false`，`std`、`fs`） | `openat2`、`openat`、`fstatat`、`fstat`、`readlinkat`、`read` | 见下 |
 | `tempfile`（dev） | 测试用的临时目录 | 已在 Cargo.lock（3.27，经 `insta`），MIT OR Apache-2.0 |
-| `libc`（dev） | 测试里在 macOS 上创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190）；只在测试代码里用 |
+| `libc`（只在 macOS 上） | `proc_pid_rusage`（`process::phys_footprint`）；测试里创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190）；rustix 没有 `proc_pid_rusage` |
 | `lectern-fs-watch` | `fs_events` 实现它的 `Backend`；事件转换是纯函数，在所有平台上编译和测试 | 基础设施层，方向向下（[fs_watch 设计「依赖」](fs_watch.md#依赖)） |
 | `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
 | `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
@@ -342,6 +343,22 @@ pub enum FileKind {
 - `nofollow_any_*`：上面的 `symlink_*`、`race_*`、`walk_*` 在 `NofollowAny` 和 `NofollowAnyParent` 上各自通过；探测结果到实现的映射是纯函数（`EINVAL` 选 `NofollowAnyParent`，成功和其他错误选 `NofollowAny`），`sw_vers` 报告 13 及以上时 `SafeRoot::open` 选的是 `NofollowAny`，更早时是 `NofollowAnyParent`；`O_NOFOLLOW_ANY` 打开父目录时对符号链接返回错误；`O_NOFOLLOW_ANY` 的一步打开对中间一级和最后一级的符号链接都返回错误，不跟随；`stat` 的一步 `fstatat` 对多级路径上的普通文件和目录一次成功（不落到 `Walk`），元数据与 `symlink_metadata` 一致，对中间一级的符号链接（含悬空链接）返回 `ENOENT` 以外的错误，最后一级是符号链接时返回链接本身的元数据或 `ENOENT` 以外的错误，从不返回链接目标的元数据。
 
 `git` 的工作区测试（FIFO 为 `UnsupportedType`、中间一级是符号链接为 `PathThroughSymlink`）在 Linux 上经本模块的 Linux 实现运行。
+
+## 进程
+
+`lectern_platform::process`，供 `lectern-bench` 测量进程的内存（[bench 设计「需要其他 crate 提供的接口」](bench.md#需要其他-crate-提供的接口)）。目前只有 `phys_footprint`，随 `cache` 第 2 步的 `cache/memory` 加入；`start_time`、`children` 随 bench 第 2 步在本节补充。
+
+```rust
+pub mod process {
+    /// 进程 `pid` 的 physical footprint，即活动监视器里的「内存」。macOS 上是
+    /// `proc_pid_rusage(pid, RUSAGE_INFO_V2)` 的 `ri_phys_footprint`；进程不存在或无权查看时返回系统的错误。
+    /// 其他平台返回 `ErrorKind::Unsupported`。不分配、不建线程，任何线程可调用。
+    pub fn phys_footprint(pid: u32) -> io::Result<u64>;
+}
+```
+
+- 模块在所有平台上编译，macOS 的实现在 `#[cfg(target_os = "macos")]` 后面，是本 crate 里除测试外唯一的 `unsafe`（一次 FFI 调用和读取它填好的结构体）。
+- 测试（`process_*`）：macOS 上，分配并写满 64 MiB 后本进程的 `phys_footprint` 至少增加 60 MiB；不存在的 pid 返回错误。Linux 上返回 `Unsupported`。
 
 ## 未决问题
 

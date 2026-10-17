@@ -19,12 +19,20 @@ pub(crate) const SCHEMA_VERSION: i32 = 1;
 const STATEMENT_CACHE: usize = 16;
 /// Bytes counted for an entry beyond its key and value.
 pub(crate) const ENTRY_OVERHEAD: u64 = 64;
-/// Most bytes one write transaction deletes to get under the budget.
+/// Most bytes one write transaction deletes to get under the budget: what
+/// it wrote, but at least `EVICT_MIN` and at most `EVICT_MAX`. While over
+/// the budget a partition never grows, and the cost of eviction follows the
+/// cost of the write.
+pub(crate) const EVICT_MIN: u64 = 1 << 20;
 pub(crate) const EVICT_MAX: u64 = 16 << 20;
 /// Most entries of retired namespace versions one write transaction deletes.
 pub(crate) const RETIRED_MAX: i64 = 256;
 /// Eviction stops at this share of the budget, in tenths.
 const EVICT_TARGET_TENTHS: u64 = 9;
+/// Free pages beyond these bytes are returned to the file system.
+pub(crate) const VACUUM_FREE: u64 = 32 << 20;
+/// Most pages one write transaction returns (2 MiB of 4 KiB pages).
+pub(crate) const VACUUM_PAGES: u32 = 512;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (
@@ -83,6 +91,8 @@ pub(crate) struct WriteParams<'a> {
     pub(crate) ops: &'a [Op<'a>],
     /// Namespace IDs already known, one per op.
     pub(crate) known: &'a [Option<i64>],
+    /// Entries read since their access time was last written; set to `atime`.
+    pub(crate) touched: &'a [i64],
     /// Entries that failed to decode.
     pub(crate) bad: &'a [i64],
     pub(crate) budget: u64,
@@ -249,32 +259,41 @@ pub(crate) fn namespace_id(conn: &Connection, ns: &Namespace) -> rusqlite::Resul
         .optional()
 }
 
+/// A stored entry as read.
+pub(crate) struct Found {
+    pub(crate) id: i64,
+    /// Minutes since the Unix epoch.
+    pub(crate) atime: i64,
+    pub(crate) raw: Raw,
+}
+
 /// Reads entries of one namespace; one read transaction when there are
 /// several keys.
 pub(crate) fn read(
     conn: &Connection,
     ns: i64,
     keys: &[&[u8]],
-) -> rusqlite::Result<Vec<Option<(i64, Raw)>>> {
+) -> rusqlite::Result<Vec<Option<Found>>> {
     // The connection's default behavior: deferred.
     let tx = if keys.len() > 1 {
         Some(conn.unchecked_transaction()?)
     } else {
         None
     };
-    let mut stmt =
-        conn.prepare_cached("SELECT id, codec, value FROM entry WHERE ns = ?1 AND key = ?2")?;
+    let mut stmt = conn
+        .prepare_cached("SELECT id, atime, codec, value FROM entry WHERE ns = ?1 AND key = ?2")?;
     let mut found = Vec::with_capacity(keys.len());
     for key in keys {
         let row = stmt
             .query_row(params![ns, key], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    Raw {
-                        codec: r.get(1)?,
-                        bytes: r.get(2)?,
+                Ok(Found {
+                    id: r.get(0)?,
+                    atime: r.get(1)?,
+                    raw: Raw {
+                        codec: r.get(2)?,
+                        bytes: r.get(3)?,
                     },
-                ))
+                })
             })
             .optional()?;
         found.push(row);
@@ -286,9 +305,28 @@ pub(crate) fn read(
     Ok(found)
 }
 
-/// One write transaction: delete entries that failed to decode, apply the
-/// writes, delete entries of retired namespaces and evict to the budget,
-/// update `meta.bytes`, commit. `hook` runs just before the commit.
+/// Writes access times back in a transaction of their own, when a partition
+/// is closed or swapped out.
+pub(crate) fn touch(conn: &mut Connection, ids: &[i64], atime: i64) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    set_atimes(&tx, ids, atime)?;
+    tx.commit()
+}
+
+/// Entries deleted since they were read are skipped. The time of the write
+/// keeps the LRU order: nothing was written between the read and now.
+fn set_atimes(conn: &Connection, ids: &[i64], atime: i64) -> rusqlite::Result<()> {
+    let mut update = conn.prepare_cached("UPDATE entry SET atime = ?1 WHERE id = ?2")?;
+    for id in ids {
+        update.execute(params![atime, id])?;
+    }
+    Ok(())
+}
+
+/// One write transaction: write access times back, delete entries that
+/// failed to decode, apply the writes, delete entries of retired namespaces
+/// and evict to the budget, return free pages, update `meta.bytes`, commit.
+/// `hook` runs just before the commit.
 pub(crate) fn write(
     conn: &mut Connection,
     p: &WriteParams<'_>,
@@ -299,6 +337,7 @@ pub(crate) fn write(
         .prepare_cached("SELECT value FROM meta WHERE name = 'bytes'")?
         .query_row([], |r| r.get(0))?;
     let mut evicted = 0i64;
+    set_atimes(&tx, p.touched, p.atime)?;
 
     {
         let mut delete = tx.prepare_cached("DELETE FROM entry WHERE id = ?1 RETURNING size")?;
@@ -312,6 +351,8 @@ pub(crate) fn write(
         }
     }
 
+    // Bytes of the entries this transaction writes.
+    let mut written = 0i64;
     let mut namespaces: Vec<(Namespace, i64)> = Vec::new();
     for (op, known) in p.ops.iter().zip(p.known) {
         let id = match known.or_else(|| {
@@ -353,6 +394,7 @@ pub(crate) fn write(
                 )?
                 .execute(params![ns, op.key, codec, size, p.atime, value])?;
                 bytes += size - old.unwrap_or(0);
+                written += size;
             }
             None => {
                 if let Some(size) = tx
@@ -385,11 +427,12 @@ pub(crate) fn write(
     let budget = i64::try_from(p.budget).unwrap_or(i64::MAX);
     if bytes > budget {
         let target = i64::try_from(p.budget / 10 * EVICT_TARGET_TENTHS).unwrap_or(i64::MAX);
+        let most = written.clamp(EVICT_MIN as i64, EVICT_MAX as i64);
         let mut freed = 0i64;
         let mut oldest =
             tx.prepare_cached("SELECT id, size FROM entry ORDER BY atime, id LIMIT 64")?;
         let mut delete = tx.prepare_cached("DELETE FROM entry WHERE id = ?1")?;
-        'evict: while bytes > target && freed < EVICT_MAX as i64 {
+        'evict: while bytes > target && freed < most {
             let victims: Vec<(i64, i64)> = oldest
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
@@ -400,13 +443,15 @@ pub(crate) fn write(
                 delete.execute(params![id])?;
                 bytes -= size;
                 freed += size;
-                if bytes <= target || freed >= EVICT_MAX as i64 {
+                if bytes <= target || freed >= most {
                     break 'evict;
                 }
             }
         }
         evicted += freed;
     }
+
+    vacuum(&tx)?;
 
     let bytes = bytes.max(0);
     tx.prepare_cached("UPDATE meta SET value = ?1 WHERE name = 'bytes'")?
@@ -418,6 +463,22 @@ pub(crate) fn write(
         evicted: evicted as u64,
         namespaces,
     })
+}
+
+/// Returns up to `VACUUM_PAGES` free pages to the file system when the free
+/// pages exceed `VACUUM_FREE`. The file shrinks at the next checkpoint.
+fn vacuum(conn: &Connection) -> rusqlite::Result<()> {
+    let pragma = |sql: &str| -> rusqlite::Result<i64> {
+        conn.prepare_cached(sql)?.query_row([], |r| r.get(0))
+    };
+    if pragma("PRAGMA freelist_count")? * pragma("PRAGMA page_size")? <= VACUUM_FREE as i64 {
+        return Ok(());
+    }
+    // One result row per page freed: run the statement to the end.
+    let mut stmt = conn.prepare_cached(&format!("PRAGMA incremental_vacuum({VACUUM_PAGES})"))?;
+    let mut rows = stmt.query([])?;
+    while rows.next()?.is_some() {}
+    Ok(())
 }
 
 /// The ID of a namespace version, inserting it on first use. A new version

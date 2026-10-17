@@ -1,10 +1,12 @@
 //! OS-specific capabilities. Today: reading files beneath a directory root
-//! without following symbolic links ([`safe_read`], docs/design/platform.md)
+//! without following symbolic links ([`safe_read`], docs/design/platform.md),
+//! the physical footprint of a process for lectern-bench ([`process`]),
 //! and, on macOS, the FSEvents and kqueue backend of `lectern-fs-watch`
 //! (`fs_events`, docs/design/fs_watch.md「platform 后端」). `open -a`,
 //! Keychain, Seatbelt and the status line hook follow once their designs are
 //! merged.
 
+pub mod process;
 #[cfg(unix)]
 pub mod safe_read;
 

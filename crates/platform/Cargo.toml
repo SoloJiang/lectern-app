@@ -22,12 +22,14 @@ lectern-fs-watch = { path = "../fs_watch" }
 lectern-executor = { path = "../executor" }
 # kqueue for `Scope::Entries` targets.
 rustix = { workspace = true, features = ["event"] }
+# `proc_pid_rusage` (`process::phys_footprint`); the tests also create a
+# FIFO with it.
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-libc.workspace = true
 # `BusyGuard`, to implement `lectern_fs_watch::Sink` in the test that drives
 # the backend through a real `Watcher`.
 lectern-kernel = { path = "../kernel" }

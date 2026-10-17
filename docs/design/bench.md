@@ -360,6 +360,8 @@ pub mod host {
 }
 ```
 
+其中 `process::phys_footprint` 已随 `cache` 第 2 步加入（`cache/memory` 用它，见「进程内基准」，[platform 设计「进程」](platform.md#进程)），其余接口仍随第 2 步。
+
 `kernel`（普通的公开接口，不放在 `test-support` 下：发布构建里没有调用方，测量用的构建因此不需要打开 kernel 的 `test-support`）：
 
 ```rust
@@ -467,6 +469,8 @@ crates/bench/
 4. 统计、与预算比较。超标时用新的夹具把这个基准重跑一次，两次都超标才记为 `over`，两次的数据都写进报告。
 5. 打印报告，写 JSON，返回退出码。
 
+`memory` 目标的计数分配器只看到经 Rust 全局分配器的内存。被测 crate 用 C 的分配器（如 SQLite 的页缓存和连接）时，它的内存基准改为在子进程里测常驻增量：目标的 `main` 先检查一个只属于这个基准的环境变量，设置了就作为子进程运行，不进入 `lectern_bench::main`；基准在 `scratch()` 下生成夹具，用 `std::env::current_exe()` 启动子进程，子进程在开始前和做完被测操作之后各取一次本进程的常驻大小，打印在标准输出的一行里，基准取两者之差作为一个样本（`Value::Bytes`），Measure 模式启动 5 次，冒烟模式 1 次、用小规模的夹具。常驻大小在 macOS 上是 `platform::process::phys_footprint(std::process::id())`，与 `app/idle_*` 的口径相同；Linux 上读 `/proc/self/status` 的 `VmRSS`（只用于冒烟和 `--measure` 的记录，不判定）；其他平台为基准出错。用新的子进程，是因为生成夹具的进程里，被测操作会复用写夹具时释放的堆，增量偏小。目前用这种方式的只有 `cache/memory`：子进程打开应用级分库和 2 个项目分库、各读 50 MiB，同一个子进程里计数分配器的存活字节只增加约 5 KB，常驻增量约 4 MB。
+
 ### 进程级基准
 
 运行器从环境变量 `LECTERN_BENCH_APP`（`lectern` 的路径）和 `LECTERN_BENCH_BASELINE`（`empty_window` 的路径）取得被测程序，由 `just bench` 设置。每次启动：建一个新的 socket 和临时数据目录，带上 `LECTERN_BENCH_SOCKET` 等环境变量启动子进程，等它连上来。
@@ -554,8 +558,8 @@ crates/bench/
 | `cache/open_existing`、`cache/open_new` | 中位数 < 5 ms / < 10 ms | [cache](cache.md#性能) | 第 1 步（同上） |
 | `cache/put_4k`、`cache/batch_1000` | 中位数 < 1 ms / < 15 ms | [cache](cache.md#性能) | 第 1 步（同上） |
 | `cache/zstd_1m/put`、`cache/zstd_1m/get` | 只记录（命名空间选 `Zstd` 之前对照使用方的预算） | [cache](cache.md#性能) | 第 1 步（同上） |
-| `cache/evict_16m` | 中位数 < 30 ms | [cache](cache.md#性能) | `cache` 第 2 步 |
-| `cache/memory` | 常驻增量 ≤ 8 MB；`Memory` | [cache](cache.md#性能) | `cache` 第 2 步 |
+| `cache/evict` | 中位数 < 30 ms（超出预算的分库里一次小写入，淘汰 1 MiB；原为 `cache/evict_16m`，见 [cache 设计「与设计的差异」](cache.md#与设计的差异)） | [cache](cache.md#性能) | `cache` 第 2 步 |
+| `cache/memory` | 子进程的常驻增量中位数 ≤ 8 MB（见「进程内基准」）；`Memory` | [cache](cache.md#性能) | `cache` 第 2 步 |
 | `project/open_cloudprint` | 中位数 < 20 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/packages_cloudprint` | 中位数 < 15 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/open_100k/files`、`project/open_100k/packages` | 中位数 < 80 ms / < 150 ms | [project](project.md#性能) | `project` 第 5 步 |
