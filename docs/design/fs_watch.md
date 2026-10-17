@@ -1,6 +1,6 @@
 # fs_watch 设计
 
-状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)）；第 3 步（macOS 后端）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），只在 Linux 上交叉检查过，macOS 上的运行由 macOS CI 验证；第 2、4 步（`git` 的适配、装配与实测）尚未实现。
+状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)，基准 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）；第 3 步（macOS 后端）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），只在 Linux 上交叉检查过，macOS 上的运行由 macOS CI 验证；第 2、4 步（`git` 的适配、装配与实测）尚未实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（没有单独的 issue；与 [platform 设计](platform.md)相同，随 Git 与 Diff 推进），消费方分属 [#9](https://github.com/SoloJiang/lectern-app/issues/9)（`project` 的增量刷新）、[#13](https://github.com/SoloJiang/lectern-app/issues/13)（`agents` 的会话目录）、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`usage` 的 reflog 时刻）和 [#66](https://github.com/SoloJiang/lectern-app/issues/66)（Analyze 的修订号）。`fs_watch` 是与平台无关的文件监听：把后端交来的原始事件按 git index 和忽略规则过滤、合并成批交给消费方，按 worktree 维护修订号，给 reflog 的新增记录打上监听时刻和序号。FSEvents 与 kqueue 后端在 `platform`，由 `app` 注入（[技术调研「性能要点」](tech-research.md#性能要点)、[ADR 0019](../adr/0019.md)、[ADR 0020](../adr/0020.md)、[ADR 0026](../adr/0026.md)）。
 
@@ -446,6 +446,8 @@ pub mod testing {
         pub fn targets(&self) -> Vec<Target>;
         /// 向 `target` 注入一个原始批次；`target` 没有 arm 时 panic。
         pub fn emit(&self, target: &Path, events: &[(&str, Flags)]);
+        /// 同 `emit`，原始批次由调用方构造：基准在计时之外构造事件，只计 fs_watch 的处理。
+        pub fn emit_batch(&self, target: &Path, batch: RawBatch);
         /// 之后注入的事件先留在后端，下一次 `Armed::flush` 时才交付，模拟 FSEvents 的延迟。
         pub fn hold(&self, target: &Path);
         pub fn fail_next_arm(&self, target: &Path, error: BackendError);
@@ -781,7 +783,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
    - `just test -p lectern-fs-watch` 里 `filter_*`、`filter_stale_*`、`revision_*`、`flush_*`、`coalesce_*`、`reflog_*`、`config_*`、`dir_*`、`rescan_*`、`health_*`、`lifecycle_*`、`quiescence_*` 通过，快照已逐个看过。
    - `cargo tree -p lectern-fs-watch -e normal --depth 1` 只列出 `lectern-kernel`、`lectern-executor`。
    - `rg -n 'cfg\(target_os|Command::new|std::process' crates/fs_watch/src` 没有结果；`python3 scripts/check_architecture.py` 通过。
-   - bench 预算表新增「性能」一节的全部 `fs_watch/*` 条目；`fs_watch/classify_burst`、`fs_watch/reflog_append` 改为 `Active`，macOS CI 的 `just bench` 判定通过，其余条目为 `planned`。
+   - bench 预算表新增「性能」一节的全部 `fs_watch/*` 条目；`fs_watch/classify_burst`、`fs_watch/reflog_append` 改为 `Active`，macOS CI 的 `just bench` 判定通过，其余条目为 `planned`。这一条和两项基准在 bench 运行器合并之后由 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 加入（见「与设计的差异」）。
 2. **`git` 的适配**（`lectern-git`）
    - `just test -p lectern-git` 里 `watch_source_*` 通过；`rg 'Command::new' crates/git/src` 没有结果。
    - [git 设计](git.md)的状态行与「index」一节更新为已实现。
@@ -806,8 +808,22 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 
 没有验证到的：
 
-- bench 预算表的 `fs_watch/*` 条目和 `classify_burst`、`reflog_append` 两项基准：bench 运行器（[#7](https://github.com/SoloJiang/lectern-app/issues/7) 第 1 步）还没有合并进 `main`，见下一节。
+- bench 预算表的 `fs_watch/*` 条目和 `classify_burst`、`reflog_append` 两项基准：#86 时 bench 运行器（[#7](https://github.com/SoloJiang/lectern-app/issues/7) 第 1 步）还没有合并进 `main`，后由 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 加入，结果见下（「与设计的差异」）。
 - macOS 上的真实后端、`flush_idle`、`write_to_deliver`、`resident`：第 3、4 步。
+
+第 1 步的基准（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，`crates/bench/benches/time/fs_watch.rs`），在 Linux 上运行（x86_64 容器，4 核，不是 M 系列 Mac；预算由 macOS CI 的 `just bench` 判定，本 PR 没有在 macOS 上运行）：
+
+- `just bench --measure fs_watch/`，4 次运行，退出码都是 0：
+
+  | ID | 中位数 | p95 | 样本数 | 预算 |
+  |---|---|---|---|---|
+  | `fs_watch/classify_burst` | 19.1 / 19.5 / 19.7 / 23.8 ms | 30.7–36.3 ms | 40–48 | < 100 ms |
+  | `fs_watch/reflog_append` | 6.8 / 7.0 / 10.6 / 10.9 µs | 10.9–13.7 µs | 10 000 | < 1 ms |
+
+  各有一次运行标为 `noisy`（`classify_burst` 的 MAD 4.7 ms，`reflog_append` 的 MAD 1.1 µs），其余没有。
+- `classify_burst`：728 个跟踪文件（`packages/pNN/src/fileNNN.ts`，与 `git/*` 相同）、20 条忽略规则（`node_modules/` 排在第 19 条，`FakeSource` 的匹配要走过大半张表）；100 个原始批次，每批 1000 个 `node_modules/**` 文件事件（2000 个包、每包 50 个文件分在 4 个目录里，每 4 个包有一个带 scope，目录数远超 1024 项的目录缓存）加 10 个受跟踪路径事件（1000 个事件依次落在 728 个文件上）。每个原始批次到达后就由 `Driver::run_until_idle` 处理（像 fs_watch 线程一样边收边处理，队列不溢出），最后推进假时钟让合并窗口结束、交付批次，这些都在计时之内；原始批次在计时之外构造，经 `FakeBackend::emit_batch` 注入，所以比第 1 步临时测量的 41.5 ms（含 `FakeBackend` 构造事件）低。每个样本都检查恰好交付一个批次、含 728 个受跟踪路径、没有 `rescan`。
+- `reflog_append`：追加一行到 `logs/HEAD` 在计时之外（与 `agents/append_4k` 相同）；计时的是 `emit_batch` 注入后端事件、`run_until_idle` 处理到记录进入仓库订阅的批次（入队、读新增的字节、打时刻和序号、并入批次）。下一个样本之前推进假时钟交付批次，逐条检查记录的文件、`Origin::Appended` 和行内容，最后核对记录数等于追加的行数。与第 1 步临时测量的中位数 5.9 µs 相近。
+- `just bench`（冒烟）退出码 0：`fs_watch/*` 的 2 条生效条目是 `smoke`，3 条是 `planned`。`just check`、`just test`（Linux 上的全部 crate，843 个测试）、`just deny` 通过；`Cargo.lock` 只多了 `lectern-bench` 对 `lectern-fs-watch` 的一条工作区内部依赖。
 
 第 3 步（`lectern-platform` 的 `fs_events`），在 Linux（x86_64）上完成；本 PR 没有在 macOS 上运行过，macOS 上的行为全部由 macOS CI 验证：
 
@@ -835,7 +851,7 @@ macOS CI 要确认的：
 - `flush_revision` 里某个 `Armed::flush` 出错时返回 `NotWatching(Failure::Backend(..))`，调用方按「已变化」处理；设计没有写这种情况。
 - 最后一个 `Watcher` 克隆 drop 时也执行 `shutdown`；`shutdown` 在 fs_watch 线程之外调用时等线程退出（最多 `flush_timeout`），所以返回之后不再交付。
 - 测试辅助比设计多了几个方法（上文「测试辅助」已列出）：`FakeBackend` 的 `emit_on_arm`、`before_arm`、`is_armed`、`history`，`FakeSource` 的设置与计数方法，`RecordingSink::len`、`is_empty`；`RecordingSink` 在 `take` 之前一直持有守卫，静止测试据此检查「交付后守卫在消费方手里」。另外 `Flags` 实现了 `BitOr`、`BitOrAssign`、`Default`、`Hash`，`Target`、`Scope`、批次类型实现了 `Clone`、`PartialEq`、`Debug`，错误类型实现了 `Display` 和 `Error`。
-- bench 预算表的 `fs_watch/*` 条目和 `classify_burst`、`reflog_append` 两项基准没有加：bench 运行器与预算表（[#7](https://github.com/SoloJiang/lectern-app/issues/7) 第 1 步）还没有合并进 `main`，等它合并后另提 PR 加入，届时把这两项改为 `Active`，其余三项为 `planned`。上面「实际验证」里有这两个场景的临时测量值。
+- bench 预算表的 `fs_watch/*` 条目和 `classify_burst`、`reflog_append` 两项基准没有随第 1 步（#86）加入：当时 bench 运行器与预算表（[#7](https://github.com/SoloJiang/lectern-app/issues/7) 第 1 步）还没有合并进 `main`。运行器合并（[#83](https://github.com/SoloJiang/lectern-app/pull/83)）后由 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 加入：五个条目都在预算表里，这两项为 `Active`，`flush_idle`、`write_to_deliver`、`resident` 为 `planned`（第 4 步）；`resident` 属于内存目标。为了在计时之外构造事件，`testing::FakeBackend` 多了 `emit_batch`（上文「测试辅助」已列出）。实测值见「实际验证」。
 - 第 3 步：FSEvents 事件的转换（去掉前缀、标志的对应）放在 `fs_events::convert`，是纯函数，在所有平台上编译，单元测试在 Linux CI 上也运行；所以 `platform` 在所有平台上依赖 `lectern-fs-watch`（只为 `Flags`、`RawEvent`），`lectern-executor` 和 rustix 的 `event` feature 只在 macOS 上依赖。`backend` 仍然只在 macOS 上存在。上文「platform 后端」已补充。
 - 第 3 步：标志对应补了设计没写的情况：`ROOT_CHANGED`、`UNMOUNTED` 总在空路径上（fs_watch 只在目标本身上读这两个标志）；挂载点在目标之下的 `Unmount` 与 `Mount` 一样是挂载点所在目录的 `RESCAN`，挂载点是目标或在它之上时才是 `UNMOUNTED`；带 `MustScanSubDirs` 的事件路径不在目标之下时按目标本身的 `RESCAN` 处理，不当作「前缀不匹配即 `ROOT_CHANGED`」，否则丢弃事件会被当成根目录消失。上文已补充。
 - 第 3 步：kqueue 的目录 `NOTE_WRITE` 不说明是哪个条目，`names` 不为空时只报告具名条目的出现、替换和消失，不报告其他条目的增减；`names` 为空时报告为空路径（目录本身）。设计的 `Scope::Entries` 写的是「目录本身的条目增减、改名」都报告，但对 kqueue 来说只能报告成目录本身，fs_watch 收到空路径会通知这个目录的全部使用方，主目录里任何文件的增删都会让配置清单的使用方修订号加一。fs_watch 的 `dir_*` 测试本来就期望「上级目录里其他条目的事件什么都不做」。上文已补充。

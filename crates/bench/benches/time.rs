@@ -7,6 +7,8 @@ mod agents;
 mod cache;
 #[path = "time/executor.rs"]
 mod executor;
+#[path = "time/fs_watch.rs"]
+mod fs_watch;
 #[path = "time/git.rs"]
 mod git;
 #[path = "time/i18n.rs"]
@@ -35,6 +37,8 @@ const BENCHES: &[Bench] = &[
     cache::ZSTD_1M,
     executor::SPAWN_10K,
     executor::WAKE_1000X100,
+    fs_watch::CLASSIFY_BURST,
+    fs_watch::REFLOG_APPEND,
     git::OPEN,
     git::OPEN_HANDLE,
     git::DIFF_50_COLD,

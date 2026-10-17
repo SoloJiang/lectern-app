@@ -31,6 +31,7 @@ insta.workspace = true
 lectern-agents = { path = "../agents", features = ["test-support"] }
 lectern-cache = { path = "../cache", features = ["test-support"] }
 lectern-executor = { path = "../executor" }
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 lectern-git = { path = "../git", features = ["test-support"] }
 lectern-i18n = { path = "../i18n", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }

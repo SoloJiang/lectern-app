@@ -563,6 +563,10 @@ crates/bench/
 | `project/resolve_package/hit`、`…/miss_cloudprint`、`…/miss_100k` | 中位数 < 1 ms / < 20 ms / < 150 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/refresh_index/cloudprint`、`…/100k` | 中位数 < 15 ms / < 60 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/facts_contains/name`、`…/path` | 中位数 < 1 µs / < 5 ms | [project](project.md#性能) | `project` 第 5 步 |
+| `fs_watch/classify_burst` | 中位数 < 100 ms（`FakeBackend` 注入 10 万个 `node_modules/**` 事件和 1000 个受跟踪路径事件，728 个跟踪文件、20 条忽略规则） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 1 步（基准由 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 加入） |
+| `fs_watch/reflog_append` | 中位数 < 1 ms（追加一行 reflog 到记录进入批次，不含后端延迟） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 1 步（同上） |
+| `fs_watch/flush_idle`、`fs_watch/write_to_deliver` | 中位数 < 5 ms / < 120 ms（macOS 真实后端） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
+| `fs_watch/resident` | 常驻增量 < 1 MB；`Memory` | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `executor/spawn_10k`、`executor/wake_1000x100` | 只记录 | [executor](executor.md#性能) | 第 1 步 |
