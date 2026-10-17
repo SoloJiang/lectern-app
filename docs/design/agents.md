@@ -62,7 +62,7 @@ pub fn plugins(deps: AgentsDeps) -> [(Name, Box<dyn Plugin>); 2];
 ### 对其他 crate 的要求
 
 - `fs_watch`：提供不过滤的递归目录监听，监视 git 仓库之外的目录（会话目录），事件只带路径，合并后交付。已写进 `crates/fs_watch/AGENTS.md`。
-- `cache`：提供不属于任何仓库的应用级分库，存本 crate 的轮次索引（键见 ADR 0026）和压缩会话的摘要（键是压缩文件的身份），按字节 LRU，与其他条目一样可以随时删除重建。已写进 `crates/cache/AGENTS.md`。
+- `cache`：提供不属于任何仓库的应用级分库，存本 crate 的轮次索引（键见 ADR 0026）和压缩会话的摘要（键是压缩文件的身份加适配器版本和摘要格式版本），按字节 LRU，与其他条目一样可以随时删除重建。已写进 `crates/cache/AGENTS.md`。
 - `services`：采纳本文「接口」一节定义的 `session` 模块，`services` 的设计文档引用本节，不重复定义。
 
 ## 接口
@@ -200,7 +200,7 @@ pub struct SessionSummary {
     pub cwd: Arc<Path>,
     pub place: Place,
     pub started_at: Timestamp,
-    /// 最后一条记录的时间戳；没有时取文件的修改时间。
+    /// 最后一条记录的时间戳；没有时、或 `tail_pending` 时取文件的修改时间。
     pub last_activity: Timestamp,
     /// 第一个 prompt 的第一行，最多 120 个字符；开头 256 KB 里没有 prompt 时为 None。
     pub title: Option<Arc<str>>,
@@ -211,6 +211,9 @@ pub struct SessionSummary {
     /// 最后一轮还没有结束：Codex 没有 `task_complete` / `turn_aborted`；Claude Code 最后一条 assistant 记录的
     /// `stop_reason` 不是 `end_turn`，或有工具调用没有结果。界面据此和 `last_activity` 判断是否在运行。
     pub open_turn: bool,
+    /// 取自文件末尾的字段（`last_activity`、`open_turn`）还没有算出：只发生在第一次见到、摘要缓存里也没有的 `.jsonl.zst`
+    /// （见「数据流与线程」第 2 步）。此时 `last_activity` 暂取文件修改时间，`open_turn` 为 false；后台补齐后随下一次 `SessionsChanged` 更新。
+    pub tail_pending: bool,
     /// Codex `archived_sessions/` 下的会话。
     pub archived: bool,
     pub format: Format,
@@ -384,14 +387,20 @@ pub enum RawTokens {
 }
 
 /// 去重用的键，去重规则在 `usage`（ADR 0014）。
+/// 键只由上游的标识组成，不含 `SourceId`：同一个上游会话经本地日志和 ACP 两个来源交来时，键相同、只计一次；
+/// 不同的上游会话即使 token 数相同，键也不同。
 pub enum UsageKey {
-    /// 每个内容块一行、重复同一份 usage：同一个键可能出现多次，也可能跨文件出现。
+    /// 每个内容块一行、重复同一份 usage：同一个键可能出现多次，也可能跨文件出现（分叉、续接复制的记录），按 ADR 0014 只计一次。
+    /// `message.id`（`msg_…`）和 `requestId`（`req_…`）由模型服务端生成、全局唯一，不需要再加会话 ID。
     /// `advisor` 是 `usage.iterations[]` 里 `type: "advisor_message"` 的那一份，模型取 `advisorModel`。
     Claude { message_id: Arc<str>, request_id: Option<Arc<str>>, advisor: Option<(Arc<str>, RawTokens)> },
     /// `event_msg` / `token_count`：`tokens` 是 `last_token_usage`，`total` 是 `total_token_usage`。`info` 为 null 的事件不给出用量记录。
-    CodexTokenCount { total: RawTokens },
-    /// 顶层 `token_usage_record`（压缩上下文的用量），按 `response_id` 去重。
-    CodexResponse { response_id: Arc<str> },
+    /// `total` 是会话内的累计值，不是唯一标识，所以键带上游线程 ID（`session_meta.id`）：同一线程里重复写出的同一个累计值
+    /// 合为一条，不同线程（重复的工作流、分叉）各自计数。分叉和子 agent 重放的父会话 `token_count` 带的是新线程的 ID，
+    /// 靠 `inherited` 标记排除（ADR 0014），不靠键。
+    CodexTokenCount { thread_id: Arc<str>, total: RawTokens },
+    /// 顶层 `token_usage_record`（压缩上下文的用量）。`response_id` 由模型服务端生成、全局唯一；同样带上 `thread_id`，与上一项一致。
+    CodexResponse { thread_id: Arc<str>, response_id: Arc<str> },
 }
 
 pub struct RateLimitSample {
@@ -522,14 +531,14 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 代价：磁盘占用等于解压后的大小，全部副本合计上限 1 GB，按最后访问时间做字节 LRU，正在读取的副本（有打开的描述符）不淘汰；内存只有解码用的 64 KB 缓冲，副本不读入内存。副本和 `cache` 一样可以随时删除重建。
 - 第一次打开一个压缩会话要解压整个文件（≥ 100 MB/s，40 MB 约 0.4 s），超出 50 ms 预算，界面按[交互规范「状态与异常」](interaction.md#状态与异常)显示骨架或进度；之后的打开和 `load` 在预算内。这是已知限制（ADR 0026）。
 - 写副本失败（磁盘满、目录不可写）时，`load` 退回从头解码到偏移，结果正确但慢，记日志。
-- 发现阶段不为压缩文件建副本：压缩文件不变，它的摘要（第 2 步）存进 `cache` 的应用级分库，键是同一个文件身份，下次启动直接读，不再解压。
+- 发现阶段不为压缩文件建副本，也不在发布列表之前整份解压（见「数据流与线程」第 2 步）。压缩文件不变，补齐后的完整摘要存进 `cache` 的应用级分库，键是同一个文件身份加适配器版本和摘要格式版本：升级后适配器或摘要字段变了，旧摘要不再命中、重新补齐；下次启动直接读，不再解压。
 
 放弃的方案：记录 zstd 帧边界（Codex 只写一个帧）；把压缩会话里被引用的每一行正文存进轮次索引（索引的大小接近原文件，全部进 SQLite、加载时进内存，比一个可淘汰的副本文件更贵）。
 
 ## 数据流与线程
 
 1. 插件在首帧之后激活（`AfterFirstFrame`），`started` 里通过 `own_with` 提交发现任务（`Background`）。首帧之前不做任何事。
-2. 发现：枚举会话目录（只列目录项，不读 `.prefix.json` 等无关文件），每个会话文件读开头最多 256 KB（找会话头、cwd、第一个 prompt）和末尾最多 64 KB（最后活动时间、`open_turn`），得到摘要。不读整个文件；`.zst` 没有办法直接读末尾，第一次见到时整份流式解码一次，摘要按文件身份存进 `cache`（见「压缩会话的随机读取」）。
+2. 发现：枚举会话目录（只列目录项，不读 `.prefix.json` 等无关文件），每个会话文件读开头最多 256 KB（找会话头、cwd、第一个 prompt）和末尾最多 64 KB（最后活动时间、`open_turn`），得到摘要。不读整个文件。`.zst` 没有办法直接读末尾：先查摘要缓存（见「压缩会话的随机读取」），命中就用；没命中时只流式解压开头 256 KB，用开头和文件的 `stat` 生成摘要、标 `tail_pending`，照常发布。整份解压补齐末尾字段的工作排在列表发布之后，作为单独的 `Background` 任务逐个进行，补齐一批就按第 4 步再发布一次，并写入摘要缓存。
 3. 归位：对去重后的 cwd 调 `Projects::resolve`（阻塞，在 executor 上），结果按 cwd 缓存到下一次目录变化；cwd 不存在时为 `Missing`。
 4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。
 5. 监听：`fs_watch` 递归监听每个会话目录，事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件从列表移除。处理完再按第 4 步发布。
@@ -576,10 +585,10 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 路由：两个来源报告相同的会话 ID 时得到两个不同的 `SessionKey`；`SessionsChanged::source` 与键的 `source` 一致（`source_*`）。
 - 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次（`inherited_*`）。
 - 子 agent：父会话、`toolUseId` 关联，`meta.json` 缺失时 `tool_call` 为 None（`subagent_*`）。
-- 去重键：Claude Code 同一响应的多行给出相同的 `UsageKey`；`info` 为 null 的 `token_count` 只给出 `RateLimits`（`usage_keys_*`）。
+- 去重键：Claude Code 同一响应的多行给出相同的 `UsageKey`；两个 Codex 线程写出相同的 `total_token_usage` 时键不同，同一线程重复写出的相同累计值键相同；键里没有 `SourceId`；`info` 为 null 的 `token_count` 只给出 `RateLimits`（`usage_keys_*`）。
 - 工具分类：分类表每一行一个用例，表外工具名归 `Other` 并计数（`tool_kind_*`）。
 - 异常：不认识的类型、坏行、超长行、末尾不完整的行、认不出格式的文件（`format_*`）。
-- 发现与监听：临时目录加 `fs_watch` 的内存模拟后端，新增、追加、删除、`.jsonl` 与 `.zst` 并存、`sessions/` 与 `archived_sessions/` 并存、`SessionFilter` 隐藏（`discover_*`、`watch_*`）。
+- 发现与监听：临时目录加 `fs_watch` 的内存模拟后端，新增、追加、删除、`.jsonl` 与 `.zst` 并存、`sessions/` 与 `archived_sessions/` 并存、`SessionFilter` 隐藏；没有缓存摘要的 `.zst` 先以 `tail_pending` 发布、整份解压之前列表已可用，后台补齐后再发布一次；摘要缓存在适配器版本或摘要格式版本变化后不命中（`discover_*`、`watch_*`）。
 - 归位：模拟的 `Projects`，相同 cwd 只 `resolve` 一次，cwd 不存在为 `Missing`（`place_*`）。
 - 轮次索引缓存：命中后只解析追加部分；适配器版本变化后不命中（`index_cache_*`）。
 - 插件：`TestKernel` 注入模拟的 `Projects`，激活后提供两个 `SessionSource`，首次发现后发出 `SessionsChanged`（`plugin_*`）。
