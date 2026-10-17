@@ -188,6 +188,7 @@ impl ManifestKind {
 pub type ManifestResult = Result<Arc<Parsed>, ManifestError>;
 
 /// `manifest(path)`：None 表示工作区里没有这个文件（已删除，不算清单）；Some(Err) 是读取或解析失败，
+/// 对 `build.gradle(.kts)` 不调用（不读内容，在文件列表里即算 Gradle 项目），调用方不为它们读文件、算 OID；
 /// 子项目照常列出并把错误填进 `Manifest.error`。
 /// `root_name`：项目显示名（`ProjectSnapshot::name`），根目录的子项目没有清单名字时（如 Cargo 虚拟清单）用它。
 pub fn resolve_packages(
@@ -468,7 +469,7 @@ fixtures：每行至少一份真实写法的样本（脱敏），格式随版本
 
 `resolve_packages` 是纯函数，输入文件列表和每个清单的解析结果：
 
-1. 候选：文件列表里每个清单文件（`FileKind::File` 或 `Executable`，符号链接不算）所在的目录。`manifest(path)` 返回 None 的不算；返回 Err 的照常是候选，只是它声明的成员无法展开。
+1. 候选：文件列表里每个清单文件（`FileKind::File` 或 `Executable`，符号链接不算）所在的目录。`manifest(path)` 返回 None 的不算；返回 Err 的照常是候选，只是它声明的成员无法展开。`build.gradle`、`build.gradle.kts` 不调用 `manifest`，在文件列表里就是候选（`packages_gradle_build_scripts_are_never_read`）。
 2. 声明：每个工作区清单按上表的规则把成员模式展开成目录。glob 相对声明它的清单所在目录，`*` 不跨 `/`，`**` 匹配任意层；去掉 `./` 前缀和末尾的 `/`；`..` 按字面路径归并，越出 worktree 的丢弃，绝对路径也丢弃。npm、pnpm、Cargo 的 glob 只匹配同生态有清单的候选目录（npm 与 pnpm 是有 `package.json` 的目录，Cargo 是有 `Cargo.toml` 的目录）；npm 与 pnpm 的通配符不匹配以 `.` 开头的目录，Cargo 的匹配（与 Cargo 相同）。含通配符的 glob 不匹配 worktree 根目录本身（`*` 能匹配空串，但工作区不会把自己的根声明为成员）。排除项只作用于同一个清单的 glob：pnpm / npm 的 `!` 排除匹配到的目录；Cargo 的 `exclude` 排除这个目录及其下的一切，但不含通配符的 `members` 项优先于 `exclude`（与 Cargo 相同）。不合法的 glob 跳过，所在清单的 `Manifest.partial` 标为 true。Maven、Gradle、go.work 的显式路径只要目录下有受跟踪文件就成立；Maven 的路径正好是列表里的一个文件时（指向另一个 pom 文件），取它所在的目录。
 3. 合并：每个目录一个 `Package`。被声明的标 `declared`；没有自己清单的被声明目录也收入，`manifests` 为空，名字取声明里的名字（Gradle 的 `:a:b` 取最后一段）或目录名。未被声明的候选目录也收入，除非路径里有 `node_modules`、`vendor`、`fixtures`、`__fixtures__`、`testdata` 这几段之一（测试样本里的清单不是子项目）；被声明的目录不受这条排除。
 4. 层级：按 `dir` 的字节序排序后，对每项从近到远查它的上级目录（`a/b/c` → `a/b` → `a` → 根），第一个在列表里的就是 `parent`。不用栈：字节序下 `a-b` 排在 `a` 与 `a/c` 之间，栈会把 `a` 弹出。用 `FileList::range_under` 算出 `files`。
@@ -616,13 +617,13 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 
 第 1 步（清单解析与成员解析），在 Linux 上运行（本 crate 不依赖 GPUI，macOS 上是同一份代码；没有在 macOS 上实测）：
 
-- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-project`（47 个测试）、`just doctest`、`just deny` 全部通过。新增依赖的许可证：`serde`、`serde_json`、`toml` 及其传递依赖为 MIT / Apache-2.0，`quick-xml`、`winnow`、`zmij` 为 MIT，`memchr` 为 Unlicense / MIT，都在 `deny.toml` 的允许列表里；Cargo.lock 里新出现的只有 `quick-xml` 0.42（0.41 由 GPUI 在 Linux 上经 `xcb` 引入，不进 macOS 的发布包）。
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-project`（48 个测试）、`just doctest`、`just deny` 全部通过。新增依赖的许可证：`serde`、`serde_json`、`toml` 及其传递依赖为 MIT / Apache-2.0，`quick-xml`、`winnow`、`zmij` 为 MIT，`memchr` 为 Unlicense / MIT，都在 `deny.toml` 的允许列表里；Cargo.lock 里新出现的只有 `quick-xml` 0.42（0.41 由 GPUI 在 Linux 上经 `xcb` 引入，不进 macOS 的发布包）。
 - `cargo tree -p lectern-project -e normal --depth 1` 只列出 `glob`、`quick-xml`、`serde`、`serde_json`、`toml`。
 - `rg -n 'std::process|Command::new' crates/project/src` 没有结果。
 - 「清单格式」表逐行有 insta 快照（`crates/project/src/manifest/snapshots/`，样本在 `crates/project/tests/fixtures/manifests/`）：package.json（npm 数组写法含 `!` 排除、yarn 1 对象写法、普通包）、pnpm-workspace.yaml（pnpm 10 带 catalog 与注释、pnpm 7 与键同缩进的序列、单行与跨行流序列、锚点与嵌套集合标为 partial）、Cargo.toml（虚拟清单与 `exclude`、包加工作区、普通包）、pom.xml（4.0.0 含 profile 里的 modules 与指向 pom 文件的模块、4.1.0 的 subprojects 与 CDATA、从 parent 取 groupId、属性插值的模块标为 partial）、settings.gradle（Groovy：多参数跨行、`includeFlat`、`projectDir`、`includeBuild`，注释和字符串里的 `include` 不算）、settings.gradle.kts（Kotlin）、变量与插值写法标为 partial、go.work 块与单行写法、go.mod。build.gradle 不读内容：`manifest_gradle_build_is_not_read`。
 - 错误：`manifest_syntax_errors_report_the_line`（每种格式一个样本，检查行号）、`manifest_syntax_errors_inline`、`manifest_too_large_is_not_parsed`（每种格式超过 1 MB 都是 `TooLarge`，正好 1 MB 照常解析）、`manifest_invalid_utf8`、`manifest_utf8_bom_is_skipped`。
 - 不 panic：`manifest_garbage_input_does_not_panic` 把每个样本在每个字节处截断后解析，再做 4000 轮随机变异（替换、插入、删除语法字符）和随机字节输入，每种格式都跑；`manifest_deep_nesting_does_not_overflow` 对每种格式喂 10 万层 `[`、`{`、`(`、`<a>`、`"${`、`- `。手写解析器对输入不递归（Gradle 插值嵌套超过 32 层按语法错误处理），对恶意输入保持线性。
-- 成员解析的快照（`crates/project/src/packages/snapshots/`）覆盖「测试」一节列出的场景：`packages_cloudprint_shape`（`apps/miniapp-console/frontend` 为 `declared: false`）、`packages_nested_workspaces`、`packages_one_directory_several_manifests`、`packages_gradle_projects_without_build_files`、`packages_manifest_errors_are_kept`、`packages_maven_modules_outside_their_directory`、`packages_paths_outside_the_worktree_are_dropped`、`packages_sample_directories_are_not_packages`、`packages_cargo_virtual_root_and_exclude`（根子项目的名字取 `root_name`）、`packages_only_regular_present_manifests_are_candidates`（符号链接、已删除的清单不是候选）；每个场景都检查「子项目与清单」的不变量。`cloudprint` 形状按本文的描述合成，没有用真实仓库的数据。
+- 成员解析的快照（`crates/project/src/packages/snapshots/`）覆盖「测试」一节列出的场景：`packages_cloudprint_shape`（`apps/miniapp-console/frontend` 为 `declared: false`）、`packages_nested_workspaces`、`packages_one_directory_several_manifests`、`packages_gradle_projects_without_build_files`、`packages_manifest_errors_are_kept`、`packages_maven_modules_outside_their_directory`、`packages_paths_outside_the_worktree_are_dropped`、`packages_sample_directories_are_not_packages`、`packages_cargo_virtual_root_and_exclude`（根子项目的名字取 `root_name`）、`packages_only_regular_present_manifests_are_candidates`（符号链接、已删除的清单不是候选）、`packages_gradle_build_scripts_are_never_read`（回调只收到 settings 脚本，build 脚本按存在计入）；每个场景都检查「子项目与清单」的不变量。`cloudprint` 形状按本文的描述合成，没有用真实仓库的数据。
 
 没有验证到的：「性能」一节的 `project/packages_cloudprint` 等基准属于第 5 步。
 

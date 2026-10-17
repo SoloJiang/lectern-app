@@ -41,7 +41,14 @@ impl Tree {
     }
 
     fn resolve(&self, root_name: &str) -> Vec<Package> {
+        self.resolve_logged(root_name).0
+    }
+
+    /// Also returns every path the callback was asked for.
+    fn resolve_logged(&self, root_name: &str) -> (Vec<Package>, Vec<String>) {
+        let calls = std::cell::RefCell::new(Vec::new());
         let manifest = |path: &str| -> Option<ManifestResult> {
+            calls.borrow_mut().push(path.to_owned());
             if self.missing.contains(&path) {
                 return None;
             }
@@ -54,7 +61,7 @@ impl Tree {
         };
         let packages = resolve_packages(&self.files, root_name, &manifest);
         check_invariants(&packages);
-        packages
+        (packages, calls.into_inner())
     }
 }
 
@@ -433,4 +440,48 @@ fn packages_parent_skips_byte_order_neighbours() {
 #[test]
 fn packages_empty_file_list() {
     assert!(Tree::new(&[]).resolve("empty").is_empty());
+}
+
+#[test]
+fn packages_gradle_build_scripts_are_never_read() {
+    let mut tree = Tree::new(&[
+        ("settings.gradle.kts", "include(\":app\")\n"),
+        ("build.gradle.kts", "not { read"),
+        ("app/build.gradle", "not { read"),
+        ("lib/build.gradle.kts", "not { read"),
+    ]);
+    // Even a build script the callback would call deleted or unreadable
+    // counts by its presence in the file list.
+    tree.missing.push("app/build.gradle");
+    tree.unreadable.push("lib/build.gradle.kts");
+    let (packages, calls) = tree.resolve_logged("gradle");
+    assert_eq!(calls, ["settings.gradle.kts"]);
+    let dirs: Vec<(&str, bool, Vec<ManifestKind>)> = packages
+        .iter()
+        .map(|p| {
+            (
+                &*p.dir,
+                p.declared,
+                p.manifests.iter().map(|m| m.kind).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        dirs,
+        [
+            (
+                "",
+                false,
+                vec![ManifestKind::GradleBuild, ManifestKind::GradleSettings]
+            ),
+            ("app", true, vec![ManifestKind::GradleBuild]),
+            ("lib", false, vec![ManifestKind::GradleBuild]),
+        ]
+    );
+    assert!(
+        packages
+            .iter()
+            .flat_map(|p| p.manifests.iter())
+            .all(|m| m.error.is_none() && !m.partial)
+    );
 }

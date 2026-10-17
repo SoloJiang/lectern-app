@@ -65,7 +65,8 @@ const SAMPLE_SEGMENTS: &[&str] = &[
 /// `manifest(path)` gives the parse result of a manifest in `files`: None
 /// when the file is gone (not a manifest), `Some(Err)` when it could not be
 /// read or parsed (the directory is still a package; its members are not
-/// expanded). `root_name` names the root package when its manifests give
+/// expanded). It is never called for `build.gradle(.kts)`, whose content is
+/// not read; the file list alone marks the Gradle project. `root_name` names the root package when its manifests give
 /// no name.
 ///
 /// The result is sorted by `dir` (bytes); `parent` indexes into it.
@@ -179,6 +180,8 @@ fn candidates<'a>(
     manifest: &dyn Fn(&str) -> Option<ManifestResult>,
 ) -> Vec<Candidate<'a>> {
     let mut out = Vec::new();
+    // One shared result for every Gradle build script.
+    let mut gradle_build: Option<Arc<Parsed>> = None;
     for (path, kind) in files.iter() {
         // Symlinks and submodules are not manifests.
         if !matches!(kind, FileKind::File | FileKind::Executable) {
@@ -188,8 +191,16 @@ fn candidates<'a>(
         let Some(kind) = ManifestKind::from_file_name(file_name) else {
             continue;
         };
-        let Some(result) = manifest(path) else {
-            continue;
+        let result = if kind == ManifestKind::GradleBuild {
+            // Build scripts are never read: being in the file list is
+            // enough to mark a Gradle project, so the caller does not load
+            // or hash them.
+            Ok(gradle_build.get_or_insert_with(Default::default).clone())
+        } else {
+            let Some(result) = manifest(path) else {
+                continue;
+            };
+            result
         };
         out.push(Candidate {
             dir,
