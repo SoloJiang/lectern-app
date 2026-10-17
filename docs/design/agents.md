@@ -69,7 +69,7 @@ pub fn plugins(deps: AgentsDeps) -> [(Name, Box<dyn Plugin>); 2];
 
 ### 服务接口（`lectern-services` 的 `session` 模块）
 
-类型都是不含行为的数据，能通过 JSON-RPC 序列化（serde 派生方式随 `services` 设计），以后的进程插件可以实现同一个接口。进程插件的单条消息上限是 4 MB（[ADR 0018](../adr/0018.md)）：经进程插件实现时，超过这个上限的单条正文由 `load` 返回 `SessionError::TooLarge`，`read` 跳过该记录并计入 `oversized_lines`、游标越过它；分块传输留给进程插件宿主的设计。内置来源在进程内，不受此限。
+类型都是不含行为的数据，能通过 JSON-RPC 序列化（serde 派生方式随 `services` 设计），以后的进程插件可以实现同一个接口。进程插件的单条消息上限是 4 MB（[ADR 0018](../adr/0018.md)）：经进程插件实现时，超过这个上限的单条正文由 `load` 返回 `SessionError::TooLarge(len)`，`read` 跳过该记录并计入 `oversized_lines`、游标越过它；分块传输留给进程插件宿主的设计。内置来源在进程内，不受此限。
 
 ```rust
 /// 多实现服务：每种 agent 一个提供者，ACP（P3）和第三方会话来源再各加一个。
@@ -117,6 +117,8 @@ pub enum SessionError {
     Io(Arc<str>),
     /// 整个文件认不出格式（见「状态与异常」）。`turns` 返回这个错误，`read` 返回空的 `Batch`。
     Unrecognized,
+    /// 经进程插件实现的来源：这条正文超过进程插件的单条消息上限（4 MB）。附原始字节数。
+    TooLarge(u64),
 }
 
 /// 恢复会话的命令只能是宿主登记的几种，来源只给出会话 ID，不给程序名和参数。
