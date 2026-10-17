@@ -44,14 +44,16 @@ def main() -> int:
             name = f"{case.get('classname', '')} {case.get('name', '')}".strip()
             failed.append((name, node.get("message") or kind, output))
             break
-    for name, message, output in failed[:MAX_ANNOTATIONS]:
+    # With more failures than slots, the last slot lists the rest by name.
+    shown = failed if len(failed) <= MAX_ANNOTATIONS else failed[: MAX_ANNOTATIONS - 1]
+    for name, message, output in shown:
         lines = output.strip().splitlines()
         if len(lines) > MAX_LINES:
             lines = lines[:10] + ["…"] + lines[-(MAX_LINES - 11):]
         body = "\n".join([message, *lines])
         print(f"::error title={escape_property(name)}::{escape(body)}")
-    if len(failed) > MAX_ANNOTATIONS:
-        rest = ", ".join(name for name, _, _ in failed[MAX_ANNOTATIONS:])
+    if len(shown) < len(failed):
+        rest = ", ".join(name for name, _, _ in failed[len(shown):])
         print(f"::error title=more failed tests::{escape(rest)}")
     print(f"{len(failed)} failed test(s) in {report}")
     return 0

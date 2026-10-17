@@ -19,7 +19,7 @@
 - 发布构建：`lto = "thin"`，`codegen-units = 1`。
 - `just` 不设置编译器 wrapper，开发者自己配置的 `RUSTC_WRAPPER`、`CARGO_BUILD_RUSTC_WRAPPER` 或 `build.rustc-wrapper` 都照常生效。要用 `sccache` 在多个 worktree 间共享编译结果，在 `~/.cargo/config.toml` 里设置 `build.rustc-wrapper = "sccache"`。
 - nextest 不跑 doctest，另有 `just doctest`（`cargo test --doc`），CI 两个任务都跑。
-- nextest：默认只完整打印失败的测试；CI 用 `ci` profile，不提前停止，并写出 JUnit 报告（`target/nextest/ci/junit.xml`）。测试失败时，`scripts/ci_annotate_failures.py` 把每个失败的测试和它的输出写成 GitHub 注释（最多 10 条），不下载任务日志也能通过 check run 的接口看到失败原因。
+- nextest：默认只完整打印失败的测试；CI 用 `ci` profile，不提前停止，并写出 JUnit 报告（`target/nextest/ci/junit.xml`）。测试失败时，`scripts/ci_annotate_failures.py` 把每个失败的测试和它的输出写成 GitHub 注释（GitHub 每个步骤最多保留 10 条；失败超过 10 个时前 9 个各一条，其余的测试名合成第 10 条），不下载任务日志也能通过 check run 的接口看到失败原因。
 
 ## 架构规则检查
 
