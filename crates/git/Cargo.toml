@@ -10,5 +10,18 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "domain"
 
+[features]
+# `testing::TestRepo`: builds repositories with gix, without the git CLI, for
+# the tests of this crate and of project, review and bench.
+test-support = ["dep:tempfile"]
+
+[dependencies]
+gix.workspace = true
+lectern-platform = { path = "../platform" }
+tempfile = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

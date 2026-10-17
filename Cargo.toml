@@ -80,6 +80,21 @@ glob = "0.3"
 # fstatat, fstat, readlinkat and read through a safe interface. Already in the
 # release build with the same features, through GPUI's async-io / polling.
 rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+# Repository reading, used only by lectern-git (docs/adr/0024.md). Exact pin;
+# upgrade in its own PR. `parallel` stays off: no `max-performance-safe`
+# (it turns on `parallel` through `max-control`), only its two pack caches.
+gix = { version = "=0.88.0", default-features = false, features = [
+    "sha1",
+    "sha256",
+    "index",
+    "revision",
+    "attributes",
+    "excludes",
+    "dirwalk",
+    "blob-diff",
+    "pack-cache-lru-static",
+    "pack-cache-lru-dynamic",
+] }
 # lectern-agents: decodes Codex's `.jsonl.zst` rollouts (pure Rust, MIT;
 # docs/adr/0026.md). Default features: `std`, and `hash` (twox-hash, MIT) to
 # verify the frame checksum. Tests also use its encoder to build fixtures.
