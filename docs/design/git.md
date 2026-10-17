@@ -2,7 +2,7 @@
 
 状态：已接受，尚未实现。
 
-对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行，以及 Analyze 需要的指纹和快照内容（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)、[ADR 0019](../adr/0019.md)）。依赖选型见 [ADR 0024](../adr/0024.md)。
+对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
 ## 范围
 
@@ -14,19 +14,18 @@
   - 改动集：树 ↔ 树（提交、分支相对 merge-base），树 ↔ 工作区（含未跟踪文件）；重命名检测、二进制判断、行 diff、单文件和整体的截断。
   - 展示行：统一视图与双栏视图共用的行模型、上下文折叠、增删配对、词级差异。
   - 以两端 blob OID 为键的 hunk 缓存；工作区内容按 git 的 blob 格式计算 OID，不写对象库。
-  - 审阅对象的指纹；Analyze 快照的内容（基准树条目、叠加改动的规范内容、截断文件改动前的版本）。
 - 不做：
   - 绘制 diff、Fluent 文案、UI 探针节点：`review_view`。本 crate 只返回枚举，不产生界面字符串。
   - 归因、Drifted、已看状态、噪声文件列表：`review`。本 crate 只给出 `.gitattributes` 里的 `linguist-generated`。
   - 文件监听、worktree 修订号、reflog 新增行的时刻：`fs_watch`。分支的「一次使用」与用量归属：`usage`。
-  - 快照的落盘、平铺、移走 agent 会自动加载的配置、沙箱：`platform` 与 `agents`（ADR 0019）。本 crate 只给出每个条目的内容来源。
   - 安全的文件读取（`O_NOFOLLOW_ANY`）：`platform`（架构规则 6），本 crate 只调用它的平台无关接口。
   - 缓存的存储与淘汰：`cache`。代码高亮：`code_intel` / `review_view`。
   - 任何写操作：提交、暂存、切换分支、写 index 或对象库。见「未决问题」1。
 - 本 issue 之外：
   - 结构化 diff（[#21](https://github.com/SoloJiang/lectern-app/issues/21)），扩展点见「结构化 diff 的扩展点」。
   - MR 的 diff：`forge`（[#25](https://github.com/SoloJiang/lectern-app/issues/25)）。
-  - 实现 `services` 的改动来源接口：等 `services` 的设计文档确定，见「验收」第 5 步。
+  - Analyze 快照的输入与审阅对象的指纹：随 [#66](https://github.com/SoloJiang/lectern-app/issues/66) 设计，见「Analyze 快照」。
+  - 实现 `services` 的改动来源接口：等 `services` 的设计文档确定，见「验收」第 4 步。
 
 本 crate 在领域层，是普通的库 crate，不是插件：不实现 kernel 的 `Plugin`，不注册服务。`project`、`review`、`usage` 等领域 crate 直接依赖并调用它（[#47](https://github.com/SoloJiang/lectern-app/issues/47) 以后若决定把插件做成包装领域库的薄 crate，本 crate 仍是被包装的库）。
 
@@ -49,7 +48,7 @@
 
 ```rust
 // lectern-platform
-/// 一个目录根（worktree 根或快照根）的描述符。
+/// 一个目录根（如 worktree 根）的描述符。
 pub struct SafeRoot { /* fd */ }
 
 pub enum Read {
@@ -75,12 +74,11 @@ Linux 上用 `openat2` 加 `RESOLVE_NO_SYMLINKS` 实现同样的语义，供 CI 
 
 | 概念 | 说明 |
 |---|---|
-| 仓库（`Repo`） | 一个 git 公共目录。同一仓库的所有 worktree 共用一个 `Repo`；gix 句柄按线程打开（见「数据流与线程」）。 |
+| 仓库（`Repo`） | 一个 git 公共目录。同一仓库的所有 worktree 共用一个 `Repo`；gix 句柄只在一次调用内存在（见「数据流与线程」）。 |
 | worktree（`Worktree`） | 主 worktree 或 linked worktree：自己的 HEAD、index 和工作区。 |
 | 基准 | 比较的旧一侧，总是一棵树：HEAD、某个提交（如会话开始时的 HEAD）或 merge-base。 |
 | 改动集（`ChangeSet`） | 基准与目标（另一棵树或工作区）之间每个改动文件的状态、两侧的模式和内容标识、diff。不可变，`Arc` 共享。 |
 | 规范内容 | 工作区文件经过 git 内置转换（to-git 方向）之后的字节，与 `git add` 会存进对象库的内容相同。工作区一侧的 blob OID 按规范内容计算。 |
-| 指纹 | 基准树 OID 加每个改动文件的路径、状态、新旧模式和内容标识的哈希，用来判断 Analyze 的结果是否过期。 |
 
 ## 接口
 
@@ -299,7 +297,6 @@ impl ChangeSet {
     pub fn target(&self) -> &Target;               // Tree(Oid) | Worktree(WorktreeId)
     pub fn files(&self) -> &[Change];              // 按路径排序，含被截断的文件
     pub fn totals(&self) -> &Totals;               // 文件数、已知的增删行数、各类截断的数量
-    pub fn fingerprint(&self) -> Fingerprint;
     /// 一个文件两侧的文本。基准一侧按 OID 读对象库；工作区一侧是比较时读到的那份内容，不重新读工作区。
     /// 新一侧是 `NotRetained` 时，`FileTexts` 的这一侧为 `NotRetained`，视图显示「内容过多，未保留」，
     /// 不按路径重读（重读的内容可能已经不是比较时的那份）；要看当前内容走完整文件阅读（⇧⌘O）。
@@ -328,83 +325,9 @@ pub fn inline_changes(old: &[u8], new: &[u8]) -> Option<InlineChanges>;
 
 行号是两侧完整文件里的行号（从 0 起）。所以高亮按完整文件计算再按行切片，缓存键是 blob OID、语言和 grammar 与查询的版本（[pulls.review 调研](../research/pulls-review.md#对-lectern-的建议)、[#42](https://github.com/SoloJiang/lectern-app/issues/42)），由做高亮的 crate 实现。
 
-### Analyze 快照的内容
+### Analyze 快照
 
-```rust
-impl Repo {
-    /// 基准快照的全部条目，按路径顺序流式返回，内容由写出方用 `blob` 读取。
-    /// 遇到损坏的名字（空名、`.`、`..`、含 `/` 或 NUL、不分大小写的 `.git`）或超过 `limits`
-    ///（默认 20 万个条目、路径合计 64 MB，ADR 0019）时返回错误，写出方不生成快照。
-    pub fn snapshot_entries(&self, tree: Oid, limits: &EntryLimits, cancel: &AtomicBool)
-        -> Result<impl Iterator<Item = Result<SnapshotEntry, GitError>> + '_, GitError>;
-}
-
-impl ChangeSet {
-    /// 叠加到基准快照上的工作区改动：只含 `selection` 里的改动——删除的路径，以及每个新增、修改文件的内容来源。
-    /// 只对工作区改动集有意义。
-    pub fn overlay<'a>(&'a self, selection: &'a Selection) -> impl Iterator<Item = OverlayEntry> + 'a;
-    /// 审阅对象的指纹：只覆盖 `selection` 里的改动。`fingerprint()` 等于选中全部文件时的结果。
-    pub fn fingerprint_of(&self, selection: &Selection) -> Fingerprint;
-
-    /// 用实际写进快照的内容构造改动集，Analyze 的 patch 和指纹都从它计算，
-    /// 不从可能还在变化的工作区计算（ADR 0019「结果要对得上当前版本」）。
-    pub fn from_written(repo: &Repo, manifest: WrittenManifest, limits: &Limits,
-        cancel: &AtomicBool) -> Result<Arc<ChangeSet>, GitError>;
-}
-
-/// 属于审阅对象的改动，由调用方选出：`review` 按会话归因决定哪些文件、哪些改动属于被审阅的会话
-///（ADR 0019：快照只含受跟踪的文件和属于审阅对象的改动），本 crate 不判断归属。审阅整个工作区时选中全部文件。
-pub struct Selection { /* files 的下标 → Ownership */ }
-
-pub enum Ownership {
-    /// 这个文件的改动全部属于审阅对象：按 `OverlaySource` 叠加。
-    Whole,
-    /// 只有一部分属于（同一个文件里还有别的会话的改动）：不按 hunk 拼出一个中间版本，
-    /// 快照里保留基准内容，条目作为 `Omitted` 给出，Analyze 标为部分内容未提供。
-    Partial,
-}
-
-/// 写出方交回的清单。`untracked_capped` 原样带回源改动集的 `Totals::untracked_capped`：
-/// 超出枚举上限的未跟踪文件没有 overlay 条目，只能靠这个标记让 `from_written` 得到同样的指纹。
-pub struct WrittenManifest {
-    pub base_tree: Oid,
-    pub entries: Vec<WrittenEntry>,
-    pub untracked_capped: bool,
-}
-
-pub enum OverlaySource {
-    /// 有适用的内置转换：已转换的规范字节，写出方原样写入。
-    Canonical(Arc<[u8]>),
-    /// 没有适用的转换：写出方从 worktree 根描述符打开并克隆（`platform`），写出时计算 blob OID。
-    Verbatim,
-    Symlink { target: Arc<[u8]> },
-    /// 子模块：写成空目录，提交 OID 只出现在 patch 里。快照里没有子模块的内容，
-    /// 所以与 `Omitted` 一样让指纹的 `complete` 为 false，Analyze 标为部分内容未提供（ADR 0019）。
-    Gitlink(Oid),
-    /// 使用了过滤器、超过读取上限、不支持的文件类型：不写出，Analyze 标为部分内容未提供。
-    /// 带着改动集里新一侧的 `Content`（`Unhashed` 或 `Unavailable`，含 `Filtered` 的原始字节摘要）。
-    Omitted(Content),
-}
-
-pub struct WrittenEntry {
-    pub path: RepoPath,
-    pub mode: Mode,
-    /// 写出内容的 blob OID；`Omitted` 的条目原样带回 `OverlaySource::Omitted` 里的 `Content`，
-    /// 所以 `from_written` 算出的指纹与工作区改动集的指纹用同一个内容标识。
-    pub content: Content,
-    pub untracked: bool,                          // 原样带回 `Change::untracked`
-    pub ownership: Ownership,                     // 原样带回 `Selection` 里的值；`Partial` 的 `content` 是源改动集新一侧的 `Content`
-    pub source: Arc<dyn WrittenContent>,          // 读取已写出的内容，生成 patch 用
-}
-
-pub trait WrittenContent: Send + Sync {
-    fn read(&self, max: u64) -> io::Result<Arc<[u8]>>;
-}
-```
-
-`overlay` 按 `files` 的顺序给出条目，同一路径上的 `Deleted` 排在未跟踪的 `Added` 之前，写出方按顺序应用，快照里这个路径上最终是工作区里的文件。
-
-截断文件和二进制文件改动前的版本由写出方按 `Change::old` 的 OID 用 `Repo::blob` 取出（ADR 0019）。保留目录、平铺、名字冲突检查都在写出方。
+Analyze 快照的输入（[ADR 0019](../adr/0019.md)）：基准树条目、叠加的工作区改动、截断文件改动前的版本、审阅对象的指纹，随 [#66](https://github.com/SoloJiang/lectern-app/issues/66) 设计，不在本文。那份设计要满足 ADR 0019 的约束：快照只含属于审阅对象的改动；省略的内容、使用了过滤器的文件、子模块、超过上限的内容都让结果标为「部分内容未提供」；模型读到的内容、显示的 patch 和指纹来自同一份状态。它建立在本文的 `ChangeSet`、`Content`（含 `Unavailable::Filtered { raw }`、`NotRetained`）、`texts` 和 `Repo::blob` 之上。
 
 ### 错误
 
@@ -455,7 +378,7 @@ pub enum Content {
 
 pub enum Unavailable {
     /// 设置了 clean / process 过滤器（如 Git LFS）：「使用了过滤器，暂不支持比较」。
-    /// `raw` 是工作区原始字节的身份，指纹用它（基准一侧来自对象库，照常是 `Blob`）。
+    /// `raw` 是工作区原始字节的身份，用来判断内容是否变了（基准一侧来自对象库，照常是 `Blob`）。
     Filtered { raw: RawIdentity },
     UnsupportedType,     // FIFO、socket、设备文件
     PathThroughSymlink,  // 路径中间一级是符号链接
@@ -463,7 +386,7 @@ pub enum Unavailable {
     Missing,             // 对象库里没有（如部分克隆）
     Unreadable,          // 读取失败
     /// 超过改动集保留工作区内容的上限（128 MiB）：比较时读过、算过 OID，但字节没有保留。
-    /// `oid` 是当时规范内容的 blob OID，指纹和已看状态用它；`Detail` 为 `Truncated`（增删行数已知）。
+    /// `oid` 是当时规范内容的 blob OID，已看状态等按 OID 的键照常可用；`Detail` 为 `Truncated`（增删行数已知）。
     NotRetained { oid: Oid },
 }
 
@@ -483,7 +406,7 @@ pub enum Detail {
     Listed,
     /// 内容相同，只改了模式。
     ModeOnly,
-    /// 至少一侧是 `Unavailable` 或子模块。
+    /// 至少一侧是 `Unavailable` 或子模块；`NotRetained` 除外（见不变量）。
     NoDiff,
 }
 
@@ -498,9 +421,10 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 
 不变量：
 
-- `files` 按（`path` 的字节序，`untracked`）排序。同一路径最多一项，唯一的例外是「工作区比较」第 3 步的情况：同一路径上一项是 `Deleted`，另一项是 `untracked` 的 `Added`。重命名只出现在新路径上，所以重命名的旧路径上重新出现的文件只有一项未跟踪的 `Added`，`Renamed` 本身不受影响。
+- `files` 按（`path` 的字节序，`untracked`）排序。同一路径最多一项，唯一的例外是「工作区比较」第 4 步的情况：同一路径上一项是 `Deleted`，另一项是 `untracked` 的 `Added`。重命名只出现在新路径上，所以重命名的旧路径上重新出现的文件只有一项未跟踪的 `Added`，`Renamed` 本身不受影响。
 - `Status` 与两侧一致：`Added` 只有 `new`，`Deleted` 只有 `old`，`Modified`、`TypeChanged`、`Renamed` 两侧都有。`Conflicted` 的两侧按实际状态：基准里没有这个路径时没有 `old`（如 HEAD 删除、对方修改的冲突），工作区里没有文件时没有 `new`，两侧都没有的冲突不出现。`TypeChanged` 是普通文件、符号链接、子模块之间的变化。
 - 截断只影响 `Detail`，不影响改动的判定、`Status` 和两侧的 `Content`：被截断、只列出的文件也有完整的 OID。
+- 有一侧是 `Unavailable` 的改动，`Detail` 为 `NoDiff`（被整体上限截到时为 `Listed`），唯一的例外是 `NotRetained`：它的 `Detail` 是 `Truncated`，增删行数是比较时算出的。
 - `Content::Blob` 的 OID 与 `git add` 之后对象库里会有的 OID 相同，所以只是被 touch 过、内容未变的文件不算改动，内容相同的文件在不同 worktree 之间命中同一份缓存。
 - `ChangeSet` 创建后不再修改。`refresh` 生成新的 `ChangeSet`，没变的 `Change` 与旧的共享。
 
@@ -510,16 +434,17 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 
 | 基准树 | index | 结果 |
 |---|---|---|
-| 有 | 有 | 按第 1、2 步比较工作区内容与基准 |
+| 有 | 有 | 按第 1–3 步比较工作区内容与基准 |
 | 有 | 没有 | `Deleted`（已从 index 删除，如 `git rm --cached`），不看工作区里同一路径上有没有文件 |
-| 没有 | 有 | `Added`，新一侧按第 1、2 步取工作区内容 |
-| 没有 | 没有 | 不是跟踪的路径；工作区里有文件时按第 3 步作为未跟踪文件 |
+| 没有 | 有 | `Added`，新一侧按第 1–3 步取工作区内容 |
+| 没有 | 没有 | 不是跟踪的路径；工作区里有文件时按第 4 步作为未跟踪文件 |
 
-0. **工作区里没有**：`SafeRoot::stat` 报告路径不存在（含中间某一级目录不存在）时，不做后面的比较：基准里有这个路径就是 `Deleted`（未暂存的 `rm`），基准里也没有（暂存了新增后又删掉文件）就不是改动。`Unavailable::Missing` 只用于对象库里缺对象，不用于这种情况。跟踪的非子模块路径 `p` 在工作区里变成了目录时同样按「没有」处理（`Deleted` 或不是改动），这个条目不设 `UPTODATE`，`p/` 下的文件由第 3 步作为未跟踪的 `Added` 列出；子模块路径是目录属于正常情况，按子模块处理。
-1. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时，工作区内容就是 index 里的 blob，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
-2. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）的文件不转换，标为 `Filtered`，不按原始字节生成 diff。
-3. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给第 0–2 步处理过、工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每个文件都是 `Added` 且 `untracked = true`，内容按第 2 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
-4. **重命名**：删除与新增之间先按 OID 找精确重命名，再按相似度（不低于 50%，候选不超过 1000 对，即 `diff.renameLimit` 的默认值）找重命名。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
+0. **工作区里没有**：`SafeRoot::stat` 报告路径不存在（含中间某一级目录不存在）时，不做后面的比较：基准里有这个路径就是 `Deleted`（未暂存的 `rm`），基准里也没有（暂存了新增后又删掉文件）就不是改动。`Unavailable::Missing` 只用于对象库里缺对象，不用于这种情况。跟踪的非子模块路径 `p` 在工作区里变成了目录时同样按「没有」处理（`Deleted` 或不是改动），这个条目不设 `UPTODATE`，`p/` 下的文件由第 4 步作为未跟踪的 `Added` 列出；子模块路径是目录属于正常情况，按子模块处理。
+1. **过滤器先判定**：按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的，新一侧一律是 `Unavailable::Filtered`（stat 与 index 一致时也是），不走下面的 stat 跳过，不按 index 的 blob 当作完整内容；`raw` 按第 3 步的读取上限计算。
+2. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时，工作区内容就是 index 里的 blob，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
+3. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。
+4. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给第 0–3 步处理过、工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每个文件都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
+5. **重命名**：删除与新增之间先按 OID 找精确重命名，再按相似度（不低于 50%，候选不超过 1000 对，即 `diff.renameLimit` 的默认值）找重命名。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
 
 其余规则：
 
@@ -528,7 +453,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 - `skip_worktree` 的条目（含从 sparse 目录展开的条目）不 stat、不读工作区，工作区一侧取 index 里的 OID：与基准相同时不是改动，不同时按已暂存的改动处理。`git add -N` 的条目按新增处理。
 - 路径的大小写与 Unicode 规范化按仓库的 `core.ignoreCase`、`core.precomposeUnicode`（gix 的文件系统能力）。
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
-- 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。超过保留上限的文件没有字节可用，明确标为 `NotRetained`：`overlay` 把它作为 `Omitted` 给出（带着同一个 `Content`），Analyze 标为部分内容未提供，指纹两边都用它的 `oid`，不落盘另存。
+- 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。超过保留上限的文件没有字节可用，明确标为 `NotRetained`，不落盘另存。
 
 `Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID），stat 没变时不重新读取和计算；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存。
 
@@ -540,29 +465,11 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 单文件 patch：统一格式、3 行上下文的字节数，或改动行数 | 1 MiB 或 20 000 行 | `Truncated { added, removed }` |
 | 整体：按路径顺序，全部改动文件（含二进制、只改模式、`TooLarge`、`NoDiff`）计入文件数，生成的 patch 计入字节数 | 5000 个文件、50 MB | 达到任一上限之后的文件为 `Listed`，`Totals` 记数量 |
 | 工作区单文件读取 | 64 MiB | `Content::Unhashed` |
-| 未跟踪文件枚举 | 20 000 个 | `Totals::untracked_capped = true`，指纹不完整 |
+| 未跟踪文件枚举 | 20 000 个 | `Totals::untracked_capped = true` |
 | 改动集保留的工作区内容 | 128 MiB | 之后的文件不保留内容，新一侧为 `Unavailable::NotRetained`（见下） |
 | 词级 diff 的单行长度 | 1000 字节 | 整行高亮 |
 
 二进制判断与 git 相同：属性 `binary` 或 `-diff`，或任一侧前 8000 字节里有 NUL。上限都在 `Limits` 里，调用方可以调整；默认值写进 `bench` 的预算表。
-
-### 指纹
-
-```rust
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct Fingerprint {
-    pub digest: [u8; 32],      // SHA-256
-    /// 选中的改动里有 `Unhashed`、`Unavailable`、`Partial`、改动了的子模块（任一侧是 `Gitlink`），或 `untracked_capped` 时为 false：
-    /// Analyze 的结果标为「部分内容未提供」。`complete` 本身也是摘要的输入，`from_written` 从清单里的同样信息得到同样的值。
-    pub complete: bool,
-}
-```
-
-- 输入：格式版本号、基准树 OID，以及选中的每一项的（路径、重命名的旧路径、状态、`untracked`、`Ownership`、新旧模式、两侧的内容标识），按 `files` 的顺序，每个字段带长度前缀。没选中的改动不进入指纹，别的会话的改动变化不会让这个审阅对象的结果过期。
-- 内容标识：`Blob` 用 OID；`Unhashed` 用大小、mtime 和 inode，不在每次刷新时读超大文件；`Filtered` 用它的 `RawIdentity`；`NotRetained` 用它的 `oid`；其余 `Unavailable` 用原因。
-- 工作区改动集和 `from_written` 得到的改动集用同一套规则：没写进快照的条目在 `WrittenEntry` 里带回原来的 `Content`，所以快照没变时两者的指纹相同，过滤器文件的原始字节变了时指纹随之改变。
-- 在截断之前、对全部改动文件计算，被截断和只列出的文件也计入；只改可执行位也会改变指纹。
-- 由 `ChangeSet` 已有的数据算出，不再读工作区。Analyze 用 `from_written` 得到的改动集的指纹。
 
 ### 缓存
 
@@ -580,9 +487,9 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 2. `review` 在后台任务里调用 `changes(Base::Head)` 或 `changes(Base::Commit(会话开始时的 HEAD))`，得到 `Arc<ChangeSet>`，加上归因后作为不可变快照交给 `review_view`（架构规则 4）。
 3. `fs_watch` 报告路径变化时，`review` 调用 `refresh(Paths)`；HEAD、index、忽略规则、属性或配置变化时调用 `refresh(Full)`。
 4. 视图滚动到某个文件时发出命令，后台任务调用 `texts` 和 `rows`，把展示行交给视图；视图不调用本 crate 的任何函数。
-5. Analyze：`review` 按归因给出审阅对象的 `Selection`，`agents` 用 `snapshot_entries` 和 `overlay(selection)` 写出快照（经 `platform`），再用 `from_written` 得到 patch 和指纹。
+5. Analyze 快照的数据流随 [#66](https://github.com/SoloJiang/lectern-app/issues/66) 设计。
 
-线程：本 crate 的函数在调用方的后台任务线程上运行，不建线程，不持有跨调用的锁。gix 的 `parallel` 关闭（ADR 0024），它的仓库句柄不是 `Send`，所以 `Repo`、`Worktree` 只保存位置、打开参数和本 crate 自己的数据（index 解析结果、stat 缓存），不持有 gix 句柄；每次调用在当前线程上取 gix 句柄：按（线程，公共目录）缓存在线程本地，同一个工作线程上的后续调用复用，空闲 30 秒后释放。每个句柄的 pack 与对象缓存合计 ≤ 4 MiB，`executor` 最多 6 个工作线程，合计 ≤ 24 MiB。非当前 worktree 只保留 `WorktreeInfo`，`Worktree` 句柄（index、stat 缓存）由调用方在离开后释放（[技术调研「性能要点」](tech-research.md#性能要点)）。
+线程：本 crate 的函数在调用方的后台任务线程上运行，不建线程，不持有跨调用的锁。gix 的 `parallel` 关闭（ADR 0024），它的仓库句柄不是 `Send`，所以 `Repo`、`Worktree` 只保存位置、打开参数和本 crate 自己的数据（index 解析结果、stat 缓存），不持有 gix 句柄。gix 句柄不在调用之间保留：每次顶层调用（`changes`、`refresh`、`texts`、`diff_trees`、引用与历史的查询等）在当前线程上打开一个，调用内部复用，返回时释放。worktree 级的调用按这个 worktree 的私有 git 目录（`WorktreeInfo::git_dir`）打开，仓库级的调用按公共目录打开，打开参数（权限、对象格式）固定在 `Repo` 里。所以空闲时内存里没有 gix 句柄和它的 pack 缓存。非当前 worktree 只保留 `WorktreeInfo`，`Worktree` 句柄（index、stat 缓存）由调用方在离开后释放（[技术调研「性能要点」](tech-research.md#性能要点)）。
 
 ## 性能
 
@@ -590,10 +497,11 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 
 | 预算 | 本 crate 的份额（M 系列 Mac，`cloudprint-miniapps` 量级：728 个跟踪文件、11 个 worktree） |
 |---|---|
+| 每次顶层调用 | 打开 gix 句柄 < 1 ms（读配置和引用，不读 pack），计入下面各项 |
 | 打开项目到项目主页可用 < 100 ms | `discover` + `worktrees` + `tracked` < 15 ms |
 | 打开一个会话的 Diff < 50 ms | 50 个改动文件的 `changes`（stat 跳过其余文件）< 15 ms；hunk 未命中时计算 < 20 ms，命中时 < 2 ms |
 | 切换 worktree / 分支 < 100 ms | 内容相同的文件命中同一份 hunk 缓存；`refresh(Full)` < 15 ms |
-| 空闲内存：打开 monorepo < 100 MB | gix 句柄的 pack 与对象缓存每个线程每个仓库 ≤ 4 MiB（合计 ≤ 24 MiB，空闲 30 秒释放），hunk LRU 16 MiB |
+| 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB |
 | 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数 |
 | 安装包 ≤ 80 MB | gix 约 3 MB（ADR 0024） |
 
@@ -602,6 +510,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 `bench` 增加的基准（[#7](https://github.com/SoloJiang/lectern-app/issues/7)），夹具由本 crate 的测试仓库构造器生成：
 
 - `git_open`：`discover` + `worktrees`（11 个 worktree）+ `tracked`。
+- `git_open_handle`：打开一次 gix 句柄的耗时（每次顶层调用都要付出）。
 - `git_changes_clean` / `git_changes_50`：没有改动、50 个文件改动时的 `changes`。
 - `git_refresh_one`：改动一个文件后的 `refresh(Paths)`。
 - `git_diff_50_cold` / `git_diff_50_warm`：50 个文件、平均 300 行的 hunk 计算，缓存未命中与命中。
@@ -637,8 +546,9 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 仓库与引用：`discover` 在子目录、linked worktree、git 目录、普通文件夹里的结果；`worktrees` 的锁定和 prunable；名为 `main` 的 linked worktree 与主 worktree 的 ID 不同，`Repo::worktree` 各自打开正确的那一个；SHA-256 仓库的 OID 是 64 位；reftable 仓库返回 `Unsupported`；`default_branch`、上游与推送目标的解析表；reflog 消息分类逐条覆盖，认不出的是 `Other`。
 - 树 diff：新增、删除、修改、模式变化、类型变化、精确与相似重命名、二进制、子模块；`--numstat` 与归档里 git 的输出一致。
 - 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`；未暂存的 `rm` 得到 `Deleted`；HEAD 删除、对方修改的冲突得到没有 `old` 的 `Conflicted`；只改 `.gitattributes`、文件 stat 不变时 `refresh(Full)` 按新规则重新计算 OID；没有改动的跟踪文件不会作为未跟踪文件出现；二进制和只改模式的文件也计入 5000 个文件的上限。
-- 截断：单文件、整体、保留内容三种上限的边界值；截断前后 `fingerprint` 不变。
-- 指纹：只改可执行位、只改符号链接目标、重命名都改变指纹；`from_written` 在内容相同时得到与工作区改动集相同的指纹，包括带 `Omitted` 条目（过滤器文件、超大文件）的快照；过滤器文件的原始字节改变后指纹不同；未跟踪文件超过枚举上限、或改动了子模块时，两边的 `complete` 都为 false 且摘要相同；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`。
+- 截断：单文件、整体、保留内容三种上限的边界值；`NotRetained` 的 `Detail` 是带增删行数的 `Truncated`。
+- 过滤器与目录：LFS 文件暂存了更新、stat 与 index 一致时仍是 `Filtered`；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`；未初始化的子模块不是改动。
+- 句柄：一次顶层调用返回后，当前线程上没有留下 gix 句柄（测试用计数钩子检查）。
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
 - 不执行外部程序：夹具仓库配置 `diff.external`、`diff.<名>.textconv`、`filter.<名>.clean` / `process`、`core.fsmonitor`，指向会写标记文件的脚本，PATH 最前面放一个记录调用的假 `git`（AGENTS.md「工作方式」）；跑完全部工作区和树 diff 场景后，标记文件不存在、假 `git` 没有被调用。
 - 展示行与词级差异：配对、折叠、hunk 相邻时合并上下文，用 insta 快照。
@@ -668,7 +578,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 
 ## 验收
 
-分五步实现，每步一个 PR，都写 `Refs #14`；#14 剩下的统一 / 双栏视图由 `review_view` 完成，最后完成的那个 PR 写 `Closes #14`。每一步都要 `just check`、`just test -p lectern-git`、`just deny` 通过。
+分四步实现，每步一个 PR，都写 `Refs #14`；#14 剩下的统一 / 双栏视图由 `review_view` 完成，最后完成的那个 PR 写 `Closes #14`。每一步都要 `just check`、`just test -p lectern-git`、`just deny` 通过。
 
 1. **仓库、worktree、引用与 index**：根 `Cargo.toml` 按 ADR 0024 加入 `gix`。
    - 前置：`platform` 的安全读取（Linux 与 macOS 实现）已合并。
@@ -678,9 +588,8 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 2. **树之间的改动集、hunk 与展示行**：
    - `diff_trees_*`、`rename_*`、`binary_*`、`truncate_*`、`rows_*`、`inline_*`、`hunk_cache_*` 测试通过，结构化输出有 insta 快照；`numstat_matches_git` 对全部归档夹具通过。
    - `git_diff_50_cold` / `git_diff_50_warm` 在预算内。
-3. **工作区比较与指纹**：
-   - `worktree_*`、`fingerprint_*`、`read_only_*`、`no_external_programs` 测试通过。
+3. **工作区比较**：
+   - `worktree_*`、`read_only_*`、`no_external_programs` 测试通过。
    - `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' crates/git/src` 没有结果：工作区只经 `SafeRoot` 读取。
    - `git_changes_clean`、`git_changes_50`、`git_refresh_one`、`git_changes_capped` 和内存基准在预算内。
-4. **Analyze 快照的内容**：`snapshot_entries_*`（坏名字和上限）、`overlay_*`、`from_written_*` 测试通过。与 `agents`、`platform` 的写出联调在它们的 PR 里验证。
-5. **改动来源接口**：`services` 的设计文档合并后，为本地仓库实现它的改动来源接口（取 diff、指纹、加载完整文件），按那份文档的验收条件测试。由哪个插件把它注册为服务按 #47 的结论处理，不在本 crate。
+4. **改动来源接口**：`services` 的设计文档合并后，为本地仓库实现它的改动来源接口（取 diff、加载完整文件；指纹随 #66），按那份文档的验收条件测试。由哪个插件把它注册为服务按 #47 的结论处理，不在本 crate。
