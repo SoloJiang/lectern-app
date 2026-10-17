@@ -24,4 +24,7 @@ just test -p lectern-fs-watch
 ```
 
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
+- 监听器的行为测试在 `src/tests/`，按设计文档「测试」一节分组（`filter_*`、`revision_*`、`reflog_*` 等），经公开接口和 `testing` 驱动：`testing::manual` 加 `Executor::manual()`，假时钟由 `Driver::advance` 推进；要让加载任务停在半路（过期的过滤器）时只处理队列、不运行 executor（`driver.shared().pump(true)`）。批次渲染成文本后用内联快照验收（`tests/support.rs` 的 `worktree_batches`、`repo_batches`、`dir_batches`）。
+- reflog 和配置清单的测试用 `tempfile` 的真实目录（`FakeBackend::arm` 对不存在的路径返回 `NotFound`）；不读本机真实的 git 配置或会话目录。
+- 静止测试用 kernel 的 `TestKernel` 取真实的守卫；`RecordingSink` 在 `take` 之前一直持有守卫。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。
