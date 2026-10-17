@@ -158,6 +158,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | Git 读取 | `gix`（gitoxide） | `git2`、调用 `git` CLI | 纯 Rust，无 libgit2 依赖；复杂写操作可回退 CLI |
 | Diff 算法 | `imara-diff` | `similar` | 速度快，gix 与 Helix 都在用；行内词级差异可用 `similar` 补 |
 | MR 数据 | `octocrab`（GitHub）/ GitLab REST | 调用 `gh` / `glab` CLI | 支持 GitHub 与 GitLab（含自部署版）；按 remote 的域名识别平台，自部署实例由用户配置域名与 API 地址；MVP 调 gh / glab CLI，复用已有登录态 |
+| 本地存储 | SQLite（`rusqlite`，静态链接自带的 SQLite，[ADR 0027](../adr/0027.md)） | 系统 `libsqlite3`、redb | 派生数据缓存与用量记录共用一种引擎；版本随依赖固定，Linux CI 与 macOS 一致 |
 | 文件监听 | `notify` + `ignore` | `watchman` | 跨平台；`ignore` 自动遵守 .gitignore |
 | Agent 协议 | [`agent-client-protocol`](https://agentclientprotocol.com) crate | 直接解析 JSONL | Zed、JetBrains 等都在用 ACP，Claude Code 与 Codex 都有适配器 |
 | 界面文案 | [Fluent](https://projectfluent.org)（`fluent-rs`） | `rust-i18n` | 支持复数、语序变化；en 与 zh-CN 的键一致由 CI 检查 |

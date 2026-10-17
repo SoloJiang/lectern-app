@@ -1,0 +1,6 @@
+---
+source: crates/git/src/rows/tests.rs
+expression: "inline(\"fn open(path: &Path) -> io::Result<File>\",\n\"pub fn open(path: &RepoPath) -> Result<File, GitError>\")"
+---
+-fn open(path: &[Path]) -> [io::]Result<File>
++[pub ]fn open(path: &[RepoPath]) -> Result<File[, GitError]>

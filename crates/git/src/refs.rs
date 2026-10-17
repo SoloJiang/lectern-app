@@ -358,7 +358,7 @@ impl Repo {
 
 /// A missing start commit is `ObjectMissing`, other failures keep their
 /// classification.
-fn missing_or(err: gix::Error, id: Oid) -> GitError {
+pub(crate) fn missing_or(err: gix::Error, id: Oid) -> GitError {
     if err.is_not_found() {
         GitError::ObjectMissing(id)
     } else {

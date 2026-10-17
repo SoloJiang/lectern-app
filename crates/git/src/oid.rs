@@ -106,6 +106,12 @@ impl Oid {
         }
     }
 
+    /// The empty tree's OID (`4b825dc…` for SHA-1): the base of a root
+    /// commit or an unborn branch. It needs no object in the database.
+    pub fn empty_tree(kind: HashKind) -> Oid {
+        Oid::from_gix(&gix::ObjectId::empty_tree(kind.to_gix()))
+    }
+
     /// Whether every byte is zero (git's "no object" marker in reflogs and
     /// index checksums).
     pub(crate) fn is_null(&self) -> bool {

@@ -1,38 +1,51 @@
 //! Repository reading with gix (docs/design/git.md, ADR 0024): repositories,
-//! worktrees, references, history and the index. Read-only; runs no
-//! external program; reads worktree files only through
-//! `lectern_platform::SafeRoot`.
+//! worktrees, references, history, the index, change sets between trees,
+//! hunks and display rows. Read-only; runs no external program; reads
+//! worktree files only through `lectern_platform::SafeRoot`.
 //!
 //! Every function blocks (object database, index, worktree) and belongs on a
-//! background task, never the UI thread. `Repo` and `Worktree` are
-//! `Send + Sync` and hold no gix handle: each top-level call opens one on
-//! the calling thread and drops it before returning. Functions taking
-//! `cancel` return `GitError::Cancelled` once it is set.
+//! background task, never the UI thread; `rows` and `inline_changes` are
+//! pure. `Repo`, `Worktree` and `ChangeSet` are `Send + Sync` and hold no
+//! gix handle: each top-level call opens one on the calling thread and
+//! drops it before returning. Functions taking `cancel` return
+//! `GitError::Cancelled` once it is set.
 
+mod attrs;
+mod changes;
 mod content;
 mod error;
 mod format;
 mod gitdir;
 mod handle;
+mod hunks;
 mod oid;
 mod path;
 mod reflog;
 mod refs;
+mod rename;
 mod repo;
+mod rows;
 mod tracked;
 mod tree;
+mod tree_diff;
 mod worktree;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
-pub use content::{RawIdentity, Unavailable};
+pub use changes::{
+    Change, ChangeSet, Detail, FileTexts, Limits, Side, SideText, Staged, Status, Target, Text,
+    Totals,
+};
+pub use content::{Content, RawIdentity, Unavailable};
 pub use error::{GitError, UnsupportedRepo};
+pub use hunks::{FileDiff, Hunk};
 pub use oid::{HashKind, Oid};
 pub use path::{Mode, RefName, RepoPath};
 pub use reflog::{ReflogAction, ReflogEntry, ReflogParseError, parse_reflog_line};
 pub use refs::{BranchInfo, CommitInfo, GitTime, RemoteBranch, RemoteInfo, Signature, StashInfo};
 pub use repo::{Discovered, HeadState, Location, Repo, WorktreeId, WorktreeInfo};
+pub use rows::{INLINE_MAX_LINE_BYTES, InlineChanges, Row, inline_changes, rows};
 pub use tracked::{EntryLimits, TrackedEntry, TrackedPaths};
 pub use worktree::{Worktree, WorktreeFile};
 
@@ -45,6 +58,8 @@ mod send_sync {
         assert::<crate::Repo>();
         assert::<crate::Worktree>();
         assert::<crate::TrackedPaths>();
+        assert::<crate::ChangeSet>();
+        assert::<crate::FileTexts>();
         assert::<crate::GitError>();
     }
 }

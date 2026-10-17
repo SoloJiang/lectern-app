@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Fast checks that do not need macOS: formatting, architecture rules,
+  # licenses, and clippy + tests for every crate that builds without GPUI.
+  checks:
+    name: Checks (Linux, GPUI-free crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-deny,cargo-nextest
+      - name: Check (fmt, architecture rules, clippy)
+        run: just check
+      - name: Licenses, sources and advisories
+        run: just deny
+      - name: Tests
+        run: just test --profile ci
+      - name: Doctests
+        run: just doctest
+
+  # Full workspace, including GPUI, on Apple Silicon.
+  macos:
+    name: Build and test (macOS arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Metal toolchain
+        # Run metal: on Xcode 26 the launcher can exist without the toolchain.
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-nextest
+      - name: Check (fmt, architecture rules, clippy)
+        run: just check
+      - name: Tests
+        run: just test --profile ci
+      - name: Doctests
+        run: just doctest
+      - name: Build app
+        run: cargo build --locked -p lectern-app
+      - name: Performance budget benchmarks
+        run: just bench
