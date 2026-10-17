@@ -349,3 +349,36 @@ fn report_merge_passes_on_target_errors() {
     assert_eq!(merged.exit, 2);
     assert!(merged.text.contains("m/x"));
 }
+
+#[test]
+fn report_merge_annotates_failed_budgets() {
+    let report = json!({
+        "results": [
+            {"id": "t/a", "status": "ok", "measured": "median 1 µs", "budget": "< 1 ms"},
+            {"id": "t/b", "status": "over", "measured": "median 2 ms", "budget": "median < 1 ms"},
+            {"id": "t/c", "status": "error", "measured": "", "budget": "< 1 ms", "reason": "panicked: 100%\nboom"},
+        ],
+        "errors": ["基准 fake/extra 不对应本目标的任何预算"],
+    });
+    assert_eq!(
+        crate::merge::annotations(&report),
+        [
+            "::error title=t/b::over: median 2 ms (budget: median < 1 ms)",
+            "::error title=t/c::error:  (budget: < 1 ms); panicked: 100%25%0Aboom",
+            "::error title=bench::基准 fake/extra 不对应本目标的任何预算",
+        ]
+    );
+}
+
+#[test]
+fn report_merge_annotations_stay_within_ten() {
+    let results: Vec<Json> = (0..12)
+        .map(|i| json!({"id": format!("t/{i}"), "status": "over", "measured": "m", "budget": "b"}))
+        .collect();
+    let lines = crate::merge::annotations(&json!({"results": results, "errors": []}));
+    assert_eq!(lines.len(), 10);
+    assert_eq!(
+        lines[9],
+        "::error title=more failed budgets::t/9, t/10, t/11"
+    );
+}

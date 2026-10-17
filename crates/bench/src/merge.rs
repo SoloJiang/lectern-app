@@ -55,6 +55,11 @@ pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
         std::env::var("GITHUB_SHA").ok(),
     );
     print!("{}", merged.text);
+    if std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true") {
+        for line in annotations(&merged.report) {
+            println!("{line}");
+        }
+    }
     let text = serde_json::to_string_pretty(&merged.report).unwrap_or_default();
     if let Err(error) = std::fs::write(dir.join("report.json"), text + "\n") {
         eprintln!("lectern-bench-report: could not write report.json: {error}");
@@ -71,6 +76,64 @@ pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
         }
     }
     ExitCode::from(merged.exit)
+}
+
+/// GitHub keeps at most 10 error annotations per step.
+const MAX_ANNOTATIONS: usize = 10;
+
+/// `::error` workflow commands for every result over budget or in error and
+/// every report-level error, so the check run's annotations say which budget
+/// failed without the job log.
+pub(crate) fn annotations(report: &Json) -> Vec<String> {
+    let escape = |text: &str| {
+        text.replace('%', "%25")
+            .replace('\r', "%0D")
+            .replace('\n', "%0A")
+    };
+    let mut failed: Vec<(String, String)> = Vec::new();
+    for result in report["results"].as_array().into_iter().flatten() {
+        let status = result["status"].as_str().unwrap_or_default();
+        if status != "over" && status != "error" {
+            continue;
+        }
+        let field = |key: &str| result[key].as_str().unwrap_or_default().to_owned();
+        let mut body = format!(
+            "{status}: {} (budget: {})",
+            field("measured"),
+            field("budget")
+        );
+        let reason = field("reason");
+        if !reason.is_empty() {
+            body.push_str(&format!("; {reason}"));
+        }
+        failed.push((field("id"), body));
+    }
+    for error in report["errors"].as_array().into_iter().flatten() {
+        failed.push((
+            "bench".into(),
+            error.as_str().unwrap_or_default().to_owned(),
+        ));
+    }
+    let shown = if failed.len() <= MAX_ANNOTATIONS {
+        failed.len()
+    } else {
+        MAX_ANNOTATIONS - 1
+    };
+    let mut lines: Vec<String> = failed[..shown]
+        .iter()
+        .map(|(title, body)| {
+            let title = escape(title).replace(':', "%3A").replace(',', "%2C");
+            format!("::error title={title}::{}", escape(body))
+        })
+        .collect();
+    if shown < failed.len() {
+        let rest: Vec<&str> = failed[shown..].iter().map(|(id, _)| id.as_str()).collect();
+        lines.push(format!(
+            "::error title=more failed budgets::{}",
+            escape(&rest.join(", "))
+        ));
+    }
+    lines
 }
 
 pub(crate) struct Merged {
