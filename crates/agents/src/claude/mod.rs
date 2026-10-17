@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use lectern_services::session::{
     Batch, Content, ContentRef, Cursor, Format, ResumeCommand, SessionError, SessionKey,
-    SessionSummary, SourceId, Timestamp, TurnIndex,
+    SessionSummary, SourceId, TurnIndex,
 };
 
 use crate::codec;
@@ -28,6 +28,9 @@ mod tools;
 pub(crate) mod tests;
 
 use parse::{Parse, State};
+
+pub(crate) use crate::read::io_error;
+pub use crate::read::{Activity, Parsed};
 
 /// 内置 Claude Code 来源的 ID（插件 ID）。
 pub const SOURCE_ID: &str = "session-claude-code";
@@ -80,20 +83,6 @@ impl SessionFile {
             ),
         }
     }
-}
-
-/// 一次 `read` 的结果：交给消费方的 `Batch`，以及要并进 `Diagnostics` 的计数。
-#[derive(Clone, PartialEq, Debug)]
-pub struct Parsed {
-    pub batch: Batch,
-    pub stats: ParseStats,
-}
-
-/// 从解析器状态里取出的末尾字段（「数据流与线程」第 2 步：已经在增量读取的文件不再读末尾）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Activity {
-    pub last_activity: Option<Timestamp>,
-    pub open_turn: bool,
 }
 
 /// Claude Code 适配器。只持有来源 ID，没有可变状态，可以在多个线程上同时使用。
@@ -377,12 +366,4 @@ impl ClaudeCode {
 
 fn open(path: &Path) -> Result<File, SessionError> {
     File::open(path).map_err(io_error)
-}
-
-pub(crate) fn io_error(e: io::Error) -> SessionError {
-    if e.kind() == io::ErrorKind::NotFound {
-        SessionError::NotFound
-    } else {
-        SessionError::Io(e.to_string().into())
-    }
 }

@@ -1,0 +1,20 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: render(&parsed.batch.records)
+---
+925.0 Context { at: Timestamp(1791190802074), cwd: "/Users/dev/fixture/repo", logged_branch: Some("feature/fixture"), model: Some("fixture-model-x") }
+925.1 TurnStarted { turn: TurnId("turn-p1-0001"), at: Timestamp(1791190802074) }
+1678.0 ToolStarted(ToolStarted { call: ToolCallId("call_p1_0001"), turn: Some(TurnId("turn-p1-0001")), at: Timestamp(1791190805185), name: "exec_command", kind: Execute { command: "rg placeholder", workdir: "/Users/dev/fixture/repo", exec_session: None, workdir_exact: true } })
+1919.0 ToolFinished(ToolFinished { call: ToolCallId("call_p1_0001"), at: Timestamp(1791190806222), status: Failed, exec_session: None })
+2183.0 ToolStarted(ToolStarted { call: ToolCallId("call_p1_0002"), turn: Some(TurnId("turn-p1-0001")), at: Timestamp(1791190807259), name: "apply_patch", kind: Edit { paths: ["/Users/dev/fixture/repo/src/main.rs"] } })
+2899.0 ToolFinished(ToolFinished { call: ToolCallId("call_p1_0002"), at: Timestamp(1791190809333), status: Completed, exec_session: None })
+3464.0 Usage(UsageRecord { at: Timestamp(1791190811407), turn: Some(TurnId("turn-p1-0001")), model: Some("fixture-model-x"), tokens: OpenAi { input: 1200, cached_input: 600, cache_write: 50, output: 90, reasoning_output: 30 }, key: CodexResponse { thread_id: "bbbbbbbb-0000-4000-8000-000000000001", response_id: "resp_p1_0001" }, advisor: None, superseded: false, sidechain: false, origin: SessionLog })
+4231.0 Usage(UsageRecord { at: Timestamp(1791190812444), turn: Some(TurnId("turn-p1-0001")), model: Some("fixture-model-x"), tokens: OpenAi { input: 1200, cached_input: 600, cache_write: 50, output: 90, reasoning_output: 30 }, key: CodexTokenCount { thread_id: "bbbbbbbb-0000-4000-8000-000000000001", total: OpenAi { input: 1200, cached_input: 600, cache_write: 50, output: 90, reasoning_output: 30 } }, advisor: None, superseded: true, sidechain: false, origin: SessionLog })
+4231.1 RateLimits(RateLimitSample { at: Timestamp(1791190812444), limit_id: Some("codex"), plan_type: Some("plus"), primary: Some(RateWindow { used_percent: 25.0, window_minutes: Some(300), resets_at: Some(Timestamp(1791370800000)) }), secondary: Some(RateWindow { used_percent: 61.5, window_minutes: Some(10080), resets_at: Some(Timestamp(1791802800000)) }) })
+5532.0 TurnEnded { turn: TurnId("turn-p1-0001"), at: Timestamp(1791190815555), aborted: false }
+6021.0 TurnStarted { turn: TurnId("turn-p1-0002"), at: Timestamp(1791190817629) }
+6552.0 ToolStarted(ToolStarted { call: ToolCallId("call_p1_0003"), turn: Some(TurnId("turn-p1-0002")), at: Timestamp(1791190819703), name: "spawn_agent", kind: SpawnAgent })
+6794.0 ToolFinished(ToolFinished { call: ToolCallId("call_p1_0003"), at: Timestamp(1791190820740), status: Completed, exec_session: None })
+7005.0 Usage(UsageRecord { at: Timestamp(1791190821777), turn: Some(TurnId("turn-p1-0002")), model: Some("fixture-model-x"), tokens: OpenAi { input: 400, cached_input: 300, cache_write: 0, output: 40, reasoning_output: 10 }, key: CodexResponse { thread_id: "bbbbbbbb-0000-4000-8000-000000000001", response_id: "resp_p1_0002" }, advisor: None, superseded: false, sidechain: false, origin: SessionLog })
+7767.0 Usage(UsageRecord { at: Timestamp(1791190822814), turn: Some(TurnId("turn-p1-0002")), model: Some("fixture-model-x"), tokens: OpenAi { input: 400, cached_input: 300, cache_write: 0, output: 40, reasoning_output: 10 }, key: CodexTokenCount { thread_id: "bbbbbbbb-0000-4000-8000-000000000001", total: OpenAi { input: 1600, cached_input: 900, cache_write: 50, output: 130, reasoning_output: 40 } }, advisor: None, superseded: true, sidechain: false, origin: SessionLog })
+8260.0 TurnEnded { turn: TurnId("turn-p1-0002"), at: Timestamp(1791190823851), aborted: true }

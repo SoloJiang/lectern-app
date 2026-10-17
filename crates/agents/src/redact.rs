@@ -36,11 +36,17 @@ const KEEP: &[&str] = &[
     "level",
     "status",
     "media_type",
+    // Codex：模式、版本、中止原因、额度的标识。
+    "history_mode",
+    "cli_version",
+    "originator",
+    "plan_type",
+    "limit_id",
 ];
 
 /// 值是任意 JSON 的键（工具输入、工具结果）：里面的字符串一律不按 `KEEP` 保留，`name`、`type` 这类键也可能装着用户内容。
 /// `tool_result` 块的 `content` 同样按任意内容处理。ID 与路径仍按各自的规则替换。
-const PAYLOADS: &[&str] = &["input", "toolUseResult"];
+const PAYLOADS: &[&str] = &["input", "toolUseResult", "arguments"];
 
 /// 值是 ID 的键。
 const IDS: &[&str] = &[
@@ -59,6 +65,15 @@ const IDS: &[&str] = &[
     "sourceToolUseID",
     "requestId",
     "promptId",
+    // Codex。
+    "call_id",
+    "turn_id",
+    "root_turn_id",
+    "thread_id",
+    "session_id",
+    "response_id",
+    "forked_from_id",
+    "parent_thread_id",
 ];
 
 /// 值是路径（或路径数组）的键。
@@ -70,10 +85,14 @@ const PATHS: &[&str] = &[
     "path",
     "worktreePath",
     "filenames",
+    // Codex。
+    "workdir",
+    "working_directory",
+    "move_path",
 ];
 
 /// 值是分支名的键：按 `/` 分段，像路径的每一级一样替换。
-const BRANCHES: &[&str] = &["gitBranch"];
+const BRANCHES: &[&str] = &["gitBranch", "branch"];
 
 /// 路径里保留原样的目录名。
 const STRUCTURAL: &[&str] = &[
@@ -104,6 +123,16 @@ const MARKERS: &[&str] = &[
     "Error: ",
 ];
 
+/// Codex 工具输出开头的元数据行：整行保留（退出码和交互式 shell 会话 ID 决定结果状态和会话关联）。
+const OUTPUT_HEADERS: &[&str] = &[
+    "Exit code: ",
+    "Process exited with code ",
+    "Process running with session ID ",
+];
+
+/// 结构上保留工具名的条目类型。
+const TOOL_CALLS: &[&str] = &["tool_use", "function_call", "custom_tool_call"];
+
 const FIXTURE_ROOT: &str = "/Users/dev/fixture";
 
 #[derive(Default)]
@@ -133,8 +162,38 @@ impl Redactor {
                     let inner = opaque
                         || PAYLOADS.contains(&k.as_str())
                         || (k == "content" && kind.as_deref() == Some("tool_result"));
-                    // 工具名只在 `tool_use` 块本身上保留。
-                    if !opaque && k == "name" && kind.as_deref() == Some("tool_use") {
+                    // 工具名只在工具调用（`tool_use` 块、Codex 的 `function_call` / `custom_tool_call`）本身上保留。
+                    if !opaque
+                        && k == "name"
+                        && kind.as_deref().is_some_and(|k| TOOL_CALLS.contains(&k))
+                    {
+                        continue;
+                    }
+                    // Codex 的 `arguments` 是装着 JSON 的字符串：按任意内容脱敏它里面的值，键保留。
+                    if k == "arguments"
+                        && let Value::String(text) = v
+                        && let Ok(mut inner) = serde_json::from_str::<Value>(text)
+                    {
+                        self.value(None, &mut inner, true);
+                        *text = serde_json::to_string(&inner).expect("a JSON value serializes");
+                        continue;
+                    }
+                    // Codex 的工具输出：任意内容，开头的元数据行保留。
+                    if !opaque && k == "output" {
+                        self.output(v);
+                        continue;
+                    }
+                    // Codex 的改动：键是路径。
+                    if !opaque && k == "changes" && v.is_object() {
+                        let Value::Object(changes) = std::mem::take(v) else {
+                            unreachable!("checked above")
+                        };
+                        let mut out = serde_json::Map::new();
+                        for (path, mut change) in changes {
+                            self.value(None, &mut change, false);
+                            out.insert(self.path(&path), change);
+                        }
+                        *v = Value::Object(out);
                         continue;
                     }
                     self.value(Some(k), v, inner);
@@ -153,6 +212,26 @@ impl Redactor {
                 }
             }
             Value::String(s) => *s = self.string(key, s, opaque),
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+
+    /// 工具输出（字符串、内容项数组或 `{content, success}`）：键、数字和布尔保留，字符串按 [`output_text`] 换掉；
+    /// 字符串本身是 JSON（旧版本 shell 的 `{"output": …, "metadata": {"exit_code": …}}`）时按同样的规则处理里面的值。
+    fn output(&mut self, v: &mut Value) {
+        match v {
+            Value::String(s) => {
+                if let Ok(mut inner @ (Value::Object(_) | Value::Array(_))) =
+                    serde_json::from_str(s)
+                {
+                    self.output(&mut inner);
+                    *s = serde_json::to_string(&inner).expect("a JSON value serializes");
+                } else {
+                    *s = output_text(s);
+                }
+            }
+            Value::Array(items) => items.iter_mut().for_each(|i| self.output(i)),
+            Value::Object(map) => map.values_mut().for_each(|i| self.output(i)),
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
         }
     }
@@ -274,6 +353,26 @@ pub(crate) fn text(s: &str) -> String {
         rest.chars()
             .map(|c| if c.is_whitespace() { c } else { 'x' }),
     );
+    out
+}
+
+/// Codex 工具输出：`Output:` 之前的元数据行里，退出码和 shell 会话 ID 整行保留，其余按 [`text`] 换掉。
+pub(crate) fn output_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut header = true;
+    for (i, line) in s.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if header && (line == "Output:" || OUTPUT_HEADERS.iter().any(|h| line.starts_with(h))) {
+            out.push_str(line);
+        } else {
+            out.push_str(&text(line));
+        }
+        if line == "Output:" {
+            header = false;
+        }
+    }
     out
 }
 
@@ -446,6 +545,95 @@ mod tests {
                 "{name}"
             );
             assert_eq!(actual.stats, expected.stats, "{name}");
+        }
+    }
+
+    #[test]
+    fn redact_codex_keeps_ids_tool_names_and_output_headers() {
+        let mut r = Redactor::default();
+        let call = r#"{"timestamp":"2026-10-01T09:00:00.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"cat secret.txt\",\"workdir\":\"/Users/alice/work/app\",\"name\":\"Acme\"}","call_id":"call_AbC123"}}"#;
+        let out: Value = serde_json::from_str(&r.line(call)).unwrap();
+        let payload = &out["payload"];
+        assert_eq!(payload["name"], "exec_command");
+        assert_eq!(payload["call_id"], r.id("call_AbC123"));
+        let args: Value = serde_json::from_str(payload["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["cmd"], "xxx xxxxxxxxxx");
+        assert!(
+            args["workdir"]
+                .as_str()
+                .unwrap()
+                .starts_with("/Users/dev/fixture/")
+        );
+        assert_ne!(args["name"], "Acme", "names inside arguments are content");
+
+        let output = r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"call_AbC123","output":"Chunk ID: c1\nWall time: 0.1 seconds\nProcess exited with code 2\nOutput:\nExit code: 0 secret"}}"#;
+        let out: Value = serde_json::from_str(&r.line(output)).unwrap();
+        assert_eq!(out["payload"]["call_id"], r.id("call_AbC123"));
+        assert_eq!(
+            out["payload"]["output"],
+            "xxxxx xxx xx\nxxxx xxxxx xxx xxxxxxx\nProcess exited with code 2\nOutput:\nxxxx xxxxx x xxxxxx"
+        );
+        // 旧版本的 JSON 输出：数字保留。
+        let old = r#"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"{\"output\":\"secret\",\"metadata\":{\"exit_code\":101}}"}}"#;
+        let out: Value = serde_json::from_str(&r.line(old)).unwrap();
+        let inner: Value =
+            serde_json::from_str(out["payload"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(inner["metadata"]["exit_code"], 101);
+        assert_eq!(inner["output"], "xxxxxx");
+
+        let patch = r#"{"type":"event_msg","payload":{"type":"patch_apply_end","call_id":"c","changes":{"/Users/alice/work/app/src/a.rs":{"type":"update","unified_diff":"-secret\n+other\n","move_path":"/Users/alice/work/app/src/b.rs"}},"status":"completed"}}"#;
+        let out: Value = serde_json::from_str(&r.line(patch)).unwrap();
+        let changes = out["payload"]["changes"].as_object().unwrap();
+        let (path, change) = changes.iter().next().unwrap();
+        assert!(path.starts_with("/Users/dev/fixture/") && path.ends_with(".rs"));
+        assert_eq!(change["type"], "update");
+        assert_eq!(out["payload"]["status"], "completed");
+        assert!(
+            change["move_path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/Users/dev/fixture/")
+        );
+        assert_ne!(change["unified_diff"], "-secret\n+other\n");
+    }
+
+    #[test]
+    fn redact_codex_fixtures_parse_to_the_same_shape() {
+        use crate::codex::tests::{MapLineage, fixture_files, fixtures_dir, rollout_name};
+        use crate::codex::{Codex, SOURCE_ID as CODEX};
+        let base = || Codex::without_decoded_copies(SourceId(CODEX.into()));
+        let originals = MapLineage::default();
+        let redacted = MapLineage::default();
+        let dir = TempDir::new();
+        let mut r = Redactor::default();
+        let mut pairs = Vec::new();
+        for (name, rel) in fixture_files() {
+            let original = base().session_file(&fixtures_dir().join(rel)).unwrap();
+            originals.insert(&original.key.id, original.clone());
+            let text = std::fs::read_to_string(&original.path).unwrap();
+            let out: String = text.lines().map(|l| r.line(l) + "\n").collect();
+            let thread = r.id(&original.key.id);
+            let path = dir.path().join(rollout_name(&thread, false));
+            std::fs::write(&path, out).unwrap();
+            let file = base().session_file(&path).unwrap();
+            redacted.insert(&thread, file.clone());
+            pairs.push((name, original, file));
+        }
+        let originals = base().with_lineage(std::sync::Arc::new(originals));
+        let redacted = base().with_lineage(std::sync::Arc::new(redacted));
+        for (name, original, file) in pairs {
+            let (expected, _) = originals.parse_all(&original).unwrap();
+            let (actual, _) = redacted.parse_all(&file).unwrap();
+            assert_eq!(
+                shape(&actual.batch.records),
+                shape(&expected.batch.records),
+                "{name}"
+            );
+            assert_eq!(actual.stats.bad_lines, expected.stats.bad_lines, "{name}");
+            assert_eq!(
+                actual.stats.unknown_types, expected.stats.unknown_types,
+                "{name}"
+            );
         }
     }
 

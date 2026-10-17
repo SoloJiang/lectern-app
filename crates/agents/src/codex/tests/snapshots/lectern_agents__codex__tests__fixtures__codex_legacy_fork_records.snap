@@ -1,0 +1,16 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: render(&parsed.batch.records)
+---
+943.0 inherited Context { at: Timestamp(1791018002074), cwd: "/Users/dev/fixture/repo", logged_branch: Some("main"), model: Some("fixture-model-x") }
+943.1 inherited TurnStarted { turn: TurnId("turn-l1-0001"), at: Timestamp(1791018002074) }
+1290.0 inherited ToolStarted(ToolStarted { call: ToolCallId("call_l1_0001"), turn: Some(TurnId("turn-l1-0001")), at: Timestamp(1791018004148), name: "exec_command", kind: Execute { command: "ls -la", workdir: "/Users/dev/fixture/repo/src", exec_session: None, workdir_exact: true } })
+1491.0 inherited ToolFinished(ToolFinished { call: ToolCallId("call_l1_0001"), at: Timestamp(1791018005185), status: Completed, exec_session: None })
+1731.0 inherited Usage(UsageRecord { at: Timestamp(1791018006222), turn: Some(TurnId("turn-l1-0001")), model: Some("fixture-model-x"), tokens: OpenAi { input: 1000, cached_input: 200, cache_write: 0, output: 100, reasoning_output: 40 }, key: CodexTokenCount { thread_id: "aaaaaaaa-0000-4000-8000-000000000002", total: OpenAi { input: 1000, cached_input: 200, cache_write: 0, output: 100, reasoning_output: 40 } }, advisor: None, superseded: false, sidechain: false, origin: SessionLog })
+2213.0 inherited TurnEnded { turn: TurnId("turn-l1-0001"), at: Timestamp(1791018007259), aborted: false }
+2662.0 Context { at: Timestamp(1791018009333), cwd: "/Users/dev/fixture/repo", logged_branch: Some("main"), model: Some("fixture-model-x") }
+2662.1 TurnStarted { turn: TurnId("turn-l2-0001"), at: Timestamp(1791018009333) }
+2983.0 ToolStarted(ToolStarted { call: ToolCallId("call_l2_0001"), turn: Some(TurnId("turn-l2-0001")), at: Timestamp(1791018011407), name: "shell_command", kind: Execute { command: "git switch -c fork-branch", workdir: "/Users/dev/fixture/repo", exec_session: None, workdir_exact: true } })
+3228.0 ToolFinished(ToolFinished { call: ToolCallId("call_l2_0001"), at: Timestamp(1791018012444), status: Completed, exec_session: None })
+3418.0 Usage(UsageRecord { at: Timestamp(1791018013481), turn: Some(TurnId("turn-l2-0001")), model: Some("fixture-model-x"), tokens: OpenAi { input: 300, cached_input: 0, cache_write: 0, output: 30, reasoning_output: 0 }, key: CodexTokenCount { thread_id: "aaaaaaaa-0000-4000-8000-000000000002", total: OpenAi { input: 1300, cached_input: 200, cache_write: 0, output: 130, reasoning_output: 40 } }, advisor: None, superseded: false, sidechain: false, origin: SessionLog })
+3894.0 TurnEnded { turn: TurnId("turn-l2-0001"), at: Timestamp(1791018014518), aborted: false }

@@ -1,0 +1,67 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "turn-l2-0001",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1791018009333,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1791018014518,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 2811,
+                len: 171,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt in the fork: try another approach.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l2_0001",
+                    ),
+                    name: "shell_command",
+                    kind: Execute {
+                        command: "git switch -c fork-branch",
+                        workdir: "/Users/dev/fixture/repo",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1791018011407,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1791018012444,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 2983,
+                        len: 244,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 3228,
+                            len: 189,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+        ],
+    },
+]

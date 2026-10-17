@@ -20,6 +20,8 @@ serde.workspace = true
 # `raw_value`: tool inputs are kept as borrowed raw JSON and only parsed for
 # the tools the adapter classifies, and `load` returns them verbatim.
 serde_json = { workspace = true, features = ["raw_value"] }
+# Codex `.jsonl.zst` sessions (docs/design/agents.md「压缩会话的随机读取」).
+ruzstd.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

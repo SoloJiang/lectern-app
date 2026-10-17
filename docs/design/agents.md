@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：实现中。第 1–2 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)），第 3–4 步尚未实现（见「验收」）。
+状态：实现中。第 1–3 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），第 4 步尚未实现（见「验收」）。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -217,6 +217,43 @@ pub mod claude {
     }
 }
 
+pub mod codex {
+    pub const SOURCE_ID: &str = "session-codex";
+    pub const ADAPTER_VERSION: u32;
+
+    /// `rollout-<时间>-<线程 ID>[_<rollout ID>].jsonl` 或 `.jsonl.zst`；会话 ID 是文件名里的线程 ID。
+    pub struct SessionFile { pub key: SessionKey, pub path: Arc<Path>, pub compressed: bool, pub archived: bool }
+    /// 按线程 ID 找来源会话的文件（分叉的 `forked_from_id`、子 agent 的父线程）；第 4 步按 `SessionList` 实现，不在本机时为 None。
+    pub trait Lineage: Send + Sync { fn locate(&self, thread_id: &str) -> Option<SessionFile>; }
+    pub use crate::{Activity, Parsed}; // 与 `claude` 共用
+
+    pub struct Codex { /* SourceId、解压副本、Lineage */ }
+    impl Codex {
+        /// `decoded_dir` 即 `AgentsDeps::decoded_dir`，副本合计上限 1 GB。
+        pub fn new(source: SourceId, decoded_dir: PathBuf) -> Self;
+        /// 不建副本，压缩会话每次从头流式解码（`testing::parse_file`、bench）。
+        pub fn without_decoded_copies(source: SourceId) -> Self;
+        pub fn with_decoded_budget(self, bytes: u64) -> Self;
+        pub fn with_lineage(self, lineage: Arc<dyn Lineage>) -> Self;
+        pub fn source(&self) -> &SourceId;
+        pub fn session_file(&self, path: &Path) -> Option<SessionFile>;
+        /// 以下与 `ClaudeCode` 的同名方法相同，都阻塞。
+        pub fn read(&self, file: &SessionFile, from: &Cursor, max_bytes: u64) -> Result<Parsed, SessionError>;
+        pub fn turns(&self, file: &SessionFile) -> Result<TurnIndex, SessionError>;
+        pub fn turns_after(&self, file: &SessionFile, prev: Option<&TurnIndex>) -> Result<TurnIndex, SessionError>;
+        pub fn parse_all(&self, file: &SessionFile) -> Result<(Parsed, TurnIndex), SessionError>;
+        pub fn load(&self, file: &SessionFile, at: &ContentRef) -> Result<Content, SessionError>;
+        /// `.jsonl.zst` 只流式解压开头，`tail_pending` 为 true。
+        pub fn summarize(&self, file: &SessionFile) -> Result<(SessionSummary, ParseStats), SessionError>;
+        /// 补齐末尾字段：整份流式解码一次，不建副本（`SessionSource::complete`）。
+        pub fn complete(&self, file: &SessionFile) -> Result<(SessionSummary, ParseStats), SessionError>;
+        /// 压缩文件消失时删掉它的副本（第 4 步的发现调用）。
+        pub fn remove_decoded(&self, key: &SessionKey);
+        pub fn resume(&self, summary: &SessionSummary) -> Option<ResumeCommand>;
+        pub fn activity(&self, cursor: &Cursor) -> Option<Activity>;
+    }
+}
+
 /// 被跳过的行与归入 `ToolKind::Other` 的工具名。`unknown_tools` 只进日志（`Diagnostics` 没有这一项）。
 pub struct ParseStats {
     pub unknown_types: Vec<(Arc<str>, u32)>, // 最多 32 种
@@ -226,7 +263,7 @@ pub struct ParseStats {
 }
 ```
 
-`ContentRef::part` 在 Claude Code 里是 `message.content` 内容块的下标，`u16::MAX` 指整条消息的文本（字符串内容，或全部 `text` 块用换行拼接）：prompt 与 `Injected` 用后者，`AgentText` 和工具调用的输入、结果用前者。
+`ContentRef::part` 在 Claude Code 里是 `message.content` 内容块的下标，`u16::MAX` 指整条消息的文本（字符串内容，或全部 `text` 块用换行拼接）：prompt 与 `Injected` 用后者，`AgentText` 和工具调用的输入、结果用前者。Codex 一行只有一个条目，`part` 说的是取这一行的哪一部分：`u16::MAX` 是文本（prompt、agent 说明、`compacted` 的摘要），0 是工具调用的输入（`arguments`、`input`、`local_shell_call.action`），1 是工具输出，2 是改动（`patch_apply_end.changes`、`FileChange.changes`）。
 
 ## 数据结构
 
@@ -457,12 +494,12 @@ pub enum ToolStatus { Completed, Failed, Denied, Interrupted }
 | | Claude Code（`tool_use.name`） | Codex |
 |---|---|---|
 | `Edit` | `Write`、`Edit`、`MultiEdit`、`NotebookEdit`（路径取 `file_path` / `notebook_path`） | `apply_patch`（`custom_tool_call` 或 `function_call`；路径取补丁里的 `*** Add File:`、`*** Update File:`、`*** Delete File:`、`*** Move to:`） |
-| `Execute` | `Bash`（`workdir` 为该记录的 `cwd`） | `function_call` 的 `shell`（`command` 数组；形如 `["bash", "-lc", 脚本]` 时取脚本）、`exec_command`（`cmd`、`workdir`）、`write_stdin`（写入的字符）、`local_shell_call` |
+| `Execute` | `Bash`（`workdir` 为该记录的 `cwd`） | `function_call` 的 `shell`（`command` 数组；形如 `["bash", "-lc", 脚本]` 时取脚本，其余按 shell 的写法加引号拼接）、`shell_command`（`command` 字符串）、`exec_command`（`cmd`、`workdir`）、`write_stdin`（写入的字符）、`local_shell_call`（`action.command`、`action.working_directory`） |
 | `Read` | `Read`、`NotebookRead` | `view_image`（读文件靠 shell，按 `Execute` 交出） |
 | `Search` | `Grep`、`Glob`（`path`）、`LS` | 无（同上） |
-| `SpawnAgent` | `Task`、`Agent` | 派出子 agent 的工具（`spawn_agent` 一类，按 fixtures 补全） |
+| `SpawnAgent` | `Task`、`Agent` | `spawn_agent` |
 
-结果状态：Claude Code 的 `tool_result.is_error` 为 true 是 `Failed`，`toolUseResult.interrupted` 为 true 是 `Interrupted`，权限被拒是 `Denied`；Codex 的结果按退出码判断：`function_call_output` 里有退出码（`exec_command` / `shell` 的输出元数据，或输出文本开头的 `Exit code: N`）时，非 0 为 `Failed`；没有退出码时 `output.success == false` 为 `Failed`（`exec_command` 失败时 `success` 仍可能为 true，不能只看它）；`local_shell_call` 没有对应的 output 记录，结束事件取它自带的 `status`：同一 `call_id` 出现 `completed` 时发 `ToolFinished`（`Completed`），`incomplete` 时发 `ToolFinished`（`Interrupted`），`in_progress` 只发开始。
+结果状态：Claude Code 的 `tool_result.is_error` 为 true 是 `Failed`，`toolUseResult.interrupted` 为 true 是 `Interrupted`，权限被拒是 `Denied`；Codex 的结果按退出码判断：`function_call_output` 里有退出码（`exec_command` / `shell` 的输出元数据：JSON 输出的 `exit_code`，或输出文本开头 `Output:` 之前的 `Exit code: N`、`Process exited with code N`）时，非 0 为 `Failed`；`apply_patch` 先到的 `patch_apply_end` / `FileChange` 的 `status` 优先（`completed`、`failed`、`declined` 分别为 `Completed`、`Failed`、`Denied`）；没有退出码时 `output.success == false` 为 `Failed`（`exec_command` 失败时 `success` 仍可能为 true，不能只看它）；`local_shell_call` 没有对应的 output 记录，结束事件取它自带的 `status`：同一 `call_id` 出现 `completed` 时发 `ToolFinished`（`Completed`），`incomplete` 时发 `ToolFinished`（`Interrupted`），`in_progress` 只发开始。
 
 用量与额度（ADR 0014、ADR 0022）：
 
@@ -794,7 +831,14 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - `crates/agents/tests/fixtures/claude-code/2.1.302/SOURCE.md` 写明 fixtures 是合成的、模拟的版本和覆盖的记录。
 - `cargo test -p lectern-agents --features test-support --release --test perf_smoke -- --ignored`（Linux 容器，x86_64，release，单线程；不是预算规定的 M 系列）：`agents/parse_throughput` 268–296 MB/s（预算 ≥ 200 MB/s），`agents/append_4k` 0.014 ms（追加 4250 字节，预算 < 1 ms），都达标。fixtures 的行短（几百字节），比带大段工具结果的真实会话解析得慢，这个吞吐是偏保守的估计。
 
-没有验证到的：第 3–4 步的验收条件；bench 没有在 macOS 上运行；没有拿真实的 Claude Code 日志验证（fixtures 是合成的，见下面「与设计的差异」）。
+第 3 步（Codex 适配器），在 Linux 上运行（`agents` 不依赖 GPUI；没有在 macOS 上实测）：
+
+- `just check`、`just test`（Linux 上不依赖 GPUI 的全部 crate，447 个测试通过，3 个忽略）、`just doctest`、`just deny`（新增 `ruzstd` 0.9.1 与它的 `twox-hash` 2.1.5，都是 MIT）、`python3 scripts/check_architecture.py` 全部通过；`rg gpui crates/agents/Cargo.toml` 没有结果；`rg 'serde_json::Value' crates/agents/src` 仍只出现在 `#[cfg(test)]` 的 `redact.rs`。
+- `just test -p lectern-agents`：116 个通过，2 个忽略（`redact_file_from_env` 和 release 下手动运行的 `perf_smoke`）。验收要求的前缀：`codex_*` 12 个（含 15 个快照：5 份 fixture 各自的 `Record` 序列、`TurnIndex`、`SessionSummary`，逐个看过）、`codex_usage_stream_*` 3 个（切换前后的合计等于最后的 `total_token_usage`；没有 `token_usage_record` 的线程都不标；子 agent 重放的父线程记录不让自己的被取代）、`zst_*` 8 个（含多帧解码的单元测试；`.jsonl` 与 `.jsonl.zst` 的记录、索引和每个引用的 `load` 相同；压缩前的游标压缩后续读不重置；分批 `read` 和 `load` 只解压一次；身份变化后重建、旧副本删除；摘要标 `tail_pending`、`complete` 补齐；损坏与缺失的归档）、`decoded_*` 3 个（含副本文件名；超过预算时删最旧的、不删正在使用的；目录不可写时退回从头解码、一次读到末尾、`load` 结果不变）、`inherited_*` 的 Codex 部分 6 个（按 `ordinal` 的子 agent；按来源文件全部轮次 ID 的 `legacy` 分叉与分叉的分叉；先于来源读到分叉；找不到来源时 `inheritance_unknown`、来源出现后下一次 `read` 返回 `reset`；回放中途来源消失）。另有 Codex 部分的 `incremental_*`、`reset_*`、`progress_*`、`tool_kind_*`、`usage_keys_*`、`resume_*`、`tail_*` 和 `redact_codex_*`（脱敏前后的 Codex fixtures 解析出同样的记录形状）。
+- `crates/agents/tests/fixtures/codex/0.140.0-legacy/` 和 `0.140.0-paginated/` 各有 `SOURCE.md`，写明 fixtures 是合成的。
+- `cargo test -p lectern-agents --features test-support --release --test perf_smoke -- --ignored`（Linux 容器，x86_64，release，单线程；不是预算规定的 M 系列；运行 3 次）：`agents/zst_throughput` 172–177 MB/s（预算 ≥ 100 MB/s，按解压后的字节计，含解压与解析），`agents/zst_load_decoded` 0.006–0.009 ms（预算 < 1 ms，副本建好之后 680 次 `load` 的中位数），都达标；同一次运行里 `agents/parse_throughput` 261–284 MB/s、`agents/append_4k` 0.015–0.019 ms。归档用 `ruzstd` 的最快档压缩（Codex 用 C 的 zstd，压缩级别不同，解压速度会有差别），内容是重复拼接到 50 MB 的合成 fixtures，行短，这个吞吐是偏保守的估计。
+
+没有验证到的：第 4 步的验收条件；bench 没有在 macOS 上运行；没有拿真实的 Claude Code 和 Codex 日志验证（fixtures 是合成的，见下面「与设计的差异」）；没有用 C 的 zstd 压缩的真实归档测试解码（`ruzstd` 实现的是标准格式，测试只用它自己的编码器）。
 
 ## 与设计的差异
 
@@ -829,3 +873,21 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - **`testing::parse_file`。** Codex 在第 3 步之前返回 `Unrecognized`；单元测试里不打开 `test-support` 也能用。
 - **插件标记。** ADR 0025 规定在第一个实现 `Plugin` 的 PR 里加 `plugin = true`，所以这一步不加，第 4 步加。
 - **bench 的形式。** `bench` crate 的设计文档（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）还没有写，按 `crates/bench/AGENTS.md` 不能先加基准代码。这一步把 `agents/parse_throughput`、`agents/append_4k` 写成 `crates/agents/tests/perf_smoke.rs` 里被忽略的测试（`required-features = ["test-support"]`），打印实测值和预算，超出时失败；`bench` 的设计文档合并后再移进 `lectern-bench`。`agents/parse_throughput` 用的是重复拼接到 50 MB 的合成 fixtures。
+
+第 3 步：
+
+- **fixtures 是合成的。** 与第 2 步相同：`codex/0.140.0-legacy/`、`codex/0.140.0-paginated/` 全部按「外部格式」记下的记录形状和公开的 Codex 源码（提交 `3b8f43a`）里的序列化形状手工构造，没有读取本机的任何会话日志，`SOURCE.md` 写明了这一点；真实样本等人提供后再补。`.jsonl.zst` 不提交，测试在临时目录里用 `ruzstd` 的编码器从合成的 `.jsonl` 生成。`src/redact.rs` 为 Codex 补了白名单：ID（`call_id`、`turn_id`、`thread_id`、`response_id`、`forked_from_id`、`parent_thread_id` 等）、路径（`workdir`、`working_directory`、`move_path`，以及 `changes` 的键）、分支（`git.branch`）、取值为枚举的键（`history_mode`、`cli_version`、`originator`、`plan_type`、`limit_id`），工具名在 `function_call` / `custom_tool_call` 上保留；`arguments` 是装着 JSON 的字符串，按任意内容处理里面的值、键保留；工具输出按任意内容处理，只保留 `Output:` 之前的退出码与 shell 会话 ID 两类元数据行，以及 JSON 文本输出里的数字。KEEP 仍只用于结构字段，不进入工具参数和输出。测试检查脱敏前后的 Codex fixtures 解析出同样的记录形状。
+- **库层，不实现 `SessionSource`；来源会话经 `Lineage` 查找。** 第 3 步交出上文「本 crate 的公开项」里的 `codex::Codex`，形状与 `claude::ClaudeCode` 相同，`Parsed`、`Activity` 两个适配器共用。库层没有 `SessionList`，所以分叉会话的来源经 `Lineage`（线程 ID 到文件）查找，第 4 步按 `SessionList` 实现。来源文件里全部 `task_started` 的 `turn_id` 由扫描来源文件得到（只看这一种记录，不做来源自己的继承判断），按来源文件在内存里缓存（最多 64 个），来源追加后从上次的位置接着扫；「与轮次索引一起缓存」进 `cache` 是第 4 步。
+- **会话 ID 取文件名。** Codex 用 `session_meta.id`（线程 ID）给文件命名（`rollout_file_name.rs`），所以 `session_file` 只看路径：`rollout-<时间>-<线程 ID>[_<rollout ID>].jsonl` 或 `.jsonl.zst`，线程 ID 必须是 UUID 的规范写法，`archived_sessions/` 之下为 `archived`。同一线程有多个 rollout 文件（带 rollout ID）时怎样选，是第 4 步「不变量」里的候选路径规则。用量键里的线程 ID 取 `session_meta.id` 和 `token_usage_record.thread_id`。
+- **解压副本与它的预算在这一步。** 副本放在 `decoded_dir/<来源 ID>/`，文件名带会话 ID 和压缩文件的设备号、inode、大小、修改时间；身份变了就删掉这个会话的旧副本重建。字节 LRU 的「最后访问时间」是副本的修改时间，每次使用时更新（访问时间常被挂载选项关掉）；「正在读取」是本进程登记的正在使用的副本，不知道别的进程。「同时建好轮次索引」随第 4 步的索引缓存一起做。副本写不出来时退回从头解码，但本 crate 还没有日志设施，原因不记录。解码的内存不只是 64 KB 的读缓冲：`ruzstd` 按帧头声明的窗口分配解码窗口（几 MB，上限是它的默认值 128 MB），不随文件大小增长。流里有多个 zstd 帧时依次解码（Codex 只写一个帧）。
+- **`ContentRef::part` 在 Codex 里的含义** 已写进上文「本 crate 的公开项」之后。`load` 给出补丁输入里的改动时，相对路径要拼上调用时的 cwd，而一行里没有 cwd：向前最多 64 行找最近的 `turn_context`，找不到时取 `session_meta` 的 cwd。cwd 中途变过、调用又离 `turn_context` 超过 64 行时，输入里的相对路径会拼错，是已知限制；`ToolKind::Edit` 的路径在解析时按准确的 cwd 拼接，结果里 `patch_apply_end` / `FileChange` 的路径本来就是绝对路径，`review` 优先用结果。从头解码时（副本写不出来）一路记下 cwd，是准确的。`changes` 按路径排序交出；补丁的 `Update` 交出文件头之后的 hunk 行（去掉 `*** End of File`），`Add` 交出去掉 `+` 的内容。
+- **工具分类的补充。** `shell_command`（`command` 是字符串）归 `Execute`；派出子 agent 的工具是 `spawn_agent`；`shell` 的 `command` 不是 `-c` / `-lc` 脚本的形式时按 POSIX shell 的写法加引号拼接。`local_shell_call` 在日志里没有工具名，`ToolStarted::name` 记为 `local_shell_call`；它没有结果记录，轮次索引里的 `result` 为 None。`write_stdin` 的 `workdir` 取打开这个 shell 会话的 `exec_command` 的工作目录（在它的输出给出会话 ID 时记下），不知道时取当前 cwd。还在等结果的 `exec_command`、已知的 shell 会话、开始了的 `local_shell_call`、先到的补丁结果在游标状态里各最多记 64 个。
+- **结果状态的补充。** 退出码除了 `Exit code: N`，还认 `exec_command` 在 `3b8f43a` 的输出头 `Process exited with code N`，只看 `Output:` 之前的行；JSON 文本的输出取 `exit_code`（旧版本 `shell` 的 `metadata.exit_code`、code mode 的结果）。会话 ID 取 `Process running with session ID N` 或 JSON 的 `session_id`，只放在 `exec_command` 的结束事件上。`3b8f43a` 不再写 `output.success`，失败的补丁的输出也没有退出码，所以 `apply_patch` 的状态取先于输出到达的 `patch_apply_end` / `FileChange` 的 `status`；轮次索引里补丁调用的 `result` 指向这条改动记录。
+- **轮次与 prompt 的补充。** 一轮的 prompt 是这一轮里自己的第一条 `user_message`（`paginated` 为 `UserMessage`）；`task_started` 之前写出的先记下，接到下一个 `task_started` 上；同一轮里之后的用户消息（中途补充的输入）记为 `Injected`，`compacted` 的摘要也记为 `Injected`。`legacy` 不读 `UserMessage` / `AgentMessage` 条目，`paginated` 不读 `user_message` / `agent_message` 事件（按 `policy.rs` 本来也不会出现）。`Turn::ended_at` 取 `task_complete` / `turn_aborted` 的时间戳；没有 `turn_id` 的 `turn_aborted` 结束当前轮次。
+- **继承前缀的补充。** 来源依次取 `forked_from_id`、`parent_thread_id`、`source.subagent.thread_spawn.parent_thread_id`。按 `ordinal` 判断时，没有 `ordinal` 的行算自己的。第一条 `session_meta` 是会话头，复制进来的来源 `session_meta` 不改变它。回放中途（继承前缀跨批读）来源消失时，下一次 `read` 返回 `reset`、按边界未定处理。「来源之后出现」以能读到来源为准（找到文件但读不了不算），不然每次 `read` 都会重置。没有 `ordinal` 的分叉或子 agent 找不到来源时一律标 `inheritance_unknown`，不论它是否真有继承前缀。
+- **只用一路用量的补充。** 切换只看 `thread_id` 等于 `session_meta.id` 的 `token_usage_record`（没有 `thread_id` 的算自己的），所以子 agent 重放的父线程记录不会让自己的 `token_count` 被取代。`CodexResponse` 的轮次取记录自己的 `turn_id`。负的 token 数按 0 交出。
+- **摘要的补充。** 与 Claude Code 相同，开头只读到会话头和自己的第一个 prompt 为止。子 agent（`source.subagent` 或有 `parent_thread_id`）的 `Parent::tool_call` 为 None：子 rollout 里没有派出它的调用 ID（父会话 `spawn_agent` 的输出里有子线程 ID，要关联需要读父会话，留给第 4 步）。没有 `session_meta`、但有带 cwd 的 `turn_context` 时照常列出，`Format::Unrecognized`。
+- **键的顺序。** 读取路径按 Codex 的写法先读 `type` 再按它选结构，不缓存；`type` 不在第一个键时（文件被别的工具重新序列化过，如脱敏工具）先留下其余键值的原样 JSON 再读，结果相同。
+- **`ruzstd` 的版本与 feature。** `Cargo.lock` 里原来没有 `ruzstd`，取实现时 crates.io 上的最新版本 0.9.1，默认 feature（`std`，以及 `hash` 用 `twox-hash` 2.1.5 校验帧的校验和），都是 MIT，`just deny` 通过。测试还用它的编码器生成归档。
+- **共用的代码。** `Parsed`、`Activity` 移到 `read` 模块（`claude`、`codex` 和 crate 根各自导出，`claude::Parsed` 的路径不变），词法路径拼接移到 `path` 模块；`IndexBuilder` 加了 Codex 用的「后补 prompt」「结果改指向改动记录」「明确结束轮次」，`finish_tool` 的结果引用改为可选。Claude Code 的行为不变（第 2 步的测试和快照不变）。
+- **bench 的形式。** 与第 2 步相同，`agents/zst_throughput`、`agents/zst_load_decoded` 写在 `tests/perf_smoke.rs` 里；归档是合成的 Codex fixtures 重复拼接到 50 MB 后用 `ruzstd` 最快档压缩的。`agents/zst_throughput` 用不建副本的适配器（`testing::parse_file`）从头解压并解析一遍。

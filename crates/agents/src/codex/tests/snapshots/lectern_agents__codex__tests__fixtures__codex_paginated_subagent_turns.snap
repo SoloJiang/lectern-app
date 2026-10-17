@@ -1,0 +1,74 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "turn-p2-0001",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1791192608896,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1791192615155,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 3508,
+                len: 346,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder subagent task.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_p2_0001",
+                    ),
+                    name: "exec_command",
+                    kind: Execute {
+                        command: "cargo check",
+                        workdir: "/Users/dev/fixture/repo",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1791192610970,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1791192611007,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 3855,
+                        len: 238,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 4094,
+                            len: 233,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 4328,
+                    len: 354,
+                    part: 65535,
+                },
+            ),
+        ],
+    },
+]
