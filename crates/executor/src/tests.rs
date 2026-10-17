@@ -2,6 +2,7 @@
 
 mod support;
 
+mod batch;
 mod cancel;
 mod dedicated;
 mod gates;

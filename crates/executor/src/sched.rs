@@ -1,4 +1,4 @@
-//! Scheduler state, worker threads and the reclaim thread.
+//! Scheduler state, worker and batch threads, and the reclaim thread.
 
 use std::collections::{HashMap, VecDeque};
 use std::mem::ManuallyDrop;
@@ -15,7 +15,54 @@ use crate::{Hook, Priority, Shutdown, ThreadKind};
 pub(crate) type TaskId = u64;
 
 #[cfg(test)]
-pub(crate) type BeforeSpawn = Box<dyn Fn(usize) + Send>;
+pub(crate) type BeforeSpawn = Box<dyn Fn(ThreadKind, usize) + Send>;
+
+/// The two thread pools. Each starts on the first submission of its own
+/// tasks; neither takes the other's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Pool {
+    /// `executor-N`: `Interactive` and `Background`.
+    Workers,
+    /// `executor-batch-N`: `Batch` (ADR 0029).
+    Batch,
+}
+
+impl Pool {
+    fn of(priority: Priority) -> Pool {
+        match priority {
+            Priority::Interactive | Priority::Background => Pool::Workers,
+            Priority::Batch => Pool::Batch,
+        }
+    }
+
+    fn kind(self) -> ThreadKind {
+        match self {
+            Pool::Workers => ThreadKind::Worker,
+            Pool::Batch => ThreadKind::Batch,
+        }
+    }
+
+    fn thread_name(self, index: usize) -> String {
+        match self {
+            Pool::Workers => format!("executor-{index}"),
+            Pool::Batch => format!("executor-batch-{index}"),
+        }
+    }
+}
+
+/// Startup and exit bookkeeping of one pool.
+#[derive(Default)]
+pub(crate) struct PoolState {
+    /// Set by the first submission to the pool, which starts its threads.
+    started: bool,
+    /// Set while that submission is still starting threads; `shutdown`
+    /// waits for it to clear.
+    starting: bool,
+    /// Threads that have been started and have not exited.
+    alive: usize,
+    /// Handles of the started threads, recorded before `starting` clears.
+    pub(crate) threads: Vec<JoinHandle<()>>,
+}
 
 /// A task the scheduler knows about: a pool task or a dedicated task.
 pub(crate) trait Job: Send + Sync {
@@ -33,20 +80,45 @@ pub(crate) trait Job: Send + Sync {
 pub(crate) struct Sched {
     pub(crate) interactive: VecDeque<Arc<dyn Job>>,
     pub(crate) background: VecDeque<Arc<dyn Job>>,
-    /// Live pool tasks: inserted on submission, removed once finished.
+    /// Only the batch threads take these.
+    pub(crate) batch: VecDeque<Arc<dyn Job>>,
+    /// Live pool tasks of both pools: inserted on submission, removed once
+    /// finished.
     pub(crate) live: HashMap<TaskId, Arc<dyn Job>>,
     /// Live dedicated tasks.
     pub(crate) dedicated: HashMap<TaskId, Arc<dyn Job>>,
     pub(crate) shutdown: bool,
-    /// Set by the first submission, which starts the workers.
-    started: bool,
-    /// Set while the first submission is still starting workers; `shutdown`
-    /// waits for it to clear.
-    starting: bool,
-    /// Workers that have been started and have not exited.
-    alive: usize,
-    /// Handles of the started workers, recorded before `starting` clears.
-    pub(crate) threads: Vec<JoinHandle<()>>,
+    pub(crate) workers: PoolState,
+    pub(crate) batch_pool: PoolState,
+}
+
+impl Sched {
+    fn pool(&mut self, pool: Pool) -> &mut PoolState {
+        match pool {
+            Pool::Workers => &mut self.workers,
+            Pool::Batch => &mut self.batch_pool,
+        }
+    }
+
+    /// Whether either pool is still starting threads or has threads left.
+    fn running(&self) -> bool {
+        self.workers.starting
+            || self.batch_pool.starting
+            || self.workers.alive > 0
+            || self.batch_pool.alive > 0
+    }
+}
+
+/// What a pool thread takes from the queues.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// `Interactive`, then `Background`.
+    General,
+    /// `executor-0` when there are at least two workers: `Interactive` only,
+    /// and `Background` too after shutdown.
+    Reserved,
+    /// `Batch` only.
+    Batch,
 }
 
 pub(crate) struct Inner {
@@ -55,9 +127,12 @@ pub(crate) struct Inner {
     work: Condvar,
     /// The reserved worker, which only takes `Interactive` tasks, waits here.
     reserved: Condvar,
-    /// `shutdown` waits here for the workers to exit.
+    /// Batch threads wait here.
+    batch_work: Condvar,
+    /// `shutdown` waits here for the worker and batch threads to exit.
     exited: Condvar,
     workers: usize,
+    batch_workers: usize,
     pub(crate) hook: Option<Hook>,
     manual: bool,
     next_id: AtomicU64,
@@ -67,23 +142,29 @@ pub(crate) struct Inner {
 }
 
 impl Inner {
-    pub(crate) fn new(workers: usize, hook: Option<Hook>, manual: bool) -> Arc<Inner> {
+    pub(crate) fn new(
+        workers: usize,
+        batch_workers: usize,
+        hook: Option<Hook>,
+        manual: bool,
+    ) -> Arc<Inner> {
         Arc::new(Inner {
             sched: Mutex::new(Sched {
                 interactive: VecDeque::new(),
                 background: VecDeque::new(),
+                batch: VecDeque::new(),
                 live: HashMap::new(),
                 dedicated: HashMap::new(),
                 shutdown: false,
-                started: false,
-                starting: false,
-                alive: 0,
-                threads: Vec::new(),
+                workers: PoolState::default(),
+                batch_pool: PoolState::default(),
             }),
             work: Condvar::new(),
             reserved: Condvar::new(),
+            batch_work: Condvar::new(),
             exited: Condvar::new(),
             workers: workers.max(1),
+            batch_workers: batch_workers.max(1),
             hook,
             manual,
             next_id: AtomicU64::new(0),
@@ -96,9 +177,9 @@ impl Inner {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Registers and queues a new pool task, starting the workers on the
-    /// first submission. After shutdown the task goes to a reclaim thread and
-    /// this returns false.
+    /// Registers and queues a new pool task, starting its pool's threads on
+    /// the first submission to that pool. After shutdown the task goes to a
+    /// reclaim thread and this returns false.
     pub(crate) fn submit(
         self: &Arc<Self>,
         id: TaskId,
@@ -114,15 +195,16 @@ impl Inner {
             }
             sched.live.insert(id, job.clone());
             self.push(&mut sched, priority, job);
-            let start = !self.manual && !sched.started;
+            let pool = sched.pool(Pool::of(priority));
+            let start = !self.manual && !pool.started;
             if start {
-                sched.started = true;
-                sched.starting = true;
+                pool.started = true;
+                pool.starting = true;
             }
             start
         };
         if start {
-            self.start_workers();
+            self.start_pool(Pool::of(priority));
         }
         true
     }
@@ -150,18 +232,21 @@ impl Inner {
                     self.reserved.notify_one();
                 }
             }
+            Priority::Batch => {
+                sched.batch.push_back(job);
+                self.batch_work.notify_one();
+            }
         }
     }
 
     /// Removes a finished pool task from the registry. The last removal after
-    /// shutdown lets the workers exit.
+    /// shutdown lets the worker and batch threads exit.
     pub(crate) fn finished(&self, id: TaskId) {
         let removed = {
             let mut sched = lock(&self.sched);
             let removed = sched.live.remove(&id);
             if sched.shutdown && sched.live.is_empty() {
-                self.work.notify_all();
-                self.reserved.notify_all();
+                self.notify_all();
             }
             removed
         };
@@ -186,54 +271,72 @@ impl Inner {
         drop(removed);
     }
 
-    /// Starts the workers one by one. Each one is counted in `alive` before
-    /// it is spawned and its handle is recorded before `starting` clears, so
-    /// `shutdown` waits for all of them and joins every one. A shutdown that
-    /// begins meanwhile stops further spawns; the first worker is still
-    /// started when cancelled tasks are left to drop.
-    fn start_workers(self: &Arc<Self>) {
-        let reserve = self.workers >= 2;
-        for index in 0..self.workers {
+    fn notify_all(&self) {
+        self.work.notify_all();
+        self.reserved.notify_all();
+        self.batch_work.notify_all();
+    }
+
+    /// Starts a pool's threads one by one. Each one is counted in `alive`
+    /// before it is spawned and its handle is recorded before `starting`
+    /// clears, so `shutdown` waits for all of them and joins every one. A
+    /// shutdown that begins meanwhile stops further spawns; the first thread
+    /// is still started when cancelled tasks are left to drop.
+    fn start_pool(self: &Arc<Self>, pool: Pool) {
+        let count = match pool {
+            Pool::Workers => self.workers,
+            Pool::Batch => self.batch_workers,
+        };
+        let reserve = pool == Pool::Workers && self.workers >= 2;
+        for index in 0..count {
             #[cfg(test)]
             if let Some(before_spawn) = &*lock(&self.before_spawn) {
-                before_spawn(index);
+                before_spawn(pool.kind(), index);
             }
             {
                 let mut sched = lock(&self.sched);
                 if sched.shutdown && (index > 0 || sched.live.is_empty()) {
                     break;
                 }
-                sched.alive += 1;
+                sched.pool(pool).alive += 1;
             }
             let inner = self.clone();
-            let reserved = reserve && index == 0;
+            let role = match pool {
+                Pool::Batch => Role::Batch,
+                Pool::Workers if reserve && index == 0 => Role::Reserved,
+                Pool::Workers => Role::General,
+            };
             let spawned = thread::Builder::new()
-                .name(format!("executor-{index}"))
-                .spawn(move || worker(inner, reserved));
+                .name(pool.thread_name(index))
+                .spawn(move || pool_thread(inner, role));
             let mut sched = lock(&self.sched);
             match spawned {
-                Ok(handle) => sched.threads.push(handle),
+                Ok(handle) => sched.pool(pool).threads.push(handle),
                 Err(error) => {
-                    sched.alive -= 1;
+                    sched.pool(pool).alive -= 1;
                     drop(sched);
-                    log(format_args!("could not start worker {index}: {error}"));
+                    log(format_args!(
+                        "could not start thread {}: {error}",
+                        pool.thread_name(index)
+                    ));
                 }
             }
         }
-        lock(&self.sched).starting = false;
+        lock(&self.sched).pool(pool).starting = false;
         self.exited.notify_all();
     }
 
-    /// Hands a value to a worker to drop under `contain` (after shutdown, to
-    /// the reclaim thread), so the calling thread never runs its `Drop`.
-    pub(crate) fn drop_later(self: &Arc<Self>, value: Box<dyn Send>) {
+    /// Hands a value to a thread of `priority`'s pool to drop under
+    /// `contain` (after shutdown, to the reclaim thread), so the calling
+    /// thread never runs its `Drop`.
+    pub(crate) fn drop_later(self: &Arc<Self>, value: Box<dyn Send>, priority: Priority) {
         let id = self.next_id();
         let job = Arc::new(Unread {
             id,
             value: Mutex::new(Some(value)),
             exec: Arc::downgrade(self),
         });
-        self.submit(id, Priority::Background, job);
+        self.submit(id, priority, job);
     }
 
     /// Runs queued tasks on the calling thread until the queues are empty.
@@ -246,6 +349,7 @@ impl Inner {
                     .interactive
                     .pop_front()
                     .or_else(|| sched.background.pop_front())
+                    .or_else(|| sched.batch.pop_front())
             };
             let Some(job) = job else { return runs };
             run_job(job);
@@ -258,9 +362,8 @@ impl Inner {
         let (pool, dedicated) = {
             let mut sched = lock(&self.sched);
             sched.shutdown = true;
-            // Idle workers recheck the exit condition.
-            self.work.notify_all();
-            self.reserved.notify_all();
+            // Idle threads recheck the exit condition.
+            self.notify_all();
             let pool: Vec<_> = sched.live.values().cloned().collect();
             let dedicated: Vec<_> = sched.dedicated.values().cloned().collect();
             (pool, dedicated)
@@ -276,18 +379,19 @@ impl Inner {
             return Shutdown::Clean;
         }
         let mut sched = lock(&self.sched);
-        while sched.starting || sched.alive > 0 {
+        while sched.running() {
             let now = Instant::now();
             if now >= deadline {
                 return Shutdown::TimedOut {
-                    busy_workers: sched.alive,
+                    busy_workers: sched.workers.alive + sched.batch_pool.alive,
                 };
             }
             sched = wait_timeout(&self.exited, sched, deadline - now);
         }
-        // Startup is over and every worker has left its loop; joining waits
+        // Startup is over and every thread has left its loop; joining waits
         // only for the threads to finish exiting.
-        let threads = std::mem::take(&mut sched.threads);
+        let mut threads = std::mem::take(&mut sched.workers.threads);
+        threads.append(&mut sched.batch_pool.threads);
         drop(sched);
         for thread in threads {
             let _ = thread.join();
@@ -304,16 +408,29 @@ pub(crate) fn run_hook(hook: Option<&Hook>, kind: ThreadKind) {
     }
 }
 
-fn worker(inner: Arc<Inner>, reserved: bool) {
-    run_hook(inner.hook.as_ref(), ThreadKind::Worker);
+/// The loop of a worker or batch thread.
+fn pool_thread(inner: Arc<Inner>, role: Role) {
+    let pool = if role == Role::Batch {
+        Pool::Batch
+    } else {
+        Pool::Workers
+    };
+    run_hook(inner.hook.as_ref(), pool.kind());
     let mut sched = lock(&inner.sched);
     loop {
-        let job = match sched.interactive.pop_front() {
-            Some(job) => Some(job),
+        let job = match role {
+            Role::Batch => sched.batch.pop_front(),
+            Role::General => match sched.interactive.pop_front() {
+                Some(job) => Some(job),
+                None => sched.background.pop_front(),
+            },
             // After shutdown only cancelled tasks are left; the reserved
             // worker helps drop them (it may be the only one started).
-            None if !reserved || sched.shutdown => sched.background.pop_front(),
-            None => None,
+            Role::Reserved => match sched.interactive.pop_front() {
+                Some(job) => Some(job),
+                None if sched.shutdown => sched.background.pop_front(),
+                None => None,
+            },
         };
         if let Some(job) = job {
             drop(sched);
@@ -324,14 +441,14 @@ fn worker(inner: Arc<Inner>, reserved: bool) {
         if sched.shutdown && sched.live.is_empty() {
             break;
         }
-        let condvar = if reserved {
-            &inner.reserved
-        } else {
-            &inner.work
+        let condvar = match role {
+            Role::General => &inner.work,
+            Role::Reserved => &inner.reserved,
+            Role::Batch => &inner.batch_work,
         };
         sched = wait(condvar, sched);
     }
-    sched.alive -= 1;
+    sched.pool(pool).alive -= 1;
     inner.exited.notify_all();
 }
 

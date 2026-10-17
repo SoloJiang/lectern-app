@@ -15,6 +15,7 @@ fn hooked() -> (Executor, mpsc::Receiver<String>) {
     let tx = Mutex::new(tx);
     let exec = Executor::new(Config {
         workers: 1,
+        batch_workers: 1,
         on_thread_start: Some(Arc::new(move |kind| {
             if kind == ThreadKind::Dedicated {
                 let name = thread::current().name().unwrap_or("").to_owned();

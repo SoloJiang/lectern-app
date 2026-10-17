@@ -26,6 +26,7 @@ fn lifecycle_new_starts_no_thread_and_calls_no_backend() {
     let count = dedicated.clone();
     let executor = Executor::new(ExecutorConfig {
         workers: 1,
+        batch_workers: 1,
         on_thread_start: Some(Arc::new(move |kind| {
             if kind == ThreadKind::Dedicated {
                 count.fetch_add(1, SeqCst);

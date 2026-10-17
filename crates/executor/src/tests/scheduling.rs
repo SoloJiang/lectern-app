@@ -86,6 +86,7 @@ fn no_thread_starts_before_the_first_submission() {
     let s = starts.clone();
     let exec = Executor::new(Config {
         workers: 3,
+        batch_workers: 1,
         on_thread_start: Some(Arc::new(move |kind| {
             let name = thread::current().name().unwrap_or("").to_owned();
             s.lock().unwrap().push((kind, name));
@@ -113,6 +114,7 @@ fn no_thread_starts_before_the_first_submission() {
 fn a_panicking_thread_start_hook_is_contained() {
     let exec = Executor::new(Config {
         workers: 1,
+        batch_workers: 1,
         on_thread_start: Some(Arc::new(|_| panic!("hook panicked"))),
     });
     assert_eq!(block_on(exec.run(Priority::Background, || 5)), Ok(5));

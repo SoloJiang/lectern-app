@@ -5,9 +5,9 @@ use std::task::{Context, Poll, Waker};
 
 use lectern_kernel::contain;
 
-use crate::TaskError;
 use crate::sched::Inner;
 use crate::util::{lock, log};
+use crate::{Priority, TaskError};
 
 pub(crate) struct Output<T> {
     state: Mutex<State<T>>,
@@ -61,11 +61,12 @@ impl<T> Output<T> {
     }
 
     /// Called when the handle goes away (dropped or detached). A value that
-    /// was already stored is handed to `exec` to drop on a worker (after
-    /// shutdown, on the reclaim thread) under `contain`, so the handle's
-    /// thread never runs its `Drop`. Errors carry only a message, and values
-    /// without drop glue run no code, so both are dropped here.
-    pub(crate) fn abandon(&self, exec: &Weak<Inner>)
+    /// was already stored is handed to `exec` to drop on a thread of
+    /// `priority`'s pool (after shutdown, on the reclaim thread) under
+    /// `contain`, so the handle's thread never runs its `Drop`. Errors carry
+    /// only a message, and values without drop glue run no code, so both are
+    /// dropped here.
+    pub(crate) fn abandon(&self, exec: &Weak<Inner>, priority: Priority)
     where
         T: Send + 'static,
     {
@@ -80,7 +81,7 @@ impl<T> Output<T> {
             return;
         }
         match exec.upgrade() {
-            Some(exec) => exec.drop_later(Box::new(value)),
+            Some(exec) => exec.drop_later(Box::new(value), priority),
             // The executor is gone (a dropped `manual()` executor): nowhere
             // else to drop it.
             None => {

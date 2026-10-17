@@ -11,7 +11,7 @@ use crate::output::Output;
 use crate::sched::{Inner, Job, TaskId, run_hook};
 use crate::task::Handle;
 use crate::util::{lock, log};
-use crate::{TaskError, ThreadKind};
+use crate::{Priority, TaskError, ThreadKind};
 
 type BoxFn<T> = Box<dyn FnOnce() -> T + Send>;
 
@@ -139,7 +139,7 @@ impl<T: Send + 'static> Handle<T> for DedicatedCell<T> {
     }
 
     fn abandon(&self) {
-        self.output.abandon(&self.exec);
+        self.output.abandon(&self.exec, Priority::Background);
     }
 }
 

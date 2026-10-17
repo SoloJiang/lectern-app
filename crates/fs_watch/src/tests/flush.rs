@@ -166,6 +166,7 @@ fn flush_times_out_while_the_fs_watch_thread_is_busy() {
     let backend = FakeBackend::new();
     let executor = Executor::new(ExecutorConfig {
         workers: 2,
+        batch_workers: 1,
         on_thread_start: None,
     });
     let watcher = Watcher::new(
