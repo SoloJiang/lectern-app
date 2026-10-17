@@ -1,6 +1,6 @@
 # fs_watch 设计
 
-状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)）；第 2–4 步（`git` 的适配、macOS 后端、装配与实测）尚未实现。
+状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)）；第 3 步（macOS 后端）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），只在 Linux 上交叉检查过，macOS 上的运行由 macOS CI 验证；第 2、4 步（`git` 的适配、装配与实测）尚未实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（没有单独的 issue；与 [platform 设计](platform.md)相同，随 Git 与 Diff 推进），消费方分属 [#9](https://github.com/SoloJiang/lectern-app/issues/9)（`project` 的增量刷新）、[#13](https://github.com/SoloJiang/lectern-app/issues/13)（`agents` 的会话目录）、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`usage` 的 reflog 时刻）和 [#66](https://github.com/SoloJiang/lectern-app/issues/66)（Analyze 的修订号）。`fs_watch` 是与平台无关的文件监听：把后端交来的原始事件按 git index 和忽略规则过滤、合并成批交给消费方，按 worktree 维护修订号，给 reflog 的新增记录打上监听时刻和序号。FSEvents 与 kqueue 后端在 `platform`，由 `app` 注入（[技术调研「性能要点」](tech-research.md#性能要点)、[ADR 0019](../adr/0019.md)、[ADR 0020](../adr/0020.md)、[ADR 0026](../adr/0026.md)）。
 
@@ -641,7 +641,7 @@ fs_watch 在加载任务里（executor 上）展开清单：
 
 - `FSEventStreamCreate`：路径是目标的规范路径（`realpath`），`sinceWhen = kFSEventStreamEventIdSinceNow`，延迟 0.02 s（合并在 fs_watch 里做），标志 `kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer | kFSEventStreamCreateFlagWatchRoot`。
 - `FSEventStreamSetDispatchQueue` 设到后端自己的一个串行队列（QoS utility），所有流共用，不用主线程的 run loop。回调在这个队列上运行：去掉规范路径前缀，转成 `RawEvent`，调用 `EventSink::send`，不阻塞。前缀不匹配的路径（只有根本身的变化会这样）按 `ROOT_CHANGED` 处理。
-- 标志的对应：`ItemIsFile` / `ItemIsDir` / `ItemIsSymlink` → `FILE` / `DIR` / `SYMLINK`；`ItemCreated`、`ItemRemoved`、`ItemRenamed` → 同名标志；`ItemModified`、`ItemCloned` → `MODIFIED`；`ItemInodeMetaMod`、`ItemChangeOwner`、`ItemXattrMod`、`ItemFinderInfoMod` → `META`；`MustScanSubDirs` → `RESCAN`，同时有 `UserDropped` 或 `KernelDropped` 时加 `DROPPED`；`RootChanged` → `ROOT_CHANGED`；`Unmount` → `UNMOUNTED`；`Mount` → 挂载点所在目录的 `RESCAN`；`EventIdsWrapped`、`HistoryDone` 丢弃。
+- 标志的对应：`ItemIsFile` / `ItemIsDir` / `ItemIsSymlink` → `FILE` / `DIR` / `SYMLINK`；`ItemCreated`、`ItemRemoved`、`ItemRenamed` → 同名标志；`ItemModified`、`ItemCloned` → `MODIFIED`；`ItemInodeMetaMod`、`ItemChangeOwner`、`ItemXattrMod`、`ItemFinderInfoMod` → `META`；`MustScanSubDirs` → `RESCAN`，同时有 `UserDropped` 或 `KernelDropped` 时加 `DROPPED`；`RootChanged` → `ROOT_CHANGED`；`Unmount` → `UNMOUNTED`；`Mount` → 挂载点所在目录的 `RESCAN`；`Unmount` 的挂载点在目标之下时同样是挂载点所在目录的 `RESCAN`，挂载点是目标本身或在它之上时是空路径上的 `UNMOUNTED`；`EventIdsWrapped`、`HistoryDone` 丢弃。`ROOT_CHANGED` 和 `UNMOUNTED` 总在空路径上（fs_watch 只在目标本身上看这两个标志）。带 `MustScanSubDirs` 的事件路径不在目标之下时（丢弃事件可能报告在上级路径上），按目标本身的 `RESCAN` 处理，不当作 `ROOT_CHANGED`。
 - `Armed::flush` 调 `FSEventStreamFlushSync`：它等回调返回，而回调只入队，所以等待有界。
 - drop：`FSEventStreamStop`、`FSEventStreamInvalidate`，再对队列做一次 `dispatch_sync` 等正在运行的回调结束，然后 `FSEventStreamRelease`；drop 返回之后不再调用 `EventSink`。
 
@@ -650,10 +650,14 @@ fs_watch 在加载任务里（executor 上）展开清单：
 - 目录用 `O_EVTONLY | O_DIRECTORY` 打开（`O_EVTONLY` 不妨碍卷卸载），注册 `EVFILT_VNODE`、`EV_CLEAR`，关注 `NOTE_WRITE`（条目增减、改名）、`NOTE_DELETE`、`NOTE_RENAME`、`NOTE_REVOKE`；后三个报告为 `ROOT_CHANGED`。
 - 每个存在的具名条目用 `O_EVTONLY | O_SYMLINK` 打开（是符号链接时监视链接本身，目标由 fs_watch 另外监视），关注 `NOTE_WRITE`、`NOTE_EXTEND`、`NOTE_ATTRIB`、`NOTE_DELETE`、`NOTE_RENAME`、`NOTE_REVOKE`、`NOTE_LINK`。
 - 目录的 `NOTE_WRITE` 到达时，对每个具名条目 `fstatat(AT_SYMLINK_NOFOLLOW)`，设备号和 inode 变了（原子改名覆盖）、出现或消失的，重新打开或关闭描述符，报告这个条目。
-- `Armed::flush`：向 kqueue 发一个 `EVFILT_USER` 事件，等线程处理到它为止。
-- 描述符数：每个仓库通常 10 个以内，全部 `Entries` 目标合计上限 256；超过时 `arm` 返回 `Exhausted`，fs_watch 把这个 worktree 标为 `Degraded(Config)`。
+- 目录的 `NOTE_WRITE` 不说明是哪个条目：`names` 为空时报告为目录本身（空路径）；`names` 不为空时只报告具名条目的变化，其他条目的增减不报告，否则主目录里无关文件的增删也会让配置清单的使用方修订号加一。
+- 具名条目打开时另加 `O_NONBLOCK`（条目是 FIFO 时不阻塞）。rustix 没有 `O_EVTONLY` 的名字，按 `sys/fcntl.h` 的值 `0x8000` 传入。
+- `Armed::flush`：向 kqueue 发一个 `EVFILT_USER` 事件，等线程处理到它为止：线程收到它之后先读当时的请求序号，再以零超时取完 kqueue 里已有的事件、交付，然后标记这个序号完成；所以 `flush` 调用之前写入引起的事件都已交付。等待上限 2 s，超时或线程已停止时返回 `Other`，fs_watch 按 `NotWatching` 处理。
+- 线程在后端 drop 时退出；`kevent` 意外出错而退出时，下一次 `Entries` 的 arm 重建 kqueue 和线程，旧的监视不再交付事件，flush 返回错误。
+- 描述符数：每个仓库通常 10 个以内，全部 `Entries` 目标合计上限 256；超过时 `arm` 返回 `Exhausted`，fs_watch 把这个 worktree 标为 `Degraded(Config)`。每个目标在 arm 时按目录加全部 `names`（不论是否存在）预留，具名条目以后出现时不会超出上限，目标 drop 时归还。
+- 交付在线程持有状态锁时进行，`Armed` 的 drop 在同一把锁下移除目标、关闭描述符（关闭即注销 kevent），所以 drop 返回之后不再调用这个目标的 `EventSink`。
 
-Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测试全部用 `FakeBackend`。
+Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测试全部用 `FakeBackend`。FSEvents 事件到 `RawEvent` 的转换（去掉前缀、标志的对应）是纯函数，在所有平台上编译，单元测试在 Linux CI 上也运行，所以 `platform` 在所有平台上都依赖本 crate；`lectern-executor` 和 rustix 的 `event` feature 只在 macOS 上依赖。
 
 ## 对其他 crate 的要求
 
@@ -763,7 +767,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 
 `git` 的适配在 `git` 里测试（`watch_source_*`，用 `TestRepo`）：`.gitignore`、`info/exclude`、`core.excludesFile` 的忽略结果与 git 的判定一致；未跟踪目录里和根目录下未跟踪的 `.gitignore` 生效，被忽略目录里的 `.gitignore` 不读；遍历达到上限时显式给出的 `.gitignore` 路径仍然生效，显式给出、但上级目录被忽略的不读；目录改名后 `rule_files` 给出新的位置；`core.ignoreCase` 下大小写不同的路径判为受跟踪；`config_files` 列出 `include.path`、`includeIf "onbranch:"`（满足与不满足）、不存在的引入目标和 XDG 默认位置；不调用 git 命令行。
 
-`platform` 的后端只能在 macOS CI 上测试（`fsevents_*`、`kqueue_*`）：真实临时目录里的新建、修改、改名、删除都报告为相对路径；`/tmp` 这类经符号链接的根去掉规范前缀；`flush` 交付延迟中的事件；drop 之后不再回调；根目录被删除报告 `ROOT_CHANGED`；kqueue 对就地写入、原子改名覆盖、具名条目是符号链接（不跟随）、目录被删除各有用例。
+`platform` 的后端只能在 macOS CI 上测试（`fsevents_*`、`kqueue_*`）：真实临时目录里的新建、修改、改名、删除都报告为相对路径；`/tmp` 这类经符号链接的根去掉规范前缀；`flush` 交付延迟中的事件；drop 之后不再回调；根目录被删除报告 `ROOT_CHANGED`；kqueue 对就地写入、原子改名覆盖、具名条目是符号链接（不跟随）、目录被删除各有用例。FSEvents 事件的转换（`fsevents_convert_*`：前缀、标志、挂载、丢弃的事件）是纯函数，在所有平台上运行。
 
 ## 未决问题
 
@@ -805,6 +809,18 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - bench 预算表的 `fs_watch/*` 条目和 `classify_burst`、`reflog_append` 两项基准：bench 运行器（[#7](https://github.com/SoloJiang/lectern-app/issues/7) 第 1 步）还没有合并进 `main`，见下一节。
 - macOS 上的真实后端、`flush_idle`、`write_to_deliver`、`resident`：第 3、4 步。
 
+第 3 步（`lectern-platform` 的 `fs_events`），在 Linux（x86_64）上完成；本 PR 没有在 macOS 上运行过，macOS 上的行为全部由 macOS CI 验证：
+
+- 交叉检查：`cargo check -p lectern-platform --target aarch64-apple-darwin --all-features --tests` 和 `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 通过。macOS 的代码（手写的 15 个 CoreFoundation / CoreServices / libdispatch 符号、rustix 的 kqueue、`O_EVTONLY` / `O_SYMLINK`、`dev_t` 为 `i32`、`mode_t` 为 `u16`）和 macOS 上的测试因此通过了类型检查和 clippy（每个 `unsafe` 块都有 `// SAFETY:`），但没有链接、没有运行：符号名和结构体布局是否与系统框架一致、FSEvents 的实际行为，要到 macOS CI 才能确认。
+- 在 Linux 上运行的：`just test -p lectern-platform` 36 个测试通过，其中新增的 6 个 `fsevents_convert_*` 覆盖前缀去除（`/`、尾部斜杠、共享前缀的兄弟目录、未解析的 `/tmp` 写法、非 UTF-8 字节）、每个 FSEvents 标志的对应、`RootChanged`、目标之外的路径、丢弃的事件、挂载与卸载、`EventIdsWrapped` / `HistoryDone`。`just check`、`just test`（Linux 上的全部 crate，780 个测试）、`just doctest`、`just deny`、`python3 scripts/check_architecture.py` 通过；Linux 上的 `cargo check -p lectern-platform` 通过，`fs_events` 在 Linux 的非测试构建里不存在。
+- 只在 macOS CI 上运行的 20 个测试：`fsevents_*` 9 个（新建、修改、改名、删除为相对路径；`/tmp` 与自建符号链接的根；120 s 延迟的流上 `flush` 交付；drop 之后不再回调；根目录被删除、被改名为 `ROOT_CHANGED`；不存在的路径为 `NotFound`；两个流共用队列互不串扰，drop 一个另一个照常；经真实 `Watcher` 的 `watch_dir`：根不存在时经 kqueue 等到它出现、`Appeared`，FSEvents 报告根里的文件，删除根后 `Vanished`），`kqueue_*` 11 个（就地写入；原子改名覆盖后报告并改为监视新文件；具名条目是符号链接时不跟随，换掉链接才报告；目录被删除、被改名为 `ROOT_CHANGED`；具名条目出现、变化、消失；没有 `names` 时报告目录本身；不存在的目录为 `NotFound`；描述符上限与归还；drop 之后不再回调；两个目标共用线程互不串扰）。FSEvents 是异步的，测试都按最长 30 s 的期限等待（每次等待之间 `flush`，FSEvents 的流先写探针文件直到报告出现），不以固定的 sleep 作为判断依据；只有「drop 之后不再回调」在 drop 后继续写一段固定时间，机器慢只会让它检查得少，不会误报。
+- 验收的检查：`rg -l 'FSEventStream' crates` 只列出 `crates/platform/src/fs_events/` 下的文件（`crates/fs_watch/AGENTS.md`、`crates/agents/AGENTS.md` 里提到 `FSEventStreamFlushSync` 的两句改为不写符号名）；`Cargo.lock` 只多了 `lectern-platform` 对 `lectern-fs-watch`、`lectern-executor`、`lectern-kernel`（dev）三条工作区内部依赖，没有新增 crate；`cargo tree -p lectern-platform -e normal --depth 1` 在 Linux 上列出 `lectern-fs-watch`、`rustix`，`--target aarch64-apple-darwin` 另有 `lectern-executor`。
+
+macOS CI 要确认的：
+
+- `just test -p lectern-platform` 里 `fsevents_*`、`kqueue_*` 全部通过（即验收第 3 步的第一条）；尤其是 FSEvents 在根目录被删除、被改名时确实报告 `RootChanged`，以及 FSEvents 在流刚启动时报告事件的延迟在测试的期限之内。
+- 测试二进制能链接（`CoreServices`、`CoreFoundation` 两个框架和 libdispatch 的符号）。
+
 ## 与设计的差异
 
 - 「路径分类」第 6 步：上级目录不是子模块且被忽略规则排除时就丢弃，不再要求它不受跟踪。设计原来只丢弃「不受跟踪且被忽略」的上级目录，于是 `build/` 被忽略、`build/keep.txt` 受跟踪时，`build/out.js` 会走到第 8 步，而 `PathFilter::ignored` 只看路径自身（`out.js` 不匹配），结果被当作未跟踪路径交付；git 不重新包含被排除目录之下的路径，`git status` 不会列出它。受跟踪的路径在第 5 步已经交付，所以改动只影响未跟踪的路径。上文第 6 步已改。
@@ -820,3 +836,9 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - 最后一个 `Watcher` 克隆 drop 时也执行 `shutdown`；`shutdown` 在 fs_watch 线程之外调用时等线程退出（最多 `flush_timeout`），所以返回之后不再交付。
 - 测试辅助比设计多了几个方法（上文「测试辅助」已列出）：`FakeBackend` 的 `emit_on_arm`、`before_arm`、`is_armed`、`history`，`FakeSource` 的设置与计数方法，`RecordingSink::len`、`is_empty`；`RecordingSink` 在 `take` 之前一直持有守卫，静止测试据此检查「交付后守卫在消费方手里」。另外 `Flags` 实现了 `BitOr`、`BitOrAssign`、`Default`、`Hash`，`Target`、`Scope`、批次类型实现了 `Clone`、`PartialEq`、`Debug`，错误类型实现了 `Display` 和 `Error`。
 - bench 预算表的 `fs_watch/*` 条目和 `classify_burst`、`reflog_append` 两项基准没有加：bench 运行器与预算表（[#7](https://github.com/SoloJiang/lectern-app/issues/7) 第 1 步）还没有合并进 `main`，等它合并后另提 PR 加入，届时把这两项改为 `Active`，其余三项为 `planned`。上面「实际验证」里有这两个场景的临时测量值。
+- 第 3 步：FSEvents 事件的转换（去掉前缀、标志的对应）放在 `fs_events::convert`，是纯函数，在所有平台上编译，单元测试在 Linux CI 上也运行；所以 `platform` 在所有平台上依赖 `lectern-fs-watch`（只为 `Flags`、`RawEvent`），`lectern-executor` 和 rustix 的 `event` feature 只在 macOS 上依赖。`backend` 仍然只在 macOS 上存在。上文「platform 后端」已补充。
+- 第 3 步：标志对应补了设计没写的情况：`ROOT_CHANGED`、`UNMOUNTED` 总在空路径上（fs_watch 只在目标本身上读这两个标志）；挂载点在目标之下的 `Unmount` 与 `Mount` 一样是挂载点所在目录的 `RESCAN`，挂载点是目标或在它之上时才是 `UNMOUNTED`；带 `MustScanSubDirs` 的事件路径不在目标之下时按目标本身的 `RESCAN` 处理，不当作「前缀不匹配即 `ROOT_CHANGED`」，否则丢弃事件会被当成根目录消失。上文已补充。
+- 第 3 步：kqueue 的目录 `NOTE_WRITE` 不说明是哪个条目，`names` 不为空时只报告具名条目的出现、替换和消失，不报告其他条目的增减；`names` 为空时报告为空路径（目录本身）。设计的 `Scope::Entries` 写的是「目录本身的条目增减、改名」都报告，但对 kqueue 来说只能报告成目录本身，fs_watch 收到空路径会通知这个目录的全部使用方，主目录里任何文件的增删都会让配置清单的使用方修订号加一。fs_watch 的 `dir_*` 测试本来就期望「上级目录里其他条目的事件什么都不做」。上文已补充。
+- 第 3 步：具名条目自己的描述符收到 `NOTE_DELETE`、`NOTE_RENAME`、`NOTE_REVOKE` 时，即使 `fstatat` 得到相同的设备号和 inode 也重新打开（新文件可能拿到相同的 inode 号）；具名条目打开时加 `O_NONBLOCK`；`O_EVTONLY` 在 rustix 里没有名字，按 `sys/fcntl.h` 的值传入。
+- 第 3 步：kqueue 的 `flush` 最多等 2 s（与 fs_watch 默认的 `flush_timeout` 相同），超时或线程已停止时返回 `BackendError::Other`；描述符上限按每个目标的目录加全部 `names`（不论是否存在）在 arm 时预留，drop 时归还，具名条目以后出现时不会超出上限；kqueue 线程在后端 drop 时退出，`kevent` 意外出错退出后，下一次 `Entries` 的 arm 重建 kqueue 和线程。设计没有写这几处。上文已补充。
+- 第 3 步：测试比设计多了 `fsevents_convert_*`（所有平台）、`fsevents_root_renamed_reports_root_changed`、`fsevents_arm_missing_path_is_not_found`、`fsevents_streams_share_one_queue_and_stay_apart`、`fsevents_watcher_dir_appears_changes_and_vanishes`（经真实 `Watcher` 和 `EventSink`，为它在 macOS 上加了 `lectern-kernel` 的 dev 依赖，实现 `Sink` 要用 `BusyGuard`），以及 kqueue 的目录改名、具名条目出现与消失、没有 `names`、不存在的目录、描述符上限、drop、两个目标各一个用例。测试经 `MacBackend::arm_with` 把批次交给一个记录用的闭包，不经 fs_watch 的队列；`Backend::arm` 只是把 `EventSink::send` 包成同样的闭包。

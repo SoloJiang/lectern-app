@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -18,7 +18,7 @@
   - 内置转换、OID 计算、stat 比较本身、按路径缓存：`git`。
   - 写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。
 - 本文不覆盖，以后在本文增加小节或另写设计文档，设计合并之前不写对应的代码：
-  - FSEvents 与 kqueue 后端（实现 `fs_watch` 的接口）：设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)。
+  - FSEvents 与 kqueue 后端（实现 `fs_watch` 的接口，模块 `fs_events`）：设计、实际验证和与设计的差异都在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)。
   - `open -a`、钥匙串、代码签名校验、线程 QoS（[executor 设计](executor.md)的线程启动钩子）。
   - Seatbelt 配置、受限进程的启动与监护、磁盘映像、快照写出（[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#66](https://github.com/SoloJiang/lectern-app/issues/66)，ADR 0019）。
   - Claude Code statusline 的安装与恢复（[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[ADR 0014](../adr/0014.md)）。
@@ -30,6 +30,10 @@
 | `rustix` 1.1（`default-features = false`，`std`、`fs`） | `openat2`、`openat`、`fstatat`、`fstat`、`readlinkat`、`read` | 见下 |
 | `tempfile`（dev） | 测试用的临时目录 | 已在 Cargo.lock（3.27，经 `insta`），MIT OR Apache-2.0 |
 | `libc`（dev） | 测试里在 macOS 上创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190）；只在测试代码里用 |
+| `lectern-fs-watch` | `fs_events` 实现它的 `Backend`；事件转换是纯函数，在所有平台上编译和测试 | 基础设施层，方向向下（[fs_watch 设计「依赖」](fs_watch.md#依赖)） |
+| `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
+| `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
+| `lectern-kernel`（dev，只在 macOS） | 经真实 `Watcher` 驱动后端的测试实现 `Sink` 要用 `BusyGuard` | kernel 层 |
 
 选 `rustix`，不选 `libc`、`nix`、`cap-std`：
 
@@ -348,7 +352,7 @@ pub enum FileKind {
 一个实现 PR，写 `Refs #14`（#14 由 `review_view` 的最后一个 PR 关闭）。合并后 `git` 设计的验收第 1 步的前置条件成立。
 
 - 根 `Cargo.toml` 的 `[workspace.dependencies]` 有 `rustix`（`default-features = false`，`std`、`fs`），`crates/platform/Cargo.toml` 用 `workspace = true` 引用；`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果（不新增 crate）。
-- `cargo tree -p lectern-platform -e normal --depth 1` 只列出 `rustix`。
+- `cargo tree -p lectern-platform -e normal --depth 1` 只列出 `rustix`（安全读取这一步；FSEvents 后端加入后另有 `lectern-fs-watch`，macOS 上还有 `lectern-executor`，见「依赖」）。
 - `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有 `relpath_*`、`stat_*`、`symlink_*`、`read_*`、`fifo_*`、`socket_*`、`device_*`、`race_*`、`fd_*`、`send_sync`、`walk_*`，Linux 上另有 `openat2_rejects_escape`、`linux_backend_choice`，macOS 上另有 `nofollow_any_*`。
 - `rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`（测试里创建 FIFO 的 `libc::mkfifo`）：实现代码没有 `unsafe`。
 - `rg 'O_NOFOLLOW_ANY|NOFOLLOW_ANY' crates --glob '!crates/platform/**'` 没有结果（架构规则 6）。
