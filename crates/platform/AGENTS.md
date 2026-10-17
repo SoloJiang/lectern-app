@@ -23,5 +23,5 @@ cargo check -p lectern-platform
 just test -p lectern-platform   # macOS 上覆盖全部代码
 ```
 
-- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY` 的实现在 macOS CI 上测试。
+- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY`（`read`）与 `AT_SYMLINK_NOFOLLOW_ANY`（`stat`）的实现在 macOS CI 上测试。
 - 其余调用系统 API 的行为只能在 macOS CI 上验证；能抽成纯函数的部分（如生成 Seatbelt 配置、合并 statusline 配置）写单元测试和 insta 快照，在任何平台上都能运行。

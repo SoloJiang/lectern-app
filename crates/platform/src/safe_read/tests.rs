@@ -315,6 +315,7 @@ fn check_intermediate_symlinks(backend: Backend) {
         "a/self/b.txt",
         "in_link/missing",
         "out_link/missing/deeper",
+        "dangling/x",
     ] {
         assert!(
             is_through_symlink(root.stat(rel(path))),
@@ -1042,22 +1043,86 @@ fn nofollow_any_one_step_open_refuses_every_symlink() {
     let tree = LinkTree::new();
     let root = SafeRoot::open_with(tree.path(), Backend::NofollowAny).unwrap();
     let fd = root.fd.as_fd();
-    for (path, target) in [
-        ("in_link/b.txt", Target::Entry),
-        ("out_link/b.txt", Target::Entry),
-        ("in_link", Target::Dir),
-        ("a/self", Target::Dir),
-        ("a/to_file", Target::Entry),
-        ("dangling", Target::Entry),
-        ("passwd", Target::Entry),
+    for path in [
+        "in_link/b.txt",
+        "out_link/b.txt",
+        "in_link",
+        "a/self",
+        "a/to_file",
+        "dangling",
+        "passwd",
     ] {
         assert!(
-            macos::open_nofollow_any(fd, path.as_bytes(), target).is_err(),
-            "{path} {target:?}"
+            macos::open_nofollow_any(fd, path.as_bytes()).is_err(),
+            "{path}"
         );
     }
-    assert!(macos::open_nofollow_any(fd, b"a/b.txt", Target::Entry).is_ok());
-    assert!(macos::open_nofollow_any(fd, b"a", Target::Dir).is_ok());
+    assert!(macos::open_nofollow_any(fd, b"a/b.txt").is_ok());
+    assert!(macos::open_nofollow_any(fd, b"a").is_ok());
+}
+
+/// The one-step `fstatat` itself, without the walk behind it: it answers a
+/// regular path in one call (otherwise every `stat` would silently take the
+/// slower walk), refuses a link before the last component with something other
+/// than `ENOENT` (which would end the call as `NotFound` without the walk),
+/// and never reports what a link points to.
+#[cfg(target_os = "macos")]
+#[test]
+fn nofollow_any_one_step_stat_follows_no_symlink() {
+    let tree = LinkTree::new();
+    write(&tree.path().join("a/b/c/d.txt"), b"deep");
+    let root = SafeRoot::open_with(tree.path(), Backend::NofollowAny).unwrap();
+    let fd = root.fd.as_fd();
+
+    for (path, kind) in [
+        ("a", FileKind::Dir),
+        ("a/b.txt", FileKind::File),
+        ("a/b", FileKind::Dir),
+        ("a/b/c/d.txt", FileKind::File),
+    ] {
+        let meta = macos::stat_nofollow_any(fd, path.as_bytes())
+            .unwrap_or_else(|error| panic!("{path}: {error:?}"));
+        assert_eq!(meta.kind, kind, "{path}");
+        assert_meta_matches(&meta, &tree.path().join(path));
+    }
+    assert_eq!(
+        macos::stat_nofollow_any(fd, b"a/missing").map(|_| ()),
+        Err(Errno::NOENT)
+    );
+
+    for path in [
+        "in_link/b.txt",
+        "out_link/b.txt",
+        "a/up/a/b.txt",
+        "a/self/b.txt",
+        "in_link/missing",
+        "out_link/missing/deeper",
+        "dangling/x",
+    ] {
+        match macos::stat_nofollow_any(fd, path.as_bytes()) {
+            Ok(meta) => panic!("{path}: followed a link to {meta:?}"),
+            Err(error) => assert_ne!(error, Errno::NOENT, "{path}"),
+        }
+    }
+
+    for path in [
+        "in_link",
+        "out_link",
+        "a/to_file",
+        "dangling",
+        "passwd",
+        "a/out_file",
+        "a/up",
+    ] {
+        match macos::stat_nofollow_any(fd, path.as_bytes()) {
+            Ok(meta) => {
+                assert_eq!(meta.kind, FileKind::Symlink, "{path}");
+                assert_meta_matches(&meta, &tree.path().join(path));
+            }
+            // `SafeRoot::stat` then asks the walk, which reports the link.
+            Err(error) => assert_ne!(error, Errno::NOENT, "{path}"),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
