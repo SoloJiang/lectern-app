@@ -4353,6 +4353,7 @@ dependencies = [
  "glob",
  "insta",
  "lectern-executor",
+ "lectern-fs-watch",
  "lectern-git",
  "lectern-kernel",
  "lectern-platform",

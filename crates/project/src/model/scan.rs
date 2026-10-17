@@ -10,22 +10,29 @@ use lectern_git::{GitError, HashKind};
 use lectern_platform::SafeRoot;
 use lectern_services::project::{
     ActiveTree, ChangedParts, FileList, ManifestError, ManifestKind, Package, ProjectEvent,
-    ProjectSnapshot, Scan, ScanError, Worktree,
+    ProjectSnapshot, Scan, ScanError, Worktree, WorktreeKey,
 };
 
 use super::cache::{OtherTree, Print};
+use super::watch::{Manifests, TreeRead};
 use super::{Model, Project, RepoInfo, Wanted, index_error, lock, worktree_error};
 use crate::ManifestResult;
 use crate::folder::{self, ReadError};
 use crate::manifest::{self, MAX_MANIFEST_BYTES};
 
 /// Reads one worktree file: `(rel, limit)`, as `TreeAccess::read_file`.
-type ReadFn<'a> = dyn Fn(&str, u64) -> Result<Option<Vec<u8>>, ReadError> + 'a;
+pub(super) type ReadFn<'a> = dyn Fn(&str, u64) -> Result<Option<Vec<u8>>, ReadError> + 'a;
+
+/// A manifest's result kept from the last round, or None to read it.
+pub(super) type Reuse<'a> = dyn Fn(&str) -> Option<Option<ManifestResult>> + 'a;
 
 impl Model {
     /// Brings the project to `wanted`: the worktree list and the active
     /// tree first, then (unless superseded) its files and sub-projects.
     pub(super) fn apply(&self, project: &Arc<Project>, wanted: Wanted) {
+        if let Some(repo) = &project.repo {
+            self.watch_repo(project, repo);
+        }
         let old = project.snapshot();
         let worktrees = wanted.worktrees.unwrap_or_else(|| old.worktrees.clone());
         let current = old.active.as_ref();
@@ -58,8 +65,9 @@ impl Model {
             ..(*old).clone()
         };
         let Some(active) = next.active.clone() else {
-            // Nothing to scan: this replacement is the `Changed` that
-            // follows `Opened`.
+            // Nothing to scan (or to watch): this replacement is the
+            // `Changed` that follows `Opened`.
+            self.unwatch_tree(project);
             self.publish(project, next);
             self.submit_facts();
             return;
@@ -74,7 +82,7 @@ impl Model {
         let name = project.snapshot().name.clone();
         let root = &*active.root;
         let result = match (&project.repo, &active.worktree) {
-            (Some(repo), Some(worktree)) => self.scan_git(project, repo, &worktree.0, &name),
+            (Some(repo), Some(worktree)) => self.scan_git(project, repo, worktree, root, &name),
             _ => self.scan_folder(project, root, &name),
         };
         let Some(packages) = result else {
@@ -93,24 +101,29 @@ impl Model {
 
     /// The file list from the index, published at once, then the
     /// sub-projects. None when the scan stopped (superseded or failed).
+    /// With a watcher, the active worktree's handle is kept with its watch
+    /// and what this scan read is recorded for the refreshes (`watch.rs`).
     fn scan_git(
         &self,
         project: &Arc<Project>,
         repo: &RepoInfo,
-        git_dir: &Path,
+        worktree: &WorktreeKey,
+        root: &Path,
         name: &str,
     ) -> Option<Vec<Package>> {
-        let tree = match self.git.open_worktree(&repo.common_dir, git_dir) {
+        let tree = match self.tree_handle(project, repo, worktree, root) {
             Ok(tree) => tree,
             Err(err) => {
                 self.publish_files(project, Err(worktree_error(&err)));
                 return None;
             }
         };
-        let files = match tree.index_files(&project.cancel) {
-            Ok(index) => Arc::new(index.files),
+        let (files, checksum) = match tree.index_files(&project.cancel) {
+            Ok(index) => (Arc::new(index.files), index.checksum),
             Err(GitError::Cancelled) => return None,
             Err(err) => {
+                // Unknown checksum: the next index change reads it again.
+                self.record_tree(project, worktree, TreeRead::default());
                 self.publish_files(project, Err(index_error(&err)));
                 return None;
             }
@@ -119,7 +132,15 @@ impl Model {
             return None;
         }
         let read = |rel: &str, limit: u64| tree.read_file(rel, limit).map_err(read_error);
-        Some(self.packages(&files, name, repo.hash, &read))
+        let (packages, manifests) = self.packages(&files, name, repo.hash, &read, &|_| None);
+        if !project.superseded() {
+            let read = TreeRead {
+                checksum: Some(checksum),
+                manifests: Arc::new(manifests),
+            };
+            self.record_tree(project, worktree, read);
+        }
+        Some(packages)
     }
 
     fn scan_folder(&self, project: &Arc<Project>, root: &Path, name: &str) -> Option<Vec<Package>> {
@@ -139,7 +160,10 @@ impl Model {
             None => Err(ReadError::Unreadable),
         };
         // Folder projects have no repository hash: SHA-1.
-        Some(self.packages(&files, name, HashKind::Sha1, &read))
+        Some(
+            self.packages(&files, name, HashKind::Sha1, &read, &|_| None)
+                .0,
+        )
     }
 
     /// Publishes the active tree's file list (sub-projects pending), or the
@@ -176,7 +200,7 @@ impl Model {
 
     /// Replaces the snapshot and emits `Changed`. False once the project is
     /// closed.
-    fn publish(&self, project: &Arc<Project>, mut next: ProjectSnapshot) -> bool {
+    pub(super) fn publish(&self, project: &Arc<Project>, mut next: ProjectSnapshot) -> bool {
         let _emit = lock(&project.emit);
         if lock(&project.control).closed {
             return false;
@@ -197,26 +221,45 @@ impl Model {
     }
 
     /// Reads and parses the manifests of `files` (parse results cached by
-    /// blob OID) and resolves the sub-projects.
+    /// blob OID) and resolves the sub-projects. `reuse` gives the result of
+    /// a manifest that need not be read again (a refresh's unchanged ones),
+    /// None to read it. Returns every manifest's result too.
     pub(super) fn packages(
         &self,
         files: &FileList,
         root_name: &str,
         hash: HashKind,
         read: &ReadFn<'_>,
-    ) -> Vec<Package> {
+        reuse: &Reuse<'_>,
+    ) -> (Vec<Package>, Manifests) {
+        let seen = RefCell::new(Manifests::new());
         let manifest = |path: &str| -> Option<ManifestResult> {
-            let file_name = path.rsplit_once('/').map_or(path, |(_, n)| n);
-            let kind = ManifestKind::from_file_name(file_name)?;
-            let bytes = match read(path, MAX_MANIFEST_BYTES as u64) {
-                Ok(Some(bytes)) => bytes,
-                Ok(None) => return None,
-                Err(ReadError::TooLarge) => return Some(Err(ManifestError::TooLarge)),
-                Err(ReadError::Unreadable) => return Some(Err(ManifestError::Unreadable)),
+            let result = match reuse(path) {
+                Some(kept) => kept,
+                None => self.read_manifest(path, hash, read),
             };
-            Some(self.parse(kind, hash, &bytes))
+            seen.borrow_mut().insert(path.into(), result.clone());
+            result
         };
-        crate::resolve_packages(files, root_name, &manifest)
+        let packages = crate::resolve_packages(files, root_name, &manifest);
+        (packages, seen.into_inner())
+    }
+
+    fn read_manifest(
+        &self,
+        path: &str,
+        hash: HashKind,
+        read: &ReadFn<'_>,
+    ) -> Option<ManifestResult> {
+        let file_name = path.rsplit_once('/').map_or(path, |(_, n)| n);
+        let kind = ManifestKind::from_file_name(file_name)?;
+        let bytes = match read(path, MAX_MANIFEST_BYTES as u64) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return None,
+            Err(ReadError::TooLarge) => return Some(Err(ManifestError::TooLarge)),
+            Err(ReadError::Unreadable) => return Some(Err(ManifestError::Unreadable)),
+        };
+        Some(self.parse(kind, hash, &bytes))
     }
 
     fn parse(&self, kind: ManifestKind, hash: HashKind, bytes: &[u8]) -> ManifestResult {
@@ -266,7 +309,8 @@ impl Model {
             tree.read_file(rel, limit).map_err(read_error)
         };
         let packages: Arc<[Package]> = self
-            .packages(&index.files, root_name, repo.hash, &read)
+            .packages(&index.files, root_name, repo.hash, &read, &|_| None)
+            .0
             .into();
         *cached = Some(OtherTree {
             checksum: index.checksum,
@@ -280,7 +324,7 @@ impl Model {
 /// The worktree to make active: the wanted one when it is listed and not
 /// prunable; else the current one; else the main worktree or the first one
 /// available.
-fn pick<'a>(
+pub(super) fn pick<'a>(
     worktrees: &'a [Worktree],
     wanted: Option<&lectern_services::project::WorktreeKey>,
     current: Option<&ActiveTree>,
@@ -309,7 +353,7 @@ fn changed(old: &ProjectSnapshot, new: &ProjectSnapshot) -> ChangedParts {
     }
 }
 
-fn read_error(err: GitError) -> ReadError {
+pub(super) fn read_error(err: GitError) -> ReadError {
     match err {
         GitError::TooLarge { .. } => ReadError::TooLarge,
         _ => ReadError::Unreadable,

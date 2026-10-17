@@ -8,6 +8,7 @@ mod locate;
 mod open;
 mod plugin;
 mod real_repo;
+mod refresh;
 mod resolve;
 mod support;
 mod worktrees;

@@ -4,8 +4,10 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use lectern_fs_watch::{WorktreeName, WorktreeSource};
 use lectern_git::{
     EntryLimits, GitError, HashKind, HeadState, Mode, Oid, Repo, RepoPath, WorktreeFile, WorktreeId,
 };
@@ -34,8 +36,10 @@ pub(crate) trait GitAccess: Send + Sync {
     fn hash_blob(&self, kind: HashKind, bytes: &[u8]) -> Oid;
 }
 
-/// One open worktree.
-pub(crate) trait TreeAccess {
+/// One open worktree. The active worktree's handle lives as long as its
+/// watch (step 4): its `watch_source` holds the same handle, so the filter
+/// and the refreshes share one parsed index.
+pub(crate) trait TreeAccess: Send + Sync {
     /// The index's paths as a file list, with the index checksum (None
     /// without an index file). Non-UTF-8 and invalid paths are counted in
     /// `FileList::skipped`.
@@ -49,6 +53,11 @@ pub(crate) trait TreeAccess {
     /// `Err(GitError::TooLarge)` above `limit`; any other error when it is
     /// not a regular file or cannot be read.
     fn read_file(&self, rel: &str, limit: u64) -> Result<Option<Vec<u8>>, GitError>;
+
+    /// The filter and config source for `fs_watch` (`Worktree::watch_source`
+    /// on this same handle). Does no IO; reads only HEAD and config when
+    /// fs_watch loads it, not the index.
+    fn watch_source(&self) -> Arc<dyn WorktreeSource>;
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -239,6 +248,21 @@ impl TreeAccess for lectern_git::Worktree {
             WorktreeFile::Unavailable(why) => Err(GitError::Corrupt(format!("{rel}: {why:?}"))),
         }
     }
+
+    fn watch_source(&self) -> Arc<dyn WorktreeSource> {
+        lectern_git::Worktree::watch_source(self)
+    }
+}
+
+/// The `fs_watch` name of the worktree whose git directory is `git_dir`:
+/// `Main` for the common directory, else `Linked(<id>)`, the directory name
+/// under `<common>/worktrees/` (as `LecternGit::open_worktree` maps it).
+pub(crate) fn worktree_name(common_dir: &Path, git_dir: &Path) -> Option<WorktreeName> {
+    if git_dir == common_dir {
+        return Some(WorktreeName::Main);
+    }
+    let name = git_dir.file_name()?.to_str()?;
+    Some(WorktreeName::Linked(name.into()))
 }
 
 fn head(state: &HeadState) -> Head {
