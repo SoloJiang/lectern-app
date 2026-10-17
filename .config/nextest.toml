@@ -8,3 +8,7 @@ failure-output = "final"
 fail-fast = false
 retries = 0
 failure-output = "immediate-final"
+
+[profile.ci.junit]
+# Read by scripts/ci_annotate_failures.py when the tests fail in CI.
+path = "junit.xml"

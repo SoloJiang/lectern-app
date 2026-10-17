@@ -33,6 +33,9 @@ jobs:
         run: just deny
       - name: Tests
         run: just test --profile ci
+      - name: Annotate failed tests
+        if: failure()
+        run: python3 scripts/ci_annotate_failures.py
       - name: Doctests
         run: just doctest
 
@@ -55,6 +58,9 @@ jobs:
         run: just check
       - name: Tests
         run: just test --profile ci
+      - name: Annotate failed tests
+        if: failure()
+        run: python3 scripts/ci_annotate_failures.py
       - name: Doctests
         run: just doctest
       - name: Build app
