@@ -36,8 +36,8 @@
 | `lectern-kernel` | `Plugin`、`KernelControl::workspace_changed`、事件、`BusyGuard` | 插件机制 |
 | `lectern-services` | `Projects` 接口、快照与事件类型定义在这里（见「接口」） | 消费方（`project_home`、`worktrees`、`agents`、`usage`、`review`）只依赖接口（架构规则 7） |
 | `lectern-git` | 发现仓库、列 worktree、读 index 路径、读工作区文件、算 blob OID | gix 只在 `git` 里用；接口见下文 |
-| `lectern-fs-watch` | worktree 与 git 元数据的变化通知 | 接口见下文 |
-| `lectern-executor` | 后台任务 | UI 线程不做 IO |
+| `lectern-fs-watch` | worktree 与 git 元数据的变化通知 | 接口见下文；实例由 `app` 创建，经 `ProjectDeps` 传入 |
+| `lectern-executor` | 后台任务 | UI 线程不做 IO；实例由 `app` 创建，经 `ProjectDeps` 传入 |
 | `serde` 1 + `serde_json` 1 | package.json | MIT / Apache-2.0；只反序列化需要的字段 |
 | `toml` 0.9（`parse`、`serde`） | Cargo.toml | MIT / Apache-2.0 |
 | `quick-xml` 0.38 | pom.xml | MIT；流式读取，只依赖 `memchr` |
@@ -46,7 +46,7 @@
 选型与放弃的方案见 [ADR 0023](../adr/0023.md)。pnpm-workspace.yaml、settings.gradle(.kts)、go.work、go.mod 用手写的子集解析。版本取实现时 crates.io 上的最新兼容版本，由 Cargo.lock 锁定。
 
 - 不用 `cache`：解析一个清单是微秒级，比 SQLite 查询还快，持久化没有收益。解析结果在内存里以 blob OID 为键缓存（见「数据流与线程」）。
-- `lectern-git`、`lectern-fs-watch`、`lectern-executor` 按库使用：只调用它们的函数和类型，不经过它们注册的插件或服务。规则 7 按「插件 crate 不依赖其他插件 crate」理解；#8 给规则 7 加检查时如果把 `git` 划为插件 crate，本文改为经 `services` 的接口调用，接口内容不变。
+- 本 crate 是插件 crate（`Cargo.toml` 的 `[package.metadata.lectern]` 写 `plugin = true`，[ADR 0025](../adr/0025.md)）：可以依赖 kernel 层的 crate 和不是插件的库 crate（`lectern-git`、`lectern-executor`、`lectern-fs-watch`，以及以后需要时的 `lectern-cache`），不依赖任何其他插件 crate；只有 `app` 依赖本 crate。其他插件读项目模型只经 `services` 里的 `Projects`。
 
 ## 接口
 
@@ -76,6 +76,7 @@ pub trait Projects: Send + Sync {
     fn open_projects(&self) -> Vec<ProjectKey>;
 
     /// 在打开中的项目里归位一个路径：只做前缀比较，不做 IO，任何线程可调用。
+    /// 几个打开的项目都包含这个路径时（父仓库与其中单独打开的子模块或嵌套仓库），返回匹配的 worktree 根或文件夹根最深的那个。
     /// `path` 必须已是规范路径（`resolve` 的结果或 `std::fs::canonicalize`）；不在任何打开项目里时返回 None。
     fn locate(&self, path: &Path) -> Option<Location>;
 
@@ -130,8 +131,10 @@ pub struct ChangedParts {
 pub struct ProjectPlugin { /* deps */ }
 
 pub struct ProjectDeps {
-    pub executor: /* executor 句柄，类型随 executor 设计 */,
-    pub watcher: /* fs_watch 的监听接口，FSEvents 后端由 platform 实现、app 注入 */,
+    /// 由 app 创建并传入，类型随 executor 设计。
+    pub executor: /* executor 句柄 */,
+    /// 由 app 创建并传入（FSEvents 后端由 platform 实现），类型随 fs_watch 设计。
+    pub watcher: /* fs_watch 的监听接口 */,
     /// 用户主目录，判断「主目录被当作 dotfiles 仓库」（见「项目标识」）。由 app 从 platform 取得。
     pub home: PathBuf,
 }
@@ -149,7 +152,12 @@ pub mod manifest {
     pub struct Parsed { /* name, members: Vec<Member>, excludes, partial */ }
     pub fn parse(kind: ManifestKind, bytes: &[u8]) -> Result<Parsed, ManifestError>;
 }
-pub fn resolve_packages(files: &FileList, parsed: &dyn Fn(&str) -> Option<Arc<Parsed>>) -> Vec<Package>;
+/// `manifest(path)`：None 表示工作区里没有这个文件（已删除，不算清单）；Some(Err) 是读取或解析失败，
+/// 子项目照常列出并把错误填进 `Manifest.error`。
+pub fn resolve_packages(
+    files: &FileList,
+    manifest: &dyn Fn(&str) -> Option<Result<Arc<Parsed>, ManifestError>>,
+) -> Vec<Package>;
 pub fn workspace_facts(trees: Vec<Arc<FileList>>) -> Arc<dyn WorkspaceFacts>;
 
 /// `test-support` feature：内存里的假 git（见「测试」）和合成仓库的形状。
@@ -204,7 +212,8 @@ pub enum ProjectKey {
     Folder { root: Arc<Path> },
 }
 
-/// worktree 根目录的规范绝对路径。
+/// worktree 的 git 目录的规范绝对路径：主 worktree 是公共目录，linked worktree 是 `<公共目录>/worktrees/<id>`。
+/// 不用根目录做键：prunable 的 worktree 根目录已不存在，无法规范化，而管理目录还在。
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct WorktreeKey(pub Arc<Path>);
 ```
@@ -235,9 +244,10 @@ pub struct ProjectSnapshot {
 }
 
 pub struct Worktree {
+    /// 即 git 目录，见 `WorktreeKey`。
     pub key: WorktreeKey,
-    /// 主 worktree 为公共目录，linked worktree 为 `<公共目录>/worktrees/<名字>`。
-    pub git_dir: Arc<Path>,
+    /// 根目录。存在时是规范路径；prunable 时取管理目录里 `gitdir` 文件记录的路径去掉末尾的 `/.git`，只做字面归并。
+    pub root: Arc<Path>,
     pub is_main: bool,
     pub head: Head,
     pub locked: bool,
@@ -294,7 +304,7 @@ pub struct Resolved {
 
 不变量：
 
-- `worktrees` 里 `key` 不重复，最多一个 `is_main`；`active.worktree` 是其中一个未 prunable 的 worktree。
+- `worktrees` 里 `key` 和 `root` 都不重复，最多一个 `is_main`；`active.worktree` 是其中一个未 prunable 的 worktree。
 - `files` 先于 `packages` 就绪：`packages` 为 `Ready` 时 `files` 一定是 `Ready`，且子项目来自同一份文件列表。
 - 一次替换内的各部分来自同一轮扫描，不会出现「新的 worktree 列表配旧的当前 worktree」。
 
@@ -328,6 +338,7 @@ pub enum FileKind { File, Executable, Symlink, Submodule }
 
 ```rust
 /// 一个目录一个子项目；同一目录里有几种清单（如 package.json 与 pom.xml）时合在一起。
+/// 被声明、但目录里没有自己清单的成员（Gradle 子项目不要求构建文件；Maven、Gradle、go.work 的显式路径只要求有受跟踪文件）`manifests` 为空。
 pub struct Package {
     pub dir: RelPath,
     /// 显示名：按 package.json `name`、Cargo `package.name`、go.mod `module`、Maven `artifactId`、
@@ -368,7 +379,7 @@ pub enum ManifestError {
 }
 ```
 
-不变量：`dir` 不重复，列表按 `dir` 的字节序排序；`parent` 指向的子项目的 `dir` 是本 `dir` 的真前缀（按 `/` 分段）；`manifests` 至少一项。
+不变量：`dir` 不重复，列表按 `dir` 的字节序排序；`parent` 指向的子项目的 `dir` 是本 `dir` 的真前缀（按 `/` 分段）；`manifests` 为空时 `declared` 一定为 true（未声明的子项目来自自己目录里的清单）。
 
 #### 清单格式
 
@@ -389,9 +400,9 @@ fixtures：每行至少一份真实写法的样本（脱敏），格式随版本
 
 `resolve_packages` 是纯函数，输入文件列表和每个清单的解析结果：
 
-1. 候选：文件列表里每个清单文件（`FileKind::File` 或 `Executable`，符号链接不算）所在的目录。
+1. 候选：文件列表里每个清单文件（`FileKind::File` 或 `Executable`，符号链接不算）所在的目录。`manifest(path)` 返回 None 的不算；返回 Err 的照常是候选，只是它声明的成员无法展开。
 2. 声明：每个工作区清单按上表的规则把成员模式展开成目录。glob 相对声明它的清单所在目录，`*` 不跨 `/`，`**` 匹配任意层；去掉 `./` 前缀和末尾的 `/`；`..` 按字面路径归并，越出 worktree 的丢弃。npm、pnpm、Cargo 的 glob 只匹配同生态有清单的候选目录；Maven、Gradle、go.work 的显式路径只要目录下有受跟踪文件就成立。
-3. 合并：每个目录一个 `Package`。被声明的标 `declared`。未被声明的候选目录也收入，除非路径里有 `node_modules`、`vendor`、`fixtures`、`__fixtures__`、`testdata` 这几段之一（测试样本里的清单不是子项目）；被声明的目录不受这条排除。
+3. 合并：每个目录一个 `Package`。被声明的标 `declared`；没有自己清单的被声明目录也收入，`manifests` 为空，名字取声明里的名字（Gradle 的 `:a:b` 取最后一段）或目录名。未被声明的候选目录也收入，除非路径里有 `node_modules`、`vendor`、`fixtures`、`__fixtures__`、`testdata` 这几段之一（测试样本里的清单不是子项目）；被声明的目录不受这条排除。
 4. 层级：按 `dir` 排序后，用栈算出每项的 `parent`；用 `FileList::range_under` 算出 `files`。
 
 `cloudprint-miniapps` 的形状（yarn workspaces + Maven 多模块，`apps/miniapp-console/frontend` 有 package.json 却不在 workspaces 里）作为快照测试的样例：后者是 `declared: false` 的子项目。
@@ -434,11 +445,11 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - 快照存在每个项目的 `Mutex<Arc<ProjectSnapshot>>` 里，只有这个项目的扫描任务替换它。每个项目同时最多一个扫描任务；运行期间来的事件只标记脏，结束后再跑一轮。一批事件到达后等 50 ms 再开始，合并 agent 连续写文件产生的多批事件。
 - 增量刷新按变化的内容决定做什么：
   - 只有普通文件的内容变了：什么都不做（文件列表来自 index，内容变化不改变它）。
-  - `index` 变了：重读 index 路径；校验和未变时跳过；变了就重建 `FileList` 和 facts，清单集合变了再重做成员解析。
+  - `index` 变了：重读 index 路径；校验和未变时跳过；变了就重建 `FileList` 和 facts，并重做成员解析。普通文件的增减也会改变 `Package.files` 和「显式路径的目录下有受跟踪文件」这类成员条件，所以只要 `FileList` 变了就重算。重算只读新出现的清单；已有清单沿用以 blob OID 为键的解析结果，只有 fs_watch 报告变化的才重读；成员解析本身是内存里的计算。
   - 清单文件变了：重读这个文件，重做成员解析。
   - 任一 worktree 的 `HEAD` 变了：只更新那个 worktree 的 `head`；当前 worktree 的 `index` 通常会一起变，按上一条处理。
   - `worktrees/` 下有增减：重新列 worktree；当前 worktree 被删除时切到主 worktree（没有时第一个可用的），`ChangedParts.active` 为 true。
-- 清单内容从工作区读（用户和 agent 看到的版本，未暂存的修改也算），缓存键是这份字节的 blob OID（`hash_blob`，按仓库的哈希算法；文件夹项目用 SHA-1），值是 `Arc<Parsed>`。缓存在进程内、所有项目和 worktree 共享，按字节 LRU，上限 2 MB（[ADR 0017](../adr/0017.md)「内存的具体约束」）。切换 worktree 时，各分支内容相同的清单直接命中。
+- 清单内容从工作区读（用户和 agent 看到的版本，未暂存的修改也算），缓存键是这份字节的 blob OID（`hash_blob`，按仓库的哈希算法；文件夹项目用 SHA-1），值是 `Result<Arc<Parsed>, ManifestError>`：语法错误同样按 OID 缓存，`TooLarge` 和 `Unreadable` 没有可哈希的内容，不缓存。缓存在进程内、所有项目和 worktree 共享，按字节 LRU，上限 2 MB（[ADR 0017](../adr/0017.md)「内存的具体约束」）。切换 worktree 时，各分支内容相同的清单直接命中。
 - 切换当前 worktree：先发布 `files: Pending` 的新快照（视图立即显示骨架），旧 worktree 的 `FileList` 随旧快照释放，只保留它的元数据。
 - 插件停用时，kernel 丢弃扫描任务；视图手里的快照仍然有效，只是不再更新。
 
@@ -450,7 +461,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 | 同上，再到子项目就绪（约 25 个清单） | 再加 < 15 ms | `project/packages_cloudprint` |
 | 大仓库：10 万个文件、2,000 个清单，到文件列表就绪 / 子项目就绪 | < 80 ms / 再加 < 150 ms | `project/open_100k` |
 | 切换当前 worktree（清单缓存已热），`cloudprint` 形状 | < 30 ms | `project/switch_worktree` |
-| `index` 变化后的刷新，`cloudprint` 形状 | < 15 ms | `project/refresh_index` |
+| `index` 变化后的刷新（重建文件列表与 facts、重算成员解析，清单缓存已热），`cloudprint` 形状 / 10 万文件 | < 15 ms / < 60 ms | `project/refresh_index` |
 | `contains`：文件名与 `*.ext` 模式 / 含 `/` 的模式（10 万文件，未缓存） | < 1 µs / < 5 ms | `project/facts_contains` |
 | 常驻内存：`cloudprint` 形状 / 10 万文件 | < 2 MB / < 12 MB | 静止后按 kernel「性能」一节测插件内存 |
 
@@ -479,9 +490,9 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 全部在 Linux 上运行（`just test -p lectern-project`），不调用 git 命令行、不访问网络：
 
 - 清单解析（`manifest_*`）：`tests/fixtures/manifests/<格式>/` 下每个样本的解析结果用 insta 快照；含 yarn 1 对象写法、pnpm 的 `!` 排除与注释、Cargo 虚拟清单与 `exclude`、POM 4.0.0 / 4.1.0 与 profile 里的 modules、Groovy / Kotlin 的 settings（`include` 多参数跨行、`projectDir`、`includeBuild`、变量写法标为 partial）、go.work 块写法；超过 1 MB、语法错误各一例。
-- 成员解析（`packages_*`）：内存里构造文件列表，快照验收。场景：`cloudprint` 形状、嵌套工作区、同一目录多种清单、Maven 模块指向 `../`、越出 worktree 的路径、样本目录排除、未声明但有清单的目录。
-- 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（内存里的仓库、worktree、index 与工作区文件，记录每次调用）。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable / locked / detached / unborn、文件夹项目的上限与跳过规则、`locate` 取最深的子项目。
-- 刷新（`refresh_*`）：用 fs_watch 的模拟后端驱动事件；连续事件合并为一轮、扫描中到达的事件触发下一轮、只改普通文件不重读 index、清单 OID 未变不重新解析、删除当前 worktree 后的切换、generation 严格递增。
+- 成员解析（`packages_*`）：内存里构造文件列表，快照验收。场景：`cloudprint` 形状、嵌套工作区、同一目录多种清单、没有构建文件的 Gradle 子项目（`manifests` 为空）、语法错误与超大清单的错误保留在 `Manifest.error`、Maven 模块指向 `../`、越出 worktree 的路径、样本目录排除、未声明但有清单的目录。
+- 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（内存里的仓库、worktree、index 与工作区文件，记录每次调用）。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable（根目录已删除，键仍来自管理目录）/ locked / detached / unborn、文件夹项目的上限与跳过规则、`locate` 取最深的子项目，以及父仓库和其中单独打开的子模块都包含路径时 `locate` 返回子模块的项目。
+- 刷新（`refresh_*`）：用 fs_watch 的模拟后端驱动事件；连续事件合并为一轮、扫描中到达的事件触发下一轮、只改普通文件内容不重读 index、新增普通受跟踪文件后 `Package.files` 更新而已有清单不重新解析、清单 OID 未变不重新解析、删除当前 worktree 后的切换、generation 严格递增。
 - facts（`facts_*`）：模式语义逐条覆盖；多个项目的并集；不合法的模式返回 false。
 - 插件（`plugin_*`）：用 kernel 的 `TestKernel`。`activate` 之后、`open` 之前 `FakeGit` 没有收到任何调用；`open` 之后提交的 facts 让一个 `Workspace(["pom.xml"])` 的测试插件激活；事件顺序为 `Opened` → `Changed`。
 - 真实仓库（`real_repo_*`）：用 git 的 `test-support` 构造器写出的仓库（含 linked worktree、SHA-256 仓库各一个）跑一遍 open 与刷新，确认 `GitAccess` 的生产实现与 `FakeGit` 行为一致。
@@ -501,7 +512,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
    - 再开一个窗口，两个窗口各有自己的当前 worktree。
    第二种要求快照按窗口区分当前 worktree，`Projects` 的接口要改，涉及的实现等答复后再做。
 
-技术问题已在文中决定。规则 7 的范围（`lectern-git` 是否算插件 crate）随 #8 确定，见「依赖」。
+技术问题已在文中决定。
 
 ## 验收
 
