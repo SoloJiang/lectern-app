@@ -435,14 +435,14 @@ pub static BUDGETS: &[Budget] = &[
         "git/changes_clean",
         &[median(Limit::TimeBelow(ms(15)))],
         GIT,
-        State::Planned("git"),
+        ACTIVE,
         Time,
     ),
     share(
         "git/changes_50",
         &[median(Limit::TimeBelow(ms(15)))],
         GIT,
-        State::Planned("git"),
+        ACTIVE,
         Time,
     ),
     // `refresh(Full)`'s share; refreshing one path is never slower.
@@ -450,14 +450,14 @@ pub static BUDGETS: &[Budget] = &[
         "git/refresh_one",
         &[median(Limit::TimeBelow(ms(15)))],
         GIT,
-        State::Planned("git"),
+        ACTIVE,
         Time,
     ),
     share(
         "git/refresh_full",
         &[median(Limit::TimeBelow(ms(15)))],
         GIT,
-        State::Planned("git"),
+        ACTIVE,
         Time,
     ),
     share(
@@ -478,24 +478,18 @@ pub static BUDGETS: &[Budget] = &[
         "git/changes_capped",
         &[median(Limit::TimeBelow(Duration::from_secs(1)))],
         GIT,
-        State::Planned("git"),
+        ACTIVE,
         Time,
     ),
     // Live bytes at most the sum of the `Limits` defaults; the git
     // implementation writes the number into the git design and here.
-    share(
-        "git/changes_capped_bytes",
-        RECORD,
-        GIT,
-        State::Planned("git"),
-        Memory,
-    ),
+    share("git/changes_capped_bytes", RECORD, GIT, ACTIVE, Memory),
     // Hunk LRU 16 MB plus one `ChangeSet` 32 MB; no handle held while idle.
     share(
         "git/resident",
         &[median(Limit::BytesAtMost(48 * MB))],
         GIT,
-        State::Planned("git"),
+        ACTIVE,
         Memory,
     ),
     // The partition is open and the system file cache warm.

@@ -112,11 +112,23 @@ pub(crate) fn read(
     limits: &EntryLimits,
     cancel: &AtomicBool,
 ) -> Result<TrackedPaths, GitError> {
+    match parse(path, hash)? {
+        None => Ok(TrackedPaths::empty()),
+        Some((file, checksum)) => convert(&file, checksum, open_handle, limits, cancel),
+    }
+}
+
+/// Parses the index at `path` and returns it with its checksum (see
+/// [`checksum`]); None without an index file.
+pub(crate) fn parse(
+    path: &Path,
+    hash: HashKind,
+) -> Result<Option<(gix::index::File, Oid)>, GitError> {
     // With `index.skipHash` the stored checksum is null and ours is computed
     // over the file; retry when the file changes while it is parsed.
     for _ in 0..3 {
         let Some(before) = checksum(path, hash)? else {
-            return Ok(TrackedPaths::empty());
+            return Ok(None);
         };
         #[cfg(test)]
         hook::parsed();
@@ -129,7 +141,7 @@ pub(crate) fn read(
             Err(err) => {
                 let err = err.into_error();
                 if err.is_not_found() {
-                    return Ok(TrackedPaths::empty());
+                    return Ok(None);
                 }
                 return Err(GitError::from_gix(err));
             }
@@ -141,7 +153,7 @@ pub(crate) fn read(
                 _ => continue,
             },
         };
-        return convert(&file, checksum, open_handle, limits, cancel);
+        return Ok(Some((file, checksum)));
     }
     Err(GitError::Corrupt(format!(
         "{} kept changing while it was read",

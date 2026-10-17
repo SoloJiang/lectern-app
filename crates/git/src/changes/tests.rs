@@ -227,7 +227,8 @@ fn numstat_matches_git() {
     let mut names: Vec<_> = std::fs::read_dir(fixtures())
         .unwrap()
         .map(|e| e.unwrap())
-        .filter(|e| e.file_type().unwrap().is_dir() && e.file_name() != "scripts")
+        // Tree fixtures have a `trees` file; worktree fixtures don't.
+        .filter(|e| e.file_type().unwrap().is_dir() && e.path().join("trees").is_file())
         .map(|e| e.file_name().into_string().unwrap())
         .collect();
     names.sort();
@@ -906,6 +907,60 @@ fn hunk_cache_second_computation_hits() {
     let new = other.tree(&[("elsewhere", b"hunk_cache_second_computation_hits 2\n")]);
     diff(&other, old, new);
     assert_eq!(crate::hunks::hook::counts(), (hits + 2, misses + 1));
+}
+
+#[test]
+fn hunk_cache_hit_checks_limits_attributes_and_missing_objects() {
+    // A hit takes the sizes from the cache and only checks that the objects
+    // exist; the results are those of reading the headers.
+    let contents: [&[u8]; 2] = [
+        b"hunk_cache_hit_checks 1\n",
+        b"hunk_cache_hit_checks 2, longer\n",
+    ];
+    let t = TestRepo::new();
+    let (old, new) = (t.tree(&[("f", contents[0])]), t.tree(&[("f", contents[1])]));
+    diff(&t, old, new);
+    let (hits, misses) = crate::hunks::hook::counts();
+    let limits = Limits {
+        diff_bytes: contents[0].len() as u64,
+        ..Limits::default()
+    };
+    let set = diff_with(&t, old, new, &limits);
+    assert_eq!(set.files()[0].detail, Detail::TooLarge);
+    assert_eq!(crate::hunks::hook::counts(), (hits + 1, misses));
+
+    // `-diff` never looks the pair up and reports both sizes.
+    let attrs = t.blob(b"f -diff\n");
+    let side = |content: &[u8]| {
+        t.tree_entries(&[
+            (".gitattributes", Mode::File, attrs),
+            ("f", Mode::File, t.blob(content)),
+        ])
+    };
+    let set = diff(&t, side(contents[0]), side(contents[1]));
+    assert_eq!(
+        set.files()[0].detail,
+        Detail::Binary {
+            old_size: Some(contents[0].len() as u64),
+            new_size: Some(contents[1].len() as u64),
+        }
+    );
+    assert_eq!(crate::hunks::hook::counts(), (hits + 1, misses));
+
+    // Another repository without the new blob: a hit, but the side is missing.
+    let other = TestRepo::new();
+    let present = other.blob(contents[0]);
+    let absent = Oid::for_blob(HashKind::Sha1, contents[1]);
+    let old = other.tree_entries(&[("f", Mode::File, present)]);
+    let new = other.tree_entries(&[("f", Mode::File, absent)]);
+    let set = diff(&other, old, new);
+    assert_eq!(crate::hunks::hook::counts(), (hits + 2, misses));
+    let change = &set.files()[0];
+    assert_eq!(change.detail, Detail::NoDiff);
+    assert_eq!(
+        change.new.as_ref().unwrap().content,
+        Content::Unavailable(Unavailable::Missing)
+    );
 }
 
 #[test]

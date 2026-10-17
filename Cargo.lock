@@ -1970,7 +1970,6 @@ dependencies = [
  "gix-config",
  "gix-date",
  "gix-diff",
- "gix-dir",
  "gix-discover",
  "gix-error",
  "gix-features",
@@ -2145,26 +2144,6 @@ dependencies = [
  "gix-tempfile",
  "gix-trace",
  "gix-traverse",
- "gix-worktree",
-]
-
-[[package]]
-name = "gix-dir"
-version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2e41d125c2c6f981aad27299a6233a7ace3413289c1e2994f57e5bab1c34847"
-dependencies = [
- "bstr",
- "gix-discover",
- "gix-error",
- "gix-fs",
- "gix-ignore",
- "gix-index",
- "gix-object",
- "gix-path",
- "gix-pathspec",
- "gix-trace",
- "gix-utils",
  "gix-worktree",
 ]
 
@@ -4326,6 +4305,7 @@ dependencies = [
  "gix",
  "insta",
  "lectern-platform",
+ "rustix",
  "tempfile",
 ]
 

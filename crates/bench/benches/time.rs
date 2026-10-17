@@ -11,6 +11,8 @@ mod executor;
 mod fs_watch;
 #[path = "time/git.rs"]
 mod git;
+#[path = "fixtures/git_worktree.rs"]
+mod git_worktree;
 #[path = "time/i18n.rs"]
 mod i18n;
 #[path = "time/kernel.rs"]
@@ -44,6 +46,11 @@ const BENCHES: &[Bench] = &[
     git::OPEN_HANDLE,
     git::DIFF_50_COLD,
     git::DIFF_50_WARM,
+    git::CHANGES_CLEAN,
+    git::CHANGES_50,
+    git::REFRESH_FULL,
+    git::REFRESH_ONE,
+    git::CHANGES_CAPPED,
     i18n::FRAME_STRINGS,
     kernel::SERVICE_GET,
     kernel::SERVICE_FOR_EACH,

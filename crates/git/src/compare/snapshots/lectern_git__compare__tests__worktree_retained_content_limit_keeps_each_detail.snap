@@ -1,0 +1,8 @@
+---
+source: crates/git/src/compare/tests.rs
+expression: "lines(&set).join(\"\\n\")"
+---
+A a.txt (untracked) - -> f:5d308e1 text(+1,-0)
+A b.bin (untracked) - -> f:not-retained:f1050c0 binary
+A c.txt (untracked) - -> f:not-retained:4cb29ea truncated(+3,-0)
+A d.big (untracked) - -> f:not-retained:7e7abc7 too-large
