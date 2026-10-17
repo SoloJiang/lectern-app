@@ -1,0 +1,7 @@
+---
+source: crates/git/src/changes/tests.rs
+expression: "render(&diff(&t, old, new))"
+---
+M a  100644 587be6b -> 100644 Missing  nodiff
+M b  100644 587be6b -> 100644 975fbec  text +1 -1 [0..1>0..1]
+totals: 2 files, +1 -1, truncated 0, too large 0, listed 0, not retained 0, invalid []

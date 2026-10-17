@@ -1,0 +1,6 @@
+---
+source: crates/git/src/rows/tests.rs
+expression: "inline(\"    let total = price * count;\",\n\"    let total = price * quantity + tax;\")"
+---
+-    let total = price * [count];
++    let total = price * [quantity + tax];

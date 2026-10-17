@@ -1,0 +1,2 @@
+# Blobs and git's outputs stay byte for byte as git wrote them (CRLF, NUL).
+* -text

@@ -1,0 +1,7 @@
+100644 blob 1bd085f3e7301d897b00df1adbc46cc0f997a0f0	.github/workflows/ci.yml
+100644 blob 090f68a3374cd4cf071176b461e9020922fdd9bb	README.md
+100644 blob 04fa9a58d825a1f8c5d733d9bf0db78ae25d5ab5	crates/project/src/lib.rs
+100644 blob a767f7ab8bf750a9c199be0a144647145482ec38	docs/adr/0020.md
+100644 blob 2a9a9c775eb018c3287c08a055793cb20f251e63	docs/design/interaction.md
+100644 blob 356f7d560d533f884380a4bc2e762442178171f1	repeated.txt
+100644 blob 0b01b2728841e8a1be87b53f8deddaaba878b6d7	scripts/check_architecture.py
