@@ -1,0 +1,73 @@
+---
+source: crates/agents/src/claude/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "aaaaaaaa-0000-4000-8000-000000000041",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1790845233231,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1790845236252,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 0,
+                len: 383,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder task for agent two.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_s201",
+                    ),
+                    name: "Glob",
+                    kind: Search {
+                        paths: [
+                            "/Users/dev/fixture/repo",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790845234238,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845235245,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 384,
+                        len: 878,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 1263,
+                            len: 605,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 1869,
+                    len: 806,
+                    part: 0,
+                },
+            ),
+        ],
+    },
+]

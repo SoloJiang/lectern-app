@@ -10,5 +10,23 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "domain"
 
+[features]
+# `testing::parse_file`, for tests and lectern-bench (docs/design/agents.md).
+test-support = []
+
+[dependencies]
+lectern-services = { path = "../services" }
+serde.workspace = true
+# `raw_value`: tool inputs are kept as borrowed raw JSON and only parsed for
+# the tools the adapter classifies, and `load` returns them verbatim.
+serde_json = { workspace = true, features = ["raw_value"] }
+
+[dev-dependencies]
+insta.workspace = true
+
+[[test]]
+name = "perf_smoke"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

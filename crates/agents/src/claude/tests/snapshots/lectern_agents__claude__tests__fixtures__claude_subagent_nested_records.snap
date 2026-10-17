@@ -1,0 +1,11 @@
+---
+source: crates/agents/src/claude/tests/fixtures.rs
+expression: render(&parsed.batch.records)
+---
+0.0 Context { at: Timestamp(1790845233231), cwd: "/Users/dev/fixture/repo", logged_branch: Some("feature/fixture"), model: None }
+0.1 TurnStarted { turn: TurnId("aaaaaaaa-0000-4000-8000-000000000041"), at: Timestamp(1790845233231) }
+384.0 Context { at: Timestamp(1790845234238), cwd: "/Users/dev/fixture/repo", logged_branch: Some("feature/fixture"), model: Some("fixture-model-a") }
+384.1 ToolStarted(ToolStarted { call: ToolCallId("toolu_fixture_s201"), turn: Some(TurnId("aaaaaaaa-0000-4000-8000-000000000041")), at: Timestamp(1790845234238), name: "Glob", kind: Search { paths: ["/Users/dev/fixture/repo"] } })
+384.2 Usage(UsageRecord { at: Timestamp(1790845234238), turn: Some(TurnId("aaaaaaaa-0000-4000-8000-000000000041")), model: Some("fixture-model-a"), tokens: Anthropic { input: 6, output: 21, cache_read: 0, cache_write: 200, cache_write_5m: 200, cache_write_1h: 0 }, key: Claude { message_id: "msg_fixture_s201", request_id: Some("req_fixture_s201") }, advisor: None, superseded: false, sidechain: true, origin: SessionLog })
+1263.0 ToolFinished(ToolFinished { call: ToolCallId("toolu_fixture_s201"), at: Timestamp(1790845235245), status: Completed, exec_session: None })
+1869.0 Usage(UsageRecord { at: Timestamp(1790845236252), turn: Some(TurnId("aaaaaaaa-0000-4000-8000-000000000041")), model: Some("fixture-model-a"), tokens: Anthropic { input: 4, output: 7, cache_read: 200, cache_write: 0, cache_write_5m: 0, cache_write_1h: 0 }, key: Claude { message_id: "msg_fixture_s202", request_id: Some("req_fixture_s202") }, advisor: None, superseded: false, sidechain: true, origin: SessionLog })

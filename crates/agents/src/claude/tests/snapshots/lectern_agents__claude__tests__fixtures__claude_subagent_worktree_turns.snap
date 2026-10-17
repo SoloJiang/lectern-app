@@ -1,0 +1,73 @@
+---
+source: crates/agents/src/claude/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "aaaaaaaa-0000-4000-8000-000000000037",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1790845233231,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1790845236252,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 0,
+                len: 424,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder task for agent one.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_s101",
+                    ),
+                    name: "Edit",
+                    kind: Edit {
+                        paths: [
+                            "/Users/dev/fixture/repo/.claude/worktrees/agent-a0fa0001/src/lib.rs",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790845234238,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845235245,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 425,
+                        len: 1040,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 1466,
+                            len: 975,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 2442,
+                    len: 847,
+                    part: 0,
+                },
+            ),
+        ],
+    },
+]

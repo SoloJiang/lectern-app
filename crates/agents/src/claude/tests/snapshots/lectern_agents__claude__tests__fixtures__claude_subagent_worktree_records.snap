@@ -1,0 +1,11 @@
+---
+source: crates/agents/src/claude/tests/fixtures.rs
+expression: render(&parsed.batch.records)
+---
+0.0 Context { at: Timestamp(1790845233231), cwd: "/Users/dev/fixture/repo/.claude/worktrees/agent-a0fa0001", logged_branch: Some("worktree-agent-a0fa0001"), model: None }
+0.1 TurnStarted { turn: TurnId("aaaaaaaa-0000-4000-8000-000000000037"), at: Timestamp(1790845233231) }
+425.0 Context { at: Timestamp(1790845234238), cwd: "/Users/dev/fixture/repo/.claude/worktrees/agent-a0fa0001", logged_branch: Some("worktree-agent-a0fa0001"), model: Some("fixture-model-a") }
+425.1 ToolStarted(ToolStarted { call: ToolCallId("toolu_fixture_s101"), turn: Some(TurnId("aaaaaaaa-0000-4000-8000-000000000037")), at: Timestamp(1790845234238), name: "Edit", kind: Edit { paths: ["/Users/dev/fixture/repo/.claude/worktrees/agent-a0fa0001/src/lib.rs"] } })
+425.2 Usage(UsageRecord { at: Timestamp(1790845234238), turn: Some(TurnId("aaaaaaaa-0000-4000-8000-000000000037")), model: Some("fixture-model-a"), tokens: Anthropic { input: 8, output: 33, cache_read: 0, cache_write: 300, cache_write_5m: 300, cache_write_1h: 0 }, key: Claude { message_id: "msg_fixture_s101", request_id: Some("req_fixture_s101") }, advisor: None, superseded: false, sidechain: true, origin: SessionLog })
+1466.0 ToolFinished(ToolFinished { call: ToolCallId("toolu_fixture_s101"), at: Timestamp(1790845235245), status: Completed, exec_session: None })
+2442.0 Usage(UsageRecord { at: Timestamp(1790845236252), turn: Some(TurnId("aaaaaaaa-0000-4000-8000-000000000037")), model: Some("fixture-model-a"), tokens: Anthropic { input: 4, output: 9, cache_read: 300, cache_write: 0, cache_write_5m: 0, cache_write_1h: 0 }, key: Claude { message_id: "msg_fixture_s102", request_id: Some("req_fixture_s102") }, advisor: None, superseded: false, sidechain: true, origin: SessionLog })

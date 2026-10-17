@@ -1,0 +1,502 @@
+---
+source: crates/agents/src/claude/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "aaaaaaaa-0000-4000-8000-000000000002",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1790845201007,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1790845213091,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 676,
+                len: 479,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt one: add the fixture module.",
+        items: [
+            AgentText(
+                ContentRef {
+                    pos: 1967,
+                    len: 794,
+                    part: 0,
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0001",
+                    ),
+                    name: "Read",
+                    kind: Read {
+                        paths: [
+                            "/Users/dev/fixture/repo/src/lib.rs",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790845204028,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845205035,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 2762,
+                        len: 854,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 3617,
+                            len: 632,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0002",
+                    ),
+                    name: "Edit",
+                    kind: Edit {
+                        paths: [
+                            "/Users/dev/fixture/repo/src/lib.rs",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790845206042,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845207049,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 4250,
+                        len: 949,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 5200,
+                            len: 916,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0003",
+                    ),
+                    name: "Edit",
+                    kind: Edit {
+                        paths: [
+                            "/Users/dev/fixture/repo/src/lib.rs",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790845208056,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845209063,
+                            ),
+                            Failed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 6117,
+                        len: 920,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 7038,
+                            len: 641,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0004",
+                    ),
+                    name: "Write",
+                    kind: Edit {
+                        paths: [
+                            "/Users/dev/fixture/repo/src/new_module.rs",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790845210070,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845211077,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 7680,
+                        len: 897,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 8578,
+                            len: 675,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 9254,
+                    len: 786,
+                    part: 0,
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 10041,
+                    len: 1077,
+                    part: 0,
+                },
+            ),
+        ],
+    },
+    Turn {
+        id: TurnId(
+            "aaaaaaaa-0000-4000-8000-000000000016",
+        ),
+        ordinal: 2,
+        started_at: Timestamp(
+            1790845220140,
+        ),
+        ended_at: None,
+        prompt: Some(
+            ContentRef {
+                pos: 11509,
+                len: 430,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt two: run the tests.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0006",
+                    ),
+                    name: "Bash",
+                    kind: Execute {
+                        command: "cd crates && cargo test --quiet",
+                        workdir: "/Users/dev/fixture/repo",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1790845221147,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845222154,
+                            ),
+                            Interrupted,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 11940,
+                        len: 886,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 12827,
+                            len: 578,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Injected(
+                ContentRef {
+                    pos: 13406,
+                    len: 440,
+                    part: 65535,
+                },
+            ),
+        ],
+    },
+    Turn {
+        id: TurnId(
+            "aaaaaaaa-0000-4000-8000-000000000020",
+        ),
+        ordinal: 3,
+        started_at: Timestamp(
+            1790845230210,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1790845252364,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 13847,
+                len: 448,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt three: delegate to two agents.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0007a",
+                    ),
+                    name: "Task",
+                    kind: SpawnAgent,
+                    started_at: Timestamp(
+                        1790845231217,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845240280,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 14296,
+                        len: 919,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 16135,
+                            len: 666,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0007b",
+                    ),
+                    name: "Agent",
+                    kind: SpawnAgent,
+                    started_at: Timestamp(
+                        1790845232224,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845241287,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 15216,
+                        len: 918,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 16802,
+                            len: 666,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0008",
+                    ),
+                    name: "Bash",
+                    kind: Execute {
+                        command: "rm -rf target",
+                        workdir: "/Users/dev/fixture/repo/crates",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1790845242294,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845243301,
+                            ),
+                            Denied,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 17469,
+                        len: 871,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 18341,
+                            len: 725,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0009a",
+                    ),
+                    name: "Grep",
+                    kind: Search {
+                        paths: [
+                            "/Users/dev/fixture/repo/crates/src",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790845244308,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845247329,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 19067,
+                        len: 841,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 21606,
+                            len: 616,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0009b",
+                    ),
+                    name: "Glob",
+                    kind: Search {
+                        paths: [
+                            "/Users/dev/fixture/repo/crates",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790845245315,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845248336,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 19909,
+                        len: 824,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 22223,
+                            len: 607,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "toolu_fixture_0009c",
+                    ),
+                    name: "mcp__fixture__lookup",
+                    kind: Other,
+                    started_at: Timestamp(
+                        1790845246322,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790845249343,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 20734,
+                        len: 871,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 22831,
+                            len: 565,
+                            part: 0,
+                        },
+                    ),
+                },
+            ),
+            Injected(
+                ContentRef {
+                    pos: 23793,
+                    len: 487,
+                    part: 65535,
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 24281,
+                    len: 790,
+                    part: 0,
+                },
+            ),
+        ],
+    },
+]
