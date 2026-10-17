@@ -1,0 +1,16 @@
+---
+source: crates/cache/src/tests/basics.rs
+expression: reader.unwrap()
+---
+cache_size = Integer(-1024)
+mmap_size = Integer(0)
+busy_timeout = Integer(100)
+journal_mode = Text("wal")
+synchronous = Integer(1)
+journal_size_limit = Integer(4194304)
+trusted_schema = Integer(0)
+cell_size_check = Integer(1)
+query_only = Integer(1)
+auto_vacuum = Integer(2)
+application_id = Integer(1279480899)
+user_version = Integer(1)
