@@ -1,6 +1,6 @@
 # git 夹具
 
-`numstat_matches_git` 和 `rename_*`、`diff_trees_*` 测试用的对照数据：用真实的 git 构造两棵树，记下 git 对它们的 `--numstat` 和 `--raw` 输出。测试只导入这些文件，不运行 git（[设计文档「测试」](../../../../docs/design/git.md#测试)）。
+`numstat_matches_git` 和 `rename_*`、`diff_trees_*` 测试用的对照数据：用真实的 git 构造两棵树，记下 git 对它们的 `--numstat` 和 `--raw` 输出；`worktree_*` 测试用的工作区夹具见下文「工作区夹具」。测试只导入这些文件，不运行 git（[设计文档「测试」](../../../../docs/design/git.md#测试)）。
 
 ## 格式
 
@@ -19,6 +19,18 @@
 
 `TestRepo::import_fixture` 写入 blob、按两份列表重建两棵树，并检查每个 OID 都与 git 记录的相同。
 
+### 工作区夹具
+
+`worktree_*` 测试用的夹具保存工作区本身，没有 `trees` 文件（`numstat_matches_git` 据此跳过它们）：
+
+| 文件 | 内容 |
+|---|---|
+| `files/<路径>` | 工作区文件，逐字节保存；名字以 `.git` 开头的（`.gitattributes`）存为 `dot-git…`，否则它们会作用在本仓库里的夹具上 |
+| `expected/git-version` | 生成输出的 `git --version` |
+| `expected/<变体>/ls-files` | `git add -A` 之后的 `git ls-files -s -z`：git 按属性转换后存进对象库的 blob OID |
+
+`<变体>` 是 `autocrlf=<值>`（`git add` 加 `-c core.autocrlf=<值>` 运行；测试在仓库配置里写同样的值）。`TestRepo::import_worktree_fixture` 把 `files/` 写进工作区，并把 `dot-git…` 还原成 `.git…`。
+
 ## 生成
 
 ```sh
@@ -33,5 +45,6 @@ bash crates/git/tests/fixtures/scripts/generate-all.sh <临时目录>
 | `renames` | 精确重命名与 git 的同名优先、空文件、同名文件的 75 % 和矩阵的 50 %、符号链接与子模块只按精确匹配、低于 50 % 不配对、CRLF 与二进制的相似度；变体 `renameLimit=1` |
 | `rename_many` | 40 个文件换名并小改、5 个精确重命名；变体 `renameLimit=39`（只剩精确重命名）、`renameLimit=40` |
 | `real` | 本仓库历史里 6 个文件各自一次提交前后的版本（文档、Python、YAML、Rust），以及一个同一行重复六十多次的合成文件（histogram 的退化情形） |
+| `worktree_conversions` | 工作区夹具：`text` / `eol` / `text=auto` / `-text`、`ident`、UTF-16LE 与带 BOM 的 UTF-16 `working-tree-encoding`，CRLF、混合换行、单独的 CR、带 NUL 的 `text=auto` 文件；变体 `autocrlf=false`、`true`、`input` |
 
 git 升级导致输出变化时新增一份夹具，不覆盖旧的。生成于 git 2.43.0。

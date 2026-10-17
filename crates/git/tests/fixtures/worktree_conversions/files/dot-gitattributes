@@ -1,0 +1,8 @@
+*.crlf text eol=crlf
+*.lf text eol=lf
+*.auto text=auto
+*.text text
+*.raw -text
+*.id ident
+*.u16 text working-tree-encoding=UTF-16LE
+*.u16bom text working-tree-encoding=UTF-16

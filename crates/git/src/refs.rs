@@ -403,7 +403,7 @@ fn commit_info(handle: &Handle, id: Oid) -> Result<CommitInfo, GitError> {
     })
 }
 
-fn merge_base(
+pub(crate) fn merge_base(
     handle: &Handle,
     a: Oid,
     b: Oid,

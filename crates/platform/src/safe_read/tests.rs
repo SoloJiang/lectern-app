@@ -623,6 +623,125 @@ fn check_swap_never_escapes(backend: Backend) {
     );
 }
 
+// list_*
+
+fn names(entries: Vec<DirEntry>) -> Vec<(String, FileKind)> {
+    let mut out: Vec<(String, FileKind)> = entries
+        .into_iter()
+        .map(|e| (String::from_utf8(e.name).unwrap(), e.kind))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[test]
+fn list_root_and_subdirectories_with_kinds() {
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("f"), b"f");
+    write(&tmp.path().join("d/inner"), b"i");
+    symlink("/etc", tmp.path().join("link")).unwrap();
+    let _socket = UnixListener::bind(tmp.path().join("sock")).unwrap();
+    mkfifo(&tmp.path().join("fifo"));
+    for root in roots(tmp.path()) {
+        assert_eq!(
+            names(root.list(None).unwrap()),
+            [
+                ("d".to_owned(), FileKind::Dir),
+                ("f".to_owned(), FileKind::File),
+                ("fifo".to_owned(), FileKind::Fifo),
+                ("link".to_owned(), FileKind::Symlink),
+                ("sock".to_owned(), FileKind::Socket),
+            ],
+            "{root:?}"
+        );
+        assert_eq!(
+            names(root.list(Some(rel("d"))).unwrap()),
+            [("inner".to_owned(), FileKind::File)]
+        );
+        // Listing the root twice gives the same answer: no shared offset.
+        assert_eq!(root.list(None).unwrap().len(), 5);
+    }
+}
+
+#[test]
+fn list_never_follows_symlinks() {
+    let tmp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    write(&outside.path().join("secret/x"), b"x");
+    write(&tmp.path().join("real/y"), b"y");
+    symlink(outside.path(), tmp.path().join("out")).unwrap();
+    symlink(tmp.path().join("real"), tmp.path().join("alias")).unwrap();
+    write(&tmp.path().join("file"), b"f");
+    for root in roots(tmp.path()) {
+        assert!(is_through_symlink(root.list(Some(rel("out")))), "{root:?}");
+        assert!(
+            is_through_symlink(root.list(Some(rel("out/secret")))),
+            "{root:?}"
+        );
+        assert!(
+            is_through_symlink(root.list(Some(rel("alias")))),
+            "{root:?}"
+        );
+        assert!(is_not_found(root.list(Some(rel("missing")))), "{root:?}");
+        assert_eq!(
+            outcome(root.list(Some(rel("file")))).unwrap_err(),
+            "Io(NotADirectory)",
+            "{root:?}"
+        );
+    }
+}
+
+fn check_list_swap_never_escapes(backend: Backend) {
+    let tmp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let root_path = tmp.path().to_owned();
+    write(&root_path.join("a/inside"), b"i");
+    write(&outside.path().join("OUTSIDE"), b"o");
+    symlink(outside.path(), root_path.join("link")).unwrap();
+    let root = SafeRoot::open_with(&root_path, backend).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let path = |name: &str| root_path.join(name);
+        let (a, held, link) = (path("a"), path("held"), path("link"));
+        thread::spawn(move || {
+            let mut swaps = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                fs::rename(&a, &held).unwrap();
+                fs::rename(&link, &a).unwrap();
+                fs::rename(&a, &link).unwrap();
+                fs::rename(&held, &a).unwrap();
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+    for _ in 0..5_000 {
+        match root.list(Some(rel("a"))) {
+            Ok(entries) => {
+                assert!(
+                    entries.iter().all(|e| e.name == b"inside"),
+                    "{backend:?}: listed {entries:?}"
+                );
+            }
+            Err(SafeError::NotFound | SafeError::PathThroughSymlink) => {}
+            Err(other) => panic!("{backend:?}: unexpected {other:?}"),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    assert!(
+        swapper.join().unwrap() > 0,
+        "{backend:?}: the swapper never ran"
+    );
+}
+
+#[test]
+fn race_list_swap_never_escapes() {
+    for backend in backends() {
+        check_list_swap_never_escapes(backend);
+    }
+}
+
 #[test]
 fn race_swap_between_calls() {
     for backend in backends() {
