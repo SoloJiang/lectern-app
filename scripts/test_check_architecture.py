@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 import check_architecture
-from check_architecture import IMPL_PLUGIN, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
+from check_architecture import has_impl_plugin, implements_plugin, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -85,9 +85,9 @@ impl kernel::Plugin for Mock {}
 #[cfg(test)]
 mod more;
 """
-        self.assertFalse(IMPL_PLUGIN.search(strip_cfg_test(src)))
+        self.assertFalse(has_impl_plugin(strip_cfg_test(src)))
         self.assertIn("pub struct Real;", strip_cfg_test(src))
-        self.assertTrue(IMPL_PLUGIN.search(strip_cfg_test(src + "impl Plugin for Real {}")))
+        self.assertTrue(has_impl_plugin(strip_cfg_test(src + "impl Plugin for Real {}")))
 
     def test_test_only_cfg(self):
         for pred in ("test", 'feature = "test-support"', 'any(test, feature = "test-support")', 'all(test, unix)'):
@@ -99,7 +99,7 @@ mod more;
 
     def test_production_cfg_is_kept(self):
         src = "#[cfg(not(test))]\nimpl Plugin for Real {}\n"
-        self.assertTrue(IMPL_PLUGIN.search(strip_cfg_test(src)))
+        self.assertTrue(has_impl_plugin(strip_cfg_test(src)))
 
     def test_comments_and_strings_are_ignored(self):
         src = """
@@ -113,17 +113,28 @@ const RAW: &str = r#"impl Plugin for Raw "quoted""#;
 fn f<'a>(c: char) -> bool { c == '"' }
 """
         cleaned = strip_comments_and_strings(src)
-        self.assertFalse(IMPL_PLUGIN.search(cleaned))
+        self.assertFalse(has_impl_plugin(cleaned))
         self.assertIn("fn f<'a>(c: char)", cleaned)
-        self.assertTrue(IMPL_PLUGIN.search(strip_comments_and_strings(src + "impl Plugin for Real {}")))
+        self.assertTrue(has_impl_plugin(strip_comments_and_strings(src + "impl Plugin for Real {}")))
+
+    def test_feature_gated_test_double_in_a_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "lib.rs"), "w") as f:
+                f.write('#[cfg(feature = "test-support")]\nimpl Plugin for Mock {}\n'
+                        '#[cfg(any(test, feature = "test-support"))]\nimpl kernel::Plugin for Fake {}\n')
+            self.assertFalse(implements_plugin(d))
+            with open(os.path.join(d, "real.rs"), "w") as f:
+                f.write('const S: &str = "x";\nimpl Plugin for Real {}\n')
+            self.assertTrue(implements_plugin(d))
 
     def test_impl_plugin_pattern(self):
-        for src in ("impl Plugin for Projects {", "impl kernel::Plugin for X", "impl<T: Send> lectern_kernel::Plugin for Source<T>"):
+        for src in ("impl Plugin for Projects {", "impl kernel::Plugin for X", "impl<T: Send> lectern_kernel::Plugin for Source<T>",
+                    "impl<T: Into<Vec<u8>>> Plugin for Adapter<T>", "impl<F: Fn() -> u8> kernel::Plugin for Hook<F>"):
             with self.subTest(src=src):
-                self.assertTrue(IMPL_PLUGIN.search(src))
+                self.assertTrue(has_impl_plugin(src))
         for src in ("impl PluginSet {", "impl From<Plugin> for X", "// a Plugin for each source", "impl MyPlugin for X"):
             with self.subTest(src=src):
-                self.assertFalse(IMPL_PLUGIN.search(src))
+                self.assertFalse(has_impl_plugin(src))
 
 
 class AppleOnlyCfg(unittest.TestCase):

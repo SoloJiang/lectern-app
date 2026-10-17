@@ -104,13 +104,45 @@ def plugin_errors(crates):
     return errors
 
 
-# `impl Plugin for X`, `impl<T> kernel::Plugin for X`, `impl lectern_kernel::Plugin for X`.
-IMPL_PLUGIN = re.compile(r"\bimpl\b(?:\s*<[^>{]*>)?\s+(?:\w+::)*Plugin\s+for\b")
+_IMPL = re.compile(r"\bimpl\b")
+_PLUGIN_FOR = re.compile(r"\s*(?:\w+::)*Plugin\s+for\b")
 
 
-def strip_comments_and_strings(src):
+def has_impl_plugin(text):
+    """Whether code text contains `impl Plugin for X`, `impl<T> kernel::Plugin
+    for X` or `impl<T: Into<Vec<u8>>> lectern_kernel::Plugin for X`. Generic
+    parameter lists are skipped with balanced angle brackets."""
+    for m in _IMPL.finditer(text):
+        i = m.end()
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i < len(text) and text[i] == "<":
+            depth = 0
+            while i < len(text):
+                if text[i] == "<":
+                    depth += 1
+                elif text[i] == ">" and text[i - 1] != "-":
+                    depth -= 1
+                    if depth == 0:
+                        i += 1
+                        break
+                elif text[i] in "{;":
+                    break
+                i += 1
+            if depth != 0:
+                continue
+        elif i == m.end():
+            continue
+        if _PLUGIN_FOR.match(text, i):
+            return True
+    return False
+
+
+def strip_comments_and_strings(src, keep_strings=False):
     """Blank out comments, string literals and char literals so that text
-    inside them (doc examples, commented-out code) is never read as code."""
+    inside them (doc examples, commented-out code) is never read as code.
+    With keep_strings, only comments are removed and literals are kept as
+    written (cfg predicates such as `feature = "test-support"` need them)."""
     out, i, n = [], 0, len(src)
     while i < n:
         c = src[i]
@@ -130,17 +162,18 @@ def strip_comments_and_strings(src):
         elif (m := re.match(r'b?r(#*)"', src[i:])) is not None:
             close = '"' + m.group(1)
             j = src.find(close, i + m.end())
-            i = n if j < 0 else j + len(close)
-            out.append('""')
+            start, i = i, n if j < 0 else j + len(close)
+            out.append(src[start:i] if keep_strings else '""')
         elif c == '"' or src.startswith('b"', i):
+            start = i
             i += 2 if c == "b" else 1
             while i < n and src[i] != '"':
                 i += 2 if src[i] == "\\" else 1
             i += 1
-            out.append('""')
+            out.append(src[start:i] if keep_strings else '""')
         elif (m := re.match(r"b?'(?:\\.[^']*|[^'\\])'", src[i:])) is not None:
+            out.append(m.group(0) if keep_strings else "' '")
             i += m.end()
-            out.append("' '")
         else:
             out.append(c)
             i += 1
@@ -217,7 +250,8 @@ def implements_plugin(src_dir):
         for file in files:
             if file.endswith(".rs") and file not in ("tests.rs", "testing.rs"):
                 with open(os.path.join(root, file), encoding="utf-8") as f:
-                    if IMPL_PLUGIN.search(strip_cfg_test(strip_comments_and_strings(f.read()))):
+                    code = strip_cfg_test(strip_comments_and_strings(f.read(), keep_strings=True))
+                    if has_impl_plugin(strip_comments_and_strings(code)):
                         return True
     return False
 
