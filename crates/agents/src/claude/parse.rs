@@ -427,7 +427,12 @@ impl Parse<'_> {
                     let call = ToolCallId(id.into());
                     let status = status(block, line.tool_use_result.as_ref());
                     if !inherited && let Some(index) = self.index.as_deref_mut() {
-                        index.finish_tool(&call, at, status, ContentRef::new(pos, len, part(i)));
+                        index.finish_tool(
+                            &call,
+                            at,
+                            status,
+                            Some(ContentRef::new(pos, len, part(i))),
+                        );
                     }
                     self.emit(
                         pos,

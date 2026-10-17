@@ -1,0 +1,487 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "turn-l1-0001",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1790931603111,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1790931618666,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 1443,
+                len: 197,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt one: list the files.",
+        items: [
+            AgentText(
+                ContentRef {
+                    pos: 1973,
+                    len: 150,
+                    part: 65535,
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0001",
+                    ),
+                    name: "exec_command",
+                    kind: Execute {
+                        command: "ls -la",
+                        workdir: "/Users/dev/fixture/repo/src",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1790931609333,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931610370,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 2124,
+                        len: 223,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 2348,
+                            len: 239,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0002",
+                    ),
+                    name: "exec_command",
+                    kind: Execute {
+                        command: "python3 -i",
+                        workdir: "/Users/dev/fixture/repo/tools",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1790931611407,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931612444,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 2588,
+                        len: 243,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 2832,
+                            len: 236,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0003",
+                    ),
+                    name: "write_stdin",
+                    kind: Execute {
+                        command: "import os\n",
+                        workdir: "/Users/dev/fixture/repo/tools",
+                        exec_session: Some(
+                            "7",
+                        ),
+                        workdir_exact: false,
+                    },
+                    started_at: Timestamp(
+                        1790931613481,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931614518,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 3069,
+                        len: 204,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 3274,
+                            len: 223,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0004",
+                    ),
+                    name: "shell",
+                    kind: Execute {
+                        command: "cargo test --quiet",
+                        workdir: "/Users/dev/fixture/repo",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1790931615555,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931616592,
+                            ),
+                            Failed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 3498,
+                        len: 269,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 3768,
+                            len: 241,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+        ],
+    },
+    Turn {
+        id: TurnId(
+            "turn-l1-0002",
+        ),
+        ordinal: 2,
+        started_at: Timestamp(
+            1790931620740,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1790931642554,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 5260,
+                len: 158,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt two: apply the patch.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0005",
+                    ),
+                    name: "apply_patch",
+                    kind: Edit {
+                        paths: [
+                            "/Users/dev/fixture/repo/crates/core/notes.txt",
+                            "/Users/dev/fixture/repo/crates/core/src/lib.rs",
+                            "/Users/dev/fixture/repo/crates/core/old.txt",
+                            "/Users/dev/fixture/repo/crates/core/src/a.rs",
+                            "/Users/dev/fixture/repo/crates/core/src/b.rs",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790931622814,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931624888,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 5419,
+                        len: 422,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 5842,
+                            len: 738,
+                            part: 2,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0006",
+                    ),
+                    name: "apply_patch",
+                    kind: Edit {
+                        paths: [
+                            "/Users/dev/fixture/repo/README.md",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790931625925,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931627999,
+                            ),
+                            Failed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 6816,
+                        len: 277,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 7094,
+                            len: 236,
+                            part: 2,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0007",
+                    ),
+                    name: "local_shell_call",
+                    kind: Execute {
+                        command: "git status",
+                        workdir: "/Users/dev/fixture/repo",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1790931628036,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931629073,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 7518,
+                        len: 307,
+                        part: 0,
+                    },
+                    result: None,
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0008",
+                    ),
+                    name: "local_shell_call",
+                    kind: Execute {
+                        command: "make build",
+                        workdir: "/Users/dev/fixture/repo/crates/core",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1790931630110,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931630110,
+                            ),
+                            Interrupted,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 8132,
+                        len: 285,
+                        part: 0,
+                    },
+                    result: None,
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0009",
+                    ),
+                    name: "view_image",
+                    kind: Read {
+                        paths: [
+                            "/Users/dev/fixture/repo/crates/core/docs/diagram.png",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1790931631147,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931632184,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 8418,
+                        len: 189,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 8608,
+                            len: 264,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0010",
+                    ),
+                    name: "spawn_agent",
+                    kind: SpawnAgent,
+                    started_at: Timestamp(
+                        1790931633221,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931634258,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 8873,
+                        len: 243,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 9117,
+                            len: 197,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_l1_0011",
+                    ),
+                    name: "fixture__lookup",
+                    kind: Other,
+                    started_at: Timestamp(
+                        1790931635295,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1790931636332,
+                            ),
+                            Failed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 9315,
+                        len: 202,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 9518,
+                            len: 196,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+        ],
+    },
+    Turn {
+        id: TurnId(
+            "turn-l1-0003",
+        ),
+        ordinal: 3,
+        started_at: Timestamp(
+            1790931644628,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1790931652924,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 11390,
+                len: 154,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt three: summarize.",
+        items: [
+            AgentText(
+                ContentRef {
+                    pos: 11545,
+                    len: 133,
+                    part: 65535,
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 12908,
+                    len: 139,
+                    part: 65535,
+                },
+            ),
+        ],
+    },
+]

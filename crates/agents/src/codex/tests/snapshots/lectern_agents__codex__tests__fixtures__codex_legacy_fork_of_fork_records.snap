@@ -1,0 +1,19 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: render(&parsed.batch.records)
+---
+950.0 inherited Context { at: Timestamp(1791104402074), cwd: "/Users/dev/fixture/repo", logged_branch: Some("fork-branch"), model: Some("fixture-model-x") }
+950.1 inherited TurnStarted { turn: TurnId("turn-l1-0001"), at: Timestamp(1791104402074) }
+1297.0 inherited ToolStarted(ToolStarted { call: ToolCallId("call_l1_0001"), turn: Some(TurnId("turn-l1-0001")), at: Timestamp(1791104404148), name: "exec_command", kind: Execute { command: "ls -la", workdir: "/Users/dev/fixture/repo/src", exec_session: None, workdir_exact: true } })
+1498.0 inherited ToolFinished(ToolFinished { call: ToolCallId("call_l1_0001"), at: Timestamp(1791104405185), status: Completed, exec_session: None })
+1738.0 inherited Usage(UsageRecord { at: Timestamp(1791104406222), turn: Some(TurnId("turn-l1-0001")), model: Some("fixture-model-x"), tokens: OpenAi { input: 1000, cached_input: 200, cache_write: 0, output: 100, reasoning_output: 40 }, key: CodexTokenCount { thread_id: "aaaaaaaa-0000-4000-8000-000000000003", total: OpenAi { input: 1000, cached_input: 200, cache_write: 0, output: 100, reasoning_output: 40 } }, advisor: None, superseded: false, sidechain: false, origin: SessionLog })
+2220.0 inherited TurnEnded { turn: TurnId("turn-l1-0001"), at: Timestamp(1791104407259), aborted: false }
+2669.0 inherited TurnStarted { turn: TurnId("turn-l2-0001"), at: Timestamp(1791104409333) }
+2990.0 inherited ToolStarted(ToolStarted { call: ToolCallId("call_l2_0001"), turn: Some(TurnId("turn-l2-0001")), at: Timestamp(1791104411407), name: "shell_command", kind: Execute { command: "git switch -c fork-branch", workdir: "/Users/dev/fixture/repo", exec_session: None, workdir_exact: true } })
+3235.0 inherited ToolFinished(ToolFinished { call: ToolCallId("call_l2_0001"), at: Timestamp(1791104412444), status: Completed, exec_session: None })
+3425.0 inherited Usage(UsageRecord { at: Timestamp(1791104413481), turn: Some(TurnId("turn-l2-0001")), model: Some("fixture-model-x"), tokens: OpenAi { input: 300, cached_input: 0, cache_write: 0, output: 30, reasoning_output: 0 }, key: CodexTokenCount { thread_id: "aaaaaaaa-0000-4000-8000-000000000003", total: OpenAi { input: 1300, cached_input: 200, cache_write: 0, output: 130, reasoning_output: 40 } }, advisor: None, superseded: false, sidechain: false, origin: SessionLog })
+3901.0 inherited TurnEnded { turn: TurnId("turn-l2-0001"), at: Timestamp(1791104414518), aborted: false }
+4350.0 Context { at: Timestamp(1791104416592), cwd: "/Users/dev/fixture/repo", logged_branch: Some("fork-branch"), model: Some("fixture-model-x") }
+4350.1 TurnStarted { turn: TurnId("turn-l3-0001"), at: Timestamp(1791104416592) }
+4812.0 Usage(UsageRecord { at: Timestamp(1791104419703), turn: Some(TurnId("turn-l3-0001")), model: Some("fixture-model-x"), tokens: OpenAi { input: 100, cached_input: 50, cache_write: 0, output: 10, reasoning_output: 0 }, key: CodexTokenCount { thread_id: "aaaaaaaa-0000-4000-8000-000000000003", total: OpenAi { input: 1400, cached_input: 250, cache_write: 0, output: 140, reasoning_output: 40 } }, advisor: None, superseded: false, sidechain: false, origin: SessionLog })
+5289.0 TurnEnded { turn: TurnId("turn-l3-0001"), at: Timestamp(1791104420740), aborted: false }

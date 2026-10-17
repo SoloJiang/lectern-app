@@ -1,0 +1,55 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: "(summary, stats)"
+---
+(
+    SessionSummary {
+        key: SessionKey {
+            source: SourceId(
+                "session-codex",
+            ),
+            id: "bbbbbbbb-0000-4000-8000-000000000002",
+        },
+        agent: Codex,
+        parent: Some(
+            Parent {
+                session: SessionKey {
+                    source: SourceId(
+                        "session-codex",
+                    ),
+                    id: "bbbbbbbb-0000-4000-8000-000000000001",
+                },
+                tool_call: None,
+            },
+        ),
+        file: "0.140.0-paginated/sessions/2026/10/05/rollout-2026-10-05T09-30-00-bbbbbbbb-0000-4000-8000-000000000002.jsonl",
+        cwd: "/Users/dev/fixture/repo",
+        place: Pending,
+        started_at: Timestamp(
+            1791192600000,
+        ),
+        last_activity: Timestamp(
+            1791192615155,
+        ),
+        title: Some(
+            "Placeholder subagent task.",
+        ),
+        agent_version: Some(
+            "0.140.0",
+        ),
+        logged_branch: Some(
+            "feature/fixture",
+        ),
+        open_turn: false,
+        tail_pending: false,
+        archived: false,
+        inheritance_unknown: false,
+        format: Known,
+    },
+    ParseStats {
+        unknown_types: [],
+        bad_lines: 0,
+        oversized_lines: 0,
+        unknown_tools: [],
+    },
+)

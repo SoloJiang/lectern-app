@@ -95,6 +95,10 @@ gix = { version = "=0.88.0", default-features = false, features = [
     "pack-cache-lru-static",
     "pack-cache-lru-dynamic",
 ] }
+# lectern-agents: decodes Codex's `.jsonl.zst` rollouts (pure Rust, MIT;
+# docs/adr/0026.md). Default features: `std`, and `hash` (twox-hash, MIT) to
+# verify the frame checksum. Tests also use its encoder to build fixtures.
+ruzstd = "0.9"
 # Snapshot tests for domain logic (AGENTS.md). Test-only.
 insta = "1.49"
 # Test-only: temporary directories for lectern-platform's tests, and mkfifo in

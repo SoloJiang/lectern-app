@@ -1,0 +1,37 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "turn-l3-0001",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1791104416592,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1791104420740,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 4499,
+                len: 161,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder prompt in the fork of the fork.",
+        items: [
+            AgentText(
+                ContentRef {
+                    pos: 4661,
+                    len: 150,
+                    part: 65535,
+                },
+            ),
+        ],
+    },
+]

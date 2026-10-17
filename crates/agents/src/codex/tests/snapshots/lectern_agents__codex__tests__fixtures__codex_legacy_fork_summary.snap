@@ -1,0 +1,45 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: "(summary, stats)"
+---
+(
+    SessionSummary {
+        key: SessionKey {
+            source: SourceId(
+                "session-codex",
+            ),
+            id: "aaaaaaaa-0000-4000-8000-000000000002",
+        },
+        agent: Codex,
+        parent: None,
+        file: "0.140.0-legacy/sessions/2026/10/03/rollout-2026-10-03T09-00-00-aaaaaaaa-0000-4000-8000-000000000002.jsonl",
+        cwd: "/Users/dev/fixture/repo",
+        place: Pending,
+        started_at: Timestamp(
+            1791018000000,
+        ),
+        last_activity: Timestamp(
+            1791018014518,
+        ),
+        title: Some(
+            "Placeholder prompt in the fork: try another approach.",
+        ),
+        agent_version: Some(
+            "0.140.0",
+        ),
+        logged_branch: Some(
+            "main",
+        ),
+        open_turn: false,
+        tail_pending: false,
+        archived: false,
+        inheritance_unknown: false,
+        format: Known,
+    },
+    ParseStats {
+        unknown_types: [],
+        bad_lines: 0,
+        oversized_lines: 0,
+        unknown_tools: [],
+    },
+)

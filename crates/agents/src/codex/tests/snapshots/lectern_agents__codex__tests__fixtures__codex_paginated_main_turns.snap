@@ -1,0 +1,166 @@
+---
+source: crates/agents/src/codex/tests/fixtures.rs
+expression: index.turns
+---
+[
+    Turn {
+        id: TurnId(
+            "turn-p1-0001",
+        ),
+        ordinal: 1,
+        started_at: Timestamp(
+            1791190802074,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1791190815555,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 1315,
+                len: 362,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder paginated prompt: fix the bug.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_p1_0001",
+                    ),
+                    name: "exec_command",
+                    kind: Execute {
+                        command: "rg placeholder",
+                        workdir: "/Users/dev/fixture/repo",
+                        exec_session: None,
+                        workdir_exact: true,
+                    },
+                    started_at: Timestamp(
+                        1791190805185,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1791190806222,
+                            ),
+                            Failed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 1678,
+                        len: 240,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 1919,
+                            len: 263,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_p1_0002",
+                    ),
+                    name: "apply_patch",
+                    kind: Edit {
+                        paths: [
+                            "/Users/dev/fixture/repo/src/main.rs",
+                        ],
+                    },
+                    started_at: Timestamp(
+                        1791190807259,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1791190809333,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 2183,
+                        len: 269,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 2453,
+                            len: 445,
+                            part: 2,
+                        },
+                    ),
+                },
+            ),
+            AgentText(
+                ContentRef {
+                    pos: 3111,
+                    len: 352,
+                    part: 65535,
+                },
+            ),
+        ],
+    },
+    Turn {
+        id: TurnId(
+            "turn-p1-0002",
+        ),
+        ordinal: 2,
+        started_at: Timestamp(
+            1791190817629,
+        ),
+        ended_at: Some(
+            Timestamp(
+                1791190823851,
+            ),
+        ),
+        prompt: Some(
+            ContentRef {
+                pos: 6183,
+                len: 368,
+                part: 65535,
+            },
+        ),
+        prompt_preview: "Placeholder paginated prompt two: ask a helper.",
+        items: [
+            Tool(
+                ToolCall {
+                    id: ToolCallId(
+                        "call_p1_0003",
+                    ),
+                    name: "spawn_agent",
+                    kind: SpawnAgent,
+                    started_at: Timestamp(
+                        1791190819703,
+                    ),
+                    finished: Some(
+                        (
+                            Timestamp(
+                                1791190820740,
+                            ),
+                            Completed,
+                        ),
+                    ),
+                    input: ContentRef {
+                        pos: 6552,
+                        len: 241,
+                        part: 0,
+                    },
+                    result: Some(
+                        ContentRef {
+                            pos: 6794,
+                            len: 210,
+                            part: 1,
+                        },
+                    ),
+                },
+            ),
+        ],
+    },
+]

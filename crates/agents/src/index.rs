@@ -123,22 +123,38 @@ impl IndexBuilder {
     }
 
     /// 给工具调用填上结果。先找当前轮次，再从后往前找已结束的轮次；找不到（调用在继承前缀里）时忽略。
+    /// 已经由 [`IndexBuilder::attach_result`] 填上的结果引用不被替换；没有结果记录的调用（Codex 的
+    /// `local_shell_call`）`result` 为 None。
     pub(crate) fn finish_tool(
         &mut self,
         call: &ToolCallId,
         at: Timestamp,
         status: ToolStatus,
-        result: ContentRef,
+        result: Option<ContentRef>,
     ) {
-        let fill = |items: &mut [TurnItem]| -> bool {
+        self.update_tool(call, |tool| {
+            if tool.finished.is_none() {
+                tool.finished = Some((at, status));
+                if tool.result.is_none() {
+                    tool.result = result;
+                }
+            }
+        });
+    }
+
+    /// 工具调用的结果引用改指向另一行（Codex 的改动记录：`patch_apply_end`、`FileChange`），
+    /// 不论结果是否已经到达。
+    pub(crate) fn attach_result(&mut self, call: &ToolCallId, result: ContentRef) {
+        self.update_tool(call, |tool| tool.result = Some(result));
+    }
+
+    fn update_tool(&mut self, call: &ToolCallId, mut f: impl FnMut(&mut ToolCall)) {
+        let mut fill = |items: &mut [TurnItem]| -> bool {
             for item in items.iter_mut().rev() {
                 if let TurnItem::Tool(tool) = item
                     && tool.id == *call
                 {
-                    if tool.finished.is_none() {
-                        tool.finished = Some((at, status));
-                        tool.result = Some(result);
-                    }
+                    f(tool);
                     return true;
                 }
             }
@@ -158,6 +174,25 @@ impl IndexBuilder {
         }
     }
 
+    /// 当前轮次还没有 prompt 时填上（Codex 的 prompt 在 `task_started` 之后才写出）。返回是否填上。
+    pub(crate) fn set_prompt(&mut self, prompt: ContentRef, preview: Arc<str>) -> bool {
+        match &mut self.current {
+            Some(turn) if turn.prompt.is_none() => {
+                turn.prompt = Some(prompt);
+                turn.preview = preview;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 明确的轮次结束（Codex 的 `task_complete` / `turn_aborted`）。
+    pub(crate) fn close_turn(&mut self, at: Timestamp) {
+        if let Some(turn) = &mut self.current {
+            turn.ended_at = Some(at);
+        }
+    }
+
     /// agent 结束了这一轮的回复：当前轮次里没有还在等结果的工具调用时记下结束时间。
     pub(crate) fn end_turn(&mut self, at: Timestamp) {
         if let Some(turn) = &mut self.current {
@@ -167,6 +202,20 @@ impl IndexBuilder {
                 .any(|i| matches!(i, TurnItem::Tool(ToolCall { finished: None, .. })));
             turn.ended_at = if pending { None } else { Some(at) };
         }
+    }
+
+    /// 第一个有 prompt 的轮次的预览。
+    pub(crate) fn first_prompt(&self) -> Option<Arc<str>> {
+        self.sealed
+            .iter()
+            .find(|t| t.prompt.is_some())
+            .map(|t| t.prompt_preview.clone())
+            .or_else(|| {
+                self.current
+                    .as_ref()
+                    .filter(|t| t.prompt.is_some())
+                    .map(|t| t.preview.clone())
+            })
     }
 
     pub(crate) fn build(&self, session: SessionKey, cursor: Cursor) -> TurnIndex {
