@@ -256,11 +256,14 @@ impl Probe {
     /// 回调只记下时刻，然后在一个新线程上连接 socket、发出 `FirstFrame`，之后由这个线程应答请求。
     pub fn watch_first_frame(&self);
 
-    /// 首帧之后、`Kernel::start` 之前调用：按 `LECTERN_BENCH_PLUGINS` 裁剪插件集合，并加入 `bench-probe` 插件。
-    /// `closure:<id>` 只留 `<id>` 的依赖闭包，`closure+self:<id>` 留依赖闭包加 `<id>`；没有设置时保留整个 profile。
-    pub fn select(&self, set: PluginSet) -> PluginSet;
+    /// 首帧之后，代替 `Kernel::start` 调用：加入 `bench-probe` 插件并启动 kernel。
+    /// 没有设置 `LECTERN_BENCH_PLUGINS` 时就是 `Kernel::start(set.with("bench-probe", ..))`，与发布构建走同一条路径。
+    /// 设置了时按它裁剪：`closure:<id>` 只留 `<id>` 的依赖闭包，`closure+self:<id>` 留依赖闭包加 `<id>`。
+    /// 裁剪用 `PluginSet::prepare` 取得的清单：每个插件的 `manifest()` 在整个启动里只调用一次，就是那次被计时的第一次调用，
+    /// 之后 `Kernel::start_prepared` 直接用这些清单和耗时，不再调用 `manifest()`，`plugin/*/activate` 里的 manifest 一段因此与发布构建相同。
+    pub fn start_kernel(&self, set: PluginSet) -> Arc<Kernel>;
 
-    /// `Kernel::start` 之后调用。裁剪过插件集合时，逐个满足所选插件的激活条件：
+    /// `start_kernel` 之后调用。裁剪过插件集合时，逐个满足所选插件的激活条件：
     /// `Command` 调用一次 `Kernel::command`，`Manual` 调用 `Kernel::activate`，
     /// `Workspace` 由 `bench-probe` 插件在 `started` 里提交一份对任何 pattern 都返回 true 的 `WorkspaceFacts`；
     /// 全部进入 Active 后发出 `Ready`。
@@ -337,16 +340,32 @@ pub mod host {
 }
 ```
 
-`kernel`（普通的公开接口，不放在 `test-support` 下：三者都只对清单做计算，发布构建里没有调用方，测量用的构建因此不需要打开 kernel 的 `test-support`）：
+`kernel`（普通的公开接口，不放在 `test-support` 下：发布构建里没有调用方，测量用的构建因此不需要打开 kernel 的 `test-support`）：
 
 ```rust
 impl PluginSet {
-    /// `id` 依赖的服务的提供者，传递闭包，不含 `id` 自己。调用每个插件的 `manifest()`。
+    /// 对每个插件调用且只调用一次 `manifest()`，按 `Kernel::start` 的方式计时、处理 panic（记为 `Failed`），
+    /// 交出带清单和耗时的集合。在调用线程上执行，`manifest()` 是纯内存计算。
+    pub fn prepare(self) -> PreparedSet;
+}
+
+pub struct PreparedSet { /* Vec<(Name, Arc<dyn Plugin>, Result<Manifest, PluginError>, Duration)> */ }
+
+impl PreparedSet {
+    /// 已取得的清单，不再调用 `manifest()`；探针用它找出激活条件。
+    pub fn manifests(&self) -> &[(Name, Manifest)];
+    /// `id` 依赖的服务的提供者，传递闭包，不含 `id` 自己。只读已取得的清单。
     pub fn dependency_closure(&self, id: &str) -> Result<Vec<Name>, Vec<GraphError>>;
     /// 只保留 `keep` 返回 true 的插件。
     pub fn retain(self, keep: impl FnMut(&str) -> bool) -> Self;
-    /// 每个插件的清单，探针用它找出激活条件。
-    pub fn manifests(&self) -> Vec<(Name, Manifest)>;
+    /// 加入一个插件，它的 `manifest()` 同样在这里调用一次并计时。
+    pub fn with(self, id: impl Into<Name>, plugin: impl Plugin) -> Self;
+}
+
+impl Kernel {
+    /// 与 `start` 相同，但用 `PreparedSet` 里的清单与耗时，不再调用 `manifest()`；
+    /// `status()` 的 `manifest_time` 是 `prepare` / `with` 里那一次调用的耗时。
+    pub fn start_prepared(set: PreparedSet) -> Arc<Kernel>;
 }
 ```
 
@@ -518,7 +537,14 @@ crates/bench/
 采样规则（Measure 模式）：
 
 - 预热：至少调用 3 次且至少 100 ms。`time` 和 `compare` 在预热时确定批量次数 k，使一个样本不短于 1 ms（`facts_contains/name` 这类 1 µs 以下的操作）；样本值是批量耗时除以 k。`time_with_setup` 不批量，k 固定为 1（`agents/append_4k`、`git/refresh_one` 单次在 10 µs 以上，`Instant` 在 M 系列上的分辨率约 42 ns，足够单次计时）。
-- 采样：至少 10 个样本且至少 1 秒，到 100 个样本或 10 秒为止。慢操作（`agents/discover_1000`）可以用 `Ctx::config` 降到 5 个样本，不能更少。
+- 采样（进程内基准）按以下顺序判断是否停止，前一条优先：
+  1. 少于 5 个样本时不停止。
+  2. 达到 10 000 个样本，或采样开始后的墙钟时间（含 `setup`）达到 5 秒时停止。
+  3. 已有至少 30 个样本，且样本耗时之和（不含 `setup`）至少 1 秒时停止。
+
+  批量后约 1 ms 的样本在约 1 秒、1 000 个样本时停在第 3 条；10 µs 的单次操作（`time_with_setup`）停在第 2 条的 10 000 个样本，约 0.1 秒；0.2 秒的操作（`agents/parse_throughput`）停在第 2 条，约 25 个样本；0.5 秒的操作（`agents/discover_1000`）停在第 2 条，约 10 个样本。`Ctx::config` 可以提高最少样本数和时长，不能把第 1 条的 5 个降低。
+- 进程级基准不用这些规则，次数由各自的流程固定（冷启动 2 次预热加 20 次、空闲内存 3 次、端到端 5 次、插件一对、超标时再两对，见「进程级基准」）。
+- 冒烟模式不用这些规则：不预热、k = 1，每个进程内基准只调用一次。
 - 统计量默认取中位数；冷启动按 ADR 0017 用计数和最大值；帧时间按 ADR 0015 用最大帧间隔。
 - 吞吐是 `bytes / 中位数耗时`；比值是被测与对照交替采样后两个中位数之比。
 - 不设容差：预算就是表里的数字。抗噪声靠预热、中位数和一次重试：超标的基准用新的夹具重跑一次，两次都超标才算超标。
@@ -612,7 +638,7 @@ CI：
 - 报告协议：`wire_*` 对每种消息编码后解码相等，含带空格、`%`、换行和非 UTF-8 字节的路径；缺字段、未知消息名、坏的百分号编码返回错误。
 - 进程调度：`process_*` 用脚本化的 `Launcher` / `ProcessInfo`：冷启动 2 次预热不计入、20 次样本；`Busy` 让 5 秒等待重新开始；采样前后代数不同时重采；30 秒不静止记为 `over`；不连 socket、提前退出、不响应 `Quit` 记为出错；插件两次启动的差值与激活耗时的取法（进程插件的进程组计入差值）；激活条件为 `[Workspace(..), AfterFirstFrame]` 的插件计入 `plugin/after_first_frame`；预热启动报告 `archive-miss` 或以 3 退出时记为出错；`time_with_setup` 每个样本调用一次 `setup`；进程组展开到孙进程、中途退出的后代被跳过、同一 pid 不重复计入、`plugin/process_total` 是全部进程插件组之和；帧间隔取 `started` 与 `presented` 两个相邻差序列的最大值，主线程阻塞造成的单个长间隔使结果超标；内存类并发不超过 3、计时类不并发。
 - `purge`：集成测试把一个假的 `sudo` 放在 PATH 最前面，记录参数，按夹具回放成功与失败（AGENTS.md「工作方式」）。
-- 探针：`probe_*` 在 Linux 上用真实的 `Kernel` 和测试插件验证 `select` 的两种裁剪、`attach` 满足 `Command` / `Manual` / `Workspace` 三种激活条件后发出 `Ready`、`bench-probe` 插件丢弃过时的 `Busy` 且不让 kernel 重新变忙。首帧回调只能在 macOS 上验证，由第 4 步的基线运行覆盖。
+- 探针：`probe_*` 在 Linux 上用真实的 `Kernel` 和测试插件验证 `start_kernel` 的两种裁剪（用计数的测试插件确认每个插件的 `manifest()` 在整个启动里只被调用一次）、`attach` 满足 `Command` / `Manual` / `Workspace` 三种激活条件后发出 `Ready`、`bench-probe` 插件丢弃过时的 `Busy` 且不让 kernel 重新变忙。首帧回调只能在 macOS 上验证，由第 4 步的基线运行覆盖。
 
 只能在 macOS 上运行的：全部判定、进程级基准、`empty_window`。
 
@@ -641,6 +667,7 @@ CI：
    - Linux 上这些函数返回 `ErrorKind::Unsupported`，有测试覆盖。
 3. **插件集合的闭包与裁剪**（`kernel`，同一 PR 里更新 kernel 设计）
    - `just test -p lectern-kernel` 的 `set_closure_*` 通过：多层依赖、`MULTIPLE` 服务的多个提供者、缺提供者时返回 `GraphError`；`retain` 之后 `validate` 通过。
+   - `set_prepare_*` 通过：`prepare`、`dependency_closure`、`retain`、`with`、`start_prepared` 走完之后，每个插件的 `manifest()` 恰好被调用一次；`status()` 的 `manifest_time` 等于 `prepare` 记下的耗时；`manifest()` panic 的插件进入 `Failed`，与 `Kernel::start` 相同。
 4. **探针、进程调度与空窗口基线**（`bench`）
    - `just test -p lectern-bench` 的 `wire_*`、`process_*`、`probe_*` 和 `purge` 集成测试通过。
    - macOS CI 上 `just bench baseline/` 报告 `baseline/empty_window_cold_start` 的 20 个样本和 `baseline/empty_window_idle`。
