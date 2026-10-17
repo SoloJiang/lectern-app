@@ -220,6 +220,10 @@ pub(crate) trait GitAccess: Send + Sync {
     fn read_worktree_file(&self, root: &Path, rel: &str, limit: u64) -> Result<Option<Vec<u8>>, GitError>;
     /// 按仓库的哈希算法计算 blob OID（与 `git hash-object` 相同），作为解析缓存的键。
     fn hash_blob(&self, kind: HashKind, bytes: &[u8]) -> ObjectId;
+    /// 当前 worktree 交给 `fs_watch::RepoWatch::watch_worktree` 的过滤器与配置来源。生产实现打开这个 worktree
+    /// （`Repo::worktree`）后调 `Worktree::watch_source`，与 `index_paths` 共用同一个 `Worktree` 句柄；
+    /// `FakeGit` 返回按它内存里的 index 和忽略规则回答的 `fs_watch::testing::FakeSource`。只读 HEAD 和配置，不读 index。
+    fn watch_source(&self, git_dir: &Path) -> Result<Arc<dyn WorktreeSource>, GitError>;
 }
 
 pub(crate) struct Discovered { worktree_root: Option<PathBuf>, git_dir: PathBuf, common_dir: PathBuf, bare: bool, hash: HashKind }

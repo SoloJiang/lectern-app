@@ -85,6 +85,7 @@ pub enum Scope {
 
 /// 后端交付事件的入口。`Clone + Send + Sync`；`send` 不阻塞：fs_watch 的队列满时丢弃这一批，
 /// 给这个目标记一次溢出，fs_watch 按「重新扫描」处理（见「状态与异常」）。
+/// `send` 在入队之前从这个目标的一个订阅取 `BusyGuard`（见「数据流与线程」的静止规则），随原始批次入队。
 #[derive(Clone)]
 pub struct EventSink { /* 目标 ID + Arc<队列> */ }
 
@@ -250,7 +251,8 @@ pub trait Sink<B>: Send + Sync + 'static {
     /// panic 时这个订阅不再交付，记日志，其余订阅照常。
     fn deliver(&self, batch: B, busy: Option<BusyGuard>);
 
-    /// 取一个守卫，插件实现为 `PluginHandle::busy()`。在 fs_watch 线程上，或在调用 `watch_*` 的线程上调用，不阻塞。
+    /// 取一个守卫，插件实现为 `PluginHandle::busy()`。在 fs_watch 线程、调用 `watch_*` 的线程或后端的回调线程
+    /// （`EventSink::send`）上调用，不阻塞、不取会与这些线程竞争的锁。
     /// 返回 None（插件已停用）时照常合并和交付，只是不带守卫。
     fn busy(&self) -> Option<BusyGuard> { None }
 }
@@ -345,7 +347,7 @@ pub struct ReflogRecord {
     pub offset: u64,
     /// 一行，不含结尾的换行。由 `git::parse_reflog_line` 解析。
     pub line: Arc<[u8]>,
-    /// 本次运行内单调递增：读到的先后；同一文件里与行序一致。不跨运行比较。
+    /// 同一 `observed.run` 内单调递增：读到的先后；同一文件里与行序一致。不跨运行比较。
     pub seq: u64,
     /// 读到这一行的那次读取结束时：记录写在它之前。
     pub observed: ReadStamp,
@@ -355,11 +357,18 @@ pub struct ReflogRecord {
 }
 
 pub struct ReadStamp {
-    /// 读取的编号。所有 reflog 读取在 fs_watch 线程上依次进行，编号越小越早，前一次结束后下一次才开始。
+    /// 这次运行的编号：`Watcher::new` 时由墙上时间（纳秒）与进程号得出，同一 `Watcher` 的全部记录相同。
+    /// `read` 和 `seq` 每次运行从 0 重新计数，`usage` 落盘后按它区分不同运行的计数。
+    pub run: RunId,
+    /// 读取的编号。同一运行内所有 reflog 读取在 fs_watch 线程上依次进行，编号越小越早，前一次结束后下一次才开始。
     pub read: u64,
     /// 墙上时间，纳秒精度。系统时间可能被调整，先后以 `read` 为准。
     pub at: SystemTime,
 }
+
+/// 运行编号，与 `Revision::epoch` 是同一类概念：区分计数器的来源，只比较相等。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RunId(pub u64);
 
 pub enum Origin {
     /// 追加在已读过的位置之后。
@@ -528,7 +537,12 @@ Analyze 的用法（ADR 0019 约束 9）：计算指纹之前调 `flush_revision
 
 ## reflog
 
-仓库状态 arm 时，在 fs_watch 线程上（公共目录目标 arm 之后）列出 `logs/HEAD`、`logs/refs/heads/` 下的全部文件、`logs/refs/stash` 和每个 `worktrees/<名字>/logs/HEAD`，为每个文件记下读取进度：已读到的偏移（当时的文件长度）、偏移之前最多 64 字节的副本、这次读取的 `ReadStamp`。arm 之前已有的记录不交付。列出与读取都在 fs_watch 线程上依次进行，读取编号才有全序（几百个分支只需几毫秒的 `fstat` 和 64 字节读取）。
+仓库状态的 reflog 进度分两段建立，都在 fs_watch 线程上：
+
+1. **arm 之前**：列出 `logs/HEAD`、`logs/refs/heads/` 下的全部文件、`logs/refs/stash` 和每个 `worktrees/<名字>/logs/HEAD`，为每个文件记下读取进度：已读到的偏移（当时的文件长度）、偏移之前最多 64 字节的副本、这次读取的 `ReadStamp`。这时已有的记录不交付。
+2. **arm 之后**：公共目录目标 arm 成功后，立即对第 1 段的每个文件按下文的步骤补读一次，并重新列出这几个目录。第 1 段与 arm 之间追加的行由补读交付（`Appended`，`after` 是第 1 段的 `ReadStamp`）；这段时间新出现的文件为 `NewFile`，消失的为 `Removed`。
+
+补读与随后排队的事件触发的读取都从同一份进度继续，进度只前进，所以 arm 前后重叠的那段时间里写入的行不会落在已记录的偏移之内而丢失，也不会交付两次：一次运行内，同一文件的同一偏移最多交付一条记录（`usage` 也可以按 `run`、文件和偏移去重）。列出与读取都在 fs_watch 线程上依次进行，读取编号才有全序（几百个分支只需几毫秒的 `fstat` 和 64 字节读取）。
 
 公共目录目标上有某个 reflog 文件的事件时，fs_watch 线程立即读它（不等合并窗口，也不等过滤器）：
 
@@ -537,7 +551,7 @@ Analyze 的用法（ADR 0019 约束 9）：计算指纹之前调 `flush_revision
 3. 读取结束后取结束时刻作为这些记录的 `observed`；`after` 是这个文件上一次读取的 `ReadStamp`。新出现的文件从头读，`origin` 为 `NewFile`，`after` 为 None。每条记录按读到的顺序取 `seq`。
 4. 记录放进每个 `RepoWatch` 订阅的当前批次。
 
-先后的判断规则（供 `usage`）：记录 A 一定早于记录 B，当且仅当 A 与 B 在同一文件里且 `A.offset < B.offset`，或 `B.after` 存在且 `A.observed.read < B.after.read`（读取依次进行，A 被读到的那次读取结束之后、B 所在文件的上一次读取才开始，那时 B 还没写入）。其余情况判断不了，`usage` 按 [ADR 0020](../adr/0020.md) 标为「不确定」。所以监听时刻只给出上界和下界，不当作写入时刻；FSEvents 的延迟只让区间变宽，不让判断出错。
+先后的判断规则（供 `usage`）：记录 A 一定早于记录 B，当且仅当 A 与 B 在同一文件里且 `A.offset < B.offset`（同一次运行内；跨运行时文件可能已被改写，只在两者之间没有 `ReflogReset` 时成立），或 `B.after` 存在、`A.observed.run == B.after.run` 且 `A.observed.read < B.after.read`（读取依次进行，A 被读到的那次读取结束之后、B 所在文件的上一次读取才开始，那时 B 还没写入）。`run` 不同的两条记录（来自 Lectern 的不同运行）只按同一文件的规则判断，读取编号不跨运行比较。其余情况判断不了，`usage` 按 [ADR 0020](../adr/0020.md) 标为「不确定」。所以监听时刻只给出上界和下界，不当作写入时刻；FSEvents 的延迟只让区间变宽，不让判断出错。
 
 reflog 文件不经 `platform` 的安全读取：公共目录不是被审阅的内容，Analyze 的威胁模型针对的是沙箱里的 agent（ADR 0019），能改写 git 目录的进程已经在以用户身份运行。读取用 `std::fs`，只读这几个固定位置下的普通文件，符号链接按 `Unreadable` 处理。
 
@@ -604,9 +618,9 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
   - 这是 [git 设计](git.md)「index」一节「`app` 把 `TrackedPaths` 包成 `fs_watch` 定义的过滤接口传进去」的具体做法：适配放在 `git` 里，`project`、`review` 共用，在 Linux 上可以测试。
 - `platform`：按「platform 后端」实现，[platform 设计](platform.md)「本文不覆盖」里的 FSEvents 一项由本文定义。
 - `app`：启动屏障放开后创建 `Watcher::new(platform::fs_events::backend(executor.clone()), executor.clone(), Config::default())`，放进 `ProjectDeps::watcher`、`AgentsDeps::watch` 等。
-- `project`：`watch_repo` 拿非当前 worktree 的 HEAD 和 `worktree_list`，当前 worktree 用 `watch_worktree`；`WorktreeBatch::meta.index` / `head` 即它要的「这一批里 index、HEAD 是否变化」。
+- `project`：`watch_repo` 拿非当前 worktree 的 HEAD 和 `worktree_list`，当前 worktree 用 `watch_worktree`，`WorktreeSpec::source` 来自它的内部接口 `GitAccess::watch_source`（生产实现转调 `Worktree::watch_source`，测试用 `FakeSource`，见 [project 设计「依赖 git 的接口」](project.md#依赖-git-的接口)）；`WorktreeBatch::meta.index` / `head` 即它要的「这一批里 index、HEAD 是否变化」。
 - `agents`：每个会话根一个 `watch_dir`，用 `Coalesce::DIR`；根目录不存在时的处理由本 crate 完成，`agents` 只处理 `root` 与 `rescan`。
-- `usage`：从 `RepoBatch::reflog` 取记录，按「reflog」里的先后规则判断，把 `seq`、`observed`、`after` 与记录一起落盘（ADR 0020「观察先落盘」）；`set_unfiltered` 维护候选 stash 的路径。
+- `usage`：从 `RepoBatch::reflog` 取记录，按「reflog」里的先后规则判断，把 `seq`、`observed`、`after`（含 `run`）与记录一起落盘（ADR 0020「观察先落盘」）；`set_unfiltered` 维护候选 stash 的路径。
 - `review`：`paths` → `refresh(Paths)`；`rescan`、`meta` 的任一标志 → `refresh(Full)`；Analyze 用 `flush_revision`。
 
 ## 数据流与线程
@@ -628,8 +642,9 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 与静止的配合（[kernel 设计](kernel.md)「静止」）：
 
 - 等待事件时不持有守卫。空闲时 kernel 能静止。
-- 订阅开一个批次时（第一个要交付的变化到达）调用 `Sink::busy()` 取一个守卫，随批次交给 `deliver`，消费方移进自己的任务。所以从事件到达 fs_watch、到消费方处理完，中间没有不计入的空档。暂存的路径（过滤器过期期间）同样属于这个批次，守卫一直持有到过滤器装上、批次交付。
-- 只落在被忽略路径上的事件不开批次、不取守卫：`node_modules` 的写入不让 kernel 变忙。
+- 入队时取守卫：`EventSink::send` 在把原始批次放进队列之前，从这个目标的一个仍然有效的订阅（目标记着订阅它的句柄，取最早登记的一个；它的 `busy()` 返回 None 时试下一个）取一个守卫，随原始批次入队。所以从后端交出事件到 fs_watch 线程分类之间，kernel 不会报告静止。分类时，原始批次开启或延续了订阅的批次，订阅批次先取自己的守卫，再 drop 入队时的守卫；原始批次全部被丢弃（只落在被忽略路径上）时，分类完直接 drop。队列满、原始批次被丢弃时守卫随之 drop，溢出标记由下一次处理时的重新扫描负责，重新扫描开批次时照常取守卫。
+- 订阅开一个批次时（第一个要交付的变化到达）调用 `Sink::busy()` 取一个守卫，随批次交给 `deliver`，消费方移进自己的任务。所以从事件到达后端回调、到消费方处理完，中间没有不计入的空档。暂存的路径（过滤器过期期间）同样属于这个批次，守卫一直持有到过滤器装上、批次交付。
+- 只落在被忽略路径上的事件不开批次：`node_modules` 的写入只在入队到分类这段时间让 kernel 变忙。这段时间有上界：队列最多 16 384 个事件，分类每个平均 < 1 µs，排空一整个队列 < 20 ms；写入停止后最多这么久 kernel 就回到静止。
 - `watch_*` 在调用线程上用 `sink.busy()` 取一个守卫，随命令进入队列，arm 和首次加载完成后放进第一个批次（带 `Live` 的那一批）交给 `deliver`。加载任务（过滤器、配置清单）开始前，为这份状态的每个订阅各取一个守卫，加载结果装上（以及因此交付的批次交付）之后才 drop。所以项目打开后、第一个 `Live` 批次交付之前，kernel 不报告静止。
 - 读 reflog 不单独取守卫：读取结果进入批次，由批次的守卫覆盖。
 
@@ -693,12 +708,12 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - 修订号（`revision_*`）：「修订号」每一条、「git 元数据」表每一行一个用例，各自恰好加一；同一原始批次里多个事件只加一；只有被忽略路径、`.lock` 文件、`objects/` 的批次不加一；另一个 worktree 的 HEAD 不让这个 worktree 加一，`refs/` 让全部 worktree 加一；配置清单里的文件、它的符号链接目标变化时加一；重新监听后 `epoch` 不同。
 - flush（`flush_*`）：`FakeBackend::hold` 留住的事件在 `flush_revision` 之后计入；`flush_revision` 不提前交付正在合并的批次；在 `Sink::deliver` 里调用返回 `WouldDeadlock`；状态失败后返回 `NotWatching`；arm 还没完成时等 arm；超时返回 `Timeout`。
 - 合并（`coalesce_*`）：`quiet` 内的事件合成一批；连续事件在 `max_delay` 时交付；两个句柄用不同参数各自交付；路径超过上限改为 `rescan`；`health` 变化立即交付；没有等待中的批次时不设定时器。
-- reflog（`reflog_*`）：追加一行得到一条 `Appended` 记录，`seq`、`observed`、`after` 符合「reflog」的规则；两个文件交替追加时先后规则给出的判断都成立，判断不了的不判断；不完整的行等换行；变短、改写末尾为 `Rewritten`；删除为 `Removed`；新分支和改名后的分支为 `NewFile`、`after` 为 None；`worktrees/<名字>/logs/HEAD` 为 `Head(Linked)`；`logs/refs/stash`；超过 1 MiB 的追加分次读完；超过 64 KiB 的行跳过；arm 之前的记录不交付；`reftable/tables.list` 存在时没有记录；公共目录 `RESCAN` 后追加的记录照常交付。
+- reflog（`reflog_*`）：追加一行得到一条 `Appended` 记录，`seq`、`observed`、`after` 符合「reflog」的规则；两个文件交替追加时先后规则给出的判断都成立，判断不了的不判断；不完整的行等换行；变短、改写末尾为 `Rewritten`；删除为 `Removed`；新分支和改名后的分支为 `NewFile`、`after` 为 None；`worktrees/<名字>/logs/HEAD` 为 `Head(Linked)`；`logs/refs/stash`；超过 1 MiB 的追加分次读完；超过 64 KiB 的行跳过；arm 之前的记录不交付；第 1 段与 arm 之间追加的行由补读交付且只交付一次，`FakeBackend` 在 arm 时注入的同一文件事件不让它重复；两个 `Watcher`（不同 `run`）的记录之间不按读取编号判断先后；`reftable/tables.list` 存在时没有记录；公共目录 `RESCAN` 后追加的记录照常交付。
 - 配置清单（`config_*`）：清单里的文件按位置分到公共目录目标、工作区根目标和 `Entries` 目标；同一目录的文件共用一个 `Entries` 目标；不存在的文件监视最近的上级目录，逐级出现后下移；符号链接的每一级和规范路径都被监视；工作区里被忽略的配置文件在过滤之前被识别；清单变化时只 arm 新增、drop 多余的目标；`HEAD` 变化触发重新计算；`config_files` 失败为 `Degraded(Config)`。
 - 目录监听（`dir_*`）：路径为绝对路径、按 250 ms 合并；根不存在时监视上级目录的 `Entries`，根出现后交付 `Appeared` 和 `rescan`；根被删除后交付 `Vanished` 并回到上级目录。
 - 异常（`rescan_*`、`health_*`）：「状态与异常」表的每一行；队列溢出按 `RESCAN` 处理；`Sink` panic 后其他订阅照常。
 - 生命周期（`lifecycle_*`）：`Watcher::new` 不建线程、不调用后端；第一次 `watch_*` 才启动；同一公共目录、同一 worktree 共享一份状态和一个后端目标；最后一个句柄 drop 后目标被 drop；`shutdown` 之后不再交付。
-- 静止（`quiescence_*`）：用 kernel 的 `TestKernel` 取真实的守卫：批次合并期间不静止，交付后守卫在消费方手里、drop 后静止；只有被忽略路径的事件不让 kernel 变忙；加载任务进行中不静止；空闲时静止。
+- 静止（`quiescence_*`）：用 kernel 的 `TestKernel` 取真实的守卫：批次合并期间不静止，交付后守卫在消费方手里、drop 后静止；`EventSink::send` 返回之后、fs_watch 线程分类之前不静止；只有被忽略路径的事件在分类完后不再让 kernel 忙碌；加载任务进行中不静止；空闲时静止。
 
 `git` 的适配在 `git` 里测试（`watch_source_*`，用 `TestRepo`）：`.gitignore`、`info/exclude`、`core.excludesFile` 的忽略结果与 git 的判定一致；`core.ignoreCase` 下大小写不同的路径判为受跟踪；`config_files` 列出 `include.path`、`includeIf "onbranch:"`（满足与不满足）、不存在的引入目标和 XDG 默认位置；不调用 git 命令行。
 
