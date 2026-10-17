@@ -1,0 +1,43 @@
+---
+source: crates/kernel/src/tests/graph.rs
+expression: errors
+---
+[
+    DuplicatePlugin(
+        "dup",
+    ),
+    EmptyActivation(
+        "idle",
+    ),
+    DuplicateCommand {
+        command: "go",
+        plugins: [
+            "cmd-1",
+            "cmd-2",
+        ],
+    },
+    ConflictingServiceId(
+        "greeter",
+    ),
+    MissingProvider {
+        plugin: "missing",
+        service: "svc-a",
+    },
+    MultipleProviders {
+        service: "greeter",
+        plugins: [
+            "greeter-1",
+            "greeter-2",
+        ],
+    },
+    MissingProvider {
+        plugin: "clash",
+        service: "greeter",
+    },
+    Cycle(
+        [
+            "cycle-b",
+            "cycle-c",
+        ],
+    ),
+]

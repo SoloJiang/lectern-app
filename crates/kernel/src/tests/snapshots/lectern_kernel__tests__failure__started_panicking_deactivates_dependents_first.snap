@@ -1,0 +1,10 @@
+---
+source: crates/kernel/src/tests/failure.rs
+expression: log.text()
+---
+started provider
+activate dependent
+started dependent
+-- provider fails
+drop dependent
+drop provider

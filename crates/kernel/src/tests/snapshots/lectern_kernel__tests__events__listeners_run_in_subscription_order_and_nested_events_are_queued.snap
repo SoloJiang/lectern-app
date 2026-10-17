@@ -1,0 +1,8 @@
+---
+source: crates/kernel/src/tests/events.rs
+expression: log.text()
+---
+first ping 1
+first emitted pong
+second ping 1
+first pong 1

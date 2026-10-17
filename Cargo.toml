@@ -67,7 +67,7 @@ fluent-syntax = "0.12"
 fluent-bundle = "0.16"
 intl_pluralrules = "7.0"
 unic-langid = "0.9"
-# Test-only.
+# Snapshot tests for domain logic (AGENTS.md). Test-only.
 insta = "1.49"
 trybuild = "1.0"
 

@@ -3326,6 +3326,9 @@ dependencies = [
 [[package]]
 name = "lectern-kernel"
 version = "0.0.0"
+dependencies = [
+ "insta",
+]
 
 [[package]]
 name = "lectern-platform"
