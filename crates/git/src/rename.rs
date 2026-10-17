@@ -8,6 +8,7 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use crate::{GitError, Mode, Oid};
@@ -218,8 +219,10 @@ pub(crate) fn detect(
         }
     }
 
-    let mut signatures: HashMap<(bool, usize), Option<Signature>> = HashMap::new();
-    let mut signature = |is_source: bool, i: usize| -> Result<Option<Signature>, GitError> {
+    // Shared, not cloned: the similarity matrix asks for each signature once
+    // per pair, up to `renameLimit`² times.
+    let mut signatures: HashMap<(bool, usize), Option<Rc<Signature>>> = HashMap::new();
+    let mut signature = |is_source: bool, i: usize| -> Result<Option<Rc<Signature>>, GitError> {
         let mode = if is_source {
             sources[i].mode
         } else {
@@ -231,7 +234,7 @@ pub(crate) fn detect(
         if let Some(sig) = signatures.get(&(is_source, i)) {
             return Ok(sig.clone());
         }
-        let sig = load(is_source, i)?;
+        let sig = load(is_source, i)?.map(Rc::new);
         signatures.insert((is_source, i), sig.clone());
         Ok(sig)
     };
@@ -277,9 +280,9 @@ pub(crate) fn detect(
         let dst_sig = signature(false, d)?;
         let score = estimate(
             &sources[s],
-            src_sig.as_ref(),
+            src_sig.as_deref(),
             &dests[d],
-            dst_sig.as_ref(),
+            dst_sig.as_deref(),
             BASENAME_SCORE,
         );
         if score >= BASENAME_SCORE {
@@ -341,9 +344,9 @@ pub(crate) fn detect(
                 source: s,
                 score: estimate(
                     &sources[s],
-                    src_sig.as_ref(),
+                    src_sig.as_deref(),
                     &dests[d],
-                    dst_sig.as_ref(),
+                    dst_sig.as_deref(),
                     MINIMUM_SCORE,
                 ),
                 same_name: basename(sources[s].path) == basename(dests[d].path),
