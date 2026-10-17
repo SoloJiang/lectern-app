@@ -128,6 +128,35 @@ impl SafeRoot {
         }
     }
 
+    /// Lists a directory: the root when `dir` is None. Its entries' names
+    /// (without `.` and `..`) and kinds, unsorted; a symbolic link is listed
+    /// as a link, never followed. The directory is opened like `read` opens
+    /// an entry, so no level of `dir` may be a symbolic link
+    /// (`PathThroughSymlink`, also when `dir` itself is one); a `dir` that
+    /// isn't a directory is `Io(NotADirectory)`. The names come from the
+    /// directory that descriptor names, which stays beneath the root even if
+    /// the path is replaced while it is read. A kind the directory entry
+    /// doesn't record is taken from `fstatat(AT_SYMLINK_NOFOLLOW)` on the
+    /// same descriptor.
+    ///
+    /// Blocks on system calls; call it from a background task, never from the
+    /// UI thread. Any number of threads may call it on the same root.
+    pub fn list(&self, dir: Option<RelPath<'_>>) -> Result<Vec<DirEntry>, SafeError> {
+        let root = self.fd.as_fd();
+        let Some(dir) = dir else {
+            // `read_from` reopens `.`: the root's own file offset is unused.
+            let listed = rustix::fs::Dir::read_from(root).map_err(io_error)?;
+            return list_entries(listed);
+        };
+        split(dir.0).ok_or_else(invalid_path)?;
+        match self.open_one_step(dir.0, Target::Entry) {
+            None => walk::list(root, dir.0),
+            Some(Ok(fd)) => list_opened(fd),
+            Some(Err(Errno::NOENT)) => Err(SafeError::NotFound),
+            Some(Err(_)) => walk::list(root, dir.0),
+        }
+    }
+
     /// Opens `path` (already checked against the [`RelPath`] rules) in one
     /// step, or `None` when this root has no one-step open.
     fn open_one_step(&self, path: &[u8], target: Target) -> Option<Result<OwnedFd, Errno>> {
@@ -410,6 +439,53 @@ impl FileKind {
             FileType::Unknown => FileKind::Other,
         }
     }
+}
+
+/// One entry of [`SafeRoot::list`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DirEntry {
+    /// The name in the directory, raw bytes: never empty, `.` or `..`, and
+    /// without `/` or NUL.
+    pub name: Vec<u8>,
+    pub kind: FileKind,
+}
+
+/// The rest of `list` once the directory is open: checks with `fstat` on
+/// the same descriptor that it is a directory, then reads it.
+fn list_opened(fd: OwnedFd) -> Result<Vec<DirEntry>, SafeError> {
+    let meta = Meta::from_stat(&rustix::fs::fstat(&fd).map_err(io_error)?);
+    if meta.kind != FileKind::Dir {
+        return Err(SafeError::Io(io::ErrorKind::NotADirectory.into()));
+    }
+    list_entries(rustix::fs::Dir::new(fd).map_err(io_error)?)
+}
+
+fn list_entries(mut dir: rustix::fs::Dir) -> Result<Vec<DirEntry>, SafeError> {
+    let mut out = Vec::new();
+    while let Some(entry) = dir.read() {
+        let entry = entry.map_err(io_error)?;
+        let name = entry.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        let kind = match entry.file_type() {
+            FileType::Unknown => {
+                let fd = dir.fd().map_err(io_error)?;
+                match rustix::fs::statat(fd, name, AtFlags::SYMLINK_NOFOLLOW) {
+                    Ok(st) => Meta::from_stat(&st).kind,
+                    // Removed since it was listed.
+                    Err(Errno::NOENT) => continue,
+                    Err(errno) => return Err(io_error(errno)),
+                }
+            }
+            other => FileKind::from_file_type(other),
+        };
+        out.push(DirEntry {
+            name: name.to_vec(),
+            kind,
+        });
+    }
+    Ok(out)
 }
 
 /// `fstatat(dir, name, AT_SYMLINK_NOFOLLOW)` on the last component.

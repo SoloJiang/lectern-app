@@ -612,7 +612,10 @@ pub(crate) fn pair_renames(
         let source = p.status == Status::Deleted
             && p.staged.is_none()
             && p.old.as_ref().is_some_and(|s| s.content.oid().is_some());
+        // A staged-only addition (`git mv a b; rm b`) isn't in the worktree:
+        // pairing it would hide that the file is gone.
         let dest = p.status == Status::Added
+            && !p.staged_only
             && !(p.untracked && deleted_paths.contains(&p.path))
             && p.new
                 .as_ref()

@@ -14,7 +14,8 @@ use rustix::fs::{AtFlags, Mode, OFlags};
 use rustix::io::Errno;
 
 use super::{
-    FileKind, Meta, Read, SafeError, invalid_path, io_error, is_valid_name, read_opened, stat_entry,
+    DirEntry, FileKind, Meta, Read, SafeError, invalid_path, io_error, is_valid_name, list_opened,
+    read_opened, stat_entry,
 };
 
 /// How often one level is retried when `fstatat` contradicts the error of the
@@ -106,6 +107,45 @@ pub(crate) fn read(
         }
     }
 }
+
+/// `list` of the directory `path` (already checked against the `RelPath`
+/// rules): every level opened with `O_NOFOLLOW`, the last one readable.
+pub(crate) fn list(root: BorrowedFd<'_>, path: &[u8]) -> Result<Vec<DirEntry>, SafeError> {
+    let (parent, name) = match path.iter().rposition(|&b| b == b'/') {
+        Some(slash) => (Some(&path[..slash]), &path[slash + 1..]),
+        None => (None, path),
+    };
+    if !is_valid_name(name) {
+        return Err(invalid_path());
+    }
+    let dir = open_parent(root, parent)?;
+    let dir = dir.as_ref().map_or(root, AsFd::as_fd);
+    let mut retries = 0;
+    loop {
+        let error = match rustix::fs::openat(dir, name, LIST_FLAGS, Mode::empty()) {
+            Ok(fd) => return list_opened(fd),
+            Err(Errno::NOENT) => return Err(SafeError::NotFound),
+            Err(error) => error,
+        };
+        match rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) => match Meta::from_stat(&st).kind {
+                FileKind::Symlink => return Err(SafeError::PathThroughSymlink),
+                FileKind::Dir if contradicts(error) && retries < RACE_RETRIES => retries += 1,
+                // Such as no read permission.
+                FileKind::Dir => return Err(io_error(error)),
+                _ => return Err(SafeError::Io(std::io::ErrorKind::NotADirectory.into())),
+            },
+            Err(Errno::NOENT) => return Err(SafeError::NotFound),
+            Err(_) => return Err(io_error(error)),
+        }
+    }
+}
+
+/// The directory `list` reads.
+const LIST_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
 
 /// Opens every component of `parent` in turn, starting at `root`. `None` when
 /// there is no parent (the entry is directly beneath the root).

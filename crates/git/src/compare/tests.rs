@@ -537,6 +537,89 @@ fn worktree_untracked_files_follow_the_ignore_rules() {
 }
 
 #[test]
+#[cfg(unix)]
+fn worktree_symlinked_gitignore_outside_the_worktree_is_not_read() {
+    // gix's own walk follows an untracked `.gitignore` symbolic link; the
+    // rules must come only from regular files read through `SafeRoot`.
+    let t = clean_repo(&[("a", b"a\n")]);
+    let outside = t.base().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("ignore"), b"secret.txt\nsub/\n").unwrap();
+    t.symlink(".gitignore", outside.join("ignore").to_str().unwrap());
+    t.write_file("secret.txt", b"s\n");
+    t.write_file("sub/x", b"x\n");
+    let l = lines(&changes(&t));
+    let paths: Vec<&str> = l.iter().map(|l| l.split(' ').nth(1).unwrap()).collect();
+    assert_eq!(paths, [".gitignore", "secret.txt", "sub/x"], "{l:#?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn worktree_directory_through_a_symlink_is_not_walked() {
+    // The outside directory's `.gitignore` would hide `keep.txt` and its
+    // other files would show up if the link were followed.
+    let t = clean_repo(&[("a", b"a\n")]);
+    let outside = t.base().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join(".gitignore"), b"*\n").unwrap();
+    std::fs::write(outside.join("OUTSIDE.txt"), b"o\n").unwrap();
+    t.symlink("d", outside.to_str().unwrap());
+    t.write_file("keep.txt", b"k\n");
+    let l = lines(&changes(&t));
+    let paths: Vec<&str> = l.iter().map(|l| l.split(' ').nth(1).unwrap()).collect();
+    assert_eq!(paths, ["d", "keep.txt"], "{l:#?}");
+}
+
+#[test]
+#[cfg(unix)]
+fn worktree_race_directory_swapped_for_a_symlink_never_escapes() {
+    use std::sync::atomic::Ordering;
+
+    let t = clean_repo(&[("a", b"a\n")]);
+    let outside = t.base().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    // Would ignore `inside.txt` and add `OUTSIDE.txt` if ever read.
+    std::fs::write(outside.join(".gitignore"), b"inside.txt\n").unwrap();
+    std::fs::write(outside.join("OUTSIDE.txt"), b"o\n").unwrap();
+    t.write_file("w/inside.txt", b"i\n");
+    t.write_file("w/deep/more.txt", b"m\n");
+    std::os::unix::fs::symlink(&outside, t.root().join("link")).unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let root = t.root().to_owned();
+        std::thread::spawn(move || {
+            let (w, held, link) = (root.join("w"), root.join("held"), root.join("link"));
+            let mut swaps = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                std::fs::rename(&w, &held).unwrap();
+                std::fs::rename(&link, &w).unwrap();
+                std::fs::rename(&w, &link).unwrap();
+                std::fs::rename(&held, &w).unwrap();
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+    let wt = main_worktree(&t);
+    let cancel = no_cancel();
+    let outside_blob = Oid::for_blob(HashKind::Sha1, b"o\n");
+    for _ in 0..300 {
+        let set = wt.changes(Base::Head, &Limits::default(), &cancel).unwrap();
+        for c in set.files() {
+            let path = c.path.as_bytes();
+            assert!(!path.ends_with(b"OUTSIDE.txt"), "{c:?}");
+            assert_ne!(
+                c.new.as_ref().and_then(|s| s.content.oid()),
+                Some(outside_blob)
+            );
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    assert!(swapper.join().unwrap() > 0);
+}
+
+#[test]
 fn worktree_untracked_limit_caps_the_list() {
     let t = clean_repo(&[("a", b"a\n")]);
     for name in ["u1", "u2", "u3"] {
@@ -894,6 +977,67 @@ fn worktree_git_mv_then_recreate_is_a_rename_and_an_untracked_addition() {
         [
             format!("A a (untracked) - -> f:{} text(+1,-0)", b7(b"new a\n")),
             format!("R100(a) b f:{c} -> f:{c} text(+0,-0)", c = b7(content)),
+        ]
+    );
+}
+
+#[test]
+fn worktree_staged_mv_then_removed_is_not_a_rename() {
+    // `git mv a b; rm b`: the staged rename must not hide that `b` is gone.
+    let content: &[u8] = b"line 1\nline 2\nline 3\n";
+    let t = TestRepo::new();
+    commit_files(&t, &[("a", content)]);
+    t.write_file("b", content);
+    t.write_index(t.common_dir(), &[t.add("b")]);
+    t.remove("b");
+    let c = b7(content);
+    assert_eq!(
+        lines(&changes(&t)),
+        [
+            format!("D a f:{c} -> - text(+0,-3)"),
+            format!("A b - -> f:{c} staged-only staged=f:{c}"),
+        ]
+    );
+}
+
+#[test]
+fn worktree_submodule_gitdir_outside_modules_is_not_read() {
+    let t = TestRepo::new();
+    // An absorbed submodule whose `.git` file points outside `modules/`.
+    let elsewhere = t.base().join("elsewhere.git");
+    let head = nested_repo(&t.base().join("elsewhere"), true).unwrap();
+    std::fs::rename(t.base().join("elsewhere/.git"), &elsewhere).unwrap();
+    t.write_file(
+        "sub/.git",
+        format!("gitdir: {}\n", elsewhere.display()).as_bytes(),
+    );
+    // And one in `modules/`, as `git submodule absorbgitdirs` leaves it.
+    let modules = t.common_dir().join("modules/ok");
+    let ok_head = nested_repo(&t.base().join("ok-src"), true).unwrap();
+    std::fs::create_dir_all(modules.parent().unwrap()).unwrap();
+    std::fs::rename(t.base().join("ok-src/.git"), &modules).unwrap();
+    t.write_file("ok/.git", b"gitdir: ../.git/modules/ok\n");
+    let recorded = t.blob(b"recorded");
+    let tree = t.tree_entries(&[
+        ("ok", Mode::Gitlink, recorded),
+        ("sub", Mode::Gitlink, recorded),
+    ]);
+    let commit = t.commit(tree, &[], "c");
+    t.set_ref("refs/heads/main", commit);
+    t.write_index(
+        t.common_dir(),
+        &[
+            IndexEntry::new("ok", Mode::Gitlink, recorded),
+            IndexEntry::new("sub", Mode::Gitlink, recorded),
+        ],
+    );
+    let r = short(recorded);
+    let _ = head;
+    assert_eq!(
+        lines(&changes(&t)),
+        [
+            format!("M ok g:{r} -> g:{} no-diff staged=g:{r}", short(ok_head)),
+            format!("M sub g:{r} -> g:unreadable no-diff"),
         ]
     );
 }

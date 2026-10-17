@@ -289,7 +289,7 @@ impl<'h> WorktreeAttrs<'h> {
     ) -> Result<Vec<u8>, GitError> {
         use gix::filter::plumbing::pipeline::convert::ToGitOutcome;
 
-        let rela = rela_path(path);
+        let rela = os_path(path.as_bytes());
         let overlay = Overlay {
             odb: &self.handle.objects,
             blobs: &self.blobs,
@@ -324,13 +324,14 @@ impl<'h> WorktreeAttrs<'h> {
     }
 }
 
+/// Repository-relative path bytes as a `Path`, for gix calls that take one.
 #[cfg(unix)]
-fn rela_path(path: &RepoPath) -> std::path::PathBuf {
+pub(crate) fn os_path(bytes: &[u8]) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStrExt;
-    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path.as_bytes()))
+    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
 }
 
 #[cfg(not(unix))]
-fn rela_path(path: &RepoPath) -> std::path::PathBuf {
-    std::path::PathBuf::from(String::from_utf8_lossy(path.as_bytes()).into_owned())
+pub(crate) fn os_path(bytes: &[u8]) -> std::path::PathBuf {
+    std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }

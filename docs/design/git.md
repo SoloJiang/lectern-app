@@ -33,9 +33,9 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `gix` =0.88.0 | 对象库、引用、index、配置、属性与忽略规则、内置转换（`text` / `eol` / `ident` / `working-tree-encoding`）、目录遍历、树 diff 与重命名检测 | 纯 Rust，MIT OR Apache-2.0；feature 与使用边界见 [ADR 0024](../adr/0024.md)；release 约 3 MB，`just deny` 通过 |
+| `gix` =0.88.0 | 对象库、引用、index、配置、属性与忽略规则、内置转换（`text` / `eol` / `ident` / `working-tree-encoding`）、树 diff 与重命名检测；工作区的目录遍历不用它（[ADR 0028](../adr/0028.md)） | 纯 Rust，MIT OR Apache-2.0；feature 与使用边界见 [ADR 0024](../adr/0024.md)；release 约 3 MB，`just deny` 通过 |
 | `gix::diff::blob`（`gix-imara-diff` 0.3） | 行 diff 与词级 diff，Histogram 算法 | gix 维护的 imara-diff 副本，Apache-2.0；随 gix 一起升级，不再引入上游 `imara-diff`（ADR 0024） |
-| `lectern-platform` | 安全读取工作区文件（见「安全读取」） | 架构规则 6 |
+| `lectern-platform` | 安全读取和列出工作区文件（见「安全读取」） | 架构规则 6 |
 | `lectern-cache` | hunk 的持久缓存 | 架构规则 5；`cache` 实现之前只用进程内的 LRU |
 | `lectern-fs-watch` | 实现它的 `WorktreeSource` / `PathFilter`（`Worktree::watch_source`） | 领域层依赖基础设施层；见 [fs_watch 设计](fs_watch.md)「对其他 crate 的要求」 |
 | `insta`（dev） | 改动集、hunk、展示行的快照 | 工作区统一依赖 |
@@ -655,13 +655,13 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 1. **过滤器先判定**：先用 `SafeRoot::stat` 判断路径是否存在和类型：不存在时 W 为没有；符号链接按下文「模式」读目标；目录按 index 条目区分（gitlink 按下文子模块的规则，其余是路径被换成目录）；FIFO、socket、设备文件为 `Mode::Special` + `UnsupportedType`。这些都不进入过滤器判定。普通文件才按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的：stat 与 index 一致、不是 racy-clean、index 的 OID 与基准相同，并且这个路径的转换规则在这一次比较里没有变化（见下文 stat 缓存）时 W = I（未改动）；其余情况（包括刚暂存了更新、index 与基准不同）W 是 `Unavailable::Filtered`，不把 index 的 blob 当作工作区的完整内容；`raw` 按第 3 步的读取上限计算。
 2. **stat 跳过**：`SafeRoot::stat` 报告路径不存在时 W 为没有。index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时 W = I，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。
 3. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID。`Unavailable::Missing` 只用于对象库里缺对象，不用于工作区里没有文件。
-4. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每一项都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取；FIFO、socket、设备文件的新一侧是 `Mode::Special` + `UnsupportedType`，未跟踪的目录里有 `.git` 时只列出这个目录，新一侧是 `Mode::Special` + `NestedRepository`。
+4. **未跟踪文件**：从工作区根出发，逐个目录用 `SafeRoot::list` 列出条目（不跟随符号链接，名字总在工作区之下，[ADR 0028](../adr/0028.md)），按 `.gitignore`、`info/exclude`、`core.excludesFile` 判断忽略，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。每个目录里的 `.gitignore` 只在它是普通文件时经 `SafeRoot::read` 读出，用 gix-ignore 在内存里解析和匹配（更深的目录优先，同一文件里后面的规则优先）；没有匹配时再查 gix 的排除栈里的 `info/exclude` 和 `core.excludesFile`，这个栈只用 id-mapping 来源，不读工作区。子模块（index 里的 gitlink）的目录不进入；跟踪的文件被换成目录时进入，其中的文件都是未跟踪的。是否跟踪只按 index 判断。列出的每一项都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取；FIFO、socket、设备文件的新一侧是 `Mode::Special` + `UnsupportedType`，未跟踪的目录里有 `.git` 时只列出这个目录，新一侧是 `Mode::Special` + `NestedRepository`。
 5. **重命名**：与 git 的 `diffcore-rename` 相同（树之间的比较也用这一步）。删除与新增之间先按 OID 找精确重命名，精确重命名不受任何上限限制，总是检测。剩下的删除（来源）与新增（目标）里，文件名（最后一级）在两边都唯一的一对先按相似度不低于 75% 配对；再按相似度（不低于 50%）找重命名，上限规则与 git 的 `too_many_rename_candidates` 相同：剩下的来源数 × 目标数超过 `diff.renameLimit` 的平方时跳过这一轮（默认 1000，即 100 万对；40 × 40 的重构照常检测；0 或负数不限）。相似度是 git 的估算（按换行或 64 字节分块、哈希、计数），分数与 git 相同。同一路径上的删除和未跟踪新增不互相配对。`staged` 为 Some 的删除（index 里还留着来源路径，如未暂存的 `mv a b`）不作为来源，否则配对后 `staged` 只能描述新路径、丢掉来源路径在 index 里的状态；这时与 `git status` 一样，报告为 `Deleted` 和未跟踪的 `Added`。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
 
 其余规则：
 
 - 模式：`core.fileMode=false` 时可执行位取 index 里的值；符号链接的内容是 `readlinkat` 读出的目标。
-- 子模块：工作区一侧的提交是子模块自己的 HEAD（只读地打开它的 git 目录）；子模块内部的未提交改动不计算。子模块没有初始化（克隆时没带 `--recurse-submodules`，或 `deinit` 之后：路径是空目录，没有仓库和 HEAD）时，W = I（index 里的 gitlink OID），不标为 `Unavailable`。
+- 子模块：工作区一侧的提交是子模块自己的 HEAD（只读地读它的 git 目录：工作区里的 `.git` 目录经 `SafeRoot` 读，`gitdir:` 只接受本仓库 `modules/` 之下的目录，ADR 0028）；子模块内部的未提交改动不计算。子模块没有初始化（克隆时没带 `--recurse-submodules`，或 `deinit` 之后：路径是空目录，没有仓库和 HEAD）时，W = I（index 里的 gitlink OID），不标为 `Unavailable`。
 - `skip_worktree` 的条目（含从 sparse 目录展开的条目）不 stat、不读工作区，W = I（按上面的表：index 与基准相同时不报告，不同时是 `Modified`、`staged` 为 None）。这与 `git status` 相同：git 不看 skip-worktree 条目的工作区文件，sparse 范围之外被重新写出、修改的文件在 git 下一次更新 index（如 `git sparse-checkout reapply`）清掉这个标志之前也不报告。这是已知限制，本 crate 不写 index，也就不替 git 清标志。`git add -N` 的条目按新增处理。
 - 路径的大小写与 Unicode 规范化按仓库的 `core.ignoreCase`、`core.precomposeUnicode`（gix 的文件系统能力）。
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
@@ -858,6 +858,12 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
   - 同一次运行里第 2 步的 `perf_smoke_git_diff_50` 未命中中位数 7.4 ms、命中 1.5 ms，比第 2 步记录的慢（机器负载不同），只作参考。没有在 macOS 上测量。
 - 没有验证的：`bench` 的 git 基准没有写（见「与设计的差异」）；超过 64 MB 的文件用调小的 `Limits::read_bytes` 测 `Unhashed`，没有真的写 64 MB；macOS 上没有运行（`O_NOFOLLOW_ANY` 由 `platform` 的测试覆盖）。
 
+第 3 步的审阅修正（PR #87，[ADR 0028](../adr/0028.md)），同一台机器：
+
+- 未跟踪文件改为在 `SafeRoot::list` 上遍历后，`just test -p lectern-git` 188 个测试通过（新增 5 个 `worktree_*`，共 62 个），原有测试的结果（含三个快照）都没有变；`just test -p lectern-platform` 新增 `list_root_and_subdirectories_with_kinds`、`list_never_follows_symlinks`、`race_list_swap_never_escapes`，对 `Openat2` 和 `Walk` 都通过。`cargo clippy -p lectern-platform -p lectern-git --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 交叉检查通过，没有在 macOS 上运行。
+- `worktree_symlinked_gitignore_outside_the_worktree_is_not_read`：未跟踪的 `.gitignore` 是指向工作区之外文件的符号链接（gix 的遍历会跟随它），那个文件里的规则不生效，`secret.txt` 和 `sub/x` 照常列出。`worktree_directory_through_a_symlink_is_not_walked`：指向外部目录的符号链接只作为一项列出，外部目录里的 `.gitignore` 和文件都不出现。`worktree_race_directory_swapped_for_a_symlink_never_escapes`：另一个线程反复把 `w` 在目录和指向外部目录的符号链接之间交换，300 次 `changes` 里从不出现外部目录的文件或内容。`worktree_submodule_gitdir_outside_modules_is_not_read`：`gitdir:` 指向 `modules/` 之外时为 `Unreadable`，指向 `modules/ok` 时读出它的 HEAD。`worktree_staged_mv_then_removed_is_not_a_rename`：`git mv a b; rm b` 得到 `Deleted(a)` 和 `StagedOnly` 的 `Added(b)`。
+- 性能（同一命令）：`git/changes_clean` 中位数 3.0 ms（新开 `Worktree` 3.6 ms），`git/changes_50` 首次 7.1 ms、之后中位数 4.6 ms，`git/refresh_one` 中位数 1.2 ms，`refresh(Full)` 中位数 4.4 ms、最慢 14.0 ms，`git/changes_capped` 中位数 128 ms，内存增量 0.78 MiB；都在预算之内，与改之前同一量级。
+
 ## 与设计的差异
 
 第 1 步：
@@ -911,8 +917,10 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - index 由工作区比较自己解析（要 stat、标志和各个 stage，`TrackedPaths` 不带这些），按 index 校验和缓存在 `Worktree` 里，与 `tracked` 的缓存分开。`tracked.rs` 拆出 `parse`，两处共用校验和与重读的逻辑。
 - 内置转换失败（如字节不符合声明的 `working-tree-encoding`）时用原始字节，与 git 的 diff 相同；`core.safecrlf` 的往返检查不做（git 的 diff 也只警告）。`worktree_conversions_match_git` 在 `autocrlf=false`、`true`、`input` 三个变体下与 git 2.43 `git add` 的 OID 逐个相同，包括 UTF-16LE、带 BOM 的 UTF-16、`ident`、混合换行和带 NUL 的 `text=auto`。
 - 工作区一侧是 `PathThroughSymlink` 或 `Unreadable` 时模式取 index 的模式，按「无法比较」处理（`staged` 为 None），状态按两侧模式是 `Modified`。冲突路径的工作区一侧总是读取比较（没有 stage 0 的 stat），`staged` 为 None。`git add -N` 的条目：工作区有文件时是 `untracked = false` 的 `Added`（基准有这个路径时为 `Modified`），没有文件时不报告。
-- 子模块：先经 `SafeRoot` 读 `<路径>/.git`（`gitdir:` 文件或目录），再用 gix 只读地打开那个 git 目录读 HEAD；`.git` 是符号链接或打不开时为 `Unavailable(Unreadable)`，没有 `.git` 或 HEAD 是 unborn 时 W = I。
+- 子模块：先经 `SafeRoot` 读 `<路径>/.git`。是目录时，`HEAD`、松散引用和 `packed-refs` 都经 `SafeRoot` 读；是 `gitdir:` 文件时，只接受规范化后在本仓库公共目录 `modules/` 之下的 git 目录（git 目录里的管理文件，按路径读），指向别处的为 `Unavailable(Unreadable)`，不按工作区里的文件给出的路径去读。`.git` 是符号链接或读不到时为 `Unavailable(Unreadable)`，没有 `.git` 或 HEAD 是 unborn 时 W = I。子模块的哈希算法按超级项目的算。
+- 未跟踪文件的遍历（PR #87 审阅后，[ADR 0028](../adr/0028.md)）：不用 gix 的 `dirwalk`。gix 按路径遍历、按路径读工作区里的 `.gitignore`（未跟踪的 `.gitignore` 是符号链接时还跟随它），被审阅的进程在遍历期间把目录换成指向工作区之外的符号链接，忽略规则和列出的名字就会来自工作区之外。改为在 `SafeRoot::list`（platform 新增的接口）上自己遍历，`.gitignore` 只读普通文件（与 git 2.32 起相同），在内存里匹配；「工作区比较」第 4 步已改。与 gix 遍历的差别：嵌套仓库按「目录里有 `.git` 目录或文件」判定，不检查它是不是有效的仓库；被忽略的目录、被忽略的未跟踪 `.gitignore` 里的规则不生效（与 git 相同）；`core.precomposeUnicode` 开启时名字按 NFC 规范化（gix-utils）。剩余的竞态：每次 `list`、`read` 的结果对应调用期间某一时刻，两次调用之间被替换的目录在下一次调用里报告为不存在或 `PathThroughSymlink`，不会读到工作区之外（`worktree_race_directory_swapped_for_a_symlink_never_escapes`）。
 - 未跟踪文件的上限按遍历顺序数，达到上限时停止遍历（`untracked_capped`），列出的再按路径排序。
+- 只在 index 里的新增（`Detail::StagedOnly` 的 `Added`，如 `git mv a b; rm b`）不作为重命名的目标：配对后会成为 `StagedOnly` 的 `Renamed`，丢掉工作区里已经没有这个文件的信息。这时报告 `Deleted(a)` 和 `StagedOnly` 的 `Added(b)`（PR #87 审阅后）。
 - `Base::MergeBase` 的引用不存在时返回 `GitError::Io(NotFound)`；HEAD 是 unborn 时返回 `GitError::NoMergeBase`。
 - 新增 `ChangeSet::fingerprint` 和 `Fingerprint`：crates/git/AGENTS.md 规定了工作区指纹的组成，改动集里已经有它需要的全部身份（截断只改 `Detail`），在这里算最直接；Analyze 怎样使用它随 #66 设计。对象库里缺失的一侧（`Unavailable::Missing`）在组装时丢掉了 OID，指纹里只记「缺失」。
 - `testing` 增加 `IndexStat`、`IndexEntry::stat`、`IndexEntry::intent_to_add` 和 `TestRepo::add`、`set_mtime`、`backdate`、`remove`、`import_worktree_fixture`（见「第 3 步补全的类型」）。工作区夹具（`tests/fixtures/worktree_conversions`）格式见 [夹具说明](../../crates/git/tests/fixtures/README.md)；它没有 `trees` 文件，`numstat_matches_git` 改为只取有 `trees` 的目录。FIFO 测试只在 Linux 上运行（用 `rustix` 建 FIFO），socket 的测试在所有平台上运行。`no_external_programs` 在 nextest 的一测试一进程模式下才把记录调用的假 `git`、`sh` 放到 PATH 最前面：`cargo test` 在一个进程里多线程运行测试，那时改环境变量不安全；仓库配置里的各种外部程序在两种方式下都指向写标记文件的脚本。

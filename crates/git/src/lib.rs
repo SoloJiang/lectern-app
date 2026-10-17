@@ -30,6 +30,7 @@ mod rows;
 mod tracked;
 mod tree;
 mod tree_diff;
+mod untracked;
 mod worktree;
 
 #[cfg(any(test, feature = "test-support"))]

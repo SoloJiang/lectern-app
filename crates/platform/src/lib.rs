@@ -7,4 +7,4 @@
 pub mod safe_read;
 
 #[cfg(unix)]
-pub use safe_read::{FileKind, Meta, Read, RelPath, SafeError, SafeRoot, Timestamp};
+pub use safe_read::{DirEntry, FileKind, Meta, Read, RelPath, SafeError, SafeRoot, Timestamp};

@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gix::bstr::{BString, ByteSlice};
 use lectern_platform::{FileKind, Meta, Read, SafeError, SafeRoot, Timestamp};
 
 use crate::changes::{
@@ -19,9 +18,10 @@ use crate::changes::{
     pair_renames, peel_to_tree,
 };
 use crate::conversion::{AttrFile, ConversionState, WorktreeAttrs};
-use crate::handle::{ConfigScope, Handle};
+use crate::handle::Handle;
 use crate::repo::{normalize, read_head};
 use crate::tree::{self, Found};
+use crate::untracked;
 use crate::{
     Content, GitError, HashKind, HeadState, Mode, Oid, RefName, RepoPath, Unavailable, tracked,
 };
@@ -122,9 +122,6 @@ struct IndexItem {
     stat: gix::index::entry::Stat,
     skip_worktree: bool,
     intent_to_add: bool,
-    /// Its entries in `state`; empty for entries expanded from a sparse
-    /// directory.
-    slots: std::ops::Range<usize>,
 }
 
 impl IndexSnapshot {
@@ -410,9 +407,7 @@ pub(crate) fn run(
         stats.insert(i, stat);
     }
 
-    // Phase B: untracked files. gix's walk treats only `UPTODATE` entries as
-    // tracked, so they are set on an in-memory copy for entries present in
-    // the worktree; index paths it still reports are dropped.
+    // Phase B: untracked files, listed through `SafeRoot` (ADR 0028).
     let outside_untracked = refresh.map_or(0, |(_, origin, _)| {
         origin
             .records
@@ -426,14 +421,21 @@ pub(crate) fn run(
             .count()
     });
     let untracked_limit = limits.untracked.saturating_sub(outside_untracked);
-    let (untracked, mut untracked_capped) = walk_untracked(
-        &handle,
-        &index,
-        &stats,
-        scope.as_ref(),
-        untracked_limit,
-        cancel,
-    )?;
+    let (untracked, mut untracked_capped) = if scope.as_ref().is_some_and(|s| s.0.is_empty()) {
+        (Vec::new(), false)
+    } else {
+        let found = untracked::walk(
+            &handle,
+            hash,
+            subject.root,
+            &*index,
+            scope.as_ref().map(|s| s as &dyn untracked::Covers),
+            untracked_limit,
+            limits.read_bytes,
+            cancel,
+        )?;
+        (found.entries, found.capped)
+    };
     if let Some((_, origin, _)) = refresh {
         untracked_capped |= origin.untracked_capped;
     }
@@ -459,7 +461,7 @@ pub(crate) fn run(
             }
             for (path, kind) in &untracked {
                 if basename(path.as_bytes()) == b".gitattributes"
-                    && *kind == gix::dir::entry::Kind::File
+                    && *kind == untracked::Kind::File
                     && let Some(content) = read_attr_file(subject.root, path, limits.read_bytes)
                 {
                     files.push(attr_file(
@@ -500,7 +502,7 @@ pub(crate) fn run(
     let mut reader = Reader {
         root: subject.root,
         root_path: subject.root_path,
-        scope_kind: subject.repo.scope(),
+        common_dir: &subject.repo.location().common_dir,
         hash,
         limits,
         file_mode,
@@ -619,9 +621,9 @@ pub(crate) fn run(
 
     // Untracked files: always additions.
     for (path, kind) in untracked {
-        use gix::dir::entry::Kind;
+        use untracked::Kind;
         let side = match kind {
-            Kind::Untrackable => Some(special(Unavailable::UnsupportedType)),
+            Kind::Special => Some(special(Unavailable::UnsupportedType)),
             Kind::Repository => Some(special(Unavailable::NestedRepository)),
             Kind::File | Kind::Symlink => {
                 let stat = match path.as_rel().map(|rel| subject.root.stat(rel)) {
@@ -632,7 +634,6 @@ pub(crate) fn run(
                 };
                 reader.observe(&mut attrs, &path, stat, None, None)?
             }
-            Kind::Directory => None,
         };
         if let Some(side) = side {
             let mut p = Pending::new(Status::Added, path, None, Some(side));
@@ -918,7 +919,6 @@ fn index_items(
             end += 1;
         }
         let group = &entries[i..end];
-        let start = i;
         i = end;
         let live: Vec<&gix::index::Entry> = group
             .iter()
@@ -947,7 +947,6 @@ fn index_items(
                     stat: Default::default(),
                     skip_worktree: true,
                     intent_to_add: false,
-                    slots: 0..0,
                 });
                 Ok(())
             })?;
@@ -993,7 +992,6 @@ fn index_items(
             stat: main.stat,
             skip_worktree: main.flags.contains(Flags::SKIP_WORKTREE),
             intent_to_add: main.flags.contains(Flags::INTENT_TO_ADD),
-            slots: start..end,
         });
     }
     if !items.is_sorted_by(|a, b| a.path < b.path) {
@@ -1003,128 +1001,34 @@ fn index_items(
     Ok((items, invalid))
 }
 
-/// gix's directory walk with the index's present entries marked tracked:
-/// untracked files, symbolic links, special files and nested repositories,
-/// in path order, at most `limit` (the bool says whether there were more).
-fn walk_untracked(
-    handle: &Handle,
-    index: &IndexSnapshot,
-    stats: &HashMap<usize, Stat>,
-    scope: Option<&Scope>,
-    limit: usize,
-    cancel: &AtomicBool,
-) -> Result<(Vec<(RepoPath, gix::dir::entry::Kind)>, bool), GitError> {
-    use gix::dir::walk::EmissionMode;
-    use gix::index::entry::Flags;
+impl untracked::Index for IndexSnapshot {
+    fn entry(&self, path: &[u8]) -> Option<Mode> {
+        let item = self.find(path)?;
+        item.entry.map(|e| e.0).or(item.conflict)
+    }
 
-    let mut state = index.state.clone();
-    {
-        let entries = state.entries_mut();
-        for entry in entries.iter_mut() {
-            entry.flags |= Flags::UPTODATE;
-        }
-        for (slot, stat) in stats {
-            let item = &index.items[*slot];
-            let present = match stat {
-                Stat::Meta(meta) => {
-                    meta.kind != FileKind::Dir || item.entry.is_some_and(|e| e.0 == Mode::Gitlink)
-                }
-                _ => false,
-            };
-            if !present {
-                for entry in &mut entries[item.slots.clone()] {
-                    entry.flags.remove(Flags::UPTODATE);
-                }
-            }
-        }
+    fn has_beneath(&self, dir: &[u8]) -> bool {
+        let mut prefix = dir.to_vec();
+        prefix.push(b'/');
+        let start = self
+            .items
+            .partition_point(|i| i.path.as_bytes() < prefix.as_slice());
+        self.items
+            .get(start)
+            .is_some_and(|i| i.path.as_bytes().starts_with(&prefix))
     }
-    let options = handle
-        .dirwalk_options()
-        .map_err(GitError::from_gix)?
-        .emit_untracked(EmissionMode::Matching)
-        .emit_ignored(None)
-        .emit_tracked(false)
-        .emit_pruned(false)
-        .emit_empty_directories(false)
-        .recurse_repositories(false)
-        .classify_untracked_bare_repositories(false)
-        .symlinks_to_directories_are_ignored_like_directories(false);
-    let patterns: Vec<BString> = match scope {
-        None => Vec::new(),
-        Some(scope) => scope
-            .0
-            .iter()
-            .map(|p| {
-                let mut pattern = BString::from(":(literal)");
-                pattern.extend_from_slice(p.as_bytes());
-                pattern
-            })
-            .collect(),
-    };
-    if scope.is_some_and(|s| s.0.is_empty()) {
-        return Ok((Vec::new(), false));
-    }
-    let mut delegate = Untracked {
-        index,
-        found: Vec::new(),
-        limit,
-        capped: false,
-    };
-    handle
-        .dirwalk(&state, patterns, cancel, options, &mut delegate)
-        .map_err(|err| {
-            if cancel.load(Ordering::Relaxed) {
-                GitError::Cancelled
-            } else {
-                GitError::from_gix(err)
-            }
-        })?;
-    if cancel.load(Ordering::Relaxed) {
-        return Err(GitError::Cancelled);
-    }
-    let mut found = delegate.found;
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    found.dedup_by(|a, b| a.0 == b.0);
-    Ok((found, delegate.capped))
 }
 
-struct Untracked<'a> {
-    index: &'a IndexSnapshot,
-    found: Vec<(RepoPath, gix::dir::entry::Kind)>,
-    limit: usize,
-    capped: bool,
-}
+impl untracked::Covers for Scope {
+    fn covers(&self, path: &[u8]) -> bool {
+        self.contains(path)
+    }
 
-impl gix::dir::walk::Delegate for Untracked<'_> {
-    fn emit(
-        &mut self,
-        entry: gix::dir::EntryRef<'_>,
-        _collapsed: Option<gix::dir::entry::Status>,
-    ) -> gix::dir::walk::Action {
-        use gix::dir::entry::{Kind, Status};
-        use std::ops::ControlFlow;
-
-        if entry.status != Status::Untracked {
-            return ControlFlow::Continue(());
-        }
-        let Some(kind @ (Kind::File | Kind::Symlink | Kind::Untrackable | Kind::Repository)) =
-            entry.disk_kind
-        else {
-            return ControlFlow::Continue(());
-        };
-        let path = entry.rela_path.as_bytes();
-        if self.index.find(path).is_some() {
-            return ControlFlow::Continue(());
-        }
-        let Some(path) = RepoPath::new(path) else {
-            return ControlFlow::Continue(());
-        };
-        if self.found.len() >= self.limit {
-            self.capped = true;
-            return ControlFlow::Break(());
-        }
-        self.found.push((path, kind));
-        ControlFlow::Continue(())
+    fn leads_to(&self, dir: &[u8]) -> bool {
+        self.0.iter().any(|s| {
+            let s = s.as_bytes();
+            s.len() > dir.len() && s.starts_with(dir) && s[dir.len()] == b'/'
+        })
     }
 }
 
@@ -1133,7 +1037,7 @@ impl gix::dir::walk::Delegate for Untracked<'_> {
 struct Reader<'a> {
     root: &'a SafeRoot,
     root_path: &'a Path,
-    scope_kind: ConfigScope,
+    common_dir: &'a Path,
     hash: HashKind,
     limits: &'a Limits,
     file_mode: bool,
@@ -1346,33 +1250,95 @@ impl Reader<'_> {
             return Seen::SameAsIndex;
         };
         let unreadable = || Seen::Side(unavailable(Mode::Gitlink, Unavailable::Unreadable));
-        let dir = rela(self.root_path, path.as_bytes());
-        let git_dir = match self.root.read(rel, 64 * 1024) {
+        const MAX: u64 = 1024 * 1024;
+        let head = match self.root.read(rel, MAX) {
             Err(SafeError::NotFound) => return Seen::SameAsIndex,
             Ok(Read::File { bytes, .. }) => {
+                // `gitdir: …` of an absorbed submodule: only a directory under
+                // this repository's `modules/` is read (a git directory, by
+                // path), never one the worktree file points elsewhere.
                 let Some(target) = bytes.trim_ascii_end().strip_prefix(b"gitdir:") else {
                     return unreadable();
                 };
-                normalize(&dir.join(rela(Path::new(""), target.trim_ascii())))
+                let dir = rela(self.root_path, path.as_bytes());
+                let git_dir = normalize(&dir.join(rela(Path::new(""), target.trim_ascii())));
+                if !git_dir.starts_with(self.common_dir.join("modules")) {
+                    return unreadable();
+                }
+                resolve_head(self.hash, &mut |name: &[u8]| {
+                    crate::gitdir::read(&rela(&git_dir, name)).ok().flatten()
+                })
             }
-            Ok(Read::Unsupported { meta }) if meta.kind == FileKind::Dir => dir.join(".git"),
+            // A `.git` directory in the worktree: read through `SafeRoot`.
+            Ok(Read::Unsupported { meta }) if meta.kind == FileKind::Dir => {
+                let root = self.root;
+                resolve_head(self.hash, &mut |name: &[u8]| {
+                    let mut rel = dot_git.as_bytes().to_vec();
+                    rel.push(b'/');
+                    rel.extend_from_slice(name);
+                    let rel = RepoPath::new(&rel)?;
+                    match root.read(rel.as_rel()?, MAX) {
+                        Ok(Read::File { bytes, .. }) => Some(bytes),
+                        _ => None,
+                    }
+                })
+            }
             _ => return unreadable(),
         };
-        let Ok(handle) = Handle::open(&git_dir, self.scope_kind) else {
-            return unreadable();
-        };
-        match handle.head() {
-            Ok(head) => match head.id() {
-                Some(id) => Seen::Side(PendingSide {
-                    mode: Mode::Gitlink,
-                    content: Content::Blob(Oid::from_gix(&id)),
-                    bytes: None,
-                }),
-                None => Seen::SameAsIndex,
-            },
-            Err(_) => unreadable(),
+        match head {
+            Head::Commit(oid) => Seen::Side(PendingSide {
+                mode: Mode::Gitlink,
+                content: Content::Blob(oid),
+                bytes: None,
+            }),
+            Head::Unborn => Seen::SameAsIndex,
+            Head::Unreadable => unreadable(),
         }
     }
+}
+
+enum Head {
+    Commit(Oid),
+    Unborn,
+    Unreadable,
+}
+
+/// A repository's HEAD from its files (`HEAD`, a loose reference or
+/// `packed-refs`), read by `read`, following up to five symbolic levels.
+fn resolve_head(hash: HashKind, read: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>) -> Head {
+    let Some(head) = read(b"HEAD") else {
+        return Head::Unreadable;
+    };
+    let mut content = head;
+    for _ in 0..5 {
+        let text = content.trim_ascii();
+        let Some(name) = text.strip_prefix(b"ref:") else {
+            return Oid::from_hex_bytes(hash, text).map_or(Head::Unreadable, Head::Commit);
+        };
+        let name = name.trim_ascii().to_vec();
+        if !name.starts_with(b"refs/")
+            || name
+                .split(|&b| b == b'/')
+                .any(|c| c.is_empty() || c == b"." || c == b"..")
+        {
+            return Head::Unreadable;
+        }
+        if let Some(next) = read(&name) {
+            content = next;
+            continue;
+        }
+        let packed = read(b"packed-refs").unwrap_or_default();
+        let found = packed.split(|&b| b == b'\n').find_map(|line| {
+            let space = line.iter().position(|&b| b == b' ')?;
+            let (hex, rest) = (&line[..space], &line[space + 1..]);
+            (rest.trim_ascii_end() == &name[..]).then_some(hex)
+        });
+        return match found {
+            Some(hex) => Oid::from_hex_bytes(hash, hex).map_or(Head::Unreadable, Head::Commit),
+            None => Head::Unborn,
+        };
+    }
+    Head::Unreadable
 }
 
 #[cfg(unix)]
@@ -1538,7 +1504,7 @@ pub(crate) mod hook {
 }
 
 #[cfg(not(test))]
-mod hook {
+pub(crate) mod hook {
     pub(crate) fn read() {}
 }
 
