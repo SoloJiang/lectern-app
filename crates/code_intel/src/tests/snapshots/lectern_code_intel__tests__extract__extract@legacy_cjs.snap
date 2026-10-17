@@ -1,0 +1,13 @@
+---
+source: crates/code_intel/src/tests/extract.rs
+description: tests/fixtures/extract/js/legacy.cjs
+expression: render(&extraction)
+---
+status: Done
+defs:
+  3:6-3 constant path [public]
+  5:9-9 function resolveAll [public] (2)
+  6:28-8 function join in resolveAll [file] (1)
+  11:4-11 variable cache [public]
+  13:9-18 function remember [public] (2)
+refs: join map

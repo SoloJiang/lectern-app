@@ -1,0 +1,19 @@
+---
+source: crates/code_intel/src/tests/extract.rs
+description: tests/fixtures/extract/python/billing.py
+expression: render(&extraction)
+---
+status: Done
+defs:
+  6:0-6 constant TAX_RATE [unknown]
+  7:0-7 constant _registry [unknown]
+  10:4-15 function register [unknown] (1)
+  11:8-13 function wrap in register [unknown] (1)
+  19:6-24 class Line [unknown]
+  23:8-24 method total in Line [unknown] (2)
+  28:6-42 class Invoice [unknown]
+  29:8-32 method __init__ in Invoice [unknown] (5)
+  35:8-37 method total in Invoice [unknown] (1)
+  40:8-42 method parse in Invoice [unknown] (3)
+  45:4-48 function pay [unknown] (3)
+refs: Base Decimal Invoice list register round split sum total

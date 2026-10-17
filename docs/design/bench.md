@@ -588,6 +588,7 @@ crates/bench/
 | `fs_watch/reflog_append` | 中位数 < 1 ms（追加一行 reflog 到记录进入批次，不含后端延迟） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 1 步（同上） |
 | `fs_watch/flush_idle`、`fs_watch/write_to_deliver` | 中位数 < 5 ms / < 120 ms（macOS 真实后端） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
 | `fs_watch/resident` | 常驻增量 < 1 MB；`Memory` | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
+| `code_intel/extract_throughput` | 中位数吞吐 ≥ 4 MB/s（单线程，首发的每种语言约 1 MiB 夹具，看门狗在运行） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `executor/spawn_10k`、`executor/wake_1000x100` | 只记录 | [executor](executor.md#性能) | 第 1 步 |

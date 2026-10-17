@@ -155,6 +155,7 @@ const PLATFORM: &str = "docs/design/platform.md#性能";
 const EXECUTOR: &str = "docs/design/executor.md#性能";
 const I18N: &str = "docs/design/i18n.md#性能";
 const FS_WATCH: &str = "docs/design/fs_watch.md#性能";
+const CODE_INTEL: &str = "docs/design/code_intel.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -771,6 +772,14 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // ---- fs_watch (docs/design/fs_watch.md「性能」) ----
+    // Single-thread extraction, about 1 MiB of each first-release language.
+    share(
+        "code_intel/extract_throughput",
+        &[median(Limit::ThroughputAtLeast(4 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     // FakeBackend and the manual driver, without backend latency.
     share(
         "fs_watch/classify_burst",

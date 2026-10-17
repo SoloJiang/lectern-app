@@ -5,6 +5,8 @@
 mod agents;
 #[path = "time/cache.rs"]
 mod cache;
+#[path = "time/code_intel.rs"]
+mod code_intel;
 #[path = "time/executor.rs"]
 mod executor;
 #[path = "time/fs_watch.rs"]
@@ -40,6 +42,7 @@ const BENCHES: &[Bench] = &[
     cache::BATCH_1000,
     cache::EVICT,
     cache::ZSTD_1M,
+    code_intel::EXTRACT_THROUGHPUT,
     executor::SPAWN_10K,
     executor::WAKE_1000X100,
     fs_watch::CLASSIFY_BURST,

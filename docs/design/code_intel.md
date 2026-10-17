@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：已接受，尚未实现（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现；第 2–5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -43,6 +43,7 @@
 | `lectern-platform` | `SafeRoot`：读工作区文件 | 工作区文件只经 `SafeRoot` 读取，不用 mmap（[platform 设计「读取上限」](platform.md#读取上限)） |
 | `tree-sitter` `=0.27.1`（不开 `wasm`） | 解析、locals 查询、截止时间的进度回调 | ADR 0030 |
 | `tree-sitter-tags` `=0.27.1` | tags 查询抽取定义和引用 | ADR 0030；只新增 `tree-sitter-language`、`streaming-iterator` 两个传递依赖 |
+| `streaming-iterator` | `ParsedFile` 自己遍历查询匹配（`QueryMatches` 实现的是它的 trait） | tree-sitter-tags 的传递依赖，MIT OR Apache-2.0，不新增 crate |
 | `tree-sitter-typescript`、`tree-sitter-javascript`、`tree-sitter-rust`、`tree-sitter-java`、`tree-sitter-python`、`tree-sitter-go` | 首发语言的 grammar（见「未决问题」1） | ADR 0018 的核心语言集合，MIT；版本取 ABI 落在 tree-sitter 0.27.1 支持范围内的最新版本，在 `[workspace.dependencies]` 用 `=` 锁定，与高亮方共用；体积计入 ADR 0018，由 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 测量 |
 | `memchr` | 限时搜索的整词查找（`memmem`） | 已在 Cargo.lock |
 | `unicode-normalization` | 名字表统一成 NFC（ADR 0030：frizbee 不做规范化） | 已在 Cargo.lock |
@@ -504,10 +505,91 @@ pub mod extract {
     /// 同一兼容组的语言可以互相引用（见「语言与抽取键」）。
     /// 当前语言表：核心语言加已装的语言包，每种语言带它的兼容组；语言包变化时整体替换（见「语言包的变化」）。
     pub struct LanguageTable { /* … */ }
+    impl LanguageTable {
+        /// 只有核心语言。不编译查询。
+        pub fn core() -> LanguageTable;
+        pub fn get(&self, name: &str) -> Option<&Lang>;
+        pub fn iter(&self) -> impl Iterator<Item = &Lang> + '_;
+        /// 先按核心语言的扩展名，再按语言包认领的扩展名（这个语言包要在表里）。
+        pub fn for_path(&self, path: &str, packs: &dyn GrammarSource) -> Option<&Lang>;
+        /// 加入或替换一个语言包；与核心语言同名的忽略。
+        pub fn with_pack(&self, name: LangName, grammar: LoadedGrammar) -> LanguageTable;
+        pub fn without(&self, name: &str) -> LanguageTable;
+    }
+    /// 表里的一种语言。克隆共享同一份，每个克隆都持有 grammar 的租约。
+    pub struct Lang { /* … */ }
+    impl Lang {
+        pub fn name(&self) -> &LangName;
+        pub fn grammar_version(&self) -> u64;
+        pub fn query_version(&self) -> u64;
+        pub fn compat_group(&self) -> Option<&str>;
+        pub fn lease(&self) -> &GrammarLease;
+        /// 编译查询（只编译一次，之后常驻）。阻塞，后台线程。编译失败时返回 false，这种语言在本次运行中停用。
+        pub fn prepare(&self) -> bool;
+    }
     /// 兼容组随语言包动态登记，所以按当前语言表判断。
     pub fn compatible(langs: &LanguageTable, a: &LangName, b: &LangName) -> bool;
-    /// 抽取一份内容。阻塞（解析），任何非 UI 线程。`deadline` 到了或 `cancel` 置位时返回 `TimedOut` / `Cancelled`。
-    pub fn extract(lang: &Lang, source: &[u8], deadline: Deadline, cancel: &AtomicBool) -> Extraction;
+    /// 截止时刻（看门狗的时钟）和内容大小上限，可选地带暂停探针。
+    pub struct Deadline { /* watchdog, at, max_len, pause */ }
+    impl Deadline {
+        /// 现在起 250 ms，上限 1 MiB。
+        pub fn background(watchdog: &Watchdog) -> Deadline;
+        /// 现在起 1 s，上限 4 MiB。
+        pub fn interactive(watchdog: &Watchdog) -> Deadline;
+        /// 限时搜索的 min(250 ms, 剩余时间) 这类明确的时刻。
+        pub fn at(watchdog: &Watchdog, at: Instant, max_len: usize) -> Deadline;
+        /// 第 3–5 层传入 `BackgroundGuard::pause_requested`，看门狗每次检查时调用。
+        pub fn with_pause(self, pause: PauseProbe) -> Deadline;
+    }
+    /// 抽取一份内容。阻塞（解析），任何非 UI 线程。`deadline` 到了返回 `TimedOut`；
+    /// `cancel` 置位、暂停探针返回 true 或看门狗停止时返回 `Cancelled`。
+    pub fn extract(lang: &Lang, source: &[u8], deadline: &Deadline, cancel: &Arc<AtomicBool>) -> Extraction;
+}
+
+/// 截止时间的看门狗（见「调度、批次与取消」）。每次激活一个，`Clone` 共享。
+pub struct Watchdog { /* … */ }
+pub type Starter = Box<dyn FnOnce(WatchdogRun) + Send>;
+pub type PauseProbe = Arc<dyn Fn() -> bool + Send + Sync>;
+impl Watchdog {
+    /// `starter` 在第一次登记在途抽取时被调用一次，拿到线程的循环；插件经 `own_with` 和
+    /// `run_dedicated_gated` 在专用线程 `WATCHDOG_THREAD`（"code-intel-watchdog"）上运行它。
+    pub fn new(clock: Arc<dyn Clock>, starter: Starter) -> Watchdog;
+    pub fn clock(&self) -> &Arc<dyn Clock>;
+    /// 置位全部在途抽取的标志、唤醒线程；之后的登记立即取消，线程不再启动。重复调用无害。
+    pub fn stop(&self);
+    /// drop 时调用 `stop`，交给 `PluginHandle::own`。
+    pub fn stop_guard(&self) -> WatchdogStop;
+}
+/// 线程的循环：有在途抽取时每 10 ms（`CHECK_INTERVAL`）检查一次，没有时不带超时地等待，`stop` 之后返回。
+pub struct WatchdogRun { /* … */ }
+impl WatchdogRun { pub fn run(self); }
+pub trait Clock: Send + Sync { fn now(&self) -> Instant; }
+pub struct SystemClock;
+
+/// 按需解析一个文件和位置分析（见「抽取结果」的 `ParsedFile`、「跳转到定义」第 1 步）。
+/// 供查询（第 4 步）、测试和 bench 使用。
+pub mod site {
+    pub struct ParsedFile { /* lang, source, tree, 定义, locals 的作用域与定义, 引用位置 */ }
+    impl ParsedFile {
+        /// 自己调用 `Parser::parse_with_options` 和 `QueryCursor::matches_with_options`，
+        /// 进度回调直接比较 `clock` 的时刻和 `cancel`，不经看门狗。
+        pub fn parse(lang: &Lang, source: Arc<[u8]>, clock: &dyn Clock, at: Instant, cancel: &AtomicBool) -> Result<ParsedFile, ParseError>;
+        pub fn defs(&self) -> impl Iterator<Item = &Def> + '_;
+        /// tags 引用与 `@local.reference` 的并集，按位置去重，不含定义自己的名字。
+        pub fn references(&self) -> &[RefSite];
+        /// 位置上（或光标紧跟其后）的标识符；不在标识符上时为 None（`QueryError::NoSymbol`）。
+        pub fn site_at(&self, at: Position) -> Option<Site>;
+    }
+    pub enum ParseError { TimedOut, Cancelled, Unsupported }
+    pub struct Site { pub name: Box<str>, pub syntax: RefSyntax, pub at: Position, pub binding: Option<LocalBinding>, pub defines: Option<SiteDef> }
+    /// `local`：locals 在非根作用域里给出的定义（`DefinitionRef::local`）。
+    pub struct SiteDef { pub def: Def, pub local: bool }
+    /// 引用绑定到的局部定义（`Binding::Local`）；tags 也捕获它时带上它的 `Def`。
+    pub struct LocalBinding { pub name: Box<str>, pub at: Position, pub def: Option<Def>, pub local: bool }
+    pub struct RefSite { pub at: Position, pub start: usize, pub end: usize }
+    /// 「候选的分层与过滤」的语法种类表，按 `DefKind::bit` 的位集给出。
+    pub fn accepted_kinds(lang: &Lang, syntax: RefSyntax) -> u16;
+    pub fn accepts(lang: &Lang, syntax: RefSyntax, kind: DefKind) -> bool;
 }
 
 /// `test-support`：`FakeGit`、`FakeProjects`（内存里的 `dyn Projects`）、`FakePower`、`FakeGrammars`（可以安装、更新、回滚、撤销的语言包）、`ManualClock`、
@@ -602,7 +684,9 @@ pub(crate) struct ChangedPaths {
 - 语言包的扩展名由 `GrammarSource::language_for_extension` 认领，与核心语言冲突时核心语言优先。语言包在项目打开期间变化的处理见「语言包的变化」。
 - 抽取键：（blob OID、语言短名、grammar 版本、查询版本）。
   - grammar 版本：核心语言取「crate 名 @ 版本」的 64 位哈希，版本号写成常量，测试 `lang_grammar_versions_match_lock` 检查它与 Cargo.lock 一致；语言包取 `artifact_sha256` 的前 8 字节。grammar 升级后旧结果不再命中（#42 的缓存键要求）。
-  - 查询版本：tags 查询、locals 查询的文本加上本 crate 的 `EXTRACTOR_VERSION`（可见性、参数个数、作用域的计算规则变化时加一）合在一起的 64 位哈希。
+  - 查询版本：tags 查询、locals 查询的文本加上 tree-sitter 与 tree-sitter-tags 的版本和本 crate 的 `EXTRACTOR_VERSION`（可见性、参数个数、作用域的计算规则变化时加一）合在一起的 64 位哈希。两个版本也是常量，由同一个测试检查；tree-sitter-tags 决定哪些匹配成为 tag，升级后旧结果同样不再命中。
+  - 哈希用 64 位 FNV-1a：键会持久化，不能用随工具链变化的 `DefaultHasher`。
+  - 首发语言的清单是 `lang.rs` 的 `CORE_LANGUAGES` 一张表（扩展名、grammar crate 与版本、兼容组、查询文件），加上两个 `Cargo.toml` 里的 grammar 依赖；「未决问题」1 选 (b) 时只删表里的行和对应依赖。
 - 文件夹项目没有 git：OID 是原始字节按 git blob 格式的 SHA-1（`git::Oid::for_blob`）。
 
 ### 抽取结果
@@ -625,8 +709,10 @@ pub enum ExtractStatus {
     TooLarge,
     /// 前 8000 字节里有 NUL，与 git 的二进制判断相同。
     Binary,
-    /// 取消或暂停。不写入缓存。
+    /// 取消或暂停，或看门狗已停止。不写入缓存。
     Cancelled,
+    /// grammar 或查询编译失败，这种语言在本次运行中停用（见「状态与异常」）。不写入缓存。
+    Unsupported,
 }
 
 pub struct Def {
@@ -654,14 +740,29 @@ pub enum Visibility {
 ```
 
 - `kind` 来自 tags 的 `@definition.<种类>`：`function`、`method`、`class`、`interface`、`module`、`macro`、`constant`、`type`、`field` 等按名字对应 `DefKind`，`struct`、`enum`、`trait` 用各语言查询里的同名种类，其余为 `Other`。
-- `scope`：同一文件里，范围包含这个定义的最内层定义的名字。抽取后按范围排序一遍求出。
-- `visibility` 和 `arity` 由每种语言的一个小函数读定义节点的修饰符和参数节点得出，不经过 tags 查询；规则变化时 `EXTRACTOR_VERSION` 加一。
+- 每个名字节点只有一个定义。tree-sitter-tags 只在两次匹配都还在队列里时按模式顺序去重，后到的匹配会给同一个名字节点再加一个定义（方法又被函数模式匹配到）；抽取后按名字节点去重，保留更具体的种类（方法、类等先于函数，函数先于常量和变量），与查询里模式的先后一致。定义自己的名字不算引用。
+- `scope`：同一文件里，范围包含这个定义的最内层定义的名字。抽取后按范围排序一遍求出。Rust 的 `impl` 块不是定义，但作为容器参与计算，块里的方法的 `scope` 是实现的类型；Go 的方法取接收者的类型。
+- `visibility` 和 `arity` 由每种语言的一个小函数得出；规则变化时 `EXTRACTOR_VERSION` 加一。tree-sitter-tags 只交出 tag、不交出语法树，所以函数读的是查询为它捕获的内容：
+  - 标记：`@reference.lectern.<种类>` 的捕获只给抽取规则用，不进入引用名。Rust 的 `pub`（`visibility_modifier`）、`impl` 块与它实现的类型（区分 trait 实现），Java 的 `private`，JS / TS 的 `export` 语句、`export { name }` 与 `export default name` 导出的名字、`import` 语句，Go 方法的接收者类型。
+  - 参数列表：函数、方法的模式用 `@doc` 捕获参数列表节点（tags 把它的文本放在 `Tag::docs`），按括号、尖括号、字符串和注释的嵌套数顶层的逗号。Rust 的 `self` 接收者和 Python 的 `*`、`/` 分隔符不计数；没有括号的参数列表（`x => x`）是 1 个。查询不再用 `@doc` 捕获注释。
+  - 规则：Rust 有 `pub` 的项、trait 和 trait 实现里的成员、宏是 `Public`，其余 `Module`；Java 有 `private` 的是 `File`，其余 `Public`；Go 大写开头的是 `Public`，其余 `Package`；Python 和语言包是 `Unknown`。JS / TS：函数体里的定义是 `File`；其余取最外层定义的可见性：在 `export` 语句里或名字被导出时是 `Public`，文件有 `import` / `export`（ES 模块）时是 `File`，没有时（脚本、CommonJS）是 `Public`。
 - 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
 
 ### 外部格式（tags 查询）
 
 - 格式来源：tree-sitter 0.27.1 文档「Code Navigation Systems」（`@definition.*`、`@reference.*`、`@name`、`@doc`），locals 查询沿用 tree-sitter-highlight 的约定（`@local.scope`、`@local.definition`、`@local.reference`）。
-- 查询文件放在 `crates/code_intel/queries/<语言>/tags.scm` 和 `locals.scm`，以对应 grammar 仓库在锁定版本里的同名文件为起点（MIT），文件头记下上游 commit 和 Lectern 的改动；TS 的 tags 查询按上游的做法叠加 JS 的查询。用 `include_str!` 编译进二进制，第一次用到一种语言时在后台线程编译 `TagsConfiguration`，之后常驻。
+- 查询文件放在 `crates/code_intel/queries/<目录>/tags.scm` 和 `locals.scm`，以对应 grammar 仓库在锁定版本里的同名文件为起点（MIT），文件头记下上游 commit 和 Lectern 的改动；上游没有 locals 查询的语言（Rust、Java、Python、Go）由 Lectern 编写，同样记在文件头。用 `include_str!` 编译进二进制，第一次用到一种语言时在后台线程编译 `TagsConfiguration`，之后常驻。
+- TS 的 tags 查询按上游的做法叠加 JS 的查询。三种 grammar 的节点不完全相同（JSX 节点只在 `js` 和 `tsx` 里，JS 的 `field_definition` 和 `class_heritage` 在 TS 里是 `public_field_definition` 和 `extends_clause`），而查询里出现 grammar 没有的节点时编译失败，所以分成几个目录拼接：
+
+  | 目录 | 内容 | 用到的语言 |
+  |---|---|---|
+  | `ecmascript` | 三种 grammar 都有的节点，以 tree-sitter-javascript 的查询为起点 | `js`、`ts`、`tsx` |
+  | `js` | 只有 JS 有的节点（类字段、`extends`） | `js` |
+  | `jsx` | JSX 组件引用 | `js`、`tsx` |
+  | `ts` | 以 tree-sitter-typescript 的查询为起点 | `ts`、`tsx` |
+  | `rust`、`java`、`python`、`go` | 各自的查询 | 同名语言 |
+
+- 引用到标识符的模式带 `(#is-not? local)`：locals 解析到局部定义的引用不进入引用名（tree-sitter-tags 只对带这个谓词的模式过滤）。
 - 夹具：`crates/code_intel/tests/fixtures/extract/<语言>/` 下每种语言若干真实写法的样本（类、方法、闭包、重载、嵌套模块、导出与非导出、宏），抽取结果用 insta 快照；grammar 或查询升级时快照的变化在 PR 里逐个看过。另有一份病态输入（深度嵌套、超长行）用于截止时间的测试。
 
 ### 存储表
@@ -969,7 +1070,9 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   | `Type` | `Class`、`Interface`、`Struct`、`Enum`、`Trait`、`Type`、`Module` |
   | `Member` | `Field`、`Method`、`Constant`、`Variable` |
   | `Plain` | 全部 |
-  | Go 的 `Call` | 默认规则之外再接受 `Type` |
+  | Go 的 `Call`、`MemberCall` | 默认规则之外再接受 `Type`（`units.Meters(value)` 也是类型转换） |
+
+  这张表是 `site::accepted_kinds`。引用位置的 `RefSyntax` 由每种语言的一张位置表判断（`site.rs`）：每行是（标识符的节点种类、父节点种类与它所在的字段、可选的外层节点种类与字段或父节点必须有的字段）→ `RefSyntax`，第一条匹配的行生效；没有匹配的类型标识符为 `Type`，其余为 `Plain`。例如 Rust 的 `call_expression.function` 里的 `identifier` 是 `Call`，`call_expression.function` 里的 `field_expression.field` 是 `MemberCall`；Java 的 `method_invocation.name` 在有 `object` 字段时是 `MemberCall`。语言包没有位置表，都是 `Plain`。
 
 - 扩展点的 `disambiguate` 最后运行（Java 按所在类和参数个数，#18）。
 
@@ -1134,6 +1237,18 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
    - `app/goto_candidates`、`app/goto_single`、`app/goto_unindexed`、`app/goto_unindexed_done`、`app/index_review_set`、`app/index_subproject`、`app/index_100k`、`app/idle_monorepo_indexed` 在 `crates/bench/src/budgets.rs` 里改为生效，macOS CI 上在预算内。
    - `app/idle_monorepo` 在后台工作暂停时仍 < 100 MB。
 
+## 实际验证
+
+第 1 步，在 Linux（x86_64，4 核 Xeon 2.1 GHz，内核 6.18）上运行。本 crate 不依赖 GPUI，也没有 macOS 专属代码；macOS 上的结果由 macOS CI 给出。
+
+- `just check`、`just test`（整个工作区 1083 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `just test -p lectern-code-intel`：34 个测试通过。按前缀：`lang_*` 9（含 `lang_grammar_versions_match_lock`）、`extract_*` 10、`deadline_*` 7、`site_*` 8。insta 快照 8 个，每种首发语言至少一个（`ts`、`tsx`、`js` 两个、`rust`、`java`、`python`、`go`），逐个看过。`site_parsed_defs_match_extraction` 检查 `ParsedFile` 自己跑查询得到的定义与 tree-sitter-tags 的抽取结果逐条相同。
+- `deadline_*` 用真实的看门狗线程（`testing::watchdog` 在 `Executor::manual()` 的专用线程上运行它）：1 MiB 的病态输入（2000 层嵌套的数组、一行 1 MiB）在 1 ms 截止时间下返回 `TimedOut`，用时 < 500 ms；解析途中置位取消标志、暂停探针返回 true、丢弃 `stop_guard()` 都让 4 MiB 的病态输入返回 `Cancelled`，`stop` 之后线程退出、之后的抽取立即取消、不再启动线程；`ManualClock` 不推进时看门狗检查但不置位，推进过截止时刻后置位；没有在途抽取时看门狗的循环计数在 100 ms 内不变。
+- `cargo tree -e features -i tree-sitter` 里没有 `wasm`（只有 `default` 和 `std`，`default` 由 tree-sitter-tags 打开）；`cargo tree -i tree-sitter-tags -e normal --depth 1` 只列出 `lectern-code-intel`。Cargo.lock 新增 `tree-sitter` 0.27.1、`tree-sitter-tags` 0.27.1、`tree-sitter-language` 0.1.9、`streaming-iterator` 0.1.9 和六个 grammar crate（`tree-sitter-typescript` 0.23.2、`tree-sitter-javascript` 0.25.0、`tree-sitter-rust` 0.24.2、`tree-sitter-java` 0.23.5、`tree-sitter-python` 0.25.0、`tree-sitter-go` 0.25.0），都是 MIT（`streaming-iterator` 为 MIT OR Apache-2.0），`just deny` 通过；已有依赖的版本没有变化。六个 grammar 都是各自在 crates.io 上的最新版本，ABI 是 14（typescript、java）或 15，在 tree-sitter 0.27.1 支持的 13–15 之内。
+- `code_intel/extract_throughput`（`just bench --measure code_intel/`，三次）：中位数 2.08–2.29 MB/s（MB 为 2^20 字节），在这台机器上低于 4 MB/s 的预算；Linux 上不判定，M 系列上没有测量，由 macOS CI 判定。同一台机器上的拆分（release，每种语言约 1 MiB 夹具）：只解析 4.4–5.5 MiB/s；tags 抽取 TS 2.0、TSX 2.5–2.6、JS 2.0、Rust 3.0 MiB/s；上游的 Rust tags 查询（不带 locals）3.5 MiB/s；去掉 locals 查询快约 15%–30%，去掉 `@local.reference` 的模式没有变化。吞吐主要受解析速度限制，抽取的查询匹配约占一半。调研在同类 Xeon 上测得 4.3 MB/s，预算按「M 系列可能快一倍」估算，M 系列上的结果要看 macOS CI。
+- 安装包体积（ADR 0018 的 80 MB）：在 Linux x86_64 上把 tree-sitter 运行时、tree-sitter-tags 和六个 grammar 链接进一个 release 二进制（thin LTO、strip），与只链接运行时的二进制相比多 6.9 MiB（7.27 MiB 对 0.34 MiB），gzip -9 之后多 1.2 MB（DMG 的 40 MB 目标）。各 grammar 的代码与数据：`tsx` 1.44 MB、`ts` 1.41 MB、`rust` 1.11 MB、`python` 0.46 MB、`java` 0.41 MB、`js` 0.41 MB、`go` 0.21 MB，运行时 0.21 MB，其余是 tags、`regex` 和绑定代码。解析表是数据，arm64 上的大小应当相近；macOS 上没有测量，正式数字由 #38 的 `app/bundle_size` 给出。「未决问题」1 选 (b) 时少 Rust、Python、Go 三个 grammar，约 1.8 MB。
+- 没有验证的：M 系列上的吞吐；macOS 上的体积；`watchdog_*`（看门狗随插件停用、`Executor::shutdown` 退出，属于第 4 步）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1143,3 +1258,21 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - `SemanticReply` 与 `ProviderRegistration`：字段属于本 crate（队列、登记表），`services` 里放不下。实现为包着回调的类型：本 crate 用 `new` 传入回调；`SemanticReply::send` 调用回调，没有调用就 drop 时回调随之 drop、不被调用；`ProviderRegistration` drop 时调用一次回调。两者都是 `Send`，不序列化。
 - `SemanticRequestId` 上文没有定义，实现为 `SemanticRequestId(pub u64)`，与 `QueryId` 相同。
 - 派生：除上文要求的标准派生外，小的键和值类型另派生 `Copy`、`Hash`（与 `services::project` 相同）；`CandidateTier` 另派生 `Ord`，顺序就是声明顺序，也就是候选列出的顺序。
+
+第 1 步：
+
+- `LangName`、`DefKind`、`RefSyntax` 暂时定义在本 crate 的根模块：它们属于 `services::code_intel`（前置条件 A），第 1 步不需要前置条件。A 合并后移到 `services`，本 crate 改为重新导出。`DefKind` 另有 `ALL`、`from_tag_kind`、`code`、`bit`、`as_str`。
+- `extract` 的签名：`deadline` 改为 `&Deadline`，`cancel` 改为 `&Arc<AtomicBool>`。tree-sitter-tags 只接受一个取消标志，所以每个在途抽取在看门狗登记自己的标志，由看门狗把截止时刻、调用方的取消标志、暂停探针和 `stop` 汇总到这个标志上；看门狗线程要持有调用方的取消标志，只能是共享的 `Arc`。`Deadline` 同时带上大小上限（后台 1 MiB、交互 4 MiB），因为两者总是成对出现。「接口」已改。
+- `ExtractStatus` 增加 `Unsupported`（grammar 或查询编译失败，不写入缓存）：设计在「状态与异常」里规定这种语言停用，但抽取函数没有对应的返回值。
+- tree-sitter-tags 只在两次匹配都还在队列里时去重，实测 Rust 的方法会再作为函数出现一次（`impl` 里带泛型参数的方法），所以抽取后按名字节点再去重一次（「抽取结果」已补）。定义自己的名字不进入引用名。
+- 可见性和参数个数不是从定义节点读出的：tree-sitter-tags 不交出语法树，再解析一次要多花一倍以上的时间（只解析的时间约占抽取的一半）。改为让查询捕获规则要用的内容：`@reference.lectern.*` 标记（`pub`、`private`、`export`、`import`、`impl` 块、Go 的接收者）和 `@doc` 捕获的参数列表，规则见「抽取结果」。查询因此不再用 `@doc` 捕获注释，`Def` 里本来也没有文档。
+- JS / TS 的可见性按文件是否为 ES 模块区分：没有 `import` / `export` 的脚本和 CommonJS 文件（`module.exports = { … }`）顶层是 `Public`，否则这些文件里的函数会被可见性过滤掉，跨文件跳转找不到它们。`export { name }` 和 `export default name` 导出的名字也是 `Public`。类、对象字面量和命名空间里的成员取最外层定义的可见性；TS 的 `private` 成员和 JS 的 `#私有` 成员仍是 `Public`（设计只规定了顶层定义）。
+- 查询文件按 grammar 的节点集合分目录（`ecmascript`、`js`、`jsx`、`ts`，见「外部格式」），而不是每种语言一个目录：查询里出现 grammar 没有的节点（TS grammar 没有 JSX 节点和 `field_definition`）时编译失败。
+- 上游没有 locals 查询的 Rust、Java、Python、Go 由 Lectern 编写，标识符引用的模式加了 `(#is-not? local)`：tree-sitter-tags 只对带这个谓词的模式过滤局部引用，上游的查询都没有带。
+- 查询版本另外包含 tree-sitter 和 tree-sitter-tags 的版本（「语言与抽取键」已改）。
+- 语法种类表里 Go 的 `MemberCall` 也接受 `Type`：`units.Meters(value)` 和 `Meters(value)` 一样是类型转换。
+- `site` 模块（`ParsedFile`、位置分析、语法种类表）是公开的，供第 4 步的查询、测试和以后的 `code_intel/goto_indexed` 使用；设计原来只说内部使用 `ParsedFile`。
+- `Watchdog` 以 `Starter` 回调启动线程：本 crate 第 1 步没有插件，测试和 bench 经 `testing::watchdog` 在 `Executor::run_dedicated` 的专用线程上运行它，第 4 步的插件改用 `own_with` 和 `run_dedicated_gated`。`stop` 和 `stop_guard` 已实现；向 `Executor::on_shutdown` 登记 `stop` 要等前置条件 D 提供这个接口，随第 4 步的插件加入。看门狗的到期表（名字表的延迟重建）随第 4 步的名字表加入。
+- `lectern-executor` 在第 1 步是可选依赖，只有 `test-support`（`testing::watchdog`）打开它；第 3 步起是普通依赖。`lectern-kernel` 等其他依赖随用到它们的步骤加入。
+- `testing` 第 1 步只有 `ManualClock`、`FakeGrammars`（安装、更新、移除、计数加载次数）、`java_pack`、`watchdog`、语言夹具 `FIXTURES` 与 `corpus`、病态输入 `pathological_js`；其余替身随用到它们的步骤加入。
+- 「性能」里本 crate 的其余分项预算还没有登记进 bench 的预算表，随实现它们的步骤登记。

@@ -1,0 +1,33 @@
+---
+source: crates/code_intel/src/tests/extract.rs
+description: tests/fixtures/extract/ts/shapes.ts
+expression: render(&extraction)
+---
+status: Done
+defs:
+  4:17-7 interface Shape [public]
+  5:2-5 method area in Shape [public] (0)
+  6:11-6 field name in Shape [public]
+  9:22-15 class Base [public]
+  10:11-10 method area in Base [public] (0)
+  12:2-14 method describe in Base [public] (2)
+  17:13-29 class Circle [public]
+  18:10-18 field radius in Circle [public]
+  23:2-25 method area in Circle [public] (0)
+  26:9-28 method unit in Circle [public] (0)
+  31:16-31 function scale [public] (2)
+  32:16-32 function scale [public] (2)
+  33:16-36 function scale [public] (2)
+  34:8-34 function one in scale [file] (1)
+  38:9-41 function helper [file] (2)
+  43:13-43 function sum [public] (1)
+  45:22-50 function load [public] (2)
+  52:17-56 module Geometry [public]
+  53:18-55 function perimeter in Geometry [public] (1)
+  58:5-58 type Pair [file]
+  58:20-58 field first in Pair [file]
+  58:30-58 field second in Pair [file]
+  60:5-63 enum Unit [file]
+  65:13-65 constant DEFAULT_UNIT [public]
+  67:16-69 function pair [public] (2)
+refs: A B Base Circle Map Options Pair Promise Shape area helper isArray map parse readText reduce sum toFixed values

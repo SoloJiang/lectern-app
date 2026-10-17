@@ -106,6 +106,25 @@ rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled
 # lectern-cache: partition file names (docs/design/cache.md). The version
 # gix-hash already uses; default features off.
 sha2 = { version = "0.11", default-features = false }
+# lectern-code-intel's symbol extraction (docs/adr/0030.md). Exact pins;
+# tree-sitter and tree-sitter-tags upgrade together in their own PR, after the
+# extraction snapshots and `code_intel/extract_throughput` pass. Default
+# features off: only `std`, never `wasm` (no WASM host, architecture rule 3).
+tree-sitter = { version = "=0.27.1", default-features = false, features = ["std"] }
+tree-sitter-tags = "=0.27.1"
+# Iterates tree-sitter query matches; already a dependency of tree-sitter-tags.
+streaming-iterator = "0.1"
+# First-release grammars (docs/design/code_intel.md「未决问题」1, default (a)):
+# the newest release of each whose ABI tree-sitter 0.27.1 loads, MIT. Shared
+# with the highlighter (file_reader); the versions are repeated in
+# crates/code_intel/src/lang.rs and checked against Cargo.lock by
+# `lang_grammar_versions_match_lock`.
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-java = "=0.23.5"
+tree-sitter-python = "=0.25.0"
+tree-sitter-go = "=0.25.0"
 # Snapshot tests for domain logic (AGENTS.md). Test-only.
 insta = "1.49"
 # Test-only: temporary directories for lectern-platform's tests, and mkfifo in

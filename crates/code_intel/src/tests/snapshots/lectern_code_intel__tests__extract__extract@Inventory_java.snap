@@ -1,0 +1,27 @@
+---
+source: crates/code_intel/src/tests/extract.rs
+description: tests/fixtures/extract/java/Inventory.java
+expression: render(&extraction)
+---
+status: Done
+defs:
+  7:13-73 class Inventory [public]
+  8:28-8 field MAX_ITEMS in Inventory [public]
+  9:29-9 field items in Inventory [file]
+  10:35-10 field counts in Inventory [public]
+  16:16-18 method add in Inventory [public] (1)
+  20:16-25 method add in Inventory [public] (2)
+  27:17-30 method log in Inventory [file] (1)
+  33:36-35 method iterator in Inventory [public] (0)
+  37:15-43 method total in Inventory [public] (2)
+  45:14-47 interface Listener in Inventory [public]
+  46:13-46 method changed in Listener [public] (1)
+  49:9-56 enum Kind in Inventory [public]
+  50:8-50 constant TOOL in Kind [public]
+  51:8-51 constant PART in Kind [public]
+  53:16-55 method isTool in Kind [public] (0)
+  58:11-64 class Item in Inventory [public]
+  66:25-72 class Counter in Inventory [file]
+  67:20-67 field value in Counter [file]
+  69:13-71 method increment in Counter [public] (0)
+refs: ArrayList IllegalArgumentException Integer Inventory Item Iterable Iterator Kind List Map String add isEmpty iterator java log name of println size util values

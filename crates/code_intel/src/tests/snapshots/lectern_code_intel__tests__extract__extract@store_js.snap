@@ -1,0 +1,22 @@
+---
+source: crates/code_intel/src/tests/extract.rs
+description: tests/fixtures/extract/js/store.js
+expression: render(&extraction)
+---
+status: Done
+defs:
+  3:6-3 constant LIMIT [file]
+  4:4-4 variable instances [file]
+  6:9-8 function clamp [file] (3)
+  10:13-34 class Store [public]
+  11:2-11 field #items in Store [public]
+  18:2-24 method add in Store [public] (2)
+  20:10-20 function keep in add [file] (1)
+  26:2-29 method #trim in Store [public] (0)
+  31:3-33 method entries in Store [public] (0)
+  36:13-36 function createStore [public] (1)
+  38:6-43 constant api [public]
+  39:2-41 method reset in api [public] (0)
+  42:2-42 function count in api [public] (0)
+  45:10-48 function ids [public] (1)
+refs: #trim Store clamp emit entries filter max min push
