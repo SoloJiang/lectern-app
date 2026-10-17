@@ -73,8 +73,19 @@ impl Executor {
     /// 在新建的专用线程上运行可能长时间阻塞的闭包（等子进程退出、阻塞读管道）。线程随闭包结束而退出。
     pub fn run_dedicated<T: Send + 'static>(&self, name: &str, f: impl FnOnce() -> T + Send + 'static) -> Task<T>;
 
-    /// 停止接收新任务（之后的提交直接返回已取消的句柄），丢弃队列里和挂起的任务（future 在 `contain` 里 drop），
-    /// 等工作线程退出，最多等 `timeout`。专用线程不等，它们的闭包结束时自行退出。
+    /// 插件经 `own_with` 提交长时间阻塞的工作时用（jdtls 的管道读取、文件监听）。与 `spawn_gated` 一样在本调用里
+    /// 同步申请 `GateSlot`，申请不到时不建线程，在 `contain` 里丢弃闭包，返回已取消的句柄。
+    /// 专用线程先等闸门打开再运行闭包，见「与 kernel 的约定」。
+    pub fn run_dedicated_gated<T: Send + 'static>(
+        &self,
+        gate: &SubmitGate,
+        name: &str,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Task<T>;
+
+    /// 停止接收新任务（之后的提交返回已取消的句柄），按存活任务登记表取消所有未结束的任务，包括挂起的任务；
+    /// 它们的 future 由工作线程在 `contain` 里 drop，不在调用 `shutdown` 的线程上 drop。等工作线程退出，最多等 `timeout`。
+    /// 专用线程不等：还在等闸门的专用任务被唤醒并丢弃闭包，正在运行的闭包结束时线程自行退出。
     pub fn shutdown(&self, timeout: Duration) -> Shutdown;
 }
 
@@ -130,7 +141,21 @@ struct TaskCell<T> {
 - `Waker` 由 `TaskCell` 实现 `Wake` 得到。`wake` 只改状态并入队：`Idle → Queued` 时放进对应优先级的队列；`Running → RunningWoken` 只设标记；`Queued`、`RunningWoken`、`Done` 时什么也不做。所以 `wake` 从不在调用线程上 poll 或 drop future，也不会让一个任务同时被两个线程 poll。
 - 工作线程取出任务后把 `Queued` 换成 `Running` 再 poll；poll 返回 `Pending` 时用 compare-exchange 把 `Running` 换回 `Idle`，失败（期间被唤醒，状态是 `RunningWoken`）就换成 `Queued` 重新入队。
 - 任务结束（返回 `Ready`、被取消、闸门返回 `Drop`、panic）时状态写为 `Done`，之后的唤醒一律忽略。`Done` 之后再丢弃 `GateSlot`，闸门据此回收登记。
-- 两个队列（`Interactive`、`Background`）各是 `Mutex<VecDeque>` 加一个共用的 `Condvar`。工作线程先取 `Interactive`；保留一个工作线程只取 `Interactive`，后台工作把其余线程占满时，用户等的任务仍有线程可用。
+- 调度状态放在一把锁里，`Condvar` 与这把锁配对：
+
+  ```rust
+  struct Sched {
+      interactive: VecDeque<Arc<dyn Job>>,
+      background: VecDeque<Arc<dyn Job>>,
+      live: HashMap<TaskId, Arc<dyn Job>>,       // 存活的池任务：提交时插入，写为 Done 时移除
+      dedicated: HashMap<TaskId, Arc<dyn Job>>,  // 存活的专用任务
+      shutdown: bool,
+  }
+  ```
+
+  入队、出队、检查 `shutdown` 和工作线程的等待条件都在这把锁下进行，入队后在同一把锁释放前通知 `Condvar`，所以不会出现一个工作线程检查完队列为空、还没开始等待时错过入队通知的情况。工作线程先取 `Interactive`；保留一个工作线程只取 `Interactive`，后台工作把其余线程占满时，用户等的任务仍有线程可用。
+- 登记表持有任务的强引用，任务写为 `Done` 之前 `TaskCell` 不会因为句柄和 waker 都被 drop 而在任意线程上释放；future 只在工作线程上（或 `manual()` 的 `run_until_idle` 里）被 drop。
+- shutdown：在锁下设 `shutdown`，复制一份登记表；释放锁后对每个任务设 `cancelled` 并唤醒它，挂起（`Idle`）的任务因此入队，工作线程取出后发现已取消，在 `contain` 里 drop future 并写为 `Done`。工作线程在 `shutdown` 已设、`live` 为空时退出，每次移除登记都检查这个条件并通知所有等待的线程。
 
 ## 与 kernel 的约定
 
@@ -140,6 +165,13 @@ struct TaskCell<T> {
 - poll 用 `kernel::catch` 包住。panic 时顺序固定：先把状态写为 `Done`，再在 `contain` 里 drop future，然后 `PanicPayload::dispose` 取出消息，最后调用 `GateSlot::panicked(message)`。
 - future 的每一次最终 drop（完成、取消、闸门关闭、shutdown 丢弃）都在 `contain` 里进行，panic 时调用 `GateSlot::panicked`；没有闸门的任务只记日志。
 - 没有闸门的任务 panic 时，`Task` 的结果为 `TaskError::Panicked(message)`，工作线程继续运行。
+
+`run_dedicated_gated` 在专用线程上执行同一套规则，没有 future，闸门检查只在运行闭包之前做一次：
+
+- 专用线程用一个唤醒时 `unpark` 本线程的 waker 调用 `GateSlot::poll`：`Wait` 时 `park`，被唤醒后再检查；`Run` 时运行闭包；`Drop`（闸门关闭、激活失效）或任务被取消（句柄 drop、shutdown）时不运行，在 `contain` 里丢弃闭包，panic 时调用 `GateSlot::panicked`。
+- 闭包在 `kernel::catch` 里运行，panic 时的顺序与工作线程相同：写为 `Done`，闭包捕获的值在展开时已 drop，然后 `PanicPayload::dispose` 取出消息，最后调用 `GateSlot::panicked(message)`。
+- 闭包开始运行后 executor 不能中断它。闭包要能随激活失效而结束，比如把子进程登记为插件的注册项，激活失效时 kernel 撤销注册项、关闭子进程，闭包里阻塞的读取随之返回。
+- 闭包结束（或被丢弃）后写为 `Done`，再 drop `GateSlot`，线程退出。
 
 ## 数据流与线程
 
@@ -157,7 +189,7 @@ struct TaskCell<T> {
 ## 状态与异常
 
 - 任务 panic：不展开到工作线程；有闸门的按上一节交给 kernel，没有闸门的变为 `TaskError::Panicked`。
-- shutdown 之后提交：返回已取消的句柄，future 在调用线程上于 `contain` 里 drop。
+- shutdown 之后提交：返回已取消的句柄。future 或闭包交给一个新建的分离线程 `executor-reclaim`，在那里于 `contain` 里 drop，提交调用不等它，所以 UI 线程在退出过程中提交也不会被 future 的 `Drop` 阻塞。shutdown 之后的提交只在退出过程中出现，按次建线程的开销可以接受。
 - 工作线程意外退出（`on_thread_start` 钩子 panic）：钩子在 `contain` 里调用，panic 只记日志，线程照常工作。
 
 ## 测试
@@ -172,7 +204,10 @@ struct TaskCell<T> {
 - 闸门封住后提交：`spawn_gated` 返回已取消的句柄，future 没有被 poll。
 - 优先级：`Background` 任务占满其余线程时，`Interactive` 任务仍在保留的线程上运行。
 - 取消：drop 句柄后任务不再被 poll，future 被丢弃；`.await` 一个被取消的任务得到 `TaskError::Cancelled`。
-- shutdown：挂起的任务被丢弃，之后的提交返回已取消的句柄，`shutdown` 在工作线程退出后返回。
+- 队列通知不丢失：多个线程并发提交、工作线程反复在空队列上等待，所有任务都运行完，没有任务停在队列里。
+- shutdown：挂起的任务（不在任何队列里、等着被唤醒）也被丢弃，future 在工作线程上 drop；`shutdown` 在工作线程退出后返回；任务阻塞不结束时返回 `TimedOut`。
+- shutdown 之后提交：`spawn` 立即返回已取消的句柄；future 的 `Drop` 阻塞在一把锁上时，提交线程不受影响，drop 发生在 `executor-reclaim` 线程上。
+- 带闸门的专用任务：闸门未打开时闭包不运行；打开后运行；闸门关闭或激活失效时闭包被丢弃、没有运行；闭包 panic 时插件进入 `Failed`；闸门封住后提交返回已取消的句柄，没有新建线程。
 - `manual()`：`run_until_idle` 按入队顺序运行，结果确定。
 - 首帧：`Executor::new` 之后、第一次提交之前，进程里没有 `executor-*` 线程。
 
