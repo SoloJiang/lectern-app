@@ -37,6 +37,7 @@
 | `gix::diff::blob`（`gix-imara-diff` 0.3） | 行 diff 与词级 diff，Histogram 算法 | gix 维护的 imara-diff 副本，Apache-2.0；随 gix 一起升级，不再引入上游 `imara-diff`（ADR 0024） |
 | `lectern-platform` | 安全读取工作区文件（见「安全读取」） | 架构规则 6 |
 | `lectern-cache` | hunk 的持久缓存 | 架构规则 5；`cache` 实现之前只用进程内的 LRU |
+| `lectern-fs-watch` | 实现它的 `WorktreeSource` / `PathFilter`（`Worktree::watch_source`） | 领域层依赖基础设施层；见 [fs_watch 设计](fs_watch.md)「对其他 crate 的要求」 |
 | `insta`（dev） | 改动集、hunk、展示行的快照 | 工作区统一依赖 |
 | `tempfile`（可选，`test-support` 打开；dev） | `TestRepo` 的临时目录（见「测试」） | 已在 Cargo.lock；gix 0.88 在上面的 feature 下已能写对象、引用文件和 index，`TestRepo` 不需要额外的 gix feature，发布构建的 feature 不变 |
 
@@ -273,7 +274,7 @@ pub struct TrackedEntry {
 
 sparse index（`index.sparse`）里，sparse checkout 之外的目录只有一个模式为 `040000` 的目录条目，记录的是树 OID。gix 0.88 读 index 时不展开它们，本 crate 自己在内存里展开：按目录条目的树 OID 从对象库读出其中的全部文件，作为 `skip_worktree` 的条目放进 `TrackedPaths`，与完整 index 里的 skip-worktree 条目相同。展开只在内存里进行，不写回 index，index 文件的 sparse 状态不变；展开的条目数计入调用方传入的 `EntryLimits`，读树时检查 `cancel`；`changes` / `refresh` 内部读 index 时用 `Limits::entries` 和它们自己的 `cancel`。`Repo::worktree` 只读 HEAD 和配置，不读 index，所以不需要这两个参数。所以「基准树 ∪ index」的比较（见「工作区比较」）看到的是逐个文件的条目，sparse 目录下的文件不会被当成删除。
 
-`fs_watch` 是基础设施层，不依赖本 crate：`app` 把 `TrackedPaths` 包成 `fs_watch` 定义的过滤接口传进去。
+`fs_watch` 是基础设施层，不依赖本 crate：本 crate 用 `TrackedPaths` 和忽略规则实现 `fs_watch` 定义的过滤与配置来源接口（`Worktree::watch_source`，见 [fs_watch 设计「对其他 crate 的要求」](fs_watch.md#对其他-crate-的要求)），`project`、`review` 把它传进去。
 
 ### 改动集
 

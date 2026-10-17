@@ -48,7 +48,7 @@
 pub struct AgentsDeps {
     pub executor: Executor,
     pub cache: Cache,
-    pub watch: Arc<dyn Watcher>,
+    pub watch: lectern_fs_watch::Watcher,   // 见 fs_watch 设计
     /// 压缩会话的解压副本目录，`app` 取 `platform` 提供的应用缓存目录下的 `agents/decoded/`（见「压缩会话的随机读取」）。
     pub decoded_dir: PathBuf,
     /// 会话目录：默认取 `$CLAUDE_CONFIG_DIR`（逗号分隔）或 `~/.claude` 与 `~/.config/claude`，
