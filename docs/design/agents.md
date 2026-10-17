@@ -137,6 +137,7 @@ pub enum ResumeCommand {
 - `session_id` 必须是 UUID 的规范写法（两种 agent 的会话 ID 都是 UUID），不是时 `terminal` 拒绝，所以它不会被解析成选项或注入别的参数。
 - 工作目录不取自来源：`terminal` 用这个会话在 `SessionList` 里的 `cwd`，并要求它在一个已打开项目的 worktree 根或已打开的文件夹项目根之内，否则不恢复。
 - `terminal` 只接受内置来源（本 crate 的 "session-claude-code"、"session-codex"，以后内置的 ACP 来源）的 `ResumeCommand`；第三方进程插件来源的 `resume` 结果一律忽略，直到它们有对应的能力声明（另写 ADR）。
+- 内置来源的身份由宿主保证，不依赖提供者自报的 `id()`：进程插件的 `SessionSource` 由进程插件宿主在 app 进程里的代理实现，代理的 `id()` 是宿主生成的 `ext.<插件 ID>.<插件报告的 ID>`，所以不会等于内置来源的 ID；代理的 `resume` 不转发给插件，总是返回 None。内置 ID 只能来自编译进 app 的插件。
 
 调用方：
 
@@ -247,7 +248,12 @@ pub struct Parent {
 pub enum Place {
     /// 还没有归位（首次发现之后、`resolve` 完成之前）。
     Pending,
-    Resolved(Resolved),             // services::project 的类型：项目、worktree、相对路径
+    /// cwd 在已打开的项目里：`Projects::locate` 的结果，含子项目。`package` 为 `NotLoaded` 时按「归位」补齐：
+    /// 非当前 worktree 用 `resolve_package` 的结果替换，当前 worktree 或加载中的文件夹项目等下一次 `Changed` 后重新 `locate`。
+    Located(Location),
+    /// 项目没有打开：`Projects::resolve` 的结果（项目、worktree、相对路径），没有子项目信息。
+    /// 项目打开后，收到 `ProjectEvent` 时重新归位为 `Located`。
+    Resolved(Resolved),
     /// cwd 已不存在。会话照常列出，不属于任何项目。
     Missing,
     Unresolvable(ResolveError),
@@ -352,14 +358,17 @@ pub struct ToolFinished {
     pub call: ToolCallId,
     pub at: Timestamp,
     pub status: ToolStatus,
+    /// 这次调用打开的交互式 shell 会话（Codex `exec_command` 在 `function_call_output` 里返回的 `session_id`），
+    /// 调用结束时 shell 仍在运行才有；其余为 None。开始时还不知道这个 ID，所以放在结束事件上。
+    pub exec_session: Option<Arc<str>>,
 }
 
 pub enum ToolKind {
     /// 写文件、改文件、应用补丁（含新建、删除、移动）。路径是绝对路径（相对路径按调用时的 cwd 在词法上拼接，不访问文件系统）。
     Edit { paths: Arc<[PathBuf]> },
     /// 执行命令。`command` 是交给 shell 的完整文本；`workdir` 是工具参数里的工作目录，没有时为调用时的 cwd。
-    /// `exec_session` 是交互式 shell 的会话 ID（Codex `exec_command` 返回的 `session_id`，`write_stdin` 按它写入），
-    /// 没有交互式会话时为 None。同一会话里的 `cd` 会延续到后面的写入，所以 `write_stdin` 的 `workdir` 只是会话启动时的目录、
+    /// `exec_session` 是这次调用写入的交互式 shell 会话 ID（`write_stdin` 参数里的 `session_id`），其余调用为 None；
+    /// 打开会话的 `exec_command` 在开始时还不知道 ID，它的 ID 在 `ToolFinished::exec_session` 上，消费方按 ID 关联两者。同一会话里的 `cd` 会延续到后面的写入，所以 `write_stdin` 的 `workdir` 只是会话启动时的目录、
     /// `workdir_exact` 为 false；按目录归属的消费方对这类事件改用命令结束后观察到的分支 / HEAD。
     Execute { command: Arc<str>, workdir: Arc<Path>, exec_session: Option<Arc<str>>, workdir_exact: bool },
     Read { paths: Arc<[PathBuf]> },
@@ -590,7 +599,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - 回退：最后一行超过 16 MB，或在上限内没找到决定 `open_turn` 的记录时，`last_activity` 取文件修改时间，`open_turn` 为 true（末尾是超长的工具结果时，这一轮通常还没结束），计入 `oversized_lines`。
    - 已经在增量读取的文件（第 5 步）不再读末尾，这两个字段从解析器状态里直接取。
    - `.zst` 没有办法直接读末尾：先查摘要缓存（见「压缩会话的随机读取」），命中就用；没命中时只流式解压开头 256 KB，用开头和文件的 `stat` 生成摘要、标 `tail_pending`，照常发布。补齐末尾字段要整份解压，按需进行：列表发布后只主动补齐修改时间最近的 8 个压缩会话（M 系列上约 3 s，之后不再有后台工作，kernel 能在首帧后 30 秒内静止，[ADR 0017](../adr/0017.md)），其余等视图调 `complete`（会话行显示出来或被打开）时才补齐；同时最多 2 个补齐任务，补齐后按第 4 步再发布，并写入摘要缓存。冷的归档历史不会让应用一直忙碌。
-3. 归位：对去重后的 cwd 先调 `Projects::locate`（只查内存，匹配已打开的项目，取最深的根），匹配到就用它的项目与 worktree，所以已打开的文件夹项目的子目录也归到该项目；没有匹配时再调 `Projects::resolve`（阻塞，在 executor 上）。结果按 cwd 缓存，目录变化或收到 `ProjectEvent`（项目打开、关闭、worktree 变化）时对受影响的 cwd 重新归位；`locate` 返回 `NotLoaded` 时按项目设计的规则处理：路径在非当前 worktree 时调 `Projects::resolve_package`（阻塞，在 executor 上）取这个 worktree 自己的子项目；在当前 worktree 或加载中的文件夹项目时，先记下项目与 worktree，等下一次 `Changed` 再补子项目。cwd 不存在时为 `Missing`。
+3. 归位：对去重后的 cwd 先调 `Projects::locate`（只查内存，匹配已打开的项目，取最深的根），匹配到就记为 `Place::Located`，所以已打开的文件夹项目的子目录也归到该项目；没有匹配时再调 `Projects::resolve`（阻塞，在 executor 上），记为 `Place::Resolved`。结果按 cwd 缓存，目录变化或收到 `ProjectEvent`（项目打开、关闭、worktree 变化）时对受影响的 cwd 重新归位；`locate` 返回 `NotLoaded` 时按项目设计的规则处理：路径在非当前 worktree 时调 `Projects::resolve_package`（阻塞，在 executor 上）取这个 worktree 自己的子项目；在当前 worktree 或加载中的文件夹项目时，先记下项目与 worktree，等下一次 `Changed` 再补子项目。cwd 不存在时为 `Missing`。
 4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。
 5. 监听：`fs_watch` 递归监听每个会话目录，事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件从列表移除。处理完再按第 4 步发布。
 6. 消费：`usage` 按自己的游标 `read`；`review` 调 `turns` / `load`。
@@ -645,7 +654,8 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 工具分类：分类表每一行一个用例，表外工具名归 `Other` 并计数（`tool_kind_*`）。
 - 异常：不认识的类型、坏行、超长行、末尾不完整的行、认不出格式的文件（`format_*`）。
 - 发现与监听：临时目录加 `fs_watch` 的内存模拟后端，新增、追加、删除、`.jsonl` 与 `.zst` 并存、`sessions/` 与 `archived_sessions/` 并存、`SessionFilter` 隐藏；没有缓存摘要的 `.zst` 先以 `tail_pending` 发布、整份解压之前列表已可用，后台补齐后再发布一次；摘要缓存在适配器版本或摘要格式版本变化后不命中（`discover_*`、`watch_*`）。
-- 归位：模拟的 `Projects`，相同 cwd 只 `resolve` 一次，cwd 不存在为 `Missing`（`place_*`）。
+- 归位：模拟的 `Projects`，相同 cwd 只 `resolve` 一次，cwd 不存在为 `Missing`；已打开项目里的 cwd 为 `Located` 并带子项目，非当前 worktree 的 `NotLoaded` 由 `resolve_package` 补齐（`place_*`）。
+- 交互式 shell：`exec_command` 的 `session_id` 出现在 `ToolFinished::exec_session` 上，之后的 `write_stdin` 的 `ToolKind::Execute::exec_session` 与它相同（`tool_kind_*`）。
 - 轮次索引缓存：命中后只解析追加部分；适配器版本变化后不命中（`index_cache_*`）。
 - 插件：`TestKernel` 注入模拟的 `Projects`，激活后提供两个 `SessionSource`，首次发现后发出 `SessionsChanged`（`plugin_*`）。
 
