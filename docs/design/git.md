@@ -726,11 +726,12 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 
 - `git/open`：`discover` + `worktrees`（11 个 worktree）+ `tracked`。
 - `git/open_handle`：打开一次 gix 句柄的耗时（每次顶层调用都要付出）。
-- `git/changes_clean` / `git/changes_50`：没有改动、50 个文件改动时的 `changes`。
-- `git/refresh_one`：改动一个文件后的 `refresh(Paths)`。
+- `git/changes_clean` / `git/changes_50`：没有改动、50 个约 300 行的文件各改 10 行时的 `changes`（同一个 `Worktree`，不持有上一个改动集，50 个文件每次都读取）。
+- `git/refresh_one`：改动一个文件后，持有上一个改动集的 `refresh(Paths)`。
+- `git/refresh_full`：持有 50 个文件的改动集、改动早于一秒时的 `refresh(Full)`（改动的文件命中 stat 缓存）。
 - `git/diff_50_cold` / `git/diff_50_warm`：728 个文件的两棵树，其中 50 个约 300 行的文件各改 10 行，整个 `diff_trees`（读树、属性、重命名检测、读 blob、hunk），hunk 缓存未命中与命中。比只算 hunk 多出读树、属性和对象头的时间，结果偏保守。
-- `git/changes_capped`：10 000 个改动文件时整体截断生效，耗时 < 1 s，`ChangeSet` 的内存不超过上限之和。
-- 内存：打开 11 个 worktree 的仓库并对当前 worktree 做一次 `changes` 后，本 crate 的常驻增量。
+- `git/changes_capped`：10 000 个未跟踪文件、5000 个之后为 `Listed` 时的 `changes`，耗时 < 1 s；`git/changes_capped_bytes`（`memory` 目标，只记录）是调用后改动集、stat 缓存和解析过的 index 仍占的字节数，不超过 `Limits` 默认上限之和（保留内容 32 MiB 加上每个改动文件的条目）。
+- `git/resident`（`memory` 目标，≤ 48 MB）：打开 11 个 worktree 的仓库、当前 worktree 的句柄并持有一个 50 个文件的改动集时，本 crate 的存活字节（含这次比较写进 hunk 缓存的部分）。
 
 ## 状态与异常
 
@@ -866,6 +867,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 未跟踪文件改为在 `SafeRoot::list` 上遍历后，`just test -p lectern-git` 188 个测试通过（新增 5 个 `worktree_*`，共 62 个），原有测试的结果（含三个快照）都没有变；`just test -p lectern-platform` 新增 `list_root_and_subdirectories_with_kinds`、`list_never_follows_symlinks`、`race_list_swap_never_escapes`，对 `Openat2` 和 `Walk` 都通过。`cargo clippy -p lectern-platform -p lectern-git --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 交叉检查通过，没有在 macOS 上运行。
 - `worktree_symlinked_gitignore_outside_the_worktree_is_not_read`：未跟踪的 `.gitignore` 是指向工作区之外文件的符号链接（gix 的遍历会跟随它），那个文件里的规则不生效，`secret.txt` 和 `sub/x` 照常列出。`worktree_directory_through_a_symlink_is_not_walked`：指向外部目录的符号链接只作为一项列出，外部目录里的 `.gitignore` 和文件都不出现。`worktree_race_directory_swapped_for_a_symlink_never_escapes`：另一个线程反复把 `w` 在目录和指向外部目录的符号链接之间交换，300 次 `changes` 里从不出现外部目录的文件或内容。`worktree_submodule_gitdir_outside_modules_is_not_read`：`gitdir:` 指向 `modules/` 之外时为 `Unreadable`，指向 `modules/ok` 时读出它的 HEAD。`worktree_staged_mv_then_removed_is_not_a_rename`：`git mv a b; rm b` 得到 `Deleted(a)` 和 `StagedOnly` 的 `Added(b)`。
 - 性能（同一命令）：`git/changes_clean` 中位数 3.0 ms（新开 `Worktree` 3.6 ms），`git/changes_50` 首次 7.1 ms、之后中位数 4.6 ms，`git/refresh_one` 中位数 1.2 ms，`refresh(Full)` 中位数 4.4 ms、最慢 14.0 ms，`git/changes_capped` 中位数 128 ms，内存增量 0.78 MiB；都在预算之内，与改之前同一量级。
+- 移进 bench 后（`just bench --measure git/`，Linux 上只报告、不判定）：`git/changes_clean` 3.03 ms、`git/changes_50` 4.46 ms、`git/refresh_one` 1.21 ms、`git/refresh_full` 4.05 ms、`git/changes_capped` 99 ms，`memory` 目标的 `git/resident` 865 KB（≤ 48 MB）、`git/changes_capped_bytes` 9.47 MB（只记录；`Limits` 默认的保留内容上限是 32 MiB）。同一次运行里 `git/diff_50_warm` 为 2.18 ms，超过 2 ms 的预算（第 2 步的 hunk 缓存命中路径，与本步无关，由 #89 处理）。没有在 macOS 上测量。
 
 ## 与设计的差异
 
@@ -911,7 +913,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 
 第 3 步：
 
-- `bench` 的 `git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/changes_capped` 和内存基准没有写进 `crates/bench`：bench 的 runner（bench 设计的第 1 步）还没有合并。在那之前由 `#[ignore]` 的 `perf_smoke_git_changes`、`perf_smoke_git_changes_capped` 在 release 下测量，结果见「实际验证」；runner 合并后移进 bench。内存用测试二进制里的计数分配器量出调用后仍未释放的字节数，要求 `--test-threads=1`。
+- 第 3 步最初没有 bench 的 runner（bench 第 1 步还没合并），`git/changes_*`、`git/refresh_one` 和内存先由 `#[ignore]` 的 `perf_smoke_git_changes`、`perf_smoke_git_changes_capped` 测量（结果见「实际验证」）。bench 第 1 步（[#83](https://github.com/SoloJiang/lectern-app/pull/83)）合并后，同一个 PR 把它们移进 `crates/bench`：`benches/time/git.rs` 的 `git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/refresh_full`、`git/changes_capped` 和 `benches/memory.rs` 的 `git/changes_capped_bytes`、`git/resident`，预算表里这七项改为 `Active`，`perf_smoke` 版本删除；两个目标共用的夹具在 `benches/fixtures/git_worktree.rs`。`git/refresh_full` 是设计的基准清单里没有、预算表里有的一项，一并加入。
 - 重命名的目标可以是未跟踪的新增（这时 `Renamed` 的 `untracked` 为 false，`untracked` 只出现在 `Added` 上），但同一路径上有删除的未跟踪新增（`git rm --cached p`）不作为目标，不只是不与同一路径的删除配对：否则它可能与别的路径的删除配对，同一路径上就会出现 `Renamed` 和 `Deleted` 两项，破坏「同一路径最多一项」的不变量（`worktree_table_snapshot` 里 `06-removed` 与 `07-rm-cached` 原本会这样配对）。
 - 「转换规则有变化」比较的是这个 `Worktree` 句柄第一次比较时的转换状态（基线），不是上一次 `refresh`：index 不会被重写，相对上一次比较就会在第二次刷新时又按 stat 跳过、改动消失。规则相对基线变了的跟踪路径每次都读取比较，规则改回来后恢复 stat 跳过；`changes` 和 `refresh(Full)` 都这样做。只有 `.gitattributes` 变化时逐个路径比较新旧规则（旧规则用基线保存的属性文件内容重建）；`info/attributes` 或影响转换的配置（`core.autocrlf`、`core.eol`、`core.safecrlf`、`core.attributesFile`、`core.fileMode`、`core.symlinks`、`filter.*`）变了时，全部跟踪路径都按规则变化处理。已知限制：`core.attributesFile`、XDG 和系统属性文件的内容变化不计入转换状态（只有 `core.attributesFile` 的值计入）；新句柄以当时的规则为基线，与 git 相同地信任 stat。
 - 生效的 `.gitattributes`：跟踪的经 `SafeRoot` 读工作区里的那份，工作区里没有或不是普通文件时用 index 的 blob（skip-worktree 的条目直接用 index 的 blob），再加上目录遍历列出的未跟踪 `.gitattributes`。被忽略的目录或被忽略的未跟踪 `.gitattributes` 不生效（git 会读，已知限制）。属性栈按 OID 从内存里的叠加层取这些内容，不写对象库，也不按路径读工作区。

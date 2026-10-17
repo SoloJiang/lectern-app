@@ -544,12 +544,12 @@ crates/bench/
 | `agents/zst_load_decoded` | 中位数 < 1 ms | [agents](agents.md#性能) | 第 1 步（同上） |
 | `git/open` | 中位数 < 15 ms | [git](git.md#性能) | 第 1 步 |
 | `git/open_handle` | 中位数 < 1 ms | [git](git.md#性能) | 第 1 步 |
-| `git/changes_clean`、`git/changes_50` | 中位数 < 15 ms | [git](git.md#性能) | `git` |
-| `git/refresh_one`、`git/refresh_full` | 中位数 < 15 ms（`refresh(Full)` 的份额，一个路径的刷新不会更慢） | [git](git.md#性能) | `git` |
+| `git/changes_clean`、`git/changes_50` | 中位数 < 15 ms | [git](git.md#性能) | `git` 第 3 步 |
+| `git/refresh_one`、`git/refresh_full` | 中位数 < 15 ms（`refresh(Full)` 的份额，一个路径的刷新不会更慢） | [git](git.md#性能) | `git` 第 3 步 |
 | `git/diff_50_cold` / `git/diff_50_warm` | 中位数 < 20 ms / < 2 ms | [git](git.md#性能) | 第 1 步（`git` 第 2 步先以 `perf_smoke` 测量） |
-| `git/changes_capped` | 中位数 < 1 s | [git](git.md#性能) | `git` |
-| `git/changes_capped_bytes` | 存活字节 ≤ `Limits` 默认上限之和（数字由 `git` 的实现写入 git 设计） | [git](git.md#性能) | `git` |
-| `git/resident` | 存活字节 ≤ 48 MB（hunk LRU 16 MB + 一个 `ChangeSet` 32 MB，空闲时不持有句柄） | [git](git.md#性能) | `git` |
+| `git/changes_capped` | 中位数 < 1 s | [git](git.md#性能) | `git` 第 3 步 |
+| `git/changes_capped_bytes` | 存活字节 ≤ `Limits` 默认上限之和（数字由 `git` 的实现写入 git 设计） | [git](git.md#性能) | `git` 第 3 步 |
+| `git/resident` | 存活字节 ≤ 48 MB（hunk LRU 16 MB + 一个 `ChangeSet` 32 MB，空闲时不持有句柄） | [git](git.md#性能) | `git` 第 3 步 |
 | `cache/get_4k`、`cache/get_many_50`、`cache/get_1m` | 中位数 < 50 µs / < 1 ms / < 2 ms（分库已打开） | [cache](cache.md#性能) | 第 1 步（`cache` 第 1 步先以 `perf_smoke` 测量） |
 | `cache/open_existing`、`cache/open_new` | 中位数 < 5 ms / < 10 ms | [cache](cache.md#性能) | 第 1 步（同上） |
 | `cache/put_4k`、`cache/batch_1000` | 中位数 < 1 ms / < 15 ms | [cache](cache.md#性能) | 第 1 步（同上） |
