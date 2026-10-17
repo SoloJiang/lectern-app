@@ -66,7 +66,7 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 |---|---|---|
 | 冷启动到首帧 | < 20 ms | 首帧前只建窗口、画骨架，首帧前不读我们自己的文件（窗口快照在首帧后读）；插件、SQLite、监听、会话扫描都在首帧后；shader 预编译；字体走系统字体 API |
 | 打开项目到项目主页可用 | < 100 ms | 文件列表直接读 git index，不遍历目录 |
-| 打开文件到首屏高亮 | < 16 ms（一帧） | mmap 读取；只解析可见区域，整文件 tree-sitter 解析放后台 |
+| 打开文件到首屏高亮 | < 16 ms（一帧） | 不用 mmap（见 [platform 设计](platform.md)）：首屏只经 `SafeRoot` 读要显示的那一段（有界的范围读取，跳转到文件中部时也是目标位置附近，`platform` 待补的接口，见 [#103](https://github.com/SoloJiang/lectern-app/issues/103)；现有的 `SafeRoot::read` 读完整个文件，超过上限时报 `TooLarge`），只解析可见区域；整个文件的读取和 tree-sitter 解析放后台，完整内容装入之前文件只读、不能进入编辑 |
 | 打开一个会话的 Diff | < 50 ms | 改动从会话 JSONL 增量提取并缓存；diff 结果按 blob OID 缓存 |
 | 切换 worktree / 分支 | < 100 ms | 所有缓存以 git blob OID 为键，内容相同即命中 |
 | 安装包 | `.app` ≤ 80 MB（目标 50 MB），`.dmg` ≤ 40 MB | 只带审阅闭环需要的核心；其余语言包、jdtls、平台与 agent 适配从插件市场按需下载（[ADR 0018](../adr/0018.md)） |
@@ -159,7 +159,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | Diff 算法 | `imara-diff` | `similar` | 速度快，gix 与 Helix 都在用；行内词级差异可用 `similar` 补 |
 | MR 数据 | `octocrab`（GitHub）/ GitLab REST | 调用 `gh` / `glab` CLI | 支持 GitHub 与 GitLab（含自部署版）；按 remote 的域名识别平台，自部署实例由用户配置域名与 API 地址；MVP 调 gh / glab CLI，复用已有登录态 |
 | 本地存储 | SQLite（`rusqlite`，静态链接自带的 SQLite，[ADR 0027](../adr/0027.md)） | 系统 `libsqlite3`、redb | 派生数据缓存与用量记录共用一种引擎；版本随依赖固定，Linux CI 与 macOS 一致 |
-| 文件监听 | `notify` + `ignore` | `watchman` | 跨平台；`ignore` 自动遵守 .gitignore |
+| 文件监听 | `fs_watch`（`platform` 的 FSEvents / kqueue 后端） | `notify`、`watchman` | 事件按 git index 和忽略规则过滤，见 [fs_watch 设计](fs_watch.md) |
 | Agent 协议 | [`agent-client-protocol`](https://agentclientprotocol.com) crate | 直接解析 JSONL | Zed、JetBrains 等都在用 ACP，Claude Code 与 Codex 都有适配器 |
 | 界面文案 | [Fluent](https://projectfluent.org)（`fluent-rs`） | `rust-i18n` | 支持复数、语序变化；en 与 zh-CN 的键一致由 CI 检查 |
 
@@ -376,7 +376,7 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 
 | 层 | 实现 | 预期可用时机 | 解决的问题 |
 |---|---|---|---|
-| 1. 语法索引 | tree-sitter tags 查询抽取定义与引用，存入本地 SQLite；`notify` 增量更新 | 打开项目后数秒 | 所有语言的类、函数、字段按名跳转 |
+| 1. 语法索引 | tree-sitter tags 查询抽取定义与引用，存入本地 SQLite；经 `fs_watch` 增量更新 | 审阅涉及的文件数秒内，整个仓库按优先级在后台完成（见 [代码导航调研](../research/code-navigation.md)） | 所有语言的类、函数、字段按名跳转 |
 | 2. Java 解析器 | 读 package / import / 内部类，全限定名映射到文件；同名方法按所在类与参数个数消歧 | 与第 1 层同时 | 项目内 Java 跳转基本准确，无需编译 |
 | 3. 依赖源码 | 解析 pom.xml / build.gradle 依赖坐标，到 `~/.m2` 与 Gradle 缓存找 `-sources.jar` 直接解压 | 按需 | 跳进 Spring 等三方库源码 |
 | 4. 精确语义（可选） | 后台启动 jdtls（自动找 JDK 21），或导入 scip-java 生成的 SCIP 索引 | 分钟级 | 重载、泛型、继承链等精确结果 |
