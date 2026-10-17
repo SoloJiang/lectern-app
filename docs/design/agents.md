@@ -284,7 +284,8 @@ pub struct Cursor { /* 见下 */ }
 impl Cursor {
     pub const START: Cursor;
     pub fn to_bytes(&self) -> Vec<u8>;
-    /// 版本不认识时返回 None，调用方从 `START` 读。
+    /// 版本不认识时返回 None，调用方从 `START` 读。序列化的游标带适配器版本：版本与当前不同
+    /// （适配器升级后能解析更多记录或修正了映射）时也返回 None，消费方从头重读，按稳定键覆盖已有数据。
     pub fn from_bytes(bytes: &[u8]) -> Option<Cursor>;
 }
 
@@ -355,7 +356,10 @@ pub enum ToolKind {
     /// 写文件、改文件、应用补丁（含新建、删除、移动）。路径是绝对路径（相对路径按调用时的 cwd 在词法上拼接，不访问文件系统）。
     Edit { paths: Arc<[PathBuf]> },
     /// 执行命令。`command` 是交给 shell 的完整文本；`workdir` 是工具参数里的工作目录，没有时为调用时的 cwd。
-    Execute { command: Arc<str>, workdir: Arc<Path> },
+    /// `exec_session` 是交互式 shell 的会话 ID（Codex `exec_command` 返回的 `session_id`，`write_stdin` 按它写入），
+    /// 没有交互式会话时为 None。同一会话里的 `cd` 会延续到后面的写入，所以 `write_stdin` 的 `workdir` 只是会话启动时的目录、
+    /// `workdir_exact` 为 false；按目录归属的消费方对这类事件改用命令结束后观察到的分支 / HEAD。
+    Execute { command: Arc<str>, workdir: Arc<Path>, exec_session: Option<Arc<str>>, workdir_exact: bool },
     Read { paths: Arc<[PathBuf]> },
     /// 搜索的目标目录或文件；工具没给路径时为调用时的 cwd。
     Search { paths: Arc<[PathBuf]> },
