@@ -393,14 +393,14 @@ pub static BUDGETS: &[Budget] = &[
         "agents/discover_1000",
         &[median(Limit::TimeBelow(ms(500)))],
         AGENTS,
-        State::Planned("agents 第 4 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "agents/turns_cached_50mb",
         &[median(Limit::TimeBelow(ms(10)))],
         AGENTS,
-        State::Planned("agents 第 4 步"),
+        ACTIVE,
         Time,
     ),
     share(

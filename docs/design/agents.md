@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：实现中。第 1–3 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)），第 4 步尚未实现（见「验收」）。
+状态：已实现。第 1–4 步都已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)），见「验收」。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -52,11 +52,16 @@ pub struct AgentsDeps {
     /// 压缩会话的解压副本目录，`app` 取 `platform` 提供的应用缓存目录下的 `agents/decoded/`（见「压缩会话的随机读取」）。
     pub decoded_dir: PathBuf,
     /// 会话目录：默认取 `$CLAUDE_CONFIG_DIR`（逗号分隔）或 `~/.claude` 与 `~/.config/claude`，
-    /// `$CODEX_HOME` 或 `~/.codex`。测试传临时目录。
+    /// `$CODEX_HOME` 或 `~/.codex`（`AgentRoots::from_env`）。测试传临时目录。
     pub roots: AgentRoots,
+    /// 隐藏的会话（见「本 crate 的公开项」），两个插件共用；Analyze 的后续 issue 持有同一份。
+    pub filter: SessionFilter,
 }
+/// 配置目录；会话根目录是 Claude Code 每个配置目录下的 `projects/`，Codex 主目录下的 `sessions/` 与 `archived_sessions/`。
+pub struct AgentRoots { pub claude: Vec<PathBuf>, pub codex: Vec<PathBuf> }
 /// 两个插件：ID "session-claude-code" 与 "session-codex"，各提供一个 `dyn SessionSource`，激活条件 `AfterFirstFrame`，依赖 `dyn Projects`。
-pub fn plugins(deps: AgentsDeps) -> [(Name, Box<dyn Plugin>); 2];
+/// `SessionPlugin` 实现 `Plugin`，`app` 逐个放进 `PluginSet::with`（它接受 `impl Plugin`）。
+pub fn plugins(deps: AgentsDeps) -> [(Name, SessionPlugin); 2];
 ```
 
 ### 对其他 crate 的要求
@@ -181,6 +186,13 @@ pub mod testing {
     pub fn append_chunk() -> &'static [u8];            // 开头到第一个不早于 4096 字节的行尾
     pub fn synthetic_rollout(len: usize) -> Vec<u8>;   // Codex 的两个主会话
     pub fn compress_zst(data: &[u8]) -> Vec<u8>;       // ruzstd 最快档，一个帧
+    /// 工具调用密度与真实长会话相同（主会话之后跟约 330 KB 的 `file-history-snapshot`，重复拼接）：`agents/turns_cached_50mb`。
+    pub fn synthetic_long_session(len: usize) -> Vec<u8>;
+    /// `projects/` 下写 `sessions` 个主会话文件（每 20 个一个项目目录，`sessionId` 各不相同）：`agents/discover_1000`。
+    pub fn synthetic_projects(projects: &Path, sessions: usize) -> io::Result<Vec<String>>;
+    /// 不经过插件的会话来源：在调用线程上同步完成第一次发现（不监听、不发事件），`complete` 同步补齐；
+    /// `projects` 为 None 时不归位，`cache` 为 None 时不读写持久缓存（`agents/discover_1000`、`agents/turns_cached_50mb`）。
+    pub fn source(agent: Agent, roots: &AgentRoots, cache: Option<&Cache>, projects: Option<Arc<dyn Projects>>, decoded_dir: &Path) -> Option<Arc<dyn SessionSource>>;
 }
 ```
 
@@ -843,7 +855,20 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - `crates/agents/tests/fixtures/codex/0.140.0-legacy/` 和 `0.140.0-paginated/` 各有 `SOURCE.md`，写明 fixtures 是合成的。
 - `cargo test -p lectern-agents --features test-support --release --test perf_smoke -- --ignored`（Linux 容器，x86_64，release，单线程；不是预算规定的 M 系列；运行 3 次）：`agents/zst_throughput` 172–177 MB/s（预算 ≥ 100 MB/s，按解压后的字节计，含解压与解析），`agents/zst_load_decoded` 0.006–0.009 ms（预算 < 1 ms，副本建好之后 680 次 `load` 的中位数），都达标；同一次运行里 `agents/parse_throughput` 261–284 MB/s、`agents/append_4k` 0.015–0.019 ms。归档用 `ruzstd` 的最快档压缩（Codex 用 C 的 zstd，压缩级别不同，解压速度会有差别），内容是重复拼接到 50 MB 的合成 fixtures，行短，这个吞吐是偏保守的估计。
 
-没有验证到的：第 4 步的验收条件；bench 没有在 macOS 上运行；没有拿真实的 Claude Code 和 Codex 日志验证（fixtures 是合成的，见下面「与设计的差异」）；没有用 C 的 zstd 压缩的真实归档测试解码（`ruzstd` 实现的是标准格式，测试只用它自己的编码器）。
+第 4 步（发现、监听、归位与插件），在 Linux 上运行（`agents` 不依赖 GPUI；没有在 macOS 上实测）：
+
+- `just check`、`just test`（Linux 上不依赖 GPUI 的全部 crate，984 个测试通过，1 个忽略）、`just doctest`、`just deny`、`python3 scripts/check_architecture.py` 全部通过；`rg gpui crates/agents/Cargo.toml` 没有结果。`agents` 标为插件 crate（`plugin = true`），新增的依赖都是工作区内的 kernel 层与基础设施 crate（`lectern-kernel`、`lectern-executor`、`lectern-fs-watch`、`lectern-cache`），没有新的外部依赖。
+- `just test -p lectern-agents`：166 个通过，1 个忽略（`redact_file_from_env`）。验收要求的前缀，全部经插件驱动（真实的 `Kernel`、`Executor::manual()`、`fs_watch` 的 `FakeBackend` 与手动驱动、临时目录里的 `cache`、模拟的 `Projects`）：
+  - `discover_*` 14 个：两种 agent 的 fixtures 发现后各发布一次（generation 1、键的 `source` 是发布者，列表各一个快照，逐个看过）；根目录为空或不存在时发布空列表；`.jsonl` 与 `.jsonl.zst` 并存时读 `.jsonl`，删掉它后改用 `.zst`、末尾字段沿用，都删掉后移除；`sessions/` 与 `archived_sessions/` 并存时读 `sessions/`，删掉后改用归档的并标 `archived`；`SessionFilter` 隐藏后 `read` / `turns` / `load` 立即 `NotFound`、`resume` 为 None，下一次刷新从列表移除；没有缓存摘要的 `.zst` 先以 `tail_pending` 发布、补齐后再发布一次（末尾字段与未压缩时相同，不建解压副本），重启后从摘要缓存直接得到完整摘要；摘要缓存在适配器版本变化（另一个键）和摘要格式版本变化（旧版本的命名空间）后不命中；读不到 cwd 的文件不列出、只有 `turn_context` 的 Codex 文件以 `Unrecognized` 列出；`legacy` 分叉在第一次 `read` 之后重新生成摘要，`inheritance_unknown` 变为 false，再读不再发布；来源会话还不在时先读了分叉，来源之后出现时分叉的摘要随之更新（不用再读；分叉是 `.jsonl.zst` 时也不被摘要缓存挡住）；边界已定的分叉在来源被删除后改回未定；`.jsonl.zst` 从 `sessions/` 移到 `archived_sessions/` 后命中摘要缓存的摘要标 `archived`、`file` 是新路径，移动或删掉同一会话的另一个压缩候选都不删解压副本、不重新解压。另有 `discover_roots_follow_the_environment`（`AgentRoots::from_env` 的规则）。
+  - `watch_*` 8 个：新文件出现；追加之后 `open_turn`、`last_activity` 更新、标题不变；内存里有索引的会话追加后接着解析索引、不重新生成整份摘要；删除文件、只报告目录的删除都移除会话；`RESCAN` 之后找到没有事件报告的文件；根目录在启动时不存在、之后出现时（`fs_watch` 先监视上级目录）扫描并列出；子 agent 的 `meta.json` 后到时 `Parent::tool_call` 补上。
+  - `place_*` 13 个：相同 cwd 只 `resolve` 一次（之后的刷新也不再调）；cwd 不存在为 `Missing`、不调 `resolve`；已打开项目里为 `Located` 并带子项目、只调 `locate`；非当前 worktree 的 `NotLoaded` 经 `resolve_package` 补齐；经符号链接记录的 cwd 归到已打开的项目、`cwd` 字段保留原样；项目之后打开时收到 `Opened` 重新归位为 `Located`、关闭后回到缓存的 `Resolved`；当前 worktree 的子项目加载完成后收到 `Changed` 补上子项目；当时不存在的 cwd 在目录重建、项目打开之后归位为 `Located`，没有项目事件时下一次刷新也会重新归位；已打开项目里的 worktree 被删除后为 `Missing`，删除后重建再归位为 `Located`，目录还在但已不属于任何 worktree 时重新 `resolve`（不用缓存的结果）；没打开的项目里 worktree 被删除，会话下一次变化时为 `Missing`。
+  - `index_cache_*` 6 个：重启后 `turns` 从 `cache` 里的索引接着解析追加的部分（把文件中间的一个 prompt 原地改写，结果仍是缓存里的旧值，证明没有重新解析），之后内存命中返回同一个 `Arc`；适配器版本变化后（另一个键、游标里的版本不同）都从文件重建；`read` 分批读完时顺带建好索引、`turns` 内存命中、读到末尾后写进 `cache`；内存里的索引按字节 LRU，不超过 8 MB，比整个预算还大的索引不留下；二进制编码对每份 fixture 的索引往返，截断和多余字节都拒绝。
+  - `complete_*` 2 个：冷缓存下 100 个 `.zst` 先全部以 `tail_pending` 发布，只补齐修改时间最近的 8 个，之后 executor 没有剩余任务、kernel 静止；对其他会话调 `complete` 才补齐，已补齐的忽略；补齐任务同时最多 2 个。
+  - `plugin_*` 3 个：两个插件各提供一个 `SessionSource`（ID 与 `Agent` 对应），第一次发现后各发出一次 `SessionsChanged`，之后 kernel 静止；`TestKernel` 注入模拟的 `Projects`，激活本身不发事件，运行 executor 之后发出第一次 `SessionsChanged`，停用后目录监听被 drop；在完整的 kernel 里停用 "session-codex" 后它的监听被 drop，另一个插件不受影响。
+  - `source_*` 里第 2 步移过来的一条：Claude Code 和 Codex 报告相同的会话 ID 时是两个不同的 `SessionKey`，每个 `SessionsChanged` 的 `source` 与其中键的 `source`、列表里的键一致。
+- `just bench --measure agents/`（Linux 容器，x86_64；不是预算规定的 M 系列，Linux 上只报告不判定）：`agents/discover_1000` 中位数 23.1–24.4 ms（预算 < 500 ms，1000 个会话文件、50 个项目目录，不含归位），`agents/turns_cached_50mb` 中位数 0.95 ms（预算 < 10 ms；50 MB、444 轮、1628 次工具调用，索引 205 KB）。同一次运行里其余四项：`agents/parse_throughput` 244 MB/s、`agents/append_4k` 17 µs、`agents/zst_throughput` 143 MB/s、`agents/zst_load_decoded` 12 µs，都达标。作为参照，同样的打开路径对 `synthetic_session` 拼成的 50 MB（8508 轮、34031 项，二进制索引 2.9 MB，比参照的真实会话密十几倍）是 12.5 ms，超出 10 ms，主要在解码时为几万个字符串分配内存。
+
+没有验证到的：第 4 步在 macOS 上的 bench 判定和冷启动基准（#7）是否不变（本插件 `AfterFirstFrame` 激活，首帧之前不做任何事）；真实 FSEvents 后端下的监听（测试只用 `fs_watch` 的内存后端）；bench 没有在 macOS 上运行；没有拿真实的 Claude Code 和 Codex 日志验证（fixtures 是合成的，见下面「与设计的差异」）；没有用 C 的 zstd 压缩的真实归档测试解码（`ruzstd` 实现的是标准格式，测试只用它自己的编码器）。
 
 ## 与设计的差异
 
@@ -896,3 +921,21 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - **`ruzstd` 的版本与 feature。** `Cargo.lock` 里原来没有 `ruzstd`，取实现时 crates.io 上的最新版本 0.9.1，默认 feature（`std`，以及 `hash` 用 `twox-hash` 2.1.5 校验帧的校验和），都是 MIT，`just deny` 通过。测试还用它的编码器生成归档。
 - **共用的代码。** `Parsed`、`Activity` 移到 `read` 模块（`claude`、`codex` 和 crate 根各自导出，`claude::Parsed` 的路径不变），词法路径拼接移到 `path` 模块；`IndexBuilder` 加了 Codex 用的「后补 prompt」「结果改指向改动记录」「明确结束轮次」，`finish_tool` 的结果引用改为可选。Claude Code 的行为不变（第 2 步的测试和快照不变）。
 - **bench 的形式。** 与第 2 步相同，`agents/zst_throughput`、`agents/zst_load_decoded` 写在 `tests/perf_smoke.rs` 里；归档是合成的 Codex fixtures 重复拼接到 50 MB 后用 `ruzstd` 最快档压缩的。`agents/zst_throughput` 用不建副本的适配器（`testing::parse_file`）从头解压并解析一遍。bench 第 1 步把这两项一并移进 `crates/bench`，归档由 `testing::synthetic_rollout` 和 `testing::compress_zst` 生成。
+
+第 4 步：
+
+- **`plugins` 的返回类型。** 设计写 `[(Name, Box<dyn Plugin>); 2]`，但 `PluginSet::with` 接受 `impl Plugin`，kernel 没有为 `Box<dyn Plugin>` 实现 `Plugin`。改为返回公开的 `SessionPlugin`（实现 `Plugin`），`app` 照样逐个放进 `PluginSet`，不改 kernel。已写进上文「依赖」。
+- **`AgentsDeps::filter` 与 `AgentRoots`。** 设计没写 `SessionFilter` 从哪里来：加进 `AgentsDeps`，两个插件共用，Analyze 的后续 issue 持有同一份。`hide` 之后 `read`、`turns`、`load` 立即返回 `NotFound`、`resume` 返回 None，列表在下一次刷新发布时去掉。`AgentRoots` 存配置目录（`claude`、`codex` 各一组），会话根目录由它推出，`from_env` 只读环境变量（「未决问题」1 按 (a)）。已写进上文「依赖」。
+- **候选路径的补充。** 「不变量」只写了 `.jsonl` / `.jsonl.zst` 与 `sessions/` / `archived_sessions/`。同一 `SessionKey` 的其余并存情况（同一线程的几个 rollout 文件、同一个会话出现在两个 Claude Code 配置目录里）按：先 `sessions/` 后归档、先未压缩后压缩，再取修改时间最新的，最后按路径，结果确定。选中的路径从 `.jsonl` 换成内容相同的 `.jsonl.zst`（压缩后原文件被删）且新摘要 `tail_pending` 时，末尾字段沿用上一次发布的值，不重新补齐。
+- **追加之后怎样更新摘要。** 「已在增量读取」定为内存里有这个会话的轮次索引（`read` 或 `turns` 建的）：文件追加后从索引的游标接着解析（同时更新索引），`last_activity` 和 `open_turn` 取新游标里的解析器状态，不读开头和末尾（`watch_append_follows_the_turn_index_of_an_open_session` 检查没有重新生成整份摘要）。其余追加的文件重新生成摘要：开头读到找齐即停，末尾按块向前读，都有上限；为了一个游标从头读整个文件代价更大。文件被替换（inode 变化）或变短时也重新生成。
+- **`read` 与索引缓存。** `from` 等于内存里索引的游标、或从 `START` 读且内存里还没有索引时，在同一遍解析里接着建索引；其余情况用一个临时的索引一起解析，只有这一批是回放（`reset`）时才采用它。索引只在读到末尾的那一批写进 `cache`（补读时不为每一批重写一次大索引）；`turns` 在游标变化时写；都在另一个后台任务里写。`turns` 内存命中的判断是会话文件的身份（设备号、inode、大小、修改时间）没变，没读到末尾的批建的索引不记身份，下次 `turns` 接着解析。估算大小超过整个内存预算（8 MB）的索引不留在内存里，调用方用完即释放。
+- **摘要缓存只照用与路径和来源无关的部分。** `agents.summary`（命名空间版本 2）另存依赖的来源线程 ID。命中时 `file` 和 `archived` 按当前路径重填（归档移动不改文件身份）；依赖来源会话的摘要和读过之后的重新生成不照用缓存的开头部分，开头重新解析（压缩会话只解压开头），只有末尾字段取自缓存。
+- **解压副本在全部候选都消失之后才删。** 一轮刷新里先处理完全部路径，再对候选全部不在的会话删副本：移动到 `archived_sessions/` 时旧路径的删除可能先被处理，同一会话的另一个压缩候选被删时选中的那个仍在用副本。
+- **缓存的编码与写回。** `agents.turns`（命名空间版本 1，不压缩）存索引的紧凑二进制编码（`src/source/index_codec.rs`：变长整数、长度前缀的字符串，解码时工具名和工作目录共用 `Arc`），`agents.summary`（不压缩）存摘要（`place` 为 `Pending`）和计数的 serde JSON。先用 JSON 加 zstd 时，`synthetic_session` 拼成的 50 MB 会话（8508 轮、34031 项，JSON 8.1 MB）打开一次要 133 ms，其中解码 38 ms、压缩 67 ms，所以改成二进制（同一份索引 2.9 MB）、不压缩，并把写回 `cache` 移出调用：插件在另一个 `Background` 任务里写（`testing::source` 在 drop 时写），`turns` 的调用方只等读和解析。
+- **来源会话的轮次集合不进 `cache`。** cache 设计的命名空间表留给本 crate 决定。集合只在内存里（最多 64 个），重启后第一次读到 `legacy` 分叉时扫描一遍来源文件（只做子串匹配，不解析其余记录）。分叉的摘要在发现时边界未定，第一次 `read` / `turns` 它之后重新生成一次（每个文件身份一次，按需扫描来源），`inheritance_unknown` 和标题随之更新并发布；每份摘要记下它的继承边界依赖哪个来源会话（`session_meta` 里的来源线程 ID），这个来源之后出现时，读过的、边界未定的会话按需扫描来源、重新生成；来源消失时，边界已定的会话重新生成、改回未定，不等它们再被读。
+- **Codex 子 agent 的 `Parent::tool_call` 仍为 None。** 第 3 步留给这一步的「从父会话 `spawn_agent` 的输出关联子线程」没有做：要在发现时读父会话的工具输出，代价和一致性规则都需要另外设计。是已知限制，Claude Code 的子 agent 不受影响（`meta.json` 后到时，它的事件让子 agent 的摘要重新生成）。
+- **归位的细节。** 归位在发布之前的同一个刷新任务里完成，所以通常不会先发一版 `Pending`（`Projects` 不可用时留在 `Pending`）。`resolve` 的结果按规范路径缓存，只在它依据的目录或 worktree 集合可能变了时丢掉：同一个目录没变时只 `resolve` 一次；它返回 `NotFound` 记为 `Missing`。收到某个项目的 `ProjectEvent`（打开、关闭、变化）时，归在这个项目里的 cwd 丢掉缓存的 `resolve` 结果，重新规范化和归位（worktree 被删除为 `Missing`，删除后重建照常归位，目录还在但已不属于任何 worktree 时重新 `resolve`）；`Pending`、`Missing` 的 cwd 一起重新核对；项目打开时其余没有 `Located` 的只重新 `locate`（只查内存）；其他项目里的不动。每轮刷新只重新核对这一轮读过摘要的会话的 cwd 和 `Missing` 的 cwd：重新规范化一次，规范路径变了（目录消失、出现、解析到别处）才丢掉缓存重新归位，所以没打开的项目里 worktree 被删除，也在它的会话下一次变化时归为 `Missing`。代价按受影响的 cwd 计，每个一次 `canonicalize`，必要时一次 `resolve`。`locate` 给出 `NotLoaded` 且带 worktree 时调 `resolve_package`，当前 worktree 还在加载时它仍给 `NotLoaded`，等下一次 `Changed`。
+- **监听的细节。** 每个批次（包括 arm 之后第一个 `rescan: true` 的批次）都直接交给刷新任务；带 `rescan` 或根目录出现、消失的批次重新枚举这个根目录，枚举只比较文件身份，没变的不重新读摘要，所以启动时第一次发现之后的这一遍只是一轮 `stat`。批次里的目录路径（只报告了目录的删除、改名）按目录之下的全部已知文件核对。刷新任务同时只有一个，排队期间到达的批次并进同一轮，守卫随之保留到那一轮结束。
+- **`Diagnostics` 的来源。** 计数来自列出的会话的摘要（开头与末尾读到的行）和读不了的目录；`read` 的计数不并进来（重复读同一段会重复计数），读不到 cwd、不列出的文件没有对应的计数项（`Diagnostics` 没有这一项，不改 `services`）。
+- **`testing` 的补充。** 新增 `testing::source`（不经过插件、在调用线程上同步发现的会话来源）、`testing::synthetic_projects` 和 `testing::synthetic_long_session`，供 bench 的 `agents/discover_1000`、`agents/turns_cached_50mb` 使用，已写进上文「本 crate 的公开项」。
+- **bench。** 两项写在 `crates/bench/benches/time/agents.rs`，预算表里改为 `Active`。`agents/discover_1000` 用 `testing::source` 计时第一次发现（枚举、读开头与末尾、组装并排序列表），不含归位（`Projects` 属于 `project`）和监听；`agents/turns_cached_50mb` 的会话是 `synthetic_long_session` 拼成的 50 MB：设计没有规定它的形状，`synthetic_session` 的行很短，50 MB 里有约 2 万次工具调用，是「性能」里参照的真实会话（56 MB、约 1600 次）的十几倍，索引大一个数量级；`synthetic_long_session` 按参照的密度（50 MB 约 1600 次工具调用、444 轮，索引 205 KB，与「轮次索引」里「几百 KB」一致）。每个样本先追加约 4 KB、新建一个内存为空的来源（模拟重启），计时一次 `turns`：读 `cache` 里的索引、核对游标、解析追加的部分并把更新后的索引写回。

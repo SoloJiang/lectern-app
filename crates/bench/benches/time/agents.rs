@@ -7,13 +7,16 @@ use std::hint::black_box;
 use std::io::Write as _;
 use std::path::Path;
 
+use lectern_agents::AgentRoots;
 use lectern_agents::claude::{ClaudeCode, SOURCE_ID};
 use lectern_agents::codex::{self, Codex};
 use lectern_agents::testing::{
-    append_chunk, compress_zst, parse_file, synthetic_rollout, synthetic_session,
+    append_chunk, compress_zst, parse_file, source, synthetic_long_session, synthetic_projects,
+    synthetic_rollout, synthetic_session,
 };
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Value};
-use lectern_services::session::{Agent, Cursor, SourceId, TurnItem};
+use lectern_cache::{Budgets, Cache, Config};
+use lectern_services::session::{Agent, Cursor, SessionKey, SourceId, TurnItem};
 
 /// The main session's ID in the fixtures; the file name makes
 /// `ClaudeCode::session_file` recognise a main session.
@@ -164,6 +167,113 @@ fn zst_load_decoded(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     });
     Ok(vec![Measured::new(
         "agents/zst_load_decoded",
+        Value::Time(time),
+    )])
+}
+
+/// Roots with one Claude Code config directory under the scratch directory.
+fn claude_roots(ctx: &Ctx, name: &str) -> AgentRoots {
+    AgentRoots {
+        claude: vec![ctx.scratch().join(name)],
+        codex: Vec::new(),
+    }
+}
+
+/// The first discovery of 1000 Claude Code session files (50 project
+/// directories): enumerate, read each file's head and tail, build and sort
+/// the list. No placement (`Projects` belongs to `project`) and no watch.
+pub const DISCOVER_1000: Bench = Bench {
+    id: "agents/discover_1000",
+    run: discover_1000,
+};
+
+fn discover_1000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let count = ctx.scale(1000, 20);
+    let roots = claude_roots(ctx, "discover");
+    synthetic_projects(&roots.claude[0].join("projects"), count)?;
+    let decoded = ctx.scratch().join("decoded");
+    let found = source(Agent::ClaudeCode, &roots, None, None, &decoded)
+        .ok_or_else(|| BenchError::new("no Claude Code source"))?
+        .sessions()
+        .sessions
+        .len();
+    if found != count {
+        return Err(BenchError::new(format!(
+            "discovered {found} of {count} sessions"
+        )));
+    }
+    let time = ctx.time(|| source(Agent::ClaudeCode, black_box(&roots), None, None, &decoded));
+    Ok(vec![Measured::new(
+        "agents/discover_1000",
+        Value::Time(time),
+    )])
+}
+
+/// Opening a 50 MB session (`synthetic_long_session`: as many tool calls
+/// per megabyte as the design's reference session) whose turn index is in
+/// the cache but not in memory (after a restart), with about 4 KB appended
+/// since: `turns` reads
+/// the cached index, checks its cursor and parses the appended part. The
+/// updated index is written back afterwards (a background task in the
+/// plugin), outside the clock.
+pub const TURNS_CACHED_50MB: Bench = Bench {
+    id: "agents/turns_cached_50mb",
+    run: turns_cached_50mb,
+};
+
+fn turns_cached_50mb(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let roots = claude_roots(ctx, "turns");
+    let dir = roots.claude[0].join("projects/-Users-dev-fixture-repo");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{MAIN}.jsonl"));
+    std::fs::write(&path, synthetic_long_session(session_len(ctx)))?;
+    let decoded = ctx.scratch().join("decoded");
+    let cache = Cache::new(Config {
+        root: ctx.scratch().join("cache"),
+        budgets: Budgets::default(),
+        ui_thread: None,
+    });
+    let key = SessionKey {
+        source: SourceId(SOURCE_ID.into()),
+        id: MAIN.into(),
+    };
+    let open = || {
+        source(Agent::ClaudeCode, &roots, Some(&cache), None, &decoded)
+            .ok_or_else(|| BenchError::new("no Claude Code source"))
+    };
+    // The first open parses the whole file and fills the cache.
+    let built = open()?
+        .turns(&key)
+        .map_err(|e| BenchError::debug("turns", e))?;
+    let chunk = append_chunk();
+    let failure: Cell<Option<String>> = Cell::new(None);
+    let time = ctx.time_with_setup(
+        || {
+            // Outside the clock: append, then a fresh source with nothing in memory.
+            if let Err(error) = append(&path, chunk) {
+                failure.set(Some(format!("append: {error}")));
+            }
+            open()
+        },
+        |opened| {
+            let opened = opened.ok();
+            let index = opened.as_ref().map(|s| s.turns(black_box(&key)));
+            match &index {
+                Some(Ok(index)) if index.turns.len() > built.turns.len() => {}
+                Some(Ok(_)) => failure.set(Some("the appended turns are missing".into())),
+                Some(Err(e)) => failure.set(Some(format!("turns: {e:?}"))),
+                None => failure.set(Some("no source".into())),
+            }
+            // Dropped after the clock stops: the source writes the updated index then, where the
+            // plugin writes it in a background task.
+            (opened, index)
+        },
+    );
+    if let Some(message) = failure.take() {
+        return Err(BenchError::new(message));
+    }
+    Ok(vec![Measured::new(
+        "agents/turns_cached_50mb",
         Value::Time(time),
     )])
 }

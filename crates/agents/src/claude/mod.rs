@@ -162,6 +162,18 @@ impl ClaudeCode {
         self.parse(file, from, max_bytes, None)
     }
 
+    /// `read`，同时在 `index` 上接着建轮次索引（「数据流与线程」第 7 步：同一遍解析）。`index` 应当建到
+    /// `from` 为止；读取从头回放（`Batch::reset`）时它被清空、从头重建。
+    pub(crate) fn read_indexed(
+        &self,
+        file: &SessionFile,
+        from: &Cursor,
+        max_bytes: u64,
+        index: &mut IndexBuilder,
+    ) -> Result<Parsed, SessionError> {
+        self.parse(file, from, max_bytes, Some(index))
+    }
+
     /// 读到末尾，同时更新 `index`（「数据流与线程」第 7 步：同一遍解析）。`from` 应当是
     /// `index` 的游标；对不上时从头读，`index` 一并重建。
     fn parse(
