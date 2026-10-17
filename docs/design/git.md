@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1 步（仓库、worktree、引用与 index）已实现（#PR）；第 2–4 步尚未实现。
+状态：实现中。第 1 步（仓库、worktree、引用与 index）已实现（[#76](https://github.com/SoloJiang/lectern-app/pull/76)）；第 2–4 步尚未实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
