@@ -21,7 +21,7 @@
   - 解析 reflog 行：`git::parse_reflog_line`，`usage` 调用；本 crate 只按行切分。
   - 按事件刷新改动集、文件列表、会话摘要：`review`、`project`、`agents`。
   - 分支的「一次使用」与用量归属：`usage`。
-- 本 issue 之外：`bench` 的基准随 bench 的设计（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）加入，见「性能」。
+- 本 issue 之外：`bench` 的运行器与预算表（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[bench 设计](bench.md)）。本 crate 的基准由各步的实现 PR 加进 `crates/bench`，见「性能」。
 
 ## 依赖
 
@@ -647,13 +647,13 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 
 空闲时 fs_watch 线程阻塞在条件变量上，没有定时器，不醒来；FSEvents 和 kqueue 没有事件时也不唤醒进程。
 
-`bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增，bench 的设计合并之前以 `#[ignore]` 的 `perf_smoke_*` 测试在 release 下测量（与 `git`、`agents` 相同）：
+基准写在 `crates/bench` 里（[bench 设计](bench.md)「预算表」）：实现对应功能的 PR 在 bench 预算表的分项预算里新增以下条目（出处指向本节），加入 `benches/time/fs_watch.rs` 或内存目标的基准，并把条目改为 `Active`。标注 macOS 的条目用真实后端，在 Linux 上记为 `skipped`：
 
 - `fs_watch/classify_burst`：`FakeBackend` 注入 10 万个 `node_modules/**` 事件和 1000 个受跟踪路径事件，过滤器是 728 个跟踪文件、20 条忽略规则；全部处理完 < 100 ms。
 - `fs_watch/flush_idle`（macOS）：真实后端，没有积压时 `flush_revision` < 5 ms。
 - `fs_watch/write_to_deliver`（macOS）：写一个受跟踪文件到 `WorktreeBatch` 交付，默认合并参数下 < 120 ms。
 - `fs_watch/reflog_append`：追加一行 reflog 到记录进入批次 < 1 ms（不含后端延迟）。
-- 内存：11 个 worktree 的仓库，`watch_repo` 加当前 worktree 的 `watch_worktree`，静止后本 crate 的常驻增量 < 1 MB（不含 `git` 的文件列表）。
+- `fs_watch/resident`：11 个 worktree 的仓库，`watch_repo` 加当前 worktree 的 `watch_worktree`，静止后本 crate 的常驻增量 < 1 MB（不含 `git` 的文件列表）。
 
 ## 状态与异常
 
@@ -716,7 +716,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
    - `just test -p lectern-fs-watch` 里 `filter_*`、`filter_stale_*`、`revision_*`、`flush_*`、`coalesce_*`、`reflog_*`、`config_*`、`dir_*`、`rescan_*`、`health_*`、`lifecycle_*`、`quiescence_*` 通过，快照已逐个看过。
    - `cargo tree -p lectern-fs-watch -e normal --depth 1` 只列出 `lectern-kernel`、`lectern-executor`。
    - `rg -n 'cfg\(target_os|Command::new|std::process' crates/fs_watch/src` 没有结果；`python3 scripts/check_architecture.py` 通过。
-   - `cargo test --release -p lectern-fs-watch --features test-support -- --ignored perf_smoke` 里 `classify_burst`、`reflog_append` 达到「性能」的目标。
+   - bench 预算表新增「性能」一节的全部 `fs_watch/*` 条目；`fs_watch/classify_burst`、`fs_watch/reflog_append` 改为 `Active`，macOS CI 的 `just bench` 判定通过，其余条目为 `planned`。
 2. **`git` 的适配**（`lectern-git`）
    - `just test -p lectern-git` 里 `watch_source_*` 通过；`rg 'Command::new' crates/git/src` 没有结果。
    - [git 设计](git.md)的状态行与「index」一节更新为已实现。
@@ -726,5 +726,5 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
    - [platform 设计](platform.md)的状态行更新。
 4. **装配与实测**（`app`）
    - `app` 按「对其他 crate 的要求」创建 `Watcher` 并注入；macOS 上 `cargo build --locked -p lectern-app` 通过。
-   - macOS 上运行 `perf_smoke` 的 `flush_idle`、`write_to_deliver` 和内存测量，达到「性能」的目标；冷启动基准（#7）不因本 crate 变化。
-   - 本文状态行改为「已实现」并列出四个 PR，填写「实际验证」。bench 的设计合并后，把 `perf_smoke_*` 移进 `crates/bench`。
+   - `fs_watch/flush_idle`、`fs_watch/write_to_deliver`、`fs_watch/resident` 改为 `Active`，macOS CI 的 `just bench` 判定通过；`app/cold_start` 不因本 crate 变化。
+   - 本文状态行改为「已实现」并列出四个 PR，填写「实际验证」。
