@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：实现中。第 1–3 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），第 4 步尚未实现（见「验收」）。
+状态：实现中。第 1–3 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)），第 4 步尚未实现（见「验收」）。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
