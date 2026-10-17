@@ -509,7 +509,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
 - 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。超过保留上限的文件没有字节可用，明确标为 `NotRetained`，不落盘另存。
 
-`Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID），stat 没变时不重新读取和计算；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存。
+`Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID、计算时刻），stat 没变时不重新读取和计算；文件的 mtime 不早于缓存项的计算时刻时（与 racy-clean 同理，同一时刻内的两次同长度写入 stat 相同）不命中缓存，照常读取内容；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存。
 
 ### 上限与截断
 
@@ -600,7 +600,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 仓库与引用：`discover` 在子目录、linked worktree、git 目录、普通文件夹里的结果；`worktrees` 的锁定和 prunable；名为 `main` 的 linked worktree 与主 worktree 的 ID 不同，`Repo::worktree` 各自打开正确的那一个；SHA-256 仓库的 OID 是 64 位；reftable 仓库返回 `Unsupported`；`default_branch`、上游与推送目标的解析表；reflog 消息分类逐条覆盖，认不出的是 `Other`。
 - 树 diff：新增、删除、修改、模式变化、类型变化、精确与相似重命名、二进制、子模块；`--numstat` 与归档里 git 的输出一致。
 - 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`；未暂存的 `rm` 得到 `Deleted`；HEAD 删除、对方修改的冲突得到没有 `old` 的 `Conflicted`；只改 `.gitattributes`、文件 stat 不变时 `refresh(Full)` 按新规则重新计算 OID；没有改动的跟踪文件不会作为未跟踪文件出现；二进制和只改模式的文件也计入 5000 个文件的上限。
-- 截断：单文件、整体、保留内容三种上限的边界值；`NotRetained` 的 `Detail` 是带增删行数的 `Truncated`。
+- 截断：单文件、整体、保留内容三种上限的边界值；`NotRetained` 保留原来的 `Detail`：文本文件是带增删行数的 `Truncated`，二进制文件是 `Binary`，行级 diff 过大的是 `TooLarge`。
 - 过滤器与目录：LFS 文件暂存了更新、stat 与 index 一致时仍是 `Filtered`；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`；未初始化的子模块不是改动。
 - 暂存：「工作区比较」表的每一行各有一个测试（用 `TestRepo` 分别构造 B、I、W），检查 `Status`、两侧、`Detail` 和 `staged`；其中包括 `git add p; rm p` 得到 `StagedOnly` 的 `Added`。
 - 模式：未跟踪的 FIFO 和嵌套仓库的新一侧是 `Mode::Special`；跟踪的文件被换成 FIFO 时是 `TypeChanged`。
