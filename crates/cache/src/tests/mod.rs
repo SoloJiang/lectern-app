@@ -6,5 +6,4 @@ mod evict;
 mod faults;
 mod open;
 mod partitions;
-mod perf;
 mod support;

@@ -1,11 +1,13 @@
 //! Behaviour tests run once for every implementation available on this
-//! platform: `Openat2` and `Walk` on Linux, `NofollowAny` and `Walk` on macOS.
+//! platform: `Openat2` and `Walk` on Linux; `NofollowAny`, `NofollowAnyParent`
+//! and `Walk` on macOS. `NofollowAnyParent` is what macOS 11 and 12 use; forcing
+//! it keeps that path tested on newer CI machines.
 
 use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -23,6 +25,8 @@ fn backends() -> Vec<Backend> {
         Backend::Openat2,
         #[cfg(target_os = "macos")]
         Backend::NofollowAny,
+        #[cfg(target_os = "macos")]
+        Backend::NofollowAnyParent,
         Backend::Walk,
     ]
 }
@@ -315,6 +319,7 @@ fn check_intermediate_symlinks(backend: Backend) {
         "a/self/b.txt",
         "in_link/missing",
         "out_link/missing/deeper",
+        "dangling/x",
     ] {
         assert!(
             is_through_symlink(root.stat(rel(path))),
@@ -1026,14 +1031,52 @@ fn linux_backend_choice() {
 
 // macOS only
 
+/// The major version `sw_vers` reports, such as 14 for 14.6.1.
+#[cfg(target_os = "macos")]
+fn macos_major_version() -> u32 {
+    let out = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .unwrap();
+    let version = String::from_utf8(out.stdout).unwrap();
+    let major = version.trim().split('.').next().unwrap();
+    major
+        .parse()
+        .unwrap_or_else(|_| panic!("sw_vers: {version:?}"))
+}
+
 #[cfg(target_os = "macos")]
 #[test]
-fn nofollow_any_is_the_default() {
-    let tmp = TempDir::new().unwrap();
+fn nofollow_any_backend_choice() {
     assert_eq!(
-        SafeRoot::open(tmp.path()).unwrap().backend,
-        Backend::NofollowAny
+        macos::backend_for_probe(Err(Errno::INVAL)),
+        Backend::NofollowAnyParent
     );
+    for probe in [
+        Ok(()),
+        Err(Errno::NOENT),
+        Err(Errno::ACCESS),
+        Err(Errno::IO),
+    ] {
+        assert_eq!(
+            macos::backend_for_probe(probe),
+            Backend::NofollowAny,
+            "{probe:?}"
+        );
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let root = SafeRoot::open(tmp.path()).unwrap();
+    let probe = macos::probe(root.fd.as_fd());
+    let major = macos_major_version();
+    eprintln!("macOS {major}: probe {probe:?}, backend {:?}", root.backend);
+    if major >= 13 {
+        assert_eq!(probe, Ok(()));
+        assert_eq!(root.backend, Backend::NofollowAny);
+    } else {
+        assert_eq!(probe, Err(Errno::INVAL));
+        assert_eq!(root.backend, Backend::NofollowAnyParent);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1042,108 +1085,133 @@ fn nofollow_any_one_step_open_refuses_every_symlink() {
     let tree = LinkTree::new();
     let root = SafeRoot::open_with(tree.path(), Backend::NofollowAny).unwrap();
     let fd = root.fd.as_fd();
-    for (path, target) in [
-        ("in_link/b.txt", Target::Entry),
-        ("out_link/b.txt", Target::Entry),
-        ("in_link", Target::Dir),
-        ("a/self", Target::Dir),
-        ("a/to_file", Target::Entry),
-        ("dangling", Target::Entry),
-        ("passwd", Target::Entry),
+    for path in [
+        "in_link/b.txt",
+        "out_link/b.txt",
+        "in_link",
+        "a/self",
+        "a/to_file",
+        "dangling",
+        "passwd",
     ] {
         assert!(
-            macos::open_nofollow_any(fd, path.as_bytes(), target).is_err(),
-            "{path} {target:?}"
+            macos::open_nofollow_any(fd, path.as_bytes()).is_err(),
+            "{path}"
         );
     }
-    assert!(macos::open_nofollow_any(fd, b"a/b.txt", Target::Entry).is_ok());
-    assert!(macos::open_nofollow_any(fd, b"a", Target::Dir).is_ok());
+    assert!(macos::open_nofollow_any(fd, b"a/b.txt").is_ok());
+    assert!(macos::open_nofollow_any(fd, b"a").is_ok());
+
+    // The parent open of `NofollowAnyParent`.
+    for path in [
+        "in_link",
+        "out_link",
+        "a/self",
+        "a/up",
+        "in_link/x",
+        "dangling",
+    ] {
+        assert!(
+            macos::open_dir_nofollow_any(fd, path.as_bytes()).is_err(),
+            "{path}"
+        );
+    }
+    assert!(macos::open_dir_nofollow_any(fd, b"a").is_ok());
+    assert!(macos::open_dir_nofollow_any(fd, b"a/b.txt").is_err());
+}
+
+/// The one-step `fstatat` itself, without the walk behind it: it answers a
+/// regular path in one call (otherwise every `stat` would silently take the
+/// slower walk), refuses a link before the last component with something other
+/// than `ENOENT` (which would end the call as `NotFound` without the walk),
+/// and never reports what a link points to.
+#[cfg(target_os = "macos")]
+#[test]
+fn nofollow_any_one_step_stat_follows_no_symlink() {
+    let tree = LinkTree::new();
+    write(&tree.path().join("a/b/c/d.txt"), b"deep");
+    let root = SafeRoot::open_with(tree.path(), Backend::NofollowAny).unwrap();
+    let fd = root.fd.as_fd();
+    if macos::probe(fd) == Err(Errno::INVAL) {
+        // Before macOS 13; `nofollow_any_backend_choice` checks that this is
+        // only the case there.
+        eprintln!("fstatat has no AT_SYMLINK_NOFOLLOW_ANY here; nothing to check");
+        return;
+    }
+
+    for (path, kind) in [
+        ("a", FileKind::Dir),
+        ("a/b.txt", FileKind::File),
+        ("a/b", FileKind::Dir),
+        ("a/b/c/d.txt", FileKind::File),
+    ] {
+        let meta = macos::stat_nofollow_any(fd, path.as_bytes())
+            .unwrap_or_else(|error| panic!("{path}: {error:?}"));
+        assert_eq!(meta.kind, kind, "{path}");
+        assert_meta_matches(&meta, &tree.path().join(path));
+    }
+    assert_eq!(
+        macos::stat_nofollow_any(fd, b"a/missing").map(|_| ()),
+        Err(Errno::NOENT)
+    );
+
+    for path in [
+        "in_link/b.txt",
+        "out_link/b.txt",
+        "a/up/a/b.txt",
+        "a/self/b.txt",
+        "in_link/missing",
+        "out_link/missing/deeper",
+        "dangling/x",
+    ] {
+        match macos::stat_nofollow_any(fd, path.as_bytes()) {
+            Ok(meta) => panic!("{path}: followed a link to {meta:?}"),
+            Err(error) => assert_ne!(error, Errno::NOENT, "{path}"),
+        }
+    }
+
+    for path in [
+        "in_link",
+        "out_link",
+        "a/to_file",
+        "dangling",
+        "passwd",
+        "a/out_file",
+        "a/up",
+    ] {
+        match macos::stat_nofollow_any(fd, path.as_bytes()) {
+            Ok(meta) => {
+                assert_eq!(meta.kind, FileKind::Symlink, "{path}");
+                assert_meta_matches(&meta, &tree.path().join(path));
+            }
+            // `SafeRoot::stat` then asks the walk, which reports the link.
+            Err(error) => assert_ne!(error, Errno::NOENT, "{path}"),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn nofollow_any_symlinks() {
-    check_intermediate_symlinks(Backend::NofollowAny);
-    check_last_symlinks(Backend::NofollowAny);
+    for backend in [Backend::NofollowAny, Backend::NofollowAnyParent] {
+        check_intermediate_symlinks(backend);
+        check_last_symlinks(backend);
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn nofollow_any_races() {
-    check_swap_between_calls(Backend::NofollowAny);
-    check_swap_never_escapes(Backend::NofollowAny);
+    for backend in [Backend::NofollowAny, Backend::NofollowAnyParent] {
+        check_swap_between_calls(backend);
+        check_swap_never_escapes(backend);
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn nofollow_any_walk_cases() {
-    check_walk_cases(Backend::NofollowAny);
-}
-
-// perf_smoke
-
-/// 728 files four levels deep, like the repository the budget was set on.
-fn perf_tree(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    'outer: for a in 0..4 {
-        for b in 0..6 {
-            for c in 0..6 {
-                for d in 0..6 {
-                    if files.len() == 728 {
-                        break 'outer;
-                    }
-                    let rel = PathBuf::from(format!("d{a}/d{b}/d{c}/f{d}.rs"));
-                    write(&root.join(&rel), &[b'x'; 4096]);
-                    files.push(rel);
-                }
-            }
-        }
-    }
-    files
-}
-
-#[test]
-#[ignore = "timing; run with `just test -p lectern-platform -- --ignored perf_smoke` in release"]
-fn perf_smoke() {
-    const ROUNDS: usize = 10_000;
-    let tmp = TempDir::new().unwrap();
-    let files = perf_tree(tmp.path());
-    let rels: Vec<String> = files
-        .iter()
-        .map(|p| p.to_str().unwrap().to_owned())
-        .collect();
-    let abs: Vec<PathBuf> = files.iter().map(|p| tmp.path().join(p)).collect();
-
-    let time = |f: &mut dyn FnMut(usize)| {
-        for i in 0..rels.len() {
-            f(i); // warm the page cache and dentries
-        }
-        let start = Instant::now();
-        for i in 0..ROUNDS {
-            f(i % rels.len());
-        }
-        start.elapsed() / ROUNDS as u32
-    };
-
-    let std_stat = time(&mut |i| {
-        std::hint::black_box(fs::symlink_metadata(&abs[i]).unwrap());
-    });
-    let std_read = time(&mut |i| {
-        std::hint::black_box(fs::read(&abs[i]).unwrap());
-    });
-    for backend in backends() {
-        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
-        let stat = time(&mut |i| {
-            std::hint::black_box(root.stat(rel(&rels[i])).unwrap());
-        });
-        let read = time(&mut |i| {
-            std::hint::black_box(file_bytes(root.read(rel(&rels[i]), 64 << 20)));
-        });
-        eprintln!(
-            "{backend:?}: stat {stat:?} vs symlink_metadata {std_stat:?} ({:.2}x); \
-             read 4 KiB {read:?} vs fs::read {std_read:?} ({:.2}x)",
-            stat.as_secs_f64() / std_stat.as_secs_f64(),
-            read.as_secs_f64() / std_read.as_secs_f64(),
-        );
+    for backend in [Backend::NofollowAny, Backend::NofollowAnyParent] {
+        check_walk_cases(backend);
     }
 }

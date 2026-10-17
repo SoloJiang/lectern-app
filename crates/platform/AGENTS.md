@@ -3,7 +3,7 @@
 macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名校验、Claude Code statusline 安装；以及按平台实现的安全读取（`SafeRoot`，Linux 实现也在这里）。macOS 系统绑定只能出现在本 crate（架构规则 6）。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：[docs/design/platform.md](../../docs/design/platform.md)，目前只覆盖安全读取（`SafeRoot`）。FSEvents 与 kqueue 后端的设计在 [docs/design/fs_watch.md](../../docs/design/fs_watch.md)「platform 后端」。`open -a`、钥匙串、Seatbelt、statusline 尚未设计：先在这份文档里增加小节或另写设计文档，按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写对应的代码。
+- 设计文档：[docs/design/platform.md](../../docs/design/platform.md)，目前只覆盖安全读取（`SafeRoot`）和 bench 用的进程测量（`process::phys_footprint`）。FSEvents 与 kqueue 后端的设计在 [docs/design/fs_watch.md](../../docs/design/fs_watch.md)「platform 后端」。`open -a`、钥匙串、Seatbelt、statusline 尚未设计：先在这份文档里增加小节或另写设计文档，按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写对应的代码。
 - issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)
 - ADR：[0004](../../docs/adr/0004.md)、[0014](../../docs/adr/0014.md)、[0018](../../docs/adr/0018.md)、[0019](../../docs/adr/0019.md)、[0024](../../docs/adr/0024.md)
 
@@ -23,5 +23,6 @@ cargo check -p lectern-platform
 just test -p lectern-platform   # macOS 上覆盖全部代码
 ```
 
-- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY` 的实现在 macOS CI 上测试。
+- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY`（`read`）与 `AT_SYMLINK_NOFOLLOW_ANY`（`stat`）的实现在 macOS CI 上测试。
+- 计时：`lectern-bench` 的 `platform/safe_stat`、`platform/safe_read_4k`（`just bench platform/`），只测 `SafeRoot::open` 选中的生产后端。
 - 其余调用系统 API 的行为只能在 macOS CI 上验证；能抽成纯函数的部分（如生成 Seatbelt 配置、合并 statusline 配置）写单元测试和 insta 快照，在任何平台上都能运行。

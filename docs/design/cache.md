@@ -388,12 +388,12 @@ pub enum DisableReason {
 | 安装包 ≤ 80 MB | SQLite 与 rusqlite 约 2 MB（ADR 0027） | #38 |
 
 - `get` 一条 4 KiB < 50 µs（`cache/get_4k`）。
-- 命名空间选 `Zstd` 之前，先用 `cache/zstd_1m`（1 MiB 值的压缩与解压）确认读取仍在使用方的预算内。
-- bench 的设计文档（#7）合并之前不写基准代码；实现 PR 先用 `#[ignore]` 的 `perf_smoke_cache` 在 release 下测量上表各项，结果写进「实际验证」（与 git 的做法相同）。
+- 命名空间选 `Zstd` 之前，先用 `cache/zstd_1m/put`、`cache/zstd_1m/get`（1 MiB 文本的压缩与解压，只记录）确认读取仍在使用方的预算内。
+- 上表各项是 `lectern-bench` 的基准（`just bench cache/`，[bench 设计「迁移」](bench.md#迁移)），夹具用 `test-support` 下的 `testing::Raw`、`testing::Zstd`、`testing::noise`、`testing::text`。`cache/evict` 和 `cache/memory` 随第 2 步生效。`cache/memory` 在 bench 的 `memory` 目标里用子进程测量：SQLite 的页缓存和连接用 C 的分配器，计数分配器看不到，所以测的是子进程打开分库、读完之后的常驻增量（Linux 的 `VmRSS`，macOS 的 `phys_footprint`，见 [bench 设计「进程内基准」](bench.md#进程内基准)）。第 1 步的实现 PR 用 `#[ignore]` 的 `perf_smoke_cache` 测量，bench 第 1 步把它移进 `crates/bench` 后删除。
 
 ## 测试
 
-全部在 Linux 上运行（`just test -p lectern-cache`），用 `tempfile` 的临时目录，不依赖 GPUI 和 macOS。`test-support` feature 提供可手动推进的时钟（访问时间、60 秒的写入暂停、目录清理）和故障注入（对写连接设置 `max_page_count` 制造 `SQLITE_FULL`；在写事务中途暂停的钩子）：`testing::ManualClock`、`Cache::with_clock`、`Cache::set_ui_thread_panics`、`Partition::file`、`Partition::set_max_page_count`、`Partition::set_write_hook`。
+全部在 Linux 上运行（`just test -p lectern-cache`），用 `tempfile` 的临时目录，不依赖 GPUI 和 macOS。`test-support` feature 提供可手动推进的时钟（访问时间、60 秒的写入暂停、目录清理）和故障注入（对写连接设置 `max_page_count` 制造 `SQLITE_FULL`；在写事务中途暂停的钩子）：`testing::ManualClock`、`Cache::with_clock`、`Cache::set_ui_thread_panics`、`Partition::file`、`Partition::set_max_page_count`、`Partition::set_write_hook`；另有 bench 用的 `testing::Raw`、`testing::Zstd`（`test.raw`、`test.zstd` 命名空间的原样字节）和 `testing::noise`、`testing::text`（不可压缩与可压缩的确定数据），见「性能」。
 
 - 构造（`new_*`）：`Cache::new` 加 `app()`、`repo()`、`folder()` 之后 `root` 不存在；第一次 `get` 之后才出现文件。
 - 线程（`ui_thread_*`）：在 `ui_thread` 上调用，debug 构建 panic；`test-support` 可以关掉这个 panic，用来检查 release 的行为：不打开文件，读返回 None，写返回 `WrongThread`。
@@ -431,10 +431,10 @@ pub enum DisableReason {
    - `cargo tree -i rusqlite -e normal --depth 1` 只列出 `lectern-cache`。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、`platform`、`executor`。
    - `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果：不加载扩展，不自建线程。
-   - `perf_smoke_cache`（`cargo test --release -p lectern-cache -- --ignored perf_smoke`）的读写各项在「性能」一节的预算内。
+   - `perf_smoke_cache`（`cargo test --release -p lectern-cache -- --ignored perf_smoke`）的读写各项在「性能」一节的预算内（已满足；这个测试之后移进 bench，见「性能」）。
 2. **淘汰、访问时间与分库管理**：
    - `evict_*`、`touch_*`、`partitions_*`、`sweep_*` 通过。
-   - `perf_smoke_cache` 的 `evict` 与 `memory` 两项在预算内（`evict` 原为 `evict_16m`，见「与设计的差异」第 2 步）。
+   - 加入 bench 的 `cache/evict` 与 `cache/memory` 两项基准（`cache/evict` 原为 `cache/evict_16m`，见「与设计的差异」第 2 步），在 `crates/bench/src/budgets.rs` 里改为生效，在预算内。
 
 接入由使用方各自的 PR 完成：`agents` 设计的第 4 步（`index_cache_*`、`complete_*`），`git` 的 hunk 缓存（`hunk_cache_*`）。`bench` 的 `cache/*` 基准随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 加入。
 
@@ -465,11 +465,12 @@ pub enum DisableReason {
 
 第 2 步，同一台机器。
 
-- `just check`、`just test`（整个工作区 692 个测试通过，跳过 6 个 `#[ignore]`）、`just doctest`、`just deny` 全部通过。
-- `just test -p lectern-cache`：68 个测试通过，跳过 `perf_smoke_cache`。第 1 步的 47 个照常通过；新增 `evict_*` 4、`touch_*` 6、`partitions_*` 6、`sweep_*` 4，以及 `cache/memory` 的子进程入口 `perf_memory_child`（没有环境变量时直接返回）。`partitions_concurrent_calls_stay_within_the_connection_limit`（6 个线程在 5 个项目分库上交替读写，期间不断换出）和 `partitions_swap_out_waits_for_calls_in_progress` 连续运行 30 次没有失败或卡住。
+- `just check`、`just test`（合并 bench 第 1 步之后，整个工作区 858 个测试通过，跳过 1 个）、`just doctest`、`just deny`、`just bench`（冒烟）全部通过。
+- `just test -p lectern-cache`：67 个测试通过。第 1 步的 47 个照常通过；新增 `evict_*` 4、`touch_*` 6、`partitions_*` 6、`sweep_*` 4。`partitions_concurrent_calls_stay_within_the_connection_limit`（6 个线程在 5 个项目分库上交替读写，期间不断换出）和 `partitions_swap_out_waits_for_calls_in_progress` 连续运行 30 次没有失败或卡住。
 - `evict_returns_free_pages_over_32_mib`：删掉 40 MiB 后，同一个事务的 `page_count` 减少 512 页加上它们的指针映射页（`auto_vacuum` 下每页约覆盖 1000 页），之后每个写事务再归还 512 页，直到空闲页不超过 32 MiB；关闭最后一个连接时检查点把文件截到 `page_count × 4096`。
 - `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果；`python3 scripts/check_architecture.py` 通过；没有新增依赖，Cargo.lock 不变。
-- `perf_smoke_cache`（运行三次；分库在临时目录，即本机的 ext4 虚拟磁盘；另在 tmpfs 上运行一次，排除磁盘）：
+- bench 的 `cache/*`（`just bench --measure cache/`，运行三次）：`cache/evict` 中位数 6.4–6.8 ms（p95 38–44 ms，65–71 个样本），`cache/memory` 3.86–3.99 MB（每次 5 个子进程，最大 4.20 MB），都在预算内；`just bench cache/` 的冒烟运行通过。其余各项：`get_4k` 3.8–3.9 µs、`get_many_50` 87–90 µs、`get_1m` 1.04–1.09 ms、`open_existing` 0.43–0.45 ms、`open_new` 3.5–4.2 ms、`put_4k` 59–72 µs、`batch_1000` 6.8–8.4 ms、`zstd_1m` 写 5.7–5.8 ms、读 0.86–1.08 ms，都在预算内。同一个子进程里计数分配器的存活字节只增加了 5.6 KB，确认 SQLite 的内存不经过它。
+- 实现时先用 `perf_smoke_cache` 测量（运行三次；分库在临时目录，即本机的 ext4 虚拟磁盘；另在 tmpfs 上运行一次，排除磁盘），之后按 bench 的迁移移进 `crates/bench`，参考项没有移：
 
   | 项 | 预算（M 系列 Mac） | 中位数 | p95 | 最慢 | tmpfs 中位数 |
   |---|---|---|---|---|---|
@@ -484,7 +485,8 @@ pub enum DisableReason {
 
   `evict` 的 120 多个样本里，前十几个只淘汰，之后每个还归还 2 MiB 空闲页。p95 超出 30 ms 的样本是提交时的自动检查点（每 1000 页一次，要 fsync），tmpfs 上 p95 是 9.3 ms 和 5.2 ms。`memory` 的增量里约 3 MiB 是页缓存（6 个连接，各自没有读满 1 MiB），其余是连接和预编译语句；每次读出的值在下一次读之前释放。第 1 步的读写各项重新测过，仍在预算内，数字与第 1 步相近。没有在 macOS 上测量。
 - 按第 1 步的设计（每个写事务最多淘汰 16 MiB、归还 8 MiB 空闲页）实测过一次小写入带 16 MiB 淘汰，超出 30 ms 的预算，所以改了淘汰的上限，数字与理由见「与设计的差异」第 2 步。
-- 没有验证的：`bench` 的 `cache/*` 基准没有写，`perf_smoke_cache` 仍在本 crate（bench 的 `cache/*` 基准随 [#83](https://github.com/SoloJiang/lectern-app/pull/83) 加入）；macOS 上没有运行。
+- `platform::process::phys_footprint` 的 macOS 实现由 `cargo clippy -p lectern-platform --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 交叉检查通过，没有运行；`process_*` 测试在 Linux 上只有返回 `Unsupported` 的一个。
+- 没有验证的：macOS 上没有运行，`cache/*` 由 macOS CI 判定。
 
 ## 与设计的差异
 
@@ -502,17 +504,17 @@ pub enum DisableReason {
 - `SQLITE_LOCKED` 按 `SQLITE_BUSY` 处理，`SQLITE_TOOBIG` 返回 `Dropped::TooLarge`；超过 `MAX_KEY` 的 `remove` 返回 `TooLarge`；空的批不打开分库，直接返回 `Committed`。
 - 解码失败的待删集合每个会话最多 4096 个 ID，不重复记录：同一个坏条目在下一次写事务之前被读多次，只记一次。
 - 读连接也设置 `synchronous` 和 `journal_size_limit`：设计列出的 PRAGMA 除 `query_only` 外每个连接都执行；`journal_mode` 只在建库时设置（持久）。
-- `bench` 的 `cache/*` 没有加入，理由与 git 第 1 步的 `git/open` 相同；由 `#[ignore]` 的 `perf_smoke_cache` 在 release 下测量，结果见「实际验证」。
+- `bench` 的 `cache/*` 没有加入，理由与 git 第 1 步的 `git/open` 相同；由 `#[ignore]` 的 `perf_smoke_cache` 在 release 下测量，结果见「实际验证」。bench 第 1 步把它的各项移进 `crates/bench` 的 `cache/*`，`perf_smoke_cache` 随之删除；`zstd_1m` 拆成 `cache/zstd_1m/put` 和 `cache/zstd_1m/get` 两条结果，`testing` 加了 bench 用的条目类型和数据生成函数（「性能」已改）。
 
 第 2 步：
 
 - 每个写事务的淘汰上限从固定的 16 MiB 改为「本事务写入的字节数，至少 1 MiB、至多 16 MiB」（「淘汰」一节已改）。按原设计实测（Linux 虚拟机，见「实际验证」），一次小写入带 16 MiB 淘汰：1 KiB 的条目中位数 164–176 ms，放到 tmpfs 上排除磁盘仍是 94 ms，其中逐行删除 1.6 万行就占 43 ms（每行要改表和两个索引，开销按行数而不是字节数增长）；64 KiB 的条目 63–73 ms（tmpfs 26 ms）。`git.diff` 的值只有几十到几百字节，16 MiB 是十万行以上，固定的字节上限在任何机器上都到不了 30 ms。新规则保留原设计的两个性质：超出预算时每个事务删掉的不少于它写入的，所以最多短暂超出预算 16 MiB、之后只减不增；淘汰的开销与这次写入本身同一量级。代价是降低预算之后（如磁盘写满时降到 75%）回到预算以内要更多次写入，每次小写入 1 MiB。
 - 每个写事务归还的空闲页从 2048 页（8 MiB）改为 512 页（2 MiB）。实测 `incremental_vacuum(2048)` 一次 11–118 ms，空闲页越多越慢：SQLite 每移动一页都要在空闲页列表里找一个更靠前的位置。512 页一次在 32 MiB 左右的空闲页下约 3 ms。
-- 性能一项 `cache/evict_16m`（带 16 MiB 淘汰的写事务 < 30 ms）改为 `cache/evict`（超出预算的分库里一次小写入 < 30 ms，淘汰 1 MiB，空闲页超过 32 MiB 时另外归还 2 MiB），预算不变。`perf_smoke_cache` 另外记下一批 16 MiB（1.5 万条 1 KiB）写入超出预算的分库、同时淘汰 16 MiB 的耗时（`evict_16m`，只作参考），与同样一批写入预算以内的分库（`batch_16m`）对比。
-- `open_new`、`open_existing` 改为每次用新的 `Cache` 测量，即每次运行第一次打开（含目录清理）：第 1 步在同一个 `Cache` 里依次打开 50 个分库，第 2 步加上连接上限之后，从第 3 个起每次打开都要换出一个分库。换出的耗时另记为 `swap_out`（只作参考）：主要是关闭最后一个连接时的检查点和 fsync，被换出的分库刚写过 1 MiB 时，磁盘上中位数约 15 ms，tmpfs 上约 2 ms。它发生在打开第 3 个项目的调用里，计入「打开项目 < 100 ms」，不计入「新建分库 < 10 ms」。
+- 性能一项 `cache/evict_16m`（带 16 MiB 淘汰的写事务 < 30 ms）改为 `cache/evict`（超出预算的分库里一次小写入 < 30 ms，淘汰 1 MiB，空闲页超过 32 MiB 时另外归还 2 MiB），预算不变。实现时的 `perf_smoke_cache` 另外记下一批 16 MiB（1.5 万条 1 KiB）写入超出预算的分库、同时淘汰 16 MiB 的耗时（`evict_16m`，只作参考），与同样一批写入预算以内的分库（`batch_16m`）对比；这两项和 `swap_out` 不在预算表里，没有移进 bench。
+- 实现时 `perf_smoke_cache` 的 `open_new`、`open_existing` 改为每次用新的 `Cache` 测量（bench 的 `cache/open_*` 本来就是这样），即每次运行第一次打开（含目录清理）：第 1 步在同一个 `Cache` 里依次打开 50 个分库，第 2 步加上连接上限之后，从第 3 个起每次打开都要换出一个分库。换出的耗时另记为 `swap_out`（只作参考）：主要是关闭最后一个连接时的检查点和 fsync，被换出的分库刚写过 1 MiB 时，磁盘上中位数约 15 ms，tmpfs 上约 2 ms。它发生在打开第 3 个项目的调用里，计入「打开项目 < 100 ms」，不计入「新建分库 < 10 ms」。
 - 访问时间写回的值是写回的时刻，不是读的时刻：待写集合只存 `id`（4096 个 32 KiB），读与写回之间没有别的写入，淘汰顺序不变。设计没有写用哪个时刻。
 - 最后一个 `Cache` drop 时不写回访问时间，只有 `Cache::close` 和换出时写回：drop 可能发生在任何线程上，设计的「生命周期」第 4 步也只说 `close` 多写回访问时间。
 - 换出的实现：正在打开的项目分库在打开文件之前先占一个名额（按会话编号记录），名额满时取最近一次调用最早的分库，关闭它之后再打开自己的文件；打开失败时让出名额，会话关闭（换出、损坏重建、停用、`close`）时自动让出。`Budgets::open_projects` 为 0 时按 1 处理。设计只写了「关闭最久没用过的」，没有写并发打开时怎样不超过上限。
 - 目录清理的细节：一个项目分库的修改时间取三个文件里最新的（WAL 模式下写入先到 `-wal`）；总量计入应用级分库的文件，但不删除它；`repo/`、`folder/` 下不是分库的文件不动；删除失败只写一行 stderr。清理在第一次打开的调用里、打开文件之前做，同时打开的其他分库等它完成，所以不会删掉正在打开的文件。
 - 测试的 `ManualClock` 改为从真实的当前时刻开始（第 1 步是固定的 2027 年 1 月）：目录清理拿文件的修改时间与这个时钟比较，固定的起点会让测试里刚建的文件看起来已有 90 天。
-- `cache/memory` 在子进程里测量（同一个测试二进制，入口 `perf_memory_child`）：在已经写过数据的进程里，读取用到的内存会复用写入时释放的堆，增量偏小（同一进程里测得 0.1 MiB）。
+- `cache/memory` 在子进程里测常驻增量（bench 的 `memory` 目标再启动自己，见 [bench 设计「进程内基准」](bench.md#进程内基准)），不用 `memory` 目标的计数分配器：SQLite 的页缓存用 C 的分配器，计数分配器看不到（同一个子进程里只增加 5.6 KB，常驻增量约 3.9 MB）；用子进程而不是本进程的常驻大小，是因为在写过夹具的进程里，读取会复用写入时释放的堆，增量偏小（同一进程里测得 0.1 MiB）。macOS 上的 `phys_footprint` 经 `platform` 新增的 `process::phys_footprint`（架构规则 6，[platform 设计「进程」](platform.md#进程)），Linux 上直接读 `/proc/self/status`。

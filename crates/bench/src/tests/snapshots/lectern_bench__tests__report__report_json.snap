@@ -1,0 +1,237 @@
+---
+source: crates/bench/src/tests/report.rs
+expression: json
+---
+{
+  "commit": "0123abc",
+  "errors": [
+    "基准 fake/extra 不对应本目标的任何预算"
+  ],
+  "gated": true,
+  "host": {
+    "chip": null,
+    "cpus": 8,
+    "model": null,
+    "os_version": null
+  },
+  "mode": "measure",
+  "results": [
+    {
+      "attempts": [
+        {
+          "mad": 0.000049999999999999914,
+          "max": 0.0013,
+          "median": 0.00125,
+          "p95": 0.0013,
+          "samples": 3,
+          "unit": "s"
+        },
+        {
+          "mad": 0.00002999999999999997,
+          "max": 0.00098,
+          "median": 0.00095,
+          "p95": 0.00098,
+          "samples": 3,
+          "unit": "s"
+        }
+      ],
+      "budget": "median < 1 ms",
+      "id": "fake/time",
+      "measured": "median 1.25 ms; median 950 µs",
+      "noisy": false,
+      "source": "docs/design/bench.md#测试",
+      "status": "ok"
+    },
+    {
+      "attempts": [
+        {
+          "bytes": 52428800,
+          "mad": 0.0050000000000000044,
+          "max": 0.31,
+          "median": 0.305,
+          "p95": 0.31,
+          "samples": 3,
+          "throughput": 171897704.9180328,
+          "unit": "s"
+        }
+      ],
+      "budget": "throughput ≥ 200 MB/s (median)",
+      "id": "fake/throughput",
+      "measured": "164 MB/s (median)",
+      "noisy": false,
+      "source": "docs/design/bench.md#测试",
+      "status": "over"
+    },
+    {
+      "attempts": [
+        {
+          "baseline": {
+            "mad": 0.0,
+            "max": 1e-6,
+            "median": 1e-6,
+            "p95": 1e-6,
+            "samples": 3,
+            "unit": "s"
+          },
+          "ratio": 2.0,
+          "subject": {
+            "mad": 0.0,
+            "max": 3e-6,
+            "median": 2e-6,
+            "p95": 3e-6,
+            "samples": 3,
+            "unit": "s"
+          }
+        }
+      ],
+      "budget": "ratio ≤ 3 (median), median < 10 µs",
+      "id": "fake/ratio",
+      "measured": "ratio 2 (median), median 2 µs",
+      "noisy": false,
+      "source": "docs/design/bench.md#测试",
+      "status": "ok"
+    },
+    {
+      "attempts": [
+        {
+          "mad": 1048576.0,
+          "max": 44040192.0,
+          "median": 42991616.0,
+          "p95": 44040192.0,
+          "samples": 3,
+          "unit": "B"
+        }
+      ],
+      "budget": "median < 60 MB",
+      "id": "fake/bytes",
+      "measured": "median 41 MB",
+      "noisy": false,
+      "source": "docs/design/bench.md#测试",
+      "status": "ok"
+    },
+    {
+      "attempts": [
+        {
+          "intervals": {
+            "mad": 0.0000499999999999997,
+            "max": 0.0167,
+            "median": 0.016649999999999998,
+            "p95": 0.0167,
+            "samples": 2,
+            "unit": "s"
+          },
+          "refresh": 0.016666667,
+          "work": {
+            "mad": 0.0004999999999999996,
+            "max": 0.005,
+            "median": 0.0045,
+            "p95": 0.005,
+            "samples": 3,
+            "unit": "s"
+          }
+        }
+      ],
+      "budget": "max ≤ 8.3 ms, interval ≤ 1.5 refresh periods (max)",
+      "id": "fake/frames",
+      "measured": "max 5 ms, interval 1 refresh periods (max)",
+      "noisy": false,
+      "source": "docs/design/bench.md#测试",
+      "status": "ok"
+    },
+    {
+      "attempts": [
+        {
+          "mad": 9.99999999999999e-7,
+          "max": 0.000012,
+          "median": 0.000011,
+          "p95": 0.000012,
+          "samples": 3,
+          "unit": "s"
+        }
+      ],
+      "budget": "record",
+      "id": "fake/record",
+      "measured": "median 11 µs",
+      "noisy": false,
+      "source": "docs/design/bench.md#测试",
+      "status": "record"
+    },
+    {
+      "attempts": [
+        {
+          "mad": 0.00019999999999999998,
+          "max": 0.0006,
+          "median": 0.0003,
+          "p95": 0.0006,
+          "samples": 5,
+          "unit": "s"
+        }
+      ],
+      "budget": "median < 1 ms",
+      "id": "fake/noisy",
+      "measured": "median 300 µs",
+      "noisy": true,
+      "source": "docs/design/bench.md#测试",
+      "status": "ok"
+    },
+    {
+      "attempts": [],
+      "budget": "median < 1 ms",
+      "id": "fake/error",
+      "measured": "",
+      "noisy": false,
+      "reason": "panic：boom",
+      "source": "docs/design/bench.md#测试",
+      "status": "error"
+    },
+    {
+      "attempts": [],
+      "budget": "median < 1 ms",
+      "id": "fake/skipped",
+      "measured": "",
+      "noisy": false,
+      "reason": "只在 macOS 运行",
+      "source": "docs/design/bench.md#测试",
+      "status": "skipped"
+    },
+    {
+      "attempts": [],
+      "budget": "median < 1 ms",
+      "id": "fake/filtered",
+      "measured": "",
+      "noisy": false,
+      "source": "docs/design/bench.md#测试",
+      "status": "filtered"
+    },
+    {
+      "attempts": [],
+      "budget": "median < 1 ms",
+      "id": "fake/planned",
+      "measured": "",
+      "noisy": false,
+      "reason": "由 fake 第 2 步 加入",
+      "source": "docs/design/bench.md#测试",
+      "status": "planned"
+    },
+    {
+      "attempts": [
+        {
+          "mad": 0.0,
+          "max": 0.0015,
+          "median": 0.0015,
+          "p95": 0.0015,
+          "samples": 1,
+          "unit": "s"
+        }
+      ],
+      "budget": "median < 1 ms",
+      "id": "fake/smoke",
+      "measured": "median 1.5 ms",
+      "noisy": false,
+      "source": "docs/design/bench.md#测试",
+      "status": "smoke"
+    }
+  ],
+  "target": "time",
+  "version": 1
+}

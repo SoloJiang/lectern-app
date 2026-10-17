@@ -1,5 +1,5 @@
-//! Test support (`test-support` feature): a clock advanced by hand and fault
-//! injection.
+//! Test support (`test-support` feature): a clock advanced by hand, fault
+//! injection, and the entry types and generated values of bench's `cache/*`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::clock::Clock;
 use crate::util::lock;
-use crate::{Cache, Config, Partition};
+use crate::{Cache, Compression, Config, Entry, Namespace, Partition};
 
 /// A clock that moves only when the test advances it. Clones share the time.
 #[derive(Clone)]
@@ -74,4 +74,67 @@ impl Partition {
     pub fn set_write_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
         lock(&self.slot.hooks).in_write = hook;
     }
+}
+
+/// Bytes stored as written, in the `test.raw` namespace: for measuring the
+/// store itself (bench's `cache/*`, docs/design/bench.md「迁移」).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Raw(pub Vec<u8>);
+
+impl Entry for Raw {
+    const NAMESPACE: Namespace = Namespace {
+        name: "test.raw",
+        version: 1,
+        compression: Compression::None,
+    };
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.0);
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        Some(Raw(bytes.to_vec()))
+    }
+}
+
+/// Bytes in the `test.zstd` namespace, which compresses values of 4 KiB or
+/// more (bench's `cache/zstd_1m`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Zstd(pub Vec<u8>);
+
+impl Entry for Zstd {
+    const NAMESPACE: Namespace = Namespace {
+        name: "test.zstd",
+        version: 1,
+        compression: Compression::Zstd,
+    };
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.0);
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        Some(Zstd(bytes.to_vec()))
+    }
+}
+
+/// `len` bytes from a xorshift generator seeded with `seed`: deterministic
+/// and incompressible.
+pub fn noise(seed: u64, len: usize) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x as u8
+        })
+        .collect()
+}
+
+/// `len` bytes of one JSON line repeated, like a session file: compresses
+/// well.
+pub fn text(len: usize) -> Vec<u8> {
+    const LINE: &[u8] = b"{\"type\":\"assistant\",\"text\":\"lorem ipsum\"}\n";
+    (0..len).map(|i| LINE[i % LINE.len()]).collect()
 }
