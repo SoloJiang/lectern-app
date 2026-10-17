@@ -95,7 +95,7 @@ pub trait SessionSource: Send + Sync {
     fn read(&self, session: &SessionKey, from: &Cursor, max_bytes: u64) -> Result<Batch, SessionError>;
 
     /// 轮次索引。阻塞，只在 executor 上调用：内存命中时只复制 `Arc`；否则读 `cache` 里的索引、
-    /// 再解析索引之后追加的部分；都没有时解析整个文件。会话还在写入时，返回截至当前末尾的索引。
+    /// 再解析索引之后追加的部分；都没有时解析整个文件（大会话超出打开预算，见「性能」）。会话还在写入时，返回截至当前末尾的索引。
     fn turns(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError>;
 
     /// 读一段正文（prompt、agent 说明、工具输入与结果、文件改动）。阻塞，只在 executor 上调用；
@@ -236,6 +236,8 @@ pub struct SessionSummary {
     pub tail_pending: bool,
     /// Codex `archived_sessions/` 下的会话。
     pub archived: bool,
+    /// 继承前缀的边界无法判断（没有 `subagent_history_start_ordinal` 的 Codex 分叉，来源会话不在本机），全部记录按自己的计。
+    pub inheritance_unknown: bool,
     pub format: Format,
 }
 
@@ -298,8 +300,10 @@ impl Cursor {
 }
 
 pub struct Batch {
-    /// 为 true 时记录从文件开头重新给出。消费方先删除之前从这个 `SessionKey` 导入的全部数据（用量、工具事件、限额等），
-    /// 再写入这一批，删除、写入和游标提交在同一个事务里；所以截断、替换或适配器不再给出的旧记录不会留下。
+    /// 为 true 时记录从文件开头重新给出，回放可能跨多批。消费方把回放的记录写进这个 `SessionKey` 的新一代数据，
+    /// 旧数据在回放期间照常可见；每批的写入和游标提交在同一个事务里，重启后从游标继续回放。读到 `at_end` 为 true 的一批时，
+    /// 在同一个事务里删除旧一代（用量、工具事件、限额等）并把新一代设为当前，所以截断、替换或适配器不再给出的旧记录不会留下，
+    /// 回放中途也不会只剩一部分历史。回放期间再次 `reset` 时丢弃未完成的新一代，重新开始。
     /// 同一条用量也由另一个会话交来时（按 `UsageKey` 去重），只去掉这个会话的那份来源，其他会话的仍然计数，细节由 `usage` 的设计规定。
     pub reset: bool,
     pub records: Vec<Positioned<Record>>,
@@ -568,7 +572,7 @@ pub enum EditOp {
 - 轮次：`event_msg` 的 `task_started`（别名 `turn_started`）到同一 `turn_id` 的 `task_complete`（`turn_complete`）或 `turn_aborted`。prompt 和 agent 说明：`legacy` 模式取 `event_msg` 的 `user_message` / `agent_message`；`paginated` 模式取 `item_completed` 里的 `UserMessage` / `AgentMessage`。`response_item` 里 `role: "user"` 的消息含环境说明和指令文件，不作为 prompt。
 - 工具：两种模式都从 `response_item` 取 `function_call{name, arguments, call_id}`、`custom_tool_call{name, input, call_id}`、`local_shell_call`，结果取 `function_call_output` / `custom_tool_call_output`。`exec_command_begin/end`、`patch_apply_begin` 不写入文件；改动另取 `legacy` 的 `patch_apply_end.changes` 或 `paginated` 的 `item_completed` / `FileChange`。
 - 用量：顶层 `token_usage_record{thread_id, turn_id, response_id, usage}`（每个响应一条），以及 `event_msg` / `token_count` 的 `info.{last_token_usage, total_token_usage}`；两路只用一路，规则见「记录」里的「只用一路用量」。模型取最近一条 `turn_context`；额度取 `token_count` 的 `rate_limits.{primary, secondary}`。
-- 继承前缀：子 agent 与分叉会话先重放来源的历史。有 `subagent_history_start_ordinal` 时，`ordinal` 小于它的行是继承前缀；否则到第一条自己的 `task_started`（或 `trigger_turn: true` 的 `inter_agent_communication_metadata`）为止（ADR 0014）。
+- 继承前缀：子 agent 与分叉会话先重放来源的历史。有 `subagent_history_start_ordinal` 时，`ordinal` 小于它的行是继承前缀。没有这个字段时（`legacy` 分叉），复制进来的前缀里本身就有来源的 `task_started`，所以按轮次 ID 判断：读来源会话（`forked_from_id` / `parent_thread_id`）的轮次索引，`turn_id` 出现在来源里的轮次是继承的，第一条 `turn_id` 不在来源里的 `task_started`（或 `trigger_turn: true` 的 `inter_agent_communication_metadata`）开始自己的部分（ADR 0014）。找不到来源会话时（已删除或不在本机）无法判断边界：全部记录不标 `inherited`，`SessionSummary::inheritance_unknown` 为 true，`usage` 据此提示这个会话的用量可能含继承部分。
 
 兼容策略：适配器按记录形状判断，不按版本号分支；字段缺失时按上表的旧写法再试一次（如 `resets_in_seconds`、没有 `origin`），仍不行就跳过这一行并计数。上游格式变化时，加 fixtures、改适配器、在本节记下来源提交或版本。
 
@@ -605,7 +609,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。
 5. 监听：`fs_watch` 递归监听每个会话目录，事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件从列表移除。处理完再按第 4 步发布。
 6. 消费：`usage` 按自己的游标 `read`；`review` 调 `turns` / `load`。
-7. 轮次索引：内存里按字节 LRU 保留（上限 8 MB）；索引更新后写入 `cache` 的应用级分库，键见 ADR 0026。`turns` 命中缓存时只解析缓存之后追加的部分。
+7. 轮次索引：`read` 解析记录时顺带更新这个会话的轮次索引（同一遍解析，不另读文件）：`from` 等于已有索引的 `cursor` 时在它之后追加，`reset` 时从头重建，其余情况不动索引。所以 `usage` 补读完历史之后，每个会话都已有缓存的索引。内存里按字节 LRU 保留（上限 8 MB）；索引更新后写入 `cache` 的应用级分库，键见 ADR 0026。`turns` 命中缓存时只解析缓存之后追加的部分。
 
 线程：
 
@@ -620,6 +624,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 空闲内存（ADR 0017）：`SessionList` 每个会话约 1 KB（1000 个会话约 1 MB）；轮次索引只为打开过的会话保留，LRU 上限 8 MB；读取用 64 KB 缓冲逐行处理，单行上限 16 MB，任何时候只持有一行；超长行边读边丢弃，不缓存。
 - 磁盘：压缩会话的解压副本合计上限 1 GB，字节 LRU（见「压缩会话的随机读取」）。
 - 打开一个会话的 Diff < 50 ms（[性能预算](tech-research.md#性能预算)）：本 crate 的份额是 `turns` 命中缓存加解析追加部分 < 10 ms，`load` 一次 < 1 ms（压缩会话从解压副本读，同样适用；第一次打开压缩会话除外，见上节）。
+- 没有缓存索引时打开（首次启动、`usage` 的补读还没读到这个会话，或缓存被淘汰）：`turns` 解析整个文件，56 MB 的会话约 0.3 s，超出预算；界面与第一次打开压缩会话一样显示骨架或进度。`usage` 补读完成后，只有缓存被淘汰的会话会再遇到这种情况。这是已知限制（ADR 0026）。
 - 预期耗时（M 系列，单线程，release）：发现 1000 个会话文件 < 500 ms；整文件解析 ≥ 200 MB/s；追加 4 KB 后 `read` < 1 ms；`.zst` 解压后解析 ≥ 100 MB/s。实现时用 bench 实测后校准，写进 bench 的预算表。
 - `bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增：`agents/discover_1000`（合成 1000 个会话目录）、`agents/parse_throughput`（fixtures 拼成 50 MB）、`agents/append_4k`、`agents/turns_cached_50mb`、`agents/zst_throughput`、`agents/zst_load_decoded`（副本建好后 `load` 一次）。
 
@@ -645,7 +650,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 读取进度：`max_bytes` 为 1 时每次调用仍消费一行；下一行比 `max_bytes` 大、但不到 16 MB 时整行返回；超过 16 MB 的行被跳过、计数、游标越过它；任何返回 `at_end == false` 的调用，新游标都大于旧游标（`progress_*`）。
 - 压缩：同一份 Codex fixture 的 `.jsonl` 与 `.jsonl.zst` 记录相同；压缩前取的游标在压缩后继续有效；第一次 `read` / `turns` / `load` 建好解压副本，之后分批 `read` 和 `load` 都不再解码（用计数的解码器检查整个归档只解压一次）；压缩文件身份变化后副本重建；副本合计超过上限时按 LRU 删除、不删正在读取的副本；副本目录不可写时 `load` 结果不变（`zst_*`、`decoded_*`）。
 - 路由：两个来源报告相同的会话 ID 时得到两个不同的 `SessionKey`；`SessionsChanged::source` 与键的 `source` 一致（`source_*`）。
-- 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次；Claude Code 子 agent 文件里带父会话 `sessionId` 和自己 `agentId` 的记录不标 `inherited`，它的轮次和用量完整交出（`inherited_*`）。
+- 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次；没有 `subagent_history_start_ordinal` 的 `legacy` 分叉按来源的轮次 ID 判断边界，找不到来源时 `inheritance_unknown` 为 true；Claude Code 子 agent 文件里带父会话 `sessionId` 和自己 `agentId` 的记录不标 `inherited`，它的轮次和用量完整交出（`inherited_*`）。
 - Codex 用量只取一路：第一条 `token_usage_record` 之后的 `CodexTokenCount` 标 `superseded`，之前的不标；没有 `token_usage_record` 的线程都不标；旧版本开始、升级后续接的 fixture 里，切换前后的用量合计等于逐响应的真实合计（`codex_usage_stream_*`）。
 - Claude Code 同一响应的多行 usage 逐步变完整时键相同，带 advisor 的行与不带的行键也相同（`usage_keys_*`）。
 - 恢复命令：`resume` 只给出 `ResumeCommand`；非 UUID 的会话 ID 被 `terminal` 拒绝的规则在 `terminal` 测试，本 crate 测试子 agent 和认不出格式的会话返回 None（`resume_*`）。
