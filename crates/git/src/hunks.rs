@@ -38,14 +38,18 @@ impl FileDiff {
     }
 }
 
-/// A computed diff and the bytes of its unified patch body (hunk headers and
-/// lines with three lines of context, no file header): what the per-file
-/// and total patch limits count. Depends only on the two contents, so it is
-/// cached with the hunks.
+/// A computed diff, the bytes of its unified patch body (hunk headers and
+/// lines with three lines of context, no file header), which the per-file
+/// and total patch limits count, and the sizes of the two contents, which
+/// the line-diff limit and `Detail::Binary` need. All of it depends only on
+/// the two contents, so it is cached with the hunks and a hit reads neither
+/// a blob nor its header.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Computed {
     pub diff: FileDiff,
     pub body_bytes: u64,
+    /// Bytes of the old and the new content.
+    pub sizes: [u64; 2],
 }
 
 /// Lines of context in the patch the limits measure (`git diff`'s default).
@@ -76,6 +80,7 @@ pub(crate) fn line_diff(old: &[u8], new: &[u8]) -> Computed {
             removed: diff.count_removals(),
         },
         body_bytes,
+        sizes: [old.len() as u64, new.len() as u64],
     }
 }
 
@@ -102,6 +107,7 @@ pub(crate) fn whole(old: &[u8], new: &[u8]) -> Computed {
             removed,
         },
         body_bytes,
+        sizes: [old.len() as u64, new.len() as u64],
     }
 }
 
@@ -161,7 +167,7 @@ fn patch_body_bytes(old: &[&[u8]], new: &[&[u8]], hunks: &[Hunk]) -> u64 {
 }
 
 /// Bumped when the cached data or its computation changes.
-pub(crate) const CACHE_FORMAT: u16 = 1;
+pub(crate) const CACHE_FORMAT: u16 = 2;
 /// The in-process LRU's budget (docs/design/git.md「性能」).
 pub(crate) const CACHE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -229,9 +235,9 @@ impl HunkCache {
     }
 
     /// What an entry costs against the budget: its hunks plus a fixed
-    /// overhead for the key, the slot and the maps.
+    /// overhead for the key, the slot (the two sizes included) and the maps.
     fn cost(value: &Computed) -> usize {
-        value.diff.hunks.len() * size_of::<Hunk>() + 192
+        value.diff.hunks.len() * size_of::<Hunk>() + 208
     }
 
     pub(crate) fn get(&mut self, key: &HunkKey) -> Option<Computed> {
@@ -348,6 +354,7 @@ mod tests {
                 removed: hunks as u32,
             },
             body_bytes: 0,
+            sizes: [0, 0],
         }
     }
 

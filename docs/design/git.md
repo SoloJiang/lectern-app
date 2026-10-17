@@ -691,7 +691,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 工作区文件的 OID | 路径 + stat | `Worktree` 内的内存缓存，不持久化 |
 | 改动集、展示行、词级差异 | 不缓存 | 由缓存的 hunk 重算，耗时与可见行数成正比 |
 
-hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库取出。两侧都是 `Blob` 且是文本时才进缓存。上下文行数不在键里，因为展示行在 hunk 之上计算。
+hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库取出。条目里另存 patch 正文的字节数和两侧内容的字节数（都只由两个 OID 决定），命中时按这次的上限判断 `TooLarge` 和 `Truncated`，只检查两侧对象是否存在（缺失时仍是 `Unavailable::Missing`），不读也不解压对象头。两侧都是 `Blob` 且是文本时才进缓存；有 `binary` / `-diff` 属性的文件不查缓存。上下文行数不在键里，因为展示行在 hunk 之上计算。
 
 ## 数据流与线程
 
@@ -772,7 +772,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
 - 不执行外部程序：夹具仓库配置 `diff.external`、`diff.<名>.textconv`、`filter.<名>.clean` / `process`、`core.fsmonitor`，指向会写标记文件的脚本，PATH 最前面放一个记录调用的假 `git`（AGENTS.md「工作方式」）；跑完全部工作区和树 diff 场景后，标记文件不存在、假 `git` 没有被调用。
 - 展示行与词级差异：配对、折叠、hunk 相邻时合并上下文，用 insta 快照。
-- 缓存：同一对 OID 第二次计算命中；键里的 `HashKind` 不同时不命中。
+- 缓存：同一对 OID 第二次计算命中；键里的 `HashKind` 不同时不命中；命中时按这次的 `diff_bytes` 判断 `TooLarge`，另一个仓库里缺失的一侧仍是 `Missing`。
 - 取消：`cancel` 置位后返回 `Cancelled`，没有部分结果。
 
 改动集、hunk 和展示行的结构化输出都用 insta 快照验收。
@@ -858,6 +858,12 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
   - 同一次运行里第 2 步的 `perf_smoke_git_diff_50` 未命中中位数 7.4 ms、命中 1.5 ms，比第 2 步记录的慢（机器负载不同），只作参考。没有在 macOS 上测量。
 - 没有验证的：`bench` 的 git 基准没有写（见「与设计的差异」）；超过 64 MB 的文件用调小的 `Limits::read_bytes` 测 `Unhashed`，没有真的写 64 MB；macOS 上没有运行（`O_NOFOLLOW_ANY` 由 `platform` 的测试覆盖）。
 
+命中缓存时不读对象头，同一台机器：
+
+- 起因：macOS CI（3 核 M1 虚拟机）上 bench 的 `git/diff_50_warm` 中位数 2.61–2.78 ms，超过 < 2 ms 的预算。在 Linux 上分段计时（300 次的中位数，整个 `diff_trees` 1.58 ms）：打开句柄 87 µs、剥离两个提交 36 µs、遍历树 69 µs、建属性栈 6 µs、查属性 29 µs、查 hunk 缓存 9 µs、释放 8 µs，100 个 blob 的对象头 1.16 ms（占 73%；松散对象每个都要打开文件、读取并解压开头）。
+- `perf_smoke_git_diff_50`（同上）：命中中位数从 1.45–1.60 ms 降到 0.34–0.35 ms（−77%），p95 从 1.78–1.85 ms 降到 0.45–0.48 ms；未命中中位数改动前 5.2–5.5 ms、改动后 5.1–5.4 ms，没有变化。bench 分支（#83）的 `git/diff_50_warm` 同一台机器上 1.51–1.52 ms → 0.34–0.36 ms，`git/diff_50_cold` 5.03–5.21 ms → 5.02–5.13 ms。没有在 macOS 上测量。
+- `just test -p lectern-git` 全部通过，insta 快照和 `numstat_matches_git` 没有变化；新增 `hunk_cache_hit_checks_limits_attributes_and_missing_objects`：命中时按这次更小的 `diff_bytes` 得到 `TooLarge`，`-diff` 的文件不查缓存且 `Binary` 带两侧大小，另一个缺少新一侧 blob 的仓库里命中后仍是 `NoDiff` 加 `Unavailable::Missing`。
+
 ## 与设计的差异
 
 第 1 步：
@@ -891,14 +897,14 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 树里引用的 blob 不在对象库里（部分克隆）时，这一侧的 `Content` 改为 `Unavailable(Missing)`、`Detail` 为 `NoDiff`；已经是 `Listed` 的文件不查对象，保持 `Blob`。
 - patch 字节数的口径：单文件上限按 patch 正文（`@@` 行、3 行上下文、增删行、「No newline」标记）计算，`@@` 行总是按 `-a,b +c,d` 的写法计长度（git 在行数为 1 时省略 `,1`，差几个字节）；整体上限另加一个文件头的估算（两个路径各两次加 100 字节）。`Truncated` 只计文件头，`Binary`、`ModeOnly`、`TooLarge`、`NoDiff` 不计字节，但都计入文件数。达到整体上限的那个文件照常计算，之后的文件为 `Listed`。
 - `Limits::entries` 在 `diff_trees` 里也限制改动路径的数量（超过时 `GitError::TooManyEntries`）：即使之后的文件都是 `Listed`，`ChangeSet` 仍保存每个改动的两侧 OID，路径数需要一个上限。
-- hunk 缓存是进程内唯一的一个（16 MiB），不属于某个 `Repo`：键是内容的 OID，内容相同的文件在不同 worktree 和不同仓库之间都命中，内存预算也只有一份。键里的 `HashKind` 由 `Oid` 自带。值除了 hunk 和增删行数，还有 patch 正文的字节数，所以命中时不读 blob 内容，只读对象头（判断 `TooLarge` 和对象缺失）。只缓存两侧都存在、内容都是文本的 `Modified` / `Renamed`；新增、删除和 `TypeChanged` 不查缓存（按整体增删计算，本来就不需要行 diff）。依赖表里的 `lectern-cache` 没有加入：它还没有实现，设计本来就写了「`cache` 实现之前只用进程内的 LRU」。
+- hunk 缓存是进程内唯一的一个（16 MiB），不属于某个 `Repo`：键是内容的 OID，内容相同的文件在不同 worktree 和不同仓库之间都命中，内存预算也只有一份。键里的 `HashKind` 由 `Oid` 自带。值除了 hunk 和增删行数，还有 patch 正文的字节数，所以命中时不读 blob 内容；两侧内容的字节数后来也放进了值里，命中时不再读对象头，只检查对象是否存在（见下文「命中缓存时不读对象头」）。只缓存两侧都存在、内容都是文本的 `Modified` / `Renamed`；新增、删除和 `TypeChanged` 不查缓存（按整体增删计算，本来就不需要行 diff）。依赖表里的 `lectern-cache` 没有加入：它还没有实现，设计本来就写了「`cache` 实现之前只用进程内的 LRU」。
 - 保留内容上限（`NotRetained`）在树之间的比较里不会出现：两侧都按 OID 在对象库里，改动集不保留字节。逻辑在组装这一步实现，供第 3 步的工作区内容使用：按路径顺序保留，第一个放不下的文件之后都不再保留（「之后的文件」）；与旧一侧 OID 相同的内容不需要保留（对象库里有）；`Listed` 的文件也参与。测试用内存里的新一侧直接驱动组装这一步。
 - 展示行：增删配对按同一个 hunk 里的顺序一一配对（第 i 个删除行配第 i 个新增行）；两个 hunk 之间不超过 `2 × context` 行时合并上下文（与 git 合并 hunk 的规则相同），所以超过时可能折叠只有一行的区间。一侧不是 `SideText::Text`（如 `NotRetained`）时，它的行数按 hunk 和另一侧推出。没有 hunk 的 diff 是一个覆盖全文的 `Folded`。
 - 词级差异：词是 ASCII 字母、数字和 `_` 的连续串，空白的连续串，其余每个字符单独一个（中文按字），按 ADR 0024 用 imara-diff 的 Histogram 比较。单行 1000 字节的上限是公开常量 `INLINE_MAX_LINE_BYTES`，不在 `Limits` 里：`inline_changes` 的签名没有 `Limits` 参数。
 - `ChangeSet::texts` 的 `file` 越界时返回 `GitError::Io(InvalidInput)`，不 panic。基准一侧和对象库里的新一侧都按 `Limits::diff_bytes` 读，超过时是 `SideText::TooLarge`。
 - 「第 2 步补全的类型」一节列出的类型设计没有写定义：`Limits`、`Target`、`Totals`、`FileTexts`、`SideText`、`Text`、`InlineChanges`；另外新增 `Oid::empty_tree`（根提交的基准，gix 不需要这个对象）、`Content::oid` 和 `testing::TestRepo::import_fixture`。
 - 归档夹具是目录格式，不是 tar：工作区没有解包 tar 的依赖，只为测试引入一个不值得；目录里的文件也能在 PR 里直接审阅。格式和生成方法见 [夹具说明](../../crates/git/tests/fixtures/README.md)，「测试」一节已改。git 的输出用 `-z` 保存（重命名的路径不经 `{a => b}` 压缩），并另存 `--raw --no-abbrev`，把模式、OID、状态和相似度也拿来对照。`numstat_matches_git` 把子模块按 git 的方式计数（每一侧一行「Subproject commit」）。生成脚本不改 git 的配置环境变量，而是用 `-c` 显式给出影响输出的设置。
-- `bench` 的 `git_diff_50_cold` / `git_diff_50_warm` 没有加入，理由与第 1 步的 `git_open` 相同；由 `#[ignore]` 的 `perf_smoke_git_diff_50` 在 release 下测量，结果见「实际验证」。它测的是整个 `diff_trees`，比只算 hunk 的基准多出读树、属性和对象头的时间。
+- `bench` 的 `git_diff_50_cold` / `git_diff_50_warm` 没有加入，理由与第 1 步的 `git_open` 相同；由 `#[ignore]` 的 `perf_smoke_git_diff_50` 在 release 下测量，结果见「实际验证」。它测的是整个 `diff_trees`，比只算 hunk 的基准多出读树、属性和对象头（命中时只检查对象是否存在）的时间。
 
 第 3 步：
 
@@ -917,3 +923,10 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 新增 `ChangeSet::fingerprint` 和 `Fingerprint`：crates/git/AGENTS.md 规定了工作区指纹的组成，改动集里已经有它需要的全部身份（截断只改 `Detail`），在这里算最直接；Analyze 怎样使用它随 #66 设计。对象库里缺失的一侧（`Unavailable::Missing`）在组装时丢掉了 OID，指纹里只记「缺失」。
 - `testing` 增加 `IndexStat`、`IndexEntry::stat`、`IndexEntry::intent_to_add` 和 `TestRepo::add`、`set_mtime`、`backdate`、`remove`、`import_worktree_fixture`（见「第 3 步补全的类型」）。工作区夹具（`tests/fixtures/worktree_conversions`）格式见 [夹具说明](../../crates/git/tests/fixtures/README.md)；它没有 `trees` 文件，`numstat_matches_git` 改为只取有 `trees` 的目录。FIFO 测试只在 Linux 上运行（用 `rustix` 建 FIFO），socket 的测试在所有平台上运行。`no_external_programs` 在 nextest 的一测试一进程模式下才把记录调用的假 `git`、`sh` 放到 PATH 最前面：`cargo test` 在一个进程里多线程运行测试，那时改环境变量不安全；仓库配置里的各种外部程序在两种方式下都指向写标记文件的脚本。
 - `ConfigScope::RepositoryOnly` 只在 `test-support` 下构造，不开这个 feature 时按 `expect(dead_code)` 处理，`cargo clippy -p lectern-git --all-targets -- -D warnings` 不再失败。
+
+命中缓存时不读对象头：
+
+- hunk 缓存的值增加两侧内容的字节数（`Computed::sizes`），缓存格式版本改为 2，每个条目的固定开销按 208 字节计（原来 192），16 MiB 的预算不变。blob 的大小只由它的 OID 决定，所以这仍是以 blob OID 为键的派生数据（架构规则 5）。命中时 `TooLarge` 用缓存的大小按这次的 `Limits::diff_bytes` 判断，对象是否缺失用 gix 的 `has_object` 判断（松散对象查文件是否存在，pack 查索引，不解压），结果与读对象头相同；未命中时照旧读对象头。原因见「实际验证」：命中时 73% 的时间花在解压 100 个对象头上。
+- 属性在查缓存之前取：有 `binary` / `-diff` 属性的文件不查缓存（原来查之前就返回 `Binary`，查缓存的次数不变），它的 `Binary` 大小照旧来自对象头。判断顺序「属性 → 大小 → NUL」不变。
+- 没有缓存树之间的改动列表（按两棵树的 OID 为键）：读树、属性和打开句柄合计约 0.25 ms，在预算内，不值得再增加一份缓存和它的内存预算。
+
