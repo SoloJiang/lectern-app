@@ -345,8 +345,16 @@ impl ChangeSet {
 
     /// 用实际写进快照的内容构造改动集，Analyze 的 patch 和指纹都从它计算，
     /// 不从可能还在变化的工作区计算（ADR 0019「结果要对得上当前版本」）。
-    pub fn from_written(repo: &Repo, base_tree: Oid, written: Vec<WrittenEntry>, limits: &Limits,
+    pub fn from_written(repo: &Repo, manifest: WrittenManifest, limits: &Limits,
         cancel: &AtomicBool) -> Result<Arc<ChangeSet>, GitError>;
+}
+
+/// 写出方交回的清单。`untracked_capped` 原样带回源改动集的 `Totals::untracked_capped`：
+/// 超出枚举上限的未跟踪文件没有 overlay 条目，只能靠这个标记让 `from_written` 得到同样的指纹。
+pub struct WrittenManifest {
+    pub base_tree: Oid,
+    pub entries: Vec<WrittenEntry>,
+    pub untracked_capped: bool,
 }
 
 pub enum OverlaySource {
@@ -355,7 +363,8 @@ pub enum OverlaySource {
     /// 没有适用的转换：写出方从 worktree 根描述符打开并克隆（`platform`），写出时计算 blob OID。
     Verbatim,
     Symlink { target: Arc<[u8]> },
-    /// 子模块：写成空目录，提交 OID 只出现在 patch 里。
+    /// 子模块：写成空目录，提交 OID 只出现在 patch 里。快照里没有子模块的内容，
+    /// 所以与 `Omitted` 一样让指纹的 `complete` 为 false，Analyze 标为部分内容未提供（ADR 0019）。
     Gitlink(Oid),
     /// 使用了过滤器、超过读取上限、不支持的文件类型：不写出，Analyze 标为部分内容未提供。
     /// 带着改动集里新一侧的 `Content`（`Unhashed` 或 `Unavailable`，含 `Filtered` 的原始字节摘要）。
@@ -490,7 +499,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 没有 | 有 | `Added`，新一侧按第 1、2 步取工作区内容 |
 | 没有 | 没有 | 不是跟踪的路径；工作区里有文件时按第 3 步作为未跟踪文件 |
 
-0. **工作区里没有**：`SafeRoot::stat` 报告路径不存在（含中间某一级目录不存在）时，不做后面的比较：基准里有这个路径就是 `Deleted`（未暂存的 `rm`），基准里也没有（暂存了新增后又删掉文件）就不是改动。`Unavailable::Missing` 只用于对象库里缺对象，不用于这种情况。
+0. **工作区里没有**：`SafeRoot::stat` 报告路径不存在（含中间某一级目录不存在）时，不做后面的比较：基准里有这个路径就是 `Deleted`（未暂存的 `rm`），基准里也没有（暂存了新增后又删掉文件）就不是改动。`Unavailable::Missing` 只用于对象库里缺对象，不用于这种情况。跟踪的非子模块路径 `p` 在工作区里变成了目录时同样按「没有」处理（`Deleted` 或不是改动），这个条目不设 `UPTODATE`，`p/` 下的文件由第 3 步作为未跟踪的 `Added` 列出；子模块路径是目录属于正常情况，按子模块处理。
 1. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时，工作区内容就是 index 里的 blob，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
 2. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）的文件不转换，标为 `Filtered`，不按原始字节生成 diff。
 3. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给第 0–2 步处理过、工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每个文件都是 `Added` 且 `untracked = true`，内容按第 2 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
@@ -527,7 +536,8 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Fingerprint {
     pub digest: [u8; 32],      // SHA-256
-    /// 有 `Unhashed`、`Unavailable` 或 `untracked_capped` 时为 false：Analyze 的结果标为「部分内容未提供」。
+    /// 有 `Unhashed`、`Unavailable`、改动了的子模块（任一侧是 `Gitlink`）或 `untracked_capped` 时为 false：
+    /// Analyze 的结果标为「部分内容未提供」。`complete` 本身也是摘要的输入，`from_written` 从清单里的同样信息得到同样的值。
     pub complete: bool,
 }
 ```
@@ -612,7 +622,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 树 diff：新增、删除、修改、模式变化、类型变化、精确与相似重命名、二进制、子模块；`--numstat` 与归档里 git 的输出一致。
 - 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`；未暂存的 `rm` 得到 `Deleted`；HEAD 删除、对方修改的冲突得到没有 `old` 的 `Conflicted`；只改 `.gitattributes`、文件 stat 不变时 `refresh(Full)` 按新规则重新计算 OID；没有改动的跟踪文件不会作为未跟踪文件出现；二进制和只改模式的文件也计入 5000 个文件的上限。
 - 截断：单文件、整体、保留内容三种上限的边界值；截断前后 `fingerprint` 不变。
-- 指纹：只改可执行位、只改符号链接目标、重命名都改变指纹；`from_written` 在内容相同时得到与工作区改动集相同的指纹，包括带 `Omitted` 条目（过滤器文件、超大文件）的快照；过滤器文件的原始字节改变后指纹不同。
+- 指纹：只改可执行位、只改符号链接目标、重命名都改变指纹；`from_written` 在内容相同时得到与工作区改动集相同的指纹，包括带 `Omitted` 条目（过滤器文件、超大文件）的快照；过滤器文件的原始字节改变后指纹不同；未跟踪文件超过枚举上限、或改动了子模块时，两边的 `complete` 都为 false 且摘要相同；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`。
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
 - 不执行外部程序：夹具仓库配置 `diff.external`、`diff.<名>.textconv`、`filter.<名>.clean` / `process`、`core.fsmonitor`，指向会写标记文件的脚本，PATH 最前面放一个记录调用的假 `git`（AGENTS.md「工作方式」）；跑完全部工作区和树 diff 场景后，标记文件不存在、假 `git` 没有被调用。
 - 展示行与词级差异：配对、折叠、hunk 相邻时合并上下文，用 insta 快照。
