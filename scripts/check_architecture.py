@@ -108,15 +108,87 @@ def plugin_errors(crates):
 IMPL_PLUGIN = re.compile(r"\bimpl\b(?:\s*<[^>{]*>)?\s+(?:\w+::)*Plugin\s+for\b")
 
 
-# `#[cfg(test)]`, `#[cfg(any(test, feature = "test-support"))]` and the like.
-CFG_TEST = re.compile(r"#\[cfg\([^\]]*\btest\b[^\]]*\)\]")
+def strip_comments_and_strings(src):
+    """Blank out comments, string literals and char literals so that text
+    inside them (doc examples, commented-out code) is never read as code."""
+    out, i, n = [], 0, len(src)
+    while i < n:
+        c = src[i]
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+        elif src.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if src.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif src.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            out.append(" ")
+        elif (m := re.match(r'b?r(#*)"', src[i:])) is not None:
+            close = '"' + m.group(1)
+            j = src.find(close, i + m.end())
+            i = n if j < 0 else j + len(close)
+            out.append('""')
+        elif c == '"' or src.startswith('b"', i):
+            i += 2 if c == "b" else 1
+            while i < n and src[i] != '"':
+                i += 2 if src[i] == "\\" else 1
+            i += 1
+            out.append('""')
+        elif (m := re.match(r"b?'(?:\\.[^']*|[^'\\])'", src[i:])) is not None:
+            i += m.end()
+            out.append("' '")
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _cfg_args(text):
+    """Split a cfg argument list at top-level commas."""
+    parts, depth, cur = [], 0, []
+    for ch in text:
+        if ch == "," and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+            continue
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        cur.append(ch)
+    if "".join(cur).strip():
+        parts.append("".join(cur).strip())
+    return parts
+
+
+def test_only_cfg(pred):
+    """Whether a cfg predicate can hold only in test builds: `test` or
+    `feature = "test-support"`, combined with all/any. `not(...)` and every
+    other atom also select production code."""
+    pred = pred.strip()
+    if pred == "test" or re.fullmatch(r'feature\s*=\s*"test-support"', pred):
+        return True
+    m = re.fullmatch(r"(all|any)\s*\((.*)\)", pred, re.S)
+    if m is None:
+        return False
+    args = _cfg_args(m.group(2))
+    if not args:
+        return False
+    check = any if m.group(1) == "all" else all
+    return check(test_only_cfg(a) for a in args)
+
+
+CFG_ATTR = re.compile(r"#\[cfg\((.*?)\)\]", re.S)
 
 
 def strip_cfg_test(src):
-    """Remove items gated on a test cfg: the attribute and the item after it,
-    up to its `;` or its matching closing brace."""
+    """Remove items gated on a test-only cfg: the attribute and the item after
+    it, up to its `;` or its matching closing brace."""
     out, pos = [], 0
-    while (m := CFG_TEST.search(src, pos)) is not None:
+    for m in CFG_ATTR.finditer(src):
+        if m.start() < pos or not test_only_cfg(m.group(1)):
+            continue
         out.append(src[pos : m.start()])
         i = m.end()
         while i < len(src) and src[i] not in "{;":
@@ -145,7 +217,7 @@ def implements_plugin(src_dir):
         for file in files:
             if file.endswith(".rs") and file not in ("tests.rs", "testing.rs"):
                 with open(os.path.join(root, file), encoding="utf-8") as f:
-                    if IMPL_PLUGIN.search(strip_cfg_test(f.read())):
+                    if IMPL_PLUGIN.search(strip_cfg_test(strip_comments_and_strings(f.read()))):
                         return True
     return False
 

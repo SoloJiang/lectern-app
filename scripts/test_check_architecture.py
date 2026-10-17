@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 import check_architecture
-from check_architecture import IMPL_PLUGIN, apple_only_cfg, strip_cfg_test, inherits_workspace_lints, is_macos_binding_name, plugin_errors
+from check_architecture import IMPL_PLUGIN, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -88,6 +88,34 @@ mod more;
         self.assertFalse(IMPL_PLUGIN.search(strip_cfg_test(src)))
         self.assertIn("pub struct Real;", strip_cfg_test(src))
         self.assertTrue(IMPL_PLUGIN.search(strip_cfg_test(src + "impl Plugin for Real {}")))
+
+    def test_test_only_cfg(self):
+        for pred in ("test", 'feature = "test-support"', 'any(test, feature = "test-support")', 'all(test, unix)'):
+            with self.subTest(pred=pred):
+                self.assertTrue(test_only_cfg(pred))
+        for pred in ("not(test)", 'any(test, target_os = "macos")', "unix", 'feature = "metal"', "any()"):
+            with self.subTest(pred=pred):
+                self.assertFalse(test_only_cfg(pred))
+
+    def test_production_cfg_is_kept(self):
+        src = "#[cfg(not(test))]\nimpl Plugin for Real {}\n"
+        self.assertTrue(IMPL_PLUGIN.search(strip_cfg_test(src)))
+
+    def test_comments_and_strings_are_ignored(self):
+        src = """
+/// ```
+/// impl Plugin for Example {}
+/// ```
+// impl Plugin for Old {}
+/* impl Plugin for Block { /* nested */ } */
+const DOC: &str = "impl Plugin for Text";
+const RAW: &str = r#"impl Plugin for Raw "quoted""#;
+fn f<'a>(c: char) -> bool { c == '"' }
+"""
+        cleaned = strip_comments_and_strings(src)
+        self.assertFalse(IMPL_PLUGIN.search(cleaned))
+        self.assertIn("fn f<'a>(c: char)", cleaned)
+        self.assertTrue(IMPL_PLUGIN.search(strip_comments_and_strings(src + "impl Plugin for Real {}")))
 
     def test_impl_plugin_pattern(self):
         for src in ("impl Plugin for Projects {", "impl kernel::Plugin for X", "impl<T: Send> lectern_kernel::Plugin for Source<T>"):
