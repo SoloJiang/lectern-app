@@ -33,8 +33,8 @@ pub struct BackgroundStatus {
     /// The number of [`BackgroundGuard`]s held.
     pub count: usize,
     /// The background epoch: it grows by one whenever a guard is taken or
-    /// dropped, a guard stops at a batch boundary, or `resume` lets stopped
-    /// guards continue. Two snapshots with the same epoch mean none of that
+    /// dropped, a guard stops at a batch boundary, or `resume` lets a stopped
+    /// guard continue (one step per guard). Two snapshots with the same epoch mean none of that
     /// happened in between. Separate from `quiescent_epoch`.
     pub epoch: u64,
 }
@@ -61,16 +61,21 @@ impl Inner {
         }
     }
 
-    /// Bumps the epoch after a change and returns the transition to announce
-    /// if the state changed.
-    fn changed(&mut self) -> Option<Transition> {
-        self.epoch += 1;
+    /// Advances the epoch by `steps` changes made in one locked step and
+    /// returns the transition to announce if the state changed.
+    fn changed_by(&mut self, steps: u64) -> Option<Transition> {
+        self.epoch += steps;
         let state = self.state();
         if state == self.announced {
             return None;
         }
         self.announced = state;
         Some(Transition::Background(state, self.epoch))
+    }
+
+    /// One change: a start, an end or a stop.
+    fn changed(&mut self) -> Option<Transition> {
+        self.changed_by(1)
     }
 
     fn status(&self) -> BackgroundStatus {
@@ -150,10 +155,12 @@ impl Background {
             inner.paused = false;
             self.paused.store(false, SeqCst);
             let stopped = std::mem::take(&mut inner.stopped);
+            // Each stopped guard continues: one epoch step per guard, one
+            // event carrying the final epoch.
             let transition = if stopped.is_empty() {
                 None
             } else {
-                inner.changed()
+                inner.changed_by(stopped.len() as u64)
             };
             (stopped, transition)
         };

@@ -109,7 +109,6 @@ fn epoch(kernel: &Kernel) -> u64 {
 fn background_guards_do_not_affect_quiescence_or_the_epoch() {
     let s = setup();
     let quiet = s.kernel.quiescent_epoch().expect("quiescent");
-    s.events.transitions.take();
     let waker = Arc::new(Count::default());
 
     let first = s.slot.get().background().unwrap();
@@ -133,7 +132,19 @@ fn background_guards_do_not_affect_quiescence_or_the_epoch() {
     });
     assert_eq!(s.kernel.quiescent_epoch(), Some(quiet));
     assert!(s.kernel.is_quiescent());
-    assert!(s.events.transitions.snapshot().is_empty());
+    // Only transitions up to the epoch read at the start may arrive late (the
+    // setup's own); none is newer.
+    let newer: Vec<String> = s
+        .events
+        .transitions
+        .snapshot()
+        .into_iter()
+        .filter(|entry| {
+            let seq: u64 = entry.rsplit(' ').next().unwrap().parse().unwrap();
+            seq > quiet
+        })
+        .collect();
+    assert!(newer.is_empty(), "{newer:?}");
     shutdown(&s.kernel);
 }
 
@@ -161,9 +172,12 @@ fn the_state_goes_idle_running_paused_and_back() {
     assert_eq!(poll(&second, &waker), Poll::Pending);
     assert_eq!(waker.wakes(), 0);
 
+    let paused_at = epoch(&s.kernel);
     s.kernel.resume();
     assert_eq!(status(&s.kernel), (BackgroundState::Running, 2));
     assert_eq!(waker.wakes(), 2, "resume wakes both stopped guards");
+    let resumed_at = epoch(&s.kernel);
+    assert_eq!(resumed_at, paused_at + 2, "one step per continued guard");
     assert!(!first.pause_requested());
     assert_eq!(poll(&first, &waker), Poll::Ready(()));
     assert_eq!(poll(&second, &waker), Poll::Ready(()));
@@ -190,6 +204,8 @@ fn the_state_goes_idle_running_paused_and_back() {
             BackgroundState::Idle,
         ]
     );
+    // The single event for the resume carries the epoch after all its steps.
+    assert_eq!(changes[2], (BackgroundState::Running, resumed_at));
     shutdown(&s.kernel);
 }
 
@@ -198,64 +214,68 @@ fn the_epoch_changes_on_each_start_end_stop_and_continue_and_only_then() {
     let s = setup();
     let waker = Arc::new(Count::default());
     let mut expected = epoch(&s.kernel);
-    let mut check = |what: &str, changed: bool| {
-        if changed {
-            expected += 1;
-        }
+    // `steps`: how many starts, ends, stops and continuations `what` was.
+    let mut check = |what: &str, steps: u64| {
+        expected += steps;
         assert_eq!(epoch(&s.kernel), expected, "after {what}");
     };
 
     // The switch alone changes nothing while no work is held.
     s.kernel.pause();
-    check("pause with no work", false);
+    check("pause with no work", 0);
     s.kernel.resume();
-    check("resume with no work", false);
+    check("resume with no work", 0);
 
     let first = s.slot.get().background().unwrap();
-    check("start", true);
+    check("start", 1);
     assert_eq!(poll(&first, &waker), Poll::Ready(()));
-    check("a batch boundary outside a pause", false);
+    check("a batch boundary outside a pause", 0);
     let _ = s.kernel.background();
-    check("reading the status", false);
+    check("reading the status", 0);
 
     s.kernel.pause();
-    check("pause before the work reaches a boundary", false);
+    check("pause before the work reaches a boundary", 0);
     assert!(first.pause_requested());
-    check("pause_requested", false);
+    check("pause_requested", 0);
     assert_eq!(poll(&first, &waker), Poll::Pending);
-    check("stop", true);
+    check("stop", 1);
     assert_eq!(poll(&first, &waker), Poll::Pending);
-    check("polling a stopped guard again", false);
+    check("polling a stopped guard again", 0);
     s.kernel.pause();
-    check("pausing again", false);
+    check("pausing again", 0);
 
     let second = s.slot.get().background().unwrap();
-    check("start during the pause", true);
+    check("start during the pause", 1);
     assert_eq!(poll(&second, &waker), Poll::Pending);
-    check("first poll of work started during the pause", false);
+    check("first poll of work started during the pause", 0);
 
     s.kernel.resume();
-    check("resume", true);
+    check("resume continuing two stopped guards", 2);
     s.kernel.resume();
-    check("resuming again", false);
+    check("resuming again", 0);
     assert_eq!(poll(&first, &waker), Poll::Ready(()));
-    check("a boundary after resume", false);
+    check("a boundary after resume", 0);
 
     // A pause that no work reached yet, then resume: nothing stopped, nothing
     // continued.
     s.kernel.pause();
     s.kernel.resume();
-    check("pause and resume between boundaries", false);
+    check("pause and resume between boundaries", 0);
 
     drop(first);
-    check("end", true);
+    check("end", 1);
     s.kernel.pause();
     assert_eq!(poll(&second, &waker), Poll::Pending);
-    check("stop", true);
-    drop(second);
-    check("end of stopped work", true);
+    check("stop", 1);
     s.kernel.resume();
-    check("resume after the stopped work ended", false);
+    check("resume continuing one stopped guard", 1);
+    s.kernel.pause();
+    assert_eq!(poll(&second, &waker), Poll::Pending);
+    check("stop", 1);
+    drop(second);
+    check("end of stopped work", 1);
+    s.kernel.resume();
+    check("resume after the stopped work ended", 0);
     assert_eq!(status(&s.kernel), (BackgroundState::Idle, 0));
     shutdown(&s.kernel);
 }
