@@ -1,0 +1,15 @@
+---
+source: crates/project/src/tests/open.rs
+assertion_line: 216
+expression: h.render(&key)
+---
+key: Git { common_dir: "[base]/repo/.git" }
+name: repo
+worktrees:
+  [base]/repo key=[base]/repo/.git head=Branch("refs/heads/main") [main]
+active: [base]/repo worktree=Some("[base]/repo/.git") opened_at=""
+files: 2 (skipped 0, truncated false)
+  Cargo.toml File
+  libs/sub Submodule
+packages:
+  "" name=repo declared=false workspace_root=true parent=None files=2 manifests=[Cargo.toml]

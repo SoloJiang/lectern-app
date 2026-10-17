@@ -1,0 +1,17 @@
+---
+source: crates/project/src/tests/worktrees.rs
+assertion_line: 26
+expression: h.render(&key)
+---
+key: Git { common_dir: "[base]/repo/.git" }
+name: repo
+worktrees:
+  [base]/repo key=[base]/repo/.git head=Branch("refs/heads/main") [main]
+  [base]/a-gone key=[base]/repo/.git/worktrees/gone head=Branch("refs/heads/gone") [prunable]
+  [base]/b-detached key=[base]/repo/.git/worktrees/detached head=Detached("0123456789abcdef0123456789abcdef01234567") []
+  [base]/c-unborn key=[base]/repo/.git/worktrees/unborn head=Unborn("refs/heads/new") []
+  [base]/z-locked key=[base]/repo/.git/worktrees/locked head=Branch("refs/heads/locked") [locked]
+active: [base]/repo worktree=Some("[base]/repo/.git") opened_at=""
+files: 1 (skipped 0, truncated false)
+  README.md File
+packages:

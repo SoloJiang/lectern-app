@@ -1,0 +1,17 @@
+---
+source: crates/project/src/tests/worktrees.rs
+assertion_line: 57
+expression: h.render(&key)
+---
+key: Git { common_dir: "[base]/repo/.git" }
+name: repo
+worktrees:
+  [base]/repo key=[base]/repo/.git head=Branch("refs/heads/main") [main]
+  [base]/repo-feature key=[base]/repo/.git/worktrees/feature head=Branch("refs/heads/feature") []
+active: [base]/repo-feature worktree=Some("[base]/repo/.git/worktrees/feature") opened_at=""
+files: 2 (skipped 0, truncated false)
+  go.work File
+  svc/go.mod File
+packages:
+  "" name=repo declared=false workspace_root=true parent=None files=2 manifests=[go.work]
+  "svc" name=example.com/svc declared=true workspace_root=false parent=Some(0) files=1 manifests=[svc/go.mod]
