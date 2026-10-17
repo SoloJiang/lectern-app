@@ -49,6 +49,8 @@ pub struct AgentsDeps {
     pub executor: Executor,
     pub cache: Cache,
     pub watch: Arc<dyn Watcher>,
+    /// 压缩会话的解压副本目录，`app` 取 `platform` 提供的应用缓存目录下的 `agents/decoded/`（见「压缩会话的随机读取」）。
+    pub decoded_dir: PathBuf,
     /// 会话目录：默认取 `$CLAUDE_CONFIG_DIR`（逗号分隔）或 `~/.claude` 与 `~/.config/claude`，
     /// `$CODEX_HOME` 或 `~/.codex`。测试传临时目录。
     pub roots: AgentRoots,
@@ -60,7 +62,7 @@ pub fn plugins(deps: AgentsDeps) -> [(Name, Box<dyn Plugin>); 2];
 ### 对其他 crate 的要求
 
 - `fs_watch`：提供不过滤的递归目录监听，监视 git 仓库之外的目录（会话目录），事件只带路径，合并后交付。已写进 `crates/fs_watch/AGENTS.md`。
-- `cache`：提供不属于任何仓库的应用级分库，存本 crate 的轮次索引（键见 ADR 0026），按字节 LRU，与其他条目一样可以随时删除重建。已写进 `crates/cache/AGENTS.md`。
+- `cache`：提供不属于任何仓库的应用级分库，存本 crate 的轮次索引（键见 ADR 0026）和压缩会话的摘要（键是压缩文件的身份），按字节 LRU，与其他条目一样可以随时删除重建。已写进 `crates/cache/AGENTS.md`。
 - `services`：采纳本文「接口」一节定义的 `session` 模块，`services` 的设计文档引用本节，不重复定义。
 
 ## 接口
@@ -73,13 +75,21 @@ pub fn plugins(deps: AgentsDeps) -> [(Name, Box<dyn Plugin>); 2];
 /// 多实现服务：每种 agent 一个提供者，ACP（P3）和第三方会话来源再各加一个。
 /// impl Service for dyn SessionSource { const ID = "session-source"; const MULTIPLE = true; }
 pub trait SessionSource: Send + Sync {
+    /// 这个提供者的稳定 ID，等于提供它的插件 ID（"session-claude-code"、"session-codex"；
+    /// 以后如 "acp-claude-code"）。插件 ID 全局唯一（`PluginSet::validate`），所以来源 ID 也唯一；
+    /// 跨版本不变，消费方把它和会话 ID 一起落盘。不阻塞。
+    fn id(&self) -> SourceId;
+
+    /// 会话属于哪个 agent 产品（界面的 agent 圆点、`usage` 的按 agent 拆分）。不阻塞。
     fn agent(&self) -> Agent;
 
     /// 当前会话列表。取锁复制一个 `Arc`，不阻塞、不做 IO，UI 线程上可以调用。
     fn sessions(&self) -> Arc<SessionList>;
 
-    /// 从 `from` 读到文件当前末尾的最后一个换行，最多读 `max_bytes` 字节（调用方循环读完，循环之间可以放弃）。
-    /// 阻塞（读文件、解压、解析），只在 executor 上调用。
+    /// 从 `from` 往后读，读到累计约 `max_bytes` 字节后在下一个完整记录之后停下。阻塞（读文件、解压、解析），只在 executor 上调用。
+    /// `max_bytes` 是软上限：只要游标之后还有一个完整的行，这次调用至少消费一行（哪怕它比 `max_bytes` 大），
+    /// 所以返回时要么 `at_end` 为 true，要么新游标严格大于 `from`，调用方循环读完不会原地打转，循环之间可以放弃。
+    /// 超过 16 MB 的行不缓存进内存，边读边丢弃到下一个换行，计入 `Diagnostics::oversized_lines`，游标越过它（也算消费了一行）。
     /// 游标与文件对不上（被截断、被替换）时从头读，`Batch::reset` 为 true。
     fn read(&self, session: &SessionKey, from: &Cursor, max_bytes: u64) -> Result<Batch, SessionError>;
 
@@ -88,7 +98,7 @@ pub trait SessionSource: Send + Sync {
     fn turns(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError>;
 
     /// 读一段正文（prompt、agent 说明、工具输入与结果、文件改动）。阻塞，只在 executor 上调用；
-    /// 读一行并解析，与文件大小无关。
+    /// 按偏移定位、读一行并解析，与文件大小无关。`.jsonl.zst` 会话从它的解压副本里定位（见「压缩会话的随机读取」）。
     fn load(&self, session: &SessionKey, at: &ContentRef) -> Result<Content, SessionError>;
 
     /// 恢复这个会话的命令。不阻塞。子 agent 会话和格式无法识别的会话返回 None。
@@ -113,6 +123,7 @@ pub struct ResumeSpec {
 
 调用方：
 
+- 路由：消费方通过 `ServiceSet<dyn SessionSource>` 拿到全部提供者，按 `SessionKey::source` 找 `id()` 相同的那一个调用 `read` / `turns` / `load` / `resume`；找不到（提供者已停用）就当作 `NotFound`，不改调用别的提供者。同一个上游会话可以同时出现在两个来源里（如本地日志和 P3 的 ACP），它们是两个不同的 `SessionKey`；`usage` 按与来源无关的 `UsageKey` 去重，不会重复计数。
 - `welcome`、`project_home`、`worktrees` 在渲染时调 `sessions()`；收到 `SessionsChanged` 后安排重绘。
 - `usage` 收到 `SessionsChanged` 后在 executor 上对变化的会话调 `read`，把记录和新游标在同一个 SQLite 事务里写入，所以重启后从自己的游标继续，不重复也不遗漏。
 - `review` 在 executor 上调 `turns` 和 `load`，`review_view` 只读 `review` 的快照。
@@ -123,7 +134,8 @@ pub struct ResumeSpec {
 ```rust
 /// 在 executor 线程上、`SessionList` 替换之后发出。监听只更新状态或安排后台任务，不做 IO。
 pub struct SessionsChanged {
-    pub agent: Agent,
+    /// 发出这个事件的提供者；`changed`、`removed` 里的键的 `source` 都等于它。
+    pub source: SourceId,
     pub generation: u64,
     /// 新增或有新内容的会话。
     pub changed: Arc<[SessionKey]>,
@@ -152,10 +164,15 @@ pub mod testing {
 ### 会话与列表
 
 ```rust
-pub enum Agent { ClaudeCode, Codex }
+/// 第三方来源报告的其他 agent 用 `Other`，附它自己的名字。
+pub enum Agent { ClaudeCode, Codex, Other(Arc<str>) }
 
-/// Claude Code：`sessionId`（文件名去掉 `.jsonl`）；子 agent 为 `agent-<agentId>`。Codex：`session_meta.id`（线程 ID）。
-pub struct SessionKey { pub agent: Agent, pub id: Arc<str> }
+/// 提供者的稳定 ID，见 `SessionSource::id`。
+pub struct SourceId(pub Arc<str>);
+
+/// 会话的全局键：来源加来源内的会话 ID。`id` 只在同一来源内唯一。
+/// 本 crate 的 `id`：Claude Code 为 `sessionId`（文件名去掉 `.jsonl`），子 agent 为 `agent-<agentId>`；Codex 为 `session_meta.id`（线程 ID）。
+pub struct SessionKey { pub source: SourceId, pub id: Arc<str> }
 
 /// UTC 毫秒。
 pub struct Timestamp(pub i64);
@@ -176,6 +193,7 @@ impl SessionList {
 
 pub struct SessionSummary {
     pub key: SessionKey,
+    pub agent: Agent,
     pub parent: Option<Parent>,
     pub file: Arc<Path>,
     /// 会话开始时的 cwd，原样取自日志。
@@ -254,7 +272,7 @@ pub struct Batch {
     pub reset: bool,
     pub records: Vec<Positioned<Record>>,
     pub cursor: Cursor,
-    /// 已读到文件当前末尾。
+    /// 游标之后已没有完整的行（包括只剩一行还没写完的情况）。为 false 时 `cursor` 一定严格大于调用时的 `from`。
     pub at_end: bool,
 }
 
@@ -495,10 +513,23 @@ fixtures（`crates/agents/tests/fixtures/`）：每个上游格式版本一份�
 - 子 agent 会话是独立的 `SessionSummary`，用 `parent` 指回父会话和派出它的工具调用，按自己的 cwd 归位（Claude Code 的子 agent 常在 `.claude/worktrees/` 下的另一个 worktree 里）。合到父会话的合计、在列表里折叠到父会话下，由 `usage` 和视图决定。
 - 继承前缀里的记录照样交出、标为 `inherited`，由 `usage` 按 ADR 0014 只计自己的部分；轮次索引不含它们。
 
+### 压缩会话的随机读取
+
+Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compression.rs` 在 `3b8f43a` 用 `zstd::stream::write::Encoder` 一次写完），没有可以定位的帧边界，流式解码只能从头开始。顺序读取（`read`、发现、建索引）照样流式解码；需要按偏移随机读取（`turns` 之后的 `load`）时，用解压副本：
+
+- 第一次对某个 `.jsonl.zst` 会话调 `turns` 或 `load` 时，把它完整解压到 `decoded_dir` 下的一个文件（先写临时文件、完整后 `rename`，之后只读），同时建好轮次索引；之后 `load` 在副本上按偏移 `pread` 一行，与未压缩的会话相同。
+- 副本的键：来源 ID、会话 ID，以及压缩文件的身份（设备号、inode、大小、修改时间）。冷文件压缩后不再改动，身份变了（被重新压缩、被替换）就删掉旧副本重建；压缩文件消失时，下一次发现删掉副本。
+- 代价：磁盘占用等于解压后的大小，全部副本合计上限 1 GB，按最后访问时间做字节 LRU，正在读取的副本（有打开的描述符）不淘汰；内存只有解码用的 64 KB 缓冲，副本不读入内存。副本和 `cache` 一样可以随时删除重建。
+- 第一次打开一个压缩会话要解压整个文件（≥ 100 MB/s，40 MB 约 0.4 s），超出 50 ms 预算，界面按[交互规范「状态与异常」](interaction.md#状态与异常)显示骨架或进度；之后的打开和 `load` 在预算内。这是已知限制（ADR 0026）。
+- 写副本失败（磁盘满、目录不可写）时，`load` 退回从头解码到偏移，结果正确但慢，记日志。
+- 发现阶段不为压缩文件建副本：压缩文件不变，它的摘要（第 2 步）存进 `cache` 的应用级分库，键是同一个文件身份，下次启动直接读，不再解压。
+
+放弃的方案：记录 zstd 帧边界（Codex 只写一个帧）；把压缩会话里被引用的每一行正文存进轮次索引（索引的大小接近原文件，全部进 SQLite、加载时进内存，比一个可淘汰的副本文件更贵）。
+
 ## 数据流与线程
 
 1. 插件在首帧之后激活（`AfterFirstFrame`），`started` 里通过 `own_with` 提交发现任务（`Background`）。首帧之前不做任何事。
-2. 发现：枚举会话目录（只列目录项，不读 `.prefix.json` 等无关文件），每个会话文件读开头最多 256 KB（找会话头、cwd、第一个 prompt）和末尾最多 64 KB（最后活动时间、`open_turn`），得到摘要；`.zst` 只解压开头。不读整个文件。
+2. 发现：枚举会话目录（只列目录项，不读 `.prefix.json` 等无关文件），每个会话文件读开头最多 256 KB（找会话头、cwd、第一个 prompt）和末尾最多 64 KB（最后活动时间、`open_turn`），得到摘要。不读整个文件；`.zst` 没有办法直接读末尾，第一次见到时整份流式解码一次，摘要按文件身份存进 `cache`（见「压缩会话的随机读取」）。
 3. 归位：对去重后的 cwd 调 `Projects::resolve`（阻塞，在 executor 上），结果按 cwd 缓存到下一次目录变化；cwd 不存在时为 `Missing`。
 4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。
 5. 监听：`fs_watch` 递归监听每个会话目录，事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件从列表移除。处理完再按第 4 步发布。
@@ -515,10 +546,11 @@ fixtures（`crates/agents/tests/fixtures/`）：每个上游格式版本一份�
 ## 性能
 
 - 冷启动（ADR 0017）：首帧之前不调用本 crate；插件在首帧之后激活，发现在 `Background` 优先级运行。
-- 空闲内存（ADR 0017）：`SessionList` 每个会话约 1 KB（1000 个会话约 1 MB）；轮次索引只为打开过的会话保留，LRU 上限 8 MB；读取用 64 KB 缓冲逐行处理，单行上限 16 MB，任何时候只持有一行。
-- 打开一个会话的 Diff < 50 ms（[性能预算](tech-research.md#性能预算)）：本 crate 的份额是 `turns` 命中缓存加解析追加部分 < 10 ms，`load` 一次 < 1 ms。
+- 空闲内存（ADR 0017）：`SessionList` 每个会话约 1 KB（1000 个会话约 1 MB）；轮次索引只为打开过的会话保留，LRU 上限 8 MB；读取用 64 KB 缓冲逐行处理，单行上限 16 MB，任何时候只持有一行；超长行边读边丢弃，不缓存。
+- 磁盘：压缩会话的解压副本合计上限 1 GB，字节 LRU（见「压缩会话的随机读取」）。
+- 打开一个会话的 Diff < 50 ms（[性能预算](tech-research.md#性能预算)）：本 crate 的份额是 `turns` 命中缓存加解析追加部分 < 10 ms，`load` 一次 < 1 ms（压缩会话从解压副本读，同样适用；第一次打开压缩会话除外，见上节）。
 - 预期耗时（M 系列，单线程，release）：发现 1000 个会话文件 < 500 ms；整文件解析 ≥ 200 MB/s；追加 4 KB 后 `read` < 1 ms；`.zst` 解压后解析 ≥ 100 MB/s。实现时用 bench 实测后校准，写进 bench 的预算表。
-- `bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增：`agents/discover_1000`（合成 1000 个会话目录）、`agents/parse_throughput`（fixtures 拼成 50 MB）、`agents/append_4k`、`agents/turns_cached_50mb`、`agents/zst_throughput`。
+- `bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增：`agents/discover_1000`（合成 1000 个会话目录）、`agents/parse_throughput`（fixtures 拼成 50 MB）、`agents/append_4k`、`agents/turns_cached_50mb`、`agents/zst_throughput`、`agents/zst_load_decoded`（副本建好后 `load` 一次）。
 
 ## 状态与异常
 
@@ -527,7 +559,7 @@ fixtures（`crates/agents/tests/fixtures/`）：每个上游格式版本一份�
 - 没有会话目录或目录为空：列表为空，不报错；Welcome 和项目主页按「还没有会话」显示。
 - 目录不可读：记进 `Diagnostics::unreadable_dirs` 和日志，其余目录照常发现。
 - 整个文件认不出格式：`Format::Unrecognized`；能读到 cwd 时照常列出、归位，`turns` 返回 `Unrecognized`，界面降级为按文件显示、隐藏轮次和说明，不弹错误。读不到 cwd 的不列出，只计数。
-- 个别行不认识、不是合法 JSON、超过 16 MB：跳过并计数，`Format::Partial`；超长行里的改动拿不到，`review` 按 Drifted 规则处理。
+- 个别行不认识、不是合法 JSON、超过 16 MB：跳过并计数，游标越过它，`Format::Partial`；超长行里的改动拿不到，`review` 按 Drifted 规则处理。
 - 文件末尾不完整的行（agent 正在写）：不读，等下一次变化。
 - 文件被截断或改写：游标的前缀副本对不上，`Batch::reset` 为 true，从头读。
 - 文件被删除：从列表移除，`SessionsChanged::removed` 带上它；`read` / `turns` 返回 `NotFound`。
@@ -539,7 +571,9 @@ fixtures（`crates/agents/tests/fixtures/`）：每个上游格式版本一份�
 - 解析快照（insta）：每份 fixture 解析出的 `Record` 序列、`TurnIndex`、`SessionSummary` 各一个快照，`claude_*` / `codex_*`。
 - 增量等价：每份 fixture 按随机切分（包括行中间）逐段追加到临时文件、每段后 `read` 一次，拼起来的记录与一次读完相同；游标经 `to_bytes` / `from_bytes` 往返后继续读，结果相同（`incremental_*`）。
 - 改写与截断：截断、替换为另一个会话、改写游标之前的内容，`reset` 为 true 且记录从头给出（`reset_*`）。
-- 压缩：同一份 Codex fixture 的 `.jsonl` 与 `.jsonl.zst` 记录相同；压缩前取的游标在压缩后继续有效（`zst_*`）。
+- 读取进度：`max_bytes` 为 1 时每次调用仍消费一行；下一行比 `max_bytes` 大、但不到 16 MB 时整行返回；超过 16 MB 的行被跳过、计数、游标越过它；任何返回 `at_end == false` 的调用，新游标都大于旧游标（`progress_*`）。
+- 压缩：同一份 Codex fixture 的 `.jsonl` 与 `.jsonl.zst` 记录相同；压缩前取的游标在压缩后继续有效；第一次 `turns` 建好解压副本，之后 `load` 不再解码；压缩文件身份变化后副本重建；副本合计超过上限时按 LRU 删除、不删正在读取的副本；副本目录不可写时 `load` 结果不变（`zst_*`、`decoded_*`）。
+- 路由：两个来源报告相同的会话 ID 时得到两个不同的 `SessionKey`；`SessionsChanged::source` 与键的 `source` 一致（`source_*`）。
 - 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次（`inherited_*`）。
 - 子 agent：父会话、`toolUseId` 关联，`meta.json` 缺失时 `tool_call` 为 None（`subagent_*`）。
 - 去重键：Claude Code 同一响应的多行给出相同的 `UsageKey`；`info` 为 null 的 `token_count` 只给出 `RateLimits`（`usage_keys_*`）。
@@ -573,13 +607,13 @@ fixtures（`crates/agents/tests/fixtures/`）：每个上游格式版本一份�
    - `SessionSource`、`SessionsChanged` 和「数据结构」里的类型在 `services::session` 里，`cargo check -p lectern-services` 通过。
    - 每个类型的 JSON 往返测试通过（`just test -p lectern-services` 的 `session_*`）。
 2. **Claude Code 适配器与增量读取**
-   - `just test -p lectern-agents` 里 `claude_*`、`incremental_*`、`reset_*`、`subagent_*`、`usage_keys_*`、`tool_kind_*`、`format_*` 通过，快照已逐个看过。
+   - `just test -p lectern-agents` 里 `claude_*`、`incremental_*`、`reset_*`、`progress_*`、`source_*`、`subagent_*`、`usage_keys_*`、`tool_kind_*`、`format_*` 通过，快照已逐个看过。
    - `crates/agents/tests/fixtures/claude-code/` 下每个版本目录都有 `SOURCE.md`。
    - `rg 'serde_json::Value' crates/agents/src` 只出现在测试代码里。
    - `just bench` 的 `agents/parse_throughput`、`agents/append_4k` 达到「性能」里的目标。
 3. **Codex 适配器**
-   - `codex_*`、`zst_*`、`inherited_*` 通过；`just deny` 通过（`ruzstd`）。
-   - `agents/zst_throughput` 达标。
+   - `codex_*`、`zst_*`、`decoded_*`、`inherited_*` 通过；`just deny` 通过（`ruzstd`）。
+   - `agents/zst_throughput`、`agents/zst_load_decoded` 达标。
 4. **发现、监听、归位与插件**（依赖 `fs_watch` 的目录监听和 `cache` 的应用级分库）
    - `discover_*`、`watch_*`、`place_*`、`index_cache_*`、`plugin_*` 通过。
    - `python3 scripts/check_architecture.py` 通过；`rg gpui crates/agents/Cargo.toml` 没有结果。
