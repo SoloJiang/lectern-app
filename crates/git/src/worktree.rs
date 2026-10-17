@@ -185,6 +185,24 @@ impl Worktree {
         compare::refresh(&self.subject(), prev, what, cancel)
     }
 
+    /// A `fs_watch` source for this worktree (docs/design/fs_watch.md
+    /// 「对其他 crate 的要求」): the filter is the index paths (the same
+    /// `Arc` as [`Worktree::tracked`] while the index is unchanged) plus the
+    /// ignore rules read once through `SafeRoot`, answered from memory; the
+    /// config list comes from the origins of the configuration gix loaded
+    /// and every `include` value. Holds this handle; runs no git CLI.
+    pub fn watch_source(&self) -> Arc<dyn lectern_fs_watch::WorktreeSource> {
+        Arc::new(crate::watch::Source::new(self.clone()))
+    }
+
+    pub(crate) fn safe_root(&self) -> &SafeRoot {
+        &self.0.root
+    }
+
+    pub(crate) fn repo(&self) -> &Repo {
+        &self.0.repo
+    }
+
     fn subject(&self) -> Subject<'_> {
         Subject {
             root: &self.0.root,

@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -275,7 +275,20 @@ pub struct TrackedEntry {
 
 sparse index（`index.sparse`）里，sparse checkout 之外的目录只有一个模式为 `040000` 的目录条目，记录的是树 OID。gix 0.88 读 index 时不展开它们，本 crate 自己在内存里展开：按目录条目的树 OID 从对象库读出其中的全部文件，作为 `skip_worktree` 的条目放进 `TrackedPaths`，与完整 index 里的 skip-worktree 条目相同。展开只在内存里进行，不写回 index，index 文件的 sparse 状态不变；展开的条目数计入调用方传入的 `EntryLimits`，读树时检查 `cancel`；`changes` / `refresh` 内部读 index 时用 `Limits::entries` 和它们自己的 `cancel`。`Repo::worktree` 只读 HEAD 和配置，不读 index，所以不需要这两个参数。所以「基准树 ∪ index」的比较（见「工作区比较」）看到的是逐个文件的条目，sparse 目录下的文件不会被当成删除。
 
-`fs_watch` 是基础设施层，不依赖本 crate：本 crate 用 `TrackedPaths` 和忽略规则实现 `fs_watch` 定义的过滤与配置来源接口（`Worktree::watch_source`，见 [fs_watch 设计「对其他 crate 的要求」](fs_watch.md#对其他-crate-的要求)），`project`、`review` 把它传进去。
+`fs_watch` 是基础设施层，不依赖本 crate：本 crate 用 `TrackedPaths` 和忽略规则实现 `fs_watch` 定义的过滤与配置来源接口（已实现，`src/watch.rs`），`project`、`review` 把它传进去：
+
+```rust
+impl Worktree {
+    /// 持有这个句柄。过滤器的文件列表就是 `tracked()` 返回的那个 Arc（index 没变时与 `project` 共用），
+    /// 忽略规则在构造时一次读完，查询只在内存里匹配；配置清单从 gix 已加载配置的来源和 `include` 值得出。
+    pub fn watch_source(&self) -> Arc<dyn lectern_fs_watch::WorktreeSource>;
+}
+impl From<WorktreeId> for lectern_fs_watch::WorktreeName { /* … */ }
+impl From<lectern_fs_watch::WorktreeName> for WorktreeId { /* … */ }
+```
+
+- `filter`：未跟踪的 `.gitignore` 由「工作区比较」第 4 步的同一个遍历找出（经 `SafeRoot`，不进入被忽略的目录、子模块和嵌套仓库，受 `Limits::untracked` 的 20 000 个条目上限，[ADR 0028](../adr/0028.md)），遍历读到的每个 `.gitignore`（跟踪的和未跟踪的）都用上；遍历没有走到的、index 里的 `.gitignore` 和事件给出的 `gitignores` 之后再读，上级目录是子模块、嵌套仓库或被忽略的不读。工作区里只读普通文件；skip-worktree 条目在工作区里读不到时用 index 的 blob（与 git 相同）。`info/exclude`、`core.excludesFile`（没有设置时是 XDG 的默认位置）由 gix-ignore 读。`ignored` 从路径所在目录起逐级向上查 `.gitignore`（最深的有匹配的那个决定，同一文件里最后一条匹配的规则生效），都没有匹配时查 `info/exclude`，再查 `core.excludesFile`；`core.ignoreCase` 时大小写折叠（index 另存一份按折叠后排序的下标，每个条目 4 字节），`core.precomposeUnicode` 时先把查询的路径规范化为 NFC。
+- `config_files`：仓库的 `config`、这个 worktree 的 `config.worktree`、`info/exclude`、`info/attributes`；gix 读系统和用户配置时（生产路径），系统、XDG、`~/.gitconfig` 三个位置和系统属性文件（`/etc/gitattributes`）本身；gix 配置里每一节的来源文件；每个 `include` / `includeIf` 节里的每个 `path`（按 gix 的规则展开 `~`、`%(prefix)`，相对路径相对所在文件的目录，条件和文件是否存在都不看）；`core.excludesFile`、`core.attributesFile` 的值，没有设置（或是不存在的 `:(optional)`）时的 XDG 默认位置。只给出绝对路径，排序去重。
 
 ### 改动集
 
@@ -870,6 +883,15 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 第二轮审阅的修正：`worktree_absorbed_submodule_symlinks_under_modules_are_not_followed`（`modules/<名字>/HEAD` 和 `modules/<名字>` 本身是指向外部的符号链接时都为 `Unreadable`，外部 HEAD 里的提交不出现）、`worktree_ignore_case_matches_index_paths_without_case`（`core.ignoreCase` 为 true 时大小写不同的 `README.md`、`docs/a.md` 不是未跟踪的新增，为 false 时是）、`worktree_refresh_paths_of_a_directory_reloads_its_attributes`（报告的目录下改了已加载的 `.gitattributes`、或新出现未跟踪的 `.gitattributes` 时，`a.txt` 按新规则重新计算）。gix 的 `dirwalk` feature 去掉后 `cargo tree -e features -i gix` 里没有它，`gix-dir` 从 Cargo.lock 移除。
 - 移进 bench 后（`just bench --measure git/`，Linux 上只报告、不判定）：`git/changes_clean` 3.03 ms、`git/changes_50` 4.46 ms、`git/refresh_one` 1.21 ms、`git/refresh_full` 4.05 ms、`git/changes_capped` 99 ms，`memory` 目标的 `git/resident` 865 KB（≤ 48 MB）、`git/changes_capped_bytes` 9.47 MB（只记录；`Limits` 默认的保留内容上限是 32 MiB）。同一次运行里 `git/diff_50_warm` 为 2.18 ms，超过 2 ms 的预算（第 2 步的 hunk 缓存命中路径，与本步无关，由 #89 处理）。没有在 macOS 上测量。
 
+`Worktree::watch_source`（[fs_watch 设计](fs_watch.md)验收第 2 步，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），同一台机器：
+
+- `just check`、`just test`（Linux 上的全部 crate，950 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）、`just bench`（Linux 上是冒烟运行）全部通过；`cargo clippy -p lectern-git --all-targets -- -D warnings`（不开 `test-support`）、`python3 scripts/check_architecture.py` 也通过。Cargo.lock 只多了 `lectern-git` 对 `lectern-fs-watch` 的一条工作区内部依赖，没有新增外部依赖。
+- `just test -p lectern-git`：206 个测试通过，新增 `watch_source_*` 15 个（`src/watch/tests.rs`），对应 fs_watch 设计「测试」里 `git` 的一段：`.gitignore`、`info/exclude`、`core.excludesFile` 的忽略结果在 `core.ignoreCase` 为 false 和 true 时都与 git 的判定一致（`ignores_match_git`，按 fs_watch「路径分类」第 6、8 步逐级组合 `ignored` 的结果，含根目录和未跟踪目录里未跟踪的 `.gitignore`、更深的 `.gitignore` 里的否定规则、被忽略目录里的 `.gitignore` 没有读）；`ignored` 只看路径自身；`core.ignoreCase` 下大小写不同的路径判为受跟踪（含目录和子模块），过滤器与 `Worktree::tracked` 共用同一个 `Arc`；跟踪的和 skip-worktree 的 `.gitignore`（后者从 index 的 blob 读）；遍历达到上限时显式给出的 `.gitignore` 仍然生效、上级目录被忽略的不读、子模块和嵌套仓库里的不读；目录改名后 `rule_files` 给出新位置；符号链接的 `.gitignore` 不读；`config_files` 列出 `include.path`（绝对、相对、`~/`、不存在的目标）、`includeIf "onbranch:"` 满足与不满足（只有满足的那个里再嵌套的引入被列出，切换分支后反过来）、系统、XDG 和 `~/.gitconfig` 的位置、XDG 默认的 `ignore` / `attributes`、linked worktree 的 `config.worktree`，测试用的仓库范围不列出仓库之外的标准位置；`runs_no_git` 在仓库配置 `core.fsmonitor` 指向写标记文件的脚本、nextest 下 PATH 最前面另有记录调用的假 `git` 时，构造过滤器和配置清单后标记文件不存在；取消时两者都返回错误。
+- 验收的检查：`rg 'Command::new' crates/git/src` 没有结果；第 3 步的 `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' …` 检查也仍然没有结果。
+- 测试二进制在 `env -i PATH=/nonexistent CI=1 INSTA_WORKSPACE_ROOT=<仓库根>` 下运行，206 个测试全部通过。
+- 与 git 的对照：`watch_source_ignores_match_git` 的期望值（git 判为忽略的路径，即 `git check-ignore --no-index` 会列出的）是按 gitignore(5) 的规则手工推出的，没有用真实的 git 生成夹具：这次的环境不允许在 worktree 之外运行 git（生成脚本要在临时目录里 `git init`、`git check-ignore`）。gix-ignore 的匹配结果与推导完全一致。以后可以按「测试」里归档夹具的做法补一份由 `git check-ignore` 生成的目录夹具。
+- 没有验证的：构造过滤器的耗时和忽略规则的内存（fs_watch「性能」里没有对应的基准条目，没有测量；遍历与「工作区比较」第 4 步相同，代价同 `git/changes_clean` 里的未跟踪文件枚举）；`core.precomposeUnicode` 的规范化没有测试；macOS 上没有运行。
+
 ## 与设计的差异
 
 第 1 步：
@@ -933,3 +955,14 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 新增 `ChangeSet::fingerprint` 和 `Fingerprint`：crates/git/AGENTS.md 规定了工作区指纹的组成，改动集里已经有它需要的全部身份（截断只改 `Detail`），在这里算最直接；Analyze 怎样使用它随 #66 设计。对象库里缺失的一侧（`Unavailable::Missing`）在组装时丢掉了 OID，指纹里只记「缺失」。
 - `testing` 增加 `IndexStat`、`IndexEntry::stat`、`IndexEntry::intent_to_add` 和 `TestRepo::add`、`set_mtime`、`backdate`、`remove`、`import_worktree_fixture`（见「第 3 步补全的类型」）。工作区夹具（`tests/fixtures/worktree_conversions`）格式见 [夹具说明](../../crates/git/tests/fixtures/README.md)；它没有 `trees` 文件，`numstat_matches_git` 改为只取有 `trees` 的目录。FIFO 测试只在 Linux 上运行（用 `rustix` 建 FIFO），socket 的测试在所有平台上运行。`no_external_programs` 在 nextest 的一测试一进程模式下才把记录调用的假 `git`、`sh` 放到 PATH 最前面：`cargo test` 在一个进程里多线程运行测试，那时改环境变量不安全；仓库配置里的各种外部程序在两种方式下都指向写标记文件的脚本。
 - `ConfigScope::RepositoryOnly` 只在 `test-support` 下构造，不开这个 feature 时按 `expect(dead_code)` 处理，`cargo clippy -p lectern-git --all-targets -- -D warnings` 不再失败。
+
+`Worktree::watch_source`（fs_watch 第 2 步）：
+
+- 未跟踪的 `.gitignore` 由 ADR 0028 之后的 `SafeRoot` 遍历找出，不是 fs_watch 设计原文写的「同一种 gix 遍历」；`untracked::walk` 多了一个可选的输出参数，记下遍历读到的每个 `.gitignore`（路径和内容），过滤器直接用这些内容，不再读一遍。fs_watch 设计「对其他 crate 的要求」已改。
+- index 里的 `.gitignore` 不是每个都读：遍历已经读过的不重复读；上级目录被忽略、是子模块或嵌套仓库的不读（git 不读，fs_watch「路径分类」第 6 步也用不到它们），事件给出的 `gitignores` 同样如此；skip-worktree 的条目在工作区里读不到时用 index 的 blob，与 git 的 `read_skip_worktree_file_from_index` 相同。设计只写了「index 里每个名为 `.gitignore` 的路径在工作区里的文件」。
+- 配置清单里的来源文件按 gix 记录的路径给出，可能含 `..`（linked worktree 读到的公共 `config` 记为 `worktrees/<名字>/../../config`）：fs_watch 展开清单时逐级处理 `..`，这里不做字面归并，字面归并在符号链接之下会得到错误的位置。
+- 相对路径的 `core.excludesFile`、`core.attributesFile` 不列出：gix 按进程的当前目录解析它们（不是工作区），fs_watch 也只接受绝对路径。`:(optional)` 的值指向不存在的文件时 gix 改读 XDG 的默认位置，所以两者都列出。
+- `include` / `includeIf` 的节名按不分大小写匹配（git 不分）；gix 只跟随小写的写法，大写写法的目标会被列出而 gix 不读，只多一个监视点。
+- 求 `~` 和 XDG 的默认位置要知道 `HOME`、`XDG_CONFIG_HOME`：经 gix-path 读，与 gix 打开仓库时（`ConfigScope::User` 的权限）读的是同两个变量，`GIT_*` 仍然不读。`ConfigScope::RepositoryOnly` 不读环境变量，也不列出仓库之外的标准位置，与 gix 在这个范围里实际读的文件一致。
+- `ConfigScope::RepositoryOnly`（`testing::discover`、`testing::open_handle`）改为跟随仓库配置里的 `include.path` / `includeIf`：配置清单的测试要 gix 按条件加载引入的文件（`onbranch:`）。它仍然不读系统、XDG、`~/.gitconfig` 和环境变量，测试结果不受机器上的配置影响；引入的文件由测试自己写在临时目录里。
+- `WorktreeName` 与 `WorktreeId` 的转换是两个 `From` 实现；`TrackedPaths` 增加 crate 内部的 `entries()`（切片，供过滤器二分查找）。
