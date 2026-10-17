@@ -1,4 +1,5 @@
-//! The tracked files of one worktree, as one path buffer plus end offsets.
+//! The tracked files of one worktree, as one path buffer plus end offsets
+//! (docs/design/project.md「文件列表」).
 
 use std::fmt;
 use std::ops::Range;

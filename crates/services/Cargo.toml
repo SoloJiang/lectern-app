@@ -10,5 +10,8 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "kernel"
 
+[dependencies]
+lectern-kernel = { path = "../kernel" }
+
 [lints]
 workspace = true

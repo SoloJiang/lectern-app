@@ -5,7 +5,6 @@
 //! returns an error for input it cannot read instead of panicking.
 
 use std::borrow::Cow;
-use std::fmt;
 use std::sync::Arc;
 
 mod cargo;
@@ -18,83 +17,10 @@ mod pom;
 #[cfg(test)]
 mod tests;
 
-/// Manifests larger than this are not parsed (`ManifestError::TooLarge`).
-/// Also the read limit for `GitAccess::read_worktree_file`.
-pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
-
-/// The manifest file formats `project` understands.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum ManifestKind {
-    PackageJson,
-    PnpmWorkspace,
-    CargoToml,
-    PomXml,
-    GradleSettings,
-    GradleBuild,
-    GoMod,
-    GoWork,
-}
-
-/// The build ecosystem a manifest belongs to.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum Ecosystem {
-    Npm,
-    Cargo,
-    Maven,
-    Gradle,
-    Go,
-}
-
-impl ManifestKind {
-    pub fn ecosystem(self) -> Ecosystem {
-        match self {
-            Self::PackageJson | Self::PnpmWorkspace => Ecosystem::Npm,
-            Self::CargoToml => Ecosystem::Cargo,
-            Self::PomXml => Ecosystem::Maven,
-            Self::GradleSettings | Self::GradleBuild => Ecosystem::Gradle,
-            Self::GoMod | Self::GoWork => Ecosystem::Go,
-        }
-    }
-
-    /// The kind of a manifest by its file name (the last path segment), or
-    /// None when the file is not a manifest.
-    pub fn from_file_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "package.json" => Self::PackageJson,
-            "pnpm-workspace.yaml" => Self::PnpmWorkspace,
-            "Cargo.toml" => Self::CargoToml,
-            "pom.xml" => Self::PomXml,
-            "settings.gradle" | "settings.gradle.kts" => Self::GradleSettings,
-            "build.gradle" | "build.gradle.kts" => Self::GradleBuild,
-            "go.mod" => Self::GoMod,
-            "go.work" => Self::GoWork,
-            _ => return None,
-        })
-    }
-}
-
-/// Why a manifest has no parse result.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum ManifestError {
-    /// Larger than `MAX_MANIFEST_BYTES`; not parsed.
-    TooLarge,
-    /// The input could not be parsed; `line` is 1-based.
-    Syntax { line: u32 },
-    /// Reading failed, or the path is not a regular file (a symlink, say).
-    Unreadable,
-}
-
-impl fmt::Display for ManifestError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooLarge => write!(f, "manifest is larger than {MAX_MANIFEST_BYTES} bytes"),
-            Self::Syntax { line } => write!(f, "manifest syntax error on line {line}"),
-            Self::Unreadable => f.write_str("manifest is unreadable"),
-        }
-    }
-}
-
-impl std::error::Error for ManifestError {}
+// The data types moved to `services` in step 2 (docs/design/project.md
+// 「验收」); re-exported so `manifest::ManifestKind` and friends keep their
+// paths.
+pub use lectern_services::project::{Ecosystem, MAX_MANIFEST_BYTES, ManifestError, ManifestKind};
 
 /// A member declaration, relative to the directory of the manifest that
 /// declares it, exactly as written apart from quoting.

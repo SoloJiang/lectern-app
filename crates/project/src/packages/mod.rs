@@ -6,50 +6,16 @@ use std::sync::Arc;
 
 use glob::{MatchOptions, Pattern};
 
-use crate::files::{FileKind, FileList};
+use lectern_services::project::{FileKind, FileList, Manifest, Package};
+
 use crate::manifest::{Exclude, ManifestError, ManifestKind, Member, Parsed};
 
 #[cfg(test)]
 mod tests;
 
-/// A path inside a worktree, `/` separated, no leading or trailing `/`;
-/// the root is "".
-pub type RelPath = Arc<str>;
-
 /// What `resolve_packages` gets for one manifest: its parse result (shared
 /// with the parse cache) or why there is none.
 pub type ManifestResult = Result<Arc<Parsed>, ManifestError>;
-
-/// One directory's sub-project. Several manifests in one directory (say
-/// package.json and pom.xml) make one package.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Package {
-    pub dir: RelPath,
-    /// The first of: package.json `name`, Cargo `package.name`, go.mod
-    /// `module`, Maven `artifactId`, the Gradle project name; else the
-    /// directory name (the project name for the root).
-    pub name: Arc<str>,
-    pub manifests: Arc<[Manifest]>,
-    /// Declared a member by some workspace manifest.
-    pub declared: bool,
-    /// This directory has a manifest that declares a workspace.
-    pub workspace_root: bool,
-    /// Index of the nearest enclosing package in the list.
-    pub parent: Option<u32>,
-    /// Tracked files under the directory, including nested packages'.
-    pub files: u32,
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Manifest {
-    pub kind: ManifestKind,
-    pub path: RelPath,
-    pub name: Option<Arc<str>>,
-    /// Uses forms the parser does not evaluate, or declares a member
-    /// pattern that is not a valid glob; members may be missing.
-    pub partial: bool,
-    pub error: Option<ManifestError>,
-}
 
 /// Path segments whose undeclared manifests are test data, not packages.
 const SAMPLE_SEGMENTS: &[&str] = &[
