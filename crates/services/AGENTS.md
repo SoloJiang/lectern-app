@@ -1,6 +1,6 @@
 # services（`lectern-services`）
 
-插件实现和依赖的服务接口：`SessionSource`、`ForgeProvider`、`NavigationProvider`、`ProjectDetector` 等。插件只依赖接口，不依赖彼此（架构规则 7）。
+插件实现和依赖的服务接口：`SessionSource`、`ForgeProvider`、`NavigationProvider`、`ProjectDetector` 等。插件之间只经这些接口交互，不依赖彼此（架构规则 7、[ADR 0025](../../docs/adr/0025.md)）。
 
 - 层：kernel 层。只依赖 kernel 层，不依赖 GPUI；任何层都可以依赖本 crate。
 - 设计文档：`docs/design/services.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。

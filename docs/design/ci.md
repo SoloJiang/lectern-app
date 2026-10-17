@@ -43,7 +43,7 @@
 python3 scripts/check_architecture.py
 ```
 
-规则 7（插件之间不直接依赖）在 kernel 定义出插件与接口 crate 后加入检查（[#8](https://github.com/SoloJiang/lectern-app/issues/8)）。
+规则 7（插件 crate 的依赖，见 [ADR 0025](../adr/0025.md)）的检查由 [#47](https://github.com/SoloJiang/lectern-app/issues/47) 加入。
 
 ## Lint
 
