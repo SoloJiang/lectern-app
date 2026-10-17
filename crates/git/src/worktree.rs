@@ -7,10 +7,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use lectern_platform::{Read, SafeError, SafeRoot};
 
+use crate::compare::{self, Base, CompareState, Refresh, Subject};
 use crate::handle::Handle;
 use crate::repo::read_head;
 use crate::tracked::{self, EntryLimits, TrackedPaths};
-use crate::{GitError, HeadState, Oid, Repo, RepoPath, WorktreeId, WorktreeInfo};
+use crate::{
+    ChangeSet, GitError, HeadState, Limits, Oid, Repo, RepoPath, WorktreeId, WorktreeInfo,
+};
 
 /// One worktree: its own HEAD, index and files. `Send + Sync`; cloning is
 /// an `Arc` clone. Holds the worktree root's `SafeRoot` and the last
@@ -26,6 +29,9 @@ struct Inner {
     root: SafeRoot,
     /// Held only within one call, never across calls.
     tracked: Mutex<Option<Arc<TrackedPaths>>>,
+    /// The parsed index, stat cache and conversion baseline of `changes`
+    /// and `refresh`. Held only within one call.
+    compare: Mutex<CompareState>,
 }
 
 /// What [`Worktree::read_file`] found. Raw bytes, no conversion.
@@ -57,6 +63,7 @@ impl Worktree {
             info,
             root,
             tracked: Mutex::new(None),
+            compare: Mutex::new(CompareState::default()),
         })))
     }
 
@@ -146,6 +153,47 @@ impl Worktree {
             }
             Err(SafeError::Io(_)) => WorktreeFile::Unavailable(Unavailable::Unreadable),
         })
+    }
+
+    /// The worktree against `base`, untracked files included
+    /// (docs/design/git.md「工作区比较」). Writes neither the index nor the
+    /// object database, runs no external program and reads worktree files
+    /// only through `SafeRoot`; files whose index stat matches (and isn't
+    /// racy) aren't read.
+    pub fn changes(
+        &self,
+        base: Base,
+        limits: &Limits,
+        cancel: &AtomicBool,
+    ) -> Result<Arc<ChangeSet>, GitError> {
+        compare::run(&self.subject(), &base, limits, cancel, None)
+    }
+
+    /// A new change set for what `prev` (a `changes` of this worktree)
+    /// compared, with the same base and limits. `Refresh::Paths` compares
+    /// only those paths again and takes everything else from `prev`; when
+    /// HEAD (for `Base::Head`) or the index changed since `prev`, or a path
+    /// is a `.gitignore` / `.gitattributes`, it compares everything, as
+    /// `Refresh::Full` does. Unchanged worktree contents are shared with
+    /// `prev`, not read again.
+    pub fn refresh(
+        &self,
+        prev: &Arc<ChangeSet>,
+        what: Refresh<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<Arc<ChangeSet>, GitError> {
+        compare::refresh(&self.subject(), prev, what, cancel)
+    }
+
+    fn subject(&self) -> Subject<'_> {
+        Subject {
+            root: &self.0.root,
+            root_path: &self.0.info.root,
+            git_dir: &self.0.info.git_dir,
+            id: &self.0.info.id,
+            repo: &self.0.repo,
+            state: &self.0.compare,
+        }
     }
 
     /// Reads only the checksum at the end of the index file: no entries

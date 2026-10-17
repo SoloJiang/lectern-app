@@ -90,7 +90,6 @@ gix = { version = "=0.88.0", default-features = false, features = [
     "revision",
     "attributes",
     "excludes",
-    "dirwalk",
     "blob-diff",
     "pack-cache-lru-static",
     "pack-cache-lru-dynamic",

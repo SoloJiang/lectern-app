@@ -1,0 +1,20 @@
+---
+source: crates/git/src/compare/tests.rs
+expression: "lines(&changes(&t)).join(\"\\n\")"
+---
+A 01-untracked (untracked) - -> f:5ea2ed4 text(+1,-0)
+A 02-add-rm - -> f:19d9cc8 staged-only staged=f:19d9cc8
+A 03-added - -> f:19d9cc8 text(+1,-0)
+A 04-added-changed - -> f:5ea2ed4 text(+1,-0) staged=f:19d9cc8
+A 05-added-socket - -> s:unsupported no-diff staged=f:19d9cc8
+D 06-removed f:df967b9 -> - text(+0,-1)
+D 07-rm-cached f:df967b9 -> - text(+0,-1)
+A 07-rm-cached (untracked) - -> f:df967b9 text(+1,-0)
+D 08-unstaged-rm f:df967b9 -> - text(+0,-1) staged=f:df967b9
+M 10-unstaged f:df967b9 -> f:5ea2ed4 text(+1,-1) staged=f:df967b9
+T 11-socket f:df967b9 -> s:unsupported no-diff staged=f:df967b9
+D 12-staged-rm f:df967b9 -> - text(+0,-1) staged=f:19d9cc8
+M 13-staged f:df967b9 -> f:19d9cc8 text(+1,-1)
+M 14-staged-reverted f:df967b9 -> f:19d9cc8 staged-only staged=f:19d9cc8
+M 15-staged-changed f:df967b9 -> f:5ea2ed4 text(+1,-1) staged=f:19d9cc8
+T 16-staged-socket f:df967b9 -> s:unsupported no-diff staged=f:19d9cc8

@@ -24,5 +24,9 @@ tempfile = { workspace = true, optional = true }
 insta.workspace = true
 tempfile.workspace = true
 
+# mkfifo for the FIFO test (already in the lock file through platform).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix.workspace = true
+
 [lints]
 workspace = true

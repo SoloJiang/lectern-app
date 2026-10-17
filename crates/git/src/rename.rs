@@ -193,7 +193,9 @@ pub(crate) fn detect(
             if (!is_regular(src.mode) || !is_regular(dst.mode)) && src.mode != dst.mode {
                 continue;
             }
-            if used[s] {
+            // A deletion and an addition of the same path (the worktree
+            // comparison's `git rm --cached p`) never pair.
+            if used[s] || src.path == dst.path {
                 continue;
             }
             let score = 1 + u8::from(basename(src.path) == basename(dst.path));
@@ -273,6 +275,9 @@ pub(crate) fn detect(
     // Each pair is independent (both sides are unique); sort for determinism.
     basename_pairs.sort_unstable();
     for (s, d) in basename_pairs {
+        if sources[s].path == dests[d].path {
+            continue;
+        }
         if cancel.load(AtomicOrdering::Relaxed) {
             return Err(GitError::Cancelled);
         }
@@ -338,6 +343,9 @@ pub(crate) fn detect(
         let mut best = [empty; CANDIDATES_PER_DEST];
         let dst_sig = signature(false, d)?;
         for &s in &remaining_sources {
+            if sources[s].path == dests[d].path {
+                continue;
+            }
             let src_sig = signature(true, s)?;
             let candidate = Slot {
                 dest: Some(d),

@@ -42,6 +42,23 @@ pub struct IndexEntry {
     /// 0 unconflicted, 1 base, 2 ours, 3 theirs.
     pub stage: u8,
     pub skip_worktree: bool,
+    /// The stat `git add` records; all zeros when None.
+    pub stat: Option<IndexStat>,
+    /// `git add -N`.
+    pub intent_to_add: bool,
+}
+
+/// A file's `lstat` as an index entry records it.
+#[derive(Clone, Copy, Debug)]
+pub struct IndexStat(gix::index::entry::Stat);
+
+impl IndexStat {
+    /// The current `lstat` of `path` (not following a symbolic link).
+    pub fn of(path: &Path) -> IndexStat {
+        let meta = gix::index::fs::Metadata::from_path_no_follow(path)
+            .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        IndexStat(gix::index::entry::Stat::from_fs(&meta).unwrap())
+    }
 }
 
 impl IndexEntry {
@@ -52,6 +69,8 @@ impl IndexEntry {
             oid,
             stage: 0,
             skip_worktree: false,
+            stat: None,
+            intent_to_add: false,
         }
     }
 }
@@ -336,8 +355,12 @@ impl TestRepo {
             if entry.skip_worktree {
                 flags |= Flags::SKIP_WORKTREE | Flags::EXTENDED;
             }
+            if entry.intent_to_add {
+                flags |= Flags::INTENT_TO_ADD | Flags::EXTENDED;
+            }
+            let stat = entry.stat.map_or_else(Default::default, |s| s.0);
             state.dangerously_push_entry(
-                Default::default(),
+                stat,
                 entry.oid.to_gix(),
                 flags,
                 mode,
@@ -376,6 +399,104 @@ impl TestRepo {
     /// Writes a file under the main worktree, creating directories.
     pub fn write_file(&self, rel: &str, content: &[u8]) {
         write(&self.root().join(rel), content);
+    }
+
+    /// The index entry `git add` would record for the main worktree's file
+    /// or symbolic link at `rel`, without conversions: its blob (written to
+    /// the object database), mode and stat.
+    pub fn add(&self, rel: &str) -> IndexEntry {
+        let path = self.root().join(rel);
+        let meta = std::fs::symlink_metadata(&path)
+            .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        let (mode, content) = if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&path).unwrap();
+            (Mode::Symlink, target.into_os_string().into_encoded_bytes())
+        } else {
+            #[cfg(unix)]
+            let executable = {
+                use std::os::unix::fs::PermissionsExt;
+                meta.permissions().mode() & 0o100 != 0
+            };
+            #[cfg(not(unix))]
+            let executable = false;
+            let mode = if executable {
+                Mode::Executable
+            } else {
+                Mode::File
+            };
+            (mode, std::fs::read(&path).unwrap())
+        };
+        IndexEntry {
+            stat: Some(IndexStat::of(&path)),
+            ..IndexEntry::new(rel, mode, self.blob(&content))
+        }
+    }
+
+    /// Sets the modification time of the main worktree's file at `rel`.
+    pub fn set_mtime(&self, rel: &str, time: std::time::SystemTime) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(self.root().join(rel))
+            .unwrap();
+        file.set_modified(time).unwrap();
+    }
+
+    /// Moves the file's modification time an hour back, so that an index
+    /// written afterwards doesn't treat its entry as racy.
+    pub fn backdate(&self, rel: &str) {
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        self.set_mtime(rel, hour_ago);
+    }
+
+    /// Removes a file, symbolic link or directory under the main worktree.
+    pub fn remove(&self, rel: &str) {
+        let path = self.root().join(rel);
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        if meta.is_dir() {
+            std::fs::remove_dir_all(path).unwrap();
+        } else {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    /// Writes the `files/` of a worktree fixture (`tests/fixtures/README.md`)
+    /// into the main worktree. Returns their paths, sorted.
+    pub fn import_worktree_fixture(&self, dir: &Path) -> Vec<String> {
+        fn visit(base: &Path, dir: &Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(base, &path, out);
+                } else {
+                    let rel = path.strip_prefix(base).unwrap();
+                    out.push(rel.to_str().unwrap().replace('\\', "/"));
+                }
+            }
+        }
+        let files = dir.join("files");
+        let mut paths = Vec::new();
+        visit(&files, &files, &mut paths);
+        paths.sort();
+        let mut out = Vec::with_capacity(paths.len());
+        for rel in &paths {
+            // `.git*` files are stored as `dot-git*`, where they don't apply
+            // to the fixture itself in this repository.
+            let (dir, base) = rel
+                .rsplit_once('/')
+                .map_or(("", rel.as_str()), |(d, b)| (d, b));
+            let base = base
+                .strip_prefix("dot-git")
+                .map_or_else(|| base.to_owned(), |rest| format!(".git{rest}"));
+            let name = if dir.is_empty() {
+                base
+            } else {
+                format!("{dir}/{base}")
+            };
+            self.write_file(&name, &std::fs::read(files.join(rel)).unwrap());
+            out.push(name);
+        }
+        out.sort();
+        out
     }
 
     /// Imports a directory fixture made by `tests/fixtures/scripts/*.sh`

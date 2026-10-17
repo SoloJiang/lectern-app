@@ -227,7 +227,8 @@ fn numstat_matches_git() {
     let mut names: Vec<_> = std::fs::read_dir(fixtures())
         .unwrap()
         .map(|e| e.unwrap())
-        .filter(|e| e.file_type().unwrap().is_dir() && e.file_name() != "scripts")
+        // Tree fixtures have a `trees` file; worktree fixtures don't.
+        .filter(|e| e.file_type().unwrap().is_dir() && e.path().join("trees").is_file())
         .map(|e| e.file_name().into_string().unwrap())
         .collect();
     names.sort();

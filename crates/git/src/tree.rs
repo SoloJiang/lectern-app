@@ -75,6 +75,45 @@ pub(crate) fn walk(
     Ok(())
 }
 
+/// What a path names in a tree.
+pub(crate) enum Found {
+    Tree(Oid),
+    File(Mode, Oid),
+}
+
+/// Looks `path` (`/`-separated, no empty components) up under `tree`; None
+/// when a component is missing or isn't a directory.
+pub(crate) fn lookup(handle: &Handle, tree: Oid, path: &[u8]) -> Result<Option<Found>, GitError> {
+    let hash = tree.kind();
+    let mut current = tree;
+    let mut components = path.split(|&b| b == b'/').peekable();
+    while let Some(name) = components.next() {
+        let object = handle
+            .try_find_object(current.to_gix())
+            .map_err(GitError::from_gix)?
+            .ok_or(GitError::ObjectMissing(current))?;
+        if object.kind != gix::objs::Kind::Tree {
+            return Err(GitError::Corrupt(format!(
+                "{current} is a {}, not a tree",
+                object.kind
+            )));
+        }
+        let decoded = gix::objs::TreeRef::from_bytes(&object.data, hash.to_gix())
+            .map_err(|err| GitError::Corrupt(format!("tree {current}: {err}")))?;
+        let Some(entry) = decoded.entries.iter().find(|e| e.filename == name) else {
+            return Ok(None);
+        };
+        let oid = Oid::from_gix(entry.oid);
+        match (Mode::from_tree(entry.mode), components.peek().is_some()) {
+            (None, true) => current = oid,
+            (None, false) => return Ok(Some(Found::Tree(oid))),
+            (Some(mode), false) => return Ok(Some(Found::File(mode, oid))),
+            (Some(_), true) => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
 /// Counting hook: how many tree walks (sparse expansions, `tree_paths`)
 /// this thread started.
 #[cfg(test)]

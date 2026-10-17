@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Value};
 use lectern_git::testing::{self, IndexEntry, TestHead, TestRepo};
-use lectern_git::{EntryLimits, GitError, Limits, Mode, Oid, WorktreeId};
+use lectern_git::{Base, EntryLimits, GitError, Limits, Mode, Oid, Refresh, RepoPath, WorktreeId};
+
+use crate::git_worktree as worktree;
 
 const FILES: usize = 728;
 const WORKTREES: usize = 11;
@@ -212,4 +214,147 @@ fn diff_50_warm(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     fixture.check(&*repo.diff_trees(old, new, &limits, &cancel)?)?;
     let time = ctx.time(|| repo.diff_trees(black_box(old), black_box(new), &limits, &cancel));
     Ok(vec![Measured::new("git/diff_50_warm", Value::Time(time))])
+}
+
+/// `Worktree::changes(Base::Head)` on a clean worktree of 728 tracked files
+/// in 11 worktrees: every file skipped by stat, plus the untracked walk.
+/// The same `Worktree` each time (its parsed index is reused).
+pub const CHANGES_CLEAN: Bench = Bench {
+    id: "git/changes_clean",
+    run: changes_clean,
+};
+
+fn changes_clean(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let t = worktree::clean(ctx.scale(FILES, 60), ctx.scale(50, 5), 0);
+    let wt = worktree::main_worktree(&t)?;
+    let cancel = AtomicBool::new(false);
+    let limits = Limits::default();
+    worktree::expect(&*worktree::changes(&wt, &limits, &cancel)?, 0, 0)?;
+    let time = ctx.time(|| wt.changes(Base::Head, &limits, &cancel));
+    Ok(vec![Measured::new("git/changes_clean", Value::Time(time))])
+}
+
+/// The same with 50 files of about 300 lines edited in 10 lines: those 50
+/// are read through `SafeRoot`, converted and hashed every time (their
+/// stat differs from the index and no earlier change set is held); the
+/// hunks come from the cache after the first call.
+pub const CHANGES_50: Bench = Bench {
+    id: "git/changes_50",
+    run: changes_50,
+};
+
+fn changes_50(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let modules = ctx.scale(50, 5);
+    let t = worktree::clean(ctx.scale(FILES, 60), modules, 0);
+    worktree::edit_modules(&t, modules, 0, false);
+    let wt = worktree::main_worktree(&t)?;
+    let cancel = AtomicBool::new(false);
+    let limits = Limits::default();
+    worktree::expect(&*worktree::changes(&wt, &limits, &cancel)?, modules, 0)?;
+    let time = ctx.time(|| wt.changes(Base::Head, &limits, &cancel));
+    Ok(vec![Measured::new("git/changes_50", Value::Time(time))])
+}
+
+/// The 50-file worktree with its change set, the edits more than a second
+/// old (so a refresh holding the change set takes them from the stat cache).
+struct Refreshing {
+    t: TestRepo,
+    wt: lectern_git::Worktree,
+    prev: std::sync::Arc<lectern_git::ChangeSet>,
+    modules: usize,
+}
+
+impl Refreshing {
+    fn new(ctx: &Ctx) -> Result<Refreshing, BenchError> {
+        let modules = ctx.scale(50, 5);
+        let t = worktree::clean(ctx.scale(FILES, 60), modules, 0);
+        worktree::edit_modules(&t, modules, 0, true);
+        let wt = worktree::main_worktree(&t)?;
+        let prev = worktree::changes(&wt, &Limits::default(), &AtomicBool::new(false))?;
+        worktree::expect(&prev, modules, 0)?;
+        Ok(Refreshing {
+            t,
+            wt,
+            prev,
+            modules,
+        })
+    }
+}
+
+/// `refresh(Full)` of the 50-file change set, holding it: everything is
+/// compared again, the edited files from the stat cache.
+pub const REFRESH_FULL: Bench = Bench {
+    id: "git/refresh_full",
+    run: refresh_full,
+};
+
+fn refresh_full(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let r = Refreshing::new(ctx)?;
+    let cancel = AtomicBool::new(false);
+    worktree::expect(
+        &*r.wt.refresh(&r.prev, Refresh::Full, &cancel)?,
+        r.modules,
+        0,
+    )?;
+    let time = ctx.time(|| r.wt.refresh(&r.prev, Refresh::Full, &cancel));
+    Ok(vec![Measured::new("git/refresh_full", Value::Time(time))])
+}
+
+/// `refresh(Paths)` of one file edited just before each sample, from the
+/// previous change set.
+pub const REFRESH_ONE: Bench = Bench {
+    id: "git/refresh_one",
+    run: refresh_one,
+};
+
+fn refresh_one(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use std::cell::{Cell, RefCell};
+
+    let r = Refreshing::new(ctx)?;
+    let cancel = AtomicBool::new(false);
+    let path = RepoPath::new(worktree::module_path(0).as_bytes())
+        .ok_or_else(|| BenchError::new("module path"))?;
+    let held = RefCell::new(std::sync::Arc::clone(&r.prev));
+    let round = Cell::new(0usize);
+    let time = ctx.time_with_setup(
+        || {
+            round.set(round.get() + 1);
+            let mut content = worktree::module(0, 0, true);
+            content.extend_from_slice(format!("// round {}\n", round.get()).as_bytes());
+            r.t.write_file(&worktree::module_path(0), &content);
+        },
+        |()| -> Result<(), GitError> {
+            let next = r.wt.refresh(
+                &held.borrow(),
+                Refresh::Paths(std::slice::from_ref(&path)),
+                &cancel,
+            )?;
+            *held.borrow_mut() = next;
+            Ok(())
+        },
+    );
+    worktree::expect(&held.borrow(), r.modules, 0)?;
+    Ok(vec![Measured::new("git/refresh_one", Value::Time(time))])
+}
+
+/// 10 000 untracked files, past the total limit of 5000 files: the rest
+/// are `Listed`.
+pub const CHANGES_CAPPED: Bench = Bench {
+    id: "git/changes_capped",
+    run: changes_capped,
+};
+
+fn changes_capped(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let files = ctx.scale(10_000, 60);
+    let limits = Limits {
+        total_files: ctx.scale(5000, 30),
+        ..Limits::default()
+    };
+    let t = worktree::untracked(files);
+    let wt = worktree::main_worktree(&t)?;
+    let cancel = AtomicBool::new(false);
+    let listed = files - limits.total_files;
+    worktree::expect(&*worktree::changes(&wt, &limits, &cancel)?, files, listed)?;
+    let time = ctx.time(|| wt.changes(Base::Head, &limits, &cancel));
+    Ok(vec![Measured::new("git/changes_capped", Value::Time(time))])
 }
