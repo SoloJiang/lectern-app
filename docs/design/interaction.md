@@ -27,10 +27,11 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 | 画板 | 屏幕 | 要点 |
 |---|---|---|
 | 01 | Welcome | 仿 Xcode 欢迎窗口：左侧应用名、Open Folder（⌘O）/ Clone、语言选择；右侧最近项目，以及从 Claude Code 与 Codex 历史里发现、尚未打开过的文件夹 |
-| 02 | Overview | 侧栏：Overview、Sessions、Packages、Worktrees / Files / Merge Requests，底部 Usage 额度条。主区：大标题一句话说明待审数量，下面是分组列表 Needs Review（每行：agent 圆点、标题、状态与信号两行灰字、已看进度环）、Outside Any Session、Recently Done |
-| 03 | Review（可交互原型） | 顶部会话简报；按轮次的改动叙事；文件头圆形勾选；行内审阅意见；Drifted 提示；右侧检查器（Files / Conversation）；点符号滑出上下文面板（Callers / Tests / History）；底部浮条发送审阅意见 |
-| 04 | Worktrees | 分组列表 Active / Idle；右侧检查器对比所选 worktree 与 main，并提示与其他 worktree 是否有文件重叠 |
-| 05 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；当前项目：项目合计、按分支明细（P3 起按 MR，未开 MR 的分支一并列出；「不属于任何 MR」单独一行）和按模型明细（普通文件夹没有分支明细，按模型明细照常显示）；所有项目：各项目合计与占比，加上「其他」一行（还没有打开对应项目的用量）；标为「路径已不存在」的项目行有「合并到…」操作（行尾按钮与右键菜单），在弹出的列表里选择现在的项目，确认后以前的用量并入它，合并过的行显示「已合并」并可以撤销；同一路径上身份无法确定、暂列为临时项目的行（根提交或主远端地址变了，又没有代码平台的仓库 ID）有「是同一个项目」和「是新项目」两个确认操作，同样可以撤销；7D / 14D / 30D |
+| 02 | Overview | 侧栏：Overview、Sessions、Packages、Worktrees / Files / Merge Requests，底部 Usage 入口（本项目最近 7 天的 token 和最紧张的额度条）。主区：大标题一句话说明待审数量，下面是分组列表 Needs Review（每行：agent 圆点、标题、状态与信号两行灰字、已看进度环）、Outside Any Session、Recently Done |
+| 03 | Review（可交互原型） | 顶部会话简报：规则生成的「值得先看」，Analyze 的进行中、可取消与结果状态，本会话改到的分支用量；按轮次的改动叙事；文件头圆形勾选；行内审阅意见；Drifted 提示；右侧检查器（Files / Conversation）；点符号滑出上下文面板（Callers / Tests / History）；底部浮条发送审阅意见 |
+| 04 | Worktrees | 分组列表 Active / Idle，每行显示分支的累计 token（有 MR 时为 MR 用量）；右侧检查器显示分支用量，对比所选 worktree 与 main，并提示与其他 worktree 是否有文件重叠 |
+| 05 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；当前项目：项目合计、按分支明细（P3 起按 MR，未开 MR 的分支一并列出；「不属于任何 MR」单独一行）和按模型明细（普通文件夹没有分支明细，按模型明细照常显示）；所有项目：各项目合计与占比，加上「其他」一行（还没有打开对应项目的用量）；标为「路径已不存在」的项目行有「合并到…」操作（行尾按钮与右键菜单），在弹出的列表里选择现在的项目，确认后以前的用量并入它，合并过的行显示「已合并」并可以撤销；同一路径上身份无法确定、暂列为临时项目的行（根提交或主远端地址变了，又没有代码平台的仓库 ID）有「是同一个项目」和「是新项目」两个确认操作，同样可以撤销；7D / 14D / 30D；只显示 token，不显示费用 |
+| 06 | Merge Request（P3） | MR 的累计 token，编写与审阅分开，按会话列出明细；PR 里 pulls.review 的共享分析标为「可能过期」，只用来给文件分组，未验证作者的分析折叠；按共享分析分组的文件列表和审阅入口 |
 
 ## 窗口结构
 

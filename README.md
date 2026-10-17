@@ -31,12 +31,13 @@ Lectern shows a session in the order it happened. For each turn you see your pro
 While reviewing, you can:
 
 - **Check the impact of a change.** The context panel lists the callers and tests of each changed symbol, and marks callers that the agent did not update. Results come from a local index. For Java, more precise results are available from an optional language server that you enable yourself.
+- **Ask for an analysis.** The brief at the top of a session lists what to check first. It is built from local rules and costs no tokens. Analyze asks the Claude Code or Codex already signed in on your Mac to read the change and point out what's critical. It runs only when you ask, in a sandbox where it can read the change but can't write files or reach other hosts.
 - **Send review notes to the agent.** You write notes on specific lines as you read. Lectern collects them and sends them to the session in one batch, with file paths and line numbers, so the agent can address them in its next turn.
 - **Skip what doesn't need review.** Changes that only affect formatting are collapsed. Files you have marked as reviewed keep that mark.
 
 ## Parallel worktrees
 
-When several agents run at the same time in separate git worktrees, Lectern lists the worktrees in two groups, Active and Idle. Selecting a worktree opens it in the inspector, which compares it with main: the files changed, the number of commits ahead, and whether any of those files are also changed in another worktree.
+When several agents run at the same time in separate git worktrees, Lectern lists the worktrees in two groups, Active and Idle. Selecting a worktree opens it in the inspector, which compares it with main: the files changed, the number of commits ahead, the tokens spent on the branch, and whether any of those files are also changed in another worktree.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">
@@ -45,7 +46,7 @@ When several agents run at the same time in separate git worktrees, Lectern list
 
 ## Token usage and limits
 
-Lectern counts tokens per project and per merge request. Project totals cover the last 7, 14 or 30 days. An MR's total adds up every session and turn that went into it; branches without an MR yet are counted the same way. Per-session and per-turn numbers remain available as a breakdown. Lectern also shows how much of your Codex and Claude Code usage limits you have used. Claude Code's status line sends its data to Lectern, so its limit windows update in real time.
+Lectern counts tokens per project and per merge request. Project totals cover the last 7, 14 or 30 days. An MR's total adds up every session and turn that went into it; branches without an MR yet are counted the same way. Per-session and per-turn numbers remain available as a breakdown, and an MR's tokens are split into writing and review (Lectern's own analyses). Lectern also shows how much of your Codex and Claude Code usage limits you have used. Claude Code's status line sends its data to Lectern, so its limit windows update in real time.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/usage-dark.png">
