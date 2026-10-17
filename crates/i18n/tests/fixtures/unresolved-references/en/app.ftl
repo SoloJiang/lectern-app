@@ -5,3 +5,4 @@ app-c = { app-hello.nope }
 app-d = { app-attrs-only }
 app-attrs-only =
     .label = L
+-unused = { app-gone }

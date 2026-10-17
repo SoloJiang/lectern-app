@@ -365,6 +365,7 @@ pub fn compile(sources: &[Source]) -> Result<Compiled, Vec<Error>> {
             sources,
             index,
             errors: &mut errors,
+            reached: std::collections::HashSet::new(),
         };
         let mut table = Vec::with_capacity(slots.len());
         for (id, attr) in &slots {
@@ -392,6 +393,12 @@ pub fn compile(sources: &[Source]) -> Result<Compiled, Vec<Error>> {
             let nodes = lowerer.entry(src, &name, anchor, pattern);
             let vars = lowerer.vars(src, &name, anchor, &nodes);
             table.push(Some((nodes, vars)));
+        }
+        // Terms no message references are validated on their own.
+        let mut terms: Vec<_> = index.terms.values().copied().collect();
+        terms.sort_by_key(|(src, term)| (*src, term.id.name));
+        for (src, term) in terms {
+            lowerer.term(src, term);
         }
         lowered.push(table);
     }
@@ -830,6 +837,8 @@ struct Lowerer<'a, 'e> {
     sources: &'a [Source],
     index: &'a LocaleIndex<'a>,
     errors: &'e mut Errors,
+    /// Messages and terms already inlined through a reference.
+    reached: std::collections::HashSet<String>,
 }
 
 impl<'a> Lowerer<'a, '_> {
@@ -864,6 +873,23 @@ impl<'a> Lowerer<'a, '_> {
         let mut stack = vec![name.to_owned()];
         self.pattern(&mut out, pattern, &scope, &mut stack);
         finish(out)
+    }
+
+    /// Lowers a term no message references, only to report errors inside it.
+    fn term(&mut self, src: usize, term: &'a ast::Term<&'a str>) {
+        let key = format!("-{}", term.id.name);
+        if self.reached.contains(&key) {
+            return;
+        }
+        let scope = Scope {
+            src,
+            key: &key,
+            anchor: term.id.name,
+            in_term: true,
+        };
+        let mut out = Vec::new();
+        let mut stack = vec![key.clone()];
+        self.pattern(&mut out, &term.value, &scope, &mut stack);
     }
 
     fn pattern(
@@ -1050,6 +1076,7 @@ impl<'a> Lowerer<'a, '_> {
             self.error(scope, at, format!("circular reference: {chain}"));
             return;
         }
+        self.reached.insert(target.clone());
         let inner = Scope {
             key: &target,
             ..inner

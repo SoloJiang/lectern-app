@@ -5,3 +5,4 @@ app-c = C
 app-d = D
 app-attrs-only =
     .label = L
+-unused = { app-gone }

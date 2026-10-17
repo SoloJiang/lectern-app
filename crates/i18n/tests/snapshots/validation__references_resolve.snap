@@ -6,3 +6,5 @@ en/app.ftl:2: app-a: unknown message `app-missing`
 en/app.ftl:3: app-b: unknown term `-missing-term`
 en/app.ftl:4: app-c: message `app-hello` has no attribute `nope`
 en/app.ftl:5: app-d: message `app-attrs-only` has no value, only attributes
+en/app.ftl:8: -unused: unknown message `app-gone`
+zh-CN/app.ftl:8: -unused: unknown message `app-gone`
