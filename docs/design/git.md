@@ -301,6 +301,8 @@ impl ChangeSet {
     pub fn totals(&self) -> &Totals;               // 文件数、已知的增删行数、各类截断的数量
     pub fn fingerprint(&self) -> Fingerprint;
     /// 一个文件两侧的文本。基准一侧按 OID 读对象库；工作区一侧是比较时读到的那份内容，不重新读工作区。
+    /// 新一侧是 `NotRetained` 时，`FileTexts` 的这一侧为 `NotRetained`，视图显示「内容过多，未保留」，
+    /// 不按路径重读（重读的内容可能已经不是比较时的那份）；要看当前内容走完整文件阅读（⇧⌘O）。
     pub fn texts(&self, repo: &Repo, file: usize) -> Result<FileTexts, GitError>;
 }
 ```
@@ -435,6 +437,9 @@ pub enum Unavailable {
     NestedRepository,    // 未跟踪的目录里有自己的 `.git`
     Missing,             // 对象库里没有（如部分克隆）
     Unreadable,          // 读取失败
+    /// 超过改动集保留工作区内容的上限（128 MiB）：比较时读过、算过 OID，但字节没有保留。
+    /// `oid` 是当时规范内容的 blob OID，指纹和已看状态用它；`Detail` 为 `Truncated`（增删行数已知）。
+    NotRetained { oid: Oid },
 }
 
 pub enum RawIdentity {
@@ -486,7 +491,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 没有 | 没有 | 不是跟踪的路径；工作区里有文件时按第 3 步作为未跟踪文件 |
 
 0. **工作区里没有**：`SafeRoot::stat` 报告路径不存在（含中间某一级目录不存在）时，不做后面的比较：基准里有这个路径就是 `Deleted`（未暂存的 `rm`），基准里也没有（暂存了新增后又删掉文件）就不是改动。`Unavailable::Missing` 只用于对象库里缺对象，不用于这种情况。
-1. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean（条目的 mtime 早于 index 文件的 mtime）时，工作区内容就是 index 里的 blob，不读文件。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
+1. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时，工作区内容就是 index 里的 blob，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
 2. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）的文件不转换，标为 `Filtered`，不按原始字节生成 diff。
 3. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给第 0–2 步处理过、工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每个文件都是 `Added` 且 `untracked = true`，内容按第 2 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
 4. **重命名**：删除与新增之间先按 OID 找精确重命名，再按相似度（不低于 50%，候选不超过 1000 对，即 `diff.renameLimit` 的默认值）找重命名。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
@@ -498,7 +503,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 - `skip_worktree` 的条目（含从 sparse 目录展开的条目）不 stat、不读工作区，工作区一侧取 index 里的 OID：与基准相同时不是改动，不同时按已暂存的改动处理。`git add -N` 的条目按新增处理。
 - 路径的大小写与 Unicode 规范化按仓库的 `core.ignoreCase`、`core.precomposeUnicode`（gix 的文件系统能力）。
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
-- 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。
+- 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。超过保留上限的文件没有字节可用，明确标为 `NotRetained`：`overlay` 把它作为 `Omitted` 给出（带着同一个 `Content`），Analyze 标为部分内容未提供，指纹两边都用它的 `oid`，不落盘另存。
 
 `Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID），stat 没变时不重新读取和计算；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存。
 
@@ -511,7 +516,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 整体：按路径顺序，全部改动文件（含二进制、只改模式、`TooLarge`、`NoDiff`）计入文件数，生成的 patch 计入字节数 | 5000 个文件、50 MB | 达到任一上限之后的文件为 `Listed`，`Totals` 记数量 |
 | 工作区单文件读取 | 64 MiB | `Content::Unhashed` |
 | 未跟踪文件枚举 | 20 000 个 | `Totals::untracked_capped = true`，指纹不完整 |
-| 改动集保留的工作区内容 | 128 MiB | 之后的文件丢弃内容，按 `Truncated` 处理 |
+| 改动集保留的工作区内容 | 128 MiB | 之后的文件不保留内容，新一侧为 `Unavailable::NotRetained`（见下） |
 | 词级 diff 的单行长度 | 1000 字节 | 整行高亮 |
 
 二进制判断与 git 相同：属性 `binary` 或 `-diff`，或任一侧前 8000 字节里有 NUL。上限都在 `Limits` 里，调用方可以调整；默认值写进 `bench` 的预算表。
@@ -528,7 +533,7 @@ pub struct Fingerprint {
 ```
 
 - 输入：格式版本号、基准树 OID，以及 `files` 里每一项的（路径、重命名的旧路径、状态、`untracked`、新旧模式、两侧的内容标识），按 `files` 的顺序，每个字段带长度前缀。
-- 内容标识：`Blob` 用 OID；`Unhashed` 用大小、mtime 和 inode，不在每次刷新时读超大文件；`Filtered` 用它的 `RawIdentity`；其余 `Unavailable` 用原因。
+- 内容标识：`Blob` 用 OID；`Unhashed` 用大小、mtime 和 inode，不在每次刷新时读超大文件；`Filtered` 用它的 `RawIdentity`；`NotRetained` 用它的 `oid`；其余 `Unavailable` 用原因。
 - 工作区改动集和 `from_written` 得到的改动集用同一套规则：没写进快照的条目在 `WrittenEntry` 里带回原来的 `Content`，所以快照没变时两者的指纹相同，过滤器文件的原始字节变了时指纹随之改变。
 - 在截断之前、对全部改动文件计算，被截断和只列出的文件也计入；只改可执行位也会改变指纹。
 - 由 `ChangeSet` 已有的数据算出，不再读工作区。Analyze 用 `from_written` 得到的改动集的指纹。
