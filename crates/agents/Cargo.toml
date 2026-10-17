@@ -24,5 +24,9 @@ serde_json = { workspace = true, features = ["raw_value"] }
 [dev-dependencies]
 insta.workspace = true
 
+[[test]]
+name = "perf_smoke"
+required-features = ["test-support"]
+
 [lints]
 workspace = true

@@ -761,7 +761,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - `just test -p lectern-agents` 里 `claude_*`、`incremental_*`、`reset_*`、`progress_*`、`source_*`、`subagent_*`、`usage_keys_*`、`tool_kind_*`、`format_*`、`resume_*`、`tail_*` 通过，快照已逐个看过；Claude Code 部分的 `inherited_*` 通过。
    - `crates/agents/tests/fixtures/claude-code/` 下每个版本目录都有 `SOURCE.md`。
    - `rg 'serde_json::Value' crates/agents/src` 只出现在测试代码里。
-   - `just bench` 的 `agents/parse_throughput`、`agents/append_4k` 达到「性能」里的目标。
+   - `agents/parse_throughput`、`agents/append_4k` 达到「性能」里的目标（`bench` 的设计文档合并之前，以 `crates/agents/tests/perf_smoke.rs` 里被忽略的测试运行，见「与设计的差异」）。
 3. **Codex 适配器**
    - `codex_*`、`codex_usage_stream_*`、`zst_*`、`decoded_*`、`inherited_*` 通过；`just deny` 通过（`ruzstd`）。
    - `agents/zst_throughput`、`agents/zst_load_decoded` 达标。
@@ -792,7 +792,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - `just check`、`just test`（Linux 上不依赖 GPUI 的全部 crate，395 个测试通过，2 个忽略）、`just doctest`、`just deny`、`python3 scripts/check_architecture.py` 全部通过；`rg gpui crates/agents/Cargo.toml` 没有结果；`rg 'serde_json::Value' crates/agents/src` 只出现在 `#[cfg(test)]` 的 `redact.rs`。
 - `just test -p lectern-agents`：64 个通过，1 个忽略（手动运行的 `redact_file_from_env`）。验收要求的前缀：`claude_*` 6 个（含 12 个快照：4 份 fixture 各自的 `Record` 序列、`TurnIndex`、`SessionSummary`，逐个看过）、`incremental_*` 2 个（每份 fixture 8 个种子的随机切分，含行中间，每段之后用随机的 `max_bytes` 读到末尾，游标经 `to_bytes` / `from_bytes` 和 serde 往返；记录、游标和用 `turns_after` 逐段追加的索引都与一次读完相同）、`reset_*` 4 个、`progress_*` 4 个（含现场生成的 16 MB 以上的行）、`source_*` 1 个、`subagent_*` 2 个、`usage_keys_*` 2 个、`tool_kind_*` 8 个（Claude Code 分类表每一行一个，表外工具名计数，结果状态）、`format_*` 8 个、`resume_*` 1 个、`tail_*` 10 个、`inherited_*` 3 个（Claude Code 的分叉与子 agent）。另有 `redact_*` 5 个（白名单脱敏工具）和行读取、游标状态编码、时间戳的单元测试。
 - `crates/agents/tests/fixtures/claude-code/2.1.302/SOURCE.md` 写明 fixtures 是合成的、模拟的版本和覆盖的记录。
-- `just bench`（Linux 容器，x86_64，release，单线程；不是预算规定的 M 系列）：`agents/parse_throughput` 296 MB/s（预算 ≥ 200 MB/s），`agents/append_4k` 0.014 ms（追加 4250 字节，预算 < 1 ms），都达标。fixtures 的行短（几百字节），比带大段工具结果的真实会话解析得慢，这个吞吐是偏保守的估计。
+- `cargo test -p lectern-agents --features test-support --release --test perf_smoke -- --ignored`（Linux 容器，x86_64，release，单线程；不是预算规定的 M 系列）：`agents/parse_throughput` 268–296 MB/s（预算 ≥ 200 MB/s），`agents/append_4k` 0.014 ms（追加 4250 字节，预算 < 1 ms），都达标。fixtures 的行短（几百字节），比带大段工具结果的真实会话解析得慢，这个吞吐是偏保守的估计。
 
 没有验证到的：第 3–4 步的验收条件；bench 没有在 macOS 上运行；没有拿真实的 Claude Code 日志验证（fixtures 是合成的，见下面「与设计的差异」）。
 
@@ -809,7 +809,8 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 
 第 2 步：
 
-- **fixtures 是合成的，脱敏的真实样本推迟。** 设计要求每个版本一份脱敏的真实样本；这一步的 `claude-code/2.1.302/` 全部按「外部格式」记下的记录形状和公开的 Claude Code JSONL 格式手工构造（占位文本、假 ID、假模型名，路径在 `/Users/dev/fixture/` 下），`SOURCE.md` 写明了这一点。人提供真实日志之后再补。字段白名单脱敏工具已经按设计实现为测试辅助（`src/redact.rs`，`#[cfg(test)]`）：保留结构、取值为枚举的字段、数字、时间戳和 token 数，ID 换成形状相同、同值同换的假 ID，路径移到 `/Users/dev/fixture/` 下、每级换成等长的占位名，文本换成等长的占位内容并保留解析器依赖的开头标记；在合成输入上做了单元测试，并验证脱敏前后的 fixtures 解析出同样的记录形状和计数。用被忽略的测试 `redact_file_from_env` 手动生成。
+- **fixtures 是合成的，脱敏的真实样本推迟。** 设计要求每个版本一份脱敏的真实样本；这一步的 `claude-code/2.1.302/` 全部按「外部格式」记下的记录形状和公开的 Claude Code JSONL 格式手工构造（占位文本、假 ID、假模型名，路径在 `/Users/dev/fixture/` 下），`SOURCE.md` 写明了这一点。人提供真实日志之后再补。字段白名单脱敏工具已经按设计实现为测试辅助（`src/redact.rs`，`#[cfg(test)]`）：保留结构、取值为枚举的字段、数字、时间戳和 token 数，ID 换成形状相同、同值同换的假 ID，路径移到 `/Users/dev/fixture/` 下、每级换成等长的占位名，文本换成等长的占位内容并保留解析器依赖的开头标记；在合成输入上做了单元测试，并验证脱敏前后的 fixtures 解析出同样的记录形状和计数。用被忽略的测试 `redact_file_from_env` 手动生成。脱敏只按结构字段保留取值：工具输入、`toolUseResult` 和 `tool_result` 的内容是任意 JSON，里面的 `name`、`type` 一类键也照常替换，工具名只在 `tool_use` 块上保留。
+- **未用真实日志验证的假设。** 适配器假定同一个会话文件里每条 `user` / `assistant` 记录的 `uuid` 只出现一次（压缩、续接复制进来的历史由「继承前缀」处理，`sessionId` 不同）。拿到真实样本后要核对这一点；如果上游会在同一文件里重写同一 `uuid` 的记录，再按 `uuid` 去重（解析器状态要随游标保存已见的 `uuid`）。
 - **库层，不实现 `SessionSource`。** 第 2 步交出「本 crate 的公开项」里的 `claude::ClaudeCode`：按会话文件读取、建索引、读正文、生成摘要；按 `SessionKey` 找文件、会话列表、`SessionsChanged` 和插件都在第 4 步。为此 `read` 返回 `Parsed`（`Batch` 加 `ParseStats`），`summarize` 返回摘要和计数，由第 4 步并进 `Diagnostics`。`source_*` 里「`SessionsChanged::source` 与键的 `source` 一致」随事件一起移到第 4 步；这一步测了键带提供者的来源 ID、另一个来源的游标从头读、用量键与来源无关。`tail_*` 里「已在增量读取的文件不再读末尾」是第 4 步发现时的选择；这一步提供 `activity(cursor)`，并测了它与读末尾的结果相同。「数据流与线程」第 7 步（`read` 顺带更新内存与 `cache` 里的索引）同样在第 4 步，这一步提供 `turns_after` 从已有索引的游标继续。
 - **`reset` 的一批游标可以小于 `from`。** 「游标与批量读取」原来写 `at_end` 为 false 时游标一定大于 `from`；从头回放的第一批做不到，已在上文改为 reset 的一批例外。`services` 里 `Batch::at_end` 的文档注释还是旧说法，留给下一个改 `services` 的 PR 一并改。
 - **表外工具名的计数在 `ParseStats::unknown_tools`。** `Diagnostics` 没有这一项，`services` 不在这一步改动；它只进日志，不使格式变成 `Partial`（没有记录被跳过）。所有归入 `Other` 的名字都计数，最多 32 种。
@@ -827,4 +828,4 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - **`serde_json` 打开 `raw_value` feature。** 不是新依赖：工具输入以借用的原样 JSON 保留，只有分类表里的工具才解析，`load` 原样交出。没有新增依赖，`just deny` 通过。
 - **`testing::parse_file`。** Codex 在第 3 步之前返回 `Unrecognized`；单元测试里不打开 `test-support` 也能用。
 - **插件标记。** ADR 0025 规定在第一个实现 `Plugin` 的 PR 里加 `plugin = true`，所以这一步不加，第 4 步加。
-- **bench 的形式。** `bench` crate 还没有设计文档和基准框架；这一步加了一个 `harness = false` 的 `benches/agents.rs`，打印实测值和预算，超出时以非零状态退出。`agents/parse_throughput` 用的是重复拼接到 50 MB 的合成 fixtures。
+- **bench 的形式。** `bench` crate 的设计文档（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）还没有写，按 `crates/bench/AGENTS.md` 不能先加基准代码。这一步把 `agents/parse_throughput`、`agents/append_4k` 写成 `crates/agents/tests/perf_smoke.rs` 里被忽略的测试（`required-features = ["test-support"]`），打印实测值和预算，超出时失败；`bench` 的设计文档合并后再移进 `lectern-bench`。`agents/parse_throughput` 用的是重复拼接到 50 MB 的合成 fixtures。

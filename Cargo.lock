@@ -3272,10 +3272,6 @@ dependencies = [
 [[package]]
 name = "lectern-bench"
 version = "0.0.0"
-dependencies = [
- "lectern-agents",
- "lectern-services",
-]
 
 [[package]]
 name = "lectern-cache"

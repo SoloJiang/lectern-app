@@ -35,9 +35,12 @@ const KEEP: &[&str] = &[
     "agentType",
     "level",
     "status",
-    "name",
     "media_type",
 ];
+
+/// 值是任意 JSON 的键（工具输入、工具结果）：里面的字符串一律不按 `KEEP` 保留，`name`、`type` 这类键也可能装着用户内容。
+/// `tool_result` 块的 `content` 同样按任意内容处理。ID 与路径仍按各自的规则替换。
+const PAYLOADS: &[&str] = &["input", "toolUseResult"];
 
 /// 值是 ID 的键。
 const IDS: &[&str] = &[
@@ -114,18 +117,27 @@ impl Redactor {
     pub(crate) fn line(&mut self, line: &str) -> String {
         match serde_json::from_str::<Value>(line) {
             Ok(mut v) => {
-                self.value(None, &mut v);
+                self.value(None, &mut v, false);
                 serde_json::to_string(&v).expect("a JSON value serializes")
             }
             Err(_) => text(line),
         }
     }
 
-    fn value(&mut self, key: Option<&str>, v: &mut Value) {
+    /// `opaque`：当前位于任意内容里（见 `PAYLOADS`）。
+    fn value(&mut self, key: Option<&str>, v: &mut Value, opaque: bool) {
         match v {
             Value::Object(map) => {
+                let kind = map.get("type").and_then(Value::as_str).map(str::to_owned);
                 for (k, v) in map.iter_mut() {
-                    self.value(Some(k), v);
+                    let inner = opaque
+                        || PAYLOADS.contains(&k.as_str())
+                        || (k == "content" && kind.as_deref() == Some("tool_result"));
+                    // 工具名只在 `tool_use` 块本身上保留。
+                    if !opaque && k == "name" && kind.as_deref() == Some("tool_use") {
+                        continue;
+                    }
+                    self.value(Some(k), v, inner);
                 }
             }
             Value::Array(items) => {
@@ -137,19 +149,19 @@ impl Redactor {
                         *s = diff_line(s);
                         continue;
                     }
-                    self.value(key, item);
+                    self.value(key, item, opaque);
                 }
             }
-            Value::String(s) => *s = self.string(key, s),
+            Value::String(s) => *s = self.string(key, s, opaque),
             Value::Null | Value::Bool(_) | Value::Number(_) => {}
         }
     }
 
-    fn string(&mut self, key: Option<&str>, s: &str) -> String {
+    fn string(&mut self, key: Option<&str>, s: &str, opaque: bool) -> String {
         let Some(key) = key else {
             return text(s);
         };
-        if KEEP.contains(&key) {
+        if !opaque && KEEP.contains(&key) {
             s.to_owned()
         } else if IDS.contains(&key) {
             self.id(s)
@@ -299,6 +311,33 @@ mod tests {
         assert_eq!(out["message"]["content"][0]["type"], "text");
         assert_eq!(out["message"]["content"][0]["text"], "xxxxxx xxxxx\nxxxxxx");
         assert_eq!(r.line("{broken"), "xxxxxxx");
+    }
+
+    #[test]
+    fn redact_payloads_do_not_keep_structural_key_names() {
+        let mut r = Redactor::default();
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"mcp__crm__lookup","input":{"name":"Acme Corp","type":"customer","status":"vip"}}]},"toolUseResult":{"name":"repo-x","kind":"private"}}"#;
+        let out: Value = serde_json::from_str(&r.line(line)).unwrap();
+        let block = &out["message"]["content"][0];
+        assert_eq!(
+            block["name"], "mcp__crm__lookup",
+            "the tool name is structural"
+        );
+        assert_eq!(block["type"], "tool_use");
+        for (v, original) in [
+            (&block["input"]["name"], "Acme Corp"),
+            (&block["input"]["type"], "customer"),
+            (&block["input"]["status"], "vip"),
+            (&out["toolUseResult"]["name"], "repo-x"),
+            (&out["toolUseResult"]["kind"], "private"),
+        ] {
+            let v = v.as_str().unwrap();
+            assert_ne!(v, original);
+            assert_eq!(v.len(), original.len());
+        }
+        let result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","name":"leak","text":"out"}]}]}}"#;
+        let out: Value = serde_json::from_str(&r.line(result)).unwrap();
+        assert_ne!(out["message"]["content"][0]["content"][0]["name"], "leak");
     }
 
     #[test]

@@ -1,4 +1,10 @@
-//! agents 的性能预算（docs/design/agents.md「性能」）：
+//! agents 的性能冒烟测试（docs/design/agents.md「性能」）。`bench` 的设计文档（#7）合并之前，
+//! 预算基准先以被忽略的测试运行：
+//!
+//! ```sh
+//! cargo test -p lectern-agents --features test-support --release --test perf_smoke -- --ignored --nocapture
+//! ```
+//!
 //!
 //! - `agents/parse_throughput`：fixtures 拼成约 50 MB，整文件解析 ≥ 200 MB/s。
 //! - `agents/append_4k`：50 MB 的会话追加约 4 KB 之后，从上一次的游标 `read` 一次 < 1 ms。
@@ -8,7 +14,6 @@
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use lectern_agents::claude::{ClaudeCode, SOURCE_ID};
@@ -20,7 +25,7 @@ const MAIN: &str = "11111111-1111-4111-8111-111111111111";
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../agents/tests/fixtures/claude-code/2.1.302/projects/-Users-dev-fixture-repo")
+        .join("tests/fixtures/claude-code/2.1.302/projects/-Users-dev-fixture-repo")
 }
 
 /// fixtures 里的全部会话文件依次拼接，重复到约 `TARGET` 字节，写进一个按主会话命名的临时文件。
@@ -63,8 +68,10 @@ impl Report {
     }
 }
 
-fn main() -> ExitCode {
-    let dir = std::env::temp_dir().join(format!("lectern-bench-agents-{}", std::process::id()));
+#[test]
+#[ignore = "timing; run in release mode on demand"]
+fn perf_smoke() {
+    let dir = std::env::temp_dir().join(format!("lectern-perf-agents-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let (path, sample) = build(&dir);
     let len = std::fs::metadata(&path).expect("stat").len();
@@ -131,9 +138,5 @@ fn main() -> ExitCode {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
-    if report.failed {
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    assert!(!report.failed, "over budget");
 }
