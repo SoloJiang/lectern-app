@@ -12,7 +12,7 @@
   - 进程内基准：直接调用领域、基础设施和 kernel 层 crate 的公开接口与 `testing` 模块。
   - 进程级基准：启动 `lectern`（或空 GPUI 窗口的基线程序）的子进程，测冷启动、空闲内存、每个插件的激活耗时与常驻内存、打开与切换的端到端耗时、帧时间。
   - 进程级基准的探针（`probe` feature）：`app` 在测量构建里调用它，向运行器报告首帧时刻、静止信号和插件状态。
-  - 迁移现有的 `perf_smoke` 测试（`crates/agents/tests/perf_smoke.rs`、`crates/platform/src/safe_read/tests.rs` 里的 `perf_smoke`、`crates/git` 里的 `perf_smoke_git_open` 和 `perf_smoke_git_diff_50`）。
+  - 迁移现有的 `perf_smoke` 测试（`crates/agents/tests/perf_smoke.rs`、`crates/platform/src/safe_read/tests.rs` 里的 `perf_smoke`、`crates/git` 里的 `perf_smoke_git_open` 和 `perf_smoke_git_diff_50`、`crates/cache` 里的 `perf_smoke_cache`）。
 - 不做：
   - 取进程创建时间、`phys_footprint`、帧的 `presentedTime`、严格的 binary archive 模式、线程 QoS：macOS 专属，在 `platform`（架构规则 6），接口见「需要其他 crate 提供的接口」。
   - 生成合成仓库、合成会话等夹具：放在被测 crate 的 `testing` 模块，供它自己的测试和 bench 共用。
@@ -32,7 +32,7 @@
 | `serde_json`（工作区已有） | 写 JSON 报告 | 已在依赖图里，不新增包 |
 | `lectern-kernel`（可选，`probe` feature） | 探针插件、裁剪插件集合 | kernel 层 |
 | `lectern-platform`（可选，`probe` feature） | 注册首帧回调 | 基础设施层 |
-| dev：`lectern-agents`、`lectern-git`、`lectern-kernel`、`lectern-i18n`（各自打开 `test-support`），`lectern-platform`、`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`tempfile`、`insta` | 进程内基准的被测代码与夹具；单元测试的临时目录与快照 | 只编译进基准目标和测试 |
+| dev：`lectern-agents`、`lectern-cache`、`lectern-git`、`lectern-kernel`、`lectern-i18n`（各自打开 `test-support`），`lectern-platform`、`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`tempfile`、`insta` | 进程内基准的被测代码与夹具；单元测试的临时目录与快照 | 只编译进基准目标和测试 |
 | dev（只在 macOS）：`gpui`、`gpui_platform` | `empty_window` 示例程序 | 只在 macOS 声明，Linux 上本 crate 仍不依赖 GPUI |
 | 以后的 dev：`lectern-project` 和各插件 crate | 随这些 crate 的实现加入 | tool 层可以依赖任何层，包括插件 crate（[ADR 0025](../adr/0025.md)） |
 
@@ -550,6 +550,12 @@ crates/bench/
 | `git/changes_capped` | 中位数 < 1 s | [git](git.md#性能) | `git` |
 | `git/changes_capped_bytes` | 存活字节 ≤ `Limits` 默认上限之和（数字由 `git` 的实现写入 git 设计） | [git](git.md#性能) | `git` |
 | `git/resident` | 存活字节 ≤ 48 MB（hunk LRU 16 MB + 一个 `ChangeSet` 32 MB，空闲时不持有句柄） | [git](git.md#性能) | `git` |
+| `cache/get_4k`、`cache/get_many_50`、`cache/get_1m` | 中位数 < 50 µs / < 1 ms / < 2 ms（分库已打开） | [cache](cache.md#性能) | 第 1 步（`cache` 第 1 步先以 `perf_smoke` 测量） |
+| `cache/open_existing`、`cache/open_new` | 中位数 < 5 ms / < 10 ms | [cache](cache.md#性能) | 第 1 步（同上） |
+| `cache/put_4k`、`cache/batch_1000` | 中位数 < 1 ms / < 15 ms | [cache](cache.md#性能) | 第 1 步（同上） |
+| `cache/zstd_1m/put`、`cache/zstd_1m/get` | 只记录（命名空间选 `Zstd` 之前对照使用方的预算） | [cache](cache.md#性能) | 第 1 步（同上） |
+| `cache/evict_16m` | 中位数 < 30 ms | [cache](cache.md#性能) | `cache` 第 2 步 |
+| `cache/memory` | 常驻增量 ≤ 8 MB；`Memory` | [cache](cache.md#性能) | `cache` 第 2 步 |
 | `project/open_cloudprint` | 中位数 < 20 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/packages_cloudprint` | 中位数 < 15 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/open_100k/files`、`project/open_100k/packages` | 中位数 < 80 ms / < 150 ms | [project](project.md#性能) | `project` 第 5 步 |
@@ -656,6 +662,7 @@ CI：
   - `git/open`：`discover` + `worktrees` + `tracked`，用 `lectern_git::testing::TestRepo` 生成同样形状的仓库（728 个跟踪文件、11 个 worktree）。
   - `git/open_handle`：在同一仓库的公共目录上打开再 drop 一次 gix 句柄。`Handle` 是 crate 内部类型，`lectern_git::testing` 增加 `open_handle(common_dir: &Path) -> Result<(), GitError>`，按原测试的方式（`ConfigScope::RepositoryOnly`）打开并 drop。
   - 更新 git 设计「与设计的差异」里的对应一条。
+- `crates/cache` 第 1 步加入的 `perf_smoke_cache`（`src/tests/perf.rs`）→ `benches/time/cache.rs` 的 `cache/get_4k`、`cache/get_many_50`、`cache/get_1m`、`cache/open_existing`、`cache/open_new`、`cache/put_4k`、`cache/batch_1000` 和只记录的 `cache/zstd_1m/put`、`cache/zstd_1m/get`。条目类型和数据由 `lectern_cache::testing` 提供（`Raw`、`Zstd`、`noise(seed, len)`、`text(len)`）。打开分库的两项用 `time_with_setup`，每个样本新建一个 `Cache`（`open_new` 还换一个新分库）；写入的两项限制样本数，写入的总量远低于分库的 512 MiB 预算，样本不含淘汰（淘汰由第 2 步的 `cache/evict_16m` 测量）。
 - `crates/platform/src/safe_read/tests.rs` 的 `perf_smoke` 和 `perf_tree` → `benches/time/platform.rs` 的 `platform/safe_stat`、`platform/safe_read_4k`。bench 自己生成同样的 728 个 4 KiB 文件、深度 4 的目录树。原测试比较每个后端，`open_with` 是 crate 内部接口；bench 只测 `SafeRoot::open` 选中的生产后端（macOS 上是 `NofollowAny`，Linux 上是 `Openat2`），预算也只对生产后端成立。`Walk` 只用于少见的路径，不设基准。更新 platform 设计「性能」里的「基准」一条。
 - `executor` 设计里推迟的两项、`kernel` 与 `i18n` 设计里的基准，同一步加入（只记录）。
 
@@ -707,7 +714,7 @@ CI：
    - `just test -p lectern-bench` 里 `stats_*`、`budgets_*`、`runner_*`、`report_*`、`report_merge_*`、`alloc_*` 通过。
    - `just bench` 之后 `target/lectern-bench/` 下有 `report-time.json`、`report-memory.json`、`report-process.json` 和合并后的 `report.json`，`app/bundle_size`、`app/dmg_size` 的状态是 `skipped`（未打包），退出码不因它们非 0；`lectern-bench-report merge --require package` 在没有 `report-package.json` 时退出码 2；删掉 `budgets.rs` 里任意一条 `Active` 预算对应的基准时，`just bench` 退出码 2。
    - Linux 上 `just bench` 退出码 0：`time` 与 `memory` 目标的生效条目状态都是 `smoke`，`process` 目标的生效条目都是 `skipped`（只在 macOS 运行），其余是 `planned`；`just bench agents/` 只运行 `agents/*`，其余条目为 `filtered`。
-   - macOS CI 的 `just bench` 判定 `agents/parse_throughput`、`agents/append_4k`、`agents/zst_throughput`、`agents/zst_load_decoded`、`git/open`、`git/open_handle`、`git/diff_50_cold`、`git/diff_50_warm`、`platform/safe_stat`、`platform/safe_read_4k`，记录 `executor/*`、`kernel/*`、`i18n/*`，上传 `report.json`。
+   - macOS CI 的 `just bench` 判定 `agents/parse_throughput`、`agents/append_4k`、`agents/zst_throughput`、`agents/zst_load_decoded`、`git/open`、`git/open_handle`、`git/diff_50_cold`、`git/diff_50_warm`、`cache/*` 的 7 项读写与打开、`platform/safe_stat`、`platform/safe_read_4k`，记录 `cache/zstd_1m/*`、`executor/*`、`kernel/*`、`i18n/*`，上传 `report.json`。
    - Linux CI 任务有 `just bench` 一步；`just ci` 在 Linux 上运行它。
    - `rg -l perf_smoke crates` 没有结果（含 `crates/git/src/worktree/tests.rs`）；`rg -n 'perf_smoke' crates/agents/Cargo.toml` 没有结果。
    - `rg -n '^name = "(criterion|divan)' Cargo.lock` 没有结果；`just deny` 通过。
@@ -732,13 +739,13 @@ CI：
 
 第 1 步，在 Linux（x86_64，4 核 Xeon 2.1 GHz，内核 6.18）上运行。判定、进程级基准和 macOS 上的 `just bench` 由 macOS CI 给出，本机没有运行。
 
-- `just check`、`just test`（整个 Linux 工作区 632 个测试通过，跳过 1 个 `#[ignore]`）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）、`python3 scripts/check_architecture.py` 全部通过；`python3 scripts/check_architecture.py --gpui-free-packages` 的输出包含 `lectern-bench`。`cargo clippy --target aarch64-apple-darwin -p lectern-bench -p lectern-platform -p lectern-agents -p lectern-git -p lectern-i18n --all-targets --all-features -- -D warnings` 在 Linux 上交叉检查通过（没有运行）。
+- `just check`、`just test`（整个 Linux 工作区 679 个测试通过，跳过 1 个 `#[ignore]`；含合并进来的 `cache` 第 1 步）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）、`python3 scripts/check_architecture.py` 全部通过；`python3 scripts/check_architecture.py --gpui-free-packages` 的输出包含 `lectern-bench`。`cargo clippy --target aarch64-apple-darwin -p lectern-bench -p lectern-platform -p lectern-agents -p lectern-git -p lectern-i18n --all-targets --all-features -- -D warnings` 在 Linux 上交叉检查通过（没有运行）。
 - `just test -p lectern-bench`：59 个测试通过。按前缀：`stats_*` 19（含冷启动规则的四个边界和帧判定）、`budgets_*` 9（含每个出处文件存在、锚点对应文件里的一个标题）、`runner_*` 14、`report_*` 5（3 个 insta 快照：文本表、JSON、Markdown，逐个看过）、`report_merge_*` 9、`alloc_*` 3（`tests/alloc.rs`，注册了 `CountingAlloc` 的单独测试二进制）。
-- `just bench`（冒烟）退出码 0：`target/lectern-bench/` 下有 `report-time.json`、`report-memory.json`、`report-process.json` 和 `report.json`；合并后的 67 条里 `smoke` 22 条（`time` 目标的全部生效条目），`planned` 43 条，`skipped` 2 条（`app/bundle_size`、`app/dmg_size`，原因「未打包」）。`memory`、`process` 目标在这一步没有生效条目。冒烟运行（含编译）在这台机器上约 80 秒，增量编译之后约 10 秒。
-- `just bench agents/` 退出码 0：`agents/*` 的 4 条生效条目是 `smoke`、2 条计划中的是 `planned`，未打包的 2 条是 `skipped`，其余 59 条都是 `filtered`。
+- `just bench`（冒烟）退出码 0：`target/lectern-bench/` 下有 `report-time.json`、`report-memory.json`、`report-process.json` 和 `report.json`；合并后的 78 条里 `smoke` 31 条（`time` 目标的全部生效条目），`planned` 45 条，`skipped` 2 条（`app/bundle_size`、`app/dmg_size`，原因「未打包」）。`memory`、`process` 目标在这一步没有生效条目。冒烟运行（含编译）在这台机器上约 80 秒，增量编译之后约 10 秒。
+- `just bench agents/` 退出码 0：`agents/*` 的 4 条生效条目是 `smoke`、2 条计划中的是 `planned`，未打包的 2 条是 `skipped`，其余 70 条都是 `filtered`。`just bench cache/` 同样退出码 0：`cache/*` 的 9 条生效条目是 `smoke`、2 条计划中的是 `planned`，未打包的 2 条是 `skipped`，其余 65 条是 `filtered`。
 - `lectern-bench-report merge --require package target/lectern-bench` 在没有 `report-package.json` 时退出码 2。
 - 临时从 `benches/time.rs` 里去掉 `agents::APPEND_4K` 时，`time` 目标在运行前以 2 退出（「预算 agents/append_4k 没有对应的基准」），`just bench` 退出码 2。
-- `rg -l perf_smoke crates` 没有结果（含 `crates/git/src/worktree/tests.rs`、`crates/git/src/changes/tests.rs`）；`rg -n 'perf_smoke' crates/agents/Cargo.toml` 没有结果；`rg -n '^name = "(criterion|divan)' Cargo.lock` 没有结果。`Cargo.lock` 只多了 `lectern-bench` 的依赖列表，没有新增包。
+- `rg -l perf_smoke crates` 没有结果（含 `crates/git/src/worktree/tests.rs`、`crates/git/src/changes/tests.rs`、`crates/cache/src/tests/`）；`rg -n 'perf_smoke' crates/agents/Cargo.toml` 没有结果；`rg -n '^name = "(criterion|divan)' Cargo.lock` 没有结果。`Cargo.lock` 只多了 `lectern-bench` 的依赖列表，没有新增包。
 - `just bench --measure`（release、thin LTO，不判定）的中位数。不是预算规定的 M 系列 Mac，只说明基准在采样规则下能跑完、量级与原来的 `perf_smoke` 一致：
 
   | ID | 中位数 | 样本数 | 预算（M 系列） |
@@ -760,7 +767,16 @@ CI：
   | `kernel/service_current/{1,4,16}` | 0.95 / 1.22 / 3.26 µs | | 只记录 |
   | `kernel/emit`、`kernel/emit_nested` | 1.17 / 1.55 µs | | 只记录 |
   | `i18n/frame_strings` | 1.22 µs | 1 276 | 只记录 |
+  | `cache/get_4k` | 4.2 µs | 727 | < 50 µs |
+  | `cache/get_many_50` | 85 µs | 1 035 | < 1 ms |
+  | `cache/get_1m` | 0.50–1.39 ms（三次运行） | 730 | < 2 ms |
+  | `cache/open_existing` | 0.34 ms（noisy） | 2 315 | < 5 ms |
+  | `cache/open_new` | 5.1 ms（noisy） | 185 | < 10 ms |
+  | `cache/put_4k` | 54 µs（noisy） | 200 | < 1 ms |
+  | `cache/batch_1000` | 6.9 ms（noisy，p95 36 ms） | 60 | < 15 ms |
+  | `cache/zstd_1m/put`、`cache/zstd_1m/get` | 5.3 ms / 0.49 ms | 184 / 1 003 | 只记录 |
 
+- `cache/*` 的中位数与 `perf_smoke_cache` 在同一台机器上的结果（[cache 设计「实际验证」](cache.md#实际验证)）同一量级，写入的长尾仍来自提交时的自动检查点。`cache/get_1m` 在完整运行里一次是 1.39 ms，单独运行两次是 0.50 和 0.57 ms，与 `perf_smoke_cache` 的 0.48–0.53 ms 一致。
 - 没有验证的：macOS 上的判定和重试（只由 `runner_*` 用假基准覆盖）、`GITHUB_STEP_SUMMARY` 和 `report.json` 的上传（由 CI 运行）。
 
 ## 与设计的差异
@@ -768,6 +784,7 @@ CI：
 第 1 步：
 
 - 迁移多了两组：`agents/zst_throughput`、`agents/zst_load_decoded`（`agents` 第 3 步写进了同一个 `tests/perf_smoke.rs`）和 `git/diff_50_cold`、`git/diff_50_warm`（`git` 第 2 步的 `perf_smoke_git_diff_50`）。本文写于这两步合并之前；验收要求 `rg -l perf_smoke crates` 没有结果，只删不迁会丢掉这两组测量。预算表里这四条改为生效，「迁移」「范围」和第 1 步的验收已改。
+- 同样的原因迁移了 `cache` 第 1 步（[#82](https://github.com/SoloJiang/lectern-app/pull/82)，在本文之后合并）加入的 `perf_smoke_cache`：`cache.md`「性能」的条目加进预算表，第 1 步已测量的 7 项读写与打开生效，`cache/evict_16m` 和 `cache/memory` 属于 `cache` 第 2 步，登记为计划中。`zstd_1m` 拆成 `cache/zstd_1m/put` 和 `cache/zstd_1m/get` 两条只记录的结果：原测试也分别打印写和读，一个 ID 只能放一组样本。`cache/memory` 暂定属于 `Memory` 目标；SQLite 用自己的 `malloc`，不经过 Rust 的全局分配器，计数分配器看不到页缓存，第 2 步实现这项基准时可能要改为进程级的 `phys_footprint`，那时一并修改目标。
 - `main` 多了 `target` 和 `tmp_dir` 两个参数：`Target` 就是「各自把自己是哪个 `Target` 传给它」；`CARGO_TARGET_TMPDIR` 只在编译基准目标和集成测试时设置，库代码取不到，由基准目标用 `env!` 传入。已改「接口」，并补上 `BenchError` 的形状。
 - 过滤优先于计划中：`just bench agents/` 之后，`project/*` 这类计划中的条目也是 `filtered`，与验收「其余条目为 filtered」一致。计划中条目的原因写「由 <负责方> 加入」。
 - 非判定平台上的 measure 模式照常与预算比较，报告里是 `ok` / `over`，`gated` 为 false，退出码不因 `over` 非 0，也不重试。本文只写了「不判定，只报告」。

@@ -147,6 +147,7 @@ const ADR_0018_DECISION: &str = "docs/adr/0018.md#决策";
 const ADR_0018_IMPACT: &str = "docs/adr/0018.md#影响";
 const AGENTS: &str = "docs/design/agents.md#性能";
 const GIT: &str = "docs/design/git.md#性能";
+const CACHE: &str = "docs/design/cache.md#性能";
 const KERNEL: &str = "docs/design/kernel.md#性能";
 const PROJECT: &str = "docs/design/project.md#性能";
 const PLATFORM: &str = "docs/design/platform.md#性能";
@@ -494,6 +495,75 @@ pub static BUDGETS: &[Budget] = &[
         &[median(Limit::BytesAtMost(48 * MB))],
         GIT,
         State::Planned("git"),
+        Memory,
+    ),
+    // The partition is open and the system file cache warm.
+    share(
+        "cache/get_4k",
+        &[median(Limit::TimeBelow(us(50)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/get_many_50",
+        &[median(Limit::TimeBelow(ms(1)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/get_1m",
+        &[median(Limit::TimeBelow(ms(2)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/open_existing",
+        &[median(Limit::TimeBelow(ms(5)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/open_new",
+        &[median(Limit::TimeBelow(ms(10)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/put_4k",
+        &[median(Limit::TimeBelow(ms(1)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/batch_1000",
+        &[median(Limit::TimeBelow(ms(15)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/evict_16m",
+        &[median(Limit::TimeBelow(ms(30)))],
+        CACHE,
+        State::Planned("cache 第 2 步"),
+        Time,
+    ),
+    // Checked before a namespace picks `Zstd`, against the user's budget.
+    share("cache/zstd_1m/put", RECORD, CACHE, ACTIVE, Time),
+    share("cache/zstd_1m/get", RECORD, CACHE, ACTIVE, Time),
+    // The app partition and 2 repository partitions open, 50 MiB read from
+    // each: resident growth.
+    share(
+        "cache/memory",
+        &[median(Limit::BytesAtMost(8 * MB))],
+        CACHE,
+        State::Planned("cache 第 2 步"),
         Memory,
     ),
     share(

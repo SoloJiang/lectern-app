@@ -803,7 +803,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - `just test -p lectern-agents` 里 `claude_*`、`incremental_*`、`reset_*`、`progress_*`、`source_*`、`subagent_*`、`usage_keys_*`、`tool_kind_*`、`format_*`、`resume_*`、`tail_*` 通过，快照已逐个看过；Claude Code 部分的 `inherited_*` 通过。
    - `crates/agents/tests/fixtures/claude-code/` 下每个版本目录都有 `SOURCE.md`。
    - `rg 'serde_json::Value' crates/agents/src` 只出现在测试代码里。
-   - `agents/parse_throughput`、`agents/append_4k` 达到「性能」里的目标（`bench` 的设计文档合并之前，以 `crates/agents/tests/perf_smoke.rs` 里被忽略的测试运行，见「与设计的差异」）。
+   - `agents/parse_throughput`、`agents/append_4k` 达到「性能」里的目标（`bench` 的设计文档合并之前，以 `crates/agents/tests/perf_smoke.rs` 里被忽略的测试运行，见「与设计的差异」；bench 第 1 步之后由 `just bench agents/` 测量，macOS CI 判定）。
 3. **Codex 适配器**
    - `codex_*`、`codex_usage_stream_*`、`zst_*`、`decoded_*`、`inherited_*` 通过；`just deny` 通过（`ruzstd`）。
    - `agents/zst_throughput`、`agents/zst_load_decoded` 达标。

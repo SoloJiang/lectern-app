@@ -195,7 +195,10 @@ fn budgets_belong_to_the_documented_targets() {
     for budget in BUDGETS {
         let expected = if budget.id == "app/bundle_size" || budget.id == "app/dmg_size" {
             Target::Package
-        } else if budget.id.ends_with("_bytes") || budget.id == "git/resident" {
+        } else if budget.id.ends_with("_bytes")
+            || budget.id == "git/resident"
+            || budget.id == "cache/memory"
+        {
             Target::Memory
         } else if ["app/", "plugin/", "lsp/", "baseline/"]
             .iter()

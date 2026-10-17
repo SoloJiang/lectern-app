@@ -3,6 +3,8 @@
 
 #[path = "time/agents.rs"]
 mod agents;
+#[path = "time/cache.rs"]
+mod cache;
 #[path = "time/executor.rs"]
 mod executor;
 #[path = "time/git.rs"]
@@ -23,6 +25,14 @@ const BENCHES: &[Bench] = &[
     agents::APPEND_4K,
     agents::ZST_THROUGHPUT,
     agents::ZST_LOAD_DECODED,
+    cache::GET_4K,
+    cache::GET_MANY_50,
+    cache::GET_1M,
+    cache::OPEN_EXISTING,
+    cache::OPEN_NEW,
+    cache::PUT_4K,
+    cache::BATCH_1000,
+    cache::ZSTD_1M,
     executor::SPAWN_10K,
     executor::WAKE_1000X100,
     git::OPEN,

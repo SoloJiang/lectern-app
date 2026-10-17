@@ -780,7 +780,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
    - 前置：`platform` 的安全读取（Linux 与 macOS 实现）已合并。
    - `just test -p lectern-git` 里 `repo_*`、`worktrees_*`、`refs_*`、`reflog_*`、`tracked_*`、`read_file_*` 测试通过，其中有 SHA-256 夹具和 reftable 夹具；`TestRepo` 在 `test-support` feature 下可用，`rg 'Command::new' crates/git/src` 没有结果。
    - `cargo tree -i gix -e normal --depth 1` 只列出 `lectern-git`。
-   - `bench` 的 `git/open` 在预算内。bench 的设计文档（#7）合并之前不写基准代码，先由 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量（见「与设计的差异」）。
+   - `bench` 的 `git/open` 在预算内。bench 的设计文档（#7）合并之前不写基准代码，先由 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量（见「与设计的差异」）。bench 第 1 步之后由 `just bench git/` 测量，macOS CI 判定。
 2. **树之间的改动集、hunk 与展示行**：
    - `diff_trees_*`、`rename_*`、`binary_*`、`truncate_*`、`rows_*`、`inline_*`、`hunk_cache_*` 测试通过，结构化输出有 insta 快照；`numstat_matches_git` 对全部归档夹具通过。
    - `git/diff_50_cold` / `git/diff_50_warm` 在预算内。

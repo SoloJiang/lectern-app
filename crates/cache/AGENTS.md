@@ -29,4 +29,4 @@ just test -p lectern-cache
 - 自建线程的测试代码只放在 `src/tests/` 下：验收检查 `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 要求库代码里没有。
 - `crash_*` 用同一个测试二进制做子进程（`current_exe` 加 `--exact`），子进程的入口没有环境变量时直接返回。
 - 结构化输出（键的编码、文件布局、PRAGMA）用 insta 快照验收，快照改动要在 PR 里逐个看过。
-- 性能：`cargo test --release -p lectern-cache -- --ignored perf_smoke --nocapture`，结果写进设计文档的「实际验证」。
+- 性能：`lectern-bench` 的 `cache/*` 基准（`just bench cache/`；Linux 上是冒烟运行，`just bench --measure cache/` 采样并打印实测值），夹具用 `testing::Raw`、`testing::Zstd`、`testing::noise`、`testing::text`；结果写进设计文档的「实际验证」。

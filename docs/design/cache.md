@@ -388,12 +388,12 @@ pub enum DisableReason {
 | 安装包 ≤ 80 MB | SQLite 与 rusqlite 约 2 MB（ADR 0027） | #38 |
 
 - `get` 一条 4 KiB < 50 µs（`cache/get_4k`）。
-- 命名空间选 `Zstd` 之前，先用 `cache/zstd_1m`（1 MiB 值的压缩与解压）确认读取仍在使用方的预算内。
-- bench 的设计文档（#7）合并之前不写基准代码；实现 PR 先用 `#[ignore]` 的 `perf_smoke_cache` 在 release 下测量上表各项，结果写进「实际验证」（与 git 的做法相同）。
+- 命名空间选 `Zstd` 之前，先用 `cache/zstd_1m/put`、`cache/zstd_1m/get`（1 MiB 文本的压缩与解压，只记录）确认读取仍在使用方的预算内。
+- 上表各项是 `lectern-bench` 的基准（`just bench cache/`，[bench 设计「迁移」](bench.md#迁移)），夹具用 `test-support` 下的 `testing::Raw`、`testing::Zstd`、`testing::noise`、`testing::text`。`cache/evict_16m` 和 `cache/memory` 在预算表里是计划中，随第 2 步生效。第 1 步的实现 PR 用 `#[ignore]` 的 `perf_smoke_cache` 测量，bench 第 1 步把它移进 `crates/bench` 后删除。
 
 ## 测试
 
-全部在 Linux 上运行（`just test -p lectern-cache`），用 `tempfile` 的临时目录，不依赖 GPUI 和 macOS。`test-support` feature 提供可手动推进的时钟（访问时间、60 秒的写入暂停、目录清理）和故障注入（对写连接设置 `max_page_count` 制造 `SQLITE_FULL`；在写事务中途暂停的钩子）：`testing::ManualClock`、`Cache::with_clock`、`Cache::set_ui_thread_panics`、`Partition::file`、`Partition::set_max_page_count`、`Partition::set_write_hook`。
+全部在 Linux 上运行（`just test -p lectern-cache`），用 `tempfile` 的临时目录，不依赖 GPUI 和 macOS。`test-support` feature 提供可手动推进的时钟（访问时间、60 秒的写入暂停、目录清理）和故障注入（对写连接设置 `max_page_count` 制造 `SQLITE_FULL`；在写事务中途暂停的钩子）：`testing::ManualClock`、`Cache::with_clock`、`Cache::set_ui_thread_panics`、`Partition::file`、`Partition::set_max_page_count`、`Partition::set_write_hook`；另有 bench 用的 `testing::Raw`、`testing::Zstd`（`test.raw`、`test.zstd` 命名空间的原样字节）和 `testing::noise`、`testing::text`（不可压缩与可压缩的确定数据），见「性能」。
 
 - 构造（`new_*`）：`Cache::new` 加 `app()`、`repo()`、`folder()` 之后 `root` 不存在；第一次 `get` 之后才出现文件。
 - 线程（`ui_thread_*`）：在 `ui_thread` 上调用，debug 构建 panic；`test-support` 可以关掉这个 panic，用来检查 release 的行为：不打开文件，读返回 None，写返回 `WrongThread`。
@@ -431,10 +431,10 @@ pub enum DisableReason {
    - `cargo tree -i rusqlite -e normal --depth 1` 只列出 `lectern-cache`。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、`platform`、`executor`。
    - `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果：不加载扩展，不自建线程。
-   - `perf_smoke_cache`（`cargo test --release -p lectern-cache -- --ignored perf_smoke`）的读写各项在「性能」一节的预算内。
+   - `perf_smoke_cache`（`cargo test --release -p lectern-cache -- --ignored perf_smoke`）的读写各项在「性能」一节的预算内（已满足；这个测试之后移进 bench，见「性能」）。
 2. **淘汰、访问时间与分库管理**：
    - `evict_*`、`touch_*`、`partitions_*`、`sweep_*` 通过。
-   - `perf_smoke_cache` 的 `evict_16m` 与 `memory` 两项在预算内。
+   - 加入 bench 的 `cache/evict_16m` 与 `cache/memory` 两项基准，在 `crates/bench/src/budgets.rs` 里改为生效，在预算内。
 
 接入由使用方各自的 PR 完成：`agents` 设计的第 4 步（`index_cache_*`、`complete_*`），`git` 的 hunk 缓存（`hunk_cache_*`）。`bench` 的 `cache/*` 基准随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 加入。
 
@@ -479,4 +479,4 @@ pub enum DisableReason {
 - `SQLITE_LOCKED` 按 `SQLITE_BUSY` 处理，`SQLITE_TOOBIG` 返回 `Dropped::TooLarge`；超过 `MAX_KEY` 的 `remove` 返回 `TooLarge`；空的批不打开分库，直接返回 `Committed`。
 - 解码失败的待删集合每个会话最多 4096 个 ID，不重复记录：同一个坏条目在下一次写事务之前被读多次，只记一次。
 - 读连接也设置 `synchronous` 和 `journal_size_limit`：设计列出的 PRAGMA 除 `query_only` 外每个连接都执行；`journal_mode` 只在建库时设置（持久）。
-- `bench` 的 `cache/*` 没有加入，理由与 git 第 1 步的 `git/open` 相同；由 `#[ignore]` 的 `perf_smoke_cache` 在 release 下测量，结果见「实际验证」。
+- `bench` 的 `cache/*` 没有加入，理由与 git 第 1 步的 `git/open` 相同；由 `#[ignore]` 的 `perf_smoke_cache` 在 release 下测量，结果见「实际验证」。bench 第 1 步把它的各项移进 `crates/bench` 的 `cache/*`，`perf_smoke_cache` 随之删除；`zstd_1m` 拆成 `cache/zstd_1m/put` 和 `cache/zstd_1m/get` 两条结果，`testing` 加了 bench 用的条目类型和数据生成函数（「性能」已改）。
