@@ -69,7 +69,7 @@
   6. 写：一个写事务里建单元、插入行、删除单元，全部生效或全部不生效；失败时返回 `Dropped`，语义与 `Batch::commit` 相同，单个事务受 `MAX_BATCH` 约束。
   7. 预编译语句缓存从每连接 16 条提高到 32 条（本 crate 约 12 条语句）。
 - `kernel`：`PluginHandle::background()` 与 `BackgroundGuard`、批次边界的暂停检查（[kernel 设计「静止」](kernel.md#静止)，ADR 0029 规定由单独的 PR 先于本 crate 实现）。
-- `executor`：批量线程组与 `Priority::Batch`（[executor 设计](executor.md)，同上）。
+- `executor`：批量线程组与 `Priority::Batch`（[executor 设计](executor.md)，同上）；另加 `Executor::on_shutdown(f: Box<dyn FnOnce() + Send>) -> ShutdownHook`：`shutdown` 开始时在调用线程上依次调用已登记的回调（在 `contain` 里），`ShutdownHook` drop 时注销。专用线程上的闭包靠它得知 executor 正在关闭（本 crate 的看门狗，见「调度、批次与取消」）。
 - `platform`：电源状态与变化通知（ADR 0029「影响」）。`app` 把它包成本 crate 的 `PowerSource` 传入；本 crate 不依赖 `platform` 的电源接口，测试用 `testing::FakePower`。
 - `fs_watch`、`git`：不需要新接口。用到的接口见「依赖 git、fs_watch 与 cache 的接口」。
 - 高亮方（`file_reader`）：依赖同一批 grammar crate、同一个 tree-sitter 版本。[#42](https://github.com/SoloJiang/lectern-app/issues/42) 指出 external scanner 不能被进度回调打断，它对 scanner 的处理（如对某个 grammar 停用）同样作用于本 crate。
@@ -210,6 +210,9 @@ pub struct DefinitionRef {
     pub lang: LangName,
     /// 最近的外层定义的名字（方法所在的类、模块里的函数所在的模块）。
     pub scope: Option<Arc<str>>,
+    /// 定义来自 locals 查询的 `@local.definition`（局部变量、参数、局部函数），只在所在文件的这个作用域里可见。
+    /// 它不在 `ci_def` 里；`References` 只扫描它所在的文件（见「查找引用与调用方」）。
+    pub local: bool,
 }
 
 pub struct Location {
@@ -430,6 +433,27 @@ pub trait GrammarSource: Send + Sync {
     fn grammar(&self, lang: &LangName) -> Option<LoadedGrammar>;
     /// 语言包认领的扩展名，如 "kt" → "kotlin"。不阻塞。
     fn language_for_extension(&self, ext: &str) -> Option<LangName>;
+    /// 已装语言包集合的代数：安装、更新、回滚、撤销都加一。不阻塞。
+    fn generation(&self) -> u64;
+    /// 语言包集合变化时在任意线程上调用 `f`（插件市场完成切换之后）；`f` 只入队，不阻塞。返回值 drop 时退订。
+    fn subscribe(&self, f: Box<dyn Fn(GrammarChange) + Send + Sync>) -> Box<dyn Send>;
+}
+
+pub struct GrammarChange {
+    pub generation: u64,
+    pub lang: LangName,
+    pub kind: GrammarChangeKind,
+}
+
+pub enum GrammarChangeKind {
+    /// 新装的语言包，开始认领它的扩展名。
+    Installed,
+    /// 换成了新版本，`artifact_sha256` 变了。
+    Updated,
+    /// 新版本激活失败，回到上一个可用版本（ADR 0018）。
+    RolledBack,
+    /// 撤销或卸载：立即停用，不再加载（ADR 0018「撤销」）。
+    Removed,
 }
 pub struct LoadedGrammar {
     pub language: tree_sitter::Language,
@@ -450,7 +474,7 @@ pub mod extract {
     pub fn extract(lang: &Lang, source: &[u8], deadline: Deadline, cancel: &AtomicBool) -> Extraction;
 }
 
-/// `test-support`：`FakeGit`、`FakeProjects`（内存里的 `dyn Projects`）、`FakePower`、`ManualClock`、
+/// `test-support`：`FakeGit`、`FakeProjects`（内存里的 `dyn Projects`）、`FakePower`、`FakeGrammars`（可以安装、更新、回滚、撤销的语言包）、`ManualClock`、
 /// 合成仓库的形状（cloudprint 形状、10 万文件）、语言夹具的生成。
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
@@ -528,7 +552,7 @@ pub(crate) struct ChangedPaths {
 | `go` | `.go` | `tree-sitter-go` | — |
 
 - 兼容组按调研第 6 节：JS / JSX / TS / TSX；Java / Kotlin；C / C++ / Objective-C 的头文件（语言包登记 `c-family` 组）。没有组的语言只与自己兼容。
-- 语言包的扩展名由 `GrammarSource::language_for_extension` 认领，与核心语言冲突时核心语言优先。
+- 语言包的扩展名由 `GrammarSource::language_for_extension` 认领，与核心语言冲突时核心语言优先。语言包在项目打开期间变化的处理见「语言包的变化」。
 - 抽取键：（blob OID、语言短名、grammar 版本、查询版本）。
   - grammar 版本：核心语言取「crate 名 @ 版本」的 64 位哈希，版本号写成常量，测试 `lang_grammar_versions_match_lock` 检查它与 Cargo.lock 一致；语言包取 `artifact_sha256` 的前 8 字节。grammar 升级后旧结果不再命中（#42 的缓存键要求）。
   - 查询版本：tags 查询、locals 查询的文本加上本 crate 的 `EXTRACTOR_VERSION`（可见性、参数个数、作用域的计算规则变化时加一）合在一起的 64 位哈希。
@@ -540,7 +564,9 @@ pub(crate) struct ChangedPaths {
 pub struct Extraction {
     pub status: ExtractStatus,
     pub defs: Vec<Def>,
-    /// 引用名，去重、按字节序。locals 查询解析到局部变量的引用不在其中（tree-sitter-tags 的行为）。
+    /// 引用名，去重、按字节序。locals 查询解析到局部定义的引用不在其中（tree-sitter-tags 的行为），
+    /// 所以持久化的 `ci_ref` 也不含它们。这不丢结果：局部定义只能在它所在的文件里被引用，
+    /// 而查引用时被查定义所在的文件总是现场解析，扫描的位置包括 `@local.reference`（见下文的 `ParsedFile`）。
     pub refs: Vec<Box<str>>,
 }
 
@@ -583,7 +609,7 @@ pub enum Visibility {
 - `kind` 来自 tags 的 `@definition.<种类>`：`function`、`method`、`class`、`interface`、`module`、`macro`、`constant`、`type`、`field` 等按名字对应 `DefKind`，`struct`、`enum`、`trait` 用各语言查询里的同名种类，其余为 `Other`。
 - `scope`：同一文件里，范围包含这个定义的最内层定义的名字。抽取后按范围排序一遍求出。
 - `visibility` 和 `arity` 由每种语言的一个小函数读定义节点的修饰符和参数节点得出，不经过 tags 查询；规则变化时 `EXTRACTOR_VERSION` 加一。
-- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`（树、tags 的引用位置、locals 的作用域），用完即丢，不进缓存。
+- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
 
 ### 外部格式（tags 查询）
 
@@ -711,7 +737,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 第 2 层的抽取 | `BusyGuard` | `Background`，同时最多 2 个任务 |
 | 打开项目、文件列表换代、工作区比较、按 `WorktreeBatch` 重新读、名字表构建、查询结果的缓存写入 | `BusyGuard` | `Background` |
 | 第 3–5 层：存在检查、抽取、写入；第 5 层读其他 worktree 的 index | `BackgroundGuard` | `Batch`，每个批量线程最多一个任务 |
-| 截止时间的看门狗 | 不取守卫（只在有在途抽取时运行） | 专用线程 `code-intel-watchdog` |
+| 截止时间的看门狗 | 不取守卫；没有在途抽取时阻塞等待，停用或 executor 关闭时退出 | 专用线程 `code-intel-watchdog`，每次激活最多一个 |
 
 第 3–5 层满足 ADR 0029 的四条条件：跳转和 ⌘K 按「跳转到定义」的顺序现场回答，不等它们；结果按 OID 存进 `cache`，暂停、取消或退出不丢已写入的批次；每批之间检查暂停和取消；不是用户正在等的操作。
 
@@ -736,7 +762,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 第 3–5 层：每个批量线程一个长期任务，循环：取一批 → 存在检查 → 抽取缺的 → 一个写事务写入 → 在批次边界询问 `BackgroundGuard`（暂停时登记 waker、返回 `Pending`）。一批最多 64 个文件、读入的内容合计最多 2 MiB、耗时最多 50 ms，先到者为准。
 - 每批开始时重新选层：第 3 层有剩余就先取第 3 层。第 1、2 层在另外的工作线程上运行，不排在批量任务后面（ADR 0029）。
 - 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数），命中的置 `indexed` 位并标记访问，缺的抽取。
-- 单文件截止时间：后台 250 ms（M 系列上 1 MiB 的文件约 230 ms，按调研的 4.3 MB/s 和「M 系列可能快一倍」估算，实测后校准），交互 1 s。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时 park。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
+- 单文件截止时间：后台 250 ms（M 系列上 1 MiB 的文件约 230 ms，按调研的 4.3 MB/s 和「M 系列可能快一倍」估算，实测后校准），交互 1 s。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
+- 看门狗的生命周期：每次激活最多一个看门狗线程，在这次激活第一次登记在途抽取时经 `PluginHandle::own_with` 和 `run_dedicated_gated` 启动。线程与登记方共用一份状态：互斥锁保护的在途表和 `stop` 标志，加一个 `Condvar`。线程循环：持锁检查 `stop`，为 true 就返回；在途表为空时 `wait`，否则 `wait_timeout(10 ms)` 后检查截止时刻。`stop()` 在锁内把标志置为 true、把在途表里的标志全部置位（正在运行的抽取随之返回 `Cancelled`），然后 `notify_all`，所以无论线程在等待还是在检查，都在一次唤醒之内返回。调用 `stop()` 的地方：
+  - 停用：启动时同时把一个 `WatchdogStop` 守卫交给 `PluginHandle::own`，它的 `Drop` 调用 `stop()`。kernel 在停用、失败和 `shutdown` 的撤销第 4 步 drop 守卫，所以每次停用都会让这次激活的看门狗退出，重新激活时另起一个，线程数不随激活次数增长。`Active` 的 `Drop` 也调用一次（重复调用无害）。
+  - executor 关闭：executor 不等专用线程，靠闭包自己结束（[executor 设计](executor.md)「接口」的 `shutdown`），所以本 crate 在启动看门狗时用 `Executor::on_shutdown` 登记一次 `stop()`（见「对其他 crate 的要求」），线程退出时注销。`app` 的退出顺序是 kernel 的 `shutdown` 完成后再关闭 executor，这条路径只在 kernel 没有先停用插件时（测试、异常退出）才起作用。
+  - 闸门：激活在线程开始运行之前就失效时，`run_dedicated_gated` 不运行闭包，不会启动线程。
 - 取消在 50 ms 内生效：项目关闭、切换 worktree 时置位取消标志，批量任务在下一个批次边界（或 tags 的取消检查）退出；正在解析的文件放弃结果，不写入。切换 worktree 或分支后第 3–5 层的游标整体重建，已写入的结果按 OID 留在缓存里。
 - 暂停（kernel 的暂停开关）：同上，在批次边界停下，恢复后从游标处继续。
 - 大小上限：后台 1 MiB（`SafeRoot::read` 的 `max`），超过记为 `TooLarge`；文件被打开（第 1 层）时上限 4 MiB，更大的不抽取，查询返回 `TooLarge`。
@@ -768,16 +798,32 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - agent 连续写文件时 fs_watch 已按 `Coalesce::WORKTREE` 合并批次，本 crate 不再另加等待。
 - 工作区比较在同一项目里同时最多一次，运行期间又触发的在结束后再做一次。
 
+### 语言包的变化
+
+语言包可以在项目打开期间安装、更新、回滚或被撤销（ADR 0018）。插件在 `started` 里调用 `GrammarSource::subscribe`，把返回值交给 `PluginHandle::own`。通知只入队；处理在一个 `Background` 任务里进行（`BusyGuard`，同时最多一个），运行期间到达的通知并进下一轮。每一轮重新读 `GrammarSource` 的当前状态，与上一轮记下的「语言 → grammar 版本」比较，按比较结果处理，所以漏掉或合并的通知不影响结果；`generation` 不大于已处理代数的通知直接丢弃。
+
+| 变化 | 处理 |
+|---|---|
+| 安装 | 在语言表里登记，第一次用到时编译查询；重建基础映射（新认领扩展名的文件进入），做一次工作区比较（这些扩展名的未跟踪文件和有改动的文件进入覆盖部分）；第 3–5 层的游标重建，这些文件按所在层排队 |
+| 更新、回滚 | 换成新的 grammar 版本：键里的 grammar 版本随之变化，旧版本的单元不再命中（回滚时，之前用那个版本写过的单元重新命中）；清掉这种语言的文件的 `indexed` 位，游标重建，按层重新做存在检查和抽取 |
+| 撤销、卸载 | 立即从语言表里移除，不再加载这个 grammar；从基础映射和覆盖部分去掉这种语言的文件，它们不再计入 `coverage`，查询不再返回它们的候选，这种语言的查询返回 `UnsupportedLanguage` |
+
+- 在途的抽取：更新、回滚、撤销都置位这种语言在途抽取的取消标志。每个批次和每次按需抽取开始时记下所用的 grammar 版本，写入缓存之前核对仍是当前版本，不是就丢弃结果，所以旧 grammar 的结果不会以新键写入。已编译的旧配置在用它的在途抽取结束后释放。
+- 旧版本的单元不主动删除，留给淘汰。
+- 名字表的代数加一。已交出的 `QueryResults` 不修改（只追加的规则）；正在进行的查询从下一步起使用新的语言表。
+
 ### 跳转到定义
 
 `query(Definition)` 在一个 `Interactive` 任务里按下面的顺序回答。前一步得到有绑定依据的候选就停下；没有时继续，结果逐批追加：
 
-1. **当前文本**：按 `TextRef` 读出内容（工作区一侧经 `SafeRoot`，读到的 OID 与 `TextRef::oid` 不同时返回 `Stale`；对象库一侧经 `GitAccess::blob`），解析，求出位置上的标识符和 `RefSyntax`。locals 查询在作用域里解析到的定义是 `Bound(Local)`；本文件里其余同名定义是第 1 层的 `NameOnly` 候选。光标在定义的名字上时，`symbol.defines` 是这个定义，它本身作为唯一的 `Bound(Local)` 候选。
+1. **当前文本**：按 `TextRef` 读出内容（工作区一侧经 `SafeRoot`，读到的 OID 与 `TextRef::oid` 不同时返回 `Stale`；对象库一侧经 `GitAccess::blob`），解析，求出位置上的标识符和 `RefSyntax`。locals 查询在作用域里解析到的定义是 `Bound(Local)`；本文件里其余同名定义是第 1 层的 `NameOnly` 候选。光标在定义的名字上时，`symbol.defines` 是这个定义（`@local.definition` 的 `local` 为 true），它本身作为唯一的 `Bound(Local)` 候选。
 2. **import**：解析扩展点给出这个名字的 import 目标，按路径取目标文件的抽取结果（缓存命中或现场抽取），其中导出的同名定义是 `Bound(Import)`；扩展点的 `bind` 给出的结果按它的 `Binding`。#17 的空实现在这一步没有结果。
 3. **索引**：`ci_def` 按名字取出全部定义，经 `ci_ext` 得到 OID 和语言，按「候选的分层与过滤」过滤和分层，只留映射里有的 OID。
 4. **限时搜索**：第 3 步之后仍没有 `Bound` 候选、且当前子项目里还有未入索引的文件时进行，见「限时搜索」。
 
 第 1–3 步的结果作为第一批交出（目标：索引命中时 ≤ 50 ms），限时搜索的结果逐批追加。结果只追加：后到的候选排在已有候选之后，已有条目不重排、下标不变（调研第 5 节「索引不完整时」的呈现规则）。
+
+去重：每次查询持有一个已交出集合，键是（路径、OID、行、列）。每一步的候选在加入结果之前先查这个集合，已经由前面的步骤交出的跳过，保留先交出的那一条（它的层更靠前）。例如当前文本的 blob 已经入索引时，第 3 步会再次查到第 1 步列出的本文件定义；第 2 步现场抽取过的文件，在第 3 步和限时搜索里也会再次出现。同一份内容出现在两个路径上时是两个候选。`semantic` 的结果与候选按位置集合比较，不进入这个集合。集合只存在于这次查询的任务里，查询关闭时释放。
 
 `jump` 和 `preselect`：
 
@@ -811,14 +857,15 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 `query(References { of })` 在 `Interactive` 任务里进行：
 
-1. 候选文件：被查定义所在的文件，加上 `ci_ref` 里有这个名字的单元经映射得到的路径（语言兼容组过滤）。顺序：在 `Focus::Review` 里的、同一子项目、依赖的子项目、其余，同层按路径距离。
-2. 逐个候选文件读出内容、解析，用 tags 的引用位置找出这个名字的每一处引用，逐处解析绑定：
+1. 候选文件：被查定义所在的文件，加上 `ci_ref` 里有这个名字的单元经映射得到的路径（语言兼容组过滤）。顺序：在 `Focus::Review` 里的、同一子项目、依赖的子项目、其余，同层按路径距离。被查定义是局部定义（`DefinitionRef::local`）时，候选文件只有它所在的文件，只扫描它的作用域，不查 `ci_ref`、不做限时搜索，结果没有 `same_name`（locals 能完整解析同一作用域里的引用）。
+2. 逐个候选文件读出内容、解析，用 `ParsedFile` 的引用位置（tags 引用与 `@local.reference` 的并集）找出这个名字的每一处引用，逐处解析绑定：
    - locals 解析到被查定义（同一文件、同一位置）：调用方。
    - locals 解析到别的局部定义：丢弃，这处引用与被查定义无关。
    - 扩展点的 `bind` 给出被查定义：调用方；给出别的定义：丢弃。
    - 其余：同名引用（`same_name`），不计入调用方，也不用于判断 agent 是否漏改了调用方（调研第 5 节）。
 3. 当前子项目里未入索引的文件走限时搜索，命中的文件按第 2 步处理。
 4. 结果逐批追加：第一批在处理完前几个候选文件或 150 ms 时交出（目标 ≤ 200 ms），之后每 100 ms 或每 32 个文件一批；10 万文件的仓库全部结果目标 ≤ 2 s。
+5. 去重：与「跳转到定义」相同，每次查询一个已交出集合，键是（路径、OID、行、列），`callers` 和 `same_name` 共用，一处引用只进其中一组、只出现一次。另记已处理的（路径、OID）：被查定义所在的文件、第 1 步的候选文件、限时搜索命中的文件有重叠时，每个文件只解析一次。
 
 #17 的空扩展点下，跨文件的引用只有 locals 能证明的那部分是调用方，其余都在同名引用里；#18、#19 的 `bind` 让 Java、TS 的调用方变准。Java 的 `References` 按升级条件同时请求语义导航。
 
@@ -881,18 +928,19 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - 语言（`lang_*`）：扩展名到语言、兼容组；语言包认领扩展名，与核心语言冲突时核心语言优先。
 - 抽取（`extract_*`）：每种语言的夹具用 insta 快照记录定义（名字、种类、位置、作用域、可见性、参数个数）和引用名；TS 叠加 JS 的查询；局部变量的引用不在引用名里；二进制和超过上限的内容；`EXTRACTOR_VERSION` 或查询文本变化时查询版本变化。
-- 截止时间（`deadline_*`）：病态输入在 1 ms 截止时间下返回 `TimedOut`；取消标志置位时返回 `Cancelled`；看门狗在截止时刻置位，没有在途抽取时不唤醒。
+- 截止时间（`deadline_*`）：病态输入在 1 ms 截止时间下返回 `TimedOut`；取消标志置位时返回 `Cancelled`；看门狗在截止时刻置位，没有在途抽取时不唤醒。看门狗的生命周期（`watchdog_*`）：插件停用后线程退出（`run_dedicated_gated` 返回的任务句柄 `is_finished`，`/proc/self/task/*/comm` 里没有 `code-intel-watchdog`）；连续激活、停用 20 次后，这个名字的线程最多一个；`Executor::shutdown` 在激活仍然存活时也让线程退出；停用时正在运行的抽取返回 `Cancelled`；激活在线程启动前失效时不建线程。
 - 位置分析（`site_*`）：位置上的标识符与 `RefSyntax`；locals 解析到的定义；光标在定义名上时的 `defines`。
 - 存储（`store_*`）：单元的写入与读回；存在检查只返回键完全相同的单元并标记访问；按名字查找区分大小写；单元被淘汰后三张表里没有它的行；配额小于数据量时按访问时间淘汰本命名空间的单元；写入被丢弃时不 panic、内存里的结果仍可用。
 - 映射（`map_*`）：从带 OID 的文件列表建映射；前 8 字节相同的两个 OID 都能正确查到；覆盖项遮住 index 条目；修改后的旧 OID、删除的文件不出现在查询结果里；未跟踪文件可以查到；文件列表换代后清理覆盖项。
 - 覆盖（`overlay_*`）：`FakeGit` 构造 git 设计「工作区比较」表里的情况，覆盖项与工作区实际内容一致：未暂存的修改、`StagedOnly`（工作区等于基准）、未暂存的删除、未跟踪文件、重命名、`Filtered` 与超过 1 MiB 的文件为 `Unindexable`。
 - 调度（`schedule_*`）：层的先后；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，第 3–5 层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停开关在批次边界生效；一批不超过 64 个文件、2 MiB、50 ms；切换 worktree 后游标重建、已写入的不重复抽取；同一 OID 在两个路径上只抽取一次；第 5 层只抽取缓存里没有、且工作区内容与 index 相同的文件。
+- 语言包（`grammar_*`，用 `testing::FakeGrammars`）：`grammar_installed_*`：安装后新扩展名的跟踪文件和未跟踪文件进入映射并被抽取；`grammar_updated_*`：更新后旧版本的单元不再命中、这种语言的文件按新版本重新抽取，旧版本在途抽取的结果没有写入；`grammar_rolled_back_*`：回滚后之前那个版本写过的单元重新命中、不重新抽取；`grammar_removed_*`：撤销后这种语言的文件从映射和 `coverage` 里消失，查询返回 `UnsupportedLanguage`，在途抽取被取消、结果没有写入；`grammar_merged_*`：连续多个通知并成一轮，结果与逐个处理相同，过时的代数被丢弃。
 - 电池（`battery_*`）：电池供电时第 4、5 层不运行、`coverage` 为 `Deferred`；接上电源后继续；电池供电时一次 `query` 让第 4、5 层继续。
 - 增量（`incremental_*`）：用 `FakeBackend` 驱动 `WorktreeBatch`：修改一个文件后按新 OID 抽取、旧 OID 不再返回；目录事件；`rescan` 触发工作区比较；`meta.index` 后等新的文件列表再重建；连续事件并成一轮；从后端交出事件到覆盖部分更新完之前 kernel 不静止。
 - 热启动（`warm_*`）：缓存里已有全部单元时重新打开项目，抽取函数一次也没被调用（计数钩子），只有存在检查；删掉一部分单元后只抽取这一部分。
-- 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`Stale`、`NoSymbol`、`UnsupportedLanguage`。
+- 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；当前文本的 blob 已入索引时，第 1 步列出的本文件定义不在第 3 步重复出现，现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现（`goto_no_duplicates_*`）；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`Stale`、`NoSymbol`、`UnsupportedLanguage`。
 - 限时搜索（`search_*`）：只解析整词命中的文件；`ManualClock` 推进到 1 s 时停止并给出 `Partial` 的计数；命中文件的结果写入缓存；搜完时为 `Complete`。
-- 引用（`refs_*`）：locals 证明的同文件引用是调用方；被局部变量遮住的同名引用被丢弃；没有依据的跨文件引用在 `same_name`；测试 `Resolver` 的 `bind` 让跨文件引用成为调用方；未入索引的部分经限时搜索找到。
+- 引用（`refs_*`）：局部变量和参数的 `References` 找到它在作用域里的全部用处（这些位置只在 `@local.reference` 里，不在 tags 引用和 `ci_ref` 里），不查 `ci_ref`、没有 `same_name`；locals 记为程序作用域局部定义的顶层函数，它的同文件引用也被找到；locals 证明的同文件引用是调用方；同一处引用、同一个文件在多个来源里出现时只列一次、只解析一次（`refs_no_duplicates_*`）；被局部变量遮住的同名引用被丢弃；没有依据的跨文件引用在 `same_name`；测试 `Resolver` 的 `bind` 让跨文件引用成为调用方；未入索引的部分经限时搜索找到。
 - 名字表（`names_*`）：去重、NFC、只含当前 worktree 映射里的 OID（另一个 worktree 独有的名字不在其中）；代数落后时重建、期间返回旧表；仍有持有者时复用同一个 `Arc`。
 - 升级（`escalate_*`）：Java 多候选和唯一 `NameOnly` 候选时调用提供者，其他语言不调用；提供者的 token 为 `Dead` 时不调用；结果相同时 `Same`、不同时 `Ready`；`head_only` 的提供者只在 `head_clean` 时被调用，返回的位置里内容与 HEAD 不同的文件被丢掉；登记 drop 后不再调用。
 - 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`；`activate` 之后、第一个项目打开之前没有任何 IO（`FakeGit`、缓存目录、`SafeRoot` 都没有被调用）；依赖 `dyn Projects`；`Results` 事件的顺序与 generation；一次查询从提交到最后一批写入之前 kernel 不静止。
@@ -927,7 +975,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - A. `services`：`code_intel` 模块；`project` 模块的 `BlobId` 和 `FileList::oid`。`cargo check -p lectern-services` 通过，`rg -n 'pub trait CodeIntel' crates/services/src` 有一处，检查 `dyn CodeIntel` 的 `ID == "code-intel"`、`MULTIPLE == false` 的测试通过。
 - B. `project`：文件列表带 OID，`plugin/project/resident_*` 的份额已更新。
 - C. `cache`：「自定义表」的设计与实现。
-- D. `kernel` 的 `BackgroundGuard`、`executor` 的 `Priority::Batch`（ADR 0029）。
+- D. `kernel` 的 `BackgroundGuard`、`executor` 的 `Priority::Batch`（ADR 0029）和 `Executor::on_shutdown`。
 
 本 crate 分五步实现，每步一个 PR；前四步写 `Refs #17`，第 5 步写 `Closes #17`。每一步都要 `just check`、`just test -p lectern-code-intel`、`just deny` 通过，并把这一步加入的 bench 条目改为生效。
 
@@ -940,12 +988,12 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
    - `store_*` 测试通过；`cargo tree -i rusqlite -e normal --depth 1` 仍只列出 `lectern-cache`。
    - `code_intel/warm_100k`（存在检查部分）在预算内。
 3. **映射、调度与增量更新**（前置 B、D）：
-   - `map_*`、`overlay_*`、`schedule_*`、`battery_*`、`incremental_*`、`warm_*` 测试通过。
+   - `map_*`、`overlay_*`、`schedule_*`、`grammar_*`、`battery_*`、`incremental_*`、`warm_*` 测试通过。
    - `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果：工作区文件只经 `SafeRoot` 读取。
    - `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 没有结果。
    - `code_intel/map_100k`、`code_intel/map_100k_bytes`、`code_intel/batch_peak` 在预算内。
 4. **查询与插件**（前置 A）：`Cargo.toml` 加 `plugin = true`。
-   - `goto_*`、`search_*`、`refs_*`、`names_*`、`escalate_*`、`plugin_*` 测试通过。
+   - `goto_*`、`search_*`、`refs_*`、`names_*`、`escalate_*`、`plugin_*`、`watchdog_*` 测试通过。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、不依赖其他插件 crate，除 `app` 和 tool 层外没有 crate 依赖它。
    - `code_intel/goto_indexed`、`code_intel/search_stop`、`code_intel/references_100k`、`code_intel/names_100k`、`code_intel/names_100k_bytes`、`plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` 在预算内。
 5. **端到端基准**（前置 #20 的抽屉和 `file_reader` 在探针里的里程碑）：bench 探针增加打开抽屉、跳转、覆盖层完成的 `Milestone`，以及读取 `coverage` 的方式。
