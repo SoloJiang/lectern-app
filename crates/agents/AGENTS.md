@@ -2,7 +2,7 @@
 
 Claude Code / Codex 会话发现与解析，按 cwd 归位到项目和 worktree；P3 起包含 ACP 客户端。
 
-- 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
+- 层：领域层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：两个插件 "session-claude-code"、"session-codex"（`plugins`）。只依赖 kernel 层（`kernel`、`services`）和非插件的库 crate（`executor`、`fs_watch`、`cache`）；`project`、`usage`、`review` 是插件，只经 `services` 的接口往来。不得直接或间接依赖 GPUI（架构规则 2）。
 - 设计文档：[docs/design/agents.md](../../docs/design/agents.md)。P1 范围是会话发现与解析；Analyze 的机制（下面「边界」里的命令行、凭据转发端点、沙箱与监护）另开 issue，设计写进该文档的后续修订。
 - issue：[#13](https://github.com/SoloJiang/lectern-app/issues/13)、[#23](https://github.com/SoloJiang/lectern-app/issues/23)
 - ADR：[0012](../../docs/adr/0012.md)、[0014](../../docs/adr/0014.md)、[0019](../../docs/adr/0019.md)、[0020](../../docs/adr/0020.md)、[0026](../../docs/adr/0026.md)
@@ -32,4 +32,5 @@ just test -p lectern-agents
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。脱敏用 `src/redact.rs` 的字段白名单工具（被忽略的测试 `redact_file_from_env`），生成后逐行看过再提交。
 - 现在的 `tests/fixtures/claude-code/2.1.302/` 和 `tests/fixtures/codex/0.140.0-*/` 都是合成数据（见各自的 `SOURCE.md`），不要从本机的 `~/.claude`、`~/.codex` 等用户目录复制任何内容进仓库。超长行、坏行、没写完的行和 `.jsonl.zst` 在测试的临时目录里生成，不提交大文件。
-- `test-support` feature 提供 `testing::parse_file` 和 bench 的合成会话（`synthetic_session`、`append_chunk`、`synthetic_rollout`、`compress_zst`，fixtures 用 `include_bytes!` 嵌入），供 `lectern-bench` 的 `agents/*` 基准使用：`just bench agents/`（Linux 上是冒烟运行，`just bench --measure agents/` 采样并打印实测值）。
+- 发现、监听、归位与插件的测试在 `src/source/tests/`（`discover_*`、`watch_*`、`place_*`、`index_cache_*`、`complete_*`、`plugin_*`、`source_*`），经插件驱动：真实的 `Kernel` 加 `Executor::manual()`、`fs_watch` 的 `testing::FakeBackend` 与手动驱动（`support.rs` 的 `Harness::emit` 注入事件并推进假时钟，不用真实的 FSEvents）、临时目录里的 `cache`、模拟的 `Projects`（`FakeProjects`）。会话目录在临时目录里，不读本机的会话目录。
+- `test-support` feature 提供 `testing::parse_file`、`testing::source`（不经过插件、同步发现的会话来源）和 bench 的合成会话（`synthetic_session`、`append_chunk`、`synthetic_rollout`、`compress_zst`、`synthetic_projects`、`synthetic_long_session`，fixtures 用 `include_bytes!` 嵌入），供 `lectern-bench` 的 `agents/*` 基准使用：`just bench agents/`（Linux 上是冒烟运行，`just bench --measure agents/` 采样并打印实测值）。

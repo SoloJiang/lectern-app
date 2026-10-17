@@ -27,6 +27,8 @@ const BENCHES: &[Bench] = &[
     agents::APPEND_4K,
     agents::ZST_THROUGHPUT,
     agents::ZST_LOAD_DECODED,
+    agents::DISCOVER_1000,
+    agents::TURNS_CACHED_50MB,
     cache::GET_4K,
     cache::GET_MANY_50,
     cache::GET_1M,

@@ -1,0 +1,9 @@
+---
+source: crates/agents/src/source/tests/discover.rs
+expression: "h.render(&seen[0].list)"
+---
+bbbbbbbb-0000-4000-8000-000000000002 file=[base]/codex/sessions/2026/10/05/rollout-2026-10-05T09-30-00-bbbbbbbb-0000-4000-8000-000000000002.jsonl cwd=/Users/dev/fixture/repo place=Missing title="Placeholder subagent task." last=1791192615155 parent=bbbbbbbb-0000-4000-8000-000000000001 Known
+bbbbbbbb-0000-4000-8000-000000000001 file=[base]/codex/sessions/2026/10/05/rollout-2026-10-05T09-00-00-bbbbbbbb-0000-4000-8000-000000000001.jsonl cwd=/Users/dev/fixture/repo place=Missing title="Placeholder paginated prompt: fix the bug." last=1791190823851 Known
+aaaaaaaa-0000-4000-8000-000000000003 file=[base]/codex/sessions/2026/10/04/rollout-2026-10-04T09-00-00-aaaaaaaa-0000-4000-8000-000000000003.jsonl cwd=/Users/dev/fixture/repo place=Missing title="Placeholder prompt one: list the files." last=1791104420740 inheritance_unknown Known
+aaaaaaaa-0000-4000-8000-000000000002 file=[base]/codex/sessions/2026/10/03/rollout-2026-10-03T09-00-00-aaaaaaaa-0000-4000-8000-000000000002.jsonl cwd=/Users/dev/fixture/repo place=Missing title="Placeholder prompt one: list the files." last=1791018014518 inheritance_unknown Known
+aaaaaaaa-0000-4000-8000-000000000001 file=[base]/codex/sessions/2026/10/02/rollout-2026-10-02T09-00-00-aaaaaaaa-0000-4000-8000-000000000001.jsonl cwd=/Users/dev/fixture/repo place=Missing title="Placeholder prompt one: list the files." last=1790931652924 Known

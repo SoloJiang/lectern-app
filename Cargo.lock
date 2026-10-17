@@ -4210,10 +4210,15 @@ name = "lectern-agents"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "lectern-cache",
+ "lectern-executor",
+ "lectern-fs-watch",
+ "lectern-kernel",
  "lectern-services",
  "ruzstd",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

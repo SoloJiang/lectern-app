@@ -235,6 +235,18 @@ impl Codex {
         self.parse(file, from, max_bytes, None)
     }
 
+    /// `read`，同时在 `index` 上接着建轮次索引（「数据流与线程」第 7 步：同一遍解析）。`index` 应当建到
+    /// `from` 为止；读取从头回放（`Batch::reset`）时它被清空、从头重建。
+    pub(crate) fn read_indexed(
+        &self,
+        file: &SessionFile,
+        from: &Cursor,
+        max_bytes: u64,
+        index: &mut IndexBuilder,
+    ) -> Result<Parsed, SessionError> {
+        self.parse(file, from, max_bytes, Some(index))
+    }
+
     /// 打开读取的对象。压缩会话先找解压副本，没有就建一个；建不出来时从头流式解码（第二个值为 true）。
     fn body(&self, file: &SessionFile) -> Result<(Body<'_>, bool), SessionError> {
         if !file.compressed {
