@@ -1,0 +1,11 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"unsupported-syntax\")"
+---
+en/app.ftl:16: -brand: term attributes are not supported
+en/app.ftl:1: app-function: functions such as NUMBER() are not supported; format the value in code and pass it with Args::str
+en/app.ftl:2: app-term-args: term arguments (`-brand(...)`) are not supported
+en/app.ftl:3: app-selector: select expressions must select on a variable
+en/app.ftl:18: -greeting: terms cannot use variables ($name)
+en/app.ftl:8: app-decimal-key: decimal variant keys such as [1.5] are not supported: Fluent never matches them against a number argument
+en/app.ftl:11: app-mixed-keys: the select on $n mixes number keys and string keys

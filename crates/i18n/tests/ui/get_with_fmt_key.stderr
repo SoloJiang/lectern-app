@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+ --> tests/ui/get_with_fmt_key.rs:4:41
+  |
+4 |     let _ = Strings::of(Locale::En).get(keys::review::FILES_CHANGED);
+  |                                     --- ^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Key`, found `FmtKey`
+  |                                     |
+  |                                     arguments to this method are incorrect
+  |
+note: method defined here
+ --> src/strings.rs
+  |
+  |     pub fn get(&self, key: Key) -> &'static str {
+  |            ^^^

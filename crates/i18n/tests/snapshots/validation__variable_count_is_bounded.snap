@@ -1,0 +1,5 @@
+---
+source: crates/i18n/tests/validation.rs
+expression: "errors(\"too-many-variables\")"
+---
+en/app.ftl:1: app-many: uses 9 variables; at most 8 are supported
