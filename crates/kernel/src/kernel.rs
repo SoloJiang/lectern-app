@@ -7,7 +7,8 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::event::{Busy, Emitter, Quiescent, Tap, dispatch_transition};
+use crate::background::{Background, BackgroundStatus};
+use crate::event::{BackgroundChanged, Busy, Emitter, Quiescent, Tap, dispatch_transition};
 use crate::handle::{Context, PluginHandle, ServiceEventFn};
 use crate::panic::contain;
 use crate::plugin::{
@@ -86,6 +87,7 @@ struct LiveSlot {
 /// State shared between the kernel thread and every other thread.
 pub(crate) struct Shared {
     pub(crate) counters: Arc<Counters>,
+    pub(crate) background: Arc<Background>,
     sender: Mutex<Option<Sender<Request>>>,
     pub(crate) registry: RwLock<Registry>,
     live: Mutex<LiveTable>,
@@ -268,9 +270,11 @@ impl Kernel {
 
     pub(crate) fn start_with_tap(plugins: Plugins, tap: Option<Name>) -> Arc<Kernel> {
         let counters = Arc::new(Counters::new());
+        let background = Arc::new(Background::new());
         let (sender, receiver) = mpsc::channel();
         let shared = Arc::new(Shared {
             counters: counters.clone(),
+            background: background.clone(),
             sender: Mutex::new(Some(sender)),
             registry: RwLock::new(Registry::default()),
             live: Mutex::new(LiveTable { slots: Vec::new() }),
@@ -285,6 +289,12 @@ impl Kernel {
         });
         let weak = Arc::downgrade(&shared);
         counters.set_notify(Box::new(move |transition| {
+            if let Some(shared) = weak.upgrade() {
+                shared.notify(transition);
+            }
+        }));
+        let weak = Arc::downgrade(&shared);
+        background.set_notify(Box::new(move |transition| {
             if let Some(shared) = weak.upgrade() {
                 shared.notify(transition);
             }
@@ -365,6 +375,28 @@ impl Kernel {
     /// the same `Some(n)` mean the kernel stayed quiescent in between.
     pub fn quiescent_epoch(&self) -> Option<u64> {
         self.shared.counters.epoch()
+    }
+
+    /// Turns the global pause switch on. Every piece of background work stops
+    /// at its next batch boundary, and work that starts during the pause
+    /// stops before its first batch. Once all of it has stopped,
+    /// [`background`](Kernel::background) reports
+    /// [`Paused`](crate::BackgroundState::Paused). Only for measurement
+    /// (ADR 0029); it does not affect quiescence.
+    pub fn pause(&self) {
+        self.shared.background.pause();
+    }
+
+    /// Turns the pause switch off: every stopped piece of work continues from
+    /// where it stopped.
+    pub fn resume(&self) {
+        self.shared.background.resume();
+    }
+
+    /// The state, count and epoch of the background work, read in one step.
+    /// Independent of [`quiescent_epoch`](Kernel::quiescent_epoch).
+    pub fn background(&self) -> BackgroundStatus {
+        self.shared.background.status()
     }
 
     /// Waits until every request queued before this call has been handled.
@@ -573,6 +605,9 @@ impl Lifecycle {
         match transition {
             Transition::Busy(seq) => dispatch_transition(&self.shared, Busy { seq }),
             Transition::Quiescent(seq) => dispatch_transition(&self.shared, Quiescent { seq }),
+            Transition::Background(state, seq) => {
+                dispatch_transition(&self.shared, BackgroundChanged { state, seq })
+            }
         }
     }
 

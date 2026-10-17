@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+use crate::background::BackgroundState;
 use crate::gate::GateInner;
 use crate::handle::PluginHandle;
 use crate::kernel::Shared;
@@ -28,11 +29,13 @@ pub enum TokenState {
     Dead,
 }
 
-/// A busy/quiescent transition with its sequence number.
+/// A busy/quiescent transition with its sequence number, or a change of the
+/// background state with the background epoch.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Transition {
     Busy(u64),
     Quiescent(u64),
+    Background(BackgroundState, u64),
 }
 
 /// Global counters behind quiescence (`docs/design/kernel.md`, 静止).
@@ -313,8 +316,14 @@ impl ActivationToken {
         self.admit(|state| state != DEAD, true)
     }
 
+    /// Like `enter_busy`, but not counted towards quiescence: taking a
+    /// `BackgroundGuard` must not make the kernel busy for a moment.
+    pub(crate) fn enter_background(&self) -> Option<Admission> {
+        self.admit(|state| state != DEAD, false)
+    }
+
     /// Like `enter`, but not counted towards quiescence. Used only to call
-    /// `Busy` / `Quiescent` listeners.
+    /// `Busy` / `Quiescent` / `BackgroundChanged` listeners.
     pub(crate) fn enter_uncounted(&self) -> Option<Admission> {
         self.admit(|state| state == LIVE, false)
     }

@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）。「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）尚未实现。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 加入）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -312,6 +312,11 @@ impl PluginHandle {
     /// 不会在撤销之后通过旧句柄新开始工作；计数加一时全局准入计数已经不为零，不会多出一次忙碌转换。
     pub fn busy(&self) -> Option<BusyGuard>;
 
+    /// 声明可暂停的后台工作（ADR 0029，见「后台工作」），取用规则与 `busy` 相同（`Pending` 也接受，这次激活已停用时返回 None），
+    /// 但取的准入不计入全局准入计数，守卫也不计入静止：取守卫不会让 kernel 短暂变忙、改变 `quiescent_epoch()`。
+    /// 停用第 3 步照常等这次准入归零，所以守卫要么在撤销完成之前创建，要么返回 None。
+    pub fn background(&self) -> Option<BackgroundGuard>;
+
     /// 带激活代数的 Emitter：这次激活停用后（包括之后重新激活），通过它发出的事件直接丢弃；
     /// token 还是 `Pending`（在 `started` 里）时，事件暂存到 token 变为 `Live` 之后再发出，激活失败时丢弃。
     pub fn emitter(&self) -> Emitter;
@@ -472,6 +477,13 @@ impl Kernel {
     /// 静止时返回当前的静止代数，忙碌时返回 None。每次从忙碌变为静止，代数加一，所以两次调用返回同一个值，
     /// 说明这两次调用之间 kernel 一直静止，中间没有出现过忙碌（哪怕很短）。
     pub fn quiescent_epoch(&self) -> Option<u64>;
+
+    /// 打开全局的暂停开关（见「后台工作」）。只供测量使用，不影响静止。可以在任何线程调用，重复调用无效果。
+    pub fn pause(&self);
+    /// 关闭暂停开关：全部已停下的后台工作在同一步里记为继续，并被唤醒。
+    pub fn resume(&self);
+    /// 后台工作的状态、守卫数和后台代数，在一次加锁里读出，三者一致。
+    pub fn background(&self) -> BackgroundStatus;
 }
 
 /// 项目文件的不可变快照。`project` 在后台读 git index 建好后再交给 kernel；
@@ -491,6 +503,46 @@ pub struct PluginStatus {
     pub commit_time: Option<Duration>,      // 最近一次提交的耗时
     pub started_time: Option<Duration>,     // 最近一次 started 的耗时（同步执行的部分，加上之后发出暂存事件、调用暂存 start、同步发出 ServiceAdded 并执行其监听的时间）
 }
+```
+
+### 后台工作
+
+```rust
+/// 可暂停的后台工作的守卫（ADR 0029），由 `PluginHandle::background()` 取得，移进任务，任务结束时 drop。
+/// kernel 单独计数，不计入静止。工作在每一批之前（包括第一批）调用 `proceed`。
+pub struct BackgroundGuard { /* Arc<kernel 的后台登记>, 守卫序号 */ }
+
+impl BackgroundGuard {
+    /// 批次边界的检查。开关关着时返回 `Ready`，不加锁（只读一个原子标志）。开关打开时在后台登记的锁内
+    /// 登记 `cx.waker()`，第一次停下时把这项工作记为已停下（后台代数加一），返回 `Pending`；`Kernel::resume` 唤醒它。
+    pub fn poll_proceed(&self, cx: &mut std::task::Context<'_>) -> Poll<()>;
+    /// `poll_proceed` 的 future 形式：每批之前 `guard.proceed().await`。
+    pub fn proceed(&self) -> Proceed<'_>;
+    /// 开关是否打开，不登记任何东西。供批次内部的检查（如解析器的进度回调）放弃当前的一项、回到批次边界。
+    pub fn pause_requested(&self) -> bool;
+}
+
+/// 后台工作的状态。
+pub enum BackgroundState {
+    /// 没有 `BackgroundGuard`。
+    Idle,
+    /// 至少有一个守卫没有停下。
+    Running,
+    /// 有守卫，并且全部已停下。
+    Paused,
+}
+
+pub struct BackgroundStatus {
+    pub state: BackgroundState,
+    /// 未 drop 的 `BackgroundGuard` 数。
+    pub count: usize,
+    /// 后台代数，与 `quiescent_epoch()` 无关：取得或 drop 守卫、一项工作在批次边界停下、`resume` 让停下的工作继续时加一。
+    pub epoch: u64,
+}
+
+/// 后台工作的状态变化，在 kernel 线程上分发，方式与 `Busy` / `Quiescent` 相同（分发和监听的准入都不计入静止）。
+/// `seq` 是变化时的后台代数；监听按 `seq` 判断先后，忽略不大于已处理的最大值的事件。
+pub struct BackgroundChanged { pub state: BackgroundState, pub seq: u64 }
 ```
 
 ### 事件
@@ -641,7 +693,14 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 
 插件把初始化工作（扫描会话目录、打开 SQLite、建索引的第 1、2 层）交给 executor 时，用 `PluginHandle::busy()` 取一个守卫移进任务，任务结束时守卫随之 drop。`PluginHandle` 在 `started` 里取得并保存，所以打开项目、收到事件之后开始的工作也能标记为忙碌。kernel 不知道 executor 的存在，只计数守卫。周期性或长期运行的任务（文件监听、定时刷新）在等待期间不取守卫，但每一轮实际工作（一次刷新：读文件、解析、更新状态）开始时取一个 `BusyGuard`，这一轮结束、结果交给主线程并应用之后才 drop（见「撤销」里排到主线程的结果），所以刷新进行中时 kernel 不报告静止。插件停用时，它的任务句柄被 drop、任务被要求取消，但取消是协作式的：任务真正结束、守卫被 drop 之前，守卫仍然计入，kernel 不报告静止。
 
-可暂停的后台工作（[ADR 0029](../adr/0029.md)，尚未实现）：建索引的第 3–5 层这类工作满足 ADR 0029 的四条条件，不取 `BusyGuard`，改取 `PluginHandle::background()` 返回的 `BackgroundGuard`，取用规则与 `busy()` 相同（激活已停用时返回 None，守卫随任务结束 drop）。kernel 单独计数这类守卫，它们不进入上面的静止条件，不影响 `is_quiescent`、`quiescent_epoch()` 和 `Busy` / `Quiescent`；kernel 另外报告后台工作的状态（没有、进行中、全部已暂停）并在状态变化时发出事件，分发方式与 `Busy` / `Quiescent` 相同。`Kernel` 提供全局的暂停开关：打开后，任务在每个批次边界询问自己的守卫，需要暂停时登记 waker、返回 `Pending`，关闭开关时被唤醒；暂停期间新取的守卫在第一批之前就停下；全部停下后状态变为「全部已暂停」。kernel 另外维护一个单调递增的后台代数，与 `quiescent_epoch()` 分开：取得或 drop `BackgroundGuard`、一项工作在批次边界停下或被唤醒继续，都在同一次原子操作里加一，所以两次读到同一个值时，两次之间后台工作的集合和状态都没有变化。接口的具体形状随实现 PR 写进「接口」一节。
+可暂停的后台工作（[ADR 0029](../adr/0029.md)，接口见「后台工作」）：建索引的第 3–5 层这类工作满足 ADR 0029 的四条条件，不取 `BusyGuard`，改取 `PluginHandle::background()` 返回的 `BackgroundGuard`，取用规则与 `busy()` 相同（激活已停用时返回 None，守卫随任务结束 drop）。kernel 单独计数这类守卫，它们不进入上面的静止条件，不影响 `is_quiescent`、`quiescent_epoch()` 和 `Busy` / `Quiescent`；kernel 另外报告后台工作的状态（没有、进行中、全部已暂停）并在状态变化时发出事件，分发方式与 `Busy` / `Quiescent` 相同。`Kernel` 提供全局的暂停开关：打开后，任务在每个批次边界询问自己的守卫，需要暂停时登记 waker、返回 `Pending`，关闭开关时被唤醒；暂停期间新取的守卫在第一批之前就停下；全部停下后状态变为「全部已暂停」。kernel 另外维护一个单调递增的后台代数，与 `quiescent_epoch()` 分开：取得或 drop `BackgroundGuard`、一项工作在批次边界停下或被唤醒继续，都在同一次原子操作里加一，所以两次读到同一个值时，两次之间后台工作的集合和状态都没有变化。
+
+后台工作的实现：开关、守卫数、已停下的守卫（连同各自最近一次的 waker）和后台代数放在一把互斥锁里，`Kernel::background()` 在同一次加锁里读出状态、守卫数和代数。每次变化（取得、drop、停下、继续）都在这把锁内改状态并给代数加一，状态与上一次报告的不同时取得 `BackgroundChanged`，释放锁之后才排进 kernel 线程的队列（与 `Counters` 的转换相同，不在锁内调用发送）。waker 的唤醒和 drop 都在锁外。具体规则：
+
+- 暂停期间取得的守卫在创建时就记为已停下（没有 waker，等它第一次调用 `poll_proceed` 时登记），所以暂停期间开始新工作不会让状态离开「全部已暂停」，代数只因「取得」加一，不再为它的第一次停下另加一。
+- `resume` 在同一次加锁里关开关、把全部已停下的守卫记为继续，代数加一（有停下的守卫时；没有就不变），释放锁后唤醒它们。所以 `resume` 返回时状态已经是「进行中」，不等任务被调度。
+- 开关本身的切换不改变代数：`pause` 只设开关，工作到批次边界才停下；没有停下的守卫时 `resume` 也不改变代数。
+- 已停下的守卫被 drop（任务被取消、插件停用时闸门丢弃 future）时同时离开已停下的集合。
 
 每次从忙碌变为静止，kernel 发出一次 `Quiescent` 事件；每次从静止变为忙碌，发出一次 `Busy` 事件。转换发生在取守卫、drop 守卫或释放准入的那个调用里，调用方可能正持有插件自己的锁，所以转换时只在原子计数上取得序号，事件排进 kernel 线程的队列，由 kernel 线程分发，不在这个调用栈里同步执行监听（否则同一插件的监听要取同一把锁时会死锁）；这个分发请求不算生命周期操作，不让 kernel 变忙。两个事件都带上这次转换的序号（与 `quiescent_epoch()` 同一个单调计数器，转换在计数器上原子递增时取得），`emit` 在不同线程上同步执行，事件到达监听的顺序可能和转换的顺序不同，所以监听按序号判断：序号不大于已经处理过的最大序号的事件是过时的，直接忽略。bench 因此不会被一个迟到的 `Busy` 取消计时、又等不到下一个 `Quiescent`。这两个事件本身的分发不计入进行中的 `emit`，调用它们的监听时取的准入也不计入全局准入计数（仍计入所属激活自己的计数，停用照常等它结束），否则调用 `Quiescent` 的监听就会让 kernel 重新变忙、发出 `Busy`，释放后又发出 `Quiescent`，循环下去。监听里再做的事（取服务、发事件、取 `BusyGuard`）照常计入，所以这两个事件的监听只记录序号和时间，bench 的监听就是这样；在监听里做实际工作会如实引起一次新的忙碌和静止。bench 收到 `Quiescent` 后等 5 秒再采样，期间收到 `Busy` 就重新开始等待。采样前后各读一次 `quiescent_epoch()`：两次都是同一个 `Some(n)` 时样本有效，否则（采样期间有过哪怕很短的忙碌）丢弃这次样本，重新等待静止。`Quiescent` 的用途：启动后第一次静止用于空窗口的内存基准，打开项目触发的激活与初始化结束后再次静止，用于 monorepo 的内存基准。空闲内存的基准在静止后一律先打开暂停开关（不论当时有没有后台工作），等后台工作为「没有」或「全部已暂停」再开始 5 秒的等待；「后台工作全部完成」的内存基准则等后台工作计数归零并静止后采样。两种样本都在 5 秒等待开始时和采样之后各读一次后台代数（与 `quiescent_epoch()` 的检查一起），两次相同、后台状态符合要求才有效（ADR 0029）。超时（ADR 0017 规定首帧后 30 秒内不静止即失败）由 bench 判断。
 
@@ -678,6 +737,13 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - 命令：依赖的服务再也不会就绪时，挂起的 `done` 收到 `DependencyUnavailable`。
 - 命令：两个插件声明同一个命令名时 `validate` 报错；停用一个正在等待依赖的命令插件，挂起的 `done` 收到 `Disabled`。
 - 静止：发出 `Quiescent` / `Busy` 不会触发新的状态切换。
+- 后台工作（ADR 0029）：
+  - 取得、停下、继续、drop `BackgroundGuard` 和分发 `BackgroundChanged` 都不改变 `is_quiescent()`、`quiescent_epoch()`，不发出 `Busy` / `Quiescent`；
+  - 状态按「没有 → 进行中 → 全部已暂停 → 进行中 → 没有」变化，每次变化发出一次 `BackgroundChanged`，带变化时的后台代数；
+  - 后台代数在每次取得、drop、停下、继续时加一，只在这些时候变化：开关的切换、重复的 `pause` / `resume`、开关关着时的批次检查、已停下的守卫再次被 poll、读状态都不改变它；
+  - 暂停期间开始的工作在第一批之前停下，`resume` 之后才运行第一批；正在执行一批的工作在下一个批次边界停下，不中途打断；
+  - drop 的守卫结束这项工作：已停下的守卫 drop 后离开已停下的集合、不再被唤醒；插件停用时，停在批次边界的任务被丢弃，守卫随之 drop；已停用的句柄取不到守卫；
+  - 并发：多个线程同时取得、检查、drop 守卫，另一个线程反复切换开关时，一次读出的守卫数、状态和代数一致（守卫数为零当且仅当「没有」，代数单调，代数相同的两次读结果相同），结束时为「没有」，按 `seq` 最大的 `BackgroundChanged` 与最终状态一致（重复 300 轮）。
 - 暂存效果：暂存的第一个事件让这次激活失效后，后面暂存的事件不再发出、`start` 不再调用（已经发出的第一个事件不回滚，激活按 `Live` 之后的失败停用）；暂存的 `start` panic 时插件进入 `Failed`，kernel 线程继续运行。
 - `own_with` 的 `start` panic：闸门关闭、任务一次也没运行，插件进入 `Failed`，之后的撤销正常完成，调用方线程没有展开。
 - `own_with` 的 `start` 里调用同一个句柄的 `own`、`own_with`：不死锁，守卫都登记上；`start` 运行期间另一个线程让这次激活失效（只做同步的 token 失效）：`own_with` 返回 false，返回的句柄被 drop、闸门关闭，任务一次也没运行；撤销在 `start` 返回、句柄处理完、准入释放之后才完成。
@@ -821,6 +887,27 @@ impl Kernel {
 - `Kernel::start` 的路径只多了一次「槽位已有清单就跳过」的判断，读清单改为调用与 `prepare` 共用的函数。改动前后各用一个临时的测试（不提交）在 release 下测 `Kernel::start` 加 `barrier`（20 个 `AfterFirstFrame` 插件，预热 200 次后取 2000 次）：改动前三次的中位数 94 / 98 / 79 µs，改动后五次 89 / 94 / 88 / 91 / 92 µs，在噪声范围内。
 - `just bench --measure kernel/`（不判定、只记录；这些基准测服务查找和事件分发，不经过本次改动的代码）与 `origin/main` 交替各运行三次，前后的差别在同一侧三次之间的波动以内，数字见 [bench 设计「实际验证」](bench.md#实际验证)第 3 步。
 
+可暂停的后台工作（[ADR 0029](../adr/0029.md)），在 Linux（x86_64，4 核虚拟机）上运行：
+
+- `just test -p lectern-kernel`：93 个测试通过，其中新增 7 个（`crates/kernel/src/tests/background.rs`，对应「测试」一节「后台工作」的各条；并发一条重复 300 轮，奇数轮在暂停中开始并反复切换开关，不靠 sleep 控制时序）；`cargo nextest run -p lectern-kernel --all-features` 连续 15 次全部通过。`just check`、`just test`、`just doctest`、`just deny` 全部通过。
+- 忙碌守卫、准入和服务调用的代码没有改动：后台登记是 `Shared` 里单独的一个 `Arc`，不在 `Counters` 里，`busy()`、`enter()`、`ServiceRef::get` 不经过它。`just bench --measure kernel/` 与 `origin/main` 交替各运行三次，数字见下表（中位数，三次依次列出；改动前的源码树是 `origin/main` 的一份拷贝），没有一项变慢：
+
+  | ID | 改动前 | 改动后 |
+  |---|---|---|
+  | `kernel/service_get` | 726 / 716 / 703 ns | 324 / 315 / 323 ns |
+  | `kernel/service_for_each/1` | 590 / 760 / 720 ns | 338 / 416 / 400 ns |
+  | `kernel/service_for_each/4` | 2.15 / 2.81 / 2.7 µs | 1.28 / 1.23 / 1.26 µs |
+  | `kernel/service_for_each/16` | 10.9 / 11.3 / 10.8 µs | 5.49 / 5.13 / 4.38 µs |
+  | `kernel/service_current/1` | 594 / 611 / 682 ns | 413 / 390 / 367 ns |
+  | `kernel/service_current/4` | 1.26 / 1.04 / 1.17 µs | 1.14 / 1.19 / 1.2 µs |
+  | `kernel/service_current/16` | 4.16 / 3.99 / 3.74 µs | 3.88 / 3.9 / 4.1 µs |
+  | `kernel/emit` | 727 / 667 / 763 ns | 651 / 720 / 786 ns |
+  | `kernel/emit_nested` | 1.45 / 1.2 / 1.53 µs | 1.47 / 1.5 / 1.53 µs |
+
+  `service_get`、`service_for_each/*` 改动后三次都更低。这几条路径的代码没有改动，差别应来自 `Shared` 多了一个字段后的内存布局或两份源码树所在目录不同，不算作本次改动带来的加速；结论只是没有变慢。
+
+- 没有验证的：`executor` 的批量线程组和 `code_intel` 怎样使用这组接口（各自的 PR），bench 的暂停请求和后台状态消息（bench 第 5 步）。
+
 ## 与设计的差异
 
 - 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。
@@ -837,3 +924,10 @@ impl Kernel {
 - 新增 `GraphError::UnknownPlugin`：`dependency_closure` 收到集合里没有的 ID 时没有合适的已有变体。
 - `dependency_closure` 除缺提供者外，还报告 `id` 自己的清单 panic（`ManifestPanicked`）和闭包里单实现服务有多个提供者（`MultipleProviders`）：这两种情况下闭包裁剪出的集合同样不能用。
 
+可暂停的后台工作（设计在「静止」里只写了规则，接口随本次实现写进「后台工作」）：
+
+- 状态的三个值命名为 `Idle`（没有）、`Running`（进行中）、`Paused`（全部已暂停）；`Kernel::background()` 一次返回状态、守卫数和后台代数，bench 的「后台工作计数归零」读 `count`。
+- 暂停期间取得的守卫在创建时就记为已停下，不等它第一次检查：设计只要求它在第一批之前停下，这样暂停期间开始新工作时状态一直是「全部已暂停」，bench 等待中的样本不会因为状态短暂变成「进行中」而失效（代数仍因「取得」加一，样本照样按代数判为无效）。工作必须在第一批之前调用 `proceed`。
+- 「继续」在 `resume` 里记账：`resume` 在同一次加锁里把全部已停下的工作记为继续、代数加一（不是每项各加一），然后唤醒它们，而不是等任务被重新 poll 时各自记账。所以 `resume` 返回时状态已经是「进行中」；两次读之间有过继续时代数一定不同，满足 ADR 0029 的判定。
+- 开关的切换本身不改变代数：ADR 0029 只要求开始、结束、停下、继续时变化，`pause` 之后工作要到批次边界才停下，那时才加一。
+- 新增 `BackgroundGuard::pause_requested`：ADR 0029 要求单个文件解析时进度回调也检查暂停，回调里不能登记 waker，只读开关。

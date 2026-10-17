@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
+use crate::background::BackgroundState;
 use crate::kernel::{Shared, invalidate};
 use crate::panic::contain;
 use crate::plugin::{Name, PluginError};
@@ -69,6 +70,18 @@ pub struct Quiescent {
 }
 
 impl Event for Quiescent {}
+
+/// The background state changed (ADR 0029). `seq` is the background epoch
+/// ([`BackgroundStatus::epoch`](crate::BackgroundStatus::epoch)) at the
+/// change, not the quiescent one; as with [`Busy`], ignore events whose `seq`
+/// is not greater than the largest already seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackgroundChanged {
+    pub state: BackgroundState,
+    pub seq: u64,
+}
+
+impl Event for BackgroundChanged {}
 
 /// Sends events. An emitter from `PluginHandle::emitter()` belongs to one
 /// activation; the app's emitter belongs to none.
@@ -211,7 +224,8 @@ fn deliver<E: Event>(shared: &Arc<Shared>, event: Tapped<E>) {
     }
 }
 
-/// Dispatches a `Busy` or `Quiescent` event on the kernel thread. Neither the
+/// Dispatches a `Busy`, `Quiescent` or `BackgroundChanged` event on the
+/// kernel thread. Neither the
 /// dispatch nor the admissions taken for its listeners count towards
 /// quiescence, so recording the event does not cause another transition.
 pub(crate) fn dispatch_transition<E: Event>(shared: &Arc<Shared>, event: E) {
