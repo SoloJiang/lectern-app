@@ -290,7 +290,7 @@ pub enum QueryState {
 }
 
 pub enum Completeness {
-    /// 能参与回答的文件都已入索引或在这次查询里搜过。
+    /// 能参与回答的文件都已入索引或在这次查询里搜过；还在在途抽取里的文件算作没搜过。
     Complete,
     /// 限时搜索到时停止：当前子项目里还有 `unsearched` 个未入索引的文件没有搜，子项目之外还有 `outside` 个未入索引。
     Partial { unsearched: u32, outside: u32 },
@@ -409,7 +409,7 @@ pub struct ProviderRegistration { /* Weak<登记表>, 登记序号 */ }
 - 多个提供者处理同一种语言时（SCIP 导入与 jdtls 都处理 Java）按固定规则仲裁，结果不取决于激活顺序和回复的先后：
   - 先后：`head_only` 的提供者（SCIP，索引对应的提交与 HEAD 相同）负责内容与 HEAD 相同的文件；其余提供者（jdtls）负责有改动和未跟踪的文件，`head_clean` 为 false 时只请求它们。同一类里按提供者 ID 的字节序。
   - 合并：每个回复的位置按所在文件归给负责它的那一类，同一文件有多个回复时取先后靠前的提供者的位置。合并结果只取决于已到达的回复集合，每到一个回复重新算一次，再与候选比较。
-  - 取消：每个请求有自己的 `SemanticRequestId`，只采用 ID 仍是这次查询当前请求的回复。查询关闭、被新的查询取代、或某个提供者的结果按上面的规则不会被采用（比如被查文件和全部候选文件都与 HEAD 相同、SCIP 已经回复）时，对还没回复的请求调用 `cancel`。
+  - 取消：每个请求有自己的 `SemanticRequestId`，只采用 ID 仍是这次查询当前请求的回复。查询关闭或被新的查询取代时，对还没回复的请求调用 `cancel`。非 `head_only` 的提供者（jdtls）在回复之前不因为别的提供者已经回复而被取消：它可能返回语法索引没找到的、在有改动或未跟踪文件里的位置。
   - 具体的提供者由 #26 实现，这里只规定 `code_intel` 一侧的仲裁。
 - 注销：登记 drop（提供者停用、失败，或它的插件被 kernel 撤销），或者调用前 `token.enter()` 取不到准入时，本 crate 把这个提供者全部未回复的请求 ID 作废，按剩下的回复重新合并受影响的查询；没有别的提供者还在请求中、也没有可用回复时 `semantic` 改为 `Failed`。作废的 ID 不再被采用，迟到的回复直接丢弃。本 crate 自己停用或项目关闭时，对全部未回复的请求调用 `cancel`（仍在准入内）后丢弃。
 - 合并结果与已列出的候选（位置集合）相同时 `semantic` 为 `Same`，不同时为 `Ready`，抽屉原地更新（技术调研「代码导航与编辑」的交互规则）。
@@ -717,6 +717,7 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 
   存在检查和名字表的构建用同样的三元组条件。grammar 或查询升级、`EXTRACTOR_VERSION` 变化之后，旧版本的单元不再出现在任何结果里，只等淘汰。
 - 单元字节数：`64 + Σ定义 (2 × 名字长度 + 作用域长度 + 40) + Σ引用 (2 × 名字长度 + 24)`，近似行加两份索引的大小，计入 `meta.bytes` 和命名空间配额。
+- 写入的键来自读到的字节：任何一次抽取（批量、按需、限时搜索、第 5 层）写入之前，都对实际读到的字节重新算 OID（原始字节的 OID；工作区一侧与排队时的 OID 不同时再用 `canonical_oid` 算一次），用这个 OID 作键。排队时记下的 OID 只用来挑选要读的文件，不作键。两者不同（排队之后文件又被改了）时，结果只写在实际的 OID 下，原来那个 OID 的 `indexed` 提示不置位；路径的新内容随 fs_watch 的事件进入覆盖部分，有效 OID 变成实际的 OID 后提示才会匹配。所以一份内容的抽取结果不会写到另一个 OID 的键下。
 - 写入：一批（见「调度、批次与取消」）在一个写事务里建单元、插入全部行，一批约 100 KB，远低于 `MAX_BATCH`；写失败（`Dropped`）时这一批的结果留在内存里供本次查询使用，下次需要时重新抽取。
 - 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 在热启动的存在检查和查询命中时标记访问，所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
 - 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。
@@ -985,7 +986,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ### 限时搜索
 
-- 范围：当前子项目（按查询快照里的子项目边界）里语言在兼容组内、`indexed` 提示与当前有效 OID 和代数不匹配（见「输入代数与派生状态」）、也不在在途抽取里的文件，按与当前文件的路径距离排序，同一目录的在前。
+- 范围：当前子项目（按查询快照里的子项目边界）里语言在兼容组内、`indexed` 提示与当前有效 OID 和代数不匹配（见「输入代数与派生状态」）、也不在在途抽取里的文件，按与当前文件的路径距离排序，同一目录的在前。在途抽取里的文件不重复抽取，但它们对这次查询不可见（索引里还没有，搜索也不扫描），所以计入 `Partial` 的 `unsearched`：有这样的文件时结果不会是 `Complete`。
 - 每个文件经 `SafeRoot` 读出（上限 1 MiB），用 `memchr::memmem` 找这个名字的字节串，命中处前后不是标识符字符（ASCII 字母数字、`_`、`$` 和 UTF-8 的多字节序列）才算整词命中。没有命中的文件不解析。
 - 命中的文件先做一次存在检查，缓存里有就直接用；没有就按后台截止时间抽取，结果用于这次查询，并交给一个 `Background` 任务写入缓存，写入成功后写入 `indexed` 提示。
 - 从查询开始计 1 s 后停止：文件之间检查时刻，抽取的截止时间取「250 ms」与「剩余时间」中较小的一个。停止后交出最后一批，`state` 为 `Done(Partial { … })`；全部搜完为 `Done(Complete)`。
@@ -1059,17 +1060,17 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 读取核对（`read_verify_*`）：原始字节的 OID 等于 `TextRef::oid` 时回答；有 `eol` 转换的文件，`canonical_oid` 等于它时回答；内容已经变了、映射里仍记着旧 OID 时返回 `Stale`；有外部过滤器的路径在原始 OID 不等时返回 `Stale`。
 - 映射（`map_*`）：从带 OID 的文件列表建映射；前 8 字节相同的两个 OID 都能正确查到；覆盖项遮住 index 条目；修改后的旧 OID、删除的文件不出现在查询结果里；未跟踪文件可以查到。
 - 覆盖（`overlay_*`）：`FakeGit` 构造 git 设计「工作区比较」表里的情况，覆盖项与工作区实际内容一致：未暂存的修改、`StagedOnly`（工作区等于基准）、未暂存的删除、未跟踪文件、重命名、`Filtered` 与超过 1 MiB 的文件为 `Unindexable`。
-- 调度（`schedule_*`）：层的先后；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，第 3–5 层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停开关在批次边界生效；一次抽取正在运行时打开暂停开关，`ManualClock` 推进 50 ms 内这次抽取返回 `Cancelled`、它的结果没有写入、`indexed` 提示不变，恢复后这个文件先被重新抽取（`schedule_pause_abandons_in_flight`）；一批不超过 64 个文件、2 MiB、50 ms；切换 worktree 后游标重建、已写入的不重复抽取；同一 OID 在两个路径上只抽取一次；第 5 层只抽取缓存里没有、且工作区内容与 index 相同的文件。
+- 调度（`schedule_*`）：层的先后；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，第 3–5 层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停开关在批次边界生效；一次抽取正在运行时打开暂停开关，`ManualClock` 推进 50 ms 内这次抽取返回 `Cancelled`、它的结果没有写入、`indexed` 提示不变，恢复后这个文件先被重新抽取（`schedule_pause_abandons_in_flight`）；一批不超过 64 个文件、2 MiB、50 ms；切换 worktree 后游标重建、已写入的不重复抽取；同一 OID 在两个路径上只抽取一次；一个文件以 OID A 排队、读之前被改成 B 时，结果只写在 B 下，A 的键下没有单元，A 的提示不置位（`schedule_key_from_bytes_read`）；第 5 层只抽取缓存里没有、且工作区内容与 index 相同的文件。
 - 语言包（`grammar_*`，用 `testing::FakeGrammars`）：`grammar_installed_*`：安装后新扩展名的跟踪文件和未跟踪文件进入映射并被抽取；`grammar_updated_*`：更新后旧版本的单元不再命中、这种语言的文件按新版本重新抽取，旧版本在途抽取的结果没有写入；`grammar_rolled_back_*`：回滚后之前那个版本写过的单元重新命中、不重新抽取；`grammar_removed_*`：撤销后这种语言的文件从映射和 `coverage` 里消失，查询返回 `UnsupportedLanguage`，在途抽取被取消、结果没有写入；`grammar_merged_*`：连续多个通知并成一轮，结果与逐个处理相同，过时的代数被丢弃；`grammar_lease_*`：`FakeGrammars` 记录模块的卸载，撤销或更新时有一个在途抽取和一个仍被查询持有的 `ParsedFile`，两者都结束之前模块没有被卸载，结束之后恰好卸载一次。
 - 电池（`battery_*`）：电池供电时第 4、5 层不运行、`coverage` 为 `Deferred`；接上电源后继续；电池供电时一次 `query` 让第 4、5 层继续。
 - 增量（`incremental_*`）：用 `FakeBackend` 驱动 `WorktreeBatch`，检查「增量更新」表里每个事件让对应的输入代数加一：修改一个文件后按新 OID 抽取、旧 OID 不再返回；目录事件请求一次比较；`rescan`；`meta.refs` 让 HEAD 代数加一；连续事件并成一轮；从后端交出事件到覆盖部分更新完之前 kernel 不静止。
 - 热启动（`warm_*`）：缓存里已有全部单元时重新打开项目，抽取函数一次也没被调用（计数钩子），只有存在检查；删掉一部分单元后只抽取这一部分。
 - 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；当前文本的 blob 已入索引时，第 1 步列出的本文件定义不在第 3 步重复出现，现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现（`goto_no_duplicates_*`）；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`NoSymbol`、`UnsupportedLanguage`；从对象库一侧（`TextOrigin::Object`）发起的查询，本文件的候选 `origin` 为 `Object`，由它发起的 `References` 读同一个 blob，不读工作区（`goto_object_origin_*`）。
 - 预取与焦点（`prefetch_*`、`focus_*`）：映射换代或淘汰代数变化之后，2 秒内同样的查询不沿用预取结果；非当前 worktree 的焦点不进入第 1、2 层，切换到那个 worktree 后生效。
-- 限时搜索（`search_*`）：只解析整词命中的文件；`ManualClock` 推进到 1 s 时停止并给出 `Partial` 的计数；命中文件的结果写入缓存；搜完时为 `Complete`。
+- 限时搜索（`search_*`）：只解析整词命中的文件；`ManualClock` 推进到 1 s 时停止并给出 `Partial` 的计数；命中文件的结果写入缓存；搜完时为 `Complete`；范围里有一个文件正在后台抽取时，搜完其余文件结果仍是 `Partial`、`unsearched` 至少为 1（`search_in_flight_partial`）。
 - 引用（`refs_*`）：局部变量和参数的 `References` 找到它在作用域里的全部用处（这些位置只在 `@local.reference` 里，不在 tags 引用和 `ci_ref` 里），不查 `ci_ref`、没有 `same_name`；locals 记为程序作用域局部定义的顶层函数，它的同文件引用也被找到；同时被 tags 和 locals 捕获的导出顶层函数 `local` 为 false，另一个文件里对它的引用经 `ci_ref` 找到、未入索引的文件经限时搜索找到（`refs_toplevel_captured_by_locals`）；locals 证明的同文件引用是调用方；同一处引用、同一个文件在多个来源里出现时只列一次、只解析一次（`refs_no_duplicates_*`）；被局部变量遮住的同名引用被丢弃；没有依据的跨文件引用在 `same_name`；测试 `Resolver` 的 `bind` 让跨文件引用成为调用方；未入索引的部分经限时搜索找到。
 - 名字表（`names_*`）：去重、NFC、只含当前 worktree 映射里的 OID（另一个 worktree 独有的名字不在其中）；第一次 `names` 返回 `Building`，`Names` 事件带着表，监听方保存后再调 `names` 返回 `Ready`、是同一个 `Arc`（`names_ready_after_build`）；构建期间重复调用不另起构建；代数落后时重建、期间返回旧表；所有持有者释放后再调用重新构建；表被持有时索引写入新的批次，`ManualClock` 推进过间隔后后台重建并发出带新 `Arc` 的 `Names`，间隔内的多次变化只触发一次重建，持有者释放后不再重建（`names_refresh_while_held`）。
-- 升级（`escalate_*`）：Java 多候选和唯一 `NameOnly` 候选时调用提供者，其他语言不调用；提供者的 token 为 `Dead` 时不调用；结果相同时 `Same`、不同时 `Ready`；`head_only` 的提供者只在 `head_clean` 时被调用，返回的位置里内容与 HEAD 不同的文件被丢掉；只暂存、未提交的文件（工作区等于 index、不等于 HEAD）的 `head_clean` 为 false，提交之后为 true；index 变化之后、新的工作区比较完成之前为 false（`head_dirty_*`）；登记 drop 后不再调用；SCIP 与 jdtls 两个假提供者同时处理 Java 时，按两种回复顺序得到相同的合并结果，HEAD 相同的文件取 SCIP 的位置、有改动的文件取 jdtls 的位置，过时 ID 的回复被丢弃，查询关闭时未回复的请求收到 `cancel`（`escalate_arbitration_*`）；提供者接受请求后注销，只有它在请求中的查询 `semantic` 变为 `Failed`、不再停在 `Pending`，另有 SCIP 回复的查询按剩下的回复重新合并，注销之后到达的回复被丢弃（`escalate_unregister_*`）。
+- 升级（`escalate_*`）：Java 多候选和唯一 `NameOnly` 候选时调用提供者，其他语言不调用；提供者的 token 为 `Dead` 时不调用；结果相同时 `Same`、不同时 `Ready`；`head_only` 的提供者只在 `head_clean` 时被调用，返回的位置里内容与 HEAD 不同的文件被丢掉；只暂存、未提交的文件（工作区等于 index、不等于 HEAD）的 `head_clean` 为 false，提交之后为 true；index 变化之后、新的工作区比较完成之前为 false（`head_dirty_*`）；登记 drop 后不再调用；SCIP 与 jdtls 两个假提供者同时处理 Java 时，按两种回复顺序得到相同的合并结果，HEAD 相同的文件取 SCIP 的位置、有改动的文件取 jdtls 的位置，过时 ID 的回复被丢弃，查询关闭时未回复的请求收到 `cancel`；SCIP 先回复、已知候选都与 HEAD 相同时，jdtls 的请求不被取消，它之后返回的未跟踪文件里的位置进入合并结果（`escalate_arbitration_*`）；提供者接受请求后注销，只有它在请求中的查询 `semantic` 变为 `Failed`、不再停在 `Pending`，另有 SCIP 回复的查询按剩下的回复重新合并，注销之后到达的回复被丢弃（`escalate_unregister_*`）。
 - 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`；`activate` 之后、第一个项目打开之前没有任何 IO（`FakeGit`、缓存目录、`SafeRoot` 都没有被调用）；依赖 `dyn Projects`；`Results` 事件的顺序与 generation；一次查询从提交到最后一批写入之前 kernel 不静止；停用之后电源、语言包的订阅都已退订，fs_watch 的订阅都已 drop，项目关闭时未回复的语义请求收到 `cancel`（`plugin_teardown_*`）。
 
 ## 未决问题
