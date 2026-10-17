@@ -51,6 +51,14 @@
 /// 一个目录根（如 worktree 根）的描述符。
 pub struct SafeRoot { /* fd */ }
 
+/// 根目录之下的相对路径，构造时校验：非空；以 `/` 分隔的各级名字都非空；没有 `.`、`..`；没有 NUL；不以 `/` 开头。
+/// 所以按它解析的位置总在根目录之下。`git` 的 `RepoPath` 满足同样的不变量，零开销转换成它。
+pub struct RelPath<'a>(&'a [u8]);
+
+impl<'a> RelPath<'a> {
+    pub fn new(bytes: &'a [u8]) -> Option<RelPath<'a>>;   // 不满足不变量时为 None
+}
+
 pub enum Read {
     File { meta: Meta, bytes: Vec<u8> },
     Symlink { meta: Meta, target: Vec<u8> },
@@ -60,15 +68,20 @@ pub enum Read {
 
 impl SafeRoot {
     pub fn open(root: &Path) -> io::Result<SafeRoot>;
-    /// 不跟随路径中任何一级符号链接的 stat（macOS：`fstatat` + `AT_SYMLINK_NOFOLLOW_ANY`）。
-    pub fn stat(&self, rel: &[u8]) -> io::Result<Meta>;
-    /// 从根描述符出发打开一次（`O_NOFOLLOW_ANY | O_NONBLOCK`），对同一个描述符 `fstat` 判断类型后读取；
+    /// 不跟随路径中任何一级符号链接的 stat。
+    pub fn stat(&self, rel: RelPath<'_>) -> io::Result<Meta>;
+    /// 打开一次，对同一个描述符 `fstat` 判断类型后读取（`O_NONBLOCK`，FIFO 不阻塞）；
     /// 最后一级是符号链接时 `readlinkat`。中间一级是符号链接时返回 `PathThroughSymlink` 错误。
-    pub fn read(&self, rel: &[u8], max: u64) -> io::Result<Read>;
+    pub fn read(&self, rel: RelPath<'_>, max: u64) -> io::Result<Read>;
 }
 ```
 
-Linux 上用 `openat2` 加 `RESOLVE_NO_SYMLINKS` 实现同样的语义，供 CI 测试；它不是 macOS 专属能力，也放在 `platform`。
+两个平台都把解析限制在根目录之下，不只靠「不跟随符号链接」（它不阻止 `..` 走到根目录之上）：
+
+- Linux：`openat2` 加 `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`，供 CI 测试；它不是 macOS 专属能力，也放在 `platform`。
+- macOS：从根描述符出发逐级 `openat(…, O_NOFOLLOW | O_DIRECTORY)` 打开中间的目录，最后一级用 `O_NOFOLLOW`（`stat` 用 `fstatat` 加 `AT_SYMLINK_NOFOLLOW`）。同一次调用里可以复用已打开的目录描述符。
+
+`RelPath` 的不变量本身已经排除 `..` 和绝对路径，平台实现的限制是第二道防线。
 
 ## 概念
 
@@ -104,6 +117,10 @@ impl Oid {
 }
 
 /// 相对 worktree 根、以 `/` 分隔的路径，原始字节（git 允许非 UTF-8 的名字）。
+/// 不变量与 `platform::RelPath` 相同：非空、各级名字非空、没有 `.` 和 `..`、没有 NUL、不以 `/` 开头；
+/// 只能经 `RepoPath::new` 构造（不满足时返回 None）。index 或树里不满足的路径（git 自己会拒绝，但 index 可能被篡改）
+/// 不构造 `RepoPath`、不读工作区，也不进入 `ChangeSet::files`：原始字节记在 `Totals::invalid_paths` 里，
+/// 视图列出并说明「路径无效，未读取」。
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct RepoPath(Arc<[u8]>);
 
@@ -135,8 +152,10 @@ pub struct Discovered {
 }
 
 impl Repo {
-    /// 从 `path` 向上查找仓库。不是仓库时返回 `Ok(None)`：普通文件夹也是项目（ADR 0020）。
-    pub fn discover(path: &Path) -> Result<Option<Discovered>, GitError>;
+    /// 从 `path` 向上查找仓库，不越过 `ceilings` 里的目录（与 `GIT_CEILING_DIRECTORIES` 的语义相同）。
+    /// 不是仓库时返回 `Ok(None)`：普通文件夹也是项目（ADR 0020）。本 crate 不读环境变量：
+    /// `project` / `app` 启动后从进程环境读一次 `GIT_CEILING_DIRECTORIES`、解析成路径列表后传进来（[project 设计](project.md)）。
+    pub fn discover(path: &Path, ceilings: &[PathBuf]) -> Result<Option<Discovered>, GitError>;
     pub fn location(&self) -> &Location;
     /// 主 worktree 与全部 linked worktree，按 id 排序。读管理文件和各自的 HEAD，不读工作区。
     pub fn worktrees(&self) -> Result<Vec<WorktreeInfo>, GitError>;
@@ -386,7 +405,7 @@ pub enum Unavailable {
     Missing,             // 对象库里没有（如部分克隆）
     Unreadable,          // 读取失败
     /// 超过改动集保留工作区内容的上限（128 MiB）：比较时读过、算过 OID，但字节没有保留。
-    /// `oid` 是当时规范内容的 blob OID，已看状态等按 OID 的键照常可用；`Detail` 为 `Truncated`（增删行数已知）。
+    /// `oid` 是当时规范内容的 blob OID，已看状态等按 OID 的键照常可用；`Detail` 保留超过上限之前已算出的那一种（`Binary`、`TooLarge`，或有增删行数时的 `Truncated`）。
     NotRetained { oid: Oid },
 }
 
@@ -424,7 +443,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 - `files` 按（`path` 的字节序，`untracked`）排序。同一路径最多一项，唯一的例外是「工作区比较」第 4 步的情况：同一路径上一项是 `Deleted`，另一项是 `untracked` 的 `Added`。重命名只出现在新路径上，所以重命名的旧路径上重新出现的文件只有一项未跟踪的 `Added`，`Renamed` 本身不受影响。
 - `Status` 与两侧一致：`Added` 只有 `new`，`Deleted` 只有 `old`，`Modified`、`TypeChanged`、`Renamed` 两侧都有。`Conflicted` 的两侧按实际状态：基准里没有这个路径时没有 `old`（如 HEAD 删除、对方修改的冲突），工作区里没有文件时没有 `new`，两侧都没有的冲突不出现。`TypeChanged` 是普通文件、符号链接、子模块之间的变化。
 - 截断只影响 `Detail`，不影响改动的判定、`Status` 和两侧的 `Content`：被截断、只列出的文件也有完整的 OID。
-- 有一侧是 `Unavailable` 的改动，`Detail` 为 `NoDiff`（被整体上限截到时为 `Listed`），唯一的例外是 `NotRetained`：它的 `Detail` 是 `Truncated`，增删行数是比较时算出的。
+- 有一侧是 `Unavailable` 的改动，`Detail` 为 `NoDiff`（被整体上限截到时为 `Listed`），唯一的例外是 `NotRetained`：它保留超过保留上限之前算出的 `Detail`（`Binary`、`TooLarge`，或带增删行数的 `Truncated`）。
 - `Content::Blob` 的 OID 与 `git add` 之后对象库里会有的 OID 相同，所以只是被 touch 过、内容未变的文件不算改动，内容相同的文件在不同 worktree 之间命中同一份缓存。
 - `ChangeSet` 创建后不再修改。`refresh` 生成新的 `ChangeSet`，没变的 `Change` 与旧的共享。
 
@@ -440,11 +459,11 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 没有 | 没有 | 不是跟踪的路径；工作区里有文件时按第 4 步作为未跟踪文件 |
 
 0. **工作区里没有**：`SafeRoot::stat` 报告路径不存在（含中间某一级目录不存在）时，不做后面的比较：基准里有这个路径就是 `Deleted`（未暂存的 `rm`），基准里也没有（暂存了新增后又删掉文件）就不是改动。`Unavailable::Missing` 只用于对象库里缺对象，不用于这种情况。跟踪的非子模块路径 `p` 在工作区里变成了目录时同样按「没有」处理（`Deleted` 或不是改动），这个条目不设 `UPTODATE`，`p/` 下的文件由第 4 步作为未跟踪的 `Added` 列出；子模块路径是目录属于正常情况，按子模块处理。
-1. **过滤器先判定**：按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的，新一侧一律是 `Unavailable::Filtered`（stat 与 index 一致时也是），不走下面的 stat 跳过，不按 index 的 blob 当作完整内容；`raw` 按第 3 步的读取上限计算。
+1. **过滤器先判定**：按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的：stat 与 index 一致、不是 racy-clean、且 index 的 OID 等于基准的 OID 时是未改动；其余情况（stat 不一致、racy-clean、或已暂存的改动）新一侧是 `Unavailable::Filtered`，不把 index 的 blob 当作工作区的完整内容；`raw` 按第 3 步的读取上限计算。
 2. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时，工作区内容就是 index 里的 blob，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
 3. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。
 4. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给第 0–3 步处理过、工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每个文件都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
-5. **重命名**：删除与新增之间先按 OID 找精确重命名，再按相似度（不低于 50%，候选不超过 1000 对，即 `diff.renameLimit` 的默认值）找重命名。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
+5. **重命名**：删除与新增之间先按 OID 找精确重命名，精确重命名不受任何上限限制，总是检测。剩下的删除（来源）与新增（目标）再按相似度（不低于 50%）找重命名，上限规则与 git 的 `too_many_rename_candidates` 相同：来源数 × 目标数超过 `diff.renameLimit` 的平方时跳过相似度检测（默认 1000，即 100 万对；40 × 40 的重构照常检测）。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
 
 其余规则：
 
@@ -549,6 +568,10 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 截断：单文件、整体、保留内容三种上限的边界值；`NotRetained` 的 `Detail` 是带增删行数的 `Truncated`。
 - 过滤器与目录：LFS 文件暂存了更新、stat 与 index 一致时仍是 `Filtered`；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`；未初始化的子模块不是改动。
 - 句柄：一次顶层调用返回后，当前线程上没有留下 gix 句柄（测试用计数钩子检查）。
+- 路径：index 里含 `..`、`.`、空名字、NUL 或以 `/` 开头的条目不被打开，记在 `Totals::invalid_paths` 里；`RelPath::new` 拒绝这些写法；Linux 上 `SafeRoot` 对 `..` 和绝对路径的解析被 `RESOLVE_BENEATH` 拒绝（`platform` 的测试）。
+- 过滤器的快路径：未改动的 LFS 文件（stat 一致、index 与基准 OID 相同）不是改动；暂存了更新的是 `Filtered`。
+- 重命名：40 个文件同时改名并小改时都识别为相似重命名；来源 × 目标超过上限的平方时只有精确重命名。
+- `discover`：`ceilings` 里的目录之上的仓库不被找到。
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
 - 不执行外部程序：夹具仓库配置 `diff.external`、`diff.<名>.textconv`、`filter.<名>.clean` / `process`、`core.fsmonitor`，指向会写标记文件的脚本，PATH 最前面放一个记录调用的假 `git`（AGENTS.md「工作方式」）；跑完全部工作区和树 diff 场景后，标记文件不存在、假 `git` 没有被调用。
 - 展示行与词级差异：配对、折叠、hunk 相邻时合并上下文，用 insta 快照。
