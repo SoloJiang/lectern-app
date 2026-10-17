@@ -3343,6 +3343,7 @@ version = "0.0.0"
 dependencies = [
  "glob",
  "insta",
+ "lectern-services",
  "quick-xml 0.42.0",
  "serde",
  "serde_json",
@@ -3364,6 +3365,11 @@ version = "0.0.0"
 [[package]]
 name = "lectern-services"
 version = "0.0.0"
+dependencies = [
+ "lectern-kernel",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "lectern-terminal"
