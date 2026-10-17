@@ -499,11 +499,11 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 
 确定 W 的步骤与其余处理：
 
-1. **过滤器先判定**：按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的：stat 与 index 一致、不是 racy-clean、index 的 OID 与基准相同，并且这个路径的转换规则在这一次比较里没有变化（见下文 stat 缓存）时 W = I（未改动）；其余情况（包括刚暂存了更新、index 与基准不同）W 是 `Unavailable::Filtered`，不把 index 的 blob 当作工作区的完整内容；`raw` 按第 3 步的读取上限计算。
+1. **过滤器先判定**：先用 `SafeRoot::stat` 判断路径是否存在、是不是文件：不存在时 W 为没有，不是文件时为 `Mode::Special` + `UnsupportedType`，都不进入过滤器判定。是文件时，按属性判断这个路径是否设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）。设置了的：stat 与 index 一致、不是 racy-clean、index 的 OID 与基准相同，并且这个路径的转换规则在这一次比较里没有变化（见下文 stat 缓存）时 W = I（未改动）；其余情况（包括刚暂存了更新、index 与基准不同）W 是 `Unavailable::Filtered`，不把 index 的 blob 当作工作区的完整内容；`raw` 按第 3 步的读取上限计算。
 2. **stat 跳过**：`SafeRoot::stat` 报告路径不存在时 W 为没有。index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean 时 W = I，不读文件。racy-clean 与 git 的规则相同：条目记录的 mtime 不早于 index 文件自己的 mtime（等于或晚于）；记录的 mtime 早于 index 文件的绝大多数条目只按 stat 判断，不读内容。
 3. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID。`Unavailable::Missing` 只用于对象库里缺对象，不用于工作区里没有文件。
 4. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每一项都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取；FIFO、socket、设备文件的新一侧是 `Mode::Special` + `UnsupportedType`，未跟踪的目录里有 `.git` 时只列出这个目录，新一侧是 `Mode::Special` + `NestedRepository`。
-5. **重命名**：删除与新增之间先按 OID 找精确重命名，精确重命名不受任何上限限制，总是检测。剩下的删除（来源）与新增（目标）再按相似度（不低于 50%）找重命名，上限规则与 git 的 `too_many_rename_candidates` 相同：来源数 × 目标数超过 `diff.renameLimit` 的平方时跳过相似度检测（默认 1000，即 100 万对；40 × 40 的重构照常检测）。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
+5. **重命名**：删除与新增之间先按 OID 找精确重命名，精确重命名不受任何上限限制，总是检测。剩下的删除（来源）与新增（目标）再按相似度（不低于 50%）找重命名，上限规则与 git 的 `too_many_rename_candidates` 相同：来源数 × 目标数超过 `diff.renameLimit` 的平方时跳过相似度检测（默认 1000，即 100 万对；40 × 40 的重构照常检测）。同一路径上的删除和未跟踪新增不互相配对。`staged` 为 Some 的删除（index 里还留着来源路径，如未暂存的 `mv a b`）不作为来源，否则配对后 `staged` 只能描述新路径、丢掉来源路径在 index 里的状态；这时与 `git status` 一样，报告为 `Deleted` 和未跟踪的 `Added`。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
 
 其余规则：
 
@@ -606,7 +606,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 树 diff：新增、删除、修改、模式变化、类型变化、精确与相似重命名、二进制、子模块；`--numstat` 与归档里 git 的输出一致。
 - 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`p` 被 `.gitignore` 忽略时只有 `Deleted`，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`；未暂存的 `rm` 得到 `Deleted`；HEAD 删除、对方修改的冲突得到没有 `old` 的 `Conflicted`；只改 `.gitattributes`、文件 stat 不变时 `refresh(Full)` 按新规则重新计算 OID；没有改动的跟踪文件不会作为未跟踪文件出现；二进制和只改模式的文件也计入 5000 个文件的上限。
 - 截断：单文件、整体、保留内容三种上限的边界值；`NotRetained` 保留原来的 `Detail`：文本文件是带增删行数的 `Truncated`，二进制文件是 `Binary`，行级 diff 过大的是 `TooLarge`。
-- 过滤器与目录：LFS 文件暂存了更新、stat 与 index 一致时仍是 `Filtered`；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`；未初始化的子模块不是改动。
+- 过滤器与目录：LFS 文件暂存了更新、stat 与 index 一致时仍是 `Filtered`；从工作区删除的 LFS 文件是 `Deleted`；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`；未初始化的子模块不是改动。
 - 暂存：「工作区比较」表的每一行各有一个测试（用 `TestRepo` 分别构造 B、I、W），检查 `Status`、两侧、`Detail` 和 `staged`；其中包括 `git add p; rm p` 得到 `StagedOnly` 的 `Added`，只暂存了可执行位、工作区又改了内容时 `staged` 带 index 的模式。
 - 模式：未跟踪的 FIFO 和嵌套仓库的新一侧是 `Mode::Special`；跟踪的文件被换成 FIFO 时是 `TypeChanged`。
 - sparse 展开：超过 `EntryLimits` 时 `tracked` 返回 `TooManyEntries`，`cancel` 置位时返回 `Cancelled`；`index_checksum` 与 `TrackedPaths::checksum` 相同，并且不展开条目（sparse index 夹具上用计数钩子检查）。
@@ -614,7 +614,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 句柄：一次顶层调用返回后，当前线程上没有留下 gix 句柄（测试用计数钩子检查）。
 - 路径：index 里含 `..`、`.`、空名字、NUL 或以 `/` 开头的条目不被打开，记在 `Totals::invalid_paths` 里；`RelPath::new` 拒绝这些写法；Linux 上 `SafeRoot` 对 `..` 和绝对路径的解析被 `RESOLVE_BENEATH` 拒绝（`platform` 的测试）。
 - 过滤器的快路径：未改动的 LFS 文件（stat 一致、index 与基准 OID 相同）不是改动；暂存了更新的是 `Filtered`。
-- 重命名：40 个文件同时改名并小改时都识别为相似重命名；来源 × 目标超过上限的平方时只有精确重命名。
+- 重命名：40 个文件同时改名并小改时都识别为相似重命名；未暂存的 `mv a b` 得到 `Deleted(a)`（`staged` 为 a 的 index 条目）和未跟踪的 `Added(b)`，不配对；来源 × 目标超过上限的平方时只有精确重命名。
 - `discover`：`ceilings` 里的目录之上的仓库不被找到。
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
 - 不执行外部程序：夹具仓库配置 `diff.external`、`diff.<名>.textconv`、`filter.<名>.clean` / `process`、`core.fsmonitor`，指向会写标记文件的脚本，PATH 最前面放一个记录调用的假 `git`（AGENTS.md「工作方式」）；跑完全部工作区和树 diff 场景后，标记文件不存在、假 `git` 没有被调用。
