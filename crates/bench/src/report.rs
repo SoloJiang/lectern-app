@@ -132,7 +132,22 @@ impl Report<'_> {
             Json::Array(self.entries.iter().map(entry_json).collect()),
         );
         out.insert("errors".into(), json!(self.errors));
-        Json::Object(out)
+        sorted(Json::Object(out))
+    }
+}
+
+/// Sorts object keys so the report is byte-identical on every platform:
+/// GPUI turns on serde_json's `preserve_order` in macOS builds, which keeps
+/// insertion order instead of sorting.
+pub(crate) fn sorted(json: Json) -> Json {
+    match json {
+        Json::Object(map) => {
+            let mut entries: Vec<_> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Json::Object(entries.into_iter().map(|(k, v)| (k, sorted(v))).collect())
+        }
+        Json::Array(items) => Json::Array(items.into_iter().map(sorted).collect()),
+        other => other,
     }
 }
 

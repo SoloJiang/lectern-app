@@ -300,7 +300,7 @@ pub(crate) fn merge(
     out.insert("results".into(), Json::Array(results));
     out.insert("errors".into(), json!(errors));
     Merged {
-        report: Json::Object(out),
+        report: report::sorted(Json::Object(out)),
         text,
         markdown,
         exit,
