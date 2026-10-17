@@ -1,6 +1,6 @@
 # project 设计
 
-状态：实现中。第 1 步（清单解析与成员解析）、第 2 步（`services` 里的服务接口与数据类型）已实现，第 3–5 步尚未实现（见「验收」）。
+状态：实现中。第 1 步（清单解析与成员解析）、第 2 步（`services` 里的服务接口与数据类型）、第 3 步（项目模型与插件，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现，第 4、5 步尚未实现（见「验收」）。
 
 对应 issue [#9](https://github.com/SoloJiang/lectern-app/issues/9)。`project` 把用户打开的路径解析成项目模型：仓库 → worktree → 子项目（[ADR 0006](../adr/0006.md)、[技术调研「Monorepo 与多 worktree 支持」](tech-research.md#monorepo-与多-worktree-支持)），以不可变快照交给视图和其他插件，并通过 `KernelControl::workspace_changed` 提交 `WorkspaceFacts`，驱动 `Activation::Workspace` 的插件（[kernel「依赖与自动启停」](kernel.md#依赖与自动启停)）。
 
@@ -36,7 +36,8 @@
 | `lectern-kernel` | `Plugin`、`KernelControl::workspace_changed`、事件、`BusyGuard` | 插件机制 |
 | `lectern-services` | `Projects` 接口、快照与事件类型定义在这里（见「接口」） | 消费方（`project_home`、`worktrees`、`agents`、`usage`、`review`）只依赖接口（架构规则 7） |
 | `lectern-git` | 发现仓库、列 worktree、读 index 路径、读工作区文件、算 blob OID | gix 只在 `git` 里用；接口见下文 |
-| `lectern-fs-watch` | worktree 与 git 元数据的变化通知 | 接口见下文；实例由 `app` 创建，经 `ProjectDeps` 传入 |
+| `lectern-fs-watch` | worktree 与 git 元数据的变化通知 | 接口见下文；实例由 `app` 创建，经 `ProjectDeps` 传入。第 4 步（增量刷新）接入 |
+| `lectern-platform` | 文件夹项目读清单用的 `SafeRoot` | 与 `git` 读工作区文件同一套安全读取（不跟随符号链接、不越出根目录）；文件夹项目没有 `Worktree` 句柄 |
 | `lectern-executor` | 后台任务 | UI 线程不做 IO；实例由 `app` 创建，经 `ProjectDeps` 传入 |
 | `serde` 1（`derive`）+ `serde_json` 1 | package.json、Cargo.toml 的反序列化 | MIT / Apache-2.0；只反序列化需要的字段 |
 | `toml` 1.1（`std`、`parse`、`serde`，不开 `display`） | Cargo.toml | MIT / Apache-2.0 |
@@ -46,7 +47,7 @@
 选型与放弃的方案见 [ADR 0023](../adr/0023.md)。pnpm-workspace.yaml、settings.gradle(.kts)、go.work、go.mod 用手写的子集解析。版本取实现时 crates.io 上的最新兼容版本，由 Cargo.lock 锁定。
 
 - 不用 `cache`：解析一个清单是微秒级，比 SQLite 查询还快，持久化没有收益。解析结果在内存里以 blob OID 为键缓存（见「数据流与线程」）。
-- 本 crate 是插件 crate（`Cargo.toml` 的 `[package.metadata.lectern]` 写 `plugin = true`，[ADR 0025](../adr/0025.md)）：可以依赖 kernel 层的 crate 和不是插件的库 crate（`lectern-git`、`lectern-executor`、`lectern-fs-watch`，以及以后需要时的 `lectern-cache`），不依赖任何其他插件 crate；只有 `app` 依赖本 crate。其他插件读项目模型只经 `services` 里的 `Projects`。
+- 本 crate 是插件 crate（`Cargo.toml` 的 `[package.metadata.lectern]` 写 `plugin = true`，[ADR 0025](../adr/0025.md)）：可以依赖 kernel 层的 crate 和不是插件的库 crate（`lectern-git`、`lectern-executor`、`lectern-fs-watch`、`lectern-platform`，以及以后需要时的 `lectern-cache`），不依赖任何其他插件 crate；只有 `app` 依赖本 crate。其他插件读项目模型只经 `services` 里的 `Projects`。
 
 ## 接口
 
@@ -133,6 +134,10 @@ pub struct ChangedParts {
 
 成功的 `Opened` 之后至少还有一次 `Changed`（文件列表就绪或不可用）。视图收到 `Changed` 后调 `snapshot` 取最新快照；事件里的 `generation` 只用来丢弃过时的通知。
 
+- 新项目在 `Opened` 之前放入第 1 代快照（`files`、`packages` 为 `Pending`），`Opened` 宣告它；之后每次替换都发一个 `Changed`，包括切换 worktree 时 `Pending` 的那一代。没有可扫描的 worktree（裸仓库没有可用的 linked worktree）时，第 2 代快照内容不变，它的 `Changed` 就是 `Opened` 之后的那一个。
+- 打开一个已经打开的项目：重新列 worktree，当前 worktree 换成路径所在的那个，重读 index 和清单。第 4 步之前这是唯一的刷新方式。
+- `Closed` 之后这个项目不再有 `Changed`：替换快照、发出事件与发出 `Closed` 在同一把锁下。
+
 ### 本 crate 的公开项
 
 ```rust
@@ -140,16 +145,20 @@ pub struct ChangedParts {
 pub struct ProjectPlugin { /* deps */ }
 
 pub struct ProjectDeps {
-    /// 由 app 创建并传入，类型随 executor 设计。
-    pub executor: /* executor 句柄 */,
-    /// 由 app 创建并传入（FSEvents 后端由 platform 实现），见 [fs_watch 设计](fs_watch.md)。
+    /// 由 app 创建并传入。
+    pub executor: lectern_executor::Executor,
+    /// 第 4 步加入：由 app 创建并传入（FSEvents 后端由 platform 实现），见 [fs_watch 设计](fs_watch.md)。
     pub watcher: lectern_fs_watch::Watcher,
     /// 用户主目录，判断「主目录被当作 dotfiles 仓库」（见「项目标识」）。由 app 从 platform 取得。
     pub home: PathBuf,
 }
 
 impl ProjectPlugin {
+    /// 从环境读一次 `GIT_CEILING_DIRECTORIES`，不做 IO。
     pub fn new(deps: ProjectDeps) -> Self;
+    /// 同一个插件，git 换成 `testing::FakeGit`（`test-support`）。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_fake_git(deps: ProjectDeps, git: Arc<testing::FakeGit>) -> Self;
 }
 
 // Manifest { provides: [service::<dyn Projects>()], requires: [], activation: [AfterFirstFrame] }
@@ -196,39 +205,47 @@ pub fn resolve_packages(
 ) -> Vec<Package>;
 pub fn workspace_facts(trees: Vec<Arc<FileList>>) -> Arc<dyn WorkspaceFacts>;
 
-/// `test-support` feature：内存里的假 git（见「测试」）和合成仓库的形状。
-#[cfg(feature = "test-support")]
+/// `test-support` feature：假 git（见「测试」）；合成仓库的形状随第 5 步（bench）加入。
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 ```
 
 ### 依赖 git 的接口
 
-本 crate 只通过一个内部 trait 访问 git，生产实现转调 `lectern-git`，测试用内存实现。具体签名以 git 的设计文档为准；下表是 project 需要的最小集合，都是阻塞调用，只在 executor 上执行：
+本 crate 只通过一个内部 trait 访问 git，生产实现转调 `lectern-git`，测试用 `testing::FakeGit`。都是阻塞调用，只在 executor 上执行。`lectern-git` 的 index 与工作区读取都在 `Worktree` 句柄上，句柄会缓存最近一次读出的 `TrackedPaths`，所以接口按「一轮扫描打开一个句柄」组织，而不是每次按路径调用：
 
 ```rust
 pub(crate) trait GitAccess: Send + Sync {
-    /// 从 path 向上发现仓库，不跨越 GIT_CEILING_DIRECTORIES。不是仓库时返回 Ok(None)。
+    /// 从 path 向上发现仓库，不跨越 GIT_CEILING_DIRECTORIES（`ProjectPlugin::new` 从环境读一次）。不是仓库时返回 Ok(None)。
     fn discover(&self, path: &Path) -> Result<Option<Discovered>, GitError>;
     /// 公共目录下的全部 worktree：主 worktree（裸仓库没有）与 `<common>/worktrees/*`。
     fn worktrees(&self, common_dir: &Path) -> Result<Vec<WorktreeInfo>, GitError>;
-    /// 一个 worktree 的 index 条目：路径（字节）与文件模式，按 index 顺序；附 index 的校验和，未变时跳过重建。
-    fn index_paths(&self, git_dir: &Path) -> Result<IndexListing, GitError>;
-    /// 只读 index 的校验和（文件末尾），判断 `resolve_package` 的缓存是否过期。
-    fn index_checksum(&self, git_dir: &Path) -> Result<ObjectId, GitError>;
-    /// 从 worktree 根目录安全地读一个工作区文件（不跟随符号链接、不越出 worktree，git 的同一套读取接口）；
-    /// 不存在时 Ok(None)，超过 limit 时 Err(TooLarge)。
-    fn read_worktree_file(&self, root: &Path, rel: &str, limit: u64) -> Result<Option<Vec<u8>>, GitError>;
+    /// 为一轮扫描打开一个 worktree（生产实现是 `Repo::worktree`）：读 index、读清单共用这个句柄，这一轮结束即释放，
+    /// 两轮之间不留 worktree 句柄和 index 内容。根目录已不存在时失败。
+    fn open_worktree(&self, common_dir: &Path, git_dir: &Path) -> Result<Box<dyn TreeAccess>, GitError>;
     /// 按仓库的哈希算法计算 blob OID（与 `git hash-object` 相同），作为解析缓存的键。
-    fn hash_blob(&self, kind: HashKind, bytes: &[u8]) -> ObjectId;
-    /// 当前 worktree 交给 `fs_watch::RepoWatch::watch_worktree` 的过滤器与配置来源。生产实现打开这个 worktree
-    /// （`Repo::worktree`）后调 `Worktree::watch_source`，与 `index_paths` 共用同一个 `Worktree` 句柄；
-    /// `FakeGit` 返回按它内存里的 index 和忽略规则回答的 `fs_watch::testing::FakeSource`。只读 HEAD 和配置，不读 index。
-    fn watch_source(&self, git_dir: &Path) -> Result<Arc<dyn WorktreeSource>, GitError>;
+    fn hash_blob(&self, kind: HashKind, bytes: &[u8]) -> Oid;
+}
+
+pub(crate) trait TreeAccess {
+    /// index 的路径直接建成 `FileList`（不是 UTF-8 的路径和 git 拒绝的路径记入 `skipped`），附 index 的校验和。
+    fn index_files(&self, cancel: &AtomicBool) -> Result<IndexFiles, GitError>;
+    /// 只读 index 的校验和（文件末尾），判断 `resolve_package` 的缓存是否过期。
+    fn index_checksum(&self) -> Result<Option<Oid>, GitError>;
+    /// 从 worktree 根目录安全地读一个工作区文件（`Worktree::read_file`：不跟随符号链接、不越出 worktree）；
+    /// 不存在时 Ok(None)，超过 limit 时 Err(TooLarge)，符号链接等非普通文件为其他错误。
+    fn read_file(&self, rel: &str, limit: u64) -> Result<Option<Vec<u8>>, GitError>;
 }
 
 pub(crate) struct Discovered { worktree_root: Option<PathBuf>, git_dir: PathBuf, common_dir: PathBuf, bare: bool, hash: HashKind }
 pub(crate) struct WorktreeInfo { root: PathBuf, git_dir: PathBuf, is_main: bool, head: Head, locked: bool, prunable: bool }
+pub(crate) struct IndexFiles { checksum: Option<Oid>, files: FileList }
 ```
+
+- `Discovered::git_dir`：路径在某个 worktree 里时是它的 git 目录；在 git 目录里（`lectern-git` 的 `Discovered::worktree` 为 None）时，路径在 `<公共目录>/worktrees/<id>` 下取这个管理目录，否则取公共目录。
+- `Head` 来自 `HeadState`：有提交的分支为 `Branch`，没有提交的为 `Unborn`，分离为 `Detached`（完整 OID 的十六进制）。`lectern-git` 读不出 HEAD 时整个 `worktrees` 调用失败（主 worktree）或跳过这个 worktree（linked），所以生产实现不产生 `Head::Unknown`。
+- 第 4 步加入 `watch_source`：当前 worktree 交给 `fs_watch::RepoWatch::watch_worktree` 的过滤器与配置来源，生产实现从 `open_worktree` 打开的同一个 `Worktree` 句柄调 `Worktree::watch_source`；`FakeGit` 返回按它内存里的 index 和忽略规则回答的 `fs_watch::testing::FakeSource`。只读 HEAD 和配置，不读 index。
+- 文件夹项目没有 `Worktree` 句柄：清单经 `lectern_platform::SafeRoot` 读取，规则与 `TreeAccess::read_file` 相同；遍历用标准库，不跟随符号链接。
 
 另需 `git` 的 `test-support` 提供不调用 git 命令行的仓库构造器：写对象、index 和 linked worktree 的管理目录，用于集成测试和 bench。
 
@@ -400,7 +417,7 @@ impl FileListBuilder {
 ```
 
 - git 项目：来自 index，同一路径的多个合并阶段（冲突中）只收一条。index 里没有的文件（未跟踪的新文件）不在列表里。
-- 文件夹项目：从根目录遍历，不跟随符号链接；跳过以 `.` 开头的目录和 `node_modules`、`target`、`build`、`dist`、`out`、`vendor`、`venv`、`__pycache__`；最多 20,000 个条目，超过时停止并标记 `truncated`。
+- 文件夹项目：从根目录遍历，不跟随符号链接；跳过以 `.` 开头的目录和 `node_modules`、`target`、`build`、`dist`、`out`、`vendor`、`venv`、`__pycache__`（以 `.` 开头的文件照常收入）；最多 20,000 个条目，超过时停止并标记 `truncated`。按名字的字节序深度优先遍历，上限截断的结果是确定的；条目指文件和符号链接，FIFO、socket、设备文件不收入，名字不是 UTF-8 的记入 `skipped`，读不出的子目录跳过。
 - 不带 blob OID：P1 的消费者（⌘K、Files、`WorkspaceFacts`、子项目）只要路径。需要时（`code_intel`，P2）另加，不改现有字段。
 - 序列化：`{ "entries": [[路径, 类型], …], "skipped": n, "truncated": b }`，不暴露内部的缓冲与偏移。反序列化经 `FileListBuilder`：来自其他进程的乱序、重复或不合法的路径按构造器的规则排序、去重、记入 `skipped`，偏移不会越界，查找不会 panic。
 
@@ -523,15 +540,17 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
   - 清单文件变了：重读这个文件，重做成员解析。
   - 任一 worktree 的 `HEAD` 变了：只更新那个 worktree 的 `head`；当前 worktree 的 `index` 通常会一起变，按上一条处理。
   - `worktrees/` 下有增减：重新列 worktree；当前 worktree 被删除时切到主 worktree（没有时第一个可用的），`ChangedParts.active` 为 true。
-- 清单内容从工作区读（用户和 agent 看到的版本，未暂存的修改也算），缓存键是这份字节的 blob OID（`hash_blob`，按仓库的哈希算法；文件夹项目用 SHA-1），值是 `Result<Arc<Parsed>, ManifestError>`：语法错误同样按 OID 缓存，`TooLarge` 和 `Unreadable` 没有可哈希的内容，不缓存。缓存在进程内、所有项目和 worktree 共享，按字节 LRU，上限 2 MB（[ADR 0017](../adr/0017.md)「内存的具体约束」）。切换 worktree 时，各分支内容相同的清单直接命中。
+- 清单内容从工作区读（用户和 agent 看到的版本，未暂存的修改也算），缓存键是清单类型加这份字节的 blob OID（`hash_blob`，按仓库的哈希算法；文件夹项目用 SHA-1；同样的字节按不同格式解析结果不同），值是 `Result<Arc<Parsed>, ManifestError>`：语法错误同样按 OID 缓存，`TooLarge` 和 `Unreadable` 没有可哈希的内容，不缓存。缓存在进程内、所有项目和 worktree 共享，按字节 LRU，上限 2 MB（[ADR 0017](../adr/0017.md)「内存的具体约束」）。切换 worktree 时，各分支内容相同的清单直接命中。
 - 非当前 worktree 的子项目（`resolve_package`）：按需计算，缓存按 worktree 的 git 目录存放，内容是子项目列表、算出它时的 index 校验和，以及参与计算的每个清单的 stat 指纹（路径、大小、修改时间、inode）。缓存不存文件列表，最多 16 个 worktree，按最近使用淘汰；只有 `resolve_package` 读它，`locate` 不读。每次调用都校验缓存：
-  - 先读 index 校验和（`GitAccess::index_checksum`，只读文件末尾）。变了就重读 index 并重算整份列表（文件列表变了，成员条件和 `Package.files` 都可能变）。
+  - 先读 index 校验和（`TreeAccess::index_checksum`，只读文件末尾）。变了就重读 index 并重算整份列表（文件列表变了，成员条件和 `Package.files` 都可能变）。
   - 没变就对指纹里的每个清单做一次 `lstat`（`std::fs::symlink_metadata`，不跟随符号链接）。有任何不一致（未暂存的修改、删除）时按未命中处理：重读 index 并重算整份列表，因为成员解析要用文件列表判断没有清单的声明目录下有没有受跟踪文件，而缓存不存文件列表。重算时内容 blob OID 没变的清单不重新解析。
   - 都一致才直接返回缓存的结果。
   - 同一个 worktree 的并发请求合并成一次计算。
   - 不在缓存检查范围内的变化：index 里没有的新清单在 `git add` 之前本来就不算（与当前 worktree 相同）。修改时间精度内、大小不变的连续写入可能漏掉一次，下次 stat 变化时纠正。
 - 切换当前 worktree：先发布 `files: Pending` 的新快照（视图立即显示骨架），旧 worktree 的 `FileList` 随旧快照释放，只保留它的元数据。
 - 插件停用时，kernel 丢弃扫描任务；视图手里的快照仍然有效，只是不再更新。
+- 每个项目的请求（打开、再次打开、切换 worktree）交给它的扫描循环：循环在运行时只记下最新的请求（新的目标覆盖旧的，新的 worktree 列表保留），每一步之间检查，有新请求就放弃当前这一轮的结果。`set_active_worktree` 指向当前 worktree、而且没有排队的请求时直接忽略。
+- 归位的边界：当前 worktree（或文件夹项目）的子项目为 `Unavailable` 时，`locate` 给出 `PackageMatch::None`，`resolve_package` 对当前 worktree 返回 `Err` 带同一个 `ScanError`。`resolve` 遇到不在仓库里的路径时，项目是包含它的最深的已打开文件夹项目，没有时是这个目录本身（文件取所在目录）；路径在 git 目录里时 `worktree` 为 None、`rel` 为 ""，打开这样的路径时 `opened_at` 也是 ""。
 
 ## 性能
 
@@ -572,11 +591,11 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 
 - 清单解析（`manifest_*`）：`tests/fixtures/manifests/<格式>/` 下每个样本的解析结果用 insta 快照；含 yarn 1 对象写法、pnpm 的 `!` 排除与注释、Cargo 虚拟清单（根子项目的名字取 `root_name`）与 `exclude`、POM 4.0.0 / 4.1.0 与 profile 里的 modules、Groovy / Kotlin 的 settings（`include` 多参数跨行、`projectDir`、`includeBuild`、变量写法标为 partial）、go.work 块写法；超过 1 MB、语法错误各一例。
 - 成员解析（`packages_*`）：内存里构造文件列表，快照验收。场景：`cloudprint` 形状、嵌套工作区、同一目录多种清单、没有构建文件的 Gradle 子项目（`manifests` 为空）、语法错误与超大清单的错误保留在 `Manifest.error`、Maven 模块指向 `../`、越出 worktree 的路径、样本目录排除、未声明但有清单的目录。
-- 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（内存里的仓库、worktree、index 与工作区文件，记录每次调用）。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable（根目录已删除，键仍来自管理目录）/ locked / detached / unborn、文件夹项目的上限与跳过规则、`locate` 取最深的子项目，以及父仓库和其中单独打开的子模块都包含路径时 `locate` 返回子模块的项目；路径在非当前 worktree 时 `locate` 返回 `NotLoaded`，`resolve_package` 按那个 worktree 自己的子项目给出结果（它比当前 worktree 多一个、少一个、移动了一个子项目各一例），index 与清单都未变时第二次调用命中缓存、不读清单；未暂存地修改或删除那个 worktree 的一个清单后，下一次 `resolve_package` 按未命中重算并给出新结果，其余清单不重新解析；已经填过缓存之后 `locate` 对非当前 worktree 仍返回 `NotLoaded`；当前 worktree 的子项目还是 `Pending` 时 `resolve_package` 返回 `NotLoaded`、不做 IO。
+- 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（仓库、worktree 列表、HEAD 与 index 在内存里，worktree 根目录与工作区文件是临时目录里的真实文件，路径能规范化、`lstat` 有效；记录每次调用），任务交给测试里的队列，由测试逐个运行，事件与 facts 记录下来。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable（根目录已删除，键仍来自管理目录）/ locked / detached / unborn、文件夹项目的上限与跳过规则、`locate` 取最深的子项目，以及父仓库和其中单独打开的子模块都包含路径时 `locate` 返回子模块的项目；路径在非当前 worktree 时 `locate` 返回 `NotLoaded`，`resolve_package` 按那个 worktree 自己的子项目给出结果（它比当前 worktree 多一个、少一个、移动了一个子项目各一例），index 与清单都未变时第二次调用命中缓存、不读清单；未暂存地修改或删除那个 worktree 的一个清单后，下一次 `resolve_package` 按未命中重算并给出新结果，其余清单不重新解析；已经填过缓存之后 `locate` 对非当前 worktree 仍返回 `NotLoaded`；当前 worktree 的子项目还是 `Pending` 时 `resolve_package` 返回 `NotLoaded`、不做 IO。
 - 刷新（`refresh_*`）：用 fs_watch 的模拟后端驱动事件；连续事件合并为一轮、扫描中到达的事件触发下一轮、只改普通文件内容不重读 index、新增普通受跟踪文件后 `Package.files` 更新而已有清单不重新解析、清单 OID 未变不重新解析、删除当前 worktree 后的切换、generation 严格递增。
 - facts（`facts_*`）：模式语义逐条覆盖；多个项目的并集；不合法的模式返回 false。
-- 插件（`plugin_*`）：用 kernel 的 `TestKernel`。`activate` 之后、`open` 之前 `FakeGit` 没有收到任何调用；`open` 之后提交的 facts 让一个 `Workspace(["pom.xml"])` 的测试插件激活；事件顺序为 `Opened` → `Changed`。
-- 真实仓库（`real_repo_*`）：用 git 的 `test-support` 构造器写出的仓库（含 linked worktree、SHA-256 仓库各一个）跑一遍 open 与刷新，确认 `GitAccess` 的生产实现与 `FakeGit` 行为一致。
+- 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`，`PluginSet` 里另放一个依赖 `dyn Projects` 的测试插件（取得服务、记录事件）。`TestKernel` 只容纳被测插件和模拟服务，放不下 `Workspace` 激活的测试插件。`activate` 之后、`open` 之前 `FakeGit` 没有收到任何调用；`open` 之后提交的 facts 让一个 `Workspace(["pom.xml"])` 的测试插件激活；事件顺序为 `Opened` → `Changed`。
+- 真实仓库（`real_repo_*`）：用 git 的 `test-support` 构造器写出的仓库（含 linked worktree、SHA-256 仓库各一个）跑一遍 open、再次打开、切换 worktree 和 `resolve_package`，确认 `GitAccess` 的生产实现与 `FakeGit` 给出相同的快照（增量刷新的部分随第 4 步）。
 
 没有只能在 macOS 上运行的部分。
 
@@ -639,6 +658,25 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - `just test -p lectern-services`（10 个测试）：`projects_service_id_and_multiple` 检查 `<dyn Projects as Service>::ID == "projects"`、`MULTIPLE == false`（编译期断言），以及 `service::<dyn Projects>()` 的键；`projects_is_a_shared_trait_object` 用一个空实现确认 `Arc<dyn Projects>` 可用、快照与查找结果是 `Send + Sync`；`project_event_shape` 构造 `ProjectEvent` 的每个变体，确认它实现 `Event` 和 `Clone`（`TestKernel::emitted` 需要）、`ChangedParts::default()` 全为 false；`project_keys_compare_by_kind_and_path`；`manifest_kinds_by_file_name_and_ecosystem`；`project_snapshot_round_trips`（有两个 worktree、文件与子项目都就绪、含清单错误的 git 快照，`Unavailable` / `Pending` 的文件夹快照，以及 `Location`、`Resolved`，经 serde_json 往返后相等）；`project_events_round_trip`（`ProjectEvent` 的每个变体，含成功与失败的 `Opened`）；`file_list_deserializes_through_the_builder`（乱序、重复、不合法的条目反序列化后满足 `FileList` 的不变量）；以及随 `FileList` 移过来的 `files_range_under_covers_only_the_directory`、`files_builder_sorts_dedups_and_skips_invalid_paths`。
 - `just test -p lectern-project`：第 1 步的其余 46 个测试照常通过，insta 快照没有变化（`Debug` 输出不含模块路径）。第 1 步的 48 个测试里有 2 个是 `FileList` 的单元测试，随代码移到 `services`，合计仍是 48 个。
 
+第 3 步（项目模型与插件），在 Linux 上运行（本 crate 不依赖 GPUI；没有在 macOS 上实测）：
+
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test`（Linux 上不依赖 GPUI 的全部 crate，671 个测试通过、6 个跳过）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都 ok）全部通过。没有新的外部依赖：`lectern-project` 新增的依赖都是工作区里的 crate（`lectern-kernel`、`lectern-git`、`lectern-executor`、`lectern-platform`），`tempfile` 只在 `test-support` 下。
+- `Cargo.toml` 标记 `plugin = true`；`python3 scripts/check_architecture.py` 通过（30 个 crate），没有其他 crate 依赖 `lectern-project`。`cargo tree -p lectern-project -e normal | rg gpui` 没有结果；`rg -n 'gix' crates/project/Cargo.toml` 没有结果；`rg -n 'std::process|Command::new' crates/project/src` 没有结果。
+- `just test -p lectern-project`：98 个测试，第 1、2 步的 46 个照常通过，新增 52 个：
+  - `open_*`（17 个，含解析缓存的 LRU 单元测试）：在子目录打开得到整个仓库、`opened_at` 为子目录（insta）；事件为 `Opened` → `Changed [files]` → `Changed [packages]`；扫描前快照为第 1 代、`Pending`；从 linked worktree 再打开得到同一个键并切换（insta）；再次打开重读 index；裸仓库取第一个未 prunable 的 linked worktree、名字去掉 `.git`（insta）；没有 worktree 的裸仓库 `active` 为 None，`Opened` 后仍有一个 `Changed`；打开公共目录或 linked worktree 的管理目录得到那个 worktree；主目录 dotfiles 仓库下的目录按文件夹打开，主目录本身按仓库打开；不存在、不是目录、仓库读不出时 `Opened` 带错误且不建项目；index 读不出时 `files`、`packages` 为 `Unavailable(IndexUnreadable)`、worktree 列表照常；子模块是 `Submodule` 文件条目、不是子项目（insta）；文件夹遍历的跳过规则、点文件、可执行位、符号链接（insta），上限截断且结果确定；关闭立即移除快照、`Closed` 来自 executor；扫描排队时关闭，扫描不再读 index、只有 `Opened` 与 `Closed`。
+  - `worktrees_*`（4 个）：主 worktree 在前、其余按根路径排序，locked / detached / unborn / prunable（根目录已删除，键仍是管理目录、根取字面路径）（insta）；切换时先发 `Pending` 的一代再发文件与子项目（insta）；切到 prunable、未知或当前 worktree 时没有事件也没有 git 调用；扫描结束前切回去，最新的请求生效。
+  - `locate_*`（6 个）：取最深的子项目，`apps/web-old` 不算在 `apps/web` 里；不在任何子项目里为 `None`；子项目 `Pending` 时 `NotLoaded`；非当前 worktree 为 `NotLoaded`，填过 `resolve_package` 的缓存后仍是；父仓库和其中单独打开的子模块都包含路径时返回子模块的项目；文件夹项目。
+  - `resolve_*`（8 个，含 16 个 worktree 的缓存淘汰单元测试）：不打开就能归位（主 worktree、linked worktree、git 目录）；仓库之外是已打开的最深文件夹项目或目录本身，不存在为 `NotFound`；`resolve_package` 按各 worktree 自己的子项目给出结果（多一个、少一个、移动了一个各一例）；index 与清单都未变时第二次调用只有 `OpenWorktree`、`IndexChecksum` 两次 git 调用、不读清单；未暂存地修改一个清单后按未命中重算、只多解析这一个，未暂存地删除一个清单后结果随之改变、不重新解析；当前 worktree 的子项目 `Pending` 时返回 `NotLoaded`、不做 git 调用；未知、prunable 的 worktree 和未打开的项目为 `RootMissing`。
+  - `facts_*`（8 个）：模式语义逐条（任意深度的文件名、`*.ext`、`**/`、含 `/` 的从根匹配、`*` 不跨 `/`、大小写敏感、只匹配文件不匹配目录和子模块、多个文件列表的并集、不合法的模式为 false、结果缓存）；打开、切换、关闭后提交的 facts 随之变化；多个打开项目（含文件夹）的并集；一份文件列表只提交一次。
+  - `plugin_*`（5 个）：真实 `Kernel` 加 `Executor::manual()`；激活之后、`open` 之前 executor 里没有任务、`FakeGit` 没有收到调用；`open` 之后提交的 facts 让 `Workspace(["pom.xml"])` 的测试插件激活，没有 `pom.xml` 时不激活；依赖方收到的事件为 `Opened` → `Changed` → `Changed`、generation 递增；停用 `project` 后依赖方回到等待依赖、服务引用不再准入。
+  - `real_repo_*`（4 个）：`TestRepo` 写出的 SHA-1 与 SHA-256 仓库（主 worktree 在分支上、linked worktree 分离 HEAD、含可执行文件）经生产实现打开、切换 worktree、对非当前 worktree 调 `resolve_package`，渲染出的快照与同样布局的 `FakeGit` 逐字相同；再次打开后新暂存的 `go.mod` 出现在子项目里（insta）；`resolve` 与打开 linked worktree 的管理目录；裸仓库没有 worktree 时 `active` 为 None、名字为 `repo`。
+- 事件顺序与 generation 严格递增由测试里的 `check_event_order` 对 open、worktrees、plugin、real_repo 的事件逐一检查。
+
+没有验证到的：
+
+- `project/*` 基准属于第 5 步。`resolve_package` 命中缓存时生产实现先经 `Repo::worktree` 打开句柄（两次 gix 打开加一次 `SafeRoot` 打开）再读校验和，「性能」表里 < 1 ms 的预算要到第 5 步实测；超标时在本 crate 里为非当前 worktree 保留只读校验和用的句柄（不调 `tracked`，不占 index 内存）。
+- 增量刷新（`refresh_*`、`watcher`、`watch_source`）属于第 4 步。
+
 ## 与设计的差异
 
 第 1 步：
@@ -659,3 +697,13 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - 设计没有写 `OpenError`、`ScanError` 等的标准派生，实现定为 `Clone`、`PartialEq`、`Eq`、`Hash`、`Debug`，测试和视图要比较它们；已写进「服务接口」。`FileList` 的序列化形式是新定的，写进了「文件列表」。
 - `services` 的 `project` 模块分为 `files`（`FileList` 及其构造器，第 1 步原样移入）、`packages`（`Package`、`Manifest`、`ManifestKind`、`Ecosystem`、`ManifestError`）、`snapshot`（键、快照、`Location`、`Resolved`），全部从 `lectern_services::project` 导出；`Projects`、`OpenRequest`、`OpenError`、`ProjectEvent`、`ChangedParts` 在模块根。只是文件划分，接口不变。
 - 第 2 步没有测试用的假 `Projects`：设计没有要求，消费方需要时（`project_home`、`agents` 的测试）在 `services` 的 `test-support` 里补。
+
+第 3 步：
+
+- `GitAccess` 改为「一轮扫描打开一个 worktree 句柄」（`open_worktree` 返回 `TreeAccess`，上文「依赖 git 的接口」已改）：`lectern-git` 的 index 和工作区读取都在 `Worktree` 句柄上，句柄会缓存最近一次的 `TrackedPaths`。按路径调用（`index_paths(git_dir)`、`read_worktree_file(root, ...)`）要么每读一个清单就重新打开一次句柄（约 25 次 gix 打开），要么在 `GitAccess` 里长期保留句柄（每个 worktree 一份 index 内容和一个目录描述符，违反「非当前 worktree 只留元数据」）。`index_paths` 换成直接建 `FileList` 的 `index_files`，不经过一份中间的路径列表。
+- `watch_source` 和 `ProjectDeps::watcher` 留到第 4 步：它们只服务于增量刷新，`lectern-fs-watch` 在 main 上还只是骨架。第 3 步不依赖 `lectern-fs-watch`，打开、再次打开、切换 worktree 时整轮扫描。
+- 依赖多了 `lectern-platform`：文件夹项目没有 `Worktree` 句柄，读清单用 `SafeRoot`（与 git 同一套安全读取），已加进「依赖」表；它是基础设施层的库 crate，符合规则 7。
+- 解析缓存的键是清单类型加 blob OID，不只是 OID：同样的字节（如空文件）作为不同格式解析结果不同。已改「数据流与线程」。
+- `ProjectPlugin::with_fake_git`（`test-support`）是新增的，`testing` 模块在 `cfg(any(test, feature = "test-support"))` 下；合成仓库的形状随第 5 步。
+- 模型测试不经 kernel：`Model` 通过一个内部的 `Host`（提交任务、发事件、提交 facts）连接 kernel 与 executor，测试用一个由测试逐个运行的队列，结果确定；`plugin_*` 用真实 `Kernel` 而不是 `TestKernel`（`TestKernel` 只容纳被测插件和模拟服务，放不下 `Workspace` 激活的测试插件）。`FakeGit` 的 worktree 根目录与工作区文件是真实文件（路径要能规范化，`resolve_package` 的缓存检查要 `lstat`），仓库元数据和 index 在内存里。已改「测试」。
+- 设计没有写到、实现时定下的规则，已写进上文「事件」「文件列表」「数据流与线程」：第 1 代快照与每次替换都发 `Changed`；再次打开重扫；`Closed` 之后没有 `Changed`；请求在扫描循环里合并、最新的生效；`set_active_worktree` 对当前 worktree 的忽略条件；子项目 `Unavailable` 时 `locate`、`resolve_package` 的结果；`resolve` 对仓库之外与 git 目录里的路径；文件夹遍历的顺序、计数和不收入的条目。`lectern-git` 不产生 `Head::Unknown`，写进了「依赖 git 的接口」。

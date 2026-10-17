@@ -1,0 +1,20 @@
+---
+source: crates/project/src/tests/open.rs
+assertion_line: 251
+expression: h.render(&key)
+---
+key: Folder { root: "[base]/folder" }
+name: folder
+worktrees:
+active: [base]/folder worktree=None opened_at=""
+files: 7 (skipped 0, truncated false)
+  .eslintrc File
+  link Symlink
+  package.json File
+  pkgs/a/index.js File
+  pkgs/a/package.json File
+  run.sh Executable
+  src/build.rs File
+packages:
+  "" name=folder declared=false workspace_root=true parent=None files=7 manifests=[package.json]
+  "pkgs/a" name=a declared=true workspace_root=false parent=Some(0) files=2 manifests=[pkgs/a/package.json]

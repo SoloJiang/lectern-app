@@ -1,0 +1,15 @@
+---
+source: crates/project/src/tests/open.rs
+assertion_line: 82
+expression: h.render(&first)
+---
+key: Git { common_dir: "[base]/repo/.git" }
+name: repo
+worktrees:
+  [base]/repo key=[base]/repo/.git head=Branch("refs/heads/main") [main]
+  [base]/repo-feature key=[base]/repo/.git/worktrees/feature head=Branch("refs/heads/feature") []
+active: [base]/repo-feature worktree=Some("[base]/repo/.git/worktrees/feature") opened_at=""
+files: 1 (skipped 0, truncated false)
+  package.json File
+packages:
+  "" name=feature declared=false workspace_root=false parent=None files=1 manifests=[package.json]

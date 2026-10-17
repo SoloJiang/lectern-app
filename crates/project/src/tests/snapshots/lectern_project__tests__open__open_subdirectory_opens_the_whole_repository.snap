@@ -1,0 +1,22 @@
+---
+source: crates/project/src/tests/open.rs
+assertion_line: 25
+expression: h.render(&key)
+---
+key: Git { common_dir: "[base]/repo/.git" }
+name: repo
+worktrees:
+  [base]/repo key=[base]/repo/.git head=Branch("refs/heads/main") [main]
+active: [base]/repo worktree=Some("[base]/repo/.git") opened_at="apps/console"
+files: 7 (skipped 0, truncated false)
+  README.md File
+  apps/console/package.json File
+  apps/console/src/main.ts File
+  apps/web/package.json File
+  apps/web/src/index.ts File
+  package.json File
+  pom.xml File
+packages:
+  "" name=root declared=false workspace_root=true parent=None files=7 manifests=[package.json, pom.xml]
+  "apps/console" name=console declared=true workspace_root=false parent=Some(0) files=2 manifests=[apps/console/package.json]
+  "apps/web" name=web declared=true workspace_root=false parent=Some(0) files=2 manifests=[apps/web/package.json]
