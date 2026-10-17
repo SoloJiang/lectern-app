@@ -6,6 +6,7 @@
 //! each activation registers, and revokes it in reverse order when the plugin
 //! is deactivated. The design is in `docs/design/kernel.md`.
 
+mod background;
 mod event;
 mod gate;
 mod handle;
@@ -21,7 +22,10 @@ mod util;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
-pub use event::{Busy, Emitter, Event, Quiescent, ServiceAdded, ServiceRemoved, Subscription};
+pub use background::{BackgroundGuard, BackgroundState, BackgroundStatus, Proceed};
+pub use event::{
+    BackgroundChanged, Busy, Emitter, Event, Quiescent, ServiceAdded, ServiceRemoved, Subscription,
+};
 pub use gate::{GatePoll, GateSlot, SubmitGate};
 pub use handle::{Context, KernelControl, PluginHandle};
 pub use kernel::{Kernel, WorkspaceFacts};

@@ -3,6 +3,7 @@
 mod executor;
 mod support;
 
+mod background;
 mod commands;
 mod events;
 mod failure;

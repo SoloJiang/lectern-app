@@ -227,6 +227,17 @@ impl Latch {
     pub(crate) fn wait(&self) -> LatchWait {
         LatchWait(self.inner.clone())
     }
+
+    pub(crate) fn release(&self) {
+        let waker = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.0 = true;
+            inner.1.take()
+        };
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
 }
 
 pub(crate) struct LatchWait(Arc<Mutex<(bool, Option<Waker>)>>);

@@ -4,6 +4,7 @@ use std::any::{Any, TypeId};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::background::BackgroundGuard;
 use crate::event::{Emitter, Event, ServiceAdded, ServiceRemoved, Subscription, dispatch};
 use crate::gate::{GateInner, SubmitGate};
 use crate::kernel::{Request, Shared, WorkspaceFacts, invalidate};
@@ -338,6 +339,19 @@ impl PluginHandle {
     pub fn busy(&self) -> Option<BusyGuard> {
         let admission = self.act.enter_busy()?;
         let guard = self.act.0.counters.busy();
+        drop(admission);
+        Some(guard)
+    }
+
+    /// Declares pausable background work (ADR 0029), taken by the same rules
+    /// as [`busy`](PluginHandle::busy) but counted apart: it does not hold off
+    /// quiescence. Move it into the task and check
+    /// [`BackgroundGuard::proceed`] before every batch. Returns `None` once the
+    /// activation is deactivated.
+    pub fn background(&self) -> Option<BackgroundGuard> {
+        let shared = self.act.0.kernel.upgrade()?;
+        let admission = self.act.enter_background()?;
+        let guard = shared.background.guard();
         drop(admission);
         Some(guard)
     }
