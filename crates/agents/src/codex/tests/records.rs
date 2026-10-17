@@ -579,7 +579,11 @@ fn inherited_codex_unknown_source_then_reset_when_it_appears() {
     assert!(records.iter().all(|r| !r.inherited));
     assert!(!batches[0].batch.reset);
     assert!(codex.summarize(&fork).unwrap().0.inheritance_unknown);
-    assert!(!adapter().summarize(&fork).unwrap().0.inheritance_unknown);
+    // 来源在本机：摘要只用已缓存的来源集合，`read` 建好集合之后才判断得了边界。
+    let known = adapter();
+    assert!(known.summarize(&fork).unwrap().0.inheritance_unknown);
+    known.read(&fork, &Cursor::START, u64::MAX).unwrap();
+    assert!(!known.summarize(&fork).unwrap().0.inheritance_unknown);
     let index = codex.turns(&fork).unwrap();
     assert_eq!(index.turns.len(), 2, "both turns count as its own");
     // 没有变化时继续读不重置。
@@ -592,6 +596,51 @@ fn inherited_codex_unknown_source_then_reset_when_it_appears() {
     assert!(batches[0].batch.reset);
     assert_eq!(replayed, all("legacy_fork"));
     assert!(!codex.summarize(&fork).unwrap().0.inheritance_unknown);
+}
+
+#[test]
+fn inherited_codex_summary_never_decodes_or_scans_the_source() {
+    // 发现阶段（摘要）不为祖先会话建解压副本，也不读它的内容；第一次 `read` 分叉时才扫描来源。
+    let dir = TempDir::new();
+    let decoded = dir.path().join("decoded");
+    let parent = fixture("legacy_main");
+    let zst = dir.path().join(format!(
+        "{}.zst",
+        parent.path.file_name().unwrap().to_str().unwrap()
+    ));
+    std::fs::write(
+        &zst,
+        ruzstd::encoding::compress_to_vec(
+            &std::fs::read(&parent.path).unwrap()[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        ),
+    )
+    .unwrap();
+    let lineage = Arc::new(MapLineage::default());
+    let codex =
+        Codex::new(SourceId(SOURCE_ID.into()), decoded.clone()).with_lineage(lineage.clone());
+    lineage.insert(L1, codex.session_file(&zst).unwrap());
+    let fork = fixture("legacy_fork");
+
+    let (summary, _) = codex.summarize(&fork).unwrap();
+    assert_eq!(codex.decodes(), 0, "no decoded copy of the parent");
+    assert!(!decoded.exists(), "the decoded dir is never touched");
+    assert_eq!(codex.cached_sources(), 0, "the parent is not scanned");
+    // 边界未定：摘要暂按未定处理。
+    assert!(summary.inheritance_unknown);
+
+    // 第一次 `read` 扫描来源（建副本），之后的摘要用缓存的集合，同样不再解码。
+    let (records, _, _) = read_to_end(&codex, &fork, &Cursor::START, u64::MAX);
+    assert_eq!(records, all("legacy_fork"));
+    assert_eq!(codex.decodes(), 1);
+    assert_eq!(codex.cached_sources(), 1);
+    let (summary, _) = codex.summarize(&fork).unwrap();
+    assert!(!summary.inheritance_unknown);
+    assert_eq!(
+        summary.title.as_deref(),
+        Some("Placeholder prompt in the fork: try another approach.")
+    );
+    assert_eq!(codex.decodes(), 1);
 }
 
 #[test]

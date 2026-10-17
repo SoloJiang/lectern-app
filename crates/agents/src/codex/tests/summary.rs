@@ -83,7 +83,10 @@ fn codex_summary_fields() {
     assert_eq!(main.started_at, ts("2026-10-02T09:00:00.000Z"));
     assert_eq!(&*main.cwd, Path::new("/Users/dev/fixture/repo"));
     assert_eq!(main.parent, None);
-    // 分叉：标题取自己的第一个 prompt。
+    // 分叉：标题取自己的第一个 prompt（来源的轮次集合已由 `read` 建好；摘要自己不扫描来源）。
+    codex
+        .read(&fixture("legacy_fork_of_fork"), &Cursor::START, u64::MAX)
+        .unwrap();
     let (fork, _) = codex.summarize(&fixture("legacy_fork_of_fork")).unwrap();
     assert_eq!(
         fork.title.as_deref(),
@@ -106,6 +109,31 @@ fn codex_summary_fields() {
         .summarize(&codex.session_file(&path).unwrap())
         .unwrap();
     assert!(summary.archived);
+}
+
+#[test]
+fn resume_codex_subagents_without_a_known_parent() {
+    // `{"subagent": "review"}` / `"compact"` 没有父线程 ID：仍是子 agent 会话，父会话 ID 为空，不能恢复。
+    for source in [r#"{"subagent":"review"}"#, r#"{"subagent":"compact"}"#] {
+        let dir = TempDir::new();
+        let meta = meta_line(L1, "").replace(r#""source":"cli""#, &format!(r#""source":{source}"#));
+        let file = write_lines(
+            &dir,
+            L1,
+            &[meta, event(1, r#"{"type":"task_started","turn_id":"t1"}"#)],
+        );
+        let codex = adapter();
+        let (summary, _) = codex.summarize(&file).unwrap();
+        let parent = summary.parent.clone().expect("a subagent session");
+        assert_eq!(&*parent.session.id, "", "{source}");
+        assert_eq!(parent.session.source, *codex.source());
+        assert_eq!(parent.tool_call, None);
+        assert_eq!(codex.resume(&summary), None, "{source}");
+    }
+    // 父会话已知的子 agent 同样不能恢复。
+    let (summary, _) = adapter().summarize(&fixture("paginated_subagent")).unwrap();
+    assert!(summary.parent.is_some());
+    assert_eq!(adapter().resume(&summary), None);
 }
 
 #[test]

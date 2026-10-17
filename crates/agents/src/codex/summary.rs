@@ -1,6 +1,7 @@
 //! 会话摘要：读文件开头和末尾（docs/design/agents.md「数据流与线程」第 2 步）。
 //!
 //! 开头用与 `read` 相同的解析器读在 256 KB 之内开始的行，直到有了会话头和自己的第一个 prompt。
+//! 分叉会话的继承边界只用内存里已缓存的来源集合，不读来源文件；没有缓存时按边界未定处理。
 //! 末尾：未压缩的文件从末尾向前找最后一条 `task_started` / `task_complete` / `turn_aborted`；
 //! `.jsonl.zst` 没有办法直接读末尾，`summarize` 只流式解压开头、标 `tail_pending`，`complete` 整份流式解码一次补齐。
 
@@ -119,7 +120,8 @@ struct Head {
 }
 
 fn head(codex: &Codex, reader: impl Read) -> Result<Head, SessionError> {
-    let lineage = |thread: &str| codex.source_turns(thread);
+    // 只用已缓存的来源集合：发现阶段不解压、不扫描祖先会话。
+    let lineage = |thread: &str| codex.cached_source_turns(thread);
     let mut index = IndexBuilder::default();
     let mut parse = Parse {
         state: State::default(),
@@ -219,19 +221,16 @@ pub(super) fn summarize(
     } else {
         Format::Unrecognized
     };
-    let parent = head
-        .meta
-        .as_ref()
-        .filter(|m| m.subagent)
-        .and_then(|m| m.parent_thread.clone())
-        .map(|id| Parent {
-            session: SessionKey {
-                source: file.key.source.clone(),
-                id,
-            },
-            // 子 agent 的 rollout 里没有派出它的调用 ID（见「与设计的差异」）。
-            tool_call: None,
-        });
+    let parent = head.meta.as_ref().filter(|m| m.subagent).map(|m| Parent {
+        // `{"subagent": "review"}` 一类没有父线程 ID：父会话未知时 ID 为空，不指向任何会话，
+        // 但仍标出这是子 agent 会话（不能恢复，见「与设计的差异」）。
+        session: SessionKey {
+            source: file.key.source.clone(),
+            id: m.parent_thread.clone().unwrap_or_else(|| "".into()),
+        },
+        // 子 agent 的 rollout 里没有派出它的调用 ID（见「与设计的差异」）。
+        tool_call: None,
+    });
     let summary = SessionSummary {
         key: file.key.clone(),
         agent: Agent::Codex,

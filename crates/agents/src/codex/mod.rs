@@ -436,6 +436,22 @@ impl Codex {
         Some(turns)
     }
 
+    /// 只取内存里已有的来源集合，不读来源文件（摘要用：发现阶段不解压、不扫描祖先会话）。
+    /// 没有缓存时为 None，摘要按边界未定处理；第一次 `read` / `turns` 这个分叉时才扫描来源。
+    pub(crate) fn cached_source_turns(&self, thread: &str) -> Option<Arc<SourceTurns>> {
+        let file = self.lineage.locate(thread)?;
+        self.sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&file.path)
+            .cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_sources(&self) -> usize {
+        self.sources.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
     /// 从 `prev` 的位置接着扫（对不上时从头扫）。没有新内容时返回 None。
     fn scan_turns(
         &self,
@@ -563,8 +579,8 @@ impl Codex {
         self.store.remove(&self.source.0, &key.id);
     }
 
-    /// `SessionSource::resume`：给出 `codex resume` 的会话 ID；子 agent 会话、认不出格式的会话
-    /// 和别的来源的会话返回 None。
+    /// `SessionSource::resume`：给出 `codex resume` 的会话 ID；子 agent 会话（有 `parent`，父会话未知时它的 ID 为空）、
+    /// 认不出格式的会话和别的来源的会话返回 None。
     pub fn resume(&self, summary: &SessionSummary) -> Option<ResumeCommand> {
         if summary.key.source != self.source
             || summary.parent.is_some()
