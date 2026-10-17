@@ -52,13 +52,18 @@ pub(crate) struct Found {
     pub capped: bool,
 }
 
+/// A `.gitignore` the walk read: its path and content.
+pub(crate) type IgnoreFile = (RepoPath, Vec<u8>);
+
 /// Walks the worktree for untracked entries: index paths are skipped,
 /// ignored files and directories are skipped (an ignored directory isn't
 /// entered), nested repositories are listed once, and symbolic links are
-/// listed, never followed. At most `limit` entries, in path order.
+/// listed, never followed. At most `limit` entries, in path order. With
+/// `ignore_files`, every `.gitignore` read on the way (tracked or not) is
+/// added to it, for the watch filter (`watch`).
 #[allow(
     clippy::too_many_arguments,
-    reason = "one step of the comparison's `run`"
+    reason = "one step of the comparison's `run` and of the watch filter"
 )]
 pub(crate) fn walk(
     handle: &Handle,
@@ -69,6 +74,7 @@ pub(crate) fn walk(
     limit: usize,
     read_bytes: u64,
     cancel: &AtomicBool,
+    ignore_files: Option<&mut Vec<IgnoreFile>>,
 ) -> Result<Found, GitError> {
     let config = handle.config_snapshot();
     let case = if config.boolean("core.ignoreCase").unwrap_or(false) {
@@ -100,6 +106,7 @@ pub(crate) fn walk(
         globals,
         found: Vec::new(),
         capped: false,
+        ignore_files,
     };
     walker.dir(&[])?;
     let mut entries = walker.found;
@@ -125,6 +132,7 @@ struct Walker<'a> {
     globals: gix::AttributeStack<'a>,
     found: Vec<(RepoPath, Kind)>,
     capped: bool,
+    ignore_files: Option<&'a mut Vec<IgnoreFile>>,
 }
 
 fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
@@ -178,6 +186,13 @@ impl Walker<'_> {
             Some(Path::new("")),
             Ignore::default(),
         );
+        if let (Some(out), Some(content), Some(path)) = (
+            self.ignore_files.as_deref_mut(),
+            content,
+            RepoPath::new(&source),
+        ) {
+            out.push((path, content));
+        }
         let result = self.entries(dir, entries);
         self.search.patterns.pop();
         result

@@ -17,6 +17,8 @@ test-support = ["dep:tempfile"]
 
 [dependencies]
 gix.workspace = true
+# `WorktreeSource` / `PathFilter`, implemented by `Worktree::watch_source`.
+lectern-fs-watch = { path = "../fs_watch" }
 lectern-platform = { path = "../platform" }
 tempfile = { workspace = true, optional = true }
 

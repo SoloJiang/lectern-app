@@ -465,13 +465,13 @@ impl ChangeSet {
     }
 }
 
-enum Blob {
+pub(crate) enum Blob {
     Bytes(Vec<u8>),
     TooLarge(u64),
     Missing,
 }
 
-fn read_blob(handle: &Handle, oid: Oid, max: u64) -> Result<Blob, GitError> {
+pub(crate) fn read_blob(handle: &Handle, oid: Oid, max: u64) -> Result<Blob, GitError> {
     let Some(header) = handle
         .try_find_header(oid.to_gix())
         .map_err(GitError::from_gix)?

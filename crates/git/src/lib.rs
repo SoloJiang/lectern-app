@@ -31,6 +31,7 @@ mod tracked;
 mod tree;
 mod tree_diff;
 mod untracked;
+mod watch;
 mod worktree;
 
 #[cfg(any(test, feature = "test-support"))]

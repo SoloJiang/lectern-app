@@ -73,6 +73,11 @@ impl TrackedPaths {
         self.entries.iter()
     }
 
+    /// The entries as a slice, for binary searches.
+    pub(crate) fn entries(&self) -> &[TrackedEntry] {
+        &self.entries
+    }
+
     /// Binary search.
     pub fn contains(&self, path: &[u8]) -> bool {
         self.entries

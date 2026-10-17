@@ -20,8 +20,9 @@ pub(crate) enum ConfigScope {
     /// No `GIT_*` environment variable takes effect and the git binary is
     /// never run to locate its installation config.
     User,
-    /// Only the repository's own configuration: tests, so that the machine's
-    /// configuration can't change their results.
+    /// Only the repository's own configuration and the files it includes:
+    /// tests, so that the machine's configuration can't change their
+    /// results.
     #[cfg_attr(
         not(any(test, feature = "test-support")),
         expect(
@@ -67,7 +68,13 @@ fn options(scope: ConfigScope) -> gix::open::Options {
                 },
             }
         }
-        ConfigScope::RepositoryOnly => gix::open::Permissions::isolated(),
+        ConfigScope::RepositoryOnly => {
+            let mut permissions = gix::open::Permissions::isolated();
+            // `include.path` / `includeIf` in the repository's own config,
+            // for the watch source's config list tests.
+            permissions.config.includes = true;
+            permissions
+        }
     };
     gix::open::Options::default()
         .permissions(permissions)
@@ -123,11 +130,10 @@ mod tests {
         assert_eq!(p.env.git_prefix, Permission::Deny);
         assert_eq!(p.env.objects, Permission::Deny);
         assert!(p.config.user && p.config.system && p.config.git);
-        assert!(
-            options(ConfigScope::RepositoryOnly)
-                .permissions
-                .is_isolated()
-        );
+        let mut only = options(ConfigScope::RepositoryOnly).permissions;
+        assert!(only.config.includes, "follows the repository's includes");
+        only.config.includes = false;
+        assert!(only.is_isolated(), "nothing else besides the repository");
     }
 }
 

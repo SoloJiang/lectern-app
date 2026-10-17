@@ -1,9 +1,9 @@
 //! The worktree comparison (docs/design/git.md「工作区比较」): the base tree,
 //! the index and the worktree, path by path, plus untracked files. Read-only:
 //! the index and the object database are never written, no external program
-//! runs, and worktree files are read only through `SafeRoot`. Directory
-//! listing for untracked files and `.gitignore` loading go through gix's
-//! walk (ADR 0024「已知限制」).
+//! runs, and worktree files are read only through `SafeRoot`, the directory
+//! walk for untracked files and `.gitignore` loading included (`untracked`,
+//! ADR 0028).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -444,6 +444,7 @@ pub(crate) fn run(
             untracked_limit,
             limits.read_bytes,
             cancel,
+            None,
         )?;
         (found.entries, found.capped)
     };
