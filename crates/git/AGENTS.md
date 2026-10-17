@@ -30,7 +30,8 @@ just test -p lectern-git
 ```
 
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
-- 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。需要和 git 输出对照的夹具是目录格式（[说明](tests/fixtures/README.md)），由 `tests/fixtures/scripts/` 用真实的 git 生成一次；测试只用 `TestRepo::import_fixture` 导入，不运行 git。
+- 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。需要和 git 输出对照的夹具是目录格式（[说明](tests/fixtures/README.md)），由 `tests/fixtures/scripts/` 用真实的 git 生成一次；测试只用 `TestRepo::import_fixture` / `import_worktree_fixture` 导入，不运行 git。
 - 测试仓库用 `testing::TestRepo`（`test-support` feature）构造，不调用 git 命令行；发现仓库用 `testing::discover`，只读仓库自己的配置，不受机器上的 git 配置影响。
 - git 目录里的管理文件只在 `src/gitdir.rs` 里按路径读；工作区文件只经 `SafeRoot`。
-- 计时：`cargo test --release -p lectern-git --all-features -- --ignored perf_smoke`（`git_open`、`git_diff_50_cold` / `warm`；`bench` 的 git 基准等 bench 的设计文档合并后加入）。
+- 工作区比较的测试（`compare/tests.rs`）每次比较前后对 git 目录做快照，必须相同（只读）；用 `hook::reads` 检查哪些文件被读了。和 git 的转换结果对照的工作区夹具见[夹具说明](tests/fixtures/README.md)「工作区夹具」。
+- 计时：`cargo test --release -p lectern-git --all-features -- --ignored perf_smoke --test-threads=1`（`git_open`、`git_diff_50_cold` / `warm`、`git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/changes_capped` 和内存；内存用计数分配器量，要单线程）。bench 的 runner 合并后移进 `crates/bench`。

@@ -12,7 +12,9 @@
 
 mod attrs;
 mod changes;
+mod compare;
 mod content;
+mod conversion;
 mod error;
 mod format;
 mod gitdir;
@@ -34,9 +36,10 @@ mod worktree;
 pub mod testing;
 
 pub use changes::{
-    Change, ChangeSet, Detail, FileTexts, Limits, Side, SideText, Staged, Status, Target, Text,
-    Totals,
+    Change, ChangeSet, Detail, FileTexts, Fingerprint, Limits, Side, SideText, Staged, Status,
+    Target, Text, Totals,
 };
+pub use compare::{Base, Refresh};
 pub use content::{Content, RawIdentity, Unavailable};
 pub use error::{GitError, UnsupportedRepo};
 pub use hunks::{FileDiff, Hunk};

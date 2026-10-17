@@ -4306,6 +4306,7 @@ dependencies = [
  "gix",
  "insta",
  "lectern-platform",
+ "rustix",
  "tempfile",
 ]
 

@@ -22,6 +22,13 @@ pub(crate) enum ConfigScope {
     User,
     /// Only the repository's own configuration: tests, so that the machine's
     /// configuration can't change their results.
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        expect(
+            dead_code,
+            reason = "only `testing::discover` (test-support) opens repositories this way"
+        )
+    )]
     RepositoryOnly,
 }
 

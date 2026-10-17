@@ -1,0 +1,10 @@
+---
+source: crates/git/src/compare/tests.rs
+expression: "lines(&set).join(\"\\n\")"
+---
+A link (untracked) - -> l:c7ca8e3 text(+1,-0)
+A nested (untracked) - -> s:nested-repository no-diff
+A notes.md (untracked) - -> f:bfa6551 text(+1,-0)
+A sock (untracked) - -> s:unsupported no-diff
+A src/deep/er/x.rs (untracked) - -> f:587be6b text(+1,-0)
+A src/new.rs (untracked) - -> f:3e75765 text(+1,-0)

@@ -9,11 +9,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::attrs::{Attrs, TreeAttributes};
+use crate::compare::Origin;
 use crate::handle::Handle;
 use crate::hunks::{self, Computed, FileDiff, HunkKey};
 use crate::refs::missing_or;
 use crate::rename::{self, Candidate, Signature};
-use crate::{Content, GitError, Mode, Oid, Repo, RepoPath, Unavailable, WorktreeId, tree_diff};
+use crate::{
+    Content, GitError, Mode, Oid, RawIdentity, Repo, RepoPath, Unavailable, WorktreeId, tree_diff,
+};
 
 /// The limits of one comparison (docs/design/git.md「上限与截断」). Tree
 /// diffs use the line-diff, patch, total and entry limits; the worktree
@@ -258,6 +261,134 @@ pub struct ChangeSet {
     /// Per file, the new side's bytes when they came from the worktree and
     /// were kept (within `Limits::retained_bytes`). Never set for trees.
     retained: Vec<Option<Arc<[u8]>>>,
+    /// What a worktree comparison needs for `Worktree::refresh`; None for
+    /// trees.
+    pub(crate) origin: Option<Arc<Origin>>,
+}
+
+/// A digest of a change set's state (crates/git/AGENTS.md「边界」): the base
+/// tree and, for every changed file, its path, status, both modes and the
+/// identity of both contents, computed from the full OIDs, so truncation
+/// doesn't change it. Content over the read limit counts by size, mtime and
+/// inode; filtered content by its raw identity. SHA-256.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Fingerprint([u8; 32]);
+
+impl Fingerprint {
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+impl ChangeSet {
+    /// Assembles a worktree change set (`compare`).
+    pub(crate) fn from_parts(
+        base_tree: Oid,
+        target: Target,
+        assembled: Assembled,
+        totals: Totals,
+        limits: Limits,
+        origin: Arc<Origin>,
+    ) -> ChangeSet {
+        ChangeSet {
+            base_tree,
+            target,
+            files: assembled.files,
+            totals,
+            limits,
+            retained: assembled.retained,
+            origin: Some(origin),
+        }
+    }
+
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// See [`Fingerprint`]. Untracked files past `Limits::untracked` aren't
+    /// listed and so don't count; `Totals::untracked_capped` and the
+    /// invalid paths do.
+    pub fn fingerprint(&self) -> Fingerprint {
+        fn bytes(h: &mut gix::hash::Hasher, b: &[u8]) {
+            h.update(&(b.len() as u64).to_le_bytes());
+            h.update(b);
+        }
+        fn side(h: &mut gix::hash::Hasher, side: Option<&Side>) {
+            let Some(side) = side else {
+                h.update(&[0]);
+                return;
+            };
+            h.update(&[1, side.mode as u8]);
+            match &side.content {
+                Content::Blob(oid) | Content::Unavailable(Unavailable::NotRetained { oid }) => {
+                    h.update(&[0]);
+                    bytes(h, oid.as_bytes());
+                }
+                Content::Unhashed {
+                    size,
+                    mtime_ns,
+                    inode,
+                }
+                | Content::Unavailable(Unavailable::Filtered {
+                    raw:
+                        RawIdentity::Stat {
+                            size,
+                            mtime_ns,
+                            inode,
+                        },
+                }) => {
+                    h.update(&[1]);
+                    h.update(&size.to_le_bytes());
+                    h.update(&mtime_ns.to_le_bytes());
+                    h.update(&inode.to_le_bytes());
+                }
+                Content::Unavailable(Unavailable::Filtered {
+                    raw: RawIdentity::Sha256(digest),
+                }) => {
+                    h.update(&[2]);
+                    h.update(digest);
+                }
+                Content::Unavailable(other) => {
+                    h.update(&[3]);
+                    bytes(h, format!("{other:?}").as_bytes());
+                }
+            }
+        }
+        let mut h = gix::hash::hasher(gix::hash::Kind::Sha256);
+        bytes(&mut h, self.base_tree.as_bytes());
+        for change in &self.files {
+            bytes(&mut h, change.path.as_bytes());
+            match &change.status {
+                Status::Renamed { from, similarity } => {
+                    h.update(&[4, *similarity]);
+                    bytes(&mut h, from.as_bytes());
+                }
+                other => h.update(&[match other {
+                    Status::Added => 0,
+                    Status::Deleted => 1,
+                    Status::Modified => 2,
+                    Status::TypeChanged => 3,
+                    _ => 5,
+                }]),
+            }
+            h.update(&[u8::from(change.untracked)]);
+            side(&mut h, change.old.as_ref());
+            side(&mut h, change.new.as_ref());
+        }
+        h.update(&[u8::from(self.totals.untracked_capped)]);
+        for path in self.totals.invalid_paths.iter() {
+            bytes(&mut h, path);
+        }
+        let mut out = [0u8; 32];
+        if let Ok(id) = h.try_finalize() {
+            out.copy_from_slice(&id.as_bytes()[..32]);
+        }
+        Fingerprint(out)
+    }
 }
 
 impl fmt::Debug for ChangeSet {
@@ -361,7 +492,7 @@ fn read_blob(handle: &Handle, oid: Oid, max: u64) -> Result<Blob, GitError> {
 
 /// Peels a commit (or a tag) to its tree; a tree is returned as is. The
 /// empty tree needs no object (gix knows it).
-fn peel_to_tree(handle: &Handle, id: Oid) -> Result<Oid, GitError> {
+pub(crate) fn peel_to_tree(handle: &Handle, id: Oid) -> Result<Oid, GitError> {
     let object = handle
         .try_find_object(id.to_gix())
         .map_err(GitError::from_gix)?
@@ -392,8 +523,6 @@ impl Repo {
         let mut invalid = walk.invalid;
 
         let mut pending = Vec::new();
-        let mut deleted: Vec<(RepoPath, Mode, Oid)> = Vec::new();
-        let mut added: Vec<(RepoPath, Mode, Oid)> = Vec::new();
         for entry in walk.entries {
             let Some(path) = RepoPath::new(&entry.path) else {
                 invalid.push(entry.path.into());
@@ -413,82 +542,24 @@ impl Repo {
                         Some(tree_side(new)),
                     ));
                 }
-                (Some((mode, oid)), None) => deleted.push((path, mode, oid)),
-                (None, Some((mode, oid))) => added.push((path, mode, oid)),
+                (Some(old), None) => pending.push(Pending::new(
+                    Status::Deleted,
+                    path,
+                    Some(tree_side(old)),
+                    None,
+                )),
+                (None, Some(new)) => pending.push(Pending::new(
+                    Status::Added,
+                    path,
+                    None,
+                    Some(tree_side(new)),
+                )),
                 (None, None) => {}
             }
         }
 
-        // git: `diff.renameLimit` 0 or negative is unlimited.
-        let limit = handle
-            .config_snapshot()
-            .integer("diff.renameLimit")
-            .map_or(Some(DEFAULT_RENAME_LIMIT), |l| u64::try_from(l).ok());
-        fn candidates(files: &[(RepoPath, Mode, Oid)]) -> Vec<Candidate<'_>> {
-            files
-                .iter()
-                .map(|(path, mode, oid)| Candidate {
-                    path: path.as_bytes(),
-                    mode: *mode,
-                    oid: *oid,
-                })
-                .collect()
-        }
-        let pairs = rename::detect(
-            &candidates(&deleted),
-            &candidates(&added),
-            limit,
-            &mut |is_source: bool, i: usize| -> Result<Option<Signature>, GitError> {
-                let (path, _, oid) = if is_source { &deleted[i] } else { &added[i] };
-                let binary = attributes.get(path)?.binary;
-                Ok(match read_blob(&handle, *oid, limits.diff_bytes)? {
-                    Blob::Bytes(bytes) => Some(Signature::new(&bytes, !binary && !has_nul(&bytes))),
-                    Blob::TooLarge(_) | Blob::Missing => None,
-                })
-            },
-            cancel,
-        )?;
-
-        let mut source_used = vec![false; deleted.len()];
-        let mut dest_used = vec![false; added.len()];
-        for pair in &pairs {
-            source_used[pair.source] = true;
-            dest_used[pair.dest] = true;
-            let (from, old_mode, old_oid) = &deleted[pair.source];
-            let (path, new_mode, new_oid) = &added[pair.dest];
-            pending.push(Pending::new(
-                Status::Renamed {
-                    from: from.clone(),
-                    similarity: pair.similarity(),
-                },
-                path.clone(),
-                Some(tree_side((*old_mode, *old_oid))),
-                Some(tree_side((*new_mode, *new_oid))),
-            ));
-        }
-        for (i, (path, mode, oid)) in deleted.into_iter().enumerate() {
-            if !source_used[i] {
-                pending.push(Pending::new(
-                    Status::Deleted,
-                    path,
-                    Some(tree_side((mode, oid))),
-                    None,
-                ));
-            }
-        }
-        for (i, (path, mode, oid)) in added.into_iter().enumerate() {
-            if !dest_used[i] {
-                pending.push(Pending::new(
-                    Status::Added,
-                    path,
-                    None,
-                    Some(tree_side((mode, oid))),
-                ));
-            }
-        }
-        pending.sort_by(|a, b| a.path.cmp(&b.path).then(a.untracked.cmp(&b.untracked)));
-
         let mut attrs = |path: &RepoPath| attributes.get(path);
+        let pending = pair_renames(&handle, pending, limits, &mut attrs, cancel)?;
         let assembled = Assembler {
             handle: &handle,
             limits,
@@ -507,12 +578,131 @@ impl Repo {
             },
             limits: limits.clone(),
             retained: assembled.retained,
+            origin: None,
         }))
     }
 }
 
 /// git's default `diff.renameLimit`.
 const DEFAULT_RENAME_LIMIT: u64 = 1000;
+
+/// Pairs deletions with additions as renames (docs/design/git.md「工作区比较」
+/// 第 5 步) and returns every change sorted by (path, `untracked`). A
+/// deletion whose path the index still has (`staged` is Some) is no source;
+/// an addition needs a known OID. Renames use this repository's
+/// `diff.renameLimit`.
+pub(crate) fn pair_renames(
+    handle: &Handle,
+    pending: Vec<Pending>,
+    limits: &Limits,
+    attrs: &mut dyn FnMut(&RepoPath) -> Result<Attrs, GitError>,
+    cancel: &AtomicBool,
+) -> Result<Vec<Pending>, GitError> {
+    let mut out = Vec::with_capacity(pending.len());
+    let mut deleted = Vec::new();
+    let mut added = Vec::new();
+    // An untracked addition on a deleted path (`git rm --cached p`) stays an
+    // addition: a path has at most a deletion and an untracked addition.
+    let deleted_paths: std::collections::HashSet<RepoPath> = pending
+        .iter()
+        .filter(|p| p.status == Status::Deleted)
+        .map(|p| p.path.clone())
+        .collect();
+    for p in pending {
+        let source = p.status == Status::Deleted
+            && p.staged.is_none()
+            && p.old.as_ref().is_some_and(|s| s.content.oid().is_some());
+        let dest = p.status == Status::Added
+            && !(p.untracked && deleted_paths.contains(&p.path))
+            && p.new
+                .as_ref()
+                .is_some_and(|s| s.mode != Mode::Special && matches!(s.content, Content::Blob(_)));
+        if source {
+            deleted.push(Some(p));
+        } else if dest {
+            added.push(Some(p));
+        } else {
+            out.push(p);
+        }
+    }
+
+    // git: `diff.renameLimit` 0 or negative is unlimited.
+    let limit = handle
+        .config_snapshot()
+        .integer("diff.renameLimit")
+        .map_or(Some(DEFAULT_RENAME_LIMIT), |l| u64::try_from(l).ok());
+    fn side(p: &Option<Pending>, source: bool) -> Option<(&RepoPath, &PendingSide)> {
+        let p = p.as_ref()?;
+        let side = if source {
+            p.old.as_ref()
+        } else {
+            p.new.as_ref()
+        }?;
+        Some((&p.path, side))
+    }
+    fn candidates(files: &[Option<Pending>], source: bool) -> Vec<Candidate<'_>> {
+        files
+            .iter()
+            .filter_map(|p| {
+                let (path, side) = side(p, source)?;
+                Some(Candidate {
+                    path: path.as_bytes(),
+                    mode: side.mode,
+                    oid: side.content.oid()?,
+                })
+            })
+            .collect()
+    }
+    let pairs = rename::detect(
+        &candidates(&deleted, true),
+        &candidates(&added, false),
+        limit,
+        &mut |is_source: bool, i: usize| -> Result<Option<Signature>, GitError> {
+            let files = if is_source { &deleted } else { &added };
+            let Some((path, side)) = side(&files[i], is_source) else {
+                return Ok(None);
+            };
+            let binary = attrs(path)?.binary;
+            if let Some(bytes) = &side.bytes {
+                if bytes.len() as u64 > limits.diff_bytes {
+                    return Ok(None);
+                }
+                return Ok(Some(Signature::new(bytes, !binary && !has_nul(bytes))));
+            }
+            let Some(oid) = side.content.oid() else {
+                return Ok(None);
+            };
+            Ok(match read_blob(handle, oid, limits.diff_bytes)? {
+                Blob::Bytes(bytes) => Some(Signature::new(&bytes, !binary && !has_nul(&bytes))),
+                Blob::TooLarge(_) | Blob::Missing => None,
+            })
+        },
+        cancel,
+    )?;
+
+    for pair in &pairs {
+        let (Some(source), Some(dest)) = (deleted[pair.source].take(), added[pair.dest].take())
+        else {
+            continue;
+        };
+        out.push(Pending {
+            status: Status::Renamed {
+                from: source.path,
+                similarity: pair.similarity(),
+            },
+            path: dest.path,
+            old: source.old,
+            new: dest.new,
+            untracked: false,
+            staged: dest.staged,
+            staged_only: dest.staged_only,
+        });
+    }
+    out.extend(deleted.into_iter().flatten());
+    out.extend(added.into_iter().flatten());
+    out.sort_by(|a, b| a.path.cmp(&b.path).then(a.untracked.cmp(&b.untracked)));
+    Ok(out)
+}
 
 /// Regular files, symbolic links, submodules and special entries are
 /// different kinds: a change between them is `TypeChanged`.
@@ -539,6 +729,7 @@ fn has_nul(bytes: &[u8]) -> bool {
 }
 
 /// One change before its `Detail` is computed.
+#[derive(Clone, Debug)]
 pub(crate) struct Pending {
     pub status: Status,
     pub path: RepoPath,
@@ -546,6 +737,9 @@ pub(crate) struct Pending {
     pub new: Option<PendingSide>,
     pub untracked: bool,
     pub staged: Option<Staged>,
+    /// The worktree equals the base and the new side is the index's entry:
+    /// `Detail::StagedOnly`.
+    pub staged_only: bool,
 }
 
 impl Pending {
@@ -562,10 +756,12 @@ impl Pending {
             new,
             untracked: false,
             staged: None,
+            staged_only: false,
         }
     }
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct PendingSide {
     pub mode: Mode,
     pub content: Content,
@@ -626,6 +822,8 @@ impl Assembler<'_> {
                 || patch_total >= self.limits.total_patch_bytes;
             let (mut detail, patch) = if over_total {
                 (Detail::Listed, 0)
+            } else if p.staged_only {
+                (Detail::StagedOnly, 0)
             } else {
                 self.detail(&mut p)?
             };
