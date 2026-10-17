@@ -1,6 +1,6 @@
 # executor 设计
 
-状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)，实现 PR 编号待填）。
+状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)）。
 
 `executor` 运行 UI 线程之外的 IO、解析和 git 操作（[技术调研「不同步阻塞 UI」](tech-research.md)）。它实现 kernel 对执行器的约定（[kernel 设计](kernel.md)「撤销」里的后台任务、`SubmitGate`、`GateSlot`），让插件提交的任务随激活失效而丢弃、任务 panic 时插件进入 `Failed`。
 
