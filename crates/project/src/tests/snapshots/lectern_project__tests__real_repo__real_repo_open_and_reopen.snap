@@ -1,0 +1,23 @@
+---
+source: crates/project/src/tests/real_repo.rs
+assertion_line: 177
+expression: real.render(&key)
+---
+key: Git { common_dir: "[base]/repo/.git" }
+name: repo
+worktrees:
+  [base]/repo key=[base]/repo/.git head=Branch("refs/heads/main") [main]
+  [base]/repo-feature key=[base]/repo/.git/worktrees/feature head=Detached("464e91622cb8ce5364950911d11890517dd4c887") []
+active: [base]/repo worktree=Some("[base]/repo/.git") opened_at=""
+files: 7 (skipped 0, truncated false)
+  README.md File
+  apps/web/package.json File
+  apps/web/src/index.ts File
+  package.json File
+  pom.xml File
+  scripts/run.sh Executable
+  svc/src/Main.java File
+packages:
+  "" name=root declared=false workspace_root=true parent=None files=7 manifests=[package.json, pom.xml]
+  "apps/web" name=web declared=true workspace_root=false parent=Some(0) files=2 manifests=[apps/web/package.json]
+  "svc" name=svc declared=true workspace_root=false parent=Some(0) files=1 manifests=[]
