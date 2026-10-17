@@ -291,7 +291,7 @@ pub struct RepoBatch {
     pub refs: bool,
     /// 公共目录里的 config、info/exclude、info/attributes。仓库之外的配置文件只计入 worktree 批次。
     pub config: bool,
-    /// 按 `seq` 排序。
+    /// 两者都按 `seq` 排序，共用一个计数，合并后即先后顺序（见 `ReflogReset`）。
     pub reflog: Vec<ReflogRecord>,
     pub reflog_resets: Vec<ReflogReset>,
     pub rescan: bool,
@@ -347,7 +347,7 @@ pub struct ReflogRecord {
     pub offset: u64,
     /// 一行，不含结尾的换行。由 `git::parse_reflog_line` 解析。
     pub line: Arc<[u8]>,
-    /// 同一 `observed.run` 内单调递增：读到的先后；同一文件里与行序一致。不跨运行比较。
+    /// 同一 `observed.run` 内单调递增，与 `ReflogReset::seq` 共用：读到的先后；同一文件里与行序一致。不跨运行比较。
     pub seq: u64,
     /// 读到这一行的那次读取结束时：记录写在它之前。
     pub observed: ReadStamp,
@@ -378,7 +378,15 @@ pub enum Origin {
     NewFile,
 }
 
-pub struct ReflogReset { pub file: ReflogFile, pub reason: ResetReason }
+/// 与 `ReflogRecord` 共用同一个 `seq` 计数：按 `seq` 把 `reflog` 与 `reflog_resets` 合并，就是每个文件上记录与重置的先后，
+/// 同一批里「追加、重置、再追加」也能分清。`usage` 把重置与记录一起落盘，「两者之间没有重置」才能算出来。
+pub struct ReflogReset {
+    pub file: ReflogFile,
+    pub reason: ResetReason,
+    pub seq: u64,
+    /// 发现这次重置的那次读取结束时。
+    pub observed: ReadStamp,
+}
 
 pub enum ResetReason {
     /// 文件变短或已读部分的末尾字节变了（`reflog expire`、`reflog delete`）。读取进度移到新的末尾，不重新交付旧记录。
@@ -394,8 +402,8 @@ pub enum ResetReason {
 ```rust
 /// `git` 实现（`git::Worktree::watch_source`），见「对其他 crate 的要求」。
 pub trait WorktreeSource: Send + Sync + 'static {
-    /// 读 index 和忽略规则（含未跟踪的 `.gitignore`），构造过滤器。`gitignores` 是触发这次加载的事件里的
-    /// `.gitignore` 路径，即使不在 index 里、遍历没有找到也读入。阻塞；fs_watch 在 executor 的 `Background` 任务里调用，
+    /// 读 index 和忽略规则（含未被忽略目录里未跟踪的 `.gitignore`），构造过滤器。`gitignores` 是触发这次加载的事件里的
+    /// `.gitignore` 路径：遍历达到条目上限、没有找到它们时也读入；上级目录被忽略的照样不读。阻塞；fs_watch 在 executor 的 `Background` 任务里调用，
     /// `cancel` 置位时放弃。
     fn filter(&self, gitignores: &[WatchPath], cancel: &AtomicBool) -> Result<Arc<dyn PathFilter>, SourceError>;
     /// 这个 worktree 的生效配置、忽略规则和属性规则读取（或文件出现时会读取）的全部文件，绝对路径，可以不存在。
@@ -409,6 +417,8 @@ pub trait PathFilter: Send + Sync + 'static {
     fn tracked(&self, path: &[u8]) -> Tracked;
     /// 只看 `path` 自身是否被忽略规则排除，不看上级目录；上级目录由 fs_watch 逐级检查（见「路径分类」）。
     fn ignored(&self, path: &[u8], is_dir: bool) -> bool;
+    /// 构造时读入的工作区里的 `.gitignore` 路径，按字节序。fs_watch 用它判断目录事件是否影响规则。
+    fn rule_files(&self) -> &[WatchPath];
 }
 
 pub enum Tracked {
@@ -460,7 +470,7 @@ pub mod testing {
         pub fn take(&self) -> Vec<(B, bool)>;
     }
 
-    /// 内存里的过滤器与配置来源：按给定的跟踪路径、忽略规则（只支持前缀与 `*.后缀`）和配置清单回答，记录调用次数。
+    /// 内存里的过滤器与配置来源：按给定的跟踪路径、忽略规则（只支持前缀与 `*.后缀`）、规则文件和配置清单回答，记录调用次数。
     pub struct FakeSource { /* … */ }
 }
 ```
@@ -473,17 +483,17 @@ worktree 状态收到工作区根目标上的一个事件，路径为 `p`（相�
 2. `p` 在这个 worktree 的配置清单里（按绝对路径比较，见「配置文件清单」）：`meta.config`，修订号加一，重新计算配置清单和过滤器。再继续往下判断，它可能同时是工作区路径。
 3. `p` 的任何一级名字是 `.git`：丢弃。主 worktree 的 git 目录由仓库状态处理，嵌套仓库的 git 目录不属于工作区。
 4. `p` 在生效的不过滤清单里，或是清单里某个路径的上级目录（目录被删除、改名）：交付。
-5. 最后一级名字是 `.gitignore` 或 `.gitattributes`：交付，`meta.rules`；`.gitignore` 同时触发过滤器重新加载。git 照样应用被忽略规则排除的这两种文件。
-6. `filter.tracked(p)` 是 `File`、`Dir` 或 `Gitlink`：交付（受跟踪的路径即使匹配忽略规则也交付）。
-7. 从最上一级起检查 `p` 的每个上级目录 `a`：`tracked(a)` 是 `Gitlink` 时丢弃（子模块内部）；`tracked(a)` 是 `No` 且 `ignored(a, true)` 时丢弃（git 不进入被忽略的目录，其中的未跟踪路径都被忽略）。
+5. `filter.tracked(p)` 是 `File`、`Dir` 或 `Gitlink`：交付（受跟踪的路径即使匹配忽略规则也交付）。
+6. 从最上一级起检查 `p` 的每个上级目录 `a`：`tracked(a)` 是 `Gitlink` 时丢弃（子模块内部）；`tracked(a)` 是 `No` 且 `ignored(a, true)` 时丢弃（git 不进入被忽略的目录，其中的未跟踪路径和规则文件都不起作用，`node_modules/**/.gitignore` 也在这里丢弃）。
+7. 最后一级名字是 `.gitignore` 或 `.gitattributes`：交付，`meta.rules`；`.gitignore` 同时触发过滤器重新加载。这两种文件自身被忽略规则排除时 git 照样应用，所以不再经过第 8 步。
 8. `ignored(p, flags 含 DIR)`：丢弃。
 9. 其余是未跟踪、未被忽略的路径：交付。
 
-第 7 步的结果按目录缓存（每个 worktree 状态最多 1024 个目录，最近使用淘汰），过滤器替换时清空，所以 `npm install` 写出的几万个 `node_modules/**` 事件每个只需一次缓存查找。
+第 6 步的结果按目录缓存（每个 worktree 状态最多 1024 个目录，最近使用淘汰），过滤器替换时清空，所以 `npm install` 写出的几万个 `node_modules/**` 事件每个只需一次缓存查找。
 
-过滤器在以下情况重新加载（executor 上调用 `WorktreeSource::filter`，同时最多一个，加载期间又触发的在结束后再加载一次）：worktree 状态 arm 时；这个 worktree 的 `index` 变化；任何 `.gitignore` 变化；`info/exclude` 变化；公共目录的 `config`、这个 worktree 的 `config.worktree` 或配置清单里的文件变化（`core.excludesFile`、`core.ignoreCase` 可能变了）。
+过滤器在以下情况重新加载（executor 上调用 `WorktreeSource::filter`，同时最多一个，加载期间又触发的在结束后再加载一次）：worktree 状态 arm 时；这个 worktree 的 `index` 变化；任何 `.gitignore` 变化（第 7 步）；事件路径是 `PathFilter::rule_files` 里某个文件的上级目录（目录被改名、删除时后端可能只报告目录本身）；带 `DIR` 且带 `RENAMED` 或 `REMOVED` 的事件（保守处理：移进来的目录里的新 `.gitignore` 由重新加载的遍历找到）；`info/exclude` 变化；公共目录的 `config`、这个 worktree 的 `config.worktree` 或配置清单里的文件变化（`core.excludesFile`、`core.ignoreCase` 可能变了）。
 
-从触发重新加载的原始批次起，到新过滤器装上为止，过滤器是过期的：走到第 7–9 步的路径（旧过滤器认为不受跟踪的，无论判为丢弃还是未跟踪）先暂存，照样计入修订号；新过滤器装上后重新分类，交付的路径并入当前批次。第一次加载完成之前的路径同样暂存。这样 `git add -f build/out.js` 之后紧接着的修改不会因为旧过滤器认为它被忽略而丢失，新建 `.gitignore` 之后紧接着写出的 `node_modules/**` 也会按新规则丢弃，而不是按旧规则作为未跟踪路径交付。暂存最多 4096 项：超过时把同一目录下的项合并成这个目录（从最深的目录开始），重新分类时被忽略的目录连同其下全部路径丢弃，否则作为目录路径交付；只有合并到 worktree 根仍超过上限时才改为 `rescan`。暂存期间这个订阅的批次不交付，合并窗口顺延到过滤器装上。
+从触发重新加载的原始批次起，到新过滤器装上为止，过滤器是过期的：走到第 6、8、9 步的路径（旧过滤器认为不受跟踪的，无论判为丢弃还是未跟踪；第 7 步的规则文件照常交付并触发加载）先暂存，照样计入修订号；新过滤器装上后重新分类，交付的路径并入当前批次。第一次加载完成之前的路径同样暂存。这样 `git add -f build/out.js` 之后紧接着的修改不会因为旧过滤器认为它被忽略而丢失，新建 `.gitignore` 之后紧接着写出的 `node_modules/**` 也会按新规则丢弃，而不是按旧规则作为未跟踪路径交付。暂存最多 4096 项：超过时把同一目录下的项合并成这个目录（从最深的目录开始），重新分类时被忽略的目录连同其下全部路径丢弃，否则作为目录路径交付；只有合并到 worktree 根仍超过上限时才改为 `rescan`。暂存期间这个订阅的批次不交付，合并窗口顺延到过滤器装上。
 
 ## git 元数据
 
@@ -520,7 +530,7 @@ linked worktree 的 `<名字>` 是 `worktrees/` 下的目录名，原样作为 `
 5. 上述任一目标的事件带 `RESCAN`，或 fs_watch 的队列在这个目标上溢出。
 6. 后端的监视出错、被重新 arm（期间的事件可能丢失）。
 
-只落在「路径分类」第 3、7、8 步丢弃的路径上（`.git` 之下、子模块内部、被忽略的未跟踪路径），或只落在 `.lock` 文件和表外 git 元数据上的原始批次，不加一。
+只落在「路径分类」第 3、6、8 步丢弃的路径上（`.git` 之下、子模块内部、被忽略的未跟踪路径），或只落在 `.lock` 文件和表外 git 元数据上的原始批次，不加一。
 
 修订号在原始批次被处理时就加一，不等合并窗口结束，所以 `flush_revision` 能看到正在合并、还没交付的变化。
 
@@ -550,8 +560,8 @@ Analyze 的用法（ADR 0019 约束 9）：计算指纹之前调 `flush_revision
 公共目录目标上有某个 reflog 文件的事件时，fs_watch 线程立即读它（不等合并窗口，也不等过滤器）：
 
 1. 取读取编号，记下开始时刻；`fstat` 后从偏移之前 64 字节处读起。文件比偏移短、或副本对不上：`ReflogReset { Rewritten }`，进度移到新的末尾，不交付记录。文件不存在：`Removed`，删掉进度。
-2. 从偏移读到最后一个换行，每次最多 1 MiB；超过时这一次只处理前 1 MiB 里的完整行，读完立即再读一次。最后一个换行之后不完整的部分不消费，等下一次事件（git 用一次 `write` 追加整行，读到半行很少见）。超过 64 KiB 的行跳过、计数，进度越过它。
-3. 读取结束后取结束时刻作为这些记录的 `observed`；`after` 是这个文件上一次读取的 `ReadStamp`。新出现的文件从头读，`origin` 为 `NewFile`，`after` 为 None。每条记录按读到的顺序取 `seq`。
+2. 从偏移读到最后一个换行，每次最多 1 MiB。每个 `RepoWatch` 订阅的一个批次里 reflog 行合计最多 1 MiB：一次读取达到上限时，这一批立即交付，剩下的部分从保存的进度接着读，进入下一批，依次进行，直到读到末尾（改名后的分支整份重读、大段追加都按这样分批）。最后一个换行之后不完整的部分不消费，等下一次事件（git 用一次 `write` 追加整行，读到半行很少见）。超过 64 KiB 的行跳过、计数，进度越过它。
+3. 读取结束后取结束时刻作为这些记录的 `observed`；`after` 是这个文件上一次读到末尾的那次读取的 `ReadStamp`（分批接着读的部分沿用同一个 `after`，因为这些行在前一批读取时已经存在）。新出现的文件从头读，每一批都是 `origin` 为 `NewFile`、`after` 为 None。每条记录按读到的顺序取 `seq`。
 4. 记录放进每个 `RepoWatch` 订阅的当前批次。
 
 先后的判断规则（供 `usage`）。记录 A 一定早于记录 B，当且仅当下列之一成立：
@@ -620,7 +630,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 ## 对其他 crate 的要求
 
 - `git`：提供 `Worktree::watch_source(&self) -> Arc<dyn lectern_fs_watch::WorktreeSource>`，持有这个 `Worktree` 句柄（与 `project` 共用同一份 index 解析结果，index 没变时 `tracked` 返回同一个 `Arc`，过滤器不另占一份文件列表的内存）：
-  - `filter`：`tracked()` 加上忽略规则。忽略规则在构造时一次读完：`info/exclude`、`core.excludesFile`（或默认位置）、index 里每个名为 `.gitignore` 的路径在工作区里的文件，以及未被忽略的目录里未跟踪的 `.gitignore`（都经 `SafeRoot` 读取）；`ignored` 只做内存里的模式匹配，不按需读文件。未跟踪的 `.gitignore` 由一次目录遍历找出，与工作区比较的第 4 步（[git 设计「工作区比较」](git.md)）是同一种 gix 遍历：不进入被忽略的目录，受同一个 20 000 个条目的上限，代价与一次未跟踪文件枚举相同，只在构造过滤器时付出。agent 先新建 `.gitignore`、还没 `git add` 就生成 `node_modules/**` 时：`.gitignore` 的事件总是交付并触发重新加载（「路径分类」第 5 步），新的过滤器读到这份未跟踪的规则，这期间的 `node_modules/**` 事件按「路径分类」的暂存机制留住、由新过滤器重新分类后丢弃，不会溢出成 `rescan`。遍历达到上限时，触发这次加载的事件里的 `.gitignore` 路径仍然读入。按 `core.ignoreCase`、`core.precomposeUnicode` 比较路径。
+  - `filter`：`tracked()` 加上忽略规则。忽略规则在构造时一次读完：`info/exclude`、`core.excludesFile`（或默认位置）、index 里每个名为 `.gitignore` 的路径在工作区里的文件，以及未被忽略的目录里未跟踪的 `.gitignore`（都经 `SafeRoot` 读取）；`ignored` 只做内存里的模式匹配，不按需读文件。未跟踪的 `.gitignore` 由一次目录遍历找出，与工作区比较的第 4 步（[git 设计「工作区比较」](git.md)）是同一种 gix 遍历：不进入被忽略的目录，受同一个 20 000 个条目的上限，代价与一次未跟踪文件枚举相同，只在构造过滤器时付出。agent 先新建 `.gitignore`、还没 `git add` 就生成 `node_modules/**` 时：`.gitignore` 的事件交付并触发重新加载（「路径分类」第 7 步），新的过滤器读到这份未跟踪的规则，这期间的 `node_modules/**` 事件按「路径分类」的暂存机制留住、由新过滤器重新分类后丢弃，不会溢出成 `rescan`。`gitignores` 参数只绕过遍历的条目上限，不绕过上级目录的检查：上级目录被忽略的 `.gitignore`（如 `node_modules/` 里的）任何情况下都不读，与 git 相同。按 `core.ignoreCase`、`core.precomposeUnicode` 比较路径。
   - `config_files`：按「配置文件清单」给出的内容，路径来自 gix 配置节的来源元数据和 `include` 值的解析，不运行 git 命令行、不读 `GIT_*` 环境变量。
   - `WorktreeName` 与 `WorktreeId` 的转换。
   - 这是 [git 设计](git.md)「index」一节「`app` 把 `TrackedPaths` 包成 `fs_watch` 定义的过滤接口传进去」的具体做法：适配放在 `git` 里，`project`、`review` 共用，在 Linux 上可以测试。
@@ -628,7 +638,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - `app`：启动屏障放开后创建 `Watcher::new(platform::fs_events::backend(executor.clone()), executor.clone(), Config::default())`，放进 `ProjectDeps::watcher`、`AgentsDeps::watch` 等。
 - `project`：`watch_repo` 拿非当前 worktree 的 HEAD 和 `worktree_list`，当前 worktree 用 `watch_worktree`，`WorktreeSpec::source` 来自它的内部接口 `GitAccess::watch_source`（生产实现转调 `Worktree::watch_source`，测试用 `FakeSource`，见 [project 设计「依赖 git 的接口」](project.md#依赖-git-的接口)）；`WorktreeBatch::meta.index` / `head` 即它要的「这一批里 index、HEAD 是否变化」。
 - `agents`：每个会话根一个 `watch_dir`，用 `Coalesce::DIR`；根目录不存在时的处理由本 crate 完成，`agents` 只处理 `root` 与 `rescan`。
-- `usage`：从 `RepoBatch::reflog` 取记录，按「reflog」里的先后规则判断，把 `seq`、`observed`、`after`（含 `run`）与记录一起落盘，第一次见到一个 `RunId` 时为它分配递增的运行序号（ADR 0020「观察先落盘」）；`set_unfiltered` 维护候选 stash 的路径。
+- `usage`：从 `RepoBatch::reflog` 取记录，按「reflog」里的先后规则判断，把 `seq`、`observed`、`after`（含 `run`）与记录一起落盘，`ReflogReset`（含 `seq`、`observed`）也落盘，第一次见到一个 `RunId` 时为它分配递增的运行序号（ADR 0020「观察先落盘」）；`set_unfiltered` 维护候选 stash 的路径。
 - `review`：`paths` → `refresh(Paths)`；`rescan`、`meta` 的任一标志 → `refresh(Full)`；Analyze 用 `flush_revision`。
 
 ## 数据流与线程
@@ -663,7 +673,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 | 冷启动 20 ms（ADR 0017） | 首帧之前不调用；`Watcher::new` 只分配一个 `Arc` |
 | 空闲内存：空窗口 < 60 MB | 没有打开项目时不建线程、不 arm，常驻 < 64 KB |
 | 空闲内存：打开 monorepo < 100 MB | 每个仓库状态 < 256 KB（reflog 进度每个文件约 150 B，1000 个分支约 150 KB；目录缓存 1024 项）；过滤器的文件列表与 `project` 共用，忽略规则 < 256 KB；非当前 worktree 不 arm 工作区根，只在公共目录目标里计数 |
-| 突发时的内存 | 队列最多 16 384 个事件（约 1.6 MB），每个订阅的批次最多 10 000 个路径（约 1 MB），暂存最多 4096 项（超过时合并到上级目录）；都有上限，超过改为 `rescan` |
+| 突发时的内存 | 队列最多 16 384 个事件（约 1.6 MB），每个订阅的批次最多 10 000 个路径（约 1 MB），暂存最多 4096 项（超过时合并到上级目录），每个仓库订阅的批次里 reflog 行最多 1 MiB（超过的分到后面的批次）；都有上限，路径超过时改为 `rescan` |
 | 打开项目到项目主页可用 < 100 ms | `watch_*` 只入队；arm 和加载在后台，不在打开路径上 |
 | 切换 worktree / 分支 < 100 ms | 切换后的事件：分类每个事件平均 < 1 µs（目录缓存命中），10 万个事件的突发 < 100 ms 的 fs_watch 线程 CPU；交付延迟是后端延迟 20 ms 加合并窗口 |
 | Analyze 的修订号 | `flush_revision` 没有积压时 < 5 ms |
@@ -711,19 +721,19 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 
 全部在 Linux 上运行（`just test -p lectern-fs-watch`），用 `testing::manual`、`FakeBackend`、`FakeSource` 和 `Executor::manual()`，时钟是假的，结果确定。reflog 读取、符号链接展开用 `tempfile` 的真实目录。批次序列和 reflog 记录用 insta 快照验收。
 
-- 路径分类（`filter_*`）：「路径分类」每一步一个用例：受跟踪文件、未跟踪未忽略文件交付；`node_modules/**` 丢弃；被忽略目录里的受跟踪文件交付；被忽略的 `.gitignore`、`.gitattributes` 交付并置 `rules`；主 worktree 的 `.git/**` 和嵌套仓库的 `.git/**` 丢弃；子模块内部丢弃、子模块路径本身交付；不过滤清单里的被忽略路径和它们的上级目录交付；不满足 `WatchPath` 不变量的路径丢弃；目录缓存在过滤器替换后失效。
+- 路径分类（`filter_*`）：「路径分类」每一步一个用例：受跟踪文件、未跟踪未忽略文件交付；`node_modules/**` 丢弃；被忽略目录里的受跟踪文件交付；自身被忽略规则排除的 `.gitignore`、`.gitattributes` 交付并置 `rules`，被忽略目录里的（`node_modules/x/.gitignore`）丢弃、不触发重新加载；主 worktree 的 `.git/**` 和嵌套仓库的 `.git/**` 丢弃；子模块内部丢弃、子模块路径本身交付；不过滤清单里的被忽略路径和它们的上级目录交付；不满足 `WatchPath` 不变量的路径丢弃；目录缓存在过滤器替换后失效；只报告目录本身的改名或删除，目录里有 `rule_files` 中的文件、或事件带 `DIR` 与 `RENAMED` 时都触发重新加载。
 - 过期的过滤器（`filter_stale_*`）：`index` 变化后、新过滤器装上之前，旧过滤器认为被忽略的路径暂存，装上后按新过滤器交付（`git add -f` 的场景）；新建未跟踪的 `.gitignore` 后紧接着写出 1 万个 `node_modules/**` 事件，重新加载时 `gitignores` 带上这个路径，这些事件被暂存（超过 4096 项时合并为 `node_modules/`）后丢弃，不变成 `rescan`；暂存期间修订号照样加一；第一次加载完成前的事件不丢；合并到 worktree 根仍超过上限时改为 `rescan`；加载失败为 `Degraded(Filter)` 并全部交付。
 - 修订号（`revision_*`）：「修订号」每一条、「git 元数据」表每一行一个用例，各自恰好加一；同一原始批次里多个事件只加一；只有被忽略路径、`.lock` 文件、`objects/` 的批次不加一；另一个 worktree 的 HEAD 不让这个 worktree 加一，`refs/` 让全部 worktree 加一；配置清单里的文件、它的符号链接目标变化时加一；重新监听后 `epoch` 不同。
 - flush（`flush_*`）：`FakeBackend::hold` 留住的事件在 `flush_revision` 之后计入；`flush_revision` 不提前交付正在合并的批次；在 `Sink::deliver` 里调用返回 `WouldDeadlock`；状态失败后返回 `NotWatching`；arm 还没完成时等 arm；超时返回 `Timeout`。
 - 合并（`coalesce_*`）：`quiet` 内的事件合成一批；连续事件在 `max_delay` 时交付；两个句柄用不同参数各自交付；路径超过上限改为 `rescan`；`health` 变化立即交付；没有等待中的批次时不设定时器。
-- reflog（`reflog_*`）：追加一行得到一条 `Appended` 记录，`seq`、`observed`、`after` 符合「reflog」的规则；两个文件交替追加时先后规则给出的判断都成立，判断不了的不判断；不完整的行等换行；变短、改写末尾为 `Rewritten`；删除为 `Removed`；新分支和改名后的分支为 `NewFile`、`after` 为 None；`worktrees/<名字>/logs/HEAD` 为 `Head(Linked)`；`logs/refs/stash`；超过 1 MiB 的追加分次读完；超过 64 KiB 的行跳过；arm 之前的记录不交付；第 1 段与 arm 之间追加的行由补读交付且只交付一次，`FakeBackend` 在 arm 时注入的同一文件事件不让它重复；两个 `Watcher`（不同 `run`）的记录之间不按读取编号和偏移判断先后：前一个 `Watcher` 关闭后把文件改写成更短的内容、再追加，后一个运行的记录在运行序号下晚于前一个运行的全部记录，偏移更小也不判为更早，`NewFile` 记录不参与跨运行判断；同一运行内 `ReflogReset` 前后的记录不按偏移判断；`reftable/tables.list` 存在时没有记录；公共目录 `RESCAN` 后追加的记录照常交付。
+- reflog（`reflog_*`）：追加一行得到一条 `Appended` 记录，`seq`、`observed`、`after` 符合「reflog」的规则；两个文件交替追加时先后规则给出的判断都成立，判断不了的不判断；不完整的行等换行；变短、改写末尾为 `Rewritten`；删除为 `Removed`；新分支和改名后的分支为 `NewFile`、`after` 为 None；`worktrees/<名字>/logs/HEAD` 为 `Head(Linked)`；`logs/refs/stash`；超过 1 MiB 的追加和 3 MiB 的改名分支分到多个批次，每批不超过 1 MiB、`seq` 连续、接着读的部分 `after` 与第一批相同；一批里追加、重置、再追加时按 `seq` 合并 `reflog` 与 `reflog_resets` 得到正确的先后；超过 64 KiB 的行跳过；arm 之前的记录不交付；第 1 段与 arm 之间追加的行由补读交付且只交付一次，`FakeBackend` 在 arm 时注入的同一文件事件不让它重复；两个 `Watcher`（不同 `run`）的记录之间不按读取编号和偏移判断先后：前一个 `Watcher` 关闭后把文件改写成更短的内容、再追加，后一个运行的记录在运行序号下晚于前一个运行的全部记录，偏移更小也不判为更早，`NewFile` 记录不参与跨运行判断；同一运行内 `ReflogReset` 前后的记录不按偏移判断；`reftable/tables.list` 存在时没有记录；公共目录 `RESCAN` 后追加的记录照常交付。
 - 配置清单（`config_*`）：清单里的文件按位置分到公共目录目标、工作区根目标和 `Entries` 目标；同一目录的文件共用一个 `Entries` 目标；不存在的文件监视最近的上级目录，逐级出现后下移；符号链接的每一级和规范路径都被监视；上级目录是链接（`~/.config -> dotfiles/config`）时，换掉这个链接、在链接后面的目录里新建原本不存在的 `git/config` 都让修订号加一并重新展开；超过 40 个链接时按不存在处理；工作区里被忽略的配置文件在过滤之前被识别；清单变化时只 arm 新增、drop 多余的目标；`HEAD` 变化触发重新计算；`config_files` 失败为 `Degraded(Config)`。
 - 目录监听（`dir_*`）：路径为绝对路径、按 250 ms 合并；根不存在时监视上级目录的 `Entries`，根出现后交付 `Appeared` 和 `rescan`；根被删除后交付 `Vanished` 并回到上级目录。
 - 异常（`rescan_*`、`health_*`）：「状态与异常」表的每一行；队列溢出按 `RESCAN` 处理；`Sink` panic 后其他订阅照常。
 - 生命周期（`lifecycle_*`）：`Watcher::new` 不建线程、不调用后端；第一次 `watch_*` 才启动；同一公共目录、同一 worktree 共享一份状态和一个后端目标；最后一个句柄 drop 后目标被 drop；`shutdown` 之后不再交付。
 - 静止（`quiescence_*`）：用 kernel 的 `TestKernel` 取真实的守卫：批次合并期间不静止，交付后守卫在消费方手里、drop 后静止；`EventSink::send` 返回之后、fs_watch 线程分类之前不静止；只有被忽略路径的事件在分类完后不再让 kernel 忙碌；加载任务进行中不静止；空闲时静止。
 
-`git` 的适配在 `git` 里测试（`watch_source_*`，用 `TestRepo`）：`.gitignore`、`info/exclude`、`core.excludesFile` 的忽略结果与 git 的判定一致；未跟踪目录里和根目录下未跟踪的 `.gitignore` 生效，被忽略目录里的 `.gitignore` 不读；遍历达到上限时显式给出的 `.gitignore` 路径仍然生效；`core.ignoreCase` 下大小写不同的路径判为受跟踪；`config_files` 列出 `include.path`、`includeIf "onbranch:"`（满足与不满足）、不存在的引入目标和 XDG 默认位置；不调用 git 命令行。
+`git` 的适配在 `git` 里测试（`watch_source_*`，用 `TestRepo`）：`.gitignore`、`info/exclude`、`core.excludesFile` 的忽略结果与 git 的判定一致；未跟踪目录里和根目录下未跟踪的 `.gitignore` 生效，被忽略目录里的 `.gitignore` 不读；遍历达到上限时显式给出的 `.gitignore` 路径仍然生效，显式给出、但上级目录被忽略的不读；目录改名后 `rule_files` 给出新的位置；`core.ignoreCase` 下大小写不同的路径判为受跟踪；`config_files` 列出 `include.path`、`includeIf "onbranch:"`（满足与不满足）、不存在的引入目标和 XDG 默认位置；不调用 git 命令行。
 
 `platform` 的后端只能在 macOS CI 上测试（`fsevents_*`、`kqueue_*`）：真实临时目录里的新建、修改、改名、删除都报告为相对路径；`/tmp` 这类经符号链接的根去掉规范前缀；`flush` 交付延迟中的事件；drop 之后不再回调；根目录被删除报告 `ROOT_CHANGED`；kqueue 对就地写入、原子改名覆盖、具名条目是符号链接（不跟随）、目录被删除各有用例。
 
