@@ -239,9 +239,9 @@ fn watch_source_tracked_paths_and_shared_index() {
         ],
     );
     for ignore_case in [false, true] {
-        if ignore_case {
-            t.append_config("[core]\n\tignoreCase = true\n");
-        }
+        // Always explicit: on a case-insensitive file system (macOS) gix's
+        // init writes `ignorecase = true`, as `git init` does.
+        t.append_config(&format!("[core]\n\tignoreCase = {ignore_case}\n"));
         let wt = main_worktree(&t);
         let f = Filter::build(&wt, &[], 20_000, &no_cancel()).unwrap();
         let tracked = wt.tracked(&EntryLimits::default(), &no_cancel()).unwrap();
