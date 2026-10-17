@@ -1,0 +1,16 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: GoMod, & fixture(\"go/go.mod\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "example.com/acme/api",
+        ),
+        group: None,
+        workspace: false,
+        members: [],
+        excludes: [],
+        partial: false,
+    },
+)

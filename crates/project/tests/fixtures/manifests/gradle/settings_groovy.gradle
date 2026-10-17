@@ -1,0 +1,29 @@
+// Sanitized sample: Groovy DSL settings script (Gradle 7-9).
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+    }
+}
+
+rootProject.name = 'acme-android'
+
+// include ':commented-out'
+/* include ':also-commented'
+   include ':still-commented' */
+def description = "include ':inside-a-string'"
+
+include ':app'
+include ':feature:login', ':feature:settings',
+        ':core:network'   // continues after the comma
+include(':core:ui')
+
+includeFlat 'acme-shared'
+
+project(':core:network').projectDir = file('libraries/network')
+
+includeBuild '../acme-build-logic'
+includeBuild('gradle/plugins') {
+    dependencySubstitution {
+        substitute module('com.acme:plugins') using project(':')
+    }
+}

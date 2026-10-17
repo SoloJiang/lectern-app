@@ -1,0 +1,19 @@
+// Sanitized sample: Go 1.22 workspace.
+go 1.22.3
+
+toolchain go1.22.5
+
+use ./cmd/acmectl
+
+use (
+	./services/api   // HTTP API
+	./services/worker
+	"./libs/with space"
+	`./libs/raw`
+)
+
+replace (
+	example.com/old => ./third_party/old
+)
+
+godebug default=go1.21

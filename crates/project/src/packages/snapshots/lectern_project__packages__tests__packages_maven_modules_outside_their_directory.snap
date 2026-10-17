@@ -1,0 +1,10 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"maven\"))"
+---
+backend  name="backend" files=3 parent=- [workspace-root]
+    PomXml backend/pom.xml name="backend"
+backend/api  name="api" files=1 parent=backend [declared]
+    PomXml backend/api/pom.xml name="api"
+backend/tools  name="tools" files=1 parent=backend [declared]
+shared  name="shared" files=1 parent=- [declared]

@@ -1,0 +1,35 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: GoWork, & fixture(\"go/go.work\"))"
+---
+Ok(
+    Parsed {
+        name: None,
+        group: None,
+        workspace: true,
+        members: [
+            Path {
+                path: "./cmd/acmectl",
+                name: None,
+            },
+            Path {
+                path: "./services/api",
+                name: None,
+            },
+            Path {
+                path: "./services/worker",
+                name: None,
+            },
+            Path {
+                path: "./libs/with space",
+                name: None,
+            },
+            Path {
+                path: "./libs/raw",
+                name: None,
+            },
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

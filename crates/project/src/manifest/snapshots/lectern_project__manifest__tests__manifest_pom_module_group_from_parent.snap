@@ -1,0 +1,18 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PomXml, & fixture(\"pom/module.xml\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "console-api",
+        ),
+        group: Some(
+            "com.acme.console",
+        ),
+        workspace: false,
+        members: [],
+        excludes: [],
+        partial: false,
+    },
+)

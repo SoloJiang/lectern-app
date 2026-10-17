@@ -1,0 +1,10 @@
+<project>
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.acme</groupId>
+  <artifactId>flavors</artifactId>
+  <modules>
+    <module>core</module>
+    <module>flavor-${flavor}</module>
+  </modules>
+  <modules/>
+</project>

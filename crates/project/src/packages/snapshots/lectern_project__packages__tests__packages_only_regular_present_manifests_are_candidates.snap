@@ -1,0 +1,8 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"kinds\"))"
+---
+<root>  name="kinds" files=7 parent=- [workspace-root]
+    PackageJson package.json
+script  name="script" files=1 parent=<root> [declared]
+    PackageJson script/package.json name="script"

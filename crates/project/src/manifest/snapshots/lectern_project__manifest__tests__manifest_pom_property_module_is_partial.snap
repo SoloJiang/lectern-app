@@ -1,0 +1,23 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PomXml, & fixture(\"pom/property_module.xml\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "flavors",
+        ),
+        group: Some(
+            "com.acme",
+        ),
+        workspace: true,
+        members: [
+            Path {
+                path: "core",
+                name: None,
+            },
+        ],
+        excludes: [],
+        partial: true,
+    },
+)

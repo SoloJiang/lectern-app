@@ -1,0 +1,9 @@
+rootProject.name = "acme-${System.getenv('FLAVOR')}"
+
+def modules = ['alpha', 'beta']
+modules.each { name ->
+    include ":modules:$name"
+}
+include ':static', moduleName
+include "${prefix}:dynamic"
+project(':static').projectDir = new File(settingsDir, '../static')

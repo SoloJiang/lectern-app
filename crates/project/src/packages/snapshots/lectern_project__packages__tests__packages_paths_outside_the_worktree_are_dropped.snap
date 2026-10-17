@@ -1,0 +1,13 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"bounds\"))"
+---
+<root>  name="example.com/root" files=7 parent=- [declared, workspace-root]
+    GoMod go.mod name="example.com/root"
+    GoWork go.work
+    PackageJson package.json
+    GradleSettings settings.gradle
+mod  name="example.com/mod" files=1 parent=<root> [declared]
+    GoMod mod/go.mod name="example.com/mod"
+web  name="web" files=1 parent=<root> [declared]
+    PackageJson web/package.json name="web"

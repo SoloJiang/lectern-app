@@ -1,0 +1,21 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: GradleSettings, & fixture(\"gradle/variables.gradle\"))"
+---
+Ok(
+    Parsed {
+        name: None,
+        group: None,
+        workspace: true,
+        members: [
+            Path {
+                path: "static",
+                name: Some(
+                    "static",
+                ),
+            },
+        ],
+        excludes: [],
+        partial: true,
+    },
+)

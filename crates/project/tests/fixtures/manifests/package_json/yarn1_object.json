@@ -1,0 +1,17 @@
+{
+  "private": true,
+  "name": "acme-mobile",
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "example"
+    ],
+    "nohoist": [
+      "**/react-native",
+      "**/react-native/**"
+    ]
+  },
+  "scripts": {
+    "postinstall": "patch-package"
+  }
+}

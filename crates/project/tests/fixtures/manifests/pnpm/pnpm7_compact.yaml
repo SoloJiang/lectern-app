@@ -1,0 +1,6 @@
+---
+# pnpm 7 style: the sequence at the key's indentation, no quotes.
+packages:
+- packages/*
+- docs
+- "!**/__tests__/**"

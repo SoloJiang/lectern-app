@@ -1,0 +1,20 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"cloudprint-miniapps\"))"
+---
+<root>  name="cloudprint-miniapps" files=18 parent=- [workspace-root]
+    PackageJson package.json name="cloudprint-miniapps"
+    PomXml pom.xml name="cloudprint-parent"
+apps/miniapp-console/backend  name="console-backend" files=2 parent=<root> [declared]
+    PomXml apps/miniapp-console/backend/pom.xml name="console-backend"
+apps/miniapp-console/frontend  name="console-frontend" files=2 parent=<root> []
+    PackageJson apps/miniapp-console/frontend/package.json name="console-frontend"
+apps/miniapp-print/backend  name="print-backend" files=2 parent=<root> [declared]
+    PomXml apps/miniapp-print/backend/pom.xml name="print-backend"
+apps/miniapp-print/web  name="print-web" files=2 parent=<root> [declared]
+    PackageJson apps/miniapp-print/web/package.json name="print-web"
+libs/java-common  name="java-common" files=1 parent=<root> [declared]
+packages/ui  name="@cloudprint/ui" files=2 parent=<root> [declared]
+    PackageJson packages/ui/package.json name="@cloudprint/ui"
+packages/utils  name="@cloudprint/utils" files=2 parent=<root> [declared]
+    PackageJson packages/utils/package.json name="@cloudprint/utils"

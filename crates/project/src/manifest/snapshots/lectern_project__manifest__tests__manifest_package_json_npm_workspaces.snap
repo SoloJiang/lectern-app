@@ -1,0 +1,30 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: PackageJson, &\nfixture(\"package_json/npm_workspaces.json\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "acme-monorepo",
+        ),
+        group: None,
+        workspace: true,
+        members: [
+            Glob(
+                "packages/*",
+            ),
+            Glob(
+                "apps/*",
+            ),
+            Glob(
+                "tools/eslint-config",
+            ),
+        ],
+        excludes: [
+            Glob(
+                "packages/legacy-*",
+            ),
+        ],
+        partial: false,
+    },
+)

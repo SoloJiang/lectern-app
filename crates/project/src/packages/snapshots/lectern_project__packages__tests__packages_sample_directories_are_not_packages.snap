@@ -1,0 +1,10 @@
+---
+source: crates/project/src/packages/tests.rs
+expression: "render(&tree.resolve(\"samples\"))"
+---
+<root>  name="root" files=8 parent=- [workspace-root]
+    PackageJson package.json name="root"
+my-fixtures  name="not-a-sample" files=1 parent=<root> []
+    PackageJson my-fixtures/package.json name="not-a-sample"
+test/fixtures/declared  name="declared-fixture" files=1 parent=<root> [declared]
+    PackageJson test/fixtures/declared/package.json name="declared-fixture"

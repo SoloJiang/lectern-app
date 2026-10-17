@@ -10,5 +10,15 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "domain"
 
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+quick-xml.workspace = true
+glob.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
 [lints]
 workspace = true

@@ -1,0 +1,1 @@
+packages: ['packages/*', "apps/*", tools/cli]  # one-line flow sequence

@@ -1,0 +1,23 @@
+# Sanitized sample: pnpm 10 workspace with catalogs.
+catalog:
+  react: ^18.3.1
+  typescript: ~5.6.2
+
+catalogs:
+  legacy:
+    react: ^17.0.2
+    packages: a nested key, not the top-level one
+
+packages:
+  # all packages in direct subdirs of packages/
+  - 'packages/*'
+  # all packages in subdirs of components/
+  - "components/**"
+  - apps/*   # plain scalar with a trailing comment
+  # exclude packages that are inside test directories
+  - '!**/test/**'
+  - '!packages/it''s-old'
+
+onlyBuiltDependencies:
+  - esbuild
+  - '@swc/core'

@@ -1,0 +1,20 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: CargoToml, & fixture(\"cargo/package_workspace.toml\"))"
+---
+Ok(
+    Parsed {
+        name: Some(
+            "acme-cli",
+        ),
+        group: None,
+        workspace: true,
+        members: [
+            Glob(
+                "plugins/*",
+            ),
+        ],
+        excludes: [],
+        partial: false,
+    },
+)

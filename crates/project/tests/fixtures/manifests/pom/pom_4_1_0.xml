@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sanitized sample: Maven 4 (POM 4.1.0) with subprojects. -->
+<project xmlns="http://maven.apache.org/POM/4.1.0" root="true">
+  <modelVersion>4.1.0</modelVersion>
+  <groupId>com.acme.billing</groupId>
+  <artifactId>billing</artifactId>
+  <version>2.0.0</version>
+  <packaging>pom</packaging>
+
+  <subprojects>
+    <subproject>billing-core</subproject>
+    <subproject>billing-web</subproject>
+  </subprojects>
+
+  <profiles>
+    <profile>
+      <id>bench</id>
+      <subprojects>
+        <subproject><![CDATA[billing-bench]]></subproject>
+      </subprojects>
+    </profile>
+  </profiles>
+</project>

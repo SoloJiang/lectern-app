@@ -1,0 +1,4 @@
+rootProject.name = 'broken'
+include ':app'
+/* this comment is never closed
+include ':lost'

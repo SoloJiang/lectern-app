@@ -1,0 +1,31 @@
+---
+source: crates/project/src/manifest/tests.rs
+expression: "parse(ManifestKind :: CargoToml, & fixture(\"cargo/virtual.toml\"))"
+---
+Ok(
+    Parsed {
+        name: None,
+        group: None,
+        workspace: true,
+        members: [
+            Glob(
+                "crates/*",
+            ),
+            Glob(
+                "tools/xtask",
+            ),
+            Glob(
+                "examples/**",
+            ),
+        ],
+        excludes: [
+            Path(
+                "crates/experimental",
+            ),
+            Path(
+                "examples/wasm",
+            ),
+        ],
+        partial: false,
+    },
+)
