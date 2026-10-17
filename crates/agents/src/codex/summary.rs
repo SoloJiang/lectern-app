@@ -19,6 +19,7 @@ use super::parse::{Boundary, Parse, State};
 use super::{Codex, SessionFile, decoded};
 use crate::index::IndexBuilder;
 use crate::lines::{HEAD, Lines, Next};
+use crate::read::Summarized;
 use crate::read::io_error;
 use crate::stats::ParseStats;
 use crate::tail::{TailEnd, scan_back};
@@ -185,7 +186,7 @@ pub(super) fn summarize(
     file: &SessionFile,
     complete: bool,
     scan_sources: bool,
-) -> Result<(SessionSummary, ParseStats), SessionError> {
+) -> Result<Summarized, SessionError> {
     let meta = std::fs::metadata(&file.path).map_err(io_error)?;
     let mtime = meta
         .modified()
@@ -266,5 +267,13 @@ pub(super) fn summarize(
         inheritance_unknown: matches!(head.state.boundary, Boundary::Unknown { .. }),
         format,
     };
-    Ok((summary, stats))
+    let lineage = match &head.state.boundary {
+        Boundary::Turns { source, .. } | Boundary::Unknown { source } => Some(source.clone()),
+        Boundary::None | Boundary::Ordinal(_) => None,
+    };
+    Ok(Summarized {
+        summary,
+        stats,
+        lineage,
+    })
 }

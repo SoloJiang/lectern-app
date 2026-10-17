@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use insta::assert_snapshot;
 use lectern_cache::{Cache, Compression, Entry, Namespace};
-use lectern_services::session::{ContentRef, Cursor, Format, SessionError};
+use lectern_services::session::{ContentRef, Cursor, Format, SessionError, SessionKey};
 
 use super::support::*;
 use super::{copy_tree, fixtures};
@@ -274,7 +274,11 @@ fn discover_summary_cache_misses_after_a_version_change() {
         .complete(&adapter.session_file(&zst).unwrap())
         .unwrap();
     marked.title = Some("from the cache".into());
-    let cached = CachedSummary::new(&marked, &stats);
+    let cached = CachedSummary::new(&crate::read::Summarized {
+        summary: marked,
+        stats,
+        lineage: None,
+    });
     let mut bytes = Vec::new();
     cached.encode(&mut bytes);
 
@@ -424,4 +428,180 @@ fn discover_fork_read_before_its_source_appears_is_redone_when_the_source_is_lis
         .flat_map(|s| s.event.changed.iter().cloned())
         .collect();
     assert!(changed.contains(&fork));
+}
+
+/// The legacy fixtures' paths under `codex/sessions/`.
+fn legacy_rel(thread: &str) -> String {
+    match thread {
+        L1 => format!("2026/10/02/rollout-2026-10-02T09-00-00-{L1}.jsonl"),
+        L2 => format!("2026/10/03/rollout-2026-10-03T09-00-00-{L2}.jsonl"),
+        _ => unreachable!(),
+    }
+}
+
+fn copy_legacy(h: &Harness, thread: &str) -> PathBuf {
+    let rel = legacy_rel(thread);
+    let to = h.codex_root().join(&rel);
+    h.copy(
+        &fixtures().join("codex/0.140.0-legacy/sessions").join(&rel),
+        &to,
+    );
+    to
+}
+
+/// Review comment 4303158820: a forced re-summary of a compressed fork must not be answered from
+/// the summary cache, which still says its boundary is unknown.
+#[test]
+fn discover_compressed_fork_is_redone_past_its_cached_summary_when_the_source_appears() {
+    let mut h = Harness::new();
+    let fork_path = copy_legacy(&h, L2);
+    compress(&fork_path);
+    std::fs::remove_file(&fork_path).unwrap();
+    h.start();
+    let fork = key(&codex_source(), L2);
+    let cached = h.list(&codex_source()).get(&fork).unwrap().clone();
+    assert!(cached.inheritance_unknown);
+    assert!(
+        !cached.tail_pending,
+        "completed, so the summary is in the cache"
+    );
+
+    h.source(&codex_source())
+        .read(&fork, &Cursor::START, u64::MAX)
+        .unwrap();
+    h.settle();
+    assert!(
+        h.list(&codex_source())
+            .get(&fork)
+            .unwrap()
+            .inheritance_unknown
+    );
+
+    let main = copy_legacy(&h, L1);
+    h.emit(&h.codex_root(), &[(&h.rel_to(&h.codex_root(), &main), F)]);
+    let after = h.list(&codex_source()).get(&fork).unwrap().clone();
+    assert!(
+        !after.inheritance_unknown,
+        "not taken from the cached summary"
+    );
+    assert!(
+        !after.tail_pending,
+        "the tail fields still come from the cache"
+    );
+    assert_eq!(after.last_activity, cached.last_activity);
+}
+
+/// Review comment 4303158829: when the source of a resolved fork is deleted, the fork's boundary
+/// is unknown again (`usage` warns about possibly inherited usage).
+#[test]
+fn discover_fork_whose_source_is_deleted_is_marked_unknown_again() {
+    let mut h = Harness::new();
+    let main = copy_legacy(&h, L1);
+    copy_legacy(&h, L2);
+    h.start();
+    let fork = key(&codex_source(), L2);
+    h.source(&codex_source())
+        .read(&fork, &Cursor::START, u64::MAX)
+        .unwrap();
+    h.settle();
+    assert!(
+        !h.list(&codex_source())
+            .get(&fork)
+            .unwrap()
+            .inheritance_unknown
+    );
+    h.take_seen(&codex_source());
+
+    std::fs::remove_file(&main).unwrap();
+    h.emit(&h.codex_root(), &[(&h.rel_to(&h.codex_root(), &main), F)]);
+    let list = h.list(&codex_source());
+    assert!(list.get(&key(&codex_source(), L1)).is_none());
+    assert!(list.get(&fork).unwrap().inheritance_unknown);
+    let changed: Vec<SessionKey> = h
+        .take_seen(&codex_source())
+        .iter()
+        .flat_map(|s| s.event.changed.iter().cloned())
+        .collect();
+    assert!(changed.contains(&fork));
+}
+
+/// Moves a compressed session from `sessions/` to `archived_sessions/` (same device, inode, size
+/// and modification time) and reports both paths in one round.
+fn archive(h: &Harness, zst: &std::path::Path) -> PathBuf {
+    let archived = h
+        .base
+        .join("codex/archived_sessions")
+        .join(zst.file_name().unwrap());
+    std::fs::rename(zst, &archived).unwrap();
+    let backend = &h.run().backend;
+    backend.emit(&h.codex_root(), &[(&h.rel_to(&h.codex_root(), zst), F)]);
+    backend.emit(
+        &h.base.join("codex/archived_sessions"),
+        &[(archived.file_name().unwrap().to_str().unwrap(), F)],
+    );
+    h.advance();
+    archived
+}
+
+/// Review comment 4303158825: a summary cache hit for a moved archive takes `archived` (and `file`)
+/// from the new path.
+#[test]
+fn discover_archived_move_recomputes_the_path_fields_of_a_cached_summary() {
+    let mut h = Harness::new();
+    std::fs::create_dir_all(h.base.join("codex/archived_sessions")).unwrap();
+    let main = copy_legacy(&h, L1);
+    let zst = compress(&main);
+    std::fs::remove_file(&main).unwrap();
+    h.start();
+    let session = key(&codex_source(), L1);
+    let before = h.list(&codex_source()).get(&session).unwrap().clone();
+    assert!(!before.archived && !before.tail_pending);
+
+    let archived = archive(&h, &zst);
+    let after = h.list(&codex_source()).get(&session).unwrap().clone();
+    assert!(after.archived, "from the new path, not the cached summary");
+    assert_eq!(&*after.file, archived.as_path());
+    assert!(!after.tail_pending);
+    assert_eq!(after.last_activity, before.last_activity);
+}
+
+/// Review comment 4303158833: moving the only compressed candidate (or removing one of several)
+/// keeps the decoded copy while another candidate of the session exists.
+#[test]
+fn discover_archived_move_keeps_the_decoded_copy() {
+    let mut h = Harness::new();
+    std::fs::create_dir_all(h.base.join("codex/archived_sessions")).unwrap();
+    let main = copy_legacy(&h, L1);
+    let zst = compress(&main);
+    std::fs::remove_file(&main).unwrap();
+    // A second compressed candidate of the same session in the archive.
+    let other = h
+        .base
+        .join("codex/archived_sessions")
+        .join(format!("rollout-2026-10-02T09-00-00-{L1}_0001.jsonl.zst"));
+    std::fs::copy(&zst, &other).unwrap();
+    h.start();
+    let session = key(&codex_source(), L1);
+    let engine = h.codex_engine();
+    h.source(&codex_source())
+        .read(&session, &Cursor::START, u64::MAX)
+        .unwrap();
+    assert_eq!(engine.adapter.decodes(), 1);
+
+    // Removing the other candidate keeps the copy of the chosen one.
+    std::fs::remove_file(&other).unwrap();
+    h.emit(
+        &h.base.join("codex/archived_sessions"),
+        &[(other.file_name().unwrap().to_str().unwrap(), F)],
+    );
+    // Moving the chosen one keeps it too: same file identity, same copy.
+    archive(&h, &zst);
+    h.source(&codex_source())
+        .read(&session, &Cursor::START, u64::MAX)
+        .unwrap();
+    assert_eq!(
+        engine.adapter.decodes(),
+        1,
+        "no second decode of the archive"
+    );
 }

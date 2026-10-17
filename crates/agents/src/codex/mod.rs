@@ -20,7 +20,7 @@ use lectern_services::session::{
 use crate::codec;
 use crate::index::IndexBuilder;
 use crate::lines::{HEAD, Lines, Next, PREFIX};
-use crate::read::io_error;
+use crate::read::{Summarized, io_error};
 use crate::stats::ParseStats;
 
 mod decoded;
@@ -575,6 +575,11 @@ impl Codex {
         &self,
         file: &SessionFile,
     ) -> Result<(SessionSummary, ParseStats), SessionError> {
+        summary::summarize(self, file, false, false).map(|s| (s.summary, s.stats))
+    }
+
+    /// `summarize`，另给出继承边界依赖的来源会话（第 4 步）。
+    pub(crate) fn summarize_lineage(&self, file: &SessionFile) -> Result<Summarized, SessionError> {
         summary::summarize(self, file, false, false)
     }
 
@@ -583,7 +588,7 @@ impl Codex {
     pub(crate) fn summarize_with_sources(
         &self,
         file: &SessionFile,
-    ) -> Result<(SessionSummary, ParseStats), SessionError> {
+    ) -> Result<Summarized, SessionError> {
         summary::summarize(self, file, false, true)
     }
 
@@ -592,6 +597,11 @@ impl Codex {
         &self,
         file: &SessionFile,
     ) -> Result<(SessionSummary, ParseStats), SessionError> {
+        summary::summarize(self, file, true, false).map(|s| (s.summary, s.stats))
+    }
+
+    /// `complete`，另给出继承边界依赖的来源会话（第 4 步）。
+    pub(crate) fn complete_lineage(&self, file: &SessionFile) -> Result<Summarized, SessionError> {
         summary::summarize(self, file, true, false)
     }
 

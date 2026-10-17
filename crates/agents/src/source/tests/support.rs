@@ -267,6 +267,23 @@ impl Harness {
         }
     }
 
+    /// 处理完全部工作，等 kernel 线程处理完排队的请求（任务句柄的回收等）之后，kernel 是否静止。
+    ///
+    /// `Kernel::barrier` 在回复之后才把它自己那个请求的计数减掉，所以紧接着读到的可能还是忙碌：
+    /// 让出线程等这一下（最多 2 秒，不 sleep）；真有没释放的守卫时超时返回 false。
+    pub(crate) fn quiescent(&self) -> bool {
+        self.settle();
+        self.run().kernel.barrier();
+        let start = std::time::Instant::now();
+        while !self.run().kernel.is_quiescent() {
+            if start.elapsed() > Duration::from_secs(2) {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
+    }
+
     /// 推进假时钟，让 250 ms / 1 s 的合并窗口结束，再处理完。
     pub(crate) fn advance(&self) {
         // The raw events enter the queue first; their window starts when they are processed.

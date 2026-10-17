@@ -20,6 +20,7 @@ use lectern_services::session::{
 
 use crate::filter::SessionFilter;
 use crate::index::IndexBuilder;
+use crate::read::Summarized;
 use crate::stats::ParseStats;
 
 pub(crate) mod adapter;
@@ -94,11 +95,12 @@ struct State<F> {
     /// 第一次发布之后才有主动补齐。
     published_once: bool,
     completion: Completion,
-    /// 读过、但重新生成摘要时仍找不到继承前缀来源的会话（Codex 分叉、子 agent）。有新会话发布时
-    /// （来源可能出现了）再按需扫描来源、重新生成一次，不再等它被读。
-    unresolved: HashMap<SessionKey, (FileId, Arc<Path>)>,
-    /// 读过之后已经排了重新生成摘要的会话（每个文件身份一次）。
+    /// 读过之后已经排了重新生成摘要的会话（每个文件身份一次）。来源会话之后出现时，只为读过的会话
+    /// 扫描来源（发现阶段不扫描）。
     resummarized: HashSet<(SessionKey, FileId)>,
+    /// 一个会话的全部候选都消失、要删掉它的解压副本：处理完这一轮的全部路径之后再判断（文件从
+    /// `sessions/` 移到 `archived_sessions/` 时，旧路径的删除可能先于新路径的出现被处理）。
+    gone: HashSet<SessionKey>,
 }
 
 #[derive(Default)]
@@ -127,6 +129,8 @@ struct Known<F> {
     id: FileId,
     /// 读不到 cwd、格式认不出（`Unrecognized`）或读失败的文件为 None：不列出。
     summary: Option<(SessionSummary, ParseStats)>,
+    /// 这份摘要的继承边界依赖的来源会话 ID（`Summarized::lineage`）。
+    lineage: Option<Arc<str>>,
 }
 
 #[derive(Default)]
@@ -141,6 +145,13 @@ struct Published {
     generation: u64,
     sessions: HashMap<SessionKey, SessionSummary>,
 }
+
+/// 一个路径上一次的身份、摘要与它依赖的来源会话。
+type Previous = (
+    FileId,
+    Option<(SessionSummary, ParseStats)>,
+    Option<Arc<str>>,
+);
 
 /// 要检查的路径，`forced` 时身份没变也重新生成摘要。
 struct Check {
@@ -165,8 +176,8 @@ impl<A: Adapter> Engine<A> {
                 chosen: HashMap::new(),
                 published_once: false,
                 completion: Completion::default(),
-                unresolved: HashMap::new(),
                 resummarized: HashSet::new(),
+                gone: HashSet::new(),
             }),
             places: Mutex::new(Places::default()),
             indexes: Mutex::new(Indexes::default()),
@@ -388,6 +399,17 @@ impl<A: Adapter> Engine<A> {
             }
             self.check(&check.path, check.forced);
         }
+        // 解压副本只在会话的全部候选都不在时删掉（一个候选被移动或删除时，另一个可能还在用同一个副本）。
+        let gone: Vec<SessionKey> = {
+            let mut state = self.state();
+            let gone: Vec<SessionKey> = state.gone.drain().collect();
+            gone.into_iter()
+                .filter(|key| !state.known.values().any(|k| A::key(&k.file) == key))
+                .collect()
+        };
+        for key in gone {
+            self.adapter.removed(&key);
+        }
 
         // 归位：事件影响的 cwd，以及还没有归位的 cwd。
         let cwds: Vec<Arc<Path>> = self
@@ -418,7 +440,7 @@ impl<A: Adapter> Engine<A> {
                 let removed = self.state().known.remove(path);
                 if let Some(old) = removed {
                     if A::compressed(&old.file) {
-                        self.adapter.removed(&key);
+                        self.state().gone.insert(key.clone());
                     }
                     self.forget_index_if_gone(&key);
                 }
@@ -427,32 +449,32 @@ impl<A: Adapter> Engine<A> {
         };
         let prev = {
             let state = self.state();
-            state.known.get(path).map(|k| (k.id, k.summary.clone()))
+            state
+                .known
+                .get(path)
+                .map(|k| (k.id, k.summary.clone(), k.lineage.clone()))
         };
-        if !forced && prev.as_ref().is_some_and(|(old, _)| *old == id) {
+        if !forced && prev.as_ref().is_some_and(|(old, _, _)| *old == id) {
             return;
         }
-        let summary = self.summarize(&file, &id, prev, forced);
+        let summarized = self.summarize(&file, &id, prev, forced);
         let mut state = self.state();
         if state.stopped {
             return;
         }
-        if forced {
-            // 读过之后的重新生成：来源仍然找不到时记下，来源出现后再来。
-            match &summary {
-                Some((s, _)) if s.inheritance_unknown => {
-                    state
-                        .unresolved
-                        .insert(key.clone(), (id, A::path(&file).clone()));
-                }
-                _ => {
-                    state.unresolved.remove(&key);
-                }
-            }
-        }
-        state
-            .known
-            .insert(A::path(&file).clone(), Known { file, id, summary });
+        let (summary, lineage) = match summarized {
+            Some(s) => (Some((s.summary, s.stats)), s.lineage),
+            None => (None, None),
+        };
+        state.known.insert(
+            A::path(&file).clone(),
+            Known {
+                file,
+                id,
+                summary,
+                lineage,
+            },
+        );
     }
 
     /// 会话的全部候选都不在了：内存里的索引不再需要。
@@ -465,42 +487,63 @@ impl<A: Adapter> Engine<A> {
 
     /// 生成摘要。压缩会话先查摘要缓存；在增量读取中的文件（内存里有它的轮次索引）只读索引游标之后追加的部分，
     /// 末尾字段取解析器状态，不再读末尾（「数据流与线程」第 2 步、第 5 步）。
+    ///
+    /// 摘要缓存只照用与路径和来源会话都无关的部分：由路径决定的字段（`file`、`archived`）按当前路径重填；
+    /// 继承边界依赖来源会话的摘要（`lineage`），以及读过之后、来源出现或消失时的重新生成（`forced`），
+    /// 开头总是重新解析（来源会话此刻在不在决定边界和标题），只有末尾字段取自缓存。
     fn summarize(
         &self,
         file: &A::File,
         id: &FileId,
-        prev: Option<(FileId, Option<(SessionSummary, ParseStats)>)>,
+        prev: Option<Previous>,
         forced: bool,
-    ) -> Option<(SessionSummary, ParseStats)> {
+    ) -> Option<Summarized> {
         let key = A::key(file);
+        let mut tail = None;
         if A::compressed(file) {
             if let Some(cache) = &self.setup.cache
                 && let Some(hit) =
                     cache.get::<CachedSummary>(&summary_key(key, id, self.setup.adapter_version))
             {
-                let (mut summary, stats) = hit.into_parts();
-                if summary.key == *key {
-                    summary.file = A::path(file).clone();
-                    return Some((summary, stats));
+                let mut hit = hit.into_parts();
+                if hit.summary.key == *key {
+                    A::path_fields(file, &mut hit.summary);
+                    if !forced && hit.lineage.is_none() {
+                        return Some(hit);
+                    }
+                    tail = Some(hit.summary);
                 }
             }
         } else if !forced
-            && let Some((old_id, Some((old, stats)))) = &prev
+            && let Some((old_id, Some((old, stats)), lineage)) = &prev
             && old_id.same_file(id)
             && id.len >= old_id.len
             && old.title.is_some()
             && let Some(updated) = self.follow(file, old)
         {
-            return Some((updated, stats.clone()));
+            return Some(Summarized {
+                summary: updated,
+                stats: stats.clone(),
+                lineage: lineage.clone(),
+            });
         }
         #[cfg(test)]
         self.full_summaries
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if forced {
-            self.adapter.summarize_with_sources(file).ok()
+        let mut fresh = if forced {
+            self.adapter.summarize_with_sources(file).ok()?
         } else {
-            self.adapter.summarize(file).ok()
+            self.adapter.summarize(file).ok()?
+        };
+        if let Some(cached) = tail
+            && fresh.summary.tail_pending
+            && !cached.tail_pending
+        {
+            fresh.summary.last_activity = cached.last_activity;
+            fresh.summary.open_turn = cached.open_turn;
+            fresh.summary.tail_pending = false;
         }
+        Some(fresh)
     }
 
     /// 追加之后：内存里的索引在这个文件上、游标仍有效时接着解析，末尾字段取新游标里的解析器状态。
@@ -589,12 +632,12 @@ impl<A: Adapter> Engine<A> {
         drop(state);
 
         let mut changed = Vec::new();
-        let mut added = false;
+        let mut added: Vec<Arc<str>> = Vec::new();
         let mut now = HashMap::with_capacity(sessions.len());
         for s in &sessions {
             match published.sessions.get(&s.key) {
                 None => {
-                    added = true;
+                    added.push(s.key.id.clone());
                     changed.push(s.key.clone());
                 }
                 Some(old) if old != s => changed.push(s.key.clone()),
@@ -618,6 +661,7 @@ impl<A: Adapter> Engine<A> {
         if !first && changed.is_empty() && removed.is_empty() && diagnostics == old_diagnostics {
             return;
         }
+        let removed_ids: Vec<Arc<str>> = removed.iter().map(|k| k.id.clone()).collect();
         published.generation += 1;
         published.sessions = now;
         let generation = published.generation;
@@ -636,24 +680,37 @@ impl<A: Adapter> Engine<A> {
             });
         }
         drop(published);
-        if added {
-            self.retry_unresolved();
-        }
+        self.lineage_changed(&added, &removed_ids);
     }
 
-    /// 有新会话发布了：读过但继承边界未定的会话再按需扫描来源、重新生成一次摘要。
-    fn retry_unresolved(&self) {
+    /// 会话出现或消失之后：继承边界依赖它们的摘要重新生成（`Known::lineage`）。来源出现时，只为读过的、
+    /// 边界还未定的会话按需扫描来源；来源消失时，边界已定的会话改为未定。
+    fn lineage_changed(&self, added: &[Arc<str>], removed: &[Arc<str>]) {
+        if added.is_empty() && removed.is_empty() {
+            return;
+        }
         {
             let mut state = self.state();
-            if state.unresolved.is_empty() {
+            let read: HashSet<&SessionKey> = state.resummarized.iter().map(|(k, _)| k).collect();
+            let paths: Vec<PathBuf> = state
+                .known
+                .iter()
+                .filter(|(_, k)| {
+                    let (Some(source), Some((summary, _))) = (&k.lineage, &k.summary) else {
+                        return false;
+                    };
+                    (summary.inheritance_unknown
+                        && added.contains(source)
+                        && read.contains(A::key(&k.file)))
+                        || (!summary.inheritance_unknown && removed.contains(source))
+                })
+                .map(|(p, _)| p.to_path_buf())
+                .collect();
+            if paths.is_empty() {
                 return;
             }
-            let paths: Vec<Arc<Path>> = state.unresolved.drain().map(|(_, (_, p))| p).collect();
             let guard = self.busy();
-            state
-                .work
-                .forced
-                .extend(paths.iter().map(|p| p.to_path_buf()));
+            state.work.forced.extend(paths);
             state.work.guards.extend(guard);
         }
         self.schedule();
@@ -740,19 +797,22 @@ impl<A: Adapter> Engine<A> {
         if !pending || !A::compressed(&file) {
             return;
         }
-        let Ok((summary, stats)) = self.adapter.complete(&file) else {
+        let Ok(done) = self.adapter.complete(&file) else {
             return;
         };
         if let Some(cache) = &self.setup.cache {
             let _ = cache.put(
                 &summary_key(key, &id, self.setup.adapter_version),
-                &CachedSummary::new(&summary, &stats),
+                &CachedSummary::new(&done),
             );
         }
         {
             let mut state = self.state();
             match state.known.get_mut(A::path(&file)) {
-                Some(known) if known.id == id => known.summary = Some((summary, stats)),
+                Some(known) if known.id == id => {
+                    known.summary = Some((done.summary, done.stats));
+                    known.lineage = done.lineage;
+                }
                 _ => return,
             }
         }

@@ -47,7 +47,7 @@ fn plugin_provides_two_sources_and_announces_the_first_discovery() {
         assert_eq!(seen[0].event.generation, seen[0].list.generation);
     }
     // Nothing left to do: the kernel is quiescent after the first discovery.
-    assert!(h.run().kernel.is_quiescent());
+    assert!(h.quiescent());
 }
 
 #[test]

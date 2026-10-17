@@ -10,6 +10,7 @@ use lectern_services::session::{SessionKey, SessionSummary, ToolKind, TurnIndex,
 use serde::{Deserialize, Serialize};
 
 use super::discover::FileId;
+use crate::read::Summarized;
 use crate::stats::ParseStats;
 
 /// 内存里的轮次索引合计上限（「性能」）。
@@ -42,43 +43,50 @@ pub(crate) fn index_key(session: &SessionKey, adapter_version: u32) -> Key {
         .u32(adapter_version)
 }
 
-/// `agents.summary`：压缩会话补齐后的摘要与计数。键是来源 ID、会话 ID、压缩文件的身份和适配器版本；
-/// 命名空间版本即摘要格式版本。`place` 存为 `Pending`，读出后重新归位。
+/// `agents.summary`：压缩会话补齐后的摘要与计数，以及继承边界依赖的来源会话。键是来源 ID、会话 ID、
+/// 压缩文件的身份和适配器版本；命名空间版本即摘要格式版本。`place` 存为 `Pending`，读出后重新归位；
+/// 由路径决定的字段和依赖来源会话的字段读出后也不照用（见 `Engine::summarize`）。
 #[derive(Serialize, Deserialize)]
 pub(crate) struct CachedSummary {
     pub(crate) summary: SessionSummary,
     unknown_types: Vec<(Arc<str>, u32)>,
     bad_lines: u32,
     oversized_lines: u32,
+    lineage: Option<Arc<str>>,
 }
 
 impl CachedSummary {
-    pub(crate) fn new(summary: &SessionSummary, stats: &ParseStats) -> CachedSummary {
-        let mut summary = summary.clone();
+    pub(crate) fn new(s: &Summarized) -> CachedSummary {
+        let mut summary = s.summary.clone();
         summary.place = lectern_services::session::Place::Pending;
         CachedSummary {
             summary,
-            unknown_types: stats.unknown_types.clone(),
-            bad_lines: stats.bad_lines,
-            oversized_lines: stats.oversized_lines,
+            unknown_types: s.stats.unknown_types.clone(),
+            bad_lines: s.stats.bad_lines,
+            oversized_lines: s.stats.oversized_lines,
+            lineage: s.lineage.clone(),
         }
     }
 
-    pub(crate) fn into_parts(self) -> (SessionSummary, ParseStats) {
+    pub(crate) fn into_parts(self) -> Summarized {
         let stats = ParseStats {
             unknown_types: self.unknown_types,
             bad_lines: self.bad_lines,
             oversized_lines: self.oversized_lines,
             unknown_tools: Vec::new(),
         };
-        (self.summary, stats)
+        Summarized {
+            summary: self.summary,
+            stats,
+            lineage: self.lineage,
+        }
     }
 }
 
 impl Entry for CachedSummary {
     const NAMESPACE: Namespace = Namespace {
         name: "agents.summary",
-        version: 1,
+        version: 2,
         compression: Compression::None,
     };
 

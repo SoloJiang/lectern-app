@@ -11,8 +11,7 @@ use lectern_services::session::{
 use crate::claude::{self, ClaudeCode};
 use crate::codex::{self, Codex};
 use crate::index::IndexBuilder;
-use crate::read::{Activity, Parsed};
-use crate::stats::ParseStats;
+use crate::read::{Activity, Parsed, Summarized};
 
 /// 发现、监听与 `SessionSource` 需要适配器做的事。`File` 是适配器自己的会话文件描述。
 pub(crate) trait Adapter: Send + Sync + 'static {
@@ -30,16 +29,18 @@ pub(crate) trait Adapter: Send + Sync + 'static {
     /// 这个路径不是会话文件，但它变化时要重新生成某个会话文件的摘要（Claude Code 子 agent 的 `meta.json`）。
     fn related(&self, path: &Path) -> Option<PathBuf>;
 
-    fn summarize(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError>;
+    fn summarize(&self, file: &Self::File) -> Result<Summarized, SessionError>;
     /// 读过这个会话之后的摘要：继承前缀的来源会话能找到时按需扫描它（Codex）；其余与 `summarize` 相同。
-    fn summarize_with_sources(
-        &self,
-        file: &Self::File,
-    ) -> Result<(SessionSummary, ParseStats), SessionError> {
+    fn summarize_with_sources(&self, file: &Self::File) -> Result<Summarized, SessionError> {
         self.summarize(file)
     }
     /// 补齐 `tail_pending` 的字段（整份流式解码一次）。
-    fn complete(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError>;
+    fn complete(&self, file: &Self::File) -> Result<Summarized, SessionError>;
+    /// 由路径决定的摘要字段（`file`，Codex 的 `archived`）按 `file` 重新填写：缓存里的摘要来自同一个
+    /// 文件身份，但文件可能被移动过（`sessions/` 移到 `archived_sessions/`）。
+    fn path_fields(file: &Self::File, summary: &mut SessionSummary) {
+        summary.file = Self::path(file).clone();
+    }
     fn read(
         &self,
         file: &Self::File,
@@ -98,12 +99,17 @@ impl Adapter for ClaudeCode {
             .then(|| path.with_file_name(format!("{agent}.jsonl")))
     }
 
-    fn summarize(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError> {
-        ClaudeCode::summarize(self, file)
+    fn summarize(&self, file: &Self::File) -> Result<Summarized, SessionError> {
+        let (summary, stats) = ClaudeCode::summarize(self, file)?;
+        Ok(Summarized {
+            summary,
+            stats,
+            lineage: None,
+        })
     }
 
-    fn complete(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError> {
-        ClaudeCode::summarize(self, file)
+    fn complete(&self, file: &Self::File) -> Result<Summarized, SessionError> {
+        Adapter::summarize(self, file)
     }
 
     fn read(
@@ -175,19 +181,21 @@ impl Adapter for Codex {
         None
     }
 
-    fn summarize(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError> {
-        Codex::summarize(self, file)
+    fn summarize(&self, file: &Self::File) -> Result<Summarized, SessionError> {
+        self.summarize_lineage(file)
     }
 
-    fn summarize_with_sources(
-        &self,
-        file: &Self::File,
-    ) -> Result<(SessionSummary, ParseStats), SessionError> {
+    fn summarize_with_sources(&self, file: &Self::File) -> Result<Summarized, SessionError> {
         Codex::summarize_with_sources(self, file)
     }
 
-    fn complete(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError> {
-        Codex::complete(self, file)
+    fn complete(&self, file: &Self::File) -> Result<Summarized, SessionError> {
+        self.complete_lineage(file)
+    }
+
+    fn path_fields(file: &Self::File, summary: &mut SessionSummary) {
+        summary.file = file.path.clone();
+        summary.archived = file.archived;
     }
 
     fn read(

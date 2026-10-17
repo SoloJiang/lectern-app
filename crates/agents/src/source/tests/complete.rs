@@ -75,7 +75,7 @@ fn complete_cold_start_completes_only_the_most_recent_eight() {
     // Nothing else is queued: the kernel is quiescent once these finished.
     assert_eq!(h.run().executor.run_until_idle(), 0);
     h.run().kernel.barrier();
-    assert!(h.run().kernel.is_quiescent());
+    assert!(h.quiescent());
 
     // A view shows an old one: it is completed on request.
     h.source(&codex_source())
@@ -88,7 +88,7 @@ fn complete_cold_start_completes_only_the_most_recent_eight() {
         9,
         "completed sessions are ignored"
     );
-    assert!(h.run().kernel.is_quiescent());
+    assert!(h.quiescent());
 }
 
 #[test]
