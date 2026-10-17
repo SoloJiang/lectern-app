@@ -1,14 +1,15 @@
 # platform（`lectern-platform`）
 
-macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名校验、Claude Code statusline 安装。macOS 系统绑定只能出现在本 crate（架构规则 6）。
+macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名校验、Claude Code statusline 安装；以及按平台实现的安全读取（`SafeRoot`，Linux 实现也在这里）。macOS 系统绑定只能出现在本 crate（架构规则 6）。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：`docs/design/platform.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
-- issue：[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)
-- ADR：[0004](../../docs/adr/0004.md)、[0014](../../docs/adr/0014.md)、[0018](../../docs/adr/0018.md)、[0019](../../docs/adr/0019.md)
+- 设计文档：[docs/design/platform.md](../../docs/design/platform.md)，目前只覆盖安全读取（`SafeRoot`）。FSEvents、`open -a`、钥匙串、Seatbelt、statusline 尚未设计：先在这份文档里增加小节或另写设计文档，按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写对应的代码。
+- issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)
+- ADR：[0004](../../docs/adr/0004.md)、[0014](../../docs/adr/0014.md)、[0018](../../docs/adr/0018.md)、[0019](../../docs/adr/0019.md)、[0024](../../docs/adr/0024.md)
 
 ## 边界
 
+- 安全读取：从根目录描述符出发，路径任何一级都不跟随符号链接、不越出根目录；普通文件的类型判断和读取用同一个描述符。接口与实现见[设计文档](../../docs/design/platform.md)，`git` 读工作区只经它。
 - 实现其他 crate 定义的接口（`fs_watch`、`kernel` 的插件宿主等），由 `app` 注入；不依赖这些 crate 的实现。
 - statusline 默认开启：用户已有 statusline 时保留原命令，Lectern 的脚本保存一份输入，再原样转发给原命令，关闭时恢复原配置（[ADR 0014](../../docs/adr/0014.md)）。
 - 为 Analyze 调用的 agent 命令行生成 Seatbelt 配置（[ADR 0019](../../docs/adr/0019.md)）：只读本次分析的输入、被审阅版本的只读快照（已提交的文件从 git 对象写出，叠加的工作区改动从 worktree 根目录描述符出发、用 `O_NOFOLLOW_ANY | O_NONBLOCK` 打开的描述符（路径任何一级是符号链接都拒绝）用 `fclonefileat` 克隆，卷不支持时用 `fcopyfile` 复制，符号链接都重建为链接；只含受跟踪文件和本次改动的文件）、该 agent 解析后的可执行文件及其依赖闭包（npm 安装时包括按 Node 解析规则找到的已安装依赖包目录，如 `@openai/codex-darwin-arm64`；版本目录或包目录和解析出的解释器；启动链接先解析到目标，`~/bin`、`~/.local/bin` 这类公共目录里的其他文件不可读）和固定的 macOS 运行时路径（只放行具体子目录，如 `/System/Library`、`/System/Cryptexes`、`/usr/lib`、`/bin`、`/usr/bin`；`/System/Volumes` 整个子树明确拒绝，它经 firmlink 通到 `/Users` 等数据卷目录）；子模块只写成空目录，不复制它的工作区（改动了子模块的分析标为部分内容未提供）；只复用不含工作区改动的基准快照（按树 OID 加处理规则的版本，规则随 agent 命令行版本的自动加载清单变化；先写在暂存目录、完整后原子 `rename` 发布，只读），有工作区改动时每次分析 clonefile 克隆基准目录再叠加，不复用；平铺目录的索引是 `index.jsonl`（路径按 JSON 转义，非 UTF-8 的用 base64）；路径不是合法 UTF-8 的条目也移进保留目录平铺，模型按序号文件名读取；克隆后移除扩展属性、资源分叉和 ACL；只接受普通文件和符号链接（对打开的描述符 `fstat` 判断，检查和读取用同一个描述符，FIFO、socket、设备文件拒绝）；会被 agent 自动加载的配置和 `base/` 里的旧版本文件按序号平铺写出，附原路径索引，保留目录的名字按大小写折叠加 NFC 规范化避开树和叠加路径的并集，保留目录和其中的文件也参加最终的冲突检查；写出前拒绝空名、`.`、`..`、含 `/` 或 NUL 的名字和 `.git`，从快照根目录的描述符出发用 `openat` / `mkdirat` 加 `O_NOFOLLOW` 写出，条目数和路径长度有上限；对叠加之后的最终路径集合（去掉删除和重命名的旧路径）检测只在大小写或 Unicode 规范化上不同的路径，有冲突时不生成快照；快照缓存和临时目录里由 Lectern 写出的部分（`inputs/`、快照克隆）放在有容量上限的稀疏 APFS 数据映像里（`hdiutil`，不需要特权，默认 6 GB，大于全部同时允许的占用之和 4.5 GB 加余量，每次分析开始前在映像里预留 1 GB，写满时内核返回 `ENOSPC`）；`work/` 是每次分析单独创建的 1 GB 工作映像，与输入和快照不在同一个文件系统上，agent 建不了指向它们的硬链接（`EXDEV`），分析结束后强制卸载并删除映像文件，agent 设的标志、ACL 和目录权限不影响清理，平铺目录里的符号链接写成记录链接目标的数据文件，每次分析前要求宿主卷剩余空间不少于所有已挂载映像还能增长的量、新工作映像的 1 GB 与 2 GB 之和；叠加的文件写出后 `fchflags(fd, 0)` 清掉 BSD 标志；可写的只有本次分析临时目录里的 `work/`（工作目录、配置与会话数据、输出），patch 和改动前的版本放在只读的 `inputs/`；凭据文件和钥匙串一律拒绝，拒绝查看其他进程的信息（`process-info*`）；快照里的符号链接不跟随（ADR 0019）；网络只允许连接 `agents` 的凭据转发端点；每次分析的配置允许读本次唯一的临时目录、拒绝一个固定的哨兵路径，并提供 `sandbox_check` 的封装，供 `agents` 按沙箱识别这次分析的全部进程；配置拒绝执行 `/usr/bin/sandbox-exec`，并提供嵌套沙箱自检（探针尝试再应用一份配置，成功时带 shell 的 agent 不可用）；判断会被自动加载的配置路径时按 Unicode 大小写折叠加 NFC 规范化比较。
@@ -22,4 +23,5 @@ cargo check -p lectern-platform
 just test -p lectern-platform   # macOS 上覆盖全部代码
 ```
 
-- 调用系统 API 的行为只能在 macOS CI 上验证；能抽成纯函数的部分（如生成 Seatbelt 配置、合并 statusline 配置）写单元测试和 insta 快照，在任何平台上都能运行。
+- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY` 的实现在 macOS CI 上测试。
+- 其余调用系统 API 的行为只能在 macOS CI 上验证；能抽成纯函数的部分（如生成 Seatbelt 配置、合并 statusline 配置）写单元测试和 insta 快照，在任何平台上都能运行。

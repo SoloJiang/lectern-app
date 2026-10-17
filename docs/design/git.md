@@ -44,44 +44,30 @@
 
 ### 安全读取
 
-本 crate 需要 `platform` 提供以下平台无关的接口（最终签名以 `platform` 的设计文档为准；它先于本文的第 1 步实现，因为 `Worktree::read_file` 用到它，PR 写 `Refs #14`）：
+本 crate 用 `platform` 提供的平台无关接口读工作区，接口、数据结构和两个平台的实现以 [platform 设计](platform.md)为准；它先于本文的第 1 步实现，因为 `Worktree::read_file` 用到它，PR 写 `Refs #14`。本 crate 用到的部分：
 
 ```rust
 // lectern-platform
-/// 一个目录根（如 worktree 根）的描述符。
 pub struct SafeRoot { /* fd */ }
-
-/// 根目录之下的相对路径，构造时校验：非空；以 `/` 分隔的各级名字都非空；没有 `.`、`..`；没有 NUL；不以 `/` 开头。
-/// 所以按它解析的位置总在根目录之下。`git` 的 `RepoPath` 满足同样的不变量，零开销转换成它。
-pub struct RelPath<'a>(&'a [u8]);
-
-impl<'a> RelPath<'a> {
-    pub fn new(bytes: &'a [u8]) -> Option<RelPath<'a>>;   // 不满足不变量时为 None
-}
-
+pub struct RelPath<'a>(&'a [u8]);          // 不变量与本 crate 的 `RepoPath` 相同
 pub enum Read {
     File { meta: Meta, bytes: Vec<u8> },
     Symlink { meta: Meta, target: Vec<u8> },
-    TooLarge { meta: Meta },                   // 超过调用方给的上限，没读内容
-    Unsupported { kind: FileKind },            // FIFO、socket、设备文件
+    TooLarge { meta: Meta },                // 超过调用方给的上限，没读内容
+    Unsupported { meta: Meta },             // 目录、FIFO、socket、设备文件，不读内容
 }
+pub enum SafeError { NotFound, PathThroughSymlink, Io(io::Error) }
 
 impl SafeRoot {
     pub fn open(root: &Path) -> io::Result<SafeRoot>;
-    /// 不跟随路径中任何一级符号链接的 stat。
-    pub fn stat(&self, rel: RelPath<'_>) -> io::Result<Meta>;
-    /// 打开一次，对同一个描述符 `fstat` 判断类型后读取（`O_NONBLOCK`，FIFO 不阻塞）；
-    /// 最后一级是符号链接时 `readlinkat`。中间一级是符号链接时返回 `PathThroughSymlink` 错误。
-    pub fn read(&self, rel: RelPath<'_>, max: u64) -> io::Result<Read>;
+    pub fn stat(&self, rel: RelPath<'_>) -> Result<Meta, SafeError>;
+    pub fn read(&self, rel: RelPath<'_>, max: u64) -> Result<Read, SafeError>;
 }
 ```
 
-两个平台都把解析限制在根目录之下，不只靠「不跟随符号链接」（它不阻止 `..` 走到根目录之上）：
+结果的处理：`NotFound` 时 W 为没有；`PathThroughSymlink` 为 `Unavailable::PathThroughSymlink`；`Io` 为 `Unavailable::Unreadable`；`Unsupported` 的 `meta.kind` 是目录时按 index 条目区分（gitlink 按子模块，其余是路径被换成目录），其余为 `Mode::Special` + `UnsupportedType`。stat 比较用的 `gix_index::entry::Stat` 按 platform 设计「数据结构」的对照表从 `Meta` 构造。
 
-- Linux：`openat2` 加 `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`，供 CI 测试；它不是 macOS 专属能力，也放在 `platform`。
-- macOS：从根描述符出发逐级 `openat(…, O_NOFOLLOW | O_DIRECTORY)` 打开中间的目录，最后一级用 `O_NOFOLLOW`（`stat` 用 `fstatat` 加 `AT_SYMLINK_NOFOLLOW`）。同一次调用里可以复用已打开的目录描述符。
-
-`RelPath` 的不变量本身已经排除 `..` 和绝对路径，平台实现的限制是第二道防线。
+两个平台都把解析限制在根目录之下，不只靠「不跟随符号链接」（它不阻止 `..` 走到根目录之上）：Linux 用 `openat2` 加 `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`（不可用时逐级 `openat`），macOS 用 `O_NOFOLLOW_ANY`，出错时逐级 `openat(…, O_NOFOLLOW | O_DIRECTORY)` 判定原因。Linux 的实现不是 macOS 专属能力，也放在 `platform`，供 CI 测试。`RelPath` 的不变量本身已经排除 `..` 和绝对路径，平台实现的限制是第二道防线。
 
 ## 概念
 
