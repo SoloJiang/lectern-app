@@ -10,5 +10,16 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "infra"
 
+[dependencies]
+lectern-kernel = { path = "../kernel" }
+
+[dev-dependencies]
+# Kernel::barrier, for the tests that drive a real kernel.
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+
+[features]
+# Executor::manual and run_until_idle, for deterministic tests.
+test-support = []
+
 [lints]
 workspace = true

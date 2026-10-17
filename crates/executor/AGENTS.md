@@ -20,5 +20,6 @@ cargo check -p lectern-executor     # 只改本 crate 时最快的反馈
 just test -p lectern-executor
 ```
 
+- 测试在 `src/tests/`，用真实的 `lectern-kernel`（`test-support`）驱动 `own_with` 和闸门；要确定顺序的用 `Executor::manual()` + `run_until_idle()`（本 crate 的 `test-support` feature，其他 crate 的测试也用它）。等待用通道或 `block_on`，不靠 sleep。
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。
