@@ -1,5 +1,7 @@
 //! Behaviour tests run once for every implementation available on this
-//! platform: `Openat2` and `Walk` on Linux, `NofollowAny` and `Walk` on macOS.
+//! platform: `Openat2` and `Walk` on Linux; `NofollowAny`, `NofollowAnyParent`
+//! and `Walk` on macOS. `NofollowAnyParent` is what macOS 11 and 12 use; forcing
+//! it keeps that path tested on newer CI machines.
 
 use std::fs;
 use std::os::fd::AsFd;
@@ -23,6 +25,8 @@ fn backends() -> Vec<Backend> {
         Backend::Openat2,
         #[cfg(target_os = "macos")]
         Backend::NofollowAny,
+        #[cfg(target_os = "macos")]
+        Backend::NofollowAnyParent,
         Backend::Walk,
     ]
 }
@@ -1027,14 +1031,52 @@ fn linux_backend_choice() {
 
 // macOS only
 
+/// The major version `sw_vers` reports, such as 14 for 14.6.1.
+#[cfg(target_os = "macos")]
+fn macos_major_version() -> u32 {
+    let out = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .unwrap();
+    let version = String::from_utf8(out.stdout).unwrap();
+    let major = version.trim().split('.').next().unwrap();
+    major
+        .parse()
+        .unwrap_or_else(|_| panic!("sw_vers: {version:?}"))
+}
+
 #[cfg(target_os = "macos")]
 #[test]
-fn nofollow_any_is_the_default() {
-    let tmp = TempDir::new().unwrap();
+fn nofollow_any_backend_choice() {
     assert_eq!(
-        SafeRoot::open(tmp.path()).unwrap().backend,
-        Backend::NofollowAny
+        macos::backend_for_probe(Err(Errno::INVAL)),
+        Backend::NofollowAnyParent
     );
+    for probe in [
+        Ok(()),
+        Err(Errno::NOENT),
+        Err(Errno::ACCESS),
+        Err(Errno::IO),
+    ] {
+        assert_eq!(
+            macos::backend_for_probe(probe),
+            Backend::NofollowAny,
+            "{probe:?}"
+        );
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let root = SafeRoot::open(tmp.path()).unwrap();
+    let probe = macos::probe(root.fd.as_fd());
+    let major = macos_major_version();
+    eprintln!("macOS {major}: probe {probe:?}, backend {:?}", root.backend);
+    if major >= 13 {
+        assert_eq!(probe, Ok(()));
+        assert_eq!(root.backend, Backend::NofollowAny);
+    } else {
+        assert_eq!(probe, Err(Errno::INVAL));
+        assert_eq!(root.backend, Backend::NofollowAnyParent);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1059,6 +1101,23 @@ fn nofollow_any_one_step_open_refuses_every_symlink() {
     }
     assert!(macos::open_nofollow_any(fd, b"a/b.txt").is_ok());
     assert!(macos::open_nofollow_any(fd, b"a").is_ok());
+
+    // The parent open of `NofollowAnyParent`.
+    for path in [
+        "in_link",
+        "out_link",
+        "a/self",
+        "a/up",
+        "in_link/x",
+        "dangling",
+    ] {
+        assert!(
+            macos::open_dir_nofollow_any(fd, path.as_bytes()).is_err(),
+            "{path}"
+        );
+    }
+    assert!(macos::open_dir_nofollow_any(fd, b"a").is_ok());
+    assert!(macos::open_dir_nofollow_any(fd, b"a/b.txt").is_err());
 }
 
 /// The one-step `fstatat` itself, without the walk behind it: it answers a
@@ -1073,6 +1132,12 @@ fn nofollow_any_one_step_stat_follows_no_symlink() {
     write(&tree.path().join("a/b/c/d.txt"), b"deep");
     let root = SafeRoot::open_with(tree.path(), Backend::NofollowAny).unwrap();
     let fd = root.fd.as_fd();
+    if macos::probe(fd) == Err(Errno::INVAL) {
+        // Before macOS 13; `nofollow_any_backend_choice` checks that this is
+        // only the case there.
+        eprintln!("fstatat has no AT_SYMLINK_NOFOLLOW_ANY here; nothing to check");
+        return;
+    }
 
     for (path, kind) in [
         ("a", FileKind::Dir),
@@ -1128,21 +1193,27 @@ fn nofollow_any_one_step_stat_follows_no_symlink() {
 #[cfg(target_os = "macos")]
 #[test]
 fn nofollow_any_symlinks() {
-    check_intermediate_symlinks(Backend::NofollowAny);
-    check_last_symlinks(Backend::NofollowAny);
+    for backend in [Backend::NofollowAny, Backend::NofollowAnyParent] {
+        check_intermediate_symlinks(backend);
+        check_last_symlinks(backend);
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn nofollow_any_races() {
-    check_swap_between_calls(Backend::NofollowAny);
-    check_swap_never_escapes(Backend::NofollowAny);
+    for backend in [Backend::NofollowAny, Backend::NofollowAnyParent] {
+        check_swap_between_calls(backend);
+        check_swap_never_escapes(backend);
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn nofollow_any_walk_cases() {
-    check_walk_cases(Backend::NofollowAny);
+    for backend in [Backend::NofollowAny, Backend::NofollowAnyParent] {
+        check_walk_cases(backend);
+    }
 }
 
 // perf_smoke

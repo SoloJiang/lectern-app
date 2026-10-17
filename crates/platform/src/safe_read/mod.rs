@@ -48,9 +48,15 @@ pub(crate) enum Backend {
     #[cfg(target_os = "linux")]
     Openat2,
     /// `openat(…, O_NOFOLLOW_ANY)` for `read`, one
-    /// `fstatat(…, AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)` for `stat`.
+    /// `fstatat(…, AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)` for `stat`
+    /// (macOS 13 and later).
     #[cfg(target_os = "macos")]
     NofollowAny,
+    /// `NofollowAny` where `fstatat` rejects `AT_SYMLINK_NOFOLLOW_ANY`
+    /// (macOS 11 and 12): `stat` opens the parent with `O_NOFOLLOW_ANY`, then
+    /// `fstatat(…, AT_SYMLINK_NOFOLLOW)` on the last component.
+    #[cfg(target_os = "macos")]
+    NofollowAnyParent,
     /// No one-step open: every call goes through [`walk`].
     #[cfg_attr(
         all(target_os = "macos", not(test)),
@@ -66,8 +72,8 @@ impl SafeRoot {
     /// Opens the root directory (`O_RDONLY | O_DIRECTORY | O_CLOEXEC`). The
     /// root path itself resolves normally, following symbolic links (pass a
     /// canonical path, such as `/private/tmp` for `/tmp`); the restrictions
-    /// apply only to the relative paths beneath it. On Linux this is where the
-    /// implementation is chosen.
+    /// apply only to the relative paths beneath it. This is where the
+    /// implementation is chosen (one probe `fstatat` or `openat2`).
     pub fn open(root: &Path) -> io::Result<SafeRoot> {
         let fd = open_root(root)?;
         let backend = default_backend(fd.as_fd());
@@ -93,19 +99,14 @@ impl SafeRoot {
         let (parent, name) = split(rel.0).ok_or_else(invalid_path)?;
         let root = self.fd.as_fd();
         match self.backend {
-            // Opens the parent in one step, then `fstatat` on the last
-            // component; a single component needs no open.
             #[cfg(target_os = "linux")]
-            Backend::Openat2 => {
-                let Some(parent_path) = parent else {
-                    return stat_entry(root, name);
-                };
-                match linux::open_beneath(root, parent_path, Target::Dir) {
-                    Ok(dir) => stat_entry(dir.as_fd(), name),
-                    Err(Errno::NOENT) => Err(SafeError::NotFound),
-                    Err(_) => walk::stat(root, parent, name),
-                }
-            }
+            Backend::Openat2 => stat_in_parent(root, parent, name, |dir| {
+                linux::open_beneath(root, dir, Target::Dir)
+            }),
+            #[cfg(target_os = "macos")]
+            Backend::NofollowAnyParent => stat_in_parent(root, parent, name, |dir| {
+                macos::open_dir_nofollow_any(root, dir)
+            }),
             // One `fstatat` on the whole path, whatever its depth.
             #[cfg(target_os = "macos")]
             Backend::NofollowAny => match macos::stat_nofollow_any(root, rel.0) {
@@ -144,12 +145,33 @@ impl SafeRoot {
             #[cfg(target_os = "linux")]
             Backend::Openat2 => Some(linux::open_beneath(self.fd.as_fd(), path, Target::Entry)),
             #[cfg(target_os = "macos")]
-            Backend::NofollowAny => Some(macos::open_nofollow_any(self.fd.as_fd(), path)),
+            Backend::NofollowAny | Backend::NofollowAnyParent => {
+                Some(macos::open_nofollow_any(self.fd.as_fd(), path))
+            }
             Backend::Walk => {
                 let _ = path;
                 None
             }
         }
+    }
+}
+
+/// `stat` through a one-step open of the parent (`open_parent`), then
+/// `fstatat` on the last component; a single component needs no open.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn stat_in_parent(
+    root: BorrowedFd<'_>,
+    parent: Option<&[u8]>,
+    name: &[u8],
+    open_parent: impl FnOnce(&[u8]) -> Result<OwnedFd, Errno>,
+) -> Result<Meta, SafeError> {
+    let Some(parent_path) = parent else {
+        return stat_entry(root, name);
+    };
+    match open_parent(parent_path) {
+        Ok(dir) => stat_entry(dir.as_fd(), name),
+        Err(Errno::NOENT) => Err(SafeError::NotFound),
+        Err(_) => walk::stat(root, parent, name),
     }
 }
 
@@ -163,10 +185,11 @@ fn default_backend(root: BorrowedFd<'_>) -> Backend {
     linux::backend_for_probe(linux::probe(root))
 }
 
+/// Apple Silicon runs macOS 11 or later, where `O_NOFOLLOW_ANY` exists;
+/// `fstatat` takes `AT_SYMLINK_NOFOLLOW_ANY` from macOS 13.
 #[cfg(target_os = "macos")]
-fn default_backend(_root: BorrowedFd<'_>) -> Backend {
-    // Apple Silicon runs macOS 11 or later, where O_NOFOLLOW_ANY exists.
-    Backend::NofollowAny
+fn default_backend(root: BorrowedFd<'_>) -> Backend {
+    macos::backend_for_probe(macos::probe(root))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
