@@ -6,13 +6,14 @@
 - 设计文档：`docs/design/services.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - `project` 模块（`dyn Projects`、项目快照与 `ProjectEvent`）的接口在 [project 设计](../../docs/design/project.md)「接口」「数据结构」里定义，由 `project` 实现。
 - `session` 模块（`dyn SessionSource`、会话列表、记录、轮次索引与 `SessionsChanged`）的接口在 [agents 设计](../../docs/design/agents.md)「接口」「数据结构」里定义，由 `agents` 实现。
-- issue：[#8](https://github.com/SoloJiang/lectern-app/issues/8)
+- `code_intel` 模块（`dyn CodeIntel`、查询与结果、名字表、`CodeIntelEvent`，以及语义导航的 `NavigationProvider`）的接口在 [code_intel 设计](../../docs/design/code_intel.md)「接口」里定义，由 `code_intel` 实现；`NavigationProvider` 由语义导航的插件（#26）实现。`project` 模块的 `BlobId` 和 `FileList::oid` 也是 code_intel 设计「对其他 crate 的要求」加的。
+- issue：[#8](https://github.com/SoloJiang/lectern-app/issues/8)、[#17](https://github.com/SoloJiang/lectern-app/issues/17)（`code_intel` 模块）
 - ADR：[0010](../../docs/adr/0010.md)、[0018](../../docs/adr/0018.md)、[0019](../../docs/adr/0019.md)
 
 ## 边界
 
-- 只有 trait、数据类型和服务 ID，没有实现。例外：`project` 模块的 `FileList` 带构造器和二分查找（project 设计「文件列表」）；`session` 模块的 `Cursor` 带外层编码（`to_bytes` / `from_bytes`）和供提供者使用的构造器，`ContentRef` 带构造器，`SessionList` 带 `get` / `in_project`（agents 设计「数据结构」）。它们都是数据结构自身的方法。
-- 同一组接口同时用于内置插件和独立进程插件（[ADR 0018](../../docs/adr/0018.md)），类型要能通过 JSON-RPC 序列化。
+- 只有 trait、数据类型和服务 ID，没有实现。例外：`project` 模块的 `FileList` 带构造器和二分查找，`BlobId` 带字节与十六进制的转换（project 设计「文件列表」）；`code_intel` 模块的 `NameTable` 带构造器（`NameTableBuilder`）和查找，`SemanticReply` 与 `ProviderRegistration` 包着实现方传入的回调（`new`；`send` 调用回调，登记 drop 时调用回调），回调的内容属于 `code_intel`；`session` 模块的 `Cursor` 带外层编码（`to_bytes` / `from_bytes`）和供提供者使用的构造器，`ContentRef` 带构造器，`SessionList` 带 `get` / `in_project`（agents 设计「数据结构」）。它们都是数据结构自身的方法。
+- 同一组接口同时用于内置插件和独立进程插件（[ADR 0018](../../docs/adr/0018.md)），类型要能通过 JSON-RPC 序列化。trait 和包着回调的 `SemanticReply`、`ProviderRegistration` 不序列化：进程插件的代理在宿主进程里持有它们。
 - 接口变动会影响所有实现它的插件，改动前在设计文档里列出受影响的 crate。
 - 改动来源的接口（ADR 0019）也定义在这里，按能力划分：取 diff 是必需的；快速判断是否过期的指纹、加载完整文件、读写审阅评论、读取共享分析结果都是可选能力。本地 git 由 `git` 实现，GitHub / GitLab 由 `forge` 实现，视图按来源具备的能力决定显示哪些功能。
 
