@@ -733,11 +733,28 @@ impl Assembler<'_> {
             });
         }
 
-        // Sizes first: a missing object makes the side unavailable.
+        let mut attr_binary = (self.attrs)(&p.path)?.binary;
+        if p.old.is_some() && old_path != p.path {
+            attr_binary |= (self.attrs)(&old_path)?.binary;
+        }
+        let both = p.old.is_some() && p.new.is_some() && !type_changed;
+        let key = match (old_oid, new_oid) {
+            (Some(o), Some(n)) if both && !attr_binary => Some(HunkKey::lines(o, n)),
+            _ => None,
+        };
+        let hit = key.as_ref().and_then(hunks::cached);
+
+        // Sizes first: a missing object makes the side unavailable. A cache
+        // hit has both sizes (a blob's size is part of its OID), so only
+        // existence is checked, without reading and inflating the header.
         let mut sizes = [None, None];
         for (i, side) in [&mut p.old, &mut p.new].into_iter().enumerate() {
             let Some(side) = side else { continue };
-            match self.size(side)? {
+            let size = match &hit {
+                Some(hit) => self.exists(side).then_some(hit.sizes[i]),
+                None => self.size(side)?,
+            };
+            match size {
                 Some(size) => sizes[i] = Some(size),
                 None => {
                     side.content = Content::Unavailable(Unavailable::Missing);
@@ -749,10 +766,6 @@ impl Assembler<'_> {
             old_size: sizes[0],
             new_size: sizes[1],
         };
-        let mut attr_binary = (self.attrs)(&p.path)?.binary;
-        if p.old.is_some() && old_path != p.path {
-            attr_binary |= (self.attrs)(&old_path)?.binary;
-        }
         if attr_binary {
             return Ok((binary, 0));
         }
@@ -760,12 +773,7 @@ impl Assembler<'_> {
             return Ok((Detail::TooLarge, 0));
         }
 
-        let both = p.old.is_some() && p.new.is_some() && !type_changed;
-        let key = match (old_oid, new_oid) {
-            (Some(o), Some(n)) if both => Some(HunkKey::lines(o, n)),
-            _ => None,
-        };
-        let computed = match key.as_ref().and_then(hunks::cached) {
+        let computed = match hit {
             Some(hit) => hit,
             None => {
                 let old = p.old.as_ref().map(|s| self.load(s)).transpose()?.flatten();
@@ -790,7 +798,9 @@ impl Assembler<'_> {
                 computed
             }
         };
-        let Computed { diff, body_bytes } = computed;
+        let Computed {
+            diff, body_bytes, ..
+        } = computed;
         let patch = body_bytes + header_bytes(&old_path, &p.path);
         let lines = u64::from(diff.added) + u64::from(diff.removed);
         if lines > u64::from(self.limits.patch_lines) || body_bytes > self.limits.patch_bytes {
@@ -819,6 +829,17 @@ impl Assembler<'_> {
             .try_find_header(oid.to_gix())
             .map_err(GitError::from_gix)?
             .map(|h| h.size()))
+    }
+
+    /// Whether the side's content can be read: worktree bytes, or an object
+    /// in the database (a file check for a loose object, an index lookup for
+    /// a packed one; nothing is inflated).
+    fn exists(&self, side: &PendingSide) -> bool {
+        side.bytes.is_some()
+            || side
+                .content
+                .oid()
+                .is_some_and(|oid| self.handle.has_object(oid.to_gix()))
     }
 
     /// The side's bytes; None when its object is missing.
