@@ -2,10 +2,10 @@
 
 用 gix 读仓库、用 imara-diff 计算 diff；结构化 diff 忽略纯格式变化并识别移动的代码。
 
-- 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
-- 设计文档：`docs/design/git.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。普通库 crate，不是插件，`project`、`review` 等直接调用。
+- 设计文档：[docs/design/git.md](../../docs/design/git.md)。
 - issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#21](https://github.com/SoloJiang/lectern-app/issues/21)
-- ADR：[0006](../../docs/adr/0006.md)
+- ADR：[0006](../../docs/adr/0006.md)、[0024](../../docs/adr/0024.md)
 
 ## 边界
 
