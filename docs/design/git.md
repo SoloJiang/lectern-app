@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -889,7 +889,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - `perf_smoke_git_diff_50`（同上）：命中中位数从 1.45–1.60 ms 降到 0.34–0.35 ms（−77%），p95 从 1.78–1.85 ms 降到 0.45–0.48 ms；未命中中位数改动前 5.2–5.5 ms、改动后 5.1–5.4 ms，没有变化。bench 分支（#83）的 `git/diff_50_warm` 同一台机器上 1.51–1.52 ms → 0.34–0.36 ms，`git/diff_50_cold` 5.03–5.21 ms → 5.02–5.13 ms。没有在 macOS 上测量。
 - `just test -p lectern-git` 全部通过，insta 快照和 `numstat_matches_git` 没有变化；新增 `hunk_cache_hit_checks_limits_attributes_and_missing_objects`：命中时按这次更小的 `diff_bytes` 得到 `TooLarge`，`-diff` 的文件不查缓存且 `Binary` 带两侧大小，另一个缺少新一侧 blob 的仓库里命中后仍是 `NoDiff` 加 `Unavailable::Missing`。
 
-`Worktree::watch_source`（[fs_watch 设计](fs_watch.md)验收第 2 步，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），同一台机器：
+`Worktree::watch_source`（[fs_watch 设计](fs_watch.md)验收第 2 步，[#95](https://github.com/SoloJiang/lectern-app/pull/95)），同一台机器：
 
 - `just check`、`just test`（Linux 上的全部 crate，950 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）、`just bench`（Linux 上是冒烟运行）全部通过；`cargo clippy -p lectern-git --all-targets -- -D warnings`（不开 `test-support`）、`python3 scripts/check_architecture.py` 也通过。Cargo.lock 只多了 `lectern-git` 对 `lectern-fs-watch` 的一条工作区内部依赖，没有新增外部依赖。
 - `just test -p lectern-git`：206 个测试通过，新增 `watch_source_*` 15 个（`src/watch/tests.rs`），对应 fs_watch 设计「测试」里 `git` 的一段：`.gitignore`、`info/exclude`、`core.excludesFile` 的忽略结果在 `core.ignoreCase` 为 false 和 true 时都与 git 的判定一致（`ignores_match_git`，按 fs_watch「路径分类」第 6、8 步逐级组合 `ignored` 的结果，含根目录和未跟踪目录里未跟踪的 `.gitignore`、更深的 `.gitignore` 里的否定规则、被忽略目录里的 `.gitignore` 没有读）；`ignored` 只看路径自身；`core.ignoreCase` 下大小写不同的路径判为受跟踪（含目录和子模块），过滤器与 `Worktree::tracked` 共用同一个 `Arc`；跟踪的和 skip-worktree 的 `.gitignore`（后者从 index 的 blob 读）；遍历达到上限时显式给出的 `.gitignore` 仍然生效、上级目录被忽略的不读、子模块和嵌套仓库里的不读；目录改名后 `rule_files` 给出新位置；符号链接的 `.gitignore` 不读；`config_files` 列出 `include.path`（绝对、相对、`~/`、不存在的目标）、`includeIf "onbranch:"` 满足与不满足（只有满足的那个里再嵌套的引入被列出，切换分支后反过来）、系统、XDG 和 `~/.gitconfig` 的位置、XDG 默认的 `ignore` / `attributes`、linked worktree 的 `config.worktree`，测试用的仓库范围不列出仓库之外的标准位置；`runs_no_git` 在仓库配置 `core.fsmonitor` 指向写标记文件的脚本、nextest 下 PATH 最前面另有记录调用的假 `git` 时，构造过滤器和配置清单后标记文件不存在；取消时两者都返回错误。
