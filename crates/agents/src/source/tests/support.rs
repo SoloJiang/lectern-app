@@ -533,6 +533,26 @@ impl FakeProjects {
         }
     }
 
+    /// 从项目里去掉一个 worktree（删除或 prune 之后的样子），打开与否都去掉。
+    pub(crate) fn remove_tree(&self, root: &Path) {
+        let mut s = self.0.lock().unwrap();
+        let FakeState { open, known, .. } = &mut *s;
+        for p in open.iter_mut().chain(known.iter_mut()) {
+            p.trees.retain(|t| t.root != root);
+        }
+    }
+
+    /// 把一个 worktree 加回项目（重建）。
+    pub(crate) fn add_tree(&self, project: &ProjectKey, tree: FakeTree) {
+        let mut s = self.0.lock().unwrap();
+        let FakeState { open, known, .. } = &mut *s;
+        for p in open.iter_mut().chain(known.iter_mut()) {
+            if p.key == *project {
+                p.trees.push(tree.clone());
+            }
+        }
+    }
+
     pub(crate) fn resolves(&self) -> Vec<PathBuf> {
         self.0.lock().unwrap().resolves.clone()
     }

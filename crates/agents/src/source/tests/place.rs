@@ -143,7 +143,7 @@ fn place_project_opened_later_is_located() {
     assert_eq!(&*seen[0].event.changed, [key(&claude_source(), &id)]);
     assert_eq!(h.projects.resolves().len(), 1, "resolve is not repeated");
 
-    // Closing it goes back to the cached `resolve` result.
+    // Closing it falls back to `resolve`.
     Projects::close(&*h.projects, &project_key);
     h.run().kernel.emitter().emit(ProjectEvent::Closed {
         project: project_key,
@@ -153,7 +153,8 @@ fn place_project_opened_later_is_located() {
         h.list(&claude_source()).sessions[0].place,
         Place::Resolved(_)
     ));
-    assert_eq!(h.projects.resolves().len(), 1);
+    // Its worktrees may have changed while it was open: resolved again, once.
+    assert_eq!(h.projects.resolves().len(), 2);
 }
 
 #[test]
@@ -230,4 +231,100 @@ fn place_missing_cwd_is_retried_on_the_next_refresh() {
         .find(|s| s.key.id.as_ref() == uuid(1))
         .unwrap();
     assert!(matches!(first.place, Place::Resolved(_)));
+}
+
+fn changed(h: &Harness, project: &ProjectKey) {
+    h.run().kernel.emitter().emit(ProjectEvent::Changed {
+        project: project.clone(),
+        generation: 9,
+        parts: ChangedParts {
+            worktrees: true,
+            ..ChangedParts::default()
+        },
+    });
+    h.settle();
+}
+
+/// A session in a linked worktree of an open project, `Located` there.
+fn in_linked_worktree(h: &mut Harness) -> (ProjectKey, std::path::PathBuf, FakeTree) {
+    let repo = h.base.join("repo");
+    let linked = h.base.join("wt-agent");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(linked.join("src")).unwrap();
+    let mut project = git_project(&repo, &[&linked]);
+    project.trees[1].packages = Some(Vec::new());
+    let tree = project.trees[1].clone();
+    let key = project.key.clone();
+    h.projects.add(project, true);
+    session_at(h, 1, &linked.join("src"));
+    h.start();
+    assert_snapshot!(places(h), @r#"00000001-0000-4000-8000-000000000000 [base]/wt-agent/src Located(git:[base]/repo/.git wt=[base]/repo/.git/worktrees/wt-agent rel="src" None)"#);
+    (key, linked, tree)
+}
+
+#[test]
+fn place_removed_worktree_is_missing() {
+    let mut h = Harness::new();
+    let (project, linked, _) = in_linked_worktree(&mut h);
+    std::fs::remove_dir_all(&linked).unwrap();
+    h.projects.remove_tree(&linked);
+    changed(&h, &project);
+    assert_eq!(h.list(&claude_source()).sessions[0].place, Place::Missing);
+}
+
+#[test]
+fn place_removed_and_recreated_worktree_is_placed_again() {
+    let mut h = Harness::new();
+    let (project, linked, tree) = in_linked_worktree(&mut h);
+    std::fs::remove_dir_all(&linked).unwrap();
+    h.projects.remove_tree(&linked);
+    changed(&h, &project);
+    assert_eq!(h.list(&claude_source()).sessions[0].place, Place::Missing);
+
+    std::fs::create_dir_all(linked.join("src")).unwrap();
+    h.projects.add_tree(&project, tree);
+    changed(&h, &project);
+    assert_snapshot!(places(&h), @r#"00000001-0000-4000-8000-000000000000 [base]/wt-agent/src Located(git:[base]/repo/.git wt=[base]/repo/.git/worktrees/wt-agent rel="src" None)"#);
+}
+
+#[test]
+fn place_directory_left_outside_every_worktree_is_resolved_again() {
+    let mut h = Harness::new();
+    let (project, linked, _) = in_linked_worktree(&mut h);
+    let resolves = h.projects.resolves().len();
+    // The worktree is removed from the repository but its directory is kept: it still exists,
+    // in no worktree.
+    h.projects.remove_tree(&linked);
+    changed(&h, &project);
+    assert_snapshot!(places(&h), @r#"00000001-0000-4000-8000-000000000000 [base]/wt-agent/src Resolved(folder:[base]/wt-agent/src wt=- rel="")"#);
+    assert_eq!(
+        h.projects.resolves().len(),
+        resolves + 1,
+        "not the cached resolution"
+    );
+}
+
+#[test]
+fn place_deleted_cwd_of_a_session_seen_on_refresh_is_missing() {
+    let mut h = Harness::new();
+    let repo = h.base.join("repo");
+    let linked = h.base.join("wt-agent");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&linked).unwrap();
+    // The project is not open: no `ProjectEvent` will come.
+    h.projects.add(git_project(&repo, &[&linked]), false);
+    let id = session_at(&h, 1, &linked);
+    h.start();
+    assert!(matches!(
+        h.list(&claude_source()).sessions[0].place,
+        Place::Resolved(_)
+    ));
+    std::fs::remove_dir_all(&linked).unwrap();
+    // The session file changes (the agent wrote a line before the worktree went).
+    let path = h.claude_root().join(format!("-p/{id}.jsonl"));
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&claude_turn(&id, &linked, "one more", 40, 9));
+    std::fs::write(&path, text).unwrap();
+    h.emit(&h.claude_root(), &[(&format!("-p/{id}.jsonl"), F)]);
+    assert_eq!(h.list(&claude_source()).sessions[0].place, Place::Missing);
 }

@@ -1,6 +1,6 @@
 //! 按 cwd 归位（docs/design/agents.md「数据流与线程」第 3 步）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -57,71 +57,86 @@ impl Places {
         self.by_cwd.get(cwd).map(|p| &p.place)
     }
 
-    /// 给还没有归位的 cwd 归位，返回是否有变化。阻塞（`canonicalize`、`resolve`），只在 executor 上调用。
+    /// 一轮刷新之后的归位，返回是否有变化。阻塞（`canonicalize`、`resolve`），只在 executor 上调用。
+    ///
+    /// 新的 cwd 归位；已有的只在可能变了时重新核对：这一轮重新读过摘要的会话的 cwd（`touched`），以及当时
+    /// 不存在的 cwd（`Missing`）。核对是一次规范化：目录消失、出现或解析到别处时，丢掉缓存的 `resolve`
+    /// 结果重新归位；没变时什么都不做，所以同一个目录只 `resolve` 一次。
     pub(crate) fn place_new<'a>(
         &mut self,
         projects: &ProjectsRef,
         cwds: impl IntoIterator<Item = &'a Arc<Path>>,
+        touched: &HashSet<Arc<Path>>,
     ) -> bool {
         let mut changed = false;
         for cwd in cwds {
-            if let Some(held) = self.by_cwd.get(&**cwd) {
-                // 目录当时不存在（`Missing`）：之后可能又建好了，每次刷新再试一次规范化（一次 `stat`）。
-                if held.canonical.is_none() {
-                    changed |= self.recanonicalize(projects, cwd);
+            match self.by_cwd.get(&**cwd) {
+                Some(held) => {
+                    if held.canonical.is_none() || touched.contains(cwd) {
+                        changed |= self.revalidate(projects, cwd, false);
+                    }
                 }
-                continue;
+                None => {
+                    let canonical = std::fs::canonicalize(cwd).ok();
+                    let place = self.locate(projects, canonical.as_deref());
+                    changed |= place != Place::Pending;
+                    self.by_cwd.insert(cwd.clone(), Placed { canonical, place });
+                }
             }
-            let canonical = std::fs::canonicalize(cwd).ok();
-            let place = self.locate(projects, canonical.as_deref());
-            changed |= place != Place::Pending;
-            self.by_cwd.insert(cwd.clone(), Placed { canonical, place });
         }
         changed
     }
 
-    /// 收到 `ProjectEvent` 后重新归位受影响的 cwd（打开、关闭：全部；变化：归到这个项目的），返回是否有变化。
-    /// `resolve` 的结果照旧用缓存，`locate` 只查内存。
+    /// 收到 `ProjectEvent` 后重新归位可能受影响的 cwd，返回是否有变化。归在这个项目里的（它的 worktree
+    /// 可能增减、被删除或重建）丢掉缓存的 `resolve` 结果，重新规范化和归位；还在 `Pending`、`Missing` 的
+    /// 同样重新核对；项目打开时，其余没有 `Located` 的 cwd 只重新 `locate`（只查内存）。其他项目里的不动。
     pub(crate) fn replace(&mut self, projects: &ProjectsRef, event: &ProjectEvent) -> bool {
-        let only = match event {
+        let (project, opened) = match event {
             ProjectEvent::Opened { result: Err(_), .. } => return false,
-            ProjectEvent::Opened { .. } | ProjectEvent::Closed { .. } => None,
-            ProjectEvent::Changed { project, .. } => Some(project.clone()),
+            ProjectEvent::Opened {
+                result: Ok(project),
+                ..
+            } => (project, true),
+            ProjectEvent::Closed { project } => (project, false),
+            ProjectEvent::Changed { project, .. } => (project, false),
         };
-        let cwds: Vec<Arc<Path>> = self
+        let work: Vec<(Arc<Path>, bool)> = self
             .by_cwd
             .iter()
-            .filter(|(_, p)| match &only {
-                None => true,
-                Some(project) => project_of(&p.place) == Some(project) || p.place == Place::Pending,
+            .filter_map(|(cwd, p)| {
+                let in_project = project_of(&p.place) == Some(project);
+                let unplaced = matches!(p.place, Place::Pending | Place::Missing);
+                let maybe_inside = opened && !matches!(p.place, Place::Located(_));
+                (in_project || unplaced || maybe_inside).then(|| (cwd.clone(), in_project))
             })
-            .map(|(cwd, _)| cwd.clone())
             .collect();
         let mut changed = false;
-        for cwd in cwds {
-            if self.by_cwd[&cwd].canonical.is_none() {
-                changed |= self.recanonicalize(projects, &cwd);
-                continue;
-            }
-            let canonical = self.by_cwd[&cwd].canonical.clone();
-            let place = self.locate(projects, canonical.as_deref());
-            let held = self.by_cwd.get_mut(&cwd).expect("listed above");
-            if held.place != place {
-                held.place = place;
-                changed = true;
-            }
+        for (cwd, in_project) in work {
+            changed |= self.revalidate(projects, &cwd, in_project);
         }
         changed
     }
 
-    /// 当时不存在的 cwd 再规范化一次；现在存在时重新归位。返回归位结果是否变了。
-    fn recanonicalize(&mut self, projects: &ProjectsRef, cwd: &Arc<Path>) -> bool {
-        let Ok(canonical) = std::fs::canonicalize(cwd) else {
+    /// 重新规范化一个 cwd；规范路径变了（目录消失、出现、解析到别处），或 `stale`（它所在项目的 worktree
+    /// 集合可能变了）时丢掉缓存的 `resolve` 结果，然后重新归位。返回归位结果是否变了。
+    fn revalidate(&mut self, projects: &ProjectsRef, cwd: &Arc<Path>, stale: bool) -> bool {
+        let canonical = std::fs::canonicalize(cwd).ok();
+        let held = self.by_cwd.get(&**cwd).expect("a held cwd");
+        let moved = held.canonical != canonical;
+        if !moved && !stale && held.place != Place::Pending {
             return false;
-        };
-        let place = self.locate(projects, Some(&canonical));
+        }
+        if moved || stale {
+            for path in [held.canonical.clone(), canonical.clone()]
+                .into_iter()
+                .flatten()
+            {
+                self.resolved.remove(&path);
+            }
+        }
+        let place = self.locate(projects, canonical.as_deref());
         let held = self.by_cwd.get_mut(&**cwd).expect("a held cwd");
-        held.canonical = Some(canonical);
+        held.canonical = canonical;
         let changed = held.place != place;
         held.place = place;
         changed

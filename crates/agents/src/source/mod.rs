@@ -390,14 +390,17 @@ impl<A: Adapter> Engine<A> {
         for path in &work.forced {
             add(&mut checks, path.clone(), true);
         }
+        let mut checked: Vec<PathBuf> = Vec::with_capacity(checks.len());
         for check in checks {
             if let Some(target) = self.adapter.related(&check.path) {
                 if self.state().known.contains_key(target.as_path()) {
                     self.check(&target, true);
+                    checked.push(target);
                 }
                 continue;
             }
             self.check(&check.path, check.forced);
+            checked.push(check.path);
         }
         // 解压副本只在会话的全部候选都不在时删掉（一个候选被移动或删除时，另一个可能还在用同一个副本）。
         let gone: Vec<SessionKey> = {
@@ -411,20 +414,28 @@ impl<A: Adapter> Engine<A> {
             self.adapter.removed(&key);
         }
 
-        // 归位：事件影响的 cwd，以及还没有归位的 cwd。
-        let cwds: Vec<Arc<Path>> = self
-            .state()
-            .known
-            .values()
-            .filter_map(|k| k.summary.as_ref().map(|(s, _)| s.cwd.clone()))
-            .collect();
+        // 归位：事件影响的 cwd，这一轮检查过的会话的 cwd，以及还没有归位的 cwd。
+        let (cwds, touched): (Vec<Arc<Path>>, HashSet<Arc<Path>>) = {
+            let state = self.state();
+            let cwds = state
+                .known
+                .values()
+                .filter_map(|k| k.summary.as_ref().map(|(s, _)| s.cwd.clone()))
+                .collect();
+            let touched = checked
+                .iter()
+                .filter_map(|p| state.known.get(p.as_path()))
+                .filter_map(|k| k.summary.as_ref().map(|(s, _)| s.cwd.clone()))
+                .collect();
+            (cwds, touched)
+        };
         let mut places = self.places.lock().unwrap_or_else(|e| e.into_inner());
         for event in &work.projects {
             places.replace(&self.setup.projects, event);
         }
         let keep: HashSet<&Path> = cwds.iter().map(|c| &**c).collect();
         places.retain(&|cwd| keep.contains(cwd));
-        places.place_new(&self.setup.projects, cwds.iter());
+        places.place_new(&self.setup.projects, cwds.iter(), &touched);
     }
 
     /// 检查一个路径：新文件读摘要，变化的文件重新生成摘要，消失的文件移除。
