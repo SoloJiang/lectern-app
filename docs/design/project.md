@@ -1,6 +1,6 @@
 # project 设计
 
-状态：实现中。第 1 步（清单解析与成员解析）、第 2 步（`services` 里的服务接口与数据类型）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现，第 5 步尚未实现（见「验收」）。
+状态：实现中。第 1 步（清单解析与成员解析）、第 2 步（`services` 里的服务接口与数据类型）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）已实现，第 5 步尚未实现（见「验收」）。
 
 对应 issue [#9](https://github.com/SoloJiang/lectern-app/issues/9)。`project` 把用户打开的路径解析成项目模型：仓库 → worktree → 子项目（[ADR 0006](../adr/0006.md)、[技术调研「Monorepo 与多 worktree 支持」](tech-research.md#monorepo-与多-worktree-支持)），以不可变快照交给视图和其他插件，并通过 `KernelControl::workspace_changed` 提交 `WorkspaceFacts`，驱动 `Activation::Workspace` 的插件（[kernel「依赖与自动启停」](kernel.md#依赖与自动启停)）。
 
