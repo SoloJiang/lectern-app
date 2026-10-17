@@ -12,6 +12,7 @@
 - git 项目的文件列表读 git index，不遍历目录；普通文件夹做有上限的遍历。
 - git 只经 `lectern-git`（`src/git_access.rs` 的 `GitAccess`），不直接依赖 gix，不运行 git 命令行和任何构建工具。
 - 所有 IO 在 executor 上；`snapshot`、`locate`、`open_projects` 只取锁复制或在内存里比较。
+- 增量刷新只经 `lectern-fs-watch`（`src/model/watch.rs`）：每个打开的 git 项目一个 `RepoWatch`，当前 worktree 一个 `WorktreeWatch`，非当前 worktree 不监听工作区，文件夹项目不监听。`Sink::deliver` 只标记脏、提交扫描循环，不做 IO。
 - 识别出的文件类型与清单交给插件市场做激活匹配（[ADR 0018](../../docs/adr/0018.md)），匹配不在本 crate 实现。
 
 ## 测试
@@ -25,4 +26,5 @@ just test -p lectern-project
 
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff、快照）用 insta 快照验收，快照改动要在 PR 里逐个看过。
 - 模型测试（`src/tests/`）用 `testing::FakeGit`（git 元数据在内存里，worktree 文件是临时目录里的真实文件，记录每次调用）和测试里的任务队列 `QueueHost`，不经 kernel；插件测试用真实的 `Kernel` 和 `Executor::manual()`；`real_repo_*` 用 `lectern_git::testing::TestRepo` 构造仓库，不调用 git 命令行。
+- 刷新测试（`refresh_*`，`src/tests/refresh.rs`）用 fs_watch 的 `testing::manual` 和 `FakeBackend` 注入事件（`tests/support.rs` 的 `Watch::settle` 交替运行 fs_watch 与 `QueueHost`），`FakeGit` 每个 worktree 的 `FakeSource` 随它的 index 更新；要在一轮扫描中途制造变化用 `FakeGit::before_read`。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。

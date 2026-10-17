@@ -13,8 +13,9 @@ plugin = true
 
 [features]
 # `testing::FakeGit`: an in-memory git for the tests of this crate and of
-# app and bench (docs/design/project.md「测试」).
-test-support = ["dep:tempfile"]
+# app and bench (docs/design/project.md「测试」). Its worktrees answer
+# `watch_source` with fs_watch's `FakeSource`.
+test-support = ["dep:tempfile", "lectern-fs-watch/test-support"]
 
 [dependencies]
 lectern-kernel = { path = "../kernel" }
@@ -22,6 +23,7 @@ lectern-services = { path = "../services" }
 lectern-git = { path = "../git" }
 lectern-executor = { path = "../executor" }
 lectern-platform = { path = "../platform" }
+lectern-fs-watch = { path = "../fs_watch" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -35,6 +37,7 @@ tempfile.workspace = true
 lectern-git = { path = "../git", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 
 [lints]
 workspace = true

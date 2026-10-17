@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lectern_executor::{Executor, Priority};
+use lectern_fs_watch::Watcher;
 use lectern_kernel::{
-    Activation, Active, Context, Manifest, Plugin, PluginError, PluginHandle, WorkspaceFacts,
-    service,
+    Activation, Active, BusyGuard, Context, Manifest, Plugin, PluginError, PluginHandle,
+    WorkspaceFacts, service,
 };
 use lectern_services::project::{ProjectEvent, Projects};
 
@@ -24,6 +25,10 @@ pub struct ProjectPlugin {
 /// `app` (ADR 0025); the plugin creates none.
 pub struct ProjectDeps {
     pub executor: Executor,
+    /// Created by `app` after the startup barrier (the FSEvents backend is
+    /// `platform`'s); open git projects refresh from it
+    /// (docs/design/fs_watch.md). Nothing is watched before the first open.
+    pub watcher: Watcher,
     /// The user's home directory, to tell a dotfiles repository whose main
     /// worktree is `$HOME` from the folders below it.
     pub home: PathBuf,
@@ -57,6 +62,7 @@ impl Plugin for ProjectPlugin {
     /// An empty project table; no IO, no task.
     fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
         let model = Model::new(self.git.clone(), self.deps.home.clone());
+        model.watch_with(self.deps.watcher.clone());
         ctx.provide::<dyn Projects>(model.clone())?;
         Ok(Box::new(ProjectActive {
             model,
@@ -114,5 +120,9 @@ impl Host for KernelHost {
 
     fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>) {
         self.handle.control().workspace_changed(facts);
+    }
+
+    fn busy(&self) -> Option<BusyGuard> {
+        self.handle.busy()
     }
 }

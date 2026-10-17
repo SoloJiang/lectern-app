@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lectern_executor::Executor;
+use lectern_fs_watch::Flags;
 use lectern_kernel::{
     Activation, Active, Context, Kernel, Manifest, Plugin, PluginError, PluginSet, PluginState,
     ServiceRef, service,
@@ -65,14 +66,19 @@ struct Setup {
     slot: Slot,
     events: Arc<Mutex<Vec<ProjectEvent>>>,
     java: Arc<AtomicBool>,
+    watch: Watch,
 }
 
 impl Setup {
     fn start(git: FakeGit) -> Setup {
         let git = Arc::new(git);
         let executor = Executor::manual();
+        // fs_watch runs on its own manual executor: `executor` holds only
+        // the plugin's work.
+        let watch = Watch::new();
         let deps = ProjectDeps {
             executor: executor.clone(),
+            watcher: watch.watcher.clone(),
             home: git.base().join("home"),
         };
         let slot = Slot::default();
@@ -97,6 +103,7 @@ impl Setup {
             slot,
             events,
             java,
+            watch,
         }
     }
 
@@ -117,10 +124,17 @@ impl Setup {
             .unwrap()
     }
 
-    /// Runs the executor and lets the kernel handle what it queued.
+    /// Runs the executor and fs_watch in turn and lets the kernel handle
+    /// what they queued, until none of them has work left.
     fn settle(&self) {
-        self.executor.run_until_idle();
-        self.kernel.barrier();
+        loop {
+            self.watch.driver.advance(LONG);
+            let ran = self.executor.run_until_idle();
+            self.kernel.barrier();
+            if ran == 0 && self.watch.driver.run_until_idle() == 0 {
+                return;
+            }
+        }
     }
 }
 
@@ -209,4 +223,46 @@ fn plugin_deactivation_drops_the_projects() {
     assert!(matches!(s.state("consumer"), PluginState::Waiting { .. }));
     // The provider is revoked: the reference no longer admits calls.
     assert!(projects.get().is_none());
+}
+
+#[test]
+fn plugin_refresh_keeps_the_kernel_busy_until_applied() {
+    let git = FakeGit::new();
+    let git_dir = git.init("repo");
+    monorepo(&git, &git_dir);
+    let s = Setup::start(git);
+    s.projects().get().unwrap().open(&s.git.base().join("repo"));
+    s.settle();
+    // The kernel thread drops its last guards on its own time.
+    wait_quiescent(&s.kernel);
+    s.events.lock().unwrap().clear();
+
+    s.git
+        .write(&git_dir, "apps/web/src/new.ts", b"export {};\n");
+    let changed = Flags(Flags::FILE.0 | Flags::MODIFIED.0);
+    s.watch.backend.emit(&git_dir, &[("index", changed)]);
+    assert!(
+        !s.kernel.is_quiescent(),
+        "the event waits in fs_watch's queue"
+    );
+    s.watch.driver.run_until_idle();
+    s.watch.driver.advance(LONG);
+    s.kernel.barrier();
+    assert!(!s.kernel.is_quiescent(), "the batch's refresh is queued");
+    s.executor.run_until_idle();
+    s.kernel.barrier();
+    wait_quiescent(&s.kernel);
+    let events = s.events.lock().unwrap().clone();
+    insta::assert_snapshot!(render_events(&events, s.git.base()), @"Changed 4 [files, packages]");
+}
+
+fn wait_quiescent(kernel: &Kernel) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !kernel.is_quiescent() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for quiescence"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }

@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use lectern_fs_watch::{Flags, Watcher};
 use lectern_git::testing::{IndexEntry, TestHead, TestRepo};
 use lectern_git::{HashKind, Mode};
 use lectern_services::project::{FileKind, Head, ProjectKey, Projects, WorktreeKey};
@@ -80,6 +81,11 @@ struct Real {
 /// A repository with a main worktree on `refs/heads/main` and a linked
 /// worktree `feature` with a detached HEAD.
 fn real(hash: HashKind) -> Real {
+    real_with(hash, None)
+}
+
+/// `real`, refreshing from `watcher` when given.
+fn real_with(hash: HashKind, watcher: Option<Watcher>) -> Real {
     let repo = match hash {
         HashKind::Sha1 => TestRepo::new(),
         HashKind::Sha256 => TestRepo::sha256(),
@@ -94,6 +100,9 @@ fn real(hash: HashKind) -> Real {
     let host = Arc::new(QueueHost::default());
     let git = Arc::new(LecternGit::with_discover(lectern_git::testing::discover));
     let model = Model::new(git, repo.base().join("home"));
+    if let Some(watcher) = watcher {
+        model.watch_with(watcher);
+    }
     model.attach(host.clone());
     Real {
         repo,
@@ -105,7 +114,19 @@ fn real(hash: HashKind) -> Real {
 
 /// The same layout in `FakeGit`; the detached HEAD is `commit`.
 fn fake(hash: HashKind, commit: &str) -> Harness {
-    let h = Harness::new();
+    fake_with(hash, commit, None)
+}
+
+fn fake_with(hash: HashKind, commit: &str, watcher: Option<Watcher>) -> Harness {
+    let git = Arc::new(FakeGit::new());
+    let home = git.base().join("home");
+    let h = Harness::with_model(git, move |g| {
+        let model = Model::new(g, home);
+        if let Some(watcher) = watcher {
+            model.watch_with(watcher);
+        }
+        model
+    });
     let common = h.git.init_with("repo", hash);
     write_fake(&h.git, &common, MAIN);
     let linked = h.git.add_worktree(&common, "feature", "repo-feature");
@@ -243,4 +264,69 @@ fn real_repo_resolve_and_bare() {
     assert_eq!(&*snapshot.name, "repo");
     assert!(snapshot.worktrees.is_empty());
     assert!(snapshot.active.is_none());
+}
+
+#[test]
+fn real_repo_refresh_matches_fake_git() {
+    let real_watch = Watch::new();
+    let real = real_with(HashKind::Sha1, Some(real_watch.watcher.clone()));
+    let request = real.model.open(real.repo.root());
+    real_watch.settle(&real.host);
+    let key = opened(&real.host.take_events(), request).unwrap();
+    let fake_watch = Watch::new();
+    let fake = fake_with(
+        HashKind::Sha1,
+        &real.detached(),
+        Some(fake_watch.watcher.clone()),
+    );
+    let fake_common = fake.base().join("repo/.git");
+    let request = fake.model.open(&fake.base().join("repo"));
+    fake_watch.settle(&fake.host);
+    let fake_key = opened(&fake.host.take_events(), request).unwrap();
+    assert_eq!(real.render(&key), fake.render(&fake_key));
+    let changed = Flags(Flags::FILE.0 | Flags::MODIFIED.0);
+
+    // A new staged manifest: the index event refreshes files and packages.
+    let mut files = MAIN.to_vec();
+    files.push(("svc/go.mod", b"module example.com/svc\n", false));
+    let files: &'static [_] = Vec::leak(files);
+    write_real(&real.repo, real.repo.root(), real.repo.common_dir(), files);
+    real_watch
+        .backend
+        .emit(real.repo.common_dir(), &[("index", changed)]);
+    real_watch.settle(&real.host);
+    fake.git
+        .write(&fake_common, "svc/go.mod", b"module example.com/svc\n");
+    fake_watch.backend.emit(&fake_common, &[("index", changed)]);
+    fake_watch.settle(&fake.host);
+    let real_events = real.host.take_events();
+    check_event_order(&real_events);
+    let fake_events = fake.host.take_events();
+    assert_eq!(
+        render_events(&real_events, real.repo.base()),
+        render_events(&fake_events, fake.base())
+    );
+    assert_eq!(real.render(&key), fake.render(&fake_key));
+    assert!(real.render(&key).contains("example.com/svc"));
+
+    // An unstaged manifest change: only the path event, no index change.
+    let web = br#"{ "name": "web-app" }"#;
+    std::fs::write(real.repo.root().join("apps/web/package.json"), web).unwrap();
+    real_watch
+        .backend
+        .emit(real.repo.root(), &[("apps/web/package.json", changed)]);
+    real_watch.settle(&real.host);
+    fake.git
+        .write_unstaged(&fake_common, "apps/web/package.json", web);
+    fake_watch.backend.emit(
+        &fake.base().join("repo"),
+        &[("apps/web/package.json", changed)],
+    );
+    fake_watch.settle(&fake.host);
+    assert_eq!(
+        render_events(&real.host.take_events(), real.repo.base()),
+        render_events(&fake.host.take_events(), fake.base())
+    );
+    assert_eq!(real.render(&key), fake.render(&fake_key));
+    assert!(real.render(&key).contains("name=web-app"));
 }

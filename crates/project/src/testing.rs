@@ -4,6 +4,10 @@
 //! repositories, worktree lists, HEADs and indexes are in memory, and every
 //! call is recorded. Never runs the git CLI. Every method panics on
 //! failure: it is test code.
+//!
+//! Each worktree has an `fs_watch::testing::FakeSource` kept in step with its
+//! index (`watch_source`), so a refresh test drives fs_watch's fake backend
+//! against the same tracked paths.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -11,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use lectern_fs_watch::WorktreeSource;
+use lectern_fs_watch::testing::FakeSource;
 use lectern_git::{GitError, HashKind, Oid};
 use lectern_services::project::{FileKind, FileList, Head};
 
@@ -27,11 +33,21 @@ pub enum Call {
     Read { git_dir: PathBuf, rel: String },
 }
 
+type Hook = Box<dyn FnOnce() + Send>;
+
 pub struct FakeGit {
     _dir: tempfile::TempDir,
     base: PathBuf,
+    inner: Arc<Inner>,
+}
+
+/// Shared with the opened worktrees, which read it live.
+#[derive(Default)]
+struct Inner {
     repos: Mutex<Vec<Repo>>,
-    calls: Arc<Mutex<Vec<Call>>>,
+    calls: Mutex<Vec<Call>>,
+    /// Run once, before the read of (git directory, path).
+    read_hooks: Mutex<Vec<(PathBuf, String, Hook)>>,
 }
 
 struct Repo {
@@ -42,7 +58,6 @@ struct Repo {
     trees: Vec<Tree>,
 }
 
-#[derive(Clone)]
 struct Tree {
     git_dir: PathBuf,
     root: PathBuf,
@@ -50,7 +65,26 @@ struct Tree {
     head: Head,
     locked: bool,
     index: BTreeMap<String, FileKind>,
+    /// Bumped by `touch_index`: part of the checksum, not of the paths.
+    stamp: u64,
     index_error: Option<String>,
+    source: Arc<FakeSource>,
+}
+
+impl Tree {
+    fn new(git_dir: PathBuf, root: PathBuf, is_main: bool, head: Head) -> Tree {
+        Tree {
+            git_dir,
+            root,
+            is_main,
+            head,
+            locked: false,
+            index: BTreeMap::new(),
+            stamp: 0,
+            index_error: None,
+            source: FakeSource::new(),
+        }
+    }
 }
 
 impl FakeGit {
@@ -60,8 +94,7 @@ impl FakeGit {
         FakeGit {
             _dir: dir,
             base,
-            repos: Mutex::new(Vec::new()),
-            calls: Arc::default(),
+            inner: Arc::default(),
         }
     }
 
@@ -85,15 +118,12 @@ impl FakeGit {
             bare: false,
             hash,
             unreadable: None,
-            trees: vec![Tree {
-                git_dir: common_dir.clone(),
+            trees: vec![Tree::new(
+                common_dir.clone(),
                 root,
-                is_main: true,
-                head: Head::Branch("refs/heads/main".into()),
-                locked: false,
-                index: BTreeMap::new(),
-                index_error: None,
-            }],
+                true,
+                Head::Branch("refs/heads/main".into()),
+            )],
         });
         common_dir
     }
@@ -125,21 +155,35 @@ impl FakeGit {
             .iter_mut()
             .find(|r| r.common_dir == common_dir)
             .expect("no such repository");
-        repo.trees.push(Tree {
-            git_dir: git_dir.clone(),
+        repo.trees.push(Tree::new(
+            git_dir.clone(),
             root,
-            is_main: false,
-            head: Head::Branch(format!("refs/heads/{name}").into()),
-            locked: false,
-            index: BTreeMap::new(),
-            index_error: None,
-        });
+            false,
+            Head::Branch(format!("refs/heads/{name}").into()),
+        ));
         git_dir
+    }
+
+    /// `git worktree remove`: deletes the linked worktree's root and its
+    /// administrative directory, and drops it from the list.
+    pub fn remove_worktree(&self, git_dir: &Path) {
+        let root = self.root(git_dir);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(git_dir).unwrap();
+        for repo in self.lock().iter_mut() {
+            repo.trees.retain(|t| t.git_dir != git_dir);
+        }
     }
 
     /// The root of the worktree whose git directory is `git_dir`.
     pub fn root(&self, git_dir: &Path) -> PathBuf {
         self.with_tree(git_dir, |t| t.root.clone())
+    }
+
+    /// The fs_watch source of this worktree: its tracked paths follow the
+    /// index; tests add ignore rules here.
+    pub fn source(&self, git_dir: &Path) -> Arc<FakeSource> {
+        self.with_tree(git_dir, |t| t.source.clone())
     }
 
     pub fn set_head(&self, git_dir: &Path, head: Head) {
@@ -165,13 +209,24 @@ impl FakeGit {
     pub fn track(&self, git_dir: &Path, rel: &str, kind: FileKind) {
         self.with_tree(git_dir, |t| {
             t.index.insert(rel.to_owned(), kind);
+            match kind {
+                FileKind::Submodule => t.source.gitlink(&[rel]),
+                _ => t.source.track(&[rel]),
+            }
         });
     }
 
     pub fn untrack(&self, git_dir: &Path, rel: &str) {
         self.with_tree(git_dir, |t| {
             t.index.remove(rel);
+            t.source.untrack(&[rel]);
         });
+    }
+
+    /// Rewrites the index with the same paths (as `git status` refreshing
+    /// stat data does): the checksum changes, the file list does not.
+    pub fn touch_index(&self, git_dir: &Path) {
+        self.with_tree(git_dir, |t| t.stamp += 1);
     }
 
     /// Changes a worktree file without staging it.
@@ -203,12 +258,19 @@ impl FakeGit {
         repo.unreadable = Some(reason.to_owned());
     }
 
+    /// Runs `hook` once, on the thread reading, just before the next read of
+    /// `rel` in this worktree: lets a test change things in the middle of a
+    /// scan.
+    pub fn before_read(&self, git_dir: &Path, rel: &str, hook: impl FnOnce() + Send + 'static) {
+        lock(&self.inner.read_hooks).push((git_dir.to_path_buf(), rel.to_owned(), Box::new(hook)));
+    }
+
     pub fn calls(&self) -> Vec<Call> {
-        lock(&self.calls).clone()
+        lock(&self.inner.calls).clone()
     }
 
     pub fn take_calls(&self) -> Vec<Call> {
-        std::mem::take(&mut *lock(&self.calls))
+        std::mem::take(&mut *lock(&self.inner.calls))
     }
 
     /// The worktree files read since the last `take_calls`.
@@ -223,11 +285,11 @@ impl FakeGit {
     }
 
     fn lock(&self) -> MutexGuard<'_, Vec<Repo>> {
-        lock(&self.repos)
+        lock(&self.inner.repos)
     }
 
     fn record(&self, call: Call) {
-        lock(&self.calls).push(call);
+        self.inner.record(call);
     }
 
     fn with_tree<T>(&self, git_dir: &Path, f: impl FnOnce(&mut Tree) -> T) -> T {
@@ -244,6 +306,12 @@ impl FakeGit {
 impl Default for FakeGit {
     fn default() -> Self {
         FakeGit::new()
+    }
+}
+
+impl Inner {
+    fn record(&self, call: Call) {
+        lock(&self.calls).push(call);
     }
 }
 
@@ -327,9 +395,11 @@ impl GitAccess for FakeGit {
             return Err(not_found(&tree.root));
         }
         Ok(Box::new(FakeTree {
-            tree: tree.clone(),
+            inner: self.inner.clone(),
+            git_dir: tree.git_dir.clone(),
+            root: tree.root.clone(),
             hash: repo.hash,
-            calls: self.calls.clone(),
+            source: tree.source.clone(),
         }))
     }
 
@@ -338,21 +408,39 @@ impl GitAccess for FakeGit {
     }
 }
 
-/// One opened worktree: the index as it was when opened.
+/// One opened worktree. Reads the index live, as a `lectern_git::Worktree`
+/// handle rereads the index file, so a handle kept across refreshes sees
+/// later changes.
 struct FakeTree {
-    tree: Tree,
+    inner: Arc<Inner>,
+    git_dir: PathBuf,
+    root: PathBuf,
     hash: HashKind,
-    calls: Arc<Mutex<Vec<Call>>>,
+    source: Arc<FakeSource>,
 }
 
 impl FakeTree {
     fn record(&self, call: Call) {
-        lock(&self.calls).push(call);
+        self.inner.record(call);
     }
 
-    fn checksum(&self) -> Oid {
-        let mut text = String::new();
-        for (path, kind) in &self.tree.index {
+    /// The index now (with its stamp), or the error reading it fails with.
+    fn index(&self) -> Result<(BTreeMap<String, FileKind>, u64), GitError> {
+        let repos = lock(&self.inner.repos);
+        let tree = repos
+            .iter()
+            .flat_map(|r| r.trees.iter())
+            .find(|t| t.git_dir == self.git_dir)
+            .ok_or_else(|| not_found(&self.git_dir))?;
+        match &tree.index_error {
+            Some(reason) => Err(GitError::Corrupt(reason.clone())),
+            None => Ok((tree.index.clone(), tree.stamp)),
+        }
+    }
+
+    fn checksum(&self, (index, stamp): &(BTreeMap<String, FileKind>, u64)) -> Oid {
+        let mut text = format!("{stamp}\n");
+        for (path, kind) in index {
             text.push_str(&format!("{kind:?} {path}\n"));
         }
         Oid::for_blob(self.hash, text.as_bytes())
@@ -361,34 +449,40 @@ impl FakeTree {
 
 impl TreeAccess for FakeTree {
     fn index_files(&self, _cancel: &AtomicBool) -> Result<IndexFiles, GitError> {
-        self.record(Call::IndexFiles(self.tree.git_dir.clone()));
-        if let Some(reason) = &self.tree.index_error {
-            return Err(GitError::Corrupt(reason.clone()));
-        }
+        self.record(Call::IndexFiles(self.git_dir.clone()));
+        let index = self.index()?;
         let mut files = FileList::builder();
-        for (path, kind) in &self.tree.index {
+        for (path, kind) in &index.0 {
             files.push(path, *kind);
         }
         Ok(IndexFiles {
-            checksum: Some(self.checksum()),
+            checksum: Some(self.checksum(&index)),
             files: files.build(),
         })
     }
 
     fn index_checksum(&self) -> Result<Option<Oid>, GitError> {
-        self.record(Call::IndexChecksum(self.tree.git_dir.clone()));
-        if let Some(reason) = &self.tree.index_error {
-            return Err(GitError::Corrupt(reason.clone()));
-        }
-        Ok(Some(self.checksum()))
+        self.record(Call::IndexChecksum(self.git_dir.clone()));
+        let index = self.index()?;
+        Ok(Some(self.checksum(&index)))
     }
 
     fn read_file(&self, rel: &str, limit: u64) -> Result<Option<Vec<u8>>, GitError> {
+        let hook = {
+            let mut hooks = lock(&self.inner.read_hooks);
+            let i = hooks
+                .iter()
+                .position(|(git_dir, path, _)| *git_dir == self.git_dir && path == rel);
+            i.map(|i| hooks.remove(i).2)
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
         self.record(Call::Read {
-            git_dir: self.tree.git_dir.clone(),
+            git_dir: self.git_dir.clone(),
             rel: rel.to_owned(),
         });
-        let path = self.tree.root.join(rel);
+        let path = self.root.join(rel);
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(meta) => meta,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -401,6 +495,10 @@ impl TreeAccess for FakeTree {
             return Err(GitError::TooLarge { size: meta.len() });
         }
         Ok(Some(std::fs::read(path)?))
+    }
+
+    fn watch_source(&self) -> Arc<dyn WorktreeSource> {
+        self.source.clone()
     }
 }
 

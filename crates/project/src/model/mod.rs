@@ -3,15 +3,18 @@
 //!
 //! Every open project has one snapshot, replaced whole, and at most one
 //! scan loop on the executor. Requests that arrive while it runs are kept
-//! as `wanted` (the newest wins) and picked up when the current step ends.
+//! as `wanted` (the newest wins) and picked up when the current step ends;
+//! fs_watch batches only mark the project dirty, and the loop refreshes it
+//! once the requests are done (`watch.rs`).
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
+use lectern_fs_watch::Watcher;
 use lectern_git::{GitError, HashKind};
-use lectern_kernel::WorkspaceFacts;
+use lectern_kernel::{BusyGuard, WorkspaceFacts};
 use lectern_services::project::{
     ActiveTree, Location, OpenError, OpenRequest, Package, PackageMatch, ProjectEvent, ProjectKey,
     ProjectSnapshot, Projects, RelPath, ResolveError, Resolved, Scan, ScanError, Worktree,
@@ -23,8 +26,10 @@ use crate::git_access::{Discovered, GitAccess, WorktreeInfo};
 
 mod cache;
 mod scan;
+mod watch;
 
 use cache::{OtherTrees, PARSE_CACHE_BYTES, ParseCache};
+use watch::{Dirty, Watches};
 
 /// Where the model runs its work and sends its results: the kernel and the
 /// executor in the app (`plugin::KernelHost`), a queue in tests.
@@ -34,6 +39,9 @@ pub(crate) trait Host: Send + Sync {
     fn spawn(&self, work: Box<dyn FnOnce() + Send>);
     fn emit(&self, event: ProjectEvent);
     fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>);
+    /// A guard for the fs_watch sinks (`Sink::busy`); None when the plugin
+    /// is deactivated, and in tests.
+    fn busy(&self) -> Option<BusyGuard>;
 }
 
 pub(crate) struct Model {
@@ -41,6 +49,11 @@ pub(crate) struct Model {
     git: Arc<dyn GitAccess>,
     home: PathBuf,
     host: OnceLock<Arc<dyn Host>>,
+    /// None (tests that don't refresh): every scan opens its own worktree
+    /// handle and nothing is watched, as before step 4.
+    watcher: OnceLock<Watcher>,
+    /// Ids of the active worktrees' watches; 0 is none.
+    next_watch: AtomicU64,
     folder_limit: usize,
     next_request: AtomicU64,
     /// In the order they were opened.
@@ -65,6 +78,12 @@ pub(crate) struct Project {
     emit: Mutex<()>,
     /// Set on close; stops an index read in progress.
     cancel: AtomicBool,
+    /// The fs_watch subscriptions and what the active tree was built from.
+    /// Only the scan loop changes it; never held across IO.
+    watch: Mutex<Watches>,
+    /// The id of the active worktree's watch (0: none). Its sink drops the
+    /// batches of an older watch without taking a lock.
+    tree_watch: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -78,6 +97,16 @@ struct Control {
     running: bool,
     closed: bool,
     wanted: Option<Wanted>,
+    /// What fs_watch reported since the last refresh.
+    dirty: Dirty,
+    /// The batches' guards, dropped when the round handling them ends.
+    guards: Vec<BusyGuard>,
+}
+
+/// One round of the scan loop.
+enum Job {
+    Apply(Wanted),
+    Refresh(Dirty),
 }
 
 /// What the scan loop should bring the snapshot to.
@@ -106,6 +135,8 @@ impl Model {
             git,
             home,
             host: OnceLock::new(),
+            watcher: OnceLock::new(),
+            next_watch: AtomicU64::new(1),
             folder_limit,
             next_request: AtomicU64::new(1),
             projects: Mutex::new(Vec::new()),
@@ -122,12 +153,19 @@ impl Model {
         let _ = self.host.set(host);
     }
 
-    /// The plugin is deactivated: stop every loop and drop every snapshot
-    /// and cache. Emits nothing.
+    /// Refreshes open git projects from `watcher` (docs/design/project.md
+    /// 「数据流与线程」). Set once, before the first `open`; no IO.
+    pub(crate) fn watch_with(&self, watcher: Watcher) {
+        let _ = self.watcher.set(watcher);
+    }
+
+    /// The plugin is deactivated: stop every loop and drop every snapshot,
+    /// watch and cache. Emits nothing.
     pub(crate) fn shutdown(&self) {
         let projects = std::mem::take(&mut *lock(&self.projects));
         for project in projects {
             project.close();
+            drop(project.take_watches());
         }
         lock(&self.parsed).clear();
         lock(&self.others).clear();
@@ -135,6 +173,10 @@ impl Model {
 
     fn host(&self) -> Option<&Arc<dyn Host>> {
         self.host.get()
+    }
+
+    fn busy(&self) -> Option<BusyGuard> {
+        self.host()?.busy()
     }
 
     fn spawn(&self, work: impl FnOnce(&Arc<Model>) + Send + 'static) {
@@ -276,6 +318,8 @@ impl Model {
                         control: Mutex::new(Control::default()),
                         emit: Mutex::new(()),
                         cancel: AtomicBool::new(false),
+                        watch: Mutex::new(Watches::default()),
+                        tree_watch: AtomicU64::new(0),
                     });
                     projects.push(project.clone());
                     project
@@ -313,19 +357,53 @@ impl Model {
         self.spawn(move |model| model.run(&project));
     }
 
+    /// Adds what an fs_watch batch reported to the project's dirty state
+    /// and starts the loop when idle. `busy` stays held until the round
+    /// that handles it ends. No IO: called on the fs_watch thread.
+    fn mark(&self, project: &Arc<Project>, busy: Option<BusyGuard>, add: impl FnOnce(&mut Dirty)) {
+        let mut control = lock(&project.control);
+        if control.closed {
+            return;
+        }
+        add(&mut control.dirty);
+        control.guards.extend(busy);
+        if control.running {
+            return;
+        }
+        control.running = true;
+        drop(control);
+        let project = project.clone();
+        self.spawn(move |model| model.run(&project));
+    }
+
+    /// Requests first (a full scan covers what is dirty in the active
+    /// tree), then refreshes; one round per iteration.
     fn run(&self, project: &Arc<Project>) {
         loop {
-            let wanted = {
+            let (job, guards) = {
                 let mut control = lock(&project.control);
-                match (control.closed, control.wanted.take()) {
-                    (false, Some(wanted)) => wanted,
-                    _ => {
-                        control.running = false;
-                        return;
-                    }
+                if control.closed {
+                    control.running = false;
+                    control.guards.clear();
+                    return;
                 }
+                let guards = std::mem::take(&mut control.guards);
+                let job = if let Some(wanted) = control.wanted.take() {
+                    control.dirty.covered_by_scan();
+                    Job::Apply(wanted)
+                } else if !control.dirty.is_empty() {
+                    Job::Refresh(std::mem::take(&mut control.dirty))
+                } else {
+                    control.running = false;
+                    return;
+                };
+                (job, guards)
             };
-            self.apply(project, wanted);
+            match job {
+                Job::Apply(wanted) => self.apply(project, wanted),
+                Job::Refresh(dirty) => self.refresh(project, dirty),
+            }
+            drop(guards);
         }
     }
 
@@ -364,8 +442,17 @@ impl Project {
         let mut control = lock(&self.control);
         control.closed = true;
         control.wanted = None;
+        control.dirty = Dirty::default();
+        control.guards.clear();
         drop(control);
+        self.tree_watch.store(0, Ordering::Relaxed);
         self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// The watches, to drop off the UI thread: the active worktree's handle
+    /// holds its parsed index.
+    fn take_watches(&self) -> Watches {
+        std::mem::take(&mut *lock(&self.watch))
     }
 
     /// A newer request or a close is waiting: the current step's result
@@ -395,6 +482,7 @@ impl Projects for Model {
         };
         removed.close();
         self.spawn(move |model| {
+            drop(removed.take_watches());
             {
                 let _emit = lock(&removed.emit);
                 model.emit(ProjectEvent::Closed {

@@ -5,8 +5,12 @@ use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use lectern_kernel::WorkspaceFacts;
+use lectern_executor::Executor;
+use lectern_fs_watch::testing::{Driver, FakeBackend, manual};
+use lectern_fs_watch::{Config, Watcher};
+use lectern_kernel::{BusyGuard, WorkspaceFacts};
 use lectern_services::project::{
     OpenError, OpenRequest, PackageMatch, ProjectEvent, ProjectKey, ProjectSnapshot, Projects, Scan,
 };
@@ -68,6 +72,50 @@ impl Host for QueueHost {
 
     fn workspace_changed(&self, facts: Arc<dyn WorkspaceFacts>) {
         self.facts.lock().unwrap().push(facts);
+    }
+
+    fn busy(&self) -> Option<BusyGuard> {
+        None
+    }
+}
+
+/// Long enough for every fs_watch coalescing window to end.
+pub(crate) const LONG: Duration = Duration::from_secs(5);
+
+/// A manually driven fs_watch over a fake backend, for the refresh tests.
+pub(crate) struct Watch {
+    pub backend: Arc<FakeBackend>,
+    pub watcher: Watcher,
+    pub driver: Arc<Driver>,
+}
+
+impl Watch {
+    pub(crate) fn new() -> Watch {
+        let backend = FakeBackend::new();
+        let (watcher, driver) = manual(backend.clone(), Executor::manual(), Config::default());
+        Watch {
+            backend,
+            watcher,
+            driver: Arc::new(driver),
+        }
+    }
+
+    /// Runs fs_watch (its queue and loads, then the clock past every
+    /// window) and the model's queued work in turn until neither has any
+    /// left.
+    pub(crate) fn settle(&self, host: &QueueHost) {
+        loop {
+            let before = self.driver.run_until_idle();
+            self.driver.advance(LONG);
+            let mut ran = false;
+            while host.step() {
+                ran = true;
+            }
+            let after = self.driver.run_until_idle();
+            if before == 0 && !ran && after == 0 {
+                return;
+            }
+        }
     }
 }
 
