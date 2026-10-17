@@ -66,7 +66,7 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 |---|---|---|
 | 冷启动到首帧 | < 20 ms | 首帧前只建窗口、画骨架，首帧前不读我们自己的文件（窗口快照在首帧后读）；插件、SQLite、监听、会话扫描都在首帧后；shader 预编译；字体走系统字体 API |
 | 打开项目到项目主页可用 | < 100 ms | 文件列表直接读 git index，不遍历目录 |
-| 打开文件到首屏高亮 | < 16 ms（一帧） | 不用 mmap（见 [platform 设计](platform.md)）：首屏只经 `SafeRoot` 读文件开头一段（有界的前缀读取，`platform` 待补的接口；现有的 `SafeRoot::read` 读完整个文件，超过上限时报 `TooLarge`），只解析可见区域；整个文件的读取和 tree-sitter 解析放后台 |
+| 打开文件到首屏高亮 | < 16 ms（一帧） | 不用 mmap（见 [platform 设计](platform.md)）：首屏只经 `SafeRoot` 读要显示的那一段（有界的范围读取，跳转到文件中部时也是目标位置附近，`platform` 待补的接口，见 [#103](https://github.com/SoloJiang/lectern-app/issues/103)；现有的 `SafeRoot::read` 读完整个文件，超过上限时报 `TooLarge`），只解析可见区域；整个文件的读取和 tree-sitter 解析放后台，完整内容装入之前文件只读、不能进入编辑 |
 | 打开一个会话的 Diff | < 50 ms | 改动从会话 JSONL 增量提取并缓存；diff 结果按 blob OID 缓存 |
 | 切换 worktree / 分支 | < 100 ms | 所有缓存以 git blob OID 为键，内容相同即命中 |
 | 安装包 | `.app` ≤ 80 MB（目标 50 MB），`.dmg` ≤ 40 MB | 只带审阅闭环需要的核心；其余语言包、jdtls、平台与 agent 适配从插件市场按需下载（[ADR 0018](../adr/0018.md)） |
