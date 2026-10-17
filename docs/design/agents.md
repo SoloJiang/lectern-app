@@ -293,12 +293,14 @@ impl Cursor {
     pub fn to_bytes(&self) -> Vec<u8>;
     /// 序列化格式不认识时返回 None，调用方从 `START` 读。游标里还记着生成它的来源 ID 和适配器版本，
     /// 但这里不检查：版本是否与当前提供者一致由 `SessionSource::read` 判断，不一致时从头读并在 `Batch::reset` 里告诉消费方
-    /// （适配器升级后能解析更多记录或修正了映射），消费方按稳定键覆盖已有数据。
+    /// （适配器升级后能解析更多记录或修正了映射），消费方按 `Batch::reset` 的规则替换已有数据。
     pub fn from_bytes(bytes: &[u8]) -> Option<Cursor>;
 }
 
 pub struct Batch {
-    /// 为 true 时记录从文件开头重新给出。消费方按记录里的稳定键（`UsageKey`、`ToolCallId`、`TurnId`）覆盖已有数据。
+    /// 为 true 时记录从文件开头重新给出。消费方先删除之前从这个 `SessionKey` 导入的全部数据（用量、工具事件、限额等），
+    /// 再写入这一批，删除、写入和游标提交在同一个事务里；所以截断、替换或适配器不再给出的旧记录不会留下。
+    /// 同一条用量也由另一个会话交来时（按 `UsageKey` 去重），只去掉这个会话的那份来源，其他会话的仍然计数，细节由 `usage` 的设计规定。
     pub reset: bool,
     pub records: Vec<Positioned<Record>>,
     pub cursor: Cursor,
@@ -639,7 +641,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 
 - 解析快照（insta）：每份 fixture 解析出的 `Record` 序列、`TurnIndex`、`SessionSummary` 各一个快照，`claude_*` / `codex_*`。
 - 增量等价：每份 fixture 按随机切分（包括行中间）逐段追加到临时文件、每段后 `read` 一次，拼起来的记录与一次读完相同；游标经 `to_bytes` / `from_bytes` 往返后继续读，结果相同（`incremental_*`）。
-- 改写与截断：截断、替换为另一个会话、改写游标之前的内容，`reset` 为 true 且记录从头给出（`reset_*`）。
+- 改写与截断：截断、替换为另一个会话、改写游标之前的内容，`reset` 为 true 且记录从头给出；替换后旧文件里有、新文件里没有的记录不再出现在回放里（`reset_*`）。
 - 读取进度：`max_bytes` 为 1 时每次调用仍消费一行；下一行比 `max_bytes` 大、但不到 16 MB 时整行返回；超过 16 MB 的行被跳过、计数、游标越过它；任何返回 `at_end == false` 的调用，新游标都大于旧游标（`progress_*`）。
 - 压缩：同一份 Codex fixture 的 `.jsonl` 与 `.jsonl.zst` 记录相同；压缩前取的游标在压缩后继续有效；第一次 `read` / `turns` / `load` 建好解压副本，之后分批 `read` 和 `load` 都不再解码（用计数的解码器检查整个归档只解压一次）；压缩文件身份变化后副本重建；副本合计超过上限时按 LRU 删除、不删正在读取的副本；副本目录不可写时 `load` 结果不变（`zst_*`、`decoded_*`）。
 - 路由：两个来源报告相同的会话 ID 时得到两个不同的 `SessionKey`；`SessionsChanged::source` 与键的 `source` 一致（`source_*`）。
