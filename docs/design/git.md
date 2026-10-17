@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -252,6 +252,9 @@ impl Worktree {
     /// 只读 index 文件末尾的校验和，不解析条目、不展开 sparse 目录；与 `TrackedPaths::checksum` 相同。
     /// 供调用方在不重建文件列表的情况下检查缓存是否过期（`project` 对非当前 worktree 的缓存检查）。没有 index 文件时为 None。
     pub fn index_checksum(&self) -> Result<Option<Oid>, GitError>;
+    /// 把 `bytes` 当作 `path` 上的普通文件，按这个路径的属性和配置做 to-git 方向的内置转换，返回规范内容的 blob OID
+    /// （与 `git add` 记录的相同），不写对象库。设置了 clean / process 过滤器的路径返回 None。见下文「规范内容的 OID」。
+    pub fn canonical_oid(&self, path: &RepoPath, bytes: &[u8]) -> Result<Option<Oid>, GitError>;
 }
 
 impl TrackedPaths {
@@ -289,6 +292,17 @@ impl From<lectern_fs_watch::WorktreeName> for WorktreeId { /* … */ }
 
 - `filter`：未跟踪的 `.gitignore` 由「工作区比较」第 4 步的同一个遍历找出（经 `SafeRoot`，不进入被忽略的目录、子模块和嵌套仓库，受 `Limits::untracked` 的 20 000 个条目上限，[ADR 0028](../adr/0028.md)），遍历读到的每个 `.gitignore`（跟踪的和未跟踪的）都用上；遍历没有走到的、index 里的 `.gitignore` 和事件给出的 `gitignores` 之后再读，上级目录是子模块、嵌套仓库或被忽略的不读。工作区里只读普通文件；skip-worktree 条目在工作区里读不到时用 index 的 blob（与 git 相同）。`info/exclude`、`core.excludesFile`（没有设置时是 XDG 的默认位置）由 gix-ignore 读。`ignored` 从路径所在目录起逐级向上查 `.gitignore`（最深的有匹配的那个决定，同一文件里最后一条匹配的规则生效），都没有匹配时查 `info/exclude`，再查 `core.excludesFile`；`core.ignoreCase` 时大小写折叠（index 另存一份按折叠后排序的下标，每个条目 4 字节），`core.precomposeUnicode` 时先把查询的路径规范化为 NFC。
 - `config_files`：仓库的 `config`、这个 worktree 的 `config.worktree`、`info/exclude`、`info/attributes`；gix 读系统和用户配置时（生产路径），系统、XDG、`~/.gitconfig` 三个位置和系统属性文件（`/etc/gitattributes`）本身；gix 配置里每一节的来源文件；每个 `include` / `includeIf` 节里的每个 `path`（按 gix 的规则展开 `~`、`%(prefix)`，相对路径相对所在文件的目录，条件和文件是否存在都不看）；`core.excludesFile`、`core.attributesFile` 的值，没有设置（或是不存在的 `:(optional)`）时的 XDG 默认位置。只给出绝对路径，排序去重。
+
+### 规范内容的 OID
+
+`canonical_oid` 供 `code_intel` 核对它自己读到的工作区字节是不是某个 OID 的那份内容（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）。转换与「工作区比较」第 3 步相同，只是单独公开：
+
+- 转换：`working-tree-encoding`、`text` / `eol` / `crlf` 与 `core.autocrlf`、`core.eol` 的换行转换、`ident`，由 gix 的过滤管道完成，管道里没有任何过滤器驱动。`text=auto` 判断 index 里这个路径的 blob 是否已有 CR（git 的 `has_crlf_in_index`），index 里没有这个路径时按没有 CR 处理。转换失败（字节不符合声明的编码）时用原始字节，与工作区比较相同。
+- 过滤器：属性 `filter=<名>` 指向配置了 `filter.<名>.clean` 或 `.process` 的驱动时返回 None，不执行任何程序。只有 `smudge` 的驱动和没有配置的驱动不影响 to-git 方向，与 git 相同。
+- 属性：`info/attributes`、全局和系统属性文件按句柄的权限读取（与工作区比较相同）；`.gitattributes` 只取 `path` 所在的各级目录（根目录到 `path` 的父目录）里的那一个。每一级的取法与工作区比较取生效的 `.gitattributes` 相同（「与设计的差异」第 3 步）：index 里有这个 `.gitattributes`（stage 0 的普通文件）时，经 `SafeRoot` 读工作区里的那份，工作区里没有或不是普通文件时用 index 的 blob，skip-worktree 的条目直接用 index 的 blob；有未解决冲突的不用；index 里没有时，工作区里有普通文件就用它。属性栈只用 id-mapping 来源，不按路径读工作区（[ADR 0028](../adr/0028.md)）。
+- 与工作区比较的差别：未跟踪的 `.gitattributes` 是否被忽略、是否在被忽略的目录里都会用上，与 git 的 `git add` 相同；工作区比较只用第 4 步遍历列出的那些（「与设计的差异」第 3 步的已知限制）。两者只在被忽略的 `.gitattributes` 上不同。
+- 读取：`bytes` 由调用方给出，本函数不读 `path` 本身；读 index（与 `changes` 共用同一份按校验和缓存的解析结果）和各级 `.gitattributes`（每级最多一次 `SafeRoot::read`，上限 `Limits::default().read_bytes`）。不写 index 和对象库，不执行外部程序。
+- 代价：每次调用打开一个 gix 句柄。新的 `Worktree` 句柄第一次调用时解析 index；同一个句柄在 index 不变时不再解析。调用方只在原始字节的 OID 与期望的不同时调用。
 
 ### 改动集
 
@@ -787,6 +801,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 重命名：40 个文件同时改名并小改时都识别为相似重命名；未暂存的 `mv a b` 得到 `Deleted(a)`（`staged` 为 a 的 index 条目）和未跟踪的 `Added(b)`，不配对；来源 × 目标超过上限的平方时只有精确重命名。
 - `discover`：`ceilings` 里的目录之上的仓库不被找到。
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
+- 规范内容的 OID（`canonical_*`，在 `compare/tests.rs`）：工作区转换夹具在 `core.autocrlf` 为 false、true、input 时，每个文件的原始字节得到 git 记录的 OID；`text=auto`、`eol=lf`、`text eol=lf` 下 LF 和 CRLF 的字节都得到 index 条目的 OID，index 的 blob 已有 CRLF 时 `text=auto` 不转换；`ident` 展开的关键字收回；clean / process 过滤器返回 None，只有 smudge 的和没有配置的驱动不影响结果；各级目录的 `.gitattributes`（未跟踪的、从工作区删掉而用 index blob 的）都生效；SHA-256 仓库得到 64 位的 OID。每次调用前后 git 目录不变。
 - 不执行外部程序：夹具仓库配置 `diff.external`、`diff.<名>.textconv`、`filter.<名>.clean` / `process`、`core.fsmonitor`，指向会写标记文件的脚本，PATH 最前面放一个记录调用的假 `git`（AGENTS.md「工作方式」）；跑完全部工作区和树 diff 场景后，标记文件不存在、假 `git` 没有被调用。
 - 展示行与词级差异：配对、折叠、hunk 相邻时合并上下文，用 insta 快照。
 - 缓存：同一对 OID 第二次计算命中；键里的 `HashKind` 不同时不命中；命中时按这次的 `diff_bytes` 判断 `TooLarge`，另一个仓库里缺失的一侧仍是 `Missing`。
@@ -898,6 +913,14 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 与 git 的对照：`watch_source_ignores_match_git` 的期望值（git 判为忽略的路径，即 `git check-ignore --no-index` 会列出的）是按 gitignore(5) 的规则手工推出的，没有用真实的 git 生成夹具：这次的环境不允许在 worktree 之外运行 git（生成脚本要在临时目录里 `git init`、`git check-ignore`）。gix-ignore 的匹配结果与推导完全一致。以后可以按「测试」里归档夹具的做法补一份由 `git check-ignore` 生成的目录夹具。
 - 没有验证的：构造过滤器的耗时和忽略规则的内存（fs_watch「性能」里没有对应的基准条目，没有测量；遍历与「工作区比较」第 4 步相同，代价同 `git/changes_clean` 里的未跟踪文件枚举）；`core.precomposeUnicode` 的规范化没有测试；macOS 上没有运行。
 
+`Worktree::canonical_oid`（[code_intel 设计](code_intel.md#对其他-crate-的要求)前置条件 E，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），同一台机器：
+
+- `just check`、`just test`、`just doctest`、`just deny` 全部通过。`just test -p lectern-git` 共 213 个测试，新增 `canonical_*` 6 个；`no_external_programs` 增加两次 `canonical_oid` 调用（配置了 clean / process 的 `b.f` 返回 None，`a.t` 返回原始字节的 OID），之后标记文件仍不存在。
+- `canonical_matches_git_for_the_conversion_fixture` 用的期望值是 `tests/fixtures/worktree_conversions` 里 git 2.43 `git add` 记录的 OID（已有夹具，测试不运行 git）：三个 `core.autocrlf` 变体下 15 个文件全部相同，包括 UTF-16LE、带 BOM 的 UTF-16、`ident`、混合换行、单独的 CR 和带 NUL 的 `text=auto`。
+- `rg 'Command::new' crates/git/src` 没有结果；「验收」第 3 步的 `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' …` 也仍然没有结果。
+- `code_intel` 用到的其余接口不需要改动：`GitAccess::head` 取 `Worktree::head` 返回的 `HeadState` 里的提交（`Branch { commit }` 的 `commit`、`Detached { commit }`，unborn 为 None），`GitAccess::index_checksum` 直接转调 `Worktree::index_checksum`；两者返回 `Oid`，转成 `services` 的 `BlobId` 是 `code_intel` 自己的事。
+- 没有验证的：没有基准（code_intel 的设计没有为它列基准条目，调用频率由原始 OID 不等的文件数决定）；macOS 上没有运行。
+
 ## 与设计的差异
 
 第 1 步：
@@ -978,3 +1001,9 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 求 `~` 和 XDG 的默认位置要知道 `HOME`、`XDG_CONFIG_HOME`：经 gix-path 读，与 gix 打开仓库时（`ConfigScope::User` 的权限）读的是同两个变量，`GIT_*` 仍然不读。`ConfigScope::RepositoryOnly` 不读环境变量，也不列出仓库之外的标准位置，与 gix 在这个范围里实际读的文件一致。
 - `ConfigScope::RepositoryOnly`（`testing::discover`、`testing::open_handle`）改为跟随仓库配置里的 `include.path` / `includeIf`：配置清单的测试要 gix 按条件加载引入的文件（`onbranch:`）。它仍然不读系统、XDG、`~/.gitconfig` 和环境变量，测试结果不受机器上的配置影响；引入的文件由测试自己写在临时目录里。
 - `WorktreeName` 与 `WorktreeId` 的转换是两个 `From` 实现；`TrackedPaths` 增加 crate 内部的 `entries()`（切片，供过滤器二分查找）。
+
+`Worktree::canonical_oid`（前置条件 E）：
+
+- 签名按 code_intel 设计，路径参数是 `&RepoPath`，返回本 crate 的 `Oid`。
+- 未跟踪的 `.gitattributes` 不看忽略规则，与 git 相同、与工作区比较不同（见「规范内容的 OID」）：单个路径只查各级目录，没有遍历可用；为它另建忽略栈只为了复现工作区比较的已知限制，不值得。
+- 实现放在 `compare.rs`（`compare::canonical_oid`），与工作区比较共用 index 快照、`read_attr_file` 和 `WorktreeAttrs`，`conversion.rs` 不变。
