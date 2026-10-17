@@ -286,7 +286,8 @@ pub static BUDGETS: &[Budget] = &[
         Process,
     ),
     top(
-        "app/palette_key_100k",
+        // The ≤ 16 ms tier covers up to 200k paths: measured at its upper bound.
+        "app/palette_key_200k",
         &[median(Limit::TimeAtMost(ms(16)))],
         TECH,
         State::Planned("#102"),
@@ -337,6 +338,16 @@ pub static BUDGETS: &[Budget] = &[
     top(
         "app/goto_unindexed",
         &[median(Limit::TimeAtMost(ms(300)))],
+        TECH,
+        State::Planned("#17"),
+        Process,
+    ),
+    // Until the bounded search ends (all candidates searched or the 1 s
+    // limit hit) and its last batch is drawn: 1 s plus 0.1 s for
+    // cancellation and drawing, on a fixture too large to finish in 1 s.
+    top(
+        "app/goto_unindexed_done",
+        &[max(Limit::TimeAtMost(ms(1100)))],
         TECH,
         State::Planned("#17"),
         Process,

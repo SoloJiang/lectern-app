@@ -479,8 +479,8 @@ crates/bench/
 
 - 冷启动（`app/cold_start`、`baseline/empty_window_cold_start`）：先启动 2 次不计入（预热系统文件缓存），再启动 20 次。`app/*` 的每一次启动，包括这 2 次预热和 `app/cold_start_purged`，都带 `LECTERN_BENCH_ARCHIVE=strict`：binary archive 缺 slice 时管线创建失败，探针的 `on_miss` 立即连接 socket 发出 `Error { message: "archive-miss <管线名>" }`，然后进程以退出码 3 退出；运行器收到这条消息或退出码 3 时，把这个基准记为 `error`（`just bench` 退出码 2）。严格模式下未命中不会写本机缓存，所以预热启动不能把缺失的 slice 补进缓存、掩盖后面的测量。`empty_window` 不用 GPUI 之外的 archive，不带这个设置。每次收到 `FirstFrame` 后取 `presented - platform::process::start_time(pid)`，发 `Quit`，等进程退出（10 秒不退出就结束它并记为出错）。
 - 冷文件缓存（`app/cold_start_purged`）：`sudo -n purge` 之后启动 1 次，只记录（ADR 0017）。`sudo -n` 失败时记为 `skipped`。
-- 空闲内存（`app/idle_empty`）：启动 3 次，每次按 [kernel「静止」](kernel.md#静止)采样：收到 `Quiescent` 后等 5 秒，期间收到 `Busy` 就重新等；然后发 `Epoch`、读 `phys_footprint(pid)`、再发 `Epoch`，两次都是同一个 `Some(n)` 时样本有效，否则重新等静止，连续 3 次无效记为出错。首帧后 30 秒内没有静止记为 `over`（ADR 0017）。取 3 次的中位数。kernel 报告有可暂停的后台工作时（[ADR 0029](../adr/0029.md)，打开项目后的建索引），运行器在静止后先请求暂停，等 kernel 报告「全部已暂停」再开始 5 秒的等待，暂停一直保持到采样结束；`app/idle_monorepo` 因此测的是后台索引暂停时的内存。暂停请求和后台工作状态的消息随第 5 步加入报告协议。`app/idle_empty` 只计主进程。子进程按 ADR 0018 以进程组为单位统计：对 `Child` 报告的每个根进程，运行器用 `ProcessInfo::children` 逐层展开，得到根进程及其全部后代（广度优先，按 pid 去重；展开期间已经退出的进程跳过），这一组的 `phys_footprint` 之和是这个插件的内存。`app/idle_empty` 不计算 `plugin/process_total`：空窗口里按 `Workspace` / `Command` / `Manual` 激活的进程插件都没有启动。主进程的后代中不属于任何已报告进程组的（含 `ChildKind::Other`），合计记为 `app/unclassified_children`（只记录），用来发现没有报告的子进程。展开与读取在同一次采样里进行，前后两次 `Epoch` 检查同样覆盖它们。同一次启动里发 `Plugins`，激活条件里含 `AfterFirstFrame` 的插件（不论它排在第几项、是否还有别的条件）四段耗时之和给出 `plugin/after_first_frame`。`baseline/empty_window_idle` 没有 kernel，在首帧后 5 秒采样。
-- 后台工作完成后的内存（`app/idle_monorepo_indexed`，ADR 0029）：打开 cloudprint 形状的夹具，不暂停后台工作，等 kernel 报告后台工作计数归零并静止后，按上面的方式等 5 秒、采样、检查前后两次 `Epoch`；取 3 次启动的中位数。
+- 空闲内存（`app/idle_empty`）：启动 3 次，每次按 [kernel「静止」](kernel.md#静止)采样：收到 `Quiescent` 后等 5 秒，期间收到 `Busy` 就重新等；然后发 `Epoch`、读 `phys_footprint(pid)`、再发 `Epoch`，两次都是同一个 `Some(n)` 时样本有效，否则重新等静止，连续 3 次无效记为出错。首帧后 30 秒内没有静止记为 `over`（ADR 0017）。取 3 次的中位数。可暂停的后台工作（[ADR 0029](../adr/0029.md)，打开项目后的建索引）：运行器在静止后一律请求暂停，不看当时有没有后台工作，等 kernel 报告后台工作为「没有」或「全部已暂停」再开始 5 秒的等待，暂停一直保持到采样结束；`app/idle_monorepo` 因此测的是后台索引暂停时的内存。`Epoch` 的应答同时带上 kernel 的后台代数和后台工作状态：5 秒等待开始时和采样之后各取一次，两次的 `quiescent_epoch()` 和后台代数都相同、后台工作一直是「没有」或「全部已暂停」时样本才有效，否则按上面的规则重新等待。暂停请求和后台工作的字段随第 5 步加入报告协议。`app/idle_empty` 只计主进程。子进程按 ADR 0018 以进程组为单位统计：对 `Child` 报告的每个根进程，运行器用 `ProcessInfo::children` 逐层展开，得到根进程及其全部后代（广度优先，按 pid 去重；展开期间已经退出的进程跳过），这一组的 `phys_footprint` 之和是这个插件的内存。`app/idle_empty` 不计算 `plugin/process_total`：空窗口里按 `Workspace` / `Command` / `Manual` 激活的进程插件都没有启动。主进程的后代中不属于任何已报告进程组的（含 `ChildKind::Other`），合计记为 `app/unclassified_children`（只记录），用来发现没有报告的子进程。展开与读取在同一次采样里进行，前后两次 `Epoch` 检查同样覆盖它们。同一次启动里发 `Plugins`，激活条件里含 `AfterFirstFrame` 的插件（不论它排在第几项、是否还有别的条件）四段耗时之和给出 `plugin/after_first_frame`。`baseline/empty_window_idle` 没有 kernel，在首帧后 5 秒采样。
+- 后台工作完成后的内存（`app/idle_monorepo_indexed`，ADR 0029）：打开 cloudprint 形状的夹具，不暂停后台工作，等 kernel 报告后台工作计数归零并静止后，按上面的方式等 5 秒、采样；5 秒等待开始时和采样之后的两次 `Epoch` 应答里，`quiescent_epoch()` 和后台代数都相同、后台工作计数都为零时样本才有效，否则重新等待，连续 3 次无效记为出错。取 3 次启动的中位数。
 - 进程插件合计（`plugin/process_total`）与语言服务器（`lsp/*`）：单独启动一次完整的 profile（进程插件宿主从安装目录加载的插件都在内；macOS CI 在这一步之前安装索引里的全部官方进程插件，方式由进程插件宿主的实现决定），先 `Open(Project(<cloudprint 夹具>))` 并等静止，再发 `ActivateAll`，等到 `Ready`（30 秒）和有效的静止样本后采样。所有 `ProcessPlugin` 进程组之和是 `plugin/process_total`，这是 ADR 0018 要求的「多个插件同时运行时的合计」。这次启动里报告过的每个 `LanguageServer` 组记为 `lsp/<id>/resident`，合计记为 `lsp/total`，只记录；没有语言服务器运行时 `lsp/total` 为 0。
 - 每个插件（`plugin/<id>/*`）：插件列表取自 `app/idle_empty` 的 `Plugins` 应答（不含 `bench-probe`）。对每个插件启动两次，`LECTERN_BENCH_PLUGINS` 分别为 `closure:<id>` 和 `closure+self:<id>`，都等到 `Ready` 和有效的静止样本。每次启动的内存是主进程的 `phys_footprint` 加上这次启动里所有 `ProcessPlugin` 进程组（按上面的展开规则取根进程及其全部后代）的合计，语言服务器组不计入、单独报告；两次之差是 `plugin/<id>/resident`，所以进程插件自己的进程组（闭包那一次不存在，记为 0）计入它的常驻内存。第二次里这个插件的四段耗时之和是 `plugin/<id>/activate`（[kernel「性能」](kernel.md#性能)）。超标时再测两对，取三对的中位数。预算按项目形状给出的插件（如 `project`），两次启动都先 `Open(Project(<夹具>))`。
 - 端到端（`app/open_project` 等）：每个样本是一次新的启动。等空窗口静止后（打开文件、Diff、切换 worktree 的，先打开 `cloudprint` 形状的夹具项目并再次静止）发 `Open(...)`，从发出请求（运行器取 `SystemTime::now()`）到对应 `Milestone` 的 `presented` 为一个样本，两者是同一台机器的系统时钟；每项 5 次启动，取中位数。帧时间按两个条件判定，在任何刷新率的显示器上都成立：
@@ -502,9 +502,11 @@ crates/bench/
 | 请求暂停后 kernel 报告后台工作「全部已暂停」 | 10 秒 |
 | `app/idle_monorepo_indexed` 打开夹具后后台工作全部完成 | 120 秒 |
 | `Epoch`、`Plugins` … `PluginsEnd` 的应答 | 10 秒 |
-| `Open(Project/File/Diff/Worktree)` 之后的 `Milestone` | 30 秒 |
+| `Open(...)` 之后的 `Milestone` | 30 秒与这条预算上限的 1.5 倍中较长的一个（`app/index_100k` 的 120 秒预算为 180 秒） |
 | `Open(Scroll/Animate/Input)` 之后的 `Frames` | 场景时长加 10 秒（输入场景 400 × 8 ms，约 13 秒） |
 | `Quit` 之后进程退出 | 10 秒 |
+
+规则：一个等待的期限不得短于它所测预算的上限，并留出余量（取上限的 1.5 倍），否则慢于期限、但仍在预算内的样本会被记为 `error`，超出预算的样本也拿不到实测值。新增预算时按这条规则检查对应等待的期限。
 
 插件相关的基准（`plugin/*`）期间收到 `PluginFailed`，或 `Plugins` 应答里所选插件的状态是 `Failed`，立即按上面的方式结束子进程并记为 `error`，不等期限。
 
@@ -528,11 +530,12 @@ crates/bench/
 | `app/open_diff` | 中位数 < 50 ms | [性能预算](tech-research.md#性能预算) | `review_view` |
 | `app/switch_worktree` | 中位数 < 100 ms | [性能预算](tech-research.md#性能预算) | `worktrees` |
 | `app/palette_open` | 中位数 < 16 ms（面板和空查询列表） | [性能预算](tech-research.md#性能预算)（[ADR 0030](../adr/0030.md)，下同） | ⌘K（[#102](https://github.com/SoloJiang/lectern-app/issues/102)） |
-| `app/palette_key_100k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 ≤ 16 ms / ≤ 50 ms | [性能预算](tech-research.md#性能预算) | ⌘K（#102） |
+| `app/palette_key_200k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 ≤ 16 ms / ≤ 50 ms（20 万条和 100 万条路径的合成仓库：分档预算在档位上界测量） | [性能预算](tech-research.md#性能预算) | ⌘K（#102） |
 | `app/files_open`、`app/files_expand` | 中位数 < 16 ms（目录表已建好；展开 2,000 个子项以内的目录） | [性能预算](tech-research.md#性能预算) | Files（[#10](https://github.com/SoloJiang/lectern-app/issues/10)） |
 | `app/nav_back` | 中位数 < 16 ms（回到最近访问的位置） | [性能预算](tech-research.md#性能预算) | Files（#10） |
 | `app/goto_candidates`、`app/goto_single` | 中位数 ≤ 50 ms（候选列表）/ ≤ 100 ms（唯一候选的目标文件首屏高亮） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/goto_unindexed` | 第一批结果中位数 ≤ 300 ms | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
+| `app/goto_unindexed_done` | 从请求到限时搜索结束（找完或到时停止）、最后一批结果画出，最大值 ≤ 1.1 s（1 s 限时加 0.1 s 取消与绘制的余量）；夹具里未索引的文件要多到 1 s 内搜不完 | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/references_first`、`app/references_100k` | 中位数 ≤ 200 ms（第一批）/ ≤ 2 s（10 万文件的全部结果） | [性能预算](tech-research.md#性能预算) | 上下文抽屉（[#20](https://github.com/SoloJiang/lectern-app/issues/20)） |
 | `app/index_review_set`、`app/index_subproject`、`app/index_100k` | 打开项目到这一层全部入索引，中位数 ≤ 2 s / ≤ 10 s / ≤ 120 s（接电源） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/scroll_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期 | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `file_reader` |
