@@ -31,12 +31,13 @@ Lectern 按会话发生的顺序显示内容。每一轮依次是你的 prompt�
 审阅时可以：
 
 - **查看改动的影响范围。** 上下文面板列出每个被改动符号的调用方和相关测试，并标出 agent 没有同步修改的调用方。结果来自本地索引。Java 项目可以手动开启可选的语言服务器，得到更精确的结果。
+- **请 agent 分析改动。** 会话顶部的简报列出值得先看的几处，由本地规则生成，不消耗 token。执行 Analyze 时，Lectern 调用你本机已登录的 Claude Code 或 Codex 阅读这次改动，标出关键问题。它只在你执行时运行，在沙箱里只能读取改动，不能写文件，也不能连接其他主机。
 - **把审阅意见发给 agent。** 阅读时在具体的代码行上写意见，Lectern 把它们汇总后，连同文件路径和行号一次发给会话，agent 在下一轮处理。
 - **跳过不需要审阅的部分。** 只涉及格式的改动默认折叠。标记为已审的文件会一直保留标记。
 
 ## 并行 worktree
 
-多个 agent 同时在不同的 git worktree 里运行时，Lectern 把这些 worktree 分成 Active 和 Idle 两组列出。选中一个 worktree，右侧检查器把它与 main 对比：改动的文件、领先的提交数，以及其中是否有文件也在其他 worktree 里被改动。
+多个 agent 同时在不同的 git worktree 里运行时，Lectern 把这些 worktree 分成 Active 和 Idle 两组列出。选中一个 worktree，右侧检查器把它与 main 对比：改动的文件、领先的提交数、这个分支用掉的 token，以及其中是否有文件也在其他 worktree 里被改动。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/worktrees-dark.png">
@@ -45,7 +46,7 @@ Lectern 按会话发生的顺序显示内容。每一轮依次是你的 prompt�
 
 ## Token 用量与额度
 
-Lectern 按项目和 MR 两级统计 token。项目合计按 7 天、14 天或 30 天统计；一个 MR 由哪些会话、哪些轮次完成，就把它们的 token 加在一起，还没开 MR 的按分支统计。每个会话、每一轮的用量作为明细保留。Lectern 同时显示 Codex 和 Claude Code 的使用额度已经用了多少。Claude Code 的状态栏会把数据发给 Lectern，所以它的额度窗口实时更新。
+Lectern 按项目和 MR 两级统计 token。项目合计按 7 天、14 天或 30 天统计；一个 MR 由哪些会话、哪些轮次完成，就把它们的 token 加在一起，还没开 MR 的按分支统计。每个会话、每一轮的用量作为明细保留，MR 的 token 分成编写和审阅（Lectern 自己的分析）两部分。Lectern 同时显示 Codex 和 Claude Code 的使用额度已经用了多少。Claude Code 的状态栏会把数据发给 Lectern，所以它的额度窗口实时更新。
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/usage-dark.png">
