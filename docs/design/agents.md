@@ -88,7 +88,7 @@ pub trait SessionSource: Send + Sync {
 
     /// 从 `from` 往后读，读到累计约 `max_bytes` 字节后在下一个完整记录之后停下。阻塞（读文件、解压、解析），只在 executor 上调用。
     /// `max_bytes` 是软上限：只要游标之后还有一个完整的行，这次调用至少消费一行（哪怕它比 `max_bytes` 大），
-    /// 所以返回时要么 `at_end` 为 true，要么新游标严格大于 `from`，调用方循环读完不会原地打转，循环之间可以放弃。
+    /// 所以返回时要么 `at_end` 为 true，要么新游标严格大于 `from`，调用方反复调用不会原地打转。调用方怎样分批、何时停下见「调用方」里对消费方的约束。
     /// 超过 16 MB 的行不缓存进内存，边读边丢弃到下一个换行，计入 `Diagnostics::oversized_lines`，游标越过它（也算消费了一行）。
     /// 游标与文件对不上（被截断、被替换）时从头读，`Batch::reset` 为 true。
     fn read(&self, session: &SessionKey, from: &Cursor, max_bytes: u64) -> Result<Batch, SessionError>;
@@ -140,6 +140,7 @@ pub enum ResumeCommand {
 - 路由：消费方通过 `ServiceSet<dyn SessionSource>` 拿到全部提供者，按 `SessionKey::source` 找 `id()` 相同的那一个调用 `read` / `turns` / `load` / `resume`；找不到（提供者已停用）就当作 `NotFound`，不改调用别的提供者。同一个上游会话可以同时出现在两个来源里（如本地日志和 P3 的 ACP），它们是两个不同的 `SessionKey`；`usage` 按与来源无关的 `UsageKey` 去重，不会重复计数。
 - `welcome`、`project_home`、`worktrees` 在渲染时调 `sessions()`；收到 `SessionsChanged` 后安排重绘。
 - `usage` 收到 `SessionsChanged` 后在 executor 上对变化的会话调 `read`，把记录和新游标在同一个 SQLite 事务里写入，所以重启后从自己的游标继续，不重复也不遗漏。
+- 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即补读不持有 `BusyGuard`，按批次让出，剩余的历史在空闲时继续。每批的大小和节奏由 `usage` 的设计文档规定。追加到正在进行的会话的新内容不受这条限制。
 - `review` 在 executor 上调 `turns` 和 `load`，`review_view` 只读 `review` 的快照。
 - `terminal` 调 `resume`，按上面的规则映射成命令。
 - `project_home`、`welcome` 在显示或打开 `tail_pending` 的会话行时调 `complete`。
@@ -385,6 +386,9 @@ pub struct UsageRecord {
     pub model: Option<Arc<str>>,
     pub tokens: RawTokens,
     pub key: UsageKey,
+    /// Claude Code `usage.iterations[]` 里 `type: "advisor_message"` 的那一份，模型取 `advisorModel`；按自己的模型计，
+    /// 不与 `tokens` 相加。是同一条记录的附带数据，不影响去重。
+    pub advisor: Option<AdvisorUsage>,
     /// Claude Code 的 `isSidechain`。
     pub sidechain: bool,
     /// 会话日志。Analyze 的计量记录（后续 issue）用另一个变体，`usage` 按它区分「编写」与「审阅」。
@@ -392,6 +396,8 @@ pub struct UsageRecord {
 }
 
 pub enum UsageOrigin { SessionLog }
+
+pub struct AdvisorUsage { pub model: Arc<str>, pub tokens: RawTokens }
 
 /// 日志里的原始数值，不规范化：两家的口径不同，规范化成互不重叠的类别在 `usage` 做。
 pub enum RawTokens {
@@ -407,13 +413,14 @@ pub enum RawTokens {
 pub enum UsageKey {
     /// 每个内容块一行、重复同一份 usage：同一个键可能出现多次，也可能跨文件出现（分叉、续接复制的记录），按 ADR 0014 只计一次。
     /// `message.id`（`msg_…`）和 `requestId`（`req_…`）由模型服务端生成、全局唯一，不需要再加会话 ID。
-    /// `advisor` 是 `usage.iterations[]` 里 `type: "advisor_message"` 的那一份，模型取 `advisorModel`。
-    Claude { message_id: Arc<str>, request_id: Option<Arc<str>>, advisor: Option<(Arc<str>, RawTokens)> },
+    /// 键只有这两个上游 ID：同一响应的多行逐步写出更完整的 usage，键相同，`usage` 按 ADR 0014 保留 token 合计最大的一条
+    /// （连同它的 `advisor`）。advisor 的数据不进键，见 `UsageRecord::advisor`。
+    Claude { message_id: Arc<str>, request_id: Option<Arc<str>> },
     /// `event_msg` / `token_count`：`tokens` 是 `last_token_usage`，`total` 是 `total_token_usage`。`info` 为 null 的事件不给出用量记录。
     /// `total` 是会话内的累计值，不是唯一标识，所以键带上游线程 ID（`session_meta.id`）：同一线程里重复写出的同一个累计值
     /// 合为一条，不同线程（重复的工作流、分叉）各自计数。分叉和子 agent 重放的父会话 `token_count` 带的是新线程的 ID，
     /// 靠 `inherited` 标记排除（ADR 0014），不靠键。
-    /// `superseded`：这个线程此前已出现过 `token_usage_record`（见下面的「只用一路用量」）。
+    /// `superseded`：这条之前，这个线程已出现过 `token_usage_record`（见下面的「只用一路用量」）。
     CodexTokenCount { thread_id: Arc<str>, total: RawTokens, superseded: bool },
     /// 顶层 `token_usage_record`：每个完成的响应一条，`tokens` 取它的 `usage`。`response_id` 由模型服务端生成、全局唯一；同样带上 `thread_id`，与上一项一致。
     CodexResponse { thread_id: Arc<str>, response_id: Arc<str> },
@@ -422,8 +429,8 @@ pub enum UsageKey {
 
 只用一路用量：Codex 按线程决定。在 `3b8f43a`，每个完成的响应先写一条 `token_usage_record`，同一个响应的用量又累加进随后的 `token_count`（`codex-rs/core/src/session/mod.rs` 的 `record_response_token_usage` 与 `update_token_usage_info`），两路都计会重复。规则：
 
-- 一个线程（`thread_id`）里只要出现过一条 `CodexResponse`，这个线程的用量只取 `CodexResponse`，它的 `CodexTokenCount` 全部不计；没有任何 `token_usage_record` 的线程（旧版本的日志）才用 `token_count` 的 `last_token_usage`。
-- 本 crate 两路都交出（续读时不知道文件后面会不会出现 `token_usage_record`），并在游标的解析器状态里记下这个线程是否已出现过 `token_usage_record`：出现之后交出的 `CodexTokenCount` 标 `superseded: true`。`usage` 在汇总时按上一条规则选取，所以文件中途才出现第一条 `token_usage_record` 时，之前已落盘的 `token_count` 也随之不计。
+- 在一个线程（`thread_id`）里按文件顺序切换：第一条 `token_usage_record` 之前，用 `token_count` 的 `last_token_usage`；从它开始，只用 `token_usage_record`。会话由只写 `token_count` 的旧版本开始、升级后续接时，`token_usage_record` 会在同一个文件中途出现，切换之前的用量照样计入。没有任何 `token_usage_record` 的线程（旧版本的日志）全程用 `token_count`。
+- 本 crate 两路都交出，在游标的解析器状态里记下这个线程是否已出现过 `token_usage_record`：只有在它之后交出的 `CodexTokenCount` 标 `superseded: true`，之前的不标、也不回头重标。`usage` 计入全部 `CodexResponse` 和 `superseded == false` 的 `CodexTokenCount`。
 - `token_count` 无论哪种情况都照常交出 `RateLimits`。
 
 ```rust
@@ -549,13 +556,14 @@ fixtures（`crates/agents/tests/fixtures/`）：每个上游格式版本一份�
 
 ### 压缩会话的随机读取
 
-Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compression.rs` 在 `3b8f43a` 用 `zstd::stream::write::Encoder` 一次写完），没有可以定位的帧边界，流式解码只能从头开始。顺序读取（`read`、发现、建索引）照样流式解码；需要按偏移随机读取（`turns` 之后的 `load`）时，用解压副本：
+Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compression.rs` 在 `3b8f43a` 用 `zstd::stream::write::Encoder` 一次写完），没有可以定位的帧边界，流式解码只能从头开始。所以凡是要从某个偏移开始读的操作都用解压副本，不在每次调用时重新解码：
 
-- 第一次对某个 `.jsonl.zst` 会话调 `turns` 或 `load` 时，把它完整解压到 `decoded_dir` 下的一个文件（先写临时文件、完整后 `rename`，之后只读），同时建好轮次索引；之后 `load` 在副本上按偏移 `pread` 一行，与未压缩的会话相同。
+- 第一次对某个 `.jsonl.zst` 会话调 `read`、`turns` 或 `load` 时，把它完整解压到 `decoded_dir` 下的一个文件（先写临时文件、完整后 `rename`，之后只读），同时建好轮次索引；之后 `read` 从游标的偏移开始读副本，`load` 在副本上按偏移 `pread` 一行，都与未压缩的会话相同。分批 `read` 一个归档的总代价是一次解压加一次顺序读，不随批数增加。
+- 只有发现（只解压开头 256 KB）和补齐末尾字段（整份流式解码一次）不建副本。
 - 副本的键：来源 ID、会话 ID，以及压缩文件的身份（设备号、inode、大小、修改时间）。冷文件压缩后不再改动，身份变了（被重新压缩、被替换）就删掉旧副本重建；压缩文件消失时，下一次发现删掉副本。
 - 代价：磁盘占用等于解压后的大小，全部副本合计上限 1 GB，按最后访问时间做字节 LRU，正在读取的副本（有打开的描述符）不淘汰；内存只有解码用的 64 KB 缓冲，副本不读入内存。副本和 `cache` 一样可以随时删除重建。
 - 第一次打开一个压缩会话要解压整个文件（≥ 100 MB/s，40 MB 约 0.4 s），超出 50 ms 预算，界面按[交互规范「状态与异常」](interaction.md#状态与异常)显示骨架或进度；之后的打开和 `load` 在预算内。这是已知限制（ADR 0026）。
-- 写副本失败（磁盘满、目录不可写）时，`load` 退回从头解码到偏移，结果正确但慢，记日志。
+- 写副本失败（磁盘满、目录不可写）时，`read` 和 `load` 退回从头解码到偏移，结果正确但慢，记日志；这时 `read` 忽略 `max_bytes`，一次读到末尾，避免分批时反复从头解码。
 - 发现阶段不为压缩文件建副本，也不在发布列表之前整份解压（见「数据流与线程」第 2 步）。压缩文件不变，补齐后的完整摘要存进 `cache` 的应用级分库，键是同一个文件身份加适配器版本和摘要格式版本：升级后适配器或摘要字段变了，旧摘要不再命中、重新补齐；下次启动直接读，不再解压。
 
 放弃的方案：记录 zstd 帧边界（Codex 只写一个帧）；把压缩会话里被引用的每一行正文存进轮次索引（索引的大小接近原文件，全部进 SQLite、加载时进内存，比一个可淘汰的副本文件更贵）。
@@ -610,10 +618,11 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 增量等价：每份 fixture 按随机切分（包括行中间）逐段追加到临时文件、每段后 `read` 一次，拼起来的记录与一次读完相同；游标经 `to_bytes` / `from_bytes` 往返后继续读，结果相同（`incremental_*`）。
 - 改写与截断：截断、替换为另一个会话、改写游标之前的内容，`reset` 为 true 且记录从头给出（`reset_*`）。
 - 读取进度：`max_bytes` 为 1 时每次调用仍消费一行；下一行比 `max_bytes` 大、但不到 16 MB 时整行返回；超过 16 MB 的行被跳过、计数、游标越过它；任何返回 `at_end == false` 的调用，新游标都大于旧游标（`progress_*`）。
-- 压缩：同一份 Codex fixture 的 `.jsonl` 与 `.jsonl.zst` 记录相同；压缩前取的游标在压缩后继续有效；第一次 `turns` 建好解压副本，之后 `load` 不再解码；压缩文件身份变化后副本重建；副本合计超过上限时按 LRU 删除、不删正在读取的副本；副本目录不可写时 `load` 结果不变（`zst_*`、`decoded_*`）。
+- 压缩：同一份 Codex fixture 的 `.jsonl` 与 `.jsonl.zst` 记录相同；压缩前取的游标在压缩后继续有效；第一次 `read` / `turns` / `load` 建好解压副本，之后分批 `read` 和 `load` 都不再解码（用计数的解码器检查整个归档只解压一次）；压缩文件身份变化后副本重建；副本合计超过上限时按 LRU 删除、不删正在读取的副本；副本目录不可写时 `load` 结果不变（`zst_*`、`decoded_*`）。
 - 路由：两个来源报告相同的会话 ID 时得到两个不同的 `SessionKey`；`SessionsChanged::source` 与键的 `source` 一致（`source_*`）。
 - 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次；Claude Code 子 agent 文件里带父会话 `sessionId` 和自己 `agentId` 的记录不标 `inherited`，它的轮次和用量完整交出（`inherited_*`）。
-- Codex 用量只取一路：有 `token_usage_record` 的线程，其后的 `CodexTokenCount` 标 `superseded`；没有的线程不标；`token_usage_record` 在文件中途才出现时，之前的记录不重标，由 `usage` 按线程规则排除（`codex_usage_stream_*`）。
+- Codex 用量只取一路：第一条 `token_usage_record` 之后的 `CodexTokenCount` 标 `superseded`，之前的不标；没有 `token_usage_record` 的线程都不标；旧版本开始、升级后续接的 fixture 里，切换前后的用量合计等于逐响应的真实合计（`codex_usage_stream_*`）。
+- Claude Code 同一响应的多行 usage 逐步变完整时键相同，带 advisor 的行与不带的行键也相同（`usage_keys_*`）。
 - 恢复命令：`resume` 只给出 `ResumeCommand`；非 UUID 的会话 ID 被 `terminal` 拒绝的规则在 `terminal` 测试，本 crate 测试子 agent 和认不出格式的会话返回 None（`resume_*`）。
 - 末尾字段：最后一条记录大于 64 KB（至 16 MB）时仍能取到它的时间戳和 `open_turn`；末尾跟着非消息记录时向前找到最后一条消息记录；最后一条记录超过 16 MB 时按「数据流与线程」第 2 步的回退规则；已在增量读取的文件不再读末尾（`tail_*`）。
 - 压缩会话的补齐：冷缓存下发现 100 个 `.zst` 之后，只补齐最近的 8 个，kernel 在补齐完成后静止；对其余会话调 `complete` 才补齐（`complete_*`）。
