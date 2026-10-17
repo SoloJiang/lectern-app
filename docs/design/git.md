@@ -175,7 +175,9 @@ pub enum WorktreeId {
 pub struct WorktreeInfo {
     pub id: WorktreeId,
     pub is_main: bool,                 // 与 `id == WorktreeId::Main` 等价，方便调用方
-    pub root: PathBuf,                 // 工作区根，规范路径
+    /// 工作区根。存在时是规范路径；prunable（根目录已不存在）时取管理目录里 `gitdir` 文件记录的路径去掉末尾的 `/.git`，
+    /// 只做字面归并，不访问文件系统（与 [project 设计](project.md) 相同）。
+    pub root: PathBuf,
     pub git_dir: PathBuf,              // 主 worktree 为公共目录，linked worktree 为 `<公共目录>/worktrees/<名字>`
     pub head: HeadState,
     pub locked: Option<String>,        // `locked` 文件里的原因，空文件为 Some("")
@@ -377,6 +379,9 @@ pub struct Change {
     pub generated: bool,             // `.gitattributes` 的 `linguist-generated`
     /// 新一侧是 index 里没有的工作区文件。只出现在 `Added` 上。
     pub untracked: bool,
+    /// index 里这个路径的 OID，只在它与工作区一侧不同时为 Some（工作区一侧是 `Blob` 或已不存在时才比较）：
+    /// 提交会记录暂存的版本，与磁盘上的内容不一样。视图据此提示，P1 不单独显示暂存区的 diff。
+    pub staged: Option<Oid>,
 }
 
 pub enum Status {
@@ -404,7 +409,7 @@ pub enum Unavailable {
     NestedRepository,    // 未跟踪的目录里有自己的 `.git`
     Missing,             // 对象库里没有（如部分克隆）
     Unreadable,          // 读取失败
-    /// 超过改动集保留工作区内容的上限（128 MiB）：比较时读过、算过 OID，但字节没有保留。
+    /// 超过改动集保留工作区内容的上限（32 MiB）：比较时读过、算过 OID，但字节没有保留。
     /// `oid` 是当时规范内容的 blob OID，已看状态等按 OID 的键照常可用；`Detail` 保留超过上限之前已算出的那一种（`Binary`、`TooLarge`，或有增删行数时的 `Truncated`）。
     NotRetained { oid: Oid },
 }
@@ -425,6 +430,8 @@ pub enum Detail {
     Listed,
     /// 内容相同，只改了模式。
     ModeOnly,
+    /// 工作区与基准相同，只有 index 不同（`staged` 为 Some）。
+    StagedOnly,
     /// 至少一侧是 `Unavailable` 或子模块；`NotRetained` 除外（见不变量）。
     NoDiff,
 }
@@ -465,6 +472,8 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 4. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给第 0–3 步处理过、工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每个文件都是 `Added` 且 `untracked = true`，内容按第 1、3 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
 5. **重命名**：删除与新增之间先按 OID 找精确重命名，精确重命名不受任何上限限制，总是检测。剩下的删除（来源）与新增（目标）再按相似度（不低于 50%）找重命名，上限规则与 git 的 `too_many_rename_candidates` 相同：来源数 × 目标数超过 `diff.renameLimit` 的平方时跳过相似度检测（默认 1000，即 100 万对；40 × 40 的重构照常检测）。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
 
+6. **暂存与工作区不同**：跟踪的路径上，index 的 OID 与基准不同、而工作区又改回了基准的内容时（基准 A、index B、工作区 A），这个路径仍然报告：`Status::Modified`，两侧内容相同，`Detail::StagedOnly`，`staged = Some(B)`。其他报告出来的改动只要 index 的 OID 与工作区一侧不同，也带上 `staged`。
+
 其余规则：
 
 - 模式：`core.fileMode=false` 时可执行位取 index 里的值；符号链接的内容是 `readlinkat` 读出的目标。
@@ -485,7 +494,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 整体：按路径顺序，全部改动文件（含二进制、只改模式、`TooLarge`、`NoDiff`）计入文件数，生成的 patch 计入字节数 | 5000 个文件、50 MB | 达到任一上限之后的文件为 `Listed`，`Totals` 记数量 |
 | 工作区单文件读取 | 64 MiB | `Content::Unhashed` |
 | 未跟踪文件枚举 | 20 000 个 | `Totals::untracked_capped = true` |
-| 改动集保留的工作区内容 | 128 MiB | 之后的文件不保留内容，新一侧为 `Unavailable::NotRetained`（见下） |
+| 改动集保留的工作区内容 | 32 MiB | 之后的文件不保留内容，新一侧为 `Unavailable::NotRetained`（见下） |
 | 词级 diff 的单行长度 | 1000 字节 | 整行高亮 |
 
 二进制判断与 git 相同：属性 `binary` 或 `-diff`，或任一侧前 8000 字节里有 NUL。上限都在 `Limits` 里，调用方可以调整；默认值写进 `bench` 的预算表。
@@ -520,7 +529,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 | 打开项目到项目主页可用 < 100 ms | `discover` + `worktrees` + `tracked` < 15 ms |
 | 打开一个会话的 Diff < 50 ms | 50 个改动文件的 `changes`（stat 跳过其余文件）< 15 ms；hunk 未命中时计算 < 20 ms，命中时 < 2 ms |
 | 切换 worktree / 分支 < 100 ms | 内容相同的文件命中同一份 hunk 缓存；`refresh(Full)` < 15 ms |
-| 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB |
+| 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB；每个 `ChangeSet` 保留的工作区内容 ≤ 32 MiB（通常只有当前审阅的一个） |
 | 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数 |
 | 安装包 ≤ 80 MB | gix 约 3 MB（ADR 0024） |
 
@@ -567,6 +576,8 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`；未暂存的 `rm` 得到 `Deleted`；HEAD 删除、对方修改的冲突得到没有 `old` 的 `Conflicted`；只改 `.gitattributes`、文件 stat 不变时 `refresh(Full)` 按新规则重新计算 OID；没有改动的跟踪文件不会作为未跟踪文件出现；二进制和只改模式的文件也计入 5000 个文件的上限。
 - 截断：单文件、整体、保留内容三种上限的边界值；`NotRetained` 的 `Detail` 是带增删行数的 `Truncated`。
 - 过滤器与目录：LFS 文件暂存了更新、stat 与 index 一致时仍是 `Filtered`；跟踪的文件被换成同名目录时得到 `Deleted` 和目录下各文件的未跟踪 `Added`；未初始化的子模块不是改动。
+- 暂存：基准 A、index B、工作区 A 时报告 `StagedOnly` 且 `staged = Some(B)`；暂存后又改了工作区时带 `staged`；index 与工作区相同时 `staged` 为 None。
+- prunable 的 worktree：根目录不存在时 `root` 是 `gitdir` 记录的路径去掉 `/.git` 后字面归并的结果。
 - 句柄：一次顶层调用返回后，当前线程上没有留下 gix 句柄（测试用计数钩子检查）。
 - 路径：index 里含 `..`、`.`、空名字、NUL 或以 `/` 开头的条目不被打开，记在 `Totals::invalid_paths` 里；`RelPath::new` 拒绝这些写法；Linux 上 `SafeRoot` 对 `..` 和绝对路径的解析被 `RESOLVE_BENEATH` 拒绝（`platform` 的测试）。
 - 过滤器的快路径：未改动的 LFS 文件（stat 一致、index 与基准 OID 相同）不是改动；暂存了更新的是 `Filtered`。
