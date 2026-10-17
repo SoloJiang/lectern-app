@@ -3336,6 +3336,11 @@ dependencies = [
 [[package]]
 name = "lectern-platform"
 version = "0.0.0"
+dependencies = [
+ "libc",
+ "rustix",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-project"
