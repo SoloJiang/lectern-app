@@ -12,7 +12,7 @@
   - 进程内基准：直接调用领域、基础设施和 kernel 层 crate 的公开接口与 `testing` 模块。
   - 进程级基准：启动 `lectern`（或空 GPUI 窗口的基线程序）的子进程，测冷启动、空闲内存、每个插件的激活耗时与常驻内存、打开与切换的端到端耗时、帧时间。
   - 进程级基准的探针（`probe` feature）：`app` 在测量构建里调用它，向运行器报告首帧时刻、静止信号和插件状态。
-  - 迁移现有的 `perf_smoke` 测试（`crates/agents/tests/perf_smoke.rs`、`crates/platform/src/safe_read/tests.rs` 里的 `perf_smoke`）。
+  - 迁移现有的 `perf_smoke` 测试（`crates/agents/tests/perf_smoke.rs`、`crates/platform/src/safe_read/tests.rs` 里的 `perf_smoke`、`crates/git` 里的 `perf_smoke_git_open`）。
 - 不做：
   - 取进程创建时间、`phys_footprint`、第一帧的 `presentedTime`、线程 QoS：macOS 专属，在 `platform`（架构规则 6），接口见「需要其他 crate 提供的接口」。
   - 生成合成仓库、合成会话等夹具：放在被测 crate 的 `testing` 模块，供它自己的测试和 bench 共用。
@@ -525,6 +525,7 @@ CI：
 第 1 步把两个被忽略的 `perf_smoke` 测试移进 bench，同一个 PR 里删除原测试：
 
 - `crates/agents/tests/perf_smoke.rs` → `benches/time/agents.rs` 的 `agents/parse_throughput`、`agents/append_4k`。拼接 50 MB 会话和取约 4 KB 完整行的代码移进 `lectern_agents::testing`（`synthetic_session(len) -> Vec<u8>`、`append_chunk() -> &'static [u8]`，fixtures 用 `include_bytes!` 嵌入）。删除 `crates/agents/Cargo.toml` 里的 `[[test]] perf_smoke`，更新 `crates/agents/AGENTS.md` 里对它的说明。
+- `crates/git` 的 `perf_smoke_git_open` → `benches/time/git.rs` 的 `git/open`，用 `lectern_git::testing::TestRepo` 生成同样形状的仓库（728 个跟踪文件、11 个 worktree）；删除原测试，更新 git 设计「与设计的差异」里的对应一条。
 - `crates/platform/src/safe_read/tests.rs` 的 `perf_smoke` 和 `perf_tree` → `benches/time/platform.rs` 的 `platform/safe_stat`、`platform/safe_read_4k`。bench 自己生成同样的 728 个 4 KiB 文件、深度 4 的目录树。原测试比较每个后端，`open_with` 是 crate 内部接口；bench 只测 `SafeRoot::open` 选中的生产后端（macOS 上是 `NofollowAny`，Linux 上是 `Openat2`），预算也只对生产后端成立。`Walk` 只用于少见的路径，不设基准。更新 platform 设计「性能」里的「基准」一条。
 - `executor` 设计里推迟的两项、`kernel` 与 `i18n` 设计里的基准，同一步加入（只记录）。
 
