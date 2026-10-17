@@ -1,0 +1,18 @@
+---
+source: crates/git/src/rows/tests.rs
+expression: "view(&old, &new, 3)"
+---
+~ folded: old 1..5, new 1..5
+    6   6  line 6
+    7   7  line 7
+    8   8  line 8
+-   9      line 9  (pair 9)
+-  10      line 10
++       9  line nine  (pair 9)
+   11  10  line 11
++      11  line 11b
++      12  line 11c
+   12  13  line 12
+   13  14  line 13
+   14  15  line 14
+~ folded: old 15..20, new 16..21

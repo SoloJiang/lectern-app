@@ -1,0 +1,10 @@
+---
+source: crates/git/src/changes/tests.rs
+expression: "render(&diff_with(&t, old, new, &limits))"
+---
+M a-binary  100644 f76dd23 -> 100644 09f370e  binary Some(1) -> Some(2)
+M b-mode  100644 1275430 -> 100755 1275430  modeonly
+M c-sub  160000 1111111 -> 160000 2222222  nodiff
+M d-text  100644 d00491f -> 100644 0cfbf08  text +1 -1 [0..1>0..1]
+M e-text  100644 d00491f -> 100644 0cfbf08  listed
+totals: 5 files, +1 -1, truncated 0, too large 0, listed 1, not retained 0, invalid []

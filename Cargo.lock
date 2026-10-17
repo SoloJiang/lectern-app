@@ -4275,6 +4275,7 @@ name = "lectern-git"
 version = "0.0.0"
 dependencies = [
  "gix",
+ "insta",
  "lectern-platform",
  "tempfile",
 ]

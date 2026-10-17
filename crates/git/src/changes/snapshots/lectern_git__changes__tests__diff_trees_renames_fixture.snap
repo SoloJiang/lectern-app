@@ -1,0 +1,22 @@
+---
+source: crates/git/src/changes/tests.rs
+expression: "render(&diff(&t, old, new))"
+---
+M keep/modified.txt  100644 7aced41 -> 100644 602c1d0  text +1 -0 [10..10>10..11]
+R100 old/b.txt => new/b.txt  100644 1275430 -> 100644 1275430  text +0 -0 []
+A new/below2.txt  - -> 100644 f8fbae0  text +10 -0 [0..0>0..10]
+R094 old/blob.bin => new/blob2.bin  100644 6241587 -> 100644 a6e209a  binary Some(275) -> Some(261)
+A new/copy.txt  - -> 100644 7aced41  text +10 -0 [0..0>0..10]
+R100 old/empty1 => new/empty2  100644 e69de29 -> 100644 e69de29  text +0 -0 []
+R079 old/hi.txt => new/hi.txt  100644 3adc246 -> 100644 147c171  text +2 -2 [8..10>8..10]
+R092 old/crlf.txt => new/lf.txt  100644 de80b7b -> 100644 773de86  text +12 -12 [0..12>0..12]
+R100 old/link => new/link  120000 0d607a7 -> 120000 0d607a7  text +0 -0 []
+A new/link2  - -> 120000 5c7e02b  text +1 -0 [0..0>0..1]
+R059 old/mid.txt => new/mid.txt  100644 6fc204a -> 100644 9426b3f  text +4 -4 [6..10>6..10]
+R088 old/q1 => new/q2  100644 8c6523f -> 100644 de4fb69  text +0 -1 [9..10>9..9]
+R100 old/script.sh => new/script.sh  100644 1183455 -> 100755 1183455  modeonly
+R100 old/sub => new/sub  160000 5555555 -> 160000 5555555  nodiff
+R100 old/a.txt => new/z.txt  100644 1275430 -> 100644 1275430  text +0 -0 []
+D old/below.txt  100644 9885296 -> -  text +0 -10 [0..10>0..0]
+D old/link2  120000 113ae7e -> -  text +0 -1 [0..1>0..0]
+totals: 17 files, +40 -30, truncated 0, too large 0, listed 0, not retained 0, invalid []

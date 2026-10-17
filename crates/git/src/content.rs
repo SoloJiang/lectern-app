@@ -1,9 +1,37 @@
-//! Why a file's content isn't available (docs/design/git.md「数据结构」).
-//! Step 1 uses `UnsupportedType`, `PathThroughSymlink` and `Unreadable`
-//! for `Worktree::read_file`; the worktree comparison (step 3) uses the
-//! rest.
+//! A side's content and why it may not be available
+//! (docs/design/git.md「数据结构」). `Worktree::read_file` uses
+//! `UnsupportedType`, `PathThroughSymlink` and `Unreadable`; tree diffs use
+//! `Blob` and `Missing`; the worktree comparison (step 3) uses the rest.
 
 use crate::Oid;
+
+/// What one side of a [`Change`](crate::Change) holds.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Content {
+    /// The blob OID of the canonical content; for a symbolic link the OID of
+    /// its target as a blob, for a submodule the commit OID.
+    Blob(Oid),
+    /// Over the worktree's single-file read limit (64 MiB): not read.
+    Unhashed {
+        size: u64,
+        mtime_ns: i128,
+        inode: u64,
+    },
+    Unavailable(Unavailable),
+}
+
+impl Content {
+    /// The content's OID when it is known: `Blob`, and `NotRetained`
+    /// (hashed, bytes not kept).
+    pub fn oid(&self) -> Option<Oid> {
+        match self {
+            Content::Blob(oid) | Content::Unavailable(Unavailable::NotRetained { oid }) => {
+                Some(*oid)
+            }
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Unavailable {

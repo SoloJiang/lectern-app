@@ -1,0 +1,10 @@
+---
+source: crates/git/src/changes/tests.rs
+expression: "render(&diff(&t, old, new))"
+---
+A .gitattributes  - -> 100644 2fa815a  text +1 -0 [0..0>0..1]
+M gen/a.rs  100644 d00491f -> 100644 0cfbf08  text +1 -1 [0..1>0..1]  generated
+M src/b.rs  100644 d00491f -> 100644 0cfbf08  text +1 -1 [0..1>0..1]
+A sub/.gitattributes  - -> 100644 6313ce6  text +1 -0 [0..0>0..1]
+M sub/data.x  100644 d00491f -> 100644 0cfbf08  binary Some(2) -> Some(2)
+totals: 5 files, +4 -2, truncated 0, too large 0, listed 0, not retained 0, invalid []

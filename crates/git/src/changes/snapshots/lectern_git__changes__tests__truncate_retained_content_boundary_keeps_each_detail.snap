@@ -1,0 +1,12 @@
+---
+source: crates/git/src/changes/tests.rs
+expression: "assemble_in_memory(&t, files, &limits)"
+---
+a-text 100644 2bd5a0a text +1 -1 [0..1>0..1]  kept Some(3)
+b-text 100644 55bd0ac text +1 -1 [0..1>0..1]  kept Some(4)
+c-text 100644 b0f6d94 (not retained) truncated +1 -1  kept None
+d-binary 100644 09f370e (not retained) binary Some(2) -> Some(2)  kept None
+e-large 100644 044d6de (not retained) toolarge  kept None
+f-empty 100644 e69de29 (not retained) truncated +0 -1  kept None
+g-same 100644 1275430 text +0 -0 []  kept None
+not retained 4

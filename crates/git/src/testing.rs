@@ -371,6 +371,59 @@ impl TestRepo {
         write(&self.root().join(rel), content);
     }
 
+    /// Imports a directory fixture made by `tests/fixtures/scripts/*.sh`
+    /// (format in `tests/fixtures/README.md`): writes its blobs, rebuilds
+    /// both trees from the recorded `git ls-tree` listings and checks that
+    /// every OID is the one git recorded. Returns the old and new tree.
+    pub fn import_fixture(&self, dir: &Path) -> (Oid, Oid) {
+        let text = |name: &str| {
+            std::fs::read_to_string(dir.join(name))
+                .unwrap_or_else(|err| panic!("{}: {err}", dir.join(name).display()))
+        };
+        let oid =
+            |hex: &str| Oid::from_hex(self.hash, hex).unwrap_or_else(|| panic!("bad OID {hex:?}"));
+        let trees = text("trees");
+        let recorded = |side: &str| {
+            trees
+                .lines()
+                .find_map(|l| l.strip_prefix(side)?.strip_prefix(' '))
+                .map(oid)
+                .unwrap_or_else(|| panic!("no {side} tree in {}", dir.display()))
+        };
+        let build = |listing: &str| -> Oid {
+            let mut entries: Vec<(String, Mode, Oid)> = Vec::new();
+            for line in text(listing).lines() {
+                let (meta, path) = line.split_once('\t').expect("<mode> <type> <oid>\\t<path>");
+                let fields: Vec<&str> = meta.split(' ').collect();
+                let [mode, kind, hex] = fields[..] else {
+                    panic!("bad ls-tree line {line:?}");
+                };
+                let mode = match mode {
+                    "100644" => Mode::File,
+                    "100755" => Mode::Executable,
+                    "120000" => Mode::Symlink,
+                    "160000" => Mode::Gitlink,
+                    other => panic!("mode {other} in {line:?}"),
+                };
+                let id = oid(hex);
+                if kind == "blob" {
+                    let content = std::fs::read(dir.join("blobs").join(hex)).unwrap();
+                    assert_eq!(self.blob(&content), id, "blob {hex}");
+                }
+                entries.push((path.to_owned(), mode, id));
+            }
+            let entries: Vec<(&str, Mode, Oid)> = entries
+                .iter()
+                .map(|(p, m, o)| (p.as_str(), *m, *o))
+                .collect();
+            self.tree_entries(&entries)
+        };
+        let (old, new) = (build("old.tree"), build("new.tree"));
+        assert_eq!(old, recorded("old"), "old tree of {}", dir.display());
+        assert_eq!(new, recorded("new"), "new tree of {}", dir.display());
+        (old, new)
+    }
+
     #[cfg(unix)]
     pub fn symlink(&self, rel: &str, target: &str) {
         let path = self.root().join(rel);
