@@ -4298,6 +4298,12 @@ version = "0.0.0"
 [[package]]
 name = "lectern-fs-watch"
 version = "0.0.0"
+dependencies = [
+ "insta",
+ "lectern-executor",
+ "lectern-kernel",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-git"

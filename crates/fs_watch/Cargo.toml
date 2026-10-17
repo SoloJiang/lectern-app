@@ -10,5 +10,22 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "infra"
 
+[features]
+# `testing`: FakeBackend, the manually driven watcher, RecordingSink and
+# FakeSource, for the tests of this crate and of git, project, agents, review,
+# usage and bench. The manual watcher drives an `Executor::manual()`.
+test-support = ["lectern-executor/test-support"]
+
+[dependencies]
+lectern-kernel = { path = "../kernel" }
+lectern-executor = { path = "../executor" }
+
+[dev-dependencies]
+insta.workspace = true
+tempfile.workspace = true
+lectern-executor = { path = "../executor", features = ["test-support"] }
+# TestKernel, for the quiescence tests.
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+
 [lints]
 workspace = true

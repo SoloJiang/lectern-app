@@ -1,0 +1,28 @@
+---
+source: crates/fs_watch/src/tests/revision.rs
+expression: table
+---
+HEAD: main+1 wt+0 filter+0 config+1 | repo worktrees=["main+head"] [] | main { head: true, index: false, refs: false, config: false, rules: false } | wt 
+index: main+1 wt+0 filter+1 config+0 | repo worktrees=["main+index"] [] | main { head: false, index: true, refs: false, config: false, rules: false } | wt 
+config.worktree: main+1 wt+0 filter+1 config+1 | repo worktrees=[] ["config"] | main { head: false, index: false, refs: false, config: true, rules: false } | wt 
+worktrees/wt/HEAD: main+0 wt+1 filter+0 config+1 | repo worktrees=["wt+head"] [] | main  | wt { head: true, index: false, refs: false, config: false, rules: false }
+worktrees/wt/index: main+0 wt+1 filter+1 config+0 | repo worktrees=["wt+index"] [] | main  | wt { head: false, index: true, refs: false, config: false, rules: false }
+worktrees/wt/config.worktree: main+0 wt+1 filter+1 config+1 | repo worktrees=[] ["config"] | main  | wt { head: false, index: false, refs: false, config: true, rules: false }
+worktrees: main+0 wt+0 filter+0 config+0 | repo worktrees=[] ["worktree_list"] | main  | wt 
+worktrees/wt: main+0 wt+0 filter+0 config+0 | repo worktrees=[] ["worktree_list"] | main  | wt 
+worktrees/wt/gitdir: main+0 wt+0 filter+0 config+0 | repo worktrees=[] ["worktree_list"] | main  | wt 
+worktrees/wt/locked: main+0 wt+0 filter+0 config+0 | repo worktrees=[] ["worktree_list"] | main  | wt 
+worktrees/wt/commondir: main+0 wt+0 filter+0 config+0 | repo worktrees=[] ["worktree_list"] | main  | wt 
+refs/heads/main: main+1 wt+1 filter+0 config+0 | repo worktrees=[] ["refs"] | main { head: false, index: false, refs: true, config: false, rules: false } | wt { head: false, index: false, refs: true, config: false, rules: false }
+packed-refs: main+1 wt+1 filter+0 config+0 | repo worktrees=[] ["refs"] | main { head: false, index: false, refs: true, config: false, rules: false } | wt { head: false, index: false, refs: true, config: false, rules: false }
+reftable/tables.list: main+1 wt+1 filter+0 config+0 | repo worktrees=[] ["refs"] | main { head: false, index: false, refs: true, config: false, rules: false } | wt { head: false, index: false, refs: true, config: false, rules: false }
+config: main+1 wt+1 filter+2 config+2 | repo worktrees=[] ["config"] | main { head: false, index: false, refs: false, config: true, rules: false } | wt { head: false, index: false, refs: false, config: true, rules: false }
+info/exclude: main+1 wt+1 filter+2 config+0 | repo worktrees=[] ["config"] | main { head: false, index: false, refs: false, config: true, rules: false } | wt { head: false, index: false, refs: false, config: true, rules: false }
+info/attributes: main+1 wt+1 filter+0 config+0 | repo worktrees=[] ["config"] | main { head: false, index: false, refs: false, config: true, rules: false } | wt { head: false, index: false, refs: false, config: true, rules: false }
+logs/HEAD: main+0 wt+0 filter+0 config+0 | repo | main  | wt 
+index.lock: main+0 wt+0 filter+0 config+0 | repo | main  | wt 
+refs/heads/main.lock: main+0 wt+0 filter+0 config+0 | repo | main  | wt 
+objects/ab/cdef: main+0 wt+0 filter+0 config+0 | repo | main  | wt 
+FETCH_HEAD: main+0 wt+0 filter+0 config+0 | repo | main  | wt 
+ORIG_HEAD: main+0 wt+0 filter+0 config+0 | repo | main  | wt 
+hooks/pre-commit: main+0 wt+0 filter+0 config+0 | repo | main  | wt
