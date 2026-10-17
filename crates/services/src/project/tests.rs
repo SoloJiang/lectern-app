@@ -184,15 +184,19 @@ where
 }
 
 fn sample_snapshot() -> ProjectSnapshot {
+    // A git project: every entry has its OID from the index.
     let mut files = FileList::builder();
-    for (p, kind) in [
+    for (i, (p, kind)) in [
         ("Cargo.toml", FileKind::File),
         ("crates/a/Cargo.toml", FileKind::File),
         ("crates/a/run.sh", FileKind::Executable),
         ("link", FileKind::Symlink),
         ("vendor/sub", FileKind::Submodule),
-    ] {
-        files.push(p, kind);
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        files.push_with_oid(p, kind, BlobId::Sha1([i as u8; 20]));
     }
     files.skip();
     let files = Arc::new(files.build());
@@ -275,6 +279,7 @@ fn project_snapshot_round_trips() {
     };
     assert_eq!(files.skipped(), 1);
     assert_eq!(files.find("crates/a/run.sh"), Some(FileKind::Executable));
+    assert_eq!(files.oid(2), Some(BlobId::Sha1([2; 20])));
 
     let folder = ProjectSnapshot {
         key: ProjectKey::Folder { root: path("/f") },
@@ -343,7 +348,7 @@ fn project_events_round_trip() {
 #[test]
 fn file_list_deserializes_through_the_builder() {
     // Unsorted, duplicated and invalid entries from another process.
-    let json = r#"{"entries":[["b","File"],["a","Executable"],["a","File"],["../x","File"],["","File"]],"skipped":1,"truncated":true}"#;
+    let json = r#"{"entries":[["b","File",null],["a","Executable",null],["a","File",null],["../x","File",null],["","File",null]],"skipped":1,"truncated":true}"#;
     let files: FileList = serde_json::from_str(json).expect("deserializes");
     assert_eq!(
         files.iter().collect::<Vec<_>>(),
@@ -352,4 +357,137 @@ fn file_list_deserializes_through_the_builder() {
     assert_eq!(files.skipped(), 3);
     assert!(files.truncated());
     assert_eq!(files.range_under(""), 0..2);
+    assert_eq!(files.oid(0), None);
+
+    // The same with OIDs: the first of equal paths keeps its OID.
+    let a = "aa".repeat(20);
+    let a2 = "a2".repeat(20);
+    let b = "bb".repeat(20);
+    let json = format!(
+        r#"{{"entries":[["b","File","{b}"],["a","Executable","{a}"],["a","File","{a2}"]],"skipped":0,"truncated":false}}"#
+    );
+    let files: FileList = serde_json::from_str(&json).expect("deserializes");
+    assert_eq!(files.oid(0), Some(BlobId::Sha1([0xaa; 20])));
+    assert_eq!(files.oid(1), Some(BlobId::Sha1([0xbb; 20])));
+    assert_eq!(files.oid(2), None);
+
+    // A bad OID fails the whole list rather than being dropped.
+    let json = r#"{"entries":[["a","File","xyz"]],"skipped":0,"truncated":false}"#;
+    assert!(serde_json::from_str::<FileList>(json).is_err());
+}
+
+#[test]
+fn file_list_serializes_oids_in_hex() {
+    let mut git = FileList::builder();
+    git.push_with_oid("b", FileKind::File, BlobId::Sha1([0x0f; 20]));
+    git.push_with_oid("a", FileKind::Symlink, BlobId::Sha1([0xab; 20]));
+    let git = git.build();
+    let json = serde_json::to_string(&git).unwrap();
+    assert_eq!(
+        json,
+        format!(
+            r#"{{"entries":[["a","Symlink","{}"],["b","File","{}"]],"skipped":0,"truncated":false}}"#,
+            "ab".repeat(20),
+            "0f".repeat(20)
+        )
+    );
+    assert_eq!(round_trip(&git), git);
+
+    let mut folder = FileList::builder();
+    folder.push("a", FileKind::File);
+    let folder = folder.build();
+    assert_eq!(
+        serde_json::to_string(&folder).unwrap(),
+        r#"{"entries":[["a","File",null]],"skipped":0,"truncated":false}"#
+    );
+    assert_eq!(round_trip(&folder), folder);
+}
+
+#[test]
+fn file_list_oids_follow_entries() {
+    let sha256 = |b: u8| BlobId::Sha256([b; 32]);
+    let mut b = FileList::builder();
+    b.push_with_oid("z", FileKind::File, sha256(3));
+    b.push_with_oid("m/x", FileKind::Executable, sha256(2));
+    b.push_with_oid("bad/../p", FileKind::File, sha256(9));
+    b.push_with_oid("a", FileKind::File, sha256(1));
+    let files = b.build();
+    let entries = (0..files.len())
+        .map(|i| (files.get(i).unwrap().0, files.oid(i)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries,
+        [
+            ("a", Some(sha256(1))),
+            ("m/x", Some(sha256(2))),
+            ("z", Some(sha256(3)))
+        ]
+    );
+    assert_eq!(files.skipped(), 1);
+    assert_eq!(files.oid(3), None);
+    assert_eq!(files.oid(usize::MAX), None);
+
+    // A folder project's list has no OIDs.
+    let mut b = FileList::builder();
+    b.push("a", FileKind::File);
+    let folder = b.build();
+    assert_eq!(folder.oid(0), None);
+
+    // Mixed lists (an entry without an OID, or two hash widths) keep none.
+    let mut b = FileList::builder();
+    b.push_with_oid("a", FileKind::File, sha256(1));
+    b.push("b", FileKind::File);
+    let mixed = b.build();
+    assert_eq!((mixed.len(), mixed.oid(0), mixed.oid(1)), (2, None, None));
+    let mut b = FileList::builder();
+    b.push_with_oid("a", FileKind::File, sha256(1));
+    b.push_with_oid("b", FileKind::File, BlobId::Sha1([1; 20]));
+    assert_eq!(b.build().oid(0), None);
+
+    // OIDs count in equality.
+    let one = |oid| {
+        let mut b = FileList::builder();
+        b.push_with_oid("a", FileKind::File, oid);
+        b.build()
+    };
+    assert_ne!(one(sha256(1)), one(sha256(2)));
+    assert_ne!(one(sha256(1)), folder);
+}
+
+#[test]
+fn blob_id_bytes_and_hex() {
+    let sha1 = BlobId::from_bytes(&[0x01; 20]).unwrap();
+    assert_eq!(sha1, BlobId::Sha1([0x01; 20]));
+    assert_eq!(sha1.as_bytes(), &[0x01; 20]);
+    let sha256 = BlobId::from_bytes(&[0xfe; 32]).unwrap();
+    assert_eq!(sha256.as_bytes().len(), 32);
+    for len in [0, 19, 21, 31, 33] {
+        assert_eq!(BlobId::from_bytes(&vec![0; len]), None, "{len}");
+    }
+
+    let hex = "0123456789abcdef0123456789abcdef01234567";
+    let id = BlobId::from_hex(hex).unwrap();
+    assert_eq!(id.to_string(), hex);
+    assert_eq!(BlobId::from_hex(&hex.to_uppercase()), Some(id));
+    assert_eq!(format!("{id:?}"), format!("BlobId({hex})"));
+    assert_eq!(
+        BlobId::from_hex(&"e3".repeat(32)),
+        Some(BlobId::Sha256([0xe3; 32]))
+    );
+    for bad in [
+        "",
+        "0123",
+        &hex[..39],
+        &"0".repeat(41),
+        &"g".repeat(40),
+        &"é".repeat(20),
+    ] {
+        assert_eq!(BlobId::from_hex(bad), None, "{bad}");
+    }
+
+    assert_eq!(serde_json::to_string(&id).unwrap(), format!("\"{hex}\""));
+    assert_eq!(round_trip(&id), id);
+    assert_eq!(round_trip(&sha256), sha256);
+    assert!(serde_json::from_str::<BlobId>("\"abc\"").is_err());
+    assert!(serde_json::from_str::<BlobId>("[1,2]").is_err());
 }

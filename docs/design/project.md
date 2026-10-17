@@ -1,6 +1,6 @@
 # project 设计
 
-状态：实现中。第 1 步（清单解析与成员解析）、第 2 步（`services` 里的服务接口与数据类型）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）已实现，第 5 步尚未实现（见「验收」）。
+状态：实现中。第 1 步（清单解析与成员解析）、第 2 步（`services` 里的服务接口与数据类型）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）已实现，第 5 步尚未实现（见「验收」）。`services` 的 `BlobId` 与 `FileList::oid`（code_intel 前置条件 A，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）已实现。
 
 对应 issue [#9](https://github.com/SoloJiang/lectern-app/issues/9)。`project` 把用户打开的路径解析成项目模型：仓库 → worktree → 子项目（[ADR 0006](../adr/0006.md)、[技术调研「Monorepo 与多 worktree 支持」](tech-research.md#monorepo-与多-worktree-支持)），以不可变快照交给视图和其他插件，并通过 `KernelControl::workspace_changed` 提交 `WorkspaceFacts`，驱动 `Activation::Workspace` 的插件（[kernel「依赖与自动启停」](kernel.md#依赖与自动启停)）。
 
@@ -389,8 +389,8 @@ pub struct Resolved {
 
 ```rust
 /// 一个 worktree 的受跟踪文件。连续的路径缓冲加结束偏移，按字节序排序（即 index 顺序），
-/// 所以一个目录下的文件是连续的一段。
-pub struct FileList { /* buf: Box<str>, ends: Box<[u32]>, kinds: Box<[FileKind]>, skipped: u32 */ }
+/// 所以一个目录下的文件是连续的一段。OID 按列表的哈希算法定长存放（每条 20 或 32 字节）。
+pub struct FileList { /* buf: Box<str>, ends: Box<[u32]>, kinds: Box<[FileKind]>, oids: Box<[u8]>, oid_width: u8, skipped: u32 */ }
 
 impl FileList {
     pub fn builder() -> FileListBuilder;
@@ -398,6 +398,8 @@ impl FileList {
     pub fn is_empty(&self) -> bool;
     pub fn get(&self, i: usize) -> Option<(&str, FileKind)>;
     pub fn iter(&self) -> impl Iterator<Item = (&str, FileKind)> + '_;
+    /// 第 i 条的 blob OID（index 里记录的）。git 项目每条都有，文件夹项目都为 None。
+    pub fn oid(&self, i: usize) -> Option<BlobId>;
     /// `dir` 下全部文件的下标范围，二分查找。`dir` 为 "" 时是全部。
     pub fn range_under(&self, dir: &str) -> Range<usize>;
     /// 这个路径是不是列表里的文件，二分查找。
@@ -410,12 +412,26 @@ impl FileList {
 
 pub enum FileKind { File, Executable, Symlink, Submodule }
 
-/// 按 index 顺序 push 时不排序；乱序时 `build` 排序。同一路径只收第一条；
+/// git 对象 ID：SHA-1 仓库 20 字节，SHA-256 仓库 32 字节；文件夹项目用原始字节的 SHA-1。
+/// 序列化为小写十六进制字符串（40 或 64 位），反序列化也接受大写。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BlobId { Sha1([u8; 20]), Sha256([u8; 32]) }
+
+impl BlobId {
+    pub fn from_bytes(bytes: &[u8]) -> Option<BlobId>; // 长度不是 20 或 32 时为 None
+    pub fn from_hex(hex: &str) -> Option<BlobId>;
+    pub fn as_bytes(&self) -> &[u8];
+}
+// Display 输出小写十六进制；Debug 输出 BlobId(十六进制)。
+
+/// 按 index 顺序 push 时不排序；乱序时 `build` 排序。同一路径只收第一条（连同它的 OID）；
 /// 空路径、以 `/` 开头或结尾、含 `.` 或 `..` 段的路径记入 `skipped`。
+/// 收入的每一条都经 `push_with_oid` 且 OID 长度相同时，列表才带 OID；否则每条的 `oid` 都为 None。
 pub struct FileListBuilder { /* … */ }
 
 impl FileListBuilder {
     pub fn push(&mut self, path: &str, kind: FileKind);
+    pub fn push_with_oid(&mut self, path: &str, kind: FileKind, oid: BlobId); // git 项目
     pub fn skip(&mut self);          // 没有收入的条目（如不是 UTF-8）
     pub fn set_truncated(&mut self); // 文件夹遍历达到上限
     pub fn build(self) -> FileList;
@@ -424,8 +440,8 @@ impl FileListBuilder {
 
 - git 项目：来自 index，同一路径的多个合并阶段（冲突中）只收一条。index 里没有的文件（未跟踪的新文件）不在列表里。
 - 文件夹项目：从根目录遍历，不跟随符号链接；跳过以 `.` 开头的目录和 `node_modules`、`target`、`build`、`dist`、`out`、`vendor`、`venv`、`__pycache__`（以 `.` 开头的文件照常收入）；最多 20,000 个条目，超过时停止并标记 `truncated`。按名字的字节序深度优先遍历，上限截断的结果是确定的；条目指文件和符号链接，FIFO、socket、设备文件不收入，名字不是 UTF-8 的记入 `skipped`，读不出的子目录跳过。
-- 不带 blob OID：P1 的消费者（⌘K、Files、`WorkspaceFacts`、子项目）只要路径。需要时（`code_intel`，P2）另加，不改现有字段。
-- 序列化：`{ "entries": [[路径, 类型], …], "skipped": n, "truncated": b }`，不暴露内部的缓冲与偏移。反序列化经 `FileListBuilder`：来自其他进程的乱序、重复或不合法的路径按构造器的规则排序、去重、记入 `skipped`，偏移不会越界，查找不会 panic。
+- blob OID：`code_intel` 的「blob → 路径」映射要用（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)），现有字段不变。git 项目从 index 建列表时用 `push_with_oid` 填入 `TrackedEntry::oid`；文件夹项目用 `push`，`oid` 都为 None。`project` 改为填入 OID 之前（code_intel「验收」前置条件 B），git 项目的 `oid` 也都为 None。
+- 序列化：`{ "entries": [[路径, 类型, OID], …], "skipped": n, "truncated": b }`，OID 是十六进制字符串，没有时为 null，不暴露内部的缓冲与偏移。反序列化经 `FileListBuilder`：来自其他进程的乱序、重复或不合法的路径按构造器的规则排序、去重、记入 `skipped`，偏移不会越界，查找不会 panic；OID 不是 40 或 64 位十六进制时整个列表反序列化失败。
 
 ### 子项目与清单
 
@@ -702,6 +718,14 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - 常驻内存：当前 worktree 的句柄（index 的 `TrackedPaths`，与过滤器共用）和每个清单结果的表随监听保留，没有测量；第 5 步按「性能」表的常驻内存一行测。
 - macOS：真实的 FSEvents 后端和 `app` 的装配（fs_watch 验收第 4 步）还没有接上，`app` 里没有构造 `ProjectDeps`；FSEvents 的延迟、根目录被删除时的 `RootChanged` 是否如 `FakeBackend` 那样到达，由 fs_watch 第 3、4 步的 macOS CI 验证。
 
+`services` 的 `BlobId` 与 `FileList::oid`（code_intel「验收」前置条件 A，与 `services::code_intel` 模块同一个 PR），在 Linux（x86_64 容器）上运行（`services` 不依赖 GPUI）：
+
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test`（Linux 上不依赖 GPUI 的全部 crate，1064 个通过、1 个跳过）、`just doctest`、`just deny` 全部通过。没有新增依赖。
+- `just test -p lectern-services`：36 个测试，其中新增 `blob_id_bytes_and_hex`（20 与 32 字节、其他长度为 None、十六进制往返、大写可读、序列化为字符串、错误的十六进制反序列化失败）、`file_list_oids_follow_entries`（排序后 OID 跟着条目走、不合法路径连同 OID 一起跳过、文件夹列表与混合列表都为 None、OID 参与相等比较）、`file_list_serializes_oids_in_hex`（git 与文件夹列表的 JSON 形式与往返）；`file_list_deserializes_through_the_builder` 的样本改为三元组，另检查同一路径只留第一条的 OID、错误的 OID 让整个列表反序列化失败；`project_snapshot_round_trips` 的文件列表改为带 OID。
+- `lectern-project` 只用 `push`，不改代码照常编译，测试照常通过；它的 git 列表在前置条件 B 之前没有 OID。
+
+没有验证到的：`FileList` 每条多 20 或 32 字节的常驻内存（`plugin/project/resident_*`）在前置条件 B 里随 `project` 填入 OID 一起测量和修改。
+
 ## 与设计的差异
 
 第 1 步：
@@ -745,3 +769,9 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - `Host` 多了 `busy()`（`Sink::busy` 用，插件里是 `PluginHandle::busy()`，测试队列返回 None）；`Model::watch_with` 在 `activate` 里设置监听器。都是 crate 内部的，公开接口只有 `ProjectDeps::watcher`。
 - 测试辅助：`FakeGit` 多了 `source`（这个 worktree 的 `FakeSource`，跟踪路径随 `track` / `untrack` / `write` 更新）、`remove_worktree`（`git worktree remove`）、`touch_index`（只改校验和、不改路径）、`before_read`（下一次读某个文件之前运行一个闭包，用来在一轮扫描中途制造变化）；`test-support` 打开 `lectern-fs-watch/test-support`。测试里的 `Watch` 把 fs_watch 的手动监听器和模型的任务队列交替跑到都没有工作。已改「测试」。
 - 快照不带监听的健康状态：fs_watch「状态与异常」说 arm 失败时由视图显示「不再自动刷新」，但 `ProjectSnapshot` 没有对应的字段，视图拿不到这个状态。第 4 步不改 `services` 的接口：`Failed` 只触发重新列 worktree，`Degraded` 不处理。等视图（`project_home`）需要时在 `services` 里加字段。
+
+`services` 的 `BlobId` 与 `FileList::oid`（code_intel 前置条件 A）：
+
+- `BlobId` 的形状：code_intel 设计只要求「20 或 32 字节、`Copy`、序列化为十六进制」，实现定为两个变体的枚举 `Sha1([u8; 20])` / `Sha256([u8; 32])`，另派生 `Hash`、`Ord`，带 `from_bytes`、`from_hex`、`as_bytes` 和输出小写十六进制的 `Display`。已写进上文「文件列表」。
+- 混合列表不带 OID：设计规定 git 项目每条都有、文件夹项目都为 None，没有写一部分条目有 OID 或两种长度混在一起时怎样处理（只会出现在来自其他进程的输入里）。实现定为整个列表都不带 OID，所以定长存放仍然成立。已写进上文「文件列表」。
+- 序列化的第三个字段没有 OID 时为 null，不省略；反序列化要求三元组，旧的二元组不再接受（还没有进程插件，没有已落盘的旧格式）。OID 不合法时整个列表反序列化失败，与路径不合法时只记入 `skipped` 不同：OID 错了说明对方的列表不可信，丢掉一条的 OID 会让整个列表变成没有 OID 的列表。

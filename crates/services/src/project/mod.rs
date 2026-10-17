@@ -2,9 +2,9 @@
 //! (docs/design/project.md「接口」「数据结构」).
 //!
 //! `project` implements [`Projects`]; consumers (`project_home`,
-//! `worktrees`, `agents`, `usage`, `review`) depend only on this module.
-//! Everything here is data without behaviour, apart from the `FileList`
-//! lookups.
+//! `worktrees`, `agents`, `usage`, `review`, `code_intel`) depend only on
+//! this module. Everything here is data without behaviour, apart from the
+//! `FileList` lookups and the `BlobId` conversions.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use lectern_kernel::{Event, Service};
 
+mod blob;
 mod files;
 mod packages;
 mod snapshot;
@@ -20,6 +21,7 @@ mod snapshot;
 #[cfg(test)]
 mod tests;
 
+pub use blob::BlobId;
 pub use files::{FileKind, FileList, FileListBuilder};
 pub use packages::{Ecosystem, MAX_MANIFEST_BYTES, Manifest, ManifestError, ManifestKind, Package};
 pub use snapshot::{

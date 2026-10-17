@@ -7,6 +7,8 @@ use std::ops::Range;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 
+use super::BlobId;
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum FileKind {
     File,
@@ -19,16 +21,25 @@ pub enum FileKind {
 /// under a directory are one contiguous range. Paths are relative, `/`
 /// separated, with no empty, `.` or `..` segments.
 ///
-/// Serialized as `{ entries: [[path, kind], ...], skipped, truncated }`.
-/// Deserializing goes through `FileListBuilder`, so input from another
-/// process cannot break the invariants: invalid paths are counted in
-/// `skipped`, unsorted entries are sorted, duplicates kept once.
+/// A git project's list has every entry's blob OID from the index; a
+/// folder project's has none. The OIDs are stored at the list's hash width
+/// (20 or 32 bytes each).
+///
+/// Serialized as `{ entries: [[path, kind, oid], ...], skipped, truncated }`
+/// with `oid` in hex or null. Deserializing goes through `FileListBuilder`,
+/// so input from another process cannot break the invariants: invalid
+/// paths are counted in `skipped`, unsorted entries are sorted, duplicates
+/// kept once.
 #[derive(Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(from = "Wire")]
 pub struct FileList {
     buf: Box<str>,
     ends: Box<[u32]>,
     kinds: Box<[FileKind]>,
+    /// `oid_width` bytes per entry, or empty when the list has no OIDs.
+    oids: Box<[u8]>,
+    /// 0 (no OIDs), 20 or 32.
+    oid_width: u8,
     skipped: u32,
     truncated: bool,
 }
@@ -54,6 +65,14 @@ impl FileList {
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, FileKind)> + '_ {
         (0..self.len()).filter_map(|i| self.get(i))
+    }
+
+    /// The blob OID of entry `i`: always present in a git project's list,
+    /// None in a folder project's.
+    pub fn oid(&self, i: usize) -> Option<BlobId> {
+        let w = usize::from(self.oid_width);
+        let start = i.checked_mul(w)?;
+        BlobId::from_bytes(self.oids.get(start..start.checked_add(w)?)?)
     }
 
     /// The index range of the files under `dir` (all of them for "").
@@ -118,7 +137,11 @@ impl Serialize for FileList {
         struct Entries<'a>(&'a FileList);
         impl Serialize for Entries<'_> {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serializer.collect_seq(self.0.iter())
+                let list = self.0;
+                serializer.collect_seq((0..list.len()).filter_map(|i| {
+                    let (path, kind) = list.get(i)?;
+                    Some((path, kind, list.oid(i)))
+                }))
             }
         }
         let mut s = serializer.serialize_struct("FileList", 3)?;
@@ -132,7 +155,7 @@ impl Serialize for FileList {
 /// The serialized form of a `FileList`.
 #[derive(Deserialize)]
 struct Wire {
-    entries: Vec<(Box<str>, FileKind)>,
+    entries: Vec<(Box<str>, FileKind, Option<BlobId>)>,
     skipped: u32,
     truncated: bool,
 }
@@ -140,8 +163,11 @@ struct Wire {
 impl From<Wire> for FileList {
     fn from(wire: Wire) -> Self {
         let mut b = FileList::builder();
-        for (path, kind) in &wire.entries {
-            b.push(path, *kind);
+        for (path, kind, oid) in &wire.entries {
+            match oid {
+                Some(oid) => b.push_with_oid(path, *kind, *oid),
+                None => b.push(path, *kind),
+            }
         }
         b.skipped = b.skipped.saturating_add(wire.skipped);
         b.truncated = wire.truncated;
@@ -158,9 +184,13 @@ impl fmt::Debug for FileList {
 /// Collects entries for a `FileList`. Entries pushed in sorted order (as
 /// the index gives them) are stored without sorting; equal paths (merge
 /// stages of a conflict) are kept once.
+///
+/// The list keeps OIDs only when every collected entry was pushed with
+/// `push_with_oid` and all OIDs have the same width; otherwise `oid` is
+/// None for every entry.
 #[derive(Default)]
 pub struct FileListBuilder {
-    entries: Vec<(Box<str>, FileKind)>,
+    entries: Vec<(Box<str>, FileKind, Option<BlobId>)>,
     sorted: bool,
     skipped: u32,
     truncated: bool,
@@ -168,16 +198,25 @@ pub struct FileListBuilder {
 
 impl FileListBuilder {
     pub fn push(&mut self, path: &str, kind: FileKind) {
+        self.push_entry(path, kind, None);
+    }
+
+    /// Like `push`, with the entry's blob OID (git projects).
+    pub fn push_with_oid(&mut self, path: &str, kind: FileKind, oid: BlobId) {
+        self.push_entry(path, kind, Some(oid));
+    }
+
+    fn push_entry(&mut self, path: &str, kind: FileKind, oid: Option<BlobId>) {
         if !is_valid_path(path) {
             self.skipped = self.skipped.saturating_add(1);
             return;
         }
         if self.entries.is_empty() {
             self.sorted = true;
-        } else if let Some((last, _)) = self.entries.last() {
+        } else if let Some((last, _, _)) = self.entries.last() {
             self.sorted &= **last <= *path;
         }
-        self.entries.push((path.into(), kind));
+        self.entries.push((path.into(), kind, oid));
     }
 
     /// Counts an entry that was not collected.
@@ -195,10 +234,12 @@ impl FileListBuilder {
             self.entries.sort_by(|a, b| a.0.cmp(&b.0));
         }
         self.entries.dedup_by(|b, a| a.0 == b.0);
+        let width = oid_width(&self.entries);
         let mut buf = String::new();
         let mut ends = Vec::with_capacity(self.entries.len());
         let mut kinds = Vec::with_capacity(self.entries.len());
-        for (path, kind) in self.entries {
+        let mut oids = Vec::with_capacity(self.entries.len() * usize::from(width));
+        for (path, kind, oid) in self.entries {
             let Ok(end) = u32::try_from(buf.len() + path.len()) else {
                 self.skipped = self.skipped.saturating_add(1);
                 continue;
@@ -206,14 +247,35 @@ impl FileListBuilder {
             buf.push_str(&path);
             ends.push(end);
             kinds.push(kind);
+            if width > 0
+                && let Some(oid) = oid
+            {
+                oids.extend_from_slice(oid.as_bytes());
+            }
         }
         FileList {
             buf: buf.into_boxed_str(),
             ends: ends.into_boxed_slice(),
             kinds: kinds.into_boxed_slice(),
+            oids: oids.into_boxed_slice(),
+            oid_width: width,
             skipped: self.skipped,
             truncated: self.truncated,
         }
+    }
+}
+
+/// The OID width shared by every entry, or 0 when an entry has no OID, the
+/// widths differ, or there are no entries.
+fn oid_width(entries: &[(Box<str>, FileKind, Option<BlobId>)]) -> u8 {
+    let mut widths = entries
+        .iter()
+        .map(|(_, _, oid)| oid.map_or(0, |o| o.as_bytes().len()));
+    let first = widths.next().unwrap_or(0);
+    if widths.all(|w| w == first) {
+        u8::try_from(first).unwrap_or(0)
+    } else {
+        0
     }
 }
 

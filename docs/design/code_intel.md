@@ -1133,3 +1133,13 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 5. **端到端基准**（前置 #20 的抽屉和 `file_reader` 在探针里的里程碑）：bench 探针增加打开抽屉、跳转、覆盖层完成的 `Milestone`，以及读取 `coverage` 的方式。
    - `app/goto_candidates`、`app/goto_single`、`app/goto_unindexed`、`app/goto_unindexed_done`、`app/index_review_set`、`app/index_subproject`、`app/index_100k`、`app/idle_monorepo_indexed` 在 `crates/bench/src/budgets.rs` 里改为生效，macOS CI 上在预算内。
    - `app/idle_monorepo` 在后台工作暂停时仍 < 100 MB。
+
+## 与设计的差异
+
+前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
+
+- `NameTable` 的构造：上文没有给构造方法。实现加了 `NameTable::builder(generation)`，返回 `NameTableBuilder`（`push(name, kinds)`、`build()`）。`build` 按字节序排序，同名条目合并为一条、种类位集取并集；NFC 规范化由本 crate 在 `push` 之前完成，`services` 不依赖 `unicode-normalization`。`kinds(i)` 下标越界时返回 0。
+- `NameTable` 的序列化：`{ "generation": n, "entries": [[名字, 种类位集], …] }`，与 `FileList` 一样不暴露缓冲与偏移，反序列化经 `NameTableBuilder`。
+- `SemanticReply` 与 `ProviderRegistration`：字段属于本 crate（队列、登记表），`services` 里放不下。实现为包着回调的类型：本 crate 用 `new` 传入回调；`SemanticReply::send` 调用回调，没有调用就 drop 时回调随之 drop、不被调用；`ProviderRegistration` drop 时调用一次回调。两者都是 `Send`，不序列化。
+- `SemanticRequestId` 上文没有定义，实现为 `SemanticRequestId(pub u64)`，与 `QueryId` 相同。
+- 派生：除上文要求的标准派生外，小的键和值类型另派生 `Copy`、`Hash`（与 `services::project` 相同）；`CandidateTier` 另派生 `Ord`，顺序就是声明顺序，也就是候选列出的顺序。
