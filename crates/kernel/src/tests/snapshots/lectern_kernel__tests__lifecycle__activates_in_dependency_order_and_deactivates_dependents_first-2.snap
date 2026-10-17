@@ -1,0 +1,42 @@
+---
+source: crates/kernel/src/tests/lifecycle.rs
+expression: "(disabled, enabled)"
+---
+(
+    [
+        (
+            "a",
+            Waiting {
+                missing: [
+                    svc-b,
+                ],
+            },
+        ),
+        (
+            "b",
+            Waiting {
+                missing: [
+                    svc-c,
+                ],
+            },
+        ),
+        (
+            "c",
+            Disabled,
+        ),
+    ],
+    [
+        (
+            "a",
+            Active,
+        ),
+        (
+            "b",
+            Active,
+        ),
+        (
+            "c",
+            Active,
+        ),
+    ],
+)

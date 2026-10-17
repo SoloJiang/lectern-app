@@ -10,5 +10,12 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "kernel"
 
+[dev-dependencies]
+insta.workspace = true
+
+[features]
+# TestKernel and Kernel::barrier, for plugin crates' tests.
+test-support = []
+
 [lints]
 workspace = true

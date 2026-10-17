@@ -1,0 +1,7 @@
+---
+source: crates/kernel/src/tests/services.rs
+expression: log.text()
+---
+user activated
+added two
+removed one

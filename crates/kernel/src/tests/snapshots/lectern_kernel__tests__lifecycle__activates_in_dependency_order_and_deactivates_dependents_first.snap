@@ -1,0 +1,21 @@
+---
+source: crates/kernel/src/tests/lifecycle.rs
+expression: log.text()
+---
+activate c
+started c
+activate b
+started b
+activate a
+started a
+-- disable c
+drop a
+drop b
+drop c
+-- enable c
+activate c
+started c
+activate b
+started b
+activate a
+started a

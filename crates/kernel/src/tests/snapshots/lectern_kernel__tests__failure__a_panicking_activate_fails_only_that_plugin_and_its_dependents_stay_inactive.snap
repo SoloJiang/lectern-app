@@ -1,0 +1,26 @@
+---
+source: crates/kernel/src/tests/failure.rs
+expression: states(&kernel)
+---
+[
+    (
+        "provider",
+        Failed(
+            Panicked(
+                "activate panicked: activate",
+            ),
+        ),
+    ),
+    (
+        "dependent",
+        Waiting {
+            missing: [
+                svc-a,
+            ],
+        },
+    ),
+    (
+        "other",
+        Active,
+    ),
+]

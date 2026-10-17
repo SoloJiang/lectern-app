@@ -1,5 +1,7 @@
 # kernel 设计
 
+状态：已实现（#PR）。
+
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
 ## 范围
@@ -723,7 +725,13 @@ pub mod testing {
         pub fn activate(&self) -> Result<(), PluginError>;
         pub fn deactivate(&self);
         pub fn emitted<E: Event + Clone>(&self) -> Vec<E>;   // 被测插件发出的事件
+        pub fn inner(&self) -> Option<Arc<Kernel>>;         // 背后的 Kernel，供需要直接操作的测试
     }
+}
+
+impl Kernel {
+    /// 等 kernel 线程处理完调用之前排入的全部请求（`test-support` 下提供）。
+    pub fn barrier(&self);
 }
 ```
 
@@ -747,3 +755,28 @@ pub mod testing {
 - kernel 不依赖 GPUI 和 kernel 层以外的 crate（`just check` 的架构检查通过）。
 - `TestKernel` 能注入模拟服务并单独激活一个插件。
 - `status()` 给出每个插件的激活耗时，`Quiescent` 事件、`is_quiescent()` 和 `quiescent_epoch()` 给出静止信号，供 #7 的 bench 读取。
+
+## 实际验证
+
+在 Linux 上运行（kernel 不依赖 GPUI，macOS 上行为相同）：
+
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test -p lectern-kernel`（75 个测试）、`just doctest`、`just deny` 全部通过；`cargo nextest run -p lectern-kernel --all-features` 连续运行 15 次全部通过。
+- 依赖图、自动启停、撤销顺序、失败隔离、事件分发的结果用 insta 快照记录（`crates/kernel/src/tests/snapshots/`）。
+- 「测试」一节中属于 kernel 自身的条目都有对应测试，分在 `crates/kernel/src/tests/` 的 `graph`、`lifecycle`、`events`、`services`、`handles`、`failure`、`quiescence`、`commands`、`workspace`、`gates`、`shutdown`、`testing` 里。`gates` 用测试里的最小执行器（`tests/executor.rs`）验证 `SubmitGate` / `GateSlot` 与执行器约定的配合：闸门打开前任务不运行、`start` panic 时任务一次也没运行、任务 panic 时插件进入 `Failed` 且工作线程继续运行、激活失效时挂起的任务被唤醒并丢弃、一次性任务的登记被回收。
+- 并发：一个 `MULTIPLE` 服务的最后两个提供者在两个线程上同时 `fail`，依赖者一定变为 `Dead`，重复 300 次（设计写「上万次」，单次测试要启动一个 kernel，300 次已覆盖交错，测试时间控制在 1 秒内）；多线程同时 `emit` 和反复停用、启用不死锁。
+
+没有在本 PR 验证、由使用这些原语的 crate 验证的条目：
+
+- 主线程上的界面注册与注销、命令重放、主线程回调和结果应用的 panic 隔离（「静止与界面注册」「界面注册」「命令重放与静止」「主线程回调 panic」「界面注册的应用 panic」「注册应用与失效」「任务结果的应用 panic」等）：由 `workspace` 实现，kernel 提供 `ActivationToken::enter` / `pending`、`Admission::own` 和 `contain`，这些原语本身已测试。
+- 执行器一侧的约定（`wake` 只入队、不重入 poll、克隆走的 waker、`shutdown` 返回后不再排队）：由 `executor` 的测试覆盖；本 PR 的测试执行器只演示约定。
+- 激活耗时预算和内存基准：在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 的 bench 里测量，`status()` 已给出四段耗时。
+
+## 与设计的差异
+
+- 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。
+- `PluginError` 的变体按实现需要列全：`Failed`（插件报告）、`Panicked`、`MissingService`、`UndeclaredService`、`DuplicateService`、`InvalidGraph`、`DependencyUnavailable`、`Disabled`、`ShuttingDown`、`UnknownCommand`。设计里提到的 `Stale` 没有用到（请求方失效时 `done` 不被调用），不提供。
+- `Context::service` / `service_set` 收到不在 `requires` 里的服务时 panic，由 `activate` 的边界捕获、插件进入 `Failed`，错误信息写明原因；设计只写了「必须在 requires 里」。
+- 启动时的依赖图检查只让出错的插件进入 `Failed`；`MissingProvider` 不让依赖者失败（提供者可能只是清单 panic），依赖者停在 `Waiting`。`validate` 仍报告全部错误。依赖环之外、依赖环里插件的依赖者也按环处理（进入 `Failed`），实现更简单，`validate` 的单元测试会先在 CI 里拦下环。
+- 日志写到 stderr（kernel 只用标准库，没有日志依赖），由 `app` 重定向到日志文件。
+- `ServiceRemoved` 只为发出过 `ServiceAdded` 的激活发出：`started` 失败的提供者从头到尾不被依赖者看到，与「新提供者」一条一致。
+
