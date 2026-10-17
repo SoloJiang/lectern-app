@@ -347,8 +347,8 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`（`$CODEX_HOME` 可改） | 首行 `session_meta`（含 cwd），之后是 `response_item` / `event_msg` | `codex resume <id>` |
 
 - 目录名里的路径编码有歧义（`-` 既是分隔符也可能是原名字符），**以文件内的 `cwd` 字段为准**，不要反解目录名。
-- 字段会随版本变化，解析层用宽松的 `serde_json::Value` + 适配器，只取需要的字段，未知 `type` 直接跳过。
-- 只读最后若干行拿标题、时间、最后一条消息即可，不要整文件解析；用 `notify` 监听目录，新增行时增量 tail。
+- 字段会随版本变化，解析层按版本适配，只取需要的字段，未知 `type` 跳过并计数。
+- 会话列表只读每个文件的开头和末尾；监听目录（经 `fs_watch`），新增行时按游标增量读取；轮次索引按会话和已解析前缀缓存（[ADR 0026](../adr/0026.md)，设计见 [agents 设计](agents.md)）。
 
 ### 2. 终端（libghostty-vt 内核）
 
