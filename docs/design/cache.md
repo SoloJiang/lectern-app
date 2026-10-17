@@ -1,6 +1,6 @@
 # cache 设计
 
-状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)（见「验收」）。
+状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`crates/cache/AGENTS.md` 列出的两个 issue；本 crate 是它们的前置，不单独关闭其中任何一个）。`cache` 是派生数据的本地持久缓存：解析、diff、索引这类可以从 git 对象或会话日志重新算出的结果，以内容的身份为键存进 SQLite，下次启动、切换 worktree 时直接命中（架构规则 5，[技术调研「性能要点」](tech-research.md#性能要点)）。存储选型见 [ADR 0027](../adr/0027.md)。
 
