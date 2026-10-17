@@ -575,7 +575,16 @@ impl Codex {
         &self,
         file: &SessionFile,
     ) -> Result<(SessionSummary, ParseStats), SessionError> {
-        summary::summarize(self, file, false)
+        summary::summarize(self, file, false, false)
+    }
+
+    /// `summarize`，但分叉与子 agent 的来源会话能找到时扫描它的轮次 ID（不只用已缓存的集合），所以继承边界
+    /// 能定下来。读过这个会话之后、或来源会话后来出现时，第 4 步用它重新生成摘要。
+    pub(crate) fn summarize_with_sources(
+        &self,
+        file: &SessionFile,
+    ) -> Result<(SessionSummary, ParseStats), SessionError> {
+        summary::summarize(self, file, false, true)
     }
 
     /// 补齐压缩会话的末尾字段：整份流式解码一次（不建副本），`tail_pending` 为 false。未压缩的会话与 `summarize` 相同。
@@ -583,7 +592,7 @@ impl Codex {
         &self,
         file: &SessionFile,
     ) -> Result<(SessionSummary, ParseStats), SessionError> {
-        summary::summarize(self, file, true)
+        summary::summarize(self, file, true, false)
     }
 
     /// 删掉这个会话的解压副本（压缩文件消失时，第 4 步的发现调用）。

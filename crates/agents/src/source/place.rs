@@ -65,7 +65,11 @@ impl Places {
     ) -> bool {
         let mut changed = false;
         for cwd in cwds {
-            if self.by_cwd.contains_key(&**cwd) {
+            if let Some(held) = self.by_cwd.get(&**cwd) {
+                // 目录当时不存在（`Missing`）：之后可能又建好了，每次刷新再试一次规范化（一次 `stat`）。
+                if held.canonical.is_none() {
+                    changed |= self.recanonicalize(projects, cwd);
+                }
                 continue;
             }
             let canonical = std::fs::canonicalize(cwd).ok();
@@ -95,6 +99,10 @@ impl Places {
             .collect();
         let mut changed = false;
         for cwd in cwds {
+            if self.by_cwd[&cwd].canonical.is_none() {
+                changed |= self.recanonicalize(projects, &cwd);
+                continue;
+            }
             let canonical = self.by_cwd[&cwd].canonical.clone();
             let place = self.locate(projects, canonical.as_deref());
             let held = self.by_cwd.get_mut(&cwd).expect("listed above");
@@ -103,6 +111,19 @@ impl Places {
                 changed = true;
             }
         }
+        changed
+    }
+
+    /// 当时不存在的 cwd 再规范化一次；现在存在时重新归位。返回归位结果是否变了。
+    fn recanonicalize(&mut self, projects: &ProjectsRef, cwd: &Arc<Path>) -> bool {
+        let Ok(canonical) = std::fs::canonicalize(cwd) else {
+            return false;
+        };
+        let place = self.locate(projects, Some(&canonical));
+        let held = self.by_cwd.get_mut(&**cwd).expect("a held cwd");
+        held.canonical = Some(canonical);
+        let changed = held.place != place;
+        held.place = place;
         changed
     }
 

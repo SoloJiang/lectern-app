@@ -383,3 +383,45 @@ fn discover_fork_summary_is_redone_once_its_source_was_read() {
     h.settle();
     assert!(h.take_seen(&codex_source()).is_empty());
 }
+
+#[test]
+fn discover_fork_read_before_its_source_appears_is_redone_when_the_source_is_listed() {
+    let mut h = Harness::new();
+    let rel_fork = format!("2026/10/03/rollout-2026-10-03T09-00-00-{L2}.jsonl");
+    let rel_main = format!("2026/10/02/rollout-2026-10-02T09-00-00-{L1}.jsonl");
+    let legacy = fixtures().join("codex/0.140.0-legacy/sessions");
+    h.copy(&legacy.join(&rel_fork), &h.codex_root().join(&rel_fork));
+    h.start();
+    let fork = key(&codex_source(), L2);
+    let before = h.list(&codex_source()).get(&fork).unwrap().clone();
+    assert!(before.inheritance_unknown);
+
+    // Read while the source session is not on this machine: the boundary stays unknown.
+    h.source(&codex_source())
+        .read(&fork, &Cursor::START, u64::MAX)
+        .unwrap();
+    h.settle();
+    assert!(
+        h.list(&codex_source())
+            .get(&fork)
+            .unwrap()
+            .inheritance_unknown
+    );
+    h.take_seen(&codex_source());
+
+    // The source appears; nobody reads the unchanged fork again.
+    h.copy(&legacy.join(&rel_main), &h.codex_root().join(&rel_main));
+    h.emit(&h.codex_root(), &[(&rel_main, F)]);
+    let after = h.list(&codex_source()).get(&fork).unwrap().clone();
+    assert!(!after.inheritance_unknown, "the boundary is known now");
+    assert_ne!(
+        after.title, before.title,
+        "the title is the fork's own prompt"
+    );
+    let changed: Vec<_> = h
+        .take_seen(&codex_source())
+        .iter()
+        .flat_map(|s| s.event.changed.iter().cloned())
+        .collect();
+    assert!(changed.contains(&fork));
+}

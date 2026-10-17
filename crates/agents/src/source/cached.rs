@@ -126,10 +126,16 @@ impl Indexes {
         Some((held.index.clone(), held.file))
     }
 
+    /// 放进一个索引，按 LRU 淘汰到预算之内。比整个预算还大的索引不留在内存里（调用方用完就释放，
+    /// 下次从 `cache` 读），同一会话的旧索引也一并去掉。
     pub(crate) fn put(&mut self, index: Arc<TurnIndex>, file: Option<FileId>) {
         self.tick += 1;
         let bytes = estimate(&index);
         let key = index.session.clone();
+        if bytes > MEMORY_BUDGET {
+            self.remove(&key);
+            return;
+        }
         if let Some(old) = self.entries.insert(
             key.clone(),
             Held {

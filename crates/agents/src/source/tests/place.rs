@@ -182,3 +182,52 @@ fn place_pending_packages_are_filled_after_changed() {
     h.settle();
     assert_snapshot!(places(&h), @r#"00000001-0000-4000-8000-000000000000 [base]/repo/apps/web Located(git:[base]/repo/.git wt=[base]/repo/.git rel="apps/web" Found("apps/web"))"#);
 }
+
+#[test]
+fn place_missing_cwd_is_placed_once_it_exists_again() {
+    let mut h = Harness::new();
+    let repo = h.base.join("repo");
+    let linked = h.base.join("wt-later");
+    std::fs::create_dir_all(&repo).unwrap();
+    let id = session_at(&h, 1, &linked.join("src"));
+    h.start();
+    assert_eq!(h.list(&claude_source()).sessions[0].place, Place::Missing);
+
+    // The worktree is created again and its project opened.
+    std::fs::create_dir_all(linked.join("src")).unwrap();
+    let mut project = git_project(&repo, &[&linked]);
+    project.trees[1].packages = Some(Vec::new());
+    let project_key = project.key.clone();
+    h.projects.add(project, true);
+    h.run().kernel.emitter().emit(ProjectEvent::Opened {
+        request: OpenRequest(1),
+        result: Ok(project_key),
+    });
+    h.settle();
+    assert_snapshot!(places(&h), @r#"00000001-0000-4000-8000-000000000000 [base]/wt-later/src Located(git:[base]/repo/.git wt=[base]/repo/.git/worktrees/wt-later rel="src" None)"#);
+    let seen = h.take_seen(&claude_source());
+    assert!(
+        seen.iter()
+            .any(|s| s.event.changed.iter().any(|k| k.id.as_ref() == id))
+    );
+}
+
+#[test]
+fn place_missing_cwd_is_retried_on_the_next_refresh() {
+    let mut h = Harness::new();
+    let work = h.base.join("later");
+    session_at(&h, 1, &work);
+    h.start();
+    assert_eq!(h.list(&claude_source()).sessions[0].place, Place::Missing);
+    std::fs::create_dir_all(&work).unwrap();
+    // Any refresh (here a new session elsewhere) canonicalizes it again.
+    let other = session_at(&h, 2, &h.base);
+    h.emit(&h.claude_root(), &[(&format!("-p/{other}.jsonl"), F)]);
+    let list = h.list(&claude_source());
+    let first = list
+        .sessions
+        .iter()
+        .find(|s| s.key.id.as_ref() == uuid(1))
+        .unwrap();
+    assert!(matches!(first.place, Place::Resolved(_)));
+}

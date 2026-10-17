@@ -94,7 +94,10 @@ struct State<F> {
     /// 第一次发布之后才有主动补齐。
     published_once: bool,
     completion: Completion,
-    /// 读过之后重新生成过摘要的会话（Codex 分叉：读取时才扫描来源，摘要据此更新一次）。
+    /// 读过、但重新生成摘要时仍找不到继承前缀来源的会话（Codex 分叉、子 agent）。有新会话发布时
+    /// （来源可能出现了）再按需扫描来源、重新生成一次，不再等它被读。
+    unresolved: HashMap<SessionKey, (FileId, Arc<Path>)>,
+    /// 读过之后已经排了重新生成摘要的会话（每个文件身份一次）。
     resummarized: HashSet<(SessionKey, FileId)>,
 }
 
@@ -162,6 +165,7 @@ impl<A: Adapter> Engine<A> {
                 chosen: HashMap::new(),
                 published_once: false,
                 completion: Completion::default(),
+                unresolved: HashMap::new(),
                 resummarized: HashSet::new(),
             }),
             places: Mutex::new(Places::default()),
@@ -433,6 +437,19 @@ impl<A: Adapter> Engine<A> {
         if state.stopped {
             return;
         }
+        if forced {
+            // 读过之后的重新生成：来源仍然找不到时记下，来源出现后再来。
+            match &summary {
+                Some((s, _)) if s.inheritance_unknown => {
+                    state
+                        .unresolved
+                        .insert(key.clone(), (id, A::path(&file).clone()));
+                }
+                _ => {
+                    state.unresolved.remove(&key);
+                }
+            }
+        }
         state
             .known
             .insert(A::path(&file).clone(), Known { file, id, summary });
@@ -479,7 +496,11 @@ impl<A: Adapter> Engine<A> {
         #[cfg(test)]
         self.full_summaries
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.adapter.summarize(file).ok()
+        if forced {
+            self.adapter.summarize_with_sources(file).ok()
+        } else {
+            self.adapter.summarize(file).ok()
+        }
     }
 
     /// 追加之后：内存里的索引在这个文件上、游标仍有效时接着解析，末尾字段取新游标里的解析器状态。
@@ -568,10 +589,16 @@ impl<A: Adapter> Engine<A> {
         drop(state);
 
         let mut changed = Vec::new();
+        let mut added = false;
         let mut now = HashMap::with_capacity(sessions.len());
         for s in &sessions {
-            if published.sessions.get(&s.key) != Some(s) {
-                changed.push(s.key.clone());
+            match published.sessions.get(&s.key) {
+                None => {
+                    added = true;
+                    changed.push(s.key.clone());
+                }
+                Some(old) if old != s => changed.push(s.key.clone()),
+                Some(_) => {}
             }
             now.insert(s.key.clone(), s.clone());
         }
@@ -608,6 +635,28 @@ impl<A: Adapter> Engine<A> {
                 removed: removed.into(),
             });
         }
+        drop(published);
+        if added {
+            self.retry_unresolved();
+        }
+    }
+
+    /// 有新会话发布了：读过但继承边界未定的会话再按需扫描来源、重新生成一次摘要。
+    fn retry_unresolved(&self) {
+        {
+            let mut state = self.state();
+            if state.unresolved.is_empty() {
+                return;
+            }
+            let paths: Vec<Arc<Path>> = state.unresolved.drain().map(|(_, (_, p))| p).collect();
+            let guard = self.busy();
+            state
+                .work
+                .forced
+                .extend(paths.iter().map(|p| p.to_path_buf()));
+            state.work.guards.extend(guard);
+        }
+        self.schedule();
     }
 
     /// 第一次发布之后：主动补齐修改时间最近的几个压缩会话（「数据流与线程」第 2 步）。

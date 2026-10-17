@@ -218,3 +218,37 @@ fn index_cache_memory_is_a_byte_lru() {
         "oldest unused"
     );
 }
+
+#[test]
+fn index_cache_memory_never_keeps_an_index_over_the_budget() {
+    let session = key(&claude_source(), &uuid(1));
+    let index = |turns: u32, preview: usize| {
+        Arc::new(TurnIndex {
+            session: session.clone(),
+            cursor: Cursor::START,
+            turns: (0..turns)
+                .map(|i| Turn {
+                    id: TurnId(format!("turn-{i}").into()),
+                    ordinal: i + 1,
+                    started_at: Timestamp(0),
+                    ended_at: None,
+                    prompt: None,
+                    prompt_preview: "x".repeat(preview).into(),
+                    items: Arc::new([]),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            format: Format::Known,
+        })
+    };
+    let small = index(10, 10);
+    let huge = index(2000, 8 << 10);
+    assert!(estimate(&huge) > MEMORY_BUDGET);
+    let mut lru = Indexes::default();
+    lru.put(small, None);
+    assert!(lru.contains(&session));
+    // Replacing it with an index larger than the whole budget keeps neither.
+    lru.put(huge, None);
+    assert!(!lru.contains(&session));
+    assert_eq!(lru.bytes(), 0);
+}

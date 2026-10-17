@@ -31,6 +31,13 @@ pub(crate) trait Adapter: Send + Sync + 'static {
     fn related(&self, path: &Path) -> Option<PathBuf>;
 
     fn summarize(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError>;
+    /// 读过这个会话之后的摘要：继承前缀的来源会话能找到时按需扫描它（Codex）；其余与 `summarize` 相同。
+    fn summarize_with_sources(
+        &self,
+        file: &Self::File,
+    ) -> Result<(SessionSummary, ParseStats), SessionError> {
+        self.summarize(file)
+    }
     /// 补齐 `tail_pending` 的字段（整份流式解码一次）。
     fn complete(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError>;
     fn read(
@@ -170,6 +177,13 @@ impl Adapter for Codex {
 
     fn summarize(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError> {
         Codex::summarize(self, file)
+    }
+
+    fn summarize_with_sources(
+        &self,
+        file: &Self::File,
+    ) -> Result<(SessionSummary, ParseStats), SessionError> {
+        Codex::summarize_with_sources(self, file)
     }
 
     fn complete(&self, file: &Self::File) -> Result<(SessionSummary, ParseStats), SessionError> {
