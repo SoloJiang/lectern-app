@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 import check_architecture
-from check_architecture import apple_only_cfg, inherits_workspace_lints, is_macos_binding_name
+from check_architecture import apple_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -38,6 +38,35 @@ def tearDownModule():
 def rustc_calls():
     with open(os.environ["FAKE_RUSTC_LOG"]) as f:
         return [json.loads(line)["args"] for line in f]
+
+
+class PluginRule(unittest.TestCase):
+    CRATES = {
+        "lectern-app": (False, "app", ["lectern-project", "lectern-agents"]),
+        "lectern-project": (True, "domain", ["lectern-git", "lectern-executor", "lectern-services"]),
+        "lectern-agents": (True, "domain", ["lectern-git"]),
+        "lectern-git": (False, "domain", []),
+        "lectern-executor": (False, "infra", []),
+        "lectern-services": (False, "kernel", []),
+        "lectern-project-home": (False, "view", ["lectern-services", "lectern-git"]),
+    }
+
+    def test_allowed(self):
+        self.assertEqual(plugin_errors(self.CRATES), [])
+
+    def test_plugin_depends_on_plugin(self):
+        crates = dict(self.CRATES, **{"lectern-agents": (True, "domain", ["lectern-git", "lectern-project"])})
+        self.assertEqual(
+            plugin_errors(crates),
+            ["lectern-agents -> lectern-project: plugin crates must not depend on each other [AGENTS.md architecture rule 7]"],
+        )
+
+    def test_library_depends_on_plugin(self):
+        crates = dict(self.CRATES, **{"lectern-project-home": (False, "view", ["lectern-project"])})
+        self.assertEqual(
+            plugin_errors(crates),
+            ["lectern-project-home -> lectern-project: only the app crate may depend on a plugin crate [AGENTS.md architecture rule 7]"],
+        )
 
 
 class AppleOnlyCfg(unittest.TestCase):

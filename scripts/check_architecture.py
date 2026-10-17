@@ -15,6 +15,9 @@ Rules checked:
      target predicates can only hold on Apple platforms (apple_only_cfg).
   5. Every workspace crate inherits the workspace lints
      (`[lints] workspace = true`).
+  6. Plugin crates (`[package.metadata.lectern] plugin = true`) never depend
+     on another plugin crate, and only app depends on a plugin crate
+     (dev-dependencies included).
 
 Each error names the rule's source (AGENTS.md or a design doc) in brackets.
 
@@ -82,6 +85,22 @@ MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "ob
 # every machine and in CI.
 LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 PLATFORM_CRATE = "lectern-platform"
+
+
+def plugin_errors(crates):
+    """Rule 7 (ADR 0025). `crates` maps a workspace crate's name to
+    (is_plugin, layer, names of the workspace crates it depends on, dev
+    included). Returns the error messages."""
+    errors = []
+    for name, (_, mine, deps) in crates.items():
+        for dep in deps:
+            if dep not in crates or not crates[dep][0]:
+                continue
+            if crates[name][0]:
+                errors.append(f"{name} -> {dep}: plugin crates must not depend on each other [AGENTS.md architecture rule 7]")
+            elif mine != "app":
+                errors.append(f"{name} -> {dep}: only the app crate may depend on a plugin crate [AGENTS.md architecture rule 7]")
+    return errors
 
 
 def metadata(platform=None, all_features=True):
@@ -267,11 +286,16 @@ def main():
     errors = []
 
     layer = {}
+    plugin = {}
     for pid in members:
         pkg = packages[pid]
-        value = (pkg.get("metadata") or {}).get("lectern", {}).get("layer")
+        lectern = (pkg.get("metadata") or {}).get("lectern", {})
+        value = lectern.get("layer")
         if value not in (*RANK, "kernel", "tool"):
             errors.append(f"{pkg['name']}: missing or unknown layer {value!r} [docs/design/cargo-workspace.md]")
+        plugin[pid] = lectern.get("plugin", False)
+        if not isinstance(plugin[pid], bool):
+            errors.append(f"{pkg['name']}: `plugin` must be true or false [docs/adr/0025.md]")
         if not inherits_workspace_lints(pkg["manifest_path"]):
             errors.append(f"{pkg['name']}: add `[lints] workspace = true` to its Cargo.toml [docs/design/ci.md]")
         layer[pid] = value
@@ -335,6 +359,15 @@ def main():
             # not bypass platform isolation.
             if name != PLATFORM_CRATE and dep_name != PLATFORM_CRATE and (is_macos_binding_name(dep_name) or apple_only(pid, dep)):
                 errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE} [AGENTS.md architecture rule 6]")
+
+    errors.extend(
+        plugin_errors(
+            {
+                packages[pid]["name"]: (plugin[pid] is True, layer[pid], [packages[d]["name"] for d in own_deps(pid) if d in members])
+                for pid in members
+            }
+        )
+    )
 
     for pid in members:
         if layer[pid] not in GPUI_FREE_LAYERS:
