@@ -1,0 +1,22 @@
+---
+source: crates/cache/src/tests/basics.rs
+expression: meta
+---
+[
+    (
+        "bytes",
+        "77",
+    ),
+    (
+        "kind",
+        "repo",
+    ),
+    (
+        "opened",
+        "<seconds>",
+    ),
+    (
+        "path",
+        "/work/lectern/.git",
+    ),
+]

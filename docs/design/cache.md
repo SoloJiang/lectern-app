@@ -1,6 +1,6 @@
 # cache 设计
 
-状态：已接受，尚未实现。
+状态：实现中。第 1 步已实现（存储、键值接口与生命周期，[#82](https://github.com/SoloJiang/lectern-app/pull/82)），第 2 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`crates/cache/AGENTS.md` 列出的两个 issue；本 crate 是它们的前置，不单独关闭其中任何一个）。`cache` 是派生数据的本地持久缓存：解析、diff、索引这类可以从 git 对象或会话日志重新算出的结果，以内容的身份为键存进 SQLite，下次启动、切换 worktree 时直接命中（架构规则 5，[技术调研「性能要点」](tech-research.md#性能要点)）。存储选型见 [ADR 0027](../adr/0027.md)。
 
@@ -186,7 +186,7 @@ pub enum Compression {
 
 /// 编码后的键。由若干段组成，每段带类型标记和长度，所以 ("ab", "c") 与 ("a", "bc") 不同。
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Key { /* SmallVec<[u8; 64]> */ }
+pub struct Key { /* Vec<u8>，第一段时预留 64 字节 */ }
 
 impl Key {
     pub fn new() -> Key;
@@ -195,8 +195,11 @@ impl Key {
     pub fn u32(self, v: u32) -> Key;
     pub fn u64(self, v: u64) -> Key;
     pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
 }
 ```
+
+键的编码：每段一个类型字节（1 字节串、2 字符串、3 `u32`、4 `u64`），字节串和字符串接着是 LEB128 编码的长度和内容，整数是 4 或 8 字节大端序。编码是单射，改动编码要升 `SCHEMA_VERSION`。
 
 键的规则：结果取决于的每一项（内容身份、生产算法、编码格式、外部工具或适配器的版本）都要出现在命名空间版本或键里，缺一项就可能读到过期的结果。内容来自 git 的，键以 blob OID 为主（架构规则 5）；来自会话日志的，按 ADR 0026 以会话和适配器版本为键、值里带游标。键超过 `MAX_KEY` 的（Analyze 的完整请求）由使用方先求哈希。
 
@@ -288,10 +291,10 @@ PRAGMA query_only = ON;               -- 只在读连接上
 ```rust
 pub struct Stats {
     pub hits: u64,
-    pub misses: u64,
+    pub misses: u64,                        // 含解码失败、超长的键、UI 线程上的读
     pub decode_failures: u64,
-    pub written: u64,
-    pub dropped: Vec<(Dropped, u64)>,       // 按原因计数，每种原因一项
+    pub written: u64,                       // 提交成功的写入调用（put、remove、commit）
+    pub dropped: Vec<(Dropped, u64)>,       // 按原因计数，每种原因一项，六项都在
     pub evicted_bytes: u64,
     pub rebuilt: u64,                       // 删除重建的次数
     pub connections: usize,                 // 当前打开的连接数
@@ -303,6 +306,16 @@ pub struct PartitionStats {
     pub path: Option<PathBuf>,
     pub state: PartitionState,              // Closed / Open / WritesSuspended { until } / Disabled { reason }
     pub bytes: u64,                         // 最近一次读到的 meta.bytes
+}
+
+impl Stats {
+    pub fn dropped(&self, reason: Dropped) -> u64;
+}
+
+pub enum DisableReason {
+    Corrupt,                                // 一次运行里第二次损坏
+    NotWritable,                            // SQLITE_CANTOPEN、SQLITE_READONLY、SQLITE_PERM，或目录建不出来
+    Io,                                     // 连续 3 次其他 IO 错误
 }
 ```
 
@@ -322,7 +335,7 @@ pub struct PartitionStats {
 - 连接数上限 2 ×（1 + `open_projects`），默认 6 个，每个页缓存 1 MiB，合计 6 MiB；`usage` 自己的数据库 ≤ 2 MiB，进程里 SQLite 的页缓存合计 ≤ 8 MB（ADR 0017、ADR 0027）。
 - 读连接在第一次读时才打开。应用级分库的连接打开后一直保留到 `close`。
 - 打开第 `open_projects + 1` 个项目分库时，关闭最久没用过的项目分库的两个连接（等它正在进行的调用结束），在这次调用里完成；之后对它的读写重新打开。
-- 连接只在本 crate 的阻塞方法里关闭（换出项目分库、损坏重建、`close`），或在最后一个 `Cache` 克隆 drop 时关闭；`Partition` 句柄不持有连接，drop 句柄不做 IO。`app` 持有的 `Cache` 在退出时 drop，关闭连接会做一次检查点，发生在退出过程中。
+- 连接只在本 crate 的阻塞方法里关闭（换出项目分库、损坏重建、`close`），或在最后一个 `Cache` 克隆 drop 时关闭；`Partition` 句柄不持有连接，drop 句柄不做 IO。`app` 持有的 `Cache` 在退出时 drop，关闭连接会做一次检查点，发生在退出过程中。最后一个 `Cache` drop 之后，仍在的 `Partition` 句柄不再做 IO：读返回 None，写返回 `Dropped::Unavailable`。
 
 ## 淘汰
 
@@ -380,7 +393,7 @@ pub struct PartitionStats {
 
 ## 测试
 
-全部在 Linux 上运行（`just test -p lectern-cache`），用 `tempfile` 的临时目录，不依赖 GPUI 和 macOS。`test-support` feature 提供可手动推进的时钟（访问时间、60 秒的写入暂停、目录清理）和故障注入（对写连接设置 `max_page_count` 制造 `SQLITE_FULL`；在写事务中途暂停的钩子）。
+全部在 Linux 上运行（`just test -p lectern-cache`），用 `tempfile` 的临时目录，不依赖 GPUI 和 macOS。`test-support` feature 提供可手动推进的时钟（访问时间、60 秒的写入暂停、目录清理）和故障注入（对写连接设置 `max_page_count` 制造 `SQLITE_FULL`；在写事务中途暂停的钩子）：`testing::ManualClock`、`Cache::with_clock`、`Cache::set_ui_thread_panics`、`Partition::file`、`Partition::set_max_page_count`、`Partition::set_write_hook`。
 
 - 构造（`new_*`）：`Cache::new` 加 `app()`、`repo()`、`folder()` 之后 `root` 不存在；第一次 `get` 之后才出现文件。
 - 线程（`ui_thread_*`）：在 `ui_thread` 上调用，debug 构建 panic；`test-support` 可以关掉这个 panic，用来检查 release 的行为：不打开文件，读返回 None，写返回 `WrongThread`。
@@ -413,7 +426,7 @@ pub struct PartitionStats {
 
 分两步实现，每步一个 PR，都写 `Refs #17` 和 `Refs #31`（本 crate 不关闭这两个 issue）。每一步都要 `just check`、`just test -p lectern-cache`、`just deny` 通过。
 
-1. **存储、键值接口与生命周期**：根 `Cargo.toml` 按 ADR 0027 加入 `rusqlite`。
+1. **存储、键值接口与生命周期**（[#82](https://github.com/SoloJiang/lectern-app/pull/82)）：根 `Cargo.toml` 按 ADR 0027 加入 `rusqlite`。
    - `just test -p lectern-cache` 里 `new_*`、`ui_thread_*`、`roundtrip_*`、`namespace_*`、`batch_*`、`open_*`、`disk_full_*`、`busy_*`、`concurrency_*`、`crash_*`、`compression_*`、`memory_*` 通过。
    - `cargo tree -i rusqlite -e normal --depth 1` 只列出 `lectern-cache`。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、`platform`、`executor`。
@@ -424,3 +437,46 @@ pub struct PartitionStats {
    - `perf_smoke_cache` 的 `evict_16m` 与 `memory` 两项在预算内。
 
 接入由使用方各自的 PR 完成：`agents` 设计的第 4 步（`index_cache_*`、`complete_*`），`git` 的 hunk 缓存（`hunk_cache_*`）。`bench` 的 `cache/*` 基准随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 加入。
+
+## 实际验证
+
+第 1 步，在 Linux（x86_64，4 核 Xeon 2.1 GHz，内核 6.18）上运行。本 crate 不依赖 GPUI，也没有 macOS 专属代码；macOS 上的结果由 macOS CI 给出。
+
+- `just check`、`just test`（整个工作区 619 个测试通过，跳过 6 个 `#[ignore]`）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `just test -p lectern-cache`：47 个测试通过，跳过 `perf_smoke_cache`。按前缀：`new_*` 3、`ui_thread_*` 3（其中 2 个检查 debug 构建 panic 的测试只在 debug 下编译）、`roundtrip_*` 9、`namespace_*` 3、`batch_*` 5、`open_*` 11、`disk_full_*` 2、`busy_*` 1、`concurrency_*` 2、`crash_*` 2（其中一个是子进程的入口，没有环境变量时直接返回）、`compression_*` 3、`memory_*` 3。insta 快照 5 个（文件布局、`meta` 的内容、键的编码、写连接和读连接的 PRAGMA），逐个看过。
+- `open_*` 的每种文件都确认走到了预期的分支（看 stderr 的 `lectern-cache:` 行）：`user_version` 更旧和更新、`application_id` 不同、复制别的分库的文件、普通的 SQLite 文件都是「版本或身份不符」；随机字节在打开时报 `SQLITE_NOTADB`；截断到一半、中间三分之一的页被改写都在读取时报 `SQLITE_CORRUPT`。`open_read_only_directory_disables` 在以 root 运行的容器里不生效（权限位被忽略，测试检测到后直接返回），`root` 是普通文件的 `open_unwritable_root_disables_without_panicking` 覆盖同一个分支。
+- `crash_committed_entries_survive_an_abort`：子进程（同一个测试二进制）提交 150 次 `put` 和一批 150 条后 `abort()`；父进程打开时 `-wal` 还在（没有做过检查点），300 条都在，`PRAGMA integrity_check` 为 `ok`，`meta.bytes` 等于 `entry.size` 之和。
+- `cargo tree -i rusqlite -e normal --depth 1` 只列出 `lectern-cache`；`python3 scripts/check_architecture.py` 通过；`rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果。Cargo.lock 新增 `rusqlite`、`libsqlite3-sys`、`hashlink`、`fallible-iterator`、`fallible-streaming-iterator`、`vcpkg`（只在 Windows 上编译），与 ADR 0027 的实测一致；`sha2` 0.11 原来就在 Cargo.lock，已有依赖的版本没有变化。
+- `perf_smoke_cache`（`cargo test --release -p lectern-cache -- --ignored perf_smoke`，运行三次，分库已打开，系统文件缓存已热）：
+
+  | 项 | 预算（M 系列 Mac） | 中位数 | p95 | 最慢 |
+  |---|---|---|---|---|
+  | `get` 一条 4 KiB | < 50 µs | 3.7–3.9 µs | 6.0–7.2 µs | 0.36 ms |
+  | `get_many` 50 条 1 KiB | < 1 ms | 77–83 µs | 113–124 µs | 0.18 ms |
+  | `get` 一条 1 MiB | < 2 ms | 0.48–0.53 ms | 0.64–0.93 ms | 2.8 ms |
+  | `put` 一条 4 KiB | < 1 ms | 46 µs | 90–104 µs | 15 ms |
+  | 1000 条 1 KiB 一批 | < 15 ms | 6.5–7.1 ms | 28–33 ms | 36 ms |
+  | 打开已有的分库 | < 5 ms | 1.3–1.6 ms | 1.9–2.3 ms | 2.9 ms |
+  | 新建分库 | < 10 ms | 4.3–6.0 ms | 6.8–10.1 ms | 34 ms |
+  | `zstd_1m`（参考，1 MiB 文本） | 无 | 写 4.7–5.8 ms，读 0.51–0.65 ms | | |
+
+  中位数都在预算内。写入的长尾来自提交时的自动检查点（每 1000 页一次，检查点要 fsync）：同样的测量关掉自动检查点后，1000 条一批的 p95 是 6.5 ms。设计规定检查点发生在当次写入的调用里，写入都在后台任务里，不影响读取的预算。新建分库的长尾是建目录和建 WAL 时的 fsync。打开已有的分库还不含目录清理（第 2 步）。没有在 macOS 上测量。
+- 没有验证的：`bench` 的 `cache/*` 基准没有写（bench 的设计文档 #7 合并之前不写，由上面的 `perf_smoke_cache` 代替）；`evict_16m` 和 `memory` 两项属于第 2 步；macOS 上没有运行。
+
+## 与设计的差异
+
+第 1 步：
+
+- 写事务里的淘汰在第 1 步就实现了：超出预算时按 `atime` 删到 90%、每个事务最多 16 MiB，以及每个事务删最多 256 条 `retired` 命名空间的条目。`disk_full_*`（按降低后的预算淘汰）和 `namespace_*`（旧条目逐步删除、`meta.bytes` 随之减少）要用到它们。第 2 步还剩：空闲页的 `incremental_vacuum`；访问时间的待写集合（读命中目前不更新 `atime`，`atime` 是写入的时刻）；项目分库的换出（目前每个打开过的项目分库都保留两个连接直到 `close`，连接数还没有 6 个的上限）；目录清理；以及 `evict_*`、`touch_*`、`partitions_*`、`sweep_*` 测试。第 2 步合并之前没有使用方接入本 crate，连接数暂时没有上限不影响内存预算。
+- `Key` 的内部表示用 `Vec<u8>`，第一段时预留 64 字节，不用 `SmallVec<[u8; 64]>`：依赖表里没有 `smallvec`，键的分配不在热路径上。接口不变，另加 `is_empty`（clippy 要求有 `len` 的类型也有 `is_empty`）。设计没有写键的编码格式，已补在「接口」里。
+- 设计没有定义的类型和方法：`DisableReason`（`PartitionState::Disabled` 的原因，已补在「统计」里）、`Stats::dropped(reason)`；`Budgets` 派生 `Clone, Debug`，`Dropped` 派生 `Hash`，`PartitionKind` 派生 `Ord, Hash`（`Stats` 里的项目分库按种类和路径排序）。`test-support` 的公开接口已列在「测试」里。
+- 计数的口径：`written` 是提交成功的写入调用数，不是条目数；UI 线程上的读计入 `misses`，不计入 `dropped`（`Dropped` 是写入的结果）；`evicted_bytes` 含 `retired` 条目的删除。
+- 打开时发现的损坏（随机字节报 `SQLITE_NOTADB`）与版本不符一样，在这次调用里删除重建，然后照常完成这次调用；它也计入「同一分库第二次损坏时停用」。读写中途发现的损坏按设计关闭连接、删除文件，这次调用按未命中或 `Dropped::Io` 返回，下一次调用建新库。
+- 第二次损坏、分库停用时也删除三个文件：留下的文件下次运行打开时反正要重建，删除不多做事，也让「停用后不做 IO」可以从文件不再出现来检查。
+- 新文件以外的识别：`application_id` 和 `user_version` 都是 0 但有表（别的程序的 SQLite 文件）、`meta` 表缺失或缺项、值的类型不对，都当作版本或身份不符，删除重建。
+- 打开已有的分库时写 `meta.opened` 遇到 `SQLITE_BUSY` 或 `SQLITE_FULL`，不让打开失败：它只给目录清理提供修改时间。
+- 读连接打开时报 `SQLITE_CANTOPEN`（写连接打开之后文件被删除）只关闭这个分库的连接，不停用；下一次调用重新打开写连接、建新库。设计的「文件在运行中被删除」只写了已打开的连接。
+- `SQLITE_LOCKED` 按 `SQLITE_BUSY` 处理，`SQLITE_TOOBIG` 返回 `Dropped::TooLarge`；超过 `MAX_KEY` 的 `remove` 返回 `TooLarge`；空的批不打开分库，直接返回 `Committed`。
+- 解码失败的待删集合每个会话最多 4096 个 ID，不重复记录：同一个坏条目在下一次写事务之前被读多次，只记一次。
+- 读连接也设置 `synchronous` 和 `journal_size_limit`：设计列出的 PRAGMA 除 `query_only` 外每个连接都执行；`journal_mode` 只在建库时设置（持久）。
+- `bench` 的 `cache/*` 没有加入，理由与 git 第 1 步的 `git/open` 相同；由 `#[ignore]` 的 `perf_smoke_cache` 在 release 下测量，结果见「实际验证」。
