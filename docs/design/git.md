@@ -469,7 +469,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 不变量：
 
 - `files` 按（`path` 的字节序，`untracked`）排序。同一路径最多一项，唯一的例外是「工作区比较」第 3 步的情况：同一路径上一项是 `Deleted`，另一项是 `untracked` 的 `Added`。重命名只出现在新路径上，所以重命名的旧路径上重新出现的文件只有一项未跟踪的 `Added`，`Renamed` 本身不受影响。
-- `Status` 与两侧一致：`Added` 只有 `new`，`Deleted` 只有 `old`，其余两侧都有。`TypeChanged` 是普通文件、符号链接、子模块之间的变化。
+- `Status` 与两侧一致：`Added` 只有 `new`，`Deleted` 只有 `old`，`Modified`、`TypeChanged`、`Renamed` 两侧都有。`Conflicted` 的两侧按实际状态：基准里没有这个路径时没有 `old`（如 HEAD 删除、对方修改的冲突），工作区里没有文件时没有 `new`，两侧都没有的冲突不出现。`TypeChanged` 是普通文件、符号链接、子模块之间的变化。
 - 截断只影响 `Detail`，不影响改动的判定、`Status` 和两侧的 `Content`：被截断、只列出的文件也有完整的 OID。
 - `Content::Blob` 的 OID 与 `git add` 之后对象库里会有的 OID 相同，所以只是被 touch 过、内容未变的文件不算改动，内容相同的文件在不同 worktree 之间命中同一份缓存。
 - `ChangeSet` 创建后不再修改。`refresh` 生成新的 `ChangeSet`，没变的 `Change` 与旧的共享。
@@ -485,9 +485,10 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 没有 | 有 | `Added`，新一侧按第 1、2 步取工作区内容 |
 | 没有 | 没有 | 不是跟踪的路径；工作区里有文件时按第 3 步作为未跟踪文件 |
 
+0. **工作区里没有**：`SafeRoot::stat` 报告路径不存在（含中间某一级目录不存在）时，不做后面的比较：基准里有这个路径就是 `Deleted`（未暂存的 `rm`），基准里也没有（暂存了新增后又删掉文件）就不是改动。`Unavailable::Missing` 只用于对象库里缺对象，不用于这种情况。
 1. **stat 跳过**：index 条目的 stat 与 `SafeRoot::stat` 的结果按 gix-index 的规则比较（`core.trustctime`、`core.checkStat`），一致且不是 racy-clean（条目的 mtime 早于 index 文件的 mtime）时，工作区内容就是 index 里的 blob，不读文件。index 的 OID 与基准树的 OID 不同时，这个文件仍是改动（已暂存的改动）。
 2. **比较内容**：stat 不一致或 racy-clean 时，用 `SafeRoot::read` 读取（上限 64 MB），按属性应用内置转换得到规范内容，计算 blob OID，与基准一侧比较。设置了 clean / process 过滤器（属性 `filter=<名>`，配置里有 `filter.<名>.clean` 或 `.process`）的文件不转换，标为 `Filtered`，不按原始字节生成 diff。
-3. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`），每个都是 `Added` 且 `untracked = true`，内容按第 2 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
+3. **未跟踪文件**：用 gix 的目录遍历按 `.gitignore`、`info/exclude`、`core.excludesFile` 枚举，不进入被忽略的目录，逐个列出 index 里没有的文件（相当于 `-uall`）。gix 的目录遍历只把带 `UPTODATE` 标志的 index 条目当作已跟踪，所以遍历之前，在内存里的 index 副本上给第 0–2 步处理过、工作区里存在的条目设上这个标志（不写回用户的 index）；遍历结果里仍出现的 index 路径一律丢弃，是否跟踪只按 index 判断。列出的每个文件都是 `Added` 且 `untracked = true`，内容按第 2 步读取。index 里已删除、工作区里又有同名文件的路径（`git rm --cached` 之后文件还在，或 `git mv a b` 之后重新建了 `a`）因此出现两项：一项 `Deleted`，一项未跟踪的 `Added`，两者独立，不合并成「未改动」或「修改」。未跟踪的目录里有 `.git` 时只列出这个目录，标为 `NestedRepository`。
 4. **重命名**：删除与新增之间先按 OID 找精确重命名，再按相似度（不低于 50%，候选不超过 1000 对，即 `diff.renameLimit` 的默认值）找重命名。同一路径上的删除和未跟踪新增不互相配对。工作区一侧的内容只放进 gix 的内存对象存储参与计算（ADR 0024）。
 
 其余规则：
@@ -499,7 +500,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
 - 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。
 
-`Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID），stat 没变时不重新读取和计算；只在内存里，`Worktree` 句柄释放时丢弃。
+`Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID），stat 没变时不重新读取和计算；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存。
 
 ### 上限与截断
 
@@ -507,7 +508,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 |---|---|---|
 | 行 diff：任一侧内容 | 16 MiB | `TooLarge` |
 | 单文件 patch：统一格式、3 行上下文的字节数，或改动行数 | 1 MiB 或 20 000 行 | `Truncated { added, removed }` |
-| 整体：按路径顺序，有 hunk 的文件数与合计 patch | 5000 个文件、50 MB | 之后的文件为 `Listed`，`Totals` 记数量 |
+| 整体：按路径顺序，全部改动文件（含二进制、只改模式、`TooLarge`、`NoDiff`）计入文件数，生成的 patch 计入字节数 | 5000 个文件、50 MB | 达到任一上限之后的文件为 `Listed`，`Totals` 记数量 |
 | 工作区单文件读取 | 64 MiB | `Content::Unhashed` |
 | 未跟踪文件枚举 | 20 000 个 | `Totals::untracked_capped = true`，指纹不完整 |
 | 改动集保留的工作区内容 | 128 MiB | 之后的文件丢弃内容，按 `Truncated` 处理 |
@@ -604,7 +605,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 
 - 仓库与引用：`discover` 在子目录、linked worktree、git 目录、普通文件夹里的结果；`worktrees` 的锁定和 prunable；名为 `main` 的 linked worktree 与主 worktree 的 ID 不同，`Repo::worktree` 各自打开正确的那一个；SHA-256 仓库的 OID 是 64 位；reftable 仓库返回 `Unsupported`；`default_branch`、上游与推送目标的解析表；reflog 消息分类逐条覆盖，认不出的是 `Other`。
 - 树 diff：新增、删除、修改、模式变化、类型变化、精确与相似重命名、二进制、子模块；`--numstat` 与归档里 git 的输出一致。
-- 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`。
+- 工作区：已暂存与未暂存的改动、未跟踪文件与忽略规则、racy-clean 的条目比较内容、touch 但内容未变的文件不算改动、换行与编码转换后与 git 的判定一致、LFS 文件为 `Filtered`、FIFO 为 `UnsupportedType` 且不阻塞、中间一级换成符号链接时为 `PathThroughSymlink`、嵌套仓库、超过 64 MB 的文件为 `Unhashed`；sparse index 里目录条目下的文件出现在 `TrackedPaths` 里且为 `skip_worktree`，不报告为删除；`git rm --cached p` 后 `p` 仍在工作区时得到 `Deleted` 和未跟踪的 `Added` 两项，`git mv a b` 后重建 `a` 时得到 `Renamed` 和未跟踪的 `Added`；未暂存的 `rm` 得到 `Deleted`；HEAD 删除、对方修改的冲突得到没有 `old` 的 `Conflicted`；只改 `.gitattributes`、文件 stat 不变时 `refresh(Full)` 按新规则重新计算 OID；没有改动的跟踪文件不会作为未跟踪文件出现；二进制和只改模式的文件也计入 5000 个文件的上限。
 - 截断：单文件、整体、保留内容三种上限的边界值；截断前后 `fingerprint` 不变。
 - 指纹：只改可执行位、只改符号链接目标、重命名都改变指纹；`from_written` 在内容相同时得到与工作区改动集相同的指纹，包括带 `Omitted` 条目（过滤器文件、超大文件）的快照；过滤器文件的原始字节改变后指纹不同。
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
