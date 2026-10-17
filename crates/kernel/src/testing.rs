@@ -98,7 +98,10 @@ impl TestKernel {
                 set = set.with(Name::Owned(format!("mock-{index}-{}", mock.key.id())), mock);
             }
             set = set.with(TARGET, Target(plugin));
-            *state = State::Running(Kernel::start_with_tap(set, Some(Name::Borrowed(TARGET))));
+            *state = State::Running(Kernel::start_with_tap(
+                crate::set::Plugins::Set(set),
+                Some(Name::Borrowed(TARGET)),
+            ));
         }
         match &*state {
             State::Running(kernel) => Some(kernel.clone()),

@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -12,6 +12,7 @@
   - 事件总线：类型化事件，插件之间广播通知。
   - 每个插件一张注册表：插件注册的所有内容在停用时按相反顺序撤销。
   - 激活耗时的记录，供 `bench` 读取。
+  - 插件集合的依赖闭包与裁剪，供 `bench` 为单个插件组装集合（见「插件集合的闭包与裁剪」）。
   - 测试用的内核：注入模拟服务，单独激活一个插件。
 - 不做：
   - 具体的服务接口（`SessionSource` 等）：在 `services`。
@@ -368,6 +369,28 @@ impl PluginSet {
     /// activation 不为空；没有环。
     /// `app` 为每个 profile 写一个调用它的单元测试，依赖图有误时 CI 失败。
     pub fn validate(&self) -> Result<(), Vec<GraphError>>;
+
+    /// 在调用线程上对每个插件调用且只调用一次 `manifest()`，计时和 `catch_unwind` 与 `Kernel::start` 相同，
+    /// 交出带清单和耗时的集合（见「插件集合的闭包与裁剪」）。`app` 不用它，发布构建仍走 `Kernel::start`。
+    pub fn prepare(self) -> PreparedSet;
+}
+
+/// 已读取清单的插件集合。这里的方法都不再调用 `manifest()`。
+pub struct PreparedSet { /* Vec<{ id: Name, Arc<dyn Plugin>, Result<Manifest, String（panic 消息）>, Duration }> */ }
+
+impl PreparedSet {
+    /// 已取得的清单，按集合顺序；`manifest()` panic 的插件不出现。
+    pub fn manifests(&self) -> impl Iterator<Item = (&Name, &Manifest)>;
+    /// `id` 依赖的服务的提供者，传递闭包，按集合顺序，不含 `id` 自己。`MULTIPLE` 服务的全部提供者都在内。
+    /// 出错：`id` 不在集合里（`UnknownPlugin`）或它的 `manifest()` panic 了（`ManifestPanicked`）；
+    /// 闭包里某个 requires 没有提供者（`MissingProvider`）；单实现服务有多个提供者（`MultipleProviders`）。
+    pub fn dependency_closure(&self, id: &str) -> Result<Vec<Name>, Vec<GraphError>>;
+    /// 只保留 `keep(id)` 返回 true 的插件。
+    pub fn retain(self, keep: impl FnMut(&str) -> bool) -> Self;
+    /// 加入一个插件，它的 `manifest()` 在这里调用一次并计时，方式与 `prepare` 相同。
+    pub fn with(self, id: impl Into<Name>, plugin: impl Plugin) -> Self;
+    /// 与 `PluginSet::validate` 相同的检查，只读已取得的清单。
+    pub fn validate(&self) -> Result<(), Vec<GraphError>>;
 }
 
 /// 单实现服务的句柄，可以保存在 `Active` 里长期使用。每次调用前用 `get()` 取得提供者的准入，
@@ -407,6 +430,11 @@ impl Kernel {
     /// AfterFirstFrame 插件（按依赖顺序）。`app` 在启动屏障放开后调用（见「启动」）。
     /// 依赖图有误时，涉及的插件进入 `Failed` 并记日志；`validate` 的单元测试保证这种情况不进入发布版本。
     pub fn start(plugins: PluginSet) -> Arc<Kernel>;
+
+    /// 与 `start` 相同，但用 `PreparedSet` 里的清单与耗时，kernel 线程不再调用 `manifest()`：
+    /// `status()` 的 `manifest_time` 是 `prepare` / `with` 里那一次调用的耗时，`manifest()` panic 过的插件进入 `Failed`，
+    /// 错误与 `start` 时相同（`PluginError::Panicked("manifest panicked: …")`）。
+    pub fn start_prepared(plugins: PreparedSet) -> Arc<Kernel>;
 
     /// 以下生命周期方法都只把请求放进 kernel 线程的队列，立即返回，可以在任何线程调用。
 
@@ -458,7 +486,7 @@ pub trait WorkspaceFacts: Send + Sync {
 pub struct PluginStatus {
     pub id: Name,
     pub state: PluginState,                 // Inactive / Waiting { missing: Vec<ServiceKey> } / Active / Disabled / Failed(PluginError)
-    pub manifest_time: Option<Duration>,    // `Kernel::start` 时调用 manifest 的耗时（只调用一次）
+    pub manifest_time: Option<Duration>,    // 调用 manifest 的耗时（只调用一次）：`Kernel::start` 时，或 `start_prepared` 之前的 `prepare` / `with` 里
     pub activate_time: Option<Duration>,    // 最近一次 activate 的耗时
     pub commit_time: Option<Duration>,      // 最近一次提交的耗时
     pub started_time: Option<Duration>,     // 最近一次 started 的耗时（同步执行的部分，加上之后发出暂存事件、调用暂存 start、同步发出 ServiceAdded 并执行其监听的时间）
@@ -535,7 +563,7 @@ impl Emitter {
 
 ### 失败
 
-kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。kernel 用一个共用的公开函数 `contain(f) -> Result<T, String>` 包住全部边界，不在各处各写一遍，executor 包住 future 的 drop 时也用它（poll 用保留 payload 的 `catch`，见 `GateSlot::panicked`）：捕获到 panic 时当场取出可读的消息，在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，然后只返回消息，所以 payload 持有的资源在调用方做后续处理（让激活失效、唤醒其他任务）之前已经释放，`Drop` 会 panic 的 payload（`panic_any` 抛出）也不会在调用方或 kernel 线程上引发第二次展开。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
+kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住：`manifest`、`activate`、`Staged::commit`、`started`、`command` 的 `done`、事件监听（在 kernel 线程上分发时）、判断 `Workspace` 激活条件时调用的 `WorkspaceFacts::contains`，以及 kernel 释放的插件对象的 drop（`shutdown` 时的 `Plugin` 对象本身、服务实现、守卫、`Active`、丢弃的暂存 `start` 闭包、被替换或清除的 `WorkspaceFacts`、在 kernel 线程上分发或丢弃的事件值）。`shutdown` 之后在调用线程上 drop 被拒绝的守卫时也用 `catch_unwind` 包住。`PluginSet::prepare` 和 `PreparedSet::with` 在调用线程上读清单时同样用 `contain` 包住，panic 只记下消息，插件在 `start_prepared` 之后进入 `Failed`。后台任务不在 kernel 线程上运行，它的每次 poll 由 `executor` 用 `catch_unwind` 包住，panic 经 `GateSlot::panicked` 交给 kernel，按同样的规则让所属激活失效。`WorkspaceFacts::contains` panic 时，算作提交这份 facts 的那次激活（通常是 `project`）失败：那个插件进入 `Failed`，kernel 丢弃这份 facts，正在判断的插件按条件未满足处理。kernel 用一个共用的公开函数 `contain(f) -> Result<T, String>` 包住全部边界，不在各处各写一遍，executor 包住 future 的 drop 时也用它（poll 用保留 payload 的 `catch`，见 `GateSlot::panicked`）：捕获到 panic 时当场取出可读的消息，在 `catch_unwind` 里 drop payload，这次 drop 又 panic 时第二个 payload 用 `mem::forget` 泄漏，然后只返回消息，所以 payload 持有的资源在调用方做后续处理（让激活失效、唤醒其他任务）之前已经释放，`Drop` 会 panic 的 payload（`panic_any` 抛出）也不会在调用方或 kernel 线程上引发第二次展开。任何一处 panic 都只让对应的插件进入 `Failed`（`done` 回调只记日志），kernel 线程继续处理后面的请求，撤销和 `shutdown` 总能完成。下面按场景说明处理方式。
 
 - `activate` 返回错误或 panic：
   - 这次激活已登记的内容全部撤销；
@@ -565,7 +593,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 
 ### 线程
 
-- kernel 有一个自己的线程（kernel 线程，`Kernel::start` 时创建，`shutdown` 后退出）。所有生命周期操作都在这个线程上串行执行：读取清单、检查依赖图、`activate`、`started`、停用与撤销。公开的生命周期方法只把请求放进队列，立即返回，所以主线程上不会执行激活（[ADR 0017](../adr/0017.md) 规定插件激活在后台线程上进行）。
+- kernel 有一个自己的线程（kernel 线程，`Kernel::start` 时创建，`shutdown` 后退出）。所有生命周期操作都在这个线程上串行执行：读取清单、检查依赖图、`activate`、`started`、停用与撤销。例外是 `Kernel::start_prepared`：清单已由 `PluginSet::prepare` 在调用线程上读好（见「插件集合的闭包与裁剪」）。公开的生命周期方法只把请求放进队列，立即返回，所以主线程上不会执行激活（[ADR 0017](../adr/0017.md) 规定插件激活在后台线程上进行）。
 - 生命周期操作期间产生的新请求（如激活时发出的事件导致另一个插件需要激活），以及事件分发期间监听里发出的请求，都进入同一个队列，按顺序执行。
 - `emit` 在调用线程上同步分发（见「事件分发」），与 kernel 线程无关。
 - `shutdown` 完成之前，守卫的 drop 在 kernel 线程上执行；kernel 线程退出之后，通过旧句柄被拒绝的守卫在调用线程上 drop（见 `PluginHandle::own`）。需要在主线程执行的（如注销视图层的注册），由提供守卫的一方负责转到主线程。
@@ -576,6 +604,18 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
   - desktop、probe：第一帧真正显示（`presentedTime` 回调）时放开；
   - headless（命令行与基准）、test：没有窗口，立即放开。
 - 屏障由 `app` 按 profile 实现，kernel 不区分 profile。
+
+### 插件集合的闭包与裁剪
+
+bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile 里只留下这个插件的依赖闭包，或者闭包加上它（见「性能」、[bench 设计「探针」](bench.md#探针lectern_benchprobeprobe-feature)）。裁剪要先读清单，而 `plugin/<id>/activate` 计入的 manifest 一段必须是那次被计时的第一次调用，所以清单只读一次，读到的结果和耗时一路带到 kernel：
+
+1. `PluginSet::prepare` 在调用线程上逐个调用 `manifest()`。计时和 `contain` 与 `Kernel::start` 在 kernel 线程上读清单时是同一个函数，两条路径的 `manifest_time` 口径相同；panic 时记下消息，插件留在集合里。
+2. `dependency_closure(id)` 只读已取得的清单，从 `id` 出发广度优先展开：每个 requires 找出集合里除自己以外的全部提供者（`MULTIPLE` 服务的每个提供者都算，因为 kernel 激活时它们互为替代、哪个先就绪不确定），逐个加入，再展开它们的 requires。结果按集合顺序，不含 `id`。清单 panic 的插件不提供任何服务，需要它的 requires 报 `MissingProvider`。同一次展开里的错误都收集起来一起返回。
+3. 对通过 `validate` 的集合，只留闭包加 `id`，得到的集合仍通过 `validate`：闭包里每个插件的每个 requires 的全部提供者都在其中，子集不会引入新的单实现服务冲突、命令名冲突或环。只留闭包时同样通过，只有一种例外：闭包里有插件依赖 `id` 提供的服务。原集合无环时，这只会是 `MULTIPLE` 服务的一个提供者反过来依赖 `id`（`id` 用另一个提供者就能激活，kernel 按「与设计的差异」里环的规则排序），这时只留闭包的集合 `validate` 报 `MissingProvider`，bench 的 `closure:<id>` 那次启动会等不到 `Ready`、记为出错。这种依赖关系在 profile 里很少见，记为已知限制。
+4. `retain` 按 ID 过滤，`with` 加入的插件（bench 的 `bench-probe`）在 `with` 里读清单，规则与第 1 步相同。
+5. `Kernel::start_prepared` 把清单、耗时和 panic 原样放进各插件的槽位，kernel 线程上的「读取清单」一步跳过已有清单的槽位，之后的依赖图检查、建表、激活与 `Kernel::start` 完全相同。整个过程里每个插件的 `manifest()` 恰好调用一次。
+
+`prepare` 在调用线程上执行，和「线程」一节「读取清单在 kernel 线程上」不同；只用于测量构建的探针（在首帧之后调用），`app` 的发布构建仍调用 `Kernel::start`，主线程上不读清单。这组接口不放在 `test-support` 下：测量构建不打开 kernel 的 `test-support`（[bench 设计「夹具与 test-support」](bench.md#夹具与-test-support)）。
 
 ### 按命令激活
 
@@ -607,7 +647,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 
 - 首帧之前不调用 kernel 的任何函数：`Kernel::start` 在启动屏障放开后才调用，建表、读清单、检查依赖图和激活都在 kernel 线程上执行，不占主线程。
 - 激活耗时：每个插件的 `manifest()`（`Kernel::start` 时调用一次）、`activate`、提交（检查清单、发布服务和监听、调用各守卫的 `commit`、更新快照）和 `started`（同步执行的部分，加上 token 变为 `Live` 之后在 kernel 线程上发出暂存事件、调用暂存 `start`，以及为这次激活提供的服务同步发出 `ServiceAdded` 并执行其监听的时间）由 kernel 分别计时，结果在 `status()` 里，预算按四者之和计算。建议预算是单个插件 1 ms、首帧后 `AfterFirstFrame` 全部激活合计 5 ms。数字在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 里用原型实测后校准，并写进 bench 的预算表。
-- 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件需要一份匹配它们全部 pattern 的 `WorkspaceFacts`：bench 在两次启动里都加入同一个合成的 `bench-facts` 插件（`AfterFirstFrame` 激活，在 `started` 里通过 `control().workspace_changed` 提交这份 facts，由 bench 的探针提供，见 [bench 设计「探针」](bench.md#探针lectern_benchprobeprobe-feature)），两次的差不受它影响；`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。`PluginSet` 支持这两种组合。
+- 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件需要一份匹配它们全部 pattern 的 `WorkspaceFacts`：bench 在两次启动里都加入同一个合成的 `bench-facts` 插件（`AfterFirstFrame` 激活，在 `started` 里通过 `control().workspace_changed` 提交这份 facts，由 bench 的探针提供，见 [bench 设计「探针」](bench.md#探针lectern_benchprobeprobe-feature)），两次的差不受它影响；`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。这两种组合由 `PluginSet::prepare`、`PreparedSet::dependency_closure` / `retain` / `with` 和 `Kernel::start_prepared` 组装（见「插件集合的闭包与裁剪」）。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `ServiceRef` / `ServiceSet`，保存在激活内的状态对象里（见「激活的提交」）。`ServiceRef::get()` 的开销是一次准入（两次原子操作）；`ServiceSet::for_each` 每个提供者一次准入、不分配；`ServiceSet::current()` 另外分配一个 `Vec`。两种多实现路径都在 bench 里按 1、4、16 个提供者测量。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
 
@@ -712,6 +752,8 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 - 静止：有正在进行的 `emit` 时不静止；静止后又变忙时发出 `Busy`。
 - 按命令激活：停用后重新启用的命令插件，再次触发命令仍能激活。
 - 生命周期的结果（激活顺序、停用顺序、状态）用 insta 快照记录。
+- 插件集合的闭包（`set_closure_*`）：多层依赖；`MULTIPLE` 服务的多个提供者都进入闭包；缺提供者、提供者的清单 panic、单实现服务有多个提供者、`id` 不在集合里时返回对应的 `GraphError`；对每个插件 `retain` 闭包（加或不加它自己）之后 `validate` 通过；`MULTIPLE` 服务的提供者反过来依赖目标插件时，只留闭包的集合报 `MissingProvider`（已知限制）。
+- 预读清单（`set_prepare_*`）：`prepare`、`dependency_closure`、`retain`、`with`、`validate`、`start_prepared` 走完、kernel 停止之后，每个插件的 `manifest()` 恰好被调用一次（含被 `retain` 去掉的插件）；`status()` 的 `manifest_time` 等于 `prepare` / `with` 记下的耗时；`manifest()` panic 的插件（`prepare` 和 `with` 加入的各一个）进入 `Failed`，状态与 `Kernel::start` 相同；`start_prepared` 的 kernel 照常提供 `lazy_commands` 和 `Manual` 激活。
 
 测试辅助放在 `test-support` feature 下：
 
@@ -771,6 +813,12 @@ impl Kernel {
 - 执行器一侧的约定（`wake` 只入队、不重入 poll、克隆走的 waker、`shutdown` 返回后不再排队）：由 `executor` 的测试覆盖；本 PR 的测试执行器只演示约定。
 - 激活耗时预算和内存基准：在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 的 bench 里测量，`status()` 已给出四段耗时。
 
+插件集合的闭包与裁剪（bench 第 3 步），在 Linux（x86_64，4 核虚拟机）上运行：
+
+- `just test -p lectern-kernel`：86 个测试通过，其中新增 10 个（`set_closure_*` 7 个、`set_prepare_*` 3 个，在 `crates/kernel/src/tests/set.rs`）；`cargo nextest run -p lectern-kernel --all-features` 连续 10 次全部通过。`just check`、`just test`、`just doctest`、`just deny` 全部通过。
+- `Kernel::start` 的路径只多了一次「槽位已有清单就跳过」的判断，读清单改为调用与 `prepare` 共用的函数。改动前后各用一个临时的测试（不提交）在 release 下测 `Kernel::start` 加 `barrier`（20 个 `AfterFirstFrame` 插件，预热 200 次后取 2000 次）：改动前三次的中位数 94 / 98 / 79 µs，改动后五次 89 / 94 / 88 / 91 / 92 µs，在噪声范围内。
+- `just bench --measure kernel/`（不判定、只记录；这些基准测服务查找和事件分发，不经过本次改动的代码）与 `origin/main` 交替各运行三次，前后的差别在同一侧三次之间的波动以内，数字见 [bench 设计「实际验证」](bench.md#实际验证)第 3 步。
+
 ## 与设计的差异
 
 - 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。
@@ -779,4 +827,11 @@ impl Kernel {
 - 启动时的依赖图检查只让出错的插件进入 `Failed`；`MissingProvider` 不让依赖者失败（提供者可能只是清单 panic），依赖者停在 `Waiting`。`validate` 仍报告全部错误。依赖环之外、依赖环里插件的依赖者也按环处理（进入 `Failed`），实现更简单，`validate` 的单元测试会先在 CI 里拦下环。判断环时，一个多实现服务的多个提供者互为替代：只要有一个提供者能排在前面就不算环（例如提供者 A 依赖消费者 C、另一个提供者 B 独立时，顺序是 B、C、A）。
 - 日志写到 stderr（kernel 只用标准库，没有日志依赖），由 `app` 重定向到日志文件。
 - `ServiceRemoved` 只为发出过 `ServiceAdded` 的激活发出：`started` 失败的提供者从头到尾不被依赖者看到，与「新提供者」一条一致。
+
+插件集合的闭包与裁剪（接口最初写在 [bench 设计「需要其他 crate 提供的接口」](bench.md#需要其他-crate-提供的接口)）：
+
+- `PreparedSet::manifests` 返回迭代器，不是 `&[(Name, Manifest)]`：集合里还要保存插件对象、耗时和 panic 消息，清单 panic 的插件没有清单，要返回切片就得另存一份清单的拷贝，或者让 `retain`、`with` 同时维护两个数组。探针只遍历它找激活条件。
+- 新增 `PreparedSet::validate`：`set_closure_*` 要求 `retain` 之后 `validate` 通过，`PluginSet::validate` 会再调用一次 `manifest()`，破坏「只调用一次」。两者共用同一套检查。
+- 新增 `GraphError::UnknownPlugin`：`dependency_closure` 收到集合里没有的 ID 时没有合适的已有变体。
+- `dependency_closure` 除缺提供者外，还报告 `id` 自己的清单 panic（`ManifestPanicked`）和闭包里单实现服务有多个提供者（`MultipleProviders`）：这两种情况下闭包裁剪出的集合同样不能用。
 
