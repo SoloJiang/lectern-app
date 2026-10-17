@@ -7,7 +7,7 @@ use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -1213,73 +1213,5 @@ fn nofollow_any_races() {
 fn nofollow_any_walk_cases() {
     for backend in [Backend::NofollowAny, Backend::NofollowAnyParent] {
         check_walk_cases(backend);
-    }
-}
-
-// perf_smoke
-
-/// 728 files four levels deep, like the repository the budget was set on.
-fn perf_tree(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    'outer: for a in 0..4 {
-        for b in 0..6 {
-            for c in 0..6 {
-                for d in 0..6 {
-                    if files.len() == 728 {
-                        break 'outer;
-                    }
-                    let rel = PathBuf::from(format!("d{a}/d{b}/d{c}/f{d}.rs"));
-                    write(&root.join(&rel), &[b'x'; 4096]);
-                    files.push(rel);
-                }
-            }
-        }
-    }
-    files
-}
-
-#[test]
-#[ignore = "timing; run with `just test -p lectern-platform -- --ignored perf_smoke` in release"]
-fn perf_smoke() {
-    const ROUNDS: usize = 10_000;
-    let tmp = TempDir::new().unwrap();
-    let files = perf_tree(tmp.path());
-    let rels: Vec<String> = files
-        .iter()
-        .map(|p| p.to_str().unwrap().to_owned())
-        .collect();
-    let abs: Vec<PathBuf> = files.iter().map(|p| tmp.path().join(p)).collect();
-
-    let time = |f: &mut dyn FnMut(usize)| {
-        for i in 0..rels.len() {
-            f(i); // warm the page cache and dentries
-        }
-        let start = Instant::now();
-        for i in 0..ROUNDS {
-            f(i % rels.len());
-        }
-        start.elapsed() / ROUNDS as u32
-    };
-
-    let std_stat = time(&mut |i| {
-        std::hint::black_box(fs::symlink_metadata(&abs[i]).unwrap());
-    });
-    let std_read = time(&mut |i| {
-        std::hint::black_box(fs::read(&abs[i]).unwrap());
-    });
-    for backend in backends() {
-        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
-        let stat = time(&mut |i| {
-            std::hint::black_box(root.stat(rel(&rels[i])).unwrap());
-        });
-        let read = time(&mut |i| {
-            std::hint::black_box(file_bytes(root.read(rel(&rels[i]), 64 << 20)));
-        });
-        eprintln!(
-            "{backend:?}: stat {stat:?} vs symlink_metadata {std_stat:?} ({:.2}x); \
-             read 4 KiB {read:?} vs fs::read {std_read:?} ({:.2}x)",
-            stat.as_secs_f64() / std_stat.as_secs_f64(),
-            read.as_secs_f64() / std_read.as_secs_f64(),
-        );
     }
 }

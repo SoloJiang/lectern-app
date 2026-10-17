@@ -46,9 +46,24 @@ test *args:
 doctest:
     cargo test --locked --doc {{packages}} --all-features
 
-# Performance budget benchmarks.
-bench:
-    cargo bench --locked -p lectern-bench --all-features
+# Performance budget benchmarks: gated on Apple silicon macOS, a smoke run
+# elsewhere. `--measure` samples on Linux too (reported, not gated); other
+# arguments filter IDs, e.g. `just bench agents/`. See docs/design/bench.md.
+bench *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f target/lectern-bench/report-*.json target/lectern-bench/report.json
+    if [[ "$(uname -s)" == Darwin ]]; then
+        if [[ "${1-}" == --measure ]]; then shift; fi
+        cargo bench --locked --no-fail-fast -p lectern-bench --all-features -- "$@" || true
+    elif [[ "${1-}" == --measure ]]; then
+        shift
+        cargo bench --locked --no-fail-fast -p lectern-bench --all-features -- "$@" || true
+    else
+        cargo test --locked --no-fail-fast -p lectern-bench --all-features --benches -- "$@" || true
+    fi
+    # The merged report decides the result: a target that failed to build or crashed leaves no report.
+    cargo run -q --locked -p lectern-bench --bin lectern-bench-report -- merge target/lectern-bench
 
 # Licenses, sources and advisories.
 deny:
@@ -57,7 +72,7 @@ deny:
 # Everything CI runs on this platform.
 ci: check deny (test "--profile" "ci") doctest
     {{ if os() == "macos" { "cargo build --locked -p lectern-app" } else { "true" } }}
-    {{ if os() == "macos" { "just bench" } else { "true" } }}
+    just bench
 
 # Format the code.
 fmt:

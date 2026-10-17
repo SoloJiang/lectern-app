@@ -279,8 +279,8 @@ pub enum FileKind {
 
 基准：
 
-- 实现 PR 提供 `#[ignore]` 的 `perf_smoke` 测试：对同一棵 728 个文件的目录树各做 10 000 次 `stat`、`read`，与 `symlink_metadata`、`std::fs::read` 对比，打印比值，在 macOS 上运行一次并把结果写进 PR 描述。
-- `bench` 实现后（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）加入 `platform/safe_stat`、`platform/safe_read_4k`，按上面的比值设预算，只测 `SafeRoot::open` 选中的生产后端；`perf_smoke` 随之删除（[bench 设计「迁移」](bench.md#迁移)）。`git` 的 `git/changes_clean` 包含它们的成本。
+- `bench` 的 `platform/safe_stat`、`platform/safe_read_4k`（[bench 设计「迁移」](bench.md#迁移)）：bench 自己生成 728 个 4 KiB 文件、深度 4 的目录树，与同一路径上的 `symlink_metadata`、`std::fs::read` 交替采样，按上面的比值判定；只测 `SafeRoot::open` 选中的生产后端（macOS 上是 `NofollowAny`，Linux 上是 `Openat2`），`Walk` 不设基准。`git` 的 `git/changes_clean` 包含它们的成本。
+- 实现 PR 里的 `#[ignore]` 测试 `perf_smoke`（对每个后端各做 10 000 次 `stat`、`read` 并打印比值）已由 bench 第 1 步删除，它在 Linux 上的结果见「实际验证」。
 
 ## 状态与异常
 
@@ -353,7 +353,7 @@ pub enum FileKind {
 - `rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`（测试里创建 FIFO 的 `libc::mkfifo`）：实现代码没有 `unsafe`。
 - `rg 'O_NOFOLLOW_ANY|NOFOLLOW_ANY' crates --glob '!crates/platform/**'` 没有结果（架构规则 6）。
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`platform` 不依赖 GPUI）。
-- `just test -p lectern-platform -- --ignored perf_smoke` 在 macOS 上运行一次，PR 描述里记录 `stat` 与 `symlink_metadata`、`read` 与 `std::fs::read` 的比值，在「性能」的预算之内。
+- `just test -p lectern-platform -- --ignored perf_smoke` 在 macOS 上运行一次，PR 描述里记录 `stat` 与 `symlink_metadata`、`read` 与 `std::fs::read` 的比值，在「性能」的预算之内。（实现 PR 的验收。这个测试已由 bench 第 1 步删除，现在由 `just bench platform/` 测量，macOS CI 判定。）
 - 本文的状态行改为「已实现」并附 PR 编号，填写「实际验证」；`crates/platform/Cargo.toml` 的 `description` 加上安全读取。
 
 ## 实际验证

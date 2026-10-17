@@ -4,5 +4,4 @@
 mod basics;
 mod faults;
 mod open;
-mod perf;
 mod support;

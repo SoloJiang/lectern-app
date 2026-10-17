@@ -32,4 +32,4 @@ just test -p lectern-agents
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。脱敏用 `src/redact.rs` 的字段白名单工具（被忽略的测试 `redact_file_from_env`），生成后逐行看过再提交。
 - 现在的 `tests/fixtures/claude-code/2.1.302/` 和 `tests/fixtures/codex/0.140.0-*/` 都是合成数据（见各自的 `SOURCE.md`），不要从本机的 `~/.claude`、`~/.codex` 等用户目录复制任何内容进仓库。超长行、坏行、没写完的行和 `.jsonl.zst` 在测试的临时目录里生成，不提交大文件。
-- `test-support` feature 提供 `testing::parse_file`，供性能冒烟测试 `tests/perf_smoke.rs`（被忽略，release 下手动运行）使用；`bench` 的设计文档合并后改由 `lectern-bench` 的 `agents/*` 基准使用。
+- `test-support` feature 提供 `testing::parse_file` 和 bench 的合成会话（`synthetic_session`、`append_chunk`、`synthetic_rollout`、`compress_zst`，fixtures 用 `include_bytes!` 嵌入），供 `lectern-bench` 的 `agents/*` 基准使用：`just bench agents/`（Linux 上是冒烟运行，`just bench --measure agents/` 采样并打印实测值）。

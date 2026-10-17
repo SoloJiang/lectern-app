@@ -17,6 +17,13 @@ pub fn discover(path: &Path, ceilings: &[PathBuf]) -> Result<Option<Discovered>,
     Repo::discover_scoped(path, ceilings, ConfigScope::RepositoryOnly)
 }
 
+/// Opens one gix handle on `common_dir`, reading only the repository's own
+/// configuration, and drops it: what every top-level call pays first. For
+/// bench's `git/open_handle` (docs/design/bench.md「迁移」).
+pub fn open_handle(common_dir: &Path) -> Result<(), GitError> {
+    crate::handle::Handle::open(common_dir, ConfigScope::RepositoryOnly).map(drop)
+}
+
 /// What a worktree's HEAD should be.
 #[derive(Clone, Copy, Debug)]
 pub enum TestHead<'a> {

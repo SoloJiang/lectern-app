@@ -30,6 +30,9 @@ mod table;
 #[cfg(test)]
 mod reference_tests;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+
 pub use args::Args;
 pub use compact::count_compact;
 pub use locale::Locale;
