@@ -69,7 +69,7 @@ pub fn plugins(deps: AgentsDeps) -> [(Name, Box<dyn Plugin>); 2];
 
 ### 服务接口（`lectern-services` 的 `session` 模块）
 
-类型都是不含行为的数据，能通过 JSON-RPC 序列化（serde 派生方式随 `services` 设计），以后的进程插件可以实现同一个接口。
+类型都是不含行为的数据，能通过 JSON-RPC 序列化（serde 派生方式随 `services` 设计），以后的进程插件可以实现同一个接口。进程插件的单条消息上限是 4 MB（[ADR 0018](../adr/0018.md)）：经进程插件实现时，超过这个上限的单条正文由 `load` 返回 `SessionError::TooLarge`，`read` 跳过该记录并计入 `oversized_lines`、游标越过它；分块传输留给进程插件宿主的设计。内置来源在进程内，不受此限。
 
 ```rust
 /// 多实现服务：每种 agent 一个提供者，ACP（P3）和第三方会话来源再各加一个。
@@ -269,7 +269,7 @@ pub struct Diagnostics {
 
 不变量：
 
-- 一个会话一个 `SessionKey`。Codex 的同一个会话同时有 `.jsonl` 和 `.jsonl.zst` 时读 `.jsonl`；`sessions/` 和 `archived_sessions/` 都有时读 `sessions/`。
+- 一个会话一个 `SessionKey`。Codex 的同一个会话同时有 `.jsonl` 和 `.jsonl.zst` 时读 `.jsonl`；`sessions/` 和 `archived_sessions/` 都有时读 `sessions/`。每次文件新增或删除后，按 `SessionKey` 重新核对它的所有候选路径：选中的路径消失而另一个候选仍在（压缩或归档后原文件被删）时改用剩下的那个，只有所有候选都不在时才从列表移除。
 - `parent` 指向的会话可能不在列表里（父会话文件已删除）。
 - 被 `SessionFilter` 隐藏的会话不在列表里。
 
@@ -570,13 +570,13 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 
 ## 数据流与线程
 
-1. 插件在首帧之后激活（`AfterFirstFrame`），`started` 里通过 `own_with` 提交发现任务（`Background`）。首帧之前不做任何事。
+1. 插件在首帧之后激活（`AfterFirstFrame`），`started` 里通过 `own_with` 提交发现任务（`Background`）。首帧之前不做任何事。发现、监听触发的刷新、`complete` 的补齐都在提交前用 `PluginHandle::busy()` 取一个 `BusyGuard`，随任务一起移进去，结果发布（第 4 步）之后才 drop（[kernel 设计](kernel.md)「静止」），所以这些工作进行中 kernel 不报告静止。
 2. 发现：先注册第 5 步的目录监听，再枚举会话目录；枚举期间收到的事件先排队，枚举结束后与扫描结果按路径合并、按第 5 步处理，然后才发布，所以扫描与监听之间新建或追加的会话不会漏掉。枚举只列目录项，不读 `.prefix.json` 等无关文件），每个会话文件读开头最多 256 KB（找会话头、cwd、第一个 prompt）和末尾的完整记录（最后活动时间、`open_turn`），得到摘要。不读整个文件。
    - 末尾：从文件末尾按 64 KB 的块向前读，按换行切出完整的行，从最后一行往前逐行解析，直到找到决定 `open_turn` 的记录（Claude Code：最后一条 `user` 或 `assistant` 记录；Codex：最后一条 `task_started` / `task_complete` / `turn_aborted`）。单行最长 16 MB，所以一行比 64 KB 大时继续向前读到它前面的换行；向前合计最多读 16 MB 或 64 行。`last_activity` 取读到的最后一条带时间戳的记录。
    - 回退：最后一行超过 16 MB，或在上限内没找到决定 `open_turn` 的记录时，`last_activity` 取文件修改时间，`open_turn` 为 true（末尾是超长的工具结果时，这一轮通常还没结束），计入 `oversized_lines`。
    - 已经在增量读取的文件（第 5 步）不再读末尾，这两个字段从解析器状态里直接取。
    - `.zst` 没有办法直接读末尾：先查摘要缓存（见「压缩会话的随机读取」），命中就用；没命中时只流式解压开头 256 KB，用开头和文件的 `stat` 生成摘要、标 `tail_pending`，照常发布。补齐末尾字段要整份解压，按需进行：列表发布后只主动补齐修改时间最近的 8 个压缩会话（M 系列上约 3 s，之后不再有后台工作，kernel 能在首帧后 30 秒内静止，[ADR 0017](../adr/0017.md)），其余等视图调 `complete`（会话行显示出来或被打开）时才补齐；同时最多 2 个补齐任务，补齐后按第 4 步再发布，并写入摘要缓存。冷的归档历史不会让应用一直忙碌。
-3. 归位：对去重后的 cwd 先调 `Projects::locate`（只查内存，匹配已打开的项目，取最深的根），匹配到就用它的项目与 worktree，所以已打开的文件夹项目的子目录也归到该项目；没有匹配时再调 `Projects::resolve`（阻塞，在 executor 上）。结果按 cwd 缓存，目录变化或收到 `ProjectEvent`（项目打开、关闭、worktree 变化）时对受影响的 cwd 重新归位；`locate` 返回 `NotLoaded` 时按项目设计的规则等下一次 `Changed` 再归位。cwd 不存在时为 `Missing`。
+3. 归位：对去重后的 cwd 先调 `Projects::locate`（只查内存，匹配已打开的项目，取最深的根），匹配到就用它的项目与 worktree，所以已打开的文件夹项目的子目录也归到该项目；没有匹配时再调 `Projects::resolve`（阻塞，在 executor 上）。结果按 cwd 缓存，目录变化或收到 `ProjectEvent`（项目打开、关闭、worktree 变化）时对受影响的 cwd 重新归位；`locate` 返回 `NotLoaded` 时按项目设计的规则处理：路径在非当前 worktree 时调 `Projects::resolve_package`（阻塞，在 executor 上）取这个 worktree 自己的子项目；在当前 worktree 或加载中的文件夹项目时，先记下项目与 worktree，等下一次 `Changed` 再补子项目。cwd 不存在时为 `Missing`。
 4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。
 5. 监听：`fs_watch` 递归监听每个会话目录，事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件从列表移除。处理完再按第 4 步发布。
 6. 消费：`usage` 按自己的游标 `read`；`review` 调 `turns` / `load`。
