@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：实现中。第 1 步（`services` 的会话接口，#PR）已实现，第 2–4 步尚未实现（见「验收」）。
+状态：实现中。第 1 步（`services` 的会话接口，[#71](https://github.com/SoloJiang/lectern-app/pull/71)）已实现，第 2–4 步尚未实现（见「验收」）。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -704,7 +704,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 
 分四步，每步一个 PR。前三步写 `Refs #13`，最后一步写 `Closes #13`。
 
-1. **`services` 的会话接口**（改 `lectern-services`，#PR）
+1. **`services` 的会话接口**（改 `lectern-services`，[#71](https://github.com/SoloJiang/lectern-app/pull/71)）
    - `SessionSource`、`SessionsChanged` 和「数据结构」里的类型在 `services::session` 里，`cargo check -p lectern-services` 通过。
    - 每个类型的 JSON 往返测试通过（`just test -p lectern-services` 的 `session_*`）。
 2. **Claude Code 适配器与增量读取**
