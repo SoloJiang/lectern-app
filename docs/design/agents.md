@@ -17,7 +17,7 @@
   - 恢复会话用哪个已登记的 agent 命令（`ResumeCommand`），供 `terminal` 映射成 `claude --resume <id>`、`codex resume <id>`。
 - 不做：
   - 用量去重、规范化、归属与聚合：`usage`。本 crate 交出日志里的原始数值和去重用的键。
-  - 命令文本里 `cd`、`pushd`、`git -C` 的解析：`usage`（`crates/usage/AGENTS.md`）。
+  - 命令文本的解析：`usage`（`crates/usage/AGENTS.md`）。包括 `cd`、`pushd`、`git -C` 改变目录的写法，也包括常见只读命令（`cat`、`sed -n`、`head`、`tail`、`rg`、`grep`、`ls`、`find`）的目标路径：Codex 读文件和搜索都走 shell，ADR 0020 要求这些读取 / 搜索目标参与归属。本 crate 交出完整命令文本和工作目录，不解释命令。
   - 改动归因、片段对齐、Drifted：`review`。本 crate 只交出每次工具调用的改动内容。
   - 路径到项目、worktree、子项目的映射：`project`，本 crate 只调用 `Projects` 接口。
   - 运行 `claude --resume`：`terminal`。
@@ -384,7 +384,7 @@ pub enum ToolStatus { Completed, Failed, Denied, Interrupted }
 | `Search` | `Grep`、`Glob`（`path`）、`LS` | 无（同上） |
 | `SpawnAgent` | `Task`、`Agent` | 派出子 agent 的工具（`spawn_agent` 一类，按 fixtures 补全） |
 
-结果状态：Claude Code 的 `tool_result.is_error` 为 true 是 `Failed`，`toolUseResult.interrupted` 为 true 是 `Interrupted`，权限被拒是 `Denied`；Codex 的 `function_call_output.output.success == false` 是 `Failed`；`local_shell_call` 没有对应的 output 记录，结束事件取它自带的 `status`：同一 `call_id` 出现 `completed` 时发 `ToolFinished`（`Completed`），`incomplete` 时发 `ToolFinished`（`Interrupted`），`in_progress` 只发开始。
+结果状态：Claude Code 的 `tool_result.is_error` 为 true 是 `Failed`，`toolUseResult.interrupted` 为 true 是 `Interrupted`，权限被拒是 `Denied`；Codex 的结果按退出码判断：`function_call_output` 里有退出码（`exec_command` / `shell` 的输出元数据，或输出文本开头的 `Exit code: N`）时，非 0 为 `Failed`；没有退出码时 `output.success == false` 为 `Failed`（`exec_command` 失败时 `success` 仍可能为 true，不能只看它）；`local_shell_call` 没有对应的 output 记录，结束事件取它自带的 `status`：同一 `call_id` 出现 `completed` 时发 `ToolFinished`（`Completed`），`incomplete` 时发 `ToolFinished`（`Interrupted`），`in_progress` 只发开始。
 
 用量与额度（ADR 0014、ADR 0022）：
 
@@ -398,6 +398,9 @@ pub struct UsageRecord {
     /// Claude Code `usage.iterations[]` 里 `type: "advisor_message"` 的那一份，模型取 `advisorModel`；按自己的模型计，
     /// 不与 `tokens` 相加。是同一条记录的附带数据，不影响去重。
     pub advisor: Option<AdvisorUsage>,
+    /// 只对 `CodexTokenCount` 有意义：这条之前这个线程已出现过 `token_usage_record`（见下面的「只用一路用量」）。
+    /// 是记录的可变数据，不进键：适配器升级后重读时同一条记录按键覆盖，这个标记随之更新，不会留下旧的可计数副本。
+    pub superseded: bool,
     /// Claude Code 的 `isSidechain`。
     pub sidechain: bool,
     /// 会话日志。Analyze 的计量记录（后续 issue）用另一个变体，`usage` 按它区分「编写」与「审阅」。
@@ -429,8 +432,8 @@ pub enum UsageKey {
     /// `total` 是会话内的累计值，不是唯一标识，所以键带上游线程 ID（`session_meta.id`）：同一线程里重复写出的同一个累计值
     /// 合为一条，不同线程（重复的工作流、分叉）各自计数。分叉和子 agent 重放的父会话 `token_count` 带的是新线程的 ID，
     /// 靠 `inherited` 标记排除（ADR 0014），不靠键。
-    /// `superseded`：这条之前，这个线程已出现过 `token_usage_record`（见下面的「只用一路用量」）。
-    CodexTokenCount { thread_id: Arc<str>, total: RawTokens, superseded: bool },
+    /// 是否已被逐响应记录取代不在键里，见 `UsageRecord::superseded`。
+    CodexTokenCount { thread_id: Arc<str>, total: RawTokens },
     /// 顶层 `token_usage_record`：每个完成的响应一条，`tokens` 取它的 `usage`。`response_id` 由模型服务端生成、全局唯一；同样带上 `thread_id`，与上一项一致。
     CodexResponse { thread_id: Arc<str>, response_id: Arc<str> },
 }
@@ -439,7 +442,7 @@ pub enum UsageKey {
 只用一路用量：Codex 按线程决定。在 `3b8f43a`，每个完成的响应先写一条 `token_usage_record`，同一个响应的用量又累加进随后的 `token_count`（`codex-rs/core/src/session/mod.rs` 的 `record_response_token_usage` 与 `update_token_usage_info`），两路都计会重复。规则：
 
 - 在一个线程（`thread_id`）里按文件顺序切换：第一条 `token_usage_record` 之前，用 `token_count` 的 `last_token_usage`；从它开始，只用 `token_usage_record`。会话由只写 `token_count` 的旧版本开始、升级后续接时，`token_usage_record` 会在同一个文件中途出现，切换之前的用量照样计入。没有任何 `token_usage_record` 的线程（旧版本的日志）全程用 `token_count`。
-- 本 crate 两路都交出，在游标的解析器状态里记下这个线程是否已出现过 `token_usage_record`：只有在它之后交出的 `CodexTokenCount` 标 `superseded: true`，之前的不标、也不回头重标。`usage` 计入全部 `CodexResponse` 和 `superseded == false` 的 `CodexTokenCount`。
+- 本 crate 两路都交出，在游标的解析器状态里记下这个线程是否已出现过 `token_usage_record`：只有在它之后交出的 `CodexTokenCount` 记录的 `superseded` 为 true，之前的不标、也不回头重标。`usage` 计入全部 `CodexResponse` 和 `superseded` 为 false 的 `CodexTokenCount` 记录。
 - `token_count` 无论哪种情况都照常交出 `RateLimits`。
 
 ```rust
