@@ -75,7 +75,7 @@ Linux 上用 `openat2` 加 `RESOLVE_NO_SYMLINKS` 实现同样的语义，供 CI 
 
 | 概念 | 说明 |
 |---|---|
-| 仓库（`Repo`） | 一个 git 公共目录。同一仓库的所有 worktree 共用一个 `Repo` 和一份对象库句柄。 |
+| 仓库（`Repo`） | 一个 git 公共目录。同一仓库的所有 worktree 共用一个 `Repo`；gix 句柄按线程打开（见「数据流与线程」）。 |
 | worktree（`Worktree`） | 主 worktree 或 linked worktree：自己的 HEAD、index 和工作区。 |
 | 基准 | 比较的旧一侧，总是一棵树：HEAD、某个提交（如会话开始时的 HEAD）或 merge-base。 |
 | 改动集（`ChangeSet`） | 基准与目标（另一棵树或工作区）之间每个改动文件的状态、两侧的模式和内容标识、diff。不可变，`Arc` 共享。 |
@@ -84,7 +84,7 @@ Linux 上用 `openat2` 加 `RESOLVE_NO_SYMLINKS` 实现同样的语义，供 CI 
 
 ## 接口
 
-所有函数都阻塞（读对象库、index 或工作区），只在后台任务里调用，UI 线程上不调用（AGENTS.md「禁止事项」）。`Repo`、`Worktree`、`ChangeSet` 都是 `Send + Sync`，克隆是 `Arc` 克隆。带 `cancel` 参数的函数在文件之间检查它，置位后返回 `GitError::Cancelled`，调用方丢弃结果。
+所有函数都阻塞（读对象库、index 或工作区），只在后台任务里调用，UI 线程上不调用（AGENTS.md「禁止事项」）。`Repo`、`Worktree`、`ChangeSet` 都是 `Send + Sync`，克隆是 `Arc` 克隆；它们不持有 gix 句柄（gix 的句柄不是 `Send`，见「数据流与线程」）。带 `cancel` 参数的函数在文件之间检查它，置位后返回 `GitError::Cancelled`，调用方丢弃结果。
 
 ### 对象 ID 与路径
 
@@ -340,13 +340,28 @@ impl Repo {
 }
 
 impl ChangeSet {
-    /// 叠加到基准快照上的工作区改动：删除的路径，以及每个新增、修改文件的内容来源。只对工作区改动集有意义。
-    pub fn overlay(&self) -> impl Iterator<Item = OverlayEntry> + '_;
+    /// 叠加到基准快照上的工作区改动：只含 `selection` 里的改动——删除的路径，以及每个新增、修改文件的内容来源。
+    /// 只对工作区改动集有意义。
+    pub fn overlay<'a>(&'a self, selection: &'a Selection) -> impl Iterator<Item = OverlayEntry> + 'a;
+    /// 审阅对象的指纹：只覆盖 `selection` 里的改动。`fingerprint()` 等于选中全部文件时的结果。
+    pub fn fingerprint_of(&self, selection: &Selection) -> Fingerprint;
 
     /// 用实际写进快照的内容构造改动集，Analyze 的 patch 和指纹都从它计算，
     /// 不从可能还在变化的工作区计算（ADR 0019「结果要对得上当前版本」）。
     pub fn from_written(repo: &Repo, manifest: WrittenManifest, limits: &Limits,
         cancel: &AtomicBool) -> Result<Arc<ChangeSet>, GitError>;
+}
+
+/// 属于审阅对象的改动，由调用方选出：`review` 按会话归因决定哪些文件、哪些改动属于被审阅的会话
+///（ADR 0019：快照只含受跟踪的文件和属于审阅对象的改动），本 crate 不判断归属。审阅整个工作区时选中全部文件。
+pub struct Selection { /* files 的下标 → Ownership */ }
+
+pub enum Ownership {
+    /// 这个文件的改动全部属于审阅对象：按 `OverlaySource` 叠加。
+    Whole,
+    /// 只有一部分属于（同一个文件里还有别的会话的改动）：不按 hunk 拼出一个中间版本，
+    /// 快照里保留基准内容，条目作为 `Omitted` 给出，Analyze 标为部分内容未提供。
+    Partial,
 }
 
 /// 写出方交回的清单。`untracked_capped` 原样带回源改动集的 `Totals::untracked_capped`：
@@ -378,6 +393,7 @@ pub struct WrittenEntry {
     /// 所以 `from_written` 算出的指纹与工作区改动集的指纹用同一个内容标识。
     pub content: Content,
     pub untracked: bool,                          // 原样带回 `Change::untracked`
+    pub ownership: Ownership,                     // 原样带回 `Selection` 里的值；`Partial` 的 `content` 是源改动集新一侧的 `Content`
     pub source: Arc<dyn WrittenContent>,          // 读取已写出的内容，生成 patch 用
 }
 
@@ -508,7 +524,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 其余规则：
 
 - 模式：`core.fileMode=false` 时可执行位取 index 里的值；符号链接的内容是 `readlinkat` 读出的目标。
-- 子模块：工作区一侧的提交是子模块自己的 HEAD（只读地打开它的 git 目录）；子模块内部的未提交改动不计算。
+- 子模块：工作区一侧的提交是子模块自己的 HEAD（只读地打开它的 git 目录）；子模块内部的未提交改动不计算。子模块没有初始化（克隆时没带 `--recurse-submodules`，或 `deinit` 之后：路径是空目录，没有仓库和 HEAD）时，工作区一侧取 index 里的 gitlink OID，按未改动处理，不标为 `Unavailable`。
 - `skip_worktree` 的条目（含从 sparse 目录展开的条目）不 stat、不读工作区，工作区一侧取 index 里的 OID：与基准相同时不是改动，不同时按已暂存的改动处理。`git add -N` 的条目按新增处理。
 - 路径的大小写与 Unicode 规范化按仓库的 `core.ignoreCase`、`core.precomposeUnicode`（gix 的文件系统能力）。
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
@@ -536,13 +552,13 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Fingerprint {
     pub digest: [u8; 32],      // SHA-256
-    /// 有 `Unhashed`、`Unavailable`、改动了的子模块（任一侧是 `Gitlink`）或 `untracked_capped` 时为 false：
+    /// 选中的改动里有 `Unhashed`、`Unavailable`、`Partial`、改动了的子模块（任一侧是 `Gitlink`），或 `untracked_capped` 时为 false：
     /// Analyze 的结果标为「部分内容未提供」。`complete` 本身也是摘要的输入，`from_written` 从清单里的同样信息得到同样的值。
     pub complete: bool,
 }
 ```
 
-- 输入：格式版本号、基准树 OID，以及 `files` 里每一项的（路径、重命名的旧路径、状态、`untracked`、新旧模式、两侧的内容标识），按 `files` 的顺序，每个字段带长度前缀。
+- 输入：格式版本号、基准树 OID，以及选中的每一项的（路径、重命名的旧路径、状态、`untracked`、`Ownership`、新旧模式、两侧的内容标识），按 `files` 的顺序，每个字段带长度前缀。没选中的改动不进入指纹，别的会话的改动变化不会让这个审阅对象的结果过期。
 - 内容标识：`Blob` 用 OID；`Unhashed` 用大小、mtime 和 inode，不在每次刷新时读超大文件；`Filtered` 用它的 `RawIdentity`；`NotRetained` 用它的 `oid`；其余 `Unavailable` 用原因。
 - 工作区改动集和 `from_written` 得到的改动集用同一套规则：没写进快照的条目在 `WrittenEntry` 里带回原来的 `Content`，所以快照没变时两者的指纹相同，过滤器文件的原始字节变了时指纹随之改变。
 - 在截断之前、对全部改动文件计算，被截断和只列出的文件也计入；只改可执行位也会改变指纹。
@@ -564,9 +580,9 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 2. `review` 在后台任务里调用 `changes(Base::Head)` 或 `changes(Base::Commit(会话开始时的 HEAD))`，得到 `Arc<ChangeSet>`，加上归因后作为不可变快照交给 `review_view`（架构规则 4）。
 3. `fs_watch` 报告路径变化时，`review` 调用 `refresh(Paths)`；HEAD、index、忽略规则、属性或配置变化时调用 `refresh(Full)`。
 4. 视图滚动到某个文件时发出命令，后台任务调用 `texts` 和 `rows`，把展示行交给视图；视图不调用本 crate 的任何函数。
-5. Analyze：`agents` 用 `snapshot_entries` 和 `overlay` 写出快照（经 `platform`），再用 `from_written` 得到 patch 和指纹。
+5. Analyze：`review` 按归因给出审阅对象的 `Selection`，`agents` 用 `snapshot_entries` 和 `overlay(selection)` 写出快照（经 `platform`），再用 `from_written` 得到 patch 和指纹。
 
-线程：本 crate 的函数在调用方的后台任务线程上运行，内部用 gix 的线程本地仓库句柄，不建线程，不持有跨调用的锁。非当前 worktree 只保留 `WorktreeInfo`，`Worktree` 句柄（index、stat 缓存）由调用方在离开后释放（[技术调研「性能要点」](tech-research.md#性能要点)）。
+线程：本 crate 的函数在调用方的后台任务线程上运行，不建线程，不持有跨调用的锁。gix 的 `parallel` 关闭（ADR 0024），它的仓库句柄不是 `Send`，所以 `Repo`、`Worktree` 只保存位置、打开参数和本 crate 自己的数据（index 解析结果、stat 缓存），不持有 gix 句柄；每次调用在当前线程上取 gix 句柄：按（线程，公共目录）缓存在线程本地，同一个工作线程上的后续调用复用，空闲 30 秒后释放。每个句柄的 pack 与对象缓存合计 ≤ 4 MiB，`executor` 最多 6 个工作线程，合计 ≤ 24 MiB。非当前 worktree 只保留 `WorktreeInfo`，`Worktree` 句柄（index、stat 缓存）由调用方在离开后释放（[技术调研「性能要点」](tech-research.md#性能要点)）。
 
 ## 性能
 
@@ -577,7 +593,7 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 | 打开项目到项目主页可用 < 100 ms | `discover` + `worktrees` + `tracked` < 15 ms |
 | 打开一个会话的 Diff < 50 ms | 50 个改动文件的 `changes`（stat 跳过其余文件）< 15 ms；hunk 未命中时计算 < 20 ms，命中时 < 2 ms |
 | 切换 worktree / 分支 < 100 ms | 内容相同的文件命中同一份 hunk 缓存；`refresh(Full)` < 15 ms |
-| 空闲内存：打开 monorepo < 100 MB | 每个仓库的对象缓存（gix 的 pack 与对象缓存）合计 ≤ 16 MiB，hunk LRU 16 MiB |
+| 空闲内存：打开 monorepo < 100 MB | gix 句柄的 pack 与对象缓存每个线程每个仓库 ≤ 4 MiB（合计 ≤ 24 MiB，空闲 30 秒释放），hunk LRU 16 MiB |
 | 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数 |
 | 安装包 ≤ 80 MB | gix 约 3 MB（ADR 0024） |
 
