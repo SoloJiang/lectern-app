@@ -1,6 +1,6 @@
 # fs_watch 设计
 
-状态：已接受，尚未实现。
+状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)）；第 2–4 步（`git` 的适配、macOS 后端、装配与实测）尚未实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（没有单独的 issue；与 [platform 设计](platform.md)相同，随 Git 与 Diff 推进），消费方分属 [#9](https://github.com/SoloJiang/lectern-app/issues/9)（`project` 的增量刷新）、[#13](https://github.com/SoloJiang/lectern-app/issues/13)（`agents` 的会话目录）、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`usage` 的 reflog 时刻）和 [#66](https://github.com/SoloJiang/lectern-app/issues/66)（Analyze 的修订号）。`fs_watch` 是与平台无关的文件监听：把后端交来的原始事件按 git index 和忽略规则过滤、合并成批交给消费方，按 worktree 维护修订号，给 reflog 的新增记录打上监听时刻和序号。FSEvents 与 kqueue 后端在 `platform`，由 `app` 注入（[技术调研「性能要点」](tech-research.md#性能要点)、[ADR 0019](../adr/0019.md)、[ADR 0020](../adr/0020.md)、[ADR 0026](../adr/0026.md)）。
 
@@ -239,7 +239,7 @@ impl Coalesce {
 }
 ```
 
-`watch_*` 和 `set_unfiltered` 只把命令放进 fs_watch 的队列就返回。arm、首次加载完成后，句柄的第一个批次带 `health: Some(Health::Live)` 和 `rescan: true`：消费方在调用 `watch_*` 之后、收到这一批之前读到的状态可能漏掉 arm 之前的变化，收到后按全部可能变化处理一次。`agents` 的「先注册监听、再枚举」和 `project` 打开后读 index 都依赖这一点。
+`watch_*` 和 `set_unfiltered` 只把命令放进 fs_watch 的队列就返回。arm、首次加载完成后，句柄的第一个批次带 `health` 和 `rescan: true`，`health` 是当时的状态（通常是 `Live`；首次加载失败时是 `Degraded`，arm 失败时是 `Failed`）：消费方在调用 `watch_*` 之后、收到这一批之前读到的状态可能漏掉 arm 之前的变化，收到后按全部可能变化处理一次。`agents` 的「先注册监听、再枚举」和 `project` 打开后读 index 都依赖这一点。
 
 ### 消费方回调
 
@@ -357,7 +357,7 @@ pub struct ReflogRecord {
 }
 
 pub struct ReadStamp {
-    /// 这次运行的编号：`Watcher::new` 时由墙上时间（纳秒）与进程号得出，同一 `Watcher` 的全部记录相同。
+    /// 这次运行的编号：`Watcher::new` 时由墙上时间（纳秒）与标准库为每个进程随机生成的哈希密钥（`RandomState`）得出，同一 `Watcher` 的全部记录相同。
     /// `read` 和 `seq` 每次运行从 0 重新计数，`usage` 落盘后按它区分不同运行的计数；只比较相等，
     /// 运行的先后由 `usage` 分配的序号给出（见「reflog」的先后规则）。
     pub run: RunId,
@@ -450,6 +450,13 @@ pub mod testing {
         pub fn hold(&self, target: &Path);
         pub fn fail_next_arm(&self, target: &Path, error: BackendError);
         pub fn flush_count(&self, target: &Path) -> usize;
+        /// 下一次 arm `target` 时，在 `arm` 返回之前交付这些事件。
+        pub fn emit_on_arm(&self, target: &Path, events: &[(&str, Flags)]);
+        /// 下一次 arm `target` 时，在监视建立之前运行 `hook`（模拟 reflog 第 1 段与 arm 之间的写入）。
+        pub fn before_arm(&self, target: &Path, hook: impl FnOnce() + Send + 'static);
+        pub fn is_armed(&self, target: &Path) -> bool;
+        /// 至今的 arm 与 drop，每行 `arm <路径> <范围>` / `drop <路径> <范围>`。
+        pub fn history(&self) -> Vec<String>;
     }
 
     /// 手动驱动的监听器：不建线程，时钟是假的。`flush_revision` 在调用线程上直接处理队列。
@@ -467,11 +474,32 @@ pub mod testing {
     pub struct RecordingSink<B> { /* … */ }
     impl<B> RecordingSink<B> {
         pub fn new(busy: Option<Arc<dyn Fn() -> Option<BusyGuard> + Send + Sync>>) -> Arc<RecordingSink<B>>;
+        /// 取走已收到的批次，同时 drop 它们的守卫（守卫在 `take` 之前一直由 sink 持有，像消费方的任务那样）。
         pub fn take(&self) -> Vec<(B, bool)>;
+        pub fn len(&self) -> usize;
+        pub fn is_empty(&self) -> bool;
     }
 
     /// 内存里的过滤器与配置来源：按给定的跟踪路径、忽略规则（只支持前缀与 `*.后缀`）、规则文件和配置清单回答，记录调用次数。
+    /// 过滤器在构造时复制当前设置，之后的修改要重新加载才生效，与真实的 index 一样。
     pub struct FakeSource { /* … */ }
+    impl FakeSource {
+        pub fn new() -> Arc<FakeSource>;
+        pub fn track(&self, paths: &[&str]);
+        pub fn untrack(&self, paths: &[&str]);
+        pub fn gitlink(&self, paths: &[&str]);
+        /// `*.后缀`；不含 `/` 的名字匹配任一级的同名条目（结尾 `/` 只匹配目录）；含 `/` 的匹配这个路径本身。
+        pub fn ignore(&self, patterns: &[&str]);
+        pub fn unignore(&self, patterns: &[&str]);
+        pub fn rule_files(&self, paths: &[&str]);
+        pub fn set_config_files(&self, files: &[PathBuf]);
+        pub fn fail_filter(&self, error: Option<&str>);
+        pub fn fail_config(&self, error: Option<&str>);
+        pub fn filter_calls(&self) -> usize;
+        pub fn config_calls(&self) -> usize;
+        /// 每次 `filter` 调用的 `gitignores` 参数。
+        pub fn gitignores(&self) -> Vec<Vec<WatchPath>>;
+    }
 }
 ```
 
@@ -484,14 +512,14 @@ worktree 状态收到工作区根目标上的一个事件，路径为 `p`（相�
 3. `p` 的任何一级名字是 `.git`：丢弃。主 worktree 的 git 目录由仓库状态处理，嵌套仓库的 git 目录不属于工作区。
 4. `p` 在生效的不过滤清单里，或是清单里某个路径的上级目录（目录被删除、改名）：交付。
 5. `filter.tracked(p)` 是 `File`、`Dir` 或 `Gitlink`：交付（受跟踪的路径即使匹配忽略规则也交付）。
-6. 从最上一级起检查 `p` 的每个上级目录 `a`：`tracked(a)` 是 `Gitlink` 时丢弃（子模块内部）；`tracked(a)` 是 `No` 且 `ignored(a, true)` 时丢弃（git 不进入被忽略的目录，其中的未跟踪路径和规则文件都不起作用，`node_modules/**/.gitignore` 也在这里丢弃）。
+6. 从最上一级起检查 `p` 的每个上级目录 `a`：`tracked(a)` 是 `Gitlink` 时丢弃（子模块内部）；`tracked(a)` 不是 `Gitlink` 且 `ignored(a, true)` 时丢弃，`a` 之下有受跟踪的文件也一样（git 不进入被忽略的目录，也不重新包含被排除目录之下的路径，其中的未跟踪路径和规则文件都不起作用，`node_modules/**/.gitignore` 也在这里丢弃；其中受跟踪的路径已在第 5 步交付）。
 7. 最后一级名字是 `.gitignore` 或 `.gitattributes`：交付，`meta.rules`；`.gitignore` 同时触发过滤器重新加载。这两种文件自身被忽略规则排除时 git 照样应用，所以不再经过第 8 步。
 8. `ignored(p, flags 含 DIR)`：丢弃。
 9. 其余是未跟踪、未被忽略的路径：交付。
 
-第 6 步的结果按目录缓存（每个 worktree 状态最多 1024 个目录，最近使用淘汰），过滤器替换时清空，所以 `npm install` 写出的几万个 `node_modules/**` 事件每个只需一次缓存查找。
+第 6 步的结果按目录缓存（每个 worktree 状态最多 1024 个目录，两代缓存近似最近使用淘汰：当前一代满 512 项时变为上一代，上一代里命中的项移回当前一代），过滤器替换时清空，所以 `npm install` 写出的几万个 `node_modules/**` 事件每个只需一次缓存查找。
 
-过滤器在以下情况重新加载（executor 上调用 `WorktreeSource::filter`，同时最多一个，加载期间又触发的在结束后再加载一次）：worktree 状态 arm 时；这个 worktree 的 `index` 变化；任何 `.gitignore` 变化（第 7 步）；事件路径是 `PathFilter::rule_files` 里某个文件的上级目录（目录被改名、删除时后端可能只报告目录本身）；带 `DIR` 且带 `RENAMED` 或 `REMOVED` 的事件（保守处理：移进来的目录里的新 `.gitignore` 由重新加载的遍历找到）；`info/exclude` 变化；公共目录的 `config`、这个 worktree 的 `config.worktree` 或配置清单里的文件变化（`core.excludesFile`、`core.ignoreCase` 可能变了）。
+过滤器在以下情况重新加载（executor 上调用 `WorktreeSource::filter`，同时最多一个，加载期间又触发的在结束后再加载一次）：worktree 状态 arm 时；这个 worktree 的 `index` 变化；任何 `.gitignore` 变化（第 7 步）；事件路径是 `PathFilter::rule_files` 里某个文件的上级目录（目录被改名、删除时后端可能只报告目录本身）；带 `DIR` 且带 `RENAMED` 或 `REMOVED` 的事件（保守处理：移进来的目录里的新 `.gitignore` 由重新加载的遍历找到）；`info/exclude` 变化；公共目录的 `config`、这个 worktree 的 `config.worktree` 或配置清单里的文件变化（`core.excludesFile`、`core.ignoreCase` 可能变了）；工作区根目标上的 `RESCAN`。按事件路径触发的几条（`.gitignore`、规则文件的上级目录、目录改名或删除）只看按当前过滤器不被丢弃的路径：被忽略目录里的目录改名（`npm install` 写 `node_modules/.staging/*` 后改名）不触发；第一次加载完成之前暂存的路径在第一个过滤器装上后按它判断，判为交付的再触发一次。
 
 从触发重新加载的原始批次起，到新过滤器装上为止，过滤器是过期的：走到第 6、8、9 步的路径（旧过滤器认为不受跟踪的，无论判为丢弃还是未跟踪；第 7 步的规则文件照常交付并触发加载）先暂存，照样计入修订号；新过滤器装上后重新分类，交付的路径并入当前批次。第一次加载完成之前的路径同样暂存。这样 `git add -f build/out.js` 之后紧接着的修改不会因为旧过滤器认为它被忽略而丢失，新建 `.gitignore` 之后紧接着写出的 `node_modules/**` 也会按新规则丢弃，而不是按旧规则作为未跟踪路径交付。暂存最多 4096 项：超过时把同一目录下的项合并成这个目录（从最深的目录开始），重新分类时被忽略的目录连同其下全部路径丢弃，否则作为目录路径交付；只有合并到 worktree 根仍超过上限时才改为 `rescan`。暂存期间这个订阅的批次不交付，合并窗口顺延到过滤器装上。
 
@@ -694,7 +722,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 
 | 情况 | 本 crate 的处理 | 消费方 |
 |---|---|---|
-| `RESCAN`（FSEvents 的 MustScanSubDirs，含 UserDropped / KernelDropped）在工作区根目标上 | 这个 worktree 的订阅 `rescan: true`、`paths` 清空，修订号加一 | `refresh(Full)` 等全量刷新 |
+| `RESCAN`（FSEvents 的 MustScanSubDirs，含 UserDropped / KernelDropped）在工作区根目标上 | 这个 worktree 的订阅 `rescan: true`、`paths` 清空，修订号加一；重新加载过滤器和配置清单（丢失的事件里可能有 `.gitignore`） | `refresh(Full)` 等全量刷新 |
 | `RESCAN` 在公共目录目标上 | 仓库订阅 `rescan: true`；每个 worktree 修订号加一、`meta` 全部置位；重新加载全部过滤器和配置清单；对每个 reflog 文件按「reflog」重新 `fstat` 和读取（追加的交付，改写的 `Reset`，新的 `NewFile`，消失的 `Removed`），并重新列出 `logs/` | 重新读引用、HEAD 和 worktree 列表 |
 | `RESCAN` 在 `DirWatch` 根目标上 | `rescan: true` | `agents` 重新枚举 |
 | fs_watch 队列在某个目标上溢出 | 按这个目标的 `RESCAN` 处理 | 同上 |
@@ -761,3 +789,34 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
    - `app` 按「对其他 crate 的要求」创建 `Watcher` 并注入；macOS 上 `cargo build --locked -p lectern-app` 通过。
    - `fs_watch/flush_idle`、`fs_watch/write_to_deliver`、`fs_watch/resident` 改为 `Active`，macOS CI 的 `just bench` 判定通过；`app/cold_start` 不因本 crate 变化。
    - 本文状态行改为「已实现」并列出四个 PR，填写「实际验证」。
+
+## 实际验证
+
+第 1 步，在 Linux 上运行（本 crate 不依赖 GPUI，也没有平台相关代码，macOS 上是同一份代码；本 PR 没有在 macOS 上实测）：
+
+- `just test -p lectern-fs-watch`：103 个测试全部通过，连续运行 15 次结果相同。测试用 `testing::manual`、`FakeBackend`、`FakeSource`、`Executor::manual()` 和假时钟，reflog 与配置清单的符号链接展开用 `tempfile` 的真实目录；只有三个测试用真实线程：`lifecycle_new_starts_no_thread_and_calls_no_backend`（用 executor 的线程启动钩子计数）、`flush_times_out_while_the_fs_watch_thread_is_busy` 和 `quiescence_*` 用的 `TestKernel`。
+- 「测试」一节的各组都有对应用例（`crates/fs_watch/src/tests/`）：`filter.rs`（`filter_*` 13 个、`filter_stale_*` 7 个）、`revision.rs`（`revision_git_metadata_table` 把「git 元数据」表的每一行连同 `.lock`、`objects/`、`FETCH_HEAD` 等表外路径做成一张快照，逐行核对加一的 worktree、重新加载的过滤器与配置清单和批次标志）、`flush.rs`、`coalesce.rs`、`reflog.rs`（先后规则按「reflog」一节写成测试里的 `earlier`，按真实写入顺序核对每一对记录的判断，并确认存在判断不了的对）、`config.rs`、`dir.rs`、`health.rs`（`rescan_*`、`health_*`）、`lifecycle.rs`、`quiescence.rs`；暂存的合并、目录缓存和 reflog 路径映射另有模块内的单元测试。insta 快照（大多是内联快照，另有 `snapshots/` 下一份）逐个看过。
+- `cargo tree -p lectern-fs-watch -e normal --depth 1` 只列出 `lectern-kernel`、`lectern-executor`；`rg -n 'cfg\(target_os|Command::new|std::process' crates/fs_watch/src` 没有结果；`python3 scripts/check_architecture.py` 通过。
+- `just check`、`just test`（Linux 上的全部 crate，774 个测试）、`just doctest`、`just deny` 通过。
+- 性能（临时的计时测试，`--release`，Linux 容器，不是 M 系列 Mac，未提交）：`classify_burst` 的场景（728 个跟踪文件、20 条忽略规则，`FakeBackend` 注入 10 万个 `node_modules/**` 事件和 1000 个受跟踪路径事件，每 1000 个一个原始批次）全部处理完最好一次 41.5 ms，含 `FakeBackend` 构造事件的开销；追加一行 reflog 到记录进入批次（`reflog_append`）中位数 5.9 µs、p95 8.0 µs。
+
+没有验证到的：
+
+- bench 预算表的 `fs_watch/*` 条目和 `classify_burst`、`reflog_append` 两项基准：bench 运行器（[#7](https://github.com/SoloJiang/lectern-app/issues/7) 第 1 步）还没有合并进 `main`，见下一节。
+- macOS 上的真实后端、`flush_idle`、`write_to_deliver`、`resident`：第 3、4 步。
+
+## 与设计的差异
+
+- 「路径分类」第 6 步：上级目录不是子模块且被忽略规则排除时就丢弃，不再要求它不受跟踪。设计原来只丢弃「不受跟踪且被忽略」的上级目录，于是 `build/` 被忽略、`build/keep.txt` 受跟踪时，`build/out.js` 会走到第 8 步，而 `PathFilter::ignored` 只看路径自身（`out.js` 不匹配），结果被当作未跟踪路径交付；git 不重新包含被排除目录之下的路径，`git status` 不会列出它。受跟踪的路径在第 5 步已经交付，所以改动只影响未跟踪的路径。上文第 6 步已改。
+- `RunId` 由墙上时间和 `RandomState` 的每进程随机密钥求哈希得出，不用进程号：取进程号要用 `std::process`，验收要求 `rg 'std::process' crates/fs_watch/src` 没有结果；随机密钥同样区分同一时刻启动的两个进程。另有一个进程内计数器区分同一纳秒创建的两个 `Watcher`。上文 `ReadStamp::run` 已改。
+- 第一个批次的 `health` 是当时的状态，不总是 `Live`：首次加载失败时是 `Degraded`，arm 失败时是 `Failed`，否则消费方要先收到 `Live` 再立即收到退化的状态。上文「监听器与句柄」已改。
+- 按事件路径触发的过滤器重新加载（`.gitignore`、规则文件的上级目录、目录改名或删除）只看按当前过滤器不被丢弃的路径；设计只对 `.gitignore` 写明了这一点（`node_modules/x/.gitignore` 不触发）。否则 `npm install` 在 `node_modules` 里不断改名目录，每次都触发重新加载，过滤器一直过期，批次一直不交付。第一次加载完成之前暂存的路径没有过滤器可判断，在第一个过滤器装上后按它判断，判为交付的再触发一次（第一次加载的遍历可能已经错过它们）。上文已补充。
+- 工作区根目标上的 `RESCAN` 同时重新加载过滤器和配置清单：丢失的事件里可能有 `.gitignore` 或配置文件，不重新加载的话过滤器会一直是旧的。上文「状态与异常」已补充。
+- 目录缓存用两代缓存近似最近使用淘汰，每次操作 O(1)，不需要链表；上限仍是 1024 项。上文已改。
+- 暂存超过 4096 项时，先在最深的一层里按上级目录分组，从最大的组开始合并，够了就停；只有一个成员的组要等更大的组都合并完仍超限时才上移一层。设计只写了「从最深的目录开始」。
+- 配置清单的监视点在 `Tree` 目标里也匹配监视点之下的路径：监视点是「最长的已存在前缀的下一级名字」时，后端可能只报告新出现的目录里的文件。
+- 过滤器加载失败（`Degraded(Filter)`）后的重试期间，路径照样全部交付（没有过滤器可暂存），但批次与正常的重新加载一样等到加载结束再交付。
+- `flush_revision` 里某个 `Armed::flush` 出错时返回 `NotWatching(Failure::Backend(..))`，调用方按「已变化」处理；设计没有写这种情况。
+- 最后一个 `Watcher` 克隆 drop 时也执行 `shutdown`；`shutdown` 在 fs_watch 线程之外调用时等线程退出（最多 `flush_timeout`），所以返回之后不再交付。
+- 测试辅助比设计多了几个方法（上文「测试辅助」已列出）：`FakeBackend` 的 `emit_on_arm`、`before_arm`、`is_armed`、`history`，`FakeSource` 的设置与计数方法，`RecordingSink::len`、`is_empty`；`RecordingSink` 在 `take` 之前一直持有守卫，静止测试据此检查「交付后守卫在消费方手里」。另外 `Flags` 实现了 `BitOr`、`BitOrAssign`、`Default`、`Hash`，`Target`、`Scope`、批次类型实现了 `Clone`、`PartialEq`、`Debug`，错误类型实现了 `Display` 和 `Error`。
+- bench 预算表的 `fs_watch/*` 条目和 `classify_burst`、`reflog_append` 两项基准没有加：bench 运行器与预算表（[#7](https://github.com/SoloJiang/lectern-app/issues/7) 第 1 步）还没有合并进 `main`，等它合并后另提 PR 加入，届时把这两项改为 `Active`，其余三项为 `planned`。上面「实际验证」里有这两个场景的临时测量值。
