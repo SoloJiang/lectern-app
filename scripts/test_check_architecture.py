@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 import check_architecture
-from check_architecture import apple_only_cfg, inherits_workspace_lints, is_macos_binding_name
+from check_architecture import has_impl_plugin, implements_plugin, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -38,6 +38,103 @@ def tearDownModule():
 def rustc_calls():
     with open(os.environ["FAKE_RUSTC_LOG"]) as f:
         return [json.loads(line)["args"] for line in f]
+
+
+class PluginRule(unittest.TestCase):
+    CRATES = {
+        "lectern-app": (False, "app", ["lectern-project", "lectern-agents"]),
+        "lectern-project": (True, "domain", ["lectern-git", "lectern-executor", "lectern-services"]),
+        "lectern-agents": (True, "domain", ["lectern-git"]),
+        "lectern-git": (False, "domain", []),
+        "lectern-executor": (False, "infra", []),
+        "lectern-services": (False, "kernel", []),
+        "lectern-project-home": (False, "view", ["lectern-services", "lectern-git"]),
+        "lectern-bench": (False, "tool", ["lectern-project", "lectern-agents"]),
+    }
+
+    def test_allowed(self):
+        self.assertEqual(plugin_errors(self.CRATES), [])
+
+    def test_plugin_depends_on_plugin(self):
+        crates = dict(self.CRATES, **{"lectern-agents": (True, "domain", ["lectern-git", "lectern-project"])})
+        self.assertEqual(
+            plugin_errors(crates),
+            ["lectern-agents -> lectern-project: plugin crates must not depend on each other [AGENTS.md architecture rule 7]"],
+        )
+
+    def test_library_depends_on_plugin(self):
+        crates = dict(self.CRATES, **{"lectern-project-home": (False, "view", ["lectern-project"])})
+        self.assertEqual(
+            plugin_errors(crates),
+            ["lectern-project-home -> lectern-project: only the app and tool crates may depend on a plugin crate [AGENTS.md architecture rule 7]"],
+        )
+
+    def test_cfg_test_items_are_ignored(self):
+        src = """
+pub struct Real;
+
+#[cfg(test)]
+mod tests {
+    struct Fake;
+    impl Plugin for Fake { fn id(&self) -> &str { "fake" } }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl kernel::Plugin for Mock {}
+
+#[cfg(test)]
+mod more;
+"""
+        self.assertFalse(has_impl_plugin(strip_cfg_test(src)))
+        self.assertIn("pub struct Real;", strip_cfg_test(src))
+        self.assertTrue(has_impl_plugin(strip_cfg_test(src + "impl Plugin for Real {}")))
+
+    def test_test_only_cfg(self):
+        for pred in ("test", 'feature = "test-support"', 'any(test, feature = "test-support")', 'all(test, unix)'):
+            with self.subTest(pred=pred):
+                self.assertTrue(test_only_cfg(pred))
+        for pred in ("not(test)", 'any(test, target_os = "macos")', "unix", 'feature = "metal"', "any()"):
+            with self.subTest(pred=pred):
+                self.assertFalse(test_only_cfg(pred))
+
+    def test_production_cfg_is_kept(self):
+        src = "#[cfg(not(test))]\nimpl Plugin for Real {}\n"
+        self.assertTrue(has_impl_plugin(strip_cfg_test(src)))
+
+    def test_comments_and_strings_are_ignored(self):
+        src = """
+/// ```
+/// impl Plugin for Example {}
+/// ```
+// impl Plugin for Old {}
+/* impl Plugin for Block { /* nested */ } */
+const DOC: &str = "impl Plugin for Text";
+const RAW: &str = r#"impl Plugin for Raw "quoted""#;
+fn f<'a>(c: char) -> bool { c == '"' }
+"""
+        cleaned = strip_comments_and_strings(src)
+        self.assertFalse(has_impl_plugin(cleaned))
+        self.assertIn("fn f<'a>(c: char)", cleaned)
+        self.assertTrue(has_impl_plugin(strip_comments_and_strings(src + "impl Plugin for Real {}")))
+
+    def test_feature_gated_test_double_in_a_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "lib.rs"), "w") as f:
+                f.write('#[cfg(feature = "test-support")]\nimpl Plugin for Mock {}\n'
+                        '#[cfg(any(test, feature = "test-support"))]\nimpl kernel::Plugin for Fake {}\n')
+            self.assertFalse(implements_plugin(d))
+            with open(os.path.join(d, "real.rs"), "w") as f:
+                f.write('const S: &str = "x";\nimpl Plugin for Real {}\n')
+            self.assertTrue(implements_plugin(d))
+
+    def test_impl_plugin_pattern(self):
+        for src in ("impl Plugin for Projects {", "impl kernel::Plugin for X", "impl<T: Send> lectern_kernel::Plugin for Source<T>",
+                    "impl<T: Into<Vec<u8>>> Plugin for Adapter<T>", "impl<F: Fn() -> u8> kernel::Plugin for Hook<F>"):
+            with self.subTest(src=src):
+                self.assertTrue(has_impl_plugin(src))
+        for src in ("impl PluginSet {", "impl From<Plugin> for X", "// a Plugin for each source", "impl MyPlugin for X"):
+            with self.subTest(src=src):
+                self.assertFalse(has_impl_plugin(src))
 
 
 class AppleOnlyCfg(unittest.TestCase):

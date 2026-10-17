@@ -3,9 +3,9 @@
 项目模型：仓库 → worktree → 子项目；清单解析（npm / yarn / pnpm、Maven、Gradle、Go、Cargo）。
 
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
-- 设计文档：`docs/design/project.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 设计文档：[docs/design/project.md](../../docs/design/project.md)
 - issue：[#9](https://github.com/SoloJiang/lectern-app/issues/9)
-- ADR：[0006](../../docs/adr/0006.md)、[0007](../../docs/adr/0007.md)
+- ADR：[0006](../../docs/adr/0006.md)、[0007](../../docs/adr/0007.md)、[0023](../../docs/adr/0023.md)
 
 ## 边界
 

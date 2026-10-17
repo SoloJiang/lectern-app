@@ -15,6 +15,10 @@ Rules checked:
      target predicates can only hold on Apple platforms (apple_only_cfg).
   5. Every workspace crate inherits the workspace lints
      (`[lints] workspace = true`).
+  6. Plugin crates (`[package.metadata.lectern] plugin = true`) never depend
+     on another plugin crate, and only app and tool crates depend on a plugin
+     crate (dev-dependencies included). A crate whose sources contain
+     `impl Plugin for` must carry the marker.
 
 Each error names the rule's source (AGENTS.md or a design doc) in brackets.
 
@@ -82,6 +86,174 @@ MACOS_NAME_TOKENS = {"macos", "darwin", "apple", "appkit", "cocoa", "metal", "ob
 # every machine and in CI.
 LINUX_TARGET = "x86_64-unknown-linux-gnu"  # the Linux CI runner
 PLATFORM_CRATE = "lectern-platform"
+
+
+def plugin_errors(crates):
+    """Rule 7 (ADR 0025). `crates` maps a workspace crate's name to
+    (is_plugin, layer, names of the workspace crates it depends on, dev
+    included). Returns the error messages."""
+    errors = []
+    for name, (_, mine, deps) in crates.items():
+        for dep in deps:
+            if dep not in crates or not crates[dep][0]:
+                continue
+            if crates[name][0]:
+                errors.append(f"{name} -> {dep}: plugin crates must not depend on each other [AGENTS.md architecture rule 7]")
+            elif mine not in ("app", "tool"):
+                errors.append(f"{name} -> {dep}: only the app and tool crates may depend on a plugin crate [AGENTS.md architecture rule 7]")
+    return errors
+
+
+_IMPL = re.compile(r"\bimpl\b")
+_PLUGIN_FOR = re.compile(r"\s*(?:\w+::)*Plugin\s+for\b")
+
+
+def has_impl_plugin(text):
+    """Whether code text contains `impl Plugin for X`, `impl<T> kernel::Plugin
+    for X` or `impl<T: Into<Vec<u8>>> lectern_kernel::Plugin for X`. Generic
+    parameter lists are skipped with balanced angle brackets."""
+    for m in _IMPL.finditer(text):
+        i = m.end()
+        while i < len(text) and text[i].isspace():
+            i += 1
+        if i < len(text) and text[i] == "<":
+            depth = 0
+            while i < len(text):
+                if text[i] == "<":
+                    depth += 1
+                elif text[i] == ">" and text[i - 1] != "-":
+                    depth -= 1
+                    if depth == 0:
+                        i += 1
+                        break
+                elif text[i] in "{;":
+                    break
+                i += 1
+            if depth != 0:
+                continue
+        elif i == m.end():
+            continue
+        if _PLUGIN_FOR.match(text, i):
+            return True
+    return False
+
+
+def strip_comments_and_strings(src, keep_strings=False):
+    """Blank out comments, string literals and char literals so that text
+    inside them (doc examples, commented-out code) is never read as code.
+    With keep_strings, only comments are removed and literals are kept as
+    written (cfg predicates such as `feature = "test-support"` need them)."""
+    out, i, n = [], 0, len(src)
+    while i < n:
+        c = src[i]
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+        elif src.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if src.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif src.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            out.append(" ")
+        elif (m := re.match(r'b?r(#*)"', src[i:])) is not None:
+            close = '"' + m.group(1)
+            j = src.find(close, i + m.end())
+            start, i = i, n if j < 0 else j + len(close)
+            out.append(src[start:i] if keep_strings else '""')
+        elif c == '"' or src.startswith('b"', i):
+            start = i
+            i += 2 if c == "b" else 1
+            while i < n and src[i] != '"':
+                i += 2 if src[i] == "\\" else 1
+            i += 1
+            out.append(src[start:i] if keep_strings else '""')
+        elif (m := re.match(r"b?'(?:\\.[^']*|[^'\\])'", src[i:])) is not None:
+            out.append(m.group(0) if keep_strings else "' '")
+            i += m.end()
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _cfg_args(text):
+    """Split a cfg argument list at top-level commas."""
+    parts, depth, cur = [], 0, []
+    for ch in text:
+        if ch == "," and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+            continue
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        cur.append(ch)
+    if "".join(cur).strip():
+        parts.append("".join(cur).strip())
+    return parts
+
+
+def test_only_cfg(pred):
+    """Whether a cfg predicate can hold only in test builds: `test` or
+    `feature = "test-support"`, combined with all/any. `not(...)` and every
+    other atom also select production code."""
+    pred = pred.strip()
+    if pred == "test" or re.fullmatch(r'feature\s*=\s*"test-support"', pred):
+        return True
+    m = re.fullmatch(r"(all|any)\s*\((.*)\)", pred, re.S)
+    if m is None:
+        return False
+    args = _cfg_args(m.group(2))
+    if not args:
+        return False
+    check = any if m.group(1) == "all" else all
+    return check(test_only_cfg(a) for a in args)
+
+
+CFG_ATTR = re.compile(r"#\[cfg\((.*?)\)\]", re.S)
+
+
+def strip_cfg_test(src):
+    """Remove items gated on a test-only cfg: the attribute and the item after
+    it, up to its `;` or its matching closing brace."""
+    out, pos = [], 0
+    for m in CFG_ATTR.finditer(src):
+        if m.start() < pos or not test_only_cfg(m.group(1)):
+            continue
+        out.append(src[pos : m.start()])
+        i = m.end()
+        while i < len(src) and src[i] not in "{;":
+            i += 1
+        if i < len(src) and src[i] == "{":
+            depth = 0
+            while i < len(src):
+                depth += {"{": 1, "}": -1}.get(src[i], 0)
+                i += 1
+                if depth == 0:
+                    break
+        else:
+            i += 1
+        pos = i
+    out.append(src[pos:])
+    return "".join(out)
+
+
+def implements_plugin(src_dir):
+    """Whether any non-test Rust source under src_dir implements
+    `kernel::Plugin`. Test plugins live in a `tests` or `testing` directory,
+    a `tests.rs` or `testing.rs` file, or an item gated on a test cfg, and
+    are skipped."""
+    for root, dirs, files in os.walk(src_dir):
+        dirs[:] = [d for d in dirs if d not in ("tests", "testing")]
+        for file in files:
+            if file.endswith(".rs") and file not in ("tests.rs", "testing.rs"):
+                with open(os.path.join(root, file), encoding="utf-8") as f:
+                    code = strip_cfg_test(strip_comments_and_strings(f.read(), keep_strings=True))
+                    if has_impl_plugin(strip_comments_and_strings(code)):
+                        return True
+    return False
 
 
 def metadata(platform=None, all_features=True):
@@ -267,11 +439,18 @@ def main():
     errors = []
 
     layer = {}
+    plugin = {}
     for pid in members:
         pkg = packages[pid]
-        value = (pkg.get("metadata") or {}).get("lectern", {}).get("layer")
+        lectern = (pkg.get("metadata") or {}).get("lectern", {})
+        value = lectern.get("layer")
         if value not in (*RANK, "kernel", "tool"):
             errors.append(f"{pkg['name']}: missing or unknown layer {value!r} [docs/design/cargo-workspace.md]")
+        plugin[pid] = lectern.get("plugin", False)
+        if not isinstance(plugin[pid], bool):
+            errors.append(f"{pkg['name']}: `plugin` must be true or false [docs/adr/0025.md]")
+        elif plugin[pid] is False and pkg["name"] != "lectern-kernel" and implements_plugin(os.path.join(os.path.dirname(pkg["manifest_path"]), "src")):
+            errors.append(f"{pkg['name']}: implements Plugin; add `plugin = true` to [package.metadata.lectern] [docs/adr/0025.md]")
         if not inherits_workspace_lints(pkg["manifest_path"]):
             errors.append(f"{pkg['name']}: add `[lints] workspace = true` to its Cargo.toml [docs/design/ci.md]")
         layer[pid] = value
@@ -335,6 +514,15 @@ def main():
             # not bypass platform isolation.
             if name != PLATFORM_CRATE and dep_name != PLATFORM_CRATE and (is_macos_binding_name(dep_name) or apple_only(pid, dep)):
                 errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE} [AGENTS.md architecture rule 6]")
+
+    errors.extend(
+        plugin_errors(
+            {
+                packages[pid]["name"]: (plugin[pid] is True, layer[pid], [packages[d]["name"] for d in own_deps(pid) if d in members])
+                for pid in members
+            }
+        )
+    )
 
     for pid in members:
         if layer[pid] not in GPUI_FREE_LAYERS:
