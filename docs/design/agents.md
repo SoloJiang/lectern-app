@@ -144,7 +144,7 @@ pub enum ResumeCommand {
 - 路由：消费方通过 `ServiceSet<dyn SessionSource>` 拿到全部提供者，按 `SessionKey::source` 找 `id()` 相同的那一个调用 `read` / `turns` / `load` / `resume`；找不到（提供者已停用）就当作 `NotFound`，不改调用别的提供者。同一个上游会话可以同时出现在两个来源里（如本地日志和 P3 的 ACP），它们是两个不同的 `SessionKey`；`usage` 按与来源无关的 `UsageKey` 去重，不会重复计数。
 - `welcome`、`project_home`、`worktrees` 在渲染时调 `sessions()`；收到 `SessionsChanged` 后安排重绘。
 - `usage` 收到 `SessionsChanged` 后在 executor 上对变化的会话调 `read`，把记录和新游标在同一个 SQLite 事务里写入，所以重启后从自己的游标继续，不重复也不遗漏。
-- 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即正在运行的一批持有 `BusyGuard`，这一批的结果写入、游标提交之后才释放；批与批之间不持有守卫，剩余的历史不预先排队，等 kernel 发出 `Quiescent` 事件、并且静止持续 10 秒（长于 [kernel 设计](kernel.md)「静止」里内存采样要求的 5 秒连续静止）后才调度下一批；其间出现忙碌就重新计时。所以每一批都计入忙碌，批与批之间留出完整的采样窗口。每批的大小和节奏由 `usage` 的设计文档规定。追加到正在进行的会话的新内容不受这条限制。
+- 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即正在运行的一批持有 `BusyGuard`，这一批的结果写入、游标提交之后才释放；批与批之间不持有守卫，剩余的历史不预先排队，等 kernel 发出 `Quiescent` 事件、并且静止持续 10 秒（长于 [kernel 设计](kernel.md)「静止」里内存采样要求的 5 秒连续静止）后才调度下一批；其间出现忙碌就重新计时。所以每一批都计入忙碌，批与批之间留出完整的采样窗口。每批的大小和节奏由 `usage` 的设计文档规定。活跃会话（`open_turn` 为 true，或 `last_activity` 在 10 分钟之内）不受这条节奏限制：它的历史一批接一批连续读完，每批仍持有 `BusyGuard`，读完之后追加的内容收到 `SessionsChanged` 就读；游标只有一个，所以必须先读完历史才能读到新追加的内容，活跃会话的数量和大小有限（单个会话的完整解析在 1 s 以内），不会让 kernel 长时间忙碌。
 - `review` 在 executor 上调 `turns` 和 `load`，`review_view` 只读 `review` 的快照。
 - `terminal` 调 `resume`，按上面的规则映射成命令。
 - `project_home`、`welcome` 在显示或打开 `tail_pending` 的会话行时调 `complete`。
@@ -572,7 +572,7 @@ pub enum EditOp {
 - 轮次：`event_msg` 的 `task_started`（别名 `turn_started`）到同一 `turn_id` 的 `task_complete`（`turn_complete`）或 `turn_aborted`。prompt 和 agent 说明：`legacy` 模式取 `event_msg` 的 `user_message` / `agent_message`；`paginated` 模式取 `item_completed` 里的 `UserMessage` / `AgentMessage`。`response_item` 里 `role: "user"` 的消息含环境说明和指令文件，不作为 prompt。
 - 工具：两种模式都从 `response_item` 取 `function_call{name, arguments, call_id}`、`custom_tool_call{name, input, call_id}`、`local_shell_call`，结果取 `function_call_output` / `custom_tool_call_output`。`exec_command_begin/end`、`patch_apply_begin` 不写入文件；改动另取 `legacy` 的 `patch_apply_end.changes` 或 `paginated` 的 `item_completed` / `FileChange`。
 - 用量：顶层 `token_usage_record{thread_id, turn_id, response_id, usage}`（每个响应一条），以及 `event_msg` / `token_count` 的 `info.{last_token_usage, total_token_usage}`；两路只用一路，规则见「记录」里的「只用一路用量」。模型取最近一条 `turn_context`；额度取 `token_count` 的 `rate_limits.{primary, secondary}`。
-- 继承前缀：子 agent 与分叉会话先重放来源的历史。有 `subagent_history_start_ordinal` 时，`ordinal` 小于它的行是继承前缀。没有这个字段时（`legacy` 分叉），复制进来的前缀里本身就有来源的 `task_started`，所以按轮次 ID 判断：取来源会话（`forked_from_id` / `parent_thread_id`）文件里全部 `task_started` 的 `turn_id`，包括来源自己继承的轮次（轮次索引不含这些，所以不用轮次索引），多级分叉因此同样成立；这份集合在解析来源时顺带记下，与轮次索引一起缓存。`turn_id` 出现在这份集合里的轮次是继承的，第一条 `turn_id` 不在来源里的 `task_started`（或 `trigger_turn: true` 的 `inter_agent_communication_metadata`）开始自己的部分（ADR 0014）。找不到来源会话时（已删除或不在本机）无法判断边界：全部记录不标 `inherited`，`SessionSummary::inheritance_unknown` 为 true，`usage` 据此提示这个会话的用量可能含继承部分。
+- 继承前缀：子 agent 与分叉会话先重放来源的历史。有 `subagent_history_start_ordinal` 时，`ordinal` 小于它的行是继承前缀。没有这个字段时（`legacy` 分叉），复制进来的前缀里本身就有来源的 `task_started`，所以按轮次 ID 判断：取来源会话（`forked_from_id` / `parent_thread_id`）文件里全部 `task_started` 的 `turn_id`，包括来源自己继承的轮次（轮次索引不含这些，所以不用轮次索引），多级分叉因此同样成立；这份集合在解析来源时顺带记下，与轮次索引一起缓存。`read` 读到这样的分叉、来源在 `SessionList` 里但集合还没有建立时，先在同一次调用里解析来源建立集合，再判断边界，所以结果与发现和补读的顺序无关。`turn_id` 出现在这份集合里的轮次是继承的，第一条 `turn_id` 不在来源里的 `task_started`（或 `trigger_turn: true` 的 `inter_agent_communication_metadata`）开始自己的部分（ADR 0014）。找不到来源会话时（已删除或不在本机）无法判断边界：全部记录不标 `inherited`，`SessionSummary::inheritance_unknown` 为 true，`usage` 据此提示这个会话的用量可能含继承部分；游标里记下边界未定，来源之后出现时，下一次 `read` 返回 `reset` 并按边界重新回放。
 
 兼容策略：适配器按记录形状判断，不按版本号分支；字段缺失时按上表的旧写法再试一次（如 `resets_in_seconds`、没有 `origin`），仍不行就跳过这一行并计数。上游格式变化时，加 fixtures、改适配器、在本节记下来源提交或版本。
 
@@ -605,9 +605,9 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - 回退：最后一行超过 16 MB，或在上限内没找到决定 `open_turn` 的记录时，`last_activity` 取文件修改时间，`open_turn` 为 true（末尾是超长的工具结果时，这一轮通常还没结束），计入 `oversized_lines`。
    - 已经在增量读取的文件（第 5 步）不再读末尾，这两个字段从解析器状态里直接取。
    - `.zst` 没有办法直接读末尾：先查摘要缓存（见「压缩会话的随机读取」），命中就用；没命中时只流式解压开头 256 KB，用开头和文件的 `stat` 生成摘要、标 `tail_pending`，照常发布。补齐末尾字段要整份解压，按需进行：列表发布后只主动补齐修改时间最近的 8 个压缩会话（M 系列上约 3 s，之后不再有后台工作，kernel 能在首帧后 30 秒内静止，[ADR 0017](../adr/0017.md)），其余等视图调 `complete`（会话行显示出来或被打开）时才补齐；同时最多 2 个补齐任务，补齐后按第 4 步再发布，并写入摘要缓存。冷的归档历史不会让应用一直忙碌。
-3. 归位：对去重后的 cwd 先调 `Projects::locate`（只查内存，匹配已打开的项目，取最深的根），匹配到就记为 `Place::Located`，所以已打开的文件夹项目的子目录也归到该项目；没有匹配时再调 `Projects::resolve`（阻塞，在 executor 上），记为 `Place::Resolved`。结果按 cwd 缓存，目录变化或收到 `ProjectEvent`（项目打开、关闭、worktree 变化）时对受影响的 cwd 重新归位；`locate` 返回 `NotLoaded` 时按项目设计的规则处理：路径在非当前 worktree 时调 `Projects::resolve_package`（阻塞，在 executor 上）取这个 worktree 自己的子项目；在当前 worktree 或加载中的文件夹项目时，先记下项目与 worktree，等下一次 `Changed` 再补子项目。cwd 不存在时为 `Missing`。
+3. 归位：先在 executor 上把去重后的 cwd 规范化（`std::fs::canonicalize`，解开 `/tmp` 一类的符号链接），失败（目录已不存在）为 `Missing`；`SessionSummary::cwd` 仍保留日志里的原样路径，规范路径只用于归位。对规范路径先调 `Projects::locate`（只查内存，匹配已打开的项目，取最深的根），匹配到就记为 `Place::Located`，所以已打开的文件夹项目的子目录也归到该项目；没有匹配时再调 `Projects::resolve`（阻塞，在 executor 上），记为 `Place::Resolved`。结果按 cwd 缓存，目录变化或收到 `ProjectEvent`（项目打开、关闭、worktree 变化）时对受影响的 cwd 重新归位；`locate` 返回 `NotLoaded` 时按项目设计的规则处理：路径在非当前 worktree 时调 `Projects::resolve_package`（阻塞，在 executor 上）取这个 worktree 自己的子项目；在当前 worktree 或加载中的文件夹项目时，先记下项目与 worktree，等下一次 `Changed` 再补子项目。cwd 不存在时为 `Missing`。
 4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。
-5. 监听：`fs_watch` 递归监听每个会话目录，事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件从列表移除。处理完再按第 4 步发布。
+5. 监听：`fs_watch` 递归监听每个会话目录；会话根目录（`<CLAUDE_CONFIG_DIR>/projects`、`<CODEX_HOME>/sessions`、`archived_sessions`）还不存在时（第一次使用），监听它最近的已存在的上级目录，根目录出现后改为递归监听它并按第 2 步扫描一次。事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件从列表移除。处理完再按第 4 步发布。
 6. 消费：`usage` 按自己的游标 `read`；`review` 调 `turns` / `load`。
 7. 轮次索引：`read` 解析记录时顺带更新这个会话的轮次索引（同一遍解析，不另读文件）：`from` 等于已有索引的 `cursor` 时在它之后追加，`reset` 时从头重建，其余情况不动索引。所以 `usage` 补读完历史之后，每个会话都已有缓存的索引。内存里按字节 LRU 保留（上限 8 MB）；索引更新后写入 `cache` 的应用级分库，键见 ADR 0026。`turns` 命中缓存时只解析缓存之后追加的部分。
 
@@ -650,7 +650,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 读取进度：`max_bytes` 为 1 时每次调用仍消费一行；下一行比 `max_bytes` 大、但不到 16 MB 时整行返回；超过 16 MB 的行被跳过、计数、游标越过它；任何返回 `at_end == false` 的调用，新游标都大于旧游标（`progress_*`）。
 - 压缩：同一份 Codex fixture 的 `.jsonl` 与 `.jsonl.zst` 记录相同；压缩前取的游标在压缩后继续有效；第一次 `read` / `turns` / `load` 建好解压副本，之后分批 `read` 和 `load` 都不再解码（用计数的解码器检查整个归档只解压一次）；压缩文件身份变化后副本重建；副本合计超过上限时按 LRU 删除、不删正在读取的副本；副本目录不可写时 `load` 结果不变（`zst_*`、`decoded_*`）。
 - 路由：两个来源报告相同的会话 ID 时得到两个不同的 `SessionKey`；`SessionsChanged::source` 与键的 `source` 一致（`source_*`）。
-- 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次；没有 `subagent_history_start_ordinal` 的 `legacy` 分叉按来源文件里的全部轮次 ID 判断边界（含分叉的分叉），找不到来源时 `inheritance_unknown` 为 true；Claude Code 子 agent 文件里带父会话 `sessionId` 和自己 `agentId` 的记录不标 `inherited`，它的轮次和用量完整交出（`inherited_*`）。
+- 继承前缀：Codex 子 agent 与分叉会话、Claude Code 分叉会话的 `inherited` 标记，轮次索引不含继承的轮次；没有 `subagent_history_start_ordinal` 的 `legacy` 分叉按来源文件里的全部轮次 ID 判断边界（含分叉的分叉），先于来源读到分叉时结果相同，找不到来源时 `inheritance_unknown` 为 true、来源之后出现时下一次 `read` 返回 `reset`；Claude Code 子 agent 文件里带父会话 `sessionId` 和自己 `agentId` 的记录不标 `inherited`，它的轮次和用量完整交出（`inherited_*`）。
 - Codex 用量只取一路：第一条 `token_usage_record` 之后的 `CodexTokenCount` 标 `superseded`，之前的不标；没有 `token_usage_record` 的线程都不标；旧版本开始、升级后续接的 fixture 里，切换前后的用量合计等于逐响应的真实合计（`codex_usage_stream_*`）。
 - Claude Code 同一响应的多行 usage 逐步变完整时键相同，带 advisor 的行与不带的行键也相同（`usage_keys_*`）。
 - 恢复命令：`resume` 只给出 `ResumeCommand`；非 UUID 的会话 ID 被 `terminal` 拒绝的规则在 `terminal` 测试，本 crate 测试子 agent 和认不出格式的会话返回 None（`resume_*`）。
@@ -660,8 +660,8 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 去重键：Claude Code 同一响应的多行给出相同的 `UsageKey`；两个 Codex 线程写出相同的 `total_token_usage` 时键不同，同一线程重复写出的相同累计值键相同；键里没有 `SourceId`；`info` 为 null 的 `token_count` 只给出 `RateLimits`（`usage_keys_*`）。
 - 工具分类：分类表每一行一个用例，表外工具名归 `Other` 并计数（`tool_kind_*`）。
 - 异常：不认识的类型、坏行、超长行、末尾不完整的行、认不出格式的文件（`format_*`）。
-- 发现与监听：临时目录加 `fs_watch` 的内存模拟后端，新增、追加、删除、`.jsonl` 与 `.zst` 并存、`sessions/` 与 `archived_sessions/` 并存、`SessionFilter` 隐藏；没有缓存摘要的 `.zst` 先以 `tail_pending` 发布、整份解压之前列表已可用，后台补齐后再发布一次；摘要缓存在适配器版本或摘要格式版本变化后不命中（`discover_*`、`watch_*`）。
-- 归位：模拟的 `Projects`，相同 cwd 只 `resolve` 一次，cwd 不存在为 `Missing`；已打开项目里的 cwd 为 `Located` 并带子项目，非当前 worktree 的 `NotLoaded` 由 `resolve_package` 补齐（`place_*`）。
+- 发现与监听：临时目录加 `fs_watch` 的内存模拟后端，新增、追加、删除、`.jsonl` 与 `.zst` 并存、`sessions/` 与 `archived_sessions/` 并存、`SessionFilter` 隐藏；没有缓存摘要的 `.zst` 先以 `tail_pending` 发布、整份解压之前列表已可用，后台补齐后再发布一次；摘要缓存在适配器版本或摘要格式版本变化后不命中；会话根目录在启动时不存在、之后被创建并写入第一个会话时，会话出现在列表里（`discover_*`、`watch_*`）。
+- 归位：模拟的 `Projects`，相同 cwd 只 `resolve` 一次，cwd 不存在为 `Missing`；已打开项目里的 cwd 为 `Located` 并带子项目，非当前 worktree 的 `NotLoaded` 由 `resolve_package` 补齐；经符号链接记录的 cwd 归到已打开的项目，`cwd` 字段保留原样（`place_*`）。
 - 交互式 shell：`exec_command` 的 `session_id` 出现在 `ToolFinished::exec_session` 上，之后的 `write_stdin` 的 `ToolKind::Execute::exec_session` 与它相同（`tool_kind_*`）。
 - 轮次索引缓存：命中后只解析追加部分；适配器版本变化后不命中（`index_cache_*`）。
 - 插件：`TestKernel` 注入模拟的 `Projects`，激活后提供两个 `SessionSource`，首次发现后发出 `SessionsChanged`（`plugin_*`）。
