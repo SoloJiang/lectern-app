@@ -145,6 +145,7 @@ const ADR_0017_DECISION: &str = "docs/adr/0017.md#决策";
 const ADR_0017_IMPACT: &str = "docs/adr/0017.md#影响";
 const ADR_0018_DECISION: &str = "docs/adr/0018.md#决策";
 const ADR_0018_IMPACT: &str = "docs/adr/0018.md#影响";
+const ADR_0029_DECISION: &str = "docs/adr/0029.md#决策";
 const AGENTS: &str = "docs/design/agents.md#性能";
 const GIT: &str = "docs/design/git.md#性能";
 const CACHE: &str = "docs/design/cache.md#性能";
@@ -239,6 +240,15 @@ pub static BUDGETS: &[Budget] = &[
         State::Planned("project_home"),
         Process,
     ),
+    // After all pausable background work (ADR 0029) has finished; the
+    // `app/idle_monorepo` sample is taken with it paused.
+    top(
+        "app/idle_monorepo_indexed",
+        &[median(Limit::BytesBelow(100 * MB))],
+        ADR_0029_DECISION,
+        State::Planned("#17"),
+        Process,
+    ),
     top(
         "app/open_project",
         &[median(Limit::TimeBelow(ms(100)))],
@@ -267,6 +277,107 @@ pub static BUDGETS: &[Budget] = &[
         State::Planned("worktrees"),
         Process,
     ),
+    // ---- code navigation (ADR 0030) ----
+    top(
+        "app/palette_open",
+        &[median(Limit::TimeBelow(ms(16)))],
+        TECH,
+        State::Planned("#102"),
+        Process,
+    ),
+    top(
+        "app/palette_key_100k",
+        &[median(Limit::TimeAtMost(ms(16)))],
+        TECH,
+        State::Planned("#102"),
+        Process,
+    ),
+    top(
+        "app/palette_key_1m",
+        &[median(Limit::TimeAtMost(ms(50)))],
+        TECH,
+        State::Planned("#102"),
+        Process,
+    ),
+    top(
+        "app/files_open",
+        &[median(Limit::TimeBelow(ms(16)))],
+        TECH,
+        State::Planned("#10"),
+        Process,
+    ),
+    top(
+        "app/files_expand",
+        &[median(Limit::TimeBelow(ms(16)))],
+        TECH,
+        State::Planned("#10"),
+        Process,
+    ),
+    top(
+        "app/nav_back",
+        &[median(Limit::TimeBelow(ms(16)))],
+        TECH,
+        State::Planned("#10"),
+        Process,
+    ),
+    top(
+        "app/goto_candidates",
+        &[median(Limit::TimeAtMost(ms(50)))],
+        TECH,
+        State::Planned("#17"),
+        Process,
+    ),
+    top(
+        "app/goto_single",
+        &[median(Limit::TimeAtMost(ms(100)))],
+        TECH,
+        State::Planned("#17"),
+        Process,
+    ),
+    top(
+        "app/goto_unindexed",
+        &[median(Limit::TimeAtMost(ms(300)))],
+        TECH,
+        State::Planned("#17"),
+        Process,
+    ),
+    top(
+        "app/references_first",
+        &[median(Limit::TimeAtMost(ms(200)))],
+        TECH,
+        State::Planned("#20"),
+        Process,
+    ),
+    top(
+        "app/references_100k",
+        &[median(Limit::TimeAtMost(ms(2000)))],
+        TECH,
+        State::Planned("#20"),
+        Process,
+    ),
+    // From opening the project until the tier is fully indexed, on power.
+    top(
+        "app/index_review_set",
+        &[median(Limit::TimeAtMost(ms(2000)))],
+        TECH,
+        State::Planned("#17"),
+        Process,
+    ),
+    top(
+        "app/index_subproject",
+        &[median(Limit::TimeAtMost(ms(10_000)))],
+        TECH,
+        State::Planned("#17"),
+        Process,
+    ),
+    top(
+        "app/index_100k",
+        &[median(Limit::TimeAtMost(ms(120_000)))],
+        TECH,
+        State::Planned("#17"),
+        Process,
+    ),
+    // ---- end code navigation ----
     top(
         "app/scroll_frames",
         FRAMES,

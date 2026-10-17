@@ -69,8 +69,15 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 | 打开文件到首屏高亮 | < 16 ms（一帧） | mmap 读取；只解析可见区域，整文件 tree-sitter 解析放后台 |
 | 打开一个会话的 Diff | < 50 ms | 改动从会话 JSONL 增量提取并缓存；diff 结果按 blob OID 缓存 |
 | 切换 worktree / 分支 | < 100 ms | 所有缓存以 git blob OID 为键，内容相同即命中 |
+| 打开 ⌘K | < 16 ms（一帧）出现面板和空查询列表 | 空查询只列审阅改动和最近打开的文件；符号名字表在第一次打开时才建（[ADR 0030](../adr/0030.md)，下同） |
+| ⌘K 每次按键到结果更新 | 20 万条路径以内 ≤ 16 ms；更大的仓库 ≤ 50 ms，期间保留上一轮结果 | frizbee 在 executor 上分片匹配，只取前 k 个 |
+| 打开 Files、展开目录 | < 16 ms（目录表已建好；展开的目录子项 2,000 个以内） | 文件列表就绪后在后台建目录表，展开只做区间查找 |
+| 跳转到定义 | 同文件或索引命中：候选列表 ≤ 50 ms，唯一候选的目标文件首屏高亮 ≤ 100 ms；索引尚未覆盖：第一批 ≤ 300 ms，限时搜索 1 s | 符号按 blob 抽取，SQLite B-tree 按名字查找；索引不完整时按固定顺序现场回答 |
+| 查找引用、调用方 | 第一批 ≤ 200 ms；10 万文件的仓库全部结果 ≤ 2 s | 引用表找出候选 blob，位置现场抽取，结果陆续追加 |
+| 后退、前进 | < 16 ms（一帧） | 最近看过的文件保留高亮结果和文本 |
+| 索引覆盖范围（后台，接电源） | 审阅集合 ≤ 2 s；当前子项目 ≤ 10 s；10 万文件的整个仓库 ≤ 2 分钟（估算，实测后校准） | 按优先级分层；审阅集合之外的部分是可暂停的后台工作，在低 QoS 线程上运行（[ADR 0029](../adr/0029.md)） |
 | 安装包 | `.app` ≤ 80 MB（目标 50 MB），`.dmg` ≤ 40 MB | 只带审阅闭环需要的核心；其余语言包、jdtls、平台与 agent 适配从插件市场按需下载（[ADR 0018](../adr/0018.md)） |
-| 空闲内存 | 空窗口 < 60 MB；打开 monorepo < 100 MB | 不内置 LSP、扩展运行时和协同；SQLite 页缓存 8 MB；缓存按字节 LRU；会话流式读取 |
+| 空闲内存 | 空窗口 < 60 MB；打开 monorepo < 100 MB，后台索引暂停时和全部完成后都适用（[ADR 0029](../adr/0029.md)） | 不内置 LSP、扩展运行时和协同；SQLite 页缓存 8 MB；缓存按字节 LRU；会话流式读取 |
 | 滚动与输入 | 稳定 120 fps | 虚拟滚动，按行缓存字形与高亮，渲染线程不做 IO |
 
 这些数字是目标值，需要在 P0 用原型实测后校准。
@@ -155,6 +162,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | 终端渲染 | 自己在 GPUI 里画网格 | [gpui-libghostty](https://docs.rs/crate/gpui-libghostty/latest/source/README.md)（原生 Metal/OpenGL surface） | 自绘能叠加 GPUI 浮层、选区、搜索；原生 surface 是 alpha 且浮层要靠截图回读 |
 | 文本存储 | `gpui-component Editor` | Zed 的 `rope` / `sum_tree` | 直接用 gpui-component Editor 自带的文本缓冲，无需单独实现 |
 | 语法高亮 | `tree-sitter` + 各语言 grammar | `syntect` | 增量解析，能顺带做代码折叠、符号大纲 |
+| 代码导航 | `frizbee` 模糊匹配，`tree-sitter-tags` 抽取符号（[ADR 0030](../adr/0030.md)） | `nucleo-matcher`、`fst` | frizbee 比 nucleo-matcher 快 3–4 倍、没有运行时依赖；按名字查找用 SQLite 的 B-tree 已经够快 |
 | Git 读取 | `gix`（gitoxide） | `git2`、调用 `git` CLI | 纯 Rust，无 libgit2 依赖；复杂写操作可回退 CLI |
 | Diff 算法 | `imara-diff` | `similar` | 速度快，gix 与 Helix 都在用；行内词级差异可用 `similar` 补 |
 | MR 数据 | `octocrab`（GitHub）/ GitLab REST | 调用 `gh` / `glab` CLI | 支持 GitHub 与 GitLab（含自部署版）；按 remote 的域名识别平台，自部署实例由用户配置域名与 API 地址；MVP 调 gh / glab CLI，复用已有登录态 |
@@ -376,7 +384,7 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 
 | 层 | 实现 | 预期可用时机 | 解决的问题 |
 |---|---|---|---|
-| 1. 语法索引 | tree-sitter tags 查询抽取定义与引用，存入本地 SQLite；`notify` 增量更新 | 打开项目后数秒 | 所有语言的类、函数、字段按名跳转 |
+| 1. 语法索引 | tree-sitter tags 查询抽取定义与引用，存入本地 SQLite；`notify` 增量更新 | 审阅集合 2 秒内，当前子项目 10 秒内，其余在后台继续（[ADR 0029](../adr/0029.md)、[ADR 0030](../adr/0030.md)） | 所有语言的类、函数、字段按名跳转 |
 | 2. Java 解析器 | 读 package / import / 内部类，全限定名映射到文件；同名方法按所在类与参数个数消歧 | 与第 1 层同时 | 项目内 Java 跳转基本准确，无需编译 |
 | 3. 依赖源码 | 解析 pom.xml / build.gradle 依赖坐标，到 `~/.m2` 与 Gradle 缓存找 `-sources.jar` 直接解压 | 按需 | 跳进 Spring 等三方库源码 |
 | 4. 精确语义（可选） | 后台启动 jdtls（自动找 JDK 21），或导入 scip-java 生成的 SCIP 索引 | 分钟级 | 重载、泛型、继承链等精确结果 |

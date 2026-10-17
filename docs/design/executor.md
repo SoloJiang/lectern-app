@@ -1,6 +1,6 @@
 # executor 设计
 
-状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)）。
+状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)）。批量线程组（[ADR 0029](../adr/0029.md)）尚未实现，下文标出。
 
 `executor` 运行 UI 线程之外的 IO、解析和 git 操作（[技术调研「不同步阻塞 UI」](tech-research.md)）。它实现 kernel 对执行器的约定（[kernel 设计](kernel.md)「撤销」里的后台任务、`SubmitGate`、`GateSlot`），让插件提交的任务随激活失效而丢弃、任务 panic 时插件进入 `Failed`。
 
@@ -8,6 +8,7 @@
 
 - 做：
   - 固定数量的工作线程和两级优先级的任务队列。
+  - 一组线程数较少的批量线程，只运行 `Priority::Batch` 的任务（可暂停的后台工作，[ADR 0029](../adr/0029.md)；尚未实现）。
   - 提交 future 或闭包，返回可取消的任务句柄；句柄 drop 即取消。
   - 插件经 `SubmitGate` 提交的任务：每次 poll 之前检查闸门，按 kernel 的约定处理 panic。
   - 长时间阻塞的工作（等外部进程、监听文件）用单独的线程，不占工作线程。
@@ -33,20 +34,26 @@ pub struct Executor { /* Arc<Inner> */ }
 pub struct Config {
     /// 工作线程数。默认 `clamp(available_parallelism - 1, 2, 6)`。0 按 1 处理；只有 1 个时不保留 `Interactive` 线程。
     pub workers: usize,
-    /// 每个工作线程和专用线程启动时在该线程上调用，`app` 用它设置 QoS 和线程名之外的属性。
+    /// 批量线程数（尚未实现）。默认 `clamp(available_parallelism / 4, 1, 3)`，0 按 1 处理（ADR 0029）。
+    pub batch_workers: usize,
+    /// 每个工作线程、批量线程和专用线程启动时在该线程上调用，`app` 用它设置 QoS 和线程名之外的属性。
+    /// `app` 经 `platform` 把 `Batch` 线程设为 utility QoS，`Worker` 的设置不变。
     pub on_thread_start: Option<Arc<dyn Fn(ThreadKind) + Send + Sync>>,
 }
 
-impl Default for Config { /* workers 取上面的默认值，on_thread_start 为 None */ }
+impl Default for Config { /* workers、batch_workers 取上面的默认值，on_thread_start 为 None */ }
 
-pub enum ThreadKind { Worker, Dedicated }
+pub enum ThreadKind { Worker, Batch /* 尚未实现 */, Dedicated }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Priority {
     /// 用户正在等的结果：当前审阅会话的 diff、打开的文件。
     Interactive,
-    /// 扫描、索引、刷新。
+    /// 扫描、刷新，以及持有 `BusyGuard` 的索引工作（第 2 层）。
     Background,
+    /// 尚未实现。可暂停的长时间批量工作（建索引的第 3–5 层，ADR 0029）：只在批量线程上运行，
+    /// 不进 `Interactive` / `Background` 的队列，也不占用工作线程。
+    Batch,
 }
 
 impl Executor {
@@ -195,6 +202,7 @@ struct TaskCell<T> {
 ## 数据流与线程
 
 - 工作线程名为 `executor-N`，专用线程名由调用方给出。线程在第一次提交时创建，之后常驻、空闲时阻塞在 `Condvar` 上，不占 CPU。
+- 批量线程（尚未实现）名为 `executor-batch-N`，有自己的队列，在第一次提交 `Batch` 任务时才创建，所以只打开空窗口时不存在。工作线程不取 `Batch` 任务，批量线程也不取另外两级的任务，所以批量工作占满批量线程时，交互和初始化任务仍有全部工作线程可用。闸门、取消、panic 和 shutdown 的规则与工作线程相同；`manual()` 的 `run_until_idle` 在 `Background` 之后运行 `Batch`。
 - executor 本身不做 IO；任务里做什么由提交方决定。UI 线程只提交任务和 drop 句柄，两者都不阻塞。
 - 任务结果交给视图：任务在自己的 future 里把结果排到主线程队列（视图层提供），不经过 executor。
 
