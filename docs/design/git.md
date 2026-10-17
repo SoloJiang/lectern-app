@@ -1,6 +1,6 @@
 # git 设计
 
-状态：已接受，尚未实现。
+状态：实现中。第 1 步（仓库、worktree、引用与 index）已实现（#PR）；第 2–4 步尚未实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -38,7 +38,7 @@
 | `lectern-platform` | 安全读取工作区文件（见「安全读取」） | 架构规则 6 |
 | `lectern-cache` | hunk 的持久缓存 | 架构规则 5；`cache` 实现之前只用进程内的 LRU |
 | `insta`（dev） | 改动集、hunk、展示行的快照 | 工作区统一依赖 |
-| `gix`（dev，额外开写入用的 feature） | 测试里构造仓库（见「测试」） | 只影响测试构建，发布构建的 feature 不变 |
+| `tempfile`（可选，`test-support` 打开；dev） | `TestRepo` 的临时目录（见「测试」） | 已在 Cargo.lock；gix 0.88 在上面的 feature 下已能写对象、引用文件和 index，`TestRepo` 不需要额外的 gix feature，发布构建的 feature 不变 |
 
 不依赖 `executor`：所有函数都是阻塞的普通函数，由调用方放进后台任务；取消用 `&AtomicBool`（与 gix 的中断约定相同）。本 crate 不自己创建线程。
 
@@ -246,7 +246,7 @@ impl Worktree {
     pub fn tracked(&self, limits: &EntryLimits, cancel: &AtomicBool) -> Result<Arc<TrackedPaths>, GitError>;
     /// 从工作区根出发、经 `SafeRoot` 读一个文件的原始字节（不做转换），最多 `max` 字节。
     /// 供 `project` 读清单文件等不需要 git 语义的读取，与本 crate 自己的读取遵守同样的安全规则。
-    pub fn read_file(&self, path: &RepoPath, max: u64) -> Result<WorktreeFile, GitError>;   // File | Symlink | TooLarge | Unavailable
+    pub fn read_file(&self, path: &RepoPath, max: u64) -> Result<WorktreeFile, GitError>;   // 见下文 `WorktreeFile`
     /// 只读 index 文件末尾的校验和，不解析条目、不展开 sparse 目录；与 `TrackedPaths::checksum` 相同。
     /// 供调用方在不重建文件列表的情况下检查缓存是否过期（`project` 对非当前 worktree 的缓存检查）。没有 index 文件时为 None。
     pub fn index_checksum(&self) -> Result<Option<Oid>, GitError>;
@@ -362,6 +362,87 @@ pub enum GitError {
 ```
 
 单个文件读不到不让整个改动集失败，标在这个文件的 `Content::Unavailable` 上。
+
+### 第 1 步补全的类型
+
+上文的签名用到、但没有写出定义的类型，第 1 步按下面实现（原因见「与设计的差异」）：
+
+```rust
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum UnsupportedRepo {
+    Reftable,                                        // extensions.refStorage = reftable
+    FormatVersion(i64),                              // core.repositoryformatversion > 1
+    /// git 不会忽略、本 crate 不认识的扩展，或认识的扩展取了读不了的值（如 objectFormat = sha512）。名字小写。
+    Extension { name: Arc<str>, value: Option<Arc<str>> },
+}
+
+pub struct EntryLimits { pub entries: usize }       // 结果的条目总数（index 自己的条目 + sparse 展开的条目），默认 1 000 000
+
+pub enum WorktreeFile {
+    File { bytes: Vec<u8> },
+    Symlink { target: Vec<u8> },                     // 不跟随
+    TooLarge { size: u64 },
+    NotFound,                                        // 不存在，或中间一级不是目录
+    Unavailable(Unavailable),                        // UnsupportedType（含目录）、PathThroughSymlink、Unreadable
+}
+
+impl TrackedPaths {
+    pub fn is_empty(&self) -> bool;
+    /// 不满足 `RepoPath` 不变量的 index 路径：不在 `iter` 里，也不被打开。
+    pub fn invalid_paths(&self) -> &[Arc<[u8]>];
+}
+
+impl Worktree {
+    pub fn git_dir(&self) -> &Path;                  // `WorktreeInfo::git_dir`
+}
+
+impl HashKind {
+    pub fn byte_len(self) -> usize;                  // 20 或 32
+    pub fn hex_len(self) -> usize;                   // 40 或 64
+}
+
+pub struct GitTime { pub seconds: i64, pub offset: i32 }          // 时区偏移以秒计，东正
+pub struct Signature { pub name: Arc<[u8]>, pub email: Arc<[u8]>, pub time: GitTime }
+
+pub struct CommitInfo {
+    pub id: Oid,
+    pub tree: Oid,
+    pub parents: Arc<[Oid]>,
+    pub summary: Arc<[u8]>,                          // `git log --format=%s`：消息第一段合成一行，原始字节
+    pub author: Signature,
+    pub committed: GitTime,                          // 提交者时间，`log` 按它排序
+}
+
+pub struct BranchInfo {
+    pub name: RefName,                               // refs/heads/…
+    pub commit: Oid,
+    pub upstream: Option<RemoteBranch>,              // branch.<名>.remote + merge
+    /// 不带参数的 `git push` 推到哪里；`git push` 会拒绝时（nothing，或 simple / upstream 没有匹配的上游）为 None。
+    pub push: Option<RemoteBranch>,
+}
+
+pub struct RemoteBranch {
+    pub remote: Arc<str>,                            // 远端名；本地仓库为 `.`；配置直接写 URL 时为 URL 本身
+    pub url: Option<Arc<str>>,                       // 上游取 fetch URL，推送目标取 push URL（已应用 insteadOf / pushInsteadOf）；`.` 为 None
+    pub branch: RefName,                             // 远端上的分支名，如 refs/heads/main
+}
+
+pub struct RemoteInfo { pub name: Arc<str>, pub fetch_url: Option<Arc<str>>, pub push_url: Option<Arc<str>> }
+
+pub struct StashInfo {
+    pub worktree: Oid,                               // stash 提交本身
+    pub base: Oid,                                   // 第一个父提交：stash 时的 HEAD
+    pub index: Oid,                                  // 第二个父提交
+    pub untracked: Option<Oid>,                      // 第三个父提交，`-u` / `-a` 时才有
+}
+
+pub enum ReflogParseError { Oid, Identity, Time }
+
+/// `test-support`：只读仓库自己的配置（不读系统、XDG、`~/.gitconfig`）的 `Repo::discover`，测试结果不受机器配置影响。
+pub mod testing { pub fn discover(path: &Path, ceilings: &[PathBuf]) -> Result<Option<Discovered>, GitError>; pub struct TestRepo; /* … */ }
+```
+
+`Unavailable` 与 `RawIdentity` 按「数据结构」一节的定义在第 1 步加入（`WorktreeFile` 用到前者）。
 
 ## 数据结构
 
@@ -637,12 +718,50 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
    - 前置：`platform` 的安全读取（Linux 与 macOS 实现）已合并。
    - `just test -p lectern-git` 里 `repo_*`、`worktrees_*`、`refs_*`、`reflog_*`、`tracked_*`、`read_file_*` 测试通过，其中有 SHA-256 夹具和 reftable 夹具；`TestRepo` 在 `test-support` feature 下可用，`rg 'Command::new' crates/git/src` 没有结果。
    - `cargo tree -i gix -e normal --depth 1` 只列出 `lectern-git`。
-   - `bench` 的 `git_open` 在预算内。
+   - `bench` 的 `git_open` 在预算内。bench 的设计文档（#7）合并之前不写基准代码，先由 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量（见「与设计的差异」）。
 2. **树之间的改动集、hunk 与展示行**：
    - `diff_trees_*`、`rename_*`、`binary_*`、`truncate_*`、`rows_*`、`inline_*`、`hunk_cache_*` 测试通过，结构化输出有 insta 快照；`numstat_matches_git` 对全部归档夹具通过。
    - `git_diff_50_cold` / `git_diff_50_warm` 在预算内。
 3. **工作区比较**：
    - `worktree_*`、`read_only_*`、`no_external_programs` 测试通过。
-   - `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' crates/git/src` 没有结果：工作区只经 `SafeRoot` 读取。
+   - `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' crates/git/src --glob '!gitdir.rs' --glob '!testing.rs' --glob '!**/tests.rs'` 没有结果：工作区只经 `SafeRoot` 读取。git 目录里的管理文件（`HEAD`、`commondir`、`gitdir`、`locked`、`config`、index 末尾的校验和）都在 `gitdir.rs` 里读；`testing.rs` 和测试代码构造夹具。
    - `git_changes_clean`、`git_changes_50`、`git_refresh_one`、`git_changes_capped` 和内存基准在预算内。
 4. **改动来源接口**：`services` 的设计文档合并后，为本地仓库实现它的改动来源接口（取 diff、加载完整文件；指纹随 #66），按那份文档的验收条件测试。由哪个插件把它注册为服务按 #47 的结论处理，不在本 crate。
+
+## 实际验证
+
+第 1 步，在 Linux（x86_64，4 核 Xeon 2.1 GHz，内核 6.18）上运行。本 crate 不依赖 GPUI，也没有 macOS 专属代码；macOS 上的结果由 macOS CI 给出。
+
+- `just check`、`just test`（整个工作区 399 个测试通过，跳过 2 个 `#[ignore]`）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）、`python3 scripts/check_architecture.py` 全部通过。
+- `just test -p lectern-git`：68 个测试通过，跳过 `perf_smoke_git_open`。按前缀：`repo_*` 21、`worktrees_*` 9、`refs_*` 13、`reflog_*` 4、`tracked_*` 14、`read_file_*` 7。SHA-256 夹具（`TestRepo::sha256`）和 reftable 夹具（`TestRepo::reftable`）都在其中。
+- `cargo tree -i gix -e normal --depth 1` 只列出 `lectern-git`；`cargo tree -p lectern-git -e features -i gix-features` 里没有 `parallel`。`rg 'Command::new' crates/git/src` 没有结果。
+- Cargo.lock 只新增 gix 及其传递依赖，已有依赖的版本没有变化。
+- 测试不依赖 git 命令行和用户配置：测试二进制在 `env -i PATH=/nonexistent`（没有 `PATH` 里的 git，没有 `HOME`、`XDG_CONFIG_HOME`）下运行，68 个测试全部通过。
+- 第 3 步的检查（「验收」第 3 步，排除 `gitdir.rs`、`testing.rs` 和测试）现在就没有结果。
+- 计数钩子：`repo_handles_never_outlive_a_call` 在每次顶层调用后检查当前线程上没有存活的 gix 句柄；`tracked_index_checksum_reads_only_the_trailer` 在 sparse index 夹具上检查 `index_checksum` 不解析条目、不展开目录、不打开句柄，且与 `TrackedPaths::checksum` 相同。
+- ceiling 的语义用真实的 git 2.43 手工对照过（不进入测试）：`GIT_CEILING_DIRECTORIES=<worktree 根>` 时在子目录里找不到仓库，在根目录本身里能找到；`repo_discover_stops_at_ceilings` 断言相同的结果。
+- `perf_smoke_git_open`（`cargo test --release -p lectern-git -- --ignored perf_smoke`，728 个跟踪文件、11 个 worktree、每个 worktree 都有自己的 index，200 次）：`discover` + `worktrees` + `worktree(Main)` + `tracked` 中位数 0.46 ms，p95 0.56–0.70 ms，最慢 0.8 ms；打开一次 gix 句柄中位数 48 µs，最慢 0.18 ms。预算（M 系列 Mac）是 < 15 ms 和 < 1 ms。测量用的是只读仓库自身配置的 `testing::discover`；生产路径另外读系统和用户的配置文件。没有在 macOS 上测量。
+- 没有验证的：`bench` 的 `git_open` 没有写（见「与设计的差异」）；macOS 上没有运行。
+
+## 与设计的差异
+
+第 1 步：
+
+- `bench` 的 `git_open` 没有加入：`crates/bench/AGENTS.md` 要求 bench 的设计文档（#7）合并之后才写基准代码。在那之前用 `#[ignore]` 的 `perf_smoke_git_open` 在 release 下测量，结果见「实际验证」；bench 设计合并后再把 `git_open` 加进 `crates/bench`。
+- 夹具在测试里用 `TestRepo` 构造，没有用归档。容器里的 git 是 2.43，还不支持 reftable（2.45 起），工作区也没有解包 tar 的依赖。reftable 夹具按 `git init --ref-format=reftable` 留下的布局逐项写出：版本 1 加 `extensions.refStorage = reftable`、HEAD 指向 `refs/heads/.invalid`、`refs/heads` 是普通文件、`reftable/tables.list` 列出一张表（表里只有 reftable 文件头，本 crate 不读它）。sparse index 由 gix 写出：先写含目录条目的 index，再读回、重写一次，gix 就加上 `sdir` 扩展，与 `index.sparse = true` 时 git 写出的结构相同。需要和 git 输出对照的归档夹具（`numstat_matches_git` 等）随第 2 步加入。
+- 依赖表里的「`gix`（dev，额外开写入用的 feature）」不需要：gix 0.88 在 ADR 0024 的 feature 下已能写对象、引用文件和 index。`TestRepo` 只多用一个可选的 `tempfile`（`test-support` 打开），已改依赖表。
+- `discover` 的 ceiling：gix 0.88 会检查 ceiling 目录本身，git 不会进入 ceiling（只检查起点本身就是 ceiling 的情况）。gix 找到的仓库所在目录恰好是起点之上的某个 ceiling 时，本 crate 返回 `Ok(None)`，与 git 一致。
+- `format` 检查在 gix 打开仓库之前读公共目录的 `config`：gix 0.88 不拒绝未知的扩展，reftable 仓库它也能打开。版本 0 接受 git 在 v0 下也认的 `noop`、`preciousObjects`、`partialClone`、`worktreeConfig`，忽略不认识的扩展，`objectFormat` 等只属于 v1 的扩展视为不支持（git 在这种情况下拒绝打开）；版本 1 另外接受 `noop-v1`、`objectFormat`（sha1 / sha256）、`compatObjectFormat`、`refStorage = files`、`relativeWorktrees`，其余都是 `Unsupported`。`refStorage = reftable` 在任何版本下都是 `Unsupported(Reftable)`。设计只写了「未知的 extensions.*」，这里列出了具体的规则。
+- 「第 1 步补全的类型」一节列出的类型都是设计没有写定义的：`UnsupportedRepo`、`EntryLimits`、`CommitInfo`、`Signature`、`GitTime`、`BranchInfo`、`RemoteBranch`、`RemoteInfo`、`StashInfo`、`ReflogParseError`、`WorktreeFile`。`Unavailable`、`RawIdentity` 按「数据结构」的定义提前加入，因为 `WorktreeFile` 要用。
+- `WorktreeFile` 多了 `NotFound`：设计写的是 `File | Symlink | TooLarge | Unavailable`，可是 `Unavailable::Missing` 只指对象库里缺对象，「工作区里没有这个文件」没有对应的变体；`project` 要据此把清单当作不存在。目录读出来是 `Unavailable(UnsupportedType)`（`read_file` 没有 index 条目可以区分）。
+- `EntryLimits::entries` 限制结果的条目总数（index 自己的条目加 sparse 展开的条目），不只限制展开的部分：这样 `TrackedPaths` 的大小总有上限。默认 100 万条。`tracked` 命中缓存时也按这次传入的上限检查。
+- `TrackedPaths` 增加 `is_empty` 和 `invalid_paths`：不满足 `RepoPath` 不变量的 index 路径不能进入 `iter`，与 `Totals::invalid_paths` 同样单独列出，不静默丢弃。`Repo::tree_paths` 的返回类型没有地方放它们，直接略过。
+- 冲突路径在 `TrackedPaths` 里只出现一次，取 stage 0，没有时依次取 2（ours）、3（theirs）、1（base）的条目：设计没有规定取哪一个，ours 最接近 HEAD。
+- `index.skipHash = true`（`feature.manyFiles` 会打开）时 git 写的校验和全为 0，以它为缓存键会让文件列表永不过期。这时 `index_checksum` 和 `TrackedPaths::checksum` 都取文件内容（去掉末尾）的哈希，也就是 git 本来会写的那个值；`index_checksum` 因此要读整个文件，仍不解析条目。`tracked` 在解析前后各算一次，不一致（文件在解析期间被替换）时重读，最多 3 次。
+- `Repo::resolve` 跟随符号引用并剥离附注标签，得到最终指向的对象；`commit` 也剥离标签。`worktrees` 和 `Worktree::head` 解析 HEAD 时只跟随引用、不读对象。
+- `BranchInfo::push` 按不带参数的 `git push` 实际推到哪里计算，不按 `@{push}`：`simple` 在三角工作流（推送远端不是 `branch.<名>.remote`，没有时是 `origin`）下推到同名分支，否则要求上游同名；`upstream` 在三角工作流下为 None；`current`、`matching` 推到同名分支；推送远端配置了 `remote.<名>.push` 时按这个 refspec。ADR 0020 要的是「分支会推到哪个远端分支」，`@{push}` 在三角工作流的 `simple` 下会报错。
+- 配置的读取范围：生产路径读系统（`/etc/gitconfig`）、XDG 和 `~/.gitconfig`，只为找到这两个文件允许 gix 读 `HOME` 和 `XDG_CONFIG_HOME`；`GIT_*` 环境变量、`GIT_CONFIG_*` 都不生效，也不为找安装配置运行 git。测试用 `testing::discover`（只读仓库自己的配置），结果不受机器配置影响；这是 `test-support` 下新增的公开函数。
+- git 目录里的管理文件集中在 `gitdir.rs` 里读，第 3 步验收里的 `rg` 检查相应地排除它、`testing.rs` 和测试代码：原来的写法会匹配这些读取，而检查的本意只针对工作区文件。
+- 没有 `gitdir` 或 `HEAD` 文件的 `worktrees/<名>` 目录、名字不是 UTF-8 的目录不列出（git 也跳过前者；后者无法构成 `WorktreeId`）。`Repo::worktree` 对不存在或 prunable 的 worktree 返回 `GitError::Io(NotFound)`，打开时用这个 worktree 的 git 目录打开一次 gix 句柄来验证它，随即释放。
+- `Oid::for_blob` 遇到被 sha1dc 判定为碰撞攻击的内容（git 拒绝存储它，没有正确的 OID）时，返回 SHA-256 blob OID 的前 20 字节作为替代：签名保持不报错，这个值不会等于仓库里的任何 OID，只会让缓存不命中。
+- `HashKind` 增加 `byte_len`、`hex_len`（`TrackedPaths`、reflog 解析按长度取 OID）；`Worktree` 增加 `git_dir()`，与 `WorktreeInfo::git_dir` 相同，供调用方定位 worktree 自己的 git 目录。
