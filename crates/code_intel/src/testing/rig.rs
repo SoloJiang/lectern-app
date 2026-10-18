@@ -72,7 +72,12 @@ impl Rig {
     /// Opens the project with the main worktree active, without running
     /// anything.
     pub fn open(&self) {
-        let event = self.projects.set(self.git.snapshot(1, "main", Vec::new()));
+        self.open_with(Vec::new());
+    }
+
+    /// The same with sub-projects.
+    pub fn open_with(&self, packages: Vec<lectern_services::project::Package>) {
+        let event = self.projects.set(self.git.snapshot(1, "main", packages));
         self.indexer.project_event(&event);
     }
 
@@ -93,6 +98,59 @@ impl Drop for Rig {
     fn drop(&mut self) {
         self.indexer.close_all();
     }
+}
+
+/// Sub-projects at `dirs`.
+pub fn packages(dirs: &[String]) -> Vec<lectern_services::project::Package> {
+    dirs.iter()
+        .map(|d| lectern_services::project::Package {
+            dir: d.as_str().into(),
+            name: d.as_str().into(),
+            manifests: Arc::from(Vec::new()),
+            declared: false,
+            workspace_root: false,
+            parent: None,
+            files: 0,
+        })
+        .collect()
+}
+
+/// A virtual repository for the benchmarks: files `0..n` of the synthetic
+/// layout (`synthetic::path`, `synthetic::oid`) staged in `worktrees` with
+/// no content behind them, the worktree comparison taken as clean, and the
+/// synthetic extraction (`synthetic::extraction`) of every source file
+/// stored in the repository's partition of `cache`. Opening it is a warm
+/// start that reads no file. Returns the number of units stored.
+pub fn virtual_repo(git: &FakeGit, cache: &Cache, n: usize, worktrees: &[&str]) -> usize {
+    use crate::store::{Store, Version};
+    git.assume_unchanged(true);
+    let entries: Vec<(String, lectern_services::project::BlobId)> = (0..n)
+        .map(|i| (super::synthetic::path(i), super::synthetic::oid(i)))
+        .collect();
+    for wt in worktrees {
+        git.stage_oids(wt, entries.iter().cloned());
+    }
+    let store = Store::new(&cache.repo(git.common_dir()));
+    let table = crate::extract::LanguageTable::core();
+    let mut stored = 0;
+    let mut write = store.write();
+    for (i, (path, oid)) in entries.iter().enumerate() {
+        let Some(lang) = table.for_path(path, &crate::NoGrammarPacks) else {
+            continue;
+        };
+        write.add(*oid, &Version::of(lang), &super::synthetic::extraction(i));
+        stored += 1;
+        if write.len() == 64 {
+            let full = std::mem::replace(&mut write, store.write());
+            let written = full.commit();
+            assert!(matches!(written, lectern_cache::Written::Committed), "{written:?}");
+        }
+    }
+    if !write.is_empty() {
+        let written = write.commit();
+        assert!(matches!(written, lectern_cache::Written::Committed), "{written:?}");
+    }
+    stored
 }
 
 /// Every block starts with its size, so `free` and `realloc` can rebuild

@@ -9,9 +9,12 @@ use lectern_bench::{Bench, BenchError, CountingAlloc, Ctx, Measured, Value};
 use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::extract::LanguageTable;
 use lectern_code_intel::map::{BaseMap, IndexedHints};
-use lectern_code_intel::testing::{FakeGit, Rig, synthetic};
+use lectern_code_intel::names::build_table;
+use lectern_code_intel::testing::{FakeGit, Rig, packages, synthetic, virtual_repo};
 use lectern_code_intel::{NoGrammarPacks, SystemClock};
-use lectern_services::code_intel::TierState;
+use lectern_services::code_intel::{
+    Position, Query, QueryKind, TextOrigin, TextRef, TierState,
+};
 
 const SAMPLES: usize = 3;
 
@@ -105,4 +108,141 @@ fn batch_peak(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         "code_intel/batch_peak",
         Value::Bytes(samples),
     )])
+}
+
+/// The ⌘K name table of 100 000 files (≤ 8 MB): its live bytes once built.
+pub const NAMES_100K_BYTES: Bench = Bench {
+    id: "code_intel/names_100k_bytes",
+    run: names_100k_bytes,
+};
+
+fn names_100k_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let dir = tempfile::tempdir_in(ctx.scratch())?;
+    let f = crate::code_intel_names::names(ctx, dir.path())?;
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(SAMPLES, 1) {
+        let before = CountingAlloc::live();
+        let table = build_table(&f.store, &f.map, &f.table, 1, &|| false)
+            .ok_or_else(|| BenchError::new("no table"))?;
+        samples.push(CountingAlloc::live().saturating_sub(before) as u64);
+        eprintln!("code_intel/names_100k_bytes: {} names", table.len());
+        drop(table);
+    }
+    Ok(vec![Measured::new(
+        "code_intel/names_100k_bytes",
+        Value::Bytes(samples),
+    )])
+}
+
+/// This crate's resident bytes with a project indexed: a warm start over
+/// virtual files (index entries and stored units), one jump made (its
+/// grammar compiled) and closed. The map, the hints, tier 5's confirmed
+/// set, the compiled grammar, the project's state; not the file list
+/// (`project`'s) and not SQLite's own memory (the cache's).
+fn resident(
+    ctx: &Ctx,
+    id: &'static str,
+    n: usize,
+    linked: usize,
+) -> Result<Vec<Measured>, BenchError> {
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(SAMPLES, 1) {
+        let git = Arc::new(FakeGit::new());
+        let mut worktrees = vec!["main".to_owned()];
+        for w in 0..linked {
+            let name = format!("w{w}");
+            git.add_worktree(&name);
+            worktrees.push(name);
+        }
+        let dir = tempfile::tempdir_in(ctx.scratch())?;
+        let cache = cache(dir.path());
+        let names: Vec<&str> = worktrees.iter().map(String::as_str).collect();
+        virtual_repo(&git, &cache, n, &names);
+        let path = "packages/pkg000/src/mod00/current.ts";
+        let name = synthetic::shared_name();
+        let mut text = synthetic::source("ts", 999_999, 16 << 10);
+        text.extend_from_slice(
+            format!("\nexport function jump(x: number) {{ return {name}(x); }}\n").as_bytes(),
+        );
+        git.add("main", &[(path, &text)]);
+        git.commit("main");
+        let rig = Rig::new(git, cache, Arc::new(SystemClock));
+        let event = rig.projects.set(rig.git.snapshot(
+            1,
+            "main",
+            packages(&synthetic::package_dirs(n)),
+        ));
+        let before = CountingAlloc::live();
+        rig.indexer.project_event(&event);
+        rig.settle();
+        let at = TextRef {
+            worktree: Some(rig.git.worktree_key("main")),
+            path: path.into(),
+            oid: rig.git.oid(&text),
+            origin: TextOrigin::Worktree,
+        };
+        let call = format!("{name}(x)");
+        let offset = text
+            .windows(call.len())
+            .position(|w| w == call.as_bytes())
+            .ok_or_else(|| BenchError::new("no call"))?;
+        let line = text[..offset].iter().filter(|b| **b == b'\n').count() as u32;
+        let start = text[..offset]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map_or(0, |i| i + 1);
+        let q = rig.indexer.query(Query {
+            project: rig.git.key(),
+            kind: QueryKind::Definition {
+                at,
+                position: Position {
+                    line,
+                    column: (offset - start) as u32,
+                },
+            },
+        });
+        rig.settle();
+        let r = rig
+            .indexer
+            .results(q)
+            .ok_or_else(|| BenchError::new("no results"))?;
+        if r.candidates.is_empty() {
+            return Err(BenchError::new(format!("no candidates: {:?}", r.state)));
+        }
+        drop(r);
+        rig.indexer.close(q);
+        rig.settle();
+        let coverage = rig
+            .indexer
+            .coverage(&rig.git.key())
+            .ok_or_else(|| BenchError::new("the project is not open"))?;
+        let tiers = [coverage.subproject, coverage.worktree, coverage.other_worktrees];
+        if tiers != [TierState::Done; 3] {
+            return Err(BenchError::new(format!("not indexed: {coverage:?}")));
+        }
+        samples.push(CountingAlloc::live().saturating_sub(before) as u64);
+        drop(rig);
+    }
+    Ok(vec![Measured::new(id, Value::Bytes(samples))])
+}
+
+/// The cloudprint shape: 728 tracked files, 11 worktrees (≤ 4 MB).
+pub const RESIDENT_CLOUDPRINT: Bench = Bench {
+    id: "plugin/code-intel/resident_cloudprint",
+    run: resident_cloudprint,
+};
+
+fn resident_cloudprint(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    resident(ctx, "plugin/code-intel/resident_cloudprint", 728, 10)
+}
+
+/// 100 000 files (≤ 10 MB).
+pub const RESIDENT_100K: Bench = Bench {
+    id: "plugin/code-intel/resident_100k",
+    run: resident_100k,
+};
+
+fn resident_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = ctx.scale(100_000, 3_000);
+    resident(ctx, "plugin/code-intel/resident_100k", n, 0)
 }

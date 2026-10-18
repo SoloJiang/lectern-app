@@ -1168,6 +1168,72 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // The partition's size after the units of 100 000 synthetic files.
     share("code_intel/disk_100k", RECORD, CODE_INTEL, ACTIVE, Time),
+    // A jump the index answers: 100 000 indexed files, a 64 KiB current
+    // text, this crate's part of the 50 ms candidates budget.
+    share(
+        "code_intel/goto_indexed",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // The time-boxed search of unindexed hits stops one second after the
+    // query; the last batch's event within 20 ms of that.
+    share(
+        "code_intel/search_stop",
+        &[max(Limit::TimeAtMost(ms(1020)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // References of a function 300 of 100 000 indexed files use: all of
+    // them, and the first batch.
+    share(
+        "code_intel/references_100k/all",
+        &[median(Limit::TimeAtMost(ms(2000)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/references_100k/first",
+        &[median(Limit::TimeAtMost(ms(200)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // The ⌘K name table of 100 000 files (synthetic, about 320 000 names):
+    // its build and its live bytes.
+    share(
+        "code_intel/names_100k",
+        &[median(Limit::TimeAtMost(ms(1000)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/names_100k_bytes",
+        &[median(Limit::BytesAtMost(8 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
+    // This crate's live bytes with a project indexed (counting allocator,
+    // tree-sitter's allocations routed through it), not the file list.
+    share(
+        "plugin/code-intel/resident_cloudprint",
+        &[median(Limit::BytesAtMost(4 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
+    share(
+        "plugin/code-intel/resident_100k",
+        &[median(Limit::BytesAtMost(10 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
     // FakeBackend and the manual driver, without backend latency.
     share(
         "fs_watch/classify_burst",
