@@ -695,6 +695,17 @@ impl Inner {
 
     fn coverage(&self, key: &ProjectKey) -> Option<Coverage> {
         let project = self.project(key)?;
+        if matches!(key, ProjectKey::Folder { .. }) {
+            // Folder projects are not indexed yet (step 3): every tier is
+            // `Pending`, never `Done`, so callers answer from a search.
+            return Some(Coverage {
+                generation: lock(&project.state).gens.map(),
+                focus: TierState::Pending,
+                subproject: TierState::Pending,
+                worktree: TierState::Pending,
+                other_worktrees: TierState::Pending,
+            });
+        }
         let eviction = project.store.evictions();
         let st = lock(&project.state);
         let focus = if st.focused.queue.iter().all(|q| q.is_empty())

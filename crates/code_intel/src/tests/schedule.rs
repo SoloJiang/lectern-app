@@ -442,6 +442,52 @@ fn schedule_large_files_take_turns() {
     });
 }
 
+#[test]
+fn schedule_folder_project_reports_unindexed() {
+    use lectern_services::project::{
+        ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
+    };
+
+    let h = Harness::new();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical");
+    std::fs::write(root.join("a.ts"), ts("in_a_folder")).expect("write");
+    let mut files = FileList::builder();
+    files.push("a.ts", FileKind::File);
+    let key = ProjectKey::Folder {
+        root: Arc::from(root.as_path()),
+    };
+    let event = h.projects.set(ProjectSnapshot {
+        key: key.clone(),
+        generation: 1,
+        name: "folder".into(),
+        worktrees: Arc::from(Vec::new()),
+        active: Some(ActiveTree {
+            root: Arc::from(root.as_path()),
+            worktree: None,
+            opened_at: "".into(),
+            files: Scan::Ready(Arc::new(files.build())),
+            packages: Scan::Ready(Arc::from(Vec::new())),
+        }),
+    });
+    h.indexer.project_event(&event);
+    h.settle();
+    // Nothing is indexed (step 3 indexes git projects only): no tier may
+    // read as complete, so callers search instead of trusting the index.
+    let c = h.indexer.coverage(&key).expect("open");
+    assert_eq!(
+        [c.focus, c.subproject, c.worktree, c.other_worktrees],
+        [TierState::Pending; 4]
+    );
+    assert_eq!(h.extractions(), 0);
+    let map = h.indexer.map(&key).expect("open");
+    assert!(
+        map.effective("a.ts").is_none(),
+        "no path has an indexed OID"
+    );
+    assert!(!h.indexer.head_clean(&key, "a.ts"));
+}
+
 /// `code_intel.tags` with a 24 KiB quota: indexing overflows it.
 static TINY: lectern_cache::Tables = lectern_cache::Tables {
     namespace: crate::store::NAMESPACE,

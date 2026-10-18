@@ -1856,11 +1856,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - `just check`、`just test`（整个工作区 1240 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。Cargo.lock 只有本 crate 的依赖列表变化，没有新增 crate。
 - `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 和 `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 都没有结果。
-- `just test -p lectern-code-intel`：138 个测试通过，第 3 步新增 49 个。按前缀：
+- `just test -p lectern-code-intel`：139 个测试通过，第 3 步新增 50 个。按前缀：
   - `map_*` 7：从带 OID 的文件列表建映射（只含普通和可执行文件、受支持的语言）；前 8 字节相同的 OID 分得开；覆盖项遮住 index 条目，改掉的旧 OID、删除的文件、超过上限的文件不出现，未跟踪文件能查到；与 index 相同的覆盖项被丢掉；同一份字节在 `.java` 和 `.js` 下按语言区分；提示只匹配自己的 OID 前缀和戳记，换文件列表时按路径沿用；10 万文件的映射 ≤ 3 MB。
   - `overlay_*` 3：表驱动的 12 种工作区情况（干净、未暂存的修改、暂存后未再改、`StagedOnly`、未暂存的删除、未跟踪、被忽略的未跟踪、语言不受支持的未跟踪、未暂存的重命名、`Filtered`、超过 1 MiB、CRLF 检出），每种情况之后覆盖项与磁盘上的实际内容一致；工作区比较失败时保留上一份覆盖部分；生产的 `LecternGit` 在 `TestRepo` 仓库上与 `FakeGit` 给出相同的比较结果、HEAD、index 校验和、规范 OID、index 条目和 blob。
   - `derived_*` 10：文件列表、子项目、HEAD、index、覆盖部分、忽略规则（含 `untracked_capped`）、语言包、淘汰、写入各一组，用计数钩子检查只有依赖这个输入的派生状态被重算；`HeadDiff` 比较完成之前 `head_clean` 为 false、提交之后为 true；核对任务计算期间输入变化时这次比较的结果被丢弃、按新输入再比较一次。
-  - `schedule_*` 12：层的先后（第 1 层、第 2 层、当前子项目、其余文件按路径、其他 worktree）；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，批量层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停在批次边界生效（`[64, 5]` 两批之后停下，第 70 个文件在登记时被放弃，恢复后先做它）；暂停开关先于第一批打开时不抽取；一次 1 MiB 的抽取进行中打开暂停，这次抽取返回 `Cancelled`、没有写入、提示不变，恢复后它第一个被重新抽取（`schedule_pause_abandons_in_flight`）；批次在 64 个文件（`[64, 64, 22]`）、2 MiB（`[6, 4]`）、50 ms（`[3, 3, 3, 1]`）处结束，一个 200 ms 的文件一批（`[1, 2]`）；切换 worktree 后游标重建、只抽取缓存里没有的；同一 OID 在两个路径上只抽取一次；`schedule_key_from_bytes_read`；第 5 层只抽取缓存里没有、且工作区内容等于 index 的文件；大文件轮流抽取；配额 24 KiB 时 80 个文件各抽取一次、遍历结束；一次抽取进行中切换会话，旧会话的批次不改动新会话的计数。
+  - `schedule_*` 13：层的先后（第 1 层、第 2 层、当前子项目、其余文件按路径、其他 worktree）；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，批量层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停在批次边界生效（`[64, 5]` 两批之后停下，第 70 个文件在登记时被放弃，恢复后先做它）；暂停开关先于第一批打开时不抽取；一次 1 MiB 的抽取进行中打开暂停，这次抽取返回 `Cancelled`、没有写入、提示不变，恢复后它第一个被重新抽取（`schedule_pause_abandons_in_flight`）；批次在 64 个文件（`[64, 64, 22]`）、2 MiB（`[6, 4]`）、50 ms（`[3, 3, 3, 1]`）处结束，一个 200 ms 的文件一批（`[1, 2]`）；切换 worktree 后游标重建、只抽取缓存里没有的；同一 OID 在两个路径上只抽取一次；`schedule_key_from_bytes_read`；第 5 层只抽取缓存里没有、且工作区内容等于 index 的文件；大文件轮流抽取；配额 24 KiB 时 80 个文件各抽取一次、遍历结束；一次抽取进行中切换会话，旧会话的批次不改动新会话的计数；文件夹项目的各层都是 `Pending`、没有抽取、映射为空。
   - `grammar_*` 6：安装、更新（在途的版本 1 抽取被取消，版本 1 的结果没有写入）、回滚（不重新抽取）、撤销（离开映射和 `coverage`，在途抽取被取消）、多个通知并成一轮（过时的代数被丢弃）、租约（撤销时有一个在途抽取和一个 `ParsedFile`，两者都结束之后模块恰好卸载一次）。
   - `battery_*` 3、`incremental_*` 6、`warm_*` 2：见「测试」；`incremental_kernel_busy_until_the_overlay_is_updated` 检查从后端交出事件到覆盖部分更新完之前 kernel 不静止；热启动 40 个文件 7 种语言时只有 7 次存在检查、没有抽取。
 - 基准（`just bench --measure code_intel/`，release，MB 为 2^20 字节）：
@@ -1876,7 +1876,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
   `batch_peak` 的组成：去掉接近 1 MiB 的文件之后峰值是 454 KB，所以几乎全部来自一个 900 KiB 的 TS 文件的语法树和遍历（约 31 MiB），超过设计按「≤ 10 MiB」的估算；预算 40 MB 不变，大文件因此同时只在一个批量任务里抽取（「性能」已改）。tree-sitter 的分配经 `testing::route_tree_sitter_allocations` 计入；基准用一个批量任务，工作区比较是 `FakeGit` 的。
   `disk_100k`：9 万个源码单元声明 279.7 MB，分库文件 298 MiB，写入过程中淘汰 80 次，4 个线程 70 s；结论写在「存储表」的「规模」一条。
-- 没有验证的：M 系列上的各项基准（由 macOS CI 判定）；`PowerSource` 的真实实现（`platform` 还没有电源接口，测试只用 `testing::FakePower`）；真实的 fs_watch 后端（测试用 `FakeBackend`）；几个批量线程同时运行（测试用 `Executor::manual()`，大文件轮流抽取由 `LargeSlot` 的单元测试检查）；文件夹项目（第 3 步不建索引）。
+- 没有验证的：M 系列上的各项基准（由 macOS CI 判定）；`PowerSource` 的真实实现（`platform` 还没有电源接口，测试只用 `testing::FakePower`）；真实的 fs_watch 后端（测试用 `FakeBackend`）；几个批量线程同时运行（测试用 `Executor::manual()`，大文件轮流抽取由 `LargeSlot` 的单元测试检查）；文件夹项目的建索引（第 3 步不实现，`coverage` 报告 `Pending`）。
 
 ## 与设计的差异
 
@@ -2024,6 +2024,6 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 抽取返回 `Unsupported` 的语言在本次运行中不再进入任何一层（「状态与异常」的「这种语言在本次运行中停用」）。
 - 语言包代数是本 crate 自己的计数（语言表每变化一次加一），不是 `GrammarSource::generation`：后者在没有改变语言表的通知（重复的安装）上也会变化。一轮开始读语言包的当前状态时清掉「再来一轮」的标记，所以之前到达的通知并进这一轮。
 - `ProjectEvent::Changed` 的 `files` 同时让下一次核对读 index 校验和；`worktrees` 和 `RepoBatch` 里其他 worktree 的 index 变化让第 5 层重新开始。`RepoBatch` 的 `refs` 和当前 worktree 的 `head` / `index` 与 `WorktreeBatch` 的 `meta` 同样处理（「增量更新」只列了 `WorktreeBatch`）。fs_watch 的监听失败（`Health::Failed`）时，订阅在 executor 上 drop（不在 fs_watch 线程的回调里），下一次 `ProjectEvent` 重新打开根目录并订阅。
-- 文件夹项目在第 3 步不建索引：它的 OID 要读每个文件才能算出，与第 4 步按需读取、核对 OID 的代码（`read_verify_*`）是同一段；第 3 步的映射、覆盖部分和各层只处理 git 项目。文件夹项目的 `coverage` 各层为 `Done`。
+- 文件夹项目在第 3 步不建索引：它的 OID 要读每个文件才能算出，与第 4 步按需读取、核对 OID 的代码（`read_verify_*`）是同一段；第 3 步的映射、覆盖部分和各层只处理 git 项目。文件夹项目的 `coverage` 各层都是 `Pending`（「未入索引」），不会是 `Done`：`TierState` 没有「不适用」，`Pending` 已经表示「还没有入索引」，所以不扩展 `services` 的类型。调用方据此不信任索引，按「跳转到定义」的顺序现场回答、走限时搜索；映射为空，所以没有路径的 `indexed` 提示匹配，`head_clean` 为 false。第 5 步的探针等 `Done` 时，文件夹项目会一直等不到，要等文件夹项目建索引实现之后才能用它测量（`schedule_folder_project_reports_unindexed`）。
 - 测试：`derived_*` 里依赖查询的部分（限时搜索不跳过有效 OID 已变的文件、淘汰之后经限时搜索找到定义、候选的子项目层、名字表的重建）随第 4 步的查询和名字表加入；第 3 步检查它们依赖的输入代数和派生状态（提示、游标、第 3 层的范围、写入代数）。分库被删除重建时 cache 让淘汰代数加一，与单元被删除走同一条路径，由 `derived_eviction_*` 覆盖。`battery_*` 里「一次 `query`」用 `Indexer::demand`（`query` 属于第 4 步）。
 - `testing` 新增 `FakeGit`、`FakeProjects`、`FakePower`、`host()`（只交出 `PluginHandle` 的插件）、`Rig`（bench 用的完整建索引环境）、`synthetic`（合成仓库：语言比例、路径、8 KiB 的源码）和 `route_tree_sitter_allocations`（让 tree-sitter 的 C 分配经过 Rust 的全局分配器，`code_intel/batch_peak` 才能计入语法树）。`Indexer::set_extractor` 让测试计数和控制抽取。依赖新增 `lectern-kernel`、`lectern-git`、`lectern-fs-watch`、`lectern-platform`，`lectern-executor` 改为普通依赖；都是已有的 crate，Cargo.lock 没有新增 crate。
