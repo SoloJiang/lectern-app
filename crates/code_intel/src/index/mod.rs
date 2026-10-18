@@ -385,8 +385,9 @@ impl Indexer {
     #[cfg(test)]
     pub(crate) fn compared_current(&self, project: &ProjectKey) -> bool {
         self.inner.project(project).is_some_and(|p| {
+            let grammar = self.inner.grammar();
             let st = lock(&p.state);
-            st.compare_for == Some(st.gens.compare_deps())
+            st.compare_for == Some(st.gens.compare_deps(grammar))
         })
     }
 
@@ -674,20 +675,23 @@ impl Inner {
                     (None, _) => {}
                 }
             }
-            let projects: Vec<Arc<Project>> = lock(&self.open).clone();
-            let new_generation = {
+            // The table and its generation change while `open` is held
+            // (`open`, then `langs`, as in `touch`): a project opened
+            // concurrently is either in `projects` or starts with the new
+            // table.
+            let projects: Vec<Arc<Project>> = {
+                let open = lock(&self.open);
                 let mut langs = lock(&self.langs);
                 langs.handled = langs.handled.max(generation).max(handled);
                 if !changed.is_empty() {
                     langs.table = table;
                     langs.generation += 1;
                 }
-                langs.generation
+                open.clone()
             };
             if !changed.is_empty() {
                 for p in &projects {
-                    let mut st = lock(&p.state);
-                    st.gens.grammar = new_generation;
+                    let st = lock(&p.state);
                     // In-flight extractions of a changed language give up;
                     // their results would be dropped before the write anyway.
                     for ((_, lang), flag) in &st.in_flight {
@@ -729,6 +733,7 @@ impl Inner {
             });
         }
         let eviction = project.store.evictions();
+        let grammar = self.grammar();
         let st = lock(&project.state);
         let focus = if st.focused.queue.iter().all(|q| q.is_empty())
             && st.focused.running.iter().all(|r| *r == 0)
@@ -739,7 +744,7 @@ impl Inner {
         };
         // The walks are of the current map (built from the current file
         // list and grammar) with the current scope.
-        let current = st.base_for == Some((st.gens.files, st.gens.grammar))
+        let current = st.base_for == Some((st.gens.files, grammar))
             && st.batch.cursor.as_ref().is_some_and(|c| {
                 c.deps == st.cursor_deps(eviction) && c.scope == batch::subproject(&st)
             });

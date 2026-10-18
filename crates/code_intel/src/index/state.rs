@@ -48,8 +48,9 @@ pub(crate) struct Gens {
     pub worktree: u64,
     /// Worktree comparisons requested (directory events, rescans).
     pub compare: u64,
-    /// The language table.
-    pub grammar: u64,
+    // The language table's generation is shared by every project and read
+    // where it is compared (`Inner::grammar`): a per-project copy can lag
+    // behind it (a project opened during a grammar round).
     /// Batches of units this crate committed.
     pub writes: u64,
     /// The focus (the tier-3 anchor and the tiers 1 and 2).
@@ -57,14 +58,15 @@ pub(crate) struct Gens {
 }
 
 impl Gens {
-    /// What the worktree comparison depends on.
-    pub fn compare_deps(&self) -> [u64; 6] {
+    /// What the worktree comparison depends on, with the language table's
+    /// generation `grammar`.
+    pub fn compare_deps(&self, grammar: u64) -> [u64; 6] {
         [
             self.head,
             self.index,
             self.files,
             self.rules,
-            self.grammar,
+            grammar,
             self.compare,
         ]
     }
@@ -340,17 +342,20 @@ impl State {
             root: None,
             root_tried: false,
             hash: HashKind::Sha1,
-            gens: Gens {
-                grammar,
-                ..Gens::default()
-            },
+            gens: Gens::default(),
             seen: Seen::default(),
             check_head: true,
             check_index: true,
             dirty: BTreeSet::new(),
             dirty_dirs: BTreeSet::new(),
             probe: BTreeSet::new(),
-            map: LiveMap::new(table),
+            map: LiveMap {
+                provenance: Provenance {
+                    grammar,
+                    ..Provenance::default()
+                },
+                ..LiveMap::new(table)
+            },
             base_for: None,
             compare_for: None,
             head_diff: Arc::new(HeadDiff::default()),

@@ -29,15 +29,19 @@ use crate::util::log;
 /// should: `reconcile_settles_*` bound the passes per input change).
 const MAX_PASSES: usize = 16;
 
-/// Whether a step of the reconcile has input left to consume.
-fn pending(st: &State) -> bool {
+/// Whether a step of the reconcile has input left to consume, with the
+/// language table's generation `grammar`.
+fn pending(st: &State, grammar: u64) -> bool {
     let files = st.seen.files.is_some();
     let base = st.base_for.is_some();
     let git = st.tree.is_some();
     (git && files && st.root.is_none() && !st.root_tried)
         || (git && (st.check_head || st.check_index))
-        || (files && st.base_for != Some((st.gens.files, st.gens.grammar)))
-        || (git && base && st.root.is_some() && st.compare_for != Some(st.gens.compare_deps()))
+        || (files && st.base_for != Some((st.gens.files, grammar)))
+        || (git
+            && base
+            && st.root.is_some()
+            && st.compare_for != Some(st.gens.compare_deps(grammar)))
         || (base
             && st.root.is_some()
             && !(st.dirty.is_empty() && st.dirty_dirs.is_empty() && st.probe.is_empty()))
@@ -99,11 +103,18 @@ impl Inner {
             held.extend(std::mem::take(&mut lock(&project.state).held));
             // Each step consumes its input (a generation it is out of date
             // with, or a set of paths); a pass is repeated only while some
-            // input is left, and no step produces input for itself: a
-            // comparison's paths are read, never compared again.
+            // input is left and the pass changed something, and no step
+            // produces input for itself: a comparison's paths are read,
+            // never compared again. Input a pass could not consume (its
+            // result was stale) waits for the request of whoever changed
+            // it.
             for pass in 1.. {
                 bump(&self.stats.reconcile_passes, 1);
-                if !self.reconcile_once(&project) || !pending(&lock(&project.state)) {
+                let Some(progress) = self.reconcile_once(&project) else {
+                    break;
+                };
+                let grammar = self.grammar();
+                if !progress || !pending(&lock(&project.state), grammar) {
                     break;
                 }
                 if pass == MAX_PASSES {
@@ -129,18 +140,23 @@ impl Inner {
         self.kick_batch();
     }
 
-    /// One pass over the steps, in dependency order. False when the
-    /// project is gone.
-    fn reconcile_once(self: &Arc<Self>, project: &Arc<Project>) -> bool {
-        let Some(session) = self.sync_snapshot(project) else {
-            return false;
-        };
-        self.open_root(project, session);
-        self.check_head_index(project, session);
-        self.rebuild_base(project, session);
-        self.compare(project, session);
-        self.reread(project, session);
-        true
+    /// One pass over the steps, in dependency order: whether some step
+    /// installed or consumed something. None when the project is gone.
+    fn reconcile_once(self: &Arc<Self>, project: &Arc<Project>) -> Option<bool> {
+        let session = self.sync_snapshot(project)?;
+        let mut progress = self.open_root(project, session);
+        progress |= self.check_head_index(project, session);
+        progress |= self.rebuild_base(project, session);
+        progress |= self.compare(project, session);
+        progress |= self.reread(project, session);
+        Some(progress)
+    }
+
+    /// The language table's generation. Shared by every project, so it is
+    /// read here, never copied into a project (the copy could lag behind).
+    /// Never called with a project's state locked.
+    pub(crate) fn grammar(&self) -> u64 {
+        lock(&self.langs).generation
     }
 
     /// Takes the project's snapshot: a new active worktree starts a new
@@ -295,9 +311,10 @@ impl Inner {
 
     /// The base map against the file list and the language table.
     fn rebuild_base(&self, project: &Arc<Project>, session: u64) -> bool {
+        let current = self.grammar();
         let files = {
             let st = lock(&project.state);
-            if st.base_for == Some((st.gens.files, st.gens.grammar)) {
+            if st.base_for == Some((st.gens.files, current)) {
                 return false;
             }
             let Some(files) = st.seen.files.clone() else {
@@ -314,8 +331,10 @@ impl Inner {
         let deps = (files.0, grammar);
         bump(&self.stats.base_builds, 1);
         let base = Arc::new(BaseMap::build(files.1, &table, &*self.packs));
+        // A newer table: the round that changed it requested a reconcile.
+        let current = self.grammar();
         let mut st = lock(&project.state);
-        if st.session != session || (st.gens.files, st.gens.grammar) != deps {
+        if st.session != session || (st.gens.files, current) != deps {
             return false;
         }
         let hints = IndexedHints::carried(&st.map.hints, st.map.base.files(), base.files());
@@ -337,9 +356,10 @@ impl Inner {
 
     /// The worktree comparison: `HeadDiff`, and which paths to read again.
     fn compare(&self, project: &Arc<Project>, session: u64) -> bool {
+        let grammar = self.grammar();
         let (deps, tree, cancel) = {
             let st = lock(&project.state);
-            let deps = st.gens.compare_deps();
+            let deps = st.gens.compare_deps(grammar);
             if st.compare_for == Some(deps) || st.base_for.is_none() || st.root.is_none() {
                 return false;
             }
@@ -350,8 +370,9 @@ impl Inner {
         };
         bump(&self.stats.compares, 1);
         let result = self.git.changed_paths(&tree, &cancel);
+        let grammar = self.grammar();
         let mut st = lock(&project.state);
-        if st.session != session || st.gens.compare_deps() != deps {
+        if st.session != session || st.gens.compare_deps(grammar) != deps {
             return false;
         }
         st.compare_for = Some(deps);
@@ -429,7 +450,8 @@ impl Inner {
                 root,
                 st.tree.clone(),
                 st.map.base.clone(),
-                (st.gens.files, st.gens.grammar),
+                // Read against this base map: installed only on it.
+                (st.map.provenance.files, st.map.provenance.grammar),
                 st.hash,
             )
         };
@@ -455,7 +477,12 @@ impl Inner {
         }
         bump(&self.stats.rereads, read);
         let mut st = lock(&project.state);
-        if st.session != session || (st.gens.files, st.gens.grammar) != deps {
+        if st.session != session {
+            return false;
+        }
+        if (st.map.provenance.files, st.map.provenance.grammar) != deps {
+            // A new base map meanwhile (its rebuild is progress): read again
+            // against it.
             st.dirty.extend(paths);
             st.probe.extend(probe);
             return true;

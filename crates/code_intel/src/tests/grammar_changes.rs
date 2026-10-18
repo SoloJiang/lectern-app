@@ -332,3 +332,33 @@ fn grammar_updated_then_opened_before_the_rebuild() {
     assert!(h.hinted("src/Tracked.jpack"));
     assert_eq!(h.coverage().focus, TierState::Done);
 }
+
+/// A project opened while a grammar round runs: it read the table's
+/// generation before the round bumped it, and the round did not see it
+/// yet. Every comparison reads the shared generation, so the base map is
+/// built once against the newest table; the reconcile does not rebuild it
+/// pass after pass.
+#[test]
+fn grammar_round_during_an_open_does_not_stall_the_project() {
+    let h = Harness::new();
+    let files = super::warm::fill(&h, 10);
+    // `touch` makes the project with the current generation…
+    h.publish("main", Vec::new());
+    // …and the round's bump happens before its reconcile runs.
+    lock(&h.indexer.inner().langs).generation += 1;
+    h.settle();
+    assert_eq!(h.map().base.len(), files.len(), "the base map is installed");
+    assert!(h.stats().base_builds <= 2, "{:?}", h.stats());
+    assert_eq!(
+        [h.coverage().subproject, h.coverage().worktree],
+        [TierState::Done; 2]
+    );
+    // An event costs no further base build.
+    let builds = h.stats().base_builds;
+    let passes = h.stats().reconcile_passes;
+    h.git.write("main", &files[0].0, &ts("edited"));
+    h.emit(&[(&files[0].0, super::support::CHANGED)]);
+    h.settle();
+    assert_eq!(h.stats().base_builds, builds);
+    assert!(h.stats().reconcile_passes - passes <= 3, "{:?}", h.stats());
+}
