@@ -38,7 +38,12 @@ fn schedule_tiers_in_order_with_their_guards() {
     h.git.add_worktree("feature");
     let only_there = ts("only_in_feature");
     h.git.add("feature", &[("feature.ts", &only_there)]);
-    let oid_of = |p: &str| all.iter().find(|(q, _)| q == p).map(|(_, o)| *o).expect("a path");
+    let oid_of = |p: &str| {
+        all.iter()
+            .find(|(q, _)| q == p)
+            .map(|(_, o)| *o)
+            .expect("a path")
+    };
     // The kernel's state during each extraction.
     let kernel = h.host.kernel();
     let during: Arc<Mutex<Vec<(BlobId, bool, usize)>>> = Arc::default();
@@ -62,8 +67,11 @@ fn schedule_tiers_in_order_with_their_guards() {
             origin: TextOrigin::Worktree,
         })),
     );
-    h.indexer
-        .set_focus(&h.key(), Some(&wt), Focus::Review(Arc::from(vec!["lib/l1.ts".into()])));
+    h.indexer.set_focus(
+        &h.key(),
+        Some(&wt),
+        Focus::Review(Arc::from(vec!["lib/l1.ts".into()])),
+    );
     h.settle();
     // Tier 1, tier 2, tier 3 (the current text's sub-project), tier 4 in
     // path order, tier 5.
@@ -80,9 +88,18 @@ fn schedule_tiers_in_order_with_their_guards() {
     // Tiers 1 and 2 hold a BusyGuard on Interactive / Background; the batch
     // tiers a BackgroundGuard on Batch.
     let log = h.indexer.inner().host.log.lock().unwrap().clone();
-    assert!(log.contains(&("tier1", Priority::Interactive, Guard::Busy)), "{log:?}");
-    assert!(log.contains(&("tier2", Priority::Background, Guard::Busy)), "{log:?}");
-    assert!(log.contains(&("batch", Priority::Batch, Guard::Background)), "{log:?}");
+    assert!(
+        log.contains(&("tier1", Priority::Interactive, Guard::Busy)),
+        "{log:?}"
+    );
+    assert!(
+        log.contains(&("tier2", Priority::Background, Guard::Busy)),
+        "{log:?}"
+    );
+    assert!(
+        log.contains(&("batch", Priority::Batch, Guard::Background)),
+        "{log:?}"
+    );
     assert!(log.iter().all(|(what, p, g)| match *what {
         "batch" => *p == Priority::Batch && *g == Guard::Background,
         _ => *p != Priority::Batch && *g == Guard::Busy,
@@ -153,7 +170,8 @@ fn schedule_pause_abandons_in_flight() {
     // Under the 1 MiB limit with the closing brackets.
     let big = pathological_js((1 << 20) - 8192);
     assert!(big.len() < 1 << 20);
-    h.git.add("main", &[("big.js", &big), ("small.ts", &ts("small"))]);
+    h.git
+        .add("main", &[("big.js", &big), ("small.ts", &ts("small"))]);
     h.git.commit("main");
     let big_oid = h.git.oid(&big);
     let gate = Arc::new(Gate::default());
@@ -286,7 +304,8 @@ fn schedule_switch_worktree_rebuilds_without_extracting_again() {
     }
     let changed = ts("changed_in_feature");
     let new = ts("new_in_feature");
-    h.git.add("feature", &[(&files[0].0, &changed), ("new.ts", &new)]);
+    h.git
+        .add("feature", &[(&files[0].0, &changed), ("new.ts", &new)]);
     h.open_with("feature", Vec::new());
     let after: Vec<BlobId> = h.extracted()[20..].to_vec();
     let mut want = vec![h.git.oid(&changed), h.git.oid(&new)];
@@ -304,7 +323,11 @@ fn schedule_one_oid_on_two_paths_once() {
     let same = ts("shared");
     h.git.add(
         "main",
-        &[("a/same.ts", &same), ("b/same.ts", &same), ("c.ts", &ts("other"))],
+        &[
+            ("a/same.ts", &same),
+            ("b/same.ts", &same),
+            ("c.ts", &ts("other")),
+        ],
     );
     h.git.commit("main");
     h.open();
@@ -341,8 +364,14 @@ fn schedule_key_from_bytes_read() {
     // The new index arrives as a new file list; the worktree's events come
     // later.
     h.refresh_files();
-    assert!(h.stored(h.git.oid(&new), "ts"), "written under the bytes read");
-    assert!(!h.stored(h.git.oid(&old), "ts"), "nothing under the queued OID");
+    assert!(
+        h.stored(h.git.oid(&new), "ts"),
+        "written under the bytes read"
+    );
+    assert!(
+        !h.stored(h.git.oid(&old), "ts"),
+        "nothing under the queued OID"
+    );
     assert!(!h.hinted("b.ts"), "the queued OID's hint is not set");
     // The event comes: the overlay takes the new OID, which is indexed.
     h.emit(&[("b.ts", super::support::CHANGED)]);
@@ -355,20 +384,27 @@ fn schedule_key_from_bytes_read() {
 fn schedule_tier5_extracts_only_missing_clean_files() {
     let h = Harness::new();
     let shared = ts("in_both");
-    h.git.add("main", &[("shared.ts", &shared), ("main.ts", &ts("main_only"))]);
+    h.git.add(
+        "main",
+        &[("shared.ts", &shared), ("main.ts", &ts("main_only"))],
+    );
     h.git.commit("main");
     h.git.add_worktree("feature");
     let fresh = ts("only_in_feature");
     let staged = ts("staged_in_feature");
     let on_disk = ts("edited_in_feature");
-    h.git.add("feature", &[("shared.ts", &shared), ("fresh.ts", &fresh)]);
+    h.git
+        .add("feature", &[("shared.ts", &shared), ("fresh.ts", &fresh)]);
     h.git.add("feature", &[("dirty.ts", &staged)]);
     h.git.write("feature", "dirty.ts", &on_disk);
     h.open();
     let extracted = h.extracted();
     assert!(extracted.contains(&h.git.oid(&fresh)));
     assert_eq!(
-        extracted.iter().filter(|o| **o == h.git.oid(&shared)).count(),
+        extracted
+            .iter()
+            .filter(|o| **o == h.git.oid(&shared))
+            .count(),
         1,
         "the shared blob is extracted once"
     );
@@ -377,6 +413,33 @@ fn schedule_tier5_extracts_only_missing_clean_files() {
     assert!(!extracted.contains(&h.git.oid(&staged)));
     assert_eq!(h.extractions(), 3);
     assert_eq!(h.coverage().other_worktrees, TierState::Done);
+}
+
+#[test]
+fn schedule_large_files_take_turns() {
+    use crate::index::batch::LargeSlot;
+
+    let slot = LargeSlot::default();
+    let first = slot.acquire(|| false).expect("free");
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        // A second batch task waits while the first holds the slot, and
+        // gives up when it is told to stop (a pause, a cancel).
+        let waiter = s.spawn(|| slot.acquire(|| stop.load(Ordering::Acquire)).is_some());
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!waiter.is_finished(), "waits for the slot");
+        stop.store(true, Ordering::Release);
+        assert!(!waiter.join().expect("waiter"), "gave up on stop");
+    });
+    std::thread::scope(|s| {
+        let waiter = s.spawn(|| slot.acquire(|| false).is_some());
+        std::thread::sleep(Duration::from_millis(30));
+        drop(first);
+        assert!(
+            waiter.join().expect("waiter"),
+            "its turn once the first ends"
+        );
+    });
 }
 
 /// `code_intel.tags` with a 24 KiB quota: indexing overflows it.

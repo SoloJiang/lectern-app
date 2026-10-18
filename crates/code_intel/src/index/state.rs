@@ -12,7 +12,9 @@ use lectern_git::HashKind;
 use lectern_kernel::BusyGuard;
 use lectern_platform::SafeRoot;
 use lectern_services::code_intel::TextRef;
-use lectern_services::project::{BlobId, FileList, Package, ProjectKey, ProjectSnapshot, RelPath, WorktreeKey};
+use lectern_services::project::{
+    BlobId, FileList, Package, ProjectKey, ProjectSnapshot, RelPath, WorktreeKey,
+};
 
 use crate::LangName;
 use crate::extract::{Lang, LanguageTable};

@@ -124,7 +124,10 @@ impl Harness {
         indexer.set_extractor(
             move |lang: &Lang, bytes: &[u8], deadline: &Deadline, cancel: &Arc<AtomicBool>| {
                 let oid = crate::git_access::hash_blob(hash, bytes);
-                s.calls.lock().unwrap().push((lang.name().0.to_string(), oid));
+                s.calls
+                    .lock()
+                    .unwrap()
+                    .push((lang.name().0.to_string(), oid));
                 let hook = s.hook.lock().unwrap().clone();
                 if let Some(hook) = hook {
                     hook(lang, bytes);
@@ -185,7 +188,9 @@ impl Harness {
     /// Publishes the index as the new file list (as `project` does after an
     /// index change).
     pub(crate) fn refresh_files(&self) {
-        let event = self.projects.set_files(&self.key(), self.git.file_list(&self.active()));
+        let event = self
+            .projects
+            .set_files(&self.key(), self.git.file_list(&self.active()));
         self.indexer.project_event(&event);
         self.settle();
     }
@@ -209,7 +214,9 @@ impl Harness {
 
     fn projects_snapshot(&self) -> Arc<lectern_services::project::ProjectSnapshot> {
         use lectern_services::project::Projects;
-        self.projects.snapshot(&self.key()).expect("an open project")
+        self.projects
+            .snapshot(&self.key())
+            .expect("an open project")
     }
 
     /// Runs fs_watch, the executor and the clock past every coalescing
@@ -250,7 +257,13 @@ impl Harness {
 
     /// The OIDs extracted so far, in order.
     pub(crate) fn extracted(&self) -> Vec<BlobId> {
-        self.seen.calls.lock().unwrap().iter().map(|(_, o)| *o).collect()
+        self.seen
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, o)| *o)
+            .collect()
     }
 
     pub(crate) fn extractions(&self) -> usize {
@@ -296,7 +309,11 @@ impl Harness {
     }
 
     pub(crate) fn current(&self, path: &str) {
-        let oid = self.map().effective(path).map(|e| e.oid).expect("a path in the map");
+        let oid = self
+            .map()
+            .effective(path)
+            .map(|e| e.oid)
+            .expect("a path in the map");
         self.set_focus(Focus::Current(Some(TextRef {
             worktree: Some(self.git.worktree_key("main")),
             path: path.into(),
@@ -373,7 +390,10 @@ impl Gate {
     pub(crate) fn wait_entered(&self) {
         let start = std::time::Instant::now();
         while !self.entered.load(Ordering::Acquire) {
-            assert!(start.elapsed() < Duration::from_secs(20), "the extraction never started");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "the extraction never started"
+            );
             std::thread::yield_now();
         }
     }

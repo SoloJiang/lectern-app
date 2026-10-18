@@ -9,7 +9,7 @@
 //! derived state is recomputed there, in dependency order, and installed
 //! only if the generations it read are still current.
 
-mod batch;
+pub(crate) mod batch;
 pub(crate) mod host;
 mod reconcile;
 mod state;
@@ -164,6 +164,8 @@ pub(crate) struct Inner {
     batch: Mutex<BatchRun>,
     rounds: Mutex<Rounds>,
     pub extract: Mutex<ExtractFn>,
+    /// One batch task at a time extracts a large file.
+    pub(crate) large: batch::LargeSlot,
     pub stats: Stats,
     next_session: AtomicUsize,
     /// The files of each extraction batch of tiers 3–5, in order (tests).
@@ -221,6 +223,7 @@ impl Indexer {
             batch: Mutex::new(BatchRun::default()),
             rounds: Mutex::new(Rounds::default()),
             extract: Mutex::new(Arc::new(extract)),
+            large: batch::LargeSlot::default(),
             stats: Stats::default(),
             next_session: AtomicUsize::new(1),
             #[cfg(test)]
@@ -392,8 +395,14 @@ impl Inner {
         self.me.upgrade()
     }
 
+    /// Lock order: `batch_project`, then `open`, then a project's state;
+    /// `open` is released before a state is locked.
     pub(crate) fn project(&self, key: &ProjectKey) -> Option<Arc<Project>> {
         lock(&self.open).iter().find(|p| &p.key == key).cloned()
+    }
+
+    pub(crate) fn is_open(&self, project: &Arc<Project>) -> bool {
+        lock(&self.open).iter().any(|p| Arc::ptr_eq(p, project))
     }
 
     pub(crate) fn head_clean(&self, key: &ProjectKey, path: &str) -> bool {
@@ -549,7 +558,8 @@ impl Inner {
     fn power_changed(&self, on_battery: bool) {
         let was = self.battery.swap(on_battery, Ordering::AcqRel);
         if was != on_battery {
-            for p in lock(&self.open).iter() {
+            let projects = lock(&self.open).clone();
+            for p in projects {
                 lock(&p.state).demand = false;
             }
         }
@@ -627,9 +637,9 @@ impl Inner {
                         let mut version = [0u8; 8];
                         version.copy_from_slice(&grammar.artifact_sha256[..8]);
                         let version = u64::from_be_bytes(version);
-                        let same = current
-                            .as_ref()
-                            .is_some_and(|l| l.grammar_version() == version && !l.lease().is_static());
+                        let same = current.as_ref().is_some_and(|l| {
+                            l.grammar_version() == version && !l.lease().is_static()
+                        });
                         if !same && current.as_ref().is_none_or(|l| !l.lease().is_static()) {
                             table = table.with_pack(name.clone(), grammar);
                             changed.push(name);
@@ -701,12 +711,7 @@ impl Inner {
                 .as_ref()
                 .is_some_and(|c| c.deps == st.cursor_deps(eviction));
         let tier = |t: usize| {
-            let walked = current
-                && st
-                    .batch
-                    .cursor
-                    .as_ref()
-                    .is_some_and(|c| c.walks[t].done);
+            let walked = current && st.batch.cursor.as_ref().is_some_and(|c| c.walks[t].done);
             if walked && st.batch.resume[t].is_empty() && st.batch.active[t] == 0 {
                 TierState::Done
             } else {
@@ -731,7 +736,10 @@ impl Inner {
                     .all(|w| o.done.contains(&w.key))
             });
             let deps = Some((st.session, st.walk_eviction(eviction), st.gens.grammar));
-            if o.deps == deps && all_done && o.current.is_none() && st.batch.resume[2].is_empty()
+            if o.deps == deps
+                && all_done
+                && o.current.is_none()
+                && st.batch.resume[2].is_empty()
                 && st.batch.active[2] == 0
             {
                 TierState::Done

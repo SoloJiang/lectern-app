@@ -40,7 +40,10 @@ fn live(files: Arc<FileList>, overlay: Vec<(&str, WorktreeState)>) -> LiveMap {
 }
 
 fn found(map: &LiveMap, oid: &BlobId, lang: &str) -> Vec<String> {
-    map.paths(oid, lang).into_iter().map(|e| e.path.to_string()).collect()
+    map.paths(oid, lang)
+        .into_iter()
+        .map(|e| e.path.to_string())
+        .collect()
 }
 
 #[test]
@@ -159,8 +162,14 @@ fn map_hints_match_only_their_oid_and_stamp() {
     // stores the OID's first 8 bytes only, as the design sizes it.)
     assert!(!map.hints.matches(&a, &oid(2, 1), stamp));
     for other in [
-        HintStamp { eviction: 4, ..stamp },
-        HintStamp { grammar: 2, ..stamp },
+        HintStamp {
+            eviction: 4,
+            ..stamp
+        },
+        HintStamp {
+            grammar: 2,
+            ..stamp
+        },
     ] {
         assert!(!map.hints.matches(&a, &oid(1, 1), other));
     }

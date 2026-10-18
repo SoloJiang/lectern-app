@@ -93,9 +93,9 @@ fn battery_does_not_hold_back_tiers_1_and_2() {
     repo(&h);
     h.open_with("main", packages(&["app", "lib"]));
     h.current("app/a.ts");
-    h.set_focus(lectern_services::code_intel::Focus::Review(std::sync::Arc::from(vec![
-        "d.ts".into(),
-    ])));
+    h.set_focus(lectern_services::code_intel::Focus::Review(
+        std::sync::Arc::from(vec!["d.ts".into()]),
+    ));
     h.settle();
     assert!(h.hinted("d.ts"), "the review set is tier 2");
     assert_eq!(h.coverage().focus, TierState::Done);

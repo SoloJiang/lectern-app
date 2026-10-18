@@ -5,6 +5,8 @@
 
 #[path = "memory/cache.rs"]
 mod cache;
+#[path = "memory/code_intel.rs"]
+mod code_intel;
 #[path = "fixtures/git_worktree.rs"]
 mod git_worktree;
 
@@ -92,7 +94,13 @@ fn git_changes_capped_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> 
     )])
 }
 
-const BENCHES: &[Bench] = &[cache::MEMORY, GIT_CHANGES_CAPPED_BYTES, GIT_RESIDENT];
+const BENCHES: &[Bench] = &[
+    cache::MEMORY,
+    code_intel::MAP_100K_BYTES,
+    code_intel::BATCH_PEAK,
+    GIT_CHANGES_CAPPED_BYTES,
+    GIT_RESIDENT,
+];
 
 fn main() -> ExitCode {
     // The child process of `cache/memory`.
@@ -100,5 +108,8 @@ fn main() -> ExitCode {
         let entries = cache::entries(std::env::args().nth(1));
         return cache::child(root.as_ref(), entries);
     }
+    // SAFETY: first thing in the process, before any tree-sitter call: the
+    // counting allocator then sees syntax trees (`code_intel/batch_peak`).
+    unsafe { lectern_code_intel::testing::route_tree_sitter_allocations() };
     lectern_bench::main(Target::Memory, env!("CARGO_TARGET_TMPDIR"), BENCHES)
 }

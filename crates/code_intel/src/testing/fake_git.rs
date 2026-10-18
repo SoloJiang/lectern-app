@@ -117,7 +117,9 @@ impl FakeGit {
     }
 
     pub fn worktree_key(&self, wt: &str) -> WorktreeKey {
-        WorktreeKey(Arc::from(self.with_tree(wt, |t| t.git_dir.clone()).as_path()))
+        WorktreeKey(Arc::from(
+            self.with_tree(wt, |t| t.git_dir.clone()).as_path(),
+        ))
     }
 
     fn with_tree<R>(&self, wt: &str, f: impl FnOnce(&mut FakeTree) -> R) -> R {
@@ -132,7 +134,11 @@ impl FakeGit {
 
     /// Adds a linked worktree (its root and git directory are created).
     pub fn add_worktree(&self, name: &str) -> PathBuf {
-        let base = self.common_dir.parent().and_then(Path::parent).expect("base");
+        let base = self
+            .common_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("base");
         let root = base.join(format!("wt-{name}"));
         let git_dir = self.common_dir.join("worktrees").join(name);
         std::fs::create_dir_all(&root).expect("create the worktree");
@@ -190,7 +196,11 @@ impl FakeGit {
                 let oid = self.oid(&canonical);
                 let mut state = self.lock();
                 state.blobs.insert(oid, canonical.into());
-                let tree = state.trees.iter_mut().find(|t| t.name == wt).expect("worktree");
+                let tree = state
+                    .trees
+                    .iter_mut()
+                    .find(|t| t.name == wt)
+                    .expect("worktree");
                 tree.index.insert(path.into(), oid);
                 tree.source.track(&[path]);
             }
@@ -207,7 +217,11 @@ impl FakeGit {
         let oid = self.oid(content);
         let mut state = self.lock();
         state.blobs.insert(oid, content.into());
-        let tree = state.trees.iter_mut().find(|t| t.name == wt).expect("worktree");
+        let tree = state
+            .trees
+            .iter_mut()
+            .find(|t| t.name == wt)
+            .expect("worktree");
         tree.index.insert(path.into(), oid);
         tree.source.track(&[path]);
     }
@@ -218,7 +232,11 @@ impl FakeGit {
         state.commits += 1;
         let n = state.commits;
         let commit = hash_blob(self.hash, format!("commit {n}").as_bytes());
-        let tree = state.trees.iter_mut().find(|t| t.name == wt).expect("worktree");
+        let tree = state
+            .trees
+            .iter_mut()
+            .find(|t| t.name == wt)
+            .expect("worktree");
         tree.head = Some(commit);
         tree.head_tree = tree.index.clone();
         commit
@@ -231,7 +249,11 @@ impl FakeGit {
         state.commits += 1;
         let n = state.commits;
         let commit = hash_blob(self.hash, format!("commit {n}").as_bytes());
-        let tree = state.trees.iter_mut().find(|t| t.name == wt).expect("worktree");
+        let tree = state
+            .trees
+            .iter_mut()
+            .find(|t| t.name == wt)
+            .expect("worktree");
         tree.head = Some(commit);
     }
 
@@ -291,7 +313,12 @@ impl FakeGit {
 
     /// A snapshot of the project with `active` as the current worktree, its
     /// file list from the index.
-    pub fn snapshot(&self, generation: u64, active: &str, packages: Vec<Package>) -> ProjectSnapshot {
+    pub fn snapshot(
+        &self,
+        generation: u64,
+        active: &str,
+        packages: Vec<Package>,
+    ) -> ProjectSnapshot {
         let files = self.file_list(active);
         let state = self.lock();
         let worktrees: Vec<Worktree> = state
@@ -306,7 +333,11 @@ impl FakeGit {
                 prunable: t.prunable,
             })
             .collect();
-        let tree = state.trees.iter().find(|t| t.name == active).expect("worktree");
+        let tree = state
+            .trees
+            .iter()
+            .find(|t| t.name == active)
+            .expect("worktree");
         ProjectSnapshot {
             key: self.key(),
             generation,
@@ -450,7 +481,10 @@ impl GitAccess for FakeGit {
             let worktree = match std::fs::read(root.join(&path)) {
                 Ok(bytes) if filtered.contains(&path) && index.contains_key(&path) => {
                     // A filter's pointer never equals the index: reported.
-                    Some(hash_blob(self.hash, &[bytes.as_slice(), b"\0filtered"].concat()))
+                    Some(hash_blob(
+                        self.hash,
+                        &[bytes.as_slice(), b"\0filtered"].concat(),
+                    ))
                 }
                 Ok(bytes) => Some(self.oid(&self.canonical(&path, &bytes))),
                 Err(_) => None,
@@ -466,10 +500,17 @@ impl GitAccess for FakeGit {
         Ok(out)
     }
 
-    fn tracked(&self, tree: &Tree, _cancel: &AtomicBool) -> Result<Vec<(RelPath, BlobId)>, GitError> {
+    fn tracked(
+        &self,
+        tree: &Tree,
+        _cancel: &AtomicBool,
+    ) -> Result<Vec<(RelPath, BlobId)>, GitError> {
         self.record("tracked");
         let index = self.tree_of(tree)?.index;
-        Ok(index.into_iter().map(|(p, o)| (p.as_str().into(), o)).collect())
+        Ok(index
+            .into_iter()
+            .map(|(p, o)| (p.as_str().into(), o))
+            .collect())
     }
 
     fn blob(&self, _tree: &Tree, oid: BlobId, max: u64) -> Result<Arc<[u8]>, GitError> {
@@ -502,7 +543,12 @@ impl GitAccess for FakeGit {
         Ok(Some(hash_blob(self.hash, text.as_bytes())))
     }
 
-    fn canonical_oid(&self, _tree: &Tree, path: &str, raw: &[u8]) -> Result<Option<BlobId>, GitError> {
+    fn canonical_oid(
+        &self,
+        _tree: &Tree,
+        path: &str,
+        raw: &[u8],
+    ) -> Result<Option<BlobId>, GitError> {
         self.record("canonical_oid");
         if self.lock().filtered.contains(path) {
             return Ok(None);

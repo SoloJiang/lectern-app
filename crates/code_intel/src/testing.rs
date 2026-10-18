@@ -5,10 +5,12 @@
 
 mod fake_git;
 mod host;
+mod rig;
 pub mod synthetic;
 
 pub use fake_git::FakeGit;
 pub use host::{FakePower, FakeProjects, TestHost, host};
+pub use rig::{Rig, route_tree_sitter_allocations};
 
 use std::any::Any;
 use std::collections::HashMap;

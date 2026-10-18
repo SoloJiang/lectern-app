@@ -196,6 +196,7 @@ fn budgets_belong_to_the_documented_targets() {
         let expected = if budget.id == "app/bundle_size" || budget.id == "app/dmg_size" {
             Target::Package
         } else if budget.id.ends_with("_bytes")
+            || budget.id.ends_with("_peak")
             || budget.id == "git/resident"
             || budget.id == "cache/memory"
             || budget.id == "fs_watch/resident"

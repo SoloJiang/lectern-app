@@ -34,7 +34,8 @@ pub(crate) trait GitAccess: Send + Sync {
 
     /// Another worktree's index entries (tier 5): the regular and
     /// executable files with UTF-8 paths, in index order.
-    fn tracked(&self, tree: &Tree, cancel: &AtomicBool) -> Result<Vec<(RelPath, BlobId)>, GitError>;
+    fn tracked(&self, tree: &Tree, cancel: &AtomicBool)
+    -> Result<Vec<(RelPath, BlobId)>, GitError>;
 
     /// One blob from the object database (`TextOrigin::Object`).
     fn blob(&self, tree: &Tree, oid: BlobId, max: u64) -> Result<Arc<[u8]>, GitError>;
@@ -50,8 +51,12 @@ pub(crate) trait GitAccess: Send + Sync {
     /// The blob OID `git add` would give `raw` at `path` after the built-in
     /// conversions; None when a clean or process filter applies. Called only
     /// when the raw bytes' OID is not the expected one.
-    fn canonical_oid(&self, tree: &Tree, path: &str, raw: &[u8])
-    -> Result<Option<BlobId>, GitError>;
+    fn canonical_oid(
+        &self,
+        tree: &Tree,
+        path: &str,
+        raw: &[u8],
+    ) -> Result<Option<BlobId>, GitError>;
 
     /// fs_watch's filter and config source for the worktree. No IO: the
     /// handle is opened on the first `filter` call, which happens only when
@@ -203,7 +208,11 @@ impl GitAccess for LecternGit {
         })
     }
 
-    fn tracked(&self, tree: &Tree, cancel: &AtomicBool) -> Result<Vec<(RelPath, BlobId)>, GitError> {
+    fn tracked(
+        &self,
+        tree: &Tree,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<(RelPath, BlobId)>, GitError> {
         let worktree = self.worktree(tree)?;
         let tracked = worktree.tracked(&EntryLimits::default(), cancel)?;
         Ok(tracked

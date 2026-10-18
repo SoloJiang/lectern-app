@@ -41,13 +41,19 @@ pub fn extension(i: usize) -> &'static str {
 pub fn path(i: usize) -> String {
     let dir = i / 40;
     let package = dir / 25;
-    format!("packages/pkg{package:03}/src/mod{:02}/file{i:06}.{}", dir % 25, extension(i))
+    format!(
+        "packages/pkg{package:03}/src/mod{:02}/file{i:06}.{}",
+        dir % 25,
+        extension(i)
+    )
 }
 
 /// The package directories of a repository of `count` files.
 pub fn package_dirs(count: usize) -> Vec<String> {
     let packages = count.div_ceil(40 * 25);
-    (0..packages).map(|p| format!("packages/pkg{p:03}")).collect()
+    (0..packages)
+        .map(|p| format!("packages/pkg{p:03}"))
+        .collect()
 }
 
 /// A synthetic OID for file `i` (no content behind it).
@@ -87,7 +93,10 @@ pub fn source(ext: &str, i: usize, len: usize) -> Vec<u8> {
         "py" => python(&mut out, i, other, len),
         "go" => go(&mut out, i, other, len),
         "json" => {
-            let _ = writeln!(out, "{{\"name\": \"pkg-{i}\", \"version\": \"1.0.{other}\"}}");
+            let _ = writeln!(
+                out,
+                "{{\"name\": \"pkg-{i}\", \"version\": \"1.0.{other}\"}}"
+            );
         }
         _ => {
             let _ = writeln!(out, "# Module {i}\n");

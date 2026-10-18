@@ -126,7 +126,13 @@ impl Inner {
             if batch.rescan || matches!(batch.health, Some(Health::Degraded(_))) {
                 st.gens.compare += 1;
                 st.gens.rules += 1;
-                let all: Vec<RelPath> = st.map.overlay.entries().iter().map(|(p, _)| p.clone()).collect();
+                let all: Vec<RelPath> = st
+                    .map
+                    .overlay
+                    .entries()
+                    .iter()
+                    .map(|(p, _)| p.clone())
+                    .collect();
                 st.dirty.extend(all);
             }
             if batch.meta.head || batch.meta.refs {

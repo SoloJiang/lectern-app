@@ -41,6 +41,47 @@ pub const BATCH_BYTES: usize = 2 << 20;
 pub const BATCH_TIME: Duration = Duration::from_millis(50);
 /// Entries a gathering step looks at, at most, under the project's lock.
 const SCAN_LIMIT: usize = 4096;
+/// Files larger than this are extracted by one batch task at a time.
+pub const LARGE_FILE: usize = 256 << 10;
+
+/// The one batch extraction of a large file (`LARGE_FILE`).
+#[derive(Default)]
+pub(crate) struct LargeSlot {
+    busy: std::sync::Mutex<bool>,
+    freed: std::sync::Condvar,
+}
+
+pub(crate) struct LargeTurn<'a>(&'a LargeSlot);
+
+impl LargeSlot {
+    /// Waits for the slot, checking `stop` every 10 ms; None once `stop`
+    /// says so.
+    pub(crate) fn acquire(&self, stop: impl Fn() -> bool) -> Option<LargeTurn<'_>> {
+        let mut busy = lock(&self.busy);
+        while *busy {
+            if stop() {
+                return None;
+            }
+            busy = self
+                .freed
+                .wait_timeout(busy, crate::CHECK_INTERVAL)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        if stop() {
+            return None;
+        }
+        *busy = true;
+        Some(LargeTurn(self))
+    }
+}
+
+impl Drop for LargeTurn<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0.busy) = false;
+        self.0.freed.notify_one();
+    }
+}
 
 /// How an item was extracted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -95,7 +136,9 @@ impl Inner {
             run.running += 1;
         }
         let me = self.clone();
-        let spawned = self.host.spawn_batch("batch", move |guard| me.batch_loop(guard));
+        let spawned = self
+            .host
+            .spawn_batch("batch", move |guard| me.batch_loop(guard));
         if !spawned {
             lock(&self.batch).running -= 1;
         }
@@ -220,7 +263,11 @@ impl Inner {
         if cursor.walks[t].done {
             return None;
         }
-        let tier = if t == 0 { Tier::Subproject } else { Tier::Worktree };
+        let tier = if t == 0 {
+            Tier::Subproject
+        } else {
+            Tier::Worktree
+        };
         let mut items = Vec::new();
         let mut looked = 0;
         let mut consider = |eff: crate::map::Effective, items: &mut Vec<Item>| {
@@ -288,12 +335,7 @@ impl Inner {
 
     /// Tier 5: up to 500 files of the next other worktree; None when every
     /// other worktree is done.
-    fn gather_other(
-        &self,
-        project: &Arc<Project>,
-        ctx: &Ctx,
-        eviction: u64,
-    ) -> Option<Vec<Item>> {
+    fn gather_other(&self, project: &Arc<Project>, ctx: &Ctx, eviction: u64) -> Option<Vec<Item>> {
         loop {
             let next = {
                 let mut st = lock(&project.state);
@@ -355,7 +397,10 @@ impl Inner {
                         });
                     }
                     Err(error) => {
-                        log(format_args!("reading worktree {}: {error}", tree.root.display()));
+                        log(format_args!(
+                            "reading worktree {}: {error}",
+                            tree.root.display()
+                        ));
                         st.batch.others.done.insert(key);
                     }
                 }
@@ -374,7 +419,9 @@ impl Inner {
                 let (path, oid) = &walk.entries[walk.pos];
                 walk.pos += 1;
                 let code = lookup.code(path);
-                let Some(lang) = code.checked_sub(1).and_then(|i| table.langs().get(usize::from(i)))
+                let Some(lang) = code
+                    .checked_sub(1)
+                    .and_then(|i| table.langs().get(usize::from(i)))
                 else {
                     continue;
                 };
@@ -598,6 +645,21 @@ impl Inner {
                 },
             }
         };
+        // A large file's syntax tree is most of a batch's memory (a file near
+        // 1 MiB about 31 MiB): one batch task at a time extracts one, so the
+        // temporary memory stays within its share with several batch
+        // threads. The wait gives up on a pause or a cancel.
+        let _large = if mode == Mode::Batch && bytes.len() > LARGE_FILE {
+            let stop =
+                || guard.is_some_and(|g| g.pause_requested()) || ctx.cancel.load(Ordering::Acquire);
+            match self.large.acquire(stop) {
+                Some(slot) => Some(slot),
+                None if guard.is_some_and(|g| g.pause_requested()) => return Outcome::Paused,
+                None => return Outcome::Skip,
+            }
+        } else {
+            None
+        };
         let deadline = match mode {
             Mode::Interactive => Deadline::interactive(&self.watchdog),
             Mode::Background => Deadline::background(&self.watchdog),
@@ -677,7 +739,11 @@ impl Inner {
                 // From now on an eviction does not restart the batch tiers'
                 // walks, or they would extract what they evicted and evict
                 // again; each file is extracted at most once per walk.
-                let walked = st.batch.cursor.as_ref().map_or(eviction, |c| c.deps.eviction);
+                let walked = st
+                    .batch
+                    .cursor
+                    .as_ref()
+                    .map_or(eviction, |c| c.deps.eviction);
                 st.batch.full = Some(walked);
             }
             if st.gens.grammar == grammar {
@@ -774,7 +840,10 @@ impl Inner {
                     continue;
                 }
                 let queue = &mut st.focused.queue[t];
-                if queue.iter().any(|q| q.path == item.path && q.oid == item.oid) {
+                if queue
+                    .iter()
+                    .any(|q| q.path == item.path && q.oid == item.oid)
+                {
                     continue;
                 }
                 queue.push_back(item);
@@ -840,7 +909,10 @@ impl Inner {
             let eviction = project.store.evictions();
             let version = Version::of(&item.lang);
             bump(&self.stats.exists_checks, 1);
-            let found = project.store.exists(&version, &[item.oid]).unwrap_or_default();
+            let found = project
+                .store
+                .exists(&version, &[item.oid])
+                .unwrap_or_default();
             if !found.is_empty() {
                 let mut st = lock(&project.state);
                 if st.finish(session, &item) {

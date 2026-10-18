@@ -52,7 +52,10 @@ fn derived_files_rebuild_the_base_and_drop_equal_overlay_entries() {
     h.git.write("main", "app/a.ts", &ts("a2"));
     h.emit(&[("app/a.ts", CHANGED)]);
     h.settle();
-    assert!(matches!(h.map().overlay.get("app/a.ts"), Some(WorktreeState::Content(_))));
+    assert!(matches!(
+        h.map().overlay.get("app/a.ts"),
+        Some(WorktreeState::Content(_))
+    ));
     let before = h.stats();
     // Staging it gives a new file list whose entry equals the worktree.
     h.git.stage("main", "app/a.ts");
@@ -65,8 +68,15 @@ fn derived_files_rebuild_the_base_and_drop_equal_overlay_entries() {
             cursor: true
         }
     );
-    assert!(h.map().overlay.is_empty(), "{:?}", h.map().overlay.entries());
-    assert_eq!(h.map().effective("app/a.ts").map(|e| e.oid), Some(h.git.oid(&ts("a2"))));
+    assert!(
+        h.map().overlay.is_empty(),
+        "{:?}",
+        h.map().overlay.entries()
+    );
+    assert_eq!(
+        h.map().effective("app/a.ts").map(|e| e.oid),
+        Some(h.git.oid(&ts("a2")))
+    );
 }
 
 #[test]
@@ -131,7 +141,10 @@ fn derived_head_only_compares_again_and_head_clean_follows() {
     }
     h.emit_git(&[("HEAD", CHANGED)]);
     h.settle();
-    assert!(!during.load(Ordering::Acquire), "not clean before the comparison ends");
+    assert!(
+        !during.load(Ordering::Acquire),
+        "not clean before the comparison ends"
+    );
     assert_eq!(
         recomputed(before, h.stats()),
         Recomputed {
@@ -181,7 +194,10 @@ fn derived_overlay_hint_follows_the_effective_oid() {
     h.git.write("main", "app/a.ts", &ts("a2"));
     h.emit(&[("app/a.ts", CHANGED)]);
     h.settle();
-    assert_eq!(h.map().effective("app/a.ts").map(|e| e.oid), Some(h.git.oid(&ts("a2"))));
+    assert_eq!(
+        h.map().effective("app/a.ts").map(|e| e.oid),
+        Some(h.git.oid(&ts("a2")))
+    );
     assert!(!h.hinted("app/a.ts"), "the new OID is not indexed yet");
     kernel.resume();
     h.settle();
@@ -221,8 +237,11 @@ fn derived_rules_drop_newly_ignored_untracked_files() {
 fn derived_grammar_rebuilds_base_hints_and_cursor() {
     let h = indexed();
     let before = h.stats();
-    h.grammars
-        .install("jpack", &["jpack"], crate::testing::java_pack(1, Arc::new(())));
+    h.grammars.install(
+        "jpack",
+        &["jpack"],
+        crate::testing::java_pack(1, Arc::new(())),
+    );
     h.settle();
     assert_eq!(
         recomputed(before, h.stats()),
@@ -288,7 +307,8 @@ fn derived_stale_result_is_not_installed() {
     let compares = h.stats().compares;
     let key = h.key();
     let inner = h.indexer.inner().clone();
-    h.git.before_compare(move || inner.bump(&key, |g| g.rules += 1));
+    h.git
+        .before_compare(move || inner.bump(&key, |g| g.rules += 1));
     h.git.write("main", ".gitignore", b"x\n");
     h.emit(&[(".gitignore", CHANGED)]);
     h.settle();

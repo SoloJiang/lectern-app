@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）已实现；第 3–5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现；第 4、5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -643,24 +643,27 @@ pub(crate) struct Bound { pub definition: DefinitionRef, pub binding: Binding }
 本 crate 只通过一个内部 trait 访问 git，生产实现转调 `lectern-git`，测试用 `testing::FakeGit`。都是阻塞调用，只在 executor 上执行；每次调用打开自己的句柄，返回时释放，不在两次调用之间持有 `git::Worktree` 和它的 `TrackedPaths`：
 
 ```rust
+/// 一个 worktree：公共目录（哪个仓库）、它的 git 目录（哪个 worktree）和根目录。每次调用都带上它。
+pub(crate) struct Tree { pub common_dir: Arc<Path>, pub git_dir: Arc<Path>, pub root: Arc<Path> }
+
 pub(crate) trait GitAccess: Send + Sync {
     /// 当前 worktree 里内容可能与 index 不同的路径：`Worktree::changes(Base::Head, limits)`，
     /// `limits` 取 `total_files = 0`、`total_patch_bytes = 0`、`retained_bytes = 0`，其余为默认值，
     /// 所以不算行 diff、不保留内容，只取每个改动的路径（含重命名的来源）。
-    fn changed_paths(&self, root: &Path, cancel: &AtomicBool) -> Result<ChangedPaths, GitError>;
-    /// 另一个 worktree 的 index 条目（第 5 层）。
-    fn tracked(&self, root: &Path, cancel: &AtomicBool) -> Result<Arc<git::TrackedPaths>, GitError>;
+    fn changed_paths(&self, tree: &Tree, cancel: &AtomicBool) -> Result<ChangedPaths, GitError>;
+    /// 另一个 worktree 的 index 条目（第 5 层）：普通文件和可执行文件、路径是 UTF-8 的，按 index 顺序。
+    fn tracked(&self, tree: &Tree, cancel: &AtomicBool) -> Result<Vec<(RelPath, BlobId)>, GitError>;
     /// 对象库里的一个 blob（`TextOrigin::Object`）。
-    fn blob(&self, root: &Path, oid: BlobId, max: u64) -> Result<Arc<[u8]>, GitError>;
+    fn blob(&self, tree: &Tree, oid: BlobId, max: u64) -> Result<Arc<[u8]>, GitError>;
     /// 当前 worktree 的 HEAD 提交（`Worktree::head`）；unborn 为 None。HEAD 输入的代数由它决定。
-    fn head(&self, root: &Path) -> Result<Option<BlobId>, GitError>;
+    fn head(&self, tree: &Tree) -> Result<Option<BlobId>, GitError>;
     /// index 文件末尾的校验和（`Worktree::index_checksum`），不解析条目。index 输入的代数由它决定。
-    fn index_checksum(&self, root: &Path) -> Result<Option<BlobId>, GitError>;
+    fn index_checksum(&self, tree: &Tree) -> Result<Option<BlobId>, GitError>;
     /// 按这个路径的属性和配置把工作区的原始字节转成规范内容，返回它的 blob OID（与 `git add` 得到的相同）。
     /// 设置了外部过滤器（clean / process）的路径返回 None。只在原始字节的 OID 与期望的不同时调用。
-    fn canonical_oid(&self, root: &Path, path: &RelPath, raw: &[u8]) -> Result<Option<BlobId>, GitError>;
+    fn canonical_oid(&self, tree: &Tree, path: &str, raw: &[u8]) -> Result<Option<BlobId>, GitError>;
     /// fs_watch 的过滤器与配置来源，见下文。不做 IO。
-    fn watch_source(&self, root: &Path) -> Arc<dyn lectern_fs_watch::WorktreeSource>;
+    fn watch_source(&self, tree: &Tree) -> Arc<dyn lectern_fs_watch::WorktreeSource>;
 }
 
 pub(crate) struct ChangedPaths {
@@ -1290,7 +1293,7 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 - 写入的键来自读到的字节：任何一次抽取（批量、按需、限时搜索、第 5 层）写入之前，都对实际读到的字节重新算 OID（原始字节的 OID；工作区一侧与排队时的 OID 不同时再用 `canonical_oid` 算一次），用这个 OID 作键。排队时记下的 OID 只用来挑选要读的文件，不作键。两者不同（排队之后文件又被改了）时，结果只写在实际的 OID 下，原来那个 OID 的 `indexed` 提示不置位；路径的新内容随 fs_watch 的事件进入覆盖部分，有效 OID 变成实际的 OID 后提示才会匹配。所以一份内容的抽取结果不会写到另一个 OID 的键下。
 - 写入：一批（见「调度、批次与取消」）在一个写事务里建单元、插入全部行，一批约 100 KB，远低于 `MAX_BATCH`；写失败（`Dropped`）时这一批的结果留在内存里供本次查询使用，下次需要时重新抽取。
 - 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 对热启动存在检查的命中和查询命中标记访问（存在检查本身只读，命中的单元排进队列，热启动之后再标记，见「调度、批次与取消」），所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
-- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍。第 3 步用 `testing` 的 10 万文件合成仓库测 `code_intel/disk_100k`，再据此校准 200–250 MB 的估算，并核对它在 256 MiB 的配额以内。
+- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍。第 3 步用 `testing` 的 10 万文件合成仓库（`testing::synthetic`：语言比例约一成不是源码，每个源码文件约 8 KiB、每个文件里的名字各不相同）测 `code_intel/disk_100k`：9 万个源码文件的单元声明 279.7 MB（266.7 MiB，每个单元平均 3.1 KB），超过 256 MiB 的配额约 4%，写入过程中淘汰了 80 次；分库文件（含 `-wal`）298 MiB。所以 10 万文件的估算校准为约 270 MiB，与配额相当：这个规模的仓库里最久没出现的约 5% 的单元会被挤出，下次用到时重新抽取（「调度、批次与取消」的配额一条保证不会反复抽取）。合成语料每 8 KiB 有 34–53 个定义（函数为主，函数体是普通的调用和条件语句）、8–16 个不同的引用名（第 2 步由夹具拼成的语料是 99–152 个定义、17–50 个引用名）；真实仓库的密度由第 5 步在 macOS 上用真实仓库核对，配额是否调整留到那时决定。
 - 版本：表结构或单元的键变化时命名空间版本加一；只是抽取规则变化时改 `EXTRACTOR_VERSION`，旧单元不再命中、逐步淘汰。
 
 ### blob → 路径映射
@@ -1306,8 +1309,10 @@ struct LiveMap {
 
 struct BaseMap {
     files: Arc<FileList>,      // project 快照里的文件列表，带 OID
-    by_oid: Box<[(u64, u32)]>, // OID 前 8 字节 + 文件列表下标，按前缀排序；查找时用 FileList::oid 核对完整 OID
-    generation: u64,
+    table: LanguageTable,      // 建映射时的语言表
+    langs: Box<[u8]>,          // 每个文件列表条目的语言（语言表里的位置加一，0 为不在映射里）
+    prefixes: Box<[u64]>,      // by_oid：OID 前 8 字节，按前缀排序
+    indices: Box<[u32]>,       // by_oid：对应的文件列表下标；查找时用 FileList::oid 核对完整 OID
 }
 
 struct Overlay {
@@ -1329,12 +1334,12 @@ enum WorktreeState {
 规则：
 
 - 基础部分来自 `ActiveTree::files`：每条有 OID、语言受支持、`FileKind` 是 `File` 或 `Executable` 的文件。子模块和符号链接不进入。
-- 覆盖部分来自工作区：对一个要重新读的路径，经 `SafeRoot::read`（上限 1 MiB）读出内容，按仓库的哈希算法计算 `Oid::for_blob`。等于文件列表里的 OID 时删掉这个路径的覆盖项；不等或文件列表里没有这个路径时记为 `Content`；`NotFound` 记为 `Absent`；`TooLarge`、`PathThroughSymlink`、读取失败记为 `Unindexable`。
-- 覆盖项的 OID 按原始字节计算。设置了 `core.autocrlf`、`eol` 一类转换的文件，原始字节与规范内容不同，这些文件被当作有改动、按原始字节的 OID 另存一份结果；macOS 上这类文件很少，结果仍然正确，只多一次抽取（已知限制）。
+- 覆盖部分来自工作区：对一个要重新读的路径，经 `SafeRoot::read`（上限 1 MiB）读出内容，按仓库的哈希算法计算 `Oid::for_blob`。等于文件列表里的 OID 时删掉这个路径的覆盖项；文件列表里有这个路径、OID 不等时调用一次 `canonical_oid`：返回 None（设置了 clean / process 过滤器，如 LFS 的指针文件）记为 `Unindexable`，等于文件列表里的 OID（`eol`、`core.autocrlf` 这类内置转换）时删掉覆盖项，否则记为 `Content`；文件列表里没有这个路径时记为 `Content`；`NotFound` 记为 `Absent`；`TooLarge`、`PathThroughSymlink`、读取失败记为 `Unindexable`。路径的语言不受支持时不读；这样的路径不在文件列表里、却是一个目录时（目录事件），请求一次工作区比较。
+- 覆盖项的 OID 按原始字节计算。未跟踪的文件不调用 `canonical_oid`：设置了 `eol` 一类转换的未跟踪文件按原始字节的 OID 存结果，与以后 `git add` 得到的 OID 不同，暂存之后再抽取一次（已知限制，只多一次抽取）。
 - 查找按（OID、语言）进行：在两个 `by_oid` 里按前缀二分查找，核对完整 OID，跳过基础部分里被覆盖项遮住的路径，再只留按路径判断的语言等于这个单元 `ci_ext.lang` 的路径。同一份字节放在 `.java` 和 `.js` 下 OID 相同，`java` 的单元只对应 `.java` 的路径。
 - 基础部分、覆盖部分何时重算见「输入代数与派生状态」。
-- 内存：10 万文件的 `by_oid` 1.2 MB，`indexed` 提示约 1.6 MB（每条 16 字节）；覆盖项通常几十条，未跟踪文件最多 20 000 条（`git` 的上限）时约 1.5 MB。
-- 文件夹项目：`FileList` 没有 OID，基础部分为空，每个文件在第一次被读到时作为 `Content` 加入覆盖部分（上限是文件夹遍历的 20 000 个条目）。
+- 内存：10 万文件的 `by_oid` 1.2 MB（每条 12 字节，前缀和下标分两个数组存放），每条的语言 0.1 MB，`indexed` 提示约 1.6 MB（每条 16 字节）；覆盖项通常几十条，未跟踪文件最多 20 000 条（`git` 的上限）时约 1.5 MB。
+- 文件夹项目：`FileList` 没有 OID，基础部分为空，每个文件在第一次被读到时作为 `Content` 加入覆盖部分（上限是文件夹遍历的 20 000 个条目）。第 3 步不实现，见「与设计的差异」。
 
 ### 输入代数与派生状态
 
@@ -1421,7 +1426,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 |---|---|---|
 | 1 | 当前文本、抽屉里正在看的候选文件 | `Focus::Current`、`Focus::Drawer` |
 | 2 | 本次审阅改到的文件、agent 本会话碰过的文件，以及这些文件 import 的文件（解析扩展点给出；#17 的空实现不给出） | `Focus::Review`、`Focus::Touched` |
-| 3 | 当前子项目：包含当前文本（没有时取审阅集合的第一个文件）的最深子项目；没有子项目时是整个 worktree | `ActiveTree::packages` |
+| 3 | 当前子项目：包含当前文本（没有时取审阅集合的第一个文件，再没有时取项目打开时的路径，根目录除外）的最深子项目；没有子项目时是整个 worktree；有子项目、但没有这样的路径或没有子项目包含它时为空，全部属于第 4 层 | `ActiveTree::packages` |
 | 4 | 当前 worktree 的其余文件 | 映射 |
 | 5 | 其他 worktree 里 OID 不在缓存中的文件 | `GitAccess::tracked` |
 
@@ -1435,7 +1440,8 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - 第 3–5 层：每个批量线程一个长期任务，循环：取一批 → 存在检查 → 抽取缺的 → 一个写事务写入 → 在批次边界询问 `BackgroundGuard`（暂停时登记 waker、返回 `Pending`）。一批在 64 个文件、读入 2 MiB，或开始 50 ms 之后的第一个文件边界处结束，先到者为准；所以一个大文件可以一直运行到它自己的截止时间。暂停和取消仍在约 50 ms 内生效，靠的是看门狗打断在途的那个文件（见下文），与 ADR 0029「每批约 64 个文件或 50 ms」「取消和暂停在约 50 ms 内生效」的要求一致：单个文件由截止时间约束，50 ms 的响应由看门狗保证。
 - 每批开始时重新选层：第 3 层有剩余就先取第 3 层。第 1、2 层在另外的工作线程上运行，不排在批量任务后面（ADR 0029）。
-- 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示，缺的抽取。存在检查只读、不标记访问：热启动的耗时就是「已入索引的仓库被认出已入索引」的时间，访问时间的写回不在这条路径上。
+- 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示，缺的抽取。存在检查只读、不标记访问：热启动的耗时就是「已入索引的仓库被认出已入索引」的时间，访问时间的写回不在这条路径上。一次存在检查本身是一批：游标在项目的锁内最多看 4096 个条目，取出至多 500 个提示不匹配的文件（按语言分组查询），缺的进入这一层的小队列，由之后的批次抽取，所以抽取的批次仍按 64 个文件、2 MiB、50 ms 结束。
+- 配额：本次会话自己的写入引起淘汰时（写入前后淘汰代数不同），命名空间已经满了。此后淘汰代数的变化不再让第 3–5 层的游标重新开始，每个文件在一次遍历里最多抽取一次；被挤出的单元等查询现场用到时（第 4 步）或下次打开项目时再抽取。否则游标会重新抽取刚被挤出的单元，写入又挤出别的单元，不会结束。刚写入的单元的提示按写入之后的淘汰代数记下。
 - 访问标记：存在检查命中的单元 ID 连同查询之前读到的淘汰代数排进项目的 `PendingTouches` 队列。批量线程在热启动的存在检查之后、在批次边界处每次标记 1024 个（`Store::touch_pending`），批次边界照常检查暂停和取消。淘汰代数变了，队列里的 ID 可能已经属于别的单元，整个队列直接丢弃、不标记。项目关闭或切换 worktree 时队列随项目的批量状态一起丢弃，没标记的单元保留原来的访问时间：丢掉的只是淘汰的先后，查询结果不受影响。
 - 单文件截止时间：后台 250 ms，交互 1 s。原来按线性吞吐估算 M 系列上 1 MiB 的文件约 230 ms；实测吞吐随文件变大而下降（tree-sitter-tags 的局部检查按「引用数 × 作用域数」增长，见 [ADR 0031](../adr/0031.md)），接近 1 MiB 的文件在 M 系列上估计要 360–400 ms，后台记为 `TimedOut`，打开时按交互截止时间重做（已知限制，`code_intel/extract_1mib` 只记录）。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
 - 看门狗线程另外持有一张到期表（名字表的延迟重建，见「名字表」）：`wait_timeout` 取在途抽取的下一个检查时刻与最早到期时刻中较早的一个，到期时提交对应的任务；两张表都空时才不带超时地等待。
@@ -1584,8 +1590,8 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 空闲内存：monorepo < 100 MB（后台暂停时和全部完成后） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
-| 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树（估算 ≤ 10 MiB）；工作区比较期间的 `TrackedPaths`（10 万文件约 10 MB） | `code_intel/batch_peak` |
-| 磁盘 | `code_intel.tags` 配额 256 MiB；cloudprint 形状约 1 MB，10 万文件约 200–250 MB | `code_intel/disk_100k`（只记录） |
+| 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）；工作区比较期间的 `TrackedPaths`（10 万文件约 10 MB，由 `git` 的基准测量） | `code_intel/batch_peak` |
+| 磁盘 | `code_intel.tags` 配额 256 MiB；cloudprint 形状约 1 MB，10 万文件约 270 MiB（第 3 步的合成仓库实测，略超配额，见「存储表」的「规模」） | `code_intel/disk_100k`（只记录） |
 | 安装包 ≤ 80 MB | 六个 grammar crate 与 tree-sitter 运行时，由 #38 测量 | `app/bundle_size` |
 
 - 首帧之前不调用本 crate；第一个任务在第一个项目打开之后提交，批量线程在第一次提交 `Batch` 任务时才创建（ADR 0029）。
@@ -1846,6 +1852,32 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - `code_intel/warm_100k_touch`：327、314、311 ms，#116 之前是 773–792 ms。
   - `EXTRACTOR_VERSION` 已经包含在查询版本里（「语言与抽取键」），`Version::of` 取的就是它，单元的键和版本过滤不用改。
 
+第 3 步（映射、调度与增量更新），基于包含 [#113](https://github.com/SoloJiang/lectern-app/pull/113)、[#115](https://github.com/SoloJiang/lectern-app/pull/115) 的 main，同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+
+- `just check`、`just test`（整个工作区 1240 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。Cargo.lock 只有本 crate 的依赖列表变化，没有新增 crate。
+- `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 和 `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 都没有结果。
+- `just test -p lectern-code-intel`：138 个测试通过，第 3 步新增 49 个。按前缀：
+  - `map_*` 7：从带 OID 的文件列表建映射（只含普通和可执行文件、受支持的语言）；前 8 字节相同的 OID 分得开；覆盖项遮住 index 条目，改掉的旧 OID、删除的文件、超过上限的文件不出现，未跟踪文件能查到；与 index 相同的覆盖项被丢掉；同一份字节在 `.java` 和 `.js` 下按语言区分；提示只匹配自己的 OID 前缀和戳记，换文件列表时按路径沿用；10 万文件的映射 ≤ 3 MB。
+  - `overlay_*` 3：表驱动的 12 种工作区情况（干净、未暂存的修改、暂存后未再改、`StagedOnly`、未暂存的删除、未跟踪、被忽略的未跟踪、语言不受支持的未跟踪、未暂存的重命名、`Filtered`、超过 1 MiB、CRLF 检出），每种情况之后覆盖项与磁盘上的实际内容一致；工作区比较失败时保留上一份覆盖部分；生产的 `LecternGit` 在 `TestRepo` 仓库上与 `FakeGit` 给出相同的比较结果、HEAD、index 校验和、规范 OID、index 条目和 blob。
+  - `derived_*` 10：文件列表、子项目、HEAD、index、覆盖部分、忽略规则（含 `untracked_capped`）、语言包、淘汰、写入各一组，用计数钩子检查只有依赖这个输入的派生状态被重算；`HeadDiff` 比较完成之前 `head_clean` 为 false、提交之后为 true；核对任务计算期间输入变化时这次比较的结果被丢弃、按新输入再比较一次。
+  - `schedule_*` 12：层的先后（第 1 层、第 2 层、当前子项目、其余文件按路径、其他 worktree）；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，批量层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停在批次边界生效（`[64, 5]` 两批之后停下，第 70 个文件在登记时被放弃，恢复后先做它）；暂停开关先于第一批打开时不抽取；一次 1 MiB 的抽取进行中打开暂停，这次抽取返回 `Cancelled`、没有写入、提示不变，恢复后它第一个被重新抽取（`schedule_pause_abandons_in_flight`）；批次在 64 个文件（`[64, 64, 22]`）、2 MiB（`[6, 4]`）、50 ms（`[3, 3, 3, 1]`）处结束，一个 200 ms 的文件一批（`[1, 2]`）；切换 worktree 后游标重建、只抽取缓存里没有的；同一 OID 在两个路径上只抽取一次；`schedule_key_from_bytes_read`；第 5 层只抽取缓存里没有、且工作区内容等于 index 的文件；大文件轮流抽取；配额 24 KiB 时 80 个文件各抽取一次、遍历结束；一次抽取进行中切换会话，旧会话的批次不改动新会话的计数。
+  - `grammar_*` 6：安装、更新（在途的版本 1 抽取被取消，版本 1 的结果没有写入）、回滚（不重新抽取）、撤销（离开映射和 `coverage`，在途抽取被取消）、多个通知并成一轮（过时的代数被丢弃）、租约（撤销时有一个在途抽取和一个 `ParsedFile`，两者都结束之后模块恰好卸载一次）。
+  - `battery_*` 3、`incremental_*` 6、`warm_*` 2：见「测试」；`incremental_kernel_busy_until_the_overlay_is_updated` 检查从后端交出事件到覆盖部分更新完之前 kernel 不静止；热启动 40 个文件 7 种语言时只有 7 次存在检查、没有抽取。
+- 基准（`just bench --measure code_intel/`，release，MB 为 2^20 字节）：
+
+  | 基准 | 结果 | 预算 |
+  |---|---|---|
+  | `code_intel/map_100k` | 中位数 9.4–9.6 ms（两次） | ≤ 20 ms |
+  | `code_intel/map_100k_bytes` | 2.65 MB | ≤ 3 MB |
+  | `code_intel/batch_peak` | 最大 32.7 MB | ≤ 40 MB |
+  | `code_intel/disk_100k` | 298 MB（只记录） | — |
+  | `code_intel/extract_throughput`（第 1 步，不变） | 3.81、4.05 MB/s | ≥ 4 MB/s（macOS 判定） |
+  | `code_intel/warm_100k`（第 2 步，不变） | 84.8、84.3 ms | < 500 ms |
+
+  `batch_peak` 的组成：去掉接近 1 MiB 的文件之后峰值是 454 KB，所以几乎全部来自一个 900 KiB 的 TS 文件的语法树和遍历（约 31 MiB），超过设计按「≤ 10 MiB」的估算；预算 40 MB 不变，大文件因此同时只在一个批量任务里抽取（「性能」已改）。tree-sitter 的分配经 `testing::route_tree_sitter_allocations` 计入；基准用一个批量任务，工作区比较是 `FakeGit` 的。
+  `disk_100k`：9 万个源码单元声明 279.7 MB，分库文件 298 MiB，写入过程中淘汰 80 次，4 个线程 70 s；结论写在「存储表」的「规模」一条。
+- 没有验证的：M 系列上的各项基准（由 macOS CI 判定）；`PowerSource` 的真实实现（`platform` 还没有电源接口，测试只用 `testing::FakePower`）；真实的 fs_watch 后端（测试用 `FakeBackend`）；几个批量线程同时运行（测试用 `Executor::manual()`，大文件轮流抽取由 `LargeSlot` 的单元测试检查）；文件夹项目（第 3 步不建索引）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1976,3 +2008,22 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 淘汰代数变了时队列整个丢弃；项目关闭时队列随之丢弃。
 
   理由：`warm_100k` 守的是热启动，即已入索引的仓库被认出已入索引（`indexed` 提示置位）、导航能用上索引的时间；淘汰顺序的记账不需要在这条路径上。丢掉一次热启动的访问标记只影响淘汰的先后，不影响结果的正确性。预算不变；推迟的标记另由只记录的 `code_intel/warm_100k_touch` 测量，开销仍然可见。cache 的访问时间改为按集合写回（[#116](https://github.com/SoloJiang/lectern-app/pull/116)）与这一条无关，本分支不依赖它。
+
+第 3 步：
+
+- 设计把映射、核对任务和各层写成插件内部的状态，没有给第 3 步（还没有插件）的入口。实现为公开的 `index` 模块：`Indexer`（`Indexer::new(IndexDeps)`，测试和 bench 用 `with_fake_git`）持有每个打开项目的状态，第 4 步的插件在 `activate` / `started` 里构造它，把 `ProjectEvent`、`set_focus`、电源和语言包的通知转给它：`project_event`、`open_existing`、`set_focus`、`power_changed`、`grammar_changed`、`demand`（电池供电时的 `query` / `names`）、`coverage`、`map`、`head_diff`、`head_clean`、`subscribe`（电源和语言包的订阅，返回值交给 `PluginHandle::own`）、`close_all`。`IndexDeps` 是「本 crate 的公开项」里 `CodeIntelDeps` 的字段加上 `projects`（`Arc<dyn Projects>`）、这次激活的 `PluginHandle`、看门狗和批量任务数（`default_batch_tasks()`，与 executor 的批量线程数相同）：executor 不公开批量线程数，插件也只能在 `started` 之后拿到句柄。
+- 映射的类型在公开的 `map` 模块（`BaseMap`、`Overlay`、`WorktreeState`、`IndexedHints`、`LiveMap`、`HeadDiff`），供第 4 步的查询和 bench 使用。`by_oid` 拆成前缀和下标两个数组（每条 12 字节，`(u64, u32)` 的元组对齐后是 16 字节），另存每条的语言（1 字节），10 万文件合计 2.8 MB，在 3 MB 以内（「blob → 路径映射」已改）。提示的戳记取淘汰代数的低 32 位和语言包代数的低 31 位，与 OID 前缀共 16 字节。
+- `GitAccess` 的参数从 `root: &Path` 改为 `&Tree`（公共目录、git 目录、根目录）：生产实现要按公共目录打开仓库、按 git 目录取 worktree，只有根目录找不到它们。`tracked` 返回 `Vec<(RelPath, BlobId)>`（只有普通文件和可执行文件、UTF-8 路径），不返回 `Arc<git::TrackedPaths>`：第 5 层只用这些条目，`FakeGit` 也构造不出 `TrackedPaths`。`canonical_oid` 的路径改为 `&str`（「依赖 git、fs_watch 与 cache 的接口」已改）。
+- 覆盖部分对文件列表里有、原始字节的 OID 不等的路径调用一次 `canonical_oid`：设计只按原始字节计算，`Filtered`（LFS 的指针文件）因此认不出来，`overlay_*` 要求它是 `Unindexable`；顺带，CRLF 检出的跟踪文件不再被当作有改动。未跟踪的文件仍按原始字节（「blob → 路径映射」已改）。
+- 游标由批量任务在每批开始时按依赖的代数重建，不在核对任务里：游标只有批量任务用，依赖表不变。
+- 第 3 层的范围：设计在没有当前文本和审阅集合时没有给出取法，实现依次取当前文本、审阅集合的第一个文件、项目打开时的路径（根目录除外）；有子项目、但没有这样的路径或没有子项目包含它时第 3 层为空。理由：取整个 worktree 时，电池供电下的第 3 层就是整个仓库，与 ADR 0029 的电池策略相反（「建索引的分层」已改）。只有最近一次收到 `set_focus` 的项目跑第 3–5 层；还没有任何 `set_focus` 时取最后打开的项目。
+- 存在检查自成一批，游标每步最多看 4096 个条目、取出至多 500 个文件，缺的进入这一层的小队列（「调度、批次与取消」已补）：设计没有规定存在检查的批与抽取的批怎样划分；按 64 个文件做存在检查时 10 万文件要 1600 次查询，超过「约 200 次」。看 4096 个条目的上限让 UI 线程上的 `set_focus` 不会等一次长的扫描。
+- 配额满时游标不因淘汰重新开始（「调度、批次与取消」已补）：设计没有考虑本 crate 自己的写入引起的淘汰，按原规则第 3–5 层会不停地重新抽取刚被挤出的单元。
+- 超过 256 KiB 的文件同时只在一个批量任务里抽取，等待的任务每 10 ms 检查一次暂停和取消（「性能」已改）：实测接近 1 MiB 的文件的语法树和遍历约 31 MiB，设计估算 ≤ 10 MiB；两三个批量线程同时抽取这样的文件会超过 40 MB 的份额。
+- 读出时超过 1 MiB 的文件（文件列表里的条目，没有覆盖项）按排队时的 OID 记一行 `TooLarge`：没有读出字节，无法按实际字节算 OID；这一行只有状态，打开时按交互上限重做。
+- 抽取返回 `Unsupported` 的语言在本次运行中不再进入任何一层（「状态与异常」的「这种语言在本次运行中停用」）。
+- 语言包代数是本 crate 自己的计数（语言表每变化一次加一），不是 `GrammarSource::generation`：后者在没有改变语言表的通知（重复的安装）上也会变化。一轮开始读语言包的当前状态时清掉「再来一轮」的标记，所以之前到达的通知并进这一轮。
+- `ProjectEvent::Changed` 的 `files` 同时让下一次核对读 index 校验和；`worktrees` 和 `RepoBatch` 里其他 worktree 的 index 变化让第 5 层重新开始。`RepoBatch` 的 `refs` 和当前 worktree 的 `head` / `index` 与 `WorktreeBatch` 的 `meta` 同样处理（「增量更新」只列了 `WorktreeBatch`）。fs_watch 的监听失败（`Health::Failed`）时，订阅在 executor 上 drop（不在 fs_watch 线程的回调里），下一次 `ProjectEvent` 重新打开根目录并订阅。
+- 文件夹项目在第 3 步不建索引：它的 OID 要读每个文件才能算出，与第 4 步按需读取、核对 OID 的代码（`read_verify_*`）是同一段；第 3 步的映射、覆盖部分和各层只处理 git 项目。文件夹项目的 `coverage` 各层为 `Done`。
+- 测试：`derived_*` 里依赖查询的部分（限时搜索不跳过有效 OID 已变的文件、淘汰之后经限时搜索找到定义、候选的子项目层、名字表的重建）随第 4 步的查询和名字表加入；第 3 步检查它们依赖的输入代数和派生状态（提示、游标、第 3 层的范围、写入代数）。分库被删除重建时 cache 让淘汰代数加一，与单元被删除走同一条路径，由 `derived_eviction_*` 覆盖。`battery_*` 里「一次 `query`」用 `Indexer::demand`（`query` 属于第 4 步）。
+- `testing` 新增 `FakeGit`、`FakeProjects`、`FakePower`、`host()`（只交出 `PluginHandle` 的插件）、`Rig`（bench 用的完整建索引环境）、`synthetic`（合成仓库：语言比例、路径、8 KiB 的源码）和 `route_tree_sitter_allocations`（让 tree-sitter 的 C 分配经过 Rust 的全局分配器，`code_intel/batch_peak` 才能计入语法树）。`Indexer::set_extractor` 让测试计数和控制抽取。依赖新增 `lectern-kernel`、`lectern-git`、`lectern-fs-watch`、`lectern-platform`，`lectern-executor` 改为普通依赖；都是已有的 crate，Cargo.lock 没有新增 crate。

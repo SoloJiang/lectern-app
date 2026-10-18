@@ -29,7 +29,10 @@ fn incremental_edit_indexes_the_new_oid_and_forgets_the_old() {
     h.git.write("main", "src/a.ts", &ts("a_edited"));
     h.emit(&[("src/a.ts", CHANGED)]);
     h.settle();
-    assert!(h.map().paths(&old, "ts").is_empty(), "the old OID is not returned");
+    assert!(
+        h.map().paths(&old, "ts").is_empty(),
+        "the old OID is not returned"
+    );
     assert_eq!(h.map().paths(&new, "ts").len(), 1);
     assert!(h.stored(new, "ts"));
     assert!(h.hinted("src/a.ts"));
@@ -42,7 +45,10 @@ fn incremental_deletion_and_new_file() {
     let h = indexed();
     h.git.delete("main", "src/b.ts");
     h.git.write("main", "src/new.ts", &ts("new"));
-    h.emit(&[("src/b.ts", REMOVED), ("src/new.ts", super::support::CREATED)]);
+    h.emit(&[
+        ("src/b.ts", REMOVED),
+        ("src/new.ts", super::support::CREATED),
+    ]);
     h.settle();
     assert!(h.map().effective("src/b.ts").is_none());
     assert!(h.map().paths(&h.git.oid(&ts("b")), "ts").is_empty());
@@ -123,10 +129,25 @@ fn incremental_events_bump_their_inputs() {
         h.emit_git(case.git);
         h.settle();
         let after = h.indexer.gens(&h.key()).expect("gens");
-        assert_eq!(h.stats().compares > compares, case.compare, "{}: compare", case.name);
+        assert_eq!(
+            h.stats().compares > compares,
+            case.compare,
+            "{}: compare",
+            case.name
+        );
         assert_eq!(after.head > before.head, case.head, "{}: head", case.name);
-        assert_eq!(after.index > before.index, case.index, "{}: index", case.name);
-        assert_eq!(after.rules > before.rules, case.rules, "{}: rules", case.name);
+        assert_eq!(
+            after.index > before.index,
+            case.index,
+            "{}: index",
+            case.name
+        );
+        assert_eq!(
+            after.rules > before.rules,
+            case.rules,
+            "{}: rules",
+            case.name
+        );
         assert_eq!(after.files, before.files, "{}: files", case.name);
     }
 }
@@ -151,7 +172,11 @@ fn incremental_events_merge_into_one_round() {
         h.driver.run_until_idle();
     }
     h.settle();
-    assert_eq!(h.stats().reconciles, reconciles + 1, "one batch, one reconcile");
+    assert_eq!(
+        h.stats().reconciles,
+        reconciles + 1,
+        "one batch, one reconcile"
+    );
     assert_eq!(h.stats().rereads, rereads + 3);
     assert_eq!(h.map().overlay.len(), 3);
 }

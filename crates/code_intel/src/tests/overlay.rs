@@ -102,7 +102,11 @@ const CASES: &[Case] = &[
         name: "Filtered (a clean filter's pointer)",
         change: |g| {
             g.filter("a.ts");
-            g.write("main", "a.ts", b"version https://git-lfs.github.com/spec/v1\n");
+            g.write(
+                "main",
+                "a.ts",
+                b"version https://git-lfs.github.com/spec/v1\n",
+            );
         },
         overlay: &[("a.ts", Expect::Unindexable)],
     },
@@ -204,10 +208,7 @@ fn overlay_lectern_git_answers_like_the_fake() {
     assert_eq!(paths, ["a.ts", "c.ts"]);
     let kind = repo.hash();
     let head: Vec<(&str, Option<_>)> = changed.head.iter().map(|(p, o)| (&**p, *o)).collect();
-    assert_eq!(
-        head,
-        [("a.ts", Some(hash_blob(kind, a1))), ("c.ts", None)]
-    );
+    assert_eq!(head, [("a.ts", Some(hash_blob(kind, a1))), ("c.ts", None)]);
     assert!(!changed.untracked_capped);
     assert_eq!(git.head(&tree).expect("head"), Some(blob_id(&commit)));
     assert!(git.index_checksum(&tree).expect("checksum").is_some());

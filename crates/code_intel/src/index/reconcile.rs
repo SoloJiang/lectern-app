@@ -19,7 +19,9 @@ use super::state::{Project, State};
 use super::{Inner, bump, lock};
 use crate::extract::BACKGROUND_MAX_LEN;
 use crate::git_access::{Tree, hash_blob, hash_kind};
-use crate::map::{BaseMap, HeadDiff, IndexedHints, LangLookup, LiveMap, Overlay, WorktreeState, find_path};
+use crate::map::{
+    BaseMap, HeadDiff, IndexedHints, LangLookup, LiveMap, Overlay, WorktreeState, find_path,
+};
 use crate::util::log;
 
 /// Whether `path`'s content equals HEAD, by the rule of「依赖 git、fs_watch 与
@@ -115,11 +117,16 @@ impl Inner {
     /// None when the project is gone.
     fn sync_snapshot(&self, project: &Arc<Project>) -> Option<u64> {
         let snapshot = self.projects.snapshot(&project.key)?;
+        // `open` is never taken while a project's state is locked.
+        let is_open = self.is_open(project);
         let mut st = lock(&project.state);
-        if st.cancel.load(Ordering::Acquire) && !lock(&self.open).iter().any(|p| Arc::ptr_eq(p, project)) {
+        if st.cancel.load(Ordering::Acquire) && !is_open {
             return None;
         }
-        let new_active = snapshot.active.as_ref().map(|a| (a.worktree.clone(), a.root.clone()));
+        let new_active = snapshot
+            .active
+            .as_ref()
+            .map(|a| (a.worktree.clone(), a.root.clone()));
         let old_active = st
             .snapshot
             .as_ref()
@@ -419,11 +426,7 @@ impl Inner {
             .filter(|(p, _)| !updates.contains_key(p))
             .cloned()
             .collect();
-        entries.extend(
-            updates
-                .into_iter()
-                .filter_map(|(p, s)| s.map(|s| (p, s))),
-        );
+        entries.extend(updates.into_iter().filter_map(|(p, s)| s.map(|s| (p, s))));
         let overlay = Overlay::build(entries, &st.map.base, &*self.packs);
         let differs = overlay.entries() != st.map.overlay.entries();
         if differs {
@@ -452,12 +455,14 @@ impl Inner {
         match root.read(rel, BACKGROUND_MAX_LEN as u64) {
             Ok(Read::File { bytes, .. }) => {
                 let raw = hash_blob(hash, &bytes);
-                (Some(self.content_state(tree, path, &bytes, raw, index)), false)
+                (
+                    Some(self.content_state(tree, path, &bytes, raw, index)),
+                    false,
+                )
             }
-            Ok(Read::Unsupported { meta }) if meta.kind == SafeKind::Dir => (
-                at.map(|_| WorktreeState::Absent),
-                true,
-            ),
+            Ok(Read::Unsupported { meta }) if meta.kind == SafeKind::Dir => {
+                (at.map(|_| WorktreeState::Absent), true)
+            }
             Ok(Read::Symlink { .. } | Read::TooLarge { .. } | Read::Unsupported { .. }) => {
                 (Some(WorktreeState::Unindexable), false)
             }

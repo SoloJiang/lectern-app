@@ -23,7 +23,10 @@ const UNTRACKED: &[u8] = b"class Untracked { int size() { return 1; } }\n";
 /// TypeScript file, opened and indexed.
 fn repo() -> Harness {
     let h = Harness::new();
-    h.git.add("main", &[("src/Tracked.jpack", TRACKED), ("src/a.ts", &ts("a"))]);
+    h.git.add(
+        "main",
+        &[("src/Tracked.jpack", TRACKED), ("src/a.ts", &ts("a"))],
+    );
     h.git.commit("main");
     h.git.write("main", "src/Untracked.jpack", UNTRACKED);
     h.open();
@@ -68,7 +71,11 @@ fn grammar_installed_brings_tracked_and_untracked_files_in() {
     let before = h.extractions();
     install(&h, 1);
     h.settle();
-    assert_eq!(pack_paths(&h), 2, "tracked and untracked files enter the map");
+    assert_eq!(
+        pack_paths(&h),
+        2,
+        "tracked and untracked files enter the map"
+    );
     assert_eq!(h.extractions(), before + 2);
     assert!(stored_under(&h, 1, TRACKED));
     assert!(stored_under(&h, 1, UNTRACKED));
@@ -92,8 +99,14 @@ fn grammar_updated_extracts_again_and_drops_in_flight_results() {
     });
     install(&h, 1);
     h.settle();
-    assert!(!stored_under(&h, 1, TRACKED), "no result of version 1 is written");
-    assert!(!stored_under(&h, 1, UNTRACKED), "no result of version 1 is written");
+    assert!(
+        !stored_under(&h, 1, TRACKED),
+        "no result of version 1 is written"
+    );
+    assert!(
+        !stored_under(&h, 1, UNTRACKED),
+        "no result of version 1 is written"
+    );
     let cancelled = h
         .seen
         .results
@@ -255,7 +268,11 @@ fn grammar_lease_unloads_after_the_last_user() {
         worker.join().expect("the executor thread");
     });
     h.settle();
-    assert_eq!(unloads.load(Ordering::Acquire), 0, "the parsed file still holds it");
+    assert_eq!(
+        unloads.load(Ordering::Acquire),
+        0,
+        "the parsed file still holds it"
+    );
     drop(parsed);
     assert_eq!(unloads.load(Ordering::Acquire), 1, "unloaded exactly once");
 }

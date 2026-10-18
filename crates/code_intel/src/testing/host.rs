@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lectern_kernel::testing::TestKernel;
-use lectern_kernel::{Activation, Active, Context, Kernel, Manifest, Plugin, PluginError, PluginHandle};
+use lectern_kernel::{
+    Activation, Active, Context, Kernel, Manifest, Plugin, PluginError, PluginHandle,
+};
 use lectern_services::project::{
     FileList, OpenError, OpenRequest, Package, PackageMatch, ProjectEvent, ProjectKey,
     ProjectSnapshot, Projects, ResolveError, Resolved, Scan, ScanError, WorktreeKey,
@@ -132,11 +134,17 @@ impl Projects for FakeProjects {
     fn set_active_worktree(&self, _project: &ProjectKey, _worktree: &WorktreeKey) {}
 
     fn snapshot(&self, key: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
-        lock(&self.snapshots).iter().find(|s| &s.key == key).cloned()
+        lock(&self.snapshots)
+            .iter()
+            .find(|s| &s.key == key)
+            .cloned()
     }
 
     fn open_projects(&self) -> Vec<ProjectKey> {
-        lock(&self.snapshots).iter().map(|s| s.key.clone()).collect()
+        lock(&self.snapshots)
+            .iter()
+            .map(|s| s.key.clone())
+            .collect()
     }
 
     fn locate(&self, _path: &Path) -> Option<lectern_services::project::Location> {

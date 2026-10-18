@@ -420,7 +420,7 @@ crates/bench/
   tests/fixtures/     本 crate 自己的小样本（目前没有）
 ```
 
-三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident` 这类进程内的字节数属于 `Memory`；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
+三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`、`*_peak` 这类进程内的字节数属于 `Memory`；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
 
 另有一个 `src/bin/lectern-bench-report.rs`，有两个子命令：`merge` 合并各目标的报告，`package --app <.app> --dmg <.dmg>` 测量安装包、写 `report-package.json`（见「报告」）。它只用本 crate 的普通依赖。
 
@@ -594,6 +594,9 @@ crates/bench/
 | `code_intel/extract_1mib` | 只记录（每种语言一个约 1 MiB 的文件，对照单文件 250 ms 的截止时间） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `code_intel/warm_100k` | 中位数 < 500 ms（热启动的存在检查：缓存里已有 10 万个文件的单元，200 次 500 个 OID 的查询，只读、不标记访问） | [code_intel](code_intel.md#性能) | `code_intel` 第 2 步 |
 | `code_intel/warm_100k_touch` | 只记录（存在检查之后推迟进行的访问标记：10 万个命中的单元每次 1024 个，访问时间都已过 1 小时，全部要写回） | [code_intel](code_intel.md#性能) | `code_intel` 第 2 步 |
+| `code_intel/map_100k`、`code_intel/map_100k_bytes` | 中位数 ≤ 20 ms / ≤ 3 MB（10 万文件的「blob → 路径」映射重建：基础部分和按路径沿用的提示，合成的 OID；字节数不含 `project` 的文件列表；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
+| `code_intel/batch_peak` | 最大值 ≤ 40 MB（批量层为合成仓库建索引期间的活跃字节峰值：8 KiB 的文件和接近 1 MiB 的文件，语法树经 tree-sitter 的分配器计入；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
+| `code_intel/disk_100k` | 只记录（10 万文件的合成仓库全部写入之后分库文件的大小，含 `-wal`；字节数，由 `time` 目标产出） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `executor/spawn_10k`、`executor/wake_1000x100` | 只记录 | [executor](executor.md#性能) | 第 1 步 |

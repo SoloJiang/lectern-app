@@ -76,7 +76,11 @@ pub struct BaseMap {
 impl BaseMap {
     /// Builds the base part. Pure computation, no IO; 100 000 entries take a
     /// few milliseconds (`code_intel/map_100k`).
-    pub fn build(files: Arc<FileList>, table: &LanguageTable, packs: &dyn GrammarSource) -> BaseMap {
+    pub fn build(
+        files: Arc<FileList>,
+        table: &LanguageTable,
+        packs: &dyn GrammarSource,
+    ) -> BaseMap {
         let mut lookup = LangLookup::new(table, packs);
         let mut langs = vec![0u8; files.len()].into_boxed_slice();
         let mut by_oid = Vec::with_capacity(files.len());
@@ -296,9 +300,7 @@ impl Overlay {
     }
 
     pub(crate) fn position(&self, path: &str) -> Option<usize> {
-        self.entries
-            .binary_search_by(|(p, _)| (**p).cmp(path))
-            .ok()
+        self.entries.binary_search_by(|(p, _)| (**p).cmp(path)).ok()
     }
 
     /// Whether file list entry `i` is hidden by an overlay entry.
@@ -396,9 +398,10 @@ impl IndexedHints {
                 std::cmp::Ordering::Less => i += 1,
                 std::cmp::Ordering::Greater => j += 1,
                 std::cmp::Ordering::Equal => {
-                    if let (Some(from), Some(to)) =
-                        (old.slots.get(2 * i..2 * i + 2), hints.slots.get(2 * j..2 * j + 2))
-                    {
+                    if let (Some(from), Some(to)) = (
+                        old.slots.get(2 * i..2 * i + 2),
+                        hints.slots.get(2 * j..2 * j + 2),
+                    ) {
                         to[0].store(from[0].load(Ordering::Relaxed), Ordering::Relaxed);
                         to[1].store(from[1].load(Ordering::Relaxed), Ordering::Relaxed);
                     }
