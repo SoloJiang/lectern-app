@@ -11,15 +11,31 @@ publish.workspace = true
 layer = "domain"
 
 [features]
-# testing::ManualClock, FakeGrammars, the language fixtures and a watchdog on
-# an executor's dedicated thread, for the tests of this crate and for
+# testing::ManualClock, FakeGrammars, FakeGit, FakeProjects, FakePower, the
+# language fixtures, the synthetic repositories, a watchdog on an executor's
+# dedicated thread and a kernel host, for the tests of this crate and for
 # lectern-bench.
-test-support = ["dep:lectern-executor"]
+test-support = [
+    "dep:tempfile",
+    "lectern-kernel/test-support",
+    "lectern-fs-watch/test-support",
+    "lectern-executor/test-support",
+]
 
 [dependencies]
-# Only testing::watchdog uses it until the plugin (step 4) starts the
-# watchdog through Executor::run_dedicated_gated.
-lectern-executor = { path = "../executor", optional = true }
+# The indexer's tasks (Interactive, Background, Batch) and the watchdog's
+# dedicated thread.
+lectern-executor = { path = "../executor" }
+# PluginHandle, BusyGuard and BackgroundGuard (ADR 0029).
+lectern-kernel = { path = "../kernel" }
+# The worktree comparison, HEAD, the index checksum, blobs and canonical
+# OIDs (git_access.rs); gix stays inside lectern-git.
+lectern-git = { path = "../git" }
+# The current worktree's WorktreeBatch (index/watch.rs).
+lectern-fs-watch = { path = "../fs_watch" }
+# SafeRoot: worktree files are read only through it.
+lectern-platform = { path = "../platform" }
+tempfile = { workspace = true, optional = true }
 # The custom tables of `code_intel.tags` (store.rs); SQL goes through its
 # interface, so rusqlite stays a dependency of lectern-cache only.
 lectern-cache = { path = "../cache" }
@@ -39,6 +55,9 @@ tree-sitter-typescript.workspace = true
 insta.workspace = true
 lectern-cache = { path = "../cache", features = ["test-support"] }
 lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
+lectern-git = { path = "../git", features = ["test-support"] }
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
 # forms_cover_grammar reads each grammar's NODE_TYPES.
 serde_json.workspace = true
 tempfile.workspace = true

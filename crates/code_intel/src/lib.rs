@@ -1,22 +1,27 @@
 //! tree-sitter symbol index, Java and TypeScript resolution, dependency sources.
 //!
-//! This is step 1 of docs/design/code_intel.md「验收」: the language registry,
+//! Steps 1–3 of docs/design/code_intel.md「验收」: the language registry,
 //! extraction keyed by (blob OID, language, grammar version, query version),
 //! the per-file deadline watchdog, and the reference-site analysis of one
-//! parsed file. Step 2 adds the storage of extractions in `cache`'s custom
-//! tables (`store`). The blob → path map, scheduling, queries and the
-//! plugin are later steps.
+//! parsed file (step 1); the storage of extractions in `cache`'s custom
+//! tables (`store`, step 2); the blob → path map of the current worktree
+//! (`map`), its incremental updates and the five indexing tiers (`index`,
+//! step 3). Queries and the plugin are step 4.
 
 mod forms;
+mod git_access;
 mod grammar;
 mod lang;
 mod locals;
+mod power;
 mod rules;
 mod util;
 mod walk;
 mod watchdog;
 
 pub mod extract;
+pub mod index;
+pub mod map;
 pub mod site;
 pub mod store;
 
@@ -29,6 +34,7 @@ mod tests;
 pub use crate::grammar::{
     GrammarChange, GrammarChangeKind, GrammarLease, GrammarSource, LoadedGrammar, NoGrammarPacks,
 };
+pub use crate::power::{AlwaysOnAc, PowerSource};
 pub use crate::watchdog::{
     CHECK_INTERVAL, Clock, PauseProbe, Starter, SystemClock, WATCHDOG_THREAD, Watchdog,
     WatchdogRun, WatchdogStop,
