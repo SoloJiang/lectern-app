@@ -11,7 +11,7 @@
 //! Steps 1–3 are the first batch; the search appends. Results only grow.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -43,9 +43,9 @@ pub(crate) fn loc_key(l: &Location) -> LocKey {
     (l.origin, l.path.clone(), l.oid, l.line, l.column)
 }
 
-/// What step 2's extractions add: units used, extractions to write, files
-/// read.
-type Pending = (Vec<Unit>, Vec<Scanned>, Vec<(RelPath, BlobId)>);
+/// What step 2's extractions add: units used, extractions to write, and
+/// each file's extraction by (path, OID of the bytes read).
+type Pending = (Vec<Unit>, Vec<Scanned>, HashMap<(RelPath, BlobId), Option<Extraction>>);
 
 /// Steps 1–3 of a jump: what the first batch shows, and what the search
 /// goes on from. A prefetch keeps one.
@@ -58,8 +58,11 @@ pub(crate) struct Prepared {
     pub delivered: HashSet<LocKey>,
     /// A step found candidates with binding evidence: no step after it runs.
     pub settled: bool,
-    /// Files steps 1–2 read: the search does not read them again.
-    pub read: HashSet<(RelPath, BlobId)>,
+    /// The current text: step 1 listed its definitions, the search skips it.
+    pub skip: HashSet<(RelPath, BlobId)>,
+    /// Step 2's extractions by (path, OID): the search uses them instead of
+    /// extracting those files again, and dedups what they give.
+    pub extracted: HashMap<(RelPath, BlobId), Option<Extraction>>,
     /// Stored units the candidates came from, marked as used afterwards.
     pub units: Vec<Unit>,
     pub scanned: Vec<Scanned>,
@@ -278,7 +281,8 @@ impl Inner {
             candidates: Vec::new(),
             delivered: HashSet::new(),
             settled: false,
-            read: HashSet::from([(at.path.clone(), at.oid)]),
+            skip: HashSet::from([(at.path.clone(), at.oid)]),
+            extracted: HashMap::new(),
             units: Vec::new(),
             scanned: Vec::new(),
         };
@@ -287,7 +291,8 @@ impl Inner {
             definition,
             tier: CandidateTier::CurrentFile,
             evidence,
-            source: CandidateSource::Index,
+            // Parsed for this query, not looked up.
+            source: CandidateSource::Scanned,
         };
 
         // 1. The current text.
@@ -319,15 +324,22 @@ impl Inner {
         let rules = self.resolver(&name);
         let until = clock.now() + INTERACTIVE_DEADLINE;
         let pending: RefCell<Pending> = RefCell::default();
-        let extraction = |path: &str| -> Option<Extraction> {
+        // A file's effective content, the OID of the bytes read and its
+        // extraction, each file extracted once.
+        let load = |path: &str| -> Option<(Effective, BlobId, Option<Extraction>)> {
             let eff = snap.map.effective(path)?;
             let bytes = self.read_file(snap, path)?;
             let key = self.key_of(snap, path, &bytes, eff.oid);
             let mut p = pending.borrow_mut();
-            let (units, scanned, read) = &mut *p;
-            read.push((eff.path.clone(), key));
-            self.file_extraction(snap, &eff, key, &bytes, until, cancel, units, scanned)
+            let (units, scanned, extracted) = &mut *p;
+            if let Some(done) = extracted.get(&(eff.path.clone(), key)) {
+                return Some((eff, key, done.clone()));
+            }
+            let done = self.file_extraction(snap, &eff, key, &bytes, until, cancel, units, scanned);
+            extracted.insert((eff.path.clone(), key), done.clone());
+            Some((eff, key, done))
         };
+        let extraction = |path: &str| load(path).and_then(|(_, _, e)| e);
         let ctx = ResolveContext {
             map: &snap.map,
             files: snap.map.base.files(),
@@ -338,13 +350,9 @@ impl Inner {
             let Some(exported) = import.exported(&site.name) else {
                 continue;
             };
-            let Some(eff) = snap.map.effective(&import.target) else {
+            let Some((eff, key, Some(found))) = load(&import.target) else {
                 continue;
             };
-            let Some(found) = extraction(&import.target) else {
-                continue;
-            };
-            let key = pending.borrow().2.last().map_or(eff.oid, |(_, k)| *k);
             for def in &found.defs {
                 if *def.name != *exported || def.visibility == Visibility::File {
                     continue;
@@ -381,10 +389,10 @@ impl Inner {
                 source: CandidateSource::Resolver,
             });
         }
-        let (units, scanned, read) = pending.into_inner();
+        let (units, scanned, extracted) = pending.into_inner();
         prepared.units.extend(units);
         prepared.scanned.extend(scanned);
-        prepared.read.extend(read);
+        prepared.extracted = extracted;
         if prepared.bound() {
             prepared.settled = true;
             return Ok(prepared);
@@ -505,16 +513,21 @@ impl Inner {
         let completeness = if p.settled {
             Some(Completeness::Complete)
         } else {
-            let scope = snap.search_scope(&at.path, &p.lang, &p.read);
+            let scope = snap.search_scope(&at.path, &p.lang, &p.skip);
+            let extracted = std::mem::take(&mut p.extracted);
             let ranker = self.ranker(snap, Some(&at.path), Some((at.origin, at.oid)), Some(p.lang.name()));
             let name = p.symbol.name.clone();
             let (lang, site) = (p.lang.clone(), p.site.clone());
             let mut units = std::mem::take(&mut p.units);
             let mut scanned = std::mem::take(&mut p.scanned);
             let result = self.search(run, snap, &scope, &lang, &name, run.started + SEARCH_FOR, |eff, key, bytes, until| {
-                let Some(extraction) = self.file_extraction(
-                    snap, eff, key, &bytes, until, &run.cancel, &mut units, &mut scanned,
-                ) else {
+                let extraction = match extracted.get(&(eff.path.clone(), key)) {
+                    Some(done) => done.clone(),
+                    None => self.file_extraction(
+                        snap, eff, key, &bytes, until, &run.cancel, &mut units, &mut scanned,
+                    ),
+                };
+                let Some(extraction) = extraction else {
                     return;
                 };
                 let mut found = Vec::new();
