@@ -845,7 +845,7 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 - 写入的键来自读到的字节：任何一次抽取（批量、按需、限时搜索、第 5 层）写入之前，都对实际读到的字节重新算 OID（原始字节的 OID；工作区一侧与排队时的 OID 不同时再用 `canonical_oid` 算一次），用这个 OID 作键。排队时记下的 OID 只用来挑选要读的文件，不作键。两者不同（排队之后文件又被改了）时，结果只写在实际的 OID 下，原来那个 OID 的 `indexed` 提示不置位；路径的新内容随 fs_watch 的事件进入覆盖部分，有效 OID 变成实际的 OID 后提示才会匹配。所以一份内容的抽取结果不会写到另一个 OID 的键下。
 - 写入：一批（见「调度、批次与取消」）在一个写事务里建单元、插入全部行，一批约 100 KB，远低于 `MAX_BATCH`；写失败（`Dropped`）时这一批的结果留在内存里供本次查询使用，下次需要时重新抽取。
 - 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 对热启动存在检查的命中和查询命中标记访问（存在检查本身只读，命中的单元排进队列，热启动之后再标记，见「调度、批次与取消」），所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
-- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍，`code_intel/disk_100k` 在第 2 步实测后校准这一条。
+- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍。第 3 步用 `testing` 的 10 万文件合成仓库测 `code_intel/disk_100k`，再据此校准 200–250 MB 的估算，并核对它在 256 MiB 的配额以内。
 - 版本：表结构或单元的键变化时命名空间版本加一；只是抽取规则变化时改 `EXTRACTOR_VERSION`，旧单元不再命中、逐步淘汰。
 
 ### blob → 路径映射
@@ -1250,6 +1250,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
    - `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果：工作区文件只经 `SafeRoot` 读取。
    - `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 没有结果。
    - `code_intel/map_100k`、`code_intel/map_100k_bytes`、`code_intel/batch_peak` 在预算内。
+   - `code_intel/disk_100k`（只记录）用 10 万文件的合成仓库测量，结果写进「存储表」的「规模」一条。
 4. **查询与插件**（前置 A、E）：`Cargo.toml` 加 `plugin = true`。
    - `goto_*`、`read_verify_*`、`search_*`、`refs_*`、`names_*`、`escalate_*`、`plugin_*`、`watchdog_*` 测试通过。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、不依赖其他插件 crate，除 `app` 和 tool 层外没有 crate 依赖它。
@@ -1364,7 +1365,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 语句共 11 条（三条插入、存在检查、两条按名字的查找、名字表两条、读回单元三条），在 cache 每连接 32 条的预编译缓存以内。
 - 名字表的第二步按单元逐个查 `ci_def_unit`（`def_names` 的单元按 ID 排序后传入）：设计写的是「按 `ci_def_unit` 顺序扫描」，没有规定是一条语句还是逐个单元，逐个单元不需要在 SQL 里表达映射过滤后的单元集合。
 - `store_dropped_write_does_not_panic` 不检查恢复后写入的单元仍在：`SQLITE_FULL` 之后 cache 把分库预算降到文件大小以下，刚写入的单元会被立即淘汰（cache 设计「淘汰」），这是 cache 的行为。
-- 「存储表」的「规模」一条要在第 2 步用 `code_intel/disk_100k` 实测后校准。第 2 步只用抽取夹具拼成的语料对照了字节数估算与实际文件的比例（见「实际验证」）：这份语料的定义密度远高于真实代码，不能用来校准 10 万文件的总量。`code_intel/disk_100k` 没有加入预算表，等第 3 步有仓库形状的合成仓库（`testing` 的 10 万文件形状）后再测。
+- 早期数据：第 2 步用抽取夹具拼成的语料对照了单元字节数的估算与实际文件，实际文件约为估算的 1.12 倍（见「实际验证」）。这份语料的定义密度远高于真实代码，不用来校准 10 万文件的总量；校准由第 3 步的 `code_intel/disk_100k` 完成（「验收」第 3 步）。
 - 把访问标记移出热启动。设计原来让存在检查给命中的单元标记访问（「调度、批次与取消」的存在检查一条、「存储表」的淘汰一条）。第 2 步第一版这样实现之后，`code_intel/warm_100k` 在 macOS CI 上中位数 537、549 ms，超过 500 ms 的预算。Linux 上的拆分：200 次查询约 82 ms，其余约 370 ms 是 `TableSet::touch` 写回 10 万个单元的访问时间。改动：
   - 存在检查只读，返回命中（含单元 ID），不写入。
   - 命中排进 `PendingTouches`，热启动之后由批量线程在批次边界每次标记 1024 个。
