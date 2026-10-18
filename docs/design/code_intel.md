@@ -10,7 +10,7 @@
   - 符号抽取：每个（blob OID、语言、grammar 版本、查询版本）抽取一次定义（名字、种类、位置、所在作用域、可见性、参数个数）和引用名，带单文件截止时间和大小上限。
   - 存储：`cache` 仓库分库（文件夹项目用文件夹分库）里的三张自定义表，在分库内单独计磁盘份额，按「最后一次出现在 worktree 里」的时间淘汰。
   - 每个打开项目的当前 worktree 的「blob → 路径」映射：index 里的 OID 加上未暂存的修改、未跟踪且未被忽略的文件；改掉或删掉的内容不再出现在查询结果里。
-  - 建索引的五层优先级与调度（ADR 0029）：每层持有的守卫、所在线程组、批次、取消、暂停、电池策略。
+  - 建索引的五层优先级与调度（ADR 0029）：每层持有的守卫、所在线程组、批次、取消、暂停；不区分电源（ADR 0032）。
   - 增量更新：消费 `fs_watch` 的 `WorktreeBatch`；重新打开项目时只抽取缓存里缺的键。
   - 查询：跳转到定义、查找引用与调用方、按名字列出定义。包括绑定依据规则、语言兼容组、候选分层与过滤、调用方解析，以及索引不完整时的回答顺序和限时搜索。
   - ⌘K 的符号名字表，供 [#102](https://github.com/SoloJiang/lectern-app/issues/102) 使用。
@@ -72,7 +72,7 @@
   8. 淘汰代数：每个分库每个登记了自定义表的命名空间一个内存里的计数，这个命名空间有单元被淘汰或删除、或分库被删除重建时加一，任何线程可以不阻塞地读取（「输入代数与派生状态」用它）。
 - `kernel`：`PluginHandle::background()` 与 `BackgroundGuard`、批次边界的暂停检查，以及不阻塞、任何线程可调用的 `BackgroundGuard::pause_requested()`（看门狗用它在批次中途打断在途抽取）（[kernel 设计「静止」](kernel.md#静止)，ADR 0029 规定由单独的 PR 先于本 crate 实现）。
 - `executor`：批量线程组与 `Priority::Batch`（[executor 设计](executor.md)，同上）；另加 `Executor::on_shutdown(f: Box<dyn FnOnce() + Send>) -> ShutdownHook`：`shutdown` 开始时在调用线程上依次调用已登记的回调（在 `contain` 里），`ShutdownHook` drop 时注销。专用线程上的闭包靠它得知 executor 正在关闭（本 crate 的看门狗，见「调度、批次与取消」）。
-- `platform`：电源状态与变化通知（ADR 0029「影响」）。`app` 把它包成本 crate 的 `PowerSource` 传入；本 crate 不依赖 `platform` 的电源接口，测试用 `testing::FakePower`。
+- `platform`：不需要电源接口（ADR 0032 取消了 ADR 0029「影响」里的这一项）。
 - `git`：`Worktree::canonical_oid(path, bytes) -> Result<Option<Oid>, GitError>`：对一份工作区字节按这个路径的属性和配置做 to-git 方向的内置转换（`text`、`eol`、`ident`、`working-tree-encoding`），返回规范内容的 OID；有外部过滤器时返回 None。工作区比较第 3 步已经在做同样的转换，只是没有单独公开。其余用到的接口（`changes`、`tracked`、`blob`、`head`、`index_checksum`）已经存在。
 - `fs_watch`：不需要新接口。
 - kernel 的 grammar 加载器（ADR 0018、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、#42）：`tree_sitter::Language` 和由它得到的 `Parser`、`Query`、`TagsConfiguration`、`Tree` 都持有动态库里的函数指针。加载器给出的每个 `LoadedGrammar` 带一个租约（`GrammarLease`，加载的模块句柄的 `Arc`）；更新、回滚、撤销时加载器只停止交出这个版本，模块的卸载（`dlclose`）推迟到它的最后一个租约 drop 之后。撤销要求的「立即停用」由不再交出新的 `LoadedGrammar`、使用方取消在途工作来满足。
@@ -112,7 +112,6 @@ pub trait CodeIntel: Send + Sync {
     /// ⌘K 的符号名字表。立即返回：仍有持有者的表返回 `Ready`，它的代数落后时同时开始重建；
     /// 没有时开始构建并返回 `Building`，已在构建时不另起一次。建好的表随 `CodeIntelEvent::Names` 交出；
     /// 表有持有者期间代数落后时，本 crate 自己在后台重建并再发一次 `Names`（见「名字表」）。
-    /// 电池供电时，这次调用让第 4、5 层恢复（见「建索引的分层」）。
     fn names(&self, project: &ProjectKey) -> Names;
 
     /// 注册一个语义导航提供者（#26）。见「语义导航的注册」。立即返回。
@@ -340,7 +339,7 @@ pub struct Coverage {
     pub other_worktrees: TierState,  // 第 5 层
 }
 
-pub enum TierState { Pending, Done, Deferred /* 电池供电时暂缓 */ }
+pub enum TierState { Pending, Done, Deferred /* 不再产生（ADR 0032），随后续的代码 PR 删除 */ }
 ```
 
 调用方：
@@ -427,7 +426,7 @@ pub struct CodeIntelDeps {
     pub executor: lectern_executor::Executor,
     pub cache: lectern_cache::Cache,
     pub watcher: lectern_fs_watch::Watcher,
-    /// 电源状态。`app` 用 `platform` 的电源接口实现；Linux 上用 `AlwaysOnAc`。
+    /// 不再使用（ADR 0032）：只传 `AlwaysOnAc`，随后续的代码 PR 删除。
     pub power: Arc<dyn PowerSource>,
     /// 语言包里的 grammar（ADR 0018）。插件市场实现之前 `app` 传 `NoGrammarPacks`。
     pub grammars: Arc<dyn GrammarSource>,
@@ -448,6 +447,7 @@ impl CodeIntelPlugin {
 // 项目关闭、切换当前 worktree 时：drop 这个项目的 `RepoWatch` / `WorktreeWatch`、取消它的任务、对未回复的语义请求调用 `cancel`；
 //   停用时 kernel 撤销守卫和任务，同样的清理在 `Active` 的 `Drop` 里做完（看门狗见「调度、批次与取消」）。
 
+// `PowerSource`、`AlwaysOnAc` 不再使用（ADR 0032），随后续的代码 PR 删除。
 pub trait PowerSource: Send + Sync {
     /// 当前是否用电池供电。不阻塞。
     fn on_battery(&self) -> bool;
@@ -1437,7 +1437,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 只有最近一次收到 `set_focus` 的项目跑第 3–5 层，其他打开的项目只做第 1、2 层和查询。
 - 第 5 层逐个处理非当前、非 prunable 的 worktree：读它的 index，按批做存在检查，缺的经那个 worktree 根的 `SafeRoot` 读出；原始字节的 OID 与 index 的 OID 相同才抽取（有改动的文件等它成为当前 worktree 时再处理）。处理完一个 worktree 就丢掉它的 `TrackedPaths`。某个 worktree 的 index 变化只让这一个 worktree 重新处理；本次会话已经确认在缓存里的（OID、语言），以及当前映射里有匹配提示的，不再做存在检查、不再排进访问标记。这个集合存 8 字节的键（OID 的前 8 字节与语言混合），10 万个约 1.2 MB，计入常驻内存（「性能」）；键冲突只让一次检查推迟到下次会话。淘汰（配额未满时）、语言包变化和换会话时这个集合清空。
 - 第 1 层只认 `Done`（`Binary` 也算，上限改不了它）：存在检查命中 `TimedOut` 或 `TooLarge` 时按交互截止时间和 4 MiB 上限重做，替换那个单元；每个（OID、版本）在命中或写入成功之后本次会话不再检查，所以重做后仍超时的不会反复重做；读不出来的（文件暂时不在）下次打开时再试。第 2–5 层认缓存里的任何状态。第 1、2 层要的键正在批量层抽取时，它们取消那次抽取、自己抽取，不排在批量任务后面（ADR 0029），批量任务暂停时也不等；第 1 层也接管第 2 层在途的键（换成交互上限），第 2 层不接管第 1、2 层的。
-- 电池供电（ADR 0029 的默认值，见「未决问题」3）：第 1–3 层照常；第 4、5 层暂缓，`coverage` 报告 `Deferred`。接上电源后继续；电池供电期间用户发起 `query` 或 `names` 时，这个项目的第 4、5 层也继续，直到项目关闭或电源状态再次变化。
+- 电源（ADR 0032，见「未决问题」3）：第 1–5 层不论接电源还是用电池都照常运行，没有电池专属的行为，`coverage` 不报告 `Deferred`。第 3 步按 ADR 0029 原来的默认值实现了电池策略（`PowerSource`、`AlwaysOnAc`、`testing::FakePower`、`Indexer::power_changed`、`Indexer::demand` 与 `State::demand`、`wide_allowed` 和 `coverage` 里的 `Deferred`、`battery_*` 测试，以及 `services` 的 `TierState::Deferred`），第 4 步之后由单独的代码 PR 删除；在那之前只传 `AlwaysOnAc`，行为与本条相同。
 
 ### 调度、批次与取消
 
@@ -1651,7 +1651,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 覆盖（`overlay_*`）：`FakeGit` 构造 git 设计「工作区比较」表里的情况，覆盖项与工作区实际内容一致：未暂存的修改、`StagedOnly`（工作区等于基准）、未暂存的删除、未跟踪文件、重命名、`Filtered` 与超过 1 MiB 的文件为 `Unindexable`。
 - 调度（`schedule_*`）：层的先后；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，第 3–5 层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停开关在批次边界生效；一次抽取正在运行时打开暂停开关，`ManualClock` 推进 50 ms 内这次抽取返回 `Cancelled`、它的结果没有写入、`indexed` 提示不变，恢复后这个文件先被重新抽取（`schedule_pause_abandons_in_flight`）；一批在 64 个文件、2 MiB 或 50 ms 之后的第一个文件边界处结束，一个 200 ms 的大文件让这一批超过 50 ms、但暂停仍在 50 ms 内打断它；切换 worktree 后游标重建、已写入的不重复抽取；同一 OID 在两个路径上只抽取一次；一个文件以 OID A 排队、读之前被改成 B 时，结果只写在 B 下，A 的键下没有单元，A 的提示不置位（`schedule_key_from_bytes_read`）；第 5 层只抽取缓存里没有、且工作区内容与 index 相同的文件。
 - 语言包（`grammar_*`，用 `testing::FakeGrammars`）：`grammar_installed_*`：安装后新扩展名的跟踪文件和未跟踪文件进入映射并被抽取；`grammar_updated_*`：更新后旧版本的单元不再命中、这种语言的文件按新版本重新抽取，旧版本在途抽取的结果没有写入；`grammar_rolled_back_*`：回滚后之前那个版本写过的单元重新命中、不重新抽取；`grammar_removed_*`：撤销后这种语言的文件从映射和 `coverage` 里消失，查询返回 `UnsupportedLanguage`，在途抽取被取消、结果没有写入；`grammar_merged_*`：连续多个通知并成一轮，结果与逐个处理相同，过时的代数被丢弃；`grammar_lease_*`：`FakeGrammars` 记录模块的卸载，撤销或更新时有一个在途抽取和一个仍被查询持有的 `ParsedFile`，两者都结束之前模块没有被卸载，结束之后恰好卸载一次。
-- 电池（`battery_*`）：电池供电时第 4、5 层不运行、`coverage` 为 `Deferred`；接上电源后继续；电池供电时一次 `query` 让第 4、5 层继续。
+- 电池（`battery_*`）：第 3 步按 ADR 0029 原来的默认值写的测试，ADR 0032 之后不再适用，随删除电池代码的 PR 一起删除（见「建索引的分层」）。
 - 增量（`incremental_*`）：用 `FakeBackend` 驱动 `WorktreeBatch`，检查「增量更新」表里每个事件让对应的输入代数加一：修改一个文件后按新 OID 抽取、旧 OID 不再返回；目录事件请求一次比较；`rescan`；`meta.refs` 让 HEAD 代数加一；连续事件并成一轮；从后端交出事件到覆盖部分更新完之前 kernel 不静止。
 - 热启动（`warm_*`）：缓存里已有全部单元时重新打开项目，抽取函数一次也没被调用（计数钩子），只有存在检查；删掉一部分单元后只抽取这一部分。
 - 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤（含 Go 的 `Meters(value)` 跳到 `type Meters`）；同一份字节在 `.java` 和 `.js` 下时 `java` 的单元只给出 `.java` 的路径（`goto_oid_language_match`）；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；当前文本的 blob 已入索引时，第 1 步列出的本文件定义不在第 3 步重复出现，现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现（`goto_no_duplicates_*`）；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`NoSymbol`、`UnsupportedLanguage`；从对象库一侧（`TextOrigin::Object`）发起的查询，本文件的候选 `origin` 为 `Object`，由它发起的 `References` 读同一个 blob，不读工作区（`goto_object_origin_*`）。
@@ -1664,24 +1664,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ## 未决问题
 
-需要产品决定（调研「[未决问题](../research/code-navigation.md#未决问题需要产品决定)」第 4–6 条里影响本 crate 的部分）：
+没有需要产品决定的问题。原来的三条（调研「[决定](../research/code-navigation.md#决定)」第 4–6 条里影响本 crate 的部分）已于 2026-10-18 决定：
 
-1. **首发语言范围。** 选项：
-   - (a) 符号抽取覆盖 ADR 0018 核心里的 TypeScript / JavaScript（含 JSX、TSX）、Rust、Java、Python、Go；按 import 解析先做 Java 和 TS（#18、#19），其余语言只按同文件、同目录、同子项目分层（默认）。
-   - (b) 只做 Java 与 TS / JS，其余语言等语言包。少三个 grammar，安装包小一些。
-
-   影响「依赖」表里的 grammar crate 和第 1 步的夹具；选 (b) 时删掉对应的行，其余设计不变。
-2. **索引没建完时是否提示。** 选项：
-   - (a) 不提示，符合「界面不显示索引状态」的规则（默认）。
-   - (b) 只在限时搜索没有覆盖全部文件、结果可能不全时，在结果末尾显示一行「仍在搜索」。
-
-   两种都由 `QueryState::Done(Completeness)` 支持，本 crate 不随选择改变；提示的界面属于 #20 和 #102。
-3. **电池供电时的索引范围。** 选项：
-   - (a) 按 ADR 0029 的默认值：接电源时索引整个仓库；用电池时只自动索引审阅集合和当前子项目，其余等接上电源或用户跳转、打开 ⌘K 时再继续（默认）。
-   - (b) 不区分电源，始终索引整个仓库。
-   - (c) 用电池时只索引审阅集合。
-
-   确认结果不同时只改「建索引的分层」里的电池一条和 `battery_*` 测试（ADR 0029 同样只改这一条）。
+1. **首发语言范围。** 选 (a)：符号抽取覆盖 ADR 0018 核心里的 TypeScript / JavaScript（含 JSX、TSX）、Rust、Java、Python、Go，第 1 步已按此实现；按 import 解析先做 Java 和 TS（#18、#19），其余语言只按同文件、同目录、同子项目分层。不采用只做 Java 与 TS / JS 的 (b)。产品负责人交给负责推进的 agent 决定，按默认值。
+2. **索引没建完时是否提示。** 选 (a)：不提示，符合「界面不显示索引状态」的规则。不采用在结果末尾显示「仍在搜索」的 (b)。`QueryState::Done(Completeness)` 照常给出完整性，本 crate 不随这个决定改变。产品负责人交给负责推进的 agent 决定，按默认值。
+3. **电池供电时的索引范围。** 选 (b)：不区分电源，始终索引整个仓库；省电模式暂不做。产品负责人决定，记录在 [ADR 0032](../adr/0032.md)；本文改动见「建索引的分层」的电源一条，电池代码的删除见同一条。
 
 技术问题都已在上文决定，没有其他未决项。
 
