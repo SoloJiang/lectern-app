@@ -11,8 +11,11 @@ use lectern_cache::{Budgets, Cache, Config};
 use lectern_executor::Executor;
 use lectern_fs_watch::testing::{Driver, FakeBackend, manual};
 use lectern_fs_watch::{Config as WatchConfig, Flags, Watcher};
-use lectern_services::code_intel::{Coverage, Focus, TextOrigin, TextRef, TierState};
-use lectern_services::project::{BlobId, Package, ProjectKey};
+use lectern_services::code_intel::{
+    CodeIntelEvent, Coverage, Evidence, Focus, Position, Query, QueryKind, QueryResults,
+    TextOrigin, TextRef, TierState,
+};
+use lectern_services::project::{BlobId, Package, ProjectKey, WorktreeKey};
 
 use crate::extract::{Deadline, Lang, extract};
 use crate::index::{IndexDeps, Indexer, StatCounts};
@@ -422,7 +425,107 @@ impl Gate {
     }
 }
 
+/// The position of the `nth` (from 0) occurrence of `needle` in `text`.
+pub(crate) fn pos_in(text: &[u8], needle: &str, nth: usize) -> Position {
+    let mut from = 0;
+    let mut found = None;
+    for _ in 0..=nth {
+        let at = text[from..]
+            .windows(needle.len())
+            .position(|w| w == needle.as_bytes())
+            .map(|i| i + from)
+            .unwrap_or_else(|| panic!("{needle:?} #{nth} is not in the text"));
+        found = Some(at);
+        from = at + 1;
+    }
+    let at = found.expect("found");
+    let line = text[..at].iter().filter(|b| **b == b'\n').count() as u32;
+    let start = text[..at]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    Position {
+        line,
+        column: (at - start) as u32,
+    }
+}
+
 impl Harness {
+    pub(crate) fn wt(&self) -> WorktreeKey {
+        self.git.worktree_key("main")
+    }
+
+    /// The worktree text at `path`: its effective OID in the map, else the
+    /// OID of the bytes on disk.
+    pub(crate) fn text(&self, path: &str) -> TextRef {
+        let oid = self.map().effective(path).map(|e| e.oid).unwrap_or_else(|| {
+            let bytes = std::fs::read(self.git.root("main").join(path)).expect("the file");
+            self.git.oid(&bytes)
+        });
+        TextRef {
+            worktree: Some(self.wt()),
+            path: path.into(),
+            oid,
+            origin: TextOrigin::Worktree,
+        }
+    }
+
+    /// The position of the `nth` `needle` in the worktree file `path`.
+    pub(crate) fn pos(&self, path: &str, needle: &str, nth: usize) -> Position {
+        let bytes = std::fs::read(self.git.root("main").join(path)).expect("the file");
+        pos_in(&bytes, needle, nth)
+    }
+
+    /// Asks a query and runs everything until it is done.
+    pub(crate) fn ask(&self, kind: QueryKind) -> Arc<QueryResults> {
+        let id = self.indexer.query(Query {
+            project: self.key(),
+            kind,
+        });
+        self.settle();
+        self.indexer.results(id).expect("the query is kept")
+    }
+
+    /// Jumps from the `nth` `needle` in `path`.
+    pub(crate) fn goto(&self, path: &str, needle: &str, nth: usize) -> Arc<QueryResults> {
+        let at = self.text(path);
+        let position = self.pos(path, needle, nth);
+        self.ask(QueryKind::Definition { at, position })
+    }
+
+    /// The candidates as (path, line, evidence), for compact assertions.
+    pub(crate) fn found(r: &QueryResults) -> Vec<(String, u32, Evidence)> {
+        r.candidates
+            .iter()
+            .map(|c| {
+                (
+                    c.definition.location.path.to_string(),
+                    c.definition.location.line,
+                    c.evidence,
+                )
+            })
+            .collect()
+    }
+
+    /// Pauses the kernel's background work: tiers 3–5 stop at their next
+    /// boundary, so files stay unindexed.
+    pub(crate) fn pause(&self) {
+        self.host.kernel().pause();
+    }
+
+    pub(crate) fn resume(&self) {
+        self.host.kernel().resume();
+    }
+
+    /// The events emitted so far (the log keeps name tables alive).
+    pub(crate) fn events(&self) -> Vec<CodeIntelEvent> {
+        self.indexer.inner().host.events.lock().unwrap().clone()
+    }
+
+    pub(crate) fn clear_events(&self) {
+        self.indexer.inner().host.events.lock().unwrap().clear();
+    }
+
     /// The file counts of the tiers 3–5 extraction batches so far.
     pub(crate) fn batches(&self) -> Vec<usize> {
         self.indexer.inner().batch_log.lock().unwrap().clone()
