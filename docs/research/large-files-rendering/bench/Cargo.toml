@@ -1,0 +1,33 @@
+# Measurement program for docs/research/large-files-rendering.md.
+# Not a workspace member: the empty [workspace] table makes it its own
+# workspace, so `just check`, `just test` and `cargo deny` never build it.
+# Run it as described in the research doc, section 「实测说明」.
+[package]
+name = "large-files-rendering-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[dependencies]
+# Same versions as Lectern's Cargo.lock (tree-sitter and grammars) and
+# gpui-component 0.7.3 (ropey). tree-sitter-json is not in Lectern's lock;
+# 0.24.8 is the version gpui-component 0.7.3 declares.
+tree-sitter = { version = "=0.27.1", default-features = false, features = ["std"] }
+tree-sitter-typescript = "=0.23.2"
+tree-sitter-javascript = "=0.25.0"
+tree-sitter-rust = "=0.24.2"
+tree-sitter-json = "=0.24.8"
+streaming-iterator = "0.1.9"
+# The features gpui-base 0.7.3 enables.
+ropey = { version = "=2.0.0-beta.1", features = ["metric_chars", "metric_lines_lf", "metric_utf16"] }
+sha1dc = "=0.1.5"
+memchr = "2.7"
+libc = "0.2"
+
+[profile.release]
+debug = false
+lto = "thin"
+codegen-units = 1

@@ -11,7 +11,7 @@
 产品定位：AI 写、人读，代码查看与审阅是第一优先级。入口是项目或文件夹，打开后先看到这个项目里待审的 agent 会话；Lectern 不以编辑器为中心，编辑收在第三层。界面英文优先，支持简体中文。性能是第一约束，原生支持 monorepo 与多 worktree，首发只做 macOS。推荐路线：GPUI + gpui-component 做 UI，libghostty-vt 做终端内核，tree-sitter 做高亮，gix + imara-diff 做 Git/Diff，直接解析 Claude Code / Codex 的本地 JSONL 会话。整套是纯 Rust（终端内核经 C ABI 链入），技术上可行，3 个月内能出可用的 MVP。
 
 - **UI 框架用 GPUI**：Zed 自研的 GPU 渲染框架，Apache-2.0，可独立使用，但仍是 pre-1.0，需要通过 crates.io 的 `gpui-pre` 快照精确锁定版本（[ADR 0016](../adr/0016.md)）。
-- **组件库和编辑器都用 gpui-component**（Longbridge 出品）：60+ 组件，并自带支持 tree-sitter 与 LSP 的代码编辑器（20 万行内性能稳定），用于完整文件阅读和按需编辑（第三层功能），不必自己写编辑器内核。
+- **组件库用 gpui-component**（Longbridge 出品）：60+ 组件。它的代码编辑器（`InputState`）只用于按需编辑（第三层功能），且只对 1 MiB 以内、没有超过 4 KiB 的行的文件开放；完整文件阅读是 Lectern 自绘的虚拟化列表，按窗口解析和高亮，语法树不常驻（[ADR 0034](../adr/0034.md)）。
 - **终端接入 Ghostty 内核**：用 libghostty-vt（Rust 绑定 libghostty-rs）做终端状态机，在 GPUI 里自绘字符网格；不用 Zed 的 alacritty_terminal。
 - **代码导航以本地索引为主**：tree-sitter 符号索引保证打开即可跳转，Java 额外做 package / import 解析和依赖 sources.jar 跳转，jdtls 只做后台增强。
 - **Agent 集成分两层**：第一层只读本地会话文件 + 在内嵌终端里 `claude --resume` / `codex resume`；第二层再考虑接 ACP 协议，把 agent 对话做成原生面板。
@@ -66,7 +66,7 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 |---|---|---|
 | 冷启动到首帧 | < 20 ms | 首帧前只建窗口、画骨架，首帧前不读我们自己的文件（窗口快照在首帧后读）；插件、SQLite、监听、会话扫描都在首帧后；shader 预编译；字体走系统字体 API |
 | 打开项目到项目主页可用 | < 100 ms | 文件列表直接读 git index，不遍历目录 |
-| 打开文件到首屏高亮 | < 16 ms（一帧） | 不用 mmap（见 [platform 设计](platform.md)）：首屏只经 `SafeRoot` 读要显示的那一段（有界的范围读取，跳转到文件中部时也是目标位置附近，`platform` 待补的接口，见 [#103](https://github.com/SoloJiang/lectern-app/issues/103)；现有的 `SafeRoot::read` 读完整个文件，超过上限时报 `TooLarge`），只解析可见区域；整个文件的读取和 tree-sitter 解析放后台，完整内容装入之前文件只读、不能进入编辑 |
+| 打开文件到首屏高亮 | < 16 ms（一帧） | 不用 mmap（见 [platform 设计](platform.md)）：首屏只经 `SafeRoot` 读要显示的那一段（有界的范围读取，跳转到文件中部时也是目标位置附近，`platform` 待补的接口，见 [#103](https://github.com/SoloJiang/lectern-app/issues/103)；现有的 `SafeRoot::read` 读完整个文件，超过上限时报 `TooLarge`），只解析可见区域：从目标附近有界的安全位置开始的窗口单独解析，带 8 ms 截止时间，与文件大小无关；中部的目标按字节偏移或按 OID 缓存的行检查点定位，不从文件开头扫描；整个文件的读取和按窗口的高亮放后台，语法树不常驻；完整内容装入之前文件只读、不能进入编辑（[ADR 0034](../adr/0034.md)，保证的条件见其「预算」） |
 | 打开一个会话的 Diff | < 50 ms | 改动从会话 JSONL 增量提取并缓存；diff 结果按 blob OID 缓存 |
 | 切换 worktree / 分支 | < 100 ms | 所有缓存以 git blob OID 为键，内容相同即命中 |
 | 打开 ⌘K | < 16 ms（一帧）出现面板和空查询列表 | 空查询只列审阅改动、最近打开的文件和当前文件的对应测试或源文件（[代码导航调研「空查询」](../research/code-navigation.md#空查询)），不用名字表；符号名字表在第一次打开时才建（[ADR 0030](../adr/0030.md)，下同） |
@@ -75,10 +75,10 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 | 跳转到定义 | 同文件或索引命中：候选列表 ≤ 50 ms，唯一候选的目标文件首屏高亮 ≤ 100 ms；索引尚未覆盖：第一批 ≤ 300 ms，限时搜索 1 s 后停止，到搜索结束、最后一批结果画出 ≤ 1.1 s | 符号按 blob 抽取，SQLite B-tree 按名字查找；索引不完整时按固定顺序现场回答 |
 | 查找引用、调用方 | 第一批 ≤ 200 ms；10 万文件的仓库全部结果 ≤ 2 s | 引用表找出候选 blob，位置现场抽取，结果陆续追加 |
 | 后退、前进 | < 16 ms（一帧） | 最近看过的文件保留高亮结果和文本 |
-| 索引覆盖范围（后台，接电源） | 审阅集合 ≤ 2 s；当前子项目 ≤ 10 s；10 万文件的整个仓库 ≤ 2 分钟（估算，实测后校准） | 按优先级分层；审阅集合之外的部分是可暂停的后台工作，在低 QoS 线程上运行（[ADR 0029](../adr/0029.md)） |
+| 索引覆盖范围（后台，接电源） | 审阅集合 ≤ 2 s；当前子项目 ≤ 10 s；10 万文件的整个仓库 ≤ 2 分钟（估算，实测后校准） | 按优先级分层；审阅集合之外的部分是可暂停的后台工作，在低 QoS 线程上运行（[ADR 0029](../adr/0029.md)）；依赖层排在第 4 层之后，交互让路默认关闭（[ADR 0033](../adr/0033.md)） |
 | 安装包 | `.app` ≤ 80 MB（目标 50 MB），`.dmg` ≤ 40 MB | 只带审阅闭环需要的核心；其余语言包、jdtls、平台与 agent 适配从插件市场按需下载（[ADR 0018](../adr/0018.md)） |
 | 空闲内存 | 空窗口 < 60 MB；打开 monorepo < 100 MB，后台索引暂停时和全部完成后都适用（[ADR 0029](../adr/0029.md)） | 不内置 LSP、扩展运行时和协同；SQLite 页缓存 8 MB；缓存按字节 LRU；会话流式读取 |
-| 滚动与输入 | 稳定 120 fps | 虚拟滚动，按行缓存字形与高亮，渲染线程不做 IO |
+| 滚动与输入 | 稳定 120 fps | 虚拟滚动：阅读视图是自绘的固定行高列表，只排版可见的显示行，超过 4 KiB 的行折成显示行，滚动位置按（首行、行内偏移）保存；按（OID、行号、宽度）缓存排版，高亮区间在后台算好；渲染线程不做 IO（[ADR 0034](../adr/0034.md)） |
 
 这些数字是目标值，需要在 P0 用原型实测后校准。
 
@@ -86,7 +86,7 @@ Lectern 以阅读为主，可以去掉 Zed 为编辑能力付出的大部分开�
 
 - **不默认启动语言服务器**：jdtls、tsserver 只在用户请求精确跳转时按需拉起，空闲一段时间后自动关闭。
 - **不做进程内的动态插件运行时**：Zed 用 WASM 扩展，VS Code 用 Node 扩展进程，Lectern 两者都不采用；内置插件编译期链接，可下载的代码插件以独立进程接入，见「插件架构」一节。唯一在进程内加载的下载内容是 tree-sitter grammar 库：只有官方审查过源码、由我们构建签名的版本，没有插件 API，只提供解析表和 scanner（[ADR 0018](../adr/0018.md)）。
-- **不全量遍历工作区**：被 .gitignore 忽略的目录（node_modules、target、.next）默认不进文件列表、不建索引、不监听，展开时再加载。
+- **不全量遍历工作区**：被 .gitignore 忽略的目录（node_modules、target、.next）默认不进文件列表、不建索引、不监听，展开时再加载。依赖的声明在跳转时按需解析，当前子项目的直接依赖在后台建索引，读取限制（不跟随符号链接、只读依赖缓存的源码子树、只读声明和源码的扩展名）见 [ADR 0033](../adr/0033.md)。
 - **不同步阻塞 UI**：所有 IO、解析、git 操作都在后台线程，UI 线程只读快照。
 
 ### 实测样例
@@ -124,7 +124,7 @@ AI 时代的仓库有三个特征：多语言混合的 monorepo、每个子项�
 
 ### 跨子项目导航
 
-- **TS 包名解析**：读 workspaces 里各包的 `name` 和 tsconfig `paths`，把 `@cloudprint-miniapps/core` 解析到 `frontend-packages/core` 源码，跳过 node_modules 里的符号链接和构建产物。
+- **TS 包名解析**：读 workspaces 里各包的 `name` 和 tsconfig `paths`，把 `@cloudprint-miniapps/core` 解析到 `frontend-packages/core` 源码，跳过 node_modules 里的符号链接和构建产物。工作区之外的包按 `package.json` 的 `exports` / `types` 解析到 node_modules 里的声明文件（[ADR 0033](../adr/0033.md)）。
 - **Maven 模块间依赖**：从各 pom.xml 的 dependency 坐标匹配本仓库模块，跳到源码；外部依赖才走 `-sources.jar`。
 - **跨包影响分析**：改了 `frontend-packages/ui` 的导出时，列出引用它的各个 app。
 - **前后端接口对照（后期）**：同一仓库里的 TS 请求路径与 Java Controller 路由按字符串匹配，改动一端时提示另一端。
@@ -143,7 +143,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 |---|---|---|---|
 | 窗口、面板、快捷键 | `gpui`、`workspace`、`ui` | 项目侧栏 + 阅读栏 + 右侧抽屉，不用 Dock 布局 | 中 |
 | 文件浏览（按需） | `project_panel`、`worktree` | 侧栏 Files 入口，按需展开；文件列表读 git index | 低 |
-| 完整文件阅读 + 编辑（第三层） | `editor`、`text`、`rope`、`language` | gpui-component 的 Editor，默认只读，去掉多光标、重构等功能 | 中 |
+| 完整文件阅读 + 编辑（第三层） | `editor`、`text`、`rope`、`language` | 阅读：Lectern 自绘的虚拟化列表，按窗口高亮（[ADR 0034](../adr/0034.md)）；编辑：gpui-component 的 `InputState`，只对 1 MiB 以内、没有超过 4 KiB 的行的文件，去掉多光标、重构等功能 | 中 |
 | Diff / MR 查看 | `buffer_diff`、`git_ui`、`multi_buffer` | gix 读仓库 + imara-diff 算差异，自绘双栏/统一视图 | 高 |
 | 内嵌终端 | `terminal`（alacritty_terminal）、`terminal_view` | libghostty-vt 内核 + GPUI 自绘网格 | 高 |
 | 识别 Claude Code / Codex 项目 | `agent_servers`、`acp_thread` | 扫描 `~/.claude/projects`、`~/.codex/sessions` 的 JSONL | 低 |
@@ -160,8 +160,8 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | 组件库 | [gpui-component](https://github.com/longbridge/gpui-component) | 自己写 | Dock 布局、虚拟化 List/Table、Markdown、主题系统都现成 |
 | 终端内核 | [libghostty-vt](https://docs.rs/libghostty-vt) via [libghostty-rs](https://github.com/Uzaaft/libghostty-rs) | alacritty_terminal（Zed 同款） | 「连接 Ghostty」的产品定位；解析、滚动缓冲、reflow、按键编码都由它处理 |
 | 终端渲染 | 自己在 GPUI 里画网格 | [gpui-libghostty](https://docs.rs/crate/gpui-libghostty/latest/source/README.md)（原生 Metal/OpenGL surface） | 自绘能叠加 GPUI 浮层、选区、搜索；原生 surface 是 alpha 且浮层要靠截图回读 |
-| 文本存储 | `gpui-component Editor` | Zed 的 `rope` / `sum_tree` | 直接用 gpui-component Editor 自带的文本缓冲，无需单独实现 |
-| 语法高亮 | `tree-sitter` + 各语言 grammar | `syntect` | 增量解析，能顺带做代码折叠、符号大纲 |
+| 文本存储 | 阅读：不可变的 64 KiB 分块加行索引，超过 16 MiB 按页经范围读取；编辑：gpui-component `InputState` 自带的 Rope | gpui-component Editor 用于全部文件、Zed 的 `rope` / `sum_tree` | 阅读不需要可编辑的结构；`InputState` 在 UI 线程上建 Rope 和换行信息，大文件超过一帧（[ADR 0034](../adr/0034.md)） |
+| 语法高亮 | `tree-sitter` + 各语言 grammar，按窗口解析，只保留按行的着色区间 | `syntect` | 增量解析，能顺带做代码折叠、符号大纲；不开 gpui-component 的 `tree-sitter` feature（它依赖另一版 tree-sitter），编辑模式经 `InputHighlighter` 接入 Lectern 的实现（[ADR 0034](../adr/0034.md)） |
 | 代码导航 | `frizbee` 模糊匹配，`tree-sitter-tags` 抽取符号（[ADR 0030](../adr/0030.md)） | `nucleo-matcher`、`fst` | frizbee 比 nucleo-matcher 快 3–4 倍、没有运行时依赖；按名字查找用 SQLite 的 B-tree 已经够快 |
 | Git 读取 | `gix`（gitoxide） | `git2`、调用 `git` CLI | 纯 Rust，无 libgit2 依赖；复杂写操作可回退 CLI |
 | Diff 算法 | `imara-diff` | `similar` | 速度快，gix 与 Helix 都在用；行内词级差异可用 `similar` 补 |
@@ -369,7 +369,7 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 
 ### 3. 代码与 Diff 查看
 
-- 视图只渲染可见行（虚拟滚动），tree-sitter 在后台线程解析，高亮结果按行缓存。
+- 视图只排版可见的显示行（虚拟滚动）；首屏窗口先出高亮，整个文件按窗口在后台计算，高亮结果按行缓存，语法树不常驻；跳转、hunk 带字节偏移，打开到文件中部不从开头扫描（[ADR 0034](../adr/0034.md)）。
 - Diff 数据流：`gix` 取 HEAD / 工作区 / 指定 commit 的 blob → `imara-diff` 出 hunk → 生成「展示行」模型（上下文折叠、增删配对）→ 统一视图与双栏视图共用同一模型。
 - 「AI 改了什么」是核心场景：默认展示工作区相对 HEAD 的变更，并支持按会话开始时间对比，这能把会话和 Diff 关联起来。
 - MR 视图：MVP 用 `gh pr diff` / `glab mr diff` 拿补丁，后续再接 API 支持评论。GitLab 自部署实例的 API 版本参差不齐，只依赖 v4 中长期稳定的接口（MR 列表、changes、notes），并在 MR 视图里把 CI 流水线状态一并展示。
@@ -386,7 +386,7 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 |---|---|---|---|
 | 1. 语法索引 | tree-sitter tags 查询抽取定义与引用，存入本地 SQLite；经 `fs_watch` 增量更新 | 审阅集合 2 秒内，当前子项目 10 秒内，其余在后台继续（[ADR 0029](../adr/0029.md)、[ADR 0030](../adr/0030.md)、[代码导航调研](../research/code-navigation.md)） | 所有语言的类、函数、字段按名跳转 |
 | 2. Java 解析器 | 读 package / import / 内部类，全限定名映射到文件；同名方法按所在类与参数个数消歧 | 与第 1 层同时 | 项目内 Java 跳转基本准确，无需编译 |
-| 3. 依赖源码 | 解析 pom.xml / build.gradle 依赖坐标，到 `~/.m2` 与 Gradle 缓存找 `-sources.jar` 直接解压 | 按需 | 跳进 Spring 等三方库源码 |
+| 3. 依赖源码 | npm 等生态：跳转时按需解析到依赖的声明文件，当前子项目的直接依赖在后台建声明闭包的索引（[ADR 0033](../adr/0033.md)）；Java：解析 pom.xml / build.gradle 依赖坐标，到 `~/.m2/repository` 与 Gradle 缓存找 `-sources.jar` 直接解压（#26） | 按需；直接依赖在后台 | 跳进 React、Spring 等三方库源码 |
 | 4. 精确语义（可选） | 后台启动 jdtls（自动找 JDK 21），或导入 scip-java 生成的 SCIP 索引 | 分钟级 | 重载、泛型、继承链等精确结果 |
 
 Maven 与 Gradle 都要支持，但两者的难度不同。Maven 的 pom.xml 是 XML，静态解析即可拿到模块和依赖坐标。Gradle 的构建脚本是 Groovy 或 Kotlin 代码，无法完整静态解析，所以分三步处理：
@@ -400,7 +400,7 @@ Maven 与 Gradle 都要支持，但两者的难度不同。Maven 的 pom.xml 是
 ### 编辑范围（第三层）
 
 - **默认只读**：完整文件阅读器默认只读，通过 Edit… 或 ⌘E 进入编辑。
-- **基于 gpui-component 的 `Editor`**：已有 tree-sitter 高亮、折叠、Go to Definition 钩子，20 万行内性能稳定；导航结果通过它的定义跳转钩子接入。
+- **基于 gpui-component 的 `InputState`**：只对 1 MiB 以内、没有超过 4 KiB 的行的文件开放，超过时 Edit… / ⌘E 不可用并说明原因；默认不开软换行；高亮经它的 `InputHighlighter` 接口接入 Lectern 自己的 tree-sitter 实现，编辑期间的语法树在退出编辑时释放；导航结果通过它的定义跳转钩子接入（[ADR 0034](../adr/0034.md)）。
 - **保留**：撤销重做、查找替换、自动缩进、括号补全、保存时调用项目已有的 formatter。
 - **不做**：多光标、宏、重构；代码补全默认关闭，写代码主要交给 agent。
 - **与 agent 共存**：文件被 agent 改动时，若本地有未保存修改，弹出三方合并提示，避免互相覆盖。
