@@ -1881,9 +1881,9 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   `disk_100k`：9 万个源码单元声明 279.7 MB，分库文件 298 MiB，写入过程中淘汰 80 次，4 个线程 70 s；结论写在「存储表」的「规模」一条。
 - 没有验证的：M 系列上的各项基准（由 macOS CI 判定）；`PowerSource` 的真实实现（`platform` 还没有电源接口，测试只用 `testing::FakePower`）；真实的 fs_watch 后端（测试用 `FakeBackend`）；几个批量线程同时运行（测试用 `Executor::manual()`，大文件轮流抽取由 `LargeSlot` 的单元测试检查）；文件夹项目的建索引（第 3 步不实现，`coverage` 报告 `Pending`）。
 
-第 4 步（查询与插件），rebase 到包含 kernel 的 barrier 修正（#96，234081f）的 main 之后，同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+第 4 步（查询与插件），rebase 到包含 kernel 的 barrier 修正（#96，[#118](https://github.com/SoloJiang/lectern-app/pull/118)）的 main 之后，同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
 
-- `just check`（含 `python3 scripts/check_architecture.py`：30 个 crate 通过，本 crate 的 `plugin = true` 生效，只有 `bench`（tool 层）依赖它）、`just test`（整个工作区 1316 个测试通过，跳过 1 个）、`just doctest`（7 个通过）、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。Cargo.lock 只有本 crate 的依赖列表变化（`memchr`、`unicode-normalization` 原已在锁文件里），没有新增 crate。`Harness::quiescent` 仍是第 3 步的宽容等待（barrier 不等 kernel 线程自己排入的请求）。
+- `just check`（含 `python3 scripts/check_architecture.py`：30 个 crate 通过，本 crate 的 `plugin = true` 生效，只有 `bench`（tool 层）依赖它）、`just test`（整个工作区 1318 个测试通过，跳过 1 个）、`just doctest`（7 个通过）、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。Cargo.lock 只有本 crate 的依赖列表变化（`memchr`、`unicode-normalization` 原已在锁文件里），没有新增 crate。`Harness::quiescent` 仍是第 3 步的宽容等待（barrier 不等 kernel 线程自己排入的请求）。
 - `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 和 `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 仍没有结果。
 - `just test -p lectern-code-intel`：214 个测试通过，第 4 步新增 55 个。按前缀：
   - `goto_*` 10：第 1–3 步各自在有依据时停下（局部绑定、`Resolver::bind`、索引）；一个有依据的候选直接跳转，只有同名依据时预选第一个；分层与排序（当前文件、审阅集合、子项目、依赖、其余）；按兼容组、可见性和语法种类过滤；当前文件的定义不重复列出；同一份字节在 `.java` 和 `.js` 下是一个 OID、两个单元，`java` 单元只给出 `.java` 的路径；没有标识符和语言不受支持时 `Failed`；`Object` 来源（Diff 的旧侧）按 OID 读 blob、不读 worktree；结果只增不减（后一批只追加，第一批的下标不变）；测试自己的 `Resolver` 给出第 2 步的 import 目标，第 2 步读过的目标不被限时搜索重复抽取、不重复列出。
