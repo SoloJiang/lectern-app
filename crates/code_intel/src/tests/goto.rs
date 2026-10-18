@@ -12,11 +12,11 @@ use lectern_services::code_intel::{
 };
 use lectern_services::project::RelPath;
 
+use crate::LangName;
 use crate::resolve::{
     Bound, CandidateDraft, Import, ImportedNames, PackageScope, ResolveContext, Resolver,
 };
 use crate::site::{ParsedFile, Site};
-use crate::LangName;
 
 use super::support::{Harness, packages};
 
@@ -66,13 +66,21 @@ fn goto_steps_stop_at_the_first_with_evidence() {
             "a.ts",
             "import { helper } from './b';\nexport function run() {\n  const limit = 3;\n  return helper(limit);\n}\n",
         ),
-        ("b.ts", "export function helper(x: number) {\n  return x;\n}\nexport const limit = 5;\n"),
+        (
+            "b.ts",
+            "export function helper(x: number) {\n  return x;\n}\nexport const limit = 5;\n",
+        ),
     ];
     let cases = [
         Case {
             what: "a local binding: step 1 only",
             paused: false,
-            expect: &[("a.ts", 2, Evidence::Bound(Binding::Local), CandidateSource::Scanned)],
+            expect: &[(
+                "a.ts",
+                2,
+                Evidence::Bound(Binding::Local),
+                CandidateSource::Scanned,
+            )],
             jump: Some(0),
         },
         Case {
@@ -111,7 +119,11 @@ fn goto_steps_stop_at_the_first_with_evidence() {
                 )
             })
             .collect();
-        let want: Vec<_> = case.expect.iter().map(|(p, l, e, s)| (*p, *l, *e, *s)).collect();
+        let want: Vec<_> = case
+            .expect
+            .iter()
+            .map(|(p, l, e, s)| (*p, *l, *e, *s))
+            .collect();
         assert_eq!(got, want, "{}", case.what);
         assert_eq!(r.jump, case.jump, "{}", case.what);
         assert_eq!(r.preselect, Some(0), "{}", case.what);
@@ -122,7 +134,10 @@ fn goto_steps_stop_at_the_first_with_evidence() {
 #[test]
 fn goto_one_bound_candidate_jumps_one_name_only_preselects() {
     let h = indexed(&[
-        ("a.py", "def run():\n    total = 1\n    return total + other()\n"),
+        (
+            "a.py",
+            "def run():\n    total = 1\n    return total + other()\n",
+        ),
         ("b.py", "def other():\n    return 2\n"),
     ]);
     let local = h.goto("a.py", "total", 1);
@@ -141,7 +156,11 @@ fn goto_one_bound_candidate_jumps_one_name_only_preselects() {
     // On a definition's own name: it is the only candidate, `defines` set.
     let own = h.goto("b.py", "other", 0);
     assert_eq!(own.jump, Some(0));
-    let defines = own.symbol.as_ref().and_then(|s| s.defines.clone()).expect("defines");
+    let defines = own
+        .symbol
+        .as_ref()
+        .and_then(|s| s.defines.clone())
+        .expect("defines");
     assert_eq!(&*defines.name, "other");
     assert!(!defines.local);
 }
@@ -171,7 +190,10 @@ fn goto_filters_group_visibility_and_kind() {
             what: "a module's own definitions are file-visible",
             files: &[
                 ("a.ts", "export function run() { return hidden(); }\n"),
-                ("b.ts", "export function other() {}\nfunction hidden() { return 1; }\n"),
+                (
+                    "b.ts",
+                    "export function other() {}\nfunction hidden() { return 1; }\n",
+                ),
                 ("c.ts", "export function hidden() { return 2; }\n"),
             ],
             from: ("a.ts", "hidden", 0),
@@ -180,7 +202,10 @@ fn goto_filters_group_visibility_and_kind() {
         Case {
             what: "go lower case is package-visible: the same directory only",
             files: &[
-                ("p/a.go", "package p\n\nfunc Run() int { return helper() }\n"),
+                (
+                    "p/a.go",
+                    "package p\n\nfunc Run() int { return helper() }\n",
+                ),
                 ("p/b.go", "package p\n\nfunc helper() int { return 1 }\n"),
                 ("q/c.go", "package q\n\nfunc helper() int { return 2 }\n"),
             ],
@@ -190,7 +215,10 @@ fn goto_filters_group_visibility_and_kind() {
         Case {
             what: "go Meters(value) is a conversion: a call reaches the type",
             files: &[
-                ("u/a.go", "package u\n\nfunc Run(value int) Meters { return Meters(value) }\n"),
+                (
+                    "u/a.go",
+                    "package u\n\nfunc Run(value int) Meters { return Meters(value) }\n",
+                ),
                 ("u/b.go", "package u\n\ntype Meters int\n"),
             ],
             from: ("u/a.go", "Meters", 1),
@@ -234,7 +262,10 @@ fn goto_filters_group_visibility_and_kind() {
         ("src/a/b.rs", "pub fn run() -> u8 { helper() }\n"),
     ]);
     let r = h.goto("src/a/b.rs", "helper", 0);
-    assert_eq!(Harness::found(&r), [("src/a.rs".to_owned(), 0, Evidence::NameOnly)]);
+    assert_eq!(
+        Harness::found(&r),
+        [("src/a.rs".to_owned(), 0, Evidence::NameOnly)]
+    );
 }
 
 /// The same bytes under `.java` and `.js` are one OID and two units: the
@@ -243,11 +274,17 @@ fn goto_filters_group_visibility_and_kind() {
 fn goto_oid_language_match() {
     let both = "class Shared { }\n";
     let h = indexed(&[
-        ("a.java", "class A { Shared make() { return new Shared(); } }\n"),
+        (
+            "a.java",
+            "class A { Shared make() { return new Shared(); } }\n",
+        ),
         ("x/Shared.java", both),
         ("x/shared.js", both),
     ]);
-    assert_eq!(h.git.oid(both.as_bytes()), h.map().effective("x/shared.js").unwrap().oid);
+    assert_eq!(
+        h.git.oid(both.as_bytes()),
+        h.map().effective("x/shared.js").unwrap().oid
+    );
     let r = h.goto("a.java", "Shared", 1);
     let paths: Vec<&str> = r
         .candidates
@@ -292,7 +329,10 @@ fn goto_tiers_and_order() {
             ("app/src/b.ts".to_owned(), CandidateTier::SamePackage),
             ("app/src/z.ts".to_owned(), CandidateTier::SamePackage),
             ("app/lib/c.ts".to_owned(), CandidateTier::SameSubproject),
-            ("app/lib/deep/d.ts".to_owned(), CandidateTier::SameSubproject),
+            (
+                "app/lib/deep/d.ts".to_owned(),
+                CandidateTier::SameSubproject
+            ),
             ("other/e.ts".to_owned(), CandidateTier::Elsewhere),
         ]
     );
@@ -308,7 +348,10 @@ fn goto_tiers_and_order() {
     assert_eq!(
         tiers(&r)[2..4],
         [
-            ("app/lib/deep/d.ts".to_owned(), CandidateTier::SameSubproject),
+            (
+                "app/lib/deep/d.ts".to_owned(),
+                CandidateTier::SameSubproject
+            ),
             ("app/lib/c.ts".to_owned(), CandidateTier::SameSubproject),
         ]
     );
@@ -331,7 +374,8 @@ fn goto_results_only_grow() {
     h.open();
     // A file the index does not have yet: only the search finds it.
     h.pause();
-    h.git.write("main", "c.ts", b"export function item() { return 2; }\n");
+    h.git
+        .write("main", "c.ts", b"export function item() { return 2; }\n");
     h.emit(&[("c.ts", super::support::CREATED)]);
     h.settle();
     // What the query had published when the search extracted `c.ts`.
@@ -352,10 +396,17 @@ fn goto_results_only_grow() {
         kind: QueryKind::Definition { at, position },
     }));
     h.settle();
-    let r = h.indexer.results(id.lock().unwrap().unwrap()).expect("kept");
+    let r = h
+        .indexer
+        .results(id.lock().unwrap().unwrap())
+        .expect("kept");
     let all = Harness::found(&r);
     let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen, [all[..1].to_vec()], "the first batch, before the search");
+    assert_eq!(
+        seen,
+        [all[..1].to_vec()],
+        "the first batch, before the search"
+    );
     assert_eq!(
         all,
         [
@@ -364,7 +415,11 @@ fn goto_results_only_grow() {
         ]
     );
     for batch in &seen {
-        assert_eq!(batch[..], all[..batch.len()], "a batch is a prefix: {seen:?}");
+        assert_eq!(
+            batch[..],
+            all[..batch.len()],
+            "a batch is a prefix: {seen:?}"
+        );
     }
     assert_eq!(r.candidates[1].source, CandidateSource::Scanned);
 }
@@ -459,8 +514,14 @@ impl Resolver for TestResolver {
 #[test]
 fn goto_resolver_step_two() {
     let files: &[(&str, &str)] = &[
-        ("a.ts", "export function run() { return local() + bound() + other(); }\n"),
-        ("b.ts", "export function helper() { return 1; }\nexport function other() { return 2; }\n"),
+        (
+            "a.ts",
+            "export function run() { return local() + bound() + other(); }\n",
+        ),
+        (
+            "b.ts",
+            "export function helper() { return 1; }\nexport function other() { return 2; }\n",
+        ),
         ("c.ts", "export function bound() { return 3; }\n"),
         ("d.ts", "export function other() { return 4; }\n"),
     ];
@@ -491,7 +552,11 @@ fn goto_resolver_step_two() {
     let r = h.goto("a.ts", "bound", 0);
     assert_eq!(
         Harness::found(&r),
-        [("c.ts".to_owned(), 0, Evidence::Bound(Binding::QualifiedName))]
+        [(
+            "c.ts".to_owned(),
+            0,
+            Evidence::Bound(Binding::QualifiedName)
+        )]
     );
     assert_eq!(r.jump, Some(0));
 }
@@ -529,7 +594,10 @@ fn goto_object_origin_reads_the_blob() {
     let old = "export function run() {\n  const limit = 1;\n  return limit;\n}\n";
     let h = indexed(&[("a.ts", old)]);
     // The worktree moved on; the old blob stays in the object database.
-    h.git.add("main", &[("a.ts", b"export function run() { return 0; }\n")]);
+    h.git.add(
+        "main",
+        &[("a.ts", b"export function run() { return 0; }\n")],
+    );
     h.git.commit("main");
     h.refresh_files();
     let at = TextRef {

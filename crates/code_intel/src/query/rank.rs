@@ -80,7 +80,13 @@ impl Ranker<'_> {
     }
 
     /// The tier of a candidate at `path` with content (`origin`, `oid`).
-    pub fn tier(&self, path: &str, origin: TextOrigin, oid: BlobId, imported: bool) -> CandidateTier {
+    pub fn tier(
+        &self,
+        path: &str,
+        origin: TextOrigin,
+        oid: BlobId,
+        imported: bool,
+    ) -> CandidateTier {
         let Some(from) = self.from else {
             return CandidateTier::Elsewhere;
         };

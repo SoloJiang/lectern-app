@@ -17,7 +17,9 @@ fn tables(h: &Harness) -> Vec<Arc<NameTable>> {
     h.events()
         .into_iter()
         .filter_map(|e| match e {
-            CodeIntelEvent::Names { table, generation, .. } => {
+            CodeIntelEvent::Names {
+                table, generation, ..
+            } => {
                 assert_eq!(generation, table.generation());
                 Some(table)
             }
@@ -36,7 +38,10 @@ fn fire_due(h: &Harness) {
     let watchdog = h.indexer.inner().watchdog.clone();
     let start = std::time::Instant::now();
     while watchdog.scheduled() > 0 {
-        assert!(start.elapsed() < Duration::from_secs(20), "the due entry never ran");
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the due entry never ran"
+        );
         std::thread::sleep(Duration::from_millis(2));
     }
     h.settle();
@@ -49,13 +54,20 @@ fn names_dedup_nfc_current_worktree_only() {
     h.git.add(
         "main",
         &[
-            ("a.py", "def caf\u{e9}():\n    return 1\n\nclass Run:\n    pass\n".as_bytes()),
-            ("b.py", "def cafe\u{301}():\n    return 2\n\ndef Run():\n    return 3\n".as_bytes()),
+            (
+                "a.py",
+                "def caf\u{e9}():\n    return 1\n\nclass Run:\n    pass\n".as_bytes(),
+            ),
+            (
+                "b.py",
+                "def cafe\u{301}():\n    return 2\n\ndef Run():\n    return 3\n".as_bytes(),
+            ),
         ],
     );
     h.git.commit("main");
     h.git.add_worktree("other");
-    h.git.add("other", &[("c.py", b"def only_there():\n    return 4\n")]);
+    h.git
+        .add("other", &[("c.py", b"def only_there():\n    return 4\n")]);
     h.open();
     assert!(
         h.stored(h.git.oid(b"def only_there():\n    return 4\n"), "python"),
@@ -66,14 +78,16 @@ fn names_dedup_nfc_current_worktree_only() {
     let table = tables(&h).pop().expect("a Names event");
     assert_eq!(names_of(&table), ["Run", "caf\u{e9}"]);
     let run = table.iter().position(|n| n == "Run").expect("Run");
-    let both = crate::def_kind_bit(crate::DefKind::Class) | crate::def_kind_bit(crate::DefKind::Function);
+    let both =
+        crate::def_kind_bit(crate::DefKind::Class) | crate::def_kind_bit(crate::DefKind::Function);
     assert_eq!(table.kinds(run), both);
 }
 
 #[test]
 fn names_ready_after_build() {
     let h = Harness::new();
-    h.git.add("main", &[("a.ts", b"export function one() {}\n")]);
+    h.git
+        .add("main", &[("a.ts", b"export function one() {}\n")]);
     h.git.commit("main");
     h.open();
     assert!(matches!(h.indexer.names(&h.key()), Names::Building));
@@ -101,7 +115,8 @@ fn names_ready_after_build() {
 #[test]
 fn names_refresh_while_held() {
     let h = Harness::new();
-    h.git.add("main", &[("a.ts", b"export function one() {}\n")]);
+    h.git
+        .add("main", &[("a.ts", b"export function one() {}\n")]);
     h.git.commit("main");
     h.open();
     h.indexer.names(&h.key());
@@ -111,8 +126,11 @@ fn names_refresh_while_held() {
     // Two batches written within the interval.
     for (i, name) in ["two", "three"].iter().enumerate() {
         let path = format!("n{i}.ts");
-        h.git
-            .write("main", &path, format!("export function {name}() {{}}\n").as_bytes());
+        h.git.write(
+            "main",
+            &path,
+            format!("export function {name}() {{}}\n").as_bytes(),
+        );
         h.emit(&[(&path, CHANGED)]);
         h.settle();
     }
@@ -120,7 +138,11 @@ fn names_refresh_while_held() {
         Names::Ready(t) => assert!(Arc::ptr_eq(&t, &first), "the old table meanwhile"),
         other => panic!("{other:?}"),
     }
-    assert_eq!(h.indexer.inner().name_builds(&h.key()), 1, "not before the interval");
+    assert_eq!(
+        h.indexer.inner().name_builds(&h.key()),
+        1,
+        "not before the interval"
+    );
     h.clock.advance(REBUILD_MIN + Duration::from_millis(1));
     fire_due(&h);
     let fresh = tables(&h);

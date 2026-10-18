@@ -1009,7 +1009,12 @@ impl Inner {
     /// a key stored meanwhile is not written again, the hints of every path
     /// with that content are set once committed. Nothing for an ended
     /// session.
-    pub(crate) fn store_scanned(&self, project: &Arc<Project>, session: u64, scanned: Vec<Scanned>) {
+    pub(crate) fn store_scanned(
+        &self,
+        project: &Arc<Project>,
+        session: u64,
+        scanned: Vec<Scanned>,
+    ) {
         if scanned.is_empty() {
             return;
         }
@@ -1017,31 +1022,32 @@ impl Inner {
             return;
         };
         let p = project.clone();
-        self.host.spawn_busy("store", Priority::Background, move || {
-            let ctx = {
-                let st = lock(&p.state);
-                if !st.live(session) {
-                    return;
-                }
-                ctx(&st)
-            };
-            let done = scanned
-                .into_iter()
-                .map(|s| Done {
-                    item: Item {
-                        path: s.path,
-                        oid: s.oid,
-                        lang: s.lang,
-                        source: Source::Worktree,
-                        tier: Tier::Review,
-                    },
-                    key: s.oid,
-                    extraction: s.extraction,
-                    flag: Arc::new(AtomicBool::new(false)),
-                })
-                .collect();
-            me.commit(&p, &ctx, done, false);
-        });
+        self.host
+            .spawn_busy("store", Priority::Background, move || {
+                let ctx = {
+                    let st = lock(&p.state);
+                    if !st.live(session) {
+                        return;
+                    }
+                    ctx(&st)
+                };
+                let done = scanned
+                    .into_iter()
+                    .map(|s| Done {
+                        item: Item {
+                            path: s.path,
+                            oid: s.oid,
+                            lang: s.lang,
+                            source: Source::Worktree,
+                            tier: Tier::Review,
+                        },
+                        key: s.oid,
+                        extraction: s.extraction,
+                        flag: Arc::new(AtomicBool::new(false)),
+                    })
+                    .collect();
+                me.commit(&p, &ctx, done, false);
+            });
     }
 
     /// Queues the focus's files that are not indexed for tiers 1 and 2, and

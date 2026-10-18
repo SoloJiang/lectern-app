@@ -454,8 +454,11 @@ fn schedule_folder_project_indexes_at_open() {
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path().canonicalize().expect("canonical");
     std::fs::write(root.join("a.ts"), ts("in_a_folder")).expect("write");
-    std::fs::write(root.join("b.ts"), b"export function run() { return in_a_folder(1); }\n")
-        .expect("write");
+    std::fs::write(
+        root.join("b.ts"),
+        b"export function run() { return in_a_folder(1); }\n",
+    )
+    .expect("write");
     std::fs::write(root.join("notes.md"), b"# notes\n").expect("write");
     let key = ProjectKey::Folder {
         root: Arc::from(root.as_path()),
@@ -487,9 +490,15 @@ fn schedule_folder_project_indexes_at_open() {
     let map = h.indexer.map(&key).expect("open");
     let a = h.git.oid(&ts("in_a_folder"));
     assert_eq!(map.effective("a.ts").map(|e| e.oid), Some(a));
-    assert!(map.effective("notes.md").is_none(), "no language: not in the map");
+    assert!(
+        map.effective("notes.md").is_none(),
+        "no language: not in the map"
+    );
     let c = h.indexer.coverage(&key).expect("open");
-    assert_eq!([c.focus, c.subproject, c.worktree, c.other_worktrees], [TierState::Done; 4]);
+    assert_eq!(
+        [c.focus, c.subproject, c.worktree, c.other_worktrees],
+        [TierState::Done; 4]
+    );
     assert_eq!(h.extractions(), 2);
     // No HEAD: never clean.
     assert!(!h.indexer.head_clean(&key, "a.ts"));
@@ -501,7 +510,10 @@ fn schedule_folder_project_indexes_at_open() {
         oid: h.git.oid(&b),
         origin: lectern_services::code_intel::TextOrigin::Worktree,
     };
-    let position = Position { line: 0, column: 32 };
+    let position = Position {
+        line: 0,
+        column: 32,
+    };
     let id = h.indexer.query(lectern_services::code_intel::Query {
         project: key.clone(),
         kind: QueryKind::Definition { at, position },

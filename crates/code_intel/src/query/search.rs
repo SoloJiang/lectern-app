@@ -50,7 +50,8 @@ impl Snap {
     }
 
     fn searchable(&self, eff: &Effective, lang: &Lang) -> bool {
-        !self.disabled.contains(eff.lang.name()) && compatible(&self.table, eff.lang.name(), lang.name())
+        !self.disabled.contains(eff.lang.name())
+            && compatible(&self.table, eff.lang.name(), lang.name())
     }
 
     fn in_flight(&self, eff: &Effective) -> bool {
@@ -86,7 +87,12 @@ impl Snap {
 
     /// The search's scope for a reference at `anchor` in `lang`: the
     /// deepest sub-project holding it, the whole worktree without one.
-    pub fn search_scope(&self, anchor: &str, lang: &Lang, skip: &HashSet<(RelPath, BlobId)>) -> Scope {
+    pub fn search_scope(
+        &self,
+        anchor: &str,
+        lang: &Lang,
+        skip: &HashSet<(RelPath, BlobId)>,
+    ) -> Scope {
         let dir = self.subproject_of(anchor).unwrap_or("").to_owned();
         let mut files = Vec::new();
         let mut in_flight = 0;
@@ -151,7 +157,10 @@ impl Inner {
     /// handed to `hit` with the bytes read and their key. Returns the
     /// completeness: `Complete` when every file was searched and none was
     /// in flight.
-    #[allow(clippy::too_many_arguments, reason = "the search's scope, its word and its time box")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the search's scope, its word and its time box"
+    )]
     pub(crate) fn search(
         &self,
         run: &Run,

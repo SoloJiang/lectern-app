@@ -43,7 +43,12 @@ impl Fake {
     }
 
     fn ids(&self) -> Vec<SemanticRequestId> {
-        self.pending.lock().unwrap().iter().map(|(i, _)| *i).collect()
+        self.pending
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(i, _)| *i)
+            .collect()
     }
 
     /// Answers the request `id` with `locations` (path, line, column).
@@ -85,12 +90,18 @@ impl NavigationProvider for Fake {
     }
 
     fn definition(&self, request: SemanticRequest, reply: SemanticReply) {
-        self.calls.lock().unwrap().push(("definition", request.clone()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("definition", request.clone()));
         self.pending.lock().unwrap().push((request.id, reply));
     }
 
     fn references(&self, request: SemanticRequest, reply: SemanticReply) {
-        self.calls.lock().unwrap().push(("references", request.clone()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("references", request.clone()));
         self.pending.lock().unwrap().push((request.id, reply));
     }
 
@@ -219,7 +230,11 @@ fn escalate_dead_or_unregistered_providers_are_not_called() {
     let id = ask(&h);
     assert!(p.calls().is_empty());
     assert_eq!(results(&h, id).semantic, SemanticState::NotRequested);
-    assert_eq!(h.indexer.inner().providers(), 0, "a dead provider is unregistered");
+    assert_eq!(
+        h.indexer.inner().providers(),
+        0,
+        "a dead provider is unregistered"
+    );
     let q = Fake::new("jdtls", false);
     let reg = h.indexer.register_provider(q.clone(), token(&h));
     drop(reg);
@@ -239,18 +254,29 @@ fn escalate_head_only_only_when_head_clean() {
     assert_eq!(scip.calls().len(), 1);
     assert!(scip.calls()[0].1.head_clean);
     // C.java changed in the worktree since HEAD: SCIP's location there goes.
-    h.git.write("main", "src/C.java", &[C.as_bytes(), b"// edited\n"].concat());
+    h.git.write(
+        "main",
+        "src/C.java",
+        &[C.as_bytes(), b"// edited\n"].concat(),
+    );
     h.emit(&[("src/C.java", CHANGED)]);
     h.settle();
     scip.answer_all(&[B_SIZE, C_SIZE]);
     match &results(&h, id).semantic {
         SemanticState::Ready(l) => {
-            assert_eq!(l.iter().map(|l| &*l.path).collect::<Vec<_>>(), ["src/B.java"]);
+            assert_eq!(
+                l.iter().map(|l| &*l.path).collect::<Vec<_>>(),
+                ["src/B.java"]
+            );
         }
         other => panic!("{other:?}"),
     }
     // The text itself changed: SCIP is not asked.
-    h.git.write("main", "src/A.java", &[A.as_bytes(), b"// edited\n"].concat());
+    h.git.write(
+        "main",
+        "src/A.java",
+        &[A.as_bytes(), b"// edited\n"].concat(),
+    );
     h.emit(&[("src/A.java", CHANGED)]);
     h.settle();
     let before = scip.calls().len();
@@ -266,7 +292,10 @@ fn head_dirty_staged_index_and_commit() {
     let h = java();
     let scip = Fake::new("scip", true);
     let _reg = h.indexer.register_provider(scip.clone(), token(&h));
-    h.git.add("main", &[("src/A.java", &[A.as_bytes(), b"// staged\n"].concat())]);
+    h.git.add(
+        "main",
+        &[("src/A.java", &[A.as_bytes(), b"// staged\n"].concat())],
+    );
     h.refresh_files();
     assert!(!h.indexer.head_clean(&h.key(), "src/A.java"));
     ask(&h);
@@ -278,7 +307,10 @@ fn head_dirty_staged_index_and_commit() {
     ask(&h);
     assert_eq!(scip.calls().len(), 1, "committed");
     // An index change delivered, the comparison not run yet: not clean.
-    h.git.add("main", &[("src/B.java", &[B.as_bytes(), b"// staged\n"].concat())]);
+    h.git.add(
+        "main",
+        &[("src/B.java", &[B.as_bytes(), b"// staged\n"].concat())],
+    );
     h.emit_git(&[("index", CHANGED)]);
     h.driver.run_until_idle();
     h.driver.advance(Duration::from_secs(5));
@@ -298,8 +330,16 @@ fn escalate_arbitration_is_independent_of_reply_order() {
     for scip_first in [true, false] {
         let h = java();
         // C.java changed in the worktree; D.java untracked.
-        h.git.write("main", "src/C.java", &[C.as_bytes(), b"// edited\n"].concat());
-        h.git.write("main", "src/D.java", b"class D {\n  int size() { return 4; }\n}\n");
+        h.git.write(
+            "main",
+            "src/C.java",
+            &[C.as_bytes(), b"// edited\n"].concat(),
+        );
+        h.git.write(
+            "main",
+            "src/D.java",
+            b"class D {\n  int size() { return 4; }\n}\n",
+        );
         h.emit(&[("src/C.java", CHANGED), ("src/D.java", CHANGED)]);
         h.settle();
         let scip = Fake::new("scip", true);
@@ -332,8 +372,10 @@ fn escalate_arbitration_is_independent_of_reply_order() {
         let SemanticState::Ready(l) = &r.semantic else {
             panic!("{:?}", r.semantic);
         };
-        let got: Vec<(String, u32, u32)> =
-            l.iter().map(|l| (l.path.to_string(), l.line, l.column)).collect();
+        let got: Vec<(String, u32, u32)> = l
+            .iter()
+            .map(|l| (l.path.to_string(), l.line, l.column))
+            .collect();
         merged.push(got);
     }
     assert_eq!(merged[0], merged[1]);
@@ -354,7 +396,11 @@ fn escalate_arbitration_stale_ids_and_cancel_on_close() {
     let first = ask(&h);
     let first_ids = jdtls.ids();
     h.indexer.close(first);
-    assert_eq!(*jdtls.cancelled.lock().unwrap(), first_ids, "closing cancels");
+    assert_eq!(
+        *jdtls.cancelled.lock().unwrap(),
+        first_ids,
+        "closing cancels"
+    );
     // A late reply to the closed query's ID is dropped.
     jdtls.answer_all(&[B_SIZE]);
     h.settle();
@@ -368,7 +414,11 @@ fn escalate_arbitration_stale_ids_and_cancel_on_close() {
 #[test]
 fn escalate_arbitration_jdtls_is_not_cancelled_by_scip() {
     let h = java();
-    h.git.write("main", "src/D.java", b"class D {\n  int size() { return 4; }\n}\n");
+    h.git.write(
+        "main",
+        "src/D.java",
+        b"class D {\n  int size() { return 4; }\n}\n",
+    );
     h.emit(&[("src/D.java", CHANGED)]);
     h.settle();
     let scip = Fake::new("scip", true);
@@ -403,7 +453,10 @@ fn escalate_unregister_while_requests_are_open() {
     let _r = h.indexer.register_provider(scip.clone(), token(&h));
     let both = ask(&h);
     scip.answer_all(&[B_SIZE]);
-    assert!(matches!(results(&h, both).semantic, SemanticState::Ready(_)));
+    assert!(matches!(
+        results(&h, both).semantic,
+        SemanticState::Ready(_)
+    ));
     drop(reg);
     assert_eq!(results(&h, alone).semantic, SemanticState::Failed);
     match results(&h, both).semantic.clone() {
@@ -426,7 +479,11 @@ fn escalate_java_references() {
     let jdtls = Fake::new("jdtls", false);
     let _reg = h.indexer.register_provider(jdtls.clone(), token(&h));
     let r = h.goto("src/B.java", "size", 0);
-    let of = r.symbol.as_ref().and_then(|s| s.defines.clone()).expect("defines");
+    let of = r
+        .symbol
+        .as_ref()
+        .and_then(|s| s.defines.clone())
+        .expect("defines");
     let before = jdtls.calls().len();
     let id = h.indexer.query(Query {
         project: h.key(),

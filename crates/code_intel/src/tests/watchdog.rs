@@ -43,7 +43,10 @@ fn eventually(what: &str, f: impl Fn() -> bool) {
 
 fn repo() -> Arc<FakeGit> {
     let git = Arc::new(FakeGit::new());
-    git.add("main", &[("a.ts", b"export function one() { return 1; }\n")]);
+    git.add(
+        "main",
+        &[("a.ts", b"export function one() { return 1; }\n")],
+    );
     git.commit("main");
     git
 }
@@ -73,10 +76,16 @@ fn watchdog_one_thread_after_20_activations() {
         run.kernel.activate().expect("activates");
         // A new file each time: an extraction, so the thread starts.
         let path = format!("f{i}.ts");
-        run.git
-            .add("main", &[(&path, format!("export function f{i}() {{}}\n").as_bytes())]);
+        run.git.add(
+            "main",
+            &[(&path, format!("export function f{i}() {{}}\n").as_bytes())],
+        );
         run.open();
-        assert!(watchdog_threads() <= 1, "activation {i}: {}", watchdog_threads());
+        assert!(
+            watchdog_threads() <= 1,
+            "activation {i}: {}",
+            watchdog_threads()
+        );
         run.kernel.deactivate();
         // Each deactivation ends its own thread: the count never grows.
         eventually("the activation's thread exited", || watchdog_threads() == 0);
@@ -98,7 +107,10 @@ fn watchdog_exits_on_executor_shutdown() {
 #[test]
 fn watchdog_deactivation_cancels_a_running_extraction() {
     let git = repo();
-    git.add("main", &[("b.ts", b"export function two() { return 2; }\n")]);
+    git.add(
+        "main",
+        &[("b.ts", b"export function two() { return 2; }\n")],
+    );
     git.commit("main");
     let run = Run::new(git, true);
     run.kernel.activate().expect("activates");
@@ -134,7 +146,10 @@ fn watchdog_deactivation_cancels_a_running_extraction() {
         });
         let start = Instant::now();
         while !entered.load(Ordering::Acquire) {
-            assert!(start.elapsed() < Duration::from_secs(20), "no extraction started");
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "no extraction started"
+            );
             std::thread::sleep(Duration::from_millis(1));
         }
         run.kernel.deactivate();

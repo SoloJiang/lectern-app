@@ -463,10 +463,14 @@ impl Harness {
     /// The worktree text at `path`: its effective OID in the map, else the
     /// OID of the bytes on disk.
     pub(crate) fn text(&self, path: &str) -> TextRef {
-        let oid = self.map().effective(path).map(|e| e.oid).unwrap_or_else(|| {
-            let bytes = std::fs::read(self.git.root("main").join(path)).expect("the file");
-            self.git.oid(&bytes)
-        });
+        let oid = self
+            .map()
+            .effective(path)
+            .map(|e| e.oid)
+            .unwrap_or_else(|| {
+                let bytes = std::fs::read(self.git.root("main").join(path)).expect("the file");
+                self.git.oid(&bytes)
+            });
         TextRef {
             worktree: Some(self.wt()),
             path: path.into(),

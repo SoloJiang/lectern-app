@@ -305,7 +305,12 @@ fn derived_writes_bump_their_generation() {
 fn found(r: &lectern_services::code_intel::QueryResults) -> Vec<(String, u32)> {
     r.candidates
         .iter()
-        .map(|c| (c.definition.location.path.to_string(), c.definition.location.line))
+        .map(|c| {
+            (
+                c.definition.location.path.to_string(),
+                c.definition.location.line,
+            )
+        })
         .collect()
 }
 
@@ -325,13 +330,20 @@ fn derived_overlay_changed_oid_is_searched() {
     h.open();
     assert!(h.hinted("b.ts"));
     h.pause();
-    h.git
-        .write("main", "b.ts", b"// moved\n\nexport function item() { return 2; }\n");
+    h.git.write(
+        "main",
+        "b.ts",
+        b"// moved\n\nexport function item() { return 2; }\n",
+    );
     h.emit(&[("b.ts", CHANGED)]);
     h.settle();
     assert!(!h.hinted("b.ts"));
     let r = h.goto("a.ts", "item", 0);
-    assert_eq!(found(&r), [("b.ts".to_owned(), 2)], "the new content, not the old unit");
+    assert_eq!(
+        found(&r),
+        [("b.ts".to_owned(), 2)],
+        "the new content, not the old unit"
+    );
     assert_eq!(
         r.candidates[0].source,
         lectern_services::code_intel::CandidateSource::Scanned
@@ -346,7 +358,10 @@ fn derived_eviction_search_finds_evicted_definitions() {
     let item = b"export function item() { return 1; }\n";
     h.git.add(
         "main",
-        &[("a.ts", b"export function run() { return item(); }\n"), ("b.ts", item)],
+        &[
+            ("a.ts", b"export function run() { return item(); }\n"),
+            ("b.ts", item),
+        ],
     );
     h.git.commit("main");
     h.open();
@@ -389,11 +404,19 @@ fn derived_packages_tiers_and_search_scope_follow() {
     assert_eq!(r.candidates[0].tier, CandidateTier::Elsewhere);
     // Unindexed: the search covers `app/x` only, `app/y` is outside.
     h.pause();
-    h.git.write("main", "app/y/c.ts", b"export function item() { return 3; }\n");
+    h.git.write(
+        "main",
+        "app/y/c.ts",
+        b"export function item() { return 3; }\n",
+    );
     h.emit(&[("app/y/c.ts", CHANGED)]);
     h.settle();
     let r = h.goto("app/x/a.ts", "item", 0);
-    assert_eq!(found(&r), [("app/y/b.ts".to_owned(), 0)], "c.ts is not searched");
+    assert_eq!(
+        found(&r),
+        [("app/y/b.ts".to_owned(), 0)],
+        "c.ts is not searched"
+    );
     assert_eq!(
         r.state,
         QueryState::Done(Completeness::Complete),
@@ -401,7 +424,10 @@ fn derived_packages_tiers_and_search_scope_follow() {
     );
     h.set_packages(&["app"]);
     let r = h.goto("app/x/a.ts", "item", 0);
-    assert_eq!(found(&r), [("app/y/b.ts".to_owned(), 0), ("app/y/c.ts".to_owned(), 0)]);
+    assert_eq!(
+        found(&r),
+        [("app/y/b.ts".to_owned(), 0), ("app/y/c.ts".to_owned(), 0)]
+    );
 }
 
 #[test]

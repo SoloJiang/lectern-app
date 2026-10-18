@@ -39,7 +39,8 @@ fn read_verify_answers_only_for_the_content() {
             what: "a CRLF checkout: the canonical OID is the content",
             setup: |h| {
                 h.git.eol("a.ts");
-                h.git.write("main", "a.ts", TEXT.replace('\n', "\r\n").as_bytes());
+                h.git
+                    .write("main", "a.ts", TEXT.replace('\n', "\r\n").as_bytes());
                 h.emit(&[("a.ts", CHANGED)]);
                 h.settle();
             },
@@ -49,7 +50,8 @@ fn read_verify_answers_only_for_the_content() {
         Case {
             what: "changed since: the map's old OID is no longer the content",
             setup: |h| {
-                h.git.write("main", "a.ts", &[TEXT.as_bytes(), b"// edited\n"].concat());
+                h.git
+                    .write("main", "a.ts", &[TEXT.as_bytes(), b"// edited\n"].concat());
                 // No event yet: the map still has the old OID.
             },
             asked: |h| h.map().effective("a.ts").expect("in the map").oid,
@@ -59,7 +61,8 @@ fn read_verify_answers_only_for_the_content() {
             what: "an external filter: no canonical OID",
             setup: |h| {
                 h.git.filter("a.ts");
-                h.git.write("main", "a.ts", &[TEXT.as_bytes(), b"// pointer\n"].concat());
+                h.git
+                    .write("main", "a.ts", &[TEXT.as_bytes(), b"// pointer\n"].concat());
             },
             asked: |h| h.git.oid(TEXT.as_bytes()),
             answers: false,
@@ -93,9 +96,18 @@ fn read_verify_answers_only_for_the_content() {
             h.ask(QueryKind::Definition { at, position }).state.clone()
         };
         if case.answers {
-            assert!(matches!(state, QueryState::Done(_)), "{}: {state:?}", case.what);
+            assert!(
+                matches!(state, QueryState::Done(_)),
+                "{}: {state:?}",
+                case.what
+            );
         } else {
-            assert_eq!(state, QueryState::Failed(QueryError::Stale), "{}", case.what);
+            assert_eq!(
+                state,
+                QueryState::Failed(QueryError::Stale),
+                "{}",
+                case.what
+            );
         }
     }
 }

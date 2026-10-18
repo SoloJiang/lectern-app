@@ -86,7 +86,9 @@ pub(crate) struct SemQuery {
     pub version: u64,
 }
 
-fn position_set(locations: impl Iterator<Item = (RelPath, u32, u32)>) -> HashSet<(RelPath, u32, u32)> {
+fn position_set(
+    locations: impl Iterator<Item = (RelPath, u32, u32)>,
+) -> HashSet<(RelPath, u32, u32)> {
     locations.collect()
 }
 
@@ -100,10 +102,12 @@ impl SemQuery {
         }
         if let Some(merged) = &self.merged {
             let listed = match self.kind {
-                SemKind::Definition => position_set(results.candidates.iter().map(|c: &Candidate| {
-                    let l = &c.definition.location;
-                    (l.path.clone(), l.line, l.column)
-                })),
+                SemKind::Definition => {
+                    position_set(results.candidates.iter().map(|c: &Candidate| {
+                        let l = &c.definition.location;
+                        (l.path.clone(), l.line, l.column)
+                    }))
+                }
                 SemKind::References => position_set(
                     results
                         .callers
@@ -266,11 +270,12 @@ impl Inner {
         let Some(me) = self.arc() else {
             return;
         };
-        self.host.spawn_busy("semantic", Priority::Background, move || {
-            for id in affected {
-                me.remerge(id);
-            }
-        });
+        self.host
+            .spawn_busy("semantic", Priority::Background, move || {
+                for id in affected {
+                    me.remerge(id);
+                }
+            });
     }
 
     pub(crate) fn escalate_definition(
@@ -284,7 +289,14 @@ impl Inner {
         let c = &prepared.candidates;
         let wanted = c.len() > 1 || (c.len() == 1 && c[0].evidence == Evidence::NameOnly);
         if wanted {
-            self.escalate(id, snap, SemKind::Definition, at, position, prepared.lang.name());
+            self.escalate(
+                id,
+                snap,
+                SemKind::Definition,
+                at,
+                position,
+                prepared.lang.name(),
+            );
         }
     }
 
@@ -351,7 +363,12 @@ impl Inner {
             return;
         }
         chosen.sort_by(|a, b| (!a.head_only, &a.provider_id).cmp(&(!b.head_only, &b.provider_id)));
-        let requests: Vec<(SemanticRequestId, u64, Arc<dyn NavigationProvider>, ActivationToken)> = chosen
+        let requests: Vec<(
+            SemanticRequestId,
+            u64,
+            Arc<dyn NavigationProvider>,
+            ActivationToken,
+        )> = chosen
             .iter()
             .map(|r| (r.id, r.seq, r.provider.clone(), r.token.clone()))
             .collect();

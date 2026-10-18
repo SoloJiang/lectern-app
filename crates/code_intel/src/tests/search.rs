@@ -32,7 +32,11 @@ fn search_whole_word_table() {
         ("item", "", false),
     ];
     for (text, name, hit) in cases {
-        assert_eq!(whole_word(text.as_bytes(), name), *hit, "{text:?} / {name:?}");
+        assert_eq!(
+            whole_word(text.as_bytes(), name),
+            *hit,
+            "{text:?} / {name:?}"
+        );
     }
 }
 
@@ -67,8 +71,10 @@ fn search_parses_only_whole_word_hits() {
 /// counts the sub-project's files left and the unindexed ones outside it.
 #[test]
 fn search_stops_at_one_second_with_partial_counts() {
-    let mut files: Vec<(String, String)> =
-        vec![("app/main.ts".into(), "export function run() { return helper(); }\n".into())];
+    let mut files: Vec<(String, String)> = vec![(
+        "app/main.ts".into(),
+        "export function run() { return helper(); }\n".into(),
+    )];
     for i in 0..6 {
         files.push((
             format!("app/f{i}.ts"),
@@ -81,7 +87,10 @@ fn search_stops_at_one_second_with_partial_counts() {
             format!("export function helper() {{ return {}; }}\n", 10 + i),
         ));
     }
-    let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
     let h = unindexed(&refs, &["app", "lib"]);
     // Every extraction takes 400 ms of the query's clock.
     let clock = h.clock.clone();
@@ -121,7 +130,10 @@ fn search_writes_its_extractions() {
     h.goto("a.ts", "item", 0);
     assert!(h.stored(oid, "ts"));
     assert!(h.hinted("c.ts"));
-    assert!(!h.hinted("d.ts"), "searched, not hit: not indexed by the search");
+    assert!(
+        !h.hinted("d.ts"),
+        "searched, not hit: not indexed by the search"
+    );
     // The next query finds it in the index.
     let r = h.goto("a.ts", "item", 0);
     assert_eq!(r.candidates[0].source, CandidateSource::Index);
