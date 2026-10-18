@@ -20,6 +20,9 @@ test-support = ["dep:lectern-executor"]
 # Only testing::watchdog uses it until the plugin (step 4) starts the
 # watchdog through Executor::run_dedicated_gated.
 lectern-executor = { path = "../executor", optional = true }
+# The custom tables of `code_intel.tags` (store.rs); SQL goes through its
+# interface, so rusqlite stays a dependency of lectern-cache only.
+lectern-cache = { path = "../cache" }
 # The shared code_intel types (LangName, DefKind, RefSyntax, Position).
 lectern-services = { path = "../services" }
 streaming-iterator.workspace = true
@@ -34,7 +37,9 @@ tree-sitter-typescript.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+lectern-cache = { path = "../cache", features = ["test-support"] }
 lectern-executor = { path = "../executor", features = ["test-support"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

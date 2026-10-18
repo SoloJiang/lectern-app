@@ -3,7 +3,8 @@
 //! This is step 1 of docs/design/code_intel.md「验收」: the language registry,
 //! extraction keyed by (blob OID, language, grammar version, query version),
 //! the per-file deadline watchdog, and the reference-site analysis of one
-//! parsed file. Storage, the blob → path map, scheduling, queries and the
+//! parsed file. Step 2 adds the storage of extractions in `cache`'s custom
+//! tables (`store`). The blob → path map, scheduling, queries and the
 //! plugin are later steps.
 
 mod grammar;
@@ -14,6 +15,7 @@ mod watchdog;
 
 pub mod extract;
 pub mod site;
+pub mod store;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;

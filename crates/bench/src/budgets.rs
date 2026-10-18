@@ -815,6 +815,15 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // One 1 MiB file per language, against the 250 ms per-file deadline.
     share("code_intel/extract_1mib", RECORD, CODE_INTEL, ACTIVE, Time),
+    // A warm start's existence check over 100 000 stored files: 200 queries
+    // of 500 OIDs, with the touches of a warm start the next day.
+    share(
+        "code_intel/warm_100k",
+        &[median(Limit::TimeBelow(ms(500)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     // FakeBackend and the manual driver, without backend latency.
     share(
         "fs_watch/classify_burst",

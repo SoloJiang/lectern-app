@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）已实现；第 2–5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储）已实现；第 3–5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -1285,6 +1285,15 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 拆分（callgrind，TS，256 KiB，指令数）：解析约 38%，查询匹配约 40%，tree-sitter-tags 逐个 tag 的处理约 13%，本 crate 的 `finish` 约 5.6%，其余是树的释放和内存分配。同一语料按文件大小：16 KiB、64 KiB、256 KiB、1 MiB 的文件分别约 2.9、2.9、2.5、1.7 MiB/s。1 MiB 的 JS 文件里，tree-sitter-tags 的局部检查（内联进 `extract` 的代码和它的 `memcmp`）约占 45%；64 KiB 时约 2%。
 - 试过、没有保留的改动（交替运行两个二进制，每项三次）：去掉 locals 查询的 `(identifier) @local.reference`，1 MiB 时 1.69 对 1.67–1.69 MiB/s，没有变化；引用名去重后再分配字符串，1 MiB 时 1.65–1.67 对 1.57–1.59，8 KiB 的文件 2.54–2.65 对 2.56–2.64，没有收益；兜底模式不带 `#is-not? local`，1 MiB 时 1.69 对 2.12，8 KiB 时没有变化，但局部变量名会进入引用名；函数级作用域标成 `local.scope-inherits false`，1 MiB 时 1.68–1.72 对 1.99–2.02，8 KiB 时 2.55–2.66 对 2.62–2.63，但改变了被过滤的引用。解析器、查询游标和 `TagsContext` 本来就按线程复用，locals 和 tags 本来就是一次匹配。
 
+第 2 步（存储），叠在第 1 步的分支上，同一台机器。
+
+- `just check`、`just test`（整个工作区 1149 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `just test -p lectern-code-intel`：51 个测试通过，其中 `store_*` 12 个：每种首发语言的夹具抽取后写入、读回与原结果逐项相同；`Def` 的每个字段（种类、可见性的五种取值、作用域、参数个数为空、0 和 255）读回相同；非 `Done` 的状态只有 `ci_ext` 一行、不出现在按名字的查找和名字表里，`Cancelled`、`Unsupported` 不写入；存在检查只返回（OID、语言、grammar 版本、查询版本）完全相同的单元，SHA-1 与 SHA-256 的 OID 都能查到，1300 个 OID 分三次查询；按名字查定义和引用区分大小写；五种语言的兼容组分两次查询、结果合并；同一个 OID 有旧 grammar 版本和旧查询版本的单元时，存在检查、按名字查定义、查引用和名字表的两步都只返回当前版本的单元（`store_version_filter_returns_current_units_only`）；同一个键再写一次时旧单元连同它的行被替换，淘汰代数加一；配额 64 KiB 的登记下超出配额时按访问时间淘汰，两小时后经存在检查标记过的单元留下、没有标记的被淘汰，被淘汰的单元在三张表里都没有行（测试自己的登记加了按单元计行数的语句），淘汰代数只在淘汰时变化，同一分库的两个句柄读到同一个代数（`store_quota_evicts_by_access_time`）；`set_max_page_count` 让写入返回 `Dropped`，不 panic，什么也没写入，代数不变，留出空间、过了 60 秒之后写入照常提交（`store_dropped_write_does_not_panic`）。
+- `cargo tree -i rusqlite -e normal --depth 1` 只列出 `lectern-cache`。本 crate 新增 `lectern-cache` 依赖，dev 依赖加 `lectern-cache` 的 `test-support` 和 `tempfile`，Cargo.lock 只有本 crate 的依赖列表变化，没有新增 crate。
+- 查询计划（Python 的 sqlite3 按同样的建表语句 `EXPLAIN QUERY PLAN`）：存在检查用 `UNIQUE (oid, lang, grammar, query)` 的自动索引按 `oid IN (…)` 逐个查找；按名字查定义先用 `ci_def_name`，再按 `ci_ext` 的主键取单元；按名字查引用用 `ci_ref` 的主键；按单元读定义、引用分别用 `ci_def_unit`、`ci_ref_unit`。
+- `code_intel/warm_100k`（`just bench --measure code_intel/warm`，四次）：中位数 450、534、474、456 ms，预算 500 ms，Linux 上不判定，M 系列由 macOS CI 判定。拆分：去掉存在检查里的标记访问时约 82 ms（200 次查询）；其余约 370 ms 是 `TableSet::touch` 写回 10 万个单元的访问时间（每 4096 个一个写事务，逐行 `UPDATE`，约 3.7 µs 一个），与 `cache/tables_touch` 的预算（5000 个 < 20 ms）同一量级；访问时间在一小时以内、写回不改任何行时耗时相同（472 ms），开销在逐行执行语句本身。
+- 单元的字节数（「存储表」的估算）对照实际文件：每种首发语言约 8 KiB 的夹具语料（`testing::corpus`）各写 1000 个单元，声明的字节数合计 52.8 MB，分库文件（含 `-wal`）59.1 MB，实际约为估算的 1.12 倍。这份语料由抽取夹具重复拼成，每 8 KiB 有 99–152 个定义、17–50 个引用名，定义比真实代码密得多，所以没有据此修改 10 万文件 200–250 MB 的估算；`code_intel/disk_100k` 仍按仓库形状的语料在后续步骤测量。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1320,3 +1329,27 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 设计没有说明 `(identifier) @local.reference` 会匹配成员名和路径段，`int add = 0; items.add(x)` 里的 `add` 因此绑定到了局部变量。现在按位置表排除（「外部格式」已补）。tree-sitter-tags 一侧，成员调用的模式本来就不带 locals 谓词，兜底的成员模式也不带。
 - 引用名原来只有调用、类型、构造和实现，`ci_ref` 选不出只有普通用处的文件。现在加了兜底模式（「抽取结果」「外部格式」已补）。同一个文件里对根作用域局部定义的用处（Python 模块级的 `TAX_RATE`）仍按设计不进入引用名，这个文件就是定义所在的文件，查引用时总会现场解析。
 - `code_intel/extract_throughput` 的测量方式改为仓库形状，另加只记录的 `code_intel/extract_1mib`，预算不变，见 [ADR 0031](../adr/0031.md)（提议中）。设计原来没有规定语料的形状，第 1 步用的是每种语言一个 1 MiB 的文件。
+
+第 2 步：
+
+- 设计没有给存储的接口。实现为公开的 `store` 模块，供第 3、4 步和 bench 使用：
+  - `TABLES`（`code_intel.tags` 的登记，`NAMESPACE` 版本 1、`QUOTA` 256 MiB）和 `Version`（语言、grammar 版本、查询版本，`Version::of(&Lang)` 取当前语言表里的三元组）。
+  - `unit_key`、`unit_bytes`：「存储表」的键和字节数估算。
+  - `Store`（`Store::new(&Partition)`，`Clone`、不持有连接）：
+    - `evictions()`：淘汰代数，只读一个原子变量。
+    - `exists(&Version, &[BlobId]) -> Option<Vec<Found>>`：存在检查，`Found` 带 OID、单元和状态。
+    - `defs_by_name(name, &[Version]) -> Option<Vec<StoredDef>>`、`refs_by_name(name, &[Version]) -> Option<Vec<StoredUnit>>`：按名字查定义、查引用的单元，区分大小写。
+    - `units(&[Version])`、`def_names(&[Unit], f)`：名字表的两步。
+    - `load(Unit) -> Option<Extraction>`：读回一个单元，供解析扩展点「按路径取已抽取的结果」使用。
+    - `touch(&[Unit])`、`write() -> StoreWrite`。
+  - `StoreWrite`：`add(oid, &Version, &Extraction) -> bool`、`len`、`bytes`、`commit() -> Written`。
+
+  读取返回 None 表示分库读不出，调用方按全部未命中处理。
+- 存在检查查出 `unit, oid, status`，设计写的是 `SELECT oid`：标记访问要用单元 ID；状态让调用方区分 `TimedOut`、`TooLarge` 的单元（文件被打开时按交互截止时间重做）。按名字查定义、查引用也多查出单元 ID，调用方交出结果之后用它标记访问（[cache 设计「访问时间」](cache.md#访问时间)）。存在检查在批量线程上运行，自己标记命中的单元；按名字的查找不标记，由调用方决定时机。
+- 版本过滤的 `OR …` 写成固定的 4 组三元组（`GROUP_TRIPLES`），用不到的组绑定 NULL，超过 4 种语言的兼容组分几次查询再合并：登记的语句是静态文本，参数个数固定（cache 设计「登记的规则」）。首发语言最大的组（`ts`、`tsx`、`js`）一次查询。存在检查和名字表的第一步只查一种语言，各用一组三元组。
+- `ci_ref` 的插入用 `INSERT OR IGNORE`：抽取结果的引用名本来已经去重，重复的一行不至于让整批回滚。
+- grammar 版本和查询版本是 `u64`，按位存成 SQLite 的 64 位有符号整数，读写用同一种转换。
+- 语句共 11 条（三条插入、存在检查、两条按名字的查找、名字表两条、读回单元三条），在 cache 每连接 32 条的预编译缓存以内。
+- 名字表的第二步按单元逐个查 `ci_def_unit`（`def_names` 的单元按 ID 排序后传入）：设计写的是「按 `ci_def_unit` 顺序扫描」，没有规定是一条语句还是逐个单元，逐个单元不需要在 SQL 里表达映射过滤后的单元集合。
+- `store_dropped_write_does_not_panic` 不检查恢复后写入的单元仍在：`SQLITE_FULL` 之后 cache 把分库预算降到文件大小以下，刚写入的单元会被立即淘汰（cache 设计「淘汰」），这是 cache 的行为。
+- 「存储表」的「规模」一条要在第 2 步用 `code_intel/disk_100k` 实测后校准。第 2 步只用抽取夹具拼成的语料对照了字节数估算与实际文件的比例（见「实际验证」）：这份语料的定义密度远高于真实代码，不能用来校准 10 万文件的总量。`code_intel/disk_100k` 没有加入预算表，等第 3 步有仓库形状的合成仓库（`testing` 的 10 万文件形状）后再测。
