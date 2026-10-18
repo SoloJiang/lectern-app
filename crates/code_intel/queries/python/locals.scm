@@ -98,6 +98,35 @@
   name: (identifier) @local.definition
   (#set! local.visible "scope"))
 
+; Hidden from tree-sitter-tags, which compares names only: `match`
+; captures (the function's names, like assignment targets) and type
+; parameters (`def f[T]()`, in the declaration that owns them).
+(case_clause
+  (case_pattern) @definition.lectern.local
+  (#set! local.visible "scope"))
+
+; (`list[T]` in an annotation is a type_parameter node too: only the
+; declaring `type_parameters` field counts.)
+([
+  (function_definition
+    type_parameters: (type_parameter
+      (type
+        (identifier) @definition.lectern.local)))
+  (class_definition
+    type_parameters: (type_parameter
+      (type
+        (identifier) @definition.lectern.local)))
+ ]
+  (#set! local.visible "owner:type_parameter"))
+
+(type_alias_statement
+  left: (type
+    (generic_type
+      (type_parameter
+        (type
+          (identifier) @definition.lectern.local))))
+  (#set! local.visible "within:type_alias_statement"))
+
 ; References
 ;------------
 

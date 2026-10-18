@@ -21,8 +21,9 @@ cargo check -p lectern-code-intel     # 只改本 crate 时最快的反馈
 just test -p lectern-code-intel
 ```
 
-- 测试在 `src/tests/`，按前缀分文件（`lang_*`、`extract_*`、`deadline_*`、`site_*`）；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
+- 测试在 `src/tests/`，按前缀分文件（`lang_*`、`extract_*`、`deadline_*`、`site_*`、`forms_*`）；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
 - tags 和 locals 查询在 `queries/`，文件头写明上游版本、commit 和 Lectern 的改动；改查询、升级 grammar 或 tree-sitter 时，抽取快照（`src/tests/snapshots/`）的变化逐个看过，版本常量由 `lang_grammar_versions_match_lock` 对照 Cargo.lock。
+- 引入名字的语法形式都在 `src/forms.rs` 的表里（设计「定义形式」），语法种类表由它推出：新增或改动一种形式时先改这张表，在 `src/tests/forms.rs` 的 `SAMPLES` 里加样例，再改查询和遍历；升级 grammar 时 `forms_cover_grammar` 列出没有归类的新节点种类。设计文档里的表由 `forms_table_matches_design` 对照，失败时按它打印的内容替换。
 - 核心语言的抽取是 `src/walk/` 下按查询写的一次遍历（ADR 0031）：改 tags 或 locals 查询时同时改对应的 `walk/<语言>.rs`，在 `src/tests/extract.rs` 的 `WALKER_CASES` 里加覆盖新模式的样例；`extract_walker_matches_tags` 检查遍历与 tree-sitter-tags 的结果相同。
 - 首发语言只在 `src/lang.rs` 的 `CORE_LANGUAGES` 和两个 `Cargo.toml` 的 grammar 依赖里列出。
 - 抽取夹具放 `tests/fixtures/extract/<语言>/`，只用合成的源码；格式随上游版本变化的，每个版本留一份样本。

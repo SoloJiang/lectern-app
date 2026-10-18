@@ -4266,6 +4266,7 @@ dependencies = [
  "insta",
  "lectern-executor",
  "lectern-services",
+ "serde_json",
  "streaming-iterator",
  "tree-sitter",
  "tree-sitter-go",

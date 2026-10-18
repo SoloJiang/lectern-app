@@ -102,6 +102,15 @@
     (identifier) @local.definition)
   (#set! local.visible "scope"))
 
+; Type parameters, in the function or type that declares them; Go has one
+; namespace, and the uses are type names. Hidden from tree-sitter-tags,
+; which compares names only. (A method receiver's type parameters,
+; `(l *List[E])`, are not modelled.)
+(type_parameter_declaration
+  name: (identifier) @definition.lectern.local
+  (#set! local.namespace "both")
+  (#set! local.visible "owner:type_parameter_list"))
+
 ; References
 ;------------
 

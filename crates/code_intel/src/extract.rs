@@ -223,7 +223,7 @@ pub fn extract(
     extract_tags(lang, source, deadline, cancel)
 }
 
-/// A core language: one walk over the tree (`crate::walk`, ADR 0032).
+/// A core language: one walk over the tree (`crate::walk`, ADR 0031).
 fn extract_walking(
     lang: &Lang,
     source: &[u8],

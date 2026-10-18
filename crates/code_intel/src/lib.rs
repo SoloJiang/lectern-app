@@ -6,6 +6,7 @@
 //! parsed file. Storage, the blob → path map, scheduling, queries and the
 //! plugin are later steps.
 
+mod forms;
 mod grammar;
 mod lang;
 mod locals;

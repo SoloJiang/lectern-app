@@ -94,6 +94,7 @@
 
 (class_declaration
   name: (_) @local.definition
+  (#set! local.namespace "both")
   (#set! local.visible "scope"))
 
 ; References

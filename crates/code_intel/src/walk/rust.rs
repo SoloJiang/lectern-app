@@ -14,6 +14,7 @@ ids! {
             enum_variant = "enum_variant",
             union_item = "union_item",
             type_item = "type_item",
+            associated_type = "associated_type",
             impl_item = "impl_item",
             trait_item = "trait_item",
             declaration_list = "declaration_list",
@@ -193,7 +194,7 @@ impl Rust {
                     Some(DefKind::Struct)
                 } else if p == k.enum_item {
                     Some(DefKind::Enum)
-                } else if p == k.type_item {
+                } else if p == k.type_item || p == k.associated_type {
                     Some(DefKind::Type)
                 } else if p == k.trait_item {
                     Some(DefKind::Trait)

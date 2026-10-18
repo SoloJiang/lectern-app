@@ -763,7 +763,7 @@ pub enum Visibility {
   - 标记：`@reference.lectern.<种类>` 的捕获只给抽取规则用，不进入引用名。Rust 的 `pub`（`visibility_modifier`）、`impl` 块与它实现的类型（区分 trait 实现），Java 的 `private`，JS / TS 的 `export` 语句、`export { name }` 与 `export default name` 导出的名字、`import` 语句，Go 方法的接收者类型。
   - 参数列表：函数、方法的模式用 `@doc` 捕获参数列表节点（tags 把它的文本放在 `Tag::docs`），按括号、尖括号、字符串和注释的嵌套数顶层的逗号。Rust 的 `self` 接收者和 Python 的 `*`、`/` 分隔符不计数；没有括号的参数列表（`x => x`）是 1 个。查询不再用 `@doc` 捕获注释。
   - 规则：Rust 有 `pub` 的项、trait 和 trait 实现里的成员、宏是 `Public`，其余 `Module`；Java 有 `private` 的是 `File`，其余 `Public`；Go 大写开头的是 `Public`，其余 `Package`；Python 和语言包是 `Unknown`。JS / TS：函数体里的定义是 `File`；其余取最外层定义的可见性：在 `export` 语句里或名字被导出时是 `Public`，文件有 `import` / `export`（ES 模块）时是 `File`，没有时（脚本、CommonJS）是 `Public`。
-- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。核心语言的定义取同一棵语法树上 `walk` 的结果，与索引里的定义一致；语言包的定义取查询的结果。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
+- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。核心语言的定义取同一棵语法树上 `walk` 的结果，与索引里的定义一致；语言包的定义取查询的结果。解析、查询和遍历都按 `ParsedFile` 自己的截止时间和取消标志停止（解析和查询在进度回调里检查，遍历每 1024 个节点检查一次），返回之前再检查一次，所以截止时间之后不会交出结果。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
 
 ### 外部格式（tags 查询）
 
@@ -786,13 +786,210 @@ pub enum Visibility {
 - 核心语言的抽取不经 tree-sitter-tags 的迭代器（[ADR 0031](../adr/0031.md)）：`walk` 模块为每种语言（JS / TS / TSX 共用一份）写了一次遍历，解析后按前序访问每个具名节点，在名字节点上按这种语言 tags 查询里模式的顺序判断它是定义、标记还是引用（第一个成立的模式生效，与 tree-sitter-tags 每个名字节点只留一个 tag、序号小的模式优先相同），带 `#is-not? local` 的引用按 tree-sitter-tags 的规则过滤（按名字比较之前出现的、所在作用域链上的 `@local.definition` 捕获的文本，遇到不继承的作用域停止），定义和标记交给与 tags 路径相同的 `rules::finish`。查询仍是规格：改 tags 或 locals 查询时同时改 `walk/<语言>.rs`，`extract_walker_matches_tags` 对全部夹具、每种语言逐个模式的样例、64 KiB 的语料和病态输入检查两条路径的抽取结果相同。唯一列出的差异是 tree-sitter 查询引擎丢掉的匹配：嵌套模式里重复字段的第二个名字（Go 包级的 `const A, B = 1, 2` 只匹配到 `A`，tags 和 locals 查询都是），遍历按模式的含义把 `B` 也记为定义。节点种类和字段按名字解析成 ID，grammar 里缺少其中一个时这种语言退回 tags 路径并记一条日志。语言包仍用 tree-sitter-tags。
 - 夹具：`crates/code_intel/tests/fixtures/extract/<语言>/` 下每种语言若干真实写法的样本（类、方法、闭包、重载、嵌套模块、导出与非导出、宏），抽取结果用 insta 快照；grammar 或查询升级时快照的变化在 PR 里逐个看过。另有一份病态输入（深度嵌套、超长行）用于截止时间的测试。
 
+### 定义形式
+
+每种首发语言里引入名字的语法形式，以及 Lectern 怎样处理它，都列在下表（`src/forms.rs` 的 `FORMS`）。tags 和 locals 查询、`walk` 的遍历按表实现；语法种类表（「候选的分层与过滤」）由表里的定义行推出：一个定义种类被它那一行列出的引用语法接受，`Plain` 和 Rust 以外的 `Member` 接受全部种类。
+
+- 覆盖：grammar 的 `node-types.json`（grammar crate 的 `NODE_TYPES`）里，带 `name`、`declarator`、`pattern`、`alias`、`label`、`left`、`property`、`parameter`、`key` 中任一字段的具名节点都必须有一行；没有这些字段的绑定位置（参数列表、模式、`match` 的捕获）单独列出。`forms_cover_grammar` 检查这两点，并检查每一行的节点种类在 grammar 里存在，所以升级 grammar 时新增或改名的声明形式会让测试失败，直到它被归类。
+- 样例：每个定义行的每个种类、每个局部绑定行都有样例（`src/tests/forms.rs` 的 `SAMPLES`）。`forms_samples_extract_and_bind` 检查定义样例在两条抽取路径上都给出这个定义且结果相同，绑定样例按「绑定规则」的期望绑定。
+- 本表与代码里的表一致，由 `forms_table_matches_design` 检查；改表时按测试打印的内容替换两个标记之间的部分。
+- 「处理」一列：定义的种类，括号里是除 `Plain` 外能指向它的引用语法；「局部」是绑定的命名空间（值、类型或两者，见「绑定规则」）；「组成部分」见所在的行；「引用」是用处，不是定义；「忽略」的原因在「说明」里。
+
+<!-- forms:begin -->
+| 语言 | 节点 | 处理 | 说明 |
+|---|---|---|---|
+| js ts tsx | `arrow_function` | 局部（值） | `x => …` 的参数 |
+| js ts tsx | `assignment_expression` | 定义 Function（Call、MemberCall、Construct） | 右边是函数时（`f = () => …`、`obj.f = function () {}`）；其余是赋值 |
+| js ts tsx | `assignment_pattern` | 组成部分 | 参数和解构的默认值：左边绑定，右边是用处 |
+| js ts tsx | `augmented_assignment_expression` | 忽略 | 给已有的名字赋值 |
+| js ts tsx | `binary_expression` | 忽略 | 表达式 |
+| js ts tsx | `break_statement` | 忽略 | 标签：单独的命名空间，不导航 |
+| js ts tsx | `catch_clause` | 局部（值） | `catch (e)` |
+| js ts tsx | `class` | 定义 Class（Construct、Type） | 类表达式：名字只在类里可见，经索引找到 |
+| js ts tsx | `class_declaration` | 定义 Class（Construct、Type）；局部（值和类型） |  |
+| js ts tsx | `continue_statement` | 忽略 | 标签 |
+| js ts tsx | `export_specifier` | 引用 | `export { a as b }`：`a` 是用处，`b` 是导出名 |
+| js | `field_definition` | 定义 Field（Call、MemberCall） | 类字段，值可以是函数 |
+| js ts tsx | `for_in_statement` | 局部（值） | 带 `const` / `let` / `var` 时；否则是赋值 |
+| js ts tsx | `formal_parameters` | 局部（值） | 每个参数，含解构和默认值 |
+| js ts tsx | `function_declaration` | 定义 Function（Call、MemberCall、Construct）；局部（值） |  |
+| js ts tsx | `function_expression` | 定义 Function（Call、MemberCall、Construct） | 名字只在函数里可见，经索引找到 |
+| js ts tsx | `generator_function` | 定义 Function（Call、MemberCall） | 同函数表达式 |
+| js ts tsx | `generator_function_declaration` | 定义 Function（Call、MemberCall）；局部（值） |  |
+| js ts tsx | `import_clause` | 忽略 | import：经索引和解析扩展点解析，不是局部定义 |
+| js ts tsx | `import_specifier` | 忽略 | import，同上 |
+| js ts tsx | `namespace_import` | 忽略 | `import * as ns`，同上 |
+| js tsx | `jsx_closing_element` | 引用 | 组件名 |
+| js tsx | `jsx_opening_element` | 引用 | 组件名 |
+| js tsx | `jsx_self_closing_element` | 引用 | 组件名 |
+| js ts tsx | `labeled_statement` | 忽略 | 标签 |
+| js ts tsx | `member_expression` | 引用 | `a.b` |
+| js ts tsx | `method_definition` | 定义 Method（Call、MemberCall） | `constructor` 不是定义（`new C` 指向类）；计算出的名字不记 |
+| js ts tsx | `object_assignment_pattern` | 组成部分 | 解构的默认值 |
+| js ts tsx | `pair` | 定义 Function（Call、MemberCall、Construct） | 值是函数时；其余是对象的键 |
+| js ts tsx | `pair_pattern` | 组成部分 | 解构：键是属性名，值是模式 |
+| js ts tsx | `regex` | 忽略 | 正则的内容 |
+| js ts tsx | `shorthand_property_identifier_pattern` | 组成部分 | 解构的简写 |
+| js ts tsx | `variable_declarator` | 定义 Function（Call、MemberCall、Construct）、Class（Construct、Type）、Constant（Call、MemberCall、Construct）、Variable（Call、MemberCall、Construct）；局部（值） | 值是函数或类时是函数或类；顶层（含 `export`、`declare`）的 `const` 是常量，`let` / `var` 是变量；都是局部绑定 |
+| ts tsx | `abstract_class_declaration` | 定义 Class（Type）；局部（值和类型） |  |
+| ts tsx | `abstract_method_signature` | 定义 Method（Call、MemberCall） |  |
+| ts tsx | `ambient_declaration` | 组成部分 | `declare const` / `let` / `var` 见 variable_declarator，`declare function` 见 function_signature |
+| ts tsx | `conditional_type` | 引用 | 类型 |
+| ts tsx | `enum_assignment` | 定义 Constant | 有初始值的枚举成员 |
+| ts tsx | `enum_body` | 定义 Constant | 没有初始值的枚举成员 |
+| ts tsx | `enum_declaration` | 定义 Enum（Type）；局部（值和类型） |  |
+| ts tsx | `function_signature` | 定义 Function（Call、MemberCall） | 重载签名和 `declare function` |
+| ts tsx | `generic_type` | 引用 | `Foo<T>` |
+| ts tsx | `index_signature` | 忽略 | `[key: string]: T` 的键名只是说明 |
+| ts tsx | `infer_type` | 忽略 | `infer U`：只在条件类型的一个分支里可见，没有建模，只给索引候选（不直接跳转） |
+| ts tsx | `interface_declaration` | 定义 Interface（Type）；局部（类型） |  |
+| ts tsx | `internal_module` | 定义 Module（Type） | `namespace A.B` 记最后一段 |
+| ts tsx | `mapped_type_clause` | 局部（类型） | `[K in keyof T]`，在映射类型里可见 |
+| ts tsx | `method_signature` | 定义 Method（Call、MemberCall） |  |
+| ts tsx | `module` | 定义 Module（Type） | `module A`；`declare module 'x'` 的名字是字符串，不记 |
+| ts tsx | `nested_identifier` | 组成部分 | 模块名 `A.B`，见 internal_module |
+| ts tsx | `nested_type_identifier` | 引用 | `ns.T` |
+| ts tsx | `optional_parameter` | 定义 Field（Call、MemberCall）；局部（值） | 参数；带 `public` / `private` / `protected` / `readonly` / `override` 时也是字段（参数属性） |
+| ts tsx | `property_signature` | 定义 Field（Call、MemberCall） |  |
+| ts tsx | `public_field_definition` | 定义 Field（Call、MemberCall） | 类字段 |
+| ts tsx | `required_parameter` | 定义 Field（Call、MemberCall）；局部（值） | 同 optional_parameter |
+| ts tsx | `type_alias_declaration` | 定义 Type（Type）；局部（类型） |  |
+| ts tsx | `type_parameter` | 局部（类型） | 在声明它的类、接口、类型别名或函数里可见 |
+| ts tsx | `type_predicate` | 引用 | `x is T` |
+| rust | `assignment_expression` | 忽略 | 给已有的绑定赋值 |
+| rust | `associated_type` | 定义 Type（Type） | trait 里的 `type Item;` |
+| rust | `binary_expression` | 忽略 | 表达式 |
+| rust | `closure_parameters` | 局部（值） | 闭包的参数 |
+| rust | `compound_assignment_expr` | 忽略 | 给已有的绑定赋值 |
+| rust | `const_item` | 定义 Constant（Call）；局部（值） | 块里的是局部 |
+| rust | `const_parameter` | 局部（值） | `const N: usize`，在声明它的项里可见 |
+| rust | `enum_item` | 定义 Enum（Type）；局部（类型） | 块里的是局部 |
+| rust | `enum_variant` | 定义 Constant（Call、Construct、Type） | 元组变体被调用（`Io(e)`），记录变体被构造和匹配（`Move { x, y }`） |
+| rust | `extern_crate_declaration` | 忽略 | crate 的别名：经路径解析 |
+| rust | `field_declaration` | 定义 Field（Member） |  |
+| rust | `field_pattern` | 组成部分 | 结构体模式里的字段：简写和改名绑定 |
+| rust | `for_expression` | 局部（值） |  |
+| rust | `function_item` | 定义 Function（Call）、Method（Call、MemberCall、Member）；局部（值） | `impl` 和 trait 里的是方法；块里的是局部 |
+| rust | `function_signature_item` | 定义 Function（Call）、Method（Call、MemberCall、Member） | trait 和 `extern` 块里的签名 |
+| rust | `let_condition` | 局部（值） | `if let` / `while let` |
+| rust | `let_declaration` | 局部（值） |  |
+| rust | `lifetime_parameter` | 忽略 | 生命周期不进入索引，不导航 |
+| rust | `macro_definition` | 定义 Macro（Call） |  |
+| rust | `macro_rule` | 忽略 | 宏的匹配模式 |
+| rust | `match_arm` | 局部（值） |  |
+| rust | `mod_item` | 定义 Module | 路径段是 `Plain` |
+| rust | `parameter` | 局部（值） |  |
+| rust | `qualified_type` | 引用 | `<T as Trait>` |
+| rust | `range_pattern` | 引用 | 范围模式的端点 |
+| rust | `scoped_identifier` | 引用 | 路径 |
+| rust | `scoped_type_identifier` | 引用 | 路径 |
+| rust | `static_item` | 定义 Constant（Call）；局部（值） | 块里的是局部 |
+| rust | `struct_expression` | 引用 | 构造 |
+| rust | `struct_item` | 定义 Struct（Call、Construct、Type）；局部（值和类型） | 元组结构体被调用；块里的是局部 |
+| rust | `token_binding_pattern` | 忽略 | 宏的元变量 |
+| rust | `trait_item` | 定义 Trait（Type）；局部（类型） | 块里的是局部 |
+| rust | `type_binding` | 引用 | `Iterator<Item = T>` |
+| rust | `type_item` | 定义 Type（Construct、Type）；局部（类型） | 块里的是局部 |
+| rust | `type_parameter` | 局部（类型） | 在声明它的项里可见 |
+| rust | `union_item` | 定义 Struct（Construct、Type）；局部（类型） | 块里的是局部 |
+| rust | `use_as_clause` | 忽略 | `use` 的别名：经路径解析 |
+| rust | `variadic_parameter` | 忽略 | C 的变长参数（`args: ...`，只在 nightly 上可用）：没有建模，只给索引候选 |
+| rust | `where_predicate` | 引用 | 类型 |
+| java | `annotation` | 引用 | 注解 |
+| java | `annotation_type_declaration` | 定义 Interface（Type） |  |
+| java | `annotation_type_element_declaration` | 定义 Method（Call、MemberCall） | `@interface` 的元素 |
+| java | `assignment_expression` | 忽略 | 给已有的变量赋值 |
+| java | `binary_expression` | 忽略 | 表达式 |
+| java | `catch_formal_parameter` | 局部（值） |  |
+| java | `class_declaration` | 定义 Class（Construct、Type）；局部（值和类型） | 块里的局部类是局部 |
+| java | `compact_constructor_declaration` | 忽略 | 紧凑构造器：`new R(…)` 指向记录 |
+| java | `constant_declaration` | 定义 Constant | 接口里的常量 |
+| java | `constructor_declaration` | 忽略 | 构造器：`new C(…)` 指向类 |
+| java | `element_value_pair` | 引用 | 注解里的元素名 |
+| java | `enhanced_for_statement` | 局部（值） |  |
+| java | `enum_constant` | 定义 Constant |  |
+| java | `enum_declaration` | 定义 Enum（Type）；局部（值和类型） | 块里的是局部 |
+| java | `field_declaration` | 定义 Field |  |
+| java | `formal_parameter` | 定义 Field（Call、MemberCall）；局部（值） | 方法、构造器和 lambda 的参数是局部；记录头里的组件是字段，调用语法指向它的访问器 |
+| java | `inferred_parameters` | 局部（值） | `(a, b) -> …` |
+| java | `instanceof_expression` | 局部（值） | 模式变量：可见范围取决于控制流，只给候选 |
+| java | `interface_declaration` | 定义 Interface（Type）；局部（值和类型） | 块里的是局部 |
+| java | `lambda_expression` | 局部（值） | `x -> …` |
+| java | `local_variable_declaration` | 局部（值） |  |
+| java | `marker_annotation` | 引用 | 注解 |
+| java | `method_declaration` | 定义 Method（Call、MemberCall） |  |
+| java | `method_invocation` | 引用 | 调用 |
+| java | `module_declaration` | 忽略 | `module-info.java` |
+| java | `record_declaration` | 定义 Class（Construct、Type）；局部（值和类型） | 块里的是局部 |
+| java | `record_pattern_component` | 局部（值） | 模式变量：只给候选 |
+| java | `resource` | 局部（值） | `try (var r = …)` |
+| java | `scoped_identifier` | 引用 | 限定名 |
+| java | `spread_parameter` | 定义 Field（Call、MemberCall）；局部（值） | 同 formal_parameter |
+| java | `type_parameter` | 局部（类型） | 在声明它的类或方法里可见 |
+| java | `type_pattern` | 局部（值） | 模式变量：只给候选 |
+| java | `variable_declarator` | 组成部分 | 见所在的声明 |
+| python | `aliased_import` | 忽略 | import：经索引解析 |
+| python | `as_pattern` | 局部（值） | `with … as x`、`except … as x` |
+| python | `assignment` | 定义 Constant（Call、MemberCall）、Field（Call、MemberCall）；局部（值） | 模块顶层是常量，类体里是字段，都是局部绑定 |
+| python | `augmented_assignment` | 局部（值） |  |
+| python | `binary_operator` | 忽略 | 表达式 |
+| python | `boolean_operator` | 忽略 | 表达式 |
+| python | `case_pattern` | 局部（值） | `match` 的捕获；类名、关键字、带点的值和键不绑定 |
+| python | `class_definition` | 定义 Class（Call、MemberCall）；局部（值） |  |
+| python | `default_parameter` | 局部（值） | 默认值在外层作用域求值 |
+| python | `dict_pattern` | 组成部分 | `match` 的映射模式，见 case_pattern |
+| python | `except_clause` | 组成部分 | `as` 由 as_pattern 绑定 |
+| python | `for_in_clause` | 局部（值） | 推导式的变量 |
+| python | `for_statement` | 局部（值） |  |
+| python | `function_definition` | 定义 Function（Call、MemberCall）、Method（Call、MemberCall）；局部（值） | 类体里的是方法 |
+| python | `future_import_statement` | 忽略 | import |
+| python | `global_statement` | 引用 | 把名字移出函数作用域 |
+| python | `import_from_statement` | 忽略 | import：经索引解析 |
+| python | `import_statement` | 忽略 | import：经索引解析 |
+| python | `keyword_argument` | 引用 | 调用的关键字参数名 |
+| python | `lambda_parameters` | 局部（值） |  |
+| python | `named_expression` | 局部（值） | `:=` |
+| python | `nonlocal_statement` | 引用 | 同 global_statement |
+| python | `pair` | 忽略 | 字典的键 |
+| python | `parameters` | 局部（值） | 每个参数 |
+| python | `type_alias_statement` | 定义 Type | `type X = …` |
+| python | `type_parameter` | 局部（值） | `def f[T]()`，在声明它的函数或类里可见 |
+| python | `typed_default_parameter` | 局部（值） | 类型和默认值在外层作用域求值 |
+| python | `typed_parameter` | 局部（值） | 类型在外层作用域求值 |
+| go | `assignment_statement` | 忽略 | 给已有的变量赋值 |
+| go | `binary_expression` | 忽略 | 表达式 |
+| go | `const_spec` | 定义 Constant；局部（值） | 包级的是常量；函数里的是局部 |
+| go | `expression_list` | 组成部分 | `:=`、`range` 等的左边 |
+| go | `field_declaration` | 定义 Field（MemberCall） | 函数类型的字段可以被调用 |
+| go | `function_declaration` | 定义 Function（Call、MemberCall） |  |
+| go | `import_spec` | 忽略 | import：经路径解析 |
+| go | `keyed_element` | 引用 | 复合字面量的键 |
+| go | `labeled_statement` | 忽略 | 标签 |
+| go | `map_type` | 引用 | 类型 |
+| go | `method_declaration` | 定义 Method（MemberCall） |  |
+| go | `method_elem` | 定义 Method（MemberCall） | 接口的方法 |
+| go | `parameter_declaration` | 局部（值） |  |
+| go | `qualified_type` | 引用 | `pkg.T` |
+| go | `range_clause` | 局部（值） |  |
+| go | `receive_statement` | 局部（值） |  |
+| go | `short_var_declaration` | 局部（值） |  |
+| go | `type_alias` | 定义 Type（Type、Call、MemberCall） | 类型转换是调用语法 |
+| go | `type_parameter_declaration` | 局部（值和类型） | 在声明它的函数或类型里可见；方法接收者里的类型参数（`(l *List[E])`）没有建模 |
+| go | `type_spec` | 定义 Type（Type、Call、MemberCall） | 函数里的类型也进入索引，没有局部绑定 |
+| go | `type_switch_statement` | 局部（值） | `switch v := x.(type)` |
+| go | `var_spec` | 定义 Variable（Call、MemberCall）；局部（值） | 包级的是变量；函数里的是局部 |
+| go | `var_spec_list` | 组成部分 | `var ( … )` |
+| go | `variadic_parameter_declaration` | 局部（值） |  |
+<!-- forms:end -->
+
 ### 绑定规则
 
 `ParsedFile` 的局部绑定（`site.rs` 和 `locals.rs`）按下面的规则解析。规则写在每种语言的 locals 查询里，以模式属性的形式出现，tree-sitter-tags 不读这些属性：
 
 - 作用域的 `local.kind`：`function`（函数、方法、闭包、lambda）、`comprehension`（Python 的推导式，是函数作用域，但 `:=` 跳过它）、`class`（Python 的类体）。没有这个属性的作用域是块，文件本身是函数作用域。
-- 定义的 `local.scope "function"`：定义放进最近的函数作用域（JS 的 `var`、Python 的 `:=`），没有这个属性时放进包含它的最内层作用域。作为作用域节点 `name` 字段的定义（函数名、类名）放进外层作用域。
-- 定义的 `local.visible`，决定从哪里开始可见：`scope` 是整个作用域，包括声明之前的位置（提升）；`end:<种类>` 从最近的这种节点结束处开始（`let x = x + 1;` 右边的 `x` 是之前的 `x`）；`body:<种类>` 从这种节点的 `body` 开始（`for x in x.iter()`）；没有这个属性时从名字本身开始。
+- 定义的 `local.scope "function"`：定义放进最近的函数作用域（JS 的 `var`、Python 的 `:=`）；这个函数的 `body` 是作用域时（JS 的语句块）放进 `body`，参数的默认值看不到它。没有这个属性时放进包含它的最内层作用域。作为作用域节点 `name` 字段的定义（函数名、类名）放进外层作用域。
+- 定义的 `local.visible`，决定从哪里开始可见：`scope` 是整个作用域，包括声明之前的位置（提升）；`end:<种类>` 从最近的这种节点结束处开始（`let x = x + 1;` 右边的 `x` 是之前的 `x`）；`body:<种类>` 从这种节点的 `body` 开始（`for x in x.iter()`）；`owner:<种类>` 只在最近的这种节点的父节点之内（类型参数在声明它的类、函数或项里），`within:<种类>` 只在最近的这种节点之内（Python 的 `type A[T] = …`），这两种定义放进这个节点外面的作用域，所以它包含的方法也看得到；没有这个属性时从名字本身开始。
+- 定义的 `local.namespace`：`type`（类型参数、局部接口和类型别名）或 `both`（类、结构体、枚举，Go 的类型参数），没有时是值。类型位置的引用（`type_identifier`）只找类型和两者，其余位置只找值和两者；限定名的后几段（`a::B`、`ns.T`、`pkg.T`、Java 的 `Outer.Inner`）不找局部定义。
 - 定义的 `local.until "<字段>:<种类>|<种类>"`，决定到哪里结束可见：到最近的这类节点的这个字段开始处，节点没有这个字段时到节点结束。只有 Rust 的 `if let` / `while let` 用它，绑定不进入 `else` 分支，也不越过 `while` 的结尾。
 - 定义的 `local.certain "false"`：可见范围取决于控制流的形式（Java 的 `instanceof` 模式和记录模式），只给候选，不给绑定。
 - 引用的 `local.nonlocal "true"`：Python 的 `global`、`nonlocal` 语句里的名字，把这个名字移出所在函数的作用域。
@@ -800,19 +997,29 @@ pub enum Visibility {
 
 **安全不变式**：只有规则表明一个声明在引用处可见时，局部绑定才成立，才挡住索引里的候选（`Bound(Local)`，直接跳转）。外层作用域里同名、但在引用处不确定可见的声明（在不提升的形式里声明在引用之后、可见范围取决于控制流、被 `global` 移出）只作为候选（`Site::possible`，本文件的候选排在前面），这时仍查询索引，不会直接跳到别的文件，也不会直接跳到一个不在作用域里的局部声明。
 
-解析：从包含引用的最内层作用域向外找同名定义。离开一个函数或类体之后，再遇到的类体跳过（类体里的名字只对直接写在类体里的代码可见，对其中的方法和嵌套类不可见）。在一个作用域里，取引用之前最后一个可见的声明；没有时取引用之后的提升声明。找到确定的声明就是绑定；找到不确定的声明，结果只有候选。
+解析：从引用的求值作用域（包含它的最内层作用域；它在这个作用域节点的「作用域入口」部分里时，是外面那个作用域）向外找同名、同命名空间的定义。离开一个函数或类体之后，再遇到的类体跳过（类体里的名字只对直接写在类体里的代码可见，对其中的方法和嵌套类不可见）。在一个作用域里，取引用之前最后一个可见的声明；没有时取引用之后的提升声明。找到确定的声明就是绑定；找到不确定的声明，结果只有候选。
 
 | 语言 | 声明形式与可见范围 | 作用域 | 提升 | 模式 |
 |---|---|---|---|---|
-| JS / TS | `let`、`const`、`class` 声明：所在块，整个块（闭包可以在声明之前引用）；`var`：最近的函数，整个函数；函数声明：所在块，整个块；参数、`catch` 参数：整个函数或子句；`for (let … of …)` / `for (var …)`：循环或函数 | 块（语句块、`for`、`for…in`）；函数（函数、箭头函数、生成器、方法） | 函数声明、`var` | 对象和数组的解构，`= 默认值`和键不绑定；解构赋值（没有 `let` / `const` / `var`）不是声明 |
-| Python | 参数、赋值目标、增量赋值、`for` 目标、`with` / `except … as`、`def`、`class`：所在函数的整个作用域；`:=`：最近的函数，跳过推导式；推导式的 `for` 目标：推导式 | 函数（函数、lambda）；推导式；类体（只对直接写在类体里的代码可见） | 函数作用域里的所有名字（赋值之前的引用也绑定到它） | 元组、列表和星号目标；属性和下标目标不绑定 |
-| Rust | `let`：从声明结束处到块结束；`if let` / `while let`：从这个 `let` 结束处到 `if` 的 `else` 之前或 `while` 结束；`for` 模式：循环体；`match` 分支模式：整个分支（含守卫）；参数、闭包参数：整个函数；块里的 `fn`、`const`、`static`：整个块 | 块、`for`、`match` 分支；函数（`fn`、闭包） | 块里的项（`fn`、`const`、`static`） | 元组、元组结构体、结构体（字段简写和改名）、引用和 `@` 模式；构造器、路径、范围、宏和大写开头的名字不绑定 |
-| Java | 局部变量：从声明符结束处到块结束；增强 `for` 变量：循环体；`try` 资源：从资源结束处；参数、`catch` 参数、lambda 参数：整个方法或子句；块里的局部类、记录、枚举、接口：从名字开始；`instanceof` 模式、记录模式：不确定 | 块、`for`、增强 `for`、`catch`、`try` 资源、`switch` 分组；函数（方法、构造器、lambda） | 无 | 记录模式的组件（不确定） |
-| Go | `:=`：从语句结束处；函数里的 `var`、`const`：从这一项结束处；包级的 `var`、`const`：整个文件（与顺序无关）；`range` 变量：循环体；`select` 的接收语句：从语句结束处；参数、类型 `switch` 的别名：整个函数或语句 | 块、`for`、`if`、`switch`、各 `case`；函数（函数、方法、函数字面量） | 包级 `var`、`const` | 多变量声明 |
+| JS / TS | `let`、`const`、`class` 声明：所在块，整个块（闭包可以在声明之前引用）；`var`：最近的函数的函数体，整个函数体；函数声明：所在块，整个块；参数、`catch` 参数：整个函数或子句；`for (let … of …)` / `for (var …)`：循环或函数体。TS：类型参数在声明它的类、接口、类型别名或函数里（类型）；映射类型的键在映射类型里（类型）；接口、类型别名（类型）和枚举、抽象类（两者）在所在块，整个块 | 块（语句块、`for`、`for…in`）；函数（函数、箭头函数、生成器、方法） | 函数声明、`var`、TS 的类型声明 | 对象和数组的解构，`= 默认值`和键不绑定；解构赋值（没有 `let` / `const` / `var`）不是声明 |
+| Python | 参数、赋值目标、增量赋值、`for` 目标、`with` / `except … as`、`match` 的捕获、`def`、`class`：所在函数的整个作用域；`:=`：最近的函数，跳过推导式；推导式的 `for` 目标：推导式；类型参数（`def f[T]`、`class C[T]`、`type A[T] = …`）：在声明它的函数、类或别名里，类的类型参数在方法里也可见 | 函数（函数、lambda）；推导式；类体（只对直接写在类体里的代码可见） | 函数作用域里的所有名字（赋值之前的引用也绑定到它） | 元组、列表和星号目标；属性和下标目标不绑定；`match` 里只有单段的名字、`*rest`、`**rest` 和 `as` 绑定，类名、关键字、带点的值和映射的键不绑定 |
+| Rust | `let`：从声明结束处到块结束；`if let` / `while let`：从这个 `let` 结束处到 `if` 的 `else` 之前或 `while` 结束；`for` 模式：循环体；`match` 分支模式：整个分支（含守卫）；参数、闭包参数：整个函数；块里的 `fn`、`const`、`static`（值）、`struct`（两者）、`enum`、`union`、`trait`、`type`（类型）：整个块；类型参数（类型）和 const 参数（值）：在声明它的项里，含 `where` 子句和 `impl` 的方法 | 块、`for`、`match` 分支；函数（`fn`、闭包） | 块里的项 | 元组、元组结构体、结构体（字段简写和改名）、引用和 `@` 模式；构造器、路径、范围、宏和大写开头的名字不绑定 |
+| Java | 局部变量：从声明符结束处到块结束；增强 `for` 变量：循环体；`try` 资源：从资源结束处；方法、构造器、lambda 的参数和 `catch` 参数：整个方法或子句（记录头里的组件不是局部，是记录的字段）；块里的局部类、记录、枚举、接口（两者）：从名字开始；类型参数（类型）：在声明它的类或方法里；`instanceof` 模式、记录模式：不确定 | 块、`for`、增强 `for`、`catch`、`try` 资源、`switch` 分组；函数（方法、构造器、lambda） | 无 | 记录模式的组件（不确定） |
+| Go | `:=`：从语句结束处；函数里的 `var`、`const`：从这一项结束处；包级的 `var`、`const`：整个文件（与顺序无关）；`range` 变量：循环体；`select` 的接收语句：从语句结束处；参数、类型 `switch` 的别名：整个函数或语句；类型参数（两者）：在声明它的函数或类型里 | 块、`for`、`if`、`switch`、各 `case`；函数（函数、方法、函数字面量） | 包级 `var`、`const` | 多变量声明 |
+
+**作用域入口**：作用域节点里有些部分在外面的作用域求值，那里的引用、作用域和定义都从外面的作用域开始解析（`locals.rs` 的 `ENCLOSING`）。
+
+| 语言 | 在外层作用域求值的部分 | 例子 |
+|---|---|---|
+| Python | 函数参数的默认值和类型标注、返回类型；lambda 参数的默认值；类的基类和关键字参数；推导式第一个 `for` 的可迭代对象 | `def f(value=value)`、`lambda item=item: item`、`class A(Mixin)`、`[x for x in x]` |
+| JS / TS | 方法的计算名（`[key]() {}`）；TS 的参数装饰器。参数的默认值在参数作用域里求值：看得到前面的参数，看不到函数体里的 `var` 和 `let` | `class A { [key](key) {} }`、`f(a = x) { var x }` |
+| Rust | 无：泛型约束和 `where` 子句里只有类型，按类型参数的规则解析 | |
+| Java | 无：记录头不是作用域，组件是字段；注解和类型标注里只有类型 | |
+| Go | 无：接收者的类型在包级解析；接收者里的类型参数（`(l *List[E])`）没有建模，只给索引候选 | |
 
 - import 不是局部定义，经索引解析（「跳转到定义」第 2、3 步）。
-- 一种语言新增声明形式时，在它的 locals 查询里加模式和属性，在 `tests/binding.rs` 的这种语言的表里加行；每种语言一个表驱动的测试（`site_binding_<语言>`），每行是一段源码、引用的位置和期望（绑定到某个声明；只有这些候选，不允许直接跳到别的文件；没有局部定义，由索引回答）。
-- 抽取时用同一个 locals 查询过滤引用名（`#is-not? local`，tree-sitter-tags 或按它的规则过滤的 `walk`）。它不读上面的属性，只按名字比较：函数作用域标成 `local.scope-inherits false`，过滤只看引用所在函数自己的局部定义；捕获整个模式的定义（解构）不等于任何名字，不过滤；Rust 的 `if let` / `while let` 绑定用 `@definition.lectern.local` 捕获，tree-sitter-tags 在 locals 查询里只处理 `@local.scope` 和 `@local.definition`，所以不过滤它们，`if` 和 `while` 也不是作用域（tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，多数 `if` 不绑定名字）。这几处都让引用名多出名字，不会少。
+- 一种语言新增声明形式时，先在「定义形式」的表里归类，再在它的 locals 查询里加模式和属性，在 `tests/binding.rs` 的这种语言的表里加行；每种语言一个表驱动的测试（`site_binding_<语言>`），作用域入口和命名空间各一个（`site_binding_entry_points`、`site_binding_namespaces`），每行是一段源码、引用的位置和期望（绑定到某个声明；只有这些候选，不允许直接跳到别的文件；没有局部定义，由索引回答）。
+- 抽取时用同一个 locals 查询过滤引用名（`#is-not? local`，tree-sitter-tags 或按它的规则过滤的 `walk`）。它不读上面的属性，只按名字比较：函数作用域标成 `local.scope-inherits false`，过滤只看引用所在函数自己的局部定义；捕获整个模式的定义（解构）不等于任何名字，不过滤；Rust 的 `if let` / `while let` 绑定、各语言的类型参数和局部类型、Python 的 `match` 捕获用 `@definition.lectern.local` 捕获，tree-sitter-tags 在 locals 查询里只处理 `@local.scope` 和 `@local.definition`，所以不过滤它们，`if` 和 `while` 也不是作用域（tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，多数 `if` 不绑定名字）。这几处都让引用名多出名字，不会少。已知限制：过滤不知道作用域入口，推导式第一个可迭代对象和推导式变量同名时（`[x for x in x]`），这一处用到的外层名字不进入引用名；外层名字是 import 时，查这个名字的引用选不中这个文件。这种写法很少见。
 
 ### 存储表
 
@@ -1111,19 +1318,20 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - 语言：只留与当前文本的语言在同一兼容组里的候选。
 - 可见性：`File` 只留同一文件；`Package` 只留同一目录；`Module`（Rust）只留同一文件，以及以它为父模块的文件（`a.rs` 对应 `a/` 之下；`mod.rs`、`lib.rs`、`main.rs` 对应所在目录之下）；`Public`、`Unknown` 不过滤。
-- 语法种类：下表是默认规则，每种语言可以追加（Go 的类型转换 `Meters(value)` 是调用语法，目标在 tags 里是 `@definition.type`）；每种语言的追加规则在第 4 步随 `goto_*` 测试加入。
+- 语法种类：首发语言的表由「定义形式」推出（`forms::kinds_for`）：一个定义种类被它那一行列出的引用语法接受。`Plain` 接受全部种类；Rust 以外的 `Member` 也接受全部种类（左边可以是命名空间导入、模块、包或类，`utils.handle`、`models.User`、`pkg.Var`、`Outer.Inner` 的成员可以是任何定义）。推出的结果：
 
-  | `RefSyntax` | 接受的 `DefKind` |
-  |---|---|
-  | `Call`、`MemberCall` | `Function`、`Method`、`Macro`，以及 `Class`、`Struct`（Python、JS 的构造调用，Rust 的元组结构体） |
-  | `Construct`（`new X`） | `Class`、`Struct` |
-  | `Type` | `Class`、`Interface`、`Struct`、`Enum`、`Trait`、`Type`、`Module` |
-  | `Member` | Rust：`Field`、`Method`、`Constant`、`Variable`（`a.b` 的左边总是值）。其他语言：全部（左边可以是命名空间导入、模块、包或类，`utils.handle`、`models.User`、`pkg.Var`、`Outer.Inner` 的成员可以是任何定义） |
-  | `Plain` | 全部 |
-  | Go 的 `Call`、`MemberCall` | 默认规则之外再接受 `Type`（`units.Meters(value)` 也是类型转换） |
-  | Rust 的 `Call` | 默认规则之外再接受 `Constant`（元组变体的构造 `Io(code)`，变体是 `@definition.constant`） |
+  | 语言 | `Call` | `MemberCall` | `Construct` | `Type` | `Member` |
+  |---|---|---|---|---|---|
+  | JS | `Function`、`Method`、`Constant`、`Field`、`Variable` | 同 `Call` | `Function`、`Class`、`Constant`、`Variable` | `Class` | 全部 |
+  | TS / TSX | 同 JS | 同 `Call` | 同 JS | `Class`、`Interface`、`Enum`、`Type`、`Module` | 全部 |
+  | Rust | `Function`、`Method`、`Struct`、`Macro`、`Constant` | `Method` | `Struct`、`Type`、`Constant` | `Struct`、`Enum`、`Trait`、`Type`、`Constant` | `Method`、`Field` |
+  | Java | `Method`、`Field` | `Method`、`Field` | `Class` | `Class`、`Interface`、`Enum` | 全部 |
+  | Python | `Function`、`Method`、`Class`、`Constant`、`Field` | 同 `Call` | 无 | 无 | 全部 |
+  | Go | `Function`、`Type`、`Variable` | `Function`、`Method`、`Type`、`Field`、`Variable` | 无 | `Type` | 全部 |
 
-  这张表是 `site::accepted_kinds`。引用位置的 `RefSyntax` 由每种语言的一张位置表判断（`site.rs`）：每行是（标识符的节点种类、父节点种类与它所在的字段、可选的外层节点种类与字段或父节点必须有的字段）→ `RefSyntax`，第一条匹配的行生效；没有匹配的类型标识符为 `Type`，其余为 `Plain`。例如 Rust 的 `call_expression.function` 里的 `identifier` 是 `Call`，`call_expression.function` 里的 `field_expression.field` 是 `MemberCall`；Java 的 `method_invocation.name` 在有 `object` 字段时是 `MemberCall`。语言包没有位置表，都是 `Plain`。
+  原因按行：JS / TS 里任何值都可以放函数或类（`const handler = () => …`、类字段 `onClick = () => …`）；Rust 的元组变体被调用（`Io(e)`），记录变体被构造和匹配（`Message::Move { x, y }`，构造是 `Construct`，匹配是 `Type`），`const` 和 `static` 可以放函数指针；Java 记录组件的访问器以调用语法出现；Python 的类、模块常量和类属性都可以被调用；Go 的类型转换是调用语法，函数类型的变量和字段可以被调用。语言包没有定义形式，按通用规则：`Call` / `MemberCall` 接受 `Function`、`Method`、`Macro`、`Class`、`Struct`，`Construct` 接受 `Class`、`Struct`，`Type` 接受 `Class`、`Interface`、`Struct`、`Enum`、`Trait`、`Type`、`Module`，其余全部。`site_kind_table` 逐行检查上表。
+
+  这张表是 `site::accepted_kinds`。引用位置的 `RefSyntax` 由每种语言的一张位置表判断（`site.rs`）：每行是（标识符的节点种类、父节点种类与它所在的字段、可选的外层节点种类与字段或父节点必须有的字段）→ `RefSyntax`，第一条匹配的行生效；没有匹配的类型标识符为 `Type`，其余为 `Plain`。例如 Rust 的 `call_expression.function` 里的 `identifier` 是 `Call`，`call_expression.function` 里的 `field_expression.field` 是 `MemberCall`，`struct_expression.name` 里的类型名和路径的最后一段（`Message::Move { .. }`）是 `Construct`；Java 的 `method_invocation.name` 在有 `object` 字段时是 `MemberCall`。语言包没有位置表，都是 `Plain`。
 
 - 扩展点的 `disambiguate` 最后运行（Java 按所在类和参数个数，#18）。
 
@@ -1349,6 +1557,17 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - `just check`、`just test`（整个工作区 1147 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过；`cargo tree -e features -i tree-sitter` 里仍没有 `wasm`，`cargo tree -i tree-sitter-tags -e normal --depth 1` 仍只列出 `lectern-code-intel`，没有新增依赖。
 - `just test -p lectern-code-intel`：49 个测试通过。新增 `extract_walker_matches_tags`（7 份夹具、7 段逐个模式的样例、7 份 64 KiB 的语料、病态输入，两条路径的定义和引用名逐条比较，只允许上面那一处 Go 的差异）、`extract_definitions_on_one_node_are_siblings`。8 个快照没有变化：遍历在夹具上与 tree-sitter-tags 逐字节相同。`deadline_*` 现在经过遍历的路径，结果不变。
 
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 第三轮审阅意见（定义形式、作用域入口、语法种类表、`ParsedFile` 的截止时间）之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1158 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。
+- `just test -p lectern-code-intel`：60 个测试通过。按前缀：`lang_*` 10、`extract_*` 14、`deadline_*` 11、`site_*` 20、`forms_*` 5。新增：
+  - `forms_cover_grammar`：七种语言的 grammar 里带命名字段的节点种类都在「定义形式」的表里（182 行），表里的种类都在 grammar 里；`forms_have_no_duplicate_rows`；`forms_rows_have_samples`、`forms_samples_extract_and_bind`：151 个样例，覆盖每个定义行的每个种类和每个绑定行，定义样例在两条抽取路径上结果相同；`forms_table_matches_design`。
+  - `site_binding_entry_points`（Python 的默认值、标注、返回类型、基类、推导式，JS / TS 的计算方法名、参数默认值与 `var`、TS 的参数装饰器）、`site_binding_namespaces`（TS、Rust、Java、Go 的类型参数，值与类型的区分，Java 记录组件不是局部）；绑定的表驱动测试共 89 行。
+  - `site_rust_variants_are_reachable`（元组变体的调用、记录变体的构造和匹配都接受 `Constant`）；`site_kind_table` 改为逐行检查推出的语法种类表。
+  - `deadline_walk_checks_stop_while_walking`、`deadline_parsed_file_checks_every_phase`、`deadline_parsed_file_walk_reads_the_deadline`：同一份 Java 源码作为核心语言和作为语言包解析，读时钟的次数之差正好是遍历的检查次数（修改之前是 0）。
+  - 2 个快照有变化，逐个看过：TS 的参数属性 `constructor(public name: string)` 和 Java 记录 `Item(String name, Kind kind)` 的组件成为字段。
+- `code_intel/extract_throughput`（每项三次以上，MB 为 2^20 字节）：本轮 8 次 3.72–4.12 MB/s；与 9a2835b 交替运行时本轮 3.72–3.96、9a2835b 3.70–3.89，在噪声以内（遍历只多了 Java 记录、TS 参数属性等几处判断）。`code_intel/extract_1mib` 3.23–3.52 MB/s（9a2835b：3.35–3.45）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1399,3 +1618,15 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - Go 包级的 `const A, B = 1, 2`：查询引擎只匹配到 `A`，遍历把 `B` 也记为定义（「外部格式」已补）。
 - 同一个节点上的几个定义（Go 的 `const A, B`、`name, kind string`，Java 的 `int a, b;`）原来互为 `scope`（后一个的 `scope` 是前一个的名字），现在都取外层的定义。两条路径共用这条规则。
 - `EXTRACTOR_VERSION` 从 1 改为 2：上面两项改变了抽取结果。
+
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 第三轮审阅意见：
+
+- `ParsedFile` 在核心语言上第二次遍历语法树时用了一个永远清零的标志，截止时间和取消在遍历时不起作用。现在遍历用 `ParsedFile` 自己的截止时间和取消标志，返回之前再检查一次（「抽取结果」已补）。检查过的其他路径：`extract` 的解析和遍历都读看门狗的标志，遍历之后再读一次；tree-sitter-tags 路径不变。
+- 设计没有逐一列出每种语言引入名字的语法形式，几轮审阅分别找到漏掉的形式。现在有「定义形式」的表，由 grammar 的 `node-types.json` 检查覆盖（「定义形式」已补）。表带来的改动：
+  - 新的定义：Java 记录头的组件（字段）和 `@interface` 的元素（方法）；TS 的参数属性（字段）、顶层的 `declare const` / `let` / `var`、`namespace A.B` 的最后一段；Rust trait 的关联类型；Python 的 `type` 别名（含泛型别名）。
+  - Java 记录头的组件原来是文件作用域里的局部定义，文件里同名的引用都绑定到它；现在只有方法、构造器和 lambda 的参数是局部。
+  - 新的局部绑定：各语言的类型参数，TS 的映射类型键和块里的接口、类型别名、枚举、抽象类，Rust 块里的结构体、枚举、联合、trait、类型别名和 const 参数，Python 的 `match` 捕获和类型参数。局部绑定分值和类型两个命名空间，类型位置的引用找类型（「绑定规则」已补）。
+  - 不建模、只给索引候选的形式记为「忽略」并写明原因（TS 的 `infer`、Rust 的 C 变长参数、Go 方法接收者里的类型参数等）。
+- 设计没有规定作用域节点里哪些部分在外层求值，Python 的参数默认值和标注绑定到了参数本身。现在按「作用域入口」的表解析：Python 的默认值、标注、返回类型、基类和推导式的第一个可迭代对象，JS / TS 的计算方法名和参数装饰器；JS 的 `var` 放进函数体，参数默认值看不到它（「绑定规则」已补）。
+- 语法种类表原来是几条通用规则加两条追加，Rust 的记录变体（`Message::Move { x, y }`，`Construct` / `Type`）、JS 的函数字段、Java 记录的访问器等因此被过滤掉。现在由「定义形式」推出（「候选的分层与过滤」已补），Rust 的 `Member` 因此只接受 `Field`、`Method`（原来也接受 `Constant`、`Variable`，Rust 没有这样的成员）。Rust 路径形式的结构体构造（`a::B { .. }`）也归为 `Construct`。
+- `ParsedFile` 给局部类型（类型参数、局部接口）的 `SiteDef` 种类是 `Type`，原来都是 `Variable`。

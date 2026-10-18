@@ -14,3 +14,35 @@
 (optional_parameter
   pattern: (_) @local.definition
   (#set! local.visible "scope"))
+
+; Types, hidden from tree-sitter-tags (it compares names only): type
+; parameters in the declaration that owns them, mapped type keys in their
+; mapped type, and interfaces, type aliases, enums and abstract classes in
+; their block.
+(type_parameter
+  name: (type_identifier) @definition.lectern.local
+  (#set! local.namespace "type")
+  (#set! local.visible "owner:type_parameters"))
+
+(mapped_type_clause
+  name: (type_identifier) @definition.lectern.local
+  (#set! local.namespace "type")
+  (#set! local.visible "owner:mapped_type_clause"))
+
+([
+  (interface_declaration
+    name: (type_identifier) @definition.lectern.local)
+  (type_alias_declaration
+    name: (type_identifier) @definition.lectern.local)
+ ]
+  (#set! local.namespace "type")
+  (#set! local.visible "scope"))
+
+([
+  (enum_declaration
+    name: (identifier) @definition.lectern.local)
+  (abstract_class_declaration
+    name: (type_identifier) @definition.lectern.local)
+ ]
+  (#set! local.namespace "both")
+  (#set! local.visible "scope"))

@@ -22,6 +22,8 @@ defs:
   51:8-51 constant PART in Kind [public]
   53:16-55 method isTool in Kind [public] (0)
   58:11-64 class Item in Inventory [public]
+  58:23-58 field name in Item [public]
+  58:34-58 field kind in Item [public]
   66:25-72 class Counter in Inventory [file]
   67:20-67 field value in Counter [file]
   69:13-71 method increment in Counter [public] (0)

@@ -4,15 +4,141 @@
 //!
 //! The locals queries carry the per-language rules as pattern properties,
 //! which tree-sitter-tags ignores: `local.kind` on scopes; `local.scope`,
-//! `local.visible`, `local.until` and `local.certain` on definitions; `local.nonlocal` on
-//! the references of Python's `global` / `nonlocal`. A captured pattern is
-//! expanded here into the identifiers it binds.
+//! `local.visible`, `local.until`, `local.certain` and `local.namespace` on
+//! definitions; `local.nonlocal` on the references of Python's `global` /
+//! `nonlocal`. A captured pattern is expanded here into the identifiers it
+//! binds. The parts of a scope's node that are evaluated in the enclosing
+//! scope (parameter defaults, base classes, …) are in [`ENCLOSING`].
 
 use std::ops::Range;
 
 use tree_sitter::{Node, QueryProperty};
 
 use crate::lang::Dialect;
+
+/// Which names a local binds: values (variables, functions), types (type
+/// parameters, local type declarations), or both (a class name).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Namespace {
+    Value,
+    Type,
+    Both,
+}
+
+impl Namespace {
+    /// Whether a binding in `self` answers a reference in `wanted`.
+    fn holds(self, wanted: Namespace) -> bool {
+        self == Namespace::Both || self == wanted
+    }
+}
+
+/// One step of a path from a scope's node to a part evaluated outside it.
+#[derive(Clone, Copy)]
+enum Step {
+    /// The children in this field.
+    Field(&'static str),
+    /// Every named child.
+    Any,
+    /// The first named child of this kind.
+    First(&'static str),
+}
+
+use Step::{Any, Field, First};
+
+/// The parts of a scope's node that are evaluated in the scope around it
+/// (docs/design/code_intel.md「绑定规则」, 作用域入口): references there,
+/// and scopes and definitions inside them, resolve from the enclosing scope.
+/// TSX follows the TypeScript rows.
+const ENCLOSING: &[(Dialect, &str, &[Step])] = &[
+    // Python: defaults and annotations of parameters, the return type, base
+    // classes, and the first iterable of a comprehension.
+    (
+        Dialect::Python,
+        "function_definition",
+        &[Field("parameters"), Any, Field("value")],
+    ),
+    (
+        Dialect::Python,
+        "function_definition",
+        &[Field("parameters"), Any, Field("type")],
+    ),
+    (
+        Dialect::Python,
+        "function_definition",
+        &[Field("return_type")],
+    ),
+    (
+        Dialect::Python,
+        "lambda",
+        &[Field("parameters"), Any, Field("value")],
+    ),
+    (
+        Dialect::Python,
+        "class_definition",
+        &[Field("superclasses")],
+    ),
+    (
+        Dialect::Python,
+        "list_comprehension",
+        &[First("for_in_clause"), Field("right")],
+    ),
+    (
+        Dialect::Python,
+        "set_comprehension",
+        &[First("for_in_clause"), Field("right")],
+    ),
+    (
+        Dialect::Python,
+        "dictionary_comprehension",
+        &[First("for_in_clause"), Field("right")],
+    ),
+    (
+        Dialect::Python,
+        "generator_expression",
+        &[First("for_in_clause"), Field("right")],
+    ),
+    // JS / TS: a computed method name (`[key]() {}`); TS: parameter
+    // decorators (`constructor(@Inject(TOKEN) x)`).
+    (Dialect::JavaScript, "method_definition", &[Field("name")]),
+    (Dialect::TypeScript, "method_definition", &[Field("name")]),
+    (
+        Dialect::TypeScript,
+        "method_definition",
+        &[Field("parameters"), Any, Field("decorator")],
+    ),
+];
+
+/// The ranges of `node`'s parts that [`ENCLOSING`] lists.
+fn enclosing_parts(dialect: Dialect, node: Node<'_>) -> Vec<Range<usize>> {
+    let dialect = if dialect == Dialect::Tsx {
+        Dialect::TypeScript
+    } else {
+        dialect
+    };
+    let mut out = Vec::new();
+    for (d, kind, path) in ENCLOSING {
+        if *d != dialect || node.kind() != *kind {
+            continue;
+        }
+        let mut nodes = vec![node];
+        for step in *path {
+            let mut next = Vec::new();
+            for n in nodes {
+                let mut cursor = n.walk();
+                match step {
+                    Field(field) => next.extend(n.children_by_field_name(field, &mut cursor)),
+                    Any => next.extend(n.named_children(&mut cursor)),
+                    First(kind) => {
+                        next.extend(n.named_children(&mut cursor).find(|c| c.kind() == *kind));
+                    }
+                }
+            }
+            nodes = next;
+        }
+        out.extend(nodes.iter().map(Node::byte_range));
+    }
+    out
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ScopeKind {
@@ -34,6 +160,19 @@ pub(crate) struct Scope {
     /// A Python comprehension: a function scope that `local.scope
     /// "function"` (`:=`) skips.
     comprehension: bool,
+    /// Parts of the scope's node evaluated in the enclosing scope.
+    enclosing: Vec<Range<usize>>,
+    /// A function's `body` field: a declaration scoped to the function
+    /// (`var`) lives there, so parameter defaults do not see it.
+    body: Option<Range<usize>>,
+}
+
+impl Scope {
+    fn encloses(&self, range: &Range<usize>) -> bool {
+        self.enclosing
+            .iter()
+            .any(|o| o.start <= range.start && range.end <= o.end)
+    }
 }
 
 pub(crate) struct LocalDef {
@@ -49,6 +188,10 @@ pub(crate) struct LocalDef {
     /// False for forms whose scope depends on control flow: they offer a
     /// candidate, never a binding.
     pub certain: bool,
+    pub namespace: Namespace,
+    /// Visible only within its owner (`local.visible "owner:…"`): before
+    /// `visible_from` it is out of scope, not merely declared later.
+    pub owned: bool,
 }
 
 /// Where a definition binds from.
@@ -60,6 +203,11 @@ enum Visible {
     End(&'static str),
     /// From the start of the `body` of the nearest node of this kind.
     Body(&'static str),
+    /// Within the parent of the nearest node of this kind (the declaration
+    /// that owns a type parameter list), and nowhere else.
+    Owner(&'static str),
+    /// Within the nearest node of this kind itself.
+    Within(&'static str),
     /// From the identifier on.
     Name,
 }
@@ -70,6 +218,9 @@ struct RawDef {
     visible_to: usize,
     function_scope: bool,
     certain: bool,
+    namespace: Namespace,
+    /// The owner's range, for `local.visible "owner:…"`.
+    owner: Option<Range<usize>>,
 }
 
 /// Collects scopes and definitions while the query runs.
@@ -94,6 +245,11 @@ const DECLARATION_KINDS: &[&str] = &[
     "const_spec",
     "for_statement",
     "receive_statement",
+    "type_parameters",
+    "type_parameter_list",
+    "type_parameter",
+    "mapped_type_clause",
+    "type_alias_statement",
 ];
 
 fn property<'p>(props: &'p [QueryProperty], key: &str) -> Option<&'p str> {
@@ -114,6 +270,10 @@ fn visible_rule(props: &[QueryProperty]) -> Visible {
         Visible::End(k)
     } else if let Some(k) = value.strip_prefix("body:").and_then(kind) {
         Visible::Body(k)
+    } else if let Some(k) = value.strip_prefix("owner:").and_then(kind) {
+        Visible::Owner(k)
+    } else if let Some(k) = value.strip_prefix("within:").and_then(kind) {
+        Visible::Within(k)
     } else {
         Visible::Name
     }
@@ -140,6 +300,8 @@ impl Collector {
                 parent: None,
                 name: None,
                 comprehension: false,
+                enclosing: Vec::new(),
+                body: None,
             }],
             defs: Vec::new(),
             nonlocal: Vec::new(),
@@ -159,16 +321,28 @@ impl Collector {
             parent: None,
             name: node.child_by_field_name("name").map(|n| n.byte_range()),
             comprehension: local_kind == Some("comprehension"),
+            enclosing: enclosing_parts(self.dialect, node),
+            body: (kind == ScopeKind::Function)
+                .then(|| node.child_by_field_name("body"))
+                .flatten()
+                .map(|b| b.byte_range()),
         });
     }
 
     pub(crate) fn definition(&mut self, node: Node<'_>, props: &[QueryProperty], text: &[u8]) {
-        let visible_from = match visible_rule(props) {
+        let rule = visible_rule(props);
+        let owner = match rule {
+            Visible::Owner(kind) => ancestor_or_self(node, kind).and_then(|n| n.parent()),
+            Visible::Within(kind) => ancestor_or_self(node, kind),
+            _ => None,
+        };
+        let visible_from = match rule {
             Visible::Scope => Some(0),
             Visible::End(kind) => ancestor_or_self(node, kind).map(|n| n.end_byte()),
             Visible::Body(kind) => ancestor_or_self(node, kind)
                 .and_then(|n| n.child_by_field_name("body"))
                 .map(|b| b.start_byte()),
+            Visible::Owner(_) | Visible::Within(_) => owner.map(|o| o.start_byte()),
             Visible::Name => None,
         };
         // `local.until "FIELD:KIND|KIND…"`: up to the start of that field of
@@ -190,8 +364,14 @@ impl Collector {
                 None
             })
             .unwrap_or(usize::MAX);
+        let visible_to = owner.map_or(visible_to, |o| o.end_byte());
         let function_scope = property(props, "local.scope") == Some("function");
         let certain = property(props, "local.certain") != Some("false");
+        let namespace = match property(props, "local.namespace") {
+            Some("type") => Namespace::Type,
+            Some("both") => Namespace::Both,
+            _ => Namespace::Value,
+        };
         let mut names = Vec::new();
         bindings(self.dialect, node, text, &mut names);
         for name in names {
@@ -201,6 +381,8 @@ impl Collector {
                 visible_to,
                 function_scope,
                 certain,
+                namespace,
+                owner: owner.map(|o| o.byte_range()),
             });
         }
     }
@@ -231,7 +413,13 @@ impl Collector {
                 }
                 stack.pop();
             }
-            scopes[i].parent = stack.last().copied();
+            // A scope inside a part evaluated outside its container (a
+            // lambda in a default value) has the container's parent.
+            let mut parent = stack.last().copied().unwrap_or(0);
+            while parent != 0 && scopes[parent].encloses(&range) {
+                parent = scopes[parent].parent.unwrap_or(0);
+            }
+            scopes[i].parent = Some(parent);
             stack.push(i);
         }
         let mut raw = self.defs;
@@ -240,13 +428,30 @@ impl Collector {
         let mut defs: Vec<LocalDef> = raw
             .into_iter()
             .map(|d| {
-                let mut scope = innermost(&scopes, &d.range);
+                let mut scope = home(&scopes, &d.range);
                 if scopes[scope].name.as_ref() == Some(&d.range) {
                     scope = scopes[scope].parent.unwrap_or(0);
+                }
+                // An owned definition (a type parameter) lives in the scope
+                // around its owner, bounded to the owner's range, so that
+                // what the owner contains (a class's methods) sees it.
+                if let Some(owner) = &d.owner {
+                    scope = home(&scopes, owner);
+                    if scopes[scope].range == *owner {
+                        scope = scopes[scope].parent.unwrap_or(0);
+                    }
                 }
                 if d.function_scope {
                     while scopes[scope].kind != ScopeKind::Function || scopes[scope].comprehension {
                         scope = scopes[scope].parent.unwrap_or(0);
+                    }
+                    // In the function's body block when it is a scope (JS):
+                    // parameter defaults are evaluated before the body's
+                    // `var` declarations exist.
+                    if let Some(body) = &scopes[scope].body
+                        && let Some(b) = scopes.iter().position(|s| s.range == *body)
+                    {
+                        scope = b;
                     }
                 }
                 LocalDef {
@@ -255,6 +460,8 @@ impl Collector {
                     range: d.range,
                     scope,
                     certain: d.certain,
+                    namespace: d.namespace,
+                    owned: d.owner.is_some(),
                 }
             })
             .collect();
@@ -263,7 +470,7 @@ impl Collector {
             .nonlocal
             .into_iter()
             .filter_map(|r| {
-                let mut scope = innermost(&scopes, &r);
+                let mut scope = home(&scopes, &r);
                 while scopes[scope].kind != ScopeKind::Function {
                     scope = scopes[scope].parent?;
                 }
@@ -317,8 +524,14 @@ impl Locals {
     /// The safety invariant (docs/design/code_intel.md「绑定规则」): a
     /// declaration binds only when the rules put it in scope at the
     /// reference; any other same-named declaration in an enclosing scope is
-    /// only `possible`.
-    pub(crate) fn resolve(&self, text: &[u8], reference: &Range<usize>) -> Resolution<'_> {
+    /// only `possible`. `namespace` is the reference's: a type position looks
+    /// for types, any other position for values.
+    pub(crate) fn resolve(
+        &self,
+        text: &[u8],
+        reference: &Range<usize>,
+        namespace: Namespace,
+    ) -> Resolution<'_> {
         let mut possible: Vec<&LocalDef> = Vec::new();
         let Some(name) = text.get(reference.clone()) else {
             return Resolution {
@@ -326,7 +539,9 @@ impl Locals {
                 possible,
             };
         };
-        let mut scope = Some(innermost(&self.scopes, reference));
+        // Parts evaluated outside their scope (defaults, base classes)
+        // resolve from the scope around it.
+        let mut scope = Some(home(&self.scopes, reference));
         // Whether the walk has left a function or class body.
         let mut nested = false;
         while let Some(s) = scope {
@@ -341,10 +556,12 @@ impl Locals {
                 for def in self.defs.iter().filter(|d| d.scope == s) {
                     if text.get(def.range.clone()) != Some(name)
                         || def.range == *reference
+                        || !def.namespace.holds(namespace)
                         || reference.start >= def.visible_to
+                        || def.owned && reference.start < def.visible_from
                     {
-                        // Another name, the declaration itself, or past
-                        // the end of its scope.
+                        // Another name or namespace, the declaration itself,
+                        // or outside the part of the scope it covers.
                         continue;
                     }
                     if hidden || def.visible_from > reference.start {
@@ -384,6 +601,17 @@ impl Locals {
             possible,
         }
     }
+}
+
+/// The scope `range` is evaluated in: the innermost scope containing it,
+/// or the scope around that one when `range` is in a part of its node
+/// evaluated outside it ([`ENCLOSING`]).
+fn home(scopes: &[Scope], range: &Range<usize>) -> usize {
+    let mut scope = innermost(scopes, range);
+    while scope != 0 && scopes[scope].encloses(range) {
+        scope = scopes[scope].parent.unwrap_or(0);
+    }
+    scope
 }
 
 /// The innermost scope containing `range` (the file when no other does).
@@ -480,10 +708,64 @@ fn bindings<'t>(dialect: Dialect, node: Node<'t>, text: &[u8], out: &mut Vec<Nod
     if non_binding(dialect, "", None, node.kind()) {
         return;
     }
-    if is_binding_kind(dialect, node.kind()) {
+    // A captured type name (a type parameter, a local interface) binds
+    // itself; inside patterns type names are never bindings.
+    if is_binding_kind(dialect, node.kind()) || node.kind() == "type_identifier" {
         out.push(node);
+    } else if dialect == Dialect::Python && node.kind() == "case_pattern" {
+        case_captures(node, out);
     } else {
         nested(dialect, node, text, out);
+    }
+}
+
+/// The names a Python `case` pattern captures: a bare name (`case x`, the
+/// value of `y=yy`), `*rest`, `**rest` and `… as name`. A class name, a
+/// keyword, a dotted value (`Color.RED`) and a mapping key are uses.
+fn case_captures<'t>(node: Node<'t>, out: &mut Vec<Node<'t>>) {
+    let mut cursor = node.walk();
+    let children: Vec<Node<'t>> = node.named_children(&mut cursor).collect();
+    match node.kind() {
+        "dotted_name" => {
+            if let [name] = children.as_slice()
+                && name.kind() == "identifier"
+                && node.parent().is_some_and(|p| p.kind() != "class_pattern")
+            {
+                out.push(*name);
+            }
+        }
+        "splat_pattern" => out.extend(children.iter().filter(|c| c.kind() == "identifier")),
+        "as_pattern" => {
+            for child in children {
+                if child.kind() == "identifier" {
+                    out.push(child);
+                } else {
+                    case_captures(child, out);
+                }
+            }
+        }
+        "keyword_pattern" => {
+            // The first identifier is the keyword.
+            for child in children.into_iter().skip(1) {
+                case_captures(child, out);
+            }
+        }
+        "dict_pattern" => {
+            let mut cursor = node.walk();
+            for child in node.children_by_field_name("value", &mut cursor) {
+                case_captures(child, out);
+            }
+            for child in children {
+                if child.kind() == "splat_pattern" {
+                    case_captures(child, out);
+                }
+            }
+        }
+        _ => {
+            for child in children {
+                case_captures(child, out);
+            }
+        }
     }
 }
 

@@ -218,3 +218,129 @@ fn deadline_stop_before_start_starts_no_thread() {
     assert_eq!(registration.slot().tripped(), Some(Trip::Stopped));
     assert!(!task.started());
 }
+
+#[test]
+fn deadline_walk_checks_stop_while_walking() {
+    // The walk asks its stop predicate every so many nodes, not only at the
+    // end, and gives up as soon as it says so.
+    let table = LanguageTable::core();
+    let js = table.get("js").unwrap();
+    let source = crate::testing::corpus("js", 64 << 10);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(js.language()).unwrap();
+    let tree = parser.parse(&source, None).unwrap();
+    let calls = std::cell::Cell::new(0u32);
+    let never = || {
+        calls.set(calls.get() + 1);
+        false
+    };
+    assert!(crate::walk::walk_tree(js.dialect(), js.language(), &tree, &source, &never).is_some());
+    let checks = calls.get();
+    assert!(checks > 2, "{checks} checks for 64 KiB");
+    calls.set(0);
+    let second = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= 2
+    };
+    assert!(crate::walk::walk_tree(js.dialect(), js.language(), &tree, &source, &second).is_none());
+    assert_eq!(calls.get(), 2, "stopped at the second check");
+}
+
+/// A clock that counts its readings and, from reading `expire_at` on, is
+/// past every deadline.
+struct CountingClock {
+    start: Instant,
+    reads: std::sync::atomic::AtomicU32,
+    expire_at: u32,
+}
+
+impl Clock for CountingClock {
+    fn now(&self) -> Instant {
+        let n = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if n >= self.expire_at {
+            self.start + MINUTE * 10
+        } else {
+            self.start
+        }
+    }
+}
+
+#[test]
+fn deadline_parsed_file_checks_every_phase() {
+    // `ParsedFile::parse` reads its clock in the parse, the query run, the
+    // walk and once more before returning: a deadline that passes at any of
+    // those readings, the last one included, gives `TimedOut`.
+    let table = LanguageTable::core();
+    let js = table.get("js").unwrap();
+    let source: Arc<[u8]> = Arc::from(crate::testing::corpus("js", 64 << 10));
+    let parse = |expire_at: u32| {
+        let clock = CountingClock {
+            start: Instant::now(),
+            reads: std::sync::atomic::AtomicU32::new(0),
+            expire_at,
+        };
+        let result = crate::site::ParsedFile::parse(
+            js,
+            source.clone(),
+            &clock,
+            clock.start + MINUTE,
+            &AtomicBool::new(false),
+        );
+        (result.err(), clock.reads.load(Ordering::SeqCst))
+    };
+    let (error, reads) = parse(u32::MAX);
+    assert_eq!(error, None);
+    for expire_at in [1, reads / 2, reads - 1, reads] {
+        assert_eq!(
+            parse(expire_at).0,
+            Some(crate::site::ParseError::TimedOut),
+            "expiring at reading {expire_at} of {reads}"
+        );
+    }
+}
+
+#[test]
+fn deadline_parsed_file_walk_reads_the_deadline() {
+    // The same Java source as core `java` (walked) and as a language pack
+    // with Java's grammar and queries (not walked): parsing, the query run
+    // and the check before returning read the clock equally often, so the
+    // difference is the walk's checks.
+    let source: Arc<[u8]> = Arc::from(crate::testing::corpus("java", 64 << 10));
+    let table = LanguageTable::core().with_pack(
+        crate::lang_name("kotlin"),
+        crate::testing::java_pack(9, Arc::new(())),
+    );
+    let readings = |name: &str| {
+        let lang = table.get(name).unwrap();
+        let clock = CountingClock {
+            start: Instant::now(),
+            reads: std::sync::atomic::AtomicU32::new(0),
+            expire_at: u32::MAX,
+        };
+        crate::site::ParsedFile::parse(
+            lang,
+            source.clone(),
+            &clock,
+            clock.start + MINUTE,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        clock.reads.load(Ordering::SeqCst)
+    };
+    let java = table.get("java").unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(java.language()).unwrap();
+    let tree = parser.parse(&*source, None).unwrap();
+    let walk_checks = std::cell::Cell::new(0u32);
+    let count = || {
+        walk_checks.set(walk_checks.get() + 1);
+        false
+    };
+    crate::walk::walk_tree(java.dialect(), java.language(), &tree, &source, &count).unwrap();
+    assert_eq!(
+        readings("java"),
+        readings("kotlin") + walk_checks.get(),
+        "the walk checks {} times",
+        walk_checks.get()
+    );
+}

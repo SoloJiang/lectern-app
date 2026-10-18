@@ -5,8 +5,9 @@
 ; Lectern's changes:
 ; - Functions directly in a class body (decorated or not) are methods.
 ; - @doc captures the parameter list (Lectern counts parameters from it).
-; - Adds superclasses as class references, and class attributes (including
-;   `Enum` members) as fields.
+; - Adds superclasses as class references, class attributes (including
+;   `Enum` members) as fields, and `type` aliases
+;   (docs/design/code_intel.md「定义形式」).
 ; - Identifier calls carry (#is-not? local).
 
 ; ---- definitions -------------------------------------------------------
@@ -42,6 +43,15 @@
 (function_definition
   name: (identifier) @name
   parameters: (parameters) @doc) @definition.function
+
+; `type Alias = …` and `type Alias[T] = …` (Python 3.12).
+(type_alias_statement
+  left: (type
+    [
+      (identifier) @name
+      (generic_type
+        (identifier) @name)
+    ])) @definition.type
 
 ; ---- references --------------------------------------------------------
 

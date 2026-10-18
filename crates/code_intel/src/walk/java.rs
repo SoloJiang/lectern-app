@@ -14,6 +14,7 @@ ids! {
             enum_declaration = "enum_declaration",
             interface_declaration = "interface_declaration",
             annotation_type_declaration = "annotation_type_declaration",
+            annotation_type_element_declaration = "annotation_type_element_declaration",
             method_declaration = "method_declaration",
             constructor_declaration = "constructor_declaration",
             lambda_expression = "lambda_expression",
@@ -103,6 +104,22 @@ impl Walker for Java {
 }
 
 impl Java {
+    /// The kind of the declaration whose `parameters` hold the parameter
+    /// `level` frames above the last one: a method, constructor, lambda or
+    /// record (None for anything else).
+    fn parameters_of(&self, stack: &[Frame<'_>], level: usize) -> Option<u16> {
+        let k = &self.0;
+        let list = up(stack, level)?;
+        let owner = up(stack, level + 1)?;
+        (list.kind == k.formal_parameters
+            && list.field == k.f_parameters
+            && (owner.kind == k.method_declaration
+                || owner.kind == k.constructor_declaration
+                || owner.kind == k.lambda_expression
+                || owner.kind == k.record_declaration))
+            .then_some(owner.kind)
+    }
+
     /// locals.scm's `@local.definition` captures (all on identifiers).
     fn local_definition(&self, stack: &[Frame<'_>]) -> bool {
         let k = &self.0;
@@ -112,9 +129,15 @@ impl Java {
         };
         let p = parent.kind;
         let name = me.field == k.f_name;
+        // A method's, constructor's or lambda's parameters; not a record
+        // header's components.
+        if name && p == k.formal_parameter {
+            return self
+                .parameters_of(stack, 2)
+                .is_some_and(|o| o != k.record_declaration);
+        }
         if name
-            && (p == k.formal_parameter
-                || p == k.catch_formal_parameter
+            && (p == k.catch_formal_parameter
                 || p == k.enhanced_for_statement
                 || p == k.resource
                 || p == k.instanceof_expression)
@@ -135,7 +158,10 @@ impl Java {
             // (spread_parameter (variable_declarator name:)),
             // (local_variable_declaration declarator: (variable_declarator name:)).
             if let Some(owner) = up(stack, 2) {
-                return owner.kind == k.spread_parameter
+                return (owner.kind == k.spread_parameter
+                    && self
+                        .parameters_of(stack, 3)
+                        .is_some_and(|o| o != k.record_declaration))
                     || (owner.kind == k.local_variable_declaration
                         && parent.field == k.f_declarator);
             }
@@ -195,6 +221,27 @@ impl Java {
                 }
                 if p == k.enum_constant {
                     cx.def(me.node, parent.node, DefKind::Constant, None);
+                    return;
+                }
+                // (record_declaration parameters: (formal_parameters
+                //   [(formal_parameter name:) (spread_parameter
+                //   (variable_declarator name:))] @definition.field))
+                if p == k.formal_parameter
+                    && self.parameters_of(stack, 2) == Some(k.record_declaration)
+                {
+                    cx.def(me.node, parent.node, DefKind::Field, None);
+                    return;
+                }
+                if p == k.variable_declarator
+                    && let Some(spread) = up(stack, 2)
+                    && spread.kind == k.spread_parameter
+                    && self.parameters_of(stack, 3) == Some(k.record_declaration)
+                {
+                    cx.def(me.node, spread.node, DefKind::Field, None);
+                    return;
+                }
+                if p == k.annotation_type_element_declaration {
+                    cx.def(me.node, parent.node, DefKind::Method, None);
                     return;
                 }
                 // (method_invocation name: (identifier) @name

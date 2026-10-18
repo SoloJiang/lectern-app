@@ -88,8 +88,14 @@ ids! {
             type_identifier = "type_identifier",
             required_parameter = "required_parameter",
             optional_parameter = "optional_parameter",
+            accessibility_modifier = "accessibility_modifier",
+            override_modifier = "override_modifier",
+            ambient_declaration = "ambient_declaration",
+            nested_identifier = "nested_identifier",
         }
-        tokens {}
+        tokens {
+            t_readonly = "readonly",
+        }
         fields {
             f_pattern = "pattern",
         }
@@ -264,12 +270,33 @@ impl Ecma {
         } else {
             return None;
         };
-        let container = up(stack, 3)?;
+        // TS: `declare const` sits in an ambient declaration
+        // (ts/tags.scm).
+        let mut level = 3;
+        let mut placed = declaration;
+        if let Some(ts) = &self.ts
+            && let Some(ambient) = up(stack, 3)
+            && ambient.kind == ts.ambient_declaration
+        {
+            placed = ambient;
+            level = 4;
+        }
+        let container = up(stack, level)?;
         let at_top = container.kind == k.program
             || (container.kind == k.export_statement
-                && declaration.field == k.f_declaration
-                && up(stack, 4).is_some_and(|p| p.kind == k.program));
+                && placed.field == k.f_declaration
+                && up(stack, level + 1).is_some_and(|p| p.kind == k.program));
         at_top.then_some(constant)
+    }
+
+    /// TS: a parameter property, a constructor parameter with an
+    /// accessibility modifier, `override` or `readonly` (ts/tags.scm).
+    fn parameter_property(&self, parameter: tree_sitter::Node<'_>, ts: &TsIds) -> bool {
+        let mut cursor = parameter.walk();
+        parameter.children(&mut cursor).any(|c| {
+            let c = c.kind_id();
+            c == ts.accessibility_modifier || c == ts.override_modifier || c == ts.t_readonly
+        })
     }
 
     fn identifier(&self, cx: &mut Ctx<'_>, stack: &[Frame<'_>]) {
@@ -383,6 +410,14 @@ impl Ecma {
                     cx.def(me.node, parent.node, DefKind::Enum, None);
                     return;
                 }
+                // Parameter properties: fields.
+                if (p == ts.required_parameter || p == ts.optional_parameter)
+                    && me.field == ts.f_pattern
+                    && self.parameter_property(parent.node, ts)
+                {
+                    cx.def(me.node, parent.node, DefKind::Field, None);
+                    return;
+                }
             }
         }
         // E10, E12, T13, J1, X0, X1 and the catch-all: all `#is-not? local`.
@@ -456,6 +491,17 @@ impl Ecma {
                     && (p == ts.public_field_definition || !private && p == ts.property_signature)
                 {
                     cx.def(me.node, parent.node, DefKind::Field, None);
+                    return;
+                }
+                // `namespace A.B`: the last segment.
+                if !private
+                    && p == ts.nested_identifier
+                    && me.field == k.f_property
+                    && let Some(module) = up(stack, 2)
+                    && (module.kind == ts.module || module.kind == ts.internal_module)
+                    && parent.field == k.f_name
+                {
+                    cx.def(me.node, module.node, DefKind::Module, None);
                     return;
                 }
             }

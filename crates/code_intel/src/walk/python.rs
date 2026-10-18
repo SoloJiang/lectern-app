@@ -11,6 +11,9 @@ ids! {
             module = "module",
             expression_statement = "expression_statement",
             assignment = "assignment",
+            type_alias_statement = "type_alias_statement",
+            type_node = "type",
+            generic_type = "generic_type",
             augmented_assignment = "augmented_assignment",
             class_definition = "class_definition",
             function_definition = "function_definition",
@@ -114,6 +117,27 @@ impl Python {
         let me = stack[stack.len() - 1];
         if let Some(parent) = up(stack, 1) {
             let p = parent.kind;
+            // (type_alias_statement left: (type (identifier) @name))
+            //   @definition.type: no other pattern names this node.
+            if p == k.type_node
+                && parent.field == k.f_left
+                && let Some(alias) = up(stack, 2)
+                && alias.kind == k.type_alias_statement
+            {
+                cx.def(me.node, alias.node, DefKind::Type, None);
+                return;
+            }
+            // … and `type Alias[T] = …`: (type (generic_type (identifier))).
+            if p == k.generic_type
+                && let Some(ty) = up(stack, 2)
+                && ty.kind == k.type_node
+                && ty.field == k.f_left
+                && let Some(alias) = up(stack, 3)
+                && alias.kind == k.type_alias_statement
+            {
+                cx.def(me.node, alias.node, DefKind::Type, None);
+                return;
+            }
             // (module (expression_statement (assignment left: (identifier)
             //   @name) @definition.constant))
             if p == k.assignment && me.field == k.f_left {

@@ -301,29 +301,66 @@ fn site_kind_table() {
             .collect()
     };
     use DefKind::*;
-    assert_eq!(
-        accepted(ts, RefSyntax::Call),
-        [Function, Method, Class, Struct, Macro]
-    );
-    assert_eq!(
-        accepted(ts, RefSyntax::MemberCall),
-        accepted(ts, RefSyntax::Call)
-    );
-    // Rust tuple variants (constants) are called like functions.
-    assert_eq!(
-        accepted(rust, RefSyntax::Call),
-        [Function, Method, Class, Struct, Macro, Constant]
-    );
-    assert!(!accepts(rust, RefSyntax::MemberCall, Constant));
-    assert_eq!(accepted(rust, RefSyntax::Construct), [Class, Struct]);
-    assert_eq!(
-        accepted(rust, RefSyntax::Type),
-        [Class, Interface, Struct, Enum, Trait, Type, Module]
-    );
-    assert_eq!(
-        accepted(rust, RefSyntax::Member),
-        [Method, Constant, Field, Variable]
-    );
+    use RefSyntax::{Call, Construct, MemberCall};
+    // The masks derived from the definition forms (crate::forms): every
+    // kind is accepted by each syntax its rows say can name it.
+    let expected: &[(&str, RefSyntax, &[DefKind])] = &[
+        // JS / TS: any value can hold a function or a class.
+        ("ts", Call, &[Function, Method, Constant, Field, Variable]),
+        (
+            "ts",
+            MemberCall,
+            &[Function, Method, Constant, Field, Variable],
+        ),
+        ("ts", Construct, &[Function, Class, Constant, Variable]),
+        (
+            "ts",
+            RefSyntax::Type,
+            &[Class, Interface, Enum, Type, Module],
+        ),
+        ("tsx", Call, &[Function, Method, Constant, Field, Variable]),
+        ("js", Call, &[Function, Method, Constant, Field, Variable]),
+        ("js", Construct, &[Function, Class, Constant, Variable]),
+        ("js", RefSyntax::Type, &[Class]),
+        // Rust: tuple variants are called, record variants constructed and
+        // matched (`Message::Move { x, y }`), consts and statics hold
+        // function pointers.
+        ("rust", Call, &[Function, Method, Struct, Macro, Constant]),
+        ("rust", MemberCall, &[Method]),
+        ("rust", Construct, &[Struct, Type, Constant]),
+        (
+            "rust",
+            RefSyntax::Type,
+            &[Struct, Enum, Trait, Type, Constant],
+        ),
+        ("rust", RefSyntax::Member, &[Method, Field]),
+        // Java: a record component's accessor is called.
+        ("java", Call, &[Method, Field]),
+        ("java", MemberCall, &[Method, Field]),
+        ("java", Construct, &[Class]),
+        ("java", RefSyntax::Type, &[Class, Interface, Enum]),
+        // Python: classes, module constants and class attributes can be
+        // called.
+        ("python", Call, &[Function, Method, Class, Constant, Field]),
+        (
+            "python",
+            MemberCall,
+            &[Function, Method, Class, Constant, Field],
+        ),
+        ("python", Construct, &[]),
+        // Go: conversions are calls naming a type; function-typed variables
+        // and fields are called.
+        ("go", Call, &[Function, Type, Variable]),
+        ("go", MemberCall, &[Function, Method, Type, Field, Variable]),
+        ("go", RefSyntax::Type, &[Type]),
+    ];
+    for (lang, syntax, kinds) in expected {
+        assert_eq!(
+            accepted(table.get(lang).unwrap(), *syntax),
+            *kinds,
+            "{lang} {syntax:?}"
+        );
+    }
     assert_eq!(accepted(rust, RefSyntax::Plain), crate::DEF_KINDS);
     // Outside Rust the left side of `a.b` can be a namespace, module, package
     // or class: a member can name any kind (`utils.handle`, `models.User`).
@@ -337,13 +374,31 @@ fn site_kind_table() {
         RefSyntax::Member,
         Class
     ));
-    // Go conversions are call syntax naming a type.
-    assert_eq!(
-        accepted(go, RefSyntax::Call),
-        [Function, Method, Class, Struct, Type, Macro]
-    );
     assert!(accepts(go, RefSyntax::MemberCall, Type));
     assert!(!accepts(rust, RefSyntax::Call, Type));
+}
+
+#[test]
+fn site_rust_variants_are_reachable() {
+    // A variant is a constant: called (`Write(s)`), constructed
+    // (`Message::Move { x: 1 }`) and matched (`Message::Move { x } =>`).
+    let table = LanguageTable::core();
+    let rust = table.get("rust").unwrap();
+    let source = "enum Message { Move { x: u8 }, Write(u8) }\nfn f(m: Message) -> u8 {\n    let _ = Message::Move { x: 1 };\n    let _ = Message::Write(2);\n    match m { Message::Move { x } => x, _ => 0 }\n}\n";
+    let file = parse("rust", source);
+    let cases = [
+        ("Move", 1, RefSyntax::Construct),
+        ("Write", 1, RefSyntax::Call),
+        ("Move", 2, RefSyntax::Type),
+    ];
+    for (needle, nth, syntax) in cases {
+        let at = site(&file, source, needle, nth);
+        assert_eq!(at.syntax, syntax, "{needle} #{nth}");
+        assert!(
+            accepts(rust, at.syntax, DefKind::Constant),
+            "{needle} #{nth}"
+        );
+    }
 }
 
 #[test]

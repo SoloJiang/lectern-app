@@ -1,5 +1,5 @@
 //! Extraction for the core languages by one walk over the syntax tree
-//! (ADR 0032), instead of tree-sitter-tags' query run.
+//! (ADR 0031), instead of tree-sitter-tags' query run.
 //!
 //! The tags and locals queries stay the specification: each walker applies,
 //! at every name node, the patterns of its language's tags query in query
@@ -318,22 +318,28 @@ pub(crate) fn extract(
         }
         tree
     })?;
-    walk(walker, &tree, source, stop)
+    walk(walker, &tree, source, &|| stop.load(Ordering::Acquire) != 0)
 }
 
-/// Walks a tree parsed elsewhere (`ParsedFile`); None when the dialect has
-/// no walker or `stop` is set.
+/// Walks a tree parsed elsewhere (`ParsedFile`, with its own deadline and
+/// cancellation); None when the dialect has no walker or once `stop` returns
+/// true, checked every [`CHECK_EVERY`] nodes and before returning.
 pub(crate) fn walk_tree(
     dialect: Dialect,
     language: &Language,
     tree: &Tree,
     source: &[u8],
-    stop: &AtomicUsize,
+    stop: &dyn Fn() -> bool,
 ) -> Option<Walked> {
     walk(walker(dialect, language)?, tree, source, stop)
 }
 
-fn walk(walker: &dyn Walker, tree: &Tree, source: &[u8], stop: &AtomicUsize) -> Option<Walked> {
+fn walk(
+    walker: &dyn Walker,
+    tree: &Tree,
+    source: &[u8],
+    stop: &dyn Fn() -> bool,
+) -> Option<Walked> {
     let mut walk = Walk {
         walker,
         stop,
@@ -370,7 +376,7 @@ fn walk(walker: &dyn Walker, tree: &Tree, source: &[u8], stop: &AtomicUsize) -> 
             }
         }
     }
-    if stop.load(Ordering::Acquire) != 0 {
+    if stop() {
         return None;
     }
     let cx = walk.cx;
@@ -402,7 +408,7 @@ fn to_named(cursor: &mut tree_sitter::TreeCursor<'_>) -> bool {
 
 struct Walk<'w, 's, 't> {
     walker: &'w dyn Walker,
-    stop: &'w AtomicUsize,
+    stop: &'w dyn Fn() -> bool,
     cx: Ctx<'s>,
     stack: Vec<Frame<'t>>,
     steps: u32,
@@ -420,7 +426,7 @@ impl<'t> Walk<'_, '_, 't> {
         });
         self.walker.visit(&mut self.cx, &self.stack);
         self.steps += 1;
-        !(self.steps.is_multiple_of(CHECK_EVERY) && self.stop.load(Ordering::Acquire) != 0)
+        !(self.steps.is_multiple_of(CHECK_EVERY) && (self.stop)())
     }
 
     /// Pops the last node, and the scopes it opened.

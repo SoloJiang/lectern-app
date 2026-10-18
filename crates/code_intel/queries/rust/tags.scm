@@ -37,6 +37,10 @@
 (type_item
     name: (type_identifier) @name) @definition.type
 
+; A trait's associated type (`type Item;`).
+(associated_type
+    name: (type_identifier) @name) @definition.type
+
 [
     (impl_item
         body: (declaration_list

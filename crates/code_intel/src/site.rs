@@ -19,7 +19,7 @@ use tree_sitter::{Node, ParseOptions, Parser, QueryCursor, QueryCursorOptions, T
 pub use crate::Position;
 use crate::extract::{Def, Lang};
 use crate::lang::{Capture, Dialect, TagClass};
-use crate::locals::{Collector, LocalDef, Locals};
+use crate::locals::{Collector, LocalDef, Locals, Namespace};
 use crate::rules::{self, FileDef, RawTag};
 use crate::util::LineIndex;
 use crate::watchdog::Clock;
@@ -242,17 +242,13 @@ impl ParsedFile {
 
         let mut tags: Vec<RawTag> = tags.into_values().map(|(_, t)| t).collect();
         // A core language's definitions and markers come from its walker,
-        // as in `extract` (ADR 0032); the query's tags give the reference
+        // as in `extract` (ADR 0031); the query's tags give the reference
         // positions.
-        if lang.lease().is_static()
-            && let Some(walked) = crate::walk::walk_tree(
-                dialect,
-                lang.language(),
-                &tree,
-                text,
-                &std::sync::atomic::AtomicUsize::new(0),
-            )
-        {
+        if lang.lease().is_static() && crate::walk::supports(dialect, lang.language()) {
+            // The walk stops with the same deadline and cancellation as the
+            // parse and the query run.
+            let walked = crate::walk::walk_tree(dialect, lang.language(), &tree, text, &stop)
+                .ok_or_else(interrupted)?;
             tags.retain(|t| t.class == TagClass::Ref);
             tags.extend(walked.tags);
         }
@@ -282,6 +278,11 @@ impl ParsedFile {
             })
             .collect();
         let finished = rules::finish(lang.dialect(), text, tags);
+        // Checked once more before returning: the rules and the binding model
+        // run after the last check above.
+        if stop() {
+            return Err(interrupted());
+        }
         Ok(ParsedFile {
             tree,
             #[cfg(test)]
@@ -346,12 +347,19 @@ impl ParsedFile {
                 defines: Some(defines),
             });
         }
-        // A member or path name (`items.add`, `obj.x`, `Queue::new`) never
-        // binds to a same-named local.
+        // A member or path name (`items.add`, `obj.x`, `Queue::new`,
+        // `a::B`) never binds to a same-named local. A type name looks for
+        // local types (type parameters, local type declarations), any other
+        // name for local values.
+        let namespace = if node.kind() == "type_identifier" {
+            Namespace::Type
+        } else {
+            Namespace::Value
+        };
         let (binding, possible) = if is_variable_position(dialect, node)
             && !matches!(syntax, RefSyntax::Member | RefSyntax::MemberCall)
         {
-            let resolution = self.locals.resolve(text, &range);
+            let resolution = self.locals.resolve(text, &range, namespace);
             (
                 resolution.binding.map(|d| self.local_binding(d, &name)),
                 resolution
@@ -393,7 +401,13 @@ impl ParsedFile {
         Some(SiteDef {
             def: Def {
                 name: name.into(),
-                kind: DefKind::Variable,
+                // A local type (a type parameter, a local interface) or a
+                // local value.
+                kind: if local.namespace == Namespace::Value {
+                    DefKind::Variable
+                } else {
+                    DefKind::Type
+                },
                 line: at.line,
                 column: at.column,
                 end_line: at.line,
@@ -506,6 +520,14 @@ const RUST_SITES: &[SiteRule] = &[
     ),
     rule("field_identifier", "field_expression", "field", Member),
     rule("type_identifier", "struct_expression", "name", Construct),
+    // `Message::Move { x, y }` and `crate::Point { .. }`.
+    rule_in(
+        "type_identifier",
+        "scoped_type_identifier",
+        "name",
+        ("struct_expression", "name"),
+        Construct,
+    ),
 ];
 
 const ECMASCRIPT_SITES: &[SiteRule] = &[
@@ -640,14 +662,29 @@ const NON_VARIABLE_POSITIONS: &[(Dialect, &str, &str)] = &[
     (Dialect::Java, "scoped_identifier", "scope"),
     (Dialect::Python, "attribute", "attribute"),
     (Dialect::Python, "keyword_argument", "name"),
+    // The last segment of a qualified type name (`a::B`, `ns.T`, `pkg.T`).
+    (Dialect::Rust, "scoped_type_identifier", "name"),
+    (Dialect::TypeScript, "nested_type_identifier", "name"),
+    (Dialect::Tsx, "nested_type_identifier", "name"),
+    (Dialect::Go, "qualified_type", "name"),
 ];
 
-/// Whether an identifier can refer to a variable (see
+/// Whether an identifier can refer to a variable or a local type (see
 /// [`NON_VARIABLE_POSITIONS`]).
 fn is_variable_position(dialect: Dialect, node: Node<'_>) -> bool {
     let Some(parent) = node.parent() else {
         return true;
     };
+    // Java's `Outer.Inner` has no fields: only the first segment can be a
+    // local type.
+    if dialect == Dialect::Java
+        && parent.kind() == "scoped_type_identifier"
+        && parent
+            .named_child(0)
+            .is_some_and(|first| first.id() != node.id())
+    {
+        return false;
+    }
     !NON_VARIABLE_POSITIONS.iter().any(|(d, kind, field)| {
         *d == dialect && parent.kind() == *kind && in_field(node, parent, field)
     })
@@ -707,38 +744,43 @@ const TYPES: u16 = crate::def_kind_bit(DefKind::Class)
     | crate::def_kind_bit(DefKind::Trait)
     | crate::def_kind_bit(DefKind::Type)
     | crate::def_kind_bit(DefKind::Module);
-const MEMBERS: u16 = crate::def_kind_bit(DefKind::Field)
-    | crate::def_kind_bit(DefKind::Method)
-    | crate::def_kind_bit(DefKind::Constant)
-    | crate::def_kind_bit(DefKind::Variable);
 
 /// The definition kinds a reference syntax accepts in a language, as a
 /// [`DefKind::bit`] set (docs/design/code_intel.md「候选的分层与过滤」).
+/// For a core language they come from the definition forms
+/// (`crate::forms`): a kind is accepted where its row says the syntax can
+/// name it. `Plain` accepts every kind, and so does `Member` outside Rust:
+/// the left side of `a.b` can be a namespace, a module, a package or a class
+/// (`utils.handle`, `models.User`, `pkg.Var`, `Outer.Inner`).
 pub fn accepted_kinds(lang: &Lang, syntax: RefSyntax) -> u16 {
-    let default = match syntax {
+    let core = match lang.dialect() {
+        Dialect::TypeScript => Some("ts"),
+        Dialect::Tsx => Some("tsx"),
+        Dialect::JavaScript => Some("js"),
+        Dialect::Rust => Some("rust"),
+        Dialect::Java => Some("java"),
+        Dialect::Python => Some("python"),
+        Dialect::Go => Some("go"),
+        Dialect::Pack => None,
+    };
+    if let Some(name) = core {
+        return match syntax {
+            RefSyntax::Plain => ALL_KINDS,
+            RefSyntax::Member if lang.dialect() != Dialect::Rust => ALL_KINDS,
+            _ => crate::forms::kinds_for(name, syntax),
+        };
+    }
+    pack_kinds(syntax)
+}
+
+/// A language pack has no forms: the general rules.
+fn pack_kinds(syntax: RefSyntax) -> u16 {
+    match syntax {
         RefSyntax::Call | RefSyntax::MemberCall => CALLABLE,
         RefSyntax::Construct => CONSTRUCTIBLE,
         RefSyntax::Type => TYPES,
-        // Rust's `a.b` always has a value on the left: a field or a method.
-        // Elsewhere the left side can be a namespace import, a module, a
-        // package or a class (`utils.handle`, `models.User`, `pkg.Var`,
-        // `Outer.Inner`), whose members can be any kind of definition.
-        RefSyntax::Member if lang.dialect() == Dialect::Rust => MEMBERS,
-        RefSyntax::Member => ALL_KINDS,
-        RefSyntax::Plain => ALL_KINDS,
-    };
-    // Go: a conversion `Meters(value)` or `units.Meters(value)` is call
-    // syntax whose target is a type.
-    let extra = match (lang.dialect(), syntax) {
-        (Dialect::Go, RefSyntax::Call | RefSyntax::MemberCall) => {
-            crate::def_kind_bit(DefKind::Type)
-        }
-        // Rust: a tuple variant is called like a function (`Error::Io(e)`);
-        // variants are constants.
-        (Dialect::Rust, RefSyntax::Call) => crate::def_kind_bit(DefKind::Constant),
-        _ => 0,
-    };
-    default | extra
+        RefSyntax::Member | RefSyntax::Plain => ALL_KINDS,
+    }
 }
 
 /// Whether a reference of `syntax` in `lang` can name a definition of `kind`.

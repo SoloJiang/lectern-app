@@ -5,8 +5,10 @@
 ; (commit f975a621f4e7f532fe322e13c4f79495e0a7b2e7), MIT.
 ; Lectern's changes:
 ; - @doc captures the parameter list (Lectern counts parameters from it).
-; - Adds namespaces, type aliases, enums and their members (constants),
-;   fields and property signatures.
+; - Adds namespaces (`namespace A.B` by its last segment), type aliases,
+;   enums and their members (constants), fields, property signatures,
+;   parameter properties and top-level `declare` variables
+;   (docs/design/code_intel.md「定义形式」).
 ; - The `new` reference is in queries/ecmascript/tags.scm; adds the class an
 ;   `extends` clause names as a class reference.
 ; - Type references cover every type identifier, not only annotations, and
@@ -56,6 +58,80 @@
 
 (property_signature
   name: (property_identifier) @name) @definition.field
+
+; Parameter properties: a constructor parameter with an accessibility
+; modifier, `override` or `readonly` is also a field of the class.
+[
+  (required_parameter
+    (accessibility_modifier)
+    pattern: (identifier) @name)
+  (required_parameter
+    (override_modifier)
+    pattern: (identifier) @name)
+  (required_parameter
+    "readonly"
+    pattern: (identifier) @name)
+  (optional_parameter
+    (accessibility_modifier)
+    pattern: (identifier) @name)
+  (optional_parameter
+    (override_modifier)
+    pattern: (identifier) @name)
+  (optional_parameter
+    "readonly"
+    pattern: (identifier) @name)
+] @definition.field
+
+; `namespace A.B`: the last segment.
+[
+  (module
+    name: (nested_identifier
+      property: (property_identifier) @name))
+  (internal_module
+    name: (nested_identifier
+      property: (property_identifier) @name))
+] @definition.module
+
+; Top-level `declare const` / `let` / `var`, also exported.
+(program
+  [
+    (ambient_declaration
+      (lexical_declaration
+        kind: "const"
+        (variable_declarator
+          name: (identifier) @name) @definition.constant))
+    (export_statement
+      declaration: (ambient_declaration
+        (lexical_declaration
+          kind: "const"
+          (variable_declarator
+            name: (identifier) @name) @definition.constant)))
+  ])
+
+(program
+  [
+    (ambient_declaration
+      [
+        (lexical_declaration
+          kind: "let"
+          (variable_declarator
+            name: (identifier) @name) @definition.variable)
+        (variable_declaration
+          (variable_declarator
+            name: (identifier) @name) @definition.variable)
+      ])
+    (export_statement
+      declaration: (ambient_declaration
+        [
+          (lexical_declaration
+            kind: "let"
+            (variable_declarator
+              name: (identifier) @name) @definition.variable)
+          (variable_declaration
+            (variable_declarator
+              name: (identifier) @name) @definition.variable)
+        ]))
+  ])
 
 ; ---- references --------------------------------------------------------
 

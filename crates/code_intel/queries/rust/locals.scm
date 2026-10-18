@@ -15,8 +15,12 @@
 ; - `@definition.lectern.local`: a local definition Lectern reads and
 ;   tree-sitter-tags ignores (it acts only on `@local.scope` and
 ;   `@local.definition` here);
+; - `local.namespace`: "type" or "both" for names that type positions use
+;   (default: values); "owner:KIND" in `local.visible` binds only within the
+;   parent of the nearest KIND (a type parameter in its item);
 ; - `local.scope-inherits false` on function scopes is for tree-sitter-tags
 ;   only: it filters references against the enclosing function's own locals.
+; Every name-introducing form is in docs/design/code_intel.md「定义形式」.
 ; A captured pattern (`(a, b)`, `Some(v)`, `Point { x, y: z }`) is expanded
 ; by Lectern into the names it binds, leaving out the constructor and path
 ; (`Some`, `Point`) and capitalised names inside a pattern (unit variants
@@ -90,6 +94,40 @@
       name: (identifier) @local.definition)
   ]
   (#set! local.visible "scope"))
+
+; Type items in a block: types, and for structs also values (`S(1)`).
+; Hidden from tree-sitter-tags, which compares names only.
+(block
+  (struct_item
+    name: (type_identifier) @definition.lectern.local)
+  (#set! local.namespace "both")
+  (#set! local.visible "scope"))
+
+(block
+  [
+    (enum_item
+      name: (type_identifier) @definition.lectern.local)
+    (union_item
+      name: (type_identifier) @definition.lectern.local)
+    (trait_item
+      name: (type_identifier) @definition.lectern.local)
+    (type_item
+      name: (type_identifier) @definition.lectern.local)
+  ]
+  (#set! local.namespace "type")
+  (#set! local.visible "scope"))
+
+; Type and const parameters, in the item that declares them.
+(type_parameters
+  (type_parameter
+    name: (type_identifier) @definition.lectern.local)
+  (#set! local.namespace "type")
+  (#set! local.visible "owner:type_parameters"))
+
+(type_parameters
+  (const_parameter
+    name: (identifier) @definition.lectern.local)
+  (#set! local.visible "owner:type_parameters"))
 
 ; References
 ;------------
