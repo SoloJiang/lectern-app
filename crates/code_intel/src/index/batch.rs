@@ -159,8 +159,12 @@ impl Inner {
     /// runnable tier 3–5 work or the pool is full (`Inner::live`, checked
     /// by the tests' harness).
     pub(crate) fn kick_batch(self: &Arc<Self>) {
-        self.fill_pool();
+        // `kicked` first: a task going idle after this sees it and steps
+        // again; one that went idle before has left room in the pool, which
+        // `fill_pool` fills. Set after, a full pool's last task could go
+        // idle in between, leave, and the kick would wait for the next one.
         lock(&self.batch).kicked = true;
+        self.fill_pool();
     }
 
     /// Starts batch tasks up to `batch_tasks`.
@@ -623,9 +627,7 @@ impl Inner {
             {
                 continue;
             }
-            for eff in st.map.paths(oid, &lang.0) {
-                st.map.hints.set(&eff.slot, oid, stamp);
-            }
+            st.hint_paths(oid, &lang.0, stamp);
         }
         for (_, group) in groups {
             for item in group {
@@ -988,9 +990,7 @@ impl Inner {
                     if tier == Tier::Other {
                         st.batch.others.confirmed.insert(&key, &version.lang);
                     }
-                    for eff in st.map.paths(&key, &version.lang.0) {
-                        st.map.hints.set(&eff.slot, &key, stamp);
-                    }
+                    st.hint_paths(&key, &version.lang.0, stamp);
                 }
             }
         }
@@ -1024,30 +1024,41 @@ impl Inner {
         let p = project.clone();
         self.host
             .spawn_busy("store", Priority::Background, move || {
-                let ctx = {
-                    let st = lock(&p.state);
-                    if !st.live(session) {
-                        return;
-                    }
-                    ctx(&st)
-                };
-                let done = scanned
-                    .into_iter()
-                    .map(|s| Done {
-                        item: Item {
-                            path: s.path,
-                            oid: s.oid,
-                            lang: s.lang,
-                            source: Source::Worktree,
-                            tier: Tier::Review,
-                        },
-                        key: s.oid,
-                        extraction: s.extraction,
-                        flag: Arc::new(AtomicBool::new(false)),
-                    })
-                    .collect();
-                me.commit(&p, &ctx, done, false);
+                me.commit_scanned(&p, session, scanned);
             });
+    }
+
+    /// [`store_scanned`](Self::store_scanned)'s write, on this thread: one
+    /// transaction, then the hints, as a batch commits. Blocking (SQLite).
+    pub(crate) fn commit_scanned(
+        &self,
+        project: &Arc<Project>,
+        session: u64,
+        scanned: Vec<Scanned>,
+    ) {
+        let ctx = {
+            let st = lock(&project.state);
+            if !st.live(session) {
+                return;
+            }
+            ctx(&st)
+        };
+        let done = scanned
+            .into_iter()
+            .map(|s| Done {
+                item: Item {
+                    path: s.path,
+                    oid: s.oid,
+                    lang: s.lang,
+                    source: Source::Worktree,
+                    tier: Tier::Review,
+                },
+                key: s.oid,
+                extraction: s.extraction,
+                flag: Arc::new(AtomicBool::new(false)),
+            })
+            .collect();
+        self.commit(project, &ctx, done, false);
     }
 
     /// Queues the focus's files that are not indexed for tiers 1 and 2, and
@@ -1240,9 +1251,7 @@ impl Inner {
                     st.batch.touches.push(before_raw, &found);
                     if current(&table, &st.map, &version) {
                         let stamp = st.stamp(before);
-                        for eff in st.map.paths(&item.oid, &item.lang.name().0) {
-                            st.map.hints.set(&eff.slot, &item.oid, stamp);
-                        }
+                        st.hint_paths(&item.oid, &item.lang.name().0, stamp);
                     }
                 }
                 continue;

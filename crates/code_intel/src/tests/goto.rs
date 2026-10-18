@@ -652,3 +652,67 @@ fn goto_site_queries_compiled_after_open() {
     let go = map.lang("go").expect("a core language");
     assert!(!go.site_query_ready(), "no Go file: not compiled");
 }
+
+/// Two projects reconcile while the compiling task is pending (the
+/// plugin activating with several projects open): the second's request
+/// finds the task submitted, and its language is compiled all the same.
+#[test]
+fn goto_site_queries_of_every_open_project() {
+    use lectern_services::project::{
+        ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
+    };
+
+    let h = Harness::new();
+    h.git.add(
+        "main",
+        &[("a.ts", b"export function one() { return 1; }\n")],
+    );
+    h.git.commit("main");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical");
+    std::fs::write(root.join("b.py"), b"def two():\n    return 2\n").expect("write");
+    let folder = ProjectKey::Folder {
+        root: Arc::from(root.as_path()),
+    };
+    let mut files = FileList::builder();
+    files.push("b.py", FileKind::File);
+    // Both projects' events before anything runs: both reconciles are
+    // queued before the compiling task the first one submits.
+    h.publish("main", Vec::new());
+    let event = h.projects.set(ProjectSnapshot {
+        key: folder.clone(),
+        generation: 1,
+        name: "folder".into(),
+        worktrees: Arc::from(Vec::new()),
+        active: Some(ActiveTree {
+            root: Arc::from(root.as_path()),
+            worktree: None,
+            opened_at: "".into(),
+            files: Scan::Ready(Arc::new(files.build())),
+            packages: Scan::Ready(Arc::from(Vec::new())),
+        }),
+    });
+    h.indexer.project_event(&event);
+    h.settle();
+    let repo = h.map();
+    let other = h.indexer.map(&folder).expect("open");
+    let ts = repo.lang("ts").expect("ts");
+    let python = other.lang("python").expect("python");
+    assert!(repo.languages().iter().any(|l| l.name().0 == ts.name().0));
+    assert!(
+        other
+            .languages()
+            .iter()
+            .any(|l| l.name().0 == python.name().0)
+    );
+    assert!(ts.site_query_ready(), "the first project's language");
+    assert!(python.site_query_ready(), "the second project's language");
+    assert!(h.indexer.inner().cold_languages().is_empty());
+    assert!(
+        !h.indexer
+            .inner()
+            .warming
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the task ended"
+    );
+}
