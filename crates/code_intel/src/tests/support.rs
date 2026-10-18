@@ -1,0 +1,410 @@
+//! The indexer's test harness: a host kernel, a manual executor, a
+//! `FakeGit` repository, `FakeProjects`, a manual fs_watch over a fake
+//! backend, a temporary cache and the watchdog on a `ManualClock`.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+
+use lectern_cache::{Budgets, Cache, Config};
+use lectern_executor::Executor;
+use lectern_fs_watch::testing::{Driver, FakeBackend, manual};
+use lectern_fs_watch::{Config as WatchConfig, Flags, Watcher};
+use lectern_services::code_intel::{Coverage, Focus, TextOrigin, TextRef, TierState};
+use lectern_services::project::{BlobId, Package, ProjectKey, RelPath};
+
+use crate::extract::{Deadline, Extraction, Lang, extract};
+use crate::index::{IndexDeps, Indexer, StatCounts};
+use crate::map::LiveMap;
+use crate::testing::{
+    FakeGit, FakeGrammars, FakePower, FakeProjects, ManualClock, TestHost, WatchdogTask, host,
+    watchdog,
+};
+
+pub(crate) const CHANGED: Flags = Flags(Flags::FILE.0 | Flags::MODIFIED.0);
+pub(crate) const CREATED: Flags = Flags(Flags::FILE.0 | Flags::CREATED.0);
+pub(crate) const REMOVED: Flags = Flags(Flags::FILE.0 | Flags::REMOVED.0);
+pub(crate) const DIR_CHANGED: Flags = Flags(Flags::DIR.0 | Flags::MODIFIED.0);
+
+type Hook = Arc<dyn Fn(&Lang, &[u8]) + Send + Sync>;
+
+/// What the extractor hook saw: every extraction's language and the OID of
+/// its bytes, in order.
+#[derive(Default)]
+pub(crate) struct Seen {
+    pub calls: Mutex<Vec<(String, BlobId)>>,
+    pub hook: Mutex<Option<Hook>>,
+    /// Each extraction's OID and status, once it returned.
+    pub results: Mutex<Vec<(BlobId, crate::extract::ExtractStatus)>>,
+}
+
+pub(crate) struct Options {
+    pub battery: bool,
+    pub batch_tasks: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            battery: false,
+            batch_tasks: 1,
+        }
+    }
+}
+
+pub(crate) struct Harness {
+    pub host: TestHost,
+    pub executor: Executor,
+    pub git: Arc<FakeGit>,
+    pub projects: Arc<FakeProjects>,
+    pub power: Arc<FakePower>,
+    pub grammars: Arc<FakeGrammars>,
+    pub clock: ManualClock,
+    pub backend: Arc<FakeBackend>,
+    pub driver: Driver,
+    pub watcher: Watcher,
+    pub cache: Cache,
+    pub indexer: Indexer,
+    pub seen: Arc<Seen>,
+    pub watchdog_task: WatchdogTask,
+    _subscriptions: Vec<Box<dyn Send>>,
+    _cache_dir: Option<tempfile::TempDir>,
+    generation: AtomicUsize,
+}
+
+impl Harness {
+    pub(crate) fn new() -> Harness {
+        Harness::with(Options::default())
+    }
+
+    pub(crate) fn with(options: Options) -> Harness {
+        Harness::with_parts(options, Arc::new(FakeGit::new()), None)
+    }
+
+    /// A new indexer (and kernel, executor, watcher) over the same
+    /// repository and cache directory: the next run of the app.
+    pub(crate) fn reopen(mut self, options: Options) -> Harness {
+        self.indexer.close_all();
+        let dir = self._cache_dir.take().expect("the cache directory");
+        let git = self.git.clone();
+        drop(self);
+        Harness::with_parts(options, git, Some(dir))
+    }
+
+    fn with_parts(options: Options, git: Arc<FakeGit>, dir: Option<tempfile::TempDir>) -> Harness {
+        let host = host();
+        let executor = Executor::manual();
+        let projects = FakeProjects::new();
+        let power = FakePower::new(options.battery);
+        let grammars = Arc::new(FakeGrammars::new());
+        let clock = ManualClock::new();
+        let backend = FakeBackend::new();
+        let (watcher, driver) = manual(backend.clone(), Executor::manual(), WatchConfig::default());
+        let dir = dir.unwrap_or_else(|| tempfile::tempdir().expect("temp dir"));
+        let cache = cache(dir.path());
+        let (wd, watchdog_task) = watchdog(&executor, Arc::new(clock.clone()));
+        let indexer = Indexer::with_fake_git(
+            IndexDeps {
+                executor: executor.clone(),
+                cache: cache.clone(),
+                watcher: watcher.clone(),
+                power: power.clone(),
+                grammars: grammars.clone(),
+                projects: projects.clone(),
+                handle: host.handle.clone(),
+                watchdog: wd,
+                batch_tasks: options.batch_tasks,
+            },
+            git.clone(),
+        );
+        let seen = Arc::new(Seen::default());
+        let s = seen.clone();
+        let hash = git.hash();
+        indexer.set_extractor(
+            move |lang: &Lang, bytes: &[u8], deadline: &Deadline, cancel: &Arc<AtomicBool>| {
+                let oid = crate::git_access::hash_blob(hash, bytes);
+                s.calls.lock().unwrap().push((lang.name().0.to_string(), oid));
+                let hook = s.hook.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    hook(lang, bytes);
+                }
+                let extraction = extract(lang, bytes, deadline, cancel);
+                s.results.lock().unwrap().push((oid, extraction.status));
+                extraction
+            },
+        );
+        let subscriptions = indexer.subscribe();
+        Harness {
+            host,
+            executor,
+            git,
+            projects,
+            power,
+            grammars,
+            clock,
+            backend,
+            driver,
+            watcher,
+            cache,
+            indexer,
+            seen,
+            watchdog_task,
+            _subscriptions: subscriptions,
+            _cache_dir: Some(dir),
+            generation: AtomicUsize::new(1),
+        }
+    }
+
+    pub(crate) fn key(&self) -> ProjectKey {
+        self.git.key()
+    }
+
+    fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::AcqRel) as u64
+    }
+
+    /// Opens (or reopens) the project with the main worktree active.
+    pub(crate) fn open(&self) {
+        self.open_with("main", Vec::new());
+    }
+
+    pub(crate) fn open_with(&self, active: &str, packages: Vec<Package>) {
+        self.publish(active, packages);
+        self.settle();
+    }
+
+    /// Publishes a snapshot with `active` as the current worktree and
+    /// hands the event to the indexer, without running anything.
+    pub(crate) fn publish(&self, active: &str, packages: Vec<Package>) {
+        let snapshot = self.git.snapshot(self.next_generation(), active, packages);
+        let event = self.projects.set(snapshot);
+        self.indexer.project_event(&event);
+    }
+
+    /// Publishes the index as the new file list (as `project` does after an
+    /// index change).
+    pub(crate) fn refresh_files(&self) {
+        let event = self.projects.set_files(&self.key(), self.git.file_list(&self.active()));
+        self.indexer.project_event(&event);
+        self.settle();
+    }
+
+    pub(crate) fn set_packages(&self, dirs: &[&str]) {
+        let event = self.projects.set_packages(&self.key(), packages(dirs));
+        self.indexer.project_event(&event);
+        self.settle();
+    }
+
+    fn active(&self) -> String {
+        let snapshot = self.projects_snapshot();
+        let active = snapshot.active.as_ref().and_then(|a| a.worktree.clone());
+        for name in ["main"] {
+            if Some(self.git.worktree_key(name)) == active {
+                return name.into();
+            }
+        }
+        "main".into()
+    }
+
+    fn projects_snapshot(&self) -> Arc<lectern_services::project::ProjectSnapshot> {
+        use lectern_services::project::Projects;
+        self.projects.snapshot(&self.key()).expect("an open project")
+    }
+
+    /// Runs fs_watch, the executor and the clock past every coalescing
+    /// window until nothing is left to do.
+    pub(crate) fn settle(&self) {
+        loop {
+            let a = self.driver.run_until_idle();
+            self.driver.advance(Duration::from_secs(5));
+            let b = self.executor.run_until_idle();
+            let c = self.driver.run_until_idle();
+            if a == 0 && b == 0 && c == 0 {
+                return;
+            }
+        }
+    }
+
+    /// Emits worktree events (paths relative to the main root).
+    pub(crate) fn emit(&self, events: &[(&str, Flags)]) {
+        self.backend.emit(&self.git.root("main"), events);
+    }
+
+    /// Emits events in the git directory (`index`, `HEAD`, `refs/...`).
+    pub(crate) fn emit_git(&self, events: &[(&str, Flags)]) {
+        self.backend.emit(self.git.common_dir(), events);
+    }
+
+    pub(crate) fn map(&self) -> LiveMap {
+        self.indexer.map(&self.key()).expect("an open project")
+    }
+
+    pub(crate) fn coverage(&self) -> Coverage {
+        self.indexer.coverage(&self.key()).expect("an open project")
+    }
+
+    pub(crate) fn stats(&self) -> StatCounts {
+        self.indexer.stats()
+    }
+
+    /// The OIDs extracted so far, in order.
+    pub(crate) fn extracted(&self) -> Vec<BlobId> {
+        self.seen.calls.lock().unwrap().iter().map(|(_, o)| *o).collect()
+    }
+
+    pub(crate) fn extractions(&self) -> usize {
+        self.seen.calls.lock().unwrap().len()
+    }
+
+    pub(crate) fn set_hook(&self, hook: impl Fn(&Lang, &[u8]) + Send + Sync + 'static) {
+        *self.seen.hook.lock().unwrap() = Some(Arc::new(hook));
+    }
+
+    /// Whether the store has a unit for `oid` in `lang`'s current version.
+    pub(crate) fn stored(&self, oid: BlobId, lang: &str) -> bool {
+        let store = self.indexer.store(&self.key()).expect("an open project");
+        let table = crate::extract::LanguageTable::core();
+        let lang = table.get(lang).expect("a core language");
+        let version = crate::store::Version::of(lang);
+        store
+            .exists(&version, &[oid])
+            .is_some_and(|found| !found.is_empty())
+    }
+
+    /// Whether `path`'s hint matches its current effective content.
+    pub(crate) fn hinted(&self, path: &str) -> bool {
+        let map = self.map();
+        let store = self.indexer.store(&self.key()).expect("an open project");
+        let Some(eff) = map.effective(path) else {
+            return false;
+        };
+        let grammar = self.indexer.gens(&self.key()).map_or(0, |g| g.grammar);
+        map.hints.matches(
+            &eff.slot,
+            &eff.oid,
+            crate::map::HintStamp {
+                eviction: store.evictions(),
+                grammar,
+            },
+        )
+    }
+
+    pub(crate) fn set_focus(&self, focus: Focus) {
+        let wt = self.git.worktree_key("main");
+        self.indexer.set_focus(&self.key(), Some(&wt), focus);
+    }
+
+    pub(crate) fn current(&self, path: &str) {
+        let oid = self.map().effective(path).map(|e| e.oid).expect("a path in the map");
+        self.set_focus(Focus::Current(Some(TextRef {
+            worktree: Some(self.git.worktree_key("main")),
+            path: path.into(),
+            oid,
+            origin: TextOrigin::Worktree,
+        })));
+    }
+
+    pub(crate) fn quiescent(&self) -> bool {
+        self.host.kernel().is_quiescent()
+    }
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        self.indexer.close_all();
+        self.indexer.inner().watchdog.stop();
+    }
+}
+
+pub(crate) fn cache(dir: &Path) -> Cache {
+    Cache::with_clock(
+        Config {
+            root: dir.join("cache"),
+            budgets: Budgets::default(),
+            ui_thread: None,
+        },
+        lectern_cache::testing::ManualClock::new(SystemTime::now()),
+    )
+}
+
+/// Sub-projects at these directories.
+pub(crate) fn packages(dirs: &[&str]) -> Vec<Package> {
+    dirs.iter()
+        .map(|d| Package {
+            dir: (*d).into(),
+            name: (*d).into(),
+            manifests: Arc::from(Vec::new()),
+            declared: false,
+            workspace_root: false,
+            parent: None,
+            files: 0,
+        })
+        .collect()
+}
+
+/// A small TypeScript module with one function named after `name`.
+pub(crate) fn ts(name: &str) -> Vec<u8> {
+    format!("export function {name}(a: number): number {{\n  return a + 1;\n}}\n").into_bytes()
+}
+
+/// Every tier's coverage.
+pub(crate) fn all(state: TierState) -> [TierState; 4] {
+    [state; 4]
+}
+
+pub(crate) fn tiers(c: &Coverage) -> [TierState; 4] {
+    [c.focus, c.subproject, c.worktree, c.other_worktrees]
+}
+
+pub(crate) fn paths(map: &LiveMap) -> HashMap<RelPath, BlobId> {
+    let mut out = HashMap::new();
+    for i in 0..map.base.files().len() {
+        if let Some(e) = map.base_effective(i) {
+            out.insert(e.path, e.oid);
+        }
+    }
+    for (p, s) in map.overlay.entries() {
+        if let crate::map::WorktreeState::Content(oid) = s {
+            out.insert(p.clone(), *oid);
+        }
+    }
+    out
+}
+
+/// A test extraction that the hook made wait: blocks until `release`.
+#[derive(Default)]
+pub(crate) struct Gate {
+    pub entered: AtomicBool,
+    pub open: AtomicBool,
+}
+
+impl Gate {
+    pub(crate) fn wait_entered(&self) {
+        let start = std::time::Instant::now();
+        while !self.entered.load(Ordering::Acquire) {
+            assert!(start.elapsed() < Duration::from_secs(20), "the extraction never started");
+            std::thread::yield_now();
+        }
+    }
+}
+
+impl Harness {
+    /// The file counts of the tiers 3–5 extraction batches so far.
+    pub(crate) fn batches(&self) -> Vec<usize> {
+        self.indexer.inner().batch_log.lock().unwrap().clone()
+    }
+
+    /// The status the extraction of `oid` returned last.
+    pub(crate) fn status(&self, oid: BlobId) -> Option<crate::extract::ExtractStatus> {
+        self.seen
+            .results
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(o, _)| *o == oid)
+            .map(|(_, s)| *s)
+    }
+}

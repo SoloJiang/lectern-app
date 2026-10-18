@@ -10,7 +10,7 @@
 //! only if the generations it read are still current.
 
 mod batch;
-mod host;
+pub(crate) mod host;
 mod reconcile;
 mod state;
 mod watch;
@@ -166,6 +166,9 @@ pub(crate) struct Inner {
     pub extract: Mutex<ExtractFn>,
     pub stats: Stats,
     next_session: AtomicUsize,
+    /// The files of each extraction batch of tiers 3–5, in order (tests).
+    #[cfg(test)]
+    pub batch_log: Mutex<Vec<usize>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -217,6 +220,8 @@ impl Indexer {
             extract: Mutex::new(Arc::new(extract)),
             stats: Stats::default(),
             next_session: AtomicUsize::new(1),
+            #[cfg(test)]
+            batch_log: Mutex::new(Vec::new()),
         });
         Indexer { inner }
     }

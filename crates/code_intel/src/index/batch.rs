@@ -485,6 +485,8 @@ impl Inner {
                 Outcome::Skip => self.release(project, ctx, &item),
             }
         }
+        #[cfg(test)]
+        lock(&self.batch_log).push(files);
         self.commit(project, ctx, done);
     }
 
