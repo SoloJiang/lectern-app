@@ -1915,6 +1915,26 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   `goto_indexed` 在这台机器上超出 20 ms。拆分（release，64 KiB 的 TS 当前文本）：解析约 9 ms，locals 与引用模式的查询约 4.5 ms，处理匹配（作用域、局部引用的变量位置）约 4 ms，遍历约 2 ms，规则与收尾约 1 ms，合计约 20 ms，其余（读取与核对、按名字查定义、约 130 个候选的过滤与排序）约 3 ms。设计的分项是「解析与 locals ≤ 10 ms」，这台机器上单是解析就接近它；这一项与 `extract_throughput`、`warm_100k` 一样在 Apple 芯片上判定（[bench 设计](bench.md)），预算没有因 Linux 的结果调高。`resident_100k` 第一版的 11.5 MB 里约 9 MB 不属于本 crate：基准没有像 `project` 那样先订阅 worktree，fs_watch 为本 crate 的订阅建的跟踪路径过滤器算进了测量窗口（`Rig::watch_as_project` 改正）；另外 `touch_pending` 排空后保留了队列的容量（已释放）；核心语言不再编译 `Compiled` 也减少了常驻。
 - 没有验证的：M 系列上的各项基准（`goto_indexed` 在这台机器上超出，见上）；`app` 装配本插件（`app` 依赖 GPUI，Linux 上不编译，第 5 步）；真实的 fs_watch 后端和语义导航提供者（测试用 `FakeBackend` 和测试里的假提供者，jdtls / SCIP 属于 #26；电源接口按 ADR 0032 不再需要）；几个批量线程同时运行；文件夹项目超过 2 万个文件时的行为（由 `project` 的遍历上限决定，没有测）；cloudprint 形状的名字表（≤ 0.1 MB、≤ 30 ms，没有对应的基准）。
 
+第 4 步，处理预审意见之后，rebase 到包含 #119、#120（5eff366）的 main，同一台机器。
+
+- `just check`、`just test`（整个工作区 1322 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。`just test -p lectern-code-intel` 218 个测试通过，本轮新增 4 个：`search_cut_extraction_is_not_stored`（5 个未入索引的文件各抽取 200 ms，第 5 个在剩余的 200 ms 里被截短：结果是 `Partial { unsearched: 1 }`，它没有写入；批量层之后按自己的截止时间写入，下一次跳转找到全部 5 个、`Complete`）、`search_file_deadline_table`、`search_distance_table`、`goto_site_queries_compiled_after_open`（映射里有 TS 和 Rust 文件：静止之后两者的查询已编译，Go 的没有）。
+- 不再依赖 OS 或时间窗口推断状态的测试：`watchdog_*` 看 `plugin::WatchdogThread`，`/proc` 只在 Linux 上、线程退出之后确认；`deadline_watchdog_idle_does_not_wake` 等看门狗的无超时等待计数加一，再确认 100 ms 里没有有超时的等待（原来只看 30 ms 内轮数不变，负载高时最后一轮落在窗口之后，macOS CI 上失败过）；`names_refresh_while_held` 的「不再重建」等到期表清空；`schedule_large_files_take_turns` 等等待方调用过两次停止探针。
+- 压力运行（同时 4 个占满 CPU 的进程）：`-E 'test(watchdog) or test(deadline) or test(search)'`（32 个测试）`--stress-count 150` 全部通过；整个本 crate（218 个）`--stress-count 30` 全部通过。预审时这两组的失败：`watchdog_one_thread_after_20_activations` 150 次里 54 次，`deadline_one_mib_returns_soon_after_the_deadline` 的 TS `ParsedFile` 一项 150 次里 38 次（计时里包含第一次编译）。
+- 基准（`just bench --measure code_intel/ plugin/code-intel/`）：
+
+  | 基准 | 结果 | 预算 |
+  |---|---|---|
+  | `code_intel/goto_first`（新增） | 中位数 6.37、6.86 ms | 只记录（候选 50 ms） |
+  | `code_intel/goto_indexed` | 中位数 23.7、23.9 ms | ≤ 20 ms（macOS 判定） |
+  | `code_intel/search_stop` | 最大 1 s | ≤ 1.02 s |
+  | `code_intel/references_100k/all`、`/first` | 1.01 s、951 ms；11 ms、10 ms | ≤ 2 s；≤ 200 ms |
+  | `code_intel/names_100k`、`names_100k_bytes` | 881 ms；4.66 MB | ≤ 1 s；≤ 8 MB |
+  | `plugin/code-intel/resident_cloudprint` | 374 KB（上一轮 155 KB） | ≤ 4 MB |
+  | `plugin/code-intel/resident_100k` | 3.07 MB（上一轮 2.86 MB） | ≤ 10 MB |
+
+  常驻增加的约 0.2 MB 是映射里七种语言的 `SiteQuery`（上一轮只编译了跳转用到的 TS）。同一次运行里 `extract_throughput` 为 3.78 MB/s，低于 4 MB/s：抽取的代码本轮没有改，这台机器上这一项在 3.3–4.27 MB/s 之间波动，在 Apple 芯片上判定；其余第 1–3 步的基准都在预算内。预审时 Linux 上第一次跳转的编译耗时（release）：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms；现在由后台任务承担，`goto_first` 不含它。
+- 没有验证的：同上一轮；另外，第一次跳转发生在后台编译完成之前时，查询等这次编译结束（不会比自己编译更久），没有单独测量。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
