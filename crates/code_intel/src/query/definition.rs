@@ -295,22 +295,33 @@ impl Inner {
         cancel: &Arc<AtomicBool>,
     ) -> Result<Prepared, QueryError> {
         crate::index::bump(&self.stats.prepares, 1);
+        let _all = crate::phases::span("prepare (steps 1-3)");
         let lang = snap
             .table
             .for_path(&at.path, &*self.packs)
             .filter(|l| !snap.disabled.contains(l.name()))
             .cloned()
             .ok_or(QueryError::UnsupportedLanguage)?;
-        let bytes = self.read_text(snap, at)?;
+        let bytes = {
+            let _t = crate::phases::span("1 read + verify current text");
+            self.read_text(snap, at)?
+        };
         let clock = self.watchdog.clock().clone();
         let deadline = clock.now() + INTERACTIVE_DEADLINE;
-        let parsed =
-            ParsedFile::parse(&lang, bytes, &*clock, deadline, cancel).map_err(|e| match e {
-                ParseError::Unsupported => QueryError::UnsupportedLanguage,
-                ParseError::TimedOut => QueryError::Unreadable("parsing timed out".into()),
-                ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
-            })?;
-        let site = parsed.site_at(position).ok_or(QueryError::NoSymbol)?;
+        let parsed = {
+            let _t = crate::phases::span("1 parse + locals + site query");
+            ParsedFile::parse_at(&lang, bytes, &*clock, deadline, cancel, position).map_err(
+                |e| match e {
+                    ParseError::Unsupported => QueryError::UnsupportedLanguage,
+                    ParseError::TimedOut => QueryError::Unreadable("parsing timed out".into()),
+                    ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
+                },
+            )?
+        };
+        let site = {
+            let _t = crate::phases::span("1 site_at");
+            parsed.site_at(position).ok_or(QueryError::NoSymbol)?
+        };
         let name = lang.name().clone();
         let defines = site.defines.as_ref().map(|d| {
             let location = here(at, d.def.line, d.def.column, d.def.end_line);
@@ -322,7 +333,10 @@ impl Inner {
             syntax: site.syntax,
             defines: defines.clone(),
         };
-        let ranker = self.ranker(snap, Some(&at.path), Some((at.origin, at.oid)), Some(&name));
+        let ranker = {
+            let _t = crate::phases::span("ranker");
+            self.ranker(snap, Some(&at.path), Some((at.origin, at.oid)), Some(&name))
+        };
         let mut prepared = Prepared {
             symbol,
             lang: lang.clone(),
@@ -377,6 +391,7 @@ impl Inner {
 
         // 2. Imports and bindings with evidence (the resolution extension
         // point; none with #17's empty rules).
+        let step2 = crate::phases::span("2 imports");
         let rules = self.resolver(&name);
         let until = clock.now() + INTERACTIVE_DEADLINE;
         let pending: RefCell<Pending> = RefCell::default();
@@ -452,6 +467,7 @@ impl Inner {
             });
         }
         let (units, scanned, extracted) = pending.into_inner();
+        drop(step2);
         prepared.units.extend(units);
         prepared.scanned.extend(scanned);
         prepared.extracted = extracted;
@@ -484,9 +500,11 @@ impl Inner {
             ranker,
             &mut prepared.units,
         );
+        let _t = crate::phases::span("3 disambiguate + rank");
         rules.disambiguate(&prepared.site, &mut drafts);
         let mut found: Vec<Candidate> = drafts.into_iter().map(|d| d.candidate).collect();
         ranker.sort(&mut found);
+        crate::phases::count("candidates", found.len() as u64);
         let mut added = false;
         for candidate in found {
             added |= prepared.push(candidate);
@@ -502,6 +520,7 @@ impl Inner {
         if !snap.hinted_since(&mut prepared.hinted) {
             return;
         }
+        crate::phases::count("second lookups", 1);
         let ranker = self.ranker(
             snap,
             Some(&at.path),
@@ -539,11 +558,15 @@ impl Inner {
             .filter(|l| compatible(&snap.table, l.name(), lang.name()))
             .map(Version::of)
             .collect();
-        let stored = snap
-            .project
-            .store
-            .defs_by_name(&site.name, &versions)
-            .unwrap_or_default();
+        let stored = {
+            let _t = crate::phases::span("3 index lookup (SQL)");
+            snap.project
+                .store
+                .defs_by_name(&site.name, &versions)
+                .unwrap_or_default()
+        };
+        crate::phases::count("stored defs", stored.len() as u64);
+        let _t = crate::phases::span("3 filter + tier");
         let mut out = Vec::new();
         for s in stored {
             if !accepts(lang, site.syntax, s.def.kind) {
@@ -608,24 +631,36 @@ impl Inner {
         if run.stopped(snap) {
             return;
         }
-        let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&p.site));
-        let first: Arc<[Candidate]> = p.candidates.clone().into();
-        let symbol = p.symbol.clone();
-        self.publish(run.id, |r| {
-            r.symbol = Some(symbol);
-            r.candidates = first;
-            r.jump = jump;
-            r.preselect = preselect;
-        });
+        {
+            let _t = crate::phases::span("publish first batch");
+            let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&p.site));
+            let first: Arc<[Candidate]> = p.candidates.clone().into();
+            let symbol = p.symbol.clone();
+            self.publish(run.id, |r| {
+                r.symbol = Some(symbol);
+                r.candidates = first;
+                r.jump = jump;
+                r.preselect = preselect;
+            });
+        }
         if !p.settled {
+            let _t = crate::phases::span("escalate");
             self.escalate_definition(run.id, snap, at, position, &p);
         }
         let completeness = if p.settled {
             Some(Completeness::Complete)
         } else {
             self.run_after_lookup(snap);
-            let scope = snap.search_scope(&at.path, &p.lang, &p.skip);
-            self.look_up_again(run, snap, at, &mut p);
+            let scope = {
+                let _t = crate::phases::span("4 search scope");
+                snap.search_scope(&at.path, &p.lang, &p.skip)
+            };
+            crate::phases::count("scope files", scope.files.len() as u64);
+            {
+                let _t = crate::phases::span("cut check");
+                self.look_up_again(run, snap, at, &mut p);
+            }
+            let search = crate::phases::span("4 search");
             let extracted = std::mem::take(&mut p.extracted);
             let ranker = self.ranker(
                 snap,
@@ -708,6 +743,8 @@ impl Inner {
             );
             p.units = units;
             p.scanned = scanned;
+            drop(search);
+            let _t = crate::phases::span("cut check");
             if result.is_some() {
                 // The counts of `Partial` read hints too.
                 self.look_up_again(run, snap, at, &mut p);
@@ -718,7 +755,12 @@ impl Inner {
         let Some(completeness) = completeness else {
             return;
         };
-        self.publish(run.id, |r| r.state = QueryState::Done(completeness));
+        {
+            let _t = crate::phases::span("publish done");
+            self.publish(run.id, |r| r.state = QueryState::Done(completeness));
+        }
+        let _t = crate::phases::span("touch units");
+        crate::phases::count("touched units", p.units.len() as u64);
         snap.project.store.touch(&p.units);
     }
 

@@ -337,7 +337,7 @@ impl Store {
     /// `None` when the partition cannot be read: treat every OID as missing.
     pub fn exists(&self, version: &Version, oids: &[BlobId]) -> Option<Vec<Found>> {
         let lang = &*version.lang.0;
-        self.set.read(|r| {
+        read_counted(&self.set, |r| {
             let mut found = Vec::new();
             let mut params = [Param::Null; 3 + EXISTS_BATCH];
             params[0] = Param::Text(lang);
@@ -350,7 +350,7 @@ impl Store {
                 {
                     *slot = oid.map_or(Param::Null, |o| Param::Bytes(o.as_bytes()));
                 }
-                let ok = r.query(EXISTS, &params, |row| {
+                let ok = counted(r).query(EXISTS, &params, |row| {
                     let hit = row.unit(0).zip(oid_at(row, 1)).zip(status_at(row, 2));
                     if let Some(((unit, oid), status)) = hit {
                         found.push(Found { oid, unit, status });
@@ -389,11 +389,11 @@ impl Store {
     /// of `versions` (the current triples of a compatibility group). Not
     /// marked as used: the caller touches what it delivers.
     pub fn defs_by_name(&self, name: &str, versions: &[Version]) -> Option<Vec<StoredDef>> {
-        self.set.read(|r| {
+        read_counted(&self.set, |r| {
             let mut out = Vec::new();
             for group in versions.chunks(GROUP_TRIPLES) {
                 let params = group_params(name, group);
-                let ok = r.query(DEFS_BY_NAME, &params, |row| {
+                let ok = counted(r).query(DEFS_BY_NAME, &params, |row| {
                     if row.text(0) != Some(name) {
                         return true;
                     }
@@ -422,11 +422,11 @@ impl Store {
     /// The `Done` units of `versions` whose reference names include `name`
     /// exactly. Not marked as used.
     pub fn refs_by_name(&self, name: &str, versions: &[Version]) -> Option<Vec<StoredUnit>> {
-        self.set.read(|r| {
+        read_counted(&self.set, |r| {
             let mut out = Vec::new();
             for group in versions.chunks(GROUP_TRIPLES) {
                 let params = group_params(name, group);
-                let ok = r.query(REFS_BY_NAME, &params, |row| {
+                let ok = counted(r).query(REFS_BY_NAME, &params, |row| {
                     push_unit(&mut out, row, 2, 0, lang_at(row, 1, group));
                     true
                 });
@@ -441,7 +441,7 @@ impl Store {
     /// Every `Done` unit of `versions` (the name table's first pass, before
     /// filtering by the map).
     pub fn units(&self, versions: &[Version]) -> Option<Vec<StoredUnit>> {
-        self.set.read(|r| {
+        read_counted(&self.set, |r| {
             let mut out = Vec::new();
             for version in versions {
                 let params = [
@@ -449,7 +449,7 @@ impl Store {
                     Param::Int(version.grammar as i64),
                     Param::Int(version.query as i64),
                 ];
-                let ok = r.query(UNITS, &params, |row| {
+                let ok = counted(r).query(UNITS, &params, |row| {
                     push_unit(&mut out, row, 0, 1, Some(version.lang.clone()));
                     true
                 });
@@ -471,7 +471,7 @@ impl Store {
         self.set
             .read(|r| {
                 let mut last: Option<(i64, bool)> = None;
-                r.query(DEF_NAMES, &[], |row| {
+                counted(r).query(DEF_NAMES, &[], |row| {
                     let Some(id) = row.int(0) else {
                         return true;
                     };
@@ -496,25 +496,25 @@ impl Store {
     /// order, reference names in byte order. `None` when the unit is gone or
     /// the partition cannot be read.
     pub fn load(&self, unit: Unit) -> Option<Extraction> {
-        self.set.read(|r| load(r, unit)).flatten()
+        read_counted(&self.set, |r| load(r, unit)).flatten()
     }
 }
 
 fn load(r: &mut TableRead<'_>, unit: Unit) -> Option<Extraction> {
     let id = [Param::Int(unit.id())];
     let mut status = None;
-    r.query(EXT_OF_UNIT, &id, |row| {
+    counted(r).query(EXT_OF_UNIT, &id, |row| {
         status = status_at(row, 0);
         false
     });
     let status = status?;
     let mut defs = Vec::new();
-    r.query(DEFS_OF_UNIT, &id, |row| {
+    counted(r).query(DEFS_OF_UNIT, &id, |row| {
         defs.extend(def_at(row, 0));
         true
     });
     let mut refs = Vec::new();
-    r.query(REFS_OF_UNIT, &id, |row| {
+    counted(r).query(REFS_OF_UNIT, &id, |row| {
         refs.extend(row.text(0).map(Box::from));
         true
     });
@@ -684,4 +684,16 @@ impl StoreWrite {
     pub fn commit(self) -> Written {
         self.write.commit()
     }
+}
+
+/// `r`, counting one statement (`phases`).
+fn counted<'r, 'a>(r: &'r mut TableRead<'a>) -> &'r mut TableRead<'a> {
+    crate::phases::count("sql statements", 1);
+    r
+}
+
+/// A read transaction, counted (`phases`).
+fn read_counted<T>(set: &TableSet, f: impl FnOnce(&mut TableRead<'_>) -> T) -> Option<T> {
+    crate::phases::count("sql read transactions", 1);
+    set.read(f)
 }

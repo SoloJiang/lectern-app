@@ -205,6 +205,9 @@ struct LangInner {
     /// `ParsedFile`'s query on a core language with a walker, compiled on
     /// first use.
     site: OnceLock<Option<SiteQuery>>,
+    /// The jump's variant of `site` ([`SiteQuery::jump`]), compiled on
+    /// first use.
+    jump: OnceLock<Option<SiteQuery>>,
     #[cfg(test)]
     _compiled_dropped: crate::testing::DropTrace,
     language: tree_sitter::Language,
@@ -227,6 +230,7 @@ impl Lang {
             lease: GrammarLease::none(),
             compiled: OnceLock::new(),
             site: OnceLock::new(),
+            jump: OnceLock::new(),
             #[cfg(test)]
             _compiled_dropped: crate::testing::DropTrace("compiled"),
         }))
@@ -248,6 +252,7 @@ impl Lang {
             lease: grammar.lease,
             compiled: OnceLock::new(),
             site: OnceLock::new(),
+            jump: OnceLock::new(),
             #[cfg(test)]
             _compiled_dropped: crate::testing::DropTrace("compiled"),
         }))
@@ -282,7 +287,8 @@ impl Lang {
     /// when the grammar or a query does not compile: the language is then
     /// unavailable for this run (one line on stderr).
     pub fn prepare(&self) -> bool {
-        self.compiled().is_some() && (!self.walks() || self.site_query().is_some())
+        self.compiled().is_some()
+            && (!self.walks() || (self.site_query().is_some() && self.jump_query().is_some()))
     }
 
     /// A core language whose walker gives the definitions and markers
@@ -296,7 +302,7 @@ impl Lang {
     /// then does not compile it first.
     pub(crate) fn site_query_ready(&self) -> bool {
         if self.walks() {
-            self.0.site.get().is_some()
+            self.0.site.get().is_some() && self.0.jump.get().is_some()
         } else {
             self.0.compiled.get().is_some()
         }
@@ -309,7 +315,7 @@ impl Lang {
     /// (`OnceLock`), so it never waits longer than compiling itself.
     pub(crate) fn prepare_site(&self) -> bool {
         if self.walks() {
-            self.site_query().is_some()
+            self.site_query().is_some() && self.jump_query().is_some()
         } else {
             self.compiled().is_some()
         }
@@ -345,6 +351,24 @@ impl Lang {
         self.0
             .site
             .get_or_init(|| match SiteQuery::new(&self.0) {
+                Ok(query) => Some(query),
+                Err(error) => {
+                    log(format_args!(
+                        "the {} queries do not compile, the language is disabled: {error}",
+                        self.0.name.0
+                    ));
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    /// [`SiteQuery::jump`], compiled on first use, on the calling
+    /// (background) thread; None when it does not compile.
+    pub(crate) fn jump_query(&self) -> Option<&SiteQuery> {
+        self.0
+            .jump
+            .get_or_init(|| match SiteQuery::jump(&self.0) {
                 Ok(query) => Some(query),
                 Err(error) => {
                     log(format_args!(
@@ -598,6 +622,40 @@ impl SiteQuery {
                         && *capture == Capture::Tag(TagClass::Ref)
                 });
             if !reference {
+                query.disable_pattern(pattern);
+            }
+        }
+        Ok(SiteQuery {
+            query,
+            captures,
+            locals_patterns,
+        })
+    }
+
+    /// The jump's query (`ParsedFile::parse_at`): the locals patterns that
+    /// build the binding model (scopes, definitions, and the `global` /
+    /// `nonlocal` directives), nothing else. A jump needs the locals
+    /// query's verdict on one reference only, the site's, which
+    /// `parse_at` takes from [`new`](Self::new)'s query run on the site's
+    /// bytes; the reference tags only give `ParsedFile::references`.
+    fn jump(lang: &LangInner) -> Result<SiteQuery, String> {
+        let source = format!("{}{}", lang.locals_query, lang.tags_query);
+        let mut query = Query::new(&lang.language, &source).map_err(|e| e.to_string())?;
+        let Classified {
+            captures,
+            locals_patterns,
+            ..
+        } = classify(&query, lang.locals_query.len())?;
+        for pattern in 0..query.pattern_count() {
+            let plain_reference = pattern < locals_patterns
+                && query
+                    .capture_quantifiers(pattern)
+                    .iter()
+                    .zip(&captures)
+                    .filter(|(quantifier, _)| **quantifier != CaptureQuantifier::Zero)
+                    .all(|(_, capture)| *capture == Capture::LocalReference)
+                && crate::locals::is_plain_reference(query.property_settings(pattern));
+            if pattern >= locals_patterns || plain_reference {
                 query.disable_pattern(pattern);
             }
         }

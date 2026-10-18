@@ -1131,3 +1131,65 @@ fn site_reference_query_matches_full() {
         }
     }
 }
+
+/// `ParsedFile::parse_at` (a jump's parse: the locals patterns that build
+/// the binding model over the whole tree, the full query on the site's
+/// bytes) gives at its site what `parse` gives there, and the same
+/// definitions: at the start and the end of identifier-like runs of the
+/// fixtures, the walkers' cases and the synthetic sources (about 150 per
+/// source).
+#[test]
+fn site_parse_at_matches_parse() {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    let deadline = || Instant::now() + Duration::from_secs(10);
+    let mut checked = 0usize;
+    for (lang, source) in parity_sources() {
+        let text: Arc<[u8]> = Arc::from(source.as_bytes());
+        let full = ParsedFile::parse(
+            lang,
+            text.clone(),
+            &SystemClock,
+            deadline(),
+            &AtomicBool::new(false),
+        )
+        .expect("parsed");
+        let bytes = source.as_bytes();
+        // The start and the end of every identifier-like run.
+        let mut at = Vec::new();
+        let (mut line, mut column) = (0u32, 0u32);
+        for (i, &b) in bytes.iter().enumerate() {
+            let starts = ident(b) && (i == 0 || !ident(bytes[i - 1]));
+            let ends = !ident(b) && i > 0 && ident(bytes[i - 1]);
+            if starts || ends {
+                at.push(Position { line, column });
+            }
+            if b == b'\n' {
+                line += 1;
+                column = 0;
+            } else {
+                column += 1;
+            }
+        }
+        let stride = (at.len() / 150).max(1);
+        let name = &lang.name().0;
+        for &p in at.iter().step_by(stride) {
+            let one = ParsedFile::parse_at(
+                lang,
+                text.clone(),
+                &SystemClock,
+                deadline(),
+                &AtomicBool::new(false),
+                p,
+            )
+            .expect("parsed");
+            assert_eq!(one.site_at(p), full.site_at(p), "{name} {p:?}: {source}");
+            assert_eq!(
+                one.defs_with_local().collect::<Vec<_>>(),
+                full.defs_with_local().collect::<Vec<_>>(),
+                "{name}: {source}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 1000, "{checked} positions");
+}

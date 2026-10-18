@@ -412,7 +412,12 @@ impl Inner {
     }
 
     fn run_query(self: &Arc<Self>, run: &Run, query: &Query, prepared: Option<Arc<Prepared>>) {
-        let Some(snap) = self.snap(&query.project) else {
+        let _all = crate::phases::span("query task");
+        let snap = {
+            let _t = crate::phases::span("snapshot");
+            self.snap(&query.project)
+        };
+        let Some(snap) = snap else {
             self.publish(run.id, |r| {
                 r.state = QueryState::Failed(QueryError::NotOpen)
             });
