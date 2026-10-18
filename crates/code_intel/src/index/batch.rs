@@ -18,10 +18,12 @@ use lectern_executor::Priority;
 use lectern_kernel::BackgroundGuard;
 use lectern_platform::{Read, RelPath as SafeRel, SafeRoot};
 use lectern_services::code_intel::TextOrigin;
-use lectern_services::project::{BlobId, ProjectKey, RelPath};
+use lectern_services::project::{BlobId, ProjectKey};
 
 use super::host::yield_now;
-use super::state::{Cursor, Item, OtherTree, Project, Scope, Source, State, Tier, Walk, under};
+use super::state::{
+    Cursor, Item, OtherTree, OtherWalk, Project, Scope, Source, State, Tier, Walk, under,
+};
 use super::{Inner, bump, lock};
 use crate::extract::{
     BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction, INTERACTIVE_MAX_LEN, Lang,
@@ -202,9 +204,8 @@ impl Inner {
             queue.clear();
         }
         st.batch.queued.clear();
-        for (key, _) in st.in_flight.iter() {
-            st.batch.queued.insert(key.clone());
-        }
+        let in_flight: Vec<_> = st.in_flight.keys().cloned().collect();
+        st.batch.queued.extend(in_flight);
     }
 
     /// Up to 500 files of tier 3 (`t` 0) or 4 (`t` 1) whose hint does not
@@ -347,7 +348,11 @@ impl Inner {
                             key: key.clone(),
                             root,
                         });
-                        st.batch.others.current = Some((other, entries.into(), 0));
+                        st.batch.others.current = Some(OtherWalk {
+                            tree: other,
+                            entries: entries.into(),
+                            pos: 0,
+                        });
                     }
                     Err(error) => {
                         log(format_args!("reading worktree {}: {error}", tree.root.display()));
@@ -363,11 +368,11 @@ impl Inner {
             let State {
                 batch, in_flight, ..
             } = &mut *st;
-            let (other, entries, pos) = batch.others.current.as_mut()?;
+            let walk = batch.others.current.as_mut()?;
             let mut items = Vec::new();
-            while *pos < entries.len() && items.len() < EXISTS_BATCH {
-                let (path, oid) = &entries[*pos];
-                *pos += 1;
+            while walk.pos < walk.entries.len() && items.len() < EXISTS_BATCH {
+                let (path, oid) = &walk.entries[walk.pos];
+                walk.pos += 1;
                 let code = lookup.code(path);
                 let Some(lang) = code.checked_sub(1).and_then(|i| table.langs().get(usize::from(i)))
                 else {
@@ -385,12 +390,12 @@ impl Inner {
                     path: path.clone(),
                     oid: *oid,
                     lang: lang.clone(),
-                    source: Source::Other(other.clone()),
+                    source: Source::Other(walk.tree.clone()),
                     tier: Tier::Other,
                 });
             }
-            if *pos >= entries.len() {
-                let key = other.key.clone();
+            if walk.pos >= walk.entries.len() {
+                let key = walk.tree.key.clone();
                 batch.others.current = None;
                 batch.others.done.insert(key);
             }
@@ -717,10 +722,10 @@ impl Inner {
         {
             match text.origin {
                 TextOrigin::Worktree => {
-                    if let Some(eff) = map.effective(&text.path) {
-                        if !cursor_hinted(&map, &eff, stamp) {
-                            wanted[0].push(item(eff, Tier::Current));
-                        }
+                    if let Some(eff) = map.effective(&text.path)
+                        && !cursor_hinted(&map, &eff, stamp)
+                    {
+                        wanted[0].push(item(eff, Tier::Current));
                     }
                 }
                 TextOrigin::Object => {

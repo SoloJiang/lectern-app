@@ -344,14 +344,19 @@ impl FakeGit {
         self.lock().calls.push(call.into());
     }
 
-    fn tree_of(&self, tree: &Tree) -> Result<(PathBuf, BTreeMap<String, BlobId>, BTreeMap<String, BlobId>, Option<BlobId>), GitError> {
+    fn tree_of(&self, tree: &Tree) -> Result<TreeCopy, GitError> {
         let state = self.lock();
         let t = state
             .trees
             .iter()
             .find(|t| *t.git_dir == *tree.git_dir)
             .ok_or_else(|| GitError::Corrupt(format!("no worktree {}", tree.git_dir.display())))?;
-        Ok((t.root.clone(), t.index.clone(), t.head_tree.clone(), t.head))
+        Ok(TreeCopy {
+            root: t.root.clone(),
+            index: t.index.clone(),
+            head_tree: t.head_tree.clone(),
+            head: t.head,
+        })
     }
 
     fn ignored(&self, path: &str) -> bool {
@@ -366,6 +371,14 @@ impl FakeGit {
             }
         })
     }
+}
+
+/// One worktree's state, copied out of the lock.
+struct TreeCopy {
+    root: PathBuf,
+    index: BTreeMap<String, BlobId>,
+    head_tree: BTreeMap<String, BlobId>,
+    head: Option<BlobId>,
 }
 
 /// Every file under `root`, relative, skipping `.git`.
@@ -401,7 +414,12 @@ impl GitAccess for FakeGit {
         if self.lock().fail_compare {
             return Err(GitError::Corrupt("comparison failed".into()));
         }
-        let (root, index, head_tree, _) = self.tree_of(tree)?;
+        let TreeCopy {
+            root,
+            index,
+            head_tree,
+            ..
+        } = self.tree_of(tree)?;
         let mut disk = BTreeSet::new();
         walk(&root, &root, &mut disk);
         let cap = self.lock().untracked_cap;
@@ -450,7 +468,7 @@ impl GitAccess for FakeGit {
 
     fn tracked(&self, tree: &Tree, _cancel: &AtomicBool) -> Result<Vec<(RelPath, BlobId)>, GitError> {
         self.record("tracked");
-        let (_, index, _, _) = self.tree_of(tree)?;
+        let index = self.tree_of(tree)?.index;
         Ok(index.into_iter().map(|(p, o)| (p.as_str().into(), o)).collect())
     }
 
@@ -468,12 +486,12 @@ impl GitAccess for FakeGit {
 
     fn head(&self, tree: &Tree) -> Result<Option<BlobId>, GitError> {
         self.record("head");
-        Ok(self.tree_of(tree)?.3)
+        Ok(self.tree_of(tree)?.head)
     }
 
     fn index_checksum(&self, tree: &Tree) -> Result<Option<BlobId>, GitError> {
         self.record("index_checksum");
-        let (_, index, _, _) = self.tree_of(tree)?;
+        let index = self.tree_of(tree)?.index;
         let mut text = String::new();
         for (path, oid) in &index {
             text.push_str(path);

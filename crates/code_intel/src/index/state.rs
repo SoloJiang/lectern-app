@@ -204,8 +204,14 @@ pub(crate) struct Others {
     /// The (session, eviction, grammar) the `done` set was built under.
     pub deps: Option<(u64, u64, u64)>,
     pub done: HashSet<WorktreeKey>,
-    /// The worktree being walked and the position in its entries.
-    pub current: Option<(Arc<OtherTree>, Arc<[(RelPath, BlobId)]>, usize)>,
+    pub current: Option<OtherWalk>,
+}
+
+/// The other worktree being walked: its index entries and the position.
+pub(crate) struct OtherWalk {
+    pub tree: Arc<OtherTree>,
+    pub entries: Arc<[(RelPath, BlobId)]>,
+    pub pos: usize,
 }
 
 /// The batch tiers' state.

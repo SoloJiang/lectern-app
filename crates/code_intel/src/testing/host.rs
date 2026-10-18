@@ -157,11 +157,13 @@ impl Projects for FakeProjects {
     }
 }
 
+type PowerFn = Arc<dyn Fn(bool) + Send + Sync>;
+
 /// A power source the test switches.
 #[derive(Default)]
 pub struct FakePower {
     battery: AtomicBool,
-    subscribers: Mutex<Vec<Arc<dyn Fn(bool) + Send + Sync>>>,
+    subscribers: Mutex<Vec<PowerFn>>,
 }
 
 impl FakePower {

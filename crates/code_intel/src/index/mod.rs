@@ -357,13 +357,6 @@ impl Indexer {
         })
     }
 
-    /// Bumps one input generation and requests a reconcile, as an event
-    /// would (tests that change an input while a reconcile computes).
-    #[cfg(test)]
-    pub(crate) fn bump(&self, project: &ProjectKey, f: impl FnOnce(&mut state::Gens)) {
-        self.inner.bump(project, f);
-    }
-
     /// Whether the last comparison is current, for tests.
     #[cfg(test)]
     pub(crate) fn compared_current(&self, project: &ProjectKey) -> bool {
@@ -403,6 +396,8 @@ impl Inner {
             .is_some_and(|p| reconcile::head_clean(&lock(&p.state), path))
     }
 
+    /// Bumps one input generation and requests a reconcile, as an event
+    /// would (tests that change an input while a reconcile computes).
     #[cfg(test)]
     pub(crate) fn bump(&self, key: &ProjectKey, f: impl FnOnce(&mut state::Gens)) {
         let Some(p) = self.project(key) else {

@@ -160,6 +160,80 @@ fn overlay_follows_the_worktree() {
     }
 }
 
+/// The production adapter over a real repository built with gix
+/// (`lectern_git::testing::TestRepo`, no git command line): the same
+/// answers `FakeGit` gives the indexer.
+#[test]
+fn overlay_lectern_git_answers_like_the_fake() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use lectern_git::testing::{TestHead, TestRepo};
+
+    use crate::git_access::{GitAccess, LecternGit, Tree, blob_id, hash_blob};
+
+    let repo = TestRepo::new();
+    let a1: &[u8] = b"export const a = 1;\n";
+    let b1: &[u8] = b"export const b = 1;\n";
+    repo.write_file("a.ts", a1);
+    repo.write_file("src/b.ts", b1);
+    repo.backdate("a.ts");
+    repo.backdate("src/b.ts");
+    let entries = [repo.add("a.ts"), repo.add("src/b.ts")];
+    repo.write_index(repo.common_dir(), &entries);
+    let tree = repo.tree(&[("a.ts", a1), ("src/b.ts", b1)]);
+    let commit = repo.commit(tree, &[], "init");
+    repo.set_ref("refs/heads/main", commit);
+    repo.set_head(TestHead::Branch("refs/heads/main"));
+    // An unstaged edit and an untracked file.
+    let a2: &[u8] = b"export const a = 2;\n";
+    repo.write_file("a.ts", a2);
+    repo.write_file("c.ts", b"export const c = 1;\n");
+
+    let git = LecternGit::with_discover(lectern_git::testing::discover);
+    let common = repo.common_dir().canonicalize().expect("canonical");
+    let root = repo.root().canonicalize().expect("canonical");
+    let tree = Tree {
+        common_dir: Arc::from(common.as_path()),
+        git_dir: Arc::from(common.as_path()),
+        root: Arc::from(root.as_path()),
+    };
+    let cancel = AtomicBool::new(false);
+    let changed = git.changed_paths(&tree, &cancel).expect("compare");
+    let paths: Vec<&str> = changed.paths.iter().map(|p| &**p).collect();
+    assert_eq!(paths, ["a.ts", "c.ts"]);
+    let kind = repo.hash();
+    let head: Vec<(&str, Option<_>)> = changed.head.iter().map(|(p, o)| (&**p, *o)).collect();
+    assert_eq!(
+        head,
+        [("a.ts", Some(hash_blob(kind, a1))), ("c.ts", None)]
+    );
+    assert!(!changed.untracked_capped);
+    assert_eq!(git.head(&tree).expect("head"), Some(blob_id(&commit)));
+    assert!(git.index_checksum(&tree).expect("checksum").is_some());
+    assert_eq!(
+        git.canonical_oid(&tree, "a.ts", a2).expect("canonical"),
+        Some(hash_blob(kind, a2))
+    );
+    let tracked: Vec<(String, _)> = git
+        .tracked(&tree, &cancel)
+        .expect("tracked")
+        .into_iter()
+        .map(|(p, o)| (p.to_string(), o))
+        .collect();
+    assert_eq!(
+        tracked,
+        [
+            ("a.ts".to_owned(), hash_blob(kind, a1)),
+            ("src/b.ts".to_owned(), hash_blob(kind, b1)),
+        ]
+    );
+    assert_eq!(
+        &*git.blob(&tree, hash_blob(kind, b1), 1 << 20).expect("blob"),
+        b1
+    );
+}
+
 #[test]
 fn overlay_failed_comparison_keeps_the_overlay() {
     let h = Harness::new();

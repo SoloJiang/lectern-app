@@ -2,7 +2,6 @@
 //! `FakeGit` repository, `FakeProjects`, a manual fs_watch over a fake
 //! backend, a temporary cache and the watchdog on a `ManualClock`.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,9 +12,9 @@ use lectern_executor::Executor;
 use lectern_fs_watch::testing::{Driver, FakeBackend, manual};
 use lectern_fs_watch::{Config as WatchConfig, Flags, Watcher};
 use lectern_services::code_intel::{Coverage, Focus, TextOrigin, TextRef, TierState};
-use lectern_services::project::{BlobId, Package, ProjectKey, RelPath};
+use lectern_services::project::{BlobId, Package, ProjectKey};
 
-use crate::extract::{Deadline, Extraction, Lang, extract};
+use crate::extract::{Deadline, Lang, extract};
 use crate::index::{IndexDeps, Indexer, StatCounts};
 use crate::map::LiveMap;
 use crate::testing::{
@@ -64,11 +63,11 @@ pub(crate) struct Harness {
     pub clock: ManualClock,
     pub backend: Arc<FakeBackend>,
     pub driver: Driver,
-    pub watcher: Watcher,
-    pub cache: Cache,
+    _watcher: Watcher,
+    _cache: Cache,
     pub indexer: Indexer,
     pub seen: Arc<Seen>,
-    pub watchdog_task: WatchdogTask,
+    _watchdog_task: WatchdogTask,
     _subscriptions: Vec<Box<dyn Send>>,
     _cache_dir: Option<tempfile::TempDir>,
     generation: AtomicUsize,
@@ -146,11 +145,11 @@ impl Harness {
             clock,
             backend,
             driver,
-            watcher,
-            cache,
+            _watcher: watcher,
+            _cache: cache,
             indexer,
             seen,
-            watchdog_task,
+            _watchdog_task: watchdog_task,
             _subscriptions: subscriptions,
             _cache_dir: Some(dir),
             generation: AtomicUsize::new(1),
@@ -362,22 +361,8 @@ pub(crate) fn tiers(c: &Coverage) -> [TierState; 4] {
     [c.focus, c.subproject, c.worktree, c.other_worktrees]
 }
 
-pub(crate) fn paths(map: &LiveMap) -> HashMap<RelPath, BlobId> {
-    let mut out = HashMap::new();
-    for i in 0..map.base.files().len() {
-        if let Some(e) = map.base_effective(i) {
-            out.insert(e.path, e.oid);
-        }
-    }
-    for (p, s) in map.overlay.entries() {
-        if let crate::map::WorktreeState::Content(oid) = s {
-            out.insert(p.clone(), *oid);
-        }
-    }
-    out
-}
-
-/// A test extraction that the hook made wait: blocks until `release`.
+/// Lets a test wait until a hooked extraction started, and the hook wait
+/// until the test opens it.
 #[derive(Default)]
 pub(crate) struct Gate {
     pub entered: AtomicBool,

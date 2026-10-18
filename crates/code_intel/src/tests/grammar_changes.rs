@@ -214,15 +214,15 @@ fn grammar_lease_unloads_after_the_last_user() {
     // A query's parsed file holds the pack.
     let lang = pack(&h).expect("installed");
     let clock = crate::SystemClock;
-    let parsed = ParsedFile::parse(
+    let Ok(parsed) = ParsedFile::parse(
         &lang,
         Arc::from(TRACKED),
         &clock,
         Instant::now() + std::time::Duration::from_secs(10),
         &AtomicBool::new(false),
-    )
-    .ok()
-    .expect("parsed");
+    ) else {
+        panic!("the pack parses the file");
+    };
     drop(lang);
     // And an extraction in flight, waiting in the hook.
     let gate = Arc::new(Gate::default());

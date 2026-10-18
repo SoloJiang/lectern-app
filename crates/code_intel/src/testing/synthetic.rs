@@ -87,7 +87,7 @@ pub fn source(ext: &str, i: usize, len: usize) -> Vec<u8> {
         "py" => python(&mut out, i, other, len),
         "go" => go(&mut out, i, other, len),
         "json" => {
-            let _ = write!(out, "{{\"name\": \"pkg-{i}\", \"version\": \"1.0.{other}\"}}\n");
+            let _ = writeln!(out, "{{\"name\": \"pkg-{i}\", \"version\": \"1.0.{other}\"}}");
         }
         _ => {
             let _ = writeln!(out, "# Module {i}\n");
