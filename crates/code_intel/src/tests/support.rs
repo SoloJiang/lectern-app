@@ -341,20 +341,25 @@ impl Harness {
     /// Whether the kernel is quiescent once its thread has handled what is
     /// queued (event dispatches count as busy while they run).
     pub(crate) fn quiescent(&self) -> bool {
-        let kernel = self.host.kernel();
-        kernel.barrier();
-        // The kernel thread counts the barrier request itself down only
-        // after it has replied, so for a moment the barrier still reads as
-        // busy; a guard that is really held stays busy past this wait.
-        let start = std::time::Instant::now();
-        while !kernel.is_quiescent() {
-            if start.elapsed() > Duration::from_millis(200) {
-                return false;
-            }
-            std::thread::yield_now();
-        }
-        true
+        quiescent(&self.host.kernel())
     }
+}
+
+/// Whether `kernel` is quiescent once its thread has handled what is
+/// queued (event dispatches count as busy while they run).
+pub(crate) fn quiescent(kernel: &lectern_kernel::Kernel) -> bool {
+    kernel.barrier();
+    // The kernel thread counts the barrier request itself down only after
+    // it has replied, so for a moment the barrier still reads as busy
+    // (#96); a guard that is really held stays busy past this wait.
+    let start = std::time::Instant::now();
+    while !kernel.is_quiescent() {
+        if start.elapsed() > Duration::from_millis(200) {
+            return false;
+        }
+        std::thread::yield_now();
+    }
+    true
 }
 
 impl Drop for Harness {

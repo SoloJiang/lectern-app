@@ -87,6 +87,8 @@ pub struct Stats {
     /// Passes over the reconcile's steps (each reconcile makes at least one).
     pub reconcile_passes: AtomicUsize,
     pub grammar_rounds: AtomicUsize,
+    /// Jumps' steps 1–3 run (a prefetch reused runs none).
+    pub prepares: AtomicUsize,
 }
 
 /// A snapshot of [`Stats`].
@@ -101,6 +103,7 @@ pub struct StatCounts {
     pub reconciles: usize,
     pub reconcile_passes: usize,
     pub grammar_rounds: usize,
+    pub prepares: usize,
 }
 
 impl Stats {
@@ -116,6 +119,7 @@ impl Stats {
             reconciles: get(&self.reconciles),
             reconcile_passes: get(&self.reconcile_passes),
             grammar_rounds: get(&self.grammar_rounds),
+            prepares: get(&self.prepares),
         }
     }
 }
