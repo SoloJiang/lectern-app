@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）已实现；第 2–5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）已实现；第 3–5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -1289,8 +1289,8 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 - 单元字节数：`64 + Σ定义 (2 × 名字长度 + 作用域长度 + 40) + Σ引用 (2 × 名字长度 + 24)`，近似行加两份索引的大小，计入 `meta.bytes` 和命名空间配额。
 - 写入的键来自读到的字节：任何一次抽取（批量、按需、限时搜索、第 5 层）写入之前，都对实际读到的字节重新算 OID（原始字节的 OID；工作区一侧与排队时的 OID 不同时再用 `canonical_oid` 算一次），用这个 OID 作键。排队时记下的 OID 只用来挑选要读的文件，不作键。两者不同（排队之后文件又被改了）时，结果只写在实际的 OID 下，原来那个 OID 的 `indexed` 提示不置位；路径的新内容随 fs_watch 的事件进入覆盖部分，有效 OID 变成实际的 OID 后提示才会匹配。所以一份内容的抽取结果不会写到另一个 OID 的键下。
 - 写入：一批（见「调度、批次与取消」）在一个写事务里建单元、插入全部行，一批约 100 KB，远低于 `MAX_BATCH`；写失败（`Dropped`）时这一批的结果留在内存里供本次查询使用，下次需要时重新抽取。
-- 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 在热启动的存在检查和查询命中时标记访问，所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
-- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍，`code_intel/disk_100k` 在第 2 步实测后校准这一条。
+- 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 对热启动存在检查的命中和查询命中标记访问（存在检查本身只读，命中的单元排进队列，热启动之后再标记，见「调度、批次与取消」），所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
+- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍。第 3 步用 `testing` 的 10 万文件合成仓库测 `code_intel/disk_100k`，再据此校准 200–250 MB 的估算，并核对它在 256 MiB 的配额以内。
 - 版本：表结构或单元的键变化时命名空间版本加一；只是抽取规则变化时改 `EXTRACTOR_VERSION`，旧单元不再命中、逐步淘汰。
 
 ### blob → 路径映射
@@ -1435,7 +1435,8 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - 第 3–5 层：每个批量线程一个长期任务，循环：取一批 → 存在检查 → 抽取缺的 → 一个写事务写入 → 在批次边界询问 `BackgroundGuard`（暂停时登记 waker、返回 `Pending`）。一批在 64 个文件、读入 2 MiB，或开始 50 ms 之后的第一个文件边界处结束，先到者为准；所以一个大文件可以一直运行到它自己的截止时间。暂停和取消仍在约 50 ms 内生效，靠的是看门狗打断在途的那个文件（见下文），与 ADR 0029「每批约 64 个文件或 50 ms」「取消和暂停在约 50 ms 内生效」的要求一致：单个文件由截止时间约束，50 ms 的响应由看门狗保证。
 - 每批开始时重新选层：第 3 层有剩余就先取第 3 层。第 1、2 层在另外的工作线程上运行，不排在批量任务后面（ADR 0029）。
-- 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示并标记访问，缺的抽取。
+- 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示，缺的抽取。存在检查只读、不标记访问：热启动的耗时就是「已入索引的仓库被认出已入索引」的时间，访问时间的写回不在这条路径上。
+- 访问标记：存在检查命中的单元 ID 连同查询之前读到的淘汰代数排进项目的 `PendingTouches` 队列。批量线程在热启动的存在检查之后、在批次边界处每次标记 1024 个（`Store::touch_pending`），批次边界照常检查暂停和取消。淘汰代数变了，队列里的 ID 可能已经属于别的单元，整个队列直接丢弃、不标记。项目关闭或切换 worktree 时队列随项目的批量状态一起丢弃，没标记的单元保留原来的访问时间：丢掉的只是淘汰的先后，查询结果不受影响。
 - 单文件截止时间：后台 250 ms，交互 1 s。原来按线性吞吐估算 M 系列上 1 MiB 的文件约 230 ms；实测吞吐随文件变大而下降（tree-sitter-tags 的局部检查按「引用数 × 作用域数」增长，见 [ADR 0031](../adr/0031.md)），接近 1 MiB 的文件在 M 系列上估计要 360–400 ms，后台记为 `TimedOut`，打开时按交互截止时间重做（已知限制，`code_intel/extract_1mib` 只记录）。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
 - 看门狗线程另外持有一张到期表（名字表的延迟重建，见「名字表」）：`wait_timeout` 取在途抽取的下一个检查时刻与最早到期时刻中较早的一个，到期时提交对应的任务；两张表都空时才不带超时地等待。
 - 看门狗的生命周期：每次激活最多一个看门狗线程，在这次激活第一次登记在途抽取或到期时刻时经 `PluginHandle::own_with` 和 `run_dedicated_gated` 启动。线程与登记方共用一份状态：互斥锁保护的在途表和 `stop` 标志，加一个 `Condvar`。线程循环：持锁检查 `stop`，为 true 就返回；在途表为空时 `wait`，否则 `wait_timeout(10 ms)` 后检查截止时刻。`stop()` 在锁内把标志置为 true、把在途表里的标志全部置位（正在运行的抽取随之返回 `Cancelled`），然后 `notify_all`，所以无论线程在等待还是在检查，都在一次唤醒之内返回。调用 `stop()` 的地方：
@@ -1450,7 +1451,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 1. 收到 `ProjectEvent::Opened` 或 `Changed` 后，按快照让对应的输入代数加一（见「增量更新」）。当前 worktree 的文件列表为 `Ready` 时打开工作区根的 `SafeRoot`、订阅 `fs_watch`（第一次时）；基础映射、工作区比较、覆盖部分由核对任务按「输入代数与派生状态」算出。文件夹项目没有订阅和工作区比较。
 2. 第 1、2 层的路径随焦点到达；第 3–5 层的游标就位，批量任务开始。
-3. 热启动只抽取缺的键：映射里每个 OID 先做存在检查，缓存里已有的不读文件、不解析。10 万文件全部命中时约 200 次存在检查，估算几百毫秒，在批量线程上进行（`code_intel/warm_100k`）。
+3. 热启动只抽取缺的键：映射里每个 OID 先做存在检查，缓存里已有的不读文件、不解析。10 万文件全部命中时约 200 次存在检查，估算几百毫秒，在批量线程上进行（`code_intel/warm_100k`）。命中的单元之后再标记访问，不在这段时间里（`code_intel/warm_100k_touch`，只记录）。
 4. 文件夹项目没有 index 的 OID，热启动要读每个文件求 OID，命中的不解析；上限是文件夹遍历的 20 000 个条目。
 5. 映射、覆盖部分、`indexed` 提示、名字表都不持久化，只有 `cache` 里的表跨启动保留（调研第 5 节「持久化与重新打开」）。
 
@@ -1579,7 +1580,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 跳转：唯一候选的目标首屏高亮 ≤ 100 ms | 本 crate 的部分同上；目标文件的读取与高亮属于 `file_reader` | `app/goto_single` |
 | 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的结果；限时搜索 1 s 后停止，取消在 20 ms 内生效 | `code_intel/search_stop` ≤ 1.02 s |
 | 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 查找 ≤ 5 ms；每个候选文件的现场抽取约 1–2 ms / 10 KB | `code_intel/references_100k` |
-| 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件），核心语言用一次遍历抽取（[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k` |
+| 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件），核心语言用一次遍历抽取（[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms，不含之后的访问标记 | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k`、`code_intel/warm_100k_touch`（只记录） |
 | 空闲内存：monorepo < 100 MB（后台暂停时和全部完成后） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
@@ -1621,7 +1622,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 截止时间（`deadline_*`）：病态输入在 1 ms 截止时间下返回 `TimedOut`；取消标志置位时返回 `Cancelled`；看门狗在截止时刻置位，没有在途抽取时不唤醒。看门狗的生命周期（`watchdog_*`）：插件停用后线程退出（`run_dedicated_gated` 返回的任务句柄 `is_finished`，`/proc/self/task/*/comm` 里没有 `code-intel-watchdog`）；连续激活、停用 20 次后，这个名字的线程最多一个；`Executor::shutdown` 在激活仍然存活时也让线程退出；停用时正在运行的抽取返回 `Cancelled`；激活在线程启动前失效时不建线程。
 - 位置分析（`site_*`）：位置上的标识符与 `RefSyntax`；locals 解析到的定义；光标在定义名上时的 `defines`。
 - 定义形式（`forms_*`）与作用域形式（`scopes_*`）：两张表对照 grammar 的覆盖、样例、locals 查询和本文的表（见「定义形式」「作用域形式」）；局部定义的可见性对照 locals 查询的作用域（`forms_local_definitions_are_file_visible`）。
-- 存储（`store_*`）：单元的写入与读回；存在检查只返回键完全相同的单元并标记访问；按名字查找区分大小写；单元被淘汰后三张表里没有它的行；配额小于数据量时按访问时间淘汰本命名空间的单元；同一个 OID 有旧 grammar 版本或旧查询版本的单元时，按名字查定义、查引用、存在检查和名字表都只返回当前版本的单元（`store_version_filter_*`）；写入被丢弃时不 panic、内存里的结果仍可用。
+- 存储（`store_*`）：单元的写入与读回；存在检查只返回键完全相同的单元、不标记访问，排队的命中在之后按块标记，淘汰代数变化后的队列被丢弃；按名字查找区分大小写；单元被淘汰后三张表里没有它的行；配额小于数据量时按访问时间淘汰本命名空间的单元；同一个 OID 有旧 grammar 版本或旧查询版本的单元时，按名字查定义、查引用、存在检查和名字表都只返回当前版本的单元（`store_version_filter_*`）；写入被丢弃时不 panic、内存里的结果仍可用。
 - 输入代数（`derived_*`），每种输入一组，检查只改这一个输入时依赖它的派生状态都被重算、不依赖它的没有重算（计数钩子）：
   - `derived_files_*`：文件列表换代后基础映射重建，路径和 OID 都相同的覆盖项被删除。
   - `derived_packages_*`：只改子项目（文件列表不变），第 3 层的范围和游标、候选的子项目层、限时搜索的范围按新的子项目计算。
@@ -1697,6 +1698,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
    - `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果：工作区文件只经 `SafeRoot` 读取。
    - `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 没有结果。
    - `code_intel/map_100k`、`code_intel/map_100k_bytes`、`code_intel/batch_peak` 在预算内。
+   - `code_intel/disk_100k`（只记录）用 10 万文件的合成仓库测量，结果写进「存储表」的「规模」一条。
 4. **查询与插件**（前置 A、E）：`Cargo.toml` 加 `plugin = true`。
    - `goto_*`、`read_verify_*`、`search_*`、`refs_*`、`names_*`、`escalate_*`、`plugin_*`、`watchdog_*` 测试通过。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、不依赖其他插件 crate，除 `app` 和 tool 层外没有 crate 依赖它。
@@ -1820,6 +1822,30 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 2 个快照有变化，逐个看过：`panel.tsx` 的引用名多了 `export default Panel` 的 `Panel`，`store.js` 多了 `export { api, ids as idSequence }` 和 `export default createStore` 的名字。
 - `code_intel/extract_throughput`：本轮 5 次 3.87–4.05 MB/s，交替运行的 9a2835b 两次 3.80 和 4.13 MB/s，在噪声以内；`code_intel/extract_1mib` 3.50–3.75 MB/s（9a2835b：3.48）。
 
+第 2 步（存储），叠在第 1 步的分支上，同一台机器。
+
+- `just check`、`just test`（整个工作区 1149 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `just test -p lectern-code-intel`：51 个测试通过，其中 `store_*` 12 个：每种首发语言的夹具抽取后写入、读回与原结果逐项相同；`Def` 的每个字段（种类、可见性的五种取值、作用域、参数个数为空、0 和 255）读回相同；非 `Done` 的状态只有 `ci_ext` 一行、不出现在按名字的查找和名字表里，`Cancelled`、`Unsupported` 不写入；存在检查只返回（OID、语言、grammar 版本、查询版本）完全相同的单元，SHA-1 与 SHA-256 的 OID 都能查到，1300 个 OID 分三次查询；按名字查定义和引用区分大小写；五种语言的兼容组分两次查询、结果合并；同一个 OID 有旧 grammar 版本和旧查询版本的单元时，存在检查、按名字查定义、查引用和名字表的两步都只返回当前版本的单元（`store_version_filter_returns_current_units_only`）；同一个键再写一次时旧单元连同它的行被替换，淘汰代数加一；配额 64 KiB 的登记下超出配额时按访问时间淘汰，两小时后经存在检查标记过的单元留下、没有标记的被淘汰，被淘汰的单元在三张表里都没有行（测试自己的登记加了按单元计行数的语句），淘汰代数只在淘汰时变化，同一分库的两个句柄读到同一个代数（`store_quota_evicts_by_access_time`）；`set_max_page_count` 让写入返回 `Dropped`，不 panic，什么也没写入，代数不变，留出空间、过了 60 秒之后写入照常提交（`store_dropped_write_does_not_panic`）。
+- `cargo tree -i rusqlite -e normal --depth 1` 只列出 `lectern-cache`。本 crate 新增 `lectern-cache` 依赖，dev 依赖加 `lectern-cache` 的 `test-support` 和 `tempfile`，Cargo.lock 只有本 crate 的依赖列表变化，没有新增 crate。
+- 查询计划（Python 的 sqlite3 按同样的建表语句 `EXPLAIN QUERY PLAN`）：存在检查用 `UNIQUE (oid, lang, grammar, query)` 的自动索引按 `oid IN (…)` 逐个查找；按名字查定义先用 `ci_def_name`，再按 `ci_ext` 的主键取单元；按名字查引用用 `ci_ref` 的主键；按单元读定义、引用分别用 `ci_def_unit`、`ci_ref_unit`。
+- `code_intel/warm_100k`（`just bench --measure code_intel/warm`，四次）：中位数 450、534、474、456 ms，预算 500 ms，Linux 上不判定，M 系列由 macOS CI 判定。拆分：去掉存在检查里的标记访问时约 82 ms（200 次查询）；其余约 370 ms 是 `TableSet::touch` 写回 10 万个单元的访问时间（每 4096 个一个写事务，逐行 `UPDATE`，约 3.7 µs 一个），与 `cache/tables_touch` 的预算（5000 个 < 20 ms）同一量级；访问时间在一小时以内、写回不改任何行时耗时相同（472 ms），开销在逐行执行语句本身。
+- 单元的字节数（「存储表」的估算）对照实际文件：每种首发语言约 8 KiB 的夹具语料（`testing::corpus`）各写 1000 个单元，声明的字节数合计 52.8 MB，分库文件（含 `-wal`）59.1 MB，实际约为估算的 1.12 倍。这份语料由抽取夹具重复拼成，每 8 KiB 有 99–152 个定义、17–50 个引用名，定义比真实代码密得多，所以没有据此修改 10 万文件 200–250 MB 的估算；`code_intel/disk_100k` 仍按仓库形状的语料在后续步骤测量。
+
+第 2 步，把访问标记移出热启动之后（[#115](https://github.com/SoloJiang/lectern-app/pull/115) 的 macOS CI 上 `code_intel/warm_100k` 中位数 537、549 ms，超出预算），同一台机器，不含 #116 的 cache 改动。
+
+- `just check`、`just test`（整个工作区 1150 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。`just test -p lectern-code-intel`：52 个测试通过，`store_*` 13 个。
+  - `store_quota_evicts_by_access_time` 改为：两小时后的存在检查找到全部 40 个单元，只有前 20 个的命中排队并经 `touch_pending` 标记；超出配额后前 20 个留下，没标记的被淘汰。存在检查如果自己标记访问，40 个单元的访问时间相同，淘汰会按 ID 先删 0–13 号：在 `exists` 里临时加回标记时，这个测试失败（「unit 0 was evicted」）。
+  - 新增 `store_pending_touches_drain_in_chunks`：2500 个命中分三次标记完（每次 1024 个）；淘汰代数变化之后，之前排队的命中被丢弃，新代数的命中替换旧队列。
+- `just bench --measure code_intel/warm`，三次：
+  - `code_intel/warm_100k`（只有存在检查）：中位数 82.6、81.9、81.2 ms，预算 500 ms。
+  - `code_intel/warm_100k_touch`（只记录；10 万个命中每次 1024 个，访问时间都已过期，全部写回）：792、773、792 ms。这比第一版按减法估出的约 370 ms 高一倍，那个数字是两次运行的差，不是直接测量。
+  - 按 500 个一块，或从队列头部取，结果相同（798、748 ms）。
+- 合并 main（含第 1 步的最终版本 [#113](https://github.com/SoloJiang/lectern-app/pull/113)、`EXTRACTOR_VERSION` 6，以及 cache 的集合写回 [#116](https://github.com/SoloJiang/lectern-app/pull/116)）之后，同一台机器：
+  - `just check`、`just test`（整个工作区 1191 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过；`just test -p lectern-code-intel` 89 个测试通过，其中 `store_*` 13 个。
+  - `code_intel/warm_100k`：81.9、81.3、79.4 ms。
+  - `code_intel/warm_100k_touch`：327、314、311 ms，#116 之前是 773–792 ms。
+  - `EXTRACTOR_VERSION` 已经包含在查询版本里（「语言与抽取键」），`Version::of` 取的就是它，单元的键和版本过滤不用改。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1919,3 +1945,34 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - Python 的解包属性赋值（`self.a, self.b = 1, 2`）也是字段；属性赋值标记改在属性节点上。
 - Rust `impl Trait for [u8]` 和 `for (u8, u8)` 的方法原来的 `scope` 是 `u8`，现在没有。
 - 引用名的变化让 `EXTRACTOR_VERSION` 从 5 改为 6。
+
+第 2 步：
+
+- 设计没有给存储的接口。实现为公开的 `store` 模块，供第 3、4 步和 bench 使用：
+  - `TABLES`（`code_intel.tags` 的登记，`NAMESPACE` 版本 1、`QUOTA` 256 MiB）和 `Version`（语言、grammar 版本、查询版本，`Version::of(&Lang)` 取当前语言表里的三元组）。
+  - `unit_key`、`unit_bytes`：「存储表」的键和字节数估算。
+  - `Store`（`Store::new(&Partition)`，`Clone`、不持有连接）：
+    - `evictions()`：淘汰代数，只读一个原子变量。
+    - `exists(&Version, &[BlobId]) -> Option<Vec<Found>>`：存在检查，`Found` 带 OID、单元和状态。
+    - `defs_by_name(name, &[Version]) -> Option<Vec<StoredDef>>`、`refs_by_name(name, &[Version]) -> Option<Vec<StoredUnit>>`：按名字查定义、查引用的单元，区分大小写。
+    - `units(&[Version])`、`def_names(&[Unit], f)`：名字表的两步。
+    - `load(Unit) -> Option<Extraction>`：读回一个单元，供解析扩展点「按路径取已抽取的结果」使用。
+    - `touch(&[Unit])`、`write() -> StoreWrite`。
+    - `touch_pending(&mut PendingTouches) -> usize`：标记排队的命中，每次最多 `TOUCH_CHUNK`（1024）个，返回还剩多少。`PendingTouches::push(generation, &[Found])` 把存在检查的命中连同查询之前读到的淘汰代数排进队列。
+  - `StoreWrite`：`add(oid, &Version, &Extraction) -> bool`、`len`、`bytes`、`commit() -> Written`。
+
+  读取返回 None 表示分库读不出，调用方按全部未命中处理。
+- 存在检查查出 `unit, oid, status`，设计写的是 `SELECT oid`：标记访问要用单元 ID；状态让调用方区分 `TimedOut`、`TooLarge` 的单元（文件被打开时按交互截止时间重做）。按名字查定义、查引用也多查出单元 ID，调用方交出结果之后用它标记访问（[cache 设计「访问时间」](cache.md#访问时间)）。存在检查和按名字的查找都不标记，由调用方决定时机（存在检查见下面「把访问标记移出热启动」一条）。
+- 版本过滤的 `OR …` 写成固定的 4 组三元组（`GROUP_TRIPLES`），用不到的组绑定 NULL，超过 4 种语言的兼容组分几次查询再合并：登记的语句是静态文本，参数个数固定（cache 设计「登记的规则」）。首发语言最大的组（`ts`、`tsx`、`js`）一次查询。存在检查和名字表的第一步只查一种语言，各用一组三元组。
+- `ci_ref` 的插入用 `INSERT OR IGNORE`：抽取结果的引用名本来已经去重，重复的一行不至于让整批回滚。
+- grammar 版本和查询版本是 `u64`，按位存成 SQLite 的 64 位有符号整数，读写用同一种转换。
+- 语句共 11 条（三条插入、存在检查、两条按名字的查找、名字表两条、读回单元三条），在 cache 每连接 32 条的预编译缓存以内。
+- 名字表的第二步按单元逐个查 `ci_def_unit`（`def_names` 的单元按 ID 排序后传入）：设计写的是「按 `ci_def_unit` 顺序扫描」，没有规定是一条语句还是逐个单元，逐个单元不需要在 SQL 里表达映射过滤后的单元集合。
+- `store_dropped_write_does_not_panic` 不检查恢复后写入的单元仍在：`SQLITE_FULL` 之后 cache 把分库预算降到文件大小以下，刚写入的单元会被立即淘汰（cache 设计「淘汰」），这是 cache 的行为。
+- 早期数据：第 2 步用抽取夹具拼成的语料对照了单元字节数的估算与实际文件，实际文件约为估算的 1.12 倍（见「实际验证」）。这份语料的定义密度远高于真实代码，不用来校准 10 万文件的总量；校准由第 3 步的 `code_intel/disk_100k` 完成（「验收」第 3 步）。
+- 把访问标记移出热启动。设计原来让存在检查给命中的单元标记访问（「调度、批次与取消」的存在检查一条、「存储表」的淘汰一条）。第 2 步第一版这样实现之后，`code_intel/warm_100k` 在 macOS CI 上中位数 537、549 ms，超过 500 ms 的预算。Linux 上的拆分：200 次查询约 82 ms，其余约 370 ms 是 `TableSet::touch` 写回 10 万个单元的访问时间。改动：
+  - 存在检查只读，返回命中（含单元 ID），不写入。
+  - 命中排进 `PendingTouches`，热启动之后由批量线程在批次边界每次标记 1024 个。
+  - 淘汰代数变了时队列整个丢弃；项目关闭时队列随之丢弃。
+
+  理由：`warm_100k` 守的是热启动，即已入索引的仓库被认出已入索引（`indexed` 提示置位）、导航能用上索引的时间；淘汰顺序的记账不需要在这条路径上。丢掉一次热启动的访问标记只影响淘汰的先后，不影响结果的正确性。预算不变；推迟的标记另由只记录的 `code_intel/warm_100k_touch` 测量，开销仍然可见。cache 的访问时间改为按集合写回（[#116](https://github.com/SoloJiang/lectern-app/pull/116)）与这一条无关，本分支不依赖它。

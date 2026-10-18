@@ -592,6 +592,8 @@ crates/bench/
 | `fs_watch/resident` | 常驻增量 < 1 MB；`Memory` | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
 | `code_intel/extract_throughput` | 中位数吞吐 ≥ 4 MB/s（单线程，首发的每种语言约 1 MiB，切成约 8 KiB 的文件，看门狗在运行；核心语言用一次遍历抽取；测量方式和预算的推导见 [ADR 0031](../adr/0031.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `code_intel/extract_1mib` | 只记录（每种语言一个约 1 MiB 的文件，对照单文件 250 ms 的截止时间） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
+| `code_intel/warm_100k` | 中位数 < 500 ms（热启动的存在检查：缓存里已有 10 万个文件的单元，200 次 500 个 OID 的查询，只读、不标记访问） | [code_intel](code_intel.md#性能) | `code_intel` 第 2 步 |
+| `code_intel/warm_100k_touch` | 只记录（存在检查之后推迟进行的访问标记：10 万个命中的单元每次 1024 个，访问时间都已过 1 小时，全部要写回） | [code_intel](code_intel.md#性能) | `code_intel` 第 2 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `executor/spawn_10k`、`executor/wake_1000x100` | 只记录 | [executor](executor.md#性能) | 第 1 步 |

@@ -4264,10 +4264,12 @@ name = "lectern-code-intel"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "lectern-cache",
  "lectern-executor",
  "lectern-services",
  "serde_json",
  "streaming-iterator",
+ "tempfile",
  "tree-sitter",
  "tree-sitter-go",
  "tree-sitter-java",

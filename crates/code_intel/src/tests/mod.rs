@@ -5,3 +5,4 @@ mod forms;
 mod lang;
 mod scopes;
 mod site;
+mod store;
