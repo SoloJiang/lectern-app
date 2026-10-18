@@ -422,18 +422,42 @@ fn schedule_large_files_take_turns() {
     let slot = LargeSlot::default();
     let first = slot.acquire(|| false).expect("free");
     let stop = AtomicBool::new(false);
+    // The waiter checks its stop probe before each wait: two checks mean
+    // it found the slot busy and waited at least once (no guessing from
+    // elapsed time).
+    let checks = std::sync::atomic::AtomicUsize::new(0);
+    let waited = |n: usize| {
+        let start = Instant::now();
+        while checks.load(Ordering::Acquire) < n {
+            assert!(start.elapsed() < Duration::from_secs(20), "never waited");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    };
     std::thread::scope(|s| {
         // A second batch task waits while the first holds the slot, and
         // gives up when it is told to stop (a pause, a cancel).
-        let waiter = s.spawn(|| slot.acquire(|| stop.load(Ordering::Acquire)).is_some());
-        std::thread::sleep(Duration::from_millis(30));
+        let waiter = s.spawn(|| {
+            slot.acquire(|| {
+                checks.fetch_add(1, Ordering::AcqRel);
+                stop.load(Ordering::Acquire)
+            })
+            .is_some()
+        });
+        waited(2);
         assert!(!waiter.is_finished(), "waits for the slot");
         stop.store(true, Ordering::Release);
         assert!(!waiter.join().expect("waiter"), "gave up on stop");
     });
+    checks.store(0, Ordering::Release);
     std::thread::scope(|s| {
-        let waiter = s.spawn(|| slot.acquire(|| false).is_some());
-        std::thread::sleep(Duration::from_millis(30));
+        let waiter = s.spawn(|| {
+            slot.acquire(|| {
+                checks.fetch_add(1, Ordering::AcqRel);
+                false
+            })
+            .is_some()
+        });
+        waited(2);
         drop(first);
         assert!(
             waiter.join().expect("waiter"),

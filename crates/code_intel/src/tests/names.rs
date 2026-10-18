@@ -159,8 +159,9 @@ fn names_refresh_while_held() {
     h.emit(&[("n9.ts", CHANGED)]);
     h.settle();
     h.clock.advance(REBUILD_MIN * 3);
-    std::thread::sleep(Duration::from_millis(50));
-    h.settle();
+    // Any due entry left has fired and what it submitted has run.
+    fire_due(&h);
+    assert_eq!(h.indexer.inner().watchdog.scheduled(), 0);
     assert!(tables(&h).is_empty(), "nobody holds it: no rebuild");
     assert_eq!(h.indexer.inner().name_builds(&h.key()), 2);
 }

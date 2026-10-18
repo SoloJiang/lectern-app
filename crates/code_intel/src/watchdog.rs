@@ -123,6 +123,11 @@ struct Shared {
     wake: Condvar,
     /// Loop iterations of the thread, for the tests.
     rounds: AtomicU64,
+    /// Waits the thread entered, with and without a timeout, counted under
+    /// the lock right before waiting: the tests see the thread parked in
+    /// the untimed wait instead of inferring it from elapsed time.
+    timed_waits: AtomicU64,
+    untimed_waits: AtomicU64,
 }
 
 impl Shared {
@@ -153,6 +158,8 @@ impl Watchdog {
                 }),
                 wake: Condvar::new(),
                 rounds: AtomicU64::new(0),
+                timed_waits: AtomicU64::new(0),
+                untimed_waits: AtomicU64::new(0),
             }),
         }
     }
@@ -222,6 +229,16 @@ impl Watchdog {
     /// nothing is in flight).
     pub fn rounds(&self) -> u64 {
         self.shared.rounds.load(Ordering::Acquire)
+    }
+
+    /// Waits the thread has entered so far: (with a timeout, without one).
+    /// The untimed count goes up, under the lock, right before the thread
+    /// parks with nothing in flight and no due entry (tests).
+    pub fn waits(&self) -> (u64, u64) {
+        (
+            self.shared.timed_waits.load(Ordering::Acquire),
+            self.shared.untimed_waits.load(Ordering::Acquire),
+        )
     }
 
     /// The number of extractions in flight.
@@ -332,6 +349,7 @@ impl WatchdogRun {
                 continue;
             }
             if state.in_flight.is_empty() && state.timers.is_empty() {
+                shared.untimed_waits.fetch_add(1, Ordering::AcqRel);
                 state = shared
                     .wake
                     .wait(state)
@@ -347,6 +365,7 @@ impl WatchdogRun {
                     .min()
                     .unwrap_or(CHECK_INTERVAL)
                     .min(CHECK_INTERVAL);
+                shared.timed_waits.fetch_add(1, Ordering::AcqRel);
                 state = shared
                     .wake
                     .wait_timeout(state, next)
