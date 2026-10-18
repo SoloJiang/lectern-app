@@ -805,7 +805,8 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // ---- fs_watch (docs/design/fs_watch.md「性能」) ----
     // Single-thread extraction, about 1 MiB of each first-release language as
-    // 8 KiB files (repository-shaped, ADR 0031).
+    // 8 KiB files (repository-shaped), by the core languages' one-walk
+    // extractors (ADR 0031).
     share(
         "code_intel/extract_throughput",
         &[median(Limit::ThroughputAtLeast(4 * MB))],

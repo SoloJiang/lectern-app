@@ -763,7 +763,7 @@ pub enum Visibility {
   - 标记：`@reference.lectern.<种类>` 的捕获只给抽取规则用，不进入引用名。Rust 的 `pub`（`visibility_modifier`）、`impl` 块与它实现的类型（区分 trait 实现），Java 的 `private`，JS / TS 的 `export` 语句、`export { name }` 与 `export default name` 导出的名字、`import` 语句，Go 方法的接收者类型。
   - 参数列表：函数、方法的模式用 `@doc` 捕获参数列表节点（tags 把它的文本放在 `Tag::docs`），按括号、尖括号、字符串和注释的嵌套数顶层的逗号。Rust 的 `self` 接收者和 Python 的 `*`、`/` 分隔符不计数；没有括号的参数列表（`x => x`）是 1 个。查询不再用 `@doc` 捕获注释。
   - 规则：Rust 有 `pub` 的项、trait 和 trait 实现里的成员、宏是 `Public`，其余 `Module`；Java 有 `private` 的是 `File`，其余 `Public`；Go 大写开头的是 `Public`，其余 `Package`；Python 和语言包是 `Unknown`。JS / TS：函数体里的定义是 `File`；其余取最外层定义的可见性：在 `export` 语句里或名字被导出时是 `Public`，文件有 `import` / `export`（ES 模块）时是 `File`，没有时（脚本、CommonJS）是 `Public`。
-- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
+- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。核心语言的定义取同一棵语法树上 `walk` 的结果，与索引里的定义一致；语言包的定义取查询的结果。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
 
 ### 外部格式（tags 查询）
 
@@ -783,6 +783,7 @@ pub enum Visibility {
 - 每种语言的 tags 查询最后有一组兜底的引用模式：locals 没有解析到的每个标识符（`@reference.name`），以及每个成员名（`@reference.member`：Rust、Go 的 `field_identifier`，JS / TS 的 `property_identifier`，Java 的 `field_access.field`，Python 的 `attribute.attribute`；成员名不带 locals 谓词）。查引用第 1 步只经 `ci_ref` 选出已入索引的候选文件，只有调用、类型这类模式时，`let v = PUBLIC_CONSTANT;`、`obj.field` 所在的文件不会被选中。兜底模式要放在全部定义模式之后：tree-sitter-tags 对一个名字节点保留模式序号最小的 tag，排在前面的兜底模式会顶掉后面的定义。JS / TS 的兜底模式因此单独放在 `ecmascript/references.scm`，拼在每种语言的最后。
 - locals 查询也把嵌套的函数和类的名字记为 `@local.definition`（Python 的 `def` 和 `class`，JS / TS 的函数和类声明，Rust 块里的 `fn`，Java 块里的局部类和记录）。声明本身也是一个作用域，名字在它的范围之内；`ParsedFile` 把作为作用域节点 `name` 字段的定义放进外层作用域，所以 `def outer(): def helper(): …; helper()` 里的调用绑定到 `helper`。Go 没有嵌套的具名函数。
 - `(identifier) @local.reference` 也会匹配成员名、路径段和关键字参数（Java 的 `items.add`、`this.add`，Python 的 `obj.x`、`f(x=1)`，Rust 的 `Queue::new`）。`ParsedFile` 按每种语言的一张表（`site.rs` 的 `NON_VARIABLE_POSITIONS`）把这些位置排除在局部引用之外，位置分析在这些位置上、以及语法种类为 `Member`、`MemberCall` 时都不做局部绑定。JS / TS 和 Go 的成员名本来就是另一种节点。
+- 核心语言的抽取不经 tree-sitter-tags 的迭代器（[ADR 0031](../adr/0031.md)）：`walk` 模块为每种语言（JS / TS / TSX 共用一份）写了一次遍历，解析后按前序访问每个具名节点，在名字节点上按这种语言 tags 查询里模式的顺序判断它是定义、标记还是引用（第一个成立的模式生效，与 tree-sitter-tags 每个名字节点只留一个 tag、序号小的模式优先相同），带 `#is-not? local` 的引用按 tree-sitter-tags 的规则过滤（按名字比较之前出现的、所在作用域链上的 `@local.definition` 捕获的文本，遇到不继承的作用域停止），定义和标记交给与 tags 路径相同的 `rules::finish`。查询仍是规格：改 tags 或 locals 查询时同时改 `walk/<语言>.rs`，`extract_walker_matches_tags` 对全部夹具、每种语言逐个模式的样例、64 KiB 的语料和病态输入检查两条路径的抽取结果相同。唯一列出的差异是 tree-sitter 查询引擎丢掉的匹配：嵌套模式里重复字段的第二个名字（Go 包级的 `const A, B = 1, 2` 只匹配到 `A`，tags 和 locals 查询都是），遍历按模式的含义把 `B` 也记为定义。节点种类和字段按名字解析成 ID，grammar 里缺少其中一个时这种语言退回 tags 路径并记一条日志。语言包仍用 tree-sitter-tags。
 - 夹具：`crates/code_intel/tests/fixtures/extract/<语言>/` 下每种语言若干真实写法的样本（类、方法、闭包、重载、嵌套模块、导出与非导出、宏），抽取结果用 insta 快照；grammar 或查询升级时快照的变化在 PR 里逐个看过。另有一份病态输入（深度嵌套、超长行）用于截止时间的测试。
 
 ### 绑定规则
@@ -811,7 +812,7 @@ pub enum Visibility {
 
 - import 不是局部定义，经索引解析（「跳转到定义」第 2、3 步）。
 - 一种语言新增声明形式时，在它的 locals 查询里加模式和属性，在 `tests/binding.rs` 的这种语言的表里加行；每种语言一个表驱动的测试（`site_binding_<语言>`），每行是一段源码、引用的位置和期望（绑定到某个声明；只有这些候选，不允许直接跳到别的文件；没有局部定义，由索引回答）。
-- tree-sitter-tags 一侧用同一个 locals 查询过滤引用名（`#is-not? local`）。它不读上面的属性，只按名字比较：函数作用域标成 `local.scope-inherits false`，过滤只看引用所在函数自己的局部定义；捕获整个模式的定义（解构）不等于任何名字，不过滤；Rust 的 `if let` / `while let` 绑定用 `@definition.lectern.local` 捕获，tree-sitter-tags 在 locals 查询里只处理 `@local.scope` 和 `@local.definition`，所以不过滤它们，`if` 和 `while` 也不是作用域（tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，多数 `if` 不绑定名字）。这几处都让引用名多出名字，不会少。
+- 抽取时用同一个 locals 查询过滤引用名（`#is-not? local`，tree-sitter-tags 或按它的规则过滤的 `walk`）。它不读上面的属性，只按名字比较：函数作用域标成 `local.scope-inherits false`，过滤只看引用所在函数自己的局部定义；捕获整个模式的定义（解构）不等于任何名字，不过滤；Rust 的 `if let` / `while let` 绑定用 `@definition.lectern.local` 捕获，tree-sitter-tags 在 locals 查询里只处理 `@local.scope` 和 `@local.definition`，所以不过滤它们，`if` 和 `while` 也不是作用域（tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，多数 `if` 不绑定名字）。这几处都让引用名多出名字，不会少。
 
 ### 存储表
 
@@ -1162,7 +1163,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 跳转：唯一候选的目标首屏高亮 ≤ 100 ms | 本 crate 的部分同上；目标文件的读取与高亮属于 `file_reader` | `app/goto_single` |
 | 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的结果；限时搜索 1 s 后停止，取消在 20 ms 内生效 | `code_intel/search_stop` ≤ 1.02 s |
 | 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 查找 ≤ 5 ms；每个候选文件的现场抽取约 1–2 ms / 10 KB | `code_intel/references_100k` |
-| 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件，[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k` |
+| 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件），核心语言用一次遍历抽取（[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k` |
 | 空闲内存：monorepo < 100 MB（后台暂停时和全部完成后） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
@@ -1329,6 +1330,25 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
   第一版的下降集中在 Rust（按语言拆分，Rust 2.27–2.50 对 2.60–2.69 MiB/s，Go 约 4%，其余在噪声内）：tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，每个 `if`、`while` 多一个作用域。去掉这两种作用域后 Rust 回到 2.60–2.70 MiB/s；只把条件里有 `let` 的 `if` 记为作用域是 2.50–2.59 MiB/s（带字段和选择的模式本身的匹配也有开销），所以改用 `local.until`。`extract_1mib` 快 12%–18%：函数作用域标成 `local.scope-inherits false` 后，局部检查只扫描所在函数的作用域。
 
+第 1 步，按协调方的要求重新评估 `code_intel/extract_throughput`（macOS CI 上同一份抽取代码测得 ≥ 4 MB/s 和 3.11–3.19 MB/s，[ADR 0031](../adr/0031.md)）之后，同一台机器。
+
+- 各部分的开销（release，8 KiB 的文件，每种语言约 1 MiB，七种语言的调和平均，MiB/s，每项两到三次）：
+
+  | 做法 | 吞吐 |
+  |---|---|
+  | 只解析 | 5.34 |
+  | 解析后遍历语法树、收集名字 | 4.41 |
+  | 解析后跑一遍 locals + tags 查询，不做任何处理 | 2.94 |
+  | 同上，去掉全部兜底模式和 `(identifier) @local.reference` | 与上一行没有可测的差别 |
+  | 自己遍历 `QueryCursor` 的匹配（作用域栈过滤局部引用、名字去重，不含可见性规则）| 2.83–2.88 |
+  | tree-sitter-tags 抽取（a489f58） | 2.39 |
+  | Go 的一次遍历原型 | Go 3.79–4.21（同一轮 tree-sitter-tags 2.43） |
+
+  查询游标关掉全部模式时只遍历语法树，每 MiB 就要 62–94 ms，占查询时间（104–194 ms）的一半到三分之二，所以减少模式的上限很低。
+- 改用一次遍历之后（`just bench --measure code_intel/`，与 99fd327 交替运行，每项三次）：`code_intel/extract_throughput` 3.86–3.97 MB/s（99fd327：2.48–2.54），`code_intel/extract_1mib` 3.19–3.25 MB/s（1.59–1.64）。按语言（MiB/s）：TS 3.2–3.5、TSX 3.8–4.0、JS 3.3–3.7、Rust 3.7–4.1、Java 4.2–4.7、Python 3.2–4.0、Go 3.5–3.7。参照名字集合换成不带密钥的快速哈希、遍历跳过匿名节点，两项都在噪声以内。
+- `just check`、`just test`（整个工作区 1147 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过；`cargo tree -e features -i tree-sitter` 里仍没有 `wasm`，`cargo tree -i tree-sitter-tags -e normal --depth 1` 仍只列出 `lectern-code-intel`，没有新增依赖。
+- `just test -p lectern-code-intel`：49 个测试通过。新增 `extract_walker_matches_tags`（7 份夹具、7 段逐个模式的样例、7 份 64 KiB 的语料、病态输入，两条路径的定义和引用名逐条比较，只允许上面那一处 Go 的差异）、`extract_definitions_on_one_node_are_siblings`。8 个快照没有变化：遍历在夹具上与 tree-sitter-tags 逐字节相同。`deadline_*` 现在经过遍历的路径，结果不变。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1372,3 +1392,10 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 函数作用域在 tree-sitter-tags 一侧标成 `local.scope-inherits false`。ADR 0031 记下这一项时是作为提速手段放弃的（它改变了被过滤的引用）；这一轮它是为了正确性：只用所在函数自己的局部定义过滤，Python 的类体不再挡住方法里的模块名，外层函数的同名局部不再让一个名字从引用名里消失。变化的方向都是引用名多出名字。
 - 设计没有规定 grammar 租约相对其他字段的 drop 顺序。语言包的条目原来先 drop 租约、后 drop 编译好的查询，`ParsedFile` 先 drop 持有租约的语言、后 drop 语法树，库可能在查询和语法树释放之前被卸载。现在租约在最后（「语言包的变化」已补），并清掉每线程 `TagsContext` 里指向语言包的解析器和游标。
 - 设计没有说枚举成员是定义：Rust 的变体、TS 的枚举成员和 Python 的类属性原来不在定义里，Java 的枚举常量有定义但可见性按自己的修饰符算（总是 `Public`）。现在都是定义，可见性取枚举的（「抽取结果」已补），Rust 的 `Call` 因此也接受 `Constant`（「候选的分层与过滤」已补）。
+
+第 1 步，按 [ADR 0031](../adr/0031.md)（提议中）改用一次遍历抽取：
+
+- 设计按 ADR 0030 用 tree-sitter-tags 抽取全部语言。核心语言改为 `walk` 模块的一次遍历（「外部格式」已补），语言包不变；`ParsedFile` 的定义随之取遍历的结果。原因是 tree-sitter-tags 路径在 macOS CI 上随机地低于 4 MB/s 的预算，而查询本身的开销就超出了预算（ADR 0031 的「背景」）。查询仍是规格，两条路径由 `extract_walker_matches_tags` 约束。
+- Go 包级的 `const A, B = 1, 2`：查询引擎只匹配到 `A`，遍历把 `B` 也记为定义（「外部格式」已补）。
+- 同一个节点上的几个定义（Go 的 `const A, B`、`name, kind string`，Java 的 `int a, b;`）原来互为 `scope`（后一个的 `scope` 是前一个的名字），现在都取外层的定义。两条路径共用这条规则。
+- `EXTRACTOR_VERSION` 从 1 改为 2：上面两项改变了抽取结果。

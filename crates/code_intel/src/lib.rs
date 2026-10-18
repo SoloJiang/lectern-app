@@ -11,6 +11,7 @@ mod lang;
 mod locals;
 mod rules;
 mod util;
+mod walk;
 mod watchdog;
 
 pub mod extract;

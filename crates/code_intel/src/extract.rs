@@ -12,6 +12,7 @@ use tree_sitter_tags::{Error as TagsError, TagsContext};
 use crate::DefKind;
 use crate::rules::{self, RawTag};
 use crate::util::log;
+use crate::walk;
 use crate::watchdog::{PauseProbe, Registration, Trip, Watchdog};
 
 pub use crate::lang::{EXTRACTOR_VERSION, Lang, LanguageTable, compatible, language_for_path};
@@ -202,6 +203,65 @@ thread_local! {
 /// is set, the deadline's pause probe says so, or the watchdog stops; the
 /// watchdog interrupts parsing within [`crate::CHECK_INTERVAL`].
 pub fn extract(
+    lang: &Lang,
+    source: &[u8],
+    deadline: &Deadline,
+    cancel: &Arc<AtomicBool>,
+) -> Extraction {
+    if cancel.load(Ordering::Acquire) {
+        return Extraction::empty(ExtractStatus::Cancelled);
+    }
+    if source.len() > deadline.max_len {
+        return Extraction::empty(ExtractStatus::TooLarge);
+    }
+    if is_binary(source) {
+        return Extraction::empty(ExtractStatus::Binary);
+    }
+    if lang.lease().is_static() && walk::supports(lang.dialect(), lang.language()) {
+        return extract_walking(lang, source, deadline, cancel);
+    }
+    extract_tags(lang, source, deadline, cancel)
+}
+
+/// A core language: one walk over the tree (`crate::walk`, ADR 0032).
+fn extract_walking(
+    lang: &Lang,
+    source: &[u8],
+    deadline: &Deadline,
+    cancel: &Arc<AtomicBool>,
+) -> Extraction {
+    let registration =
+        deadline
+            .watchdog
+            .register(deadline.at, Some(cancel.clone()), deadline.pause.clone());
+    if registration.slot().tripped().is_some() {
+        return interrupted(&registration);
+    }
+    let walked = walk::extract(
+        lang.dialect(),
+        lang.language(),
+        source,
+        registration.slot().flag(),
+    );
+    if registration.slot().tripped().is_some() {
+        return interrupted(&registration);
+    }
+    drop(registration);
+    let Some(walked) = walked else {
+        log(format_args!("parsing {} failed", lang.name().0));
+        return Extraction::empty(ExtractStatus::Unsupported);
+    };
+    let finished = rules::finish_with_refs(lang.dialect(), source, walked.tags, walked.refs);
+    Extraction {
+        status: ExtractStatus::Done,
+        defs: finished.defs.into_iter().map(|d| d.def).collect(),
+        refs: finished.refs,
+    }
+}
+
+/// tree-sitter-tags with the language's queries: language packs, and the
+/// reference for the walkers' tests.
+pub(crate) fn extract_tags(
     lang: &Lang,
     source: &[u8],
     deadline: &Deadline,

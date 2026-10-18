@@ -56,6 +56,27 @@ struct Container {
 }
 
 pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Finished {
+    finish_inner(dialect, source, tags, None)
+}
+
+/// `finish` for the walkers (`crate::walk`): `tags` holds definitions and
+/// markers only, `refs` the reference names, deduplicated, in byte order,
+/// without the definitions' own names.
+pub(crate) fn finish_with_refs(
+    dialect: Dialect,
+    source: &[u8],
+    tags: Vec<RawTag>,
+    refs: Vec<Box<str>>,
+) -> Finished {
+    finish_inner(dialect, source, tags, Some(refs))
+}
+
+fn finish_inner(
+    dialect: Dialect,
+    source: &[u8],
+    tags: Vec<RawTag>,
+    ref_names: Option<Vec<Box<str>>>,
+) -> Finished {
     let text = |r: &Range<usize>| {
         source
             .get(r.clone())
@@ -87,18 +108,21 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
         )
     });
     defs.dedup_by(|b, a| a.0.name_range == b.0.name_range);
-    // A definition's own name is not a reference to it.
-    let def_names: HashSet<(usize, usize)> = defs
-        .iter()
-        .map(|(tag, _, _)| (tag.name_range.start, tag.name_range.end))
-        .collect();
-    let mut refs: Vec<Box<str>> = refs
-        .into_iter()
-        .filter(|(r, _)| !def_names.contains(&(r.start, r.end)))
-        .map(|(_, name)| name)
-        .collect();
-    refs.sort_unstable();
-    refs.dedup();
+    let refs = ref_names.unwrap_or_else(|| {
+        // A definition's own name is not a reference to it.
+        let def_names: HashSet<(usize, usize)> = defs
+            .iter()
+            .map(|(tag, _, _)| (tag.name_range.start, tag.name_range.end))
+            .collect();
+        let mut refs: Vec<Box<str>> = refs
+            .into_iter()
+            .filter(|(r, _)| !def_names.contains(&(r.start, r.end)))
+            .map(|(_, name)| name)
+            .collect();
+        refs.sort_unstable();
+        refs.dedup();
+        refs
+    });
 
     // Containers: definitions and `impl` blocks, outermost first.
     let mut containers: Vec<Container> = defs
@@ -138,7 +162,14 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
     for &i in &order {
         let range = containers[i].range.clone();
         while let Some(&top) = stack.last() {
-            if containers[top].range.end >= range.end && containers[top].range.start <= range.start
+            // Definitions on one node (`const A, B = 1, 2`, `int a, b;`) are
+            // siblings, not each other's scope.
+            let sibling = containers[top].range == range
+                && containers[top].def.is_some()
+                && containers[i].def.is_some();
+            if containers[top].range.end >= range.end
+                && containers[top].range.start <= range.start
+                && !sibling
             {
                 break;
             }

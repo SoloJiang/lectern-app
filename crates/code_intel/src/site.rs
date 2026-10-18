@@ -241,6 +241,21 @@ impl ParsedFile {
         let locals = collector.finish(text);
 
         let mut tags: Vec<RawTag> = tags.into_values().map(|(_, t)| t).collect();
+        // A core language's definitions and markers come from its walker,
+        // as in `extract` (ADR 0032); the query's tags give the reference
+        // positions.
+        if lang.lease().is_static()
+            && let Some(walked) = crate::walk::walk_tree(
+                dialect,
+                lang.language(),
+                &tree,
+                text,
+                &std::sync::atomic::AtomicUsize::new(0),
+            )
+        {
+            tags.retain(|t| t.class == TagClass::Ref);
+            tags.extend(walked.tags);
+        }
         tags.sort_by_key(|t| t.name_range.start);
         ref_ranges.extend(
             tags.iter()

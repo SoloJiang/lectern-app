@@ -402,3 +402,180 @@ fn extract_enum_members_are_definitions() {
         }
     }
 }
+
+#[test]
+fn extract_definitions_on_one_node_are_siblings() {
+    // `name, kind string` and `int a, b;` are two definitions on one node:
+    // each is in the type's scope, not in the other's.
+    type Case<'a> = (&'a str, &'a str, &'a [(&'a str, Option<&'a str>)]);
+    let cases: &[Case] = &[
+        (
+            "go",
+            "package p\n\nconst A, B = 1, 2\n\ntype T struct { name, kind string }\n",
+            &[
+                ("A", None),
+                ("B", None),
+                ("name", Some("T")),
+                ("kind", Some("T")),
+            ],
+        ),
+        (
+            "java",
+            "class C {\n  int a, b;\n}\n",
+            &[("a", Some("C")), ("b", Some("C"))],
+        ),
+    ];
+    for (lang, source, want) in cases {
+        let e = run(lang, source);
+        for (name, scope) in *want {
+            assert_eq!(def(&e, name).scope.as_deref(), *scope, "{lang} {name}");
+        }
+    }
+}
+
+/// Sources for the walkers' parity test beyond the fixtures: each pattern
+/// of the tags and locals queries and its near misses.
+const WALKER_CASES: &[(&str, &str)] = &[
+    (
+        "rust",
+        "pub(crate) struct S<T>(T);\nunion U { a: u8 }\npub type Alias = u8;\nmod m { pub fn f() {} }\nmacro_rules! mac { ($x:ident) => { $x }; }\n\
+         impl<T> S<T> { pub fn new(t: T) -> Self { S(t) } }\nimpl a::b::Trait for crate::x::S<u8> { fn go(&self) {} }\nimpl Display for S<u8> { fn fmt(&self, f: &mut F) -> R { write!(f, \"\") } }\n\
+         trait T { fn sig(&self, a: u8); fn body() {} }\nextern \"C\" { fn ext(x: i32); }\nstatic mut G: u8 = 0;\n\
+         fn f(Point { x, y: z }: P, (a, b): (u8, u8), c @ Some(_): O) -> u8 {\n    let helper = |q: u8| q + x;\n    fn inner() {}\n    const K: u8 = 1;\n    \
+         let s = S::new(a).field.method(b);\n    m::f(); mac!(z); inner(); helper(K);\n    if let Some(v) = c { v } else { v }\n    \
+         while let Some(w) = it.next() { w; }\n    for (i, j) in pairs { i + j; }\n    match s { Some(k) if k > 0 => k, None => G, _ => 0 }\n    S { field: 1 }.field\n}\n",
+    ),
+    (
+        "go",
+        "package p\n\nimport \"fmt\"\n\nconst A, B = 1, 2\nvar (\n\tx int\n\ty, z = 1, 2\n)\nvar w = 3\n\ntype T[K any] struct { name, kind string }\ntype I interface { M(a int) error }\ntype Alias = T[int]\n\n\
+         func (t *T[K]) M(a int) error { return nil }\nfunc (T) N() {}\nfunc (t *T[K]) O(xs ...int) {}\n\
+         func f(a, b int, rest ...string) (int, error) {\n\tc := a + x\n\tvar d, e = b, c\n\tconst g = 1\n\tfor i, v := range rest { fmt.Println(i, v, d, e, g) }\n\t\
+         switch q := c.(type) { case int: _ = q }\n\tselect { case m := <-ch: _ = m }\n\tif h := f2(); h > 0 { return h, nil } else { return h, nil }\n\t\
+         fn := func(k int) int { return k + c }\n\treturn (fn)(1), t.M(2)\n}\n",
+    ),
+    (
+        "python",
+        "import os\nfrom a import b as c\nLIMIT = 1\nx, y = 1, 2\n\nclass Base(object, metaclass=Meta):\n    count = 0\n    other: int = 1\n    @staticmethod\n    def make(cls, *args, key=None, **kw):\n        return cls(count)\n    \
+         def run(self, /, a, b: int = 2, *, c):\n        global LIMIT\n        LIMIT = a\n        return [v for v in self.items if (w := v)] + [w]\n    class Inner(Base):\n        size = count\n\n\
+         @decorator\ndef top(p, q=LIMIT):\n    def helper(r):\n        nonlocal p\n        return r + p\n    with open(p) as fh, other() as (g, h):\n        pass\n    try:\n        pass\n    except E as err:\n        print(err)\n    \
+         for k, (m, n) in items:\n        top(k)\n    lam = lambda s, t=1: s + t\n    q += 1\n    os.path.join(helper(q), lam(1))\n    return Base.make(q)\n",
+    ),
+    (
+        "java",
+        "package p;\nimport java.util.List;\n\n@interface Marker { int value(); }\npublic record Point(int x, int y) {}\ninterface Shape { double area(); }\n\
+         enum Kind { A, B; private static final int MAX = 3; }\n\
+         public class C<T> extends Base implements Shape, Other {\n    private int count;\n    public static final String NAME = \"n\";\n    private C(int count) { this.count = count; }\n    \
+         public double area() { return count; }\n    private <U> void run(List<U> items, int... more) {\n        int total = 0;\n        for (U item : items) { total += item.hashCode(); }\n        \
+         try (var in = open()) { in.read(); } catch (IOException e) { log(e); }\n        Runnable r = () -> run(items);\n        java.util.function.Function<Integer, Integer> f = x -> x + total;\n        \
+         if (items instanceof List<?> l) { l.size(); }\n        switch (total) { case 1: int k = 2; break; default: k = 3; }\n        \
+         class Local { }\n        Object o = new Local();\n        this.count = items.size() + Math.max(total, count);\n    }\n}\n",
+    ),
+    (
+        "ts",
+        "import { a } from './a';\nexport { a as b };\nexport default thing;\nexport const LIMIT = 3, other = () => 1;\nlet counter = 0;\nvar legacy = 1;\nexport let flag = true;\n\
+         export abstract class Shape<T> extends Base implements IShape, Other {\n  private readonly id: number = 1;\n  #secret = 2;\n  abstract area(): number;\n  constructor(public x: number, private y?: string) { super(); }\n  \
+         method({ a, b: [c] }: Opts, d = LIMIT, ...rest: number[]): void { this.#secret; c(); }\n  get size() { return this.id; }\n}\n\
+         interface IShape { area(): number; name: string; [key: string]: unknown; }\ntype Alias<T> = T | null;\nenum Color { Red, Green = 2, 'Blue' }\nconst enum E { A }\n\
+         declare function overload(a: number): void;\nnamespace NS { export const inner = 1; }\ndeclare module 'mod' { }\nmodule Legacy { }\n\
+         function outer(p: number) {\n  const inner = (q: number) => q + p;\n  function nested() { return inner(p); }\n  for (const k of keys) { use(k); }\n  for (let i = 0; i < 3; i++) { i; }\n  \
+         try { } catch (err) { err; }\n  return new Shape.Sub() || new Thing() || require('x');\n}\nobj.handler = function (e) { e; };\nexport default b = 1;\nconst o = { m(x) { return x; }, f: async (y) => y, g: z => z };\n",
+    ),
+    (
+        "tsx",
+        "import React from 'react';\nexport function Panel({ items }: Props) {\n  const [open, setOpen] = useState(false);\n  return <Box title=\"t\">{items.map(item => <Row key={item.id} {...item} />)}<div onClick={() => setOpen(!open)} /><ui.Menu /></Box>;\n}\nclass View extends React.Component<P> { state = { n: 1 }; render() { return <View.Item />; } }\n",
+    ),
+    (
+        "js",
+        "const path = require('path');\nmodule.exports = { resolve, other: function () {} };\nexports.helper = (a) => a;\nclass Store extends Base {\n  items = [];\n  #count = 0;\n  static #hidden;\n  constructor(root) { super(); this.root = root; }\n  \
+         *gen() { yield 1; }\n  async load(key) { const { [key]: value, ...rest } = this.cache; return value ?? rest; }\n}\nclass Sub extends mixins.Base {}\nconst Anon = class Named {};\n\
+         function* generator() {}\nconst fn = function named(x) { return named; };\nvar a = 1, b = function () {};\nlet c;\nfor (var i in obj) { i; }\nfor (x of y) { x; }\n\
+         function hoisted() { return later(); function later() {} }\nexport default function () {}\nconst el = <Comp prop={value}><span>{text}</span><Other /></Comp>;\n",
+    ),
+];
+
+#[test]
+fn extract_walker_matches_tags() {
+    // The walkers (crate::walk) follow the tags and locals queries: both
+    // paths give the same extraction for every source, except where
+    // tree-sitter's query engine drops a match (`known` below).
+    let table = LanguageTable::core();
+    let watchdog = test_watchdog();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut sources: Vec<(&str, String, Vec<u8>)> = FIXTURES
+        .iter()
+        .map(|(lang, file, source)| (*lang, (*file).to_owned(), source.as_bytes().to_vec()))
+        .collect();
+    for (lang, source) in WALKER_CASES {
+        sources.push((lang, format!("{lang} case"), source.as_bytes().to_vec()));
+    }
+    for lang in table.iter() {
+        let name: &str = &lang.name().0;
+        let name = CORE_NAMES.iter().copied().find(|n| *n == name).unwrap();
+        sources.push((
+            name,
+            format!("{name} corpus"),
+            crate::testing::corpus(name, 64 << 10),
+        ));
+    }
+    sources.push((
+        "js",
+        "pathological".to_owned(),
+        crate::testing::pathological_js(64 << 10),
+    ));
+    let mut failures = Vec::new();
+    for (lang, what, source) in &sources {
+        let lang = table.get(lang).unwrap();
+        let deadline = Deadline::interactive(&watchdog);
+        let walked = extract(lang, source, &deadline, &cancel);
+        let tagged = crate::extract::extract_tags(lang, source, &deadline, &cancel);
+        assert_eq!(walked.status, ExtractStatus::Done, "{what}");
+        let show = |d: &crate::extract::Def| {
+            format!(
+                "{}:{} {} {} {:?} {} {:?}",
+                d.line + 1,
+                d.column,
+                crate::def_kind_name(d.kind),
+                d.name,
+                d.scope,
+                d.visibility.as_str(),
+                d.arity
+            )
+        };
+        let walked_defs: Vec<String> = walked.defs.iter().map(show).collect();
+        let tagged_defs: Vec<String> = tagged.defs.iter().map(show).collect();
+        for d in &tagged_defs {
+            if !walked_defs.contains(d) {
+                failures.push(format!("{what}: walker lacks definition {d}"));
+            }
+        }
+        for d in &walked_defs {
+            if !tagged_defs.contains(d) {
+                failures.push(format!("{what}: walker adds definition {d}"));
+            }
+        }
+        for r in &tagged.refs {
+            if !walked.refs.contains(r) {
+                failures.push(format!("{what}: walker lacks reference {r}"));
+            }
+        }
+        for r in &walked.refs {
+            if !tagged.refs.contains(r) {
+                failures.push(format!("{what}: walker adds reference {r}"));
+            }
+        }
+    }
+    watchdog.stop();
+    // tree-sitter's query engine keeps only the first name of a repeated
+    // field in this nested pattern (`(source_file (const_declaration
+    // (const_spec name: …)))`, both in tags.scm and locals.scm): `B` of
+    // `const A, B = 1, 2` is no definition there. The walker follows the
+    // pattern's meaning, so `B` is a definition and not a reference name.
+    let known = [
+        "go case: walker adds definition 5:9 constant B None public None",
+        "go case: walker lacks reference B",
+    ];
+    failures.retain(|f| !known.contains(&f.as_str()));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const CORE_NAMES: &[&str] = &["ts", "tsx", "js", "rust", "java", "python", "go"];
