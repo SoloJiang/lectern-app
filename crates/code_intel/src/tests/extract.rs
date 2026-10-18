@@ -361,6 +361,170 @@ fn extract_plain_and_member_uses_are_names() {
     }
 }
 
+/// The JS / TS export forms (docs/design/code_intel.md「抽取结果」):
+/// (language, form, an ES module that exports `name` this way, the same
+/// module without the export, name).
+const EXPORT_FORMS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "js",
+        "export function",
+        "import m from 'm';\nexport function run() {}\n",
+        "import m from 'm';\nfunction run() {}\n",
+        "run",
+    ),
+    (
+        "js",
+        "export const",
+        "import m from 'm';\nexport const LIMIT = 1;\n",
+        "import m from 'm';\nconst LIMIT = 1;\n",
+        "LIMIT",
+    ),
+    (
+        "js",
+        "export class",
+        "import m from 'm';\nexport class Store {}\n",
+        "import m from 'm';\nclass Store {}\n",
+        "Store",
+    ),
+    (
+        "js",
+        "export default function",
+        "import m from 'm';\nexport default function run() {}\n",
+        "import m from 'm';\nfunction run() {}\n",
+        "run",
+    ),
+    (
+        "js",
+        "export default name",
+        "import m from 'm';\nfunction run() {}\nexport default run;\n",
+        "import m from 'm';\nfunction run() {}\n",
+        "run",
+    ),
+    (
+        "js",
+        "export { name }",
+        "import m from 'm';\nfunction run() {}\nexport { run };\n",
+        "import m from 'm';\nfunction run() {}\n",
+        "run",
+    ),
+    (
+        "js",
+        "export { name as alias }",
+        "import m from 'm';\nfunction run() {}\nexport { run as go };\n",
+        "import m from 'm';\nfunction run() {}\n",
+        "run",
+    ),
+    (
+        "ts",
+        "export = name",
+        "import m from 'm';\nfunction run() {}\nexport = run;\n",
+        "import m from 'm';\nfunction run() {}\n",
+        "run",
+    ),
+    (
+        "ts",
+        "export declare const",
+        "import m from 'm';\nexport declare const VERSION: string;\n",
+        "import m from 'm';\ndeclare const VERSION: string;\n",
+        "VERSION",
+    ),
+    (
+        "ts",
+        "export interface",
+        "import m from 'm';\nexport interface Opts {}\n",
+        "import m from 'm';\ninterface Opts {}\n",
+        "Opts",
+    ),
+    (
+        "ts",
+        "export namespace",
+        "import m from 'm';\nexport namespace NS { export const version = 1; }\n",
+        "import m from 'm';\nnamespace NS { export const version = 1; }\n",
+        "NS",
+    ),
+    (
+        "ts",
+        "declare global",
+        "import m from 'm';\ndeclare global { interface Window { app: number } }\n",
+        "import m from 'm';\ninterface Window { app: number }\n",
+        "Window",
+    ),
+];
+
+#[test]
+fn extract_export_forms_change_visibility() {
+    // Each export form makes the name `Public` in an ES module, where the
+    // same name unexported is `File`; both extraction paths agree.
+    let table = LanguageTable::core();
+    let watchdog = test_watchdog();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut failures = Vec::new();
+    for (lang, form, exported, plain, name) in EXPORT_FORMS {
+        let l = table.get(lang).unwrap();
+        for (source, want) in [(exported, Visibility::Public), (plain, Visibility::File)] {
+            let deadline = Deadline::interactive(&watchdog);
+            let walked = extract(l, source.as_bytes(), &deadline, &cancel);
+            let tagged = crate::extract::extract_tags(l, source.as_bytes(), &deadline, &cancel);
+            if walked != tagged {
+                failures.push(format!("{lang} {form}: walker and tags differ"));
+            }
+            match walked.defs.iter().find(|d| &*d.name == *name) {
+                Some(d) if d.visibility == want => {}
+                found => failures.push(format!(
+                    "{lang} {form}: {name} is {:?}, not {want:?} in {source:?}",
+                    found.map(|d| d.visibility)
+                )),
+            }
+        }
+    }
+    watchdog.stop();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn extract_python_module_level_and_attributes() {
+    // Module level is no function or class scope around: assignments under
+    // `if`, `try`, `with` and `for`, and every name of a chain, are module
+    // constants; ones in a function or class are not. `self.name = …` in a
+    // method (or a function nested in it) is a field of the class; other
+    // attribute assignments stay member references.
+    let source = "import os\nif os.name == 'nt':\n    SEP = 'a'\nelse:\n    SEP = 'b'\ntry:\n    FAST = True\nexcept ImportError:\n    FAST = None\n\
+                  with open('x') as fh:\n    DATA = fh.read()\nfor item in []:\n    LAST = item\nA = B = None\n\
+                  def f():\n    local = 1\n    return local\n\
+                  class Config:\n    size = 1\n    if True:\n        hidden = 2\n    def __init__(self, name):\n        self.name = name\n        self.size = 3\n        other.attr = 1\n\
+                  \x20   def reset(this):\n        this.count = 0\n        def inner():\n            this.nested = 1\n        inner()\n\
+                  def free(obj):\n    obj.x = 1\n";
+    let table = LanguageTable::core();
+    let watchdog = test_watchdog();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let python = table.get("python").unwrap();
+    let deadline = Deadline::interactive(&watchdog);
+    let walked = extract(python, source.as_bytes(), &deadline, &cancel);
+    let tagged = crate::extract::extract_tags(python, source.as_bytes(), &deadline, &cancel);
+    watchdog.stop();
+    assert_eq!(walked, tagged);
+    let find = |name: &str| walked.defs.iter().filter(|d| &*d.name == name).collect::<Vec<_>>();
+    for name in ["SEP", "FAST", "DATA", "LAST", "A", "B"] {
+        let defs = find(name);
+        assert!(!defs.is_empty(), "{name}");
+        for d in defs {
+            assert_eq!((d.kind, d.scope.as_deref()), (DefKind::Constant, None), "{name}");
+        }
+    }
+    for name in ["local", "hidden", "attr", "x"] {
+        assert!(find(name).is_empty(), "{name}: {:?}", find(name));
+    }
+    for name in ["size", "name", "count", "nested"] {
+        let defs = find(name);
+        assert_eq!(defs.len(), 1, "{name}: {defs:?}");
+        assert_eq!(defs[0].kind, DefKind::Field, "{name}");
+        assert_eq!(defs[0].scope.as_deref(), Some("Config"), "{name}");
+    }
+    for name in ["attr", "x"] {
+        assert!(walked.refs.iter().any(|r| &**r == name), "{name} in {:?}", walked.refs);
+    }
+}
+
 #[test]
 fn extract_rust_impl_self_types() {
     // The methods of a trait implementation are public and in the

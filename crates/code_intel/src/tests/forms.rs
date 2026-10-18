@@ -829,6 +829,18 @@ const SAMPLES: &[Sample] = &[
     (
         &["python"],
         "assignment",
+        "if ready:\n    MODE = 'a'\nelse:\n    MODE = 'b'\nFIRST = SECOND = None\n",
+        Defines("SECOND", DefKind::Constant),
+    ),
+    (
+        &["python"],
+        "attribute",
+        "class A:\n    def __init__(self, n):\n        self.size = n\n",
+        Defines("size", DefKind::Field),
+    ),
+    (
+        &["python"],
+        "assignment",
         "first, *rest = items\n(p, [q, r]) = nested\n",
         Defines("r", DefKind::Constant),
     ),
@@ -963,6 +975,12 @@ const SAMPLES: &[Sample] = &[
         "typed_parameter",
         "def f(limit: int):\n    return limit\n",
         Binding(Binds(("limit", 0, 0)), ("limit", 1)),
+    ),
+    (
+        &["rust"],
+        "let_declaration",
+        "fn f(p: Point) -> u8 {\n    let Point { x, y: other } = p;\n    x + other\n}\n",
+        Binding(Binds(("x", 0, 0)), ("x", 1)),
     ),
     // ---- Go ----
     (
@@ -1277,6 +1295,43 @@ fn forms_local_definitions_are_file_visible() {
     }
     watchdog.stop();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn forms_positions_yield_sites() {
+    // Every binding and use position in the forms and scopes samples is a
+    // `Site` (the identifier kinds come from one list, `locals::name_kinds`),
+    // and every declaration and definition there is a defining site.
+    let mut missing = Vec::new();
+    for (langs, kind, source, shows) in SAMPLES {
+        for lang in *langs {
+            match shows {
+                Binding(expect, reference) => {
+                    missing.extend(super::binding::missing_sites(lang, source, *reference, expect));
+                }
+                Defines(name, def_kind) => {
+                    let file = super::site::parse(lang, source);
+                    let Some(def) = file.defs().find(|d| &*d.name == *name && d.kind == *def_kind)
+                    else {
+                        continue;
+                    };
+                    let at = crate::site::Position {
+                        line: def.line,
+                        column: def.column,
+                    };
+                    if file.site_at(at).and_then(|s| s.defines).is_none() {
+                        missing.push(format!("{lang} {kind}: {name} is no defining site"));
+                    }
+                }
+            }
+        }
+    }
+    for (langs, _, row) in super::scopes::SAMPLES {
+        for lang in *langs {
+            missing.extend(super::binding::missing_sites(lang, row.source, row.reference, &row.expect));
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
 
 /// The table as the design document shows it.

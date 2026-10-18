@@ -655,8 +655,8 @@ pub(crate) const FORMS: &[Form] = &[
     form(
         JAVA,
         "interface_declaration",
-        def_local(&[(Interface, TYPE)], Both),
-        "块里的是局部",
+        def_local(&[(Interface, NEW_TYPE)], Both),
+        "`new I() { … }`（匿名类）也指向接口；块里的是局部",
     ),
     form(JAVA, "lambda_expression", Role::Local(Value), "`x -> …`"),
     form(JAVA, "local_variable_declaration", Role::Local(Value), ""),
@@ -721,9 +721,15 @@ pub(crate) const FORMS: &[Form] = &[
         PYTHON,
         "assignment",
         def_local(&[(Constant, CALLS), (Field, CALLS)], Value),
-        "模块顶层是常量，类体里是字段，解包（`A, B = …`、`first, *rest = …`）时两层以内的每个名字都是；都是局部绑定",
+        "不在函数或类作用域里的是常量（含 `if`、`try`、`with`、`for` 里的和连等 `A = B = None` 的每个名字），类体里直接写的是字段，解包（`A, B = …`、`first, *rest = …`）时两层以内的每个名字都是；都是局部绑定",
     ),
-    form(PYTHON, "attribute", Role::Use, "`a.b`").at(&[In("attribute")]),
+    form(
+        PYTHON,
+        "attribute",
+        def(&[(Field, CALLS)]),
+        "`a.b`；方法（及其中嵌套的函数）里给方法第一个参数的属性赋值（`self.name = …`）是类的字段，其余是成员引用",
+    )
+    .at(&[In("attribute")]),
     form(PYTHON, "augmented_assignment", Role::Local(Value), ""),
     form(PYTHON, "binary_operator", Role::Ignored, "表达式"),
     form(PYTHON, "boolean_operator", Role::Ignored, "表达式"),

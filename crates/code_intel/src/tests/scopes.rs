@@ -632,9 +632,9 @@ fn scopes_have_no_duplicate_rows() {
 
 /// (languages, node kind, binding row): each sample needs the scope of its
 /// kind to resolve as the row says.
-type Sample = (&'static [&'static str], &'static str, Row);
+pub(super) type Sample = (&'static [&'static str], &'static str, Row);
 
-const SAMPLES: &[Sample] = &[
+pub(super) const SAMPLES: &[Sample] = &[
     // ---- JavaScript, TypeScript, TSX ----
     (
         ECMA,

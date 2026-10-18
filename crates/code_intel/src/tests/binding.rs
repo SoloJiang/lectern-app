@@ -28,6 +28,31 @@ pub(super) struct Row {
     pub expect: Expect,
 }
 
+/// The positions of a row that are not a `Site`: the reference, and each
+/// declaration the row expects (which must also be a definition there).
+pub(super) fn missing_sites(lang: &str, source: &str, reference: (&str, usize), expect: &Expect) -> Vec<String> {
+    let file = parse(lang, source);
+    let mut missing = Vec::new();
+    let (needle, nth) = reference;
+    if file.site_at(pos(source, needle, nth, 0)).is_none() {
+        missing.push(format!("{lang}: no site at {needle} #{nth} in {source:?}"));
+    }
+    let decls: Vec<At> = match expect {
+        Binds(at) => vec![*at],
+        Candidates(ats) => ats.to_vec(),
+        Free => Vec::new(),
+    };
+    for (needle, nth, offset) in decls {
+        let site = file.site_at(pos(source, needle, nth, offset));
+        if site.as_ref().and_then(|s| s.defines.as_ref()).is_none() {
+            missing.push(format!(
+                "{lang}: the declaration {needle} #{nth} is no defining site in {source:?}"
+            ));
+        }
+    }
+    missing
+}
+
 pub(super) fn check(lang: &str, rows: &[Row]) {
     for row in rows {
         let file = parse(lang, row.source);
@@ -683,6 +708,137 @@ fn site_binding_entry_points() {
             source: "const token = 1;\nclass A { constructor(@Inject(token) token: string) {} }\n",
             reference: ("token", 1),
             expect: Binds(("token", 0, 0)),
+        }],
+    );
+}
+
+#[test]
+fn site_binding_positions() {
+    // Only the locals query's references in variable positions resolve
+    // locally: keys, attributes, member and path names and tag names never
+    // bind to a same-named local (the forms table's positions), and a Go
+    // composite literal key only offers it as a candidate.
+    check(
+        "js",
+        &[
+            Row {
+                what: "an object key",
+                source: "function f(name) {\n  return { name: name.trim() };\n}\n",
+                reference: ("name", 1),
+                expect: Free,
+            },
+            Row {
+                what: "the object value",
+                source: "function f(name) {\n  return { name: name.trim() };\n}\n",
+                reference: ("name", 2),
+                expect: Binds(("name", 0, 0)),
+            },
+            Row {
+                what: "a JSX attribute name",
+                source: "function C({ value }) {\n  return <Child value={value} />;\n}\n",
+                reference: ("value", 1),
+                expect: Free,
+            },
+            Row {
+                what: "the JSX attribute value",
+                source: "function C({ value }) {\n  return <Child value={value} />;\n}\n",
+                reference: ("value", 2),
+                expect: Binds(("value", 0, 0)),
+            },
+            Row {
+                what: "an intrinsic JSX element",
+                source: "function C(label) {\n  return <label>{label}</label>;\n}\n",
+                reference: ("label", 1),
+                expect: Free,
+            },
+            Row {
+                what: "an intrinsic JSX closing element",
+                source: "function C(label) {\n  return <label>{label}</label>;\n}\n",
+                reference: ("label", 3),
+                expect: Free,
+            },
+            Row {
+                what: "the JSX expression",
+                source: "function C(label) {\n  return <label>{label}</label>;\n}\n",
+                reference: ("label", 2),
+                expect: Binds(("label", 0, 0)),
+            },
+            Row {
+                what: "a destructuring key",
+                source: "function f(name, obj) {\n  const { name: other } = obj;\n  return other;\n}\n",
+                reference: ("name", 1),
+                expect: Free,
+            },
+            Row {
+                what: "an imported name",
+                source: "const size = 1;\nimport { size as width } from './m';\n",
+                reference: ("size", 1),
+                expect: Free,
+            },
+            Row {
+                what: "a shorthand property uses the variable",
+                source: "function f(name) {\n  return { name };\n}\n",
+                reference: ("name", 1),
+                expect: Binds(("name", 0, 0)),
+            },
+        ],
+    );
+    check(
+        "rust",
+        &[
+            Row {
+                what: "a struct expression's field name",
+                source: "fn f(name: String) -> User {\n    User { name: name.clone() }\n}\n",
+                reference: ("name", 1),
+                expect: Free,
+            },
+            Row {
+                what: "the field's value",
+                source: "fn f(name: String) -> User {\n    User { name: name.clone() }\n}\n",
+                reference: ("name", 2),
+                expect: Binds(("name", 0, 0)),
+            },
+            Row {
+                what: "a field pattern's name",
+                source: "fn f(name: u8, u: User) -> u8 {\n    let User { name: n } = u;\n    name + n\n}\n",
+                reference: ("name", 1),
+                expect: Free,
+            },
+        ],
+    );
+    check(
+        "go",
+        &[
+            Row {
+                what: "a composite literal key may be a field name",
+                source: "package p\n\nfunc New(addr string) *Server {\n\treturn &Server{addr: addr}\n}\n",
+                reference: ("addr", 1),
+                expect: Candidates(&[("addr", 0, 0)]),
+            },
+            Row {
+                what: "the composite literal value",
+                source: "package p\n\nfunc New(addr string) *Server {\n\treturn &Server{addr: addr}\n}\n",
+                reference: ("addr", 2),
+                expect: Binds(("addr", 0, 0)),
+            },
+        ],
+    );
+    check(
+        "java",
+        &[Row {
+            what: "a method reference's name",
+            source: "class A { int name; void f(int name) { use(this::name); } }\n",
+            reference: ("name", 2),
+            expect: Free,
+        }],
+    );
+    check(
+        "python",
+        &[Row {
+            what: "a class pattern's keyword",
+            source: "def f(cmd, x):\n    match cmd:\n        case Point(x=0):\n            pass\n",
+            reference: ("x", 1),
+            expect: Free,
         }],
     );
 }

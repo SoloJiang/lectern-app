@@ -810,7 +810,7 @@ pub enum Visibility {
 | js ts tsx | `class` | 定义 Class（Construct、Type） | 类表达式：名字只在类里可见，经索引找到 |
 | js ts tsx | `class_declaration` | 定义 Class（Construct、Type）；局部（值和类型） |  |
 | js ts tsx | `continue_statement` | 忽略 | 标签 |
-| js ts tsx | `export_specifier` | 引用 | `export { a as b }`：`a` 是用处，`b` 是导出名 |
+| js ts tsx | `export_specifier` | 引用；不是变量：`alias` | `export { a as b }`：`a` 是用处，`b` 是导出名 |
 | js | `field_definition` | 定义 Field（Call、MemberCall） | 类字段，值可以是函数 |
 | js ts tsx | `for_in_statement` | 局部（值） | 带 `const` / `let` / `var` 时；否则是赋值 |
 | js ts tsx | `formal_parameters` | 局部（值） | 每个参数，含解构和默认值 |
@@ -818,12 +818,12 @@ pub enum Visibility {
 | js ts tsx | `function_expression` | 定义 Function（Call、MemberCall、Construct） | 名字只在函数里可见，经索引找到 |
 | js ts tsx | `generator_function` | 定义 Function（Call、MemberCall） | 同函数表达式 |
 | js ts tsx | `generator_function_declaration` | 定义 Function（Call、MemberCall）；局部（值） |  |
-| js ts tsx | `import_clause` | 忽略 | import：经索引和解析扩展点解析，不是局部定义 |
-| js ts tsx | `import_specifier` | 忽略 | import，同上 |
-| js ts tsx | `namespace_import` | 忽略 | `import * as ns`，同上 |
-| js tsx | `jsx_closing_element` | 引用 | 组件名 |
-| js tsx | `jsx_opening_element` | 引用 | 组件名 |
-| js tsx | `jsx_self_closing_element` | 引用 | 组件名 |
+| js ts tsx | `import_clause` | 忽略；不是变量：其中的名字 | import：经索引和解析扩展点解析，不是局部定义 |
+| js ts tsx | `import_specifier` | 忽略；不是变量：`name`、`alias` | import，同上 |
+| js ts tsx | `namespace_import` | 忽略；不是变量：其中的名字 | `import * as ns`，同上 |
+| js tsx | `jsx_closing_element` | 引用；不是变量：小写的 `name` | 组件名；小写的是内置元素，不是引用 |
+| js tsx | `jsx_opening_element` | 引用；不是变量：小写的 `name` | 组件名；小写的是内置元素，不是引用 |
+| js tsx | `jsx_self_closing_element` | 引用；不是变量：小写的 `name` | 组件名；小写的是内置元素，不是引用 |
 | js ts tsx | `labeled_statement` | 忽略 | 标签 |
 | js ts tsx | `member_expression` | 引用 | `a.b` |
 | js ts tsx | `method_definition` | 定义 Method（Call、MemberCall） | `constructor` 不是定义（`new C` 指向类）；计算出的名字不记 |
@@ -852,7 +852,7 @@ pub enum Visibility {
 | ts tsx | `method_signature` | 定义 Method（Call、MemberCall） |  |
 | ts tsx | `module` | 定义 Module（Type） | `module A`；`declare module 'x'` 的名字是字符串，不记 |
 | ts tsx | `nested_identifier` | 组成部分 | 模块名 `A.B`，见 internal_module |
-| ts tsx | `nested_type_identifier` | 引用 | `ns.T` |
+| ts tsx | `nested_type_identifier` | 引用；不是变量：`name` | `ns.T` |
 | ts tsx | `optional_parameter` | 定义 Field（Call、MemberCall）；局部（值） | 参数；带 `public` / `private` / `protected` / `readonly` / `override` 时也是字段（参数属性） |
 | ts tsx | `property_signature` | 定义 Field（Call、MemberCall） |  |
 | ts tsx | `public_field_definition` | 定义 Field（Call、MemberCall） | 类字段 |
@@ -879,14 +879,15 @@ pub enum Visibility {
 | rust | `let_declaration` | 局部（值） |  |
 | rust | `lifetime_parameter` | 忽略 | 生命周期不进入索引，不导航 |
 | rust | `macro_definition` | 定义 Macro（Call） |  |
+| rust | `macro_invocation` | 引用；不是变量：`macro` | 宏调用 |
 | rust | `macro_rule` | 忽略 | 宏的匹配模式 |
 | rust | `match_arm` | 局部（值） |  |
 | rust | `mod_item` | 定义 Module | 路径段是 `Plain` |
 | rust | `parameter` | 局部（值） |  |
 | rust | `qualified_type` | 引用 | `<T as Trait>` |
 | rust | `range_pattern` | 引用 | 范围模式的端点 |
-| rust | `scoped_identifier` | 引用 | 路径 |
-| rust | `scoped_type_identifier` | 引用 | 路径 |
+| rust | `scoped_identifier` | 引用；不是变量：`name`、`path` | 路径 |
+| rust | `scoped_type_identifier` | 引用；不是变量：`name` | 路径 |
 | rust | `static_item` | 定义 Constant（Call）；局部（值） | 块里的是局部 |
 | rust | `struct_expression` | 引用 | 构造 |
 | rust | `struct_item` | 定义 Struct（Call、Construct、Type）；局部（值和类型） | 元组结构体被调用；块里的是局部 |
@@ -909,32 +910,36 @@ pub enum Visibility {
 | java | `compact_constructor_declaration` | 忽略 | 紧凑构造器：`new R(…)` 指向记录 |
 | java | `constant_declaration` | 定义 Constant | 接口里的常量 |
 | java | `constructor_declaration` | 忽略 | 构造器：`new C(…)` 指向类 |
-| java | `element_value_pair` | 引用 | 注解里的元素名 |
+| java | `element_value_pair` | 引用；不是变量：`key` | 注解里的元素名 |
 | java | `enhanced_for_statement` | 局部（值） |  |
 | java | `enum_constant` | 定义 Constant |  |
 | java | `enum_declaration` | 定义 Enum（Type）；局部（值和类型） | 块里的是局部 |
+| java | `field_access` | 引用；不是变量：`field` | `a.b` |
 | java | `field_declaration` | 定义 Field |  |
 | java | `formal_parameter` | 定义 Field（Call、MemberCall）；局部（值） | 方法、构造器和 lambda 的参数是局部；记录头里的组件是字段，调用语法指向它的访问器 |
 | java | `inferred_parameters` | 局部（值） | `(a, b) -> …` |
 | java | `instanceof_expression` | 局部（值） | 模式变量：可见范围取决于控制流，只给候选 |
-| java | `interface_declaration` | 定义 Interface（Type）；局部（值和类型） | 块里的是局部 |
+| java | `interface_declaration` | 定义 Interface（Construct、Type）；局部（值和类型） | `new I() { … }`（匿名类）也指向接口；块里的是局部 |
 | java | `lambda_expression` | 局部（值） | `x -> …` |
 | java | `local_variable_declaration` | 局部（值） |  |
 | java | `marker_annotation` | 引用 | 注解 |
 | java | `method_declaration` | 定义 Method（Call、MemberCall） |  |
-| java | `method_invocation` | 引用 | 调用 |
+| java | `method_invocation` | 引用；不是变量：`name` | 调用 |
+| java | `method_reference` | 引用；不是变量：第一个以外的名字 | `this::name`、`A::m` |
 | java | `module_declaration` | 忽略 | `module-info.java` |
 | java | `record_declaration` | 定义 Class（Construct、Type）；局部（值和类型） | 块里的是局部 |
 | java | `record_pattern_component` | 局部（值） | 模式变量：只给候选 |
 | java | `resource` | 局部（值） | `try (var r = …)` |
-| java | `scoped_identifier` | 引用 | 限定名 |
+| java | `scoped_identifier` | 引用；不是变量：`name`、`scope` | 限定名 |
+| java | `scoped_type_identifier` | 引用；不是变量：第一个以外的名字 | 限定的类型名 |
 | java | `spread_parameter` | 定义 Field（Call、MemberCall）；局部（值） | 同 formal_parameter |
 | java | `type_parameter` | 局部（类型） | 在声明它的类或方法里可见 |
 | java | `type_pattern` | 局部（值） | 模式变量：只给候选 |
 | java | `variable_declarator` | 组成部分 | 见所在的声明 |
 | python | `aliased_import` | 忽略 | import：经索引解析 |
 | python | `as_pattern` | 局部（值） | `with … as x`、`except … as x` |
-| python | `assignment` | 定义 Constant（Call、MemberCall）、Field（Call、MemberCall）；局部（值） | 模块顶层是常量，类体里是字段，解包（`A, B = …`、`first, *rest = …`）时两层以内的每个名字都是；都是局部绑定 |
+| python | `assignment` | 定义 Constant（Call、MemberCall）、Field（Call、MemberCall）；局部（值） | 不在函数或类作用域里的是常量（含 `if`、`try`、`with`、`for` 里的和连等 `A = B = None` 的每个名字），类体里直接写的是字段，解包（`A, B = …`、`first, *rest = …`）时两层以内的每个名字都是；都是局部绑定 |
+| python | `attribute` | 定义 Field（Call、MemberCall）；不是变量：`attribute` | `a.b`；方法（及其中嵌套的函数）里给方法第一个参数的属性赋值（`self.name = …`）是类的字段，其余是成员引用 |
 | python | `augmented_assignment` | 局部（值） |  |
 | python | `binary_operator` | 忽略 | 表达式 |
 | python | `boolean_operator` | 忽略 | 表达式 |
@@ -950,7 +955,8 @@ pub enum Visibility {
 | python | `global_statement` | 引用 | 作用域指令：名字是模块的，越过所有外层函数（「绑定规则」） |
 | python | `import_from_statement` | 忽略 | import：经索引解析 |
 | python | `import_statement` | 忽略 | import：经索引解析 |
-| python | `keyword_argument` | 引用 | 调用的关键字参数名 |
+| python | `keyword_argument` | 引用；不是变量：`name` | 调用的关键字参数名 |
+| python | `keyword_pattern` | 组成部分；不是变量：第一个名字 | `case Point(x=…)`：关键字是属性名，值是模式 |
 | python | `lambda_parameters` | 局部（值） |  |
 | python | `list_pattern` | 组成部分 | 解包，见 assignment |
 | python | `list_splat_pattern` | 组成部分 | 解包的 `*rest`，见 assignment |
@@ -971,13 +977,13 @@ pub enum Visibility {
 | go | `field_declaration` | 定义 Field（MemberCall） | 函数类型的字段可以被调用 |
 | go | `function_declaration` | 定义 Function（Call、MemberCall） |  |
 | go | `import_spec` | 忽略 | import：经路径解析 |
-| go | `keyed_element` | 引用 | 复合字面量的键 |
+| go | `keyed_element` | 引用；不是变量：`key`（同名的局部只是候选） | 复合字面量的键：结构体字面量里是字段名，map 里是表达式；同名的局部只是候选，引用名总是记下 |
 | go | `labeled_statement` | 忽略 | 标签 |
 | go | `map_type` | 引用 | 类型 |
 | go | `method_declaration` | 定义 Method（MemberCall） |  |
 | go | `method_elem` | 定义 Method（MemberCall） | 接口的方法 |
 | go | `parameter_declaration` | 局部（值） |  |
-| go | `qualified_type` | 引用 | `pkg.T` |
+| go | `qualified_type` | 引用；不是变量：`name` | `pkg.T` |
 | go | `range_clause` | 局部（值） | 只有 `:=`；`for i = range xs` 是赋值 |
 | go | `receive_statement` | 局部（值） | 只有 `:=`；`case v = <-ch` 是赋值 |
 | go | `short_var_declaration` | 局部（值） | 只有同一作用域里新的名字（函数体还要除去参数和结果）；已声明的名字是对它的使用 |
@@ -1526,11 +1532,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   | JS | `Function`、`Method`、`Constant`、`Field`、`Variable` | 同 `Call` | `Function`、`Class`、`Constant`、`Variable` | `Class` | 全部 |
   | TS / TSX | 同 JS | 同 `Call` | 同 JS | `Class`、`Interface`、`Enum`、`Type`、`Module` | 全部 |
   | Rust | `Function`、`Method`、`Struct`、`Macro`、`Constant` | `Method` | `Struct`、`Type`、`Constant` | `Struct`、`Enum`、`Trait`、`Type`、`Constant` | `Method`、`Field` |
-  | Java | `Method`、`Field` | `Method`、`Field` | `Class` | `Class`、`Interface`、`Enum` | 全部 |
+  | Java | `Method`、`Field` | `Method`、`Field` | `Class`、`Interface` | `Class`、`Interface`、`Enum` | 全部 |
   | Python | `Function`、`Method`、`Class`、`Constant`、`Field` | 同 `Call` | 无 | 无 | 全部 |
   | Go | `Function`、`Type`、`Variable` | `Function`、`Method`、`Type`、`Field`、`Variable` | 无 | `Type` | 全部 |
 
-  原因按行：JS / TS 里任何值都可以放函数或类（`const handler = () => …`、类字段 `onClick = () => …`）；Rust 的元组变体被调用（`Io(e)`），记录变体被构造和匹配（`Message::Move { x, y }`，构造是 `Construct`，匹配是 `Type`），`const` 和 `static` 可以放函数指针；Java 记录组件的访问器以调用语法出现；Python 的类、模块常量和类属性都可以被调用；Go 的类型转换是调用语法，函数类型的变量和字段可以被调用。语言包没有定义形式，按通用规则：`Call` / `MemberCall` 接受 `Function`、`Method`、`Macro`、`Class`、`Struct`，`Construct` 接受 `Class`、`Struct`，`Type` 接受 `Class`、`Interface`、`Struct`、`Enum`、`Trait`、`Type`、`Module`，其余全部。`site_kind_table` 逐行检查上表。
+  原因按行：JS / TS 里任何值都可以放函数或类（`const handler = () => …`、类字段 `onClick = () => …`）；Rust 的元组变体被调用（`Io(e)`），记录变体被构造和匹配（`Message::Move { x, y }`，构造是 `Construct`，匹配是 `Type`），`const` 和 `static` 可以放函数指针；Java 记录组件的访问器以调用语法出现，`new Runnable() { … }` 构造接口的匿名类；Python 的类、模块常量和类属性都可以被调用；Go 的类型转换是调用语法，函数类型的变量和字段可以被调用。语言包没有定义形式，按通用规则：`Call` / `MemberCall` 接受 `Function`、`Method`、`Macro`、`Class`、`Struct`，`Construct` 接受 `Class`、`Struct`，`Type` 接受 `Class`、`Interface`、`Struct`、`Enum`、`Trait`、`Type`、`Module`，其余全部。`site_kind_table` 逐行检查上表。表从定义形式推出，只看声明，所以另有一组用法样例（`tests/site.rs` 的 `USES`）：每种语言每个被收窄的引用语法，对它能指向的每种定义各有一个常见写法，`site_kind_masks_accept_uses` 检查这个位置的语法确是这一种、表接受这种定义。
 
   这张表是 `site::accepted_kinds`。引用位置的 `RefSyntax` 由每种语言的一张位置表判断（`site.rs`）：每行是（标识符的节点种类、父节点种类与它所在的字段、可选的外层节点种类与字段或父节点必须有的字段）→ `RefSyntax`，第一条匹配的行生效；没有匹配的类型标识符为 `Type`，其余为 `Plain`。例如 Rust 的 `call_expression.function` 里的 `identifier` 是 `Call`，`call_expression.function` 里的 `field_expression.field` 是 `MemberCall`，`struct_expression.name` 里的类型名和路径的最后一段（`Message::Move { .. }`）是 `Construct`；Java 的 `method_invocation.name` 在有 `object` 字段时是 `MemberCall`。语言包没有位置表，都是 `Plain`。
 
