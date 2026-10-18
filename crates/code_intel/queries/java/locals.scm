@@ -2,57 +2,152 @@
 ;
 ; Written by Lectern: tree-sitter-java 0.23.5 ships no locals query. Same
 ; capture names as the other locals queries (tree-sitter-highlight's
-; convention). Parameters, local variables, catch and for-each variables,
-; lambda parameters, local classes and records.
+; convention), with the binding rules of docs/design/code_intel.md
+; 「绑定规则」 as properties that tree-sitter-tags ignores:
+; - `local.kind "function"`: methods, constructors and lambdas;
+; - a switch block is one scope (a declaration in one group is in scope in
+;   the later groups, JLS 6.3); a `case … ->` rule is its own;
+; - `local.visible`: "scope" binds the whole scope (parameters); "end:KIND"
+;   binds from the end of the declaring KIND node (a local variable is in
+;   scope after its declarator, so an earlier use names a field);
+;   "body:KIND" binds from the start of KIND's body (for-each variables);
+;   without it, from the name on (local classes);
+; - `local.certain "false"`: pattern variables (`instanceof`, record and
+;   type patterns) have flow-dependent scopes: they offer a same-file
+;   candidate, never a direct jump;
+; - `local.namespace`: "type" or "both" for names that type positions use
+;   (default: values); "owner:KIND" in `local.visible` binds only within the
+;   parent of the nearest KIND (a type parameter in its class or method);
+; - `local.scope-inherits false` on function scopes is for tree-sitter-tags
+;   only: it filters references against the enclosing function's own locals.
+; Fields and members, record components included, are not locals: they are
+; definitions in the index. Every name-introducing form is in
+; docs/design/code_intel.md「定义形式」.
 
 ; Scopes
 ;-------
 
 [
-  (method_declaration)
-  (constructor_declaration)
-  (lambda_expression)
   (block)
+  (for_statement)
   (enhanced_for_statement)
   (catch_clause)
+  (try_with_resources_statement)
+  (switch_block)
+  (switch_rule)
 ] @local.scope
+
+(
+  [
+    (method_declaration)
+    (constructor_declaration)
+    (lambda_expression)
+  ] @local.scope
+  (#set! local.kind "function")
+  (#set! local.scope-inherits false)
+)
 
 ; Definitions
 ;------------
 
-(formal_parameter
-  name: (identifier) @local.definition)
-
-(spread_parameter
-  (variable_declarator
-    name: (identifier) @local.definition))
+; Parameters of methods, constructors and lambdas. A record header's
+; components are not locals: they are the record's fields (tags.scm).
+(
+  [
+    (method_declaration
+      parameters: (formal_parameters
+        [
+          (formal_parameter
+            name: (identifier) @local.definition)
+          (spread_parameter
+            (variable_declarator
+              name: (identifier) @local.definition))
+        ]))
+    (constructor_declaration
+      parameters: (formal_parameters
+        [
+          (formal_parameter
+            name: (identifier) @local.definition)
+          (spread_parameter
+            (variable_declarator
+              name: (identifier) @local.definition))
+        ]))
+    (lambda_expression
+      parameters: (formal_parameters
+        [
+          (formal_parameter
+            name: (identifier) @local.definition)
+          (spread_parameter
+            (variable_declarator
+              name: (identifier) @local.definition))
+        ]))
+  ]
+  (#set! local.visible "scope"))
 
 (catch_formal_parameter
-  name: (identifier) @local.definition)
+  name: (identifier) @local.definition
+  (#set! local.visible "scope"))
+
+(lambda_expression
+  parameters: (identifier) @local.definition
+  (#set! local.visible "scope"))
+
+(inferred_parameters
+  (identifier) @local.definition
+  (#set! local.visible "scope"))
 
 (local_variable_declaration
   declarator: (variable_declarator
-    name: (identifier) @local.definition))
+    name: (identifier) @local.definition)
+  (#set! local.visible "end:variable_declarator"))
 
 (enhanced_for_statement
-  name: (identifier) @local.definition)
+  name: (identifier) @local.definition
+  (#set! local.visible "body:enhanced_for_statement"))
 
-(lambda_expression
-  parameters: (identifier) @local.definition)
+(resource
+  name: (identifier) @local.definition
+  (#set! local.visible "end:resource"))
 
-(inferred_parameters
-  (identifier) @local.definition)
-
-; Local classes and records, declared in a block.
+; Local classes, records, enums and interfaces, from their name on, as
+; values (`Local.of()`) and types (`new Local()`).
 (block
   [
     (class_declaration
       name: (identifier) @local.definition)
     (record_declaration
       name: (identifier) @local.definition)
-  ])
+    (enum_declaration
+      name: (identifier) @local.definition)
+    (interface_declaration
+      name: (identifier) @local.definition)
+  ]
+  (#set! local.namespace "both"))
+
+; Type parameters, in the class or method that declares them (hidden from
+; tree-sitter-tags, which compares names only).
+(type_parameter
+  (type_identifier) @definition.lectern.local
+  (#set! local.namespace "type")
+  (#set! local.visible "owner:type_parameters"))
+
+(instanceof_expression
+  name: (identifier) @local.definition
+  (#set! local.certain "false"))
+
+(type_pattern
+  (identifier) @local.definition
+  (#set! local.certain "false"))
+
+(record_pattern_component
+  (identifier) @local.definition
+  (#set! local.certain "false"))
 
 ; References
 ;------------
 
+; Only these captures resolve to locals (`ParsedFile::site_at`): values
+; and, for local types, type names.
 (identifier) @local.reference
+
+(type_identifier) @local.reference

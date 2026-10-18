@@ -13,9 +13,9 @@ use crate::util::{fnv64, log};
 use crate::{DefKind, LangName};
 
 /// Bumped when the extractor's own rules change (visibility, parameter
-/// counts, scopes, markers): every query version changes with it, so old
-/// results stop matching.
-pub const EXTRACTOR_VERSION: u32 = 1;
+/// counts, scopes, markers, the core languages' walkers): every query
+/// version changes with it, so old results stop matching.
+pub const EXTRACTOR_VERSION: u32 = 6;
 
 /// The tree-sitter runtime and tags crate versions, pinned in the root
 /// `Cargo.toml` (ADR 0030; `lang_grammar_versions_match_lock`). Part of
@@ -196,13 +196,17 @@ struct LangInner {
     grammar_version: u64,
     query_version: u64,
     compat_group: Option<Arc<str>>,
-    language: tree_sitter::Language,
     tags_query: Arc<str>,
     locals_query: Arc<str>,
-    lease: GrammarLease,
     /// Compiled on first use, on the calling (background) thread; `None`
     /// when compiling failed, which disables the language for this run.
     compiled: OnceLock<Option<Arc<Compiled>>>,
+    #[cfg(test)]
+    _compiled_dropped: crate::testing::DropTrace,
+    language: tree_sitter::Language,
+    /// Last: fields drop in declaration order, so the grammar's library
+    /// outlives the compiled queries and the language built from it.
+    lease: GrammarLease,
 }
 
 impl Lang {
@@ -218,6 +222,8 @@ impl Lang {
             locals_query: Arc::from(spec.locals_query),
             lease: GrammarLease::none(),
             compiled: OnceLock::new(),
+            #[cfg(test)]
+            _compiled_dropped: crate::testing::DropTrace("compiled"),
         }))
     }
 
@@ -236,6 +242,8 @@ impl Lang {
             locals_query: locals,
             lease: grammar.lease,
             compiled: OnceLock::new(),
+            #[cfg(test)]
+            _compiled_dropped: crate::testing::DropTrace("compiled"),
         }))
     }
 
@@ -331,17 +339,41 @@ pub(crate) enum Marker {
     Module,
     /// Rust: a visibility modifier at the start of an item.
     Pub,
-    /// Rust: an inherent `impl` block and the type it belongs to.
+    /// TS: a `declare global { … }` block; its declarations are global.
+    Global,
+    /// Rust: an `impl` block and the name of the type it implements.
     Impl,
-    /// Rust: a trait `impl` block and the type it belongs to.
+    /// Rust: the `for` of a trait `impl` block.
     ImplTrait,
     /// Java: a `private` modifier at the start of a declaration.
     Private,
     /// Go: a method declaration and its receiver type.
     Owner,
+    /// Python: a function definition and its first parameter (a method's
+    /// `self`).
+    Receiver,
+    /// Python: an assignment to an attribute (`obj.name = …`) and the
+    /// attribute's name; a field of the class when `obj` is the receiver
+    /// of the method around it, a member reference otherwise.
+    Attribute,
 }
 
 impl Marker {
+    /// Whether the marker's `@name` is a name the file uses (an exported
+    /// name, an implemented or receiver type, an attribute), not a keyword
+    /// (`export`, `for`, `pub`, `global`). Such a name stays a reference
+    /// name, and a reference position, unless it became the definition at
+    /// that position (`rules::finish`, `ParsedFile`): the marker pattern
+    /// takes the name node from the reference patterns after it. A
+    /// `Receiver` is a parameter, the definition at its position, which
+    /// those patterns did not count either.
+    pub(crate) fn consumes_name(self) -> bool {
+        matches!(
+            self,
+            Marker::ExportName | Marker::Impl | Marker::Owner | Marker::Attribute
+        )
+    }
+
     fn from_kind(kind: &str) -> Option<Marker> {
         Some(match kind {
             "export" => Marker::Export,
@@ -352,6 +384,9 @@ impl Marker {
             "impl-trait" => Marker::ImplTrait,
             "private" => Marker::Private,
             "owner" => Marker::Owner,
+            "global" => Marker::Global,
+            "receiver" => Marker::Receiver,
+            "attribute" => Marker::Attribute,
             _ => return None,
         })
     }
@@ -411,6 +446,9 @@ impl Compiled {
                 return Err(format!("syntax type {id} is not {kind:?}"));
             }
             let reference = match kind.strip_prefix("lectern.") {
+                // `@definition.lectern.local` is only in the locals query,
+                // so it never becomes a tag.
+                Some("local") => TagClass::Ref,
                 Some(marker) => TagClass::Marker(
                     Marker::from_kind(marker)
                         .ok_or_else(|| format!("unknown marker reference.{kind}"))?,
@@ -428,7 +466,10 @@ impl Compiled {
                 "doc" => Capture::Doc,
                 "ignore" => Capture::Ignore,
                 "local.scope" => Capture::LocalScope,
-                "local.definition" => Capture::LocalDefinition,
+                // A local definition tree-sitter-tags does not see: in the
+                // locals query it acts only on `@local.scope` and
+                // `@local.definition`, so it never filters this name.
+                "local.definition" | "definition.lectern.local" => Capture::LocalDefinition,
                 "local.reference" => Capture::LocalReference,
                 _ => {
                     let (kind, is_definition) = match name.strip_prefix("definition.") {

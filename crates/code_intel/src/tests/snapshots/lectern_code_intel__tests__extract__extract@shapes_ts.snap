@@ -11,6 +11,7 @@ defs:
   6:11-6 field name in Shape [public]
   9:22-15 class Base [public]
   10:11-10 method area in Base [public] (0)
+  11:21-11 field name in Base [public]
   12:2-14 method describe in Base [public] (2)
   17:13-29 class Circle [public]
   18:10-18 field radius in Circle [public]
@@ -29,6 +30,8 @@ defs:
   58:20-58 field first in Pair [file]
   58:30-58 field second in Pair [file]
   60:5-63 enum Unit [file]
+  61:2-61 constant Metre in Unit [file]
+  62:2-62 constant Inch in Unit [file]
   65:13-65 constant DEFAULT_UNIT [public]
   67:16-69 function pair [public] (2)
-refs: A Array B Base Circle Inch JSON Map Math Metre Options PI Pair Promise Shape Unit area constructor fallback helper isArray map name parse radius readText reduce sum toFixed values
+refs: A Array B Base Circle JSON Map Math Metre Options PI Pair Promise Shape Unit area by constructor fallback helper isArray map name parse radius readText reduce sum toFixed values

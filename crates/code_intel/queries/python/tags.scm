@@ -5,18 +5,130 @@
 ; Lectern's changes:
 ; - Functions directly in a class body (decorated or not) are methods.
 ; - @doc captures the parameter list (Lectern counts parameters from it).
-; - Adds superclasses as class references.
+; - Adds superclasses as class references, class attributes (including
+;   `Enum` members) as fields, and `type` aliases
+;   (docs/design/code_intel.md「定义形式」).
+; - Module-level constants in any statement and chain, and instance
+;   attributes (`self.name = …` in a method) through the
+;   `reference.lectern.receiver` and `reference.lectern.attribute` markers.
 ; - Identifier calls carry (#is-not? local).
 
 ; ---- definitions -------------------------------------------------------
 
-(module
-  (expression_statement
-    (assignment
-      left: (identifier) @name) @definition.constant))
+; Class attributes, including `Enum` members (`Color.RED`), also unpacked
+; (`left, right = 1, 2`): first, so that the general assignment pattern
+; below does not take them.
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment
+      left: [
+        (identifier) @name
+        (pattern_list
+          [
+            (identifier) @name
+            (list_splat_pattern (identifier) @name)
+            (tuple_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+            (list_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+          ])
+        (tuple_pattern
+          [
+            (identifier) @name
+            (list_splat_pattern (identifier) @name)
+            (tuple_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+            (list_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+          ])
+        (list_pattern
+          [
+            (identifier) @name
+            (list_splat_pattern (identifier) @name)
+            (tuple_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+            (list_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+          ])
+      ]) @definition.field)))
 
 (class_definition
   name: (identifier) @name) @definition.class
+
+; Module-level names, also unpacked (`A, B = load()`, `first, *rest = xs`,
+; `(p, (q, r)) = …`): every name the target binds, two levels deep, in any
+; statement (`if`, `try`, `with`, `for` bodies) and in a chain
+; (`A = B = None`, where the inner assignment is the outer one's right
+; side). Only module level counts: `rules::finish` drops the ones inside a
+; function or class scope.
+      (assignment
+        left: [
+          (identifier) @name
+          (pattern_list
+            [
+              (identifier) @name
+              (list_splat_pattern (identifier) @name)
+              (tuple_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+              (list_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+            ])
+          (tuple_pattern
+            [
+              (identifier) @name
+              (list_splat_pattern (identifier) @name)
+              (tuple_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+              (list_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+            ])
+          (list_pattern
+            [
+              (identifier) @name
+              (list_splat_pattern (identifier) @name)
+              (tuple_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+              (list_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+            ])
+        ]) @definition.constant
 
 (class_definition
   body: (block
@@ -34,6 +146,52 @@
 (function_definition
   name: (identifier) @name
   parameters: (parameters) @doc) @definition.function
+
+; `type Alias = …` and `type Alias[T] = …` (Python 3.12).
+(type_alias_statement
+  left: (type
+    [
+      (identifier) @name
+      (generic_type
+        (identifier) @name)
+    ])) @definition.type
+
+; ---- markers -----------------------------------------------------------
+
+; A function's first parameter: a method's `self`, also annotated or
+; with a default (`self: Self`).
+(function_definition
+  parameters: (parameters
+    .
+    [
+      (identifier) @name
+      (typed_parameter
+        .
+        (identifier) @name)
+      (default_parameter
+        name: (identifier) @name)
+      (typed_default_parameter
+        name: (identifier) @name)
+    ])) @reference.lectern.receiver
+
+; An assignment to an attribute (`self.name = name`, also in a chain and
+; unpacked: `self.a, self.b = 1, 2`): a field of the class when the object
+; is the receiver of the method around it (`rules::finish`), a member
+; reference otherwise; the marker's node is the attribute.
+(assignment
+  left: [
+    (attribute
+      object: (identifier)
+      attribute: (identifier) @name) @reference.lectern.attribute
+    (pattern_list
+      (attribute
+        object: (identifier)
+        attribute: (identifier) @name) @reference.lectern.attribute)
+    (tuple_pattern
+      (attribute
+        object: (identifier)
+        attribute: (identifier) @name) @reference.lectern.attribute)
+  ])
 
 ; ---- references --------------------------------------------------------
 

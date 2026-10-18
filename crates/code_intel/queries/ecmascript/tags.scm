@@ -9,7 +9,7 @@
 ; - @doc captures the parameter list (Lectern counts parameters from it);
 ;   comment captures and their #strip! / #select-adjacent! are removed.
 ; - Adds class expressions bound to a name, top-level constants and
-;   variables, private methods.
+;   variables (also destructured), private methods.
 ; - Identifier references carry (#is-not? local).
 ; - `new` takes the identifier or the member name, not the whole expression.
 ; - `reference.lectern.*` captures are markers read by the extractor, never
@@ -101,38 +101,221 @@
       (call_expression)
     ])) @definition.constant
 
+; Top-level `const`, `let` and `var`, also destructured
+; (`const { a, b: renamed, ...rest } = obj`, `let [x, , y = 1] = arr`):
+; every name the pattern binds, two levels deep. `const` comes first, so a
+; `const` declarator is never also a variable: the second pattern's
+; wildcard is a `lexical_declaration` or a `variable_declaration`.
 (program
   [
     (lexical_declaration
       kind: "const"
       (variable_declarator
-        name: (identifier) @name) @definition.constant)
+        name: [
+          (identifier) @name
+          (object_pattern
+              [
+                (shorthand_property_identifier_pattern) @name
+                (pair_pattern
+                  value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                (object_assignment_pattern
+                  left: (shorthand_property_identifier_pattern) @name)
+                (rest_pattern (identifier) @name)
+                (pair_pattern value: (object_pattern
+                      [
+                        (shorthand_property_identifier_pattern) @name
+                        (pair_pattern
+                          value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                        (object_assignment_pattern
+                          left: (shorthand_property_identifier_pattern) @name)
+                        (rest_pattern (identifier) @name)
+                      ]))
+                (pair_pattern value: (array_pattern
+                      [
+                        (identifier) @name
+                        (assignment_pattern left: (identifier) @name)
+                        (rest_pattern (identifier) @name)
+                      ]))
+              ])
+          (array_pattern
+              [
+                (identifier) @name
+                (assignment_pattern left: (identifier) @name)
+                (rest_pattern (identifier) @name)
+                (object_pattern
+                    [
+                      (shorthand_property_identifier_pattern) @name
+                      (pair_pattern
+                        value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                      (object_assignment_pattern
+                        left: (shorthand_property_identifier_pattern) @name)
+                      (rest_pattern (identifier) @name)
+                    ])
+                (array_pattern
+                    [
+                      (identifier) @name
+                      (assignment_pattern left: (identifier) @name)
+                      (rest_pattern (identifier) @name)
+                    ])
+              ])
+        ]) @definition.constant)
     (export_statement
       declaration: (lexical_declaration
         kind: "const"
         (variable_declarator
-          name: (identifier) @name) @definition.constant))
+          name: [
+            (identifier) @name
+            (object_pattern
+                [
+                  (shorthand_property_identifier_pattern) @name
+                  (pair_pattern
+                    value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                  (object_assignment_pattern
+                    left: (shorthand_property_identifier_pattern) @name)
+                  (rest_pattern (identifier) @name)
+                  (pair_pattern value: (object_pattern
+                        [
+                          (shorthand_property_identifier_pattern) @name
+                          (pair_pattern
+                            value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                          (object_assignment_pattern
+                            left: (shorthand_property_identifier_pattern) @name)
+                          (rest_pattern (identifier) @name)
+                        ]))
+                  (pair_pattern value: (array_pattern
+                        [
+                          (identifier) @name
+                          (assignment_pattern left: (identifier) @name)
+                          (rest_pattern (identifier) @name)
+                        ]))
+                ])
+            (array_pattern
+                [
+                  (identifier) @name
+                  (assignment_pattern left: (identifier) @name)
+                  (rest_pattern (identifier) @name)
+                  (object_pattern
+                      [
+                        (shorthand_property_identifier_pattern) @name
+                        (pair_pattern
+                          value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                        (object_assignment_pattern
+                          left: (shorthand_property_identifier_pattern) @name)
+                        (rest_pattern (identifier) @name)
+                      ])
+                  (array_pattern
+                      [
+                        (identifier) @name
+                        (assignment_pattern left: (identifier) @name)
+                        (rest_pattern (identifier) @name)
+                      ])
+                ])
+          ]) @definition.constant))
   ])
 
 (program
   [
-    (lexical_declaration
-      kind: "let"
+    (_
       (variable_declarator
-        name: (identifier) @name) @definition.variable)
-    (variable_declaration
-      (variable_declarator
-        name: (identifier) @name) @definition.variable)
+        name: [
+          (identifier) @name
+          (object_pattern
+              [
+                (shorthand_property_identifier_pattern) @name
+                (pair_pattern
+                  value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                (object_assignment_pattern
+                  left: (shorthand_property_identifier_pattern) @name)
+                (rest_pattern (identifier) @name)
+                (pair_pattern value: (object_pattern
+                      [
+                        (shorthand_property_identifier_pattern) @name
+                        (pair_pattern
+                          value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                        (object_assignment_pattern
+                          left: (shorthand_property_identifier_pattern) @name)
+                        (rest_pattern (identifier) @name)
+                      ]))
+                (pair_pattern value: (array_pattern
+                      [
+                        (identifier) @name
+                        (assignment_pattern left: (identifier) @name)
+                        (rest_pattern (identifier) @name)
+                      ]))
+              ])
+          (array_pattern
+              [
+                (identifier) @name
+                (assignment_pattern left: (identifier) @name)
+                (rest_pattern (identifier) @name)
+                (object_pattern
+                    [
+                      (shorthand_property_identifier_pattern) @name
+                      (pair_pattern
+                        value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                      (object_assignment_pattern
+                        left: (shorthand_property_identifier_pattern) @name)
+                      (rest_pattern (identifier) @name)
+                    ])
+                (array_pattern
+                    [
+                      (identifier) @name
+                      (assignment_pattern left: (identifier) @name)
+                      (rest_pattern (identifier) @name)
+                    ])
+              ])
+        ]) @definition.variable)
     (export_statement
-      declaration: [
-        (lexical_declaration
-          kind: "let"
-          (variable_declarator
-            name: (identifier) @name) @definition.variable)
-        (variable_declaration
-          (variable_declarator
-            name: (identifier) @name) @definition.variable)
-      ])
+      declaration: (_
+        (variable_declarator
+          name: [
+            (identifier) @name
+            (object_pattern
+                [
+                  (shorthand_property_identifier_pattern) @name
+                  (pair_pattern
+                    value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                  (object_assignment_pattern
+                    left: (shorthand_property_identifier_pattern) @name)
+                  (rest_pattern (identifier) @name)
+                  (pair_pattern value: (object_pattern
+                        [
+                          (shorthand_property_identifier_pattern) @name
+                          (pair_pattern
+                            value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                          (object_assignment_pattern
+                            left: (shorthand_property_identifier_pattern) @name)
+                          (rest_pattern (identifier) @name)
+                        ]))
+                  (pair_pattern value: (array_pattern
+                        [
+                          (identifier) @name
+                          (assignment_pattern left: (identifier) @name)
+                          (rest_pattern (identifier) @name)
+                        ]))
+                ])
+            (array_pattern
+                [
+                  (identifier) @name
+                  (assignment_pattern left: (identifier) @name)
+                  (rest_pattern (identifier) @name)
+                  (object_pattern
+                      [
+                        (shorthand_property_identifier_pattern) @name
+                        (pair_pattern
+                          value: [(identifier) @name (assignment_pattern left: (identifier) @name)])
+                        (object_assignment_pattern
+                          left: (shorthand_property_identifier_pattern) @name)
+                        (rest_pattern (identifier) @name)
+                      ])
+                  (array_pattern
+                      [
+                        (identifier) @name
+                        (assignment_pattern left: (identifier) @name)
+                        (rest_pattern (identifier) @name)
+                      ])
+                ])
+          ]) @definition.variable))
   ])
 
 ; ---- references --------------------------------------------------------
@@ -161,14 +344,23 @@
 
 ; ---- markers -----------------------------------------------------------
 
-(export_statement
-  "export" @name) @reference.lectern.export
+; Program-level only: an `export` inside a TS namespace or module body
+; exports a member of it, and makes neither the file an ES module nor a
+; top-level name exported.
+(program
+  (export_statement
+    "export" @name) @reference.lectern.export)
 
-(export_specifier
-  name: (identifier) @name) @reference.lectern.export-name
+(program
+  (export_statement
+    (export_clause
+      (export_specifier
+        name: (identifier) @name) @reference.lectern.export-name)))
 
-(export_statement
-  value: (identifier) @name) @reference.lectern.export-name
+(program
+  (export_statement
+    value: (identifier) @name) @reference.lectern.export-name)
 
-(import_statement
-  "import" @name) @reference.lectern.module
+(program
+  (import_statement
+    "import" @name) @reference.lectern.module)

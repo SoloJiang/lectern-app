@@ -111,6 +111,109 @@ fn deadline_pause_probe_cancels() {
 }
 
 #[test]
+fn deadline_one_mib_returns_soon_after_the_deadline() {
+    // A 1 MiB file with a 100 ms deadline returns soon after it on both
+    // extraction paths and in `ParsedFile`: no phase after the parse (the
+    // binding model, the rules) is long or runs unchecked. Unchecked work
+    // used to take seconds here; the margin is wide enough for a debug build
+    // on a loaded CI runner (179 ms seen with a 150 ms limit). Release-build
+    // timings are in the design doc's 「实际验证」.
+    let executor = Executor::manual();
+    let (watchdog, _) = watchdog(&executor, Arc::new(SystemClock));
+    let table = LanguageTable::core();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let limit = Duration::from_millis(600);
+    for lang in ["js", "python", "ts"] {
+        let l = table.get(lang).unwrap();
+        assert!(l.prepare());
+        let source = crate::testing::corpus(lang, 1 << 20);
+        let started = Instant::now();
+        let deadline = Deadline::at(&watchdog, started + Duration::from_millis(100), 2 << 20);
+        let walked = extract(l, &source, &deadline, &cancel);
+        let walked_took = started.elapsed();
+        let started = Instant::now();
+        let deadline = Deadline::at(&watchdog, started + Duration::from_millis(100), 2 << 20);
+        let tagged = crate::extract::extract_tags(l, &source, &deadline, &cancel);
+        let tagged_took = started.elapsed();
+        let started = Instant::now();
+        let parsed = crate::site::ParsedFile::parse(
+            l,
+            Arc::from(source.as_slice()),
+            &SystemClock,
+            started + Duration::from_millis(100),
+            &AtomicBool::new(false),
+        );
+        let parsed_took = started.elapsed();
+        for (path, took, done) in [
+            ("walk", walked_took, walked.status == ExtractStatus::Done),
+            ("tags", tagged_took, tagged.status == ExtractStatus::Done),
+            ("ParsedFile", parsed_took, parsed.is_ok()),
+        ] {
+            assert!(
+                took < limit || (done && took < Duration::from_millis(100)),
+                "{lang} {path}: {took:?}"
+            );
+        }
+    }
+    watchdog.stop();
+}
+
+#[test]
+fn deadline_checked_at_the_start() {
+    // A deadline already past or a pause already requested stops a small
+    // file at once, on both extraction paths and in `ParsedFile`, even when
+    // the watchdog's thread never gets to check (its loop never runs here).
+    let clock = ManualClock::new();
+    let watchdog = crate::Watchdog::new(Arc::new(clock.clone()), Box::new(|_| {}));
+    let table = LanguageTable::core();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let source = b"function a() { return 1; }\n";
+    let expired = Deadline::at(&watchdog, clock.now(), 1 << 20);
+    let paused =
+        Deadline::at(&watchdog, clock.now() + MINUTE, 1 << 20).with_pause(Arc::new(|| true));
+    let open = Deadline::at(&watchdog, clock.now() + MINUTE, 1 << 20);
+    for lang in ["js", "python", "go"] {
+        let l = table.get(lang).unwrap();
+        assert!(l.prepare());
+        assert_eq!(
+            extract(l, source, &open, &cancel).status,
+            ExtractStatus::Done,
+            "{lang}"
+        );
+        assert_eq!(
+            extract(l, source, &expired, &cancel).status,
+            ExtractStatus::TimedOut,
+            "{lang}"
+        );
+        assert_eq!(
+            extract(l, source, &paused, &cancel).status,
+            ExtractStatus::Cancelled,
+            "{lang}"
+        );
+        for (deadline, status) in [
+            (&expired, ExtractStatus::TimedOut),
+            (&paused, ExtractStatus::Cancelled),
+        ] {
+            let tagged = crate::extract::extract_tags(l, source, deadline, &cancel);
+            assert_eq!(tagged.status, status, "{lang} tags path");
+        }
+        let parsed = crate::site::ParsedFile::parse(
+            l,
+            Arc::from(&source[..]),
+            &clock,
+            clock.now(),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(
+            parsed.err(),
+            Some(crate::site::ParseError::TimedOut),
+            "{lang}"
+        );
+    }
+    assert_eq!(watchdog.in_flight(), 0);
+}
+
+#[test]
 fn deadline_watchdog_trips_at_the_deadline() {
     let executor = Executor::manual();
     let clock = ManualClock::new();
@@ -217,4 +320,130 @@ fn deadline_stop_before_start_starts_no_thread() {
     let registration = watchdog.register(Instant::now() + Duration::from_secs(1), None, None);
     assert_eq!(registration.slot().tripped(), Some(Trip::Stopped));
     assert!(!task.started());
+}
+
+#[test]
+fn deadline_walk_checks_stop_while_walking() {
+    // The walk asks its stop predicate every so many nodes, not only at the
+    // end, and gives up as soon as it says so.
+    let table = LanguageTable::core();
+    let js = table.get("js").unwrap();
+    let source = crate::testing::corpus("js", 64 << 10);
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(js.language()).unwrap();
+    let tree = parser.parse(&source, None).unwrap();
+    let calls = std::cell::Cell::new(0u32);
+    let never = || {
+        calls.set(calls.get() + 1);
+        false
+    };
+    assert!(crate::walk::walk_tree(js.dialect(), js.language(), &tree, &source, &never).is_some());
+    let checks = calls.get();
+    assert!(checks > 2, "{checks} checks for 64 KiB");
+    calls.set(0);
+    let second = || {
+        calls.set(calls.get() + 1);
+        calls.get() >= 2
+    };
+    assert!(crate::walk::walk_tree(js.dialect(), js.language(), &tree, &source, &second).is_none());
+    assert_eq!(calls.get(), 2, "stopped at the second check");
+}
+
+/// A clock that counts its readings and, from reading `expire_at` on, is
+/// past every deadline.
+struct CountingClock {
+    start: Instant,
+    reads: std::sync::atomic::AtomicU32,
+    expire_at: u32,
+}
+
+impl Clock for CountingClock {
+    fn now(&self) -> Instant {
+        let n = self.reads.fetch_add(1, Ordering::SeqCst) + 1;
+        if n >= self.expire_at {
+            self.start + MINUTE * 10
+        } else {
+            self.start
+        }
+    }
+}
+
+#[test]
+fn deadline_parsed_file_checks_every_phase() {
+    // `ParsedFile::parse` reads its clock in the parse, the query run, the
+    // walk and once more before returning: a deadline that passes at any of
+    // those readings, the last one included, gives `TimedOut`.
+    let table = LanguageTable::core();
+    let js = table.get("js").unwrap();
+    let source: Arc<[u8]> = Arc::from(crate::testing::corpus("js", 64 << 10));
+    let parse = |expire_at: u32| {
+        let clock = CountingClock {
+            start: Instant::now(),
+            reads: std::sync::atomic::AtomicU32::new(0),
+            expire_at,
+        };
+        let result = crate::site::ParsedFile::parse(
+            js,
+            source.clone(),
+            &clock,
+            clock.start + MINUTE,
+            &AtomicBool::new(false),
+        );
+        (result.err(), clock.reads.load(Ordering::SeqCst))
+    };
+    let (error, reads) = parse(u32::MAX);
+    assert_eq!(error, None);
+    for expire_at in [1, reads / 2, reads - 1, reads] {
+        assert_eq!(
+            parse(expire_at).0,
+            Some(crate::site::ParseError::TimedOut),
+            "expiring at reading {expire_at} of {reads}"
+        );
+    }
+}
+
+#[test]
+fn deadline_parsed_file_walk_reads_the_deadline() {
+    // The same Java source as core `java` (walked) and as a language pack
+    // with Java's grammar and queries (not walked): parsing, the query run
+    // and the check before returning read the clock equally often, so the
+    // difference is the walk's checks.
+    let source: Arc<[u8]> = Arc::from(crate::testing::corpus("java", 64 << 10));
+    let table = LanguageTable::core().with_pack(
+        crate::lang_name("kotlin"),
+        crate::testing::java_pack(9, Arc::new(())),
+    );
+    let readings = |name: &str| {
+        let lang = table.get(name).unwrap();
+        let clock = CountingClock {
+            start: Instant::now(),
+            reads: std::sync::atomic::AtomicU32::new(0),
+            expire_at: u32::MAX,
+        };
+        crate::site::ParsedFile::parse(
+            lang,
+            source.clone(),
+            &clock,
+            clock.start + MINUTE,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        clock.reads.load(Ordering::SeqCst)
+    };
+    let java = table.get("java").unwrap();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(java.language()).unwrap();
+    let tree = parser.parse(&*source, None).unwrap();
+    let walk_checks = std::cell::Cell::new(0u32);
+    let count = || {
+        walk_checks.set(walk_checks.get() + 1);
+        false
+    };
+    crate::walk::walk_tree(java.dialect(), java.language(), &tree, &source, &count).unwrap();
+    assert_eq!(
+        readings("java"),
+        readings("kotlin") + walk_checks.get(),
+        "the walk checks {} times",
+        walk_checks.get()
+    );
 }

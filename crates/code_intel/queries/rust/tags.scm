@@ -8,7 +8,8 @@
 ; - @doc captures the parameter list (Lectern counts parameters from it).
 ; - Methods are the functions of `impl` and `trait` bodies only (upstream
 ;   took any declaration list, so functions of inline modules too); adds
-;   trait method signatures, constants, statics and struct fields.
+;   trait method signatures, constants, statics, struct fields and enum
+;   variants (constants).
 ; - Adds calls through paths (`Type::new()`, `module::f()`) and path macros,
 ;   struct literals, and every type identifier as a type reference (last, so
 ;   that definitions win for their own names).
@@ -26,10 +27,18 @@
 (enum_item
     name: (type_identifier) @name) @definition.enum
 
+; Variants: constants, as visible as their enum.
+(enum_variant
+    name: (identifier) @name) @definition.constant
+
 (union_item
     name: (type_identifier) @name) @definition.struct
 
 (type_item
+    name: (type_identifier) @name) @definition.type
+
+; A trait's associated type (`type Item;`).
+(associated_type
     name: (type_identifier) @name) @definition.type
 
 [
@@ -85,25 +94,66 @@
 
 (visibility_modifier) @name @reference.lectern.pub
 
+; An `impl` block and the name of the type it implements: through
+; references, pointers, arrays, slices and tuples (the first element), two
+; levels deep (`&[T]`); a generic or path type gives its own name
+; (`Box<T>` is `Box`, `a::B` is `B`); a primitive type names itself, but
+; not through an array or tuple (`[u8]`, `(u8, u8)` are not `u8`).
 (impl_item
-    trait: (_)
     type: [
         (type_identifier) @name
-        (generic_type
-            type: (type_identifier) @name)
-        (scoped_type_identifier
-            name: (type_identifier) @name)
-    ]) @reference.lectern.impl-trait
-
-(impl_item
-    !trait
-    type: [
-        (type_identifier) @name
-        (generic_type
-            type: (type_identifier) @name)
-        (scoped_type_identifier
-            name: (type_identifier) @name)
+        (primitive_type) @name
+        (scoped_type_identifier name: (type_identifier) @name)
+        (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])
+        (reference_type
+            type: [
+                (type_identifier) @name
+                (primitive_type) @name
+                (scoped_type_identifier name: (type_identifier) @name)
+                (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])
+                (reference_type type: [(type_identifier) @name (primitive_type) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (pointer_type type: [(type_identifier) @name (primitive_type) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (array_type element: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (tuple_type . [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+            ])
+        (pointer_type
+            type: [
+                (type_identifier) @name
+                (primitive_type) @name
+                (scoped_type_identifier name: (type_identifier) @name)
+                (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])
+                (reference_type type: [(type_identifier) @name (primitive_type) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (pointer_type type: [(type_identifier) @name (primitive_type) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (array_type element: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (tuple_type . [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+            ])
+        (array_type
+            element: [
+                (type_identifier) @name
+                (scoped_type_identifier name: (type_identifier) @name)
+                (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])
+                (reference_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (pointer_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (array_type element: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (tuple_type . [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+            ])
+        (tuple_type
+            .
+            [
+                (type_identifier) @name
+                (scoped_type_identifier name: (type_identifier) @name)
+                (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])
+                (reference_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (pointer_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (array_type element: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+                (tuple_type . [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name) (generic_type type: [(type_identifier) @name (scoped_type_identifier name: (type_identifier) @name)])])
+            ])
     ]) @reference.lectern.impl
+
+; A trait `impl` block (`impl Trait for T`), whatever its type: the `for`
+; token, so the trait's own name stays a reference.
+(impl_item
+    "for" @name) @reference.lectern.impl-trait
 
 ; ---- references --------------------------------------------------------
 

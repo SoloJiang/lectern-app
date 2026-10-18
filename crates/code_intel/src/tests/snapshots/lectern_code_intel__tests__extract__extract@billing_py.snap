@@ -9,12 +9,17 @@ defs:
   6:0-6 constant TAX_RATE [unknown]
   7:0-7 constant _registry [unknown]
   10:4-15 function register [unknown] (1)
-  11:8-13 function wrap in register [unknown] (1)
+  11:8-13 function wrap in register [file] (1)
   19:6-24 class Line [unknown]
+  20:4-20 field description in Line [unknown]
+  21:4-21 field amount in Line [unknown]
   23:8-24 method total in Line [unknown] (2)
   28:6-42 class Invoice [unknown]
   29:8-32 method __init__ in Invoice [unknown] (5)
+  30:13-30 field number in Invoice [unknown]
+  31:13-31 field lines in Invoice [unknown]
+  32:13-32 field currency in Invoice [unknown]
   35:8-37 method total in Invoice [unknown] (1)
   40:8-42 method parse in Invoice [unknown] (3)
   45:4-48 function pay [unknown] (3)
-refs: Base Decimal amount currency dataclass dataclasses decimal line lines list number property register round split staticmethod str sum total wrap
+refs: Base Decimal Invoice TAX_RATE _registry amount callback currency dataclass dataclasses decimal encoding extra kind line lines list property register round self split staticmethod str strict sum tax total wrap

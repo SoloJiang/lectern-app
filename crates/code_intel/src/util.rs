@@ -20,6 +20,39 @@ pub(crate) fn fnv64(parts: &[&[u8]]) -> u64 {
     hash
 }
 
+/// A fast, non-keyed hasher for short in-memory keys such as identifier
+/// names (the multiply-rotate of rustc's FxHasher). Not for persisted keys
+/// (use [`fnv64`]) or input an attacker could shape into collisions at scale.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct FastHasher(u64);
+
+impl std::hash::Hasher for FastHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        const K: u64 = 0x517c_c1b7_2722_0a95;
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            let word = u64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
+            self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(K);
+        }
+        let rest = chunks.remainder();
+        if !rest.is_empty() {
+            let mut word = [0u8; 8];
+            word[..rest.len()].copy_from_slice(rest);
+            self.0 = (self.0.rotate_left(5) ^ u64::from_le_bytes(word)).wrapping_mul(K);
+        }
+    }
+
+    fn write_usize(&mut self, n: usize) {
+        self.0 = (self.0.rotate_left(5) ^ n as u64).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) type FastBuild = std::hash::BuildHasherDefault<FastHasher>;
+
 /// Byte offsets of line starts, for turning byte offsets into rows.
 pub(crate) struct LineIndex {
     starts: Vec<usize>,

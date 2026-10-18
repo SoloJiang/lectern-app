@@ -10,7 +10,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 use super::support::{Blob, Fixture, config, key, meta_bytes, minute, noise, raw, sum_sizes};
-use crate::db::ENTRY_OVERHEAD;
+use crate::db::{ENTRY_OVERHEAD, TOUCH_CHUNK, TOUCH_SQL};
 use crate::slot::TOUCHED_MAX;
 use crate::{
     Budgets, Cache, Compression, Dropped, Key, MAX_BATCH, MAX_KEY, Namespace, Param, Partition,
@@ -761,6 +761,96 @@ fn tables_touch_writes_back_when_the_set_is_full() {
     assert_eq!(p.put(&key(1), &Blob(vec![1])), Written::Committed);
     // All units, and the entry just written.
     assert_eq!(fresh(&conn), n as i64 + 1);
+}
+
+/// The write-back runs one statement per `TOUCH_CHUNK` IDs: across several
+/// chunks and a partial last one, units over an hour old get the new access
+/// time, units written within the hour keep theirs, and deleted units are
+/// skipped.
+#[test]
+fn tables_touch_write_back_spans_chunks_and_skips_recent_units() {
+    let f = Fixture::new();
+    let p = f.repo();
+    let set = p.tables(&tags::TABLES);
+    let all_units = |set: &TableSet| -> Vec<Unit> {
+        set.read(|r| {
+            let mut out = Vec::new();
+            r.query(tags::ALL_UNITS, &[], |row| {
+                out.push(row.unit(0).unwrap());
+                true
+            });
+            out
+        })
+        .unwrap()
+    };
+    let old_n = 2 * TOUCH_CHUNK as u64 + 7;
+    let mut w = set.write();
+    for i in 0..old_n {
+        let unit = w.create(&unit_key(i), 10);
+        w.execute(tags::INSERT_EXT, &[Param::New(unit), Param::Bytes(&oid(i))]);
+    }
+    assert_eq!(w.commit(), Written::Committed);
+    let old = all_units(&set);
+    assert_eq!(old.len() as u64, old_n);
+    let written_old = minute(&f.clock);
+
+    // Two hours later: ten new units, and five old ones deleted.
+    f.clock.advance(2 * HOUR);
+    let mut w = set.write();
+    for i in old_n..old_n + 10 {
+        let unit = w.create(&unit_key(i), 10);
+        w.execute(tags::INSERT_EXT, &[Param::New(unit), Param::Bytes(&oid(i))]);
+    }
+    for &unit in &old[..5] {
+        w.remove_unit(unit);
+    }
+    assert_eq!(w.commit(), Written::Committed);
+    let written_new = minute(&f.clock);
+    let new: Vec<Unit> = all_units(&set)
+        .into_iter()
+        .filter(|u| !old.contains(u))
+        .collect();
+    assert_eq!(new.len(), 10);
+
+    // 30 minutes later every unit, deleted ones included, is touched.
+    f.clock.advance(30 * MINUTE);
+    let mut touched = old.clone();
+    touched.extend(&new);
+    set.touch(&touched);
+    assert_eq!(p.slot.pending_touched(), touched.len());
+    assert_eq!(p.put(&key(1), &Blob(vec![1])), Written::Committed);
+    assert_eq!(p.slot.pending_touched(), 0);
+
+    let conn = raw(p.file());
+    let now = minute(&f.clock);
+    assert!(now > written_new && written_new > written_old);
+    for &unit in &old[5..] {
+        assert_eq!(atime_of(&conn, unit), now, "{unit:?}");
+    }
+    for &unit in &new {
+        assert_eq!(atime_of(&conn, unit), written_new, "{unit:?}");
+    }
+    let gone: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM entry WHERE id IN (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params_from_iter(old[..5].iter().map(|u| u.id())),
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(gone, 0);
+
+    // The statement looks units up by ID, not by a scan of `entry_atime`.
+    let nulls = vec![rusqlite::types::Null; 2 + TOUCH_CHUNK];
+    let mut plan = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {TOUCH_SQL}"))
+        .unwrap();
+    let detail: Vec<String> = plan
+        .query_map(rusqlite::params_from_iter(nulls), |r| r.get(3))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(detail.len(), 1, "{detail:?}");
+    assert!(detail[0].contains("INTEGER PRIMARY KEY"), "{detail:?}");
 }
 
 // Eviction.

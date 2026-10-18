@@ -73,6 +73,27 @@ pub fn watchdog(executor: &Executor, clock: Arc<dyn Clock>) -> (Watchdog, Watchd
     (watchdog, task)
 }
 
+thread_local! {
+    static DROPS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Records its name in this thread's drop log when dropped. Placed right
+/// after a field, it marks the moment that field has been dropped (fields
+/// drop in declaration order).
+#[derive(Debug)]
+pub struct DropTrace(pub &'static str);
+
+impl Drop for DropTrace {
+    fn drop(&mut self) {
+        DROPS.with(|d| d.borrow_mut().push(self.0));
+    }
+}
+
+/// Takes this thread's drop log.
+pub fn take_drops() -> Vec<&'static str> {
+    DROPS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
 /// The watchdog thread's task handle, once started.
 #[derive(Clone)]
 pub struct WatchdogTask(Arc<Mutex<Option<Task<()>>>>);

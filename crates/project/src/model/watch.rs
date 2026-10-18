@@ -10,9 +10,9 @@
 //!   failed worktree watch: list the worktrees again; when the active one is
 //!   gone or prunable, switch to the main one (else the first available);
 //! - the active worktree's index: read its checksum; when it changed and
-//!   the file list did too, rebuild the file list and the facts and resolve
-//!   the sub-projects again, keeping every manifest result fs_watch did not
-//!   report a change for;
+//!   the file list did too (a path, a kind or a blob OID), rebuild the file
+//!   list and the facts and resolve the sub-projects again, keeping every
+//!   manifest result fs_watch did not report a change for;
 //! - a manifest path (or a directory above one): read it again and resolve
 //!   the sub-projects again;
 //! - any other path: nothing (the file list comes from the index).
@@ -376,8 +376,10 @@ impl Model {
                 match handle.index_files(&project.cancel) {
                     Ok(index) => {
                         checksum = Some(index.checksum);
-                        // Same paths (a stat-only rewrite of the index):
-                        // keep the list the snapshot already shares.
+                        // Same paths and OIDs (a stat-only rewrite of the
+                        // index): keep the list the snapshot already
+                        // shares. `FileList` equality covers the OIDs, so
+                        // staging new content alone replaces the list.
                         if old_files.as_deref() != Some(&index.files) {
                             files = Some(Arc::new(index.files));
                         }

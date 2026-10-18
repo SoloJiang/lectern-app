@@ -4267,6 +4267,7 @@ dependencies = [
  "lectern-cache",
  "lectern-executor",
  "lectern-services",
+ "serde_json",
  "streaming-iterator",
  "tempfile",
  "tree-sitter",

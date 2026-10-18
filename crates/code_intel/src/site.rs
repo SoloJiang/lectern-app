@@ -19,6 +19,7 @@ use tree_sitter::{Node, ParseOptions, Parser, QueryCursor, QueryCursorOptions, T
 pub use crate::Position;
 use crate::extract::{Def, Lang};
 use crate::lang::{Capture, Dialect, TagClass};
+use crate::locals::{Collector, LocalDef, Locals, Namespace};
 use crate::rules::{self, FileDef, RawTag};
 use crate::util::LineIndex;
 use crate::watchdog::Clock;
@@ -40,11 +41,27 @@ pub struct Site {
     pub syntax: RefSyntax,
     /// Where the identifier starts.
     pub at: Position,
-    /// The local definition the locals query binds this reference to
-    /// (`Binding::Local`). None on a definition's own name.
+    /// The local declaration this reference binds to under the binding rules
+    /// (`Binding::Local`): certain, so a direct jump that hides the index
+    /// candidates. None on a definition's own name.
     pub binding: Option<LocalBinding>,
+    /// Same-named declarations in the scopes around the reference that may
+    /// be the target, with no certain binding: declared later in a
+    /// non-hoisting form, flow-scoped, or behind `global` / `nonlocal`.
+    /// When this is not empty there is no direct jump, to this file or
+    /// another: the query lists these first, then the index candidates
+    /// (docs/design/code_intel.md「绑定规则」).
+    pub possible: Vec<LocalBinding>,
     /// The definition whose name this is, when the position is on one.
     pub defines: Option<SiteDef>,
+}
+
+impl Site {
+    /// Whether the query may jump directly to a definition in another file:
+    /// no local binding, and no same-file declaration that might be it.
+    pub fn may_jump_elsewhere(&self) -> bool {
+        self.binding.is_none() && self.possible.is_empty()
+    }
 }
 
 /// A definition named at the position.
@@ -63,7 +80,8 @@ pub struct LocalBinding {
     pub at: Position,
     /// The definition when tags captured it too; a plain local otherwise.
     pub def: Option<Def>,
-    /// In a non-root scope.
+    /// Visible in one function or block only: not at file level, not a
+    /// class member.
     pub local: bool,
 }
 
@@ -75,32 +93,87 @@ pub struct RefSite {
     pub end: usize,
 }
 
-struct Scope {
-    range: Range<usize>,
-    inherits: bool,
-    parent: Option<usize>,
-    /// The `name` field of the scope's node (a function or class that also
-    /// opens this scope): a local definition there belongs to the parent.
-    name: Option<Range<usize>>,
-}
-
-struct LocalDef {
-    range: Range<usize>,
-    scope: usize,
+/// The local scopes of `source` by the language's locals query
+/// ([`Locals::local_scopes`]), for `rules::finish` on the tags path; None
+/// once `stop` returns true, or when the grammar or its queries do not
+/// compile.
+pub(crate) fn local_scopes(
+    lang: &Lang,
+    source: &[u8],
+    stop: &dyn Fn() -> bool,
+) -> Option<Vec<Range<usize>>> {
+    let compiled = lang.compiled()?;
+    let mut parser = Parser::new();
+    parser.set_language(lang.language()).ok()?;
+    let mut progress = |_: &tree_sitter::ParseState| {
+        if stop() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let tree = parser.parse_with_options(
+        &mut |i, _| source.get(i..).unwrap_or(&[]),
+        None,
+        Some(ParseOptions::new().progress_callback(&mut progress)),
+    )?;
+    let query = &compiled.tags.query;
+    let mut cursor = QueryCursor::new();
+    let mut query_progress = |_: &tree_sitter::QueryCursorState| {
+        if stop() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let mut matches = cursor.matches_with_options(
+        query,
+        tree.root_node(),
+        source,
+        QueryCursorOptions::new().progress_callback(&mut query_progress),
+    );
+    let mut collector = Collector::new(lang.dialect(), source.len());
+    while let Some(m) = matches.next() {
+        if m.pattern_index >= compiled.locals_patterns {
+            continue;
+        }
+        let props = query.property_settings(m.pattern_index);
+        for capture in m.captures() {
+            if matches!(
+                compiled.captures[capture.index as usize],
+                Capture::LocalScope
+            ) {
+                collector.scope(capture.node, props);
+            }
+        }
+    }
+    drop(matches);
+    if stop() {
+        return None;
+    }
+    Some(collector.finish(source).local_scopes())
 }
 
 /// One parsed file, kept while a query uses it and then dropped; never
 /// cached. Holds the grammar's lease through its [`Lang`].
+///
+/// Fields drop in declaration order: `lang` (and with the last one the
+/// grammar's lease) comes after `tree`, so a language pack's library is never
+/// unloaded while the tree built from it is being freed.
 pub struct ParsedFile {
-    lang: Lang,
-    source: Arc<[u8]>,
     tree: Tree,
+    #[cfg(test)]
+    _tree_dropped: crate::testing::DropTrace,
+    source: Arc<[u8]>,
     lines: LineIndex,
     defs: Vec<FileDef>,
-    /// Index 0 is the root scope; outermost first.
-    scopes: Vec<Scope>,
-    locals: Vec<LocalDef>,
+    locals: Locals,
+    /// The locals query's `@local.reference` captures in variable
+    /// positions, by position, with whether the position is uncertain (a Go
+    /// composite literal key): the only names `site_at` resolves locally.
+    local_refs: Vec<(Range<usize>, bool)>,
     refs: Vec<RefSite>,
+    lang: Lang,
 }
 
 impl ParsedFile {
@@ -124,6 +197,11 @@ impl ParsedFile {
                 ParseError::TimedOut
             }
         };
+        // A deadline already past or a cancellation already set: no work. A
+        // small file can be parsed before the progress callback runs.
+        if stop() {
+            return Err(interrupted());
+        }
         let mut parser = Parser::new();
         parser
             .set_language(lang.language())
@@ -159,43 +237,31 @@ impl ParsedFile {
             text,
             QueryCursorOptions::new().progress_callback(&mut query_progress),
         );
-        let mut scopes = vec![Scope {
-            range: 0..text.len(),
-            inherits: false,
-            parent: None,
-            name: None,
-        }];
-        let mut local_ranges: Vec<Range<usize>> = Vec::new();
+        let mut collector = Collector::new(dialect, text.len());
         let mut ref_ranges: Vec<Range<usize>> = Vec::new();
+        let mut local_refs: Vec<(Range<usize>, bool)> = Vec::new();
         // One tag per name node, from the lowest pattern (tree-sitter-tags).
         let mut tags: HashMap<(usize, usize), (usize, RawTag)> = HashMap::new();
         while let Some(m) = matches.next() {
             if m.pattern_index < compiled.locals_patterns {
+                let props = query.property_settings(m.pattern_index);
                 for capture in m.captures() {
-                    let range = capture.node.byte_range();
                     match compiled.captures[capture.index as usize] {
-                        Capture::LocalScope => {
-                            let inherits =
-                                !query.property_settings(m.pattern_index).iter().any(|p| {
-                                    &*p.key == "local.scope-inherits"
-                                        && p.value.as_deref() == Some("false")
-                                });
-                            scopes.push(Scope {
-                                range,
-                                inherits,
-                                parent: None,
-                                name: capture
-                                    .node
-                                    .child_by_field_name("name")
-                                    .map(|n| n.byte_range()),
-                            });
+                        Capture::LocalScope => collector.scope(capture.node, props),
+                        Capture::LocalDefinition => {
+                            collector.definition(capture.node, props, text);
                         }
-                        Capture::LocalDefinition => local_ranges.push(range),
                         // `(identifier) @local.reference` also matches member
-                        // and path names (`items.add`, `Queue::new`), which
-                        // never refer to a local.
-                        Capture::LocalReference if is_variable_position(dialect, capture.node) => {
-                            ref_ranges.push(range);
+                        // and path names (`items.add`, `Queue::new`), keys
+                        // and tag names, which never refer to a local
+                        // (the forms table's positions).
+                        Capture::LocalReference if collector.reference(capture.node, props) => {
+                            let at = variable_position(dialect, capture.node, text);
+                            if at != Variable::No {
+                                let range = capture.node.byte_range();
+                                local_refs.push((range.clone(), at == Variable::Uncertain));
+                                ref_ranges.push(range);
+                            }
                         }
                         _ => {}
                     }
@@ -246,54 +312,57 @@ impl ParsedFile {
             return Err(interrupted());
         }
 
-        // Scopes: outermost first, each with its parent.
-        let root = scopes.remove(0);
-        scopes.sort_by_key(|s| (s.range.start, std::cmp::Reverse(s.range.end)));
-        scopes.insert(0, root);
-        let mut stack: Vec<usize> = vec![0];
-        for i in 1..scopes.len() {
-            let range = scopes[i].range.clone();
-            while let Some(&top) = stack.last() {
-                let r = &scopes[top].range;
-                if r.start <= range.start && range.end <= r.end {
-                    break;
-                }
-                stack.pop();
-            }
-            scopes[i].parent = stack.last().copied();
-            stack.push(i);
-        }
-        local_ranges.sort_by_key(|r| (r.start, r.end));
-        local_ranges.dedup();
-        let locals: Vec<LocalDef> = local_ranges
-            .into_iter()
-            .map(|range| {
-                // A function or class name is visible in the scope around the
-                // declaration, not in the body scope the declaration opens.
-                let mut scope = innermost(&scopes, &range);
-                if scopes[scope].name.as_ref() == Some(&range) {
-                    scope = scopes[scope].parent.unwrap_or(0);
-                }
-                LocalDef { scope, range }
-            })
-            .collect();
+        let locals = collector.finish(text);
 
         let mut tags: Vec<RawTag> = tags.into_values().map(|(_, t)| t).collect();
+        // A core language's definitions and markers come from its walker,
+        // as in `extract` (ADR 0031); the query's tags give the reference
+        // positions.
+        if lang.lease().is_static() && crate::walk::supports(dialect, lang.language()) {
+            // The walk stops with the same deadline and cancellation as the
+            // parse and the query run.
+            let walked = crate::walk::walk_tree(dialect, lang.language(), &tree, text, &stop)
+                .ok_or_else(interrupted)?;
+            tags.retain(|t| t.class == TagClass::Ref);
+            tags.extend(walked.tags);
+        }
         tags.sort_by_key(|t| t.name_range.start);
+        // Tags references, and the names markers take from the reference
+        // patterns (`Marker::consumes_name`): an exported name, an
+        // implemented or receiver type, an attribute write.
         ref_ranges.extend(
             tags.iter()
-                .filter(|t| t.class == TagClass::Ref)
+                .filter(|t| match t.class {
+                    TagClass::Ref => true,
+                    TagClass::Marker(marker) => marker.consumes_name(),
+                    TagClass::Def(_) => false,
+                })
                 .map(|t| t.name_range.clone()),
         );
         let lines = LineIndex::new(text);
         ref_ranges.sort_by_key(|r| (r.start, r.end));
         ref_ranges.dedup();
-        // `(identifier) @local.reference` matches definition names too.
-        let named: std::collections::HashSet<(usize, usize)> = tags
+        local_refs.sort_by_key(|(r, _)| (r.start, r.end));
+        local_refs.dedup_by(|b, a| a.0 == b.0);
+        let tag_defs: Vec<(usize, usize)> = tags
             .iter()
             .filter(|t| matches!(t.class, TagClass::Def(_)))
             .map(|t| (t.name_range.start, t.name_range.end))
-            .chain(locals.iter().map(|l| (l.range.start, l.range.end)))
+            .collect();
+        // A language pack's scopes are not classified (`rules::finish`).
+        let local_scopes = lang.lease().is_static().then(|| locals.local_scopes());
+        let finished = rules::finish(lang.dialect(), text, tags, local_scopes.as_deref());
+        // `(identifier) @local.reference` matches definition names too; a
+        // marker's name that became a definition (a Python field) is one.
+        let named: std::collections::HashSet<(usize, usize)> = tag_defs
+            .into_iter()
+            .chain(
+                finished
+                    .defs
+                    .iter()
+                    .map(|d| (d.name_range.start, d.name_range.end)),
+            )
+            .chain(locals.defs().iter().map(|l| (l.range.start, l.range.end)))
             .collect();
         let refs = ref_ranges
             .into_iter()
@@ -304,16 +373,22 @@ impl ParsedFile {
                 end: r.end,
             })
             .collect();
-        let finished = rules::finish(lang.dialect(), text, tags);
+        // Checked once more before returning: the rules and the binding model
+        // run after the last check above.
+        if stop() {
+            return Err(interrupted());
+        }
         Ok(ParsedFile {
-            lang: lang.clone(),
-            source,
             tree,
+            #[cfg(test)]
+            _tree_dropped: crate::testing::DropTrace("tree"),
+            source,
             lines,
             defs: finished.defs,
-            scopes,
             locals,
+            local_refs,
             refs,
+            lang: lang.clone(),
         })
     }
 
@@ -323,6 +398,13 @@ impl ParsedFile {
 
     pub fn source(&self) -> &Arc<[u8]> {
         &self.source
+    }
+
+    /// The definitions with their node ranges, and the local scopes of the
+    /// binding model, for the tests.
+    #[cfg(test)]
+    pub(crate) fn defs_and_local_scopes(&self) -> (&[FileDef], Vec<Range<usize>>) {
+        (&self.defs, self.locals.local_scopes())
     }
 
     pub fn tree(&self) -> &Tree {
@@ -364,28 +446,59 @@ impl ParsedFile {
                 syntax,
                 at: start,
                 binding: None,
+                possible: Vec::new(),
                 defines: Some(defines),
             });
         }
-        // A member or path name (`items.add`, `obj.x`, `Queue::new`) never
-        // binds to a same-named local.
-        let binding = (is_variable_position(dialect, node)
-            && !matches!(syntax, RefSyntax::Member | RefSyntax::MemberCall))
-        .then(|| self.binding(&range, &name))
-        .flatten();
+        // Only the locals query's references in variable positions resolve
+        // locally (an allow-list): a member, key, attribute, path segment or
+        // tag name never binds to a same-named local. A type name looks for
+        // local types (type parameters, local type declarations), any other
+        // name for local values.
+        let namespace = if node.kind() == "type_identifier" {
+            Namespace::Type
+        } else {
+            Namespace::Value
+        };
+        let i = self
+            .local_refs
+            .partition_point(|(r, _)| r.start < range.start);
+        let local_ref = self
+            .local_refs
+            .get(i)
+            .filter(|(r, _)| *r == range)
+            .map(|(_, uncertain)| *uncertain);
+        let (binding, possible) = match local_ref {
+            Some(uncertain) if !matches!(syntax, RefSyntax::Member | RefSyntax::MemberCall) => {
+                let resolution = self.locals.resolve(text, &range, namespace);
+                let mut possible: Vec<LocalBinding> = resolution
+                    .possible
+                    .into_iter()
+                    .map(|d| self.local_binding(d, &name))
+                    .collect();
+                let mut binding = resolution.binding.map(|d| self.local_binding(d, &name));
+                if uncertain {
+                    // A Go composite literal key may be a field name.
+                    possible.extend(binding.take());
+                }
+                (binding, possible)
+            }
+            _ => (None, Vec::new()),
+        };
         Some(Site {
             name,
             syntax,
             at: start,
             binding,
+            possible,
             defines: None,
         })
     }
 
     /// The definition named by `range`: a tags definition, or a plain local.
     fn defines(&self, range: &Range<usize>, name: &str, at: Position) -> Option<SiteDef> {
-        let local = self.locals.iter().find(|l| l.range == *range);
-        let local_flag = local.is_some_and(|l| l.scope != 0);
+        let local = self.locals.def_at(range);
+        let local_flag = local.is_some_and(|l| self.locals.is_local(l));
         if let Some(def) = self.defs.iter().find(|d| d.name_range == *range) {
             return Some(SiteDef {
                 def: def.def.clone(),
@@ -402,7 +515,13 @@ impl ParsedFile {
         Some(SiteDef {
             def: Def {
                 name: name.into(),
-                kind: DefKind::Variable,
+                // A local type (a type parameter, a local interface) or a
+                // local value.
+                kind: if local.namespace == Namespace::Value {
+                    DefKind::Variable
+                } else {
+                    DefKind::Type
+                },
                 line: at.line,
                 column: at.column,
                 end_line: at.line,
@@ -410,59 +529,23 @@ impl ParsedFile {
                 visibility: crate::extract::Visibility::File,
                 arity: None,
             },
-            local: local.scope != 0,
+            local: self.locals.is_local(local),
         })
     }
 
-    /// The local definition a reference binds to: the innermost scope around
-    /// it with a definition of the name, preferring the last definition
-    /// before the reference, then the first after it (hoisting).
-    fn binding(&self, range: &Range<usize>, name: &str) -> Option<LocalBinding> {
-        let text = &*self.source;
-        let mut scope = Some(innermost(&self.scopes, range));
-        while let Some(s) = scope {
-            let mut before: Option<&LocalDef> = None;
-            let mut after: Option<&LocalDef> = None;
-            for local in self.locals.iter().filter(|l| l.scope == s) {
-                if text.get(local.range.clone()) != Some(name.as_bytes()) {
-                    continue;
-                }
-                if local.range.start < range.start {
-                    before = Some(local);
-                } else if after.is_none() {
-                    after = Some(local);
-                }
-            }
-            if let Some(local) = before.or(after) {
-                let def = self
-                    .defs
-                    .iter()
-                    .find(|d| d.name_range == local.range)
-                    .map(|d| d.def.clone());
-                return Some(LocalBinding {
-                    name: name.into(),
-                    at: position(&self.lines, local.range.start, text),
-                    def,
-                    local: local.scope != 0,
-                });
-            }
-            if !self.scopes[s].inherits {
-                break;
-            }
-            scope = self.scopes[s].parent;
+    fn local_binding(&self, local: &LocalDef, name: &str) -> LocalBinding {
+        let def = self
+            .defs
+            .iter()
+            .find(|d| d.name_range == local.range)
+            .map(|d| d.def.clone());
+        LocalBinding {
+            name: name.into(),
+            at: position(&self.lines, local.range.start, &self.source),
+            def,
+            local: self.locals.is_local(local),
         }
-        None
     }
-}
-
-/// The innermost scope containing `range` (the root when no other does).
-fn innermost(scopes: &[Scope], range: &Range<usize>) -> usize {
-    scopes
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, s)| s.range.start <= range.start && range.end <= s.range.end)
-        .map_or(0, |(i, _)| i)
 }
 
 fn position(lines: &LineIndex, offset: usize, text: &[u8]) -> Position {
@@ -551,6 +634,14 @@ const RUST_SITES: &[SiteRule] = &[
     ),
     rule("field_identifier", "field_expression", "field", Member),
     rule("type_identifier", "struct_expression", "name", Construct),
+    // `Message::Move { x, y }` and `crate::Point { .. }`.
+    rule_in(
+        "type_identifier",
+        "scoped_type_identifier",
+        "name",
+        ("struct_expression", "name"),
+        Construct,
+    ),
 ];
 
 const ECMASCRIPT_SITES: &[SiteRule] = &[
@@ -645,57 +736,78 @@ fn site_rules(dialect: Dialect) -> &'static [SiteRule] {
     }
 }
 
-/// The node kinds that are identifiers in a language.
+/// The node kinds that are names in a language: the binding and the
+/// reference kinds of `locals::name_kinds`.
 fn is_identifier(dialect: Dialect, kind: &str) -> bool {
-    let kinds: &[&str] = match dialect {
-        Dialect::Rust => &["identifier", "field_identifier", "type_identifier"],
-        Dialect::TypeScript | Dialect::Tsx | Dialect::JavaScript => &[
-            "identifier",
-            "property_identifier",
-            "private_property_identifier",
-            "shorthand_property_identifier",
-            "shorthand_property_identifier_pattern",
-            "type_identifier",
-        ],
-        Dialect::Java => &["identifier", "type_identifier"],
-        Dialect::Python => &["identifier"],
-        Dialect::Go => &[
-            "identifier",
-            "field_identifier",
-            "type_identifier",
-            "package_identifier",
-        ],
-        Dialect::Pack => return kind.ends_with("identifier"),
-    };
-    kinds.contains(&kind)
+    crate::locals::is_name_kind(dialect, kind)
 }
 
-/// Identifier positions that name a member, a path segment or a keyword
-/// argument rather than a variable: (parent kind, field). The locals
-/// queries' `(identifier) @local.reference` matches these too; they are not
-/// local references and never bind to a local. JS, TS and Go name members
-/// with their own node kinds (`property_identifier`, `field_identifier`).
-const NON_VARIABLE_POSITIONS: &[(Dialect, &str, &str)] = &[
-    (Dialect::Rust, "scoped_identifier", "name"),
-    (Dialect::Rust, "scoped_identifier", "path"),
-    (Dialect::Rust, "macro_invocation", "macro"),
-    (Dialect::Java, "method_invocation", "name"),
-    (Dialect::Java, "field_access", "field"),
-    (Dialect::Java, "scoped_identifier", "name"),
-    (Dialect::Java, "scoped_identifier", "scope"),
-    (Dialect::Python, "attribute", "attribute"),
-    (Dialect::Python, "keyword_argument", "name"),
-];
+/// The forms table's name for a core dialect.
+fn core_name(dialect: Dialect) -> Option<&'static str> {
+    match dialect {
+        Dialect::TypeScript => Some("ts"),
+        Dialect::Tsx => Some("tsx"),
+        Dialect::JavaScript => Some("js"),
+        Dialect::Rust => Some("rust"),
+        Dialect::Java => Some("java"),
+        Dialect::Python => Some("python"),
+        Dialect::Go => Some("go"),
+        Dialect::Pack => None,
+    }
+}
 
-/// Whether an identifier can refer to a variable (see
-/// [`NON_VARIABLE_POSITIONS`]).
-fn is_variable_position(dialect: Dialect, node: Node<'_>) -> bool {
-    let Some(parent) = node.parent() else {
-        return true;
+/// Whether a `@local.reference` can refer to a variable or a local type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Variable {
+    Yes,
+    /// A key, an attribute, a member or path segment, a tag name: never a
+    /// local binding.
+    No,
+    /// A Go composite literal key: a local of that name is only possible.
+    Uncertain,
+}
+
+/// What an identifier's position is, by the positions the forms table
+/// gives its parent's row (`forms::Pos`); a language pack has none.
+pub(crate) fn variable_position(dialect: Dialect, node: Node<'_>, text: &[u8]) -> Variable {
+    use crate::forms::Pos;
+    let Some(lang) = core_name(dialect) else {
+        return Variable::Yes;
     };
-    !NON_VARIABLE_POSITIONS.iter().any(|(d, kind, field)| {
-        *d == dialect && parent.kind() == *kind && in_field(node, parent, field)
-    })
+    let Some(parent) = node.parent() else {
+        return Variable::Yes;
+    };
+    let rows = crate::forms::positions(lang);
+    if let Some(positions) = rows.get(parent.kind()) {
+        let first = parent.named_child(0).is_some_and(|f| f.id() == node.id());
+        for pos in *positions {
+            let not_variable = match pos {
+                Pos::In(field) => in_field(node, parent, field),
+                Pos::NotFirst => !first,
+                Pos::First => first,
+                Pos::Any => true,
+                Pos::Lowercase(field) => {
+                    in_field(node, parent, field)
+                        && text
+                            .get(node.start_byte())
+                            .is_some_and(u8::is_ascii_lowercase)
+                }
+                Pos::Uncertain(_) => false,
+            };
+            if not_variable {
+                return Variable::No;
+            }
+        }
+    }
+    if let Some(grand) = parent.parent()
+        && let Some(positions) = rows.get(grand.kind())
+        && positions
+            .iter()
+            .any(|p| matches!(p, Pos::Uncertain(field) if in_field(parent, grand, field)))
+    {
+        return Variable::Uncertain;
+    }
+    Variable::Yes
 }
 
 /// Whether `node` is the child in `field` of its parent.
@@ -752,35 +864,43 @@ const TYPES: u16 = crate::def_kind_bit(DefKind::Class)
     | crate::def_kind_bit(DefKind::Trait)
     | crate::def_kind_bit(DefKind::Type)
     | crate::def_kind_bit(DefKind::Module);
-const MEMBERS: u16 = crate::def_kind_bit(DefKind::Field)
-    | crate::def_kind_bit(DefKind::Method)
-    | crate::def_kind_bit(DefKind::Constant)
-    | crate::def_kind_bit(DefKind::Variable);
 
 /// The definition kinds a reference syntax accepts in a language, as a
 /// [`DefKind::bit`] set (docs/design/code_intel.md「候选的分层与过滤」).
+/// For a core language they come from the definition forms
+/// (`crate::forms`): a kind is accepted where its row says the syntax can
+/// name it. `Plain` accepts every kind, and so does `Member` outside Rust:
+/// the left side of `a.b` can be a namespace, a module, a package or a class
+/// (`utils.handle`, `models.User`, `pkg.Var`, `Outer.Inner`).
 pub fn accepted_kinds(lang: &Lang, syntax: RefSyntax) -> u16 {
-    let default = match syntax {
+    let core = match lang.dialect() {
+        Dialect::TypeScript => Some("ts"),
+        Dialect::Tsx => Some("tsx"),
+        Dialect::JavaScript => Some("js"),
+        Dialect::Rust => Some("rust"),
+        Dialect::Java => Some("java"),
+        Dialect::Python => Some("python"),
+        Dialect::Go => Some("go"),
+        Dialect::Pack => None,
+    };
+    if let Some(name) = core {
+        return match syntax {
+            RefSyntax::Plain => ALL_KINDS,
+            RefSyntax::Member if lang.dialect() != Dialect::Rust => ALL_KINDS,
+            _ => crate::forms::kinds_for(name, syntax),
+        };
+    }
+    pack_kinds(syntax)
+}
+
+/// A language pack has no forms: the general rules.
+fn pack_kinds(syntax: RefSyntax) -> u16 {
+    match syntax {
         RefSyntax::Call | RefSyntax::MemberCall => CALLABLE,
         RefSyntax::Construct => CONSTRUCTIBLE,
         RefSyntax::Type => TYPES,
-        // Rust's `a.b` always has a value on the left: a field or a method.
-        // Elsewhere the left side can be a namespace import, a module, a
-        // package or a class (`utils.handle`, `models.User`, `pkg.Var`,
-        // `Outer.Inner`), whose members can be any kind of definition.
-        RefSyntax::Member if lang.dialect() == Dialect::Rust => MEMBERS,
-        RefSyntax::Member => ALL_KINDS,
-        RefSyntax::Plain => ALL_KINDS,
-    };
-    // Go: a conversion `Meters(value)` or `units.Meters(value)` is call
-    // syntax whose target is a type.
-    let extra = match (lang.dialect(), syntax) {
-        (Dialect::Go, RefSyntax::Call | RefSyntax::MemberCall) => {
-            crate::def_kind_bit(DefKind::Type)
-        }
-        _ => 0,
-    };
-    default | extra
+        RefSyntax::Member | RefSyntax::Plain => ALL_KINDS,
+    }
 }
 
 /// Whether a reference of `syntax` in `lang` can name a definition of `kind`.

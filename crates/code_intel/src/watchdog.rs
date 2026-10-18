@@ -191,8 +191,12 @@ impl Watchdog {
     }
 
     /// Registers an extraction: its flag is set when `at` passes, `cancel` is
-    /// set, `pause` says so, or the watchdog stops. Starts the thread on the
-    /// first registration. Deregistered on drop.
+    /// set, `pause` says so, or the watchdog stops. The slot is checked once
+    /// here, on the caller's thread, so a deadline already past, a
+    /// cancellation or a pause already requested is seen before any work,
+    /// not only at the thread's next check (a small file can finish first).
+    /// Starts the thread on the first registration that is not tripped at
+    /// once. Deregistered on drop.
     pub(crate) fn register(
         &self,
         at: Instant,
@@ -206,9 +210,12 @@ impl Watchdog {
             cancel,
             pause,
         });
+        slot.check(self.shared.clock.now());
         let mut state = self.shared.lock();
         if state.stop {
             slot.trip(Trip::Stopped);
+        }
+        if slot.tripped().is_some() {
             return Registration {
                 shared: None,
                 id: 0,

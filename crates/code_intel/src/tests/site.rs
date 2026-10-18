@@ -10,10 +10,15 @@ use crate::site::{ParseError, ParsedFile, Position, Site, accepts};
 use crate::testing::ManualClock;
 use crate::{Clock, DefKind, RefSyntax, SystemClock};
 
-fn parse(lang: &str, source: &str) -> ParsedFile {
-    let table = LanguageTable::core();
+/// The core languages, compiled once for the tests.
+pub(super) fn core_table() -> &'static LanguageTable {
+    static TABLE: std::sync::OnceLock<LanguageTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(LanguageTable::core)
+}
+
+pub(super) fn parse(lang: &str, source: &str) -> ParsedFile {
     ParsedFile::parse(
-        table.get(lang).expect("core language"),
+        core_table().get(lang).expect("core language"),
         Arc::from(source.as_bytes()),
         &SystemClock,
         Instant::now() + Duration::from_secs(10),
@@ -23,7 +28,7 @@ fn parse(lang: &str, source: &str) -> ParsedFile {
 }
 
 /// The position of the `nth` occurrence of `needle`, plus `offset` bytes.
-fn pos(source: &str, needle: &str, nth: usize, offset: usize) -> Position {
+pub(super) fn pos(source: &str, needle: &str, nth: usize, offset: usize) -> Position {
     let start = source
         .match_indices(needle)
         .nth(nth)
@@ -286,6 +291,490 @@ fn site_parsed_defs_match_extraction() {
     }
 }
 
+/// (language, reference syntax, definition kind, source, the use: an
+/// occurrence of the definition's name): an idiomatic use of a definition
+/// of that kind in that syntax.
+type Use = (
+    &'static str,
+    RefSyntax,
+    DefKind,
+    &'static str,
+    (&'static str, usize),
+);
+
+const USES: &[Use] = &[
+    // ---- JavaScript, TypeScript ----
+    (
+        "js",
+        RefSyntax::Call,
+        DefKind::Function,
+        "function helper() {}\nhelper();\n",
+        ("helper", 1),
+    ),
+    (
+        "js",
+        RefSyntax::Call,
+        DefKind::Variable,
+        "let handler = make();\nhandler();\n",
+        ("handler", 1),
+    ),
+    (
+        "js",
+        RefSyntax::Call,
+        DefKind::Constant,
+        "const runner = make();\nrunner();\n",
+        ("runner", 1),
+    ),
+    (
+        "js",
+        RefSyntax::MemberCall,
+        DefKind::Method,
+        "class A { go() {} }\nnew A().go();\n",
+        ("go", 1),
+    ),
+    (
+        "js",
+        RefSyntax::MemberCall,
+        DefKind::Function,
+        "const api = { load: () => 1 };\napi.load();\n",
+        ("load", 1),
+    ),
+    (
+        "js",
+        RefSyntax::MemberCall,
+        DefKind::Field,
+        "class A { cb = make(); run() { this.cb(); } }\n",
+        ("cb", 1),
+    ),
+    (
+        "js",
+        RefSyntax::Construct,
+        DefKind::Class,
+        "class Store {}\nnew Store();\n",
+        ("Store", 1),
+    ),
+    (
+        "js",
+        RefSyntax::Construct,
+        DefKind::Function,
+        "function Legacy() {}\nnew Legacy();\n",
+        ("Legacy", 1),
+    ),
+    (
+        "js",
+        RefSyntax::Construct,
+        DefKind::Variable,
+        "let Impl = pick();\nnew Impl();\n",
+        ("Impl", 1),
+    ),
+    (
+        "js",
+        RefSyntax::Construct,
+        DefKind::Constant,
+        "const Impl = pick();\nnew Impl();\n",
+        ("Impl", 1),
+    ),
+    (
+        "ts",
+        RefSyntax::Call,
+        DefKind::Function,
+        "function helper(): void {}\nhelper();\n",
+        ("helper", 1),
+    ),
+    (
+        "ts",
+        RefSyntax::Construct,
+        DefKind::Class,
+        "class Store {}\nnew Store();\n",
+        ("Store", 1),
+    ),
+    (
+        "ts",
+        RefSyntax::Type,
+        DefKind::Class,
+        "class Shape {}\nlet s: Shape;\n",
+        ("Shape", 1),
+    ),
+    (
+        "ts",
+        RefSyntax::Type,
+        DefKind::Interface,
+        "interface Opts {}\nlet o: Opts;\n",
+        ("Opts", 1),
+    ),
+    (
+        "ts",
+        RefSyntax::Type,
+        DefKind::Enum,
+        "enum Kind { A }\nlet k: Kind;\n",
+        ("Kind", 1),
+    ),
+    (
+        "ts",
+        RefSyntax::Type,
+        DefKind::Type,
+        "type Id = number;\nlet i: Id;\n",
+        ("Id", 1),
+    ),
+    (
+        "tsx",
+        RefSyntax::Type,
+        DefKind::Interface,
+        "interface Props {}\nlet p: Props;\n",
+        ("Props", 1),
+    ),
+    // ---- Rust ----
+    (
+        "rust",
+        RefSyntax::Call,
+        DefKind::Function,
+        "fn helper() {}\nfn main() { helper(); }\n",
+        ("helper", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Call,
+        DefKind::Struct,
+        "struct Meters(u8);\nfn f() { Meters(1); }\n",
+        ("Meters", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Call,
+        DefKind::Macro,
+        "macro_rules! log { () => {} }\nfn f() { log!(); }\n",
+        ("log", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Call,
+        DefKind::Constant,
+        "enum E { Wrap(u8) }\nfn f() { E::Wrap(1); }\n",
+        ("Wrap", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Call,
+        DefKind::Method,
+        "struct S;\nimpl S { fn create() -> S { S } }\nfn f() { S::create(); }\n",
+        ("create", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::MemberCall,
+        DefKind::Method,
+        "struct S;\nimpl S { fn go(&self) {} }\nfn f(s: S) { s.go(); }\n",
+        ("go", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Construct,
+        DefKind::Struct,
+        "struct Point { x: u8 }\nfn f() { Point { x: 1 }; }\n",
+        ("Point", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Construct,
+        DefKind::Constant,
+        "enum M { Move { x: u8 } }\nfn f() { M::Move { x: 1 }; }\n",
+        ("Move", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Construct,
+        DefKind::Type,
+        "struct P { x: u8 }\ntype Alias = P;\nfn f() { Alias { x: 1 }; }\n",
+        ("Alias", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Type,
+        DefKind::Struct,
+        "struct Point;\nfn f(p: Point) {}\n",
+        ("Point", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Type,
+        DefKind::Enum,
+        "enum Kind { A }\nfn f(k: Kind) {}\n",
+        ("Kind", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Type,
+        DefKind::Trait,
+        "trait Draw {}\nfn f(d: &dyn Draw) {}\n",
+        ("Draw", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Type,
+        DefKind::Type,
+        "type Id = u8;\nfn f(i: Id) {}\n",
+        ("Id", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Type,
+        DefKind::Constant,
+        "enum M { Move { x: u8 } }\nfn f(m: M) { if let M::Move { x } = m {} }\n",
+        ("Move", 1),
+    ),
+    (
+        "rust",
+        RefSyntax::Member,
+        DefKind::Field,
+        "struct P { width: u8 }\nfn f(p: P) -> u8 { p.width }\n",
+        ("width", 1),
+    ),
+    // ---- Java ----
+    (
+        "java",
+        RefSyntax::Call,
+        DefKind::Method,
+        "class A { void go() {} void run() { go(); } }\n",
+        ("go", 1),
+    ),
+    (
+        "java",
+        RefSyntax::Call,
+        DefKind::Field,
+        "record R(int size) { int twice() { return size() * 2; } }\n",
+        ("size", 1),
+    ),
+    (
+        "java",
+        RefSyntax::MemberCall,
+        DefKind::Method,
+        "class A { void go() {} void run(A a) { a.go(); } }\n",
+        ("go", 1),
+    ),
+    (
+        "java",
+        RefSyntax::MemberCall,
+        DefKind::Field,
+        "record R(int size) {}\nclass B { int f(R r) { return r.size(); } }\n",
+        ("size", 1),
+    ),
+    (
+        "java",
+        RefSyntax::Construct,
+        DefKind::Class,
+        "class Store {}\nclass B { Object o = new Store(); }\n",
+        ("Store", 1),
+    ),
+    (
+        "java",
+        RefSyntax::Construct,
+        DefKind::Interface,
+        "interface Task { void run(); }\nclass B { Task t = new Task() { public void run() {} }; }\n",
+        ("Task", 2),
+    ),
+    (
+        "java",
+        RefSyntax::Type,
+        DefKind::Class,
+        "class Store {}\nclass B { Store s; }\n",
+        ("Store", 1),
+    ),
+    (
+        "java",
+        RefSyntax::Type,
+        DefKind::Interface,
+        "interface Task {}\nclass B { Task t; }\n",
+        ("Task", 1),
+    ),
+    (
+        "java",
+        RefSyntax::Type,
+        DefKind::Enum,
+        "enum Kind { A }\nclass B { Kind k; }\n",
+        ("Kind", 1),
+    ),
+    // ---- Python ----
+    (
+        "python",
+        RefSyntax::Call,
+        DefKind::Function,
+        "def helper():\n    pass\nhelper()\n",
+        ("helper", 1),
+    ),
+    (
+        "python",
+        RefSyntax::Call,
+        DefKind::Class,
+        "class Store:\n    pass\nStore()\n",
+        ("Store", 1),
+    ),
+    (
+        "python",
+        RefSyntax::Call,
+        DefKind::Constant,
+        "HANDLER = make()\nHANDLER()\n",
+        ("HANDLER", 1),
+    ),
+    (
+        "python",
+        RefSyntax::MemberCall,
+        DefKind::Method,
+        "class A:\n    def go(self):\n        pass\nA().go()\n",
+        ("go", 1),
+    ),
+    (
+        "python",
+        RefSyntax::MemberCall,
+        DefKind::Function,
+        "def helper():\n    pass\nmod.helper()\n",
+        ("helper", 1),
+    ),
+    (
+        "python",
+        RefSyntax::MemberCall,
+        DefKind::Class,
+        "class Store:\n    pass\nmodels.Store()\n",
+        ("Store", 1),
+    ),
+    (
+        "python",
+        RefSyntax::MemberCall,
+        DefKind::Field,
+        "class A:\n    def __init__(self, cb):\n        self.cb = cb\n    def run(self):\n        self.cb()\n",
+        ("cb", 3),
+    ),
+    // ---- Go ----
+    (
+        "go",
+        RefSyntax::Call,
+        DefKind::Function,
+        "package p\n\nfunc helper() {}\n\nfunc f() { helper() }\n",
+        ("helper", 1),
+    ),
+    (
+        "go",
+        RefSyntax::Call,
+        DefKind::Type,
+        "package p\n\ntype Meters float64\n\nfunc f() { _ = Meters(1) }\n",
+        ("Meters", 1),
+    ),
+    (
+        "go",
+        RefSyntax::Call,
+        DefKind::Variable,
+        "package p\n\nvar handler = make()\n\nfunc f() { handler() }\n",
+        ("handler", 1),
+    ),
+    (
+        "go",
+        RefSyntax::MemberCall,
+        DefKind::Method,
+        "package p\n\ntype T struct{}\n\nfunc (T) Go() {}\n\nfunc f(t T) { t.Go() }\n",
+        ("Go", 1),
+    ),
+    (
+        "go",
+        RefSyntax::MemberCall,
+        DefKind::Function,
+        "package p\n\nfunc Helper() {}\n\nfunc f() { pkg.Helper() }\n",
+        ("Helper", 1),
+    ),
+    (
+        "go",
+        RefSyntax::MemberCall,
+        DefKind::Type,
+        "package p\n\ntype Meters float64\n\nfunc f() { _ = units.Meters(1) }\n",
+        ("Meters", 1),
+    ),
+    (
+        "go",
+        RefSyntax::MemberCall,
+        DefKind::Field,
+        "package p\n\ntype T struct{ cb func() }\n\nfunc f(t T) { t.cb() }\n",
+        ("cb", 1),
+    ),
+    (
+        "go",
+        RefSyntax::Type,
+        DefKind::Type,
+        "package p\n\ntype T struct{}\n\nfunc f(t T) {}\n",
+        ("T", 1),
+    ),
+];
+
+#[test]
+fn site_kind_masks_accept_uses() {
+    // The kind masks come from the definition forms; each idiomatic use
+    // checks that its syntax accepts the kind of what it names, so a form
+    // that can be named in a way its row does not list (`new Runnable()
+    // { … }` naming an interface) fails here. Every narrowed syntax of
+    // every core language has uses.
+    let table = LanguageTable::core();
+    let mut failures = Vec::new();
+    for (lang, syntax, kind, source, (needle, nth)) in USES {
+        let file = parse(lang, source);
+        if !file.defs().any(|d| &*d.name == *needle && d.kind == *kind) {
+            failures.push(format!(
+                "{lang} {syntax:?}: no {kind:?} {needle} in {source:?}"
+            ));
+            continue;
+        }
+        let at = site(&file, source, needle, *nth);
+        if at.syntax != *syntax {
+            failures.push(format!(
+                "{lang}: {needle} #{nth} is {:?}, not {syntax:?}",
+                at.syntax
+            ));
+        }
+        if !accepts(table.get(lang).unwrap(), *syntax, *kind) {
+            failures.push(format!("{lang} {syntax:?} does not accept {kind:?}"));
+        }
+    }
+    let narrowed: &[(&str, &[RefSyntax])] = &[
+        (
+            "js",
+            &[RefSyntax::Call, RefSyntax::MemberCall, RefSyntax::Construct],
+        ),
+        (
+            "ts",
+            &[RefSyntax::Call, RefSyntax::Construct, RefSyntax::Type],
+        ),
+        ("tsx", &[RefSyntax::Type]),
+        (
+            "rust",
+            &[
+                RefSyntax::Call,
+                RefSyntax::MemberCall,
+                RefSyntax::Construct,
+                RefSyntax::Type,
+                RefSyntax::Member,
+            ],
+        ),
+        (
+            "java",
+            &[
+                RefSyntax::Call,
+                RefSyntax::MemberCall,
+                RefSyntax::Construct,
+                RefSyntax::Type,
+            ],
+        ),
+        ("python", &[RefSyntax::Call, RefSyntax::MemberCall]),
+        (
+            "go",
+            &[RefSyntax::Call, RefSyntax::MemberCall, RefSyntax::Type],
+        ),
+    ];
+    for (lang, syntaxes) in narrowed {
+        for syntax in *syntaxes {
+            if !USES.iter().any(|u| u.0 == *lang && u.1 == *syntax) {
+                failures.push(format!("{lang} {syntax:?}: no use sample"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn site_kind_table() {
     let table = LanguageTable::core();
@@ -301,23 +790,68 @@ fn site_kind_table() {
             .collect()
     };
     use DefKind::*;
-    assert_eq!(
-        accepted(rust, RefSyntax::Call),
-        [Function, Method, Class, Struct, Macro]
-    );
-    assert_eq!(
-        accepted(ts, RefSyntax::MemberCall),
-        accepted(rust, RefSyntax::Call)
-    );
-    assert_eq!(accepted(rust, RefSyntax::Construct), [Class, Struct]);
-    assert_eq!(
-        accepted(rust, RefSyntax::Type),
-        [Class, Interface, Struct, Enum, Trait, Type, Module]
-    );
-    assert_eq!(
-        accepted(rust, RefSyntax::Member),
-        [Method, Constant, Field, Variable]
-    );
+    use RefSyntax::{Call, Construct, MemberCall};
+    // The masks derived from the definition forms (crate::forms): every
+    // kind is accepted by each syntax its rows say can name it.
+    let expected: &[(&str, RefSyntax, &[DefKind])] = &[
+        // JS / TS: any value can hold a function or a class.
+        ("ts", Call, &[Function, Method, Constant, Field, Variable]),
+        (
+            "ts",
+            MemberCall,
+            &[Function, Method, Constant, Field, Variable],
+        ),
+        ("ts", Construct, &[Function, Class, Constant, Variable]),
+        (
+            "ts",
+            RefSyntax::Type,
+            &[Class, Interface, Enum, Type, Module],
+        ),
+        ("tsx", Call, &[Function, Method, Constant, Field, Variable]),
+        ("js", Call, &[Function, Method, Constant, Field, Variable]),
+        ("js", Construct, &[Function, Class, Constant, Variable]),
+        ("js", RefSyntax::Type, &[Class]),
+        // Rust: tuple variants are called, record variants constructed and
+        // matched (`Message::Move { x, y }`), consts and statics hold
+        // function pointers.
+        ("rust", Call, &[Function, Method, Struct, Macro, Constant]),
+        ("rust", MemberCall, &[Method]),
+        ("rust", Construct, &[Struct, Type, Constant]),
+        (
+            "rust",
+            RefSyntax::Type,
+            &[Struct, Enum, Trait, Type, Constant],
+        ),
+        ("rust", RefSyntax::Member, &[Method, Field]),
+        // Java: a record component's accessor is called.
+        ("java", Call, &[Method, Field]),
+        ("java", MemberCall, &[Method, Field]),
+        // `new Runnable() { … }` constructs an anonymous class of an
+        // interface.
+        ("java", Construct, &[Class, Interface]),
+        ("java", RefSyntax::Type, &[Class, Interface, Enum]),
+        // Python: classes, module constants and class attributes can be
+        // called.
+        ("python", Call, &[Function, Method, Class, Constant, Field]),
+        (
+            "python",
+            MemberCall,
+            &[Function, Method, Class, Constant, Field],
+        ),
+        ("python", Construct, &[]),
+        // Go: conversions are calls naming a type; function-typed variables
+        // and fields are called.
+        ("go", Call, &[Function, Type, Variable]),
+        ("go", MemberCall, &[Function, Method, Type, Field, Variable]),
+        ("go", RefSyntax::Type, &[Type]),
+    ];
+    for (lang, syntax, kinds) in expected {
+        assert_eq!(
+            accepted(table.get(lang).unwrap(), *syntax),
+            *kinds,
+            "{lang} {syntax:?}"
+        );
+    }
     assert_eq!(accepted(rust, RefSyntax::Plain), crate::DEF_KINDS);
     // Outside Rust the left side of `a.b` can be a namespace, module, package
     // or class: a member can name any kind (`utils.handle`, `models.User`).
@@ -331,13 +865,31 @@ fn site_kind_table() {
         RefSyntax::Member,
         Class
     ));
-    // Go conversions are call syntax naming a type.
-    assert_eq!(
-        accepted(go, RefSyntax::Call),
-        [Function, Method, Class, Struct, Type, Macro]
-    );
     assert!(accepts(go, RefSyntax::MemberCall, Type));
     assert!(!accepts(rust, RefSyntax::Call, Type));
+}
+
+#[test]
+fn site_rust_variants_are_reachable() {
+    // A variant is a constant: called (`Write(s)`), constructed
+    // (`Message::Move { x: 1 }`) and matched (`Message::Move { x } =>`).
+    let table = LanguageTable::core();
+    let rust = table.get("rust").unwrap();
+    let source = "enum Message { Move { x: u8 }, Write(u8) }\nfn f(m: Message) -> u8 {\n    let _ = Message::Move { x: 1 };\n    let _ = Message::Write(2);\n    match m { Message::Move { x } => x, _ => 0 }\n}\n";
+    let file = parse("rust", source);
+    let cases = [
+        ("Move", 1, RefSyntax::Construct),
+        ("Write", 1, RefSyntax::Call),
+        ("Move", 2, RefSyntax::Type),
+    ];
+    for (needle, nth, syntax) in cases {
+        let at = site(&file, source, needle, nth);
+        assert_eq!(at.syntax, syntax, "{needle} #{nth}");
+        assert!(
+            accepts(rust, at.syntax, DefKind::Constant),
+            "{needle} #{nth}"
+        );
+    }
 }
 
 #[test]

@@ -25,4 +25,4 @@ defs:
   48:15-48 method Name in table [public] (0)
   50:5-55 function check [package] (1)
   57:5-63 function FromFeet [public] (1)
-refs: Errorf Meters Name New append check error errors float64 fmt len make maxValue metresPerFoot string table units
+refs: ErrRange Errorf Meters Name New _ append check error errors float64 fmt len make maxValue metresPerFoot string table units v

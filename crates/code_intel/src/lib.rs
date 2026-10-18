@@ -7,10 +7,13 @@
 //! tables (`store`). The blob → path map, scheduling, queries and the
 //! plugin are later steps.
 
+mod forms;
 mod grammar;
 mod lang;
+mod locals;
 mod rules;
 mod util;
+mod walk;
 mod watchdog;
 
 pub mod extract;

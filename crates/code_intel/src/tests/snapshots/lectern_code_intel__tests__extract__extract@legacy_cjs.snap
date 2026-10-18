@@ -11,4 +11,4 @@ defs:
   6:28-8 function join in resolveAll [file] (1)
   11:4-11 variable cache [public]
   13:9-18 function remember [public] (2)
-refs: exports join map module remember require resolveAll
+refs: cache exports join map module path remember require resolveAll root

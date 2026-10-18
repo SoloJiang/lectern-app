@@ -55,7 +55,122 @@ struct Container {
     parent: Option<usize>,
 }
 
-pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Finished {
+/// `local_scopes`: the ranges of the file's local scopes (functions and
+/// blocks, not class or namespace bodies: `locals::ScopeKind::is_local`), by
+/// start and outermost first; a definition strictly inside one is
+/// `Visibility::File` in every language. None for a language pack, whose
+/// scopes Lectern does not classify: a definition inside a function or
+/// method definition is `File`.
+pub(crate) fn finish(
+    dialect: Dialect,
+    source: &[u8],
+    tags: Vec<RawTag>,
+    local_scopes: Option<&[Range<usize>]>,
+) -> Finished {
+    finish_inner(dialect, source, tags, None, local_scopes)
+}
+
+/// `finish` for the walkers (`crate::walk`): `tags` holds definitions and
+/// markers only, `refs` the reference names, deduplicated, in byte order,
+/// without the definitions' own names.
+pub(crate) fn finish_with_refs(
+    dialect: Dialect,
+    source: &[u8],
+    tags: Vec<RawTag>,
+    refs: Vec<Box<str>>,
+    local_scopes: &[Range<usize>],
+) -> Finished {
+    finish_inner(dialect, source, tags, Some(refs), Some(local_scopes))
+}
+
+/// The Rust `impl` blocks as containers: an `Impl` marker names the
+/// implemented type, an `ImplTrait` marker (on the `for` token) on the same
+/// block makes it a trait implementation. A trait implementation whose type
+/// has no name the queries take (`impl Trait for fn()`) is still one, with
+/// no name to give as `scope`.
+fn impl_containers(markers: &[(Marker, RawTag, Box<str>)]) -> Vec<Container> {
+    let trait_impls: HashSet<(usize, usize)> = markers
+        .iter()
+        .filter(|(marker, _, _)| *marker == Marker::ImplTrait)
+        .map(|(_, tag, _)| (tag.range.start, tag.range.end))
+        .collect();
+    let mut named: HashSet<(usize, usize)> = HashSet::new();
+    let mut out: Vec<Container> = markers
+        .iter()
+        .filter(|(marker, _, _)| *marker == Marker::Impl)
+        .map(|(_, tag, name)| {
+            let key = (tag.range.start, tag.range.end);
+            named.insert(key);
+            Container {
+                range: tag.range.clone(),
+                name: name.clone(),
+                def: None,
+                trait_impl: trait_impls.contains(&key),
+                parent: None,
+            }
+        })
+        .collect();
+    out.extend(
+        markers
+            .iter()
+            .filter(|(marker, tag, _)| {
+                *marker == Marker::ImplTrait && !named.contains(&(tag.range.start, tag.range.end))
+            })
+            .map(|(_, tag, _)| Container {
+                range: tag.range.clone(),
+                name: "".into(),
+                def: None,
+                trait_impl: true,
+                parent: None,
+            }),
+    );
+    out
+}
+
+/// For each container, whether its node lies strictly inside one of
+/// `scopes` (nested ranges, by start and outermost first); a scope with the
+/// container's own range is the scope the definition opens.
+fn inside_scopes(containers: &[Container], scopes: &[Range<usize>]) -> Vec<bool> {
+    let mut order: Vec<usize> = (0..containers.len()).collect();
+    order.sort_by_key(|&i| {
+        (
+            containers[i].range.start,
+            std::cmp::Reverse(containers[i].range.end),
+        )
+    });
+    let mut out = vec![false; containers.len()];
+    let mut open: Vec<&Range<usize>> = Vec::new();
+    let mut next = 0;
+    for i in order {
+        let r = &containers[i].range;
+        // Open the scopes that start before the definition, or at its start
+        // and end after it.
+        while let Some(s) = scopes.get(next)
+            && (s.start < r.start || s.start == r.start && s.end > r.end)
+        {
+            while open.last().is_some_and(|t| t.end <= s.start) {
+                open.pop();
+            }
+            open.push(s);
+            next += 1;
+        }
+        while open.last().is_some_and(|t| t.end <= r.start) {
+            open.pop();
+        }
+        out[i] = open
+            .iter()
+            .any(|t| t.start <= r.start && r.end <= t.end && *t != r);
+    }
+    out
+}
+
+fn finish_inner(
+    dialect: Dialect,
+    source: &[u8],
+    tags: Vec<RawTag>,
+    ref_names: Option<Vec<Box<str>>>,
+    local_scopes: Option<&[Range<usize>]>,
+) -> Finished {
     let text = |r: &Range<usize>| {
         source
             .get(r.clone())
@@ -87,18 +202,21 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
         )
     });
     defs.dedup_by(|b, a| a.0.name_range == b.0.name_range);
-    // A definition's own name is not a reference to it.
-    let def_names: HashSet<(usize, usize)> = defs
-        .iter()
-        .map(|(tag, _, _)| (tag.name_range.start, tag.name_range.end))
-        .collect();
-    let mut refs: Vec<Box<str>> = refs
-        .into_iter()
-        .filter(|(r, _)| !def_names.contains(&(r.start, r.end)))
-        .map(|(_, name)| name)
-        .collect();
-    refs.sort_unstable();
-    refs.dedup();
+    let refs = ref_names.unwrap_or_else(|| {
+        // A definition's own name is not a reference to it.
+        let def_names: HashSet<(usize, usize)> = defs
+            .iter()
+            .map(|(tag, _, _)| (tag.name_range.start, tag.name_range.end))
+            .collect();
+        let mut refs: Vec<Box<str>> = refs
+            .into_iter()
+            .filter(|(r, _)| !def_names.contains(&(r.start, r.end)))
+            .map(|(_, name)| name)
+            .collect();
+        refs.sort_unstable();
+        refs.dedup();
+        refs
+    });
 
     // Containers: definitions and `impl` blocks, outermost first.
     let mut containers: Vec<Container> = defs
@@ -111,18 +229,7 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
             trait_impl: false,
             parent: None,
         })
-        .chain(
-            markers
-                .iter()
-                .filter(|(marker, _, _)| matches!(marker, Marker::Impl | Marker::ImplTrait))
-                .map(|(marker, tag, name)| Container {
-                    range: tag.range.clone(),
-                    name: name.clone(),
-                    def: None,
-                    trait_impl: *marker == Marker::ImplTrait,
-                    parent: None,
-                }),
-        )
+        .chain(impl_containers(&markers))
         .collect();
     let mut order: Vec<usize> = (0..containers.len()).collect();
     order.sort_by_key(|&i| {
@@ -138,7 +245,14 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
     for &i in &order {
         let range = containers[i].range.clone();
         while let Some(&top) = stack.last() {
-            if containers[top].range.end >= range.end && containers[top].range.start <= range.start
+            // Definitions on one node (`const A, B = 1, 2`, `int a, b;`) are
+            // siblings, not each other's scope.
+            let sibling = containers[top].range == range
+                && containers[top].def.is_some()
+                && containers[i].def.is_some();
+            if containers[top].range.end >= range.end
+                && containers[top].range.start <= range.start
+                && !sibling
             {
                 break;
             }
@@ -154,6 +268,41 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
 
     let rules = FileRules::new(dialect, &markers);
     let lines = LineIndex::new(source);
+    // Local to the file: a definition inside a function or block. A member
+    // (a field or method, a TS parameter property inside its constructor
+    // included) is as local as the class or `impl` block it belongs to; a
+    // member whose nearest container is a function or method belongs to an
+    // anonymous class there, and is local by its own position.
+    let local: Vec<bool> = match local_scopes {
+        Some(scopes) => {
+            let inside = inside_scopes(&containers, scopes);
+            let kind_of = |c: usize| containers[c].def.map(|d| defs[d].1);
+            (0..defs.len())
+                .map(|i| {
+                    let mut c = i;
+                    while matches!(kind_of(c), Some(DefKind::Field | DefKind::Method))
+                        && let Some(p) = containers[c].parent
+                        && !matches!(kind_of(p), Some(DefKind::Function | DefKind::Method))
+                    {
+                        c = p;
+                    }
+                    inside[c]
+                })
+                .collect()
+        }
+        None => (0..defs.len())
+            .map(|i| {
+                Ancestors {
+                    containers: &containers,
+                    next: parent_of_def[i],
+                }
+                .any(|c| {
+                    c.def
+                        .is_some_and(|d| matches!(defs[d].1, DefKind::Function | DefKind::Method))
+                })
+            })
+            .collect(),
+    };
     let mut out: Vec<FileDef> = defs
         .iter()
         .enumerate()
@@ -162,18 +311,26 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
                 containers: &containers,
                 next: parent_of_def[i],
             };
-            let mut scope = parent_of_def[i].map(|p| containers[p].name.clone());
+            let mut scope = parent_of_def[i]
+                .map(|p| containers[p].name.clone())
+                .filter(|n| !n.is_empty());
             if dialect == Dialect::Go
                 && let Some(owner) = rules.owner(&tag.range)
             {
                 scope = Some(owner.into());
             }
-            let visibility = rules.visibility(
-                tag,
-                *kind,
-                name,
-                ancestors.map(|c| (c, c.def.map(|d| (&defs[d].0, defs[d].1)))),
-            );
+            // Inside a function or block: local to the file, in every
+            // language (docs/design/code_intel.md「抽取结果」).
+            let visibility = if local[i] {
+                Visibility::File
+            } else {
+                rules.visibility(
+                    tag,
+                    *kind,
+                    name,
+                    ancestors.map(|c| (c, c.def.map(|d| (&defs[d].0, defs[d].1)))),
+                )
+            };
             let arity = matches!(kind, DefKind::Function | DefKind::Method)
                 .then(|| tag.params.as_deref().map(|p| count_params(p, dialect)))
                 .flatten();
@@ -193,6 +350,137 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
             }
         })
         .collect();
+    // Enum members (Rust variants, Java constants) are as visible as their
+    // enum; JS / TS members already take the outermost definition's.
+    if matches!(dialect, Dialect::Rust | Dialect::Java) {
+        for i in 0..out.len() {
+            let parent = parent_of_def[i].and_then(|p| containers[p].def);
+            if let Some(p) = parent
+                && defs[i].1 == DefKind::Constant
+                && defs[p].1 == DefKind::Enum
+            {
+                out[i].def.visibility = out[p].def.visibility;
+            }
+        }
+    }
+    let mut refs = refs;
+    if dialect == Dialect::Python {
+        let kind_of = |c: usize| containers[c].def.map(|d| defs[d].1);
+        // Module level is no function or class scope around: an assignment
+        // elsewhere binds a local or a class member, not a module constant.
+        // A chained assignment (`A = B = None`) is no one's scope.
+        let mut keep = vec![true; out.len()];
+        for i in 0..out.len() {
+            if defs[i].1 != DefKind::Constant {
+                continue;
+            }
+            out[i].def.scope = None;
+            let in_class = Ancestors {
+                containers: &containers,
+                next: parent_of_def[i],
+            }
+            .any(|c| c.def.is_some_and(|d| defs[d].1 == DefKind::Class));
+            keep[i] = !local[i] && !in_class;
+        }
+        // The class attributes already defined in a class body.
+        let mut fields: HashSet<(usize, &str)> = (0..defs.len())
+            .filter(|&i| defs[i].1 == DefKind::Field && keep[i])
+            .filter_map(|i| Some((parent_of_def[i]?, &*defs[i].2)))
+            .collect();
+        let mut i = 0;
+        out.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+        // Instance attributes: `obj.name = …` in a method whose first
+        // parameter is `obj` (also in a function nested in it) is a field of
+        // the method's class; any other attribute assignment is a member
+        // reference, as without the marker.
+        let receivers: std::collections::HashMap<(usize, usize), &str> = markers
+            .iter()
+            .filter(|(marker, _, _)| *marker == Marker::Receiver)
+            .map(|(_, tag, name)| ((tag.range.start, tag.range.end), &**name))
+            .collect();
+        let starts: Vec<usize> = order.iter().map(|&c| containers[c].range.start).collect();
+        let innermost = |range: &Range<usize>| -> Option<usize> {
+            let j = starts.partition_point(|&s| s <= range.start);
+            let mut c = order[j.checked_sub(1)?];
+            loop {
+                let r = &containers[c].range;
+                if r.start <= range.start && range.end <= r.end {
+                    return Some(c);
+                }
+                c = containers[c].parent?;
+            }
+        };
+        for (marker, tag, name) in &markers {
+            if *marker != Marker::Attribute {
+                continue;
+            }
+            let class = innermost(&tag.range).and_then(|mut m| {
+                while kind_of(m) == Some(DefKind::Function) {
+                    m = containers[m].parent?;
+                }
+                let receiver = (kind_of(m) == Some(DefKind::Method))
+                    .then(|| receivers.get(&(containers[m].range.start, containers[m].range.end)))
+                    .flatten()?;
+                let object = source
+                    .get(tag.range.start..tag.name_range.start)
+                    .and_then(|b| std::str::from_utf8(b).ok())?
+                    .trim_end()
+                    .strip_suffix('.')?
+                    .trim();
+                let class = containers[m].parent?;
+                (object == *receiver && kind_of(class) == Some(DefKind::Class)).then_some(class)
+            });
+            let Some(class) = class else {
+                continue;
+            };
+            if !fields.insert((class, &**name)) {
+                continue;
+            }
+            out.push(FileDef {
+                def: Def {
+                    name: name.clone(),
+                    kind: DefKind::Field,
+                    line: tag.row,
+                    column: tag.column,
+                    end_line: lines.last_row(tag.range.start, tag.range.end),
+                    scope: Some(containers[class].name.clone()),
+                    visibility: if local[class] {
+                        Visibility::File
+                    } else {
+                        Visibility::Unknown
+                    },
+                    arity: None,
+                },
+                name_range: tag.name_range.clone(),
+                range: tag.range.clone(),
+            });
+        }
+    }
+    // A marker that takes a name node from the reference patterns (an
+    // exported name, an implemented or receiver type, an attribute write)
+    // leaves the name a reference name, unless it became the definition at
+    // that position (`Marker::consumes_name`).
+    let def_names: HashSet<(usize, usize)> = out
+        .iter()
+        .map(|d| (d.name_range.start, d.name_range.end))
+        .collect();
+    let before = refs.len();
+    refs.extend(
+        markers
+            .iter()
+            .filter(|(marker, tag, _)| {
+                marker.consumes_name()
+                    && !def_names.contains(&(tag.name_range.start, tag.name_range.end))
+            })
+            .map(|(_, _, name)| name.clone()),
+    );
+    if refs.len() != before {
+        refs.sort_unstable();
+        refs.dedup();
+    }
     out.sort_by_key(|d| (d.def.line, d.def.column, d.range.start));
     Finished { defs: out, refs }
 }
@@ -228,13 +516,14 @@ struct FileRules<'a> {
     dialect: Dialect,
     /// Rust `pub`, Java `private`: where the modifier starts.
     modifier_starts: HashSet<usize>,
-    /// JS / TS export statements.
+    /// JS / TS export statements and `declare global` blocks, by start;
+    /// they do not overlap (all are at program level).
     exports: Vec<Range<usize>>,
     export_names: HashSet<&'a str>,
     /// JS / TS: the file has import or export statements.
     es_module: bool,
     /// Go: method range → receiver type.
-    owners: Vec<(Range<usize>, &'a str)>,
+    owners: std::collections::HashMap<(usize, usize), &'a str>,
 }
 
 impl<'a> FileRules<'a> {
@@ -245,7 +534,7 @@ impl<'a> FileRules<'a> {
             exports: Vec::new(),
             export_names: HashSet::new(),
             es_module: false,
-            owners: Vec::new(),
+            owners: std::collections::HashMap::new(),
         };
         for (marker, tag, name) in markers {
             match marker {
@@ -256,23 +545,34 @@ impl<'a> FileRules<'a> {
                     rules.exports.push(tag.range.clone());
                     rules.es_module = true;
                 }
+                // `declare global { … }`: its declarations are global, as
+                // visible as exported ones.
+                Marker::Global => rules.exports.push(tag.range.clone()),
                 Marker::ExportName => {
                     rules.export_names.insert(name);
                     rules.es_module = true;
                 }
                 Marker::Module => rules.es_module = true,
-                Marker::Owner => rules.owners.push((tag.range.clone(), name)),
-                Marker::Impl | Marker::ImplTrait => {}
+                Marker::Owner => {
+                    rules
+                        .owners
+                        .insert((tag.range.start, tag.range.end), &**name);
+                }
+                Marker::Impl | Marker::ImplTrait | Marker::Receiver | Marker::Attribute => {}
             }
         }
+        rules.exports.sort_by_key(|r| r.start);
         rules
     }
 
     fn owner(&self, range: &Range<usize>) -> Option<&'a str> {
-        self.owners
-            .iter()
-            .find(|(r, _)| r == range)
-            .map(|(_, name)| *name)
+        self.owners.get(&(range.start, range.end)).copied()
+    }
+
+    /// Whether `range` lies in an export statement or `declare global`.
+    fn in_export(&self, range: &Range<usize>) -> bool {
+        let i = self.exports.partition_point(|r| r.start <= range.start);
+        i > 0 && range.end <= self.exports[i - 1].end
     }
 
     fn visibility<'c>(
@@ -323,11 +623,7 @@ impl<'a> FileRules<'a> {
                         top = (&def_tag.range, &container.name);
                     }
                 }
-                let exported = self
-                    .exports
-                    .iter()
-                    .any(|r| r.start <= top.0.start && top.0.end <= r.end)
-                    || self.export_names.contains(top.1);
+                let exported = self.in_export(top.0) || self.export_names.contains(top.1);
                 if exported || !self.es_module {
                     // A script or CommonJS file: its top level is shared.
                     Visibility::Public

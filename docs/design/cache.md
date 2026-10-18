@@ -494,7 +494,7 @@ impl TableWrite {
 ### 访问时间
 
 - `touch` 把单元 ID 并进分库的待写集合（与读命中共用，最多 4096 个），不读 `entry`。集合满时在这次调用里写回（一个只更新访问时间的写事务），再接着记录余下的 ID；写回失败时丢掉这次调用余下的 ID，只影响淘汰顺序。所以标记 10 万个单元最多写回 25 次，待写集合仍不超过 32 KiB。
-- 写回只更新 `atime` 早于写回时刻 60 分钟以上的条目（`… WHERE id = ? AND atime < ?`），所以一小时内重复标记的单元不改变文件，精度与读命中相同。
+- 写回只更新 `atime` 早于写回时刻 60 分钟以上的条目（`… WHERE atime < ?2 AND id IN (?3, …)`），所以一小时内重复标记的单元不改变文件，精度与读命中相同。写回按集合执行：每 1024 个 ID 一条语句，`IN` 里是固定个数的占位符，最后一组用不到的绑定 NULL。
 - 写回可能发生在 `touch` 的调用里。用户等待结果的路径（code_intel 的查询命中）先交出结果再调用 `touch`，或把它交给 `Background` 任务。
 
 ### 淘汰代数
@@ -681,6 +681,13 @@ impl TableWrite {
   - 第一次建表：分库里已有 20 万个 300 字节的条目时，第一次 `read`（建表、检查、建部分索引）44 ms；之后的 `read` 3.4 µs（release 构建，一次性的测试，没有提交）。
 - 没有验证的：macOS 上没有运行，`cache/tables_*` 由 macOS CI 判定；code_intel 真实的表和语句由 code_intel 第 2 步接入时验证（`store_*`）。
 
+访问时间的集合写回（[#17](https://github.com/SoloJiang/lectern-app/issues/17)，code_intel 第 2 步的 `code_intel/warm_100k` 在 macOS CI 上中位数 537、549 ms，超出 500 ms；其中大部分是 `touch` 逐行写回），同一台机器。
+
+- `just check`、`just test`（整个工作区 1102 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过；`just bench cache/` 的冒烟运行通过。`just test -p lectern-cache`：89 个测试通过，新增 `tables_touch_write_back_spans_chunks_and_skips_recent_units`：2055 个单元跨三组写回（最后一组不满），一小时以前写入的单元换成新的访问时间，一小时以内写入的保持不变，已删除的单元跳过；写回语句的查询计划按主键逐个查找，不扫描 `entry_atime`。原有的 `touch_*` 和 `tables_touch_*` 照常通过。
+- `cache/tables_touch`（`just bench --measure cache/tables_touch`，各三次）：逐行写回 8.54、8.54、8.63 ms；集合写回 7.28、7.34、7.24 ms。
+- 更大的规模（一次性的测量，没有提交）：5 万个 `testing::tags` 单元，每次 `touch` 500 个、共 100 次。访问时间都已过期（全部要改）时，逐行 154 ms，每组 256 个 138 ms，每组 1024 个 127 ms；访问时间都在一小时以内（一行也不改）时，逐行 179 ms，集合 8.0 ms。用 `json_each` 一次传入全部 ID 时分别是 151 ms 和 13.7 ms，所以选了固定占位符、每组 1024 个。
+- callgrind（`tables_touch`，集合写回）：要改的行占绝大部分开销，几乎都在索引维护上。`sqlite3BtreeInsert` 45%，`sqlite3BtreeIndexMoveto` 44%，页的分裂 `balance` 21%，`sqlite3BtreeDelete` 12%。每改一行，`entry_atime` 和配额淘汰的部分索引 `entry_ns<id>` 都要删掉旧键、插入新键。语句本身的开销（绑定、单步执行、重置）是逐行写回时省下的那部分。
+
 ## 与设计的差异
 
 第 1 步：
@@ -721,3 +728,8 @@ impl TableWrite {
 - 要求第 8 条只写了「被淘汰或删除、或分库被删除重建时加一」。另外在分库停用时，以及本次运行打开过的分库再打开时发现是新文件（目录清理或用户删除了文件）时加一：这两种情况下之前的单元同样不在了。本次运行第一次打开时新建文件不加一。
 - 设计没有写的：单元 ID 是 rowid，删除后可能重用（测试 `tables_create_replaces_the_unit_of_a_key` 里新单元拿到了旧单元的 ID），所以「登记的规则」要求代数变化后不再沿用旧 ID；`Row::unit`、`Unit::from_id` 和 `TableWrite::remove_unit` 是为使用方从自己的表里读出单元 ID 后使用而加的；登记违规时只写 stderr、不 panic，测试可以检查这时什么也没建。`Stats` 没有新增计数：表的读不计入 `hits` / `misses`，写入计入 `written` 和 `dropped`，淘汰计入 `evicted_bytes`。
 - `testing` 增加 `tags`（code_intel 形状的三张表和写入一个单元的函数），供 bench 的 `cache/tables_*` 使用；`crates/cache/src/tests/tables.rs` 的测试用自己的登记（多个前缀和配额）。
+
+访问时间的集合写回：
+
+- 「访问时间」原来写的是逐个 ID 执行 `… WHERE id = ? AND atime < ?`。现在每 1024 个 ID 执行一条 `UPDATE entry SET atime = ?1 WHERE atime < ?2 AND id IN (…)`（「访问时间」已改）。精度规则不变：一小时以内写入或写回过的条目不改。读命中和 `touch` 的写回都走这条路径，写在自己的事务里或其他写事务的开头，位置不变。这条语句占预编译语句缓存的一条。
+- 要改的行很多时（第二天的热启动，所有单元都过期），收益只有约 15%：开销在两个以 `atime` 为键的索引上（见「实际验证」），只改写回的方式省不掉。要再快，就得减少以 `atime` 为键的索引（比如让配额淘汰改用 `entry_atime` 加 `ns` 过滤），这会改变表结构和 `SCHEMA_VERSION`，不在这次改动里。

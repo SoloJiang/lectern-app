@@ -161,6 +161,34 @@ fn lang_lease_lives_with_the_language() {
     assert_eq!(Arc::strong_count(&module), 1);
 }
 
+#[test]
+fn lang_lease_outlives_grammar_backed_values() {
+    // A pack's compiled queries and every tree hold pointers into the
+    // loaded module: the lease is dropped last, after the tree of a parsed
+    // file and after the language's compiled queries.
+    use crate::testing::{DropTrace, take_drops};
+    let module: Arc<dyn std::any::Any + Send + Sync> = Arc::new(DropTrace("unload"));
+    let table = LanguageTable::core().with_pack(name("kotlin"), java_pack(4, module));
+    let lang = table.get("kotlin").unwrap().clone();
+    assert!(lang.prepare());
+    let file = crate::site::ParsedFile::parse(
+        &lang,
+        Arc::from(&b"class A { void f() { int x = 1; } }"[..]),
+        &crate::SystemClock,
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .expect("parsed");
+    drop(table);
+    // Only the core languages went with the table.
+    assert!(take_drops().iter().all(|d| *d == "compiled"));
+    drop(lang);
+    // The parsed file keeps the language, and so the module, alive.
+    assert_eq!(take_drops(), Vec::<&str>::new());
+    drop(file);
+    assert_eq!(take_drops(), ["tree", "compiled", "unload"]);
+}
+
 /// `name` → `version` of every package in the workspace's Cargo.lock.
 fn locked_versions() -> HashMap<String, Vec<String>> {
     let lock = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))

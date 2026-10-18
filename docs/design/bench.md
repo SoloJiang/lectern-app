@@ -556,7 +556,7 @@ crates/bench/
 | `plugin/*/activate` | 四段之和 < 1 ms | [kernel](kernel.md#性能) | 第 5 步 |
 | `plugin/after_first_frame` | 激活条件含 `AfterFirstFrame` 的插件四段之和合计 < 5 ms | [kernel](kernel.md#性能) | 第 5 步 |
 | `plugin/*/resident` | 只记录；插件的设计文档给出数字时另加具体条目 | [kernel](kernel.md#性能) | 第 5 步 |
-| `plugin/project/resident_cloudprint`、`plugin/project/resident_100k` | < 2 MB / < 12 MB | [project](project.md#性能) | `project` |
+| `plugin/project/resident_cloudprint`、`plugin/project/resident_100k` | < 2 MB / < 16 MB | [project](project.md#性能) | `project` |
 | `agents/parse_throughput` | 中位数吞吐 ≥ 200 MB/s | [agents](agents.md#性能) | 第 1 步 |
 | `agents/append_4k` | 中位数 < 1 ms | [agents](agents.md#性能) | 第 1 步 |
 | `agents/discover_1000` | 中位数 < 500 ms | [agents](agents.md#性能) | `agents` 第 4 步 |
@@ -590,7 +590,7 @@ crates/bench/
 | `fs_watch/reflog_append` | 中位数 < 1 ms（追加一行 reflog 到记录进入批次，不含后端延迟） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 1 步（同上） |
 | `fs_watch/flush_idle`、`fs_watch/write_to_deliver` | 中位数 < 5 ms / < 120 ms（macOS 真实后端） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
 | `fs_watch/resident` | 常驻增量 < 1 MB；`Memory` | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
-| `code_intel/extract_throughput` | 中位数吞吐 ≥ 4 MB/s（单线程，首发的每种语言约 1 MiB，切成约 8 KiB 的文件，看门狗在运行；测量方式见 [ADR 0031](../adr/0031.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
+| `code_intel/extract_throughput` | 中位数吞吐 ≥ 4 MB/s（单线程，首发的每种语言约 1 MiB，切成约 8 KiB 的文件，看门狗在运行；核心语言用一次遍历抽取；测量方式和预算的推导见 [ADR 0031](../adr/0031.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `code_intel/extract_1mib` | 只记录（每种语言一个约 1 MiB 的文件，对照单文件 250 ms 的截止时间） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `code_intel/warm_100k` | 中位数 < 500 ms（热启动的存在检查：缓存里已有 10 万个文件的单元，200 次 500 个 OID 的查询，只读、不标记访问） | [code_intel](code_intel.md#性能) | `code_intel` 第 2 步 |
 | `code_intel/warm_100k_touch` | 只记录（存在检查之后推迟进行的访问标记：10 万个命中的单元每次 1024 个，访问时间都已过 1 小时，全部要写回） | [code_intel](code_intel.md#性能) | `code_intel` 第 2 步 |

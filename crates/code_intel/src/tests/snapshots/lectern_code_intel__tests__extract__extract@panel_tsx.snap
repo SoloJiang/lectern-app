@@ -15,4 +15,4 @@ defs:
   10:50-10 field onClick in Row [file]
   14:16-31 function Panel [public] (1)
   16:8-16 function toggle in Panel [file] (0)
-refs: Badge PanelProps Row count h2 items key label length li map onClick onSelect section title ul useState
+refs: Badge Panel PanelProps Row count item items key label length map onClick onSelect open setOpen title useState

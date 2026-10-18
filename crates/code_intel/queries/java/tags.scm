@@ -4,8 +4,9 @@
 ; (commit 94703d5a6bed02b98e438d7cad1136c01a60ba2c), MIT.
 ; Lectern's changes:
 ; - @doc captures the parameter list (Lectern counts parameters from it).
-; - Adds records, enums, annotation types, fields, interface constants and
-;   enum constants.
+; - Adds records and their components, enums, annotation types and their
+;   elements, fields, interface constants and enum constants
+;   (docs/design/code_intel.md「定义形式」).
 ; - Adds every type identifier as a type reference (last, so that
 ;   definitions win for their own names).
 ; - `reference.lectern.private` is a marker read by the extractor, never
@@ -42,6 +43,20 @@
 
 (enum_constant
   name: (identifier) @name) @definition.constant
+
+; A record's components are its fields (with accessors of the same name).
+(record_declaration
+  parameters: (formal_parameters
+    [
+      (formal_parameter
+        name: (identifier) @name)
+      (spread_parameter
+        (variable_declarator
+          name: (identifier) @name))
+    ] @definition.field))
+
+(annotation_type_element_declaration
+  name: (identifier) @name) @definition.method
 
 ; ---- markers -----------------------------------------------------------
 

@@ -491,9 +491,11 @@ pub static BUDGETS: &[Budget] = &[
         State::Planned("project"),
         Process,
     ),
+    // 12 MB before the file list carried blob OIDs; 100k × 32 bytes (a
+    // SHA-256 repository) adds 3.05 MiB, rounded up to 16 MB.
     share(
         "plugin/project/resident_100k",
-        &[median(Limit::BytesBelow(12 * MB))],
+        &[median(Limit::BytesBelow(16 * MB))],
         PROJECT,
         State::Planned("project"),
         Process,
@@ -805,7 +807,8 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // ---- fs_watch (docs/design/fs_watch.md「性能」) ----
     // Single-thread extraction, about 1 MiB of each first-release language as
-    // 8 KiB files (repository-shaped, ADR 0031).
+    // 8 KiB files (repository-shaped), by the core languages' one-walk
+    // extractors (ADR 0031).
     share(
         "code_intel/extract_throughput",
         &[median(Limit::ThroughputAtLeast(4 * MB))],

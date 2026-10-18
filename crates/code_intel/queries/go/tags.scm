@@ -32,10 +32,14 @@
 (type_alias
   name: (type_identifier) @name) @definition.type
 
+; Every name of `const A, B = 1, 2`: the grammar's `name` field of a
+; const_spec also spans the commas, and `name: (identifier)` in this nested
+; pattern matches only the first name. An identifier child of a const_spec
+; is always a name (types are type identifiers, values an expression list).
 (source_file
   (const_declaration
     (const_spec
-      name: (identifier) @name) @definition.constant))
+      (identifier) @name) @definition.constant))
 
 (source_file
   (var_declaration
@@ -88,6 +92,13 @@
   ]) @reference.call
 
 (type_identifier) @name @reference.type
+
+; A composite literal's key (`&Server{addr: addr}`): a field name in a
+; struct literal, an expression in a map literal. No locals predicate, so a
+; same-named local does not drop the field name.
+(keyed_element
+  key: (literal_element
+    (identifier) @name)) @reference.member
 
 ; Catch-all, last so that definitions win for their own names: every
 ; identifier that locals does not resolve, and every field or selector
