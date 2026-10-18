@@ -161,39 +161,73 @@ impl Inner {
         self.warm_site_queries(&project);
     }
 
-    /// Compiles `ParsedFile`'s query for every language the project's map
-    /// has a file in and that is not compiled yet, in one `Background`
-    /// task: a jump's step 1, the search and find references parse files
-    /// on the `Interactive` thread, and a core language's extraction (the
-    /// walker) never compiles it, so the first jump in each language would
-    /// pay 30–140 ms. After the first frame like the whole plugin
-    /// (`AfterFirstFrame`); at most one such task at a time, which looks
-    /// again when it ends; it holds the kernel busy.
-    fn warm_site_queries(self: &Arc<Self>, project: &Arc<Project>) {
-        let langs: Vec<crate::extract::Lang> = lock(&project.state)
+    /// Compiles `ParsedFile`'s query for every language some open
+    /// project's map has a file in and that is not compiled yet, in one
+    /// `Background` task: a jump's step 1, the search and find references
+    /// parse files on the `Interactive` thread, and a core language's
+    /// extraction (the walker) never compiles it, so the first jump in each
+    /// language would pay 30–140 ms. After the first frame like the whole
+    /// plugin (`AfterFirstFrame`); it holds the kernel busy.
+    ///
+    /// Level-triggered: a request only makes sure the task runs; the task
+    /// itself looks at every open project, compiles until it finds nothing
+    /// left, and looks once more after clearing `warming`, so a request
+    /// that found the task running (another project's reconcile, a map
+    /// installed meanwhile) is never lost.
+    pub(crate) fn warm_site_queries(self: &Arc<Self>, project: &Arc<Project>) {
+        // Nothing of this project's is cold: its request asks for nothing.
+        if !lock(&project.state)
             .map
             .languages()
-            .into_iter()
-            .filter(|l| !l.site_query_ready())
-            .collect();
-        if langs.is_empty() || self.warming.swap(true, Ordering::AcqRel) {
+            .iter()
+            .any(|l| !l.site_query_ready())
+        {
+            return;
+        }
+        if self.warming.swap(true, Ordering::AcqRel) {
             return;
         }
         let me = self.clone();
-        let p = project.clone();
         let spawned = self
             .host
             .spawn_busy("site queries", Priority::Background, move || {
-                for lang in &langs {
-                    lang.prepare_site();
+                loop {
+                    let cold = me.cold_languages();
+                    if cold.is_empty() {
+                        me.warming.store(false, Ordering::Release);
+                        // A request between the look and the store found
+                        // `warming` set and left its languages to this task.
+                        if me.cold_languages().is_empty() || me.warming.swap(true, Ordering::AcqRel)
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                    for lang in &cold {
+                        lang.prepare_site();
+                    }
                 }
-                me.warming.store(false, Ordering::Release);
-                // Languages a reconcile found while this one ran.
-                me.warm_site_queries(&p);
             });
         if !spawned {
             self.warming.store(false, Ordering::Release);
         }
+    }
+
+    /// The languages of every open project's map whose `ParsedFile` query
+    /// is not compiled yet. A language in several maps is compiled once
+    /// (`prepare_site` again is a no-op).
+    pub(crate) fn cold_languages(&self) -> Vec<crate::extract::Lang> {
+        let open: Vec<Arc<Project>> = lock(&self.open).clone();
+        let mut cold = Vec::new();
+        for project in open {
+            let map = lock(&project.state).map.clone();
+            cold.extend(
+                map.languages()
+                    .into_iter()
+                    .filter(|l| !l.site_query_ready()),
+            );
+        }
+        cold
     }
 
     /// One pass over the steps, in dependency order: whether some step

@@ -117,64 +117,12 @@ impl Inner {
         );
 
         let mut units: Vec<Unit> = Vec::new();
-        if !of.local {
-            // 1. Indexed files whose reference names include the name.
-            let versions: Vec<Version> = snap
-                .table
-                .iter()
-                .filter(|x| !snap.disabled.contains(x.name()))
-                .filter(|x| compatible(&snap.table, x.name(), lang.name()))
-                .map(Version::of)
-                .collect();
-            let stored = snap
-                .project
-                .store
-                .refs_by_name(&of.name, &versions)
-                .unwrap_or_default();
-            let mut jobs = Vec::new();
-            for s in &stored {
-                for eff in snap.map.paths(&s.oid, &s.lang.0) {
-                    jobs.push((eff, s.unit));
-                }
-            }
-            jobs.sort_by(|(a, _), (b, _)| {
-                (ranker.file_order(&a.path), &a.path).cmp(&(ranker.file_order(&b.path), &b.path))
-            });
-            for (eff, unit) in jobs {
-                if run.stopped(snap) {
-                    return;
-                }
-                if found.parsed.contains(&(eff.path.clone(), eff.oid)) {
-                    continue;
-                }
-                let Some(bytes) = self.read_file(snap, &eff.path) else {
-                    continue;
-                };
-                let key = self.key_of(snap, &eff.path, &bytes, eff.oid);
-                if key == eff.oid {
-                    units.push(unit);
-                }
-                let Some(file_lang) = snap.table.get(&eff.lang.name().0).cloned() else {
-                    continue;
-                };
-                let file = File {
-                    worktree: snap.worktree.clone(),
-                    path: eff.path.clone(),
-                    origin: TextOrigin::Worktree,
-                    lang: file_lang,
-                };
-                self.references_in(
-                    run,
-                    snap,
-                    of,
-                    &ranker,
-                    &file,
-                    key,
-                    bytes.into(),
-                    None,
-                    &mut found,
-                );
-            }
+        let mut cut = snap.hinted;
+        // 1. Indexed files whose reference names include the name.
+        if !of.local
+            && !self.indexed_references(run, snap, of, &ranker, &lang, &mut found, &mut units)
+        {
+            return;
         }
         if run.stopped(snap) {
             return;
@@ -183,10 +131,18 @@ impl Inner {
         let completeness = if of.local {
             Some(lectern_services::code_intel::Completeness::Complete)
         } else {
+            self.run_after_lookup(snap);
             let skip = found.parsed.clone();
             let scope = snap.search_scope(&l.path, &lang, &skip);
+            // Files the scope takes as indexed whose unit was written after
+            // the lookup: their references are read now.
+            if snap.hinted_since(&mut cut)
+                && !self.indexed_references(run, snap, of, &ranker, &lang, &mut found, &mut units)
+            {
+                return;
+            }
             let name = of.name.clone();
-            self.search(
+            let result = self.search(
                 run,
                 snap,
                 &scope,
@@ -218,7 +174,15 @@ impl Inner {
                         &mut found,
                     )
                 },
-            )
+            );
+            // The counts of `Partial` read hints too.
+            if result.is_some()
+                && snap.hinted_since(&mut cut)
+                && !self.indexed_references(run, snap, of, &ranker, &lang, &mut found, &mut units)
+            {
+                return;
+            }
+            result
         };
         let Some(completeness) = completeness else {
             return;
@@ -232,6 +196,73 @@ impl Inner {
         units.sort();
         units.dedup();
         snap.project.store.touch(&units);
+    }
+
+    /// The indexed files whose reference names include the name (`ci_ref`),
+    /// nearest first, each not parsed yet read and parsed. Run again when
+    /// hints were installed after the lookup ([`Snap::hinted_since`]).
+    /// False when the query stopped.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the query's snapshot, the definition and what it adds to"
+    )]
+    fn indexed_references(
+        &self,
+        run: &Run,
+        snap: &Snap,
+        of: &DefinitionRef,
+        ranker: &Ranker<'_>,
+        lang: &Lang,
+        found: &mut Found,
+        units: &mut Vec<Unit>,
+    ) -> bool {
+        let versions: Vec<Version> = snap
+            .table
+            .iter()
+            .filter(|x| !snap.disabled.contains(x.name()))
+            .filter(|x| compatible(&snap.table, x.name(), lang.name()))
+            .map(Version::of)
+            .collect();
+        let stored = snap
+            .project
+            .store
+            .refs_by_name(&of.name, &versions)
+            .unwrap_or_default();
+        let mut jobs = Vec::new();
+        for s in &stored {
+            for eff in snap.map.paths(&s.oid, &s.lang.0) {
+                jobs.push((eff, s.unit));
+            }
+        }
+        jobs.sort_by(|(a, _), (b, _)| {
+            (ranker.file_order(&a.path), &a.path).cmp(&(ranker.file_order(&b.path), &b.path))
+        });
+        for (eff, unit) in jobs {
+            if run.stopped(snap) {
+                return false;
+            }
+            if found.parsed.contains(&(eff.path.clone(), eff.oid)) {
+                continue;
+            }
+            let Some(bytes) = self.read_file(snap, &eff.path) else {
+                continue;
+            };
+            let key = self.key_of(snap, &eff.path, &bytes, eff.oid);
+            if key == eff.oid {
+                units.push(unit);
+            }
+            let Some(file_lang) = snap.table.get(&eff.lang.name().0).cloned() else {
+                continue;
+            };
+            let file = File {
+                worktree: snap.worktree.clone(),
+                path: eff.path.clone(),
+                origin: TextOrigin::Worktree,
+                lang: file_lang,
+            };
+            self.references_in(run, snap, of, ranker, &file, key, bytes.into(), None, found);
+        }
+        true
     }
 
     /// Parses one file and sorts every reference of the name in it, with

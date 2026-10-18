@@ -441,24 +441,33 @@ impl IndexedHints {
         }
     }
 
-    pub fn set(&self, slot: &HintSlot, oid: &BlobId, stamp: HintStamp) {
+    /// Sets a hint; whether it did not match before. Writers hold the
+    /// project's lock ([`State::hint_paths`](crate::index::state::State::hint_paths)).
+    pub fn set(&self, slot: &HintSlot, oid: &BlobId, stamp: HintStamp) -> bool {
+        let want = (prefix(oid), stamp.word());
         match slot {
             HintSlot::Base(i) => {
                 let i = *i as usize * 2;
-                if let Some(s) = self.slots.get(i..i + 2) {
-                    // Clear the stamp first: a reader between the stores sees
-                    // an unset hint, never the new prefix with an old stamp.
-                    s[1].store(0, Ordering::Release);
-                    s[0].store(prefix(oid), Ordering::Release);
-                    s[1].store(stamp.word(), Ordering::Release);
+                let Some(s) = self.slots.get(i..i + 2) else {
+                    return false;
+                };
+                if s[0].load(Ordering::Acquire) == want.0 && s[1].load(Ordering::Acquire) == want.1
+                {
+                    return false;
                 }
+                // Clear the stamp first: a reader between the stores sees
+                // an unset hint, never the new prefix with an old stamp.
+                s[1].store(0, Ordering::Release);
+                s[0].store(want.0, Ordering::Release);
+                s[1].store(want.1, Ordering::Release);
+                true
             }
-            HintSlot::Extra(path) => {
-                self.extra
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(path.clone(), (prefix(oid), stamp.word()));
-            }
+            HintSlot::Extra(path) => self
+                .extra
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(path.clone(), want)
+                .is_none_or(|old| old != want),
         }
     }
 

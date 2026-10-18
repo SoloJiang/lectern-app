@@ -406,12 +406,33 @@ pub(crate) struct State {
     /// Extractions in flight by key, with the one that owns the entry
     /// (tiers 1 and 2 take a key over from a batch, tier 1 from tier 2).
     pub in_flight: HashMap<(BlobId, LangName), Owner>,
+    /// Hint installations: one more for every locked section that made
+    /// some hint match ([`State::hint_paths`]). A query records it before
+    /// its index lookup (its cut); a hint it sees that was installed after
+    /// the cut is for a file the lookup may have missed (「输入代数与派生
+    /// 状态」).
+    pub hinted: u64,
     /// On battery, a query or `names` lets tiers 4 and 5 go on until the
     /// project closes or the power source changes.
     pub demand: bool,
 }
 
 impl State {
+    /// Sets the hints of every path the map has for `oid` in `lang`, after
+    /// its unit was found or written; counts the installation in
+    /// [`hinted`](Self::hinted) when some hint changed. Every hint is set
+    /// here, under the project's lock, so a query that reads a hint and
+    /// then the count under the lock sees that hint's installation.
+    pub fn hint_paths(&mut self, oid: &BlobId, lang: &str, stamp: HintStamp) {
+        let mut changed = false;
+        for eff in self.map.paths(oid, lang) {
+            changed |= self.map.hints.set(&eff.slot, oid, stamp);
+        }
+        if changed {
+            self.hinted += 1;
+        }
+    }
+
     pub fn new(session: u64, table: &LanguageTable, grammar: u64) -> State {
         State {
             session,
@@ -422,6 +443,7 @@ impl State {
             root_tried: false,
             hash: HashKind::Sha1,
             gens: Gens::default(),
+            hinted: 0,
             seen: Seen::default(),
             check_head: true,
             check_index: true,

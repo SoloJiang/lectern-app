@@ -93,6 +93,10 @@ pub(crate) struct Prepared {
     /// Stored units the candidates came from, marked as used afterwards.
     pub units: Vec<Unit>,
     pub scanned: Vec<Scanned>,
+    /// The hint installations counted before step 3's lookup (the
+    /// snapshot's, a prefetch's own): hints installed after it are for
+    /// files the lookup may have missed ([`Snap::hinted_since`]).
+    pub hinted: u64,
 }
 
 impl Prepared {
@@ -330,6 +334,7 @@ impl Inner {
             extracted: HashMap::new(),
             units: Vec::new(),
             scanned: Vec::new(),
+            hinted: snap.hinted,
         };
         let current = |definition: DefinitionRef, evidence: Evidence| Candidate {
             in_review: ranker.in_review(&definition.location.path),
@@ -456,15 +461,62 @@ impl Inner {
         }
 
         // 3. The index.
-        let mut drafts =
-            self.index_candidates(snap, &lang, &site, &at.path, &ranker, &mut prepared.units);
-        rules.disambiguate(&site, &mut drafts);
+        self.index_step(snap, &at.path, &ranker, &mut prepared);
+        Ok(prepared)
+    }
+
+    /// Step 3 into `prepared`: the index's candidates, disambiguated and
+    /// ranked, after those already there. Run again by
+    /// [`look_up_again`](Self::look_up_again). Whether it added some.
+    fn index_step(
+        &self,
+        snap: &Snap,
+        from: &str,
+        ranker: &Ranker<'_>,
+        prepared: &mut Prepared,
+    ) -> bool {
+        let rules = self.resolver(prepared.lang.name());
+        let mut drafts = self.index_candidates(
+            snap,
+            &prepared.lang,
+            &prepared.site,
+            from,
+            ranker,
+            &mut prepared.units,
+        );
+        rules.disambiguate(&prepared.site, &mut drafts);
         let mut found: Vec<Candidate> = drafts.into_iter().map(|d| d.candidate).collect();
         ranker.sort(&mut found);
+        let mut added = false;
         for candidate in found {
-            prepared.push(candidate);
+            added |= prepared.push(candidate);
         }
-        Ok(prepared)
+        added
+    }
+
+    /// When a hint was installed after `prepared`'s cut (a batch committed
+    /// since step 3 looked up, or since the prefetch did), step 3 again,
+    /// and the new candidates go out. Called after the reads of hints that
+    /// leave files out of the search, so none of them is missed.
+    fn look_up_again(&self, run: &Run, snap: &Snap, at: &TextRef, prepared: &mut Prepared) {
+        if !snap.hinted_since(&mut prepared.hinted) {
+            return;
+        }
+        let ranker = self.ranker(
+            snap,
+            Some(&at.path),
+            Some((at.origin, at.oid)),
+            Some(prepared.lang.name()),
+        );
+        if self.index_step(snap, &at.path, &ranker, prepared) {
+            let all: Arc<[Candidate]> = prepared.candidates.clone().into();
+            let (jump, preselect) = jump_and_preselect(&prepared.candidates, Some(&prepared.site));
+            self.publish(run.id, |r| {
+                r.candidates = all;
+                r.jump = jump;
+                r.preselect = preselect;
+            });
+        }
     }
 
     /// Step 3: the stored definitions named like the site, in the units of
@@ -571,7 +623,9 @@ impl Inner {
         let completeness = if p.settled {
             Some(Completeness::Complete)
         } else {
+            self.run_after_lookup(snap);
             let scope = snap.search_scope(&at.path, &p.lang, &p.skip);
+            self.look_up_again(run, snap, at, &mut p);
             let extracted = std::mem::take(&mut p.extracted);
             let ranker = self.ranker(
                 snap,
@@ -654,6 +708,10 @@ impl Inner {
             );
             p.units = units;
             p.scanned = scanned;
+            if result.is_some() {
+                // The counts of `Partial` read hints too.
+                self.look_up_again(run, snap, at, &mut p);
+            }
             result
         };
         self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
@@ -679,40 +737,44 @@ impl Inner {
             .filter(|l| !snap.disabled.contains(l.name()))
             .map(Version::of)
             .collect();
-        let stored = snap
-            .project
-            .store
-            .defs_by_name(name, &versions)
-            .unwrap_or_default();
         let ranker = self.ranker(snap, near, None, None);
         let mut candidates = Vec::new();
         let mut delivered = HashSet::new();
         let mut units = Vec::new();
-        for s in stored {
-            for eff in snap.map.paths(&s.oid, &s.lang.0) {
-                let location = Location {
-                    worktree: snap.worktree.clone(),
-                    path: eff.path.clone(),
-                    origin: TextOrigin::Worktree,
-                    oid: s.oid,
-                    line: s.def.line,
-                    column: s.def.column,
-                    end_line: s.def.end_line,
-                };
-                if !delivered.insert(loc_key(&location)) {
-                    continue;
+        let mut look_up = |candidates: &mut Vec<Candidate>, units: &mut Vec<Unit>| {
+            let stored = snap
+                .project
+                .store
+                .defs_by_name(name, &versions)
+                .unwrap_or_default();
+            for s in stored {
+                for eff in snap.map.paths(&s.oid, &s.lang.0) {
+                    let location = Location {
+                        worktree: snap.worktree.clone(),
+                        path: eff.path.clone(),
+                        origin: TextOrigin::Worktree,
+                        oid: s.oid,
+                        line: s.def.line,
+                        column: s.def.column,
+                        end_line: s.def.end_line,
+                    };
+                    if !delivered.insert(loc_key(&location)) {
+                        continue;
+                    }
+                    candidates.push(Candidate {
+                        tier: ranker.tier(&eff.path, TextOrigin::Worktree, s.oid, false),
+                        in_review: ranker.in_review(&eff.path),
+                        definition: def_ref(&s.def, &s.lang, false, location),
+                        evidence: Evidence::NameOnly,
+                        source: CandidateSource::Index,
+                    });
+                    units.push(s.unit);
                 }
-                candidates.push(Candidate {
-                    tier: ranker.tier(&eff.path, TextOrigin::Worktree, s.oid, false),
-                    in_review: ranker.in_review(&eff.path),
-                    definition: def_ref(&s.def, &s.lang, false, location),
-                    evidence: Evidence::NameOnly,
-                    source: CandidateSource::Index,
-                });
-                units.push(s.unit);
             }
-        }
-        ranker.sort(&mut candidates);
+        };
+        let mut cut = snap.hinted;
+        look_up(&mut candidates, &mut units);
+        self.run_after_lookup(snap);
         if run.stopped(snap) {
             return;
         }
@@ -721,6 +783,12 @@ impl Inner {
         let dir = near.and_then(|n| snap.subproject_of(n)).unwrap_or("");
         let (unindexed, flying) = snap.unindexed_under(dir);
         let outside = snap.unindexed_outside(dir, None);
+        // A file those counts took as indexed whose unit was written after
+        // the lookup: looked up again.
+        if snap.hinted_since(&mut cut) {
+            look_up(&mut candidates, &mut units);
+        }
+        ranker.sort(&mut candidates);
         let completeness = if unindexed == 0 && flying == 0 && outside == 0 {
             Completeness::Complete
         } else {

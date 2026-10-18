@@ -203,6 +203,10 @@ pub(crate) struct Inner {
     /// The files of each extraction batch of tiers 3–5, in order (tests).
     #[cfg(test)]
     pub batch_log: Mutex<Vec<usize>>,
+    /// Run once by the next query between its index lookup and its first
+    /// hint read (tests: a batch committing in between).
+    #[cfg(test)]
+    pub after_lookup: Mutex<Option<crate::query::AfterLookup>>,
     /// Another registration of `code_intel.tags` for new projects (tests).
     #[cfg(test)]
     pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
@@ -268,6 +272,8 @@ impl Indexer {
             warming: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             batch_log: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            after_lookup: Mutex::new(None),
             #[cfg(test)]
             tables: Mutex::new(None),
         });

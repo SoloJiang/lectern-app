@@ -48,6 +48,10 @@ pub const SEARCH_FOR: Duration = Duration::from_secs(1);
 /// Prefetches kept at once.
 const PREFETCHES: usize = 4;
 
+/// [`Inner::after_lookup`](crate::index::Inner) (tests).
+#[cfg(test)]
+pub(crate) type AfterLookup = Box<dyn FnOnce(&Inner, &Snap) + Send>;
+
 /// One query's entry: its current results and what stops it.
 pub(crate) struct Entry {
     pub id: QueryId,
@@ -104,12 +108,28 @@ pub(crate) struct Snap {
     pub packages: Arc<[Package]>,
     pub review: Arc<[RelPath]>,
     pub stamp: HintStamp,
+    /// The project's hint installations when the snapshot was taken
+    /// (`State::hinted`): the cut of an index lookup made from it.
+    pub hinted: u64,
     /// Keys extracted right now: neither in the index nor searched.
     pub in_flight: HashSet<(BlobId, LangName)>,
     pub inputs: Inputs,
 }
 
 impl Snap {
+    /// Whether a hint was installed after `cut`, the installations counted
+    /// before the index lookup a query's results come from; moves `cut` to
+    /// now. A query calls it after the hint reads that take files as
+    /// indexed (its search's scope, its counts) and, when it says so, looks
+    /// up again: every hint those reads saw is installed by now, so its
+    /// file is in the new lookup (「输入代数与派生状态」, a query's cut).
+    pub fn hinted_since(&self, cut: &mut u64) -> bool {
+        let now = lock(&self.project.state).hinted;
+        let moved = now != *cut;
+        *cut = now;
+        moved
+    }
+
     /// The worktree root of `worktree` (the current one when it is the
     /// current or None), opened now if the reconcile has not yet.
     pub fn root_of(&self, worktree: Option<&WorktreeKey>) -> Option<Arc<SafeRoot>> {
@@ -356,6 +376,7 @@ impl Inner {
                 .unwrap_or_else(|| Arc::from(Vec::new())),
             review,
             stamp: st.stamp(eviction),
+            hinted: st.hinted,
             in_flight: st.in_flight.keys().cloned().collect(),
             inputs: Inputs {
                 session: st.session,
@@ -364,6 +385,20 @@ impl Inner {
                 grammar,
             },
         })
+    }
+
+    /// The test hook between a query's index lookup and its first hint
+    /// read ([`Inner::after_lookup`]); nothing outside the tests.
+    pub(crate) fn run_after_lookup(&self, snap: &Snap) {
+        #[cfg(test)]
+        {
+            let hook = lock(&self.after_lookup).take();
+            if let Some(f) = hook {
+                f(self, snap);
+            }
+        }
+        #[cfg(not(test))]
+        let _ = snap;
     }
 
     /// The resolution rules of a language: an extension's implementation,

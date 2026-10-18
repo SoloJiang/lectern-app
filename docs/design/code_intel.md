@@ -1390,6 +1390,7 @@ enum WorktreeState {
 - 忽略规则或配置变了：下一次工作区比较之后，覆盖部分与比较结果对齐。重新读的路径是比较给出的路径加上现有的全部覆盖项；现有的未跟踪覆盖项（不在文件列表里）没有出现在比较结果里时，说明它现在被忽略或已经不在，从覆盖部分删除；`untracked_capped` 为 true 时比较结果不完整，这一步不删除。
 - 有效 OID 变了：一个路径的有效 OID 是它的覆盖项的 OID，没有覆盖项时是文件列表的 OID。`indexed` 提示每条存（有效 OID 的前 8 字节、淘汰代数、语言包代数），读的时候与当前的有效 OID 和代数比较，所以 OID 一变提示就不再匹配，不需要逐个清除；新 OID 的存在检查命中或写入成功之后才重新置位。命中或写入的版本与当前语言表、映射的语言表里这种语言的版本都相同时才置位。
 - 淘汰：淘汰代数加一后全部提示不再匹配，第 3–5 层的游标重建、按层重新做存在检查。仍在的单元只重新置位、不重新抽取，被淘汰的重新抽取。查询现场用到一个文件的抽取结果时（第 2 步的 import 目标、引用的候选文件、限时搜索的命中文件）先做存在检查，没有就现场抽取，并按所在层排队写入。
+- 查询的切面：提示由批次在后台持续置位，查询先查索引（跳转第 3 步、查引用的 `ci_ref`、`Named`），之后才读提示（限时搜索的范围、`Partial` 的计数）。两次读之间写入的文件，查索引时还没有、读提示时已算入索引，两边都漏掉。所以每个项目记一个「提示置位次数」：每次在项目锁内让某条提示从不匹配变为匹配就加一（只有这一处置位提示）。查询在查索引之前记下它（快照、预取各记自己的），读完提示之后再读一次；变了就再查一次索引，把新出现的候选追加进结果。读提示之前已置位的提示，它的写入在第二次查索引之前已经提交，所以不会再漏。预取的结果只对它记下的次数有效，复用时同样按这条规则补查。
 
 ### 名字表
 
@@ -1935,6 +1936,13 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   常驻增加的约 0.2 MB 是映射里七种语言的 `SiteQuery`（上一轮只编译了跳转用到的 TS）。同一次运行里 `extract_throughput` 为 3.78 MB/s，低于 4 MB/s：抽取的代码本轮没有改，这台机器上这一项在 3.3–4.27 MB/s 之间波动，在 Apple 芯片上判定；其余第 1–3 步的基准都在预算内。预审时 Linux 上第一次跳转的编译耗时（release）：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms；现在由后台任务承担，`goto_first` 不含它。
 - 没有验证的：同上一轮；另外，第一次跳转发生在后台编译完成之前时，查询等这次编译结束（不会比自己编译更久），没有单独测量。
 
+第 4 步，处理 #121 上 Codex 的两条 P1 之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1328 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。本 crate 224 个测试，新增 6 个：`cut_jump_finds_a_file_indexed_after_the_lookup`、`cut_prefetch_reused_after_a_batch_finds_its_file`、`cut_references_find_a_file_indexed_after_the_lookup`、`cut_named_finds_a_file_indexed_after_the_lookup`（批次在查索引与第一次读提示之间写入 c.ts：四种查询都列出它；去掉第二次查索引时这四个都失败）、`cut_unchanged_hint_is_no_installation`、`goto_site_queries_of_every_open_project`（两个项目的核对都排在编译任务之前：TS 和 Python 都已编译；换回原来按项目重看的实现时这个测试失败，Python 没有编译）。
+- 压力运行（同时 4 个占满 CPU 的进程）：`-E 'test(cut_) or test(goto_site_queries) or test(search_) or test(prefetch_)'` （19 个测试）`--stress-count 150` 全部通过；整个本 crate（224 个）`--stress-count 30` 全部通过。
+- 基准：本轮只改了查询在提示变化时的补查、编译任务的调度和批量任务的唤醒顺序。没有批次写入时，补查只多读一次项目锁里的计数，所以没有重跑基准。
+- 没有验证的：`kick_batch` 的顺序只在多个 executor 线程同时运行时有区别，测试用的手动 executor 是单线程，没有专门的测试。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2117,7 +2125,9 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 文件夹项目在第 4 步建索引（第 3 步把它推迟到这一步，见上）：文件列表就绪时打开根目录的 `SafeRoot`，把文件列表里的每个文件放进重新读集合，核对任务读出、按原始字节的 SHA-1 记为覆盖项（`Content`），之后与 git 项目走同一套映射、各层和查询；换文件列表时全部重新读。没有 fs_watch 订阅、工作区比较和 HEAD（`head_clean` 总是 false），`ProjectEvent::Changed` 不再让文件夹项目重新打开根目录。热启动要读每个文件求 OID，命中的不解析（`schedule_folder_project_indexes_at_open`）。
 - 名字表的第二步改为一条语句扫描整张 `ci_def`（`SELECT unit, name, kind FROM ci_def`，表的顺序），跳过单元集合以外的行；同一单元的行连续写入，对上一行单元的判断沿用到下一行。逐个单元查 `ci_def_unit` 时 10 万个单元要 10 万次语句执行和 300 万次按 rowid 回表，`code_intel/names_100k` 为 1.07 s，超出 1 s；一次扫描为 0.81 s。
 - `ParsedFile`（跳转第 1 步、查引用和限时搜索现场解析的文件）在核心语言上不再跑 `Compiled` 的完整查询：定义和标记本来就取自遍历（ADR 0031），只需要 locals 的模式和给出引用的 tags 模式。`Lang::site_query` 用与 `Compiled` 相同的文本另编译一个查询，停用其余 tags 模式，模式和捕获的编号、属性、谓词与完整查询相同；它不经 `TagsConfiguration`，所以核心语言在生产中只编译这一个查询。`site_reference_query_matches_full` 在夹具、遍历的样例和每种扩展名的合成源码上检查两者的定义、引用位置和每个位置的 `site_at` 相同。另外，局部引用是否处在变量位置要看父节点，tree-sitter 的 `Node::parent` 每次从根往下逐层扫描子节点，顶层条目多的文件每次都扫描全部顶层条目；`site::Parents` 用二分查找定位根的子节点，往下与 tree-sitter 相同（`site_parents_match_tree_sitter` 检查每个节点的父节点与 `Node::parent` 相同）。64 KiB 的 TS 文件上 `ParsedFile` 从约 27 ms 降到约 20 ms（解析本身约 9 ms）。
-- `ParsedFile` 要的查询（核心语言的 `SiteQuery`，语言包的 `Compiled`）不在查询线程上第一次编译：核心语言的抽取走遍历，从不编译它，第一次跳转原来要在 `Interactive` 线程上先编译（release，Linux：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms），超出候选 50 ms 的预算。每次核对任务结束时，映射里有文件、查询还没编译的语言由一个 `Background` 任务编译（`warm_site_queries`，同时最多一个，结束时再看一遍）；插件本身在首帧之后激活，所以这也在首帧之后。查询在编译进行中用到它时等这次编译（`OnceLock`），不会比自己编译更久。`Lang::prepare` 也编译它，测试和基准计时之前调用。设计没有写这些查询何时编译。
+- `ParsedFile` 要的查询（核心语言的 `SiteQuery`，语言包的 `Compiled`）不在查询线程上第一次编译：核心语言的抽取走遍历，从不编译它，第一次跳转原来要在 `Interactive` 线程上先编译（release，Linux：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms），超出候选 50 ms 的预算。每次核对任务结束时，这个项目的映射里有还没编译的语言，就请求一个 `Background` 任务编译（`warm_site_queries`）。任务同时最多一个，请求只保证它在运行；任务自己扫描所有打开项目的映射，编译到扫描为空，清除标志后再扫描一次，所以任务进行中别的项目发来的请求不会丢（原来请求方带上自己项目的语言，任务结束时只重看这个项目：几个项目同时打开时，后来者的语言要等到下一次与它无关的核对，`goto_site_queries_of_every_open_project`）。插件本身在首帧之后激活，所以这也在首帧之后。查询在编译进行中用到它时等这次编译（`OnceLock`），不会比自己编译更久。`Lang::prepare` 也编译它，测试和基准计时之前调用。设计没有写这些查询何时编译。
+- 查询的切面（「输入代数与派生状态」已补这一条）：查询先查索引、后读提示，两次读之间提交的批次让一个文件两边都漏掉，结果还报 `Complete`；复用批次之前的预取时更容易遇到。每个项目的 `State::hinted` 在置位提示的同一段锁内加一（`State::hint_paths`，只在提示真的变化时；所有置位都经它），快照和 `Prepared` 记下它；跳转、查引用、`Named` 在读提示（限时搜索的范围、`Partial` 的计数）之后用 `Snap::hinted_since` 比较，变了就再查一次索引并追加（`cut_*`：测试钩子 `Inner::after_lookup` 在查索引与第一次读提示之间经批量层同样的提交写入一个文件）。名字表只按单元建表、不判断完整性，不受影响；它的重建由 `gens.writes` 触发。
+- 批量任务的唤醒（`kick_batch`）先置 `kicked` 再补满任务池：原来先补池再置位，池满时最后一个任务恰好在两步之间空闲退出，这次唤醒要等下一次。其余单飞的入口（核对的 `again`、语言包一轮的 `again`、名字表建完后的重查、语义回复的队列、看门狗按表运行）都在同一把锁里记下请求，不会丢。
 - 查询读文件的截止时间统一为 `query::search::FileDeadline`：后台截止时间（250 ms）与查询剩余时间中较小的一个（跳转第 2 步、限时搜索、查引用的解析；查引用原来在限时搜索里不看剩余时间）。被剩余时间截短后 `TimedOut`，以及 `Cancelled`，都不写入缓存、文件计入 `unsearched`（`FileDeadline::settles`，「限时搜索」已补这一条）：原来这样的 `TimedOut` 被写入，批量层不再重做，这个文件的定义要等打开它才出现，查询还报 `Complete`（`search_cut_extraction_is_not_stored`）。查询的其他写入只有访问标记，名字表和预取不写入。
 - 看门狗线程的测试不用 `run_dedicated_gated` 的任务句柄：它交给 `own_with` 由这次激活持有，停用时丢弃。线程自己的闭包在开始和返回时记录到 `plugin::WatchdogThread`（`NotStarted` / `Running` / `Exited`），测试看它；`/proc/self/task` 只在 Linux 上、在线程已退出之后再确认（原来在 macOS 上没有 `/proc`，两个测试必然失败、两个空过；Linux 负载高时线程名在启动之后才设置，20 次激活的测试会失败）。「测试」已改。
 - 基准：
