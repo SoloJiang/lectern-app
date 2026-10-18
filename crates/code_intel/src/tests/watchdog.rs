@@ -3,42 +3,58 @@
 //! executor's shutdown, there is at most one per activation however often
 //! the plugin activates, an extraction running at deactivation returns
 //! `Cancelled`, and an activation dead before the thread starts starts none.
-//! Thread names come from `/proc/self/task/*/comm` (each test is its own
-//! process under nextest).
+//! The thread is watched through `plugin::WatchdogThread`, which its own
+//! closure updates; on Linux, once it has exited, `/proc/self/task/*/comm`
+//! also shows no thread of that name left (each test is its own process
+//! under nextest).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::extract::{Deadline, ExtractStatus, Lang, extract};
+use crate::plugin::{ThreadState, WatchdogThread};
 use crate::testing::FakeGit;
-use crate::watchdog::{SystemClock, WATCHDOG_THREAD};
+use crate::watchdog::SystemClock;
 
 use super::plugin::Run;
 
-/// Threads of this process named like the watchdog (`comm` keeps 15 bytes).
-fn watchdog_threads() -> usize {
-    let name = &WATCHDOG_THREAD.as_bytes()[..15];
-    std::fs::read_dir("/proc/self/task")
-        .map(|tasks| {
-            tasks
-                .flatten()
-                .filter(|t| {
-                    std::fs::read(t.path().join("comm"))
-                        .is_ok_and(|c| c.strip_suffix(b"\n").unwrap_or(&c) == name)
-                })
-                .count()
-        })
-        .unwrap_or(0)
-}
-
-/// Waits until `f` holds (threads exit asynchronously).
+/// Waits until `f` holds (threads start and exit asynchronously).
 fn eventually(what: &str, f: impl Fn() -> bool) {
     let start = Instant::now();
     while !f() {
         assert!(start.elapsed() < Duration::from_secs(20), "never: {what}");
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Linux only, and only once every watchdog thread of the test has
+/// exited: no OS thread of the watchdog's name is left either (the name
+/// is set after the thread starts, and the OS thread ends shortly after
+/// its closure returns, so this waits too).
+fn no_watchdog_thread_left() {
+    #[cfg(target_os = "linux")]
+    {
+        let name = &crate::watchdog::WATCHDOG_THREAD.as_bytes()[..15];
+        let named = || {
+            std::fs::read_dir("/proc/self/task")
+                .expect("/proc/self/task")
+                .flatten()
+                .filter(|t| {
+                    std::fs::read(t.path().join("comm"))
+                        .is_ok_and(|c| c.strip_suffix(b"\n").unwrap_or(&c) == name)
+                })
+                .count()
+        };
+        eventually("no OS thread of the watchdog's name", || named() == 0);
+    }
+}
+
+fn thread(run: &Run) -> WatchdogThread {
+    run.service()
+        .watchdog_thread()
+        .expect("started: a watchdog")
+        .clone()
 }
 
 fn repo() -> Arc<FakeGit> {
@@ -52,28 +68,35 @@ fn repo() -> Arc<FakeGit> {
 }
 
 /// Activates and indexes: the first extraction starts the thread.
-fn active(run: &Run) {
+fn active(run: &Run) -> WatchdogThread {
     run.kernel.activate().expect("activates");
+    let t = thread(run);
+    assert_eq!(t.state(), ThreadState::NotStarted);
     run.open();
-    eventually("the watchdog thread started", || watchdog_threads() == 1);
+    eventually("the watchdog thread started", || {
+        t.state() != ThreadState::NotStarted
+    });
+    t
 }
 
 #[test]
 fn watchdog_exits_on_deactivation() {
     let run = Run::new(repo(), true);
-    assert_eq!(watchdog_threads(), 0);
-    active(&run);
+    let t = active(&run);
     let watchdog = run.service().watchdog().expect("a watchdog").clone();
     run.kernel.deactivate();
     assert!(watchdog.is_stopped());
-    eventually("the thread exited", || watchdog_threads() == 0);
+    eventually("the thread exited", || t.state() == ThreadState::Exited);
+    no_watchdog_thread_left();
 }
 
 #[test]
 fn watchdog_one_thread_after_20_activations() {
     let run = Run::new(repo(), true);
+    let mut threads: Vec<WatchdogThread> = Vec::new();
     for i in 0..20 {
         run.kernel.activate().expect("activates");
+        let t = thread(&run);
         // A new file each time: an extraction, so the thread starts.
         let path = format!("f{i}.ts");
         run.git.add(
@@ -81,25 +104,32 @@ fn watchdog_one_thread_after_20_activations() {
             &[(&path, format!("export function f{i}() {{}}\n").as_bytes())],
         );
         run.open();
-        assert!(
-            watchdog_threads() <= 1,
-            "activation {i}: {}",
-            watchdog_threads()
-        );
+        eventually("this activation's thread started", || {
+            t.state() != ThreadState::NotStarted
+        });
+        // Every earlier activation's thread has exited: one at a time.
+        for (j, earlier) in threads.iter().enumerate() {
+            assert_eq!(earlier.state(), ThreadState::Exited, "activation {j}");
+        }
         run.kernel.deactivate();
         // Each deactivation ends its own thread: the count never grows.
-        eventually("the activation's thread exited", || watchdog_threads() == 0);
+        eventually("the activation's thread exited", || {
+            t.state() == ThreadState::Exited
+        });
+        threads.push(t);
     }
+    no_watchdog_thread_left();
 }
 
 #[test]
 fn watchdog_exits_on_executor_shutdown() {
     let run = Run::new(repo(), true);
-    active(&run);
+    let t = active(&run);
     // The activation is still live: the executor's shutdown stops it.
     let _ = run.executor.shutdown(Duration::from_secs(5));
-    eventually("the thread exited", || watchdog_threads() == 0);
+    eventually("the thread exited", || t.state() == ThreadState::Exited);
     assert!(run.service().watchdog().expect("a watchdog").is_stopped());
+    no_watchdog_thread_left();
 }
 
 /// An extraction running when the plugin deactivates returns `Cancelled`
@@ -173,7 +203,7 @@ fn watchdog_no_thread_for_a_dead_activation() {
     let handle = host.handle.clone();
     host.deactivate();
     let executor = lectern_executor::Executor::manual();
-    let watchdog = crate::plugin::watchdog(&handle, &executor, Arc::new(SystemClock));
+    let (watchdog, thread) = crate::plugin::watchdog(&handle, &executor, Arc::new(SystemClock));
     let lang = crate::extract::LanguageTable::core()
         .get("ts")
         .cloned()
@@ -186,6 +216,12 @@ fn watchdog_no_thread_for_a_dead_activation() {
         &Arc::new(AtomicBool::new(false)),
     );
     assert_eq!(e.status, ExtractStatus::Done);
-    std::thread::sleep(Duration::from_millis(50));
-    assert_eq!(watchdog_threads(), 0);
+    // The starter ran (the extraction registered) and its closure was
+    // rejected: nothing runs it, on the executor or anywhere else. A
+    // thread wrongly started would have recorded `Running` well within
+    // the wait.
+    executor.run_until_idle();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(thread.state(), ThreadState::NotStarted);
+    no_watchdog_thread_left();
 }

@@ -18,11 +18,12 @@ use lectern_services::project::{BlobId, RelPath, WorktreeKey};
 
 use super::definition::{LocKey, loc_key};
 use super::rank::Ranker;
+use super::search::{FileDeadline, Searched};
 use super::{Run, SEARCH_FOR, Snap};
-use crate::extract::{BACKGROUND_DEADLINE, ExtractStatus, Extraction, Lang, compatible};
+use crate::extract::{ExtractStatus, Extraction, Lang, compatible};
 use crate::index::Inner;
 use crate::resolve::ResolveContext;
-use crate::site::ParsedFile;
+use crate::site::{ParseError, ParsedFile};
 use crate::store::Version;
 
 /// The first batch goes out after this many files…
@@ -111,7 +112,9 @@ impl Inner {
             origin: l.origin,
             lang: lang.clone(),
         };
-        self.references_in(run, snap, of, &ranker, &file, l.oid, bytes, &mut found);
+        self.references_in(
+            run, snap, of, &ranker, &file, l.oid, bytes, None, &mut found,
+        );
 
         let mut units: Vec<Unit> = Vec::new();
         if !of.local {
@@ -160,7 +163,17 @@ impl Inner {
                     origin: TextOrigin::Worktree,
                     lang: file_lang,
                 };
-                self.references_in(run, snap, of, &ranker, &file, key, bytes.into(), &mut found);
+                self.references_in(
+                    run,
+                    snap,
+                    of,
+                    &ranker,
+                    &file,
+                    key,
+                    bytes.into(),
+                    None,
+                    &mut found,
+                );
             }
         }
         if run.stopped(snap) {
@@ -180,12 +193,12 @@ impl Inner {
                 &lang,
                 &name,
                 run.started + SEARCH_FOR,
-                |eff, key, bytes, _| {
+                |eff, key, bytes, until| {
                     if found.parsed.contains(&(eff.path.clone(), key)) {
-                        return;
+                        return Searched::Done;
                     }
                     let Some(file_lang) = snap.table.get(&eff.lang.name().0).cloned() else {
-                        return;
+                        return Searched::Done;
                     };
                     let file = File {
                         worktree: snap.worktree.clone(),
@@ -201,8 +214,9 @@ impl Inner {
                         &file,
                         key,
                         bytes.into(),
+                        Some(until),
                         &mut found,
-                    );
+                    )
                 },
             )
         };
@@ -220,7 +234,9 @@ impl Inner {
         snap.project.store.touch(&units);
     }
 
-    /// Parses one file and sorts every reference of the name in it.
+    /// Parses one file and sorts every reference of the name in it, with
+    /// the per-file deadline cut at `until` (the search's end). A parse the
+    /// query's time cut short, or a cancelled one, is `Unsearched`.
     #[allow(
         clippy::too_many_arguments,
         reason = "one file's part of a query: its snapshot, the file and what it adds to"
@@ -234,17 +250,30 @@ impl Inner {
         file: &File,
         oid: BlobId,
         bytes: Arc<[u8]>,
+        until: Option<Instant>,
         found: &mut Found,
-    ) {
-        if !found.parsed.insert((file.path.clone(), oid)) {
-            return;
+    ) -> Searched {
+        if found.parsed.contains(&(file.path.clone(), oid)) {
+            return Searched::Done;
         }
         let clock = self.watchdog.clock().clone();
-        let deadline = clock.now() + BACKGROUND_DEADLINE;
-        let Ok(parsed) = ParsedFile::parse(&file.lang, bytes, &*clock, deadline, &run.cancel)
-        else {
-            return;
+        let deadline = FileDeadline::new(clock.now(), until);
+        let parsed = match ParsedFile::parse(&file.lang, bytes, &*clock, deadline.at, &run.cancel) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let status = match error {
+                    ParseError::TimedOut => ExtractStatus::TimedOut,
+                    ParseError::Cancelled => ExtractStatus::Cancelled,
+                    ParseError::Unsupported => ExtractStatus::Unsupported,
+                };
+                if !deadline.settles(status) {
+                    return Searched::Unsearched;
+                }
+                found.parsed.insert((file.path.clone(), oid));
+                return Searched::Done;
+            }
         };
+        found.parsed.insert((file.path.clone(), oid));
         let def = &of.location;
         let own = file.path == def.path && file.origin == def.origin && oid == def.oid;
         let rules = self.resolver(file.lang.name());
@@ -352,5 +381,6 @@ impl Inner {
                 r.same_name = same_name.into();
             });
         }
+        Searched::Done
     }
 }

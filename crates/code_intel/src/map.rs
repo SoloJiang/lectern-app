@@ -521,6 +521,20 @@ impl LiveMap {
         self.base.table().get(name)
     }
 
+    /// The languages some file of the map is in, in table order.
+    pub fn languages(&self) -> Vec<Lang> {
+        let mut seen = [false; 256];
+        for &code in self.base.langs.iter().chain(self.overlay.langs.iter()) {
+            seen[usize::from(code)] = true;
+        }
+        seen.iter()
+            .enumerate()
+            .filter(|(_, s)| **s)
+            .filter_map(|(code, _)| u8::try_from(code).ok())
+            .filter_map(|code| self.base.lang_of_code(code).cloned())
+            .collect()
+    }
+
     /// Whether some path with content `oid` in language `lang` has a
     /// matching hint (the blob is known to be stored).
     pub fn hinted(&self, oid: &BlobId, lang: &str, stamp: HintStamp) -> bool {

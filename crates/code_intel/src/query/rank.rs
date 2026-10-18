@@ -25,9 +25,17 @@ pub(crate) fn deepest<'a>(packages: &'a [Package], path: &str) -> Option<&'a str
 /// The segments two paths have left once their common leading segments are
 /// dropped, summed: 0 for the same path, 2 for two files of one directory.
 pub(crate) fn distance(a: &str, b: &str) -> usize {
-    let (a, b): (Vec<&str>, Vec<&str>) = (a.split('/').collect(), b.split('/').collect());
-    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
-    (a.len() - common) + (b.len() - common)
+    // The segments left on both sides after the common prefix; no
+    // allocation (the search sorts 100 000 paths by it).
+    let (mut a, mut b) = (a.split('/'), b.split('/'));
+    loop {
+        match (a.next(), b.next()) {
+            (Some(x), Some(y)) if x == y => {}
+            (x, y) => {
+                return usize::from(x.is_some()) + a.count() + usize::from(y.is_some()) + b.count();
+            }
+        }
+    }
 }
 
 /// Whether a definition of `visibility` in `def_path` is visible from a

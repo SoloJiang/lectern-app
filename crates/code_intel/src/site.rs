@@ -205,7 +205,7 @@ impl ParsedFile {
         // A core language's definitions and markers come from its walker,
         // as in `extract` (ADR 0031): its query only has the locals
         // patterns and the tags patterns that give references enabled.
-        let walking = lang.lease().is_static() && crate::walk::supports(dialect, lang.language());
+        let walking = lang.walks();
         let (query, captures, locals_patterns) = if walking && !full_query {
             let site = lang.site_query().ok_or(ParseError::Unsupported)?;
             (&site.query, &site.captures[..], site.locals_patterns)

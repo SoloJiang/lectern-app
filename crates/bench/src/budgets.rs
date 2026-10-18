@@ -872,6 +872,10 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // The first jump of a fresh index: the project opened and settled (its
+    // languages' queries compiled in the background), nothing warmed by an
+    // earlier jump. Recorded against the 50 ms candidates budget.
+    share("code_intel/goto_first", RECORD, CODE_INTEL, ACTIVE, Time),
     // The time-boxed search of unindexed hits stops one second after the
     // query; the last batch's event within 20 ms of that.
     share(

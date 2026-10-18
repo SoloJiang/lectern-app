@@ -131,6 +131,56 @@ fn goto_indexed(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
+/// The first jump of a fresh index (record-only, against the 50 ms
+/// candidates budget): the cloudprint shape (728 files), opened and
+/// settled, so the background task has compiled the languages' queries;
+/// no jump before it in that index. Each sample is a new index with its
+/// own language table, so nothing an earlier sample compiled is reused.
+pub const GOTO_FIRST: Bench = Bench {
+    id: "code_intel/goto_first",
+    run: goto_first,
+};
+
+fn goto_first(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = 728;
+    let mut samples = Vec::new();
+    for _ in 0..slow_samples(ctx) {
+        let git = Arc::new(FakeGit::new());
+        let dir = tempfile::tempdir_in(ctx.scratch())?;
+        let cache = cache(dir.path());
+        virtual_repo(&git, &cache, n, &["main"]);
+        let path = "packages/pkg000/src/mod00/current.ts";
+        let name = synthetic::shared_name();
+        let mut text = synthetic::source("ts", 999_999, 16 << 10);
+        text.extend_from_slice(
+            format!("\nexport function jump(x: number) {{ return {name}(x); }}\n").as_bytes(),
+        );
+        git.add("main", &[(path, &text)]);
+        git.commit("main");
+        let rig = Rig::new(git, cache, Arc::new(SystemClock));
+        rig.open_with(packages(&synthetic::package_dirs(n)));
+        rig.settle();
+        let query = Query {
+            project: rig.git.key(),
+            kind: QueryKind::Definition {
+                at: text_ref(&rig.git, path, &text),
+                position: position(&text, &format!("{name}(x)"))?,
+            },
+        };
+        let start = Instant::now();
+        let (_, r) = run(&rig, &query)?;
+        let took = start.elapsed();
+        if r.candidates.is_empty() {
+            return Err(BenchError::new(format!("no candidates: {:?}", r.state)));
+        }
+        samples.push(took);
+    }
+    Ok(vec![Measured::new(
+        "code_intel/goto_first",
+        Value::Time(Samples(samples)),
+    )])
+}
+
 /// Samples of an operation taking about a second: one warm-up, then 5.
 fn slow_samples(ctx: &Ctx) -> usize {
     match ctx.mode() {
