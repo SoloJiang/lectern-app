@@ -157,6 +157,7 @@ impl Inner {
         drop(held);
         self.enqueue_focus(&project);
         self.kick_batch();
+        self.names_changed(&project);
     }
 
     /// One pass over the steps, in dependency order: whether some step
@@ -198,7 +199,8 @@ impl Inner {
             .as_ref()
             .and_then(|s| s.active.as_ref())
             .map(|a| (a.worktree.clone(), a.root.clone()));
-        if st.snapshot.is_some() && new_active != old_active {
+        let switched = st.snapshot.is_some() && new_active != old_active;
+        if switched {
             // A new current worktree: every input record starts over; the
             // focus stays under its worktree's name.
             let (table, grammar) = {
@@ -244,7 +246,14 @@ impl Inner {
             }
         }
         st.snapshot = Some(snapshot);
-        Some(st.session)
+        let session = st.session;
+        drop(st);
+        if switched {
+            // The old worktree's queries answer about content that is no
+            // longer current: closed, their semantic requests cancelled.
+            self.close_queries(Some(&project.key));
+        }
+        Some(session)
     }
 
     /// Opens the worktree root and subscribes to fs_watch, once the file

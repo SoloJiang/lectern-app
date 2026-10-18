@@ -114,6 +114,10 @@ tree-sitter = { version = "=0.27.1", default-features = false, features = ["std"
 tree-sitter-tags = "=0.27.1"
 # Iterates tree-sitter query matches; already a dependency of tree-sitter-tags.
 streaming-iterator = "0.1"
+# lectern-code-intel: the time-boxed search's `memmem` and the name table's
+# NFC (docs/design/code_intel.md「依赖」). Both already in Cargo.lock.
+memchr = "2.8"
+unicode-normalization = "0.1.26"
 # First-release grammars (docs/design/code_intel.md「未决问题」1, default (a)):
 # the newest release of each whose ABI tree-sitter 0.27.1 loads, MIT. Shared
 # with the highlighter (file_reader); the versions are repeated in

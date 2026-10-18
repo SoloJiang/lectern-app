@@ -4271,6 +4271,7 @@ dependencies = [
  "lectern-kernel",
  "lectern-platform",
  "lectern-services",
+ "memchr",
  "serde_json",
  "streaming-iterator",
  "tempfile",
@@ -4282,6 +4283,7 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-tags",
  "tree-sitter-typescript",
+ "unicode-normalization",
 ]
 
 [[package]]

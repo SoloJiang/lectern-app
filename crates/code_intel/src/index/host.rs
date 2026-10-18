@@ -9,6 +9,7 @@ use std::task::{Context, Poll};
 
 use lectern_executor::{Executor, Priority};
 use lectern_kernel::{BackgroundGuard, BusyGuard, PluginHandle};
+use lectern_services::code_intel::CodeIntelEvent;
 
 /// Which guard a task held, for the `schedule_*` tests.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -22,6 +23,9 @@ pub(crate) struct Host {
     executor: Executor,
     #[cfg(test)]
     pub(crate) log: std::sync::Mutex<Vec<(&'static str, Priority, Guard)>>,
+    /// Every event emitted, in order (tests).
+    #[cfg(test)]
+    pub(crate) events: std::sync::Mutex<Vec<CodeIntelEvent>>,
 }
 
 impl Host {
@@ -31,7 +35,20 @@ impl Host {
             executor,
             #[cfg(test)]
             log: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            events: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Emits through this activation's emitter: on the calling (executor)
+    /// thread, after the snapshot it announces is in place.
+    pub(crate) fn emit(&self, event: CodeIntelEvent) {
+        #[cfg(test)]
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event.clone());
+        self.handle.emitter().emit(event);
     }
 
     pub(crate) fn busy(&self) -> Option<BusyGuard> {

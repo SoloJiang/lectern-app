@@ -416,6 +416,34 @@ impl ParsedFile {
         self.defs.iter().map(|d| &d.def)
     }
 
+    /// The definitions, each with whether it is a local definition: a
+    /// `@local.definition` in a non-root scope (`DefinitionRef::local`).
+    pub fn defs_with_local(&self) -> impl Iterator<Item = (&Def, bool)> + '_ {
+        self.defs.iter().map(|d| {
+            let local = self
+                .locals
+                .def_at(&d.name_range)
+                .is_some_and(|l| self.locals.is_local(l));
+            (&d.def, local)
+        })
+    }
+
+    /// The innermost definition whose node holds byte `offset` outside its
+    /// own name: who a reference there is in (the callers' `enclosing`).
+    pub fn enclosing(&self, offset: usize) -> Option<&Def> {
+        self.defs
+            .iter()
+            .filter(|d| d.range.start <= offset && offset < d.range.end)
+            .filter(|d| !(d.name_range.start <= offset && offset < d.name_range.end))
+            .max_by_key(|d| (d.range.start, std::cmp::Reverse(d.range.end)))
+            .map(|d| &d.def)
+    }
+
+    /// The source text of a reference position.
+    pub fn text(&self, site: &RefSite) -> &[u8] {
+        self.source.get(site.start..site.end).unwrap_or(&[])
+    }
+
     /// Every reference position: tags references and `@local.reference`,
     /// deduplicated by position. Tags leaves out references that locals
     /// resolves; the union keeps them.
