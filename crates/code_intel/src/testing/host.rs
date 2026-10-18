@@ -166,11 +166,40 @@ impl Projects for FakeProjects {
 
 type PowerFn = Arc<dyn Fn(bool) + Send + Sync>;
 
+/// Live subscribers by ID; a subscription's guard removes its own.
+pub(crate) type Subscribers<F> = Arc<Mutex<(u64, Vec<(u64, F)>)>>;
+
+/// Removes a subscriber when dropped.
+pub(crate) struct Unsubscribe<F: Send + 'static> {
+    pub(crate) list: std::sync::Weak<Mutex<(u64, Vec<(u64, F)>)>>,
+    pub(crate) id: u64,
+}
+
+impl<F: Send + 'static> Drop for Unsubscribe<F> {
+    fn drop(&mut self) {
+        if let Some(list) = self.list.upgrade() {
+            lock(&list).1.retain(|(id, _)| *id != self.id);
+        }
+    }
+}
+
+/// Adds a subscriber; the returned guard removes it.
+pub(crate) fn subscribe<F: Send + Sync + 'static>(list: &Subscribers<F>, f: F) -> Box<dyn Send> {
+    let mut l = lock(list);
+    l.0 += 1;
+    let id = l.0;
+    l.1.push((id, f));
+    Box::new(Unsubscribe {
+        list: Arc::downgrade(list),
+        id,
+    })
+}
+
 /// A power source the test switches.
 #[derive(Default)]
 pub struct FakePower {
     battery: AtomicBool,
-    subscribers: Mutex<Vec<PowerFn>>,
+    subscribers: Subscribers<PowerFn>,
 }
 
 impl FakePower {
@@ -183,14 +212,19 @@ impl FakePower {
     /// Switches the source and notifies the subscribers.
     pub fn set(&self, on_battery: bool) {
         self.battery.store(on_battery, Ordering::Release);
-        let subscribers = lock(&self.subscribers).clone();
+        let subscribers: Vec<PowerFn> = lock(&self.subscribers)
+            .1
+            .iter()
+            .map(|(_, f)| f.clone())
+            .collect();
         for f in subscribers {
             f(on_battery);
         }
     }
 
+    /// Subscriptions not dropped yet.
     pub fn subscribers(&self) -> usize {
-        lock(&self.subscribers).len()
+        lock(&self.subscribers).1.len()
     }
 }
 
@@ -200,8 +234,7 @@ impl PowerSource for FakePower {
     }
 
     fn subscribe(&self, f: Box<dyn Fn(bool) + Send + Sync>) -> Box<dyn Send> {
-        lock(&self.subscribers).push(Arc::from(f));
-        Box::new(())
+        subscribe(&self.subscribers, Arc::from(f))
     }
 }
 

@@ -15,7 +15,7 @@
 //!   stops the watchdog and closes every project and query.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use lectern_cache::Cache;
 use lectern_executor::Executor;
@@ -57,7 +57,8 @@ pub struct CodeIntelPlugin {
     clock: Arc<dyn Clock>,
     batch_tasks: usize,
     /// The latest activation's service (tests).
-    last: Arc<Mutex<Option<Arc<CodeIntelService>>>>,
+    /// Weak: it never keeps a deactivated activation alive.
+    last: Arc<Mutex<Weak<CodeIntelService>>>,
 }
 
 impl CodeIntelPlugin {
@@ -99,10 +100,30 @@ impl CodeIntelPlugin {
     /// The service of the latest activation (tests and benchmarks).
     #[cfg(any(test, feature = "test-support"))]
     pub fn service(&self) -> Option<Arc<CodeIntelService>> {
-        self.last
+        self.services().get()
+    }
+
+    /// Where every activation of this plugin leaves its service, kept after
+    /// the plugin moves into a kernel (tests and benchmarks).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn services(&self) -> Services {
+        Services(self.last.clone())
+    }
+}
+
+/// The latest activation's service of a [`CodeIntelPlugin`].
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+pub struct Services(Arc<Mutex<Weak<CodeIntelService>>>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Services {
+    /// The latest activation's service while that activation lives.
+    pub fn get(&self) -> Option<Arc<CodeIntelService>> {
+        self.0
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .upgrade()
     }
 }
 
@@ -130,7 +151,7 @@ impl Plugin for CodeIntelPlugin {
                 indexer.project_event(event);
             }
         });
-        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(service.clone());
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&service);
         Ok(Box::new(CodeIntelActive {
             service,
             deps: self.deps.clone(),
@@ -197,7 +218,7 @@ impl Drop for CodeIntelActive {
 /// thread [`WATCHDOG_THREAD`], submitted through `own_with` (so a dead
 /// activation starts none), with its `stop` registered in
 /// `Executor::on_shutdown` until the thread exits.
-fn watchdog(handle: &PluginHandle, executor: &Executor, clock: Arc<dyn Clock>) -> Watchdog {
+pub(crate) fn watchdog(handle: &PluginHandle, executor: &Executor, clock: Arc<dyn Clock>) -> Watchdog {
     let handle = handle.clone();
     let executor = executor.clone();
     Watchdog::new(

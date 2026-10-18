@@ -247,6 +247,7 @@ impl Inner {
         position: Position,
         cancel: &Arc<AtomicBool>,
     ) -> Result<Prepared, QueryError> {
+        crate::index::bump(&self.stats.prepares, 1);
         let lang = snap
             .table
             .for_path(&at.path, &*self.packs)

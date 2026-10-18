@@ -301,6 +301,109 @@ fn derived_writes_bump_their_generation() {
     assert_eq!(h.indexer.gens(&h.key()).expect("gens").writes, writes + 1);
 }
 
+/// The paths of a query's candidates.
+fn found(r: &lectern_services::code_intel::QueryResults) -> Vec<(String, u32)> {
+    r.candidates
+        .iter()
+        .map(|c| (c.definition.location.path.to_string(), c.definition.location.line))
+        .collect()
+}
+
+/// A path's effective OID changed: its hint stops matching, so the search
+/// reads it (the new content) until it is indexed again.
+#[test]
+fn derived_overlay_changed_oid_is_searched() {
+    let h = Harness::new();
+    h.git.add(
+        "main",
+        &[
+            ("a.ts", b"export function run() { return item(); }\n"),
+            ("b.ts", b"export function item() { return 1; }\n"),
+        ],
+    );
+    h.git.commit("main");
+    h.open();
+    assert!(h.hinted("b.ts"));
+    h.pause();
+    h.git
+        .write("main", "b.ts", b"// moved\n\nexport function item() { return 2; }\n");
+    h.emit(&[("b.ts", CHANGED)]);
+    h.settle();
+    assert!(!h.hinted("b.ts"));
+    let r = h.goto("a.ts", "item", 0);
+    assert_eq!(found(&r), [("b.ts".to_owned(), 2)], "the new content, not the old unit");
+    assert_eq!(
+        r.candidates[0].source,
+        lectern_services::code_intel::CandidateSource::Scanned
+    );
+}
+
+/// Units evicted, not indexed again yet: the jump still finds their
+/// definitions, through the search.
+#[test]
+fn derived_eviction_search_finds_evicted_definitions() {
+    let h = Harness::new();
+    let item = b"export function item() { return 1; }\n";
+    h.git.add(
+        "main",
+        &[("a.ts", b"export function run() { return item(); }\n"), ("b.ts", item)],
+    );
+    h.git.commit("main");
+    h.open();
+    h.pause();
+    let store = h.indexer.store(&h.key()).expect("store");
+    let ts_lang = crate::extract::LanguageTable::core()
+        .get("ts")
+        .cloned()
+        .expect("ts");
+    let mut write = store.write();
+    write.remove(h.git.oid(item), &Version::of(&ts_lang));
+    assert!(matches!(write.commit(), lectern_cache::Written::Committed));
+    let r = h.goto("a.ts", "item", 0);
+    assert_eq!(found(&r), [("b.ts".to_owned(), 0)]);
+    assert_eq!(
+        r.candidates[0].source,
+        lectern_services::code_intel::CandidateSource::Scanned
+    );
+}
+
+/// Only the sub-projects change: candidates' sub-project tiers and the
+/// search's scope follow the new ones.
+#[test]
+fn derived_packages_tiers_and_search_scope_follow() {
+    use lectern_services::code_intel::{CandidateTier, Completeness, QueryState};
+    let h = Harness::new();
+    h.git.add(
+        "main",
+        &[
+            ("app/x/a.ts", b"export function run() { return item(); }\n"),
+            ("app/y/b.ts", b"export function item() { return 1; }\n"),
+        ],
+    );
+    h.git.commit("main");
+    h.open_with("main", packages(&["app"]));
+    let r = h.goto("app/x/a.ts", "item", 0);
+    assert_eq!(r.candidates[0].tier, CandidateTier::SameSubproject);
+    h.set_packages(&["app/x", "app/y"]);
+    let r = h.goto("app/x/a.ts", "item", 0);
+    assert_eq!(r.candidates[0].tier, CandidateTier::Elsewhere);
+    // Unindexed: the search covers `app/x` only, `app/y` is outside.
+    h.pause();
+    h.git.write("main", "app/y/c.ts", b"export function item() { return 3; }\n");
+    h.emit(&[("app/y/c.ts", CHANGED)]);
+    h.settle();
+    let r = h.goto("app/x/a.ts", "item", 0);
+    assert_eq!(found(&r), [("app/y/b.ts".to_owned(), 0)], "c.ts is not searched");
+    assert_eq!(
+        r.state,
+        QueryState::Done(Completeness::Complete),
+        "the sub-project is searched through"
+    );
+    h.set_packages(&["app"]);
+    let r = h.goto("app/x/a.ts", "item", 0);
+    assert_eq!(found(&r), [("app/y/b.ts".to_owned(), 0), ("app/y/c.ts".to_owned(), 0)]);
+}
+
 #[test]
 fn derived_stale_result_is_not_installed() {
     let h = indexed();
