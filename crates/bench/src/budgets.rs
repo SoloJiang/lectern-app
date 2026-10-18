@@ -836,6 +836,33 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // Rebuilding the blob → path map of 100 000 files (base part and hints
+    // carried by path), and its live bytes without the file list.
+    share(
+        "code_intel/map_100k",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/map_100k_bytes",
+        &[median(Limit::BytesAtMost(3 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
+    // The peak of live bytes while the batch tiers index a synthetic
+    // repository (8 KiB files and files near 1 MiB), syntax trees included.
+    share(
+        "code_intel/batch_peak",
+        &[max(Limit::BytesAtMost(40 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
+    // The partition's size after the units of 100 000 synthetic files.
+    share("code_intel/disk_100k", RECORD, CODE_INTEL, ACTIVE, Time),
     // FakeBackend and the manual driver, without backend latency.
     share(
         "fs_watch/classify_burst",

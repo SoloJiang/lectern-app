@@ -1,0 +1,813 @@
+//! The indexer (docs/design/code_intel.md「blob → 路径映射」「输入代数与派生
+//! 状态」「建索引的分层」「调度、批次与取消」「打开项目与热启动」「增量更新」
+//! 「语言包的变化」): per open project, the blob → path map of the current
+//! worktree, kept up to date from `ProjectEvent`s and the worktree's
+//! `WorktreeBatch`es by one reconcile task, and the five tiers that extract
+//! what the cache is missing.
+//!
+//! Events only bump input generations and request a reconcile; every
+//! derived state is recomputed there, in dependency order, and installed
+//! only if the generations it read are still current.
+
+pub(crate) mod batch;
+pub(crate) mod host;
+mod reconcile;
+pub(crate) mod state;
+mod watch;
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+
+use lectern_cache::Cache;
+use lectern_executor::{Executor, Priority};
+use lectern_fs_watch::Watcher;
+use lectern_kernel::PluginHandle;
+use lectern_services::code_intel::{Coverage, Focus, TierState};
+use lectern_services::project::{ProjectEvent, ProjectKey, Projects, WorktreeKey};
+
+use crate::LangName;
+use crate::extract::{Deadline, Extraction, Lang, LanguageTable, extract};
+use crate::git_access::{GitAccess, LecternGit};
+use crate::grammar::{GrammarChange, GrammarSource};
+use crate::map::{HeadDiff, LiveMap};
+use crate::power::PowerSource;
+use crate::store::Store;
+use crate::watchdog::Watchdog;
+
+pub(crate) use host::Host;
+use state::{Project, State};
+
+/// What the indexer is built from. `app` creates the executor, the cache
+/// and the watcher once (ADR 0025); the plugin passes its handle and its
+/// watchdog.
+pub struct IndexDeps {
+    pub executor: Executor,
+    pub cache: Cache,
+    pub watcher: Watcher,
+    pub power: Arc<dyn PowerSource>,
+    pub grammars: Arc<dyn GrammarSource>,
+    pub projects: Arc<dyn Projects>,
+    /// The activation the tasks belong to and take their guards from.
+    pub handle: PluginHandle,
+    pub watchdog: Watchdog,
+    /// Long-running batch tasks, one per batch thread
+    /// ([`default_batch_tasks`]).
+    pub batch_tasks: usize,
+}
+
+/// The executor's default number of batch threads, `clamp(parallelism / 4,
+/// 1, 3)` (ADR 0029): one batch task each.
+pub fn default_batch_tasks() -> usize {
+    let parallelism = std::thread::available_parallelism().map_or(1, |n| n.get());
+    (parallelism / 4).clamp(1, 3)
+}
+
+/// The extraction the tiers call; tests count and steer it.
+pub(crate) type ExtractFn =
+    Arc<dyn Fn(&Lang, &[u8], &Deadline, &Arc<AtomicBool>) -> Extraction + Send + Sync>;
+
+/// Counters of the recomputations, for the `derived_*` tests (「测试」's
+/// counting hooks) and the benchmarks.
+#[derive(Default, Debug)]
+pub struct Stats {
+    pub base_builds: AtomicUsize,
+    pub compares: AtomicUsize,
+    /// Paths read again for the overlay.
+    pub rereads: AtomicUsize,
+    pub cursor_builds: AtomicUsize,
+    pub extractions: AtomicUsize,
+    /// Existence-check calls (one per language and chunk of up to 500).
+    pub exists_checks: AtomicUsize,
+    pub reconciles: AtomicUsize,
+    /// Passes over the reconcile's steps (each reconcile makes at least one).
+    pub reconcile_passes: AtomicUsize,
+    pub grammar_rounds: AtomicUsize,
+}
+
+/// A snapshot of [`Stats`].
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct StatCounts {
+    pub base_builds: usize,
+    pub compares: usize,
+    pub rereads: usize,
+    pub cursor_builds: usize,
+    pub extractions: usize,
+    pub exists_checks: usize,
+    pub reconciles: usize,
+    pub reconcile_passes: usize,
+    pub grammar_rounds: usize,
+}
+
+impl Stats {
+    fn counts(&self) -> StatCounts {
+        let get = |a: &AtomicUsize| a.load(Ordering::Acquire);
+        StatCounts {
+            base_builds: get(&self.base_builds),
+            compares: get(&self.compares),
+            rereads: get(&self.rereads),
+            cursor_builds: get(&self.cursor_builds),
+            extractions: get(&self.extractions),
+            exists_checks: get(&self.exists_checks),
+            reconciles: get(&self.reconciles),
+            reconcile_passes: get(&self.reconcile_passes),
+            grammar_rounds: get(&self.grammar_rounds),
+        }
+    }
+}
+
+pub(crate) fn bump(counter: &AtomicUsize, by: usize) {
+    counter.fetch_add(by, Ordering::AcqRel);
+}
+
+/// The current language table, and what the last grammar round saw.
+pub(crate) struct Langs {
+    pub table: LanguageTable,
+    /// Grows by one whenever the table changes (the language-pack input).
+    pub generation: u64,
+    /// The newest `GrammarSource::generation` handled.
+    pub handled: u64,
+    /// Languages disabled for this run: their grammar or queries do not
+    /// compile.
+    pub disabled: HashSet<LangName>,
+}
+
+/// The grammar rounds: at most one at a time, notifications during one
+/// merged into the next.
+#[derive(Default)]
+struct Rounds {
+    running: bool,
+    again: bool,
+    langs: HashSet<LangName>,
+}
+
+#[derive(Default)]
+pub(crate) struct BatchRun {
+    pub running: usize,
+    /// Work may have arrived since a running task last looked.
+    kicked: bool,
+    /// The most tasks running at once (tests).
+    #[cfg(test)]
+    pub peak: usize,
+}
+
+pub(crate) struct Inner {
+    me: Weak<Inner>,
+    pub host: Host,
+    pub cache: Cache,
+    pub watcher: Watcher,
+    pub power: Arc<dyn PowerSource>,
+    pub packs: Arc<dyn GrammarSource>,
+    pub projects: Arc<dyn Projects>,
+    pub watchdog: Watchdog,
+    pub git: Arc<dyn GitAccess>,
+    batch_tasks: usize,
+    pub langs: Mutex<Langs>,
+    open: Mutex<Vec<Arc<Project>>>,
+    /// The project that got the latest `set_focus` (or else was opened
+    /// last): only it runs tiers 3–5.
+    pub(crate) batch_project: Mutex<Option<ProjectKey>>,
+    /// Some `set_focus` happened: opening a project no longer picks it.
+    focused_once: AtomicBool,
+    pub battery: AtomicBool,
+    pub(crate) batch: Mutex<BatchRun>,
+    rounds: Mutex<Rounds>,
+    pub extract: Mutex<ExtractFn>,
+    /// One batch task at a time extracts a large file.
+    pub(crate) large: batch::LargeSlot,
+    pub stats: Stats,
+    next_session: AtomicUsize,
+    /// The files of each extraction batch of tiers 3–5, in order (tests).
+    #[cfg(test)]
+    pub batch_log: Mutex<Vec<usize>>,
+    /// Another registration of `code_intel.tags` for new projects (tests).
+    #[cfg(test)]
+    pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
+}
+
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The index of a plugin activation. Every method returns at once and may
+/// be called on any thread; the work runs on the executor.
+pub struct Indexer {
+    inner: Arc<Inner>,
+}
+
+impl Indexer {
+    /// No IO.
+    pub fn new(deps: IndexDeps) -> Indexer {
+        Indexer::with_git(deps, Arc::new(LecternGit::new()))
+    }
+
+    /// The same indexer over `testing::FakeGit`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_fake_git(deps: IndexDeps, git: Arc<crate::testing::FakeGit>) -> Indexer {
+        Indexer::with_git(deps, git)
+    }
+
+    pub(crate) fn with_git(deps: IndexDeps, git: Arc<dyn GitAccess>) -> Indexer {
+        let battery = deps.power.on_battery();
+        let inner = Arc::new_cyclic(|me| Inner {
+            me: me.clone(),
+            host: Host::new(deps.handle, deps.executor),
+            cache: deps.cache,
+            watcher: deps.watcher,
+            power: deps.power,
+            packs: deps.grammars,
+            projects: deps.projects,
+            watchdog: deps.watchdog,
+            git,
+            batch_tasks: deps.batch_tasks.max(1),
+            langs: Mutex::new(Langs {
+                table: LanguageTable::core(),
+                generation: 0,
+                handled: 0,
+                disabled: HashSet::new(),
+            }),
+            open: Mutex::new(Vec::new()),
+            batch_project: Mutex::new(None),
+            focused_once: AtomicBool::new(false),
+            battery: AtomicBool::new(battery),
+            batch: Mutex::new(BatchRun::default()),
+            rounds: Mutex::new(Rounds::default()),
+            extract: Mutex::new(Arc::new(extract)),
+            large: batch::LargeSlot::default(),
+            stats: Stats::default(),
+            next_session: AtomicUsize::new(1),
+            #[cfg(test)]
+            batch_log: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            tables: Mutex::new(None),
+        });
+        Indexer { inner }
+    }
+
+    /// Subscribes to the power source and the language packs; the plugin
+    /// hands the returned values to `PluginHandle::own`, so they are dropped
+    /// (unsubscribed) on deactivation. Picks up packs already installed.
+    pub fn subscribe(&self) -> Vec<Box<dyn Send>> {
+        let power = {
+            let me = Arc::downgrade(&self.inner);
+            self.inner.power.subscribe(Box::new(move |on_battery| {
+                if let Some(inner) = me.upgrade() {
+                    inner.power_changed(on_battery);
+                }
+            }))
+        };
+        let grammars = {
+            let me = Arc::downgrade(&self.inner);
+            self.inner.packs.subscribe(Box::new(move |change| {
+                if let Some(inner) = me.upgrade() {
+                    inner.grammar_changed(Some(change));
+                }
+            }))
+        };
+        if self.inner.packs.generation() > 0 || !self.inner.packs.installed().is_empty() {
+            self.inner.grammar_changed(None);
+        }
+        vec![power, grammars]
+    }
+
+    /// Handles a `ProjectEvent`: only bumps inputs and requests a reconcile.
+    pub fn project_event(&self, event: &ProjectEvent) {
+        self.inner.project_event(event);
+    }
+
+    /// Starts on the projects already open (`started`).
+    pub fn open_existing(&self) {
+        for key in self.inner.projects.open_projects() {
+            self.inner.touch(&key);
+        }
+    }
+
+    /// `CodeIntel::set_focus`: replaces one kind of focus. Tiers 1 and 2
+    /// index it; it picks the project that runs tiers 3–5 and the anchor
+    /// of tier 3.
+    pub fn set_focus(&self, project: &ProjectKey, worktree: Option<&WorktreeKey>, focus: Focus) {
+        self.inner.set_focus(project, worktree, focus);
+    }
+
+    /// The power source changed (`PowerSource::subscribe`).
+    pub fn power_changed(&self, on_battery: bool) {
+        self.inner.power_changed(on_battery);
+    }
+
+    /// The language packs changed (`GrammarSource::subscribe`).
+    pub fn grammar_changed(&self, change: GrammarChange) {
+        self.inner.grammar_changed(Some(change));
+    }
+
+    /// The user asked something of this project (`query`, `names`): on
+    /// battery, tiers 4 and 5 go on until it closes or the power changes.
+    pub fn demand(&self, project: &ProjectKey) {
+        self.inner.demand(project);
+    }
+
+    /// `CodeIntel::coverage`: memory only, never blocks.
+    pub fn coverage(&self, project: &ProjectKey) -> Option<Coverage> {
+        self.inner.coverage(project)
+    }
+
+    /// The current map of a project: one consistent view (for queries).
+    pub fn map(&self, project: &ProjectKey) -> Option<LiveMap> {
+        let p = self.inner.project(project)?;
+        Some(lock(&p.state).map.clone())
+    }
+
+    /// The last worktree comparison's HEAD difference.
+    pub fn head_diff(&self, project: &ProjectKey) -> Option<Arc<HeadDiff>> {
+        let p = self.inner.project(project)?;
+        Some(lock(&p.state).head_diff.clone())
+    }
+
+    /// Whether a path's current content equals HEAD (「依赖 git、fs_watch 与
+    /// cache 的接口」): its OID in HEAD is known and equals its effective
+    /// OID, and the last comparison saw the current HEAD, index and file
+    /// list. Otherwise false, until the reconcile compares again.
+    pub fn head_clean(&self, project: &ProjectKey, path: &str) -> bool {
+        self.inner.head_clean(project, path)
+    }
+
+    /// The project's store, for queries and tests.
+    pub fn store(&self, project: &ProjectKey) -> Option<Store> {
+        Some(self.inner.project(project)?.store.clone())
+    }
+
+    /// Counters of recomputations so far.
+    pub fn stats(&self) -> StatCounts {
+        self.inner.stats.counts()
+    }
+
+    /// Replaces the extraction the tiers call (tests count, block or steer
+    /// it).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_extractor(
+        &self,
+        f: impl Fn(&Lang, &[u8], &Deadline, &Arc<AtomicBool>) -> Extraction + Send + Sync + 'static,
+    ) {
+        *lock(&self.inner.extract) = Arc::new(f);
+    }
+
+    /// The input generations of a project, for tests.
+    #[cfg(test)]
+    pub(crate) fn gens(&self, project: &ProjectKey) -> Option<state::Gens> {
+        Some(lock(&self.inner.project(project)?.state).gens)
+    }
+
+    /// The stamp a hint of the current map matches (its provenance and the
+    /// walks' eviction generation), for tests.
+    #[cfg(test)]
+    pub(crate) fn stamp(&self, project: &ProjectKey) -> Option<crate::map::HintStamp> {
+        let p = self.inner.project(project)?;
+        let eviction = p.evictions();
+        Some(lock(&p.state).stamp(eviction))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inner(&self) -> &Arc<Inner> {
+        &self.inner
+    }
+
+    /// Tier 3's scope in the current cursor ("whole", "empty" or the
+    /// directory), for tests.
+    #[cfg(test)]
+    pub(crate) fn cursor_scope(&self, project: &ProjectKey) -> Option<String> {
+        let p = self.inner.project(project)?;
+        let st = lock(&p.state);
+        let cursor = st.batch.cursor.as_ref()?;
+        Some(match &cursor.scope {
+            state::Scope::Whole => "whole".into(),
+            state::Scope::Empty => "empty".into(),
+            state::Scope::Dir(d) => d.to_string(),
+        })
+    }
+
+    /// Whether the last comparison is current, for tests.
+    #[cfg(test)]
+    pub(crate) fn compared_current(&self, project: &ProjectKey) -> bool {
+        self.inner.project(project).is_some_and(|p| {
+            let grammar = self.inner.grammar();
+            let st = lock(&p.state);
+            st.compare_for == Some(st.gens.compare_deps(grammar))
+        })
+    }
+
+    /// Ends every project's session: tasks stop, extractions in flight are
+    /// cancelled, subscriptions to fs_watch dropped.
+    pub fn close_all(&self) {
+        let projects = std::mem::take(&mut *lock(&self.inner.open));
+        for p in projects {
+            lock(&p.state).end();
+        }
+    }
+}
+
+impl Drop for Indexer {
+    fn drop(&mut self) {
+        self.close_all();
+    }
+}
+
+impl Inner {
+    fn arc(&self) -> Option<Arc<Inner>> {
+        self.me.upgrade()
+    }
+
+    /// Lock order: `batch_project`, then `open`, then a project's state;
+    /// `open` is released before a state is locked.
+    pub(crate) fn project(&self, key: &ProjectKey) -> Option<Arc<Project>> {
+        lock(&self.open).iter().find(|p| &p.key == key).cloned()
+    }
+
+    pub(crate) fn is_open(&self, project: &Arc<Project>) -> bool {
+        lock(&self.open).iter().any(|p| Arc::ptr_eq(p, project))
+    }
+
+    pub(crate) fn head_clean(&self, key: &ProjectKey, path: &str) -> bool {
+        let grammar = self.grammar();
+        self.project(key)
+            .is_some_and(|p| reconcile::head_clean(&lock(&p.state), path, grammar))
+    }
+
+    /// Bumps one input generation and requests a reconcile, as an event
+    /// would (tests that change an input while a reconcile computes).
+    #[cfg(test)]
+    pub(crate) fn bump(&self, key: &ProjectKey, f: impl FnOnce(&mut state::Gens)) {
+        let Some(p) = self.project(key) else {
+            return;
+        };
+        f(&mut lock(&p.state).gens);
+        if let Some(me) = self.arc() {
+            me.request_reconcile(&p);
+        }
+    }
+
+    #[cfg(not(test))]
+    fn store_for(&self, partition: &lectern_cache::Partition) -> Store {
+        Store::new(partition)
+    }
+
+    /// Tests may register `code_intel.tags` with a smaller quota.
+    #[cfg(test)]
+    fn store_for(&self, partition: &lectern_cache::Partition) -> Store {
+        match *lock(&self.tables) {
+            Some(tables) => Store::with_tables(partition, tables),
+            None => Store::new(partition),
+        }
+    }
+
+    /// Runs a reconcile of the project on this thread now (tests that
+    /// change the session while an extraction is in flight).
+    #[cfg(test)]
+    pub(crate) fn reconcile_now(self: &Arc<Self>, key: &ProjectKey) {
+        if let Some(p) = self.project(key) {
+            lock(&p.state).run.running = true;
+            self.clone().reconcile(p);
+        }
+    }
+
+    fn new_session(&self) -> u64 {
+        self.next_session.fetch_add(1, Ordering::AcqRel) as u64
+    }
+
+    /// The project, opened if it was not, and a reconcile requested.
+    fn touch(&self, key: &ProjectKey) -> Arc<Project> {
+        let (project, created) = {
+            let mut open = lock(&self.open);
+            match open.iter().find(|p| &p.key == key) {
+                Some(p) => (p.clone(), false),
+                None => {
+                    let partition = match key {
+                        ProjectKey::Git { common_dir } => self.cache.repo(common_dir),
+                        ProjectKey::Folder { root } => self.cache.folder(root),
+                    };
+                    let (table, grammar) = {
+                        let langs = lock(&self.langs);
+                        (langs.table.clone(), langs.generation)
+                    };
+                    let p = Arc::new(Project {
+                        key: key.clone(),
+                        store: self.store_for(&partition),
+                        commits: Mutex::new(()),
+                        replaced: std::sync::atomic::AtomicU64::new(0),
+                        replacing: std::sync::atomic::AtomicU64::new(0),
+                        steady: std::sync::atomic::AtomicU64::new(0),
+                        state: Mutex::new(State::new(self.new_session(), &table, grammar)),
+                    });
+                    open.push(p.clone());
+                    (p, true)
+                }
+            }
+        };
+        // Until the first `set_focus`, the project opened last runs tiers 3–5.
+        if created && !self.focused_once.load(Ordering::Acquire) {
+            *lock(&self.batch_project) = Some(key.clone());
+        }
+        if let Some(me) = self.arc() {
+            me.request_reconcile(&project);
+        }
+        project
+    }
+
+    pub(crate) fn project_event(&self, event: &ProjectEvent) {
+        match event {
+            ProjectEvent::Opened {
+                result: Ok(key), ..
+            } => {
+                self.touch(key);
+            }
+            ProjectEvent::Opened { result: Err(_), .. } => {}
+            ProjectEvent::Changed { project, parts, .. } => {
+                let p = self.project(project).unwrap_or_else(|| self.touch(project));
+                {
+                    let mut st = lock(&p.state);
+                    // The worktree list or a HEAD changed: tier 5 is not
+                    // walked again for that (an index change of one other
+                    // worktree arrives in a `RepoBatch`, and only that
+                    // worktree is walked again); a new worktree is not in
+                    // `done` yet.
+                    if parts.worktrees {
+                        st.check_head = true;
+                    }
+                    if parts.files {
+                        st.check_index = true;
+                    }
+                    // A failed watch (or root) is tried again on the next
+                    // event.
+                    if st.watches.is_none() {
+                        st.root = None;
+                        st.root_tried = false;
+                    }
+                }
+                if let Some(me) = self.arc() {
+                    me.request_reconcile(&p);
+                }
+            }
+            ProjectEvent::Closed { project } => {
+                let removed = {
+                    let mut open = lock(&self.open);
+                    let at = open.iter().position(|p| &p.key == project);
+                    at.map(|i| open.remove(i))
+                };
+                if let Some(p) = removed {
+                    lock(&p.state).end();
+                }
+                {
+                    let mut batch = lock(&self.batch_project);
+                    if batch.as_ref() == Some(project) {
+                        *batch = lock(&self.open).last().map(|p| p.key.clone());
+                    }
+                }
+                // The project that runs tiers 3–5 now may have work left.
+                if let Some(me) = self.arc() {
+                    me.kick_batch();
+                }
+            }
+        }
+    }
+
+    fn set_focus(&self, key: &ProjectKey, worktree: Option<&WorktreeKey>, focus: Focus) {
+        let Some(project) = self.project(key) else {
+            return;
+        };
+        {
+            let mut st = lock(&project.state);
+            let wt = worktree.cloned();
+            match focus {
+                Focus::Current(text) => st.focus.current = text.map(|t| (wt, t)),
+                Focus::Drawer(paths) => st.focus.drawer = Some((wt, paths)),
+                Focus::Review(paths) => st.focus.review = Some((wt, paths)),
+                Focus::Touched(paths) => st.focus.touched = Some((wt, paths)),
+            }
+            st.gens.focus += 1;
+        }
+        self.focused_once.store(true, Ordering::Release);
+        *lock(&self.batch_project) = Some(key.clone());
+        if let Some(me) = self.arc() {
+            me.enqueue_focus(&project);
+            me.kick_batch();
+        }
+    }
+
+    fn power_changed(&self, on_battery: bool) {
+        let was = self.battery.swap(on_battery, Ordering::AcqRel);
+        if was != on_battery {
+            let projects = lock(&self.open).clone();
+            for p in projects {
+                lock(&p.state).demand = false;
+            }
+        }
+        if let Some(me) = self.arc() {
+            me.kick_batch();
+        }
+    }
+
+    fn demand(&self, key: &ProjectKey) {
+        if let Some(p) = self.project(key) {
+            lock(&p.state).demand = true;
+        }
+        if let Some(me) = self.arc() {
+            me.kick_batch();
+        }
+    }
+
+    /// Queues a grammar round; `change` None asks for one without a
+    /// notification (packs installed before the subscription).
+    fn grammar_changed(&self, change: Option<GrammarChange>) {
+        {
+            let mut rounds = lock(&self.rounds);
+            if let Some(change) = change {
+                if change.generation <= lock(&self.langs).handled {
+                    return;
+                }
+                rounds.langs.insert(change.lang);
+            }
+            if rounds.running {
+                rounds.again = true;
+                return;
+            }
+            rounds.running = true;
+        }
+        let Some(me) = self.arc() else {
+            return;
+        };
+        let spawned = self
+            .host
+            .spawn_busy("grammar", Priority::Background, move || me.grammar_round());
+        if !spawned {
+            lock(&self.rounds).running = false;
+        }
+    }
+
+    /// One grammar round (「语言包的变化」): reads the packs' current state,
+    /// compares it with the table and updates the table; the language
+    /// generation then makes the map, the hints and the cursors follow.
+    pub(crate) fn grammar_round(self: Arc<Self>) {
+        loop {
+            bump(&self.stats.grammar_rounds, 1);
+            let (asked, mut table, handled) = {
+                let mut rounds = lock(&self.rounds);
+                // This round reads the current state: notifications so far
+                // are merged into it.
+                rounds.again = false;
+                let asked = std::mem::take(&mut rounds.langs);
+                let langs = lock(&self.langs);
+                (asked, langs.table.clone(), langs.handled)
+            };
+            let generation = self.packs.generation();
+            let mut names: Vec<LangName> = table
+                .iter()
+                .filter(|l| !l.lease().is_static())
+                .map(|l| l.name().clone())
+                .chain(asked)
+                // Packs installed before activation, or whose notification
+                // was missed: a round reads the whole installed set.
+                .chain(self.packs.installed())
+                .collect();
+            names.sort_by(|a, b| a.0.cmp(&b.0));
+            names.dedup();
+            let mut changed = Vec::new();
+            for name in names {
+                let current = table.get(&name.0).cloned();
+                match (self.packs.grammar(&name), current) {
+                    (Some(grammar), current) => {
+                        let mut version = [0u8; 8];
+                        version.copy_from_slice(&grammar.artifact_sha256[..8]);
+                        let version = u64::from_be_bytes(version);
+                        let same = current.as_ref().is_some_and(|l| {
+                            l.grammar_version() == version && !l.lease().is_static()
+                        });
+                        if !same && current.as_ref().is_none_or(|l| !l.lease().is_static()) {
+                            table = table.with_pack(name.clone(), grammar);
+                            changed.push(name);
+                        }
+                    }
+                    (None, Some(current)) if !current.lease().is_static() => {
+                        table = table.without(&name.0);
+                        changed.push(name);
+                    }
+                    (None, _) => {}
+                }
+            }
+            // The table and its generation change while `open` is held
+            // (`open`, then `langs`, as in `touch`): a project opened
+            // concurrently is either in `projects` or starts with the new
+            // table.
+            let projects: Vec<Arc<Project>> = {
+                let open = lock(&self.open);
+                let mut langs = lock(&self.langs);
+                langs.handled = langs.handled.max(generation).max(handled);
+                if !changed.is_empty() {
+                    langs.table = table;
+                    langs.generation += 1;
+                }
+                open.clone()
+            };
+            if !changed.is_empty() {
+                for p in &projects {
+                    let st = lock(&p.state);
+                    // In-flight extractions of a changed language give up;
+                    // their results would be dropped before the write anyway.
+                    for ((_, lang), owner) in &st.in_flight {
+                        if changed.contains(lang) {
+                            owner.flag.store(true, Ordering::Release);
+                        }
+                    }
+                }
+                for p in &projects {
+                    self.request_reconcile(p);
+                }
+            }
+            let mut rounds = lock(&self.rounds);
+            if rounds.again {
+                rounds.again = false;
+                continue;
+            }
+            rounds.running = false;
+            return;
+        }
+    }
+
+    /// Whether tiers 4 and 5 may run for a project.
+    pub(crate) fn wide_allowed(&self, st: &State) -> bool {
+        !self.battery.load(Ordering::Acquire) || st.demand
+    }
+
+    fn coverage(&self, key: &ProjectKey) -> Option<Coverage> {
+        let project = self.project(key)?;
+        if matches!(key, ProjectKey::Folder { .. }) {
+            // Folder projects are not indexed yet (step 3): every tier is
+            // `Pending`, never `Done`, so callers answer from a search.
+            return Some(Coverage {
+                generation: lock(&project.state).map.provenance.generation(),
+                focus: TierState::Pending,
+                subproject: TierState::Pending,
+                worktree: TierState::Pending,
+                other_worktrees: TierState::Pending,
+            });
+        }
+        let eviction = project.evictions();
+        let grammar = self.grammar();
+        let st = lock(&project.state);
+        let focus = if st.focused.queue.iter().all(|q| q.is_empty())
+            && st.focused.running.iter().all(|r| *r == 0)
+        {
+            TierState::Done
+        } else {
+            TierState::Pending
+        };
+        // The walks are of the current map (built from the current file
+        // list and grammar) with the current scope.
+        let current = st.base_for == Some((st.gens.files, grammar))
+            && st.batch.cursor.as_ref().is_some_and(|c| {
+                c.deps == st.cursor_deps(eviction) && c.scope == batch::subproject(&st)
+            });
+        let tier = |t: usize| {
+            let walked = current && st.batch.cursor.as_ref().is_some_and(|c| c.walks[t].done);
+            if walked && st.batch.resume[t].is_empty() && st.batch.active[t] == 0 {
+                TierState::Done
+            } else {
+                TierState::Pending
+            }
+        };
+        let wide = self.wide_allowed(&st);
+        let deferred = |state: TierState| {
+            if wide || state == TierState::Done {
+                state
+            } else {
+                TierState::Deferred
+            }
+        };
+        let others = {
+            let o = &st.batch.others;
+            let all_done = st.snapshot.as_ref().is_some_and(|s| {
+                let active = st.worktree();
+                s.worktrees
+                    .iter()
+                    .filter(|w| !w.prunable && Some(&w.key) != active)
+                    .all(|w| o.done.contains(&w.key))
+            });
+            let stamp = st.stamp(eviction);
+            let deps = Some((st.session, stamp.eviction, stamp.grammar));
+            if o.deps == deps
+                && all_done
+                && o.current.is_none()
+                && st.batch.resume[2].is_empty()
+                && st.batch.active[2] == 0
+            {
+                TierState::Done
+            } else {
+                TierState::Pending
+            }
+        };
+        Some(Coverage {
+            generation: st.map.provenance.generation(),
+            focus,
+            subproject: tier(0),
+            worktree: deferred(tier(1)),
+            other_worktrees: deferred(others),
+        })
+    }
+}

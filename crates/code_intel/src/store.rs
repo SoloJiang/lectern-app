@@ -641,6 +641,14 @@ impl StoreWrite {
         true
     }
 
+    /// Deletes the unit of `oid` under `version` (tests: a cache that lost
+    /// some units).
+    #[cfg(test)]
+    pub(crate) fn remove(&mut self, oid: BlobId, version: &Version) {
+        self.write.remove(&unit_key(oid, version));
+        self.units += 1;
+    }
+
     /// Units recorded.
     pub fn len(&self) -> usize {
         self.units

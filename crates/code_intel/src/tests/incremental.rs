@@ -1,0 +1,282 @@
+//! `incremental_*`: `FakeBackend` drives `WorktreeBatch`es; each event of
+//! 「增量更新」's table bumps its input, and the kernel stays busy from the
+//! backend's event until the overlay is updated.
+
+use lectern_fs_watch::Flags;
+
+use super::support::{CHANGED, DIR_CHANGED, Harness, REMOVED, ts};
+
+fn indexed() -> Harness {
+    let h = Harness::new();
+    h.git.add(
+        "main",
+        &[
+            ("src/a.ts", &ts("a")),
+            ("src/b.ts", &ts("b")),
+            ("docs/c.ts", &ts("c")),
+        ],
+    );
+    h.git.commit("main");
+    h.open();
+    h
+}
+
+#[test]
+fn incremental_edit_indexes_the_new_oid_and_forgets_the_old() {
+    let h = indexed();
+    let old = h.git.oid(&ts("a"));
+    let new = h.git.oid(&ts("a_edited"));
+    h.git.write("main", "src/a.ts", &ts("a_edited"));
+    h.emit(&[("src/a.ts", CHANGED)]);
+    h.settle();
+    assert!(
+        h.map().paths(&old, "ts").is_empty(),
+        "the old OID is not returned"
+    );
+    assert_eq!(h.map().paths(&new, "ts").len(), 1);
+    assert!(h.stored(new, "ts"));
+    assert!(h.hinted("src/a.ts"));
+    // The old unit stays for eviction: another worktree may use it.
+    assert!(h.stored(old, "ts"));
+}
+
+#[test]
+fn incremental_deletion_and_new_file() {
+    let h = indexed();
+    h.git.delete("main", "src/b.ts");
+    h.git.write("main", "src/new.ts", &ts("new"));
+    h.emit(&[
+        ("src/b.ts", REMOVED),
+        ("src/new.ts", super::support::CREATED),
+    ]);
+    h.settle();
+    assert!(h.map().effective("src/b.ts").is_none());
+    assert!(h.map().paths(&h.git.oid(&ts("b")), "ts").is_empty());
+    assert!(h.hinted("src/new.ts"));
+}
+
+/// Each event and the generations it must bump.
+#[test]
+fn incremental_events_bump_their_inputs() {
+    struct Case {
+        name: &'static str,
+        setup: fn(&Harness),
+        events: &'static [(&'static str, Flags)],
+        git: &'static [(&'static str, Flags)],
+        compare: bool,
+        head: bool,
+        index: bool,
+        rules: bool,
+    }
+    let cases = [
+        Case {
+            name: "a directory: compare to find files moved in",
+            setup: |h| h.git.write("main", "src/moved/in.ts", &ts("moved")),
+            events: &[("src", DIR_CHANGED)],
+            git: &[],
+            compare: true,
+            head: false,
+            index: false,
+            rules: false,
+        },
+        Case {
+            name: "rescan",
+            setup: |_| {},
+            events: &[("src", Flags(Flags::DIR.0 | Flags::RESCAN.0))],
+            git: &[],
+            compare: true,
+            head: false,
+            index: false,
+            rules: true,
+        },
+        Case {
+            name: "HEAD moved by a ref change",
+            setup: |h| h.git.move_head("main"),
+            events: &[],
+            git: &[("refs/heads/main", CHANGED)],
+            compare: true,
+            head: true,
+            index: false,
+            rules: false,
+        },
+        Case {
+            name: "the index",
+            setup: |h| h.git.stage_content("main", "src/a.ts", &ts("a_staged")),
+            events: &[],
+            git: &[("index", CHANGED)],
+            compare: true,
+            head: false,
+            index: true,
+            rules: false,
+        },
+        Case {
+            name: "a .gitignore",
+            setup: |h| h.git.write("main", ".gitignore", b"*.log\n"),
+            events: &[(".gitignore", CHANGED)],
+            git: &[],
+            compare: true,
+            head: false,
+            index: false,
+            rules: true,
+        },
+    ];
+    for case in cases {
+        let h = indexed();
+        let before = h.indexer.gens(&h.key()).expect("gens");
+        let compares = h.stats().compares;
+        (case.setup)(&h);
+        h.emit(case.events);
+        h.emit_git(case.git);
+        h.settle();
+        let after = h.indexer.gens(&h.key()).expect("gens");
+        assert_eq!(
+            h.stats().compares > compares,
+            case.compare,
+            "{}: compare",
+            case.name
+        );
+        assert_eq!(after.head > before.head, case.head, "{}: head", case.name);
+        assert_eq!(
+            after.index > before.index,
+            case.index,
+            "{}: index",
+            case.name
+        );
+        assert_eq!(
+            after.rules > before.rules,
+            case.rules,
+            "{}: rules",
+            case.name
+        );
+        assert_eq!(after.files, before.files, "{}: files", case.name);
+    }
+}
+
+#[test]
+fn incremental_directory_event_finds_moved_in_files() {
+    let h = indexed();
+    h.git.write("main", "src/moved/in.ts", &ts("moved"));
+    h.emit(&[("src/moved", DIR_CHANGED)]);
+    h.settle();
+    assert!(h.hinted("src/moved/in.ts"));
+}
+
+#[test]
+fn incremental_events_merge_into_one_round() {
+    let h = indexed();
+    let reconciles = h.stats().reconciles;
+    let rereads = h.stats().rereads;
+    for (i, path) in ["src/a.ts", "src/b.ts", "docs/c.ts"].iter().enumerate() {
+        h.git.write("main", path, &ts(&format!("burst{i}")));
+        h.emit(&[(path, CHANGED)]);
+        h.driver.run_until_idle();
+    }
+    h.settle();
+    assert_eq!(
+        h.stats().reconciles,
+        reconciles + 1,
+        "one batch, one reconcile"
+    );
+    assert_eq!(h.stats().rereads, rereads + 3);
+    assert_eq!(h.map().overlay.len(), 3);
+}
+
+#[test]
+fn incremental_kernel_busy_until_the_overlay_is_updated() {
+    let h = indexed();
+    assert!(h.quiescent());
+    h.git.write("main", "src/a.ts", &ts("a_busy"));
+    h.emit(&[("src/a.ts", CHANGED)]);
+    // The event is in fs_watch's coalescing window.
+    h.driver.run_until_idle();
+    assert!(!h.quiescent(), "busy from the backend's event");
+    // Delivered: the reconcile is queued, not run.
+    h.driver.advance(std::time::Duration::from_secs(5));
+    assert!(!h.quiescent(), "busy until the reconcile ran");
+    assert!(h.map().overlay.is_empty());
+    h.executor.run_until_idle();
+    assert_eq!(h.map().overlay.len(), 1);
+    h.settle();
+    assert!(h.quiescent(), "idle once the overlay is updated");
+}
+
+/// `head_clean` answers false while an event's input waits for the
+/// reconcile: for the path read again, for every path under a directory
+/// event, and for every path on a HEAD or index change.
+#[test]
+fn incremental_head_clean_false_until_events_are_reconciled() {
+    let h = indexed();
+    let key = h.key();
+    let clean = |path: &str| h.indexer.head_clean(&key, path);
+    let deliver = |events: &[(&str, Flags)], git: bool| {
+        if git {
+            h.emit_git(events);
+        } else {
+            h.emit(events);
+        }
+        h.driver.run_until_idle();
+        h.driver.advance(std::time::Duration::from_secs(5));
+    };
+    assert!(clean("src/a.ts") && clean("src/b.ts") && clean("docs/c.ts"));
+    // An edit, delivered but not reconciled yet: that path only.
+    h.git.write("main", "src/a.ts", &ts("a_edited"));
+    deliver(&[("src/a.ts", CHANGED)], false);
+    assert!(!clean("src/a.ts"), "a path to read again");
+    assert!(clean("src/b.ts"));
+    h.settle();
+    assert!(!clean("src/a.ts"), "it differs from HEAD now");
+    assert!(clean("src/b.ts"));
+    // A directory event: the paths under it are read again, and it asks
+    // for a comparison, which holds every path until it is done.
+    deliver(&[("src", DIR_CHANGED)], false);
+    assert!(!clean("src/b.ts"));
+    assert!(!clean("docs/c.ts"));
+    h.settle();
+    assert!(clean("docs/c.ts"));
+    assert!(clean("src/b.ts"));
+    // HEAD: every path until the reconcile compares again.
+    deliver(&[("HEAD", CHANGED)], true);
+    assert!(!clean("docs/c.ts"));
+    h.settle();
+    assert!(clean("docs/c.ts"));
+}
+
+/// An untracked nested repository is listed as its directory: the reconcile
+/// compares once per event, not again and again (only events request a
+/// comparison, and a pass repeats only on new input).
+#[test]
+fn incremental_nested_repository_does_not_loop() {
+    let h = Harness::new();
+    h.git.add("main", &[("a.ts", &ts("a"))]);
+    h.git.commit("main");
+    h.git
+        .write("main", "vendor/lib/.git/HEAD", b"ref: refs/heads/main\n");
+    h.git.write("main", "vendor/lib/x.ts", &ts("x"));
+    h.open();
+    assert!(h.git.count("changed_paths") <= 2, "{:?}", h.git.calls());
+    let (passes, reconciles) = (h.stats().reconcile_passes, h.stats().reconciles);
+    assert!(passes <= 3 * reconciles, "{passes} passes in {reconciles}");
+    assert!(h.map().effective("vendor/lib").is_none());
+    // An event on it compares at most once more.
+    let before = h.git.count("changed_paths");
+    h.emit(&[("vendor/lib", DIR_CHANGED)]);
+    h.settle();
+    assert!(h.git.count("changed_paths") <= before + 1);
+    assert!(h.quiescent());
+}
+
+/// A tracked file replaced by a directory: the file leaves the map and the
+/// directory's files come in, without the reconcile looping.
+#[test]
+fn incremental_file_replaced_by_a_directory() {
+    let h = indexed();
+    let before = h.git.count("changed_paths");
+    h.git.delete("main", "src/a.ts");
+    h.git.write("main", "src/a.ts/inner.ts", &ts("inner"));
+    h.emit(&[("src/a.ts", DIR_CHANGED)]);
+    h.settle();
+    assert!(h.git.count("changed_paths") <= before + 2);
+    assert!(h.map().effective("src/a.ts").is_none());
+    assert!(h.hinted("src/a.ts/inner.ts"));
+    assert!(h.quiescent());
+}

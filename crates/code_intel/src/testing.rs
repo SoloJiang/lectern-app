@@ -1,5 +1,16 @@
 //! Test support (`test-support`): a manual clock, fake language packs, a
-//! watchdog on an executor's dedicated thread, and the language fixtures.
+//! watchdog on an executor's dedicated thread, the language fixtures,
+//! `FakeGit`, `FakeProjects`, `FakePower`, a kernel host and the synthetic
+//! repositories.
+
+mod fake_git;
+mod host;
+mod rig;
+pub mod synthetic;
+
+pub use fake_git::FakeGit;
+pub use host::{FakePower, FakeProjects, TestHost, host};
+pub use rig::{Rig, route_tree_sitter_allocations};
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -218,6 +229,11 @@ impl GrammarSource for FakeGrammars {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .generation
+    }
+
+    fn installed(&self) -> Vec<LangName> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.packs.keys().cloned().collect()
     }
 
     fn subscribe(&self, f: Box<dyn Fn(GrammarChange) + Send + Sync>) -> Box<dyn Send> {

@@ -303,6 +303,18 @@ impl Lang {
     }
 }
 
+/// Two languages are equal when their keys are: the same name, grammar
+/// version and query version.
+impl PartialEq for Lang {
+    fn eq(&self, other: &Lang) -> bool {
+        self.name() == other.name()
+            && self.grammar_version() == other.grammar_version()
+            && self.query_version() == other.query_version()
+    }
+}
+
+impl Eq for Lang {}
+
 impl fmt::Debug for Lang {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Lang")
@@ -528,6 +540,26 @@ impl LanguageTable {
         self.langs.iter()
     }
 
+    /// The languages in table order: what the map's per-entry language
+    /// indices refer to.
+    pub(crate) fn langs(&self) -> &[Lang] {
+        &self.langs
+    }
+
+    /// The table position of the language of an extension: core first, then
+    /// the pack claiming it, if that pack is in this table.
+    pub(crate) fn position_for_extension(
+        &self,
+        ext: &str,
+        packs: &dyn GrammarSource,
+    ) -> Option<usize> {
+        let name = match core_for_extension(ext) {
+            Some(spec) => crate::lang_name(spec.name),
+            None => packs.language_for_extension(ext)?,
+        };
+        self.langs.iter().position(|l| l.name() == &name)
+    }
+
     /// The language of a path: a core extension first, then the extension a
     /// pack claims, if that pack is in this table.
     pub fn for_path(&self, path: &str, packs: &dyn GrammarSource) -> Option<&Lang> {
@@ -581,7 +613,7 @@ fn core_spec(name: &str) -> Option<&'static CoreSpec> {
 
 /// The extension of a path's file name: what follows its last dot, unless
 /// the dot starts the name (`.gitignore` has none).
-fn extension(path: &str) -> Option<&str> {
+pub(crate) fn extension(path: &str) -> Option<&str> {
     let file = path.rsplit('/').next().unwrap_or(path);
     match file.rfind('.') {
         Some(0) | None => None,

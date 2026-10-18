@@ -17,6 +17,10 @@ pub trait GrammarSource: Send + Sync {
     /// The generation of the installed set: install, update, rollback and
     /// removal each add one. Never blocks.
     fn generation(&self) -> u64;
+    /// The languages of the installed packs, in any order. Never blocks.
+    /// A grammar round reads it, so packs installed before activation (or
+    /// a notification that was missed) are picked up.
+    fn installed(&self) -> Vec<LangName>;
     /// Calls `f` on any thread when the installed set changes; `f` only
     /// queues. Dropping the result unsubscribes.
     fn subscribe(&self, f: Box<dyn Fn(GrammarChange) + Send + Sync>) -> Box<dyn Send>;
@@ -113,6 +117,10 @@ impl GrammarSource for NoGrammarPacks {
 
     fn generation(&self) -> u64 {
         0
+    }
+
+    fn installed(&self) -> Vec<LangName> {
+        Vec::new()
     }
 
     fn subscribe(&self, _: Box<dyn Fn(GrammarChange) + Send + Sync>) -> Box<dyn Send> {

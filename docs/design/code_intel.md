@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）已实现；第 3–5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）已实现；第 4、5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -463,6 +463,8 @@ pub trait GrammarSource: Send + Sync {
     fn language_for_extension(&self, ext: &str) -> Option<LangName>;
     /// 已装语言包集合的代数：安装、更新、回滚、撤销都加一。不阻塞。
     fn generation(&self) -> u64;
+    /// 已装语言包的语言，顺序不限。不阻塞。语言包的每一轮都读它，激活之前已装的包和漏掉的通知因此不会丢。
+    fn installed(&self) -> Vec<LangName>;
     /// 语言包集合变化时在任意线程上调用 `f`（插件市场完成切换之后）；`f` 只入队，不阻塞。返回值 drop 时退订。
     fn subscribe(&self, f: Box<dyn Fn(GrammarChange) + Send + Sync>) -> Box<dyn Send>;
 }
@@ -643,24 +645,27 @@ pub(crate) struct Bound { pub definition: DefinitionRef, pub binding: Binding }
 本 crate 只通过一个内部 trait 访问 git，生产实现转调 `lectern-git`，测试用 `testing::FakeGit`。都是阻塞调用，只在 executor 上执行；每次调用打开自己的句柄，返回时释放，不在两次调用之间持有 `git::Worktree` 和它的 `TrackedPaths`：
 
 ```rust
+/// 一个 worktree：公共目录（哪个仓库）、它的 git 目录（哪个 worktree）和根目录。每次调用都带上它。
+pub(crate) struct Tree { pub common_dir: Arc<Path>, pub git_dir: Arc<Path>, pub root: Arc<Path> }
+
 pub(crate) trait GitAccess: Send + Sync {
     /// 当前 worktree 里内容可能与 index 不同的路径：`Worktree::changes(Base::Head, limits)`，
     /// `limits` 取 `total_files = 0`、`total_patch_bytes = 0`、`retained_bytes = 0`，其余为默认值，
     /// 所以不算行 diff、不保留内容，只取每个改动的路径（含重命名的来源）。
-    fn changed_paths(&self, root: &Path, cancel: &AtomicBool) -> Result<ChangedPaths, GitError>;
-    /// 另一个 worktree 的 index 条目（第 5 层）。
-    fn tracked(&self, root: &Path, cancel: &AtomicBool) -> Result<Arc<git::TrackedPaths>, GitError>;
+    fn changed_paths(&self, tree: &Tree, cancel: &AtomicBool) -> Result<ChangedPaths, GitError>;
+    /// 另一个 worktree 的 index 条目（第 5 层）：普通文件和可执行文件、路径是 UTF-8 的，按 index 顺序。
+    fn tracked(&self, tree: &Tree, cancel: &AtomicBool) -> Result<Vec<(RelPath, BlobId)>, GitError>;
     /// 对象库里的一个 blob（`TextOrigin::Object`）。
-    fn blob(&self, root: &Path, oid: BlobId, max: u64) -> Result<Arc<[u8]>, GitError>;
+    fn blob(&self, tree: &Tree, oid: BlobId, max: u64) -> Result<Arc<[u8]>, GitError>;
     /// 当前 worktree 的 HEAD 提交（`Worktree::head`）；unborn 为 None。HEAD 输入的代数由它决定。
-    fn head(&self, root: &Path) -> Result<Option<BlobId>, GitError>;
+    fn head(&self, tree: &Tree) -> Result<Option<BlobId>, GitError>;
     /// index 文件末尾的校验和（`Worktree::index_checksum`），不解析条目。index 输入的代数由它决定。
-    fn index_checksum(&self, root: &Path) -> Result<Option<BlobId>, GitError>;
+    fn index_checksum(&self, tree: &Tree) -> Result<Option<BlobId>, GitError>;
     /// 按这个路径的属性和配置把工作区的原始字节转成规范内容，返回它的 blob OID（与 `git add` 得到的相同）。
     /// 设置了外部过滤器（clean / process）的路径返回 None。只在原始字节的 OID 与期望的不同时调用。
-    fn canonical_oid(&self, root: &Path, path: &RelPath, raw: &[u8]) -> Result<Option<BlobId>, GitError>;
+    fn canonical_oid(&self, tree: &Tree, path: &str, raw: &[u8]) -> Result<Option<BlobId>, GitError>;
     /// fs_watch 的过滤器与配置来源，见下文。不做 IO。
-    fn watch_source(&self, root: &Path) -> Arc<dyn lectern_fs_watch::WorktreeSource>;
+    fn watch_source(&self, tree: &Tree) -> Arc<dyn lectern_fs_watch::WorktreeSource>;
 }
 
 pub(crate) struct ChangedPaths {
@@ -673,7 +678,7 @@ pub(crate) struct ChangedPaths {
 }
 ```
 
-- HEAD 差异：每次工作区比较的 `head` 存成项目的 `HeadDiff`（路径 → HEAD 里的 OID），连同这次比较时 HEAD、index、文件列表的代数。它与覆盖部分分开：覆盖部分只描述工作区与 index 的差别，只暂存的改动（工作区等于 index、不等于 HEAD）没有覆盖项，却在 `HeadDiff` 里。一个路径与 HEAD 相同（`head_clean`）当且仅当它在 HEAD 里的 OID 已知且等于当前工作区的 OID（覆盖项的 OID，没有覆盖项时是文件列表的 OID）：在 `HeadDiff` 里的取记下的 OID，不在里面的取文件列表的 OID。只在记下的三个代数都等于当前代数时成立，否则按「不相同」处理，直到核对任务重新比较完成（「输入代数与派生状态」）。`SemanticRequest::head_clean`、`head_only` 提供者的选择和它返回位置的过滤都只用这条规则。
+- HEAD 差异：每次工作区比较的 `head` 存成项目的 `HeadDiff`（路径 → HEAD 里的 OID），连同这次比较时 HEAD、index、文件列表的代数。它与覆盖部分分开：覆盖部分只描述工作区与 index 的差别，只暂存的改动（工作区等于 index、不等于 HEAD）没有覆盖项，却在 `HeadDiff` 里。一个路径与 HEAD 相同（`head_clean`）当且仅当它在 HEAD 里的 OID 已知且等于当前工作区的 OID（覆盖项的 OID，没有覆盖项时是文件列表的 OID）：在 `HeadDiff` 里的取记下的 OID，不在里面的取文件列表的 OID。只在记下的三个代数都等于当前代数时成立，否则按「不相同」处理，直到核对任务重新比较完成（「输入代数与派生状态」）。事件已经到达、核对任务还没有消费的输入同样让它不成立：HEAD 或 index 待检查、请求了工作区比较时对所有路径；这个路径（或它上面的目录）在重新读集合里时对这个路径。`SemanticRequest::head_clean`、`head_only` 提供者的选择和它返回位置的过滤都只用这条规则。
 - 工作区比较只用来找出「哪些路径要重新读」，不用它给出的工作区一侧的 OID：这些路径由本 crate 自己经 `SafeRoot` 读取并计算 OID（见「blob → 路径映射」），所以 `StagedOnly`、未暂存的删除、`Filtered`、`Unhashed` 都按同一条规则处理。
 - `fs_watch`：本 crate 为每个打开的 git 项目的当前 worktree 自己订阅一份（`watch_repo` 加 `watch_worktree`，`Coalesce::WORKTREE`），与 `project` 的订阅共用同一份 worktree 状态（「同一 worktree 状态只用第一个句柄给的来源」，[fs_watch 设计「监听器与句柄」](fs_watch.md#监听器与句柄)）。`project` 在扫描当前 worktree 时先订阅，本 crate 在收到文件列表就绪的 `ProjectEvent::Changed` 之后才订阅，所以生效的来源是 `project` 的。本 crate 传入的 `watch_source` 是延迟实现：只有本 crate 的订阅先建立了状态时（`project` 的订阅恰好已经 drop）才在第一次调用 `filter` 时打开 `git::Worktree`，平时不读 index、不占内存。`Sink::busy` 返回 `PluginHandle::busy()`，`deliver` 只把批次并进项目的脏集合并在需要时提交刷新任务，守卫移进那个任务。
 - `cache`：每个打开的 git 项目用 `cache.repo(common_dir)`，文件夹项目用 `cache.folder(root)`，在其上取本 crate 登记的自定义表（见「存储表」）。所有调用都在 executor 的任务里。
@@ -1290,7 +1295,7 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 - 写入的键来自读到的字节：任何一次抽取（批量、按需、限时搜索、第 5 层）写入之前，都对实际读到的字节重新算 OID（原始字节的 OID；工作区一侧与排队时的 OID 不同时再用 `canonical_oid` 算一次），用这个 OID 作键。排队时记下的 OID 只用来挑选要读的文件，不作键。两者不同（排队之后文件又被改了）时，结果只写在实际的 OID 下，原来那个 OID 的 `indexed` 提示不置位；路径的新内容随 fs_watch 的事件进入覆盖部分，有效 OID 变成实际的 OID 后提示才会匹配。所以一份内容的抽取结果不会写到另一个 OID 的键下。
 - 写入：一批（见「调度、批次与取消」）在一个写事务里建单元、插入全部行，一批约 100 KB，远低于 `MAX_BATCH`；写失败（`Dropped`）时这一批的结果留在内存里供本次查询使用，下次需要时重新抽取。
 - 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 对热启动存在检查的命中和查询命中标记访问（存在检查本身只读，命中的单元排进队列，热启动之后再标记，见「调度、批次与取消」），所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
-- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍。第 3 步用 `testing` 的 10 万文件合成仓库测 `code_intel/disk_100k`，再据此校准 200–250 MB 的估算，并核对它在 256 MiB 的配额以内。
+- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍。第 3 步用 `testing` 的 10 万文件合成仓库（`testing::synthetic`：语言比例约一成不是源码，每个源码文件约 8 KiB、每个文件里的名字各不相同）测 `code_intel/disk_100k`：9 万个源码文件的单元声明 279.7 MB（266.7 MiB，每个单元平均 3.1 KB），超过 256 MiB 的配额约 4%，写入过程中淘汰了 80 次；分库文件（含 `-wal`）298 MiB。所以 10 万文件的估算校准为约 270 MiB，与配额相当：这个规模的仓库里最久没出现的约 5% 的单元会被挤出，下次用到时重新抽取（「调度、批次与取消」的配额一条保证不会反复抽取）。合成语料每 8 KiB 有 34–53 个定义（函数为主，函数体是普通的调用和条件语句）、8–16 个不同的引用名（第 2 步由夹具拼成的语料是 99–152 个定义、17–50 个引用名）；真实仓库的密度由第 5 步在 macOS 上用真实仓库核对，配额是否调整留到那时决定。
 - 版本：表结构或单元的键变化时命名空间版本加一；只是抽取规则变化时改 `EXTRACTOR_VERSION`，旧单元不再命中、逐步淘汰。
 
 ### blob → 路径映射
@@ -1306,8 +1311,10 @@ struct LiveMap {
 
 struct BaseMap {
     files: Arc<FileList>,      // project 快照里的文件列表，带 OID
-    by_oid: Box<[(u64, u32)]>, // OID 前 8 字节 + 文件列表下标，按前缀排序；查找时用 FileList::oid 核对完整 OID
-    generation: u64,
+    table: LanguageTable,      // 建映射时的语言表
+    langs: Box<[u8]>,          // 每个文件列表条目的语言（语言表里的位置加一，0 为不在映射里）
+    prefixes: Box<[u64]>,      // by_oid：OID 前 8 字节，按前缀排序
+    indices: Box<[u32]>,       // by_oid：对应的文件列表下标；查找时用 FileList::oid 核对完整 OID
 }
 
 struct Overlay {
@@ -1329,12 +1336,12 @@ enum WorktreeState {
 规则：
 
 - 基础部分来自 `ActiveTree::files`：每条有 OID、语言受支持、`FileKind` 是 `File` 或 `Executable` 的文件。子模块和符号链接不进入。
-- 覆盖部分来自工作区：对一个要重新读的路径，经 `SafeRoot::read`（上限 1 MiB）读出内容，按仓库的哈希算法计算 `Oid::for_blob`。等于文件列表里的 OID 时删掉这个路径的覆盖项；不等或文件列表里没有这个路径时记为 `Content`；`NotFound` 记为 `Absent`；`TooLarge`、`PathThroughSymlink`、读取失败记为 `Unindexable`。
-- 覆盖项的 OID 按原始字节计算。设置了 `core.autocrlf`、`eol` 一类转换的文件，原始字节与规范内容不同，这些文件被当作有改动、按原始字节的 OID 另存一份结果；macOS 上这类文件很少，结果仍然正确，只多一次抽取（已知限制）。
+- 覆盖部分来自工作区：对一个要重新读的路径，经 `SafeRoot::read`（上限 1 MiB）读出内容，按仓库的哈希算法计算 `Oid::for_blob`。等于文件列表里的 OID 时删掉这个路径的覆盖项；文件列表里有这个路径、OID 不等时调用一次 `canonical_oid`：返回 None（设置了 clean / process 过滤器，如 LFS 的指针文件）记为 `Unindexable`，等于文件列表里的 OID（`eol`、`core.autocrlf` 这类内置转换）时删掉覆盖项，否则记为 `Content`；文件列表里没有这个路径时记为 `Content`；`NotFound` 记为 `Absent`；`TooLarge`、`PathThroughSymlink`、读取失败记为 `Unindexable`。路径的语言不受支持时不读；这样的路径不在文件列表里、却是一个目录时（目录事件），请求一次工作区比较。
+- 覆盖项的 OID 按原始字节计算。未跟踪的文件不调用 `canonical_oid`：设置了 `eol` 一类转换的未跟踪文件按原始字节的 OID 存结果，与以后 `git add` 得到的 OID 不同，暂存之后再抽取一次（已知限制，只多一次抽取）。
 - 查找按（OID、语言）进行：在两个 `by_oid` 里按前缀二分查找，核对完整 OID，跳过基础部分里被覆盖项遮住的路径，再只留按路径判断的语言等于这个单元 `ci_ext.lang` 的路径。同一份字节放在 `.java` 和 `.js` 下 OID 相同，`java` 的单元只对应 `.java` 的路径。
 - 基础部分、覆盖部分何时重算见「输入代数与派生状态」。
-- 内存：10 万文件的 `by_oid` 1.2 MB，`indexed` 提示约 1.6 MB（每条 16 字节）；覆盖项通常几十条，未跟踪文件最多 20 000 条（`git` 的上限）时约 1.5 MB。
-- 文件夹项目：`FileList` 没有 OID，基础部分为空，每个文件在第一次被读到时作为 `Content` 加入覆盖部分（上限是文件夹遍历的 20 000 个条目）。
+- 内存：10 万文件的 `by_oid` 1.2 MB（每条 12 字节，前缀和下标分两个数组存放），每条的语言 0.1 MB，`indexed` 提示约 1.6 MB（每条 16 字节）；覆盖项通常几十条，未跟踪文件最多 20 000 条（`git` 的上限）时约 1.5 MB。
+- 文件夹项目：`FileList` 没有 OID，基础部分为空，每个文件在第一次被读到时作为 `Content` 加入覆盖部分（上限是文件夹遍历的 20 000 个条目）。第 3 步不实现，见「与设计的差异」。
 
 ### 输入代数与派生状态
 
@@ -1354,7 +1361,7 @@ enum WorktreeState {
 | 淘汰 | `cache` 的淘汰代数变化：`code_intel.tags` 有单元被淘汰、删除，或分库被重建（本 crate 不在那次写事务里） |
 | 写入 | 本 crate 提交了一批单元 |
 
-映射代数不是独立的输入：它由文件列表、工作区内容、语言包三者的代数合成，任何一个变了它就变。
+映射代数不是独立的输入：它由文件列表、工作区内容、语言包三者的代数合成，任何一个变了它就变。映射记下算出它时这三个代数（它的来历）：游标的依赖和 `indexed` 提示的戳记都取映射的来历，不取当前代数。语言包代数已经加一、映射还没重建的间隙里，旧映射带的是旧版本的 `Lang`，按当前代数戳记会让旧版本的命中看起来是新版本的。各项目共用的输入（语言包、淘汰）在比较处直接读共用的值，不在项目里存副本：副本会落后（语言包的一轮与项目打开同时进行时，新项目可能读到旧代数、又不在这一轮通知的项目里），落后的副本让派生状态永远「不一致」。语言表和它的代数在持有打开项目表的锁时一起更新，所以同时打开的项目要么在这一轮的通知里，要么一开始就读到新表。
 
 **派生状态**：每一项记下算出它时所依赖输入的代数。
 
@@ -1363,12 +1370,12 @@ enum WorktreeState {
 | 基础映射 | 文件列表、语言包 | 重建 |
 | 工作区比较：`HeadDiff` 和「要重新读的路径」 | HEAD、index、文件列表、忽略规则与配置、语言包（决定哪些路径受支持）、工作区内容里的比较请求 | 再做一次 `changed_paths` |
 | 覆盖部分 | 工作区比较、文件列表、语言包 | 与比较结果对齐，见下 |
-| `indexed` 提示 | 每条按（路径、有效 OID、淘汰代数、语言包代数） | 不匹配即视为未入索引 |
-| 第 3–5 层的游标、第 3 层的范围 | 映射代数、子项目边界、淘汰、语言包、焦点 | 重建游标 |
+| `indexed` 提示 | 每条按（路径、有效 OID、淘汰代数、映射来历里的语言包代数） | 不匹配即视为未入索引 |
+| 第 3–5 层的游标、第 3 层的范围 | 映射的来历、子项目边界、淘汰、第 3 层的范围本身（焦点只经它起作用：焦点变了、范围没变时不重建） | 重建游标 |
 | 候选分层、依赖子项目的范围、限时搜索的范围 | 子项目边界、映射代数 | 每次查询按自己的快照计算，不缓存 |
 | 名字表 | 映射代数、淘汰、语言包、写入 | 按「名字表」的规则重建 |
 | 预取结果 | 映射代数、淘汰、语言包 | 丢弃，重新查询 |
-| `head_clean` | `HeadDiff` 记下的 HEAD、index、文件列表代数 | 任何一个不一致时，结果按「与 HEAD 不同」处理，直到重新比较完成 |
+| `head_clean` | `HeadDiff` 记下的 HEAD、index、文件列表代数；还没有消费的事件输入（HEAD、index 的检查、比较请求、重新读集合） | 任何一个不一致或还有待消费的输入时，结果按「与 HEAD 不同」处理，直到核对任务处理完 |
 
 **执行**：事件只让输入代数加一，并请求一次核对。每个项目一个核对任务（`Background`，`BusyGuard`，同时最多一个，运行期间又有代数变化的，结束后再运行一次）。它先读一遍当前代数，按上表的依赖顺序（基础映射 → 工作区比较 → 覆盖部分 → 游标 → 名字表）重算不一致的项。每项结果在装上之前再核对一次它依赖的代数，期间又变了的结果丢弃，留给下一轮，所以按旧输入算出的状态不会被装上。
 
@@ -1377,7 +1384,7 @@ enum WorktreeState {
 - 只有子项目变了（`ChangedParts::packages`，文件列表不变）：子项目边界代数加一，第 3 层的范围和游标、候选的「同一子项目」和「依赖的子项目」层、限时搜索的范围都按新的子项目重算。
 - 提交只改变 HEAD：index 和文件列表都不变时，HEAD 代数仍然加一，`HeadDiff` 重新比较，刚提交的文件变为与 HEAD 相同。
 - 忽略规则或配置变了：下一次工作区比较之后，覆盖部分与比较结果对齐。重新读的路径是比较给出的路径加上现有的全部覆盖项；现有的未跟踪覆盖项（不在文件列表里）没有出现在比较结果里时，说明它现在被忽略或已经不在，从覆盖部分删除；`untracked_capped` 为 true 时比较结果不完整，这一步不删除。
-- 有效 OID 变了：一个路径的有效 OID 是它的覆盖项的 OID，没有覆盖项时是文件列表的 OID。`indexed` 提示每条存（有效 OID 的前 8 字节、淘汰代数、语言包代数），读的时候与当前的有效 OID 和代数比较，所以 OID 一变提示就不再匹配，不需要逐个清除；新 OID 的存在检查命中或写入成功之后才重新置位。
+- 有效 OID 变了：一个路径的有效 OID 是它的覆盖项的 OID，没有覆盖项时是文件列表的 OID。`indexed` 提示每条存（有效 OID 的前 8 字节、淘汰代数、语言包代数），读的时候与当前的有效 OID 和代数比较，所以 OID 一变提示就不再匹配，不需要逐个清除；新 OID 的存在检查命中或写入成功之后才重新置位。命中或写入的版本与当前语言表、映射的语言表里这种语言的版本都相同时才置位。
 - 淘汰：淘汰代数加一后全部提示不再匹配，第 3–5 层的游标重建、按层重新做存在检查。仍在的单元只重新置位、不重新抽取，被淘汰的重新抽取。查询现场用到一个文件的抽取结果时（第 2 步的 import 目标、引用的候选文件、限时搜索的命中文件）先做存在检查，没有就现场抽取，并按所在层排队写入。
 
 ### 名字表
@@ -1421,21 +1428,25 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 |---|---|---|
 | 1 | 当前文本、抽屉里正在看的候选文件 | `Focus::Current`、`Focus::Drawer` |
 | 2 | 本次审阅改到的文件、agent 本会话碰过的文件，以及这些文件 import 的文件（解析扩展点给出；#17 的空实现不给出） | `Focus::Review`、`Focus::Touched` |
-| 3 | 当前子项目：包含当前文本（没有时取审阅集合的第一个文件）的最深子项目；没有子项目时是整个 worktree | `ActiveTree::packages` |
+| 3 | 当前子项目：包含当前文本（没有时取审阅集合的第一个文件，再没有时取项目打开时的路径，根目录除外）的最深子项目；没有子项目时是整个 worktree；有子项目、但没有这样的路径或没有子项目包含它时为空，全部属于第 4 层 | `ActiveTree::packages` |
 | 4 | 当前 worktree 的其余文件 | 映射 |
 | 5 | 其他 worktree 里 OID 不在缓存中的文件 | `GitAccess::tracked` |
 
 - 第 3、4 层用游标遍历文件列表的区间（`range_under`），不把 10 万个条目放进队列；`indexed` 提示与当前有效 OID 和代数匹配的、语言不受支持的跳过。第 1、2 层和 `WorktreeBatch` 带来的路径是显式的小队列。
 - 同一 OID 出现在多个路径上时只抽取一次：在途的键记在一个集合里，第二个路径等第一个的结果。
 - 只有最近一次收到 `set_focus` 的项目跑第 3–5 层，其他打开的项目只做第 1、2 层和查询。
-- 第 5 层逐个处理非当前、非 prunable 的 worktree：读它的 index，按批做存在检查，缺的经那个 worktree 根的 `SafeRoot` 读出；原始字节的 OID 与 index 的 OID 相同才抽取（有改动的文件等它成为当前 worktree 时再处理）。处理完一个 worktree 就丢掉它的 `TrackedPaths`。
+- 第 5 层逐个处理非当前、非 prunable 的 worktree：读它的 index，按批做存在检查，缺的经那个 worktree 根的 `SafeRoot` 读出；原始字节的 OID 与 index 的 OID 相同才抽取（有改动的文件等它成为当前 worktree 时再处理）。处理完一个 worktree 就丢掉它的 `TrackedPaths`。某个 worktree 的 index 变化只让这一个 worktree 重新处理；本次会话已经确认在缓存里的（OID、语言），以及当前映射里有匹配提示的，不再做存在检查、不再排进访问标记。这个集合存 8 字节的键（OID 的前 8 字节与语言混合），10 万个约 1.2 MB，计入常驻内存（「性能」）；键冲突只让一次检查推迟到下次会话。淘汰（配额未满时）、语言包变化和换会话时这个集合清空。
+- 第 1 层只认 `Done`（`Binary` 也算，上限改不了它）：存在检查命中 `TimedOut` 或 `TooLarge` 时按交互截止时间和 4 MiB 上限重做，替换那个单元；每个（OID、版本）在命中或写入成功之后本次会话不再检查，所以重做后仍超时的不会反复重做；读不出来的（文件暂时不在）下次打开时再试。第 2–5 层认缓存里的任何状态。第 1、2 层要的键正在批量层抽取时，它们取消那次抽取、自己抽取，不排在批量任务后面（ADR 0029），批量任务暂停时也不等；第 1 层也接管第 2 层在途的键（换成交互上限），第 2 层不接管第 1、2 层的。
 - 电池供电（ADR 0029 的默认值，见「未决问题」3）：第 1–3 层照常；第 4、5 层暂缓，`coverage` 报告 `Deferred`。接上电源后继续；电池供电期间用户发起 `query` 或 `names` 时，这个项目的第 4、5 层也继续，直到项目关闭或电源状态再次变化。
 
 ### 调度、批次与取消
 
 - 第 3–5 层：每个批量线程一个长期任务，循环：取一批 → 存在检查 → 抽取缺的 → 一个写事务写入 → 在批次边界询问 `BackgroundGuard`（暂停时登记 waker、返回 `Pending`）。一批在 64 个文件、读入 2 MiB，或开始 50 ms 之后的第一个文件边界处结束，先到者为准；所以一个大文件可以一直运行到它自己的截止时间。暂停和取消仍在约 50 ms 内生效，靠的是看门狗打断在途的那个文件（见下文），与 ADR 0029「每批约 64 个文件或 50 ms」「取消和暂停在约 50 ms 内生效」的要求一致：单个文件由截止时间约束，50 ms 的响应由看门狗保证。
 - 每批开始时重新选层：第 3 层有剩余就先取第 3 层。第 1、2 层在另外的工作线程上运行，不排在批量任务后面（ADR 0029）。
-- 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示，缺的抽取。存在检查只读、不标记访问：热启动的耗时就是「已入索引的仓库被认出已入索引」的时间，访问时间的写回不在这条路径上。
+- 批量任务的数目：一次唤醒把任务补到批量线程数，一批做完、还留下工作（某层的小队列里有缺的文件）时再补一次。可能产生第 3–5 层工作的每一步之后（打开、关闭、跑第 3–5 层的项目改变、焦点、电源、语言包、核对任务结束）都唤醒一次，所以总是成立：要么没有项目有可做的第 3–5 层工作，要么批量任务数已满。测试的 `Harness` 在每次 `settle` 和 `set_focus` 之后检查这一条，漏掉的唤醒让测试失败。
+- 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示，缺的抽取。存在检查只读、不标记访问：热启动的耗时就是「已入索引的仓库被认出已入索引」的时间，访问时间的写回不在这条路径上。一次存在检查本身是一批：游标在项目的锁内最多看 4096 个条目，取出至多 500 个提示不匹配的文件（按语言分组查询），缺的进入这一层的小队列，由之后的批次抽取，所以抽取的批次仍按 64 个文件、2 MiB、50 ms 结束。
+- 配额：本次会话自己的写入引起淘汰时（写入前后淘汰代数不同），命名空间已经满了。此后游标的依赖和提示的戳记都用冻结的淘汰代数（命名空间满之前的那一代），淘汰不再让第 3–5 层的游标重新开始，焦点变化也不重建游标（见「输入代数与派生状态」），每个文件在一次会话里由批量层最多抽取一次；被挤出的单元等第 1 层打开它、查询现场用到时（第 4 步）或下次打开项目时再抽取。否则游标会重新抽取刚被挤出的单元，写入又挤出别的单元，不会结束。刚写入的单元的提示按写入之后的淘汰代数记下（冻结后按冻结的那一代）。
+- 替换：写事务之前再查一次存在，已在缓存里、状态满足这一层的键不再写，所以批量层的写事务只新增单元，其间的淘汰只来自配额。只有第 1 层会替换单元（重做的 `TimedOut`、`TooLarge`）；cache 把替换计为一次淘汰（每个写事务一次）。写事务和它前后读淘汰代数在项目的写锁里进行：替换了单元、淘汰代数恰好加一的事务记为本 crate 自己的一次，提示、游标和第 5 层用的淘汰代数减去这些次数（替换事务进行期间读到的是它之前的值，cache 的加一与本 crate 的计数之间没有读者能看到多出的一代），所以打开一个大文件不会让全部提示失效、游标重建、第 5 层重来；批量层也不会把它当成配额已满。访问标记的队列仍按 cache 自己的淘汰代数（`Store::touch_pending` 与它比较）。已知限制：同一个替换事务里同时因配额淘汰的单元也被算成替换，本次会话不因它重新检查，等查询用到时或下次打开项目时再抽取。批量层从队列取文件时，跳过入队之后已由第 1、2 层写入（提示已匹配）的文件。
 - 访问标记：存在检查命中的单元 ID 连同查询之前读到的淘汰代数排进项目的 `PendingTouches` 队列。批量线程在热启动的存在检查之后、在批次边界处每次标记 1024 个（`Store::touch_pending`），批次边界照常检查暂停和取消。淘汰代数变了，队列里的 ID 可能已经属于别的单元，整个队列直接丢弃、不标记。项目关闭或切换 worktree 时队列随项目的批量状态一起丢弃，没标记的单元保留原来的访问时间：丢掉的只是淘汰的先后，查询结果不受影响。
 - 单文件截止时间：后台 250 ms，交互 1 s。原来按线性吞吐估算 M 系列上 1 MiB 的文件约 230 ms；实测吞吐随文件变大而下降（tree-sitter-tags 的局部检查按「引用数 × 作用域数」增长，见 [ADR 0031](../adr/0031.md)），接近 1 MiB 的文件在 M 系列上估计要 360–400 ms，后台记为 `TimedOut`，打开时按交互截止时间重做（已知限制，`code_intel/extract_1mib` 只记录）。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
 - 看门狗线程另外持有一张到期表（名字表的延迟重建，见「名字表」）：`wait_timeout` 取在途抽取的下一个检查时刻与最早到期时刻中较早的一个，到期时提交对应的任务；两张表都空时才不带超时地等待。
@@ -1443,7 +1454,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 停用：启动时同时把一个 `WatchdogStop` 守卫交给 `PluginHandle::own`，它的 `Drop` 调用 `stop()`。kernel 在停用、失败和 `shutdown` 的撤销第 4 步 drop 守卫，所以每次停用都会让这次激活的看门狗退出，重新激活时另起一个，线程数不随激活次数增长。`Active` 的 `Drop` 也调用一次（重复调用无害）。
   - executor 关闭：executor 不等专用线程，靠闭包自己结束（[executor 设计](executor.md)「接口」的 `shutdown`），所以本 crate 在启动看门狗时用 `Executor::on_shutdown` 登记一次 `stop()`（见「对其他 crate 的要求」），线程退出时注销。`app` 的退出顺序是 kernel 的 `shutdown` 完成后再关闭 executor，这条路径只在 kernel 没有先停用插件时（测试、异常退出）才起作用。
   - 闸门：激活在线程开始运行之前就失效时，`run_dedicated_gated` 不运行闭包，不会启动线程。
-- 取消在 50 ms 内生效：项目关闭、切换 worktree 时置位取消标志，批量任务在下一个批次边界（或 tags 的取消检查）退出；正在解析的文件放弃结果，不写入。切换 worktree 或分支后第 3–5 层的游标整体重建，已写入的结果按 OID 留在缓存里。
+- 取消在 50 ms 内生效：项目关闭、切换 worktree 时置位取消标志，批量任务在下一个批次边界（或 tags 的取消检查）退出；正在解析的文件放弃结果，不写入。每个取工作的循环（第 1、2 层的任务、批量层的取文件和第 5 层的收集）在取下一项之前检查会话是否已结束，结束后不再读文件，任务随即结束、交还它的 `BusyGuard`。切换 worktree 或分支后第 3–5 层的游标整体重建，已写入的结果按 OID 留在缓存里。
 - 暂停（kernel 的暂停开关）：在约 50 ms 内生效，正在解析的文件放弃这次结果（ADR 0029）。批量任务在文件之间、以及每个在途抽取在登记时（在调用方的线程上同步检查一次截止时间、取消标志和暂停探针，已经过期或已经请求暂停时不开始工作；小文件可能在看门狗第一次检查之前就抽取完）和看门狗的每次检查（10 ms）时读 `BackgroundGuard::pause_requested()`；`ParsedFile` 在解析之前同样先检查一次截止时间和取消标志；为 true 时看门狗置位这次抽取的取消标志，tags 在下一次取消检查时返回 `Cancelled`。这个文件的结果不写入，`indexed` 提示不变，放回这一层游标之前的「恢复后先做」小队列；这一批已经抽取完的文件照常在一个写事务里写入，然后在批次边界停下。恢复后先做小队列里的文件，再从游标处继续。
 - 大小上限：后台 1 MiB（`SafeRoot::read` 的 `max`），超过记为 `TooLarge`；文件被打开（第 1 层）时上限 4 MiB，更大的不抽取，查询返回 `TooLarge`。
 
@@ -1467,7 +1478,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | `ProjectEvent::Changed` 的 `packages` | 子项目边界 |
 | `ProjectEvent::Changed` 的 `worktrees`；`WorktreeBatch` 的 `meta.head`、`meta.refs` | HEAD（核对时读 `GitAccess::head`，与记下的不同才加一） |
 | `WorktreeBatch` 的 `meta.index` | index（读校验和，不同才加一） |
-| `paths` 里的文件路径 | 工作区内容：这些路径进入重新读集合 |
+| `paths` 里的文件路径 | 工作区内容：这些路径进入重新读集合；读的时候是目录的（新目录、文件被目录替换），请求一次工作区比较 |
 | `paths` 里的目录路径 | 工作区内容：映射里这个目录下的路径进入重新读集合，并请求一次工作区比较（找出移进来的未跟踪文件） |
 | `rescan`、`health` 为 `Degraded` | 工作区内容（请求比较、全部覆盖项重新读）、忽略规则与配置 |
 | `meta.rules`、`meta.config` | 忽略规则与配置 |
@@ -1478,10 +1489,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - 重新读的路径有了新 OID、而新 OID 不在缓存里时，按路径所在的层排队：在焦点里的按第 1、2 层，其余按第 3、4 层。旧 OID 的行不删除，留给淘汰（其他 worktree 可能还在用）。
 - agent 连续写文件时 fs_watch 已按 `Coalesce::WORKTREE` 合并批次，本 crate 不再另加等待。
+- 工作区比较的请求只来自事件。比较本身列出的路径进入重新读集合，但不再请求比较：git 把未跟踪的嵌套仓库列为一个目录路径，它读出来是目录，如果再请求比较，核对任务会无限循环。核对任务的一轮只在这一遍有步骤装上或消费了什么、且还有没消费的输入（要打开的根目录、HEAD 和 index 的检查、不一致的派生状态、重新读集合）时再走一遍，最多 16 遍，超过时记日志、留给下一个事件。一遍里每一步的结果都因输入又变了而作废时停下：改变输入的一方（事件、语言包的一轮）会再请求一次核对，所以卡住的输入不会让每个事件付 16 次重建。
 
 ### 语言包的变化
 
-语言包可以在项目打开期间安装、更新、回滚或被撤销（ADR 0018）。插件在 `started` 里调用 `GrammarSource::subscribe`，把返回值交给 `PluginHandle::own`。通知只入队；处理在一个 `Background` 任务里进行（`BusyGuard`，同时最多一个），运行期间到达的通知并进下一轮。每一轮重新读 `GrammarSource` 的当前状态，与上一轮记下的「语言 → grammar 版本」比较，按比较结果处理，所以漏掉或合并的通知不影响结果；`generation` 不大于已处理代数的通知直接丢弃。
+语言包可以在项目打开期间安装、更新、回滚或被撤销（ADR 0018）。插件在 `started` 里调用 `GrammarSource::subscribe`，把返回值交给 `PluginHandle::own`。通知只入队；处理在一个 `Background` 任务里进行（`BusyGuard`，同时最多一个），运行期间到达的通知并进下一轮。每一轮重新读 `GrammarSource` 的当前状态（`installed` 列出的全部语言包，加上语言表里已有的），与上一轮记下的「语言 → grammar 版本」比较，按比较结果处理，所以漏掉或合并的通知不影响结果；`generation` 不大于已处理代数的通知直接丢弃。
 
 每一轮先更新语言表，再让语言包代数加一；基础映射、覆盖部分、`indexed` 提示、游标和名字表随之按「输入代数与派生状态」重算。语言表的更新：
 
@@ -1581,11 +1593,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的结果；限时搜索 1 s 后停止，取消在 20 ms 内生效 | `code_intel/search_stop` ≤ 1.02 s |
 | 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 查找 ≤ 5 ms；每个候选文件的现场抽取约 1–2 ms / 10 KB | `code_intel/references_100k` |
 | 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件），核心语言用一次遍历抽取（[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms，不含之后的访问标记 | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k`、`code_intel/warm_100k_touch`（只记录） |
-| 空闲内存：monorepo < 100 MB（后台暂停时和全部完成后） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
+| 空闲内存：monorepo < 100 MB（后台暂停时和全部完成后） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、第 5 层本次会话已确认的 blob 集合（每个 8 字节的键，10 万个约 1.2 MB，项目关闭或换会话时释放）、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
-| 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树（估算 ≤ 10 MiB）；工作区比较期间的 `TrackedPaths`（10 万文件约 10 MB） | `code_intel/batch_peak` |
-| 磁盘 | `code_intel.tags` 配额 256 MiB；cloudprint 形状约 1 MB，10 万文件约 200–250 MB | `code_intel/disk_100k`（只记录） |
+| 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）；工作区比较期间的 `TrackedPaths`（10 万文件约 10 MB，由 `git` 的基准测量） | `code_intel/batch_peak` |
+| 磁盘 | `code_intel.tags` 配额 256 MiB；cloudprint 形状约 1 MB，10 万文件约 270 MiB（第 3 步的合成仓库实测，略超配额，见「存储表」的「规模」） | `code_intel/disk_100k`（只记录） |
 | 安装包 ≤ 80 MB | 六个 grammar crate 与 tree-sitter 运行时，由 #38 测量 | `app/bundle_size` |
 
 - 首帧之前不调用本 crate；第一个任务在第一个项目打开之后提交，批量线程在第一次提交 `Batch` 任务时才创建（ADR 0029）。
@@ -1846,6 +1858,36 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - `code_intel/warm_100k_touch`：327、314、311 ms，#116 之前是 773–792 ms。
   - `EXTRACTOR_VERSION` 已经包含在查询版本里（「语言与抽取键」），`Version::of` 取的就是它，单元的键和版本过滤不用改。
 
+第 3 步（映射、调度与增量更新），基于包含 [#113](https://github.com/SoloJiang/lectern-app/pull/113)、[#115](https://github.com/SoloJiang/lectern-app/pull/115) 的 main，同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+
+- `just check`、`just test`（整个工作区 1261 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。Cargo.lock 只有本 crate 的依赖列表变化，没有新增 crate。
+- 第 1 步的 `extract_walker_matches_tags` 在机器负载高时偶尔失败：两条路径共用一个 1 s 的交互截止时间，病态的 JS 让 tags 超时，超时的结果是空的。改为每条路径各自 60 s 的截止时间，并要求 tags 的结果是 `Done`；四个测试进程同时运行时不再失败。
+- `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 和 `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 都没有结果。
+- `just test -p lectern-code-intel`：159 个测试通过，第 3 步新增 70 个。按前缀：
+  - `map_*` 7：从带 OID 的文件列表建映射（只含普通和可执行文件、受支持的语言）；前 8 字节相同的 OID 分得开；覆盖项遮住 index 条目，改掉的旧 OID、删除的文件、超过上限的文件不出现，未跟踪文件能查到；与 index 相同的覆盖项被丢掉；同一份字节在 `.java` 和 `.js` 下按语言区分；提示只匹配自己的 OID 前缀和戳记，换文件列表时按路径沿用；10 万文件的映射 ≤ 3 MB。
+  - `overlay_*` 4：表驱动的 12 种工作区情况（干净、未暂存的修改、暂存后未再改、`StagedOnly`、未暂存的删除、未跟踪、被忽略的未跟踪、语言不受支持的未跟踪、未暂存的重命名、`Filtered`、超过 1 MiB、CRLF 检出），每种情况之后覆盖项与磁盘上的实际内容一致；工作区比较失败时保留上一份覆盖部分；生产的 `LecternGit` 在 `TestRepo` 仓库上与 `FakeGit` 给出相同的比较结果、HEAD、index 校验和、规范 OID、index 条目和 blob；未跟踪的嵌套仓库和被目录替换的跟踪文件，两者列出相同的路径和 HEAD OID（`overlay_lectern_git_and_the_fake_list_directories_alike`）。
+  - `derived_*` 10：文件列表、子项目、HEAD、index、覆盖部分、忽略规则（含 `untracked_capped`）、语言包、淘汰、写入各一组，用计数钩子检查只有依赖这个输入的派生状态被重算；`HeadDiff` 比较完成之前 `head_clean` 为 false、提交之后为 true；核对任务计算期间输入变化时这次比较的结果被丢弃、按新输入再比较一次。
+  - `schedule_*` 25：层的先后（第 1 层、第 2 层、当前子项目、其余文件按路径、其他 worktree）；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，批量层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停在批次边界生效（`[64, 5]` 两批之后停下，第 70 个文件在登记时被放弃，恢复后先做它）；暂停开关先于第一批打开时不抽取；一次 1 MiB 的抽取进行中打开暂停，这次抽取返回 `Cancelled`、没有写入、提示不变，恢复后它第一个被重新抽取（`schedule_pause_abandons_in_flight`）；批次在 64 个文件（`[64, 64, 22]`）、2 MiB（`[6, 4]`）、50 ms（`[3, 3, 3, 1]`）处结束，一个 200 ms 的文件一批（`[1, 2]`）；切换 worktree 后游标重建、只抽取缓存里没有的；同一 OID 在两个路径上只抽取一次；`schedule_key_from_bytes_read`；第 5 层只抽取缓存里没有、且工作区内容等于 index 的文件；大文件轮流抽取；配额 24 KiB 时 80 个文件各抽取一次、遍历结束；一次抽取进行中切换会话，旧会话的批次不改动新会话的计数；文件夹项目的各层都是 `Pending`、没有抽取、映射为空。预审之后补的：配额 24 KiB、80 个文件时 5 次切换文件，批量层不再抽取、游标不重建（原来每次多抽取 24–57 个）；150 个文件里第 10 个抽取时暂停，审阅集合的 10 个文件由第 2 层写入，恢复后批量层不再抽取和写入它们，共 151 次抽取（暂停放弃的那个两次），淘汰代数不变、`full` 未设置；批量层记为 `TimedOut` 的文件打开时按交互上限重做一次、存为 `Done`，再次打开不再检查；批量层正在抽取的文件被打开时第 1 层取消那次抽取、自己抽取；一个其他 worktree 的 index 变化只重新读那一个 worktree 的 index，没有新的存在检查和抽取；还没有 `set_focus` 时最后打开的项目跑第 3–5 层，之后打开的项目不再接管。第二轮预审之后补的：重做 `TimedOut` 的替换让 cache 的淘汰代数加一，提示的戳记、游标和第 5 层不变（另一个 worktree 的 index 没有再读）；审阅集合里的文件正在批量层抽取时，第 2 层取消它、自己抽取；打开时读不出来的文件不记为已满足，可读之后再打开时抽取；第 5 层已确认的集合 10 万个键 ≤ 1.5 MB、分得开 OID 和语言。#117 审阅之后补的：三个批量线程时一次唤醒就有三个任务（`peak` 为 3）；关闭跑第 3–5 层的文件夹项目后，排在它前面打开的 git 项目开始并走完第 3–5 层；第 2 层有 30 个文件的队列时在第一个文件的抽取中关闭项目，之后不再抽取任何文件，kernel 静止；`Harness` 在每次 `settle` 和 `set_focus` 之后检查批量任务的活性规则，全部 `schedule_*` 和其余建索引的测试都满足它。
+  - `grammar_*` 10：安装、更新（在途的版本 1 抽取被取消，版本 1 的结果没有写入）、回滚（不重新抽取）、撤销（离开映射和 `coverage`，在途抽取被取消）、多个通知并成一轮（过时的代数被丢弃）、租约（撤销时有一个在途抽取和一个 `ParsedFile`，两者都结束之后模块恰好卸载一次）；语言包更新之后、映射重建之前运行了一个批次，或打开了那个文件，最后两个文件都按版本 2 写入、提示匹配（原来不再按版本 2 抽取）；项目打开时读到的语言包代数被随后的一轮越过（那一轮没有通知它），基础映射仍然装上、最多建两次，之后的事件不再重建（原来每个事件 16 次重建、映射一直为空）；激活之前已装的语言包在第一张映射里（`grammar_installed_before_activation_is_in_the_first_map`）。
+  - `battery_*` 3、`incremental_*` 9、`warm_*` 2：未跟踪的嵌套仓库打开时最多比较两次、核对的遍数有界，它上面的事件最多再比较一次；跟踪文件被目录替换后文件离开映射、目录里的文件入索引，kernel 回到静止；事件已交付、核对任务还没运行时 `head_clean` 对改动的路径为 false、对其他路径仍为 true，目录事件和 HEAD 事件让所有路径为 false，核对之后恢复；其余见「测试」；`incremental_kernel_busy_until_the_overlay_is_updated` 检查从后端交出事件到覆盖部分更新完之前 kernel 不静止；热启动 40 个文件 7 种语言时只有 7 次存在检查、没有抽取。
+- 基准（`just bench --measure code_intel/`，release，MB 为 2^20 字节）：
+
+  | 基准 | 结果 | 预算 |
+  |---|---|---|
+  | `code_intel/map_100k` | 中位数 9.4–9.6 ms（两次）；预审修正之后 9.19 ms；第二轮之后 9.75 ms；#117 之后 10.8 ms | ≤ 20 ms |
+  | `code_intel/map_100k_bytes` | 2.65 MB（两轮修正之后相同） | ≤ 3 MB |
+  | `code_intel/batch_peak` | 最大 32.7 MB（两轮修正之后相同） | ≤ 40 MB |
+  | `code_intel/disk_100k` | 298 MB（只记录；两轮修正之后相同，80 次淘汰） | — |
+  | `code_intel/extract_throughput`（第 1 步，不变） | 3.81、4.05 MB/s；修正之后 4.27 MB/s；第二轮之后 3.76、3.41 MB/s，#117 之后 3.3 MB/s（见下） | ≥ 4 MB/s（macOS 判定） |
+  | `code_intel/warm_100k`（第 2 步，不变） | 84.8、84.3 ms；修正之后 79.8 ms；第二轮之后 103 ms（报告为 noisy），#117 之后 85.8 ms | < 500 ms |
+
+  第二轮和 #117 一轮的数字在容器重启之后测得。`extract_throughput` 低于 4 MB/s，但抽取的代码与预审修正那一轮（4.27 MB/s）相同：之后只改了 `index/`、`GrammarSource` 的一个方法和测试，基准不经过它们，所以这是机器的差别；这一项在 Apple 芯片上判定（[bench 设计](bench.md)），Linux 上的数字只作记录。
+- 测试里 `Harness::quiescent` 原来在 `Kernel::barrier()` 之后立即读 `is_quiescent()`，负载高时偶尔读到忙（`incremental_kernel_busy_until_the_overlay_is_updated` 在 300 次压力运行里失败 1 次，这个测试本轮没有改动）。原因在 kernel：kernel 线程处理 barrier 时先回复、再把这个请求自己的计数减一，所以 `barrier()` 返回后有一瞬间仍是忙。`Harness::quiescent` 改为在 barrier 之后最多等 200 ms 让计数归零（真正持有的守卫仍然判为忙），300 次压力运行全部通过；kernel 的这个顺序另行修正，不在本 PR 里。
+
+  `batch_peak` 的组成：去掉接近 1 MiB 的文件之后峰值是 454 KB，所以几乎全部来自一个 900 KiB 的 TS 文件的语法树和遍历（约 31 MiB），超过设计按「≤ 10 MiB」的估算；预算 40 MB 不变，大文件因此同时只在一个批量任务里抽取（「性能」已改）。tree-sitter 的分配经 `testing::route_tree_sitter_allocations` 计入；基准用一个批量任务，工作区比较是 `FakeGit` 的。
+  `disk_100k`：9 万个源码单元声明 279.7 MB，分库文件 298 MiB，写入过程中淘汰 80 次，4 个线程 70 s；结论写在「存储表」的「规模」一条。
+- 没有验证的：M 系列上的各项基准（由 macOS CI 判定）；`PowerSource` 的真实实现（`platform` 还没有电源接口，测试只用 `testing::FakePower`）；真实的 fs_watch 后端（测试用 `FakeBackend`）；几个批量线程同时运行（测试用 `Executor::manual()`，大文件轮流抽取由 `LargeSlot` 的单元测试检查）；文件夹项目的建索引（第 3 步不实现，`coverage` 报告 `Pending`）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1976,3 +2018,36 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 淘汰代数变了时队列整个丢弃；项目关闭时队列随之丢弃。
 
   理由：`warm_100k` 守的是热启动，即已入索引的仓库被认出已入索引（`indexed` 提示置位）、导航能用上索引的时间；淘汰顺序的记账不需要在这条路径上。丢掉一次热启动的访问标记只影响淘汰的先后，不影响结果的正确性。预算不变；推迟的标记另由只记录的 `code_intel/warm_100k_touch` 测量，开销仍然可见。cache 的访问时间改为按集合写回（[#116](https://github.com/SoloJiang/lectern-app/pull/116)）与这一条无关，本分支不依赖它。
+
+第 3 步：
+
+- 设计把映射、核对任务和各层写成插件内部的状态，没有给第 3 步（还没有插件）的入口。实现为公开的 `index` 模块：`Indexer`（`Indexer::new(IndexDeps)`，测试和 bench 用 `with_fake_git`）持有每个打开项目的状态，第 4 步的插件在 `activate` / `started` 里构造它，把 `ProjectEvent`、`set_focus`、电源和语言包的通知转给它：`project_event`、`open_existing`、`set_focus`、`power_changed`、`grammar_changed`、`demand`（电池供电时的 `query` / `names`）、`coverage`、`map`、`head_diff`、`head_clean`、`subscribe`（电源和语言包的订阅，返回值交给 `PluginHandle::own`）、`close_all`。`IndexDeps` 是「本 crate 的公开项」里 `CodeIntelDeps` 的字段加上 `projects`（`Arc<dyn Projects>`）、这次激活的 `PluginHandle`、看门狗和批量任务数（`default_batch_tasks()`，与 executor 的批量线程数相同）：executor 不公开批量线程数，插件也只能在 `started` 之后拿到句柄。
+- 映射的类型在公开的 `map` 模块（`BaseMap`、`Overlay`、`WorktreeState`、`IndexedHints`、`LiveMap`、`HeadDiff`），供第 4 步的查询和 bench 使用。`by_oid` 拆成前缀和下标两个数组（每条 12 字节，`(u64, u32)` 的元组对齐后是 16 字节），另存每条的语言（1 字节），10 万文件合计 2.8 MB，在 3 MB 以内（「blob → 路径映射」已改）。提示的戳记取淘汰代数的低 32 位和语言包代数的低 31 位，与 OID 前缀共 16 字节。
+- `GitAccess` 的参数从 `root: &Path` 改为 `&Tree`（公共目录、git 目录、根目录）：生产实现要按公共目录打开仓库、按 git 目录取 worktree，只有根目录找不到它们。`tracked` 返回 `Vec<(RelPath, BlobId)>`（只有普通文件和可执行文件、UTF-8 路径），不返回 `Arc<git::TrackedPaths>`：第 5 层只用这些条目，`FakeGit` 也构造不出 `TrackedPaths`。`canonical_oid` 的路径改为 `&str`（「依赖 git、fs_watch 与 cache 的接口」已改）。
+- 覆盖部分对文件列表里有、原始字节的 OID 不等的路径调用一次 `canonical_oid`：设计只按原始字节计算，`Filtered`（LFS 的指针文件）因此认不出来，`overlay_*` 要求它是 `Unindexable`；顺带，CRLF 检出的跟踪文件不再被当作有改动。未跟踪的文件仍按原始字节（「blob → 路径映射」已改）。
+- 游标由批量任务在每批开始时按依赖的代数重建，不在核对任务里：游标只有批量任务用，依赖表不变。
+- 第 3 层的范围：设计在没有当前文本和审阅集合时没有给出取法，实现依次取当前文本、审阅集合的第一个文件、项目打开时的路径（根目录除外）；有子项目、但没有这样的路径或没有子项目包含它时第 3 层为空。理由：取整个 worktree 时，电池供电下的第 3 层就是整个仓库，与 ADR 0029 的电池策略相反（「建索引的分层」已改）。只有最近一次收到 `set_focus` 的项目跑第 3–5 层；还没有任何 `set_focus` 时取最后打开的项目。
+- 存在检查自成一批，游标每步最多看 4096 个条目、取出至多 500 个文件，缺的进入这一层的小队列（「调度、批次与取消」已补）：设计没有规定存在检查的批与抽取的批怎样划分；按 64 个文件做存在检查时 10 万文件要 1600 次查询，超过「约 200 次」。看 4096 个条目的上限让 UI 线程上的 `set_focus` 不会等一次长的扫描。
+- 配额满时游标不因淘汰重新开始，提示也按冻结的淘汰代数比较和记下（「调度、批次与取消」已补）：设计没有考虑本 crate 自己的写入引起的淘汰，按原规则第 3–5 层会不停地重新抽取刚被挤出的单元。只冻结游标的依赖不够：游标因别的原因重建时（焦点、编辑），提示若按当前淘汰代数比较就几乎全部失效，每次切换文件都会重新抽取被挤出的单元（24 KiB 配额、80 个文件时，5 次切换各多抽取 24–57 个）。
+- 映射记下它的来历（文件列表、工作区内容、语言包三个代数），游标的依赖和提示的戳记取自来历，不取当前代数；命中只在版本与当前语言表、映射的语言表都相同时置位提示（「输入代数与派生状态」已改）。原来按当前代数戳记时，语言包更新之后、映射重建之前运行的批次或第 1 层会把旧版本的命中戳成新代数，这些文件在本次会话里不再按新版本抽取。`coverage` 另外要求映射按当前的文件列表和语言包建成、游标的范围是当前的范围。
+- 焦点不是游标的依赖，只经第 3 层的范围起作用（「输入代数与派生状态」已改）：每次 `set_focus` 都重建游标时，游标整个重新走一遍，这只有在全部提示都匹配时才无害。
+- 第 1 层只认 `Done`，`TimedOut`、`TooLarge` 打开时重做一次，第 1 层接管批量层在途的键；批量层写入前再查一次存在、不替换，只有第 1 层替换（「建索引的分层」「调度、批次与取消」已补）。设计写了「打开时按交互截止时间重做」，原实现把缓存里的任何状态都当作已入索引；cache 把替换计为淘汰，所以要区分替换和配额压力，写事务放进项目的写锁（新增的锁不与本 crate 的其他锁同时持有）。
+- 工作区比较的请求只来自事件，核对任务的一轮只在有没消费的输入时再走（「增量更新」已补）：原实现把比较列出的、读出来是目录的路径也当成「目录级变化」，未跟踪的嵌套仓库（git 把它列为一个目录路径）和被目录替换的跟踪文件会让核对任务无限地比较下去。
+- 第 5 层：某个 worktree 的 index 变化只让它重新处理，本次会话已确认在缓存里的键不再检查和标记访问（「建索引的分层」已补）。原实现让任何一个 worktree 的 index 变化重新处理全部 worktree，并把全部命中重新排进访问标记；agent 在其他 worktree 里频繁 `git add` 时每次的代价是 N 个 index 的读取、每 10 万条约 200 次存在检查，以及把全部命中重新标记访问。
+- 超过 256 KiB 的文件同时只在一个批量任务里抽取，等待的任务每 10 ms 检查一次暂停和取消（「性能」已改）：实测接近 1 MiB 的文件的语法树和遍历约 31 MiB，设计估算 ≤ 10 MiB；两三个批量线程同时抽取这样的文件会超过 40 MB 的份额。
+- 读出时超过 1 MiB 的文件（文件列表里的条目，没有覆盖项）按排队时的 OID 记一行 `TooLarge`：没有读出字节，无法按实际字节算 OID；这一行只有状态，打开时按交互上限重做。
+- 抽取返回 `Unsupported` 的语言在本次运行中不再进入任何一层（「状态与异常」的「这种语言在本次运行中停用」）。
+- 语言包代数是本 crate 自己的计数（语言表每变化一次加一），不是 `GrammarSource::generation`：后者在没有改变语言表的通知（重复的安装）上也会变化。一轮开始读语言包的当前状态时清掉「再来一轮」的标记，所以之前到达的通知并进这一轮。这个代数只有一份，各项目比较时直接读它，不存副本（「输入代数与派生状态」已补）：第二轮预审发现，语言包的一轮先复制打开项目表、再让代数加一，其间打开的项目带着旧代数、又不在通知里；按项目的副本比较时，它的基础映射每遍都重建、每次都作废，映射一直为空、`coverage` 一直是 `Pending`，每个事件 16 次重建（10 万文件每次约 10 ms）。现在语言表和代数在持有打开项目表的锁时更新，核对任务在一遍没有任何进展时停下。
+- 第 1 层的替换不算淘汰：替换引起的淘汰代数加一在写锁里记为本 crate 自己的，提示和游标用的淘汰代数减去它（「调度、批次与取消」已补）。不这样做，每打开一个记为 `TimedOut` 的大文件，全部提示失效、游标重建、第 5 层重新开始一次。
+- 第 2 层也接管批量层在途的键（「建索引的分层」已改）：原来第 2 层遇到在途的键就跳过，批量任务暂停时那个文件要等到恢复，与 ADR 0029「第 1、2 层不排在批量任务后面」不符。在途表因此记下每个键的持有层。
+- 第 1 层只在命中或写入成功之后把（OID、版本）记为本次会话已满足（「建索引的分层」已改）：原来在抽取之前就记下，读不出来的文件（暂时被删除、正在被替换）本次会话再打开也不会抽取。
+- 第 5 层已确认的集合存 8 字节的键（「建索引的分层」「性能」已补）：原来每条约 56 字节，10 万个约 6 MB，常驻内存的份额没有计入它。
+- 批量任务的唤醒补满任务数，并有一条可检查的活性规则（「调度、批次与取消」已补）：#117 的审阅发现一次唤醒只启动一个任务（两三个批量线程时只有一个在跑），关闭跑第 3–5 层的项目后接手的项目没有被唤醒，它的第 3–5 层一直不开始。
+- 会话结束后（项目关闭）第 1、2 层的任务在取下一个文件之前停下（「调度、批次与取消」已补）：原来只比较会话号，关闭后同一会话号的任务继续读、哈希、抽取队列里剩下的文件，并一直持有 `BusyGuard`。
+- `head_clean` 在事件已到、核对任务还没处理时也是 false（「依赖 git、fs_watch 与 cache 的接口」「输入代数与派生状态」已改）：原来它一直按上一次的 `HeadDiff` 回答，语义查询可能把内容已变的文件交给只认 HEAD 的提供者。
+- `GrammarSource` 增加 `installed`（「本 crate 的公开项」已改）：激活时语言包的代数已不为零（启动前装好的包）时，第一轮没有通知可依据，原来的一轮只看语言表里已有的语言，这些包永远不加载。现在每一轮都读全部已装的包；`NoGrammarPacks` 返回空表，`testing::FakeGrammars` 返回它装着的包。
+- `ProjectEvent::Changed` 的 `files` 同时让下一次核对读 index 校验和；`RepoBatch` 里其他 worktree 的 index 变化让第 5 层重新处理那个 worktree，`rescan` 让它重新处理全部 worktree。`RepoBatch` 的 `refs` 和当前 worktree 的 `head` / `index` 与 `WorktreeBatch` 的 `meta` 同样处理（「增量更新」只列了 `WorktreeBatch`）。fs_watch 的监听失败（`Health::Failed`）时，订阅在 executor 上 drop（不在 fs_watch 线程的回调里），下一次 `ProjectEvent` 重新打开根目录并订阅。
+- 文件夹项目在第 3 步不建索引：它的 OID 要读每个文件才能算出，与第 4 步按需读取、核对 OID 的代码（`read_verify_*`）是同一段；第 3 步的映射、覆盖部分和各层只处理 git 项目。文件夹项目的 `coverage` 各层都是 `Pending`（「未入索引」），不会是 `Done`：`TierState` 没有「不适用」，`Pending` 已经表示「还没有入索引」，所以不扩展 `services` 的类型。调用方据此不信任索引，按「跳转到定义」的顺序现场回答、走限时搜索；映射为空，所以没有路径的 `indexed` 提示匹配，`head_clean` 为 false。第 5 步的探针等 `Done` 时，文件夹项目会一直等不到，要等文件夹项目建索引实现之后才能用它测量（`schedule_folder_project_reports_unindexed`）。
+- 测试：`derived_*` 里依赖查询的部分（限时搜索不跳过有效 OID 已变的文件、淘汰之后经限时搜索找到定义、候选的子项目层、名字表的重建）随第 4 步的查询和名字表加入；第 3 步检查它们依赖的输入代数和派生状态（提示、游标、第 3 层的范围、写入代数）。分库被删除重建时 cache 让淘汰代数加一，与单元被删除走同一条路径，由 `derived_eviction_*` 覆盖。`battery_*` 里「一次 `query`」用 `Indexer::demand`（`query` 属于第 4 步）。
+- `FakeGit` 与 lectern-git 一样把含 `.git` 的目录（嵌套仓库）列为一个未跟踪的目录路径，被目录替换的跟踪文件列为这个文件和目录里的文件；`overlay_lectern_git_and_the_fake_list_directories_alike` 在 `TestRepo` 和 `FakeGit` 上构造同样的情况、比较两者的结果。原来的 `FakeGit` 会走进嵌套仓库，掩盖了上面的核对循环。
+- `testing` 新增 `FakeGit`、`FakeProjects`、`FakePower`、`host()`（只交出 `PluginHandle` 的插件）、`Rig`（bench 用的完整建索引环境）、`synthetic`（合成仓库：语言比例、路径、8 KiB 的源码）和 `route_tree_sitter_allocations`（让 tree-sitter 的 C 分配经过 Rust 的全局分配器，`code_intel/batch_peak` 才能计入语法树）。`Indexer::set_extractor` 让测试计数和控制抽取。依赖新增 `lectern-kernel`、`lectern-git`、`lectern-fs-watch`、`lectern-platform`，`lectern-executor` 改为普通依赖；都是已有的 crate，Cargo.lock 没有新增 crate。
