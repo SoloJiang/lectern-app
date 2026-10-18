@@ -76,8 +76,12 @@ pub(crate) struct SemQuery {
     pub kind: SemKind,
     pub project: ProjectKey,
     pub worktree: Option<WorktreeKey>,
-    /// The map the query started with: it gives the replies' OIDs.
-    pub map: LiveMap,
+    /// The map the query started with: it gives the replies' OIDs. Only
+    /// while some request is open: dropped with the last answer or the
+    /// last provider gone (a map holds the language table's grammar leases
+    /// and, for 100 000 files, about 3 MB), and never kept without
+    /// requests.
+    pub map: Option<LiveMap>,
     pub requests: Vec<SemRequest>,
     /// The merge of the replies so far; None until one is `Ok`.
     pub merged: Option<Arc<[Location]>>,
@@ -145,6 +149,7 @@ impl SemQuery {
     /// The merge of the replies arrived, by the fixed arbitration.
     /// `head_clean` says whether a path's content equals HEAD.
     fn merge(&self, head_clean: &dyn Fn(&str) -> bool) -> Option<Arc<[Location]>> {
+        let map = self.map.as_ref()?;
         let mut order: Vec<&SemRequest> = self.requests.iter().collect();
         order.sort_by(|a, b| (!a.head_only, &a.provider_id).cmp(&(!b.head_only, &b.provider_id)));
         // HEAD-equal files belong to the head-only class while one of its
@@ -175,7 +180,7 @@ impl SemQuery {
                 }
                 // Paths the query's map does not have (deleted, ignored,
                 // another worktree) are dropped.
-                let Some(eff) = self.map.effective(&loc.path) else {
+                let Some(eff) = map.effective(&loc.path) else {
                     continue;
                 };
                 out.push(Location {
@@ -377,7 +382,7 @@ impl Inner {
                 kind,
                 project: snap.project.key.clone(),
                 worktree: snap.worktree.clone(),
-                map: snap.map.clone(),
+                map: (!chosen.is_empty()).then(|| snap.map.clone()),
                 requests: chosen,
                 merged: None,
                 version: 0,
@@ -490,11 +495,15 @@ impl Inner {
             let Some(s) = &entry.semantic else {
                 return;
             };
+            // No map: nothing was open any more; the merge is final.
+            let Some(map) = s.map.clone() else {
+                return;
+            };
             SemQuery {
                 kind: s.kind,
                 project: s.project.clone(),
                 worktree: s.worktree.clone(),
-                map: s.map.clone(),
+                map: Some(map),
                 requests: s
                     .requests
                     .iter()
@@ -520,6 +529,9 @@ impl Inner {
                 && s.version == view.version
             {
                 s.merged = merged;
+                if !s.requests.iter().any(|r| r.live && r.reply.is_none()) {
+                    s.map = None;
+                }
             }
         });
     }

@@ -62,6 +62,7 @@ const BENCHES: &[Bench] = &[
     code_intel::DISK_100K,
     code_intel_query::GOTO_INDEXED,
     code_intel_query::GOTO_FIRST,
+    code_intel_query::NAMED_50K,
     code_intel_query::SEARCH_STOP,
     code_intel_query::REFERENCES_100K,
     code_intel_query::NAMES_100K,

@@ -217,6 +217,28 @@ fn escalate_same_or_ready() {
     assert_eq!(results(&h, id).semantic, SemanticState::Failed);
 }
 
+/// A query's semantic part keeps the map it started with only while a
+/// request is open (the map holds the language table's leases): the last
+/// answer, or the last provider gone, drops it; the merge stays.
+#[test]
+fn escalate_answered_query_releases_its_map() {
+    let h = java();
+    let p = Fake::new("jdtls", false);
+    let reg = h.indexer.register_provider(p.clone(), token(&h));
+    let id = ask(&h);
+    assert_eq!(h.indexer.inner().semantic_map_held(id), Some(true), "open");
+    p.answer_all(&[B_SIZE]);
+    assert!(matches!(results(&h, id).semantic, SemanticState::Ready(_)));
+    assert_eq!(h.indexer.inner().semantic_map_held(id), Some(false));
+    // The provider going away with a request open drops it too.
+    let id = ask(&h);
+    assert_eq!(h.indexer.inner().semantic_map_held(id), Some(true));
+    drop(reg);
+    h.settle();
+    assert_eq!(h.indexer.inner().semantic_map_held(id), Some(false));
+    assert_eq!(results(&h, id).semantic, SemanticState::Failed);
+}
+
 /// A dead token is never called, and the registration goes; a dropped
 /// registration is not called either.
 #[test]

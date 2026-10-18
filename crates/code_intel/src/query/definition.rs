@@ -25,6 +25,7 @@ use lectern_services::project::{BlobId, RelPath};
 
 use super::rank::{Ranker, visible};
 use super::search::{FileDeadline, Searched};
+use super::text::FileRead;
 use super::{Run, SEARCH_FOR, Snap};
 use crate::extract::{
     BACKGROUND_MAX_LEN, Deadline, Def, ExtractStatus, Extraction, INTERACTIVE_DEADLINE, Lang,
@@ -395,12 +396,16 @@ impl Inner {
         let rules = self.resolver(&name);
         let until = clock.now() + INTERACTIVE_DEADLINE;
         let pending: RefCell<Pending> = RefCell::default();
-        // A file's effective content, the OID of the bytes read and its
-        // extraction, each file extracted once.
+        // A file's effective content, its OID and its extraction, each file
+        // extracted once. Only the snapshot's content counts
+        // (`read_content`): a file changed since gives nothing here, and the
+        // search counts it as unsearched.
         let load = |path: &str| -> Option<(Effective, BlobId, Option<Extraction>)> {
             let eff = snap.map.effective(path)?;
-            let bytes = self.read_file(snap, path)?;
-            let key = self.key_of(snap, path, &bytes, eff.oid);
+            let FileRead::Content(bytes) = self.read_content(snap, &eff) else {
+                return None;
+            };
+            let key = eff.oid;
             let mut p = pending.borrow_mut();
             let (units, scanned, extracted) = &mut *p;
             if let Some(done) = extracted.get(&(eff.path.clone(), key)) {
@@ -784,11 +789,15 @@ impl Inner {
         let mut delivered = HashSet::new();
         let mut units = Vec::new();
         let mut look_up = |candidates: &mut Vec<Candidate>, units: &mut Vec<Unit>| {
-            let stored = snap
-                .project
-                .store
-                .defs_by_name(name, &versions)
-                .unwrap_or_default();
+            let stored = {
+                let _t = crate::phases::span("named: lookup (SQL)");
+                snap.project
+                    .store
+                    .defs_by_name(name, &versions)
+                    .unwrap_or_default()
+            };
+            crate::phases::count("named: stored defs", stored.len() as u64);
+            let _t = crate::phases::span("named: candidates");
             for s in stored {
                 for eff in snap.map.paths(&s.oid, &s.lang.0) {
                     let location = Location {
@@ -823,14 +832,19 @@ impl Inner {
         // Not searched: what is not indexed yet is reported, never taken
         // as complete.
         let dir = near.and_then(|n| snap.subproject_of(n)).unwrap_or("");
+        let counts = crate::phases::span("named: counts");
         let (unindexed, flying) = snap.unindexed_under(dir);
         let outside = snap.unindexed_outside(dir, None);
+        drop(counts);
         // A file those counts took as indexed whose unit was written after
         // the lookup: looked up again.
         if snap.hinted_since(&mut cut) {
             look_up(&mut candidates, &mut units);
         }
-        ranker.sort(&mut candidates);
+        {
+            let _t = crate::phases::span("named: rank");
+            ranker.sort(&mut candidates);
+        }
         let completeness = if unindexed == 0 && flying == 0 && outside == 0 {
             Completeness::Complete
         } else {
@@ -840,12 +854,15 @@ impl Inner {
             }
         };
         let preselect = (!candidates.is_empty()).then_some(0);
+        let publish = crate::phases::span("named: publish");
         let all: Arc<[Candidate]> = candidates.into();
         self.publish(run.id, |r| {
             r.candidates = all;
             r.preselect = preselect;
             r.state = QueryState::Done(completeness);
         });
+        drop(publish);
+        let _t = crate::phases::span("named: touch");
         units.sort_by_key(|u| u.id());
         units.dedup();
         snap.project.store.touch(&units);

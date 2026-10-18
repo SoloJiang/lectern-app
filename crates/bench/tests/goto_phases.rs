@@ -1,14 +1,16 @@
-//! The per-phase breakdown of `code_intel/goto_indexed`
-//! (docs/design/code_intel.md「实际验证」): the same fixture, each jump with
-//! `lectern_code_intel::phases` recording, the medians printed. A profile,
-//! not a check: ignored by default; run it in release:
+//! The per-phase breakdowns of `code_intel/goto_indexed` and
+//! `code_intel/named_50k` (docs/design/code_intel.md「实际验证」): the same
+//! fixtures, each query with `lectern_code_intel::phases` recording, the
+//! medians printed. Profiles, not checks: ignored by default; run them in
+//! release:
 //!
 //! ```sh
 //! cargo test --release --locked -p lectern-bench --all-features \
 //!     --test goto_phases -- --ignored --nocapture
 //! ```
 //!
-//! `GOTO_PHASES_FILES` sets the repository size (100 000).
+//! `GOTO_PHASES_FILES` sets the repository size (100 000 for the jump,
+//! 60 000 for `Named`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -18,7 +20,9 @@ use lectern_bench::CountingAlloc;
 use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::SystemClock;
 use lectern_code_intel::phases;
-use lectern_code_intel::testing::{FakeGit, Rig, packages, synthetic, virtual_repo};
+use lectern_code_intel::testing::{
+    FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_with,
+};
 use lectern_services::code_intel::{
     Completeness, Position, Query, QueryKind, QueryState, TextOrigin, TextRef,
 };
@@ -58,13 +62,17 @@ fn median<T: Ord + Copy>(mut v: Vec<T>) -> T {
     v[v.len() / 2]
 }
 
+fn files(default: usize) -> usize {
+    std::env::var("GOTO_PHASES_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 #[test]
 #[ignore = "a profile; see the module docs"]
 fn goto_indexed_phases() {
-    let n: usize = std::env::var("GOTO_PHASES_FILES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100_000);
+    let n = files(100_000);
     let git = Arc::new(FakeGit::new());
     let dir = tempfile::tempdir().expect("temp dir");
     let cache = cache(dir.path());
@@ -102,19 +110,57 @@ fn goto_indexed_phases() {
     let r = jump();
     assert!(!r.candidates.is_empty());
     assert_eq!(r.state, QueryState::Done(Completeness::Complete));
-    for _ in 0..WARMUP {
-        jump();
+    profile(&format!("goto_indexed phases, {n} files"), JUMPS, jump);
+}
+
+/// `code_intel/named_50k`'s breakdown: `Named` for `id`, which every unit
+/// of a virtual repository defines.
+#[test]
+#[ignore = "a profile; see the module docs"]
+fn named_50k_phases() {
+    let n = files(60_000);
+    let git = Arc::new(FakeGit::new());
+    let dir = tempfile::tempdir().expect("temp dir");
+    let cache = cache(dir.path());
+    let units = virtual_repo_with(&git, &cache, n, &["main"], Some("id"));
+    git.commit("main");
+    let rig = Rig::new(git, cache, Arc::new(SystemClock));
+    rig.open_with(packages(&synthetic::package_dirs(n)));
+    rig.settle();
+    let query = Query {
+        project: rig.git.key(),
+        kind: QueryKind::Named {
+            name: "id".into(),
+            near: Some(synthetic::path(0).into()),
+        },
+    };
+    let named = || {
+        let id = rig.indexer.query(query.clone());
+        rig.executor.run_until_idle();
+        let r = rig.indexer.results(id).expect("kept");
+        rig.indexer.close(id);
+        r
+    };
+    assert_eq!(named().candidates.len(), units);
+    profile(&format!("named_50k phases, {units} definitions"), 20, named);
+}
+
+/// Runs `op` a few times, then `runs` times with the phases recording;
+/// prints the medians.
+fn profile<R>(title: &str, runs: usize, op: impl Fn() -> R) {
+    for _ in 0..WARMUP.min(runs) {
+        op();
     }
     let mut totals = Vec::new();
     let mut allocs = Vec::new();
     let mut phases_by: Vec<(&'static str, Vec<Duration>)> = Vec::new();
     let mut counts_by: Vec<(&'static str, Vec<u64>)> = Vec::new();
-    for _ in 0..JUMPS {
+    for _ in 0..runs {
         phases::take();
         phases::enable(true);
         let a = CountingAlloc::allocations();
         let start = Instant::now();
-        jump();
+        op();
         let took = start.elapsed();
         let a = CountingAlloc::allocations() - a;
         phases::enable(false);
@@ -134,18 +180,16 @@ fn goto_indexed_phases() {
             }
         }
     }
-    println!(
-        "goto_indexed phases, {n} files, {JUMPS} jumps (medians; phases recorded with their own overhead)"
-    );
+    println!("{title}, {runs} runs (medians; phases recorded with their own overhead)");
     println!(
         "{:<34} {:>10}",
-        "jump, query to results",
+        "query to results",
         format!("{:.2?}", median(totals))
     );
     for (name, v) in phases_by {
-        let runs = v.len();
+        let n = v.len();
         println!(
-            "{name:<34} {:>10}  ({runs} jumps)",
+            "{name:<34} {:>10}  ({n} runs)",
             format!("{:.2?}", median(v))
         );
     }

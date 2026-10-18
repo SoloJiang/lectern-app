@@ -32,21 +32,6 @@ fn names_of(t: &NameTable) -> Vec<&str> {
     t.iter().collect()
 }
 
-/// Waits until the watchdog has run its due entries (it polls the manual
-/// clock), then runs what they submitted.
-fn fire_due(h: &Harness) {
-    let watchdog = h.indexer.inner().watchdog.clone();
-    let start = std::time::Instant::now();
-    while watchdog.scheduled() > 0 {
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "the due entry never ran"
-        );
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    h.settle();
-}
-
 #[test]
 fn names_dedup_nfc_current_worktree_only() {
     let h = Harness::new();
@@ -143,8 +128,7 @@ fn names_refresh_while_held() {
         1,
         "not before the interval"
     );
-    h.clock.advance(REBUILD_MIN + Duration::from_millis(1));
-    fire_due(&h);
+    h.advance_and_fire(REBUILD_MIN + Duration::from_millis(1));
     let fresh = tables(&h);
     assert_eq!(fresh.len(), 1, "one rebuild for both changes");
     assert_eq!(names_of(&fresh[0]), ["one", "three", "two"]);
@@ -158,9 +142,8 @@ fn names_refresh_while_held() {
     h.git.write("main", "n9.ts", b"export function four() {}\n");
     h.emit(&[("n9.ts", CHANGED)]);
     h.settle();
-    h.clock.advance(REBUILD_MIN * 3);
     // Any due entry left has fired and what it submitted has run.
-    fire_due(&h);
+    h.advance_and_fire(REBUILD_MIN * 3);
     assert_eq!(h.indexer.inner().watchdog.scheduled(), 0);
     assert!(tables(&h).is_empty(), "nobody holds it: no rebuild");
     assert_eq!(h.indexer.inner().name_builds(&h.key()), 2);

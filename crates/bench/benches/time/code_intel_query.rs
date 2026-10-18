@@ -11,7 +11,9 @@ use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::SystemClock;
 use lectern_code_intel::names::build_table;
-use lectern_code_intel::testing::{FakeGit, Rig, packages, synthetic, virtual_repo};
+use lectern_code_intel::testing::{
+    FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_with,
+};
 use lectern_services::code_intel::{
     CodeIntelEvent, Completeness, Position, Query, QueryId, QueryKind, QueryState, TextOrigin,
     TextRef,
@@ -177,6 +179,60 @@ fn goto_first(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     }
     Ok(vec![Measured::new(
         "code_intel/goto_first",
+        Value::Time(Samples(samples)),
+    )])
+}
+
+/// `Named` for a name some 50 000 files define (record-only): every unit
+/// of a virtual repository also defines `id`. From the query to its first
+/// (and only) batch: the lookup, ranking every candidate, the event.
+pub const NAMED_50K: Bench = Bench {
+    id: "code_intel/named_50k",
+    run: named_50k,
+};
+
+fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = ctx.scale(60_000, 600);
+    let git = Arc::new(FakeGit::new());
+    let dir = tempfile::tempdir_in(ctx.scratch())?;
+    let cache = cache(dir.path());
+    let units = virtual_repo_with(&git, &cache, n, &["main"], Some("id"));
+    git.commit("main");
+    let rig = Rig::new(git, cache, Arc::new(SystemClock));
+    rig.open_with(packages(&synthetic::package_dirs(n)));
+    rig.settle();
+    let (seen, _subscription) = listen(&rig)?;
+    let query = Query {
+        project: rig.git.key(),
+        kind: QueryKind::Named {
+            name: "id".into(),
+            near: Some(synthetic::path(0).into()),
+        },
+    };
+    let mut samples = Vec::new();
+    for round in 0..slow_samples(ctx) {
+        seen.lock().unwrap().clear();
+        let start = Instant::now();
+        let (id, r) = run(&rig, &query)?;
+        let first = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(i, _, _)| *i == id)
+            .map(|(_, _, t)| *t)
+            .ok_or_else(|| BenchError::new("no batch"))?;
+        if r.candidates.len() < units {
+            return Err(BenchError::new(format!(
+                "{} candidates of {units} units",
+                r.candidates.len()
+            )));
+        }
+        if round > 0 || ctx.mode() == Mode::Smoke {
+            samples.push(first - start);
+        }
+    }
+    Ok(vec![Measured::new(
+        "code_intel/named_50k",
         Value::Time(Samples(samples)),
     )])
 }

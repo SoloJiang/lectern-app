@@ -11,14 +11,15 @@ use std::time::{Duration, Instant};
 
 use lectern_cache::Unit;
 use lectern_services::code_intel::{
-    DefinitionRef, Location, QueryError, QueryState, RefSyntax, Reference, Symbol, TextOrigin,
-    TextRef,
+    Completeness, DefinitionRef, Location, QueryError, QueryState, RefSyntax, Reference, Symbol,
+    TextOrigin, TextRef,
 };
 use lectern_services::project::{BlobId, RelPath, WorktreeKey};
 
 use super::definition::{LocKey, loc_key};
 use super::rank::Ranker;
 use super::search::{FileDeadline, Searched};
+use super::text::FileRead;
 use super::{Run, SEARCH_FOR, Snap};
 use crate::extract::{ExtractStatus, Extraction, Lang, compatible};
 use crate::index::Inner;
@@ -50,6 +51,9 @@ struct Found {
     delivered: HashSet<LocKey>,
     /// (path, OID) of every file parsed: each one once.
     parsed: HashSet<(RelPath, BlobId)>,
+    /// Indexed files not searched: changed since the snapshot (`Stale`), or
+    /// their parse cancelled. Counted in `Partial::unsearched`.
+    unsearched: HashSet<(RelPath, BlobId)>,
     files: usize,
     since: usize,
     last: Option<Instant>,
@@ -101,6 +105,7 @@ impl Inner {
             same_name: Vec::new(),
             delivered: HashSet::new(),
             parsed: HashSet::new(),
+            unsearched: HashSet::new(),
             files: 0,
             since: 0,
             last: None,
@@ -129,7 +134,7 @@ impl Inner {
         }
         // 3. Unindexed files of the sub-project: the search.
         let completeness = if of.local {
-            Some(lectern_services::code_intel::Completeness::Complete)
+            Some(Completeness::Complete)
         } else {
             self.run_after_lookup(snap);
             let skip = found.parsed.clone();
@@ -187,6 +192,22 @@ impl Inner {
         let Some(completeness) = completeness else {
             return;
         };
+        // Indexed files not searched keep it `Partial`.
+        let stale = u32::try_from(found.unsearched.len()).unwrap_or(u32::MAX);
+        let completeness = match completeness {
+            _ if stale == 0 => completeness,
+            Completeness::Complete => Completeness::Partial {
+                unsearched: stale,
+                outside: 0,
+            },
+            Completeness::Partial {
+                unsearched,
+                outside,
+            } => Completeness::Partial {
+                unsearched: unsearched.saturating_add(stale),
+                outside,
+            },
+        };
         let (callers, same_name) = (found.callers.clone(), found.same_name.clone());
         self.publish(run.id, |r| {
             r.callers = callers.into();
@@ -234,23 +255,27 @@ impl Inner {
                 jobs.push((eff, s.unit));
             }
         }
-        jobs.sort_by(|(a, _), (b, _)| {
-            (ranker.file_order(&a.path), &a.path).cmp(&(ranker.file_order(&b.path), &b.path))
-        });
+        // `file_order` scans the review set, the sub-projects and their
+        // dependencies: once per file, not per comparison.
+        jobs.sort_by_cached_key(|(eff, _)| (ranker.file_order(&eff.path), eff.path.clone()));
         for (eff, unit) in jobs {
             if run.stopped(snap) {
                 return false;
             }
-            if found.parsed.contains(&(eff.path.clone(), eff.oid)) {
+            let at = (eff.path.clone(), eff.oid);
+            if found.parsed.contains(&at) || found.unsearched.contains(&at) {
                 continue;
             }
-            let Some(bytes) = self.read_file(snap, &eff.path) else {
-                continue;
+            let bytes = match self.read_content(snap, &eff) {
+                FileRead::Content(bytes) => bytes,
+                FileRead::TooLarge => continue,
+                // Changed since the snapshot: its unit is of other content.
+                FileRead::Stale => {
+                    found.unsearched.insert(at);
+                    continue;
+                }
             };
-            let key = self.key_of(snap, &eff.path, &bytes, eff.oid);
-            if key == eff.oid {
-                units.push(unit);
-            }
+            units.push(unit);
             let Some(file_lang) = snap.table.get(&eff.lang.name().0).cloned() else {
                 continue;
             };
@@ -260,7 +285,20 @@ impl Inner {
                 origin: TextOrigin::Worktree,
                 lang: file_lang,
             };
-            self.references_in(run, snap, of, ranker, &file, key, bytes.into(), None, found);
+            let searched = self.references_in(
+                run,
+                snap,
+                of,
+                ranker,
+                &file,
+                eff.oid,
+                bytes.into(),
+                None,
+                found,
+            );
+            if searched == Searched::Unsearched {
+                found.unsearched.insert(at);
+            }
         }
         true
     }

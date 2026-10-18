@@ -111,3 +111,74 @@ fn read_verify_answers_only_for_the_content() {
         }
     }
 }
+
+const RUN: &str = "export function run() { return item(); }\n";
+const ITEM: &str = "export function item() { return 2; }\n";
+const EDITED_ITEM: &str = "export function item() { return 3; }\n";
+const USE: &str = "export function other() { return item() + 1; }\n";
+const EDITED_USE: &str = "export function other() { return item() * item(); }\n";
+
+/// A search candidate edited after the query took its snapshot (between
+/// its lookup and the search's read): its new bytes give nothing, under no
+/// OID; the file counts as unsearched, and nothing is stored for it.
+#[test]
+fn read_verify_search_skips_a_file_changed_after_the_snapshot() {
+    let h = super::goto::unindexed(&[("a.ts", RUN), ("c.ts", ITEM)], &[]);
+    let git = h.git.clone();
+    *crate::index::lock(&h.indexer.inner().after_lookup) = Some(Box::new(move |_, _| {
+        git.write("main", "c.ts", EDITED_ITEM.as_bytes());
+    }));
+    let r = h.goto("a.ts", "item", 0);
+    assert!(r.candidates.is_empty(), "{:?}", r.candidates);
+    assert_eq!(
+        r.state,
+        QueryState::Done(lectern_services::code_intel::Completeness::Partial {
+            unsearched: 1,
+            outside: 0
+        })
+    );
+    let edited = h.git.oid(EDITED_ITEM.as_bytes());
+    assert!(
+        !h.stored(edited, "ts"),
+        "nothing extracted from the new bytes"
+    );
+    assert!(!h.stored(h.git.oid(ITEM.as_bytes()), "ts"));
+}
+
+/// An indexed file edited after the snapshot (on disk, before its event):
+/// find references reads none of its new bytes and stays `Partial`; the
+/// file's index entry is of other content.
+#[test]
+fn read_verify_references_skip_an_indexed_file_changed_after_the_snapshot() {
+    let h = super::goto::indexed(&[("a.ts", ITEM), ("c.ts", USE)]);
+    let r = h.goto("a.ts", "item", 0);
+    let of = r
+        .symbol
+        .as_ref()
+        .and_then(|s| s.defines.clone())
+        .expect("a definition");
+    // Before the edit: c.ts's reference, complete.
+    let r = h.ask(QueryKind::References { of: of.clone() });
+    let paths = |r: &lectern_services::code_intel::QueryResults| -> Vec<String> {
+        r.callers
+            .iter()
+            .chain(r.same_name.iter())
+            .map(|x| x.location.path.to_string())
+            .collect()
+    };
+    assert_eq!(paths(&r), ["c.ts"]);
+    assert_eq!(
+        r.state,
+        QueryState::Done(lectern_services::code_intel::Completeness::Complete)
+    );
+    h.git.write("main", "c.ts", EDITED_USE.as_bytes());
+    let r = h.ask(QueryKind::References { of });
+    assert!(paths(&r).is_empty(), "{:?}", r.same_name);
+    assert_eq!(
+        r.state,
+        QueryState::Done(lectern_services::code_intel::Completeness::Partial {
+            unsearched: 1,
+            outside: 0
+        })
+    );
+}
