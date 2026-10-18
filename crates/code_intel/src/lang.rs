@@ -15,7 +15,7 @@ use crate::{DefKind, LangName};
 /// Bumped when the extractor's own rules change (visibility, parameter
 /// counts, scopes, markers, the core languages' walkers): every query
 /// version changes with it, so old results stop matching.
-pub const EXTRACTOR_VERSION: u32 = 5;
+pub const EXTRACTOR_VERSION: u32 = 6;
 
 /// The tree-sitter runtime and tags crate versions, pinned in the root
 /// `Cargo.toml` (ADR 0030; `lang_grammar_versions_match_lock`). Part of
@@ -359,6 +359,21 @@ pub(crate) enum Marker {
 }
 
 impl Marker {
+    /// Whether the marker's `@name` is a name the file uses (an exported
+    /// name, an implemented or receiver type, an attribute), not a keyword
+    /// (`export`, `for`, `pub`, `global`). Such a name stays a reference
+    /// name, and a reference position, unless it became the definition at
+    /// that position (`rules::finish`, `ParsedFile`): the marker pattern
+    /// takes the name node from the reference patterns after it. A
+    /// `Receiver` is a parameter, the definition at its position, which
+    /// those patterns did not count either.
+    pub(crate) fn consumes_name(self) -> bool {
+        matches!(
+            self,
+            Marker::ExportName | Marker::Impl | Marker::Owner | Marker::Attribute
+        )
+    }
+
     fn from_kind(kind: &str) -> Option<Marker> {
         Some(match kind {
             "export" => Marker::Export,

@@ -756,12 +756,12 @@ pub enum Visibility {
 ```
 
 - `kind` 来自 tags 的 `@definition.<种类>`：`function`、`method`、`class`、`interface`、`module`、`macro`、`constant`、`type`、`field` 等按名字对应 `DefKind`，`struct`、`enum`、`trait` 用各语言查询里的同名种类，其余为 `Other`。
-- 枚举的成员是定义：Rust 的变体、TS 的枚举成员、Java 的枚举常量是 `Constant`，`scope` 是所在的枚举，可见性取枚举的可见性（Rust 的变体没有自己的 `pub`，Java 的枚举常量没有修饰符）；Python 类体里直接赋值的名字（类属性，包括 `Enum` 的成员）是 `Field`，`scope` 是所在的类；方法（以及其中嵌套的函数）里给方法第一个参数的属性赋值（`self.name = name`，在 `__init__` 和其他方法里）也是这个类的 `Field`，一个类里同名的只记第一个，类属性优先；给其他对象的属性赋值仍是成员引用。查询用 `reference.lectern.receiver`（函数的第一个参数）和 `reference.lectern.attribute`（属性赋值）两个标记交给规则判断。JS / TS 构造器里的 `this.x = …` 不是字段（已知限制，TS 的字段通常写成声明）。
+- 枚举的成员是定义：Rust 的变体、TS 的枚举成员、Java 的枚举常量是 `Constant`，`scope` 是所在的枚举，可见性取枚举的可见性（Rust 的变体没有自己的 `pub`，Java 的枚举常量没有修饰符）；Python 类体里直接赋值的名字（类属性，包括 `Enum` 的成员）是 `Field`，`scope` 是所在的类；方法（以及其中嵌套的函数）里给方法第一个参数的属性赋值（`self.name = name`，在 `__init__` 和其他方法里，也包括解包 `self.a, self.b = 1, 2`）也是这个类的 `Field`，一个类里同名的只记第一个，类属性优先；给其他对象的属性赋值仍是成员引用。查询用 `reference.lectern.receiver`（函数的第一个参数）和 `reference.lectern.attribute`（属性赋值）两个标记交给规则判断。JS / TS 构造器里的 `this.x = …` 不是字段（已知限制，TS 的字段通常写成声明）。
 - Python 的模块级常量按作用域判断，不按语法形状：不在函数或类作用域里的赋值目标都是 `Constant`，包括 `if`、`try`、`with`、`for` 体里的和连等 `A = B = None` 的每个名字；查询捕获每个赋值，`rules::finish` 去掉在局部作用域或类里的，连等里的名字没有 `scope`。JS / TS 和 Go 的顶层仍按形状判断，它们的规则本来就是「程序或源文件的直接子节点」（`let`、`const`、`class` 在块里是块作用域）；已知限制：顶层块里的 `var`（提升到程序作用域）不是定义。
 - 每个名字节点只有一个定义。tree-sitter-tags 只在两次匹配都还在队列里时按模式顺序去重，后到的匹配会给同一个名字节点再加一个定义（方法又被函数模式匹配到）；抽取后按名字节点去重，保留更具体的种类（方法、类等先于函数，函数先于常量和变量），与查询里模式的先后一致。定义自己的名字不算引用。
-- `scope`：同一文件里，范围包含这个定义的最内层定义的名字。抽取后按范围排序一遍求出。Rust 的 `impl` 块不是定义，但作为容器参与计算，块里的方法的 `scope` 是实现的类型；Go 的方法取接收者的类型。实现的类型的名字穿过引用、指针、数组、切片和元组（第一个元素），最多两层（`&[T]` 是 `T`）；泛型和路径类型取自己的名字（`Box<T>` 是 `Box`，`a::B` 是 `B`），基本类型是它自己（`u8`）；其他形式（`fn()`、`dyn Trait`）没有名字，trait 实现里的方法没有 `scope`，仍是 `Public`。
+- `scope`：同一文件里，范围包含这个定义的最内层定义的名字。抽取后按范围排序一遍求出。Rust 的 `impl` 块不是定义，但作为容器参与计算，块里的方法的 `scope` 是实现的类型；Go 的方法取接收者的类型。实现的类型的名字穿过引用、指针、数组、切片和元组（第一个元素），最多两层（`&[T]` 是 `T`）；泛型和路径类型取自己的名字（`Box<T>` 是 `Box`，`a::B` 是 `B`），基本类型是它自己（`u8`、`&u8`），穿过数组和元组时不算（`[u8]`、`(u8, u8)` 没有名字）；其他形式（`fn()`、`dyn Trait`）没有名字，trait 实现里的方法没有 `scope`，仍是 `Public`。
 - `visibility` 和 `arity` 由每种语言的一个小函数得出；规则变化时 `EXTRACTOR_VERSION` 加一。tree-sitter-tags 只交出 tag、不交出语法树，所以函数读的是查询为它捕获的内容：
-  - 标记：`@reference.lectern.<种类>` 的捕获只给抽取规则用，不进入引用名。Rust 的 `pub`（`visibility_modifier`）、`impl` 块与它实现的类型、trait 实现（`impl … for` 的 `for`，与类型分开，所以类型取不到名字时仍是 trait 实现），Java 的 `private`，JS / TS 程序顶层的 `export` 语句、`export { name }`、`export default name` 与 TS 的 `export = name` 导出的名字、`import` 语句（namespace 和 module 体里的 `export` 导出的是它们的成员，不算），TS 的 `declare global { … }`（其中的声明是全局的，同导出的一样可见，但不让文件成为 ES 模块）；每种导出形式在 `extract_export_forms_change_visibility` 的表里各有一行，检查它让名字从 `File` 变为 `Public`，Go 方法的接收者类型。
+  - 标记：`@reference.lectern.<种类>` 的捕获给抽取规则用，标记本身不存。标记的模式排在引用模式之前，会占用名字节点；占用的是名字（导出的名字、实现的类型、Go 方法的接收者类型、Python 的属性赋值）而不是关键字（`export`、`for`、`pub`、`global`）时，这个名字仍记为引用名，`ParsedFile` 里仍是引用位置，除非它成了这个位置上的定义（Python 的字段；方法的第一个参数是参数自己的局部定义）。这是两条抽取路径共用的不变式（`Marker::consumes_name`），`extract_markers_keep_their_names` 对每种标记各取样例检查。Rust 的 `pub`（`visibility_modifier`）、`impl` 块与它实现的类型、trait 实现（`impl … for` 的 `for`，与类型分开，所以类型取不到名字时仍是 trait 实现），Java 的 `private`，JS / TS 程序顶层的 `export` 语句、`export { name }`、`export default name` 与 TS 的 `export = name` 导出的名字、`import` 语句（namespace 和 module 体里的 `export` 导出的是它们的成员，不算），TS 的 `declare global { … }` 和以字符串命名的环境模块 `declare module 'm' { … }`（常用于扩充其他包的类型；其中的声明是全局的或隐式导出的，同导出的一样可见，但不让文件成为 ES 模块）；每种导出形式在 `extract_export_forms_change_visibility` 的表里各有一行，检查它让名字从 `File` 变为 `Public`，Go 方法的接收者类型。
   - 参数列表：函数、方法的模式用 `@doc` 捕获参数列表节点（tags 把它的文本放在 `Tag::docs`），按括号、尖括号、字符串和注释的嵌套数顶层的逗号。Rust 的 `self` 接收者和 Python 的 `*`、`/` 分隔符不计数；没有括号的参数列表（`x => x`）是 1 个。查询不再用 `@doc` 捕获注释。
   - 局部定义：定义节点严格位于一个局部作用域之内的，在每种语言里都是 `File`，不再看下面按语言的规则。局部作用域是 locals 查询的作用域里除文件本身、类体（Python）和命名空间体（TS 的 namespace、module、`declare global`）之外的全部（「作用域形式」），由作用域的种类推出，不按语言写规则：遍历在同一遍里记下它们，tags 路径（核心语言）和 `ParsedFile` 取查询的结果。成员（字段、方法，含 TS 构造器里的参数属性）取它所属的类或 `impl` 块的位置，所以局部类的成员是 `File`，顶层类在构造器参数里声明的字段不是；最近的容器是函数或方法时（匿名类的成员），取自己的位置。语言包的作用域不分类，函数或方法定义里面的定义是 `File`。
   - 规则：Rust 有 `pub` 的项、trait 和 trait 实现里的成员、宏是 `Public`，其余 `Module`；Java 有 `private` 的是 `File`，其余 `Public`；Go 大写开头的是 `Public`，其余 `Package`；Python 和语言包是 `Unknown`。JS / TS：函数里的定义（如命名函数表达式的名字）是 `File`；其余取最外层定义的可见性：在 `export` 语句里或名字被导出时是 `Public`，程序顶层有 `import` / `export`（ES 模块）时是 `File`，没有时（脚本、CommonJS，以及只在 namespace 里有 `export` 的 TS 文件）是 `Public`。
@@ -1813,6 +1813,13 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 2 个快照有变化，逐个看过：`billing.py` 的 `Invoice.__init__` 里 `self.number`、`self.lines`、`self.currency` 成为字段（引用名少了 `number`）；`panel.tsx` 的引用名少了内置元素 `h2`、`li`、`section`、`ul`。
 - `code_intel/extract_throughput`：本轮 3 次 3.99–4.16 MB/s，交替运行的 9a2835b 4.10 MB/s；`code_intel/extract_1mib` 3.57–3.92 MB/s（9a2835b：3.67），规则不再按「定义数 × 导出语句数」增长。
 
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 的第二次预审意见（标记占用的名字、环境模块、解包的属性赋值）之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1174 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。
+- `just test -p lectern-code-intel`：76 个测试通过。新增 `extract_markers_keep_their_names`：每种标记各有样例，占用名字的标记的名字在两条路径上都是引用名、在 `ParsedFile` 里是引用位置或这个位置上的定义，关键字标记不产生引用名，方法的第一个参数是定义；`EXPORT_FORMS` 加了环境模块的两行（接口和它的成员）；Python 的解包属性赋值和 Rust 的 `[u8]`、`(u8, u8)`、`&u8` 加进已有的测试。
+- 2 个快照有变化，逐个看过：`panel.tsx` 的引用名多了 `export default Panel` 的 `Panel`，`store.js` 多了 `export { api, ids as idSequence }` 和 `export default createStore` 的名字。
+- `code_intel/extract_throughput`：本轮 5 次 3.87–4.05 MB/s，交替运行的 9a2835b 两次 3.80 和 4.13 MB/s，在噪声以内；`code_intel/extract_1mib` 3.50–3.75 MB/s（9a2835b：3.48）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1904,3 +1911,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - Python 的模块级常量原来只认模块的直接子语句，`if` / `try` / `with` / `for` 里的赋值和连等里第一个以外的名字都不是定义；方法里的 `self.name = …` 也不是字段。现在模块级按作用域判断，`self` 的属性赋值是类的字段（「抽取结果」「定义形式」已改）。
 - TS 的 `export = X` 没有被认作导出（grammar 里 `X` 不在 `value` 字段里）；`declare global` 里的声明是 `File`。现在都按导出处理，导出形式有一张逐行检查的表（「抽取结果」已补）。
 - 规则的变化让 `EXTRACTOR_VERSION` 从 4 改为 5。
+
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 的第二次预审意见：
+
+- 标记的模式排在引用模式之前，占用名字节点后这个名字就不再是引用：Python 的每次属性赋值（`self.n = …` 的第二次写、`o.n = 2`）不在 `ParsedFile` 的引用位置里，Go 只有方法的文件里接收者类型、`export { UserService } from …` 里的名字、Rust `impl` 的类型都不在引用名里。现在定为不变式：占用名字的标记在两条路径上都把名字记回引用名、在 `ParsedFile` 里记回引用位置，除非它成了这个位置上的定义（「抽取结果」已补）。
+- TS 以字符串命名的环境模块（`declare module 'express-serve-static-core' { interface Request { … } }`）里的声明原来是 `File`，`req.user` 失去唯一的候选。现在与 `declare global` 一样按导出处理（「抽取结果」已补）。
+- Python 的解包属性赋值（`self.a, self.b = 1, 2`）也是字段；属性赋值标记改在属性节点上。
+- Rust `impl Trait for [u8]` 和 `for (u8, u8)` 的方法原来的 `scope` 是 `u8`，现在没有。
+- 引用名的变化让 `EXTRACTOR_VERSION` 从 5 改为 6。

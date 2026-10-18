@@ -198,19 +198,18 @@ impl Python {
                 cx.marker(me.node, function.node, Marker::Receiver);
                 return;
             }
-            // (assignment left: (attribute object: (identifier)
-            //   attribute: (identifier) @name)) @reference.lectern.attribute
+            // (assignment left: [(attribute object: (identifier)
+            //   attribute: (identifier) @name) @reference.lectern.attribute
+            //   (pattern_list (attribute …)) (tuple_pattern (attribute …))])
             if p == k.attribute
                 && me.field == k.f_attribute
-                && parent.field == k.f_left
                 && parent
                     .node
                     .child_by_field_id(k.f_object)
                     .is_some_and(|o| o.kind_id() == k.identifier)
-                && let Some(assignment) = up(stack, 2)
-                && assignment.kind == k.assignment
+                && self.assigned(stack, 1)
             {
-                cx.marker(me.node, assignment.node, Marker::Attribute);
+                cx.marker(me.node, parent.node, Marker::Attribute);
                 return;
             }
             // (call function: (attribute attribute: (identifier))) and
@@ -261,6 +260,24 @@ impl Python {
         }
         let assignment = up(stack, level + 1)?;
         (assignment.kind == k.assignment && frame.field == k.f_left).then_some(level + 1)
+    }
+
+    /// Whether the frame `level` above the last is an assignment's `left`,
+    /// directly or as an element of a pattern list or tuple pattern there.
+    fn assigned(&self, stack: &[Frame<'_>], level: usize) -> bool {
+        let k = &self.0;
+        let Some(target) = up(stack, level) else {
+            return false;
+        };
+        let is_assignment = |l: usize| up(stack, l).is_some_and(|a| a.kind == k.assignment);
+        if target.field == k.f_left && is_assignment(level + 1) {
+            return true;
+        }
+        up(stack, level + 1).is_some_and(|list| {
+            (list.kind == k.pattern_list || list.kind == k.tuple_pattern)
+                && list.field == k.f_left
+                && is_assignment(level + 2)
+        })
     }
 
     /// Whether the frame `level` above the last is a block in a class

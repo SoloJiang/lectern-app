@@ -327,9 +327,16 @@ impl ParsedFile {
             tags.extend(walked.tags);
         }
         tags.sort_by_key(|t| t.name_range.start);
+        // Tags references, and the names markers take from the reference
+        // patterns (`Marker::consumes_name`): an exported name, an
+        // implemented or receiver type, an attribute write.
         ref_ranges.extend(
             tags.iter()
-                .filter(|t| t.class == TagClass::Ref)
+                .filter(|t| match t.class {
+                    TagClass::Ref => true,
+                    TagClass::Marker(marker) => marker.consumes_name(),
+                    TagClass::Def(_) => false,
+                })
                 .map(|t| t.name_range.clone()),
         );
         let lines = LineIndex::new(text);
@@ -337,11 +344,24 @@ impl ParsedFile {
         ref_ranges.dedup();
         local_refs.sort_by_key(|(r, _)| (r.start, r.end));
         local_refs.dedup_by(|b, a| a.0 == b.0);
-        // `(identifier) @local.reference` matches definition names too.
-        let named: std::collections::HashSet<(usize, usize)> = tags
+        let tag_defs: Vec<(usize, usize)> = tags
             .iter()
             .filter(|t| matches!(t.class, TagClass::Def(_)))
             .map(|t| (t.name_range.start, t.name_range.end))
+            .collect();
+        // A language pack's scopes are not classified (`rules::finish`).
+        let local_scopes = lang.lease().is_static().then(|| locals.local_scopes());
+        let finished = rules::finish(lang.dialect(), text, tags, local_scopes.as_deref());
+        // `(identifier) @local.reference` matches definition names too; a
+        // marker's name that became a definition (a Python field) is one.
+        let named: std::collections::HashSet<(usize, usize)> = tag_defs
+            .into_iter()
+            .chain(
+                finished
+                    .defs
+                    .iter()
+                    .map(|d| (d.name_range.start, d.name_range.end)),
+            )
             .chain(locals.defs().iter().map(|l| (l.range.start, l.range.end)))
             .collect();
         let refs = ref_ranges
@@ -353,9 +373,6 @@ impl ParsedFile {
                 end: r.end,
             })
             .collect();
-        // A language pack's scopes are not classified (`rules::finish`).
-        let local_scopes = lang.lease().is_static().then(|| locals.local_scopes());
-        let finished = rules::finish(lang.dialect(), text, tags, local_scopes.as_deref());
         // Checked once more before returning: the rules and the binding model
         // run after the last check above.
         if stop() {

@@ -413,7 +413,6 @@ fn finish_inner(
                 c = containers[c].parent?;
             }
         };
-        let mut extra_refs = Vec::new();
         for (marker, tag, name) in &markers {
             if *marker != Marker::Attribute {
                 continue;
@@ -435,7 +434,6 @@ fn finish_inner(
                 (object == *receiver && kind_of(class) == Some(DefKind::Class)).then_some(class)
             });
             let Some(class) = class else {
-                extra_refs.push(name.clone());
                 continue;
             };
             if !fields.insert((class, &**name)) {
@@ -460,11 +458,28 @@ fn finish_inner(
                 range: tag.range.clone(),
             });
         }
-        if !extra_refs.is_empty() {
-            refs.extend(extra_refs);
-            refs.sort_unstable();
-            refs.dedup();
-        }
+    }
+    // A marker that takes a name node from the reference patterns (an
+    // exported name, an implemented or receiver type, an attribute write)
+    // leaves the name a reference name, unless it became the definition at
+    // that position (`Marker::consumes_name`).
+    let def_names: HashSet<(usize, usize)> = out
+        .iter()
+        .map(|d| (d.name_range.start, d.name_range.end))
+        .collect();
+    let before = refs.len();
+    refs.extend(
+        markers
+            .iter()
+            .filter(|(marker, tag, _)| {
+                marker.consumes_name()
+                    && !def_names.contains(&(tag.name_range.start, tag.name_range.end))
+            })
+            .map(|(_, _, name)| name.clone()),
+    );
+    if refs.len() != before {
+        refs.sort_unstable();
+        refs.dedup();
     }
     out.sort_by_key(|d| (d.def.line, d.def.column, d.range.start));
     Finished { defs: out, refs }

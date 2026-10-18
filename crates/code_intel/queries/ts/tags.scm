@@ -122,6 +122,13 @@
   (ambient_declaration
     "global" @name) @reference.lectern.global)
 
+; `declare module 'm' { … }` (an ambient module, often augmenting another
+; package's types): its declarations are exported without `export`.
+(program
+  (ambient_declaration
+    (module
+      name: (string) @name)) @reference.lectern.global)
+
 ; Exported `const`, `let` and `var` in a namespace or module body
 ; (`namespace Config { export const version = 1 }`): members, used as
 ; `Config.version`. Unexported ones are locals of the body; destructuring

@@ -269,11 +269,16 @@ impl Rust {
         for _ in 0..2 {
             let parent = up(stack, level + 1)?;
             let p = parent.kind;
-            let wrapped = ((p == k.reference_type || p == k.pointer_type) && at.field == k.f_type)
-                || (p == k.array_type && at.field == k.f_element)
+            let sequence = (p == k.array_type && at.field == k.f_element)
                 || (p == k.tuple_type && parent.node.named_child(0) == Some(at.node));
+            let wrapped = ((p == k.reference_type || p == k.pointer_type) && at.field == k.f_type)
+                || sequence;
             if !wrapped {
                 break;
+            }
+            // `[u8]` and `(u8, u8)` are not `u8`.
+            if sequence && me.kind == k.primitive_type {
+                return None;
             }
             level += 1;
             at = *parent;

@@ -215,6 +215,17 @@ impl Walker for Ecma {
             // (program (ambient_declaration "global" @name))
             //   @reference.lectern.global
             self.tokens(cx, me.node, ts.t_global, Marker::Global);
+            // (program (ambient_declaration (module name: (string) @name)))
+            //   @reference.lectern.global
+            let mut cursor = me.node.walk();
+            for child in me.node.named_children(&mut cursor) {
+                if child.kind_id() == ts.module
+                    && let Some(name) = child.child_by_field_id(k.f_name)
+                    && name.kind_id() == k.string
+                {
+                    cx.marker(name, me.node, Marker::Global);
+                }
+            }
         }
         // (with_statement body: (_) @local.scope): a second scope on a
         // block body, which changes nothing for tree-sitter-tags.

@@ -164,13 +164,24 @@
     .
     (identifier) @name)) @reference.lectern.receiver
 
-; An assignment to an attribute (`self.name = name`, also in a chain): a
-; field of the class when the object is the receiver of the method around
-; it (`rules::finish`), a member reference otherwise.
+; An assignment to an attribute (`self.name = name`, also in a chain and
+; unpacked: `self.a, self.b = 1, 2`): a field of the class when the object
+; is the receiver of the method around it (`rules::finish`), a member
+; reference otherwise; the marker's node is the attribute.
 (assignment
-  left: (attribute
-    object: (identifier)
-    attribute: (identifier) @name)) @reference.lectern.attribute
+  left: [
+    (attribute
+      object: (identifier)
+      attribute: (identifier) @name) @reference.lectern.attribute
+    (pattern_list
+      (attribute
+        object: (identifier)
+        attribute: (identifier) @name) @reference.lectern.attribute)
+    (tuple_pattern
+      (attribute
+        object: (identifier)
+        attribute: (identifier) @name) @reference.lectern.attribute)
+  ])
 
 ; ---- references --------------------------------------------------------
 

@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 use lectern_executor::Executor;
 
 use crate::extract::{Deadline, ExtractStatus, Extraction, LanguageTable, Visibility, extract};
-use crate::lang::{Dialect, EXTRACTOR_VERSION, query_version, query_version_with};
+use crate::lang::{Dialect, EXTRACTOR_VERSION, Marker, query_version, query_version_with};
 use crate::rules::count_params;
 use crate::testing::{FIXTURES, ManualClock, watchdog};
 use crate::{DefKind, SystemClock, Watchdog};
@@ -444,6 +444,20 @@ const EXPORT_FORMS: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "ts",
+        "declare module 'm' (augmentation)",
+        "import m from 'm';\ndeclare module 'express-serve-static-core' { interface Request { user?: string } }\n",
+        "import m from 'm';\ninterface Request { user?: string }\n",
+        "Request",
+    ),
+    (
+        "ts",
+        "declare module 'm' (a member)",
+        "import m from 'm';\ndeclare module 'express-serve-static-core' { interface Request { user?: string } }\n",
+        "import m from 'm';\ninterface Request { user?: string }\n",
+        "user",
+    ),
+    (
+        "ts",
         "declare global",
         "import m from 'm';\ndeclare global { interface Window { app: number } }\n",
         "import m from 'm';\ninterface Window { app: number }\n",
@@ -481,6 +495,168 @@ fn extract_export_forms_change_visibility() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// (marker, language, source, the marker's name: an occurrence): a sample
+/// of each marker kind.
+const MARKER_SAMPLES: &[(Marker, &str, &str, (&str, usize))] = &[
+    (
+        Marker::Export,
+        "js",
+        "export function run() {}\n",
+        ("export", 0),
+    ),
+    (
+        Marker::ExportName,
+        "js",
+        "function run() {}\nexport { run };\n",
+        ("run", 1),
+    ),
+    (
+        Marker::ExportName,
+        "js",
+        "function run() {}\nexport default run;\n",
+        ("run", 1),
+    ),
+    (
+        Marker::ExportName,
+        "ts",
+        "export { UserService } from './user-service';\n",
+        ("UserService", 0),
+    ),
+    (
+        Marker::ExportName,
+        "ts",
+        "function run() {}\nexport = run;\n",
+        ("run", 1),
+    ),
+    (Marker::Module, "js", "import x from 'm';\n", ("import", 0)),
+    (
+        Marker::Global,
+        "ts",
+        "declare global { interface Window {} }\n",
+        ("global", 0),
+    ),
+    (Marker::Pub, "rust", "pub fn run() {}\n", ("pub", 0)),
+    (
+        Marker::Impl,
+        "rust",
+        "struct Store;\nimpl Store { fn get(&self) {} }\n",
+        ("Store", 1),
+    ),
+    (
+        Marker::Impl,
+        "rust",
+        "impl Display for Point { fn fmt(&self) {} }\n",
+        ("Point", 0),
+    ),
+    (
+        Marker::ImplTrait,
+        "rust",
+        "impl Display for Point { fn fmt(&self) {} }\n",
+        ("for", 0),
+    ),
+    (
+        Marker::Private,
+        "java",
+        "class A { private int n; }\n",
+        ("private", 0),
+    ),
+    (
+        Marker::Owner,
+        "go",
+        "package p\n\nfunc (s *Server) Start() {}\n",
+        ("Server", 0),
+    ),
+    (
+        Marker::Receiver,
+        "python",
+        "class A:\n    def run(self):\n        return self\n",
+        ("self", 0),
+    ),
+    (
+        Marker::Attribute,
+        "python",
+        "class A:\n    def __init__(self):\n        self.count = 0\n    def inc(self, o):\n        self.count = self.count + 1\n        o.count = 2\n",
+        ("count", 0),
+    ),
+    (
+        Marker::Attribute,
+        "python",
+        "class A:\n    def __init__(self):\n        self.count = 0\n    def inc(self, o):\n        self.count = self.count + 1\n        o.count = 2\n",
+        ("count", 1),
+    ),
+    (
+        Marker::Attribute,
+        "python",
+        "class A:\n    def __init__(self):\n        self.count = 0\n    def inc(self, o):\n        self.count = self.count + 1\n        o.count = 2\n",
+        ("count", 3),
+    ),
+];
+
+#[test]
+fn extract_markers_keep_their_names() {
+    // A marker that takes a name node from the reference patterns never
+    // removes the name as a reference: the name is a reference name on both
+    // extraction paths and a reference position in `ParsedFile`, unless it
+    // is the definition at that position. Keyword markers (`export`, `for`)
+    // add no reference name. Every marker kind has a sample.
+    let table = LanguageTable::core();
+    let watchdog = test_watchdog();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut failures = Vec::new();
+    for (marker, lang, source, (needle, nth)) in MARKER_SAMPLES {
+        let l = table.get(lang).unwrap();
+        let deadline = Deadline::interactive(&watchdog);
+        let walked = extract(l, source.as_bytes(), &deadline, &cancel);
+        let tagged = crate::extract::extract_tags(l, source.as_bytes(), &deadline, &cancel);
+        if walked != tagged {
+            failures.push(format!("{marker:?} {lang}: walker and tags differ"));
+        }
+        let at = super::site::pos(source, needle, *nth, 0);
+        let file = super::site::parse(lang, source);
+        let is_def = file.site_at(at).is_some_and(|s| s.defines.is_some());
+        let in_refs = walked.refs.iter().any(|r| &**r == *needle);
+        if marker.consumes_name() {
+            if !in_refs && !is_def {
+                failures.push(format!("{marker:?} {lang}: {needle} is no reference name"));
+            }
+            let start = source.match_indices(needle).nth(*nth).unwrap().0;
+            if !is_def && !file.references().iter().any(|r| r.start == start) {
+                failures.push(format!(
+                    "{marker:?} {lang}: {needle} #{nth} is no reference position"
+                ));
+            }
+        } else if *marker == Marker::Receiver {
+            if !is_def {
+                failures.push(format!("{marker:?} {lang}: {needle} is no defining site"));
+            }
+        } else if in_refs {
+            failures.push(format!(
+                "{marker:?} {lang}: the keyword {needle} became a reference name"
+            ));
+        }
+    }
+    watchdog.stop();
+    let kinds = [
+        Marker::Export,
+        Marker::ExportName,
+        Marker::Module,
+        Marker::Global,
+        Marker::Pub,
+        Marker::Impl,
+        Marker::ImplTrait,
+        Marker::Private,
+        Marker::Owner,
+        Marker::Receiver,
+        Marker::Attribute,
+    ];
+    for kind in kinds {
+        if !MARKER_SAMPLES.iter().any(|s| s.0 == kind) {
+            failures.push(format!("{kind:?}: no sample"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn extract_python_module_level_and_attributes() {
     // Module level is no function or class scope around: assignments under
@@ -491,7 +667,7 @@ fn extract_python_module_level_and_attributes() {
     let source = "import os\nif os.name == 'nt':\n    SEP = 'a'\nelse:\n    SEP = 'b'\ntry:\n    FAST = True\nexcept ImportError:\n    FAST = None\n\
                   with open('x') as fh:\n    DATA = fh.read()\nfor item in []:\n    LAST = item\nA = B = None\n\
                   def f():\n    local = 1\n    return local\n\
-                  class Config:\n    size = 1\n    if True:\n        hidden = 2\n    def __init__(self, name):\n        self.name = name\n        self.size = 3\n        other.attr = 1\n\
+                  class Config:\n    size = 1\n    if True:\n        hidden = 2\n    def __init__(self, name):\n        self.name = name\n        self.size = 3\n        other.attr = 1\n        self.left, self.right = 1, 2\n\
                   \x20   def reset(this):\n        this.count = 0\n        def inner():\n            this.nested = 1\n        inner()\n\
                   def free(obj):\n    obj.x = 1\n";
     let table = LanguageTable::core();
@@ -524,7 +700,7 @@ fn extract_python_module_level_and_attributes() {
     for name in ["local", "hidden", "attr", "x"] {
         assert!(find(name).is_empty(), "{name}: {:?}", find(name));
     }
-    for name in ["size", "name", "count", "nested"] {
+    for name in ["size", "name", "count", "nested", "left", "right"] {
         let defs = find(name);
         assert_eq!(defs.len(), 1, "{name}: {defs:?}");
         assert_eq!(defs[0].kind, DefKind::Field, "{name}");
@@ -555,7 +731,10 @@ fn extract_rust_impl_self_types() {
                   impl Display for std::path::PathBuf { fn i(&self) {} }\n\
                   impl Display for fn() { fn j(&self) {} }\n\
                   impl Point { fn k(&self) {} }\n\
-                  impl Grid<u8> { pub fn l(&self) {} }\n";
+                  impl Grid<u8> { pub fn l(&self) {} }\n\
+                  impl Display for [u8] { fn m(&self) {} }\n\
+                  impl Display for (u8, u8) { fn n(&self) {} }\n\
+                  impl Display for &u8 { fn o(&self) {} }\n";
     let want: &[(&str, Option<&str>, Visibility)] = &[
         ("a", Some("Point"), Visibility::Public),
         ("b", Some("Grid"), Visibility::Public),
@@ -569,6 +748,9 @@ fn extract_rust_impl_self_types() {
         ("j", None, Visibility::Public),
         ("k", Some("Point"), Visibility::Module),
         ("l", Some("Grid"), Visibility::Public),
+        ("m", None, Visibility::Public),
+        ("n", None, Visibility::Public),
+        ("o", Some("u8"), Visibility::Public),
     ];
     let table = LanguageTable::core();
     let watchdog = test_watchdog();
