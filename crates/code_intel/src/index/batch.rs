@@ -21,7 +21,7 @@ use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{BlobId, ProjectKey, RelPath};
 
 use super::host::yield_now;
-use super::state::{Cursor, Item, OtherTree, Project, Source, State, Tier, Walk, under};
+use super::state::{Cursor, Item, OtherTree, Project, Scope, Source, State, Tier, Walk, under};
 use super::{Inner, bump, lock};
 use crate::extract::{
     BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction, INTERACTIVE_MAX_LEN, Lang,
@@ -184,16 +184,17 @@ impl Inner {
             return;
         }
         bump(&self.stats.cursor_builds, 1);
-        let dir = subproject(st);
+        let scope = subproject(st);
         let files = st.map.base.files().clone();
-        let range = match &dir {
-            Some(dir) => files.range_under(dir),
-            None => 0..files.len(),
+        let range = match &scope {
+            Scope::Dir(dir) => files.range_under(dir),
+            Scope::Whole => 0..files.len(),
+            Scope::Empty => 0..0,
         };
         st.batch.cursor = Some(Cursor {
             deps,
             map: st.map.clone(),
-            dir,
+            scope,
             range,
             walks: [Walk::default(); 2],
         });
@@ -882,14 +883,21 @@ fn cursor_hinted(map: &crate::map::LiveMap, eff: &crate::map::Effective, stamp: 
     map.hints.matches(&eff.slot, &eff.oid, stamp)
 }
 
-/// Tier 3's directory: the deepest sub-project containing the current text,
-/// else the review set's first file, else the path the project was opened
-/// at. None (the whole worktree) without sub-projects.
-fn subproject(st: &State) -> Option<RelPath> {
-    let snapshot = st.snapshot.as_ref()?;
-    let active = snapshot.active.as_ref()?;
-    let packages = st.seen.packages.as_ref()?;
+/// Tier 3: the deepest sub-project containing the current text, else the
+/// review set's first file, else the path the project was opened at (when
+/// not its root). The whole worktree without sub-projects; empty when no
+/// sub-project contains the anchor or there is none.
+fn subproject(st: &State) -> Scope {
+    let Some(packages) = st.seen.packages.as_ref().filter(|p| !p.is_empty()) else {
+        return Scope::Whole;
+    };
     let wt = st.worktree();
+    let opened = st
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.active.as_ref())
+        .map(|a| a.opened_at.clone())
+        .filter(|p| !p.is_empty());
     let anchor = st
         .focus
         .current
@@ -903,10 +911,17 @@ fn subproject(st: &State) -> Option<RelPath> {
                 .filter(|(w, _)| w.as_ref() == wt)
                 .and_then(|(_, p)| p.first().cloned())
         })
-        .unwrap_or_else(|| active.opened_at.clone());
-    let best = packages
+        .or(opened);
+    let Some(anchor) = anchor else {
+        return Scope::Empty;
+    };
+    match packages
         .iter()
         .filter(|p| under(&anchor, &p.dir))
-        .max_by_key(|p| p.dir.len())?;
-    (!best.dir.is_empty()).then(|| best.dir.clone())
+        .max_by_key(|p| p.dir.len())
+    {
+        Some(p) if p.dir.is_empty() => Scope::Whole,
+        Some(p) => Scope::Dir(p.dir.clone()),
+        None => Scope::Empty,
+    }
 }

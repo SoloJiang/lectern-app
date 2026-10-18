@@ -306,8 +306,12 @@ impl Harness {
         })));
     }
 
+    /// Whether the kernel is quiescent once its thread has handled what is
+    /// queued (event dispatches count as busy while they run).
     pub(crate) fn quiescent(&self) -> bool {
-        self.host.kernel().is_quiescent()
+        let kernel = self.host.kernel();
+        kernel.barrier();
+        kernel.is_quiescent()
     }
 }
 

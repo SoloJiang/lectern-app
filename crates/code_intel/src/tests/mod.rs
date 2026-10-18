@@ -1,7 +1,11 @@
+mod battery;
 mod binding;
 mod deadline;
+mod derived;
 mod extract;
 mod forms;
+mod grammar_changes;
+mod incremental;
 mod lang;
 mod map;
 mod overlay;

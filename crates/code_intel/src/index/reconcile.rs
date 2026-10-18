@@ -386,6 +386,15 @@ impl Inner {
         let mut read = 0;
         for path in &paths {
             if lookup.code(path) == 0 {
+                // A new directory (its files came with it) asks for a
+                // comparison; other paths without a language are skipped.
+                let unknown = find_path(base.files(), path).is_none();
+                if unknown
+                    && let Some(rel) = SafeRel::new(path.as_bytes())
+                    && root.stat(rel).is_ok_and(|m| m.kind == SafeKind::Dir)
+                {
+                    saw_dir = true;
+                }
                 continue;
             }
             read += 1;

@@ -309,9 +309,7 @@ impl Indexer {
     /// OID, and the last comparison saw the current HEAD, index and file
     /// list. Otherwise false, until the reconcile compares again.
     pub fn head_clean(&self, project: &ProjectKey, path: &str) -> bool {
-        self.inner
-            .project(project)
-            .is_some_and(|p| reconcile::head_clean(&lock(&p.state), path))
+        self.inner.head_clean(project, path)
     }
 
     /// The project's store, for queries and tests.
@@ -345,6 +343,36 @@ impl Indexer {
         &self.inner
     }
 
+    /// Tier 3's scope in the current cursor ("whole", "empty" or the
+    /// directory), for tests.
+    #[cfg(test)]
+    pub(crate) fn cursor_scope(&self, project: &ProjectKey) -> Option<String> {
+        let p = self.inner.project(project)?;
+        let st = lock(&p.state);
+        let cursor = st.batch.cursor.as_ref()?;
+        Some(match &cursor.scope {
+            state::Scope::Whole => "whole".into(),
+            state::Scope::Empty => "empty".into(),
+            state::Scope::Dir(d) => d.to_string(),
+        })
+    }
+
+    /// Bumps one input generation and requests a reconcile, as an event
+    /// would (tests that change an input while a reconcile computes).
+    #[cfg(test)]
+    pub(crate) fn bump(&self, project: &ProjectKey, f: impl FnOnce(&mut state::Gens)) {
+        self.inner.bump(project, f);
+    }
+
+    /// Whether the last comparison is current, for tests.
+    #[cfg(test)]
+    pub(crate) fn compared_current(&self, project: &ProjectKey) -> bool {
+        self.inner.project(project).is_some_and(|p| {
+            let st = lock(&p.state);
+            st.compare_for == Some(st.gens.compare_deps())
+        })
+    }
+
     /// Ends every project's session: tasks stop, extractions in flight are
     /// cancelled, subscriptions to fs_watch dropped.
     pub fn close_all(&self) {
@@ -368,6 +396,22 @@ impl Inner {
 
     pub(crate) fn project(&self, key: &ProjectKey) -> Option<Arc<Project>> {
         lock(&self.open).iter().find(|p| &p.key == key).cloned()
+    }
+
+    pub(crate) fn head_clean(&self, key: &ProjectKey, path: &str) -> bool {
+        self.project(key)
+            .is_some_and(|p| reconcile::head_clean(&lock(&p.state), path))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bump(&self, key: &ProjectKey, f: impl FnOnce(&mut state::Gens)) {
+        let Some(p) = self.project(key) else {
+            return;
+        };
+        f(&mut lock(&p.state).gens);
+        if let Some(me) = self.arc() {
+            me.request_reconcile(&p);
+        }
     }
 
     fn new_session(&self) -> u64 {
@@ -530,11 +574,14 @@ impl Inner {
     /// One grammar round (「语言包的变化」): reads the packs' current state,
     /// compares it with the table and updates the table; the language
     /// generation then makes the map, the hints and the cursors follow.
-    fn grammar_round(self: Arc<Self>) {
+    pub(crate) fn grammar_round(self: Arc<Self>) {
         loop {
             bump(&self.stats.grammar_rounds, 1);
             let (asked, mut table, handled) = {
                 let mut rounds = lock(&self.rounds);
+                // This round reads the current state: notifications so far
+                // are merged into it.
+                rounds.again = false;
                 let asked = std::mem::take(&mut rounds.langs);
                 let langs = lock(&self.langs);
                 (asked, langs.table.clone(), langs.handled)

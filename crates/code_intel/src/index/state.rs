@@ -161,20 +161,31 @@ pub(crate) struct Walk {
 pub(crate) struct Cursor {
     pub deps: CursorDeps,
     pub map: LiveMap,
-    /// The current sub-project's directory; None when tier 3 is the whole
-    /// worktree.
-    pub dir: Option<RelPath>,
-    /// Its range of the file list.
+    pub scope: Scope,
+    /// The scope's range of the file list.
     pub range: Range<usize>,
     pub walks: [Walk; 2],
+}
+
+/// What tier 3 covers.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Scope {
+    /// No sub-projects: the whole worktree.
+    Whole,
+    /// The current sub-project's directory.
+    Dir(RelPath),
+    /// Sub-projects, but none holds the current text (or there is none):
+    /// everything is tier 4.
+    Empty,
 }
 
 impl Cursor {
     /// Whether a path belongs to tier 3.
     pub fn in_subproject(&self, path: &str) -> bool {
-        match &self.dir {
-            None => true,
-            Some(dir) => under(path, dir),
+        match &self.scope {
+            Scope::Whole => true,
+            Scope::Dir(dir) => under(path, dir),
+            Scope::Empty => false,
         }
     }
 }
