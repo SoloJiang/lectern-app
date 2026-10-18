@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use lectern_executor::Priority;
 use lectern_git::HashKind;
 use lectern_platform::{FileKind as SafeKind, Read, RelPath as SafeRel, SafeError, SafeRoot};
-use lectern_services::project::{BlobId, ProjectKey, RelPath, Scan};
+use lectern_services::project::{BlobId, FileKind, ProjectKey, RelPath, Scan};
 
 use super::state::{Project, State};
 use super::{Inner, bump, lock};
@@ -259,6 +259,9 @@ impl Inner {
     /// Opens the worktree root and subscribes to fs_watch, once the file
     /// list is ready (「打开项目与热启动」1).
     fn open_root(self: &Arc<Self>, project: &Arc<Project>, session: u64) -> bool {
+        if matches!(project.key, ProjectKey::Folder { .. }) {
+            return self.open_folder(project, session);
+        }
         let tree = {
             let mut st = lock(&project.state);
             if st.root.is_some() || st.root_tried || st.seen.files.is_none() {
@@ -288,6 +291,45 @@ impl Inner {
         st.watches = watches;
         // Whatever happened before the subscription: compare once more.
         st.gens.compare += 1;
+        true
+    }
+
+    /// A folder project (「blob → 路径映射」, the last point): no index, no
+    /// fs_watch, no comparison. Its root is opened once the file list is
+    /// ready, and every file of the list is read: its raw bytes' SHA-1 is
+    /// its OID, an overlay entry like an untracked file's. A new file list
+    /// is read again in full (`rebuild_base`); `project` does not watch
+    /// folders, so nothing changes in between.
+    fn open_folder(&self, project: &Arc<Project>, session: u64) -> bool {
+        let path = {
+            let mut st = lock(&project.state);
+            if st.root.is_some() || st.root_tried || st.seen.files.is_none() {
+                return false;
+            }
+            let Some(path) = st
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.active.as_ref())
+                .map(|a| a.root.clone())
+            else {
+                return false;
+            };
+            st.root_tried = true;
+            path
+        };
+        let root = match SafeRoot::open(&path) {
+            Ok(root) => Arc::new(root),
+            Err(error) => {
+                log(format_args!("cannot open {}: {error}", path.display()));
+                return false;
+            }
+        };
+        let mut st = lock(&project.state);
+        if st.session != session {
+            return false;
+        }
+        st.root = Some(root);
+        queue_folder(&mut st);
         true
     }
 
@@ -379,6 +421,10 @@ impl Inner {
             },
         };
         st.base_for = Some(deps);
+        if matches!(project.key, ProjectKey::Folder { .. }) {
+            // A new list: every file is read again for its OID.
+            queue_folder(&mut st);
+        }
         true
     }
 
@@ -597,6 +643,23 @@ impl Inner {
                 log(format_args!("converting {path} failed: {error}"));
                 WorktreeState::Content(raw)
             }
+        }
+    }
+}
+
+/// Every file of a folder project's list goes to the paths to read, once
+/// its root is open: a folder's OIDs come from its bytes (the base part is
+/// empty, every file an overlay entry).
+fn queue_folder(st: &mut State) {
+    if st.root.is_none() {
+        return;
+    }
+    let Some(files) = st.seen.files.clone() else {
+        return;
+    };
+    for (path, kind) in files.iter() {
+        if matches!(kind, FileKind::File | FileKind::Executable) {
+            st.dirty.insert(path.into());
         }
     }
 }
