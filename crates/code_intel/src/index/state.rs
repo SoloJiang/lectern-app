@@ -228,6 +228,9 @@ pub(crate) struct Batch {
     pub active: [usize; 3],
     pub touches: PendingTouches,
     pub others: Others,
+    /// Set once this session's own write evicted units (the namespace is
+    /// at its quota): the eviction generation the walks keep using.
+    pub full: Option<u64>,
 }
 
 /// Tiers 1 and 2: explicit small queues on the worker threads.
@@ -236,6 +239,9 @@ pub(crate) struct Focused {
     pub queue: [VecDeque<Item>; 2],
     /// Tasks running: tier 1 at most one, tier 2 at most two.
     pub running: [usize; 2],
+    /// Object-database texts (`TextOrigin::Object`) handled this session:
+    /// no path's hint records them.
+    pub objects: HashSet<(BlobId, LangName)>,
 }
 
 /// The last focus of each kind, with the worktree its paths are in.
@@ -351,14 +357,36 @@ impl State {
             .and_then(|a| a.worktree.as_ref())
     }
 
+    /// The eviction generation the batch tiers' walks depend on: the
+    /// store's, unless the namespace is full (`Batch::full`).
+    pub fn walk_eviction(&self, eviction: u64) -> u64 {
+        self.batch.full.unwrap_or(eviction)
+    }
+
     pub fn cursor_deps(&self, eviction: u64) -> CursorDeps {
         CursorDeps {
             session: self.session,
             map: self.gens.map(),
             packages: self.gens.packages,
-            eviction,
+            eviction: self.walk_eviction(eviction),
             grammar: self.gens.grammar,
             focus: self.gens.focus,
         }
+    }
+
+    /// Ends an item of this session: no longer in flight or queued.
+    /// False (and nothing changed) when the item belongs to an older
+    /// session.
+    pub fn finish(&mut self, session: u64, item: &Item) -> bool {
+        if self.session != session {
+            return false;
+        }
+        let key = item.key();
+        self.in_flight.remove(&key);
+        self.batch.queued.remove(&key);
+        if let Some(t) = item.tier.batch() {
+            self.batch.active[t] = self.batch.active[t].saturating_sub(1);
+        }
+        true
     }
 }

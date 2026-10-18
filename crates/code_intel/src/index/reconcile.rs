@@ -71,7 +71,7 @@ impl Inner {
         }
     }
 
-    fn reconcile(self: Arc<Self>, project: Arc<Project>) {
+    pub(super) fn reconcile(self: Arc<Self>, project: Arc<Project>) {
         bump(&self.stats.reconciles, 1);
         let mut held = Vec::new();
         loop {

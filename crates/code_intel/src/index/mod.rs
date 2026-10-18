@@ -169,6 +169,9 @@ pub(crate) struct Inner {
     /// The files of each extraction batch of tiers 3–5, in order (tests).
     #[cfg(test)]
     pub batch_log: Mutex<Vec<usize>>,
+    /// Another registration of `code_intel.tags` for new projects (tests).
+    #[cfg(test)]
+    pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -222,6 +225,8 @@ impl Indexer {
             next_session: AtomicUsize::new(1),
             #[cfg(test)]
             batch_log: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            tables: Mutex::new(None),
         });
         Indexer { inner }
     }
@@ -409,6 +414,30 @@ impl Inner {
         }
     }
 
+    #[cfg(not(test))]
+    fn store_for(&self, partition: &lectern_cache::Partition) -> Store {
+        Store::new(partition)
+    }
+
+    /// Tests may register `code_intel.tags` with a smaller quota.
+    #[cfg(test)]
+    fn store_for(&self, partition: &lectern_cache::Partition) -> Store {
+        match *lock(&self.tables) {
+            Some(tables) => Store::with_tables(partition, tables),
+            None => Store::new(partition),
+        }
+    }
+
+    /// Runs a reconcile of the project on this thread now (tests that
+    /// change the session while an extraction is in flight).
+    #[cfg(test)]
+    pub(crate) fn reconcile_now(self: &Arc<Self>, key: &ProjectKey) {
+        if let Some(p) = self.project(key) {
+            lock(&p.state).run.running = true;
+            self.clone().reconcile(p);
+        }
+    }
+
     fn new_session(&self) -> u64 {
         self.next_session.fetch_add(1, Ordering::AcqRel) as u64
     }
@@ -430,7 +459,7 @@ impl Inner {
                     };
                     let p = Arc::new(Project {
                         key: key.clone(),
-                        store: Store::new(&partition),
+                        store: self.store_for(&partition),
                         state: Mutex::new(State::new(self.new_session(), &table, grammar)),
                     });
                     open.push(p.clone());
@@ -701,7 +730,7 @@ impl Inner {
                     .filter(|w| !w.prunable && Some(&w.key) != active)
                     .all(|w| o.done.contains(&w.key))
             });
-            let deps = Some((st.session, eviction, st.gens.grammar));
+            let deps = Some((st.session, st.walk_eviction(eviction), st.gens.grammar));
             if o.deps == deps && all_done && o.current.is_none() && st.batch.resume[2].is_empty()
                 && st.batch.active[2] == 0
             {

@@ -297,7 +297,7 @@ impl Inner {
         loop {
             let next = {
                 let mut st = lock(&project.state);
-                let deps = Some((st.session, eviction, st.gens.grammar));
+                let deps = Some((st.session, st.walk_eviction(eviction), st.gens.grammar));
                 if st.batch.others.deps != deps {
                     st.batch.others = super::state::Others {
                         deps,
@@ -481,9 +481,9 @@ impl Inner {
                 }
                 Outcome::Paused => {
                     let mut st = lock(&project.state);
-                    st.in_flight.remove(&item.key());
-                    st.batch.active[t] -= 1;
-                    if st.session == ctx.session {
+                    if st.finish(ctx.session, &item) {
+                        // Still queued: back to the front.
+                        st.batch.queued.insert(item.key());
                         st.batch.resume[t].push_front(item);
                     }
                     break;
@@ -518,15 +518,7 @@ impl Inner {
 
     /// Forgets an item that gave nothing to write.
     fn release(&self, project: &Arc<Project>, ctx: &Ctx, item: &Item) {
-        let mut st = lock(&project.state);
-        let key = item.key();
-        st.in_flight.remove(&key);
-        if st.session == ctx.session {
-            st.batch.queued.remove(&key);
-        }
-        if let Some(t) = item.tier.batch() {
-            st.batch.active[t] -= 1;
-        }
+        lock(&project.state).finish(ctx.session, item);
     }
 
     /// Reads and extracts one item. The key is the OID of the bytes read:
@@ -676,11 +668,25 @@ impl Inner {
             }
         }
         let committed = !write.is_empty() && matches!(write.commit(), Written::Committed);
+        let after = project.store.evictions();
         let mut st = lock(&project.state);
         if st.session == ctx.session && committed {
             st.gens.writes += 1;
+            if after != eviction && st.batch.full.is_none() {
+                // Our own write evicted units: the namespace is at its quota.
+                // From now on an eviction does not restart the batch tiers'
+                // walks, or they would extract what they evicted and evict
+                // again; each file is extracted at most once per walk.
+                let walked = st.batch.cursor.as_ref().map_or(eviction, |c| c.deps.eviction);
+                st.batch.full = Some(walked);
+            }
             if st.gens.grammar == grammar {
-                let stamp = HintStamp { eviction, grammar };
+                // The units just written are the newest: they outlive the
+                // eviction they caused.
+                let stamp = HintStamp {
+                    eviction: after,
+                    grammar,
+                };
                 for (key, lang) in &written {
                     for eff in st.map.paths(key, &lang.0) {
                         st.map.hints.set(&eff.slot, key, stamp);
@@ -689,14 +695,7 @@ impl Inner {
             }
         }
         for d in &done {
-            let key = d.item.key();
-            st.in_flight.remove(&key);
-            if st.session == ctx.session {
-                st.batch.queued.remove(&key);
-            }
-            if let Some(t) = d.item.tier.batch() {
-                st.batch.active[t] -= 1;
-            }
+            st.finish(ctx.session, &d.item);
         }
     }
 
@@ -732,7 +731,12 @@ impl Inner {
                     let table = map.base.table().clone();
                     let mut lookup = LangLookup::new(&table, &*self.packs);
                     let code = lookup.code(&text.path);
-                    if let Some(lang) = map.base.lang_of_code(code) {
+                    if let Some(lang) = map.base.lang_of_code(code)
+                        && !st
+                            .focused
+                            .objects
+                            .contains(&(text.oid, lang.name().clone()))
+                    {
                         wanted[0].push(Item {
                             path: text.path.clone(),
                             oid: text.oid,
@@ -801,7 +805,10 @@ impl Inner {
                     .host
                     .spawn_busy(name, priority, move || me.focus_task(&p, t, session))
                 {
-                    lock(&project.state).focused.running[t] -= 1;
+                    let mut st = lock(&project.state);
+                    if st.session == session {
+                        st.focused.running[t] -= 1;
+                    }
                     break;
                 }
             }
@@ -813,12 +820,11 @@ impl Inner {
         loop {
             let (item, ctx, flag) = {
                 let mut st = lock(&project.state);
-                let item = if st.session == session {
-                    st.focused.queue[t].pop_front()
-                } else {
-                    None
-                };
-                let Some(item) = item else {
+                if st.session != session {
+                    // A new session counts its own tasks.
+                    return;
+                }
+                let Some(item) = st.focused.queue[t].pop_front() else {
                     st.focused.running[t] -= 1;
                     return;
                 };
@@ -837,8 +843,10 @@ impl Inner {
             let found = project.store.exists(&version, &[item.oid]).unwrap_or_default();
             if !found.is_empty() {
                 let mut st = lock(&project.state);
-                st.in_flight.remove(&item.key());
-                if st.session == session {
+                if st.finish(session, &item) {
+                    if matches!(item.source, Source::Object) {
+                        st.focused.objects.insert(item.key());
+                    }
                     let stamp = HintStamp {
                         eviction,
                         grammar: st.gens.grammar,
@@ -855,10 +863,16 @@ impl Inner {
             } else {
                 Mode::Background
             };
+            if matches!(item.source, Source::Object) {
+                let mut st = lock(&project.state);
+                if st.session == session {
+                    st.focused.objects.insert(item.key());
+                }
+            }
             match self.extract_item(&ctx, &item, mode, None, &flag) {
                 Outcome::Done(d, _) => self.commit(project, &ctx, vec![d]),
                 Outcome::Paused | Outcome::Skip => {
-                    lock(&project.state).in_flight.remove(&item.key());
+                    lock(&project.state).finish(session, &item);
                 }
             }
         }

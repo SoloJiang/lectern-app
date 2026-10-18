@@ -378,3 +378,59 @@ fn schedule_tier5_extracts_only_missing_clean_files() {
     assert_eq!(h.extractions(), 3);
     assert_eq!(h.coverage().other_worktrees, TierState::Done);
 }
+
+/// `code_intel.tags` with a 24 KiB quota: indexing overflows it.
+static TINY: lectern_cache::Tables = lectern_cache::Tables {
+    namespace: crate::store::NAMESPACE,
+    schema: crate::store::SCHEMA,
+    statements: crate::store::STATEMENTS,
+    quota: 24 << 10,
+};
+
+#[test]
+fn schedule_over_the_quota_extracts_each_file_once() {
+    let h = Harness::new();
+    *h.indexer.inner().tables.lock().unwrap() = Some(&TINY);
+    fill(&h, 80);
+    h.open();
+    let store = h.indexer.store(&h.key()).expect("store");
+    assert!(store.evictions() > 0, "the quota was exceeded");
+    // The walk finishes: what its own writes evicted is not extracted again
+    // in this session (a query or the next open does it).
+    let mut extracted = h.extracted();
+    let n = extracted.len();
+    extracted.sort();
+    extracted.dedup();
+    assert_eq!(extracted.len(), n, "no file extracted twice");
+    assert_eq!(n, 80);
+    let c = h.coverage();
+    assert_eq!([c.subproject, c.worktree], [TierState::Done; 2]);
+}
+
+#[test]
+fn schedule_session_switch_during_an_extraction() {
+    let h = Harness::new();
+    fill(&h, 12);
+    h.git.add_worktree("feature");
+    h.git.add("feature", &[("f.ts", &ts("feature"))]);
+    let inner = h.indexer.inner().clone();
+    let projects = h.projects.clone();
+    let snapshot = h.git.snapshot(100, "feature", Vec::new());
+    let key = h.key();
+    let once = Arc::new(Mutex::new(Some(snapshot)));
+    h.set_hook(move |_, _| {
+        let next = once.lock().unwrap().take();
+        if let Some(snapshot) = next {
+            // The active worktree changes and the new session starts while
+            // this extraction (of the old session) runs.
+            projects.set(snapshot);
+            inner.reconcile_now(&key);
+        }
+    });
+    h.open();
+    // The old session's batch ended without touching the new session's
+    // counters; the new session indexed its worktree.
+    let c = h.coverage();
+    assert_eq!([c.focus, c.subproject, c.worktree], [TierState::Done; 3]);
+    assert!(h.hinted("f.ts"));
+}
