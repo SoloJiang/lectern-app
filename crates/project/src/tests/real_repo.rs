@@ -160,12 +160,37 @@ impl Real {
     }
 }
 
+/// The active file lists of both are equal, OIDs included, and every entry
+/// carries the index OID of its content in `files`.
+fn same_files(
+    real: &Real,
+    key: &ProjectKey,
+    fake: &Harness,
+    fake_key: &ProjectKey,
+    hash: HashKind,
+    files: Files,
+) {
+    let real_files = active_files(&real.model.snapshot(key).unwrap());
+    assert_eq!(real_files, active_files(&fake.snapshot(fake_key)));
+    assert_eq!(real_files.len(), files.len());
+    for (path, content, _) in files {
+        let staged = blob(hash, content);
+        assert_eq!(oid_of(&real_files, path), staged, "{path}");
+        assert_eq!(
+            staged.map(|o| o.as_bytes().len()),
+            Some(hash.byte_len()),
+            "{path}"
+        );
+    }
+}
+
 fn same_as_fake(hash: HashKind) {
     let real = real(hash);
     let key = real.open(&real.repo.root().join("apps/web"));
     let fake = fake(hash, &real.detached());
     let fake_key = fake.open(&fake.base().join("repo/apps/web")).unwrap();
     assert_eq!(real.render(&key), fake.render(&fake_key));
+    same_files(&real, &key, &fake, &fake_key, hash, MAIN);
 
     // Switching to the linked worktree.
     real.model
@@ -176,6 +201,7 @@ fn same_as_fake(hash: HashKind) {
         .set_active_worktree(&fake_key, &WorktreeKey(linked.as_path().into()));
     fake.host.run();
     assert_eq!(real.render(&key), fake.render(&fake_key));
+    same_files(&real, &key, &fake, &fake_key, hash, FEATURE);
 
     // `resolve_package` for the main worktree, now inactive.
     let main = WorktreeKey(real.repo.common_dir().into());
@@ -329,4 +355,38 @@ fn real_repo_refresh_matches_fake_git() {
     );
     assert_eq!(real.render(&key), fake.render(&fake_key));
     assert!(real.render(&key).contains("name=web-app"));
+
+    // Staging content only (the manifest above and a new README): the same
+    // paths, new OIDs. Both replace the file list with the same one.
+    let readme = b"# root, staged\n";
+    let staged: Vec<_> = files
+        .iter()
+        .map(|&(path, content, exec)| match path {
+            "README.md" => (path, &readme[..], exec),
+            "apps/web/package.json" => (path, &web[..], exec),
+            _ => (path, content, exec),
+        })
+        .collect();
+    let staged: &'static [_] = Vec::leak(staged);
+    let before = active_files(&real.model.snapshot(&key).unwrap());
+    write_real(&real.repo, real.repo.root(), real.repo.common_dir(), staged);
+    real_watch
+        .backend
+        .emit(real.repo.common_dir(), &[("index", changed)]);
+    real_watch.settle(&real.host);
+    fake.git.write(&fake_common, "README.md", readme);
+    fake.git.write(&fake_common, "apps/web/package.json", web);
+    fake_watch.backend.emit(&fake_common, &[("index", changed)]);
+    fake_watch.settle(&fake.host);
+    let real_events = render_events(&real.host.take_events(), real.repo.base());
+    assert_eq!(
+        real_events,
+        render_events(&fake.host.take_events(), fake.base())
+    );
+    assert!(real_events.contains("[files]"), "{real_events}");
+    assert_eq!(real.render(&key), fake.render(&fake_key));
+    let after = active_files(&real.model.snapshot(&key).unwrap());
+    assert!(before.iter().eq(after.iter()));
+    assert_eq!(after, active_files(&fake.snapshot(&fake_key)));
+    assert_eq!(oid_of(&after, "README.md"), blob(HashKind::Sha1, readme));
 }

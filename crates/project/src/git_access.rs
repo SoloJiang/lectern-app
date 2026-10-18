@@ -11,7 +11,7 @@ use lectern_fs_watch::{WorktreeName, WorktreeSource};
 use lectern_git::{
     EntryLimits, GitError, HashKind, HeadState, Mode, Oid, Repo, RepoPath, WorktreeFile, WorktreeId,
 };
-use lectern_services::project::{FileKind, FileList, Head};
+use lectern_services::project::{BlobId, FileKind, FileList, Head};
 
 pub(crate) trait GitAccess: Send + Sync {
     /// Discovers the repository at `path` and upwards, not above
@@ -41,7 +41,8 @@ pub(crate) trait GitAccess: Send + Sync {
 /// and the refreshes share one parsed index.
 pub(crate) trait TreeAccess: Send + Sync {
     /// The index's paths as a file list, with the index checksum (None
-    /// without an index file). Non-UTF-8 and invalid paths are counted in
+    /// without an index file). Every entry carries its blob OID from the
+    /// index (`FileList::oid`). Non-UTF-8 and invalid paths are counted in
     /// `FileList::skipped`.
     fn index_files(&self, cancel: &AtomicBool) -> Result<IndexFiles, GitError>;
 
@@ -219,7 +220,7 @@ impl TreeAccess for lectern_git::Worktree {
                 }
             };
             match std::str::from_utf8(entry.path.as_bytes()) {
-                Ok(path) => files.push(path, kind),
+                Ok(path) => files.push_with_oid(path, kind, blob_id(&entry.oid)),
                 Err(_) => files.skip(),
             }
         }
@@ -263,6 +264,16 @@ pub(crate) fn worktree_name(common_dir: &Path, git_dir: &Path) -> Option<Worktre
     }
     let name = git_dir.file_name()?.to_str()?;
     Some(WorktreeName::Linked(name.into()))
+}
+
+/// `lectern-git`'s `Oid` as the `services` `BlobId` of a file list entry:
+/// the same bytes, 20 for SHA-1 and 32 for SHA-256.
+pub(crate) fn blob_id(oid: &Oid) -> BlobId {
+    let bytes = oid.as_bytes();
+    match oid.kind() {
+        HashKind::Sha1 => BlobId::Sha1(bytes.try_into().expect("a SHA-1 OID has 20 bytes")),
+        HashKind::Sha256 => BlobId::Sha256(bytes.try_into().expect("a SHA-256 OID has 32 bytes")),
+    }
 }
 
 fn head(state: &HeadState) -> Head {

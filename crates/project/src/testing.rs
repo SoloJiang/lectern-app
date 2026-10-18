@@ -8,6 +8,11 @@
 //! Each worktree has an `fs_watch::testing::FakeSource` kept in step with its
 //! index (`watch_source`), so a refresh test drives fs_watch's fake backend
 //! against the same tracked paths.
+//!
+//! Every index entry has a blob OID in the repository's hash algorithm: what
+//! was in the worktree when it was staged (`write`, `track`), as `git add`
+//! records it, so a file list from `FakeGit` carries the same OIDs as one
+//! from a real repository with the same content.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -20,7 +25,7 @@ use lectern_fs_watch::testing::FakeSource;
 use lectern_git::{GitError, HashKind, Oid};
 use lectern_services::project::{FileKind, FileList, Head};
 
-use crate::git_access::{Discovered, GitAccess, IndexFiles, TreeAccess, WorktreeInfo};
+use crate::git_access::{Discovered, GitAccess, IndexFiles, TreeAccess, WorktreeInfo, blob_id};
 
 /// One call `FakeGit` received.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -34,6 +39,9 @@ pub enum Call {
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
+
+/// Path → (kind, blob OID of the staged content).
+type Index = BTreeMap<String, (FileKind, Oid)>;
 
 pub struct FakeGit {
     _dir: tempfile::TempDir,
@@ -64,7 +72,9 @@ struct Tree {
     is_main: bool,
     head: Head,
     locked: bool,
-    index: BTreeMap<String, FileKind>,
+    /// The repository's hash algorithm, for the OIDs of staged content.
+    hash: HashKind,
+    index: Index,
     /// Bumped by `touch_index`: part of the checksum, not of the paths.
     stamp: u64,
     index_error: Option<String>,
@@ -72,13 +82,14 @@ struct Tree {
 }
 
 impl Tree {
-    fn new(git_dir: PathBuf, root: PathBuf, is_main: bool, head: Head) -> Tree {
+    fn new(git_dir: PathBuf, root: PathBuf, is_main: bool, head: Head, hash: HashKind) -> Tree {
         Tree {
             git_dir,
             root,
             is_main,
             head,
             locked: false,
+            hash,
             index: BTreeMap::new(),
             stamp: 0,
             index_error: None,
@@ -123,6 +134,7 @@ impl FakeGit {
                 root,
                 true,
                 Head::Branch("refs/heads/main".into()),
+                hash,
             )],
         });
         common_dir
@@ -160,6 +172,7 @@ impl FakeGit {
             root,
             false,
             Head::Branch(format!("refs/heads/{name}").into()),
+            repo.hash,
         ));
         git_dir
     }
@@ -205,10 +218,15 @@ impl FakeGit {
         self.track(git_dir, rel, FileKind::File);
     }
 
-    /// Adds an index entry without touching the worktree.
+    /// Adds an index entry without touching the worktree. Its OID is the
+    /// blob OID of what is in the worktree at `rel` now: a regular file's
+    /// content, a symbolic link's target, else empty content (a missing
+    /// file, a submodule directory).
     pub fn track(&self, git_dir: &Path, rel: &str, kind: FileKind) {
+        let staged = staged_bytes(&self.root(git_dir).join(rel));
         self.with_tree(git_dir, |t| {
-            t.index.insert(rel.to_owned(), kind);
+            let oid = Oid::for_blob(t.hash, &staged);
+            t.index.insert(rel.to_owned(), (kind, oid));
             match kind {
                 FileKind::Submodule => t.source.gitlink(&[rel]),
                 _ => t.source.track(&[rel]),
@@ -425,7 +443,7 @@ impl FakeTree {
     }
 
     /// The index now (with its stamp), or the error reading it fails with.
-    fn index(&self) -> Result<(BTreeMap<String, FileKind>, u64), GitError> {
+    fn index(&self) -> Result<(Index, u64), GitError> {
         let repos = lock(&self.inner.repos);
         let tree = repos
             .iter()
@@ -438,10 +456,10 @@ impl FakeTree {
         }
     }
 
-    fn checksum(&self, (index, stamp): &(BTreeMap<String, FileKind>, u64)) -> Oid {
+    fn checksum(&self, (index, stamp): &(Index, u64)) -> Oid {
         let mut text = format!("{stamp}\n");
-        for (path, kind) in index {
-            text.push_str(&format!("{kind:?} {path}\n"));
+        for (path, (kind, oid)) in index {
+            text.push_str(&format!("{kind:?} {} {path}\n", oid.to_hex()));
         }
         Oid::for_blob(self.hash, text.as_bytes())
     }
@@ -452,8 +470,8 @@ impl TreeAccess for FakeTree {
         self.record(Call::IndexFiles(self.git_dir.clone()));
         let index = self.index()?;
         let mut files = FileList::builder();
-        for (path, kind) in &index.0 {
-            files.push(path, *kind);
+        for (path, (kind, oid)) in &index.0 {
+            files.push_with_oid(path, *kind, blob_id(oid));
         }
         Ok(IndexFiles {
             checksum: Some(self.checksum(&index)),
@@ -499,6 +517,19 @@ impl TreeAccess for FakeTree {
 
     fn watch_source(&self) -> Arc<dyn WorktreeSource> {
         self.source.clone()
+    }
+}
+
+/// What `git add` would hash for `path`: a regular file's content, a
+/// symbolic link's target, else nothing.
+fn staged_bytes(path: &Path) -> Vec<u8> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => std::fs::read(path).unwrap(),
+        Ok(meta) if meta.is_symlink() => std::fs::read_link(path)
+            .unwrap()
+            .into_os_string()
+            .into_encoded_bytes(),
+        _ => Vec::new(),
     }
 }
 

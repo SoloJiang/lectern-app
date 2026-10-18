@@ -1,6 +1,6 @@
 # project 设计
 
-状态：实现中。第 1 步（清单解析与成员解析）、第 2 步（`services` 里的服务接口与数据类型）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）已实现，第 5 步尚未实现（见「验收」）。`services` 的 `BlobId` 与 `FileList::oid`（code_intel 前置条件 A，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）已实现。
+状态：实现中。第 1 步（清单解析与成员解析）、第 2 步（`services` 里的服务接口与数据类型）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）已实现，第 5 步尚未实现（见「验收」）。`services` 的 `BlobId` 与 `FileList::oid`（code_intel 前置条件 A，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）、git 项目的文件列表带 index 的 blob OID（code_intel 前置条件 B，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现。
 
 对应 issue [#9](https://github.com/SoloJiang/lectern-app/issues/9)。`project` 把用户打开的路径解析成项目模型：仓库 → worktree → 子项目（[ADR 0006](../adr/0006.md)、[技术调研「Monorepo 与多 worktree 支持」](tech-research.md#monorepo-与多-worktree-支持)），以不可变快照交给视图和其他插件，并通过 `KernelControl::workspace_changed` 提交 `WorkspaceFacts`，驱动 `Activation::Workspace` 的插件（[kernel「依赖与自动启停」](kernel.md#依赖与自动启停)）。
 
@@ -232,6 +232,7 @@ pub(crate) trait GitAccess: Send + Sync {
 /// `Send + Sync`：当前 worktree 的句柄随监听保留，在 executor 的不同任务之间共用。
 pub(crate) trait TreeAccess: Send + Sync {
     /// index 的路径直接建成 `FileList`（不是 UTF-8 的路径和 git 拒绝的路径记入 `skipped`），附 index 的校验和。
+    /// 每条带 index 记录的 blob OID（`TrackedEntry::oid` 转成 `BlobId`）。
     fn index_files(&self, cancel: &AtomicBool) -> Result<IndexFiles, GitError>;
     /// 只读 index 的校验和（文件末尾），判断 `resolve_package` 的缓存和刷新时的文件列表是否过期。
     fn index_checksum(&self) -> Result<Option<Oid>, GitError>;
@@ -440,7 +441,7 @@ impl FileListBuilder {
 
 - git 项目：来自 index，同一路径的多个合并阶段（冲突中）只收一条。index 里没有的文件（未跟踪的新文件）不在列表里。
 - 文件夹项目：从根目录遍历，不跟随符号链接；跳过以 `.` 开头的目录和 `node_modules`、`target`、`build`、`dist`、`out`、`vendor`、`venv`、`__pycache__`（以 `.` 开头的文件照常收入）；最多 20,000 个条目，超过时停止并标记 `truncated`。按名字的字节序深度优先遍历，上限截断的结果是确定的；条目指文件和符号链接，FIFO、socket、设备文件不收入，名字不是 UTF-8 的记入 `skipped`，读不出的子目录跳过。
-- blob OID：`code_intel` 的「blob → 路径」映射要用（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)），现有字段不变。git 项目从 index 建列表时用 `push_with_oid` 填入 `TrackedEntry::oid`；文件夹项目用 `push`，`oid` 都为 None。`project` 改为填入 OID 之前（code_intel「验收」前置条件 B），git 项目的 `oid` 也都为 None。
+- blob OID：`code_intel` 的「blob → 路径」映射要用（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)），现有字段不变。git 项目从 index 建列表时用 `push_with_oid` 填入 `TrackedEntry::oid`（`lectern_git::Oid` 到 `BlobId` 的转换在本 crate 的 `git_access`，字节不变，SHA-1 为 20 字节、SHA-256 为 32 字节）；文件夹项目用 `push`，`oid` 都为 None。OID 参与 `FileList` 的相等比较，所以刷新时只暂存了内容变化的 index 也会让文件列表换代（见「数据流与线程」）。
 - 序列化：`{ "entries": [[路径, 类型, OID], …], "skipped": n, "truncated": b }`，OID 是十六进制字符串，没有时为 null，不暴露内部的缓冲与偏移。反序列化经 `FileListBuilder`：来自其他进程的乱序、重复或不合法的路径按构造器的规则排序、去重、记入 `skipped`，偏移不会越界，查找不会 panic；OID 不是 40 或 64 位十六进制时整个列表反序列化失败。
 
 ### 子项目与清单
@@ -559,7 +560,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - 扫描循环先处理请求（打开、再次打开、切换 worktree），再刷新：完整扫描重读当前 worktree 的 index 和全部清单，所以取出请求时清掉当前 worktree 的脏标记，只留「重新列 worktree」。刷新途中有新请求或项目被关闭时放弃这一轮的结果，脏标记并回去。
 - 增量刷新按变化的内容决定做什么：
   - 只有普通文件的内容变了：什么都不做，不读 index 也不读文件（文件列表来自 index，内容变化不改变它）。
-  - `index` 变了：先读 index 校验和；与上一轮相同时跳过；变了就读 index 路径，路径与当前 `FileList` 相同（`git status` 这类只刷新 stat 信息的改写）时沿用原来的 `FileList`、不替换快照；路径变了就重建 `FileList` 和 facts，并重做成员解析。普通文件的增减也会改变 `Package.files` 和「显式路径的目录下有受跟踪文件」这类成员条件，所以只要 `FileList` 变了就重算。重算只读新出现的清单；已有清单沿用上一轮的结果，只有 fs_watch 报告变化的才重读；成员解析本身是内存里的计算。当前 worktree 为此记着上一轮读到的 index 校验和与每个清单的结果（`Arc<Parsed>` 与解析缓存共用，不另存一份）。
+  - `index` 变了：先读 index 校验和；与上一轮相同时跳过；变了就读 index 路径，路径、类型和 blob OID 都与当前 `FileList` 相同（`git status` 这类只刷新 stat 信息的改写）时沿用原来的 `FileList`、不替换快照；有任何一项变了（包括只暂存了内容、路径不变的 `git add`）就重建 `FileList` 和 facts，并重做成员解析。facts 持有文件列表，所以只有 OID 变化时也要重新提交，旧列表才能释放；成员解析的结果不变时子项目不替换，`ChangedParts` 只有 `files`。普通文件的增减也会改变 `Package.files` 和「显式路径的目录下有受跟踪文件」这类成员条件，所以只要 `FileList` 变了就重算。重算只读新出现的清单；已有清单沿用上一轮的结果，只有 fs_watch 报告变化的才重读；成员解析本身是内存里的计算。当前 worktree 为此记着上一轮读到的 index 校验和与每个清单的结果（`Arc<Parsed>` 与解析缓存共用，不另存一份）。
   - 清单文件变了（批次里有这个路径，或它的某个上级目录：目录被删除、改名时 fs_watch 可能只报告目录）：重读这个文件，重做成员解析；内容的 blob OID 没变时解析缓存命中，子项目不变就不替换快照。不读 index。
   - `rescan`（事件丢失，或一批的路径超过 10 000 个）：按 `index` 变了处理，并当作全部清单都变了。
   - 任一 worktree 的 `HEAD` 变了：重新列 worktree（`lectern-git` 读单个 worktree 的 HEAD 也要先打开那个 worktree，与列一次的代价相当），快照里通常只有 worktree 列表变化；当前 worktree 的 `index` 通常会一起变，按上一条处理。unborn 分支的第一次提交只写 `refs/heads/<分支>`、不写 `HEAD`，所以快照里有 unborn 分支时 `refs` 的变化也重新列。
@@ -588,9 +589,10 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 | `resolve_package`，非当前 worktree：缓存命中（读 index 校验和，加上约 25 个清单各一次 `lstat`）/ 未命中、清单缓存已热，`cloudprint` 形状 / 未命中，10 万文件 | < 1 ms / < 20 ms / < 150 ms | `project/resolve_package` |
 | `index` 变化后的刷新（重建文件列表与 facts、重算成员解析，清单缓存已热），`cloudprint` 形状 / 10 万文件 | < 15 ms / < 60 ms | `project/refresh_index` |
 | `contains`：文件名与 `*.ext` 模式 / 含 `/` 的模式（10 万文件，未缓存） | < 1 µs / < 5 ms | `project/facts_contains` |
-| 常驻内存：`cloudprint` 形状 / 10 万文件（含 16 个非当前 worktree 的子项目列表缓存） | < 2 MB / < 12 MB | 静止后按 kernel「性能」一节测插件内存 |
+| 常驻内存：`cloudprint` 形状 / 10 万文件（含 16 个非当前 worktree 的子项目列表缓存，文件列表带 blob OID） | < 2 MB / < 16 MB | 静止后按 kernel「性能」一节测插件内存 |
 
 - 对应[性能预算](tech-research.md#性能预算)的「打开项目到项目主页可用 < 100 ms」「切换 worktree / 分支 < 100 ms」和 ADR 0017 的「打开一个 monorepo 后空闲 < 100 MB」。主页在文件列表就绪后即可用，子项目稍后填入侧栏的 Packages。
+- 常驻内存里的 blob OID：当前 worktree 的文件列表每条按列表的哈希算法定长存 20 或 32 字节（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）。10 万文件多 2.0 MB（SHA-1）或 3.2 MB（SHA-256，约 3.05 MiB），10 万文件的预算从 12 MB 改为 16 MB，覆盖 SHA-256 仓库。`cloudprint` 形状 728 个文件只多约 23 KB，2 MB 不变。非当前 worktree 不保留文件列表，`resolve_package` 读出的列表算完子项目即丢弃，OID 只增加这段时间的峰值。
 - 首帧之前什么都不做：插件 `AfterFirstFrame` 激活，`activate` 只建空表；第一次扫描由首帧之后的 `open` 触发。
 - 预算是初始值，实现时用真实规模的合成仓库实测后校准，写进 bench 的预算表，超标即 CI 失败。合成仓库由 `testing` 的形状描述加 git 的 `test-support` 构造器生成，不依赖 git 命令行和网络。
 
@@ -616,11 +618,11 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 
 - 清单解析（`manifest_*`）：`tests/fixtures/manifests/<格式>/` 下每个样本的解析结果用 insta 快照；含 yarn 1 对象写法、pnpm 的 `!` 排除与注释、Cargo 虚拟清单（根子项目的名字取 `root_name`）与 `exclude`、POM 4.0.0 / 4.1.0 与 profile 里的 modules、Groovy / Kotlin 的 settings（`include` 多参数跨行、`projectDir`、`includeBuild`、变量写法标为 partial）、go.work 块写法；超过 1 MB、语法错误各一例。
 - 成员解析（`packages_*`）：内存里构造文件列表，快照验收。场景：`cloudprint` 形状、嵌套工作区、同一目录多种清单、没有构建文件的 Gradle 子项目（`manifests` 为空）、语法错误与超大清单的错误保留在 `Manifest.error`、Maven 模块指向 `../`、越出 worktree 的路径、样本目录排除、未声明但有清单的目录。
-- 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（仓库、worktree 列表、HEAD 与 index 在内存里，worktree 根目录与工作区文件是临时目录里的真实文件，路径能规范化、`lstat` 有效；记录每次调用），任务交给测试里的队列，由测试逐个运行，事件与 facts 记录下来。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable（根目录已删除，键仍来自管理目录）/ locked / detached / unborn、文件夹项目的上限与跳过规则、`locate` 取最深的子项目，以及父仓库和其中单独打开的子模块都包含路径时 `locate` 返回子模块的项目；路径在非当前 worktree 时 `locate` 返回 `NotLoaded`，`resolve_package` 按那个 worktree 自己的子项目给出结果（它比当前 worktree 多一个、少一个、移动了一个子项目各一例），index 与清单都未变时第二次调用命中缓存、不读清单；未暂存地修改或删除那个 worktree 的一个清单后，下一次 `resolve_package` 按未命中重算并给出新结果，其余清单不重新解析；已经填过缓存之后 `locate` 对非当前 worktree 仍返回 `NotLoaded`；当前 worktree 的子项目还是 `Pending` 时 `resolve_package` 返回 `NotLoaded`、不做 IO。
-- 刷新（`refresh_*`）：用 fs_watch 的模拟后端驱动事件（`testing::manual`、`FakeBackend`，`FakeGit` 每个 worktree 的 `FakeSource`），模型的任务仍交给测试里的队列；连续事件合并为一轮、扫描中到达的事件触发下一轮、只改普通文件内容不重读 index、新增普通受跟踪文件后 `Package.files` 更新而已有清单不重新解析、清单 OID 未变不重新解析、删除当前 worktree 后的切换、generation 严格递增；另有打开后第一批不替换快照、只刷新 stat 信息的 index 改写、目录事件代表其下的清单、根目录被删除后切换、其他 worktree 的 HEAD 只更新列表、unborn 分支的第一次提交、关闭的项目与文件夹项目不监听。
+- 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（仓库、worktree 列表、HEAD 与 index 在内存里，worktree 根目录与工作区文件是临时目录里的真实文件，路径能规范化、`lstat` 有效；记录每次调用），任务交给测试里的队列，由测试逐个运行，事件与 facts 记录下来。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable（根目录已删除，键仍来自管理目录）/ locked / detached / unborn、文件夹项目的上限与跳过规则、git 项目的文件列表每条带 index 的 OID（SHA-1 与 SHA-256）而文件夹项目都为 None、`locate` 取最深的子项目，以及父仓库和其中单独打开的子模块都包含路径时 `locate` 返回子模块的项目；路径在非当前 worktree 时 `locate` 返回 `NotLoaded`，`resolve_package` 按那个 worktree 自己的子项目给出结果（它比当前 worktree 多一个、少一个、移动了一个子项目各一例），index 与清单都未变时第二次调用命中缓存、不读清单；未暂存地修改或删除那个 worktree 的一个清单后，下一次 `resolve_package` 按未命中重算并给出新结果，其余清单不重新解析；已经填过缓存之后 `locate` 对非当前 worktree 仍返回 `NotLoaded`；当前 worktree 的子项目还是 `Pending` 时 `resolve_package` 返回 `NotLoaded`、不做 IO。
+- 刷新（`refresh_*`）：用 fs_watch 的模拟后端驱动事件（`testing::manual`、`FakeBackend`，`FakeGit` 每个 worktree 的 `FakeSource`），模型的任务仍交给测试里的队列；连续事件合并为一轮、扫描中到达的事件触发下一轮、只改普通文件内容不重读 index、新增普通受跟踪文件后 `Package.files` 更新而已有清单不重新解析、清单 OID 未变不重新解析、删除当前 worktree 后的切换、generation 严格递增；另有打开后第一批不替换快照、只刷新 stat 信息的 index 改写、目录事件代表其下的清单、根目录被删除后切换、其他 worktree 的 HEAD 只更新列表、unborn 分支的第一次提交、关闭的项目与文件夹项目不监听；只暂存内容变化（路径不变、OID 变了）时文件列表换代而子项目不变，同样的字节再暂存一次不换代（SHA-1 与 SHA-256 各一遍）。`FakeGit` 的 index 每条带暂存时工作区内容的 blob OID，与真实仓库相同。
 - facts（`facts_*`）：模式语义逐条覆盖；多个项目的并集；不合法的模式返回 false。
 - 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`，`PluginSet` 里另放一个依赖 `dyn Projects` 的测试插件（取得服务、记录事件）。`TestKernel` 只容纳被测插件和模拟服务，放不下 `Workspace` 激活的测试插件。`activate` 之后、`open` 之前 `FakeGit` 没有收到任何调用；`open` 之后提交的 facts 让一个 `Workspace(["pom.xml"])` 的测试插件激活；事件顺序为 `Opened` → `Changed`；一次刷新从后端交出事件到快照替换之前 kernel 不静止。`ProjectDeps::watcher` 用 fs_watch 的手动监听器，它有自己的 `Executor::manual()`。
-- 真实仓库（`real_repo_*`）：用 git 的 `test-support` 构造器写出的仓库（含 linked worktree、SHA-256 仓库各一个）跑一遍 open、再次打开、切换 worktree 和 `resolve_package`，确认 `GitAccess` 的生产实现与 `FakeGit` 给出相同的快照；增量刷新（生产实现的 `watch_source` 加 `FakeBackend`）在一次 index 变化和一次未暂存的清单修改之后，事件与快照也与 `FakeGit` 相同。
+- 真实仓库（`real_repo_*`）：用 git 的 `test-support` 构造器写出的仓库（含 linked worktree、SHA-256 仓库各一个）跑一遍 open、再次打开、切换 worktree 和 `resolve_package`，确认 `GitAccess` 的生产实现与 `FakeGit` 给出相同的快照和相同的文件列表（连同 OID）；增量刷新（生产实现的 `watch_source` 加 `FakeBackend`）在一次 index 变化和一次未暂存的清单修改之后，事件与快照也与 `FakeGit` 相同。
 
 没有只能在 macOS 上运行的部分。
 
@@ -726,6 +728,21 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 
 没有验证到的：`FileList` 每条多 20 或 32 字节的常驻内存（`plugin/project/resident_*`）在前置条件 B 里随 `project` 填入 OID 一起测量和修改。
 
+git 项目的文件列表带 blob OID（code_intel「验收」前置条件 B），在 Linux（x86_64 容器）上运行（本 crate 不依赖 GPUI；没有在 macOS 上实测）：
+
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just test`（Linux 上不依赖 GPUI 的全部 crate，1101 个通过、1 个跳过）、`just doctest`（7 个文档测试）、`just deny`（advisories、bans、licenses、sources 都 ok）全部通过；`cargo clippy -p lectern-project -- -D warnings`（不开 `test-support`）也通过。没有新增依赖，`services` 没有改动：#108 的 `FileList` 已按列表的哈希算法定长存放 OID（`oid_width` 为 0、20 或 32），相等比较包括 OID。
+- `just test -p lectern-project`：118 个测试，原有的 115 个照常通过，insta 快照没有变化（`render` 和 `FileList` 的 `Debug` 都不输出 OID）。新增和扩充的：
+  - `open_file_lists_carry_index_oids_for_git_only`：`FakeGit` 的 SHA-1 与 SHA-256 仓库每条（含子模块条目）都有 OID、长度与哈希算法一致，`README.md`、`apps/web/src/index.ts` 的 OID 等于暂存内容的 blob OID；文件夹项目每条都为 None。
+  - `refresh_staged_content_change_replaces_the_file_list_sha1` / `_sha256`：暂存 `apps/web/src/index.ts` 的新内容（路径不变）后 index 事件让文件列表换代（`Changed 4 [files]`，generation 加一，新的 `Arc`），路径与类型逐条相同、只有这一条的 OID 变了，不读也不解析清单，facts 多提交一次；再暂存同样的字节并 `touch_index` 之后读一次 index、不替换快照、facts 不再提交。
+  - `real_repo_sha1_matches_fake_git`、`real_repo_sha256_matches_fake_git`：生产实现（`TestRepo` 写出的 index）与 `FakeGit` 的当前文件列表连同 OID 相等，打开时（主 worktree）和切到 linked worktree 后各比较一次，每条的 OID 等于 `TestRepo` 写入的 blob。
+  - `real_repo_refresh_matches_fake_git`：最后加一步只暂存内容（`README.md` 和上一步未暂存的 `apps/web/package.json`），两边的事件序列（含 `[files]`）、快照和文件列表连同 OID 都相同，路径与类型不变。
+- `plugin/project/resident_100k` 在 `crates/bench/src/budgets.rs` 与 [bench 设计「预算表」](bench.md#预算表) 里从 12 MB 改为 16 MB，`resident_cloudprint` 仍是 2 MB，见「性能」。`just test -p lectern-bench`（62 个测试）通过。
+
+没有验证到的（前置条件 B）：
+
+- 常驻内存：两条预算仍是计划中（`project` 第 5 步），新数字是按每条 32 字节估算的，没有实测。tech-research「性能预算」表里没有 `project` 的分项，顶层预算不变。
+- 只有 OID 变化时仍重做成员解析：内存里的计算，清单沿用上一轮的结果；耗时属于第 5 步的 `project/refresh_index`。
+
 ## 与设计的差异
 
 第 1 步：
@@ -775,3 +792,8 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - `BlobId` 的形状：code_intel 设计只要求「20 或 32 字节、`Copy`、序列化为十六进制」，实现定为两个变体的枚举 `Sha1([u8; 20])` / `Sha256([u8; 32])`，另派生 `Hash`、`Ord`，带 `from_bytes`、`from_hex`、`as_bytes` 和输出小写十六进制的 `Display`。已写进上文「文件列表」。
 - 混合列表不带 OID：设计规定 git 项目每条都有、文件夹项目都为 None，没有写一部分条目有 OID 或两种长度混在一起时怎样处理（只会出现在来自其他进程的输入里）。实现定为整个列表都不带 OID，所以定长存放仍然成立。已写进上文「文件列表」。
 - 序列化的第三个字段没有 OID 时为 null，不省略；反序列化要求三元组，旧的二元组不再接受（还没有进程插件，没有已落盘的旧格式）。OID 不合法时整个列表反序列化失败，与路径不合法时只记入 `skipped` 不同：OID 错了说明对方的列表不可信，丢掉一条的 OID 会让整个列表变成没有 OID 的列表。
+
+git 项目的文件列表带 blob OID（code_intel 前置条件 B）：
+
+- `FakeGit` 的 index 每条存（类型，OID），OID 是暂存时工作区内容的 blob OID（`write`、`track`；符号链接取目标，没有文件或是子模块目录时取空内容），index 校验和包括 OID。设计只要求 git 项目每条都有 OID，测试辅助怎样给出 OID 是实现时定的：这样 `FakeGit` 与真实仓库的文件列表逐字相同，`real_repo_*` 能直接比较。已写进「测试」。
+- 预算只改 10 万文件一条（12 MB 改为 16 MB）：code_intel 设计给出的增量是 2 MB（SHA-1）或 3.2 MB（SHA-256），按 SHA-256 取整；`cloudprint` 形状只多约 23 KB，2 MB 不变。已写进「性能」。

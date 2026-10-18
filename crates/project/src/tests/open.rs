@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use lectern_git::HashKind;
 use lectern_services::project::{
     FileKind, OpenError, ProjectEvent, ProjectKey, Projects, Scan, ScanError,
 };
@@ -262,6 +263,45 @@ fn open_folder_walks_with_skip_rules() {
     insta::assert_snapshot!(h.render(&key));
     // A folder never reaches git beyond discovery.
     assert!(h.git.calls().iter().all(|c| matches!(c, Call::Discover(_))));
+}
+
+#[test]
+fn open_file_lists_carry_index_oids_for_git_only() {
+    for hash in [HashKind::Sha1, HashKind::Sha256] {
+        let h = Harness::new();
+        let git_dir = h.git.init_with("repo", hash);
+        monorepo(&h.git, &git_dir);
+        h.git.track(&git_dir, "vendor/lib", FileKind::Submodule);
+        let key = h.open(&h.base().join("repo")).unwrap();
+        let files = active_files(&h.snapshot(&key));
+        // Every entry has the OID of what was staged, at the repository's
+        // width; a submodule too.
+        for i in 0..files.len() {
+            let oid = files.oid(i).unwrap();
+            assert_eq!(oid.as_bytes().len(), hash.byte_len(), "{hash:?}");
+        }
+        assert_eq!(
+            oid_of(&files, "README.md"),
+            blob(hash, b"# root\n"),
+            "{hash:?}"
+        );
+        assert_eq!(
+            oid_of(&files, "apps/web/src/index.ts"),
+            blob(hash, b"export {};\n"),
+            "{hash:?}"
+        );
+    }
+
+    // A folder project's list has none.
+    let h = Harness::new();
+    let root = h.base().join("folder");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("package.json"), br#"{ "name": "folder" }"#).unwrap();
+    std::fs::write(root.join("src/index.ts"), b"export {};\n").unwrap();
+    let key = h.open(&root).unwrap();
+    let files = active_files(&h.snapshot(&key));
+    assert_eq!(files.len(), 2);
+    assert!((0..files.len()).all(|i| files.oid(i).is_none()));
 }
 
 #[test]

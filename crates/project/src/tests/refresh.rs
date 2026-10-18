@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use lectern_fs_watch::Flags;
+use lectern_git::HashKind;
 use lectern_services::project::{
     Head, Package, ProjectEvent, ProjectKey, Projects, Scan, WorktreeKey,
 };
@@ -275,6 +276,67 @@ fn refresh_stat_only_index_rewrite_changes_nothing() {
     f.emit(&common, &[("index", CHANGED)]);
     insta::assert_snapshot!(f.events(), @"");
     assert_eq!(f.h.git.calls(), vec![Call::IndexChecksum(common.clone())]);
+}
+
+fn staged_content_change(hash: HashKind) {
+    let f = Fixture::new();
+    let common = f.h.git.init_with("repo", hash);
+    monorepo(&f.h.git, &common);
+    let root = f.h.base().join("repo");
+    let key = f.open(&root);
+    let before = f.h.snapshot(&key);
+    let old = active_files(&before);
+    let facts = f.h.host.facts_count();
+    let parses = f.parses();
+
+    // `git add` of a new version of a source file: the same paths, one new
+    // OID. The file list is replaced (a new generation), the sub-projects
+    // stay, no manifest is read.
+    let content = b"export const x = 1;\n";
+    f.h.git.write(&common, "apps/web/src/index.ts", content);
+    f.emit(&common, &[("index", CHANGED)]);
+    f.emit(&root, &[("apps/web/src/index.ts", CHANGED)]);
+    assert_eq!(f.events(), "Changed 4 [files]\n");
+    let after = f.h.snapshot(&key);
+    assert_eq!(after.generation, before.generation + 1);
+    let new = active_files(&after);
+    assert!(!Arc::ptr_eq(&old, &new));
+    assert!(old.iter().eq(new.iter()), "the same paths and kinds");
+    assert_eq!(
+        oid_of(&old, "apps/web/src/index.ts"),
+        blob(hash, b"export {};\n")
+    );
+    assert_eq!(oid_of(&new, "apps/web/src/index.ts"), blob(hash, content));
+    for (i, (path, _)) in new.iter().enumerate() {
+        if path != "apps/web/src/index.ts" {
+            assert_eq!(new.oid(i), oid_of(&old, path), "{path}");
+        }
+    }
+    assert_eq!(f.h.git.reads(), Vec::<String>::new());
+    assert_eq!(f.parses(), parses);
+    // The facts hold the new list, so the old one is released.
+    assert_eq!(f.h.host.facts_count(), facts + 1);
+
+    // Staging the same bytes again (and a stat-only rewrite): the index is
+    // read, every OID is the same, nothing is replaced.
+    f.h.git.take_calls();
+    f.h.git.write(&common, "apps/web/src/index.ts", content);
+    f.h.git.touch_index(&common);
+    f.emit(&common, &[("index", CHANGED)]);
+    assert_eq!(f.events(), "");
+    assert_eq!(f.count(is_index), 1);
+    assert!(Arc::ptr_eq(&after, &f.h.snapshot(&key)));
+    assert_eq!(f.h.host.facts_count(), facts + 1);
+}
+
+#[test]
+fn refresh_staged_content_change_replaces_the_file_list_sha1() {
+    staged_content_change(HashKind::Sha1);
+}
+
+#[test]
+fn refresh_staged_content_change_replaces_the_file_list_sha256() {
+    staged_content_change(HashKind::Sha256);
 }
 
 #[test]
