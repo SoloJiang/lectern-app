@@ -837,10 +837,6 @@ fn schedule_tier5_index_change_rewalks_only_that_worktree() {
 /// it, opening another project does not take them over.
 #[test]
 fn schedule_last_opened_project_runs_the_batch_before_any_focus() {
-    use lectern_services::project::{
-        ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
-    };
-
     let h = Harness::new();
     h.git.add("main", &[("a.ts", &ts("a"))]);
     h.git.commit("main");
@@ -848,29 +844,9 @@ fn schedule_last_opened_project_runs_the_batch_before_any_focus() {
     let batch_project = || crate::index::lock(&h.indexer.inner().batch_project).clone();
     assert_eq!(batch_project(), Some(h.key()));
     let open_folder = |name: &str| {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let root = dir.path().canonicalize().expect("canonical");
-        let mut files = FileList::builder();
-        files.push("a.ts", FileKind::File);
-        let key = ProjectKey::Folder {
-            root: Arc::from(root.as_path()),
-        };
-        let event = h.projects.set(ProjectSnapshot {
-            key: key.clone(),
-            generation: 1,
-            name: name.into(),
-            worktrees: Arc::from(Vec::new()),
-            active: Some(ActiveTree {
-                root: Arc::from(root.as_path()),
-                worktree: None,
-                opened_at: "".into(),
-                files: Scan::Ready(Arc::new(files.build())),
-                packages: Scan::Ready(Arc::from(Vec::new())),
-            }),
-        });
-        h.indexer.project_event(&event);
+        let opened = open_folder(&h, name);
         h.settle();
-        (dir, key)
+        opened
     };
     let (_one, folder) = open_folder("one");
     assert_eq!(batch_project(), Some(folder));
@@ -879,6 +855,116 @@ fn schedule_last_opened_project_runs_the_batch_before_any_focus() {
     assert_eq!(batch_project(), Some(h.key()));
     let (_two, _) = open_folder("two");
     assert_eq!(batch_project(), Some(h.key()));
+}
+
+/// Opens a folder project with one file (no settling).
+fn open_folder(
+    h: &Harness,
+    name: &str,
+) -> (tempfile::TempDir, lectern_services::project::ProjectKey) {
+    use lectern_services::project::{
+        ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
+    };
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical");
+    let mut files = FileList::builder();
+    files.push("a.ts", FileKind::File);
+    let key = ProjectKey::Folder {
+        root: Arc::from(root.as_path()),
+    };
+    let event = h.projects.set(ProjectSnapshot {
+        key: key.clone(),
+        generation: 1,
+        name: name.into(),
+        worktrees: Arc::from(Vec::new()),
+        active: Some(ActiveTree {
+            root: Arc::from(root.as_path()),
+            worktree: None,
+            opened_at: "".into(),
+            files: Scan::Ready(Arc::new(files.build())),
+            packages: Scan::Ready(Arc::from(Vec::new())),
+        }),
+    });
+    h.indexer.project_event(&event);
+    (dir, key)
+}
+
+/// One kick fills the batch pool: with three batch threads, three tasks
+/// run the walk (`kick_batch`'s liveness rule; the harness checks it after
+/// every settle and focus).
+#[test]
+fn schedule_one_kick_fills_the_batch_pool() {
+    let h = Harness::with(super::support::Options {
+        batch_tasks: 3,
+        ..Default::default()
+    });
+    fill(&h, 200);
+    h.open();
+    assert_eq!(h.extractions(), 200);
+    assert_eq!(h.indexer.inner().batch.lock().unwrap().peak, 3);
+    let c = h.coverage();
+    assert_eq!([c.subproject, c.worktree], [TierState::Done; 2]);
+}
+
+/// Closing the project that runs tiers 3–5 hands them to the one opened
+/// before, and that project's walk starts (it was waiting its turn).
+#[test]
+fn schedule_closing_the_batch_project_starts_the_next_one() {
+    let h = Harness::new();
+    fill(&h, 20);
+    // The git project opens, then a folder project, before any focus: the
+    // folder runs tiers 3–5 and the git project waits.
+    h.publish("main", Vec::new());
+    let (_dir, folder) = open_folder(&h, "folder");
+    h.settle();
+    assert_eq!(h.extractions(), 0, "the git project waits its turn");
+    h.indexer
+        .project_event(&lectern_services::project::ProjectEvent::Closed { project: folder });
+    h.assert_live("after closing the folder");
+    h.settle();
+    assert_eq!(h.extractions(), 20);
+    let c = h.coverage();
+    assert_eq!([c.subproject, c.worktree], [TierState::Done; 2]);
+}
+
+/// Closing a project while tier 2 has a long queue: its tasks stop before
+/// the next file, nothing more is read, and the kernel is quiescent.
+#[test]
+fn schedule_close_during_a_review_queue_stops_reading() {
+    let h = Harness::new();
+    let files = fill(&h, 40);
+    let kernel = h.host.kernel();
+    // The batch tiers wait; tiers 1 and 2 do not.
+    kernel.pause();
+    h.open();
+    assert_eq!(h.extractions(), 0);
+    let inner = h.indexer.inner().clone();
+    let key = h.key();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    h.set_hook(move |_, _| {
+        if c.fetch_add(1, Ordering::AcqRel) == 0 {
+            inner.project_event(&lectern_services::project::ProjectEvent::Closed {
+                project: key.clone(),
+            });
+        }
+    });
+    let review: Vec<lectern_services::project::RelPath> = files[..30]
+        .iter()
+        .map(|(p, _, _)| p.as_str().into())
+        .collect();
+    h.set_focus(Focus::Review(review.into()));
+    h.settle();
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        1,
+        "no file read after the close"
+    );
+    assert!(h.quiescent(), "the tier 2 tasks released their guards");
+    kernel.resume();
+    h.settle();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
 }
 
 /// Tier 5's set of blobs confirmed stored this session stays small: 100k

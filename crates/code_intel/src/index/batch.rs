@@ -128,22 +128,41 @@ struct Ctx {
 }
 
 impl Inner {
-    /// Makes sure a batch task runs (one per batch thread at most).
+    /// Work for tiers 3–5 may have appeared: the pool runs `batch_tasks`
+    /// tasks (one per batch thread), and a task about to stop goes on.
+    ///
+    /// The liveness rule: after every operation that can create batch work
+    /// (open, close, a change of the project that runs tiers 3–5, focus,
+    /// power, grammar, the end of a reconcile), either no project has
+    /// runnable tier 3–5 work or the pool is full (`Inner::live`, checked
+    /// by the tests' harness).
     pub(crate) fn kick_batch(self: &Arc<Self>) {
-        {
-            let mut run = lock(&self.batch);
-            if run.running >= self.batch_tasks {
-                run.kicked = true;
+        self.fill_pool();
+        lock(&self.batch).kicked = true;
+    }
+
+    /// Starts batch tasks up to `batch_tasks`.
+    fn fill_pool(self: &Arc<Self>) {
+        loop {
+            {
+                let mut run = lock(&self.batch);
+                if run.running >= self.batch_tasks {
+                    return;
+                }
+                run.running += 1;
+                #[cfg(test)]
+                {
+                    run.peak = run.peak.max(run.running);
+                }
+            }
+            let me = self.clone();
+            let spawned = self
+                .host
+                .spawn_batch("batch", move |guard| me.batch_loop(guard));
+            if !spawned {
+                lock(&self.batch).running -= 1;
                 return;
             }
-            run.running += 1;
-        }
-        let me = self.clone();
-        let spawned = self
-            .host
-            .spawn_batch("batch", move |guard| me.batch_loop(guard));
-        if !spawned {
-            lock(&self.batch).running -= 1;
         }
     }
 
@@ -151,7 +170,12 @@ impl Inner {
         loop {
             guard.proceed().await;
             match self.batch_step(&guard) {
-                Step::Worked => yield_now().await,
+                Step::Worked => {
+                    // A step can leave work for others (missed files in a
+                    // tier's queue): tasks that stopped start again.
+                    self.fill_pool();
+                    yield_now().await;
+                }
                 Step::Idle => {
                     let mut run = lock(&self.batch);
                     if run.kicked {
@@ -163,6 +187,61 @@ impl Inner {
                 }
             }
         }
+    }
+
+    /// Whether the project that runs tiers 3–5 has work a new batch task
+    /// would do now (`batch_step` would not be idle): files to extract,
+    /// a walk to rebuild or to go on with, other worktrees left, touches.
+    #[cfg(test)]
+    pub(crate) fn runnable(&self) -> bool {
+        let Some(project) = self.batch_project() else {
+            return false;
+        };
+        let eviction = project.evictions();
+        let st = lock(&project.state);
+        if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
+            return false;
+        }
+        let wide = self.wide_allowed(&st);
+        let tiers = if wide { 3 } else { 1 };
+        if st.batch.resume[..tiers].iter().any(|q| !q.is_empty()) || !st.batch.touches.is_empty() {
+            return true;
+        }
+        let deps = st.cursor_deps(eviction);
+        let Some(cursor) = st
+            .batch
+            .cursor
+            .as_ref()
+            .filter(|c| c.deps == deps && c.scope == subproject(&st))
+        else {
+            return true;
+        };
+        if !cursor.walks[0].done || (wide && !cursor.walks[1].done) {
+            return true;
+        }
+        if !wide {
+            return false;
+        }
+        let others = &st.batch.others;
+        let stamp = st.stamp(eviction);
+        if others.deps != Some((st.session, stamp.eviction, stamp.grammar)) {
+            return true;
+        }
+        let active = st.worktree();
+        others.current.is_some()
+            || st.snapshot.as_ref().is_some_and(|s| {
+                s.worktrees
+                    .iter()
+                    .any(|w| !w.prunable && Some(&w.key) != active && !others.done.contains(&w.key))
+            })
+    }
+
+    /// The liveness rule of `kick_batch`: no runnable batch work, or a full
+    /// pool. False is a missed kick.
+    #[cfg(test)]
+    pub(crate) fn live(&self) -> bool {
+        let running = lock(&self.batch).running;
+        running >= self.batch_tasks || !self.runnable()
     }
 
     fn batch_project(&self) -> Option<Arc<Project>> {
@@ -350,6 +429,9 @@ impl Inner {
         loop {
             let next = {
                 let mut st = lock(&project.state);
+                if !st.live(ctx.session) {
+                    return None;
+                }
                 let deps = Some((st.session, stamp.eviction, stamp.grammar));
                 if st.batch.others.deps != deps {
                     st.batch.others = super::state::Others {
@@ -392,7 +474,7 @@ impl Inner {
                             .map_err(|e| e.to_string())
                     });
                 let mut st = lock(&project.state);
-                if st.session != ctx.session {
+                if !st.live(ctx.session) {
                     return None;
                 }
                 match loaded {
@@ -506,7 +588,7 @@ impl Inner {
         }
         let table = lock(&self.langs).table.clone();
         let mut st = lock(&project.state);
-        if st.session != ctx.session {
+        if !st.live(ctx.session) {
             return;
         }
         st.batch.touches.push(eviction, &found);
@@ -593,7 +675,7 @@ impl Inner {
     fn take(&self, project: &Arc<Project>, ctx: &Ctx, t: usize) -> Option<(Item, Arc<AtomicBool>)> {
         let eviction = project.evictions();
         let mut st = lock(&project.state);
-        if st.session != ctx.session {
+        if !st.live(ctx.session) {
             return None;
         }
         let stamp = st.stamp(eviction);
@@ -904,7 +986,7 @@ impl Inner {
         let eviction = project.evictions();
         let disabled = lock(&self.langs).disabled.clone();
         let mut st = lock(&project.state);
-        if st.base_for.is_none() {
+        if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
             return;
         }
         let wt = st.worktree().cloned();
@@ -1001,6 +1083,9 @@ impl Inner {
             loop {
                 let session = {
                     let mut st = lock(&project.state);
+                    if st.cancel.load(Ordering::Acquire) {
+                        return;
+                    }
                     let f = &mut st.focused;
                     if f.running[t] >= limit || f.queue[t].len() <= f.running[t] {
                         break;
@@ -1030,8 +1115,9 @@ impl Inner {
         loop {
             let (item, ctx, flag) = {
                 let mut st = lock(&project.state);
-                if st.session != session {
-                    // A new session counts its own tasks.
+                if !st.live(session) {
+                    // Ended, or a new session (which counts its own tasks):
+                    // nothing more is read.
                     return;
                 }
                 let Some(item) = st.focused.queue[t].pop_front() else {

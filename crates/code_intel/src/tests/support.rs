@@ -234,9 +234,23 @@ impl Harness {
             let b = self.executor.run_until_idle();
             let c = self.driver.run_until_idle();
             if a == 0 && b == 0 && c == 0 {
+                // Nothing runs any more: either no batch work is left, or
+                // the pool waits (paused) at full size; never work nobody
+                // will pick up.
+                self.assert_live("after settling");
                 return;
             }
         }
+    }
+
+    /// The liveness rule of `Inner::kick_batch`, after an operation.
+    pub(crate) fn assert_live(&self, after: &str) {
+        let inner = self.indexer.inner();
+        assert!(
+            inner.live(),
+            "{after}: runnable batch work with {} of the pool's tasks running",
+            inner.batch.lock().unwrap().running
+        );
     }
 
     /// Emits worktree events (paths relative to the main root).
@@ -304,6 +318,7 @@ impl Harness {
     pub(crate) fn set_focus(&self, focus: Focus) {
         let wt = self.git.worktree_key("main");
         self.indexer.set_focus(&self.key(), Some(&wt), focus);
+        self.assert_live("after set_focus");
     }
 
     pub(crate) fn current(&self, path: &str) {
@@ -325,7 +340,17 @@ impl Harness {
     pub(crate) fn quiescent(&self) -> bool {
         let kernel = self.host.kernel();
         kernel.barrier();
-        kernel.is_quiescent()
+        // The kernel thread counts the barrier request itself down only
+        // after it has replied, so for a moment the barrier still reads as
+        // busy; a guard that is really held stays busy past this wait.
+        let start = std::time::Instant::now();
+        while !kernel.is_quiescent() {
+            if start.elapsed() > Duration::from_millis(200) {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
     }
 }
 

@@ -142,10 +142,13 @@ struct Rounds {
 }
 
 #[derive(Default)]
-struct BatchRun {
-    running: usize,
-    /// Work arrived while every batch task was running.
+pub(crate) struct BatchRun {
+    pub running: usize,
+    /// Work may have arrived since a running task last looked.
     kicked: bool,
+    /// The most tasks running at once (tests).
+    #[cfg(test)]
+    pub peak: usize,
 }
 
 pub(crate) struct Inner {
@@ -167,7 +170,7 @@ pub(crate) struct Inner {
     /// Some `set_focus` happened: opening a project no longer picks it.
     focused_once: AtomicBool,
     pub battery: AtomicBool,
-    batch: Mutex<BatchRun>,
+    pub(crate) batch: Mutex<BatchRun>,
     rounds: Mutex<Rounds>,
     pub extract: Mutex<ExtractFn>,
     /// One batch task at a time extracts a large file.
@@ -508,7 +511,7 @@ impl Inner {
         project
     }
 
-    fn project_event(&self, event: &ProjectEvent) {
+    pub(crate) fn project_event(&self, event: &ProjectEvent) {
         match event {
             ProjectEvent::Opened {
                 result: Ok(key), ..
@@ -551,9 +554,15 @@ impl Inner {
                 if let Some(p) = removed {
                     lock(&p.state).end();
                 }
-                let mut batch = lock(&self.batch_project);
-                if batch.as_ref() == Some(project) {
-                    *batch = lock(&self.open).last().map(|p| p.key.clone());
+                {
+                    let mut batch = lock(&self.batch_project);
+                    if batch.as_ref() == Some(project) {
+                        *batch = lock(&self.open).last().map(|p| p.key.clone());
+                    }
+                }
+                // The project that runs tiers 3–5 now may have work left.
+                if let Some(me) = self.arc() {
+                    me.kick_batch();
                 }
             }
         }

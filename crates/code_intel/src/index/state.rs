@@ -447,6 +447,12 @@ impl State {
         }
     }
 
+    /// Whether work of `session` goes on: it is the current session and it
+    /// has not ended. Every loop that takes work checks it before each item.
+    pub fn live(&self, session: u64) -> bool {
+        self.session == session && !self.cancel.load(Ordering::Acquire)
+    }
+
     /// Ends this session: every task of it stops, every extraction in
     /// flight is cancelled.
     pub fn end(&mut self) {
