@@ -490,9 +490,11 @@ pub static BUDGETS: &[Budget] = &[
         State::Planned("project"),
         Process,
     ),
+    // 12 MB before the file list carried blob OIDs; 100k × 32 bytes (a
+    // SHA-256 repository) adds 3.05 MiB, rounded up to 16 MB.
     share(
         "plugin/project/resident_100k",
-        &[median(Limit::BytesBelow(12 * MB))],
+        &[median(Limit::BytesBelow(16 * MB))],
         PROJECT,
         State::Planned("project"),
         Process,

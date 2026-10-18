@@ -556,7 +556,7 @@ crates/bench/
 | `plugin/*/activate` | 四段之和 < 1 ms | [kernel](kernel.md#性能) | 第 5 步 |
 | `plugin/after_first_frame` | 激活条件含 `AfterFirstFrame` 的插件四段之和合计 < 5 ms | [kernel](kernel.md#性能) | 第 5 步 |
 | `plugin/*/resident` | 只记录；插件的设计文档给出数字时另加具体条目 | [kernel](kernel.md#性能) | 第 5 步 |
-| `plugin/project/resident_cloudprint`、`plugin/project/resident_100k` | < 2 MB / < 12 MB | [project](project.md#性能) | `project` |
+| `plugin/project/resident_cloudprint`、`plugin/project/resident_100k` | < 2 MB / < 16 MB | [project](project.md#性能) | `project` |
 | `agents/parse_throughput` | 中位数吞吐 ≥ 200 MB/s | [agents](agents.md#性能) | 第 1 步 |
 | `agents/append_4k` | 中位数 < 1 ms | [agents](agents.md#性能) | 第 1 步 |
 | `agents/discover_1000` | 中位数 < 500 ms | [agents](agents.md#性能) | `agents` 第 4 步 |

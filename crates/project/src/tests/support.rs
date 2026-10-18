@@ -10,12 +10,14 @@ use std::time::Duration;
 use lectern_executor::Executor;
 use lectern_fs_watch::testing::{Driver, FakeBackend, manual};
 use lectern_fs_watch::{Config, Watcher};
+use lectern_git::{HashKind, Oid};
 use lectern_kernel::{BusyGuard, WorkspaceFacts};
 use lectern_services::project::{
-    OpenError, OpenRequest, PackageMatch, ProjectEvent, ProjectKey, ProjectSnapshot, Projects, Scan,
+    BlobId, FileList, OpenError, OpenRequest, PackageMatch, ProjectEvent, ProjectKey,
+    ProjectSnapshot, Projects, Scan,
 };
 
-use crate::git_access::GitAccess;
+use crate::git_access::{GitAccess, blob_id};
 use crate::model::{Host, Model};
 use crate::testing::FakeGit;
 
@@ -298,6 +300,29 @@ pub(crate) fn render(snapshot: &ProjectSnapshot, base: &Path) -> String {
 
 pub(crate) fn redact(text: &str, base: &Path) -> String {
     text.replace(&*base.to_string_lossy(), "[base]")
+}
+
+/// The active tree's file list; panics unless it is ready.
+pub(crate) fn active_files(snapshot: &ProjectSnapshot) -> Arc<FileList> {
+    match &snapshot.active.as_ref().expect("no active tree").files {
+        Scan::Ready(files) => files.clone(),
+        other => panic!("files {other:?}"),
+    }
+}
+
+/// The OID of `path` in `files`; panics when the path is not listed.
+pub(crate) fn oid_of(files: &FileList, path: &str) -> Option<BlobId> {
+    let i = files
+        .iter()
+        .position(|(p, _)| p == path)
+        .unwrap_or_else(|| panic!("{path} not listed"));
+    files.oid(i)
+}
+
+/// The `FileList` OID git records for `content` staged in a `hash`
+/// repository.
+pub(crate) fn blob(hash: HashKind, content: &[u8]) -> Option<BlobId> {
+    Some(blob_id(&Oid::for_blob(hash, content)))
 }
 
 pub(crate) fn found(dir: &str) -> PackageMatch {
