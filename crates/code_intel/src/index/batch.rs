@@ -95,6 +95,28 @@ enum Mode {
     Batch,
 }
 
+/// An extraction a query made of a file not stored yet (a search hit, an
+/// import target), to be written like tier 2's (「输入代数与派生状态」).
+pub(crate) struct Scanned {
+    pub path: lectern_services::project::RelPath,
+    /// The OID of the bytes extracted.
+    pub oid: BlobId,
+    /// The language as the query's (current) table had it.
+    pub lang: Lang,
+    pub extraction: Extraction,
+}
+
+impl Clone for Scanned {
+    fn clone(&self) -> Scanned {
+        Scanned {
+            path: self.path.clone(),
+            oid: self.oid,
+            lang: self.lang.clone(),
+            extraction: self.extraction.clone(),
+        }
+    }
+}
+
 /// One extraction ready to be written.
 struct Done {
     item: Item,
@@ -975,7 +997,51 @@ impl Inner {
         for d in &done {
             st.finish(ctx.session, &d.item, &d.flag);
         }
+        drop(st);
+        if committed && let Some(me) = self.arc() {
+            // A written batch makes a held name table behind.
+            me.names_changed(project);
+        }
         settled
+    }
+
+    /// Writes a query's extractions in a `Background` task, as tier 2 would:
+    /// a key stored meanwhile is not written again, the hints of every path
+    /// with that content are set once committed. Nothing for an ended
+    /// session.
+    pub(crate) fn store_scanned(&self, project: &Arc<Project>, session: u64, scanned: Vec<Scanned>) {
+        if scanned.is_empty() {
+            return;
+        }
+        let Some(me) = self.arc() else {
+            return;
+        };
+        let p = project.clone();
+        self.host.spawn_busy("store", Priority::Background, move || {
+            let ctx = {
+                let st = lock(&p.state);
+                if !st.live(session) {
+                    return;
+                }
+                ctx(&st)
+            };
+            let done = scanned
+                .into_iter()
+                .map(|s| Done {
+                    item: Item {
+                        path: s.path,
+                        oid: s.oid,
+                        lang: s.lang,
+                        source: Source::Worktree,
+                        tier: Tier::Review,
+                    },
+                    key: s.oid,
+                    extraction: s.extraction,
+                    flag: Arc::new(AtomicBool::new(false)),
+                })
+                .collect();
+            me.commit(&p, &ctx, done, false);
+        });
     }
 
     /// Queues the focus's files that are not indexed for tiers 1 and 2, and

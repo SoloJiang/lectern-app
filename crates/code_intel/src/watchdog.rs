@@ -103,10 +103,17 @@ impl Slot {
     }
 }
 
+/// Work the thread submits once its time comes (the name table's delayed
+/// rebuild, docs/design/code_intel.md「名字表」): it only submits, never
+/// blocks.
+pub type Due = Box<dyn FnOnce() + Send>;
+
 struct State {
     stop: bool,
     next_id: u64,
     in_flight: Vec<(u64, Arc<Slot>)>,
+    /// The due table: (time, callback), unordered.
+    timers: Vec<(Instant, Due)>,
     starter: Option<Starter>,
 }
 
@@ -141,6 +148,7 @@ impl Watchdog {
                     stop: false,
                     next_id: 0,
                     in_flight: Vec::new(),
+                    timers: Vec::new(),
                     starter: Some(starter),
                 }),
                 wake: Condvar::new(),
@@ -159,12 +167,43 @@ impl Watchdog {
     pub fn stop(&self) {
         let mut state = self.shared.lock();
         state.stop = true;
-        state.starter = None;
+        let starter = state.starter.take();
         for (_, slot) in &state.in_flight {
             slot.trip(Trip::Stopped);
         }
+        let timers = std::mem::take(&mut state.timers);
         drop(state);
         self.shared.wake.notify_all();
+        // Dropped outside the lock: they may hold anything.
+        drop((starter, timers));
+    }
+
+    /// Calls `f` on the watchdog's thread once the clock reaches `at` (the
+    /// due table, docs/design/code_intel.md「调度、批次与取消」); `f` only
+    /// submits work. Starts the thread if it is not running. False, with
+    /// `f` dropped, once the watchdog has stopped.
+    pub fn schedule(&self, at: Instant, f: Due) -> bool {
+        let mut state = self.shared.lock();
+        if state.stop {
+            drop(state);
+            drop(f);
+            return false;
+        }
+        state.timers.push((at, f));
+        let starter = state.starter.take();
+        drop(state);
+        self.shared.wake.notify_all();
+        if let Some(starter) = starter {
+            starter(WatchdogRun {
+                shared: self.shared.clone(),
+            });
+        }
+        true
+    }
+
+    /// Entries of the due table (tests).
+    pub fn scheduled(&self) -> usize {
+        self.shared.lock().timers.len()
     }
 
     /// A guard whose drop calls [`stop`](Self::stop). The plugin hands it to
@@ -266,7 +305,10 @@ impl WatchdogRun {
     }
 
     /// Runs until the watchdog stops: with extractions in flight, checks them
-    /// every [`CHECK_INTERVAL`]; otherwise waits without a timeout.
+    /// every [`CHECK_INTERVAL`]; with due entries, runs those whose time
+    /// came and waits until the next one (at most [`CHECK_INTERVAL`] at a
+    /// time, so a test's manual clock is seen to move); with neither, waits
+    /// without a timeout.
     pub fn run(self) {
         let shared = &*self.shared;
         let mut state = shared.lock();
@@ -274,19 +316,40 @@ impl WatchdogRun {
             if state.stop {
                 return;
             }
-            if state.in_flight.is_empty() {
+            let now = shared.clock.now();
+            if state.timers.iter().any(|(at, _)| *at <= now) {
+                let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut state.timers)
+                    .into_iter()
+                    .partition(|(at, _)| *at <= now);
+                state.timers = later;
+                drop(state);
+                for (_, f) in due {
+                    // A callback only submits work; a panic in it does not
+                    // take the watchdog down.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+                }
+                state = shared.lock();
+                continue;
+            }
+            if state.in_flight.is_empty() && state.timers.is_empty() {
                 state = shared
                     .wake
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner);
             } else {
-                let now = shared.clock.now();
                 for (_, slot) in &state.in_flight {
                     slot.check(now);
                 }
+                let next = state
+                    .timers
+                    .iter()
+                    .map(|(at, _)| at.saturating_duration_since(now))
+                    .min()
+                    .unwrap_or(CHECK_INTERVAL)
+                    .min(CHECK_INTERVAL);
                 state = shared
                     .wake
-                    .wait_timeout(state, CHECK_INTERVAL)
+                    .wait_timeout(state, next)
                     .unwrap_or_else(PoisonError::into_inner)
                     .0;
             }

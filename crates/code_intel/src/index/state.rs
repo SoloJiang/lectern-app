@@ -39,6 +39,8 @@ pub(crate) struct Project {
     pub replacing: std::sync::atomic::AtomicU64,
     pub steady: std::sync::atomic::AtomicU64,
     pub state: std::sync::Mutex<State>,
+    /// The ⌘K name table: locked after, never with, `state`.
+    pub names: std::sync::Mutex<crate::names::NameState>,
 }
 
 impl Project {

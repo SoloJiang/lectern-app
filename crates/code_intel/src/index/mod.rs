@@ -22,8 +22,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use lectern_cache::Cache;
 use lectern_executor::{Executor, Priority};
 use lectern_fs_watch::Watcher;
-use lectern_kernel::PluginHandle;
-use lectern_services::code_intel::{Coverage, Focus, TierState};
+use lectern_kernel::{ActivationToken, PluginHandle};
+use lectern_services::code_intel::{
+    CodeIntel, Coverage, Focus, NavigationProvider, Names, ProviderRegistration, Query, QueryId,
+    QueryResults, TierState,
+};
 use lectern_services::project::{ProjectEvent, ProjectKey, Projects, WorktreeKey};
 
 use crate::LangName;
@@ -35,6 +38,7 @@ use crate::power::PowerSource;
 use crate::store::Store;
 use crate::watchdog::Watchdog;
 
+pub(crate) use batch::Scanned;
 pub(crate) use host::Host;
 use state::{Project, State};
 
@@ -152,7 +156,7 @@ pub(crate) struct BatchRun {
 }
 
 pub(crate) struct Inner {
-    me: Weak<Inner>,
+    pub(crate) me: Weak<Inner>,
     pub host: Host,
     pub cache: Cache,
     pub watcher: Watcher,
@@ -177,6 +181,18 @@ pub(crate) struct Inner {
     pub(crate) large: batch::LargeSlot,
     pub stats: Stats,
     next_session: AtomicUsize,
+    /// The queries of this activation (`crate::query`).
+    pub(crate) queries: Mutex<crate::query::Queries>,
+    /// Held around replacing a query's results and emitting its event, so
+    /// one query's events go out in generation order.
+    pub(crate) publishing: Mutex<()>,
+    /// The resolution extension point's implementations (none in #17: the
+    /// empty rules answer for every language).
+    pub(crate) resolvers: Mutex<Vec<Arc<dyn crate::resolve::Resolver>>>,
+    /// Registered semantic providers (#26).
+    pub(crate) providers: Mutex<crate::semantic::Providers>,
+    pub(crate) replies: Mutex<crate::semantic::Replies>,
+    pub(crate) next_request: std::sync::atomic::AtomicU64,
     /// The files of each extraction batch of tiers 3–5, in order (tests).
     #[cfg(test)]
     pub batch_log: Mutex<Vec<usize>>,
@@ -236,6 +252,12 @@ impl Indexer {
             large: batch::LargeSlot::default(),
             stats: Stats::default(),
             next_session: AtomicUsize::new(1),
+            queries: Mutex::new(crate::query::Queries::default()),
+            publishing: Mutex::new(()),
+            resolvers: Mutex::new(Vec::new()),
+            providers: Mutex::new(crate::semantic::Providers::default()),
+            replies: Mutex::new(crate::semantic::Replies::default()),
+            next_request: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             batch_log: Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -394,13 +416,55 @@ impl Indexer {
         })
     }
 
+    /// `CodeIntel::query`: returns at once; the results come in batches.
+    pub fn query(&self, query: Query) -> QueryId {
+        self.inner.query(query)
+    }
+
+    /// `CodeIntel::results`: one lock, one `Arc` clone.
+    pub fn results(&self, id: QueryId) -> Option<Arc<QueryResults>> {
+        self.inner.results(id)
+    }
+
+    /// `CodeIntel::close`.
+    pub fn close(&self, id: QueryId) {
+        self.inner.close(id);
+    }
+
+    /// `CodeIntel::prefetch`.
+    pub fn prefetch(&self, query: Query) {
+        self.inner.prefetch(query);
+    }
+
+    /// `CodeIntel::names`.
+    pub fn names(&self, project: &ProjectKey) -> Names {
+        self.inner.names(project)
+    }
+
+    /// `CodeIntel::register_provider`.
+    pub fn register_provider(
+        &self,
+        provider: Arc<dyn NavigationProvider>,
+        token: ActivationToken,
+    ) -> ProviderRegistration {
+        self.inner.register_provider(provider, token)
+    }
+
+    /// Installs a resolver (tests of the extension point).
+    #[cfg(test)]
+    pub(crate) fn set_resolver(&self, resolver: Arc<dyn crate::resolve::Resolver>) {
+        lock(&self.inner.resolvers).push(resolver);
+    }
+
     /// Ends every project's session: tasks stop, extractions in flight are
-    /// cancelled, subscriptions to fs_watch dropped.
+    /// cancelled, subscriptions to fs_watch dropped, every query closed (its
+    /// unanswered semantic requests cancelled).
     pub fn close_all(&self) {
         let projects = std::mem::take(&mut *lock(&self.inner.open));
         for p in projects {
             lock(&p.state).end();
         }
+        self.inner.close_queries(None);
     }
 }
 
@@ -410,8 +474,46 @@ impl Drop for Indexer {
     }
 }
 
+impl CodeIntel for Indexer {
+    fn set_focus(&self, project: &ProjectKey, worktree: Option<&WorktreeKey>, focus: Focus) {
+        Indexer::set_focus(self, project, worktree, focus);
+    }
+
+    fn query(&self, query: Query) -> QueryId {
+        Indexer::query(self, query)
+    }
+
+    fn results(&self, id: QueryId) -> Option<Arc<QueryResults>> {
+        Indexer::results(self, id)
+    }
+
+    fn close(&self, id: QueryId) {
+        Indexer::close(self, id);
+    }
+
+    fn prefetch(&self, query: Query) {
+        Indexer::prefetch(self, query);
+    }
+
+    fn names(&self, project: &ProjectKey) -> Names {
+        Indexer::names(self, project)
+    }
+
+    fn register_provider(
+        &self,
+        provider: Arc<dyn NavigationProvider>,
+        token: ActivationToken,
+    ) -> ProviderRegistration {
+        Indexer::register_provider(self, provider, token)
+    }
+
+    fn coverage(&self, project: &ProjectKey) -> Option<Coverage> {
+        Indexer::coverage(self, project)
+    }
+}
+
 impl Inner {
-    fn arc(&self) -> Option<Arc<Inner>> {
+    pub(crate) fn arc(&self) -> Option<Arc<Inner>> {
         self.me.upgrade()
     }
 
@@ -495,6 +597,7 @@ impl Inner {
                         replacing: std::sync::atomic::AtomicU64::new(0),
                         steady: std::sync::atomic::AtomicU64::new(0),
                         state: Mutex::new(State::new(self.new_session(), &table, grammar)),
+                        names: Mutex::new(crate::names::NameState::default()),
                     });
                     open.push(p.clone());
                     (p, true)
@@ -554,6 +657,7 @@ impl Inner {
                 if let Some(p) = removed {
                     lock(&p.state).end();
                 }
+                self.close_queries(Some(project));
                 {
                     let mut batch = lock(&self.batch_project);
                     if batch.as_ref() == Some(project) {
@@ -604,7 +708,7 @@ impl Inner {
         }
     }
 
-    fn demand(&self, key: &ProjectKey) {
+    pub(crate) fn demand(&self, key: &ProjectKey) {
         if let Some(p) = self.project(key) {
             lock(&p.state).demand = true;
         }
