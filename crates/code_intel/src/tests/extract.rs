@@ -165,6 +165,20 @@ fn extract_visibility_rules() {
     assert_eq!(vis(&module, "c"), Visibility::Public);
     let script = run("js", "function b() {}\nmodule.exports = { b };\n");
     assert_eq!(vis(&script, "b"), Visibility::Public);
+    // Only program-level import and export make an ES module: an `export`
+    // in a namespace exports a member of it.
+    let namespaced = run(
+        "ts",
+        "namespace NS { export function inner() {} export const version = 1; }\nfunction top() {}\n",
+    );
+    assert_eq!(vis(&namespaced, "top"), Visibility::Public);
+    assert_eq!(vis(&namespaced, "version"), Visibility::Public);
+    let module = run(
+        "ts",
+        "export namespace NS { export const version = 1; }\nfunction top() {}\n",
+    );
+    assert_eq!(vis(&module, "top"), Visibility::File);
+    assert_eq!(vis(&module, "version"), Visibility::Public);
 }
 
 #[test]
@@ -348,6 +362,53 @@ fn extract_plain_and_member_uses_are_names() {
 }
 
 #[test]
+fn extract_rust_impl_self_types() {
+    // The methods of a trait implementation are public and in the
+    // implemented type's scope, whatever wraps the type; an inherent impl's
+    // methods keep their own visibility.
+    let source = "impl Display for &Point { fn a(&self) {} }\n\
+                  impl Display for &mut Grid { fn b(&self) {} }\n\
+                  impl<T> Display for Box<T> { fn c(&self) {} }\n\
+                  impl Display for [Cell] { fn d(&self) {} }\n\
+                  impl Display for &[Row] { fn e(&self) {} }\n\
+                  impl Display for (Left, Right) { fn f(&self) {} }\n\
+                  impl Display for *const Raw { fn g(&self) {} }\n\
+                  impl Display for u8 { fn h(&self) {} }\n\
+                  impl Display for std::path::PathBuf { fn i(&self) {} }\n\
+                  impl Display for fn() { fn j(&self) {} }\n\
+                  impl Point { fn k(&self) {} }\n\
+                  impl Grid<u8> { pub fn l(&self) {} }\n";
+    let want: &[(&str, Option<&str>, Visibility)] = &[
+        ("a", Some("Point"), Visibility::Public),
+        ("b", Some("Grid"), Visibility::Public),
+        ("c", Some("Box"), Visibility::Public),
+        ("d", Some("Cell"), Visibility::Public),
+        ("e", Some("Row"), Visibility::Public),
+        ("f", Some("Left"), Visibility::Public),
+        ("g", Some("Raw"), Visibility::Public),
+        ("h", Some("u8"), Visibility::Public),
+        ("i", Some("PathBuf"), Visibility::Public),
+        ("j", None, Visibility::Public),
+        ("k", Some("Point"), Visibility::Module),
+        ("l", Some("Grid"), Visibility::Public),
+    ];
+    let table = LanguageTable::core();
+    let watchdog = test_watchdog();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let rust = table.get("rust").unwrap();
+    let deadline = Deadline::interactive(&watchdog);
+    let walked = extract(rust, source.as_bytes(), &deadline, &cancel);
+    let tagged = crate::extract::extract_tags(rust, source.as_bytes(), &deadline, &cancel);
+    watchdog.stop();
+    assert_eq!(walked, tagged);
+    for (name, scope, visibility) in want {
+        let d = def(&walked, name);
+        assert_eq!(d.scope.as_deref(), *scope, "{name}");
+        assert_eq!(d.visibility, *visibility, "{name}");
+    }
+}
+
+#[test]
 fn extract_enum_members_are_definitions() {
     // Enum variants and members are definitions in the enum's scope and
     // take the enum's visibility; Python class attributes are fields.
@@ -450,7 +511,7 @@ const WALKER_CASES: &[(&str, &str)] = &[
         "package p\n\nimport \"fmt\"\n\nconst A, B = 1, 2\nvar (\n\tx int\n\ty, z = 1, 2\n)\nvar w = 3\n\ntype T[K any] struct { name, kind string }\ntype I interface { M(a int) error }\ntype Alias = T[int]\n\n\
          func (t *T[K]) M(a int) error { return nil }\nfunc (T) N() {}\nfunc (t *T[K]) O(xs ...int) {}\n\
          func f(a, b int, rest ...string) (int, error) {\n\tc := a + x\n\tvar d, e = b, c\n\tconst g = 1\n\tfor i, v := range rest { fmt.Println(i, v, d, e, g) }\n\t\
-         switch q := c.(type) { case int: _ = q }\n\tselect { case m := <-ch: _ = m }\n\tif h := f2(); h > 0 { return h, nil } else { return h, nil }\n\t\
+         switch q := c.(type) { case int: _ = q }\n\tselect { case m := <-ch: _ = m }\n\tselect { case w = <-ch: _ = w }\n\tfor x = range rest { _ = x }\n\tout, d := g2()\n\t_ = out\n\tif h := f2(); h > 0 { return h, nil } else { return h, nil }\n\t\
          fn := func(k int) int { return k + c }\n\treturn (fn)(1), t.M(2)\n}\n",
     ),
     (
@@ -476,7 +537,7 @@ const WALKER_CASES: &[(&str, &str)] = &[
          export abstract class Shape<T> extends Base implements IShape, Other {\n  private readonly id: number = 1;\n  #secret = 2;\n  abstract area(): number;\n  constructor(public x: number, private y?: string) { super(); }\n  \
          method({ a, b: [c] }: Opts, d = LIMIT, ...rest: number[]): void { this.#secret; c(); }\n  get size() { return this.id; }\n}\n\
          interface IShape { area(): number; name: string; [key: string]: unknown; }\ntype Alias<T> = T | null;\nenum Color { Red, Green = 2, 'Blue' }\nconst enum E { A }\n\
-         declare function overload(a: number): void;\nnamespace NS { export const inner = 1; }\ndeclare module 'mod' { }\nmodule Legacy { }\n\
+         declare function overload(a: number): void;\nnamespace NS { export const inner = 1; }\ndeclare module 'mod' { export const fromMod: number; }\nmodule Legacy { export var old = 1, older = 2; let hidden = old; export const { a1 } = obj; }\n\
          function outer(p: number) {\n  const inner = (q: number) => q + p;\n  function nested() { return inner(p); }\n  for (const k of keys) { use(k); }\n  for (let i = 0; i < 3; i++) { i; }\n  \
          try { } catch (err) { err; }\n  return new Shape.Sub() || new Thing() || require('x');\n}\nobj.handler = function (e) { e; };\nexport default b = 1;\nconst o = { m(x) { return x; }, f: async (y) => y, g: z => z };\n",
     ),

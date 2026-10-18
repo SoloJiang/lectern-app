@@ -42,8 +42,6 @@ ids! {
             function_type = "function_type",
             statement_list = "statement_list",
             short_var_declaration = "short_var_declaration",
-            range_clause = "range_clause",
-            receive_statement = "receive_statement",
             expression_list = "expression_list",
         }
         tokens {}
@@ -123,10 +121,9 @@ impl Go {
         }
         if parent.kind == k.expression_list {
             if let Some(owner) = up(stack, 2) {
-                let left = parent.field == k.f_left
-                    && (owner.kind == k.short_var_declaration
-                        || owner.kind == k.range_clause
-                        || owner.kind == k.receive_statement);
+                // Range and receive `:=` names are `@definition.lectern.local`,
+                // which tree-sitter-tags does not filter by.
+                let left = parent.field == k.f_left && owner.kind == k.short_var_declaration;
                 let alias = parent.field == k.f_alias && owner.kind == k.type_switch_statement;
                 return left || alias;
             }

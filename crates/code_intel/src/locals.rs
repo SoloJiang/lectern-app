@@ -247,6 +247,9 @@ struct RawDef {
     namespace: Namespace,
     /// The owner's range, for `local.visible "owner:…"`.
     owner: Option<Range<usize>>,
+    /// `local.redeclare "true"` (Go's `:=`): a use of an earlier
+    /// declaration in the same scope, when there is one.
+    redeclare: bool,
 }
 
 /// Collects scopes and definitions while the query runs.
@@ -400,6 +403,7 @@ impl Collector {
         let visible_to = owner.map_or(visible_to, |o| o.end_byte());
         let function_scope = property(props, "local.scope") == Some("function");
         let certain = property(props, "local.certain") != Some("false");
+        let redeclare = property(props, "local.redeclare") == Some("true");
         let namespace = match property(props, "local.namespace") {
             Some("type") => Namespace::Type,
             Some("both") => Namespace::Both,
@@ -416,6 +420,7 @@ impl Collector {
                 certain,
                 namespace,
                 owner: owner.map(|o| o.byte_range()),
+                redeclare,
             });
         }
     }
@@ -468,7 +473,7 @@ impl Collector {
         let mut raw = self.defs;
         raw.sort_by_key(|d| (d.range.start, d.range.end));
         raw.dedup_by(|b, a| a.range == b.range);
-        let mut defs: Vec<LocalDef> = raw
+        let mut defs: Vec<(LocalDef, bool)> = raw
             .into_iter()
             .map(|d| {
                 let mut scope = home(&scopes, &d.range);
@@ -497,7 +502,7 @@ impl Collector {
                         scope = b;
                     }
                 }
-                LocalDef {
+                let def = LocalDef {
                     visible_from: d.visible_from.unwrap_or(d.range.start),
                     visible_to: d.visible_to,
                     range: d.range,
@@ -505,10 +510,35 @@ impl Collector {
                     certain: d.certain,
                     namespace: d.namespace,
                     owned: d.owner.is_some(),
-                }
+                };
+                (def, d.redeclare)
             })
             .collect();
-        defs.sort_by_key(|d| d.range.start);
+        defs.sort_by_key(|(d, _)| d.range.start);
+        // Go's `:=` declares only the names new to its scope: one declared
+        // earlier in the same scope, or among the parameters and results
+        // when the scope is the function's body, is a use of that variable
+        // (a reference, resolved like any other).
+        let mut declared: std::collections::HashSet<(usize, &[u8])> =
+            std::collections::HashSet::new();
+        let defs: Vec<LocalDef> = defs
+            .into_iter()
+            .filter_map(|(def, redeclare)| {
+                let name = text.get(def.range.clone()).unwrap_or_default();
+                if redeclare {
+                    let function = scopes[def.scope]
+                        .parent
+                        .filter(|f| scopes[*f].body.as_ref() == Some(&scopes[def.scope].range));
+                    if declared.contains(&(def.scope, name))
+                        || function.is_some_and(|f| declared.contains(&(f, name)))
+                    {
+                        return None;
+                    }
+                }
+                declared.insert((def.scope, name));
+                Some(def)
+            })
+            .collect();
         let nonlocal = self
             .nonlocal
             .into_iter()

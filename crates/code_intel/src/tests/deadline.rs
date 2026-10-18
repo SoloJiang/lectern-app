@@ -111,6 +111,61 @@ fn deadline_pause_probe_cancels() {
 }
 
 #[test]
+fn deadline_checked_at_the_start() {
+    // A deadline already past or a pause already requested stops a small
+    // file at once, on both extraction paths and in `ParsedFile`, even when
+    // the watchdog's thread never gets to check (its loop never runs here).
+    let clock = ManualClock::new();
+    let watchdog = crate::Watchdog::new(Arc::new(clock.clone()), Box::new(|_| {}));
+    let table = LanguageTable::core();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let source = b"function a() { return 1; }\n";
+    let expired = Deadline::at(&watchdog, clock.now(), 1 << 20);
+    let paused =
+        Deadline::at(&watchdog, clock.now() + MINUTE, 1 << 20).with_pause(Arc::new(|| true));
+    let open = Deadline::at(&watchdog, clock.now() + MINUTE, 1 << 20);
+    for lang in ["js", "python", "go"] {
+        let l = table.get(lang).unwrap();
+        assert!(l.prepare());
+        assert_eq!(
+            extract(l, source, &open, &cancel).status,
+            ExtractStatus::Done,
+            "{lang}"
+        );
+        assert_eq!(
+            extract(l, source, &expired, &cancel).status,
+            ExtractStatus::TimedOut,
+            "{lang}"
+        );
+        assert_eq!(
+            extract(l, source, &paused, &cancel).status,
+            ExtractStatus::Cancelled,
+            "{lang}"
+        );
+        for (deadline, status) in [
+            (&expired, ExtractStatus::TimedOut),
+            (&paused, ExtractStatus::Cancelled),
+        ] {
+            let tagged = crate::extract::extract_tags(l, source, deadline, &cancel);
+            assert_eq!(tagged.status, status, "{lang} tags path");
+        }
+        let parsed = crate::site::ParsedFile::parse(
+            l,
+            Arc::from(&source[..]),
+            &clock,
+            clock.now(),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(
+            parsed.err(),
+            Some(crate::site::ParseError::TimedOut),
+            "{lang}"
+        );
+    }
+    assert_eq!(watchdog.in_flight(), 0);
+}
+
+#[test]
 fn deadline_watchdog_trips_at_the_deadline() {
     let executor = Executor::manual();
     let clock = ManualClock::new();

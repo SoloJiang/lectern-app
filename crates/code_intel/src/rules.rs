@@ -83,6 +83,50 @@ pub(crate) fn finish_with_refs(
     finish_inner(dialect, source, tags, Some(refs), Some(local_scopes))
 }
 
+/// The Rust `impl` blocks as containers: an `Impl` marker names the
+/// implemented type, an `ImplTrait` marker (on the `for` token) on the same
+/// block makes it a trait implementation. A trait implementation whose type
+/// has no name the queries take (`impl Trait for fn()`) is still one, with
+/// no name to give as `scope`.
+fn impl_containers(markers: &[(Marker, RawTag, Box<str>)]) -> Vec<Container> {
+    let trait_impls: HashSet<(usize, usize)> = markers
+        .iter()
+        .filter(|(marker, _, _)| *marker == Marker::ImplTrait)
+        .map(|(_, tag, _)| (tag.range.start, tag.range.end))
+        .collect();
+    let mut named: HashSet<(usize, usize)> = HashSet::new();
+    let mut out: Vec<Container> = markers
+        .iter()
+        .filter(|(marker, _, _)| *marker == Marker::Impl)
+        .map(|(_, tag, name)| {
+            let key = (tag.range.start, tag.range.end);
+            named.insert(key);
+            Container {
+                range: tag.range.clone(),
+                name: name.clone(),
+                def: None,
+                trait_impl: trait_impls.contains(&key),
+                parent: None,
+            }
+        })
+        .collect();
+    out.extend(
+        markers
+            .iter()
+            .filter(|(marker, tag, _)| {
+                *marker == Marker::ImplTrait && !named.contains(&(tag.range.start, tag.range.end))
+            })
+            .map(|(_, tag, _)| Container {
+                range: tag.range.clone(),
+                name: "".into(),
+                def: None,
+                trait_impl: true,
+                parent: None,
+            }),
+    );
+    out
+}
+
 /// For each container, whether its node lies strictly inside one of
 /// `scopes` (nested ranges, by start and outermost first); a scope with the
 /// container's own range is the scope the definition opens.
@@ -185,18 +229,7 @@ fn finish_inner(
             trait_impl: false,
             parent: None,
         })
-        .chain(
-            markers
-                .iter()
-                .filter(|(marker, _, _)| matches!(marker, Marker::Impl | Marker::ImplTrait))
-                .map(|(marker, tag, name)| Container {
-                    range: tag.range.clone(),
-                    name: name.clone(),
-                    def: None,
-                    trait_impl: *marker == Marker::ImplTrait,
-                    parent: None,
-                }),
-        )
+        .chain(impl_containers(&markers))
         .collect();
     let mut order: Vec<usize> = (0..containers.len()).collect();
     order.sort_by_key(|&i| {
@@ -278,7 +311,9 @@ fn finish_inner(
                 containers: &containers,
                 next: parent_of_def[i],
             };
-            let mut scope = parent_of_def[i].map(|p| containers[p].name.clone());
+            let mut scope = parent_of_def[i]
+                .map(|p| containers[p].name.clone())
+                .filter(|n| !n.is_empty());
             if dialect == Dialect::Go
                 && let Some(owner) = rules.owner(&tag.range)
             {

@@ -276,7 +276,7 @@ pub(crate) const FORMS: &[Form] = &[
             ],
             Value,
         ),
-        "值是函数或类时是函数或类；顶层（含 `export`、`declare`）的 `const` 是常量，`let` / `var` 是变量，解构时模式两层以内绑定的每个名字都是；都是局部绑定",
+        "值是函数或类时是函数或类；顶层（含 `export`、`declare`）的 `const` 是常量，`let` / `var` 是变量，解构时模式两层以内绑定的每个名字都是；TS 的 namespace / module 体里 `export` 的也是（只认单个名字）；都是局部绑定",
     ),
     form(
         TS,
@@ -823,9 +823,24 @@ pub(crate) const FORMS: &[Form] = &[
     ),
     form(GO, "parameter_declaration", Role::Local(Value), ""),
     form(GO, "qualified_type", Role::Use, "`pkg.T`"),
-    form(GO, "range_clause", Role::Local(Value), ""),
-    form(GO, "receive_statement", Role::Local(Value), ""),
-    form(GO, "short_var_declaration", Role::Local(Value), ""),
+    form(
+        GO,
+        "range_clause",
+        Role::Local(Value),
+        "只有 `:=`；`for i = range xs` 是赋值",
+    ),
+    form(
+        GO,
+        "receive_statement",
+        Role::Local(Value),
+        "只有 `:=`；`case v = <-ch` 是赋值",
+    ),
+    form(
+        GO,
+        "short_var_declaration",
+        Role::Local(Value),
+        "只有同一作用域里新的名字（函数体还要除去参数和结果）；已声明的名字是对它的使用",
+    ),
     form(
         GO,
         "type_alias",

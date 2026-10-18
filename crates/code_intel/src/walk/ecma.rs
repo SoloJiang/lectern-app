@@ -30,6 +30,7 @@ ids! {
             pair = "pair",
             export_statement = "export_statement",
             export_specifier = "export_specifier",
+            export_clause = "export_clause",
             import_statement = "import_statement",
             number = "number",
             string = "string",
@@ -181,11 +182,13 @@ impl Walker for Ecma {
             })
         {
             cx.scope(stack, false);
-        } else if kind == k.export_statement {
-            // (export_statement "export" @name) @reference.lectern.export
+        } else if kind == k.export_statement && self.in_program(stack, 1) {
+            // (program (export_statement "export" @name)
+            //   @reference.lectern.export)
             self.tokens(cx, me.node, k.t_export, Marker::Export);
-        } else if kind == k.import_statement {
-            // (import_statement "import" @name) @reference.lectern.module
+        } else if kind == k.import_statement && self.in_program(stack, 1) {
+            // (program (import_statement "import" @name)
+            //   @reference.lectern.module)
             self.tokens(cx, me.node, k.t_import, Marker::Module);
         }
         // (with_statement body: (_) @local.scope): a second scope on a
@@ -227,6 +230,11 @@ impl Ecma {
                 cx.marker(child, node, marker);
             }
         }
+    }
+
+    /// Whether the frame `level` above the last is the program.
+    fn in_program(&self, stack: &[Frame<'_>], level: usize) -> bool {
+        up(stack, level).is_some_and(|p| p.kind == self.k.program)
     }
 
     /// TS: a namespace or module body, or the block of `declare global`
@@ -405,6 +413,20 @@ impl Ecma {
         } else {
             return None;
         };
+        // TS: exported in a namespace or module body, a plain name only
+        // (ts/tags.scm).
+        if let Some(ts) = &self.ts
+            && level == 1
+            && declaration.field == k.f_declaration
+            && up(stack, level + 2).is_some_and(|e| e.kind == k.export_statement)
+            && let Some(body) = up(stack, level + 3)
+            && body.kind == k.statement_block
+            && body.field == k.f_body
+            && up(stack, level + 4)
+                .is_some_and(|m| m.kind == ts.internal_module || m.kind == ts.module)
+        {
+            return Some(constant);
+        }
         // TS: `declare const` sits in an ambient declaration
         // (ts/tags.scm).
         let mut level = level + 2;
@@ -527,10 +549,15 @@ impl Ecma {
             }
             // E10 (call, not `require`) and E12 (new) are `#is-not? local`
             // like the catch-all; a local name falls through to them.
-            // E15: (export_specifier name: (identifier)) and E16:
-            // (export_statement value: (identifier)) are markers.
-            if (name && p == k.export_specifier)
-                || (p == k.export_statement && me.field == k.f_value)
+            // E15: (program (export_statement (export_clause
+            // (export_specifier name: (identifier))))) and E16: (program
+            // (export_statement value: (identifier))) are markers.
+            if (name
+                && p == k.export_specifier
+                && up(stack, 2).is_some_and(|c| c.kind == k.export_clause)
+                && up(stack, 3).is_some_and(|s| s.kind == k.export_statement)
+                && self.in_program(stack, 4))
+                || (p == k.export_statement && me.field == k.f_value && self.in_program(stack, 2))
             {
                 cx.marker(me.node, parent.node, Marker::ExportName);
                 return;

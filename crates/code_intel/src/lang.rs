@@ -15,7 +15,7 @@ use crate::{DefKind, LangName};
 /// Bumped when the extractor's own rules change (visibility, parameter
 /// counts, scopes, markers, the core languages' walkers): every query
 /// version changes with it, so old results stop matching.
-pub const EXTRACTOR_VERSION: u32 = 3;
+pub const EXTRACTOR_VERSION: u32 = 4;
 
 /// The tree-sitter runtime and tags crate versions, pinned in the root
 /// `Cargo.toml` (ADR 0030; `lang_grammar_versions_match_lock`). Part of

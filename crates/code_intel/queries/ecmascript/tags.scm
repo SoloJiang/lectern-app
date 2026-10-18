@@ -344,14 +344,23 @@
 
 ; ---- markers -----------------------------------------------------------
 
-(export_statement
-  "export" @name) @reference.lectern.export
+; Program-level only: an `export` inside a TS namespace or module body
+; exports a member of it, and makes neither the file an ES module nor a
+; top-level name exported.
+(program
+  (export_statement
+    "export" @name) @reference.lectern.export)
 
-(export_specifier
-  name: (identifier) @name) @reference.lectern.export-name
+(program
+  (export_statement
+    (export_clause
+      (export_specifier
+        name: (identifier) @name) @reference.lectern.export-name)))
 
-(export_statement
-  value: (identifier) @name) @reference.lectern.export-name
+(program
+  (export_statement
+    value: (identifier) @name) @reference.lectern.export-name)
 
-(import_statement
-  "import" @name) @reference.lectern.module
+(program
+  (import_statement
+    "import" @name) @reference.lectern.module)

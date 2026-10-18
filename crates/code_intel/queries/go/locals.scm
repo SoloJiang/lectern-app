@@ -12,6 +12,9 @@
 ;   "end:KIND" binds from the end of the declaring KIND node, so
 ;   `x := x + 1` reads the earlier `x`; "body:KIND" binds from the start of
 ;   KIND's body (range variables);
+; - `local.redeclare "true"`: a `:=` name already declared in the same
+;   scope (or the function's parameters and results, for its body) is a use
+;   of the existing variable;
 ; - `local.scope-inherits false` on function scopes is for tree-sitter-tags
 ;   only: it filters references against the enclosing function's own locals.
 
@@ -53,10 +56,16 @@
   name: (identifier) @local.definition
   (#set! local.visible "scope"))
 
+; `:=` may redeclare: a name already declared earlier in the same block
+; (or among the parameters and results when the block is the function
+; body) is a use of that variable, not a new one (`local.redeclare`; Go
+; spec, Short variable declarations). tree-sitter-tags compares names only,
+; and such a name is already a local of the scope, so it filters the same.
 (short_var_declaration
   left: (expression_list
     (identifier) @local.definition)
-  (#set! local.visible "end:short_var_declaration"))
+  (#set! local.visible "end:short_var_declaration")
+  (#set! local.redeclare "true"))
 
 (statement_list
   (var_declaration
@@ -92,15 +101,24 @@
       (identifier) @local.definition))
   (#set! local.visible "scope"))
 
+; Only the `:=` forms declare: `for i = range xs` and `case v = <-ch`
+; assign to existing variables. A range clause starts a new for scope, so
+; its `:=` names are always new. Hidden from tree-sitter-tags: it handles
+; matches in the order they complete, and these complete at the `:=` after
+; the name, so the catch-all reference on the name would come first; not
+; filtering these names only adds reference names.
 (range_clause
   left: (expression_list
-    (identifier) @local.definition)
+    (identifier) @definition.lectern.local)
+  ":="
   (#set! local.visible "body:for_statement"))
 
 (receive_statement
   left: (expression_list
-    (identifier) @local.definition)
-  (#set! local.visible "end:receive_statement"))
+    (identifier) @definition.lectern.local)
+  ":="
+  (#set! local.visible "end:receive_statement")
+  (#set! local.redeclare "true"))
 
 (type_switch_statement
   alias: (expression_list

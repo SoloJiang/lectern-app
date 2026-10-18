@@ -193,6 +193,11 @@ impl ParsedFile {
                 ParseError::TimedOut
             }
         };
+        // A deadline already past or a cancellation already set: no work. A
+        // small file can be parsed before the progress callback runs.
+        if stop() {
+            return Err(interrupted());
+        }
         let mut parser = Parser::new();
         parser
             .set_language(lang.language())

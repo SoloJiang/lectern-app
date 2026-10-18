@@ -279,6 +279,18 @@ const SAMPLES: &[Sample] = &[
     ),
     (
         TS,
+        "variable_declarator",
+        "namespace Config { export const version = 1; }\n",
+        Defines("version", DefKind::Constant),
+    ),
+    (
+        TS,
+        "variable_declarator",
+        "declare module 'cfg' { export let mode: number; }\n",
+        Defines("mode", DefKind::Variable),
+    ),
+    (
+        TS,
         "abstract_class_declaration",
         "export abstract class Shape {}\n",
         Defines("Shape", DefKind::Class),
@@ -1189,9 +1201,9 @@ const VISIBILITY: &[(&str, &str, &[&str], &[&str])] = &[
     ),
     (
         "ts",
-        "export function outer() {\n  function helper() {}\n  class Local { m() {} }\n}\nexport namespace NS { export function inside() {} }\nexport class C { constructor(public prop: number) {} method() {} }\n{ function inBlock() {} }\n",
+        "export function outer() {\n  function helper() {}\n  class Local { m() {} }\n}\nexport namespace NS { export function inside() {} export const version = 1; }\nexport class C { constructor(public prop: number) {} method() {} }\n{ function inBlock() {} }\n",
         &["helper", "Local", "m", "inBlock"],
-        &["outer", "NS", "inside", "C", "prop", "method"],
+        &["outer", "NS", "inside", "version", "C", "prop", "method"],
     ),
     (
         "js",

@@ -44,17 +44,24 @@ ids! {
             match_arm = "match_arm",
             match_pattern = "match_pattern",
             let_declaration = "let_declaration",
+            primitive_type = "primitive_type",
+            reference_type = "reference_type",
+            pointer_type = "pointer_type",
+            array_type = "array_type",
+            tuple_type = "tuple_type",
         }
-        tokens {}
+        tokens {
+            t_for = "for",
+        }
         fields {
             f_name = "name",
             f_parameters = "parameters",
             f_body = "body",
-            f_trait = "trait",
             f_type = "type",
             f_function = "function",
             f_macro = "macro",
             f_pattern = "pattern",
+            f_element = "element",
         }
     }
 }
@@ -93,6 +100,20 @@ impl Walker for Rust {
         } else if kind == k.visibility_modifier {
             // (visibility_modifier) @name @reference.lectern.pub
             cx.marker(me.node, me.node, Marker::Pub);
+        } else if kind == k.primitive_type {
+            // The implemented type of an `impl` block, when it is primitive;
+            // no other pattern names a primitive type.
+            if let Some(implementation) = self.impl_of(stack) {
+                cx.marker(me.node, implementation, Marker::Impl);
+            }
+        } else if kind == k.impl_item {
+            // (impl_item "for" @name) @reference.lectern.impl-trait
+            let mut cursor = me.node.walk();
+            for child in me.node.children(&mut cursor) {
+                if child.kind_id() == k.t_for {
+                    cx.marker(child, me.node, Marker::ImplTrait);
+                }
+            }
         }
     }
 }
@@ -211,15 +232,9 @@ impl Rust {
                     return;
                 }
             }
-            // (impl_item trait: (_)? type: [T (generic_type type: T)
-            //   (scoped_type_identifier name: T)]) @reference.lectern.impl[-trait]
-            if let Some(implementation) = self.impl_of(stack, k.f_type) {
-                let marker = if implementation.child_by_field_id(k.f_trait).is_some() {
-                    Marker::ImplTrait
-                } else {
-                    Marker::Impl
-                };
-                cx.marker(me.node, implementation, marker);
+            // (impl_item type: …) @reference.lectern.impl
+            if let Some(implementation) = self.impl_of(stack) {
+                cx.marker(me.node, implementation, Marker::Impl);
                 return;
             }
         }
@@ -228,21 +243,43 @@ impl Rust {
         cx.reference(me.node);
     }
 
-    /// The `impl_item` whose `field` (type or trait) is the name being
-    /// visited, directly or as `generic_type.type` or
-    /// `scoped_type_identifier.name`.
-    fn impl_of<'t>(&self, stack: &[Frame<'t>], field: u16) -> Option<Node<'t>> {
+    /// The `impl_item` whose implemented type the name being visited (a
+    /// type identifier or a primitive type) names, as tags.scm spells it:
+    /// the name itself, a path's last segment or a generic type's own name,
+    /// inside at most two references, pointers, arrays or tuples (the first
+    /// element).
+    fn impl_of<'t>(&self, stack: &[Frame<'t>]) -> Option<Node<'t>> {
         let k = &self.0;
         let me = stack[stack.len() - 1];
-        let parent = up(stack, 1)?;
-        let (child, owner) = if (parent.kind == k.generic_type && me.field == k.f_type)
-            || (parent.kind == k.scoped_type_identifier && me.field == k.f_name)
-        {
-            (parent, up(stack, 2)?)
-        } else {
-            (&me, parent)
-        };
-        (owner.kind == k.impl_item && child.field == field).then_some(owner.node)
+        let mut level = 0;
+        let mut at = me;
+        if me.kind == k.type_identifier {
+            // (scoped_type_identifier name: T), then (generic_type type: …).
+            let parent = up(stack, level + 1)?;
+            if parent.kind == k.scoped_type_identifier && at.field == k.f_name {
+                level += 1;
+                at = *parent;
+            }
+            let parent = up(stack, level + 1)?;
+            if parent.kind == k.generic_type && at.field == k.f_type {
+                level += 1;
+                at = *parent;
+            }
+        }
+        for _ in 0..2 {
+            let parent = up(stack, level + 1)?;
+            let p = parent.kind;
+            let wrapped = ((p == k.reference_type || p == k.pointer_type) && at.field == k.f_type)
+                || (p == k.array_type && at.field == k.f_element)
+                || (p == k.tuple_type && parent.node.named_child(0) == Some(at.node));
+            if !wrapped {
+                break;
+            }
+            level += 1;
+            at = *parent;
+        }
+        let owner = up(stack, level + 1)?;
+        (owner.kind == k.impl_item && at.field == k.f_type).then_some(owner.node)
     }
 
     fn field_identifier(&self, cx: &mut Ctx<'_>, stack: &[Frame<'_>]) {

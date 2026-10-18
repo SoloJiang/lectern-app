@@ -108,6 +108,42 @@
             name: (identifier) @name) @definition.constant)))
   ])
 
+; Exported `const`, `let` and `var` in a namespace or module body
+; (`namespace Config { export const version = 1 }`): members, used as
+; `Config.version`. Unexported ones are locals of the body; destructuring
+; there is not indexed.
+[
+  (internal_module
+    body: (statement_block
+      (export_statement
+        declaration: (lexical_declaration
+          kind: "const"
+          (variable_declarator
+            name: (identifier) @name) @definition.constant))))
+  (module
+    body: (statement_block
+      (export_statement
+        declaration: (lexical_declaration
+          kind: "const"
+          (variable_declarator
+            name: (identifier) @name) @definition.constant))))
+]
+
+[
+  (internal_module
+    body: (statement_block
+      (export_statement
+        declaration: (_
+          (variable_declarator
+            name: (identifier) @name) @definition.variable))))
+  (module
+    body: (statement_block
+      (export_statement
+        declaration: (_
+          (variable_declarator
+            name: (identifier) @name) @definition.variable))))
+]
+
 (program
   [
     (ambient_declaration
