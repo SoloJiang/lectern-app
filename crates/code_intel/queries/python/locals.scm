@@ -11,8 +11,9 @@
 ;   the assignment;
 ; - `local.scope "function"`: an assignment expression binds in the
 ;   enclosing function, also inside a comprehension (PEP 572);
-; - `local.nonlocal`: names a `global` / `nonlocal` statement takes out of
-;   the function's scope;
+; - `local.nonlocal`: names a `global` ("global": the module's, past every
+;   enclosing function) or `nonlocal` ("true": an enclosing function's,
+;   never the module's) statement takes out of the function's scope;
 ; - `local.scope-inherits false` on function scopes is for tree-sitter-tags
 ;   only: it filters references against the enclosing function's own locals
 ;   (so a class body never hides a module name from a method).
@@ -132,7 +133,7 @@
 
 (global_statement
   (identifier) @local.reference
-  (#set! local.nonlocal "true"))
+  (#set! local.nonlocal "global"))
 
 (nonlocal_statement
   (identifier) @local.reference

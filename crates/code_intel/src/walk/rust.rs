@@ -20,6 +20,7 @@ ids! {
             declaration_list = "declaration_list",
             function_item = "function_item",
             function_signature_item = "function_signature_item",
+            function_type = "function_type",
             parameters = "parameters",
             parameter = "parameter",
             closure_expression = "closure_expression",
@@ -72,9 +73,13 @@ impl Walker for Rust {
         let me = stack[stack.len() - 1];
         let kind = me.kind;
         if kind == k.block || kind == k.for_expression || kind == k.match_arm {
-            cx.scope(stack.len() - 1, true);
-        } else if kind == k.function_item || kind == k.closure_expression {
-            cx.scope(stack.len() - 1, false);
+            cx.scope(stack, true);
+        } else if kind == k.function_item
+            || kind == k.closure_expression
+            || kind == k.function_signature_item
+            || kind == k.function_type
+        {
+            cx.scope(stack, false);
         }
         if self.local_definition(stack) {
             cx.local(me.node);

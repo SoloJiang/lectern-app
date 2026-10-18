@@ -39,7 +39,8 @@ ids! {
             enhanced_for_statement = "enhanced_for_statement",
             catch_clause = "catch_clause",
             try_with_resources_statement = "try_with_resources_statement",
-            switch_block_statement_group = "switch_block_statement_group",
+            switch_block = "switch_block",
+            switch_rule = "switch_rule",
             resource = "resource",
             instanceof_expression = "instanceof_expression",
             type_pattern = "type_pattern",
@@ -76,14 +77,15 @@ impl Walker for Java {
             || kind == k.enhanced_for_statement
             || kind == k.catch_clause
             || kind == k.try_with_resources_statement
-            || kind == k.switch_block_statement_group
+            || kind == k.switch_block
+            || kind == k.switch_rule
         {
-            cx.scope(stack.len() - 1, true);
+            cx.scope(stack, true);
         } else if kind == k.method_declaration
             || kind == k.constructor_declaration
             || kind == k.lambda_expression
         {
-            cx.scope(stack.len() - 1, false);
+            cx.scope(stack, false);
         } else if kind == k.modifiers {
             // (modifiers "private" @name) @reference.lectern.private
             let mut cursor = me.node.walk();

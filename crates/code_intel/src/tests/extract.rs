@@ -455,7 +455,7 @@ const WALKER_CASES: &[(&str, &str)] = &[
     ),
     (
         "python",
-        "import os\nfrom a import b as c\nLIMIT = 1\nx, y = 1, 2\n\nclass Base(object, metaclass=Meta):\n    count = 0\n    other: int = 1\n    @staticmethod\n    def make(cls, *args, key=None, **kw):\n        return cls(count)\n    \
+        "import os\nfrom a import b as c\nLIMIT = 1\nx, y = 1, 2\n[pa, *pb] = xs\n(pc, (pd, [pe, *pf])) = ys\n\nclass Base(object, metaclass=Meta):\n    count = 0\n    left, (right, *more) = 1, (2, 3)\n    other: int = 1\n    @staticmethod\n    def make(cls, *args, key=None, **kw):\n        return cls(count)\n    \
          def run(self, /, a, b: int = 2, *, c):\n        global LIMIT\n        LIMIT = a\n        return [v for v in self.items if (w := v)] + [w]\n    class Inner(Base):\n        size = count\n\n\
          @decorator\ndef top(p, q=LIMIT):\n    def helper(r):\n        nonlocal p\n        return r + p\n    with open(p) as fh, other() as (g, h):\n        pass\n    try:\n        pass\n    except E as err:\n        print(err)\n    \
          for k, (m, n) in items:\n        top(k)\n    lam = lambda s, t=1: s + t\n    q += 1\n    os.path.join(helper(q), lam(1))\n    return Base.make(q)\n",
@@ -472,7 +472,7 @@ const WALKER_CASES: &[(&str, &str)] = &[
     ),
     (
         "ts",
-        "import { a } from './a';\nexport { a as b };\nexport default thing;\nexport const LIMIT = 3, other = () => 1;\nlet counter = 0;\nvar legacy = 1;\nexport let flag = true;\n\
+        "import { a } from './a';\nexport { a as b };\nexport default thing;\nexport const LIMIT = 3, other = () => 1;\nlet counter = 0;\nvar legacy = 1;\nexport let flag = true;\nexport const { tx, ty: [tz] } = obj;\n\
          export abstract class Shape<T> extends Base implements IShape, Other {\n  private readonly id: number = 1;\n  #secret = 2;\n  abstract area(): number;\n  constructor(public x: number, private y?: string) { super(); }\n  \
          method({ a, b: [c] }: Opts, d = LIMIT, ...rest: number[]): void { this.#secret; c(); }\n  get size() { return this.id; }\n}\n\
          interface IShape { area(): number; name: string; [key: string]: unknown; }\ntype Alias<T> = T | null;\nenum Color { Red, Green = 2, 'Blue' }\nconst enum E { A }\n\
@@ -488,7 +488,7 @@ const WALKER_CASES: &[(&str, &str)] = &[
         "js",
         "const path = require('path');\nmodule.exports = { resolve, other: function () {} };\nexports.helper = (a) => a;\nclass Store extends Base {\n  items = [];\n  #count = 0;\n  static #hidden;\n  constructor(root) { super(); this.root = root; }\n  \
          *gen() { yield 1; }\n  async load(key) { const { [key]: value, ...rest } = this.cache; return value ?? rest; }\n}\nclass Sub extends mixins.Base {}\nconst Anon = class Named {};\n\
-         function* generator() {}\nconst fn = function named(x) { return named; };\nvar a = 1, b = function () {};\nlet c;\nfor (var i in obj) { i; }\nfor (x of y) { x; }\n\
+         function* generator() {}\nconst fn = function named(x) { return named; };\nvar a = 1, b = function () {};\nlet c;\nconst { p, q: r = 1, s = 2, ...t, n: { nn }, l: [l1] } = src;\nlet [u, , [v], { w }, ...z] = arr;\nexport var { deep: { inner: [notBound] } } = obj;\nfor (var i in obj) { i; }\nfor (x of y) { x; }\n\
          function hoisted() { return later(); function later() {} }\nexport default function () {}\nconst el = <Comp prop={value}><span>{text}</span><Other /></Comp>;\n",
     ),
 ];
@@ -496,8 +496,7 @@ const WALKER_CASES: &[(&str, &str)] = &[
 #[test]
 fn extract_walker_matches_tags() {
     // The walkers (crate::walk) follow the tags and locals queries: both
-    // paths give the same extraction for every source, except where
-    // tree-sitter's query engine drops a match (`known` below).
+    // paths give the same extraction for every source.
     let table = LanguageTable::core();
     let watchdog = test_watchdog();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -565,16 +564,6 @@ fn extract_walker_matches_tags() {
         }
     }
     watchdog.stop();
-    // tree-sitter's query engine keeps only the first name of a repeated
-    // field in this nested pattern (`(source_file (const_declaration
-    // (const_spec name: …)))`, both in tags.scm and locals.scm): `B` of
-    // `const A, B = 1, 2` is no definition there. The walker follows the
-    // pattern's meaning, so `B` is a definition and not a reference name.
-    let known = [
-        "go case: walker adds definition 5:9 constant B None public None",
-        "go case: walker lacks reference B",
-    ];
-    failures.retain(|f| !known.contains(&f.as_str()));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

@@ -32,10 +32,14 @@
 (type_alias
   name: (type_identifier) @name) @definition.type
 
+; Every name of `const A, B = 1, 2`: the grammar's `name` field of a
+; const_spec also spans the commas, and `name: (identifier)` in this nested
+; pattern matches only the first name. An identifier child of a const_spec
+; is always a name (types are type identifiers, values an expression list).
 (source_file
   (const_declaration
     (const_spec
-      name: (identifier) @name) @definition.constant))
+      (identifier) @name) @definition.constant))
 
 (source_file
   (var_declaration

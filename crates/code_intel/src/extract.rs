@@ -251,7 +251,13 @@ fn extract_walking(
         log(format_args!("parsing {} failed", lang.name().0));
         return Extraction::empty(ExtractStatus::Unsupported);
     };
-    let finished = rules::finish_with_refs(lang.dialect(), source, walked.tags, walked.refs);
+    let finished = rules::finish_with_refs(
+        lang.dialect(),
+        source,
+        walked.tags,
+        walked.refs,
+        &walked.local_scopes,
+    );
     Extraction {
         status: ExtractStatus::Done,
         defs: finished.defs.into_iter().map(|d| d.def).collect(),
@@ -321,11 +327,21 @@ pub(crate) fn extract_tags(
             return Extraction::empty(ExtractStatus::Unsupported);
         }
     };
+    // A core language's local scopes come from its locals query, as in
+    // `ParsedFile` (this path is the walkers' reference, and the fallback
+    // when a grammar has no walker); a language pack's scopes are not
+    // classified.
+    let scopes = if lang.lease().is_static() {
+        let flag = registration.slot().flag();
+        crate::site::local_scopes(lang, source, &|| flag.load(Ordering::Acquire) != 0)
+    } else {
+        None
+    };
     if registration.slot().tripped().is_some() {
         return interrupted(&registration);
     }
     drop(registration);
-    let finished = rules::finish(lang.dialect(), source, tags);
+    let finished = rules::finish(lang.dialect(), source, tags, scopes.as_deref());
     Extraction {
         status: ExtractStatus::Done,
         defs: finished.defs.into_iter().map(|d| d.def).collect(),

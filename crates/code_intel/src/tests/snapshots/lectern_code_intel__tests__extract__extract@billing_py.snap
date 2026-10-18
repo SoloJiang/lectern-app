@@ -9,7 +9,7 @@ defs:
   6:0-6 constant TAX_RATE [unknown]
   7:0-7 constant _registry [unknown]
   10:4-15 function register [unknown] (1)
-  11:8-13 function wrap in register [unknown] (1)
+  11:8-13 function wrap in register [file] (1)
   19:6-24 class Line [unknown]
   20:4-20 field description in Line [unknown]
   21:4-21 field amount in Line [unknown]

@@ -8,13 +8,13 @@ use std::sync::atomic::AtomicBool;
 use super::binding::{Binds, Candidates, Expect, Row, check};
 use super::extract::test_watchdog;
 use crate::DefKind;
-use crate::extract::{Deadline, LanguageTable, extract, extract_tags};
+use crate::extract::{Deadline, LanguageTable, Visibility, extract, extract_tags};
 use crate::forms::{FORMS, NAMING_FIELDS, Role, forms};
 use crate::locals::Namespace;
 
 const LANGS: &[&str] = &["ts", "tsx", "js", "rust", "java", "python", "go"];
 
-fn node_types(lang: &str) -> &'static str {
+pub(super) fn node_types(lang: &str) -> &'static str {
     match lang {
         "ts" => tree_sitter_typescript::TYPESCRIPT_NODE_TYPES,
         "tsx" => tree_sitter_typescript::TSX_NODE_TYPES,
@@ -234,6 +234,30 @@ const SAMPLES: &[Sample] = &[
         "variable_declarator",
         "export let count = 0;\n",
         Defines("count", DefKind::Variable),
+    ),
+    (
+        ECMA,
+        "variable_declarator",
+        "export const { a, b: renamed, ...rest } = obj;\n",
+        Defines("renamed", DefKind::Constant),
+    ),
+    (
+        ECMA,
+        "variable_declarator",
+        "const { deep: { inner = 1 }, list: [first] } = obj;\n",
+        Defines("inner", DefKind::Constant),
+    ),
+    (
+        ECMA,
+        "variable_declarator",
+        "let [x, , y = 1, ...tail] = arr;\n",
+        Defines("tail", DefKind::Variable),
+    ),
+    (
+        ECMA,
+        "variable_declarator",
+        "var [[p], { q }] = arr;\n",
+        Defines("q", DefKind::Variable),
     ),
     (
         ECMA,
@@ -787,6 +811,24 @@ const SAMPLES: &[Sample] = &[
     (
         &["python"],
         "assignment",
+        "A, B = load()\n",
+        Defines("B", DefKind::Constant),
+    ),
+    (
+        &["python"],
+        "assignment",
+        "first, *rest = items\n(p, [q, r]) = nested\n",
+        Defines("r", DefKind::Constant),
+    ),
+    (
+        &["python"],
+        "assignment",
+        "class A:\n    left, right = 1, 2\n",
+        Defines("right", DefKind::Field),
+    ),
+    (
+        &["python"],
+        "assignment",
         "def f():\n    total = 1\n    return total\n",
         Binding(Binds(("total", 0, 0)), ("total", 1)),
     ),
@@ -920,6 +962,12 @@ const SAMPLES: &[Sample] = &[
     (
         &["go"],
         "const_spec",
+        "package p\n\nconst A, B = 1, 2\n",
+        Defines("B", DefKind::Constant),
+    ),
+    (
+        &["go"],
+        "const_spec",
         "package p\n\nfunc f() int {\n\tconst kk = 2\n\treturn kk\n}\n",
         Binding(Binds(("kk", 0, 0)), ("kk", 1)),
     ),
@@ -1000,6 +1048,12 @@ const SAMPLES: &[Sample] = &[
         "var_spec",
         "package p\n\nvar Count int\n",
         Defines("Count", DefKind::Variable),
+    ),
+    (
+        &["go"],
+        "var_spec",
+        "package p\n\nvar a, b = load()\n",
+        Defines("b", DefKind::Variable),
     ),
     (
         &["go"],
@@ -1098,6 +1152,114 @@ fn forms_samples_extract_and_bind() {
                         failures.push(format!("{lang} {kind}: binding"));
                     }
                 }
+            }
+        }
+    }
+    watchdog.stop();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// (language, source, names that are local to the file, names that are
+/// not): definitions nested in functions and blocks, members of local and
+/// non-local classes.
+const VISIBILITY: &[(&str, &str, &[&str], &[&str])] = &[
+    (
+        "python",
+        "def register(kind):\n    def wrap(cls):\n        return cls\n    class Local:\n        size = 1\n        def run(self):\n            pass\n    return wrap\n\nclass Top:\n    class Inner:\n        def go(self):\n            pass\n",
+        &["wrap", "Local", "size", "run"],
+        &["register", "Top", "Inner", "go"],
+    ),
+    (
+        "rust",
+        "fn outer() {\n    fn helper() {}\n    struct Local { field: u8 }\n    impl Local { fn method(&self) {} }\n}\npub fn top() {}\nmod m { pub fn inner() {} }\nconst K: u8 = { fn in_const() -> u8 { 1 } in_const() };\n",
+        &["helper", "Local", "field", "method", "in_const"],
+        &["outer", "top", "inner", "K"],
+    ),
+    (
+        "java",
+        "class A {\n  void m() {\n    class Local { void run() {} }\n    Runnable r = new Runnable() { public void run2() {} };\n  }\n  static { class InStatic {} }\n  class Member { void go() {} }\n}\n",
+        &["Local", "run", "run2", "InStatic"],
+        &["A", "m", "Member", "go"],
+    ),
+    (
+        "go",
+        "package p\n\nfunc F() {\n\ttype local struct{ field int }\n\ttype iface interface{ M() }\n}\n\ntype Top struct{ Name string }\n",
+        &["local", "field", "iface", "M"],
+        &["F", "Top", "Name"],
+    ),
+    (
+        "ts",
+        "export function outer() {\n  function helper() {}\n  class Local { m() {} }\n}\nexport namespace NS { export function inside() {} }\nexport class C { constructor(public prop: number) {} method() {} }\n{ function inBlock() {} }\n",
+        &["helper", "Local", "m", "inBlock"],
+        &["outer", "NS", "inside", "C", "prop", "method"],
+    ),
+    (
+        "js",
+        "function outer() { function helper() {} }\nclass K { static { function inStatic() {} } }\nwith (o) { function inWith() {} }\n",
+        &["helper", "inStatic", "inWith"],
+        &["outer", "K"],
+    ),
+];
+
+#[test]
+fn forms_local_definitions_are_file_visible() {
+    // A definition whose node lies inside a local scope of the binding
+    // model (a function or block, not a class or namespace body) is local
+    // to the file in every language, and a member is as local as its
+    // class: checked against the scopes of the locals query (`ParsedFile`)
+    // on every forms sample and the cases above, and the walker's scopes
+    // (`extract`) give the same visibility.
+    let table = LanguageTable::core();
+    let watchdog = test_watchdog();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut failures = Vec::new();
+    let mut sources: BTreeSet<(&str, &str)> =
+        VISIBILITY.iter().map(|(l, s, _, _)| (*l, *s)).collect();
+    for (langs, _, source, _) in SAMPLES {
+        sources.extend(langs.iter().map(|l| (*l, *source)));
+    }
+    for (lang, source) in sources {
+        let file = super::site::parse(lang, source);
+        let (defs, scopes) = file.defs_and_local_scopes();
+        for d in defs {
+            let inside = scopes
+                .iter()
+                .any(|s| s.start <= d.range.start && d.range.end <= s.end && *s != d.range);
+            let member = matches!(d.def.kind, DefKind::Field | DefKind::Method);
+            if inside && !member && d.def.visibility != Visibility::File {
+                failures.push(format!(
+                    "{lang}: {} is in a local scope but {:?}",
+                    d.def.name, d.def.visibility
+                ));
+            }
+        }
+        let l = table.get(lang).unwrap();
+        let deadline = Deadline::interactive(&watchdog);
+        let walked = extract(l, source.as_bytes(), &deadline, &cancel);
+        let parsed: Vec<&crate::extract::Def> = defs.iter().map(|d| &d.def).collect();
+        let walked: Vec<&crate::extract::Def> = walked.defs.iter().collect();
+        if parsed != walked {
+            failures.push(format!(
+                "{lang}: the walker and ParsedFile differ on {source:?}"
+            ));
+        }
+    }
+    for (lang, source, local, not_local) in VISIBILITY {
+        let file = super::site::parse(lang, source);
+        let visibility = |name: &str| file.defs().find(|d| &*d.name == name).map(|d| d.visibility);
+        for name in *local {
+            if visibility(name) != Some(Visibility::File) {
+                failures.push(format!(
+                    "{lang}: {name} is {:?}, not File",
+                    visibility(name)
+                ));
+            }
+        }
+        for name in *not_local {
+            match visibility(name) {
+                None => failures.push(format!("{lang}: no definition {name}")),
+                Some(Visibility::File) => failures.push(format!("{lang}: {name} is File")),
+                Some(_) => {}
             }
         }
     }

@@ -604,6 +604,71 @@ fn site_binding_entry_points() {
 }
 
 #[test]
+fn site_binding_directives() {
+    // docs/design/code_intel.md「绑定规则」, 作用域指令: statements that move
+    // a name to another scope (Python's `global` / `nonlocal`) or make
+    // names resolve at run time (JS `with`).
+    check(
+        "python",
+        &[
+            Row {
+                what: "global skips every enclosing function",
+                source: "counter = 0\ndef outer():\n    counter = 1\n    def inner():\n        global counter\n        return counter\n",
+                reference: ("counter", 3),
+                expect: Binds(("counter", 0, 0)),
+            },
+            Row {
+                what: "nonlocal stops at the nearest enclosing function",
+                source: "counter = 0\ndef outer():\n    counter = 1\n    def inner():\n        nonlocal counter\n        return counter\n",
+                reference: ("counter", 3),
+                expect: Binds(("counter", 1, 0)),
+            },
+            Row {
+                what: "nonlocal passes an enclosing function without the name",
+                source: "def a():\n    total = 0\n    def b():\n        def c():\n            nonlocal total\n            return total\n",
+                reference: ("total", 2),
+                expect: Binds(("total", 0, 0)),
+            },
+            Row {
+                what: "nonlocal never binds the module's name",
+                source: "total = 0\ndef a():\n    def b():\n        nonlocal total\n        return total\n",
+                reference: ("total", 2),
+                expect: Free,
+            },
+            Row {
+                what: "a function inside one that declares global sees the module's name",
+                source: "counter = 0\ndef outer():\n    global counter\n    counter = 1\n    def inner():\n        return counter\n",
+                reference: ("counter", 3),
+                expect: Binds(("counter", 0, 0)),
+            },
+            Row {
+                what: "global at module level changes nothing",
+                source: "global counter\ncounter = 0\nuse(counter)\n",
+                reference: ("counter", 2),
+                expect: Binds(("counter", 1, 0)),
+            },
+        ],
+    );
+    check(
+        "js",
+        &[
+            Row {
+                what: "an outer name in a with body is only possible",
+                source: "function f(obj) {\n  const size = 1;\n  with (obj) { use(size); }\n}\n",
+                reference: ("size", 1),
+                expect: Candidates(&[("size", 0, 0)]),
+            },
+            Row {
+                what: "a var in a with body may still be the object's property",
+                source: "function f(obj) {\n  with (obj) { var total = 1; use(total); }\n}\n",
+                reference: ("total", 1),
+                expect: Candidates(&[("total", 0, 0)]),
+            },
+        ],
+    );
+}
+
+#[test]
 fn site_binding_namespaces() {
     // Type positions resolve to local types (type parameters, local type
     // declarations), other positions to local values.

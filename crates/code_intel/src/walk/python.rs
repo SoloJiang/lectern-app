@@ -14,6 +14,10 @@ ids! {
             type_alias_statement = "type_alias_statement",
             type_node = "type",
             generic_type = "generic_type",
+            pattern_list = "pattern_list",
+            tuple_pattern = "tuple_pattern",
+            list_pattern = "list_pattern",
+            list_splat_pattern = "list_splat_pattern",
             augmented_assignment = "augmented_assignment",
             class_definition = "class_definition",
             function_definition = "function_definition",
@@ -70,9 +74,10 @@ impl Walker for Python {
             || kind == k.dictionary_comprehension
             || kind == k.generator_expression
         {
-            cx.scope(stack.len() - 1, false);
+            cx.scope(stack, false);
         } else if kind == k.class_definition {
-            cx.scope(stack.len() - 1, true);
+            // Its definitions are members.
+            cx.member_scope(stack, true);
         }
         if self.local_definition(stack) {
             cx.local(me.node);
@@ -138,28 +143,29 @@ impl Python {
                 cx.def(me.node, alias.node, DefKind::Type, None);
                 return;
             }
-            // (module (expression_statement (assignment left: (identifier)
-            //   @name) @definition.constant))
-            if p == k.assignment && me.field == k.f_left {
-                let statement = up(stack, 2).filter(|s| s.kind == k.expression_statement);
-                let container = up(stack, 3);
-                if statement.is_some() && container.is_some_and(|m| m.kind == k.module) {
-                    cx.def(me.node, parent.node, DefKind::Constant, None);
-                    return;
-                }
+            // (module (expression_statement (assignment left: [(identifier)
+            //   (pattern_list …) (tuple_pattern …) (list_pattern …)])
+            //   @definition.constant)), and the same in a class body as
+            //   fields: the assignment's level above the name.
+            let target = self.assignment_target(stack);
+            if let Some(level) = target
+                && let Some(assignment) = up(stack, level)
+                && up(stack, level + 1).is_some_and(|s| s.kind == k.expression_statement)
+                && up(stack, level + 2).is_some_and(|m| m.kind == k.module)
+            {
+                cx.def(me.node, assignment.node, DefKind::Constant, None);
+                return;
             }
             if p == k.class_definition && me.field == k.f_name {
                 cx.def(me.node, parent.node, DefKind::Class, None);
                 return;
             }
-            // (class_definition body: (block (expression_statement
-            //   (assignment left: (identifier) @name) @definition.field)))
-            if p == k.assignment
-                && me.field == k.f_left
-                && up(stack, 2).is_some_and(|s| s.kind == k.expression_statement)
-                && self.class_body(stack, 3)
+            if let Some(level) = target
+                && let Some(assignment) = up(stack, level)
+                && up(stack, level + 1).is_some_and(|s| s.kind == k.expression_statement)
+                && self.class_body(stack, level + 2)
             {
-                cx.def(me.node, parent.node, DefKind::Field, None);
+                cx.def(me.node, assignment.node, DefKind::Field, None);
                 return;
             }
             if p == k.function_definition
@@ -197,6 +203,37 @@ impl Python {
         }
         // The plain call and the catch-all are `#is-not? local`.
         cx.nonlocal(me.node);
+    }
+
+    /// The level of the assignment whose `left` binds the name being
+    /// visited, as tags.scm spells it: the name itself, or a name (or
+    /// `*name`) in a pattern list, tuple or list pattern, one more tuple or
+    /// list pattern deep at most.
+    fn assignment_target(&self, stack: &[Frame<'_>]) -> Option<usize> {
+        let k = &self.0;
+        let me = stack[stack.len() - 1];
+        let mut level = 1;
+        let mut frame = up(stack, level)?;
+        if frame.kind == k.assignment {
+            return (me.field == k.f_left).then_some(level);
+        }
+        if frame.kind == k.list_splat_pattern {
+            level += 1;
+            frame = up(stack, level)?;
+        }
+        let pattern =
+            |kind: u16| kind == k.pattern_list || kind == k.tuple_pattern || kind == k.list_pattern;
+        if !pattern(frame.kind) {
+            return None;
+        }
+        // An inner tuple or list pattern, inside an outer pattern.
+        let outer = up(stack, level + 1)?;
+        if pattern(outer.kind) && frame.kind != k.pattern_list {
+            level += 1;
+            frame = outer;
+        }
+        let assignment = up(stack, level + 1)?;
+        (assignment.kind == k.assignment && frame.field == k.f_left).then_some(level + 1)
     }
 
     /// Whether the frame `level` above the last is a block in a class

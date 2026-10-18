@@ -37,7 +37,9 @@ ids! {
             type_switch_statement = "type_switch_statement",
             expression_case = "expression_case",
             type_case = "type_case",
+            default_case = "default_case",
             communication_case = "communication_case",
+            function_type = "function_type",
             statement_list = "statement_list",
             short_var_declaration = "short_var_declaration",
             range_clause = "range_clause",
@@ -77,14 +79,19 @@ impl Walker for Go {
             || kind == k.type_switch_statement
             || kind == k.expression_case
             || kind == k.type_case
+            || kind == k.default_case
             || kind == k.communication_case
         {
-            cx.scope(stack.len() - 1, true);
+            cx.scope(stack, true);
             return;
         }
-        if kind == k.function_declaration || kind == k.method_declaration || kind == k.func_literal
+        if kind == k.function_declaration
+            || kind == k.method_declaration
+            || kind == k.func_literal
+            || kind == k.method_elem
+            || kind == k.function_type
         {
-            cx.scope(stack.len() - 1, false);
+            cx.scope(stack, false);
             return;
         }
         if kind == k.identifier {
@@ -179,7 +186,8 @@ impl Go {
                 cx.def(me.node, parent.node, DefKind::Function, Some(params));
                 return;
             }
-            // (source_file (const_declaration (const_spec name: …)))
+            // (source_file (const_declaration (const_spec (identifier))));
+            // a const_spec's identifier children are its names.
             if parent.kind == k.const_spec
                 && me.field == k.f_name
                 && self.declaration_at(stack, 2, true)

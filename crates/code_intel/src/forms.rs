@@ -111,6 +111,12 @@ pub(crate) const FORMS: &[Form] = &[
     // ---- JavaScript, TypeScript, TSX ----
     form(
         ECMA,
+        "array_pattern",
+        Role::Part,
+        "解构：顶层声明里两层以内的名字是定义，见 variable_declarator",
+    ),
+    form(
+        ECMA,
         "arrow_function",
         Role::Local(Value),
         "`x => …` 的参数",
@@ -234,6 +240,12 @@ pub(crate) const FORMS: &[Form] = &[
     ),
     form(
         ECMA,
+        "object_pattern",
+        Role::Part,
+        "解构：顶层声明里两层以内的名字是定义，见 variable_declarator",
+    ),
+    form(
+        ECMA,
         "pair",
         def(&[(Function, CALLS_NEW)]),
         "值是函数时；其余是对象的键",
@@ -245,6 +257,7 @@ pub(crate) const FORMS: &[Form] = &[
         "解构：键是属性名，值是模式",
     ),
     form(ECMA, "regex", Role::Ignored, "正则的内容"),
+    form(ECMA, "rest_pattern", Role::Part, "解构的 `...rest`"),
     form(
         ECMA,
         "shorthand_property_identifier_pattern",
@@ -263,7 +276,7 @@ pub(crate) const FORMS: &[Form] = &[
             ],
             Value,
         ),
-        "值是函数或类时是函数或类；顶层（含 `export`、`declare`）的 `const` 是常量，`let` / `var` 是变量；都是局部绑定",
+        "值是函数或类时是函数或类；顶层（含 `export`、`declare`）的 `const` 是常量，`let` / `var` 是变量，解构时模式两层以内绑定的每个名字都是；都是局部绑定",
     ),
     form(
         TS,
@@ -664,7 +677,7 @@ pub(crate) const FORMS: &[Form] = &[
         PYTHON,
         "assignment",
         def_local(&[(Constant, CALLS), (Field, CALLS)], Value),
-        "模块顶层是常量，类体里是字段，都是局部绑定",
+        "模块顶层是常量，类体里是字段，解包（`A, B = …`、`first, *rest = …`）时两层以内的每个名字都是；都是局部绑定",
     ),
     form(PYTHON, "augmented_assignment", Role::Local(Value), ""),
     form(PYTHON, "binary_operator", Role::Ignored, "表达式"),
@@ -712,7 +725,7 @@ pub(crate) const FORMS: &[Form] = &[
         PYTHON,
         "global_statement",
         Role::Use,
-        "把名字移出函数作用域",
+        "作用域指令：名字是模块的，越过所有外层函数（「绑定规则」）",
     ),
     form(
         PYTHON,
@@ -728,15 +741,24 @@ pub(crate) const FORMS: &[Form] = &[
     ),
     form(PYTHON, "keyword_argument", Role::Use, "调用的关键字参数名"),
     form(PYTHON, "lambda_parameters", Role::Local(Value), ""),
+    form(PYTHON, "list_pattern", Role::Part, "解包，见 assignment"),
+    form(
+        PYTHON,
+        "list_splat_pattern",
+        Role::Part,
+        "解包的 `*rest`，见 assignment",
+    ),
     form(PYTHON, "named_expression", Role::Local(Value), "`:=`"),
     form(
         PYTHON,
         "nonlocal_statement",
         Role::Use,
-        "同 global_statement",
+        "作用域指令：名字是最近的有它的外层函数的，不找到模块",
     ),
     form(PYTHON, "pair", Role::Ignored, "字典的键"),
     form(PYTHON, "parameters", Role::Local(Value), "每个参数"),
+    form(PYTHON, "pattern_list", Role::Part, "解包，见 assignment"),
+    form(PYTHON, "tuple_pattern", Role::Part, "解包，见 assignment"),
     form(
         PYTHON,
         "type_alias_statement",
@@ -773,7 +795,7 @@ pub(crate) const FORMS: &[Form] = &[
         GO,
         "const_spec",
         def_local(&[(Constant, NONE)], Value),
-        "包级的是常量；函数里的是局部",
+        "包级的是常量（`const A, B` 的每个名字）；函数里的是局部",
     ),
     form(GO, "expression_list", Role::Part, "`:=`、`range` 等的左边"),
     form(

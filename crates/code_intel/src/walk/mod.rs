@@ -22,7 +22,7 @@ mod rust;
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Range};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -50,6 +50,9 @@ pub(crate) struct Ctx<'s> {
     tags: Vec<RawTag>,
     refs: HashSet<&'s [u8], crate::util::FastBuild>,
     scopes: Vec<Scope<'s>>,
+    /// The ranges of the scopes opened so far whose definitions are local
+    /// to the file (`locals::ScopeKind::is_local`), in document order.
+    local_scopes: Vec<Range<usize>>,
 }
 
 struct Scope<'s> {
@@ -71,6 +74,7 @@ impl<'s> Ctx<'s> {
                 inherits: false,
                 defs: Vec::new(),
             }],
+            local_scopes: Vec::new(),
         }
     }
 
@@ -78,10 +82,19 @@ impl<'s> Ctx<'s> {
         &self.src[node.byte_range()]
     }
 
-    /// A `@local.scope` capture at `depth` in the frame stack.
-    pub fn scope(&mut self, depth: usize, inherits: bool) {
+    /// A `@local.scope` capture of the last frame: a function or block,
+    /// whose definitions are local to the file.
+    pub fn scope(&mut self, stack: &[Frame<'_>], inherits: bool) {
+        self.local_scopes
+            .push(stack[stack.len() - 1].node.byte_range());
+        self.member_scope(stack, inherits);
+    }
+
+    /// A `@local.scope` capture of the last frame whose definitions are
+    /// members (a Python class body, a TS namespace body).
+    pub fn member_scope(&mut self, stack: &[Frame<'_>], inherits: bool) {
         self.scopes.push(Scope {
-            depth,
+            depth: stack.len() - 1,
             inherits,
             defs: Vec::new(),
         });
@@ -280,10 +293,12 @@ thread_local! {
     static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
 }
 
-/// The walk's result: definitions and markers, and reference names.
+/// The walk's result: definitions and markers, reference names, and the
+/// local scopes for `rules::finish`.
 pub(crate) struct Walked {
     pub tags: Vec<RawTag>,
     pub refs: Vec<Box<str>>,
+    pub local_scopes: Vec<Range<usize>>,
 }
 
 /// Parses `source` and walks it. None once `stop` is set (the watchdog's
@@ -390,6 +405,7 @@ fn walk(
     Some(Walked {
         tags: cx.tags,
         refs,
+        local_scopes: cx.local_scopes,
     })
 }
 

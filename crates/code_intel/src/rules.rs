@@ -55,8 +55,19 @@ struct Container {
     parent: Option<usize>,
 }
 
-pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Finished {
-    finish_inner(dialect, source, tags, None)
+/// `local_scopes`: the ranges of the file's local scopes (functions and
+/// blocks, not class or namespace bodies: `locals::ScopeKind::is_local`), by
+/// start and outermost first; a definition strictly inside one is
+/// `Visibility::File` in every language. None for a language pack, whose
+/// scopes Lectern does not classify: a definition inside a function or
+/// method definition is `File`.
+pub(crate) fn finish(
+    dialect: Dialect,
+    source: &[u8],
+    tags: Vec<RawTag>,
+    local_scopes: Option<&[Range<usize>]>,
+) -> Finished {
+    finish_inner(dialect, source, tags, None, local_scopes)
 }
 
 /// `finish` for the walkers (`crate::walk`): `tags` holds definitions and
@@ -67,8 +78,46 @@ pub(crate) fn finish_with_refs(
     source: &[u8],
     tags: Vec<RawTag>,
     refs: Vec<Box<str>>,
+    local_scopes: &[Range<usize>],
 ) -> Finished {
-    finish_inner(dialect, source, tags, Some(refs))
+    finish_inner(dialect, source, tags, Some(refs), Some(local_scopes))
+}
+
+/// For each container, whether its node lies strictly inside one of
+/// `scopes` (nested ranges, by start and outermost first); a scope with the
+/// container's own range is the scope the definition opens.
+fn inside_scopes(containers: &[Container], scopes: &[Range<usize>]) -> Vec<bool> {
+    let mut order: Vec<usize> = (0..containers.len()).collect();
+    order.sort_by_key(|&i| {
+        (
+            containers[i].range.start,
+            std::cmp::Reverse(containers[i].range.end),
+        )
+    });
+    let mut out = vec![false; containers.len()];
+    let mut open: Vec<&Range<usize>> = Vec::new();
+    let mut next = 0;
+    for i in order {
+        let r = &containers[i].range;
+        // Open the scopes that start before the definition, or at its start
+        // and end after it.
+        while let Some(s) = scopes.get(next)
+            && (s.start < r.start || s.start == r.start && s.end > r.end)
+        {
+            while open.last().is_some_and(|t| t.end <= s.start) {
+                open.pop();
+            }
+            open.push(s);
+            next += 1;
+        }
+        while open.last().is_some_and(|t| t.end <= r.start) {
+            open.pop();
+        }
+        out[i] = open
+            .iter()
+            .any(|t| t.start <= r.start && r.end <= t.end && *t != r);
+    }
+    out
 }
 
 fn finish_inner(
@@ -76,6 +125,7 @@ fn finish_inner(
     source: &[u8],
     tags: Vec<RawTag>,
     ref_names: Option<Vec<Box<str>>>,
+    local_scopes: Option<&[Range<usize>]>,
 ) -> Finished {
     let text = |r: &Range<usize>| {
         source
@@ -185,6 +235,41 @@ fn finish_inner(
 
     let rules = FileRules::new(dialect, &markers);
     let lines = LineIndex::new(source);
+    // Local to the file: a definition inside a function or block. A member
+    // (a field or method, a TS parameter property inside its constructor
+    // included) is as local as the class or `impl` block it belongs to; a
+    // member whose nearest container is a function or method belongs to an
+    // anonymous class there, and is local by its own position.
+    let local: Vec<bool> = match local_scopes {
+        Some(scopes) => {
+            let inside = inside_scopes(&containers, scopes);
+            let kind_of = |c: usize| containers[c].def.map(|d| defs[d].1);
+            (0..defs.len())
+                .map(|i| {
+                    let mut c = i;
+                    while matches!(kind_of(c), Some(DefKind::Field | DefKind::Method))
+                        && let Some(p) = containers[c].parent
+                        && !matches!(kind_of(p), Some(DefKind::Function | DefKind::Method))
+                    {
+                        c = p;
+                    }
+                    inside[c]
+                })
+                .collect()
+        }
+        None => (0..defs.len())
+            .map(|i| {
+                Ancestors {
+                    containers: &containers,
+                    next: parent_of_def[i],
+                }
+                .any(|c| {
+                    c.def
+                        .is_some_and(|d| matches!(defs[d].1, DefKind::Function | DefKind::Method))
+                })
+            })
+            .collect(),
+    };
     let mut out: Vec<FileDef> = defs
         .iter()
         .enumerate()
@@ -199,12 +284,18 @@ fn finish_inner(
             {
                 scope = Some(owner.into());
             }
-            let visibility = rules.visibility(
-                tag,
-                *kind,
-                name,
-                ancestors.map(|c| (c, c.def.map(|d| (&defs[d].0, defs[d].1)))),
-            );
+            // Inside a function or block: local to the file, in every
+            // language (docs/design/code_intel.md「抽取结果」).
+            let visibility = if local[i] {
+                Visibility::File
+            } else {
+                rules.visibility(
+                    tag,
+                    *kind,
+                    name,
+                    ancestors.map(|c| (c, c.def.map(|d| (&defs[d].0, defs[d].1)))),
+                )
+            };
             let arity = matches!(kind, DefKind::Function | DefKind::Method)
                 .then(|| tag.params.as_deref().map(|p| count_params(p, dialect)))
                 .flatten();

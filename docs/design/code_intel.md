@@ -762,7 +762,8 @@ pub enum Visibility {
 - `visibility` 和 `arity` 由每种语言的一个小函数得出；规则变化时 `EXTRACTOR_VERSION` 加一。tree-sitter-tags 只交出 tag、不交出语法树，所以函数读的是查询为它捕获的内容：
   - 标记：`@reference.lectern.<种类>` 的捕获只给抽取规则用，不进入引用名。Rust 的 `pub`（`visibility_modifier`）、`impl` 块与它实现的类型（区分 trait 实现），Java 的 `private`，JS / TS 的 `export` 语句、`export { name }` 与 `export default name` 导出的名字、`import` 语句，Go 方法的接收者类型。
   - 参数列表：函数、方法的模式用 `@doc` 捕获参数列表节点（tags 把它的文本放在 `Tag::docs`），按括号、尖括号、字符串和注释的嵌套数顶层的逗号。Rust 的 `self` 接收者和 Python 的 `*`、`/` 分隔符不计数；没有括号的参数列表（`x => x`）是 1 个。查询不再用 `@doc` 捕获注释。
-  - 规则：Rust 有 `pub` 的项、trait 和 trait 实现里的成员、宏是 `Public`，其余 `Module`；Java 有 `private` 的是 `File`，其余 `Public`；Go 大写开头的是 `Public`，其余 `Package`；Python 和语言包是 `Unknown`。JS / TS：函数体里的定义是 `File`；其余取最外层定义的可见性：在 `export` 语句里或名字被导出时是 `Public`，文件有 `import` / `export`（ES 模块）时是 `File`，没有时（脚本、CommonJS）是 `Public`。
+  - 局部定义：定义节点严格位于一个局部作用域之内的，在每种语言里都是 `File`，不再看下面按语言的规则。局部作用域是 locals 查询的作用域里除文件本身、类体（Python）和命名空间体（TS 的 namespace、module、`declare global`）之外的全部（「作用域形式」），由作用域的种类推出，不按语言写规则：遍历在同一遍里记下它们，tags 路径（核心语言）和 `ParsedFile` 取查询的结果。成员（字段、方法，含 TS 构造器里的参数属性）取它所属的类或 `impl` 块的位置，所以局部类的成员是 `File`，顶层类在构造器参数里声明的字段不是；最近的容器是函数或方法时（匿名类的成员），取自己的位置。语言包的作用域不分类，函数或方法定义里面的定义是 `File`。
+  - 规则：Rust 有 `pub` 的项、trait 和 trait 实现里的成员、宏是 `Public`，其余 `Module`；Java 有 `private` 的是 `File`，其余 `Public`；Go 大写开头的是 `Public`，其余 `Package`；Python 和语言包是 `Unknown`。JS / TS：函数里的定义（如命名函数表达式的名字）是 `File`；其余取最外层定义的可见性：在 `export` 语句里或名字被导出时是 `Public`，文件有 `import` / `export`（ES 模块）时是 `File`，没有时（脚本、CommonJS）是 `Public`。
 - 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。核心语言的定义取同一棵语法树上 `walk` 的结果，与索引里的定义一致；语言包的定义取查询的结果。解析、查询和遍历都按 `ParsedFile` 自己的截止时间和取消标志停止（解析和查询在进度回调里检查，遍历每 1024 个节点检查一次），返回之前再检查一次，所以截止时间之后不会交出结果。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
 
 ### 外部格式（tags 查询）
@@ -781,9 +782,9 @@ pub enum Visibility {
 
 - 引用到标识符的模式带 `(#is-not? local)`：locals 解析到局部定义的引用不进入引用名（tree-sitter-tags 只对带这个谓词的模式过滤）。
 - 每种语言的 tags 查询最后有一组兜底的引用模式：locals 没有解析到的每个标识符（`@reference.name`），以及每个成员名（`@reference.member`：Rust、Go 的 `field_identifier`，JS / TS 的 `property_identifier`，Java 的 `field_access.field`，Python 的 `attribute.attribute`；成员名不带 locals 谓词）。查引用第 1 步只经 `ci_ref` 选出已入索引的候选文件，只有调用、类型这类模式时，`let v = PUBLIC_CONSTANT;`、`obj.field` 所在的文件不会被选中。兜底模式要放在全部定义模式之后：tree-sitter-tags 对一个名字节点保留模式序号最小的 tag，排在前面的兜底模式会顶掉后面的定义。JS / TS 的兜底模式因此单独放在 `ecmascript/references.scm`，拼在每种语言的最后。
-- locals 查询也把嵌套的函数和类的名字记为 `@local.definition`（Python 的 `def` 和 `class`，JS / TS 的函数和类声明，Rust 块里的 `fn`，Java 块里的局部类和记录）。声明本身也是一个作用域，名字在它的范围之内；`ParsedFile` 把作为作用域节点 `name` 字段的定义放进外层作用域，所以 `def outer(): def helper(): …; helper()` 里的调用绑定到 `helper`。Go 没有嵌套的具名函数。
+- locals 查询也把嵌套的函数和类的名字记为 `@local.definition`（Python 的 `def` 和 `class`，JS / TS 的函数和类声明，Rust 块里的 `fn`，Java 块里的局部类和记录）。声明本身也是一个作用域，名字在它的范围之内；`ParsedFile` 把作为函数或类作用域节点 `name` 字段的定义放进外层作用域，所以 `def outer(): def helper(): …; helper()` 里的调用绑定到 `helper`。块作用域的 `name` 字段是它绑定的名字（Java 增强 `for` 的变量），留在块里。Go 没有嵌套的具名函数。
 - `(identifier) @local.reference` 也会匹配成员名、路径段和关键字参数（Java 的 `items.add`、`this.add`，Python 的 `obj.x`、`f(x=1)`，Rust 的 `Queue::new`）。`ParsedFile` 按每种语言的一张表（`site.rs` 的 `NON_VARIABLE_POSITIONS`）把这些位置排除在局部引用之外，位置分析在这些位置上、以及语法种类为 `Member`、`MemberCall` 时都不做局部绑定。JS / TS 和 Go 的成员名本来就是另一种节点。
-- 核心语言的抽取不经 tree-sitter-tags 的迭代器（[ADR 0031](../adr/0031.md)）：`walk` 模块为每种语言（JS / TS / TSX 共用一份）写了一次遍历，解析后按前序访问每个具名节点，在名字节点上按这种语言 tags 查询里模式的顺序判断它是定义、标记还是引用（第一个成立的模式生效，与 tree-sitter-tags 每个名字节点只留一个 tag、序号小的模式优先相同），带 `#is-not? local` 的引用按 tree-sitter-tags 的规则过滤（按名字比较之前出现的、所在作用域链上的 `@local.definition` 捕获的文本，遇到不继承的作用域停止），定义和标记交给与 tags 路径相同的 `rules::finish`。查询仍是规格：改 tags 或 locals 查询时同时改 `walk/<语言>.rs`，`extract_walker_matches_tags` 对全部夹具、每种语言逐个模式的样例、64 KiB 的语料和病态输入检查两条路径的抽取结果相同。唯一列出的差异是 tree-sitter 查询引擎丢掉的匹配：嵌套模式里重复字段的第二个名字（Go 包级的 `const A, B = 1, 2` 只匹配到 `A`，tags 和 locals 查询都是），遍历按模式的含义把 `B` 也记为定义。节点种类和字段按名字解析成 ID，grammar 里缺少其中一个时这种语言退回 tags 路径并记一条日志。语言包仍用 tree-sitter-tags。
+- 核心语言的抽取不经 tree-sitter-tags 的迭代器（[ADR 0031](../adr/0031.md)）：`walk` 模块为每种语言（JS / TS / TSX 共用一份）写了一次遍历，解析后按前序访问每个具名节点，在名字节点上按这种语言 tags 查询里模式的顺序判断它是定义、标记还是引用（第一个成立的模式生效，与 tree-sitter-tags 每个名字节点只留一个 tag、序号小的模式优先相同），带 `#is-not? local` 的引用按 tree-sitter-tags 的规则过滤（按名字比较之前出现的、所在作用域链上的 `@local.definition` 捕获的文本，遇到不继承的作用域停止），定义和标记交给与 tags 路径相同的 `rules::finish`。查询仍是规格：改 tags 或 locals 查询时同时改 `walk/<语言>.rs`，`extract_walker_matches_tags` 对全部夹具、每种语言逐个模式的样例、64 KiB 的语料和病态输入检查两条路径的抽取结果相同，没有允许的差异。Go 的 `const_spec` 的 `name` 字段也包含逗号，嵌套模式里的 `name: (identifier)` 只匹配到 `const A, B = 1, 2` 的 `A`，所以 tags 和 locals 查询写成 `(const_spec (identifier))`（`const_spec` 的标识符子节点只有名字）。节点种类和字段按名字解析成 ID，grammar 里缺少其中一个时这种语言退回 tags 路径并记一条日志。语言包仍用 tree-sitter-tags。
 - 夹具：`crates/code_intel/tests/fixtures/extract/<语言>/` 下每种语言若干真实写法的样本（类、方法、闭包、重载、嵌套模块、导出与非导出、宏），抽取结果用 insta 快照；grammar 或查询升级时快照的变化在 PR 里逐个看过。另有一份病态输入（深度嵌套、超长行）用于截止时间的测试。
 
 ### 定义形式
@@ -798,6 +799,7 @@ pub enum Visibility {
 <!-- forms:begin -->
 | 语言 | 节点 | 处理 | 说明 |
 |---|---|---|---|
+| js ts tsx | `array_pattern` | 组成部分 | 解构：顶层声明里两层以内的名字是定义，见 variable_declarator |
 | js ts tsx | `arrow_function` | 局部（值） | `x => …` 的参数 |
 | js ts tsx | `assignment_expression` | 定义 Function（Call、MemberCall、Construct） | 右边是函数时（`f = () => …`、`obj.f = function () {}`）；其余是赋值 |
 | js ts tsx | `assignment_pattern` | 组成部分 | 参数和解构的默认值：左边绑定，右边是用处 |
@@ -826,11 +828,13 @@ pub enum Visibility {
 | js ts tsx | `member_expression` | 引用 | `a.b` |
 | js ts tsx | `method_definition` | 定义 Method（Call、MemberCall） | `constructor` 不是定义（`new C` 指向类）；计算出的名字不记 |
 | js ts tsx | `object_assignment_pattern` | 组成部分 | 解构的默认值 |
+| js ts tsx | `object_pattern` | 组成部分 | 解构：顶层声明里两层以内的名字是定义，见 variable_declarator |
 | js ts tsx | `pair` | 定义 Function（Call、MemberCall、Construct） | 值是函数时；其余是对象的键 |
 | js ts tsx | `pair_pattern` | 组成部分 | 解构：键是属性名，值是模式 |
 | js ts tsx | `regex` | 忽略 | 正则的内容 |
+| js ts tsx | `rest_pattern` | 组成部分 | 解构的 `...rest` |
 | js ts tsx | `shorthand_property_identifier_pattern` | 组成部分 | 解构的简写 |
-| js ts tsx | `variable_declarator` | 定义 Function（Call、MemberCall、Construct）、Class（Construct、Type）、Constant（Call、MemberCall、Construct）、Variable（Call、MemberCall、Construct）；局部（值） | 值是函数或类时是函数或类；顶层（含 `export`、`declare`）的 `const` 是常量，`let` / `var` 是变量；都是局部绑定 |
+| js ts tsx | `variable_declarator` | 定义 Function（Call、MemberCall、Construct）、Class（Construct、Type）、Constant（Call、MemberCall、Construct）、Variable（Call、MemberCall、Construct）；局部（值） | 值是函数或类时是函数或类；顶层（含 `export`、`declare`）的 `const` 是常量，`let` / `var` 是变量，解构时模式两层以内绑定的每个名字都是；都是局部绑定 |
 | ts tsx | `abstract_class_declaration` | 定义 Class（Type）；局部（值和类型） |  |
 | ts tsx | `abstract_method_signature` | 定义 Method（Call、MemberCall） |  |
 | ts tsx | `ambient_declaration` | 组成部分 | `declare const` / `let` / `var` 见 variable_declarator，`declare function` 见 function_signature |
@@ -930,7 +934,7 @@ pub enum Visibility {
 | java | `variable_declarator` | 组成部分 | 见所在的声明 |
 | python | `aliased_import` | 忽略 | import：经索引解析 |
 | python | `as_pattern` | 局部（值） | `with … as x`、`except … as x` |
-| python | `assignment` | 定义 Constant（Call、MemberCall）、Field（Call、MemberCall）；局部（值） | 模块顶层是常量，类体里是字段，都是局部绑定 |
+| python | `assignment` | 定义 Constant（Call、MemberCall）、Field（Call、MemberCall）；局部（值） | 模块顶层是常量，类体里是字段，解包（`A, B = …`、`first, *rest = …`）时两层以内的每个名字都是；都是局部绑定 |
 | python | `augmented_assignment` | 局部（值） |  |
 | python | `binary_operator` | 忽略 | 表达式 |
 | python | `boolean_operator` | 忽略 | 表达式 |
@@ -943,22 +947,26 @@ pub enum Visibility {
 | python | `for_statement` | 局部（值） |  |
 | python | `function_definition` | 定义 Function（Call、MemberCall）、Method（Call、MemberCall）；局部（值） | 类体里的是方法 |
 | python | `future_import_statement` | 忽略 | import |
-| python | `global_statement` | 引用 | 把名字移出函数作用域 |
+| python | `global_statement` | 引用 | 作用域指令：名字是模块的，越过所有外层函数（「绑定规则」） |
 | python | `import_from_statement` | 忽略 | import：经索引解析 |
 | python | `import_statement` | 忽略 | import：经索引解析 |
 | python | `keyword_argument` | 引用 | 调用的关键字参数名 |
 | python | `lambda_parameters` | 局部（值） |  |
+| python | `list_pattern` | 组成部分 | 解包，见 assignment |
+| python | `list_splat_pattern` | 组成部分 | 解包的 `*rest`，见 assignment |
 | python | `named_expression` | 局部（值） | `:=` |
-| python | `nonlocal_statement` | 引用 | 同 global_statement |
+| python | `nonlocal_statement` | 引用 | 作用域指令：名字是最近的有它的外层函数的，不找到模块 |
 | python | `pair` | 忽略 | 字典的键 |
 | python | `parameters` | 局部（值） | 每个参数 |
+| python | `pattern_list` | 组成部分 | 解包，见 assignment |
+| python | `tuple_pattern` | 组成部分 | 解包，见 assignment |
 | python | `type_alias_statement` | 定义 Type | `type X = …` |
 | python | `type_parameter` | 局部（值） | `def f[T]()`，在声明它的函数或类里可见 |
 | python | `typed_default_parameter` | 局部（值） | 类型和默认值在外层作用域求值 |
 | python | `typed_parameter` | 局部（值） | 类型在外层作用域求值 |
 | go | `assignment_statement` | 忽略 | 给已有的变量赋值 |
 | go | `binary_expression` | 忽略 | 表达式 |
-| go | `const_spec` | 定义 Constant；局部（值） | 包级的是常量；函数里的是局部 |
+| go | `const_spec` | 定义 Constant；局部（值） | 包级的是常量（`const A, B` 的每个名字）；函数里的是局部 |
 | go | `expression_list` | 组成部分 | `:=`、`range` 等的左边 |
 | go | `field_declaration` | 定义 Field（MemberCall） | 函数类型的字段可以被调用 |
 | go | `function_declaration` | 定义 Function（Call、MemberCall） |  |
@@ -982,30 +990,213 @@ pub enum Visibility {
 | go | `variadic_parameter_declaration` | 局部（值） |  |
 <!-- forms:end -->
 
+### 作用域形式
+
+「定义形式」的对应表：每种首发语言里可能开出词法作用域的节点种类，locals 查询是否在那里开作用域、开哪一种，它绑定什么，哪些部分在外层作用域求值（`src/tests/scopes.rs` 的 `SCOPES`）。局部绑定（「绑定规则」）和局部定义的可见性（「抽取结果」）都由这些作用域决定。
+
+- 覆盖：grammar 的 `node-types.json` 里看起来可能开作用域的具名节点都必须有一行，即使只是「不开」：种类是 `block`，或以 `_clause`、`_block`、`_case`、`_body`、`_arm`、`_comprehension`、`_initializer`、`_group`、`_rule` 结尾，或带 `body`、`parameters`、`parameter`、`consequence`、`alternative`、`condition`、`initializer` 字段，或以 `_statement` 结尾且带 `left`、`value` 字段（循环头、`switch` 的初始化）。`scopes_cover_grammar` 检查这一点，并检查每一行的种类在 grammar 里存在；没被这个启发式选中、但需要说明的种类（Rust 的 `let_condition`、TS 的 `ambient_declaration`）也可以列出。
+- 与查询一致：`scopes_match_locals_query` 在样例上运行每种语言的 locals 查询，查询开出的每个作用域都对应表里同种类、同类型的一行（命名空间体和 `with` 体的作用域捕获在 `statement_block` 等子节点上，对应父节点的那一行），表里每个开作用域的行都在它的样例上被查询开出。
+- 样例：每个开作用域的行都有绑定样例（同一文件的 `SAMPLES`），`scopes_samples_bind` 按「绑定规则」的期望检查，多数样例检查作用域里的声明在作用域之外不绑定。
+- 本表与代码里的表一致，由 `scopes_table_matches_design` 检查；改表时按测试打印的内容替换两个标记之间的部分。
+- 「作用域」一列：函数（tree-sitter-tags 一侧不继承；`var` 和 Python 的 `:=` 放进这里）、块、类体（只对直接写在类体里的代码可见）、命名空间（照常绑定，但其中的定义是成员，不是局部）、动态（JS 的 `with` 体，见「绑定规则」的作用域指令）、不开。
+
+<!-- scopes:begin -->
+| 语言 | 节点 | 作用域 | 绑定 | 在外层求值 |
+|---|---|---|---|---|
+| js ts tsx | `arrow_function` | 函数 | 参数 |  |
+| js ts tsx | `catch_clause` | 块 | `catch (e)` 的参数 |  |
+| js ts tsx | `class` | 不开 | 类表达式的名字只在类里可见（不建模，经索引找到） |  |
+| js ts tsx | `class_body` | 不开 | 成员经 `this` 访问，不是局部绑定 |  |
+| js ts tsx | `class_declaration` | 不开 | 类名绑定在外层的块里 |  |
+| js ts tsx | `class_static_block` | 不开 | 它的 `statement_block` 开块作用域 |  |
+| js ts tsx | `do_statement` | 不开 | 循环体的块开作用域 |  |
+| js ts tsx | `else_clause` | 不开 |  |  |
+| js ts tsx | `export_clause` | 不开 | 导出名，不绑定 |  |
+| js ts tsx | `export_statement` | 不开 |  |  |
+| js ts tsx | `finally_clause` | 不开 |  |  |
+| js ts tsx | `for_in_statement` | 块 | `for (const x of …)` / `for (let k in …)` 的变量 |  |
+| js ts tsx | `for_statement` | 块 | `for (let i …)` 的变量 |  |
+| js ts tsx | `function_declaration` | 函数 | 参数；函数名绑定在外层（提升） |  |
+| js ts tsx | `function_expression` | 函数 | 参数；名字只在函数里可见（不建模，经索引找到） |  |
+| js ts tsx | `generator_function` | 函数 | 同 `function_expression` |  |
+| js ts tsx | `generator_function_declaration` | 函数 | 同 `function_declaration` |  |
+| js ts tsx | `if_statement` | 不开 |  |  |
+| js ts tsx | `import_clause` | 不开 | import 经索引解析 |  |
+| js ts tsx | `labeled_statement` | 不开 | 标签不是绑定 |  |
+| js ts tsx | `method_definition` | 函数 | 参数 | 计算出的方法名（`[key]() {}`）；TS 的参数装饰器 |
+| js ts tsx | `statement_block` | 块 | `let` / `const` / `class` / 函数声明；TS 的 namespace / module 体是命名空间 |  |
+| js ts tsx | `switch_body` | 块 | 各 `case` 里的 `let` / `const`：整个 switch 体 |  |
+| js ts tsx | `switch_case` | 不开 | 属于 `switch_body` |  |
+| js ts tsx | `switch_default` | 不开 | 属于 `switch_body` |  |
+| js ts tsx | `switch_statement` | 不开 | `switch_body` 开块作用域 |  |
+| js ts tsx | `ternary_expression` | 不开 |  |  |
+| js ts tsx | `try_statement` | 不开 |  |  |
+| js ts tsx | `while_statement` | 不开 |  |  |
+| js ts tsx | `with_statement` | 动态 | 体是动态作用域：体里声明的名字照常绑定，体外的声明只是候选（名字可能是对象的属性） | 对象表达式 |
+| ts tsx | `abstract_class_declaration` | 不开 | 类名绑定在外层的块里 |  |
+| ts tsx | `abstract_method_signature` | 函数 | 参数只在签名里 |  |
+| ts tsx | `ambient_declaration` | 命名空间 | `declare global { … }` 的块是命名空间，同 `internal_module` |  |
+| ts tsx | `call_signature` | 函数 | 参数只在签名里 |  |
+| ts tsx | `conditional_type` | 不开 | `infer U` 的类型名不建模 |  |
+| ts tsx | `construct_signature` | 函数 | 参数只在签名里 |  |
+| ts tsx | `constructor_type` | 函数 | 参数只在类型里 |  |
+| ts tsx | `enum_body` | 不开 | 成员不是局部绑定 |  |
+| ts tsx | `enum_declaration` | 不开 | 枚举名绑定在外层的块里 |  |
+| ts tsx | `extends_clause` | 不开 |  |  |
+| ts tsx | `extends_type_clause` | 不开 |  |  |
+| ts tsx | `function_signature` | 函数 | 参数只在签名里 |  |
+| ts tsx | `function_type` | 函数 | 参数只在类型里 |  |
+| ts tsx | `implements_clause` | 不开 |  |  |
+| ts tsx | `import_require_clause` | 不开 | import 经索引解析 |  |
+| ts tsx | `interface_body` | 不开 | 成员不是局部绑定 |  |
+| ts tsx | `interface_declaration` | 不开 | 接口名绑定在外层的块里（类型） |  |
+| ts tsx | `internal_module` | 命名空间 | 体（`statement_block`）是命名空间：照常绑定，但其中的定义是成员（`NS.x`），不是局部 |  |
+| ts tsx | `mapped_type_clause` | 不开 | 键名只在映射类型里（`owner` 规则） |  |
+| ts tsx | `method_signature` | 函数 | 参数只在签名里 |  |
+| ts tsx | `module` | 命名空间 | 同 `internal_module` |  |
+| rust | `async_block` | 不开 | 它的 `block` 开块作用域 |  |
+| rust | `base_field_initializer` | 不开 |  |  |
+| rust | `block` | 块 | `let`（从声明结束起）、块里的项（整个块） |  |
+| rust | `closure_expression` | 函数 | 参数 |  |
+| rust | `const_block` | 不开 | 它的 `block` 开块作用域 |  |
+| rust | `else_clause` | 不开 | `if let` 的模式在 `else` 里不可见（见 `let_condition`） |  |
+| rust | `enum_item` | 不开 | 变体是定义，不是局部 |  |
+| rust | `enum_variant` | 不开 |  |  |
+| rust | `field_initializer` | 不开 |  |  |
+| rust | `for_expression` | 块 | 模式，从循环体开始 | 被迭代的表达式 |
+| rust | `foreign_mod_item` | 不开 | 项是定义，不是局部 |  |
+| rust | `function_item` | 函数 | 参数 |  |
+| rust | `function_signature_item` | 函数 | 参数只在签名里 |  |
+| rust | `function_type` | 函数 | 参数只在类型里 |  |
+| rust | `gen_block` | 不开 | 它的 `block` 开块作用域 |  |
+| rust | `if_expression` | 不开 | `if let` 见 `let_condition` |  |
+| rust | `impl_item` | 不开 | 项是定义，不是局部 |  |
+| rust | `let_condition` | 不开 | 模式从条件结束起，到 `else` 之前（`while let`：到循环结束） |  |
+| rust | `let_declaration` | 不开 | 模式从声明结束起；`let … else` 的 `else` 块看不到它 |  |
+| rust | `loop_expression` | 不开 | 循环体的块开作用域 |  |
+| rust | `macro_rule` | 不开 | 宏的元变量不建模 |  |
+| rust | `match_arm` | 块 | 模式（守卫和分支体里） |  |
+| rust | `match_block` | 不开 |  |  |
+| rust | `match_expression` | 不开 |  |  |
+| rust | `match_pattern` | 不开 | 属于 `match_arm` |  |
+| rust | `mod_item` | 不开 | 项是定义，不是局部 |  |
+| rust | `shorthand_field_initializer` | 不开 |  |  |
+| rust | `struct_expression` | 不开 |  |  |
+| rust | `struct_item` | 不开 |  |  |
+| rust | `trait_item` | 不开 | 项是定义，不是局部 |  |
+| rust | `try_block` | 不开 | 它的 `block` 开块作用域 |  |
+| rust | `union_item` | 不开 |  |  |
+| rust | `unsafe_block` | 不开 | 它的 `block` 开块作用域 |  |
+| rust | `use_as_clause` | 不开 | import 经索引解析 |  |
+| rust | `where_clause` | 不开 |  |  |
+| rust | `while_expression` | 不开 | `while let` 见 `let_condition` |  |
+| java | `annotation_type_body` | 不开 | 成员 |  |
+| java | `annotation_type_declaration` | 不开 |  |  |
+| java | `array_initializer` | 不开 |  |  |
+| java | `block` | 块 | 局部变量（从声明符结束起）、局部类 |  |
+| java | `catch_clause` | 块 | catch 参数 |  |
+| java | `class_body` | 不开 | 成员 |  |
+| java | `class_declaration` | 不开 |  |  |
+| java | `compact_constructor_declaration` | 不开 | 体是块；记录的分量是字段，不建模为参数 |  |
+| java | `constructor_body` | 不开 | 属于构造器的函数作用域 |  |
+| java | `constructor_declaration` | 函数 | 参数 |  |
+| java | `do_statement` | 不开 |  |  |
+| java | `element_value_array_initializer` | 不开 |  |  |
+| java | `enhanced_for_statement` | 块 | 循环变量，从循环体开始 | 被迭代的表达式 |
+| java | `enum_body` | 不开 | 成员 |  |
+| java | `enum_constant` | 不开 | 常量的类体是成员 |  |
+| java | `enum_declaration` | 不开 |  |  |
+| java | `finally_clause` | 不开 |  |  |
+| java | `for_statement` | 块 | 初始化里的变量 |  |
+| java | `if_statement` | 不开 | `instanceof` 的模式变量不确定（见「定义形式」） |  |
+| java | `interface_body` | 不开 | 成员 |  |
+| java | `interface_declaration` | 不开 |  |  |
+| java | `lambda_expression` | 函数 | 参数 |  |
+| java | `method_declaration` | 函数 | 参数 |  |
+| java | `module_body` | 不开 |  |  |
+| java | `module_declaration` | 不开 |  |  |
+| java | `record_declaration` | 不开 | 分量是字段 |  |
+| java | `record_pattern_body` | 不开 | 模式变量不确定 |  |
+| java | `static_initializer` | 不开 | 它的块开块作用域 |  |
+| java | `switch_block` | 块 | 各组里的局部变量：从声明到 switch 块结束，后面的组也看得到（JLS 6.3） |  |
+| java | `switch_block_statement_group` | 不开 | 属于 `switch_block` |  |
+| java | `switch_expression` | 不开 | `switch_block` 开块作用域 |  |
+| java | `switch_rule` | 块 | `case … ->` 的模式变量和体 |  |
+| java | `synchronized_statement` | 不开 |  |  |
+| java | `ternary_expression` | 不开 |  |  |
+| java | `try_statement` | 不开 |  |  |
+| java | `try_with_resources_statement` | 块 | 资源变量，从声明结束起 |  |
+| java | `while_statement` | 不开 |  |  |
+| python | `block` | 不开 | Python 的块不开作用域 |  |
+| python | `case_clause` | 不开 | `case` 的捕获绑定所在的函数 |  |
+| python | `class_definition` | 类体 | 类体里的名字只对类体直接可见，方法里看不到 | 基类 |
+| python | `dictionary_comprehension` | 函数 | `for` 的变量；`:=` 越过它绑定所在的函数 | 第一个 `for` 的可迭代对象 |
+| python | `elif_clause` | 不开 |  |  |
+| python | `else_clause` | 不开 |  |  |
+| python | `except_clause` | 不开 | `as` 的名字是函数的局部变量（离开子句时被删除，不建模） |  |
+| python | `finally_clause` | 不开 |  |  |
+| python | `for_in_clause` | 不开 | 属于推导式 |  |
+| python | `for_statement` | 不开 | 循环变量是函数的局部变量 |  |
+| python | `function_definition` | 函数 | 参数 | 默认值、参数注解、返回注解 |
+| python | `generator_expression` | 函数 | 同 `dictionary_comprehension` | 第一个 `for` 的可迭代对象 |
+| python | `if_clause` | 不开 | 属于推导式 |  |
+| python | `if_statement` | 不开 |  |  |
+| python | `lambda` | 函数 | 参数 | 默认值 |
+| python | `list_comprehension` | 函数 | 同 `dictionary_comprehension` | 第一个 `for` 的可迭代对象 |
+| python | `match_statement` | 不开 |  |  |
+| python | `set_comprehension` | 函数 | 同 `dictionary_comprehension` | 第一个 `for` 的可迭代对象 |
+| python | `try_statement` | 不开 |  |  |
+| python | `type_alias_statement` | 不开 | 类型参数只在语句里（`within` 规则） |  |
+| python | `while_statement` | 不开 |  |  |
+| python | `with_clause` | 不开 | `as` 的名字是函数的局部变量 |  |
+| python | `with_statement` | 不开 |  |  |
+| go | `assignment_statement` | 不开 | 给已有的变量赋值 |  |
+| go | `block` | 块 | `:=`、`var`、`const`（从声明结束起） |  |
+| go | `communication_case` | 块 | `case v := <-ch` 的变量和分支里的声明 |  |
+| go | `composite_literal` | 不开 |  |  |
+| go | `default_case` | 块 | 分支里的声明 |  |
+| go | `expression_case` | 块 | 分支里的声明 |  |
+| go | `expression_switch_statement` | 块 | 初始化语句的变量 |  |
+| go | `for_clause` | 不开 | 属于 `for_statement` |  |
+| go | `for_statement` | 块 | 初始化语句和 `range` 的变量（`range` 的从循环体开始） |  |
+| go | `func_literal` | 函数 | 参数和结果 |  |
+| go | `function_declaration` | 函数 | 参数和结果 |  |
+| go | `function_type` | 函数 | 参数只在类型里 |  |
+| go | `if_statement` | 块 | 初始化语句的变量（`else` 里也可见） |  |
+| go | `method_declaration` | 函数 | 接收者、参数和结果 |  |
+| go | `method_elem` | 函数 | 参数只在签名里 |  |
+| go | `package_clause` | 不开 |  |  |
+| go | `range_clause` | 不开 | 属于 `for_statement` |  |
+| go | `receive_statement` | 不开 | `v := <-ch` 的变量属于外层 |  |
+| go | `send_statement` | 不开 |  |  |
+| go | `type_case` | 块 | 分支里的声明 |  |
+| go | `type_switch_statement` | 块 | `switch v := x.(type)` 的别名（每个分支里） |  |
+<!-- scopes:end -->
+
 ### 绑定规则
 
 `ParsedFile` 的局部绑定（`site.rs` 和 `locals.rs`）按下面的规则解析。规则写在每种语言的 locals 查询里，以模式属性的形式出现，tree-sitter-tags 不读这些属性：
 
-- 作用域的 `local.kind`：`function`（函数、方法、闭包、lambda）、`comprehension`（Python 的推导式，是函数作用域，但 `:=` 跳过它）、`class`（Python 的类体）。没有这个属性的作用域是块，文件本身是函数作用域。
-- 定义的 `local.scope "function"`：定义放进最近的函数作用域（JS 的 `var`、Python 的 `:=`）；这个函数的 `body` 是作用域时（JS 的语句块）放进 `body`，参数的默认值看不到它。没有这个属性时放进包含它的最内层作用域。作为作用域节点 `name` 字段的定义（函数名、类名）放进外层作用域。
+- 作用域的 `local.kind`：`function`（函数、方法、闭包、lambda，以及签名和函数类型：它们的参数只在签名里）、`comprehension`（Python 的推导式，是函数作用域，但 `:=` 跳过它）、`class`（Python 的类体）、`namespace`（TS 的 namespace、module 和 `declare global` 的体：按块绑定，其中的定义是成员）、`dynamic`（JS 的 `with` 体，见下面的作用域指令）。没有这个属性的作用域是块，文件本身是函数作用域。同一个节点被捕获两次时（一个语句块也是命名空间体或 `with` 体）取不是块的那一种。每种节点开哪种作用域见「作用域形式」。
+- 定义的 `local.scope "function"`：定义放进最近的函数作用域（JS 的 `var`、Python 的 `:=`）；这个函数的 `body` 是作用域时（JS 的语句块）放进 `body`，参数的默认值看不到它。没有这个属性时放进包含它的最内层作用域。作为函数或类作用域节点 `name` 字段的定义（函数名、类名）放进外层作用域；块作用域的 `name` 字段是它绑定的名字（Java 增强 `for` 的变量），留在块里。
 - 定义的 `local.visible`，决定从哪里开始可见：`scope` 是整个作用域，包括声明之前的位置（提升）；`end:<种类>` 从最近的这种节点结束处开始（`let x = x + 1;` 右边的 `x` 是之前的 `x`）；`body:<种类>` 从这种节点的 `body` 开始（`for x in x.iter()`）；`owner:<种类>` 只在最近的这种节点的父节点之内（类型参数在声明它的类、函数或项里），`within:<种类>` 只在最近的这种节点之内（Python 的 `type A[T] = …`），这两种定义放进这个节点外面的作用域，所以它包含的方法也看得到；没有这个属性时从名字本身开始。
 - 定义的 `local.namespace`：`type`（类型参数、局部接口和类型别名）或 `both`（类、结构体、枚举，Go 的类型参数），没有时是值。类型位置的引用（`type_identifier`）只找类型和两者，其余位置只找值和两者；限定名的后几段（`a::B`、`ns.T`、`pkg.T`、Java 的 `Outer.Inner`）不找局部定义。
 - 定义的 `local.until "<字段>:<种类>|<种类>"`，决定到哪里结束可见：到最近的这类节点的这个字段开始处，节点没有这个字段时到节点结束。只有 Rust 的 `if let` / `while let` 用它，绑定不进入 `else` 分支，也不越过 `while` 的结尾。
 - 定义的 `local.certain "false"`：可见范围取决于控制流的形式（Java 的 `instanceof` 模式和记录模式），只给候选，不给绑定。
-- 引用的 `local.nonlocal "true"`：Python 的 `global`、`nonlocal` 语句里的名字，把这个名字移出所在函数的作用域。
+- 引用的 `local.nonlocal`：Python 的 `global`（`"global"`）、`nonlocal`（`"true"`）语句里的名字，把这个名字移出所在函数的作用域，见下面的作用域指令。
 - 捕获的节点可以是一个模式（`{a, b: [c]}`、`(a, *rest)`、`Some(v)`、`Point { x, y: z }`），`locals.rs` 把它展开成它绑定的名字。构造器和路径（`Some`、`Point`）、默认值、类型标注、键、属性和下标目标（`obj.count = 1`）不绑定名字；Rust 模式里大写开头的名字是单元变体或常量（`None`、`MAX`），不绑定。
 
-**安全不变式**：只有规则表明一个声明在引用处可见时，局部绑定才成立，才挡住索引里的候选（`Bound(Local)`，直接跳转）。外层作用域里同名、但在引用处不确定可见的声明（在不提升的形式里声明在引用之后、可见范围取决于控制流、被 `global` 移出）只作为候选（`Site::possible`，本文件的候选排在前面），这时仍查询索引，不会直接跳到别的文件，也不会直接跳到一个不在作用域里的局部声明。
+**安全不变式**：只有规则表明一个声明在引用处可见时，局部绑定才成立，才挡住索引里的候选（`Bound(Local)`，直接跳转）。外层作用域里同名、但在引用处不确定可见的声明（在不提升的形式里声明在引用之后、可见范围取决于控制流、被 `global` / `nonlocal` 移出、引用在 `with` 体里而声明在体外）只作为候选（`Site::possible`，本文件的候选排在前面），这时仍查询索引，不会直接跳到别的文件，也不会直接跳到一个不在作用域里的局部声明。
 
-解析：从引用的求值作用域（包含它的最内层作用域；它在这个作用域节点的「作用域入口」部分里时，是外面那个作用域）向外找同名、同命名空间的定义。离开一个函数或类体之后，再遇到的类体跳过（类体里的名字只对直接写在类体里的代码可见，对其中的方法和嵌套类不可见）。在一个作用域里，取引用之前最后一个可见的声明；没有时取引用之后的提升声明。找到确定的声明就是绑定；找到不确定的声明，结果只有候选。
+解析：从引用的求值作用域（包含它的最内层作用域；它在这个作用域节点的「作用域入口」部分里时，是外面那个作用域）向外找同名、同命名空间的定义。离开一个函数或类体之后，再遇到的类体跳过（类体里的名字只对直接写在类体里的代码可见，对其中的方法和嵌套类不可见）。在一个作用域里，取引用之前最后一个可见的声明；没有时取引用之后的提升声明。找到确定的声明就是绑定；找到不确定的声明，结果只有候选。作用域指令改变向外找的路径，见下面的表。
 
 | 语言 | 声明形式与可见范围 | 作用域 | 提升 | 模式 |
 |---|---|---|---|---|
-| JS / TS | `let`、`const`、`class` 声明：所在块，整个块（闭包可以在声明之前引用）；`var`：最近的函数的函数体，整个函数体；函数声明：所在块，整个块；参数、`catch` 参数：整个函数或子句；`for (let … of …)` / `for (var …)`：循环或函数体。TS：类型参数在声明它的类、接口、类型别名或函数里（类型）；映射类型的键在映射类型里（类型）；接口、类型别名（类型）和枚举、抽象类（两者）在所在块，整个块 | 块（语句块、`for`、`for…in`）；函数（函数、箭头函数、生成器、方法） | 函数声明、`var`、TS 的类型声明 | 对象和数组的解构，`= 默认值`和键不绑定；解构赋值（没有 `let` / `const` / `var`）不是声明 |
+| JS / TS | `let`、`const`、`class` 声明：所在块，整个块（闭包可以在声明之前引用）；`var`：最近的函数的函数体，整个函数体；函数声明：所在块，整个块；参数、`catch` 参数：整个函数或子句；`for (let … of …)` / `for (var …)`：循环或函数体。TS：类型参数在声明它的类、接口、类型别名或函数里（类型）；映射类型的键在映射类型里（类型）；接口、类型别名（类型）和枚举、抽象类（两者）在所在块，整个块 | 块（语句块、`for`、`for…in`、`catch`、`switch` 体）；函数（函数、箭头函数、生成器、方法；TS 的签名和函数类型）；命名空间（TS 的 namespace / module 体）；动态（`with` 体） | 函数声明、`var`、TS 的类型声明 | 对象和数组的解构，`= 默认值`和键不绑定；解构赋值（没有 `let` / `const` / `var`）不是声明 |
 | Python | 参数、赋值目标、增量赋值、`for` 目标、`with` / `except … as`、`match` 的捕获、`def`、`class`：所在函数的整个作用域；`:=`：最近的函数，跳过推导式；推导式的 `for` 目标：推导式；类型参数（`def f[T]`、`class C[T]`、`type A[T] = …`）：在声明它的函数、类或别名里，类的类型参数在方法里也可见 | 函数（函数、lambda）；推导式；类体（只对直接写在类体里的代码可见） | 函数作用域里的所有名字（赋值之前的引用也绑定到它） | 元组、列表和星号目标；属性和下标目标不绑定；`match` 里只有单段的名字、`*rest`、`**rest` 和 `as` 绑定，类名、关键字、带点的值和映射的键不绑定 |
-| Rust | `let`：从声明结束处到块结束；`if let` / `while let`：从这个 `let` 结束处到 `if` 的 `else` 之前或 `while` 结束；`for` 模式：循环体；`match` 分支模式：整个分支（含守卫）；参数、闭包参数：整个函数；块里的 `fn`、`const`、`static`（值）、`struct`（两者）、`enum`、`union`、`trait`、`type`（类型）：整个块；类型参数（类型）和 const 参数（值）：在声明它的项里，含 `where` 子句和 `impl` 的方法 | 块、`for`、`match` 分支；函数（`fn`、闭包） | 块里的项 | 元组、元组结构体、结构体（字段简写和改名）、引用和 `@` 模式；构造器、路径、范围、宏和大写开头的名字不绑定 |
-| Java | 局部变量：从声明符结束处到块结束；增强 `for` 变量：循环体；`try` 资源：从资源结束处；方法、构造器、lambda 的参数和 `catch` 参数：整个方法或子句（记录头里的组件不是局部，是记录的字段）；块里的局部类、记录、枚举、接口（两者）：从名字开始；类型参数（类型）：在声明它的类或方法里；`instanceof` 模式、记录模式：不确定 | 块、`for`、增强 `for`、`catch`、`try` 资源、`switch` 分组；函数（方法、构造器、lambda） | 无 | 记录模式的组件（不确定） |
-| Go | `:=`：从语句结束处；函数里的 `var`、`const`：从这一项结束处；包级的 `var`、`const`：整个文件（与顺序无关）；`range` 变量：循环体；`select` 的接收语句：从语句结束处；参数、类型 `switch` 的别名：整个函数或语句；类型参数（两者）：在声明它的函数或类型里 | 块、`for`、`if`、`switch`、各 `case`；函数（函数、方法、函数字面量） | 包级 `var`、`const` | 多变量声明 |
+| Rust | `let`：从声明结束处到块结束；`if let` / `while let`：从这个 `let` 结束处到 `if` 的 `else` 之前或 `while` 结束；`for` 模式：循环体；`match` 分支模式：整个分支（含守卫）；参数、闭包参数：整个函数；块里的 `fn`、`const`、`static`（值）、`struct`（两者）、`enum`、`union`、`trait`、`type`（类型）：整个块；类型参数（类型）和 const 参数（值）：在声明它的项里，含 `where` 子句和 `impl` 的方法 | 块、`for`、`match` 分支；函数（`fn`、闭包、没有函数体的签名、函数指针类型） | 块里的项 | 元组、元组结构体、结构体（字段简写和改名）、引用和 `@` 模式；构造器、路径、范围、宏和大写开头的名字不绑定 |
+| Java | 局部变量：从声明符结束处到块结束；增强 `for` 变量：循环体；`try` 资源：从资源结束处；方法、构造器、lambda 的参数和 `catch` 参数：整个方法或子句（记录头里的组件不是局部，是记录的字段）；块里的局部类、记录、枚举、接口（两者）：从名字开始；类型参数（类型）：在声明它的类或方法里；`instanceof` 模式、记录模式：不确定 | 块、`for`、增强 `for`、`catch`、`try` 资源、`switch` 块（一个块里的声明在后面的分组里也可见）、`case … ->` 规则；函数（方法、构造器、lambda） | 无 | 记录模式的组件（不确定） |
+| Go | `:=`：从语句结束处；函数里的 `var`、`const`：从这一项结束处；包级的 `var`、`const`：整个文件（与顺序无关）；`range` 变量：循环体；`select` 的接收语句：从语句结束处；参数、类型 `switch` 的别名：整个函数或语句；类型参数（两者）：在声明它的函数或类型里 | 块、`for`、`if`、`switch`、各 `case` 和 `default`；函数（函数、方法、函数字面量、接口方法、函数类型） | 包级 `var`、`const` | 多变量声明 |
 
 **作用域入口**：作用域节点里有些部分在外面的作用域求值，那里的引用、作用域和定义都从外面的作用域开始解析（`locals.rs` 的 `ENCLOSING`）。
 
@@ -1017,9 +1208,18 @@ pub enum Visibility {
 | Java | 无：记录头不是作用域，组件是字段；注解和类型标注里只有类型 | |
 | Go | 无：接收者的类型在包级解析；接收者里的类型参数（`(l *List[E])`）没有建模，只给索引候选 | |
 
+**作用域指令**：把名字移到另一个作用域、或让名字在运行时才确定的语句，改变向外找的路径（`locals.rs` 的 `Directive` 和 `ScopeKind::Dynamic`）。
+
+| 语言 | 指令 | 解析 | 例子 |
+|---|---|---|---|
+| Python | `global x` | 所在函数里 `x` 的声明（`x = …`）都是对模块级 `x` 的赋值，只作为候选；从所在函数直接跳到模块，越过所有外层函数，所以内层函数里的 `x` 也解析到模块。模块顶层的 `global` 不起作用 | `def outer(): x = 1; def inner(): global x; return x` 的 `x` 是模块的 |
+| Python | `nonlocal x` | 所在函数里 `x` 的声明只作为候选；向外找最近的有 `x` 的外层函数，不找到模块 | 同上换成 `nonlocal`，`x` 是 `outer` 的 |
+| JS | `with (obj) { … }` | 体是动态作用域：体里声明的名字照常绑定；离开体之后找到的声明（含体里的 `var`，它在函数作用域里）都只是候选，名字可能是 `obj` 的属性 | `with (o) { use(size) }` 的 `size` 只有候选 |
+
+- 其他语言没有这类指令：Java、Go、Rust、TS（严格模式不允许 `with`，grammar 仍能解析，按 JS 处理）。Python 的 `del x` 不建模：之后的引用仍绑定到 `del` 之前的声明（已知限制，删除后再引用本来就是运行时错误）。
 - import 不是局部定义，经索引解析（「跳转到定义」第 2、3 步）。
-- 一种语言新增声明形式时，先在「定义形式」的表里归类，再在它的 locals 查询里加模式和属性，在 `tests/binding.rs` 的这种语言的表里加行；每种语言一个表驱动的测试（`site_binding_<语言>`），作用域入口和命名空间各一个（`site_binding_entry_points`、`site_binding_namespaces`），每行是一段源码、引用的位置和期望（绑定到某个声明；只有这些候选，不允许直接跳到别的文件；没有局部定义，由索引回答）。
-- 抽取时用同一个 locals 查询过滤引用名（`#is-not? local`，tree-sitter-tags 或按它的规则过滤的 `walk`）。它不读上面的属性，只按名字比较：函数作用域标成 `local.scope-inherits false`，过滤只看引用所在函数自己的局部定义；捕获整个模式的定义（解构）不等于任何名字，不过滤；Rust 的 `if let` / `while let` 绑定、各语言的类型参数和局部类型、Python 的 `match` 捕获用 `@definition.lectern.local` 捕获，tree-sitter-tags 在 locals 查询里只处理 `@local.scope` 和 `@local.definition`，所以不过滤它们，`if` 和 `while` 也不是作用域（tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，多数 `if` 不绑定名字）。这几处都让引用名多出名字，不会少。已知限制：过滤不知道作用域入口，推导式第一个可迭代对象和推导式变量同名时（`[x for x in x]`），这一处用到的外层名字不进入引用名；外层名字是 import 时，查这个名字的引用选不中这个文件。这种写法很少见。
+- 一种语言新增声明形式时，先在「定义形式」的表里归类，再在它的 locals 查询里加模式和属性，在 `tests/binding.rs` 的这种语言的表里加行；每种语言一个表驱动的测试（`site_binding_<语言>`），作用域入口、作用域指令和命名空间各一个（`site_binding_entry_points`、`site_binding_directives`、`site_binding_namespaces`），新增或改动一种作用域时同时改「作用域形式」的表和它的样例，每行是一段源码、引用的位置和期望（绑定到某个声明；只有这些候选，不允许直接跳到别的文件；没有局部定义，由索引回答）。
+- 抽取时用同一个 locals 查询过滤引用名（`#is-not? local`，tree-sitter-tags 或按它的规则过滤的 `walk`）。它不读上面的属性，只按名字比较：函数作用域标成 `local.scope-inherits false`，过滤只看引用所在函数自己的局部定义；捕获整个模式的定义（解构）不等于任何名字，不过滤；Rust 的 `if let` / `while let` 绑定、各语言的类型参数和局部类型、Python 的 `match` 捕获用 `@definition.lectern.local` 捕获，tree-sitter-tags 在 locals 查询里只处理 `@local.scope` 和 `@local.definition`，所以不过滤它们，`if` 和 `while` 也不是作用域（tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，多数 `if` 不绑定名字）。这几处都让引用名多出名字，不会少；`catch`、`switch` 体、签名和函数类型这类作用域让里面的参数和声明不再过滤作用域之外的同名引用，同样只多不少。已知限制：过滤不知道作用域入口，推导式第一个可迭代对象和推导式变量同名时（`[x for x in x]`），这一处用到的外层名字不进入引用名；外层名字是 import 时，查这个名字的引用选不中这个文件。这种写法很少见。
 
 ### 存储表
 
@@ -1412,6 +1612,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 抽取（`extract_*`）：每种语言的夹具用 insta 快照记录定义（名字、种类、位置、作用域、可见性、参数个数）和引用名；TS 叠加 JS 的查询；局部变量的引用不在引用名里；二进制和超过上限的内容；`EXTRACTOR_VERSION` 或查询文本变化时查询版本变化。
 - 截止时间（`deadline_*`）：病态输入在 1 ms 截止时间下返回 `TimedOut`；取消标志置位时返回 `Cancelled`；看门狗在截止时刻置位，没有在途抽取时不唤醒。看门狗的生命周期（`watchdog_*`）：插件停用后线程退出（`run_dedicated_gated` 返回的任务句柄 `is_finished`，`/proc/self/task/*/comm` 里没有 `code-intel-watchdog`）；连续激活、停用 20 次后，这个名字的线程最多一个；`Executor::shutdown` 在激活仍然存活时也让线程退出；停用时正在运行的抽取返回 `Cancelled`；激活在线程启动前失效时不建线程。
 - 位置分析（`site_*`）：位置上的标识符与 `RefSyntax`；locals 解析到的定义；光标在定义名上时的 `defines`。
+- 定义形式（`forms_*`）与作用域形式（`scopes_*`）：两张表对照 grammar 的覆盖、样例、locals 查询和本文的表（见「定义形式」「作用域形式」）；局部定义的可见性对照 locals 查询的作用域（`forms_local_definitions_are_file_visible`）。
 - 存储（`store_*`）：单元的写入与读回；存在检查只返回键完全相同的单元并标记访问；按名字查找区分大小写；单元被淘汰后三张表里没有它的行；配额小于数据量时按访问时间淘汰本命名空间的单元；同一个 OID 有旧 grammar 版本或旧查询版本的单元时，按名字查定义、查引用、存在检查和名字表都只返回当前版本的单元（`store_version_filter_*`）；写入被丢弃时不 panic、内存里的结果仍可用。
 - 输入代数（`derived_*`），每种输入一组，检查只改这一个输入时依赖它的派生状态都被重算、不依赖它的没有重算（计数钩子）：
   - `derived_files_*`：文件列表换代后基础映射重建，路径和 OID 都相同的覆盖项被删除。
@@ -1568,6 +1769,18 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 2 个快照有变化，逐个看过：TS 的参数属性 `constructor(public name: string)` 和 Java 记录 `Item(String name, Kind kind)` 的组件成为字段。
 - `code_intel/extract_throughput`（每项三次以上，MB 为 2^20 字节）：本轮 8 次 3.72–4.12 MB/s；与 9a2835b 交替运行时本轮 3.72–3.96、9a2835b 3.70–3.89，在噪声以内（遍历只多了 Java 记录、TS 参数属性等几处判断）。`code_intel/extract_1mib` 3.23–3.52 MB/s（9a2835b：3.35–3.45）。
 
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 第四轮审阅意见（局部定义的可见性、`global` 与 `nonlocal`、解包和解构的定义、`catch` 的作用域）之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1165 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。
+- `just test -p lectern-code-intel`：67 个测试通过。按前缀：`lang_*` 10、`extract_*` 14、`deadline_*` 11、`site_*` 21、`forms_*` 6、`scopes_*` 5。新增：
+  - `scopes_cover_grammar`、`scopes_have_no_duplicate_rows`、`scopes_match_locals_query`、`scopes_samples_bind`、`scopes_table_matches_design`：「作用域形式」的表 168 行，其中 60 行开作用域，64 个绑定样例；查询在样例上开出的每个作用域都对应表里的一行，每个开作用域的行都被它的样例开出。
+  - `forms_local_definitions_are_file_visible`：在全部定义形式的样例和六种语言的嵌套写法上，定义节点在 locals 查询的局部作用域里的都是 `File`，局部类的成员是 `File`，顶层类和命名空间的成员、TS 的参数属性不是；遍历记下的作用域与查询的作用域给出相同的可见性。
+  - `site_binding_directives`：`global` 越过外层函数、`nonlocal` 停在最近的有这个名字的外层函数且不找到模块、模块顶层的 `global`、`with` 体；绑定的表驱动测试共 97 行。
+  - 定义形式的样例新增 9 个（JS / TS 顶层的对象和数组解构、两层嵌套，Python 模块级和类体里的解包，Go 的 `const A, B`、`var a, b`），表新增 7 行（解构和解包的模式节点）。`WALKER_CASES` 加了这些写法，`extract_walker_matches_tags` 不再有允许的差异。
+  - 1 个快照有变化，逐个看过：`billing.py` 里嵌套在 `register` 里的 `wrap` 由 `unknown` 变为 `file`。
+- 测试辅助函数 `tests::site::parse` 改为共用一个编译好的语言表，`lectern-code-intel` 的测试从约 17 s 降到约 2 s。
+- `code_intel/extract_throughput`（MB 为 2^20 字节）：本轮 4 次 3.73–4.09 MB/s，交替运行的 9a2835b 4.01–4.07 MB/s，在噪声以内；`code_intel/extract_1mib` 3.21–3.41 MB/s（9a2835b：3.31–3.43）。遍历只多记下局部作用域的范围，可见性的计算是一次按位置的扫描。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1602,7 +1815,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 设计没有规定 locals 查询要捕获嵌套声明的名字，`def outer(): def helper(): …; helper()` 里的调用因此没有局部绑定。现在捕获，并规定声明名属于外层作用域（「外部格式」已补）。Go 没有嵌套的具名函数，不需要。
 - 设计没有说明 `(identifier) @local.reference` 会匹配成员名和路径段，`int add = 0; items.add(x)` 里的 `add` 因此绑定到了局部变量。现在按位置表排除（「外部格式」已补）。tree-sitter-tags 一侧，成员调用的模式本来就不带 locals 谓词，兜底的成员模式也不带。
 - 引用名原来只有调用、类型、构造和实现，`ci_ref` 选不出只有普通用处的文件。现在加了兜底模式（「抽取结果」「外部格式」已补）。同一个文件里对根作用域局部定义的用处（Python 模块级的 `TAX_RATE`）仍按设计不进入引用名，这个文件就是定义所在的文件，查引用时总会现场解析。（第二轮之后，函数里对它的用处会进入引用名，见下面第二轮的 `local.scope-inherits false`。）
-- `code_intel/extract_throughput` 的测量方式改为仓库形状，另加只记录的 `code_intel/extract_1mib`，预算不变，见 [ADR 0031](../adr/0031.md)（提议中）。设计原来没有规定语料的形状，第 1 步用的是每种语言一个 1 MiB 的文件。
+- `code_intel/extract_throughput` 的测量方式改为仓库形状，另加只记录的 `code_intel/extract_1mib`，预算不变，见 [ADR 0031](../adr/0031.md)。设计原来没有规定语料的形状，第 1 步用的是每种语言一个 1 MiB 的文件。
 
 第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 第二轮审阅意见：
 
@@ -1612,7 +1825,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 设计没有规定 grammar 租约相对其他字段的 drop 顺序。语言包的条目原来先 drop 租约、后 drop 编译好的查询，`ParsedFile` 先 drop 持有租约的语言、后 drop 语法树，库可能在查询和语法树释放之前被卸载。现在租约在最后（「语言包的变化」已补），并清掉每线程 `TagsContext` 里指向语言包的解析器和游标。
 - 设计没有说枚举成员是定义：Rust 的变体、TS 的枚举成员和 Python 的类属性原来不在定义里，Java 的枚举常量有定义但可见性按自己的修饰符算（总是 `Public`）。现在都是定义，可见性取枚举的（「抽取结果」已补），Rust 的 `Call` 因此也接受 `Constant`（「候选的分层与过滤」已补）。
 
-第 1 步，按 [ADR 0031](../adr/0031.md)（提议中）改用一次遍历抽取：
+第 1 步，按 [ADR 0031](../adr/0031.md) 改用一次遍历抽取：
 
 - 设计按 ADR 0030 用 tree-sitter-tags 抽取全部语言。核心语言改为 `walk` 模块的一次遍历（「外部格式」已补），语言包不变；`ParsedFile` 的定义随之取遍历的结果。原因是 tree-sitter-tags 路径在 macOS CI 上随机地低于 4 MB/s 的预算，而查询本身的开销就超出了预算（ADR 0031 的「背景」）。查询仍是规格，两条路径由 `extract_walker_matches_tags` 约束。
 - Go 包级的 `const A, B = 1, 2`：查询引擎只匹配到 `A`，遍历把 `B` 也记为定义（「外部格式」已补）。
@@ -1630,3 +1843,15 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 设计没有规定作用域节点里哪些部分在外层求值，Python 的参数默认值和标注绑定到了参数本身。现在按「作用域入口」的表解析：Python 的默认值、标注、返回类型、基类和推导式的第一个可迭代对象，JS / TS 的计算方法名和参数装饰器；JS 的 `var` 放进函数体，参数默认值看不到它（「绑定规则」已补）。
 - 语法种类表原来是几条通用规则加两条追加，Rust 的记录变体（`Message::Move { x, y }`，`Construct` / `Type`）、JS 的函数字段、Java 记录的访问器等因此被过滤掉。现在由「定义形式」推出（「候选的分层与过滤」已补），Rust 的 `Member` 因此只接受 `Field`、`Method`（原来也接受 `Constant`、`Variable`，Rust 没有这样的成员）。Rust 路径形式的结构体构造（`a::B { .. }`）也归为 `Construct`。
 - `ParsedFile` 给局部类型（类型参数、局部接口）的 `SiteDef` 种类是 `Type`，原来都是 `Variable`。
+
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 第四轮审阅意见：
+
+- 局部定义的可见性原来按语言写规则，只有 JS / TS 把函数体里的定义记为 `File`，Python 嵌套在函数里的 `def` 是 `Unknown`，Rust 函数里的 `fn`、Java 的局部类和匿名类的方法、Go 函数里的类型也都按顶层的规则算，会成为其他文件的候选。现在在每种语言里由作用域推出：定义节点在局部作用域里的是 `File`，成员取所属的类（「抽取结果」已改）。`rules::finish` 因此多一个局部作用域的参数，遍历在同一遍里记下作用域，tags 路径（核心语言）用 locals 查询再算一次；`EXTRACTOR_VERSION` 从 2 改为 3。
+- 设计没有逐一列出开作用域的语法形式。现在有「作用域形式」的表，由 grammar 检查覆盖、由 locals 查询检查一致（「作用域形式」已补）。表带来的改动：
+  - JS / TS：`catch` 子句是作用域（参数原来漏到外面的块里）；`switch` 体是作用域（`case` 里的 `let` 原来在 `switch` 之外也可见）；`with` 体是动态作用域；TS 的签名和函数类型（`function_signature`、`method_signature`、`function_type` 等）是函数作用域，参数原来漏到所在的块或文件里，同一文件里同名的引用会绑定到签名的参数；namespace、module 和 `declare global` 的体是命名空间，其中的定义是成员，不是局部。
+  - Rust 的 `function_signature_item` 和 `function_type`、Go 的接口方法和函数类型是函数作用域，理由同上；Go 的 `default` 分支是作用域。
+  - Java 的作用域从 `switch` 分组改为 `switch` 块（一组里声明的局部变量在后面的组里也可见，JLS 6.3）和 `case … ->` 规则。
+  - Java 增强 `for` 的变量是这个作用域节点的 `name` 字段，原来按函数名的规则放进了外层作用域，循环之后同名的引用会绑定到它；现在这条规则只用于函数和类。
+- `global` 和 `nonlocal` 原来一样处理：都只是把名字移出所在函数，再从外层函数找。现在 `global` 直接跳到模块，`nonlocal` 不找到模块（「绑定规则」的作用域指令已补）。
+- 模块级和类体里的解包（`A, B = load()`）、JS / TS 顶层的解构（`const { a, b: c } = obj`）原来不是定义，只是局部绑定。现在模式两层以内绑定的每个名字都是定义（「定义形式」已改），查询和遍历都按两层写，更深的嵌套是已知限制。
+- Go 的 `const A, B = 1, 2`：原因是 `const_spec` 的 `name` 字段也包含逗号，不是查询引擎的问题；查询改为 `(const_spec (identifier))` 之后两条路径都把 `B` 记为定义，`extract_walker_matches_tags` 不再允许差异（「外部格式」已改）。函数里的 `const a, b` 也因此两个名字都是局部绑定。

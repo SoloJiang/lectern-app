@@ -4,7 +4,9 @@
 ; capture names as the other locals queries (tree-sitter-highlight's
 ; convention), with the binding rules of docs/design/code_intel.md
 ; 「绑定规则」 as properties that tree-sitter-tags ignores:
-; - `local.kind "function"`: functions, methods and function literals;
+; - `local.kind "function"`: functions, methods and function literals, and
+;   interface methods and function types, whose parameters bind nothing
+;   outside them;
 ; - `local.visible`: "scope" binds the whole scope (parameters, results,
 ;   receivers, and package-level names, which do not depend on order);
 ;   "end:KIND" binds from the end of the declaring KIND node, so
@@ -24,6 +26,7 @@
   (type_switch_statement)
   (expression_case)
   (type_case)
+  (default_case)
   (communication_case)
 ] @local.scope
 
@@ -32,6 +35,8 @@
     (function_declaration)
     (method_declaration)
     (func_literal)
+    (method_elem)
+    (function_type)
   ] @local.scope
   (#set! local.kind "function")
   (#set! local.scope-inherits false)
@@ -67,7 +72,7 @@
 (statement_list
   (const_declaration
     (const_spec
-      name: (identifier) @local.definition))
+      (identifier) @local.definition))
   (#set! local.visible "end:const_spec"))
 
 (source_file
@@ -84,7 +89,7 @@
 (source_file
   (const_declaration
     (const_spec
-      name: (identifier) @local.definition))
+      (identifier) @local.definition))
   (#set! local.visible "scope"))
 
 (range_clause

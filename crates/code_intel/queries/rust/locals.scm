@@ -4,7 +4,8 @@
 ; capture names as the other locals queries (tree-sitter-highlight's
 ; convention), with the binding rules of docs/design/code_intel.md
 ; 「绑定规则」 as properties that tree-sitter-tags ignores:
-; - `local.kind "function"`: functions and closures;
+; - `local.kind "function"`: functions and closures, and signatures and
+;   function types, whose parameters bind nothing outside them;
 ; - `local.visible`: "scope" binds the whole scope (parameters, match arms,
 ;   items in a block); "end:KIND" binds from the end of the declaring KIND
 ;   node, so `let x = x + 1;` reads the earlier `x`; "body:KIND" binds from
@@ -39,6 +40,8 @@
   [
     (function_item)
     (closure_expression)
+    (function_signature_item)
+    (function_type)
   ] @local.scope
   (#set! local.kind "function")
   (#set! local.scope-inherits false)

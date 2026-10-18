@@ -12,20 +12,117 @@
 
 ; ---- definitions -------------------------------------------------------
 
+; Module-level names, also unpacked (`A, B = load()`, `first, *rest = xs`,
+; `(p, (q, r)) = …`): every name the target binds, two levels deep.
 (module
   (expression_statement
     (assignment
-      left: (identifier) @name) @definition.constant))
+      left: [
+        (identifier) @name
+        (pattern_list
+          [
+            (identifier) @name
+            (list_splat_pattern (identifier) @name)
+            (tuple_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+            (list_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+          ])
+        (tuple_pattern
+          [
+            (identifier) @name
+            (list_splat_pattern (identifier) @name)
+            (tuple_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+            (list_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+          ])
+        (list_pattern
+          [
+            (identifier) @name
+            (list_splat_pattern (identifier) @name)
+            (tuple_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+            (list_pattern
+              [
+                (identifier) @name
+                (list_splat_pattern (identifier) @name)
+              ])
+          ])
+      ]) @definition.constant))
 
 (class_definition
   name: (identifier) @name) @definition.class
 
-; Class attributes, including `Enum` members (`Color.RED`).
+; Class attributes, including `Enum` members (`Color.RED`), also unpacked,
+; as at module level.
 (class_definition
   body: (block
     (expression_statement
       (assignment
-        left: (identifier) @name) @definition.field)))
+        left: [
+          (identifier) @name
+          (pattern_list
+            [
+              (identifier) @name
+              (list_splat_pattern (identifier) @name)
+              (tuple_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+              (list_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+            ])
+          (tuple_pattern
+            [
+              (identifier) @name
+              (list_splat_pattern (identifier) @name)
+              (tuple_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+              (list_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+            ])
+          (list_pattern
+            [
+              (identifier) @name
+              (list_splat_pattern (identifier) @name)
+              (tuple_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+              (list_pattern
+                [
+                  (identifier) @name
+                  (list_splat_pattern (identifier) @name)
+                ])
+            ])
+        ]) @definition.field)))
 
 (class_definition
   body: (block

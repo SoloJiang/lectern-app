@@ -7,7 +7,8 @@
 ; `pattern/identifier` (which also matched destructuring assignments), with
 ; the binding rules of docs/design/code_intel.md「绑定规则」 as properties
 ; that tree-sitter-tags ignores:
-; - `local.kind`: a scope's kind ("function"; blocks by default);
+; - `local.kind`: a scope's kind ("function", "dynamic" for a `with` body,
+;   "namespace" in ts/locals.scm; blocks by default);
 ; - `local.scope`: "function" puts a definition in the nearest function
 ;   scope (`var`) instead of the innermost scope;
 ; - `local.visible`: "scope" binds the whole scope, including references
@@ -27,6 +28,20 @@
 (for_statement) @local.scope
 
 (for_in_statement) @local.scope
+
+; The catch parameter belongs to the clause; a declaration in one `case`
+; is in scope in the whole switch body.
+(catch_clause) @local.scope
+
+(switch_body) @local.scope
+
+; A name that a `with` body does not declare may be a property of the
+; object: a declaration found outside the body is only possible.
+(
+  (with_statement
+    body: (_) @local.scope)
+  (#set! local.kind "dynamic")
+)
 
 (
   [

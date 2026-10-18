@@ -93,6 +93,67 @@ pub struct RefSite {
     pub end: usize,
 }
 
+/// The local scopes of `source` by the language's locals query
+/// ([`Locals::local_scopes`]), for `rules::finish` on the tags path; None
+/// once `stop` returns true, or when the grammar or its queries do not
+/// compile.
+pub(crate) fn local_scopes(
+    lang: &Lang,
+    source: &[u8],
+    stop: &dyn Fn() -> bool,
+) -> Option<Vec<Range<usize>>> {
+    let compiled = lang.compiled()?;
+    let mut parser = Parser::new();
+    parser.set_language(lang.language()).ok()?;
+    let mut progress = |_: &tree_sitter::ParseState| {
+        if stop() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let tree = parser.parse_with_options(
+        &mut |i, _| source.get(i..).unwrap_or(&[]),
+        None,
+        Some(ParseOptions::new().progress_callback(&mut progress)),
+    )?;
+    let query = &compiled.tags.query;
+    let mut cursor = QueryCursor::new();
+    let mut query_progress = |_: &tree_sitter::QueryCursorState| {
+        if stop() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let mut matches = cursor.matches_with_options(
+        query,
+        tree.root_node(),
+        source,
+        QueryCursorOptions::new().progress_callback(&mut query_progress),
+    );
+    let mut collector = Collector::new(lang.dialect(), source.len());
+    while let Some(m) = matches.next() {
+        if m.pattern_index >= compiled.locals_patterns {
+            continue;
+        }
+        let props = query.property_settings(m.pattern_index);
+        for capture in m.captures() {
+            if matches!(
+                compiled.captures[capture.index as usize],
+                Capture::LocalScope
+            ) {
+                collector.scope(capture.node, props);
+            }
+        }
+    }
+    drop(matches);
+    if stop() {
+        return None;
+    }
+    Some(collector.finish(source).local_scopes())
+}
+
 /// One parsed file, kept while a query uses it and then dropped; never
 /// cached. Holds the grammar's lease through its [`Lang`].
 ///
@@ -277,7 +338,9 @@ impl ParsedFile {
                 end: r.end,
             })
             .collect();
-        let finished = rules::finish(lang.dialect(), text, tags);
+        // A language pack's scopes are not classified (`rules::finish`).
+        let local_scopes = lang.lease().is_static().then(|| locals.local_scopes());
+        let finished = rules::finish(lang.dialect(), text, tags, local_scopes.as_deref());
         // Checked once more before returning: the rules and the binding model
         // run after the last check above.
         if stop() {
@@ -302,6 +365,13 @@ impl ParsedFile {
 
     pub fn source(&self) -> &Arc<[u8]> {
         &self.source
+    }
+
+    /// The definitions with their node ranges, and the local scopes of the
+    /// binding model, for the tests.
+    #[cfg(test)]
+    pub(crate) fn defs_and_local_scopes(&self) -> (&[FileDef], Vec<Range<usize>>) {
+        (&self.defs, self.locals.local_scopes())
     }
 
     pub fn tree(&self) -> &Tree {

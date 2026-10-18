@@ -42,10 +42,19 @@ ids! {
             for_statement = "for_statement",
             for_in_statement = "for_in_statement",
             catch_clause = "catch_clause",
+            switch_body = "switch_body",
+            with_statement = "with_statement",
             identifier = "identifier",
             property_identifier = "property_identifier",
             private_property_identifier = "private_property_identifier",
             shorthand_property_identifier = "shorthand_property_identifier",
+            shorthand_property_identifier_pattern = "shorthand_property_identifier_pattern",
+            object_pattern = "object_pattern",
+            array_pattern = "array_pattern",
+            pair_pattern = "pair_pattern",
+            assignment_pattern = "assignment_pattern",
+            object_assignment_pattern = "object_assignment_pattern",
+            rest_pattern = "rest_pattern",
         }
         tokens {
             t_export = "export",
@@ -65,6 +74,7 @@ ids! {
             f_kind = "kind",
             f_declaration = "declaration",
             f_property = "property",
+            f_body = "body",
         }
     }
 }
@@ -75,6 +85,10 @@ ids! {
             function_signature = "function_signature",
             method_signature = "method_signature",
             abstract_method_signature = "abstract_method_signature",
+            call_signature = "call_signature",
+            construct_signature = "construct_signature",
+            function_type = "function_type",
+            constructor_type = "constructor_type",
             abstract_class_declaration = "abstract_class_declaration",
             module = "module",
             internal_module = "internal_module",
@@ -136,22 +150,48 @@ impl Walker for Ecma {
         let k = &self.k;
         let me = stack[stack.len() - 1];
         let kind = me.kind;
-        if kind == k.statement_block || kind == k.for_statement || kind == k.for_in_statement {
-            cx.scope(stack.len() - 1, true);
+        // ecmascript/locals.scm and ts/locals.scm: scopes. Blocks inherit;
+        // functions, and TS signatures and function types, do not.
+        if kind == k.statement_block {
+            if self.namespace_body(stack) {
+                cx.member_scope(stack, true);
+            } else {
+                cx.scope(stack, true);
+            }
+        } else if kind == k.for_statement
+            || kind == k.for_in_statement
+            || kind == k.catch_clause
+            || kind == k.switch_body
+        {
+            cx.scope(stack, true);
         } else if kind == k.function_expression
             || kind == k.arrow_function
             || kind == k.function_declaration
             || kind == k.generator_function
             || kind == k.generator_function_declaration
             || kind == k.method_definition
+            || self.ts.as_ref().is_some_and(|ts| {
+                kind == ts.function_signature
+                    || kind == ts.method_signature
+                    || kind == ts.abstract_method_signature
+                    || kind == ts.call_signature
+                    || kind == ts.construct_signature
+                    || kind == ts.function_type
+                    || kind == ts.constructor_type
+            })
         {
-            cx.scope(stack.len() - 1, false);
+            cx.scope(stack, false);
         } else if kind == k.export_statement {
             // (export_statement "export" @name) @reference.lectern.export
             self.tokens(cx, me.node, k.t_export, Marker::Export);
         } else if kind == k.import_statement {
             // (import_statement "import" @name) @reference.lectern.module
             self.tokens(cx, me.node, k.t_import, Marker::Module);
+        }
+        // (with_statement body: (_) @local.scope): a second scope on a
+        // block body, which changes nothing for tree-sitter-tags.
+        if me.field == k.f_body && up(stack, 1).is_some_and(|p| p.kind == k.with_statement) {
+            cx.scope(stack, true);
         }
         if self.local_definition(stack) {
             cx.local(me.node);
@@ -164,6 +204,13 @@ impl Walker for Ecma {
             self.property(cx, stack, true);
         } else if kind == k.shorthand_property_identifier {
             cx.nonlocal(me.node);
+        } else if kind == k.shorthand_property_identifier_pattern {
+            // E8, E9 in a destructuring pattern; no other pattern names it.
+            if let Some(level) = self.declarator(stack)
+                && let Some(constant) = self.top_level_declaration(stack, level)
+            {
+                self.top_level_def(cx, stack, level, constant);
+            }
         } else if let Some(ts) = &self.ts
             && kind == ts.type_identifier
         {
@@ -180,6 +227,19 @@ impl Ecma {
                 cx.marker(child, node, marker);
             }
         }
+    }
+
+    /// TS: a namespace or module body, or the block of `declare global`
+    /// (ts/locals.scm's "namespace" scopes).
+    fn namespace_body(&self, stack: &[Frame<'_>]) -> bool {
+        let Some(ts) = &self.ts else {
+            return false;
+        };
+        let me = stack[stack.len() - 1];
+        up(stack, 1).is_some_and(|p| {
+            (me.field == self.k.f_body && (p.kind == ts.internal_module || p.kind == ts.module))
+                || p.kind == ts.ambient_declaration
+        })
     }
 
     /// ecmascript/locals.scm and ts/locals.scm's `@local.definition`
@@ -251,11 +311,86 @@ impl Ecma {
         }
     }
 
-    /// E8 and E9: a declarator at the top level of the program, directly or
-    /// in an export statement's `declaration`; Some(true) for `const`.
-    fn top_level_declaration(&self, stack: &[Frame<'_>]) -> Option<bool> {
+    /// E8 and E9: the level of the variable declarator whose `name` binds
+    /// the name being visited, as tags.scm spells it: the name itself, or a
+    /// name in an object or array pattern, one more pattern deep at most.
+    fn declarator(&self, stack: &[Frame<'_>]) -> Option<usize> {
         let k = &self.k;
-        let declaration = up(stack, 2)?;
+        let me = stack[stack.len() - 1];
+        let parent = up(stack, 1)?;
+        if parent.kind == k.variable_declarator {
+            return (me.field == k.f_name).then_some(1);
+        }
+        let mut level = self.pattern_leaf(stack, 0)?;
+        let pattern = up(stack, level)?;
+        let mut above = up(stack, level + 1)?;
+        // An inner pattern: a pair's value in an object pattern, or an
+        // element of an array pattern.
+        if above.kind == k.pair_pattern && pattern.field == k.f_value {
+            let outer = up(stack, level + 2)?;
+            if outer.kind != k.object_pattern {
+                return None;
+            }
+            level += 2;
+            above = up(stack, level + 1)?;
+        } else if above.kind == k.array_pattern {
+            level += 1;
+            above = up(stack, level + 1)?;
+        }
+        let outer = up(stack, level)?;
+        (above.kind == k.variable_declarator && outer.field == k.f_name).then_some(level + 1)
+    }
+
+    /// The level of the object or array pattern that has the frame `at`
+    /// levels above the last as a leaf: `{a}`, `{b: a}`, `{b: a = 1}`,
+    /// `{a = 1}`, `{...a}`, `[a]`, `[a = 1]` and `[...a]`.
+    fn pattern_leaf(&self, stack: &[Frame<'_>], at: usize) -> Option<usize> {
+        let k = &self.k;
+        let me = up(stack, at)?;
+        let parent = up(stack, at + 1)?;
+        let p = parent.kind;
+        if me.kind == k.shorthand_property_identifier_pattern {
+            if p == k.object_pattern {
+                return Some(at + 1);
+            }
+            let object = up(stack, at + 2)?;
+            return (p == k.object_assignment_pattern
+                && me.field == k.f_left
+                && object.kind == k.object_pattern)
+                .then_some(at + 2);
+        }
+        if me.kind != k.identifier {
+            return None;
+        }
+        if p == k.array_pattern {
+            return Some(at + 1);
+        }
+        let grand = up(stack, at + 2)?;
+        let g = grand.kind;
+        if p == k.rest_pattern && (g == k.object_pattern || g == k.array_pattern) {
+            return Some(at + 2);
+        }
+        if p == k.pair_pattern && me.field == k.f_value && g == k.object_pattern {
+            return Some(at + 2);
+        }
+        if p == k.assignment_pattern && me.field == k.f_left {
+            if g == k.array_pattern {
+                return Some(at + 2);
+            }
+            let object = up(stack, at + 3)?;
+            if g == k.pair_pattern && parent.field == k.f_value && object.kind == k.object_pattern {
+                return Some(at + 3);
+            }
+        }
+        None
+    }
+
+    /// E8 and E9: a declarator `level` frames above the name, at the top
+    /// level of the program, directly or in an export statement's
+    /// `declaration`; Some(true) for `const`.
+    fn top_level_declaration(&self, stack: &[Frame<'_>], level: usize) -> Option<bool> {
+        let k = &self.k;
+        let declaration = up(stack, level + 1)?;
         let constant = if declaration.kind == k.lexical_declaration {
             let token = declaration.node.child_by_field_id(k.f_kind)?.kind_id();
             if token == k.t_const {
@@ -272,14 +407,14 @@ impl Ecma {
         };
         // TS: `declare const` sits in an ambient declaration
         // (ts/tags.scm).
-        let mut level = 3;
+        let mut level = level + 2;
         let mut placed = declaration;
         if let Some(ts) = &self.ts
-            && let Some(ambient) = up(stack, 3)
+            && let Some(ambient) = up(stack, level)
             && ambient.kind == ts.ambient_declaration
         {
             placed = ambient;
-            level = 4;
+            level += 1;
         }
         let container = up(stack, level)?;
         let at_top = container.kind == k.program
@@ -287,6 +422,19 @@ impl Ecma {
                 && placed.field == k.f_declaration
                 && up(stack, level + 1).is_some_and(|p| p.kind == k.program));
         at_top.then_some(constant)
+    }
+
+    fn top_level_def(&self, cx: &mut Ctx<'_>, stack: &[Frame<'_>], level: usize, constant: bool) {
+        let me = stack[stack.len() - 1];
+        let Some(declarator) = up(stack, level) else {
+            return;
+        };
+        let kind = if constant {
+            DefKind::Constant
+        } else {
+            DefKind::Variable
+        };
+        cx.def(me.node, declarator.node, kind, None);
     }
 
     /// TS: a parameter property, a constructor parameter with an
@@ -369,17 +517,12 @@ impl Ecma {
                 cx.def(me.node, statement.node, DefKind::Constant, None);
                 return;
             }
-            // E8, E9: top-level const, let and var declarators.
-            if name
-                && p == k.variable_declarator
-                && let Some(constant) = self.top_level_declaration(stack)
+            // E8, E9: top-level const, let and var declarators, also
+            // destructured.
+            if let Some(level) = self.declarator(stack)
+                && let Some(constant) = self.top_level_declaration(stack, level)
             {
-                let kind = if constant {
-                    DefKind::Constant
-                } else {
-                    DefKind::Variable
-                };
-                cx.def(me.node, parent.node, kind, None);
+                self.top_level_def(cx, stack, level, constant);
                 return;
             }
             // E10 (call, not `require`) and E12 (new) are `#is-not? local`

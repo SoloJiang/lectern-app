@@ -5,8 +5,8 @@
 //! The locals queries carry the per-language rules as pattern properties,
 //! which tree-sitter-tags ignores: `local.kind` on scopes; `local.scope`,
 //! `local.visible`, `local.until`, `local.certain` and `local.namespace` on
-//! definitions; `local.nonlocal` on the references of Python's `global` /
-//! `nonlocal`. A captured pattern is expanded here into the identifiers it
+//! definitions; `local.nonlocal` (`"global"` or `"true"`) on the names of
+//! Python's `global` / `nonlocal`. A captured pattern is expanded here into the identifiers it
 //! binds. The parts of a scope's node that are evaluated in the enclosing
 //! scope (parameter defaults, base classes, …) are in [`ENCLOSING`].
 
@@ -148,6 +148,32 @@ pub(crate) enum ScopeKind {
     /// A Python class body: visible to references directly in it, not to
     /// the functions inside it.
     Class,
+    /// A TS namespace or module body (`local.kind "namespace"`): a block
+    /// whose declarations are members, not locals.
+    Namespace,
+    /// A JS `with` body (`local.kind "dynamic"`): a name it does not declare
+    /// may be a property of the object, so a declaration found outside it
+    /// is only possible.
+    Dynamic,
+}
+
+impl ScopeKind {
+    /// Whether a definition inside a scope of this kind is local to the
+    /// file (`Visibility::File`): every scope but a class or namespace body,
+    /// whose definitions are members.
+    pub(crate) fn is_local(self) -> bool {
+        !matches!(self, ScopeKind::Class | ScopeKind::Namespace)
+    }
+}
+
+/// A Python scope directive on a name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Directive {
+    /// `global x`: the name is the module's, past every enclosing function.
+    Global,
+    /// `nonlocal x`: the name is an enclosing function's, never the
+    /// module's.
+    Nonlocal,
 }
 
 pub(crate) struct Scope {
@@ -228,7 +254,7 @@ pub(crate) struct Collector {
     dialect: Dialect,
     scopes: Vec<Scope>,
     defs: Vec<RawDef>,
-    nonlocal: Vec<Range<usize>>,
+    nonlocal: Vec<(Range<usize>, Directive)>,
 }
 
 /// The kinds in `local.visible "end:KIND"` / `"body:KIND"` values, so that
@@ -313,13 +339,20 @@ impl Collector {
         let kind = match local_kind {
             Some("function" | "comprehension") => ScopeKind::Function,
             Some("class") => ScopeKind::Class,
+            Some("namespace") => ScopeKind::Namespace,
+            Some("dynamic") => ScopeKind::Dynamic,
             _ => ScopeKind::Block,
         };
         self.scopes.push(Scope {
             range: node.byte_range(),
             kind,
             parent: None,
-            name: node.child_by_field_name("name").map(|n| n.byte_range()),
+            // A function's or class's own name; a block's `name` field is
+            // what it binds (Java's for-each variable).
+            name: matches!(kind, ScopeKind::Function | ScopeKind::Class)
+                .then(|| node.child_by_field_name("name"))
+                .flatten()
+                .map(|n| n.byte_range()),
             comprehension: local_kind == Some("comprehension"),
             enclosing: enclosing_parts(self.dialect, node),
             body: (kind == ScopeKind::Function)
@@ -388,19 +421,29 @@ impl Collector {
     }
 
     /// A reference capture; Python's `global` / `nonlocal` names carry
-    /// `local.nonlocal`.
+    /// `local.nonlocal "global"` / `"true"`.
     pub(crate) fn reference(&mut self, node: Node<'_>, props: &[QueryProperty]) -> bool {
-        if property(props, "local.nonlocal") == Some("true") {
-            self.nonlocal.push(node.byte_range());
-            return false;
-        }
-        true
+        let directive = match property(props, "local.nonlocal") {
+            Some("global") => Directive::Global,
+            Some("true") => Directive::Nonlocal,
+            _ => return true,
+        };
+        self.nonlocal.push((node.byte_range(), directive));
+        false
     }
 
     pub(crate) fn finish(self, text: &[u8]) -> Locals {
         let mut scopes = self.scopes;
         let root = scopes.remove(0);
-        scopes.sort_by_key(|s| (s.range.start, std::cmp::Reverse(s.range.end)));
+        // Two captures of one node (a block that is also a namespace or a
+        // `with` body) keep the more specific kind.
+        scopes.sort_by_key(|s| {
+            (
+                s.range.start,
+                std::cmp::Reverse(s.range.end),
+                s.kind == ScopeKind::Block,
+            )
+        });
         scopes.dedup_by(|b, a| a.range == b.range);
         scopes.insert(0, root);
         let mut stack: Vec<usize> = vec![0];
@@ -469,12 +512,16 @@ impl Collector {
         let nonlocal = self
             .nonlocal
             .into_iter()
-            .filter_map(|r| {
+            .filter_map(|(r, directive)| {
                 let mut scope = home(&scopes, &r);
                 while scopes[scope].kind != ScopeKind::Function {
                     scope = scopes[scope].parent?;
                 }
-                Some((scope, text.get(r)?.to_vec()))
+                // `global` at module level changes nothing.
+                if scope == 0 && directive == Directive::Global {
+                    return None;
+                }
+                Some((scope, text.get(r)?.to_vec(), directive))
             })
             .collect();
         Locals {
@@ -491,8 +538,9 @@ pub(crate) struct Locals {
     scopes: Vec<Scope>,
     /// By position.
     defs: Vec<LocalDef>,
-    /// (function scope, name) taken out by `global` / `nonlocal`.
-    nonlocal: Vec<(usize, Vec<u8>)>,
+    /// (function scope, name, directive) taken out by `global` /
+    /// `nonlocal`.
+    nonlocal: Vec<(usize, Vec<u8>, Directive)>,
 }
 
 /// How a reference resolves.
@@ -516,9 +564,22 @@ impl Locals {
     }
 
     /// Visible in one function or block only (`DefinitionRef::local`): not
-    /// at file level, not a class member.
+    /// at file level, not a class or namespace member.
     pub(crate) fn is_local(&self, def: &LocalDef) -> bool {
-        def.scope != 0 && self.scopes[def.scope].kind != ScopeKind::Class
+        def.scope != 0 && self.scopes[def.scope].kind.is_local()
+    }
+
+    /// The ranges of the scopes whose definitions are local to the file
+    /// ([`ScopeKind::is_local`]), without the file itself, by start and
+    /// outermost first: `rules::finish` makes a definition inside one
+    /// `Visibility::File`.
+    pub(crate) fn local_scopes(&self) -> Vec<Range<usize>> {
+        self.scopes
+            .iter()
+            .skip(1)
+            .filter(|s| s.kind.is_local())
+            .map(|s| s.range.clone())
+            .collect()
     }
 
     /// The safety invariant (docs/design/code_intel.md「绑定规则」): a
@@ -544,12 +605,25 @@ impl Locals {
         let mut scope = Some(home(&self.scopes, reference));
         // Whether the walk has left a function or class body.
         let mut nested = false;
+        // Whether it has left a `with` body: what it finds is only possible.
+        let mut dynamic = false;
+        // Whether it has passed a `nonlocal` for the name: the module's
+        // declarations are not the target.
+        let mut enclosing_only = false;
         while let Some(s) = scope {
             let kind = self.scopes[s].kind;
+            if s == 0 && enclosing_only {
+                break;
+            }
             // A class body is visible only to code directly in it, not to
             // the functions or classes inside it.
             let skip = kind == ScopeKind::Class && nested;
-            let hidden = self.nonlocal.iter().any(|(f, n)| *f == s && n == name);
+            let directive = self
+                .nonlocal
+                .iter()
+                .find(|(f, n, _)| *f == s && n == name)
+                .map(|(_, _, d)| *d);
+            let hidden = directive.is_some();
             if !skip {
                 let mut before: Option<&LocalDef> = None;
                 let mut after: Option<&LocalDef> = None;
@@ -578,7 +652,7 @@ impl Locals {
                     }
                 }
                 if let Some(def) = before.or(after) {
-                    if def.certain {
+                    if def.certain && !dynamic {
                         return Resolution {
                             binding: Some(def),
                             possible: Vec::new(),
@@ -591,10 +665,21 @@ impl Locals {
                     };
                 }
             }
-            if kind != ScopeKind::Block {
+            if matches!(kind, ScopeKind::Function | ScopeKind::Class) {
                 nested = true;
             }
-            scope = self.scopes[s].parent;
+            if kind == ScopeKind::Dynamic {
+                dynamic = true;
+            }
+            scope = match directive {
+                // Past every enclosing function, to the module.
+                Some(Directive::Global) => Some(0),
+                Some(Directive::Nonlocal) => {
+                    enclosing_only = true;
+                    self.scopes[s].parent
+                }
+                None => self.scopes[s].parent,
+            };
         }
         Resolution {
             binding: None,

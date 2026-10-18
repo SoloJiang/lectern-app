@@ -5,6 +5,8 @@
 ; convention), with the binding rules of docs/design/code_intel.md
 ; 「绑定规则」 as properties that tree-sitter-tags ignores:
 ; - `local.kind "function"`: methods, constructors and lambdas;
+; - a switch block is one scope (a declaration in one group is in scope in
+;   the later groups, JLS 6.3); a `case … ->` rule is its own;
 ; - `local.visible`: "scope" binds the whole scope (parameters); "end:KIND"
 ;   binds from the end of the declaring KIND node (a local variable is in
 ;   scope after its declarator, so an earlier use names a field);
@@ -31,7 +33,8 @@
   (enhanced_for_statement)
   (catch_clause)
   (try_with_resources_statement)
-  (switch_block_statement_group)
+  (switch_block)
+  (switch_rule)
 ] @local.scope
 
 (

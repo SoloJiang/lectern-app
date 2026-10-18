@@ -10,10 +10,15 @@ use crate::site::{ParseError, ParsedFile, Position, Site, accepts};
 use crate::testing::ManualClock;
 use crate::{Clock, DefKind, RefSyntax, SystemClock};
 
+/// The core languages, compiled once for the tests.
+pub(super) fn core_table() -> &'static LanguageTable {
+    static TABLE: std::sync::OnceLock<LanguageTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(LanguageTable::core)
+}
+
 pub(super) fn parse(lang: &str, source: &str) -> ParsedFile {
-    let table = LanguageTable::core();
     ParsedFile::parse(
-        table.get(lang).expect("core language"),
+        core_table().get(lang).expect("core language"),
         Arc::from(source.as_bytes()),
         &SystemClock,
         Instant::now() + Duration::from_secs(10),
