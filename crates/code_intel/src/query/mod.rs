@@ -423,7 +423,11 @@ impl Inner {
     /// A prefetch of the same query made within [`PREFETCH_FOR`] with the
     /// inputs still current.
     fn take_prefetch(&self, query: &Query) -> Option<Arc<Prepared>> {
-        if !lock(&self.queries).prefetched.iter().any(|p| &p.query == query) {
+        if !lock(&self.queries)
+            .prefetched
+            .iter()
+            .any(|p| &p.query == query)
+        {
             return None;
         }
         let now = self.watchdog.clock().now();

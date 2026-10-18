@@ -6,6 +6,7 @@ use std::ffi::CString;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
+use tree_sitter::{CaptureQuantifier, Query};
 use tree_sitter_tags::TagsConfiguration;
 
 use crate::grammar::{GrammarLease, GrammarSource, LoadedGrammar};
@@ -201,6 +202,9 @@ struct LangInner {
     /// Compiled on first use, on the calling (background) thread; `None`
     /// when compiling failed, which disables the language for this run.
     compiled: OnceLock<Option<Arc<Compiled>>>,
+    /// `ParsedFile`'s query on a core language with a walker, compiled on
+    /// first use.
+    site: OnceLock<Option<SiteQuery>>,
     #[cfg(test)]
     _compiled_dropped: crate::testing::DropTrace,
     language: tree_sitter::Language,
@@ -222,6 +226,7 @@ impl Lang {
             locals_query: Arc::from(spec.locals_query),
             lease: GrammarLease::none(),
             compiled: OnceLock::new(),
+            site: OnceLock::new(),
             #[cfg(test)]
             _compiled_dropped: crate::testing::DropTrace("compiled"),
         }))
@@ -242,6 +247,7 @@ impl Lang {
             locals_query: locals,
             lease: grammar.lease,
             compiled: OnceLock::new(),
+            site: OnceLock::new(),
             #[cfg(test)]
             _compiled_dropped: crate::testing::DropTrace("compiled"),
         }))
@@ -294,6 +300,24 @@ impl Lang {
                 Err(error) => {
                     log(format_args!(
                         "the {} grammar or its queries do not compile, the language is disabled: {error}",
+                        self.0.name.0
+                    ));
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    /// `SiteQuery`, compiled on first use, on the calling (background)
+    /// thread; None when it does not compile (one line on stderr).
+    pub(crate) fn site_query(&self) -> Option<&SiteQuery> {
+        self.0
+            .site
+            .get_or_init(|| match SiteQuery::new(&self.0) {
+                Ok(query) => Some(query),
+                Err(error) => {
+                    log(format_args!(
+                        "the {} queries do not compile, the language is disabled: {error}",
                         self.0.name.0
                     ));
                     None
@@ -431,6 +455,129 @@ pub(crate) struct Compiled {
     pub locals_patterns: usize,
 }
 
+/// The query `ParsedFile` runs on a core language whose walker gives the
+/// definitions and markers (ADR 0031): the locals and tags query compiled
+/// from the same text as `Compiled::tags`, so with the same pattern and
+/// capture indices, properties and predicates, but only the locals patterns
+/// and the tags patterns that capture a reference enabled. Compiled on its
+/// own: such a language never needs `Compiled` outside the tests.
+pub(crate) struct SiteQuery {
+    pub query: Query,
+    /// By capture index of `query`.
+    pub captures: Vec<Capture>,
+    /// Patterns below this index come from the locals query.
+    pub locals_patterns: usize,
+}
+
+/// How the extractor reads the captures and patterns of a combined
+/// `locals + tags` query.
+struct Classified<'q> {
+    /// tree-sitter-tags' syntax types: the kinds after `definition.` and
+    /// `reference.`, in capture order, one ID per distinct kind.
+    kinds: Vec<&'q str>,
+    /// By syntax type ID: `[as reference, as definition]`.
+    classes: Vec<[TagClass; 2]>,
+    /// By capture index.
+    captures: Vec<Capture>,
+    locals_patterns: usize,
+}
+
+fn classify(query: &Query, locals_len: usize) -> Result<Classified<'_>, String> {
+    let mut kinds: Vec<&str> = Vec::new();
+    for name in query.capture_names() {
+        let Some(kind) = name
+            .strip_prefix("definition.")
+            .or_else(|| name.strip_prefix("reference."))
+        else {
+            continue;
+        };
+        if CString::new(kind).is_ok() && !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    let mut classes = Vec::with_capacity(kinds.len());
+    for kind in &kinds {
+        let reference = match kind.strip_prefix("lectern.") {
+            // `@definition.lectern.local` is only in the locals query,
+            // so it never becomes a tag.
+            Some("local") => TagClass::Ref,
+            Some(marker) => TagClass::Marker(
+                Marker::from_kind(marker)
+                    .ok_or_else(|| format!("unknown marker reference.{kind}"))?,
+            ),
+            None => TagClass::Ref,
+        };
+        classes.push([reference, TagClass::Def(crate::def_kind_from_tag(kind))]);
+    }
+    let captures = query
+        .capture_names()
+        .iter()
+        .map(|name| match *name {
+            "name" => Capture::Name,
+            "doc" => Capture::Doc,
+            "ignore" => Capture::Ignore,
+            "local.scope" => Capture::LocalScope,
+            // A local definition tree-sitter-tags does not see: in the
+            // locals query it acts only on `@local.scope` and
+            // `@local.definition`, so it never filters this name.
+            "local.definition" | "definition.lectern.local" => Capture::LocalDefinition,
+            "local.reference" => Capture::LocalReference,
+            _ => {
+                let (kind, is_definition) = match name.strip_prefix("definition.") {
+                    Some(kind) => (kind, true),
+                    None => match name.strip_prefix("reference.") {
+                        Some(kind) => (kind, false),
+                        None => return Capture::Other,
+                    },
+                };
+                match kinds.iter().position(|k| *k == kind) {
+                    Some(id) => Capture::Tag(classes[id][usize::from(is_definition)]),
+                    None => Capture::Other,
+                }
+            }
+        })
+        .collect();
+    let locals_patterns = (0..query.pattern_count())
+        .filter(|&i| query.start_byte_for_pattern(i) < locals_len)
+        .count();
+    Ok(Classified {
+        kinds,
+        classes,
+        captures,
+        locals_patterns,
+    })
+}
+
+impl SiteQuery {
+    fn new(lang: &LangInner) -> Result<SiteQuery, String> {
+        let source = format!("{}{}", lang.locals_query, lang.tags_query);
+        let mut query = Query::new(&lang.language, &source).map_err(|e| e.to_string())?;
+        let Classified {
+            captures,
+            locals_patterns,
+            ..
+        } = classify(&query, lang.locals_query.len())?;
+        for pattern in locals_patterns..query.pattern_count() {
+            let reference = query
+                .capture_quantifiers(pattern)
+                .iter()
+                .zip(&captures)
+                .any(|(quantifier, capture)| {
+                    *quantifier != CaptureQuantifier::Zero
+                        && *capture == Capture::Tag(TagClass::Ref)
+                });
+            if !reference {
+                query.disable_pattern(pattern);
+            }
+        }
+        Ok(SiteQuery {
+            query,
+            captures,
+            locals_patterns,
+        })
+    }
+}
+
 impl Compiled {
     fn new(lang: &LangInner) -> Result<Compiled, String> {
         let tags =
@@ -439,68 +586,18 @@ impl Compiled {
         // tree-sitter-tags numbers the kinds after `definition.` and
         // `reference.` in capture order, one ID per distinct kind; the same
         // walk gives the same IDs, checked against `syntax_type_name`.
-        let mut kinds: Vec<&str> = Vec::new();
-        for name in tags.query.capture_names() {
-            let Some(kind) = name
-                .strip_prefix("definition.")
-                .or_else(|| name.strip_prefix("reference."))
-            else {
-                continue;
-            };
-            if CString::new(kind).is_ok() && !kinds.contains(&kind) {
-                kinds.push(kind);
-            }
-        }
-        let mut classes = Vec::with_capacity(kinds.len());
+        let Classified {
+            kinds,
+            classes,
+            captures,
+            locals_patterns,
+        } = classify(&tags.query, lang.locals_query.len())?;
         for (id, kind) in kinds.iter().enumerate() {
             let id = u32::try_from(id).map_err(|e| e.to_string())?;
             if tags.syntax_type_name(id) != *kind {
                 return Err(format!("syntax type {id} is not {kind:?}"));
             }
-            let reference = match kind.strip_prefix("lectern.") {
-                // `@definition.lectern.local` is only in the locals query,
-                // so it never becomes a tag.
-                Some("local") => TagClass::Ref,
-                Some(marker) => TagClass::Marker(
-                    Marker::from_kind(marker)
-                        .ok_or_else(|| format!("unknown marker reference.{kind}"))?,
-                ),
-                None => TagClass::Ref,
-            };
-            classes.push([reference, TagClass::Def(crate::def_kind_from_tag(kind))]);
         }
-        let captures = tags
-            .query
-            .capture_names()
-            .iter()
-            .map(|name| match *name {
-                "name" => Capture::Name,
-                "doc" => Capture::Doc,
-                "ignore" => Capture::Ignore,
-                "local.scope" => Capture::LocalScope,
-                // A local definition tree-sitter-tags does not see: in the
-                // locals query it acts only on `@local.scope` and
-                // `@local.definition`, so it never filters this name.
-                "local.definition" | "definition.lectern.local" => Capture::LocalDefinition,
-                "local.reference" => Capture::LocalReference,
-                _ => {
-                    let (kind, is_definition) = match name.strip_prefix("definition.") {
-                        Some(kind) => (kind, true),
-                        None => match name.strip_prefix("reference.") {
-                            Some(kind) => (kind, false),
-                            None => return Capture::Other,
-                        },
-                    };
-                    match kinds.iter().position(|k| *k == kind) {
-                        Some(id) => Capture::Tag(classes[id][usize::from(is_definition)]),
-                        None => Capture::Other,
-                    }
-                }
-            })
-            .collect();
-        let locals_patterns = (0..tags.query.pattern_count())
-            .filter(|&i| tags.query.start_byte_for_pattern(i) < lang.locals_query.len())
-            .count();
         Ok(Compiled {
             tags,
             classes,

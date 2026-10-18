@@ -1280,7 +1280,7 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 
 - 状态不是 `Done` 的抽取也写一行 `ci_ext`、没有定义和引用：超时和超过上限的内容不会在每次打开项目时重试。
 - `ci_def_name` 用 `NOCASE`（ASCII 大小写折叠）：跳转按 `name = ?1 COLLATE NOCASE` 取出后在 Rust 里按原样比较；大小写不敏感的语言包可以直接用这个索引。`ci_ref` 只按原样的名字查。
-- `ci_def_unit`、`ci_ref_unit` 供删除单元和建名字表按单元扫描。
+- `ci_def_unit`、`ci_ref_unit` 供删除单元和按单元读定义、引用。
 - 版本过滤：所有读取都经 `ci_ext` 限定在当前语言表的版本上。每种语言有一个当前三元组（语言、grammar 版本、查询版本），查询把兼容组内每种语言的当前三元组作为参数：
 
   ```sql
@@ -1394,7 +1394,7 @@ enum WorktreeState {
 ### 名字表
 
 - 内容：当前 worktree 映射里所有 OID 的定义名，去重（区分大小写），NFC 统一，按字节序排序；每个名字带它出现过的 `DefKind` 位集，⌘K 用它显示图标或过滤。
-- 构建：后台任务里先取出 `ci_ext` 中键的语言、grammar 版本、查询版本与当前一致的全部 `(unit, oid)`，按映射以（OID、语言）过滤成单元集合，再按 `ci_def_unit` 顺序扫描 `ci_def`，合并去重。正在入索引的 OID 不在其中，下一代名字表再补上。
+- 构建：后台任务里先取出 `ci_ext` 中键的语言、grammar 版本、查询版本与当前一致的全部 `(unit, oid)`，按映射以（OID、语言）过滤成单元集合，再按表的顺序扫描一遍 `ci_def`，跳过集合以外的单元，合并去重。正在入索引的 OID 不在其中，下一代名字表再补上。
 - 代：名字表依赖的输入见「输入代数与派生状态」，任何一个变化时代数加一。`names` 发现仍有持有者的表代数落后时开始重建，重建期间仍返回旧表（`Ready`）。
 - 交付：每个项目同时最多一次构建，构建期间的 `names` 返回 `Building`（或仍有持有者的旧表），不另起一次。建好后在 `CodeIntelEvent::Names` 里交出 `Arc<NameTable>`，同时把 `Weak` 换成指向新表；所以第一次调用返回 `Building` 之后，监听方从事件里拿到表，之后的 `names` 只要表还有持有者就返回 `Ready`。所有持有者都释放之后，下一次 `names` 重新构建。
 - 持有期间的刷新：表有持有者（`Weak` 能升级）时，只要代数落后（批次写入、映射换代、淘汰代数或语言包变化），本 crate 就在后台重建，建好后发出新的 `Names`，持有方换上新表，不需要再调 `names`。重建有间隔：上一次构建开始之后至少过 `max(1 s, 2 × 上一次构建的耗时)` 才开始下一次，期间的变化并进下一次；间隔未到时登记一个到期时刻，由看门狗线程（见「调度、批次与取消」）到期后提交重建任务。10 万文件的仓库在建索引期间因此最多每 2 秒左右重建一次，CPU 不会全花在名字表上。构建开始时取映射和淘汰代数的快照，表的代数就是这份快照的代数；建好时代数已经又落后的，照常交出，再按间隔排下一次。持有者全部释放后不再重建。
@@ -1881,6 +1881,39 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   `disk_100k`：9 万个源码单元声明 279.7 MB，分库文件 298 MiB，写入过程中淘汰 80 次，4 个线程 70 s；结论写在「存储表」的「规模」一条。
 - 没有验证的：M 系列上的各项基准（由 macOS CI 判定）；`PowerSource` 的真实实现（`platform` 还没有电源接口，测试只用 `testing::FakePower`）；真实的 fs_watch 后端（测试用 `FakeBackend`）；几个批量线程同时运行（测试用 `Executor::manual()`，大文件轮流抽取由 `LargeSlot` 的单元测试检查）；文件夹项目的建索引（第 3 步不实现，`coverage` 报告 `Pending`）。
 
+第 4 步（查询与插件），rebase 到包含 kernel 的 barrier 修正（#96，234081f）的 main 之后，同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+
+- `just check`（含 `python3 scripts/check_architecture.py`：30 个 crate 通过，本 crate 的 `plugin = true` 生效，只有 `bench`（tool 层）依赖它）、`just test`（整个工作区 1316 个测试通过，跳过 1 个）、`just doctest`（7 个通过）、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。Cargo.lock 只有本 crate 的依赖列表变化（`memchr`、`unicode-normalization` 原已在锁文件里），没有新增 crate。`Harness::quiescent` 仍是第 3 步的宽容等待（barrier 不等 kernel 线程自己排入的请求）。
+- `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 和 `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 仍没有结果。
+- `just test -p lectern-code-intel`：214 个测试通过，第 4 步新增 55 个。按前缀：
+  - `goto_*` 10：第 1–3 步各自在有依据时停下（局部绑定、`Resolver::bind`、索引）；一个有依据的候选直接跳转，只有同名依据时预选第一个；分层与排序（当前文件、审阅集合、子项目、依赖、其余）；按兼容组、可见性和语法种类过滤；当前文件的定义不重复列出；同一份字节在 `.java` 和 `.js` 下是一个 OID、两个单元，`java` 单元只给出 `.java` 的路径；没有标识符和语言不受支持时 `Failed`；`Object` 来源（Diff 的旧侧）按 OID 读 blob、不读 worktree；结果只增不减（后一批只追加，第一批的下标不变）；测试自己的 `Resolver` 给出第 2 步的 import 目标，第 2 步读过的目标不被限时搜索重复抽取、不重复列出。
+  - `read_verify_*` 1（表驱动）：原始字节的 OID 相符、CRLF 检出时规范 OID 相符，这两种回答；映射里的旧 OID 已不是磁盘内容（还没有事件）、外部过滤器（没有规范 OID）、文件已删除，这三种不回答。
+  - `search_*` 5：整词匹配的表（标识符字符、Unicode、边界）；只解析整词命中的文件；1 s 停下，`Partial` 的计数与未搜的文件数一致；后台正在抽取的文件不搜索，其余文件都搜完结果仍是 `Partial`；跳转的限时搜索把命中文件的抽取结果写入缓存，那个路径的提示随之匹配。
+  - `refs_*` 8：同文件的调用方；局部变量只在自己的作用域里；嵌套的同名函数是局部的；被遮蔽的使用不列出；顶层名字被 locals 捕获时仍是引用；`bind` 给出依据时是调用方；三个来源（当前文件、`ci_ref`、限时搜索）不重复；未入索引的文件经限时搜索找到。
+  - `names_*` 4：去重、NFC、只含当前 worktree 映射里的 OID；`Building` 之后在 `Names` 事件里交出表，之后 `Ready`；持有中、代数落后时 `names` 仍返回旧表，新表等间隔到了由看门狗的到期项构建，几次变化只建一次，持有者全部释放后不再重建（`clear_events` 之后数 `name_builds`）；没有项目或没有索引时 `Unavailable`。
+  - `escalate_*` 9：只有一个或几个同名候选时向 Java 提供者升级；`head_only` 提供者只对与 HEAD 相同的文本调用，它在与 HEAD 不同的文件里给出的位置被丢掉；回复的先后不影响合并结果；`Same` 与 `Ready`；关闭查询、淘汰时取消、作废的请求 ID 被忽略；SCIP 的回复不取消 jdtls 的请求；死掉或已注销的提供者不再调用，注销时未回复的请求作废并重新合并；查引用同样升级。`head_dirty_*` 1：暂存、改 index、提交三种情况下 `head_clean` 的变化。
+  - `prefetch_*` 2、`focus_*` 1：2 s 内同一查询沿用预取（`Stats::prepares` 不增加）；过了 2 s、换了映射、发生淘汰之后不沿用（表驱动）；对不是当前 worktree 的焦点不进第 1、2 层，切换过去之后才进。
+  - `plugin_*` 4（`TestKernel` 加模拟的 `dyn Projects`）：激活时不做 IO，没有项目时不建任何东西；缺少 `dyn Projects` 时激活失败；结果事件按代数顺序发出，最后一批交出之前 kernel 忙；关闭项目时取消它未回复的语义请求、退掉 fs_watch 订阅，停用时退掉电源和语言包的订阅。
+  - `watchdog_*` 5（读 `/proc/self/task/*/comm`）：停用后看门狗线程退出；executor 关闭时退出；线程启动前已经结束的激活不起线程（抽取照常运行，没有截止时间的执行者）；激活 20 次之后最多一个线程；停用时进行中的抽取返回 `Cancelled`、不写入。
+  - `derived_*` 新增 3：覆盖项改了 OID 的文件被搜索；被淘汰的定义经限时搜索找回；子项目变化后分层和搜索范围随之变化。`site_*` 新增 2：`site_reference_query_matches_full`、`site_parents_match_tree_sitter`（见「与设计的差异」）。`schedule_folder_project_indexes_at_open` 替换第 3 步的文件夹项目测试：打开即读出全部文件、各层走完、`coverage` 为 `Done`。
+- 基准（`just bench --measure code_intel/ plugin/code-intel/`，release，MB 为 2^20 字节）：
+
+  | 基准 | 结果 | 预算 |
+  |---|---|---|
+  | `code_intel/goto_indexed` | 中位数 30.6 ms（第一版）；`site_query` 之后 25.2 ms；`Parents` 之后 25.0、23.2 ms | ≤ 20 ms（macOS 判定） |
+  | `code_intel/search_stop` | 最大 1 s | ≤ 1.02 s |
+  | `code_intel/references_100k/all` | 中位数 1.26 s（第一版）；1.03 s | ≤ 2 s |
+  | `code_intel/references_100k/first` | 中位数 12.4 ms；10.6 ms | ≤ 200 ms |
+  | `code_intel/names_100k` | 中位数 1.07 s（逐个单元查 `ci_def_unit`）；一次扫描之后 814、796 ms | ≤ 1 s |
+  | `code_intel/names_100k_bytes` | 4.66 MB（29 万个名字） | ≤ 8 MB |
+  | `plugin/code-intel/resident_cloudprint` | 241 KB（第一版）；155 KB | ≤ 4 MB |
+  | `plugin/code-intel/resident_100k` | 11.5 MB（第一版）；2.86 MB | ≤ 10 MB |
+
+  同一次运行里第 1–3 步的基准：`map_100k` 9.22 ms、`map_100k_bytes` 2.65 MB、`batch_peak` 32.7 MB、`extract_throughput` 4.22 MB/s、`warm_100k` 83.5 ms，都在预算内；`disk_100k` 9 万个单元，分库文件 298 MiB，80 次淘汰。
+
+  `goto_indexed` 在这台机器上超出 20 ms。拆分（release，64 KiB 的 TS 当前文本）：解析约 9 ms，locals 与引用模式的查询约 4.5 ms，处理匹配（作用域、局部引用的变量位置）约 4 ms，遍历约 2 ms，规则与收尾约 1 ms，合计约 20 ms，其余（读取与核对、按名字查定义、约 130 个候选的过滤与排序）约 3 ms。设计的分项是「解析与 locals ≤ 10 ms」，这台机器上单是解析就接近它；这一项与 `extract_throughput`、`warm_100k` 一样在 Apple 芯片上判定（[bench 设计](bench.md)），预算没有因 Linux 的结果调高。`resident_100k` 第一版的 11.5 MB 里约 9 MB 不属于本 crate：基准没有像 `project` 那样先订阅 worktree，fs_watch 为本 crate 的订阅建的跟踪路径过滤器算进了测量窗口（`Rig::watch_as_project` 改正）；另外 `touch_pending` 排空后保留了队列的容量（已释放）；核心语言不再编译 `Compiled` 也减少了常驻。
+- 没有验证的：M 系列上的各项基准（`goto_indexed` 在这台机器上超出，见上）；`app` 装配本插件（`app` 依赖 GPUI，Linux 上不编译，第 5 步）；真实的 `PowerSource`、fs_watch 后端和语义导航提供者（测试用 `FakePower`、`FakeBackend` 和测试里的假提供者，jdtls / SCIP 属于 #26）；几个批量线程同时运行；文件夹项目超过 2 万个文件时的行为（由 `project` 的遍历上限决定，没有测）；cloudprint 形状的名字表（≤ 0.1 MB、≤ 30 ms，没有对应的基准）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2002,7 +2035,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - `ci_ref` 的插入用 `INSERT OR IGNORE`：抽取结果的引用名本来已经去重，重复的一行不至于让整批回滚。
 - grammar 版本和查询版本是 `u64`，按位存成 SQLite 的 64 位有符号整数，读写用同一种转换。
 - 语句共 11 条（三条插入、存在检查、两条按名字的查找、名字表两条、读回单元三条），在 cache 每连接 32 条的预编译缓存以内。
-- 名字表的第二步按单元逐个查 `ci_def_unit`（`def_names` 的单元按 ID 排序后传入）：设计写的是「按 `ci_def_unit` 顺序扫描」，没有规定是一条语句还是逐个单元，逐个单元不需要在 SQL 里表达映射过滤后的单元集合。
+- 名字表的第二步按单元逐个查 `ci_def_unit`（`def_names` 的单元按 ID 排序后传入）：设计写的是「按 `ci_def_unit` 顺序扫描」，没有规定是一条语句还是逐个单元，逐个单元不需要在 SQL 里表达映射过滤后的单元集合。第 4 步改为一次扫描整张表，见下。
 - `store_dropped_write_does_not_panic` 不检查恢复后写入的单元仍在：`SQLITE_FULL` 之后 cache 把分库预算降到文件大小以下，刚写入的单元会被立即淘汰（cache 设计「淘汰」），这是 cache 的行为。
 - 早期数据：第 2 步用抽取夹具拼成的语料对照了单元字节数的估算与实际文件，实际文件约为估算的 1.12 倍（见「实际验证」）。这份语料的定义密度远高于真实代码，不用来校准 10 万文件的总量；校准由第 3 步的 `code_intel/disk_100k` 完成（「验收」第 3 步）。
 - 把访问标记移出热启动。设计原来让存在检查给命中的单元标记访问（「调度、批次与取消」的存在检查一条、「存储表」的淘汰一条）。第 2 步第一版这样实现之后，`code_intel/warm_100k` 在 macOS CI 上中位数 537、549 ms，超过 500 ms 的预算。Linux 上的拆分：200 次查询约 82 ms，其余约 370 ms 是 `TableSet::touch` 写回 10 万个单元的访问时间。改动：
@@ -2061,9 +2094,12 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 语义导航：合并时「与 HEAD 相同的文件归 `head_only` 一类」只在这次查询还有可回答的（未作废或已回复的）`head_only` 请求时成立，否则全部文件归另一类：设计没有说 SCIP 注销之后它的文件归谁。`Same` / `Ready` 按（路径、行、列）的集合比较。注销后的重新合并、回复的处理都在 `Background` 任务里（回复只入队），事件在 executor 线程上发出。切换当前 worktree 时关闭这个项目的全部查询（未回复的请求收到 `cancel`）：它们回答的是旧 worktree 的内容。
 - 覆盖：`coverage` 另外要求没有待读的路径、git 项目的工作区比较是当前的，否则第 3、4 层是 `Pending`：原来在核对任务装上基础映射、还没读完覆盖部分的间隙里，第 3、4 层可能报 `Done`。
 - 文件夹项目在第 4 步建索引（第 3 步把它推迟到这一步，见上）：文件列表就绪时打开根目录的 `SafeRoot`，把文件列表里的每个文件放进重新读集合，核对任务读出、按原始字节的 SHA-1 记为覆盖项（`Content`），之后与 git 项目走同一套映射、各层和查询；换文件列表时全部重新读。没有 fs_watch 订阅、工作区比较和 HEAD（`head_clean` 总是 false），`ProjectEvent::Changed` 不再让文件夹项目重新打开根目录。热启动要读每个文件求 OID，命中的不解析（`schedule_folder_project_indexes_at_open`）。
+- 名字表的第二步改为一条语句扫描整张 `ci_def`（`SELECT unit, name, kind FROM ci_def`，表的顺序），跳过单元集合以外的行；同一单元的行连续写入，对上一行单元的判断沿用到下一行。逐个单元查 `ci_def_unit` 时 10 万个单元要 10 万次语句执行和 300 万次按 rowid 回表，`code_intel/names_100k` 为 1.07 s，超出 1 s；一次扫描为 0.81 s。
+- `ParsedFile`（跳转第 1 步、查引用和限时搜索现场解析的文件）在核心语言上不再跑 `Compiled` 的完整查询：定义和标记本来就取自遍历（ADR 0031），只需要 locals 的模式和给出引用的 tags 模式。`Lang::site_query` 用与 `Compiled` 相同的文本另编译一个查询，停用其余 tags 模式，模式和捕获的编号、属性、谓词与完整查询相同；它不经 `TagsConfiguration`，所以核心语言在生产中只编译这一个查询（第一次跳转时，Linux 上约 130 ms，与原来编译 `Compiled` 相同）。`site_reference_query_matches_full` 在夹具、遍历的样例和每种扩展名的合成源码上检查两者的定义、引用位置和每个位置的 `site_at` 相同。另外，局部引用是否处在变量位置要看父节点，tree-sitter 的 `Node::parent` 每次从根往下逐层扫描子节点，顶层条目多的文件每次都扫描全部顶层条目；`site::Parents` 用二分查找定位根的子节点，往下与 tree-sitter 相同（`site_parents_match_tree_sitter` 检查每个节点的父节点与 `Node::parent` 相同）。64 KiB 的 TS 文件上 `ParsedFile` 从约 27 ms 降到约 20 ms（解析本身约 9 ms）。
 - 基准：
   - `plugin/code-intel/resident_*` 在 `Memory` 目标里用计数分配器测本 crate 的活跃字节（tree-sitter 的分配经 `route_tree_sitter_allocations` 计入，不含 `project` 的文件列表和 SQLite 自己的内存）：`Process` 目标的进程级基准（bench 第 4、5 步）还没有实现，按 bench 设计的划分它们属于 `Process`，`budgets_belong_to_the_documented_targets` 为它们加了例外（[bench 设计「基准目标」](bench.md#基准目标)已改）。
   - `code_intel/references_100k` 拆成 `code_intel/references_100k/all`（≤ 2 s）和 `code_intel/references_100k/first`（≤ 200 ms）：「性能」这一行有两个预算。
+  - bench 的 `budgets_ids_are_crate_slash_name` 允许 `plugin/<id>/…` 的插件 ID 一段里有 `-`：插件 ID 是 kebab-case，`plugin/code-intel/*` 是预算表里第一批带 `-` 的具体条目。
   - 10 万文件的基准用虚拟仓库：`testing::virtual_repo`（`FakeGit::stage_oids` 只有 index 条目，`assume_unchanged` 让工作区比较为空，单元是 `synthetic::extraction` 的合成抽取结果：每个文件 3 个自己的名字、27 个取自 2 万个共用名字，10 万文件约 32 万个不同的名字，对应调研对名字表 4–8 MB 的估算）；查询要读的文件才写到磁盘上。`goto_indexed` 的当前文本 64 KiB，目标名字有约 130 个定义。
 - `testing`：`TestHost` 改为直接启动 `Kernel`、不经 `TestKernel`（`TestKernel` 记下目标插件发出的每个事件，会一直持有名字表）；`FakePower`、`FakeGrammars` 的订阅返回可退订的守卫（`subscribers()` 只数没退订的）。`Stats` 新增 `prepares`（跳转第 1–3 步的次数，预取的测试用）。
 - 依赖：`memchr`（限时搜索的 `memmem`）和 `unicode-normalization`（名字表的 NFC）加入 `[workspace.dependencies]`，两者原已在 Cargo.lock 里，没有新增 crate。

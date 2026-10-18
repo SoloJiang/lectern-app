@@ -405,9 +405,11 @@ fn deadline_parsed_file_checks_every_phase() {
 #[test]
 fn deadline_parsed_file_walk_reads_the_deadline() {
     // The same Java source as core `java` (walked) and as a language pack
-    // with Java's grammar and queries (not walked): parsing, the query run
-    // and the check before returning read the clock equally often, so the
-    // difference is the walk's checks.
+    // with Java's grammar and queries (not walked), both with the full
+    // query (core languages otherwise run fewer patterns,
+    // `Lang::site_query`): parsing, the query run and the check before
+    // returning read the clock equally often, so the difference is the
+    // walk's checks.
     let source: Arc<[u8]> = Arc::from(crate::testing::corpus("java", 64 << 10));
     let table = LanguageTable::core().with_pack(
         crate::lang_name("kotlin"),
@@ -420,12 +422,13 @@ fn deadline_parsed_file_walk_reads_the_deadline() {
             reads: std::sync::atomic::AtomicU32::new(0),
             expire_at: u32::MAX,
         };
-        crate::site::ParsedFile::parse(
+        crate::site::ParsedFile::parse_with(
             lang,
             source.clone(),
             &clock,
             clock.start + MINUTE,
             &AtomicBool::new(false),
+            true,
         )
         .unwrap();
         clock.reads.load(Ordering::SeqCst)

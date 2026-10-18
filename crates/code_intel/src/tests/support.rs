@@ -522,10 +522,6 @@ impl Harness {
         self.host.kernel().pause();
     }
 
-    pub(crate) fn resume(&self) {
-        self.host.kernel().resume();
-    }
-
     /// The events emitted so far (the log keeps name tables alive).
     pub(crate) fn events(&self) -> Vec<CodeIntelEvent> {
         self.indexer.inner().host.events.lock().unwrap().clone()
