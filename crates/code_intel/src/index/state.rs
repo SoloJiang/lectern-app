@@ -415,6 +415,9 @@ pub(crate) struct State {
     /// On battery, a query or `names` lets tiers 4 and 5 go on until the
     /// project closes or the power source changes.
     pub demand: bool,
+    /// Queries asked before this session's map was built: started when
+    /// `rebuild_base` installs it (`Inner::resume_waiting`).
+    pub waiting: Vec<crate::query::Waiting>,
 }
 
 impl State {
@@ -468,6 +471,7 @@ impl State {
             batch: Batch::default(),
             in_flight: HashMap::new(),
             demand: false,
+            waiting: Vec::new(),
         }
     }
 

@@ -48,9 +48,30 @@ pub const SEARCH_FOR: Duration = Duration::from_secs(1);
 /// Prefetches kept at once.
 const PREFETCHES: usize = 4;
 
-/// [`Inner::after_lookup`](crate::index::Inner) (tests).
+/// A point in a query where the tests' hook runs (`Inner::step_hook`):
+/// the interleaving matrix injects a background change there.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Step {
+    /// The snapshot is taken.
+    Snapshot,
+    /// The index lookup is done (a jump's steps 1–3, the references'
+    /// `ci_ref` pass, `Named`'s lookup).
+    Lookup,
+    /// The hint reads are done (the search's scope, the counts).
+    Hints,
+    /// Before a file of the snapshot is read (`read_content`).
+    Read,
+    /// Before results are published.
+    Publish,
+}
+
+/// The tests' hook (`Inner::step_hook`): run once, at its step.
 #[cfg(test)]
-pub(crate) type AfterLookup = Box<dyn FnOnce(&Inner, &Snap) + Send>;
+pub(crate) type StepHook = (Step, HookFn);
+
+/// What the tests' hook runs.
+#[cfg(test)]
+pub(crate) type HookFn = Box<dyn FnOnce(&Inner, &Snap) + Send>;
 
 /// One query's entry: its current results and what stops it.
 pub(crate) struct Entry {
@@ -63,12 +84,11 @@ pub(crate) struct Entry {
 }
 
 /// A prefetched jump: steps 1–3 for a `Definition`, kept for
-/// [`PREFETCH_FOR`] while the map, the eviction and the language generations
-/// stay.
+/// [`PREFETCH_FOR`] while its view's basis stays (`View::same_basis`).
 struct Prefetched {
     query: Query,
     at: Instant,
-    inputs: Inputs,
+    view: View,
     prepared: Option<Arc<Prepared>>,
 }
 
@@ -90,13 +110,66 @@ pub(crate) struct Queries {
     expiry: Option<Instant>,
 }
 
-/// What a query's snapshot depends on, for the prefetch's reuse.
+/// The inputs one query's results are consistent with (「查询的视图」):
+/// the generations of everything a query reads that changes under it,
+/// taken with its snapshot. [`Inner::check_view`] compares it with now.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct Inputs {
+pub(crate) struct View {
+    /// The project's session: its current worktree and root; it ends when
+    /// the project closes or the current worktree changes.
     pub session: u64,
+    /// The map's generation (`Provenance::generation`).
     pub map: u64,
+    /// The store's eviction generation (`Project::evictions`): units of the
+    /// index only go away with it.
     pub eviction: u64,
+    /// The language table's generation.
     pub grammar: u64,
+    /// The hint installations (`State::hinted`); only grows.
+    pub hinted: u64,
+}
+
+impl View {
+    /// The same session, map, evictions and language table: what a reused
+    /// prefetch must share with the query (hints may have grown).
+    pub fn same_basis(&self, other: &View) -> bool {
+        (self.session, self.map, self.eviction, self.grammar)
+            == (other.session, other.map, other.eviction, other.grammar)
+    }
+}
+
+/// A query asked while its project's session has no map yet: started when
+/// the map is installed (`Inner::resume_waiting`).
+pub(crate) struct Waiting {
+    pub id: QueryId,
+    pub cancel: Arc<AtomicBool>,
+    pub query: Query,
+}
+
+/// What [`Inner::snap_or_wait`] found.
+pub(crate) enum Snapped {
+    Ready(Box<Snap>),
+    /// The session has no map yet: the query waits for it.
+    Waiting,
+    /// The project is not open.
+    Gone,
+}
+
+/// How a query's view relates to now ([`Inner::check_view`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ViewCheck {
+    /// Nothing the query read has changed.
+    Same,
+    /// Only hints were installed: the lookup is made again and its new
+    /// results appended (the cut; the snapshot's map still applies).
+    Grew(u64),
+    /// Units were evicted: lookups and hints read before or after may
+    /// disagree. Before anything is published the lookup is made again
+    /// under a new snapshot, once; afterwards the query ends `Stale`.
+    Evicted,
+    /// The session ended (the project closed, the current worktree
+    /// changed): the query ends `Stale` and publishes nothing more.
+    Ended,
 }
 
 /// One project as a query sees it, taken once when the query starts
@@ -118,28 +191,13 @@ pub(crate) struct Snap {
     pub packages: Arc<[Package]>,
     pub review: Arc<[RelPath]>,
     pub stamp: HintStamp,
-    /// The project's hint installations when the snapshot was taken
-    /// (`State::hinted`): the cut of an index lookup made from it.
-    pub hinted: u64,
     /// Keys extracted right now: neither in the index nor searched.
     pub in_flight: HashSet<(BlobId, LangName)>,
-    pub inputs: Inputs,
+    /// The view taken with the snapshot.
+    pub view: View,
 }
 
 impl Snap {
-    /// Whether a hint was installed after `cut`, the installations counted
-    /// before the index lookup a query's results come from; moves `cut` to
-    /// now. A query calls it after the hint reads that take files as
-    /// indexed (its search's scope, its counts) and, when it says so, looks
-    /// up again: every hint those reads saw is installed by now, so its
-    /// file is in the new lookup (「输入代数与派生状态」, a query's cut).
-    pub fn hinted_since(&self, cut: &mut u64) -> bool {
-        let now = lock(&self.project.state).hinted;
-        let moved = now != *cut;
-        *cut = now;
-        moved
-    }
-
     /// The worktree root of `worktree` (the current one when it is the
     /// current or None), opened now if the reconcile has not yet.
     pub fn root_of(&self, worktree: Option<&WorktreeKey>) -> Option<Arc<SafeRoot>> {
@@ -307,6 +365,15 @@ impl Inner {
         f: impl FnOnce(&mut QueryResults, &mut Option<SemQuery>),
     ) -> bool {
         let _order = lock(&self.publishing);
+        self.publish_ordered(id, f)
+    }
+
+    /// [`publish_entry`](Self::publish_entry) with `publishing` held.
+    fn publish_ordered(
+        &self,
+        id: QueryId,
+        f: impl FnOnce(&mut QueryResults, &mut Option<SemQuery>),
+    ) -> bool {
         let generation = {
             let mut q = lock(&self.queries);
             let Some(entry) = q.entries.iter_mut().find(|e| e.id == id) else {
@@ -326,24 +393,90 @@ impl Inner {
         true
     }
 
-    /// What a prefetch of the project depends on now: a few loads under
-    /// the project's lock, nothing copied (`query` runs on any thread).
-    fn inputs(&self, key: &ProjectKey) -> Option<Inputs> {
+    /// The project's view now: a few loads under the project's lock,
+    /// nothing copied (`query` runs on any thread).
+    fn view_of(&self, key: &ProjectKey) -> Option<View> {
         let project = self.project(key)?;
         let eviction = project.evictions();
         let grammar = self.grammar();
         let st = lock(&project.state);
-        Some(Inputs {
+        Some(View {
             session: st.session,
             map: st.map.provenance.generation(),
             eviction,
             grammar,
+            hinted: st.hinted,
         })
     }
 
-    /// The project as a query sees it now.
+    /// Compares a query's view with now (「查询的视图」): one lock of the
+    /// project and one atomic; called once after the reads of each step.
+    /// The map and the language table a query reads are its snapshot's own
+    /// copies, so a new map or table does not change what the query has
+    /// read; the shared inputs are the session (root, worktree, open), the
+    /// store (evictions, and units written: hints) and the files (checked
+    /// per read, `read_content`).
+    pub(crate) fn check_view(&self, snap: &Snap, view: &View) -> ViewCheck {
+        let eviction = snap.project.evictions();
+        let hinted = {
+            let st = lock(&snap.project.state);
+            if st.session != view.session || st.cancel.load(Ordering::Acquire) {
+                return ViewCheck::Ended;
+            }
+            st.hinted
+        };
+        if eviction != view.eviction {
+            ViewCheck::Evicted
+        } else if hinted != view.hinted {
+            ViewCheck::Grew(hinted)
+        } else {
+            ViewCheck::Same
+        }
+    }
+
+    /// [`publish`](Self::publish) for a query answering from `snap`: only
+    /// while its session is live, checked under the lock that orders
+    /// publication against the session's end (a worktree switch or a
+    /// close takes it to end the session), so nothing of an ended session
+    /// is published after the end. False when not published.
+    pub(crate) fn publish_in(
+        &self,
+        snap: &Snap,
+        id: QueryId,
+        f: impl FnOnce(&mut QueryResults),
+    ) -> bool {
+        self.step_hook(Step::Publish, snap);
+        let _order = lock(&self.publishing);
+        {
+            let st = lock(&snap.project.state);
+            if st.session != snap.view.session || st.cancel.load(Ordering::Acquire) {
+                return false;
+            }
+        }
+        self.publish_ordered(id, |results, _| f(results))
+    }
+
+    /// The project as a query sees it now; None when it is not open, or
+    /// its session has no map yet ([`snap_or_wait`](Self::snap_or_wait)).
     pub(crate) fn snap(&self, key: &ProjectKey) -> Option<Snap> {
-        let project = self.project(key)?;
+        match self.take_snap(key, None) {
+            Snapped::Ready(snap) => Some(*snap),
+            Snapped::Waiting | Snapped::Gone => None,
+        }
+    }
+
+    /// The project as a query sees it now. A session without its map yet
+    /// (the project just opened, or the current worktree just changed)
+    /// takes `waiting`, started again when the map is installed
+    /// (`resume_waiting`); checked and queued under one lock.
+    pub(crate) fn snap_or_wait(&self, key: &ProjectKey, waiting: Waiting) -> Snapped {
+        self.take_snap(key, Some(waiting))
+    }
+
+    fn take_snap(&self, key: &ProjectKey, waiting: Option<Waiting>) -> Snapped {
+        let Some(project) = self.project(key) else {
+            return Snapped::Gone;
+        };
         let eviction = project.evictions();
         let (table, disabled, grammar) = {
             let langs = lock(&self.langs);
@@ -353,7 +486,13 @@ impl Inner {
                 langs.generation,
             )
         };
-        let st = lock(&project.state);
+        let mut st = lock(&project.state);
+        if st.cancel.load(Ordering::Acquire) || st.base_for.is_none() {
+            if let Some(w) = waiting {
+                st.waiting.push(w);
+            }
+            return Snapped::Waiting;
+        }
         let worktree = st.worktree().cloned();
         let review = st
             .focus
@@ -363,7 +502,7 @@ impl Inner {
             .map(|(_, p)| p.clone())
             .unwrap_or_else(|| Arc::from(Vec::new()));
         let snapshot = st.snapshot.clone();
-        Some(Snap {
+        Snapped::Ready(Box::new(Snap {
             project: project.clone(),
             session: st.session,
             ended: st.cancel.clone(),
@@ -387,29 +526,62 @@ impl Inner {
                 .unwrap_or_else(|| Arc::from(Vec::new())),
             review,
             stamp: st.stamp(eviction),
-            hinted: st.hinted,
             in_flight: st.in_flight.keys().cloned().collect(),
-            inputs: Inputs {
+            view: View {
                 session: st.session,
                 map: st.map.provenance.generation(),
                 eviction,
                 grammar,
+                hinted: st.hinted,
             },
-        })
+        }))
     }
 
-    /// The test hook between a query's index lookup and its first hint
-    /// read ([`Inner::after_lookup`]); nothing outside the tests.
-    pub(crate) fn run_after_lookup(&self, snap: &Snap) {
+    /// Starts the queries that waited for their session's map.
+    pub(crate) fn resume_waiting(self: &Arc<Self>, waiting: Vec<Waiting>) {
+        for w in waiting {
+            if w.cancel.load(Ordering::Acquire) {
+                continue;
+            }
+            let me = self.clone();
+            let run = Run {
+                id: w.id,
+                cancel: w.cancel,
+                started: self.watchdog.clock().now(),
+            };
+            let query = w.query;
+            let spawned = self
+                .host
+                .spawn_busy("query", Priority::Interactive, move || {
+                    me.run_query(&run, &query, None);
+                });
+            if !spawned {
+                self.publish(w.id, |r| r.state = QueryState::Failed(QueryError::NotOpen));
+            }
+        }
+    }
+
+    /// The tests' hook at `step` (`Inner::step_hook`); nothing outside the
+    /// tests.
+    #[cfg_attr(
+        not(test),
+        allow(unused_variables, reason = "the hook runs in the tests only")
+    )]
+    pub(crate) fn step_hook(&self, step: Step, snap: &Snap) {
         #[cfg(test)]
         {
-            let hook = lock(&self.after_lookup).take();
-            if let Some(f) = hook {
+            let hook = {
+                let mut h = lock(&self.step_hook);
+                if h.as_ref().is_some_and(|(s, _)| *s == step) {
+                    h.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, f)) = hook {
                 f(self, snap);
             }
         }
-        #[cfg(not(test))]
-        let _ = snap;
     }
 
     /// The resolution rules of a language: an extension's implementation,
@@ -424,16 +596,28 @@ impl Inner {
 
     fn run_query(self: &Arc<Self>, run: &Run, query: &Query, prepared: Option<Arc<Prepared>>) {
         let _all = crate::phases::span("query task");
-        let snap = {
+        let snapped = {
             let _t = crate::phases::span("snapshot");
-            self.snap(&query.project)
+            self.snap_or_wait(
+                &query.project,
+                Waiting {
+                    id: run.id,
+                    cancel: run.cancel.clone(),
+                    query: query.clone(),
+                },
+            )
         };
-        let Some(snap) = snap else {
-            self.publish(run.id, |r| {
-                r.state = QueryState::Failed(QueryError::NotOpen)
-            });
-            return;
+        let snap = match snapped {
+            Snapped::Ready(snap) => *snap,
+            Snapped::Waiting => return,
+            Snapped::Gone => {
+                self.publish(run.id, |r| {
+                    r.state = QueryState::Failed(QueryError::NotOpen)
+                });
+                return;
+            }
         };
+        self.step_hook(Step::Snapshot, &snap);
         match &query.kind {
             QueryKind::Definition { at, position } => {
                 self.run_definition(run, &snap, at, *position, prepared);
@@ -470,7 +654,7 @@ impl Inner {
                     q.prefetched.push(Prefetched {
                         query,
                         at: now,
-                        inputs: snap.inputs,
+                        view: snap.view,
                         prepared: prepared.map(Arc::new),
                     });
                     while q.prefetched.len() > PREFETCHES {
@@ -496,8 +680,8 @@ impl Inner {
             .iter()
             .map(|p| p.query.project.clone())
             .collect();
-        // Read without the queries' lock: `inputs` locks the project.
-        let current: Vec<Option<Inputs>> = keys.iter().map(|k| self.inputs(k)).collect();
+        // Read without the queries' lock: `view_of` locks the project.
+        let current: Vec<Option<View>> = keys.iter().map(|k| self.view_of(k)).collect();
         let (dropped, next) = {
             let mut q = lock(&self.queries);
             let mut dropped = Vec::new();
@@ -508,7 +692,7 @@ impl Inner {
                     .iter()
                     .position(|k| *k == p.query.project)
                     .and_then(|j| current[j])
-                    == Some(p.inputs);
+                    .is_some_and(|v| v.same_basis(&p.view));
                 if now.saturating_duration_since(p.at) > PREFETCH_FOR || !fresh_inputs {
                     dropped.push(q.prefetched.remove(i));
                 } else {
@@ -580,15 +764,15 @@ impl Inner {
             return None;
         }
         let now = self.watchdog.clock().now();
-        let current = self.inputs(&query.project);
+        let current = self.view_of(&query.project);
         let p = {
             let mut q = lock(&self.queries);
             let i = q.prefetched.iter().position(|p| &p.query == query)?;
             q.prefetched.remove(i)
         };
         // Outside the lock: a stale one drops here.
-        let fresh =
-            now.saturating_duration_since(p.at) <= PREFETCH_FOR && Some(p.inputs) == current;
+        let fresh = now.saturating_duration_since(p.at) <= PREFETCH_FOR
+            && current.is_some_and(|v| v.same_basis(&p.view));
         if fresh { p.prepared } else { None }
     }
 

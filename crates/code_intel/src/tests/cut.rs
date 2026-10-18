@@ -15,7 +15,7 @@ use lectern_services::code_intel::{
 
 use crate::extract::{Deadline, extract};
 use crate::index::{Inner, Scanned, lock};
-use crate::query::Snap;
+use crate::query::{Snap, Step, ViewCheck};
 
 use super::goto::unindexed;
 use super::support::Harness;
@@ -50,16 +50,16 @@ fn commit(inner: &Inner, snap: &Snap, path: &str, text: &[u8]) {
 /// The next query's batch commits `path` between its lookup and its first
 /// hint read.
 fn commit_after_lookup(h: &Harness, path: &'static str, text: &'static str) {
-    *lock(&h.indexer.inner().after_lookup) = Some(Box::new(move |inner, snap| {
-        commit(inner, snap, path, text.as_bytes());
-    }));
+    *lock(&h.indexer.inner().step_hook) = Some((
+        Step::Lookup,
+        Box::new(move |inner, snap| {
+            commit(inner, snap, path, text.as_bytes());
+        }),
+    ));
 }
 
 fn ran(h: &Harness) {
-    assert!(
-        lock(&h.indexer.inner().after_lookup).is_none(),
-        "the hook ran"
-    );
+    assert!(lock(&h.indexer.inner().step_hook).is_none(), "the hook ran");
     assert!(h.hinted("c.ts"), "the batch installed c.ts's hint");
 }
 
@@ -163,13 +163,17 @@ fn cut_unchanged_hint_is_no_installation() {
     let snap = inner.snap(&h.key()).expect("open");
     commit(inner, &snap, "c.ts", ITEM.as_bytes());
     let after = lock(&snap.project.state).hinted;
-    assert!(after > snap.hinted);
-    let mut cut = after;
+    assert!(after > snap.view.hinted);
+    assert_eq!(inner.check_view(&snap, &snap.view), ViewCheck::Grew(after));
     let eff = snap.map.effective("c.ts").expect("c.ts");
     {
         let mut st = lock(&snap.project.state);
         let stamp = st.stamp(snap.project.evictions());
         st.hint_paths(&eff.oid, &eff.lang.name().0, stamp);
     }
-    assert!(!snap.hinted_since(&mut cut));
+    let view = crate::query::View {
+        hinted: after,
+        ..snap.view
+    };
+    assert_eq!(inner.check_view(&snap, &view), ViewCheck::Same);
 }

@@ -78,6 +78,7 @@ impl Inner {
     /// an index entry (untracked, or a folder project) has the OID its
     /// overlay entry recorded when the worktree was read, and the same rule.
     pub(crate) fn read_content(&self, snap: &Snap, eff: &Effective) -> FileRead {
+        self.step_hook(super::Step::Read, snap);
         let Some(root) = snap.root_of(None) else {
             return FileRead::Stale;
         };

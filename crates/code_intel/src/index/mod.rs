@@ -203,10 +203,10 @@ pub(crate) struct Inner {
     /// The files of each extraction batch of tiers 3–5, in order (tests).
     #[cfg(test)]
     pub batch_log: Mutex<Vec<usize>>,
-    /// Run once by the next query between its index lookup and its first
-    /// hint read (tests: a batch committing in between).
+    /// Run once by the next query that reaches its step (tests: the
+    /// interleaving matrix injects a background change there).
     #[cfg(test)]
-    pub after_lookup: Mutex<Option<crate::query::AfterLookup>>,
+    pub step_hook: Mutex<Option<crate::query::StepHook>>,
     /// Another registration of `code_intel.tags` for new projects (tests).
     #[cfg(test)]
     pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
@@ -273,7 +273,7 @@ impl Indexer {
             #[cfg(test)]
             batch_log: Mutex::new(Vec::new()),
             #[cfg(test)]
-            after_lookup: Mutex::new(None),
+            step_hook: Mutex::new(None),
             #[cfg(test)]
             tables: Mutex::new(None),
         });
@@ -638,6 +638,15 @@ impl Inner {
             ProjectEvent::Opened { result: Err(_), .. } => {}
             ProjectEvent::Changed { project, parts, .. } => {
                 let p = self.project(project).unwrap_or_else(|| self.touch(project));
+                // A new current worktree ends the old session here, not in
+                // the reconcile: from now on no query reads the new
+                // worktree's files against the old map, and nothing of the
+                // old session is published.
+                if parts.active
+                    && let Some(snapshot) = self.projects.snapshot(project)
+                {
+                    self.switch_session(&p, &snapshot);
+                }
                 {
                     let mut st = lock(&p.state);
                     // The worktree list or a HEAD changed: tier 5 is not
@@ -668,10 +677,15 @@ impl Inner {
                     let at = open.iter().position(|p| &p.key == project);
                     at.map(|i| open.remove(i))
                 };
-                if let Some(p) = removed {
-                    lock(&p.state).end();
+                {
+                    // Ordered against publication: nothing of the session
+                    // is published after this.
+                    let _order = lock(&self.publishing);
+                    if let Some(p) = removed {
+                        lock(&p.state).end();
+                    }
+                    self.close_queries(Some(project));
                 }
-                self.close_queries(Some(project));
                 {
                     let mut batch = lock(&self.batch_project);
                     if batch.as_ref() == Some(project) {

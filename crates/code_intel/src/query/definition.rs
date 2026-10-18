@@ -19,14 +19,14 @@ use std::time::Instant;
 use lectern_cache::Unit;
 use lectern_services::code_intel::{
     Binding, Candidate, CandidateSource, CandidateTier, Completeness, DefinitionRef, Evidence,
-    Location, Position, QueryError, QueryState, Symbol, TextOrigin, TextRef,
+    Location, Position, QueryError, QueryId, QueryState, Symbol, TextOrigin, TextRef,
 };
 use lectern_services::project::{BlobId, RelPath};
 
 use super::rank::{Ranker, visible};
 use super::search::{FileDeadline, Searched};
 use super::text::FileRead;
-use super::{Run, SEARCH_FOR, Snap};
+use super::{Run, SEARCH_FOR, Snap, Step, View, ViewCheck};
 use crate::extract::{
     BACKGROUND_MAX_LEN, Deadline, Def, ExtractStatus, Extraction, INTERACTIVE_DEADLINE, Lang,
     Visibility, compatible,
@@ -94,10 +94,10 @@ pub(crate) struct Prepared {
     /// Stored units the candidates came from, marked as used afterwards.
     pub units: Vec<Unit>,
     pub scanned: Vec<Scanned>,
-    /// The hint installations counted before step 3's lookup (the
-    /// snapshot's, a prefetch's own): hints installed after it are for
-    /// files the lookup may have missed ([`Snap::hinted_since`]).
-    pub hinted: u64,
+    /// The view step 3's lookup was made under (the snapshot's, a
+    /// prefetch's own): the query's results are consistent with it
+    /// (「查询的视图」, `Inner::check_view`).
+    pub view: View,
 }
 
 impl Prepared {
@@ -349,7 +349,7 @@ impl Inner {
             extracted: HashMap::new(),
             units: Vec::new(),
             scanned: Vec::new(),
-            hinted: snap.hinted,
+            view: snap.view,
         };
         let current = |definition: DefinitionRef, evidence: Evidence| Candidate {
             in_review: ranker.in_review(&definition.location.path),
@@ -517,14 +517,25 @@ impl Inner {
         added
     }
 
-    /// When a hint was installed after `prepared`'s cut (a batch committed
-    /// since step 3 looked up, or since the prefetch did), step 3 again,
-    /// and the new candidates go out. Called after the reads of hints that
-    /// leave files out of the search, so none of them is missed.
-    fn look_up_again(&self, run: &Run, snap: &Snap, at: &TextRef, prepared: &mut Prepared) {
-        if !snap.hinted_since(&mut prepared.hinted) {
-            return;
+    /// After the hint reads of a step: whether the query's view still
+    /// holds. Hints installed since (a batch committed after step 3 looked
+    /// up, or after the prefetch did) are looked up again and the new
+    /// candidates go out; evictions or the session's end mean the query
+    /// ends `Stale` (false).
+    fn hold_view(&self, run: &Run, snap: &Snap, at: &TextRef, p: &mut Prepared) -> bool {
+        match self.check_view(snap, &p.view) {
+            ViewCheck::Same => true,
+            ViewCheck::Grew(hinted) => {
+                p.view.hinted = hinted;
+                self.look_up_again(run, snap, at, p);
+                true
+            }
+            ViewCheck::Evicted | ViewCheck::Ended => false,
         }
+    }
+
+    /// Step 3 again, the new candidates out ([`hold_view`](Self::hold_view)).
+    fn look_up_again(&self, run: &Run, snap: &Snap, at: &TextRef, prepared: &mut Prepared) {
         crate::phases::count("second lookups", 1);
         let ranker = self.ranker(
             snap,
@@ -535,7 +546,7 @@ impl Inner {
         if self.index_step(snap, &at.path, &ranker, prepared) {
             let all: Arc<[Candidate]> = prepared.candidates.clone().into();
             let (jump, preselect) = jump_and_preselect(&prepared.candidates, Some(&prepared.site));
-            self.publish(run.id, |r| {
+            self.publish_in(snap, run.id, |r| {
                 r.candidates = all;
                 r.jump = jump;
                 r.preselect = preselect;
@@ -620,33 +631,61 @@ impl Inner {
         position: Position,
         prepared: Option<Arc<Prepared>>,
     ) {
-        let prepared = match prepared {
-            Some(p) => Ok((*p).clone()),
-            None => self.prepare_definition(snap, at, position, &run.cancel),
-        };
-        let mut p = match prepared {
-            Ok(p) => p,
-            Err(error) => {
-                if !run.stopped(snap) {
-                    self.publish(run.id, |r| r.state = QueryState::Failed(error));
+        // Steps 1–3 under one view: units evicted meanwhile (the lookup and
+        // the hints read later would disagree) make them again once, under
+        // a new snapshot, before anything is published (「查询的视图」).
+        let mut again: Option<Snap> = None;
+        let mut prepared = prepared;
+        let mut attempt = 0;
+        let mut p = loop {
+            let s = again.as_ref().unwrap_or(snap);
+            let made = match prepared.take() {
+                Some(p) => Ok((*p).clone()),
+                None => self.prepare_definition(s, at, position, &run.cancel),
+            };
+            let p = match made {
+                Ok(p) => p,
+                Err(error) => {
+                    if !run.stopped(s) {
+                        self.publish_in(s, run.id, |r| r.state = QueryState::Failed(error));
+                    }
+                    return;
                 }
+            };
+            if run.stopped(s) {
                 return;
             }
+            self.step_hook(Step::Lookup, s);
+            match self.check_view(s, &p.view) {
+                // No hint is read yet: what grew is looked up after the
+                // scope's reads.
+                ViewCheck::Same | ViewCheck::Grew(_) => break p,
+                ViewCheck::Ended => return,
+                ViewCheck::Evicted if attempt == 0 => {
+                    attempt += 1;
+                    match self.snap(&snap.project.key) {
+                        Some(fresh) => again = Some(fresh),
+                        None => return self.end_stale(s, run.id),
+                    }
+                }
+                ViewCheck::Evicted => return self.end_stale(s, run.id),
+            }
         };
-        if run.stopped(snap) {
-            return;
-        }
+        let snap = again.as_ref().unwrap_or(snap);
         {
             let _t = crate::phases::span("publish first batch");
             let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&p.site));
             let first: Arc<[Candidate]> = p.candidates.clone().into();
             let symbol = p.symbol.clone();
-            self.publish(run.id, |r| {
+            let published = self.publish_in(snap, run.id, |r| {
                 r.symbol = Some(symbol);
                 r.candidates = first;
                 r.jump = jump;
                 r.preselect = preselect;
             });
+            if !published {
+                return;
+            }
         }
         if !p.settled {
             let _t = crate::phases::span("escalate");
@@ -655,15 +694,17 @@ impl Inner {
         let completeness = if p.settled {
             Some(Completeness::Complete)
         } else {
-            self.run_after_lookup(snap);
             let scope = {
                 let _t = crate::phases::span("4 search scope");
                 snap.search_scope(&at.path, &p.lang, &p.skip)
             };
             crate::phases::count("scope files", scope.files.len() as u64);
+            self.step_hook(Step::Hints, snap);
             {
-                let _t = crate::phases::span("cut check");
-                self.look_up_again(run, snap, at, &mut p);
+                let _t = crate::phases::span("view check");
+                if !self.hold_view(run, snap, at, &mut p) {
+                    return self.end_stale(snap, run.id);
+                }
             }
             let search = crate::phases::span("4 search");
             let extracted = std::mem::take(&mut p.extracted);
@@ -737,7 +778,7 @@ impl Inner {
                     if p.candidates.len() > before {
                         let all: Arc<[Candidate]> = p.candidates.clone().into();
                         let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&site));
-                        self.publish(run.id, |r| {
+                        self.publish_in(snap, run.id, |r| {
                             r.candidates = all;
                             r.jump = jump;
                             r.preselect = preselect;
@@ -749,10 +790,11 @@ impl Inner {
             p.units = units;
             p.scanned = scanned;
             drop(search);
-            let _t = crate::phases::span("cut check");
-            if result.is_some() {
-                // The counts of `Partial` read hints too.
-                self.look_up_again(run, snap, at, &mut p);
+            let _t = crate::phases::span("view check");
+            // The counts of `Partial` read hints too.
+            if result.is_some() && !self.hold_view(run, snap, at, &mut p) {
+                self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
+                return self.end_stale(snap, run.id);
             }
             result
         };
@@ -762,15 +804,25 @@ impl Inner {
         };
         {
             let _t = crate::phases::span("publish done");
-            self.publish(run.id, |r| r.state = QueryState::Done(completeness));
+            self.publish_in(snap, run.id, |r| r.state = QueryState::Done(completeness));
         }
         let _t = crate::phases::span("touch units");
         crate::phases::count("touched units", p.units.len() as u64);
         snap.project.store.touch(&p.units);
     }
 
+    /// Ends a query whose view moved after it published (「查询的视图」):
+    /// what it published stays; its state says to ask again.
+    pub(crate) fn end_stale(&self, snap: &Snap, id: QueryId) {
+        self.publish_in(snap, id, |r| {
+            r.state = QueryState::Failed(QueryError::Stale)
+        });
+    }
+
     /// A `Named` query: step 3 only, every definition of the name in any
-    /// language, ranked from `near`; all `NameOnly`, no jump.
+    /// language, ranked from `near`; all `NameOnly`, no jump. Units evicted
+    /// during it make it again once under a new snapshot (nothing is
+    /// published before its end), then `Stale`.
     pub(crate) fn run_named(
         self: &Arc<Self>,
         run: &Run,
@@ -778,6 +830,22 @@ impl Inner {
         name: &str,
         near: Option<&str>,
     ) {
+        let mut again: Option<Snap> = None;
+        for attempt in 0..2 {
+            let s = again.as_ref().unwrap_or(snap);
+            match self.named_once(run, s, name, near) {
+                Ended::Done | Ended::Stopped => return,
+                Ended::Evicted if attempt == 0 => match self.snap(&snap.project.key) {
+                    Some(fresh) => again = Some(fresh),
+                    None => return self.end_stale(s, run.id),
+                },
+                Ended::Evicted => return self.end_stale(s, run.id),
+            }
+        }
+    }
+
+    fn named_once(&self, run: &Run, snap: &Snap, name: &str, near: Option<&str>) -> Ended {
+        let view = snap.view;
         let versions: Vec<Version> = snap
             .table
             .iter()
@@ -823,11 +891,10 @@ impl Inner {
                 }
             }
         };
-        let mut cut = snap.hinted;
         look_up(&mut candidates, &mut units);
-        self.run_after_lookup(snap);
+        self.step_hook(Step::Lookup, snap);
         if run.stopped(snap) {
-            return;
+            return Ended::Stopped;
         }
         // Not searched: what is not indexed yet is reported, never taken
         // as complete.
@@ -836,10 +903,14 @@ impl Inner {
         let (unindexed, flying) = snap.unindexed_under(dir);
         let outside = snap.unindexed_outside(dir, None);
         drop(counts);
-        // A file those counts took as indexed whose unit was written after
-        // the lookup: looked up again.
-        if snap.hinted_since(&mut cut) {
-            look_up(&mut candidates, &mut units);
+        self.step_hook(Step::Hints, snap);
+        match self.check_view(snap, &view) {
+            ViewCheck::Same => {}
+            // A file the counts took as indexed whose unit was written
+            // after the lookup: looked up again.
+            ViewCheck::Grew(_) => look_up(&mut candidates, &mut units),
+            ViewCheck::Evicted => return Ended::Evicted,
+            ViewCheck::Ended => return Ended::Stopped,
         }
         {
             let _t = crate::phases::span("named: rank");
@@ -856,7 +927,7 @@ impl Inner {
         let preselect = (!candidates.is_empty()).then_some(0);
         let publish = crate::phases::span("named: publish");
         let all: Arc<[Candidate]> = candidates.into();
-        self.publish(run.id, |r| {
+        self.publish_in(snap, run.id, |r| {
             r.candidates = all;
             r.preselect = preselect;
             r.state = QueryState::Done(completeness);
@@ -866,5 +937,15 @@ impl Inner {
         units.sort_by_key(|u| u.id());
         units.dedup();
         snap.project.store.touch(&units);
+        Ended::Done
     }
+}
+
+/// How one pass of `Named` ended.
+enum Ended {
+    Done,
+    /// Stopped: closed, or its session ended.
+    Stopped,
+    /// Units were evicted during it.
+    Evicted,
 }

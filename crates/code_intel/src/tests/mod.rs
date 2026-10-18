@@ -23,5 +23,6 @@ mod search;
 mod site;
 mod store;
 mod support;
+mod view;
 mod warm;
 mod watchdog;
