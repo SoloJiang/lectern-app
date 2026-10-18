@@ -277,6 +277,44 @@ fn grammar_lease_unloads_after_the_last_user() {
     assert_eq!(unloads.load(Ordering::Acquire), 1, "unloaded exactly once");
 }
 
+/// A prefetch of a jump in a pack's file holds the pack's lease in its
+/// `Prepared`; removed meanwhile, the pack is unloaded once the prefetch
+/// expires, with no query after it.
+#[test]
+fn grammar_lease_released_by_an_expired_prefetch() {
+    use lectern_services::code_intel::{Query, QueryKind};
+
+    let h = repo();
+    let unloads = Arc::new(AtomicUsize::new(0));
+    h.grammars.install(
+        "jpack",
+        &["jpack"],
+        java_pack(1, Arc::new(Module(unloads.clone()))),
+    );
+    h.settle();
+    let q = Query {
+        project: h.key(),
+        kind: QueryKind::Definition {
+            at: h.text("src/Tracked.jpack"),
+            position: h.pos("src/Tracked.jpack", "helper", 0),
+        },
+    };
+    h.indexer.prefetch(q.clone());
+    h.settle();
+    assert!(h.indexer.inner().prefetched(&q));
+    h.grammars.remove("jpack");
+    h.indexer.inner().clone().grammar_round();
+    h.settle();
+    assert_eq!(
+        unloads.load(Ordering::Acquire),
+        0,
+        "the prefetch still holds it"
+    );
+    h.advance_and_fire(crate::query::PREFETCH_FOR + std::time::Duration::from_millis(2));
+    assert_eq!(h.indexer.inner().prefetch_count(), 0);
+    assert_eq!(unloads.load(Ordering::Acquire), 1, "unloaded exactly once");
+}
+
 /// A grammar update while the reconcile is between the generation bump and
 /// the base map rebuild (say, in its git IO), with a batch step meanwhile:
 /// hits of the old version never stamp hints, so the file is extracted

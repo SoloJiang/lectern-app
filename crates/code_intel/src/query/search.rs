@@ -10,6 +10,7 @@ use lectern_services::code_intel::Completeness;
 use lectern_services::project::{BlobId, RelPath};
 
 use super::rank::distance;
+use super::text::FileRead;
 use super::{Run, Snap};
 use crate::extract::{BACKGROUND_DEADLINE, ExtractStatus, Lang, compatible};
 use crate::index::Inner;
@@ -236,14 +237,19 @@ impl Inner {
                 break;
             }
             searched += 1;
-            let Some(bytes) = self.read_file(snap, &eff.path) else {
-                continue;
+            let bytes = match self.read_content(snap, eff) {
+                FileRead::Content(bytes) => bytes,
+                FileRead::TooLarge => continue,
+                // Changed since the snapshot: not searched under new bytes.
+                FileRead::Stale => {
+                    cut += 1;
+                    continue;
+                }
             };
             if !whole_word(&bytes, name) {
                 continue;
             }
-            let key = self.key_of(snap, &eff.path, &bytes, eff.oid);
-            if hit(eff, key, bytes, until) == Searched::Unsearched {
+            if hit(eff, eff.oid, bytes, until) == Searched::Unsearched {
                 cut += 1;
             }
         }

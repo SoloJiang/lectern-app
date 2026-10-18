@@ -128,6 +128,9 @@ struct Shared {
     /// the untimed wait instead of inferring it from elapsed time.
     timed_waits: AtomicU64,
     untimed_waits: AtomicU64,
+    /// Due entries whose callback has returned (tests: an entry leaves the
+    /// table before its callback runs).
+    fired: AtomicU64,
 }
 
 impl Shared {
@@ -160,6 +163,7 @@ impl Watchdog {
                 rounds: AtomicU64::new(0),
                 timed_waits: AtomicU64::new(0),
                 untimed_waits: AtomicU64::new(0),
+                fired: AtomicU64::new(0),
             }),
         }
     }
@@ -234,6 +238,13 @@ impl Watchdog {
     /// Waits the thread has entered so far: (with a timeout, without one).
     /// The untimed count goes up, under the lock, right before the thread
     /// parks with nothing in flight and no due entry (tests).
+    /// Due entries whose callback has returned (tests: an entry leaves the
+    /// table before its callback runs, so an empty table does not mean its
+    /// work was submitted).
+    pub fn fired(&self) -> u64 {
+        self.shared.fired.load(Ordering::Acquire)
+    }
+
     pub fn waits(&self) -> (u64, u64) {
         (
             self.shared.timed_waits.load(Ordering::Acquire),
@@ -344,6 +355,7 @@ impl WatchdogRun {
                     // A callback only submits work; a panic in it does not
                     // take the watchdog down.
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+                    shared.fired.fetch_add(1, Ordering::AcqRel);
                 }
                 state = shared.lock();
                 continue;

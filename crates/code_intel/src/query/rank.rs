@@ -121,19 +121,19 @@ impl Ranker<'_> {
     /// The order within one batch.
     pub fn sort(&self, candidates: &mut [Candidate]) {
         let from = self.from.unwrap_or("");
-        candidates.sort_by(|a, b| {
-            let key = |c: &Candidate| {
-                let l = &c.definition.location;
-                (
-                    c.tier,
-                    !c.in_review,
-                    distance(from, &l.path),
-                    l.path.clone(),
-                    l.line,
-                    l.column,
-                )
-            };
-            key(a).cmp(&key(b))
+        // One key per candidate, not two per comparison: `distance` walks
+        // both paths, and a common name (`Named`) has tens of thousands of
+        // candidates. The path is an `Arc<str>`: its clone allocates nothing.
+        candidates.sort_by_cached_key(|c| {
+            let l = &c.definition.location;
+            (
+                c.tier,
+                !c.in_review,
+                distance(from, &l.path),
+                l.path.clone(),
+                l.line,
+                l.column,
+            )
         });
     }
 

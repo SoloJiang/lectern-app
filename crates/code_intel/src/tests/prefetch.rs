@@ -130,3 +130,38 @@ fn focus_of_another_worktree_waits_for_it() {
         "current now: tier 1 extracts it"
     );
 }
+
+/// An unused prefetch goes [`PREFETCH_FOR`] after it was made, with no
+/// query or prefetch after it: a due entry on the watchdog's table expires
+/// it. One whose inputs changed goes at the next prefetch.
+#[test]
+fn prefetch_expires_unused() {
+    let h = repo();
+    let q = jump(&h);
+    h.indexer.prefetch(q.clone());
+    h.settle();
+    assert_eq!(h.indexer.inner().prefetch_count(), 1);
+    assert_eq!(h.indexer.inner().watchdog.scheduled(), 1, "its expiry");
+    h.clock.advance(PREFETCH_FOR);
+    h.settle();
+    assert_eq!(h.indexer.inner().prefetch_count(), 1, "still valid");
+    h.advance_and_fire(Duration::from_millis(2));
+    assert_eq!(h.indexer.inner().prefetch_count(), 0);
+    assert_eq!(h.indexer.inner().watchdog.scheduled(), 0, "nothing left");
+    // A new map makes it unusable: the next prefetch drops it.
+    h.indexer.prefetch(q.clone());
+    h.settle();
+    h.git.write("main", "c.ts", b"export const c = 1;\n");
+    h.emit(&[("c.ts", CHANGED)]);
+    h.settle();
+    let other = Query {
+        project: h.key(),
+        kind: QueryKind::Definition {
+            at: h.text("b.ts"),
+            position: h.pos("b.ts", "item", 0),
+        },
+    };
+    h.indexer.prefetch(other);
+    h.settle();
+    assert_eq!(h.indexer.inner().prefetch_count(), 1, "only the new one");
+}

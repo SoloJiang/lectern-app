@@ -159,6 +159,18 @@ pub fn packages(dirs: &[String]) -> Vec<lectern_services::project::Package> {
 /// stored in the repository's partition of `cache`. Opening it is a warm
 /// start that reads no file. Returns the number of units stored.
 pub fn virtual_repo(git: &FakeGit, cache: &Cache, n: usize, worktrees: &[&str]) -> usize {
+    virtual_repo_with(git, cache, n, worktrees, None)
+}
+
+/// [`virtual_repo`] whose every unit also defines the function `common`
+/// (a name like `id` that tens of thousands of files define).
+pub fn virtual_repo_with(
+    git: &FakeGit,
+    cache: &Cache,
+    n: usize,
+    worktrees: &[&str],
+    common: Option<&str>,
+) -> usize {
     use crate::store::{Store, Version};
     git.assume_unchanged(true);
     let entries: Vec<(String, lectern_services::project::BlobId)> = (0..n)
@@ -175,7 +187,15 @@ pub fn virtual_repo(git: &FakeGit, cache: &Cache, n: usize, worktrees: &[&str]) 
         let Some(lang) = table.for_path(path, &crate::NoGrammarPacks) else {
             continue;
         };
-        write.add(*oid, &Version::of(lang), &super::synthetic::extraction(i));
+        let mut extraction = super::synthetic::extraction(i);
+        if let Some(name) = common {
+            let mut def = extraction.defs[1].clone();
+            def.name = name.into();
+            def.line = 200;
+            def.end_line = 203;
+            extraction.defs.push(def);
+        }
+        write.add(*oid, &Version::of(lang), &extraction);
         stored += 1;
         if write.len() == 64 {
             let full = std::mem::replace(&mut write, store.write());

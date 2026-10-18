@@ -12,6 +12,7 @@ use super::Snap;
 use crate::extract::{BACKGROUND_MAX_LEN, INTERACTIVE_MAX_LEN};
 use crate::git_access::{hash_blob, hash_kind};
 use crate::index::Inner;
+use crate::map::Effective;
 
 impl Inner {
     /// The bytes of `text`, only when they are provably that content: the
@@ -66,22 +67,40 @@ impl Inner {
         matches!(self.git.canonical_oid(tree, path, bytes), Ok(Some(c)) if c == oid)
     }
 
-    /// The key of worktree bytes read at `path`, queued as `expected`: the
-    /// expected OID when the bytes are that content, else their raw OID.
-    pub(crate) fn key_of(&self, snap: &Snap, path: &str, bytes: &[u8], expected: BlobId) -> BlobId {
-        if self.is_content(snap, path, bytes, expected) {
-            expected
-        } else {
-            hash_blob(hash_kind(&expected), bytes)
+    /// A file of the snapshot's map, read for a query: the only way a query
+    /// reads a file other than its own text (step 2's import targets, the
+    /// indexed files of find references, the time-boxed search; a prefetch
+    /// runs the same steps). The bytes count only when they are the content
+    /// the snapshot's map has for the path, `eff.oid` (raw, or after the
+    /// built-in conversions), as [`read_text`](Self::read_text) checks the
+    /// text: otherwise the file changed after the snapshot and is `Stale`,
+    /// never searched or extracted under the new bytes' OID. A path without
+    /// an index entry (untracked, or a folder project) has the OID its
+    /// overlay entry recorded when the worktree was read, and the same rule.
+    pub(crate) fn read_content(&self, snap: &Snap, eff: &Effective) -> FileRead {
+        let Some(root) = snap.root_of(None) else {
+            return FileRead::Stale;
+        };
+        match read(&root, &eff.path, BACKGROUND_MAX_LEN) {
+            Ok(Some(bytes)) if self.is_content(snap, &eff.path, &bytes, eff.oid) => {
+                FileRead::Content(bytes)
+            }
+            Ok(None) => FileRead::TooLarge,
+            Ok(Some(_)) | Err(_) => FileRead::Stale,
         }
     }
+}
 
-    /// A worktree file of the current worktree, read up to the background
-    /// limit (1 MiB) for a query: None when it cannot be read as a file.
-    pub(crate) fn read_file(&self, snap: &Snap, path: &str) -> Option<Vec<u8>> {
-        let root = snap.root_of(None)?;
-        read(&root, path, BACKGROUND_MAX_LEN).ok().flatten()
-    }
+/// What [`Inner::read_content`] read.
+pub(crate) enum FileRead {
+    /// The snapshot's content of the path.
+    Content(Vec<u8>),
+    /// Over the background limit (1 MiB): no query reads it, as the batch
+    /// tiers store it `TooLarge`.
+    TooLarge,
+    /// Gone, unreadable, or not the snapshot's content any more: nothing
+    /// from it is used, and it counts as unsearched.
+    Stale,
 }
 
 pub(crate) enum Reading {

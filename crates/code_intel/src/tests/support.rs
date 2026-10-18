@@ -522,6 +522,26 @@ impl Harness {
         self.host.kernel().pause();
     }
 
+    /// Advances the clock by `by` and waits until the watchdog has run the
+    /// callback of every entry of its due table (it polls the manual
+    /// clock; an entry leaves the table before its callback runs, so this
+    /// counts finished callbacks, `Watchdog::fired`), then runs what they
+    /// submitted. Every entry scheduled now must be due after `by`.
+    pub(crate) fn advance_and_fire(&self, by: Duration) {
+        let watchdog = self.indexer.inner().watchdog.clone();
+        let target = watchdog.fired() + watchdog.scheduled() as u64;
+        self.clock.advance(by);
+        let start = std::time::Instant::now();
+        while watchdog.fired() < target {
+            assert!(
+                start.elapsed() < Duration::from_secs(20),
+                "a due entry never ran"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.settle();
+    }
+
     pub(crate) fn resume(&self) {
         self.host.kernel().resume();
     }

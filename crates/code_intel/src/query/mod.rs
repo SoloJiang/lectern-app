@@ -73,11 +73,21 @@ struct Prefetched {
 }
 
 /// The queries of one activation.
+///
+/// Bounds: at most [`RETAINED`] entries (their results stay until closed
+/// or pushed out by newer queries; a finished query's semantic part drops
+/// its map once no request is open, `SemQuery::map`); at most
+/// [`PREFETCHES`] prefetches, none kept past [`PREFETCH_FOR`] (a due entry
+/// on the watchdog's table expires them, `expire_prefetches`) or past a
+/// change of its inputs (pruned at every prefetch and query).
 #[derive(Default)]
 pub(crate) struct Queries {
     next: u64,
     pub entries: VecDeque<Entry>,
     prefetched: Vec<Prefetched>,
+    /// When the due entry that expires prefetches fires, if one is
+    /// scheduled.
+    expiry: Option<Instant>,
 }
 
 /// What a query's snapshot depends on, for the prefetch's reuse.
@@ -218,6 +228,7 @@ impl Inner {
             return id;
         }
         let prepared = self.take_prefetch(&query);
+        self.expire_prefetches();
         let me = self.clone();
         let run = Run {
             id,
@@ -450,18 +461,112 @@ impl Inner {
                 let cancel = Arc::new(AtomicBool::new(false));
                 let prepared = me.prepare_definition(&snap, &at, position, &cancel).ok();
                 let now = me.watchdog.clock().now();
-                let mut q = lock(&me.queries);
-                q.prefetched.retain(|p| p.query != query);
-                q.prefetched.push(Prefetched {
-                    query,
-                    at: now,
-                    inputs: snap.inputs,
-                    prepared: prepared.map(Arc::new),
-                });
-                while q.prefetched.len() > PREFETCHES {
-                    q.prefetched.remove(0);
+                let mut dropped = Vec::new();
+                {
+                    let mut q = lock(&me.queries);
+                    if let Some(i) = q.prefetched.iter().position(|p| p.query == query) {
+                        dropped.push(q.prefetched.remove(i));
+                    }
+                    q.prefetched.push(Prefetched {
+                        query,
+                        at: now,
+                        inputs: snap.inputs,
+                        prepared: prepared.map(Arc::new),
+                    });
+                    while q.prefetched.len() > PREFETCHES {
+                        dropped.push(q.prefetched.remove(0));
+                    }
                 }
+                // Dropped outside the lock: a `Prepared` may hold the last
+                // lease of a replaced grammar.
+                drop(dropped);
+                me.expire_prefetches();
             });
+    }
+
+    /// Drops every prefetch past [`PREFETCH_FOR`] or whose inputs changed
+    /// (the project closed, a new map, evictions, the language table), and
+    /// schedules a due entry for the next one to expire, so none outlives
+    /// its use: a `Prepared` holds candidates, extractions and its
+    /// language's grammar lease.
+    pub(crate) fn expire_prefetches(self: &Arc<Self>) {
+        let now = self.watchdog.clock().now();
+        let keys: Vec<ProjectKey> = lock(&self.queries)
+            .prefetched
+            .iter()
+            .map(|p| p.query.project.clone())
+            .collect();
+        // Read without the queries' lock: `inputs` locks the project.
+        let current: Vec<Option<Inputs>> = keys.iter().map(|k| self.inputs(k)).collect();
+        let (dropped, next) = {
+            let mut q = lock(&self.queries);
+            let mut dropped = Vec::new();
+            let mut i = 0;
+            while i < q.prefetched.len() {
+                let p = &q.prefetched[i];
+                let fresh_inputs = keys
+                    .iter()
+                    .position(|k| *k == p.query.project)
+                    .and_then(|j| current[j])
+                    == Some(p.inputs);
+                if now.saturating_duration_since(p.at) > PREFETCH_FOR || !fresh_inputs {
+                    dropped.push(q.prefetched.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
+            // Just past the oldest one's last valid instant.
+            let next = q
+                .prefetched
+                .iter()
+                .map(|p| p.at + PREFETCH_FOR + Duration::from_millis(1))
+                .min();
+            let next = next.filter(|at| q.expiry.is_none_or(|e| *at < e));
+            if let Some(at) = next {
+                q.expiry = Some(at);
+            }
+            (dropped, next)
+        };
+        drop(dropped);
+        let Some(at) = next else {
+            return;
+        };
+        let me = Arc::downgrade(self);
+        // The watchdog's thread only submits: the drop runs in a task.
+        self.watchdog.schedule(
+            at,
+            Box::new(move || {
+                let Some(me) = me.upgrade() else {
+                    return;
+                };
+                {
+                    let mut q = lock(&me.queries);
+                    if q.expiry == Some(at) {
+                        q.expiry = None;
+                    }
+                }
+                let task = me.clone();
+                me.host
+                    .spawn_busy("prefetch expiry", Priority::Background, move || {
+                        task.expire_prefetches();
+                    });
+            }),
+        );
+    }
+
+    /// Whether query `id`'s semantic part holds a map (tests); None without
+    /// one.
+    #[cfg(test)]
+    pub(crate) fn semantic_map_held(&self, id: QueryId) -> Option<bool> {
+        let q = lock(&self.queries);
+        let entry = q.entries.iter().find(|e| e.id == id)?;
+        entry.semantic.as_ref().map(|s| s.map.is_some())
+    }
+
+    /// Prefetches kept now (tests).
+    #[cfg(test)]
+    pub(crate) fn prefetch_count(&self) -> usize {
+        lock(&self.queries).prefetched.len()
     }
 
     /// A prefetch of the same query made within [`PREFETCH_FOR`] with the
@@ -476,9 +581,12 @@ impl Inner {
         }
         let now = self.watchdog.clock().now();
         let current = self.inputs(&query.project);
-        let mut q = lock(&self.queries);
-        let i = q.prefetched.iter().position(|p| &p.query == query)?;
-        let p = q.prefetched.remove(i);
+        let p = {
+            let mut q = lock(&self.queries);
+            let i = q.prefetched.iter().position(|p| &p.query == query)?;
+            q.prefetched.remove(i)
+        };
+        // Outside the lock: a stale one drops here.
         let fresh =
             now.saturating_duration_since(p.at) <= PREFETCH_FOR && Some(p.inputs) == current;
         if fresh { p.prepared } else { None }

@@ -876,6 +876,9 @@ pub static BUDGETS: &[Budget] = &[
     // languages' queries compiled in the background), nothing warmed by an
     // earlier jump. Recorded against the 50 ms candidates budget.
     share("code_intel/goto_first", RECORD, CODE_INTEL, ACTIVE, Time),
+    // `Named` for a name some 50 000 files define: from the query to its
+    // first batch.
+    share("code_intel/named_50k", RECORD, CODE_INTEL, ACTIVE, Time),
     // The time-boxed search of unindexed hits stops one second after the
     // query; the last batch's event within 20 ms of that.
     share(
