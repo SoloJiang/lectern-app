@@ -1307,11 +1307,15 @@ fn forms_positions_yield_sites() {
         for lang in *langs {
             match shows {
                 Binding(expect, reference) => {
-                    missing.extend(super::binding::missing_sites(lang, source, *reference, expect));
+                    missing.extend(super::binding::missing_sites(
+                        lang, source, *reference, expect,
+                    ));
                 }
                 Defines(name, def_kind) => {
                     let file = super::site::parse(lang, source);
-                    let Some(def) = file.defs().find(|d| &*d.name == *name && d.kind == *def_kind)
+                    let Some(def) = file
+                        .defs()
+                        .find(|d| &*d.name == *name && d.kind == *def_kind)
                     else {
                         continue;
                     };
@@ -1328,7 +1332,12 @@ fn forms_positions_yield_sites() {
     }
     for (langs, _, row) in super::scopes::SAMPLES {
         for lang in *langs {
-            missing.extend(super::binding::missing_sites(lang, row.source, row.reference, &row.expect));
+            missing.extend(super::binding::missing_sites(
+                lang,
+                row.source,
+                row.reference,
+                &row.expect,
+            ));
         }
     }
     assert!(missing.is_empty(), "{}", missing.join("\n"));

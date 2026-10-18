@@ -592,7 +592,10 @@ impl Ecma {
                 //   @reference.lectern.export-name
                 if p == k.export_statement
                     && me.field == 0
-                    && me.node.prev_sibling().is_some_and(|t| t.kind_id() == ts.t_assign)
+                    && me
+                        .node
+                        .prev_sibling()
+                        .is_some_and(|t| t.kind_id() == ts.t_assign)
                     && self.in_program(stack, 2)
                 {
                     cx.marker(me.node, parent.node, Marker::ExportName);

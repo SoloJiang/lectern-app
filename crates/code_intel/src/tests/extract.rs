@@ -503,12 +503,22 @@ fn extract_python_module_level_and_attributes() {
     let tagged = crate::extract::extract_tags(python, source.as_bytes(), &deadline, &cancel);
     watchdog.stop();
     assert_eq!(walked, tagged);
-    let find = |name: &str| walked.defs.iter().filter(|d| &*d.name == name).collect::<Vec<_>>();
+    let find = |name: &str| {
+        walked
+            .defs
+            .iter()
+            .filter(|d| &*d.name == name)
+            .collect::<Vec<_>>()
+    };
     for name in ["SEP", "FAST", "DATA", "LAST", "A", "B"] {
         let defs = find(name);
         assert!(!defs.is_empty(), "{name}");
         for d in defs {
-            assert_eq!((d.kind, d.scope.as_deref()), (DefKind::Constant, None), "{name}");
+            assert_eq!(
+                (d.kind, d.scope.as_deref()),
+                (DefKind::Constant, None),
+                "{name}"
+            );
         }
     }
     for name in ["local", "hidden", "attr", "x"] {
@@ -521,7 +531,11 @@ fn extract_python_module_level_and_attributes() {
         assert_eq!(defs[0].scope.as_deref(), Some("Config"), "{name}");
     }
     for name in ["attr", "x"] {
-        assert!(walked.refs.iter().any(|r| &**r == name), "{name} in {:?}", walked.refs);
+        assert!(
+            walked.refs.iter().any(|r| &**r == name),
+            "{name} in {:?}",
+            walked.refs
+        );
     }
 }
 

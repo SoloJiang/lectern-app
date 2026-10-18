@@ -756,15 +756,16 @@ pub enum Visibility {
 ```
 
 - `kind` 来自 tags 的 `@definition.<种类>`：`function`、`method`、`class`、`interface`、`module`、`macro`、`constant`、`type`、`field` 等按名字对应 `DefKind`，`struct`、`enum`、`trait` 用各语言查询里的同名种类，其余为 `Other`。
-- 枚举的成员是定义：Rust 的变体、TS 的枚举成员、Java 的枚举常量是 `Constant`，`scope` 是所在的枚举，可见性取枚举的可见性（Rust 的变体没有自己的 `pub`，Java 的枚举常量没有修饰符）；Python 类体里直接赋值的名字（类属性，包括 `Enum` 的成员）是 `Field`，`scope` 是所在的类。
+- 枚举的成员是定义：Rust 的变体、TS 的枚举成员、Java 的枚举常量是 `Constant`，`scope` 是所在的枚举，可见性取枚举的可见性（Rust 的变体没有自己的 `pub`，Java 的枚举常量没有修饰符）；Python 类体里直接赋值的名字（类属性，包括 `Enum` 的成员）是 `Field`，`scope` 是所在的类；方法（以及其中嵌套的函数）里给方法第一个参数的属性赋值（`self.name = name`，在 `__init__` 和其他方法里）也是这个类的 `Field`，一个类里同名的只记第一个，类属性优先；给其他对象的属性赋值仍是成员引用。查询用 `reference.lectern.receiver`（函数的第一个参数）和 `reference.lectern.attribute`（属性赋值）两个标记交给规则判断。JS / TS 构造器里的 `this.x = …` 不是字段（已知限制，TS 的字段通常写成声明）。
+- Python 的模块级常量按作用域判断，不按语法形状：不在函数或类作用域里的赋值目标都是 `Constant`，包括 `if`、`try`、`with`、`for` 体里的和连等 `A = B = None` 的每个名字；查询捕获每个赋值，`rules::finish` 去掉在局部作用域或类里的，连等里的名字没有 `scope`。JS / TS 和 Go 的顶层仍按形状判断，它们的规则本来就是「程序或源文件的直接子节点」（`let`、`const`、`class` 在块里是块作用域）；已知限制：顶层块里的 `var`（提升到程序作用域）不是定义。
 - 每个名字节点只有一个定义。tree-sitter-tags 只在两次匹配都还在队列里时按模式顺序去重，后到的匹配会给同一个名字节点再加一个定义（方法又被函数模式匹配到）；抽取后按名字节点去重，保留更具体的种类（方法、类等先于函数，函数先于常量和变量），与查询里模式的先后一致。定义自己的名字不算引用。
 - `scope`：同一文件里，范围包含这个定义的最内层定义的名字。抽取后按范围排序一遍求出。Rust 的 `impl` 块不是定义，但作为容器参与计算，块里的方法的 `scope` 是实现的类型；Go 的方法取接收者的类型。实现的类型的名字穿过引用、指针、数组、切片和元组（第一个元素），最多两层（`&[T]` 是 `T`）；泛型和路径类型取自己的名字（`Box<T>` 是 `Box`，`a::B` 是 `B`），基本类型是它自己（`u8`）；其他形式（`fn()`、`dyn Trait`）没有名字，trait 实现里的方法没有 `scope`，仍是 `Public`。
 - `visibility` 和 `arity` 由每种语言的一个小函数得出；规则变化时 `EXTRACTOR_VERSION` 加一。tree-sitter-tags 只交出 tag、不交出语法树，所以函数读的是查询为它捕获的内容：
-  - 标记：`@reference.lectern.<种类>` 的捕获只给抽取规则用，不进入引用名。Rust 的 `pub`（`visibility_modifier`）、`impl` 块与它实现的类型、trait 实现（`impl … for` 的 `for`，与类型分开，所以类型取不到名字时仍是 trait 实现），Java 的 `private`，JS / TS 程序顶层的 `export` 语句、`export { name }` 与 `export default name` 导出的名字、`import` 语句（namespace 和 module 体里的 `export` 导出的是它们的成员，不算），Go 方法的接收者类型。
+  - 标记：`@reference.lectern.<种类>` 的捕获只给抽取规则用，不进入引用名。Rust 的 `pub`（`visibility_modifier`）、`impl` 块与它实现的类型、trait 实现（`impl … for` 的 `for`，与类型分开，所以类型取不到名字时仍是 trait 实现），Java 的 `private`，JS / TS 程序顶层的 `export` 语句、`export { name }`、`export default name` 与 TS 的 `export = name` 导出的名字、`import` 语句（namespace 和 module 体里的 `export` 导出的是它们的成员，不算），TS 的 `declare global { … }`（其中的声明是全局的，同导出的一样可见，但不让文件成为 ES 模块）；每种导出形式在 `extract_export_forms_change_visibility` 的表里各有一行，检查它让名字从 `File` 变为 `Public`，Go 方法的接收者类型。
   - 参数列表：函数、方法的模式用 `@doc` 捕获参数列表节点（tags 把它的文本放在 `Tag::docs`），按括号、尖括号、字符串和注释的嵌套数顶层的逗号。Rust 的 `self` 接收者和 Python 的 `*`、`/` 分隔符不计数；没有括号的参数列表（`x => x`）是 1 个。查询不再用 `@doc` 捕获注释。
   - 局部定义：定义节点严格位于一个局部作用域之内的，在每种语言里都是 `File`，不再看下面按语言的规则。局部作用域是 locals 查询的作用域里除文件本身、类体（Python）和命名空间体（TS 的 namespace、module、`declare global`）之外的全部（「作用域形式」），由作用域的种类推出，不按语言写规则：遍历在同一遍里记下它们，tags 路径（核心语言）和 `ParsedFile` 取查询的结果。成员（字段、方法，含 TS 构造器里的参数属性）取它所属的类或 `impl` 块的位置，所以局部类的成员是 `File`，顶层类在构造器参数里声明的字段不是；最近的容器是函数或方法时（匿名类的成员），取自己的位置。语言包的作用域不分类，函数或方法定义里面的定义是 `File`。
   - 规则：Rust 有 `pub` 的项、trait 和 trait 实现里的成员、宏是 `Public`，其余 `Module`；Java 有 `private` 的是 `File`，其余 `Public`；Go 大写开头的是 `Public`，其余 `Package`；Python 和语言包是 `Unknown`。JS / TS：函数里的定义（如命名函数表达式的名字）是 `File`；其余取最外层定义的可见性：在 `export` 语句里或名字被导出时是 `Public`，程序顶层有 `import` / `export`（ES 模块）时是 `File`，没有时（脚本、CommonJS，以及只在 namespace 里有 `export` 的 TS 文件）是 `Public`。
-- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。核心语言的定义取同一棵语法树上 `walk` 的结果，与索引里的定义一致；语言包的定义取查询的结果。解析、查询和遍历都按 `ParsedFile` 自己的截止时间和取消标志停止（解析和查询在进度回调里检查，遍历每 1024 个节点检查一次），返回之前再检查一次，所以截止时间之后不会交出结果。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
+- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。核心语言的定义取同一棵语法树上 `walk` 的结果，与索引里的定义一致；语言包的定义取查询的结果。解析、查询和遍历都按 `ParsedFile` 自己的截止时间和取消标志停止（解析和查询在进度回调里检查，遍历每 1024 个节点检查一次），返回之前再检查一次，所以截止时间之后不会交出结果。查询之后的绑定模型（`Collector::finish`：最内层作用域按起点二分查找再向外走，函数体按范围查表，每个作用域的定义有索引）和规则（`rules::finish`：作用域、导出范围按位置扫描或二分查找，Go 的接收者按范围查表）都与文件大小成线性，没有按「定义数 × 作用域数」增长的部分；两条抽取路径的看门狗登记覆盖到规则结束，之后再检查一次。`deadline_one_mib_returns_soon_after_the_deadline` 检查 1 MiB 的文件在 100 ms 的截止时间下约 150 ms 内返回。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
 
 ### 外部格式（tags 查询）
 
@@ -783,7 +784,7 @@ pub enum Visibility {
 - 引用到标识符的模式带 `(#is-not? local)`：locals 解析到局部定义的引用不进入引用名（tree-sitter-tags 只对带这个谓词的模式过滤）。
 - 每种语言的 tags 查询最后有一组兜底的引用模式：locals 没有解析到的每个标识符（`@reference.name`），以及每个成员名（`@reference.member`：Rust、Go 的 `field_identifier`，JS / TS 的 `property_identifier`，Java 的 `field_access.field`，Python 的 `attribute.attribute`；成员名不带 locals 谓词）。查引用第 1 步只经 `ci_ref` 选出已入索引的候选文件，只有调用、类型这类模式时，`let v = PUBLIC_CONSTANT;`、`obj.field` 所在的文件不会被选中。兜底模式要放在全部定义模式之后：tree-sitter-tags 对一个名字节点保留模式序号最小的 tag，排在前面的兜底模式会顶掉后面的定义。JS / TS 的兜底模式因此单独放在 `ecmascript/references.scm`，拼在每种语言的最后。
 - locals 查询也把嵌套的函数和类的名字记为 `@local.definition`（Python 的 `def` 和 `class`，JS / TS 的函数和类声明，Rust 块里的 `fn`，Java 块里的局部类和记录）。声明本身也是一个作用域，名字在它的范围之内；`ParsedFile` 把作为函数或类作用域节点 `name` 字段的定义放进外层作用域，所以 `def outer(): def helper(): …; helper()` 里的调用绑定到 `helper`。块作用域的 `name` 字段是它绑定的名字（Java 增强 `for` 的变量），留在块里。Go 没有嵌套的具名函数。
-- `(identifier) @local.reference` 也会匹配成员名、路径段和关键字参数（Java 的 `items.add`、`this.add`，Python 的 `obj.x`、`f(x=1)`，Rust 的 `Queue::new`）。`ParsedFile` 按每种语言的一张表（`site.rs` 的 `NON_VARIABLE_POSITIONS`）把这些位置排除在局部引用之外，位置分析在这些位置上、以及语法种类为 `Member`、`MemberCall` 时都不做局部绑定。JS / TS 和 Go 的成员名本来就是另一种节点。
+- 局部解析是白名单：位置分析只对 locals 查询的 `@local.reference` 捕获（`identifier`、类型名 `type_identifier`、JS / TS 对象字面量的简写 `{ a }`）做局部绑定，其他节点种类（JS / TS 的 `property_identifier`、Rust 和 Go 的 `field_identifier` 等成员名、对象和结构体的键、JSX 的属性名）从不绑定到同名的局部。`(identifier) @local.reference` 也会匹配不是变量的位置：成员名和路径段（Java 的 `items.add`、`this::name`，Python 的 `obj.x`，Rust 的 `Queue::new`）、关键字（`f(x=1)`、`case Point(x=…)`）、import 的远端名、JSX 的内置元素名（`<label>`）。这些位置写在「定义形式」表的行上（`forms.rs` 的 `positions`），`ParsedFile` 按它把它们排除在局部引用之外；Go 复合字面量的键（`&Server{addr: addr}`，结构体里是字段名，map 里是表达式）同名的局部只是候选。语法种类为 `Member`、`MemberCall` 时也不做局部绑定。位置分析认的节点种类和模式里绑定名字的节点种类是同一张表（`locals.rs` 的 `name_kinds`）。`forms_positions_yield_sites` 检查定义形式和作用域形式的样例里每个声明和用处都是一个 `Site`，`site_binding_positions` 检查上面每种位置。
 - 核心语言的抽取不经 tree-sitter-tags 的迭代器（[ADR 0031](../adr/0031.md)）：`walk` 模块为每种语言（JS / TS / TSX 共用一份）写了一次遍历，解析后按前序访问每个具名节点，在名字节点上按这种语言 tags 查询里模式的顺序判断它是定义、标记还是引用（第一个成立的模式生效，与 tree-sitter-tags 每个名字节点只留一个 tag、序号小的模式优先相同），带 `#is-not? local` 的引用按 tree-sitter-tags 的规则过滤（按名字比较之前出现的、所在作用域链上的 `@local.definition` 捕获的文本，遇到不继承的作用域停止），定义和标记交给与 tags 路径相同的 `rules::finish`。查询仍是规格：改 tags 或 locals 查询时同时改 `walk/<语言>.rs`，`extract_walker_matches_tags` 对全部夹具、每种语言逐个模式的样例、64 KiB 的语料和病态输入检查两条路径的抽取结果相同，没有允许的差异。Go 的 `const_spec` 的 `name` 字段也包含逗号，嵌套模式里的 `name: (identifier)` 只匹配到 `const A, B = 1, 2` 的 `A`，所以 tags 和 locals 查询写成 `(const_spec (identifier))`（`const_spec` 的标识符子节点只有名字）。节点种类和字段按名字解析成 ID，grammar 里缺少其中一个时这种语言退回 tags 路径并记一条日志。语言包仍用 tree-sitter-tags。
 - 夹具：`crates/code_intel/tests/fixtures/extract/<语言>/` 下每种语言若干真实写法的样本（类、方法、闭包、重载、嵌套模块、导出与非导出、宏），抽取结果用 insta 快照；grammar 或查询升级时快照的变化在 PR 里逐个看过。另有一份病态输入（深度嵌套、超长行）用于截止时间的测试。
 
@@ -1799,6 +1800,19 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 1 个快照有变化，逐个看过：`units.go` 的引用名多了 `range` 的 `:=` 变量 `_`、`v`（这两种变量不再参与 tree-sitter-tags 一侧的过滤）。
 - `code_intel/extract_throughput`：本轮 4 次 3.99–4.11 MB/s，交替运行的 9a2835b 4.15 MB/s；`code_intel/extract_1mib` 3.40–3.54 MB/s（9a2835b：3.48）。
 
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 的独立预审意见（局部解析改为白名单、线性的绑定模型和规则、按用法检查语法种类表、Python 的模块级与实例属性、导出形式）之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1173 个测试通过，跳过 1 个；第一次运行时 `lectern-kernel` 的 `a_panicking_task_releases_its_payload_and_siblings_are_dropped` 等待超时，单独重跑和整体重跑都通过，本轮没有改 kernel）、`just doctest`、`just deny` 全部通过。
+- `just test -p lectern-code-intel`：75 个测试通过。按前缀：`lang_*` 10、`extract_*` 17、`deadline_*` 13、`site_*` 23、`forms_*` 7、`scopes_*` 5。新增：
+  - `site_binding_positions`：对象和解构的键、JSX 属性名和内置元素名、import 的远端名、Rust 结构体表达式和结构体模式的字段名、Java 的 `this::name`、Python 的 `case Point(x=…)` 不绑定；对象字面量的简写和各处的值绑定；Go 复合字面量的键只作候选。绑定的表驱动测试共 128 行。
+  - `forms_positions_yield_sites`：定义形式和作用域形式的样例里每个声明、定义和用处都是 `Site`（含 Rust 结构体模式简写的绑定）。
+  - `site_kind_masks_accept_uses`：56 个按用法写的样例，覆盖每种语言每个被收窄的引用语法。
+  - `extract_export_forms_change_visibility`：12 种导出形式各让名字从 `File` 变为 `Public`，含 `export = X` 和 `declare global`。
+  - `extract_python_module_level_and_attributes`：`if` / `try` / `with` / `for` 里的和连等的常量，函数和类里的不是；`self` 和嵌套函数里的接收者属性是字段，其他对象的属性是成员引用。
+  - `deadline_one_mib_returns_soon_after_the_deadline`：1 MiB 的 JS、Python、TS 在 100 ms 的截止时间下，两条抽取路径和 `ParsedFile` 都在 150 ms 内返回。
+  - 2 个快照有变化，逐个看过：`billing.py` 的 `Invoice.__init__` 里 `self.number`、`self.lines`、`self.currency` 成为字段（引用名少了 `number`）；`panel.tsx` 的引用名少了内置元素 `h2`、`li`、`section`、`ul`。
+- `code_intel/extract_throughput`：本轮 3 次 3.99–4.16 MB/s，交替运行的 9a2835b 4.10 MB/s；`code_intel/extract_1mib` 3.57–3.92 MB/s（9a2835b：3.67），规则不再按「定义数 × 导出语句数」增长。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1881,3 +1895,12 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - Rust `impl Trait for &T`、`&mut T`、`[T]`、元组、基本类型等的方法原来没有 `impl` 标记，可见性是 `Module`。现在实现的类型穿过引用、指针、数组和元组取名字，trait 实现另由 `for` 标记，类型取不到名字时方法仍是 `Public`（「抽取结果」已补）；`EXTRACTOR_VERSION` 从 3 改为 4。
 - TS namespace 和 module 体里导出的 `const` / `let` / `var` 原来不是定义。现在是（「定义形式」已改），只认单个名字，解构和 `declare namespace` 里没有 `export` 的隐式导出是已知限制。
 - namespace 里的 `export` 原来让文件成为 ES 模块，顶层没有导出的定义因此成了 `File`。现在只看程序顶层的 `import` / `export`（「抽取结果」已改）。
+
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 的独立预审意见：
+
+- 局部解析原来是黑名单：位置分析对任何名字节点按文本解析，`NON_VARIABLE_POSITIONS` 列出例外，对象的键（`{ name: name.trim() }`）、JSX 属性名、Rust 结构体表达式和结构体模式的字段名、JS 解构的键、Go 复合字面量的键、JSX 的内置元素名（`<label>`）都绑定到了同名的局部。现在只解析 locals 查询的 `@local.reference` 捕获，再按「定义形式」表行上的位置排除键、属性、路径段和标签名，Go 的键只作候选（「外部格式」已改）；locals 查询因此另外捕获类型名和 `{ a }` 简写。位置分析认的节点种类与模式展开的绑定种类合成一张表，Rust 结构体模式简写里的 `x`（`let Point { x, y } = p`）原来不在其中，点不到。
+- `Collector::finish` 按「定义数 × 作用域数」找最内层作用域，`rules::finish` 按「定义数 × 导出语句数」判断导出，1000 KiB 的 JS 在 `ParsedFile` 里要 8.9 s，1 MiB 的 `export const` 抽取 905 ms；规则还在看门狗登记撤销之后运行。现在都是排序后的扫描、二分查找和查表，看门狗登记覆盖到规则结束（「抽取结果」已补）；release 下 `ParsedFile` 处理 1 MiB 的 JS 约 0.6 s，256 KiB 的约 0.2 s。
+- 语法种类表只从声明推出，Java 的 `new Runnable() { … }` 指向接口时被过滤掉。现在 `interface_declaration` 也接受 `Construct`，另有按用法写的样例逐一检查（「候选的分层与过滤」已补）。
+- Python 的模块级常量原来只认模块的直接子语句，`if` / `try` / `with` / `for` 里的赋值和连等里第一个以外的名字都不是定义；方法里的 `self.name = …` 也不是字段。现在模块级按作用域判断，`self` 的属性赋值是类的字段（「抽取结果」「定义形式」已改）。
+- TS 的 `export = X` 没有被认作导出（grammar 里 `X` 不在 `value` 字段里）；`declare global` 里的声明是 `File`。现在都按导出处理，导出形式有一张逐行检查的表（「抽取结果」已补）。
+- 规则的变化让 `EXTRACTOR_VERSION` 从 4 改为 5。

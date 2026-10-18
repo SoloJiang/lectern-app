@@ -30,7 +30,12 @@ pub(super) struct Row {
 
 /// The positions of a row that are not a `Site`: the reference, and each
 /// declaration the row expects (which must also be a definition there).
-pub(super) fn missing_sites(lang: &str, source: &str, reference: (&str, usize), expect: &Expect) -> Vec<String> {
+pub(super) fn missing_sites(
+    lang: &str,
+    source: &str,
+    reference: (&str, usize),
+    expect: &Expect,
+) -> Vec<String> {
     let file = parse(lang, source);
     let mut missing = Vec::new();
     let (needle, nth) = reference;

@@ -810,7 +810,9 @@ pub(crate) fn is_name_kind(dialect: Dialect, kind: &str) -> bool {
 
 /// The node kinds that are bound names in a pattern.
 fn is_binding_kind(dialect: Dialect, kind: &str) -> bool {
-    name_kinds(dialect).iter().any(|(k, binds)| *binds && *k == kind)
+    name_kinds(dialect)
+        .iter()
+        .any(|(k, binds)| *binds && *k == kind)
 }
 
 /// Parts of a pattern that bind nothing: (parent kind or "*", field or "*",
