@@ -111,6 +111,51 @@ fn deadline_pause_probe_cancels() {
 }
 
 #[test]
+fn deadline_one_mib_returns_soon_after_the_deadline() {
+    // A 1 MiB file with a 100 ms deadline returns within about 150 ms on
+    // both extraction paths and in `ParsedFile`: no phase after the parse
+    // (the binding model, the rules) is long or runs unchecked.
+    let executor = Executor::manual();
+    let (watchdog, _) = watchdog(&executor, Arc::new(SystemClock));
+    let table = LanguageTable::core();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let limit = Duration::from_millis(150);
+    for lang in ["js", "python", "ts"] {
+        let l = table.get(lang).unwrap();
+        assert!(l.prepare());
+        let source = crate::testing::corpus(lang, 1 << 20);
+        let started = Instant::now();
+        let deadline = Deadline::at(&watchdog, started + Duration::from_millis(100), 2 << 20);
+        let walked = extract(l, &source, &deadline, &cancel);
+        let walked_took = started.elapsed();
+        let started = Instant::now();
+        let deadline = Deadline::at(&watchdog, started + Duration::from_millis(100), 2 << 20);
+        let tagged = crate::extract::extract_tags(l, &source, &deadline, &cancel);
+        let tagged_took = started.elapsed();
+        let started = Instant::now();
+        let parsed = crate::site::ParsedFile::parse(
+            l,
+            Arc::from(source.as_slice()),
+            &SystemClock,
+            started + Duration::from_millis(100),
+            &AtomicBool::new(false),
+        );
+        let parsed_took = started.elapsed();
+        for (path, took, done) in [
+            ("walk", walked_took, walked.status == ExtractStatus::Done),
+            ("tags", tagged_took, tagged.status == ExtractStatus::Done),
+            ("ParsedFile", parsed_took, parsed.is_ok()),
+        ] {
+            assert!(
+                took < limit || (done && took < Duration::from_millis(100)),
+                "{lang} {path}: {took:?}"
+            );
+        }
+    }
+    watchdog.stop();
+}
+
+#[test]
 fn deadline_checked_at_the_start() {
     // A deadline already past or a pause already requested stops a small
     // file at once, on both extraction paths and in `ParsedFile`, even when

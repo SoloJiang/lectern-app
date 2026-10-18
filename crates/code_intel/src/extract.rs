@@ -246,11 +246,12 @@ fn extract_walking(
     if registration.slot().tripped().is_some() {
         return interrupted(&registration);
     }
-    drop(registration);
     let Some(walked) = walked else {
         log(format_args!("parsing {} failed", lang.name().0));
         return Extraction::empty(ExtractStatus::Unsupported);
     };
+    // The rules run under the same registration, and are checked once more
+    // after: the deadline covers the whole extraction.
     let finished = rules::finish_with_refs(
         lang.dialect(),
         source,
@@ -258,6 +259,10 @@ fn extract_walking(
         walked.refs,
         &walked.local_scopes,
     );
+    if registration.slot().tripped().is_some() {
+        return interrupted(&registration);
+    }
+    drop(registration);
     Extraction {
         status: ExtractStatus::Done,
         defs: finished.defs.into_iter().map(|d| d.def).collect(),
@@ -340,8 +345,11 @@ pub(crate) fn extract_tags(
     if registration.slot().tripped().is_some() {
         return interrupted(&registration);
     }
-    drop(registration);
     let finished = rules::finish(lang.dialect(), source, tags, scopes.as_deref());
+    if registration.slot().tripped().is_some() {
+        return interrupted(&registration);
+    }
+    drop(registration);
     Extraction {
         status: ExtractStatus::Done,
         defs: finished.defs.into_iter().map(|d| d.def).collect(),

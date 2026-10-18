@@ -191,6 +191,10 @@ pub(crate) struct Scope {
     /// A function's `body` field: a declaration scoped to the function
     /// (`var`) lives there, so parameter defaults do not see it.
     body: Option<Range<usize>>,
+    /// The innermost scope containing this one by range (`parent` skips
+    /// a scope whose part evaluated outside contains this one); 0 for the
+    /// file.
+    outer: usize,
 }
 
 impl Scope {
@@ -331,6 +335,7 @@ impl Collector {
                 comprehension: false,
                 enclosing: Vec::new(),
                 body: None,
+                outer: 0,
             }],
             defs: Vec::new(),
             nonlocal: Vec::new(),
@@ -362,6 +367,7 @@ impl Collector {
                 .then(|| node.child_by_field_name("body"))
                 .flatten()
                 .map(|b| b.byte_range()),
+            outer: 0,
         });
     }
 
@@ -464,12 +470,18 @@ impl Collector {
             // A scope inside a part evaluated outside its container (a
             // lambda in a default value) has the container's parent.
             let mut parent = stack.last().copied().unwrap_or(0);
+            scopes[i].outer = parent;
             while parent != 0 && scopes[parent].encloses(&range) {
                 parent = scopes[parent].parent.unwrap_or(0);
             }
             scopes[i].parent = Some(parent);
             stack.push(i);
         }
+        let by_range: std::collections::HashMap<(usize, usize), usize> = scopes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| ((s.range.start, s.range.end), i))
+            .collect();
         let mut raw = self.defs;
         raw.sort_by_key(|d| (d.range.start, d.range.end));
         raw.dedup_by(|b, a| a.range == b.range);
@@ -497,7 +509,7 @@ impl Collector {
                     // parameter defaults are evaluated before the body's
                     // `var` declarations exist.
                     if let Some(body) = &scopes[scope].body
-                        && let Some(b) = scopes.iter().position(|s| s.range == *body)
+                        && let Some(&b) = by_range.get(&(body.start, body.end))
                     {
                         scope = b;
                     }
@@ -554,9 +566,14 @@ impl Collector {
                 Some((scope, text.get(r)?.to_vec(), directive))
             })
             .collect();
+        let mut scope_defs = vec![Vec::new(); scopes.len()];
+        for (i, def) in defs.iter().enumerate() {
+            scope_defs[def.scope].push(i);
+        }
         Locals {
             scopes,
             defs,
+            scope_defs,
             nonlocal,
         }
     }
@@ -568,6 +585,9 @@ pub(crate) struct Locals {
     scopes: Vec<Scope>,
     /// By position.
     defs: Vec<LocalDef>,
+    /// For each scope, the indices of its definitions in `defs`, by
+    /// position.
+    scope_defs: Vec<Vec<usize>>,
     /// (function scope, name, directive) taken out by `global` /
     /// `nonlocal`.
     nonlocal: Vec<(usize, Vec<u8>, Directive)>,
@@ -590,7 +610,9 @@ impl Locals {
     }
 
     pub(crate) fn def_at(&self, range: &Range<usize>) -> Option<&LocalDef> {
-        self.defs.iter().find(|d| d.range == *range)
+        // By position: definitions do not overlap.
+        let i = self.defs.partition_point(|d| d.range.start < range.start);
+        self.defs.get(i).filter(|d| d.range == *range)
     }
 
     /// Visible in one function or block only (`DefinitionRef::local`): not
@@ -657,7 +679,7 @@ impl Locals {
             if !skip {
                 let mut before: Option<&LocalDef> = None;
                 let mut after: Option<&LocalDef> = None;
-                for def in self.defs.iter().filter(|d| d.scope == s) {
+                for def in self.scope_defs[s].iter().map(|&i| &self.defs[i]) {
                     if text.get(def.range.clone()) != Some(name)
                         || def.range == *reference
                         || !def.namespace.holds(namespace)
@@ -730,13 +752,17 @@ fn home(scopes: &[Scope], range: &Range<usize>) -> usize {
 }
 
 /// The innermost scope containing `range` (the file when no other does).
+/// The scopes are nested and ordered by start, outermost first: the last
+/// one starting at or before `range` either contains it or has it among
+/// the scopes around it, so a binary search and a walk outwards find it.
 fn innermost(scopes: &[Scope], range: &Range<usize>) -> usize {
-    scopes
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, s)| s.range.start <= range.start && range.end <= s.range.end)
-        .map_or(0, |(i, _)| i)
+    let mut i = scopes
+        .partition_point(|s| s.range.start <= range.start)
+        .saturating_sub(1);
+    while i != 0 && !(scopes[i].range.start <= range.start && range.end <= scopes[i].range.end) {
+        i = scopes[i].outer;
+    }
+    i
 }
 
 // ---- pattern expansion -----------------------------------------------------

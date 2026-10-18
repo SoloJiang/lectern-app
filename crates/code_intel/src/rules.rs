@@ -398,13 +398,14 @@ struct FileRules<'a> {
     dialect: Dialect,
     /// Rust `pub`, Java `private`: where the modifier starts.
     modifier_starts: HashSet<usize>,
-    /// JS / TS export statements.
+    /// JS / TS export statements and `declare global` blocks, by start;
+    /// they do not overlap (all are at program level).
     exports: Vec<Range<usize>>,
     export_names: HashSet<&'a str>,
     /// JS / TS: the file has import or export statements.
     es_module: bool,
     /// Go: method range → receiver type.
-    owners: Vec<(Range<usize>, &'a str)>,
+    owners: std::collections::HashMap<(usize, usize), &'a str>,
 }
 
 impl<'a> FileRules<'a> {
@@ -415,7 +416,7 @@ impl<'a> FileRules<'a> {
             exports: Vec::new(),
             export_names: HashSet::new(),
             es_module: false,
-            owners: Vec::new(),
+            owners: std::collections::HashMap::new(),
         };
         for (marker, tag, name) in markers {
             match marker {
@@ -426,23 +427,34 @@ impl<'a> FileRules<'a> {
                     rules.exports.push(tag.range.clone());
                     rules.es_module = true;
                 }
+                // `declare global { … }`: its declarations are global, as
+                // visible as exported ones.
+                Marker::Global => rules.exports.push(tag.range.clone()),
                 Marker::ExportName => {
                     rules.export_names.insert(name);
                     rules.es_module = true;
                 }
                 Marker::Module => rules.es_module = true,
-                Marker::Owner => rules.owners.push((tag.range.clone(), name)),
-                Marker::Impl | Marker::ImplTrait => {}
+                Marker::Owner => {
+                    rules
+                        .owners
+                        .insert((tag.range.start, tag.range.end), &**name);
+                }
+                Marker::Impl | Marker::ImplTrait | Marker::Receiver | Marker::Attribute => {}
             }
         }
+        rules.exports.sort_by_key(|r| r.start);
         rules
     }
 
     fn owner(&self, range: &Range<usize>) -> Option<&'a str> {
-        self.owners
-            .iter()
-            .find(|(r, _)| r == range)
-            .map(|(_, name)| *name)
+        self.owners.get(&(range.start, range.end)).copied()
+    }
+
+    /// Whether `range` lies in an export statement or `declare global`.
+    fn in_export(&self, range: &Range<usize>) -> bool {
+        let i = self.exports.partition_point(|r| r.start <= range.start);
+        i > 0 && range.end <= self.exports[i - 1].end
     }
 
     fn visibility<'c>(
@@ -493,11 +505,7 @@ impl<'a> FileRules<'a> {
                         top = (&def_tag.range, &container.name);
                     }
                 }
-                let exported = self
-                    .exports
-                    .iter()
-                    .any(|r| r.start <= top.0.start && top.0.end <= r.end)
-                    || self.export_names.contains(top.1);
+                let exported = self.in_export(top.0) || self.export_names.contains(top.1);
                 if exported || !self.es_module {
                     // A script or CommonJS file: its top level is shared.
                     Visibility::Public

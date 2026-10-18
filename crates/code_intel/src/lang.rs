@@ -339,14 +339,23 @@ pub(crate) enum Marker {
     Module,
     /// Rust: a visibility modifier at the start of an item.
     Pub,
-    /// Rust: an inherent `impl` block and the type it belongs to.
+    /// TS: a `declare global { … }` block; its declarations are global.
+    Global,
+    /// Rust: an `impl` block and the name of the type it implements.
     Impl,
-    /// Rust: a trait `impl` block and the type it belongs to.
+    /// Rust: the `for` of a trait `impl` block.
     ImplTrait,
     /// Java: a `private` modifier at the start of a declaration.
     Private,
     /// Go: a method declaration and its receiver type.
     Owner,
+    /// Python: a function definition and its first parameter (a method's
+    /// `self`).
+    Receiver,
+    /// Python: an assignment to an attribute (`obj.name = …`) and the
+    /// attribute's name; a field of the class when `obj` is the receiver
+    /// of the method around it, a member reference otherwise.
+    Attribute,
 }
 
 impl Marker {
@@ -360,6 +369,9 @@ impl Marker {
             "impl-trait" => Marker::ImplTrait,
             "private" => Marker::Private,
             "owner" => Marker::Owner,
+            "global" => Marker::Global,
+            "receiver" => Marker::Receiver,
+            "attribute" => Marker::Attribute,
             _ => return None,
         })
     }
