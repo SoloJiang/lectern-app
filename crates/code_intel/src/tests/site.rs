@@ -1027,3 +1027,107 @@ fn site_member_names_do_not_bind_locals() {
         assert!(s.binding.is_some(), "{lang}: plain {} unbound", plain.0);
     }
 }
+
+/// The fixtures, the walkers' cases and a synthetic source per extension,
+/// each with its core language.
+fn parity_sources() -> Vec<(&'static crate::extract::Lang, String)> {
+    let table = core_table();
+    let mut sources: Vec<(&crate::extract::Lang, String)> = Vec::new();
+    for (lang, _, source) in crate::testing::FIXTURES {
+        sources.push((table.get(lang).expect(lang), (*source).to_owned()));
+    }
+    for (lang, source) in super::extract::WALKER_CASES {
+        sources.push((table.get(lang).expect(lang), (*source).to_owned()));
+    }
+    for ext in ["ts", "tsx", "js", "rs", "py", "go", "java"] {
+        let lang = table
+            .for_path(&format!("f.{ext}"), &crate::NoGrammarPacks)
+            .expect(ext);
+        let text = crate::testing::synthetic::source(ext, 7, 8 << 10);
+        sources.push((lang, String::from_utf8(text).unwrap()));
+    }
+    sources
+}
+
+/// `site::Parents` gives every node of a tree, named or not, the parent
+/// tree-sitter gives it.
+#[test]
+fn site_parents_match_tree_sitter() {
+    for (lang, source) in parity_sources() {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(lang.language()).unwrap();
+        let tree = parser.parse(source.as_bytes(), None).unwrap();
+        let parents = crate::site::Parents::new(&tree);
+        let mut cursor = tree.walk();
+        let mut checked = 0;
+        loop {
+            let node = cursor.node();
+            assert_eq!(
+                parents.of(node).map(|p| p.id()),
+                node.parent().map(|p| p.id()),
+                "{} {node:?}: {source}",
+                lang.name().0
+            );
+            checked += 1;
+            if cursor.goto_first_child() || cursor.goto_next_sibling() {
+                continue;
+            }
+            while cursor.goto_parent() && !cursor.goto_next_sibling() {}
+            if cursor.node().id() == tree.root_node().id() {
+                break;
+            }
+        }
+        assert!(checked > 1, "{source}");
+    }
+}
+
+/// On a core language `ParsedFile` runs the query with only the locals
+/// patterns and the reference patterns enabled (`Lang::site_query`):
+/// the definitions, the reference positions and what is at each of them
+/// are what the full query gives, over the fixtures, the walkers' cases
+/// and the synthetic sources.
+#[test]
+fn site_reference_query_matches_full() {
+    for (lang, source) in parity_sources() {
+        let text: Arc<[u8]> = Arc::from(source.as_bytes());
+        let reduced = ParsedFile::parse(
+            lang,
+            text.clone(),
+            &SystemClock,
+            Instant::now() + Duration::from_secs(10),
+            &AtomicBool::new(false),
+        )
+        .expect("parsed");
+        let full = ParsedFile::parse_with(
+            lang,
+            text,
+            &SystemClock,
+            Instant::now() + Duration::from_secs(10),
+            &AtomicBool::new(false),
+            true,
+        )
+        .expect("parsed");
+        let name = &lang.name().0;
+        assert_eq!(
+            reduced.defs_with_local().collect::<Vec<_>>(),
+            full.defs_with_local().collect::<Vec<_>>(),
+            "{name}: {source}"
+        );
+        assert_eq!(reduced.references(), full.references(), "{name}: {source}");
+        let positions = full
+            .references()
+            .iter()
+            .map(|r| r.at)
+            .chain(full.defs().map(|d| Position {
+                line: d.line,
+                column: d.column,
+            }));
+        for at in positions {
+            assert_eq!(
+                reduced.site_at(at),
+                full.site_at(at),
+                "{name} {at:?}: {source}"
+            );
+        }
+    }
+}

@@ -57,7 +57,8 @@ fn prefetch_is_reused_within_two_seconds() {
 /// runs its own steps.
 #[test]
 fn prefetch_is_not_reused_after_its_inputs_change() {
-    let cases: [(&str, fn(&Harness)); 3] = [
+    type Case = (&'static str, fn(&Harness));
+    let cases: [Case; 3] = [
         ("two seconds later", |h| {
             h.clock.advance(PREFETCH_FOR + Duration::from_millis(1))
         }),

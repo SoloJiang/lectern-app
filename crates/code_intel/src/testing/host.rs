@@ -167,11 +167,14 @@ impl Projects for FakeProjects {
 type PowerFn = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// Live subscribers by ID; a subscription's guard removes its own.
-pub(crate) type Subscribers<F> = Arc<Mutex<(u64, Vec<(u64, F)>)>>;
+pub(crate) type Subscribers<F> = Arc<SubscriberList<F>>;
+
+/// The last ID given and the live subscribers.
+pub(crate) type SubscriberList<F> = Mutex<(u64, Vec<(u64, F)>)>;
 
 /// Removes a subscriber when dropped.
 pub(crate) struct Unsubscribe<F: Send + 'static> {
-    pub(crate) list: std::sync::Weak<Mutex<(u64, Vec<(u64, F)>)>>,
+    pub(crate) list: std::sync::Weak<SubscriberList<F>>,
     pub(crate) id: u64,
 }
 

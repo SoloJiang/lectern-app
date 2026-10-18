@@ -865,7 +865,7 @@ fn extract_definitions_on_one_node_are_siblings() {
 
 /// Sources for the walkers' parity test beyond the fixtures: each pattern
 /// of the tags and locals queries and its near misses.
-const WALKER_CASES: &[(&str, &str)] = &[
+pub(super) const WALKER_CASES: &[(&str, &str)] = &[
     (
         "rust",
         "pub(crate) struct S<T>(T);\nunion U { a: u8 }\npub type Alias = u8;\nmod m { pub fn f() {} }\nmacro_rules! mac { ($x:ident) => { $x }; }\n\

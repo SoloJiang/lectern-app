@@ -126,8 +126,9 @@ pub(crate) const REFS_BY_NAME: &str = "SELECT e.oid, e.lang, e.unit
 /// Every `Done` unit of one version triple (the name table's first pass).
 pub(crate) const UNITS: &str = "SELECT unit, oid FROM ci_ext
      WHERE lang = ?1 AND grammar = ?2 AND query = ?3 AND status = 0";
-/// The definition names of one unit (the name table's scan by `ci_def_unit`).
-pub(crate) const DEF_NAMES: &str = "SELECT name, kind FROM ci_def WHERE unit = ?1";
+/// Every definition's unit, name and kind, in table order (the name
+/// table's second pass): one scan of `ci_def`, no index lookups.
+pub(crate) const DEF_NAMES: &str = "SELECT unit, name, kind FROM ci_def";
 pub(crate) const EXT_OF_UNIT: &str = "SELECT status FROM ci_ext WHERE unit = ?1";
 /// In insertion order, which is the extraction's order.
 pub(crate) const DEFS_OF_UNIT: &str =
@@ -460,23 +461,33 @@ impl Store {
         })
     }
 
-    /// Calls `f` with each definition name and kind of `units`, in the
-    /// order given (sorted units scan `ci_def_unit` in order). False when the
-    /// partition cannot be read; `f` then saw part of the names.
+    /// Calls `f` with each definition name and kind of `units` (sorted by
+    /// ID), in table order: one scan of `ci_def`, the rows of other units
+    /// skipped. A unit's rows are written together, so the decision is
+    /// cached for consecutive rows. False when the partition cannot be read;
+    /// `f` then saw part of the names.
     pub fn def_names(&self, units: &[Unit], mut f: impl FnMut(Unit, &str, DefKind)) -> bool {
+        debug_assert!(units.is_sorted(), "def_names takes sorted units");
         self.set
             .read(|r| {
-                for &unit in units {
-                    let ok = r.query(DEF_NAMES, &[Param::Int(unit.id())], |row| {
-                        if let Some((name, kind)) = row.text(0).zip(kind_at(row, 1)) {
-                            f(unit, name, kind);
+                let mut last: Option<(i64, bool)> = None;
+                r.query(DEF_NAMES, &[], |row| {
+                    let Some(id) = row.int(0) else {
+                        return true;
+                    };
+                    let wanted = match last {
+                        Some((at, wanted)) if at == id => wanted,
+                        _ => {
+                            let wanted = units.binary_search_by_key(&id, |u| u.id()).is_ok();
+                            last = Some((id, wanted));
+                            wanted
                         }
-                        true
-                    });
-                    if !ok {
-                        return;
+                    };
+                    if wanted && let Some((name, kind)) = row.text(1).zip(kind_at(row, 2)) {
+                        f(Unit::from_id(id), name, kind);
                     }
-                }
+                    true
+                });
             })
             .is_some()
     }
