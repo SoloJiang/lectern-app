@@ -443,49 +443,82 @@ fn schedule_large_files_take_turns() {
 }
 
 #[test]
-fn schedule_folder_project_reports_unindexed() {
+fn schedule_folder_project_indexes_at_open() {
+    use lectern_services::code_intel::{
+        CandidateSource, Completeness, Position, QueryKind, QueryState,
+    };
     use lectern_services::project::{
         ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
     };
 
-    let h = Harness::new();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path().canonicalize().expect("canonical");
     std::fs::write(root.join("a.ts"), ts("in_a_folder")).expect("write");
-    let mut files = FileList::builder();
-    files.push("a.ts", FileKind::File);
+    std::fs::write(root.join("b.ts"), b"export function run() { return in_a_folder(1); }\n")
+        .expect("write");
+    std::fs::write(root.join("notes.md"), b"# notes\n").expect("write");
     let key = ProjectKey::Folder {
         root: Arc::from(root.as_path()),
     };
-    let event = h.projects.set(ProjectSnapshot {
-        key: key.clone(),
-        generation: 1,
-        name: "folder".into(),
-        worktrees: Arc::from(Vec::new()),
-        active: Some(ActiveTree {
-            root: Arc::from(root.as_path()),
-            worktree: None,
-            opened_at: "".into(),
-            files: Scan::Ready(Arc::new(files.build())),
-            packages: Scan::Ready(Arc::from(Vec::new())),
-        }),
-    });
-    h.indexer.project_event(&event);
-    h.settle();
-    // Nothing is indexed (step 3 indexes git projects only): no tier may
-    // read as complete, so callers search instead of trusting the index.
-    let c = h.indexer.coverage(&key).expect("open");
-    assert_eq!(
-        [c.focus, c.subproject, c.worktree, c.other_worktrees],
-        [TierState::Pending; 4]
-    );
-    assert_eq!(h.extractions(), 0);
+    let open = |h: &Harness| {
+        let mut files = FileList::builder();
+        for path in ["a.ts", "b.ts", "notes.md"] {
+            files.push(path, FileKind::File);
+        }
+        let event = h.projects.set(ProjectSnapshot {
+            key: key.clone(),
+            generation: 1,
+            name: "folder".into(),
+            worktrees: Arc::from(Vec::new()),
+            active: Some(ActiveTree {
+                root: Arc::from(root.as_path()),
+                worktree: None,
+                opened_at: "".into(),
+                files: Scan::Ready(Arc::new(files.build())),
+                packages: Scan::Ready(Arc::from(Vec::new())),
+            }),
+        });
+        h.indexer.project_event(&event);
+        h.settle();
+    };
+    let h = Harness::new();
+    open(&h);
+    // Every file read: its raw bytes' SHA-1 is its OID; every tier done.
     let map = h.indexer.map(&key).expect("open");
-    assert!(
-        map.effective("a.ts").is_none(),
-        "no path has an indexed OID"
-    );
+    let a = h.git.oid(&ts("in_a_folder"));
+    assert_eq!(map.effective("a.ts").map(|e| e.oid), Some(a));
+    assert!(map.effective("notes.md").is_none(), "no language: not in the map");
+    let c = h.indexer.coverage(&key).expect("open");
+    assert_eq!([c.focus, c.subproject, c.worktree, c.other_worktrees], [TierState::Done; 4]);
+    assert_eq!(h.extractions(), 2);
+    // No HEAD: never clean.
     assert!(!h.indexer.head_clean(&key, "a.ts"));
+    // A jump answers from the index, verifying the folder's raw OIDs.
+    let b = std::fs::read(root.join("b.ts")).expect("read");
+    let at = lectern_services::code_intel::TextRef {
+        worktree: None,
+        path: "b.ts".into(),
+        oid: h.git.oid(&b),
+        origin: lectern_services::code_intel::TextOrigin::Worktree,
+    };
+    let position = Position { line: 0, column: 32 };
+    let id = h.indexer.query(lectern_services::code_intel::Query {
+        project: key.clone(),
+        kind: QueryKind::Definition { at, position },
+    });
+    h.settle();
+    let r = h.indexer.results(id).expect("kept");
+    assert_eq!(r.candidates.len(), 1, "{r:?}");
+    assert_eq!(&*r.candidates[0].definition.location.path, "a.ts");
+    assert_eq!(r.candidates[0].source, CandidateSource::Index);
+    assert_eq!(r.state, QueryState::Done(Completeness::Complete));
+    // The next run reads every file again (no index to know the OIDs
+    // from) and extracts nothing.
+    let h = h.reopen(super::support::Options::default());
+    open(&h);
+    assert_eq!(h.extractions(), 0);
+    let c = h.indexer.coverage(&key).expect("open");
+    assert_eq!(c.subproject, TierState::Done);
 }
 
 /// `code_intel.tags` with a 24 KiB quota: indexing overflows it.

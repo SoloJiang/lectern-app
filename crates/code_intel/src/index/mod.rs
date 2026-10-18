@@ -642,8 +642,8 @@ impl Inner {
                         st.check_index = true;
                     }
                     // A failed watch (or root) is tried again on the next
-                    // event.
-                    if st.watches.is_none() {
+                    // event; a folder project has no watch.
+                    if st.watches.is_none() && matches!(project, ProjectKey::Git { .. }) {
                         st.root = None;
                         st.root_tried = false;
                     }
@@ -845,17 +845,6 @@ impl Inner {
 
     fn coverage(&self, key: &ProjectKey) -> Option<Coverage> {
         let project = self.project(key)?;
-        if matches!(key, ProjectKey::Folder { .. }) {
-            // Folder projects are not indexed yet (step 3): every tier is
-            // `Pending`, never `Done`, so callers answer from a search.
-            return Some(Coverage {
-                generation: lock(&project.state).map.provenance.generation(),
-                focus: TierState::Pending,
-                subproject: TierState::Pending,
-                worktree: TierState::Pending,
-                other_worktrees: TierState::Pending,
-            });
-        }
         let eviction = project.evictions();
         let grammar = self.grammar();
         let st = lock(&project.state);
@@ -867,8 +856,14 @@ impl Inner {
             TierState::Pending
         };
         // The walks are of the current map (built from the current file
-        // list and grammar) with the current scope.
-        let current = st.base_for == Some((st.gens.files, grammar))
+        // list and grammar, with no path left to read and, for a git
+        // project, its comparison current) with the current scope.
+        let git = matches!(key, ProjectKey::Git { .. });
+        let read = st.dirty.is_empty() && st.dirty_dirs.is_empty() && st.probe.is_empty();
+        let compared = !git || st.compare_for == Some(st.gens.compare_deps(grammar));
+        let current = read
+            && compared
+            && st.base_for == Some((st.gens.files, grammar))
             && st.batch.cursor.as_ref().is_some_and(|c| {
                 c.deps == st.cursor_deps(eviction) && c.scope == batch::subproject(&st)
             });
