@@ -1,6 +1,6 @@
 //! Quiescence signals for `bench` and the UI probe.
 
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -112,6 +112,79 @@ fn an_admitted_call_or_an_emit_in_progress_is_not_quiescent() {
     worker.join().unwrap();
     settle(&kernel);
     shutdown(&kernel);
+}
+
+/// Barriers sent per run of the stress test below.
+const BARRIER_ROUNDS: usize = 20_000;
+
+/// Counts the barriers after which the kernel still reads busy, while one
+/// spinning thread per core competes with the kernel thread for the CPU, so
+/// it is often preempted right after it wakes the waiter.
+fn busy_after_barrier(kernel: &crate::Kernel, rounds: usize) -> usize {
+    let stop = Arc::new(AtomicBool::new(false));
+    let cores = thread::available_parallelism().map_or(2, |n| n.get());
+    let spinners: Vec<_> = (0..cores)
+        .map(|_| {
+            let stop = stop.clone();
+            thread::spawn(move || {
+                while !stop.load(SeqCst) {
+                    std::hint::spin_loop();
+                }
+            })
+        })
+        .collect();
+    let busy = (0..rounds)
+        .filter(|_| {
+            kernel.barrier();
+            kernel.quiescent_epoch().is_none()
+        })
+        .count();
+    stop.store(true, SeqCst);
+    for spinner in spinners {
+        spinner.join().unwrap();
+    }
+    busy
+}
+
+/// `barrier` answers only after its own request has left the busy count
+/// (#96): with nothing else busy, the kernel is quiescent the moment
+/// `barrier` returns, without polling.
+#[test]
+fn barrier_returns_after_its_own_request_leaves_the_busy_count() {
+    let kernel = start(PluginSet::new().with(
+        "p",
+        handle_plugin(&HandleSlot::default(), after_first_frame()),
+    ));
+    wait_until("quiescent", || kernel.is_quiescent());
+    let busy = busy_after_barrier(&kernel, BARRIER_ROUNDS);
+    assert_eq!(
+        busy, 0,
+        "busy right after {busy} of {BARRIER_ROUNDS} barriers"
+    );
+    shutdown(&kernel);
+}
+
+/// The same holds for a barrier the kernel thread rejects because it was
+/// queued behind `shutdown`.
+#[test]
+fn a_barrier_rejected_after_shutdown_also_answers_after_its_own_count() {
+    let mut busy = 0;
+    for _ in 0..200 {
+        let kernel = start(PluginSet::new());
+        wait_until("quiescent", || kernel.is_quiescent());
+        let (done, finished) = std::sync::mpsc::channel();
+        kernel.shutdown(move || {
+            let _ = done.send(());
+        });
+        kernel.barrier();
+        if kernel.quiescent_epoch().is_none() {
+            busy += 1;
+        }
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("shutdown finished");
+    }
+    assert_eq!(busy, 0, "busy right after {busy} of 200 rejected barriers");
 }
 
 #[test]
