@@ -33,7 +33,8 @@ pub trait WorkspaceFacts: Send + Sync {
 type Done = Box<dyn FnOnce(Result<ActivationToken, PluginError>) + Send>;
 
 /// Requests for the kernel thread. Every request except `Transition` counts
-/// as a busy unit from enqueue until it is handled.
+/// as a busy unit from enqueue until it is handled. `Barrier` and `Shutdown`
+/// answer only after that unit is released.
 pub(crate) enum Request {
     Start,
     Activate {
@@ -108,8 +109,7 @@ impl Shared {
             None => Some(request),
         };
         if let Some(request) = rejected {
-            reject(request);
-            self.counters.dec();
+            reject(request, &self.counters);
         }
     }
 
@@ -142,21 +142,35 @@ impl Shared {
     }
 }
 
-/// Handles a request that arrived after shutdown, on the calling thread.
-fn reject(request: Request) {
+/// Handles a request that arrived after shutdown, on the calling thread, and
+/// releases its busy unit. A barrier or shutdown reply goes out only after the
+/// release, as on the kernel thread, so whoever it wakes no longer counts this
+/// request as busy. A command callback runs before the release, as it does
+/// when the command is handled.
+fn reject(request: Request, counters: &Counters) {
     match request {
         Request::Command {
             done, requester, ..
-        } => call_done(done, requester.as_ref(), Err(PluginError::ShuttingDown)),
+        } => {
+            call_done(done, requester.as_ref(), Err(PluginError::ShuttingDown));
+            counters.dec();
+        }
         Request::Shutdown(done) => {
+            counters.dec();
             if let Err(message) = contain(done) {
                 log(format_args!("shutdown callback panicked: {message}"));
             }
         }
         Request::Barrier(reply) => {
+            counters.dec();
             let _ = reply.send(());
         }
-        other => drop_rejected(other),
+        // Not counted: `notify` sends these directly, never through `enqueue`.
+        Request::Transition(transition) => drop_rejected(transition),
+        other => {
+            drop_rejected(other);
+            counters.dec();
+        }
     }
 }
 
@@ -400,6 +414,10 @@ impl Kernel {
     }
 
     /// Waits until every request queued before this call has been handled.
+    /// The barrier's own busy unit is released before it returns, so with
+    /// nothing else busy `is_quiescent()` is already true. A request the
+    /// kernel thread queued for itself while handling those (the `Sweep`
+    /// after a failure) may still be queued behind the barrier.
     #[cfg(any(test, feature = "test-support"))]
     pub fn barrier(&self) {
         let (reply, wait) = mpsc::channel();
@@ -527,8 +545,10 @@ fn run(shared: Arc<Shared>, plugins: Plugins, receiver: Receiver<Request>) {
             }
             Request::Barrier(reply) => {
                 lifecycle.settle();
-                let _ = reply.send(());
+                // Release this request's busy unit before waking the waiter,
+                // or `is_quiescent()` right after `barrier()` reads busy (#96).
                 shared.counters.dec();
+                let _ = reply.send(());
             }
             request => {
                 lifecycle.handle(request);
@@ -546,13 +566,12 @@ fn run(shared: Arc<Shared>, plugins: Plugins, receiver: Receiver<Request>) {
     };
     drop(receiver);
     for request in rest {
-        let counted = !matches!(request, Request::Transition(_));
         match request {
-            Request::Shutdown(done) => finish.push(done),
-            request => reject(request),
-        }
-        if counted {
-            shared.counters.dec();
+            Request::Shutdown(done) => {
+                finish.push(done);
+                shared.counters.dec();
+            }
+            request => reject(request, &shared.counters),
         }
     }
     drop(lifecycle);

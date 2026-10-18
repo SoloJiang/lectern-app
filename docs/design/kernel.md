@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -778,6 +778,7 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - 界面注册与失效竞争：主线程应用注册时另一线程调用 `fail`，撤销在注册应用完之后才 drop 守卫和 `Active`，注册随后被注销。
 - 发出方失效：后台任务的 `emit` 与 `fail` 并发时，`fail` 返回之后开始的分发不会把事件送给任何监听。
 - 静止代数：两次 `quiescent_epoch()` 之间取过再释放一个 `BusyGuard` 时，两次返回值不同。
+- `barrier` 与静止：没有其他忙碌来源时，`barrier()` 返回后立即读 `quiescent_epoch()` 得到 `Some`；排在 `shutdown` 之后、被 kernel 线程拒绝的 barrier 同样如此。
 - `started` 暂存：`started` 里发事件、提交任务后再 panic 或被 `fail`，事件没有送达任何监听，`start` 没有被调用；`started` 成功时它们在 token 变为 `Live` 之后按顺序发生。
 - 单实现服务：提供者失效后 `ServiceRef::get()` 返回 None；提供者的撤销等正在进行的 `Admitted` 调用结束。
 - 准入：token 为 `Dead` 之后 `enter()` 返回 None；停用在准入计数归零之前不 drop 守卫和 `Active`（主线程回调、服务调用、监听各一个测试）；在监听里调用同一插件的服务、在监听里调用 `fail` 都不死锁。
@@ -841,6 +842,10 @@ pub mod testing {
 
 impl Kernel {
     /// 等 kernel 线程处理完调用之前排入的全部请求（`test-support` 下提供）。
+    /// kernel 线程先释放 barrier 请求自己的忙计数，再唤醒调用方；被拒绝的 barrier（排在 `shutdown` 之后）同样如此。
+    /// 所以没有其他忙碌来源时，返回后 `is_quiescent()` 已经为 true，不需要轮询。
+    /// kernel 线程处理这些请求时给自己排入的请求（激活失效后的 `Sweep`、插件代码在 kernel 线程上调用
+    /// `control()` 排入的请求）可能排在 barrier 之后，返回时仍计入忙碌。
     pub fn barrier(&self);
 }
 ```
@@ -908,9 +913,19 @@ impl Kernel {
 
 - 没有验证的：`executor` 的批量线程组和 `code_intel` 怎样使用这组接口（各自的 PR），bench 的暂停请求和后台状态消息（bench 第 5 步）。
 
+`barrier` 先释放忙计数再返回（[#96](https://github.com/SoloJiang/lectern-app/issues/96)），在 Linux（x86_64，4 核虚拟机）上运行：
+
+- 原因：kernel 线程处理 `Request::Barrier` 时先 `reply.send(())`，再释放这个请求自己的忙计数。调用方在两步之间醒来，读 `is_quiescent()` 得到忙碌。被拒绝的请求有同样的顺序：排在 `shutdown` 之后的 barrier 在 kernel 线程上先回复、后释放；`enqueue` 在调用方线程上拒绝 `shutdown` 时先调用 `done`、后释放。改为先释放、再回复或调用 `done`。命令的 `done` 不变，仍在释放之前调用，与正常处理命令时一致（`done` 属于这次生命周期操作）。
+- 新增 2 个测试（`crates/kernel/src/tests/quiescence.rs`）：`barrier_returns_after_its_own_request_leaves_the_busy_count` 连续调用 20000 次 `barrier()`，每次返回后立即读 `quiescent_epoch()`，期间每个核上有一个自旋线程与 kernel 线程争抢 CPU；`a_barrier_rejected_after_shutdown_also_answers_after_its_own_count` 重复 200 次「`shutdown` 后立即 `barrier`」。两个测试都要求读到忙碌的次数为 0。
+- 修改前：`cargo nextest run -p lectern-kernel --all-features -E 'test(barrier)' --stress-count 200`，200 轮全部失败。第一个测试 200 轮全部失败，400 万次 barrier 中 1916449 次读到忙碌（每轮 20000 次中 1413–16038 次）；第二个测试 187 轮失败，4 万次中 3536 次读到忙碌（每轮 200 次中 1–188 次）。
+- 修改后：同一命令 200 轮全部通过；`cargo nextest run -p lectern-kernel --all-features --stress-count 200`（95 个测试）200 轮全部通过。`just check`、`just test`、`just doctest`、`just deny` 全部通过。
+- 压力测试中发现 `gates::a_panicking_task_releases_its_payload_and_siblings_are_dropped` 自身的竞争，与 barrier 无关：闸门打开时，同级任务如果已经 poll 过一次（`Wait`），会排到 panic 的任务之后；激活失效后，同级任务的 future 没运行过就被丢弃，在 future 体内创建的守卫从未存在，测试等不到它的 drop。单独压力运行 4000 次失败 3 次，失败时同级任务的 `Run` poll 次数都是 0。改为在 future 外创建守卫、移进 future 后，4000 次全部通过。
+- 已知限制：barrier 只等调用之前排入的请求。kernel 线程处理这些请求时给自己排入的请求排在 barrier 之后，例如 `started` 里调用 `fail` 后排入的 `Sweep`。临时测试（不提交）里，启动一个在 `started` 里 `fail` 的插件后立即 `barrier`，300 次中 9 次返回时仍忙碌。处理这种情况要让 kernel 线程区分自己排入的请求，会改动发布构建里请求的入队路径，本次不做；需要静止的测试在这种场景下仍要等到静止。
+- 没有验证的：`agents` 测试辅助 `Harness::quiescent()` 里的等待循环（[#94](https://github.com/SoloJiang/lectern-app/pull/94)）和 `code_intel` 里受影响的测试由各自的 crate 去掉或复查，不在本次改动内。
+
 ## 与设计的差异
 
-- 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。
+- 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。barrier 先释放自己的忙计数再唤醒调用方（[#96](https://github.com/SoloJiang/lectern-app/issues/96)），kernel 线程给自己排入的后续请求不在等待范围内，见「实际验证」里的已知限制。
 - `PluginError` 的变体按实现需要列全：`Failed`（插件报告）、`Panicked`、`MissingService`、`UndeclaredService`、`DuplicateService`、`InvalidGraph`、`DependencyUnavailable`、`Disabled`、`ShuttingDown`、`UnknownCommand`。设计里提到的 `Stale` 没有用到（请求方失效时 `done` 不被调用），不提供。
 - `Context::service` / `service_set` 收到不在 `requires` 里的服务时 panic，由 `activate` 的边界捕获、插件进入 `Failed`，错误信息写明原因；设计只写了「必须在 requires 里」。
 - 启动时的依赖图检查只让出错的插件进入 `Failed`；`MissingProvider` 不让依赖者失败（提供者可能只是清单 panic），依赖者停在 `Waiting`。`validate` 仍报告全部错误。依赖环之外、依赖环里插件的依赖者也按环处理（进入 `Failed`），实现更简单，`validate` 的单元测试会先在 CI 里拦下环。判断环时，一个多实现服务的多个提供者互为替代：只要有一个提供者能排在前面就不算环（例如提供者 A 依赖消费者 C、另一个提供者 B 独立时，顺序是 B、C、A）。

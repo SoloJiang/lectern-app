@@ -241,8 +241,12 @@ fn a_panicking_task_releases_its_payload_and_siblings_are_dropped() {
     let latch = Latch::default();
     let wait = latch.wait();
     assert!(slot.get().own_with(move |gate| {
+        // Moved into the future rather than created in its body: the
+        // panicking task may kill the activation before the sibling is first
+        // polled, and the sibling's future must be dropped either way.
+        let held = Guard("sibling".into(), d);
         let sibling = executor.spawn(&gate, async move {
-            let _state = Guard("sibling".into(), d);
+            let _held = held;
             wait.await;
         });
         let panicking = executor.spawn(&gate, async move {
