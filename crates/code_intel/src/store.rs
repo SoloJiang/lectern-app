@@ -684,6 +684,13 @@ impl StoreWrite {
     pub fn commit(self) -> Written {
         self.write.commit()
     }
+
+    /// Deletes `unit`, as an eviction does: the namespace's eviction
+    /// generation grows (tests: an eviction at a chosen moment).
+    #[cfg(test)]
+    pub fn remove_unit(&mut self, unit: Unit) {
+        self.write.remove_unit(unit);
+    }
 }
 
 /// `r`, counting one statement (`phases`).

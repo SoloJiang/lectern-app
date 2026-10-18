@@ -1390,7 +1390,17 @@ enum WorktreeState {
 - 忽略规则或配置变了：下一次工作区比较之后，覆盖部分与比较结果对齐。重新读的路径是比较给出的路径加上现有的全部覆盖项；现有的未跟踪覆盖项（不在文件列表里）没有出现在比较结果里时，说明它现在被忽略或已经不在，从覆盖部分删除；`untracked_capped` 为 true 时比较结果不完整，这一步不删除。
 - 有效 OID 变了：一个路径的有效 OID 是它的覆盖项的 OID，没有覆盖项时是文件列表的 OID。`indexed` 提示每条存（有效 OID 的前 8 字节、淘汰代数、语言包代数），读的时候与当前的有效 OID 和代数比较，所以 OID 一变提示就不再匹配，不需要逐个清除；新 OID 的存在检查命中或写入成功之后才重新置位。命中或写入的版本与当前语言表、映射的语言表里这种语言的版本都相同时才置位。
 - 淘汰：淘汰代数加一后全部提示不再匹配，第 3–5 层的游标重建、按层重新做存在检查。仍在的单元只重新置位、不重新抽取，被淘汰的重新抽取。查询现场用到一个文件的抽取结果时（第 2 步的 import 目标、引用的候选文件、限时搜索的命中文件）先做存在检查，没有就现场抽取，并按所在层排队写入。
-- 查询的切面：提示由批次在后台持续置位，查询先查索引（跳转第 3 步、查引用的 `ci_ref`、`Named`），之后才读提示（限时搜索的范围、`Partial` 的计数）。两次读之间写入的文件，查索引时还没有、读提示时已算入索引，两边都漏掉。所以每个项目记一个「提示置位次数」：每次在项目锁内让某条提示从不匹配变为匹配就加一（只有这一处置位提示）。查询在查索引之前记下它（快照、预取各记自己的），读完提示之后再读一次；变了就再查一次索引，把新出现的候选追加进结果。读提示之前已置位的提示，它的写入在第二次查索引之前已经提交，所以不会再漏。预取的结果只对它记下的次数有效，复用时同样按这条规则补查。
+
+#### 查询的视图
+
+一次查询的结果与一个视图一致。查询在取快照时记下视图（`query::View`），之后每一步只读这个快照和视图允许的共享输入；读完一步之后在一个地方（`Inner::check_view`）与当前比较一次，按比较结果处理。
+
+- 视图的成员：会话（含当前 worktree 和它的根；项目关闭、当前 worktree 改变时结束）、映射代数、淘汰代数（`Project::evictions`，与批量层同一个值）、语言表代数、提示置位次数（`State::hinted`：每次在项目锁内让某条提示从不匹配变为匹配就加一，只有 `State::hint_paths` 一处置位提示）。文件内容按读核对：查询读的每个文件都要是快照的映射给这个路径的内容（`read_content`），否则这个文件计入 `unsearched`。
+- 映射和语言表是快照自己的副本（`Arc`），查询读的是它们，不是共享状态，所以运行中的查询不因新映射、新语言表失效：结果与旧视图一致（位置带旧 OID，打开前核对）。复用预取则要求会话、映射、淘汰、语言表四项都相同（`View::same_basis`）。
+- 比较点：跳转在第 1–3 步（含复用的预取）之后、限时搜索的范围读完提示之后、搜索结束算完计数之后；查引用在 `ci_ref` 那一遍之后、范围之后、搜索之后；`Named` 在计数之后。每次发布结果（`publish_in`）还在决定发布顺序的锁（`publishing`）下检查会话。
+- 变化的处理：只多了提示（`Grew`），就再查一次索引，把新出现的候选追加进结果：读提示之前已置位的提示，它的写入在第二次查索引之前已经提交，所以不会再漏；有淘汰（`Evicted`），还没发布结果时用新快照重做一次（跳转的第 1–3 步，`Named` 整个），已经发布了或重做时又变了，查询以 `Failed(Stale)` 结束，已发布的结果留下，消费方再问一次；查引用从第一个文件就交出结果，所以有淘汰就以 `Stale` 结束；会话结束（`Ended`），查询已随会话关闭，不再发布任何结果。任何变化之后都不报 `Complete`。
+- 会话在触发它的事件里同步结束：`Changed` 带来新的当前 worktree 时（`switch_session`）、`Closed` 时，在 `publishing` 锁下结束旧会话、关闭它的查询；之后不会再发布旧会话的结果，也不会用旧映射回答新 worktree 的文本。新会话还没有映射（项目刚打开、刚切换 worktree）时，问来的查询排进 `State::waiting`，`rebuild_base` 装好映射时开始（不再用空映射回答、报 `Complete`）。
+- 不进入视图的共享输入：名字表（查询不读它，`Named` 直接查存储）、语义导航的提供者集合（只影响 `semantic` 一栏，不影响 `state` 的完整性；查询开始时选定要问的提供者）、`coverage`（查询不读）、解析扩展点的实现（每次激活注册一次）、子项目和审阅集合（快照里的副本）。
 
 ### 名字表
 
@@ -1981,6 +1991,13 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 基准（`just bench --measure code_intel/ plugin/code-intel/`）：`goto_indexed` 17.2 ms，`goto_first` 4.87 ms，`named_50k`（新增，只记录；54 000 个定义）493 ms，`references_100k/all` 971 ms、`/first` 9.93 ms，`search_stop` 1 s（每个读到的文件都核对 OID 之后），`names_100k` 919 ms，`resident_cloudprint` 650 KB，`resident_100k` 3.34 MB；`extract_throughput` 3.95 MB/s，同前几轮在 4 MB/s 上下波动，本轮没有改抽取。
 - `named_50k` 的分项（`goto_phases.rs` 的 `named_50k_phases`，release，20 次的中位数）：按名字查定义（SQL）383 ms，组成候选 72 ms，排序 16 ms，访问标记 11 ms，计数 5 ms，交出 4 ms；合计 501 ms，约 27 万次分配。
 
+第 4 步，查询改为按视图（「查询的视图」）之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1340 个测试通过，跳过 3 个）、`just doctest`、`just deny` 全部通过。本 crate 236 个测试。
+- 交错矩阵（`view_*`）：4 种查询（跳转、复用预取的跳转、查引用、`Named`）× 5 个步骤（取快照后、查索引后、读提示后、每次读文件前、发布前；复用预取另加「预取与查询之间」）× 7 种后台变化（批次提交、淘汰、映射重建、磁盘上改文件、切换 worktree、关闭项目、语言包变化），每格一个新仓库，共 147 格，其中 140 格的变化确实发生在那一步（`Named` 不读文件，它的 7 格「读文件前」走不到；测试按格数断言）。每格断言：结果是旧视图的、新视图的，或者不是 `Complete`；列出的每一项都属于其中一个视图；会话结束之后不再有这个查询的 `Results` 事件。另有 `view_query_right_after_a_switch_answers_from_the_new_worktree`（切换后立刻问新 worktree 的文本：按新映射回答或不是 `Complete`）和 `view_eviction_moves_the_generation`。分别去掉修复的各部分时：去掉淘汰这一成员，跳转和 `Named` 的矩阵失败（`Definition Step(Snapshot) Evict: complete but neither view's`）；去掉事件里的同步切换，四个矩阵都失败（`published after its session ended`），切换后立刻查询的测试也失败；去掉等映射，切换后立刻查询的测试失败（`Named` 按空映射报 `Complete`）；去掉发布时的会话检查，矩阵仍然通过：同步关闭在同一把锁下已经去掉了这些查询的条目，两者保证的是同一件事。
+- 压力运行（同时 4 个占满 CPU 的进程）：`view_*`、`cut_*`、`read_verify_*`（18 个测试）`--stress-count 150` 跑满 147 次全部通过、第 148 次时到了后台任务的 60 分钟上限被中止，又补跑 `--stress-count 10` 全部通过，合计 157 次没有失败；整个本 crate（236 个）`--stress-count 30` 全部通过。
+- 基准：`goto_indexed` 18.6 ms（视图的比较每次跳转合计约 0.35 µs，`goto_phases`），`goto_first` 4.73 ms，`named_50k` 492 ms，`references_100k/all` 972 ms、`/first` 10 ms，`search_stop` 1 s，`names_100k` 842 ms，`resident_cloudprint` 650 KB，`resident_100k` 3.34 MB；`extract_throughput` 3.88 MB/s，同前几轮在 4 MB/s 上下波动，本轮没有改抽取。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2164,7 +2181,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 名字表的第二步改为一条语句扫描整张 `ci_def`（`SELECT unit, name, kind FROM ci_def`，表的顺序），跳过单元集合以外的行；同一单元的行连续写入，对上一行单元的判断沿用到下一行。逐个单元查 `ci_def_unit` 时 10 万个单元要 10 万次语句执行和 300 万次按 rowid 回表，`code_intel/names_100k` 为 1.07 s，超出 1 s；一次扫描为 0.81 s。
 - `ParsedFile`（跳转第 1 步、查引用和限时搜索现场解析的文件）在核心语言上不再跑 `Compiled` 的完整查询：定义和标记本来就取自遍历（ADR 0031），只需要 locals 的模式和给出引用的 tags 模式。`Lang::site_query` 用与 `Compiled` 相同的文本另编译一个查询，停用其余 tags 模式，模式和捕获的编号、属性、谓词与完整查询相同；它不经 `TagsConfiguration`，所以核心语言在生产中只编译这一个查询。`site_reference_query_matches_full` 在夹具、遍历的样例和每种扩展名的合成源码上检查两者的定义、引用位置和每个位置的 `site_at` 相同。另外，局部引用是否处在变量位置要看父节点，tree-sitter 的 `Node::parent` 每次从根往下逐层扫描子节点，顶层条目多的文件每次都扫描全部顶层条目；`site::Parents` 用二分查找定位根的子节点，往下与 tree-sitter 相同（`site_parents_match_tree_sitter` 检查每个节点的父节点与 `Node::parent` 相同）。64 KiB 的 TS 文件上 `ParsedFile` 从约 27 ms 降到约 20 ms（解析本身约 9 ms）。
 - `ParsedFile` 要的查询（核心语言的 `SiteQuery`，语言包的 `Compiled`）不在查询线程上第一次编译：核心语言的抽取走遍历，从不编译它，第一次跳转原来要在 `Interactive` 线程上先编译（release，Linux：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms），超出候选 50 ms 的预算。每次核对任务结束时，这个项目的映射里有还没编译的语言，就请求一个 `Background` 任务编译（`warm_site_queries`）。任务同时最多一个，请求只保证它在运行；任务自己扫描所有打开项目的映射，编译到扫描为空，清除标志后再扫描一次，所以任务进行中别的项目发来的请求不会丢（原来请求方带上自己项目的语言，任务结束时只重看这个项目：几个项目同时打开时，后来者的语言要等到下一次与它无关的核对，`goto_site_queries_of_every_open_project`）。插件本身在首帧之后激活，所以这也在首帧之后。查询在编译进行中用到它时等这次编译（`OnceLock`），不会比自己编译更久。`Lang::prepare` 也编译它，测试和基准计时之前调用。设计没有写这些查询何时编译。
-- 查询的切面（「输入代数与派生状态」已补这一条）：查询先查索引、后读提示，两次读之间提交的批次让一个文件两边都漏掉，结果还报 `Complete`；复用批次之前的预取时更容易遇到。每个项目的 `State::hinted` 在置位提示的同一段锁内加一（`State::hint_paths`，只在提示真的变化时；所有置位都经它），快照和 `Prepared` 记下它；跳转、查引用、`Named` 在读提示（限时搜索的范围、`Partial` 的计数）之后用 `Snap::hinted_since` 比较，变了就再查一次索引并追加（`cut_*`：测试钩子 `Inner::after_lookup` 在查索引与第一次读提示之间经批量层同样的提交写入一个文件）。名字表只按单元建表、不判断完整性，不受影响；它的重建由 `gens.writes` 触发。
+- 查询的视图（「输入代数与派生状态」的「查询的视图」，取代原来按输入逐个补的检查：提示的切面、预取的 `Inputs`）：一次查询读几个各自前进的输入（会话与当前 worktree、映射、淘汰、提示、文件内容、项目的打开与关闭），原来是逐个输入临时检查，Codex 先后指出三处同一个根因：读提示与查索引之间提交的批次（切面）、快照与查索引之间的淘汰（冻结的提示戳记仍然匹配，查不到的单元被当成已入索引，结果报 `Complete`）、切换 worktree 后旧会话、旧映射和运行中的查询要等核对任务才结束（新 worktree 的文本按旧映射回答，运行中的查询在切换之后还发布旧结果）。另外发现第四处：新会话（项目刚打开、刚切换）的映射建好之前，查询按空映射回答并报 `Complete`。现在：一个 `View`、一个比较（`Inner::check_view`，一次项目锁、一次原子读，O(1)），比较结果决定追加、重做一次、`Stale` 或停止；发布经 `publish_in` 在 `publishing` 锁下核对会话；切换 worktree 和关闭项目在事件里同步结束会话；没有映射的会话里，查询排队等它。测试：`view_*` 的交错矩阵（见「实际验证」），`cut_*` 改用同一组钩子（`Inner::step_hook`，代替 `after_lookup`）。名字表只按单元建表、不判断完整性，不受影响；它的重建由 `gens.writes` 触发。
 - 批量任务的唤醒（`kick_batch`）先置 `kicked` 再补满任务池：原来先补池再置位，池满时最后一个任务恰好在两步之间空闲退出，这次唤醒要等下一次。其余单飞的入口（核对的 `again`、语言包一轮的 `again`、名字表建完后的重查、语义回复的队列、看门狗按表运行）都在同一把锁里记下请求，不会丢。
 - 跳转第 1 步解析当前文本用 `ParsedFile::parse_at`，不用 `parse`：跳转只看光标处一个位置、本文件的定义和绑定模型，用不到文件里其余引用的位置（`references`，只有查引用用）。核心语言上，整棵树只跑建绑定模型的 locals 模式（作用域、定义、`global` / `nonlocal`，`Lang::jump_query`）；光标处名字是不是 locals 的引用、在不在变量位置，由完整的查询在光标前后两个字节上再跑一次给出；引用位置不再收集。64 KiB 的 TS 文本上，查询从 9.3 ms 降到 4.9 ms，匹配从 11 478 个降到 2 506 个，引用位置的整理从 1.5 ms 降到 0.2 ms，分配从约 10 500 次降到约 5 700 次。`site_parse_at_matches_parse` 检查 `site_at` 与本文件的定义（连同 `local` 标记）都与 `parse` 相同：每种核心语言一段跨作用域绑定的样例（模块级的名字在函数、类、方法里使用，内层作用域遮蔽它，JSX / TSX 组件，Python 的 `global` / `nonlocal`，Go 的包级名字，Rust 的 crate 级条目，Java 的字段和 import）、夹具和遍历的样例上每个标识符的起止位置，8 KiB 的合成源码上每个来源约 150 个位置，合计约 6 000 个；`parse_at` 的结果在别的位置调用 `site_at` 或取 `references` 时 debug 断言失败。`jump_query` 与 `site_query` 一起由后台任务编译（`prepare_site`）。语言包仍走完整的 `parse`。
 - 查询读文件只经 `Inner::read_content`（「跳转到定义」第 1 步核对当前文本的规则用到每一次读）：读出的字节只有是快照的映射给这个路径的内容（`Effective::oid`，原始 OID 或经内置转换）时才算数，否则 `Stale`，计入 `unsearched`，不抽取、不写入，也不以新字节的 OID 交出位置。用到它的是第 2 步的 import 目标、查引用的已入索引文件、限时搜索；预取走同样的步骤，名字表不读文件。没有 index 条目的路径（未跟踪的文件、文件夹项目）按映射里覆盖项记下的 OID，规则相同。原来这三处在字节不符时改用新字节的原始 OID（`key_of`），快照之后改动的文件会以新内容给出候选和引用、结果还报 `Complete`，消费方也发现不了（`read_verify_search_skips_a_file_changed_after_the_snapshot`、`read_verify_references_skip_an_indexed_file_changed_after_the_snapshot`）。查引用里这样的已入索引文件记在 `Found::unsearched`，结果为 `Partial`。超过 1 MiB 的文件与批量层一样不读（`TooLarge`）。

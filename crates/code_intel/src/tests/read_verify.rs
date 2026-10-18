@@ -125,9 +125,12 @@ const EDITED_USE: &str = "export function other() { return item() * item(); }\n"
 fn read_verify_search_skips_a_file_changed_after_the_snapshot() {
     let h = super::goto::unindexed(&[("a.ts", RUN), ("c.ts", ITEM)], &[]);
     let git = h.git.clone();
-    *crate::index::lock(&h.indexer.inner().after_lookup) = Some(Box::new(move |_, _| {
-        git.write("main", "c.ts", EDITED_ITEM.as_bytes());
-    }));
+    *crate::index::lock(&h.indexer.inner().step_hook) = Some((
+        crate::query::Step::Lookup,
+        Box::new(move |_, _| {
+            git.write("main", "c.ts", EDITED_ITEM.as_bytes());
+        }),
+    ));
     let r = h.goto("a.ts", "item", 0);
     assert!(r.candidates.is_empty(), "{:?}", r.candidates);
     assert_eq!(

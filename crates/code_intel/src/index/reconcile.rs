@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use lectern_executor::Priority;
 use lectern_git::HashKind;
 use lectern_platform::{FileKind as SafeKind, Read, RelPath as SafeRel, SafeError, SafeRoot};
-use lectern_services::project::{BlobId, FileKind, ProjectKey, RelPath, Scan};
+use lectern_services::project::{BlobId, FileKind, ProjectKey, ProjectSnapshot, RelPath, Scan};
 
 use super::state::{Project, State};
 use super::{Inner, bump, lock};
@@ -271,20 +271,11 @@ impl Inner {
             .map(|a| (a.worktree.clone(), a.root.clone()));
         let switched = st.snapshot.is_some() && new_active != old_active;
         if switched {
-            // A new current worktree: every input record starts over; the
-            // focus stays under its worktree's name.
-            let (table, grammar) = {
-                let langs = lock(&self.langs);
-                (langs.table.clone(), langs.generation)
-            };
-            let focus = st.focus.clone();
-            let demand = st.demand;
-            let run = std::mem::take(&mut st.run);
-            st.end();
-            *st = State::new(self.new_session(), &table, grammar);
-            st.focus = focus;
-            st.demand = demand;
-            st.run = run;
+            // Normally ended by the `Changed` event already
+            // (`switch_session`); a snapshot the event did not mark.
+            drop(st);
+            self.switch_session(project, &snapshot);
+            st = lock(&project.state);
         }
         if let Some(active) = &snapshot.active {
             st.tree = match (&project.key, &active.worktree) {
@@ -318,12 +309,68 @@ impl Inner {
         st.snapshot = Some(snapshot);
         let session = st.session;
         drop(st);
-        if switched {
-            // The old worktree's queries answer about content that is no
-            // longer current: closed, their semantic requests cancelled.
-            self.close_queries(Some(&project.key));
-        }
         Some(session)
+    }
+
+    /// Ends the session when `snapshot`'s current worktree is not the
+    /// session's (「查询的视图」): a new session starts with no map, the old
+    /// one's queries are closed and their semantic requests cancelled, all
+    /// under the lock that orders publication, so no query of the old
+    /// session publishes after this returns. The queries asked from now on
+    /// wait for the new session's map. The old state is dropped in a task
+    /// (its watches and map). True when it switched.
+    pub(crate) fn switch_session(
+        &self,
+        project: &Arc<Project>,
+        snapshot: &ProjectSnapshot,
+    ) -> bool {
+        let new_active = snapshot
+            .active
+            .as_ref()
+            .map(|a| (a.worktree.clone(), a.root.clone()));
+        let (table, grammar) = {
+            let langs = lock(&self.langs);
+            (langs.table.clone(), langs.generation)
+        };
+        let old = {
+            let _order = lock(&self.publishing);
+            let old = {
+                let mut st = lock(&project.state);
+                let old_active = st
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.active.as_ref())
+                    .map(|a| (a.worktree.clone(), a.root.clone()));
+                if st.snapshot.is_none() || new_active == old_active {
+                    return false;
+                }
+                // Every input record starts over; the focus stays under its
+                // worktree's name.
+                let focus = st.focus.clone();
+                let demand = st.demand;
+                let run = std::mem::take(&mut st.run);
+                st.end();
+                let mut old =
+                    std::mem::replace(&mut *st, State::new(self.new_session(), &table, grammar));
+                st.focus = focus;
+                st.demand = demand;
+                st.run = run;
+                // Queries that waited for the old session's map were asked
+                // of the old worktree: closed below with the others.
+                old.waiting.clear();
+                old
+            };
+            self.close_queries(Some(&project.key));
+            old
+        };
+        // Without an activation the task is dropped unrun, and `old` with it.
+        let _ = self
+            .host
+            .spawn_busy("old session", Priority::Background, move || drop(old));
+        if let Some(me) = self.arc() {
+            me.request_reconcile(project);
+        }
+        true
     }
 
     /// Opens the worktree root and subscribes to fs_watch, once the file
@@ -494,6 +541,14 @@ impl Inner {
         if matches!(project.key, ProjectKey::Folder { .. }) {
             // A new list: every file is read again for its OID.
             queue_folder(&mut st);
+        }
+        // The session has its map: the queries that waited for it start.
+        let waiting = std::mem::take(&mut st.waiting);
+        drop(st);
+        if !waiting.is_empty()
+            && let Some(me) = self.arc()
+        {
+            me.resume_waiting(waiting);
         }
         true
     }

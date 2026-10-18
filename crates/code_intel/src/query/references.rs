@@ -20,7 +20,7 @@ use super::definition::{LocKey, loc_key};
 use super::rank::Ranker;
 use super::search::{FileDeadline, Searched};
 use super::text::FileRead;
-use super::{Run, SEARCH_FOR, Snap};
+use super::{Run, SEARCH_FOR, Snap, Step, ViewCheck};
 use crate::extract::{ExtractStatus, Extraction, Lang, compatible};
 use crate::index::Inner;
 use crate::resolve::ResolveContext;
@@ -68,7 +68,7 @@ impl Inner {
             .filter(|l| !snap.disabled.contains(l.name()))
             .cloned()
         else {
-            self.publish(run.id, |r| {
+            self.publish_in(snap, run.id, |r| {
                 r.state = QueryState::Failed(QueryError::UnsupportedLanguage);
             });
             return;
@@ -91,14 +91,14 @@ impl Inner {
         let bytes = match self.read_text(snap, &own) {
             Ok(bytes) => bytes,
             Err(error) => {
-                self.publish(run.id, |r| {
+                self.publish_in(snap, run.id, |r| {
                     r.symbol = Some(symbol);
                     r.state = QueryState::Failed(error);
                 });
                 return;
             }
         };
-        self.publish(run.id, |r| r.symbol = Some(symbol));
+        self.publish_in(snap, run.id, |r| r.symbol = Some(symbol));
         self.escalate_references(run.id, snap, of);
         let mut found = Found {
             callers: Vec::new(),
@@ -122,7 +122,8 @@ impl Inner {
         );
 
         let mut units: Vec<Unit> = Vec::new();
-        let mut cut = snap.hinted;
+        // The view the lookups are made under (「查询的视图」).
+        let mut view = snap.view;
         // 1. Indexed files whose reference names include the name.
         if !of.local
             && !self.indexed_references(run, snap, of, &ranker, &lang, &mut found, &mut units)
@@ -132,19 +133,36 @@ impl Inner {
         if run.stopped(snap) {
             return;
         }
+        self.step_hook(Step::Lookup, snap);
+        // References go out from the first files on: a view that moved
+        // ends the query `Stale` (no hint is read yet, so growth waits for
+        // the scope).
+        if matches!(
+            self.check_view(snap, &view),
+            ViewCheck::Evicted | ViewCheck::Ended
+        ) {
+            return self.end_stale(snap, run.id);
+        }
         // 3. Unindexed files of the sub-project: the search.
         let completeness = if of.local {
             Some(Completeness::Complete)
         } else {
-            self.run_after_lookup(snap);
             let skip = found.parsed.clone();
             let scope = snap.search_scope(&l.path, &lang, &skip);
+            self.step_hook(Step::Hints, snap);
             // Files the scope takes as indexed whose unit was written after
             // the lookup: their references are read now.
-            if snap.hinted_since(&mut cut)
-                && !self.indexed_references(run, snap, of, &ranker, &lang, &mut found, &mut units)
-            {
-                return;
+            match self.check_view(snap, &view) {
+                ViewCheck::Same => {}
+                ViewCheck::Grew(hinted) => {
+                    view.hinted = hinted;
+                    if !self
+                        .indexed_references(run, snap, of, &ranker, &lang, &mut found, &mut units)
+                    {
+                        return;
+                    }
+                }
+                ViewCheck::Evicted | ViewCheck::Ended => return self.end_stale(snap, run.id),
             }
             let name = of.name.clone();
             let result = self.search(
@@ -181,11 +199,20 @@ impl Inner {
                 },
             );
             // The counts of `Partial` read hints too.
-            if result.is_some()
-                && snap.hinted_since(&mut cut)
-                && !self.indexed_references(run, snap, of, &ranker, &lang, &mut found, &mut units)
-            {
-                return;
+            if result.is_some() {
+                match self.check_view(snap, &view) {
+                    ViewCheck::Same => {}
+                    ViewCheck::Grew(_) => {
+                        if !self.indexed_references(
+                            run, snap, of, &ranker, &lang, &mut found, &mut units,
+                        ) {
+                            return;
+                        }
+                    }
+                    ViewCheck::Evicted | ViewCheck::Ended => {
+                        return self.end_stale(snap, run.id);
+                    }
+                }
             }
             result
         };
@@ -209,7 +236,7 @@ impl Inner {
             },
         };
         let (callers, same_name) = (found.callers.clone(), found.same_name.clone());
-        self.publish(run.id, |r| {
+        self.publish_in(snap, run.id, |r| {
             r.callers = callers.into();
             r.same_name = same_name.into();
             r.state = QueryState::Done(completeness);
@@ -221,7 +248,7 @@ impl Inner {
 
     /// The indexed files whose reference names include the name (`ci_ref`),
     /// nearest first, each not parsed yet read and parsed. Run again when
-    /// hints were installed after the lookup ([`Snap::hinted_since`]).
+    /// hints were installed after the lookup (`ViewCheck::Grew`).
     /// False when the query stopped.
     #[allow(
         clippy::too_many_arguments,
@@ -445,7 +472,7 @@ impl Inner {
             found.last = Some(now);
             found.changed = false;
             let (callers, same_name) = (found.callers.clone(), found.same_name.clone());
-            self.publish(run.id, |r| {
+            self.publish_in(snap, run.id, |r| {
                 r.callers = callers.into();
                 r.same_name = same_name.into();
             });
