@@ -1584,6 +1584,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 每个文件经 `SafeRoot` 读出（上限 1 MiB），用 `memchr::memmem` 找这个名字的字节串，命中处前后不是标识符字符（ASCII 字母数字、`_`、`$` 和 UTF-8 的多字节序列）才算整词命中。没有命中的文件不解析。
 - 命中的文件先做一次存在检查，缓存里有就直接用；没有就按后台截止时间抽取，结果用于这次查询，并交给一个 `Background` 任务写入缓存，写入成功后写入 `indexed` 提示。
 - 从查询开始计 1 s 后停止：文件之间检查时刻，抽取的截止时间取「250 ms」与「剩余时间」中较小的一个。停止后交出最后一批，`state` 为 `Done(Partial { … })`；全部搜完为 `Done(Complete)`。
+- 截止时间被剩余时间截短、抽取因此 `TimedOut` 时，是查询的时间用完了，不是这个文件超时：结果不写入缓存，这个文件计入 `unsearched`，之后由批量层按自己的截止时间抽取。`Cancelled` 同样不写入、计入 `unsearched`。查询读文件的每条路径（跳转第 2 步、限时搜索、查引用的解析）都用同一个截止时间和同一条规则。
 - 结果每 50 ms 或每个命中文件交出一批。
 - 搜索只读、不建索引的文件不改变 `indexed` 提示，第 3 层的批量任务之后照常处理它们。
 
@@ -1594,7 +1595,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 预算 | 本 crate 的份额 | 基准 |
 |---|---|---|
 | 冷启动 20 ms | 首帧之前不做任何事：`AfterFirstFrame` 激活，`activate` 只建空表、不加载 grammar | `plugin/code-intel/activate`（kernel 的 < 1 ms） |
-| 跳转：同文件或索引命中，候选 ≤ 50 ms | 当前文本（100 KB 以内）解析与 locals ≤ 10 ms；名字查找 ≤ 2 ms；过滤、分层与排序 ≤ 3 ms；合计 ≤ 20 ms，余下的给抽屉 | `code_intel/goto_indexed`（cloudprint 形状、10 万文件） |
+| 跳转：同文件或索引命中，候选 ≤ 50 ms | 当前文本（100 KB 以内）解析与 locals ≤ 10 ms；名字查找 ≤ 2 ms；过滤、分层与排序 ≤ 3 ms；合计 ≤ 20 ms，余下的给抽屉 | `code_intel/goto_indexed`（cloudprint 形状、10 万文件）；新索引的第一次跳转 `code_intel/goto_first`（只记录） |
 | 跳转：唯一候选的目标首屏高亮 ≤ 100 ms | 本 crate 的部分同上；目标文件的读取与高亮属于 `file_reader` | `app/goto_single` |
 | 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的结果；限时搜索 1 s 后停止，取消在 20 ms 内生效 | `code_intel/search_stop` ≤ 1.02 s |
 | 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 查找 ≤ 5 ms；每个候选文件的现场抽取约 1–2 ms / 10 KB | `code_intel/references_100k/all`、`code_intel/references_100k/first` |
@@ -1637,7 +1638,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - 语言（`lang_*`）：扩展名到语言、兼容组；语言包认领扩展名，与核心语言冲突时核心语言优先。
 - 抽取（`extract_*`）：每种语言的夹具用 insta 快照记录定义（名字、种类、位置、作用域、可见性、参数个数）和引用名；TS 叠加 JS 的查询；局部变量的引用不在引用名里；二进制和超过上限的内容；`EXTRACTOR_VERSION` 或查询文本变化时查询版本变化。
-- 截止时间（`deadline_*`）：病态输入在 1 ms 截止时间下返回 `TimedOut`；取消标志置位时返回 `Cancelled`；看门狗在截止时刻置位，没有在途抽取时不唤醒。看门狗的生命周期（`watchdog_*`）：插件停用后线程退出（`run_dedicated_gated` 返回的任务句柄 `is_finished`，`/proc/self/task/*/comm` 里没有 `code-intel-watchdog`）；连续激活、停用 20 次后，这个名字的线程最多一个；`Executor::shutdown` 在激活仍然存活时也让线程退出；停用时正在运行的抽取返回 `Cancelled`；激活在线程启动前失效时不建线程。
+- 截止时间（`deadline_*`）：病态输入在 1 ms 截止时间下返回 `TimedOut`；取消标志置位时返回 `Cancelled`；看门狗在截止时刻置位，没有在途抽取时不唤醒。看门狗的生命周期（`watchdog_*`）：插件停用后线程退出（线程自己的闭包记录的 `plugin::WatchdogThread` 为 `Exited`；只在 Linux 上、且在它退出之后，再确认 `/proc/self/task/*/comm` 里没有 `code-intel-watchdog`）；连续激活、停用 20 次，每次激活的线程在下一次激活前都已退出；`Executor::shutdown` 在激活仍然存活时也让线程退出；停用时正在运行的抽取返回 `Cancelled`；激活在线程启动前失效时不建线程。
 - 位置分析（`site_*`）：位置上的标识符与 `RefSyntax`；locals 解析到的定义；光标在定义名上时的 `defines`。
 - 定义形式（`forms_*`）与作用域形式（`scopes_*`）：两张表对照 grammar 的覆盖、样例、locals 查询和本文的表（见「定义形式」「作用域形式」）；局部定义的可见性对照 locals 查询的作用域（`forms_local_definitions_are_file_visible`）。
 - 存储（`store_*`）：单元的写入与读回；存在检查只返回键完全相同的单元、不标记访问，排队的命中在之后按块标记，淘汰代数变化后的队列被丢弃；按名字查找区分大小写；单元被淘汰后三张表里没有它的行；配额小于数据量时按访问时间淘汰本命名空间的单元；同一个 OID 有旧 grammar 版本或旧查询版本的单元时，按名字查定义、查引用、存在检查和名字表都只返回当前版本的单元（`store_version_filter_*`）；写入被丢弃时不 panic、内存里的结果仍可用。
@@ -2095,7 +2096,10 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 覆盖：`coverage` 另外要求没有待读的路径、git 项目的工作区比较是当前的，否则第 3、4 层是 `Pending`：原来在核对任务装上基础映射、还没读完覆盖部分的间隙里，第 3、4 层可能报 `Done`。
 - 文件夹项目在第 4 步建索引（第 3 步把它推迟到这一步，见上）：文件列表就绪时打开根目录的 `SafeRoot`，把文件列表里的每个文件放进重新读集合，核对任务读出、按原始字节的 SHA-1 记为覆盖项（`Content`），之后与 git 项目走同一套映射、各层和查询；换文件列表时全部重新读。没有 fs_watch 订阅、工作区比较和 HEAD（`head_clean` 总是 false），`ProjectEvent::Changed` 不再让文件夹项目重新打开根目录。热启动要读每个文件求 OID，命中的不解析（`schedule_folder_project_indexes_at_open`）。
 - 名字表的第二步改为一条语句扫描整张 `ci_def`（`SELECT unit, name, kind FROM ci_def`，表的顺序），跳过单元集合以外的行；同一单元的行连续写入，对上一行单元的判断沿用到下一行。逐个单元查 `ci_def_unit` 时 10 万个单元要 10 万次语句执行和 300 万次按 rowid 回表，`code_intel/names_100k` 为 1.07 s，超出 1 s；一次扫描为 0.81 s。
-- `ParsedFile`（跳转第 1 步、查引用和限时搜索现场解析的文件）在核心语言上不再跑 `Compiled` 的完整查询：定义和标记本来就取自遍历（ADR 0031），只需要 locals 的模式和给出引用的 tags 模式。`Lang::site_query` 用与 `Compiled` 相同的文本另编译一个查询，停用其余 tags 模式，模式和捕获的编号、属性、谓词与完整查询相同；它不经 `TagsConfiguration`，所以核心语言在生产中只编译这一个查询（第一次跳转时，Linux 上约 130 ms，与原来编译 `Compiled` 相同）。`site_reference_query_matches_full` 在夹具、遍历的样例和每种扩展名的合成源码上检查两者的定义、引用位置和每个位置的 `site_at` 相同。另外，局部引用是否处在变量位置要看父节点，tree-sitter 的 `Node::parent` 每次从根往下逐层扫描子节点，顶层条目多的文件每次都扫描全部顶层条目；`site::Parents` 用二分查找定位根的子节点，往下与 tree-sitter 相同（`site_parents_match_tree_sitter` 检查每个节点的父节点与 `Node::parent` 相同）。64 KiB 的 TS 文件上 `ParsedFile` 从约 27 ms 降到约 20 ms（解析本身约 9 ms）。
+- `ParsedFile`（跳转第 1 步、查引用和限时搜索现场解析的文件）在核心语言上不再跑 `Compiled` 的完整查询：定义和标记本来就取自遍历（ADR 0031），只需要 locals 的模式和给出引用的 tags 模式。`Lang::site_query` 用与 `Compiled` 相同的文本另编译一个查询，停用其余 tags 模式，模式和捕获的编号、属性、谓词与完整查询相同；它不经 `TagsConfiguration`，所以核心语言在生产中只编译这一个查询。`site_reference_query_matches_full` 在夹具、遍历的样例和每种扩展名的合成源码上检查两者的定义、引用位置和每个位置的 `site_at` 相同。另外，局部引用是否处在变量位置要看父节点，tree-sitter 的 `Node::parent` 每次从根往下逐层扫描子节点，顶层条目多的文件每次都扫描全部顶层条目；`site::Parents` 用二分查找定位根的子节点，往下与 tree-sitter 相同（`site_parents_match_tree_sitter` 检查每个节点的父节点与 `Node::parent` 相同）。64 KiB 的 TS 文件上 `ParsedFile` 从约 27 ms 降到约 20 ms（解析本身约 9 ms）。
+- `ParsedFile` 要的查询（核心语言的 `SiteQuery`，语言包的 `Compiled`）不在查询线程上第一次编译：核心语言的抽取走遍历，从不编译它，第一次跳转原来要在 `Interactive` 线程上先编译（release，Linux：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms），超出候选 50 ms 的预算。每次核对任务结束时，映射里有文件、查询还没编译的语言由一个 `Background` 任务编译（`warm_site_queries`，同时最多一个，结束时再看一遍）；插件本身在首帧之后激活，所以这也在首帧之后。查询在编译进行中用到它时等这次编译（`OnceLock`），不会比自己编译更久。`Lang::prepare` 也编译它，测试和基准计时之前调用。设计没有写这些查询何时编译。
+- 查询读文件的截止时间统一为 `query::search::FileDeadline`：后台截止时间（250 ms）与查询剩余时间中较小的一个（跳转第 2 步、限时搜索、查引用的解析；查引用原来在限时搜索里不看剩余时间）。被剩余时间截短后 `TimedOut`，以及 `Cancelled`，都不写入缓存、文件计入 `unsearched`（`FileDeadline::settles`，「限时搜索」已补这一条）：原来这样的 `TimedOut` 被写入，批量层不再重做，这个文件的定义要等打开它才出现，查询还报 `Complete`（`search_cut_extraction_is_not_stored`）。查询的其他写入只有访问标记，名字表和预取不写入。
+- 看门狗线程的测试不用 `run_dedicated_gated` 的任务句柄：它交给 `own_with` 由这次激活持有，停用时丢弃。线程自己的闭包在开始和返回时记录到 `plugin::WatchdogThread`（`NotStarted` / `Running` / `Exited`），测试看它；`/proc/self/task` 只在 Linux 上、在线程已退出之后再确认（原来在 macOS 上没有 `/proc`，两个测试必然失败、两个空过；Linux 负载高时线程名在启动之后才设置，20 次激活的测试会失败）。「测试」已改。
 - 基准：
   - `plugin/code-intel/resident_*` 在 `Memory` 目标里用计数分配器测本 crate 的活跃字节（tree-sitter 的分配经 `route_tree_sitter_allocations` 计入，不含 `project` 的文件列表和 SQLite 自己的内存）：`Process` 目标的进程级基准（bench 第 4、5 步）还没有实现，按 bench 设计的划分它们属于 `Process`，`budgets_belong_to_the_documented_targets` 为它们加了例外（[bench 设计「基准目标」](bench.md#基准目标)已改）。
   - `code_intel/references_100k` 拆成 `code_intel/references_100k/all`（≤ 2 s）和 `code_intel/references_100k/first`（≤ 200 ms）：「性能」这一行有两个预算。

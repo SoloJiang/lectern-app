@@ -24,10 +24,11 @@ use lectern_services::code_intel::{
 use lectern_services::project::{BlobId, RelPath};
 
 use super::rank::{Ranker, visible};
+use super::search::{FileDeadline, Searched};
 use super::{Run, SEARCH_FOR, Snap};
 use crate::extract::{
-    BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, Deadline, Def, ExtractStatus, Extraction,
-    INTERACTIVE_DEADLINE, Lang, Visibility, compatible,
+    BACKGROUND_MAX_LEN, Deadline, Def, ExtractStatus, Extraction, INTERACTIVE_DEADLINE, Lang,
+    Visibility, compatible,
 };
 use crate::index::{Inner, Scanned};
 use crate::map::Effective;
@@ -50,6 +51,28 @@ type Pending = (
     Vec<Scanned>,
     HashMap<(RelPath, BlobId), Option<Extraction>>,
 );
+
+/// One file's extraction for a query ([`Inner::file_extraction`]).
+pub(crate) enum FileExtraction {
+    /// `Done`: its definitions.
+    Defs(Extraction),
+    /// Known to give none: stored or extracted with another status that
+    /// settles the file (`FileDeadline::settles`), or a language not in
+    /// the current table.
+    Nothing,
+    /// The query's time ran out or it was cancelled: nothing is known, not
+    /// stored; the file counts as unsearched.
+    Unsearched,
+}
+
+impl FileExtraction {
+    fn defs(self) -> Option<Extraction> {
+        match self {
+            FileExtraction::Defs(e) => Some(e),
+            FileExtraction::Nothing | FileExtraction::Unsearched => None,
+        }
+    }
+}
 
 /// Steps 1–3 of a jump: what the first batch shows, and what the search
 /// goes on from. A prefetch keeps one.
@@ -198,9 +221,8 @@ impl Inner {
 
     /// A file's extraction for a query (「输入代数与派生状态」, the last
     /// point): its stored unit when it is `Done`, else extracted now with
-    /// the background limits until `until` and queued to be written. None
-    /// when it gives no definitions (stored or extracted with another
-    /// status, or its language is not in the current table).
+    /// the background limits cut at `until` ([`FileDeadline`]) and, when
+    /// the result settles the file, queued to be written.
     #[allow(
         clippy::too_many_arguments,
         reason = "one file's part of a query: its snapshot, the file and what it adds to"
@@ -215,8 +237,10 @@ impl Inner {
         cancel: &Arc<AtomicBool>,
         units: &mut Vec<Unit>,
         scanned: &mut Vec<Scanned>,
-    ) -> Option<Extraction> {
-        let lang = snap.table.get(&eff.lang.name().0)?.clone();
+    ) -> FileExtraction {
+        let Some(lang) = snap.table.get(&eff.lang.name().0).cloned() else {
+            return FileExtraction::Nothing;
+        };
         let version = Version::of(&lang);
         if let Some(found) = snap
             .project
@@ -227,38 +251,34 @@ impl Inner {
             .next()
         {
             if found.status != ExtractStatus::Done {
-                return None;
+                return FileExtraction::Nothing;
             }
             if let Some(extraction) = snap.project.store.load(found.unit) {
                 units.push(found.unit);
-                return Some(extraction);
+                return FileExtraction::Defs(extraction);
             }
         }
-        let now = self.watchdog.clock().now();
-        let at = (now + BACKGROUND_DEADLINE).min(until);
-        let deadline = Deadline::at(&self.watchdog, at, BACKGROUND_MAX_LEN);
+        let file = FileDeadline::new(self.watchdog.clock().now(), Some(until));
+        let deadline = Deadline::at(&self.watchdog, file.at, BACKGROUND_MAX_LEN);
         let extract = crate::index::lock(&self.extract).clone();
         let extraction = extract(&lang, bytes, &deadline, cancel);
-        match extraction.status {
-            ExtractStatus::Done => {
-                scanned.push(Scanned {
-                    path: eff.path.clone(),
-                    oid: key,
-                    lang,
-                    extraction: extraction.clone(),
-                });
-                Some(extraction)
-            }
-            ExtractStatus::TimedOut | ExtractStatus::TooLarge | ExtractStatus::Binary => {
-                scanned.push(Scanned {
-                    path: eff.path.clone(),
-                    oid: key,
-                    lang,
-                    extraction,
-                });
-                None
-            }
-            ExtractStatus::Cancelled | ExtractStatus::Unsupported => None,
+        if !file.settles(extraction.status) {
+            return FileExtraction::Unsearched;
+        }
+        let status = extraction.status;
+        // `Unsupported` is this run's grammar failing, not the file's: not
+        // stored, as the batch tiers do.
+        if status != ExtractStatus::Unsupported {
+            scanned.push(Scanned {
+                path: eff.path.clone(),
+                oid: key,
+                lang,
+                extraction: extraction.clone(),
+            });
+        }
+        match status {
+            ExtractStatus::Done => FileExtraction::Defs(extraction),
+            _ => FileExtraction::Nothing,
         }
     }
 
@@ -366,7 +386,13 @@ impl Inner {
             if let Some(done) = extracted.get(&(eff.path.clone(), key)) {
                 return Some((eff, key, done.clone()));
             }
-            let done = self.file_extraction(snap, &eff, key, &bytes, until, cancel, units, scanned);
+            let done = match self
+                .file_extraction(snap, &eff, key, &bytes, until, cancel, units, scanned)
+            {
+                // Not kept: the search extracts it again, or counts it.
+                FileExtraction::Unsearched => return Some((eff, key, None)),
+                other => other.defs(),
+            };
             extracted.insert((eff.path.clone(), key), done.clone());
             Some((eff, key, done))
         };
@@ -567,7 +593,7 @@ impl Inner {
                 |eff, key, bytes, until| {
                     let extraction = match extracted.get(&(eff.path.clone(), key)) {
                         Some(done) => done.clone(),
-                        None => self.file_extraction(
+                        None => match self.file_extraction(
                             snap,
                             eff,
                             key,
@@ -576,10 +602,13 @@ impl Inner {
                             &run.cancel,
                             &mut units,
                             &mut scanned,
-                        ),
+                        ) {
+                            FileExtraction::Unsearched => return Searched::Unsearched,
+                            other => other.defs(),
+                        },
                     };
                     let Some(extraction) = extraction else {
-                        return;
+                        return Searched::Done;
                     };
                     let mut found = Vec::new();
                     for def in &extraction.defs {
@@ -620,6 +649,7 @@ impl Inner {
                             r.preselect = preselect;
                         });
                     }
+                    Searched::Done
                 },
             );
             p.units = units;

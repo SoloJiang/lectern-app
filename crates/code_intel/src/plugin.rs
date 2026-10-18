@@ -15,6 +15,7 @@
 //!   stops the watchdog and closes every project and query.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
 use lectern_cache::Cache;
@@ -146,6 +147,7 @@ impl Plugin for CodeIntelPlugin {
         let service = Arc::new(CodeIntelService {
             indexer: OnceLock::new(),
             watchdog: OnceLock::new(),
+            watchdog_thread: OnceLock::new(),
         });
         ctx.provide::<dyn CodeIntel>(service.clone())?;
         let listener = service.clone();
@@ -178,7 +180,8 @@ struct CodeIntelActive {
 
 impl Active for CodeIntelActive {
     fn started(&mut self, handle: PluginHandle) {
-        let watchdog = watchdog(&handle, &self.deps.executor, self.clock.clone());
+        let (watchdog, thread) = watchdog(&handle, &self.deps.executor, self.clock.clone());
+        let _ = self.service.watchdog_thread.set(thread);
         handle.own(watchdog.stop_guard());
         let indexer = Indexer::with_git(
             IndexDeps {
@@ -225,10 +228,12 @@ pub(crate) fn watchdog(
     handle: &PluginHandle,
     executor: &Executor,
     clock: Arc<dyn Clock>,
-) -> Watchdog {
+) -> (Watchdog, WatchdogThread) {
     let handle = handle.clone();
     let executor = executor.clone();
-    Watchdog::new(
+    let thread = WatchdogThread::default();
+    let state = thread.0.clone();
+    let watchdog = Watchdog::new(
         clock,
         Box::new(move |body| {
             let stop = body.watchdog();
@@ -236,12 +241,47 @@ pub(crate) fn watchdog(
             let ex = executor.clone();
             handle.own_with(move |gate| {
                 ex.run_dedicated_gated(&gate, WATCHDOG_THREAD, move || {
+                    state.store(THREAD_RUNNING, Ordering::Release);
                     body.run();
                     drop(hook);
+                    // The closure's last statement: the thread ends here.
+                    state.store(THREAD_EXITED, Ordering::Release);
                 })
             });
         }),
-    )
+    );
+    (watchdog, thread)
+}
+
+const THREAD_RUNNING: u8 = 1;
+const THREAD_EXITED: u8 = 2;
+
+/// Where one activation's watchdog thread is: the thread's own closure
+/// records when it starts and when it returns, so the tests watch the
+/// thread without the OS (the `run_dedicated_gated` task itself is owned by
+/// the activation, which drops it on deactivation).
+#[derive(Clone, Default)]
+pub struct WatchdogThread(Arc<AtomicU8>);
+
+/// [`WatchdogThread`]'s states.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThreadState {
+    /// Not started: no extraction yet, or the activation was dead when the
+    /// starter ran (the gate rejected the closure).
+    NotStarted,
+    Running,
+    /// The closure returned.
+    Exited,
+}
+
+impl WatchdogThread {
+    pub fn state(&self) -> ThreadState {
+        match self.0.load(Ordering::Acquire) {
+            THREAD_RUNNING => ThreadState::Running,
+            THREAD_EXITED => ThreadState::Exited,
+            _ => ThreadState::NotStarted,
+        }
+    }
 }
 
 /// `dyn CodeIntel` of one activation. Until `started` (the kernel admits no
@@ -249,6 +289,7 @@ pub(crate) fn watchdog(
 pub struct CodeIntelService {
     indexer: OnceLock<Indexer>,
     watchdog: OnceLock<Watchdog>,
+    watchdog_thread: OnceLock<WatchdogThread>,
 }
 
 impl CodeIntelService {
@@ -262,6 +303,12 @@ impl CodeIntelService {
     #[cfg(any(test, feature = "test-support"))]
     pub fn watchdog(&self) -> Option<&Watchdog> {
         self.watchdog.get()
+    }
+
+    /// This activation's watchdog thread (tests).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn watchdog_thread(&self) -> Option<&WatchdogThread> {
+        self.watchdog_thread.get()
     }
 }
 

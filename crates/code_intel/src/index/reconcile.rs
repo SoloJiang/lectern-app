@@ -158,6 +158,42 @@ impl Inner {
         self.enqueue_focus(&project);
         self.kick_batch();
         self.names_changed(&project);
+        self.warm_site_queries(&project);
+    }
+
+    /// Compiles `ParsedFile`'s query for every language the project's map
+    /// has a file in and that is not compiled yet, in one `Background`
+    /// task: a jump's step 1, the search and find references parse files
+    /// on the `Interactive` thread, and a core language's extraction (the
+    /// walker) never compiles it, so the first jump in each language would
+    /// pay 30–140 ms. After the first frame like the whole plugin
+    /// (`AfterFirstFrame`); at most one such task at a time, which looks
+    /// again when it ends; it holds the kernel busy.
+    fn warm_site_queries(self: &Arc<Self>, project: &Arc<Project>) {
+        let langs: Vec<crate::extract::Lang> = lock(&project.state)
+            .map
+            .languages()
+            .into_iter()
+            .filter(|l| !l.site_query_ready())
+            .collect();
+        if langs.is_empty() || self.warming.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let me = self.clone();
+        let p = project.clone();
+        let spawned = self
+            .host
+            .spawn_busy("site queries", Priority::Background, move || {
+                for lang in &langs {
+                    lang.prepare_site();
+                }
+                me.warming.store(false, Ordering::Release);
+                // Languages a reconcile found while this one ran.
+                me.warm_site_queries(&p);
+            });
+        if !spawned {
+            self.warming.store(false, Ordering::Release);
+        }
     }
 
     /// One pass over the steps, in dependency order: whether some step

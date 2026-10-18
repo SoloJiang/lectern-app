@@ -277,11 +277,42 @@ impl Lang {
         &self.0.lease
     }
 
-    /// Compiles the queries now if they are not yet. Blocking; background
-    /// threads only. False when the grammar or a query does not compile: the
-    /// language is then unavailable for this run (one line on stderr).
+    /// Compiles the queries now if they are not yet, `ParsedFile`'s
+    /// [`SiteQuery`] included. Blocking; background threads only. False
+    /// when the grammar or a query does not compile: the language is then
+    /// unavailable for this run (one line on stderr).
     pub fn prepare(&self) -> bool {
-        self.compiled().is_some()
+        self.compiled().is_some() && (!self.walks() || self.site_query().is_some())
+    }
+
+    /// A core language whose walker gives the definitions and markers
+    /// (ADR 0031): its extraction never compiles `Compiled`, and
+    /// `ParsedFile` runs its [`SiteQuery`].
+    pub(crate) fn walks(&self) -> bool {
+        self.lease().is_static() && crate::walk::supports(self.dialect(), self.language())
+    }
+
+    /// Whether `ParsedFile`'s query is compiled (or failed to): a parse
+    /// then does not compile it first.
+    pub(crate) fn site_query_ready(&self) -> bool {
+        if self.walks() {
+            self.0.site.get().is_some()
+        } else {
+            self.0.compiled.get().is_some()
+        }
+    }
+
+    /// Compiles what `ParsedFile` runs, if it is not yet: the
+    /// [`SiteQuery`] of a language with a walker, `Compiled` otherwise.
+    /// Blocking; background threads only. A parse that needs it while it
+    /// compiles waits for this compile instead of starting its own
+    /// (`OnceLock`), so it never waits longer than compiling itself.
+    pub(crate) fn prepare_site(&self) -> bool {
+        if self.walks() {
+            self.site_query().is_some()
+        } else {
+            self.compiled().is_some()
+        }
     }
 
     pub(crate) fn dialect(&self) -> Dialect {

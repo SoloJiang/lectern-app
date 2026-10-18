@@ -197,6 +197,9 @@ pub(crate) struct Inner {
     pub(crate) providers: Mutex<crate::semantic::Providers>,
     pub(crate) replies: Mutex<crate::semantic::Replies>,
     pub(crate) next_request: std::sync::atomic::AtomicU64,
+    /// A task compiling `ParsedFile`'s queries is submitted or running
+    /// (`warm_site_queries`).
+    pub(crate) warming: std::sync::atomic::AtomicBool,
     /// The files of each extraction batch of tiers 3–5, in order (tests).
     #[cfg(test)]
     pub batch_log: Mutex<Vec<usize>>,
@@ -262,6 +265,7 @@ impl Indexer {
             providers: Mutex::new(crate::semantic::Providers::default()),
             replies: Mutex::new(crate::semantic::Replies::default()),
             next_request: std::sync::atomic::AtomicU64::new(0),
+            warming: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             batch_log: Mutex::new(Vec::new()),
             #[cfg(test)]

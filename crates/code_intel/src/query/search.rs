@@ -11,10 +11,63 @@ use lectern_services::project::{BlobId, RelPath};
 
 use super::rank::distance;
 use super::{Run, Snap};
-use crate::extract::{Lang, compatible};
+use crate::extract::{BACKGROUND_DEADLINE, ExtractStatus, Lang, compatible};
 use crate::index::Inner;
 use crate::index::state::under;
 use crate::map::Effective;
+
+/// One file's time in a query (step 2's reads, the time-boxed search, the
+/// references' parses): the background limit from now, cut at the query's
+/// own end when that comes first. Every query path that reads a file for
+/// a query takes its deadline from here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct FileDeadline {
+    pub at: Instant,
+    /// The query's end came before the background limit.
+    cut: bool,
+}
+
+impl FileDeadline {
+    pub(crate) fn new(now: Instant, until: Option<Instant>) -> FileDeadline {
+        let full = now + BACKGROUND_DEADLINE;
+        match until {
+            Some(until) if until < full => FileDeadline {
+                at: until,
+                cut: true,
+            },
+            _ => FileDeadline {
+                at: full,
+                cut: false,
+            },
+        }
+    }
+
+    /// Whether an extraction with `status` made under this deadline says
+    /// something about the file, so that it may be stored like the batch
+    /// tiers' results. `Cancelled` never does, and neither does `TimedOut`
+    /// under a cut deadline: the query's time ran out, not the file's
+    /// limit. Such a file is neither stored nor searched: it counts as
+    /// unsearched ([`Searched::Unsearched`]).
+    pub(crate) fn settles(&self, status: ExtractStatus) -> bool {
+        match status {
+            ExtractStatus::Cancelled => false,
+            ExtractStatus::TimedOut => !self.cut,
+            ExtractStatus::Done
+            | ExtractStatus::TooLarge
+            | ExtractStatus::Binary
+            | ExtractStatus::Unsupported => true,
+        }
+    }
+}
+
+/// What a query learned about one file it read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Searched {
+    /// Searched: its definitions or references are known, or it has none.
+    Done,
+    /// Cut short by the query's time or cancelled: counts as unsearched.
+    Unsearched,
+}
 
 /// The files a search covers.
 pub(crate) struct Scope {
@@ -109,9 +162,8 @@ impl Snap {
                 files.push(eff);
             }
         });
-        files.sort_by(|a, b| {
-            (distance(anchor, &a.path), &a.path).cmp(&(distance(anchor, &b.path), &b.path))
-        });
+        // `distance` allocates: one key per file, not one per comparison.
+        files.sort_by_cached_key(|e| (distance(anchor, &e.path), e.path.clone()));
         Scope {
             files,
             dir,
@@ -154,9 +206,11 @@ impl Snap {
 
 impl Inner {
     /// Searches `scope` for `name` until `until`: every whole-word hit is
-    /// handed to `hit` with the bytes read and their key. Returns the
-    /// completeness: `Complete` when every file was searched and none was
-    /// in flight.
+    /// handed to `hit` with the bytes read, their key and `until`, and says
+    /// whether the file was searched. Returns the completeness: `Complete`
+    /// when every file was searched and none was in flight; files not
+    /// reached, in flight or cut short (`Searched::Unsearched`) are
+    /// `unsearched`.
     #[allow(
         clippy::too_many_arguments,
         reason = "the search's scope, its word and its time box"
@@ -169,10 +223,11 @@ impl Inner {
         lang: &Lang,
         name: &str,
         until: Instant,
-        mut hit: impl FnMut(&Effective, BlobId, Vec<u8>, Instant),
+        mut hit: impl FnMut(&Effective, BlobId, Vec<u8>, Instant) -> Searched,
     ) -> Option<Completeness> {
         let clock = self.watchdog.clock().clone();
         let mut searched = 0usize;
+        let mut cut = 0usize;
         for eff in &scope.files {
             if run.stopped(snap) {
                 return None;
@@ -188,9 +243,14 @@ impl Inner {
                 continue;
             }
             let key = self.key_of(snap, &eff.path, &bytes, eff.oid);
-            hit(eff, key, bytes, until);
+            if hit(eff, key, bytes, until) == Searched::Unsearched {
+                cut += 1;
+            }
         }
-        let left = scope.files.len() - searched;
+        if run.stopped(snap) {
+            return None;
+        }
+        let left = scope.files.len() - searched + cut;
         if left == 0 && scope.in_flight == 0 {
             return Some(Completeness::Complete);
         }

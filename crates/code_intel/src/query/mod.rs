@@ -33,6 +33,10 @@ use crate::resolve::{DefaultRules, Resolver};
 use crate::semantic::SemQuery;
 
 pub(crate) use definition::Prepared;
+#[cfg(test)]
+pub(crate) use rank::distance;
+#[cfg(test)]
+pub(crate) use search::FileDeadline;
 pub use search::whole_word;
 
 /// Queries kept at once; a new one closes the oldest beyond this.

@@ -624,3 +624,31 @@ fn goto_object_origin_reads_the_blob() {
         .collect();
     assert_eq!(callers, [(TextOrigin::Object, 2)]);
 }
+
+/// Once a project's map is installed, `ParsedFile`'s query for every
+/// language of the map is compiled by a background task, so the first
+/// jump in a language does not compile it on the query's thread; a
+/// language the map has no file in is not compiled.
+#[test]
+fn goto_site_queries_compiled_after_open() {
+    let h = unindexed(
+        &[
+            ("a.ts", "export function one() { return two(); }\n"),
+            ("b.rs", "pub fn two() -> u32 { 2 }\n"),
+        ],
+        &[],
+    );
+    h.settle();
+    let map = h.map();
+    let names: Vec<String> = map
+        .languages()
+        .iter()
+        .map(|l| l.name().0.to_string())
+        .collect();
+    assert_eq!(names, ["ts", "rust"]);
+    for lang in map.languages() {
+        assert!(lang.site_query_ready(), "{}", lang.name().0);
+    }
+    let go = map.lang("go").expect("a core language");
+    assert!(!go.site_query_ready(), "no Go file: not compiled");
+}
