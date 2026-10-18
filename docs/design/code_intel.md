@@ -61,7 +61,7 @@
   - 采纳本文「接口」一节定义的 `code_intel` 模块，`services` 的设计文档引用本节，不重复定义。
   - `project` 模块增加 `BlobId`（20 或 32 字节的对象 ID，`Copy`、可序列化为十六进制），`FileList` 增加每条的 OID：`FileList::oid(i) -> Option<BlobId>`，git 项目每条都有，文件夹项目都为 None；`FileListBuilder::push_with_oid`。序列化的 `entries` 每项多一个十六进制字段。这是 [project 设计「文件列表」](project.md#文件列表)里「需要时（`code_intel`）另加」的那一列。
 - `project`：从 index 建 `FileList` 时填入 OID（`TrackedEntry::oid`）；刷新时「路径与当前 `FileList` 相同就沿用」的判断改为路径和 OID 都相同，所以只暂存了内容变化时文件列表也会换代。OID 按列表的哈希算法定长存放，10 万文件多 2 MB（SHA-1）或 3.2 MB（SHA-256），`project` 的常驻份额（`plugin/project/resident_100k`）在同一个 PR 里相应修改。
-- `cache`：按 [cache 设计「范围」](cache.md#范围)预留的做法增加「自定义表」一节和实现，满足本 crate 的以下需要（具体签名由 cache 的设计决定）：
+- `cache`：按 [cache 设计「范围」](cache.md#范围)预留的做法增加「自定义表」一节和实现，满足本 crate 的以下需要（具体签名由 cache 的设计决定，已写在 [cache 设计「自定义表」](cache.md#自定义表)，与下列各条的差异见 cache 设计「与设计的差异」第 3 步）：
   1. 使用方以静态常量登记一组表（建表语句、索引、预编译语句的 SQL 文本）和它的版本；第一次使用时建表，版本变化时删掉旧表和它的全部单元后重建。
   2. 单元：一条自定义数据对应 `entry` 表里的一个条目（命名空间加键，带使用方声明的字节数），计入 `meta.bytes` 与 LRU。淘汰或删除一个单元时，在同一个事务里删除它在自定义表里的全部行（外键级联，或使用方登记的删除语句）。本 crate 的单元 ID 就是这个条目的 ID。
   3. 命名空间配额：`code_intel.tags` 在每个项目分库里最多占 256 MiB；超出时先按访问时间淘汰这个命名空间自己的单元，分库总预算（512 MiB）的淘汰规则不变，所以 hunk 缓存至少保留 256 MiB。
@@ -789,9 +789,10 @@ pub enum Visibility {
 一次抽取是 `cache` 的一个单元，命名空间 `code_intel.tags`（版本 1，不压缩），键是 `Key::new().bytes(oid).str(lang).u64(grammar).u64(query)`，单元的字节数由本 crate 按行估算（见下）。本 crate 登记的表：
 
 ```sql
--- 一次抽取一行。unit 是 cache 分配的单元 ID；单元被淘汰时 cache 在同一事务里删除下面三张表里它的全部行。
+-- 一次抽取一行。unit 是 cache 分配的单元 ID；单元被淘汰或删除时，外键级联在同一条语句里删除下面三张表里它的全部行
+-- （cache 设计「自定义表」的登记规则：每张表有一列 REFERENCES entry (id) ON DELETE CASCADE，且这一列有索引）。
 CREATE TABLE ci_ext (
-  unit    INTEGER PRIMARY KEY,
+  unit    INTEGER PRIMARY KEY REFERENCES entry (id) ON DELETE CASCADE,
   oid     BLOB    NOT NULL,           -- 20 或 32 字节
   lang    TEXT    NOT NULL,
   grammar INTEGER NOT NULL,
@@ -801,7 +802,7 @@ CREATE TABLE ci_ext (
 );
 
 CREATE TABLE ci_def (
-  unit     INTEGER NOT NULL,
+  unit     INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
   name     TEXT    NOT NULL,          -- 原样，区分大小写
   kind     INTEGER NOT NULL,
   line     INTEGER NOT NULL,
@@ -817,7 +818,7 @@ CREATE INDEX ci_def_unit ON ci_def (unit);
 -- 每个单元每个名字一行，不存位置：位置在用到时对候选文件现场抽取。
 CREATE TABLE ci_ref (
   name TEXT    NOT NULL,
-  unit INTEGER NOT NULL,
+  unit INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
   PRIMARY KEY (name, unit)
 ) WITHOUT ROWID;
 CREATE INDEX ci_ref_unit ON ci_ref (unit);
@@ -989,7 +990,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - 第 3–5 层：每个批量线程一个长期任务，循环：取一批 → 存在检查 → 抽取缺的 → 一个写事务写入 → 在批次边界询问 `BackgroundGuard`（暂停时登记 waker、返回 `Pending`）。一批在 64 个文件、读入 2 MiB，或开始 50 ms 之后的第一个文件边界处结束，先到者为准；所以一个大文件可以一直运行到它自己的截止时间。暂停和取消仍在约 50 ms 内生效，靠的是看门狗打断在途的那个文件（见下文），与 ADR 0029「每批约 64 个文件或 50 ms」「取消和暂停在约 50 ms 内生效」的要求一致：单个文件由截止时间约束，50 ms 的响应由看门狗保证。
 - 每批开始时重新选层：第 3 层有剩余就先取第 3 层。第 1、2 层在另外的工作线程上运行，不排在批量任务后面（ADR 0029）。
-- 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数），命中的按当前有效 OID 和代数写入 `indexed` 提示并标记访问，缺的抽取。
+- 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示并标记访问，缺的抽取。
 - 单文件截止时间：后台 250 ms，交互 1 s。原来按线性吞吐估算 M 系列上 1 MiB 的文件约 230 ms；实测吞吐随文件变大而下降（tree-sitter-tags 的局部检查按「引用数 × 作用域数」增长，见 [ADR 0031](../adr/0031.md)），接近 1 MiB 的文件在 M 系列上估计要 360–400 ms，后台记为 `TimedOut`，打开时按交互截止时间重做（已知限制，`code_intel/extract_1mib` 只记录）。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
 - 看门狗线程另外持有一张到期表（名字表的延迟重建，见「名字表」）：`wait_timeout` 取在途抽取的下一个检查时刻与最早到期时刻中较早的一个，到期时提交对应的任务；两张表都空时才不带超时地等待。
 - 看门狗的生命周期：每次激活最多一个看门狗线程，在这次激活第一次登记在途抽取或到期时刻时经 `PluginHandle::own_with` 和 `run_dedicated_gated` 启动。线程与登记方共用一份状态：互斥锁保护的在途表和 `stop` 标志，加一个 `Condvar`。线程循环：持锁检查 `stop`，为 true 就返回；在途表为空时 `wait`，否则 `wait_timeout(10 ms)` 后检查截止时刻。`stop()` 在锁内把标志置为 true、把在途表里的标志全部置位（正在运行的抽取随之返回 `Cancelled`），然后 `notify_all`，所以无论线程在等待还是在检查，都在一次唤醒之内返回。调用 `stop()` 的地方：

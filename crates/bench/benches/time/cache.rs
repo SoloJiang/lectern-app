@@ -1,15 +1,16 @@
 //! `cache/*` (docs/design/cache.md「性能」): reads and writes on an open
-//! partition, opening a partition, and a write that evicts, with the entry
-//! types and values of `lectern_cache::testing`. The system file cache is
-//! warm. `cache/memory` is in `benches/memory/cache.rs`.
+//! partition, opening a partition, a write that evicts, and custom tables,
+//! with the entry types, tables and values of `lectern_cache::testing`. The
+//! system file cache is warm. `cache/memory` is in
+//! `benches/memory/cache.rs`.
 
 use std::cell::Cell;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 
 use lectern_bench::{Bench, BenchError, Ctx, Measured, SampleConfig, Value};
-use lectern_cache::testing::{Raw, Zstd, noise, text};
-use lectern_cache::{Budgets, Cache, Config, Key, MAX_BATCH, Partition, Written};
+use lectern_cache::testing::{ManualClock, Raw, Zstd, noise, tags, text};
+use lectern_cache::{Budgets, Cache, Config, Key, MAX_BATCH, Param, Partition, TableSet, Written};
 
 fn cache(root: &Path) -> Cache {
     cache_with(root, Budgets::default())
@@ -368,4 +369,177 @@ fn zstd_1m(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         Measured::new("cache/zstd_1m/put", Value::Time(put)),
         Measured::new("cache/zstd_1m/get", Value::Time(get)),
     ])
+}
+
+/// Units of `tags` from `start`, 64 per write (code_intel's batch).
+fn fill_tags(set: &TableSet, start: u64, n: u64) -> Result<(), BenchError> {
+    for first in (start..start + n).step_by(64) {
+        let mut w = set.write();
+        for i in first..(first + 64).min(start + n) {
+            tags::add(&mut w, i);
+        }
+        match w.commit() {
+            Written::Committed => {}
+            other => return Err(BenchError::debug("fill", other)),
+        }
+    }
+    Ok(())
+}
+
+/// One `TableWrite` of 64 new units with their rows (20 definitions and 40
+/// references each, about 100 KB of parameters): code_intel's batch. The
+/// write is recorded in the setup; the commit is timed.
+pub const TABLES_WRITE: Bench = Bench {
+    id: "cache/tables_write",
+    run: tables_write,
+};
+
+fn tables_write(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (_cache, p) = open(ctx);
+    let set = p.tables(&tags::TABLES);
+    // Creates the tables outside the samples.
+    if set.read(|_| ()).is_none() {
+        return Err(BenchError::new("the tables were not created"));
+    }
+    // 200 writes of about 270 KB declared: far below the quota.
+    writes_at_most(ctx, 200);
+    let writes = Writes::new();
+    let mut next = 0u64;
+    let time = ctx.time_with_setup(
+        || {
+            let mut w = set.write();
+            for _ in 0..64 {
+                tags::add(&mut w, next);
+                next += 1;
+            }
+            w
+        },
+        |w| writes.check(w.commit()),
+    );
+    writes.result()?;
+    Ok(vec![Measured::new("cache/tables_write", Value::Time(time))])
+}
+
+/// One `read` running one query by name over 10 000 units (200 000
+/// definitions), finding one row: the cache's share of a lookup.
+pub const TABLES_READ: Bench = Bench {
+    id: "cache/tables_read",
+    run: tables_read,
+};
+
+fn tables_read(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (_cache, p) = open(ctx);
+    let set = p.tables(&tags::TABLES);
+    let n = ctx.scale(10_000, 128);
+    fill_tags(&set, 0, n)?;
+    let lookup = |i: u64| {
+        let name = tags::def_name(i % n, i % tags::DEFS);
+        set.read(|r| {
+            let mut found = 0;
+            let ok = r.query(tags::DEFS_BY_NAME, &[Param::Text(&name)], |row| {
+                found += usize::from(row.bytes(2).is_some());
+                true
+            });
+            ok.then_some(found)
+        })
+        .flatten()
+    };
+    if lookup(1) != Some(1) {
+        return Err(BenchError::new("a stored definition was not found"));
+    }
+    let mut next = 0;
+    let time = ctx.time(|| {
+        next += 7919;
+        lookup(black_box(next))
+    });
+    Ok(vec![Measured::new("cache/tables_read", Value::Time(time))])
+}
+
+/// `touch` of 5000 units whose access times are over an hour old: 4096 are
+/// written back in the call (the pending set is full), the rest wait for the
+/// next write, which the setup of the next sample makes.
+pub const TABLES_TOUCH: Bench = Bench {
+    id: "cache/tables_touch",
+    run: tables_touch,
+};
+
+fn tables_touch(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let clock = ManualClock::new(std::time::SystemTime::now());
+    let cache = Cache::with_clock(
+        Config {
+            root: ctx.scratch().join("cache"),
+            budgets: Budgets::default(),
+            ui_thread: None,
+        },
+        clock.clone(),
+    );
+    let p = cache.repo(Path::new("/work/lectern/.git"));
+    let set = p.tables(&tags::TABLES);
+    let n = 5000;
+    fill_tags(&set, 0, n)?;
+    let units = set
+        .read(|r| {
+            let mut units = Vec::new();
+            let ok = r.query(tags::ALL_UNITS, &[], |row| {
+                units.extend(row.unit(0));
+                true
+            });
+            ok.then_some(units)
+        })
+        .flatten()
+        .unwrap_or_default();
+    if units.len() as u64 != n {
+        return Err(BenchError::new("the units were not all found"));
+    }
+    writes_at_most(ctx, 100);
+    let writes = Writes::new();
+    let mut next = 0;
+    let time = ctx.time_with_setup(
+        || {
+            // Writes back what the last sample left, then ages everything.
+            next += 1;
+            let _ = writes.check(p.put(&key("touch", next), &Raw(vec![1])));
+            clock.advance(std::time::Duration::from_secs(2 * 60 * 60));
+        },
+        |()| set.touch(black_box(&units)),
+    );
+    writes.result()?;
+    Ok(vec![Measured::new("cache/tables_touch", Value::Time(time))])
+}
+
+/// `cache/tables_write`'s batch of 64 units into a namespace over its
+/// quota: the write also evicts as many bytes of the oldest units, with
+/// their rows (about 64 units, 4 000 rows). Filled through `tags::TABLES`
+/// to 12 MB; written through `tags::SMALL_QUOTA`, the same tables with an
+/// 8 MiB quota. Each sample deletes what it writes, so every sample evicts.
+pub const TABLES_EVICT: Bench = Bench {
+    id: "cache/tables_evict",
+    run: tables_evict,
+};
+
+fn tables_evict(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (_cache, p) = open(ctx);
+    let filled = 2_800;
+    fill_tags(&p.tables(&tags::TABLES), 0, filled)?;
+    let set = p.tables(&tags::SMALL_QUOTA);
+    writes_at_most(ctx, 200);
+    let writes = Writes::new();
+    let before = set.evictions();
+    let mut next = filled;
+    let time = ctx.time_with_setup(
+        || {
+            let mut w = set.write();
+            for _ in 0..64 {
+                tags::add(&mut w, next);
+                next += 1;
+            }
+            w
+        },
+        |w| writes.check(w.commit()),
+    );
+    writes.result()?;
+    if set.evictions() == before {
+        return Err(BenchError::new("nothing was evicted"));
+    }
+    Ok(vec![Measured::new("cache/tables_evict", Value::Time(time))])
 }

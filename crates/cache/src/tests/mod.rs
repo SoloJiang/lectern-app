@@ -7,3 +7,4 @@ mod faults;
 mod open;
 mod partitions;
 mod support;
+mod tables;

@@ -577,6 +577,8 @@ crates/bench/
 | `cache/zstd_1m/put`、`cache/zstd_1m/get` | 只记录（命名空间选 `Zstd` 之前对照使用方的预算） | [cache](cache.md#性能) | 第 1 步（同上） |
 | `cache/evict` | 中位数 < 30 ms（超出预算的分库里一次小写入，淘汰 1 MiB；原为 `cache/evict_16m`，见 [cache 设计「与设计的差异」](cache.md#与设计的差异)） | [cache](cache.md#性能) | `cache` 第 2 步 |
 | `cache/memory` | 子进程的常驻增量中位数 ≤ 8 MB（见「进程内基准」）；`Memory` | [cache](cache.md#性能) | `cache` 第 2 步 |
+| `cache/tables_write`、`cache/tables_evict` | 中位数 < 15 ms / < 30 ms（自定义表：一次写入 64 个单元及其行；同样一批写进超出配额的命名空间） | [cache](cache.md#性能) | `cache` 第 3 步 |
+| `cache/tables_read`、`cache/tables_touch` | 中位数 < 50 µs / < 20 ms（一次 `read` 按索引取 1 行；`touch` 5000 个过期单元，调用里写回 4096 个） | [cache](cache.md#性能) | `cache` 第 3 步 |
 | `project/open_cloudprint` | 中位数 < 20 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/packages_cloudprint` | 中位数 < 15 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/open_100k/files`、`project/open_100k/packages` | 中位数 < 80 ms / < 150 ms | [project](project.md#性能) | `project` 第 5 步 |

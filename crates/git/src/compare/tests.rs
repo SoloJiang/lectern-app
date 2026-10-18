@@ -755,6 +755,14 @@ fn worktree_racy_clean_entry_compares_content() {
         .unwrap();
     t.write_file("a", b"bbbb\n");
     t.set_mtime("a", mtime);
+    // Pin the index file's mtime to the entry's, so a second boundary between
+    // writing `a` and writing the index cannot make the entry look clean.
+    std::fs::File::options()
+        .write(true)
+        .open(t.common_dir().join("index"))
+        .unwrap()
+        .set_modified(mtime)
+        .unwrap();
     // The entry's mtime is not before the index file's: racy, so it is read.
     let set = changes(&t);
     assert_eq!(

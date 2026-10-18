@@ -677,6 +677,38 @@ pub static BUDGETS: &[Budget] = &[
     // Checked before a namespace picks `Zstd`, against the user's budget.
     share("cache/zstd_1m/put", RECORD, CACHE, ACTIVE, Time),
     share("cache/zstd_1m/get", RECORD, CACHE, ACTIVE, Time),
+    // Custom tables: one write of 64 units with their rows (code_intel's
+    // batch); one read with one indexed query; a touch of 5000 units over an
+    // hour old (4096 written back in the call); the same batch into a
+    // namespace over its quota (evicts as much as it writes).
+    share(
+        "cache/tables_write",
+        &[median(Limit::TimeBelow(ms(15)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/tables_read",
+        &[median(Limit::TimeBelow(us(50)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/tables_touch",
+        &[median(Limit::TimeBelow(ms(20)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "cache/tables_evict",
+        &[median(Limit::TimeBelow(ms(30)))],
+        CACHE,
+        ACTIVE,
+        Time,
+    ),
     // The app partition and 2 repository partitions open, 50 MiB read from
     // each: resident growth of a child process (VmRSS on Linux,
     // phys_footprint on macOS), as SQLite's memory bypasses CountingAlloc.

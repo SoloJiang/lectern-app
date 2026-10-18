@@ -1,5 +1,6 @@
 //! Test support (`test-support` feature): a clock advanced by hand, fault
-//! injection, and the entry types and generated values of bench's `cache/*`.
+//! injection, and the entry types, custom tables and generated values of
+//! bench's `cache/*`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -137,4 +138,109 @@ pub fn noise(seed: u64, len: usize) -> Vec<u8> {
 pub fn text(len: usize) -> Vec<u8> {
     const LINE: &[u8] = b"{\"type\":\"assistant\",\"text\":\"lorem ipsum\"}\n";
     (0..len).map(|i| LINE[i % LINE.len()]).collect()
+}
+
+/// Custom tables shaped like code_intel's (bench's `cache/tables_*`), in
+/// the `test.tags` namespace: one row per unit in `tag_ext`, definitions in
+/// `tag_def`, reference names in `tag_ref`. Unit `i` has `DEFS` definitions
+/// named [`tags::def_name`] and `REFS` references to other units' names.
+pub mod tags {
+    use crate::{Compression, Key, Namespace, Param, TableWrite, Tables};
+
+    pub const DEFS: u64 = 20;
+    pub const REFS: u64 = 40;
+
+    pub const INSERT_EXT: &str = "INSERT INTO tag_ext (unit, oid) VALUES (?1, ?2)";
+    pub const INSERT_DEF: &str =
+        "INSERT INTO tag_def (unit, name, kind, line, col) VALUES (?1, ?2, ?3, ?4, ?5)";
+    pub const INSERT_REF: &str = "INSERT OR IGNORE INTO tag_ref (name, unit) VALUES (?1, ?2)";
+    /// Definitions by name, with their unit's OID.
+    pub const DEFS_BY_NAME: &str = "SELECT d.line, d.col, e.oid FROM tag_def d
+         JOIN tag_ext e ON e.unit = d.unit WHERE d.name = ?1";
+    /// Every unit.
+    pub const ALL_UNITS: &str = "SELECT unit FROM tag_ext ORDER BY unit";
+
+    const SCHEMA: &[&str] = &[
+        "CREATE TABLE tag_ext (
+           unit INTEGER PRIMARY KEY REFERENCES entry (id) ON DELETE CASCADE,
+           oid  BLOB NOT NULL UNIQUE)",
+        "CREATE TABLE tag_def (
+           unit INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
+           name TEXT NOT NULL, kind INTEGER NOT NULL, line INTEGER NOT NULL,
+           col INTEGER NOT NULL)",
+        "CREATE INDEX tag_def_name ON tag_def (name)",
+        "CREATE INDEX tag_def_unit ON tag_def (unit)",
+        "CREATE TABLE tag_ref (
+           name TEXT NOT NULL,
+           unit INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
+           PRIMARY KEY (name, unit)) WITHOUT ROWID",
+        "CREATE INDEX tag_ref_unit ON tag_ref (unit)",
+    ];
+    const STATEMENTS: &[&str] = &[INSERT_EXT, INSERT_DEF, INSERT_REF, DEFS_BY_NAME, ALL_UNITS];
+    const NAMESPACE: Namespace = Namespace {
+        name: "test.tags",
+        version: 1,
+        compression: Compression::None,
+    };
+
+    /// The registration, with code_intel's 256 MiB quota.
+    pub static TABLES: Tables = Tables {
+        namespace: NAMESPACE,
+        schema: SCHEMA,
+        statements: STATEMENTS,
+        quota: 256 << 20,
+    };
+
+    /// The same tables with an 8 MiB quota: writes through it into a
+    /// partition filled through [`TABLES`] evict to the quota.
+    pub static SMALL_QUOTA: Tables = Tables {
+        namespace: NAMESPACE,
+        schema: SCHEMA,
+        statements: STATEMENTS,
+        quota: 8 << 20,
+    };
+
+    /// The OID of unit `i`.
+    pub fn oid(i: u64) -> [u8; 20] {
+        let mut oid = [0u8; 20];
+        oid[..8].copy_from_slice(&i.to_be_bytes());
+        oid
+    }
+
+    /// The name of definition `j` of unit `i`; unique.
+    pub fn def_name(i: u64, j: u64) -> String {
+        format!("symbol_{:08}", i * DEFS + j)
+    }
+
+    /// Records unit `i` with its rows, declaring code_intel's estimate of
+    /// their size: 64, plus 2 × name + 40 per definition and 2 × name + 24
+    /// per reference.
+    pub fn add(w: &mut TableWrite, i: u64) {
+        let names: Vec<String> = (0..DEFS).map(|j| def_name(i, j)).collect();
+        let refs: Vec<String> = (0..REFS)
+            .map(|j| def_name((i * 7 + j * 13) % (i + 1), j % DEFS))
+            .collect();
+        let bytes = 64
+            + names.iter().map(|n| 2 * n.len() as u64 + 40).sum::<u64>()
+            + refs.iter().map(|n| 2 * n.len() as u64 + 24).sum::<u64>();
+        let oid = oid(i);
+        let unit = w.create(&Key::new().bytes(&oid).str("rust").u64(1).u64(1), bytes);
+        w.execute(INSERT_EXT, &[Param::New(unit), Param::Bytes(&oid)]);
+        for (j, name) in names.iter().enumerate() {
+            let j = j as i64;
+            w.execute(
+                INSERT_DEF,
+                &[
+                    Param::New(unit),
+                    Param::Text(name),
+                    Param::Int(j % 8),
+                    Param::Int(j * 10 + 1),
+                    Param::Int(4),
+                ],
+            );
+        }
+        for name in &refs {
+            w.execute(INSERT_REF, &[Param::Text(name), Param::New(unit)]);
+        }
+    }
 }
