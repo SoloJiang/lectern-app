@@ -14,7 +14,7 @@ use lectern_cache::{Budgets, Cache, Config, Written};
 use lectern_code_intel::extract::{
     Deadline, Def, ExtractStatus, Extraction, Lang, LanguageTable, Visibility, extract,
 };
-use lectern_code_intel::store::{EXISTS_BATCH, Store, Version};
+use lectern_code_intel::store::{EXISTS_BATCH, Found, PendingTouches, Store, Version};
 use lectern_code_intel::testing::{corpus, watchdog};
 use lectern_code_intel::{DefKind, SystemClock};
 use lectern_executor::Executor;
@@ -38,13 +38,20 @@ pub const EXTRACT_1MIB: Bench = Bench {
     run: extract_1mib,
 };
 
-/// The existence check of a warm start over 100 000 files, all stored: 200
-/// checks of 500 OIDs, each marking its units as used. The access times are
-/// two hours old at every sample, so the touches are written back (24 times
-/// in the calls, 4096 units each), as on a warm start the next day.
+/// A warm start over 100 000 stored files: the existence checks only (200
+/// of 500 OIDs), which make the files known to be indexed. They write
+/// nothing.
 pub const WARM_100K: Bench = Bench {
     id: "code_intel/warm_100k",
     run: warm_100k,
+};
+
+/// The access marking deferred off the warm path: the 100 000 hits marked
+/// 1024 at a time, with access times two hours old so that every unit is
+/// written back, as on a warm start the next day. Record only.
+pub const WARM_100K_TOUCH: Bench = Bench {
+    id: "code_intel/warm_100k_touch",
+    run: warm_100k_touch,
 };
 
 /// Every core language, compiled, with one source of about `len` bytes and
@@ -150,50 +157,98 @@ fn unit(i: u64) -> Extraction {
     }
 }
 
-fn warm_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let files = ctx.scale(100_000, 2_000);
-    let clock = ManualClock::new(SystemTime::now());
-    let cache = Cache::with_clock(
-        Config {
-            root: ctx.scratch().join("cache"),
-            budgets: Budgets::default(),
-            ui_thread: None,
-        },
-        clock.clone(),
-    );
-    let store = Store::new(&cache.repo(Path::new("/work/monorepo/.git")));
-    let table = LanguageTable::core();
-    let version = Version::of(table.get("rust").expect("a core language"));
-    // Batches of 64 units, the scheduler's batch.
-    for first in (0..files).step_by(64) {
-        let mut w = store.write();
-        for i in first..(first + 64).min(files) {
-            w.add(oid(i), &version, &unit(i));
+/// A warm start's store: 100 000 files (2000 in smoke mode) stored as units
+/// in batches of 64, the scheduler's batch.
+struct Warm {
+    /// Keeps the store's partition open.
+    _cache: Cache,
+    clock: ManualClock,
+    store: Store,
+    version: Version,
+    oids: Vec<BlobId>,
+}
+
+impl Warm {
+    /// The store and every hit of its existence checks.
+    fn new(ctx: &Ctx) -> Result<(Warm, Vec<Found>), BenchError> {
+        let files = ctx.scale(100_000, 2_000);
+        let clock = ManualClock::new(SystemTime::now());
+        let cache = Cache::with_clock(
+            Config {
+                root: ctx.scratch().join("cache"),
+                budgets: Budgets::default(),
+                ui_thread: None,
+            },
+            clock.clone(),
+        );
+        let store = Store::new(&cache.repo(Path::new("/work/monorepo/.git")));
+        let table = LanguageTable::core();
+        let version = Version::of(table.get("rust").expect("a core language"));
+        for first in (0..files).step_by(64) {
+            let mut w = store.write();
+            for i in first..(first + 64).min(files) {
+                w.add(oid(i), &version, &unit(i));
+            }
+            match w.commit() {
+                Written::Committed => {}
+                other => return Err(BenchError::debug("fill", other)),
+            }
         }
-        match w.commit() {
-            Written::Committed => {}
-            other => return Err(BenchError::debug("fill", other)),
+        let warm = Warm {
+            _cache: cache,
+            clock,
+            store,
+            version,
+            oids: (0..files).map(oid).collect(),
+        };
+        let hits = warm.check();
+        if hits.len() != warm.oids.len() {
+            return Err(BenchError::new("a stored unit was not found"));
         }
+        Ok((warm, hits))
     }
-    let oids: Vec<BlobId> = (0..files).map(oid).collect();
-    let check = || {
-        let mut found = 0;
-        for chunk in oids.chunks(EXISTS_BATCH) {
-            found += store
-                .exists(&version, black_box(chunk))
-                .map_or(0, |f| f.len());
+
+    /// The warm pass: existence checks of 500 OIDs.
+    fn check(&self) -> Vec<Found> {
+        let mut found = Vec::with_capacity(self.oids.len());
+        for chunk in self.oids.chunks(EXISTS_BATCH) {
+            found.extend(
+                self.store
+                    .exists(&self.version, black_box(chunk))
+                    .unwrap_or_default(),
+            );
         }
         found
-    };
-    if check() != oids.len() {
-        return Err(BenchError::new("a stored unit was not found"));
     }
-    let time = ctx.time_with_setup(
-        || clock.advance(Duration::from_secs(2 * 3600)),
-        |()| check(),
-    );
+}
+
+fn warm_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (warm, _) = Warm::new(ctx)?;
+    let time = ctx.time(|| warm.check());
     Ok(vec![Measured::new(
         "code_intel/warm_100k",
+        Value::Time(time),
+    )])
+}
+
+fn warm_100k_touch(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (warm, hits) = Warm::new(ctx)?;
+    let generation = warm.store.evictions();
+    let time = ctx.time_with_setup(
+        || {
+            // Every access time is over an hour old: all are written back.
+            warm.clock.advance(Duration::from_secs(2 * 3600));
+            let mut pending = PendingTouches::new();
+            pending.push(generation, &hits);
+            pending
+        },
+        |mut pending| while warm.store.touch_pending(&mut pending) > 0 {},
+    );
+    if warm.store.evictions() != generation {
+        return Err(BenchError::new("units were evicted while marking"));
+    }
+    Ok(vec![Measured::new(
+        "code_intel/warm_100k_touch",
         Value::Time(time),
     )])
 }

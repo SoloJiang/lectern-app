@@ -214,6 +214,47 @@ pub fn unit_bytes(extraction: &Extraction) -> u64 {
     64 + defs + refs
 }
 
+/// Units per [`Store::touch_pending`] call: one write-back's worth for
+/// `lectern-cache`.
+pub const TOUCH_CHUNK: usize = 1024;
+
+/// Hits of existence checks waiting to be marked as used, off the warm
+/// path. Kept with the project's batch state and dropped with it: when the
+/// project closes, or the worktree changes, before the queue is drained,
+/// those units keep their old access times. That changes only which units
+/// eviction takes first, never a result.
+#[derive(Default, Debug)]
+pub struct PendingTouches {
+    units: Vec<Unit>,
+    /// The eviction generation the queued IDs were read under.
+    generation: u64,
+}
+
+impl PendingTouches {
+    pub fn new() -> PendingTouches {
+        PendingTouches::default()
+    }
+
+    /// Queues the hits of an existence check. `generation` is
+    /// [`Store::evictions`] read before that check; a queue holding IDs of
+    /// another generation is emptied first.
+    pub fn push(&mut self, generation: u64, found: &[Found]) {
+        if generation != self.generation {
+            self.units.clear();
+            self.generation = generation;
+        }
+        self.units.extend(found.iter().map(|f| f.unit));
+    }
+
+    pub fn len(&self) -> usize {
+        self.units.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.units.is_empty()
+    }
+}
+
 /// A unit found by [`Store::exists`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Found {
@@ -289,11 +330,13 @@ impl Store {
 
     /// The existence check: the units among `oids` stored under exactly
     /// `version`, whatever their status, in [`EXISTS_BATCH`]-OID queries.
-    /// The units found are marked as used. `None` when the partition cannot
-    /// be read: treat every OID as missing.
+    /// Read only: it marks nothing as used, so a warm start is not held up
+    /// by access-time writes. The caller queues the hits in
+    /// [`PendingTouches`] and marks them later with [`Store::touch_pending`].
+    /// `None` when the partition cannot be read: treat every OID as missing.
     pub fn exists(&self, version: &Version, oids: &[BlobId]) -> Option<Vec<Found>> {
         let lang = &*version.lang.0;
-        let found = self.set.read(|r| {
+        self.set.read(|r| {
             let mut found = Vec::new();
             let mut params = [Param::Null; 3 + EXISTS_BATCH];
             params[0] = Param::Text(lang);
@@ -318,10 +361,23 @@ impl Store {
                 }
             }
             found
-        })?;
-        let units: Vec<Unit> = found.iter().map(|f| f.unit).collect();
-        self.touch(&units);
-        Some(found)
+        })
+    }
+
+    /// Marks up to [`TOUCH_CHUNK`] queued units as used and returns how many
+    /// are still queued. The batch thread calls it at batch boundaries after
+    /// the warm pass, with the usual pause and cancel checks between calls.
+    /// Units queued under an older eviction generation are dropped unmarked:
+    /// their IDs may now belong to other units.
+    pub fn touch_pending(&self, pending: &mut PendingTouches) -> usize {
+        if pending.generation != self.evictions() {
+            pending.units.clear();
+            return 0;
+        }
+        let at = pending.units.len().saturating_sub(TOUCH_CHUNK);
+        let chunk = pending.units.split_off(at);
+        self.touch(&chunk);
+        pending.units.len()
     }
 
     /// The definitions named exactly `name` (case-sensitive) in `Done` units

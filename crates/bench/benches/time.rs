@@ -49,6 +49,7 @@ const BENCHES: &[Bench] = &[
     code_intel::EXTRACT_THROUGHPUT,
     code_intel::EXTRACT_1MIB,
     code_intel::WARM_100K,
+    code_intel::WARM_100K_TOUCH,
     executor::SPAWN_10K,
     executor::WAKE_1000X100,
     fs_watch::CLASSIFY_BURST,

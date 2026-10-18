@@ -1,6 +1,6 @@
 //! `store_*`: units of `code_intel.tags` written and read back, the
 //! existence check, lookups by name, the version filter, eviction and its
-//! generation, and dropped writes.
+//! generation, queued access marking, and dropped writes.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -13,8 +13,8 @@ use tempfile::TempDir;
 use super::extract::run;
 use crate::extract::{Def, ExtractStatus, Extraction, LanguageTable, Visibility};
 use crate::store::{
-    self, EXISTS, EXISTS_BATCH, Found, NAMESPACE, SCHEMA, STATEMENTS, Store, StoredUnit, Version,
-    unit_bytes,
+    self, EXISTS, EXISTS_BATCH, Found, NAMESPACE, PendingTouches, SCHEMA, STATEMENTS, Store,
+    StoredUnit, TOUCH_CHUNK, Version, unit_bytes,
 };
 use crate::testing::FIXTURES;
 use crate::{DefKind, lang_name};
@@ -517,17 +517,26 @@ fn store_quota_evicts_by_access_time() {
     let old: Vec<BlobId> = (0..40).map(oid).collect();
     let units: Vec<Found> = store.exists(&rust, &old).expect("read");
     assert_eq!(units.len(), 40);
-    // The next write flushes those touches; within the hour they change no
-    // access time.
-    let small = done(Vec::new(), &[]);
-    commit(&store, &[(oid(1000), &rust, &small)]);
-    // Reads, touches and writes of new units leave the generation alone.
+    // Reads and writes of new units leave the generation alone.
     assert_eq!(store.evictions(), generation);
 
-    // Two hours later the first 20 are seen again.
+    // Two hours later a warm pass finds all 40, but only the hits of the
+    // first 20 are queued and marked afterwards. The existence check itself
+    // marks nothing: if it did, all 40 would look equally recent and
+    // eviction would take the lowest IDs, units 0–13.
     f.clock.advance(Duration::from_secs(2 * 3600));
-    let seen: Vec<BlobId> = (0..20).map(oid).collect();
-    assert_eq!(store.exists(&rust, &seen).expect("read").len(), 20);
+    let generation_before = store.evictions();
+    let seen = store.exists(&rust, &old).expect("read");
+    assert_eq!(seen.len(), 40);
+    let first: Vec<Found> = seen
+        .into_iter()
+        .filter(|f| (0..20).map(oid).any(|o| o == f.oid))
+        .collect();
+    assert_eq!(first.len(), 20);
+    let mut pending = PendingTouches::new();
+    pending.push(generation_before, &first);
+    assert_eq!(store.touch_pending(&mut pending), 0);
+    assert!(pending.is_empty());
     assert_eq!(store.evictions(), generation);
 
     // 30 more units go over the quota.
@@ -559,6 +568,47 @@ fn store_quota_evicts_by_access_time() {
     // A kept unit still has its rows.
     let kept = units.iter().find(|u| u.oid == oid(0)).expect("unit 0");
     assert_eq!(rows(&p, kept.unit), [1, 10, 0]);
+}
+
+/// Queued hits are marked `TOUCH_CHUNK` at a time; a queue read under an
+/// older eviction generation is dropped, since its IDs may have been reused.
+#[test]
+fn store_pending_touches_drain_in_chunks() {
+    let f = Fixture::new();
+    let store = f.store();
+    let rust = v("rust", 1, 1);
+    let small = done(vec![def("f", DefKind::Function, 0)], &[]);
+    let mut w = store.write();
+    for i in 0..2500 {
+        assert!(w.add(oid(i), &rust, &small));
+    }
+    assert_eq!(w.commit(), Written::Committed);
+    let oids: Vec<BlobId> = (0..2500).map(oid).collect();
+
+    let generation = store.evictions();
+    let found = store.exists(&rust, &oids).expect("read");
+    let mut pending = PendingTouches::new();
+    pending.push(generation, &found);
+    assert_eq!(pending.len(), 2500);
+    assert_eq!(store.touch_pending(&mut pending), 2500 - TOUCH_CHUNK);
+    assert_eq!(store.touch_pending(&mut pending), 2500 - 2 * TOUCH_CHUNK);
+    assert_eq!(store.touch_pending(&mut pending), 0);
+    assert_eq!(store.touch_pending(&mut pending), 0);
+
+    // A unit is replaced: the generation moves, and the queue read before it
+    // is dropped without marking anything.
+    pending.push(generation, &found);
+    commit(&store, &[(oid(0), &rust, &small)]);
+    assert_ne!(store.evictions(), generation);
+    assert_eq!(store.touch_pending(&mut pending), 0);
+    assert!(pending.is_empty());
+    // Hits of the new generation replace a queue of the old one.
+    pending.push(generation, &found[..10]);
+    let now = store.evictions();
+    let fresh = store.exists(&rust, &oids[..3]).expect("read");
+    pending.push(now, &fresh);
+    assert_eq!(pending.len(), 3);
+    assert_eq!(store.touch_pending(&mut pending), 0);
 }
 
 #[test]

@@ -815,11 +815,20 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // One 1 MiB file per language, against the 250 ms per-file deadline.
     share("code_intel/extract_1mib", RECORD, CODE_INTEL, ACTIVE, Time),
-    // A warm start's existence check over 100 000 stored files: 200 queries
-    // of 500 OIDs, with the touches of a warm start the next day.
+    // A warm start's existence checks over 100 000 stored files: 200 queries
+    // of 500 OIDs, read only (access marking is deferred off this path).
     share(
         "code_intel/warm_100k",
         &[median(Limit::TimeBelow(ms(500)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // The deferred access marking of those 100 000 hits, 1024 at a time,
+    // every access time over an hour old.
+    share(
+        "code_intel/warm_100k_touch",
+        RECORD,
         CODE_INTEL,
         ACTIVE,
         Time,
