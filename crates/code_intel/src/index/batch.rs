@@ -826,6 +826,9 @@ impl Inner {
                     written.push((d.key, version, d.item.tier));
                 }
             }
+            if replaces {
+                project.begin_replace();
+            }
             let committed = !write.is_empty() && matches!(write.commit(), Written::Committed);
             let after = project.store.evictions();
             // Under the lock nobody else changes `replaced`.
@@ -836,7 +839,10 @@ impl Inner {
             // units are extracted again when used or on the next open.
             let own = committed && replaces && after == eviction + 1;
             if own {
-                project.replaced.fetch_add(1, Ordering::AcqRel);
+                project.replaced.fetch_add(1, Ordering::SeqCst);
+            }
+            if replaces {
+                project.end_replace();
             }
             (
                 eviction.saturating_sub(replaced),

@@ -488,6 +488,8 @@ impl Inner {
                         store: self.store_for(&partition),
                         commits: Mutex::new(()),
                         replaced: std::sync::atomic::AtomicU64::new(0),
+                        replacing: std::sync::atomic::AtomicU64::new(0),
+                        steady: std::sync::atomic::AtomicU64::new(0),
                         state: Mutex::new(State::new(self.new_session(), &table, grammar)),
                     });
                     open.push(p.clone());

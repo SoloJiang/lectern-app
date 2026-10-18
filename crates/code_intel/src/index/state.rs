@@ -34,16 +34,42 @@ pub(crate) struct Project {
     /// a `TimedOut` or `TooLarge` unit; the cache counts the replaced unit
     /// as an eviction). Counted under `commits`.
     pub replaced: std::sync::atomic::AtomicU64,
+    /// Odd while a replacing commit runs (between the store's bump and
+    /// `replaced` counting it); `steady` is `evictions()` from before it.
+    pub replacing: std::sync::atomic::AtomicU64,
+    pub steady: std::sync::atomic::AtomicU64,
     pub state: std::sync::Mutex<State>,
 }
 
 impl Project {
     /// The eviction generation hints and cursors depend on: the store's,
     /// less this crate's own replaces. The touches keep the store's own
-    /// (`Store::touch_pending` compares with it).
+    /// (`Store::touch_pending` compares with it). During a replacing commit
+    /// it is the generation from before it, so no reader sees the replace's
+    /// bump before it is counted.
     pub fn evictions(&self) -> u64 {
-        let replaced = self.replaced.load(Ordering::Acquire);
-        self.store.evictions().saturating_sub(replaced)
+        loop {
+            let seq = self.replacing.load(Ordering::SeqCst);
+            if seq % 2 == 1 {
+                return self.steady.load(Ordering::SeqCst);
+            }
+            let replaced = self.replaced.load(Ordering::SeqCst);
+            let value = self.store.evictions().saturating_sub(replaced);
+            if self.replacing.load(Ordering::SeqCst) == seq {
+                return value;
+            }
+        }
+    }
+
+    /// Starts a replacing commit (under `commits`).
+    pub fn begin_replace(&self) {
+        self.steady.store(self.evictions(), Ordering::SeqCst);
+        self.replacing.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Ends it, once `replaced` counts its bump (under `commits`).
+    pub fn end_replace(&self) {
+        self.replacing.fetch_add(1, Ordering::SeqCst);
     }
 }
 
