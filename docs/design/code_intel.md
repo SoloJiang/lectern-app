@@ -709,7 +709,9 @@ pub(crate) struct ChangedPaths {
 pub struct Extraction {
     pub status: ExtractStatus,
     pub defs: Vec<Def>,
-    /// 引用名，去重、按字节序。locals 查询解析到局部定义的引用不在其中（tree-sitter-tags 的行为），
+    /// 引用名，去重、按字节序：调用、类型和构造之外，也包括普通标识符的用处和成员名（`const v = LIMIT`、`obj.field`），
+    /// 所以 `ci_ref` 列出可能用到一个名字的每个文件（见「外部格式」）。
+    /// locals 查询解析到局部定义的引用不在其中（tree-sitter-tags 的行为），
     /// 所以持久化的 `ci_ref` 也不含它们。这不丢结果：局部定义只能在它所在的文件里被引用，
     /// 而查引用时被查定义所在的文件总是现场解析，扫描的位置包括 `@local.reference`（见下文的 `ParsedFile`）。
     pub refs: Vec<Box<str>>,
@@ -770,13 +772,16 @@ pub enum Visibility {
 
   | 目录 | 内容 | 用到的语言 |
   |---|---|---|
-  | `ecmascript` | 三种 grammar 都有的节点，以 tree-sitter-javascript 的查询为起点 | `js`、`ts`、`tsx` |
+  | `ecmascript` | 三种 grammar 都有的节点，以 tree-sitter-javascript 的查询为起点；`references.scm` 是兜底的引用模式，拼在每种语言的最后 | `js`、`ts`、`tsx` |
   | `js` | 只有 JS 有的节点（类字段、`extends`） | `js` |
   | `jsx` | JSX 组件引用 | `js`、`tsx` |
   | `ts` | 以 tree-sitter-typescript 的查询为起点 | `ts`、`tsx` |
   | `rust`、`java`、`python`、`go` | 各自的查询 | 同名语言 |
 
 - 引用到标识符的模式带 `(#is-not? local)`：locals 解析到局部定义的引用不进入引用名（tree-sitter-tags 只对带这个谓词的模式过滤）。
+- 每种语言的 tags 查询最后有一组兜底的引用模式：locals 没有解析到的每个标识符（`@reference.name`），以及每个成员名（`@reference.member`：Rust、Go 的 `field_identifier`，JS / TS 的 `property_identifier`，Java 的 `field_access.field`，Python 的 `attribute.attribute`；成员名不带 locals 谓词）。查引用第 1 步只经 `ci_ref` 选出已入索引的候选文件，只有调用、类型这类模式时，`let v = PUBLIC_CONSTANT;`、`obj.field` 所在的文件不会被选中。兜底模式要放在全部定义模式之后：tree-sitter-tags 对一个名字节点保留模式序号最小的 tag，排在前面的兜底模式会顶掉后面的定义。JS / TS 的兜底模式因此单独放在 `ecmascript/references.scm`，拼在每种语言的最后。
+- locals 查询也把嵌套的函数和类的名字记为 `@local.definition`（Python 的 `def` 和 `class`，JS / TS 的函数和类声明，Rust 块里的 `fn`，Java 块里的局部类和记录）。声明本身也是一个作用域，名字在它的范围之内；`ParsedFile` 把作为作用域节点 `name` 字段的定义放进外层作用域，所以 `def outer(): def helper(): …; helper()` 里的调用绑定到 `helper`。Go 没有嵌套的具名函数。
+- `(identifier) @local.reference` 也会匹配成员名、路径段和关键字参数（Java 的 `items.add`、`this.add`，Python 的 `obj.x`、`f(x=1)`，Rust 的 `Queue::new`）。`ParsedFile` 按每种语言的一张表（`site.rs` 的 `NON_VARIABLE_POSITIONS`）把这些位置排除在局部引用之外，位置分析在这些位置上、以及语法种类为 `Member`、`MemberCall` 时都不做局部绑定。JS / TS 和 Go 的成员名本来就是另一种节点。
 - 夹具：`crates/code_intel/tests/fixtures/extract/<语言>/` 下每种语言若干真实写法的样本（类、方法、闭包、重载、嵌套模块、导出与非导出、宏），抽取结果用 insta 快照；grammar 或查询升级时快照的变化在 PR 里逐个看过。另有一份病态输入（深度嵌套、超长行）用于截止时间的测试。
 
 ### 存储表
@@ -839,7 +844,7 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 - 写入的键来自读到的字节：任何一次抽取（批量、按需、限时搜索、第 5 层）写入之前，都对实际读到的字节重新算 OID（原始字节的 OID；工作区一侧与排队时的 OID 不同时再用 `canonical_oid` 算一次），用这个 OID 作键。排队时记下的 OID 只用来挑选要读的文件，不作键。两者不同（排队之后文件又被改了）时，结果只写在实际的 OID 下，原来那个 OID 的 `indexed` 提示不置位；路径的新内容随 fs_watch 的事件进入覆盖部分，有效 OID 变成实际的 OID 后提示才会匹配。所以一份内容的抽取结果不会写到另一个 OID 的键下。
 - 写入：一批（见「调度、批次与取消」）在一个写事务里建单元、插入全部行，一批约 100 KB，远低于 `MAX_BATCH`；写失败（`Dropped`）时这一批的结果留在内存里供本次查询使用，下次需要时重新抽取。
 - 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 在热启动的存在检查和查询命中时标记访问，所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
-- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。
+- 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍，`code_intel/disk_100k` 在第 2 步实测后校准这一条。
 - 版本：表结构或单元的键变化时命名空间版本加一；只是抽取规则变化时改 `EXTRACTOR_VERSION`，旧单元不再命中、逐步淘汰。
 
 ### blob → 路径映射
@@ -985,7 +990,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 第 3–5 层：每个批量线程一个长期任务，循环：取一批 → 存在检查 → 抽取缺的 → 一个写事务写入 → 在批次边界询问 `BackgroundGuard`（暂停时登记 waker、返回 `Pending`）。一批在 64 个文件、读入 2 MiB，或开始 50 ms 之后的第一个文件边界处结束，先到者为准；所以一个大文件可以一直运行到它自己的截止时间。暂停和取消仍在约 50 ms 内生效，靠的是看门狗打断在途的那个文件（见下文），与 ADR 0029「每批约 64 个文件或 50 ms」「取消和暂停在约 50 ms 内生效」的要求一致：单个文件由截止时间约束，50 ms 的响应由看门狗保证。
 - 每批开始时重新选层：第 3 层有剩余就先取第 3 层。第 1、2 层在另外的工作线程上运行，不排在批量任务后面（ADR 0029）。
 - 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数），命中的按当前有效 OID 和代数写入 `indexed` 提示并标记访问，缺的抽取。
-- 单文件截止时间：后台 250 ms（M 系列上 1 MiB 的文件约 230 ms，按调研的 4.3 MB/s 和「M 系列可能快一倍」估算，实测后校准），交互 1 s。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
+- 单文件截止时间：后台 250 ms，交互 1 s。原来按线性吞吐估算 M 系列上 1 MiB 的文件约 230 ms；实测吞吐随文件变大而下降（tree-sitter-tags 的局部检查按「引用数 × 作用域数」增长，见 [ADR 0031](../adr/0031.md)），接近 1 MiB 的文件在 M 系列上估计要 360–400 ms，后台记为 `TimedOut`，打开时按交互截止时间重做（已知限制，`code_intel/extract_1mib` 只记录）。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
 - 看门狗线程另外持有一张到期表（名字表的延迟重建，见「名字表」）：`wait_timeout` 取在途抽取的下一个检查时刻与最早到期时刻中较早的一个，到期时提交对应的任务；两张表都空时才不带超时地等待。
 - 看门狗的生命周期：每次激活最多一个看门狗线程，在这次激活第一次登记在途抽取或到期时刻时经 `PluginHandle::own_with` 和 `run_dedicated_gated` 启动。线程与登记方共用一份状态：互斥锁保护的在途表和 `stop` 标志，加一个 `Condvar`。线程循环：持锁检查 `stop`，为 true 就返回；在途表为空时 `wait`，否则 `wait_timeout(10 ms)` 后检查截止时刻。`stop()` 在锁内把标志置为 true、把在途表里的标志全部置位（正在运行的抽取随之返回 `Cancelled`），然后 `notify_all`，所以无论线程在等待还是在检查，都在一次唤醒之内返回。调用 `stop()` 的地方：
   - 停用：启动时同时把一个 `WatchdogStop` 守卫交给 `PluginHandle::own`，它的 `Drop` 调用 `stop()`。kernel 在停用、失败和 `shutdown` 的撤销第 4 步 drop 守卫，所以每次停用都会让这次激活的看门狗退出，重新激活时另起一个，线程数不随激活次数增长。`Active` 的 `Drop` 也调用一次（重复调用无害）。
@@ -1082,7 +1087,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   | `Call`、`MemberCall` | `Function`、`Method`、`Macro`，以及 `Class`、`Struct`（Python、JS 的构造调用，Rust 的元组结构体） |
   | `Construct`（`new X`） | `Class`、`Struct` |
   | `Type` | `Class`、`Interface`、`Struct`、`Enum`、`Trait`、`Type`、`Module` |
-  | `Member` | `Field`、`Method`、`Constant`、`Variable` |
+  | `Member` | Rust：`Field`、`Method`、`Constant`、`Variable`（`a.b` 的左边总是值）。其他语言：全部（左边可以是命名空间导入、模块、包或类，`utils.handle`、`models.User`、`pkg.Var`、`Outer.Inner` 的成员可以是任何定义） |
   | `Plain` | 全部 |
   | Go 的 `Call`、`MemberCall` | 默认规则之外再接受 `Type`（`units.Meters(value)` 也是类型转换） |
 
@@ -1126,7 +1131,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 跳转：唯一候选的目标首屏高亮 ≤ 100 ms | 本 crate 的部分同上；目标文件的读取与高亮属于 `file_reader` | `app/goto_single` |
 | 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的结果；限时搜索 1 s 后停止，取消在 20 ms 内生效 | `code_intel/search_stop` ≤ 1.02 s |
 | 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 查找 ≤ 5 ms；每个候选文件的现场抽取约 1–2 ms / 10 KB | `code_intel/references_100k` |
-| 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s；热启动 10 万文件的存在检查 ≤ 500 ms | `code_intel/extract_throughput`、`code_intel/warm_100k` |
+| 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件，[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k` |
 | 空闲内存：monorepo < 100 MB（后台暂停时和全部完成后） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
@@ -1263,6 +1268,22 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 安装包体积（ADR 0018 的 80 MB）：在 Linux x86_64 上把 tree-sitter 运行时、tree-sitter-tags 和六个 grammar 链接进一个 release 二进制（thin LTO、strip），与只链接运行时的二进制相比多 6.9 MiB（7.27 MiB 对 0.34 MiB），gzip -9 之后多 1.2 MB（DMG 的 40 MB 目标）。各 grammar 的代码与数据：`tsx` 1.44 MB、`ts` 1.41 MB、`rust` 1.11 MB、`python` 0.46 MB、`java` 0.41 MB、`js` 0.41 MB、`go` 0.21 MB，运行时 0.21 MB，其余是 tags、`regex` 和绑定代码。解析表是数据，arm64 上的大小应当相近；macOS 上没有测量，正式数字由 #38 的 `app/bundle_size` 给出。「未决问题」1 选 (b) 时少 Rust、Python、Go 三个 grammar，约 1.8 MB。
 - 没有验证的：M 系列上的吞吐；macOS 上的体积；`watchdog_*`（看门狗随插件停用退出、激活 20 次后最多一个线程，属于第 4 步；`Executor::shutdown` 让看门狗退出已由 `deadline_executor_shutdown_stops_the_watchdog` 经 `testing::watchdog` 检查）。
 
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 的审阅意见之后，同一台机器。
+
+- `just test -p lectern-code-intel`：39 个测试通过。按前缀：`lang_*` 9、`extract_*` 11、`deadline_*` 8、`site_*` 11。新增 `site_member_values_accept_every_kind`、`site_nested_declarations_bind_locally`（Python 的 `def` 和 `class`、JS 的函数、Rust 块里的 `fn`、Java 的局部类）、`site_member_names_do_not_bind_locals`（Java 的 `items.add` 与 `this.add`、Python 的 `obj.x`、Rust 的 `Queue::new`）、`extract_plain_and_member_uses_are_names`（六种语言）。8 个快照的引用名都变了（兜底模式加入的普通标识符和成员名，以及 `new Store()` 现在解析到本文件的类声明、不再进入 JS 的引用名），逐个看过。
+- `code_intel/extract_throughput`（`just bench --measure code_intel/`，每项三次，MB 为 2^20 字节）：
+
+  | 版本 | 语料 | 中位数 |
+  |---|---|---|
+  | 审阅前（3de4dbc） | 每种语言一个 1 MiB 的文件 | 2.09–2.22 MB/s |
+  | 加入兜底引用模式之后 | 同上 | 1.49–1.52 MB/s |
+  | 同上 | 每种语言约 1 MiB，切成约 8 KiB 的文件（ADR 0031） | 2.53–2.58 MB/s |
+  | 同上（`code_intel/extract_1mib`，只记录） | 每种语言一个 1 MiB 的文件 | 1.63–1.65 MB/s |
+
+  macOS CI 上审阅前的版本是 3.7 和 3.49 MB/s，约为这台机器的 1.6–1.7 倍；按这个比例，仓库形状的语料在 M 系列上估计 4.0–4.4 MB/s，由 macOS CI 判定。
+- 拆分（callgrind，TS，256 KiB，指令数）：解析约 38%，查询匹配约 40%，tree-sitter-tags 逐个 tag 的处理约 13%，本 crate 的 `finish` 约 5.6%，其余是树的释放和内存分配。同一语料按文件大小：16 KiB、64 KiB、256 KiB、1 MiB 的文件分别约 2.9、2.9、2.5、1.7 MiB/s。1 MiB 的 JS 文件里，tree-sitter-tags 的局部检查（内联进 `extract` 的代码和它的 `memcmp`）约占 45%；64 KiB 时约 2%。
+- 试过、没有保留的改动（交替运行两个二进制，每项三次）：去掉 locals 查询的 `(identifier) @local.reference`，1 MiB 时 1.69 对 1.67–1.69 MiB/s，没有变化；引用名去重后再分配字符串，1 MiB 时 1.65–1.67 对 1.57–1.59，8 KiB 的文件 2.54–2.65 对 2.56–2.64，没有收益；兜底模式不带 `#is-not? local`，1 MiB 时 1.69 对 2.12，8 KiB 时没有变化，但局部变量名会进入引用名；函数级作用域标成 `local.scope-inherits false`，1 MiB 时 1.68–1.72 对 1.99–2.02，8 KiB 时 2.55–2.66 对 2.62–2.63，但改变了被过滤的引用。解析器、查询游标和 `TagsContext` 本来就按线程复用，locals 和 tags 本来就是一次匹配。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1290,3 +1311,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - `lectern-executor` 在第 1 步是可选依赖，只有 `test-support`（`testing::watchdog`）打开它；第 3 步起是普通依赖。`lectern-services` 第 1 步起是普通依赖（上面的共享类型）。`lectern-kernel` 等其他依赖随用到它们的步骤加入。
 - `testing` 第 1 步只有 `ManualClock`、`FakeGrammars`（安装、更新、移除、计数加载次数）、`java_pack`、`watchdog`、语言夹具 `FIXTURES` 与 `corpus`、病态输入 `pathological_js`；其余替身随用到它们的步骤加入。
 - 「性能」里本 crate 的其余分项预算还没有登记进 bench 的预算表，随实现它们的步骤登记。
+
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 的审阅意见：
+
+- 语法种类表的 `Member` 原来只接受 `Field`、`Method`、`Constant`、`Variable`。`const cb = utils.handle`、`models.User` 这类成员是函数和类，被过滤掉了。改为只在 Rust 里收窄，其他语言接受全部种类（「候选的分层与过滤」已改）。
+- 设计没有规定 locals 查询要捕获嵌套声明的名字，`def outer(): def helper(): …; helper()` 里的调用因此没有局部绑定。现在捕获，并规定声明名属于外层作用域（「外部格式」已补）。Go 没有嵌套的具名函数，不需要。
+- 设计没有说明 `(identifier) @local.reference` 会匹配成员名和路径段，`int add = 0; items.add(x)` 里的 `add` 因此绑定到了局部变量。现在按位置表排除（「外部格式」已补）。tree-sitter-tags 一侧，成员调用的模式本来就不带 locals 谓词，兜底的成员模式也不带。
+- 引用名原来只有调用、类型、构造和实现，`ci_ref` 选不出只有普通用处的文件。现在加了兜底模式（「抽取结果」「外部格式」已补）。同一个文件里对根作用域局部定义的用处（Python 模块级的 `TAX_RATE`）仍按设计不进入引用名，这个文件就是定义所在的文件，查引用时总会现场解析。
+- `code_intel/extract_throughput` 的测量方式改为仓库形状，另加只记录的 `code_intel/extract_1mib`，预算不变，见 [ADR 0031](../adr/0031.md)（提议中）。设计原来没有规定语料的形状，第 1 步用的是每种语言一个 1 MiB 的文件。

@@ -43,6 +43,7 @@ const BENCHES: &[Bench] = &[
     cache::EVICT,
     cache::ZSTD_1M,
     code_intel::EXTRACT_THROUGHPUT,
+    code_intel::EXTRACT_1MIB,
     executor::SPAWN_10K,
     executor::WAKE_1000X100,
     fs_watch::CLASSIFY_BURST,

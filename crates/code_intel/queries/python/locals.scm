@@ -2,9 +2,9 @@
 ;
 ; Written by Lectern: tree-sitter-python 0.25.0 ships no locals query. Same
 ; capture names as the other locals queries (tree-sitter-highlight's
-; convention). Parameters, assignments to a plain name, `for` targets and
-; lambda parameters. Class bodies are not scopes: their names are not
-; visible inside methods.
+; convention). Parameters, assignments to a plain name, `for` targets,
+; lambda parameters, and `def` / `class` names. Class bodies are not scopes:
+; their names are not visible inside methods.
 
 ; Scopes
 ;-------
@@ -43,6 +43,15 @@
 
 (for_statement
   left: (identifier) @local.definition)
+
+; A `def` or `class` name belongs to the scope around the declaration; the
+; function's own scope starts inside it (Lectern resolves a definition that
+; is the `name` of a scope node in the parent scope).
+(function_definition
+  name: (identifier) @local.definition)
+
+(class_definition
+  name: (identifier) @local.definition)
 
 ; References
 ;------------

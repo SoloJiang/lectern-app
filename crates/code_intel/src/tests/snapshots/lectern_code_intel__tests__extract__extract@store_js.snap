@@ -1,5 +1,6 @@
 ---
 source: crates/code_intel/src/tests/extract.rs
+assertion_line: 75
 description: tests/fixtures/extract/js/store.js
 expression: render(&extraction)
 ---
@@ -19,4 +20,4 @@ defs:
   39:2-41 method reset in api [public] (0)
   42:2-42 function count in api [public] (0)
   45:10-48 function ids [public] (1)
-refs: #trim Store clamp emit entries filter max min push
+refs: #items #trim Math clamp constructor emit entries filter idSequence length max min name push rest

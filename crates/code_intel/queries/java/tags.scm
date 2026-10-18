@@ -64,3 +64,16 @@
   (type_identifier) @name) @reference.class
 
 (type_identifier) @name @reference.type
+
+; Catch-all, last so that definitions win for their own names. Field names
+; never refer to a local, so they carry no locals predicate; every other
+; identifier that locals does not resolve is a reference name too. `ci_ref`
+; must list each file that may use a name (`int v = MAX_ITEMS;`,
+; `inventory.counts`), since only unindexed files are searched byte by byte.
+(field_access
+  field: (identifier) @name) @reference.member
+
+(
+  (identifier) @name @reference.name
+  (#is-not? local)
+)

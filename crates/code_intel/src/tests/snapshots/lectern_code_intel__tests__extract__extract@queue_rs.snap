@@ -1,5 +1,6 @@
 ---
 source: crates/code_intel/src/tests/extract.rs
+assertion_line: 75
 description: tests/fixtures/extract/rust/queue.rs
 expression: render(&extraction)
 ---
@@ -30,4 +31,4 @@ defs:
   90:7-90 function reset in metrics [module] (0)
   93:3-96 function emit [module] (1)
   98:7-107 function run [public] (1)
-refs: Display Drain F Fn Formatter Ok Queue QueueError Result Self Stats T Vec VecDeque debug_assert drain drain_into emit ensure extend format len new println push push_back record remaining retain trim with_capacity write
+refs: Clone Closed Copy DEFAULT_CAPACITY Debug Display Drain Eq Err F Fn Formatter Full Ok PartialEq Queue QueueError Result Self Stats T Vec VecDeque _ capacity closed collections debug_assert derive drain drain_into emit ensure extend fmt format items len metrics new println push push_back record remaining retain std trim with_capacity write

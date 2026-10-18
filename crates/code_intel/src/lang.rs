@@ -71,7 +71,11 @@ pub(crate) static CORE_LANGUAGES: &[CoreSpec] = &[
         compat_group: Some("js"),
         dialect: Dialect::TypeScript,
         language: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        tags_query: query!("ecmascript/tags.scm", "ts/tags.scm"),
+        tags_query: query!(
+            "ecmascript/tags.scm",
+            "ts/tags.scm",
+            "ecmascript/references.scm"
+        ),
         locals_query: query!("ecmascript/locals.scm", "ts/locals.scm"),
     },
     CoreSpec {
@@ -82,7 +86,12 @@ pub(crate) static CORE_LANGUAGES: &[CoreSpec] = &[
         compat_group: Some("js"),
         dialect: Dialect::Tsx,
         language: || tree_sitter_typescript::LANGUAGE_TSX.into(),
-        tags_query: query!("ecmascript/tags.scm", "ts/tags.scm", "jsx/tags.scm"),
+        tags_query: query!(
+            "ecmascript/tags.scm",
+            "ts/tags.scm",
+            "jsx/tags.scm",
+            "ecmascript/references.scm"
+        ),
         locals_query: query!("ecmascript/locals.scm", "ts/locals.scm"),
     },
     CoreSpec {
@@ -93,7 +102,12 @@ pub(crate) static CORE_LANGUAGES: &[CoreSpec] = &[
         compat_group: Some("js"),
         dialect: Dialect::JavaScript,
         language: || tree_sitter_javascript::LANGUAGE.into(),
-        tags_query: query!("ecmascript/tags.scm", "js/tags.scm", "jsx/tags.scm"),
+        tags_query: query!(
+            "ecmascript/tags.scm",
+            "js/tags.scm",
+            "jsx/tags.scm",
+            "ecmascript/references.scm"
+        ),
         locals_query: query!("ecmascript/locals.scm"),
     },
     CoreSpec {

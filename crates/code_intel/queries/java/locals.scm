@@ -3,7 +3,7 @@
 ; Written by Lectern: tree-sitter-java 0.23.5 ships no locals query. Same
 ; capture names as the other locals queries (tree-sitter-highlight's
 ; convention). Parameters, local variables, catch and for-each variables,
-; lambda parameters.
+; lambda parameters, local classes and records.
 
 ; Scopes
 ;-------
@@ -42,6 +42,15 @@
 
 (inferred_parameters
   (identifier) @local.definition)
+
+; Local classes and records, declared in a block.
+(block
+  [
+    (class_declaration
+      name: (identifier) @local.definition)
+    (record_declaration
+      name: (identifier) @local.definition)
+  ])
 
 ; References
 ;------------

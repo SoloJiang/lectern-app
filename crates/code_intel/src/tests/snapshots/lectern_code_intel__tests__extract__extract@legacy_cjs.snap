@@ -1,5 +1,6 @@
 ---
 source: crates/code_intel/src/tests/extract.rs
+assertion_line: 75
 description: tests/fixtures/extract/js/legacy.cjs
 expression: render(&extraction)
 ---
@@ -10,4 +11,4 @@ defs:
   6:28-8 function join in resolveAll [file] (1)
   11:4-11 variable cache [public]
   13:9-18 function remember [public] (2)
-refs: join map
+refs: exports join map module remember require resolveAll

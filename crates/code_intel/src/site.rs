@@ -79,6 +79,9 @@ struct Scope {
     range: Range<usize>,
     inherits: bool,
     parent: Option<usize>,
+    /// The `name` field of the scope's node (a function or class that also
+    /// opens this scope): a local definition there belongs to the parent.
+    name: Option<Range<usize>>,
 }
 
 struct LocalDef {
@@ -112,6 +115,7 @@ impl ParsedFile {
         cancel: &AtomicBool,
     ) -> Result<ParsedFile, ParseError> {
         let compiled = lang.compiled().ok_or(ParseError::Unsupported)?;
+        let dialect = lang.dialect();
         let stop = || cancel.load(Ordering::Acquire) || clock.now() >= at;
         let interrupted = || {
             if cancel.load(Ordering::Acquire) {
@@ -159,6 +163,7 @@ impl ParsedFile {
             range: 0..text.len(),
             inherits: false,
             parent: None,
+            name: None,
         }];
         let mut local_ranges: Vec<Range<usize>> = Vec::new();
         let mut ref_ranges: Vec<Range<usize>> = Vec::new();
@@ -179,10 +184,19 @@ impl ParsedFile {
                                 range,
                                 inherits,
                                 parent: None,
+                                name: capture
+                                    .node
+                                    .child_by_field_name("name")
+                                    .map(|n| n.byte_range()),
                             });
                         }
                         Capture::LocalDefinition => local_ranges.push(range),
-                        Capture::LocalReference => ref_ranges.push(range),
+                        // `(identifier) @local.reference` also matches member
+                        // and path names (`items.add`, `Queue::new`), which
+                        // never refer to a local.
+                        Capture::LocalReference if is_variable_position(dialect, capture.node) => {
+                            ref_ranges.push(range);
+                        }
                         _ => {}
                     }
                 }
@@ -253,9 +267,14 @@ impl ParsedFile {
         local_ranges.dedup();
         let locals: Vec<LocalDef> = local_ranges
             .into_iter()
-            .map(|range| LocalDef {
-                scope: innermost(&scopes, &range),
-                range,
+            .map(|range| {
+                // A function or class name is visible in the scope around the
+                // declaration, not in the body scope the declaration opens.
+                let mut scope = innermost(&scopes, &range);
+                if scopes[scope].name.as_ref() == Some(&range) {
+                    scope = scopes[scope].parent.unwrap_or(0);
+                }
+                LocalDef { scope, range }
             })
             .collect();
 
@@ -348,7 +367,12 @@ impl ParsedFile {
                 defines: Some(defines),
             });
         }
-        let binding = self.binding(&range, &name);
+        // A member or path name (`items.add`, `obj.x`, `Queue::new`) never
+        // binds to a same-named local.
+        let binding = (is_variable_position(dialect, node)
+            && !matches!(syntax, RefSyntax::Member | RefSyntax::MemberCall))
+        .then(|| self.binding(&range, &name))
+        .flatten();
         Some(Site {
             name,
             syntax,
@@ -646,6 +670,34 @@ fn is_identifier(dialect: Dialect, kind: &str) -> bool {
     kinds.contains(&kind)
 }
 
+/// Identifier positions that name a member, a path segment or a keyword
+/// argument rather than a variable: (parent kind, field). The locals
+/// queries' `(identifier) @local.reference` matches these too; they are not
+/// local references and never bind to a local. JS, TS and Go name members
+/// with their own node kinds (`property_identifier`, `field_identifier`).
+const NON_VARIABLE_POSITIONS: &[(Dialect, &str, &str)] = &[
+    (Dialect::Rust, "scoped_identifier", "name"),
+    (Dialect::Rust, "scoped_identifier", "path"),
+    (Dialect::Rust, "macro_invocation", "macro"),
+    (Dialect::Java, "method_invocation", "name"),
+    (Dialect::Java, "field_access", "field"),
+    (Dialect::Java, "scoped_identifier", "name"),
+    (Dialect::Java, "scoped_identifier", "scope"),
+    (Dialect::Python, "attribute", "attribute"),
+    (Dialect::Python, "keyword_argument", "name"),
+];
+
+/// Whether an identifier can refer to a variable (see
+/// [`NON_VARIABLE_POSITIONS`]).
+fn is_variable_position(dialect: Dialect, node: Node<'_>) -> bool {
+    let Some(parent) = node.parent() else {
+        return true;
+    };
+    !NON_VARIABLE_POSITIONS.iter().any(|(d, kind, field)| {
+        *d == dialect && parent.kind() == *kind && in_field(node, parent, field)
+    })
+}
+
 /// Whether `node` is the child in `field` of its parent.
 fn in_field(node: Node<'_>, parent: Node<'_>, field: &str) -> bool {
     parent
@@ -712,7 +764,12 @@ pub fn accepted_kinds(lang: &Lang, syntax: RefSyntax) -> u16 {
         RefSyntax::Call | RefSyntax::MemberCall => CALLABLE,
         RefSyntax::Construct => CONSTRUCTIBLE,
         RefSyntax::Type => TYPES,
-        RefSyntax::Member => MEMBERS,
+        // Rust's `a.b` always has a value on the left: a field or a method.
+        // Elsewhere the left side can be a namespace import, a module, a
+        // package or a class (`utils.handle`, `models.User`, `pkg.Var`,
+        // `Outer.Inner`), whose members can be any kind of definition.
+        RefSyntax::Member if lang.dialect() == Dialect::Rust => MEMBERS,
+        RefSyntax::Member => ALL_KINDS,
         RefSyntax::Plain => ALL_KINDS,
     };
     // Go: a conversion `Meters(value)` or `units.Meters(value)` is call

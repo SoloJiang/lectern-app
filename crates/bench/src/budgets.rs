@@ -772,7 +772,8 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // ---- fs_watch (docs/design/fs_watch.md「性能」) ----
-    // Single-thread extraction, about 1 MiB of each first-release language.
+    // Single-thread extraction, about 1 MiB of each first-release language as
+    // 8 KiB files (repository-shaped, ADR 0031).
     share(
         "code_intel/extract_throughput",
         &[median(Limit::ThroughputAtLeast(4 * MB))],
@@ -780,6 +781,8 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // One 1 MiB file per language, against the 250 ms per-file deadline.
+    share("code_intel/extract_1mib", RECORD, CODE_INTEL, ACTIVE, Time),
     // FakeBackend and the manual driver, without backend latency.
     share(
         "fs_watch/classify_burst",

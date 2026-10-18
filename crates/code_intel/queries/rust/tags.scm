@@ -141,3 +141,14 @@
     name: (type_identifier) @name) @reference.class
 
 (type_identifier) @name @reference.type
+
+; Catch-all, last so that definitions win for their own names: every
+; identifier that locals does not resolve, and every field name. `ci_ref`
+; must list each file that may use a name (`let v = PUBLIC_CONSTANT;`,
+; `object.field`), since only unindexed files are searched byte by byte.
+(
+    (identifier) @name @reference.name
+    (#is-not? local)
+)
+
+(field_identifier) @name @reference.member

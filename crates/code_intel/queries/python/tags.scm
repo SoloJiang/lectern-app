@@ -50,3 +50,16 @@
 (class_definition
   superclasses: (argument_list
     (identifier) @name) @reference.class)
+
+; Catch-all, last so that definitions win for their own names. Attribute
+; names never refer to a local, so they carry no locals predicate; every
+; other identifier that locals does not resolve is a reference name too.
+; `ci_ref` must list each file that may use a name (`rate = TAX_RATE`,
+; `models.User`), since only unindexed files are searched byte by byte.
+(attribute
+  attribute: (identifier) @name) @reference.member
+
+(
+  (identifier) @name @reference.name
+  (#is-not? local)
+)

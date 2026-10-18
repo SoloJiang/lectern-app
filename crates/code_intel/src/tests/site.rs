@@ -319,6 +319,18 @@ fn site_kind_table() {
         [Method, Constant, Field, Variable]
     );
     assert_eq!(accepted(rust, RefSyntax::Plain), crate::DEF_KINDS);
+    // Outside Rust the left side of `a.b` can be a namespace, module, package
+    // or class: a member can name any kind (`utils.handle`, `models.User`).
+    for lang in ["ts", "tsx", "js", "java", "python", "go"] {
+        let lang = table.get(lang).unwrap();
+        assert_eq!(accepted(lang, RefSyntax::Member), crate::DEF_KINDS);
+    }
+    assert!(accepts(ts, RefSyntax::Member, Function));
+    assert!(accepts(
+        table.get("python").unwrap(),
+        RefSyntax::Member,
+        Class
+    ));
     // Go conversions are call syntax naming a type.
     assert_eq!(
         accepted(go, RefSyntax::Call),
@@ -326,4 +338,140 @@ fn site_kind_table() {
     );
     assert!(accepts(go, RefSyntax::MemberCall, Type));
     assert!(!accepts(rust, RefSyntax::Call, Type));
+}
+
+#[test]
+fn site_member_values_accept_every_kind() {
+    // A member that is not called can name a function or a class: an
+    // exported function taken as a value, a qualified Python name.
+    let table = LanguageTable::core();
+    let source = "import * as utils from './utils';\nconst cb = utils.handle;\n";
+    let file = parse("ts", source);
+    let handle = site(&file, source, "handle", 0);
+    assert_eq!(handle.syntax, RefSyntax::Member);
+    assert!(accepts(
+        table.get("ts").unwrap(),
+        handle.syntax,
+        DefKind::Function
+    ));
+
+    let source = "import models\nuser = models.User\n";
+    let file = parse("python", source);
+    let user = site(&file, source, "User", 0);
+    assert_eq!(user.syntax, RefSyntax::Member);
+    assert!(accepts(
+        table.get("python").unwrap(),
+        user.syntax,
+        DefKind::Class
+    ));
+
+    // Rust's `a.b` has a value on the left: fields and methods only.
+    let rust = table.get("rust").unwrap();
+    assert!(!accepts(rust, RefSyntax::Member, DefKind::Function));
+    assert!(accepts(rust, RefSyntax::Member, DefKind::Field));
+}
+
+#[test]
+fn site_nested_declarations_bind_locally() {
+    // (language, source, the call's needle and occurrence, the definition's
+    // needle and occurrence, offset of the name inside the definition needle)
+    let cases = [
+        (
+            "python",
+            "def outer():\n    def helper():\n        return 1\n    return helper()\n",
+            ("helper", 1),
+            ("def helper", 0, 4),
+        ),
+        (
+            "python",
+            "def outer():\n    class Local:\n        pass\n    return Local()\n",
+            ("Local", 1),
+            ("class Local", 0, 6),
+        ),
+        (
+            "js",
+            "function outer() {\n  function helper() { return 1; }\n  return helper();\n}\n",
+            ("helper", 1),
+            ("function helper", 0, 9),
+        ),
+        (
+            "rust",
+            "fn outer() -> u8 {\n    fn helper() -> u8 { 1 }\n    helper()\n}\n",
+            ("helper", 1),
+            ("fn helper", 0, 3),
+        ),
+        (
+            "java",
+            "class A {\n  void outer() {\n    class Local {}\n    new Local();\n  }\n}\n",
+            ("Local", 1),
+            ("class Local", 0, 6),
+        ),
+    ];
+    for (lang, source, (call, call_nth), (decl, decl_nth, offset)) in cases {
+        let file = parse(lang, source);
+        let at = pos(source, decl, decl_nth, offset);
+        let use_site = site(&file, source, call, call_nth);
+        let binding = use_site
+            .binding
+            .unwrap_or_else(|| panic!("{lang}: {call} is not bound"));
+        assert_eq!(binding.at, at, "{lang}");
+        // In the enclosing function's scope, not the declaration's own body.
+        assert!(binding.local, "{lang}");
+        let defines = file
+            .site_at(at)
+            .expect("the name")
+            .defines
+            .expect("defines");
+        assert!(defines.local, "{lang}: the nested declaration is local");
+    }
+
+    // At the top level the name is in the root scope: not local.
+    let source = "def top():\n    return 1\n\ntop()\n";
+    let file = parse("python", source);
+    let top = file
+        .site_at(pos(source, "top", 0, 0))
+        .unwrap()
+        .defines
+        .unwrap();
+    assert!(!top.local);
+    let call = site(&file, source, "top", 1).binding.expect("root binding");
+    assert!(!call.local);
+}
+
+#[test]
+fn site_member_names_do_not_bind_locals() {
+    // (language, source, member needle and occurrence, plain use of the
+    // same name and its occurrence)
+    let cases = [
+        (
+            "java",
+            "class A {\n  void f(java.util.List<Integer> items) {\n    int add = 0;\n    items.add(add);\n    this.add = add;\n  }\n}\n",
+            &[("add", 1), ("add", 3)][..],
+            ("add", 2),
+        ),
+        (
+            "python",
+            "def f(obj):\n    x = 1\n    obj.x()\n    return obj.x + x\n",
+            &[("x", 1), ("x", 2)][..],
+            ("x", 3),
+        ),
+        (
+            "rust",
+            "fn f() {\n    let new = 1;\n    let q = Queue::new();\n    g(new);\n}\n",
+            &[("new", 1)][..],
+            ("new", 2),
+        ),
+    ];
+    for (lang, source, members, plain) in cases {
+        let file = parse(lang, source);
+        for &(needle, nth) in members {
+            let s = site(&file, source, needle, nth);
+            assert!(
+                s.binding.is_none(),
+                "{lang}: {needle} #{nth} bound to a local"
+            );
+        }
+        let s = site(&file, source, plain.0, plain.1);
+        assert!(s.binding.is_some(), "{lang}: plain {} unbound", plain.0);
+    }
 }

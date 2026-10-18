@@ -284,3 +284,65 @@ fn extract_arity_counts_parameters() {
     let many = format!("({})", vec!["a"; 300].join(", "));
     assert_eq!(count_params(&many, Dialect::JavaScript), 255);
 }
+
+#[test]
+fn extract_plain_and_member_uses_are_names() {
+    // `ci_ref` picks the candidate files of a reference search, so every
+    // file that may use a name lists it: plain uses of a constant or
+    // variable, and member names, not only calls and types. Locals stay out.
+    let cases: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "rust",
+            "fn f(o: &Obj) -> u8 {\n    let v = PUBLIC_CONSTANT;\n    o.field + v\n}\n",
+            &["PUBLIC_CONSTANT", "field"],
+            &["v", "o", "f"],
+        ),
+        (
+            "ts",
+            "export function f(o: Obj) {\n  const v = LIMIT;\n  const cb = utils.handle;\n  return o.size + v;\n}\n",
+            &["LIMIT", "utils", "handle", "size"],
+            &["v", "o", "cb", "f"],
+        ),
+        (
+            "js",
+            "export function f(o) {\n  const v = LIMIT;\n  return { v, total: o.total + COUNT };\n}\n",
+            &["LIMIT", "total", "COUNT"],
+            &["v", "o", "f"],
+        ),
+        (
+            "java",
+            "class A {\n  int f(Inventory inv) {\n    int v = MAX_ITEMS;\n    return inv.counts + v;\n  }\n}\n",
+            &["MAX_ITEMS", "counts"],
+            &["v", "inv", "f"],
+        ),
+        (
+            "python",
+            "def f(o):\n    v = TAX_RATE\n    return models.User(o.amount, v)\n",
+            &["TAX_RATE", "models", "User", "amount"],
+            &["v", "o", "f"],
+        ),
+        (
+            "go",
+            "package p\n\nfunc f(t *table) float64 {\n\tv := Precision\n\treturn t.units + v\n}\n",
+            &["Precision", "units"],
+            &["v", "t", "f"],
+        ),
+    ];
+    for (lang, source, present, absent) in cases {
+        let e = run(lang, source);
+        for name in *present {
+            assert!(
+                e.refs.iter().any(|r| &**r == *name),
+                "{lang}: {name} missing from {:?}",
+                e.refs
+            );
+        }
+        for name in *absent {
+            assert!(
+                !e.refs.iter().any(|r| &**r == *name),
+                "{lang}: {name} in {:?}",
+                e.refs
+            );
+        }
+    }
+}

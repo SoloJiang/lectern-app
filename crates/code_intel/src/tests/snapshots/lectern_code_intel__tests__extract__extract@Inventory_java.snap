@@ -1,5 +1,6 @@
 ---
 source: crates/code_intel/src/tests/extract.rs
+assertion_line: 75
 description: tests/fixtures/extract/java/Inventory.java
 expression: render(&extraction)
 ---
@@ -24,4 +25,4 @@ defs:
   66:25-72 class Counter in Inventory [file]
   67:20-67 field value in Counter [file]
   69:13-71 method increment in Counter [public] (0)
-refs: ArrayList IllegalArgumentException Integer Inventory Item Iterable Iterator Kind List Map String add isEmpty iterator java log name of println size util values
+refs: ArrayList IllegalArgumentException Integer Inventory Item Iterable Iterator Kind List Map Override String System TOOL add com counts example isEmpty items iterator java log name of out println size stock util value values

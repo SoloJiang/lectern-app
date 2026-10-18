@@ -88,3 +88,14 @@
   ]) @reference.call
 
 (type_identifier) @name @reference.type
+
+; Catch-all, last so that definitions win for their own names: every
+; identifier that locals does not resolve, and every field or selector
+; name. `ci_ref` must list each file that may use a name (`v := Precision`,
+; `t.units`), since only unindexed files are searched byte by byte.
+(
+  (identifier) @name @reference.name
+  (#is-not? local)
+)
+
+(field_identifier) @name @reference.member

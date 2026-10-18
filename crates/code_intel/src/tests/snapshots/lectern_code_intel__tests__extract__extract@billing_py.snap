@@ -1,5 +1,6 @@
 ---
 source: crates/code_intel/src/tests/extract.rs
+assertion_line: 75
 description: tests/fixtures/extract/python/billing.py
 expression: render(&extraction)
 ---
@@ -16,4 +17,4 @@ defs:
   35:8-37 method total in Invoice [unknown] (1)
   40:8-42 method parse in Invoice [unknown] (3)
   45:4-48 function pay [unknown] (3)
-refs: Base Decimal Invoice list register round split sum total
+refs: Base Decimal amount currency dataclass dataclasses decimal line lines list number property register round split staticmethod str sum total wrap

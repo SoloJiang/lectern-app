@@ -1,5 +1,6 @@
 ---
 source: crates/code_intel/src/tests/extract.rs
+assertion_line: 75
 description: tests/fixtures/extract/go/units.go
 expression: render(&extraction)
 ---
@@ -24,4 +25,4 @@ defs:
   48:15-48 method Name in table [public] (0)
   50:5-55 function check [package] (1)
   57:5-63 function FromFeet [public] (1)
-refs: Errorf Meters New append check error float64 len make string table
+refs: Errorf Meters Name New append check error errors float64 fmt len make maxValue metresPerFoot string table units

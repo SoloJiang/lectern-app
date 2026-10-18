@@ -1,5 +1,6 @@
 ---
 source: crates/code_intel/src/tests/extract.rs
+assertion_line: 75
 description: tests/fixtures/extract/ts/shapes.ts
 expression: render(&extraction)
 ---
@@ -30,4 +31,4 @@ defs:
   60:5-63 enum Unit [file]
   65:13-65 constant DEFAULT_UNIT [public]
   67:16-69 function pair [public] (2)
-refs: A B Base Circle Map Options Pair Promise Shape area helper isArray map parse readText reduce sum toFixed values
+refs: A Array B Base Circle Inch JSON Map Math Metre Options PI Pair Promise Shape Unit area constructor fallback helper isArray map name parse radius readText reduce sum toFixed values
