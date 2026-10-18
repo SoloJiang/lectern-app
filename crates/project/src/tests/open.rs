@@ -290,6 +290,8 @@ fn open_file_lists_carry_index_oids_for_git_only() {
             blob(hash, b"export {};\n"),
             "{hash:?}"
         );
+        // A gitlink holds a commit OID, not the empty blob's.
+        assert_ne!(oid_of(&files, "vendor/lib"), blob(hash, b""), "{hash:?}");
     }
 
     // A folder project's list has none.

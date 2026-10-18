@@ -221,9 +221,13 @@ impl FakeGit {
     /// Adds an index entry without touching the worktree. Its OID is the
     /// blob OID of what is in the worktree at `rel` now: a regular file's
     /// content, a symbolic link's target, else empty content (a missing
-    /// file, a submodule directory).
+    /// file). A submodule's entry holds a commit OID in a real index; the
+    /// fake gives it a stand-in derived from the path, never the empty blob.
     pub fn track(&self, git_dir: &Path, rel: &str, kind: FileKind) {
-        let staged = staged_bytes(&self.root(git_dir).join(rel));
+        let staged = match kind {
+            FileKind::Submodule => format!("fake gitlink {rel}").into_bytes(),
+            _ => staged_bytes(&self.root(git_dir).join(rel)),
+        };
         self.with_tree(git_dir, |t| {
             let oid = Oid::for_blob(t.hash, &staged);
             t.index.insert(rel.to_owned(), (kind, oid));
