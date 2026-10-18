@@ -8,15 +8,22 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionB
 
 use crate::Namespace;
 use crate::codec::Raw;
+use crate::custom;
+use crate::tables::TableOps;
 
 /// `PRAGMA application_id`: 0x4C435443, "LCTC".
 pub(crate) const APPLICATION_ID: i32 = 0x4C43_5443;
 /// `PRAGMA user_version`. Bumped when the tables change; older and newer
-/// files are rebuilt, never migrated.
-pub(crate) const SCHEMA_VERSION: i32 = 1;
+/// files are rebuilt, never migrated. 2: the `custom` table and foreign keys
+/// (custom tables).
+pub(crate) const SCHEMA_VERSION: i32 = 2;
 
-/// Prepared statements kept per connection (rusqlite's `cache` feature).
-const STATEMENT_CACHE: usize = 16;
+/// Prepared statements kept per connection (rusqlite's `cache` feature):
+/// this crate's own and those of the custom tables' users.
+pub(crate) const STATEMENT_CACHE: usize = 32;
+/// A hit or touch on an entry whose access time is older than this many
+/// minutes has its access time written back; younger ones are left alone.
+pub(crate) const TOUCH_AFTER_MIN: i64 = 60;
 /// Bytes counted for an entry beyond its key and value.
 pub(crate) const ENTRY_OVERHEAD: u64 = 64;
 /// Most bytes one write transaction deletes to get under the budget: what
@@ -25,6 +32,9 @@ pub(crate) const ENTRY_OVERHEAD: u64 = 64;
 /// cost of the write.
 pub(crate) const EVICT_MIN: u64 = 1 << 20;
 pub(crate) const EVICT_MAX: u64 = 16 << 20;
+/// The same for a custom namespace over its quota, at least this much: its
+/// units carry rows, so a byte costs more to delete than a byte of entries.
+pub(crate) const QUOTA_EVICT_MIN: u64 = 256 << 10;
 /// Most entries of retired namespace versions one write transaction deletes.
 pub(crate) const RETIRED_MAX: i64 = 256;
 /// Eviction stops at this share of the budget, in tenths.
@@ -59,6 +69,14 @@ CREATE TABLE entry (
   UNIQUE (ns, key)
 );
 CREATE INDEX entry_atime ON entry (atime);
+
+CREATE TABLE custom (
+  ns      INTEGER PRIMARY KEY,
+  name    TEXT NOT NULL UNIQUE,
+  version INTEGER NOT NULL,
+  bytes   INTEGER NOT NULL,
+  tables  TEXT NOT NULL
+);
 ";
 
 /// What a partition file must say about itself in `meta`.
@@ -87,10 +105,23 @@ pub(crate) struct Op<'a> {
     pub(crate) value: Option<(u8, &'a [u8])>,
 }
 
+/// What a write transaction writes.
+pub(crate) enum Work<'a> {
+    /// Entries, with the namespace IDs already known, one per op.
+    Entries {
+        ops: &'a [Op<'a>],
+        known: &'a [Option<i64>],
+    },
+    /// The units and statements of a `TableWrite` on namespace `ns`.
+    Tables {
+        ns: i64,
+        quota: u64,
+        ops: &'a TableOps,
+    },
+}
+
 pub(crate) struct WriteParams<'a> {
-    pub(crate) ops: &'a [Op<'a>],
-    /// Namespace IDs already known, one per op.
-    pub(crate) known: &'a [Option<i64>],
+    pub(crate) work: Work<'a>,
     /// Entries read since their access time was last written; set to `atime`.
     pub(crate) touched: &'a [i64],
     /// Entries that failed to decode.
@@ -107,6 +138,70 @@ pub(crate) struct WriteOutcome {
     pub(crate) evicted: u64,
     /// Namespace IDs this transaction looked up or assigned.
     pub(crate) namespaces: Vec<(Namespace, i64)>,
+    /// Custom table namespaces this transaction deleted units of.
+    pub(crate) deleted_tables: Vec<String>,
+}
+
+/// The byte accounting of one write transaction: `meta.bytes`, and the
+/// change of each namespace for `custom.bytes`.
+#[derive(Default)]
+pub(crate) struct Tally {
+    /// `meta.bytes` so far.
+    bytes: i64,
+    /// Bytes of the entries and units written.
+    written: i64,
+    /// Bytes deleted for the budget, a quota and retired namespaces.
+    evicted: i64,
+    /// Per namespace ID: the change in bytes, and whether any was deleted.
+    namespaces: Vec<(i64, i64, bool)>,
+}
+
+impl Tally {
+    fn namespace(&mut self, ns: i64) -> &mut (i64, i64, bool) {
+        let at = match self.namespaces.iter().position(|(id, _, _)| *id == ns) {
+            Some(at) => at,
+            None => {
+                self.namespaces.push((ns, 0, false));
+                self.namespaces.len() - 1
+            }
+        };
+        &mut self.namespaces[at]
+    }
+
+    /// A new or replacing entry or unit of `size` bytes.
+    pub(crate) fn write(&mut self, ns: i64, size: i64) {
+        self.bytes += size;
+        self.written += size;
+        self.namespace(ns).1 += size;
+    }
+
+    /// An entry overwritten in place: its old size no longer counts.
+    fn overwrite(&mut self, ns: i64, old: i64) {
+        self.bytes -= old;
+        self.namespace(ns).1 -= old;
+    }
+
+    /// An entry or unit deleted.
+    pub(crate) fn delete(&mut self, ns: i64, size: i64) {
+        self.bytes -= size;
+        let n = self.namespace(ns);
+        n.1 -= size;
+        n.2 = true;
+    }
+
+    /// Deleted by eviction.
+    pub(crate) fn evict(&mut self, ns: i64, size: i64) {
+        self.delete(ns, size);
+        self.evicted += size;
+    }
+
+    /// The change in bytes of namespace `ns` so far.
+    fn delta(&self, ns: i64) -> i64 {
+        self.namespaces
+            .iter()
+            .find(|(id, _, _)| *id == ns)
+            .map_or(0, |n| n.1)
+    }
 }
 
 /// Opens the write connection of a partition, creating the file.
@@ -138,8 +233,11 @@ fn configure(conn: &Connection, page_cache: u64) -> rusqlite::Result<()> {
     conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
     conn.busy_timeout(Duration::from_millis(100))?;
     let kib = (page_cache / 1024).max(1);
+    // Foreign keys: deleting a unit's entry deletes its rows in the custom
+    // tables in the same statement (ON DELETE CASCADE).
     conn.execute_batch(&format!(
-        "PRAGMA synchronous = NORMAL;
+        "PRAGMA foreign_keys = ON;
+         PRAGMA synchronous = NORMAL;
          PRAGMA cache_size = -{kib};
          PRAGMA journal_size_limit = 4194304;
          PRAGMA mmap_size = 0;
@@ -306,55 +404,172 @@ pub(crate) fn read(
 }
 
 /// Writes access times back in a transaction of their own, when a partition
-/// is closed or swapped out.
+/// is closed or swapped out, or the pending set is full.
 pub(crate) fn touch(conn: &mut Connection, ids: &[i64], atime: i64) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     set_atimes(&tx, ids, atime)?;
     tx.commit()
 }
 
-/// Entries deleted since they were read are skipped. The time of the write
-/// keeps the LRU order: nothing was written between the read and now.
+/// Entries deleted since they were read are skipped, and so are entries
+/// written or touched within `TOUCH_AFTER_MIN` (units are touched without
+/// reading their access time). The time of the write keeps the LRU order:
+/// nothing was written between the read and now.
 fn set_atimes(conn: &Connection, ids: &[i64], atime: i64) -> rusqlite::Result<()> {
-    let mut update = conn.prepare_cached("UPDATE entry SET atime = ?1 WHERE id = ?2")?;
+    let mut update =
+        conn.prepare_cached("UPDATE entry SET atime = ?1 WHERE id = ?2 AND atime < ?3")?;
     for id in ids {
-        update.execute(params![atime, id])?;
+        update.execute(params![atime, id, atime - TOUCH_AFTER_MIN])?;
     }
     Ok(())
 }
 
 /// One write transaction: write access times back, delete entries that
-/// failed to decode, apply the writes, delete entries of retired namespaces
-/// and evict to the budget, return free pages, update `meta.bytes`, commit.
-/// `hook` runs just before the commit.
+/// failed to decode, apply the writes, delete entries of retired namespaces,
+/// evict to a custom namespace's quota and to the budget, return free pages,
+/// update `meta.bytes` and `custom.bytes`, commit. `hook` runs just before
+/// the commit. A failing statement of a custom table's user sets
+/// `statement_failed`.
 pub(crate) fn write(
     conn: &mut Connection,
     p: &WriteParams<'_>,
+    statement_failed: &mut bool,
     hook: impl FnOnce(),
 ) -> rusqlite::Result<WriteOutcome> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let mut bytes: i64 = tx
-        .prepare_cached("SELECT value FROM meta WHERE name = 'bytes'")?
-        .query_row([], |r| r.get(0))?;
-    let mut evicted = 0i64;
+    let mut tally = Tally {
+        bytes: tx
+            .prepare_cached("SELECT value FROM meta WHERE name = 'bytes'")?
+            .query_row([], |r| r.get(0))?,
+        ..Tally::default()
+    };
     set_atimes(&tx, p.touched, p.atime)?;
 
     {
-        let mut delete = tx.prepare_cached("DELETE FROM entry WHERE id = ?1 RETURNING size")?;
+        let mut delete = tx.prepare_cached("DELETE FROM entry WHERE id = ?1 RETURNING ns, size")?;
         for id in p.bad {
-            if let Some(size) = delete
-                .query_row(params![id], |r| r.get::<_, i64>(0))
+            if let Some((ns, size)) = delete
+                .query_row(params![id], |r| Ok((r.get(0)?, r.get(1)?)))
                 .optional()?
             {
-                bytes -= size;
+                tally.delete(ns, size);
             }
         }
     }
 
-    // Bytes of the entries this transaction writes.
-    let mut written = 0i64;
     let mut namespaces: Vec<(Namespace, i64)> = Vec::new();
-    for (op, known) in p.ops.iter().zip(p.known) {
+    match p.work {
+        Work::Entries { ops, known } => {
+            write_entries(&tx, ops, known, p.atime, &mut tally, &mut namespaces)?
+        }
+        Work::Tables { ns, ops, .. } => {
+            custom::apply(&tx, ns, ops, p.atime, &mut tally, statement_failed)?
+        }
+    }
+
+    {
+        let mut retired = tx.prepare_cached(
+            "DELETE FROM entry WHERE id IN (
+               SELECT id FROM entry
+               WHERE ns IN (SELECT id FROM namespace WHERE retired = 1)
+               LIMIT ?1
+             ) RETURNING ns, size",
+        )?;
+        let mut rows = retired.query(params![RETIRED_MAX])?;
+        while let Some(row) = rows.next()? {
+            tally.evict(row.get(0)?, row.get(1)?);
+        }
+    }
+
+    // Quota and budget eviction share one limit per transaction; quota
+    // eviction alone stops at a lower one.
+    let most = tally.written.clamp(EVICT_MIN as i64, EVICT_MAX as i64);
+    let mut freed = 0i64;
+    if let Work::Tables { ns, quota, .. } = p.work {
+        let ns_bytes = custom::bytes(&tx, ns)? + tally.delta(ns);
+        if ns_bytes > i64::try_from(quota).unwrap_or(i64::MAX) {
+            let target = i64::try_from(quota / 10 * EVICT_TARGET_TENTHS).unwrap_or(i64::MAX);
+            let quota_most = tally
+                .written
+                .clamp(QUOTA_EVICT_MIN as i64, EVICT_MAX as i64);
+            custom::evict_quota(
+                &tx, ns, ns_bytes, target, quota_most, &mut freed, &mut tally,
+            )?;
+        }
+    }
+
+    let budget = i64::try_from(p.budget).unwrap_or(i64::MAX);
+    if tally.bytes > budget {
+        let target = i64::try_from(p.budget / 10 * EVICT_TARGET_TENTHS).unwrap_or(i64::MAX);
+        let mut oldest =
+            tx.prepare_cached("SELECT id, ns, size FROM entry ORDER BY atime, id LIMIT 64")?;
+        let mut delete = tx.prepare_cached("DELETE FROM entry WHERE id = ?1")?;
+        'evict: while tally.bytes > target && freed < most {
+            let victims: Vec<(i64, i64, i64)> = oldest
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            if victims.is_empty() {
+                break;
+            }
+            for (id, ns, size) in victims {
+                delete.execute(params![id])?;
+                tally.evict(ns, size);
+                freed += size;
+                if tally.bytes <= target || freed >= most {
+                    break 'evict;
+                }
+            }
+        }
+    }
+
+    vacuum(&tx)?;
+
+    let bytes = tally.bytes.max(0);
+    tx.prepare_cached("UPDATE meta SET value = ?1 WHERE name = 'bytes'")?
+        .execute(params![bytes])?;
+    let deleted_tables = custom_bytes(&tx, &tally)?;
+    hook();
+    tx.commit()?;
+    Ok(WriteOutcome {
+        bytes: bytes as u64,
+        evicted: tally.evicted as u64,
+        namespaces,
+        deleted_tables,
+    })
+}
+
+/// Adds each namespace's change to its `custom.bytes`; returns the custom
+/// namespaces that lost units.
+fn custom_bytes(conn: &Connection, tally: &Tally) -> rusqlite::Result<Vec<String>> {
+    let mut deleted = Vec::new();
+    let mut update =
+        conn.prepare_cached("UPDATE custom SET bytes = bytes + ?1 WHERE ns = ?2 RETURNING name")?;
+    for (ns, delta, lost) in &tally.namespaces {
+        if *delta == 0 && !lost {
+            continue;
+        }
+        let name: Option<String> = update
+            .query_row(params![delta, ns], |r| r.get(0))
+            .optional()?;
+        if let Some(name) = name
+            && *lost
+        {
+            deleted.push(name);
+        }
+    }
+    Ok(deleted)
+}
+
+/// The writes of `Partition::put`, `remove` and `Batch::commit`.
+fn write_entries(
+    tx: &Connection,
+    ops: &[Op<'_>],
+    known: &[Option<i64>],
+    atime: i64,
+    tally: &mut Tally,
+    namespaces: &mut Vec<(Namespace, i64)>,
+) -> rusqlite::Result<()> {
+    for (op, known) in ops.iter().zip(known) {
         let id = match known.or_else(|| {
             namespaces
                 .iter()
@@ -364,9 +579,9 @@ pub(crate) fn write(
             Some(id) => Some(id),
             None => {
                 let id = if op.value.is_some() {
-                    Some(assign_namespace(&tx, &op.namespace)?)
+                    Some(assign_namespace(tx, &op.namespace)?)
                 } else {
-                    namespace_id(&tx, &op.namespace)?
+                    namespace_id(tx, &op.namespace)?
                 };
                 if let Some(id) = id {
                     namespaces.push((op.namespace, id));
@@ -392,9 +607,11 @@ pub(crate) fn write(
                        codec = excluded.codec, size = excluded.size,
                        atime = excluded.atime, value = excluded.value",
                 )?
-                .execute(params![ns, op.key, codec, size, p.atime, value])?;
-                bytes += size - old.unwrap_or(0);
-                written += size;
+                .execute(params![ns, op.key, codec, size, atime, value])?;
+                if let Some(old) = old {
+                    tally.overwrite(ns, old);
+                }
+                tally.write(ns, size);
             }
             None => {
                 if let Some(size) = tx
@@ -402,67 +619,12 @@ pub(crate) fn write(
                     .query_row(params![ns, op.key], |r| r.get::<_, i64>(0))
                     .optional()?
                 {
-                    bytes -= size;
+                    tally.delete(ns, size);
                 }
             }
         }
     }
-
-    {
-        let mut retired = tx.prepare_cached(
-            "DELETE FROM entry WHERE id IN (
-               SELECT id FROM entry
-               WHERE ns IN (SELECT id FROM namespace WHERE retired = 1)
-               LIMIT ?1
-             ) RETURNING size",
-        )?;
-        let mut rows = retired.query(params![RETIRED_MAX])?;
-        while let Some(row) = rows.next()? {
-            let size: i64 = row.get(0)?;
-            bytes -= size;
-            evicted += size;
-        }
-    }
-
-    let budget = i64::try_from(p.budget).unwrap_or(i64::MAX);
-    if bytes > budget {
-        let target = i64::try_from(p.budget / 10 * EVICT_TARGET_TENTHS).unwrap_or(i64::MAX);
-        let most = written.clamp(EVICT_MIN as i64, EVICT_MAX as i64);
-        let mut freed = 0i64;
-        let mut oldest =
-            tx.prepare_cached("SELECT id, size FROM entry ORDER BY atime, id LIMIT 64")?;
-        let mut delete = tx.prepare_cached("DELETE FROM entry WHERE id = ?1")?;
-        'evict: while bytes > target && freed < most {
-            let victims: Vec<(i64, i64)> = oldest
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<_>>()?;
-            if victims.is_empty() {
-                break;
-            }
-            for (id, size) in victims {
-                delete.execute(params![id])?;
-                bytes -= size;
-                freed += size;
-                if bytes <= target || freed >= most {
-                    break 'evict;
-                }
-            }
-        }
-        evicted += freed;
-    }
-
-    vacuum(&tx)?;
-
-    let bytes = bytes.max(0);
-    tx.prepare_cached("UPDATE meta SET value = ?1 WHERE name = 'bytes'")?
-        .execute(params![bytes])?;
-    hook();
-    tx.commit()?;
-    Ok(WriteOutcome {
-        bytes: bytes as u64,
-        evicted: evicted as u64,
-        namespaces,
-    })
+    Ok(())
 }
 
 /// Returns up to `VACUUM_PAGES` free pages to the file system when the free
@@ -484,7 +646,7 @@ fn vacuum(conn: &Connection) -> rusqlite::Result<()> {
 /// The ID of a namespace version, inserting it on first use. A new version
 /// retires the lower ones; a version lower than one already seen is retired
 /// from the start.
-fn assign_namespace(conn: &Connection, ns: &Namespace) -> rusqlite::Result<i64> {
+pub(crate) fn assign_namespace(conn: &Connection, ns: &Namespace) -> rusqlite::Result<i64> {
     if let Some(id) = namespace_id(conn, ns)? {
         return Ok(id);
     }

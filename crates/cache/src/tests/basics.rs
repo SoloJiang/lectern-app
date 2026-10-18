@@ -611,7 +611,7 @@ fn compression_broken_frame_is_a_decode_failure() {
 
 // memory_*
 
-const PRAGMAS: [&str; 12] = [
+const PRAGMAS: [&str; 13] = [
     "cache_size",
     "mmap_size",
     "busy_timeout",
@@ -620,6 +620,7 @@ const PRAGMAS: [&str; 12] = [
     "journal_size_limit",
     "trusted_schema",
     "cell_size_check",
+    "foreign_keys",
     "query_only",
     "auto_vacuum",
     "application_id",

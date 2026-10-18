@@ -5,16 +5,20 @@
 //! files under the app cache directory. Every blocking method runs on the
 //! caller's thread; this crate starts no thread and submits no task. Failures
 //! never reach the caller: a failed read is a miss, a failed write returns
-//! [`Written::Dropped`]. The design is in `docs/design/cache.md`.
+//! [`Written::Dropped`]. Users that need their own indexed queries register
+//! custom tables ([`Tables`]), whose rows belong to units that are evicted
+//! like entries. The design is in `docs/design/cache.md`.
 
 mod clock;
 mod codec;
+mod custom;
 mod db;
 mod key;
 mod pool;
 mod slot;
 mod stats;
 mod sweep;
+mod tables;
 mod util;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -34,12 +38,13 @@ use sha2::{Digest, Sha256};
 use crate::clock::Clock;
 use crate::db::Op;
 use crate::pool::Pool;
-use crate::slot::Slot;
+use crate::slot::{Slot, Writes};
 use crate::stats::Counters;
 use crate::util::lock;
 
 pub use crate::key::Key;
 pub use crate::stats::{DisableReason, PartitionKind, PartitionState, PartitionStats, Stats};
+pub use crate::tables::{NewUnit, Param, Row, TableRead, TableSet, TableWrite, Tables, Unit};
 
 /// Largest encoded key.
 pub const MAX_KEY: usize = 512;
@@ -349,11 +354,11 @@ impl Partition {
         if key.len() > MAX_KEY || bytes.len() > MAX_VALUE {
             return self.slot.dropped(Dropped::TooLarge);
         }
-        self.slot.write(&[Op {
+        self.slot.write(Writes::Entries(&[Op {
             namespace: E::NAMESPACE,
             key: key.as_bytes(),
             value: Some((codec, &bytes)),
-        }])
+        }]))
     }
 
     /// Deletes one entry. Blocking; executor tasks only.
@@ -365,11 +370,11 @@ impl Partition {
         if key.len() > MAX_KEY {
             return self.slot.dropped(Dropped::TooLarge);
         }
-        self.slot.write(&[Op {
+        self.slot.write(Writes::Entries(&[Op {
             namespace: E::NAMESPACE,
             key: key.as_bytes(),
             value: None,
-        }])
+        }]))
     }
 
     /// Starts a batch of writes. No IO.
@@ -455,7 +460,7 @@ impl Batch {
                 value: op.value.as_ref().map(|(codec, bytes)| (*codec, &bytes[..])),
             })
             .collect();
-        slot.write(&ops)
+        slot.write(Writes::Entries(&ops))
     }
 }
 

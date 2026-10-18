@@ -17,8 +17,10 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, Weak};
 use rusqlite::{Connection, ErrorCode};
 
 use crate::codec;
-use crate::db::{self, Check, Found, Identity, Op, WriteParams};
+use crate::custom::{self, Attach};
+use crate::db::{self, Check, Found, Identity, Op, TOUCH_AFTER_MIN, Work, WriteParams};
 use crate::stats::{DisableReason, PartitionKind, PartitionState, PartitionStats};
+use crate::tables::{TableOps, TableRead, Tables};
 use crate::util::{lock, log, read, write};
 use crate::{Dropped, Entry, Key, MAX_KEY, Namespace, Shared, Written, clock, sweep};
 
@@ -30,9 +32,6 @@ const IO_ERRORS_MAX: u32 = 3;
 const CORRUPTIONS_MAX: u32 = 2;
 /// Undecodable entries remembered for deletion; more are found again later.
 const BAD_MAX: usize = 4096;
-/// A hit on an entry whose access time is older than this many minutes
-/// writes the access time back.
-const TOUCH_AFTER_MIN: i64 = 60;
 /// Entries waiting for their access time to be written back (32 KiB of IDs);
 /// hits beyond it are not recorded.
 pub(crate) const TOUCHED_MAX: usize = 4096;
@@ -41,6 +40,13 @@ pub(crate) const TOUCHED_MAX: usize = 4096;
 const NO_PAGE_LIMIT: u64 = 4_294_967_294;
 
 pub(crate) type Hook = Arc<dyn Fn() + Send + Sync>;
+
+/// What one write transaction writes.
+#[derive(Clone, Copy)]
+pub(crate) enum Writes<'a> {
+    Entries(&'a [Op<'a>]),
+    Tables(&'static Tables, &'a TableOps),
+}
 
 pub(crate) struct Slot {
     pub(crate) shared: Arc<Shared>,
@@ -55,6 +61,9 @@ pub(crate) struct Slot {
     session: RwLock<Option<Session>>,
     state: Mutex<State>,
     io_errors: AtomicU32,
+    /// The eviction generation of each custom table namespace a `TableSet`
+    /// was taken for. A leaf lock, never held across IO.
+    evictions: Mutex<Vec<(&'static str, Arc<AtomicU64>)>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) hooks: Mutex<Hooks>,
 }
@@ -83,12 +92,23 @@ pub(crate) struct Session {
     namespaces: Mutex<Vec<(Namespace, i64)>>,
     /// Entries that failed to decode, deleted by the next write transaction.
     bad: Mutex<Vec<i64>>,
-    /// Entries hit with an old access time, sorted; written back by the next
-    /// write transaction, `close` and swapping out.
+    /// Entries hit with an old access time and touched units, sorted;
+    /// written back by the next write transaction, `close`, swapping out,
+    /// and `touch` when full.
     touched: Mutex<Vec<i64>>,
+    /// Custom tables known to exist in this file, by namespace name and
+    /// version, with their namespace IDs.
+    tables: Mutex<Vec<(Namespace, i64)>>,
 }
 
 impl Session {
+    fn tables(&self, ns: &Namespace) -> Option<i64> {
+        lock(&self.tables)
+            .iter()
+            .find(|(known, _)| known.same_version(ns))
+            .map(|(_, id)| *id)
+    }
+
     fn namespace(&self, ns: &Namespace) -> Option<i64> {
         lock(&self.namespaces)
             .iter()
@@ -136,6 +156,9 @@ struct State {
     bytes: u64,
     /// The budget for this run: lowered after a full disk.
     budget: u64,
+    /// A session was opened in this run: a new file found by a later open
+    /// means the data was deleted (swept, or removed by the user).
+    opened_before: bool,
 }
 
 /// How a SQLite error is handled.
@@ -206,8 +229,10 @@ impl Slot {
                 corruptions: 0,
                 bytes: 0,
                 budget,
+                opened_before: false,
             }),
             io_errors: AtomicU32::new(0),
+            evictions: Mutex::new(Vec::new()),
             #[cfg(any(test, feature = "test-support"))]
             hooks: Mutex::new(Hooks::default()),
         })
@@ -274,14 +299,201 @@ impl Slot {
     }
 
     /// Writes pending access times in a transaction of their own. Failures
-    /// only lose LRU precision; the next open handles a broken file.
-    fn write_back(&self, session: &Session) {
+    /// only lose LRU precision; the next open handles a broken file. Returns
+    /// whether they were written.
+    fn write_back(&self, session: &Session) -> bool {
         let ids = std::mem::take(&mut *lock(&session.touched));
-        if ids.is_empty() || lock(&self.state).disabled.is_some() {
-            return;
+        if ids.is_empty() {
+            return true;
+        }
+        if lock(&self.state).disabled.is_some() {
+            return false;
         }
         let atime = (self.shared.clock.now_ms() / 60_000) as i64;
-        let _ = db::touch(&mut lock(&session.writer), &ids, atime);
+        db::touch(&mut lock(&session.writer), &ids, atime).is_ok()
+    }
+
+    /// The eviction generation of custom table namespace `name`.
+    pub(crate) fn evictions(&self, name: &'static str) -> Arc<AtomicU64> {
+        let mut all = lock(&self.evictions);
+        if let Some((_, n)) = all.iter().find(|(known, _)| *known == name) {
+            return n.clone();
+        }
+        let n = Arc::new(AtomicU64::new(0));
+        all.push((name, n.clone()));
+        n
+    }
+
+    /// Units of custom table namespace `name` were deleted.
+    fn bump(&self, name: &str) {
+        if let Some((_, n)) = lock(&self.evictions)
+            .iter()
+            .find(|(known, _)| *known == name)
+        {
+            n.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    /// The file's data is gone: rebuilt, disabled, or found new.
+    fn bump_all(&self) {
+        for (_, n) in lock(&self.evictions).iter() {
+            n.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    /// Marks units as used: adds them to the pending access times, writing
+    /// those back whenever the set is full. Stops when a write-back fails.
+    pub(crate) fn touch_units(&self, mut ids: Vec<i64>) {
+        if ids.is_empty() || !self.shared.may_block() || lock(&self.state).disabled.is_some() {
+            return;
+        }
+        self.used();
+        let Ok(guard) = self.session() else {
+            return;
+        };
+        let Some(session) = guard.as_ref() else {
+            unreachable!("session() returns an open session");
+        };
+        loop {
+            {
+                let mut set = lock(&session.touched);
+                set.append(&mut ids);
+                set.sort_unstable();
+                set.dedup();
+                if set.len() > TOUCHED_MAX {
+                    ids = set.split_off(TOUCHED_MAX);
+                }
+            }
+            if ids.is_empty() || !self.write_back(session) {
+                return;
+            }
+        }
+    }
+
+    /// Makes sure the tables of `tables` exist in the session's file; on
+    /// the write connection, under its lock. `None` for a registration that
+    /// breaks a rule.
+    fn attach(
+        &self,
+        session: &Session,
+        tables: &'static Tables,
+        conn: &mut Connection,
+    ) -> rusqlite::Result<Option<i64>> {
+        let name = tables.namespace.name;
+        if let Some(ns) = session.tables(&tables.namespace) {
+            return Ok(Some(ns));
+        }
+        match custom::attach(conn, tables)? {
+            Attach::Ready { ns, replaced } => {
+                let mut known = lock(&session.tables);
+                // Another version's tables are gone from the file.
+                known.retain(|(n, _)| n.name != name);
+                known.push((tables.namespace, ns));
+                drop(known);
+                if replaced {
+                    self.bump(name);
+                }
+                Ok(Some(ns))
+            }
+            Attach::Invalid(why) => {
+                log(format_args!("custom tables of {}: {why}", self.describe()));
+                Ok(None)
+            }
+        }
+    }
+
+    /// One read transaction over custom tables.
+    pub(crate) fn read_tables<T>(
+        &self,
+        tables: &'static Tables,
+        f: impl FnOnce(&mut TableRead<'_>) -> T,
+    ) -> Option<T> {
+        if !self.shared.may_block() || lock(&self.state).disabled.is_some() {
+            return None;
+        }
+        self.used();
+        let guard = self.session().ok()?;
+        let Some(session) = guard.as_ref() else {
+            unreachable!("session() returns an open session");
+        };
+        let id = session.id;
+        let attached = if session.tables(&tables.namespace).is_some() {
+            Ok(Some(()))
+        } else {
+            let mut conn = lock(&session.writer);
+            self.prepare_writer(&conn)
+                .and_then(|_| self.attach(session, tables, &mut conn))
+                .map(|ns| ns.map(|_| ()))
+        };
+        match attached {
+            Ok(Some(())) => {}
+            Ok(None) => return None,
+            Err(e) => {
+                drop(guard);
+                self.fail(id, &e);
+                return None;
+            }
+        }
+        let result = self.query_tables(session, tables, f);
+        drop(guard);
+        match result {
+            Ok(value) => {
+                self.succeeded();
+                Some(value)
+            }
+            Err(ReadError::Reader(e)) if classify(&e) == Failure::NotWritable => {
+                self.close_session(id);
+                None
+            }
+            Err(ReadError::Reader(e) | ReadError::Query(e)) => {
+                if custom::is_statement_error(&e) {
+                    log(format_args!(
+                        "a query of {} in {} failed: {e}",
+                        tables.namespace.name,
+                        self.describe()
+                    ));
+                } else {
+                    self.fail(id, &e);
+                }
+                None
+            }
+        }
+    }
+
+    fn query_tables<T>(
+        &self,
+        session: &Session,
+        tables: &'static Tables,
+        f: impl FnOnce(&mut TableRead<'_>) -> T,
+    ) -> Result<T, ReadError> {
+        let mut reader = lock(&session.reader);
+        let conn = self.reader(&mut reader)?;
+        let tx = conn.unchecked_transaction().map_err(ReadError::Query)?;
+        let mut read = TableRead {
+            conn,
+            tables,
+            failed: None,
+        };
+        let value = f(&mut read);
+        if let Some(e) = read.failed {
+            return Err(ReadError::Query(e));
+        }
+        tx.commit().map_err(ReadError::Query)?;
+        Ok(value)
+    }
+
+    /// The read connection, opened on first use.
+    fn reader<'a>(&self, reader: &'a mut Option<Connection>) -> Result<&'a Connection, ReadError> {
+        if reader.is_none() {
+            let conn = db::open_reader(&self.file, self.shared.budgets.page_cache)
+                .map_err(ReadError::Reader)?;
+            *reader = Some(conn);
+            self.shared.connections.fetch_add(1, Ordering::Relaxed);
+        }
+        let Some(conn) = reader.as_ref() else {
+            unreachable!("the reader was just opened");
+        };
+        Ok(conn)
     }
 
     fn used(&self) {
@@ -369,15 +581,7 @@ impl Slot {
         keys: &[&[u8]],
     ) -> Result<Vec<Option<Found>>, ReadError> {
         let mut reader = lock(&session.reader);
-        if reader.is_none() {
-            let conn = db::open_reader(&self.file, self.shared.budgets.page_cache)
-                .map_err(ReadError::Reader)?;
-            *reader = Some(conn);
-            self.shared.connections.fetch_add(1, Ordering::Relaxed);
-        }
-        let Some(conn) = reader.as_ref() else {
-            unreachable!("the reader was just opened");
-        };
+        let conn = self.reader(&mut reader)?;
         let id = match session.namespace(ns) {
             Some(id) => id,
             None => match db::namespace_id(conn, ns).map_err(ReadError::Query)? {
@@ -392,9 +596,12 @@ impl Slot {
     }
 
     /// One write transaction.
-    pub(crate) fn write(&self, ops: &[Op<'_>]) -> Written {
+    pub(crate) fn write(&self, writes: Writes<'_>) -> Written {
         debug_assert!(
-            ops.iter().all(|op| op.namespace.is_valid()),
+            match writes {
+                Writes::Entries(ops) => ops.iter().all(|op| op.namespace.is_valid()),
+                Writes::Tables(tables, _) => tables.namespace.is_valid(),
+            },
             "namespace names use ASCII lowercase letters, digits, '.' and '_'"
         );
         let now = self.shared.clock.now_ms();
@@ -421,32 +628,65 @@ impl Slot {
         let Some(session) = guard.as_ref() else {
             unreachable!("session() returns an open session");
         };
-        let known: Vec<Option<i64>> = ops
-            .iter()
-            .map(|op| session.namespace(&op.namespace))
-            .collect();
+        let known: Vec<Option<i64>> = match writes {
+            Writes::Entries(ops) => ops
+                .iter()
+                .map(|op| session.namespace(&op.namespace))
+                .collect(),
+            Writes::Tables(..) => Vec::new(),
+        };
         let bad: Vec<i64> = lock(&session.bad).clone();
         let touched = std::mem::take(&mut *lock(&session.touched));
+        let mut statement_failed = false;
         let result = {
             let mut conn = lock(&session.writer);
             self.prepare_writer(&conn).and_then(|hook| {
+                let work = match writes {
+                    Writes::Entries(ops) => Work::Entries { ops, known: &known },
+                    Writes::Tables(tables, ops) => match self.attach(session, tables, &mut conn)? {
+                        Some(ns) => Work::Tables {
+                            ns,
+                            quota: tables.quota,
+                            ops,
+                        },
+                        None => return Ok(None),
+                    },
+                };
                 let params = WriteParams {
-                    ops,
-                    known: &known,
+                    work,
                     touched: &touched,
                     bad: &bad,
                     budget,
                     atime: (now / 60_000) as i64,
                 };
-                db::write(&mut conn, &params, || {
+                db::write(&mut conn, &params, &mut statement_failed, || {
                     if let Some(hook) = &hook {
                         hook();
                     }
                 })
+                .map(Some)
             })
         };
         match result {
-            Ok(outcome) => {
+            Ok(None) => {
+                // The registration breaks a rule; nothing was tried.
+                touch(&mut lock(&session.touched), touched);
+                drop(guard);
+                self.dropped(Dropped::Io)
+            }
+            Err(e) if statement_failed => {
+                touch(&mut lock(&session.touched), touched);
+                drop(guard);
+                if let Writes::Tables(tables, _) = writes {
+                    log(format_args!(
+                        "a statement of {} in {} failed: {e}",
+                        tables.namespace.name,
+                        self.describe()
+                    ));
+                }
+                self.dropped(Dropped::Io)
+            }
+            Ok(Some(outcome)) => {
                 if !bad.is_empty() {
                     lock(&session.bad).retain(|id| !bad.contains(id));
                 }
@@ -454,6 +694,9 @@ impl Slot {
                     session.remember(ns, id);
                 }
                 drop(guard);
+                for name in &outcome.deleted_tables {
+                    self.bump(name);
+                }
                 lock(&self.state).bytes = outcome.bytes;
                 self.succeeded();
                 let counters = &self.shared.counters;
@@ -536,13 +779,21 @@ impl Slot {
     /// belongs to something else or is corrupt. Failures are handled here.
     fn open_file(&self, id: u64) -> Result<Session, Dropped> {
         // At most: a mismatch rebuilt, then a corrupt new file rebuilt.
+        // A rebuild already moved the eviction generations.
+        let mut rebuilt = false;
         for _ in 0..3 {
             let failure = match self.try_open() {
-                Ok((writer, bytes)) => {
-                    {
+                Ok((writer, bytes, fresh)) => {
+                    let lost = {
                         let mut st = lock(&self.state);
                         st.open = true;
                         st.bytes = bytes;
+                        let lost = fresh && st.opened_before && !rebuilt;
+                        st.opened_before = true;
+                        lost
+                    };
+                    if lost {
+                        self.bump_all();
                     }
                     self.succeeded();
                     let shared = self.shared.clone();
@@ -555,10 +806,12 @@ impl Slot {
                         namespaces: Mutex::new(Vec::new()),
                         bad: Mutex::new(Vec::new()),
                         touched: Mutex::new(Vec::new()),
+                        tables: Mutex::new(Vec::new()),
                     });
                 }
                 Err(OpenError::Mismatch) => {
                     self.rebuild("is from another version or partition")?;
+                    rebuilt = true;
                     continue;
                 }
                 Err(OpenError::Dir(e)) => {
@@ -572,11 +825,14 @@ impl Slot {
             if let Some(reason) = failure {
                 return Err(reason);
             }
+            // The file was corrupt and deleted.
+            rebuilt = true;
         }
         Err(Dropped::Io)
     }
 
-    fn try_open(&self) -> Result<(Connection, u64), OpenError> {
+    /// The write connection, `meta.bytes`, and whether the file is new.
+    fn try_open(&self) -> Result<(Connection, u64, bool), OpenError> {
         if let Some(dir) = self.file.parent() {
             fs::create_dir_all(dir).map_err(OpenError::Dir)?;
         }
@@ -593,7 +849,7 @@ impl Slot {
         match db::check(&conn, &identity)? {
             Check::New => {
                 db::create(&mut conn, &identity, now)?;
-                Ok((conn, 0))
+                Ok((conn, 0, true))
             }
             Check::Ready { bytes } => {
                 db::enable_wal(&conn)?;
@@ -603,7 +859,7 @@ impl Slot {
                         return Err(e.into());
                     }
                 }
-                Ok((conn, bytes))
+                Ok((conn, bytes, false))
             }
             Check::Mismatch => Err(OpenError::Mismatch),
         }
@@ -674,6 +930,7 @@ impl Slot {
     fn rebuild(&self, why: &str) -> Result<(), Dropped> {
         log(format_args!("{} {why}; rebuilding", self.describe()));
         self.shared.counters.rebuilt();
+        self.bump_all();
         if let Err(e) = self.remove_files() {
             return Err(self.disable(
                 DisableReason::NotWritable,
@@ -704,6 +961,7 @@ impl Slot {
                 st.disabled = Some(reason);
             }
         }
+        self.bump_all();
         log(format_args!("{why}; disabled for this run"));
         Dropped::Unavailable
     }

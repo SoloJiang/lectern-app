@@ -12,6 +12,7 @@
 - 首帧之后才打开数据库。
 - 除了按仓库分库，另有一个不属于任何仓库的应用级分库，存 `agents` 的会话轮次索引（键是来源 ID、会话 ID、适配器版本和索引格式版本，值带生成时的游标，有效性由 `agents` 按已解析前缀判断）和压缩会话的摘要（键是压缩文件的身份加适配器版本和摘要格式版本）（[ADR 0026](../../docs/adr/0026.md)）。
 - SQLite 经 rusqlite（bundled，[ADR 0027](../../docs/adr/0027.md)）；本 crate 的连接最多 6 个、页缓存合计 ≤ 6 MB，与 `usage` 自己数据库的 ≤ 2 MB 合计 8 MB（ADR 0017）。缓存按字节 LRU；缓存可以随时删除重建，不存只有这里才有的数据。
+- 自定义表（`code_intel` 的符号索引）：使用方登记自己的表，SQL 经本 crate 的接口执行，公开接口里没有 rusqlite 的类型，其他 crate 不直接依赖 rusqlite。表里的行属于单元（`entry` 的条目），经外键级联随单元删除；每个连接 `PRAGMA foreign_keys = ON`（设计文档「自定义表」）。
 - 缓存放在 `platform` 提供的应用缓存目录下，按仓库 git 公共目录的绝对规范路径区分（`git rev-parse --path-format=absolute --git-common-dir` 或解析后取规范路径），同一仓库的 worktree 共用，不在用户的 `.git` 里写文件。
 - 模型分析结果的键是完整分析请求的哈希：规范化后的提示词、每个文件规范化后的完整 patch 的哈希（含新旧路径、OID、文件模式和状态）、被审阅 worktree 的指纹、schema 版本、模型 ID，以及调用的 agent、它的命令行版本、影响输出的模型服务配置、快照处理规则的版本（与基准快照的键相同，规则变了旧结果不再命中）和分析流程的版本（提示词模板、校验、覆盖检查、纠错、对账、启动参数、上限任何一项变化都升版本）（[ADR 0019](../../docs/adr/0019.md)）。规则生成的结果不缓存，每次重算。
 - Analyze 的快照按字节 LRU 淘汰；只缓存不含工作区改动的基准快照（按树 OID 加处理规则的版本，规则随 agent 命令行版本的自动加载清单变化，写出后只读），叠加了工作区改动的克隆属于单次分析，不进缓存；正在使用的快照有引用计数，不参与淘汰（ADR 0019）。
@@ -30,4 +31,4 @@ just test -p lectern-cache
 - `crash_*` 用同一个测试二进制做子进程（`current_exe` 加 `--exact`），子进程的入口没有环境变量时直接返回。
 - 目录清理按 `ManualClock` 的时刻比较文件的修改时间，所以测试的时钟从真实的当前时刻开始（`support::Fixture`）。
 - 结构化输出（键的编码、文件布局、PRAGMA）用 insta 快照验收，快照改动要在 PR 里逐个看过。
-- 性能：`lectern-bench` 的 `cache/*` 基准（`just bench cache/`；Linux 上是冒烟运行，`just bench --measure cache/` 采样并打印实测值），夹具用 `testing::Raw`、`testing::Zstd`、`testing::noise`、`testing::text`；`cache/memory` 在 bench 的 `memory` 目标里用子进程测常驻增量（SQLite 的内存不经计数分配器）。结果写进设计文档的「实际验证」。
+- 性能：`lectern-bench` 的 `cache/*` 基准（`just bench cache/`；Linux 上是冒烟运行，`just bench --measure cache/` 采样并打印实测值），夹具用 `testing::Raw`、`testing::Zstd`、`testing::noise`、`testing::text`，自定义表用 `testing::tags`；`cache/memory` 在 bench 的 `memory` 目标里用子进程测常驻增量（SQLite 的内存不经计数分配器）。结果写进设计文档的「实际验证」。
