@@ -1913,7 +1913,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   同一次运行里第 1–3 步的基准：`map_100k` 9.22 ms、`map_100k_bytes` 2.65 MB、`batch_peak` 32.7 MB、`extract_throughput` 4.22 MB/s、`warm_100k` 83.5 ms，都在预算内；`disk_100k` 9 万个单元，分库文件 298 MiB，80 次淘汰。
 
   `goto_indexed` 在这台机器上超出 20 ms。拆分（release，64 KiB 的 TS 当前文本）：解析约 9 ms，locals 与引用模式的查询约 4.5 ms，处理匹配（作用域、局部引用的变量位置）约 4 ms，遍历约 2 ms，规则与收尾约 1 ms，合计约 20 ms，其余（读取与核对、按名字查定义、约 130 个候选的过滤与排序）约 3 ms。设计的分项是「解析与 locals ≤ 10 ms」，这台机器上单是解析就接近它；这一项与 `extract_throughput`、`warm_100k` 一样在 Apple 芯片上判定（[bench 设计](bench.md)），预算没有因 Linux 的结果调高。`resident_100k` 第一版的 11.5 MB 里约 9 MB 不属于本 crate：基准没有像 `project` 那样先订阅 worktree，fs_watch 为本 crate 的订阅建的跟踪路径过滤器算进了测量窗口（`Rig::watch_as_project` 改正）；另外 `touch_pending` 排空后保留了队列的容量（已释放）；核心语言不再编译 `Compiled` 也减少了常驻。
-- 没有验证的：M 系列上的各项基准（`goto_indexed` 在这台机器上超出，见上）；`app` 装配本插件（`app` 依赖 GPUI，Linux 上不编译，第 5 步）；真实的 `PowerSource`、fs_watch 后端和语义导航提供者（测试用 `FakePower`、`FakeBackend` 和测试里的假提供者，jdtls / SCIP 属于 #26）；几个批量线程同时运行；文件夹项目超过 2 万个文件时的行为（由 `project` 的遍历上限决定，没有测）；cloudprint 形状的名字表（≤ 0.1 MB、≤ 30 ms，没有对应的基准）。
+- 没有验证的：M 系列上的各项基准（`goto_indexed` 在这台机器上超出，见上）；`app` 装配本插件（`app` 依赖 GPUI，Linux 上不编译，第 5 步）；真实的 fs_watch 后端和语义导航提供者（测试用 `FakeBackend` 和测试里的假提供者，jdtls / SCIP 属于 #26；电源接口按 ADR 0032 不再需要）；几个批量线程同时运行；文件夹项目超过 2 万个文件时的行为（由 `project` 的遍历上限决定，没有测）；cloudprint 形状的名字表（≤ 0.1 MB、≤ 30 ms，没有对应的基准）。
 
 ## 与设计的差异
 
@@ -2086,7 +2086,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 看门狗的到期表：`Watchdog::schedule(at, f)`（`Due`），线程在有到期项时每次最多等 `CHECK_INTERVAL`（10 ms），所以测试的手动时钟推进后能被看到；没有在途抽取也没有到期项时仍不带超时地等待。`stop` 丢弃到期表。
 - 第 1 步的候选 `source` 是 `Scanned`（当前文本为这次查询现场解析，不是查索引得到的），设计没有规定。解析超时时返回 `Failed(Unreadable("parsing timed out"))`：`QueryError` 没有超时一项，交互截止时间是 1 s。
 - 第 2 步读过的 import 目标，限时搜索不跳过、用第 2 步的抽取结果，按已交出的位置去重；只跳过当前文本（第 1 步已列出它的同名定义）。设计写「现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现」，按文件跳过会丢掉这个文件里第 2 步没有列出的同名定义，所以按位置去重。
-- 限时搜索的范围：有子项目、但没有子项目包含当前文本时搜整个 worktree（设计没有规定这种情况；第 3 层建索引在这时为空，那是电池策略，搜索有 1 s 的上限，不受它影响）。`Partial::outside` 只在停下时计算。
+- 限时搜索的范围：有子项目、但没有子项目包含当前文本时搜整个 worktree（设计没有规定这种情况；第 3 层建索引在这时为空，见第 3 步的「第 3 层的范围」，搜索有 1 s 的上限，不受它影响）。`Partial::outside` 只在停下时计算。
 - 解析扩展点：`Resolver::package_of` 返回 None 时用默认的「同一目录」；`Import::exported` 给出本地名对应的导出名。#17 只有空规则 `DefaultRules`，测试经 `Indexer::set_resolver` 装入自己的实现。
 - 查引用：import 语句里的名字（`import { helper } from './a'`）也是引用位置，没有依据时列在 `same_name`，`bind` 给出依据时是调用方；这是 `ParsedFile` 的引用位置本来就包含的。限时搜索命中的文件只解析、不写入缓存：`ParsedFile` 不是抽取结果（它的引用位置包含局部引用），为写入再抽取一遍要多一倍时间；第 3 层的批量任务之后照常为它们建索引（设计「限时搜索」写的写入只对跳转做）。第一批在处理完 4 个文件或 150 ms 时交出，之后每 32 个文件或 100 ms。
 - `Named`：`symbol` 为 None（`Symbol` 要求语言，按名字查询没有）；不按可见性和语法种类过滤（没有引用位置）；不做限时搜索，所以 `near` 所在子项目（没有 `near` 时整个 worktree）里还有未入索引的文件、或在途抽取时结果是 `Done(Partial)`，`outside` 是其余未入索引的文件，都入索引后才是 `Complete`。设计只说「只做第 3 步」，没有说完整性。

@@ -244,20 +244,21 @@ fn deadline_watchdog_idle_does_not_wake() {
     assert!(!task.started());
     let registration = watchdog.register(Instant::now() + Duration::from_secs(60), None, None);
     assert!(eventually(|| watchdog.rounds() >= 2));
+    // While the registration is in the table the thread only waits with a
+    // timeout, so this is the untimed count before it can park.
+    let (_, parked) = watchdog.waits();
     drop(registration);
-    // One more round notices the table is empty; then it waits untimed. Wait
-    // until the count stops changing instead of assuming how soon that round
-    // runs on a loaded machine.
-    let mut rounds = watchdog.rounds();
-    assert!(eventually(|| {
-        thread::sleep(Duration::from_millis(30));
-        let now = watchdog.rounds();
-        let settled = now == rounds;
-        rounds = now;
-        settled
-    }));
+    // The round that notices the table is empty parks the thread in the
+    // untimed wait: wait for that, not for a quiet stretch of time.
+    assert!(eventually(|| watchdog.waits().1 > parked));
+    let (timed, untimed) = watchdog.waits();
+    let rounds = watchdog.rounds();
     thread::sleep(Duration::from_millis(100));
-    assert_eq!(watchdog.rounds(), rounds);
+    // Parked: no timed wait since, and every round since (a spurious
+    // wake-up) went straight back into the untimed wait.
+    let (timed_after, untimed_after) = watchdog.waits();
+    assert_eq!(timed_after, timed, "a timed wait with nothing in flight");
+    assert_eq!(watchdog.rounds() - rounds, untimed_after - untimed);
     assert!(!task.is_finished());
     watchdog.stop();
     assert!(eventually(|| task.is_finished()));
