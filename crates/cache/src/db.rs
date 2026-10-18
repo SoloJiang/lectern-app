@@ -415,14 +415,57 @@ pub(crate) fn touch(conn: &mut Connection, ids: &[i64], atime: i64) -> rusqlite:
 /// written or touched within `TOUCH_AFTER_MIN` (units are touched without
 /// reading their access time). The time of the write keeps the LRU order:
 /// nothing was written between the read and now.
+///
+/// Set-based: one statement per [`TOUCH_CHUNK`] IDs instead of one per ID.
+/// The last chunk binds NULL to the unused placeholders, which match no row.
 fn set_atimes(conn: &Connection, ids: &[i64], atime: i64) -> rusqlite::Result<()> {
-    let mut update =
-        conn.prepare_cached("UPDATE entry SET atime = ?1 WHERE id = ?2 AND atime < ?3")?;
-    for id in ids {
-        update.execute(params![atime, id, atime - TOUCH_AFTER_MIN])?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut update = conn.prepare_cached(TOUCH_SQL)?;
+    for chunk in ids.chunks(TOUCH_CHUNK) {
+        update.raw_bind_parameter(1, atime)?;
+        update.raw_bind_parameter(2, atime - TOUCH_AFTER_MIN)?;
+        for i in 0..TOUCH_CHUNK {
+            let index = i + 3;
+            match chunk.get(i) {
+                Some(id) => update.raw_bind_parameter(index, *id)?,
+                None => update.raw_bind_parameter(index, rusqlite::types::Null)?,
+            }
+        }
+        update.raw_execute()?;
     }
     Ok(())
 }
+
+/// IDs per access-time write-back statement.
+pub(crate) const TOUCH_CHUNK: usize = 1024;
+
+const TOUCH_HEAD: &str = "UPDATE entry SET atime = ?1 WHERE atime < ?2 AND id IN (";
+const TOUCH_LEN: usize = TOUCH_HEAD.len() + 2 * TOUCH_CHUNK;
+const TOUCH_BYTES: [u8; TOUCH_LEN] = {
+    let mut out = [0u8; TOUCH_LEN];
+    let head = TOUCH_HEAD.as_bytes();
+    let mut i = 0;
+    while i < head.len() {
+        out[i] = head[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < TOUCH_CHUNK {
+        out[i] = b'?';
+        out[i + 1] = if j + 1 < TOUCH_CHUNK { b',' } else { b')' };
+        i += 2;
+        j += 1;
+    }
+    out
+};
+/// `UPDATE entry SET atime = ?1 WHERE atime < ?2 AND id IN (?3, …)`, with
+/// [`TOUCH_CHUNK`] static placeholders (`?` takes the next number).
+pub(crate) const TOUCH_SQL: &str = match std::str::from_utf8(&TOUCH_BYTES) {
+    Ok(sql) => sql,
+    Err(_) => panic!("the write-back statement is ASCII"),
+};
 
 /// One write transaction: write access times back, delete entries that
 /// failed to decode, apply the writes, delete entries of retired namespaces,
