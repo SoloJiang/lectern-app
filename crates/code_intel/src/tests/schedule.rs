@@ -637,13 +637,24 @@ fn schedule_opened_timed_out_file_is_redone_once() {
                 crate::extract::extract(lang, bytes, deadline, cancel)
             }
         });
+    h.git.add_worktree("feature");
+    h.git.add("feature", &[("big.ts", &big)]);
     h.open();
     assert_eq!(calls.load(Ordering::Acquire), 1);
     assert!(h.hinted("big.ts"), "a TimedOut unit is stored");
+    let store = h.indexer.store(&h.key()).expect("store");
+    let (raw, stamp) = (store.evictions(), h.indexer.stamp(&h.key()));
+    let (builds, tracked) = (h.stats().cursor_builds, h.git.count("tracked"));
     h.current("big.ts");
     h.settle();
     assert_eq!(calls.load(Ordering::Acquire), 2, "redone when opened");
-    let store = h.indexer.store(&h.key()).expect("store");
+    // The replace bumped the store's eviction generation; the hints, the
+    // cursor and tier 5 do not count it.
+    assert_eq!(store.evictions(), raw + 1);
+    assert_eq!(h.indexer.stamp(&h.key()), stamp);
+    assert_eq!(h.stats().cursor_builds, builds);
+    assert_eq!(h.git.count("tracked"), tracked, "tier 5 not walked again");
+    assert!(h.hinted("big.ts"));
     let lang = crate::index::lock(&h.indexer.inner().langs)
         .table
         .get("ts")
@@ -664,10 +675,84 @@ fn schedule_opened_timed_out_file_is_redone_once() {
     assert_eq!(crate::index::lock(&p.state).batch.full, None);
 }
 
+/// An opened file that could not be read is not settled for the session:
+/// opened again once it is readable, tier 1 extracts it.
+#[test]
+fn schedule_opened_file_read_failure_is_tried_again() {
+    use crate::extract::Extraction;
+
+    let h = Harness::new();
+    let big = ts("big");
+    h.git.add("main", &[("big.ts", &big)]);
+    h.git.commit("main");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    h.indexer
+        .set_extractor(move |lang, bytes, deadline, cancel| {
+            if c.fetch_add(1, Ordering::AcqRel) == 0 {
+                Extraction {
+                    status: ExtractStatus::TimedOut,
+                    defs: Vec::new(),
+                    refs: Vec::new(),
+                }
+            } else {
+                crate::extract::extract(lang, bytes, deadline, cancel)
+            }
+        });
+    h.open();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    // Gone from the disk (no event yet): tier 1 cannot read it.
+    h.git.delete("main", "big.ts");
+    h.current("big.ts");
+    h.settle();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    // Back: opening it again extracts it.
+    h.git.write("main", "big.ts", &big);
+    h.set_focus(Focus::Current(None));
+    h.settle();
+    h.current("big.ts");
+    h.settle();
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    let p = h.indexer.inner().project(&h.key()).expect("open");
+    let lang = crate::index::lock(&h.indexer.inner().langs)
+        .table
+        .get("ts")
+        .cloned()
+        .expect("ts");
+    let st = crate::index::lock(&p.state);
+    assert!(
+        st.focused
+            .satisfied
+            .contains(&(h.git.oid(&big), crate::store::Version::of(&lang)))
+    );
+}
+
 /// Opening a file the batch is extracting: tier 1 does not wait on the
 /// batch (ADR 0029); it cancels that extraction and extracts it itself.
 #[test]
 fn schedule_opened_file_takes_over_a_batch_extraction() {
+    let current = |slow: &[u8], h: &Harness| {
+        Focus::Current(Some(TextRef {
+            worktree: Some(h.git.worktree_key("main")),
+            path: "slow.ts".into(),
+            oid: h.git.oid(slow),
+            origin: TextOrigin::Worktree,
+        }))
+    };
+    takes_over_a_batch_extraction(current);
+}
+
+/// The same for tier 2 (the review set): it does not wait on a batch that
+/// a pause may hold for long either.
+#[test]
+fn schedule_review_file_takes_over_a_batch_extraction() {
+    takes_over_a_batch_extraction(|_, _| {
+        let paths: Vec<lectern_services::project::RelPath> = vec!["slow.ts".into()];
+        Focus::Review(paths.into())
+    });
+}
+
+fn takes_over_a_batch_extraction(focus: impl Fn(&[u8], &Harness) -> Focus) {
     use crate::extract::Extraction;
 
     let h = Harness::new();
@@ -706,14 +791,10 @@ fn schedule_opened_file_takes_over_a_batch_extraction() {
         h.indexer.set_focus(
             &h.key(),
             Some(&h.git.worktree_key("main")),
-            Focus::Current(Some(TextRef {
-                worktree: Some(h.git.worktree_key("main")),
-                path: "slow.ts".into(),
-                oid: h.git.oid(&slow),
-                origin: TextOrigin::Worktree,
-            })),
+            focus(&slow, &h),
         );
-        // Tier 1 runs here while the batch task is still in its extraction.
+        // Tier 1 or 2 runs here while the batch task is still in its
+        // extraction.
         h.executor.run_until_idle();
         worker.join().expect("the executor thread");
     });
@@ -798,4 +879,28 @@ fn schedule_last_opened_project_runs_the_batch_before_any_focus() {
     assert_eq!(batch_project(), Some(h.key()));
     let (_two, _) = open_folder("two");
     assert_eq!(batch_project(), Some(h.key()));
+}
+
+/// Tier 5's set of blobs confirmed stored this session stays small: 100k
+/// blobs fit in 1.5 MB, and it tells blobs and languages apart.
+#[test]
+fn schedule_tier5_confirmed_set_is_compact() {
+    let mut set = crate::index::state::Confirmed::default();
+    let ts = crate::lang_name("ts");
+    let oid = |i: u64| {
+        let mut b = [0u8; 20];
+        b[..8].copy_from_slice(&i.to_be_bytes());
+        BlobId::from_bytes(&b).expect("an OID")
+    };
+    for i in 0..100_000 {
+        set.insert(&oid(i), &ts);
+    }
+    assert!(set.contains(&oid(7), &ts));
+    assert!(!set.contains(&oid(100_001), &ts));
+    assert!(!set.contains(&oid(7), &crate::lang_name("js")));
+    assert!(
+        set.heap_bytes() <= 3 << 19,
+        "{} bytes for 100k blobs",
+        set.heap_bytes()
+    );
 }

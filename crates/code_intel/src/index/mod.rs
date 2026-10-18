@@ -12,7 +12,7 @@
 pub(crate) mod batch;
 pub(crate) mod host;
 mod reconcile;
-mod state;
+pub(crate) mod state;
 mod watch;
 
 use std::collections::HashSet;
@@ -358,7 +358,7 @@ impl Indexer {
     #[cfg(test)]
     pub(crate) fn stamp(&self, project: &ProjectKey) -> Option<crate::map::HintStamp> {
         let p = self.inner.project(project)?;
-        let eviction = p.store.evictions();
+        let eviction = p.evictions();
         Some(lock(&p.state).stamp(eviction))
     }
 
@@ -487,6 +487,7 @@ impl Inner {
                         key: key.clone(),
                         store: self.store_for(&partition),
                         commits: Mutex::new(()),
+                        replaced: std::sync::atomic::AtomicU64::new(0),
                         state: Mutex::new(State::new(self.new_session(), &table, grammar)),
                     });
                     open.push(p.clone());
@@ -694,9 +695,9 @@ impl Inner {
                     let st = lock(&p.state);
                     // In-flight extractions of a changed language give up;
                     // their results would be dropped before the write anyway.
-                    for ((_, lang), flag) in &st.in_flight {
+                    for ((_, lang), owner) in &st.in_flight {
                         if changed.contains(lang) {
-                            flag.store(true, Ordering::Release);
+                            owner.flag.store(true, Ordering::Release);
                         }
                     }
                 }
@@ -732,7 +733,7 @@ impl Inner {
                 other_worktrees: TierState::Pending,
             });
         }
-        let eviction = project.store.evictions();
+        let eviction = project.evictions();
         let grammar = self.grammar();
         let st = lock(&project.state);
         let focus = if st.focused.queue.iter().all(|q| q.is_empty())

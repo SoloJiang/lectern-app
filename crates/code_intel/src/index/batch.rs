@@ -22,7 +22,7 @@ use lectern_services::project::{BlobId, ProjectKey};
 
 use super::host::yield_now;
 use super::state::{
-    Cursor, Item, OtherTree, OtherWalk, Project, Scope, Source, State, Tier, Walk, under,
+    Cursor, Item, OtherTree, OtherWalk, Owner, Project, Scope, Source, State, Tier, Walk, under,
 };
 use super::{Inner, bump, lock};
 use crate::extract::{
@@ -175,7 +175,7 @@ impl Inner {
         let Some(project) = self.batch_project() else {
             return Step::Idle;
         };
-        let eviction = project.store.evictions();
+        let eviction = project.evictions();
         let (wide, ctx, stamp) = {
             let mut st = lock(&project.state);
             if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
@@ -451,7 +451,7 @@ impl Inner {
                 let key = (*oid, lang.name().clone());
                 // Known stored: the current worktree has it indexed, or this
                 // session already found it for another worktree.
-                if batch.others.confirmed.contains(&key)
+                if batch.others.confirmed.contains(oid, lang.name())
                     || map.hinted(oid, &lang.name().0, stamp)
                     || batch.queued.contains(&key)
                     || in_flight.contains_key(&key)
@@ -529,7 +529,10 @@ impl Inner {
                 if hits.contains(&key) {
                     st.batch.queued.remove(&key);
                     if item.tier == Tier::Other {
-                        st.batch.others.confirmed.insert(key);
+                        st.batch
+                            .others
+                            .confirmed
+                            .insert(&item.oid, item.lang.name());
                     }
                     continue;
                 }
@@ -588,7 +591,7 @@ impl Inner {
     /// Items stored since their existence check (by tier 1 or 2, or for
     /// another worktree) are dropped.
     fn take(&self, project: &Arc<Project>, ctx: &Ctx, t: usize) -> Option<(Item, Arc<AtomicBool>)> {
-        let eviction = project.store.evictions();
+        let eviction = project.evictions();
         let mut st = lock(&project.state);
         if st.session != ctx.session {
             return None;
@@ -598,14 +601,22 @@ impl Inner {
             let item = st.batch.resume[t].pop_front()?;
             let key = item.key();
             if st.in_flight.contains_key(&key)
-                || st.batch.others.confirmed.contains(&key)
+                || st
+                    .batch
+                    .others
+                    .confirmed
+                    .contains(&item.oid, item.lang.name())
                 || st.map.hinted(&item.oid, &item.lang.name().0, stamp)
             {
                 st.batch.queued.remove(&key);
                 continue;
             }
             let flag = Arc::new(AtomicBool::new(ctx.cancel.load(Ordering::Acquire)));
-            st.in_flight.insert(key, flag.clone());
+            let owner = Owner {
+                flag: flag.clone(),
+                tier: item.tier,
+            };
+            st.in_flight.insert(key, owner);
             st.batch.active[t] += 1;
             return Some((item, flag));
         }
@@ -761,9 +772,11 @@ impl Inner {
     /// units: an eviction during it is the quota's (`Batch::full`). Only a
     /// tier 1 commit replaces a unit (a `TimedOut` or `TooLarge` one), which
     /// the cache counts as an eviction; it never sets `full`.
-    fn commit(&self, project: &Arc<Project>, ctx: &Ctx, done: Vec<Done>, batch: bool) {
+    ///
+    /// True when every item is now stored (written, or found stored).
+    fn commit(&self, project: &Arc<Project>, ctx: &Ctx, done: Vec<Done>, batch: bool) -> bool {
         if done.is_empty() {
-            return;
+            return true;
         }
         let table = lock(&self.langs).table.clone();
         let live = |d: &Done| {
@@ -774,7 +787,9 @@ impl Inner {
                     .is_some_and(|l| Version::of(l) == Version::of(&d.item.lang))
         };
         // Keys stored since the existence check: one query per version.
-        let before = project.store.evictions();
+        // The touches keep the store's own eviction generation, the hints
+        // the one without our replaces.
+        let (before_raw, before) = (project.store.evictions(), project.evictions());
         let mut groups: Vec<(Version, Vec<BlobId>)> = Vec::new();
         for d in done.iter().filter(|d| live(d)) {
             let version = Version::of(&d.item.lang);
@@ -797,23 +812,42 @@ impl Inner {
             let _turn = lock(&project.commits);
             let eviction = project.store.evictions();
             let mut write = project.store.write();
+            let mut replaces = false;
             for d in done.iter().filter(|d| live(d)) {
                 let version = Version::of(&d.item.lang);
-                let hit = found.iter().find(|(v, f)| {
-                    *v == version && f.oid == d.key && satisfies(d.item.tier, f.status)
-                });
-                if let Some((_, f)) = hit {
+                let stored_as = found.iter().find(|(v, f)| *v == version && f.oid == d.key);
+                if let Some((_, f)) = stored_as.filter(|(_, f)| satisfies(d.item.tier, f.status)) {
                     hits.push(*f);
                     stored.push((d.key, version, d.item.tier));
                     continue;
                 }
                 if write.add(d.key, &version, &d.extraction) {
+                    replaces |= stored_as.is_some();
                     written.push((d.key, version, d.item.tier));
                 }
             }
             let committed = !write.is_empty() && matches!(write.commit(), Written::Committed);
-            (eviction, committed, project.store.evictions())
+            let after = project.store.evictions();
+            // Under the lock nobody else changes `replaced`.
+            let replaced = project.replaced.load(Ordering::Acquire);
+            // Our own replace's one bump (one per transaction): hints and
+            // cursors do not count it. Should the same transaction also
+            // evict for the quota, that eviction is not seen either; its
+            // units are extracted again when used or on the next open.
+            let own = committed && replaces && after == eviction + 1;
+            if own {
+                project.replaced.fetch_add(1, Ordering::AcqRel);
+            }
+            (
+                eviction.saturating_sub(replaced),
+                committed,
+                after.saturating_sub(replaced + u64::from(own)),
+            )
         };
+        if !committed {
+            written.clear();
+        }
+        let settled = stored.len() + written.len() == done.len();
         let mut st = lock(&project.state);
         if st.session == ctx.session {
             if committed {
@@ -831,10 +865,8 @@ impl Inner {
                         .map_or(eviction, |c| c.deps.eviction);
                     st.batch.full = Some(walked);
                 }
-            } else {
-                written.clear();
             }
-            st.batch.touches.push(before, &hits);
+            st.batch.touches.push(before_raw, &hits);
             // The units just written are the newest: they outlive the
             // eviction they caused.
             let sets = [(stored, st.stamp(before)), (written, st.stamp(after))];
@@ -844,8 +876,7 @@ impl Inner {
                         continue;
                     }
                     if tier == Tier::Other {
-                        let key = (key, version.lang.clone());
-                        st.batch.others.confirmed.insert(key);
+                        st.batch.others.confirmed.insert(&key, &version.lang);
                     }
                     for eff in st.map.paths(&key, &version.lang.0) {
                         st.map.hints.set(&eff.slot, &key, stamp);
@@ -856,6 +887,7 @@ impl Inner {
         for d in &done {
             st.finish(ctx.session, &d.item, &d.flag);
         }
+        settled
     }
 
     /// Queues the focus's files that are not indexed for tiers 1 and 2, and
@@ -863,7 +895,7 @@ impl Inner {
     /// (it also stands for `TimedOut` and `TooLarge`): it checks each blob
     /// once per session (`Focused::satisfied`). Tier 2 trusts the hints.
     pub(crate) fn enqueue_focus(self: &Arc<Self>, project: &Arc<Project>) {
-        let eviction = project.store.evictions();
+        let eviction = project.evictions();
         let disabled = lock(&self.langs).disabled.clone();
         let mut st = lock(&project.state);
         if st.base_for.is_none() {
@@ -933,10 +965,13 @@ impl Inner {
         }
         for (t, items) in wanted.into_iter().enumerate() {
             for item in items {
-                // Tier 1 takes a key in flight over (`focus_task`).
-                if disabled.contains(item.lang.name())
-                    || (t == 1 && st.in_flight.contains_key(&item.key()))
-                {
+                // Tiers 1 and 2 take a key over from a batch (`focus_task`);
+                // tier 2 leaves one that tier 1 or 2 is extracting.
+                let focused = st
+                    .in_flight
+                    .get(&item.key())
+                    .is_some_and(|o| o.tier.batch().is_none());
+                if disabled.contains(item.lang.name()) || (t == 1 && focused) {
                     continue;
                 }
                 let queue = &mut st.focused.queue[t];
@@ -999,28 +1034,32 @@ impl Inner {
                 };
                 let c = ctx(&st);
                 let key = item.key();
-                if t == 0
-                    && !st
-                        .focused
-                        .satisfied
-                        .insert((item.oid, Version::of(&item.lang)))
-                {
+                let version = Version::of(&item.lang);
+                if t == 0 && st.focused.satisfied.contains(&(item.oid, version)) {
                     // Once per session (`enqueue_focus`).
                     continue;
                 }
                 if let Some(other) = st.in_flight.get(&key) {
-                    if t == 1 {
+                    // Tiers 1 and 2 never wait on batch work (ADR 0029):
+                    // they cancel the extraction in flight and own the key.
+                    // Tier 1 also takes one over from tier 2 (the
+                    // interactive limits); tier 2 leaves tier 1's and
+                    // tier 2's to them.
+                    let batch = other.tier.batch().is_some();
+                    if t == 1 && !batch {
                         continue;
                     }
-                    // Tier 1 never waits on batch work (ADR 0029): it cancels
-                    // the extraction in flight and owns the key.
-                    other.store(true, Ordering::Release);
+                    other.flag.store(true, Ordering::Release);
                 }
                 let flag = Arc::new(AtomicBool::new(c.cancel.load(Ordering::Acquire)));
-                st.in_flight.insert(key, flag.clone());
+                let owner = Owner {
+                    flag: flag.clone(),
+                    tier: item.tier,
+                };
+                st.in_flight.insert(key, owner);
                 (item, c, flag)
             };
-            let before = project.store.evictions();
+            let (before_raw, before) = (project.store.evictions(), project.evictions());
             let version = Version::of(&item.lang);
             bump(&self.stats.exists_checks, 1);
             let found = project
@@ -1031,7 +1070,10 @@ impl Inner {
                 let table = lock(&self.langs).table.clone();
                 let mut st = lock(&project.state);
                 if st.finish(session, &item, &flag) {
-                    st.batch.touches.push(before, &found);
+                    if t == 0 {
+                        st.focused.satisfied.insert((item.oid, version.clone()));
+                    }
+                    st.batch.touches.push(before_raw, &found);
                     if current(&table, &st.map, &version) {
                         let stamp = st.stamp(before);
                         for eff in st.map.paths(&item.oid, &item.lang.name().0) {
@@ -1049,7 +1091,16 @@ impl Inner {
                 Mode::Background
             };
             match self.extract_item(&ctx, &item, mode, None, &flag) {
-                Outcome::Done(d, _) => self.commit(project, &ctx, vec![d], false),
+                Outcome::Done(d, _) => {
+                    // Settled for the session only once a result is stored:
+                    // a file that could not be read is tried again.
+                    if self.commit(project, &ctx, vec![d], false) && t == 0 {
+                        let mut st = lock(&project.state);
+                        if st.session == session {
+                            st.focused.satisfied.insert((item.oid, version));
+                        }
+                    }
+                }
                 Outcome::Paused | Outcome::Skip => {
                     lock(&project.state).finish(session, &item, &flag);
                 }

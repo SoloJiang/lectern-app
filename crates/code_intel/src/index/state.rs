@@ -30,7 +30,21 @@ pub(crate) struct Project {
     /// on either side of it: a batch commit tells its own evictions from a
     /// tier 1 replace. Never held with another lock of this crate.
     pub commits: std::sync::Mutex<()>,
+    /// Eviction generations this crate's own replaces caused (tier 1 redoes
+    /// a `TimedOut` or `TooLarge` unit; the cache counts the replaced unit
+    /// as an eviction). Counted under `commits`.
+    pub replaced: std::sync::atomic::AtomicU64,
     pub state: std::sync::Mutex<State>,
+}
+
+impl Project {
+    /// The eviction generation hints and cursors depend on: the store's,
+    /// less this crate's own replaces. The touches keep the store's own
+    /// (`Store::touch_pending` compares with it).
+    pub fn evictions(&self) -> u64 {
+        let replaced = self.replaced.load(Ordering::Acquire);
+        self.store.evictions().saturating_sub(replaced)
+    }
 }
 
 /// The inputs' generations. Each grows by one when its input changes
@@ -201,6 +215,12 @@ pub(crate) fn under(path: &str, dir: &str) -> bool {
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
+/// The extraction that owns an in-flight key: its cancel flag and tier.
+pub(crate) struct Owner {
+    pub flag: Arc<AtomicBool>,
+    pub tier: Tier,
+}
+
 /// Tier 5's progress.
 #[derive(Default)]
 pub(crate) struct Others {
@@ -212,7 +232,38 @@ pub(crate) struct Others {
     /// access marking) that the current worktree's map does not have: a
     /// walk again after one worktree's index changed checks and touches
     /// only what is new.
-    pub confirmed: HashSet<(BlobId, LangName)>,
+    pub confirmed: Confirmed,
+}
+
+/// A set of (OID, language) as 8-byte keys (the OID's first 8 bytes mixed
+/// with the language): about 9 bytes per blob, 1.2 MB for 100k with the
+/// table's spare capacity. A collision only skips a check that the next
+/// session makes; the set is a hint, like `IndexedHints`.
+#[derive(Default)]
+pub(crate) struct Confirmed(HashSet<u64>);
+
+impl Confirmed {
+    fn key(oid: &BlobId, lang: &LangName) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // Fixed keys: the same language mixes the same way every time.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        lang.0.hash(&mut h);
+        crate::map::prefix(oid) ^ h.finish()
+    }
+
+    pub fn insert(&mut self, oid: &BlobId, lang: &LangName) {
+        self.0.insert(Confirmed::key(oid, lang));
+    }
+
+    pub fn contains(&self, oid: &BlobId, lang: &LangName) -> bool {
+        self.0.contains(&Confirmed::key(oid, lang))
+    }
+
+    /// Bytes on the heap (the table's buckets and control bytes).
+    #[cfg(test)]
+    pub fn heap_bytes(&self) -> usize {
+        self.0.capacity() * (std::mem::size_of::<u64>() + 1)
+    }
 }
 
 impl Others {
@@ -324,9 +375,9 @@ pub(crate) struct State {
     pub focus: Focuses,
     pub focused: Focused,
     pub batch: Batch,
-    /// Extractions in flight by key, with the cancel flag of the one that
-    /// owns the entry (tier 1 can take a key over from a batch).
-    pub in_flight: HashMap<(BlobId, LangName), Arc<AtomicBool>>,
+    /// Extractions in flight by key, with the one that owns the entry
+    /// (tiers 1 and 2 take a key over from a batch, tier 1 from tier 2).
+    pub in_flight: HashMap<(BlobId, LangName), Owner>,
     /// On battery, a query or `names` lets tiers 4 and 5 go on until the
     /// project closes or the power source changes.
     pub demand: bool,
@@ -374,8 +425,8 @@ impl State {
     /// flight is cancelled.
     pub fn end(&mut self) {
         self.cancel.store(true, Ordering::Release);
-        for flag in self.in_flight.values() {
-            flag.store(true, Ordering::Release);
+        for owner in self.in_flight.values() {
+            owner.flag.store(true, Ordering::Release);
         }
         self.watches = None;
         self.held.clear();
@@ -424,7 +475,7 @@ impl State {
         if self
             .in_flight
             .get(&key)
-            .is_some_and(|f| Arc::ptr_eq(f, flag))
+            .is_some_and(|o| Arc::ptr_eq(&o.flag, flag))
         {
             self.in_flight.remove(&key);
         }
