@@ -24,6 +24,9 @@ ids! {
             decorated_definition = "decorated_definition",
             block = "block",
             parameters = "parameters",
+            typed_parameter = "typed_parameter",
+            default_parameter = "default_parameter",
+            typed_default_parameter = "typed_default_parameter",
             lambda = "lambda",
             lambda_parameters = "lambda_parameters",
             list_comprehension = "list_comprehension",
@@ -187,15 +190,11 @@ impl Python {
                 cx.def(me.node, parent.node, kind, Some(params));
                 return;
             }
-            // (function_definition parameters: (parameters . (identifier)))
-            //   @reference.lectern.receiver
-            if p == k.parameters
-                && parent.field == k.f_parameters
-                && parent.node.named_child(0) == Some(me.node)
-                && let Some(function) = up(stack, 2)
-                && function.kind == k.function_definition
-            {
-                cx.marker(me.node, function.node, Marker::Receiver);
+            // (function_definition parameters: (parameters . [(identifier)
+            //   (typed_parameter . (identifier)) (default_parameter name:)
+            //   (typed_default_parameter name:)])) @reference.lectern.receiver
+            if let Some(function) = self.receiver_of(stack) {
+                cx.marker(me.node, function, Marker::Receiver);
                 return;
             }
             // (assignment left: [(attribute object: (identifier)
@@ -260,6 +259,31 @@ impl Python {
         }
         let assignment = up(stack, level + 1)?;
         (assignment.kind == k.assignment && frame.field == k.f_left).then_some(level + 1)
+    }
+
+    /// The function whose first parameter the name being visited is: the
+    /// parameter itself, or its name when it is annotated or has a default.
+    fn receiver_of<'t>(&self, stack: &[Frame<'t>]) -> Option<tree_sitter::Node<'t>> {
+        let k = &self.0;
+        let me = stack[stack.len() - 1];
+        let parent = up(stack, 1)?;
+        let (parameter, level) = if parent.kind == k.parameters {
+            (me, 1)
+        } else if (parent.kind == k.typed_parameter && parent.node.named_child(0) == Some(me.node))
+            || ((parent.kind == k.default_parameter || parent.kind == k.typed_default_parameter)
+                && me.field == k.f_name)
+        {
+            (*parent, 2)
+        } else {
+            return None;
+        };
+        let parameters = up(stack, level)?;
+        let function = up(stack, level + 1)?;
+        (parameters.kind == k.parameters
+            && parameters.field == k.f_parameters
+            && parameters.node.named_child(0) == Some(parameter.node)
+            && function.kind == k.function_definition)
+            .then_some(function.node)
     }
 
     /// Whether the frame `level` above the last is an assignment's `left`,

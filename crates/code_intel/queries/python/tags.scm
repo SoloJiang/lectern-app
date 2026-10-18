@@ -158,11 +158,21 @@
 
 ; ---- markers -----------------------------------------------------------
 
-; A function's first parameter: a method's `self`.
+; A function's first parameter: a method's `self`, also annotated or
+; with a default (`self: Self`).
 (function_definition
   parameters: (parameters
     .
-    (identifier) @name)) @reference.lectern.receiver
+    [
+      (identifier) @name
+      (typed_parameter
+        .
+        (identifier) @name)
+      (default_parameter
+        name: (identifier) @name)
+      (typed_default_parameter
+        name: (identifier) @name)
+    ])) @reference.lectern.receiver
 
 ; An assignment to an attribute (`self.name = name`, also in a chain and
 ; unpacked: `self.a, self.b = 1, 2`): a field of the class when the object

@@ -669,7 +669,9 @@ fn extract_python_module_level_and_attributes() {
                   def f():\n    local = 1\n    return local\n\
                   class Config:\n    size = 1\n    if True:\n        hidden = 2\n    def __init__(self, name):\n        self.name = name\n        self.size = 3\n        other.attr = 1\n        self.left, self.right = 1, 2\n\
                   \x20   def reset(this):\n        this.count = 0\n        def inner():\n            this.nested = 1\n        inner()\n\
-                  def free(obj):\n    obj.x = 1\n";
+                  def free(obj):\n    obj.x = 1\n\
+                  class Typed:\n    def __init__(self: Self, v):\n        self.value = v\n    def reset(self=None):\n        self.flag = 0\n\
+                  \x20   def clear(self: Self = None):\n        self.empty = 1\n";
     let table = LanguageTable::core();
     let watchdog = test_watchdog();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -712,6 +714,13 @@ fn extract_python_module_level_and_attributes() {
             "{name} in {:?}",
             walked.refs
         );
+    }
+    // An annotated or defaulted receiver (`self: Self`, `self=None`).
+    for name in ["value", "flag", "empty"] {
+        let defs = find(name);
+        assert_eq!(defs.len(), 1, "{name}: {defs:?}");
+        assert_eq!(defs[0].kind, DefKind::Field, "{name}");
+        assert_eq!(defs[0].scope.as_deref(), Some("Typed"), "{name}");
     }
 }
 
