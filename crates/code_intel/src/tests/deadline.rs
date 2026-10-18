@@ -142,9 +142,17 @@ fn deadline_watchdog_idle_does_not_wake() {
     let registration = watchdog.register(Instant::now() + Duration::from_secs(60), None, None);
     assert!(eventually(|| watchdog.rounds() >= 2));
     drop(registration);
-    // One more round notices the table is empty; then it waits untimed.
-    thread::sleep(Duration::from_millis(30));
-    let rounds = watchdog.rounds();
+    // One more round notices the table is empty; then it waits untimed. Wait
+    // until the count stops changing instead of assuming how soon that round
+    // runs on a loaded machine.
+    let mut rounds = watchdog.rounds();
+    assert!(eventually(|| {
+        thread::sleep(Duration::from_millis(30));
+        let now = watchdog.rounds();
+        let settled = now == rounds;
+        rounds = now;
+        settled
+    }));
     thread::sleep(Duration::from_millis(100));
     assert_eq!(watchdog.rounds(), rounds);
     assert!(!task.is_finished());
