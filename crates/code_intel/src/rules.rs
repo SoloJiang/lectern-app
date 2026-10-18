@@ -193,6 +193,19 @@ pub(crate) fn finish(dialect: Dialect, source: &[u8], tags: Vec<RawTag>) -> Fini
             }
         })
         .collect();
+    // Enum members (Rust variants, Java constants) are as visible as their
+    // enum; JS / TS members already take the outermost definition's.
+    if matches!(dialect, Dialect::Rust | Dialect::Java) {
+        for i in 0..out.len() {
+            let parent = parent_of_def[i].and_then(|p| containers[p].def);
+            if let Some(p) = parent
+                && defs[i].1 == DefKind::Constant
+                && defs[p].1 == DefKind::Enum
+            {
+                out[i].def.visibility = out[p].def.visibility;
+            }
+        }
+    }
     out.sort_by_key(|d| (d.def.line, d.def.column, d.range.start));
     Finished { defs: out, refs }
 }

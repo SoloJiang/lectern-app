@@ -10,7 +10,7 @@ use crate::site::{ParseError, ParsedFile, Position, Site, accepts};
 use crate::testing::ManualClock;
 use crate::{Clock, DefKind, RefSyntax, SystemClock};
 
-fn parse(lang: &str, source: &str) -> ParsedFile {
+pub(super) fn parse(lang: &str, source: &str) -> ParsedFile {
     let table = LanguageTable::core();
     ParsedFile::parse(
         table.get(lang).expect("core language"),
@@ -23,7 +23,7 @@ fn parse(lang: &str, source: &str) -> ParsedFile {
 }
 
 /// The position of the `nth` occurrence of `needle`, plus `offset` bytes.
-fn pos(source: &str, needle: &str, nth: usize, offset: usize) -> Position {
+pub(super) fn pos(source: &str, needle: &str, nth: usize, offset: usize) -> Position {
     let start = source
         .match_indices(needle)
         .nth(nth)
@@ -302,13 +302,19 @@ fn site_kind_table() {
     };
     use DefKind::*;
     assert_eq!(
-        accepted(rust, RefSyntax::Call),
+        accepted(ts, RefSyntax::Call),
         [Function, Method, Class, Struct, Macro]
     );
     assert_eq!(
         accepted(ts, RefSyntax::MemberCall),
-        accepted(rust, RefSyntax::Call)
+        accepted(ts, RefSyntax::Call)
     );
+    // Rust tuple variants (constants) are called like functions.
+    assert_eq!(
+        accepted(rust, RefSyntax::Call),
+        [Function, Method, Class, Struct, Macro, Constant]
+    );
+    assert!(!accepts(rust, RefSyntax::MemberCall, Constant));
     assert_eq!(accepted(rust, RefSyntax::Construct), [Class, Struct]);
     assert_eq!(
         accepted(rust, RefSyntax::Type),

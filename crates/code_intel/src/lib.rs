@@ -8,6 +8,7 @@
 
 mod grammar;
 mod lang;
+mod locals;
 mod rules;
 mod util;
 mod watchdog;

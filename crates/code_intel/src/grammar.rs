@@ -81,6 +81,11 @@ impl GrammarLease {
     pub fn new(handle: Arc<dyn Any + Send + Sync>) -> GrammarLease {
         GrammarLease(Some(handle))
     }
+
+    /// A statically linked grammar: nothing is ever unloaded.
+    pub fn is_static(&self) -> bool {
+        self.0.is_none()
+    }
 }
 
 impl fmt::Debug for GrammarLease {

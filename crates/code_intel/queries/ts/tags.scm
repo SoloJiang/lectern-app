@@ -5,7 +5,8 @@
 ; (commit f975a621f4e7f532fe322e13c4f79495e0a7b2e7), MIT.
 ; Lectern's changes:
 ; - @doc captures the parameter list (Lectern counts parameters from it).
-; - Adds namespaces, type aliases, enums, fields and property signatures.
+; - Adds namespaces, type aliases, enums and their members (constants),
+;   fields and property signatures.
 ; - The `new` reference is in queries/ecmascript/tags.scm; adds the class an
 ;   `extends` clause names as a class reference.
 ; - Type references cover every type identifier, not only annotations, and
@@ -42,6 +43,13 @@
 
 (enum_declaration
   name: (identifier) @name) @definition.enum
+
+; Members: constants, as visible as their enum.
+(enum_body
+  name: (property_identifier) @name @definition.constant)
+
+(enum_assignment
+  name: (property_identifier) @name) @definition.constant
 
 (public_field_definition
   name: [(property_identifier) (private_property_identifier)] @name) @definition.field

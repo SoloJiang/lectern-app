@@ -8,7 +8,8 @@
 ; - @doc captures the parameter list (Lectern counts parameters from it).
 ; - Methods are the functions of `impl` and `trait` bodies only (upstream
 ;   took any declaration list, so functions of inline modules too); adds
-;   trait method signatures, constants, statics and struct fields.
+;   trait method signatures, constants, statics, struct fields and enum
+;   variants (constants).
 ; - Adds calls through paths (`Type::new()`, `module::f()`) and path macros,
 ;   struct literals, and every type identifier as a type reference (last, so
 ;   that definitions win for their own names).
@@ -25,6 +26,10 @@
 
 (enum_item
     name: (type_identifier) @name) @definition.enum
+
+; Variants: constants, as visible as their enum.
+(enum_variant
+    name: (identifier) @name) @definition.constant
 
 (union_item
     name: (type_identifier) @name) @definition.struct

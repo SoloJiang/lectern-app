@@ -19,6 +19,7 @@ use tree_sitter::{Node, ParseOptions, Parser, QueryCursor, QueryCursorOptions, T
 pub use crate::Position;
 use crate::extract::{Def, Lang};
 use crate::lang::{Capture, Dialect, TagClass};
+use crate::locals::{Collector, LocalDef, Locals};
 use crate::rules::{self, FileDef, RawTag};
 use crate::util::LineIndex;
 use crate::watchdog::Clock;
@@ -40,11 +41,27 @@ pub struct Site {
     pub syntax: RefSyntax,
     /// Where the identifier starts.
     pub at: Position,
-    /// The local definition the locals query binds this reference to
-    /// (`Binding::Local`). None on a definition's own name.
+    /// The local declaration this reference binds to under the binding rules
+    /// (`Binding::Local`): certain, so a direct jump that hides the index
+    /// candidates. None on a definition's own name.
     pub binding: Option<LocalBinding>,
+    /// Same-named declarations in the scopes around the reference that may
+    /// be the target, with no certain binding: declared later in a
+    /// non-hoisting form, flow-scoped, or behind `global` / `nonlocal`.
+    /// When this is not empty there is no direct jump, to this file or
+    /// another: the query lists these first, then the index candidates
+    /// (docs/design/code_intel.md「绑定规则」).
+    pub possible: Vec<LocalBinding>,
     /// The definition whose name this is, when the position is on one.
     pub defines: Option<SiteDef>,
+}
+
+impl Site {
+    /// Whether the query may jump directly to a definition in another file:
+    /// no local binding, and no same-file declaration that might be it.
+    pub fn may_jump_elsewhere(&self) -> bool {
+        self.binding.is_none() && self.possible.is_empty()
+    }
 }
 
 /// A definition named at the position.
@@ -63,7 +80,8 @@ pub struct LocalBinding {
     pub at: Position,
     /// The definition when tags captured it too; a plain local otherwise.
     pub def: Option<Def>,
-    /// In a non-root scope.
+    /// Visible in one function or block only: not at file level, not a
+    /// class member.
     pub local: bool,
 }
 
@@ -75,32 +93,22 @@ pub struct RefSite {
     pub end: usize,
 }
 
-struct Scope {
-    range: Range<usize>,
-    inherits: bool,
-    parent: Option<usize>,
-    /// The `name` field of the scope's node (a function or class that also
-    /// opens this scope): a local definition there belongs to the parent.
-    name: Option<Range<usize>>,
-}
-
-struct LocalDef {
-    range: Range<usize>,
-    scope: usize,
-}
-
 /// One parsed file, kept while a query uses it and then dropped; never
 /// cached. Holds the grammar's lease through its [`Lang`].
+///
+/// Fields drop in declaration order: `lang` (and with the last one the
+/// grammar's lease) comes after `tree`, so a language pack's library is never
+/// unloaded while the tree built from it is being freed.
 pub struct ParsedFile {
-    lang: Lang,
-    source: Arc<[u8]>,
     tree: Tree,
+    #[cfg(test)]
+    _tree_dropped: crate::testing::DropTrace,
+    source: Arc<[u8]>,
     lines: LineIndex,
     defs: Vec<FileDef>,
-    /// Index 0 is the root scope; outermost first.
-    scopes: Vec<Scope>,
-    locals: Vec<LocalDef>,
+    locals: Locals,
     refs: Vec<RefSite>,
+    lang: Lang,
 }
 
 impl ParsedFile {
@@ -159,43 +167,27 @@ impl ParsedFile {
             text,
             QueryCursorOptions::new().progress_callback(&mut query_progress),
         );
-        let mut scopes = vec![Scope {
-            range: 0..text.len(),
-            inherits: false,
-            parent: None,
-            name: None,
-        }];
-        let mut local_ranges: Vec<Range<usize>> = Vec::new();
+        let mut collector = Collector::new(dialect, text.len());
         let mut ref_ranges: Vec<Range<usize>> = Vec::new();
         // One tag per name node, from the lowest pattern (tree-sitter-tags).
         let mut tags: HashMap<(usize, usize), (usize, RawTag)> = HashMap::new();
         while let Some(m) = matches.next() {
             if m.pattern_index < compiled.locals_patterns {
+                let props = query.property_settings(m.pattern_index);
                 for capture in m.captures() {
-                    let range = capture.node.byte_range();
                     match compiled.captures[capture.index as usize] {
-                        Capture::LocalScope => {
-                            let inherits =
-                                !query.property_settings(m.pattern_index).iter().any(|p| {
-                                    &*p.key == "local.scope-inherits"
-                                        && p.value.as_deref() == Some("false")
-                                });
-                            scopes.push(Scope {
-                                range,
-                                inherits,
-                                parent: None,
-                                name: capture
-                                    .node
-                                    .child_by_field_name("name")
-                                    .map(|n| n.byte_range()),
-                            });
+                        Capture::LocalScope => collector.scope(capture.node, props),
+                        Capture::LocalDefinition => {
+                            collector.definition(capture.node, props, text);
                         }
-                        Capture::LocalDefinition => local_ranges.push(range),
                         // `(identifier) @local.reference` also matches member
                         // and path names (`items.add`, `Queue::new`), which
                         // never refer to a local.
-                        Capture::LocalReference if is_variable_position(dialect, capture.node) => {
-                            ref_ranges.push(range);
+                        Capture::LocalReference
+                            if collector.reference(capture.node, props)
+                                && is_variable_position(dialect, capture.node) =>
+                        {
+                            ref_ranges.push(capture.node.byte_range());
                         }
                         _ => {}
                     }
@@ -246,37 +238,7 @@ impl ParsedFile {
             return Err(interrupted());
         }
 
-        // Scopes: outermost first, each with its parent.
-        let root = scopes.remove(0);
-        scopes.sort_by_key(|s| (s.range.start, std::cmp::Reverse(s.range.end)));
-        scopes.insert(0, root);
-        let mut stack: Vec<usize> = vec![0];
-        for i in 1..scopes.len() {
-            let range = scopes[i].range.clone();
-            while let Some(&top) = stack.last() {
-                let r = &scopes[top].range;
-                if r.start <= range.start && range.end <= r.end {
-                    break;
-                }
-                stack.pop();
-            }
-            scopes[i].parent = stack.last().copied();
-            stack.push(i);
-        }
-        local_ranges.sort_by_key(|r| (r.start, r.end));
-        local_ranges.dedup();
-        let locals: Vec<LocalDef> = local_ranges
-            .into_iter()
-            .map(|range| {
-                // A function or class name is visible in the scope around the
-                // declaration, not in the body scope the declaration opens.
-                let mut scope = innermost(&scopes, &range);
-                if scopes[scope].name.as_ref() == Some(&range) {
-                    scope = scopes[scope].parent.unwrap_or(0);
-                }
-                LocalDef { scope, range }
-            })
-            .collect();
+        let locals = collector.finish(text);
 
         let mut tags: Vec<RawTag> = tags.into_values().map(|(_, t)| t).collect();
         tags.sort_by_key(|t| t.name_range.start);
@@ -293,7 +255,7 @@ impl ParsedFile {
             .iter()
             .filter(|t| matches!(t.class, TagClass::Def(_)))
             .map(|t| (t.name_range.start, t.name_range.end))
-            .chain(locals.iter().map(|l| (l.range.start, l.range.end)))
+            .chain(locals.defs().iter().map(|l| (l.range.start, l.range.end)))
             .collect();
         let refs = ref_ranges
             .into_iter()
@@ -306,14 +268,15 @@ impl ParsedFile {
             .collect();
         let finished = rules::finish(lang.dialect(), text, tags);
         Ok(ParsedFile {
-            lang: lang.clone(),
-            source,
             tree,
+            #[cfg(test)]
+            _tree_dropped: crate::testing::DropTrace("tree"),
+            source,
             lines,
             defs: finished.defs,
-            scopes,
             locals,
             refs,
+            lang: lang.clone(),
         })
     }
 
@@ -364,28 +327,41 @@ impl ParsedFile {
                 syntax,
                 at: start,
                 binding: None,
+                possible: Vec::new(),
                 defines: Some(defines),
             });
         }
         // A member or path name (`items.add`, `obj.x`, `Queue::new`) never
         // binds to a same-named local.
-        let binding = (is_variable_position(dialect, node)
-            && !matches!(syntax, RefSyntax::Member | RefSyntax::MemberCall))
-        .then(|| self.binding(&range, &name))
-        .flatten();
+        let (binding, possible) = if is_variable_position(dialect, node)
+            && !matches!(syntax, RefSyntax::Member | RefSyntax::MemberCall)
+        {
+            let resolution = self.locals.resolve(text, &range);
+            (
+                resolution.binding.map(|d| self.local_binding(d, &name)),
+                resolution
+                    .possible
+                    .into_iter()
+                    .map(|d| self.local_binding(d, &name))
+                    .collect(),
+            )
+        } else {
+            (None, Vec::new())
+        };
         Some(Site {
             name,
             syntax,
             at: start,
             binding,
+            possible,
             defines: None,
         })
     }
 
     /// The definition named by `range`: a tags definition, or a plain local.
     fn defines(&self, range: &Range<usize>, name: &str, at: Position) -> Option<SiteDef> {
-        let local = self.locals.iter().find(|l| l.range == *range);
-        let local_flag = local.is_some_and(|l| l.scope != 0);
+        let local = self.locals.def_at(range);
+        let local_flag = local.is_some_and(|l| self.locals.is_local(l));
         if let Some(def) = self.defs.iter().find(|d| d.name_range == *range) {
             return Some(SiteDef {
                 def: def.def.clone(),
@@ -410,59 +386,23 @@ impl ParsedFile {
                 visibility: crate::extract::Visibility::File,
                 arity: None,
             },
-            local: local.scope != 0,
+            local: self.locals.is_local(local),
         })
     }
 
-    /// The local definition a reference binds to: the innermost scope around
-    /// it with a definition of the name, preferring the last definition
-    /// before the reference, then the first after it (hoisting).
-    fn binding(&self, range: &Range<usize>, name: &str) -> Option<LocalBinding> {
-        let text = &*self.source;
-        let mut scope = Some(innermost(&self.scopes, range));
-        while let Some(s) = scope {
-            let mut before: Option<&LocalDef> = None;
-            let mut after: Option<&LocalDef> = None;
-            for local in self.locals.iter().filter(|l| l.scope == s) {
-                if text.get(local.range.clone()) != Some(name.as_bytes()) {
-                    continue;
-                }
-                if local.range.start < range.start {
-                    before = Some(local);
-                } else if after.is_none() {
-                    after = Some(local);
-                }
-            }
-            if let Some(local) = before.or(after) {
-                let def = self
-                    .defs
-                    .iter()
-                    .find(|d| d.name_range == local.range)
-                    .map(|d| d.def.clone());
-                return Some(LocalBinding {
-                    name: name.into(),
-                    at: position(&self.lines, local.range.start, text),
-                    def,
-                    local: local.scope != 0,
-                });
-            }
-            if !self.scopes[s].inherits {
-                break;
-            }
-            scope = self.scopes[s].parent;
+    fn local_binding(&self, local: &LocalDef, name: &str) -> LocalBinding {
+        let def = self
+            .defs
+            .iter()
+            .find(|d| d.name_range == local.range)
+            .map(|d| d.def.clone());
+        LocalBinding {
+            name: name.into(),
+            at: position(&self.lines, local.range.start, &self.source),
+            def,
+            local: self.locals.is_local(local),
         }
-        None
     }
-}
-
-/// The innermost scope containing `range` (the root when no other does).
-fn innermost(scopes: &[Scope], range: &Range<usize>) -> usize {
-    scopes
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, s)| s.range.start <= range.start && range.end <= s.range.end)
-        .map_or(0, |(i, _)| i)
 }
 
 fn position(lines: &LineIndex, offset: usize, text: &[u8]) -> Position {
@@ -778,6 +718,9 @@ pub fn accepted_kinds(lang: &Lang, syntax: RefSyntax) -> u16 {
         (Dialect::Go, RefSyntax::Call | RefSyntax::MemberCall) => {
             crate::def_kind_bit(DefKind::Type)
         }
+        // Rust: a tuple variant is called like a function (`Error::Io(e)`);
+        // variants are constants.
+        (Dialect::Rust, RefSyntax::Call) => crate::def_kind_bit(DefKind::Constant),
         _ => 0,
     };
     default | extra

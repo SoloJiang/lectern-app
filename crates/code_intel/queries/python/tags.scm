@@ -5,7 +5,8 @@
 ; Lectern's changes:
 ; - Functions directly in a class body (decorated or not) are methods.
 ; - @doc captures the parameter list (Lectern counts parameters from it).
-; - Adds superclasses as class references.
+; - Adds superclasses as class references, and class attributes (including
+;   `Enum` members) as fields.
 ; - Identifier calls carry (#is-not? local).
 
 ; ---- definitions -------------------------------------------------------
@@ -17,6 +18,13 @@
 
 (class_definition
   name: (identifier) @name) @definition.class
+
+; Class attributes, including `Enum` members (`Color.RED`).
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment
+        left: (identifier) @name) @definition.field)))
 
 (class_definition
   body: (block

@@ -20,4 +20,4 @@ defs:
   39:2-41 method reset in api [public] (0)
   42:2-42 function count in api [public] (0)
   45:10-48 function ids [public] (1)
-refs: #items #trim Math clamp constructor emit entries filter idSequence length max min name push rest
+refs: #items #trim LIMIT Math Store clamp constructor emit entries filter idSequence instances length max min name push rest start

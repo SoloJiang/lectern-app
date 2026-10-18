@@ -756,6 +756,7 @@ pub enum Visibility {
 ```
 
 - `kind` 来自 tags 的 `@definition.<种类>`：`function`、`method`、`class`、`interface`、`module`、`macro`、`constant`、`type`、`field` 等按名字对应 `DefKind`，`struct`、`enum`、`trait` 用各语言查询里的同名种类，其余为 `Other`。
+- 枚举的成员是定义：Rust 的变体、TS 的枚举成员、Java 的枚举常量是 `Constant`，`scope` 是所在的枚举，可见性取枚举的可见性（Rust 的变体没有自己的 `pub`，Java 的枚举常量没有修饰符）；Python 类体里直接赋值的名字（类属性，包括 `Enum` 的成员）是 `Field`，`scope` 是所在的类。
 - 每个名字节点只有一个定义。tree-sitter-tags 只在两次匹配都还在队列里时按模式顺序去重，后到的匹配会给同一个名字节点再加一个定义（方法又被函数模式匹配到）；抽取后按名字节点去重，保留更具体的种类（方法、类等先于函数，函数先于常量和变量），与查询里模式的先后一致。定义自己的名字不算引用。
 - `scope`：同一文件里，范围包含这个定义的最内层定义的名字。抽取后按范围排序一遍求出。Rust 的 `impl` 块不是定义，但作为容器参与计算，块里的方法的 `scope` 是实现的类型；Go 的方法取接收者的类型。
 - `visibility` 和 `arity` 由每种语言的一个小函数得出；规则变化时 `EXTRACTOR_VERSION` 加一。tree-sitter-tags 只交出 tag、不交出语法树，所以函数读的是查询为它捕获的内容：
@@ -783,6 +784,34 @@ pub enum Visibility {
 - locals 查询也把嵌套的函数和类的名字记为 `@local.definition`（Python 的 `def` 和 `class`，JS / TS 的函数和类声明，Rust 块里的 `fn`，Java 块里的局部类和记录）。声明本身也是一个作用域，名字在它的范围之内；`ParsedFile` 把作为作用域节点 `name` 字段的定义放进外层作用域，所以 `def outer(): def helper(): …; helper()` 里的调用绑定到 `helper`。Go 没有嵌套的具名函数。
 - `(identifier) @local.reference` 也会匹配成员名、路径段和关键字参数（Java 的 `items.add`、`this.add`，Python 的 `obj.x`、`f(x=1)`，Rust 的 `Queue::new`）。`ParsedFile` 按每种语言的一张表（`site.rs` 的 `NON_VARIABLE_POSITIONS`）把这些位置排除在局部引用之外，位置分析在这些位置上、以及语法种类为 `Member`、`MemberCall` 时都不做局部绑定。JS / TS 和 Go 的成员名本来就是另一种节点。
 - 夹具：`crates/code_intel/tests/fixtures/extract/<语言>/` 下每种语言若干真实写法的样本（类、方法、闭包、重载、嵌套模块、导出与非导出、宏），抽取结果用 insta 快照；grammar 或查询升级时快照的变化在 PR 里逐个看过。另有一份病态输入（深度嵌套、超长行）用于截止时间的测试。
+
+### 绑定规则
+
+`ParsedFile` 的局部绑定（`site.rs` 和 `locals.rs`）按下面的规则解析。规则写在每种语言的 locals 查询里，以模式属性的形式出现，tree-sitter-tags 不读这些属性：
+
+- 作用域的 `local.kind`：`function`（函数、方法、闭包、lambda）、`comprehension`（Python 的推导式，是函数作用域，但 `:=` 跳过它）、`class`（Python 的类体）。没有这个属性的作用域是块，文件本身是函数作用域。
+- 定义的 `local.scope "function"`：定义放进最近的函数作用域（JS 的 `var`、Python 的 `:=`），没有这个属性时放进包含它的最内层作用域。作为作用域节点 `name` 字段的定义（函数名、类名）放进外层作用域。
+- 定义的 `local.visible`，决定从哪里开始可见：`scope` 是整个作用域，包括声明之前的位置（提升）；`end:<种类>` 从最近的这种节点结束处开始（`let x = x + 1;` 右边的 `x` 是之前的 `x`）；`body:<种类>` 从这种节点的 `body` 开始（`for x in x.iter()`）；没有这个属性时从名字本身开始。
+- 定义的 `local.until "<字段>:<种类>|<种类>"`，决定到哪里结束可见：到最近的这类节点的这个字段开始处，节点没有这个字段时到节点结束。只有 Rust 的 `if let` / `while let` 用它，绑定不进入 `else` 分支，也不越过 `while` 的结尾。
+- 定义的 `local.certain "false"`：可见范围取决于控制流的形式（Java 的 `instanceof` 模式和记录模式），只给候选，不给绑定。
+- 引用的 `local.nonlocal "true"`：Python 的 `global`、`nonlocal` 语句里的名字，把这个名字移出所在函数的作用域。
+- 捕获的节点可以是一个模式（`{a, b: [c]}`、`(a, *rest)`、`Some(v)`、`Point { x, y: z }`），`locals.rs` 把它展开成它绑定的名字。构造器和路径（`Some`、`Point`）、默认值、类型标注、键、属性和下标目标（`obj.count = 1`）不绑定名字；Rust 模式里大写开头的名字是单元变体或常量（`None`、`MAX`），不绑定。
+
+**安全不变式**：只有规则表明一个声明在引用处可见时，局部绑定才成立，才挡住索引里的候选（`Bound(Local)`，直接跳转）。外层作用域里同名、但在引用处不确定可见的声明（在不提升的形式里声明在引用之后、可见范围取决于控制流、被 `global` 移出）只作为候选（`Site::possible`，本文件的候选排在前面），这时仍查询索引，不会直接跳到别的文件，也不会直接跳到一个不在作用域里的局部声明。
+
+解析：从包含引用的最内层作用域向外找同名定义。离开一个函数或类体之后，再遇到的类体跳过（类体里的名字只对直接写在类体里的代码可见，对其中的方法和嵌套类不可见）。在一个作用域里，取引用之前最后一个可见的声明；没有时取引用之后的提升声明。找到确定的声明就是绑定；找到不确定的声明，结果只有候选。
+
+| 语言 | 声明形式与可见范围 | 作用域 | 提升 | 模式 |
+|---|---|---|---|---|
+| JS / TS | `let`、`const`、`class` 声明：所在块，整个块（闭包可以在声明之前引用）；`var`：最近的函数，整个函数；函数声明：所在块，整个块；参数、`catch` 参数：整个函数或子句；`for (let … of …)` / `for (var …)`：循环或函数 | 块（语句块、`for`、`for…in`）；函数（函数、箭头函数、生成器、方法） | 函数声明、`var` | 对象和数组的解构，`= 默认值`和键不绑定；解构赋值（没有 `let` / `const` / `var`）不是声明 |
+| Python | 参数、赋值目标、增量赋值、`for` 目标、`with` / `except … as`、`def`、`class`：所在函数的整个作用域；`:=`：最近的函数，跳过推导式；推导式的 `for` 目标：推导式 | 函数（函数、lambda）；推导式；类体（只对直接写在类体里的代码可见） | 函数作用域里的所有名字（赋值之前的引用也绑定到它） | 元组、列表和星号目标；属性和下标目标不绑定 |
+| Rust | `let`：从声明结束处到块结束；`if let` / `while let`：从这个 `let` 结束处到 `if` 的 `else` 之前或 `while` 结束；`for` 模式：循环体；`match` 分支模式：整个分支（含守卫）；参数、闭包参数：整个函数；块里的 `fn`、`const`、`static`：整个块 | 块、`for`、`match` 分支；函数（`fn`、闭包） | 块里的项（`fn`、`const`、`static`） | 元组、元组结构体、结构体（字段简写和改名）、引用和 `@` 模式；构造器、路径、范围、宏和大写开头的名字不绑定 |
+| Java | 局部变量：从声明符结束处到块结束；增强 `for` 变量：循环体；`try` 资源：从资源结束处；参数、`catch` 参数、lambda 参数：整个方法或子句；块里的局部类、记录、枚举、接口：从名字开始；`instanceof` 模式、记录模式：不确定 | 块、`for`、增强 `for`、`catch`、`try` 资源、`switch` 分组；函数（方法、构造器、lambda） | 无 | 记录模式的组件（不确定） |
+| Go | `:=`：从语句结束处；函数里的 `var`、`const`：从这一项结束处；包级的 `var`、`const`：整个文件（与顺序无关）；`range` 变量：循环体；`select` 的接收语句：从语句结束处；参数、类型 `switch` 的别名：整个函数或语句 | 块、`for`、`if`、`switch`、各 `case`；函数（函数、方法、函数字面量） | 包级 `var`、`const` | 多变量声明 |
+
+- import 不是局部定义，经索引解析（「跳转到定义」第 2、3 步）。
+- 一种语言新增声明形式时，在它的 locals 查询里加模式和属性，在 `tests/binding.rs` 的这种语言的表里加行；每种语言一个表驱动的测试（`site_binding_<语言>`），每行是一段源码、引用的位置和期望（绑定到某个声明；只有这些候选，不允许直接跳到别的文件；没有局部定义，由索引回答）。
+- tree-sitter-tags 一侧用同一个 locals 查询过滤引用名（`#is-not? local`）。它不读上面的属性，只按名字比较：函数作用域标成 `local.scope-inherits false`，过滤只看引用所在函数自己的局部定义；捕获整个模式的定义（解构）不等于任何名字，不过滤；Rust 的 `if let` / `while let` 绑定用 `@definition.lectern.local` 捕获，tree-sitter-tags 在 locals 查询里只处理 `@local.scope` 和 `@local.definition`，所以不过滤它们，`if` 和 `while` 也不是作用域（tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，多数 `if` 不绑定名字）。这几处都让引用名多出名字，不会少。
 
 ### 存储表
 
@@ -1045,7 +1074,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 更新、回滚 | 换成新的 grammar 版本。键里的 grammar 版本随之变化，旧版本的单元不再命中（回滚时，之前用那个版本写过的单元重新命中） |
 | 撤销、卸载 | 立即移除，不再加载这个 grammar。这种语言的文件随基础映射重建离开映射和 `coverage`，这种语言的查询返回 `UnsupportedLanguage` |
 
-- 租约：语言表里的每个条目、由它编译出的 `TagsConfiguration` 和 locals `Query`、每个 `Parser`、每个在途抽取和 `ParsedFile`（持有 `Tree`）都持有一份 `GrammarLease` 的克隆。更新、回滚、撤销时语言表先换掉或删掉条目，旧条目的租约随最后一个使用者（在途抽取结束、查询释放 `ParsedFile`）drop，加载器这时才卸载动态库，所以不会有代码调用已卸载的库。
+- 租约：语言表里的每个条目、由它编译出的 `TagsConfiguration` 和 locals `Query`、每个 `Parser`、每个在途抽取和 `ParsedFile`（持有 `Tree`）都持有一份 `GrammarLease` 的克隆。更新、回滚、撤销时语言表先换掉或删掉条目，旧条目的租约随最后一个使用者（在途抽取结束、查询释放 `ParsedFile`）drop，加载器这时才卸载动态库，所以不会有代码调用已卸载的库。同一个值里，租约在所有指向库的字段之后 drop：Rust 按声明顺序 drop 字段，语言表条目和 `ParsedFile` 把租约（或持有租约的 `Lang`）声明在最后；每线程复用的 `TagsContext`（持有指向库的解析器和查询游标）在语言包的每次抽取之后清掉。`lang_lease_outlives_grammar_backed_values` 检查 drop 的顺序：语法树、编译好的查询、模块。
 - 在途的抽取：更新、回滚、撤销都置位这种语言在途抽取的取消标志。每个批次和每次按需抽取开始时记下所用的 grammar 版本，写入缓存之前核对仍是当前版本，不是就丢弃结果，所以旧 grammar 的结果不会以新键写入。已编译的旧配置在用它的在途抽取结束后释放。
 - 旧版本的单元不主动删除，留给淘汰。
 - 已交出的 `QueryResults` 不修改（只追加的规则）；正在进行的查询按自己开始时的快照完成。
@@ -1056,7 +1085,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 `query(Definition)` 在一个 `Interactive` 任务里按下面的顺序回答。前一步得到有绑定依据的候选就停下；没有时继续，结果逐批追加：
 
-1. **当前文本**：按 `TextRef` 读出内容。工作区一侧经 `SafeRoot` 读，只有能证明读到的字节就是 `TextRef::oid` 那份内容时才回答：原始字节的 OID 等于它，或 `GitAccess::canonical_oid` 把这些字节转成规范内容后的 OID 等于它；两者都不等（或有外部过滤器）时返回 `Stale`，不因为映射里还记着这个 OID 就接受。对象库一侧经 `GitAccess::blob` 读，按 OID 取出的内容不需要核对。然后解析，求出位置上的标识符和 `RefSyntax`。locals 查询在作用域里解析到的定义是 `Bound(Local)`；本文件里其余同名定义是第 1 层的 `NameOnly` 候选。光标在定义的名字上时，`symbol.defines` 是这个定义（`local` 按上面 `DefinitionRef::local` 的规则：locals 在非根作用域里给出时为 true），它本身作为唯一的 `Bound(Local)` 候选。
+1. **当前文本**：按 `TextRef` 读出内容。工作区一侧经 `SafeRoot` 读，只有能证明读到的字节就是 `TextRef::oid` 那份内容时才回答：原始字节的 OID 等于它，或 `GitAccess::canonical_oid` 把这些字节转成规范内容后的 OID 等于它；两者都不等（或有外部过滤器）时返回 `Stale`，不因为映射里还记着这个 OID 就接受。对象库一侧经 `GitAccess::blob` 读，按 OID 取出的内容不需要核对。然后解析，求出位置上的标识符和 `RefSyntax`。按「绑定规则」在引用处确定可见的局部定义是 `Bound(Local)`；不确定可见的局部定义（`Site::possible`）和本文件里其余同名定义是第 1 层的 `NameOnly` 候选，前者在前。光标在定义的名字上时，`symbol.defines` 是这个定义（`local` 按上面 `DefinitionRef::local` 的规则：locals 在非根作用域里给出时为 true），它本身作为唯一的 `Bound(Local)` 候选。
 2. **import**：解析扩展点给出这个名字的 import 目标，按路径取目标文件的抽取结果（缓存命中或现场抽取），其中导出的同名定义是 `Bound(Import)`；扩展点的 `bind` 给出的结果按它的 `Binding`。#17 的空实现在这一步没有结果。
 3. **索引**：`ci_def` 按名字取出全部定义，经 `ci_ext` 得到 OID 和语言，只取语言、grammar 版本、查询版本与当前语言表一致的单元（见「存储表」的版本过滤），按「候选的分层与过滤」过滤和分层，只留映射里有的 OID。
 4. **限时搜索**：第 3 步之后仍没有 `Bound` 候选、且当前子项目里还有未入索引的文件时进行，见「限时搜索」。
@@ -1067,7 +1096,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 `jump` 和 `preselect`：
 
-- 有 `Bound` 候选、且恰好一个时，`jump` 是它；多个 `Bound` 候选（重载签名、同名的多个 `impl`）时不跳，`preselect` 为第一个。
+- 有 `Bound` 候选、且恰好一个时，`jump` 是它；多个 `Bound` 候选（重载签名、同名的多个 `impl`）时不跳，`preselect` 为第一个。第 1 步有不确定的局部候选（`Site::possible`）时也不跳：这个名字可能就是那个局部声明（「绑定规则」的安全不变式）。
 - 只有 `NameOnly` 候选时，即使只有一个也不跳，`preselect` 为第一个。方法调用、接收者类型不明的成员访问都属于这一类。
 - Java 的候选满足「语义导航的注册」里的升级条件时，同时发出语义请求，`semantic` 为 `Pending`。
 
@@ -1091,6 +1120,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   | `Member` | Rust：`Field`、`Method`、`Constant`、`Variable`（`a.b` 的左边总是值）。其他语言：全部（左边可以是命名空间导入、模块、包或类，`utils.handle`、`models.User`、`pkg.Var`、`Outer.Inner` 的成员可以是任何定义） |
   | `Plain` | 全部 |
   | Go 的 `Call`、`MemberCall` | 默认规则之外再接受 `Type`（`units.Meters(value)` 也是类型转换） |
+  | Rust 的 `Call` | 默认规则之外再接受 `Constant`（元组变体的构造 `Io(code)`，变体是 `@definition.constant`） |
 
   这张表是 `site::accepted_kinds`。引用位置的 `RefSyntax` 由每种语言的一张位置表判断（`site.rs`）：每行是（标识符的节点种类、父节点种类与它所在的字段、可选的外层节点种类与字段或父节点必须有的字段）→ `RefSyntax`，第一条匹配的行生效；没有匹配的类型标识符为 `Type`，其余为 `Plain`。例如 Rust 的 `call_expression.function` 里的 `identifier` 是 `Call`，`call_expression.function` 里的 `field_expression.field` 是 `MemberCall`；Java 的 `method_invocation.name` 在有 `object` 字段时是 `MemberCall`。语言包没有位置表，都是 `Plain`。
 
@@ -1285,6 +1315,20 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 拆分（callgrind，TS，256 KiB，指令数）：解析约 38%，查询匹配约 40%，tree-sitter-tags 逐个 tag 的处理约 13%，本 crate 的 `finish` 约 5.6%，其余是树的释放和内存分配。同一语料按文件大小：16 KiB、64 KiB、256 KiB、1 MiB 的文件分别约 2.9、2.9、2.5、1.7 MiB/s。1 MiB 的 JS 文件里，tree-sitter-tags 的局部检查（内联进 `extract` 的代码和它的 `memcmp`）约占 45%；64 KiB 时约 2%。
 - 试过、没有保留的改动（交替运行两个二进制，每项三次）：去掉 locals 查询的 `(identifier) @local.reference`，1 MiB 时 1.69 对 1.67–1.69 MiB/s，没有变化；引用名去重后再分配字符串，1 MiB 时 1.65–1.67 对 1.57–1.59，8 KiB 的文件 2.54–2.65 对 2.56–2.64，没有收益；兜底模式不带 `#is-not? local`，1 MiB 时 1.69 对 2.12，8 KiB 时没有变化，但局部变量名会进入引用名；函数级作用域标成 `local.scope-inherits false`，1 MiB 时 1.68–1.72 对 1.99–2.02，8 KiB 时 2.55–2.66 对 2.62–2.63，但改变了被过滤的引用。解析器、查询游标和 `TagsContext` 本来就按线程复用，locals 和 tags 本来就是一次匹配。
 
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 第二轮审阅意见（绑定规则、租约的 drop 顺序、枚举成员）之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1145 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。
+- `just test -p lectern-code-intel`：47 个测试通过。按前缀：`lang_*` 10、`extract_*` 12、`deadline_*` 8、`site_*` 17。新增 `site_binding_javascript`、`site_binding_typescript`、`site_binding_python`、`site_binding_rust`、`site_binding_java`、`site_binding_go`（「绑定规则」的表驱动测试，共 58 行）、`extract_enum_members_are_definitions`（Rust、TS、Java、Python）、`lang_lease_outlives_grammar_backed_values`。7 个快照有变化，逐个看过：新增 Rust 的变体、TS 的枚举成员、Python dataclass 的类属性三类定义（枚举成员的名字随之不再作为引用名出现，`Inch`、`Closed`）；引用名多出原来被过滤掉的名字（解构出的名字、外层函数的局部定义、方法里的 `self`、Python 类体外的模块名、Go 的包级 `ErrRange`），都是保守方向的变化。
+- `code_intel/extract_throughput`（交替运行这一版和 99fd327，每项三次，MB 为 2^20 字节）：
+
+  | 版本 | 仓库形状（8 KiB 的文件） | `extract_1mib` |
+  |---|---|---|
+  | 99fd327 | 2.40–2.62 MB/s | 1.59–1.69 MB/s |
+  | 本轮第一版（`if`、`while` 都是作用域） | 2.31–2.43 MB/s | 1.73–1.83 MB/s |
+  | 本轮（`if let` / `while let` 用 `local.until` 限定范围，`if`、`while` 不是作用域） | 2.40–2.50 MB/s | 1.88–1.91 MB/s |
+
+  第一版的下降集中在 Rust（按语言拆分，Rust 2.27–2.50 对 2.60–2.69 MiB/s，Go 约 4%，其余在噪声内）：tree-sitter-tags 对每个要过滤的引用检查已经出现的全部作用域，每个 `if`、`while` 多一个作用域。去掉这两种作用域后 Rust 回到 2.60–2.70 MiB/s；只把条件里有 `let` 的 `if` 记为作用域是 2.50–2.59 MiB/s（带字段和选择的模式本身的匹配也有开销），所以改用 `local.until`。`extract_1mib` 快 12%–18%：函数作用域标成 `local.scope-inherits false` 后，局部检查只扫描所在函数的作用域。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1318,5 +1362,13 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 语法种类表的 `Member` 原来只接受 `Field`、`Method`、`Constant`、`Variable`。`const cb = utils.handle`、`models.User` 这类成员是函数和类，被过滤掉了。改为只在 Rust 里收窄，其他语言接受全部种类（「候选的分层与过滤」已改）。
 - 设计没有规定 locals 查询要捕获嵌套声明的名字，`def outer(): def helper(): …; helper()` 里的调用因此没有局部绑定。现在捕获，并规定声明名属于外层作用域（「外部格式」已补）。Go 没有嵌套的具名函数，不需要。
 - 设计没有说明 `(identifier) @local.reference` 会匹配成员名和路径段，`int add = 0; items.add(x)` 里的 `add` 因此绑定到了局部变量。现在按位置表排除（「外部格式」已补）。tree-sitter-tags 一侧，成员调用的模式本来就不带 locals 谓词，兜底的成员模式也不带。
-- 引用名原来只有调用、类型、构造和实现，`ci_ref` 选不出只有普通用处的文件。现在加了兜底模式（「抽取结果」「外部格式」已补）。同一个文件里对根作用域局部定义的用处（Python 模块级的 `TAX_RATE`）仍按设计不进入引用名，这个文件就是定义所在的文件，查引用时总会现场解析。
+- 引用名原来只有调用、类型、构造和实现，`ci_ref` 选不出只有普通用处的文件。现在加了兜底模式（「抽取结果」「外部格式」已补）。同一个文件里对根作用域局部定义的用处（Python 模块级的 `TAX_RATE`）仍按设计不进入引用名，这个文件就是定义所在的文件，查引用时总会现场解析。（第二轮之后，函数里对它的用处会进入引用名，见下面第二轮的 `local.scope-inherits false`。）
 - `code_intel/extract_throughput` 的测量方式改为仓库形状，另加只记录的 `code_intel/extract_1mib`，预算不变，见 [ADR 0031](../adr/0031.md)（提议中）。设计原来没有规定语料的形状，第 1 步用的是每种语言一个 1 MiB 的文件。
+
+第 1 步，处理 [#113](https://github.com/SoloJiang/lectern-app/pull/113) 第二轮审阅意见：
+
+- 设计只说「locals 查询在作用域里解析到的定义是 `Bound(Local)`」，没有规定每种语言的声明形式、作用域、提升和模式，实现按名字找最内层作用域里的定义，出现了四类错误的直接跳转：引用在声明之前时取了之后的声明（`before.or(after)` 不区分是否提升）、Python 方法看到了类体里的名字、JS 的 `var` 按块处理、Rust 的嵌套模式没有展开。现在按新增的「绑定规则」解析，并加了安全不变式：不确定可见的局部声明只给候选，不直接跳转，也不允许跳到别的文件（「跳转到定义」的 `jump` 规则已补）。`Site` 因此多了 `possible` 字段和 `may_jump_elsewhere`。
+- locals 查询改为按声明形式捕获：JS / TS 原来用上游的 `pattern/identifier`，它也匹配解构赋值（不是声明）；Rust、Java、Python、Go 的查询加了块、`for`、`match` 分支、`catch`、`switch` 分组等作用域，以及推导式、`:=`、`global` / `nonlocal`、`with` / `except … as`、Java 的局部类与模式、Go 的包级声明。import 仍不是局部定义。
+- 函数作用域在 tree-sitter-tags 一侧标成 `local.scope-inherits false`。ADR 0031 记下这一项时是作为提速手段放弃的（它改变了被过滤的引用）；这一轮它是为了正确性：只用所在函数自己的局部定义过滤，Python 的类体不再挡住方法里的模块名，外层函数的同名局部不再让一个名字从引用名里消失。变化的方向都是引用名多出名字。
+- 设计没有规定 grammar 租约相对其他字段的 drop 顺序。语言包的条目原来先 drop 租约、后 drop 编译好的查询，`ParsedFile` 先 drop 持有租约的语言、后 drop 语法树，库可能在查询和语法树释放之前被卸载。现在租约在最后（「语言包的变化」已补），并清掉每线程 `TagsContext` 里指向语言包的解析器和游标。
+- 设计没有说枚举成员是定义：Rust 的变体、TS 的枚举成员和 Python 的类属性原来不在定义里，Java 的枚举常量有定义但可见性按自己的修饰符算（总是 `Public`）。现在都是定义，可见性取枚举的（「抽取结果」已补），Rust 的 `Call` 因此也接受 `Constant`（「候选的分层与过滤」已补）。

@@ -346,3 +346,59 @@ fn extract_plain_and_member_uses_are_names() {
         }
     }
 }
+
+#[test]
+fn extract_enum_members_are_definitions() {
+    // Enum variants and members are definitions in the enum's scope and
+    // take the enum's visibility; Python class attributes are fields.
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [(&'a str, DefKind, &'a str, Visibility)],
+    );
+    let cases: &[Case] = &[
+        (
+            "rust",
+            "pub enum Error { Full, Io(u8) }\nenum Private { Hidden }\n",
+            &[
+                ("Full", DefKind::Constant, "Error", Visibility::Public),
+                ("Io", DefKind::Constant, "Error", Visibility::Public),
+                ("Hidden", DefKind::Constant, "Private", Visibility::Module),
+            ],
+        ),
+        (
+            "ts",
+            "export enum Unit { Metre, Inch = 2 }\nenum Local { Only }\n",
+            &[
+                ("Metre", DefKind::Constant, "Unit", Visibility::Public),
+                ("Inch", DefKind::Constant, "Unit", Visibility::Public),
+                ("Only", DefKind::Constant, "Local", Visibility::File),
+            ],
+        ),
+        (
+            "java",
+            "class A {\n  private enum Kind { TOOL }\n  public enum Open { WIDE }\n}\n",
+            &[
+                ("TOOL", DefKind::Constant, "Kind", Visibility::File),
+                ("WIDE", DefKind::Constant, "Open", Visibility::Public),
+            ],
+        ),
+        (
+            "python",
+            "class Color(Enum):\n    RED = 1\n    GREEN = 2\n",
+            &[
+                ("RED", DefKind::Field, "Color", Visibility::Unknown),
+                ("GREEN", DefKind::Field, "Color", Visibility::Unknown),
+            ],
+        ),
+    ];
+    for (lang, source, want) in cases {
+        let e = run(lang, source);
+        for (name, kind, scope, visibility) in *want {
+            let d = def(&e, name);
+            assert_eq!(d.kind, *kind, "{lang} {name}");
+            assert_eq!(d.scope.as_deref(), Some(*scope), "{lang} {name}");
+            assert_eq!(d.visibility, *visibility, "{lang} {name}");
+        }
+    }
+}

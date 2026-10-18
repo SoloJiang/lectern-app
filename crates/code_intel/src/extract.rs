@@ -247,6 +247,12 @@ pub fn extract(
         }
         Ok::<_, TagsError>(tags)
     });
+    // The thread's parser keeps a pointer to the language it last parsed.
+    // A language pack can be unloaded once its lease is gone, so the context
+    // goes now, while this call still holds the lease through `lang`.
+    if !lang.lease().is_static() {
+        CONTEXT.with(|context| drop(context.borrow_mut().take()));
+    }
     let tags = match tags {
         Ok(tags) => tags,
         Err(TagsError::Cancelled) => return interrupted(&registration),
