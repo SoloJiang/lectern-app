@@ -42,6 +42,8 @@ pub(crate) struct Seen {
 pub(crate) struct Options {
     pub battery: bool,
     pub batch_tasks: usize,
+    /// Language packs installed before the indexer subscribes.
+    pub grammars: Option<Arc<FakeGrammars>>,
 }
 
 impl Default for Options {
@@ -49,6 +51,7 @@ impl Default for Options {
         Options {
             battery: false,
             batch_tasks: 1,
+            grammars: None,
         }
     }
 }
@@ -97,7 +100,10 @@ impl Harness {
         let executor = Executor::manual();
         let projects = FakeProjects::new();
         let power = FakePower::new(options.battery);
-        let grammars = Arc::new(FakeGrammars::new());
+        let grammars = options
+            .grammars
+            .clone()
+            .unwrap_or_else(|| Arc::new(FakeGrammars::new()));
         let clock = ManualClock::new();
         let backend = FakeBackend::new();
         let (watcher, driver) = manual(backend.clone(), Executor::manual(), WatchConfig::default());

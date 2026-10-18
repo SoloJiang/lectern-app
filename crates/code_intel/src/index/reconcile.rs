@@ -48,13 +48,32 @@ fn pending(st: &State, grammar: u64) -> bool {
 }
 
 /// Whether `path`'s content equals HEAD, by the rule of「依赖 git、fs_watch 与
-/// cache 的接口」.
-pub(crate) fn head_clean(st: &State, path: &str) -> bool {
+/// cache 的接口」, with the language table's generation `grammar`.
+/// Conservative: input the reconcile has not consumed yet makes it false —
+/// a HEAD or index check, a requested comparison project-wide; a path to
+/// read again (or a directory event above it) for that path.
+pub(crate) fn head_clean(st: &State, path: &str, grammar: u64) -> bool {
     let diff = &st.head_diff;
     if diff.head != st.gens.head || diff.index != st.gens.index || diff.files != st.gens.files {
         return false;
     }
-    if st.compare_for.is_none() {
+    if st.compare_for != Some(st.gens.compare_deps(grammar)) || st.check_head || st.check_index {
+        return false;
+    }
+    // The path or a directory above it (a file replaced by a directory).
+    let pending = |set: &std::collections::BTreeSet<RelPath>| {
+        let mut at = path;
+        loop {
+            if set.contains(at) {
+                return true;
+            }
+            match at.rfind('/') {
+                Some(i) => at = &at[..i],
+                None => return set.contains(""),
+            }
+        }
+    };
+    if pending(&st.dirty) || pending(&st.dirty_dirs) || pending(&st.probe) {
         return false;
     }
     let files = st.map.base.files();

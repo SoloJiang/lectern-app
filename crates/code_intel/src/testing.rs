@@ -231,6 +231,11 @@ impl GrammarSource for FakeGrammars {
             .generation
     }
 
+    fn installed(&self) -> Vec<LangName> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.packs.keys().cloned().collect()
+    }
+
     fn subscribe(&self, f: Box<dyn Fn(GrammarChange) + Send + Sync>) -> Box<dyn Send> {
         self.state
             .lock()

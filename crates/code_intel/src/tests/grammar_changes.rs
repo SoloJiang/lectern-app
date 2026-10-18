@@ -333,6 +333,27 @@ fn grammar_updated_then_opened_before_the_rebuild() {
     assert_eq!(h.coverage().focus, TierState::Done);
 }
 
+/// A pack installed before activation: the first round finds it by
+/// listing the installed packs (there is no notification for it), and the
+/// first map has its files.
+#[test]
+fn grammar_installed_before_activation_is_in_the_first_map() {
+    let grammars = Arc::new(crate::testing::FakeGrammars::new());
+    grammars.install("jpack", &["jpack"], java_pack(1, Arc::new(())));
+    let h = Harness::with(super::support::Options {
+        grammars: Some(grammars),
+        ..Default::default()
+    });
+    h.git.add(
+        "main",
+        &[("src/Tracked.jpack", TRACKED), ("src/a.ts", &ts("a"))],
+    );
+    h.git.commit("main");
+    h.open();
+    assert_eq!(h.map().paths(&h.git.oid(TRACKED), "jpack").len(), 1);
+    assert!(stored_under(&h, 1, TRACKED));
+}
+
 /// A project opened while a grammar round runs: it read the table's
 /// generation before the round bumped it, and the round did not see it
 /// yet. Every comparison reads the shared generation, so the base map is

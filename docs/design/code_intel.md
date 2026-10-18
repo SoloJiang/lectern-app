@@ -463,6 +463,8 @@ pub trait GrammarSource: Send + Sync {
     fn language_for_extension(&self, ext: &str) -> Option<LangName>;
     /// 已装语言包集合的代数：安装、更新、回滚、撤销都加一。不阻塞。
     fn generation(&self) -> u64;
+    /// 已装语言包的语言，顺序不限。不阻塞。语言包的每一轮都读它，激活之前已装的包和漏掉的通知因此不会丢。
+    fn installed(&self) -> Vec<LangName>;
     /// 语言包集合变化时在任意线程上调用 `f`（插件市场完成切换之后）；`f` 只入队，不阻塞。返回值 drop 时退订。
     fn subscribe(&self, f: Box<dyn Fn(GrammarChange) + Send + Sync>) -> Box<dyn Send>;
 }

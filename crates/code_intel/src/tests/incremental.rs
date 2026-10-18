@@ -200,6 +200,47 @@ fn incremental_kernel_busy_until_the_overlay_is_updated() {
     assert!(h.quiescent(), "idle once the overlay is updated");
 }
 
+/// `head_clean` answers false while an event's input waits for the
+/// reconcile: for the path read again, for every path under a directory
+/// event, and for every path on a HEAD or index change.
+#[test]
+fn incremental_head_clean_false_until_events_are_reconciled() {
+    let h = indexed();
+    let key = h.key();
+    let clean = |path: &str| h.indexer.head_clean(&key, path);
+    let deliver = |events: &[(&str, Flags)], git: bool| {
+        if git {
+            h.emit_git(events);
+        } else {
+            h.emit(events);
+        }
+        h.driver.run_until_idle();
+        h.driver.advance(std::time::Duration::from_secs(5));
+    };
+    assert!(clean("src/a.ts") && clean("src/b.ts") && clean("docs/c.ts"));
+    // An edit, delivered but not reconciled yet: that path only.
+    h.git.write("main", "src/a.ts", &ts("a_edited"));
+    deliver(&[("src/a.ts", CHANGED)], false);
+    assert!(!clean("src/a.ts"), "a path to read again");
+    assert!(clean("src/b.ts"));
+    h.settle();
+    assert!(!clean("src/a.ts"), "it differs from HEAD now");
+    assert!(clean("src/b.ts"));
+    // A directory event: the paths under it are read again, and it asks
+    // for a comparison, which holds every path until it is done.
+    deliver(&[("src", DIR_CHANGED)], false);
+    assert!(!clean("src/b.ts"));
+    assert!(!clean("docs/c.ts"));
+    h.settle();
+    assert!(clean("docs/c.ts"));
+    assert!(clean("src/b.ts"));
+    // HEAD: every path until the reconcile compares again.
+    deliver(&[("HEAD", CHANGED)], true);
+    assert!(!clean("docs/c.ts"));
+    h.settle();
+    assert!(clean("docs/c.ts"));
+}
+
 /// An untracked nested repository is listed as its directory: the reconcile
 /// compares once per event, not again and again (only events request a
 /// comparison, and a pass repeats only on new input).

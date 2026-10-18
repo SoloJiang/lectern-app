@@ -261,7 +261,7 @@ impl Indexer {
                 }
             }))
         };
-        if self.inner.packs.generation() > 0 {
+        if self.inner.packs.generation() > 0 || !self.inner.packs.installed().is_empty() {
             self.inner.grammar_changed(None);
         }
         vec![power, grammars]
@@ -423,8 +423,9 @@ impl Inner {
     }
 
     pub(crate) fn head_clean(&self, key: &ProjectKey, path: &str) -> bool {
+        let grammar = self.grammar();
         self.project(key)
-            .is_some_and(|p| reconcile::head_clean(&lock(&p.state), path))
+            .is_some_and(|p| reconcile::head_clean(&lock(&p.state), path, grammar))
     }
 
     /// Bumps one input generation and requests a reconcile, as an event
@@ -652,6 +653,9 @@ impl Inner {
                 .filter(|l| !l.lease().is_static())
                 .map(|l| l.name().clone())
                 .chain(asked)
+                // Packs installed before activation, or whose notification
+                // was missed: a round reads the whole installed set.
+                .chain(self.packs.installed())
                 .collect();
             names.sort_by(|a, b| a.0.cmp(&b.0));
             names.dedup();
