@@ -24,7 +24,7 @@ use lectern_executor::{Executor, Priority};
 use lectern_fs_watch::Watcher;
 use lectern_kernel::{ActivationToken, PluginHandle};
 use lectern_services::code_intel::{
-    CodeIntel, Coverage, Focus, NavigationProvider, Names, ProviderRegistration, Query, QueryId,
+    CodeIntel, Coverage, Focus, Names, NavigationProvider, ProviderRegistration, Query, QueryId,
     QueryResults, TierState,
 };
 use lectern_services::project::{ProjectEvent, ProjectKey, Projects, WorktreeKey};

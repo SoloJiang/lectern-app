@@ -21,12 +21,12 @@ use lectern_cache::Cache;
 use lectern_executor::Executor;
 use lectern_fs_watch::Watcher;
 use lectern_kernel::{
-    Activation, Active, ActivationToken, Context, Manifest, Plugin, PluginError, PluginHandle,
+    Activation, ActivationToken, Active, Context, Manifest, Plugin, PluginError, PluginHandle,
     ServiceRef, service,
 };
 use lectern_services::code_intel::{
-    CodeIntel, Coverage, Focus, NavigationProvider, Names, ProviderRegistration, Query,
-    QueryError, QueryId, QueryResults, SemanticState,
+    CodeIntel, Coverage, Focus, Names, NavigationProvider, ProviderRegistration, Query, QueryError,
+    QueryId, QueryResults, SemanticState,
 };
 use lectern_services::project::{
     Location, OpenRequest, PackageMatch, ProjectEvent, ProjectKey, ProjectSnapshot, Projects,
@@ -69,7 +69,10 @@ impl CodeIntelPlugin {
 
     /// The same plugin over `testing::FakeGit`.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_fake_git(deps: CodeIntelDeps, git: Arc<crate::testing::FakeGit>) -> CodeIntelPlugin {
+    pub fn with_fake_git(
+        deps: CodeIntelDeps,
+        git: Arc<crate::testing::FakeGit>,
+    ) -> CodeIntelPlugin {
         CodeIntelPlugin::with_git(deps, git)
     }
 
@@ -218,7 +221,11 @@ impl Drop for CodeIntelActive {
 /// thread [`WATCHDOG_THREAD`], submitted through `own_with` (so a dead
 /// activation starts none), with its `stop` registered in
 /// `Executor::on_shutdown` until the thread exits.
-pub(crate) fn watchdog(handle: &PluginHandle, executor: &Executor, clock: Arc<dyn Clock>) -> Watchdog {
+pub(crate) fn watchdog(
+    handle: &PluginHandle,
+    executor: &Executor,
+    clock: Arc<dyn Clock>,
+) -> Watchdog {
     let handle = handle.clone();
     let executor = executor.clone();
     Watchdog::new(

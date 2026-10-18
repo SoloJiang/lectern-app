@@ -171,7 +171,11 @@ fn plugin_activate_does_no_io_before_a_project() {
     run.kernel.activate().expect("activates");
     run.settle();
     assert!(run.git.calls().is_empty(), "{:?}", run.git.calls());
-    assert_eq!(listing(run.cache_root.parent().unwrap()), before, "the cache is untouched");
+    assert_eq!(
+        listing(run.cache_root.parent().unwrap()),
+        before,
+        "the cache is untouched"
+    );
     assert!(run.backend.targets().is_empty(), "nothing watched");
     // The first project: now it works.
     run.open();
@@ -181,7 +185,10 @@ fn plugin_activate_does_no_io_before_a_project() {
 #[test]
 fn plugin_requires_projects() {
     let run = Run::new(repo(), false);
-    assert_eq!(run.kernel.activate(), Err(PluginError::DependencyUnavailable));
+    assert_eq!(
+        run.kernel.activate(),
+        Err(PluginError::DependencyUnavailable)
+    );
 }
 
 /// `Results` events of one query come in generation order, the last one
@@ -301,8 +308,15 @@ fn plugin_teardown_unsubscribes_and_cancels() {
     assert_eq!(recorder.held.lock().unwrap().len(), 1, "asked");
     run.emit(run.projects.close(&run.git.key()));
     run.settle();
-    assert_eq!(recorder.cancelled.lock().unwrap().len(), 1, "cancelled on close");
-    assert!(!run.backend.is_armed(&root), "the worktree is no longer watched");
+    assert_eq!(
+        recorder.cancelled.lock().unwrap().len(),
+        1,
+        "cancelled on close"
+    );
+    assert!(
+        !run.backend.is_armed(&root),
+        "the worktree is no longer watched"
+    );
     drop(service);
     run.kernel.deactivate();
     assert_eq!(run.power.subscribers(), 0);

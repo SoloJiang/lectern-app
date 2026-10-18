@@ -37,7 +37,11 @@ pub fn names(ctx: &Ctx, root: &Path) -> Result<Names, BenchError> {
         let Some(lang) = table.for_path(&path, &NoGrammarPacks) else {
             continue;
         };
-        write.add(synthetic::oid(i), &Version::of(lang), &synthetic::extraction(i));
+        write.add(
+            synthetic::oid(i),
+            &Version::of(lang),
+            &synthetic::extraction(i),
+        );
         if write.len() == 64 {
             let full = std::mem::replace(&mut write, store.write());
             if !matches!(full.commit(), Written::Committed) {

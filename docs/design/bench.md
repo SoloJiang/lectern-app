@@ -426,7 +426,7 @@ crates/bench/
   tests/fixtures/     本 crate 自己的小样本（目前没有）
 ```
 
-三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
+三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)）；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
 
 另有一个 `src/bin/lectern-bench-report.rs`，有两个子命令：`merge` 合并各目标的报告，`package --app <.app> --dmg <.dmg>` 测量安装包、写 `report-package.json`（见「报告」）。它只用本 crate 的普通依赖。
 
@@ -621,6 +621,11 @@ crates/bench/
 | `code_intel/map_100k`、`code_intel/map_100k_bytes` | 中位数 ≤ 20 ms / ≤ 3 MB（10 万文件的「blob → 路径」映射重建：基础部分和按路径沿用的提示，合成的 OID；字节数不含 `project` 的文件列表；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
 | `code_intel/batch_peak` | 最大值 ≤ 40 MB（批量层为合成仓库建索引期间的活跃字节峰值：8 KiB 的文件和接近 1 MiB 的文件，语法树经 tree-sitter 的分配器计入；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
 | `code_intel/disk_100k` | 只记录（10 万文件的合成仓库全部写入之后分库文件的大小，含 `-wal`；字节数，由 `time` 目标产出） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
+| `code_intel/goto_indexed` | 中位数 ≤ 20 ms（索引命中的跳转：10 万个已入索引的文件、每 1000 个一个子项目，64 KiB 的当前文本；从 `query` 到最后一批） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/search_stop` | 最大值 ≤ 1.02 s（6000 个未入索引、每个都命中的文件，从 `query` 到最后一批的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/references_100k/all`、`code_intel/references_100k/first` | 中位数 ≤ 2 s / ≤ 200 ms（10 万个已入索引的文件里 300 个用到这个名字：到最后一批 / 到第一批带引用的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/names_100k`、`code_intel/names_100k_bytes` | 中位数 ≤ 1 s / ≤ 8 MB（10 万文件的合成抽取结果，约 32 万个名字；名字表的构建与它的活跃字节；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_range` | 中位数 ≤ 同一路径上 `File::open`、`metadata`、两次 `read_at`、`metadata` 的 1.5 倍，且 < 200 µs（64 MiB 的文件，首屏的文件头 8 KiB 加中部目标附近 132 KiB） | [platform](platform.md#性能) | `platform` 范围读取（[#103](https://github.com/SoloJiang/lectern-app/issues/103)） |

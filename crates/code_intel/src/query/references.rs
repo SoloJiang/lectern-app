@@ -173,21 +173,38 @@ impl Inner {
             let skip = found.parsed.clone();
             let scope = snap.search_scope(&l.path, &lang, &skip);
             let name = of.name.clone();
-            self.search(run, snap, &scope, &lang, &name, run.started + SEARCH_FOR, |eff, key, bytes, _| {
-                if found.parsed.contains(&(eff.path.clone(), key)) {
-                    return;
-                }
-                let Some(file_lang) = snap.table.get(&eff.lang.name().0).cloned() else {
-                    return;
-                };
-                let file = File {
-                    worktree: snap.worktree.clone(),
-                    path: eff.path.clone(),
-                    origin: TextOrigin::Worktree,
-                    lang: file_lang,
-                };
-                self.references_in(run, snap, of, &ranker, &file, key, bytes.into(), &mut found);
-            })
+            self.search(
+                run,
+                snap,
+                &scope,
+                &lang,
+                &name,
+                run.started + SEARCH_FOR,
+                |eff, key, bytes, _| {
+                    if found.parsed.contains(&(eff.path.clone(), key)) {
+                        return;
+                    }
+                    let Some(file_lang) = snap.table.get(&eff.lang.name().0).cloned() else {
+                        return;
+                    };
+                    let file = File {
+                        worktree: snap.worktree.clone(),
+                        path: eff.path.clone(),
+                        origin: TextOrigin::Worktree,
+                        lang: file_lang,
+                    };
+                    self.references_in(
+                        run,
+                        snap,
+                        of,
+                        &ranker,
+                        &file,
+                        key,
+                        bytes.into(),
+                        &mut found,
+                    );
+                },
+            )
         };
         let Some(completeness) = completeness else {
             return;
@@ -204,7 +221,10 @@ impl Inner {
     }
 
     /// Parses one file and sorts every reference of the name in it.
-    #[allow(clippy::too_many_arguments, reason = "one file's part of a query: its snapshot, the file and what it adds to")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one file's part of a query: its snapshot, the file and what it adds to"
+    )]
     fn references_in(
         &self,
         run: &Run,
@@ -221,7 +241,8 @@ impl Inner {
         }
         let clock = self.watchdog.clock().clone();
         let deadline = clock.now() + BACKGROUND_DEADLINE;
-        let Ok(parsed) = ParsedFile::parse(&file.lang, bytes, &*clock, deadline, &run.cancel) else {
+        let Ok(parsed) = ParsedFile::parse(&file.lang, bytes, &*clock, deadline, &run.cancel)
+        else {
             return;
         };
         let def = &of.location;
@@ -313,8 +334,13 @@ impl Inner {
         found.since += 1;
         let now = clock.now();
         let due = match found.last {
-            None => found.files >= FIRST_FILES || now.saturating_duration_since(run.started) >= FIRST_AFTER,
-            Some(last) => found.since >= BATCH_FILES || now.saturating_duration_since(last) >= BATCH_AFTER,
+            None => {
+                found.files >= FIRST_FILES
+                    || now.saturating_duration_since(run.started) >= FIRST_AFTER
+            }
+            Some(last) => {
+                found.since >= BATCH_FILES || now.saturating_duration_since(last) >= BATCH_AFTER
+            }
         };
         if due && found.changed {
             found.since = 0;

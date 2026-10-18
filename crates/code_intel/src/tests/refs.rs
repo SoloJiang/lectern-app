@@ -12,9 +12,7 @@ use lectern_services::code_intel::{
 use lectern_services::project::RelPath;
 
 use crate::LangName;
-use crate::resolve::{
-    Bound, CandidateDraft, Import, PackageScope, ResolveContext, Resolver,
-};
+use crate::resolve::{Bound, CandidateDraft, Import, PackageScope, ResolveContext, Resolver};
 use crate::site::{ParsedFile, Site};
 
 use super::goto::{indexed, unindexed};
@@ -50,12 +48,18 @@ fn refs_local_variable_stays_in_its_scope() {
             "a.ts",
             "export function run(items: number[]) {\n  let total = 0;\n  for (const x of items) {\n    total += x;\n  }\n  return total;\n}\nexport function other() {\n  const total = 5;\n  return total;\n}\n",
         ),
-        ("b.ts", "export const total = 1;\nexport function use() { return total; }\n"),
+        (
+            "b.ts",
+            "export const total = 1;\nexport function use() { return total; }\n",
+        ),
     ]);
     let of = def(&h, "a.ts", "total", 0);
     assert!(of.local);
     let r = refs(&h, &of);
-    assert_eq!(at(&r.callers), [("a.ts".to_owned(), 3), ("a.ts".to_owned(), 5)]);
+    assert_eq!(
+        at(&r.callers),
+        [("a.ts".to_owned(), 3), ("a.ts".to_owned(), 5)]
+    );
     assert!(r.same_name.is_empty(), "{:?}", r.same_name);
     assert_eq!(r.state, QueryState::Done(Completeness::Complete));
     let enclosing: Vec<_> = r.callers.iter().map(|c| c.enclosing.as_deref()).collect();
@@ -73,7 +77,10 @@ fn refs_toplevel_function_same_file_callers() {
     let of = def(&h, "a.js", "helper", 0);
     assert!(!of.local, "root scope: not a local");
     let r = refs(&h, &of);
-    assert_eq!(at(&r.callers), [("a.js".to_owned(), 2), ("a.js".to_owned(), 2)]);
+    assert_eq!(
+        at(&r.callers),
+        [("a.js".to_owned(), 2), ("a.js".to_owned(), 2)]
+    );
     assert!(r.same_name.is_empty());
 }
 
@@ -84,10 +91,17 @@ fn refs_toplevel_function_same_file_callers() {
 fn refs_toplevel_captured_by_locals() {
     let h = indexed(&[
         ("a.js", "export function helper() { return 1; }\n"),
-        ("b.js", "import { helper } from './a.js';\nexport const x = helper();\n"),
+        (
+            "b.js",
+            "import { helper } from './a.js';\nexport const x = helper();\n",
+        ),
     ]);
     h.pause();
-    h.git.write("main", "c.js", b"import { helper } from './a.js';\n\nhelper();\n");
+    h.git.write(
+        "main",
+        "c.js",
+        b"import { helper } from './a.js';\n\nhelper();\n",
+    );
     h.emit(&[("c.js", CREATED)]);
     h.settle();
     assert!(!h.hinted("c.js"));
@@ -117,13 +131,23 @@ fn refs_nested_helper_is_local() {
             "a.js",
             "export function outer() {\n  const helper = () => 1;\n  return helper() + helper();\n}\n",
         ),
-        ("b.js", "export function helper() { return 2; }\nhelper();\n"),
+        (
+            "b.js",
+            "export function helper() { return 2; }\nhelper();\n",
+        ),
     ]);
     let of = def(&h, "a.js", "helper", 0);
     assert!(of.local);
     let r = refs(&h, &of);
-    assert_eq!(at(&r.callers), [("a.js".to_owned(), 2), ("a.js".to_owned(), 2)]);
-    assert!(r.same_name.is_empty(), "nothing from b.js: {:?}", r.same_name);
+    assert_eq!(
+        at(&r.callers),
+        [("a.js".to_owned(), 2), ("a.js".to_owned(), 2)]
+    );
+    assert!(
+        r.same_name.is_empty(),
+        "nothing from b.js: {:?}",
+        r.same_name
+    );
 }
 
 /// A use bound by the locals to another (shadowing) local is dropped.
@@ -131,13 +155,22 @@ fn refs_nested_helper_is_local() {
 fn refs_shadowed_uses_are_dropped() {
     let h = indexed(&[
         ("a.ts", "export function helper() { return 1; }\n"),
-        ("b.ts", "export function use() {\n  const helper = 1;\n  return helper;\n}\n"),
-        ("c.ts", "import { helper } from './a';\nexport const y = helper();\n"),
+        (
+            "b.ts",
+            "export function use() {\n  const helper = 1;\n  return helper;\n}\n",
+        ),
+        (
+            "c.ts",
+            "import { helper } from './a';\nexport const y = helper();\n",
+        ),
     ]);
     let of = def(&h, "a.ts", "helper", 0);
     let r = refs(&h, &of);
     // b.ts's uses are its own local's; c.ts's import and call remain.
-    assert_eq!(at(&r.same_name), [("c.ts".to_owned(), 0), ("c.ts".to_owned(), 1)]);
+    assert_eq!(
+        at(&r.same_name),
+        [("c.ts".to_owned(), 0), ("c.ts".to_owned(), 1)]
+    );
     assert!(r.callers.is_empty());
 }
 
@@ -193,7 +226,10 @@ impl Resolver for BindBack {
 fn refs_resolver_bind_makes_callers() {
     let h = indexed(&[
         ("a.ts", "export function helper() { return 1; }\n"),
-        ("b.ts", "import { helper } from './a';\nexport const y = helper();\n"),
+        (
+            "b.ts",
+            "import { helper } from './a';\nexport const y = helper();\n",
+        ),
     ]);
     let of = def(&h, "a.ts", "helper", 0);
     let resolver = Arc::new(BindBack {
@@ -202,7 +238,10 @@ fn refs_resolver_bind_makes_callers() {
     });
     h.indexer.set_resolver(resolver);
     let r = refs(&h, &of);
-    assert_eq!(at(&r.callers), [("b.ts".to_owned(), 0), ("b.ts".to_owned(), 1)]);
+    assert_eq!(
+        at(&r.callers),
+        [("b.ts".to_owned(), 0), ("b.ts".to_owned(), 1)]
+    );
     assert!(r.same_name.is_empty());
 }
 
@@ -213,13 +252,19 @@ fn refs_unindexed_files_through_the_search() {
     let h = unindexed(
         &[
             ("a.ts", "export function helper() { return 1; }\n"),
-            ("b.ts", "import { helper } from './a';\nexport const y = helper();\n"),
+            (
+                "b.ts",
+                "import { helper } from './a';\nexport const y = helper();\n",
+            ),
             ("c.ts", "export const z = 2;\n"),
         ],
         &[],
     );
     let of = def(&h, "a.ts", "helper", 0);
     let r = refs(&h, &of);
-    assert_eq!(at(&r.same_name), [("b.ts".to_owned(), 0), ("b.ts".to_owned(), 1)]);
+    assert_eq!(
+        at(&r.same_name),
+        [("b.ts".to_owned(), 0), ("b.ts".to_owned(), 1)]
+    );
     assert_eq!(r.state, QueryState::Done(Completeness::Complete));
 }

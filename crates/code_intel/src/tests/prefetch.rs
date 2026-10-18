@@ -58,7 +58,9 @@ fn prefetch_is_reused_within_two_seconds() {
 #[test]
 fn prefetch_is_not_reused_after_its_inputs_change() {
     let cases: [(&str, fn(&Harness)); 3] = [
-        ("two seconds later", |h| h.clock.advance(PREFETCH_FOR + Duration::from_millis(1))),
+        ("two seconds later", |h| {
+            h.clock.advance(PREFETCH_FOR + Duration::from_millis(1))
+        }),
         ("a new map", |h| {
             h.git.write("main", "c.ts", b"export const c = 1;\n");
             h.emit(&[("c.ts", CHANGED)]);
@@ -66,9 +68,15 @@ fn prefetch_is_not_reused_after_its_inputs_change() {
         }),
         ("evictions", |h| {
             let store = h.indexer.store(&h.key()).expect("store");
-            let ts = crate::extract::LanguageTable::core().get("ts").cloned().unwrap();
+            let ts = crate::extract::LanguageTable::core()
+                .get("ts")
+                .cloned()
+                .unwrap();
             let mut w = store.write();
-            w.remove(h.git.oid(b"export function item() { return 1; }\n"), &Version::of(&ts));
+            w.remove(
+                h.git.oid(b"export function item() { return 1; }\n"),
+                &Version::of(&ts),
+            );
             assert!(matches!(w.commit(), lectern_cache::Written::Committed));
         }),
     ];
@@ -91,11 +99,13 @@ fn prefetch_is_not_reused_after_its_inputs_change() {
 #[test]
 fn focus_of_another_worktree_waits_for_it() {
     let h = Harness::new();
-    h.git.add("main", &[("a.ts", b"export function one() {}\n")]);
+    h.git
+        .add("main", &[("a.ts", b"export function one() {}\n")]);
     h.git.commit("main");
     let other = h.git.add_worktree("other");
     let _ = other;
-    h.git.add("other", &[("o.ts", b"export function two() {}\n")]);
+    h.git
+        .add("other", &[("o.ts", b"export function two() {}\n")]);
     h.pause();
     h.open();
     let wt = h.git.worktree_key("other");
@@ -114,5 +124,8 @@ fn focus_of_another_worktree_waits_for_it() {
     assert!(!h.extracted().contains(&oid), "not the current worktree");
     h.publish("other", Vec::new());
     h.settle();
-    assert!(h.extracted().contains(&oid), "current now: tier 1 extracts it");
+    assert!(
+        h.extracted().contains(&oid),
+        "current now: tier 1 extracts it"
+    );
 }

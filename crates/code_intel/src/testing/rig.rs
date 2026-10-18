@@ -81,6 +81,43 @@ impl Rig {
         self.indexer.project_event(&event);
     }
 
+    /// Subscribes to the main worktree as `project` does before this crate
+    /// (「依赖 git、fs_watch 与 cache 的接口」): the worktree state, its
+    /// filter of the tracked paths included, is fs_watch's and shared, not
+    /// this crate's memory. Keep the returned value.
+    pub fn watch_as_project(&self) -> Box<dyn Send> {
+        use crate::git_access::{GitAccess, Tree};
+        use lectern_fs_watch::testing::RecordingSink;
+        use lectern_fs_watch::{
+            Coalesce, RepoBatch, RepoSpec, WorktreeBatch, WorktreeName, WorktreeSpec,
+        };
+        let common: Arc<std::path::Path> = Arc::from(self.git.common_dir());
+        let root: Arc<std::path::Path> = Arc::from(self.git.root("main").as_path());
+        let tree = Tree {
+            common_dir: common.clone(),
+            git_dir: common.clone(),
+            root: root.clone(),
+        };
+        let repo = self._watcher.watch_repo(
+            RepoSpec {
+                common_dir: common.to_path_buf(),
+                coalesce: Coalesce::REPO,
+            },
+            RecordingSink::<RepoBatch>::new(None),
+        );
+        let worktree = repo.watch_worktree(
+            WorktreeSpec {
+                name: WorktreeName::Main,
+                root: root.to_path_buf(),
+                source: self.git.watch_source(&tree),
+                coalesce: Coalesce::WORKTREE,
+            },
+            RecordingSink::<WorktreeBatch>::new(None),
+        );
+        self.settle();
+        Box::new((repo, worktree))
+    }
+
     /// Runs everything until nothing is left to do.
     pub fn settle(&self) {
         loop {
@@ -143,12 +180,18 @@ pub fn virtual_repo(git: &FakeGit, cache: &Cache, n: usize, worktrees: &[&str]) 
         if write.len() == 64 {
             let full = std::mem::replace(&mut write, store.write());
             let written = full.commit();
-            assert!(matches!(written, lectern_cache::Written::Committed), "{written:?}");
+            assert!(
+                matches!(written, lectern_cache::Written::Committed),
+                "{written:?}"
+            );
         }
     }
     if !write.is_empty() {
         let written = write.commit();
-        assert!(matches!(written, lectern_cache::Written::Committed), "{written:?}");
+        assert!(
+            matches!(written, lectern_cache::Written::Committed),
+            "{written:?}"
+        );
     }
     stored
 }

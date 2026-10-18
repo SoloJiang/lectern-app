@@ -377,6 +377,10 @@ impl Store {
         let at = pending.units.len().saturating_sub(TOUCH_CHUNK);
         let chunk = pending.units.split_off(at);
         self.touch(&chunk);
+        if pending.units.is_empty() {
+            // A warm start queues every unit: its buffer does not stay.
+            pending.units = Vec::new();
+        }
         pending.units.len()
     }
 

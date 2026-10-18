@@ -12,9 +12,7 @@ use lectern_code_intel::map::{BaseMap, IndexedHints};
 use lectern_code_intel::names::build_table;
 use lectern_code_intel::testing::{FakeGit, Rig, packages, synthetic, virtual_repo};
 use lectern_code_intel::{NoGrammarPacks, SystemClock};
-use lectern_services::code_intel::{
-    Position, Query, QueryKind, TextOrigin, TextRef, TierState,
-};
+use lectern_services::code_intel::{Position, Query, QueryKind, TextOrigin, TextRef, TierState};
 
 const SAMPLES: usize = 3;
 
@@ -172,6 +170,9 @@ fn resident(
             "main",
             packages(&synthetic::package_dirs(n)),
         ));
+        // `project`'s subscription comes first: the worktree state is
+        // fs_watch's.
+        let _project = rig.watch_as_project();
         let before = CountingAlloc::live();
         rig.indexer.project_event(&event);
         rig.settle();
@@ -216,7 +217,11 @@ fn resident(
             .indexer
             .coverage(&rig.git.key())
             .ok_or_else(|| BenchError::new("the project is not open"))?;
-        let tiers = [coverage.subproject, coverage.worktree, coverage.other_worktrees];
+        let tiers = [
+            coverage.subproject,
+            coverage.worktree,
+            coverage.other_worktrees,
+        ];
         if tiers != [TierState::Done; 3] {
             return Err(BenchError::new(format!("not indexed: {coverage:?}")));
         }

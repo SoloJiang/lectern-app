@@ -32,7 +32,10 @@ fn position(text: &[u8], needle: &str) -> Result<Position, BenchError> {
         .position(|w| w == needle.as_bytes())
         .ok_or_else(|| BenchError::new(format!("no {needle}")))?;
     let line = text[..at].iter().filter(|b| **b == b'\n').count() as u32;
-    let start = text[..at].iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let start = text[..at]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
     Ok(Position {
         line,
         column: (at - start) as u32,
@@ -67,7 +70,10 @@ fn listen(rig: &Rig) -> Result<(Seen, lectern_kernel::Subscription), BenchError>
 }
 
 /// Runs one query to the end; its results.
-fn run(rig: &Rig, query: &Query) -> Result<(QueryId, Arc<lectern_services::code_intel::QueryResults>), BenchError> {
+fn run(
+    rig: &Rig,
+    query: &Query,
+) -> Result<(QueryId, Arc<lectern_services::code_intel::QueryResults>), BenchError> {
     let id = rig.indexer.query(query.clone());
     rig.executor.run_until_idle();
     let r = rig
@@ -119,7 +125,10 @@ fn goto_indexed(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         )));
     }
     let time = ctx.time(|| run(&rig, &query));
-    Ok(vec![Measured::new("code_intel/goto_indexed", Value::Time(time))])
+    Ok(vec![Measured::new(
+        "code_intel/goto_indexed",
+        Value::Time(time),
+    )])
 }
 
 /// Samples of an operation taking about a second: one warm-up, then 5.
@@ -144,7 +153,9 @@ fn search_stop(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let git = Arc::new(FakeGit::new());
     for i in 0..n {
         let mut text = synthetic::source("ts", i, 8 << 10);
-        text.extend_from_slice(format!("\nexport function wanted() {{ return {i}; }}\n").as_bytes());
+        text.extend_from_slice(
+            format!("\nexport function wanted() {{ return {i}; }}\n").as_bytes(),
+        );
         git.add("main", &[(&format!("app/m{}/f{i}.ts", i % 40), &text)]);
     }
     let main = b"export function run() { return wanted(); }\n".to_vec();
@@ -216,7 +227,10 @@ fn references_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         let package = i % synthetic::package_dirs(n).len();
         git.add(
             "main",
-            &[(&format!("packages/pkg{package:03}/src/users/u{i}.ts"), &text)],
+            &[(
+                &format!("packages/pkg{package:03}/src/users/u{i}.ts"),
+                &text,
+            )],
         );
     }
     git.commit("main");
@@ -305,5 +319,8 @@ fn names_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     eprintln!("code_intel/names_100k: {} names", built.len());
     drop(built);
     let time = ctx.time(|| build_table(&f.store, &f.map, &f.table, 1, &|| false));
-    Ok(vec![Measured::new("code_intel/names_100k", Value::Time(time))])
+    Ok(vec![Measured::new(
+        "code_intel/names_100k",
+        Value::Time(time),
+    )])
 }

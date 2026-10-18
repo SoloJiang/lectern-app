@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）已实现；第 4、5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现；第 5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -1345,7 +1345,7 @@ enum WorktreeState {
 - 查找按（OID、语言）进行：在两个 `by_oid` 里按前缀二分查找，核对完整 OID，跳过基础部分里被覆盖项遮住的路径，再只留按路径判断的语言等于这个单元 `ci_ext.lang` 的路径。同一份字节放在 `.java` 和 `.js` 下 OID 相同，`java` 的单元只对应 `.java` 的路径。
 - 基础部分、覆盖部分何时重算见「输入代数与派生状态」。
 - 内存：10 万文件的 `by_oid` 1.2 MB（每条 12 字节，前缀和下标分两个数组存放），每条的语言 0.1 MB，`indexed` 提示约 1.6 MB（每条 16 字节）；覆盖项通常几十条，未跟踪文件最多 20 000 条（`git` 的上限）时约 1.5 MB。
-- 文件夹项目：`FileList` 没有 OID，基础部分为空，每个文件在第一次被读到时作为 `Content` 加入覆盖部分（上限是文件夹遍历的 20 000 个条目）。第 3 步不实现，见「与设计的差异」。
+- 文件夹项目：`FileList` 没有 OID，基础部分为空，每个文件在第一次被读到时作为 `Content` 加入覆盖部分（上限是文件夹遍历的 20 000 个条目）。根目录在文件列表就绪后打开，文件列表里的每个文件随即读一遍（每次换文件列表时也是），没有 fs_watch 订阅和工作区比较；第 4 步实现，见「与设计的差异」。
 
 ### 输入代数与派生状态
 
@@ -1597,7 +1597,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 跳转：同文件或索引命中，候选 ≤ 50 ms | 当前文本（100 KB 以内）解析与 locals ≤ 10 ms；名字查找 ≤ 2 ms；过滤、分层与排序 ≤ 3 ms；合计 ≤ 20 ms，余下的给抽屉 | `code_intel/goto_indexed`（cloudprint 形状、10 万文件） |
 | 跳转：唯一候选的目标首屏高亮 ≤ 100 ms | 本 crate 的部分同上；目标文件的读取与高亮属于 `file_reader` | `app/goto_single` |
 | 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的结果；限时搜索 1 s 后停止，取消在 20 ms 内生效 | `code_intel/search_stop` ≤ 1.02 s |
-| 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 查找 ≤ 5 ms；每个候选文件的现场抽取约 1–2 ms / 10 KB | `code_intel/references_100k` |
+| 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 查找 ≤ 5 ms；每个候选文件的现场抽取约 1–2 ms / 10 KB | `code_intel/references_100k/all`、`code_intel/references_100k/first` |
 | 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件），核心语言用一次遍历抽取（[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms，不含之后的访问标记 | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k`、`code_intel/warm_100k_touch`（只记录） |
 | 空闲内存：monorepo < 100 MB，10 万文件的仓库 < 120 MB（后台暂停时和全部完成后；后者的份额加总见 [ADR 0035](../adr/0035.md)） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、第 5 层本次会话已确认的 blob 集合（每个 8 字节的键，10 万个约 1.2 MB，项目关闭或换会话时释放）、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
@@ -2044,3 +2044,26 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 测试：`derived_*` 里依赖查询的部分（限时搜索不跳过有效 OID 已变的文件、淘汰之后经限时搜索找到定义、候选的子项目层、名字表的重建）随第 4 步的查询和名字表加入；第 3 步检查它们依赖的输入代数和派生状态（提示、游标、第 3 层的范围、写入代数）。分库被删除重建时 cache 让淘汰代数加一，与单元被删除走同一条路径，由 `derived_eviction_*` 覆盖。`battery_*` 里「一次 `query`」用 `Indexer::demand`（`query` 属于第 4 步）。
 - `FakeGit` 与 lectern-git 一样把含 `.git` 的目录（嵌套仓库）列为一个未跟踪的目录路径，被目录替换的跟踪文件列为这个文件和目录里的文件；`overlay_lectern_git_and_the_fake_list_directories_alike` 在 `TestRepo` 和 `FakeGit` 上构造同样的情况、比较两者的结果。原来的 `FakeGit` 会走进嵌套仓库，掩盖了上面的核对循环。
 - `testing` 新增 `FakeGit`、`FakeProjects`、`FakePower`、`host()`（只交出 `PluginHandle` 的插件）、`Rig`（bench 用的完整建索引环境）、`synthetic`（合成仓库：语言比例、路径、8 KiB 的源码）和 `route_tree_sitter_allocations`（让 tree-sitter 的 C 分配经过 Rust 的全局分配器，`code_intel/batch_peak` 才能计入语法树）。`Indexer::set_extractor` 让测试计数和控制抽取。依赖新增 `lectern-kernel`、`lectern-git`、`lectern-fs-watch`、`lectern-platform`，`lectern-executor` 改为普通依赖；都是已有的 crate，Cargo.lock 没有新增 crate。
+
+第 4 步：
+
+- 查询、名字表和语义导航的登记做在 `Indexer` 上（`query`、`results`、`close`、`prefetch`、`names`、`register_provider`，并 `impl CodeIntel for Indexer`），模块是 `query`（跳转、按名字、查引用、限时搜索、读取核对、分层）、`names`（`build_table` 公开，供 bench）、`semantic`（内部）和 `resolve`（解析扩展点，内部）。设计把它们写成插件内部的状态；理由与第 3 步的 `Indexer` 相同：测试和 bench 不经 kernel 就能驱动。
+- 插件：`activate` 里提供的服务对象是 `CodeIntelService`，`Indexer` 在 `started` 里才建（`PluginHandle` 只在 `started` 拿到，第 3 步的 `IndexDeps` 要它）。kernel 在 `started` 之前不准入任何调用，服务在那之前按「没有打开的项目」回答（`query` 返回 `QueryId(0)`，结果是 `Failed(NotOpen)`）。`dyn Projects` 经 `ServiceRef` 包成 `ProjectsRef`，每次调用取提供者的准入。`CodeIntelPlugin` 另有 `test-support` 的 `with_clock`、`with_batch_tasks` 和 `services()`（最近一次激活的服务，只存 `Weak`，不延长停用的激活）。`app` 还没有装配本插件（`app` 依赖 GPUI，Linux 上不编译），留给第 5 步。
+- 看门狗的到期表：`Watchdog::schedule(at, f)`（`Due`），线程在有到期项时每次最多等 `CHECK_INTERVAL`（10 ms），所以测试的手动时钟推进后能被看到；没有在途抽取也没有到期项时仍不带超时地等待。`stop` 丢弃到期表。
+- 第 1 步的候选 `source` 是 `Scanned`（当前文本为这次查询现场解析，不是查索引得到的），设计没有规定。解析超时时返回 `Failed(Unreadable("parsing timed out"))`：`QueryError` 没有超时一项，交互截止时间是 1 s。
+- 第 2 步读过的 import 目标，限时搜索不跳过、用第 2 步的抽取结果，按已交出的位置去重；只跳过当前文本（第 1 步已列出它的同名定义）。设计写「现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现」，按文件跳过会丢掉这个文件里第 2 步没有列出的同名定义，所以按位置去重。
+- 限时搜索的范围：有子项目、但没有子项目包含当前文本时搜整个 worktree（设计没有规定这种情况；第 3 层建索引在这时为空，那是电池策略，搜索有 1 s 的上限，不受它影响）。`Partial::outside` 只在停下时计算。
+- 解析扩展点：`Resolver::package_of` 返回 None 时用默认的「同一目录」；`Import::exported` 给出本地名对应的导出名。#17 只有空规则 `DefaultRules`，测试经 `Indexer::set_resolver` 装入自己的实现。
+- 查引用：import 语句里的名字（`import { helper } from './a'`）也是引用位置，没有依据时列在 `same_name`，`bind` 给出依据时是调用方；这是 `ParsedFile` 的引用位置本来就包含的。限时搜索命中的文件只解析、不写入缓存：`ParsedFile` 不是抽取结果（它的引用位置包含局部引用），为写入再抽取一遍要多一倍时间；第 3 层的批量任务之后照常为它们建索引（设计「限时搜索」写的写入只对跳转做）。第一批在处理完 4 个文件或 150 ms 时交出，之后每 32 个文件或 100 ms。
+- `Named`：`symbol` 为 None（`Symbol` 要求语言，按名字查询没有）；不按可见性和语法种类过滤（没有引用位置）；不做限时搜索，所以 `near` 所在子项目（没有 `near` 时整个 worktree）里还有未入索引的文件、或在途抽取时结果是 `Done(Partial)`，`outside` 是其余未入索引的文件，都入索引后才是 `Complete`。设计只说「只做第 3 步」，没有说完整性。
+- 预取的沿用条件另含项目的会话号（切换 worktree 之后不沿用）；最多保留 4 个预取。用过一次即丢弃。
+- 名字表的代数是本 crate 按项目记的计数：每次看到输入（会话、映射来历、淘汰代数、语言包代数、写入代数）与上次不同就加一。设计写「名字表依赖的输入……任何一个变化时代数加一」；直接用输入代数之和不行，切换 worktree 时项目的输入代数从零重新开始，表的代数会变小。名字表的状态放在 `Project` 上（不随会话重置），持有中的表在切换 worktree 后也会重建。重建的触发点是批次写入之后、核对任务结束时和 `names` 本身；淘汰代数的变化在这些点上读到。
+- 语义导航：合并时「与 HEAD 相同的文件归 `head_only` 一类」只在这次查询还有可回答的（未作废或已回复的）`head_only` 请求时成立，否则全部文件归另一类：设计没有说 SCIP 注销之后它的文件归谁。`Same` / `Ready` 按（路径、行、列）的集合比较。注销后的重新合并、回复的处理都在 `Background` 任务里（回复只入队），事件在 executor 线程上发出。切换当前 worktree 时关闭这个项目的全部查询（未回复的请求收到 `cancel`）：它们回答的是旧 worktree 的内容。
+- 覆盖：`coverage` 另外要求没有待读的路径、git 项目的工作区比较是当前的，否则第 3、4 层是 `Pending`：原来在核对任务装上基础映射、还没读完覆盖部分的间隙里，第 3、4 层可能报 `Done`。
+- 文件夹项目在第 4 步建索引（第 3 步把它推迟到这一步，见上）：文件列表就绪时打开根目录的 `SafeRoot`，把文件列表里的每个文件放进重新读集合，核对任务读出、按原始字节的 SHA-1 记为覆盖项（`Content`），之后与 git 项目走同一套映射、各层和查询；换文件列表时全部重新读。没有 fs_watch 订阅、工作区比较和 HEAD（`head_clean` 总是 false），`ProjectEvent::Changed` 不再让文件夹项目重新打开根目录。热启动要读每个文件求 OID，命中的不解析（`schedule_folder_project_indexes_at_open`）。
+- 基准：
+  - `plugin/code-intel/resident_*` 在 `Memory` 目标里用计数分配器测本 crate 的活跃字节（tree-sitter 的分配经 `route_tree_sitter_allocations` 计入，不含 `project` 的文件列表和 SQLite 自己的内存）：`Process` 目标的进程级基准（bench 第 4、5 步）还没有实现，按 bench 设计的划分它们属于 `Process`，`budgets_belong_to_the_documented_targets` 为它们加了例外（[bench 设计「基准目标」](bench.md#基准目标)已改）。
+  - `code_intel/references_100k` 拆成 `code_intel/references_100k/all`（≤ 2 s）和 `code_intel/references_100k/first`（≤ 200 ms）：「性能」这一行有两个预算。
+  - 10 万文件的基准用虚拟仓库：`testing::virtual_repo`（`FakeGit::stage_oids` 只有 index 条目，`assume_unchanged` 让工作区比较为空，单元是 `synthetic::extraction` 的合成抽取结果：每个文件 3 个自己的名字、27 个取自 2 万个共用名字，10 万文件约 32 万个不同的名字，对应调研对名字表 4–8 MB 的估算）；查询要读的文件才写到磁盘上。`goto_indexed` 的当前文本 64 KiB，目标名字有约 130 个定义。
+- `testing`：`TestHost` 改为直接启动 `Kernel`、不经 `TestKernel`（`TestKernel` 记下目标插件发出的每个事件，会一直持有名字表）；`FakePower`、`FakeGrammars` 的订阅返回可退订的守卫（`subscribers()` 只数没退订的）。`Stats` 新增 `prepares`（跳转第 1–3 步的次数，预取的测试用）。
+- 依赖：`memchr`（限时搜索的 `memmem`）和 `unicode-normalization`（名字表的 NFC）加入 `[workspace.dependencies]`，两者原已在 Cargo.lock 里，没有新增 crate。

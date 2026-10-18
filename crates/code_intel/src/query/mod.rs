@@ -19,8 +19,7 @@ use std::time::{Duration, Instant};
 use lectern_executor::Priority;
 use lectern_platform::SafeRoot;
 use lectern_services::code_intel::{
-    CodeIntelEvent, Query, QueryError, QueryId, QueryKind, QueryResults, QueryState,
-    SemanticState,
+    CodeIntelEvent, Query, QueryError, QueryId, QueryKind, QueryResults, QueryState, SemanticState,
 };
 use lectern_services::project::{BlobId, Package, ProjectKey, RelPath, Worktree, WorktreeKey};
 
@@ -114,7 +113,9 @@ impl Snap {
             if let Some(root) = &self.root {
                 return Some(root.clone());
             }
-            return SafeRoot::open(self.root_path.as_deref()?).ok().map(Arc::new);
+            return SafeRoot::open(self.root_path.as_deref()?)
+                .ok()
+                .map(Arc::new);
         }
         let other = self.worktrees.iter().find(|w| Some(&w.key) == worktree)?;
         SafeRoot::open(&other.root).ok().map(Arc::new)
@@ -199,9 +200,11 @@ impl Inner {
             cancel: cancel.clone(),
             started: self.watchdog.clock().now(),
         };
-        let spawned = self.host.spawn_busy("query", Priority::Interactive, move || {
-            me.run_query(&run, &query, prepared);
-        });
+        let spawned = self
+            .host
+            .spawn_busy("query", Priority::Interactive, move || {
+                me.run_query(&run, &query, prepared);
+            });
         if !spawned {
             self.publish(id, |r| r.state = QueryState::Failed(QueryError::NotOpen));
         }
@@ -288,6 +291,21 @@ impl Inner {
         true
     }
 
+    /// What a prefetch of the project depends on now: a few loads under
+    /// the project's lock, nothing copied (`query` runs on any thread).
+    fn inputs(&self, key: &ProjectKey) -> Option<Inputs> {
+        let project = self.project(key)?;
+        let eviction = project.evictions();
+        let grammar = self.grammar();
+        let st = lock(&project.state);
+        Some(Inputs {
+            session: st.session,
+            map: st.map.provenance.generation(),
+            eviction,
+            grammar,
+        })
+    }
+
     /// The project as a query sees it now.
     pub(crate) fn snap(&self, key: &ProjectKey) -> Option<Snap> {
         let project = self.project(key)?;
@@ -356,7 +374,9 @@ impl Inner {
 
     fn run_query(self: &Arc<Self>, run: &Run, query: &Query, prepared: Option<Arc<Prepared>>) {
         let Some(snap) = self.snap(&query.project) else {
-            self.publish(run.id, |r| r.state = QueryState::Failed(QueryError::NotOpen));
+            self.publish(run.id, |r| {
+                r.state = QueryState::Failed(QueryError::NotOpen)
+            });
             return;
         };
         match &query.kind {
@@ -378,36 +398,41 @@ impl Inner {
             return;
         }
         let me = self.clone();
-        self.host.spawn_busy("prefetch", Priority::Interactive, move || {
-            let Some(snap) = me.snap(&query.project) else {
-                return;
-            };
-            let cancel = Arc::new(AtomicBool::new(false));
-            let prepared = me.prepare_definition(&snap, &at, position, &cancel).ok();
-            let now = me.watchdog.clock().now();
-            let mut q = lock(&me.queries);
-            q.prefetched.retain(|p| p.query != query);
-            q.prefetched.push(Prefetched {
-                query,
-                at: now,
-                inputs: snap.inputs,
-                prepared: prepared.map(Arc::new),
+        self.host
+            .spawn_busy("prefetch", Priority::Interactive, move || {
+                let Some(snap) = me.snap(&query.project) else {
+                    return;
+                };
+                let cancel = Arc::new(AtomicBool::new(false));
+                let prepared = me.prepare_definition(&snap, &at, position, &cancel).ok();
+                let now = me.watchdog.clock().now();
+                let mut q = lock(&me.queries);
+                q.prefetched.retain(|p| p.query != query);
+                q.prefetched.push(Prefetched {
+                    query,
+                    at: now,
+                    inputs: snap.inputs,
+                    prepared: prepared.map(Arc::new),
+                });
+                while q.prefetched.len() > PREFETCHES {
+                    q.prefetched.remove(0);
+                }
             });
-            while q.prefetched.len() > PREFETCHES {
-                q.prefetched.remove(0);
-            }
-        });
     }
 
     /// A prefetch of the same query made within [`PREFETCH_FOR`] with the
     /// inputs still current.
     fn take_prefetch(&self, query: &Query) -> Option<Arc<Prepared>> {
+        if !lock(&self.queries).prefetched.iter().any(|p| &p.query == query) {
+            return None;
+        }
         let now = self.watchdog.clock().now();
-        let current = self.snap(&query.project).map(|s| s.inputs);
+        let current = self.inputs(&query.project);
         let mut q = lock(&self.queries);
         let i = q.prefetched.iter().position(|p| &p.query == query)?;
         let p = q.prefetched.remove(i);
-        let fresh = now.saturating_duration_since(p.at) <= PREFETCH_FOR && Some(p.inputs) == current;
+        let fresh =
+            now.saturating_duration_since(p.at) <= PREFETCH_FOR && Some(p.inputs) == current;
         if fresh { p.prepared } else { None }
     }
 

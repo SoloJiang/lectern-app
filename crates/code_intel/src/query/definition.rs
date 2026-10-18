@@ -45,7 +45,11 @@ pub(crate) fn loc_key(l: &Location) -> LocKey {
 
 /// What step 2's extractions add: units used, extractions to write, and
 /// each file's extraction by (path, OID of the bytes read).
-type Pending = (Vec<Unit>, Vec<Scanned>, HashMap<(RelPath, BlobId), Option<Extraction>>);
+type Pending = (
+    Vec<Unit>,
+    Vec<Scanned>,
+    HashMap<(RelPath, BlobId), Option<Extraction>>,
+);
 
 /// Steps 1–3 of a jump: what the first batch shows, and what the search
 /// goes on from. A prefetch keeps one.
@@ -70,7 +74,10 @@ pub(crate) struct Prepared {
 
 impl Prepared {
     fn push(&mut self, candidate: Candidate) -> bool {
-        if self.delivered.insert(loc_key(&candidate.definition.location)) {
+        if self
+            .delivered
+            .insert(loc_key(&candidate.definition.location))
+        {
             self.candidates.push(candidate);
             true
         } else {
@@ -88,7 +95,10 @@ impl Prepared {
 /// `jump` and `preselect` (「跳转到定义」): the only candidate with evidence,
 /// unless the current file has same-named declarations that might be the
 /// target; else the first candidate.
-pub(crate) fn jump_and_preselect(candidates: &[Candidate], site: Option<&Site>) -> (Option<u32>, Option<u32>) {
+pub(crate) fn jump_and_preselect(
+    candidates: &[Candidate],
+    site: Option<&Site>,
+) -> (Option<u32>, Option<u32>) {
     let bound: Vec<usize> = candidates
         .iter()
         .enumerate()
@@ -101,7 +111,12 @@ pub(crate) fn jump_and_preselect(candidates: &[Candidate], site: Option<&Site>) 
     (jump, preselect)
 }
 
-pub(crate) fn def_ref(def: &Def, lang: &LangName, local: bool, location: Location) -> DefinitionRef {
+pub(crate) fn def_ref(
+    def: &Def,
+    lang: &LangName,
+    local: bool,
+    location: Location,
+) -> DefinitionRef {
     DefinitionRef {
         location,
         name: Arc::from(&*def.name),
@@ -127,7 +142,12 @@ pub(crate) fn here(at: &TextRef, line: u32, column: u32, end_line: u32) -> Locat
 
 fn binding_ref(b: &LocalBinding, lang: &LangName, at: &TextRef) -> DefinitionRef {
     match &b.def {
-        Some(def) => def_ref(def, lang, b.local, here(at, def.line, def.column, def.end_line)),
+        Some(def) => def_ref(
+            def,
+            lang,
+            b.local,
+            here(at, def.line, def.column, def.end_line),
+        ),
         None => DefinitionRef {
             location: here(at, b.at.line, b.at.column, b.at.line),
             name: Arc::from(&*b.name),
@@ -181,7 +201,10 @@ impl Inner {
     /// the background limits until `until` and queued to be written. None
     /// when it gives no definitions (stored or extracted with another
     /// status, or its language is not in the current table).
-    #[allow(clippy::too_many_arguments, reason = "one file's part of a query: its snapshot, the file and what it adds to")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one file's part of a query: its snapshot, the file and what it adds to"
+    )]
     pub(crate) fn file_extraction(
         &self,
         snap: &Snap,
@@ -257,11 +280,12 @@ impl Inner {
         let bytes = self.read_text(snap, at)?;
         let clock = self.watchdog.clock().clone();
         let deadline = clock.now() + INTERACTIVE_DEADLINE;
-        let parsed = ParsedFile::parse(&lang, bytes, &*clock, deadline, cancel).map_err(|e| match e {
-            ParseError::Unsupported => QueryError::UnsupportedLanguage,
-            ParseError::TimedOut => QueryError::Unreadable("parsing timed out".into()),
-            ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
-        })?;
+        let parsed =
+            ParsedFile::parse(&lang, bytes, &*clock, deadline, cancel).map_err(|e| match e {
+                ParseError::Unsupported => QueryError::UnsupportedLanguage,
+                ParseError::TimedOut => QueryError::Unreadable("parsing timed out".into()),
+                ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
+            })?;
         let site = parsed.site_at(position).ok_or(QueryError::NoSymbol)?;
         let name = lang.name().clone();
         let defines = site.defines.as_ref().map(|d| {
@@ -311,12 +335,18 @@ impl Inner {
             return Ok(prepared);
         }
         for possible in &site.possible {
-            prepared.push(current(binding_ref(possible, &name, at), Evidence::NameOnly));
+            prepared.push(current(
+                binding_ref(possible, &name, at),
+                Evidence::NameOnly,
+            ));
         }
         for (def, local) in parsed.defs_with_local() {
             if *def.name == *site.name && accepts(&lang, site.syntax, def.kind) {
                 let location = here(at, def.line, def.column, def.end_line);
-                prepared.push(current(def_ref(def, &name, local, location), Evidence::NameOnly));
+                prepared.push(current(
+                    def_ref(def, &name, local, location),
+                    Evidence::NameOnly,
+                ));
             }
         }
 
@@ -400,7 +430,8 @@ impl Inner {
         }
 
         // 3. The index.
-        let mut drafts = self.index_candidates(snap, &lang, &site, &at.path, &ranker, &mut prepared.units);
+        let mut drafts =
+            self.index_candidates(snap, &lang, &site, &at.path, &ranker, &mut prepared.units);
         rules.disambiguate(&site, &mut drafts);
         let mut found: Vec<Candidate> = drafts.into_iter().map(|d| d.candidate).collect();
         ranker.sort(&mut found);
@@ -516,61 +547,81 @@ impl Inner {
         } else {
             let scope = snap.search_scope(&at.path, &p.lang, &p.skip);
             let extracted = std::mem::take(&mut p.extracted);
-            let ranker = self.ranker(snap, Some(&at.path), Some((at.origin, at.oid)), Some(p.lang.name()));
+            let ranker = self.ranker(
+                snap,
+                Some(&at.path),
+                Some((at.origin, at.oid)),
+                Some(p.lang.name()),
+            );
             let name = p.symbol.name.clone();
             let (lang, site) = (p.lang.clone(), p.site.clone());
             let mut units = std::mem::take(&mut p.units);
             let mut scanned = std::mem::take(&mut p.scanned);
-            let result = self.search(run, snap, &scope, &lang, &name, run.started + SEARCH_FOR, |eff, key, bytes, until| {
-                let extraction = match extracted.get(&(eff.path.clone(), key)) {
-                    Some(done) => done.clone(),
-                    None => self.file_extraction(
-                        snap, eff, key, &bytes, until, &run.cancel, &mut units, &mut scanned,
-                    ),
-                };
-                let Some(extraction) = extraction else {
-                    return;
-                };
-                let mut found = Vec::new();
-                for def in &extraction.defs {
-                    if *def.name != *name || !accepts(&lang, site.syntax, def.kind) {
-                        continue;
-                    }
-                    if !visible(def.visibility, &eff.path, &at.path) {
-                        continue;
-                    }
-                    let location = Location {
-                        worktree: snap.worktree.clone(),
-                        path: eff.path.clone(),
-                        origin: TextOrigin::Worktree,
-                        oid: key,
-                        line: def.line,
-                        column: def.column,
-                        end_line: def.end_line,
+            let result = self.search(
+                run,
+                snap,
+                &scope,
+                &lang,
+                &name,
+                run.started + SEARCH_FOR,
+                |eff, key, bytes, until| {
+                    let extraction = match extracted.get(&(eff.path.clone(), key)) {
+                        Some(done) => done.clone(),
+                        None => self.file_extraction(
+                            snap,
+                            eff,
+                            key,
+                            &bytes,
+                            until,
+                            &run.cancel,
+                            &mut units,
+                            &mut scanned,
+                        ),
                     };
-                    found.push(Candidate {
-                        tier: ranker.tier(&eff.path, TextOrigin::Worktree, key, false),
-                        in_review: ranker.in_review(&eff.path),
-                        definition: def_ref(def, eff.lang.name(), false, location),
-                        evidence: Evidence::NameOnly,
-                        source: CandidateSource::Scanned,
-                    });
-                }
-                ranker.sort(&mut found);
-                let before = p.candidates.len();
-                for c in found {
-                    p.push(c);
-                }
-                if p.candidates.len() > before {
-                    let all: Arc<[Candidate]> = p.candidates.clone().into();
-                    let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&site));
-                    self.publish(run.id, |r| {
-                        r.candidates = all;
-                        r.jump = jump;
-                        r.preselect = preselect;
-                    });
-                }
-            });
+                    let Some(extraction) = extraction else {
+                        return;
+                    };
+                    let mut found = Vec::new();
+                    for def in &extraction.defs {
+                        if *def.name != *name || !accepts(&lang, site.syntax, def.kind) {
+                            continue;
+                        }
+                        if !visible(def.visibility, &eff.path, &at.path) {
+                            continue;
+                        }
+                        let location = Location {
+                            worktree: snap.worktree.clone(),
+                            path: eff.path.clone(),
+                            origin: TextOrigin::Worktree,
+                            oid: key,
+                            line: def.line,
+                            column: def.column,
+                            end_line: def.end_line,
+                        };
+                        found.push(Candidate {
+                            tier: ranker.tier(&eff.path, TextOrigin::Worktree, key, false),
+                            in_review: ranker.in_review(&eff.path),
+                            definition: def_ref(def, eff.lang.name(), false, location),
+                            evidence: Evidence::NameOnly,
+                            source: CandidateSource::Scanned,
+                        });
+                    }
+                    ranker.sort(&mut found);
+                    let before = p.candidates.len();
+                    for c in found {
+                        p.push(c);
+                    }
+                    if p.candidates.len() > before {
+                        let all: Arc<[Candidate]> = p.candidates.clone().into();
+                        let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&site));
+                        self.publish(run.id, |r| {
+                            r.candidates = all;
+                            r.jump = jump;
+                            r.preselect = preselect;
+                        });
+                    }
+                },
+            );
             p.units = units;
             p.scanned = scanned;
             result
@@ -585,7 +636,13 @@ impl Inner {
 
     /// A `Named` query: step 3 only, every definition of the name in any
     /// language, ranked from `near`; all `NameOnly`, no jump.
-    pub(crate) fn run_named(self: &Arc<Self>, run: &Run, snap: &Snap, name: &str, near: Option<&str>) {
+    pub(crate) fn run_named(
+        self: &Arc<Self>,
+        run: &Run,
+        snap: &Snap,
+        name: &str,
+        near: Option<&str>,
+    ) {
         let versions: Vec<Version> = snap
             .table
             .iter()
