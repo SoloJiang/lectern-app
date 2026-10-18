@@ -1,0 +1,18 @@
+---
+source: crates/code_intel/src/tests/extract.rs
+assertion_line: 75
+description: tests/fixtures/extract/tsx/panel.tsx
+expression: render(&extraction)
+---
+status: Done
+defs:
+  4:5-8 type PanelProps [file]
+  5:2-5 field title in PanelProps [file]
+  6:2-6 field items in PanelProps [file]
+  7:2-7 field onSelect in PanelProps [file]
+  10:9-12 function Row [file] (1)
+  10:35-10 field label in Row [file]
+  10:50-10 field onClick in Row [file]
+  14:16-31 function Panel [public] (1)
+  16:8-16 function toggle in Panel [file] (0)
+refs: Badge Panel PanelProps Row count item items key label length map onClick onSelect open setOpen title useState

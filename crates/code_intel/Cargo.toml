@@ -10,5 +10,33 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "domain"
 
+[features]
+# testing::ManualClock, FakeGrammars, the language fixtures and a watchdog on
+# an executor's dedicated thread, for the tests of this crate and for
+# lectern-bench.
+test-support = ["dep:lectern-executor"]
+
+[dependencies]
+# Only testing::watchdog uses it until the plugin (step 4) starts the
+# watchdog through Executor::run_dedicated_gated.
+lectern-executor = { path = "../executor", optional = true }
+# The shared code_intel types (LangName, DefKind, RefSyntax, Position).
+lectern-services = { path = "../services" }
+streaming-iterator.workspace = true
+tree-sitter.workspace = true
+tree-sitter-tags.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-typescript.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+lectern-executor = { path = "../executor", features = ["test-support"] }
+# forms_cover_grammar reads each grammar's NODE_TYPES.
+serde_json.workspace = true
+
 [lints]
 workspace = true
