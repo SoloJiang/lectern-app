@@ -112,14 +112,17 @@ fn deadline_pause_probe_cancels() {
 
 #[test]
 fn deadline_one_mib_returns_soon_after_the_deadline() {
-    // A 1 MiB file with a 100 ms deadline returns within about 150 ms on
-    // both extraction paths and in `ParsedFile`: no phase after the parse
-    // (the binding model, the rules) is long or runs unchecked.
+    // A 1 MiB file with a 100 ms deadline returns soon after it on both
+    // extraction paths and in `ParsedFile`: no phase after the parse (the
+    // binding model, the rules) is long or runs unchecked. Unchecked work
+    // used to take seconds here; the margin is wide enough for a debug build
+    // on a loaded CI runner (179 ms seen with a 150 ms limit). Release-build
+    // timings are in the design doc's 「实际验证」.
     let executor = Executor::manual();
     let (watchdog, _) = watchdog(&executor, Arc::new(SystemClock));
     let table = LanguageTable::core();
     let cancel = Arc::new(AtomicBool::new(false));
-    let limit = Duration::from_millis(150);
+    let limit = Duration::from_millis(600);
     for lang in ["js", "python", "ts"] {
         let l = table.get(lang).unwrap();
         assert!(l.prepare());

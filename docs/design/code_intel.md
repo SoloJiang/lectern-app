@@ -765,7 +765,7 @@ pub enum Visibility {
   - 参数列表：函数、方法的模式用 `@doc` 捕获参数列表节点（tags 把它的文本放在 `Tag::docs`），按括号、尖括号、字符串和注释的嵌套数顶层的逗号。Rust 的 `self` 接收者和 Python 的 `*`、`/` 分隔符不计数；没有括号的参数列表（`x => x`）是 1 个。查询不再用 `@doc` 捕获注释。
   - 局部定义：定义节点严格位于一个局部作用域之内的，在每种语言里都是 `File`，不再看下面按语言的规则。局部作用域是 locals 查询的作用域里除文件本身、类体（Python）和命名空间体（TS 的 namespace、module、`declare global`）之外的全部（「作用域形式」），由作用域的种类推出，不按语言写规则：遍历在同一遍里记下它们，tags 路径（核心语言）和 `ParsedFile` 取查询的结果。成员（字段、方法，含 TS 构造器里的参数属性）取它所属的类或 `impl` 块的位置，所以局部类的成员是 `File`，顶层类在构造器参数里声明的字段不是；最近的容器是函数或方法时（匿名类的成员），取自己的位置。语言包的作用域不分类，函数或方法定义里面的定义是 `File`。
   - 规则：Rust 有 `pub` 的项、trait 和 trait 实现里的成员、宏是 `Public`，其余 `Module`；Java 有 `private` 的是 `File`，其余 `Public`；Go 大写开头的是 `Public`，其余 `Package`；Python 和语言包是 `Unknown`。JS / TS：函数里的定义（如命名函数表达式的名字）是 `File`；其余取最外层定义的可见性：在 `export` 语句里或名字被导出时是 `Public`，程序顶层有 `import` / `export`（ES 模块）时是 `File`，没有时（脚本、CommonJS，以及只在 namespace 里有 `export` 的 TS 文件）是 `Public`。
-- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。核心语言的定义取同一棵语法树上 `walk` 的结果，与索引里的定义一致；语言包的定义取查询的结果。解析、查询和遍历都按 `ParsedFile` 自己的截止时间和取消标志停止（解析和查询在进度回调里检查，遍历每 1024 个节点检查一次），返回之前再检查一次，所以截止时间之后不会交出结果。查询之后的绑定模型（`Collector::finish`：最内层作用域按起点二分查找再向外走，函数体按范围查表，每个作用域的定义有索引）和规则（`rules::finish`：作用域、导出范围按位置扫描或二分查找，Go 的接收者按范围查表）都与文件大小成线性，没有按「定义数 × 作用域数」增长的部分；两条抽取路径的看门狗登记覆盖到规则结束，之后再检查一次。`deadline_one_mib_returns_soon_after_the_deadline` 检查 1 MiB 的文件在 100 ms 的截止时间下约 150 ms 内返回。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
+- 按需抽取（第 1 层、限时搜索、引用的位置）另外需要语法树和引用位置，内部用 `ParsedFile`，用完即丢，不进缓存。它保留：语法树；tags 的引用位置；locals 查询的作用域、`@local.definition` 和 `@local.reference` 的位置。核心语言的定义取同一棵语法树上 `walk` 的结果，与索引里的定义一致；语言包的定义取查询的结果。解析、查询和遍历都按 `ParsedFile` 自己的截止时间和取消标志停止（解析和查询在进度回调里检查，遍历每 1024 个节点检查一次），返回之前再检查一次，所以截止时间之后不会交出结果。查询之后的绑定模型（`Collector::finish`：最内层作用域按起点二分查找再向外走，函数体按范围查表，每个作用域的定义有索引）和规则（`rules::finish`：作用域、导出范围按位置扫描或二分查找，Go 的接收者按范围查表）都与文件大小成线性，没有按「定义数 × 作用域数」增长的部分；两条抽取路径的看门狗登记覆盖到规则结束，之后再检查一次。`deadline_one_mib_returns_soon_after_the_deadline` 检查 1 MiB 的文件在 100 ms 的截止时间下很快返回（debug 构建、CI 机器上上限 600 ms；未检查的阶段以前要几秒），线性的证据是 release 构建的计时。引用位置取 tags 引用与 `@local.reference` 的并集，按位置去重：tags 省略了被 locals 解析掉的引用（包括 locals 查询把顶层函数也记为程序作用域里的局部定义时，对它的同文件引用），只扫 tags 的位置会漏掉局部变量、参数和这类同文件引用。
 
 ### 外部格式（tags 查询）
 
@@ -1809,7 +1809,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - `site_kind_masks_accept_uses`：56 个按用法写的样例，覆盖每种语言每个被收窄的引用语法。
   - `extract_export_forms_change_visibility`：12 种导出形式各让名字从 `File` 变为 `Public`，含 `export = X` 和 `declare global`。
   - `extract_python_module_level_and_attributes`：`if` / `try` / `with` / `for` 里的和连等的常量，函数和类里的不是；`self` 和嵌套函数里的接收者属性是字段，其他对象的属性是成员引用。
-  - `deadline_one_mib_returns_soon_after_the_deadline`：1 MiB 的 JS、Python、TS 在 100 ms 的截止时间下，两条抽取路径和 `ParsedFile` 都在 150 ms 内返回。
+  - `deadline_one_mib_returns_soon_after_the_deadline`：1 MiB 的 JS、Python、TS 在 100 ms 的截止时间下，两条抽取路径和 `ParsedFile` 都在 600 ms 内返回（debug 构建在共享 CI 机器上的余量；以前未检查的阶段要几秒）。
   - 2 个快照有变化，逐个看过：`billing.py` 的 `Invoice.__init__` 里 `self.number`、`self.lines`、`self.currency` 成为字段（引用名少了 `number`）；`panel.tsx` 的引用名少了内置元素 `h2`、`li`、`section`、`ul`。
 - `code_intel/extract_throughput`：本轮 3 次 3.99–4.16 MB/s，交替运行的 9a2835b 4.10 MB/s；`code_intel/extract_1mib` 3.57–3.92 MB/s（9a2835b：3.67），规则不再按「定义数 × 导出语句数」增长。
 
