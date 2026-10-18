@@ -217,6 +217,23 @@ fn cmd_gen(out: &Path) {
     }
 }
 
+/// Large one-line files for `first`: minified JS and the package-lock shape
+/// with all whitespace removed (its strings contain no spaces), 16 and 64 MiB.
+fn cmd_gen_oneline(out: &Path) {
+    std::fs::create_dir_all(out).unwrap();
+    for &size in &[16usize, 64] {
+        let text = fixtures::generate(fixtures::Kind::MinJs, size << 20, 7 + size as u64);
+        let path = out.join(format!("minified_{size}m.js"));
+        std::fs::write(&path, &text).unwrap();
+        println!("{} {} bytes", path.display(), text.len());
+        let text = fixtures::generate(fixtures::Kind::Json, size << 20, 30 + size as u64)
+            .replace(['\n', ' '], "");
+        let path = out.join(format!("oneline_{size}m.json"));
+        std::fs::write(&path, &text).unwrap();
+        println!("{} {} bytes", path.display(), text.len());
+    }
+}
+
 // ---------------------------------------------------------------- parse: (a) (c) (f)
 
 fn cmd_parse(paths: &[PathBuf]) {
@@ -928,6 +945,194 @@ fn cmd_chunked(kib: usize, tree_cut: bool, paths: &[PathBuf]) {
     }
 }
 
+// ---------------------------------------------------------------- first: bounded first screen
+
+/// Total backward scan allowed when choosing the first-screen window.
+const FIRST_BACK_CAP: usize = 64 << 10;
+
+/// Start of the line containing `pos`, if it begins within `limit` bytes.
+fn line_start_within(b: &[u8], pos: usize, limit: usize) -> Option<usize> {
+    let lo = pos.saturating_sub(limit);
+    if pos == 0 {
+        return Some(0);
+    }
+    match memchr::memrchr(b'\n', &b[lo..pos]) {
+        Some(i) => Some(lo + i + 1),
+        None if lo == 0 => Some(0),
+        None => None,
+    }
+}
+
+/// One-line JSON without knowing the string state: the nearest `,"key":`
+/// before `from` whose key has no backslash and is at most 256 bytes.
+fn json_key_boundary_back(b: &[u8], from: usize, lo: usize) -> Option<usize> {
+    let mut i = from;
+    while i > lo + 1 {
+        i -= 1;
+        if b[i] == b'"' && b[i - 1] == b',' {
+            let rest = &b[i + 1..(i + 258).min(b.len())];
+            if let Some(q) = memchr::memchr(b'"', rest) {
+                if !rest[..q].contains(&b'\\') && rest.get(q + 1) == Some(&b':') {
+                    return Some(i);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Chooses the first-screen window for a target byte offset using only the
+/// bytes near it (at most `FIRST_BACK_CAP` before, 64 KiB after): no line
+/// index, no scan from the file start. None: no safe start within the cap,
+/// so the first screen is plain text and the boundary is found later.
+fn first_window(text: &str, json: bool, x: usize) -> Option<(usize, usize, Range<usize>)> {
+    let b = text.as_bytes();
+    let floor = x.saturating_sub(FIRST_BACK_CAP);
+    if let Some(ls) = line_start_within(b, x, 4096) {
+        // Line mode: 60 lines forward (at most 64 KiB), context ~8 KiB back
+        // plus up to 4 KiB more for a statement start.
+        let mut end = ls;
+        for _ in 0..=VISIBLE_LINES {
+            let lim = (ls + (64 << 10)).min(b.len());
+            match memchr::memchr(b'\n', &b[end.min(lim)..lim]) {
+                Some(i) => end = end + i + 1,
+                None => {
+                    end = lim;
+                    break;
+                }
+            }
+        }
+        let vis = ls..end;
+        let c = line_start_within(b, ls.saturating_sub(8 << 10).max(floor), 4096)?;
+        let limit = c.saturating_sub(4 << 10).max(floor);
+        let (mut best, mut best_indent, mut l) = (c, usize::MAX, c);
+        let start = loop {
+            let le = memchr::memchr(b'\n', &b[l..]).map_or(b.len(), |i| l + i + 1);
+            let s = &text[l..le];
+            if is_boundary(s) {
+                break l;
+            }
+            let t = s.trim_start();
+            let comment = t.starts_with('*') || t.starts_with("//") || t.starts_with("/*");
+            if !t.is_empty() && !comment && indent(s) < best_indent {
+                best_indent = indent(s);
+                best = l;
+            }
+            if l == 0 || l <= limit {
+                break best;
+            }
+            match line_start_within(b, l - 1, l - limit) {
+                Some(p) if p >= limit => l = p,
+                _ => break best,
+            }
+        };
+        let tail = (end + (4 << 10)).min(b.len());
+        let we = memchr::memchr(b'\n', &b[tail..(tail + 4096).min(b.len())])
+            .map_or(tail, |i| tail + i + 1);
+        Some((start, snap(text, we), vis))
+    } else {
+        // Long line: 8 KiB visible, 8 KiB of context, safe start within the cap.
+        let vis = snap(text, x)..snap(text, x + 8192);
+        let s0 = x.saturating_sub(8 << 10);
+        let start = if json {
+            json_key_boundary_back(b, s0, floor)?
+        } else {
+            let mut i = s0;
+            loop {
+                if i <= floor {
+                    return None;
+                }
+                if b[i - 1] == b';' || b[i - 1] == b'}' {
+                    break i;
+                }
+                i -= 1;
+            }
+        };
+        Some((start, snap(text, vis.end + (4 << 10)), vis))
+    }
+}
+
+/// First screen at 40 random byte offsets, with the window choice, JSON
+/// balancing, parse and visible-range query all inside the timed region.
+/// Agreement is skipped for files listed after `--no-ref`.
+fn cmd_first(paths: &[PathBuf]) {
+    println!(
+        "file\ttargets\tfallback\twindow_KiB_mean\tselect_ms_max\ttotal_ms_mean\ttotal_ms_p95\ttotal_ms_max\tagree_mean\tagree_min\tperfect_%"
+    );
+    let mut with_ref = true;
+    for path in paths {
+        if path.as_os_str() == "--no-ref" {
+            with_ref = false;
+            continue;
+        }
+        let text = read(path);
+        let bytes = text.as_bytes();
+        let lang = lang_for(path);
+        let json = lang.name == "json";
+        let query = query_for(&lang);
+        let mut p = parser_for(&lang);
+        let full = with_ref.then(|| parse_contiguous(&mut p, &text));
+        let mut rng = fixtures::Rng::new(42);
+        let (mut totals, mut selects, mut agree) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut fallback, mut win) = (0usize, 0usize);
+        for _ in 0..40 {
+            let lo = text.len() / 20;
+            let x = snap(&text, lo + rng.below((text.len() * 9 / 10) as u64) as usize);
+            let t0 = Instant::now();
+            let Some((ws, we, vis)) = first_window(&text, json, x) else {
+                selects.push(t0.elapsed());
+                fallback += 1;
+                continue;
+            };
+            selects.push(t0.elapsed());
+            let (window, base) = window_text(json, &text, ws, we);
+            p.reset();
+            let wt = p.parse(window.as_ref(), None).unwrap();
+            let got = capture_map(&query, &wt, window.as_bytes(), base, vis.clone());
+            totals.push(t0.elapsed());
+            win += we - ws;
+            if let Some(full) = &full {
+                let want = capture_map(&query, full, bytes, 0, vis.clone());
+                agree.push(agreement(&got, &want, bytes, vis));
+            }
+        }
+        totals.sort();
+        let n = totals.len().max(1);
+        let mean = totals.iter().map(|d| ms(*d)).sum::<f64>() / n as f64;
+        let p95 = totals.get(totals.len() * 95 / 100).map_or(0.0, |d| ms(*d));
+        let fmt_agree = |v: &[f64]| {
+            if v.is_empty() {
+                ("-".to_string(), "-".to_string(), "-".to_string())
+            } else {
+                (
+                    format!("{:.4}", v.iter().sum::<f64>() / v.len() as f64),
+                    format!("{:.4}", v.iter().cloned().fold(1.0, f64::min)),
+                    format!(
+                        "{:.0}",
+                        v.iter().filter(|&&a| a >= 0.999_999).count() as f64 * 100.0
+                            / v.len() as f64
+                    ),
+                )
+            }
+        };
+        let (am, amin, perf) = fmt_agree(&agree);
+        println!(
+            "{}\t{}\t{}\t{:.0}\t{:.3}\t{:.2}\t{:.2}\t{:.2}\t{}\t{}\t{}",
+            path.file_name().unwrap().to_string_lossy(),
+            40,
+            fallback,
+            win as f64 / n as f64 / 1024.0,
+            selects.iter().map(|d| ms(*d)).fold(0.0, f64::max),
+            mean,
+            p95,
+            totals.last().map_or(0.0, |d| ms(*d)),
+            am,
+            amin,
+            perf
+        );
+    }
+}
+
 // ---------------------------------------------------------------- query: (e)
 
 fn cmd_query(paths: &[PathBuf]) {
@@ -1175,6 +1380,8 @@ fn main() {
     let paths: Vec<PathBuf> = args.iter().skip(2).map(PathBuf::from).collect();
     match args.get(1).map(String::as_str) {
         Some("gen") => cmd_gen(&paths[0]),
+        Some("gen-oneline") => cmd_gen_oneline(&paths[0]),
+        Some("first") => cmd_first(&paths),
         Some("parse") => cmd_parse(&paths),
         Some("slice") => cmd_slice(&paths),
         Some("window") => cmd_window(&paths),

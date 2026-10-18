@@ -5,11 +5,12 @@
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
 - 设计文档：`docs/design/file_reader.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
 - issue：[#10](https://github.com/SoloJiang/lectern-app/issues/10)
-- ADR：[0012](../../docs/adr/0012.md)
+- ADR：[0012](../../docs/adr/0012.md)、[0034](../../docs/adr/0034.md)
 
 ## 边界
 
-- 打开文件到首屏高亮 < 16 ms。读文件（经 `platform` 的 `SafeRoot`，不用 mmap；首屏先读要显示的那一段，整个文件随后读；完整内容装入之前只读，编辑入口不可用）和高亮解析在后台由 `code_intel` 与 `executor` 完成：先解析可见区域，整文件解析随后进行。本视图只读它们给出的快照，不做 IO 和解析（架构规则 4）。
+- 打开文件到首屏高亮 < 16 ms。读文件（经 `platform` 的 `SafeRoot`，不用 mmap；首屏先读要显示的那一段，整个文件随后读；完整内容装入之前只读，编辑入口不可用）和高亮解析在后台由领域层与 `executor` 完成：首屏只解析目标附近的窗口，整个文件按档位在后台计算，语法树不常驻；中部的目标按字节偏移或行检查点定位（[ADR 0034](../../docs/adr/0034.md)）。本视图只读它们给出的快照，不做 IO 和解析（架构规则 4）。
+- 阅读视图是自绘的固定行高列表，只排版可见的显示行；编辑模式用 gpui-component 的 `InputState`，只对 1 MiB 以内、没有超过 4 KiB 的行的文件开放（ADR 0034）。
 - 只做轻量编辑，编辑为审阅服务（[ADR 0012](../../docs/adr/0012.md)）。
 
 ## 测试

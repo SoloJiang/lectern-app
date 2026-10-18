@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已设计、尚未实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -75,6 +75,12 @@ impl SafeRoot {
     /// 目录本身和路径的任何一级是符号链接时为 `PathThroughSymlink`；不是目录时为 `Io(NotADirectory)`。
     /// 名字从打开的那个描述符读出，路径在读取期间被替换也不会列出根目录之外的目录。
     pub fn list(&self, dir: Option<RelPath<'_>>) -> Result<Vec<DirEntry>, SafeError>;
+
+    /// 在这个根之下打开一个子目录作为新的根（ADR 0033：工作区里的依赖根如 `node_modules`、`.venv`）。
+    /// 与 `list` 相同的一步打开和 `Walk` 后备：路径的任何一级（含这个目录本身）是符号链接为 `PathThroughSymlink`，
+    /// 不是目录为 `Io(NotADirectory)`。返回的根绑定到打开的那个目录描述符，之后的调用不再经过 `rel`。
+    /// 尚未实现，随 `code_intel` 的依赖层（#19）之前的一个 `platform` PR 加入。
+    pub fn open_dir(&self, rel: RelPath<'_>) -> Result<SafeRoot, SafeError>;
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -244,6 +250,10 @@ pub enum FileKind {
 2. 否则用 `read` 的一步打开打开整个路径；成功时对这个描述符 `fstat`，不是目录为 `Io(NotADirectory)`，是目录就从它读目录项。
 3. 一步打开返回 `ENOENT` 为 `NotFound`，其他错误交给 `Walk`：中间各级同 `Walk` 的第 1 步，最后一级 `openat(dir, 名字, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`，失败时 `fstatat` 判定：符号链接为 `PathThroughSymlink`，目录且与错误矛盾时重做（同 `Walk`），其他类型为 `Io(NotADirectory)`。
 4. 目录项的类型为 `DT_UNKNOWN` 时对同一个目录描述符 `fstatat`；这时条目已不存在就略过它。
+
+### open_dir
+
+与 `list` 的第 2、3 步相同地打开 `rel`（成功时 `fstat` 确认是目录），把得到的描述符作为新 `SafeRoot` 的根，后端与原来的根相同；不读目录项。`SafeRoot::open` 会跟随根路径本身里的符号链接，所以工作区之内的子目录（依赖根）一律经已打开的工作区根调用本方法，不按路径另开（[ADR 0033](../adr/0033.md)「依赖根的读取限制」）。测试 `open_dir_*`：普通子目录、子目录本身或中间一级是符号链接、不是目录、打开后原路径被换成指向根外的链接时读到的仍是原来的目录。
 
 ### Walk
 

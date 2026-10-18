@@ -368,7 +368,9 @@ pub enum Row {
 pub fn inline_changes(old: &[u8], new: &[u8]) -> Option<InlineChanges>;
 ```
 
-行号是两侧完整文件里的行号（从 0 起）。所以高亮按完整文件计算再按行切片，缓存键是 blob OID、语言和 grammar 与查询的版本（[pulls.review 调研](../research/pulls-review.md#对-lectern-的建议)、[#42](https://github.com/SoloJiang/lectern-app/issues/42)），由做高亮的 crate 实现。
+行号是两侧完整文件里的行号（从 0 起）。高亮按 blob 的窗口计算再按行切片（[ADR 0034](../adr/0034.md)：大文件不做整文件解析，窗口覆盖展示的 hunk 和上下文），缓存键是 blob OID、语言和 grammar 与查询的版本（[pulls.review 调研](../research/pulls-review.md#对-lectern-的建议)、[#42](https://github.com/SoloJiang/lectern-app/issues/42)），由做高亮的 crate 实现。
+
+字节偏移（ADR 0034，已设计、尚未实现，随 `review_view` 之前的一个 `git` PR 加入）：`Hunk` 增加两侧第一行的字节偏移（`old_byte`、`new_byte: u64`），展示行的 `Context`、`Removed`、`Added` 带所在行的字节偏移，`Folded` 带区间起点的偏移。行 diff 时两侧文本都在内存里，偏移在切行时顺带得到；hunk 缓存的值每个 hunk 多两个整数，缓存的命名空间版本加一。视图从 hunk 打开完整文件、高亮按窗口定位时用偏移，不从文件开头扫描换行。
 
 ### Analyze 快照
 

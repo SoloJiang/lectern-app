@@ -2,7 +2,7 @@
 # Parse, slice, window, chunked, query, text and contention measurements for
 # docs/research/large-files-rendering.md. Usage:
 #   bash docs/research/large-files-rendering/run.sh <work-dir> <stages> [real-files...]
-# <stages> is a comma-separated subset of parse,slice,window,chunked,query,text,contend
+# <stages> is a comma-separated subset of parse,slice,window,first,chunked,query,text,contend
 # or "all". <work-dir> receives the build, the synthetic fixtures and the
 # results; real files (downloaded data, see the research doc) are measured
 # after the synthetic ones.
@@ -11,7 +11,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 work="$(mkdir -p "$1" && cd "$1" && pwd)"
 stages=",$2,"
 shift 2
-[[ "$stages" == ",all," ]] && stages=",parse,slice,window,chunked,query,text,contend,"
+[[ "$stages" == ",all," ]] && stages=",parse,slice,window,first,chunked,query,text,contend,"
 cargo build --release --locked --manifest-path "$here/bench/Cargo.toml" --target-dir "$work/cargo-target"
 bin="$work/cargo-target/release/large-files-rendering-bench"
 fx="$work/fixtures"
@@ -30,6 +30,13 @@ has() { [[ "$stages" == *",$1,"* ]]; }
 has parse && "$bin" parse "${all[@]}" | tee "$out/parse.tsv"
 has slice && "$bin" slice "${all[@]}" | tee "$out/slice.tsv"
 has window && "$bin" window "${all[@]}" | tee "$out/window.tsv"
+if has first; then
+    # Bounded first screen: window choice inside the timer, plus 16 / 64 MiB
+    # one-line files (no full-parse reference for the 64 MiB minified file).
+    [[ -f "$fx/oneline_64m.json" ]] || "$bin" gen-oneline "$fx" > "$out/gen-oneline.txt"
+    "$bin" first "${all[@]}" "$fx/minified_16m.js" "$fx/oneline_16m.json" "$fx/oneline_64m.json" \
+        --no-ref "$fx/minified_64m.js" | tee "$out/first.tsv"
+fi
 if has chunked; then
     "$bin" chunked 64 "${all[@]}" | tee "$out/chunked64.tsv"
     "$bin" chunked-tree 64 "${all[@]}" | tee "$out/chunked64tree.tsv"

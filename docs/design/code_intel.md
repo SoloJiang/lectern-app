@@ -23,7 +23,7 @@
   - 语法高亮、高亮与文本的 LRU、后退前进（`file_reader`、[#10](https://github.com/SoloJiang/lectern-app/issues/10)）。高亮方与本 crate 依赖同一批 grammar crate，链接进二进制的只有一份。
   - 文件列表与子项目（`project`）、工作区比较（`git`）、监听（`fs_watch`）、安全读取（`platform`）、SQLite 的连接与淘汰（`cache`）。本 crate 只调用它们的接口，需要它们新增的部分列在「对其他 crate 的要求」。
   - 语言包的下载、校验和加载（`marketplace` 与 kernel 的 grammar 加载器，ADR 0018）：本 crate 只定义接收已加载 grammar 的接口 `GrammarSource`。
-  - 依赖源码（导航第 3 层，[ADR 0007](../adr/0007.md)）与文件内容的全文搜索。
+  - 依赖源码（导航第 3 层，[ADR 0007](../adr/0007.md)）与文件内容的全文搜索。[ADR 0033](../adr/0033.md) 把 npm 等生态的依赖声明（按需解析与依赖层）移进本 crate，Java 的 `-sources.jar` 仍不在内（#26）；详细设计在 #17 的下一个 PR 里写进本文。
 - 本 issue 之外：
   - 文件夹项目的增量更新：`project` 在 P1 不监听文件夹项目（[project 设计「范围」](project.md#范围)），本 crate 同样只在打开时建索引；`project` 加入文件夹监听后，本 crate 改为消费同一来源的事件。
   - `review` 的工作区比较结果如果以后经 `services` 共享，本 crate 改用它，不再自己做一次比较（见「打开项目与热启动」）。
@@ -232,6 +232,8 @@ pub struct Location {
     pub origin: TextOrigin,
     /// 位置所在的那份内容。视图打开前比较：文件已经变了时重新查询，不跳到错误的行。
     pub oid: BlobId,
+    // ADR 0034：增加 `byte: u64`（起点的字节偏移），视图打开大文件的中部时按它定位、不从文件开头扫描；
+    // ADR 0033：`origin` 增加依赖一类。详细设计在 #17 的下一个 PR 里写进本节。
     pub line: u32,
     pub column: u32,
     /// 定义节点的最后一行；引用为引用所在的行。
@@ -1236,6 +1238,8 @@ pub enum Visibility {
 
 ### 存储表
 
+> [ADR 0033](../adr/0033.md)：依赖的单元写进单独的命名空间 `code_intel.deps`（配额 32 MiB），`code_intel.tags` 的配额从 256 MiB 改为 224 MiB，两者合计不变；[ADR 0034](../adr/0034.md)：超过 1 MiB 的打开文件按窗口写单元，键另加窗口起点。详细设计在 #17 的下一个 PR 里写进本节，在那之前实现仍按下文。
+
 一次抽取是 `cache` 的一个单元，命名空间 `code_intel.tags`（版本 1，不压缩），键是 `Key::new().bytes(oid).str(lang).u64(grammar).u64(query)`，单元的字节数由本 crate 按行估算（见下）。本 crate 登记的表：
 
 ```sql
@@ -1424,6 +1428,8 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ### 建索引的分层
 
+> [ADR 0033](../adr/0033.md)：在第 4、5 层之间增加「依赖层」（当前子项目直接依赖的声明闭包，`BackgroundGuard`、批量线程）；kernel 的交互让路开关（默认关闭）打开时第 4 层、依赖层、第 5 层让路，第 3 层不让路。详细设计在 #17 的下一个 PR 里写进本节。
+
 | 层 | 内容 | 来源 |
 |---|---|---|
 | 1 | 当前文本、抽屉里正在看的候选文件 | `Focus::Current`、`Focus::Drawer` |
@@ -1456,7 +1462,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 闸门：激活在线程开始运行之前就失效时，`run_dedicated_gated` 不运行闭包，不会启动线程。
 - 取消在 50 ms 内生效：项目关闭、切换 worktree 时置位取消标志，批量任务在下一个批次边界（或 tags 的取消检查）退出；正在解析的文件放弃结果，不写入。每个取工作的循环（第 1、2 层的任务、批量层的取文件和第 5 层的收集）在取下一项之前检查会话是否已结束，结束后不再读文件，任务随即结束、交还它的 `BusyGuard`。切换 worktree 或分支后第 3–5 层的游标整体重建，已写入的结果按 OID 留在缓存里。
 - 暂停（kernel 的暂停开关）：在约 50 ms 内生效，正在解析的文件放弃这次结果（ADR 0029）。批量任务在文件之间、以及每个在途抽取在登记时（在调用方的线程上同步检查一次截止时间、取消标志和暂停探针，已经过期或已经请求暂停时不开始工作；小文件可能在看门狗第一次检查之前就抽取完）和看门狗的每次检查（10 ms）时读 `BackgroundGuard::pause_requested()`；`ParsedFile` 在解析之前同样先检查一次截止时间和取消标志；为 true 时看门狗置位这次抽取的取消标志，tags 在下一次取消检查时返回 `Cancelled`。这个文件的结果不写入，`indexed` 提示不变，放回这一层游标之前的「恢复后先做」小队列；这一批已经抽取完的文件照常在一个写事务里写入，然后在批次边界停下。恢复后先做小队列里的文件，再从游标处继续。
-- 大小上限：后台 1 MiB（`SafeRoot::read` 的 `max`），超过记为 `TooLarge`；文件被打开（第 1 层）时上限 4 MiB，更大的不抽取，查询返回 `TooLarge`。
+- 大小上限：后台 1 MiB（`SafeRoot::read` 的 `max`），超过记为 `TooLarge`；文件被打开（第 1 层）时上限 4 MiB，更大的不抽取，查询返回 `TooLarge`。[ADR 0034](../adr/0034.md) 把打开文件的上限改为 16 MiB：超过 1 MiB 的按窗口抽取，可见窗口先交出，每个窗口完成即写入；详细设计在 #17 的下一个 PR 里写进本节。
 
 ### 打开项目与热启动
 
