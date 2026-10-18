@@ -56,6 +56,7 @@ impl Inner {
     /// (no repository) has raw OIDs only; a path with an external filter
     /// never matches when the raw OID differs.
     pub(crate) fn is_content(&self, snap: &Snap, path: &str, bytes: &[u8], oid: BlobId) -> bool {
+        crate::phases::count("hashed bytes", bytes.len() as u64);
         if hash_blob(hash_kind(&oid), bytes) == oid {
             return true;
         }
@@ -91,6 +92,7 @@ pub(crate) enum Reading {
 
 /// A regular file's bytes; `Ok(None)` when larger than `max`.
 pub(crate) fn read(root: &SafeRoot, path: &str, max: usize) -> Result<Option<Vec<u8>>, Reading> {
+    crate::phases::count("file reads", 1);
     let rel = SafeRel::new(path.as_bytes()).ok_or(Reading::Gone)?;
     match root.read(rel, max as u64) {
         Ok(Read::File { bytes, .. }) => Ok(Some(bytes)),

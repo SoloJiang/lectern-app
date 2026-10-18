@@ -27,6 +27,7 @@ pub mod extract;
 pub mod index;
 pub mod map;
 pub mod names;
+pub mod phases;
 pub mod plugin;
 pub mod query;
 pub mod site;

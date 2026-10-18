@@ -34,4 +34,5 @@ just test -p lectern-code-intel
 - 看门狗的测试用 `testing::watchdog`（`Executor` 的专用线程）；需要线程的测试用 `std::thread::scope`，`src` 里不出现 `thread::spawn`（设计「验收」第 3 步）。
 - 查询（`src/query/`）的测试用 `Harness` 的 `goto`、`ask`（提交查询、跑完 executor、取结果）；要文件保持未入索引时先 `pause()` kernel 的后台工作（第 3–5 层停在批次边界）。解析扩展点用测试自己的 `Resolver`（`Indexer::set_resolver`），语义导航用测试里的假提供者（回复由测试发出）。`Harness` 的事件记在 `Host::events` 里（记录持有名字表的 `Arc`：测「没人持有」时先 `clear_events`）；`testing::host()` 的 kernel 不记录事件。
 - 插件（`plugin_*`、`watchdog_*`）用 kernel 的 `TestKernel` 加模拟的 `dyn Projects`（`tests/plugin.rs` 的 `Run`）；`watchdog_*` 看线程自己的闭包更新的 `plugin::WatchdogThread`；`/proc/self/task/*/comm` 只在 Linux 上、线程已退出之后再确认（依赖 nextest 每个测试一个进程）。测试不从经过的时间推断状态：等一个由被测代码更新的信号（看门狗的 `waits()`、到期表的 `scheduled()`、探针的调用次数），再断言。
+- `code_intel/goto_indexed` 的分项（`src/phases.rs` 的计时与计数，只在 `test-support` 下、打开时记录）：`cargo test --release --locked -p lectern-bench --all-features --test goto_phases -- --ignored --nocapture`，`GOTO_PHASES_FILES` 改仓库大小。
 - 基准的虚拟仓库：`testing::virtual_repo`（`FakeGit::stage_oids` 只有 index 条目、没有文件，`assume_unchanged` 让工作区比较为空，单元是 `synthetic::extraction`），只有查询要读的文件写在磁盘上。

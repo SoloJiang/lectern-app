@@ -1943,6 +1943,31 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 基准：本轮只改了查询在提示变化时的补查、编译任务的调度和批量任务的唤醒顺序。没有批次写入时，补查只多读一次项目锁里的计数，所以没有重跑基准。
 - 没有验证的：`kick_batch` 的顺序只在多个 executor 线程同时运行时有区别，测试用的手动 executor 是单线程，没有专门的测试。
 
+第 4 步，`goto_indexed` 在 macOS CI（3 核 M1 虚拟机）上中位数 24.2、26.5 ms，超出 20 ms 之后，同一台 Linux 机器。
+
+- 分项（`crates/bench/tests/goto_phases.rs`：与 `goto_indexed` 相同的夹具，10 万文件、64 KiB 的 TS 当前文本、69 个候选，release，300 次跳转的中位数；每次跳转从提交查询到取回结果，`src/phases.rs` 计时，计时本身的开销算在内）：
+
+  | 阶段 | 改前 | 改后 |
+  |---|---|---|
+  | 跳转合计 | 25.7 ms | 18.9 ms |
+  | 读取并核对当前文本（1 次读、64 KiB 的哈希） | 0.11 ms | 0.10 ms |
+  | tree-sitter 解析 | 9.3 ms | 8.8 ms |
+  | 整棵树上的查询（locals；改前另有引用模式） | 9.6 ms（11 478 个匹配） | 4.9 ms（2 506 个匹配） |
+  | 光标处再跑完整查询 | — | 0.02 ms |
+  | locals 收尾 | 0.21 ms | 0.20 ms |
+  | 遍历（定义） | 1.96 ms | 1.90 ms |
+  | 规则与引用位置 | 1.47 ms | 0.22 ms |
+  | `site_at`、排序器、第 2 步 | < 0.02 ms | < 0.02 ms |
+  | 按名字查定义（1 个读事务、1 条语句，`prepare_cached`） | 1.22 ms | 1.16 ms |
+  | 过滤与分层 | 0.25 ms | 0.25 ms |
+  | 消歧与排序 | 0.04 ms | 0.04 ms |
+  | 交出结果（两次）、限时搜索范围（0 个文件）、切面检查、访问标记 | 约 0.17 ms | 约 0.17 ms |
+  | 每次跳转的分配（含 realloc） | 约 10 500 次 | 约 5 700 次 |
+
+  随仓库或候选数增长的部分（查定义、过滤、排序、搜索范围）合计约 1.6 ms；候选不读文件、不算哈希；切面计数没有引起第二次查索引；名字表和映射没有复制。时间在当前文本的解析和整棵树上的查询：设计的分项「解析与 locals ≤ 10 ms」，改后仍是 8.8 + 4.9 = 13.7 ms（加上 locals 收尾和遍历 15.8 ms），超出它。解析本身接近 10 ms，不经缓存或重新组织 locals（按作用域只匹配光标所在的部分，或并入遍历）降不下去；这两种都改变绑定模型的取法或要设计决定，本轮没有做，预算也没有改。
+- `just bench --measure code_intel/ plugin/code-intel/`：`goto_indexed` 中位数 18 ms（上一轮 23.7、23.9 ms），`goto_first` 5.07 ms，`references_100k/all` 1 s、`/first` 10.1 ms，`search_stop` 1 s，`names_100k` 803 ms，`resident_cloudprint` 650 KB（上一轮 374 KB，多了七种语言的 `jump_query`），`resident_100k` 3.34 MB；`extract_throughput` 3.98 MB/s，同前几轮在 4 MB/s 上下波动，本轮没有改抽取。
+- `just check`、`just test`（整个工作区 1329 个测试通过，跳过 2 个：另一个是忽略的 `goto_phases`）、`just doctest`、`just deny` 全部通过；本 crate 225 个测试，新增 `site_parse_at_matches_parse`。同时 4 个占满 CPU 的进程下整个本 crate `--stress-count 30` 全部通过。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2128,6 +2153,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - `ParsedFile` 要的查询（核心语言的 `SiteQuery`，语言包的 `Compiled`）不在查询线程上第一次编译：核心语言的抽取走遍历，从不编译它，第一次跳转原来要在 `Interactive` 线程上先编译（release，Linux：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms），超出候选 50 ms 的预算。每次核对任务结束时，这个项目的映射里有还没编译的语言，就请求一个 `Background` 任务编译（`warm_site_queries`）。任务同时最多一个，请求只保证它在运行；任务自己扫描所有打开项目的映射，编译到扫描为空，清除标志后再扫描一次，所以任务进行中别的项目发来的请求不会丢（原来请求方带上自己项目的语言，任务结束时只重看这个项目：几个项目同时打开时，后来者的语言要等到下一次与它无关的核对，`goto_site_queries_of_every_open_project`）。插件本身在首帧之后激活，所以这也在首帧之后。查询在编译进行中用到它时等这次编译（`OnceLock`），不会比自己编译更久。`Lang::prepare` 也编译它，测试和基准计时之前调用。设计没有写这些查询何时编译。
 - 查询的切面（「输入代数与派生状态」已补这一条）：查询先查索引、后读提示，两次读之间提交的批次让一个文件两边都漏掉，结果还报 `Complete`；复用批次之前的预取时更容易遇到。每个项目的 `State::hinted` 在置位提示的同一段锁内加一（`State::hint_paths`，只在提示真的变化时；所有置位都经它），快照和 `Prepared` 记下它；跳转、查引用、`Named` 在读提示（限时搜索的范围、`Partial` 的计数）之后用 `Snap::hinted_since` 比较，变了就再查一次索引并追加（`cut_*`：测试钩子 `Inner::after_lookup` 在查索引与第一次读提示之间经批量层同样的提交写入一个文件）。名字表只按单元建表、不判断完整性，不受影响；它的重建由 `gens.writes` 触发。
 - 批量任务的唤醒（`kick_batch`）先置 `kicked` 再补满任务池：原来先补池再置位，池满时最后一个任务恰好在两步之间空闲退出，这次唤醒要等下一次。其余单飞的入口（核对的 `again`、语言包一轮的 `again`、名字表建完后的重查、语义回复的队列、看门狗按表运行）都在同一把锁里记下请求，不会丢。
+- 跳转第 1 步解析当前文本用 `ParsedFile::parse_at`，不用 `parse`：跳转只看光标处一个位置、本文件的定义和绑定模型，用不到文件里其余引用的位置（`references`，只有查引用用）。核心语言上，整棵树只跑建绑定模型的 locals 模式（作用域、定义、`global` / `nonlocal`，`Lang::jump_query`）；光标处名字是不是 locals 的引用、在不在变量位置，由完整的查询在光标前后两个字节上再跑一次给出；引用位置不再收集。64 KiB 的 TS 文本上，查询从 9.3 ms 降到 4.9 ms，匹配从 11 478 个降到 2 506 个，引用位置的整理从 1.5 ms 降到 0.2 ms，分配从约 10 500 次降到约 5 700 次。`site_parse_at_matches_parse` 在夹具、遍历的样例和合成源码上每个来源约 150 个位置检查 `site_at` 与本文件的定义都与 `parse` 相同；`parse_at` 的结果在别的位置调用 `site_at` 或取 `references` 时 debug 断言失败。`jump_query` 与 `site_query` 一起由后台任务编译（`prepare_site`）。语言包仍走完整的 `parse`。
 - 查询读文件的截止时间统一为 `query::search::FileDeadline`：后台截止时间（250 ms）与查询剩余时间中较小的一个（跳转第 2 步、限时搜索、查引用的解析；查引用原来在限时搜索里不看剩余时间）。被剩余时间截短后 `TimedOut`，以及 `Cancelled`，都不写入缓存、文件计入 `unsearched`（`FileDeadline::settles`，「限时搜索」已补这一条）：原来这样的 `TimedOut` 被写入，批量层不再重做，这个文件的定义要等打开它才出现，查询还报 `Complete`（`search_cut_extraction_is_not_stored`）。查询的其他写入只有访问标记，名字表和预取不写入。
 - 看门狗线程的测试不用 `run_dedicated_gated` 的任务句柄：它交给 `own_with` 由这次激活持有，停用时丢弃。线程自己的闭包在开始和返回时记录到 `plugin::WatchdogThread`（`NotStarted` / `Running` / `Exited`），测试看它；`/proc/self/task` 只在 Linux 上、在线程已退出之后再确认（原来在 macOS 上没有 `/proc`，两个测试必然失败、两个空过；Linux 负载高时线程名在启动之后才设置，20 次激活的测试会失败）。「测试」已改。
 - 基准：
