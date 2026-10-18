@@ -78,6 +78,69 @@ pub fn file_list(count: usize) -> FileList {
     b.build()
 }
 
+/// Names shared across a synthetic repository: most definition names of a
+/// real repository repeat (`get`, `handle`, `render`, test names), a few
+/// per file are its own.
+pub const VOCABULARY: usize = 20_000;
+
+/// A synthetic extraction of file `i` (no source behind it): 3 names of
+/// its own and 27 from [`VOCABULARY`], 12 reference names from it. About
+/// 320 000 different names for 100 000 files, the 4–8 MB the research
+/// estimates for the ⌘K name table (ADR 0030).
+pub fn extraction(i: usize) -> crate::extract::Extraction {
+    use crate::DefKind;
+    use crate::extract::{Def, ExtractStatus, Extraction, Visibility};
+    let shared = |j: usize| {
+        let mixed = (i as u64)
+            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            .wrapping_add((j as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9));
+        (mixed >> 17) as usize % VOCABULARY
+    };
+    let def = |name: String, kind: DefKind, line: u32| Def {
+        name: name.into(),
+        kind,
+        line,
+        column: 4,
+        end_line: line + 3,
+        scope: None,
+        visibility: Visibility::Public,
+        arity: Some(1),
+    };
+    let mut defs = vec![
+        def(format!("Service{i}"), DefKind::Class, 0),
+        def(format!("build{i}"), DefKind::Function, 10),
+        def(format!("config{i}"), DefKind::Constant, 20),
+    ];
+    for j in 0..27 {
+        let kind = if j % 3 == 0 {
+            DefKind::Method
+        } else {
+            DefKind::Function
+        };
+        defs.push(def(format!("handle{}", shared(j)), kind, 30 + 5 * j as u32));
+    }
+    let mut refs: Vec<Box<str>> = (100..112)
+        .map(|j| format!("handle{}", shared(j)).into())
+        .collect();
+    refs.sort();
+    refs.dedup();
+    Extraction {
+        status: ExtractStatus::Done,
+        defs,
+        refs,
+    }
+}
+
+/// A shared name the first source file defines (and some 0.14 % of all
+/// source files with it): what a jump in a virtual repository looks up.
+pub fn shared_name() -> String {
+    let table = crate::extract::LanguageTable::core();
+    let first = (0..)
+        .find(|i| table.for_path(&path(*i), &crate::NoGrammarPacks).is_some())
+        .unwrap_or(0);
+    extraction(first).defs[3].name.to_string()
+}
+
 /// About `len` bytes of source for synthetic file `i` with extension `ext`:
 /// a module of a few types and many functions with bodies that call
 /// functions of other files, the definition and reference density of

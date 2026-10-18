@@ -7,6 +7,8 @@
 mod cache;
 #[path = "memory/code_intel.rs"]
 mod code_intel;
+#[path = "fixtures/code_intel_names.rs"]
+mod code_intel_names;
 #[path = "fixtures/git_worktree.rs"]
 mod git_worktree;
 
@@ -98,6 +100,9 @@ const BENCHES: &[Bench] = &[
     cache::MEMORY,
     code_intel::MAP_100K_BYTES,
     code_intel::BATCH_PEAK,
+    code_intel::NAMES_100K_BYTES,
+    code_intel::RESIDENT_CLOUDPRINT,
+    code_intel::RESIDENT_100K,
     GIT_CHANGES_CAPPED_BYTES,
     GIT_RESIDENT,
 ];

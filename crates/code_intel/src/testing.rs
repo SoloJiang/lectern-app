@@ -10,7 +10,7 @@ pub mod synthetic;
 
 pub use fake_git::FakeGit;
 pub use host::{FakePower, FakeProjects, TestHost, host};
-pub use rig::{Rig, route_tree_sitter_allocations};
+pub use rig::{Rig, packages, route_tree_sitter_allocations, virtual_repo};
 
 use std::any::Any;
 use std::collections::HashMap;

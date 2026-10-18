@@ -44,6 +44,7 @@ struct State {
     calls: Vec<String>,
     before_compare: Vec<Hook>,
     fail_compare: bool,
+    unchanged: bool,
 }
 
 /// An in-memory git over real worktree files.
@@ -224,6 +225,31 @@ impl FakeGit {
             .expect("worktree");
         tree.index.insert(path.into(), oid);
         tree.source.track(&[path]);
+    }
+
+    /// Sets the index entries of `entries` to their OIDs with no content
+    /// behind them: no blob, no worktree file (the benchmarks' virtual
+    /// repositories, with [`FakeGit::assume_unchanged`]).
+    pub fn stage_oids(&self, wt: &str, entries: impl IntoIterator<Item = (String, BlobId)>) {
+        let mut state = self.lock();
+        let tree = state
+            .trees
+            .iter_mut()
+            .find(|t| t.name == wt)
+            .expect("worktree");
+        let mut paths = Vec::new();
+        for (path, oid) in entries {
+            tree.index.insert(path.clone(), oid);
+            paths.push(path);
+        }
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        tree.source.track(&refs);
+    }
+
+    /// The worktree comparison lists nothing: the worktree is taken to
+    /// equal the index (virtual repositories whose files do not exist).
+    pub fn assume_unchanged(&self, unchanged: bool) {
+        self.lock().unchanged = unchanged;
     }
 
     /// Commits the index: HEAD becomes a new commit with the index's tree.
@@ -447,6 +473,9 @@ impl GitAccess for FakeGit {
         }
         if self.lock().fail_compare {
             return Err(GitError::Corrupt("comparison failed".into()));
+        }
+        if self.lock().unchanged {
+            return Ok(ChangedPaths::default());
         }
         let TreeCopy {
             root,
