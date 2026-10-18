@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储）已实现；第 3–5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）已实现；第 3–5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
