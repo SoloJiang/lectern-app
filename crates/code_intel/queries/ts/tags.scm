@@ -108,6 +108,20 @@
             name: (identifier) @name) @definition.constant)))
   ])
 
+; ---- markers (TS) ------------------------------------------------------
+
+; `export = X;` (the grammar has no field for X) exports X.
+(program
+  (export_statement
+    "="
+    (identifier) @name) @reference.lectern.export-name)
+
+; `declare global { … }`: its declarations are global, as visible as
+; exported ones.
+(program
+  (ambient_declaration
+    "global" @name) @reference.lectern.global)
+
 ; Exported `const`, `let` and `var` in a namespace or module body
 ; (`namespace Config { export const version = 1 }`): members, used as
 ; `Config.version`. Unexported ones are locals of the body; destructuring

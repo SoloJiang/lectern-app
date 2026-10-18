@@ -110,6 +110,8 @@ ids! {
         }
         tokens {
             t_readonly = "readonly",
+            t_assign = "=",
+            t_global = "global",
         }
         fields {
             f_pattern = "pattern",
@@ -127,10 +129,23 @@ ids! {
     }
 }
 
+ids! {
+    JsxIds {
+        kinds {
+            jsx_opening_element = "jsx_opening_element",
+            jsx_closing_element = "jsx_closing_element",
+            jsx_self_closing_element = "jsx_self_closing_element",
+        }
+        tokens {}
+        fields {}
+    }
+}
+
 pub(super) struct Ecma {
     k: Ids,
     ts: Option<TsIds>,
     js: Option<JsIds>,
+    jsx: Option<JsxIds>,
 }
 
 impl Ecma {
@@ -141,6 +156,9 @@ impl Ecma {
             ts: ts.then(|| TsIds::new(language)).transpose()?,
             js: (dialect == Dialect::JavaScript)
                 .then(|| JsIds::new(language))
+                .transpose()?,
+            jsx: matches!(dialect, Dialect::JavaScript | Dialect::Tsx)
+                .then(|| JsxIds::new(language))
                 .transpose()?,
         })
     }
@@ -190,6 +208,13 @@ impl Walker for Ecma {
             // (program (import_statement "import" @name)
             //   @reference.lectern.module)
             self.tokens(cx, me.node, k.t_import, Marker::Module);
+        } else if let Some(ts) = &self.ts
+            && kind == ts.ambient_declaration
+            && self.in_program(stack, 1)
+        {
+            // (program (ambient_declaration "global" @name))
+            //   @reference.lectern.global
+            self.tokens(cx, me.node, ts.t_global, Marker::Global);
         }
         // (with_statement body: (_) @local.scope): a second scope on a
         // block body, which changes nothing for tree-sitter-tags.
@@ -563,6 +588,16 @@ impl Ecma {
                 return;
             }
             if let Some(ts) = &self.ts {
+                // (program (export_statement "=" (identifier) @name))
+                //   @reference.lectern.export-name
+                if p == k.export_statement
+                    && me.field == 0
+                    && me.node.prev_sibling().is_some_and(|t| t.kind_id() == ts.t_assign)
+                    && self.in_program(stack, 2)
+                {
+                    cx.marker(me.node, parent.node, Marker::ExportName);
+                    return;
+                }
                 // T0: (function_signature name: params) @definition.function
                 if name
                     && p == ts.function_signature
@@ -589,6 +624,18 @@ impl Ecma {
                     return;
                 }
             }
+        }
+        // jsx/tags.scm: a lowercase element name is an intrinsic element,
+        // `@ignore`d.
+        if let Some(jsx) = &self.jsx
+            && let Some(parent) = up(stack, 1)
+            && me.field == k.f_name
+            && (parent.kind == jsx.jsx_opening_element
+                || parent.kind == jsx.jsx_closing_element
+                || parent.kind == jsx.jsx_self_closing_element)
+            && cx.text(me.node).first().is_some_and(u8::is_ascii_lowercase)
+        {
+            return;
         }
         // E10, E12, T13, J1, X0, X1 and the catch-all: all `#is-not? local`.
         cx.nonlocal(me.node);

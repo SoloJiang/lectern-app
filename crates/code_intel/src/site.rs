@@ -168,6 +168,10 @@ pub struct ParsedFile {
     lines: LineIndex,
     defs: Vec<FileDef>,
     locals: Locals,
+    /// The locals query's `@local.reference` captures in variable
+    /// positions, by position, with whether the position is uncertain (a Go
+    /// composite literal key): the only names `site_at` resolves locally.
+    local_refs: Vec<(Range<usize>, bool)>,
     refs: Vec<RefSite>,
     lang: Lang,
 }
@@ -235,6 +239,7 @@ impl ParsedFile {
         );
         let mut collector = Collector::new(dialect, text.len());
         let mut ref_ranges: Vec<Range<usize>> = Vec::new();
+        let mut local_refs: Vec<(Range<usize>, bool)> = Vec::new();
         // One tag per name node, from the lowest pattern (tree-sitter-tags).
         let mut tags: HashMap<(usize, usize), (usize, RawTag)> = HashMap::new();
         while let Some(m) = matches.next() {
@@ -247,13 +252,16 @@ impl ParsedFile {
                             collector.definition(capture.node, props, text);
                         }
                         // `(identifier) @local.reference` also matches member
-                        // and path names (`items.add`, `Queue::new`), which
-                        // never refer to a local.
-                        Capture::LocalReference
-                            if collector.reference(capture.node, props)
-                                && is_variable_position(dialect, capture.node) =>
-                        {
-                            ref_ranges.push(capture.node.byte_range());
+                        // and path names (`items.add`, `Queue::new`), keys
+                        // and tag names, which never refer to a local
+                        // (the forms table's positions).
+                        Capture::LocalReference if collector.reference(capture.node, props) => {
+                            let at = variable_position(dialect, capture.node, text);
+                            if at != Variable::No {
+                                let range = capture.node.byte_range();
+                                local_refs.push((range.clone(), at == Variable::Uncertain));
+                                ref_ranges.push(range);
+                            }
                         }
                         _ => {}
                     }
@@ -327,6 +335,8 @@ impl ParsedFile {
         let lines = LineIndex::new(text);
         ref_ranges.sort_by_key(|r| (r.start, r.end));
         ref_ranges.dedup();
+        local_refs.sort_by_key(|(r, _)| (r.start, r.end));
+        local_refs.dedup_by(|b, a| a.0 == b.0);
         // `(identifier) @local.reference` matches definition names too.
         let named: std::collections::HashSet<(usize, usize)> = tags
             .iter()
@@ -359,6 +369,7 @@ impl ParsedFile {
             lines,
             defs: finished.defs,
             locals,
+            local_refs,
             refs,
             lang: lang.clone(),
         })
@@ -422,8 +433,9 @@ impl ParsedFile {
                 defines: Some(defines),
             });
         }
-        // A member or path name (`items.add`, `obj.x`, `Queue::new`,
-        // `a::B`) never binds to a same-named local. A type name looks for
+        // Only the locals query's references in variable positions resolve
+        // locally (an allow-list): a member, key, attribute, path segment or
+        // tag name never binds to a same-named local. A type name looks for
         // local types (type parameters, local type declarations), any other
         // name for local values.
         let namespace = if node.kind() == "type_identifier" {
@@ -431,20 +443,30 @@ impl ParsedFile {
         } else {
             Namespace::Value
         };
-        let (binding, possible) = if is_variable_position(dialect, node)
-            && !matches!(syntax, RefSyntax::Member | RefSyntax::MemberCall)
-        {
-            let resolution = self.locals.resolve(text, &range, namespace);
-            (
-                resolution.binding.map(|d| self.local_binding(d, &name)),
-                resolution
+        let i = self
+            .local_refs
+            .partition_point(|(r, _)| r.start < range.start);
+        let local_ref = self
+            .local_refs
+            .get(i)
+            .filter(|(r, _)| *r == range)
+            .map(|(_, uncertain)| *uncertain);
+        let (binding, possible) = match local_ref {
+            Some(uncertain) if !matches!(syntax, RefSyntax::Member | RefSyntax::MemberCall) => {
+                let resolution = self.locals.resolve(text, &range, namespace);
+                let mut possible: Vec<LocalBinding> = resolution
                     .possible
                     .into_iter()
                     .map(|d| self.local_binding(d, &name))
-                    .collect(),
-            )
-        } else {
-            (None, Vec::new())
+                    .collect();
+                let mut binding = resolution.binding.map(|d| self.local_binding(d, &name));
+                if uncertain {
+                    // A Go composite literal key may be a field name.
+                    possible.extend(binding.take());
+                }
+                (binding, possible)
+            }
+            _ => (None, Vec::new()),
         };
         Some(Site {
             name,
@@ -697,72 +719,78 @@ fn site_rules(dialect: Dialect) -> &'static [SiteRule] {
     }
 }
 
-/// The node kinds that are identifiers in a language.
+/// The node kinds that are names in a language: the binding and the
+/// reference kinds of `locals::name_kinds`.
 fn is_identifier(dialect: Dialect, kind: &str) -> bool {
-    let kinds: &[&str] = match dialect {
-        Dialect::Rust => &["identifier", "field_identifier", "type_identifier"],
-        Dialect::TypeScript | Dialect::Tsx | Dialect::JavaScript => &[
-            "identifier",
-            "property_identifier",
-            "private_property_identifier",
-            "shorthand_property_identifier",
-            "shorthand_property_identifier_pattern",
-            "type_identifier",
-        ],
-        Dialect::Java => &["identifier", "type_identifier"],
-        Dialect::Python => &["identifier"],
-        Dialect::Go => &[
-            "identifier",
-            "field_identifier",
-            "type_identifier",
-            "package_identifier",
-        ],
-        Dialect::Pack => return kind.ends_with("identifier"),
-    };
-    kinds.contains(&kind)
+    crate::locals::is_name_kind(dialect, kind)
 }
 
-/// Identifier positions that name a member, a path segment or a keyword
-/// argument rather than a variable: (parent kind, field). The locals
-/// queries' `(identifier) @local.reference` matches these too; they are not
-/// local references and never bind to a local. JS, TS and Go name members
-/// with their own node kinds (`property_identifier`, `field_identifier`).
-const NON_VARIABLE_POSITIONS: &[(Dialect, &str, &str)] = &[
-    (Dialect::Rust, "scoped_identifier", "name"),
-    (Dialect::Rust, "scoped_identifier", "path"),
-    (Dialect::Rust, "macro_invocation", "macro"),
-    (Dialect::Java, "method_invocation", "name"),
-    (Dialect::Java, "field_access", "field"),
-    (Dialect::Java, "scoped_identifier", "name"),
-    (Dialect::Java, "scoped_identifier", "scope"),
-    (Dialect::Python, "attribute", "attribute"),
-    (Dialect::Python, "keyword_argument", "name"),
-    // The last segment of a qualified type name (`a::B`, `ns.T`, `pkg.T`).
-    (Dialect::Rust, "scoped_type_identifier", "name"),
-    (Dialect::TypeScript, "nested_type_identifier", "name"),
-    (Dialect::Tsx, "nested_type_identifier", "name"),
-    (Dialect::Go, "qualified_type", "name"),
-];
-
-/// Whether an identifier can refer to a variable or a local type (see
-/// [`NON_VARIABLE_POSITIONS`]).
-fn is_variable_position(dialect: Dialect, node: Node<'_>) -> bool {
-    let Some(parent) = node.parent() else {
-        return true;
-    };
-    // Java's `Outer.Inner` has no fields: only the first segment can be a
-    // local type.
-    if dialect == Dialect::Java
-        && parent.kind() == "scoped_type_identifier"
-        && parent
-            .named_child(0)
-            .is_some_and(|first| first.id() != node.id())
-    {
-        return false;
+/// The forms table's name for a core dialect.
+fn core_name(dialect: Dialect) -> Option<&'static str> {
+    match dialect {
+        Dialect::TypeScript => Some("ts"),
+        Dialect::Tsx => Some("tsx"),
+        Dialect::JavaScript => Some("js"),
+        Dialect::Rust => Some("rust"),
+        Dialect::Java => Some("java"),
+        Dialect::Python => Some("python"),
+        Dialect::Go => Some("go"),
+        Dialect::Pack => None,
     }
-    !NON_VARIABLE_POSITIONS.iter().any(|(d, kind, field)| {
-        *d == dialect && parent.kind() == *kind && in_field(node, parent, field)
-    })
+}
+
+/// Whether a `@local.reference` can refer to a variable or a local type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Variable {
+    Yes,
+    /// A key, an attribute, a member or path segment, a tag name: never a
+    /// local binding.
+    No,
+    /// A Go composite literal key: a local of that name is only possible.
+    Uncertain,
+}
+
+/// What an identifier's position is, by the positions the forms table
+/// gives its parent's row (`forms::Pos`); a language pack has none.
+pub(crate) fn variable_position(dialect: Dialect, node: Node<'_>, text: &[u8]) -> Variable {
+    use crate::forms::Pos;
+    let Some(lang) = core_name(dialect) else {
+        return Variable::Yes;
+    };
+    let Some(parent) = node.parent() else {
+        return Variable::Yes;
+    };
+    let rows = crate::forms::positions(lang);
+    if let Some(positions) = rows.get(parent.kind()) {
+        let first = parent.named_child(0).is_some_and(|f| f.id() == node.id());
+        for pos in *positions {
+            let not_variable = match pos {
+                Pos::In(field) => in_field(node, parent, field),
+                Pos::NotFirst => !first,
+                Pos::First => first,
+                Pos::Any => true,
+                Pos::Lowercase(field) => {
+                    in_field(node, parent, field)
+                        && text
+                            .get(node.start_byte())
+                            .is_some_and(u8::is_ascii_lowercase)
+                }
+                Pos::Uncertain(_) => false,
+            };
+            if not_variable {
+                return Variable::No;
+            }
+        }
+    }
+    if let Some(grand) = parent.parent()
+        && let Some(positions) = rows.get(grand.kind())
+        && positions
+            .iter()
+            .any(|p| matches!(p, Pos::Uncertain(field) if in_field(parent, grand, field)))
+    {
+        return Variable::Uncertain;
+    }
+    Variable::Yes
 }
 
 /// Whether `node` is the child in `field` of its parent.

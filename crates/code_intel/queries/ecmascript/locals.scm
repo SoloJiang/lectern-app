@@ -116,3 +116,7 @@
 ;------------
 
 (identifier) @local.reference
+
+; `{ a }` in an object literal uses the variable `a`. Only these captures
+; resolve to locals (`ParsedFile::site_at`).
+(shorthand_property_identifier) @local.reference

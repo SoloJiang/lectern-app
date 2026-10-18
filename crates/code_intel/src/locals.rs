@@ -767,15 +767,50 @@ fn innermost(scopes: &[Scope], range: &Range<usize>) -> usize {
 
 // ---- pattern expansion -----------------------------------------------------
 
+/// The node kinds that are names in a dialect, with whether a pattern
+/// binds them: the binding kinds, then the kinds that only name something
+/// in a reference (members, types, packages). `site::is_identifier` (where
+/// a position resolves) and the pattern expansion below both read it.
+fn name_kinds(dialect: Dialect) -> &'static [(&'static str, bool)] {
+    match dialect {
+        Dialect::Rust => &[
+            ("identifier", true),
+            ("shorthand_field_identifier", true),
+            ("field_identifier", false),
+            ("type_identifier", false),
+        ],
+        Dialect::TypeScript | Dialect::Tsx | Dialect::JavaScript => &[
+            ("identifier", true),
+            ("shorthand_property_identifier_pattern", true),
+            ("property_identifier", false),
+            ("private_property_identifier", false),
+            ("shorthand_property_identifier", false),
+            ("type_identifier", false),
+        ],
+        Dialect::Java => &[("identifier", true), ("type_identifier", false)],
+        Dialect::Python => &[("identifier", true)],
+        Dialect::Go => &[
+            ("identifier", true),
+            ("field_identifier", false),
+            ("type_identifier", false),
+            ("package_identifier", false),
+        ],
+        Dialect::Pack => &[("identifier", true)],
+    }
+}
+
+/// Whether `kind` is a name in `dialect`; in a language pack, any kind
+/// ending in `identifier`.
+pub(crate) fn is_name_kind(dialect: Dialect, kind: &str) -> bool {
+    if dialect == Dialect::Pack {
+        return kind.ends_with("identifier");
+    }
+    name_kinds(dialect).iter().any(|(k, _)| *k == kind)
+}
+
 /// The node kinds that are bound names in a pattern.
 fn is_binding_kind(dialect: Dialect, kind: &str) -> bool {
-    match dialect {
-        Dialect::Rust => matches!(kind, "identifier" | "shorthand_field_identifier"),
-        Dialect::TypeScript | Dialect::Tsx | Dialect::JavaScript => {
-            matches!(kind, "identifier" | "shorthand_property_identifier_pattern")
-        }
-        Dialect::Java | Dialect::Python | Dialect::Go | Dialect::Pack => kind == "identifier",
-    }
+    name_kinds(dialect).iter().any(|(k, binds)| *binds && *k == kind)
 }
 
 /// Parts of a pattern that bind nothing: (parent kind or "*", field or "*",

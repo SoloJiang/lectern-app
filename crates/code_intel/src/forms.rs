@@ -9,6 +9,9 @@
 //! binding row has a sample that extracts or binds, and that the design
 //! document shows the same table.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use crate::locals::Namespace;
 use crate::{DefKind, RefSyntax};
 
@@ -52,14 +55,40 @@ pub(crate) enum Role {
 
 pub(crate) struct Form {
     pub langs: &'static [&'static str],
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the forms_* tests"))]
     pub kind: &'static str,
     pub role: Role,
     #[cfg_attr(not(test), expect(dead_code, reason = "read by the forms_* tests"))]
     pub note: &'static str,
+    /// Identifier positions in this node that are not variables (a key,
+    /// an attribute, a member or path segment, a tag name): they never
+    /// bind to a local (`site::is_variable_position`).
+    pub positions: &'static [Pos],
+}
+
+/// An identifier position in a form's node that is not a variable.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Pos {
+    /// The identifier in this field.
+    In(&'static str),
+    /// Every identifier child but the first named child (`Outer.Inner`,
+    /// `this::name`).
+    NotFirst,
+    /// The first named child, when it is an identifier (Python's
+    /// `case Point(x=…)` keyword).
+    First,
+    /// Every identifier child (`import React from …`).
+    Any,
+    /// The identifier in this field when its name starts with a lowercase
+    /// letter: a JSX intrinsic element (`<label>`, `<my-tag>`).
+    Lowercase(&'static str),
+    /// The identifier inside the node in this field: a Go composite
+    /// literal's key, a field name in a struct literal and an expression in
+    /// a map literal. A local of that name is only a possible binding.
+    Uncertain(&'static str),
 }
 
 use Namespace::{Both, Type as TypeNs, Value};
+use Pos::{Any, First, In, Lowercase, NotFirst, Uncertain};
 use RefSyntax::{Call, Construct, Member, MemberCall, Type as TypeRef};
 
 const ECMA: &[&str] = &["js", "ts", "tsx"];
@@ -99,6 +128,14 @@ const fn form(
         kind,
         role,
         note,
+        positions: &[],
+    }
+}
+
+impl Form {
+    /// The row with the positions in its node that are not variables.
+    const fn at(self, positions: &'static [Pos]) -> Form {
+        Form { positions, ..self }
     }
 }
 
@@ -165,7 +202,8 @@ pub(crate) const FORMS: &[Form] = &[
         "export_specifier",
         Role::Use,
         "`export { a as b }`：`a` 是用处，`b` 是导出名",
-    ),
+    )
+    .at(&[In("alias")]),
     form(
         JS,
         "field_definition",
@@ -213,17 +251,19 @@ pub(crate) const FORMS: &[Form] = &[
         "import_clause",
         Role::Ignored,
         "import：经索引和解析扩展点解析，不是局部定义",
-    ),
-    form(ECMA, "import_specifier", Role::Ignored, "import，同上"),
+    )
+    .at(&[Any]),
+    form(ECMA, "import_specifier", Role::Ignored, "import，同上").at(&[In("name"), In("alias")]),
     form(
         ECMA,
         "namespace_import",
         Role::Ignored,
         "`import * as ns`，同上",
-    ),
-    form(JSX, "jsx_closing_element", Role::Use, "组件名"),
-    form(JSX, "jsx_opening_element", Role::Use, "组件名"),
-    form(JSX, "jsx_self_closing_element", Role::Use, "组件名"),
+    )
+    .at(&[Any]),
+    form(JSX, "jsx_closing_element", Role::Use, "组件名；小写的是内置元素，不是引用").at(&[Lowercase("name")]),
+    form(JSX, "jsx_opening_element", Role::Use, "组件名；小写的是内置元素，不是引用").at(&[Lowercase("name")]),
+    form(JSX, "jsx_self_closing_element", Role::Use, "组件名；小写的是内置元素，不是引用").at(&[Lowercase("name")]),
     form(ECMA, "labeled_statement", Role::Ignored, "标签"),
     form(ECMA, "member_expression", Role::Use, "`a.b`"),
     form(
@@ -355,7 +395,7 @@ pub(crate) const FORMS: &[Form] = &[
         Role::Part,
         "模块名 `A.B`，见 internal_module",
     ),
-    form(TS, "nested_type_identifier", Role::Use, "`ns.T`"),
+    form(TS, "nested_type_identifier", Role::Use, "`ns.T`").at(&[In("name")]),
     form(
         TS,
         "optional_parameter",
@@ -476,14 +516,15 @@ pub(crate) const FORMS: &[Form] = &[
         "生命周期不进入索引，不导航",
     ),
     form(RUST, "macro_definition", def(&[(Macro, &[Call])]), ""),
+    form(RUST, "macro_invocation", Role::Use, "宏调用").at(&[In("macro")]),
     form(RUST, "macro_rule", Role::Ignored, "宏的匹配模式"),
     form(RUST, "match_arm", Role::Local(Value), ""),
     form(RUST, "mod_item", def(&[(Module, NONE)]), "路径段是 `Plain`"),
     form(RUST, "parameter", Role::Local(Value), ""),
     form(RUST, "qualified_type", Role::Use, "`<T as Trait>`"),
     form(RUST, "range_pattern", Role::Use, "范围模式的端点"),
-    form(RUST, "scoped_identifier", Role::Use, "路径"),
-    form(RUST, "scoped_type_identifier", Role::Use, "路径"),
+    form(RUST, "scoped_identifier", Role::Use, "路径").at(&[In("name"), In("path")]),
+    form(RUST, "scoped_type_identifier", Role::Use, "路径").at(&[In("name")]),
     form(
         RUST,
         "static_item",
@@ -582,7 +623,7 @@ pub(crate) const FORMS: &[Form] = &[
         Role::Ignored,
         "构造器：`new C(…)` 指向类",
     ),
-    form(JAVA, "element_value_pair", Role::Use, "注解里的元素名"),
+    form(JAVA, "element_value_pair", Role::Use, "注解里的元素名").at(&[In("key")]),
     form(JAVA, "enhanced_for_statement", Role::Local(Value), ""),
     form(JAVA, "enum_constant", def(&[(Constant, NONE)]), ""),
     form(
@@ -591,6 +632,7 @@ pub(crate) const FORMS: &[Form] = &[
         def_local(&[(Enum, TYPE)], Both),
         "块里的是局部",
     ),
+    form(JAVA, "field_access", Role::Use, "`a.b`").at(&[In("field")]),
     form(JAVA, "field_declaration", def(&[(Field, NONE)]), ""),
     form(
         JAVA,
@@ -620,7 +662,8 @@ pub(crate) const FORMS: &[Form] = &[
     form(JAVA, "local_variable_declaration", Role::Local(Value), ""),
     form(JAVA, "marker_annotation", Role::Use, "注解"),
     form(JAVA, "method_declaration", def(&[(Method, CALLS)]), ""),
-    form(JAVA, "method_invocation", Role::Use, "调用"),
+    form(JAVA, "method_invocation", Role::Use, "调用").at(&[In("name")]),
+    form(JAVA, "method_reference", Role::Use, "`this::name`、`A::m`").at(&[NotFirst]),
     form(
         JAVA,
         "module_declaration",
@@ -640,7 +683,8 @@ pub(crate) const FORMS: &[Form] = &[
         "模式变量：只给候选",
     ),
     form(JAVA, "resource", Role::Local(Value), "`try (var r = …)`"),
-    form(JAVA, "scoped_identifier", Role::Use, "限定名"),
+    form(JAVA, "scoped_identifier", Role::Use, "限定名").at(&[In("name"), In("scope")]),
+    form(JAVA, "scoped_type_identifier", Role::Use, "限定的类型名").at(&[NotFirst]),
     form(
         JAVA,
         "spread_parameter",
@@ -679,6 +723,7 @@ pub(crate) const FORMS: &[Form] = &[
         def_local(&[(Constant, CALLS), (Field, CALLS)], Value),
         "模块顶层是常量，类体里是字段，解包（`A, B = …`、`first, *rest = …`）时两层以内的每个名字都是；都是局部绑定",
     ),
+    form(PYTHON, "attribute", Role::Use, "`a.b`").at(&[In("attribute")]),
     form(PYTHON, "augmented_assignment", Role::Local(Value), ""),
     form(PYTHON, "binary_operator", Role::Ignored, "表达式"),
     form(PYTHON, "boolean_operator", Role::Ignored, "表达式"),
@@ -739,7 +784,14 @@ pub(crate) const FORMS: &[Form] = &[
         Role::Ignored,
         "import：经索引解析",
     ),
-    form(PYTHON, "keyword_argument", Role::Use, "调用的关键字参数名"),
+    form(PYTHON, "keyword_argument", Role::Use, "调用的关键字参数名").at(&[In("name")]),
+    form(
+        PYTHON,
+        "keyword_pattern",
+        Role::Part,
+        "`case Point(x=…)`：关键字是属性名，值是模式",
+    )
+    .at(&[First]),
     form(PYTHON, "lambda_parameters", Role::Local(Value), ""),
     form(PYTHON, "list_pattern", Role::Part, "解包，见 assignment"),
     form(
@@ -806,7 +858,13 @@ pub(crate) const FORMS: &[Form] = &[
     ),
     form(GO, "function_declaration", def(&[(Function, CALLS)]), ""),
     form(GO, "import_spec", Role::Ignored, "import：经路径解析"),
-    form(GO, "keyed_element", Role::Use, "复合字面量的键"),
+    form(
+        GO,
+        "keyed_element",
+        Role::Use,
+        "复合字面量的键：结构体字面量里是字段名，map 里是表达式；同名的局部只是候选，引用名总是记下",
+    )
+    .at(&[Uncertain("key")]),
     form(GO, "labeled_statement", Role::Ignored, "标签"),
     form(GO, "map_type", Role::Use, "类型"),
     form(
@@ -822,7 +880,7 @@ pub(crate) const FORMS: &[Form] = &[
         "接口的方法",
     ),
     form(GO, "parameter_declaration", Role::Local(Value), ""),
-    form(GO, "qualified_type", Role::Use, "`pkg.T`"),
+    form(GO, "qualified_type", Role::Use, "`pkg.T`").at(&[In("name")]),
     form(
         GO,
         "range_clause",
@@ -878,6 +936,26 @@ pub(crate) const FORMS: &[Form] = &[
 /// The forms of one language.
 pub(crate) fn forms(lang: &str) -> impl Iterator<Item = &'static Form> + '_ {
     FORMS.iter().filter(move |f| f.langs.contains(&lang))
+}
+
+/// The core languages, in the order of [`positions`]' cache.
+const CORE: [&str; 7] = ["ts", "tsx", "js", "rust", "java", "python", "go"];
+
+/// The identifier positions that are not variables in a core language, by
+/// the kind of the node they are in (the rows' `positions`).
+pub(crate) fn positions(lang: &str) -> &'static HashMap<&'static str, &'static [Pos]> {
+    static CACHE: [OnceLock<HashMap<&'static str, &'static [Pos]>>; 7] =
+        [const { OnceLock::new() }; 7];
+    static EMPTY: OnceLock<HashMap<&'static str, &'static [Pos]>> = OnceLock::new();
+    let Some(i) = CORE.iter().position(|l| *l == lang) else {
+        return EMPTY.get_or_init(HashMap::new);
+    };
+    CACHE[i].get_or_init(|| {
+        forms(CORE[i])
+            .filter(|f| !f.positions.is_empty())
+            .map(|f| (f.kind, f.positions))
+            .collect()
+    })
 }
 
 /// The definition kinds that a reference of `syntax` can name in `lang`,

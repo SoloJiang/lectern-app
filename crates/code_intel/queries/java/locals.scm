@@ -146,4 +146,8 @@
 ; References
 ;------------
 
+; Only these captures resolve to locals (`ParsedFile::site_at`): values
+; and, for local types, type names.
 (identifier) @local.reference
+
+(type_identifier) @local.reference

@@ -4,11 +4,11 @@ use tree_sitter::Language;
 
 use super::{Ctx, Frame, Walker, field_of, ids, up};
 use crate::DefKind;
+use crate::lang::Marker;
 
 ids! {
     Ids {
         kinds {
-            module = "module",
             expression_statement = "expression_statement",
             assignment = "assignment",
             type_alias_statement = "type_alias_statement",
@@ -48,6 +48,7 @@ ids! {
             f_attribute = "attribute",
             f_superclasses = "superclasses",
             f_alias = "alias",
+            f_object = "object",
         }
     }
 }
@@ -143,17 +144,19 @@ impl Python {
                 cx.def(me.node, alias.node, DefKind::Type, None);
                 return;
             }
-            // (module (expression_statement (assignment left: [(identifier)
-            //   (pattern_list …) (tuple_pattern …) (list_pattern …)])
-            //   @definition.constant)), and the same in a class body as
-            //   fields: the assignment's level above the name.
+            // (class_definition body: (block (expression_statement
+            //   (assignment left: [(identifier) (pattern_list …)
+            //   (tuple_pattern …) (list_pattern …)])))) @definition.field,
+            //   then (assignment left: …) @definition.constant anywhere
+            //   (`rules::finish` keeps the module-level ones): the
+            //   assignment's level above the name.
             let target = self.assignment_target(stack);
             if let Some(level) = target
                 && let Some(assignment) = up(stack, level)
                 && up(stack, level + 1).is_some_and(|s| s.kind == k.expression_statement)
-                && up(stack, level + 2).is_some_and(|m| m.kind == k.module)
+                && self.class_body(stack, level + 2)
             {
-                cx.def(me.node, assignment.node, DefKind::Constant, None);
+                cx.def(me.node, assignment.node, DefKind::Field, None);
                 return;
             }
             if p == k.class_definition && me.field == k.f_name {
@@ -162,10 +165,8 @@ impl Python {
             }
             if let Some(level) = target
                 && let Some(assignment) = up(stack, level)
-                && up(stack, level + 1).is_some_and(|s| s.kind == k.expression_statement)
-                && self.class_body(stack, level + 2)
             {
-                cx.def(me.node, assignment.node, DefKind::Field, None);
+                cx.def(me.node, assignment.node, DefKind::Constant, None);
                 return;
             }
             if p == k.function_definition
@@ -184,6 +185,32 @@ impl Python {
                     DefKind::Function
                 };
                 cx.def(me.node, parent.node, kind, Some(params));
+                return;
+            }
+            // (function_definition parameters: (parameters . (identifier)))
+            //   @reference.lectern.receiver
+            if p == k.parameters
+                && parent.field == k.f_parameters
+                && parent.node.named_child(0) == Some(me.node)
+                && let Some(function) = up(stack, 2)
+                && function.kind == k.function_definition
+            {
+                cx.marker(me.node, function.node, Marker::Receiver);
+                return;
+            }
+            // (assignment left: (attribute object: (identifier)
+            //   attribute: (identifier) @name)) @reference.lectern.attribute
+            if p == k.attribute
+                && me.field == k.f_attribute
+                && parent.field == k.f_left
+                && parent
+                    .node
+                    .child_by_field_id(k.f_object)
+                    .is_some_and(|o| o.kind_id() == k.identifier)
+                && let Some(assignment) = up(stack, 2)
+                && assignment.kind == k.assignment
+            {
+                cx.marker(me.node, assignment.node, Marker::Attribute);
                 return;
             }
             // (call function: (attribute attribute: (identifier))) and

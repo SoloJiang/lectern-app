@@ -93,6 +93,13 @@
 
 (type_identifier) @name @reference.type
 
+; A composite literal's key (`&Server{addr: addr}`): a field name in a
+; struct literal, an expression in a map literal. No locals predicate, so a
+; same-named local does not drop the field name.
+(keyed_element
+  key: (literal_element
+    (identifier) @name)) @reference.member
+
 ; Catch-all, last so that definitions win for their own names: every
 ; identifier that locals does not resolve, and every field or selector
 ; name. `ci_ref` must list each file that may use a name (`v := Precision`,

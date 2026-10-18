@@ -75,3 +75,7 @@
  ]
   (#set! local.namespace "both")
   (#set! local.visible "scope"))
+
+; Type names: they resolve to local types (`ParsedFile::site_at` resolves
+; only these captures).
+(type_identifier) @local.reference

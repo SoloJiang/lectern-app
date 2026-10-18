@@ -43,6 +43,8 @@ ids! {
             statement_list = "statement_list",
             short_var_declaration = "short_var_declaration",
             expression_list = "expression_list",
+            keyed_element = "keyed_element",
+            literal_element = "literal_element",
         }
         tokens {}
         fields {
@@ -52,6 +54,7 @@ ids! {
             f_type = "type",
             f_left = "left",
             f_alias = "alias",
+            f_key = "key",
         }
     }
 }
@@ -199,6 +202,16 @@ impl Go {
                 cx.def(me.node, parent.node, DefKind::Variable, None);
                 return;
             }
+        }
+        // (keyed_element key: (literal_element (identifier))) @reference.member:
+        // no locals predicate.
+        if let Some(element) = up(stack, 1)
+            && element.kind == k.literal_element
+            && element.field == k.f_key
+            && up(stack, 2).is_some_and(|e| e.kind == k.keyed_element)
+        {
+            cx.reference(me.node);
+            return;
         }
         // The call reference and the catch-all are both `#is-not? local`.
         cx.nonlocal(me.node);

@@ -8,15 +8,20 @@
 ; - Adds superclasses as class references, class attributes (including
 ;   `Enum` members) as fields, and `type` aliases
 ;   (docs/design/code_intel.md「定义形式」).
+; - Module-level constants in any statement and chain, and instance
+;   attributes (`self.name = …` in a method) through the
+;   `reference.lectern.receiver` and `reference.lectern.attribute` markers.
 ; - Identifier calls carry (#is-not? local).
 
 ; ---- definitions -------------------------------------------------------
 
-; Module-level names, also unpacked (`A, B = load()`, `first, *rest = xs`,
-; `(p, (q, r)) = …`): every name the target binds, two levels deep.
-(module
-  (expression_statement
-    (assignment
+; Class attributes, including `Enum` members (`Color.RED`), also unpacked
+; (`left, right = 1, 2`): first, so that the general assignment pattern
+; below does not take them.
+(class_definition
+  body: (block
+    (expression_statement
+      (assignment
       left: [
         (identifier) @name
         (pattern_list
@@ -64,16 +69,17 @@
                 (list_splat_pattern (identifier) @name)
               ])
           ])
-      ]) @definition.constant))
+      ]) @definition.field)))
 
 (class_definition
   name: (identifier) @name) @definition.class
 
-; Class attributes, including `Enum` members (`Color.RED`), also unpacked,
-; as at module level.
-(class_definition
-  body: (block
-    (expression_statement
+; Module-level names, also unpacked (`A, B = load()`, `first, *rest = xs`,
+; `(p, (q, r)) = …`): every name the target binds, two levels deep, in any
+; statement (`if`, `try`, `with`, `for` bodies) and in a chain
+; (`A = B = None`, where the inner assignment is the outer one's right
+; side). Only module level counts: `rules::finish` drops the ones inside a
+; function or class scope.
       (assignment
         left: [
           (identifier) @name
@@ -122,7 +128,7 @@
                   (list_splat_pattern (identifier) @name)
                 ])
             ])
-        ]) @definition.field)))
+        ]) @definition.constant
 
 (class_definition
   body: (block
@@ -149,6 +155,22 @@
       (generic_type
         (identifier) @name)
     ])) @definition.type
+
+; ---- markers -----------------------------------------------------------
+
+; A function's first parameter: a method's `self`.
+(function_definition
+  parameters: (parameters
+    .
+    (identifier) @name)) @reference.lectern.receiver
+
+; An assignment to an attribute (`self.name = name`, also in a chain): a
+; field of the class when the object is the receiver of the method around
+; it (`rules::finish`), a member reference otherwise.
+(assignment
+  left: (attribute
+    object: (identifier)
+    attribute: (identifier) @name)) @reference.lectern.attribute
 
 ; ---- references --------------------------------------------------------
 

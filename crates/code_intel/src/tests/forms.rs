@@ -1311,6 +1311,24 @@ fn render() -> String {
             Role::Use => "引用".to_owned(),
             Role::Ignored => "忽略".to_owned(),
         };
+        let role = if form.positions.is_empty() {
+            role
+        } else {
+            use crate::forms::Pos;
+            let at: Vec<String> = form
+                .positions
+                .iter()
+                .map(|p| match p {
+                    Pos::In(f) => format!("`{f}`"),
+                    Pos::NotFirst => "第一个以外的名字".to_owned(),
+                    Pos::First => "第一个名字".to_owned(),
+                    Pos::Any => "其中的名字".to_owned(),
+                    Pos::Lowercase(f) => format!("小写的 `{f}`"),
+                    Pos::Uncertain(f) => format!("`{f}`（同名的局部只是候选）"),
+                })
+                .collect();
+            format!("{role}；不是变量：{}", at.join("、"))
+        };
         out.push_str(&format!(
             "| {} | `{}` | {} | {} |\n",
             form.langs.join(" "),

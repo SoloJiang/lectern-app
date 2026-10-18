@@ -363,6 +363,109 @@ fn finish_inner(
             }
         }
     }
+    let mut refs = refs;
+    if dialect == Dialect::Python {
+        let kind_of = |c: usize| containers[c].def.map(|d| defs[d].1);
+        // Module level is no function or class scope around: an assignment
+        // elsewhere binds a local or a class member, not a module constant.
+        // A chained assignment (`A = B = None`) is no one's scope.
+        let mut keep = vec![true; out.len()];
+        for i in 0..out.len() {
+            if defs[i].1 != DefKind::Constant {
+                continue;
+            }
+            out[i].def.scope = None;
+            let in_class = Ancestors {
+                containers: &containers,
+                next: parent_of_def[i],
+            }
+            .any(|c| c.def.is_some_and(|d| defs[d].1 == DefKind::Class));
+            keep[i] = !local[i] && !in_class;
+        }
+        // The class attributes already defined in a class body.
+        let mut fields: HashSet<(usize, &str)> = (0..defs.len())
+            .filter(|&i| defs[i].1 == DefKind::Field && keep[i])
+            .filter_map(|i| Some((parent_of_def[i]?, &*defs[i].2)))
+            .collect();
+        let mut i = 0;
+        out.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+        // Instance attributes: `obj.name = …` in a method whose first
+        // parameter is `obj` (also in a function nested in it) is a field of
+        // the method's class; any other attribute assignment is a member
+        // reference, as without the marker.
+        let receivers: std::collections::HashMap<(usize, usize), &str> = markers
+            .iter()
+            .filter(|(marker, _, _)| *marker == Marker::Receiver)
+            .map(|(_, tag, name)| ((tag.range.start, tag.range.end), &**name))
+            .collect();
+        let starts: Vec<usize> = order.iter().map(|&c| containers[c].range.start).collect();
+        let innermost = |range: &Range<usize>| -> Option<usize> {
+            let j = starts.partition_point(|&s| s <= range.start);
+            let mut c = order[j.checked_sub(1)?];
+            loop {
+                let r = &containers[c].range;
+                if r.start <= range.start && range.end <= r.end {
+                    return Some(c);
+                }
+                c = containers[c].parent?;
+            }
+        };
+        let mut extra_refs = Vec::new();
+        for (marker, tag, name) in &markers {
+            if *marker != Marker::Attribute {
+                continue;
+            }
+            let class = innermost(&tag.range).and_then(|mut m| {
+                while kind_of(m) == Some(DefKind::Function) {
+                    m = containers[m].parent?;
+                }
+                let receiver = (kind_of(m) == Some(DefKind::Method))
+                    .then(|| receivers.get(&(containers[m].range.start, containers[m].range.end)))
+                    .flatten()?;
+                let object = source
+                    .get(tag.range.start..tag.name_range.start)
+                    .and_then(|b| std::str::from_utf8(b).ok())?
+                    .trim_end()
+                    .strip_suffix('.')?
+                    .trim();
+                let class = containers[m].parent?;
+                (object == *receiver && kind_of(class) == Some(DefKind::Class)).then_some(class)
+            });
+            let Some(class) = class else {
+                extra_refs.push(name.clone());
+                continue;
+            };
+            if !fields.insert((class, &**name)) {
+                continue;
+            }
+            out.push(FileDef {
+                def: Def {
+                    name: name.clone(),
+                    kind: DefKind::Field,
+                    line: tag.row,
+                    column: tag.column,
+                    end_line: lines.last_row(tag.range.start, tag.range.end),
+                    scope: Some(containers[class].name.clone()),
+                    visibility: if local[class] {
+                        Visibility::File
+                    } else {
+                        Visibility::Unknown
+                    },
+                    arity: None,
+                },
+                name_range: tag.name_range.clone(),
+                range: tag.range.clone(),
+            });
+        }
+        if !extra_refs.is_empty() {
+            refs.extend(extra_refs);
+            refs.sort_unstable();
+            refs.dedup();
+        }
+    }
     out.sort_by_key(|d| (d.def.line, d.def.column, d.range.start));
     Finished { defs: out, refs }
 }
