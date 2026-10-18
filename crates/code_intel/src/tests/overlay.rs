@@ -235,6 +235,68 @@ fn overlay_lectern_git_answers_like_the_fake() {
     );
 }
 
+/// Directory entries: an untracked nested repository is listed as its
+/// directory, a tracked file replaced by a directory as the file and the
+/// directory's files. `FakeGit` answers like lectern-git.
+#[test]
+fn overlay_lectern_git_and_the_fake_list_directories_alike() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use lectern_git::testing::{TestHead, TestRepo};
+
+    use crate::git_access::{GitAccess, LecternGit, Tree};
+    use crate::testing::FakeGit;
+
+    let repo = TestRepo::new();
+    let a1: &[u8] = b"export const a = 1;\n";
+    repo.write_file("a.ts", a1);
+    repo.write_file("foo.ts", a1);
+    repo.backdate("a.ts");
+    repo.backdate("foo.ts");
+    let entries = [repo.add("a.ts"), repo.add("foo.ts")];
+    repo.write_index(repo.common_dir(), &entries);
+    let tree = repo.tree(&[("a.ts", a1), ("foo.ts", a1)]);
+    let commit = repo.commit(tree, &[], "init");
+    repo.set_ref("refs/heads/main", commit);
+    repo.set_head(TestHead::Branch("refs/heads/main"));
+    repo.write_file("vendor/lib/.git/HEAD", b"ref: refs/heads/main\n");
+    repo.write_file("vendor/lib/x.ts", b"export const x = 1;\n");
+    std::fs::create_dir_all(repo.root().join("vendor/lib/.git/objects")).unwrap();
+    std::fs::create_dir_all(repo.root().join("vendor/lib/.git/refs")).unwrap();
+    std::fs::remove_file(repo.root().join("foo.ts")).unwrap();
+    repo.write_file("foo.ts/bar.ts", b"export const b = 1;\n");
+    let git = LecternGit::with_discover(lectern_git::testing::discover);
+    let common = repo.common_dir().canonicalize().unwrap();
+    let root = repo.root().canonicalize().unwrap();
+    let tree = Tree {
+        common_dir: Arc::from(common.as_path()),
+        git_dir: Arc::from(common.as_path()),
+        root: Arc::from(root.as_path()),
+    };
+    let cancel = AtomicBool::new(false);
+    let real = git.changed_paths(&tree, &cancel).expect("compare");
+
+    let fake = FakeGit::with_hash(repo.hash());
+    fake.add("main", &[("a.ts", a1), ("foo.ts", a1)]);
+    fake.commit("main");
+    fake.write("main", "vendor/lib/.git/HEAD", b"ref: refs/heads/main\n");
+    fake.write("main", "vendor/lib/x.ts", b"export const x = 1;\n");
+    fake.delete("main", "foo.ts");
+    fake.write("main", "foo.ts/bar.ts", b"export const b = 1;\n");
+    let fake_tree = Tree {
+        common_dir: Arc::from(fake.common_dir()),
+        git_dir: fake.worktree_key("main").0,
+        root: Arc::from(fake.root("main").as_path()),
+    };
+    let faked = fake.changed_paths(&fake_tree, &cancel).expect("compare");
+
+    let paths: Vec<&str> = real.paths.iter().map(|p| &**p).collect();
+    assert_eq!(paths, ["foo.ts", "foo.ts/bar.ts", "vendor/lib"]);
+    assert_eq!(real.paths, faked.paths);
+    assert_eq!(real.head, faked.head);
+}
+
 #[test]
 fn overlay_failed_comparison_keeps_the_overlay() {
     let h = Harness::new();

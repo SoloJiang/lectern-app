@@ -27,10 +27,11 @@ use super::state::{
 use super::{Inner, bump, lock};
 use crate::extract::{
     BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction, INTERACTIVE_MAX_LEN, Lang,
+    LanguageTable,
 };
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{HintStamp, LangLookup};
-use crate::store::{EXISTS_BATCH, Version};
+use crate::store::{EXISTS_BATCH, Found, Version};
 use crate::util::log;
 
 /// A batch ends after this many files…
@@ -100,6 +101,8 @@ struct Done {
     /// The OID of the bytes actually read (「存储表」).
     key: BlobId,
     extraction: Extraction,
+    /// The cancel flag the item was taken with (`State::finish`).
+    flag: Arc<AtomicBool>,
 }
 
 enum Outcome {
@@ -179,11 +182,7 @@ impl Inner {
                 return Step::Idle;
             }
             self.ensure_cursor(&mut st, eviction);
-            let stamp = HintStamp {
-                eviction,
-                grammar: st.gens.grammar,
-            };
-            (self.wide_allowed(&st), ctx(&st), stamp)
+            (self.wide_allowed(&st), ctx(&st), st.stamp(eviction))
         };
         let tiers: &[usize] = if wide { &[0, 1, 2] } else { &[0] };
         // Files known to be missing go first, tier by tier.
@@ -195,7 +194,7 @@ impl Inner {
         }
         for &t in tiers {
             let items = if t == 2 {
-                match self.gather_other(&project, &ctx, eviction) {
+                match self.gather_other(&project, &ctx, stamp) {
                     Some(items) => items,
                     None => continue,
                 }
@@ -222,14 +221,21 @@ impl Inner {
         Step::Idle
     }
 
-    /// Rebuilds tier 3 and 4's cursor when its dependencies changed.
+    /// Rebuilds tier 3 and 4's cursor when the map it walks, the
+    /// sub-projects, the walks' eviction generation or tier 3's scope
+    /// changed (a focus change alone does not).
     fn ensure_cursor(&self, st: &mut State, eviction: u64) {
         let deps = st.cursor_deps(eviction);
-        if st.batch.cursor.as_ref().is_some_and(|c| c.deps == deps) {
+        let scope = subproject(st);
+        if st
+            .batch
+            .cursor
+            .as_ref()
+            .is_some_and(|c| c.deps == deps && c.scope == scope)
+        {
             return;
         }
         bump(&self.stats.cursor_builds, 1);
-        let scope = subproject(st);
         let files = st.map.base.files().clone();
         let range = match &scope {
             Scope::Dir(dir) => files.range_under(dir),
@@ -335,11 +341,16 @@ impl Inner {
 
     /// Tier 5: up to 500 files of the next other worktree; None when every
     /// other worktree is done.
-    fn gather_other(&self, project: &Arc<Project>, ctx: &Ctx, eviction: u64) -> Option<Vec<Item>> {
+    fn gather_other(
+        &self,
+        project: &Arc<Project>,
+        ctx: &Ctx,
+        stamp: HintStamp,
+    ) -> Option<Vec<Item>> {
         loop {
             let next = {
                 let mut st = lock(&project.state);
-                let deps = Some((st.session, st.walk_eviction(eviction), st.gens.grammar));
+                let deps = Some((st.session, stamp.eviction, stamp.grammar));
                 if st.batch.others.deps != deps {
                     st.batch.others = super::state::Others {
                         deps,
@@ -406,18 +417,27 @@ impl Inner {
                 }
                 continue;
             }
-            let table = lock(&self.langs).table.clone();
             let disabled = lock(&self.langs).disabled.clone();
-            let mut lookup = LangLookup::new(&table, &*self.packs);
             let mut st = lock(&project.state);
+            if st.batch.others.deps != Some((st.session, stamp.eviction, stamp.grammar)) {
+                continue;
+            }
+            // Languages as the map knows them (its provenance), like tiers
+            // 3 and 4.
+            let map = st.map.clone();
+            let table = map.base.table().clone();
+            let mut lookup = LangLookup::new(&table, &*self.packs);
             let State {
                 batch, in_flight, ..
             } = &mut *st;
             let walk = batch.others.current.as_mut()?;
             let mut items = Vec::new();
-            while walk.pos < walk.entries.len() && items.len() < EXISTS_BATCH {
+            let mut looked = 0;
+            while walk.pos < walk.entries.len() && items.len() < EXISTS_BATCH && looked < SCAN_LIMIT
+            {
                 let (path, oid) = &walk.entries[walk.pos];
                 walk.pos += 1;
+                looked += 1;
                 let code = lookup.code(path);
                 let Some(lang) = code
                     .checked_sub(1)
@@ -429,7 +449,13 @@ impl Inner {
                     continue;
                 }
                 let key = (*oid, lang.name().clone());
-                if batch.queued.contains(&key) || in_flight.contains_key(&key) {
+                // Known stored: the current worktree has it indexed, or this
+                // session already found it for another worktree.
+                if batch.others.confirmed.contains(&key)
+                    || map.hinted(oid, &lang.name().0, stamp)
+                    || batch.queued.contains(&key)
+                    || in_flight.contains_key(&key)
+                {
                     continue;
                 }
                 batch.queued.insert(key);
@@ -446,7 +472,7 @@ impl Inner {
                 batch.others.current = None;
                 batch.others.done.insert(key);
             }
-            if items.is_empty() {
+            if items.is_empty() && batch.others.current.is_none() {
                 continue;
             }
             return Some(items);
@@ -457,6 +483,8 @@ impl Inner {
     /// those of every path with the same content), misses wait in their
     /// tier's queue.
     fn exists(&self, project: &Arc<Project>, ctx: &Ctx, items: Vec<Item>, stamp: HintStamp) {
+        // Read before the queries: the touches are queued under it.
+        let eviction = project.store.evictions();
         let mut groups: Vec<(Version, Vec<Item>)> = Vec::new();
         for item in items {
             let version = Version::of(&item.lang);
@@ -476,12 +504,21 @@ impl Inner {
             }
             found.extend(hit);
         }
+        let table = lock(&self.langs).table.clone();
         let mut st = lock(&project.state);
         if st.session != ctx.session {
             return;
         }
-        st.batch.touches.push(stamp.eviction, &found);
+        st.batch.touches.push(eviction, &found);
         for (oid, lang) in &hits {
+            // A hit stamps hints only for the version the map and the current
+            // language table both have, and with the map's own stamp: a hit
+            // of an older grammar never makes a newer map's path look stored.
+            if stamp.grammar != st.map.provenance.grammar
+                || !same_version(&table, &st.map, lang, &groups)
+            {
+                continue;
+            }
             for eff in st.map.paths(oid, &lang.0) {
                 st.map.hints.set(&eff.slot, oid, stamp);
             }
@@ -491,6 +528,9 @@ impl Inner {
                 let key = item.key();
                 if hits.contains(&key) {
                     st.batch.queued.remove(&key);
+                    if item.tier == Tier::Other {
+                        st.batch.others.confirmed.insert(key);
+                    }
                     continue;
                 }
                 let Some(t) = item.tier.batch() else {
@@ -528,31 +568,39 @@ impl Inner {
                 }
                 Outcome::Paused => {
                     let mut st = lock(&project.state);
-                    if st.finish(ctx.session, &item) {
+                    // Not when tier 1 took it over (`focus_task`).
+                    if st.finish(ctx.session, &item, &flag) && !flag.load(Ordering::Acquire) {
                         // Still queued: back to the front.
                         st.batch.queued.insert(item.key());
                         st.batch.resume[t].push_front(item);
                     }
                     break;
                 }
-                Outcome::Skip => self.release(project, ctx, &item),
+                Outcome::Skip => self.release(project, ctx, &item, &flag),
             }
         }
         #[cfg(test)]
         lock(&self.batch_log).push(files);
-        self.commit(project, ctx, done);
+        self.commit(project, ctx, done, true);
     }
 
     /// Takes the next item of tier `t`'s queue and registers it in flight.
+    /// Items stored since their existence check (by tier 1 or 2, or for
+    /// another worktree) are dropped.
     fn take(&self, project: &Arc<Project>, ctx: &Ctx, t: usize) -> Option<(Item, Arc<AtomicBool>)> {
+        let eviction = project.store.evictions();
         let mut st = lock(&project.state);
         if st.session != ctx.session {
             return None;
         }
+        let stamp = st.stamp(eviction);
         loop {
             let item = st.batch.resume[t].pop_front()?;
             let key = item.key();
-            if st.in_flight.contains_key(&key) {
+            if st.in_flight.contains_key(&key)
+                || st.batch.others.confirmed.contains(&key)
+                || st.map.hinted(&item.oid, &item.lang.name().0, stamp)
+            {
                 st.batch.queued.remove(&key);
                 continue;
             }
@@ -564,8 +612,8 @@ impl Inner {
     }
 
     /// Forgets an item that gave nothing to write.
-    fn release(&self, project: &Arc<Project>, ctx: &Ctx, item: &Item) {
-        lock(&project.state).finish(ctx.session, item);
+    fn release(&self, project: &Arc<Project>, ctx: &Ctx, item: &Item, flag: &Arc<AtomicBool>) {
+        lock(&project.state).finish(ctx.session, item, flag);
     }
 
     /// Reads and extracts one item. The key is the OID of the bytes read:
@@ -593,6 +641,7 @@ impl Inner {
                         defs: Vec::new(),
                         refs: Vec::new(),
                     },
+                    flag: cancel.clone(),
                 },
                 0,
             )
@@ -696,6 +745,7 @@ impl Inner {
                     item: item.clone(),
                     key,
                     extraction,
+                    flag: cancel.clone(),
                 },
                 bytes.len(),
             ),
@@ -705,68 +755,113 @@ impl Inner {
     /// Writes extractions in one transaction, after checking each was made
     /// with the current grammar; then sets the hints of every path with that
     /// content.
-    fn commit(&self, project: &Arc<Project>, ctx: &Ctx, done: Vec<Done>) {
+    ///
+    /// A key stored meanwhile with a status that satisfies the item's tier
+    /// (`satisfies`) is not written again, so a batch commit only adds
+    /// units: an eviction during it is the quota's (`Batch::full`). Only a
+    /// tier 1 commit replaces a unit (a `TimedOut` or `TooLarge` one), which
+    /// the cache counts as an eviction; it never sets `full`.
+    fn commit(&self, project: &Arc<Project>, ctx: &Ctx, done: Vec<Done>, batch: bool) {
         if done.is_empty() {
             return;
         }
-        let (table, grammar) = {
-            let langs = lock(&self.langs);
-            (langs.table.clone(), langs.generation)
+        let table = lock(&self.langs).table.clone();
+        let live = |d: &Done| {
+            !ctx.cancel.load(Ordering::Acquire)
+                && !d.flag.load(Ordering::Acquire)
+                && table
+                    .get(&d.item.lang.name().0)
+                    .is_some_and(|l| Version::of(l) == Version::of(&d.item.lang))
         };
-        let eviction = project.store.evictions();
-        let current = |lang: &Lang| {
-            table
-                .get(&lang.name().0)
-                .is_some_and(|l| Version::of(l) == Version::of(lang))
-        };
-        let mut write = project.store.write();
-        let mut written = Vec::new();
-        for d in &done {
-            if ctx.cancel.load(Ordering::Acquire) || !current(&d.item.lang) {
-                continue;
-            }
-            if write.add(d.key, &Version::of(&d.item.lang), &d.extraction) {
-                written.push((d.key, d.item.lang.name().clone()));
+        // Keys stored since the existence check: one query per version.
+        let before = project.store.evictions();
+        let mut groups: Vec<(Version, Vec<BlobId>)> = Vec::new();
+        for d in done.iter().filter(|d| live(d)) {
+            let version = Version::of(&d.item.lang);
+            match groups.iter_mut().find(|(v, _)| *v == version) {
+                Some((_, keys)) => keys.push(d.key),
+                None => groups.push((version, vec![d.key])),
             }
         }
-        let committed = !write.is_empty() && matches!(write.commit(), Written::Committed);
-        let after = project.store.evictions();
-        let mut st = lock(&project.state);
-        if st.session == ctx.session && committed {
-            st.gens.writes += 1;
-            if after != eviction && st.batch.full.is_none() {
-                // Our own write evicted units: the namespace is at its quota.
-                // From now on an eviction does not restart the batch tiers'
-                // walks, or they would extract what they evicted and evict
-                // again; each file is extracted at most once per walk.
-                let walked = st
-                    .batch
-                    .cursor
-                    .as_ref()
-                    .map_or(eviction, |c| c.deps.eviction);
-                st.batch.full = Some(walked);
+        let mut found: Vec<(Version, Found)> = Vec::new();
+        for (version, keys) in &groups {
+            bump(&self.stats.exists_checks, 1);
+            for f in project.store.exists(version, keys).unwrap_or_default() {
+                found.push((version.clone(), f));
             }
-            if st.gens.grammar == grammar {
-                // The units just written are the newest: they outlive the
-                // eviction they caused.
-                let stamp = HintStamp {
-                    eviction: after,
-                    grammar,
-                };
-                for (key, lang) in &written {
-                    for eff in st.map.paths(key, &lang.0) {
-                        st.map.hints.set(&eff.slot, key, stamp);
+        }
+        let mut stored = Vec::new();
+        let mut written = Vec::new();
+        let mut hits = Vec::new();
+        let (eviction, committed, after) = {
+            let _turn = lock(&project.commits);
+            let eviction = project.store.evictions();
+            let mut write = project.store.write();
+            for d in done.iter().filter(|d| live(d)) {
+                let version = Version::of(&d.item.lang);
+                let hit = found.iter().find(|(v, f)| {
+                    *v == version && f.oid == d.key && satisfies(d.item.tier, f.status)
+                });
+                if let Some((_, f)) = hit {
+                    hits.push(*f);
+                    stored.push((d.key, version, d.item.tier));
+                    continue;
+                }
+                if write.add(d.key, &version, &d.extraction) {
+                    written.push((d.key, version, d.item.tier));
+                }
+            }
+            let committed = !write.is_empty() && matches!(write.commit(), Written::Committed);
+            (eviction, committed, project.store.evictions())
+        };
+        let mut st = lock(&project.state);
+        if st.session == ctx.session {
+            if committed {
+                st.gens.writes += 1;
+                if batch && after != eviction && st.batch.full.is_none() {
+                    // Our own write evicted units: the namespace is at its
+                    // quota. From now on an eviction does not restart the
+                    // batch tiers' walks, or they would extract what they
+                    // evicted and evict again; each file is extracted at
+                    // most once per session.
+                    let walked = st
+                        .batch
+                        .cursor
+                        .as_ref()
+                        .map_or(eviction, |c| c.deps.eviction);
+                    st.batch.full = Some(walked);
+                }
+            } else {
+                written.clear();
+            }
+            st.batch.touches.push(before, &hits);
+            // The units just written are the newest: they outlive the
+            // eviction they caused.
+            let sets = [(stored, st.stamp(before)), (written, st.stamp(after))];
+            for (units, stamp) in sets {
+                for (key, version, tier) in units {
+                    if !current(&table, &st.map, &version) {
+                        continue;
+                    }
+                    if tier == Tier::Other {
+                        let key = (key, version.lang.clone());
+                        st.batch.others.confirmed.insert(key);
+                    }
+                    for eff in st.map.paths(&key, &version.lang.0) {
+                        st.map.hints.set(&eff.slot, &key, stamp);
                     }
                 }
             }
         }
         for d in &done {
-            st.finish(ctx.session, &d.item);
+            st.finish(ctx.session, &d.item, &d.flag);
         }
     }
 
     /// Queues the focus's files that are not indexed for tiers 1 and 2, and
-    /// starts their tasks.
+    /// starts their tasks. Tier 1 needs `Done`, which a hint does not tell
+    /// (it also stands for `TimedOut` and `TooLarge`): it checks each blob
+    /// once per session (`Focused::satisfied`). Tier 2 trusts the hints.
     pub(crate) fn enqueue_focus(self: &Arc<Self>, project: &Arc<Project>) {
         let eviction = project.store.evictions();
         let disabled = lock(&self.langs).disabled.clone();
@@ -775,12 +870,11 @@ impl Inner {
             return;
         }
         let wt = st.worktree().cloned();
-        let stamp = HintStamp {
-            eviction,
-            grammar: st.gens.grammar,
-        };
+        let stamp = st.stamp(eviction);
         let map = st.map.clone();
         let focus = st.focus.clone();
+        let checked = st.focused.satisfied.clone();
+        let satisfied = |oid: BlobId, lang: &Lang| checked.contains(&(oid, Version::of(lang)));
         let mut wanted: [Vec<Item>; 2] = Default::default();
         if let Some((w, text)) = &focus.current
             && *w == wt
@@ -788,7 +882,7 @@ impl Inner {
             match text.origin {
                 TextOrigin::Worktree => {
                     if let Some(eff) = map.effective(&text.path)
-                        && !cursor_hinted(&map, &eff, stamp)
+                        && !satisfied(eff.oid, &eff.lang)
                     {
                         wanted[0].push(item(eff, Tier::Current));
                     }
@@ -798,10 +892,7 @@ impl Inner {
                     let mut lookup = LangLookup::new(&table, &*self.packs);
                     let code = lookup.code(&text.path);
                     if let Some(lang) = map.base.lang_of_code(code)
-                        && !st
-                            .focused
-                            .objects
-                            .contains(&(text.oid, lang.name().clone()))
+                        && !satisfied(text.oid, lang)
                     {
                         wanted[0].push(Item {
                             path: text.path.clone(),
@@ -827,16 +918,25 @@ impl Inner {
                 continue;
             }
             for path in paths.iter() {
-                if let Some(eff) = map.effective(path)
-                    && !cursor_hinted(&map, &eff, stamp)
-                {
+                let Some(eff) = map.effective(path) else {
+                    continue;
+                };
+                let indexed = if t == 0 {
+                    satisfied(eff.oid, &eff.lang)
+                } else {
+                    cursor_hinted(&map, &eff, stamp)
+                };
+                if !indexed {
                     wanted[t].push(item(eff, tier));
                 }
             }
         }
         for (t, items) in wanted.into_iter().enumerate() {
             for item in items {
-                if disabled.contains(item.lang.name()) || st.in_flight.contains_key(&item.key()) {
+                // Tier 1 takes a key in flight over (`focus_task`).
+                if disabled.contains(item.lang.name())
+                    || (t == 1 && st.in_flight.contains_key(&item.key()))
+                {
                     continue;
                 }
                 let queue = &mut st.focused.queue[t];
@@ -899,56 +999,91 @@ impl Inner {
                 };
                 let c = ctx(&st);
                 let key = item.key();
-                if st.in_flight.contains_key(&key) {
+                if t == 0
+                    && !st
+                        .focused
+                        .satisfied
+                        .insert((item.oid, Version::of(&item.lang)))
+                {
+                    // Once per session (`enqueue_focus`).
                     continue;
+                }
+                if let Some(other) = st.in_flight.get(&key) {
+                    if t == 1 {
+                        continue;
+                    }
+                    // Tier 1 never waits on batch work (ADR 0029): it cancels
+                    // the extraction in flight and owns the key.
+                    other.store(true, Ordering::Release);
                 }
                 let flag = Arc::new(AtomicBool::new(c.cancel.load(Ordering::Acquire)));
                 st.in_flight.insert(key, flag.clone());
                 (item, c, flag)
             };
-            let eviction = project.store.evictions();
+            let before = project.store.evictions();
             let version = Version::of(&item.lang);
             bump(&self.stats.exists_checks, 1);
             let found = project
                 .store
                 .exists(&version, &[item.oid])
                 .unwrap_or_default();
-            if !found.is_empty() {
+            if found.iter().any(|f| satisfies(item.tier, f.status)) {
+                let table = lock(&self.langs).table.clone();
                 let mut st = lock(&project.state);
-                if st.finish(session, &item) {
-                    if matches!(item.source, Source::Object) {
-                        st.focused.objects.insert(item.key());
-                    }
-                    let stamp = HintStamp {
-                        eviction,
-                        grammar: st.gens.grammar,
-                    };
-                    st.batch.touches.push(eviction, &found);
-                    for eff in st.map.paths(&item.oid, &item.lang.name().0) {
-                        st.map.hints.set(&eff.slot, &item.oid, stamp);
+                if st.finish(session, &item, &flag) {
+                    st.batch.touches.push(before, &found);
+                    if current(&table, &st.map, &version) {
+                        let stamp = st.stamp(before);
+                        for eff in st.map.paths(&item.oid, &item.lang.name().0) {
+                            st.map.hints.set(&eff.slot, &item.oid, stamp);
+                        }
                     }
                 }
                 continue;
             }
+            // Not stored, or stored `TimedOut` or `TooLarge` and opened: tier
+            // 1 extracts it again with the interactive limits.
             let mode = if t == 0 {
                 Mode::Interactive
             } else {
                 Mode::Background
             };
-            if matches!(item.source, Source::Object) {
-                let mut st = lock(&project.state);
-                if st.session == session {
-                    st.focused.objects.insert(item.key());
-                }
-            }
             match self.extract_item(&ctx, &item, mode, None, &flag) {
-                Outcome::Done(d, _) => self.commit(project, &ctx, vec![d]),
+                Outcome::Done(d, _) => self.commit(project, &ctx, vec![d], false),
                 Outcome::Paused | Outcome::Skip => {
-                    lock(&project.state).finish(session, &item);
+                    lock(&project.state).finish(session, &item, &flag);
                 }
             }
         }
     }
+}
+
+/// Whether a stored unit of status `status` satisfies `tier`: an opened
+/// file (tier 1) needs `Done`, or `Binary`, which no limit changes; the
+/// other tiers take any stored status.
+fn satisfies(tier: Tier, status: ExtractStatus) -> bool {
+    tier != Tier::Current || !matches!(status, ExtractStatus::TimedOut | ExtractStatus::TooLarge)
+}
+
+/// Whether `version` is the version of its language both in the current
+/// language table and in the table `map` was built with: only then may a
+/// unit stored under it stamp the map's hints.
+fn current(table: &LanguageTable, map: &crate::map::LiveMap, version: &Version) -> bool {
+    let of = |l: Option<&Lang>| l.is_some_and(|l| Version::of(l) == *version);
+    of(table.get(&version.lang.0)) && of(map.lang(&version.lang.0))
+}
+
+/// `current` for the version a group of `exists` queried `lang` under.
+fn same_version(
+    table: &LanguageTable,
+    map: &crate::map::LiveMap,
+    lang: &crate::LangName,
+    groups: &[(Version, Vec<Item>)],
+) -> bool {
+    groups
+        .iter()
+        .find(|(v, _)| v.lang == *lang)
+        .is_some_and(|(v, _)| current(table, map, v))
 }
 
 fn item(eff: crate::map::Effective, tier: Tier) -> Item {
@@ -978,7 +1113,7 @@ fn cursor_hinted(map: &crate::map::LiveMap, eff: &crate::map::Effective, stamp: 
 /// review set's first file, else the path the project was opened at (when
 /// not its root). The whole worktree without sub-projects; empty when no
 /// sub-project contains the anchor or there is none.
-fn subproject(st: &State) -> Scope {
+pub(super) fn subproject(st: &State) -> Scope {
     let Some(packages) = st.seen.packages.as_ref().filter(|p| !p.is_empty()) else {
         return Scope::Whole;
     };

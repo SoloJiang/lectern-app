@@ -20,9 +20,28 @@ use super::{Inner, bump, lock};
 use crate::extract::BACKGROUND_MAX_LEN;
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{
-    BaseMap, HeadDiff, IndexedHints, LangLookup, LiveMap, Overlay, WorktreeState, find_path,
+    BaseMap, HeadDiff, IndexedHints, LangLookup, LiveMap, Overlay, Provenance, WorktreeState,
+    find_path,
 };
 use crate::util::log;
+
+/// A reconcile stops after this many passes even with input left (it never
+/// should: `reconcile_settles_*` bound the passes per input change).
+const MAX_PASSES: usize = 16;
+
+/// Whether a step of the reconcile has input left to consume.
+fn pending(st: &State) -> bool {
+    let files = st.seen.files.is_some();
+    let base = st.base_for.is_some();
+    let git = st.tree.is_some();
+    (git && files && st.root.is_none() && !st.root_tried)
+        || (git && (st.check_head || st.check_index))
+        || (files && st.base_for != Some((st.gens.files, st.gens.grammar)))
+        || (git && base && st.root.is_some() && st.compare_for != Some(st.gens.compare_deps()))
+        || (base
+            && st.root.is_some()
+            && !(st.dirty.is_empty() && st.dirty_dirs.is_empty() && st.probe.is_empty()))
+}
 
 /// Whether `path`'s content equals HEAD, by the rule of「依赖 git、fs_watch 与
 /// cache 的接口」.
@@ -78,9 +97,22 @@ impl Inner {
         let mut held = Vec::new();
         loop {
             held.extend(std::mem::take(&mut lock(&project.state).held));
-            let mut changed = true;
-            while changed {
-                changed = self.reconcile_once(&project);
+            // Each step consumes its input (a generation it is out of date
+            // with, or a set of paths); a pass is repeated only while some
+            // input is left, and no step produces input for itself: a
+            // comparison's paths are read, never compared again.
+            for pass in 1.. {
+                bump(&self.stats.reconcile_passes, 1);
+                if !self.reconcile_once(&project) || !pending(&lock(&project.state)) {
+                    break;
+                }
+                if pass == MAX_PASSES {
+                    log(format_args!(
+                        "the reconcile of {:?} did not settle in {MAX_PASSES} passes",
+                        project.key
+                    ));
+                    break;
+                }
             }
             let mut st = lock(&project.state);
             if st.run.again {
@@ -97,19 +129,18 @@ impl Inner {
         self.kick_batch();
     }
 
-    /// One pass over the steps. True when something was installed, so that
-    /// a later step may now be out of date.
+    /// One pass over the steps, in dependency order. False when the
+    /// project is gone.
     fn reconcile_once(self: &Arc<Self>, project: &Arc<Project>) -> bool {
-        let mut changed = false;
         let Some(session) = self.sync_snapshot(project) else {
             return false;
         };
-        changed |= self.open_root(project, session);
-        changed |= self.check_head_index(project, session);
-        changed |= self.rebuild_base(project, session);
-        changed |= self.compare(project, session);
-        changed |= self.reread(project, session);
-        changed
+        self.open_root(project, session);
+        self.check_head_index(project, session);
+        self.rebuild_base(project, session);
+        self.compare(project, session);
+        self.reread(project, session);
+        true
     }
 
     /// Takes the project's snapshot: a new active worktree starts a new
@@ -185,14 +216,17 @@ impl Inner {
     /// list is ready (「打开项目与热启动」1).
     fn open_root(self: &Arc<Self>, project: &Arc<Project>, session: u64) -> bool {
         let tree = {
-            let st = lock(&project.state);
-            if st.root.is_some() || st.seen.files.is_none() {
+            let mut st = lock(&project.state);
+            if st.root.is_some() || st.root_tried || st.seen.files.is_none() {
                 return false;
             }
-            match &st.tree {
-                Some(tree) => tree.clone(),
-                None => return false,
-            }
+            let Some(tree) = st.tree.clone() else {
+                return false;
+            };
+            // Once per subscription: a root that cannot be opened is tried
+            // again on the next `ProjectEvent`.
+            st.root_tried = true;
+            tree
         };
         let root = match SafeRoot::open(&tree.root) {
             Ok(root) => Arc::new(root),
@@ -261,20 +295,25 @@ impl Inner {
 
     /// The base map against the file list and the language table.
     fn rebuild_base(&self, project: &Arc<Project>, session: u64) -> bool {
-        let (deps, files) = {
+        let files = {
             let st = lock(&project.state);
-            let deps = (st.gens.files, st.gens.grammar);
-            if st.base_for == Some(deps) {
+            if st.base_for == Some((st.gens.files, st.gens.grammar)) {
                 return false;
             }
             let Some(files) = st.seen.files.clone() else {
                 return false;
             };
-            (deps, files)
+            (st.gens.files, files)
         };
-        let table = lock(&self.langs).table.clone();
+        // The table and its generation together: the map's provenance is
+        // the table it was really built with.
+        let (table, grammar) = {
+            let langs = lock(&self.langs);
+            (langs.table.clone(), langs.generation)
+        };
+        let deps = (files.0, grammar);
         bump(&self.stats.base_builds, 1);
-        let base = Arc::new(BaseMap::build(files, &table, &*self.packs));
+        let base = Arc::new(BaseMap::build(files.1, &table, &*self.packs));
         let mut st = lock(&project.state);
         if st.session != session || (st.gens.files, st.gens.grammar) != deps {
             return false;
@@ -286,6 +325,11 @@ impl Inner {
             base,
             overlay: Arc::new(overlay),
             hints: Arc::new(hints),
+            provenance: Provenance {
+                files: deps.0,
+                worktree: st.gens.worktree,
+                grammar: deps.1,
+            },
         };
         st.base_for = Some(deps);
         true
@@ -345,13 +389,14 @@ impl Inner {
             let overlay = Overlay::build(kept, &st.map.base, &*self.packs);
             st.map.overlay = Arc::new(overlay);
             st.gens.worktree += 1;
+            st.map.provenance.worktree = st.gens.worktree;
         }
         true
     }
 
     /// Reads the dirty paths and updates the overlay.
     fn reread(&self, project: &Arc<Project>, session: u64) -> bool {
-        let (paths, root, tree, base, deps, hash) = {
+        let (paths, probe, root, tree, base, deps, hash) = {
             let mut st = lock(&project.state);
             if st.base_for.is_none() {
                 return false;
@@ -359,9 +404,10 @@ impl Inner {
             let Some(root) = st.root.clone() else {
                 return false;
             };
-            if st.dirty.is_empty() && st.dirty_dirs.is_empty() {
+            if st.dirty.is_empty() && st.dirty_dirs.is_empty() && st.probe.is_empty() {
                 return false;
             }
+            let probe = std::mem::take(&mut st.probe);
             let mut paths = std::mem::take(&mut st.dirty);
             let dirs = std::mem::take(&mut st.dirty_dirs);
             for dir in &dirs {
@@ -379,6 +425,7 @@ impl Inner {
             }
             (
                 paths,
+                probe,
                 root,
                 st.tree.clone(),
                 st.map.base.clone(),
@@ -386,33 +433,31 @@ impl Inner {
                 st.hash,
             )
         };
+        // An event path the map does not know may be a new directory (a
+        // directory moved in, a clone inside the worktree): it asks for one
+        // comparison. Paths a comparison listed never ask for another, so a
+        // directory it lists (an untracked nested repository) is read once.
+        let saw_dir = probe.iter().any(|path| {
+            SafeRel::new(path.as_bytes())
+                .is_some_and(|rel| root.stat(rel).is_ok_and(|m| m.kind == SafeKind::Dir))
+        });
         let table = base.table().clone();
         let mut lookup = LangLookup::new(&table, &*self.packs);
         let mut updates: HashMap<RelPath, Option<WorktreeState>> = HashMap::new();
-        let mut saw_dir = false;
         let mut read = 0;
         for path in &paths {
             if lookup.code(path) == 0 {
-                // A new directory (its files came with it) asks for a
-                // comparison; other paths without a language are skipped.
-                let unknown = find_path(base.files(), path).is_none();
-                if unknown
-                    && let Some(rel) = SafeRel::new(path.as_bytes())
-                    && root.stat(rel).is_ok_and(|m| m.kind == SafeKind::Dir)
-                {
-                    saw_dir = true;
-                }
                 continue;
             }
             read += 1;
-            let (state, dir) = self.read_state(&root, tree.as_ref(), &base, path, hash);
-            saw_dir |= dir;
+            let state = self.read_state(&root, tree.as_ref(), &base, path, hash);
             updates.insert(path.clone(), state);
         }
         bump(&self.stats.rereads, read);
         let mut st = lock(&project.state);
         if st.session != session || (st.gens.files, st.gens.grammar) != deps {
             st.dirty.extend(paths);
+            st.probe.extend(probe);
             return true;
         }
         if saw_dir {
@@ -432,12 +477,13 @@ impl Inner {
         if differs {
             st.map.overlay = Arc::new(overlay);
             st.gens.worktree += 1;
+            st.map.provenance.worktree = st.gens.worktree;
         }
         differs || saw_dir
     }
 
-    /// What the worktree holds at `path` (「blob → 路径映射」), and whether
-    /// the path is a directory now.
+    /// What the worktree holds at `path` (「blob → 路径映射」). A directory
+    /// where the file list has a file is `Absent`.
     fn read_state(
         &self,
         root: &SafeRoot,
@@ -445,30 +491,27 @@ impl Inner {
         base: &BaseMap,
         path: &str,
         hash: HashKind,
-    ) -> (Option<WorktreeState>, bool) {
+    ) -> Option<WorktreeState> {
         let files = base.files();
         let at = find_path(files, path);
         let index = at.and_then(|i| files.oid(i));
         let Some(rel) = SafeRel::new(path.as_bytes()) else {
-            return (Some(WorktreeState::Unindexable), false);
+            return Some(WorktreeState::Unindexable);
         };
         match root.read(rel, BACKGROUND_MAX_LEN as u64) {
             Ok(Read::File { bytes, .. }) => {
                 let raw = hash_blob(hash, &bytes);
-                (
-                    Some(self.content_state(tree, path, &bytes, raw, index)),
-                    false,
-                )
+                Some(self.content_state(tree, path, &bytes, raw, index))
             }
             Ok(Read::Unsupported { meta }) if meta.kind == SafeKind::Dir => {
-                (at.map(|_| WorktreeState::Absent), true)
+                at.map(|_| WorktreeState::Absent)
             }
             Ok(Read::Symlink { .. } | Read::TooLarge { .. } | Read::Unsupported { .. }) => {
-                (Some(WorktreeState::Unindexable), false)
+                Some(WorktreeState::Unindexable)
             }
-            Err(SafeError::NotFound) => (Some(WorktreeState::Absent), false),
+            Err(SafeError::NotFound) => Some(WorktreeState::Absent),
             Err(SafeError::PathThroughSymlink | SafeError::Io(_)) => {
-                (Some(WorktreeState::Unindexable), false)
+                Some(WorktreeState::Unindexable)
             }
         }
     }

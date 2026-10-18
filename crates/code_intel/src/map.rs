@@ -477,6 +477,25 @@ pub struct Effective {
     pub slot: HintSlot,
 }
 
+/// The input generations a map was built from: the file list and the
+/// language table of its base part, the worktree content of its overlay.
+/// Everything derived from a map (the batch tiers' cursor, hint stamps)
+/// takes its generations from here, never from the inputs' current
+/// generations, which may already be ahead of what was built.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash, Debug)]
+pub struct Provenance {
+    pub files: u64,
+    pub worktree: u64,
+    pub grammar: u64,
+}
+
+impl Provenance {
+    /// The map's generation: it changes with any of the three.
+    pub fn generation(&self) -> u64 {
+        self.files + self.worktree + self.grammar
+    }
+}
+
 /// One consistent view of the map. Queries and batches take it once and
 /// use it throughout.
 #[derive(Clone)]
@@ -484,6 +503,7 @@ pub struct LiveMap {
     pub base: Arc<BaseMap>,
     pub overlay: Arc<Overlay>,
     pub hints: Arc<IndexedHints>,
+    pub provenance: Provenance,
 }
 
 impl LiveMap {
@@ -492,7 +512,28 @@ impl LiveMap {
             base: Arc::new(BaseMap::empty(table)),
             overlay: Arc::new(Overlay::empty()),
             hints: Arc::new(IndexedHints::new(0)),
+            provenance: Provenance::default(),
         }
+    }
+
+    /// The version of a language in the table this map was built with.
+    pub fn lang(&self, name: &str) -> Option<&Lang> {
+        self.base.table().get(name)
+    }
+
+    /// Whether some path with content `oid` in language `lang` has a
+    /// matching hint (the blob is known to be stored).
+    pub fn hinted(&self, oid: &BlobId, lang: &str, stamp: HintStamp) -> bool {
+        let base = self
+            .base
+            .find(oid)
+            .filter_map(|i| self.base_effective(i))
+            .any(|e| &*e.lang.name().0 == lang && self.hints.matches(&e.slot, &e.oid, stamp));
+        base || self
+            .overlay
+            .find(oid)
+            .filter_map(|i| self.overlay_effective(i))
+            .any(|e| &*e.lang.name().0 == lang && self.hints.matches(&e.slot, &e.oid, stamp))
     }
 
     /// The effective content of a path, when it is indexable.

@@ -199,3 +199,43 @@ fn incremental_kernel_busy_until_the_overlay_is_updated() {
     h.settle();
     assert!(h.quiescent(), "idle once the overlay is updated");
 }
+
+/// An untracked nested repository is listed as its directory: the reconcile
+/// compares once per event, not again and again (only events request a
+/// comparison, and a pass repeats only on new input).
+#[test]
+fn incremental_nested_repository_does_not_loop() {
+    let h = Harness::new();
+    h.git.add("main", &[("a.ts", &ts("a"))]);
+    h.git.commit("main");
+    h.git
+        .write("main", "vendor/lib/.git/HEAD", b"ref: refs/heads/main\n");
+    h.git.write("main", "vendor/lib/x.ts", &ts("x"));
+    h.open();
+    assert!(h.git.count("changed_paths") <= 2, "{:?}", h.git.calls());
+    let (passes, reconciles) = (h.stats().reconcile_passes, h.stats().reconciles);
+    assert!(passes <= 3 * reconciles, "{passes} passes in {reconciles}");
+    assert!(h.map().effective("vendor/lib").is_none());
+    // An event on it compares at most once more.
+    let before = h.git.count("changed_paths");
+    h.emit(&[("vendor/lib", DIR_CHANGED)]);
+    h.settle();
+    assert!(h.git.count("changed_paths") <= before + 1);
+    assert!(h.quiescent());
+}
+
+/// A tracked file replaced by a directory: the file leaves the map and the
+/// directory's files come in, without the reconcile looping.
+#[test]
+fn incremental_file_replaced_by_a_directory() {
+    let h = indexed();
+    let before = h.git.count("changed_paths");
+    h.git.delete("main", "src/a.ts");
+    h.git.write("main", "src/a.ts/inner.ts", &ts("inner"));
+    h.emit(&[("src/a.ts", DIR_CHANGED)]);
+    h.settle();
+    assert!(h.git.count("changed_paths") <= before + 2);
+    assert!(h.map().effective("src/a.ts").is_none());
+    assert!(h.hinted("src/a.ts/inner.ts"));
+    assert!(h.quiescent());
+}

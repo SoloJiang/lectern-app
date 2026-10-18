@@ -543,3 +543,259 @@ fn schedule_session_switch_during_an_extraction() {
     assert_eq!([c.focus, c.subproject, c.worktree], [TierState::Done; 3]);
     assert!(h.hinted("f.ts"));
 }
+
+/// Over the quota, focus changes do not restart the batch walk: the batch
+/// tiers extract nothing again; tier 1 extracts at most the opened file
+/// (it needs `Done`, and the file may have been evicted).
+#[test]
+fn schedule_over_the_quota_focus_changes_extract_nothing_again() {
+    let h = Harness::new();
+    *h.indexer.inner().tables.lock().unwrap() = Some(&TINY);
+    let files = fill(&h, 80);
+    h.open();
+    let store = h.indexer.store(&h.key()).expect("store");
+    assert!(store.evictions() > 0, "the quota was exceeded");
+    let batch: usize = h.batches().iter().sum();
+    let first = h.extractions();
+    let builds = h.stats().cursor_builds;
+    for (round, (path, _, _)) in files.iter().take(5).enumerate() {
+        h.current(path);
+        h.settle();
+        assert_eq!(
+            h.batches().iter().sum::<usize>(),
+            batch,
+            "focus change {round}: the batch tiers extracted again"
+        );
+        assert!(h.extractions() <= first + round + 1);
+    }
+    assert_eq!(h.stats().cursor_builds, builds, "no cursor rebuild");
+    let c = h.coverage();
+    assert_eq!([c.subproject, c.worktree], [TierState::Done; 2]);
+}
+
+/// Files the batch found missing and queued are then put in the review set
+/// and written by tier 2: the batch does not extract or write them again
+/// (a replace would count as an eviction).
+#[test]
+fn schedule_review_files_written_by_tier_2_are_not_extracted_again() {
+    let h = Harness::new();
+    let files = fill(&h, 150);
+    let kernel = h.host.kernel();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    let k = kernel.clone();
+    h.set_hook(move |_, _| {
+        if c.fetch_add(1, Ordering::AcqRel) + 1 == 10 {
+            k.pause();
+        }
+    });
+    h.open();
+    let store = h.indexer.store(&h.key()).expect("store");
+    let evictions = store.evictions();
+    let review: Vec<lectern_services::project::RelPath> = files[100..110]
+        .iter()
+        .map(|(p, _, _)| p.as_str().into())
+        .collect();
+    h.set_focus(Focus::Review(review.into()));
+    h.settle();
+    kernel.resume();
+    h.settle();
+    let mut extracted = h.extracted();
+    let n = extracted.len();
+    extracted.sort();
+    extracted.dedup();
+    assert_eq!(extracted.len(), 150);
+    // The one file the pause abandoned is extracted twice.
+    assert_eq!(n, 151);
+    assert_eq!(store.evictions(), evictions, "nothing was replaced");
+    let p = h.indexer.inner().project(&h.key()).expect("open");
+    assert_eq!(crate::index::lock(&p.state).batch.full, None);
+}
+
+/// A file stored `TimedOut` by the batch is extracted again with the
+/// interactive limits when it is opened, once per session.
+#[test]
+fn schedule_opened_timed_out_file_is_redone_once() {
+    use crate::extract::Extraction;
+
+    let h = Harness::new();
+    let big = ts("big");
+    h.git.add("main", &[("big.ts", &big)]);
+    h.git.commit("main");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    h.indexer
+        .set_extractor(move |lang, bytes, deadline, cancel| {
+            if c.fetch_add(1, Ordering::AcqRel) == 0 {
+                // The background deadline ran out.
+                Extraction {
+                    status: ExtractStatus::TimedOut,
+                    defs: Vec::new(),
+                    refs: Vec::new(),
+                }
+            } else {
+                crate::extract::extract(lang, bytes, deadline, cancel)
+            }
+        });
+    h.open();
+    assert_eq!(calls.load(Ordering::Acquire), 1);
+    assert!(h.hinted("big.ts"), "a TimedOut unit is stored");
+    h.current("big.ts");
+    h.settle();
+    assert_eq!(calls.load(Ordering::Acquire), 2, "redone when opened");
+    let store = h.indexer.store(&h.key()).expect("store");
+    let lang = crate::index::lock(&h.indexer.inner().langs)
+        .table
+        .get("ts")
+        .cloned()
+        .expect("ts");
+    let found = store
+        .exists(&crate::store::Version::of(&lang), &[h.git.oid(&big)])
+        .expect("exists");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].status, ExtractStatus::Done);
+    // Opening it again checks nothing more.
+    h.set_focus(Focus::Current(None));
+    h.settle();
+    h.current("big.ts");
+    h.settle();
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    let p = h.indexer.inner().project(&h.key()).expect("open");
+    assert_eq!(crate::index::lock(&p.state).batch.full, None);
+}
+
+/// Opening a file the batch is extracting: tier 1 does not wait on the
+/// batch (ADR 0029); it cancels that extraction and extracts it itself.
+#[test]
+fn schedule_opened_file_takes_over_a_batch_extraction() {
+    use crate::extract::Extraction;
+
+    let h = Harness::new();
+    let slow = ts("slow");
+    h.git.add("main", &[("slow.ts", &slow)]);
+    h.git.commit("main");
+    let gate = Arc::new(Gate::default());
+    let g = gate.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    h.indexer
+        .set_extractor(move |lang, bytes, deadline, cancel| {
+            if c.fetch_add(1, Ordering::AcqRel) == 0 {
+                // The batch's extraction runs until something cancels it.
+                g.entered.store(true, Ordering::Release);
+                let start = Instant::now();
+                while !cancel.load(Ordering::Acquire) {
+                    assert!(start.elapsed() < Duration::from_secs(20), "never cancelled");
+                    std::thread::yield_now();
+                }
+                return Extraction {
+                    status: ExtractStatus::Cancelled,
+                    defs: Vec::new(),
+                    refs: Vec::new(),
+                };
+            }
+            crate::extract::extract(lang, bytes, deadline, cancel)
+        });
+    h.publish("main", Vec::new());
+    let executor = h.executor.clone();
+    std::thread::scope(|s| {
+        let worker = s.spawn(move || {
+            executor.run_until_idle();
+        });
+        gate.wait_entered();
+        h.indexer.set_focus(
+            &h.key(),
+            Some(&h.git.worktree_key("main")),
+            Focus::Current(Some(TextRef {
+                worktree: Some(h.git.worktree_key("main")),
+                path: "slow.ts".into(),
+                oid: h.git.oid(&slow),
+                origin: TextOrigin::Worktree,
+            })),
+        );
+        // Tier 1 runs here while the batch task is still in its extraction.
+        h.executor.run_until_idle();
+        worker.join().expect("the executor thread");
+    });
+    h.settle();
+    assert_eq!(calls.load(Ordering::Acquire), 2);
+    assert!(h.stored(h.git.oid(&slow), "ts"));
+    assert!(h.hinted("slow.ts"));
+    assert_eq!(h.coverage().focus, TierState::Done);
+}
+
+/// An index change in one other worktree walks only that worktree again,
+/// and its blobs already confirmed this session are not checked or touched
+/// again.
+#[test]
+fn schedule_tier5_index_change_rewalks_only_that_worktree() {
+    let h = Harness::new();
+    h.git.add("main", &[("main.ts", &ts("main"))]);
+    h.git.commit("main");
+    for name in ["feature", "other"] {
+        h.git.add_worktree(name);
+        h.git.add(
+            name,
+            &[("main.ts", &ts("main")), (&format!("{name}.ts"), &ts(name))],
+        );
+    }
+    h.open();
+    assert_eq!(h.coverage().other_worktrees, TierState::Done);
+    let tracked = h.git.count("tracked");
+    let checks = h.stats().exists_checks;
+    let extractions = h.extractions();
+    h.emit_git(&[("worktrees/feature/index", super::support::CHANGED)]);
+    h.settle();
+    assert_eq!(h.git.count("tracked"), tracked + 1, "only `feature`");
+    assert_eq!(h.stats().exists_checks, checks, "confirmed blobs skipped");
+    assert_eq!(h.extractions(), extractions);
+    assert_eq!(h.coverage().other_worktrees, TierState::Done);
+}
+
+/// Until the first focus, the project opened last runs tiers 3–5; after
+/// it, opening another project does not take them over.
+#[test]
+fn schedule_last_opened_project_runs_the_batch_before_any_focus() {
+    use lectern_services::project::{
+        ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
+    };
+
+    let h = Harness::new();
+    h.git.add("main", &[("a.ts", &ts("a"))]);
+    h.git.commit("main");
+    h.open();
+    let batch_project = || crate::index::lock(&h.indexer.inner().batch_project).clone();
+    assert_eq!(batch_project(), Some(h.key()));
+    let open_folder = |name: &str| {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().canonicalize().expect("canonical");
+        let mut files = FileList::builder();
+        files.push("a.ts", FileKind::File);
+        let key = ProjectKey::Folder {
+            root: Arc::from(root.as_path()),
+        };
+        let event = h.projects.set(ProjectSnapshot {
+            key: key.clone(),
+            generation: 1,
+            name: name.into(),
+            worktrees: Arc::from(Vec::new()),
+            active: Some(ActiveTree {
+                root: Arc::from(root.as_path()),
+                worktree: None,
+                opened_at: "".into(),
+                files: Scan::Ready(Arc::new(files.build())),
+                packages: Scan::Ready(Arc::from(Vec::new())),
+            }),
+        });
+        h.indexer.project_event(&event);
+        h.settle();
+        (dir, key)
+    };
+    let (_one, folder) = open_folder("one");
+    assert_eq!(batch_project(), Some(folder));
+    h.current("a.ts");
+    h.settle();
+    assert_eq!(batch_project(), Some(h.key()));
+    let (_two, _) = open_folder("two");
+    assert_eq!(batch_project(), Some(h.key()));
+}

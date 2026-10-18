@@ -80,6 +80,8 @@ pub struct Stats {
     /// Existence-check calls (one per language and chunk of up to 500).
     pub exists_checks: AtomicUsize,
     pub reconciles: AtomicUsize,
+    /// Passes over the reconcile's steps (each reconcile makes at least one).
+    pub reconcile_passes: AtomicUsize,
     pub grammar_rounds: AtomicUsize,
 }
 
@@ -93,6 +95,7 @@ pub struct StatCounts {
     pub extractions: usize,
     pub exists_checks: usize,
     pub reconciles: usize,
+    pub reconcile_passes: usize,
     pub grammar_rounds: usize,
 }
 
@@ -107,6 +110,7 @@ impl Stats {
             extractions: get(&self.extractions),
             exists_checks: get(&self.exists_checks),
             reconciles: get(&self.reconciles),
+            reconcile_passes: get(&self.reconcile_passes),
             grammar_rounds: get(&self.grammar_rounds),
         }
     }
@@ -159,7 +163,9 @@ pub(crate) struct Inner {
     open: Mutex<Vec<Arc<Project>>>,
     /// The project that got the latest `set_focus` (or else was opened
     /// last): only it runs tiers 3–5.
-    batch_project: Mutex<Option<ProjectKey>>,
+    pub(crate) batch_project: Mutex<Option<ProjectKey>>,
+    /// Some `set_focus` happened: opening a project no longer picks it.
+    focused_once: AtomicBool,
     pub battery: AtomicBool,
     batch: Mutex<BatchRun>,
     rounds: Mutex<Rounds>,
@@ -219,6 +225,7 @@ impl Indexer {
             }),
             open: Mutex::new(Vec::new()),
             batch_project: Mutex::new(None),
+            focused_once: AtomicBool::new(false),
             battery: AtomicBool::new(battery),
             batch: Mutex::new(BatchRun::default()),
             rounds: Mutex::new(Rounds::default()),
@@ -346,6 +353,15 @@ impl Indexer {
         Some(lock(&self.inner.project(project)?.state).gens)
     }
 
+    /// The stamp a hint of the current map matches (its provenance and the
+    /// walks' eviction generation), for tests.
+    #[cfg(test)]
+    pub(crate) fn stamp(&self, project: &ProjectKey) -> Option<crate::map::HintStamp> {
+        let p = self.inner.project(project)?;
+        let eviction = p.store.evictions();
+        Some(lock(&p.state).stamp(eviction))
+    }
+
     #[cfg(test)]
     pub(crate) fn inner(&self) -> &Arc<Inner> {
         &self.inner
@@ -469,6 +485,7 @@ impl Inner {
                     let p = Arc::new(Project {
                         key: key.clone(),
                         store: self.store_for(&partition),
+                        commits: Mutex::new(()),
                         state: Mutex::new(State::new(self.new_session(), &table, grammar)),
                     });
                     open.push(p.clone());
@@ -476,11 +493,9 @@ impl Inner {
                 }
             }
         };
-        if created {
-            let mut batch = lock(&self.batch_project);
-            if batch.is_none() {
-                *batch = Some(key.clone());
-            }
+        // Until the first `set_focus`, the project opened last runs tiers 3–5.
+        if created && !self.focused_once.load(Ordering::Acquire) {
+            *lock(&self.batch_project) = Some(key.clone());
         }
         if let Some(me) = self.arc() {
             me.request_reconcile(&project);
@@ -500,16 +515,22 @@ impl Inner {
                 let p = self.project(project).unwrap_or_else(|| self.touch(project));
                 {
                     let mut st = lock(&p.state);
+                    // The worktree list or a HEAD changed: tier 5 is not
+                    // walked again for that (an index change of one other
+                    // worktree arrives in a `RepoBatch`, and only that
+                    // worktree is walked again); a new worktree is not in
+                    // `done` yet.
                     if parts.worktrees {
                         st.check_head = true;
-                        st.batch.others = Default::default();
                     }
                     if parts.files {
                         st.check_index = true;
                     }
-                    // A failed watch is subscribed again on the next event.
+                    // A failed watch (or root) is tried again on the next
+                    // event.
                     if st.watches.is_none() {
                         st.root = None;
+                        st.root_tried = false;
                     }
                 }
                 if let Some(me) = self.arc() {
@@ -548,6 +569,7 @@ impl Inner {
             }
             st.gens.focus += 1;
         }
+        self.focused_once.store(true, Ordering::Release);
         *lock(&self.batch_project) = Some(key.clone());
         if let Some(me) = self.arc() {
             me.enqueue_focus(&project);
@@ -699,7 +721,7 @@ impl Inner {
             // Folder projects are not indexed yet (step 3): every tier is
             // `Pending`, never `Done`, so callers answer from a search.
             return Some(Coverage {
-                generation: lock(&project.state).gens.map(),
+                generation: lock(&project.state).map.provenance.generation(),
                 focus: TierState::Pending,
                 subproject: TierState::Pending,
                 worktree: TierState::Pending,
@@ -715,12 +737,12 @@ impl Inner {
         } else {
             TierState::Pending
         };
-        let current = st.base_for.is_some()
-            && st
-                .batch
-                .cursor
-                .as_ref()
-                .is_some_and(|c| c.deps == st.cursor_deps(eviction));
+        // The walks are of the current map (built from the current file
+        // list and grammar) with the current scope.
+        let current = st.base_for == Some((st.gens.files, st.gens.grammar))
+            && st.batch.cursor.as_ref().is_some_and(|c| {
+                c.deps == st.cursor_deps(eviction) && c.scope == batch::subproject(&st)
+            });
         let tier = |t: usize| {
             let walked = current && st.batch.cursor.as_ref().is_some_and(|c| c.walks[t].done);
             if walked && st.batch.resume[t].is_empty() && st.batch.active[t] == 0 {
@@ -746,7 +768,8 @@ impl Inner {
                     .filter(|w| !w.prunable && Some(&w.key) != active)
                     .all(|w| o.done.contains(&w.key))
             });
-            let deps = Some((st.session, st.walk_eviction(eviction), st.gens.grammar));
+            let stamp = st.stamp(eviction);
+            let deps = Some((st.session, stamp.eviction, stamp.grammar));
             if o.deps == deps
                 && all_done
                 && o.current.is_none()
@@ -759,7 +782,7 @@ impl Inner {
             }
         };
         Some(Coverage {
-            generation: st.gens.map(),
+            generation: st.map.provenance.generation(),
             focus,
             subproject: tier(0),
             worktree: deferred(tier(1)),

@@ -157,9 +157,10 @@ impl Inner {
                     st.dirty_dirs.insert(path.into());
                     st.gens.compare += 1;
                 } else {
-                    // A file, or a new directory: the read tells, and a
-                    // directory requests a comparison.
+                    // A file, a new directory or a file replaced by one: the
+                    // read tells, and a directory requests one comparison.
                     st.dirty.insert(path.into());
+                    st.probe.insert(path.into());
                 }
             }
             st.held.extend(busy);
@@ -193,17 +194,33 @@ impl Inner {
             if batch.config {
                 st.gens.rules += 1;
             }
-            let mut others = batch.worktree_list || batch.rescan;
             for (n, meta) in &batch.worktrees {
                 if n == name {
                     st.check_head |= meta.head;
                     st.check_index |= meta.index;
                 } else if meta.index {
-                    others = true;
+                    // Only the worktree whose index changed is walked again.
+                    let common = match &project.key {
+                        lectern_services::project::ProjectKey::Git { common_dir } => {
+                            common_dir.clone()
+                        }
+                        lectern_services::project::ProjectKey::Folder { .. } => continue,
+                    };
+                    let key = st.snapshot.as_ref().and_then(|s| {
+                        s.worktrees
+                            .iter()
+                            .find(|w| worktree_name(&common, &w.key.0).as_ref() == Some(n))
+                            .map(|w| w.key.clone())
+                    });
+                    if let Some(key) = key {
+                        st.batch.others.reset(&key);
+                    }
                 }
             }
-            if others {
-                st.batch.others = Default::default();
+            if batch.rescan {
+                // Events were lost: every other worktree may have changed.
+                st.batch.others.done.clear();
+                st.batch.others.current = None;
             }
             st.held.extend(busy);
         }

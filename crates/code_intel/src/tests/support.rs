@@ -288,19 +288,11 @@ impl Harness {
     /// Whether `path`'s hint matches its current effective content.
     pub(crate) fn hinted(&self, path: &str) -> bool {
         let map = self.map();
-        let store = self.indexer.store(&self.key()).expect("an open project");
         let Some(eff) = map.effective(path) else {
             return false;
         };
-        let grammar = self.indexer.gens(&self.key()).map_or(0, |g| g.grammar);
-        map.hints.matches(
-            &eff.slot,
-            &eff.oid,
-            crate::map::HintStamp {
-                eviction: store.evictions(),
-                grammar,
-            },
-        )
+        let stamp = self.indexer.stamp(&self.key()).expect("an open project");
+        map.hints.matches(&eff.slot, &eff.oid, stamp)
     }
 
     pub(crate) fn set_focus(&self, focus: Focus) {

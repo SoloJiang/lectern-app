@@ -19,13 +19,17 @@ use lectern_services::project::{
 use crate::LangName;
 use crate::extract::{Lang, LanguageTable};
 use crate::git_access::Tree;
-use crate::map::{HeadDiff, LiveMap};
-use crate::store::{PendingTouches, Store};
+use crate::map::{HeadDiff, HintStamp, LiveMap, Provenance};
+use crate::store::{PendingTouches, Store, Version};
 
 /// One open project.
 pub(crate) struct Project {
     pub key: ProjectKey,
     pub store: Store,
+    /// Held around each write transaction and the eviction generations read
+    /// on either side of it: a batch commit tells its own evictions from a
+    /// tier 1 replace. Never held with another lock of this crate.
+    pub commits: std::sync::Mutex<()>,
     pub state: std::sync::Mutex<State>,
 }
 
@@ -53,12 +57,6 @@ pub(crate) struct Gens {
 }
 
 impl Gens {
-    /// The map's generation: not an input of its own, it changes with the
-    /// file list, the worktree content and the language table.
-    pub fn map(&self) -> u64 {
-        self.files + self.worktree + self.grammar
-    }
-
     /// What the worktree comparison depends on.
     pub fn compare_deps(&self) -> [u64; 6] {
         [
@@ -138,15 +136,16 @@ impl Item {
     }
 }
 
-/// The dependencies of the batch tiers' cursor.
+/// The dependencies of the batch tiers' cursor: the map it walks (its
+/// provenance, so the cursor never runs ahead of what was built), the
+/// sub-projects and the eviction generation of the walks. The focus is not
+/// one: a focus change rebuilds the cursor only when tier 3's scope changes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct CursorDeps {
     pub session: u64,
-    pub map: u64,
+    pub map: Provenance,
     pub packages: u64,
     pub eviction: u64,
-    pub grammar: u64,
-    pub focus: u64,
 }
 
 /// A walk over one batch tier: overlay entries first (new and changed
@@ -207,6 +206,21 @@ pub(crate) struct Others {
     pub deps: Option<(u64, u64, u64)>,
     pub done: HashSet<WorktreeKey>,
     pub current: Option<OtherWalk>,
+    /// Blobs of other worktrees this session found stored (and queued for
+    /// access marking) that the current worktree's map does not have: a
+    /// walk again after one worktree's index changed checks and touches
+    /// only what is new.
+    pub confirmed: HashSet<(BlobId, LangName)>,
+}
+
+impl Others {
+    /// One other worktree's index changed: only it is walked again.
+    pub fn reset(&mut self, key: &WorktreeKey) {
+        self.done.remove(key);
+        if self.current.as_ref().is_some_and(|w| &w.tree.key == key) {
+            self.current = None;
+        }
+    }
 }
 
 /// The other worktree being walked: its index entries and the position.
@@ -241,9 +255,10 @@ pub(crate) struct Focused {
     pub queue: [VecDeque<Item>; 2],
     /// Tasks running: tier 1 at most one, tier 2 at most two.
     pub running: [usize; 2],
-    /// Object-database texts (`TextOrigin::Object`) handled this session:
-    /// no path's hint records them.
-    pub objects: HashSet<(BlobId, LangName)>,
+    /// Tier 1's blobs this session found stored `Done`, or extracted again
+    /// with the interactive limits: tier 1 needs `Done`, which a hint does
+    /// not tell (a hint also stands for `TimedOut` and `TooLarge`).
+    pub satisfied: HashSet<(BlobId, Version)>,
 }
 
 /// The last focus of each kind, with the worktree its paths are in.
@@ -279,6 +294,8 @@ pub(crate) struct State {
     pub snapshot: Option<Arc<ProjectSnapshot>>,
     pub tree: Option<Tree>,
     pub root: Option<Arc<SafeRoot>>,
+    /// The root was opened (or failed to open) for this subscription.
+    pub root_tried: bool,
     pub hash: HashKind,
     pub gens: Gens,
     pub seen: Seen,
@@ -288,6 +305,10 @@ pub(crate) struct State {
     /// Paths to read again, and directories whose paths are.
     pub dirty: BTreeSet<RelPath>,
     pub dirty_dirs: BTreeSet<RelPath>,
+    /// Paths of fs_watch events the map does not know: a new directory
+    /// among them requests a worktree comparison. Only events fill it, so
+    /// a comparison never requests another one.
+    pub probe: BTreeSet<RelPath>,
     pub map: LiveMap,
     pub base_for: Option<(u64, u64)>,
     pub compare_for: Option<[u64; 6]>,
@@ -301,6 +322,8 @@ pub(crate) struct State {
     pub focus: Focuses,
     pub focused: Focused,
     pub batch: Batch,
+    /// Extractions in flight by key, with the cancel flag of the one that
+    /// owns the entry (tier 1 can take a key over from a batch).
     pub in_flight: HashMap<(BlobId, LangName), Arc<AtomicBool>>,
     /// On battery, a query or `names` lets tiers 4 and 5 go on until the
     /// project closes or the power source changes.
@@ -315,6 +338,7 @@ impl State {
             snapshot: None,
             tree: None,
             root: None,
+            root_tried: false,
             hash: HashKind::Sha1,
             gens: Gens {
                 grammar,
@@ -325,6 +349,7 @@ impl State {
             check_index: true,
             dirty: BTreeSet::new(),
             dirty_dirs: BTreeSet::new(),
+            probe: BTreeSet::new(),
             map: LiveMap::new(table),
             base_for: None,
             compare_for: None,
@@ -368,23 +393,36 @@ impl State {
     pub fn cursor_deps(&self, eviction: u64) -> CursorDeps {
         CursorDeps {
             session: self.session,
-            map: self.gens.map(),
+            map: self.map.provenance,
             packages: self.gens.packages,
             eviction: self.walk_eviction(eviction),
-            grammar: self.gens.grammar,
-            focus: self.gens.focus,
         }
     }
 
-    /// Ends an item of this session: no longer in flight or queued.
-    /// False (and nothing changed) when the item belongs to an older
-    /// session.
-    pub fn finish(&mut self, session: u64, item: &Item) -> bool {
+    /// The stamp hints are set and compared with: the walks' eviction
+    /// generation and the language generation the map was built with.
+    pub fn stamp(&self, eviction: u64) -> HintStamp {
+        HintStamp {
+            eviction: self.walk_eviction(eviction),
+            grammar: self.map.provenance.grammar,
+        }
+    }
+
+    /// Ends an item of this session: no longer queued, and no longer in
+    /// flight when `flag` still owns its entry. False (and nothing changed)
+    /// when the item belongs to an older session.
+    pub fn finish(&mut self, session: u64, item: &Item, flag: &Arc<AtomicBool>) -> bool {
         if self.session != session {
             return false;
         }
         let key = item.key();
-        self.in_flight.remove(&key);
+        if self
+            .in_flight
+            .get(&key)
+            .is_some_and(|f| Arc::ptr_eq(f, flag))
+        {
+            self.in_flight.remove(&key);
+        }
         self.batch.queued.remove(&key);
         if let Some(t) = item.tier.batch() {
             self.batch.active[t] = self.batch.active[t].saturating_sub(1);

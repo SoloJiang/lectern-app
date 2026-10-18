@@ -954,10 +954,17 @@ fn extract_walker_matches_tags() {
     let mut failures = Vec::new();
     for (lang, what, source) in &sources {
         let lang = table.get(lang).unwrap();
-        let deadline = Deadline::interactive(&watchdog);
-        let walked = extract(lang, source, &deadline, &cancel);
-        let tagged = crate::extract::extract_tags(lang, source, &deadline, &cancel);
+        // Each path its own deadline, far off: on a loaded machine the
+        // pathological source can take tags longer than the interactive
+        // second, and a timed-out result would compare as empty.
+        let deadline = || {
+            let at = watchdog.clock().now() + std::time::Duration::from_secs(60);
+            Deadline::at(&watchdog, at, crate::extract::INTERACTIVE_MAX_LEN)
+        };
+        let walked = extract(lang, source, &deadline(), &cancel);
+        let tagged = crate::extract::extract_tags(lang, source, &deadline(), &cancel);
         assert_eq!(walked.status, ExtractStatus::Done, "{what}");
+        assert_eq!(tagged.status, ExtractStatus::Done, "{what}");
         let show = |d: &crate::extract::Def| {
             format!(
                 "{}:{} {} {} {:?} {} {:?}",

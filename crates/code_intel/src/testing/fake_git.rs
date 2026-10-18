@@ -412,7 +412,9 @@ struct TreeCopy {
     head: Option<BlobId>,
 }
 
-/// Every file under `root`, relative, skipping `.git`.
+/// Every file under `root`, relative, skipping `.git`. A directory holding
+/// a `.git` (a nested repository) is one entry, its own path, as git lists
+/// it.
 fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -425,7 +427,8 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<String>) {
         let Ok(kind) = entry.file_type() else {
             continue;
         };
-        if kind.is_dir() {
+        let nested = kind.is_dir() && path.join(".git").exists();
+        if kind.is_dir() && !nested {
             walk(root, &path, out);
         } else if let Ok(rel) = path.strip_prefix(root)
             && let Some(rel) = rel.to_str()
@@ -491,7 +494,10 @@ impl GitAccess for FakeGit {
             };
             let i = index.get(&path).copied();
             let h = head_tree.get(&path).copied();
-            if worktree != h || i != h {
+            // An untracked entry is listed whether or not it reads as a file
+            // (a nested repository is a directory).
+            let untracked = i.is_none() && h.is_none() && disk.contains(&path);
+            if worktree != h || i != h || untracked {
                 let rel: RelPath = path.as_str().into();
                 out.head.push((rel.clone(), h));
                 out.paths.push(rel);

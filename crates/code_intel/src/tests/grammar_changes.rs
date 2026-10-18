@@ -276,3 +276,59 @@ fn grammar_lease_unloads_after_the_last_user() {
     drop(parsed);
     assert_eq!(unloads.load(Ordering::Acquire), 1, "unloaded exactly once");
 }
+
+/// A grammar update while the reconcile is between the generation bump and
+/// the base map rebuild (say, in its git IO), with a batch step meanwhile:
+/// hits of the old version never stamp hints, so the file is extracted
+/// under the new version once the map is rebuilt.
+#[test]
+fn grammar_updated_during_a_reconcile_with_a_batch_step() {
+    let h = repo();
+    install(&h, 1);
+    h.settle();
+    assert!(stored_under(&h, 1, TRACKED));
+    let inner = h.indexer.inner().clone();
+    let p = inner.project(&h.key()).expect("open");
+    // A reconcile is running.
+    lock(&p.state).run.running = true;
+    install(&h, 2);
+    inner.clone().grammar_round();
+    // The batch runs meanwhile (any kick: a focus, a write).
+    h.set_focus(lectern_services::code_intel::Focus::Review(Arc::from(
+        Vec::new(),
+    )));
+    h.executor.run_until_idle();
+    // The reconcile goes on and installs the new base.
+    lock(&p.state).run.running = false;
+    inner.reconcile_now(&h.key());
+    h.settle();
+    assert!(stored_under(&h, 2, TRACKED));
+    assert!(stored_under(&h, 2, UNTRACKED));
+    assert!(h.hinted("src/Tracked.jpack"));
+}
+
+/// The same race through tier 1: the file is opened before the reconcile
+/// rebuilt the base map.
+#[test]
+fn grammar_updated_then_opened_before_the_rebuild() {
+    use lectern_services::code_intel::{Focus, TextOrigin, TextRef};
+
+    let h = repo();
+    install(&h, 1);
+    h.settle();
+    assert!(stored_under(&h, 1, TRACKED));
+    let inner = h.indexer.inner().clone();
+    install(&h, 2);
+    // Queues the reconcile; tier 1 runs first (Interactive).
+    inner.clone().grammar_round();
+    h.set_focus(Focus::Current(Some(TextRef {
+        worktree: Some(h.git.worktree_key("main")),
+        path: "src/Tracked.jpack".into(),
+        oid: h.git.oid(TRACKED),
+        origin: TextOrigin::Worktree,
+    })));
+    h.settle();
+    assert!(stored_under(&h, 2, TRACKED));
+    assert!(h.hinted("src/Tracked.jpack"));
+    assert_eq!(h.coverage().focus, TierState::Done);
+}

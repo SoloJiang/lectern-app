@@ -36,6 +36,7 @@ fn live(files: Arc<FileList>, overlay: Vec<(&str, WorktreeState)>) -> LiveMap {
         hints: Arc::new(IndexedHints::new(base.files().len())),
         base: Arc::new(base),
         overlay: Arc::new(overlay),
+        provenance: Default::default(),
     }
 }
 
