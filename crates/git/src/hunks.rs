@@ -12,10 +12,18 @@ use crate::Oid;
 
 /// One region of change, without context. Line numbers are 0-based in each
 /// side's whole file; an empty range is a pure insertion or removal point.
+///
+/// `old_byte` and `new_byte` are the byte offsets of `old.start` and
+/// `new.start` in that side's canonical content: the bytes of the side's
+/// blob, which are also [`Text::bytes`](crate::Text::bytes) of
+/// [`ChangeSet::texts`](crate::ChangeSet::texts). For an empty range it is
+/// the offset of the line after the point (the content's length at the end).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Hunk {
     pub old: Range<u32>,
     pub new: Range<u32>,
+    pub old_byte: u64,
+    pub new_byte: u64,
 }
 
 /// A file's line diff.
@@ -63,15 +71,20 @@ pub(crate) fn line_diff(old: &[u8], new: &[u8]) -> Computed {
     let input = InternedInput::new(byte_lines(old), byte_lines(new));
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
     diff.postprocess_lines(&input);
+    let old_lines: Vec<&[u8]> = input.before.iter().map(|t| input.interner[*t]).collect();
+    let new_lines: Vec<&[u8]> = input.after.iter().map(|t| input.interner[*t]).collect();
+    // Hunks come in order on both sides, so one forward walk over each
+    // side's lines gives every offset.
+    let (mut old_at, mut new_at) = (Cursor::default(), Cursor::default());
     let hunks: Vec<Hunk> = diff
         .hunks()
         .map(|h| Hunk {
+            old_byte: old_at.advance(&old_lines, h.before.start),
+            new_byte: new_at.advance(&new_lines, h.after.start),
             old: h.before,
             new: h.after,
         })
         .collect();
-    let old_lines: Vec<&[u8]> = input.before.iter().map(|t| input.interner[*t]).collect();
-    let new_lines: Vec<&[u8]> = input.after.iter().map(|t| input.interner[*t]).collect();
     let body_bytes = patch_body_bytes(&old_lines, &new_lines, &hunks);
     Computed {
         diff: FileDiff {
@@ -97,6 +110,8 @@ pub(crate) fn whole(old: &[u8], new: &[u8]) -> Computed {
         vec![Hunk {
             old: 0..removed,
             new: 0..added,
+            old_byte: 0,
+            new_byte: 0,
         }]
     };
     let body_bytes = patch_body_bytes(&old_lines, &new_lines, &hunks);
@@ -108,6 +123,26 @@ pub(crate) fn whole(old: &[u8], new: &[u8]) -> Computed {
         },
         body_bytes,
         sizes: [old.len() as u64, new.len() as u64],
+    }
+}
+
+/// A line and its byte offset, walking one side's lines forward.
+#[derive(Default)]
+struct Cursor {
+    line: u32,
+    byte: u64,
+}
+
+impl Cursor {
+    /// The byte offset of line `to` (not before the cursor's line). The
+    /// lines keep their `\n` (and any `\r` before it), so their lengths add
+    /// up to the content's bytes.
+    fn advance(&mut self, lines: &[&[u8]], to: u32) -> u64 {
+        while self.line < to {
+            self.byte += lines[self.line as usize].len() as u64;
+            self.line += 1;
+        }
+        self.byte
     }
 }
 
@@ -166,8 +201,10 @@ fn patch_body_bytes(old: &[&[u8]], new: &[&[u8]], hunks: &[Hunk]) -> u64 {
     total
 }
 
-/// Bumped when the cached data or its computation changes.
-pub(crate) const CACHE_FORMAT: u16 = 2;
+/// Bumped when the cached data or its computation changes: 3 added the
+/// hunks' byte offsets. When the hunks move into `cache`'s `git.diff`
+/// namespace this is that namespace's version.
+pub(crate) const CACHE_FORMAT: u16 = 3;
 /// The in-process LRU's budget (docs/design/git.md「性能」).
 pub(crate) const CACHE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -203,6 +240,13 @@ impl HunkKey {
             algorithm: DiffAlgorithm::Histogram,
             whitespace: Whitespace::Exact,
         }
+    }
+
+    /// The same key under another format version: an entry written by an
+    /// older build.
+    #[cfg(test)]
+    pub(crate) fn with_format(self, format: u16) -> HunkKey {
+        HunkKey { format, ..self }
     }
 }
 
@@ -348,6 +392,8 @@ mod tests {
                     .map(|i| Hunk {
                         old: i..i + 1,
                         new: i..i + 1,
+                        old_byte: u64::from(i) * 10,
+                        new_byte: u64::from(i) * 12,
                     })
                     .collect(),
                 added: hunks as u32,
@@ -366,6 +412,66 @@ mod tests {
         assert_eq!(cache.get(&HunkKey::lines(a, b)), Some(computed(2)));
         // Direction matters: b → a is another diff.
         assert_eq!(cache.get(&HunkKey::lines(b, a)), None);
+    }
+
+    #[test]
+    fn hunk_cache_keeps_the_byte_offsets() {
+        let mut cache = HunkCache::new(CACHE_BYTES);
+        let (a, b) = (oid(HashKind::Sha1, 3), oid(HashKind::Sha1, 4));
+        let value = line_diff(b"a\r\nb\r\nc", b"a\r\nB\r\nc\n");
+        cache.insert(HunkKey::lines(a, b), value.clone());
+        let hit = cache.get(&HunkKey::lines(a, b)).unwrap();
+        assert_eq!(hit, value);
+        let offsets: Vec<_> = hit
+            .diff
+            .hunks
+            .iter()
+            .map(|h| (h.old_byte, h.new_byte))
+            .collect();
+        assert_eq!(offsets, [(3, 3)]);
+    }
+
+    #[test]
+    fn hunk_cache_entry_of_an_older_format_is_not_read() {
+        // An entry written before the hunks carried byte offsets (format 2)
+        // has the same OIDs but another key: the new format misses it and
+        // computes again instead of reading hunks without offsets.
+        assert_eq!(CACHE_FORMAT, 3);
+        let mut cache = HunkCache::new(CACHE_BYTES);
+        let (a, b) = (oid(HashKind::Sha1, 5), oid(HashKind::Sha1, 6));
+        let old = HunkKey::lines(a, b).with_format(2);
+        cache.insert(old, computed(2));
+        assert_eq!(cache.get(&HunkKey::lines(a, b)), None);
+        assert_eq!(cache.get(&old), Some(computed(2)));
+        assert_ne!(old, HunkKey::lines(a, b));
+    }
+
+    #[test]
+    fn hunk_offsets_count_every_byte_of_the_lines_before() {
+        // CRLF lines count both bytes; a last line without `\n` is a line.
+        let c = line_diff(b"one\r\ntwo\r\nthree", b"one\r\n2\r\nthree\r\nfour");
+        let got: Vec<_> = c
+            .diff
+            .hunks
+            .iter()
+            .map(|h| (h.old.clone(), h.new.clone(), h.old_byte, h.new_byte))
+            .collect();
+        assert_eq!(got, [(1..3, 1..4, 5, 5)]);
+        // Several hunks: each side's offset of its own first line.
+        let old = b"a\nb\nc\nd\ne\nf\ng\nh\n";
+        let new = b"a\nBB\nc\nd\ne\nf\ng\nh\nnew\n";
+        let c = line_diff(old, new);
+        let got: Vec<_> = c
+            .diff
+            .hunks
+            .iter()
+            .map(|h| (h.old.clone(), h.new.clone(), h.old_byte, h.new_byte))
+            .collect();
+        // The insertion at the end points past the last line on the old side.
+        assert_eq!(got, [(1..2, 1..2, 2, 2), (8..8, 8..9, 16, 17)]);
+        // A whole-file hunk starts at 0 on both sides.
+        let w = whole(b"x\n", b"");
+        assert_eq!((w.diff.hunks[0].old_byte, w.diff.hunks[0].new_byte), (0, 0));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -355,13 +355,15 @@ impl ChangeSet {
 /// 统一视图与双栏视图共用的展示行。纯计算，调用方在后台任务里为可见的文件算好，交给视图。
 pub fn rows(diff: &FileDiff, texts: &FileTexts, context: u32) -> Vec<Row>;
 
+/// `*_byte`：所在行（`Folded` 为区间第一行）在这一侧规范内容里的字节偏移，见下文「字节偏移」。
+/// 这一侧是 `SideText::Text` 或 `Absent`（偏移为 0）时为 Some，其余为 None。
 pub enum Row {
-    Context { old: u32, new: u32 },
+    Context { old: u32, new: u32, old_byte: Option<u64>, new_byte: Option<u64> },
     /// `pair`：同一个 hunk 里与它配对的新行，双栏视图把两者放在同一行。
-    Removed { old: u32, pair: Option<u32> },
-    Added { new: u32, pair: Option<u32> },
+    Removed { old: u32, pair: Option<u32>, old_byte: Option<u64> },
+    Added { new: u32, pair: Option<u32>, new_byte: Option<u64> },
     /// 折叠的未改动行；视图展开时用同样的行号区间取文本。
-    Folded { old: Range<u32>, new: Range<u32> },
+    Folded { old: Range<u32>, new: Range<u32>, old_byte: Option<u64>, new_byte: Option<u64> },
 }
 
 /// 一对配对行的词级差异：两侧改动部分的字节区间。任一行超过 1000 字节时返回 None，视图整行高亮。纯计算。
@@ -370,7 +372,11 @@ pub fn inline_changes(old: &[u8], new: &[u8]) -> Option<InlineChanges>;
 
 行号是两侧完整文件里的行号（从 0 起）。高亮按 blob 的窗口计算再按行切片（[ADR 0034](../adr/0034.md)：大文件不做整文件解析，窗口覆盖展示的 hunk 和上下文），缓存键是 blob OID、语言和 grammar 与查询的版本（[pulls.review 调研](../research/pulls-review.md#对-lectern-的建议)、[#42](https://github.com/SoloJiang/lectern-app/issues/42)），由做高亮的 crate 实现。
 
-字节偏移（ADR 0034，已设计、尚未实现，随 `review_view` 之前的一个 `git` PR 加入）：`Hunk` 增加两侧第一行的字节偏移（`old_byte`、`new_byte: u64`），展示行的 `Context`、`Removed`、`Added` 带所在行的字节偏移，`Folded` 带区间起点的偏移。行 diff 时两侧文本都在内存里，偏移在切行时顺带得到；hunk 缓存的值每个 hunk 多两个整数，缓存的命名空间版本加一。视图从 hunk 打开完整文件、高亮按窗口定位时用偏移，不从文件开头扫描换行。
+字节偏移（ADR 0034）：`Hunk` 有两侧第一行的字节偏移（`old_byte`、`new_byte: u64`；区间为空时是插入点之后那一行的偏移，在文件末尾时等于内容的长度）。展示行的 `Context`、`Removed`、`Added` 带所在行的字节偏移，`Folded` 带区间第一行的偏移。行 diff 时两侧文本都在内存里，偏移在切行时顺带得到：hunk 在两侧都按顺序排列，每侧的行只向前走一遍。展示行的偏移取自 `Text` 的行首表（`Text::line_start`）。hunk 缓存的值每个 hunk 多两个 `u64`，缓存格式版本（`git.diff` 命名空间的版本）从 2 改为 3，旧版本的条目不会被当作新格式读出。视图从 hunk 打开完整文件、高亮按窗口定位时用偏移，不从文件开头扫描换行。
+
+偏移的口径是规范内容，即这一侧 blob 的字节，也就是 `ChangeSet::texts` 返回的 `Text::bytes()`，与行号的口径相同。工作区一侧是经过「工作区比较」第 3 步内置转换（`working-tree-encoding`、换行、`ident`）的内容，所以 `core.autocrlf = true` 时 CRLF 的工作区文件按 LF 计偏移，UTF-16 的文件按转换后的 UTF-8 计。理由：hunk 以两侧 blob OID 为键缓存（架构规则 5），同一个 OID 在换行、编码配置不同的 worktree 里对应不同的原始字节，只有规范内容由 OID 唯一确定；`texts` 和展示行的文本也是规范内容。使用方在 `texts` 的文本或按 OID 取出的内容（`Repo::blob`）里用偏移；直接读工作区原始字节时，只有原始字节的 OID 等于这一侧的 OID（转换没有改变字节）才按偏移定位，否则按行号和行检查点定位。
+
+其余情形：CRLF 行的 `\r` 计入这一行，最后一行没有 `\n` 也算一行；二进制、`TooLarge`、`Truncated`、`Listed` 没有 hunk，也就没有偏移；重命名的旧一侧按来源路径的 blob 计。词级差异的区间相对所在行，加上展示行的偏移就是在文本里的位置。一侧的 `SideText` 不是 `Text` 也不是 `Absent` 时，这一侧的展示行偏移为 None（见「与设计的差异」）。
 
 ### Analyze 快照
 
@@ -523,6 +529,7 @@ impl Text {
     pub fn line_count(&self) -> u32;
     pub fn line(&self, n: u32) -> &[u8];       // 不含 `\n`
     pub fn ends_with_newline(&self) -> bool;
+    pub fn line_start(&self, n: u32) -> u64;   // 第 n 行在 `bytes()` 里的偏移；从 `line_count()` 起为长度
 }
 
 /// 两侧改动部分在各自行内的字节区间。
@@ -639,7 +646,12 @@ pub struct FileDiff {
     pub removed: u32,
 }
 
-pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
+pub struct Hunk {
+    pub old: Range<u32>,
+    pub new: Range<u32>,
+    pub old_byte: u64,               // `old.start` 在旧一侧规范内容里的字节偏移（「展示行」的「字节偏移」）
+    pub new_byte: u64,
+}
 ```
 
 不变量：
@@ -723,7 +735,7 @@ pub struct Hunk { pub old: Range<u32>, pub new: Range<u32> }
 | 工作区文件的 OID | 路径 + stat | `Worktree` 内的内存缓存，不持久化 |
 | 改动集、展示行、词级差异 | 不缓存 | 由缓存的 hunk 重算，耗时与可见行数成正比 |
 
-hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库取出。条目里另存 patch 正文的字节数和两侧内容的字节数（都只由两个 OID 决定），命中时按这次的上限判断 `TooLarge` 和 `Truncated`，只检查两侧对象是否存在（缺失时仍是 `Unavailable::Missing`），不读也不解压对象头。两侧都是 `Blob` 且是文本时才进缓存；有 `binary` / `-diff` 属性的文件不查缓存。上下文行数不在键里，因为展示行在 hunk 之上计算。
+hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本随时可以按 OID 从对象库取出。条目里另存 patch 正文的字节数和两侧内容的字节数（都只由两个 OID 决定），命中时按这次的上限判断 `TooLarge` 和 `Truncated`，只检查两侧对象是否存在（缺失时仍是 `Unavailable::Missing`），不读也不解压对象头。两侧都是 `Blob` 且是文本时才进缓存；有 `binary` / `-diff` 属性的文件不查缓存。上下文行数不在键里，因为展示行在 hunk 之上计算。
 
 ## 数据流与线程
 
@@ -805,8 +817,9 @@ hunk 只存行号区间，不存文本：文本随时可以按 OID 从对象库�
 - 只读：每个工作区测试前后对 `.git` 下全部文件的路径、大小和内容哈希做快照，必须相同。
 - 规范内容的 OID（`canonical_*`，在 `compare/tests.rs`）：工作区转换夹具在 `core.autocrlf` 为 false、true、input 时，每个文件的原始字节得到 git 记录的 OID；`text=auto`、`eol=lf`、`text eol=lf` 下 LF 和 CRLF 的字节都得到 index 条目的 OID，index 的 blob 已有 CRLF 时 `text=auto` 不转换；`ident` 展开的关键字收回；clean / process 过滤器返回 None，只有 smudge 的和没有配置的驱动不影响结果；各级目录的 `.gitattributes`（未跟踪的、从工作区删掉而用 index blob 的）都生效；SHA-256 仓库得到 64 位的 OID。每次调用前后 git 目录不变。
 - 不执行外部程序：夹具仓库配置 `diff.external`、`diff.<名>.textconv`、`filter.<名>.clean` / `process`、`core.fsmonitor`，指向会写标记文件的脚本，PATH 最前面放一个记录调用的假 `git`（AGENTS.md「工作方式」）；跑完全部工作区和树 diff 场景后，标记文件不存在、假 `git` 没有被调用。
-- 展示行与词级差异：配对、折叠、hunk 相邻时合并上下文，用 insta 快照。
-- 缓存：同一对 OID 第二次计算命中；键里的 `HashKind` 不同时不命中；命中时按这次的 `diff_bytes` 判断 `TooLarge`，另一个仓库里缺失的一侧仍是 `Missing`。
+- 展示行与词级差异：配对、折叠、hunk 相邻时合并上下文，用 insta 快照（带每行的字节偏移）。
+- 字节偏移：全部树夹具和工作区转换夹具（三种 `core.autocrlf`）里每个文本文件的 hunk 偏移等于这一行在 `texts` 文本里的行首；上下文为 0、3 和全部显示时，每个展示行的偏移处恰好是这一行的文本，之后是 `\n` 或文本末尾；词级差异的区间加上行的偏移得到同样的字节。覆盖 CRLF、末尾没有换行、重命名、新增和删除；`core.autocrlf = true` 下 CRLF 的工作区文件按规范内容（LF）计偏移。
+- 缓存：同一对 OID 第二次计算命中，命中的 hunk 带同样的偏移；格式版本 2 的条目不被版本 3 读出；键里的 `HashKind` 不同时不命中；命中时按这次的 `diff_bytes` 判断 `TooLarge`，另一个仓库里缺失的一侧仍是 `Missing`。
 - 取消：`cancel` 置位后返回 `Cancelled`，没有部分结果。
 
 改动集、hunk 和展示行的结构化输出都用 insta 快照验收。
@@ -923,6 +936,15 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - `code_intel` 用到的其余接口不需要改动：`GitAccess::head` 取 `Worktree::head` 返回的 `HeadState` 里的提交（`Branch { commit }` 的 `commit`、`Detached { commit }`，unborn 为 None），`GitAccess::index_checksum` 直接转调 `Worktree::index_checksum`；两者返回 `Oid`，转成 `services` 的 `BlobId` 是 `code_intel` 自己的事。
 - 没有验证的：没有基准（code_intel 的设计没有为它列基准条目，调用频率由原始 OID 不等的文件数决定）；macOS 上没有运行。
 
+hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)，[#122](https://github.com/SoloJiang/lectern-app/pull/122)），同一台机器：
+
+- `just check`、`just test`（Linux 上的全部 crate，1271 个测试通过，跳过 1 个）、`just doctest`（7 个）、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。`just test -p lectern-git` 共 221 个测试，新增 8 个：`hunk_offsets_count_every_byte_of_the_lines_before`、`hunk_cache_keeps_the_byte_offsets`、`hunk_cache_entry_of_an_older_format_is_not_read`、`hunk_cache_hit_has_the_offsets_of_its_own_contents`、`rows_offsets_with_crlf_and_a_missing_final_newline`、`rows_offsets_of_every_row_start_its_line`、`rows_offsets_start_their_lines_in_every_fixture`、`worktree_byte_offsets_index_the_canonical_content`；`rows_*` 的 5 个快照加上每行两侧的偏移，新增 1 个 CRLF 与末尾没有换行的快照，逐个手算核对过。
+- 偏移的检查（`rows::tests::assert_offsets`）：每个 hunk 的偏移等于这一行在 `texts` 文本里的行首；上下文为 0、3 和全部显示时，每个展示行的偏移在行首（为 0 或前一个字节是 `\n`），从偏移起恰好是 `Text::line` 的字节，之后是 `\n` 或文本末尾；配对行的词级区间加上行的偏移得到同样的字节。4 个树夹具（`basic` 的 `crlf.txt`、`noeol.txt`，`renames` 的相似重命名，`real`，`rename_many`）的全部文本文件，以及 `worktree_conversions` 在 `core.autocrlf` 为 false、true、input 时的全部文本文件（`-text` 保留的 CRLF、混合换行、单独的 CR、UTF-16 转成 UTF-8）都通过。
+- 规范内容的口径：`core.autocrlf = true`、HEAD 为 `one\ntwo\nthree\n`、工作区为 `one\r\nTWO\r\nthree\r\n` 时，hunk 的两侧偏移都是 4（原始字节里是 5），`texts` 的新一侧是转换后的 `one\nTWO\nthree\n`。
+- 缓存：`CACHE_FORMAT` 为 3；用同样两个 OID、格式 2 的键写入的条目，格式 3 的键查不到；命中的 hunk 与计算的相同（偏移在内），另一个仓库里路径不同、内容相同的文件命中同一条目，偏移对它的文本照样成立。`Hunk` 从 16 字节变为 32 字节，LRU 的开销按 `size_of::<Hunk>()` 计，16 MiB 的预算不变。
+- 计时（`just bench --measure git/`，Linux 上只记录、不判定）：`git/diff_50_cold` 中位数 4.53 ms（改动前同一台机器 4.84 ms，预算 < 20 ms），`git/diff_50_warm` 312 µs（改动前 301 µs，预算 < 2 ms），差别在噪声以内；`git/resident` 874 KB（≤ 48 MB），其余 `git/` 基准都在预算内。
+- 没有验证的：macOS 上没有运行；视图按偏移打开完整文件、按窗口高亮的使用方还没有实现（`file_reader`、`review_view`）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1009,3 +1031,10 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - 签名按 code_intel 设计，路径参数是 `&RepoPath`，返回本 crate 的 `Oid`。
 - 未跟踪的 `.gitattributes` 不看忽略规则，与 git 相同、与工作区比较不同（见「规范内容的 OID」）：单个路径只查各级目录，没有遍历可用；为它另建忽略栈只为了复现工作区比较的已知限制，不值得。
 - 实现放在 `compare.rs`（`compare::canonical_oid`），与工作区比较共用 index 快照、`read_attr_file` 和 `WorktreeAttrs`，`conversion.rs` 不变。
+
+字节偏移（ADR 0034）：
+
+- 展示行的偏移是 `Option<u64>`，`Hunk` 的是 `u64`。一侧不是 `SideText::Text` 时（`TooLarge`、`NotRetained`、`Unavailable`），这一侧的 hunk 内后续行和最后一个 hunk 之后的行无法从 hunk 和另一侧推出（需要这一侧每行的长度），所以这一侧的偏移一律为 None；`Absent` 一侧是空内容，偏移为 0。本 crate 自己的改动集里 `Detail::Text` 的两侧总是 `Text` 或 `Absent`（`NotRetained` 的文件改为 `Truncated`），None 只出现在对象在 `texts` 之前消失、或调用方用别的文本计算展示行时。
+- 新增 `Text::line_start`：展示行的偏移和词级区间在文本里的位置都由它给出，视图也用它把词级区间换算到文本里。
+- 设计写的「缓存的命名空间版本加一」：`cache` 的 `git.diff` 命名空间还没有接入，现在的版本是键里的格式版本 `CACHE_FORMAT`，从 2 改为 3；接入 `cache` 时它就是命名空间的版本。
+- 偏移的口径（规范内容）设计没有写，按「展示行」的「字节偏移」一段决定：与 hunk 缓存的键（规范内容的 blob OID）和 `texts` 的文本一致。

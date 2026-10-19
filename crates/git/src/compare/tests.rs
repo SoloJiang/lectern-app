@@ -856,6 +856,58 @@ fn worktree_conversions_match_git() {
     }
 }
 
+/// Byte offsets index the canonical content (what `git add` would store and
+/// what `texts` returns), not the raw worktree bytes: under
+/// `core.autocrlf = true` a CRLF worktree file is LF in its blob.
+#[test]
+fn worktree_byte_offsets_index_the_canonical_content() {
+    let t = clean_repo(&[("a.txt", b"one\ntwo\nthree\n")]);
+    t.append_config("[core]\n\tautocrlf = true\n");
+    let raw: &[u8] = b"one\r\nTWO\r\nthree\r\n";
+    t.write_file("a.txt", raw);
+    let set = changes(&t);
+    let change = &set.files()[0];
+    let Detail::Text(diff) = &change.detail else {
+        panic!("{:?}", change.detail);
+    };
+    let canonical: &[u8] = b"one\nTWO\nthree\n";
+    assert_eq!(
+        change.new.as_ref().unwrap().content,
+        Content::Blob(Oid::for_blob(HashKind::Sha1, canonical))
+    );
+    let h = &diff.hunks[0];
+    assert_eq!((h.old.clone(), h.new.clone()), (1..2, 1..2));
+    // "one\n" is 4 bytes; in the raw file it would be 5.
+    assert_eq!((h.old_byte, h.new_byte), (4, 4));
+    let texts = set.texts(&t.repo(), 0).unwrap();
+    let SideText::Text(new) = &texts.new else {
+        panic!("{:?}", texts.new);
+    };
+    assert_eq!(new.bytes(), canonical);
+    crate::rows::tests::assert_offsets(diff, &texts, "a.txt");
+
+    // The conversion fixture under each `core.autocrlf`: CRLF kept by
+    // `-text`, mixed endings, a lone CR, UTF-16 converted to UTF-8.
+    let dir = fixture("worktree_conversions");
+    for autocrlf in ["false", "true", "input"] {
+        let t = TestRepo::new();
+        t.append_config(&format!("[core]\n\tautocrlf = {autocrlf}\n"));
+        t.import_worktree_fixture(&dir);
+        let set = changes(&t);
+        let mut checked = 0;
+        for (i, change) in set.files().iter().enumerate() {
+            let Detail::Text(diff) = &change.detail else {
+                continue;
+            };
+            let texts = set.texts(&t.repo(), i).unwrap();
+            let what = format!("{autocrlf} {:?}", change.path);
+            crate::rows::tests::assert_offsets(diff, &texts, &what);
+            checked += 1;
+        }
+        assert!(checked >= 10, "{checked} files under autocrlf = {autocrlf}");
+    }
+}
+
 #[test]
 fn worktree_attribute_change_recomputes_stat_clean_files() {
     let t = clean_repo(&[("a.txt", b"one\r\ntwo\r\n")]);
