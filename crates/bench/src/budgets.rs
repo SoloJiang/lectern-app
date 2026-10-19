@@ -920,6 +920,29 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // Range read (platform design「范围读取」): the first-screen call on a
+    // 64 MiB file (8 KiB head and 132 KiB around a mid-file target), and
+    // 64 KiB pages on a held `OpenFile`; ratios against the std equivalents.
+    share(
+        "platform/safe_read_range",
+        &[
+            median(Limit::RatioAtMost(1.5)),
+            median(Limit::TimeBelow(us(200))),
+        ],
+        PLATFORM,
+        State::Planned("#103"),
+        Time,
+    ),
+    share(
+        "platform/safe_read_page",
+        &[
+            median(Limit::RatioAtMost(1.5)),
+            median(Limit::TimeBelow(us(50))),
+        ],
+        PLATFORM,
+        State::Planned("#103"),
+        Time,
+    ),
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),
     share("executor/wake_1000x100", RECORD, EXECUTOR, ACTIVE, Time),
     share("kernel/service_get", RECORD, KERNEL, ACTIVE, Time),
