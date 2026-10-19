@@ -59,9 +59,12 @@ enum Change {
     Close,
     /// A language pack is installed: the language table changes.
     Grammar,
+    /// The pack k.jpack is in is upgraded: the table has the new version
+    /// before the reconcile rebuilds the map.
+    Upgrade,
 }
 
-const CHANGES: [Change; 7] = [
+const CHANGES: [Change; 8] = [
     Change::Commit,
     Change::Evict,
     Change::Map,
@@ -69,15 +72,22 @@ const CHANGES: [Change; 7] = [
     Change::Switch,
     Change::Close,
     Change::Grammar,
+    Change::Upgrade,
 ];
 
-/// Where a change happens: at a step of the query, or (a reused prefetch)
-/// between the prefetch and the query.
+/// Where a change happens: at a step of the query; just before the query
+/// is asked, so it arrives while the reconcile the change requested has
+/// not run (no ready snapshot after a switch, the old one otherwise); or
+/// (a reused prefetch) between the prefetch and the query.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum At {
     Step(Step),
+    Before,
     Between,
 }
+
+/// A method `item` in the pack's language: `Named` lists it.
+const K_PACK: &str = "class K { void item() { } }\n";
 
 const STEPS: [Step; 5] = [
     Step::Snapshot,
@@ -115,12 +125,19 @@ fn commit(inner: &Inner, snap: &Snap, path: &str, text: &[u8]) {
 /// `feature` worktree with one more definition.
 fn fixture(kind: Kind) -> Harness {
     let h = Harness::new();
-    let files: [(&str, &str); 5] = [
+    h.grammars.install(
+        "jpack",
+        &["jpack"],
+        crate::testing::java_pack(1, Arc::new(())),
+    );
+    h.settle();
+    let files: [(&str, &str); 6] = [
         ("a.ts", RUN),
         ("c.ts", ITEM),
         ("d.ts", ITEM2),
         ("e.ts", USE),
         ("f.ts", USE2),
+        ("k.jpack", K_PACK),
     ];
     for (path, text) in files {
         h.git.add("main", &[(path, text.as_bytes())]);
@@ -142,6 +159,7 @@ fn fixture(kind: Kind) -> Harness {
     let snap = inner.snap(&h.key()).expect("open");
     commit(inner, &snap, "c.ts", ITEM.as_bytes());
     commit(inner, &snap, "e.ts", USE.as_bytes());
+    commit(inner, &snap, "k.jpack", K_PACK.as_bytes());
     h.settle();
     h
 }
@@ -187,9 +205,17 @@ fn change(h: &Harness, c: Change) -> HookFn {
         }),
         Change::Grammar => Box::new(move |inner, _| {
             grammars.install(
+                "kpack",
+                &["kpack"],
+                crate::testing::java_pack(3, Arc::new(())),
+            );
+            inner.arc().expect("live").grammar_round();
+        }),
+        Change::Upgrade => Box::new(move |inner, _| {
+            grammars.install(
                 "jpack",
                 &["jpack"],
-                crate::testing::java_pack(1, Arc::new(())),
+                crate::testing::java_pack(2, Arc::new(())),
             );
             inner.arc().expect("live").grammar_round();
         }),
@@ -273,6 +299,7 @@ fn matrix(kind: Kind) -> (usize, usize) {
     assert!(old.complete, "{kind:?}: the old view's result is complete");
     assert!(!old.listed.is_empty(), "{kind:?}");
     let mut places: Vec<At> = STEPS.iter().map(|s| At::Step(*s)).collect();
+    places.push(At::Before);
     if kind == Kind::Prefetch {
         places.push(At::Between);
     }
@@ -301,7 +328,10 @@ fn matrix(kind: Kind) -> (usize, usize) {
                     *lock(&h.indexer.inner().step_hook) = Some((step, hook));
                     false
                 }
-                At::Between => {
+                // Applied with nothing run after it: the reconcile it
+                // requests is still queued when the query runs
+                // (`Interactive` before `Background`).
+                At::Before | At::Between => {
                     let inner = h.indexer.inner();
                     let snap = inner.snap(&h.key()).expect("open");
                     change(&h, c)(inner, &snap);
@@ -378,30 +408,113 @@ fn matrix(kind: Kind) -> (usize, usize) {
 #[test]
 fn view_matrix_definition() {
     let (cases, ran) = matrix(Kind::Definition);
-    assert_eq!(cases, 35);
+    assert_eq!(cases, 48);
     assert_eq!(ran, cases, "every case ran its change");
 }
 
 #[test]
 fn view_matrix_prefetch() {
     let (cases, ran) = matrix(Kind::Prefetch);
-    assert_eq!(cases, 42);
+    assert_eq!(cases, 56);
     assert_eq!(ran, cases, "every case ran its change");
 }
 
 #[test]
 fn view_matrix_references() {
     let (cases, ran) = matrix(Kind::References);
-    assert_eq!(cases, 35);
+    assert_eq!(cases, 48);
     assert_eq!(ran, cases, "every case ran its change");
 }
 
 #[test]
 fn view_matrix_named() {
     let (cases, ran) = matrix(Kind::Named);
-    assert_eq!(cases, 35);
-    // `Named` reads no file: its 7 `Read` cases never reach the step.
-    assert_eq!(ran, cases - 7);
+    assert_eq!(cases, 48);
+    // `Named` reads no file: its 8 `Read` cases never reach the step.
+    assert_eq!(ran, cases - 8);
+}
+
+/// A folder project opening: the reconcile builds the base map (its file
+/// list has no OIDs) before it reads every file into the overlay. In that
+/// window no snapshot is ready: a query asked there waits, then answers
+/// from the complete map.
+#[test]
+fn view_folder_project_opening_has_no_snapshot_before_its_overlay() {
+    use lectern_services::project::{
+        ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
+    };
+
+    let h = Harness::new();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical");
+    std::fs::write(root.join("a.ts"), RUN).expect("write");
+    std::fs::write(root.join("c.ts"), ITEM).expect("write");
+    let key = ProjectKey::Folder {
+        root: Arc::from(root.as_path()),
+    };
+    let mut files = FileList::builder();
+    files.push("a.ts", FileKind::File);
+    files.push("c.ts", FileKind::File);
+    let in_window: Arc<std::sync::Mutex<Option<bool>>> = Arc::default();
+    let seen = in_window.clone();
+    let k = key.clone();
+    *lock(&h.indexer.inner().after_base) = Some(Box::new(move |inner| {
+        *seen.lock().unwrap() = Some(inner.snap(&k).is_some());
+    }));
+    let event = h.projects.set(ProjectSnapshot {
+        key: key.clone(),
+        generation: 1,
+        name: "folder".into(),
+        worktrees: Arc::from(Vec::new()),
+        active: Some(ActiveTree {
+            root: Arc::from(root.as_path()),
+            worktree: None,
+            opened_at: "".into(),
+            files: Scan::Ready(Arc::new(files.build())),
+            packages: Scan::Ready(Arc::from(Vec::new())),
+        }),
+    });
+    h.indexer.project_event(&event);
+    // Asked before anything ran: it waits for the snapshot.
+    let id = h.indexer.query(Query {
+        project: key.clone(),
+        kind: QueryKind::Named {
+            name: "item".into(),
+            near: None,
+        },
+    });
+    h.settle();
+    assert_eq!(
+        *in_window.lock().unwrap(),
+        Some(false),
+        "no snapshot between the base and the overlay"
+    );
+    // It started once the overlay was read: c.ts is a file of its map, not
+    // indexed yet, so it is reported, never taken as complete.
+    let r = h.indexer.results(id).expect("kept");
+    let got = outcome(Kind::Named, &r);
+    assert!(
+        !got.complete || got.listed.iter().any(|(p, ..)| p == "c.ts"),
+        "{:?} {:?}",
+        r.state,
+        got.listed
+    );
+    assert!(matches!(r.state, QueryState::Done(_)), "{:?}", r.state);
+    // Once indexed: complete, with c.ts.
+    let again = ask(
+        &h,
+        Query {
+            project: key,
+            kind: QueryKind::Named {
+                name: "item".into(),
+                near: None,
+            },
+        },
+    )
+    .expect("kept");
+    let got = outcome(Kind::Named, &again);
+    assert!(got.complete, "{:?}", again.state);
+    assert!(got.listed.iter().any(|(p, ..)| p == "c.ts"));
 }
 
 /// A query asked right after the current worktree changed, about the new

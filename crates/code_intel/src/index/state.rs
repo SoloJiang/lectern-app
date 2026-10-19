@@ -364,6 +364,26 @@ pub(crate) struct Watches {
     pub _worktree: WorktreeWatch,
 }
 
+/// One session's index as queries see it, published whole by the reconcile
+/// (`State::published`): every query snapshot comes from one of these, never
+/// from the current state or the current language table. Immutable; the
+/// map's hints are shared with the state while the map is current (the
+/// view's hint installs cover them).
+pub(crate) struct Published {
+    pub session: u64,
+    /// The map, base and overlay complete for the inputs it was built from.
+    pub map: LiveMap,
+    /// The language table the map was built with (`BaseMap::table`): the
+    /// versions a query's lookups ask for, so they match the hints' stamp.
+    pub table: LanguageTable,
+    /// The languages disabled this run when this was published.
+    pub disabled: HashSet<LangName>,
+    pub snapshot: Option<Arc<ProjectSnapshot>>,
+    pub root: Option<Arc<SafeRoot>>,
+    pub tree: Option<Tree>,
+    pub packages: Arc<[Package]>,
+}
+
 /// A project's state for one active worktree (a session). Switching the
 /// active worktree starts a new session: everything below is rebuilt, what
 /// was written stays in the cache by OID.
@@ -415,9 +435,14 @@ pub(crate) struct State {
     /// On battery, a query or `names` lets tiers 4 and 5 go on until the
     /// project closes or the power source changes.
     pub demand: bool,
-    /// Queries asked before this session's map was built: started when
-    /// `rebuild_base` installs it (`Inner::resume_waiting`).
+    /// Queries asked while this session has no published snapshot: started
+    /// when the reconcile publishes one (`Inner::resume_waiting`).
     pub waiting: Vec<crate::query::Waiting>,
+    /// What queries answer from (「查询的视图」): published by the reconcile,
+    /// under this lock, only when it has consumed all its input (the base
+    /// and the overlay are complete for the current inputs). The previous
+    /// one stays while a reconcile runs; a new session has none.
+    pub published: Option<Arc<Published>>,
 }
 
 impl State {
@@ -472,6 +497,7 @@ impl State {
             in_flight: HashMap::new(),
             demand: false,
             waiting: Vec::new(),
+            published: None,
         }
     }
 

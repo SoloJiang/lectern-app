@@ -342,6 +342,117 @@ fn head_dirty_staged_index_and_commit() {
     assert!(h.indexer.head_clean(&h.key(), "src/A.java"));
 }
 
+/// How a provider ends a request in [`escalate_arbitration_by_outcome`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Outcome {
+    Pending,
+    Ok,
+    Err,
+    Timeout,
+}
+
+const OUTCOMES: [Outcome; 4] = [
+    Outcome::Pending,
+    Outcome::Ok,
+    Outcome::Err,
+    Outcome::Timeout,
+];
+
+fn end(p: &Fake, outcome: Outcome) {
+    match outcome {
+        Outcome::Pending => {}
+        Outcome::Ok => p.answer_all(&[B_SIZE, C_SIZE]),
+        Outcome::Err | Outcome::Timeout => {
+            for (_, reply) in std::mem::take(&mut *p.pending.lock().unwrap()) {
+                reply.send(Err(if outcome == Outcome::Err {
+                    SemanticError::Failed("broken".into())
+                } else {
+                    SemanticError::Timeout
+                }));
+            }
+        }
+    }
+}
+
+/// Every pair of outcomes of a head-only provider (SCIP) and another
+/// (jdtls), in both reply orders: B.java equals HEAD, C.java does not.
+/// HEAD-equal files belong to the head-only provider only while it is
+/// pending or answered with locations; one that failed or timed out owns
+/// nothing, and jdtls's locations there count. The state is `Pending`
+/// while one can still answer and none has, `Failed` when none can.
+#[test]
+fn escalate_arbitration_by_outcome() {
+    for scip_ends in OUTCOMES {
+        for jdtls_ends in OUTCOMES {
+            for scip_first in [true, false] {
+                let what =
+                    format!("scip {scip_ends:?}, jdtls {jdtls_ends:?}, scip first {scip_first}");
+                let h = java();
+                h.git.write(
+                    "main",
+                    "src/C.java",
+                    &[C.as_bytes(), b"// edited\n"].concat(),
+                );
+                h.emit(&[("src/C.java", CHANGED)]);
+                h.settle();
+                assert!(h.indexer.head_clean(&h.key(), "src/B.java"), "{what}");
+                assert!(!h.indexer.head_clean(&h.key(), "src/C.java"), "{what}");
+                let scip = Fake::new("scip", true);
+                let jdtls = Fake::new("jdtls", false);
+                let _a = h.indexer.register_provider(scip.clone(), token(&h));
+                let _b = h.indexer.register_provider(jdtls.clone(), token(&h));
+                let id = ask(&h);
+                assert_eq!(scip.calls().len(), 1, "{what}");
+                assert_eq!(jdtls.calls().len(), 1, "{what}");
+                if scip_first {
+                    end(&scip, scip_ends);
+                    h.settle();
+                    end(&jdtls, jdtls_ends);
+                } else {
+                    end(&jdtls, jdtls_ends);
+                    h.settle();
+                    end(&scip, scip_ends);
+                }
+                let state = results(&h, id).semantic.clone();
+                // The expected merge.
+                let head_class = matches!(scip_ends, Outcome::Pending | Outcome::Ok);
+                let mut paths: Vec<&str> = Vec::new();
+                if scip_ends == Outcome::Ok {
+                    paths.push("src/B.java");
+                }
+                if jdtls_ends == Outcome::Ok {
+                    if !head_class {
+                        paths.push("src/B.java");
+                    }
+                    paths.push("src/C.java");
+                }
+                paths.sort();
+                let any_ok = scip_ends == Outcome::Ok || jdtls_ends == Outcome::Ok;
+                let any_pending = scip_ends == Outcome::Pending || jdtls_ends == Outcome::Pending;
+                match state {
+                    // The candidates are B.size and C.size.
+                    SemanticState::Same => {
+                        assert!(any_ok, "{what}");
+                        assert_eq!(paths, ["src/B.java", "src/C.java"], "{what}");
+                    }
+                    SemanticState::Ready(l) => {
+                        assert!(any_ok, "{what}");
+                        let got: Vec<&str> = l.iter().map(|l| &*l.path).collect();
+                        assert_eq!(got, paths, "{what}");
+                    }
+                    SemanticState::Pending => {
+                        assert!(!any_ok && any_pending, "{what}");
+                    }
+                    SemanticState::Failed => {
+                        assert!(!any_ok && !any_pending, "{what}");
+                    }
+                    other => panic!("{what}: {other:?}"),
+                }
+            }
+        }
+    }
+}
+
 /// SCIP and jdtls both handle Java: whatever order they reply in, the
 /// merge is the same: HEAD-equal files from SCIP, changed and untracked
 /// ones from jdtls; a reply to a stale ID is dropped; closing cancels what
