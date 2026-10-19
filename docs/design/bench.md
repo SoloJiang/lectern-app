@@ -580,8 +580,8 @@ crates/bench/
 | `git/changes_count/per_path_bytes` | 存活字节 ≤ 1 KB（同上除以改动路径数；ADR 0035 按它给首页的改动集定上限；`Memory`） | [git](git.md#性能) | `git` 第 4 步（释放比较用的 index；另一个前提 stat 缓存不持有内容已完成） |
 | `git/resident` | 存活字节 ≤ 48 MB（hunk LRU 16 MB + 一个 `ChangeSet` 32 MB，空闲时不持有句柄） | [git](git.md#性能) | `git` 第 3 步 |
 | `git/open_100k`、`git/filter_100k`、`git/changes_clean_100k` | 中位数 < 40 ms / < 400 ms / < 2 s（10 万个跟踪文件、`core.ignoreCase`：`git/open` 的读取，index 不在缓存里；index 变化后重建 fs_watch 过滤器；干净工作区的 `changes`，每个样本用新的 `Worktree`，index 每次都解析） | [git](git.md#性能) | `git/open_100k` 随 [ADR 0035](../adr/0035.md) 加入；另两项在 macOS CI 上是 678–766 ms 和 9.05–9.54 s，由定位并修正这项开销的 `git` PR 加入 |
-| `git/filter_100k/walk`、`git/changes_clean_100k/stat_all`、`git/changes_clean_100k/read_all` | 只记录（同一仓库：经 `SafeRoot::list` 列出工作区的每个目录一次；对每个跟踪路径 `SafeRoot::stat` 一次；对每个跟踪路径 `SafeRoot::read` 一次。用来定位上一行两项在 macOS 上的开销） | [git](git.md#性能) | 随 ADR 0035 加入 |
-| `git/changes_clean_100k/reads`、`…/reads_after_read_all`、`…/stat_racy`、`…/stat_unmatched`、`…/stat_mtime`、`…/stat_size`、`…/stat_ctime`、`…/stat_ino`、`…/stat_owner` | 只记录，计数（`Value::Count`；同一仓库：新 `Worktree` 上第一次比较读过的文件数，`read_all` 之后再比较一次的读取数，读取之前 index 的 stat 与 `SafeRoot::stat` 逐项不一致的条目数。分辨 macOS 上的开销是比较去读了内容，还是 stat 与遍历本身慢，见 [git 设计「与设计的差异」](git.md#与设计的差异)） | [git](git.md#性能) | `git` 的 stat 缓存修正 |
+| `git/filter_100k/walk`、`git/changes_clean_100k/stat_all` | 只记录（同一仓库：经 `SafeRoot::list` 列出工作区的每个目录一次；对每个跟踪路径 `SafeRoot::stat` 一次。用来定位上一行两项在 macOS 上的开销；原来的 `git/changes_clean_100k/read_all` 已去掉，见「实际验证」） | [git](git.md#性能) | 随 ADR 0035 加入 |
+| `git/changes_clean_100k/reads`、`…/stat_racy`、`…/stat_unmatched`、`…/stat_mtime`、`…/stat_size`、`…/stat_ctime`、`…/stat_ino`、`…/stat_owner` | 只记录，计数（`Value::Count`；同一仓库：新 `Worktree` 上第一次比较读过的文件数，读取之前 index 的 stat 与 `SafeRoot::stat` 逐项不一致的条目数。分辨 macOS 上的开销是比较去读了内容，还是 stat 与遍历本身慢，见 [git 设计「与设计的差异」](git.md#与设计的差异)） | [git](git.md#性能) | `git` 的 stat 缓存修正 |
 | `git/compare_100k/peak_bytes` | 存活字节 ≤ 72 MB（同一仓库上新 `Worktree` 的一次 `changes` 期间的峰值：比较自己解析的 index、折叠副本、未跟踪遍历、改动集；临时内存，不是空闲份额；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
 | `git/compare_100k/retained_bytes` | 存活字节 < 1 MB（同一次比较返回、丢掉改动集之后 `Worktree` 仍持有的字节：比较用的 index 不在调用之间保留；`Memory`） | [git](git.md#性能) | `git` 第 4 步 |
 | `git/filter_cloudprint_bytes`、`git/filter_100k_bytes` | 存活字节 < 1 MB / ≤ 16 MB（`cloudprint` 形状 / 10 万文件的仓库，`core.ignoreCase`；fs_watch 过滤器连同它的 `Worktree` 句柄：与 `project` 的句柄共用的解析后 index、折叠顺序、忽略规则；`git` 的份额，`fs_watch/resident*` 和 `project/resident_*` 不含它；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
@@ -868,8 +868,9 @@ CI：
 
 `git` 的 stat 缓存修正（`Refs #14`），同一类 Linux 虚拟机：
 
-- `Value` 增加 `Count(u64)`：观察一次的计数，报告里是 `{"count": n, "samples": 1, "unit": "count"}`，文字是数字本身，没有适用的检查（`stats_counts_are_record_only`）。预算表加入只记录的 `git/changes_clean_100k/reads`、`…/reads_after_read_all` 和 7 个 `…/stat_*`（「预算表」），`git/changes_count/per_path_bytes` 的「加入」改为只差 `git` 第 4 步。`just test -p lectern-bench` 63 个测试通过。
-- `just bench --measure git/`：`git/changes_count/total_bytes` 从 76.7 MB 降到 2.12 MB；计数在 Linux 上是 `reads` 1、`reads_after_read_all` 1、`stat_*` 全为 0。数字见 [git 设计「实际验证」](git.md#实际验证)。
+- `Value` 增加 `Count(u64)`：观察一次的计数，报告里是 `{"count": n, "samples": 1, "unit": "count"}`，文字是数字本身，没有适用的检查（`stats_counts_are_record_only`）。预算表加入只记录的 `git/changes_clean_100k/reads` 和 7 个 `…/stat_*`（「预算表」），`git/changes_count/per_path_bytes` 的「加入」改为只差 `git` 第 4 步。
+- `just bench --measure git/`：`git/changes_count/total_bytes` 从 76.7 MB 降到 2.12 MB；计数在 Linux 上是 `reads` 1（根目录的 `.gitignore`）、`stat_*` 全为 0。数字见 [git 设计「实际验证」](git.md#实际验证)。
+- macOS CI（[#130](https://github.com/SoloJiang/lectern-app/pull/130) 的 notice，修正之前的代码）：`git/filter_100k/walk` 502 ms、`git/changes_clean_100k/stat_all` 1.03 s、`git/changes_clean_100k/read_all` 14.6 s、`git/changes_count/total_bytes` 76.7 MB。`changes_clean_100k` 约 9 s，介于 stat 与读取全部文件之间，说明 macOS 上比较读了大部分文件。`read_all` 每个样本 14.6 s，按采样规则要跑十几个样本，CI 时间过长，所以去掉了它，连同依赖它的 `…/reads_after_read_all`：是否读、为什么读由 `…/reads` 和 `…/stat_*` 回答，读取的代价已经知道。rebase 到 #130 之后 `just test -p lectern-bench` 65 个测试通过。
 
 ## 与设计的差异
 

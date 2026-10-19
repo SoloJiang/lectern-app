@@ -705,23 +705,15 @@ pub static BUDGETS: &[Budget] = &[
         MACOS_100K,
         Time,
     ),
-    // Recorded, to locate it: one `SafeRoot::stat`, and one `SafeRoot::read`,
-    // of every tracked path.
+    // Recorded, to locate it: one `SafeRoot::stat` of every tracked path.
+    // (`…/read_all`, one `SafeRoot::read` of each, is gone: 14.6 s a sample
+    // on macOS CI, and the counts below say whether the comparison reads.)
     share("git/changes_clean_100k/stat_all", RECORD, GIT, ACTIVE, Time),
-    share("git/changes_clean_100k/read_all", RECORD, GIT, ACTIVE, Time),
     // Recorded counts, to tell the hypotheses apart on macOS CI: the files
     // the first comparison read (1 when every stat matches: the root
-    // `.gitignore` the untracked walk reads), the same after
-    // `read_all` read every file, and per stat field how many index entries
-    // differ from `SafeRoot::stat` before any read.
+    // `.gitignore` the untracked walk reads), and per stat field how many
+    // index entries differ from `SafeRoot::stat` before any read.
     share("git/changes_clean_100k/reads", RECORD, GIT, ACTIVE, Time),
-    share(
-        "git/changes_clean_100k/reads_after_read_all",
-        RECORD,
-        GIT,
-        ACTIVE,
-        Time,
-    ),
     share(
         "git/changes_clean_100k/stat_racy",
         RECORD,
