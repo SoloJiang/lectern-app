@@ -13,7 +13,8 @@ use super::account::{Account, Reason};
 use super::rank::distance;
 use super::{Run, Snap};
 use crate::extract::{
-    BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, ExtractStatus, INTERACTIVE_MAX_LEN, Lang, compatible,
+    BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, ExtractStatus, INTERACTIVE_DEADLINE,
+    INTERACTIVE_MAX_LEN, Lang, compatible,
 };
 use crate::index::Inner;
 use crate::index::state::under;
@@ -33,6 +34,23 @@ pub(crate) struct FileDeadline {
 impl FileDeadline {
     pub(crate) fn new(now: Instant, until: Option<Instant>) -> FileDeadline {
         let full = now + BACKGROUND_DEADLINE;
+        match until {
+            Some(until) if until < full => FileDeadline {
+                at: until,
+                cut: true,
+            },
+            _ => FileDeadline {
+                at: full,
+                cut: false,
+            },
+        }
+    }
+
+    /// The interactive limit from now (tier 1's): the text a query is about
+    /// (the definition's own file of find references), and files whose
+    /// stored unit is `TooLarge` or `TimedOut`, cut at `until`.
+    pub(crate) fn interactive(now: Instant, until: Option<Instant>) -> FileDeadline {
+        let full = now + INTERACTIVE_DEADLINE;
         match until {
             Some(until) if until < full => FileDeadline {
                 at: until,
@@ -174,7 +192,8 @@ impl Snap {
     /// The search's scope for a reference at `anchor` in `lang`: the
     /// deepest sub-project holding it, the whole worktree without one; its
     /// files in `lang`'s group that are not indexed and not being extracted
-    /// right now, nearest first. Once the namespace is full a matching hint
+    /// right now, nearest first; those stored `TooLarge` or `TimedOut` too
+    /// (their units hold nothing). Once the namespace is full a matching hint
     /// does not prove its unit: the hinted files of the scope are checked
     /// against the store first (`verify_hinted`), and those missing are
     /// searched too.
@@ -193,7 +212,13 @@ impl Snap {
                 return;
             }
             if !self.unindexed(&eff) {
-                if self.full {
+                // Stored without its definitions (`TooLarge`, `TimedOut`):
+                // read and searched, up to the interactive limit.
+                if self.unfinished(&eff) {
+                    if !self.in_flight(&eff) {
+                        files.push(eff);
+                    }
+                } else if self.full {
                     hinted.push(eff);
                 }
                 return;

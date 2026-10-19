@@ -53,6 +53,15 @@ fn text_ref(git: &FakeGit, path: &str, text: &[u8]) -> TextRef {
     }
 }
 
+/// With `CODE_INTEL_BENCH_FULL` set, the queries run with the project's
+/// namespace full (`Indexer::set_namespace_full`): the full-mode numbers of
+/// the design's「实际验证」, recorded by hand, never gated.
+fn maybe_full(rig: &Rig) {
+    if std::env::var_os("CODE_INTEL_BENCH_FULL").is_some() {
+        rig.indexer.set_namespace_full(&rig.git.key());
+    }
+}
+
 /// Every `Results` event's (query, generation, time).
 type Seen = Arc<Mutex<Vec<(QueryId, u32, Instant)>>>;
 
@@ -111,6 +120,7 @@ fn goto_indexed(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let rig = Rig::new(git, cache, Arc::new(SystemClock));
     rig.open_with(packages(&synthetic::package_dirs(n)));
     rig.settle();
+    maybe_full(&rig);
     let query = Query {
         project: rig.git.key(),
         kind: QueryKind::Definition {
@@ -201,6 +211,7 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let rig = Rig::new(git, cache, Arc::new(SystemClock));
     rig.open_with(packages(&synthetic::package_dirs(n)));
     rig.settle();
+    maybe_full(&rig);
     let (seen, _subscription) = listen(&rig)?;
     let query = Query {
         project: rig.git.key(),
@@ -273,6 +284,7 @@ fn search_stop(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     rig.host.kernel().pause();
     rig.open_with(packages(&["app".to_owned()]));
     rig.settle();
+    maybe_full(&rig);
     let (seen, _subscription) = listen(&rig)?;
     let query = Query {
         project: rig.git.key(),
@@ -343,6 +355,7 @@ fn references_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let rig = Rig::new(git, cache, Arc::new(SystemClock));
     rig.open_with(packages(&synthetic::package_dirs(n)));
     rig.settle();
+    maybe_full(&rig);
     let (_, r) = run(
         &rig,
         &Query {

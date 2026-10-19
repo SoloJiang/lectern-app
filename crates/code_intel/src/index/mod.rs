@@ -215,6 +215,13 @@ pub(crate) struct Inner {
     /// the overlay is read (tests: a query snapshot in that window).
     #[cfg(test)]
     pub after_base: Mutex<Option<AfterBase>>,
+    /// Tests: find references parses this path as if its deadline passed.
+    #[cfg(test)]
+    pub parse_timeout: Mutex<Option<String>>,
+    /// Tests: the full-mode statements the accountings' walks were allowed
+    /// to make outside the scope (`Stops::due` asked).
+    #[cfg(test)]
+    pub verify_checks: std::sync::atomic::AtomicUsize,
     /// Another registration of `code_intel.tags` for new projects (tests).
     #[cfg(test)]
     pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
@@ -284,6 +291,10 @@ impl Indexer {
             step_hook: Mutex::new(None),
             #[cfg(test)]
             after_base: Mutex::new(None),
+            #[cfg(test)]
+            parse_timeout: Mutex::new(None),
+            #[cfg(test)]
+            verify_checks: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             tables: Mutex::new(None),
         });
@@ -398,6 +409,24 @@ impl Indexer {
         let mut st = lock(&p.state);
         let walked = st.walk_eviction(eviction);
         st.batch.full = Some(walked);
+    }
+
+    /// Forgets the project's cached walks (`Project::walks`), so the next
+    /// query walks every file, as the first one after a change does (the
+    /// profiles of the first jump).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_walks(&self, project: &ProjectKey) {
+        if let Some(p) = self.inner.project(project) {
+            lock(&p.walks).clear();
+        }
+    }
+
+    /// The number of the project's cached walks (tests).
+    #[cfg(test)]
+    pub(crate) fn walks(&self, project: &ProjectKey) -> usize {
+        self.inner
+            .project(project)
+            .map_or(0, |p| lock(&p.walks).len())
     }
 
     /// Replaces the extraction the tiers call (tests count, block or steer
@@ -637,6 +666,7 @@ impl Inner {
                         steady: std::sync::atomic::AtomicU64::new(0),
                         state: Mutex::new(State::new(self.new_session(), &table, grammar)),
                         names: Mutex::new(crate::names::NameState::default()),
+                        walks: Mutex::new(Vec::new()),
                     });
                     open.push(p.clone());
                     (p, true)

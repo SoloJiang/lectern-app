@@ -169,7 +169,12 @@ fn cut_unchanged_hint_is_no_installation() {
     {
         let mut st = lock(&snap.project.state);
         let stamp = st.stamp(snap.project.evictions());
-        st.hint_paths(&eff.oid, &eff.lang.name().0, stamp);
+        st.hint_paths(
+            &eff.oid,
+            &eff.lang.name().0,
+            stamp,
+            crate::extract::ExtractStatus::Done,
+        );
     }
     let view = crate::query::View {
         hinted: after,

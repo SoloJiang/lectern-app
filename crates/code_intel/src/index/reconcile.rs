@@ -75,7 +75,11 @@ fn publish(st: &mut State, disabled: HashSet<LangName>) -> bool {
     // A Git project's overlay comes from the comparison, which needs the
     // root; a folder project's from reading every file through it.
     let incomplete = st.root.is_none() || (st.tree.is_some() && st.compare_failed);
+    // Sessions are numbered across the activation: (session, count) never
+    // repeats.
+    st.publishes += 1;
     st.published = Some(Arc::new(Published {
+        seq: (st.session << 32) | (st.publishes & 0xffff_ffff),
         incomplete,
         session: st.session,
         table: st.map.base.table().clone(),
@@ -804,7 +808,7 @@ impl Inner {
         let at = find_path(files, path);
         let index = at.and_then(|i| files.oid(i));
         let Some(rel) = SafeRel::new(path.as_bytes()) else {
-            return Some(WorktreeState::Unindexable);
+            return Some(WorktreeState::Excluded);
         };
         match root.read(rel, BACKGROUND_MAX_LEN as u64) {
             Ok(Read::File { bytes, .. }) => {
@@ -814,20 +818,19 @@ impl Inner {
             Ok(Read::Unsupported { meta }) if meta.kind == SafeKind::Dir => {
                 at.map(|_| WorktreeState::Absent)
             }
-            Ok(Read::Symlink { .. } | Read::TooLarge { .. } | Read::Unsupported { .. }) => {
-                Some(WorktreeState::Unindexable)
-            }
+            // Over the limit, or unreadable: a source file whose content is
+            // not known (queries count it).
+            Ok(Read::TooLarge { .. }) | Err(SafeError::Io(_)) => Some(WorktreeState::Unindexable),
+            Ok(Read::Symlink { .. } | Read::Unsupported { .. })
+            | Err(SafeError::PathThroughSymlink) => Some(WorktreeState::Excluded),
             Err(SafeError::NotFound) => Some(WorktreeState::Absent),
-            Err(SafeError::PathThroughSymlink | SafeError::Io(_)) => {
-                Some(WorktreeState::Unindexable)
-            }
         }
     }
 
     /// The state of a file read in full. Its raw OID is the overlay's OID;
     /// when the index has the path with another OID, the built-in
     /// conversions decide whether the content still equals it (CRLF
-    /// checkouts) or a filter's pointer is checked out (`Unindexable`).
+    /// checkouts) or a filter's pointer is checked out (`Excluded`).
     fn content_state(
         &self,
         tree: Option<&Tree>,
@@ -843,7 +846,7 @@ impl Inner {
             return WorktreeState::Content(raw);
         }
         match self.git.canonical_oid(tree, path, bytes) {
-            Ok(None) => WorktreeState::Unindexable,
+            Ok(None) => WorktreeState::Excluded,
             Ok(Some(canonical)) if canonical == index => WorktreeState::Content(index),
             Ok(Some(_)) => WorktreeState::Content(raw),
             Err(error) => {

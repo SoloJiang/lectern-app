@@ -181,9 +181,13 @@ pub enum WorktreeState {
     /// No file at the path: a deletion not staged, an entry outside the
     /// sparse checkout.
     Absent,
-    /// A file not indexed: over 1 MiB, unreadable, a path through a
-    /// symbolic link, a filter's pointer file (Git LFS).
+    /// A file of the worktree not indexed: over 1 MiB, or unreadable. Its
+    /// content is not known; a query counts it as not searched.
     Unindexable,
+    /// Not a source file this crate indexes: a symbolic link or a path
+    /// through one, a file of another kind, a filter's pointer file (Git
+    /// LFS). Not one of a query's files.
+    Excluded,
 }
 
 /// The overlay: worktree states of paths with a supported language, in
@@ -248,7 +252,7 @@ impl Overlay {
             let redundant = match state {
                 WorktreeState::Content(oid) => index_oid == Some(oid),
                 WorktreeState::Absent => at.is_none(),
-                WorktreeState::Unindexable => false,
+                WorktreeState::Unindexable | WorktreeState::Excluded => false,
             };
             if redundant {
                 continue;
@@ -489,7 +493,9 @@ pub struct Effective {
 /// One file of the map as a walk sees it, borrowed from the map: nothing is
 /// allocated for an index entry ([`LiveMap::each_file`]).
 pub(crate) struct FileRef<'a> {
-    pub oid: BlobId,
+    /// None for an `Unindexable` overlay entry: a file of the worktree whose
+    /// content is not known (over 1 MiB, unreadable).
+    pub oid: Option<BlobId>,
     pub lang: &'a Lang,
     pub slot: HintSlot,
     #[cfg_attr(
@@ -648,9 +654,9 @@ impl LiveMap {
     /// Every file of the map under `dir` ("" holds everything), or every
     /// one not under it (`inside` false), in a language `admit` admits
     /// (asked once per language of the map's table): index entries not
-    /// hidden by an overlay entry, then the overlay's `Content` entries.
-    /// No `Effective` and no path is built: 100 000 files take about a
-    /// millisecond.
+    /// hidden by an overlay entry, then the overlay's `Content` and
+    /// `Unindexable` entries (the latter without an OID). No `Effective` and
+    /// no path is built: 100 000 files take about a millisecond.
     pub(crate) fn each_file(
         &self,
         dir: &str,
@@ -689,7 +695,7 @@ impl LiveMap {
                 continue;
             };
             f(FileRef {
-                oid,
+                oid: Some(oid),
                 lang,
                 slot: HintSlot::Base(i as u32),
                 at: FileAt::Base(files, i),
@@ -699,8 +705,11 @@ impl LiveMap {
             if crate::index::state::under(path, dir) != inside {
                 continue;
             }
-            let WorktreeState::Content(oid) = state else {
-                continue;
+            // `Absent` and `Excluded` entries are no files of a query's.
+            let oid = match state {
+                WorktreeState::Content(oid) => Some(*oid),
+                WorktreeState::Unindexable => None,
+                WorktreeState::Absent | WorktreeState::Excluded => continue,
             };
             let Some(lang) = lang_of(self.overlay.lang_code(i)) else {
                 continue;
@@ -710,7 +719,7 @@ impl LiveMap {
                 None => HintSlot::Extra(path.clone()),
             };
             f(FileRef {
-                oid: *oid,
+                oid,
                 lang,
                 slot,
                 at: FileAt::Overlay(path),
