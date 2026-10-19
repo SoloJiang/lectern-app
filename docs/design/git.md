@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 实现。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -936,7 +936,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
 - `code_intel` 用到的其余接口不需要改动：`GitAccess::head` 取 `Worktree::head` 返回的 `HeadState` 里的提交（`Branch { commit }` 的 `commit`、`Detached { commit }`，unborn 为 None），`GitAccess::index_checksum` 直接转调 `Worktree::index_checksum`；两者返回 `Oid`，转成 `services` 的 `BlobId` 是 `code_intel` 自己的事。
 - 没有验证的：没有基准（code_intel 的设计没有为它列基准条目，调用频率由原始 OID 不等的文件数决定）；macOS 上没有运行。
 
-hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），同一台机器：
+hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)，[#122](https://github.com/SoloJiang/lectern-app/pull/122)），同一台机器：
 
 - `just check`、`just test`（Linux 上的全部 crate，1271 个测试通过，跳过 1 个）、`just doctest`（7 个）、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。`just test -p lectern-git` 共 221 个测试，新增 8 个：`hunk_offsets_count_every_byte_of_the_lines_before`、`hunk_cache_keeps_the_byte_offsets`、`hunk_cache_entry_of_an_older_format_is_not_read`、`hunk_cache_hit_has_the_offsets_of_its_own_contents`、`rows_offsets_with_crlf_and_a_missing_final_newline`、`rows_offsets_of_every_row_start_its_line`、`rows_offsets_start_their_lines_in_every_fixture`、`worktree_byte_offsets_index_the_canonical_content`；`rows_*` 的 5 个快照加上每行两侧的偏移，新增 1 个 CRLF 与末尾没有换行的快照，逐个手算核对过。
 - 偏移的检查（`rows::tests::assert_offsets`）：每个 hunk 的偏移等于这一行在 `texts` 文本里的行首；上下文为 0、3 和全部显示时，每个展示行的偏移在行首（为 0 或前一个字节是 `\n`），从偏移起恰好是 `Text::line` 的字节，之后是 `\n` 或文本末尾；配对行的词级区间加上行的偏移得到同样的字节。4 个树夹具（`basic` 的 `crlf.txt`、`noeol.txt`，`renames` 的相似重命名，`real`，`rename_many`）的全部文本文件，以及 `worktree_conversions` 在 `core.autocrlf` 为 false、true、input 时的全部文本文件（`-text` 保留的 CRLF、混合换行、单独的 CR、UTF-16 转成 UTF-8）都通过。
