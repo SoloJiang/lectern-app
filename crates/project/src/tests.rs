@@ -1,7 +1,8 @@
 //! Tests of the project model and the plugin (docs/design/project.md
 //! 「测试」): `open_*`, `worktrees_*`, `locate_*`, `resolve_*`, `facts_*`
 //! (the model's submissions; the pattern semantics are in `facts/tests.rs`),
-//! `plugin_*` and `real_repo_*`.
+//! `plugin_*` and `real_repo_*`; `shape_*` checks bench's synthetic
+//! repositories (`testing::Shape`).
 
 mod facts;
 mod locate;
@@ -10,5 +11,6 @@ mod plugin;
 mod real_repo;
 mod refresh;
 mod resolve;
+mod shape;
 mod support;
 mod worktrees;

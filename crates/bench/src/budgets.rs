@@ -484,11 +484,14 @@ pub static BUDGETS: &[Budget] = &[
         Process,
     ),
     share("plugin/*/resident", RECORD, KERNEL, STEP_5, Process),
+    // `phys_footprint` of two launches (kernel「性能」), with the app's
+    // measurement build; until then `project/resident_*_bytes` measures the
+    // same in live bytes, in process.
     share(
         "plugin/project/resident_cloudprint",
         &[median(Limit::BytesBelow(2 * MB))],
         PROJECT,
-        State::Planned("project"),
+        STEP_5,
         Process,
     ),
     // 12 MB before the file list carried blob OIDs; 100k × 32 bytes (a
@@ -497,7 +500,7 @@ pub static BUDGETS: &[Budget] = &[
         "plugin/project/resident_100k",
         &[median(Limit::BytesBelow(16 * MB))],
         PROJECT,
-        State::Planned("project"),
+        STEP_5,
         Process,
     ),
     share(
@@ -725,85 +728,116 @@ pub static BUDGETS: &[Budget] = &[
         "project/open_cloudprint",
         &[median(Limit::TimeBelow(ms(20)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "project/packages_cloudprint",
         &[median(Limit::TimeBelow(ms(15)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "project/open_100k/files",
         &[median(Limit::TimeBelow(ms(80)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "project/open_100k/packages",
         &[median(Limit::TimeBelow(ms(150)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "project/switch_worktree",
         &[median(Limit::TimeBelow(ms(30)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "project/resolve_package/hit",
         &[median(Limit::TimeBelow(ms(1)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "project/resolve_package/miss_cloudprint",
         &[median(Limit::TimeBelow(ms(20)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "project/resolve_package/miss_100k",
         &[median(Limit::TimeBelow(ms(150)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
+    // The model's refresh round only: the new index is parsed by the
+    // fs_watch filter reload (git's work) before the batch arrives.
     share(
         "project/refresh_index/cloudprint",
         &[median(Limit::TimeBelow(ms(15)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
     share(
         "project/refresh_index/100k",
         &[median(Limit::TimeBelow(ms(60)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
     ),
+    // Uncached: the pattern's result is not cached yet; each pattern asked
+    // once per new set of facts, taking turns at being first.
     share(
         "project/facts_contains/name",
         &[median(Limit::TimeBelow(us(1)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
+        Time,
+    ),
+    // The first pattern asked of facts just built.
+    share(
+        "project/facts_contains/name_first",
+        RECORD,
+        PROJECT,
+        ACTIVE,
         Time,
     ),
     share(
         "project/facts_contains/path",
         &[median(Limit::TimeBelow(ms(5)))],
         PROJECT,
-        State::Planned("project 第 5 步"),
+        ACTIVE,
         Time,
+    ),
+    // The plugin at rest, in live bytes: a kernel with it against one
+    // without, in one process (kernel「性能」's two launches); the numbers
+    // of `plugin/project/resident_*`. The one without arms the same watches,
+    // so the fs_watch filter and the parsed index it shares with the
+    // plugin's worktree handle are `fs_watch/resident`'s, not counted here.
+    share(
+        "project/resident_cloudprint_bytes",
+        &[median(Limit::BytesBelow(2 * MB))],
+        PROJECT,
+        ACTIVE,
+        Memory,
+    ),
+    share(
+        "project/resident_100k_bytes",
+        &[median(Limit::BytesBelow(16 * MB))],
+        PROJECT,
+        ACTIVE,
+        Memory,
     ),
     // ---- fs_watch (docs/design/fs_watch.md「性能」) ----
     // Single-thread extraction, about 1 MiB of each first-release language as
@@ -894,7 +928,8 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // `watch_repo` plus the current worktree's `watch_worktree` on an
-    // 11-worktree repository, at rest; the filter's file list not included.
+    // 11-worktree repository, at rest; the filter's index (`TrackedPaths`,
+    // shared with `project`'s worktree handle) included.
     share(
         "fs_watch/resident",
         &[median(Limit::BytesBelow(MB))],

@@ -165,6 +165,23 @@ impl OtherTrees {
         slot
     }
 
+    /// Every slot but `own`.
+    pub(crate) fn others(&self, own: &OtherSlot) -> Vec<OtherSlot> {
+        self.slots
+            .iter()
+            .filter(|(_, slot)| !Arc::ptr_eq(slot, own))
+            .map(|(_, slot)| slot.clone())
+            .collect()
+    }
+
+    /// The sub-projects cached for a worktree, for tests.
+    #[cfg(test)]
+    pub(crate) fn packages(&self, git_dir: &Path) -> Option<Arc<[Package]>> {
+        let (_, slot) = self.slots.iter().find(|(dir, _)| dir == git_dir)?;
+        let tree = slot.lock().ok()?;
+        tree.as_ref().map(|t| t.packages.clone())
+    }
+
     /// Drops the slots of one repository's worktrees.
     pub(crate) fn forget(&mut self, common_dir: &Path) {
         self.slots.retain(|(dir, _)| !dir.starts_with(common_dir));

@@ -118,7 +118,7 @@ impl LecternGit {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_discover(discover: DiscoverFn) -> LecternGit {
         LecternGit {
             ceilings: Vec::new(),

@@ -171,6 +171,12 @@ impl Model {
         lock(&self.others).clear();
     }
 
+    /// What `resolve_package` cached for the worktree at `git_dir`.
+    #[cfg(test)]
+    pub(crate) fn cached_packages(&self, git_dir: &Path) -> Option<Arc<[Package]>> {
+        lock(&self.others).packages(git_dir)
+    }
+
     fn host(&self) -> Option<&Arc<dyn Host>> {
         self.host.get()
     }
@@ -643,7 +649,11 @@ impl Projects for Model {
         if tree.prunable {
             return Err(ScanError::RootMissing);
         }
-        let packages = self.other_packages(repo, tree, &snapshot.name)?;
+        let active = snapshot.active.as_ref().and_then(|a| match &a.packages {
+            Scan::Ready(packages) => Some(packages),
+            _ => None,
+        });
+        let packages = self.other_packages(repo, tree, &snapshot.name, active)?;
         Ok(deepest(&packages, rel))
     }
 }

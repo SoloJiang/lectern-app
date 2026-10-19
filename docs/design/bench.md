@@ -32,9 +32,9 @@
 | `serde_json`（工作区已有） | 写 JSON 报告 | 已在依赖图里，不新增包 |
 | `lectern-kernel`（可选，`probe` feature） | 探针插件、裁剪插件集合 | kernel 层 |
 | `lectern-platform`（可选，`probe` feature） | 注册首帧回调 | 基础设施层 |
-| dev：`lectern-agents`、`lectern-cache`、`lectern-git`、`lectern-kernel`、`lectern-i18n`（各自打开 `test-support`），`lectern-platform`、`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`tempfile`、`insta` | 进程内基准的被测代码与夹具；单元测试的临时目录与快照 | 只编译进基准目标和测试 |
+| dev：`lectern-agents`、`lectern-cache`、`lectern-git`、`lectern-kernel`、`lectern-i18n`、`lectern-project`（各自打开 `test-support`），`lectern-platform`、`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`tempfile`、`insta` | 进程内基准的被测代码与夹具；单元测试的临时目录与快照 | 只编译进基准目标和测试 |
 | dev（只在 macOS）：`gpui`、`gpui_platform` | `empty_window` 示例程序 | 只在 macOS 声明，Linux 上本 crate 仍不依赖 GPUI |
-| 以后的 dev：`lectern-project` 和各插件 crate | 随这些 crate 的实现加入 | tool 层可以依赖任何层，包括插件 crate（[ADR 0025](../adr/0025.md)） |
+| 以后的 dev：其他插件 crate | 随这些 crate 的实现加入；`lectern-project` 随它的第 5 步加入 | tool 层可以依赖任何层，包括插件 crate（[ADR 0025](../adr/0025.md)） |
 
 本 crate 不新增任何外部 crate，`just deny` 与 `Cargo.lock` 的外部部分不变。
 
@@ -559,7 +559,7 @@ crates/bench/
 | `plugin/*/activate` | 四段之和 < 1 ms | [kernel](kernel.md#性能) | 第 5 步 |
 | `plugin/after_first_frame` | 激活条件含 `AfterFirstFrame` 的插件四段之和合计 < 5 ms | [kernel](kernel.md#性能) | 第 5 步 |
 | `plugin/*/resident` | 只记录；插件的设计文档给出数字时另加具体条目 | [kernel](kernel.md#性能) | 第 5 步 |
-| `plugin/project/resident_cloudprint`、`plugin/project/resident_100k` | < 2 MB / < 16 MB | [project](project.md#性能) | `project` |
+| `plugin/project/resident_cloudprint`、`plugin/project/resident_100k` | < 2 MB / < 16 MB | [project](project.md#性能) | 第 5 步（进程级，两次启动的 `phys_footprint`；在此之前进程内的同一测量见 `project/resident_*_bytes`） |
 | `agents/parse_throughput` | 中位数吞吐 ≥ 200 MB/s | [agents](agents.md#性能) | 第 1 步 |
 | `agents/append_4k` | 中位数 < 1 ms | [agents](agents.md#性能) | 第 1 步 |
 | `agents/discover_1000` | 中位数 < 500 ms | [agents](agents.md#性能) | `agents` 第 4 步 |
@@ -587,12 +587,14 @@ crates/bench/
 | `project/open_100k/files`、`project/open_100k/packages` | 中位数 < 80 ms / < 150 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/switch_worktree` | 中位数 < 30 ms | [project](project.md#性能) | `project` 第 5 步 |
 | `project/resolve_package/hit`、`…/miss_cloudprint`、`…/miss_100k` | 中位数 < 1 ms / < 20 ms / < 150 ms | [project](project.md#性能) | `project` 第 5 步 |
-| `project/refresh_index/cloudprint`、`…/100k` | 中位数 < 15 ms / < 60 ms | [project](project.md#性能) | `project` 第 5 步 |
-| `project/facts_contains/name`、`…/path` | 中位数 < 1 µs / < 5 ms | [project](project.md#性能) | `project` 第 5 步 |
+| `project/refresh_index/cloudprint`、`…/100k` | 中位数 < 15 ms / < 60 ms（只计模型那一轮；新 index 的解析是 fs_watch 重建过滤器时 `git` 的工作，在批次交付之前完成，不计入） | [project](project.md#性能) | `project` 第 5 步 |
+| `project/facts_contains/name`、`…/path` | 中位数 < 1 µs / < 5 ms（未缓存：模式的结果还没有缓存，每组新 facts 上每个模式各问一次） | [project](project.md#性能) | `project` 第 5 步 |
+| `project/facts_contains/name_first` | 只记录（每组新 facts 上的第一次调用） | [project](project.md#性能) | `project` 第 5 步 |
+| `project/resident_cloudprint_bytes`、`project/resident_100k_bytes` | 中位数 < 2 MB / < 16 MB（`project` 插件静止后的存活字节：只有依赖闭包、但 arm 同样监听的 kernel，与加上 `project` 并打开夹具、填满非当前 worktree 的子项目缓存之后的 kernel 之差，同一进程里按 kernel「性能」测；fs_watch 过滤器持有的解析后 index 两边都有，归 `fs_watch/resident`；与 `plugin/project/resident_*` 同一数字；`Memory`） | [project](project.md#性能) | `project` 第 5 步 |
 | `fs_watch/classify_burst` | 中位数 < 100 ms（`FakeBackend` 注入 10 万个 `node_modules/**` 事件和 1000 个受跟踪路径事件，728 个跟踪文件、20 条忽略规则） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 1 步（基准由 [#92](https://github.com/SoloJiang/lectern-app/pull/92) 加入） |
 | `fs_watch/reflog_append` | 中位数 < 1 ms（追加一行 reflog 到记录进入批次，不含后端延迟） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 1 步（同上） |
 | `fs_watch/flush_idle`、`fs_watch/write_to_deliver` | 中位数 < 5 ms / < 120 ms（macOS 真实后端） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
-| `fs_watch/resident` | 常驻增量 < 1 MB；`Memory` | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
+| `fs_watch/resident` | 常驻增量 < 1 MB，含过滤器持有的当前 worktree 解析后 index（与 `project` 的句柄共用）；`Memory` | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
 | `code_intel/extract_throughput` | 中位数吞吐 ≥ 4 MB/s（单线程，首发的每种语言约 1 MiB，切成约 8 KiB 的文件，看门狗在运行；核心语言用一次遍历抽取；测量方式和预算的推导见 [ADR 0031](../adr/0031.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `code_intel/extract_1mib` | 只记录（每种语言一个约 1 MiB 的文件，对照单文件 250 ms 的截止时间） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `code_intel/warm_100k` | 中位数 < 500 ms（热启动的存在检查：缓存里已有 10 万个文件的单元，200 次 500 个 OID 的查询，只读、不标记访问） | [code_intel](code_intel.md#性能) | `code_intel` 第 2 步 |

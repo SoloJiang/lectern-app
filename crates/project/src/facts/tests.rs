@@ -104,3 +104,44 @@ fn facts_invalid_patterns_are_false() {
     assert!(facts.contains("*.txt"));
     assert!(!facts.contains("["));
 }
+
+#[test]
+fn facts_name_table_spans_trees_and_grows() {
+    // 3501 entries over three trees (one empty, one with a submodule
+    // entry) and 2000 distinct names.
+    let a: Vec<String> = (0..1500)
+        .map(|i| format!("a/d{}/n{i}.txt", i % 7))
+        .collect();
+    let c: Vec<String> = (0..1500)
+        .map(|i| format!("c/n{}.rs", i % 500))
+        .chain((0..500).map(|i| format!("c/x/n{i}.rs")))
+        .collect();
+    let mut with_module: Vec<(&str, FileKind)> =
+        c.iter().map(|p| (p.as_str(), FileKind::File)).collect();
+    with_module.push(("c/vendor", FileKind::Submodule));
+    let trees = vec![
+        files(&a.iter().map(String::as_str).collect::<Vec<_>>()),
+        files(&[]),
+        tree(&with_module),
+    ];
+    let facts = workspace_facts(trees);
+    for i in [0, 7, 1499] {
+        assert!(facts.contains(&format!("n{i}.txt")), "n{i}.txt");
+    }
+    for i in [0, 499] {
+        assert!(facts.contains(&format!("n{i}.rs")), "n{i}.rs");
+    }
+    assert!(!facts.contains("n1500.txt"));
+    assert!(!facts.contains("n500.rs"));
+    assert!(!facts.contains("vendor"), "a submodule is not a file");
+    assert!(facts.contains("n149?.txt"));
+    assert!(!facts.contains("n5??.rs"));
+
+    // Every name distinct: the table grows past 3/4 of its first size.
+    let many: Vec<String> = (0..5000).map(|i| format!("f{i}")).collect();
+    let facts = workspace_facts(vec![files(
+        &many.iter().map(String::as_str).collect::<Vec<_>>(),
+    )]);
+    assert!(many.iter().all(|n| facts.contains(n)));
+    assert!(!facts.contains("f5000"));
+}

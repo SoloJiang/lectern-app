@@ -13,7 +13,7 @@ use lectern_services::project::{
     ProjectSnapshot, Scan, ScanError, Worktree, WorktreeKey,
 };
 
-use super::cache::{OtherTree, Print};
+use super::cache::{OtherSlot, OtherTree, Print};
 use super::watch::{Manifests, TreeRead};
 use super::{Model, Project, RepoInfo, Wanted, index_error, lock, worktree_error};
 use crate::ManifestResult;
@@ -277,11 +277,15 @@ impl Model {
 
     /// The sub-projects of a worktree that is not active, from the cache
     /// when its index checksum and every manifest's `lstat` are unchanged.
+    /// `active` is the active tree's list, when ready: worktrees of one
+    /// repository mostly have the same sub-projects, and an equal list is
+    /// kept once.
     pub(super) fn other_packages(
         &self,
         repo: &RepoInfo,
         worktree: &Worktree,
         root_name: &str,
+        active: Option<&Arc<[Package]>>,
     ) -> Result<Arc<[Package]>, ScanError> {
         let slot = lock(&self.others).slot(&worktree.key.0);
         let mut cached = lock(&slot);
@@ -312,12 +316,44 @@ impl Model {
             .packages(&index.files, root_name, repo.hash, &read, &|_| None)
             .0
             .into();
+        let packages = self.share_packages(packages, active, &slot);
         *cached = Some(OtherTree {
             checksum: index.checksum,
             packages: packages.clone(),
             prints: prints.into_inner(),
         });
         Ok(packages)
+    }
+}
+
+impl Model {
+    /// The same list already held, by the active tree or another cached
+    /// worktree, when one is equal to `packages`; else `packages`. The
+    /// caller holds `own`'s lock; the other slots are only tried, so two
+    /// computations never wait on each other.
+    fn share_packages(
+        &self,
+        packages: Arc<[Package]>,
+        active: Option<&Arc<[Package]>>,
+        own: &OtherSlot,
+    ) -> Arc<[Package]> {
+        if let Some(active) = active
+            && **active == *packages
+        {
+            return active.clone();
+        }
+        let slots = lock(&self.others).others(own);
+        for slot in slots {
+            let Ok(other) = slot.try_lock() else {
+                continue;
+            };
+            if let Some(tree) = other.as_ref()
+                && *tree.packages == *packages
+            {
+                return tree.packages.clone();
+            }
+        }
+        packages
     }
 }
 
