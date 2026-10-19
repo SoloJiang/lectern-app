@@ -264,6 +264,49 @@ fn numstat_matches_git() {
     assert!(checked >= 7, "{checked} fixture variants");
 }
 
+// ---- rows_* (byte offsets on the fixtures) --------------------------------
+
+/// Every tree fixture: each text file's hunks and rows point at the start of
+/// their lines in the texts `texts` returns (CRLF, no final newline, renames
+/// and the histogram's degenerate case among them).
+#[test]
+fn rows_offsets_start_their_lines_in_every_fixture() {
+    let mut names: Vec<_> = std::fs::read_dir(fixtures())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_dir() && e.path().join("trees").is_file())
+        .map(|e| e.file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    let (mut files, mut rows) = (Vec::new(), 0);
+    for name in &names {
+        let (t, old, new) = fixture(name, "default");
+        let repo = t.repo();
+        let set = diff(&t, old, new);
+        for (i, change) in set.files().iter().enumerate() {
+            let Detail::Text(d) = &change.detail else {
+                continue;
+            };
+            let texts = set.texts(&repo, i).unwrap();
+            let what = format!("{name}/{}", path_str(&change.path));
+            rows += crate::rows::tests::assert_offsets(d, &texts, &what);
+            files.push(what);
+        }
+    }
+    for covered in [
+        "basic/crlf.txt",
+        "basic/noeol.txt",
+        "renames/new/hi.txt",
+        "real/",
+    ] {
+        assert!(
+            files.iter().any(|f| f.starts_with(covered)),
+            "{covered} not checked: {files:?}"
+        );
+    }
+    assert!(rows > 1000, "{rows} rows");
+}
+
 // ---- diff_trees_* ----------------------------------------------------------
 
 #[test]
@@ -890,6 +933,32 @@ fn truncate_retained_content_boundary_keeps_each_detail() {
 // ---- hunk_cache_* ------------------------------------------------------------
 
 #[test]
+fn hunk_cache_hit_has_the_offsets_of_its_own_contents() {
+    // Two repositories with the same contents under other paths share the
+    // entry; the offsets are the contents', so they hold in both.
+    let old: &[u8] = b"hunk_cache_hit_has_the_offsets\r\nsame\r\nold\r\n";
+    let new: &[u8] = b"hunk_cache_hit_has_the_offsets\r\nsame\r\nnew\r\nmore";
+    let (hits, misses) = crate::hunks::hook::counts();
+    let mut details = Vec::new();
+    for path in ["first", "dir/second"] {
+        let t = TestRepo::new();
+        let (o, n) = (t.tree(&[(path, old)]), t.tree(&[(path, new)]));
+        let set = diff(&t, o, n);
+        let Detail::Text(d) = &set.files()[0].detail else {
+            panic!("{:?}", set.files()[0].detail);
+        };
+        let texts = set.texts(&t.repo(), 0).unwrap();
+        crate::rows::tests::assert_offsets(d, &texts, path);
+        details.push(d.clone());
+    }
+    assert_eq!(crate::hunks::hook::counts(), (hits + 1, misses + 1));
+    assert_eq!(details[0], details[1]);
+    let h = &details[0].hunks[0];
+    assert_eq!((h.old.clone(), h.new.clone()), (2..3, 2..4));
+    assert_eq!((h.old_byte, h.new_byte), (38, 38));
+}
+
+#[test]
 fn hunk_cache_second_computation_hits() {
     // Contents unique to this test, so other tests can't warm the cache.
     let t = TestRepo::new();
@@ -901,6 +970,8 @@ fn hunk_cache_second_computation_hits() {
     let second = diff(&t, old, new);
     assert_eq!(crate::hunks::hook::counts(), (hits + 1, misses + 1));
     assert_eq!(render(&first), render(&second));
+    // The hit has the same hunks, byte offsets included.
+    assert_eq!(first.files()[0].detail, second.files()[0].detail);
     // Another repository with the same contents shares the entry.
     let other = TestRepo::new();
     let old = other.tree(&[("elsewhere", b"hunk_cache_second_computation_hits 1\n")]);

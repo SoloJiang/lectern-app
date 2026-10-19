@@ -1,0 +1,11 @@
+---
+source: crates/git/src/rows/tests.rs
+expression: "view(old, new, 1)"
+---
+~ folded: old 1..1 @0, new 1..1 @0
+    2   2  @7    @7    beta
+-   3      @13         gamma  (pair 3)
++       3        @13   GAMMA ray  (pair 3)
+    4   4  @20   @24   delta
+-   5      @27         end  (pair 5)
++       5        @31   end  (pair 5)

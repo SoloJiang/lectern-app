@@ -9,26 +9,38 @@ use gix::diff::blob::{Algorithm, Diff, InternedInput};
 use crate::{FileDiff, FileTexts, SideText};
 
 /// One display row. Line numbers are 0-based in each side's whole file.
+///
+/// The `*_byte` fields are the byte offsets of the row's line (of a fold,
+/// its first line) in that side's [`Text::bytes`](crate::Text::bytes): the
+/// canonical content of the side's blob, like [`Hunk`](crate::Hunk)'s. They
+/// are None only when that side's `SideText` is neither `Text` nor `Absent`
+/// (no bytes to point into); an `Absent` side is empty, at offset 0.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Row {
     Context {
         old: u32,
         new: u32,
+        old_byte: Option<u64>,
+        new_byte: Option<u64>,
     },
     /// `pair`: the added line of the same hunk shown beside it in the
     /// side-by-side view.
     Removed {
         old: u32,
         pair: Option<u32>,
+        old_byte: Option<u64>,
     },
     Added {
         new: u32,
         pair: Option<u32>,
+        new_byte: Option<u64>,
     },
     /// Unchanged lines folded away; expanding takes the same ranges' text.
     Folded {
         old: Range<u32>,
         new: Range<u32>,
+        old_byte: Option<u64>,
+        new_byte: Option<u64>,
     },
 }
 
@@ -52,12 +64,18 @@ pub fn rows(diff: &FileDiff, texts: &FileTexts, context: u32) -> Vec<Row> {
         (None, Some(n)) => (last_old + n.saturating_sub(last_new), n),
         (None, None) => (last_old, last_new),
     };
+    let at = Offsets {
+        old: &texts.old,
+        new: &texts.new,
+    };
     let mut out = Vec::new();
     if diff.hunks.is_empty() {
         if old_len > 0 || new_len > 0 {
             out.push(Row::Folded {
                 old: 0..old_len,
                 new: 0..new_len,
+                old_byte: at.old_at(0),
+                new_byte: at.new_at(0),
             });
         }
         return out;
@@ -65,25 +83,51 @@ pub fn rows(diff: &FileDiff, texts: &FileTexts, context: u32) -> Vec<Row> {
     let (mut o, mut n) = (0, 0);
     for (i, hunk) in diff.hunks.iter().enumerate() {
         let shown = if i == 0 { Shown::End } else { Shown::Both };
-        unchanged(&mut out, o..hunk.old.start, n, shown, context);
+        unchanged(&mut out, &at, o..hunk.old.start, n, shown, context);
         let (removed, added) = (hunk.old.len() as u32, hunk.new.len() as u32);
         for k in 0..removed {
             out.push(Row::Removed {
                 old: hunk.old.start + k,
                 pair: (k < added).then(|| hunk.new.start + k),
+                old_byte: at.old_at(hunk.old.start + k),
             });
         }
         for k in 0..added {
             out.push(Row::Added {
                 new: hunk.new.start + k,
                 pair: (k < removed).then(|| hunk.old.start + k),
+                new_byte: at.new_at(hunk.new.start + k),
             });
         }
         (o, n) = (hunk.old.end, hunk.new.end);
     }
     let tail = old_len.saturating_sub(o).min(new_len.saturating_sub(n));
-    unchanged(&mut out, o..o + tail, n, Shown::Start, context);
+    unchanged(&mut out, &at, o..o + tail, n, Shown::Start, context);
     out
+}
+
+/// Line offsets from the two sides' texts.
+struct Offsets<'t> {
+    old: &'t SideText,
+    new: &'t SideText,
+}
+
+impl Offsets<'_> {
+    fn of(side: &SideText, line: u32) -> Option<u64> {
+        match side {
+            SideText::Text(text) => Some(text.line_start(line)),
+            SideText::Absent => Some(0),
+            _ => None,
+        }
+    }
+
+    fn old_at(&self, line: u32) -> Option<u64> {
+        Offsets::of(self.old, line)
+    }
+
+    fn new_at(&self, line: u32) -> Option<u64> {
+        Offsets::of(self.new, line)
+    }
 }
 
 /// Which ends of an unchanged stretch keep their context.
@@ -99,7 +143,14 @@ enum Shown {
 
 /// `old` (and the same number of lines from `new_start`) as context rows
 /// and a fold.
-fn unchanged(out: &mut Vec<Row>, old: Range<u32>, new_start: u32, shown: Shown, context: u32) {
+fn unchanged(
+    out: &mut Vec<Row>,
+    at: &Offsets<'_>,
+    old: Range<u32>,
+    new_start: u32,
+    shown: Shown,
+    context: u32,
+) {
     let len = old.len() as u32;
     let (head, tail) = match shown {
         Shown::End => (0, len.min(context)),
@@ -110,12 +161,16 @@ fn unchanged(out: &mut Vec<Row>, old: Range<u32>, new_start: u32, shown: Shown, 
     let context_row = |k: u32| Row::Context {
         old: old.start + k,
         new: new_start + k,
+        old_byte: at.old_at(old.start + k),
+        new_byte: at.new_at(new_start + k),
     };
     out.extend((0..head).map(context_row));
     if head + tail < len {
         out.push(Row::Folded {
             old: old.start + head..old.end - tail,
             new: new_start + head..new_start + len - tail,
+            old_byte: at.old_at(old.start + head),
+            new_byte: at.new_at(new_start + head),
         });
     }
     out.extend((len - tail..len).map(context_row));
@@ -124,7 +179,8 @@ fn unchanged(out: &mut Vec<Row>, old: Range<u32>, new_start: u32, shown: Shown, 
 /// Lines longer than this get no word diff: the view highlights the whole line.
 pub const INLINE_MAX_LINE_BYTES: usize = 1000;
 
-/// The changed parts of a pair of lines, as byte ranges into each line.
+/// The changed parts of a pair of lines, as byte ranges into each line; a
+/// range's offset in the side's text is the row's `*_byte` plus the range.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct InlineChanges {
     pub old: Vec<Range<u32>>,
@@ -202,4 +258,4 @@ fn word_bounds(line: &[u8]) -> Vec<usize> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

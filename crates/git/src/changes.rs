@@ -232,6 +232,19 @@ impl Text {
         line.strip_suffix(b"\n").unwrap_or(line)
     }
 
+    /// The byte offset of line `n` (0-based) in [`bytes`](Text::bytes); the
+    /// length of the text from `line_count()` on. A word-level range of
+    /// [`inline_changes`](crate::inline_changes) on line `n` is at this
+    /// offset plus the range.
+    pub fn line_start(&self, n: u32) -> u64 {
+        let start = self
+            .starts
+            .get(n as usize)
+            .copied()
+            .unwrap_or(self.bytes.len());
+        start as u64
+    }
+
     /// Whether the last line ends with `\n` (git's "No newline at end of
     /// file" when not). True for empty text.
     pub fn ends_with_newline(&self) -> bool {

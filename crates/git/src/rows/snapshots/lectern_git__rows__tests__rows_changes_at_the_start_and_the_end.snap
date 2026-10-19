@@ -2,12 +2,12 @@
 source: crates/git/src/rows/tests.rs
 expression: "view(&old, &new, 2)"
 ---
--   1      line 1  (pair 1)
-+       1  first  (pair 1)
-    2   2  line 2
-    3   3  line 3
-~ folded: old 4..7, new 4..7
-    8   8  line 8
-    9   9  line 9
--  10      line 10  (pair 10)
-+      10  last  (pair 10)
+-   1      @0          line 1  (pair 1)
++       1        @0    first  (pair 1)
+    2   2  @7    @6    line 2
+    3   3  @14   @13   line 3
+~ folded: old 4..7 @21, new 4..7 @20
+    8   8  @49   @48   line 8
+    9   9  @56   @55   line 9
+-  10      @63         line 10  (pair 10)
++      10        @62   last  (pair 10)
