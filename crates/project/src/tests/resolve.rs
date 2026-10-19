@@ -268,3 +268,44 @@ fn resolve_package_unknown_or_prunable_is_root_missing() {
         missing
     );
 }
+
+#[test]
+fn resolve_package_keeps_equal_lists_once() {
+    let h = Harness::new();
+    let common = h.git.init("repo");
+    monorepo(&h.git, &common);
+    let same = h.git.add_worktree(&common, "same", "wt-same");
+    monorepo(&h.git, &same);
+    let mut extra = Vec::new();
+    for name in ["extra-a", "extra-b"] {
+        let git_dir = h.git.add_worktree(&common, name, &format!("wt-{name}"));
+        monorepo(&h.git, &git_dir);
+        h.git.write(
+            &git_dir,
+            "apps/admin/package.json",
+            br#"{ "name": "admin" }"#,
+        );
+        extra.push(git_dir);
+    }
+    let key = h.open(&h.base().join("repo")).unwrap();
+    for git_dir in [&same, &extra[0], &extra[1]] {
+        let found = h.model.resolve_package(
+            &key,
+            &WorktreeKey(git_dir.as_path().into()),
+            "apps/web/src/index.ts",
+        );
+        assert_eq!(found, Ok(PackageMatch::Found("apps/web".into())));
+    }
+    let active = match &h.snapshot(&key).active.as_ref().unwrap().packages {
+        lectern_services::project::Scan::Ready(p) => p.clone(),
+        other => panic!("{other:?}"),
+    };
+    let cached = |git_dir: &Path| h.model.cached_packages(git_dir).unwrap();
+    // The same sub-projects as the active tree: its list.
+    assert!(std::sync::Arc::ptr_eq(&cached(&same), &active));
+    // Equal to each other, not to the active tree: one list for both.
+    let (a, b) = (cached(&extra[0]), cached(&extra[1]));
+    assert!(!std::sync::Arc::ptr_eq(&a, &active));
+    assert_eq!(a.len(), active.len() + 1);
+    assert!(std::sync::Arc::ptr_eq(&a, &b));
+}

@@ -720,7 +720,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - `fs_watch/flush_idle`（macOS）：真实后端，没有积压时 `flush_revision` < 5 ms。
 - `fs_watch/write_to_deliver`（macOS）：写一个受跟踪文件到 `WorktreeBatch` 交付，默认合并参数下 < 120 ms。
 - `fs_watch/reflog_append`：追加一行 reflog 到记录进入批次 < 1 ms（不含后端延迟）。
-- `fs_watch/resident`：11 个 worktree 的仓库，`watch_repo` 加当前 worktree 的 `watch_worktree`，静止后本 crate 的常驻增量 < 1 MB（不含 `git` 的文件列表）。
+- `fs_watch/resident`：11 个 worktree 的仓库，`watch_repo` 加当前 worktree 的 `watch_worktree`，静止后本 crate 的常驻增量 < 1 MB，含过滤器持有的当前 worktree 解析后 index（`git` 的 `TrackedPaths`，与 `project` 保留的 worktree 句柄共用一份，算本 crate 的份额，见 [project 设计「性能」](project.md#性能)；728 个文件时约 0.1 MB）。
 
 ## 状态与异常
 

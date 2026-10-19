@@ -37,6 +37,7 @@ lectern-git = { path = "../git", features = ["test-support"] }
 lectern-i18n = { path = "../i18n", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 lectern-platform = { path = "../platform" }
+lectern-project = { path = "../project", features = ["test-support"] }
 lectern-services = { path = "../services" }
 tempfile.workspace = true
 

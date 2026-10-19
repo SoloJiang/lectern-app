@@ -43,6 +43,17 @@ impl ProjectPlugin {
         }
     }
 
+    /// The same plugin, discovering with `lectern_git::testing::discover`:
+    /// only each repository's own configuration is read, so the machine's
+    /// git configuration can't change bench's measurements.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_repository_config_only(deps: ProjectDeps) -> ProjectPlugin {
+        ProjectPlugin {
+            deps,
+            git: Arc::new(LecternGit::with_discover(lectern_git::testing::discover)),
+        }
+    }
+
     /// The same plugin over `testing::FakeGit`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_fake_git(deps: ProjectDeps, git: Arc<crate::testing::FakeGit>) -> ProjectPlugin {

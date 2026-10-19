@@ -13,6 +13,11 @@
 //! was in the worktree when it was staged (`write`, `track`), as `git add`
 //! records it, so a file list from `FakeGit` carries the same OIDs as one
 //! from a real repository with the same content.
+//!
+//! For bench (docs/design/project.md「性能」): [`Shape`] describes the
+//! synthetic repositories (`cloudprint` and the large monorepo), which
+//! bench writes with `lectern_git::testing::TestRepo`, and [`Driven`] runs
+//! the model on the production git access on the caller's thread.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -26,6 +31,12 @@ use lectern_git::{GitError, HashKind, Oid};
 use lectern_services::project::{FileKind, FileList, Head};
 
 use crate::git_access::{Discovered, GitAccess, IndexFiles, TreeAccess, WorktreeInfo, blob_id};
+
+mod driven;
+mod shape;
+
+pub use driven::{Driven, Logged};
+pub use shape::Shape;
 
 /// One call `FakeGit` received.
 #[derive(Clone, PartialEq, Eq, Debug)]

@@ -28,3 +28,4 @@ just test -p lectern-project
 - 模型测试（`src/tests/`）用 `testing::FakeGit`（git 元数据在内存里，worktree 文件是临时目录里的真实文件，记录每次调用；index 每条的 OID 是暂存时工作区内容的 blob OID，与真实仓库相同；子模块条目用由路径导出的替代 OID 代表它指向的提交）和测试里的任务队列 `QueueHost`，不经 kernel；插件测试用真实的 `Kernel` 和 `Executor::manual()`；`real_repo_*` 用 `lectern_git::testing::TestRepo` 构造仓库，不调用 git 命令行。
 - 刷新测试（`refresh_*`，`src/tests/refresh.rs`）用 fs_watch 的 `testing::manual` 和 `FakeBackend` 注入事件（`tests/support.rs` 的 `Watch::settle` 交替运行 fs_watch 与 `QueueHost`），`FakeGit` 每个 worktree 的 `FakeSource` 随它的 index 更新；要在一轮扫描中途制造变化用 `FakeGit::before_read`。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。
+- bench 的 `project/*`（`crates/bench/benches/time/project.rs`、`benches/memory/project.rs`）用 `testing::Shape`（`cloudprint` 与 10 万文件的合成仓库形状，由 bench 用 `TestRepo` 写出；`shape_*` 测试检查它）、`testing::Driven`（模型接生产的 git 实现，任务在调用方线程上运行）和 `ProjectPlugin::with_repository_config_only`。`just bench --measure project/` 在 Linux 上也采样，只报告。

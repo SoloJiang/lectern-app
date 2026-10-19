@@ -21,6 +21,10 @@ mod i18n;
 mod kernel;
 #[path = "time/platform.rs"]
 mod platform;
+#[path = "time/project.rs"]
+mod project;
+#[path = "fixtures/project_repo.rs"]
+mod project_repo;
 
 use std::process::ExitCode;
 
@@ -75,6 +79,13 @@ const BENCHES: &[Bench] = &[
     platform::SAFE_READ_4K,
     platform::SAFE_READ_RANGE,
     platform::SAFE_READ_PAGE,
+    project::OPEN_CLOUDPRINT,
+    project::PACKAGES_CLOUDPRINT,
+    project::OPEN_100K,
+    project::SWITCH_WORKTREE,
+    project::RESOLVE_PACKAGE,
+    project::REFRESH_INDEX,
+    project::FACTS_CONTAINS,
 ];
 
 fn main() -> ExitCode {

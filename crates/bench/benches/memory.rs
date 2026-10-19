@@ -9,6 +9,14 @@ mod cache;
 mod code_intel;
 #[path = "fixtures/git_worktree.rs"]
 mod git_worktree;
+#[path = "memory/project.rs"]
+mod project;
+#[allow(
+    dead_code,
+    reason = "the index flip is for the time target's project/refresh_index"
+)]
+#[path = "fixtures/project_repo.rs"]
+mod project_repo;
 
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
@@ -100,6 +108,8 @@ const BENCHES: &[Bench] = &[
     code_intel::BATCH_PEAK,
     GIT_CHANGES_CAPPED_BYTES,
     GIT_RESIDENT,
+    project::RESIDENT_CLOUDPRINT,
+    project::RESIDENT_100K,
 ];
 
 fn main() -> ExitCode {
