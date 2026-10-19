@@ -46,7 +46,7 @@ just fmt     # 格式化
 
 只改不依赖 GPUI 的 crate（领域、基础设施、kernel 层）时，可以先用 `cargo check -p <crate>` 快速检查，不必编译 GPUI；提交前仍要跑上面的入口。
 
-CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
+CI 的三个任务见 [docs/design/ci.md](docs/design/ci.md)。
 
 ## Review guidelines
 
