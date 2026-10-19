@@ -1,9 +1,14 @@
-//! Test support: a kernel with one plugin under test and mocked services.
+//! Test support: a kernel with one plugin under test and mocked services,
+//! and a manual clock for the keepalive slots.
 //!
 //! Enabled with the `test-support` feature. Every plugin crate tests itself
 //! with [`TestKernel`] instead of starting the whole app.
 
 use std::sync::{Arc, Mutex};
+use std::task::Waker;
+use std::time::{Duration, Instant};
+
+use crate::clock::Clock;
 
 use crate::event::Event;
 use crate::handle::Context;
@@ -168,6 +173,74 @@ impl Drop for TestKernel {
                 let _ = done.send(());
             });
             let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
+        }
+    }
+}
+
+/// A clock that moves only when told to, for
+/// [`Kernel::set_clock`](crate::Kernel::set_clock). `advance` wakes the timers
+/// it passes, in order, on the calling thread, after releasing its lock.
+#[derive(Clone)]
+pub struct ManualClock {
+    inner: Arc<Mutex<ManualInner>>,
+}
+
+struct ManualInner {
+    now: Instant,
+    timers: Vec<(Instant, Waker)>,
+}
+
+impl ManualClock {
+    pub fn new() -> ManualClock {
+        ManualClock {
+            inner: Arc::new(Mutex::new(ManualInner {
+                now: Instant::now(),
+                timers: Vec::new(),
+            })),
+        }
+    }
+
+    pub fn advance(&self, by: Duration) {
+        let mut due = {
+            let mut inner = lock(&self.inner);
+            inner.now += by;
+            let now = inner.now;
+            let (due, keep) = std::mem::take(&mut inner.timers)
+                .into_iter()
+                .partition(|(at, _)| *at <= now);
+            inner.timers = keep;
+            due
+        };
+        due.sort_by_key(|(at, _)| *at);
+        for (_, waker) in due {
+            waker.wake();
+        }
+    }
+
+    /// The timers not yet reached.
+    pub fn pending_timers(&self) -> usize {
+        lock(&self.inner).timers.len()
+    }
+}
+
+impl Default for ManualClock {
+    fn default() -> Self {
+        ManualClock::new()
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> Instant {
+        lock(&self.inner).now
+    }
+
+    fn wake_at(&self, at: Instant, waker: Waker) {
+        let mut inner = lock(&self.inner);
+        if at <= inner.now {
+            drop(inner);
+            waker.wake();
+        } else {
+            inner.timers.push((at, waker));
         }
     }
 }

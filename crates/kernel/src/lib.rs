@@ -7,6 +7,7 @@
 //! is deactivated. The design is in `docs/design/kernel.md`.
 
 mod background;
+mod clock;
 mod event;
 mod gate;
 mod handle;
@@ -18,11 +19,13 @@ mod service;
 mod set;
 mod token;
 mod util;
+mod yielding;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
-pub use background::{BackgroundGuard, BackgroundState, BackgroundStatus, Proceed};
+pub use background::{BackgroundGuard, BackgroundState, BackgroundStatus, Proceed, ProceedItem};
+pub use clock::{Clock, SystemClock};
 pub use event::{
     BackgroundChanged, Busy, Emitter, Event, Quiescent, ServiceAdded, ServiceRemoved, Subscription,
 };
@@ -38,6 +41,7 @@ pub use registry::{Admitted, ServiceRef, ServiceSet};
 pub use service::{Service, ServiceKey, service};
 pub use set::{PluginSet, PreparedSet};
 pub use token::{ActivationToken, Admission, BusyGuard, PendingGuard, TokenState};
+pub use yielding::{Grant, SLOT_INTERVAL, SLOT_LENGTH, SLOT_MAX_BYTES};
 
 #[cfg(test)]
 mod tests;

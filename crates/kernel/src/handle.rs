@@ -347,11 +347,27 @@ impl PluginHandle {
     /// as [`busy`](PluginHandle::busy) but counted apart: it does not hold off
     /// quiescence. Move it into the task and check
     /// [`BackgroundGuard::proceed`] before every batch. Returns `None` once the
-    /// activation is deactivated.
+    /// activation is deactivated. The work does not yield to interaction
+    /// (`code_intel`'s tier 3); see
+    /// [`background_yielding`](PluginHandle::background_yielding).
     pub fn background(&self) -> Option<BackgroundGuard> {
+        self.background_guard(false)
+    }
+
+    /// Declares pausable background work that also yields to interaction
+    /// (ADR 0033): `code_intel`'s tier 4, dependency tier and tier 5, and the
+    /// memory-only batch work. Taken by the same rules as
+    /// [`background`](PluginHandle::background); while
+    /// [`Kernel::set_yield`](crate::Kernel::set_yield) is on the work moves
+    /// only in keepalive slots, see [`BackgroundGuard::proceed_item`].
+    pub fn background_yielding(&self) -> Option<BackgroundGuard> {
+        self.background_guard(true)
+    }
+
+    fn background_guard(&self, yields: bool) -> Option<BackgroundGuard> {
         let shared = self.act.0.kernel.upgrade()?;
         let admission = self.act.enter_background()?;
-        let guard = shared.background.guard();
+        let guard = shared.background.guard(yields);
         drop(admission);
         Some(guard)
     }

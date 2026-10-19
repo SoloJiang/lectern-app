@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -315,7 +315,12 @@ impl PluginHandle {
     /// 声明可暂停的后台工作（ADR 0029，见「后台工作」），取用规则与 `busy` 相同（`Pending` 也接受，这次激活已停用时返回 None），
     /// 但取的准入不计入全局准入计数，守卫也不计入静止：取守卫不会让 kernel 短暂变忙、改变 `quiescent_epoch()`。
     /// 停用第 3 步照常等这次准入归零，所以守卫要么在撤销完成之前创建，要么返回 None。
+    /// 这样取得的工作不让路（`code_intel` 的第 3 层）。
     pub fn background(&self) -> Option<BackgroundGuard>;
+
+    /// 声明让路的可暂停后台工作（ADR 0033）：`code_intel` 的第 4 层、依赖层、第 5 层，空闲预取，大文件的整文件高亮。
+    /// 取用规则与 `background` 相同，只是守卫记为让路：`Kernel::set_yield(true)` 期间按「交互让路」的保活时段前进。
+    pub fn background_yielding(&self) -> Option<BackgroundGuard>;
 
     /// 带激活代数的 Emitter：这次激活停用后（包括之后重新激活），通过它发出的事件直接丢弃；
     /// token 还是 `Pending`（在 `started` 里）时，事件暂存到 token 变为 `Live` 之后再发出，激活失败时丢弃。
@@ -485,11 +490,16 @@ impl Kernel {
     /// 后台工作的状态、守卫数和后台代数，在一次加锁里读出，三者一致。
     pub fn background(&self) -> BackgroundStatus;
 
-    /// 交互让路开关（ADR 0033，已设计、尚未实现）。打开时，取守卫时声明可以让路的工作（`code_intel` 的第 4 层、
-    /// 依赖层、第 5 层，空闲预取，大文件的整文件高亮）在批次边界停下；第 3 层不声明，照常运行。与 `pause` 的区别：
-    /// 不影响 `pause_requested()`，在途的那一项不放弃；不改变后台工作的状态、计数和代数；停下期间按「后台工作」的
-    /// 保活规则放行。`app` 调用，默认不调用（开关保持关闭），是否启用由 `app/scroll_frames_indexing` 决定。
+    /// 交互让路开关（ADR 0033），默认关闭。打开时，用 `background_yielding` 取守卫的工作（`code_intel` 的第 4 层、
+    /// 依赖层、第 5 层，空闲预取，大文件的整文件高亮）在下一个分片边界停下、保留状态，之后只在保活时段里前进；
+    /// 用 `background` 取守卫的工作（第 3 层）照常运行。与 `pause` 的区别：不影响 `pause_requested()`，在途的那一项不放弃；
+    /// 不改变后台工作的状态、计数和代数，也不影响静止；两个开关都打开时以暂停为准。关闭时唤醒全部等待中的工作。
+    /// 任何线程都可以调用。`app` 调用，默认不调用（开关保持关闭），是否启用由 `app/scroll_frames_indexing` 决定。
     pub fn set_yield(&self, on: bool);
+
+    /// 替换保活时段用的时钟，在让路的工作开始等待之前调用。只在 `test-support` 下提供，测试传入 `testing::ManualClock`。
+    #[cfg(feature = "test-support")]
+    pub fn set_clock(&self, clock: Arc<dyn Clock>);
 }
 
 /// 项目文件的不可变快照。`project` 在后台读 git index 建好后再交给 kernel；
@@ -526,6 +536,38 @@ impl BackgroundGuard {
     pub fn proceed(&self) -> Proceed<'_>;
     /// 开关是否打开，不登记任何东西。供批次内部的检查（如解析器的进度回调）放弃当前的一项、回到批次边界。
     pub fn pause_requested(&self) -> bool;
+
+    /// 让路的工作在批次边界的检查，`bytes` 是下一项的大小。暂停的处理与 `poll_proceed` 相同，暂停优先。
+    /// 让路开关关着，或守卫不让路时返回 `Ready(Grant::Batch)`。开关打开时登记 `cx.waker()` 排队等保活时段，
+    /// 轮到它时返回 `Ready(Grant::Slot { deadline })`；`bytes` 超过 `SLOT_MAX_BYTES` 的一项不进入时段，等开关关闭后返回 `Batch`。
+    /// 等待保活时段不算停下：后台状态、计数和代数都不变。每次调用先结束这个守卫自己的时段。
+    pub fn poll_proceed_item(&self, cx: &mut std::task::Context<'_>, bytes: u64) -> Poll<Grant>;
+    /// `poll_proceed_item` 的 future 形式。
+    pub fn proceed_item(&self, bytes: u64) -> ProceedItem<'_>;
+    /// 守卫是否用 `background_yielding` 取得。
+    pub fn yields(&self) -> bool;
+    /// 让路的工作是否应在下一个分片边界停下，不登记任何东西，供进度回调读取：开关打开，并且这个守卫没有持有时段，
+    /// 或者时段已到 `deadline`。不让路的守卫总是 false。开关关着时只读一个原子标志。
+    pub fn yield_requested(&self) -> bool;
+}
+
+/// 让路的工作在批次边界得到的许可。
+pub enum Grant {
+    /// 照常运行一批：让路开关关着，或这项工作不让路。
+    Batch,
+    /// 持有保活时段：只做请求的那一项，到 kernel 时钟的 `deadline` 为止。时段在这个守卫下一次批次边界检查或 drop 时结束。
+    Slot { deadline: Instant },
+}
+
+pub const SLOT_LENGTH: Duration = Duration::from_millis(50);     // 一个时段最长 50 ms
+pub const SLOT_INTERVAL: Duration = Duration::from_millis(500);  // 相邻两个时段的开始至少相隔 500 ms
+pub const SLOT_MAX_BYTES: u64 = 256 * 1024;                      // 超过 256 KiB 的一项不进入时段
+
+/// 保活时段的时间来源。`SystemClock` 用单调时钟，计时线程在第一次 `wake_at` 时创建，1 秒没有计时器就退出。
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Instant;
+    /// `now()` 到达 `at` 时唤醒 `waker`，已经到达时立即唤醒。
+    fn wake_at(&self, at: Instant, waker: Waker);
 }
 
 /// 后台工作的状态。
@@ -701,10 +743,12 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 
 可暂停的后台工作（[ADR 0029](../adr/0029.md)，接口见「后台工作」）：建索引的第 3–5 层这类工作满足 ADR 0029 的四条条件，不取 `BusyGuard`，改取 `PluginHandle::background()` 返回的 `BackgroundGuard`，取用规则与 `busy()` 相同（激活已停用时返回 None，守卫随任务结束 drop）。kernel 单独计数这类守卫，它们不进入上面的静止条件，不影响 `is_quiescent`、`quiescent_epoch()` 和 `Busy` / `Quiescent`；kernel 另外报告后台工作的状态（没有、进行中、全部已暂停）并在状态变化时发出事件，分发方式与 `Busy` / `Quiescent` 相同。`Kernel` 提供全局的暂停开关：打开后，任务在每个批次边界询问自己的守卫，需要暂停时登记 waker、返回 `Pending`，关闭开关时被唤醒；暂停期间新取的守卫在第一批之前就停下；全部停下后状态变为「全部已暂停」。kernel 另外维护一个单调递增的后台代数，与 `quiescent_epoch()` 分开：取得或 drop `BackgroundGuard`、一项工作在批次边界停下或被唤醒继续，都在同一次原子操作里加一，所以两次读到同一个值时，两次之间后台工作的集合和状态都没有变化。
 
-交互让路（[ADR 0033](../adr/0033.md)，已设计、尚未实现，随 `code_intel` 的依赖层之前的一个 kernel PR 加入）：`Kernel::set_yield` 是与暂停开关分开的第二个全局开关，默认关闭。取守卫时声明这项工作是否让路（第 3 层不让路）。开关打开时，让路的工作：
+交互让路（[ADR 0033](../adr/0033.md)，接口见「后台工作」）：`Kernel::set_yield` 是与暂停开关分开的第二个全局开关，默认关闭。取守卫时声明这项工作是否让路：`PluginHandle::background_yielding()` 取得的守卫让路，`background()` 取得的不让路（第 3 层）。开关打开时，让路的工作：
 
 - 在途的那一项在下一个分片边界停下、保留状态，不放弃：解析用可恢复的分片解析（进度回调返回 `Break`，下次用同一份输入继续），一次遍历抽取在节点计数的检查点停下；守卫提供不登记任何东西的 `yield_requested()`，供进度回调读取。不能恢复的抽取（语言包用的 tree-sitter-tags）照暂停的规则放弃这一项，交互静止后重做。
-- 之后只在保活时段里前进：kernel 持有一个全局的保活令牌，同一时刻最多一个批量线程持有它；一个时段最长 50 ms，下一个时段最早在上一个开始后 500 ms 才发放。所以无论有几个批量线程，开关打开期间批量层合计最多用一个核的 10%。时段里只做一个文件，超过 256 KiB 的文件不进入时段、等交互静止；时段到期时同样在分片边界停下，下一个时段接着做。
+- 之后只在保活时段里前进：kernel 持有一个全局的保活令牌，同一时刻最多一个批量线程持有它；一个时段最长 50 ms，下一个时段最早在上一个开始后 500 ms 才发放。所以无论有几个批量线程，开关打开期间批量层合计最多用一个核的 10%。时段里只做一个文件，超过 256 KiB 的文件不进入时段、等交互静止；时段到期时同样在分片边界停下，下一个时段接着做。工作在批次边界调用 `proceed_item(下一项的字节数)`：得到 `Grant::Slot` 时只做这一项，`yield_requested()` 在 `deadline` 变为 true；得到 `Grant::Batch` 时照常运行一批。
+- 令牌按先来先得发放：等待的守卫排成一个队列，时段空出并且距上一个时段的开始已满 500 ms 时，kernel 选队列里第一个大小不超过 256 KiB 的守卫、为它保留令牌并唤醒它，它下一次检查时取得时段；还不满 500 ms 时让时钟在那一刻唤醒 kernel。持有者再次检查时先交还令牌、排到队尾，所以几项工作轮流前进。持有者或被选中的守卫 drop、因暂停停下时交还令牌、离开队列。
+- 暂停打开时唤醒全部等待令牌的守卫，它们下一次检查时按暂停停下，状态照常变为「全部已暂停」；恢复后重新排队。关闭让路开关时唤醒全部等待的守卫，它们得到 `Batch`；仍持有时段的守卫在下一次检查时交还令牌。
 - 不影响 `pause_requested()`、后台工作的状态、计数和代数，测量用的暂停与它独立；两个开关都打开时以暂停为准。
 - 测试：开关打开后在途解析在一个分片内停下且之后得到的结果与不停时相同；第 3 层的守卫不受影响；3 个让路的工作同时等待时，`ManualClock` 推进 5 s 内合计运行不超过 500 ms；超过 256 KiB 的文件不进入时段；关闭开关后全部从停下处继续。
 
@@ -936,6 +980,22 @@ impl Kernel {
 - 已知限制：barrier 只等调用之前排入的请求。kernel 线程处理这些请求时给自己排入的请求排在 barrier 之后，例如 `started` 里调用 `fail` 后排入的 `Sweep`。临时测试（不提交）里，启动一个在 `started` 里 `fail` 的插件后立即 `barrier`，300 次中 9 次返回时仍忙碌。处理这种情况要让 kernel 线程区分自己排入的请求，会改动发布构建里请求的入队路径，本次不做；需要静止的测试在这种场景下仍要等到静止。
 - 没有验证的：`agents` 测试辅助 `Harness::quiescent()` 里的等待循环（[#94](https://github.com/SoloJiang/lectern-app/pull/94)）和 `code_intel` 里受影响的测试由各自的 crate 去掉或复查，不在本次改动内。
 
+交互让路（[ADR 0033](../adr/0033.md)），在 Linux（x86_64，4 核虚拟机）上运行：
+
+- `just test -p lectern-kernel`：104 个测试通过，其中新增 9 个（`crates/kernel/src/tests/yielding.rs`）。测试里的工作是可恢复的分片解析：每个分片把 4 KiB 折进一个哈希、让 `ManualClock` 前进 10 ms，分片之后读 `yield_requested()`。单线程的驱动只 poll 被唤醒的工作，没有可运行的工作时才让时钟前进 10 ms，所以每次运行的调度完全相同，不依赖真实时间：
+  - `an_in_flight_item_stops_at_a_slice_boundary_and_resumes_with_the_same_result`：第 10 个分片执行期间打开开关，这一次运行恰好在第 10 个分片之后停下；之后每次运行都在时段里、不超过 50 ms（10 次 5 个分片、最后 1 次 4 个分片），64 个分片各执行一次，哈希与不停下的解析相同；等待期间后台状态、计数、代数和 `quiescent_epoch()` 都不变。
+  - `guards_that_do_not_yield_are_unaffected`：开关打开时，`background()` 取得的守卫 `yield_requested()` 为 false，`poll_proceed` 返回 `Ready`，`poll_proceed_item` 对任何大小都返回 `Batch`；旁边有两项让路的工作时，它的三个文件（含一个 320 KiB 的）各在一次运行里做完。
+  - `three_yielding_works_run_at_most_500_ms_in_5_s`：3 项让路的工作同时等待，时钟推进 5 s，合计运行 500 ms（10 个时段，每个 50 ms），时段的开始两两相隔不少于 500 ms，运行区间不重叠，每项工作至少得到 3 个时段。
+  - `items_over_256_kib_never_enter_a_slot`：一个 300 KiB 的文件在第 5 个分片时遇到开关打开，之后 5 s 里没有得到时段、没有再执行分片，同时另一项小文件的工作得到至少 9 个时段；关闭开关后它得到 `Batch`，从第 6 个分片继续，结果与不停下的解析相同。
+  - `turning_the_switch_off_resumes_everything`：两项小文件、一项大文件的工作在开关打开时等待，关闭后全部被唤醒，不再推进空闲时间就全部做完，每个分片恰好执行一次，结果正确；代数只因 3 次取得、3 次 drop 变化。
+  - `the_pause_wins_over_the_yield_and_its_state_is_unchanged`：持有时段、等待时段、等待开关关闭的三个守卫在暂停打开后都按暂停停下，状态为「全部已暂停」、代数加 3；恢复后重新排队，距第一个时段 500 ms 时队首的守卫被唤醒并取得时段；关闭开关后全部得到 `Batch`。
+  - `a_dropped_holder_or_waiter_hands_the_slot_on`：持有者 drop 后令牌空出，仍要等到 500 ms 才发给下一个；被选中的守卫 drop 后令牌立即转给队列里的下一个；时段到 `deadline` 时 `yield_requested()` 变为 true。
+  - `the_system_clock_wakes_at_the_instant_and_not_before`：`SystemClock` 乱序登记的三个计时器（其中一个已到期）各被唤醒一次，没有一个早于自己的时刻；测试等的是唤醒本身，10 s 的超时只防止挂住。
+  - `one_slot_at_a_time_under_concurrent_yielding_work`：4 个线程各做 40 项（其中一个线程每 4 项有 1 项超过 256 KiB），主线程推进时钟、反复切换让路开关和暂停开关，任何时刻最多一个线程在时段里，时段的开始两两相隔不少于 500 ms，结束时状态为「没有」。
+- 压力测试在另外 4 个满负荷自旋进程占满 4 个核时运行：`cargo nextest run -p lectern-kernel --all-features -E 'test(yield)' --stress-count 100` 100 轮全部通过（当时 8 个测试，`SystemClock` 的测试在这之后加入，包含在下面的全量压力测试里）；`cargo nextest run -p lectern-kernel --all-features --stress-count 100`（104 个测试）100 轮全部通过。`just check`、`just test`、`just doctest`、`just deny` 全部通过。
+- 发布构建里的热路径：不让路的守卫在开关关着时多一次布尔判断，`poll_proceed` 和 `pause_requested` 仍然只读原子标志、不加锁；让路的守卫在两个开关都关着时多读两个原子量。忙碌守卫、准入、服务调用和事件分发的代码没有改动，`kernel/` 的基准不经过本次改动的代码，本次没有重新测量。
+- 没有验证的：`SystemClock` 的计时线程只有 `the_system_clock_wakes_at_the_instant_and_not_before` 一个测试，1 秒没有计时器后退出没有测试，其余测试全部用 `ManualClock`；`code_intel` 怎样接入（之后的 PR）；`app` 的交互静止判断和 `app/scroll_frames_indexing` 的校准（macOS）。
+
 ## 与设计的差异
 
 - 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。barrier 先释放自己的忙计数再唤醒调用方（[#96](https://github.com/SoloJiang/lectern-app/issues/96)），kernel 线程给自己排入的后续请求不在等待范围内，见「实际验证」里的已知限制。
@@ -959,3 +1019,11 @@ impl Kernel {
 - 「继续」在 `resume` 里记账，而不是等任务被重新 poll 时各自记账：`resume` 在同一次加锁里把全部已停下的工作记为继续，代数按 ADR 0029 每项继续加一（n 项加 n），状态变化只报告一次、`seq` 是最终的代数，然后一次唤醒它们。所以 `resume` 返回时状态已经是「进行中」。
 - 开关的切换本身不改变代数：ADR 0029 只要求开始、结束、停下、继续时变化，`pause` 之后工作要到批次边界才停下，那时才加一。
 - 新增 `BackgroundGuard::pause_requested`：ADR 0029 要求单个文件解析时进度回调也检查暂停，回调里不能登记 waker，只读开关。
+
+交互让路（设计在「静止」里只写了规则，接口随本次实现写进「后台工作」）：
+
+- 新增 `Clock`、`SystemClock` 和 `Kernel::set_clock`（`test-support`）：保活时段要读时间，还要在上一个时段开始 500 ms 后唤醒等待的工作，设计没有写由谁计时。kernel 不依赖 `executor`，也不能借用 kernel 线程：排进 kernel 线程的请求计入忙碌，会改变静止。`SystemClock` 的计时线程在第一次需要等待时创建，1 秒没有计时器就退出，开关关着时不创建；线程创建失败时只记日志，等待的工作在开关关闭时继续。
+- 批次边界的检查带上下一项的大小（`proceed_item(bytes)`，返回 `Grant`）：「超过 256 KiB 的文件不进入时段」要求 kernel 知道这一项的大小，「时段里只做一个文件」要求工作知道自己得到的是时段还是一批。让路的守卫调用不带大小的 `proceed()` 时只等开关关闭，不进入时段。
+- 时段没有单独的句柄：时段在持有者下一次批次边界检查或 drop 时结束，`Grant::Slot` 只带 `deadline`，到期由 `yield_requested()` 报告。
+- 令牌按先来先得发放，被选中的守卫先保留令牌、被唤醒后取得时段，持有者交还后排到队尾：设计只规定同一时刻最多一个持有者，没有规定顺序；全部唤醒再竞争会让几项工作中的一项长期拿不到时段。
+- 不能恢复的抽取放弃这一项、交互静止后重做，由使用方按 `yield_requested()` 和 `pause_requested()` 处理，kernel 不区分抽取能否恢复。
