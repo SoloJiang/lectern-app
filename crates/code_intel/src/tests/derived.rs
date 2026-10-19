@@ -417,10 +417,14 @@ fn derived_packages_tiers_and_search_scope_follow() {
         [("app/y/b.ts".to_owned(), 0)],
         "c.ts is not searched"
     );
+    // The sub-project is searched through; c.ts, outside it, is neither
+    // indexed nor searched: reported, never taken as complete.
     assert_eq!(
         r.state,
-        QueryState::Done(Completeness::Complete),
-        "the sub-project is searched through"
+        QueryState::Done(Completeness::Partial {
+            unsearched: 0,
+            outside: 1
+        }),
     );
     h.set_packages(&["app"]);
     let r = h.goto("app/x/a.ts", "item", 0);

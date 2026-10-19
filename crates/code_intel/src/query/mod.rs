@@ -4,6 +4,7 @@
 //! starts, and writes its results in batches. Every batch replaces the
 //! query's `Arc<QueryResults>` and emits `CodeIntelEvent::Results`.
 
+mod account;
 mod definition;
 mod rank;
 mod references;
@@ -32,6 +33,8 @@ use crate::map::{HintStamp, LiveMap};
 use crate::resolve::{DefaultRules, Resolver};
 use crate::semantic::SemQuery;
 
+#[cfg(test)]
+pub(crate) use account::{Account, Reason};
 pub(crate) use definition::Prepared;
 #[cfg(test)]
 pub(crate) use rank::distance;
@@ -120,9 +123,14 @@ pub(crate) struct View {
     pub session: u64,
     /// The map's generation (`Provenance::generation`).
     pub map: u64,
-    /// The store's eviction generation (`Project::evictions`): units of the
-    /// index only go away with it.
+    /// The eviction generation the hints are stamped with (`State::stamp`):
+    /// the store's less this crate's own replaces (`Project::evictions`),
+    /// the frozen one once the namespace is full (`Batch::full`), so the
+    /// batch layer's own quota evictions do not move it; units of the index
+    /// only go away with it, or (full) the query checks the store.
     pub eviction: u64,
+    /// The namespace is full: hints do not prove units (`Snap::full`).
+    pub full: bool,
     /// The language table's generation.
     pub grammar: u64,
     /// The hint installations (`State::hinted`); only grows.
@@ -133,8 +141,19 @@ impl View {
     /// The same session, map, evictions and language table: what a reused
     /// prefetch must share with the query (hints may have grown).
     pub fn same_basis(&self, other: &View) -> bool {
-        (self.session, self.map, self.eviction, self.grammar)
-            == (other.session, other.map, other.eviction, other.grammar)
+        (
+            self.session,
+            self.map,
+            self.eviction,
+            self.full,
+            self.grammar,
+        ) == (
+            other.session,
+            other.map,
+            other.eviction,
+            other.full,
+            other.grammar,
+        )
     }
 }
 
@@ -151,6 +170,9 @@ pub(crate) enum Snapped {
     Ready(Box<Snap>),
     /// The session has no map yet: the query waits for it.
     Waiting,
+    /// The session's last reconcile found it can publish none (no current
+    /// worktree, its file list unavailable): the query fails at once.
+    Unavailable(Arc<str>),
     /// The project is not open.
     Gone,
 }
@@ -163,9 +185,11 @@ pub(crate) enum ViewCheck {
     /// Only hints were installed: the lookup is made again and its new
     /// results appended (the cut; the snapshot's map still applies).
     Grew(u64),
-    /// Units were evicted: lookups and hints read before or after may
-    /// disagree. Before anything is published the lookup is made again
-    /// under a new snapshot, once; afterwards the query ends `Stale`.
+    /// Units were evicted, or the namespace became full, or the data the
+    /// query holds was derived from another map than its snapshot's (a
+    /// prefetch's): lookups and hints read before or after may disagree.
+    /// Before anything is published the lookup is made again under a new
+    /// snapshot, once; afterwards the query ends `Stale`.
     Evicted,
     /// The session ended (the project closed, the current worktree
     /// changed): the query ends `Stale` and publishes nothing more.
@@ -190,6 +214,16 @@ pub(crate) struct Snap {
     pub disabled: HashSet<LangName>,
     pub packages: Arc<[Package]>,
     pub review: Arc<[RelPath]>,
+    /// Tier 1's paths (the current text, the drawer's files): indexed with
+    /// the interactive limit, so read with it.
+    pub focused: HashSet<RelPath>,
+    /// The namespace is full (`Batch::full`): the hints' stamp is frozen, so
+    /// a matching hint no longer proves its unit; the accounting checks the
+    /// store (`Snap::verify_hinted`).
+    pub full: bool,
+    /// The published map lacks the worktree's content (`Published::
+    /// incomplete`): no file counts as indexed without being read.
+    pub incomplete: bool,
     pub stamp: HintStamp,
     /// Keys extracted right now: neither in the index nor searched.
     pub in_flight: HashSet<(BlobId, LangName)>,
@@ -232,6 +266,21 @@ impl Run {
     pub fn stopped(&self, snap: &Snap) -> bool {
         self.cancel.load(Ordering::Acquire) || snap.ended.load(Ordering::Acquire)
     }
+}
+
+/// What ended queries leave to finish outside every lock
+/// ([`Inner::finish_ended`]).
+#[derive(Default)]
+pub(crate) struct Ended {
+    semantic: Vec<SemQuery>,
+    prefetched: Vec<Prefetched>,
+}
+
+/// Stops a query: its task ends at its next check. Its semantic part is
+/// left to [`Inner::finish_ended`].
+fn end_entry(entry: Entry) -> Option<SemQuery> {
+    entry.cancel.store(true, Ordering::Release);
+    entry.semantic
 }
 
 fn empty_results(id: QueryId, state: QueryState) -> QueryResults {
@@ -279,9 +328,10 @@ impl Inner {
             }
             (id, evicted)
         };
-        for entry in evicted {
-            self.end_entry(entry);
-        }
+        self.finish_ended(Ended {
+            semantic: evicted.into_iter().filter_map(end_entry).collect(),
+            prefetched: Vec::new(),
+        });
         if project.is_none() {
             return id;
         }
@@ -322,33 +372,57 @@ impl Inner {
             at.and_then(|i| q.entries.remove(i))
         };
         if let Some(entry) = entry {
-            self.end_entry(entry);
+            self.finish_ended(Ended {
+                semantic: end_entry(entry).into_iter().collect(),
+                prefetched: Vec::new(),
+            });
         }
     }
 
     /// Closes every query of a project (it closed, or its worktree changed),
-    /// or every query (`project` None: deactivation).
-    pub(crate) fn close_queries(&self, project: Option<&ProjectKey>) {
-        let ended: Vec<Entry> = {
-            let mut q = lock(&self.queries);
-            let (gone, kept): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut q.entries)
+    /// or every query (`project` None: deactivation), and drops their
+    /// prefetches. Their semantic requests are cancelled, and what they hold
+    /// dropped, by [`finish_ended`](Self::finish_ended): called by the
+    /// caller once it holds no lock (a session's end holds `publishing`).
+    #[must_use = "finish_ended cancels the queries' semantic requests"]
+    pub(crate) fn close_queries(&self, project: Option<&ProjectKey>) -> Ended {
+        let mut q = lock(&self.queries);
+        let (gone, kept): (Vec<Entry>, Vec<Entry>) = std::mem::take(&mut q.entries)
+            .into_iter()
+            .partition(|e| project.is_none_or(|p| &e.project == p));
+        q.entries = kept.into();
+        let (dropped, prefetched): (Vec<Prefetched>, Vec<Prefetched>) =
+            std::mem::take(&mut q.prefetched)
                 .into_iter()
-                .partition(|e| project.is_none_or(|p| &e.project == p));
-            q.entries = kept.into();
-            q.prefetched
-                .retain(|p| project.is_some_and(|k| &p.query.project != k));
-            gone
-        };
-        for entry in ended {
-            self.end_entry(entry);
+                .partition(|p| project.is_none_or(|k| &p.query.project == k));
+        q.prefetched = prefetched;
+        Ended {
+            semantic: gone.into_iter().filter_map(end_entry).collect(),
+            prefetched: dropped,
         }
     }
 
-    fn end_entry(&self, entry: Entry) {
-        entry.cancel.store(true, Ordering::Release);
-        if let Some(semantic) = entry.semantic {
+    /// Cancels the unanswered semantic requests of ended queries (the
+    /// providers' `cancel` returns at once, on any thread) and drops what
+    /// they held in a `Background` task: a query's map (about 3 MB for
+    /// 100 000 files) or a prefetch's `Prepared` may hold the last lease of
+    /// a replaced grammar, and this may run on the UI thread (`close`).
+    pub(crate) fn finish_ended(&self, ended: Ended) {
+        if ended.semantic.is_empty() && ended.prefetched.is_empty() {
+            return;
+        }
+        for semantic in &ended.semantic {
             semantic.cancel_unanswered();
         }
+        self.drop_later(ended);
+    }
+
+    /// Drops `value` in a `Background` task; here when the activation is
+    /// gone (nothing runs then).
+    pub(crate) fn drop_later(&self, value: impl Send + 'static) {
+        let _ = self
+            .host
+            .spawn_busy("drop", Priority::Background, move || drop(value));
     }
 
     /// Replaces a query's results with `f` applied to a copy, one generation
@@ -403,7 +477,8 @@ impl Inner {
         Some(View {
             session: st.session,
             map: published.map.provenance.generation(),
-            eviction,
+            eviction: st.walk_eviction(eviction),
+            full: st.batch.full.is_some(),
             grammar: published.map.provenance.grammar,
             hinted: st.hinted,
         })
@@ -415,17 +490,27 @@ impl Inner {
     /// copies, so a new map or table does not change what the query has
     /// read; the shared inputs are the session (root, worktree, open), the
     /// store (evictions, and units written: hints) and the files (checked
-    /// per read, `read_content`).
+    /// per read, `read_content`). `view` is the view the data the query
+    /// holds was read under: a prefetch's, or the snapshot's; data from
+    /// another map or table than the snapshot's is `Evicted` (made again).
     pub(crate) fn check_view(&self, snap: &Snap, view: &View) -> ViewCheck {
+        let mine = &snap.view;
+        if (view.session, view.map, view.grammar) != (mine.session, mine.map, mine.grammar) {
+            return ViewCheck::Evicted;
+        }
         let eviction = snap.project.evictions();
-        let hinted = {
+        let (eviction, full, hinted) = {
             let st = lock(&snap.project.state);
             if st.session != view.session || st.cancel.load(Ordering::Acquire) {
                 return ViewCheck::Ended;
             }
-            st.hinted
+            (
+                st.walk_eviction(eviction),
+                st.batch.full.is_some(),
+                st.hinted,
+            )
         };
-        if eviction != view.eviction {
+        if eviction != view.eviction || full != view.full {
             ViewCheck::Evicted
         } else if hinted != view.hinted {
             ViewCheck::Grew(hinted)
@@ -461,7 +546,7 @@ impl Inner {
     pub(crate) fn snap(&self, key: &ProjectKey) -> Option<Snap> {
         match self.take_snap(key, None) {
             Snapped::Ready(snap) => Some(*snap),
-            Snapped::Waiting | Snapped::Gone => None,
+            Snapped::Waiting | Snapped::Unavailable(_) | Snapped::Gone => None,
         }
     }
 
@@ -484,6 +569,14 @@ impl Inner {
         let published = match &st.published {
             Some(p) if !st.cancel.load(Ordering::Acquire) && p.session == st.session => p.clone(),
             _ => {
+                // The last reconcile found none can be published, and none
+                // is running or requested to find otherwise.
+                if !st.run.running
+                    && !st.cancel.load(Ordering::Acquire)
+                    && let Some(why) = &st.unavailable
+                {
+                    return Snapped::Unavailable(why.clone());
+                }
                 if let Some(w) = waiting {
                     st.waiting.push(w);
                 }
@@ -504,6 +597,22 @@ impl Inner {
             .filter(|(w, _)| *w == worktree)
             .map(|(_, p)| p.clone())
             .unwrap_or_else(|| Arc::from(Vec::new()));
+        // Tier 1's paths, for the read limit only.
+        let focused: HashSet<RelPath> = {
+            let f = &st.focus;
+            let current = f
+                .current
+                .iter()
+                .filter(|(w, _)| *w == worktree)
+                .map(|(_, t)| t.path.clone());
+            let drawer = f
+                .drawer
+                .iter()
+                .filter(|(w, _)| *w == worktree)
+                .flat_map(|(_, p)| p.iter().cloned());
+            current.chain(drawer).collect()
+        };
+        let full = st.batch.full.is_some();
         let map = published.map.clone();
         Snapped::Ready(Box::new(Snap {
             project: project.clone(),
@@ -524,6 +633,9 @@ impl Inner {
             disabled: published.disabled.clone(),
             packages: published.packages.clone(),
             review,
+            focused,
+            full,
+            incomplete: published.incomplete,
             stamp: HintStamp {
                 eviction: st.walk_eviction(eviction),
                 grammar: map.provenance.grammar,
@@ -532,7 +644,8 @@ impl Inner {
             view: View {
                 session: st.session,
                 map: map.provenance.generation(),
-                eviction,
+                eviction: st.walk_eviction(eviction),
+                full,
                 grammar: map.provenance.grammar,
                 hinted: st.hinted,
             },
@@ -613,6 +726,12 @@ impl Inner {
         let snap = match snapped {
             Snapped::Ready(snap) => *snap,
             Snapped::Waiting => return,
+            Snapped::Unavailable(why) => {
+                self.publish(run.id, |r| {
+                    r.state = QueryState::Failed(QueryError::Unreadable(why))
+                });
+                return;
+            }
             Snapped::Gone => {
                 self.publish(run.id, |r| {
                     r.state = QueryState::Failed(QueryError::NotOpen)
@@ -714,7 +833,10 @@ impl Inner {
             }
             (dropped, next)
         };
-        drop(dropped);
+        // Not here: `query` runs this on the UI thread.
+        if !dropped.is_empty() {
+            self.drop_later(dropped);
+        }
         let Some(at) = next else {
             return;
         };
@@ -773,10 +895,16 @@ impl Inner {
             let i = q.prefetched.iter().position(|p| &p.query == query)?;
             q.prefetched.remove(i)
         };
-        // Outside the lock: a stale one drops here.
+        // Only a hint of reuse: the task checks the prefetch's view against
+        // the snapshot it takes (`run_definition`), which may be newer.
         let fresh = now.saturating_duration_since(p.at) <= PREFETCH_FOR
             && current.is_some_and(|v| v.same_basis(&p.view));
-        if fresh { p.prepared } else { None }
+        if fresh {
+            return p.prepared;
+        }
+        // A stale one is dropped in a task: this is the UI thread.
+        self.drop_later(p);
+        None
     }
 
     /// Whether a prefetch of `query` is waiting (tests).

@@ -486,6 +486,46 @@ pub struct Effective {
     pub slot: HintSlot,
 }
 
+/// One file of the map as a walk sees it, borrowed from the map: nothing is
+/// allocated for an index entry ([`LiveMap::each_file`]).
+pub(crate) struct FileRef<'a> {
+    pub oid: BlobId,
+    pub lang: &'a Lang,
+    pub slot: HintSlot,
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the accounting's per-file listing reads it in the tests"
+        )
+    )]
+    at: FileAt<'a>,
+}
+
+/// Where a [`FileRef`]'s path is: looked up only when asked for.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the accounting's per-file listing reads it in the tests"
+    )
+)]
+enum FileAt<'a> {
+    Base(&'a FileList, usize),
+    Overlay(&'a str),
+}
+
+impl FileRef<'_> {
+    /// The file's path (tests).
+    #[cfg(test)]
+    pub fn path(&self) -> &str {
+        match self.at {
+            FileAt::Base(files, i) => files.get(i).map_or("", |(p, _)| p),
+            FileAt::Overlay(path) => path,
+        }
+    }
+}
+
 /// The input generations a map was built from: the file list and the
 /// language table of its base part, the worktree content of its overlay.
 /// Everything derived from a map (the batch tiers' cursor, hint stamps)
@@ -603,6 +643,79 @@ impl LiveMap {
     pub(crate) fn overlay_effective(&self, i: usize) -> Option<Effective> {
         let (path, _) = self.overlay.entries.get(i)?;
         self.effective(path)
+    }
+
+    /// Every file of the map under `dir` ("" holds everything), or every
+    /// one not under it (`inside` false), in a language `admit` admits
+    /// (asked once per language of the map's table): index entries not
+    /// hidden by an overlay entry, then the overlay's `Content` entries.
+    /// No `Effective` and no path is built: 100 000 files take about a
+    /// millisecond.
+    pub(crate) fn each_file(
+        &self,
+        dir: &str,
+        inside: bool,
+        admit: &mut dyn FnMut(&Lang) -> bool,
+        mut f: impl FnMut(FileRef<'_>),
+    ) {
+        let mut admitted: [Option<bool>; 256] = [None; 256];
+        let mut lang_of = |code: u8| -> Option<&Lang> {
+            let lang = self.base.lang_of_code(code)?;
+            admitted[usize::from(code)]
+                .get_or_insert_with(|| admit(lang))
+                .then_some(lang)
+        };
+        let files = self.base.files();
+        let under_dir = files.range_under(dir);
+        let ranges = if inside {
+            [under_dir, 0..0]
+        } else if dir.is_empty() {
+            [0..0, 0..0]
+        } else {
+            [0..under_dir.start, under_dir.end..files.len()]
+        };
+        for i in ranges.into_iter().flatten() {
+            let code = self.base.langs.get(i).copied().unwrap_or(0);
+            if code == 0 {
+                continue;
+            }
+            let Some(lang) = lang_of(code) else {
+                continue;
+            };
+            if self.overlay.hides(i) {
+                continue;
+            }
+            let Some(oid) = files.oid(i) else {
+                continue;
+            };
+            f(FileRef {
+                oid,
+                lang,
+                slot: HintSlot::Base(i as u32),
+                at: FileAt::Base(files, i),
+            });
+        }
+        for (i, (path, state)) in self.overlay.entries.iter().enumerate() {
+            if crate::index::state::under(path, dir) != inside {
+                continue;
+            }
+            let WorktreeState::Content(oid) = state else {
+                continue;
+            };
+            let Some(lang) = lang_of(self.overlay.lang_code(i)) else {
+                continue;
+            };
+            let slot = match self.overlay.base_index(i) {
+                Some(b) => HintSlot::Base(b as u32),
+                None => HintSlot::Extra(path.clone()),
+            };
+            f(FileRef {
+                oid: *oid,
+                lang,
+                slot,
+                at: FileAt::Overlay(path),
+            });
+        }
     }
 
     /// Every path whose effective content is `oid` in the language named

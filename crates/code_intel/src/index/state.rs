@@ -382,6 +382,12 @@ pub(crate) struct Published {
     pub root: Option<Arc<SafeRoot>>,
     pub tree: Option<Tree>,
     pub packages: Arc<[Package]>,
+    /// The map lacks the worktree's content: the root could not be opened
+    /// (nothing of the worktree was read), or the last worktree comparison
+    /// failed (the overlay may be behind). Queries count no file as
+    /// indexed without reading it (`Reason::Unverified`), so nothing is
+    /// `Complete` from such a map.
+    pub incomplete: bool,
 }
 
 /// A project's state for one active worktree (a session). Switching the
@@ -413,6 +419,9 @@ pub(crate) struct State {
     pub map: LiveMap,
     pub base_for: Option<(u64, u64)>,
     pub compare_for: Option<[u64; 6]>,
+    /// The last worktree comparison failed: the overlay is the one before
+    /// it (`Published::incomplete`).
+    pub compare_failed: bool,
     pub head_diff: Arc<HeadDiff>,
     pub run: Run,
     /// Guards fs_watch delivered with batches: kept until the reconcile that
@@ -443,6 +452,11 @@ pub(crate) struct State {
     /// and the overlay are complete for the current inputs). The previous
     /// one stays while a reconcile runs; a new session has none.
     pub published: Option<Arc<Published>>,
+    /// Set by a reconcile that consumed all its input and still has no
+    /// map to publish (no current worktree, its file list unavailable):
+    /// why. Queries asked while no reconcile runs fail with it at once;
+    /// those waiting failed with it.
+    pub unavailable: Option<Arc<str>>,
 }
 
 impl State {
@@ -451,12 +465,19 @@ impl State {
     /// [`hinted`](Self::hinted) when some hint changed. Every hint is set
     /// here, under the project's lock, so a query that reads a hint and
     /// then the count under the lock sees that hint's installation.
+    ///
+    /// Once the namespace is full every setting counts: the frozen stamp
+    /// keeps the hint of an evicted unit matching, so writing that unit
+    /// again changes no hint, yet a query's lookup made before the write
+    /// missed it while its existence check after the write finds it.
     pub fn hint_paths(&mut self, oid: &BlobId, lang: &str, stamp: HintStamp) {
         let mut changed = false;
+        let mut any = false;
         for eff in self.map.paths(oid, lang) {
+            any = true;
             changed |= self.map.hints.set(&eff.slot, oid, stamp);
         }
-        if changed {
+        if changed || (any && self.batch.full.is_some()) {
             self.hinted += 1;
         }
     }
@@ -487,6 +508,7 @@ impl State {
             },
             base_for: None,
             compare_for: None,
+            compare_failed: false,
             head_diff: Arc::new(HeadDiff::default()),
             run: Run::default(),
             held: Vec::new(),
@@ -498,6 +520,7 @@ impl State {
             demand: false,
             waiting: Vec::new(),
             published: None,
+            unavailable: None,
         }
     }
 

@@ -1,18 +1,20 @@
 //! The time-boxed search (「限时搜索」): the current sub-project's files that
 //! are not indexed, nearest first, read and searched for the name as a whole
 //! word until one second after the query started. Files being extracted
-//! right now are not searched and count as unsearched.
+//! right now are not searched. What it reads goes into the query's
+//! [`Account`]; the accounting decides the completeness.
 
 use std::collections::HashSet;
 use std::time::Instant;
 
-use lectern_services::code_intel::Completeness;
 use lectern_services::project::{BlobId, RelPath};
 
+use super::account::{Account, Reason};
 use super::rank::distance;
-use super::text::FileRead;
 use super::{Run, Snap};
-use crate::extract::{BACKGROUND_DEADLINE, ExtractStatus, Lang, compatible};
+use crate::extract::{
+    BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, ExtractStatus, INTERACTIVE_MAX_LEN, Lang, compatible,
+};
 use crate::index::Inner;
 use crate::index::state::under;
 use crate::map::Effective;
@@ -47,8 +49,7 @@ impl FileDeadline {
     /// something about the file, so that it may be stored like the batch
     /// tiers' results. `Cancelled` never does, and neither does `TimedOut`
     /// under a cut deadline: the query's time ran out, not the file's
-    /// limit. Such a file is neither stored nor searched: it counts as
-    /// unsearched ([`Searched::Unsearched`]).
+    /// limit. Such a file is neither stored nor searched.
     pub(crate) fn settles(&self, status: ExtractStatus) -> bool {
         match status {
             ExtractStatus::Cancelled => false,
@@ -59,6 +60,20 @@ impl FileDeadline {
             | ExtractStatus::Unsupported => true,
         }
     }
+
+    /// Why a file whose extraction or parse ended with `status` was not
+    /// searched; None for `Done`.
+    pub(crate) fn reason(&self, status: ExtractStatus) -> Option<Reason> {
+        match status {
+            ExtractStatus::Done => None,
+            ExtractStatus::Cancelled => Some(Reason::Cancelled),
+            ExtractStatus::TimedOut if self.cut => Some(Reason::Cut),
+            ExtractStatus::TimedOut => Some(Reason::TimedOut),
+            ExtractStatus::TooLarge => Some(Reason::TooLarge),
+            ExtractStatus::Binary => Some(Reason::Binary),
+            ExtractStatus::Unsupported => Some(Reason::Unreadable),
+        }
+    }
 }
 
 /// What a query learned about one file it read.
@@ -66,18 +81,17 @@ impl FileDeadline {
 pub(crate) enum Searched {
     /// Searched: its definitions or references are known, or it has none.
     Done,
-    /// Cut short by the query's time or cancelled: counts as unsearched.
-    Unsearched,
+    /// Not searched, and why.
+    Unsearched(Reason),
 }
 
 /// The files a search covers.
 pub(crate) struct Scope {
-    /// Unindexed files of the sub-project, nearest first.
+    /// The sub-project's files to search, nearest first: not indexed, or
+    /// (full mode) hinted with their unit missing.
     pub files: Vec<Effective>,
     /// The sub-project's directory ("" for the whole worktree).
     pub dir: String,
-    /// Its files being extracted right now.
-    pub in_flight: usize,
 }
 
 /// Whether `name` occurs in `bytes` as a whole word: the bytes around it
@@ -103,17 +117,35 @@ impl Snap {
         !self.map.hints.matches(&eff.slot, &eff.oid, self.stamp)
     }
 
-    fn searchable(&self, eff: &Effective, lang: &Lang) -> bool {
-        !self.disabled.contains(eff.lang.name())
-            && compatible(&self.table, eff.lang.name(), lang.name())
+    /// Whether a file is in `lang`'s group and its language enabled: the
+    /// files a jump or find references in `lang` accounts for.
+    pub fn searchable(&self, eff: &Effective, lang: &Lang) -> bool {
+        self.in_group(&eff.lang, lang)
     }
 
-    fn in_flight(&self, eff: &Effective) -> bool {
+    /// Whether `file`'s language is enabled and in `lang`'s group.
+    pub fn in_group(&self, file: &Lang, lang: &Lang) -> bool {
+        !self.disabled.contains(file.name()) && compatible(&self.table, file.name(), lang.name())
+    }
+
+    pub(super) fn in_flight(&self, eff: &Effective) -> bool {
         self.in_flight.contains(&(eff.oid, eff.lang.name().clone()))
     }
 
+    /// The read limit of a file for a query: the limit its unit was (or is
+    /// being) extracted under. A file with a unit (its hint matches) or in
+    /// tier 1 may be up to the interactive limit (4 MiB); the others are
+    /// extracted by the background tiers (1 MiB).
+    pub fn read_limit(&self, eff: &Effective) -> usize {
+        if !self.unindexed(eff) || self.focused.contains(&eff.path) {
+            INTERACTIVE_MAX_LEN
+        } else {
+            BACKGROUND_MAX_LEN
+        }
+    }
+
     /// Every file of the map under `dir` (or not under it, `inside` false).
-    fn each(&self, dir: &str, inside: bool, mut f: impl FnMut(Effective)) {
+    pub(super) fn each(&self, dir: &str, inside: bool, mut f: impl FnMut(Effective)) {
         let files = self.map.base.files();
         let range = if inside {
             files.range_under(dir)
@@ -140,129 +172,92 @@ impl Snap {
     }
 
     /// The search's scope for a reference at `anchor` in `lang`: the
-    /// deepest sub-project holding it, the whole worktree without one.
+    /// deepest sub-project holding it, the whole worktree without one; its
+    /// files in `lang`'s group that are not indexed and not being extracted
+    /// right now, nearest first. Once the namespace is full a matching hint
+    /// does not prove its unit: the hinted files of the scope are checked
+    /// against the store first (`verify_hinted`), and those missing are
+    /// searched too.
     pub fn search_scope(
         &self,
         anchor: &str,
         lang: &Lang,
         skip: &HashSet<(RelPath, BlobId)>,
+        account: &mut Account,
     ) -> Scope {
         let dir = self.subproject_of(anchor).unwrap_or("").to_owned();
         let mut files = Vec::new();
-        let mut in_flight = 0;
+        let mut hinted = Vec::new();
         self.each(&dir, true, |eff| {
-            if !self.searchable(&eff, lang) || !self.unindexed(&eff) {
+            if !self.searchable(&eff, lang) || skip.contains(&(eff.path.clone(), eff.oid)) {
                 return;
             }
-            if skip.contains(&(eff.path.clone(), eff.oid)) {
+            if !self.unindexed(&eff) {
+                if self.full {
+                    hinted.push(eff);
+                }
                 return;
             }
-            if self.in_flight(&eff) {
-                in_flight += 1;
-            } else {
+            if !self.in_flight(&eff) {
                 files.push(eff);
             }
         });
+        self.verify_hinted(account, &hinted);
+        files.extend(
+            hinted
+                .into_iter()
+                .filter(|e| !self.indexed(account, e) && !self.in_flight(e)),
+        );
         // `distance` allocates: one key per file, not one per comparison.
         files.sort_by_cached_key(|e| (distance(anchor, &e.path), e.path.clone()));
-        Scope {
-            files,
-            dir,
-            in_flight,
-        }
-    }
-
-    /// Unindexed files in `lang`'s group outside `dir` (`Partial::outside`).
-    pub fn unindexed_outside(&self, dir: &str, lang: Option<&Lang>) -> u32 {
-        if dir.is_empty() {
-            return 0;
-        }
-        let mut n = 0u32;
-        self.each(dir, false, |eff| {
-            let fits = lang.is_none_or(|l| self.searchable(&eff, l));
-            if fits && self.unindexed(&eff) {
-                n = n.saturating_add(1);
-            }
-        });
-        n
-    }
-
-    /// Unindexed files of every language under `dir`, and those in flight
-    /// (`Named`'s completeness).
-    pub fn unindexed_under(&self, dir: &str) -> (u32, u32) {
-        let (mut n, mut flying) = (0u32, 0u32);
-        self.each(dir, true, |eff| {
-            if self.disabled.contains(eff.lang.name()) || !self.unindexed(&eff) {
-                return;
-            }
-            if self.in_flight(&eff) {
-                flying = flying.saturating_add(1);
-            } else {
-                n = n.saturating_add(1);
-            }
-        });
-        (n, flying)
+        Scope { files, dir }
     }
 }
 
 impl Inner {
     /// Searches `scope` for `name` until `until`: every whole-word hit is
     /// handed to `hit` with the bytes read, their key and `until`, and says
-    /// whether the file was searched. Returns the completeness: `Complete`
-    /// when every file was searched and none was in flight; files not
-    /// reached, in flight or cut short (`Searched::Unsearched`) are
-    /// `unsearched`.
+    /// whether the file was searched. Every file read goes into `account`
+    /// (searched, or why not); a file not reached is left to the
+    /// accounting. False when the query stopped.
     #[allow(
         clippy::too_many_arguments,
-        reason = "the search's scope, its word and its time box"
+        reason = "the search's scope, its word, its time box and its account"
     )]
     pub(crate) fn search(
         &self,
         run: &Run,
         snap: &Snap,
         scope: &Scope,
-        lang: &Lang,
         name: &str,
         until: Instant,
+        account: &mut Account,
         mut hit: impl FnMut(&Effective, BlobId, Vec<u8>, Instant) -> Searched,
-    ) -> Option<Completeness> {
+    ) -> bool {
         let clock = self.watchdog.clock().clone();
-        let mut searched = 0usize;
-        let mut cut = 0usize;
         for eff in &scope.files {
             if run.stopped(snap) {
-                return None;
+                return false;
             }
             if clock.now() >= until {
                 break;
             }
-            searched += 1;
-            let bytes = match self.read_content(snap, eff) {
-                FileRead::Content(bytes) => bytes,
-                FileRead::TooLarge => continue,
-                // Changed since the snapshot: not searched under new bytes.
-                FileRead::Stale => {
-                    cut += 1;
+            let bytes = match self.read_content(snap, eff, snap.read_limit(eff)) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    account.unsearched(&eff.path, eff.oid, reason);
                     continue;
                 }
             };
             if !whole_word(&bytes, name) {
+                account.searched(&eff.path, eff.oid);
                 continue;
             }
-            if hit(eff, eff.oid, bytes, until) == Searched::Unsearched {
-                cut += 1;
+            match hit(eff, eff.oid, bytes, until) {
+                Searched::Done => account.searched(&eff.path, eff.oid),
+                Searched::Unsearched(reason) => account.unsearched(&eff.path, eff.oid, reason),
             }
         }
-        if run.stopped(snap) {
-            return None;
-        }
-        let left = scope.files.len() - searched + cut;
-        if left == 0 && scope.in_flight == 0 {
-            return Some(Completeness::Complete);
-        }
-        Some(Completeness::Partial {
-            unsearched: u32::try_from(left + scope.in_flight).unwrap_or(u32::MAX),
-            outside: snap.unindexed_outside(&scope.dir, Some(lang)),
-        })
+        !run.stopped(snap)
     }
 }

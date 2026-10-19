@@ -9,7 +9,8 @@ use lectern_services::code_intel::{QueryError, TextOrigin, TextRef};
 use lectern_services::project::BlobId;
 
 use super::Snap;
-use crate::extract::{BACKGROUND_MAX_LEN, INTERACTIVE_MAX_LEN};
+use super::account::Reason;
+use crate::extract::INTERACTIVE_MAX_LEN;
 use crate::git_access::{hash_blob, hash_kind};
 use crate::index::Inner;
 use crate::map::Effective;
@@ -77,31 +78,28 @@ impl Inner {
     /// never searched or extracted under the new bytes' OID. A path without
     /// an index entry (untracked, or a folder project) has the OID its
     /// overlay entry recorded when the worktree was read, and the same rule.
-    pub(crate) fn read_content(&self, snap: &Snap, eff: &Effective) -> FileRead {
+    ///
+    /// `max` is the limit the file's unit was extracted under
+    /// (`Snap::read_limit`). Otherwise why it cannot be searched: over
+    /// `max`, gone or not the snapshot's content (`Stale`), or unreadable;
+    /// the caller records it in the query's account.
+    pub(crate) fn read_content(
+        &self,
+        snap: &Snap,
+        eff: &Effective,
+        max: usize,
+    ) -> Result<Vec<u8>, Reason> {
         self.step_hook(super::Step::Read, snap);
         let Some(root) = snap.root_of(None) else {
-            return FileRead::Stale;
+            return Err(Reason::Unreadable);
         };
-        match read(&root, &eff.path, BACKGROUND_MAX_LEN) {
-            Ok(Some(bytes)) if self.is_content(snap, &eff.path, &bytes, eff.oid) => {
-                FileRead::Content(bytes)
-            }
-            Ok(None) => FileRead::TooLarge,
-            Ok(Some(_)) | Err(_) => FileRead::Stale,
+        match read(&root, &eff.path, max) {
+            Ok(Some(bytes)) if self.is_content(snap, &eff.path, &bytes, eff.oid) => Ok(bytes),
+            Ok(Some(_)) | Err(Reading::Gone) => Err(Reason::Stale),
+            Ok(None) => Err(Reason::TooLarge),
+            Err(Reading::Failed(_)) => Err(Reason::Unreadable),
         }
     }
-}
-
-/// What [`Inner::read_content`] read.
-pub(crate) enum FileRead {
-    /// The snapshot's content of the path.
-    Content(Vec<u8>),
-    /// Over the background limit (1 MiB): no query reads it, as the batch
-    /// tiers store it `TooLarge`.
-    TooLarge,
-    /// Gone, unreadable, or not the snapshot's content any more: nothing
-    /// from it is used, and it counts as unsearched.
-    Stale,
 }
 
 pub(crate) enum Reading {

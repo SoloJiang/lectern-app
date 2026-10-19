@@ -386,6 +386,20 @@ impl Indexer {
         self.inner.stats.counts()
     }
 
+    /// Marks the project's namespace as full, as the batch layer does when
+    /// its own write evicts units (`Batch::full`): the hints' stamp freezes
+    /// at the walks' generation (tests and the full-mode profile).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_namespace_full(&self, project: &ProjectKey) {
+        let Some(p) = self.inner.project(project) else {
+            return;
+        };
+        let eviction = p.evictions();
+        let mut st = lock(&p.state);
+        let walked = st.walk_eviction(eviction);
+        st.batch.full = Some(walked);
+    }
+
     /// Replaces the extraction the tiers call (tests count, block or steer
     /// it).
     #[cfg(any(test, feature = "test-support"))]
@@ -488,7 +502,8 @@ impl Indexer {
         for p in projects {
             lock(&p.state).end();
         }
-        self.inner.close_queries(None);
+        let ended = self.inner.close_queries(None);
+        self.inner.finish_ended(ended);
     }
 }
 
@@ -687,15 +702,17 @@ impl Inner {
                     let at = open.iter().position(|p| &p.key == project);
                     at.map(|i| open.remove(i))
                 };
-                {
+                let ended = {
                     // Ordered against publication: nothing of the session
                     // is published after this.
                     let _order = lock(&self.publishing);
-                    if let Some(p) = removed {
+                    if let Some(p) = &removed {
                         lock(&p.state).end();
                     }
-                    self.close_queries(Some(project));
-                }
+                    self.close_queries(Some(project))
+                };
+                // Their providers' `cancel`, outside the lock.
+                self.finish_ended(ended);
                 {
                     let mut batch = lock(&self.batch_project);
                     if batch.as_ref() == Some(project) {

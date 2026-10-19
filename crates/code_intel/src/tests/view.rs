@@ -1,17 +1,23 @@
 //! `view_*`: a query's results are consistent with one view (「查询的视图」).
 //! The interleaving matrix: for each query kind, at each step where the
-//! test hook runs (and, for a reused prefetch, between the prefetch and the
-//! query), each background change, each case on its own repository. The
-//! result is the old view's, the new view's, or not `Complete`: never a
-//! silent omission, never a mix. Every candidate it lists is one of the old
-//! or the new view's.
+//! test hook runs (and just before the query is asked, just after it
+//! returns before its task takes the snapshot, and, for a reused prefetch,
+//! between the prefetch and the query), each background change, each case
+//! on its own repository. The result is the old view's, the new view's, or
+//! not `Complete`: never a silent omission, never a mix. Every candidate it
+//! lists is one of the old or the new view's.
+//!
+//! The files are in a language pack's language (`jpack`, the Java grammar
+//! in the `jvm` group), so a pack upgrade and a pack installed in the same
+//! group change the language the queries use; each change targets a file
+//! that contributes to the kind's result.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use lectern_services::code_intel::{
-    Completeness, DefinitionRef, Query, QueryKind, QueryResults, QueryState,
+    Completeness, DefinitionRef, Query, QueryError, QueryKind, QueryResults, QueryState,
 };
 use lectern_services::project::ProjectEvent;
 
@@ -22,17 +28,19 @@ use crate::store::Version;
 
 use super::support::Harness;
 
-const RUN: &str = "export function run() { return item(); }\n";
+const RUN: &str = "class A { void run() { item(); } }\n";
 /// Indexed before the query.
-const ITEM: &str = "export function item() { return 2; }\n";
+const ITEM: &str = "class C { void item() { } }\n";
+const ITEM_EDITED: &str = "class C { void item() { int edited = 1; } }\n";
 /// Not indexed: the search finds it.
-const ITEM2: &str = "export function item() { return 4; }\n";
-const ITEM2_EDITED: &str = "export function item() { return 5; }\n";
+const ITEM2: &str = "class D { void item() { int x = 4; } }\n";
+const ITEM2_EDITED: &str = "class D { void item() { int x = 5; } }\n";
 /// References: indexed, and not indexed.
-const USE: &str = "export function other() { return item() + 1; }\n";
-const USE2: &str = "export function more() { return item() * 2; }\n";
+const USE: &str = "class E { void other() { item(); } }\n";
+const USE_EDITED: &str = "class E { void other() { int y = 2; item(); } }\n";
+const USE2: &str = "class F { void more() { item(); item(); } }\n";
 /// Only in the other worktree.
-const ITEM3: &str = "export function item() { return 6; }\n";
+const ITEM3: &str = "class G { void item() { int z = 6; } }\n";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
@@ -57,11 +65,41 @@ enum Change {
     Switch,
     /// The project closes.
     Close,
-    /// A language pack is installed: the language table changes.
+    /// A language pack is installed in the queries' group (`jvm`): the
+    /// language table, and the group's versions, change.
     Grammar,
-    /// The pack k.jpack is in is upgraded: the table has the new version
+    /// The queries' own pack is upgraded: the table has the new version
     /// before the reconcile rebuilds the map.
     Upgrade,
+}
+
+impl Change {
+    /// The file the change is made to, for `kind`: one that contributes to
+    /// its result. A jump and `Named` list definitions (c.jpack indexed,
+    /// d.jpack not), find references lists references (e.jpack indexed,
+    /// f.jpack not).
+    fn target(self, kind: Kind) -> &'static str {
+        let refs = kind == Kind::References;
+        match self {
+            Change::Commit if refs => "f.jpack",
+            Change::Commit => "d.jpack",
+            Change::Evict | Change::Map | Change::Edit if refs => "e.jpack",
+            Change::Evict | Change::Map => "c.jpack",
+            Change::Edit => "d.jpack",
+            Change::Switch | Change::Close | Change::Grammar | Change::Upgrade => "",
+        }
+    }
+}
+
+/// The content of `path` before and after an edit.
+fn contents(path: &str) -> (&'static str, &'static str) {
+    match path {
+        "c.jpack" => (ITEM, ITEM_EDITED),
+        "d.jpack" => (ITEM2, ITEM2_EDITED),
+        "e.jpack" => (USE, USE_EDITED),
+        "f.jpack" => (USE2, USE2),
+        other => panic!("no contents for {other}"),
+    }
 }
 
 const CHANGES: [Change; 8] = [
@@ -77,17 +115,18 @@ const CHANGES: [Change; 8] = [
 
 /// Where a change happens: at a step of the query; just before the query
 /// is asked, so it arrives while the reconcile the change requested has
-/// not run (no ready snapshot after a switch, the old one otherwise); or
-/// (a reused prefetch) between the prefetch and the query.
+/// not run (no ready snapshot after a switch, the old one otherwise); just
+/// after `query` returned, before its task takes the snapshot (a map the
+/// change publishes there is newer than the one `query` checked a reused
+/// prefetch against); or (a reused prefetch) between the prefetch and the
+/// query.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum At {
     Step(Step),
     Before,
+    AfterAsk,
     Between,
 }
-
-/// A method `item` in the pack's language: `Named` lists it.
-const K_PACK: &str = "class K { void item() { } }\n";
 
 const STEPS: [Step; 5] = [
     Step::Snapshot,
@@ -120,10 +159,8 @@ fn commit(inner: &Inner, snap: &Snap, path: &str, text: &[u8]) {
     );
 }
 
-/// The repository: `main` with a.ts (the jump's text), c.ts and e.ts
-/// indexed, d.ts and f.ts not (for `Named`, everything indexed); a
-/// `feature` worktree with one more definition.
-fn fixture(kind: Kind) -> Harness {
+/// A harness with the `jpack` pack installed.
+fn pack_harness() -> Harness {
     let h = Harness::new();
     h.grammars.install(
         "jpack",
@@ -131,13 +168,20 @@ fn fixture(kind: Kind) -> Harness {
         crate::testing::java_pack(1, Arc::new(())),
     );
     h.settle();
-    let files: [(&str, &str); 6] = [
-        ("a.ts", RUN),
-        ("c.ts", ITEM),
-        ("d.ts", ITEM2),
-        ("e.ts", USE),
-        ("f.ts", USE2),
-        ("k.jpack", K_PACK),
+    h
+}
+
+/// The repository: `main` with a.jpack (the jump's text), c.jpack and
+/// e.jpack indexed, d.jpack and f.jpack not (for `Named`, everything
+/// indexed); a `feature` worktree with one more definition.
+fn fixture(kind: Kind) -> Harness {
+    let h = pack_harness();
+    let files: [(&str, &str); 5] = [
+        ("a.jpack", RUN),
+        ("c.jpack", ITEM),
+        ("d.jpack", ITEM2),
+        ("e.jpack", USE),
+        ("f.jpack", USE2),
     ];
     for (path, text) in files {
         h.git.add("main", &[(path, text.as_bytes())]);
@@ -147,7 +191,7 @@ fn fixture(kind: Kind) -> Harness {
     for (path, text) in files {
         h.git.add("feature", &[(path, text.as_bytes())]);
     }
-    h.git.add("feature", &[("g.ts", ITEM3.as_bytes())]);
+    h.git.add("feature", &[("g.jpack", ITEM3.as_bytes())]);
     h.git.commit("feature");
     if kind == Kind::Named {
         h.open();
@@ -157,25 +201,26 @@ fn fixture(kind: Kind) -> Harness {
     h.open();
     let inner = h.indexer.inner();
     let snap = inner.snap(&h.key()).expect("open");
-    commit(inner, &snap, "c.ts", ITEM.as_bytes());
-    commit(inner, &snap, "e.ts", USE.as_bytes());
-    commit(inner, &snap, "k.jpack", K_PACK.as_bytes());
+    commit(inner, &snap, "c.jpack", ITEM.as_bytes());
+    commit(inner, &snap, "e.jpack", USE.as_bytes());
     h.settle();
     h
 }
 
-/// The change, as the hook runs it (on the query's thread).
-fn change(h: &Harness, c: Change) -> HookFn {
+/// The change, as the hook runs it (on the query's thread), to `kind`'s
+/// target file.
+fn change(h: &Harness, kind: Kind, c: Change) -> HookFn {
     let git = h.git.clone();
     let projects = h.projects.clone();
     let grammars = h.grammars.clone();
     let key = h.key();
+    let target = c.target(kind);
     match c {
         Change::Commit => Box::new(move |inner, snap| {
-            commit(inner, snap, "d.ts", ITEM2.as_bytes());
+            commit(inner, snap, target, contents(target).0.as_bytes());
         }),
         Change::Evict => Box::new(move |_, snap| {
-            let eff = snap.map.effective("c.ts").expect("c.ts");
+            let eff = snap.map.effective(target).expect("in the map");
             let version = Version::of(&eff.lang);
             let found = snap
                 .project
@@ -189,12 +234,12 @@ fn change(h: &Harness, c: Change) -> HookFn {
             let _ = write.commit();
         }),
         Change::Map => Box::new(move |inner, snap| {
-            git.write("main", "d.ts", ITEM2_EDITED.as_bytes());
-            lock(&snap.project.state).dirty.insert("d.ts".into());
+            git.write("main", target, contents(target).1.as_bytes());
+            lock(&snap.project.state).dirty.insert(target.into());
             inner.arc().expect("live").reconcile_now(&key);
         }),
         Change::Edit => Box::new(move |_, _| {
-            git.write("main", "d.ts", ITEM2_EDITED.as_bytes());
+            git.write("main", target, contents(target).1.as_bytes());
         }),
         Change::Switch => Box::new(move |inner, _| {
             let event = projects.set(git.snapshot(1_000, "feature", Vec::new()));
@@ -249,9 +294,9 @@ fn outcome(kind: Kind, r: &QueryResults) -> Outcome {
     }
 }
 
-/// The definition the references are asked of: c.ts's `item`.
+/// The definition the references are asked of: c.jpack's `item`.
 fn defined(h: &Harness) -> DefinitionRef {
-    h.goto("c.ts", "item", 0)
+    h.goto("c.jpack", "item", 0)
         .symbol
         .as_ref()
         .and_then(|s| s.defines.clone())
@@ -261,15 +306,15 @@ fn defined(h: &Harness) -> DefinitionRef {
 fn query(h: &Harness, kind: Kind, of: Option<&DefinitionRef>) -> Query {
     let kind = match kind {
         Kind::Definition | Kind::Prefetch => QueryKind::Definition {
-            at: h.text("a.ts"),
-            position: h.pos("a.ts", "item", 0),
+            at: h.text("a.jpack"),
+            position: h.pos("a.jpack", "item", 0),
         },
         Kind::References => QueryKind::References {
             of: of.expect("a definition").clone(),
         },
         Kind::Named => QueryKind::Named {
             name: "item".into(),
-            near: Some("a.ts".into()),
+            near: Some("a.jpack".into()),
         },
     };
     Query {
@@ -300,6 +345,7 @@ fn matrix(kind: Kind) -> (usize, usize) {
     assert!(!old.listed.is_empty(), "{kind:?}");
     let mut places: Vec<At> = STEPS.iter().map(|s| At::Step(*s)).collect();
     places.push(At::Before);
+    places.push(At::AfterAsk);
     if kind == Kind::Prefetch {
         places.push(At::Between);
     }
@@ -318,9 +364,14 @@ fn matrix(kind: Kind) -> (usize, usize) {
             }
             // The events recorded once the change is done.
             let mark = Arc::new(AtomicUsize::new(usize::MAX));
+            let now = |h: &Harness| {
+                let inner = h.indexer.inner();
+                let snap = inner.snap(&h.key()).expect("open");
+                change(h, kind, c)(inner, &snap);
+            };
             let fired = match at {
                 At::Step(step) => {
-                    let (m, run) = (mark.clone(), change(&h, c));
+                    let (m, run) = (mark.clone(), change(&h, kind, c));
                     let hook: HookFn = Box::new(move |inner, snap| {
                         run(inner, snap);
                         m.store(lock(&inner.host.events).len(), Ordering::Release);
@@ -332,13 +383,16 @@ fn matrix(kind: Kind) -> (usize, usize) {
                 // requests is still queued when the query runs
                 // (`Interactive` before `Background`).
                 At::Before | At::Between => {
-                    let inner = h.indexer.inner();
-                    let snap = inner.snap(&h.key()).expect("open");
-                    change(&h, c)(inner, &snap);
+                    now(&h);
                     true
                 }
+                At::AfterAsk => true,
             };
             let id = h.indexer.query(q.clone());
+            // `query` returned; its task has not taken its snapshot.
+            if at == At::AfterAsk {
+                now(&h);
+            }
             h.settle();
             let r = h.indexer.results(id);
             let fired = fired || lock(&h.indexer.inner().step_hook).is_none();
@@ -408,28 +462,28 @@ fn matrix(kind: Kind) -> (usize, usize) {
 #[test]
 fn view_matrix_definition() {
     let (cases, ran) = matrix(Kind::Definition);
-    assert_eq!(cases, 48);
+    assert_eq!(cases, 56);
     assert_eq!(ran, cases, "every case ran its change");
 }
 
 #[test]
 fn view_matrix_prefetch() {
     let (cases, ran) = matrix(Kind::Prefetch);
-    assert_eq!(cases, 56);
+    assert_eq!(cases, 64);
     assert_eq!(ran, cases, "every case ran its change");
 }
 
 #[test]
 fn view_matrix_references() {
     let (cases, ran) = matrix(Kind::References);
-    assert_eq!(cases, 48);
+    assert_eq!(cases, 56);
     assert_eq!(ran, cases, "every case ran its change");
 }
 
 #[test]
 fn view_matrix_named() {
     let (cases, ran) = matrix(Kind::Named);
-    assert_eq!(cases, 48);
+    assert_eq!(cases, 56);
     // `Named` reads no file: its 8 `Read` cases never reach the step.
     assert_eq!(ran, cases - 8);
 }
@@ -447,8 +501,12 @@ fn view_folder_project_opening_has_no_snapshot_before_its_overlay() {
     let h = Harness::new();
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path().canonicalize().expect("canonical");
-    std::fs::write(root.join("a.ts"), RUN).expect("write");
-    std::fs::write(root.join("c.ts"), ITEM).expect("write");
+    std::fs::write(
+        root.join("a.ts"),
+        "export function run() { return item(); }\n",
+    )
+    .expect("write");
+    std::fs::write(root.join("c.ts"), "export function item() { return 2; }\n").expect("write");
     let key = ProjectKey::Folder {
         root: Arc::from(root.as_path()),
     };
@@ -519,7 +577,7 @@ fn view_folder_project_opening_has_no_snapshot_before_its_overlay() {
 
 /// A query asked right after the current worktree changed, about the new
 /// worktree's text, before any reconcile ran: it answers from the new
-/// worktree's map (g.ts is only there), or it is not `Complete`; never from
+/// worktree's map (g.jpack is only there), or it is not `Complete`; never from
 /// the old map. The same for every kind that reads the map.
 #[test]
 fn view_query_right_after_a_switch_answers_from_the_new_worktree() {
@@ -529,7 +587,7 @@ fn view_query_right_after_a_switch_answers_from_the_new_worktree() {
         h.indexer.project_event(&event);
         let at = lectern_services::code_intel::TextRef {
             worktree: Some(h.git.worktree_key("feature")),
-            path: "a.ts".into(),
+            path: "a.jpack".into(),
             oid: h.git.oid(RUN.as_bytes()),
             origin: lectern_services::code_intel::TextOrigin::Worktree,
         };
@@ -538,7 +596,7 @@ fn view_query_right_after_a_switch_answers_from_the_new_worktree() {
             kind: match kind {
                 Kind::Named => QueryKind::Named {
                     name: "item".into(),
-                    near: Some("a.ts".into()),
+                    near: Some("a.jpack".into()),
                 },
                 _ => QueryKind::Definition {
                     position: super::support::pos_in(RUN.as_bytes(), "item", 0),
@@ -550,7 +608,7 @@ fn view_query_right_after_a_switch_answers_from_the_new_worktree() {
         let got = outcome(kind, &r);
         if got.complete {
             assert!(
-                got.listed.iter().any(|(p, ..)| p == "g.ts"),
+                got.listed.iter().any(|(p, ..)| p == "g.jpack"),
                 "{kind:?}: complete from the old map: {:?}",
                 got.listed
             );
@@ -564,6 +622,88 @@ fn view_query_right_after_a_switch_answers_from_the_new_worktree() {
     }
 }
 
+/// A session whose reconcile finds nothing it can publish (here the file
+/// list is unavailable) ends the queries waiting for it, and fails the ones
+/// asked afterwards at once: none stays `Running`.
+#[test]
+fn view_queries_end_when_no_snapshot_can_be_published() {
+    use lectern_services::project::{ActiveTree, ProjectKey, ProjectSnapshot, Scan, ScanError};
+
+    let h = Harness::new();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical");
+    let key = ProjectKey::Folder {
+        root: Arc::from(root.as_path()),
+    };
+    let event = h.projects.set(ProjectSnapshot {
+        key: key.clone(),
+        generation: 1,
+        name: "folder".into(),
+        worktrees: Arc::from(Vec::new()),
+        active: Some(ActiveTree {
+            root: Arc::from(root.as_path()),
+            worktree: None,
+            opened_at: "".into(),
+            files: Scan::Unavailable(ScanError::RootMissing),
+            packages: Scan::Ready(Arc::from(Vec::new())),
+        }),
+    });
+    h.indexer.project_event(&event);
+    let named = || Query {
+        project: key.clone(),
+        kind: QueryKind::Named {
+            name: "item".into(),
+            near: None,
+        },
+    };
+    // Asked before the reconcile ran: waits, then fails with it.
+    let id = h.indexer.query(named());
+    h.settle();
+    let r = h.indexer.results(id).expect("kept");
+    assert!(
+        matches!(r.state, QueryState::Failed(QueryError::Unreadable(_))),
+        "{:?}",
+        r.state
+    );
+    // Asked afterwards: fails at once.
+    let r = ask(&h, named()).expect("kept");
+    assert!(
+        matches!(r.state, QueryState::Failed(QueryError::Unreadable(_))),
+        "{:?}",
+        r.state
+    );
+}
+
+/// A failed worktree comparison publishes a map without the worktree's
+/// content: no query over it is `Complete` until a comparison succeeds.
+#[test]
+fn view_map_without_the_worktree_is_never_complete() {
+    for kind in [Kind::Definition, Kind::References, Kind::Named] {
+        let h = pack_harness();
+        for (path, text) in [("a.jpack", RUN), ("c.jpack", ITEM), ("e.jpack", USE)] {
+            h.git.add("main", &[(path, text.as_bytes())]);
+        }
+        h.git.commit("main");
+        h.git.fail_compare(true);
+        h.open();
+        let of = (kind == Kind::References).then(|| defined(&h));
+        let r = ask(&h, query(&h, kind, of.as_ref())).expect("kept");
+        assert!(
+            matches!(r.state, QueryState::Done(_)),
+            "{kind:?}: {:?}",
+            r.state
+        );
+        assert!(!outcome(kind, &r).complete, "{kind:?}: {:?}", r.state);
+        // Compared again (a new HEAD asks for it), with success: complete.
+        h.git.fail_compare(false);
+        h.git.move_head("main");
+        h.emit_git(&[("HEAD", super::support::CHANGED)]);
+        h.settle();
+        let r = ask(&h, query(&h, kind, of.as_ref())).expect("kept");
+        assert!(outcome(kind, &r).complete, "{kind:?}: {:?}", r.state);
+    }
+}
+
 /// Removing a unit is an eviction the view sees: the store's eviction
 /// generation grows (the matrix's `Evict` relies on it).
 #[test]
@@ -571,7 +711,7 @@ fn view_eviction_moves_the_generation() {
     let h = fixture(Kind::Definition);
     let inner = h.indexer.inner();
     let snap = inner.snap(&h.key()).expect("open");
-    change(&h, Change::Evict)(inner, &snap);
+    change(&h, Kind::Definition, Change::Evict)(inner, &snap);
     assert_eq!(
         inner.check_view(&snap, &snap.view),
         crate::query::ViewCheck::Evicted

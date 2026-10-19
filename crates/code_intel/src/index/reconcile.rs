@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use lectern_executor::Priority;
 use lectern_git::HashKind;
 use lectern_platform::{FileKind as SafeKind, Read, RelPath as SafeRel, SafeError, SafeRoot};
+use lectern_services::code_intel::{QueryError, QueryState};
 use lectern_services::project::{BlobId, FileKind, ProjectKey, ProjectSnapshot, RelPath, Scan};
 
 use super::state::{Project, Published, State};
@@ -50,12 +51,32 @@ fn pending(st: &State, grammar: u64) -> bool {
 
 /// Publishes what queries answer from (`State::published`): the current
 /// map with the table it was built with, and the session's root and
-/// sub-projects, as one object. Only once the base is built.
-fn publish(st: &mut State, disabled: HashSet<LangName>) {
+/// sub-projects, as one object. Only once the base is built; otherwise,
+/// when nothing will build it until the next event, why
+/// (`State::unavailable`). True when published.
+fn publish(st: &mut State, disabled: HashSet<LangName>) -> bool {
     if st.base_for.is_none() {
-        return;
+        let active = st.snapshot.as_ref().map(|s| s.active.as_ref());
+        st.unavailable = match active {
+            // Not read yet: no reconcile has seen the project.
+            None => None,
+            Some(None) => Some(Arc::from("the project has no current worktree")),
+            Some(Some(a)) => match &a.files {
+                Scan::Unavailable(error) => Some(Arc::from(format!(
+                    "the file list is unavailable: {error:?}"
+                ))),
+                // Still being listed: its event brings the list.
+                Scan::Pending | Scan::Ready(_) => None,
+            },
+        };
+        return false;
     }
+    st.unavailable = None;
+    // A Git project's overlay comes from the comparison, which needs the
+    // root; a folder project's from reading every file through it.
+    let incomplete = st.root.is_none() || (st.tree.is_some() && st.compare_failed);
     st.published = Some(Arc::new(Published {
+        incomplete,
         session: st.session,
         table: st.map.base.table().clone(),
         map: st.map.clone(),
@@ -69,6 +90,7 @@ fn publish(st: &mut State, disabled: HashSet<LangName>) {
             .clone()
             .unwrap_or_else(|| Arc::from(Vec::new())),
     }));
+    true
 }
 
 /// Whether `path`'s content equals HEAD, by the rule of「依赖 git、fs_watch 与
@@ -182,15 +204,29 @@ impl Inner {
             // All input consumed: the base and the overlay are complete for
             // the current inputs; queries answer from this from now on, and
             // those that waited for a snapshot start.
-            let waiting = if pending(&st, grammar) || st.cancel.load(Ordering::Acquire) {
-                Vec::new()
+            // None can be published until the next event: those waiting
+            // fail with why.
+            let (waiting, failed) = if pending(&st, grammar) || st.cancel.load(Ordering::Acquire) {
+                (Vec::new(), Vec::new())
+            } else if publish(&mut st, disabled) {
+                (std::mem::take(&mut st.waiting), Vec::new())
+            } else if let Some(why) = st.unavailable.clone() {
+                let failed: Vec<_> = std::mem::take(&mut st.waiting)
+                    .into_iter()
+                    .map(|w| (w.id, why.clone()))
+                    .collect();
+                (Vec::new(), failed)
             } else {
-                publish(&mut st, disabled);
-                std::mem::take(&mut st.waiting)
+                (Vec::new(), Vec::new())
             };
             drop(st);
             if !waiting.is_empty() {
                 self.resume_waiting(waiting);
+            }
+            for (id, why) in failed {
+                self.publish(id, |r| {
+                    r.state = QueryState::Failed(QueryError::Unreadable(why));
+                });
             }
             break;
         }
@@ -382,7 +418,7 @@ impl Inner {
             let langs = lock(&self.langs);
             (langs.table.clone(), langs.generation)
         };
-        let old = {
+        let (old, ended) = {
             let _order = lock(&self.publishing);
             let old = {
                 let mut st = lock(&project.state);
@@ -410,9 +446,10 @@ impl Inner {
                 old.waiting.clear();
                 old
             };
-            self.close_queries(Some(&project.key));
-            old
+            (old, self.close_queries(Some(&project.key)))
         };
+        // Their providers' `cancel`, outside the lock.
+        self.finish_ended(ended);
         // Without an activation the task is dropped unrun, and `old` with it.
         let _ = self
             .host
@@ -620,11 +657,14 @@ impl Inner {
         let changed = match result {
             Ok(changed) => changed,
             Err(error) => {
-                // Keep the overlay; the next event tries again.
+                // Keep the overlay; the next event tries again. Until then
+                // the map lacks the worktree's content.
                 log(format_args!("comparing the worktree failed: {error}"));
+                st.compare_failed = true;
                 return true;
             }
         };
+        st.compare_failed = false;
         st.head_diff = Arc::new(HeadDiff::new(
             changed.head,
             st.gens.head,
