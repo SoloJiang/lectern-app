@@ -639,8 +639,8 @@ pub static BUDGETS: &[Budget] = &[
     // the comparison's parsed index is still kept (git step 4).
     share("git/changes_count/total_bytes", RECORD, GIT, ACTIVE, Memory),
     // The same per changed path once the comparison index is released as
-    // well (git design「与设计的差异」): about 1.16 KB with the stat cache
-    // fixed alone, so active with git step 4.
+    // well (git design「与设计的差异」): 1111 B measured with the stat
+    // cache fixed alone, so active with git step 4.
     share(
         "git/changes_count/per_path_bytes",
         &[median(Limit::BytesAtMost(1024))],
@@ -710,7 +710,8 @@ pub static BUDGETS: &[Budget] = &[
     share("git/changes_clean_100k/stat_all", RECORD, GIT, ACTIVE, Time),
     share("git/changes_clean_100k/read_all", RECORD, GIT, ACTIVE, Time),
     // Recorded counts, to tell the hypotheses apart on macOS CI: the files
-    // the first comparison read (0 when every stat matches), the same after
+    // the first comparison read (1 when every stat matches: the root
+    // `.gitignore` the untracked walk reads), the same after
     // `read_all` read every file, and per stat field how many index entries
     // differ from `SafeRoot::stat` before any read.
     share("git/changes_clean_100k/reads", RECORD, GIT, ACTIVE, Time),
