@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已设计、尚未实现。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -77,9 +77,10 @@ impl SafeRoot {
     pub fn list(&self, dir: Option<RelPath<'_>>) -> Result<Vec<DirEntry>, SafeError>;
 
     /// 在这个根之下打开一个子目录作为新的根（ADR 0033：工作区里的依赖根如 `node_modules`、`.venv`）。
-    /// 与 `list` 相同的一步打开和 `Walk` 后备：路径的任何一级（含这个目录本身）是符号链接为 `PathThroughSymlink`，
-    /// 不是目录为 `Io(NotADirectory)`。返回的根绑定到打开的那个目录描述符，之后的调用不再经过 `rel`。
-    /// 尚未实现，随 `code_intel` 的依赖层（#19）之前的一个 `platform` PR 加入。
+    /// 与 `list` 共用同一个打开函数（一步打开、`fstat` 确认是目录、`Walk` 后备）：路径的任何一级（含这个目录本身）
+    /// 是符号链接为 `PathThroughSymlink`，不是目录为 `Io(NotADirectory)`，不存在为 `NotFound`。
+    /// 返回的根绑定到打开的那个目录描述符，实现与原来的根相同，之后的调用不再经过 `rel`；
+    /// 在它之下的调用与原来的根遵守同样的规则（不跟随符号链接、`..` 和绝对路径不是 `RelPath`）。不读目录项。
     pub fn open_dir(&self, rel: RelPath<'_>) -> Result<SafeRoot, SafeError>;
 }
 
@@ -360,13 +361,14 @@ pub enum FileKind {
 - `race_swap_between_calls`：`stat("a/b.txt")` 成功后，把 `a` 改名并在原处建指向根目录之外的目录的符号链接，下一次 `stat` 和 `read` 为 `PathThroughSymlink`；换回目录后恢复正常。
 - `race_swap_never_escapes`：一个线程反复在「目录 `a`」和「指向根目录之外、含同名文件的目录的符号链接 `a`」之间交换，另一个线程读 10 000 次 `a/secret`；每次结果只能是根目录之内的内容、`NotFound` 或 `PathThroughSymlink`，从不出现根目录之外那份文件的内容。
 - `list_*`：根目录和子目录的名字与类型（普通文件、目录、符号链接、FIFO、socket），同一个根连续列两次结果相同；目录本身或中间一级是符号链接为 `PathThroughSymlink`，不存在为 `NotFound`，普通文件为 `Io(NotADirectory)`。`race_list_swap_never_escapes`：目录 `a` 与指向根目录之外的符号链接来回交换时列 5000 次 `a`，结果只能是根目录之内的名字、`NotFound` 或 `PathThroughSymlink`。
+- `open_dir_*`：一级和多级的子目录，从打开的根再打开一层，新根的实现与原来的根相同，读到的内容、元数据和目录项都在子目录之内，原来的根里子目录之外的条目为 `NotFound`；子目录本身或中间一级是符号链接（指向根目录之内的目录和普通文件、根目录之外、悬空）为 `PathThroughSymlink`；普通文件、FIFO、socket 为 `Io(NotADirectory)`，不存在、中间一级是普通文件为 `NotFound`；打开后把原路径换成指向根目录之外的符号链接，新根的 `read`、`stat`、`list`、`open_dir` 仍作用在原来的目录上，按路径再打开为 `PathThroughSymlink`，原来的目录删除后为 `NotFound`；新根之下上面的 `symlink_*` 照样成立，`..`、绝对路径不是 `RelPath`，绕过 `RelPath::new` 直接传入时四个方法都在系统调用之前返回 `Io(InvalidInput)`。`race_open_dir_swap_never_escapes`：目录 `a` 与指向根目录之外的符号链接来回交换时打开 5000 次 `a` 并经新根读 `secret`，结果只能是根目录之内的内容、`NotFound` 或 `PathThroughSymlink`；交换开始之前打开的新根每次都读到原来的内容。`fd_*` 也覆盖 `open_dir` 和它返回的根。
 - `fd_*`：反复调用（含各种出错路径）之后，进程打开的描述符数不变（Linux 读 `/proc/self/fd`，macOS 读 `/dev/fd`）；`SafeRoot` 的描述符设了 `FD_CLOEXEC`。
 - `send_sync`：编译期断言 `SafeRoot`、`RelPath`、`Meta`、`Read`、`SafeError` 是 `Send + Sync`；8 个线程同时对同一个 `SafeRoot` 调用 `stat` 和 `read`，结果与单线程相同。
 - `walk_*`：`Walk` 的判定在一步打开失败的每种情况下（中间是符号链接、中间是普通文件、最后一级是符号链接、socket、路径超过 `PATH_MAX`）与上表一致。
 
 只在 Linux 上运行：
 
-- `openat2_rejects_escape`：绕过 `RelPath`、直接把 `"../x"`、`"/etc/passwd"`、`"a/../../x"` 交给 `Openat2` 的一步打开，内核拒绝（`EXDEV`），不打开根目录之外的文件。
+- `openat2_rejects_escape`：绕过 `RelPath`、直接把 `"../x"`、`"/etc/passwd"`、`"a/../../x"` 交给 `Openat2` 的一步打开，内核拒绝（`EXDEV`），不打开根目录之外的文件。`open_dir_openat2_rejects_escape` 对 `open_dir` 返回的根做同样的检查，`..` 指向原来的根里的条目时也拒绝。
 - `linux_backend_choice`：探测结果到实现的映射是纯函数，`ENOSYS`、`EPERM`、`EINVAL`、`E2BIG` 选 `Walk`，成功和其他错误选 `Openat2`；在 CI 的内核上 `SafeRoot::open` 选的是 `Openat2`。
 
 只在 macOS 上运行：
@@ -427,6 +429,7 @@ pub mod process {
 
   Linux 默认的 `Openat2` 在「性能」的预算之内。`Walk` 只在 `openat2` 不可用或一步打开出错时使用，不在预算的范围内。预算按 M 系列 Mac 制定，macOS 上的数字随 macOS 上的那次运行写进 PR 描述。
 - macOS 的 `stat` 改为一次 `fstatat`（见「与设计的差异」）之后：`cargo check -p lectern-platform --target aarch64-apple-darwin` 和 `cargo clippy -p lectern-platform --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 在 Linux 上交叉检查通过，`just check`、`just test`、`just deny` 在 Linux 上通过（Linux 的实现没有改）。新增的 `nofollow_any_one_step_stat_follows_no_symlink`、`nofollow_any_backend_choice` 和其余 `nofollow_any_*` 没有在 macOS 上运行过，由 macOS CI 运行；比值由 macOS CI 的 `platform/safe_stat` 判定。macOS 11、12 的 `NofollowAnyParent` 由测试强制选择后在 CI 上运行，没有在 11、12 上运行过；`nofollow_any_backend_choice` 在 CI 上确认探测成功、选中 `NofollowAny`。
+- `SafeRoot::open_dir`（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）在 Linux（x86_64，内核 6.18，`openat2` 可用）上：`just test -p lectern-platform` 47 个测试通过，其中新增 7 个（`open_dir_*` 6 个，`race_open_dir_swap_never_escapes` 1 个；`open_dir_openat2_rejects_escape` 只在 Linux 上运行），对 `Openat2` 和 `Walk` 各运行一次。`race_*`、`open_dir_*`、`fd_*` 连续运行 40 次都通过；`race_open_dir_swap_never_escapes` 每次运行中打开成功和被拒绝（`NotFound`、`PathThroughSymlink`）两类结果都出现（一次运行：`Openat2` 1237 次成功、3763 次被拒绝，`Walk` 2184 次、2816 次）。`just check`、`just test`（整个工作区 1270 个测试通过，跳过 1 个）、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过；macOS 的 `NofollowAny`、`NofollowAnyParent` 上的 `open_dir_*` 和 race 测试没有在 macOS 上运行过，由 macOS CI 运行。没有新增依赖，`rg -l 'unsafe' crates/platform/src/safe_read` 仍只列出 `tests.rs`。
 
 ## 与设计的差异
 
@@ -437,4 +440,5 @@ pub mod process {
 - `SafeRoot::open_with` 只在 `#[cfg(test)]` 下编译：除测试外没有调用方。Analyze 快照（#66）复用的是 `walk` 和一步打开的 `pub(crate)` 函数，不需要它。
 - `SafeRoot::list` 和 `DirEntry` 随 [ADR 0028](../adr/0028.md) 加入（PR #87）：原设计把目录遍历留给 gix，gix 按路径遍历，被审阅的进程能在遍历期间把目录换成指向工作区之外的符号链接。「范围」「接口」「实现」「测试」已改。Linux 上 `list_*` 和 `race_list_swap_never_escapes` 对 `Openat2` 和 `Walk` 都通过；macOS 的实现与 `read` 共用 `O_NOFOLLOW_ANY` 的一步打开，没有在 macOS 上运行。
 - macOS 的 `stat` 改为一次 `fstatat(root, 路径, AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)`（见「stat」），原设计是以 `O_NOFOLLOW_ANY` 打开父目录、`fstatat`、关闭，共 3 次系统调用。bench 第 1 步（[#83](https://github.com/SoloJiang/lectern-app/pull/83)）的 `platform/safe_stat` 在 macOS CI 的 arm64 托管机器上测得原做法的中位数为 8.1–8.8 µs，是同一路径上 `symlink_metadata` 的 3.94–4.16 倍，超出「性能」的 3 倍预算；Linux 的 `Openat2` 为 1.19 倍，没有改。成功时的 `Meta`、`ENOENT` 为 `NotFound`、其他错误交给 `Walk` 重做，都与原做法相同；结果只在一种情况下不同：只有搜索权限的目录（如 `0711`）下的条目由 `Io(PermissionDenied)` 变为成功，与 `lstat` 一致（「已知限制」已改）。`fstatat` 从 macOS 13 起才接受 `AT_SYMLINK_NOFOLLOW_ANY`，macOS 11、12 上返回 `EINVAL`；那里的 `stat` 保留原做法，作为单独的实现 `NofollowAnyParent`，由 `SafeRoot::open` 探测选择（见「macOS 的实现选择」），不交给 `Walk`。`Target`（一步打开父目录还是条目）随之只在 Linux 上使用，移进 `linux.rs`。
+- `open_dir` 的实现与「open_dir」一致，接口没有改。`list` 和 `open_dir` 共用一个打开函数（一步打开、`fstat` 确认是目录、出错时交给 `Walk`），`Walk` 里列目录的那一步随之改为只打开并返回目录描述符，由 `list` 读目录项；`list` 的行为不变。增加了设计没有列出的测试：`open_dir_root_follows_the_same_rules_beneath_it`（新根之下的符号链接规则，`..` 和绝对路径被拒绝）、`open_dir_openat2_rejects_escape`（Linux）、`race_open_dir_swap_never_escapes`，`fd_*` 也覆盖 `open_dir`；「测试」已补上。
 - 增加了设计没有列出的测试：`stat_after_the_root_is_deleted_is_not_found`、`stat_overlong_name_is_io`、`walk_permission_denied_is_io`、`read_procfs_file_with_size_zero_to_eof`（Linux）、`errors_convert_to_io_errors`、`timestamp_as_nanos_handles_times_before_1970`、`file_kind_follows_the_mode`，分别对应「状态与异常」「读取上限」里的条目和 `SafeError` 的转换。

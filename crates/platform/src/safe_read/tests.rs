@@ -7,7 +7,7 @@ use std::fs;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -281,13 +281,35 @@ fn stat_overlong_name_is_io() {
 struct LinkTree {
     tmp: TempDir,
     _outside: TempDir,
+    /// Where the tree is built: the temporary directory, or a subdirectory
+    /// of it for roots opened with `open_dir`.
+    base: PathBuf,
 }
 
 impl LinkTree {
     fn new() -> LinkTree {
+        LinkTree::build(None)
+    }
+
+    /// The tree in the subdirectory `dir` of the temporary directory, whose
+    /// other entries (`secret`, `sibling/b.txt`) are outside the tree but
+    /// inside the temporary directory.
+    fn beneath(dir: &str) -> LinkTree {
+        LinkTree::build(Some(dir))
+    }
+
+    fn build(dir: Option<&str>) -> LinkTree {
         let tmp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
-        let root = tmp.path();
+        let base = match dir {
+            Some(dir) => {
+                write(&tmp.path().join("secret"), b"parent");
+                write(&tmp.path().join("sibling/b.txt"), b"sibling");
+                tmp.path().join(dir)
+            }
+            None => tmp.path().to_owned(),
+        };
+        let root = base.as_path();
         write(&root.join("a/b.txt"), b"inside");
         write(&outside.path().join("b.txt"), b"outside");
         symlink("a", root.join("in_link")).unwrap();
@@ -301,10 +323,16 @@ impl LinkTree {
         LinkTree {
             tmp,
             _outside: outside,
+            base,
         }
     }
 
     fn path(&self) -> &Path {
+        &self.base
+    }
+
+    /// The temporary directory the tree is in.
+    fn top(&self) -> &Path {
         self.tmp.path()
     }
 }
@@ -312,6 +340,10 @@ impl LinkTree {
 fn check_intermediate_symlinks(backend: Backend) {
     let tree = LinkTree::new();
     let root = SafeRoot::open_with(tree.path(), backend).unwrap();
+    check_intermediate_symlinks_in(&root, backend);
+}
+
+fn check_intermediate_symlinks_in(root: &SafeRoot, backend: Backend) {
     for path in [
         "in_link/b.txt",
         "out_link/b.txt",
@@ -335,6 +367,10 @@ fn check_intermediate_symlinks(backend: Backend) {
 fn check_last_symlinks(backend: Backend) {
     let tree = LinkTree::new();
     let root = SafeRoot::open_with(tree.path(), backend).unwrap();
+    check_last_symlinks_in(&tree, &root, backend);
+}
+
+fn check_last_symlinks_in(tree: &LinkTree, root: &SafeRoot, backend: Backend) {
     for path in [
         "in_link",
         "out_link",
@@ -756,6 +792,277 @@ fn race_swap_never_escapes() {
     }
 }
 
+// open_dir_*
+
+#[test]
+fn open_dir_opens_a_subdirectory() {
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("node_modules/pkg/index.d.ts"), b"types");
+    write(&tmp.path().join("node_modules/pkg/lib/deep.d.ts"), b"deep");
+    write(&tmp.path().join("node_modules/top.json"), b"{}");
+    write(&tmp.path().join("outside_deps"), b"workspace");
+    for root in roots(tmp.path()) {
+        let deps = root.open_dir(rel("node_modules")).unwrap();
+        assert_eq!(deps.backend, root.backend);
+        assert_eq!(
+            file_bytes(deps.read(rel("pkg/index.d.ts"), 1024)),
+            b"types",
+            "{root:?}"
+        );
+        assert_eq!(deps.stat(rel("pkg")).unwrap().kind, FileKind::Dir);
+        assert_meta_matches(
+            &deps.stat(rel("pkg/lib/deep.d.ts")).unwrap(),
+            &tmp.path().join("node_modules/pkg/lib/deep.d.ts"),
+        );
+        assert_eq!(
+            names(deps.list(None).unwrap()),
+            [
+                ("pkg".to_owned(), FileKind::Dir),
+                ("top.json".to_owned(), FileKind::File),
+            ],
+            "{root:?}"
+        );
+        // The parent root's other entries are not beneath the new one.
+        assert!(is_not_found(deps.read(rel("outside_deps"), 1024)));
+        assert!(is_not_found(deps.stat(rel("node_modules"))));
+
+        // Several levels at once, and a root opened from an opened root.
+        let lib = root.open_dir(rel("node_modules/pkg/lib")).unwrap();
+        assert_eq!(file_bytes(lib.read(rel("deep.d.ts"), 1024)), b"deep");
+        let pkg = deps.open_dir(rel("pkg")).unwrap();
+        assert_eq!(file_bytes(pkg.read(rel("lib/deep.d.ts"), 1024)), b"deep");
+        assert_eq!(
+            names(pkg.list(Some(rel("lib"))).unwrap()),
+            [("deep.d.ts".to_owned(), FileKind::File)]
+        );
+    }
+}
+
+#[test]
+fn open_dir_through_a_symlink_is_path_through_symlink() {
+    let tree = LinkTree::new();
+    fs::create_dir(tree.path().join("a/c")).unwrap();
+    for root in roots(tree.path()) {
+        for path in [
+            // The directory itself is a link.
+            "in_link",
+            "out_link",
+            "a/up",
+            "a/self",
+            "a/to_file",
+            "dangling",
+            "passwd",
+            // An intermediate component is a link.
+            "in_link/c",
+            "out_link/x",
+            "a/up/a",
+            "dangling/x",
+        ] {
+            assert!(
+                is_through_symlink(root.open_dir(rel(path))),
+                "{root:?} {path}"
+            );
+        }
+        // The directory the links name opens by its own path.
+        assert!(root.open_dir(rel("a/c")).is_ok(), "{root:?}");
+    }
+}
+
+#[test]
+fn open_dir_of_a_non_directory_fails() {
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("file"), b"f");
+    write(&tmp.path().join("d/inner"), b"i");
+    mkfifo(&tmp.path().join("fifo"));
+    let _socket = UnixListener::bind(tmp.path().join("sock")).unwrap();
+    for root in roots(tmp.path()) {
+        for path in ["file", "d/inner", "fifo", "sock"] {
+            assert_eq!(
+                outcome(root.open_dir(rel(path))).unwrap_err(),
+                "Io(NotADirectory)",
+                "{root:?} {path}"
+            );
+        }
+        for path in ["missing", "d/missing", "missing/x", "file/x"] {
+            assert!(is_not_found(root.open_dir(rel(path))), "{root:?} {path}");
+        }
+    }
+}
+
+#[test]
+fn open_dir_stays_bound_when_the_path_is_replaced() {
+    let tmp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    write(&tmp.path().join("deps/secret"), b"inside");
+    write(&tmp.path().join("deps/pkg/x"), b"x");
+    write(&outside.path().join("secret"), b"OUTSIDE");
+    write(&outside.path().join("pkg/x"), b"OUTSIDE");
+    let roots = roots(tmp.path());
+    let opened: Vec<SafeRoot> = roots
+        .iter()
+        .map(|root| root.open_dir(rel("deps")).unwrap())
+        .collect();
+
+    // The path now names a link to a directory outside the root.
+    fs::rename(tmp.path().join("deps"), tmp.path().join("held")).unwrap();
+    symlink(outside.path(), tmp.path().join("deps")).unwrap();
+    for (root, deps) in roots.iter().zip(&opened) {
+        assert_eq!(
+            file_bytes(deps.read(rel("secret"), 1024)),
+            b"inside",
+            "{deps:?}"
+        );
+        assert_eq!(deps.stat(rel("secret")).unwrap().size, 6, "{deps:?}");
+        assert_eq!(
+            names(deps.list(None).unwrap()),
+            [
+                ("pkg".to_owned(), FileKind::Dir),
+                ("secret".to_owned(), FileKind::File),
+            ]
+        );
+        assert_eq!(file_bytes(deps.read(rel("pkg/x"), 1024)), b"x");
+        let pkg = deps.open_dir(rel("pkg")).unwrap();
+        assert_eq!(file_bytes(pkg.read(rel("x"), 1024)), b"x");
+        // Opening by the path again sees the link.
+        assert!(is_through_symlink(root.open_dir(rel("deps"))), "{root:?}");
+    }
+
+    // Once the directory is deleted, the bound root finds nothing.
+    fs::remove_dir_all(tmp.path().join("held")).unwrap();
+    for deps in &opened {
+        assert!(is_not_found(deps.read(rel("secret"), 1024)), "{deps:?}");
+        assert!(is_not_found(deps.stat(rel("pkg"))), "{deps:?}");
+    }
+}
+
+#[test]
+fn open_dir_root_follows_the_same_rules_beneath_it() {
+    let tree = LinkTree::beneath("deps");
+    for root in roots(tree.top()) {
+        let deps = root.open_dir(rel("deps")).unwrap();
+        let backend = deps.backend;
+        // Links in the middle are refused and links in the last component
+        // are returned unfollowed, as beneath the parent root.
+        check_intermediate_symlinks_in(&deps, backend);
+        check_last_symlinks_in(&tree, &deps, backend);
+        for path in ["in_link", "out_link", "a/up", "dangling"] {
+            assert!(is_through_symlink(deps.list(Some(rel(path)))), "{path}");
+            assert!(is_through_symlink(deps.open_dir(rel(path))), "{path}");
+        }
+        // `a/up` points at the new root itself: its parent stays unreachable.
+        assert!(is_through_symlink(deps.read(rel("a/up/secret"), 1024)));
+
+        // Paths that would leave the new root are not `RelPath`s.
+        for path in ["../secret", "/etc/passwd", "a/../../secret", ".."] {
+            assert_eq!(RelPath::new(path.as_bytes()), None, "{path}");
+            // Bypassing `RelPath::new`, the check before every system call
+            // refuses them without opening anything.
+            let bypass = RelPath(path.as_bytes());
+            for result in [
+                outcome(deps.stat(bypass).map(drop)),
+                outcome(deps.read(bypass, 1024).map(drop)),
+                outcome(deps.list(Some(bypass)).map(drop)),
+                outcome(deps.open_dir(bypass).map(drop)),
+            ] {
+                assert_eq!(result.unwrap_err(), "Io(InvalidInput)", "{path}");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn open_dir_openat2_rejects_escape() {
+    let tree = LinkTree::beneath("deps");
+    let root = SafeRoot::open_with(tree.top(), Backend::Openat2).unwrap();
+    let deps = root.open_dir(rel("deps")).unwrap();
+    for path in [
+        "../secret",
+        "../sibling/b.txt",
+        "/etc/passwd",
+        "a/../../secret",
+    ] {
+        for target in [Target::Entry, Target::Dir] {
+            match linux::open_beneath(deps.fd.as_fd(), path.as_bytes(), target) {
+                Err(rustix::io::Errno::XDEV) => {}
+                other => panic!("{path} {target:?}: {other:?}"),
+            }
+        }
+    }
+}
+
+/// One thread swaps directory `a` with a link to a directory outside the
+/// root while this one opens `a` and reads through the result, and reads
+/// through a root opened from `a` before the swapping began. Every read
+/// sees the inside file, `NotFound` or `PathThroughSymlink`.
+fn check_open_dir_swap_never_escapes(backend: Backend) {
+    let tmp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let root_path = tmp.path().to_owned();
+    write(&root_path.join("a/secret"), b"inside");
+    write(&outside.path().join("secret"), b"OUTSIDE");
+    symlink(outside.path(), root_path.join("link")).unwrap();
+    let root = SafeRoot::open_with(&root_path, backend).unwrap();
+    let before = root.open_dir(rel("a")).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let path = |name: &str| root_path.join(name);
+        let (a, held, link) = (path("a"), path("held"), path("link"));
+        thread::spawn(move || {
+            let mut swaps = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                fs::rename(&a, &held).unwrap();
+                fs::rename(&link, &a).unwrap();
+                fs::rename(&a, &link).unwrap();
+                fs::rename(&held, &a).unwrap();
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+
+    let (mut opened, mut refused) = (0, 0);
+    for _ in 0..5_000 {
+        // Bound before the swapping began: always the original directory.
+        assert_eq!(
+            file_bytes(before.read(rel("secret"), 1024)),
+            b"inside",
+            "{backend:?}"
+        );
+        match root.open_dir(rel("a")) {
+            Ok(a) => {
+                opened += 1;
+                // Bound to whatever directory the open found, which is `a`
+                // under its own name or under `held`, never the outside one.
+                assert_eq!(
+                    file_bytes(a.read(rel("secret"), 1024)),
+                    b"inside",
+                    "{backend:?}"
+                );
+                assert!(
+                    a.list(None).unwrap().iter().all(|e| e.name == b"secret"),
+                    "{backend:?}"
+                );
+            }
+            Err(SafeError::NotFound | SafeError::PathThroughSymlink) => refused += 1,
+            Err(other) => panic!("{backend:?}: unexpected {other:?}"),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let swaps = swapper.join().unwrap();
+    assert!(swaps > 0, "{backend:?}: the swapper never ran");
+    eprintln!("{backend:?}: {opened} opened, {refused} refused, {swaps} swaps");
+}
+
+#[test]
+fn race_open_dir_swap_never_escapes() {
+    for backend in backends() {
+        check_open_dir_swap_never_escapes(backend);
+    }
+}
+
 // fd_*
 
 fn open_fds() -> usize {
@@ -794,6 +1101,7 @@ fn fd_count_is_unchanged_after_many_calls() {
         for path in paths {
             let _ = root.stat(rel(path));
             let _ = root.read(rel(path), 100);
+            let _ = root.open_dir(rel(path));
         }
     }
 
@@ -805,6 +1113,8 @@ fn fd_count_is_unchanged_after_many_calls() {
                 let _ = root.stat(rel(path));
                 let _ = root.read(rel(path), 100);
                 let _ = root.read(rel(path), 1 << 20);
+                // Dropping an opened root closes its descriptor.
+                let _ = root.open_dir(rel(path));
             }
         }
     }
@@ -826,8 +1136,14 @@ fn fd_count_is_unchanged_after_many_calls() {
 #[test]
 fn fd_root_is_close_on_exec() {
     let tmp = TempDir::new().unwrap();
+    fs::create_dir(tmp.path().join("sub")).unwrap();
     let mut all = roots(tmp.path());
     all.push(SafeRoot::open(tmp.path()).unwrap());
+    let opened: Vec<SafeRoot> = all
+        .iter()
+        .map(|root| root.open_dir(rel("sub")).unwrap())
+        .collect();
+    all.extend(opened);
     for root in all {
         let flags = rustix::io::fcntl_getfd(&root.fd).unwrap();
         assert!(
