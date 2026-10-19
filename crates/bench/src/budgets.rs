@@ -630,6 +630,10 @@ pub static BUDGETS: &[Budget] = &[
     // Live bytes at most the sum of the `Limits` defaults; the git
     // implementation writes the number into the git design and here.
     share("git/changes_capped_bytes", RECORD, GIT, ACTIVE, Memory),
+    // The project home's count of changes outside sessions (ADR 0035):
+    // the same 10 000 untracked files with `retained_bytes = 0` and
+    // `total_patch_bytes = 0`, what the home keeps at idle per changed path.
+    share("git/changes_count_bytes", RECORD, GIT, ACTIVE, Memory),
     // Hunk LRU 16 MB plus one `ChangeSet` 32 MB; no handle held while idle.
     share(
         "git/resident",

@@ -1472,7 +1472,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 4. 文件夹项目没有 index 的 OID，热启动要读每个文件求 OID，命中的不解析；上限是文件夹遍历的 20 000 个条目。
 5. 映射、覆盖部分、`indexed` 提示、名字表都不持久化，只有 `cache` 里的表跨启动保留（调研第 5 节「持久化与重新打开」）。
 
-工作区比较由本 crate 自己做一次：`review` 的比较结果不在 `services` 里，它的基准也可能是会话开始时的提交。这一次比较按 stat 跳过未改的文件、不算 diff、不保留内容，10 万文件估算一两百毫秒，期间的 `TrackedPaths` 随调用释放（见「性能」的临时内存）。
+工作区比较由本 crate 自己做一次：`review` 的比较结果不在 `services` 里，它的基准也可能是会话开始时的提交。这一次比较按 stat 跳过未改的文件、不算 diff、不保留内容；比较自己解析一次 index（不用 `TrackedPaths`），10 万文件实测约 1.0 s（`git/changes_clean_100k`，Linux），期间的临时内存峰值约 66 MB（`git/compare_100k/peak_bytes`），`GitAccess` 每次调用新开 `Worktree`，返回时随句柄释放（见「性能」的临时内存、[ADR 0035](../adr/0035.md)）。
 
 ### 增量更新
 
@@ -1602,7 +1602,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 空闲内存：monorepo < 100 MB，10 万文件的仓库 < 120 MB（后台暂停时和全部完成后；后者的份额加总见 [ADR 0035](../adr/0035.md)） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、第 5 层本次会话已确认的 blob 集合（每个 8 字节的键，10 万个约 1.2 MB，项目关闭或换会话时释放）、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
-| 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）。`git` 的工作区比较（`GitAccess::changed_paths`）期间的临时内存不在这 40 MB 里：比较不用 `TrackedPaths`，自己解析 index，10 万文件时一次比较的峰值 65.8 MB（`git/compare_100k/peak_bytes` ≤ 72 MB，`git` 的份额，[ADR 0035](../adr/0035.md)），单独就超过 40 MB；`code_intel/batch_peak` 的夹具用 `FakeGit`，不含它。两者同时出现时进程的临时峰值可达约 110 MB。降低的办法是 ADR 0035 的「比较与 `tracked` 共用一次解析」；比较是否与超过 256 KiB 的文件的抽取错开，由本 crate 的下一步决定 | `code_intel/batch_peak` |
+| 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）。`git` 的工作区比较（`GitAccess::changed_paths`）期间的临时内存不在这 40 MB 里：比较不用 `TrackedPaths`，自己解析 index，10 万文件时一次比较的峰值 65.8 MB（`git/compare_100k/peak_bytes` ≤ 72 MB，`git` 的份额，[ADR 0035](../adr/0035.md)），单独就超过 40 MB；`code_intel/batch_peak` 的夹具用 `FakeGit`，不含它。最坏情况下，打开项目时首页的计数比较和本 crate 的核对比较各在一个新 `Worktree` 上同时做冷比较，加上批量层，进程的临时峰值可达约 2 × 66 + 40 ≈ 170 MB（git 的比较之间没有串行化，这是已知的最坏情况，不设顶层预算，同 ADR 0029 的临时内存）。降低的办法是 ADR 0035 的「比较与 `tracked` 共用一次解析」；比较是否与超过 256 KiB 的文件的抽取错开，由本 crate 的下一步决定 | `code_intel/batch_peak` |
 | 磁盘 | `code_intel.tags` 配额 256 MiB；cloudprint 形状约 1 MB，10 万文件约 270 MiB（第 3 步的合成仓库实测，略超配额，见「存储表」的「规模」） | `code_intel/disk_100k`（只记录） |
 | 安装包 ≤ 80 MB | 六个 grammar crate 与 tree-sitter 运行时，由 #38 测量 | `app/bundle_size` |
 

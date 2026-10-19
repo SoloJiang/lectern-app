@@ -759,7 +759,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 | 打开一个会话的 Diff < 50 ms | 50 个改动文件的 `changes`（stat 跳过其余文件）< 15 ms；hunk 未命中时计算 < 20 ms，命中时 < 2 ms |
 | 切换 worktree / 分支 < 100 ms | 内容相同的文件命中同一份 hunk 缓存；`refresh(Full)` < 15 ms |
 | 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB；每个 `ChangeSet` 保留的工作区内容 ≤ 32 MiB（通常只有当前审阅的一个）；fs_watch 的过滤器（解析后的 index、`core.ignoreCase` 的折叠顺序、忽略规则）是本 crate 的份额，index 与 `project` 保留的句柄共用一份（[ADR 0035](../adr/0035.md)），连同句柄 < 1 MB |
-| 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 过滤器连同它的 `Worktree` 句柄 ≤ 16 MB；工作区比较解析的 index 不在空闲时保留（「缓存」），调用返回后 `Worktree` 为比较留下的 < 1 MB（`git/compare_100k/retained_bytes`，第 4 步生效）。`ChangeSet` 和 stat 缓存随改动文件数增长，不随跟踪文件数增长 |
+| 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 过滤器连同它的 `Worktree` 句柄 ≤ 16 MB；工作区比较解析的 index 不在空闲时保留（「缓存」），调用返回后 `Worktree` 为比较留下的 < 1 MB（`git/compare_100k/retained_bytes`，第 4 步生效）。采样状态里唯一保留的改动集是项目主页的计数用改动集（`retained_bytes = 0`、`total_patch_bytes = 0`，没有工作区内容和 hunk）：它连同 stat 缓存随改动路径数增长、不随跟踪文件数增长，每个改动路径约 0.95 KB（`git/changes_count_bytes`：1 万个 9.32 MB）；主页只在 4000 个以内保留它（≤ 4 MB），在 ADR 0035 的 12 MB 余量里。上一行 cloudprint 量级的 32 MiB 保留内容是打开 Diff 后的改动集 |
 | 工作区比较期间的临时内存（10 万个跟踪文件，不设顶层预算，同 ADR 0029 的临时内存） | 一次 `changes` 的存活字节峰值 ≤ 72 MB（`git/compare_100k/peak_bytes`）：gix 的 `State`、逐条的 stat 与标志、折叠副本、未跟踪遍历、改动集；比较与 `tracked` 各解析一次 index，合成一次解析是降低它的办法（ADR 0035） |
 | index 变化后的刷新（10 万个跟踪文件，后台） | 重建 fs_watch 过滤器（解析 index、排序折叠顺序、未跟踪遍历、读 `.gitignore`）< 400 ms，fs_watch 等它完成后才交付这一批；`changes` 的全量比较（首次比较和每次 `refresh(Full)`，每次都重新解析 index）< 2 s，项目主页先显示文件列表，改动数随后填入 |
 | 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数；10 万文件仓库的读取、过滤器和全量比较都在打开项目之后的后台任务里 |
@@ -784,6 +784,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 - `git/open_100k`（< 40 ms）：同 `git/open`，每次新开 `Worktree`，index 不在缓存里。
 - `git/filter_100k`（< 400 ms）：在 index 还没解析的 `Worktree` 上 `watch_source().filter(&[], ..)`，即 index 变化后 fs_watch 重建过滤器的工作。
 - `git/changes_clean_100k`（< 2 s）：同 `git/changes_clean`，但每个样本用新的 `Worktree`（不计时），每次比较都解析 index，即第 4 步之后每次 `changes` / `refresh(Full)` 的做法。`refresh(Full)` 对没有改动的文件做同样的工作。
+- `git/changes_count_bytes`（`memory` 目标，只记录）：同 `git/changes_capped_bytes` 的 1 万个未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 的 stat 缓存和解析过的 index 的存活字节。
 - `git/compare_100k/peak_bytes`（`memory` 目标，≤ 72 MB）和 `git/compare_100k/retained_bytes`（`memory` 目标，< 1 MB，计划中，第 4 步）：新 `Worktree` 上一次 `changes(Base::Head)` 期间的存活字节峰值，和丢掉改动集之后 `Worktree` 仍持有的字节。
 - `git/filter_100k_bytes`（`memory` 目标，≤ 16 MB）：同 `git/filter_cloudprint_bytes`，在这个仓库上。
 
@@ -963,6 +964,7 @@ fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0
 
 - `just bench --measure git/`（release，不判定；运行期间同一台机器上另有构建，负载约 9）：`git/open_100k` 中位数 17.2 ms（< 40 ms），`git/filter_100k` 276 ms（< 400 ms），`git/filter_100k_bytes` 13.9 MB（≤ 16 MB）；另一次单独运行这些基准、机器空闲时是 16.4 ms、214 ms 和 13.9 MB。`git/filter_cloudprint_bytes` 111 KB（< 1 MB）。原有的 `git/*` 都在预算内，与上一次记录同一量级。
 - 工作区比较自己的 index（同一仓库，`memory` 目标）：新 `Worktree` 上一次 `changes` 期间的峰值 65.8 MB（`git/compare_100k/peak_bytes`，≤ 72 MB）；返回、丢掉改动集之后 `Worktree` 还持有 39 MB，几乎都是比较解析的 index（gix 的 `State`、每条一个 `IndexItem`、折叠副本），这就是「缓存」一节要求第 4 步在调用返回时释放的部分（`git/compare_100k/retained_bytes` < 1 MB，计划中）。
+- `git/changes_count_bytes`：1 万个改动路径 9.32 MB，约 0.95 KB 一个（同一次运行的 `git/changes_capped_bytes` 9.54 MB：这些文件只有三行，保留内容本来就少，差别主要在大文件）。
 - `git/changes_clean_100k`：每个样本新开 `Worktree`、index 每次都解析时中位数 1.0 s（负载约 9，`noisy`，5 个样本）；第一版复用同一个 `Worktree`、index 已解析时是 823 ms（空闲）和 881 ms（负载约 9）。预算 < 2 s 按重新解析的做法给出。
 - `git/filter_100k_bytes` 的 13.9 MB 比 project 第 5 步测得的 13.5 MB 多出折叠顺序（`core.ignoreCase`，每条 4 字节，约 0.4 MB）；夹具的忽略规则只有三条，占用很小。
 - 预算按 Linux 上的中位数留出约 2 倍余量：macOS CI 的 3 核 M1 虚拟机上 `git/diff_50_warm` 曾比这里慢 1.7 倍（见上文）；`changes` 每个文件一次 `SafeRoot::stat`，macOS 上的 `platform/safe_stat` 预算是 < 10 µs。

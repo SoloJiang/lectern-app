@@ -69,6 +69,47 @@ fn git_resident(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     Ok(vec![Measured::new("git/resident", Value::Bytes(samples))])
 }
 
+/// `git/changes_count_bytes`: the same 10 000 untracked files compared the
+/// way the project home counts changes outside sessions (ADR 0035):
+/// `retained_bytes = 0` and `total_patch_bytes = 0`, so the change set
+/// keeps no content and no hunks. Live bytes of that change set with the
+/// stat cache and parsed index its `Worktree` holds; per changed path, it
+/// is what the home keeps at idle for incremental refreshes.
+const GIT_CHANGES_COUNT_BYTES: Bench = Bench {
+    id: "git/changes_count_bytes",
+    run: git_changes_count_bytes,
+};
+
+fn git_changes_count_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let files = ctx.scale(10_000, 60);
+    let limits = Limits {
+        retained_bytes: 0,
+        total_patch_bytes: 0,
+        ..Limits::default()
+    };
+    let t = worktree::untracked(files);
+    let cancel = AtomicBool::new(false);
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(SAMPLES, 1) {
+        let wt = worktree::main_worktree(&t)?;
+        let before = CountingAlloc::live();
+        let set = worktree::changes(&wt, &limits, &cancel)?;
+        let held = CountingAlloc::live().saturating_sub(before);
+        if set.files().len() != files {
+            return Err(BenchError::new(format!(
+                "expected {files} changed files, got {}",
+                set.files().len()
+            )));
+        }
+        samples.push(held as u64);
+        drop((set, wt));
+    }
+    Ok(vec![Measured::new(
+        "git/changes_count_bytes",
+        Value::Bytes(samples),
+    )])
+}
+
 /// `git/changes_capped_bytes`: live bytes a change set of 10 000 untracked
 /// files (5000 of them `Listed`) leaves behind, with the stat cache and the
 /// parsed index of its `Worktree`. Recorded; its ceiling is the sum of the
@@ -208,6 +249,7 @@ const BENCHES: &[Bench] = &[
     code_intel::MAP_100K_BYTES,
     code_intel::BATCH_PEAK,
     GIT_CHANGES_CAPPED_BYTES,
+    GIT_CHANGES_COUNT_BYTES,
     GIT_COMPARE_100K,
     GIT_FILTER_CLOUDPRINT_BYTES,
     GIT_FILTER_100K_BYTES,
