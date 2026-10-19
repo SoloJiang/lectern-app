@@ -575,7 +575,7 @@ crates/bench/
 | `git/changes_capped` | 中位数 < 1 s | [git](git.md#性能) | `git` 第 3 步 |
 | `git/changes_capped_bytes` | 存活字节 ≤ `Limits` 默认上限之和（数字由 `git` 的实现写入 git 设计） | [git](git.md#性能) | `git` 第 3 步 |
 | `git/changes_count/total_bytes` | 只记录（1000 个改了的跟踪文件、1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 持有的存活字节，现在含 stat 缓存留住的文件内容；`Memory`） | [git](git.md#性能) | 随 [ADR 0035](../adr/0035.md) 加入 |
-| `git/changes_count/per_path_bytes` | 存活字节 ≤ 1 KB（同上除以改动路径数；ADR 0035 按它给首页的改动集定上限；`Memory`） | [git](git.md#性能) | `git` 修正 stat 缓存不持有文件内容的 PR |
+| `git/changes_count/per_path_bytes` | 存活字节 ≤ 1 KB（同上除以改动路径数；ADR 0035 按它给首页的改动集定上限；`Memory`） | [git](git.md#性能) | `git` 的 stat 缓存不持有内容的修正与 `git` 第 4 步（释放比较用的 index）中后完成的那个 |
 | `git/resident` | 存活字节 ≤ 48 MB（hunk LRU 16 MB + 一个 `ChangeSet` 32 MB，空闲时不持有句柄） | [git](git.md#性能) | `git` 第 3 步 |
 | `git/open_100k`、`git/filter_100k`、`git/changes_clean_100k` | 中位数 < 40 ms / < 400 ms / < 2 s（10 万个跟踪文件、`core.ignoreCase`：`git/open` 的读取，index 不在缓存里；index 变化后重建 fs_watch 过滤器；干净工作区的 `changes`，每个样本用新的 `Worktree`，index 每次都解析） | [git](git.md#性能) | 随 [ADR 0035](../adr/0035.md) 加入 |
 | `git/compare_100k/peak_bytes` | 存活字节 ≤ 72 MB（同一仓库上新 `Worktree` 的一次 `changes` 期间的峰值：比较自己解析的 index、折叠副本、未跟踪遍历、改动集；临时内存，不是空闲份额；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
@@ -853,7 +853,7 @@ CI：
 
 10 万文件的预算与内存归属（[ADR 0035](../adr/0035.md)，`Refs #7`），同一类 Linux 虚拟机：
 
-- 预算表加入 `app/idle_100k`、`app/idle_100k_indexed`（计划中）、`git/open_100k`、`git/filter_100k`、`git/changes_clean_100k`、`git/filter_cloudprint_bytes`、`git/filter_100k_bytes`、`git/compare_100k/peak_bytes`、`git/changes_count/total_bytes`（生效）、`git/compare_100k/retained_bytes`（计划中，`git` 第 4 步）、`git/changes_count/per_path_bytes`（计划中，stat 缓存的修正）和 `fs_watch/resident_100k`（计划中）；`fs_watch/resident` 改为不含过滤器。新的夹具 `benches/fixtures/git_worktree.rs` 的 `shaped` 按 project 的 `Shape` 写出真实文件和带 stat 的 index（`core.ignoreCase = true`），只写树对象。实测值见 [git 设计「实际验证」](git.md#实际验证)。
+- 预算表加入 `app/idle_100k`、`app/idle_100k_indexed`（计划中）、`git/open_100k`、`git/filter_100k`、`git/changes_clean_100k`、`git/filter_cloudprint_bytes`、`git/filter_100k_bytes`、`git/compare_100k/peak_bytes`、`git/changes_count/total_bytes`（生效）、`git/compare_100k/retained_bytes`（计划中，`git` 第 4 步）、`git/changes_count/per_path_bytes`（计划中，stat 缓存的修正与 `git` 第 4 步中后完成的那个）和 `fs_watch/resident_100k`（计划中）；`fs_watch/resident` 改为不含过滤器。新的夹具 `benches/fixtures/git_worktree.rs` 的 `shaped` 按 project 的 `Shape` 写出真实文件和带 stat 的 index（`core.ignoreCase = true`），只写树对象。实测值见 [git 设计「实际验证」](git.md#实际验证)。
 - `budgets_belong_to_the_documented_targets` 把 `fs_watch/resident_100k` 归入 `Memory`。
 
 ## 与设计的差异

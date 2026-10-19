@@ -76,9 +76,10 @@ fn git_resident(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 /// `total_patch_bytes = 0`, so the change set keeps no content and no
 /// hunks. `total_bytes` (recorded) is the live bytes of that change set
 /// with what its `Worktree` holds, what the home keeps at idle for
-/// incremental refreshes. The git fix that stops the stat cache from
-/// keeping file contents allocated adds `per_path_bytes` (the same divided
-/// by the changed paths, ≤ 1 KB).
+/// incremental refreshes. `per_path_bytes` (the same divided by the
+/// changed paths, ≤ 1 KB) is added by whichever lands later of the git fix
+/// that stops the stat cache from keeping file contents allocated and git
+/// step 4, which releases the comparison index.
 const GIT_CHANGES_COUNT: Bench = Bench {
     id: "git/changes_count",
     run: git_changes_count,

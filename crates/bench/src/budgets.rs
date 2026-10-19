@@ -637,12 +637,16 @@ pub static BUDGETS: &[Budget] = &[
     // Recorded: today the stat cache keeps every read file's content
     // allocated (git design「与设计的差异」).
     share("git/changes_count/total_bytes", RECORD, GIT, ACTIVE, Memory),
-    // The same per changed path once comparison caches hold no content.
+    // The same per changed path once comparison caches hold no content and
+    // the comparison index is released (about 1163 B with the first alone):
+    // active with whichever of the two lands later.
     share(
         "git/changes_count/per_path_bytes",
         &[median(Limit::BytesAtMost(1024))],
         GIT,
-        State::Planned("git：stat 缓存不持有文件内容"),
+        State::Planned(
+            "git：stat 缓存不持有内容，且第 4 步释放比较用的 index（两者中后完成的那个）",
+        ),
         Memory,
     ),
     // Hunk LRU 16 MB plus one `ChangeSet` 32 MB; no handle held while idle.
