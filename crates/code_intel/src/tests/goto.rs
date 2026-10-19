@@ -18,7 +18,7 @@ use crate::resolve::{
 };
 use crate::site::{ParsedFile, Site};
 
-use super::support::{Harness, packages};
+use super::support::{Harness, packages, parsed};
 
 /// A harness with `files` committed and indexed.
 pub(crate) fn indexed(files: &[(&str, &str)]) -> Harness {
@@ -677,6 +677,44 @@ fn goto_object_origin_reads_the_blob() {
         .map(|c| (c.location.origin, c.location.line))
         .collect();
     assert_eq!(callers, [(TextOrigin::Object, 2)]);
+}
+
+/// A jump from an object's text whose path has other content in the
+/// worktree: the index's candidate there (a nested `File` definition) goes
+/// out as the index has it, `local` not known (false); the one file parsed
+/// is the jump's own text, not the worktree's file.
+#[test]
+fn goto_object_side_parses_only_its_text() {
+    let old = "export function run() {\n  return helper();\n}\n";
+    let new = "export function run() {\n  const helper = () => 1;\n  return helper();\n}\n";
+    let h = indexed(&[("a.ts", old)]);
+    h.git.add("main", &[("a.ts", new.as_bytes())]);
+    h.git.commit("main");
+    h.refresh_files();
+    let at = TextRef {
+        worktree: Some(h.wt()),
+        path: "a.ts".into(),
+        oid: h.git.oid(old.as_bytes()),
+        origin: TextOrigin::Object,
+    };
+    let position = super::support::pos_in(old.as_bytes(), "helper", 0);
+    let texts = [("object", old), ("worktree", new)];
+    parsed(&texts);
+    let r = h.ask(QueryKind::Definition { at, position });
+    let found: Vec<(String, TextOrigin, u32, bool)> = r
+        .candidates
+        .iter()
+        .map(|c| {
+            let l = &c.definition.location;
+            (l.path.to_string(), l.origin, l.line, c.definition.local)
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [("a.ts".to_owned(), TextOrigin::Worktree, 1, false)],
+        "{r:?}"
+    );
+    assert_eq!(parsed(&texts), ["object"]);
 }
 
 /// Once a project's map is installed, `ParsedFile`'s query for every

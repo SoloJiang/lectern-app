@@ -16,7 +16,7 @@ use crate::resolve::{Bound, CandidateDraft, Import, PackageScope, ResolveContext
 use crate::site::{ParsedFile, Site};
 
 use super::goto::{indexed, unindexed};
-use super::support::{CREATED, Harness};
+use super::support::{CREATED, Harness, parsed};
 
 /// The definition named at the `nth` `needle` of `path`.
 fn def(h: &Harness, path: &str, needle: &str, nth: usize) -> DefinitionRef {
@@ -151,12 +151,13 @@ fn refs_nested_helper_is_local() {
 }
 
 /// The same nested `helper` found by `Named` (⌘K): the index does not store
-/// locality, the candidate's file gives it; its references are only in the
-/// outer function. A `DefinitionRef` that says otherwise (made by anyone)
-/// is corrected by find references from the definition's own file.
+/// locality, so the candidate's `local` is false (not known). Find
+/// references knows it from the definition's own file, whatever the
+/// `DefinitionRef` says: the one parse of that file gives the locality and
+/// the references; nothing else is parsed, the scope is the outer function.
 #[test]
 fn refs_nested_helper_from_named_is_local() {
-    let h = indexed(&[
+    let files = [
         (
             "a.js",
             "export function outer() {\n  const helper = () => 1;\n  return helper() + helper();\n}\n",
@@ -165,7 +166,9 @@ fn refs_nested_helper_from_named_is_local() {
             "b.js",
             "export function helper() { return 2; }\nhelper();\n",
         ),
-    ]);
+    ];
+    let h = indexed(&files);
+    parsed(&files);
     let r = h.ask(QueryKind::Named {
         name: "helper".into(),
         near: None,
@@ -180,9 +183,10 @@ fn refs_nested_helper_from_named_is_local() {
         .collect();
     assert_eq!(
         local,
-        [("a.js".to_owned(), true), ("b.js".to_owned(), false)],
+        [("a.js".to_owned(), false), ("b.js".to_owned(), false)],
         "{local:?}"
     );
+    assert_eq!(parsed(&files), Vec::<String>::new());
     let mut of = r
         .candidates
         .iter()
@@ -190,18 +194,67 @@ fn refs_nested_helper_from_named_is_local() {
         .expect("a.js")
         .definition
         .clone();
-    for given in [true, false] {
+    for given in [false, true] {
         of.local = given;
         let r = refs(&h, &of);
+        assert_eq!(parsed(&files), ["a.js"], "given {given}");
         assert_eq!(
             at(&r.callers),
             [("a.js".to_owned(), 2), ("a.js".to_owned(), 2)],
             "given {given}"
         );
         assert!(r.same_name.is_empty(), "given {given}: {:?}", r.same_name);
+        assert_eq!(r.state, QueryState::Done(Completeness::Complete));
         let defines = r.symbol.as_ref().and_then(|s| s.defines.as_ref());
         assert!(defines.is_some_and(|d| d.local), "given {given}");
     }
+    // A root definition said to be local is searched across files: its own
+    // file's parse says it is not.
+    let mut of = r
+        .candidates
+        .iter()
+        .find(|c| &*c.definition.location.path == "b.js")
+        .expect("b.js")
+        .definition
+        .clone();
+    of.local = true;
+    let r = refs(&h, &of);
+    let defines = r.symbol.as_ref().and_then(|s| s.defines.as_ref());
+    assert!(defines.is_some_and(|d| !d.local));
+    // Parsed once; a.js's uses are bound to its own local, which `ci_ref`
+    // does not list, so no other file is a candidate.
+    assert_eq!(parsed(&files), ["b.js"]);
+}
+
+/// `Named` lists what the index has: however many of its definitions are
+/// `File` (each could be local), no file is parsed before the candidates
+/// go out, nor after.
+#[test]
+fn refs_named_parses_no_file() {
+    let files: Vec<(String, String)> = (0..40)
+        .map(|i| {
+            (
+                format!("m{i}.js"),
+                format!(
+                    "export function outer{i}() {{\n  const helper = () => {i};\n  return helper();\n}}\n"
+                ),
+            )
+        })
+        .collect();
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let h = indexed(&pairs);
+    parsed(&pairs);
+    let r = h.ask(QueryKind::Named {
+        name: "helper".into(),
+        near: Some("m0.js".into()),
+    });
+    assert_eq!(r.candidates.len(), 40);
+    assert!(r.candidates.iter().all(|c| !c.definition.local));
+    assert!(matches!(r.state, QueryState::Done(_)), "{:?}", r.state);
+    assert_eq!(parsed(&pairs), Vec::<String>::new());
 }
 
 /// A use bound by the locals to another (shadowing) local is dropped.

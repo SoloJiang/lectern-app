@@ -80,35 +80,18 @@ fn record(account: &mut Account, path: &RelPath, oid: BlobId, searched: Searched
     }
 }
 
-impl Inner {
-    /// Whether the definition `of` is local, by the parse of its own file
-    /// `bytes` (tier 1's limits) at its position: the definition there with
-    /// its name. `of.local` as given when that parse fails or has no such
-    /// definition.
-    fn own_locality(
-        &self,
-        lang: &Lang,
-        bytes: &Arc<[u8]>,
-        of: &DefinitionRef,
-        cancel: &Arc<std::sync::atomic::AtomicBool>,
-    ) -> bool {
-        let l = &of.location;
-        let clock = self.watchdog.clock().clone();
-        let deadline = clock.now() + crate::extract::INTERACTIVE_DEADLINE;
-        let site = lectern_services::code_intel::Position {
-            line: l.line,
-            column: l.column,
-        };
-        let Ok(parsed) = ParsedFile::parse_at(lang, bytes.clone(), &*clock, deadline, cancel, site)
-        else {
-            return of.local;
-        };
-        parsed
-            .defs_with_local()
-            .find(|(d, _)| d.line == l.line && d.column == l.column && *d.name == *of.name)
-            .map_or(of.local, |(_, local)| local)
-    }
+/// Whether the definition `of` is local by `parsed`, the parse of its own
+/// file: the definition there at its position with its name. `of.local` as
+/// given when the parse has no such definition.
+fn own_locality(parsed: &ParsedFile, of: &DefinitionRef) -> bool {
+    let l = &of.location;
+    parsed
+        .defs_with_local()
+        .find(|(d, _)| d.line == l.line && d.column == l.column && *d.name == *of.name)
+        .map_or(of.local, |(_, local)| local)
+}
 
+impl Inner {
     pub(crate) fn run_references(self: &Arc<Self>, run: &Run, snap: &Snap, of: &DefinitionRef) {
         let Some(lang) = snap
             .table
@@ -145,23 +128,6 @@ impl Inner {
                 return;
             }
         };
-        // Whether the definition is local, from its own file's parse,
-        // whoever made `of` (a `Named` result, a provider, a jump): what to
-        // scan depends on it (「查找引用与调用方」1).
-        let of = &DefinitionRef {
-            local: self.own_locality(&lang, &bytes, of, &run.cancel),
-            ..of.clone()
-        };
-        let l = &of.location;
-        let symbol = Symbol {
-            name: of.name.clone(),
-            lang: of.lang.clone(),
-            syntax: RefSyntax::Plain,
-            defines: Some(of.clone()),
-        };
-        let ranker = self.ranker(snap, Some(&l.path), Some((l.origin, l.oid)), Some(&of.lang));
-        self.publish_in(snap, run.id, |r| r.symbol = Some(symbol));
-        self.escalate_references(run.id, snap, of);
         let mut found = Found {
             callers: Vec::new(),
             same_name: Vec::new(),
@@ -180,9 +146,33 @@ impl Inner {
             origin: l.origin,
             lang: lang.clone(),
         };
-        let own = self.references_in(
-            run, snap, of, &ranker, &file, l.oid, bytes, None, &mut found,
-        );
+        // The definition's own file, parsed once: its parse says whether the
+        // definition is local, whoever made `of` (a jump, a `Named` result
+        // from the index, which does not know, a provider), and what to scan
+        // depends on it (「查找引用与调用方」1); the same parse gives the
+        // file's references. A parse that fails leaves `of.local` as given.
+        // The providers are asked first: by position, not by locality.
+        self.escalate_references(run.id, snap, of);
+        let parsed = self.parse_for_references(run, of, &file, l.oid, bytes, None, &mut found);
+        let of = &DefinitionRef {
+            local: parsed.as_ref().map_or(of.local, |p| own_locality(p, of)),
+            ..of.clone()
+        };
+        let l = &of.location;
+        let symbol = Symbol {
+            name: of.name.clone(),
+            lang: of.lang.clone(),
+            syntax: RefSyntax::Plain,
+            defines: Some(of.clone()),
+        };
+        let ranker = self.ranker(snap, Some(&l.path), Some((l.origin, l.oid)), Some(&of.lang));
+        self.publish_in(snap, run.id, |r| r.symbol = Some(symbol));
+        let own = match parsed {
+            Ok(parsed) => {
+                self.sort_references(run, snap, of, &ranker, &file, l.oid, &parsed, &mut found)
+            }
+            Err(searched) => searched,
+        };
         // Read by OID as an object, it is the map's file only when the map
         // has that content at the path (`Snap::finish` checks).
         record(&mut account, &l.path, l.oid, own);
@@ -452,6 +442,29 @@ impl Inner {
         if found.parsed.contains(&(file.path.clone(), oid)) {
             return found.outcome(&file.path, oid);
         }
+        match self.parse_for_references(run, of, file, oid, bytes, until, found) {
+            Ok(parsed) => self.sort_references(run, snap, of, ranker, file, oid, &parsed, found),
+            Err(searched) => searched,
+        }
+    }
+
+    /// Parses one file for [`references_in`](Self::references_in), marked
+    /// parsed in `found`; a failure is what the file's searching gave
+    /// (`Unsearched`), recorded when it settles the file.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one file's part of a query: the file and what it adds to"
+    )]
+    fn parse_for_references(
+        &self,
+        run: &Run,
+        of: &DefinitionRef,
+        file: &File,
+        oid: BlobId,
+        bytes: Arc<[u8]>,
+        until: Option<Instant>,
+        found: &mut Found,
+    ) -> Result<ParsedFile, Searched> {
         let clock = self.watchdog.clock().clone();
         let def = &of.location;
         let own = file.path == def.path && file.origin == def.origin && oid == def.oid;
@@ -468,8 +481,11 @@ impl Inner {
             Some(path) if **path == *file.path => Err(ParseError::TimedOut),
             _ => parsed,
         };
-        let parsed = match parsed {
-            Ok(parsed) => parsed,
+        match parsed {
+            Ok(parsed) => {
+                found.parsed.insert((file.path.clone(), oid));
+                Ok(parsed)
+            }
             Err(error) => {
                 let status = match error {
                     ParseError::TimedOut => ExtractStatus::TimedOut,
@@ -483,10 +499,31 @@ impl Inner {
                     found.parsed.insert((file.path.clone(), oid));
                     found.failed.insert((file.path.clone(), oid), reason);
                 }
-                return Searched::Unsearched(reason);
+                Err(Searched::Unsearched(reason))
             }
-        };
-        found.parsed.insert((file.path.clone(), oid));
+        }
+    }
+
+    /// Sorts every reference of the name in one parsed file into callers
+    /// and same-name references, and publishes a batch when one is due.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one file's part of a query: its snapshot, the file and what it adds to"
+    )]
+    fn sort_references(
+        &self,
+        run: &Run,
+        snap: &Snap,
+        of: &DefinitionRef,
+        ranker: &Ranker<'_>,
+        file: &File,
+        oid: BlobId,
+        parsed: &ParsedFile,
+        found: &mut Found,
+    ) -> Searched {
+        let clock = self.watchdog.clock().clone();
+        let def = &of.location;
+        let own = file.path == def.path && file.origin == def.origin && oid == def.oid;
         let rules = self.resolver(file.lang.name());
         let stored = |path: &str| -> Option<Extraction> {
             let eff = snap.map.effective(path)?;
@@ -529,7 +566,7 @@ impl Inner {
                 // A local is visible in its own scope only: what the locals
                 // do not bind there is not about it.
                 None if of.local => continue,
-                None => match rules.bind(&site, &parsed, &ctx) {
+                None => match rules.bind(&site, parsed, &ctx) {
                     Some(bound) => {
                         let b = &bound.definition;
                         if b.name == of.name

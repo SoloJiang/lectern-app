@@ -875,11 +875,15 @@ impl Inner {
     /// with the current grammar; then sets the hints of every path with that
     /// content.
     ///
-    /// A key stored meanwhile with a status that satisfies the item's tier
-    /// (`satisfies`) is not written again, so a batch commit only adds
-    /// units: an eviction during it is the quota's (`Batch::full`). Only a
-    /// tier 1 commit replaces a unit (a `TimedOut` or `TooLarge` one), which
-    /// the cache counts as an eviction; it never sets `full`.
+    /// A key already stored is written again only when the extraction
+    /// outranks the stored unit (`outranks`: `Done` over `TimedOut` or
+    /// `TooLarge`), whichever tier writes; an unfinished extraction never
+    /// replaces anything. The check runs under the project's commit lock,
+    /// which every store write takes, so a unit written by another commit
+    /// between the extraction and this one is seen. A replace is counted
+    /// by the cache as an eviction and is not taken as the quota's: the
+    /// transaction's own bump is subtracted (`Project::replaced`), so it
+    /// does not set `Batch::full`.
     ///
     /// True when every item is now stored (written, or found stored).
     fn commit(&self, project: &Arc<Project>, ctx: &Ctx, done: Vec<Done>, batch: bool) -> bool {
@@ -894,7 +898,6 @@ impl Inner {
                     .get(&d.item.lang.name().0)
                     .is_some_and(|l| Version::of(l) == Version::of(&d.item.lang))
         };
-        // Keys stored since the existence check: one query per version.
         // The touches keep the store's own eviction generation, the hints
         // the one without our replaces.
         let (before_raw, before) = (project.store.evictions(), project.evictions());
@@ -906,27 +909,30 @@ impl Inner {
                 None => groups.push((version, vec![d.key])),
             }
         }
-        let mut found: Vec<(Version, Found)> = Vec::new();
-        for (version, keys) in &groups {
-            bump(&self.stats.exists_checks, 1);
-            for f in project.store.exists(version, keys).unwrap_or_default() {
-                found.push((version.clone(), f));
-            }
-        }
         let mut stored = Vec::new();
         let mut written = Vec::new();
         let mut hits = Vec::new();
         let (eviction, committed, after) = {
             let _turn = lock(&project.commits);
+            // Keys stored since the extraction: one query per version,
+            // under the lock every store write takes, so no commit lands
+            // between this check and the write.
+            let mut found: Vec<(Version, Found)> = Vec::new();
+            for (version, keys) in &groups {
+                bump(&self.stats.exists_checks, 1);
+                for f in project.store.exists(version, keys).unwrap_or_default() {
+                    found.push((version.clone(), f));
+                }
+            }
             let eviction = project.store.evictions();
             let mut write = project.store.write();
             let mut replaces = false;
             for d in done.iter().filter(|d| live(d)) {
                 let version = Version::of(&d.item.lang);
                 let stored_as = found.iter().find(|(v, f)| *v == version && f.oid == d.key);
-                if let Some((_, f)) = stored_as.filter(|(_, f)| {
-                    satisfies(d.item.tier, f.status) && !outranks(d.extraction.status, f.status)
-                }) {
+                if let Some((_, f)) =
+                    stored_as.filter(|(_, f)| !outranks(d.extraction.status, f.status))
+                {
                     hits.push(*f);
                     stored.push((d.key, version, d.item.tier, f.status));
                     continue;
@@ -1303,8 +1309,9 @@ fn unfinished(status: ExtractStatus) -> bool {
 
 /// Whether an extraction with `new` replaces a stored unit with `stored`,
 /// whatever the tier that made it: a `Done` result (tier 1's interactive
-/// limits, a query's search) over a `TooLarge` or `TimedOut` unit. Never
-/// the other way round.
+/// limits, a query's search) over a `TooLarge` or `TimedOut` unit. The only
+/// replace `commit` makes: never the other way round, nor an unfinished
+/// result over an unfinished unit.
 fn outranks(new: ExtractStatus, stored: ExtractStatus) -> bool {
     new == ExtractStatus::Done && unfinished(stored)
 }

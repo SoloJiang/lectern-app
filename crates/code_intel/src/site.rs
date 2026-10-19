@@ -154,6 +154,14 @@ pub(crate) fn local_scopes(
     Some(collector.finish(source).local_scopes())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: the source of every file parsed on this thread, in order (a
+    /// harness runs its queries on the test's thread, `Executor::manual`).
+    pub(crate) static PARSED: std::cell::RefCell<Vec<Arc<[u8]>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// One parsed file, kept while a query uses it and then dropped; never
 /// cached. Holds the grammar's lease through its [`Lang`].
 ///
@@ -236,6 +244,8 @@ impl ParsedFile {
         full_query: bool,
         site: Option<Position>,
     ) -> Result<ParsedFile, ParseError> {
+        #[cfg(test)]
+        PARSED.with_borrow_mut(|p| p.push(source.clone()));
         let dialect = lang.dialect();
         // A core language's definitions and markers come from its walker,
         // as in `extract` (ADR 0031): its query only has the locals

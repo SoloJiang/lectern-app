@@ -78,10 +78,6 @@ impl PackageScope {
 pub(crate) struct CandidateDraft {
     pub candidate: Candidate,
     pub arity: Option<u8>,
-    /// An index definition of `Visibility::File`: it may be local, which
-    /// the index does not record; its file's parse tells
-    /// (`Inner::recover_locality`).
-    pub maybe_local: bool,
 }
 
 /// One language's resolution rules.

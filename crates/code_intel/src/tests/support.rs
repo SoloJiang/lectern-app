@@ -430,6 +430,22 @@ impl Gate {
     }
 }
 
+/// The files parsed on this thread since the last call (every
+/// `ParsedFile` parse, whoever made it), each named by the first of
+/// `files` (path, text) with its text, `?` for another text.
+pub(crate) fn parsed(files: &[(&str, &str)]) -> Vec<String> {
+    crate::site::PARSED
+        .with_borrow_mut(std::mem::take)
+        .iter()
+        .map(|source| {
+            files
+                .iter()
+                .find(|(_, text)| text.as_bytes() == &**source)
+                .map_or_else(|| "?".to_owned(), |(path, _)| (*path).to_owned())
+        })
+        .collect()
+}
+
 /// The position of the `nth` (from 0) occurrence of `needle` in `text`.
 pub(crate) fn pos_in(text: &[u8], needle: &str, nth: usize) -> Position {
     let mut from = 0;

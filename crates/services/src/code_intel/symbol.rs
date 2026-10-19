@@ -76,7 +76,9 @@ pub struct DefinitionRef {
     /// locals 查询在非根作用域里给出的 `@local.definition`（局部变量、参数、嵌套的
     /// `const helper = () => …`）为 true，不论 tags 是否也捕获了它；只在所在文件的
     /// 这个作用域里可见，`References` 只扫描这个作用域。根作用域（程序、模块顶层）
-    /// 的定义和只被 tags 捕获的定义为 false，按跨文件的方式查引用。
+    /// 的定义和只被 tags 捕获的定义为 false，按跨文件的方式查引用。只有来自解析的
+    /// 值是确定的：来自索引的定义（跳转的索引候选、`Named`）一律为 false，意思是
+    /// 不知道；`References` 不论它由谁给出，都按被查定义所在文件的解析重新确定。
     pub local: bool,
 }
 
