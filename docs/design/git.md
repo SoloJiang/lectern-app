@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」；macOS 上的两项超标仍未定位。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -567,6 +567,20 @@ impl TestRepo {
     pub fn remove(&self, rel: &str);
     pub fn import_worktree_fixture(&self, dir: &Path) -> Vec<String>; // 工作区夹具，见夹具说明
 }
+
+/// `test-support`，供 bench 定位比较的开销（ADR 0035 之后加入，见「与设计的差异」第 3 步）
+/// 本线程上工作区比较经 `SafeRoot::read` 读过的文件数（含未跟踪遍历读的 `.gitignore`），累计值。
+pub fn worktree_reads() -> usize;
+/// 每个有 stage 0 条目、不是 skip-worktree、`SafeRoot::stat` 找得到的跟踪路径：index 记录的 stat
+/// 与 `SafeRoot::stat` 按比较用的 stat 选项逐项对照。不读文件；index 按 `changes` 的方式解析进这个句柄。
+pub struct StatMismatches {
+    pub entries: usize,
+    pub racy: usize,
+    pub unmatched: usize,   // 不是 racy、stat 不一致，比较会读它
+    pub mtime: usize, pub size: usize, pub ctime: usize, pub ino: usize,
+    pub owner: usize,       // uid 或 gid；选项不比较的字段记 0
+}
+pub fn stat_mismatches(worktree: &Worktree) -> Result<StatMismatches, GitError>;
 ```
 
 ## 数据结构
@@ -711,7 +725,7 @@ pub struct Hunk {
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
 - 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。超过保留上限的文件没有字节可用，明确标为 `NotRetained`，不落盘另存。
 
-`Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID、计算时刻），stat 没变时不重新读取和计算；文件的 mtime 不早于缓存项的计算时刻时（与 racy-clean 同理，同一时刻内的两次同长度写入 stat 相同）不命中缓存，照常读取内容；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存；并且这一次比较里，转换规则（按新旧两份属性和配置分别求出的 `eol`、`text`、`ident`、`working-tree-encoding`、`filter`）有变化的跟踪路径跳过第 1 步的过滤器快路径和第 2 步的 stat 跳过：新规则有过滤器的按第 1 步是 `Filtered`，其余按第 3 步读取并重新计算 OID。规则没变的路径照常走 stat 跳过。
+`Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID、计算时刻），stat 没变时不重新读取和计算。缓存项不引用文件内容（包括 `Weak`，ADR 0035）：命中时内容等于 index 的 blob 的不需要字节（对象库里有）；其余内容取 `refresh` 传入的改动集保留的字节（同一路径、同一 OID），没有时按未命中处理，按路径重新读取；文件的 mtime 不早于缓存项的计算时刻时（与 racy-clean 同理，同一时刻内的两次同长度写入 stat 相同）不命中缓存，照常读取内容；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存；并且这一次比较里，转换规则（按新旧两份属性和配置分别求出的 `eol`、`text`、`ident`、`working-tree-encoding`、`filter`）有变化的跟踪路径跳过第 1 步的过滤器快路径和第 2 步的 stat 跳过：新规则有过滤器的按第 1 步是 `Filtered`，其余按第 3 步读取并重新计算 OID。规则没变的路径照常走 stat 跳过。
 
 ### 上限与截断
 
@@ -732,7 +746,7 @@ pub struct Hunk {
 | 数据 | 键 | 存放 |
 |---|---|---|
 | hunk（`FileDiff`） | 格式版本、`HashKind`、旧 OID、新 OID、算法（Histogram）、空白处理（P1 只有「不忽略」） | 进程内字节 LRU 16 MiB；`cache` 实现后写入它的 SQLite（命名空间 `git.diff`），首帧之后才打开 |
-| 工作区文件的 OID | 路径 + stat | `Worktree` 内的内存缓存，不持久化；缓存项不持有让文件内容保持分配的引用（[ADR 0035](../adr/0035.md)），现在的实现违反这一条，见「与设计的差异」第 3 步的已知缺陷 |
+| 工作区文件的 OID | 路径 + stat | `Worktree` 内的内存缓存，不持久化；缓存项不持有让文件内容保持分配的引用（[ADR 0035](../adr/0035.md)），需要内容时取 `refresh` 传入的改动集保留的字节或按路径重新读取（「工作区比较」） |
 | 工作区比较自己解析的 index（gix 的 `State`、逐条的 stat 与标志、`core.ignoreCase` 的折叠副本） | index 校验和 | 只在一次 `changes` / `refresh` 调用内持有，调用返回时释放，下一次比较重新解析（[ADR 0035](../adr/0035.md)）。现在的实现仍随 `Worktree` 保留，10 万个跟踪文件时调用返回后 `Worktree` 还持有 39 MB（`git/compare_100k/retained_bytes`，几乎都是它），第 4 步改正 |
 | 改动集、展示行、词级差异 | 不缓存 | 由缓存的 hunk 重算，耗时与可见行数成正比 |
 
@@ -759,7 +773,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 | 打开一个会话的 Diff < 50 ms | 50 个改动文件的 `changes`（stat 跳过其余文件）< 15 ms；hunk 未命中时计算 < 20 ms，命中时 < 2 ms |
 | 切换 worktree / 分支 < 100 ms | 内容相同的文件命中同一份 hunk 缓存；`refresh(Full)` < 15 ms |
 | 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB；每个 `ChangeSet` 保留的工作区内容 ≤ 32 MiB（通常只有当前审阅的一个）；fs_watch 的过滤器（解析后的 index、`core.ignoreCase` 的折叠顺序、忽略规则）是本 crate 的份额，index 与 `project` 保留的句柄共用一份（[ADR 0035](../adr/0035.md)），连同句柄 < 1 MB |
-| 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 过滤器连同它的 `Worktree` 句柄 ≤ 16 MB；工作区比较解析的 index 不在空闲时保留（「缓存」），调用返回后 `Worktree` 为比较留下的 < 1 MB（`git/compare_100k/retained_bytes`，第 4 步生效）。采样状态里唯一保留的改动集是项目主页的计数用改动集（`retained_bytes = 0`、`total_patch_bytes = 0`，没有工作区内容和 hunk）：它连同 stat 缓存随改动路径数增长、不随跟踪文件数增长，要求每个改动路径 ≤ 1 KB（`git/changes_count/per_path_bytes`，计划中）；主页只在 4000 个以内保留它（≤ 4 MB），在 ADR 0035 的 12 MB 余量里。这个上限要等 stat 缓存不再持有文件内容、比较用的 index 在调用返回时释放（第 4 步）两者都完成才成立：现在它让读过的每个文件的字节都留在 `Worktree` 里（「与设计的差异」第 3 步的已知缺陷，`git/changes_count/total_bytes` 76.7 MB）。上一行 cloudprint 量级的 32 MiB 保留内容是打开 Diff 后的改动集 |
+| 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 过滤器连同它的 `Worktree` 句柄 ≤ 16 MB；工作区比较解析的 index 不在空闲时保留（「缓存」），调用返回后 `Worktree` 为比较留下的 < 1 MB（`git/compare_100k/retained_bytes`，第 4 步生效）。采样状态里唯一保留的改动集是项目主页的计数用改动集（`retained_bytes = 0`、`total_patch_bytes = 0`，没有工作区内容和 hunk）：它连同 stat 缓存随改动路径数增长、不随跟踪文件数增长，要求每个改动路径 ≤ 1 KB（`git/changes_count/per_path_bytes`，计划中）；主页只在 4000 个以内保留它（≤ 4 MB），在 ADR 0035 的 12 MB 余量里。这个上限要等 stat 缓存不再持有文件内容、比较用的 index 在调用返回时释放（第 4 步）两者都完成才成立：前者已完成（`git/changes_count/total_bytes` 从 76.7 MB 降到 2.12 MB，每个改动路径约 1.11 KB），还差第 4 步。上一行 cloudprint 量级的 32 MiB 保留内容是打开 Diff 后的改动集 |
 | 工作区比较期间的临时内存（10 万个跟踪文件，不设顶层预算，同 ADR 0029 的临时内存） | 一次 `changes` 的存活字节峰值 ≤ 72 MB（`git/compare_100k/peak_bytes`）：gix 的 `State`、逐条的 stat 与标志、折叠副本、未跟踪遍历、改动集；比较与 `tracked` 各解析一次 index，合成一次解析是降低它的办法（ADR 0035） |
 | index 变化后的刷新（10 万个跟踪文件，后台） | 重建 fs_watch 过滤器（解析 index、排序折叠顺序、未跟踪遍历、读 `.gitignore`）< 400 ms，fs_watch 等它完成后才交付这一批；`changes` 的全量比较（首次比较和每次 `refresh(Full)`，每次都重新解析 index）< 2 s，项目主页先显示文件列表，改动数随后填入。这两项 macOS 上现在超标（约 0.7 s 和 9 s 多），见「与设计的差异」的已知差距 |
 | 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数；10 万文件仓库的读取、过滤器和全量比较都在打开项目之后的后台任务里 |
@@ -784,8 +798,8 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 - `git/open_100k`（< 40 ms）：同 `git/open`，每次新开 `Worktree`，index 不在缓存里。
 - `git/filter_100k`（< 400 ms）：在 index 还没解析的 `Worktree` 上 `watch_source().filter(&[], ..)`，即 index 变化后 fs_watch 重建过滤器的工作。
 - `git/changes_clean_100k`（< 2 s）：同 `git/changes_clean`，但每个样本用新的 `Worktree`（不计时），每次比较都解析 index，即第 4 步之后每次 `changes` / `refresh(Full)` 的做法。`refresh(Full)` 对没有改动的文件做同样的工作。
-- 这两项在 macOS 上超标（「与设计的差异」），修正之前是计划中。只记录的 `git/filter_100k/walk`（经 `SafeRoot::list` 列出工作区的每个目录一次）、`git/changes_clean_100k/stat_all`（每个跟踪路径 `SafeRoot::stat` 一次）、`git/changes_clean_100k/read_all`（每个跟踪路径 `SafeRoot::read` 一次）总是运行，用来定位开销。
-- `git/changes_count/total_bytes`（`memory` 目标，只记录）和 `git/changes_count/per_path_bytes`（≤ 1 KB，计划中：stat 缓存不持有内容的修正与第 4 步释放比较用的 index 两者都完成后才能通过，随后完成的那个生效）：1000 个改了的跟踪文件和 1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 持有的一切（stat 缓存、解析过的 index）的存活字节，和它除以改动路径数。
+- 这两项在 macOS 上超标（「与设计的差异」），修正之前是计划中。只记录的 `git/filter_100k/walk`（经 `SafeRoot::list` 列出工作区的每个目录一次）、`git/changes_clean_100k/stat_all`（每个跟踪路径 `SafeRoot::stat` 一次）、`git/changes_clean_100k/read_all`（每个跟踪路径 `SafeRoot::read` 一次）总是运行，用来定位开销。同一基准另记录几个计数（`Value::Count`）：`…/reads`（夹具建好后新 `Worktree` 上第一次 `changes` 读过的文件数，`testing::worktree_reads` 之差，含未跟踪遍历读的 `.gitignore`，干净时为 1）、`…/reads_after_read_all`（`read_all` 读过每个文件之后，再用新 `Worktree` 比较一次的读取数）、`…/stat_racy`、`…/stat_unmatched`、`…/stat_mtime`、`…/stat_size`、`…/stat_ctime`、`…/stat_ino`、`…/stat_owner`（`testing::stat_mismatches`，读取之前 index 的 stat 与 `SafeRoot::stat` 逐项不一致的条目数）。
+- `git/changes_count/total_bytes`（`memory` 目标，只记录）和 `git/changes_count/per_path_bytes`（≤ 1 KB，计划中：stat 缓存不持有内容的修正与第 4 步释放比较用的 index 两者都完成后才能通过；前者已完成，随第 4 步生效）：1000 个改了的跟踪文件和 1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 持有的一切（stat 缓存、解析过的 index）的存活字节，和它除以改动路径数。
 - `git/compare_100k/peak_bytes`（`memory` 目标，≤ 72 MB）和 `git/compare_100k/retained_bytes`（`memory` 目标，< 1 MB，计划中，第 4 步）：新 `Worktree` 上一次 `changes(Base::Head)` 期间的存活字节峰值，和丢掉改动集之后 `Worktree` 仍持有的字节。
 - `git/filter_100k_bytes`（`memory` 目标，≤ 16 MB）：同 `git/filter_cloudprint_bytes`，在这个仓库上。
 
@@ -875,7 +889,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
    - `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' crates/git/src --glob '!gitdir.rs' --glob '!testing.rs' --glob '!**/tests.rs'` 没有结果：工作区只经 `SafeRoot` 读取。git 目录里的管理文件（`HEAD`、`commondir`、`gitdir`、`locked`、`config`、index 末尾的校验和）都在 `gitdir.rs` 里读；`testing.rs` 和测试代码构造夹具。
    - `git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/changes_capped` 和内存基准在预算内。
 4. **改动来源接口**：`services` 的设计文档合并后，为本地仓库实现它的改动来源接口（取 diff、加载完整文件；指纹随 #66），按那份文档的验收条件测试。由哪个插件把它注册为服务按 #47 的结论处理，不在本 crate。
-   - 同一步：工作区比较解析的 index 只在一次 `changes` / `refresh` 调用内持有（「缓存」，[ADR 0035](../adr/0035.md)）。`compare_releases_its_index_*` 测试检查调用返回后 `Worktree` 不再持有它、下一次 `refresh(Paths)` / `refresh(Full)` 重新解析且结果不变；bench 的 `git/compare_100k/retained_bytes` 改为 `Active`（< 1 MB）；stat 缓存不持有内容的修正已经合并时，`git/changes_count/per_path_bytes` 也在这一步改为 `Active`（≤ 1 KB），否则由那个修正改；`git/refresh_one`、`git/refresh_full` 仍在预算内，`git/changes_clean_100k` 已经生效时也在预算内。
+   - 同一步：工作区比较解析的 index 只在一次 `changes` / `refresh` 调用内持有（「缓存」，[ADR 0035](../adr/0035.md)）。`compare_releases_its_index_*` 测试检查调用返回后 `Worktree` 不再持有它、下一次 `refresh(Paths)` / `refresh(Full)` 重新解析且结果不变；bench 的 `git/compare_100k/retained_bytes` 改为 `Active`（< 1 MB）；stat 缓存不持有内容的修正已经完成，`git/changes_count/per_path_bytes` 也在这一步改为 `Active`（≤ 1 KB）；`git/refresh_one`、`git/refresh_full` 仍在预算内，`git/changes_clean_100k` 已经生效时也在预算内。
 
 ## 实际验证
 
@@ -972,6 +986,14 @@ fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0
 - 没有验证的：比较用的 index 在调用返回时释放还没有实现（第 4 步）。
 - macOS CI（PR [#129](https://github.com/SoloJiang/lectern-app/pull/129)）：`git/open_100k` 和各项内存通过；`git/changes_clean_100k` 中位数 9.05、9.54 s（预算 < 2 s，Linux 约 1.0 s），`git/filter_100k` 766、678 ms（预算 < 400 ms，Linux 214–276 ms）。约 9 倍和约 3 倍的差距不是平台之间的正常波动，是 macOS 上某一步的实际开销，见「与设计的差异」的已知差距。CI 的日志和产物在这台容器里下载不到，没有分段数据，所以加了只记录的 `git/filter_100k/walk`、`git/changes_clean_100k/stat_all`、`git/changes_clean_100k/read_all`；Linux 上依次是 163 ms、279 ms（`noisy`）、393 ms，即 Linux 上 `filter_100k` 的大部分是目录遍历，`changes_clean_100k` 的 stat 约占三成。
 
+stat 缓存不持有文件内容（[ADR 0035](../adr/0035.md) 的关键约束，`Refs #14`），同一类 Linux 虚拟机：
+
+- `just check`、`just test`（Linux 上的全部 crate，1321 个测试通过，跳过 1 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过；`cargo clippy -p lectern-git --all-targets -- -D warnings`（不开 `test-support`）也通过。
+- `just test -p lectern-git` 共 224 个测试，新增 3 个：`worktree_stat_cache_keeps_no_reference_to_contents`（改动集保留的每份字节 `Arc::weak_count` 为 0、`strong_count` 为 2，即只有改动集的保留列表和它的 `Origin` 记录持有；`refresh(Full)` 两个文件都命中、不读，字节与传入的改动集是同一份；改动集都丢掉之后 `changes` 重新读这两个文件）、`worktree_stat_cache_hit_equal_to_the_index_needs_no_bytes`（被 touch、内容等于 index 的文件第二次比较不读）、`worktree_stat_mismatches_of_a_clean_worktree_are_none`（40 个文件、嵌套目录、`core.ignoreCase`：`stat_mismatches` 全为 0，经 `SafeRoot::read` 读过每个文件之后仍为 0，比较不读文件；改一个文件后 `unmatched`、`size` 各为 1）。原有的 `worktree_stat_cache_reuses_contents_a_change_set_still_holds` 不改也通过。
+- `just bench --measure git/`（release，不判定）：`git/changes_count/total_bytes` 从 80,404,225 字节（76.7 MB，修正前在同一台机器上重测）降到 2,222,257 字节（2.12 MB），每个改动路径 1111 B，余下的主要是比较用的 index（第 4 步释放），所以 `per_path_bytes`（≤ 1 KB）仍是计划中。其余 `git/*` 都在预算内，与上一次记录同一量级：`git/changes_clean` 3.13 ms、`git/changes_50` 4.05 ms、`git/refresh_one` 605 µs、`git/refresh_full` 3.39 ms、`git/changes_capped` 91.2 ms、`git/changes_capped_bytes` 9.29 MB、`git/resident` 873 KB、`git/open_100k` 18.8 ms、`git/compare_100k/peak_bytes` 65.8 MB、`git/filter_100k_bytes` 13.9 MB。
+- 新的计数在 Linux 上：`git/changes_clean_100k/reads` 和 `…/reads_after_read_all` 都是 1（根目录的 `.gitignore`），`…/stat_*` 全为 0；同一次运行里 `git/filter_100k/walk` 154 ms、`…/stat_all` 284 ms（`noisy`）、`…/read_all` 384 ms。
+- 没有验证的：macOS 上的计数和两项超标的原因（「与设计的差异」的已知差距）；`git/changes_clean_100k` 和 `git/filter_100k` 仍是计划中。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1020,7 +1042,7 @@ fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0
 - 重命名的目标可以是未跟踪的新增（这时 `Renamed` 的 `untracked` 为 false，`untracked` 只出现在 `Added` 上），但同一路径上有删除的未跟踪新增（`git rm --cached p`）不作为目标，不只是不与同一路径的删除配对：否则它可能与别的路径的删除配对，同一路径上就会出现 `Renamed` 和 `Deleted` 两项，破坏「同一路径最多一项」的不变量（`worktree_table_snapshot` 里 `06-removed` 与 `07-rm-cached` 原本会这样配对）。
 - 「转换规则有变化」比较的是这个 `Worktree` 句柄第一次比较时的转换状态（基线），不是上一次 `refresh`：index 不会被重写，相对上一次比较就会在第二次刷新时又按 stat 跳过、改动消失。规则相对基线变了的跟踪路径每次都读取比较，规则改回来后恢复 stat 跳过；`changes` 和 `refresh(Full)` 都这样做。只有 `.gitattributes` 变化时逐个路径比较新旧规则（旧规则用基线保存的属性文件内容重建）；`info/attributes` 或影响转换的配置（`core.autocrlf`、`core.eol`、`core.safecrlf`、`core.attributesFile`、`core.fileMode`、`core.symlinks`、`filter.*`）变了时，全部跟踪路径都按规则变化处理。已知限制：`core.attributesFile`、XDG 和系统属性文件的内容变化不计入转换状态（只有 `core.attributesFile` 的值计入）；新句柄以当时的规则为基线，与 git 相同地信任 stat。
 - 生效的 `.gitattributes`：跟踪的经 `SafeRoot` 读工作区里的那份，工作区里没有或不是普通文件时用 index 的 blob（skip-worktree 的条目直接用 index 的 blob），再加上目录遍历列出的未跟踪 `.gitattributes`。被忽略的目录或被忽略的未跟踪 `.gitattributes` 不生效（git 会读，已知限制）。属性栈按 OID 从内存里的叠加层取这些内容，不写对象库，也不按路径读工作区。
-- stat 缓存的命中条件：stat（大小、mtime、ctime、inode、设备、模式位）、转换状态和 index 的 blob OID 都相同，并且 mtime 比开始比较的时刻早一秒以上（按整秒比较，多出的一秒覆盖内核文件时钟比系统时钟慢的那一点）。缓存项用 `Weak<[u8]>` 引用内容：内容还被某个改动集持有时直接共享，否则重新读取；`Unhashed`、`Filtered` 不需要内容，命中时不读。已知缺陷：`Arc<[u8]>` 的计数和字节在同一次分配里，只要还有 `Weak`，整块分配就不释放，所以比较读过的每个文件的字节都随 stat 缓存一直留在 `Worktree` 里，不受 `retained_bytes` 限制，每个文件只受 `read_bytes`（64 MiB）限制。这里原来写的「缓存本身不增加常驻内存」不成立：`git/changes_count/total_bytes`（1000 个改了的跟踪文件、1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，`retained_bytes = 0`）是 76.7 MB，其中文件内容 74.5 MiB，丢掉改动集之后 `Worktree` 仍持有 75.7 MB。[ADR 0035](../adr/0035.md) 要求跨调用保留的比较缓存不持有让内容保持分配的引用，由后续的 `git` PR 修正；`git/changes_count/per_path_bytes`（≤ 1 KB，计划中）还要第 4 步释放比较用的 index，随两者中后完成的那个生效。
+- stat 缓存的命中条件：stat（大小、mtime、ctime、inode、设备、模式位）、转换状态和 index 的 blob OID 都相同，并且 mtime 比开始比较的时刻早一秒以上（按整秒比较，多出的一秒覆盖内核文件时钟比系统时钟慢的那一点）。`Unhashed`、`Filtered` 不需要内容，命中时不读。缓存项最初用 `Weak<[u8]>` 引用内容，内容还被某个改动集持有时直接共享。这是一个缺陷：`Arc<[u8]>` 的计数和字节在同一次分配里，只要还有 `Weak`，整块分配就不释放，比较读过的每个文件的字节都随 stat 缓存一直留在 `Worktree` 里，不受 `retained_bytes` 限制；`git/changes_count/total_bytes`（1000 个改了的跟踪文件、1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，`retained_bytes = 0`）是 76.7 MB，其中文件内容 74.5 MiB。按 [ADR 0035](../adr/0035.md) 的关键约束修正后，缓存项不再引用内容（「工作区比较」末段）：命中时内容等于 index 的 blob 的不需要字节；其余内容只从 `refresh` 传入的改动集里取（`Origin` 的记录按路径二分查找，OID 相同才用），所以共享只在调用期间、经调用方持有的改动集发生；`changes` 和没有那份字节的 `refresh` 按路径重新读取。行为上与原来的两处不同：另一个没有传入的改动集还持有内容时，原来的 `Weak` 能命中，现在重新读取；被 touch 过、内容仍等于 index 的文件（index 不刷新，stat 每次都不一致），原来每次比较都读（没有改动集持有它的字节），现在第二次起按缓存的 OID 命中，不读。同一测量从 76.7 MB 降到 2.12 MB（每个改动路径约 1.11 KB），见「实际验证」。`git/changes_count/per_path_bytes`（≤ 1 KB，计划中）还要第 4 步释放比较用的 index，随第 4 步生效。
 - `refresh(Paths)` 在三种情况下按 `Refresh::Full` 处理：index 的校验和变了、`Base::Head` 的 HEAD 树变了、报告的路径里有 `.gitignore` 或 `.gitattributes`。没有报告的路径直接取上一个改动集的结果（重命名配对之前的记录），然后对全部记录重新做重命名检测和组装，整体上限和保留内容按路径顺序重新计算；上一次没有保留内容、内容也不在对象库里的路径（`NotRetained`）一并重读。属性取上一次比较的转换状态。
 - index 由工作区比较自己解析（要 stat、标志和各个 stage，`TrackedPaths` 不带这些），按 index 校验和缓存在 `Worktree` 里，与 `tracked` 的缓存分开。（[ADR 0035](../adr/0035.md) 之后改为只在一次调用内持有，见「缓存」，第 4 步实现。）`tracked.rs` 拆出 `parse`，两处共用校验和与重读的逻辑。
 - 内置转换失败（如字节不符合声明的 `working-tree-encoding`）时用原始字节，与 git 的 diff 相同；`core.safecrlf` 的往返检查不做（git 的 diff 也只警告）。`worktree_conversions_match_git` 在 `autocrlf=false`、`true`、`input` 三个变体下与 git 2.43 `git add` 的 OID 逐个相同，包括 UTF-16LE、带 BOM 的 UTF-16、`ident`、混合换行和带 NUL 的 `text=auto`。
@@ -1069,3 +1091,10 @@ fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0
 10 万文件的份额（[ADR 0035](../adr/0035.md)），已知差距：
 
 - macOS 上 10 万个跟踪文件的工作区比较和过滤器重建超出「性能」的份额：macOS CI 上 `git/changes_clean_100k` 中位数 9.05、9.54 s（< 2 s），`git/filter_100k` 766、678 ms（< 400 ms），Linux 上是约 1.0 s 和 214–276 ms。预算不放宽。可能的原因有每个条目经 `SafeRoot` 的 stat（macOS 上逐个打开路径）、ctime 或 racy 判断让比较去读内容、APFS 上的目录遍历，还没有定位。由一个 `git` PR 用 `git/changes_clean_100k/stat_all`、`read_all` 和 `git/filter_100k/walk` 在 macOS CI 上的值定位并修正，两行在那个 PR 里改为 `Active`；在此之前它们是计划中，基准不产出它们。
+- stat 缓存修正的 PR 按代码逐条检查了 macOS 上与 Linux 不同的部分，没有找到能确定的原因，两行仍是计划中：
+  - `SafeRoot`：macOS 13 起 `stat` 是一次 `fstatat(AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)`（`open` 时探测一次），只有返回 `ENOENT` 以外的错误才逐级打开；platform 的 `nofollow_any_one_step_stat_follows_no_symlink` 在 macOS CI 上检查多级路径一次调用就有结果。`read` 是一次 `openat(O_NOFOLLOW_ANY)`、`fstat`、读、关；`list` 是一次 `openat`、`fstat`、`readdir`，APFS 的目录项带类型，不逐项 `fstatat`。没有逐级的描述符链。
+  - stat 比较：gix 0.88 的默认选项是 `use_nsec = false`、`use_stdev = false`、`trustctime`、`checkStat = default`，比较 mtime 和 ctime 的秒、32 位的大小和 inode、uid、gid，不比较设备号。index 一侧由 gix-index 的 `lstat` 取（`st_ctime`，不是创建时间），比较一侧是 `SafeRoot::stat` 的 `fstatat`，同一个结构，截断方式相同（`as u32`）。代码里没有只在 macOS 上不一致的字段。
+  - racy：按秒比较；夹具把每个文件的 mtime 提前一小时，index 在其后写出，不是 racy。
+  - `core.ignoreCase`：夹具在两个平台上都打开，Linux 的数字已含折叠查找。
+  - 按量级推算：`git/filter_100k` 在 macOS 上 0.7 s，目录遍历不超过它；`platform/safe_stat` 在 macOS 上 < 10 µs，10 万次 stat 不超过约 1 s。9 s 里剩下的部分推测是比较在 macOS 上读了文件（打开文件的系统调用在 macOS 上比 stat 慢得多，没有实测），但 `worktree_clean_reads_nothing` 在 macOS CI 上通过，说明小夹具上 stat 一致。
+- 为此加入只记录的计数（「性能」）：`…/reads` 接近 10 万时是比较去读了内容，`…/stat_*` 给出哪个字段不一致（或 racy）；`…/reads` 只有 1 而 `…/reads_after_read_all` 接近 10 万时，是读文件改变了 ctime 一类的字段；两者都只有 1 时，开销在 stat、遍历和 CPU 上，由 `stat_all`、`read_all`、`walk` 分开。bench 的修改（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）让 CI 把只记录的结果输出为 check run 的 notice 注释，这台容器能读到它们。测试 `worktree_stat_mismatches_of_a_clean_worktree_are_none` 在 macOS CI 上检查同样的条件：嵌套目录、`core.ignoreCase`，读过每个文件之后 stat 仍全部一致，比较不读文件。

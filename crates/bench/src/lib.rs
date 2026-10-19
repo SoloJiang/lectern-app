@@ -67,6 +67,9 @@ pub enum Value {
     Ratio { subject: Samples, baseline: Samples },
     /// Bytes: the counting allocator's live bytes, or `phys_footprint`.
     Bytes(Vec<u64>),
+    /// A count observed once, such as the files one operation read. Record
+    /// only: no check applies to it.
+    Count(u64),
     /// A scroll, input or animation: each frame's work
     /// (`completed - requested`) and the interval between consecutive
     /// frames' `started`.

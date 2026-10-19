@@ -100,16 +100,18 @@ pub(crate) enum Kind {
     Ratio,
     Bytes,
     Frames,
+    Count,
 }
 
 impl Kind {
     #[cfg(test)]
-    pub(crate) const ALL: [Kind; 5] = [
+    pub(crate) const ALL: [Kind; 6] = [
         Kind::Time,
         Kind::Throughput,
         Kind::Ratio,
         Kind::Bytes,
         Kind::Frames,
+        Kind::Count,
     ];
 }
 
@@ -121,6 +123,7 @@ impl Value {
             Value::Ratio { .. } => Kind::Ratio,
             Value::Bytes(_) => Kind::Bytes,
             Value::Frames { .. } => Kind::Frames,
+            Value::Count(_) => Kind::Count,
         }
     }
 
@@ -131,7 +134,7 @@ impl Value {
                 subject.summary().noisy() || baseline.summary().noisy()
             }
             Value::Bytes(b) => bytes_summary(b).noisy(),
-            Value::Frames { .. } => false,
+            Value::Frames { .. } | Value::Count(_) => false,
         }
     }
 }
@@ -277,6 +280,7 @@ pub(crate) fn describe(value: &Value) -> String {
             fmt_seconds(work.summary().max),
             fmt_number(intervals.summary().max / refresh.as_secs_f64())
         ),
+        Value::Count(n) => n.to_string(),
     }
 }
 

@@ -241,6 +241,7 @@ fn value_json(value: &Value) -> Json {
             "intervals": summary_json(intervals.summary(), "s"),
             "refresh": refresh.as_secs_f64(),
         }),
+        Value::Count(n) => json!({ "count": n, "samples": 1, "unit": "count" }),
     }
 }
 

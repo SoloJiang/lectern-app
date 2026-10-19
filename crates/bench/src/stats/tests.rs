@@ -22,6 +22,21 @@ fn passes(budget_id: &str, value: &Value) -> bool {
 }
 
 #[test]
+fn stats_counts_are_record_only() {
+    let value = Value::Count(100_000);
+    assert_eq!(describe(&value), "100000");
+    assert!(!value.noisy());
+    let check = Check {
+        stat: Stat::Median,
+        limit: Limit::BytesAtMost(1024),
+    };
+    assert!(
+        evaluate(&check, &value).is_err(),
+        "no check applies to a count"
+    );
+}
+
+#[test]
 fn stats_median_of_odd_and_even_counts() {
     assert_eq!(median(&[1.0, 2.0, 9.0]), 2.0);
     assert_eq!(median(&[1.0, 2.0, 4.0, 9.0]), 3.0);

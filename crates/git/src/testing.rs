@@ -24,6 +24,41 @@ pub fn open_handle(common_dir: &Path) -> Result<(), GitError> {
     crate::handle::Handle::open(common_dir, ConfigScope::RepositoryOnly).map(drop)
 }
 
+/// Worktree files read through `SafeRoot::read` on this thread so far, by
+/// worktree comparisons and their untracked walks (`.gitignore` included).
+/// For bench's `git/changes_clean_100k/reads`: the difference around one
+/// `changes` is how many files that comparison read.
+pub fn worktree_reads() -> usize {
+    crate::compare::hook::reads()
+}
+
+/// [`stat_mismatches`]: for the tracked paths with a stage-0 entry, outside
+/// skip-worktree, that `SafeRoot::stat` finds, how many are racy, how many
+/// a comparison would read because the stat differs (`unmatched`, not
+/// racy), and per field how many differ under the comparison's stat
+/// options (a field the options ignore counts 0).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct StatMismatches {
+    pub entries: usize,
+    pub racy: usize,
+    pub unmatched: usize,
+    pub mtime: usize,
+    pub size: usize,
+    pub ctime: usize,
+    pub ino: usize,
+    /// uid or gid.
+    pub owner: usize,
+}
+
+/// Compares the index stat of every tracked path of `worktree` with its
+/// `SafeRoot::stat`, as the worktree comparison does, without reading any
+/// file. Parses the index into `worktree`'s comparison state as `changes`
+/// does. For bench's `git/changes_clean_100k/stat_*`, which tell why a
+/// clean comparison reads files.
+pub fn stat_mismatches(worktree: &crate::Worktree) -> Result<StatMismatches, GitError> {
+    crate::compare::stat_mismatches(&worktree.subject())
+}
+
 /// What a worktree's HEAD should be.
 #[derive(Clone, Copy, Debug)]
 pub enum TestHead<'a> {

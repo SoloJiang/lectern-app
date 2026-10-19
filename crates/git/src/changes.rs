@@ -322,6 +322,12 @@ impl ChangeSet {
         &self.limits
     }
 
+    /// The worktree bytes kept per file, for the tests of `compare`.
+    #[cfg(test)]
+    pub(crate) fn retained(&self) -> &[Option<Arc<[u8]>>] {
+        &self.retained
+    }
+
     /// See [`Fingerprint`]. Untracked files past `Limits::untracked` aren't
     /// listed and so don't count; `Totals::untracked_capped` and the
     /// invalid paths do.

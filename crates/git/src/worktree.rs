@@ -166,7 +166,7 @@ impl Worktree {
         limits: &Limits,
         cancel: &AtomicBool,
     ) -> Result<Arc<ChangeSet>, GitError> {
-        compare::run(&self.subject(), &base, limits, cancel, None)
+        compare::run(&self.subject(), &base, limits, cancel, None, None)
     }
 
     /// A new change set for what `prev` (a `changes` of this worktree)
@@ -219,7 +219,7 @@ impl Worktree {
         &self.0.repo
     }
 
-    fn subject(&self) -> Subject<'_> {
+    pub(crate) fn subject(&self) -> Subject<'_> {
         Subject {
             root: &self.0.root,
             root_path: &self.0.info.root,
