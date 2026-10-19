@@ -297,11 +297,15 @@ impl Inner {
     ) -> Result<Prepared, QueryError> {
         crate::index::bump(&self.stats.prepares, 1);
         let _all = crate::phases::span("prepare (steps 1-3)");
+        // The language the snapshot's map gives the path (the table it was
+        // built with); a path the map does not have by its extension, in
+        // that same table.
         let lang = snap
-            .table
-            .for_path(&at.path, &*self.packs)
+            .map
+            .effective(&at.path)
+            .map(|e| e.lang)
+            .or_else(|| snap.table.for_path(&at.path, &*self.packs).cloned())
             .filter(|l| !snap.disabled.contains(l.name()))
-            .cloned()
             .ok_or(QueryError::UnsupportedLanguage)?;
         let bytes = {
             let _t = crate::phases::span("1 read + verify current text");

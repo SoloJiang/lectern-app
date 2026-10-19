@@ -159,6 +159,10 @@ pub(crate) struct BatchRun {
     pub peak: usize,
 }
 
+/// [`Inner::after_base`] (tests).
+#[cfg(test)]
+pub(crate) type AfterBase = Box<dyn FnOnce(&Inner) + Send>;
+
 pub(crate) struct Inner {
     pub(crate) me: Weak<Inner>,
     pub host: Host,
@@ -207,6 +211,10 @@ pub(crate) struct Inner {
     /// interleaving matrix injects a background change there).
     #[cfg(test)]
     pub step_hook: Mutex<Option<crate::query::StepHook>>,
+    /// Run once by the next reconcile pass that rebuilt the base map, before
+    /// the overlay is read (tests: a query snapshot in that window).
+    #[cfg(test)]
+    pub after_base: Mutex<Option<AfterBase>>,
     /// Another registration of `code_intel.tags` for new projects (tests).
     #[cfg(test)]
     pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
@@ -274,6 +282,8 @@ impl Indexer {
             batch_log: Mutex::new(Vec::new()),
             #[cfg(test)]
             step_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_base: Mutex::new(None),
             #[cfg(test)]
             tables: Mutex::new(None),
         });

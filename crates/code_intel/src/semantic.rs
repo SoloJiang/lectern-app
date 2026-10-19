@@ -153,11 +153,11 @@ impl SemQuery {
         let mut order: Vec<&SemRequest> = self.requests.iter().collect();
         order.sort_by(|a, b| (!a.head_only, &a.provider_id).cmp(&(!b.head_only, &b.provider_id)));
         // HEAD-equal files belong to the head-only class while one of its
-        // providers can still answer or has.
-        let head_class = self
-            .requests
-            .iter()
-            .any(|r| r.head_only && (r.live || r.reply.is_some()));
+        // providers can still answer or has answered with locations: a
+        // failed one (an error, a timeout) or one gone owns nothing.
+        let head_class = self.requests.iter().any(|r| {
+            r.head_only && ((r.live && r.reply.is_none()) || matches!(r.reply, Some(Ok(_))))
+        });
         let mut owner: HashMap<RelPath, &str> = HashMap::new();
         let mut any = false;
         let mut out = Vec::new();

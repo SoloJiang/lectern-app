@@ -6,7 +6,7 @@
 //! tasks) and installs each result only if the generations it was computed
 //! from are still current.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -15,8 +15,9 @@ use lectern_git::HashKind;
 use lectern_platform::{FileKind as SafeKind, Read, RelPath as SafeRel, SafeError, SafeRoot};
 use lectern_services::project::{BlobId, FileKind, ProjectKey, ProjectSnapshot, RelPath, Scan};
 
-use super::state::{Project, State};
+use super::state::{Project, Published, State};
 use super::{Inner, bump, lock};
+use crate::LangName;
 use crate::extract::BACKGROUND_MAX_LEN;
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{
@@ -45,6 +46,29 @@ fn pending(st: &State, grammar: u64) -> bool {
         || (base
             && st.root.is_some()
             && !(st.dirty.is_empty() && st.dirty_dirs.is_empty() && st.probe.is_empty()))
+}
+
+/// Publishes what queries answer from (`State::published`): the current
+/// map with the table it was built with, and the session's root and
+/// sub-projects, as one object. Only once the base is built.
+fn publish(st: &mut State, disabled: HashSet<LangName>) {
+    if st.base_for.is_none() {
+        return;
+    }
+    st.published = Some(Arc::new(Published {
+        session: st.session,
+        table: st.map.base.table().clone(),
+        map: st.map.clone(),
+        disabled,
+        snapshot: st.snapshot.clone(),
+        root: st.root.clone(),
+        tree: st.tree.clone(),
+        packages: st
+            .seen
+            .packages
+            .clone()
+            .unwrap_or_else(|| Arc::from(Vec::new())),
+    }));
 }
 
 /// Whether `path`'s content equals HEAD, by the rule of「依赖 git、fs_watch 与
@@ -144,12 +168,30 @@ impl Inner {
                     break;
                 }
             }
+            // The language table before the state (lock order).
+            let (grammar, disabled) = {
+                let langs = lock(&self.langs);
+                (langs.generation, langs.disabled.clone())
+            };
             let mut st = lock(&project.state);
             if st.run.again {
                 st.run.again = false;
                 continue;
             }
             st.run.running = false;
+            // All input consumed: the base and the overlay are complete for
+            // the current inputs; queries answer from this from now on, and
+            // those that waited for a snapshot start.
+            let waiting = if pending(&st, grammar) || st.cancel.load(Ordering::Acquire) {
+                Vec::new()
+            } else {
+                publish(&mut st, disabled);
+                std::mem::take(&mut st.waiting)
+            };
+            drop(st);
+            if !waiting.is_empty() {
+                self.resume_waiting(waiting);
+            }
             break;
         }
         // The batches fs_watch delivered are handled: the overlay is up to
@@ -236,7 +278,15 @@ impl Inner {
         let session = self.sync_snapshot(project)?;
         let mut progress = self.open_root(project, session);
         progress |= self.check_head_index(project, session);
-        progress |= self.rebuild_base(project, session);
+        let rebuilt = self.rebuild_base(project, session);
+        #[cfg(test)]
+        if rebuilt {
+            let hook = lock(&self.after_base).take();
+            if let Some(f) = hook {
+                f(self);
+            }
+        }
+        progress |= rebuilt;
         progress |= self.compare(project, session);
         progress |= self.reread(project, session);
         Some(progress)
@@ -541,14 +591,6 @@ impl Inner {
         if matches!(project.key, ProjectKey::Folder { .. }) {
             // A new list: every file is read again for its OID.
             queue_folder(&mut st);
-        }
-        // The session has its map: the queries that waited for it start.
-        let waiting = std::mem::take(&mut st.waiting);
-        drop(st);
-        if !waiting.is_empty()
-            && let Some(me) = self.arc()
-        {
-            me.resume_waiting(waiting);
         }
         true
     }

@@ -398,13 +398,13 @@ impl Inner {
     fn view_of(&self, key: &ProjectKey) -> Option<View> {
         let project = self.project(key)?;
         let eviction = project.evictions();
-        let grammar = self.grammar();
         let st = lock(&project.state);
+        let published = st.published.as_ref()?;
         Some(View {
             session: st.session,
-            map: st.map.provenance.generation(),
+            map: published.map.provenance.generation(),
             eviction,
-            grammar,
+            grammar: published.map.provenance.grammar,
             hinted: st.hinted,
         })
     }
@@ -478,22 +478,25 @@ impl Inner {
             return Snapped::Gone;
         };
         let eviction = project.evictions();
-        let (table, disabled, grammar) = {
-            let langs = lock(&self.langs);
-            (
-                langs.table.clone(),
-                langs.disabled.clone(),
-                langs.generation,
-            )
-        };
         let mut st = lock(&project.state);
-        if st.cancel.load(Ordering::Acquire) || st.base_for.is_none() {
-            if let Some(w) = waiting {
-                st.waiting.push(w);
+        // Only a published snapshot of this session: never the state being
+        // reconciled, never the current language table.
+        let published = match &st.published {
+            Some(p) if !st.cancel.load(Ordering::Acquire) && p.session == st.session => p.clone(),
+            _ => {
+                if let Some(w) = waiting {
+                    st.waiting.push(w);
+                }
+                return Snapped::Waiting;
             }
-            return Snapped::Waiting;
-        }
-        let worktree = st.worktree().cloned();
+        };
+        let snapshot = published.snapshot.clone();
+        let worktree = snapshot
+            .as_ref()
+            .and_then(|s| s.active.as_ref())
+            .and_then(|a| a.worktree.clone());
+        // The review set orders and tiers candidates only (`in_review`):
+        // taken as it is now.
         let review = st
             .focus
             .review
@@ -501,7 +504,7 @@ impl Inner {
             .filter(|(w, _)| *w == worktree)
             .map(|(_, p)| p.clone())
             .unwrap_or_else(|| Arc::from(Vec::new()));
-        let snapshot = st.snapshot.clone();
+        let map = published.map.clone();
         Snapped::Ready(Box::new(Snap {
             project: project.clone(),
             session: st.session,
@@ -514,26 +517,26 @@ impl Inner {
                 .and_then(|s| s.active.as_ref())
                 .map(|a| a.root.clone()),
             worktree,
-            root: st.root.clone(),
-            tree: st.tree.clone(),
-            map: st.map.clone(),
-            table,
-            disabled,
-            packages: st
-                .seen
-                .packages
-                .clone()
-                .unwrap_or_else(|| Arc::from(Vec::new())),
+            // The session's root: opened once, at the published root path.
+            root: published.root.clone().or_else(|| st.root.clone()),
+            tree: published.tree.clone(),
+            table: published.table.clone(),
+            disabled: published.disabled.clone(),
+            packages: published.packages.clone(),
             review,
-            stamp: st.stamp(eviction),
+            stamp: HintStamp {
+                eviction: st.walk_eviction(eviction),
+                grammar: map.provenance.grammar,
+            },
             in_flight: st.in_flight.keys().cloned().collect(),
             view: View {
                 session: st.session,
-                map: st.map.provenance.generation(),
+                map: map.provenance.generation(),
                 eviction,
-                grammar,
+                grammar: map.provenance.grammar,
                 hinted: st.hinted,
             },
+            map,
         }))
     }
 
