@@ -130,6 +130,54 @@ pub fn shaped(shape: &Shape) -> TestRepo {
     t
 }
 
+/// A worktree with realistic changes: `modified` tracked files and
+/// `untracked` untracked files of 10–50 KB each (text), plus one untracked
+/// file of `large` bytes. The tracked files are committed and staged with
+/// their stat before they are rewritten; only trees go into the object
+/// database.
+#[allow(dead_code, reason = "only the memory target's git/changes_count")]
+pub fn mixed(modified: usize, untracked: usize, large: usize) -> TestRepo {
+    let t = TestRepo::new();
+    let hash = t.hash();
+    let size = |i: usize| 10 * 1024 + (i * 7919) % (40 * 1024);
+    let text = |seed: &str, len: usize| {
+        let line = format!("export const value_{seed} = compute({seed});\n");
+        line.repeat(len / line.len() + 1).into_bytes()[..len].to_vec()
+    };
+    let paths: Vec<String> = (0..modified)
+        .map(|i| format!("src/m{:02}/file{i:04}.ts", i % 40))
+        .collect();
+    let mut entries = Vec::with_capacity(modified);
+    for (i, path) in paths.iter().enumerate() {
+        let content = text(&format!("old{i}"), size(i));
+        t.write_file(path, &content);
+        t.backdate(path);
+        entries.push(IndexEntry {
+            stat: Some(IndexStat::of(&t.root().join(path))),
+            ..IndexEntry::new(path, Mode::File, Oid::for_blob(hash, &content))
+        });
+    }
+    let items: Vec<(&str, Mode, Oid)> = paths
+        .iter()
+        .zip(&entries)
+        .map(|(p, e)| (p.as_str(), e.mode, e.oid))
+        .collect();
+    let commit = t.commit(t.tree_entries(&items), &[], "base");
+    t.set_ref("refs/heads/main", commit);
+    t.write_index(t.common_dir(), &entries);
+    for (i, path) in paths.iter().enumerate() {
+        let content = text(&format!("new{i}"), size(i));
+        t.write_file(path, &content);
+    }
+    for i in 0..untracked {
+        let content = text(&format!("gen{i}"), size(i + modified));
+        t.write_file(&format!("gen/d{:02}/out{i:04}.js", i % 40), &content);
+    }
+    let dump = text("dump", large);
+    t.write_file("dump/trace.log", &dump);
+    t
+}
+
 /// A clean repository with `untracked` untracked files of three lines.
 pub fn untracked(untracked: usize) -> TestRepo {
     let t = clean(2, 0, 0);

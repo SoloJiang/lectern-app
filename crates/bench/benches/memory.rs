@@ -69,25 +69,31 @@ fn git_resident(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     Ok(vec![Measured::new("git/resident", Value::Bytes(samples))])
 }
 
-/// `git/changes_count_bytes`: the same 10 000 untracked files compared the
-/// way the project home counts changes outside sessions (ADR 0035):
-/// `retained_bytes = 0` and `total_patch_bytes = 0`, so the change set
-/// keeps no content and no hunks. Live bytes of that change set with the
-/// stat cache and parsed index its `Worktree` holds; per changed path, it
-/// is what the home keeps at idle for incremental refreshes.
-const GIT_CHANGES_COUNT_BYTES: Bench = Bench {
-    id: "git/changes_count_bytes",
-    run: git_changes_count_bytes,
+/// `git/changes_count/*`: a worktree with realistic changes
+/// (`worktree::mixed`: modified tracked and untracked files of 10–50 KB,
+/// one large untracked file) compared the way the project home counts
+/// changes outside sessions (ADR 0035): `retained_bytes = 0` and
+/// `total_patch_bytes = 0`, so the change set keeps no content and no
+/// hunks. `total_bytes` (recorded) is the live bytes of that change set
+/// with what its `Worktree` holds, what the home keeps at idle for
+/// incremental refreshes. The git fix that stops the stat cache from
+/// keeping file contents allocated adds `per_path_bytes` (the same divided
+/// by the changed paths, ≤ 1 KB).
+const GIT_CHANGES_COUNT: Bench = Bench {
+    id: "git/changes_count",
+    run: git_changes_count,
 };
 
-fn git_changes_count_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let files = ctx.scale(10_000, 60);
+fn git_changes_count(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (modified, untracked) = ctx.scale((1000, 1000), (10, 10));
+    let large = ctx.scale(16 << 20, 64 << 10);
     let limits = Limits {
         retained_bytes: 0,
         total_patch_bytes: 0,
         ..Limits::default()
     };
-    let t = worktree::untracked(files);
+    let t = worktree::mixed(modified, untracked, large);
+    let paths = modified + untracked + 1;
     let cancel = AtomicBool::new(false);
     let mut samples = Vec::new();
     for _ in 0..ctx.scale(SAMPLES, 1) {
@@ -95,9 +101,9 @@ fn git_changes_count_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         let before = CountingAlloc::live();
         let set = worktree::changes(&wt, &limits, &cancel)?;
         let held = CountingAlloc::live().saturating_sub(before);
-        if set.files().len() != files {
+        if set.files().len() != paths {
             return Err(BenchError::new(format!(
-                "expected {files} changed files, got {}",
+                "expected {paths} changed files, got {}",
                 set.files().len()
             )));
         }
@@ -105,7 +111,7 @@ fn git_changes_count_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         drop((set, wt));
     }
     Ok(vec![Measured::new(
-        "git/changes_count_bytes",
+        "git/changes_count/total_bytes",
         Value::Bytes(samples),
     )])
 }
@@ -249,7 +255,7 @@ const BENCHES: &[Bench] = &[
     code_intel::MAP_100K_BYTES,
     code_intel::BATCH_PEAK,
     GIT_CHANGES_CAPPED_BYTES,
-    GIT_CHANGES_COUNT_BYTES,
+    GIT_CHANGES_COUNT,
     GIT_COMPARE_100K,
     GIT_FILTER_CLOUDPRINT_BYTES,
     GIT_FILTER_100K_BYTES,

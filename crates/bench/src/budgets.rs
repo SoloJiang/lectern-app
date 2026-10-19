@@ -631,9 +631,20 @@ pub static BUDGETS: &[Budget] = &[
     // implementation writes the number into the git design and here.
     share("git/changes_capped_bytes", RECORD, GIT, ACTIVE, Memory),
     // The project home's count of changes outside sessions (ADR 0035):
-    // the same 10 000 untracked files with `retained_bytes = 0` and
-    // `total_patch_bytes = 0`, what the home keeps at idle per changed path.
-    share("git/changes_count_bytes", RECORD, GIT, ACTIVE, Memory),
+    // 1000 modified tracked and 1000 untracked files of 10–50 KB and one
+    // 16 MiB untracked file, with `retained_bytes = 0` and
+    // `total_patch_bytes = 0`; the change set and what its `Worktree` holds.
+    // Recorded: today the stat cache keeps every read file's content
+    // allocated (git design「与设计的差异」).
+    share("git/changes_count/total_bytes", RECORD, GIT, ACTIVE, Memory),
+    // The same per changed path once comparison caches hold no content.
+    share(
+        "git/changes_count/per_path_bytes",
+        &[median(Limit::BytesAtMost(1024))],
+        GIT,
+        State::Planned("git：stat 缓存不持有文件内容"),
+        Memory,
+    ),
     // Hunk LRU 16 MB plus one `ChangeSet` 32 MB; no handle held while idle.
     share(
         "git/resident",
