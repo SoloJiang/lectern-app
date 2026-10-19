@@ -413,6 +413,29 @@ impl Kernel {
         self.shared.background.status()
     }
 
+    /// The interaction yield switch (ADR 0033), separate from the pause
+    /// switch and off by default. While on, work whose guard was taken with
+    /// [`background_yielding`](crate::PluginHandle::background_yielding)
+    /// stops at its next slice boundary, keeps its state and moves only in
+    /// keepalive slots: one at a time across all yielding work, each at most
+    /// [`SLOT_LENGTH`](crate::SLOT_LENGTH), starts at least
+    /// [`SLOT_INTERVAL`](crate::SLOT_INTERVAL) apart, one item each, items
+    /// over [`SLOT_MAX_BYTES`](crate::SLOT_MAX_BYTES) waiting for the switch
+    /// to turn off. Other background work runs as usual. It changes neither
+    /// `pause_requested`, the background state, count and epoch, nor
+    /// quiescence; with both switches on the pause wins. Turning it off wakes
+    /// every waiting piece of work. Callable on any thread.
+    pub fn set_yield(&self, on: bool) {
+        self.shared.background.yielding.set(on);
+    }
+
+    /// Replaces the clock of the keepalive slots, before any yielding work
+    /// waits (tests use [`ManualClock`](crate::testing::ManualClock)).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_clock(&self, clock: Arc<dyn crate::Clock>) {
+        self.shared.background.yielding.set_clock(clock);
+    }
+
     /// Waits until every request queued before this call has been handled.
     /// The barrier's own busy unit is released before it returns, so with
     /// nothing else busy `is_quiescent()` is already true. A request the

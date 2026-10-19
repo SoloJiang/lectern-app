@@ -17,3 +17,4 @@ mod set;
 mod shutdown;
 mod testing;
 mod workspace;
+mod yielding;
