@@ -158,12 +158,41 @@ impl SafeRoot {
             let listed = rustix::fs::Dir::read_from(root).map_err(io_error)?;
             return list_entries(listed);
         };
+        let fd = self.open_directory(dir)?;
+        list_entries(rustix::fs::Dir::new(fd).map_err(io_error)?)
+    }
+
+    /// Opens the directory `rel` beneath this root as a new root: the
+    /// dependency roots of ADR 0033, such as `node_modules` or `.venv` in a
+    /// worktree. It is opened like [`SafeRoot::list`] opens a directory, so no
+    /// level of `rel` may be a symbolic link (`PathThroughSymlink`, also when
+    /// `rel` itself is one), and an `rel` that isn't a directory is
+    /// `Io(NotADirectory)`. The new root has this root's implementation and is
+    /// bound to the directory that descriptor names: its calls never resolve
+    /// `rel` again, so replacing the path afterwards does not move it, and
+    /// they follow the same rules beneath it as this root's calls do beneath
+    /// this root. No directory entry is read.
+    ///
+    /// Blocks on system calls; call it from a background task, never from the
+    /// UI thread. Any number of threads may call it on the same root.
+    pub fn open_dir(&self, rel: RelPath<'_>) -> Result<SafeRoot, SafeError> {
+        Ok(SafeRoot {
+            fd: self.open_directory(rel)?,
+            backend: self.backend,
+        })
+    }
+
+    /// The open shared by `list` and `open_dir`: the one-step open of
+    /// `read`, then `fstat` on the same descriptor to check it is a
+    /// directory; [`walk`] redoes any failure but `ENOENT`.
+    fn open_directory(&self, dir: RelPath<'_>) -> Result<OwnedFd, SafeError> {
         split(dir.0).ok_or_else(invalid_path)?;
+        let root = self.fd.as_fd();
         match self.open_one_step(dir.0) {
-            None => walk::list(root, dir.0),
-            Some(Ok(fd)) => list_opened(fd),
+            None => walk::directory(root, dir.0),
+            Some(Ok(fd)) => checked_directory(fd),
             Some(Err(Errno::NOENT)) => Err(SafeError::NotFound),
-            Some(Err(_)) => walk::list(root, dir.0),
+            Some(Err(_)) => walk::directory(root, dir.0),
         }
     }
 
@@ -482,14 +511,14 @@ pub struct DirEntry {
     pub kind: FileKind,
 }
 
-/// The rest of `list` once the directory is open: checks with `fstat` on
-/// the same descriptor that it is a directory, then reads it.
-fn list_opened(fd: OwnedFd) -> Result<Vec<DirEntry>, SafeError> {
+/// Checks with `fstat` on an opened descriptor that it is a directory, for
+/// `list` and `open_dir`.
+fn checked_directory(fd: OwnedFd) -> Result<OwnedFd, SafeError> {
     let meta = Meta::from_stat(&rustix::fs::fstat(&fd).map_err(io_error)?);
     if meta.kind != FileKind::Dir {
         return Err(SafeError::Io(io::ErrorKind::NotADirectory.into()));
     }
-    list_entries(rustix::fs::Dir::new(fd).map_err(io_error)?)
+    Ok(fd)
 }
 
 fn list_entries(mut dir: rustix::fs::Dir) -> Result<Vec<DirEntry>, SafeError> {

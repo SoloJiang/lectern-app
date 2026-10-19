@@ -14,7 +14,7 @@ use rustix::fs::{AtFlags, Mode, OFlags};
 use rustix::io::Errno;
 
 use super::{
-    DirEntry, FileKind, Meta, Read, SafeError, invalid_path, io_error, is_valid_name, list_opened,
+    FileKind, Meta, Read, SafeError, checked_directory, invalid_path, io_error, is_valid_name,
     read_opened, stat_entry,
 };
 
@@ -108,9 +108,10 @@ pub(crate) fn read(
     }
 }
 
-/// `list` of the directory `path` (already checked against the `RelPath`
-/// rules): every level opened with `O_NOFOLLOW`, the last one readable.
-pub(crate) fn list(root: BorrowedFd<'_>, path: &[u8]) -> Result<Vec<DirEntry>, SafeError> {
+/// Opens the directory `path` (already checked against the `RelPath` rules)
+/// for `list` and `open_dir`: every level opened with `O_NOFOLLOW`, the last
+/// one readable.
+pub(crate) fn directory(root: BorrowedFd<'_>, path: &[u8]) -> Result<OwnedFd, SafeError> {
     let (parent, name) = match path.iter().rposition(|&b| b == b'/') {
         Some(slash) => (Some(&path[..slash]), &path[slash + 1..]),
         None => (None, path),
@@ -123,7 +124,7 @@ pub(crate) fn list(root: BorrowedFd<'_>, path: &[u8]) -> Result<Vec<DirEntry>, S
     let mut retries = 0;
     loop {
         let error = match rustix::fs::openat(dir, name, LIST_FLAGS, Mode::empty()) {
-            Ok(fd) => return list_opened(fd),
+            Ok(fd) => return checked_directory(fd),
             Err(Errno::NOENT) => return Err(SafeError::NotFound),
             Err(error) => error,
         };
@@ -141,7 +142,7 @@ pub(crate) fn list(root: BorrowedFd<'_>, path: &[u8]) -> Result<Vec<DirEntry>, S
     }
 }
 
-/// The directory `list` reads.
+/// The directory `list` reads or `open_dir` returns.
 const LIST_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
