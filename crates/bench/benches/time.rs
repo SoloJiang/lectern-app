@@ -73,6 +73,8 @@ const BENCHES: &[Bench] = &[
     kernel::EMIT_NESTED,
     platform::SAFE_STAT,
     platform::SAFE_READ_4K,
+    platform::SAFE_READ_RANGE,
+    platform::SAFE_READ_PAGE,
 ];
 
 fn main() -> ExitCode {

@@ -6,7 +6,9 @@
 //! the one callers see.
 //!
 //! At most two descriptors are held at a time: each level is opened from the
-//! previous one, which is closed right after. Nothing is kept across calls.
+//! previous one, which is closed right after. Nothing is kept across calls,
+//! except the last descriptor of `open_file` and `open_dir`, which the call
+//! hands to its result.
 
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
@@ -14,8 +16,8 @@ use rustix::fs::{AtFlags, Mode, OFlags};
 use rustix::io::Errno;
 
 use super::{
-    FileKind, Meta, Read, SafeError, checked_directory, invalid_path, io_error, is_valid_name,
-    read_opened, stat_entry,
+    Entry, FileKind, Meta, SafeError, checked_directory, classify, invalid_path, io_error,
+    is_valid_name, stat_entry,
 };
 
 /// How often one level is retried when `fstatat` contradicts the error of the
@@ -37,8 +39,8 @@ const DIR_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
-/// The last component of `read`. `O_NONBLOCK` returns at once for a FIFO
-/// without a writer.
+/// The last component of `read` and `open_file`. `O_NONBLOCK` returns at
+/// once for a FIFO without a writer.
 const ENTRY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::NONBLOCK)
@@ -56,20 +58,19 @@ pub(crate) fn stat(
     stat_entry(dir.as_ref().map_or(root, AsFd::as_fd), name)
 }
 
-/// `read` of `name` inside `parent` (both already checked against the
-/// `RelPath` rules).
-pub(crate) fn read(
+/// Opens and classifies `name` inside `parent` (both already checked
+/// against the `RelPath` rules), for `read` and `open_file`.
+pub(crate) fn entry(
     root: BorrowedFd<'_>,
     parent: Option<&[u8]>,
     name: &[u8],
-    max: u64,
-) -> Result<Read, SafeError> {
+) -> Result<Entry, SafeError> {
     let dir = open_parent(root, parent)?;
     let dir = dir.as_ref().map_or(root, AsFd::as_fd);
     let mut retries = 0;
     loop {
         let error = match rustix::fs::openat(dir, name, ENTRY_FLAGS, Mode::empty()) {
-            Ok(fd) => return read_opened(fd, max),
+            Ok(fd) => return classify(fd),
             Err(Errno::NOENT | Errno::NOTDIR) => return Err(SafeError::NotFound),
             Err(error) => error,
         };
@@ -81,7 +82,7 @@ pub(crate) fn read(
         match meta.kind {
             FileKind::Symlink => match rustix::fs::readlinkat(dir, name, Vec::new()) {
                 Ok(target) => {
-                    return Ok(Read::Symlink {
+                    return Ok(Entry::Symlink {
                         meta,
                         target: target.into_bytes(),
                     });
@@ -103,7 +104,7 @@ pub(crate) fn read(
             | FileKind::Socket
             | FileKind::CharDevice
             | FileKind::BlockDevice
-            | FileKind::Other => return Ok(Read::Unsupported { meta }),
+            | FileKind::Other => return Ok(Entry::Unsupported { meta }),
         }
     }
 }

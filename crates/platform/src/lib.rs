@@ -1,5 +1,6 @@
 //! OS-specific capabilities. Today: reading files beneath a directory root
-//! without following symbolic links ([`safe_read`], docs/design/platform.md),
+//! without following symbolic links, in full or by byte range ([`safe_read`],
+//! docs/design/platform.md),
 //! the physical footprint of a process for lectern-bench ([`process`]),
 //! and, on macOS, the FSEvents and kqueue backend of `lectern-fs-watch`
 //! (`fs_events`, docs/design/fs_watch.md「platform 后端」). `open -a`,
@@ -11,7 +12,10 @@ pub mod process;
 pub mod safe_read;
 
 #[cfg(unix)]
-pub use safe_read::{DirEntry, FileKind, Meta, Read, RelPath, SafeError, SafeRoot, Timestamp};
+pub use safe_read::{
+    DirEntry, FileIdentity, FileKind, FullRead, MAX_RANGE_BYTES, MAX_RANGES, Meta, OpenFile,
+    Opened, RangeRead, Read, RelPath, SafeError, SafeRoot, Timestamp,
+};
 
 /// The file watching backend (`fs_events::backend`) exists on macOS only; on
 /// other platforms just its event conversion is compiled, for its tests.

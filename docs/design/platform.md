@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已设计、尚未实现。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -86,7 +86,7 @@ impl SafeRoot {
 
     /// 打开一个条目供范围读取：打开、`fstat` 与类型判断同 `read`，普通文件返回持有描述符的 `OpenFile`，不读内容。
     /// 与其他方法不同，打开的描述符不在返回前关闭，而是转交给 `OpenFile`，在它 drop 时关闭（见「数据流与线程」的描述符生命周期）。
-    /// 见「范围读取」。尚未实现（#103）。
+    /// 见「范围读取」。
     pub fn open_file(&self, rel: RelPath<'_>) -> Result<Opened, SafeError>;
 }
 
@@ -331,7 +331,7 @@ pub enum FileKind {
 基准：
 
 - `bench` 的 `platform/safe_stat`、`platform/safe_read_4k`（[bench 设计「迁移」](bench.md#迁移)）：bench 自己生成 728 个 4 KiB 文件、深度 4 的目录树，与同一路径上的 `symlink_metadata`、`std::fs::read` 交替采样，按上面的比值判定；只测 `SafeRoot::open` 选中的生产后端（macOS 上是 `NofollowAny`，Linux 上是 `Openat2`），`Walk` 不设基准。`git` 的 `git/changes_clean` 包含它们的成本。
-- `platform/safe_read_range`、`platform/safe_read_page`：范围读取的首屏调用和分页，预算与测量方式见「范围读取」的「性能」。在 `crates/bench/src/budgets.rs` 里登记为 `Planned("#103")`，范围读取的实现 PR 加上基准并改为 `Active`。
+- `platform/safe_read_range`、`platform/safe_read_page`：范围读取的首屏调用和分页，预算与测量方式见「范围读取」的「性能」。基准在 `crates/bench/benches/time/platform.rs`，`crates/bench/src/budgets.rs` 里的这两条随范围读取的实现 PR 由 `Planned("#103")` 改为 `Active`。
 - 实现 PR 里的 `#[ignore]` 测试 `perf_smoke`（对每个后端各做 10 000 次 `stat`、`read` 并打印比值）已由 bench 第 1 步删除，它在 Linux 上的结果见「实际验证」。
 
 ## 状态与异常
@@ -585,7 +585,7 @@ impl Meta {
   - 工作区文件的 OID：查行检查点要先知道 OID。`OpenFile::meta()` 是完整的 `Meta`，可以按 git 的 stat 比较规则与 index 条目比较（一致且不是 racy-clean 时就是 index 里的 OID）；需要的接口由 `file_reader` 的设计向 `git` 提出。
   - 取得 `SafeRoot` 的途径（经 `git` 的 `Worktree`，或 `project`）由 `file_reader` 的设计决定。
 - `git`：不改，`read` 的行为不变。`file_reader` 经 `Worktree` 打开文件时，`git` 增加一个转发 `open_file` 的方法，随 `file_reader` 的设计。
-- `bench`：预算表增加 `platform/safe_read_range`、`platform/safe_read_page`，[bench 设计「预算表」](bench.md#预算表)和 `crates/bench/src/budgets.rs`（`Planned("#103")`）里都已加上（本 PR），实现 PR 加基准并改为 `Active`，见下文「性能」。
+- `bench`：预算表增加 `platform/safe_read_range`、`platform/safe_read_page`，[bench 设计「预算表」](bench.md#预算表)和 `crates/bench/src/budgets.rs` 里都已加上（设计 PR 登记为 `Planned("#103")`），实现 PR 加了基准并改为 `Active`，见下文「性能」。
 - [技术调研「性能预算」](tech-research.md#性能预算)「打开文件到首屏高亮」一行的「`platform` 待补的接口」改为指向本节（本 PR 已改）。
 - `code_intel`、`cache`、`fs_watch`：不改。
 
@@ -623,6 +623,7 @@ impl Meta {
 - `read_all_*`：小文件、空文件、恰好 `max` 字节、`max + 1` 字节、读取中变长的结果与 `read` 相同；打开时就超过 `max` 的为 `TooLarge`，不读内容；`meta` 是读完之后的 `fstat`。
 - `open_file_concurrent`：8 个线程在同一个 `Arc<OpenFile>` 上各读 1000 次不同的区间，结果与单线程相同。
 - `fd_*`、`send_sync` 补充：持有 n 个 `OpenFile` 时进程打开的描述符数比之前多 n，在它们上面反复 `read_ranges`、`read_all`、`stat` 不再增加，全部 drop 之后回到之前；`open_file` 得到 `Symlink`、`Unsupported` 或错误时（含每种类型和出错路径）返回之后描述符数不变；`OpenFile` 的描述符设了 `FD_CLOEXEC`；`OpenFile`、`Opened`、`RangeRead`、`FullRead`、`FileIdentity` 是 `Send + Sync`。
+- 实现 PR 增加的测试：`read_all_procfs_file_with_size_zero_to_eof`（只在 Linux 上运行）：`fstat` 报告大小为 0 的 procfs 文件，`read_all` 读到 EOF 并受 `max` 约束，`read_ranges` 读出打开时的 `size` 之外的内容。`fd_open_files_hold_one_descriptor_each` 是上一条描述符计数的测试。`walk_*` 也对超过 `PATH_MAX` 的路径调用 `open_file` 和 `read_all`。
 
 ## 进程
 
@@ -685,6 +686,19 @@ pub mod process {
   Linux 默认的 `Openat2` 在「性能」的预算之内。`Walk` 只在 `openat2` 不可用或一步打开出错时使用，不在预算的范围内。预算按 M 系列 Mac 制定，macOS 上的数字随 macOS 上的那次运行写进 PR 描述。
 - macOS 的 `stat` 改为一次 `fstatat`（见「与设计的差异」）之后：`cargo check -p lectern-platform --target aarch64-apple-darwin` 和 `cargo clippy -p lectern-platform --all-targets --all-features --target aarch64-apple-darwin -- -D warnings` 在 Linux 上交叉检查通过，`just check`、`just test`、`just deny` 在 Linux 上通过（Linux 的实现没有改）。新增的 `nofollow_any_one_step_stat_follows_no_symlink`、`nofollow_any_backend_choice` 和其余 `nofollow_any_*` 没有在 macOS 上运行过，由 macOS CI 运行；比值由 macOS CI 的 `platform/safe_stat` 判定。macOS 11、12 的 `NofollowAnyParent` 由测试强制选择后在 CI 上运行，没有在 11、12 上运行过；`nofollow_any_backend_choice` 在 CI 上确认探测成功、选中 `NofollowAny`。
 - `SafeRoot::open_dir`（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）在 Linux（x86_64，内核 6.18，`openat2` 可用）上：`just test -p lectern-platform` 47 个测试通过，其中新增 7 个（`open_dir_*` 6 个，`race_open_dir_swap_never_escapes` 1 个；`open_dir_openat2_rejects_escape` 只在 Linux 上运行），对 `Openat2` 和 `Walk` 各运行一次。`race_*`、`open_dir_*`、`fd_*` 连续运行 40 次都通过；`race_open_dir_swap_never_escapes` 每次运行中打开成功和被拒绝（`NotFound`、`PathThroughSymlink`）两类结果都出现（一次运行：`Openat2` 1237 次成功、3763 次被拒绝，`Walk` 2184 次、2816 次）。`just check`、`just test`（整个工作区 1270 个测试通过，跳过 1 个）、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过；macOS 的 `NofollowAny`、`NofollowAnyParent` 上的 `open_dir_*` 和 race 测试没有在 macOS 上运行过，由 macOS CI 运行。没有新增依赖，`rg -l 'unsafe' crates/platform/src/safe_read` 仍只列出 `tests.rs`。
+- 范围读取（[#103](https://github.com/SoloJiang/lectern-app/issues/103)，实现 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）在 Linux（x86_64，内核 6.18，`openat2` 可用，4 个 vCPU 的虚拟机）上：
+  - `just test -p lectern-platform` 72 个测试通过，其中新增 25 个：`open_file_*` 7 个（含 `open_file_on_open_dir_root`、`open_file_concurrent`）、`race_open_file_never_escapes`、`range_*` 7 个（含 `range_plan_merges_overlapping_and_adjacent`、`range_first_screen_at_file_start`）、`identity_*` 5 个、`read_all_*` 4 个（`read_all_procfs_file_with_size_zero_to_eof` 只在 Linux 上运行）、`fd_open_files_hold_one_descriptor_each`。行为测试对 `Openat2` 和 `Walk` 各运行一次；`fd_count_is_unchanged_after_many_calls`、`send_sync`、`walk_matches_the_table_when_the_one_step_open_fails` 也覆盖 `open_file` 和新增的类型。原有的 47 个测试结果不变。用 `cargo test` 在同一个进程里运行，72 个也都通过。
+  - `race_*`、`fd_*`、`open_file_*`、`identity_*`、`send_sync` 连续运行 40 次都通过。`race_open_file_never_escapes` 每次运行中三种结果都出现，一次运行的分布：`Openat2` 932 次读到根目录之内的内容、7585 次 `NotFound`、1483 次 `PathThroughSymlink`；`Walk` 依次为 1600、2667、5733 次。
+  - `just check`、`just test`（整个工作区 1312 个测试通过，跳过 1 个）、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。macOS 的 `NofollowAny`、`NofollowAnyParent` 上的范围读取测试没有在 macOS 上运行过，由 macOS CI 运行。
+  - 验收的检查：`rg -n 'mmap' crates/platform/src` 没有结果；`rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`；`git diff origin/main -- Cargo.lock` 为空（`pread` 来自已有的 `rustix`）。
+  - `just bench --measure platform/`（release，64 MiB 的文件，路径深度 4，页缓存已热）运行 4 次。测量期间机器上有其他构建，负载在 14 左右，绝对时间的波动主要来自这一点，std 的对照随之同涨同落：
+
+    | 基准 | `SafeRoot` 中位数 | std 对照中位数 | 比值 | 预算 |
+    |---|---|---|---|---|
+    | `platform/safe_read_range` | 84.2–147 µs | 83.9–178 µs | 0.83–1.10 | ≤ 1.5，< 200 µs |
+    | `platform/safe_read_page` | 28.4–61.3 µs | 30.1–63.5 µs | 0.94–1.03 | ≤ 1.5，< 50 µs |
+
+    比值 4 次都在预算之内。`safe_read_page` 的绝对时间有 1 次（61.3 µs，std 对照 63.5 µs）超过 50 µs，其余 3 次（28.4、34.6、41.2 µs）在预算之内。预算按 M 系列 Mac 制定，由 macOS CI 判定；Linux 上只报告。同一次运行里原有的 `platform/safe_stat`（比值 0.88，1.25 µs）、`platform/safe_read_4k`（比值 0.77）也在预算之内。
 
 ## 与设计的差异
 
@@ -697,3 +711,8 @@ pub mod process {
 - macOS 的 `stat` 改为一次 `fstatat(root, 路径, AT_SYMLINK_NOFOLLOW | AT_SYMLINK_NOFOLLOW_ANY)`（见「stat」），原设计是以 `O_NOFOLLOW_ANY` 打开父目录、`fstatat`、关闭，共 3 次系统调用。bench 第 1 步（[#83](https://github.com/SoloJiang/lectern-app/pull/83)）的 `platform/safe_stat` 在 macOS CI 的 arm64 托管机器上测得原做法的中位数为 8.1–8.8 µs，是同一路径上 `symlink_metadata` 的 3.94–4.16 倍，超出「性能」的 3 倍预算；Linux 的 `Openat2` 为 1.19 倍，没有改。成功时的 `Meta`、`ENOENT` 为 `NotFound`、其他错误交给 `Walk` 重做，都与原做法相同；结果只在一种情况下不同：只有搜索权限的目录（如 `0711`）下的条目由 `Io(PermissionDenied)` 变为成功，与 `lstat` 一致（「已知限制」已改）。`fstatat` 从 macOS 13 起才接受 `AT_SYMLINK_NOFOLLOW_ANY`，macOS 11、12 上返回 `EINVAL`；那里的 `stat` 保留原做法，作为单独的实现 `NofollowAnyParent`，由 `SafeRoot::open` 探测选择（见「macOS 的实现选择」），不交给 `Walk`。`Target`（一步打开父目录还是条目）随之只在 Linux 上使用，移进 `linux.rs`。
 - `open_dir` 的实现与「open_dir」一致，接口没有改。`list` 和 `open_dir` 共用一个打开函数（一步打开、`fstat` 确认是目录、出错时交给 `Walk`），`Walk` 里列目录的那一步随之改为只打开并返回目录描述符，由 `list` 读目录项；`list` 的行为不变。增加了设计没有列出的测试：`open_dir_root_follows_the_same_rules_beneath_it`（新根之下的符号链接规则，`..` 和绝对路径被拒绝）、`open_dir_openat2_rejects_escape`（Linux）、`race_open_dir_swap_never_escapes`，`fd_*` 也覆盖 `open_dir`；「测试」已补上。
 - 增加了设计没有列出的测试：`stat_after_the_root_is_deleted_is_not_found`、`stat_overlong_name_is_io`、`walk_permission_denied_is_io`、`read_procfs_file_with_size_zero_to_eof`（Linux）、`errors_convert_to_io_errors`、`timestamp_as_nanos_handles_times_before_1970`、`file_kind_follows_the_mode`，分别对应「状态与异常」「读取上限」里的条目和 `SafeError` 的转换。
+- 范围读取（[#103](https://github.com/SoloJiang/lectern-app/issues/103)，实现 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）的接口和行为与「范围读取」一致，没有差异。实现上需要说明的有三处，都不改变接口：
+  - `read` 与 `open_file` 共用一个内部的打开函数（一步打开、对描述符 `fstat` 分类、出错时交给 `Walk`），`Walk` 里读最后一级的那一步随之改为只打开并分类、返回描述符或 `Symlink`、`Unsupported`，由 `read` 读内容、由 `open_file` 转交给 `OpenFile`；`read` 的行为不变，原有测试的结果不变。`read_all` 与 `read` 共用「读取上限」的函数，前者用 `pread` 从偏移 0 读，后者用 `read`。
+  - 「读取的规则」第 3 步的按需扩容：一段的缓冲读满而这段还没读完时（读到了打开时的 `size`），先用栈上 4 KiB 的缓冲 `pread` 一次，返回 0 就是 EOF，不分配；读到数据（文件变长了）才按倍增扩容，不超过段长。所以分配总是不超过 `min(段长, 打开时的 size − 起点)`，除非文件确实变长。终点到达 EOF 的段因此多一次返回 0 的 `pread`，与「系统调用数」里「短读时多几次」一致。
+  - 一段里最后取字节的那个区间覆盖了这段读到的全部字节时，这段的缓冲直接移给它的 `pieces[i]`，不复制；其余区间从段的缓冲复制。首屏在文件中部时两段不合并，两个区间都不复制。
+- 范围读取的测试里对 `clippy::single_range_in_vec_init` 加了 `allow`（附理由）：`read_ranges` 的参数是区间的切片，`&[0..100]` 是正常的单区间调用，这个 lint 把它当作误写的 `Vec`。bench 里用 `std::slice::from_ref` 传单个区间。

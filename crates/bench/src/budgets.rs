@@ -930,7 +930,7 @@ pub static BUDGETS: &[Budget] = &[
             median(Limit::TimeBelow(us(200))),
         ],
         PLATFORM,
-        State::Planned("#103"),
+        ACTIVE,
         Time,
     ),
     share(
@@ -940,7 +940,7 @@ pub static BUDGETS: &[Budget] = &[
             median(Limit::TimeBelow(us(50))),
         ],
         PLATFORM,
-        State::Planned("#103"),
+        ACTIVE,
         Time,
     ),
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),

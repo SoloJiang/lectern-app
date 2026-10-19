@@ -3,7 +3,13 @@
 //! and `Walk` on macOS. `NofollowAnyParent` is what macOS 11 and 12 use; forcing
 //! it keeps that path tested on newer CI machines.
 
+#![allow(
+    clippy::single_range_in_vec_init,
+    reason = "`read_ranges` takes a slice of byte ranges; one range is a common call"
+)]
+
 use std::fs;
+use std::ops::Range;
 use std::os::fd::AsFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::net::UnixListener;
@@ -1102,6 +1108,7 @@ fn fd_count_is_unchanged_after_many_calls() {
             let _ = root.stat(rel(path));
             let _ = root.read(rel(path), 100);
             let _ = root.open_dir(rel(path));
+            exercise_open_file(root, path);
         }
     }
 
@@ -1115,6 +1122,9 @@ fn fd_count_is_unchanged_after_many_calls() {
                 let _ = root.read(rel(path), 1 << 20);
                 // Dropping an opened root closes its descriptor.
                 let _ = root.open_dir(rel(path));
+                // So does dropping an `OpenFile`; `Symlink`, `Unsupported`
+                // and errors keep none.
+                exercise_open_file(root, path);
             }
         }
     }
@@ -1164,6 +1174,11 @@ fn send_sync() {
     assert_send_sync::<Meta>();
     assert_send_sync::<Read>();
     assert_send_sync::<SafeError>();
+    assert_send_sync::<OpenFile>();
+    assert_send_sync::<Opened>();
+    assert_send_sync::<RangeRead>();
+    assert_send_sync::<FullRead>();
+    assert_send_sync::<FileIdentity>();
 
     let tree = LinkTree::new();
     write(&tree.path().join("a/c/d.txt"), b"nested");
@@ -1184,6 +1199,7 @@ fn send_sync() {
                 (
                     outcome(root.stat(rel(path))),
                     outcome(root.read(rel(path), 1024)),
+                    opened_summary(root.open_file(rel(path))),
                 )
             })
             .collect::<Vec<_>>()
@@ -1269,6 +1285,8 @@ fn check_walk_cases(backend: Backend) {
     let meta = root.stat(rel(&deep)).unwrap();
     assert_eq!((meta.kind, meta.size), (FileKind::File, 4), "{backend:?}");
     assert_eq!(file_bytes(root.read(rel(&deep), 9)), b"deep", "{backend:?}");
+    let file = open_file(&root, &deep);
+    assert_eq!(read_all_bytes(file.read_all(9)), b"deep", "{backend:?}");
     let deep_dir = &deep[..deep.len() - "/leaf.txt".len()];
     assert_eq!(root.stat(rel(deep_dir)).unwrap().kind, FileKind::Dir);
 }
@@ -1293,25 +1311,28 @@ fn walk_directly_classifies_each_failure() {
         some("in_link"),
         b"b.txt"
     )));
-    assert!(is_through_symlink(walk::read(
+    assert!(is_through_symlink(walk::entry(
         fd,
         some("a/up/a"),
-        b"b.txt",
-        9
+        b"b.txt"
     )));
     assert!(is_not_found(walk::stat(fd, some("a/b.txt"), b"x")));
-    assert!(is_not_found(walk::read(fd, some("missing"), b"x", 9)));
+    assert!(is_not_found(walk::entry(fd, some("missing"), b"x")));
     assert!(matches!(
-        walk::read(fd, some("a"), b"to_file", 9),
-        Ok(Read::Symlink { .. })
+        walk::entry(fd, some("a"), b"to_file"),
+        Ok(Entry::Symlink { .. })
     ));
     assert!(matches!(
-        walk::read(fd, None, b"dangling", 9),
-        Ok(Read::Symlink { target, .. }) if target == b"nowhere"
+        walk::entry(fd, None, b"dangling"),
+        Ok(Entry::Symlink { target, .. }) if target == b"nowhere"
     ));
     assert!(matches!(
-        walk::read(fd, some("a"), b"s", 9),
-        Ok(Read::Unsupported { meta }) if meta.kind == FileKind::Socket
+        walk::entry(fd, some("a"), b"s"),
+        Ok(Entry::Unsupported { meta }) if meta.kind == FileKind::Socket
+    ));
+    assert!(matches!(
+        walk::entry(fd, some("a"), b"b.txt"),
+        Ok(Entry::File { meta, .. }) if meta.kind == FileKind::File && meta.size == 6
     ));
     // The walk re-checks every component and opens nothing for a bad one.
     for parent in ["..", "a/..", ".", "a//b", ""] {
@@ -1407,6 +1428,924 @@ fn file_kind_follows_the_mode() {
         let meta = root.stat(rel("f")).unwrap();
         assert_eq!(meta.mode & 0o170000, 0o100000);
         assert_eq!(meta.kind, FileKind::File);
+    }
+}
+
+// open_file_*, range_*, identity_*, read_all_* (「范围读取」)
+
+const KIB: u64 = 1024;
+
+/// Deterministic pseudo-random bytes (xorshift64).
+fn random_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// `bytes[range]` cut at the end of `bytes`, as `read_ranges` cuts at EOF.
+fn slice(bytes: &[u8], range: &Range<u64>) -> Vec<u8> {
+    let end = (range.end as usize).min(bytes.len());
+    let start = (range.start as usize).min(end);
+    bytes[start..end].to_vec()
+}
+
+fn open_file(root: &SafeRoot, path: &str) -> OpenFile {
+    match root.open_file(rel(path)) {
+        Ok(Opened::File(file)) => file,
+        other => panic!("{:?} open_file {path}: {other:?}", root.backend),
+    }
+}
+
+fn pieces_of(file: &OpenFile, ranges: &[Range<u64>]) -> Vec<Vec<u8>> {
+    file.read_ranges(ranges)
+        .unwrap_or_else(|error| panic!("read_ranges {ranges:?}: {error}"))
+        .pieces
+}
+
+fn read_all_bytes(read: std::io::Result<FullRead>) -> Vec<u8> {
+    match read {
+        Ok(FullRead::File { bytes, .. }) => bytes,
+        other => panic!("expected the whole file, got {other:?}"),
+    }
+}
+
+/// `open_file`'s result in the terms of `read`'s, to check that the two
+/// classify every path alike: a regular file is `File` whatever its size.
+fn opened_summary(result: Result<Opened, SafeError>) -> Result<String, String> {
+    outcome(result).map(|opened| match opened {
+        Opened::File(file) => format!("File {:?}", file.meta()),
+        Opened::Symlink { meta, target } => format!("Symlink {meta:?} {target:?}"),
+        Opened::Unsupported { meta } => format!("Unsupported {:?}", meta.kind),
+    })
+}
+
+fn read_summary(result: Result<Read, SafeError>) -> Result<String, String> {
+    outcome(result).map(|read| match read {
+        Read::File { meta, .. } | Read::TooLarge { meta } => format!("File {meta:?}"),
+        Read::Symlink { meta, target } => format!("Symlink {meta:?} {target:?}"),
+        Read::Unsupported { meta } => format!("Unsupported {:?}", meta.kind),
+    })
+}
+
+/// Opens `path` and, for a regular file, reads it every way, dropping
+/// everything before returning.
+fn exercise_open_file(root: &SafeRoot, path: &str) {
+    if let Ok(Opened::File(file)) = root.open_file(rel(path)) {
+        let _ = file.read_ranges(&[0..100, 50..5000]);
+        let _ = file.read_all(100);
+        let _ = file.read_all(1 << 20);
+        let _ = file.stat();
+    }
+}
+
+/// `open_file` on the paths of `symlink_*` and `read_*` in a [`LinkTree`]
+/// beneath `root`: the same answers as `read`, links in the middle refused,
+/// links in the last component returned unfollowed.
+fn check_open_file_in(tree: &LinkTree, root: &SafeRoot) {
+    let backend = root.backend;
+    let file = open_file(root, "a/b.txt");
+    assert_eq!(
+        *file.meta(),
+        root.stat(rel("a/b.txt")).unwrap(),
+        "{backend:?}"
+    );
+    assert_eq!(pieces_of(&file, &[0..100]), [b"inside".to_vec()]);
+    for path in [
+        "in_link/b.txt",
+        "out_link/b.txt",
+        "a/up/a/b.txt",
+        "a/self/b.txt",
+        "in_link/missing",
+        "out_link/missing/deeper",
+        "dangling/x",
+    ] {
+        assert!(
+            is_through_symlink(root.open_file(rel(path))),
+            "{backend:?} open_file {path}"
+        );
+    }
+    for path in [
+        "in_link",
+        "out_link",
+        "a/to_file",
+        "dangling",
+        "passwd",
+        "a/out_file",
+        "a/up",
+    ] {
+        let full = tree.path().join(path);
+        let target = fs::read_link(&full).unwrap();
+        match root.open_file(rel(path)).unwrap() {
+            Opened::Symlink {
+                meta,
+                target: opened,
+            } => {
+                assert_eq!(opened, target.as_os_str().as_encoded_bytes(), "{path}");
+                assert_eq!(meta, root.stat(rel(path)).unwrap(), "{backend:?} {path}");
+            }
+            other => panic!("{backend:?} open_file {path}: {other:?}"),
+        }
+    }
+    for path in [
+        "a/b.txt",
+        "a",
+        "in_link",
+        "out_link/b.txt",
+        "a/to_file",
+        "dangling",
+        "passwd",
+        "a/up/a/b.txt",
+        "missing",
+        "a/b.txt/x",
+        "a/missing/x",
+    ] {
+        assert_eq!(
+            opened_summary(root.open_file(rel(path))),
+            read_summary(root.read(rel(path), 1)),
+            "{backend:?} {path}"
+        );
+    }
+}
+
+#[test]
+fn open_file_regular_file_keeps_its_meta() {
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("top.txt"), b"hello");
+    write(&tmp.path().join("empty"), b"");
+    write(&tmp.path().join("a/b/c/deep.txt"), &random_bytes(70_000, 1));
+    for root in roots(tmp.path()) {
+        for path in ["top.txt", "empty", "a/b/c/deep.txt"] {
+            let file = open_file(&root, path);
+            let meta = *file.meta();
+            assert_eq!(meta.kind, FileKind::File);
+            assert_eq!(meta, root.stat(rel(path)).unwrap(), "{path}");
+            assert_meta_matches(&meta, &tmp.path().join(path));
+            assert_eq!(file.identity(), meta.identity());
+            assert_eq!(file.stat().unwrap(), meta);
+        }
+    }
+}
+
+#[test]
+fn open_file_sparse_terabyte_file_returns_at_once() {
+    let tmp = TempDir::new().unwrap();
+    let file = fs::File::create(tmp.path().join("sparse")).unwrap();
+    file.set_len(1 << 40).unwrap();
+    for root in roots(tmp.path()) {
+        let start = Instant::now();
+        let opened = open_file(&root, "sparse");
+        assert_eq!(opened.meta().size, 1 << 40);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn open_file_symlinks_and_classification_match_read() {
+    for backend in backends() {
+        let tree = LinkTree::new();
+        let root = SafeRoot::open_with(tree.path(), backend).unwrap();
+        check_open_file_in(&tree, &root);
+    }
+}
+
+#[test]
+fn open_file_unsupported_types_are_closed_unread() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir_all(tmp.path().join("d/e")).unwrap();
+    mkfifo(&tmp.path().join("pipe"));
+    mkfifo(&tmp.path().join("d/pipe"));
+    let _top = UnixListener::bind(tmp.path().join("s")).unwrap();
+    let _nested = UnixListener::bind(tmp.path().join("d/s")).unwrap();
+
+    for backend in backends() {
+        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let results = [
+                opened_summary(root.open_file(rel("pipe"))),
+                opened_summary(root.open_file(rel("d/pipe"))),
+            ];
+            let _ = tx.send(results);
+        });
+        let results = rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|_| panic!("{backend:?}: opening a FIFO blocked"));
+        for result in results {
+            assert_eq!(result, Ok("Unsupported Fifo".to_owned()), "{backend:?}");
+        }
+    }
+    for root in roots(tmp.path()) {
+        for (path, kind) in [
+            ("d", FileKind::Dir),
+            ("d/e", FileKind::Dir),
+            ("s", FileKind::Socket),
+            ("d/s", FileKind::Socket),
+        ] {
+            match root.open_file(rel(path)).unwrap() {
+                Opened::Unsupported { meta } => assert_eq!(meta.kind, kind, "{path}"),
+                other => panic!("{:?} {path}: {other:?}", root.backend),
+            }
+            assert_eq!(
+                opened_summary(root.open_file(rel(path))),
+                read_summary(root.read(rel(path), 1024))
+            );
+        }
+    }
+    for root in roots(Path::new("/dev")) {
+        match root.open_file(rel("null")).unwrap() {
+            Opened::Unsupported { meta } => assert_eq!(meta.kind, FileKind::CharDevice),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn open_file_missing_and_through_a_file_are_not_found() {
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("a/file.txt"), b"x");
+    for root in roots(tmp.path()) {
+        for path in ["missing", "a/missing", "missing/x", "a/file.txt/x"] {
+            assert!(is_not_found(root.open_file(rel(path))), "{path}");
+        }
+    }
+}
+
+#[test]
+fn open_file_on_open_dir_root() {
+    // The same answers beneath a root opened with `open_dir`.
+    let tree = LinkTree::beneath("deps");
+    for root in roots(tree.top()) {
+        let deps = root.open_dir(rel("deps")).unwrap();
+        check_open_file_in(&tree, &deps);
+        // `a/up` points at the new root itself: its parent stays unreachable.
+        assert!(is_through_symlink(deps.open_file(rel("a/up/secret"))));
+        for path in ["../secret", "/etc/passwd", "a/../../secret"] {
+            let bypass = RelPath(path.as_bytes());
+            assert_eq!(
+                opened_summary(deps.open_file(bypass)).unwrap_err(),
+                "Io(InvalidInput)",
+                "{path}"
+            );
+        }
+    }
+
+    // Replacing the path after `open_dir` does not move the new root.
+    let tmp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    write(&tmp.path().join("deps/secret"), b"inside");
+    write(&outside.path().join("secret"), b"OUTSIDE");
+    let roots = roots(tmp.path());
+    let opened: Vec<SafeRoot> = roots
+        .iter()
+        .map(|root| root.open_dir(rel("deps")).unwrap())
+        .collect();
+    fs::rename(tmp.path().join("deps"), tmp.path().join("held")).unwrap();
+    symlink(outside.path(), tmp.path().join("deps")).unwrap();
+    for (root, deps) in roots.iter().zip(&opened) {
+        let file = open_file(deps, "secret");
+        assert_eq!(
+            pieces_of(&file, &[0..100]),
+            [b"inside".to_vec()],
+            "{deps:?}"
+        );
+        assert_eq!(read_all_bytes(file.read_all(100)), b"inside");
+        assert!(is_through_symlink(root.open_file(rel("deps/secret"))));
+    }
+}
+
+/// `race_swap_never_escapes` through `open_file` and `read_ranges`.
+fn check_open_file_swap_never_escapes(backend: Backend) {
+    let tmp = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let root_path = tmp.path().to_owned();
+    write(&root_path.join("a/secret"), b"inside");
+    write(&outside.path().join("secret"), b"OUTSIDE");
+    symlink(outside.path(), root_path.join("link")).unwrap();
+    let root = SafeRoot::open_with(&root_path, backend).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let stop = Arc::clone(&stop);
+        let path = |name: &str| root_path.join(name);
+        let (a, held, link) = (path("a"), path("held"), path("link"));
+        thread::spawn(move || {
+            let mut swaps = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                fs::rename(&a, &held).unwrap();
+                fs::rename(&link, &a).unwrap();
+                fs::rename(&a, &link).unwrap();
+                fs::rename(&held, &a).unwrap();
+                swaps += 1;
+            }
+            swaps
+        })
+    };
+
+    let (mut inside, mut missing, mut through) = (0, 0, 0);
+    for _ in 0..10_000 {
+        match root.open_file(rel("a/secret")) {
+            Ok(Opened::File(file)) => {
+                let read = file.read_ranges(&[0..1024, 2..4]).unwrap();
+                assert_eq!(
+                    read.pieces,
+                    [b"inside".to_vec(), b"si".to_vec()],
+                    "{backend:?}: read the outside file"
+                );
+                inside += 1;
+            }
+            Err(SafeError::NotFound) => missing += 1,
+            Err(SafeError::PathThroughSymlink) => through += 1,
+            other => panic!("{backend:?}: unexpected {other:?}"),
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    let swaps = swapper.join().unwrap();
+    assert!(swaps > 0, "{backend:?}: the swapper never ran");
+    eprintln!(
+        "{backend:?}: {inside} inside, {missing} missing, {through} through a link, {swaps} swaps"
+    );
+}
+
+#[test]
+fn race_open_file_never_escapes() {
+    for backend in backends() {
+        check_open_file_swap_never_escapes(backend);
+    }
+}
+
+#[test]
+fn range_pieces_match_the_file() {
+    let tmp = TempDir::new().unwrap();
+    let content = random_bytes(300_000, 7);
+    write(&tmp.path().join("d/random.bin"), &content);
+    let cases: [&[Range<u64>]; 7] = [
+        &[0..10],
+        &[100..5000],
+        &[299_990..300_000],
+        &[0..300_000],
+        &[1000..2000, 50_000..60_000, 7..8, 299_999..300_000],
+        &[123_456..123_457],
+        &[0..(MAX_RANGE_BYTES / 4), 200_000..300_000],
+    ];
+    for root in roots(tmp.path()) {
+        let file = open_file(&root, "d/random.bin");
+        for ranges in cases {
+            let read = file.read_ranges(ranges).unwrap();
+            let expected: Vec<Vec<u8>> = ranges.iter().map(|r| slice(&content, r)).collect();
+            assert_eq!(read.pieces, expected, "{:?} {ranges:?}", root.backend);
+            assert_eq!(read.meta.identity(), file.identity());
+        }
+    }
+}
+
+#[test]
+fn range_cut_at_eof_and_empty_ranges() {
+    let tmp = TempDir::new().unwrap();
+    let content = random_bytes(300_000, 8);
+    write(&tmp.path().join("f"), &content);
+    write(&tmp.path().join("empty"), b"");
+    for root in roots(tmp.path()) {
+        let file = open_file(&root, "f");
+        // Across EOF: cut there.
+        assert_eq!(
+            pieces_of(&file, &[299_000..310_000]),
+            [content[299_000..].to_vec()]
+        );
+        // At or past EOF: empty.
+        assert_eq!(pieces_of(&file, &[300_000..300_100]), [Vec::<u8>::new()]);
+        assert_eq!(pieces_of(&file, &[400_000..400_100]), [Vec::<u8>::new()]);
+        // Empty ranges, inside and past the file, beside others.
+        assert_eq!(pieces_of(&file, &[5..5]), [Vec::<u8>::new()]);
+        assert_eq!(
+            pieces_of(&file, &[10..10, 0..20, 20..20, 500_000..500_000]),
+            [vec![], content[..20].to_vec(), vec![], vec![]]
+        );
+        let empty = open_file(&root, "empty");
+        assert_eq!(
+            pieces_of(&empty, &[0..8 * KIB, 0..0]),
+            [Vec::<u8>::new(), vec![]]
+        );
+    }
+}
+
+#[test]
+fn range_overlapping_adjacent_and_unordered() {
+    let tmp = TempDir::new().unwrap();
+    let content = random_bytes(100_000, 9);
+    write(&tmp.path().join("f"), &content);
+    let cases: [&[Range<u64>]; 6] = [
+        &[100..200, 150..250],
+        &[0..8192, 8192..16384],
+        &[50_000..60_000, 0..10, 55_000..56_000],
+        &[0..100, 0..100],
+        &[10..20, 0..300],
+        &[99_000..101_000, 98_000..99_500, 0..1, 1..2],
+    ];
+    for root in roots(tmp.path()) {
+        let file = open_file(&root, "f");
+        for ranges in cases {
+            let expected: Vec<Vec<u8>> = ranges.iter().map(|r| slice(&content, r)).collect();
+            assert_eq!(pieces_of(&file, ranges), expected, "{ranges:?}");
+        }
+    }
+}
+
+#[test]
+fn range_sparse_terabyte_file_tail_reads_zeros() {
+    let tmp = TempDir::new().unwrap();
+    let file = fs::File::create(tmp.path().join("sparse")).unwrap();
+    file.set_len(1 << 40).unwrap();
+    let end: u64 = 1 << 40;
+    for root in roots(tmp.path()) {
+        let opened = open_file(&root, "sparse");
+        let start = Instant::now();
+        let read = opened
+            .read_ranges(&[end - 4096..end, end - 10..end + 10, end..end + 100])
+            .unwrap();
+        assert_eq!(read.pieces, [vec![0; 4096], vec![0; 10], vec![]]);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn range_invalid_input() {
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("f"), b"contents");
+    let max_end = i64::MAX as u64;
+    let past_max = Range {
+        start: 0,
+        end: max_end + 1,
+    };
+    let backwards = Range { start: 5, end: 3 };
+    for root in roots(tmp.path()) {
+        let file = open_file(&root, "f");
+        let invalid: [&[Range<u64>]; 7] = [
+            &[],
+            &[0..1, 1..2, 2..3, 3..4, 4..5],
+            std::slice::from_ref(&backwards),
+            std::slice::from_ref(&past_max),
+            &[0..MAX_RANGE_BYTES + 1],
+            &[0..MAX_RANGE_BYTES / 2, 0..MAX_RANGE_BYTES / 2 + 1],
+            &[0..max_end, 0..max_end],
+        ];
+        for ranges in invalid {
+            let error = file.read_ranges(ranges).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{ranges:?}");
+        }
+        // The limits themselves are allowed.
+        assert_eq!(
+            pieces_of(&file, &[0..MAX_RANGE_BYTES]),
+            [b"contents".to_vec()]
+        );
+        assert_eq!(pieces_of(&file, &[max_end..max_end]), [Vec::<u8>::new()]);
+        assert_eq!(
+            pieces_of(&file, &[0..1, 1..2, 2..3, 3..4]).len(),
+            MAX_RANGES
+        );
+    }
+}
+
+#[test]
+fn range_plan_merges_overlapping_and_adjacent() {
+    // The file head and a window starting inside it: one read.
+    assert_eq!(range::plan(&[0..8 * KIB, 4 * KIB..76 * KIB]), [0..76 * KIB]);
+    assert_eq!(range::plan(&[4 * KIB..76 * KIB, 0..8 * KIB]), [0..76 * KIB]);
+    // Adjacent ranges merge; a one-byte gap keeps two reads.
+    assert_eq!(range::plan(&[0..8 * KIB, 8 * KIB..16 * KIB]), [0..16 * KIB]);
+    assert_eq!(
+        range::plan(&[0..8 * KIB, 8 * KIB + 1..16 * KIB]),
+        [0..8 * KIB, 8 * KIB + 1..16 * KIB]
+    );
+    // Sorted, contained ranges absorbed, empty ones kept apart.
+    assert_eq!(
+        range::plan(&[100..200, 0..10, 150..300, 50..60, 120..130]),
+        [0..10, 50..60, 100..300]
+    );
+    assert_eq!(range::plan(&[5..5, 0..5]), [0..5]);
+    assert_eq!(range::plan(&[40..40, 0..5]), [0..5, 40..40]);
+}
+
+/// The two ranges of the first-screen call (「首屏的一次调用」), clamped by
+/// its rules: lower bounds with `saturating_sub`, upper bounds at `size`.
+fn first_screen(t: u64, size: u64) -> [Range<u64>; 2] {
+    let t = t.min(size);
+    [
+        0..(8 * KIB).min(size),
+        t.saturating_sub(64 * KIB)..(t + 68 * KIB).min(size),
+    ]
+}
+
+#[test]
+fn range_first_screen_at_file_start() {
+    let tmp = TempDir::new().unwrap();
+    let content = random_bytes(1 << 20, 10);
+    write(&tmp.path().join("big"), &content);
+    write(&tmp.path().join("small"), &content[..5000]);
+    write(&tmp.path().join("empty"), b"");
+    let size = content.len() as u64;
+    for root in roots(tmp.path()) {
+        let file = open_file(&root, "big");
+        for (t, window_start) in [(0, 0), (10 * KIB, 0), (72 * KIB, 8 * KIB)] {
+            let ranges = first_screen(t, size);
+            assert_eq!(ranges[1].start, window_start, "t = {t}");
+            assert!(ranges[1].start <= 8 * KIB);
+            // One read for both.
+            assert_eq!(range::plan(&ranges), [0..ranges[1].end], "t = {t}");
+            let pieces = pieces_of(&file, &ranges);
+            assert_eq!(pieces[0], content[..8192], "t = {t}");
+            assert_eq!(pieces[1], slice(&content, &ranges[1]), "t = {t}");
+        }
+        // One KiB later the window starts past the head: two reads.
+        let ranges = first_screen(73 * KIB, size);
+        assert_eq!(range::plan(&ranges).len(), 2);
+        let pieces = pieces_of(&file, &ranges);
+        assert_eq!(pieces[1], slice(&content, &ranges[1]));
+        // A target past the end is clamped to it.
+        let ranges = first_screen(size + 1, size);
+        assert_eq!(ranges[1], size - 64 * KIB..size);
+        assert_eq!(
+            pieces_of(&file, &ranges)[1],
+            content[(size - 64 * KIB) as usize..]
+        );
+
+        // Smaller than 8 KiB: both ranges are the whole file.
+        let small = open_file(&root, "small");
+        for t in [0, 2000, 5000] {
+            let ranges = first_screen(t, 5000);
+            assert_eq!(range::plan(&ranges), [0..5000], "t = {t}");
+            assert_eq!(
+                pieces_of(&small, &ranges),
+                [content[..5000].to_vec(), content[..5000].to_vec()]
+            );
+        }
+        let empty = open_file(&root, "empty");
+        assert_eq!(
+            pieces_of(&empty, &first_screen(0, 0)),
+            [Vec::<u8>::new(), vec![]]
+        );
+    }
+}
+
+/// Waits until a file written now gets a `ctime` later than `after`, so that
+/// the next change is not within the same tick of a coarse clock.
+fn wait_for_a_later_ctime(dir: &Path, after: Timestamp) {
+    let probe = dir.join("clock-probe");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        fs::write(&probe, b"tick").unwrap();
+        let md = fs::metadata(&probe).unwrap();
+        let ctime = Timestamp {
+            secs: md.ctime(),
+            nanos: md.ctime_nsec().try_into().unwrap(),
+        };
+        if ctime > after {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the file system clock did not advance"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn identity_unchanged_without_changes() {
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("f"), &random_bytes(50_000, 11));
+    for root in roots(tmp.path()) {
+        let file = open_file(&root, "f");
+        let identity = file.identity();
+        assert_eq!(
+            file.read_ranges(&[0..100]).unwrap().meta.identity(),
+            identity
+        );
+        match file.read_all(1 << 20).unwrap() {
+            FullRead::File { meta, .. } => assert_eq!(meta.identity(), identity),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(file.stat().unwrap().identity(), identity);
+        assert_eq!(root.stat(rel("f")).unwrap().identity(), identity);
+    }
+}
+
+#[test]
+fn identity_changes_on_append() {
+    for backend in backends() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("log");
+        write(&path, b"first\n");
+        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
+        let file = open_file(&root, "log");
+        let mut appender = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut appender, b"second\n").unwrap();
+
+        // New bytes within the range are read.
+        let read = file.read_ranges(&[0..100]).unwrap();
+        assert_eq!(read.pieces, [b"first\nsecond\n".to_vec()], "{backend:?}");
+        assert_eq!(read.meta.size, 13);
+        assert_ne!(read.meta.identity(), file.identity());
+        match file.read_all(100).unwrap() {
+            FullRead::File { bytes, meta } => {
+                assert_eq!(bytes, b"first\nsecond\n");
+                assert_ne!(meta.identity(), file.identity());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_ne!(file.stat().unwrap().identity(), file.identity());
+    }
+}
+
+#[test]
+fn identity_changes_on_truncate() {
+    for backend in backends() {
+        let tmp = TempDir::new().unwrap();
+        let content = random_bytes(10_000, 12);
+        write(&tmp.path().join("f"), &content);
+        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
+        let file = open_file(&root, "f");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join("f"))
+            .unwrap()
+            .set_len(4000)
+            .unwrap();
+        let read = file.read_ranges(&[0..100, 3000..6000, 5000..6000]).unwrap();
+        assert_eq!(
+            read.pieces,
+            [
+                content[..100].to_vec(),
+                content[3000..4000].to_vec(),
+                vec![]
+            ],
+            "{backend:?}"
+        );
+        assert_eq!(read.meta.size, 4000);
+        assert_ne!(read.meta.identity(), file.identity());
+        match file.read_all(1 << 20).unwrap() {
+            FullRead::File { bytes, meta } => {
+                assert_eq!(bytes, content[..4000]);
+                assert_ne!(meta.identity(), file.identity());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[test]
+fn identity_changes_on_rewrite_with_mtime_set_back() {
+    use std::os::unix::fs::FileExt;
+    for backend in backends() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("f");
+        write(&path, &random_bytes(8192, 13));
+        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
+        let file = open_file(&root, "f");
+        let before = *file.meta();
+        wait_for_a_later_ctime(tmp.path(), before.ctime);
+
+        // Same size, new bytes, then `mtime` set back as `touch -d` would.
+        let writer = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        writer.write_all_at(&random_bytes(8192, 14), 0).unwrap();
+        let mtime =
+            UNIX_EPOCH + Duration::new(before.mtime.secs.try_into().unwrap(), before.mtime.nanos);
+        writer.set_modified(mtime).unwrap();
+        drop(writer);
+
+        let after = file.read_ranges(&[0..10]).unwrap().meta;
+        assert_eq!(after.size, before.size, "{backend:?}");
+        assert_eq!(after.mtime, before.mtime, "{backend:?}");
+        assert_ne!(after.ctime, before.ctime, "{backend:?}");
+        assert_ne!(after.identity(), file.identity(), "{backend:?}");
+    }
+}
+
+#[test]
+fn identity_rename_over_and_delete() {
+    for backend in backends() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("a.txt"), b"original");
+        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
+        let file = open_file(&root, "a.txt");
+
+        // An atomic save: the path now names another file.
+        write(&tmp.path().join("a.txt.new"), b"replaced");
+        fs::rename(tmp.path().join("a.txt.new"), tmp.path().join("a.txt")).unwrap();
+        assert_eq!(pieces_of(&file, &[0..100]), [b"original".to_vec()]);
+        let now = root.stat(rel("a.txt")).unwrap().identity();
+        assert_ne!(now.ino, file.identity().ino, "{backend:?}");
+        let reopened = open_file(&root, "a.txt");
+        assert_eq!(pieces_of(&reopened, &[0..100]), [b"replaced".to_vec()]);
+        assert_ne!(reopened.identity(), file.identity());
+
+        // Deleted: the open file still reads.
+        fs::remove_file(tmp.path().join("a.txt")).unwrap();
+        assert!(is_not_found(root.stat(rel("a.txt"))));
+        assert_eq!(read_all_bytes(file.read_all(100)), b"original");
+        assert_eq!(read_all_bytes(reopened.read_all(100)), b"replaced");
+    }
+}
+
+#[test]
+fn read_all_matches_read() {
+    let tmp = TempDir::new().unwrap();
+    write(&tmp.path().join("small.txt"), b"small file\n");
+    write(&tmp.path().join("empty"), b"");
+    write(&tmp.path().join("d/exact"), &[7; 4096]);
+    write(&tmp.path().join("d/over"), &[7; 4097]);
+    write(&tmp.path().join("big.bin"), &random_bytes(300_000, 15));
+    let cases = [
+        ("small.txt", 4096),
+        ("empty", 4096),
+        ("empty", 0),
+        ("d/exact", 4096),
+        ("d/over", 4096),
+        ("big.bin", 300_000),
+        ("big.bin", 299_999),
+    ];
+    for root in roots(tmp.path()) {
+        for (path, max) in cases {
+            let file = open_file(&root, path);
+            let full = file.read_all(max).unwrap();
+            match (root.read(rel(path), max).unwrap(), full) {
+                (
+                    Read::File { meta, bytes },
+                    FullRead::File {
+                        bytes: all,
+                        meta: after,
+                    },
+                ) => {
+                    assert_eq!(all, bytes, "{path} {max}");
+                    assert_eq!(after, meta, "{path} {max}");
+                }
+                (Read::TooLarge { meta }, FullRead::TooLarge { meta: opened }) => {
+                    // Too large at open: not read, the meta of the open.
+                    assert_eq!(opened, *file.meta(), "{path} {max}");
+                    assert_eq!(opened, meta, "{path} {max}");
+                }
+                other => panic!("{:?} {path} {max}: {other:?}", root.backend),
+            }
+            // `pread` from offset 0: a second call reads the same.
+            assert_eq!(file.read_all(max).unwrap(), file.read_all(max).unwrap());
+        }
+    }
+}
+
+#[test]
+fn read_all_of_a_file_grown_since_open() {
+    for backend in backends() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("f");
+        write(&path, b"0123456789");
+        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
+        let file = open_file(&root, "f");
+        let mut appender = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut appender, b"abcdefghij").unwrap();
+
+        // At open it fits; read, it exceeds `max`: the meta after the read.
+        match file.read_all(15).unwrap() {
+            FullRead::TooLarge { meta } => assert_eq!(meta.size, 20, "{backend:?}"),
+            other => panic!("{backend:?}: {other:?}"),
+        }
+        match file.read_all(20).unwrap() {
+            FullRead::File { bytes, meta } => {
+                assert_eq!(bytes, b"0123456789abcdefghij");
+                assert_eq!(meta.size, 20);
+                assert_ne!(meta.identity(), file.identity());
+            }
+            other => panic!("{backend:?}: {other:?}"),
+        }
+        // `read` by path gives the same bytes.
+        assert_eq!(file_bytes(root.read(rel("f"), 20)), b"0123456789abcdefghij");
+    }
+}
+
+#[test]
+fn read_all_too_large_at_open_reads_nothing() {
+    let tmp = TempDir::new().unwrap();
+    fs::File::create(tmp.path().join("sparse"))
+        .unwrap()
+        .set_len(1 << 40)
+        .unwrap();
+    for root in roots(tmp.path()) {
+        let file = open_file(&root, "sparse");
+        let start = Instant::now();
+        assert_eq!(
+            file.read_all(64 << 20).unwrap(),
+            FullRead::TooLarge { meta: *file.meta() }
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+}
+
+/// Size 0 in `fstat` but content (procfs): read to EOF, bounded by `max`.
+#[cfg(target_os = "linux")]
+#[test]
+fn read_all_procfs_file_with_size_zero_to_eof() {
+    for root in roots(Path::new("/proc/self")) {
+        let file = open_file(&root, "status");
+        assert_eq!(file.meta().size, 0);
+        assert!(read_all_bytes(file.read_all(1 << 20)).starts_with(b"Name:"));
+        assert!(matches!(file.read_all(4), Ok(FullRead::TooLarge { .. })));
+        // A range read past the size at open finds the content too.
+        assert!(pieces_of(&file, &[0..5])[0].starts_with(b"Name:"));
+    }
+}
+
+#[test]
+fn open_file_concurrent() {
+    let tmp = TempDir::new().unwrap();
+    let content = Arc::new(random_bytes(1 << 20, 16));
+    write(&tmp.path().join("f"), &content);
+    let size = content.len() as u64;
+    // Different ranges for every thread and call, some across EOF.
+    let ranges = move |thread: u64, call: u64| {
+        let start = (thread * 7919 + call * 104_729) % size;
+        let len = 1 + (call * 31 + thread * 977) % (16 * KIB);
+        let second = (start * 3 + call) % (size + 100);
+        vec![start..start + len, second..second + 100]
+    };
+    for backend in backends() {
+        let root = SafeRoot::open_with(tmp.path(), backend).unwrap();
+        let file = Arc::new(open_file(&root, "f"));
+        // The single-threaded answers for thread 0.
+        let single: Vec<Vec<Vec<u8>>> = (0..1000)
+            .map(|call| pieces_of(&file, &ranges(0, call)))
+            .collect();
+        let single = Arc::new(single);
+        let threads: Vec<_> = (0..8u64)
+            .map(|thread| {
+                let file = Arc::clone(&file);
+                let content = Arc::clone(&content);
+                let single = Arc::clone(&single);
+                thread::spawn(move || {
+                    for call in 0..1000 {
+                        let wanted = ranges(thread, call);
+                        let read = file.read_ranges(&wanted).unwrap();
+                        let expected: Vec<Vec<u8>> =
+                            wanted.iter().map(|r| slice(&content, r)).collect();
+                        assert_eq!(read.pieces, expected, "{thread} {call}");
+                        assert_eq!(read.meta.identity(), file.identity());
+                        if thread == 0 {
+                            assert_eq!(read.pieces, single[call as usize]);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+}
+
+#[test]
+fn fd_open_files_hold_one_descriptor_each() {
+    let tree = LinkTree::new();
+    write(&tree.path().join("a/big"), &[1; 100_000]);
+    let roots = roots(tree.path());
+    for root in &roots {
+        exercise_open_file(root, "a/big");
+    }
+    // `just test`: nextest runs each test in its own process, so the count
+    // is exact; `cargo test` runs other tests on threads of this process.
+    let exact = std::env::var_os("NEXTEST").is_some();
+    let before = open_fds();
+    let held: Vec<OpenFile> = roots
+        .iter()
+        .flat_map(|root| [open_file(root, "a/big"), open_file(root, "a/b.txt")])
+        .collect();
+    let holding = open_fds();
+    if exact {
+        assert_eq!(holding, before + held.len());
+    }
+    for _ in 0..200 {
+        for file in &held {
+            file.read_ranges(&[0..100, 90_000..100_100]).unwrap();
+            file.read_all(1 << 20).unwrap();
+            file.stat().unwrap();
+        }
+    }
+    if exact {
+        // Reading opens nothing else.
+        assert_eq!(open_fds(), holding);
+    }
+    for file in &held {
+        let flags = rustix::io::fcntl_getfd(&file.fd).unwrap();
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+    }
+    drop(held);
+    let after = open_fds();
+    if exact {
+        assert_eq!(after, before);
+    } else {
+        assert!(after < holding + 100, "{before} -> {holding} -> {after}");
     }
 }
 

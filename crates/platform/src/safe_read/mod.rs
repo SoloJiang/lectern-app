@@ -7,6 +7,10 @@
 //! `AT_SYMLINK_NOFOLLOW_ANY` for `fstatat` on macOS); when it fails for any
 //! reason other than `ENOENT`, the call is redone by [`walk`], which opens one
 //! level at a time and tells the caller why the path is unusable.
+//!
+//! [`SafeRoot::open_file`] opens a regular file the same way and hands its
+//! descriptor to an [`OpenFile`], which reads byte ranges with `pread`
+//! ([`range`], 「范围读取」 in the design).
 
 use std::fmt;
 use std::io;
@@ -23,7 +27,10 @@ mod linux;
 use linux::Target;
 #[cfg(target_os = "macos")]
 mod macos;
+mod range;
 mod walk;
+
+pub use range::{FileIdentity, FullRead, MAX_RANGE_BYTES, MAX_RANGES, OpenFile, Opened, RangeRead};
 
 #[cfg(test)]
 mod tests;
@@ -128,13 +135,51 @@ impl SafeRoot {
     /// never from the UI thread. Any number of threads may call it on the same
     /// root.
     pub fn read(&self, rel: RelPath<'_>, max: u64) -> Result<Read, SafeError> {
+        Ok(match self.open_entry(rel)? {
+            Entry::File { meta, .. } if meta.size > max => Read::TooLarge { meta },
+            Entry::File { fd, meta } => {
+                match read_limited(fd.as_fd(), Cursor::Current, meta.size, max)? {
+                    Some(bytes) => Read::File { meta, bytes },
+                    None => Read::TooLarge { meta },
+                }
+            }
+            Entry::Symlink { meta, target } => Read::Symlink { meta, target },
+            Entry::Unsupported { meta } => Read::Unsupported { meta },
+        })
+    }
+
+    /// Opens an entry for range reads ([`OpenFile`]). The open, its flags,
+    /// the `fstat` on the descriptor and the [`walk`] fallback are those of
+    /// [`SafeRoot::read`]: a regular file is [`Opened::File`], which keeps the
+    /// descriptor and reads nothing yet, whatever its size; a symbolic link
+    /// in the last component is read with `readlinkat`, not followed;
+    /// directories, FIFOs, sockets and devices are closed unread. The errors
+    /// are those of `read`.
+    ///
+    /// Unlike the other calls, the descriptor of a regular file stays open
+    /// after the call: the [`OpenFile`] owns it and closes it when dropped.
+    ///
+    /// Blocks on system calls; call it from a background task, never from the
+    /// UI thread. Any number of threads may call it on the same root.
+    pub fn open_file(&self, rel: RelPath<'_>) -> Result<Opened, SafeError> {
+        Ok(match self.open_entry(rel)? {
+            Entry::File { fd, meta } => Opened::File(OpenFile::new(fd, meta)),
+            Entry::Symlink { meta, target } => Opened::Symlink { meta, target },
+            Entry::Unsupported { meta } => Opened::Unsupported { meta },
+        })
+    }
+
+    /// The open shared by `read` and `open_file`: the one-step open of the
+    /// entry, then `fstat` on the same descriptor; [`walk`] redoes any
+    /// failure but `ENOENT`.
+    fn open_entry(&self, rel: RelPath<'_>) -> Result<Entry, SafeError> {
         let (parent, name) = split(rel.0).ok_or_else(invalid_path)?;
         let root = self.fd.as_fd();
         match self.open_one_step(rel.0) {
-            None => walk::read(root, parent, name, max),
-            Some(Ok(fd)) => read_opened(fd, max),
+            None => walk::entry(root, parent, name),
+            Some(Ok(fd)) => classify(fd),
             Some(Err(Errno::NOENT)) => Err(SafeError::NotFound),
-            Some(Err(_)) => walk::read(root, parent, name, max),
+            Some(Err(_)) => walk::entry(root, parent, name),
         }
     }
 
@@ -558,30 +603,58 @@ fn stat_entry(dir: BorrowedFd<'_>, name: &[u8]) -> Result<Meta, SafeError> {
     }
 }
 
+/// An entry opened by `read` or `open_file`, classified with `fstat` on the
+/// descriptor (or, after the walk, with `fstatat` on its parent).
+pub(crate) enum Entry {
+    /// A regular file and the `fstat` on its descriptor.
+    File {
+        fd: OwnedFd,
+        meta: Meta,
+    },
+    Symlink {
+        meta: Meta,
+        target: Vec<u8>,
+    },
+    /// The descriptor, if any, is already closed.
+    Unsupported {
+        meta: Meta,
+    },
+}
+
 /// Step 2 of `read`: classifies an opened entry with `fstat` on the same
-/// descriptor and reads it when it is a regular file.
-fn read_opened(fd: OwnedFd, max: u64) -> Result<Read, SafeError> {
+/// descriptor. Anything but a regular file closes it unread.
+fn classify(fd: OwnedFd) -> Result<Entry, SafeError> {
     let meta = Meta::from_stat(&rustix::fs::fstat(&fd).map_err(io_error)?);
     if meta.kind != FileKind::File {
         // The descriptor closes here without reading (FIFOs, devices, dirs).
-        return Ok(Read::Unsupported { meta });
+        return Ok(Entry::Unsupported { meta });
     }
-    if meta.size > max {
-        return Ok(Read::TooLarge { meta });
-    }
-    Ok(match read_limited(fd.as_fd(), meta.size, max)? {
-        Some(bytes) => Read::File { meta, bytes },
-        None => Read::TooLarge { meta },
-    })
+    Ok(Entry::File { fd, meta })
 }
 
 /// Below this, growing the buffer for a file that has grown since `fstat`
 /// (or reports size 0, like procfs) adds at least this much.
 const MIN_GROWTH: u64 = 8 * 1024;
 
+/// Where [`read_limited`] reads from.
+#[derive(Clone, Copy)]
+enum Cursor {
+    /// `read` at the descriptor's file offset (`SafeRoot::read`, whose
+    /// descriptor is its own).
+    Current,
+    /// `pread` from offset 0, leaving the file offset alone
+    /// (`OpenFile::read_all`, which several threads may call at once).
+    Start,
+}
+
 /// Reads `fd` to EOF. `size` is the size `fstat` reported (`size <= max`).
 /// Returns `None` when there are more than `max` bytes.
-fn read_limited(fd: BorrowedFd<'_>, size: u64, max: u64) -> Result<Option<Vec<u8>>, SafeError> {
+fn read_limited(
+    fd: BorrowedFd<'_>,
+    cursor: Cursor,
+    size: u64,
+    max: u64,
+) -> Result<Option<Vec<u8>>, SafeError> {
     // At most `max` bytes plus the one that shows the file is larger.
     let limit = max.saturating_add(1);
     let mut bytes = Vec::new();
@@ -596,7 +669,14 @@ fn read_limited(fd: BorrowedFd<'_>, size: u64, max: u64) -> Result<Option<Vec<u8
                 .min(limit);
             reserve_exact(&mut bytes, target - len)?;
         }
-        match rustix::io::read(fd, spare_capacity(&mut bytes)) {
+        let read = match cursor {
+            Cursor::Current => rustix::io::read(fd, spare_capacity(&mut bytes)),
+            Cursor::Start => {
+                let offset = bytes.len() as u64;
+                rustix::io::pread(fd, spare_capacity(&mut bytes), offset)
+            }
+        };
+        match read {
             Ok(0) => return Ok(Some(bytes)),
             Ok(_) if bytes.len() as u64 > max => return Ok(None),
             Ok(_) | Err(Errno::INTR) => {}
