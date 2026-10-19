@@ -505,9 +505,12 @@ fn filter_100k_full(ctx: &mut Ctx, t: &TestRepo) -> Result<Measured, BenchError>
 /// (ADR 0035, git design step 4). Planned for now (`active`); always
 /// recorded, through the platform calls the comparison makes:
 /// `git/changes_clean_100k/stat_all`, one `SafeRoot::stat` of every
-/// tracked path, and `git/changes_clean_100k/read_all`, one
-/// `SafeRoot::read` of every tracked path (what the comparison would cost
-/// if no stat matched the index).
+/// tracked path; and counts: `…/reads`, the files the first comparison
+/// read (the untracked walk's `.gitignore` included), and `…/stat_*`, the
+/// index entries whose stat differs from `SafeRoot::stat` per field
+/// (`testing::stat_mismatches`) before any read. The sampled read of
+/// every tracked path (`read_all`, 14.6 s a sample on macOS CI) is gone:
+/// the counts tell whether and why the comparison reads.
 pub const CHANGES_CLEAN_100K: Bench = Bench {
     id: "git/changes_clean_100k",
     run: changes_clean_100k,
@@ -526,27 +529,41 @@ fn changes_clean_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         }
         Ok(())
     };
-    let read_all = || -> Result<(), BenchError> {
-        for path in &paths {
-            black_box(
-                root.read(rel(path)?, 64 << 20)
-                    .map_err(|e| BenchError::new(format!("{e:?}")))?,
-            );
-        }
-        Ok(())
-    };
+    let repo = t.repo();
+    let cancel = AtomicBool::new(false);
+    let limits = Limits::default();
+    // Before any read: how the index stats compare, field by field, and
+    // how many files the first comparison reads (the `.gitignore` of the
+    // untracked walk included).
+    let stat = testing::stat_mismatches(&repo.worktree(&WorktreeId::Main)?)?;
+    let wt = repo.worktree(&WorktreeId::Main)?;
+    let before = testing::worktree_reads();
+    worktree::expect(&*worktree::changes(&wt, &limits, &cancel)?, 0, 0)?;
+    let read = testing::worktree_reads() - before;
+    drop(wt);
+    let mut out = vec![Measured::new(
+        "git/changes_clean_100k/reads",
+        Value::Count(read as u64),
+    )];
+    for (name, n) in [
+        ("racy", stat.racy),
+        ("unmatched", stat.unmatched),
+        ("mtime", stat.mtime),
+        ("size", stat.size),
+        ("ctime", stat.ctime),
+        ("ino", stat.ino),
+        ("owner", stat.owner),
+    ] {
+        out.push(Measured::new(
+            format!("git/changes_clean_100k/stat_{name}"),
+            Value::Count(n as u64),
+        ));
+    }
     stat_all()?;
-    read_all()?;
-    let mut out = vec![
-        Measured::new(
-            "git/changes_clean_100k/stat_all",
-            Value::Time(ctx.time(stat_all)),
-        ),
-        Measured::new(
-            "git/changes_clean_100k/read_all",
-            Value::Time(ctx.time(read_all)),
-        ),
-    ];
+    out.push(Measured::new(
+        "git/changes_clean_100k/stat_all",
+        Value::Time(ctx.time(stat_all)),
+    ));
     if active("git/changes_clean_100k") {
         out.push(changes_clean_100k_full(ctx, &t)?);
     }

@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lectern_platform::{FileKind, Meta, Read, SafeError, SafeRoot, Timestamp};
@@ -69,13 +69,15 @@ impl std::fmt::Debug for CompareState {
 
 /// A stat cache entry: the canonical result of reading a file whose stat was
 /// `key`, under conversion state `conversion` and index blob `index_oid`.
+/// It holds no reference to the content, not even a `Weak` (an `Arc<[u8]>`
+/// keeps its bytes in the allocation of its counts, so a `Weak` keeps them
+/// allocated, ADR 0035): a hit that needs the bytes takes them from the
+/// change set a refresh is given, or reads the file again.
 struct Cached {
     key: StatKey,
     conversion: u64,
     index_oid: Option<Oid>,
     side: (Mode, Content),
-    /// The bytes, while a change set still holds them.
-    bytes: Option<Weak<[u8]>>,
     /// Whole seconds since the epoch when the comparison that read it began.
     computed: i64,
 }
@@ -145,6 +147,20 @@ pub(crate) struct Origin {
     records: Vec<Record>,
     base_invalid: Vec<Arc<[u8]>>,
     untracked_capped: bool,
+}
+
+impl Origin {
+    /// The worktree bytes of `path` this change set kept, if they are the
+    /// canonical content with blob `oid`.
+    fn held_bytes(&self, path: &RepoPath, oid: Oid) -> Option<Arc<[u8]>> {
+        let start = self.records.partition_point(|r| r.pending.path < *path);
+        self.records[start..]
+            .iter()
+            .take_while(|r| r.pending.path == *path)
+            .filter_map(|r| r.pending.new.as_ref())
+            .find(|side| side.content == Content::Blob(oid))
+            .and_then(|side| side.bytes.clone())
+    }
 }
 
 #[derive(Clone)]
@@ -259,13 +275,16 @@ pub(crate) struct Subject<'a> {
 
 /// A worktree comparison against `base`. With `refresh`, only the paths in
 /// its scope are compared again and the rest is taken from the previous
-/// change set.
+/// change set. `held` is the comparison of the change set a refresh was
+/// given: a stat cache hit takes the bytes it kept instead of reading the
+/// file again.
 pub(crate) fn run(
     subject: &Subject<'_>,
     base: &Base,
     limits: &Limits,
     cancel: &AtomicBool,
     refresh: Option<(&ChangeSet, &Origin, &[RepoPath])>,
+    held: Option<&Origin>,
 ) -> Result<Arc<ChangeSet>, GitError> {
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -456,7 +475,7 @@ pub(crate) fn run(
             .iter()
             .any(|(p, _)| basename(p.as_bytes()) == b".gitattributes")
         {
-            return run(subject, base, limits, cancel, None);
+            return run(subject, base, limits, cancel, None, held);
         }
         untracked_capped |= origin.untracked_capped;
     }
@@ -531,6 +550,7 @@ pub(crate) fn run(
         started,
         cache,
         fresh: HashMap::new(),
+        held,
     };
 
     // Phase D: each path of the base or the index.
@@ -784,13 +804,14 @@ pub(crate) fn refresh(
     };
     let limits = prev.limits().clone();
     match what {
-        Refresh::Full => run(subject, &origin.base, &limits, cancel, None),
+        Refresh::Full => run(subject, &origin.base, &limits, cancel, None, Some(&origin)),
         Refresh::Paths(paths) => run(
             subject,
             &origin.base,
             &limits,
             cancel,
             Some((prev, &origin, paths)),
+            Some(&origin),
         ),
     }
 }
@@ -1177,6 +1198,9 @@ struct Reader<'a> {
     cache: HashMap<RepoPath, Cached>,
     /// This comparison's.
     fresh: HashMap<RepoPath, Cached>,
+    /// The comparison of the change set a refresh was given, for the bytes
+    /// it kept.
+    held: Option<&'a Origin>,
 }
 
 impl Reader<'_> {
@@ -1325,7 +1349,6 @@ impl Reader<'_> {
                 conversion: self.conversion,
                 index_oid,
                 side: (side.mode, side.content.clone()),
-                bytes: side.bytes.as_ref().map(Arc::downgrade),
                 computed: self.started,
             },
         );
@@ -1336,8 +1359,10 @@ impl Reader<'_> {
     /// mtime more than a whole second before the comparison that read it
     /// began (as git's racy-clean rule: a write in the same second as the
     /// read can leave the stat equal; the extra second covers the kernel's
-    /// coarse file clock lagging the system clock), and its bytes still held
-    /// by a change set when they are needed.
+    /// coarse file clock lagging the system clock), and its bytes at hand
+    /// when they are needed: content equal to the index blob needs none (the
+    /// object database has it); other content takes the bytes the refreshed
+    /// change set kept (`held`), or is a miss and the file is read again.
     fn cached(
         &mut self,
         path: &RepoPath,
@@ -1353,8 +1378,9 @@ impl Reader<'_> {
             return None;
         }
         let (mode, content) = entry.side.clone();
-        let bytes = match &content {
-            Content::Blob(_) => Some(entry.bytes.as_ref()?.upgrade()?),
+        let bytes = match content {
+            Content::Blob(oid) if Some(oid) == index_oid => None,
+            Content::Blob(oid) => Some(self.held?.held_bytes(path, oid)?),
             _ => None,
         };
         let entry = self.cache.remove(path)?;
@@ -1646,8 +1672,9 @@ fn classify(
     Some(p)
 }
 
-/// Counting hook: worktree content reads on this thread.
-#[cfg(test)]
+/// Counting hook: worktree content reads on this thread (tests, and
+/// `testing::worktree_reads` for bench).
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod hook {
     use std::cell::Cell;
 
@@ -1664,9 +1691,56 @@ pub(crate) mod hook {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) mod hook {
     pub(crate) fn read() {}
+}
+
+/// How the index stat of every tracked path compares with its
+/// `SafeRoot::stat`, field by field under the stat options a comparison
+/// uses (`testing::stat_mismatches`).
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn stat_mismatches(
+    subject: &Subject<'_>,
+) -> Result<crate::testing::StatMismatches, GitError> {
+    let handle = Handle::open(subject.git_dir, subject.repo.scope())?;
+    let index = snapshot(
+        subject,
+        &handle,
+        &Limits::default(),
+        &AtomicBool::new(false),
+    )?;
+    let options = handle.stat_options().map_err(GitError::from_gix)?;
+    let timestamp = index.state.timestamp();
+    let nsec = options.check_stat && options.use_nsec;
+    let mut out = crate::testing::StatMismatches::default();
+    for item in &index.items {
+        if item.skip_worktree || item.entry.is_none() {
+            continue;
+        }
+        let Some(rel) = item.path.as_rel() else {
+            continue;
+        };
+        let Ok(meta) = subject.root.stat(rel) else {
+            continue;
+        };
+        out.entries += 1;
+        let (a, b) = (&item.stat, &index_stat(&meta));
+        let racy = a.is_racy(timestamp, options);
+        let clean = !racy && a.matches(b, options);
+        out.racy += usize::from(racy);
+        out.unmatched += usize::from(!racy && !clean);
+        out.mtime +=
+            usize::from(a.mtime.secs != b.mtime.secs || nsec && a.mtime.nsecs != b.mtime.nsecs);
+        out.size += usize::from(a.size != b.size);
+        out.ctime += usize::from(
+            options.trust_ctime
+                && (a.ctime.secs != b.ctime.secs || nsec && a.ctime.nsecs != b.ctime.nsecs),
+        );
+        out.ino += usize::from(options.check_stat && a.ino != b.ino);
+        out.owner += usize::from(options.check_stat && (a.uid != b.uid || a.gid != b.gid));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -635,19 +635,17 @@ pub static BUDGETS: &[Budget] = &[
     // 1000 modified tracked and 1000 untracked files of 10–50 KB and one
     // 16 MiB untracked file, with `retained_bytes = 0` and
     // `total_patch_bytes = 0`; the change set and what its `Worktree` holds.
-    // Recorded: today the stat cache keeps every read file's content
-    // allocated (git design「与设计的差异」).
+    // Recorded. The stat cache no longer keeps read contents allocated;
+    // the comparison's parsed index is still kept (git step 4).
     share("git/changes_count/total_bytes", RECORD, GIT, ACTIVE, Memory),
-    // The same per changed path once comparison caches hold no content and
-    // the comparison index is released (about 1163 B with the first alone):
-    // active with whichever of the two lands later.
+    // The same per changed path once the comparison index is released as
+    // well (git design「与设计的差异」): 1111 B measured with the stat
+    // cache fixed alone, so active with git step 4.
     share(
         "git/changes_count/per_path_bytes",
         &[median(Limit::BytesAtMost(1024))],
         GIT,
-        State::Planned(
-            "git：stat 缓存不持有内容，且第 4 步释放比较用的 index（两者中后完成的那个）",
-        ),
+        State::Planned("git 第 4 步（释放比较用的 index；stat 缓存不持有内容已完成）"),
         Memory,
     ),
     // Hunk LRU 16 MB plus one `ChangeSet` 32 MB; no handle held while idle.
@@ -707,10 +705,58 @@ pub static BUDGETS: &[Budget] = &[
         MACOS_100K,
         Time,
     ),
-    // Recorded, to locate it: one `SafeRoot::stat`, and one `SafeRoot::read`,
-    // of every tracked path.
+    // Recorded, to locate it: one `SafeRoot::stat` of every tracked path.
+    // (`…/read_all`, one `SafeRoot::read` of each, is gone: 14.6 s a sample
+    // on macOS CI, and the counts below say whether the comparison reads.)
     share("git/changes_clean_100k/stat_all", RECORD, GIT, ACTIVE, Time),
-    share("git/changes_clean_100k/read_all", RECORD, GIT, ACTIVE, Time),
+    // Recorded counts, to tell the hypotheses apart on macOS CI: the files
+    // the first comparison read (1 when every stat matches: the root
+    // `.gitignore` the untracked walk reads), and per stat field how many
+    // index entries differ from `SafeRoot::stat` before any read.
+    share("git/changes_clean_100k/reads", RECORD, GIT, ACTIVE, Time),
+    share(
+        "git/changes_clean_100k/stat_racy",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/stat_unmatched",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/stat_mtime",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/stat_size",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/stat_ctime",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share("git/changes_clean_100k/stat_ino", RECORD, GIT, ACTIVE, Time),
+    share(
+        "git/changes_clean_100k/stat_owner",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
     // That comparison's peak of live bytes (temporary memory, not idle):
     // the comparison's own parsed index and case-folded copy, the walk,
     // the change set.

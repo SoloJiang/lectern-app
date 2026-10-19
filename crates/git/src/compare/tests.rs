@@ -1758,6 +1758,124 @@ fn worktree_stat_cache_reuses_contents_a_change_set_still_holds() {
 }
 
 #[test]
+fn worktree_stat_cache_keeps_no_reference_to_contents() {
+    // ADR 0035: an `Arc<[u8]>` keeps its bytes in the allocation of its
+    // counts, so even a `Weak` in the stat cache would keep every read file
+    // allocated after the change set is dropped.
+    let t = clean_repo(&[("a", b"a\n")]);
+    t.write_file("a", b"a changed\n");
+    t.backdate("a");
+    t.write_file("u", &b"untracked\n".repeat(1000));
+    t.backdate("u");
+    let wt = main_worktree(&t);
+    let cancel = no_cancel();
+    let first = wt.changes(Base::Head, &Limits::default(), &cancel).unwrap();
+    let kept: Vec<&Arc<[u8]>> = first.retained().iter().flatten().collect();
+    assert_eq!(kept.len(), 2);
+    for bytes in kept {
+        assert_eq!(Arc::weak_count(bytes), 0, "the stat cache holds no Weak");
+        // The change set's retained list and its records for refresh.
+        assert_eq!(Arc::strong_count(bytes), 2, "only the change set holds it");
+    }
+
+    // A refresh still shares the bytes the change set it is given kept.
+    let reads = hook::reads();
+    let second = wt.refresh(&first, Refresh::Full, &cancel).unwrap();
+    assert_eq!(hook::reads(), reads, "both hit the stat cache");
+    for (a, b) in first.retained().iter().zip(second.retained()) {
+        assert!(Arc::ptr_eq(a.as_ref().unwrap(), b.as_ref().unwrap()));
+    }
+    assert_eq!(lines(&first), lines(&second));
+    drop(first);
+    for bytes in second.retained().iter().flatten() {
+        assert_eq!(Arc::weak_count(bytes), 0);
+        assert_eq!(Arc::strong_count(bytes), 2);
+    }
+
+    // Without a change set that kept them, the bytes are read again.
+    drop(second);
+    let _third = wt.changes(Base::Head, &Limits::default(), &cancel).unwrap();
+    assert_eq!(hook::reads(), reads + 2);
+}
+
+#[test]
+fn worktree_stat_cache_hit_equal_to_the_index_needs_no_bytes() {
+    // A touched file with the content of its index blob: its stat never
+    // matches the index again (the index isn't written), but the stat cache
+    // knows its OID and the object database has the content.
+    let t = clean_repo(&[("a", b"a\n")]);
+    t.write_file("a", b"a\n");
+    t.set_mtime(
+        "a",
+        std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+    );
+    let wt = main_worktree(&t);
+    let cancel = no_cancel();
+    let reads = hook::reads();
+    let first = wt.changes(Base::Head, &Limits::default(), &cancel).unwrap();
+    assert_eq!(hook::reads(), reads + 1, "the stat differs: read once");
+    drop(first);
+    let second = wt.changes(Base::Head, &Limits::default(), &cancel).unwrap();
+    assert_eq!(
+        hook::reads(),
+        reads + 1,
+        "a stat cache hit, no change set held"
+    );
+    assert_eq!(lines(&second), Vec::<String>::new());
+}
+
+#[test]
+fn worktree_stat_mismatches_of_a_clean_worktree_are_none() {
+    // What bench's `git/changes_clean_100k/stat_*` count: none for files
+    // whose stat the index recorded, also after every file was read (an
+    // access that changed ctime would make each comparison read them all).
+    let files: Vec<(String, Vec<u8>)> = (0..40)
+        .map(|i| {
+            (
+                format!("p{}/src/d{}/f{i}.ts", i % 3, i % 5),
+                format!("// {i}\n").into_bytes(),
+            )
+        })
+        .collect();
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_slice()))
+        .collect();
+    let t = clean_repo(&refs);
+    t.append_config("[core]\n\tignoreCase = true\n");
+    let expected = crate::testing::StatMismatches {
+        entries: 40,
+        ..Default::default()
+    };
+    let wt = main_worktree(&t);
+    assert_eq!(crate::testing::stat_mismatches(&wt).unwrap(), expected);
+    let root = lectern_platform::SafeRoot::open(t.root()).unwrap();
+    for (path, _) in &files {
+        let rel = lectern_platform::RelPath::new(path.as_bytes()).unwrap();
+        assert!(matches!(
+            root.read(rel, 1 << 20),
+            Ok(lectern_platform::Read::File { .. })
+        ));
+    }
+    let wt = main_worktree(&t);
+    assert_eq!(crate::testing::stat_mismatches(&wt).unwrap(), expected);
+    let reads = crate::testing::worktree_reads();
+    assert_eq!(lines(&changes(&t)), Vec::<String>::new());
+    assert_eq!(
+        crate::testing::worktree_reads(),
+        reads,
+        "a clean worktree reads nothing"
+    );
+
+    // A changed file is counted by field.
+    t.write_file(&files[0].0, b"// changed, longer\n");
+    t.backdate(&files[0].0);
+    let wt = main_worktree(&t);
+    let after = crate::testing::stat_mismatches(&wt).unwrap();
+    assert_eq!((after.unmatched, after.size, after.racy), (1, 1, 0));
+}
+
+#[test]
 fn worktree_fingerprint_follows_contents_not_truncation() {
     let t = clean_repo(&[("a", b"a\n"), ("b", b"b\n")]);
     t.write_file("a", b"a1\n");
