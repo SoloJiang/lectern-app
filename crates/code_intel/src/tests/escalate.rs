@@ -25,7 +25,12 @@ struct Fake {
     calls: Mutex<Vec<(&'static str, SemanticRequest)>>,
     pending: Mutex<Vec<(SemanticRequestId, SemanticReply)>>,
     cancelled: Mutex<Vec<SemanticRequestId>>,
+    /// Run in every `cancel`; what it returns is recorded in `probed`.
+    probe: Mutex<Option<Probe>>,
+    probed: Mutex<Vec<bool>>,
 }
+
+type Probe = Box<dyn Fn() -> bool + Send + Sync>;
 
 impl Fake {
     fn new(id: &'static str, head_only: bool) -> Arc<Fake> {
@@ -35,6 +40,8 @@ impl Fake {
             calls: Mutex::default(),
             pending: Mutex::default(),
             cancelled: Mutex::default(),
+            probe: Mutex::default(),
+            probed: Mutex::default(),
         })
     }
 
@@ -107,6 +114,10 @@ impl NavigationProvider for Fake {
 
     fn cancel(&self, request: SemanticRequestId) {
         self.cancelled.lock().unwrap().push(request);
+        if let Some(probe) = &*self.probe.lock().unwrap() {
+            let free = probe();
+            self.probed.lock().unwrap().push(free);
+        }
     }
 }
 
@@ -540,6 +551,42 @@ fn escalate_arbitration_stale_ids_and_cancel_on_close() {
     assert!(h.indexer.results(first).is_none());
     let second = ask(&h);
     assert_eq!(results(&h, second).semantic, SemanticState::Pending);
+}
+
+/// `cancel` has no contract beyond returning at once: it is never called
+/// with the lock that orders publication held (a session's end takes it),
+/// for a close, a worktree switch, the project closing or deactivation.
+#[test]
+fn escalate_cancel_runs_outside_publishing() {
+    use lectern_services::project::ProjectEvent;
+    for end in ["close", "switch", "closed", "close_all"] {
+        let h = java();
+        h.git.add_worktree("feature");
+        h.git.add("feature", &[("src/A.java", A.as_bytes())]);
+        h.git.commit("feature");
+        let jdtls = Fake::new("jdtls", false);
+        let _reg = h.indexer.register_provider(jdtls.clone(), token(&h));
+        let id = ask(&h);
+        assert!(!jdtls.ids().is_empty(), "{end}: asked");
+        let inner = h.indexer.inner().clone();
+        *jdtls.probe.lock().unwrap() = Some(Box::new(move || inner.publishing.try_lock().is_ok()));
+        match end {
+            "close" => h.indexer.close(id),
+            "switch" => {
+                let event = h.projects.set(h.git.snapshot(1_000, "feature", Vec::new()));
+                h.indexer.project_event(&event);
+            }
+            "closed" => h
+                .indexer
+                .project_event(&ProjectEvent::Closed { project: h.key() }),
+            _ => h.indexer.close_all(),
+        }
+        assert_eq!(*jdtls.cancelled.lock().unwrap(), jdtls.ids(), "{end}");
+        let probed = jdtls.probed.lock().unwrap().clone();
+        assert!(!probed.is_empty(), "{end}: cancelled");
+        assert!(probed.iter().all(|free| *free), "{end}: under `publishing`");
+        h.settle();
+    }
 }
 
 /// SCIP replies first and every known candidate equals HEAD: jdtls is not

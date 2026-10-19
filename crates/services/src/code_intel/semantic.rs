@@ -29,6 +29,8 @@ pub trait NavigationProvider: Send + Sync {
 
     fn references(&self, request: SemanticRequest, reply: SemanticReply);
 
+    /// 立即返回，不阻塞；可在任意线程调用（包括 UI 线程：关闭查询时）。只登记取消，
+    /// 停止请求的工作由提供者自己在别处完成。`code_intel` 调用它时不持有自己的任何锁。
     fn cancel(&self, request: SemanticRequestId);
 }
 

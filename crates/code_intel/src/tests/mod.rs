@@ -1,3 +1,4 @@
+mod account;
 mod battery;
 mod binding;
 mod cut;

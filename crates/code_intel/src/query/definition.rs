@@ -9,6 +9,8 @@
 //! 4. the time-boxed search of the current sub-project's unindexed files.
 //!
 //! Steps 1–3 are the first batch; the search appends. Results only grow.
+//! The completeness is the accounting's (`account`): every file of the
+//! jump's language group, indexed, searched, or not.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -23,13 +25,12 @@ use lectern_services::code_intel::{
 };
 use lectern_services::project::{BlobId, RelPath};
 
+use super::account::{Account, Reason};
 use super::rank::{Ranker, visible};
 use super::search::{FileDeadline, Searched};
-use super::text::FileRead;
 use super::{Run, SEARCH_FOR, Snap, Step, View, ViewCheck};
 use crate::extract::{
-    BACKGROUND_MAX_LEN, Deadline, Def, ExtractStatus, Extraction, INTERACTIVE_DEADLINE, Lang,
-    Visibility, compatible,
+    Deadline, Def, ExtractStatus, Extraction, INTERACTIVE_DEADLINE, Lang, Visibility, compatible,
 };
 use crate::index::{Inner, Scanned};
 use crate::map::Effective;
@@ -45,33 +46,37 @@ pub(crate) fn loc_key(l: &Location) -> LocKey {
     (l.origin, l.path.clone(), l.oid, l.line, l.column)
 }
 
-/// What step 2's extractions add: units used, extractions to write, and
-/// each file's extraction by (path, OID of the bytes read).
+/// What step 2's extractions add: units used, extractions to write, each
+/// file's extraction by (path, OID of the bytes read), and what was read.
 type Pending = (
     Vec<Unit>,
     Vec<Scanned>,
     HashMap<(RelPath, BlobId), Option<Extraction>>,
+    Account,
 );
 
 /// One file's extraction for a query ([`Inner::file_extraction`]).
 pub(crate) enum FileExtraction {
     /// `Done`: its definitions.
     Defs(Extraction),
-    /// Known to give none: stored or extracted with another status that
-    /// settles the file (`FileDeadline::settles`), or a language not in
-    /// the current table.
+    /// A language not in the snapshot's table: not one of the query's files.
     Nothing,
-    /// The query's time ran out or it was cancelled: nothing is known, not
-    /// stored; the file counts as unsearched.
-    Unsearched,
+    /// Nothing is known of its definitions, and why: the query's time ran
+    /// out or it was cancelled (not stored), or it is stored or extracted
+    /// with a status that has no definitions (`TooLarge`, `Binary`,
+    /// `TimedOut`, a grammar failing).
+    Unsearched(Reason),
 }
 
-impl FileExtraction {
-    fn defs(self) -> Option<Extraction> {
-        match self {
-            FileExtraction::Defs(e) => Some(e),
-            FileExtraction::Nothing | FileExtraction::Unsearched => None,
-        }
+/// Why a file stored with `status` gives no definitions; None for `Done`.
+fn stored_reason(status: ExtractStatus) -> Option<Reason> {
+    match status {
+        ExtractStatus::Done => None,
+        ExtractStatus::TimedOut => Some(Reason::TimedOut),
+        ExtractStatus::TooLarge => Some(Reason::TooLarge),
+        ExtractStatus::Binary => Some(Reason::Binary),
+        ExtractStatus::Cancelled => Some(Reason::Cancelled),
+        ExtractStatus::Unsupported => Some(Reason::Unreadable),
     }
 }
 
@@ -94,6 +99,9 @@ pub(crate) struct Prepared {
     /// Stored units the candidates came from, marked as used afterwards.
     pub units: Vec<Unit>,
     pub scanned: Vec<Scanned>,
+    /// The files steps 1–3 read (the current text, step 2's targets): the
+    /// search goes on with it, the accounting classifies them by it.
+    pub account: Account,
     /// The view step 3's lookup was made under (the snapshot's, a
     /// prefetch's own): the query's results are consistent with it
     /// (「查询的视图」, `Inner::check_view`).
@@ -226,8 +234,9 @@ impl Inner {
 
     /// A file's extraction for a query (「输入代数与派生状态」, the last
     /// point): its stored unit when it is `Done`, else extracted now with
-    /// the background limits cut at `until` ([`FileDeadline`]) and, when
-    /// the result settles the file, queued to be written.
+    /// the background deadline cut at `until` ([`FileDeadline`]) and the
+    /// file's read limit (`Snap::read_limit`) and, when the result settles
+    /// the file, queued to be written.
     #[allow(
         clippy::too_many_arguments,
         reason = "one file's part of a query: its snapshot, the file and what it adds to"
@@ -255,8 +264,8 @@ impl Inner {
             .into_iter()
             .next()
         {
-            if found.status != ExtractStatus::Done {
-                return FileExtraction::Nothing;
+            if let Some(reason) = stored_reason(found.status) {
+                return FileExtraction::Unsearched(reason);
             }
             if let Some(extraction) = snap.project.store.load(found.unit) {
                 units.push(found.unit);
@@ -264,16 +273,13 @@ impl Inner {
             }
         }
         let file = FileDeadline::new(self.watchdog.clock().now(), Some(until));
-        let deadline = Deadline::at(&self.watchdog, file.at, BACKGROUND_MAX_LEN);
+        let deadline = Deadline::at(&self.watchdog, file.at, snap.read_limit(eff));
         let extract = crate::index::lock(&self.extract).clone();
         let extraction = extract(&lang, bytes, &deadline, cancel);
-        if !file.settles(extraction.status) {
-            return FileExtraction::Unsearched;
-        }
         let status = extraction.status;
         // `Unsupported` is this run's grammar failing, not the file's: not
         // stored, as the batch tiers do.
-        if status != ExtractStatus::Unsupported {
+        if file.settles(status) && status != ExtractStatus::Unsupported {
             scanned.push(Scanned {
                 path: eff.path.clone(),
                 oid: key,
@@ -281,9 +287,9 @@ impl Inner {
                 extraction: extraction.clone(),
             });
         }
-        match status {
-            ExtractStatus::Done => FileExtraction::Defs(extraction),
-            _ => FileExtraction::Nothing,
+        match file.reason(status) {
+            None => FileExtraction::Defs(extraction),
+            Some(reason) => FileExtraction::Unsearched(reason),
         }
     }
 
@@ -353,8 +359,12 @@ impl Inner {
             extracted: HashMap::new(),
             units: Vec::new(),
             scanned: Vec::new(),
+            account: Account::default(),
             view: snap.view,
         };
+        // The current text is read and parsed: its definitions are step 1's
+        // (the map's file when the map has that content at the path).
+        prepared.account.searched(&at.path, at.oid);
         let current = |definition: DefinitionRef, evidence: Evidence| Candidate {
             in_review: ranker.in_review(&definition.location.path),
             definition,
@@ -402,26 +412,41 @@ impl Inner {
         let pending: RefCell<Pending> = RefCell::default();
         // A file's effective content, its OID and its extraction, each file
         // extracted once. Only the snapshot's content counts
-        // (`read_content`): a file changed since gives nothing here, and the
-        // search counts it as unsearched.
+        // (`read_content`): a file changed since, too large or unreadable
+        // gives nothing here, and the accounting counts it unsearched.
         let load = |path: &str| -> Option<(Effective, BlobId, Option<Extraction>)> {
             let eff = snap.map.effective(path)?;
-            let FileRead::Content(bytes) = self.read_content(snap, &eff) else {
-                return None;
-            };
             let key = eff.oid;
-            let mut p = pending.borrow_mut();
-            let (units, scanned, extracted) = &mut *p;
-            if let Some(done) = extracted.get(&(eff.path.clone(), key)) {
-                return Some((eff, key, done.clone()));
+            {
+                let p = pending.borrow();
+                if let Some(done) = p.2.get(&(eff.path.clone(), key)) {
+                    return Some((eff, key, done.clone()));
+                }
+                if p.3.outcome(&eff.path, key).is_some() {
+                    return Some((eff, key, None));
+                }
             }
+            let bytes = match self.read_content(snap, &eff, snap.read_limit(&eff)) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    pending.borrow_mut().3.unsearched(&eff.path, key, reason);
+                    return None;
+                }
+            };
+            let mut p = pending.borrow_mut();
+            let (units, scanned, extracted, account) = &mut *p;
             let done = match self
                 .file_extraction(snap, &eff, key, &bytes, until, cancel, units, scanned)
             {
-                // Not kept: the search extracts it again, or counts it.
-                FileExtraction::Unsearched => return Some((eff, key, None)),
-                other => other.defs(),
+                FileExtraction::Defs(e) => Some(e),
+                FileExtraction::Nothing => None,
+                // Not kept: the search extracts it again, or it is counted.
+                FileExtraction::Unsearched(reason) => {
+                    account.unsearched(&eff.path, key, reason);
+                    return Some((eff, key, None));
+                }
             };
+            account.searched(&eff.path, key);
             extracted.insert((eff.path.clone(), key), done.clone());
             Some((eff, key, done))
         };
@@ -475,11 +500,12 @@ impl Inner {
                 source: CandidateSource::Resolver,
             });
         }
-        let (units, scanned, extracted) = pending.into_inner();
+        let (units, scanned, extracted, account) = pending.into_inner();
         drop(step2);
         prepared.units.extend(units);
         prepared.scanned.extend(scanned);
         prepared.extracted = extracted;
+        prepared.account.merge(account);
         if prepared.bound() {
             prepared.settled = true;
             return Ok(prepared);
@@ -643,7 +669,10 @@ impl Inner {
         let mut attempt = 0;
         let mut p = loop {
             let s = again.as_ref().unwrap_or(snap);
-            let made = match prepared.take() {
+            // A prefetch only when made under the basis of the snapshot just
+            // taken: a map published between `query` and this snapshot has
+            // other OIDs (its steps would mix with this snapshot's search).
+            let made = match prepared.take().filter(|p| p.view.same_basis(&s.view)) {
                 Some(p) => Ok((*p).clone()),
                 None => self.prepare_definition(s, at, position, &run.cancel),
             };
@@ -695,12 +724,15 @@ impl Inner {
             let _t = crate::phases::span("escalate");
             self.escalate_definition(run.id, snap, at, position, &p);
         }
+        // A binding the steps proved settles the jump: no other file can
+        // change it (「跳转到定义」).
         let completeness = if p.settled {
             Some(Completeness::Complete)
         } else {
+            let mut account = std::mem::take(&mut p.account);
             let scope = {
                 let _t = crate::phases::span("4 search scope");
-                snap.search_scope(&at.path, &p.lang, &p.skip)
+                snap.search_scope(&at.path, &p.lang, &p.skip, &mut account)
             };
             crate::phases::count("scope files", scope.files.len() as u64);
             self.step_hook(Step::Hints, snap);
@@ -722,13 +754,13 @@ impl Inner {
             let (lang, site) = (p.lang.clone(), p.site.clone());
             let mut units = std::mem::take(&mut p.units);
             let mut scanned = std::mem::take(&mut p.scanned);
-            let result = self.search(
+            let searched = self.search(
                 run,
                 snap,
                 &scope,
-                &lang,
                 &name,
                 run.started + SEARCH_FOR,
+                &mut account,
                 |eff, key, bytes, until| {
                     let extraction = match extracted.get(&(eff.path.clone(), key)) {
                         Some(done) => done.clone(),
@@ -742,8 +774,11 @@ impl Inner {
                             &mut units,
                             &mut scanned,
                         ) {
-                            FileExtraction::Unsearched => return Searched::Unsearched,
-                            other => other.defs(),
+                            FileExtraction::Defs(e) => Some(e),
+                            FileExtraction::Nothing => None,
+                            FileExtraction::Unsearched(reason) => {
+                                return Searched::Unsearched(reason);
+                            }
                         },
                     };
                     let Some(extraction) = extraction else {
@@ -794,13 +829,24 @@ impl Inner {
             p.units = units;
             p.scanned = scanned;
             drop(search);
-            let _t = crate::phases::span("view check");
-            // The counts of `Partial` read hints too.
-            if result.is_some() && !self.hold_view(run, snap, at, &mut p) {
-                self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
-                return self.end_stale(snap, run.id);
+            if searched {
+                // Every file of the jump's language group, classified once.
+                let part = |l: &Lang| snap.in_group(l, &lang);
+                let walked = {
+                    let _t = crate::phases::span("4 accounting");
+                    snap.walk(&mut account, &scope.dir, &part)
+                };
+                let _t = crate::phases::span("view check");
+                // The walk read hints: a file it took as indexed whose unit
+                // was written after the lookup is looked up again.
+                if !self.hold_view(run, snap, at, &mut p) {
+                    self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
+                    return self.end_stale(snap, run.id);
+                }
+                Some(snap.finish(&account, &scope.dir, &part, walked))
+            } else {
+                None
             }
-            result
         };
         self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
         let Some(completeness) = completeness else {
@@ -901,11 +947,13 @@ impl Inner {
             return Ended::Stopped;
         }
         // Not searched: what is not indexed yet is reported, never taken
-        // as complete.
+        // as complete. Every file of every enabled language, classified
+        // once (`Snap::walk`).
         let dir = near.and_then(|n| snap.subproject_of(n)).unwrap_or("");
+        let part = |l: &Lang| !snap.disabled.contains(l.name());
+        let mut account = Account::default();
         let counts = crate::phases::span("named: counts");
-        let (unindexed, flying) = snap.unindexed_under(dir);
-        let outside = snap.unindexed_outside(dir, None);
+        let walked = snap.walk(&mut account, dir, &part);
         drop(counts);
         self.step_hook(Step::Hints, snap);
         match self.check_view(snap, &view) {
@@ -920,14 +968,7 @@ impl Inner {
             let _t = crate::phases::span("named: rank");
             ranker.sort(&mut candidates);
         }
-        let completeness = if unindexed == 0 && flying == 0 && outside == 0 {
-            Completeness::Complete
-        } else {
-            Completeness::Partial {
-                unsearched: unindexed.saturating_add(flying),
-                outside,
-            }
-        };
+        let completeness = snap.finish(&account, dir, &part, walked);
         let preselect = (!candidates.is_empty()).then_some(0);
         let publish = crate::phases::span("named: publish");
         let all: Arc<[Candidate]> = candidates.into();

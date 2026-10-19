@@ -72,6 +72,20 @@ fn files(default: usize) -> usize {
 #[test]
 #[ignore = "a profile; see the module docs"]
 fn goto_indexed_phases() {
+    goto_phases(false);
+}
+
+/// The same jump once the namespace is full (`Indexer::set_namespace_full`):
+/// hints no longer prove units, so the accounting checks every hinted file
+/// against the store (「完整性的核算」); its cost is the `4 accounting`
+/// phase and the `verified hints` count.
+#[test]
+#[ignore = "a profile; see the module docs"]
+fn goto_indexed_full_phases() {
+    goto_phases(true);
+}
+
+fn goto_phases(full: bool) {
     let n = files(100_000);
     let git = Arc::new(FakeGit::new());
     let dir = tempfile::tempdir().expect("temp dir");
@@ -88,6 +102,9 @@ fn goto_indexed_phases() {
     let rig = Rig::new(git, cache, Arc::new(SystemClock));
     rig.open_with(packages(&synthetic::package_dirs(n)));
     rig.settle();
+    if full {
+        rig.indexer.set_namespace_full(&rig.git.key());
+    }
     let query = Query {
         project: rig.git.key(),
         kind: QueryKind::Definition {
@@ -110,7 +127,12 @@ fn goto_indexed_phases() {
     let r = jump();
     assert!(!r.candidates.is_empty());
     assert_eq!(r.state, QueryState::Done(Completeness::Complete));
-    profile(&format!("goto_indexed phases, {n} files"), JUMPS, jump);
+    let title = if full {
+        "goto_indexed phases, namespace full"
+    } else {
+        "goto_indexed phases"
+    };
+    profile(&format!("{title}, {n} files"), JUMPS, jump);
 }
 
 /// `code_intel/named_50k`'s breakdown: `Named` for `id`, which every unit
