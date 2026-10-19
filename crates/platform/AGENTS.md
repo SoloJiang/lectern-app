@@ -3,8 +3,8 @@
 macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名校验、Claude Code statusline 安装；以及按平台实现的安全读取（`SafeRoot`，Linux 实现也在这里）。macOS 系统绑定只能出现在本 crate（架构规则 6）。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：[docs/design/platform.md](../../docs/design/platform.md)，目前只覆盖安全读取（`SafeRoot`）和 bench 用的进程测量（`process::phys_footprint`）。FSEvents 与 kqueue 后端（`fs_events`，已实现）的设计在 [docs/design/fs_watch.md](../../docs/design/fs_watch.md)「platform 后端」。`open -a`、钥匙串、Seatbelt、statusline 尚未设计：先在这份文档里增加小节或另写设计文档，按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写对应的代码。
-- issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)
+- 设计文档：[docs/design/platform.md](../../docs/design/platform.md)，目前只覆盖安全读取（`SafeRoot`，含范围读取 `open_file`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)）和 bench 用的进程测量（`process::phys_footprint`）。FSEvents 与 kqueue 后端（`fs_events`，已实现）的设计在 [docs/design/fs_watch.md](../../docs/design/fs_watch.md)「platform 后端」。`open -a`、钥匙串、Seatbelt、statusline 尚未设计：先在这份文档里增加小节或另写设计文档，按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写对应的代码。
+- issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#103](https://github.com/SoloJiang/lectern-app/issues/103)
 - ADR：[0004](../../docs/adr/0004.md)、[0014](../../docs/adr/0014.md)、[0018](../../docs/adr/0018.md)、[0019](../../docs/adr/0019.md)、[0024](../../docs/adr/0024.md)
 
 ## 边界
