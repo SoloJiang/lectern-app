@@ -2,13 +2,15 @@
 //! `git/resident` benchmarks (docs/design/git.md「性能」), shared by the
 //! `time` and `memory` targets. Built with `lectern_git::testing::TestRepo`:
 //! files on disk with the stat `git add` records, backdated so that no
-//! index entry is racy.
+//! index entry is racy. `large` is the 100 000-file shape of the
+//! `git/*_100k*` benchmarks.
 
 use std::sync::atomic::AtomicBool;
 
 use lectern_bench::BenchError;
-use lectern_git::testing::{IndexEntry, TestHead, TestRepo};
-use lectern_git::{Base, ChangeSet, Limits, Worktree, WorktreeId};
+use lectern_git::testing::{IndexEntry, IndexStat, TestHead, TestRepo};
+use lectern_git::{Base, ChangeSet, Limits, Mode, Oid, Worktree, WorktreeId};
+use lectern_project::testing::Shape;
 
 /// Linked worktrees besides the main one (11 in all, as in `git/open`).
 const LINKED: usize = 10;
@@ -80,6 +82,100 @@ pub fn edit_modules(t: &TestRepo, modules: usize, round: usize, backdate: bool) 
             t.backdate(&module_path(n));
         }
     }
+}
+
+/// The large repository of the project design (`Shape::monorepo(files,
+/// manifests)`, 100 000 files in「性能」) as a clean worktree, see
+/// `shaped`.
+pub fn large(files: usize, manifests: usize) -> TestRepo {
+    shaped(&Shape::monorepo(files, manifests))
+}
+
+/// A project design shape as one clean worktree with `core.ignoreCase`,
+/// as on macOS: every path a file on disk (the manifests with their
+/// contents, `.gitignore` with three rules, the rest one line each), the
+/// index with their stat, HEAD a tree with the same blob OIDs. Only the
+/// trees go into the object database: a clean comparison reads no blob.
+pub fn shaped(shape: &Shape) -> TestRepo {
+    let t = TestRepo::new();
+    t.append_config("[core]\n\tignoreCase = true\n");
+    let hash = t.hash();
+    let mut manifests = shape.manifests.iter().peekable();
+    let mut entries: Vec<IndexEntry> = Vec::with_capacity(shape.paths.len());
+    for path in &shape.paths {
+        let content: Vec<u8> = match manifests.peek() {
+            Some((p, content)) if p == path => {
+                manifests.next();
+                content.clone()
+            }
+            _ if path == ".gitignore" => b"node_modules/\ndist/\n*.log\n".to_vec(),
+            _ => format!("// {path}\n").into_bytes(),
+        };
+        t.write_file(path, &content);
+        t.backdate(path);
+        entries.push(IndexEntry {
+            stat: Some(IndexStat::of(&t.root().join(path))),
+            ..IndexEntry::new(path, Mode::File, Oid::for_blob(hash, &content))
+        });
+    }
+    let items: Vec<(&str, Mode, Oid)> = shape
+        .paths
+        .iter()
+        .zip(&entries)
+        .map(|(p, e)| (p.as_str(), e.mode, e.oid))
+        .collect();
+    let commit = t.commit(t.tree_entries(&items), &[], "base");
+    t.set_ref("refs/heads/main", commit);
+    t.write_index(t.common_dir(), &entries);
+    t
+}
+
+/// A worktree with realistic changes: `modified` tracked files and
+/// `untracked` untracked files of 10–50 KB each (text), plus one untracked
+/// file of `large` bytes. The tracked files are committed and staged with
+/// their stat before they are rewritten; only trees go into the object
+/// database.
+#[allow(dead_code, reason = "only the memory target's git/changes_count")]
+pub fn mixed(modified: usize, untracked: usize, large: usize) -> TestRepo {
+    let t = TestRepo::new();
+    let hash = t.hash();
+    let size = |i: usize| 10 * 1024 + (i * 7919) % (40 * 1024);
+    let text = |seed: &str, len: usize| {
+        let line = format!("export const value_{seed} = compute({seed});\n");
+        line.repeat(len / line.len() + 1).into_bytes()[..len].to_vec()
+    };
+    let paths: Vec<String> = (0..modified)
+        .map(|i| format!("src/m{:02}/file{i:04}.ts", i % 40))
+        .collect();
+    let mut entries = Vec::with_capacity(modified);
+    for (i, path) in paths.iter().enumerate() {
+        let content = text(&format!("old{i}"), size(i));
+        t.write_file(path, &content);
+        t.backdate(path);
+        entries.push(IndexEntry {
+            stat: Some(IndexStat::of(&t.root().join(path))),
+            ..IndexEntry::new(path, Mode::File, Oid::for_blob(hash, &content))
+        });
+    }
+    let items: Vec<(&str, Mode, Oid)> = paths
+        .iter()
+        .zip(&entries)
+        .map(|(p, e)| (p.as_str(), e.mode, e.oid))
+        .collect();
+    let commit = t.commit(t.tree_entries(&items), &[], "base");
+    t.set_ref("refs/heads/main", commit);
+    t.write_index(t.common_dir(), &entries);
+    for (i, path) in paths.iter().enumerate() {
+        let content = text(&format!("new{i}"), size(i));
+        t.write_file(path, &content);
+    }
+    for i in 0..untracked {
+        let content = text(&format!("gen{i}"), size(i + modified));
+        t.write_file(&format!("gen/d{:02}/out{i:04}.js", i % 40), &content);
+    }
+    let dump = text("dump", large);
+    t.write_file("dump/trace.log", &dump);
+    t
 }
 
 /// A clean repository with `untracked` untracked files of three lines.

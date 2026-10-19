@@ -420,7 +420,7 @@ crates/bench/
   tests/fixtures/     本 crate 自己的小样本（目前没有）
 ```
 
-三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`、`*_peak` 这类进程内的字节数属于 `Memory`；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
+三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
 
 另有一个 `src/bin/lectern-bench-report.rs`，有两个子命令：`merge` 合并各目标的报告，`package --app <.app> --dmg <.dmg>` 测量安装包、写 `report-package.json`（见「报告」）。它只用本 crate 的普通依赖。
 
@@ -525,6 +525,7 @@ crates/bench/
 | `app/idle_empty` | 中位数 < 60 MB；首帧后 30 秒内静止 | [ADR 0017](../adr/0017.md#决策) | 第 5 步 |
 | `app/idle_monorepo` | 中位数 < 100 MB（后台工作已暂停，[ADR 0029](../adr/0029.md)） | [ADR 0017](../adr/0017.md#决策) | `project_home` |
 | `app/idle_monorepo_indexed` | 中位数 < 100 MB（后台工作全部完成后） | [ADR 0029](../adr/0029.md#决策) | `code_intel`（[#17](https://github.com/SoloJiang/lectern-app/issues/17)） |
+| `app/idle_100k`、`app/idle_100k_indexed` | 中位数 < 120 MB（[project 设计「性能」](project.md#性能)的 10 万文件形状、17 个 worktree；采样同 `app/idle_monorepo` 与 `app/idle_monorepo_indexed`，后者在 `app/index_100k` 的启动里、索引全部完成并静止后采样；份额的分配见 ADR 0035） | [ADR 0035](../adr/0035.md#决策) | `project_home` / `code_intel`（#17） |
 | `app/open_project` | 中位数 < 100 ms | [性能预算](tech-research.md#性能预算) | `project_home` |
 | `app/open_file` | 中位数 < 16 ms；场景：cloudprint 形状的普通文件，另有 4 MiB 与 64 MiB 的合成源码、压缩成一行的 4 MiB JS、从 diff 打开 4 MiB `package-lock.json` 中部的一个 hunk（按字节偏移定位），预算相同（[ADR 0034](../adr/0034.md)） | [性能预算](tech-research.md#性能预算) | `file_reader` |
 | `app/enter_edit` | 中位数 ≤ 100 ms（1 MiB、没有超过 4 KiB 的行的文件从 ⌘E 到可以输入；超标时降低编辑上限，[ADR 0034](../adr/0034.md)） | [交互规范「状态与异常」](interaction.md#状态与异常)（100 ms 内不显示加载态） | `file_reader` |
@@ -573,7 +574,14 @@ crates/bench/
 | `git/diff_50_cold` / `git/diff_50_warm` | 中位数 < 20 ms / < 2 ms | [git](git.md#性能) | 第 1 步（`git` 第 2 步先以 `perf_smoke` 测量） |
 | `git/changes_capped` | 中位数 < 1 s | [git](git.md#性能) | `git` 第 3 步 |
 | `git/changes_capped_bytes` | 存活字节 ≤ `Limits` 默认上限之和（数字由 `git` 的实现写入 git 设计） | [git](git.md#性能) | `git` 第 3 步 |
+| `git/changes_count/total_bytes` | 只记录（1000 个改了的跟踪文件、1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 持有的存活字节，现在含 stat 缓存留住的文件内容；`Memory`） | [git](git.md#性能) | 随 [ADR 0035](../adr/0035.md) 加入 |
+| `git/changes_count/per_path_bytes` | 存活字节 ≤ 1 KB（同上除以改动路径数；ADR 0035 按它给首页的改动集定上限；`Memory`） | [git](git.md#性能) | `git` 的 stat 缓存不持有内容的修正与 `git` 第 4 步（释放比较用的 index）中后完成的那个 |
 | `git/resident` | 存活字节 ≤ 48 MB（hunk LRU 16 MB + 一个 `ChangeSet` 32 MB，空闲时不持有句柄） | [git](git.md#性能) | `git` 第 3 步 |
+| `git/open_100k`、`git/filter_100k`、`git/changes_clean_100k` | 中位数 < 40 ms / < 400 ms / < 2 s（10 万个跟踪文件、`core.ignoreCase`：`git/open` 的读取，index 不在缓存里；index 变化后重建 fs_watch 过滤器；干净工作区的 `changes`，每个样本用新的 `Worktree`，index 每次都解析） | [git](git.md#性能) | `git/open_100k` 随 [ADR 0035](../adr/0035.md) 加入；另两项在 macOS CI 上是 678–766 ms 和 9.05–9.54 s，由定位并修正这项开销的 `git` PR 加入 |
+| `git/filter_100k/walk`、`git/changes_clean_100k/stat_all`、`git/changes_clean_100k/read_all` | 只记录（同一仓库：经 `SafeRoot::list` 列出工作区的每个目录一次；对每个跟踪路径 `SafeRoot::stat` 一次；对每个跟踪路径 `SafeRoot::read` 一次。用来定位上一行两项在 macOS 上的开销） | [git](git.md#性能) | 随 ADR 0035 加入 |
+| `git/compare_100k/peak_bytes` | 存活字节 ≤ 72 MB（同一仓库上新 `Worktree` 的一次 `changes` 期间的峰值：比较自己解析的 index、折叠副本、未跟踪遍历、改动集；临时内存，不是空闲份额；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
+| `git/compare_100k/retained_bytes` | 存活字节 < 1 MB（同一次比较返回、丢掉改动集之后 `Worktree` 仍持有的字节：比较用的 index 不在调用之间保留；`Memory`） | [git](git.md#性能) | `git` 第 4 步 |
+| `git/filter_cloudprint_bytes`、`git/filter_100k_bytes` | 存活字节 < 1 MB / ≤ 16 MB（`cloudprint` 形状 / 10 万文件的仓库，`core.ignoreCase`；fs_watch 过滤器连同它的 `Worktree` 句柄：与 `project` 的句柄共用的解析后 index、折叠顺序、忽略规则；`git` 的份额，`fs_watch/resident*` 和 `project/resident_*` 不含它；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
 | `cache/get_4k`、`cache/get_many_50`、`cache/get_1m` | 中位数 < 50 µs / < 1 ms / < 2 ms（分库已打开） | [cache](cache.md#性能) | 第 1 步（`cache` 第 1 步先以 `perf_smoke` 测量） |
 | `cache/open_existing`、`cache/open_new` | 中位数 < 5 ms / < 10 ms | [cache](cache.md#性能) | 第 1 步（同上） |
 | `cache/put_4k`、`cache/batch_1000` | 中位数 < 1 ms / < 15 ms | [cache](cache.md#性能) | 第 1 步（同上） |
@@ -590,11 +598,11 @@ crates/bench/
 | `project/refresh_index/cloudprint`、`…/100k` | 中位数 < 15 ms / < 60 ms（只计模型那一轮；新 index 的解析是 fs_watch 重建过滤器时 `git` 的工作，在批次交付之前完成，不计入） | [project](project.md#性能) | `project` 第 5 步 |
 | `project/facts_contains/name`、`…/path` | 中位数 < 1 µs / < 5 ms（未缓存：模式的结果还没有缓存，每组新 facts 上每个模式各问一次） | [project](project.md#性能) | `project` 第 5 步 |
 | `project/facts_contains/name_first` | 只记录（每组新 facts 上的第一次调用） | [project](project.md#性能) | `project` 第 5 步 |
-| `project/resident_cloudprint_bytes`、`project/resident_100k_bytes` | 中位数 < 2 MB / < 16 MB（`project` 插件静止后的存活字节：只有依赖闭包、但 arm 同样监听的 kernel，与加上 `project` 并打开夹具、填满非当前 worktree 的子项目缓存之后的 kernel 之差，同一进程里按 kernel「性能」测；fs_watch 过滤器持有的解析后 index 两边都有，归 `fs_watch/resident`；与 `plugin/project/resident_*` 同一数字；`Memory`） | [project](project.md#性能) | `project` 第 5 步 |
+| `project/resident_cloudprint_bytes`、`project/resident_100k_bytes` | 中位数 < 2 MB / < 16 MB（`project` 插件静止后的存活字节：只有依赖闭包、但 arm 同样监听的 kernel，与加上 `project` 并打开夹具、填满非当前 worktree 的子项目缓存之后的 kernel 之差，同一进程里按 kernel「性能」测；fs_watch 的监听和过滤器（连同过滤器持有的解析后 index）两边都有，分别归 `fs_watch/resident*` 和 `git/filter_*_bytes`；与 `plugin/project/resident_*` 同一数字；`Memory`） | [project](project.md#性能) | `project` 第 5 步 |
 | `fs_watch/classify_burst` | 中位数 < 100 ms（`FakeBackend` 注入 10 万个 `node_modules/**` 事件和 1000 个受跟踪路径事件，728 个跟踪文件、20 条忽略规则） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 1 步（基准由 [#92](https://github.com/SoloJiang/lectern-app/pull/92) 加入） |
 | `fs_watch/reflog_append` | 中位数 < 1 ms（追加一行 reflog 到记录进入批次，不含后端延迟） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 1 步（同上） |
 | `fs_watch/flush_idle`、`fs_watch/write_to_deliver` | 中位数 < 5 ms / < 120 ms（macOS 真实后端） | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
-| `fs_watch/resident` | 常驻增量 < 1 MB，含过滤器持有的当前 worktree 解析后 index（与 `project` 的句柄共用）；`Memory` | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
+| `fs_watch/resident`、`fs_watch/resident_100k` | 常驻增量 < 1 MB / < 1 MB（11 个 worktree、728 个文件的仓库 / 10 万文件、17 个 worktree 的仓库）；只计本 crate 自己的状态，过滤器和它持有的解析后 index 归 `git`（ADR 0035）；`Memory` | [fs_watch](fs_watch.md#性能) | `fs_watch` 第 4 步 |
 | `code_intel/extract_throughput` | 中位数吞吐 ≥ 4 MB/s（单线程，首发的每种语言约 1 MiB，切成约 8 KiB 的文件，看门狗在运行；核心语言用一次遍历抽取；测量方式和预算的推导见 [ADR 0031](../adr/0031.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `code_intel/extract_1mib` | 只记录（每种语言一个约 1 MiB 的文件，对照单文件 250 ms 的截止时间） | [code_intel](code_intel.md#性能) | `code_intel` 第 1 步 |
 | `code_intel/warm_100k` | 中位数 < 500 ms（热启动的存在检查：缓存里已有 10 万个文件的单元，200 次 500 个 OID 的查询，只读、不标记访问） | [code_intel](code_intel.md#性能) | `code_intel` 第 2 步 |
@@ -843,6 +851,12 @@ CI：
 
   `Kernel::start` 本身另用一个临时测试（不提交）测量，见 [kernel 设计「实际验证」](kernel.md#实际验证)：改动前后中位数都在 80–100 µs（20 个插件，含 `barrier`）。
 - 没有验证的：探针怎样用这组接口（第 4 步），macOS 上的运行（kernel 不依赖 GPUI，行为与 Linux 相同）。
+
+10 万文件的预算与内存归属（[ADR 0035](../adr/0035.md)，`Refs #7`），同一类 Linux 虚拟机：
+
+- 预算表加入 `app/idle_100k`、`app/idle_100k_indexed`（计划中）、`git/open_100k`、`git/filter_100k/walk`、`git/changes_clean_100k/stat_all`、`git/changes_clean_100k/read_all`、`git/filter_cloudprint_bytes`、`git/filter_100k_bytes`、`git/compare_100k/peak_bytes`、`git/changes_count/total_bytes`（生效）、`git/compare_100k/retained_bytes`（计划中，`git` 第 4 步）、`git/changes_count/per_path_bytes`（计划中，stat 缓存的修正与 `git` 第 4 步中后完成的那个）、`git/filter_100k` 和 `git/changes_clean_100k`（计划中，macOS 上超标，见下）和 `fs_watch/resident_100k`（计划中）；`fs_watch/resident` 改为不含过滤器。新的夹具 `benches/fixtures/git_worktree.rs` 的 `shaped` 按 project 的 `Shape` 写出真实文件和带 stat 的 index（`core.ignoreCase = true`），只写树对象。实测值见 [git 设计「实际验证」](git.md#实际验证)。
+- `budgets_belong_to_the_documented_targets` 把 `fs_watch/resident_100k` 归入 `Memory`。
+- macOS CI（PR [#129](https://github.com/SoloJiang/lectern-app/pull/129)）上 `git/changes_clean_100k` 中位数 9.05、9.54 s（< 2 s），`git/filter_100k` 766、678 ms（< 400 ms），Linux 上约 1.0 s 和 214–276 ms；其余条目通过。预算不放宽：两行改为计划中，由定位并修正这项开销的 `git` PR 改为生效（git 设计「与设计的差异」）。基准在条目生效时才产出它们（`active`），另外总是记录 `git/filter_100k/walk`、`git/changes_clean_100k/stat_all`、`git/changes_clean_100k/read_all`，它们的值出现在 CI 的 Markdown 摘要里，下一个 PR 据此分辨开销在 stat、读取还是目录遍历。Linux 上依次是 163 ms、279 ms、393 ms。
 
 ## 与设计的差异
 

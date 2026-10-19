@@ -146,6 +146,7 @@ const ADR_0017_IMPACT: &str = "docs/adr/0017.md#影响";
 const ADR_0018_DECISION: &str = "docs/adr/0018.md#决策";
 const ADR_0018_IMPACT: &str = "docs/adr/0018.md#影响";
 const ADR_0029_DECISION: &str = "docs/adr/0029.md#决策";
+const ADR_0035_DECISION: &str = "docs/adr/0035.md#决策";
 const AGENTS: &str = "docs/design/agents.md#性能";
 const GIT: &str = "docs/design/git.md#性能";
 const CACHE: &str = "docs/design/cache.md#性能";
@@ -201,6 +202,7 @@ const fn share(
 const ACTIVE: State = State::Active;
 const STEP_4: State = State::Planned("bench 第 4 步");
 const STEP_5: State = State::Planned("bench 第 5 步");
+const MACOS_100K: State = State::Planned("git：macOS 上 10 万文件的比较与过滤器重建达标");
 
 use Target::{Memory, Package, Process, Time};
 
@@ -247,6 +249,23 @@ pub static BUDGETS: &[Budget] = &[
         "app/idle_monorepo_indexed",
         &[median(Limit::BytesBelow(100 * MB))],
         ADR_0029_DECISION,
+        State::Planned("#17"),
+        Process,
+    ),
+    // The same two on the large repository (100 000 files, 17 worktrees),
+    // ADR 0035; `app/idle_100k_indexed` is sampled in the launches of
+    // `app/index_100k`, once indexing is done and the app is at rest.
+    top(
+        "app/idle_100k",
+        &[median(Limit::BytesBelow(120 * MB))],
+        ADR_0035_DECISION,
+        State::Planned("project_home"),
+        Process,
+    ),
+    top(
+        "app/idle_100k_indexed",
+        &[median(Limit::BytesBelow(120 * MB))],
+        ADR_0035_DECISION,
         State::Planned("#17"),
         Process,
     ),
@@ -612,10 +631,109 @@ pub static BUDGETS: &[Budget] = &[
     // Live bytes at most the sum of the `Limits` defaults; the git
     // implementation writes the number into the git design and here.
     share("git/changes_capped_bytes", RECORD, GIT, ACTIVE, Memory),
+    // The project home's count of changes outside sessions (ADR 0035):
+    // 1000 modified tracked and 1000 untracked files of 10–50 KB and one
+    // 16 MiB untracked file, with `retained_bytes = 0` and
+    // `total_patch_bytes = 0`; the change set and what its `Worktree` holds.
+    // Recorded: today the stat cache keeps every read file's content
+    // allocated (git design「与设计的差异」).
+    share("git/changes_count/total_bytes", RECORD, GIT, ACTIVE, Memory),
+    // The same per changed path once comparison caches hold no content and
+    // the comparison index is released (about 1163 B with the first alone):
+    // active with whichever of the two lands later.
+    share(
+        "git/changes_count/per_path_bytes",
+        &[median(Limit::BytesAtMost(1024))],
+        GIT,
+        State::Planned(
+            "git：stat 缓存不持有内容，且第 4 步释放比较用的 index（两者中后完成的那个）",
+        ),
+        Memory,
+    ),
     // Hunk LRU 16 MB plus one `ChangeSet` 32 MB; no handle held while idle.
     share(
         "git/resident",
         &[median(Limit::BytesAtMost(48 * MB))],
+        GIT,
+        ACTIVE,
+        Memory,
+    ),
+    // The current worktree's fs_watch filter with its `Worktree`: the
+    // parsed index shared with `project`'s kept handle, the case-folded
+    // order, the ignore rules. git's share (ADR 0035); `fs_watch/resident*`
+    // and `project/resident_*` exclude it. `cloudprint` shape here, the
+    // large repository below.
+    share(
+        "git/filter_cloudprint_bytes",
+        &[median(Limit::BytesBelow(MB))],
+        GIT,
+        ACTIVE,
+        Memory,
+    ),
+    // ---- the large repository (100 000 tracked files, ADR 0035) ----
+    // `git/open` there: the index parsed with nothing cached; part of
+    // `project/open_100k/files`.
+    share(
+        "git/open_100k",
+        &[median(Limit::TimeBelow(ms(40)))],
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    // The fs_watch filter rebuilt after an index change: index, case-folded
+    // order, untracked walk and `.gitignore` files; batches wait for it.
+    // Planned: macOS CI measured 766 and 678 ms (Linux 214–276 ms); a git
+    // PR locates and fixes the cost (git design「与设计的差异」).
+    share(
+        "git/filter_100k",
+        &[median(Limit::TimeBelow(ms(400)))],
+        GIT,
+        MACOS_100K,
+        Time,
+    ),
+    // Recorded, to locate that cost: one listing of every directory of the
+    // worktree through `SafeRoot::list`.
+    share("git/filter_100k/walk", RECORD, GIT, ACTIVE, Time),
+    // A full comparison of a clean worktree, in the background after the
+    // file list is shown: the index parsed (cold, a new `Worktree` each
+    // sample: no parsed index is kept between calls, ADR 0035), every
+    // tracked file skipped by stat, the untracked walk. Every
+    // `refresh(Full)` does the same. Planned: macOS CI measured 9.05 and
+    // 9.54 s (Linux about 1.0 s), as above.
+    share(
+        "git/changes_clean_100k",
+        &[median(Limit::TimeBelow(ms(2000)))],
+        GIT,
+        MACOS_100K,
+        Time,
+    ),
+    // Recorded, to locate it: one `SafeRoot::stat`, and one `SafeRoot::read`,
+    // of every tracked path.
+    share("git/changes_clean_100k/stat_all", RECORD, GIT, ACTIVE, Time),
+    share("git/changes_clean_100k/read_all", RECORD, GIT, ACTIVE, Time),
+    // That comparison's peak of live bytes (temporary memory, not idle):
+    // the comparison's own parsed index and case-folded copy, the walk,
+    // the change set.
+    share(
+        "git/compare_100k/peak_bytes",
+        &[median(Limit::BytesAtMost(72 * MB))],
+        GIT,
+        ACTIVE,
+        Memory,
+    ),
+    // What the `Worktree` still holds after it, the change set dropped:
+    // no parsed index between calls (ADR 0035); 39 MB until git step 4.
+    share(
+        "git/compare_100k/retained_bytes",
+        &[median(Limit::BytesBelow(MB))],
+        GIT,
+        State::Planned("git 第 4 步"),
+        Memory,
+    ),
+    // `git/filter_cloudprint_bytes` there.
+    share(
+        "git/filter_100k_bytes",
+        &[median(Limit::BytesAtMost(16 * MB))],
         GIT,
         ACTIVE,
         Memory,
@@ -824,7 +942,8 @@ pub static BUDGETS: &[Budget] = &[
     // without, in one process (kernel「性能」's two launches); the numbers
     // of `plugin/project/resident_*`. The one without arms the same watches,
     // so the fs_watch filter and the parsed index it shares with the
-    // plugin's worktree handle are `fs_watch/resident`'s, not counted here.
+    // plugin's worktree handle (git's, `git/filter_*_bytes`) and
+    // fs_watch's own state cancel out, not counted here.
     share(
         "project/resident_cloudprint_bytes",
         &[median(Limit::BytesBelow(2 * MB))],
@@ -928,10 +1047,19 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // `watch_repo` plus the current worktree's `watch_worktree` on an
-    // 11-worktree repository, at rest; the filter's index (`TrackedPaths`,
-    // shared with `project`'s worktree handle) included.
+    // 11-worktree repository, at rest: fs_watch's own state. The filter
+    // and the parsed index it shares with `project`'s worktree handle are
+    // git's (ADR 0035), measured apart and not counted here.
     share(
         "fs_watch/resident",
+        &[median(Limit::BytesBelow(MB))],
+        FS_WATCH,
+        State::Planned("fs_watch 第 4 步"),
+        Memory,
+    ),
+    // The same on the large repository (100 000 files, 17 worktrees).
+    share(
+        "fs_watch/resident_100k",
         &[median(Limit::BytesBelow(MB))],
         FS_WATCH,
         State::Planned("fs_watch 第 4 步"),

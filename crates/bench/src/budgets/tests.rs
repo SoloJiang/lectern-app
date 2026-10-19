@@ -200,6 +200,7 @@ fn budgets_belong_to_the_documented_targets() {
             || budget.id == "git/resident"
             || budget.id == "cache/memory"
             || budget.id == "fs_watch/resident"
+            || budget.id == "fs_watch/resident_100k"
         {
             Target::Memory
         } else if ["app/", "plugin/", "lsp/", "baseline/"]

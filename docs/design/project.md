@@ -614,9 +614,9 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 | `resolve_package`，非当前 worktree：缓存命中（读 index 校验和，加上约 25 个清单各一次 `lstat`）/ 未命中、清单缓存已热，`cloudprint` 形状 / 未命中，10 万文件 | < 1 ms / < 20 ms / < 150 ms | `project/resolve_package` |
 | `index` 变化后的刷新（重建文件列表与 facts、重算成员解析，清单缓存已热；不含新 index 的解析，它是 fs_watch 重建过滤器时 `git` 的工作，在批次交付之前完成），`cloudprint` 形状 / 10 万文件 | < 15 ms / < 60 ms | `project/refresh_index` |
 | `contains`：文件名与 `*.ext` 模式 / 含 `/` 的模式（10 万文件，未缓存：这个模式的结果还没有缓存，不是指 facts 建好之后的第一次调用；第一次调用的耗时只记录，`project/facts_contains/name_first`） | < 1 µs / < 5 ms | `project/facts_contains` |
-| 常驻内存：`cloudprint` 形状 / 10 万文件（含 16 个非当前 worktree 的子项目列表缓存，文件列表带 blob OID；不含 fs_watch 过滤器持有的、与当前 worktree 句柄共用的解析后 index，那是 `fs_watch/resident` 的份额） | < 2 MB / < 16 MB | `project/resident_cloudprint_bytes`、`project/resident_100k_bytes`（进程内的存活字节）；`plugin/project/resident_*`（静止后按 kernel「性能」一节测 `phys_footprint`，随 bench 第 5 步） |
+| 常驻内存：`cloudprint` 形状 / 10 万文件（含 16 个非当前 worktree 的子项目列表缓存，文件列表带 blob OID；不含 fs_watch 过滤器持有的、与当前 worktree 句柄共用的解析后 index，那是 `git` 的份额 `git/filter_cloudprint_bytes`、`git/filter_100k_bytes`，见 [ADR 0035](../adr/0035.md)） | < 2 MB / < 16 MB | `project/resident_cloudprint_bytes`、`project/resident_100k_bytes`（进程内的存活字节）；`plugin/project/resident_*`（静止后按 kernel「性能」一节测 `phys_footprint`，随 bench 第 5 步） |
 
-- 对应[性能预算](tech-research.md#性能预算)的「打开项目到项目主页可用 < 100 ms」「切换 worktree / 分支 < 100 ms」和 ADR 0017 的「打开一个 monorepo 后空闲 < 100 MB」。主页在文件列表就绪后即可用，子项目稍后填入侧栏的 Packages。
+- 对应[性能预算](tech-research.md#性能预算)的「打开项目到项目主页可用 < 100 ms」「切换 worktree / 分支 < 100 ms」和 ADR 0017 的「打开一个 monorepo 后空闲 < 100 MB」；10 万文件的常驻份额对应 ADR 0035 的「10 万文件的仓库空闲 < 120 MB」，各份额的加总见那条 ADR。主页在文件列表就绪后即可用，子项目稍后填入侧栏的 Packages。
 - 常驻内存里的 blob OID：当前 worktree 的文件列表每条按列表的哈希算法定长存 20 或 32 字节（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）。10 万文件多 2.0 MB（SHA-1）或 3.2 MB（SHA-256，约 3.05 MiB），10 万文件的预算从 12 MB 改为 16 MB，覆盖 SHA-256 仓库。`cloudprint` 形状 728 个文件只多约 23 KB，2 MB 不变。非当前 worktree 不保留文件列表，`resolve_package` 读出的列表算完子项目即丢弃，OID 只增加这段时间的峰值。
 - 首帧之前什么都不做：插件 `AfterFirstFrame` 激活，`activate` 只建空表；第一次扫描由首帧之后的 `open` 触发。
 - 预算是初始值，实现时用真实规模的合成仓库实测后校准，写进 bench 的预算表，超标即 CI 失败。合成仓库由 `testing` 的形状描述加 git 的 `test-support` 构造器生成，不依赖 git 命令行和网络。
@@ -624,7 +624,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
   - 夹具：`testing::Shape` 由 bench 用 `TestRepo` 写出。index 列出形状的全部路径和各自的 blob OID；工作区里只写清单，模型不读 git worktree 里清单以外的文件。linked worktree 有与主 worktree 相同的 index 和清单。`cloudprint` 形状 11 个 worktree；10 万文件的仓库计时用 2 个，测常驻内存用 17 个（16 个非当前 worktree）。
   - 计时基准用 `testing::Driven`：模型的任务在基准线程上运行，fs_watch 用手动驱动的 `FakeBackend`，它自己的工作（arm、合并、过滤器重建）在计时之外。打开项目每个样本用新的模型（解析缓存为空）：从 `open` 到文件列表的 facts 提交是「文件列表就绪」，从那里到 `Changed [packages]` 是「再到子项目就绪」。`index` 变化后的刷新只计模型的那一轮：生产中 fs_watch 收到 index 变化即在自己的线程上重建过滤器，新的 index 在合并窗口结束、批次交付之前已经解析进两者共用的 `TrackedPaths`。
   - `contains` 每组新 facts 上每个模式各问一次（都未缓存），各模式轮流做第一个，每次调用是一个样本，与 kernel 在一次提交之后依次问各插件模式的情形相同。「未缓存」指这个模式的结果还没有缓存。每组 facts 的第一次调用另记为 `project/facts_contains/name_first`，只记录。
-  - 常驻内存在 `memory` 目标里按 kernel「性能」的两次启动在同一进程里测：一个 kernel 只有依赖闭包（空），但 arm 与 `project` 相同的监听（仓库与当前 worktree，过滤器来自一个 `lectern-git` worktree 句柄）；另一个加上 `project`，打开夹具、arm 监听并处理第一批、对每个非当前 worktree 调一次 `resolve_package`。两者静止后计数分配器的存活字节之差是本 crate 的份额。监听与过滤器，连同过滤器持有的、与本 crate 保留的句柄共用的解析后 index（`TrackedPaths`），归 fs_watch（`fs_watch/resident`），两边都有，相减抵消。计入本 crate 的有文件列表、子项目及其缓存、kernel 保留的 facts、解析缓存，以及一个持有服务引用的测试插件（几百字节）。进程级的 `plugin/project/resident_*` 要 `app` 的测量构建，随 bench 第 5 步生效，归属相同。
+  - 常驻内存在 `memory` 目标里按 kernel「性能」的两次启动在同一进程里测：一个 kernel 只有依赖闭包（空），但 arm 与 `project` 相同的监听（仓库与当前 worktree，过滤器来自一个 `lectern-git` worktree 句柄）；另一个加上 `project`，打开夹具、arm 监听并处理第一批、对每个非当前 worktree 调一次 `resolve_package`。两者静止后计数分配器的存活字节之差是本 crate 的份额。监听归 fs_watch（`fs_watch/resident*`），过滤器连同它持有的、与本 crate 保留的句柄共用的解析后 index（`TrackedPaths`）归 git（`git/filter_*_bytes`，ADR 0035），两边都有，相减抵消。计入本 crate 的有文件列表、子项目及其缓存、kernel 保留的 facts、解析缓存，以及一个持有服务引用的测试插件（几百字节）。进程级的 `plugin/project/resident_*` 要 `app` 的测量构建，随 bench 第 5 步生效，归属相同。
 
 ## 状态与异常
 
@@ -798,9 +798,9 @@ git 项目的文件列表带 blob OID（code_intel「验收」前置条件 B）�
   | `project/resident_cloudprint_bytes` | < 2 MB | 119 KB / 119 KB |
   | `project/resident_100k_bytes` | < 16 MB | 12.7 MB / 12.7 MB |
 
-- `refresh_index` 不含新 index 的解析：它是 fs_watch 收到 index 变化后重建过滤器时 `git` 的工作（`Worktree::tracked`，结果与本 crate 保留的句柄共用），在合并窗口结束、批次交付之前完成。10 万条的 index 单独解析一次约 39 ms（`memory` 目标里一次测量）。`git` 设计「性能」的 index 读取份额（`discover` + `worktrees` + `tracked` < 15 ms）只按 `cloudprint` 量级（728 个文件）给出，没有 10 万文件的份额；打开项目的 `open_100k/files` 包含这次解析，在 80 ms 内。
+- `refresh_index` 不含新 index 的解析：它是 fs_watch 收到 index 变化后重建过滤器时 `git` 的工作（`Worktree::tracked`，结果与本 crate 保留的句柄共用），在合并窗口结束、批次交付之前完成。10 万条的 index 单独解析一次约 39 ms（`memory` 目标里一次测量）。`git` 设计「性能」的 index 读取份额（`discover` + `worktrees` + `tracked` < 15 ms）只按 `cloudprint` 量级（728 个文件）给出，没有 10 万文件的份额；打开项目的 `open_100k/files` 包含这次解析，在 80 ms 内。之后 git 设计加了 10 万文件的 `git/open_100k`（< 40 ms）和重建过滤器的 `git/filter_100k`（< 400 ms，见 [ADR 0035](../adr/0035.md)）。
 - `facts_contains/name`：第一次测量超标（5.36 µs）。分项（10 万文件，每组新 facts 依次问 5 个模式，300 组的中位数）：第一个模式 3,994 ns，之后未缓存的模式 655–2,283 ns，已缓存 183 ns。原因都在本 crate：每次未缓存的查询先用 `glob` 编译模式，再判断是不是纯文件名或 `*.ext`；结果缓存的插入每次分配一个 `Box<str>`，第一次还要分配 `HashMap`。改为纯文件名和 `*.ext` 直接查表，结果缓存改为建 facts 时预留的模式缓冲区加按哈希查的表（检查不分配），文件名集合改为下一条的紧凑表。之后在同一台机器上与改动前交替运行三轮：`name` 548–613 ns 对 408–508 ns，`name_first` 1.44–1.8 µs 对 1.0–1.1 µs。基准的取样方式：「未缓存」指模式的结果还没有缓存，每组 facts 上每个模式各问一次、轮流做第一个；每组 facts 的第一次调用另记为只记录的 `name_first`。
-- 常驻内存的归属：fs_watch 过滤器持有当前 worktree 解析后的 index（`TrackedPaths`），本 crate 保留的句柄与它共用一份，算作 fs_watch 的份额（`fs_watch/resident`）。基准里不含本插件的 kernel 也 arm 同样的监听，两边相减抵消（见「性能」的测法）。这一份在 10 万文件时是 13.5 MB（基线 kernel 加监听的存活字节 14.1 MB，几乎都是它；`TrackedEntry` 每条 56 字节加一个 `Arc<[u8]>` 路径），`cloudprint` 形状时 120 KB。`fs_watch/resident` 的预算是 11 个 worktree、728 个文件的仓库上 < 1 MB，`cloudprint` 量级在内；10 万文件时 13.5 MB 远超 1 MB，那条预算没有 10 万文件的数字，这里没有改它。
+- 常驻内存的归属：fs_watch 过滤器持有当前 worktree 解析后的 index（`TrackedPaths`），本 crate 保留的句柄与它共用一份，算作 fs_watch 的份额（`fs_watch/resident`）。基准里不含本插件的 kernel 也 arm 同样的监听，两边相减抵消（见「性能」的测法）。这一份在 10 万文件时是 13.5 MB（基线 kernel 加监听的存活字节 14.1 MB，几乎都是它；`TrackedEntry` 每条 56 字节加一个 `Arc<[u8]>` 路径），`cloudprint` 形状时 120 KB。`fs_watch/resident` 的预算是 11 个 worktree、728 个文件的仓库上 < 1 MB，`cloudprint` 量级在内；10 万文件时 13.5 MB 远超 1 MB，那条预算没有 10 万文件的数字，这里没有改它。之后 [ADR 0035](../adr/0035.md) 把这份 index 连同过滤器改为 `git` 的份额（`git/filter_100k_bytes` ≤ 16 MB，10 万文件、`core.ignoreCase` 时实测 13.9 MB），`fs_watch/resident` 只计 fs_watch 自己的状态；本 crate 的份额和测法不变。
 - 本 crate 的份额（10 万文件，17 个 worktree，存活字节，按 2^20 计 MB），去重之前 / 之后：
 
   | 部分 | 之前 | 之后 |
@@ -879,7 +879,7 @@ git 项目的文件列表带 blob OID（code_intel 前置条件 B）：
 第 5 步：
 
 - 常驻内存先在进程内测。kernel「性能」的方法是两次启动 `app` 取 `phys_footprint`，要 `app` 的测量构建（bench 第 5 步），现在还没有。本步在 bench 的 `memory` 目标里按同样的「依赖闭包 / 依赖闭包加本插件」在一个进程里测计数分配器的存活字节，预算表新增 `project/resident_cloudprint_bytes`、`project/resident_100k_bytes` 两条，数字与出处同 `plugin/project/resident_*`；后者仍是计划中，改由 bench 第 5 步加入。已改「性能」。
-- 常驻内存的归属写明：fs_watch 过滤器持有、与本 crate 保留的句柄共用的解析后 index 算 fs_watch 的份额（`fs_watch/resident`，fs_watch 设计原来写「不含 `git` 的文件列表」，已改为含），不算本 crate 的。第 4 步保留句柄时没有说明这一份归谁；按本文原来的写法测，10 万文件是 33.7 MB，其中 13.5 MB 是这份 index。已改「性能」。
+- 常驻内存的归属写明：fs_watch 过滤器持有、与本 crate 保留的句柄共用的解析后 index 算 fs_watch 的份额（`fs_watch/resident`，fs_watch 设计原来写「不含 `git` 的文件列表」，已改为含），不算本 crate 的。第 4 步保留句柄时没有说明这一份归谁；按本文原来的写法测，10 万文件是 33.7 MB，其中 13.5 MB 是这份 index。已改「性能」。（这份 index 后来由 [ADR 0035](../adr/0035.md) 改为 `git` 的份额，不再算 fs_watch 的。）
 - 非当前 worktree 的子项目缓存与相等的列表共用一份；facts 的文件名集合改为一个缓冲区加紧凑表；模式结果缓存改为预留的缓冲区加表、检查时不分配。都是内部结构，接口和行为不变，已改「WorkspaceFacts」「数据流与线程」。
 - 新增只记录的 `project/facts_contains/name_first`（每组新 facts 的第一次调用），「性能」表写明「未缓存」指模式的结果还没有缓存。
 - 公开项多了 `testing::Shape`、`testing::Driven`、`testing::Logged` 和 `ProjectPlugin::with_repository_config_only`（已写进「本 crate 的公开项」）；`test-support` 多打开 `lectern-git/test-support`（`lectern_git::testing::discover`）。设计原来只写了「合成仓库的形状随第 5 步加入」。
