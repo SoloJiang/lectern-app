@@ -150,6 +150,60 @@ fn refs_nested_helper_is_local() {
     );
 }
 
+/// The same nested `helper` found by `Named` (⌘K): the index does not store
+/// locality, the candidate's file gives it; its references are only in the
+/// outer function. A `DefinitionRef` that says otherwise (made by anyone)
+/// is corrected by find references from the definition's own file.
+#[test]
+fn refs_nested_helper_from_named_is_local() {
+    let h = indexed(&[
+        (
+            "a.js",
+            "export function outer() {\n  const helper = () => 1;\n  return helper() + helper();\n}\n",
+        ),
+        (
+            "b.js",
+            "export function helper() { return 2; }\nhelper();\n",
+        ),
+    ]);
+    let r = h.ask(QueryKind::Named {
+        name: "helper".into(),
+        near: None,
+    });
+    let local: Vec<(String, bool)> = r
+        .candidates
+        .iter()
+        .map(|c| {
+            let d = &c.definition;
+            (d.location.path.to_string(), d.local)
+        })
+        .collect();
+    assert_eq!(
+        local,
+        [("a.js".to_owned(), true), ("b.js".to_owned(), false)],
+        "{local:?}"
+    );
+    let mut of = r
+        .candidates
+        .iter()
+        .find(|c| &*c.definition.location.path == "a.js")
+        .expect("a.js")
+        .definition
+        .clone();
+    for given in [true, false] {
+        of.local = given;
+        let r = refs(&h, &of);
+        assert_eq!(
+            at(&r.callers),
+            [("a.js".to_owned(), 2), ("a.js".to_owned(), 2)],
+            "given {given}"
+        );
+        assert!(r.same_name.is_empty(), "given {given}: {:?}", r.same_name);
+        let defines = r.symbol.as_ref().and_then(|s| s.defines.as_ref());
+        assert!(defines.is_some_and(|d| d.local), "given {given}");
+    }
+}
+
 /// A use bound by the locals to another (shadowing) local is dropped.
 #[test]
 fn refs_shadowed_uses_are_dropped() {

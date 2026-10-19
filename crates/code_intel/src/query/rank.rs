@@ -72,7 +72,8 @@ pub(crate) struct Ranker<'a> {
     /// The reference's path (`Named`: the `near` path); None ranks every
     /// candidate `Elsewhere`.
     pub from: Option<&'a str>,
-    /// The current text: (origin, OID) of `from`.
+    /// The current text: (origin, OID) of `from`. None when there is none
+    /// (`Named`): then no candidate is `CurrentFile`, `near` only orders.
     pub current: Option<(TextOrigin, BlobId)>,
     pub packages: &'a [Package],
     /// "The same package" of `from`.
@@ -98,7 +99,9 @@ impl Ranker<'_> {
         let Some(from) = self.from else {
             return CandidateTier::Elsewhere;
         };
-        if path == from && self.current.is_none_or(|c| c == (origin, oid)) {
+        // Every tier needs what it compares with to be known: an absent
+        // current text, package or sub-project matches nothing.
+        if path == from && self.current.is_some_and(|c| c == (origin, oid)) {
             return CandidateTier::CurrentFile;
         }
         if imported {
@@ -107,15 +110,25 @@ impl Ranker<'_> {
         if self.package.as_ref().is_some_and(|p| p.contains(path)) {
             return CandidateTier::SamePackage;
         }
-        let mine = deepest(self.packages, from);
-        let theirs = deepest(self.packages, path);
-        if mine == theirs {
+        if self.same_subproject(from, path) {
             return CandidateTier::SameSubproject;
         }
+        let theirs = deepest(self.packages, path);
         if theirs.is_some_and(|t| self.dependencies.iter().any(|d| **d == *t)) {
             return CandidateTier::DependentSubproject;
         }
         CandidateTier::Elsewhere
+    }
+
+    /// Whether `a` and `b` are in the same sub-project: the deepest one
+    /// holding both, or the whole worktree when it has no sub-projects. Two
+    /// files that no sub-project holds are not in the same one.
+    fn same_subproject(&self, a: &str, b: &str) -> bool {
+        if self.packages.is_empty() {
+            return true;
+        }
+        let mine = deepest(self.packages, a);
+        mine.is_some() && mine == deepest(self.packages, b)
     }
 
     /// The order within one batch.
@@ -144,9 +157,8 @@ impl Ranker<'_> {
         let group = if self.in_review(path) {
             0
         } else {
-            let mine = deepest(self.packages, from);
             let theirs = deepest(self.packages, path);
-            if mine == theirs {
+            if self.same_subproject(from, path) {
                 1
             } else if theirs.is_some_and(|t| self.dependencies.iter().any(|d| **d == *t)) {
                 2

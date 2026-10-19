@@ -530,7 +530,7 @@ impl Inner {
         }
 
         // 3. The index.
-        self.index_step(snap, &at.path, &ranker, &mut prepared);
+        self.index_step(snap, &at.path, &ranker, &mut prepared, cancel);
         Ok(prepared)
     }
 
@@ -543,6 +543,7 @@ impl Inner {
         from: &str,
         ranker: &Ranker<'_>,
         prepared: &mut Prepared,
+        cancel: &Arc<AtomicBool>,
     ) -> bool {
         let rules = self.resolver(prepared.lang.name());
         let mut drafts = self.index_candidates(
@@ -555,6 +556,18 @@ impl Inner {
         );
         let _t = crate::phases::span("3 disambiguate + rank");
         rules.disambiguate(&prepared.site, &mut drafts);
+        // Their locality from their file's parse; not for the current text's
+        // definitions, which step 1 listed with theirs (dropped below as
+        // delivered).
+        let delivered = &prepared.delivered;
+        let targets: Vec<&mut DefinitionRef> = drafts
+            .iter_mut()
+            .filter(|d| {
+                d.maybe_local && !delivered.contains(&loc_key(&d.candidate.definition.location))
+            })
+            .map(|d| &mut d.candidate.definition)
+            .collect();
+        self.recover_locality(snap, cancel, targets);
         let mut found: Vec<Candidate> = drafts.into_iter().map(|d| d.candidate).collect();
         ranker.sort(&mut found);
         crate::phases::count("candidates", found.len() as u64);
@@ -591,7 +604,7 @@ impl Inner {
             Some((at.origin, at.oid)),
             Some(prepared.lang.name()),
         );
-        if self.index_step(snap, &at.path, &ranker, prepared) {
+        if self.index_step(snap, &at.path, &ranker, prepared, &run.cancel) {
             let all: Arc<[Candidate]> = prepared.candidates.clone().into();
             let (jump, preselect) = jump_and_preselect(&prepared.candidates, Some(&prepared.site));
             self.publish_in(snap, run.id, |r| {
@@ -600,6 +613,75 @@ impl Inner {
                 r.preselect = preselect;
             });
         }
+    }
+
+    /// The locality (`DefinitionRef::local`) of definitions from the index,
+    /// which does not store it: the parse of their file gives it, as it
+    /// gives a jump's current text its own. Only `Visibility::File`
+    /// definitions can be local (a definition inside a function or block is
+    /// `File` in every language, `rules::finish`), so only those come here;
+    /// each file is read (the snapshot's content, `read_content`) and parsed
+    /// once, with tier 1's limits. A file that cannot be read or parsed
+    /// leaves them not local: find references then searches the project,
+    /// which finds the scope's references too.
+    pub(crate) fn recover_locality(
+        &self,
+        snap: &Snap,
+        cancel: &Arc<AtomicBool>,
+        mut targets: Vec<&mut DefinitionRef>,
+    ) {
+        if targets.is_empty() {
+            return;
+        }
+        let _t = crate::phases::span("locality");
+        let mut files: HashMap<(RelPath, BlobId), Vec<usize>> = HashMap::new();
+        for (i, d) in targets.iter().enumerate() {
+            files
+                .entry((d.location.path.clone(), d.location.oid))
+                .or_default()
+                .push(i);
+        }
+        crate::phases::count("locality parses", files.len() as u64);
+        for ((path, oid), at) in files {
+            let first = &targets[at[0]].location;
+            let site = Position {
+                line: first.line,
+                column: first.column,
+            };
+            let Some(local) = self.file_locals(snap, cancel, &path, oid, site) else {
+                continue;
+            };
+            for i in at {
+                let l = &targets[i].location;
+                targets[i].local = local.contains(&(l.line, l.column));
+            }
+        }
+    }
+
+    /// The (line, column) of every local definition of the snapshot's file
+    /// `path` at `oid`; None when it cannot be read or parsed.
+    fn file_locals(
+        &self,
+        snap: &Snap,
+        cancel: &Arc<AtomicBool>,
+        path: &RelPath,
+        oid: BlobId,
+        site: Position,
+    ) -> Option<HashSet<(u32, u32)>> {
+        let eff = snap.map.effective(path).filter(|e| e.oid == oid)?;
+        let lang = snap.table.get(&eff.lang.name().0)?.clone();
+        let bytes = self.read_content(snap, &eff, snap.read_limit(&eff)).ok()?;
+        let clock = self.watchdog.clock().clone();
+        let deadline = clock.now() + INTERACTIVE_DEADLINE;
+        let parsed =
+            ParsedFile::parse_at(&lang, bytes.into(), &*clock, deadline, cancel, site).ok()?;
+        Some(
+            parsed
+                .defs_with_local()
+                .filter(|(_, local)| *local)
+                .map(|(d, _)| (d.line, d.column))
+                .collect(),
+        )
     }
 
     /// Step 3: the stored definitions named like the site, in the units of
@@ -660,6 +742,7 @@ impl Inner {
                         source: CandidateSource::Index,
                     },
                     arity: s.def.arity,
+                    maybe_local: s.def.visibility == Visibility::File,
                 });
             }
             if used {
@@ -938,7 +1021,13 @@ impl Inner {
         let mut candidates = Vec::new();
         let mut delivered = HashSet::new();
         let mut units = Vec::new();
-        let mut look_up = |candidates: &mut Vec<Candidate>, units: &mut Vec<Unit>| {
+        // The index has no locality: each lookup's `File` definitions get
+        // theirs from their file (`recover_locality`).
+        let look_up = |candidates: &mut Vec<Candidate>,
+                       units: &mut Vec<Unit>,
+                       delivered: &mut HashSet<LocKey>| {
+            let from = candidates.len();
+            let mut maybe = Vec::new();
             let stored = {
                 let _t = crate::phases::span("named: lookup (SQL)");
                 snap.project
@@ -962,6 +1051,9 @@ impl Inner {
                     if !delivered.insert(loc_key(&location)) {
                         continue;
                     }
+                    if s.def.visibility == Visibility::File {
+                        maybe.push(candidates.len());
+                    }
                     candidates.push(Candidate {
                         tier: ranker.tier(&eff.path, TextOrigin::Worktree, s.oid, false),
                         in_review: ranker.in_review(&eff.path),
@@ -972,8 +1064,17 @@ impl Inner {
                     units.push(s.unit);
                 }
             }
+            drop(_t);
+            let maybe: HashSet<usize> = maybe.into_iter().collect();
+            let targets = candidates[from..]
+                .iter_mut()
+                .enumerate()
+                .filter(|(i, _)| maybe.contains(&(from + i)))
+                .map(|(_, c)| &mut c.definition)
+                .collect();
+            self.recover_locality(snap, &run.cancel, targets);
         };
-        look_up(&mut candidates, &mut units);
+        look_up(&mut candidates, &mut units, &mut delivered);
         self.step_hook(Step::Lookup, snap);
         if run.stopped(snap) {
             return Ended::Stopped;
@@ -994,7 +1095,7 @@ impl Inner {
             ViewCheck::Same => {}
             // A file the counts took as indexed whose unit was written
             // after the lookup: looked up again.
-            ViewCheck::Grew(_) => look_up(&mut candidates, &mut units),
+            ViewCheck::Grew(_) => look_up(&mut candidates, &mut units, &mut delivered),
             ViewCheck::Evicted => return Ended::Evicted,
             ViewCheck::Ended => return Ended::Stopped,
         }

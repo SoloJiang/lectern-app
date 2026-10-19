@@ -924,7 +924,9 @@ impl Inner {
             for d in done.iter().filter(|d| live(d)) {
                 let version = Version::of(&d.item.lang);
                 let stored_as = found.iter().find(|(v, f)| *v == version && f.oid == d.key);
-                if let Some((_, f)) = stored_as.filter(|(_, f)| satisfies(d.item.tier, f.status)) {
+                if let Some((_, f)) = stored_as.filter(|(_, f)| {
+                    satisfies(d.item.tier, f.status) && !outranks(d.extraction.status, f.status)
+                }) {
                     hits.push(*f);
                     stored.push((d.key, version, d.item.tier, f.status));
                     continue;
@@ -1285,11 +1287,26 @@ impl Inner {
     }
 }
 
-/// Whether a stored unit of status `status` satisfies `tier`: an opened
-/// file (tier 1) needs `Done`, or `Binary`, which no limit changes; the
-/// other tiers take any stored status.
+/// Whether a stored unit of status `status` satisfies `tier`, so that the
+/// tier does not extract the file again: an opened file (tier 1) needs
+/// `Done`, or `Binary`, which no limit changes; the other tiers take any
+/// stored status (their limits would give the same). It never decides
+/// against a better result already made ([`outranks`]).
 fn satisfies(tier: Tier, status: ExtractStatus) -> bool {
-    tier != Tier::Current || !matches!(status, ExtractStatus::TimedOut | ExtractStatus::TooLarge)
+    tier != Tier::Current || !unfinished(status)
+}
+
+/// A unit without the file's definitions (`State::unfinished`).
+fn unfinished(status: ExtractStatus) -> bool {
+    matches!(status, ExtractStatus::TimedOut | ExtractStatus::TooLarge)
+}
+
+/// Whether an extraction with `new` replaces a stored unit with `stored`,
+/// whatever the tier that made it: a `Done` result (tier 1's interactive
+/// limits, a query's search) over a `TooLarge` or `TimedOut` unit. Never
+/// the other way round.
+fn outranks(new: ExtractStatus, stored: ExtractStatus) -> bool {
+    new == ExtractStatus::Done && unfinished(stored)
 }
 
 /// Whether `version` is the version of its language both in the current

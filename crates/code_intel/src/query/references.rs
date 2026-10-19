@@ -81,6 +81,34 @@ fn record(account: &mut Account, path: &RelPath, oid: BlobId, searched: Searched
 }
 
 impl Inner {
+    /// Whether the definition `of` is local, by the parse of its own file
+    /// `bytes` (tier 1's limits) at its position: the definition there with
+    /// its name. `of.local` as given when that parse fails or has no such
+    /// definition.
+    fn own_locality(
+        &self,
+        lang: &Lang,
+        bytes: &Arc<[u8]>,
+        of: &DefinitionRef,
+        cancel: &Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        let l = &of.location;
+        let clock = self.watchdog.clock().clone();
+        let deadline = clock.now() + crate::extract::INTERACTIVE_DEADLINE;
+        let site = lectern_services::code_intel::Position {
+            line: l.line,
+            column: l.column,
+        };
+        let Ok(parsed) = ParsedFile::parse_at(lang, bytes.clone(), &*clock, deadline, cancel, site)
+        else {
+            return of.local;
+        };
+        parsed
+            .defs_with_local()
+            .find(|(d, _)| d.line == l.line && d.column == l.column && *d.name == *of.name)
+            .map_or(of.local, |(_, local)| local)
+    }
+
     pub(crate) fn run_references(self: &Arc<Self>, run: &Run, snap: &Snap, of: &DefinitionRef) {
         let Some(lang) = snap
             .table
@@ -93,14 +121,7 @@ impl Inner {
             });
             return;
         };
-        let symbol = Symbol {
-            name: of.name.clone(),
-            lang: of.lang.clone(),
-            syntax: RefSyntax::Plain,
-            defines: Some(of.clone()),
-        };
         let l = &of.location;
-        let ranker = self.ranker(snap, Some(&l.path), Some((l.origin, l.oid)), Some(&of.lang));
         let own = TextRef {
             worktree: l.worktree.clone(),
             path: l.path.clone(),
@@ -111,6 +132,12 @@ impl Inner {
         let bytes = match self.read_text(snap, &own) {
             Ok(bytes) => bytes,
             Err(error) => {
+                let symbol = Symbol {
+                    name: of.name.clone(),
+                    lang: of.lang.clone(),
+                    syntax: RefSyntax::Plain,
+                    defines: Some(of.clone()),
+                };
                 self.publish_in(snap, run.id, |r| {
                     r.symbol = Some(symbol);
                     r.state = QueryState::Failed(error);
@@ -118,6 +145,21 @@ impl Inner {
                 return;
             }
         };
+        // Whether the definition is local, from its own file's parse,
+        // whoever made `of` (a `Named` result, a provider, a jump): what to
+        // scan depends on it (「查找引用与调用方」1).
+        let of = &DefinitionRef {
+            local: self.own_locality(&lang, &bytes, of, &run.cancel),
+            ..of.clone()
+        };
+        let l = &of.location;
+        let symbol = Symbol {
+            name: of.name.clone(),
+            lang: of.lang.clone(),
+            syntax: RefSyntax::Plain,
+            defines: Some(of.clone()),
+        };
+        let ranker = self.ranker(snap, Some(&l.path), Some((l.origin, l.oid)), Some(&of.lang));
         self.publish_in(snap, run.id, |r| r.symbol = Some(symbol));
         self.escalate_references(run.id, snap, of);
         let mut found = Found {
