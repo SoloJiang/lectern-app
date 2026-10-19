@@ -603,12 +603,14 @@ impl Inner {
         }
         let mut found = Vec::new();
         let mut hits = Vec::new();
+        let mut statuses = Vec::new();
         for (version, group) in &groups {
             let oids: Vec<BlobId> = group.iter().map(|i| i.oid).collect();
             bump(&self.stats.exists_checks, oids.len().div_ceil(EXISTS_BATCH));
             let hit = project.store.exists(version, &oids).unwrap_or_default();
             for f in &hit {
                 hits.push((f.oid, version.lang.clone()));
+                statuses.push(f.status);
             }
             found.extend(hit);
         }
@@ -618,7 +620,7 @@ impl Inner {
             return;
         }
         st.batch.touches.push(eviction, &found);
-        for (oid, lang) in &hits {
+        for ((oid, lang), status) in hits.iter().zip(&statuses) {
             // A hit stamps hints only for the version the map and the current
             // language table both have, and with the map's own stamp: a hit
             // of an older grammar never makes a newer map's path look stored.
@@ -627,7 +629,7 @@ impl Inner {
             {
                 continue;
             }
-            st.hint_paths(oid, &lang.0, stamp);
+            st.hint_paths(oid, &lang.0, stamp, *status);
         }
         for (_, group) in groups {
             for item in group {
@@ -924,12 +926,12 @@ impl Inner {
                 let stored_as = found.iter().find(|(v, f)| *v == version && f.oid == d.key);
                 if let Some((_, f)) = stored_as.filter(|(_, f)| satisfies(d.item.tier, f.status)) {
                     hits.push(*f);
-                    stored.push((d.key, version, d.item.tier));
+                    stored.push((d.key, version, d.item.tier, f.status));
                     continue;
                 }
                 if write.add(d.key, &version, &d.extraction) {
                     replaces |= stored_as.is_some();
-                    written.push((d.key, version, d.item.tier));
+                    written.push((d.key, version, d.item.tier, d.extraction.status));
                 }
             }
             if replaces {
@@ -983,14 +985,14 @@ impl Inner {
             // eviction they caused.
             let sets = [(stored, st.stamp(before)), (written, st.stamp(after))];
             for (units, stamp) in sets {
-                for (key, version, tier) in units {
+                for (key, version, tier, status) in units {
                     if !current(&table, &st.map, &version) {
                         continue;
                     }
                     if tier == Tier::Other {
                         st.batch.others.confirmed.insert(&key, &version.lang);
                     }
-                    st.hint_paths(&key, &version.lang.0, stamp);
+                    st.hint_paths(&key, &version.lang.0, stamp, status);
                 }
             }
         }
@@ -1241,7 +1243,8 @@ impl Inner {
                 .store
                 .exists(&version, &[item.oid])
                 .unwrap_or_default();
-            if found.iter().any(|f| satisfies(item.tier, f.status)) {
+            if let Some(hit) = found.iter().find(|f| satisfies(item.tier, f.status)) {
+                let status = hit.status;
                 let table = lock(&self.langs).table.clone();
                 let mut st = lock(&project.state);
                 if st.finish(session, &item, &flag) {
@@ -1251,7 +1254,7 @@ impl Inner {
                     st.batch.touches.push(before_raw, &found);
                     if current(&table, &st.map, &version) {
                         let stamp = st.stamp(before);
-                        st.hint_paths(&item.oid, &item.lang.name().0, stamp);
+                        st.hint_paths(&item.oid, &item.lang.name().0, stamp, status);
                     }
                 }
                 continue;

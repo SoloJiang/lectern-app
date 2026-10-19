@@ -33,6 +33,7 @@ use crate::map::{HintStamp, LiveMap};
 use crate::resolve::{DefaultRules, Resolver};
 use crate::semantic::SemQuery;
 
+pub(crate) use account::WalkKey;
 #[cfg(test)]
 pub(crate) use account::{Account, Reason};
 pub(crate) use definition::Prepared;
@@ -66,6 +67,9 @@ pub(crate) enum Step {
     Read,
     /// Before results are published.
     Publish,
+    /// Between two statements of the full-mode check outside the search's
+    /// scope (`Snap::walk`).
+    Verify,
 }
 
 /// The tests' hook (`Inner::step_hook`): run once, at its step.
@@ -224,6 +228,11 @@ pub(crate) struct Snap {
     /// The published map lacks the worktree's content (`Published::
     /// incomplete`): no file counts as indexed without being read.
     pub incomplete: bool,
+    /// The published object's `seq` (cached walks are keyed by it).
+    pub published: u64,
+    /// The units stored `TooLarge` or `TimedOut` as of the snapshot
+    /// (`State::unfinished`): the search reads those files.
+    pub unfinished: Arc<crate::index::state::Unfinished>,
     pub stamp: HintStamp,
     /// Keys extracted right now: neither in the index nor searched.
     pub in_flight: HashSet<(BlobId, LangName)>,
@@ -636,6 +645,8 @@ impl Inner {
             focused,
             full,
             incomplete: published.incomplete,
+            published: published.seq,
+            unfinished: st.unfinished.clone(),
             stamp: HintStamp {
                 eviction: st.walk_eviction(eviction),
                 grammar: map.provenance.grammar,
@@ -698,6 +709,36 @@ impl Inner {
                 f(self, snap);
             }
         }
+    }
+
+    /// The accounting's walk ([`Snap::walk`]) for query `run`: the full-mode
+    /// check outside the scope stops with the query and at its time box
+    /// (the search's, [`SEARCH_FOR`] after it was asked). None when the
+    /// query stopped.
+    pub(crate) fn walk(
+        &self,
+        run: &Run,
+        snap: &Snap,
+        account: &mut account::Account,
+        dir: &str,
+        part: &dyn Fn(&crate::extract::Lang) -> bool,
+        group: Option<&LangName>,
+    ) -> Option<account::Walked> {
+        let clock = self.watchdog.clock().clone();
+        let until = run.started + SEARCH_FOR;
+        let stopped = || run.stopped(snap);
+        let due = || {
+            #[cfg(test)]
+            self.verify_checks.fetch_add(1, Ordering::AcqRel);
+            self.step_hook(Step::Verify, snap);
+            clock.now() >= until
+        };
+        let stops = account::Stops {
+            stopped: &stopped,
+            due: &due,
+        };
+        let walked = snap.walk(account, dir, part, group, &stops)?;
+        (!run.stopped(snap)).then_some(walked)
     }
 
     /// The resolution rules of a language: an extension's implementation,

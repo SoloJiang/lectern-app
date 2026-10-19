@@ -178,9 +178,15 @@ impl Inner {
         }
         // 3. Unindexed files of the sub-project: the search.
         // A local is visible in its own scope only: its file is all there is
-        // (「查找引用与调用方」1).
+        // (「查找引用与调用方」1), complete once that file was searched.
         let completeness = if of.local {
-            Some(Completeness::Complete)
+            Some(match own {
+                Searched::Done => Completeness::Complete,
+                Searched::Unsearched(_) => Completeness::Partial {
+                    unsearched: 1,
+                    outside: 0,
+                },
+            })
         } else {
             let skip = found.parsed.clone();
             let scope = snap.search_scope(&l.path, &lang, &skip, &mut account);
@@ -240,11 +246,22 @@ impl Inner {
                     )
                 },
             );
-            if searched {
-                // Every file of the language group, classified once; the
-                // walk reads hints, so the view is checked after it.
-                let part = |l: &Lang| snap.in_group(l, &lang);
-                let walked = snap.walk(&mut account, &scope.dir, &part);
+            // Every file of the language group, classified once; the walk
+            // reads hints, so the view is checked after it.
+            let part = |l: &Lang| snap.in_group(l, &lang);
+            let walked = if searched {
+                self.walk(
+                    run,
+                    snap,
+                    &mut account,
+                    &scope.dir,
+                    &part,
+                    Some(lang.name()),
+                )
+            } else {
+                None
+            };
+            if let Some(walked) = walked {
                 match self.check_view(snap, &view) {
                     ViewCheck::Same => {}
                     ViewCheck::Grew(_) => {
@@ -265,7 +282,7 @@ impl Inner {
                         return self.end_stale(snap, run.id);
                     }
                 }
-                Some(snap.finish(&account, &scope.dir, &part, walked))
+                Some(snap.finish(&account, walked))
             } else {
                 None
             }
@@ -394,8 +411,22 @@ impl Inner {
             return found.outcome(&file.path, oid);
         }
         let clock = self.watchdog.clock().clone();
-        let deadline = FileDeadline::new(clock.now(), until);
-        let parsed = match ParsedFile::parse(&file.lang, bytes, &*clock, deadline.at, &run.cancel) {
+        let def = &of.location;
+        let own = file.path == def.path && file.origin == def.origin && oid == def.oid;
+        // The definition's own file is the text the query is about: tier 1's
+        // limit, as a jump's current text. The others, the background's.
+        let deadline = if own {
+            FileDeadline::interactive(clock.now(), until)
+        } else {
+            FileDeadline::new(clock.now(), until)
+        };
+        let parsed = ParsedFile::parse(&file.lang, bytes, &*clock, deadline.at, &run.cancel);
+        #[cfg(test)]
+        let parsed = match &*crate::index::lock(&self.parse_timeout) {
+            Some(path) if **path == *file.path => Err(ParseError::TimedOut),
+            _ => parsed,
+        };
+        let parsed = match parsed {
             Ok(parsed) => parsed,
             Err(error) => {
                 let status = match error {
@@ -414,8 +445,6 @@ impl Inner {
             }
         };
         found.parsed.insert((file.path.clone(), oid));
-        let def = &of.location;
-        let own = file.path == def.path && file.origin == def.origin && oid == def.oid;
         let rules = self.resolver(file.lang.name());
         let stored = |path: &str| -> Option<Extraction> {
             let eff = snap.map.effective(path)?;

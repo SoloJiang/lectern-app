@@ -17,7 +17,7 @@ use lectern_services::project::{
 };
 
 use crate::LangName;
-use crate::extract::{Lang, LanguageTable};
+use crate::extract::{ExtractStatus, Lang, LanguageTable};
 use crate::git_access::Tree;
 use crate::map::{HeadDiff, HintStamp, LiveMap, Provenance};
 use crate::store::{PendingTouches, Store, Version};
@@ -41,6 +41,10 @@ pub(crate) struct Project {
     pub state: std::sync::Mutex<State>,
     /// The ⌘K name table: locked after, never with, `state`.
     pub names: std::sync::Mutex<crate::names::NameState>,
+    /// The last walks of queries' accountings (「完整性的核算」), at most
+    /// `WALKS_KEPT`: a repeated query on an unchanged index skips the walk.
+    /// Locked after, never with, `state`.
+    pub walks: std::sync::Mutex<Vec<(crate::query::WalkKey, (i64, i64))>>,
 }
 
 impl Project {
@@ -364,6 +368,10 @@ pub(crate) struct Watches {
     pub _worktree: WorktreeWatch,
 }
 
+/// Stored units without the file's definitions (`State::unfinished`): by
+/// OID, the languages and their status.
+pub(crate) type Unfinished = HashMap<BlobId, Vec<(LangName, ExtractStatus)>>;
+
 /// One session's index as queries see it, published whole by the reconcile
 /// (`State::published`): every query snapshot comes from one of these, never
 /// from the current state or the current language table. Immutable; the
@@ -371,6 +379,9 @@ pub(crate) struct Watches {
 /// view's hint installs cover them).
 pub(crate) struct Published {
     pub session: u64,
+    /// Grows with every publication of the session (`State::publishes`):
+    /// identifies this object (cached walks are keyed by it).
+    pub seq: u64,
     /// The map, base and overlay complete for the inputs it was built from.
     pub map: LiveMap,
     /// The language table the map was built with (`BaseMap::table`): the
@@ -452,6 +463,13 @@ pub(crate) struct State {
     /// and the overlay are complete for the current inputs). The previous
     /// one stays while a reconcile runs; a new session has none.
     pub published: Option<Arc<Published>>,
+    /// Publications so far (`Published::seq`).
+    pub publishes: u64,
+    /// The keys of this session whose stored unit is `TooLarge` or
+    /// `TimedOut` (`hint_paths`): their hints match, but their units hold no
+    /// definitions or references. A query's snapshot takes the `Arc`; a
+    /// change copies it. Usually a few generated or very large files.
+    pub unfinished: Arc<Unfinished>,
     /// Set by a reconcile that consumed all its input and still has no
     /// map to publish (no current worktree, its file list unavailable):
     /// why. Queries asked while no reconcile runs fail with it at once;
@@ -470,15 +488,59 @@ impl State {
     /// keeps the hint of an evicted unit matching, so writing that unit
     /// again changes no hint, yet a query's lookup made before the write
     /// missed it while its existence check after the write finds it.
-    pub fn hint_paths(&mut self, oid: &BlobId, lang: &str, stamp: HintStamp) {
+    ///
+    /// `status` is the stored unit's: a `TooLarge` or `TimedOut` unit has no
+    /// definitions or references of the file, so the key is recorded in
+    /// [`unfinished`](Self::unfinished) (a query counts the file as not
+    /// searched, and its search reads it); any other status takes it out. A
+    /// change of that record counts as an installation too.
+    pub fn hint_paths(
+        &mut self,
+        oid: &BlobId,
+        lang: &str,
+        stamp: HintStamp,
+        status: ExtractStatus,
+    ) {
         let mut changed = false;
         let mut any = false;
         for eff in self.map.paths(oid, lang) {
             any = true;
             changed |= self.map.hints.set(&eff.slot, oid, stamp);
         }
+        changed |= self.record_status(oid, lang, status);
         if changed || (any && self.batch.full.is_some()) {
             self.hinted += 1;
+        }
+    }
+
+    /// Records whether the unit stored for (`oid`, `lang`) is unfinished
+    /// (`Unfinished`); whether the record changed.
+    fn record_status(&mut self, oid: &BlobId, lang: &str, status: ExtractStatus) -> bool {
+        let unfinished = matches!(status, ExtractStatus::TooLarge | ExtractStatus::TimedOut);
+        let now = self
+            .unfinished
+            .get(oid)
+            .and_then(|v| v.iter().find(|(l, _)| &*l.0 == lang))
+            .map(|(_, s)| *s);
+        match (now, unfinished) {
+            (Some(s), true) if s == status => false,
+            (None, false) => false,
+            (_, true) => {
+                let keys = Arc::make_mut(&mut self.unfinished).entry(*oid).or_default();
+                keys.retain(|(l, _)| &*l.0 != lang);
+                keys.push((LangName(Arc::from(lang)), status));
+                true
+            }
+            (Some(_), false) => {
+                let map = Arc::make_mut(&mut self.unfinished);
+                if let Some(keys) = map.get_mut(oid) {
+                    keys.retain(|(l, _)| &*l.0 != lang);
+                    if keys.is_empty() {
+                        map.remove(oid);
+                    }
+                }
+                true
+            }
         }
     }
 
@@ -520,6 +582,8 @@ impl State {
             demand: false,
             waiting: Vec::new(),
             published: None,
+            publishes: 0,
+            unfinished: Arc::default(),
             unavailable: None,
         }
     }

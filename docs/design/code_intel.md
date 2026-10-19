@@ -1333,15 +1333,17 @@ enum WorktreeState {
     Content(BlobId),
     /// 工作区里没有这个文件（未暂存的删除、sparse 范围外的条目）。
     Absent,
-    /// 存在，但不建索引：超过 1 MiB、读不出、路径中间是符号链接、LFS 这类过滤器的指针文件。
+    /// 存在，但不建索引：超过 1 MiB、读不出。内容不知道，查询计为未搜（「完整性的核算」）。
     Unindexable,
+    /// 不是本 crate 索引的源文件：符号链接、路径中间是符号链接、其他种类的文件、LFS 这类过滤器的指针文件。不参与查询的核算。
+    Excluded,
 }
 ```
 
 规则：
 
 - 基础部分来自 `ActiveTree::files`：每条有 OID、语言受支持、`FileKind` 是 `File` 或 `Executable` 的文件。子模块和符号链接不进入。
-- 覆盖部分来自工作区：对一个要重新读的路径，经 `SafeRoot::read`（上限 1 MiB）读出内容，按仓库的哈希算法计算 `Oid::for_blob`。等于文件列表里的 OID 时删掉这个路径的覆盖项；文件列表里有这个路径、OID 不等时调用一次 `canonical_oid`：返回 None（设置了 clean / process 过滤器，如 LFS 的指针文件）记为 `Unindexable`，等于文件列表里的 OID（`eol`、`core.autocrlf` 这类内置转换）时删掉覆盖项，否则记为 `Content`；文件列表里没有这个路径时记为 `Content`；`NotFound` 记为 `Absent`；`TooLarge`、`PathThroughSymlink`、读取失败记为 `Unindexable`。路径的语言不受支持时不读；这样的路径不在文件列表里、却是一个目录时（目录事件），请求一次工作区比较。
+- 覆盖部分来自工作区：对一个要重新读的路径，经 `SafeRoot::read`（上限 1 MiB）读出内容，按仓库的哈希算法计算 `Oid::for_blob`。等于文件列表里的 OID 时删掉这个路径的覆盖项；文件列表里有这个路径、OID 不等时调用一次 `canonical_oid`：返回 None（设置了 clean / process 过滤器，如 LFS 的指针文件）记为 `Excluded`，等于文件列表里的 OID（`eol`、`core.autocrlf` 这类内置转换）时删掉覆盖项，否则记为 `Content`；文件列表里没有这个路径时记为 `Content`；`NotFound` 记为 `Absent`；`TooLarge`、读取失败记为 `Unindexable`；符号链接、`PathThroughSymlink`、其他种类的文件记为 `Excluded`。路径的语言不受支持时不读；这样的路径不在文件列表里、却是一个目录时（目录事件），请求一次工作区比较。
 - 覆盖项的 OID 按原始字节计算。未跟踪的文件不调用 `canonical_oid`：设置了 `eol` 一类转换的未跟踪文件按原始字节的 OID 存结果，与以后 `git add` 得到的 OID 不同，暂存之后再抽取一次（已知限制，只多一次抽取）。
 - 查找按（OID、语言）进行：在两个 `by_oid` 里按前缀二分查找，核对完整 OID，跳过基础部分里被覆盖项遮住的路径，再只留按路径判断的语言等于这个单元 `ci_ext.lang` 的路径。同一份字节放在 `.java` 和 `.js` 下 OID 相同，`java` 的单元只对应 `.java` 的路径。
 - 基础部分、覆盖部分何时重算见「输入代数与派生状态」。
@@ -1595,7 +1597,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ### 限时搜索
 
-- 范围：当前子项目（按查询快照里的子项目边界）里语言在兼容组内、`indexed` 提示与当前有效 OID 和代数不匹配（见「输入代数与派生状态」）、也不在在途抽取里的文件，按与当前文件的路径距离排序，同一目录的在前。命名空间满了之后，范围里提示匹配的文件先按批与存储核对（见「完整性的核算」），单元已不在的也在范围里。在途抽取里的文件不重复抽取，但它们对这次查询不可见（索引里还没有，搜索也不扫描），所以计入 `Partial` 的 `unsearched`：有这样的文件时结果不会是 `Complete`。范围只是搜索读哪些文件；子项目之外没入索引的文件不搜，但照样计入完整性（`outside`），见「完整性的核算」。
+- 范围：当前子项目（按查询快照里的子项目边界）里语言在兼容组内、`indexed` 提示与当前有效 OID 和代数不匹配（见「输入代数与派生状态」）、也不在在途抽取里的文件，按与当前文件的路径距离排序，同一目录的在前。命名空间满了之后，范围里提示匹配的文件先按批与存储核对（见「完整性的核算」），单元已不在的也在范围里；单元是 `TooLarge`、`TimedOut` 的提示匹配文件（单元里没有它的定义）也在范围里，按第 1 层的交互上限读和抽取，截到查询的时间盒。在途抽取里的文件不重复抽取，但它们对这次查询不可见（索引里还没有，搜索也不扫描），所以计入 `Partial` 的 `unsearched`：有这样的文件时结果不会是 `Complete`。范围只是搜索读哪些文件；子项目之外没入索引的文件不搜，但照样计入完整性（`outside`），见「完整性的核算」。
 - 每个文件经 `SafeRoot` 读出，上限是它的单元抽取时的上限（`Snap::read_limit`）：有单元（提示匹配，或满额模式下被挤出的）或在第 1 层（当前文本、抽屉）的文件 4 MiB，其余 1 MiB；超过上限、二进制、读不出的文件计入 `unsearched`，不当作搜过。查引用读 `ci_ref` 给出的已入索引文件时同样按 4 MiB 读。用 `memchr::memmem` 找这个名字的字节串，命中处前后不是标识符字符（ASCII 字母数字、`_`、`$` 和 UTF-8 的多字节序列）才算整词命中。没有命中的文件不解析。
 - 命中的文件先做一次存在检查，缓存里有就直接用；没有就按后台截止时间抽取，结果用于这次查询，并交给一个 `Background` 任务写入缓存，写入成功后写入 `indexed` 提示。
 - 从查询开始计 1 s 后停止：文件之间检查时刻，抽取的截止时间取「250 ms」与「剩余时间」中较小的一个。停止后交出最后一批，`state` 由「完整性的核算」决定：没搜到的文件是 `Done(Partial { … })`，每个能参与回答的文件都已入索引或搜过才是 `Done(Complete)`。
@@ -1609,14 +1611,17 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 | 分类 | 条件 |
 |---|---|
-| 已入索引 | 没有被这次查询读过；提示匹配，满额模式下还经存储核对单元仍在，快照不缺工作区内容 |
+| 已入索引 | 没有被这次查询读过；提示匹配，单元不是 `TooLarge`、`TimedOut`（`Binary` 算：二进制内容没有定义和引用，上限改不了它），满额模式下还经存储核对单元仍在，快照不缺工作区内容 |
 | 搜过 | 这次查询读到快照的内容并看过（当前文本、第 2 步的目标、`ci_ref` 的文件、搜索命中或没命中的文件） |
-| 未搜（原因） | 搜索范围内没轮到（`NotReached`）、截短（`Cut`）、取消、自身超时、内容已变（`Stale`）、超过上限、二进制、读不出、在途、范围之外（`Outside`）、被挤出（`Evicted`）、快照缺工作区内容（`Unverified`） |
+| 未搜（原因） | 搜索范围内没轮到（`NotReached`）、截短（`Cut`）、取消、自身超时或单元 `TimedOut`（`TimedOut`）、内容已变（`Stale`）、超过上限或单元 `TooLarge`（`TooLarge`）、读不出、覆盖部分读不出的工作区文件（`Unindexable`）、在途、范围之外（`Outside`）、被挤出（`Evicted`）、满额模式下没来得及核对（`Unchecked`）、快照缺工作区内容（`Unverified`） |
 
 - 计数：未搜的文件在搜索范围之内的计入 `Partial::unsearched`，之外的计入 `outside`；查询读过、没能搜的文件不论在哪里都计入 `unsearched`。范围之外没入索引的文件因此让跳转、查引用、`Named` 都是 `Partial { outside }`，不再因为只搜了当前子项目就报 `Complete`（`account_outside_the_scope_is_partial`）。
-- 有绑定依据就结束的跳转（第 1、2 步得到 `Bound`）和局部定义的查引用（只看它所在的文件）是 `Complete`：依据本身证明了答案，其余文件改变不了它。
-- 一次遍历（`Snap::walk`）读全部提示，在查询最后一次比较视图之前；比较发现只多了提示（`Grew`）而再查一次索引时，新读的文件在 `Snap::finish` 里按读到的结果改分类，不再读提示，所以已置位的提示都被那次查索引覆盖。遍历不建 `Effective`，10 万个文件约 1.3 ms（`goto_phases` 的 `4 accounting`）。
-- 满额模式：命名空间满了之后（`Batch::full`）提示的戳记冻结在满之前那一代，被配额挤出的单元的提示仍然匹配，提示不再证明单元在。查询把计为「已入索引」之前的提示匹配文件按批与存储核对（与批量层同一条 `IN (…)` 语句，每条 500 个，按版本分组），范围里的在搜索之前核对、不在的进入搜索，其余在遍历时核对、不在的计为 `Evicted`（`account_full_namespace_checks_the_hinted_files`）。冻结之后再写入同一个单元不会让提示由不匹配变为匹配，所以满额模式下每次置位都让提示置位次数加一，查询据此再查一次索引。10 万个文件的仓库满额时这次核对约 52 000 个提示、108 条语句、约 280 ms，在第一批之后、`Done` 之前（「实际验证」）；没满时不核对，跳转的耗时不变。
+- 没有内容的单元：批量层存成 `TooLarge`（超过 1 MiB、没打开过的生成文件）或 `TimedOut` 的文件也有匹配的提示，但单元里没有这个文件的定义和引用。本次会话记下这些键（`State::unfinished`，置位提示时按单元的状态更新；记录的变化也算一次提示置位），快照带上它的 `Arc`。核算把它们计为未搜；搜索范围包括它们，按交互上限（4 MiB、1 s，截到查询的时间盒）现场抽取，所以跳转和查引用能找到只在这样的文件里的定义和调用方，`Named` 不搜，报告它们（`account_too_large_units_are_searched`、`account_timed_out_units_are_not_indexed`、`account_binary_units_count_as_indexed`）。
+- 覆盖部分里的工作区文件：修改过或未跟踪、超过 1 MiB 或读不出的文件是 `Unindexable`，内容不知道，计为未搜；过滤器的指针文件（LFS）、符号链接或路径经过符号链接的、其他种类的文件是 `Excluded`，不是本 crate 索引的源文件，不参与核算（`account_unindexable_worktree_files_are_unsearched`）。
+- 有绑定依据就结束的跳转（第 1、2 步得到 `Bound`）是 `Complete`：依据本身证明了答案，其余文件改变不了它。局部定义的查引用只看它所在的文件：这个文件搜过才是 `Complete`，否则 `Partial { unsearched: 1 }`；被查定义所在的文件按第 1 层的交互上限（1 s、4 MiB）解析（`account_local_references_need_their_file_searched`）。按 OID 读的被查定义所在的文件（对象库里的、工作区里已经变了的）没能搜时也计入 `unsearched`，即使映射在这个路径上是另一份内容（`account_definition_read_as_an_object_counts_when_unsearched`）。
+- 一次遍历（`Snap::walk`）读全部提示，并定下此时已读过的文件在遍历里的分类，都在查询最后一次比较视图之前；`Snap::finish` 不读提示：遍历定下分类的文件换成读到的结果，遍历之后才读的文件（比较发现只多了提示、再查一次索引时读的）只在没能搜时计入（保守）。已置位的提示都被那次查索引覆盖。遍历不建 `Effective`、不取路径，10 万个文件约 1.2 ms。
+- 遍历的结果按项目缓存（`Project::walks`，最多 2 个）：键是发布对象、提示戳记、提示置位次数、搜索范围的目录和语言组，任何一个变了就不用；满额模式不缓存。同一个索引上重复的跳转因此不再遍历（`account_walks_are_cached_until_the_index_changes`）。
+- 满额模式：命名空间满了之后（`Batch::full`）提示的戳记冻结在满之前那一代，被配额挤出的单元的提示仍然匹配，提示不再证明单元在。查询把计为「已入索引」之前的提示匹配文件按批与存储核对（与批量层同一条 `IN (…)` 语句，每条 500 个，按版本分组）：范围里的在搜索之前全部核对（10 万文件、子项目 1000 个文件约 2.3 ms），不在的进入搜索；范围之外的在遍历时核对，每条语句之前检查查询是否已停止、是否到了查询的时间盒（与搜索同一个，查询开始后 1 s），停止时立即返回，到时没核对的计为 `Unchecked`、计入 `outside`（`account_full_namespace_checks_the_hinted_files`、`account_full_check_stops_with_the_query`、`account_full_check_is_time_boxed`）。冻结之后再写入同一个单元不会让提示由不匹配变为匹配，所以满额模式下每次置位都让提示置位次数加一，查询据此再查一次索引。没满时不核对。
 
 ## 性能
 
@@ -2035,6 +2040,15 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 压力运行（同时 4 个占满 CPU 的进程）：`view_*`、`cut_*`、`read_verify_*`、`escalate_*`、`account_*`（37 个测试）分两次 `--stress-count 50` 和 `--stress-count 100` 全部通过（合计 150 次，555 s、1301 s）；整个本 crate（245 个）`--stress-count 30` 全部通过（1679 s）。
 - 基准：`goto_indexed` 19.1 ms（单独测 17.4–19.3 ms；核算的遍历约 0.95 ms，原来搜完就报 `Complete`、不看子项目之外），`goto_first` 4.54 ms，`named_50k` 473 ms，`references_100k/all` 855 ms、`/first` 9.11 ms，`search_stop` 1 s，`names_100k` 870 ms，`warm_100k` 84 ms，`map_100k` 10.1 ms，`batch_peak` 33.3 MB；`extract_throughput` 一次 3.98 MB/s（与编译同时运行），单独再测 4.04 MB/s，本轮没有改抽取。
 
+第 4 步，没有内容的单元与 `Unindexable` 计入核算、满额核对按时间盒、遍历缓存之后，同一台机器。
+
+- `just check`、`just test`、`just doctest`、`just deny` 全部通过（整个工作区 1358 个测试通过，跳过 5 个）。本 crate 254 个测试。
+- 每项修复分别去掉时，对应的测试失败：不看没有内容的单元，`account_too_large_units_are_searched`、`account_timed_out_units_are_not_indexed` 失败；`Unindexable` 覆盖项不计，`account_unindexable_worktree_files_are_unsearched` 失败；局部定义的查引用不看自己的文件，`account_local_references_need_their_file_searched` 失败；按 OID 读、映射里是另一份内容的文件没能搜时丢掉，`account_definition_read_as_an_object_counts_when_unsearched` 失败；满额核对不检查停止，`account_full_check_stops_with_the_query` 失败（关闭之后又做了语句）；不检查时间盒，`account_full_check_is_time_boxed` 失败；缓存的键不含提示置位次数，`account_walks_are_cached_until_the_index_changes`、文件夹项目的测试和 `view_matrix_definition`、`view_matrix_prefetch` 都失败。
+- 跳转的分项（`goto_phases`，10 万文件）：重复跳转（遍历已缓存）`query to results` 16.2 ms、`4 accounting` 2.7 µs；索引变化之后的第一次（`goto_indexed_uncached_phases`，每次跳转前清掉缓存）19.5 ms、`4 accounting` 1.24 ms（这一次 `prepare` 也比前者慢约 2 ms，机器有波动）。
+- 压力运行（同时 4 个占满 CPU 的进程）：`view_*`、`cut_*`、`read_verify_*`、`escalate_*`、`account_*`（46 个测试）`--stress-count 150` 全部通过（1825 s）；整个本 crate（254 个）`--stress-count 30` 全部通过（1575 s）。
+- 基准：`goto_indexed` 17.3 ms（基准重复同一个跳转，量的是遍历已缓存的稳定状态；第一次跳转见上面的分项），`goto_first` 4.88 ms，`named_50k` 471 ms，`references_100k/all` 902 ms、`/first` 9.28 ms，`search_stop` 1 s，`names_100k` 916 ms，`warm_100k` 77.3 ms，`map_100k` 8.98 ms，`batch_peak` 33.3 MB，`extract_throughput` 4.31 MB/s。
+- 满额模式（`CODE_INTEL_BENCH_FULL=1`，只记录）：`goto_indexed` 到 `Done` 287 ms（第一批不变；范围之外约 52 000 个提示在时间盒内核对完），`references_100k/all` 1.02 s，`search_stop` 1 s（没有入索引的文件，没有要核对的），`named_50k` 732 ms。核对超过查询的 1 s 时间盒时停下、没核对的计入 `outside`，所以 `Done` 不晚于时间盒加一条语句（500 个 OID，几毫秒）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2171,7 +2185,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 设计把映射、核对任务和各层写成插件内部的状态，没有给第 3 步（还没有插件）的入口。实现为公开的 `index` 模块：`Indexer`（`Indexer::new(IndexDeps)`，测试和 bench 用 `with_fake_git`）持有每个打开项目的状态，第 4 步的插件在 `activate` / `started` 里构造它，把 `ProjectEvent`、`set_focus`、电源和语言包的通知转给它：`project_event`、`open_existing`、`set_focus`、`power_changed`、`grammar_changed`、`demand`（电池供电时的 `query` / `names`）、`coverage`、`map`、`head_diff`、`head_clean`、`subscribe`（电源和语言包的订阅，返回值交给 `PluginHandle::own`）、`close_all`。`IndexDeps` 是「本 crate 的公开项」里 `CodeIntelDeps` 的字段加上 `projects`（`Arc<dyn Projects>`）、这次激活的 `PluginHandle`、看门狗和批量任务数（`default_batch_tasks()`，与 executor 的批量线程数相同）：executor 不公开批量线程数，插件也只能在 `started` 之后拿到句柄。
 - 映射的类型在公开的 `map` 模块（`BaseMap`、`Overlay`、`WorktreeState`、`IndexedHints`、`LiveMap`、`HeadDiff`），供第 4 步的查询和 bench 使用。`by_oid` 拆成前缀和下标两个数组（每条 12 字节，`(u64, u32)` 的元组对齐后是 16 字节），另存每条的语言（1 字节），10 万文件合计 2.8 MB，在 3 MB 以内（「blob → 路径映射」已改）。提示的戳记取淘汰代数的低 32 位和语言包代数的低 31 位，与 OID 前缀共 16 字节。
 - `GitAccess` 的参数从 `root: &Path` 改为 `&Tree`（公共目录、git 目录、根目录）：生产实现要按公共目录打开仓库、按 git 目录取 worktree，只有根目录找不到它们。`tracked` 返回 `Vec<(RelPath, BlobId)>`（只有普通文件和可执行文件、UTF-8 路径），不返回 `Arc<git::TrackedPaths>`：第 5 层只用这些条目，`FakeGit` 也构造不出 `TrackedPaths`。`canonical_oid` 的路径改为 `&str`（「依赖 git、fs_watch 与 cache 的接口」已改）。
-- 覆盖部分对文件列表里有、原始字节的 OID 不等的路径调用一次 `canonical_oid`：设计只按原始字节计算，`Filtered`（LFS 的指针文件）因此认不出来，`overlay_*` 要求它是 `Unindexable`；顺带，CRLF 检出的跟踪文件不再被当作有改动。未跟踪的文件仍按原始字节（「blob → 路径映射」已改）。
+- 覆盖部分对文件列表里有、原始字节的 OID 不等的路径调用一次 `canonical_oid`：设计只按原始字节计算，`Filtered`（LFS 的指针文件）因此认不出来，`overlay_*` 要求它是 `Excluded`（原为 `Unindexable`，见下面「完整性的核算」第二条）；顺带，CRLF 检出的跟踪文件不再被当作有改动。未跟踪的文件仍按原始字节（「blob → 路径映射」已改）。
 - 游标由批量任务在每批开始时按依赖的代数重建，不在核对任务里：游标只有批量任务用，依赖表不变。
 - 第 3 层的范围：设计在没有当前文本和审阅集合时没有给出取法，实现依次取当前文本、审阅集合的第一个文件、项目打开时的路径（根目录除外）；有子项目、但没有这样的路径或没有子项目包含它时第 3 层为空。理由：取整个 worktree 时，电池供电下的第 3 层就是整个仓库，与 ADR 0029 的电池策略相反（「建索引的分层」已改）。只有最近一次收到 `set_focus` 的项目跑第 3–5 层；还没有任何 `set_focus` 时取最后打开的项目。
 - 存在检查自成一批，游标每步最多看 4096 个条目、取出至多 500 个文件，缺的进入这一层的小队列（「调度、批次与取消」已补）：设计没有规定存在检查的批与抽取的批怎样划分；按 64 个文件做存在检查时 10 万文件要 1600 次查询，超过「约 200 次」。看 4096 个条目的上限让 UI 线程上的 `set_focus` 不会等一次长的扫描。
@@ -2234,8 +2248,9 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 10 万文件的基准用虚拟仓库：`testing::virtual_repo`（`FakeGit::stage_oids` 只有 index 条目，`assume_unchanged` 让工作区比较为空，单元是 `synthetic::extraction` 的合成抽取结果：每个文件 3 个自己的名字、27 个取自 2 万个共用名字，10 万文件约 32 万个不同的名字，对应调研对名字表 4–8 MB 的估算）；查询要读的文件才写到磁盘上。`goto_indexed` 的当前文本 64 KiB，目标名字有约 130 个定义。
 - `testing`：`TestHost` 改为直接启动 `Kernel`、不经 `TestKernel`（`TestKernel` 记下目标插件发出的每个事件，会一直持有名字表）；`FakePower`、`FakeGrammars` 的订阅返回可退订的守卫（`subscribers()` 只数没退订的）。`Stats` 新增 `prepares`（跳转第 1–3 步的次数，预取的测试用）。
 - 依赖：`memchr`（限时搜索的 `memmem`）和 `unicode-normalization`（名字表的 NFC）加入 `[workspace.dependencies]`，两者原已在 Cargo.lock 里，没有新增 crate。
-- 完整性的核算（新增「完整性的核算」一节，「限时搜索」「查询的视图」已改）：原来 `Complete` 由几处各自的计数决定：搜索在范围搜完、没有在途时直接报 `Complete`，不看子项目之外；查引用另记读不出的已入索引文件；`Named` 自己数；读到超过 1 MiB 的文件直接跳过。审阅指出三处由此而来的漏报：子项目之外没入索引的文件不计（`pa/a.ts` 跳到只在 `pb/c.ts` 里定义的名字，返回空的 `Complete`，查引用漏掉其他包的调用方）；命名空间满了之后提示冻结，被挤出的文件提示仍匹配，搜索把它当作已入索引跳过（10 万文件的仓库约 5%）；第 1 层按 4 MiB 入索引的 1–4 MiB 文件，查引用按 1 MiB 读，读不出就丢掉。现在只有一处决定完整性：每个能参与回答的文件分类一次。决定：`Complete` 保持接口文档的含义（「能参与回答的文件都已入索引或在这次查询里搜过」），范围之外没入索引的文件计入 `outside`，三种查询一样；限时搜索仍只搜当前子项目。满额模式的核对除了范围里的文件（搜索之前，约 2.3 ms），也核对范围之外提示匹配的文件（遍历时）：只核对范围里的会让范围之外被挤出的文件仍算已入索引，正是这一类漏报；10 万文件满额时多约 280 ms，在第一批之后。已存储但状态不是 `Done` 的单元（`TooLarge`、`TimedOut`、`Binary`）在查询现场用到时计为未搜；没被读到时按提示算已入索引（批量层的结论，第 1 层打开时按交互上限重做），这是已知限制。`View` 的淘汰代数改为提示戳记用的那个（满额后冻结），另加「是否已满」：满额后批量层自己的配额淘汰不再让并发的查询以 `Stale` 结束（`account_full_namespace_eviction_during_a_query_is_not_stale`）。
+- 完整性的核算（新增「完整性的核算」一节，「限时搜索」「查询的视图」已改）：原来 `Complete` 由几处各自的计数决定：搜索在范围搜完、没有在途时直接报 `Complete`，不看子项目之外；查引用另记读不出的已入索引文件；`Named` 自己数；读到超过 1 MiB 的文件直接跳过。审阅指出三处由此而来的漏报：子项目之外没入索引的文件不计（`pa/a.ts` 跳到只在 `pb/c.ts` 里定义的名字，返回空的 `Complete`，查引用漏掉其他包的调用方）；命名空间满了之后提示冻结，被挤出的文件提示仍匹配，搜索把它当作已入索引跳过（10 万文件的仓库约 5%）；第 1 层按 4 MiB 入索引的 1–4 MiB 文件，查引用按 1 MiB 读，读不出就丢掉。现在只有一处决定完整性：每个能参与回答的文件分类一次。决定：`Complete` 保持接口文档的含义（「能参与回答的文件都已入索引或在这次查询里搜过」），范围之外没入索引的文件计入 `outside`，三种查询一样；限时搜索仍只搜当前子项目。满额模式的核对除了范围里的文件（搜索之前，约 2.3 ms），也核对范围之外提示匹配的文件（遍历时）：只核对范围里的会让范围之外被挤出的文件仍算已入索引，正是这一类漏报；范围之外的核对按时间盒分条进行（见下一轮）。`View` 的淘汰代数改为提示戳记用的那个（满额后冻结），另加「是否已满」：满额后批量层自己的配额淘汰不再让并发的查询以 `Stale` 结束（`account_full_namespace_eviction_during_a_query_is_not_stale`）。
 - 预取的沿用改在查询任务里、按它自己取的快照判断（「查询的视图」已改）：原来 `query` 在调用方线程上用当前视图判断，任务稍后才取快照，两者之间核对任务发布了新映射时，第 1–3 步来自旧映射、搜索来自新映射，同一个文件的两个 OID 都列出且 `Complete`。`check_view` 也比较数据的视图与快照的映射代数（`view_matrix_prefetch` 的「`query` 返回之后、任务取快照之前」）。
 - 没有可发布快照的会话（「查询的视图」已补）：原来没有当前 worktree、文件列表 `Unavailable` 时等着的查询一直 `Running`；现在以 `Failed(Unreadable)` 结束。工作区比较失败或根目录打不开时发布的快照标为缺工作区内容，结果不是 `Complete`（原来按只有基础部分的映射回答 `Complete`）。
 - `NavigationProvider::cancel` 写明「立即返回，不阻塞；可在任意线程调用」（「语义导航的注册」的接口已补）：它在 UI 线程上被调用（`close`、超过 16 个查询时挤出最旧的）。会话结束时原来在 `publishing` 锁里调用它，现在收集起来，放开锁之后再调用（`escalate_cancel_runs_outside_publishing`）；关闭的查询持有的映射、作废的预取交给 `Background` 任务释放，不在 UI 线程上放掉最后一份语言包租约或约 3 MB 的映射。
+- 完整性的核算，第二轮（「完整性的核算」「blob → 路径映射」已改）：审阅又指出三处。批量层存成 `TooLarge`（没打开过的 1.5 MiB 生成文件）或 `TimedOut` 的文件有匹配的提示，原来算已入索引、搜索也跳过，只在它里面定义的类型跳转返回空的 `Complete`；修改过或未跟踪、超过 1 MiB 的文件是 `Unindexable` 覆盖项，遮住了基础条目，原来从核算里消失。决定修复、不作为已知限制：本次会话记下单元没有内容的键（`State::unfinished`），核算计为未搜，搜索按交互上限读它们；`Binary` 算已入索引（没有定义可找）；`WorktreeState` 分出 `Excluded`（过滤器的指针文件、符号链接），`Unindexable` 只剩超过 1 MiB 和读不出，计为未搜。局部定义的查引用原来不看自己的文件有没有搜成（大文件按后台的 250 ms 解析，超时就是零个引用、`Complete`），现在要它搜过，并按交互上限解析；按 OID 读、映射在这个路径上是另一份内容的被查定义所在的文件没能搜时也计入。`finish` 原来在最后一次比较视图之后又读提示（被读过的文件按当时的提示算出遍历里的分类）；现在遍历时定下这些分类，`finish` 不读提示。满额模式范围之外的核对原来一口气做完（10 万文件约 280 ms），不检查停止，`Done` 晚到约 1.28 s，超过「到停止 ≤ 1.1 s」，关闭查询也不停；现在每条语句之前检查停止和时间盒，没核对的计入 `outside`。另按审阅的建议缓存遍历的结果，`goto_indexed` 的重复跳转不再遍历（「实际验证」有第一次与重复两个数字）。
 - 交错矩阵：文件改用语言包的语言（`jpack`，Java grammar，`jvm` 组），语言包升级和同组安装改变查询用的语言；每种变化作用于对这种查询有贡献的文件（跳转和 `Named` 是定义所在的 c、d，查引用是引用所在的 e、f），原来提交、换映射、改文件都作用于没有引用的 d.ts，查引用的那几格测不出遗漏。另加位置「`query` 返回之后、任务取快照之前」。

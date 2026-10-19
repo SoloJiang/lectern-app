@@ -21,7 +21,7 @@ fn check_against_disk(h: &Harness) {
                 assert_eq!(*oid, h.git.oid(&bytes), "{path}");
             }
             WorktreeState::Absent => assert!(on_disk.is_err(), "{path} is on disk"),
-            WorktreeState::Unindexable => {}
+            WorktreeState::Unindexable | WorktreeState::Excluded => {}
         }
     }
 }
@@ -39,6 +39,7 @@ enum Expect {
     Content(&'static str),
     Absent,
     Unindexable,
+    Excluded,
 }
 
 const CASES: &[Case] = &[
@@ -108,7 +109,7 @@ const CASES: &[Case] = &[
                 b"version https://git-lfs.github.com/spec/v1\n",
             );
         },
-        overlay: &[("a.ts", Expect::Unindexable)],
+        overlay: &[("a.ts", Expect::Excluded)],
     },
     Case {
         name: "over 1 MiB",
@@ -155,6 +156,7 @@ fn overlay_follows_the_worktree() {
                     Expect::Content(text) => WorktreeState::Content(h.git.oid(text.as_bytes())),
                     Expect::Absent => WorktreeState::Absent,
                     Expect::Unindexable => WorktreeState::Unindexable,
+                    Expect::Excluded => WorktreeState::Excluded,
                 };
                 (p.to_string(), state)
             })

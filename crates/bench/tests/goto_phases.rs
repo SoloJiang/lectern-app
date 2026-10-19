@@ -72,7 +72,15 @@ fn files(default: usize) -> usize {
 #[test]
 #[ignore = "a profile; see the module docs"]
 fn goto_indexed_phases() {
-    goto_phases(false);
+    goto_phases(false, false);
+}
+
+/// The same jump as the first one after the index changed: the cached
+/// walk of the accounting (「完整性的核算」) forgotten before each jump.
+#[test]
+#[ignore = "a profile; see the module docs"]
+fn goto_indexed_uncached_phases() {
+    goto_phases(false, true);
 }
 
 /// The same jump once the namespace is full (`Indexer::set_namespace_full`):
@@ -82,10 +90,10 @@ fn goto_indexed_phases() {
 #[test]
 #[ignore = "a profile; see the module docs"]
 fn goto_indexed_full_phases() {
-    goto_phases(true);
+    goto_phases(true, false);
 }
 
-fn goto_phases(full: bool) {
+fn goto_phases(full: bool, uncached: bool) {
     let n = files(100_000);
     let git = Arc::new(FakeGit::new());
     let dir = tempfile::tempdir().expect("temp dir");
@@ -118,6 +126,9 @@ fn goto_phases(full: bool) {
         },
     };
     let jump = || {
+        if uncached {
+            rig.indexer.clear_walks(&rig.git.key());
+        }
         let id = rig.indexer.query(query.clone());
         rig.executor.run_until_idle();
         let r = rig.indexer.results(id).expect("kept");
@@ -127,10 +138,10 @@ fn goto_phases(full: bool) {
     let r = jump();
     assert!(!r.candidates.is_empty());
     assert_eq!(r.state, QueryState::Done(Completeness::Complete));
-    let title = if full {
-        "goto_indexed phases, namespace full"
-    } else {
-        "goto_indexed phases"
+    let title = match (full, uncached) {
+        (true, _) => "goto_indexed phases, namespace full",
+        (false, true) => "goto_indexed phases, walk not cached",
+        (false, false) => "goto_indexed phases",
     };
     profile(&format!("{title}, {n} files"), JUMPS, jump);
 }

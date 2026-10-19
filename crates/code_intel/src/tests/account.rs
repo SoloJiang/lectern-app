@@ -156,7 +156,7 @@ fn account_full_namespace_checks_the_hinted_files() {
     let snap = h.indexer.inner().snap(&h.key()).expect("open");
     let mut account = Account::default();
     let all = |_: &crate::extract::Lang| true;
-    let _ = snap.walk(&mut account, "", &all);
+    let _ = snap.walk_all(&mut account, "");
     assert_eq!(
         snap.unsearched_files(&account, "", &all),
         [
@@ -272,4 +272,273 @@ fn account_files_are_read_under_their_units_limit() {
             outside: 0
         }
     );
+}
+
+/// The accounting's reasons of every file, for every language, before any
+/// query read something.
+fn reasons(h: &Harness) -> Vec<(String, Reason)> {
+    let snap = h.indexer.inner().snap(&h.key()).expect("open");
+    snap.unsearched_files(&Account::default(), "", &|_| true)
+}
+
+fn partial(unsearched: u32, outside: u32) -> Completeness {
+    Completeness::Partial {
+        unsearched,
+        outside,
+    }
+}
+
+/// F1: a tracked file over the background limit, never opened, is stored
+/// `TooLarge` and its hint matches, but its unit holds nothing: it is not
+/// indexed. `Named` (which searches nothing) reports it; a jump and find
+/// references search it, under the interactive limit.
+#[test]
+fn account_too_large_units_are_searched() {
+    let generated = large(ITEM, 3 << 19);
+    let far = large("export function far() { return item() + 9; }\n", 3 << 19);
+    let h = indexed(&[
+        ("a.ts", RUN),
+        ("c.ts", ITEM3),
+        ("gen.ts", &generated),
+        ("far.ts", &far),
+    ]);
+    assert!(h.hinted("gen.ts") && h.hinted("far.ts"));
+    assert_eq!(
+        reasons(&h),
+        [
+            ("far.ts".to_owned(), Reason::TooLarge),
+            ("gen.ts".to_owned(), Reason::TooLarge)
+        ]
+    );
+    let r = named(&h, "a.ts");
+    assert_eq!(paths(&r), ["c.ts"]);
+    assert_eq!(done(&r), partial(2, 0));
+
+    let r = h.goto("a.ts", "item", 0);
+    assert_eq!(paths(&r), ["c.ts", "gen.ts"], "gen.ts is searched");
+    assert_eq!(done(&r), Completeness::Complete);
+
+    let of = defined(&h, "c.ts");
+    let r = h.ask(QueryKind::References { of });
+    assert_eq!(paths(&r), ["a.ts", "far.ts"], "far.ts is searched");
+    assert_eq!(done(&r), Completeness::Complete);
+}
+
+/// F1: a unit stored `TimedOut` (here every extraction of the file times
+/// out) is not indexed either: never complete without its file.
+#[test]
+fn account_timed_out_units_are_not_indexed() {
+    use crate::extract::{ExtractStatus, Extraction, extract};
+    let h = Harness::new();
+    h.indexer.set_extractor(|lang, bytes, deadline, cancel| {
+        if memchr::memmem::find(bytes, b"SLOW").is_some() {
+            Extraction::empty(ExtractStatus::TimedOut)
+        } else {
+            extract(lang, bytes, deadline, cancel)
+        }
+    });
+    let slow = "// SLOW\nexport function item() { return 7; }\n";
+    for (path, text) in [("a.ts", RUN), ("slow.ts", slow)] {
+        h.git.add("main", &[(path, text.as_bytes())]);
+    }
+    h.git.commit("main");
+    h.open();
+    assert!(h.hinted("slow.ts"));
+    assert_eq!(reasons(&h), [("slow.ts".to_owned(), Reason::TimedOut)]);
+    assert_eq!(done(&named(&h, "a.ts")), partial(1, 0));
+    // The search extracts it again, and it times out again.
+    let r = h.goto("a.ts", "item", 0);
+    assert!(r.candidates.is_empty());
+    assert_eq!(done(&r), partial(1, 0));
+}
+
+/// F1, decided: a binary file has no definitions or references whatever the
+/// limit, so its `Binary` unit counts as indexed.
+#[test]
+fn account_binary_units_count_as_indexed() {
+    let binary = "export function item() { return 1; }\n\0\0\0\0";
+    let h = indexed(&[("a.ts", RUN), ("c.ts", ITEM), ("bin.ts", binary)]);
+    assert!(h.hinted("bin.ts"));
+    assert_eq!(reasons(&h), []);
+    let r = h.goto("a.ts", "item", 0);
+    assert_eq!(paths(&r), ["c.ts"]);
+    assert_eq!(done(&r), Completeness::Complete);
+}
+
+/// F1: a worktree file the overlay could not read (over 1 MiB, modified or
+/// untracked: `Unindexable`) is not searched; a filter's pointer file
+/// (`Excluded`) is no file of a query's.
+#[test]
+fn account_unindexable_worktree_files_are_unsearched() {
+    use crate::map::WorktreeState;
+    let h = indexed(&[
+        ("a.ts", RUN),
+        ("c.ts", ITEM),
+        ("big.ts", CALL),
+        ("lfs.ts", ITEM3),
+    ]);
+    h.pause();
+    h.git
+        .write("main", "big.ts", large(CALL, 2 << 20).as_bytes());
+    h.git
+        .write("main", "new.ts", large(ITEM3, 2 << 20).as_bytes());
+    h.git.filter("lfs.ts");
+    h.git.write(
+        "main",
+        "lfs.ts",
+        b"version https://git-lfs.github.com/spec/v1\n",
+    );
+    h.emit(&[
+        ("big.ts", CHANGED),
+        ("new.ts", CHANGED),
+        ("lfs.ts", CHANGED),
+    ]);
+    h.settle();
+    let map = h.map();
+    assert_eq!(map.overlay.get("big.ts"), Some(WorktreeState::Unindexable));
+    assert_eq!(map.overlay.get("new.ts"), Some(WorktreeState::Unindexable));
+    assert_eq!(map.overlay.get("lfs.ts"), Some(WorktreeState::Excluded));
+    assert_eq!(
+        reasons(&h),
+        [
+            ("big.ts".to_owned(), Reason::Unindexable),
+            ("new.ts".to_owned(), Reason::Unindexable)
+        ]
+    );
+    let r = h.goto("a.ts", "item", 0);
+    assert_eq!(paths(&r), ["c.ts"]);
+    assert_eq!(done(&r), partial(2, 0));
+}
+
+/// F2: references of a local definition are complete only when its own
+/// file was searched; the own file is parsed with tier 1's limits.
+#[test]
+fn account_local_references_need_their_file_searched() {
+    let text = "export function run() { const local = 1; return local + local; }\n";
+    let h = indexed(&[("a.ts", text)]);
+    let of = h
+        .goto("a.ts", "local", 0)
+        .symbol
+        .as_ref()
+        .and_then(|s| s.defines.clone())
+        .expect("a definition");
+    assert!(of.local);
+    let r = h.ask(QueryKind::References { of: of.clone() });
+    assert!(!paths(&r).is_empty());
+    assert_eq!(done(&r), Completeness::Complete);
+    *lock(&h.indexer.inner().parse_timeout) = Some("a.ts".into());
+    let r = h.ask(QueryKind::References { of });
+    assert!(r.callers.is_empty() && r.same_name.is_empty());
+    assert_eq!(done(&r), partial(1, 0));
+}
+
+/// F2: the definition's own file read by OID (an object: the worktree's
+/// file changed since) that could not be searched counts, though the map
+/// has another content at its path.
+#[test]
+fn account_definition_read_as_an_object_counts_when_unsearched() {
+    use lectern_services::code_intel::TextOrigin;
+    let h = indexed(&[("a.ts", RUN), ("c.ts", ITEM)]);
+    let mut of = defined(&h, "c.ts");
+    h.git.write("main", "c.ts", ITEM3.as_bytes());
+    h.emit(&[("c.ts", CHANGED)]);
+    h.settle();
+    assert_ne!(h.text("c.ts").oid, of.location.oid);
+    of.location.origin = TextOrigin::Object;
+    of.location.worktree = None;
+    let r = h.ask(QueryKind::References { of: of.clone() });
+    assert_eq!(done(&r), Completeness::Complete);
+    *lock(&h.indexer.inner().parse_timeout) = Some("c.ts".into());
+    let r = h.ask(QueryKind::References { of });
+    assert_eq!(done(&r), partial(1, 0));
+}
+
+/// Sub-projects `pa` (the jump) and `pb` (six more files), all indexed,
+/// the namespace full and the background paused.
+fn full_two_packages() -> Harness {
+    let h = Harness::new();
+    h.git.add(
+        "main",
+        &[("pa/a.ts", RUN.as_bytes()), ("pa/b.ts", ITEM.as_bytes())],
+    );
+    for i in 0..6 {
+        let text = format!("export function f{i}() {{ return {i}; }}\n");
+        h.git
+            .add("main", &[(&format!("pb/f{i}.ts"), text.as_bytes())]);
+    }
+    h.git.commit("main");
+    h.open_with("main", packages(&["pa", "pb"]));
+    h.pause();
+    fill(&h);
+    h
+}
+
+/// F3: closing a query during the full-mode check outside its scope stops
+/// the check before its next statement (a statement is at most 500 OIDs, a
+/// few milliseconds).
+#[test]
+fn account_full_check_stops_with_the_query() {
+    use lectern_services::code_intel::Query;
+    let h = full_two_packages();
+    let inner = h.indexer.inner().clone();
+    let id = h.indexer.query(Query {
+        project: h.key(),
+        kind: QueryKind::Definition {
+            at: h.text("pa/a.ts"),
+            position: h.pos("pa/a.ts", "item", 0),
+        },
+    });
+    *lock(&inner.step_hook) = Some((Step::Verify, Box::new(move |inner, _| inner.close(id))));
+    let before = inner
+        .verify_checks
+        .load(std::sync::atomic::Ordering::Acquire);
+    h.settle();
+    assert!(lock(&inner.step_hook).is_none(), "the check started");
+    assert_eq!(
+        inner
+            .verify_checks
+            .load(std::sync::atomic::Ordering::Acquire)
+            - before,
+        1,
+        "no statement after the close"
+    );
+    assert!(h.indexer.results(id).is_none());
+}
+
+/// F3: the check outside the scope stops at the query's time box; what it
+/// did not check counts as `outside`. Without the cut, complete.
+#[test]
+fn account_full_check_is_time_boxed() {
+    let h = full_two_packages();
+    let clock = h.clock.clone();
+    *lock(&h.indexer.inner().step_hook) = Some((
+        Step::Verify,
+        Box::new(move |_, _| clock.advance(std::time::Duration::from_secs(2))),
+    ));
+    let r = h.goto("pa/a.ts", "item", 0);
+    assert_eq!(paths(&r), ["pa/b.ts"]);
+    assert_eq!(done(&r), partial(0, 6));
+    let r = h.goto("pa/a.ts", "item", 0);
+    assert_eq!(done(&r), Completeness::Complete);
+}
+
+/// The walk is cached per project until its key changes: the same query
+/// again on an unchanged index reuses it; a unit done again (tier 1 opens a
+/// `TooLarge` file) changes the record, counted as an installation, so the
+/// next query walks again and sees it indexed.
+#[test]
+fn account_walks_are_cached_until_the_index_changes() {
+    let big = large(ITEM, 3 << 19);
+    let h = indexed(&[("a.ts", RUN), ("c.ts", ITEM3), ("big.ts", &big)]);
+    h.indexer.clear_walks(&h.key());
+    assert_eq!(done(&named(&h, "a.ts")), partial(1, 0));
+    assert_eq!(h.indexer.walks(&h.key()), 1);
+    assert_eq!(done(&named(&h, "a.ts")), partial(1, 0));
+    assert_eq!(h.indexer.walks(&h.key()), 1, "the same walk");
+    h.current("big.ts");
+    h.settle();
+    let r = named(&h, "a.ts");
+    assert_eq!(paths(&r), ["big.ts", "c.ts"]);
+    assert_eq!(done(&r), Completeness::Complete);
+    assert_eq!(h.indexer.walks(&h.key()), 2, "walked again");
 }

@@ -59,7 +59,9 @@ type Pending = (
 pub(crate) enum FileExtraction {
     /// `Done`: its definitions.
     Defs(Extraction),
-    /// A language not in the snapshot's table: not one of the query's files.
+    /// No definitions, and none to find: a language not in the snapshot's
+    /// table, or binary content (stored or extracted `Binary`: no limit
+    /// changes it; the accounting takes it as searched).
     Nothing,
     /// Nothing is known of its definitions, and why: the query's time ran
     /// out or it was cancelled (not stored), or it is stored or extracted
@@ -256,6 +258,9 @@ impl Inner {
             return FileExtraction::Nothing;
         };
         let version = Version::of(&lang);
+        // A unit stored `TooLarge` or `TimedOut` holds nothing of the file:
+        // extracted now with tier 1's limits, cut at `until`.
+        let mut unfinished = false;
         if let Some(found) = snap
             .project
             .store
@@ -264,15 +269,27 @@ impl Inner {
             .into_iter()
             .next()
         {
-            if let Some(reason) = stored_reason(found.status) {
-                return FileExtraction::Unsearched(reason);
-            }
-            if let Some(extraction) = snap.project.store.load(found.unit) {
-                units.push(found.unit);
-                return FileExtraction::Defs(extraction);
+            match found.status {
+                ExtractStatus::TooLarge | ExtractStatus::TimedOut => unfinished = true,
+                // No definitions to have: as indexed.
+                ExtractStatus::Binary => return FileExtraction::Nothing,
+                status => {
+                    if let Some(reason) = stored_reason(status) {
+                        return FileExtraction::Unsearched(reason);
+                    }
+                    if let Some(extraction) = snap.project.store.load(found.unit) {
+                        units.push(found.unit);
+                        return FileExtraction::Defs(extraction);
+                    }
+                }
             }
         }
-        let file = FileDeadline::new(self.watchdog.clock().now(), Some(until));
+        let now = self.watchdog.clock().now();
+        let file = if unfinished {
+            FileDeadline::interactive(now, Some(until))
+        } else {
+            FileDeadline::new(now, Some(until))
+        };
         let deadline = Deadline::at(&self.watchdog, file.at, snap.read_limit(eff));
         let extract = crate::index::lock(&self.extract).clone();
         let extraction = extract(&lang, bytes, &deadline, cancel);
@@ -289,6 +306,7 @@ impl Inner {
         }
         match file.reason(status) {
             None => FileExtraction::Defs(extraction),
+            Some(Reason::Binary) => FileExtraction::Nothing,
             Some(reason) => FileExtraction::Unsearched(reason),
         }
     }
@@ -829,23 +847,37 @@ impl Inner {
             p.units = units;
             p.scanned = scanned;
             drop(search);
-            if searched {
-                // Every file of the jump's language group, classified once.
-                let part = |l: &Lang| snap.in_group(l, &lang);
-                let walked = {
-                    let _t = crate::phases::span("4 accounting");
-                    snap.walk(&mut account, &scope.dir, &part)
-                };
-                let _t = crate::phases::span("view check");
-                // The walk read hints: a file it took as indexed whose unit
-                // was written after the lookup is looked up again.
-                if !self.hold_view(run, snap, at, &mut p) {
-                    self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
-                    return self.end_stale(snap, run.id);
-                }
-                Some(snap.finish(&account, &scope.dir, &part, walked))
+            // Every file of the jump's language group, classified once.
+            let part = |l: &Lang| snap.in_group(l, &lang);
+            let walked = if searched {
+                let _t = crate::phases::span("4 accounting");
+                self.walk(
+                    run,
+                    snap,
+                    &mut account,
+                    &scope.dir,
+                    &part,
+                    Some(lang.name()),
+                )
             } else {
                 None
+            };
+            match walked {
+                Some(walked) => {
+                    let _t = crate::phases::span("view check");
+                    // The walk read hints: a file it took as indexed whose
+                    // unit was written after the lookup is looked up again.
+                    if !self.hold_view(run, snap, at, &mut p) {
+                        self.store_scanned(
+                            &snap.project,
+                            snap.session,
+                            std::mem::take(&mut p.scanned),
+                        );
+                        return self.end_stale(snap, run.id);
+                    }
+                    Some(snap.finish(&account, walked))
+                }
+                None => None,
             }
         };
         self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
@@ -953,7 +985,9 @@ impl Inner {
         let part = |l: &Lang| !snap.disabled.contains(l.name());
         let mut account = Account::default();
         let counts = crate::phases::span("named: counts");
-        let walked = snap.walk(&mut account, dir, &part);
+        let Some(walked) = self.walk(run, snap, &mut account, dir, &part, None) else {
+            return Ended::Stopped;
+        };
         drop(counts);
         self.step_hook(Step::Hints, snap);
         match self.check_view(snap, &view) {
@@ -968,7 +1002,7 @@ impl Inner {
             let _t = crate::phases::span("named: rank");
             ranker.sort(&mut candidates);
         }
-        let completeness = snap.finish(&account, dir, &part, walked);
+        let completeness = snap.finish(&account, walked);
         let preselect = (!candidates.is_empty()).then_some(0);
         let publish = crate::phases::span("named: publish");
         let all: Arc<[Candidate]> = candidates.into();
