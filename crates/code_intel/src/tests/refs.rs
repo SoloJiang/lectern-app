@@ -12,6 +12,8 @@ use lectern_services::code_intel::{
 use lectern_services::project::RelPath;
 
 use crate::LangName;
+use crate::index::lock;
+use crate::query::Step;
 use crate::resolve::{Bound, CandidateDraft, Import, PackageScope, ResolveContext, Resolver};
 use crate::site::{ParsedFile, Site};
 
@@ -255,6 +257,83 @@ fn refs_named_parses_no_file() {
     assert!(r.candidates.iter().all(|c| !c.definition.local));
     assert!(matches!(r.state, QueryState::Done(_)), "{:?}", r.state);
     assert_eq!(parsed(&pairs), Vec::<String>::new());
+}
+
+/// The latest results of the newest query (in a step hook).
+fn latest(inner: &crate::index::Inner) -> Option<Arc<QueryResults>> {
+    lock(&inner.queries)
+        .entries
+        .back()
+        .map(|e| e.results.clone())
+}
+
+type Seen = Arc<std::sync::Mutex<Option<Arc<QueryResults>>>>;
+
+/// B2: what the definition's file and the `ci_ref` pass found goes out
+/// before the search's scope is read: two files (fewer than the first
+/// batch's four) and no time passed, published all the same.
+#[test]
+fn refs_indexed_references_go_out_before_the_search() {
+    let h = indexed(&[
+        ("c.ts", "export function item() { return 2; }\n"),
+        ("a.ts", "export function run() { return item(); }\n"),
+    ]);
+    let of = def(&h, "c.ts", "item", 0);
+    let seen: Seen = Arc::default();
+    let s = seen.clone();
+    *lock(&h.indexer.inner().step_hook) = Some((
+        Step::Hints,
+        Box::new(move |inner, _| *s.lock().unwrap() = latest(inner)),
+    ));
+    let r = refs(&h, &of);
+    assert_eq!(at(&r.same_name), [("a.ts".to_owned(), 0)]);
+    let before = seen.lock().unwrap().clone().expect("the hook ran");
+    assert_eq!(before.state, QueryState::Running);
+    assert_eq!(at(&before.same_name), [("a.ts".to_owned(), 0)]);
+}
+
+/// B2: the search's batches go out on their timers between hits too: a
+/// hit in the first file, then 200 ms of files without one (past the first
+/// batch's 150 ms), and the hit is out before the next file is read.
+#[test]
+fn refs_search_batches_go_out_on_time() {
+    let mut files = vec![
+        (
+            "c.ts".to_owned(),
+            "export function item() { return 2; }\n".to_owned(),
+        ),
+        (
+            "a.ts".to_owned(),
+            "export function run() { return item(); }\n".to_owned(),
+        ),
+    ];
+    for i in 0..4 {
+        files.push((format!("b{i}.ts"), format!("export const b{i} = {i};\n")));
+    }
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let h = unindexed(&pairs, &[]);
+    let of = def(&h, "c.ts", "item", 0);
+    let seen: Seen = Arc::default();
+    let (s, clock) = (seen.clone(), h.clock.clone());
+    // Before a.ts is read: arm the next hook. Before b0.ts: 200 ms pass.
+    // Before b1.ts: what is published.
+    let third: crate::query::HookFn = Box::new(move |inner, _| *s.lock().unwrap() = latest(inner));
+    let second: crate::query::HookFn = Box::new(move |inner, _| {
+        clock.advance(std::time::Duration::from_millis(200));
+        *lock(&inner.step_hook) = Some((Step::Read, third));
+    });
+    *lock(&h.indexer.inner().step_hook) = Some((
+        Step::Read,
+        Box::new(move |inner, _| *lock(&inner.step_hook) = Some((Step::Read, second))),
+    ));
+    let r = refs(&h, &of);
+    assert_eq!(at(&r.same_name), [("a.ts".to_owned(), 0)]);
+    let before = seen.lock().unwrap().clone().expect("the hooks ran");
+    assert_eq!(before.state, QueryState::Running);
+    assert_eq!(at(&before.same_name), [("a.ts".to_owned(), 0)]);
 }
 
 /// A use bound by the locals to another (shadowing) local is dropped.

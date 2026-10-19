@@ -13,8 +13,8 @@ use tempfile::TempDir;
 use super::extract::run;
 use crate::extract::{Def, ExtractStatus, Extraction, LanguageTable, Visibility};
 use crate::store::{
-    self, EXISTS, EXISTS_BATCH, Found, NAMESPACE, PendingTouches, SCHEMA, STATEMENTS, Store,
-    StoredUnit, TOUCH_CHUNK, Version, unit_bytes,
+    self, EXISTS, EXISTS_BATCH, Found, NAMESPACE, NamePager, PendingTouches, SCHEMA, STATEMENTS,
+    Store, StoredUnit, TOUCH_CHUNK, Version, unit_bytes,
 };
 use crate::testing::FIXTURES;
 use crate::{DefKind, lang_name};
@@ -29,8 +29,10 @@ static TEST_STATEMENTS: &[&str] = &[
     store::INSERT_DEF,
     store::INSERT_REF,
     store::EXISTS,
-    store::DEFS_BY_NAME,
-    store::REFS_BY_NAME,
+    store::DEFS_PAGE,
+    store::DEFS_LEFT,
+    store::DEFS_IN,
+    store::REFS_PAGE,
     store::UNITS,
     store::DEF_NAMES,
     store::EXT_OF_UNIT,
@@ -395,6 +397,200 @@ fn store_lookups_cover_a_compatibility_group() {
     assert_eq!(unit_oids(&refs), expected);
     let all = store.units(&versions).expect("read");
     assert_eq!(unit_oids(&all), expected);
+}
+
+/// A3: a name's definitions in pages of at most the limit, in unit order,
+/// each unit's definitions in one page (a unit with two overloads is not
+/// split at a page's end), every definition once; the rows left counted
+/// while pages remain; the other cases of the name read but not returned.
+#[test]
+fn store_lookup_by_name_in_pages() {
+    let f = Fixture::new();
+    let store = f.store();
+    let js = v("js", 1, 1);
+    let mut units = Vec::new();
+    for i in 0..10u32 {
+        let mut defs = vec![def("get", DefKind::Function, 1)];
+        if i % 4 == 2 {
+            // An overload in the same unit.
+            defs.push(def("get", DefKind::Method, 7));
+        }
+        if i == 5 {
+            defs.push(def("Get", DefKind::Class, 9));
+        }
+        units.push((oid(i), done(defs, &[])));
+    }
+    let rows: Vec<_> = units.iter().map(|(o, e)| (*o, &js, e)).collect();
+    commit(&store, &rows);
+    let all = store
+        .defs_by_name("get", std::slice::from_ref(&js))
+        .expect("read");
+    assert_eq!(all.len(), 12);
+
+    let mut pager = NamePager::new("get", std::slice::from_ref(&js));
+    let mut seen = Vec::new();
+    let mut pages = 0;
+    while !pager.done() {
+        let left = store.defs_left(&pager);
+        let page = store.next_defs(&mut pager, 3).expect("read");
+        assert!(page.len() <= 3, "{page:?}");
+        assert!(left >= page.len() as u64);
+        seen.extend(page.into_iter().map(|d| (d.oid, d.def.line)));
+        pages += 1;
+        assert!(pages < 20, "the pages end");
+    }
+    assert_eq!(store.defs_left(&pager), 0);
+    let mut want: Vec<_> = all.iter().map(|d| (d.oid, d.def.line)).collect();
+    want.sort();
+    seen.sort();
+    assert_eq!(seen, want, "each definition once");
+    // Before reading anything: every row of the name, any case.
+    let pager = NamePager::new("get", std::slice::from_ref(&js));
+    assert_eq!(store.defs_left(&pager), 13);
+}
+
+/// A3: the lookup by name in given units returns the name's definitions
+/// in the units of those OIDs only, at most the limit per statement.
+#[test]
+fn store_lookup_by_name_in_given_units() {
+    let f = Fixture::new();
+    let store = f.store();
+    let ts = v("ts", 1, 1);
+    let units: Vec<_> = (0..700u32)
+        .map(|i| {
+            (
+                oid(i),
+                done(vec![def("get", DefKind::Function, i % 50)], &[]),
+            )
+        })
+        .collect();
+    let rows: Vec<_> = units.iter().map(|(o, e)| (*o, &ts, e)).collect();
+    for chunk in rows.chunks(64) {
+        commit(&store, chunk);
+    }
+    let wanted: Vec<BlobId> = (0..700).filter(|i| i % 7 == 0).map(oid).collect();
+    let mut found: Vec<BlobId> = store
+        .defs_by_name_in("get", std::slice::from_ref(&ts), &wanted, 256)
+        .expect("read")
+        .into_iter()
+        .map(|d| d.oid)
+        .collect();
+    found.sort();
+    let mut expected = wanted.clone();
+    expected.sort();
+    assert_eq!(found, expected);
+    // 600 OIDs: two statements of at most 5 rows each.
+    let many: Vec<BlobId> = (0..600).map(oid).collect();
+    let limited = store
+        .defs_by_name_in("get", std::slice::from_ref(&ts), &many, 5)
+        .expect("read");
+    assert_eq!(limited.len(), 10);
+    assert_eq!(
+        store
+            .defs_by_name_in("other", std::slice::from_ref(&ts), &wanted, 256)
+            .expect("read"),
+        vec![]
+    );
+}
+
+/// The plans of the lookups by name (`EXPLAIN QUERY PLAN`): every one
+/// seeks `ci_def_name` (or `ci_ref`'s key) by (name, unit), never scans a
+/// table and never sorts, so its cost follows the rows or units it reads.
+#[test]
+fn store_lookups_by_name_use_the_name_and_unit_index() {
+    use std::sync::LazyLock;
+    static PLANS: LazyLock<Tables> = LazyLock::new(|| {
+        let mut statements: Vec<&'static str> = STATEMENTS.to_vec();
+        for sql in [
+            store::DEFS_PAGE,
+            store::DEFS_IN,
+            store::DEFS_LEFT,
+            store::REFS_PAGE,
+        ] {
+            statements.push(Box::leak(
+                format!("EXPLAIN QUERY PLAN {sql}").into_boxed_str(),
+            ));
+        }
+        Tables {
+            namespace: NAMESPACE,
+            schema: SCHEMA,
+            statements: Box::leak(statements.into_boxed_slice()),
+            quota: store::QUOTA,
+        }
+    });
+    let f = Fixture::new();
+    let p = f.partition();
+    let store = Store::with_tables(&p, &PLANS);
+    let js = v("js", 1, 1);
+    commit(
+        &store,
+        &[(
+            oid(1),
+            &js,
+            &done(vec![def("get", DefKind::Function, 1)], &[]),
+        )],
+    );
+    let set = p.tables(&PLANS);
+    let plan = |sql: &str, params: &[Param<'_>]| -> String {
+        let explain: &'static str = PLANS
+            .statements
+            .iter()
+            .find(|s| s.starts_with("EXPLAIN") && s.ends_with(sql))
+            .expect("registered");
+        set.read(|r| {
+            let mut details = Vec::new();
+            assert!(r.query(explain, params, |row| {
+                details.push(row.text(3).unwrap_or_default().to_owned());
+                true
+            }));
+            details.join("\n")
+        })
+        .expect("read")
+    };
+    let mut page = vec![Param::Null; 15];
+    page[0] = Param::Text("get");
+    page[13] = Param::Int(0);
+    page[14] = Param::Int(256);
+    let mut within = vec![Param::Null; 14 + EXISTS_BATCH];
+    within[0] = Param::Text("get");
+    within[13] = Param::Int(256);
+    for (sql, params, wants) in [
+        (
+            store::DEFS_PAGE,
+            page.clone(),
+            &[
+                "ci_def_name (name=? AND unit>?)",
+                "e USING INTEGER PRIMARY KEY",
+            ][..],
+        ),
+        (
+            store::REFS_PAGE,
+            page,
+            &[
+                "r USING PRIMARY KEY (name=? AND unit>?)",
+                "e USING INTEGER PRIMARY KEY",
+            ][..],
+        ),
+        (
+            store::DEFS_IN,
+            within,
+            &["(oid=?", "ci_def_name (name=? AND unit=?)"][..],
+        ),
+        (
+            store::DEFS_LEFT,
+            vec![Param::Text("get"), Param::Int(0)],
+            &["COVERING INDEX ci_def_name (name=? AND unit>?)"][..],
+        ),
+    ] {
+        let plan = plan(sql, &params);
+        for want in wants {
+            assert!(plan.contains(want), "{want} in:\n{plan}");
+        }
+        assert!(
+            !plan.contains("SCAN") && !plan.contains("TEMP B-TREE"),
+            "{plan}"
+        );
+    }
 }
 
 /// The same OIDs under an old grammar version and an old query version:

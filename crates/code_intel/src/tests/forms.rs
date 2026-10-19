@@ -1148,6 +1148,9 @@ fn forms_samples_extract_and_bind() {
             match shows {
                 Defines(name, def_kind) => {
                     let l = table.get(lang).unwrap();
+                    // Compiled before the deadline starts: compiling the
+                    // tags query is not part of either extraction's time.
+                    assert!(l.compiled().is_some());
                     let deadline = Deadline::interactive(&watchdog);
                     let walked = extract(l, source.as_bytes(), &deadline, &cancel);
                     let tagged = extract_tags(l, source.as_bytes(), &deadline, &cancel);

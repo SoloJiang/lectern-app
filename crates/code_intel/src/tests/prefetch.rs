@@ -137,6 +137,12 @@ fn focus_of_another_worktree_waits_for_it() {
 #[test]
 fn prefetch_expires_unused() {
     let h = repo();
+    // The prefetch's cold parse would warm the text and schedule the kept
+    // parse's own due entry (`parse_cache_*` tests it).
+    h.indexer
+        .inner()
+        .no_warm
+        .store(true, std::sync::atomic::Ordering::Release);
     let q = jump(&h);
     h.indexer.prefetch(q.clone());
     h.settle();

@@ -498,32 +498,17 @@ pub(crate) struct FileRef<'a> {
     pub oid: Option<BlobId>,
     pub lang: &'a Lang,
     pub slot: HintSlot,
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "the accounting's per-file listing reads it in the tests"
-        )
-    )]
     at: FileAt<'a>,
 }
 
 /// Where a [`FileRef`]'s path is: looked up only when asked for.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the accounting's per-file listing reads it in the tests"
-    )
-)]
 enum FileAt<'a> {
     Base(&'a FileList, usize),
     Overlay(&'a str),
 }
 
 impl FileRef<'_> {
-    /// The file's path (tests).
-    #[cfg(test)]
+    /// The file's path, looked up now (no allocation).
     pub fn path(&self) -> &str {
         match self.at {
             FileAt::Base(files, i) => files.get(i).map_or("", |(p, _)| p),

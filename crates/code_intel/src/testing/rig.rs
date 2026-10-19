@@ -171,6 +171,19 @@ pub fn virtual_repo_with(
     worktrees: &[&str],
     common: Option<&str>,
 ) -> usize {
+    virtual_repo_sharing(git, cache, n, worktrees, common.map(|c| (c, 1)))
+}
+
+/// [`virtual_repo`] whose every `every`th file also defines the function
+/// `name` of `common` (a popular name like `get`: one file in 30 of a
+/// 100 000-file repository is some 3000 definitions).
+pub fn virtual_repo_sharing(
+    git: &FakeGit,
+    cache: &Cache,
+    n: usize,
+    worktrees: &[&str],
+    common: Option<(&str, usize)>,
+) -> usize {
     use crate::store::{Store, Version};
     git.assume_unchanged(true);
     let entries: Vec<(String, lectern_services::project::BlobId)> = (0..n)
@@ -188,7 +201,9 @@ pub fn virtual_repo_with(
             continue;
         };
         let mut extraction = super::synthetic::extraction(i);
-        if let Some(name) = common {
+        if let Some((name, every)) = common
+            && i % every.max(1) == 0
+        {
             let mut def = extraction.defs[1].clone();
             def.name = name.into();
             def.line = 200;

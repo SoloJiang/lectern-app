@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use lectern_services::project::{BlobId, RelPath};
 
-use super::account::{Account, Reason};
+use super::account::{Account, Reason, Stops};
 use super::rank::distance;
 use super::{Run, Snap};
 use crate::extract::{
@@ -19,6 +19,10 @@ use crate::extract::{
 use crate::index::Inner;
 use crate::index::state::under;
 use crate::map::Effective;
+
+/// Files whose OIDs the first batch's lookup of a common name reads
+/// ([`Snap::near_oids`]): four statements of 500 OIDs.
+pub const NEAR_FILES: usize = 2048;
 
 /// One file's time in a query (step 2's reads, the time-boxed search, the
 /// references' parses): the background limit from now, cut at the query's
@@ -46,9 +50,21 @@ impl FileDeadline {
         }
     }
 
+    /// The deadline of a file read under tier 1's limits or not
+    /// (`FileLimits::interactive`, [`Snap::file_limits`]): the interactive
+    /// one when its unit was or may have been made under them, the
+    /// background one otherwise; cut at `until`.
+    pub(crate) fn of(interactive: bool, now: Instant, until: Option<Instant>) -> FileDeadline {
+        if interactive {
+            FileDeadline::interactive(now, until)
+        } else {
+            FileDeadline::new(now, until)
+        }
+    }
+
     /// The interactive limit from now (tier 1's): the text a query is about
-    /// (the definition's own file of find references), and files whose
-    /// stored unit is `TooLarge` or `TimedOut`, cut at `until`.
+    /// (the definition's own file of find references), and files read under
+    /// tier 1's limits ([`FileLimits`]), cut at `until`.
     pub(crate) fn interactive(now: Instant, until: Option<Instant>) -> FileDeadline {
         let full = now + INTERACTIVE_DEADLINE;
         match until {
@@ -92,6 +108,19 @@ impl FileDeadline {
             ExtractStatus::Unsupported => Some(Reason::Unreadable),
         }
     }
+}
+
+/// The limits a query reads and parses one file of the map under: those
+/// its unit was, or may have been, made under (「限时搜索」). One rule for
+/// the read limit and the deadline, so a file is never read under one
+/// tier's limit and parsed under the other's.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct FileLimits {
+    /// The most bytes read.
+    pub max_len: usize,
+    /// Tier 1's limits (4 MiB, 1 s) rather than the background's (1 MiB,
+    /// 250 ms).
+    pub interactive: bool,
 }
 
 /// What a query learned about one file it read.
@@ -150,16 +179,59 @@ impl Snap {
         self.in_flight.contains(&(eff.oid, eff.lang.name().clone()))
     }
 
-    /// The read limit of a file for a query: the limit its unit was (or is
-    /// being) extracted under. A file with a unit (its hint matches) or in
-    /// tier 1 may be up to the interactive limit (4 MiB); the others are
-    /// extracted by the background tiers (1 MiB).
-    pub fn read_limit(&self, eff: &Effective) -> usize {
-        if !self.unindexed(eff) || self.focused.contains(&eff.path) {
-            INTERACTIVE_MAX_LEN
-        } else {
-            BACKGROUND_MAX_LEN
+    /// The limits of a file for a query: those its unit was (or is being,
+    /// or would be) extracted under. A file with a unit (its hint matches:
+    /// done under either tier's limits, or `TooLarge` or `TimedOut` under the
+    /// background's and redone under tier 1's) or in tier 1 takes the
+    /// interactive limits (4 MiB, 1 s); the others are the background
+    /// tiers' (1 MiB, 250 ms).
+    pub fn file_limits(&self, eff: &Effective) -> FileLimits {
+        let interactive = !self.unindexed(eff) || self.focused.contains(&eff.path);
+        FileLimits {
+            max_len: if interactive {
+                INTERACTIVE_MAX_LEN
+            } else {
+                BACKGROUND_MAX_LEN
+            },
+            interactive,
         }
+    }
+
+    /// The read limit of a file for a query ([`file_limits`](Self::file_limits)).
+    pub fn read_limit(&self, eff: &Effective) -> usize {
+        self.file_limits(eff).max_len
+    }
+
+    /// The OIDs of the files nearest `from` in the languages `part` admits,
+    /// for the first batch's lookup of a name many units define (「候选的分层
+    /// 与过滤」): `from`'s directory's, then its sub-project's (none without
+    /// one: the whole worktree is no near tier), at most [`NEAR_FILES`],
+    /// each once.
+    pub fn near_oids(&self, from: &str, part: &dyn Fn(&Lang) -> bool) -> Vec<BlobId> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        let dir = from.rsplit_once('/').map_or("", |(d, _)| d);
+        let sub = self.subproject_of(from);
+        let mut admit = |l: &Lang| part(l);
+        for (dir, root) in [(Some(dir), dir.is_empty()), (sub, false)] {
+            let Some(dir) = dir else {
+                continue;
+            };
+            self.map.each_file(dir, true, &mut admit, |f| {
+                // The root's own files only, not the whole worktree.
+                if out.len() < NEAR_FILES
+                    && !(root && f.path().contains('/'))
+                    && let Some(oid) = f.oid
+                    && seen.insert(oid)
+                {
+                    out.push(oid);
+                }
+            });
+            if out.len() >= NEAR_FILES {
+                break;
+            }
+        }
+        out
     }
 
     /// Every file of the map under `dir` (or not under it, `inside` false).
@@ -195,15 +267,17 @@ impl Snap {
     /// right now, nearest first; those stored `TooLarge` or `TimedOut` too
     /// (their units hold nothing). Once the namespace is full a matching hint
     /// does not prove its unit: the hinted files of the scope are checked
-    /// against the store first (`verify_hinted`), and those missing are
-    /// searched too.
+    /// against the store first (`verify_hinted`, stopped by `stops`), and
+    /// those missing are searched too (those left unchecked as well, while
+    /// time remains). None when the query stopped.
     pub fn search_scope(
         &self,
         anchor: &str,
         lang: &Lang,
         skip: &HashSet<(RelPath, BlobId)>,
         account: &mut Account,
-    ) -> Scope {
+        stops: &Stops<'_>,
+    ) -> Option<Scope> {
         let dir = self.subproject_of(anchor).unwrap_or("").to_owned();
         let mut files = Vec::new();
         let mut hinted = Vec::new();
@@ -227,7 +301,9 @@ impl Snap {
                 files.push(eff);
             }
         });
-        self.verify_hinted(account, &hinted);
+        if !self.verify_hinted(account, &hinted, stops) {
+            return None;
+        }
         files.extend(
             hinted
                 .into_iter()
@@ -235,15 +311,16 @@ impl Snap {
         );
         // `distance` allocates: one key per file, not one per comparison.
         files.sort_by_cached_key(|e| (distance(anchor, &e.path), e.path.clone()));
-        Scope { files, dir }
+        Some(Scope { files, dir })
     }
 }
 
 impl Inner {
     /// Searches `scope` for `name` until `until`: every whole-word hit is
     /// handed to `hit` with the bytes read, their key and `until`, and says
-    /// whether the file was searched. Every file read goes into `account`
-    /// (searched, or why not); a file not reached is left to the
+    /// whether the file was searched; `tick` runs after every file, hit or
+    /// not (the caller's timed batches). Every file read goes into
+    /// `account` (searched, or why not); a file not reached is left to the
     /// accounting. False when the query stopped.
     #[allow(
         clippy::too_many_arguments,
@@ -258,6 +335,7 @@ impl Inner {
         until: Instant,
         account: &mut Account,
         mut hit: impl FnMut(&Effective, BlobId, Vec<u8>, Instant) -> Searched,
+        mut tick: impl FnMut(),
     ) -> bool {
         let clock = self.watchdog.clock().clone();
         for eff in &scope.files {
@@ -267,21 +345,17 @@ impl Inner {
             if clock.now() >= until {
                 break;
             }
-            let bytes = match self.read_content(snap, eff, snap.read_limit(eff)) {
-                Ok(bytes) => bytes,
-                Err(reason) => {
-                    account.unsearched(&eff.path, eff.oid, reason);
-                    continue;
-                }
-            };
-            if !whole_word(&bytes, name) {
-                account.searched(&eff.path, eff.oid);
-                continue;
+            match self.read_content(snap, eff, snap.read_limit(eff)) {
+                Err(reason) => account.unsearched(&eff.path, eff.oid, reason),
+                Ok(bytes) if !whole_word(&bytes, name) => account.searched(&eff.path, eff.oid),
+                Ok(bytes) => match hit(eff, eff.oid, bytes, until) {
+                    Searched::Done => account.searched(&eff.path, eff.oid),
+                    Searched::Unsearched(reason) => {
+                        account.unsearched(&eff.path, eff.oid, reason);
+                    }
+                },
             }
-            match hit(eff, eff.oid, bytes, until) {
-                Searched::Done => account.searched(&eff.path, eff.oid),
-                Searched::Unsearched(reason) => account.unsearched(&eff.path, eff.oid, reason),
-            }
+            tick();
         }
         !run.stopped(snap)
     }

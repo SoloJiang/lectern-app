@@ -1168,14 +1168,93 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // The partition's size after the units of 100 000 synthetic files.
     share("code_intel/disk_100k", RECORD, CODE_INTEL, ACTIVE, Time),
-    // A jump the index answers: 100 000 indexed files, a 64 KiB current
-    // text, this crate's part of the 50 ms candidates budget.
+    // A jump the index answers, from the query to its first batch with
+    // candidates: 100 000 indexed files, a 100 KB current text whose parse
+    // is kept (ADR 0037); this crate's part of the 50 ms candidates budget.
+    // In the states a first jump meets: the accounting's walk not cached,
+    // a name some 3000 files define, the namespace at its quota. To the
+    // query's end recorded; within the 1 s time box once full.
     share(
         "code_intel/goto_indexed",
         &[median(Limit::TimeAtMost(ms(20)))],
         CODE_INTEL,
         ACTIVE,
         Time,
+    ),
+    share(
+        "code_intel/goto_indexed/done",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_uncached",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_uncached/done",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_popular",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_popular/done",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_full",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_full/done",
+        &[max(Limit::TimeAtMost(ms(1020)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // The first jump in a text before its parse is kept (the text parsed
+    // for the site), a jump its own locals bind (a `File` definition), and
+    // one from a diff's old side: recorded against the 50 ms candidates.
+    share(
+        "code_intel/goto_cold_parse",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_same_file",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share("code_intel/goto_object", RECORD, CODE_INTEL, ACTIVE, Time),
+    // The kept parses at their bounds: two 100 KB texts (ADR 0037).
+    share(
+        "code_intel/parse_cache_bytes",
+        &[max(Limit::BytesAtMost(12 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
     ),
     // The first jump of a fresh index: the project opened and settled (its
     // languages' queries compiled in the background), nothing warmed by an
@@ -1204,6 +1283,22 @@ pub static BUDGETS: &[Budget] = &[
     ),
     share(
         "code_intel/references_100k/first",
+        &[median(Limit::TimeAtMost(ms(200)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // The same with the namespace at its quota: the first batch gated all
+    // the same, the end recorded.
+    share(
+        "code_intel/references_full/all",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/references_full/first",
         &[median(Limit::TimeAtMost(ms(200)))],
         CODE_INTEL,
         ACTIVE,

@@ -5,18 +5,18 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::SystemClock;
 use lectern_code_intel::names::build_table;
 use lectern_code_intel::testing::{
-    FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_with,
+    FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_sharing, virtual_repo_with,
 };
 use lectern_services::code_intel::{
-    CodeIntelEvent, Completeness, Position, Query, QueryId, QueryKind, QueryState, TextOrigin,
-    TextRef,
+    CodeIntelEvent, Completeness, Focus, Position, Query, QueryId, QueryKind, QueryState,
+    TextOrigin, TextRef,
 };
 
 fn cache(root: &Path) -> Cache {
@@ -95,9 +95,221 @@ fn run(
     Ok((id, r))
 }
 
+/// The jumps' current text: about 100 KB of TypeScript (the「性能」row's
+/// size), ending in a call of `name`.
+fn current_text(name: &str) -> Vec<u8> {
+    let mut text = synthetic::source("ts", 999_999, 100 << 10);
+    text.extend_from_slice(
+        format!("\nexport function jump(x: number) {{ return {name}(x); }}\n").as_bytes(),
+    );
+    text
+}
+
+/// The path of the jumps' current text.
+const CURRENT: &str = "packages/pkg000/src/mod00/current.ts";
+
+/// How a jump fixture is set up.
+#[derive(Clone, Copy, Default)]
+struct Shape {
+    /// Every `k`th unit also defines the jump's name (a popular name).
+    popular: Option<usize>,
+    /// The project's namespace at its quota (`Indexer::set_namespace_full`).
+    full: bool,
+    /// The current text read as an object (a diff's old side).
+    object: bool,
+    /// The jump's name is the current text's own function, which the
+    /// current text's locals bind (a `File` definition, step 1).
+    same_file: bool,
+}
+
+/// A jump fixture: the rig, its query, and the directory its cache lives in.
+struct Jump {
+    rig: Rig,
+    query: Query,
+    at: TextRef,
+    _dir: tempfile::TempDir,
+}
+
+/// A jump the index answers in a virtual repository of `n` files in
+/// sub-projects of 1000 (the 「性能」 jump rows): the 100 KB current text
+/// indexed and made the current one, so its parse is kept (ADR 0037).
+fn jump_fixture(ctx: &Ctx, n: usize, shape: Shape) -> Result<Jump, BenchError> {
+    let git = Arc::new(FakeGit::new());
+    let dir = tempfile::tempdir_in(ctx.scratch())?;
+    let cache = cache(dir.path());
+    let name = if shape.popular.is_some() {
+        "fetchShared".to_owned()
+    } else if shape.same_file {
+        "jumpTarget".to_owned()
+    } else {
+        synthetic::shared_name()
+    };
+    virtual_repo_sharing(
+        &git,
+        &cache,
+        n,
+        &["main"],
+        shape.popular.map(|k| (name.as_str(), k)),
+    );
+    let mut text = current_text(&name);
+    if shape.same_file {
+        text.extend_from_slice(format!("function {name}(x: number) {{ return x; }}\n").as_bytes());
+    }
+    git.add("main", &[(CURRENT, &text)]);
+    git.commit("main");
+    let rig = Rig::new(git, cache, Arc::new(SystemClock));
+    rig.open_with(packages(&synthetic::package_dirs(n)));
+    rig.settle();
+    if shape.full {
+        rig.indexer.set_namespace_full(&rig.git.key());
+    } else {
+        maybe_full(&rig);
+    }
+    let mut at = text_ref(&rig.git, CURRENT, &text);
+    if shape.object {
+        at.origin = TextOrigin::Object;
+    }
+    rig.indexer.set_focus(
+        &rig.git.key(),
+        Some(&rig.git.worktree_key("main")),
+        Focus::Current(Some(at.clone())),
+    );
+    rig.settle();
+    if rig.indexer.kept_parses().0 != 1 {
+        return Err(BenchError::new("the current text's parse is not kept"));
+    }
+    let query = Query {
+        project: rig.git.key(),
+        kind: QueryKind::Definition {
+            at: at.clone(),
+            position: position(&text, &format!("{name}(x)"))?,
+        },
+    };
+    Ok(Jump {
+        rig,
+        query,
+        at,
+        _dir: dir,
+    })
+}
+
+/// One `Results` event: its query, its time, and whether its results had
+/// candidates, and the query's end.
+type Batch = (QueryId, Instant, bool, bool);
+
+/// Every `Results` event seen.
+type Batches = Arc<Mutex<Vec<Batch>>>;
+
+fn listen_batches(rig: &Rig) -> Result<(Batches, lectern_kernel::Subscription), BenchError> {
+    let seen: Batches = Arc::default();
+    let s = seen.clone();
+    let indexer = rig.indexer.handle();
+    let subscription = rig
+        .host
+        .handle
+        .on::<CodeIntelEvent>(move |e, _| {
+            if let CodeIntelEvent::Results { id, .. } = e
+                && let Some(r) = indexer.results(*id)
+            {
+                let at = Instant::now();
+                let done = matches!(r.state, QueryState::Done(_));
+                s.lock()
+                    .unwrap()
+                    .push((*id, at, !r.candidates.is_empty(), done));
+            }
+        })
+        .ok_or_else(|| BenchError::new("cannot listen"))?;
+    Ok((seen, subscription))
+}
+
+/// Runs `query`: from the query to its first batch with candidates and
+/// to its end, and its results.
+fn first_and_done(
+    rig: &Rig,
+    seen: &Batches,
+    query: &Query,
+) -> Result<
+    (
+        Duration,
+        Duration,
+        Arc<lectern_services::code_intel::QueryResults>,
+    ),
+    BenchError,
+> {
+    seen.lock().unwrap().clear();
+    let start = Instant::now();
+    let (id, r) = run(rig, query)?;
+    let events = seen.lock().unwrap().clone();
+    let at = |want: &dyn Fn(&Batch) -> bool| {
+        events
+            .iter()
+            .find(|e| e.0 == id && want(e))
+            .map(|e| e.1 - start)
+    };
+    let first = at(&|e| e.2).ok_or_else(|| BenchError::new("no batch with candidates"))?;
+    let done = at(&|e| e.3).ok_or_else(|| BenchError::new("no end"))?;
+    Ok((first, done, r))
+}
+
+/// Samples of a jump: `before` runs untimed before each (forgetting a
+/// cache). In measure mode a few warm-up runs, then 40.
+fn sample_jumps(
+    ctx: &Ctx,
+    jump: &Jump,
+    before: &dyn Fn(&Rig),
+    want: &dyn Fn(&lectern_services::code_intel::QueryResults) -> Result<(), BenchError>,
+) -> Result<(Samples, Samples), BenchError> {
+    let (seen, _subscription) = listen_batches(&jump.rig)?;
+    let (warmup, runs) = match ctx.mode() {
+        Mode::Measure => (5, 40),
+        Mode::Smoke => (0, 1),
+    };
+    let (mut firsts, mut dones) = (Vec::new(), Vec::new());
+    for round in 0..warmup + runs {
+        before(&jump.rig);
+        let (first, done, r) = first_and_done(&jump.rig, &seen, &jump.query)?;
+        want(&r)?;
+        if round >= warmup {
+            firsts.push(first);
+            dones.push(done);
+        }
+    }
+    Ok((Samples(firsts), Samples(dones)))
+}
+
+/// The results a jump of the index must give: candidates, and `Done`.
+fn answered(r: &lectern_services::code_intel::QueryResults) -> Result<(), BenchError> {
+    if r.candidates.is_empty() || !matches!(r.state, QueryState::Done(_)) {
+        return Err(BenchError::new(format!(
+            "{} candidates, {:?}",
+            r.candidates.len(),
+            r.state
+        )));
+    }
+    Ok(())
+}
+
+/// [`answered`], and complete.
+fn complete(r: &lectern_services::code_intel::QueryResults) -> Result<(), BenchError> {
+    answered(r)?;
+    if r.state != QueryState::Done(Completeness::Complete) && !full_mode() {
+        return Err(BenchError::new(format!("not complete: {:?}", r.state)));
+    }
+    Ok(())
+}
+
+fn full_mode() -> bool {
+    std::env::var_os("CODE_INTEL_BENCH_FULL").is_some()
+}
+
+fn nothing(_: &Rig) {}
+
 /// A jump answered from the index (「性能」: candidates ≤ 50 ms, this
-/// crate's part ≤ 20 ms): 100 000 indexed files in sub-projects of 1000,
-/// a 64 KiB current text calling a function some 130 of them define.
+/// crate's part ≤ 20 ms to the first batch with candidates): 100 000
+/// indexed files in sub-projects of 1000, a 100 KB current text whose
+/// parse is kept (it is the current one), calling a function some 130
+/// files define. The accounting's walk is cached (the same jump again);
+/// to the end recorded.
 pub const GOTO_INDEXED: Bench = Bench {
     id: "code_intel/goto_indexed",
     run: goto_indexed,
@@ -105,41 +317,160 @@ pub const GOTO_INDEXED: Bench = Bench {
 
 fn goto_indexed(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let n = ctx.scale(100_000, 3_000);
-    let git = Arc::new(FakeGit::new());
-    let dir = tempfile::tempdir_in(ctx.scratch())?;
-    let cache = cache(dir.path());
-    virtual_repo(&git, &cache, n, &["main"]);
-    let path = "packages/pkg000/src/mod00/current.ts";
-    let name = synthetic::shared_name();
-    let mut text = synthetic::source("ts", 999_999, 64 << 10);
-    text.extend_from_slice(
-        format!("\nexport function jump(x: number) {{ return {name}(x); }}\n").as_bytes(),
-    );
-    git.add("main", &[(path, &text)]);
-    git.commit("main");
-    let rig = Rig::new(git, cache, Arc::new(SystemClock));
-    rig.open_with(packages(&synthetic::package_dirs(n)));
-    rig.settle();
-    maybe_full(&rig);
-    let query = Query {
-        project: rig.git.key(),
-        kind: QueryKind::Definition {
-            at: text_ref(&rig.git, path, &text),
-            position: position(&text, &format!("{name}(x)"))?,
-        },
+    let jump = jump_fixture(ctx, n, Shape::default())?;
+    let (first, done) = sample_jumps(ctx, &jump, &nothing, &complete)?;
+    Ok(vec![
+        Measured::new("code_intel/goto_indexed", Value::Time(first)),
+        Measured::new("code_intel/goto_indexed/done", Value::Time(done)),
+    ])
+}
+
+/// The same jump as the first one after the index changed: the
+/// accounting's cached walk forgotten before each (untimed). The first
+/// batch does not wait for the walk.
+pub const GOTO_UNCACHED: Bench = Bench {
+    id: "code_intel/goto_uncached",
+    run: goto_uncached,
+};
+
+fn goto_uncached(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = ctx.scale(100_000, 3_000);
+    let jump = jump_fixture(ctx, n, Shape::default())?;
+    let key = jump.rig.git.key();
+    let forget = |rig: &Rig| rig.indexer.clear_walks(&key);
+    let (first, done) = sample_jumps(ctx, &jump, &forget, &complete)?;
+    Ok(vec![
+        Measured::new("code_intel/goto_uncached", Value::Time(first)),
+        Measured::new("code_intel/goto_uncached/done", Value::Time(done)),
+    ])
+}
+
+/// A jump to a popular name: one file in 17 of 100 000 defines it, some
+/// 3000 of them in the jump's language group (TypeScript, TSX, JavaScript:
+/// about half the files), a Zipf-like name such as `get`. The first batch
+/// reads one page and the nearest files' definitions; the rest follow.
+pub const GOTO_POPULAR: Bench = Bench {
+    id: "code_intel/goto_popular",
+    run: goto_popular,
+};
+
+fn goto_popular(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = ctx.scale(100_000, 3_000);
+    let shape = Shape {
+        popular: Some(17),
+        ..Shape::default()
     };
-    let (_, r) = run(&rig, &query)?;
-    if r.candidates.is_empty() || r.state != QueryState::Done(Completeness::Complete) {
-        return Err(BenchError::new(format!(
-            "{} candidates, {:?}",
-            r.candidates.len(),
-            r.state
-        )));
-    }
-    let time = ctx.time(|| run(&rig, &query));
+    let jump = jump_fixture(ctx, n, shape)?;
+    let want = |r: &lectern_services::code_intel::QueryResults| {
+        complete(r)?;
+        if r.candidates.len() < n * 3 / 100 - n / 400 {
+            return Err(BenchError::new(format!(
+                "{} candidates",
+                r.candidates.len()
+            )));
+        }
+        Ok(())
+    };
+    let (first, done) = sample_jumps(ctx, &jump, &nothing, &want)?;
+    Ok(vec![
+        Measured::new("code_intel/goto_popular", Value::Time(first)),
+        Measured::new("code_intel/goto_popular/done", Value::Time(done)),
+    ])
+}
+
+/// The jump of [`GOTO_INDEXED`] with the namespace at its quota (100 000
+/// files are some 270 MiB, over the 256 MiB quota: the usual state): hints
+/// do not prove units, so the accounting checks the store, within the
+/// query's 1 s time box. The first batch does not wait for it; the end
+/// comes within the time box.
+pub const GOTO_FULL: Bench = Bench {
+    id: "code_intel/goto_full",
+    run: goto_full,
+};
+
+fn goto_full(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = ctx.scale(100_000, 3_000);
+    let shape = Shape {
+        full: true,
+        ..Shape::default()
+    };
+    let jump = jump_fixture(ctx, n, shape)?;
+    let (first, done) = sample_jumps(ctx, &jump, &nothing, &answered)?;
+    Ok(vec![
+        Measured::new("code_intel/goto_full", Value::Time(first)),
+        Measured::new("code_intel/goto_full/done", Value::Time(done)),
+    ])
+}
+
+/// The jump of [`GOTO_INDEXED`] with no kept parse (forgotten before each,
+/// untimed): the first jump in a text before its parse is warmed, which
+/// parses the text for its site. Recorded, not gated (ADR 0037).
+pub const GOTO_COLD_PARSE: Bench = Bench {
+    id: "code_intel/goto_cold_parse",
+    run: goto_cold_parse,
+};
+
+fn goto_cold_parse(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = ctx.scale(100_000, 3_000);
+    let jump = jump_fixture(ctx, n, Shape::default())?;
+    let forget = |rig: &Rig| rig.indexer.clear_kept_parses();
+    let (first, _) = sample_jumps(ctx, &jump, &forget, &complete)?;
     Ok(vec![Measured::new(
-        "code_intel/goto_indexed",
-        Value::Time(time),
+        "code_intel/goto_cold_parse",
+        Value::Time(first),
+    )])
+}
+
+/// A jump to the current text's own function, a `File` definition its
+/// locals bind (step 1 settles: no index lookup), with the parse kept.
+pub const GOTO_SAME_FILE: Bench = Bench {
+    id: "code_intel/goto_same_file",
+    run: goto_same_file,
+};
+
+fn goto_same_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = ctx.scale(100_000, 3_000);
+    let shape = Shape {
+        same_file: true,
+        ..Shape::default()
+    };
+    let jump = jump_fixture(ctx, n, shape)?;
+    let want = |r: &lectern_services::code_intel::QueryResults| {
+        complete(r)?;
+        if r.jump.is_none() {
+            return Err(BenchError::new("no direct jump"));
+        }
+        Ok(())
+    };
+    let (first, _) = sample_jumps(ctx, &jump, &nothing, &want)?;
+    Ok(vec![Measured::new(
+        "code_intel/goto_same_file",
+        Value::Time(first),
+    )])
+}
+
+/// The jump of [`GOTO_INDEXED`] from a diff's old side: the current text
+/// read by OID from the object database (`TextOrigin::Object`), its parse
+/// kept as the worktree's would be.
+pub const GOTO_OBJECT: Bench = Bench {
+    id: "code_intel/goto_object",
+    run: goto_object,
+};
+
+fn goto_object(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let n = ctx.scale(100_000, 3_000);
+    let shape = Shape {
+        object: true,
+        ..Shape::default()
+    };
+    let jump = jump_fixture(ctx, n, shape)?;
+    if jump.at.origin != TextOrigin::Object {
+        return Err(BenchError::new("not an object's text"));
+    }
+    let (first, _) = sample_jumps(ctx, &jump, &nothing, &answered)?;
+    Ok(vec![Measured::new(
+        "code_intel/goto_object",
+        Value::Time(first),
     )])
 }
 
@@ -330,6 +661,33 @@ pub const REFERENCES_100K: Bench = Bench {
 };
 
 fn references_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    references(ctx, false)
+}
+
+/// [`REFERENCES_100K`] with the namespace at its quota (the usual state of
+/// 100 000 files): the first batch within 200 ms all the same, the
+/// accounting's store checks after it.
+pub const REFERENCES_FULL: Bench = Bench {
+    id: "code_intel/references_full",
+    run: references_full,
+};
+
+fn references_full(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    references(ctx, true)
+}
+
+fn references(ctx: &mut Ctx, full: bool) -> Result<Vec<Measured>, BenchError> {
+    let (id_all, id_first) = if full {
+        (
+            "code_intel/references_full/all",
+            "code_intel/references_full/first",
+        )
+    } else {
+        (
+            "code_intel/references_100k/all",
+            "code_intel/references_100k/first",
+        )
+    };
     let n = ctx.scale(100_000, 3_000);
     let users = ctx.scale(300, 10);
     let git = Arc::new(FakeGit::new());
@@ -355,7 +713,11 @@ fn references_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let rig = Rig::new(git, cache, Arc::new(SystemClock));
     rig.open_with(packages(&synthetic::package_dirs(n)));
     rig.settle();
-    maybe_full(&rig);
+    if full {
+        rig.indexer.set_namespace_full(&rig.git.key());
+    } else {
+        maybe_full(&rig);
+    }
     let (_, r) = run(
         &rig,
         &Query {
@@ -415,11 +777,8 @@ fn references_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         }
     }
     Ok(vec![
-        Measured::new("code_intel/references_100k/all", Value::Time(Samples(all))),
-        Measured::new(
-            "code_intel/references_100k/first",
-            Value::Time(Samples(first)),
-        ),
+        Measured::new(id_all, Value::Time(Samples(all))),
+        Measured::new(id_first, Value::Time(Samples(first))),
     ])
 }
 

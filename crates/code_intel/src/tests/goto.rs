@@ -4,15 +4,17 @@
 //! duplicates across steps; the resolution extension point's step 2; text
 //! from the object database.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use lectern_services::code_intel::{
     Binding, CandidateSource, CandidateTier, Completeness, DefinitionRef, Evidence, Focus,
-    QueryError, QueryKind, QueryState, TextOrigin, TextRef,
+    QueryError, QueryKind, QueryResults, QueryState, TextOrigin, TextRef,
 };
 use lectern_services::project::RelPath;
 
 use crate::LangName;
+use crate::index::lock;
 use crate::resolve::{
     Bound, CandidateDraft, Import, ImportedNames, PackageScope, ResolveContext, Resolver,
 };
@@ -679,6 +681,225 @@ fn goto_object_origin_reads_the_blob() {
     assert_eq!(callers, [(TextOrigin::Object, 2)]);
 }
 
+/// Definitions of `get` in [`popular`]: more than two pages (`NAME_PAGE`).
+const POPULAR: usize = 601;
+
+/// A name more than two pages of units define (`NAME_PAGE`): 600 files of
+/// sub-project `aa` define `get`, then `zz/near.ts` (indexed last, so its
+/// unit comes after the first page's), and `zz/main.ts` calls it. The
+/// background is paused afterwards.
+fn popular() -> Harness {
+    let h = Harness::new();
+    for i in 0..POPULAR - 1 {
+        let text = format!("export function get() {{ return {i}; }}\n");
+        h.git
+            .add("main", &[(&format!("aa/f{i:03}.ts"), text.as_bytes())]);
+    }
+    h.git.add(
+        "main",
+        &[("zz/main.ts", b"export function run() { return get(); }\n")],
+    );
+    h.git.commit("main");
+    h.open_with("main", packages(&["aa", "zz"]));
+    h.git.add(
+        "main",
+        &[("zz/near.ts", b"export function get() { return -1; }\n")],
+    );
+    h.git.commit("main");
+    h.refresh_files();
+    h.pause();
+    h
+}
+
+/// The results of the query's first batch: read at its second publish.
+fn first_batch(h: &Harness) -> Arc<std::sync::Mutex<Option<Arc<QueryResults>>>> {
+    let seen: Arc<std::sync::Mutex<Option<Arc<QueryResults>>>> = Arc::default();
+    let s = seen.clone();
+    let second: crate::query::HookFn = Box::new(move |inner, _| {
+        let q = lock(&inner.queries);
+        *s.lock().unwrap() = q.entries.back().map(|e| e.results.clone());
+    });
+    *lock(&h.indexer.inner().step_hook) = Some((
+        crate::query::Step::Publish,
+        Box::new(move |inner, _| {
+            *lock(&inner.step_hook) = Some((crate::query::Step::Publish, second));
+        }),
+    ));
+    seen
+}
+
+/// A3: the first batch of a jump to a name more than a page of units
+/// define reads one page and the definitions in the files nearest the jump
+/// (its directory and sub-project), so the nearest candidate leads it
+/// whatever the name's count; the other pages follow in later batches,
+/// every definition once, complete.
+#[test]
+fn goto_popular_name_nearest_first() {
+    let h = popular();
+    let seen = first_batch(&h);
+    let r = h.goto("zz/main.ts", "get", 0);
+    assert_eq!(r.state, QueryState::Done(Completeness::Complete));
+    assert_eq!(r.candidates.len(), POPULAR);
+    let paths: HashSet<&str> = r
+        .candidates
+        .iter()
+        .map(|c| &*c.definition.location.path)
+        .collect();
+    assert_eq!(paths.len(), POPULAR, "each once");
+    let first = seen.lock().unwrap().clone().expect("a later batch");
+    assert!(
+        first.candidates.len() < POPULAR,
+        "{}",
+        first.candidates.len()
+    );
+    assert_eq!(&*first.candidates[0].definition.location.path, "zz/near.ts");
+    assert_eq!(first.candidates[0].tier, CandidateTier::SamePackage);
+    assert_eq!(first.state, QueryState::Running);
+    // `Named` from the same file: the same first batch.
+    let seen = first_batch(&h);
+    let r = h.ask(QueryKind::Named {
+        name: "get".into(),
+        near: Some("zz/main.ts".into()),
+    });
+    assert_eq!(r.candidates.len(), POPULAR);
+    assert_eq!(r.state, QueryState::Done(Completeness::Complete));
+    let first = seen.lock().unwrap().clone().expect("a later batch");
+    assert!(first.candidates.len() < POPULAR);
+    assert_eq!(&*first.candidates[0].definition.location.path, "zz/near.ts");
+}
+
+/// A3: the later pages stop at the query's time box; the definitions not
+/// read count as unsearched (at most that many files), never complete.
+#[test]
+fn goto_popular_name_pages_are_time_boxed() {
+    let h = popular();
+    let clock = h.clock.clone();
+    let second: crate::query::HookFn =
+        Box::new(move |_, _| clock.advance(std::time::Duration::from_secs(2)));
+    *lock(&h.indexer.inner().step_hook) = Some((
+        crate::query::Step::Publish,
+        Box::new(move |inner, _| {
+            *lock(&inner.step_hook) = Some((crate::query::Step::Publish, second));
+        }),
+    ));
+    let r = h.goto("zz/main.ts", "get", 0);
+    assert!(r.candidates.len() < POPULAR, "{}", r.candidates.len());
+    match &r.state {
+        QueryState::Done(Completeness::Partial { unsearched, .. }) => {
+            assert!(
+                *unsearched as usize >= POPULAR - r.candidates.len(),
+                "{unsearched}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A2: the text that becomes the current one is parsed in the background
+/// and kept; a jump in it then reads and parses nothing, at any position,
+/// and answers as the cold jump does (a parse for its site).
+#[test]
+fn goto_kept_parse_answers_as_the_cold_one() {
+    let a = "import { other } from './b';\nexport function run(x: number) {\n  const local = x + 1;\n  return helper(local) + other();\n}\nfunction helper(y: number) { return y; }\n";
+    let b =
+        "export function other() { return 2; }\nexport function helper(z: number) { return z; }\n";
+    let h = indexed(&[("a.ts", a), ("b.ts", b)]);
+    let texts = [("a.ts", a), ("b.ts", b)];
+    let sites = [
+        ("local", 1),
+        ("helper", 0),
+        ("other", 1),
+        ("run", 0),
+        ("x", 1),
+    ];
+    // Cold: nothing kept, each jump parses its site.
+    h.indexer
+        .inner()
+        .no_warm
+        .store(true, std::sync::atomic::Ordering::Release);
+    let cold: Vec<_> = sites.iter().map(|(n, i)| h.goto("a.ts", n, *i)).collect();
+    assert_eq!(h.indexer.kept_parses().0, 0);
+    h.indexer
+        .inner()
+        .no_warm
+        .store(false, std::sync::atomic::Ordering::Release);
+    h.current("a.ts");
+    h.settle();
+    assert_eq!(h.indexer.kept_parses().0, 1, "warmed in the background");
+    parsed(&texts);
+    for ((n, i), cold) in sites.iter().zip(&cold) {
+        let warm = h.goto("a.ts", n, *i);
+        assert_eq!(warm.symbol, cold.symbol, "{n} #{i}");
+        assert_eq!(warm.candidates, cold.candidates, "{n} #{i}");
+        assert_eq!(
+            (warm.jump, warm.preselect),
+            (cold.jump, cold.preselect),
+            "{n} #{i}"
+        );
+        assert_eq!(warm.state, cold.state, "{n} #{i}");
+    }
+    assert_eq!(parsed(&texts), Vec::<String>::new(), "no parse");
+    // Another content (the file changed): not the kept one, parsed.
+    let a2 = a.replace("x + 1", "x + 2");
+    h.git.write("main", "a.ts", a2.as_bytes());
+    h.emit(&[("a.ts", super::support::CHANGED)]);
+    h.settle();
+    let texts = [("a2", a2.as_str())];
+    parsed(&texts);
+    let r = h.goto("a.ts", "helper", 0);
+    assert!(!r.candidates.is_empty());
+    assert_eq!(parsed(&texts).first().map(String::as_str), Some("a2"));
+}
+
+/// A2: the bounds of the kept parses: at most `PARSE_CACHE_ENTRIES` texts
+/// (the least recently used goes), none over `PARSE_CACHE_MAX_SOURCE`, and
+/// none kept past `PARSE_CACHE_KEEP_FOR` unused (a due entry drops them).
+#[test]
+fn goto_kept_parses_are_bounded() {
+    use crate::query::{PARSE_CACHE_ENTRIES, PARSE_CACHE_KEEP_FOR, PARSE_CACHE_MAX_SOURCE};
+    let mut files: Vec<(String, String)> = (0..PARSE_CACHE_ENTRIES + 1)
+        .map(|i| {
+            (
+                format!("f{i}.ts"),
+                format!("export function f{i}() {{ return {i}; }}\n"),
+            )
+        })
+        .collect();
+    let mut big = "export function big() { return 1; }\n".to_owned();
+    while big.len() <= PARSE_CACHE_MAX_SOURCE {
+        big.push_str("// padding padding padding padding padding padding padding\n");
+    }
+    files.push(("big.ts".to_owned(), big));
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let h = indexed(&pairs);
+    for (path, _) in &files[..PARSE_CACHE_ENTRIES + 1] {
+        h.current(path);
+        h.settle();
+    }
+    let (kept, bytes) = h.indexer.kept_parses();
+    assert_eq!(kept, PARSE_CACHE_ENTRIES);
+    assert!(bytes <= crate::query::PARSE_CACHE_BYTES);
+    // The first one went: its jump parses again.
+    let texts: Vec<(&str, &str)> = pairs.clone();
+    parsed(&texts);
+    h.goto("f0.ts", "f0", 0);
+    assert_eq!(parsed(&texts).first().map(String::as_str), Some("f0.ts"));
+    // Over the size: never kept.
+    h.indexer.clear_kept_parses();
+    h.current("big.ts");
+    h.settle();
+    assert_eq!(h.indexer.kept_parses().0, 0);
+    // Unused for long: dropped by the due entry.
+    h.current("f1.ts");
+    h.settle();
+    assert_eq!(h.indexer.kept_parses().0, 1);
+    h.advance_and_fire(PARSE_CACHE_KEEP_FOR + std::time::Duration::from_millis(1));
+    assert_eq!(h.indexer.kept_parses().0, 0);
+}
+
 /// A jump from an object's text whose path has other content in the
 /// worktree: the index's candidate there (a nested `File` definition) goes
 /// out as the index has it, `local` not known (false); the one file parsed
@@ -700,7 +921,10 @@ fn goto_object_side_parses_only_its_text() {
     let position = super::support::pos_in(old.as_bytes(), "helper", 0);
     let texts = [("object", old), ("worktree", new)];
     parsed(&texts);
-    let r = h.ask(QueryKind::Definition { at, position });
+    let r = h.ask(QueryKind::Definition {
+        at: at.clone(),
+        position,
+    });
     let found: Vec<(String, TextOrigin, u32, bool)> = r
         .candidates
         .iter()
@@ -714,7 +938,12 @@ fn goto_object_side_parses_only_its_text() {
         [("a.ts".to_owned(), TextOrigin::Worktree, 1, false)],
         "{r:?}"
     );
-    assert_eq!(parsed(&texts), ["object"]);
+    // The jump's own parse of its text, then the whole parse kept for the
+    // next jumps in it (in the background): never the worktree's file.
+    assert_eq!(parsed(&texts), ["object", "object"]);
+    let again = h.ask(QueryKind::Definition { at, position });
+    assert_eq!(again.candidates, r.candidates);
+    assert_eq!(parsed(&texts), Vec::<String>::new(), "kept: no parse");
 }
 
 /// Once a project's map is installed, `ParsedFile`'s query for every

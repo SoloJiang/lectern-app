@@ -45,7 +45,9 @@ pub struct CodeIntelDeps {
     pub executor: Executor,
     pub cache: Cache,
     pub watcher: Watcher,
-    /// The power source: `app` wraps `platform`'s; `AlwaysOnAc` on Linux.
+    /// The power source: always `AlwaysOnAc`. Indexing does not depend on
+    /// the power source and `platform` has no power interface (ADR 0032);
+    /// the field goes with the battery code's removal.
     pub power: Arc<dyn PowerSource>,
     /// Language packs (ADR 0018); `NoGrammarPacks` until the marketplace.
     pub grammars: Arc<dyn GrammarSource>,

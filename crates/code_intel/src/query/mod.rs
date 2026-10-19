@@ -6,10 +6,17 @@
 
 mod account;
 mod definition;
+mod parsed;
 mod rank;
 mod references;
 mod search;
 mod text;
+
+pub(crate) use parsed::ParseCache;
+pub use parsed::{
+    BYTES as PARSE_CACHE_BYTES, ENTRIES as PARSE_CACHE_ENTRIES, KEEP_FOR as PARSE_CACHE_KEEP_FOR,
+    MAX_SOURCE as PARSE_CACHE_MAX_SOURCE,
+};
 
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
@@ -724,6 +731,33 @@ impl Inner {
         part: &dyn Fn(&crate::extract::Lang) -> bool,
         group: Option<&LangName>,
     ) -> Option<account::Walked> {
+        let walked = self.with_stops(run, snap, |stops| {
+            snap.walk(account, dir, part, group, stops)
+        })?;
+        (!run.stopped(snap)).then_some(walked)
+    }
+
+    /// The search's scope ([`Snap::search_scope`]) for query `run`: its
+    /// full-mode check stops with the query and at its time box. None when
+    /// the query stopped.
+    pub(crate) fn scope(
+        &self,
+        run: &Run,
+        snap: &Snap,
+        anchor: &str,
+        lang: &crate::extract::Lang,
+        skip: &HashSet<(RelPath, BlobId)>,
+        account: &mut account::Account,
+    ) -> Option<search::Scope> {
+        self.with_stops(run, snap, |stops| {
+            snap.search_scope(anchor, lang, skip, account, stops)
+        })
+    }
+
+    /// What stops a full-mode check of query `run` ([`account::Stops`]):
+    /// the query stopped, or its time box (the search's, [`SEARCH_FOR`]
+    /// after it was asked) is due. Checked before every statement.
+    fn with_stops<R>(&self, run: &Run, snap: &Snap, f: impl FnOnce(&account::Stops<'_>) -> R) -> R {
         let clock = self.watchdog.clock().clone();
         let until = run.started + SEARCH_FOR;
         let stopped = || run.stopped(snap);
@@ -733,12 +767,10 @@ impl Inner {
             self.step_hook(Step::Verify, snap);
             clock.now() >= until
         };
-        let stops = account::Stops {
+        f(&account::Stops {
             stopped: &stopped,
             due: &due,
-        };
-        let walked = snap.walk(account, dir, part, group, &stops)?;
-        (!run.stopped(snap)).then_some(walked)
+        })
     }
 
     /// The resolution rules of a language: an extension's implementation,

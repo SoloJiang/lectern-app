@@ -1,7 +1,8 @@
-//! The power source (docs/design/code_intel.md「本 crate 的公开项」): on
-//! battery, tiers 4 and 5 wait (「建索引的分层」, ADR 0029). `app` wraps
-//! `platform`'s power interface; this crate never reads it itself
-//! (architecture rule 6), and its tests use `testing::FakePower`.
+//! The power source (docs/design/code_intel.md「本 crate 的公开项」): step
+//! 3's battery rule (tiers 4 and 5 wait on battery, ADR 0029), no longer
+//! the design since ADR 0032: indexing does not depend on the power source,
+//! `platform` has no power interface and `app` passes `AlwaysOnAc`. This
+//! code and its `battery_*` tests go in a separate PR (ADR 0032「影响」).
 
 /// Whether the machine runs on battery, and its changes.
 pub trait PowerSource: Send + Sync {
@@ -14,8 +15,7 @@ pub trait PowerSource: Send + Sync {
     fn subscribe(&self, f: Box<dyn Fn(bool) + Send + Sync>) -> Box<dyn Send>;
 }
 
-/// Always on AC power (Linux, and before `app` wires `platform`'s power
-/// interface).
+/// Always on AC power: the only source `app` passes (ADR 0032).
 #[derive(Clone, Copy, Default, Debug)]
 pub struct AlwaysOnAc;
 

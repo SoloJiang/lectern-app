@@ -7,6 +7,7 @@
 //! accounting's (`account`): every file of the language group, indexed,
 //! searched, or not.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -21,13 +22,13 @@ use lectern_services::project::{BlobId, RelPath, WorktreeKey};
 use super::account::{Account, Reason};
 use super::definition::{LocKey, loc_key};
 use super::rank::Ranker;
-use super::search::{FileDeadline, Searched};
+use super::search::{FileDeadline, FileLimits, Searched};
 use super::{Run, SEARCH_FOR, Snap, Step, ViewCheck};
 use crate::extract::{ExtractStatus, Extraction, INTERACTIVE_MAX_LEN, Lang, compatible};
 use crate::index::Inner;
 use crate::resolve::ResolveContext;
 use crate::site::{ParseError, ParsedFile};
-use crate::store::Version;
+use crate::store::{NAME_PAGE, NamePager, Version};
 
 /// The first batch goes out after this many files…
 const FIRST_FILES: usize = 4;
@@ -44,6 +45,10 @@ struct File {
     path: RelPath,
     origin: TextOrigin,
     lang: Lang,
+    /// Parsed under tier 1's deadline: the definition's own file, or a file
+    /// of the map read under tier 1's limits (`Snap::file_limits`, the same
+    /// rule as its read limit).
+    interactive: bool,
 }
 
 /// The query's results so far and its batching.
@@ -145,6 +150,8 @@ impl Inner {
             path: l.path.clone(),
             origin: l.origin,
             lang: lang.clone(),
+            // The text the query is about, as a jump's current text.
+            interactive: true,
         };
         // The definition's own file, parsed once: its parse says whether the
         // definition is local, whoever made `of` (a jump, a `Named` result
@@ -153,7 +160,7 @@ impl Inner {
         // file's references. A parse that fails leaves `of.local` as given.
         // The providers are asked first: by position, not by locality.
         self.escalate_references(run.id, snap, of);
-        let parsed = self.parse_for_references(run, of, &file, l.oid, bytes, None, &mut found);
+        let parsed = self.parse_for_references(run, &file, l.oid, bytes, None, &mut found);
         let of = &DefinitionRef {
             local: parsed.as_ref().map_or(of.local, |p| own_locality(p, of)),
             ..of.clone()
@@ -220,8 +227,14 @@ impl Inner {
                 },
             })
         } else {
+            // What the definition's file and the `ci_ref` pass found goes out
+            // now: the scope's reads (and, full, its store checks) and the
+            // search come after.
+            self.flush(run, snap, &mut found, true);
             let skip = found.parsed.clone();
-            let scope = snap.search_scope(&l.path, &lang, &skip, &mut account);
+            let Some(scope) = self.scope(run, snap, &l.path, &lang, &skip, &mut account) else {
+                return;
+            };
             self.step_hook(Step::Hints, snap);
             // Files the scope takes as indexed whose unit was written after
             // the lookup: their references are read now.
@@ -245,6 +258,8 @@ impl Inner {
                 ViewCheck::Evicted | ViewCheck::Ended => return self.end_stale(snap, run.id),
             }
             let name = of.name.clone();
+            // The hits add to `found`, the ticks between files publish it.
+            let cell = RefCell::new(&mut found);
             let searched = self.search(
                 run,
                 snap,
@@ -253,6 +268,7 @@ impl Inner {
                 run.started + SEARCH_FOR,
                 &mut account,
                 |eff, key, bytes, until| {
+                    let mut found = cell.borrow_mut();
                     if found.parsed.contains(&(eff.path.clone(), key)) {
                         return found.outcome(&eff.path, key);
                     }
@@ -264,6 +280,8 @@ impl Inner {
                         path: eff.path.clone(),
                         origin: TextOrigin::Worktree,
                         lang: file_lang,
+                        // As the search read it (`Snap::read_limit`).
+                        interactive: snap.file_limits(eff).interactive,
                     };
                     self.references_in(
                         run,
@@ -277,7 +295,11 @@ impl Inner {
                         &mut found,
                     )
                 },
+                || self.flush(run, snap, &mut cell.borrow_mut(), false),
             );
+            // The search's last hits go out before the accounting's walk
+            // (which, full, checks the store until the time box).
+            self.flush(run, snap, &mut found, true);
             // Every file of the language group, classified once; the walk
             // reads hints, so the view is checked after it.
             let part = |l: &Lang| snap.in_group(l, &lang);
@@ -359,11 +381,23 @@ impl Inner {
             .filter(|x| compatible(&snap.table, x.name(), lang.name()))
             .map(Version::of)
             .collect();
-        let stored = snap
-            .project
-            .store
-            .refs_by_name(&of.name, &versions)
-            .unwrap_or_default();
+        // In pages of at most `NAME_PAGE` units, the query's stop checked
+        // between two: a name many units use never holds a closed query
+        // longer than one statement. Then sorted, so the files are read
+        // nearest first whatever the page they came in.
+        let mut pager = NamePager::new(&of.name, &versions);
+        let mut stored = Vec::new();
+        while !pager.done() {
+            if run.stopped(snap) {
+                return false;
+            }
+            stored.extend(
+                snap.project
+                    .store
+                    .next_refs(&mut pager, NAME_PAGE)
+                    .unwrap_or_default(),
+            );
+        }
         let mut jobs = Vec::new();
         for s in &stored {
             for eff in snap.map.paths(&s.oid, &s.lang.0) {
@@ -383,10 +417,15 @@ impl Inner {
                 continue;
             }
             // Its unit was extracted from these bytes, under at most the
-            // interactive limit (tier 1): read under it. Changed since the
-            // snapshot (its unit is of other content), too large or
-            // unreadable: not searched.
-            let bytes = match self.read_content(snap, &eff, INTERACTIVE_MAX_LEN) {
+            // interactive limits (tier 1): read and parsed under them (a
+            // file with a unit, `Snap::file_limits`; this path's own hint may
+            // not be set yet). Changed since the snapshot (its unit is of
+            // other content), too large or unreadable: not searched.
+            let limits = FileLimits {
+                max_len: INTERACTIVE_MAX_LEN,
+                interactive: true,
+            };
+            let bytes = match self.read_content(snap, &eff, limits.max_len) {
                 Ok(bytes) => bytes,
                 Err(reason) => {
                     account.unsearched(&eff.path, eff.oid, reason);
@@ -403,6 +442,7 @@ impl Inner {
                 path: eff.path.clone(),
                 origin: TextOrigin::Worktree,
                 lang: file_lang,
+                interactive: limits.interactive,
             };
             let searched = self.references_in(
                 run,
@@ -442,7 +482,7 @@ impl Inner {
         if found.parsed.contains(&(file.path.clone(), oid)) {
             return found.outcome(&file.path, oid);
         }
-        match self.parse_for_references(run, of, file, oid, bytes, until, found) {
+        match self.parse_for_references(run, file, oid, bytes, until, found) {
             Ok(parsed) => self.sort_references(run, snap, of, ranker, file, oid, &parsed, found),
             Err(searched) => searched,
         }
@@ -451,14 +491,9 @@ impl Inner {
     /// Parses one file for [`references_in`](Self::references_in), marked
     /// parsed in `found`; a failure is what the file's searching gave
     /// (`Unsearched`), recorded when it settles the file.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one file's part of a query: the file and what it adds to"
-    )]
     fn parse_for_references(
         &self,
         run: &Run,
-        of: &DefinitionRef,
         file: &File,
         oid: BlobId,
         bytes: Arc<[u8]>,
@@ -466,19 +501,22 @@ impl Inner {
         found: &mut Found,
     ) -> Result<ParsedFile, Searched> {
         let clock = self.watchdog.clock().clone();
-        let def = &of.location;
-        let own = file.path == def.path && file.origin == def.origin && oid == def.oid;
-        // The definition's own file is the text the query is about: tier 1's
-        // limit, as a jump's current text. The others, the background's.
-        let deadline = if own {
-            FileDeadline::interactive(clock.now(), until)
-        } else {
-            FileDeadline::new(clock.now(), until)
-        };
+        // The deadline goes with the limit the file was read under: tier 1's
+        // for the definition's own file and the files whose unit was or may
+        // have been made under it, the background's for the others.
+        let deadline = FileDeadline::of(file.interactive, clock.now(), until);
         let parsed = ParsedFile::parse(&file.lang, bytes, &*clock, deadline.at, &run.cancel);
         #[cfg(test)]
-        let parsed = match &*crate::index::lock(&self.parse_timeout) {
-            Some(path) if **path == *file.path => Err(ParseError::TimedOut),
+        let parsed = match &*crate::index::lock(&self.parse_takes) {
+            Some((path, took))
+                if **path == *file.path
+                    && clock
+                        .now()
+                        .checked_add(*took)
+                        .is_none_or(|end| end >= deadline.at) =>
+            {
+                Err(ParseError::TimedOut)
+            }
             _ => parsed,
         };
         match parsed {
@@ -521,7 +559,6 @@ impl Inner {
         parsed: &ParsedFile,
         found: &mut Found,
     ) -> Searched {
-        let clock = self.watchdog.clock().clone();
         let def = &of.location;
         let own = file.path == def.path && file.origin == def.origin && oid == def.oid;
         let rules = self.resolver(file.lang.name());
@@ -609,26 +646,43 @@ impl Inner {
         }
         found.files += 1;
         found.since += 1;
-        let now = clock.now();
-        let due = match found.last {
-            None => {
-                found.files >= FIRST_FILES
-                    || now.saturating_duration_since(run.started) >= FIRST_AFTER
-            }
-            Some(last) => {
-                found.since >= BATCH_FILES || now.saturating_duration_since(last) >= BATCH_AFTER
-            }
-        };
-        if due && found.changed {
-            found.since = 0;
-            found.last = Some(now);
-            found.changed = false;
-            let (callers, same_name) = (found.callers.clone(), found.same_name.clone());
-            self.publish_in(snap, run.id, |r| {
-                r.callers = callers.into();
-                r.same_name = same_name.into();
-            });
-        }
+        self.flush(run, snap, found, false);
         Searched::Done
+    }
+
+    /// Publishes the references found since the last batch when one is due
+    /// (「查找引用与调用方」4): the first after [`FIRST_FILES`] files or
+    /// [`FIRST_AFTER`] from the query's start, the next ones every
+    /// [`BATCH_FILES`] files or [`BATCH_AFTER`]; with `now`, whenever there
+    /// is something new. Called after every parsed file, at every file of
+    /// the search (so the timers run between hits too) and, with `now`, at
+    /// the end of the `ci_ref` pass: nothing found waits for a later file or
+    /// for the search's scope to be read and checked.
+    fn flush(&self, run: &Run, snap: &Snap, found: &mut Found, now: bool) {
+        if !found.changed {
+            return;
+        }
+        let at = self.watchdog.clock().now();
+        let due = now
+            || match found.last {
+                None => {
+                    found.files >= FIRST_FILES
+                        || at.saturating_duration_since(run.started) >= FIRST_AFTER
+                }
+                Some(last) => {
+                    found.since >= BATCH_FILES || at.saturating_duration_since(last) >= BATCH_AFTER
+                }
+            };
+        if !due {
+            return;
+        }
+        found.since = 0;
+        found.last = Some(at);
+        found.changed = false;
+        let (callers, same_name) = (found.callers.clone(), found.same_name.clone());
+        self.publish_in(snap, run.id, |r| {
+            r.callers = callers.into();
+            r.same_name = same_name.into();
+        });
     }
 }

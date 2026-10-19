@@ -213,6 +213,10 @@ fn resident(
         drop(r);
         rig.indexer.close(q);
         rig.settle();
+        // The jump's text's parse is kept until it goes unused for
+        // `PARSE_CACHE_KEEP_FOR` (ADR 0037): what stays resident is measured
+        // without it; `code_intel/parse_cache_bytes` measures it.
+        rig.indexer.clear_kept_parses();
         let coverage = rig
             .indexer
             .coverage(&rig.git.key())
@@ -229,6 +233,74 @@ fn resident(
         drop(rig);
     }
     Ok(vec![Measured::new(id, Value::Bytes(samples))])
+}
+
+/// The kept parses of current texts at their bounds (ADR 0037): two
+/// 100 KB TypeScript texts made the current one in turn, so both parses
+/// are kept; their live bytes (the syntax trees through tree-sitter's
+/// allocator, the binding models, the reference positions) are what
+/// forgetting them frees. Against `PARSE_CACHE_BYTES`; also prints the
+/// bytes per source byte the cache's estimate uses.
+pub const PARSE_CACHE_BYTES: Bench = Bench {
+    id: "code_intel/parse_cache_bytes",
+    run: parse_cache_bytes,
+};
+
+fn parse_cache_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let mut samples = Vec::new();
+    for round in 0..ctx.scale(SAMPLES, 1) {
+        let git = Arc::new(FakeGit::new());
+        let dir = tempfile::tempdir_in(ctx.scratch())?;
+        let cache = cache(dir.path());
+        virtual_repo(&git, &cache, 728, &["main"]);
+        let texts: Vec<(String, Vec<u8>)> = (0..lectern_code_intel::query::PARSE_CACHE_ENTRIES)
+            .map(|i| {
+                let path = format!("packages/pkg000/src/mod00/current{i}.ts");
+                (
+                    path,
+                    synthetic::source("ts", 990_000 + i + 10 * round, 100 << 10),
+                )
+            })
+            .collect();
+        for (path, text) in &texts {
+            git.add("main", &[(path, text)]);
+        }
+        git.commit("main");
+        let rig = Rig::new(git, cache, Arc::new(SystemClock));
+        rig.open_with(packages(&synthetic::package_dirs(728)));
+        rig.settle();
+        for (path, text) in &texts {
+            rig.indexer.set_focus(
+                &rig.git.key(),
+                Some(&rig.git.worktree_key("main")),
+                lectern_services::code_intel::Focus::Current(Some(TextRef {
+                    worktree: Some(rig.git.worktree_key("main")),
+                    path: path.as_str().into(),
+                    oid: rig.git.oid(text),
+                    origin: TextOrigin::Worktree,
+                })),
+            );
+            rig.settle();
+        }
+        let (kept, estimated) = rig.indexer.kept_parses();
+        if kept != texts.len() {
+            return Err(BenchError::new(format!("{kept} parses kept")));
+        }
+        let with = CountingAlloc::live();
+        rig.indexer.clear_kept_parses();
+        let bytes = with.saturating_sub(CountingAlloc::live()) as u64;
+        let source: usize = texts.iter().map(|(_, t)| t.len()).sum();
+        eprintln!(
+            "code_intel/parse_cache_bytes: {bytes} bytes for {source} source bytes ({:.1} per byte), estimated {estimated}",
+            bytes as f64 / source as f64
+        );
+        samples.push(bytes);
+        drop(rig);
+    }
+    Ok(vec![Measured::new(
+        "code_intel/parse_cache_bytes",
+        Value::Bytes(samples),
+    )])
 }
 
 /// The cloudprint shape: 728 tracked files, 11 worktrees (≤ 4 MB).

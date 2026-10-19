@@ -310,7 +310,11 @@ fn grammar_lease_released_by_an_expired_prefetch() {
         0,
         "the prefetch still holds it"
     );
-    h.advance_and_fire(crate::query::PREFETCH_FOR + std::time::Duration::from_millis(2));
+    // The prefetch's cold parse warmed the text: the round dropped that
+    // kept parse with its language, but its due entry stays scheduled, so
+    // the clock goes past both.
+    assert_eq!(h.indexer.kept_parses().0, 0, "dropped with its language");
+    h.advance_and_fire(crate::query::PARSE_CACHE_KEEP_FOR + std::time::Duration::from_millis(2));
     assert_eq!(h.indexer.inner().prefetch_count(), 0);
     assert_eq!(unloads.load(Ordering::Acquire), 1, "unloaded exactly once");
 }

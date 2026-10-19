@@ -259,6 +259,7 @@ const BENCHES: &[Bench] = &[
     code_intel::MAP_100K_BYTES,
     code_intel::BATCH_PEAK,
     code_intel::NAMES_100K_BYTES,
+    code_intel::PARSE_CACHE_BYTES,
     code_intel::RESIDENT_CLOUDPRINT,
     code_intel::RESIDENT_100K,
     GIT_CHANGES_CAPPED_BYTES,

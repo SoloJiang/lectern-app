@@ -24,7 +24,7 @@ use lectern_code_intel::testing::{
     FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_with,
 };
 use lectern_services::code_intel::{
-    Completeness, Position, Query, QueryKind, QueryState, TextOrigin, TextRef,
+    Completeness, Focus, Position, Query, QueryKind, QueryState, TextOrigin, TextRef,
 };
 
 #[global_allocator]
@@ -72,7 +72,7 @@ fn files(default: usize) -> usize {
 #[test]
 #[ignore = "a profile; see the module docs"]
 fn goto_indexed_phases() {
-    goto_phases(false, false);
+    goto_phases(false, false, false);
 }
 
 /// The same jump as the first one after the index changed: the cached
@@ -80,7 +80,15 @@ fn goto_indexed_phases() {
 #[test]
 #[ignore = "a profile; see the module docs"]
 fn goto_indexed_uncached_phases() {
-    goto_phases(false, true);
+    goto_phases(false, true, false);
+}
+
+/// The same jump as the first one in the text: no kept parse (forgotten
+/// before each jump), the text read and parsed for the site.
+#[test]
+#[ignore = "a profile; see the module docs"]
+fn goto_indexed_cold_phases() {
+    goto_phases(false, false, true);
 }
 
 /// The same jump once the namespace is full (`Indexer::set_namespace_full`):
@@ -90,10 +98,10 @@ fn goto_indexed_uncached_phases() {
 #[test]
 #[ignore = "a profile; see the module docs"]
 fn goto_indexed_full_phases() {
-    goto_phases(true, false);
+    goto_phases(true, false, false);
 }
 
-fn goto_phases(full: bool, uncached: bool) {
+fn goto_phases(full: bool, uncached: bool, cold: bool) {
     let n = files(100_000);
     let git = Arc::new(FakeGit::new());
     let dir = tempfile::tempdir().expect("temp dir");
@@ -101,7 +109,8 @@ fn goto_phases(full: bool, uncached: bool) {
     virtual_repo(&git, &cache, n, &["main"]);
     let path = "packages/pkg000/src/mod00/current.ts";
     let name = synthetic::shared_name();
-    let mut text = synthetic::source("ts", 999_999, 64 << 10);
+    // The 「性能」 row's 100 KB, as `code_intel/goto_indexed`.
+    let mut text = synthetic::source("ts", 999_999, 100 << 10);
     text.extend_from_slice(
         format!("\nexport function jump(x: number) {{ return {name}(x); }}\n").as_bytes(),
     );
@@ -113,21 +122,32 @@ fn goto_phases(full: bool, uncached: bool) {
     if full {
         rig.indexer.set_namespace_full(&rig.git.key());
     }
+    let at = TextRef {
+        worktree: Some(rig.git.worktree_key("main")),
+        path: path.into(),
+        oid: rig.git.oid(&text),
+        origin: TextOrigin::Worktree,
+    };
+    // The current text: its parse is kept (ADR 0037), unless `cold`.
+    rig.indexer.set_focus(
+        &rig.git.key(),
+        Some(&rig.git.worktree_key("main")),
+        Focus::Current(Some(at.clone())),
+    );
+    rig.settle();
     let query = Query {
         project: rig.git.key(),
         kind: QueryKind::Definition {
-            at: TextRef {
-                worktree: Some(rig.git.worktree_key("main")),
-                path: path.into(),
-                oid: rig.git.oid(&text),
-                origin: TextOrigin::Worktree,
-            },
+            at,
             position: position(&text, &format!("{name}(x)")),
         },
     };
     let jump = || {
         if uncached {
             rig.indexer.clear_walks(&rig.git.key());
+        }
+        if cold {
+            rig.indexer.clear_kept_parses();
         }
         let id = rig.indexer.query(query.clone());
         rig.executor.run_until_idle();
@@ -138,10 +158,11 @@ fn goto_phases(full: bool, uncached: bool) {
     let r = jump();
     assert!(!r.candidates.is_empty());
     assert_eq!(r.state, QueryState::Done(Completeness::Complete));
-    let title = match (full, uncached) {
-        (true, _) => "goto_indexed phases, namespace full",
-        (false, true) => "goto_indexed phases, walk not cached",
-        (false, false) => "goto_indexed phases",
+    let title = match (full, uncached, cold) {
+        (true, _, _) => "goto_indexed phases, namespace full",
+        (false, true, _) => "goto_indexed phases, walk not cached",
+        (false, false, true) => "goto_indexed phases, parse not kept",
+        (false, false, false) => "goto_indexed phases",
     };
     profile(&format!("{title}, {n} files"), JUMPS, jump);
 }

@@ -21,9 +21,10 @@ use crate::{DEF_KINDS, DefKind, LangName};
 
 /// The units' namespace. The version changes with the tables or the units'
 /// key; a change of extraction rules changes `EXTRACTOR_VERSION` instead.
+/// 2: `ci_def_name` covers the unit (the paged and tiered lookups by name).
 pub const NAMESPACE: Namespace = Namespace {
     name: "code_intel.tags",
-    version: 1,
+    version: 2,
     compression: Compression::None,
 };
 
@@ -36,6 +37,14 @@ pub const EXISTS_BATCH: usize = 500;
 /// Version triples per by-name query: a compatibility group of up to this
 /// many languages is one query, a larger one several.
 pub const GROUP_TRIPLES: usize = 4;
+
+/// Definitions per page of a lookup by name ([`Store::next_defs`]): the
+/// rows one statement reads, a few milliseconds whatever the name.
+pub const NAME_PAGE: usize = 256;
+
+/// Definitions per statement of a lookup by name in given units
+/// ([`Store::defs_by_name_in`]).
+pub const NAME_IN_LIMIT: usize = 256;
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE ci_ext (
@@ -56,7 +65,10 @@ pub(crate) const SCHEMA: &[&str] = &[
        scope    TEXT,
        flags    INTEGER NOT NULL,
        arity    INTEGER)",
-    "CREATE INDEX ci_def_name ON ci_def (name COLLATE NOCASE)",
+    // With the unit: a name's rows in unit order without reading the table
+    // (the pages of a lookup, the count of the rows left), and one seek per
+    // unit for the lookup in given units.
+    "CREATE INDEX ci_def_name ON ci_def (name COLLATE NOCASE, unit)",
     "CREATE INDEX ci_def_unit ON ci_def (unit)",
     "CREATE TABLE ci_ref (
        name TEXT    NOT NULL,
@@ -103,26 +115,88 @@ pub(crate) const EXISTS: &str = match std::str::from_utf8(&EXISTS_BYTES) {
     Err(_) => panic!("the existence check is ASCII"),
 };
 
-/// Definitions by name (jump step 3, `Named`), in the units of up to
-/// [`GROUP_TRIPLES`] version triples. `NOCASE` uses `ci_def_name`; names
-/// are compared exactly afterwards.
-pub(crate) const DEFS_BY_NAME: &str =
+/// One page of the definitions by name (jump step 3, `Named`): those of
+/// units after `?14`, in unit order, at most `?15` rows, in the units of up
+/// to [`GROUP_TRIPLES`] version triples. `NOCASE` and the unit range use
+/// `ci_def_name` (name, unit) in index order: a page reads its rows and no
+/// more, whatever the name's count. Names are compared exactly afterwards.
+pub(crate) const DEFS_PAGE: &str =
     "SELECT d.name, d.kind, d.line, d.col, d.end_line, d.scope, d.flags, d.arity,
             e.oid, e.lang, d.unit
-     FROM ci_def d JOIN ci_ext e ON e.unit = d.unit
+     FROM ci_def d INDEXED BY ci_def_name CROSS JOIN ci_ext e ON e.unit = d.unit
+     WHERE d.name = ?1 COLLATE NOCASE AND d.unit > ?14 AND e.status = 0
+       AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4)
+         OR (e.lang = ?5 AND e.grammar = ?6 AND e.query = ?7)
+         OR (e.lang = ?8 AND e.grammar = ?9 AND e.query = ?10)
+         OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))
+     ORDER BY d.unit LIMIT ?15";
+
+/// The rows named `?1` of units after `?2`, whatever their version and
+/// status: an upper bound of what a lookup cut short did not read. Read
+/// from `ci_def_name` alone.
+pub(crate) const DEFS_LEFT: &str = "SELECT count(*) FROM ci_def INDEXED BY ci_def_name
+     WHERE name = ?1 COLLATE NOCASE AND unit > ?2";
+
+// `?14 > 0` (the limit, always positive) names `?14` before the OIDs, so
+// their bare `?` number from 15.
+const DEFS_IN_HEAD: &str =
+    "SELECT d.name, d.kind, d.line, d.col, d.end_line, d.scope, d.flags, d.arity,
+            e.oid, e.lang, d.unit
+     FROM ci_ext e CROSS JOIN ci_def d INDEXED BY ci_def_name ON d.unit = e.unit
      WHERE d.name = ?1 COLLATE NOCASE AND e.status = 0
        AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4)
          OR (e.lang = ?5 AND e.grammar = ?6 AND e.query = ?7)
          OR (e.lang = ?8 AND e.grammar = ?9 AND e.query = ?10)
-         OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))";
-/// The units referring to a name (references step 1); exact names.
-pub(crate) const REFS_BY_NAME: &str = "SELECT e.oid, e.lang, e.unit
-     FROM ci_ref r JOIN ci_ext e ON e.unit = r.unit
-     WHERE r.name = ?1 AND e.status = 0
+         OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))
+       AND ?14 > 0 AND e.oid IN (";
+const DEFS_IN_TAIL: &str = " LIMIT ?14";
+/// `?` takes the number after the largest so far: `?15` … `?514`.
+const DEFS_IN_LEN: usize = DEFS_IN_HEAD.len() + 2 * EXISTS_BATCH + DEFS_IN_TAIL.len();
+const DEFS_IN_BYTES: [u8; DEFS_IN_LEN] = {
+    let mut out = [0u8; DEFS_IN_LEN];
+    let head = DEFS_IN_HEAD.as_bytes();
+    let mut i = 0;
+    while i < head.len() {
+        out[i] = head[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < EXISTS_BATCH {
+        out[i] = b'?';
+        out[i + 1] = if j + 1 < EXISTS_BATCH { b',' } else { b')' };
+        i += 2;
+        j += 1;
+    }
+    let tail = DEFS_IN_TAIL.as_bytes();
+    let mut k = 0;
+    while k < tail.len() {
+        out[i] = tail[k];
+        i += 1;
+        k += 1;
+    }
+    out
+};
+/// The definitions by name in the units of up to [`EXISTS_BATCH`] OIDs
+/// (`?15` …, unused ones NULL), at most `?14` rows: the jump's and
+/// `Named`'s first batch, from the files nearest the query (「候选的分层与
+/// 过滤」). Each OID is one seek in `ci_ext`'s key and one in `ci_def_name`
+/// (name, unit): the cost follows the files asked for, not how many units
+/// define the name.
+pub(crate) const DEFS_IN: &str = match std::str::from_utf8(&DEFS_IN_BYTES) {
+    Ok(sql) => sql,
+    Err(_) => panic!("the lookup in units is ASCII"),
+};
+/// One page of the units referring to a name (references step 1), exact
+/// names: those after unit `?14`, in unit order, at most `?15`. The key
+/// (name, unit) of `ci_ref` gives the order: a page reads its rows only.
+pub(crate) const REFS_PAGE: &str = "SELECT e.oid, e.lang, e.unit
+     FROM ci_ref r CROSS JOIN ci_ext e ON e.unit = r.unit
+     WHERE r.name = ?1 AND r.unit > ?14 AND e.status = 0
        AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4)
          OR (e.lang = ?5 AND e.grammar = ?6 AND e.query = ?7)
          OR (e.lang = ?8 AND e.grammar = ?9 AND e.query = ?10)
-         OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))";
+         OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))
+     ORDER BY r.unit LIMIT ?15";
 /// Every `Done` unit of one version triple (the name table's first pass).
 pub(crate) const UNITS: &str = "SELECT unit, oid FROM ci_ext
      WHERE lang = ?1 AND grammar = ?2 AND query = ?3 AND status = 0";
@@ -141,8 +215,10 @@ pub(crate) const STATEMENTS: &[&str] = &[
     INSERT_DEF,
     INSERT_REF,
     EXISTS,
-    DEFS_BY_NAME,
-    REFS_BY_NAME,
+    DEFS_PAGE,
+    DEFS_LEFT,
+    DEFS_IN,
+    REFS_PAGE,
     UNITS,
     DEF_NAMES,
     EXT_OF_UNIT,
@@ -283,6 +359,52 @@ pub struct StoredDef {
     pub def: Def,
 }
 
+/// Where a lookup of a name's definitions in pages stands
+/// ([`Store::next_defs`]): the version groups of its versions
+/// ([`GROUP_TRIPLES`] each), the current one, and the last unit read in
+/// it. Holds no connection; a query keeps it between its batches.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NamePager {
+    name: Box<str>,
+    versions: Vec<Version>,
+    group: usize,
+    after: i64,
+    finished: bool,
+}
+
+impl NamePager {
+    pub fn new(name: &str, versions: &[Version]) -> NamePager {
+        NamePager {
+            name: name.into(),
+            versions: versions.to_vec(),
+            group: 0,
+            after: 0,
+            finished: versions.is_empty(),
+        }
+    }
+
+    /// Every page is read.
+    pub fn done(&self) -> bool {
+        self.finished
+    }
+
+    fn groups(&self) -> usize {
+        self.versions.len().div_ceil(GROUP_TRIPLES)
+    }
+
+    fn next_group(&mut self) {
+        self.group += 1;
+        self.after = 0;
+        if self.group >= self.groups() {
+            self.finished = true;
+        }
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
 /// `code_intel.tags` in one partition (`cache.repo(common_dir)`, or
 /// `cache.folder(root)` for a folder project). `Clone + Send + Sync`; holds
 /// no connection.
@@ -386,33 +508,161 @@ impl Store {
     }
 
     /// The definitions named exactly `name` (case-sensitive) in `Done` units
-    /// of `versions` (the current triples of a compatibility group). Not
-    /// marked as used: the caller touches what it delivers.
+    /// of `versions` (the current triples of a compatibility group), every
+    /// page of them ([`next_defs`](Self::next_defs)). Not marked as used:
+    /// the caller touches what it delivers.
     pub fn defs_by_name(&self, name: &str, versions: &[Version]) -> Option<Vec<StoredDef>> {
+        let mut pager = NamePager::new(name, versions);
+        let mut out = Vec::new();
+        while !pager.done() {
+            out.extend(self.next_defs(&mut pager, NAME_PAGE)?);
+        }
+        Some(out)
+    }
+
+    /// The next page of a lookup by name ([`NamePager`]): up to `limit`
+    /// definitions named exactly `name` in `Done` units of the pager's
+    /// versions, in unit order, after the last unit the pager read. One
+    /// statement of at most `limit` rows. `None` when the partition cannot
+    /// be read (the pager is then done: nothing more can be learned).
+    pub fn next_defs(&self, pager: &mut NamePager, limit: usize) -> Option<Vec<StoredDef>> {
+        if pager.done() {
+            return Some(Vec::new());
+        }
+        let limit = limit.max(1);
+        let group = pager.versions[pager.group * GROUP_TRIPLES..]
+            .iter()
+            .take(GROUP_TRIPLES)
+            .cloned()
+            .collect::<Vec<Version>>();
+        let name = &*pager.name;
+        let after = pager.after;
+        // Every row's unit (to go on after it), with its definition when
+        // the name matches exactly (`NOCASE` reads the other cases too).
+        let read = read_counted(&self.set, |r| {
+            let mut rows: Vec<(i64, Option<StoredDef>)> = Vec::new();
+            let mut params = [Param::Null; 15];
+            params[..13].copy_from_slice(&group_params(name, &group));
+            params[13] = Param::Int(after);
+            params[14] = Param::Int(limit as i64);
+            let ok = counted(r).query(DEFS_PAGE, &params, |row| {
+                let Some(unit) = row.unit(10) else {
+                    return true;
+                };
+                let def = (row.text(0) == Some(name))
+                    .then(|| {
+                        def_at(row, 0)
+                            .zip(oid_at(row, 8))
+                            .zip(lang_at(row, 9, &group))
+                    })
+                    .flatten()
+                    .map(|((def, oid), lang)| StoredDef {
+                        unit,
+                        oid,
+                        lang,
+                        def,
+                    });
+                rows.push((unit.id(), def));
+                true
+            });
+            ok.then_some(rows)
+        })
+        .flatten();
+        let Some(mut rows) = read else {
+            pager.finish();
+            return None;
+        };
+        // A full page may end inside a unit (overloads): that unit's rows go
+        // to the next page, unless the whole page is one unit (the rest of
+        // that unit's rows of the name is then not read).
+        if rows.len() >= limit {
+            let last = rows.last().map(|(u, _)| *u);
+            if rows.first().map(|(u, _)| *u) != last {
+                rows.retain(|(u, _)| Some(*u) != last);
+            }
+            if let Some((u, _)) = rows.last() {
+                pager.after = *u;
+            }
+        } else {
+            pager.next_group();
+        }
+        Some(rows.into_iter().filter_map(|(_, d)| d).collect())
+    }
+
+    /// The rows named `name` (any case, version or status) that a lookup
+    /// cut short at `pager` has not read: those of units after its last
+    /// unit in the current group, and all of them for each group left. An
+    /// upper bound of the definitions it left out (index only, no table
+    /// row read). 0 when the partition cannot be read.
+    pub fn defs_left(&self, pager: &NamePager) -> u64 {
+        if pager.done() {
+            return 0;
+        }
+        let count = |after: i64| -> u64 {
+            read_counted(&self.set, |r| {
+                let mut n = 0u64;
+                counted(r).query(
+                    DEFS_LEFT,
+                    &[Param::Text(&pager.name), Param::Int(after)],
+                    |row| {
+                        n = row.int(0).map_or(0, |c| c.max(0) as u64);
+                        false
+                    },
+                );
+                n
+            })
+            .unwrap_or(0)
+        };
+        let groups_left = pager.groups().saturating_sub(pager.group + 1) as u64;
+        count(pager.after) + groups_left * count(0)
+    }
+
+    /// The definitions named exactly `name` in `Done` units of `versions`
+    /// whose OID is among `oids`: one statement per [`EXISTS_BATCH`] OIDs
+    /// and version group, each at most `limit` rows (what one statement
+    /// returns beyond them is left to the paged lookup). The cost follows
+    /// the OIDs, not the name's count.
+    pub fn defs_by_name_in(
+        &self,
+        name: &str,
+        versions: &[Version],
+        oids: &[BlobId],
+        limit: usize,
+    ) -> Option<Vec<StoredDef>> {
         read_counted(&self.set, |r| {
             let mut out = Vec::new();
+            let mut params = [Param::Null; 14 + EXISTS_BATCH];
+            params[13] = Param::Int(limit.max(1) as i64);
             for group in versions.chunks(GROUP_TRIPLES) {
-                let params = group_params(name, group);
-                let ok = counted(r).query(DEFS_BY_NAME, &params, |row| {
-                    if row.text(0) != Some(name) {
-                        return true;
+                params[..13].copy_from_slice(&group_params(name, group));
+                for chunk in oids.chunks(EXISTS_BATCH) {
+                    for (slot, oid) in params[14..]
+                        .iter_mut()
+                        .zip(chunk.iter().map(Some).chain(std::iter::repeat(None)))
+                    {
+                        *slot = oid.map_or(Param::Null, |o| Param::Bytes(o.as_bytes()));
                     }
-                    let found = def_at(row, 0)
-                        .zip(oid_at(row, 8))
-                        .zip(lang_at(row, 9, group))
-                        .zip(row.unit(10));
-                    if let Some((((def, oid), lang), unit)) = found {
-                        out.push(StoredDef {
-                            unit,
-                            oid,
-                            lang,
-                            def,
-                        });
+                    let ok = counted(r).query(DEFS_IN, &params, |row| {
+                        if row.text(0) != Some(name) {
+                            return true;
+                        }
+                        let found = def_at(row, 0)
+                            .zip(oid_at(row, 8))
+                            .zip(lang_at(row, 9, group))
+                            .zip(row.unit(10));
+                        if let Some((((def, oid), lang), unit)) = found {
+                            out.push(StoredDef {
+                                unit,
+                                oid,
+                                lang,
+                                def,
+                            });
+                        }
+                        true
+                    });
+                    if !ok {
+                        return out;
                     }
-                    true
-                });
-                if !ok {
-                    break;
                 }
             }
             out
@@ -420,22 +670,60 @@ impl Store {
     }
 
     /// The `Done` units of `versions` whose reference names include `name`
-    /// exactly. Not marked as used.
+    /// exactly, every page of them ([`next_refs`](Self::next_refs)). Not
+    /// marked as used.
     pub fn refs_by_name(&self, name: &str, versions: &[Version]) -> Option<Vec<StoredUnit>> {
-        read_counted(&self.set, |r| {
+        let mut pager = NamePager::new(name, versions);
+        let mut out = Vec::new();
+        while !pager.done() {
+            out.extend(self.next_refs(&mut pager, NAME_PAGE)?);
+        }
+        Some(out)
+    }
+
+    /// The next page of the units referring to a name ([`NamePager`]): up
+    /// to `limit` `Done` units of the pager's versions whose reference names
+    /// include its name exactly, in unit order, after the last unit read.
+    /// One statement. `None` when the partition cannot be read (the pager
+    /// is then done).
+    pub fn next_refs(&self, pager: &mut NamePager, limit: usize) -> Option<Vec<StoredUnit>> {
+        if pager.done() {
+            return Some(Vec::new());
+        }
+        let limit = limit.max(1);
+        let group: Vec<Version> = pager.versions[pager.group * GROUP_TRIPLES..]
+            .iter()
+            .take(GROUP_TRIPLES)
+            .cloned()
+            .collect();
+        let (name, after) = (&*pager.name, pager.after);
+        let read = read_counted(&self.set, |r| {
             let mut out = Vec::new();
-            for group in versions.chunks(GROUP_TRIPLES) {
-                let params = group_params(name, group);
-                let ok = counted(r).query(REFS_BY_NAME, &params, |row| {
-                    push_unit(&mut out, row, 2, 0, lang_at(row, 1, group));
-                    true
-                });
-                if !ok {
-                    break;
-                }
-            }
-            out
+            let mut last = None;
+            let mut rows = 0usize;
+            let mut params = [Param::Null; 15];
+            params[..13].copy_from_slice(&group_params(name, &group));
+            params[13] = Param::Int(after);
+            params[14] = Param::Int(limit as i64);
+            let ok = counted(r).query(REFS_PAGE, &params, |row| {
+                rows += 1;
+                last = row.unit(2).map(Unit::id).or(last);
+                push_unit(&mut out, row, 2, 0, lang_at(row, 1, &group));
+                true
+            });
+            ok.then_some((out, last, rows))
         })
+        .flatten();
+        let Some((out, last, rows)) = read else {
+            pager.finish();
+            return None;
+        };
+        // One row per (name, unit): a full page ends at a unit boundary.
+        match last {
+            Some(unit) if rows >= limit => pager.after = unit,
+            _ => pager.next_group(),
+        }
+        Some(out)
     }
 
     /// Every `Done` unit of `versions` (the name table's first pass, before

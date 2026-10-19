@@ -1,8 +1,9 @@
 //! The ⌘K name table (docs/design/code_intel.md「名字表」): the definition
 //! names of the current worktree's map, deduplicated (case-sensitive), NFC,
 //! in byte order, each with the set of kinds it was seen with. Built in two
-//! passes: the current versions' units, filtered by the map, then their
-//! definitions by `ci_def_unit`. This crate keeps only a `Weak`; the table
+//! passes: the current versions' units, filtered by the map, then one scan
+//! of `ci_def` in table order that keeps the rows of those units
+//! (`Store::def_names`, no index lookups). This crate keeps only a `Weak`; the table
 //! belongs to whoever took it from `CodeIntelEvent::Names`. While someone
 //! holds it, a table behind its inputs is rebuilt in the background, at most
 //! once per `max(1 s, 2 × the last build)`.

@@ -230,14 +230,16 @@ impl Snap {
     /// Full mode (`Snap::full`): checks the store for the hinted files among
     /// `files` (OID and language) not checked yet, with the batch layer's
     /// existence statement (`VERIFY_CHUNK` OIDs each, by version), and
-    /// records what it has. `stops`, when given, is checked between two
-    /// statements: once it says stop, the rest are `Unchecked`. False when
-    /// the query stopped.
+    /// records what it has. `stops` is checked before every statement, in
+    /// the scope and outside it alike, so a check never holds a query past
+    /// its cancellation by more than one statement: once the time box is
+    /// due, the rest are `Unchecked` (counted, never taken as indexed).
+    /// False when the query stopped.
     fn verify_keys<'a>(
         &self,
         account: &mut Account,
         files: impl Iterator<Item = (BlobId, &'a Lang)>,
-        stops: Option<&Stops<'_>>,
+        stops: &Stops<'_>,
     ) -> bool {
         let mut groups: HashMap<Version, (HashSet<BlobId>, LangName)> = HashMap::new();
         for (oid, lang) in files {
@@ -265,12 +267,10 @@ impl Snap {
         for (version, (oids, lang)) in groups {
             let oids: Vec<BlobId> = oids.into_iter().collect();
             for chunk in oids.chunks(VERIFY_CHUNK) {
-                if let Some(stops) = stops {
-                    if (stops.stopped)() {
-                        return false;
-                    }
-                    cut = cut || (stops.due)();
+                if (stops.stopped)() {
+                    return false;
                 }
+                cut = cut || (stops.due)();
                 if cut {
                     for oid in chunk {
                         account
@@ -302,16 +302,22 @@ impl Snap {
     }
 
     /// [`verify_keys`](Self::verify_keys) for the hinted files among `files`
-    /// (the search's scope), all of them.
-    pub fn verify_hinted(&self, account: &mut Account, files: &[Effective]) {
+    /// (the search's scope), until `stops` says stop. False when the query
+    /// stopped.
+    pub fn verify_hinted(
+        &self,
+        account: &mut Account,
+        files: &[Effective],
+        stops: &Stops<'_>,
+    ) -> bool {
         if !self.full {
-            return;
+            return true;
         }
         let hinted = files
             .iter()
             .filter(|e| !self.unindexed(e))
             .map(|e| (e.oid, &e.lang));
-        self.verify_keys(account, hinted, None);
+        self.verify_keys(account, hinted, stops)
     }
 
     /// Whether a file counts as indexed without being read: its hint
@@ -381,9 +387,10 @@ impl Snap {
     /// file read so far. `group` names `part` for the cache (the query's
     /// language, None for every language).
     ///
-    /// Full mode checks the store for the hinted files first: those of the
-    /// scope all, the others in statements between which `stops` is
-    /// checked; unchecked ones count. Outside full mode the counts are
+    /// Full mode checks the store for the hinted files first, the scope's
+    /// before the others, in statements between which `stops` is checked;
+    /// unchecked ones count (`Unchecked`: unsearched inside the scope,
+    /// outside it outside). Outside full mode the counts are
     /// cached per project (`WalkKey`). Every hint the accounting uses is
     /// read here, before the query's last view check. None when the query
     /// stopped.
@@ -488,9 +495,8 @@ impl Snap {
         Some(walked)
     }
 
-    /// Full mode: checks every hinted file the walk covers, those of the
-    /// scope all, the others until `stops` says stop. False when the query
-    /// stopped.
+    /// Full mode: checks every hinted file the walk covers, the scope's
+    /// first, until `stops` says stop. False when the query stopped.
     fn verify_all(
         &self,
         account: &mut Account,
@@ -511,7 +517,6 @@ impl Snap {
                     hinted.push((oid, f.lang.clone()));
                 }
             });
-            let stops = (!inside).then_some(stops);
             if !self.verify_keys(account, hinted.iter().map(|(o, l)| (*o, l)), stops) {
                 return false;
             }

@@ -19,6 +19,8 @@ const ITEM: &str = "export function item() { return 2; }\n";
 const CALL: &str = "export function more() { return item() * 2; }\n";
 /// Another definition (other content: not the same unit as `ITEM`).
 const ITEM3: &str = "export function item() { return 3; }\n";
+/// A parse that never ends in time (`Inner::parse_takes`).
+const FOREVER: std::time::Duration = std::time::Duration::from_secs(3600);
 
 fn done(r: &QueryResults) -> Completeness {
     match &r.state {
@@ -274,6 +276,41 @@ fn account_files_are_read_under_their_units_limit() {
     );
 }
 
+/// B1: a file read under tier 1's limits is parsed under tier 1's deadline
+/// too (one rule, `Snap::file_limits`). Find references parses a `TooLarge`
+/// unit's 1.5 MiB file (the search reads it up to 4 MiB) and a 2 MiB file
+/// tier 1 indexed (from `ci_ref`); each parse takes 400 ms, past the
+/// background's 250 ms and within tier 1's 1 s: both are searched, their
+/// references found, the result complete.
+#[test]
+fn account_files_are_parsed_under_their_units_limit() {
+    let api = large(CALL, 3 << 19);
+    let big = large("export function third() { return item() - 1; }\n", 2 << 20);
+    let h = indexed(&[
+        ("a.ts", RUN),
+        ("c.ts", ITEM),
+        ("api.ts", &api),
+        ("e.ts", &big),
+    ]);
+    h.current("e.ts");
+    h.settle();
+    assert!(h.hinted("api.ts") && h.hinted("e.ts"));
+    assert_eq!(reasons(&h), [("api.ts".to_owned(), Reason::TooLarge)]);
+    let of = defined(&h, "c.ts");
+    let slow = std::time::Duration::from_millis(400);
+    for path in ["api.ts", "e.ts"] {
+        *lock(&h.indexer.inner().parse_takes) = Some((path.into(), slow));
+        let r = h.ask(QueryKind::References { of: of.clone() });
+        assert_eq!(paths(&r), ["a.ts", "api.ts", "e.ts"], "{path} parsed");
+        assert_eq!(done(&r), Completeness::Complete, "{path}");
+    }
+    // Past tier 1's deadline too: not searched, never complete.
+    *lock(&h.indexer.inner().parse_takes) = Some(("e.ts".into(), FOREVER));
+    let r = h.ask(QueryKind::References { of });
+    assert_eq!(paths(&r), ["a.ts", "api.ts"]);
+    assert_eq!(done(&r), partial(1, 0));
+}
+
 /// The accounting's reasons of every file, for every language, before any
 /// query read something.
 fn reasons(h: &Harness) -> Vec<(String, Reason)> {
@@ -440,7 +477,7 @@ fn account_local_references_need_their_file_searched() {
     let r = h.ask(QueryKind::References { of: of.clone() });
     assert!(!paths(&r).is_empty());
     assert_eq!(done(&r), Completeness::Complete);
-    *lock(&h.indexer.inner().parse_timeout) = Some("a.ts".into());
+    *lock(&h.indexer.inner().parse_takes) = Some(("a.ts".into(), FOREVER));
     let r = h.ask(QueryKind::References { of });
     assert!(r.callers.is_empty() && r.same_name.is_empty());
     assert_eq!(done(&r), partial(1, 0));
@@ -462,7 +499,7 @@ fn account_definition_read_as_an_object_counts_when_unsearched() {
     of.location.worktree = None;
     let r = h.ask(QueryKind::References { of: of.clone() });
     assert_eq!(done(&r), Completeness::Complete);
-    *lock(&h.indexer.inner().parse_timeout) = Some("c.ts".into());
+    *lock(&h.indexer.inner().parse_takes) = Some(("c.ts".into(), FOREVER));
     let r = h.ask(QueryKind::References { of });
     assert_eq!(done(&r), partial(1, 0));
 }
@@ -519,21 +556,119 @@ fn account_full_check_stops_with_the_query() {
     assert!(h.indexer.results(id).is_none());
 }
 
-/// F3: the check outside the scope stops at the query's time box; what it
-/// did not check counts as `outside`. Without the cut, complete.
+/// A4: `Named`'s candidates go out before its accounting's walk, whose
+/// full-mode check runs up to the time box: at the walk's first statement
+/// they are published, the query still running.
+#[test]
+fn account_named_candidates_go_out_before_the_walk() {
+    let h = full_two_packages();
+    let seen: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<QueryResults>>>> =
+        Default::default();
+    let s = seen.clone();
+    *lock(&h.indexer.inner().step_hook) = Some((
+        Step::Verify,
+        Box::new(move |inner, _| {
+            let q = lock(&inner.queries);
+            *s.lock().unwrap() = q.entries.back().map(|e| e.results.clone());
+        }),
+    ));
+    let r = named(&h, "pa/a.ts");
+    assert_eq!(paths(&r), ["pa/b.ts"]);
+    assert_eq!(done(&r), Completeness::Complete);
+    let before = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the walk checked the store");
+    assert_eq!(before.state, QueryState::Running);
+    assert_eq!(paths(&before), ["pa/b.ts"]);
+}
+
+/// A hook that lets the query's time box pass at its `n`th full-mode
+/// statement (`Step::Verify`), counting from 1.
+fn time_box_at(n: usize, clock: crate::testing::ManualClock) -> crate::query::HookFn {
+    Box::new(move |inner, _| {
+        if n <= 1 {
+            clock.advance(std::time::Duration::from_secs(2));
+        } else {
+            *lock(&inner.step_hook) = Some((Step::Verify, time_box_at(n - 1, clock)));
+        }
+    })
+}
+
+/// F3, A4: every full-mode check stops at the query's time box, the
+/// scope's as well as the one outside it; what it did not check counts
+/// (`Unchecked`: unsearched in the scope, `outside` outside it), never as
+/// indexed. The statements: the scope's hinted pa/b.ts, the walk's pa/a.ts,
+/// then pb's six files two at a time. Without the cut, complete.
 #[test]
 fn account_full_check_is_time_boxed() {
     let h = full_two_packages();
-    let clock = h.clock.clone();
-    *lock(&h.indexer.inner().step_hook) = Some((
-        Step::Verify,
-        Box::new(move |_, _| clock.advance(std::time::Duration::from_secs(2))),
-    ));
+    // At the scope's statement: pa/b.ts is unchecked, and so is pb.
+    *lock(&h.indexer.inner().step_hook) = Some((Step::Verify, time_box_at(1, h.clock.clone())));
+    let r = h.goto("pa/a.ts", "item", 0);
+    assert_eq!(paths(&r), ["pa/b.ts"], "the index's candidate");
+    assert_eq!(done(&r), partial(1, 6));
+    // At the first statement outside the scope.
+    *lock(&h.indexer.inner().step_hook) = Some((Step::Verify, time_box_at(3, h.clock.clone())));
     let r = h.goto("pa/a.ts", "item", 0);
     assert_eq!(paths(&r), ["pa/b.ts"]);
     assert_eq!(done(&r), partial(0, 6));
     let r = h.goto("pa/a.ts", "item", 0);
     assert_eq!(done(&r), Completeness::Complete);
+}
+
+/// A4: the full-mode check of the search's scope (the root: no sub-project,
+/// so every file is in it) stops at the query's time box too: the seven
+/// hinted files besides the current text are unchecked and unsearched; a
+/// query closed during it does no statement after the close.
+#[test]
+fn account_full_scope_check_stops_with_the_query() {
+    use lectern_services::code_intel::Query;
+    let mut files = vec![
+        ("a.ts".to_owned(), RUN.to_owned()),
+        ("b.ts".to_owned(), ITEM.to_owned()),
+    ];
+    for i in 0..6 {
+        files.push((
+            format!("f{i}.ts"),
+            format!("export function f{i}() {{ return {i}; }}\n"),
+        ));
+    }
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let h = indexed(&pairs);
+    h.pause();
+    fill(&h);
+    *lock(&h.indexer.inner().step_hook) = Some((Step::Verify, time_box_at(1, h.clock.clone())));
+    let r = h.goto("a.ts", "item", 0);
+    assert_eq!(paths(&r), ["b.ts"], "the index's candidate");
+    assert_eq!(done(&r), partial(7, 0));
+    let inner = h.indexer.inner().clone();
+    let id = h.indexer.query(Query {
+        project: h.key(),
+        kind: QueryKind::Definition {
+            at: h.text("a.ts"),
+            position: h.pos("a.ts", "item", 0),
+        },
+    });
+    *lock(&inner.step_hook) = Some((Step::Verify, Box::new(move |inner, _| inner.close(id))));
+    let before = inner
+        .verify_checks
+        .load(std::sync::atomic::Ordering::Acquire);
+    h.settle();
+    assert!(lock(&inner.step_hook).is_none(), "the check started");
+    assert_eq!(
+        inner
+            .verify_checks
+            .load(std::sync::atomic::Ordering::Acquire)
+            - before,
+        1,
+        "no statement after the close"
+    );
+    assert!(h.indexer.results(id).is_none());
 }
 
 /// The walk is cached per project until its key changes: the same query

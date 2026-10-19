@@ -191,6 +191,10 @@ pub(crate) struct Inner {
     next_session: AtomicUsize,
     /// The queries of this activation (`crate::query`).
     pub(crate) queries: Mutex<crate::query::Queries>,
+    /// The parsed current texts kept for jumps (ADR 0037).
+    pub(crate) parse_cache: Mutex<crate::query::ParseCache>,
+    /// When the due entry that expires kept parses fires, if scheduled.
+    pub(crate) parse_expiry: Mutex<Option<std::time::Instant>>,
     /// Held around replacing a query's results and emitting its event, so
     /// one query's events go out in generation order.
     pub(crate) publishing: Mutex<()>,
@@ -215,9 +219,14 @@ pub(crate) struct Inner {
     /// the overlay is read (tests: a query snapshot in that window).
     #[cfg(test)]
     pub after_base: Mutex<Option<AfterBase>>,
-    /// Tests: find references parses this path as if its deadline passed.
+    /// Tests: no text is warmed (`Inner::warm_parse`), so no kept parse's
+    /// due entry is scheduled (tests that count the watchdog's entries).
     #[cfg(test)]
-    pub parse_timeout: Mutex<Option<String>>,
+    pub no_warm: std::sync::atomic::AtomicBool,
+    /// Tests: find references parses this path as if the parse took this
+    /// long: past its deadline, it times out.
+    #[cfg(test)]
+    pub parse_takes: Mutex<Option<(String, std::time::Duration)>>,
     /// Tests: the full-mode statements the accountings' walks were allowed
     /// to make outside the scope (`Stops::due` asked).
     #[cfg(test)]
@@ -279,6 +288,8 @@ impl Indexer {
             stats: Stats::default(),
             next_session: AtomicUsize::new(1),
             queries: Mutex::new(crate::query::Queries::default()),
+            parse_cache: Mutex::new(crate::query::ParseCache::default()),
+            parse_expiry: Mutex::new(None),
             publishing: Mutex::new(()),
             resolvers: Mutex::new(Vec::new()),
             providers: Mutex::new(crate::semantic::Providers::default()),
@@ -292,7 +303,9 @@ impl Indexer {
             #[cfg(test)]
             after_base: Mutex::new(None),
             #[cfg(test)]
-            parse_timeout: Mutex::new(None),
+            no_warm: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            parse_takes: Mutex::new(None),
             #[cfg(test)]
             verify_checks: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -419,6 +432,31 @@ impl Indexer {
         if let Some(p) = self.inner.project(project) {
             lock(&p.walks).clear();
         }
+    }
+
+    /// Another handle to the same activation (benchmarks: an event listener
+    /// reads the results it is told about).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handle(&self) -> Indexer {
+        Indexer {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// The kept parses of current texts (ADR 0037): how many, and their
+    /// estimated bytes (tests and benchmarks).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn kept_parses(&self) -> (usize, usize) {
+        let cache = lock(&self.inner.parse_cache);
+        (cache.len(), cache.bytes())
+    }
+
+    /// Forgets every kept parse, so the next jump parses its text, as the
+    /// first one in a text does (benchmarks of the cold path).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_kept_parses(&self) {
+        let dropped = lock(&self.inner.parse_cache).without_all();
+        drop(dropped);
     }
 
     /// The number of the project's cached walks (tests).
@@ -761,6 +799,12 @@ impl Inner {
         let Some(project) = self.project(key) else {
             return;
         };
+        // A text that becomes the current one: its parse is kept for the
+        // jumps in it (ADR 0037), made in the background.
+        let warm = match &focus {
+            Focus::Current(Some(text)) => Some(text.clone()),
+            _ => None,
+        };
         {
             let mut st = lock(&project.state);
             let wt = worktree.cloned();
@@ -777,6 +821,9 @@ impl Inner {
         if let Some(me) = self.arc() {
             me.enqueue_focus(&project);
             me.kick_batch();
+            if let Some(text) = warm {
+                me.warm_parse(key, &text);
+            }
         }
     }
 
@@ -895,6 +942,11 @@ impl Inner {
                 open.clone()
             };
             if !changed.is_empty() {
+                // Kept parses of a changed language hold its old grammar's
+                // lease: dropped now (here, a background task), not when
+                // they expire.
+                let dropped = lock(&self.parse_cache).without(&changed);
+                drop(dropped);
                 for p in &projects {
                     let st = lock(&p.state);
                     // In-flight extractions of a changed language give up;

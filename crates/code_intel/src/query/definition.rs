@@ -36,7 +36,7 @@ use crate::index::{Inner, Scanned};
 use crate::map::Effective;
 use crate::resolve::{CandidateDraft, ResolveContext};
 use crate::site::{LocalBinding, ParseError, ParsedFile, Site, accepts};
-use crate::store::Version;
+use crate::store::{NAME_IN_LIMIT, NAME_PAGE, NamePager, StoredDef, Version};
 use crate::{DefKind, LangName};
 
 /// A delivered location: (origin, path, OID, line, column).
@@ -108,6 +108,12 @@ pub(crate) struct Prepared {
     /// prefetch's own): the query's results are consistent with it
     /// (「查询的视图」, `Inner::check_view`).
     pub view: View,
+    /// Step 3's lookup when the first batch did not read every page of the
+    /// name (a name many units define): the rest goes out in later batches.
+    pub pager: Option<NamePager>,
+    /// The definitions a lookup cut by the time box did not read (an upper
+    /// bound, `Store::defs_left`): counted as unsearched.
+    pub left: u64,
 }
 
 impl Prepared {
@@ -127,6 +133,29 @@ impl Prepared {
         self.candidates
             .iter()
             .any(|c| matches!(c.evidence, Evidence::Bound(_)))
+    }
+}
+
+/// `completeness` with `left` more files unsearched (the rows a lookup cut
+/// by the time box did not read, `Store::defs_left`: at most that many files
+/// hold the definitions it left out).
+pub(crate) fn plus_unsearched(completeness: Completeness, left: u64) -> Completeness {
+    if left == 0 {
+        return completeness;
+    }
+    let left = u32::try_from(left).unwrap_or(u32::MAX);
+    match completeness {
+        Completeness::Complete => Completeness::Partial {
+            unsearched: left,
+            outside: 0,
+        },
+        Completeness::Partial {
+            unsearched,
+            outside,
+        } => Completeness::Partial {
+            unsearched: unsearched.saturating_add(left),
+            outside,
+        },
     }
 }
 
@@ -235,10 +264,10 @@ impl Inner {
     }
 
     /// A file's extraction for a query (「输入代数与派生状态」, the last
-    /// point): its stored unit when it is `Done`, else extracted now with
-    /// the background deadline cut at `until` ([`FileDeadline`]) and the
-    /// file's read limit (`Snap::read_limit`) and, when the result settles
-    /// the file, queued to be written.
+    /// point): its stored unit when it is `Done`, else extracted now under
+    /// the file's limits (`Snap::file_limits`: its deadline cut at `until`,
+    /// [`FileDeadline::of`], and its read limit) and, when the result
+    /// settles the file, queued to be written.
     #[allow(
         clippy::too_many_arguments,
         reason = "one file's part of a query: its snapshot, the file and what it adds to"
@@ -259,8 +288,8 @@ impl Inner {
         };
         let version = Version::of(&lang);
         // A unit stored `TooLarge` or `TimedOut` holds nothing of the file:
-        // extracted now with tier 1's limits, cut at `until`.
-        let mut unfinished = false;
+        // extracted now with tier 1's limits (its hint matches:
+        // `Snap::file_limits`), cut at `until`.
         if let Some(found) = snap
             .project
             .store
@@ -270,7 +299,7 @@ impl Inner {
             .next()
         {
             match found.status {
-                ExtractStatus::TooLarge | ExtractStatus::TimedOut => unfinished = true,
+                ExtractStatus::TooLarge | ExtractStatus::TimedOut => {}
                 // No definitions to have: as indexed.
                 ExtractStatus::Binary => return FileExtraction::Nothing,
                 status => {
@@ -285,12 +314,9 @@ impl Inner {
             }
         }
         let now = self.watchdog.clock().now();
-        let file = if unfinished {
-            FileDeadline::interactive(now, Some(until))
-        } else {
-            FileDeadline::new(now, Some(until))
-        };
-        let deadline = Deadline::at(&self.watchdog, file.at, snap.read_limit(eff));
+        let limits = snap.file_limits(eff);
+        let file = FileDeadline::of(limits.interactive, now, Some(until));
+        let deadline = Deadline::at(&self.watchdog, file.at, limits.max_len);
         let extract = crate::index::lock(&self.extract).clone();
         let extraction = extract(&lang, bytes, &deadline, cancel);
         let status = extraction.status;
@@ -331,21 +357,40 @@ impl Inner {
             .or_else(|| snap.table.for_path(&at.path, &*self.packs).cloned())
             .filter(|l| !snap.disabled.contains(l.name()))
             .ok_or(QueryError::UnsupportedLanguage)?;
-        let bytes = {
-            let _t = crate::phases::span("1 read + verify current text");
-            self.read_text(snap, at)?
-        };
         let clock = self.watchdog.clock().clone();
-        let deadline = clock.now() + INTERACTIVE_DEADLINE;
-        let parsed = {
-            let _t = crate::phases::span("1 parse + locals + site query");
-            ParsedFile::parse_at(&lang, bytes, &*clock, deadline, cancel, position).map_err(
-                |e| match e {
-                    ParseError::Unsupported => QueryError::UnsupportedLanguage,
-                    ParseError::TimedOut => QueryError::Unreadable("parsing timed out".into()),
-                    ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
-                },
-            )?
+        // The text's parse kept by an earlier jump or prefetch, or warmed when
+        // it became the current text (ADR 0037): no read, no parse. The text
+        // is its OID's content, as a parse kept under that OID was checked to
+        // be (`read_text`). Otherwise read, verified and parsed for this site
+        // (the cold path), and its whole parse kept in the background.
+        let version = Version::of(&lang);
+        let parsed = match self.cached_parse(at.oid, &version) {
+            Some(parsed) => {
+                crate::phases::count("1 kept parses", 1);
+                parsed
+            }
+            None => {
+                let bytes = {
+                    let _t = crate::phases::span("1 read + verify current text");
+                    self.read_text(snap, at)?
+                };
+                let deadline = clock.now() + INTERACTIVE_DEADLINE;
+                if let Some(me) = self.arc() {
+                    me.warm_parse_of(&lang, at.oid, bytes.clone());
+                }
+                let parsed = {
+                    let _t = crate::phases::span("1 parse + locals + site query");
+                    ParsedFile::parse_at(&lang, bytes, &*clock, deadline, cancel, position)
+                        .map_err(|e| match e {
+                            ParseError::Unsupported => QueryError::UnsupportedLanguage,
+                            ParseError::TimedOut => {
+                                QueryError::Unreadable("parsing timed out".into())
+                            }
+                            ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
+                        })?
+                };
+                Arc::new(parsed)
+            }
         };
         let site = {
             let _t = crate::phases::span("1 site_at");
@@ -379,6 +424,8 @@ impl Inner {
             scanned: Vec::new(),
             account: Account::default(),
             view: snap.view,
+            pager: None,
+            left: 0,
         };
         // The current text is read and parsed: its definitions are step 1's
         // (the map's file when the map has that content at the path).
@@ -534,9 +581,24 @@ impl Inner {
         Ok(prepared)
     }
 
-    /// Step 3 into `prepared`: the index's candidates, disambiguated and
-    /// ranked, after those already there. Run again by
-    /// [`look_up_again`](Self::look_up_again). Whether it added some.
+    /// The current versions of the languages of `lang`'s group: what step
+    /// 3 looks up.
+    fn group_versions(snap: &Snap, lang: &Lang) -> Vec<Version> {
+        snap.table
+            .iter()
+            .filter(|l| !snap.disabled.contains(l.name()))
+            .filter(|l| compatible(&snap.table, l.name(), lang.name()))
+            .map(Version::of)
+            .collect()
+    }
+
+    /// Step 3 into `prepared`, the first batch's part (「候选的分层与过滤」):
+    /// the first page of the name's definitions; when there are more (a
+    /// name many units define), the definitions in the files nearest the
+    /// jump as well (its directory, its sub-project), so the best tiers are
+    /// in the first batch whatever the name's count. Both are bounded: one
+    /// page of rows, one seek per near file. The other pages go out in
+    /// later batches ([`rest_of_lookup`](Self::rest_of_lookup)).
     fn index_step(
         &self,
         snap: &Snap,
@@ -544,6 +606,45 @@ impl Inner {
         ranker: &Ranker<'_>,
         prepared: &mut Prepared,
     ) -> bool {
+        let versions = Self::group_versions(snap, &prepared.lang);
+        let name = prepared.site.name.clone();
+        let mut pager = NamePager::new(&name, &versions);
+        let mut stored = {
+            let _t = crate::phases::span("3 index lookup (SQL)");
+            snap.project
+                .store
+                .next_defs(&mut pager, NAME_PAGE)
+                .unwrap_or_default()
+        };
+        if !pager.done() {
+            let _t = crate::phases::span("3 near lookup (SQL)");
+            let lang = prepared.lang.clone();
+            let near = snap.near_oids(from, &|l: &Lang| snap.in_group(l, &lang));
+            crate::phases::count("near files", near.len() as u64);
+            stored.extend(
+                snap.project
+                    .store
+                    .defs_by_name_in(&name, &versions, &near, NAME_IN_LIMIT)
+                    .unwrap_or_default(),
+            );
+        }
+        prepared.pager = (!pager.done()).then_some(pager);
+        self.add_index_candidates(snap, from, ranker, prepared, stored)
+    }
+
+    /// The candidates of `stored` (stored definitions by name) into
+    /// `prepared`, disambiguated and ranked among themselves, after those
+    /// already there (results only grow); those already delivered are
+    /// skipped. Whether it added some.
+    fn add_index_candidates(
+        &self,
+        snap: &Snap,
+        from: &str,
+        ranker: &Ranker<'_>,
+        prepared: &mut Prepared,
+        stored: Vec<StoredDef>,
+    ) -> bool {
+        crate::phases::count("stored defs", stored.len() as u64);
         let rules = self.resolver(prepared.lang.name());
         let mut drafts = self.index_candidates(
             snap,
@@ -552,6 +653,7 @@ impl Inner {
             from,
             ranker,
             &mut prepared.units,
+            stored,
         );
         let _t = crate::phases::span("3 disambiguate + rank");
         rules.disambiguate(&prepared.site, &mut drafts);
@@ -563,6 +665,49 @@ impl Inner {
             added |= prepared.push(candidate);
         }
         added
+    }
+
+    /// The pages of step 3's lookup the first batch did not read, each one
+    /// statement of at most [`NAME_PAGE`] rows and its candidates published
+    /// at once, until the lookup ends, the query stops or its time box (the
+    /// search's) is due: then the rows not read count as unsearched
+    /// (`Prepared::left`). False when the query stopped.
+    fn rest_of_lookup(&self, run: &Run, snap: &Snap, at: &TextRef, p: &mut Prepared) -> bool {
+        let Some(mut pager) = p.pager.take() else {
+            return true;
+        };
+        let _t = crate::phases::span("3 later pages");
+        let ranker = self.ranker(
+            snap,
+            Some(&at.path),
+            Some((at.origin, at.oid)),
+            Some(p.lang.name()),
+        );
+        let clock = self.watchdog.clock().clone();
+        while !pager.done() {
+            if run.stopped(snap) {
+                return false;
+            }
+            if clock.now() >= run.started + SEARCH_FOR {
+                p.left += snap.project.store.defs_left(&pager);
+                break;
+            }
+            let stored = snap
+                .project
+                .store
+                .next_defs(&mut pager, NAME_PAGE)
+                .unwrap_or_default();
+            if self.add_index_candidates(snap, &at.path, &ranker, p, stored) {
+                let all: Arc<[Candidate]> = p.candidates.clone().into();
+                let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&p.site));
+                self.publish_in(snap, run.id, |r| {
+                    r.candidates = all;
+                    r.jump = jump;
+                    r.preselect = preselect;
+                });
+            }
+        }
+        true
     }
 
     /// After the hint reads of a step: whether the query's view still
@@ -582,30 +727,24 @@ impl Inner {
         }
     }
 
-    /// Step 3 again, the new candidates out ([`hold_view`](Self::hold_view)).
+    /// Step 3 again, every page, the new candidates out as they come
+    /// ([`hold_view`](Self::hold_view)); the time box and the query's stop
+    /// end it as they end the first lookup's pages.
     fn look_up_again(&self, run: &Run, snap: &Snap, at: &TextRef, prepared: &mut Prepared) {
         crate::phases::count("second lookups", 1);
-        let ranker = self.ranker(
-            snap,
-            Some(&at.path),
-            Some((at.origin, at.oid)),
-            Some(prepared.lang.name()),
-        );
-        if self.index_step(snap, &at.path, &ranker, prepared) {
-            let all: Arc<[Candidate]> = prepared.candidates.clone().into();
-            let (jump, preselect) = jump_and_preselect(&prepared.candidates, Some(&prepared.site));
-            self.publish_in(snap, run.id, |r| {
-                r.candidates = all;
-                r.jump = jump;
-                r.preselect = preselect;
-            });
-        }
+        let versions = Self::group_versions(snap, &prepared.lang);
+        prepared.pager = Some(NamePager::new(&prepared.site.name, &versions));
+        self.rest_of_lookup(run, snap, at, prepared);
     }
 
-    /// Step 3: the stored definitions named like the site, in the units of
-    /// the current version of every language of its group, at every path
-    /// the map has for their OID, visible from `from` and of a kind the
-    /// site's syntax accepts.
+    /// Step 3's candidates of `stored` (definitions named like the site, in
+    /// the units of the current version of every language of its group): at
+    /// every path the map has for their OID, visible from `from` and of a
+    /// kind the site's syntax accepts.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the snapshot, the site and its ranking, and what it adds to"
+    )]
     fn index_candidates(
         &self,
         snap: &Snap,
@@ -614,22 +753,8 @@ impl Inner {
         from: &str,
         ranker: &Ranker<'_>,
         units: &mut Vec<Unit>,
+        stored: Vec<StoredDef>,
     ) -> Vec<CandidateDraft> {
-        let versions: Vec<Version> = snap
-            .table
-            .iter()
-            .filter(|l| !snap.disabled.contains(l.name()))
-            .filter(|l| compatible(&snap.table, l.name(), lang.name()))
-            .map(Version::of)
-            .collect();
-        let stored = {
-            let _t = crate::phases::span("3 index lookup (SQL)");
-            snap.project
-                .store
-                .defs_by_name(&site.name, &versions)
-                .unwrap_or_default()
-        };
-        crate::phases::count("stored defs", stored.len() as u64);
         let _t = crate::phases::span("3 filter + tier");
         let mut out = Vec::new();
         for s in stored {
@@ -739,8 +864,16 @@ impl Inner {
             }
         }
         if !p.settled {
-            let _t = crate::phases::span("escalate");
-            self.escalate_definition(run.id, snap, at, position, &p);
+            {
+                let _t = crate::phases::span("escalate");
+                self.escalate_definition(run.id, snap, at, position, &p);
+            }
+            // The index's other pages (a name many units define), in later
+            // batches before the search.
+            if !self.rest_of_lookup(run, snap, at, &mut p) {
+                self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
+                return;
+            }
         }
         // A binding the steps proved settles the jump: no other file can
         // change it (「跳转到定义」).
@@ -750,7 +883,11 @@ impl Inner {
             let mut account = std::mem::take(&mut p.account);
             let scope = {
                 let _t = crate::phases::span("4 search scope");
-                snap.search_scope(&at.path, &p.lang, &p.skip, &mut account)
+                self.scope(run, snap, &at.path, &p.lang, &p.skip, &mut account)
+            };
+            let Some(scope) = scope else {
+                self.store_scanned(&snap.project, snap.session, std::mem::take(&mut p.scanned));
+                return;
             };
             crate::phases::count("scope files", scope.files.len() as u64);
             self.step_hook(Step::Hints, snap);
@@ -832,6 +969,8 @@ impl Inner {
                     for c in found {
                         p.push(c);
                     }
+                    // Every hit that adds candidates goes out at once
+                    // (「限时搜索」): no timer to tick between files.
                     if p.candidates.len() > before {
                         let all: Arc<[Candidate]> = p.candidates.clone().into();
                         let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&site));
@@ -843,6 +982,7 @@ impl Inner {
                     }
                     Searched::Done
                 },
+                || {},
             );
             p.units = units;
             p.scanned = scanned;
@@ -875,7 +1015,7 @@ impl Inner {
                         );
                         return self.end_stale(snap, run.id);
                     }
-                    Some(snap.finish(&account, walked))
+                    Some(plus_unsearched(snap.finish(&account, walked), p.left))
                 }
                 None => None,
             }
@@ -889,6 +1029,8 @@ impl Inner {
             self.publish_in(snap, run.id, |r| r.state = QueryState::Done(completeness));
         }
         let _t = crate::phases::span("touch units");
+        p.units.sort_by_key(|u| u.id());
+        p.units.dedup();
         crate::phases::count("touched units", p.units.len() as u64);
         snap.project.store.touch(&p.units);
     }
@@ -935,49 +1077,54 @@ impl Inner {
             .map(Version::of)
             .collect();
         let ranker = self.ranker(snap, near, None, None);
-        let mut candidates = Vec::new();
-        let mut delivered = HashSet::new();
-        let mut units = Vec::new();
-        let mut look_up = |candidates: &mut Vec<Candidate>, units: &mut Vec<Unit>| {
-            let stored = {
-                let _t = crate::phases::span("named: lookup (SQL)");
-                snap.project
-                    .store
-                    .defs_by_name(name, &versions)
-                    .unwrap_or_default()
-            };
-            crate::phases::count("named: stored defs", stored.len() as u64);
-            let _t = crate::phases::span("named: candidates");
-            for s in stored {
-                for eff in snap.map.paths(&s.oid, &s.lang.0) {
-                    let location = Location {
-                        worktree: snap.worktree.clone(),
-                        path: eff.path.clone(),
-                        origin: TextOrigin::Worktree,
-                        oid: s.oid,
-                        line: s.def.line,
-                        column: s.def.column,
-                        end_line: s.def.end_line,
-                    };
-                    if !delivered.insert(loc_key(&location)) {
-                        continue;
-                    }
-                    candidates.push(Candidate {
-                        tier: ranker.tier(&eff.path, TextOrigin::Worktree, s.oid, false),
-                        in_review: ranker.in_review(&eff.path),
-                        definition: def_ref(&s.def, &s.lang, false, location),
-                        evidence: Evidence::NameOnly,
-                        source: CandidateSource::Index,
-                    });
-                    units.push(s.unit);
-                }
+        let mut found = NamedFound::default();
+        // The first batch: the first page of the name's definitions and,
+        // for a name many units define, those of the files nearest `near`
+        // (its directory, its sub-project); both bounded.
+        let mut pager = NamePager::new(name, &versions);
+        {
+            let _t = crate::phases::span("named: lookup (SQL)");
+            let store = &snap.project.store;
+            let mut stored = store.next_defs(&mut pager, NAME_PAGE).unwrap_or_default();
+            if !pager.done()
+                && let Some(near) = near
+            {
+                let part = |l: &Lang| !snap.disabled.contains(l.name());
+                let oids = snap.near_oids(near, &part);
+                stored.extend(
+                    store
+                        .defs_by_name_in(name, &versions, &oids, NAME_IN_LIMIT)
+                        .unwrap_or_default(),
+                );
             }
-        };
-        look_up(&mut candidates, &mut units);
+            crate::phases::count("named: stored defs", stored.len() as u64);
+            found.add(snap, &ranker, stored);
+        }
         self.step_hook(Step::Lookup, snap);
         if run.stopped(snap) {
             return Ended::Stopped;
         }
+        // The candidates go out before the later pages and the accounting's
+        // walk (which, once the namespace is full, checks the store until
+        // the time box): what waits is the rest and the completeness. Units
+        // evicted during the lookup make it again before anything is
+        // published.
+        match self.check_view(snap, &view) {
+            ViewCheck::Same | ViewCheck::Grew(_) => {}
+            ViewCheck::Evicted => return Ended::Evicted,
+            ViewCheck::Ended => return Ended::Stopped,
+        }
+        {
+            let _t = crate::phases::span("named: publish");
+            if !self.publish_named(snap, run, &found, None) {
+                return Ended::Stopped;
+            }
+        }
+        // The other pages, each published as it comes.
+        let mut left = match self.named_pages(run, snap, &ranker, &mut pager, &mut found) {
+            Some(left) => left,
+            None => return Ended::Stopped,
+        };
         // Not searched: what is not indexed yet is reported, never taken
         // as complete. Every file of every enabled language, classified
         // once (`Snap::walk`).
@@ -993,30 +1140,133 @@ impl Inner {
         match self.check_view(snap, &view) {
             ViewCheck::Same => {}
             // A file the counts took as indexed whose unit was written
-            // after the lookup: looked up again.
-            ViewCheck::Grew(_) => look_up(&mut candidates, &mut units),
-            ViewCheck::Evicted => return Ended::Evicted,
+            // after the lookup: looked up again, every page, the new ones
+            // after those published (results only grow).
+            ViewCheck::Grew(_) => {
+                let mut again = NamePager::new(name, &versions);
+                match self.named_pages(run, snap, &ranker, &mut again, &mut found) {
+                    Some(more) => left += more,
+                    None => return Ended::Stopped,
+                }
+            }
+            // Published already: what it published stays, its state says
+            // to ask again (「查询的视图」).
+            ViewCheck::Evicted => {
+                self.end_stale(snap, run.id);
+                return Ended::Stopped;
+            }
             ViewCheck::Ended => return Ended::Stopped,
         }
+        let completeness = plus_unsearched(snap.finish(&account, walked), left);
         {
-            let _t = crate::phases::span("named: rank");
-            ranker.sort(&mut candidates);
+            let _t = crate::phases::span("named: publish");
+            self.publish_named(snap, run, &found, Some(completeness));
         }
-        let completeness = snap.finish(&account, walked);
-        let preselect = (!candidates.is_empty()).then_some(0);
-        let publish = crate::phases::span("named: publish");
-        let all: Arc<[Candidate]> = candidates.into();
-        self.publish_in(snap, run.id, |r| {
-            r.candidates = all;
-            r.preselect = preselect;
-            r.state = QueryState::Done(completeness);
-        });
-        drop(publish);
         let _t = crate::phases::span("named: touch");
+        let mut units = found.units;
         units.sort_by_key(|u| u.id());
         units.dedup();
         snap.project.store.touch(&units);
         Ended::Done
+    }
+
+    /// Publishes `Named`'s candidates so far, and its end when `done`
+    /// says how complete it is. False when not published.
+    fn publish_named(
+        &self,
+        snap: &Snap,
+        run: &Run,
+        found: &NamedFound,
+        done: Option<Completeness>,
+    ) -> bool {
+        let preselect = (!found.candidates.is_empty()).then_some(0);
+        let all: Arc<[Candidate]> = found.candidates.clone().into();
+        self.publish_in(snap, run.id, |r| {
+            r.candidates = all;
+            r.preselect = preselect;
+            if let Some(c) = done {
+                r.state = QueryState::Done(c);
+            }
+        })
+    }
+
+    /// `Named`'s pages from `pager` on, each one statement of at most
+    /// [`NAME_PAGE`] rows, its new candidates published as they come,
+    /// until the lookup ends or the query's time box (the search's) is due:
+    /// the rows not read (`Store::defs_left`, counted unsearched). None
+    /// when the query stopped.
+    fn named_pages(
+        &self,
+        run: &Run,
+        snap: &Snap,
+        ranker: &Ranker<'_>,
+        pager: &mut NamePager,
+        found: &mut NamedFound,
+    ) -> Option<u64> {
+        let clock = self.watchdog.clock().clone();
+        while !pager.done() {
+            if run.stopped(snap) {
+                return None;
+            }
+            if clock.now() >= run.started + SEARCH_FOR {
+                return Some(snap.project.store.defs_left(pager));
+            }
+            let stored = snap
+                .project
+                .store
+                .next_defs(pager, NAME_PAGE)
+                .unwrap_or_default();
+            if found.add(snap, ranker, stored) && !self.publish_named(snap, run, found, None) {
+                return None;
+            }
+        }
+        Some(0)
+    }
+}
+
+/// What `Named` has found: its candidates in the order published, each
+/// location once, and the units they came from.
+#[derive(Default)]
+struct NamedFound {
+    candidates: Vec<Candidate>,
+    delivered: HashSet<LocKey>,
+    units: Vec<Unit>,
+}
+
+impl NamedFound {
+    /// The candidates of `stored` at every path the map has for their OID,
+    /// ranked among themselves after those already there (results only
+    /// grow), each location once. Whether it added some.
+    fn add(&mut self, snap: &Snap, ranker: &Ranker<'_>, stored: Vec<StoredDef>) -> bool {
+        let _t = crate::phases::span("named: candidates");
+        let from = self.candidates.len();
+        for s in stored {
+            for eff in snap.map.paths(&s.oid, &s.lang.0) {
+                let location = Location {
+                    worktree: snap.worktree.clone(),
+                    path: eff.path.clone(),
+                    origin: TextOrigin::Worktree,
+                    oid: s.oid,
+                    line: s.def.line,
+                    column: s.def.column,
+                    end_line: s.def.end_line,
+                };
+                if !self.delivered.insert(loc_key(&location)) {
+                    continue;
+                }
+                self.candidates.push(Candidate {
+                    tier: ranker.tier(&eff.path, TextOrigin::Worktree, s.oid, false),
+                    in_review: ranker.in_review(&eff.path),
+                    definition: def_ref(&s.def, &s.lang, false, location),
+                    evidence: Evidence::NameOnly,
+                    source: CandidateSource::Index,
+                });
+                self.units.push(s.unit);
+            }
+        }
+        let _r = crate::phases::span("named: rank");
+        ranker.sort(&mut self.candidates[from..]);
+        self.candidates.len() > from
     }
 }
 
