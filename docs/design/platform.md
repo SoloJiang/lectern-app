@@ -85,6 +85,7 @@ impl SafeRoot {
     pub fn open_dir(&self, rel: RelPath<'_>) -> Result<SafeRoot, SafeError>;
 
     /// 打开一个条目供范围读取：打开、`fstat` 与类型判断同 `read`，普通文件返回持有描述符的 `OpenFile`，不读内容。
+    /// 与其他方法不同，打开的描述符不在返回前关闭，而是转交给 `OpenFile`，在它 drop 时关闭（见「数据流与线程」的描述符生命周期）。
     /// 见「范围读取」。尚未实现（#103）。
     pub fn open_file(&self, rel: RelPath<'_>) -> Result<Opened, SafeError>;
 }
@@ -219,7 +220,7 @@ pub enum FileKind {
 | `NofollowAnyParent` | macOS 11、12 | `read` 同 `NofollowAny`；`stat`：`openat(root, 父目录, O_RDONLY \| O_DIRECTORY \| O_NOFOLLOW_ANY)` | 探测返回 `EINVAL`：`fstatat` 不认识 `AT_SYMLINK_NOFOLLOW_ANY`。Apple Silicon 只运行 macOS 11 及以上，`O_NOFOLLOW_ANY` 从 11 起可用 |
 | `Walk` | 所有 unix | 从根描述符出发逐级 `openat(dir, 名字, O_DIRECTORY \| O_NOFOLLOW)` | Linux 探测失败；以及上面的一步实现出错时，用它重做这次调用并判定原因 |
 
-所有描述符都带 `O_CLOEXEC`（ADR 0019：子进程不继承 Lectern 打开的描述符），由 `OwnedFd` 持有，出错路径上也随 drop 关闭。
+所有描述符都带 `O_CLOEXEC`（ADR 0019：子进程不继承 Lectern 打开的描述符），由 `OwnedFd` 持有，出错路径上也随 drop 关闭；转交给 `OpenFile` 和 `open_dir` 返回的 `SafeRoot` 的描述符同样如此（见「数据流与线程」的描述符生命周期）。
 
 ### 路径复核
 
@@ -263,7 +264,7 @@ pub enum FileKind {
 
 ### Walk
 
-一次调用内复用描述符：每一级用上一级的描述符打开，打开下一级之后关闭上一级，同时最多持有两个描述符；最后一级的各个步骤都用同一个父目录描述符。不跨调用保留描述符。
+一次调用内复用描述符：每一级用上一级的描述符打开，打开下一级之后关闭上一级，同时最多持有两个描述符；最后一级的各个步骤都用同一个父目录描述符。不跨调用保留描述符，只有 `open_file` 和 `open_dir` 最后一级打开的那个描述符转交给返回值（见「数据流与线程」）。
 
 1. 中间的每一级：`openat(dir, 名字, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`，Linux 加 `O_PATH`（只需要目录的搜索权限，与 `lstat` 相同），macOS 用 `O_RDONLY`。
    - `ENOENT`：`NotFound`。
@@ -302,7 +303,14 @@ pub enum FileKind {
 - `file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）：首屏、完整读取和超过 16 MiB 的文件的分页经 `open_file` 与 `OpenFile`，见「范围读取」的「对其他 crate 的影响」。
 - Analyze 快照（#66）：在本 crate 内复用同一套打开逻辑（`pub(crate)` 的一步打开和 `Walk`），叠加工作区文件时从根描述符打开、对同一个描述符判断类型后克隆，设计随 #66。
 
-线程：`SafeRoot` 只有一个 `OwnedFd` 和一个创建后不变的实现选择，二者都是 `Send + Sync`；所有操作都是以描述符为起点的 `*at` 系统调用，不改当前目录，不用根描述符的文件偏移，不读环境变量，没有进程级的缓存或锁，所以多个线程可以同时调用同一个 `SafeRoot`。每次调用自己打开和关闭需要的描述符（最多两个），调用之间不持有。
+线程：`SafeRoot` 只有一个 `OwnedFd` 和一个创建后不变的实现选择，二者都是 `Send + Sync`；所有操作都是以描述符为起点的 `*at` 系统调用，不改当前目录，不用根描述符的文件偏移，不读环境变量，没有进程级的缓存或锁，所以多个线程可以同时调用同一个 `SafeRoot`。
+
+描述符的生命周期：除 `open_file` 和 `open_dir` 之外，每次调用自己打开和关闭需要的描述符（最多两个），返回之前全部关闭，调用之间不持有。两个例外都把调用里打开的最后一个描述符转交给返回值，由返回值独占：
+
+- `open_dir`：目录描述符转交给返回的 `SafeRoot`，与 `SafeRoot::open` 打开的根一样，在这个 `SafeRoot` drop 时关闭。
+- `open_file`：结果为 `Opened::File` 时，普通文件的描述符转交给 `OpenFile`。`OpenFile` 只持有这一个描述符（带 `O_CLOEXEC`，子进程不继承），`read_ranges`、`read_all`、`stat` 都在它上面进行、不再打开别的描述符，drop 时关闭。`Opened::Symlink`、`Opened::Unsupported` 和错误返回之前关闭全部描述符，与 `read` 相同。`file_reader` 持有 `OpenFile` 的时间见「范围读取」的「对其他 crate 的影响」：不超过 16 MiB 的文件到完整读取结束，超过 16 MiB 的到阅读视图关闭或收到这个路径的 `fs_watch` 事件。
+
+`fd_*` 测试按这条规则计数：存活的 `SafeRoot`（含 `open_dir` 返回的）和 `OpenFile` 各算一个描述符，其余调用返回之后描述符数回到调用之前。
 
 本模块不缓存任何东西：stat 缓存和内容的 OID 缓存在 `git`（架构规则 5 的派生数据由调用方以 blob OID 为键缓存）。
 
@@ -311,7 +319,7 @@ pub enum FileKind {
 | 预算 | 本模块的份额 |
 |---|---|
 | 冷启动 20 ms（[ADR 0017](../adr/0017.md)） | 首帧之前不调用；`SafeRoot::open` 在 `git` 的后台任务里 |
-| 空闲内存 | 每个 `SafeRoot` 一个描述符，没有缓存；一次 `read` 的内存是文件本身（不超过 `max`） |
+| 空闲内存 | 每个存活的 `SafeRoot` 和 `OpenFile` 各一个描述符，没有缓存；一次 `read` 的内存是文件本身（不超过 `max`），`read_ranges` 不超过 `MAX_RANGE_BYTES` |
 | 打开文件到首屏高亮 < 16 ms | 首屏的范围读取中位数 < 200 µs，见「范围读取」的「性能」 |
 | 打开一个会话的 Diff < 50 ms | `git` 的 `changes` 对全部跟踪文件 `stat`：728 个文件的 `stat` 合计 < 5 ms（M 系列 Mac） |
 | 安装包 ≤ 80 MB（[ADR 0018](../adr/0018.md)） | rustix 已在发布构建里（经 GPUI），不新增 crate；本模块的代码在几十 KB 量级 |
@@ -323,6 +331,7 @@ pub enum FileKind {
 基准：
 
 - `bench` 的 `platform/safe_stat`、`platform/safe_read_4k`（[bench 设计「迁移」](bench.md#迁移)）：bench 自己生成 728 个 4 KiB 文件、深度 4 的目录树，与同一路径上的 `symlink_metadata`、`std::fs::read` 交替采样，按上面的比值判定；只测 `SafeRoot::open` 选中的生产后端（macOS 上是 `NofollowAny`，Linux 上是 `Openat2`），`Walk` 不设基准。`git` 的 `git/changes_clean` 包含它们的成本。
+- `platform/safe_read_range`、`platform/safe_read_page`：范围读取的首屏调用和分页，预算与测量方式见「范围读取」的「性能」。在 `crates/bench/src/budgets.rs` 里登记为 `Planned("#103")`，范围读取的实现 PR 加上基准并改为 `Active`。
 - 实现 PR 里的 `#[ignore]` 测试 `perf_smoke`（对每个后端各做 10 000 次 `stat`、`read` 并打印比值）已由 bench 第 1 步删除，它在 Linux 上的结果见「实际验证」。
 
 ## 状态与异常
@@ -369,7 +378,7 @@ pub enum FileKind {
 - `race_swap_never_escapes`：一个线程反复在「目录 `a`」和「指向根目录之外、含同名文件的目录的符号链接 `a`」之间交换，另一个线程读 10 000 次 `a/secret`；每次结果只能是根目录之内的内容、`NotFound` 或 `PathThroughSymlink`，从不出现根目录之外那份文件的内容。
 - `list_*`：根目录和子目录的名字与类型（普通文件、目录、符号链接、FIFO、socket），同一个根连续列两次结果相同；目录本身或中间一级是符号链接为 `PathThroughSymlink`，不存在为 `NotFound`，普通文件为 `Io(NotADirectory)`。`race_list_swap_never_escapes`：目录 `a` 与指向根目录之外的符号链接来回交换时列 5000 次 `a`，结果只能是根目录之内的名字、`NotFound` 或 `PathThroughSymlink`。
 - `open_dir_*`：一级和多级的子目录，从打开的根再打开一层，新根的实现与原来的根相同，读到的内容、元数据和目录项都在子目录之内，原来的根里子目录之外的条目为 `NotFound`；子目录本身或中间一级是符号链接（指向根目录之内的目录和普通文件、根目录之外、悬空）为 `PathThroughSymlink`；普通文件、FIFO、socket 为 `Io(NotADirectory)`，不存在、中间一级是普通文件为 `NotFound`；打开后把原路径换成指向根目录之外的符号链接，新根的 `read`、`stat`、`list`、`open_dir` 仍作用在原来的目录上，按路径再打开为 `PathThroughSymlink`，原来的目录删除后为 `NotFound`；新根之下上面的 `symlink_*` 照样成立，`..`、绝对路径不是 `RelPath`，绕过 `RelPath::new` 直接传入时四个方法都在系统调用之前返回 `Io(InvalidInput)`。`race_open_dir_swap_never_escapes`：目录 `a` 与指向根目录之外的符号链接来回交换时打开 5000 次 `a` 并经新根读 `secret`，结果只能是根目录之内的内容、`NotFound` 或 `PathThroughSymlink`；交换开始之前打开的新根每次都读到原来的内容。`fd_*` 也覆盖 `open_dir` 和它返回的根。
-- `fd_*`：反复调用（含各种出错路径）之后，进程打开的描述符数不变（Linux 读 `/proc/self/fd`，macOS 读 `/dev/fd`）；`SafeRoot` 的描述符设了 `FD_CLOEXEC`。
+- `fd_*`：反复调用（含各种出错路径）之后，进程打开的描述符数不变（Linux 读 `/proc/self/fd`，macOS 读 `/dev/fd`）；存活的 `SafeRoot` 和 `OpenFile` 按「数据流与线程」的描述符生命周期各计一个，drop 之后数目回落；`SafeRoot` 的描述符设了 `FD_CLOEXEC`。
 - `send_sync`：编译期断言 `SafeRoot`、`RelPath`、`Meta`、`Read`、`SafeError` 是 `Send + Sync`；8 个线程同时对同一个 `SafeRoot` 调用 `stat` 和 `read`，结果与单线程相同。
 - `walk_*`：`Walk` 的判定在一步打开失败的每种情况下（中间是符号链接、中间是普通文件、最后一级是符号链接、socket、路径超过 `PATH_MAX`）与上表一致。
 
@@ -529,7 +538,7 @@ impl Meta {
 
 `read_all` 按「读取上限」的规则读取，区别有三处：用 `pread` 从偏移 0 开始（不依赖描述符的文件偏移，所以可以从多个线程同时调用）；`size > max` 的判断用 `OpenFile::meta()`；读完之后 `fstat` 一次。
 
-描述符：`open_file` 的打开标志与 `read` 相同（`O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`，macOS 用 `O_NOFOLLOW_ANY`），所以 FIFO 不阻塞，子进程不继承（ADR 0019）。`O_NONBLOCK` 留在描述符上，对普通文件的 `pread` 没有影响：Linux 和 macOS 上普通文件的读取忽略这个标志。`rustix::io::pread` 不需要另开 feature，依赖不变。
+描述符：`open_file` 的打开标志与 `read` 相同（`O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC`，macOS 用 `O_NOFOLLOW_ANY`），所以 FIFO 不阻塞，子进程不继承（ADR 0019）。普通文件的这个描述符是本模块里唯一在返回之后仍然打开的文件描述符（`open_dir` 转交的是目录描述符）：`OpenFile` 独占它，drop 时关闭，`OpenFile` 上的读取不再打开别的描述符。`O_NONBLOCK` 留在描述符上，对普通文件的 `pread` 没有影响：Linux 和 macOS 上普通文件的读取忽略这个标志。`rustix::io::pread` 不需要另开 feature，依赖不变。
 
 系统调用数：`open_file` 对普通文件是 1 次打开、1 次 `fstat`（与 `read` 相同，与深度无关，`Walk` 后备除外）；`read_ranges` 是每段 1 次 `pread`（短读时多几次）加 1 次 `fstat`；drop 时 1 次关闭。
 
@@ -537,26 +546,32 @@ impl Meta {
 
 - `MAX_RANGES = 4`、`MAX_RANGE_BYTES = 1 MiB`：一次调用的内存和耗时都有上限，范围读取不能代替 `read_all` 绕过 `max`。首屏约 140 KiB、按行检查点定位约 204 KiB（见下两节）、分页的 64 KiB 页都在其内；后台按顺序扫描超过 16 MiB 的文件时每次读 1 MiB。
 - 区间的终点不超过 `i64::MAX`。
-- `OpenFile` 的个数和持有时间不由本模块限制：每个占一个描述符，持有多久由调用方决定（见「对其他 crate 的影响」）。
+- `OpenFile` 的个数和持有时间不由本模块限制：每个独占一个描述符，drop 时关闭（「数据流与线程」的描述符生命周期）；`file_reader` 的持有时间见「对其他 crate 的影响」，同时存活的 `OpenFile` 不超过打开着的阅读视图数。
 
 ### 首屏的一次调用
 
-首屏是 `open_file` 加一次 `read_ranges`，两个区间（`t` 是目标的字节偏移，截到打开时的 `size`；目标在文件开头时为 0）：
+首屏是 `open_file` 加一次 `read_ranges`，两个区间。`size` 是 `OpenFile::meta().size`，`t` 是目标的字节偏移先截到 `size`（`t = t.min(size)`；目标在文件开头时为 0，这是最常见的初始视图）：
 
 | 区间 | 用途（ADR 0034「首屏路径的准备工作」） |
 |---|---|
-| `0 .. 8 KiB` | 编码、BOM 和二进制的判断只看文件头 8 KiB 和窗口 |
-| `t − 64 KiB .. t + 68 KiB` | 安全位置只在目标之前至多 64 KiB 里找；目标所在的行首从目标往前至多 4 KiB；可见部分从行首往后至多 64 KiB；窗口到可见部分之后 4 KiB 结束 |
+| `0 .. min(8 KiB, size)` | 编码、BOM 和二进制的判断只看文件头 8 KiB 和窗口 |
+| `t.saturating_sub(64 KiB) .. min(t + 68 KiB, size)` | 安全位置只在目标之前至多 64 KiB 里找；目标所在的行首从目标往前至多 4 KiB；可见部分从行首往后至多 64 KiB；窗口到可见部分之后 4 KiB 结束 |
 
-合计约 140 KiB；`t` 在 72 KiB 之内时两个区间相邻或重叠，合并为一次 `pread`。区间的确切常量由 `file_reader` 的设计决定，本模块只要求一次调用不超过 `MAX_RANGE_BYTES`。首屏需要的字节超出这两段时（如 64 KiB 内找不到安全位置），按 ADR 0034 首屏先画纯文本，后台再算，不扩大这次读取。
+截取规则，适用于本节和下一节的每个区间：
+
+- 下界一律用 `saturating_sub`，截到 0。`t < 64 KiB`（包括 `t = 0`）时普通的 `u64` 减法会下溢；截到 0 之后窗口从文件开头开始，`read_ranges` 收到的仍是合法区间（`start <= end`）。
+- 上界一律截到 `size`。EOF 处的短读本来也会把各段截短，截到 `size` 是为了让请求的长度就是实际要读的长度，`MAX_RANGE_BYTES` 按截过的长度计算；打开之后变长的部分不在请求里，变长会让身份不同（「文件身份」）。`t <= size <= i64::MAX`，所以 `t + 68 KiB` 不会溢出，截过的终点也满足 `end <= i64::MAX`。
+- 先截取、再交给 `read_ranges`，由它按「读取的规则」第 2 步合并重叠或相邻的区间。`t <= 72 KiB` 时窗口的起点不大于 8 KiB，与文件头相邻或重叠，两个区间合并为一次 `pread`；`t < 64 KiB` 时窗口从 0 开始，文件头整个落在窗口里；文件小于 8 KiB 时两段都是整个文件。
+
+合计约 140 KiB，截取之后只会更少。区间的确切常量由 `file_reader` 的设计决定，本模块只要求一次调用不超过 `MAX_RANGE_BYTES`，并要求 `file_reader` 的设计按上面的截取规则写出区间。首屏需要的字节超出这两段时（如 64 KiB 内找不到安全位置），按 ADR 0034 首屏先画纯文本，后台再算，不扩大这次读取。
 
 ### 按行定位
 
 决定：本模块只按字节偏移读取，不建行索引，也不提供「找第 N 行」。超出读取范围的行号由 `file_reader` 的领域库按 ADR 0034 的行检查点或完整读取解决：
 
 - 知道偏移的一方给出偏移（`code_intel` 的 `Location.byte`，`git` 的 hunk 与展示行的 `*_byte`，保存的阅读位置），首屏直接按偏移读取，不需要行号。
-- 只有行号时，查 `syntax.lines` 里按 blob OID 缓存的行检查点（[cache 设计「命名空间」](cache.md#命名空间)，每 64 KiB 一个）。检查点 `c` 是目标行之前最近的那个，目标行在 `c` 之后 64 KiB 之内，所以一次 `read_ranges` 读文件头和 `c − 64 KiB .. c + 132 KiB`（合计约 204 KiB），数换行得到目标的偏移，窗口也在这一段里，不需要第二次读取。
-- 没有检查点时：不超过 16 MiB 的文件，后台的 `read_all` 之后建行索引、写检查点；超过 16 MiB 的文件，后台以 1 MiB 的 `read_ranges` 顺序扫描整个文件、写检查点。在那之前首屏显示文件开头，扫描到那一行后再滚过去，这种情况不在 16 ms 的保证内（ADR 0034「预算」）。
+- 只有行号时，查 `syntax.lines` 里按 blob OID 缓存的行检查点（[cache 设计「命名空间」](cache.md#命名空间)，每 64 KiB 一个）。检查点 `c` 是目标行之前最近的那个，目标行在 `c` 之后 64 KiB 之内，所以一次 `read_ranges` 读文件头 `0 .. min(8 KiB, size)` 和 `c.saturating_sub(64 KiB) .. min(c + 132 KiB, size)`（合计约 204 KiB，按上一节的截取规则截到 0 和 `size`；`c = 0` 即第一个检查点时下界为 0，与文件头合并），数换行得到目标的偏移，窗口也在这一段里，不需要第二次读取。
+- 没有检查点时：不超过 16 MiB 的文件，后台的 `read_all` 之后建行索引、写检查点；超过 16 MiB 的文件，后台以 1 MiB 的 `read_ranges`（第 k 次读 `k × 1 MiB .. min((k + 1) × 1 MiB, size)`）顺序扫描整个文件、写检查点。在那之前首屏显示文件开头，扫描到那一行后再滚过去，这种情况不在 16 ms 的保证内（ADR 0034「预算」）。
 
 不放在本模块的原因：数换行是对内容的计算；行检查点是以 blob OID 为键的派生数据，按架构规则 5 由领域层缓存。本模块按路径和描述符工作，不知道 OID，在这里建行索引只能按路径缓存或每次从头扫描，后者正是 ADR 0034 要避免的。
 
@@ -570,7 +585,7 @@ impl Meta {
   - 工作区文件的 OID：查行检查点要先知道 OID。`OpenFile::meta()` 是完整的 `Meta`，可以按 git 的 stat 比较规则与 index 条目比较（一致且不是 racy-clean 时就是 index 里的 OID）；需要的接口由 `file_reader` 的设计向 `git` 提出。
   - 取得 `SafeRoot` 的途径（经 `git` 的 `Worktree`，或 `project`）由 `file_reader` 的设计决定。
 - `git`：不改，`read` 的行为不变。`file_reader` 经 `Worktree` 打开文件时，`git` 增加一个转发 `open_file` 的方法，随 `file_reader` 的设计。
-- `bench`：预算表增加 `platform/safe_read_range`、`platform/safe_read_page`（本 PR 已加，见下文「性能」）。
+- `bench`：预算表增加 `platform/safe_read_range`、`platform/safe_read_page`，[bench 设计「预算表」](bench.md#预算表)和 `crates/bench/src/budgets.rs`（`Planned("#103")`）里都已加上（本 PR），实现 PR 加基准并改为 `Active`，见下文「性能」。
 - [技术调研「性能预算」](tech-research.md#性能预算)「打开文件到首屏高亮」一行的「`platform` 待补的接口」改为指向本节（本 PR 已改）。
 - `code_intel`、`cache`、`fs_watch`：不改。
 
@@ -587,7 +602,7 @@ impl Meta {
 
 基准（M 系列 Mac，macOS 13 及以上，路径深度 4，64 MiB 的文件，页缓存已热，只测 `SafeRoot::open` 选中的生产后端）：
 
-- `platform/safe_read_range`：目标在文件中部，`open_file`、`read_ranges([0 .. 8 KiB, t − 64 KiB .. t + 68 KiB])`、drop；中位数不超过同一路径上 `File::open`、`metadata`、两次 `FileExt::read_at`、`metadata` 的 1.5 倍，且 < 200 µs。
+- `platform/safe_read_range`：目标在文件中部，`open_file`、按「首屏的一次调用」截取的 `read_ranges([0 .. 8 KiB, t.saturating_sub(64 KiB) .. min(t + 68 KiB, size)])`、drop（`t` 在中部，截取不起作用，两段不合并）；中位数不超过同一路径上 `File::open`、`metadata`、两次 `FileExt::read_at`、`metadata` 的 1.5 倍，且 < 200 µs。
 - `platform/safe_read_page`：同一个 `OpenFile` 上依次读 64 KiB 的页；中位数不超过 `std::fs::File` 上 `read_at` 加 `metadata` 的 1.5 倍，且 < 50 µs。
 
 ### 已知限制
@@ -603,11 +618,11 @@ impl Meta {
 
 - `open_file_*`：普通文件为 `Opened::File`，`meta()` 与 `SafeRoot::stat` 一致，1 TiB 的稀疏文件也立即返回（不读、不分配）；最后一级是符号链接为 `Symlink`，`target` 与 `std::fs::read_link` 相同；中间一级是符号链接为 `PathThroughSymlink`；目录、FIFO（单独的线程里调用，2 秒内返回）、socket、以 `/dev` 为根的 `null` 为 `Unsupported`；不存在、中间一级是普通文件为 `NotFound`。在 `read_*`、`symlink_*` 用到的同一组路径上，结果的分类与 `read` 逐一对应。`open_file_on_open_dir_root`：在 `open_dir` 返回的根上，上面这些情况的结果相同；打开新根之后把原路径换成指向根目录之外的符号链接，`open_file` 读到的仍是原来目录里的文件。
 - `race_open_file_never_escapes`：同 `race_swap_never_escapes`，每次用 `open_file` 加 `read_ranges` 读 `a/secret`，10 000 次里只出现根目录之内的内容、`NotFound` 或 `PathThroughSymlink`。
-- `range_*`：随机内容的文件上，各段等于文件的对应切片；跨过 EOF 的段在 EOF 处截止；起点在 EOF 或之后的段为空；空区间为空；重叠、相邻、乱序的区间结果正确；1 TiB 稀疏文件末尾附近的区间读出 0。0 个或 5 个区间、`end < start`、`end > i64::MAX`、长度之和超过 1 MiB 为 `InvalidInput`。`range_plan_*`：合并区间的纯函数把重叠和相邻的区间合成一段（文件头 8 KiB 与 `4 KiB .. 76 KiB` 合成 `0 .. 76 KiB`），不相邻的保持两段。
+- `range_*`：随机内容的文件上，各段等于文件的对应切片；跨过 EOF 的段在 EOF 处截止；起点在 EOF 或之后的段为空；空区间为空；重叠、相邻、乱序的区间结果正确；1 TiB 稀疏文件末尾附近的区间读出 0。0 个或 5 个区间、`end < start`、`end > i64::MAX`、长度之和超过 1 MiB 为 `InvalidInput`。`range_plan_*`：合并区间的纯函数把重叠和相邻的区间合成一段（文件头 8 KiB 与 `4 KiB .. 76 KiB` 合成 `0 .. 76 KiB`），不相邻的保持两段。`range_first_screen_at_file_start`：按「首屏的一次调用」的截取规则，`t = 0`、`t = 10 KiB`、`t = 72 KiB` 时窗口的下界截到 0 或不大于 8 KiB，两段合并为一次读取，各段内容正确；`t = 73 KiB` 时为两段；文件小于 8 KiB 和空文件时两段都是整个文件或为空，不报错。
 - `identity_*`：没有变化时 `read_ranges`、`read_all`、`stat` 返回的身份都等于 `identity()`；追加、截短（段变短、`size` 变小）、大小不变的改写之后再用 `utimensat` 把 `mtime` 改回原值（`ctime` 仍不同），身份都不同。改写之前测试先轮询到系统的粗粒度时钟前进（至多 1 秒），避开同一个 tick。路径被 `rename` 覆盖之后，原来的 `OpenFile` 读到的仍是原内容，`SafeRoot::stat(rel)` 的 `identity()` 里 `ino` 不同；删除路径之后原来的 `OpenFile` 照常读取。
 - `read_all_*`：小文件、空文件、恰好 `max` 字节、`max + 1` 字节、读取中变长的结果与 `read` 相同；打开时就超过 `max` 的为 `TooLarge`，不读内容；`meta` 是读完之后的 `fstat`。
 - `open_file_concurrent`：8 个线程在同一个 `Arc<OpenFile>` 上各读 1000 次不同的区间，结果与单线程相同。
-- `fd_*`、`send_sync` 补充：反复 `open_file`（含每种类型和出错路径）并 drop 之后，进程打开的描述符数不变；`OpenFile` 的描述符设了 `FD_CLOEXEC`；`OpenFile`、`Opened`、`RangeRead`、`FullRead`、`FileIdentity` 是 `Send + Sync`。
+- `fd_*`、`send_sync` 补充：持有 n 个 `OpenFile` 时进程打开的描述符数比之前多 n，在它们上面反复 `read_ranges`、`read_all`、`stat` 不再增加，全部 drop 之后回到之前；`open_file` 得到 `Symlink`、`Unsupported` 或错误时（含每种类型和出错路径）返回之后描述符数不变；`OpenFile` 的描述符设了 `FD_CLOEXEC`；`OpenFile`、`Opened`、`RangeRead`、`FullRead`、`FileIdentity` 是 `Send + Sync`。
 
 ## 进程
 
@@ -644,10 +659,10 @@ pub mod process {
 
 范围读取（[#103](https://github.com/SoloJiang/lectern-app/issues/103)）一个实现 PR，写 `Closes #103`，在 `file_reader`（#10）的实现之前合并：
 
-- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有 `open_file_*`（含 `open_file_on_open_dir_root`）、`race_open_file_never_escapes`、`range_*`、`range_plan_*`、`identity_*`、`read_all_*`、`open_file_concurrent`，`fd_*`、`send_sync` 覆盖新增的类型；原有的 `read_*`、`symlink_*`、`race_*` 结果不变。
+- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有 `open_file_*`（含 `open_file_on_open_dir_root`）、`race_open_file_never_escapes`、`range_*`（含 `range_first_screen_at_file_start`）、`range_plan_*`、`identity_*`、`read_all_*`、`open_file_concurrent`，`fd_*`、`send_sync` 覆盖新增的类型；原有的 `read_*`、`symlink_*`、`race_*` 结果不变。
 - `rg -n 'mmap' crates/platform/src` 没有结果；`rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`。
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果（`pread` 来自已有的 `rustix`）。
-- `platform/safe_read_range`、`platform/safe_read_page` 的基准加在 `crates/bench/benches/time/platform.rs`，`crates/bench/src/budgets.rs` 里的这两条为 `Active`（[bench 设计「预算表」](bench.md#预算表)）；macOS CI 的 `just bench platform/` 在「范围读取」的「性能」预算之内，数字写进「实际验证」。
+- `platform/safe_read_range`、`platform/safe_read_page` 的基准加在 `crates/bench/benches/time/platform.rs`，`crates/bench/src/budgets.rs` 里的这两条由 `Planned("#103")` 改为 `Active`（[bench 设计「预算表」](bench.md#预算表)）；macOS CI 的 `just bench platform/` 在「范围读取」的「性能」预算之内，数字写进「实际验证」。
 - 本文的状态行改为已实现并附 PR 编号，填写「实际验证」和「与设计的差异」。
 
 ## 实际验证
