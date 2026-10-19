@@ -464,3 +464,67 @@ fn runner_process_target_is_skipped_off_macos() {
     assert_eq!(x.reason.as_deref(), Some("只在 macOS 运行"));
     assert_eq!(status(&run, "app/later").status, Status::Planned);
 }
+
+static TWO: &[Budget] = &[
+    budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
+    budget("fake/b", UNDER_1_MS, State::Active, Target::Time),
+];
+
+#[test]
+fn runner_shares_fixtures_across_benches_and_retries() {
+    static BUILDS: AtomicUsize = AtomicUsize::new(0);
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    struct Fixture(u64);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            DROPS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    fn fixture(ctx: &Ctx) -> Result<std::rc::Rc<Fixture>, BenchError> {
+        ctx.shared("fake::fixture", || {
+            BUILDS.fetch_add(1, Ordering::SeqCst);
+            Ok(Fixture(2))
+        })
+    }
+    fn over(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        // Over budget both times: retried once with the same fixture.
+        Ok(vec![Measured::new("fake/a", time(fixture(ctx)?.0))])
+    }
+    fn within(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        assert_eq!(fixture(ctx)?.0, 2);
+        assert!(
+            ctx.shared("fake::fixture", || Ok(1u8)).is_err(),
+            "another type"
+        );
+        Ok(vec![Measured::new("fake/b", time(0))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [
+        Bench {
+            id: "fake/a",
+            run: over,
+        },
+        Bench {
+            id: "fake/b",
+            run: within,
+        },
+    ];
+    let run = run(
+        &options(TWO, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    assert_eq!(run.exit, 1, "{}", run.text);
+    assert_eq!(BUILDS.load(Ordering::SeqCst), 1, "built once");
+    assert_eq!(DROPS.load(Ordering::SeqCst), 1, "dropped when the run ends");
+    let report = run.report.as_ref().unwrap();
+    let times: Vec<(&str, u32)> = report
+        .benches
+        .iter()
+        .map(|b| (b.id.as_str(), b.attempts))
+        .collect();
+    assert_eq!(times, [("fake/a", 2), ("fake/b", 1)]);
+    assert!(report.benches.iter().all(|b| b.seconds >= 0.0));
+    let json = report.to_json();
+    assert_eq!(json["benches"][0]["id"], "fake/a");
+    assert_eq!(json["benches"][0]["attempts"], 2);
+}

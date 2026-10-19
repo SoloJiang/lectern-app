@@ -112,6 +112,17 @@ pub(crate) struct Report<'a> {
     /// that ran, by which the merge expands `plugin/*` and `lsp/*`.
     pub plugins: Vec<String>,
     pub language_servers: Vec<String>,
+    /// How long each benchmark that ran took, fixtures and retries included.
+    pub benches: Vec<BenchTime>,
+}
+
+/// The wall time of one benchmark's run: every attempt, from creating its
+/// scratch directory to removing it, so fixture generation counts.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BenchTime {
+    pub id: String,
+    pub seconds: f64,
+    pub attempts: u32,
 }
 
 impl Report<'_> {
@@ -132,6 +143,14 @@ impl Report<'_> {
             Json::Array(self.entries.iter().map(entry_json).collect()),
         );
         out.insert("errors".into(), json!(self.errors));
+        if !self.benches.is_empty() {
+            let benches = self
+                .benches
+                .iter()
+                .map(|b| json!({ "id": b.id, "seconds": b.seconds, "attempts": b.attempts }))
+                .collect();
+            out.insert("benches".into(), Json::Array(benches));
+        }
         sorted(Json::Object(out))
     }
 }

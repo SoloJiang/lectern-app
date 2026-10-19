@@ -361,10 +361,10 @@ fn changes_capped(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 }
 
 /// The large repository (`worktree::large`, 100 000 tracked files) for the
-/// `git/*_100k` benchmarks; a few thousand files in smoke mode.
-fn large(ctx: &Ctx) -> TestRepo {
-    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
-    worktree::large(files, manifests)
+/// `git/*_100k` benchmarks, shared by them; a few thousand files in smoke
+/// mode.
+fn large(ctx: &Ctx) -> Result<std::rc::Rc<TestRepo>, BenchError> {
+    worktree::large_shared(ctx)
 }
 
 /// `git/open` on the large repository: what opening it reads from git
@@ -377,7 +377,7 @@ pub const OPEN_100K: Bench = Bench {
 };
 
 fn open_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let t = large(ctx);
+    let t = large(ctx)?;
     let files = ctx.scale(100_000, 2_000);
     let cancel = AtomicBool::new(false);
     let counts = open(t.root(), &cancel)?;
@@ -453,13 +453,14 @@ pub const FILTER_100K: Bench = Bench {
 };
 
 fn filter_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let t = large(ctx);
+    let t = large(ctx)?;
     let root = lectern_platform::SafeRoot::open(t.root())?;
     let mut out = Vec::new();
     if walk(&root)? < large_paths(ctx).len() {
         return Err(BenchError::new("the walk missed files"));
     }
-    let time = ctx.time(|| walk(black_box(&root)));
+    // Record-only diagnostic: one sample, warmed by the check above.
+    let time = ctx.once(|| walk(black_box(&root)));
     out.push(Measured::new("git/filter_100k/walk", Value::Time(time)));
     if active("git/filter_100k") {
         out.push(filter_100k_full(ctx, &t)?);
@@ -517,7 +518,7 @@ pub const CHANGES_CLEAN_100K: Bench = Bench {
 };
 
 fn changes_clean_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let t = large(ctx);
+    let t = large(ctx)?;
     let paths = large_paths(ctx);
     let root = lectern_platform::SafeRoot::open(t.root())?;
     let stat_all = || -> Result<(), BenchError> {
@@ -562,7 +563,8 @@ fn changes_clean_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     stat_all()?;
     out.push(Measured::new(
         "git/changes_clean_100k/stat_all",
-        Value::Time(ctx.time(stat_all)),
+        // Record-only diagnostic: one sample, warmed by the call above.
+        Value::Time(ctx.once(stat_all)),
     ));
     if active("git/changes_clean_100k") {
         out.push(changes_clean_100k_full(ctx, &t)?);

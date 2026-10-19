@@ -5,10 +5,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::budgets::{Budget, State, Target, is_prefix, lookup};
-use crate::ctx::{Ctx, SampleConfig};
-use crate::report::{self, Entry, Host, Report, Status};
+use crate::ctx::{Ctx, Fixtures, SampleConfig};
+use crate::report::{self, BenchTime, Entry, Host, Report, Status};
 use crate::stats::evaluate;
 use crate::{Bench, Measured, Mode, Value};
 
@@ -92,6 +93,7 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         errors: Vec::new(),
         plugins: Vec::new(),
         language_servers: Vec::new(),
+        benches: Vec::new(),
     };
 
     // Entries that need no run: filtered, then planned.
@@ -146,6 +148,8 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
 
     let mut order: Vec<&Bench> = benches.iter().collect();
     order.sort_by_key(|b| b.id);
+    // Shared fixtures live until every benchmark of the target has run.
+    let fixtures = Fixtures::default();
     for bench in order {
         let wanted: Vec<&'a Budget> = pending
             .iter()
@@ -155,8 +159,23 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         if wanted.is_empty() {
             continue;
         }
-        run_bench(options, &args, gated, bench, &wanted, &mut report);
+        let started = Instant::now();
+        let attempts = run_bench(
+            options,
+            &args,
+            gated,
+            bench,
+            &wanted,
+            &fixtures,
+            &mut report,
+        );
+        report.benches.push(BenchTime {
+            id: bench.id.to_owned(),
+            seconds: started.elapsed().as_secs_f64(),
+            attempts,
+        });
     }
+    drop(fixtures);
     // Keep the table's order.
     let position = |id: &str| {
         own.iter()
@@ -199,16 +218,18 @@ fn correspondence(own: &[&Budget], benches: &[Bench]) -> (BTreeSet<&'static str>
 }
 
 /// Runs `bench` once (twice when gated and something is over budget) and
-/// adds an entry for each budget it should produce.
+/// adds an entry for each budget it should produce. Returns how many
+/// attempts ran.
 fn run_bench<'a>(
     options: &Options<'a>,
     args: &Args,
     gated: bool,
     bench: &Bench,
     wanted: &[&'a Budget],
+    fixtures: &Fixtures,
     report: &mut Report<'a>,
-) {
-    let first = match attempt(options, args.mode, bench) {
+) -> u32 {
+    let first = match attempt(options, args.mode, bench, fixtures) {
         Ok(results) => results,
         Err(message) => {
             for budget in wanted {
@@ -216,15 +237,16 @@ fn run_bench<'a>(
                     .entries
                     .push(Entry::new(budget, Status::Error, Some(message.clone())));
             }
-            return;
+            return 1;
         }
     };
     let mut entries = collect(options, args, bench, wanted, first, report);
     for entry in &mut entries {
         judge(entry, args.mode);
     }
-    if gated && entries.iter().any(|e| e.status == Status::Over) {
-        match attempt(options, args.mode, bench) {
+    let retry = gated && entries.iter().any(|e| e.status == Status::Over);
+    if retry {
+        match attempt(options, args.mode, bench, fixtures) {
             Ok(results) => {
                 let mut again: BTreeMap<String, Value> =
                     results.into_iter().map(|m| (m.id, m.value)).collect();
@@ -250,6 +272,7 @@ fn run_bench<'a>(
         }
     }
     report.entries.extend(entries);
+    1 + u32::from(retry)
 }
 
 /// Matches one attempt's results with the budgets. Unknown, duplicate or
@@ -359,14 +382,19 @@ fn judge(entry: &mut Entry<'_>, mode: Mode) {
     };
 }
 
-/// One run of `bench` in a fresh scratch directory. A returned error or a
-/// panic is `Err`.
-fn attempt(options: &Options<'_>, mode: Mode, bench: &Bench) -> Result<Vec<Measured>, String> {
+/// One run of `bench` in a fresh scratch directory (shared fixtures are
+/// reused). A returned error or a panic is `Err`.
+fn attempt(
+    options: &Options<'_>,
+    mode: Mode,
+    bench: &Bench,
+    fixtures: &Fixtures,
+) -> Result<Vec<Measured>, String> {
     let scratch = options.scratch_root.join(bench.id);
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)
         .map_err(|e| format!("建不了临时目录 {}：{e}", scratch.display()))?;
-    let mut ctx = Ctx::new(mode, options.config, scratch.clone());
+    let mut ctx = Ctx::new(mode, options.config, scratch.clone(), fixtures.clone());
     let outcome = catch_unwind(AssertUnwindSafe(|| (bench.run)(&mut ctx)));
     let _ = std::fs::remove_dir_all(&scratch);
     match outcome {

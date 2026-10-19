@@ -1,24 +1,29 @@
 # CI 与约束检查
 
-状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。
+状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。macOS 的基准拆成单独的任务（[ADR 0036](../adr/0036.md)），见「任务」「实际验证」。
 
 对应 issue [#4](https://github.com/SoloJiang/lectern-app/issues/4)。规则以脚本执行，违反时构建立即失败（[技术调研](tech-research.md)「约束检查」）。
 
-## 两个任务
+## 任务
 
-| 任务 | Runner | 内容 | 分开的原因 |
+| 任务（检查名） | Runner | 内容 | 分开的原因 |
 |---|---|---|---|
-| Checks | `ubuntu-latest` | 格式、架构规则、cargo-deny、不依赖 GPUI 的 crate 的 clippy 与测试 | 不编译 GPUI，几十秒出结果；agent 改领域逻辑时先看这个任务 |
-| macOS | `macos-15`（Apple Silicon） | 整个工作区的 clippy、测试、构建 `lectern` | GPUI 与视图层只能在 macOS 编译 |
+| `Checks (Linux, GPUI-free crates)` | `ubuntu-latest` | 格式、架构规则、cargo-deny、不依赖 GPUI 的 crate 的 clippy 与测试、基准的冒烟运行 | 不编译 GPUI，约 2 分钟出结果；agent 改领域逻辑时先看这个任务 |
+| `Build and test (macOS arm64)` | `macos-15`（Apple Silicon） | 整个工作区的 clippy、测试、doctest、构建 `lectern` | GPUI 与视图层只能在 macOS 编译 |
+| `Benchmarks (macOS arm64)` | `macos-15`（Apple Silicon） | `just bench`：判定性能预算，上传 `report.json` | 与上一个任务并行；基准用 release 构建，与测试的 debug 构建不共用产物（[ADR 0036](../adr/0036.md)） |
 
-两个任务都是必需检查，步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`、`just doctest`、`just bench`），本地和 CI 跑的是同一套命令。`just bench` 在 Linux 上是冒烟运行，在 macOS 上判定预算，之后上传 `target/lectern-bench/report.json`（[bench 设计「`just bench` 与 CI」](bench.md#just-bench-与-ci)）。`RUSTFLAGS=-D warnings`，clippy 警告即失败。clippy 与测试都带 `--all-features`，可选 feature 后的代码也参与编译和测试。
+三个任务都是必需检查，步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`、`just doctest`、`just bench`），本地和 CI 跑的是同一套命令。`just bench` 在 Linux 上是冒烟运行，在 macOS 上判定预算，之后上传 `target/lectern-bench/report.json`（[bench 设计「`just bench` 与 CI」](bench.md#just-bench-与-ci)）。
+
+两个 macOS 任务各用一个 `Swatinem/rust-cache` 的缓存键（`test`、`bench`）：缓存按任务和键区分，debug 与 release 的产物不互相挤占。基准原来是 macOS 任务的最后一步，任务的墙钟时间是测试与基准之和（#129 之后约 13 分钟，其中 setup、check、测试和 doctest 约 4 分钟）；拆开之后取两者中较长的一个。目标：典型 PR 的 macOS 墙钟时间 ≤ 15 分钟。每个基准的耗时写进 `report.json`，最慢的 10 个是 check run 的一条 notice（[bench 设计「报告」](bench.md#报告)），超过目标时据此定位。
+
+检查名就是 GitHub 分支保护里必需检查的名字，改名要同时改分支保护。`Benchmarks (macOS arm64)` 由 ADR 0036 加入，要由仓库管理员加进必需检查；在那之前，基准超标只让这个任务失败，不阻止合并。`RUSTFLAGS=-D warnings`，clippy 警告即失败。clippy 与测试都带 `--all-features`，可选 feature 后的代码也参与编译和测试。
 
 ## 构建配置
 
 - 开发构建：依赖用 `opt-level = 2`（GPUI 在 0 级下慢到不能用），本仓库的 crate 保持 0 级，增量编译快；`debug = "limited"`，`split-debuginfo = "unpacked"`。
 - 发布构建：`lto = "thin"`，`codegen-units = 1`。
 - `just` 不设置编译器 wrapper，开发者自己配置的 `RUSTC_WRAPPER`、`CARGO_BUILD_RUSTC_WRAPPER` 或 `build.rustc-wrapper` 都照常生效。要用 `sccache` 在多个 worktree 间共享编译结果，在 `~/.cargo/config.toml` 里设置 `build.rustc-wrapper = "sccache"`。
-- nextest 不跑 doctest，另有 `just doctest`（`cargo test --doc`），CI 两个任务都跑。
+- nextest 不跑 doctest，另有 `just doctest`（`cargo test --doc`），Linux 任务和 `Build and test (macOS arm64)` 都跑。
 - nextest：默认只完整打印失败的测试；CI 用 `ci` profile，不提前停止，并写出 JUnit 报告（`target/nextest/ci/junit.xml`）。测试失败时，`scripts/ci_annotate_failures.py` 把每个失败的测试和它的输出写成 GitHub 注释（GitHub 每个步骤最多保留 10 条；失败超过 10 个时前 9 个各一条，其余的测试名合成第 10 条），不下载任务日志也能通过 check run 的接口看到失败原因。
 
 ## 架构规则检查
@@ -76,6 +81,12 @@ GPUI 在构建时编译 Metal shader。Xcode 26 起 Metal 工具链需单独下�
 - 删掉某个 crate 的 `[lints] workspace = true` 时，架构检查失败，报错指向本文件。
 - `lectern-doc-check` 的单元测试覆盖行内与引用式链接、带括号和尖括号的路径、查询参数、百分号编码、仓库外的路径、引用块和列表里的标题、setext 标题、缩进与围栏代码块、跨行代码片段、HTML 注释、脚注、重复标题的锚点和锚点大小写；在 README 里临时加一条指向不存在锚点的链接时报错；在 main 和当时打开的各个 PR 分支上都通过。
 - macOS 上的 `just check` 由 CI 的 macOS 任务运行。
+
+macOS 基准拆成单独的任务（[ADR 0036](../adr/0036.md)，`Refs #7`）：
+
+- 依据（jobs 接口，最近 30 次运行）：macOS 任务里 setup、check、测试和 doctest 约 4 分钟，基准一步在 #129 之前 5–6 分钟、之后约 13 分钟，`docs/budget-100k` 分支 13–16 分钟，`impl/code-intel-query` 分支 23–39 分钟；Linux 任务约 2 分钟。
+- `ci.yml` 的语法和两个 macOS 任务的拆分只能由 CI 运行验证，本机没有运行 GitHub Actions。基准一步缩短多少见 [bench 设计「实际验证」](bench.md#实际验证)；拆开之后 macOS 的墙钟时间是两个任务中较长的一个。
+- 没有验证的：分支保护的必需检查要由仓库管理员加上 `Benchmarks (macOS arm64)`。
 
 ## 与设计的差异
 

@@ -1,6 +1,6 @@
 # bench 设计
 
-状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2、4、5 步尚未实现（见「验收」）。
+状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2、4、5 步尚未实现（见「验收」）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。
 
 对应 issue [#7](https://github.com/SoloJiang/lectern-app/issues/7)；安装包体积检查 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 复用本 crate 的运行器和预算表。`bench` 测量[性能预算](tech-research.md#性能预算)、[ADR 0017](../adr/0017.md)、[ADR 0018](../adr/0018.md) 和各 crate 设计文档「性能」一节里的每一项，打印实测值与预算，在 Apple 芯片的 macOS 上超标即以非 0 退出码让 CI 失败。
 
@@ -108,6 +108,10 @@ impl Ctx {
     pub fn compare<R1, R2>(&mut self, subject: impl FnMut() -> R1, baseline: impl FnMut() -> R2) -> (Samples, Samples);
     /// 覆盖本基准的采样配置（慢操作减少样本数等）。
     pub fn config(&mut self, config: SampleConfig);
+    /// 只计时一次调用，不预热：只记录的诊断项（见「平台与噪声」）。
+    pub fn once<R>(&mut self, f: impl FnMut() -> R) -> Samples;
+    /// 本目标进程里按 `key` 共享的只读夹具：第一次调用 `build`，之后的基准和重跑拿到同一份（见「夹具与 `test-support`」）。
+    pub fn shared<T: 'static>(&self, key: &str, build: impl FnOnce() -> Result<T, BenchError>) -> Result<Rc<T>, BenchError>;
 }
 
 /// `memory` 基准目标的全局分配器：包装 `System`，用两个 `AtomicUsize` 记录存活字节与峰值。
@@ -437,6 +441,7 @@ crates/bench/
 - `lsp/*/resident` 按 `report-process.json` 记录的语言服务器列表（这次运行里 `Child { kind: LanguageServer }` 报告过的 ID）展开，规则与下面的插件列表相同；没有语言服务器运行时列表为空，`lsp/*/resident` 本身出现一次，状态是 `skipped`（原因「没有运行的语言服务器」）、`planned` 或 `filtered`。
 - 带 `*` 的预算先展开再检查：`report-process.json` 记录这次运行的插件列表（`app/idle_empty` 的 `Plugins` 应答，不含 `bench-probe`），合并工具把 `plugin/*/activate` 展开成列表里每个插件的 `plugin/<id>/activate`（已有具体条目的插件用具体条目），每个展开后的 ID 恰好出现一次。插件列表为空时（Linux、`app` 尚未接入、进程级基准被过滤或跳过），带 `*` 的条目本身出现一次，状态是 `planned`、`skipped` 或 `filtered`；插件列表不为空时，带 `*` 的条目本身不应出现。进程级目标自己的对应检查用同一套展开规则。
 - 合并成 `target/lectern-bench/report.json`；设置了 `GITHUB_STEP_SUMMARY` 时追加一张 Markdown 表。在 GitHub Actions 里（`GITHUB_ACTIONS=true`）另为每条 `over` / `error` 的结果和每条报告级错误输出一条 `::error` 注释（每个步骤最多 10 条，超出的合成最后一条），不下载任务日志也能从 check run 的注释看到是哪条预算没过。同一环境下，状态为 `record` 的结果输出为 `::notice` 注释，按 ID 的第一段分组，每组一条：标题是 `<组> record`（如 `git record`），正文每行一条结果 `<ID>: <实测值>`。GitHub 每个步骤对每一级注释（error、warning、notice）各只保留 10 条，所以组数超过 10 时，第 10 条合并剩下的所有组，标题列出这些组名，正文照样逐行列出，不丢结果。CI 容器里取不到任务日志、产物和步骤摘要，只能经 API 读 check run 的注释，`git/changes_clean_100k/stat_all` 这类只记录的分项靠这些 notice 读出。冒烟模式的结果状态是 `smoke`，不输出 notice。
+- 每份报告另有 `benches`：每个运行过的基准一项 `{id, seconds, attempts}`，`seconds` 是这个基准全部尝试的墙钟时间，从建临时目录到删除，夹具生成和重跑都算在内（[ADR 0036](../adr/0036.md)）。合并后的 `report.json` 给每项加上 `target`，按耗时从长到短排序；文本表和步骤摘要之后列出总数、合计耗时和最慢的 10 个。在 GitHub Actions 里这份列表是第一条 notice（标题 `slowest benchmarks`），`record` 的分组 notice 共用剩下的 9 条，超出的照样合进最后一条。
 - 退出码按合并后的结果计算，规则与单个目标相同（0 / 1 / 2），`just bench` 以它为最终结果。
 
 合并后的格式：
@@ -639,13 +644,16 @@ crates/bench/
 
 采样规则（Measure 模式）：
 
-- 预热：至少调用 3 次且至少 100 ms。`time` 和 `compare` 在预热时确定批量次数 k，使一个样本不短于 1 ms（`facts_contains/name` 这类 1 µs 以下的操作）；样本值是批量耗时除以 k。`time_with_setup` 不批量，k 固定为 1（`agents/append_4k`、`git/refresh_one` 单次在 10 µs 以上，`Instant` 在 M 系列上的分辨率约 42 ns，足够单次计时）。
+- 预热：至少调用 3 次且至少 100 ms，或者至少调用 1 次且至少 300 ms（慢操作一次调用之后就是热的，[ADR 0036](../adr/0036.md)）。`time` 和 `compare` 在预热时确定批量次数 k，使一个样本不短于 1 ms（`facts_contains/name` 这类 1 µs 以下的操作）；样本值是批量耗时除以 k。`time_with_setup` 不批量，k 固定为 1（`agents/append_4k`、`git/refresh_one` 单次在 10 µs 以上，`Instant` 在 M 系列上的分辨率约 42 ns，足够单次计时）。
 - 采样（进程内基准）按以下顺序判断是否停止，前一条优先：
   1. 少于 5 个样本时不停止。
-  2. 达到 10 000 个样本，或采样开始后的墙钟时间（含 `setup`）达到 5 秒时停止。
+  2. 达到 10 000 个样本，或从预热开始的墙钟时间（含预热和 `setup`）达到 3 秒时停止。
   3. 已有至少 30 个样本，且样本耗时之和（不含 `setup`）至少 1 秒时停止。
 
-  批量后约 1 ms 的样本在约 1 秒、1 000 个样本时停在第 3 条；10 µs 的单次操作（`time_with_setup`）停在第 2 条的 10 000 个样本，约 0.1 秒；0.2 秒的操作（`agents/parse_throughput`）停在第 2 条，约 25 个样本；0.5 秒的操作（`agents/discover_1000`）停在第 2 条，约 10 个样本。`Ctx::config` 可以提高最少样本数和时长，不能把第 1 条的 5 个降低。
+  批量后约 1 ms 的样本在约 1 秒、1 000 个样本时停在第 3 条；10 µs 的单次操作（`time_with_setup`）停在第 2 条的 10 000 个样本，约 0.1 秒；0.2 秒的操作（`agents/parse_throughput`）预热 2 次，停在第 2 条，约 13 个样本；0.5 秒的操作（`agents/discover_1000`）预热 1 次，约 5 个样本；1 秒以上的操作取最少的 5 个样本。`Ctx::config` 可以提高最少样本数和时长，不能把第 1 条的 5 个降低。
+
+  最少 5 个样本的理由（ADR 0036）：真实中位数落在 5 个样本的最小值与最大值之间的概率约 94%，与分布无关；超标要两次独立采样的中位数都超标才算。这一版之前第 2 条从采样开始计 5 秒、预热至少 3 次，1 秒的操作要 8 秒；判定用的统计量、上限和重跑规则都没有变。
+- 只记录、只用来定位开销的诊断项用 `Ctx::once` 取 1 个样本，不预热，由基准自己先调用一次（如 `git/filter_100k/walk`、`git/changes_clean_100k/stat_all`）。`Ctx::once(f) -> Samples` 在两种模式下都只计时一次调用。
 - 进程级基准不用这些规则，次数由各自的流程固定（冷启动 2 次预热加 20 次、空闲内存 3 次、端到端 5 次、插件一对、超标时再两对，见「进程级基准」）。
 - 冒烟模式不用这些规则：不预热、k = 1，每个进程内基准只调用一次。
 - 统计量默认取中位数；冷启动按 ADR 0017 用计数和最大值；帧时间用每帧工作时间的最大值和以刷新周期为单位的最大间隔（见「进程级基准」）。
@@ -694,13 +702,14 @@ bench *args:
 CI：
 
 - Linux 任务在 Doctests 之后增加一步 `just bench`。目标耗时 2 分钟以内（大部分编译产物与测试步骤共用）。
-- macOS 任务保持现有的 `just bench` 一步，之后用 `actions/upload-artifact` 上传 `target/lectern-bench/report.json`（`if: always()`，超标时也能看到数据）。报告表同时写进任务摘要。目标耗时 15 分钟以内，其中运行约 8 分钟；超过时先把端到端基准和 `app/idle_empty` 的启动次数降到 3 次和 1 次，不减少 ADR 规定的次数和时长（冷启动 20 次、静止后等 5 秒）。
+- macOS 上 `just bench` 在单独的 `Benchmarks (macOS arm64)` 任务里运行，与 `Build and test (macOS arm64)` 并行（[ADR 0036](../adr/0036.md)，[CI 设计「任务」](ci.md#任务)），之后用 `actions/upload-artifact` 上传 `target/lectern-bench/report.json`（`if: always()`，超标时也能看到数据）。报告表同时写进任务摘要，最慢的 10 个基准是一条 notice。目标耗时 15 分钟以内，其中运行约 8 分钟；超过时先把端到端基准和 `app/idle_empty` 的启动次数降到 3 次和 1 次，不减少 ADR 规定的次数和时长（冷启动 20 次、静止后等 5 秒）。
 
 ## 夹具与 `test-support`
 
 - 被测 crate 用 `test-support` feature 导出 `pub mod testing`（`#[cfg(any(test, feature = "test-support"))]`）：夹具生成器，以及公开接口之外 bench 需要的入口（如 `agents::testing::parse_file`）。`git` 的 `TestRepo`、`project` 的合成仓库形状、`kernel` 的 `TestKernel`、`executor` 的手动执行器都按这个约定放置。
 - bench 只调用公开接口和 `testing`，不复制被测 crate 的内部逻辑，也不按相对路径读别的 crate 的目录；需要的样本由 `testing` 用 `include_bytes!` 嵌入或在运行时生成。
 - 生成器是确定的（固定种子，不取时钟），接受规模参数，冒烟用小规模。生成的文件放在 `Ctx::scratch()` 下，每个基准、每次重试都重新生成，会修改夹具的基准（`append_4k`、`refresh_one`）不影响别的基准。
+- 例外是共享夹具（[ADR 0036](../adr/0036.md)）：生成要几秒以上、只读的大型夹具用 `Ctx::shared(key, build)` 在一个基准目标进程里只生成一次，之后的基准和重跑拿到同一份（`Rc`），目标运行结束时释放。键写明生成器和规模，如 `git_worktree::large(100000, 2000)`；同一个键换了类型时返回错误。共享夹具不放在 `scratch()` 下（每个基准结束时删除）。用它的基准只读：不写工作区和 git 目录，句柄和缓存各自新建。现在共享的只有 10 万文件的 git 工作区（`git_worktree::large_shared`：`time` 目标的 `git/open_100k`、`git/filter_100k`、`git/changes_clean_100k`，`memory` 目标的 `git/compare_100k`、`git/filter_100k_bytes`）。不缓存到 `target/` 下跨运行复用：index 记着每个文件的 ctime 和 inode，复制或还原都会改变它们。
 - 只有 bench 的 dev-dependencies 打开被测 crate 的 `test-support`，没有哪个 crate 的普通依赖打开它，`app` 的 `bench-probe` 也不打开。发布构建里既没有 `lectern-bench` 也没有 `test-support`（见「验收」里的 `cargo tree` 检查）。
 - 大型样例项目不提交进仓库：`cloudprint` 形状（728 个文件、11 个 worktree、约 25 个清单）和 10 万文件的仓库都由 `project` 的形状描述加 `git` 的 `TestRepo` 生成。`crates/bench/tests/fixtures/` 只放本 crate 自己的小样本。
 
@@ -871,6 +880,17 @@ CI：
 - `Value` 增加 `Count(u64)`：观察一次的计数，报告里是 `{"count": n, "samples": 1, "unit": "count"}`，文字是数字本身，没有适用的检查（`stats_counts_are_record_only`）。预算表加入只记录的 `git/changes_clean_100k/reads` 和 7 个 `…/stat_*`（「预算表」），`git/changes_count/per_path_bytes` 的「加入」改为只差 `git` 第 4 步。
 - `just bench --measure git/`：`git/changes_count/total_bytes` 从 76.7 MB 降到 2.12 MB；计数在 Linux 上是 `reads` 1（根目录的 `.gitignore`）、`stat_*` 全为 0。数字见 [git 设计「实际验证」](git.md#实际验证)。
 - macOS CI（[#130](https://github.com/SoloJiang/lectern-app/pull/130) 的 notice，修正之前的代码）：`git/filter_100k/walk` 502 ms、`git/changes_clean_100k/stat_all` 1.03 s、`git/changes_clean_100k/read_all` 14.6 s、`git/changes_count/total_bytes` 76.7 MB。`changes_clean_100k` 约 9 s，介于 stat 与读取全部文件之间，说明 macOS 上比较读了大部分文件。`read_all` 每个样本 14.6 s，按采样规则要跑十几个样本，CI 时间过长，所以去掉了它，连同依赖它的 `…/reads_after_read_all`：是否读、为什么读由 `…/reads` 和 `…/stat_*` 回答，读取的代价已经知道。rebase 到 #130 之后 `just test -p lectern-bench` 65 个测试通过。
+
+CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟机（4 核）：
+
+- 新的测试：`runner_shares_fixtures_across_benches_and_retries`（两个基准和一次重跑只生成一次共享夹具，目标运行结束时释放；同一个键换类型时返回错误；`benches` 记下两个基准，超标重跑的那个 `attempts` 为 2）、`report_merge_lists_the_slowest_benchmarks_first`（合并后按耗时排序、带上目标，文本列出最慢的几个，notice 的格式）、`report_merge_notices_leave_room_for_the_slowest`（有耗时列表时 `record` 的分组只占 9 条）、`stats_warm_up_ends_after_three_calls_or_one_slow_call`、`stats_slow_operation_takes_the_minimum`（1 s 的操作是 1 次预热加 5 个样本），`stats_stop_rules_in_order` 改为 3 秒。rebase 到 #131 之后 `just test -p lectern-bench` 70 个测试通过，`just check`、`just test`（1328 个通过，跳过 1 个）、`just doctest`、`just deny` 和冒烟的 `just bench` 都通过。
+- `just bench --measure`（release，不判定），改动前后各运行一次。这台虚拟机上同时有另一个任务在编译和测试（空闲时负载约 4），同一个基准两次之间可以差 4 倍（没有改动的 `project/refresh_index` 前后是 7.9 s 和 30.1 s），所以只看结构性的变化：
+  - 进程内基准合计 424.3 s → 364.6 s（69 个）；改动前编译 1 分 26 秒，整个命令约 8.5 分钟。
+  - 10 万文件的 git 基准（`time` 目标 3 个、`memory` 目标 2 个）：改动前 121.7 s（`git/changes_clean_100k` 32.6 s、`git/filter_100k` 28.5 s、`git/open_100k` 24.6 s、`git/filter_100k_bytes` 19.7 s、`git/compare_100k` 16.3 s，每个都生成一次夹具），改动后 67.9 s：每个目标只在第一个用到的基准里生成一次（`git/changes_clean_100k` 9.7 s、`git/compare_100k` 55.7 s，后者在负载最高时），其余三个是 0.3–1.1 s。
+  - `code_intel/extract_1mib` 21.5 s → 12.2 s、`code_intel/extract_throughput` 17.5 s → 12.0 s、`project/facts_contains` 15.4 s → 9.1 s：单次 0.1–1 s 的操作按 3 秒封顶采样。
+  - 最慢的仍是 `code_intel/disk_100k`（76.7 s、80.5 s）：只记录、只运行一次，时间是 9 万个文件的抽取和写入，本次没有改它。
+- 这两次测量在 #131 合并之前（`git/changes_clean_100k/read_all` 还在，改动后只取 1 个样本）；rebase 到 #131 之后它已不存在，`…/stat_all` 取 1 个样本。
+- 没有验证的：macOS 上的耗时，由下一次 CI 的 `slowest benchmarks` notice 给出。
 
 ## 与设计的差异
 

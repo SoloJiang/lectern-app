@@ -419,3 +419,57 @@ fn report_merge_notices_keep_every_record_within_ten() {
         "::notice title=g09 g10 g11 record::g09/x: m%0Ag10/x: m%0Ag11/x: m"
     );
 }
+
+#[test]
+fn report_merge_lists_the_slowest_benchmarks_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let reports = Reports {
+        dir: dir.path(),
+        gated: false,
+    };
+    reports.complete();
+    reports.write(
+        Target::Time,
+        &[("t/a", "ok"), ("t/later", "planned")],
+        json!({ "benches": [
+            {"id": "t/a", "seconds": 1.5, "attempts": 1},
+            {"id": "t/slow", "seconds": 30.31, "attempts": 2},
+        ] }),
+    );
+    reports.write(
+        Target::Memory,
+        &[("m/a", "planned")],
+        json!({ "benches": [{"id": "m/x", "seconds": 4.0, "attempts": 1}] }),
+    );
+    let merged = run(dir.path(), false);
+    let ids: Vec<&str> = merged.report["benches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["t/slow", "m/x", "t/a"]);
+    assert_eq!(merged.report["benches"][1]["target"], "memory");
+    assert!(merged.text.contains("t/slow (time): 30.3 s, retried"));
+    let notices = crate::merge::notices(&merged.report);
+    assert_eq!(
+        notices[0],
+        "::notice title=slowest benchmarks::3 benchmarks, 35.8 s in all%0A\
+         t/slow (time): 30.3 s, retried%0Am/x (memory): 4.0 s%0At/a (time): 1.5 s"
+    );
+}
+
+#[test]
+fn report_merge_notices_leave_room_for_the_slowest() {
+    let results: Vec<Json> = (0..12)
+        .map(|i| json!({"id": format!("g{i:02}/x"), "status": "record", "measured": "m"}))
+        .collect();
+    let benches = [json!({"id": "g00/x", "target": "time", "seconds": 1.0, "attempts": 1})];
+    let lines = crate::merge::notices(&json!({"results": results, "benches": benches}));
+    assert_eq!(lines.len(), 10);
+    assert!(lines[0].starts_with("::notice title=slowest benchmarks::"));
+    assert_eq!(
+        lines[9],
+        "::notice title=g08 g09 g10 g11 record::g08/x: m%0Ag09/x: m%0Ag10/x: m%0Ag11/x: m"
+    );
+}

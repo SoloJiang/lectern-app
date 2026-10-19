@@ -5,9 +5,10 @@
 //! index entry is racy. `large` is the 100 000-file shape of the
 //! `git/*_100k*` benchmarks.
 
+use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 
-use lectern_bench::BenchError;
+use lectern_bench::{BenchError, Ctx};
 use lectern_git::testing::{IndexEntry, IndexStat, TestHead, TestRepo};
 use lectern_git::{Base, ChangeSet, Limits, Mode, Oid, Worktree, WorktreeId};
 use lectern_project::testing::Shape;
@@ -89,6 +90,22 @@ pub fn edit_modules(t: &TestRepo, modules: usize, round: usize, backdate: bool) 
 /// `shaped`.
 pub fn large(files: usize, manifests: usize) -> TestRepo {
     shaped(&Shape::monorepo(files, manifests))
+}
+
+/// `large` at the bench's scale (100 000 files and 2 000 manifests, 2 000
+/// and 40 in smoke mode), built once per target process and shared by the
+/// `git/*_100k*` benchmarks (`Ctx::shared`): writing 100 000 files with
+/// their stat takes seconds. Every user only reads it (`changes`,
+/// `watch_source().filter`, `SafeRoot` reads, new `Worktree` handles,
+/// whose caches live in the handle); none writes the worktree or the git
+/// directory.
+#[allow(dead_code, reason = "each target uses its own subset of the fixtures")]
+pub fn large_shared(ctx: &Ctx) -> Result<Rc<TestRepo>, BenchError> {
+    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
+    ctx.shared(
+        &format!("git_worktree::large({files}, {manifests})"),
+        || Ok(large(files, manifests)),
+    )
 }
 
 /// A project design shape as one clean worktree with `core.ignoreCase`,
