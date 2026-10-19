@@ -757,6 +757,93 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // Recorded: one cold comparison on that repository, timed by phase
+    // (`testing::compare_phases`), to find where macOS spends its ~9 s with
+    // every stat matching; `phase_rest` is the call's time no phase covers.
+    share(
+        "git/changes_clean_100k/phase_open",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_index",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_base_tree",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_setup",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_stat",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_fold",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_untracked",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_attributes",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_classify",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_assemble",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_finish",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "git/changes_clean_100k/phase_rest",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
     // That comparison's peak of live bytes (temporary memory, not idle):
     // the comparison's own parsed index and case-folded copy, the walk,
     // the change set.

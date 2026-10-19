@@ -581,6 +581,9 @@ pub struct StatMismatches {
     pub owner: usize,       // uid 或 gid；选项不比较的字段记 0
 }
 pub fn stat_mismatches(worktree: &Worktree) -> Result<StatMismatches, GitError>;
+/// 本线程上最近一次工作区比较各阶段的墙钟时间，按顺序：open、index、base_tree、setup、stat、fold、
+/// untracked、attributes、classify、assemble、finish（没有运行的阶段不出现）。计时只在 `test-support` 下进行。
+pub fn compare_phases() -> Vec<(&'static str, Duration)>;
 ```
 
 ## 数据结构
@@ -798,7 +801,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 - `git/open_100k`（< 40 ms）：同 `git/open`，每次新开 `Worktree`，index 不在缓存里。
 - `git/filter_100k`（< 400 ms）：在 index 还没解析的 `Worktree` 上 `watch_source().filter(&[], ..)`，即 index 变化后 fs_watch 重建过滤器的工作。
 - `git/changes_clean_100k`（< 2 s）：同 `git/changes_clean`，但每个样本用新的 `Worktree`（不计时），每次比较都解析 index，即第 4 步之后每次 `changes` / `refresh(Full)` 的做法。`refresh(Full)` 对没有改动的文件做同样的工作。
-- 这两项在 macOS 上超标（「与设计的差异」），修正之前是计划中。只记录的 `git/filter_100k/walk`（经 `SafeRoot::list` 列出工作区的每个目录一次）、`git/changes_clean_100k/stat_all`（每个跟踪路径 `SafeRoot::stat` 一次）总是运行，用来定位开销；原来的 `git/changes_clean_100k/read_all`（每个跟踪路径 `SafeRoot::read` 一次）在 macOS CI 上每个样本 14.6 s，已去掉。同一基准另记录几个计数（`Value::Count`）：`…/reads`（夹具建好后新 `Worktree` 上第一次 `changes` 读过的文件数，`testing::worktree_reads` 之差，含未跟踪遍历读的 `.gitignore`，干净时为 1）、`…/stat_racy`、`…/stat_unmatched`、`…/stat_mtime`、`…/stat_size`、`…/stat_ctime`、`…/stat_ino`、`…/stat_owner`（`testing::stat_mismatches`，读取之前 index 的 stat 与 `SafeRoot::stat` 逐项不一致的条目数）。
+- 这两项在 macOS 上超标（「与设计的差异」），修正之前是计划中。只记录的 `git/filter_100k/walk`（经 `SafeRoot::list` 列出工作区的每个目录一次）、`git/changes_clean_100k/stat_all`（每个跟踪路径 `SafeRoot::stat` 一次）总是运行，用来定位开销；原来的 `git/changes_clean_100k/read_all`（每个跟踪路径 `SafeRoot::read` 一次）在 macOS CI 上每个样本 14.6 s，已去掉。同一基准另记录几个计数（`Value::Count`）：`…/reads`（夹具建好后新 `Worktree` 上第一次 `changes` 读过的文件数，`testing::worktree_reads` 之差，含未跟踪遍历读的 `.gitignore`，干净时为 1）、`…/stat_racy`、`…/stat_unmatched`、`…/stat_mtime`、`…/stat_size`、`…/stat_ctime`、`…/stat_ino`、`…/stat_owner`（`testing::stat_mismatches`，读取之前 index 的 stat 与 `SafeRoot::stat` 逐项不一致的条目数）。另外按阶段计时一次冷的比较（新 `Worktree`，第一次比较之后页缓存是热的）：`…/phase_open`、`…/phase_index`、`…/phase_base_tree`、`…/phase_setup`、`…/phase_stat`、`…/phase_fold`、`…/phase_untracked`、`…/phase_attributes`、`…/phase_classify`、`…/phase_assemble`、`…/phase_finish`（`testing::compare_phases`）和 `…/phase_rest`（整个调用减去各阶段之和：返回时释放临时状态），各 1 个样本。
 - `git/changes_count/total_bytes`（`memory` 目标，只记录）和 `git/changes_count/per_path_bytes`（≤ 1 KB，计划中：stat 缓存不持有内容的修正与第 4 步释放比较用的 index 两者都完成后才能通过；前者已完成，随第 4 步生效）：1000 个改了的跟踪文件和 1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 持有的一切（stat 缓存、解析过的 index）的存活字节，和它除以改动路径数。
 - `git/compare_100k/peak_bytes`（`memory` 目标，≤ 72 MB）和 `git/compare_100k/retained_bytes`（`memory` 目标，< 1 MB，计划中，第 4 步）：新 `Worktree` 上一次 `changes(Base::Head)` 期间的存活字节峰值，和丢掉改动集之后 `Worktree` 仍持有的字节。
 - `git/filter_100k_bytes`（`memory` 目标，≤ 16 MB）：同 `git/filter_cloudprint_bytes`，在这个仓库上。
@@ -995,6 +998,12 @@ stat 缓存不持有文件内容（[ADR 0035](../adr/0035.md) 的关键约束，
 - macOS CI 的第一批 notice（[#130](https://github.com/SoloJiang/lectern-app/pull/130)，修正之前的代码）：`git/filter_100k/walk` 502 ms、`…/stat_all` 1.03 s、`…/read_all` 14.6 s、`git/changes_count/total_bytes` 76.7 MB。`git/changes_clean_100k` 约 9 s，远超 stat 加遍历的约 1.5 s，所以 macOS 上的比较读了大部分文件，即那里的 stat 与 index 不一致；`…/stat_*` 会给出是哪个字段。`read_all` 每个样本 14.6 s，CI 时间过长，已去掉，连同依赖它的 `…/reads_after_read_all`（在 `read_all` 之后再比较一次）：比较是否读、为什么读由 `…/reads` 和读取之前的 `…/stat_*` 回答。
 - 没有验证的：macOS 上的计数和两项超标的原因（「与设计的差异」的已知差距）；`git/changes_clean_100k` 和 `git/filter_100k` 仍是计划中。
 
+比较的分阶段计时（`Refs #14`），同一类 Linux 虚拟机：
+
+- `worktree_compare_phases_are_timed_in_order`：一次 `changes` 按顺序记下 11 个阶段；没有可遍历的路径的 `refresh(Paths)` 没有 `fold` 和 `untracked`。`just test -p lectern-git` 226 个测试通过。计时的钩子和计数一样只在 `test-support` 下编译，发布构建里 `Phases` 是空操作。
+- `just bench --measure git/changes_clean_100k`（release）：`phase_base_tree` 284 ms、`phase_stat` 208 ms、`phase_untracked` 176 ms、`phase_classify` 17.7 ms、`phase_index` 14.4 ms、`phase_fold` 4.86 ms、`phase_attributes` 2.32 ms、`phase_rest` 3.1 ms，其余在 0.2 ms 以下；同一次运行里 `…/stat_all` 209 ms，与 `phase_stat` 相同。各阶段之和约 0.71 s。分析见「与设计的差异」的已知差距。
+- 没有验证的：macOS 上各阶段的耗时，由下一次 macOS CI 的 notice 给出。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1100,3 +1109,8 @@ stat 缓存不持有文件内容（[ADR 0035](../adr/0035.md) 的关键约束，
   - 按量级推算：`git/filter_100k` 在 macOS 上 0.7 s，目录遍历不超过它；`platform/safe_stat` 在 macOS 上 < 10 µs，10 万次 stat 不超过约 1 s。9 s 里剩下的部分推测是比较在 macOS 上读了文件（打开文件的系统调用在 macOS 上比 stat 慢得多，没有实测），但 `worktree_clean_reads_nothing` 在 macOS CI 上通过，说明小夹具上 stat 一致。
 - 为此加入只记录的计数（「性能」）：`…/reads` 接近 10 万时是比较去读了内容，`…/stat_*` 给出哪个字段不一致（或 racy）；`…/reads` 只有 1 时，开销在 stat、遍历和 CPU 上，由 `stat_all`、`walk` 分开。bench 的修改（[#130](https://github.com/SoloJiang/lectern-app/pull/130)）让 CI 把只记录的结果输出为 check run 的 notice 注释，这台容器能读到它们。
 - macOS CI 的第一批 notice（「实际验证」）：`stat_all` 1.03 s、`walk` 502 ms、`read_all` 14.6 s，`git/changes_clean_100k` 约 9 s，所以那里的比较读了大部分文件，stat 与 index 不一致；上面按代码的检查没有找到原因，下一次 macOS CI 的 `…/stat_*` 给出字段。`read_all` 随后去掉（每个样本 14.6 s）。测试 `worktree_stat_mismatches_of_a_clean_worktree_are_none` 在 macOS CI 上检查同样的条件：嵌套目录、`core.ignoreCase`，读过每个文件之后 stat 仍全部一致，比较不读文件。
+- [#131](https://github.com/SoloJiang/lectern-app/pull/131) 的 macOS notice 否定了上一条的推测：`…/reads` 是 1，`…/stat_*` 全为 0，比较没有多读文件；`stat_all` 715 ms、`walk` 473 ms，`git/changes_count/total_bytes` 2.16 MB。约 9 s 的开销在 `changes` 的其他步骤里。为此按阶段计时一次冷的比较（`testing::compare_phases`，只在 `test-support` 下计时），记为只记录的 `git/changes_clean_100k/phase_*`。Linux 上（同一仓库，release）：`phase_base_tree` 284 ms 最大，其次 `phase_stat` 208 ms、`phase_untracked` 176 ms、`phase_classify` 17.7 ms、`phase_index` 14.4 ms、`phase_fold` 4.9 ms，其余都在 3 ms 以下。
+- 按代码检查的结果：
+  - `base_tree` 是 Linux 上最大的一段，也是 `git/filter_100k` 和 `git/open_100k` 都没有的一段：`tree::walk` 为 HEAD 树的每个目录从对象库读一个树对象。夹具只写松散对象，每个目录一个 `objects/xx/…` 文件，每次读取是一次 `open`、读、zlib 解压（gix 的对象缓存关闭，每个树只读一次）。macOS 上打开文件远比 stat 慢（`read_all` 每个文件约 146 µs，`stat_all` 约 7 µs），这一段在 macOS 上可能占几秒，是首要的嫌疑，由下一次 macOS CI 的 `phase_base_tree` 确认。真实仓库的树多在 pack 里，按 pack 索引查找，不逐个打开文件；夹具与真实仓库在这一点上不同。
+  - 可能的修正（下一个 PR 按 macOS 的数字决定）：index 的 cache-tree 扩展（`TREE`）记录的根树等于基准树时，index 与基准相同，不必遍历基准树（git 的 `diff-index --cached` 也这样跳过）；或者夹具把树写成 pack。前者对真实仓库也有效，但要求夹具写出 cache-tree。
+  - 没有发现逐个条目的路径规范化（`canonicalize` 只在 `discover` 和 `worktrees` 里，每次调用一次）、`getattrlist` 或 `SafeRoot` 之外的 `std::fs` 调用；`core.ignoreCase` 的折叠查找是对折叠副本的二分查找，副本只建一次（`phase_fold`）。完整比较里没有 O(n²) 的循环；`refresh(Paths)` 按报告的路径逐个检查记录（记录数 × 路径数），只在路径很多的刷新里才明显，不影响 `changes_clean_100k`。
