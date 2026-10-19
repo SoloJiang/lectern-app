@@ -318,6 +318,20 @@ fn account_too_large_units_are_searched() {
     assert_eq!(paths(&r), ["c.ts", "gen.ts"], "gen.ts is searched");
     assert_eq!(done(&r), Completeness::Complete);
 
+    // The search's `Done` extractions replaced the `TooLarge` units (a done
+    // result outranks an unfinished unit whatever the tier writing it): no
+    // longer unfinished, `Named` lists gen.ts, the next jump answers from
+    // the index without extracting anything again.
+    assert_eq!(reasons(&h), []);
+    let r = named(&h, "a.ts");
+    assert_eq!(paths(&r), ["c.ts", "gen.ts"]);
+    assert_eq!(done(&r), Completeness::Complete);
+    let before = h.extractions();
+    let r = h.goto("a.ts", "item", 0);
+    assert_eq!(paths(&r), ["c.ts", "gen.ts"]);
+    assert_eq!(done(&r), Completeness::Complete);
+    assert_eq!(h.extractions(), before, "nothing extracted again");
+
     let of = defined(&h, "c.ts");
     let r = h.ask(QueryKind::References { of });
     assert_eq!(paths(&r), ["a.ts", "far.ts"], "far.ts is searched");

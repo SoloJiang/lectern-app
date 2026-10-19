@@ -358,6 +358,60 @@ fn goto_tiers_and_order() {
     assert!(r.candidates[2].in_review);
 }
 
+/// A tier holds only when what it compares with is known. `Named` has no
+/// current text: a definition at the `near` path is not `CurrentFile` (nor
+/// `Imported`), only the nearest. Files outside every sub-project of a
+/// project that has some are not in the same sub-project.
+#[test]
+fn goto_tiers_need_what_they_compare_with() {
+    let def = "export function item() { return 1; }\n";
+    let h = Harness::new();
+    let files = [
+        ("app/a.ts", def),
+        ("app/b.ts", def),
+        (
+            "tools/top.ts",
+            "export function call() { return item(); }\n",
+        ),
+        ("scripts/root.ts", def),
+    ];
+    for (p, t) in files {
+        let text = format!("{t}// {p}\n");
+        h.git.add("main", &[(p, text.as_bytes())]);
+    }
+    h.git.commit("main");
+    h.open_with("main", packages(&["app"]));
+    let tiers = |r: &lectern_services::code_intel::QueryResults| -> Vec<(String, CandidateTier)> {
+        r.candidates
+            .iter()
+            .map(|c| (c.definition.location.path.to_string(), c.tier))
+            .collect()
+    };
+    let r = h.ask(QueryKind::Named {
+        name: "item".into(),
+        near: Some("app/a.ts".into()),
+    });
+    assert_eq!(
+        tiers(&r),
+        [
+            ("app/a.ts".to_owned(), CandidateTier::SamePackage),
+            ("app/b.ts".to_owned(), CandidateTier::SamePackage),
+            ("scripts/root.ts".to_owned(), CandidateTier::Elsewhere),
+        ]
+    );
+    // From a file no sub-project holds: another such file (in another
+    // directory) is not in the same sub-project.
+    let r = h.goto("tools/top.ts", "item", 0);
+    assert_eq!(
+        tiers(&r),
+        [
+            ("app/a.ts".to_owned(), CandidateTier::Elsewhere),
+            ("app/b.ts".to_owned(), CandidateTier::Elsewhere),
+            ("scripts/root.ts".to_owned(), CandidateTier::Elsewhere),
+        ]
+    );
+}
+
 /// Results only grow: a later batch appends; the first batch keeps its
 /// indices.
 #[test]
