@@ -50,7 +50,7 @@ CI 的两个任务见 [docs/design/ci.md](docs/design/ci.md)。
 
 ## Review guidelines
 
-Codex 审阅 PR 时按这一节判断报什么、不报什么；各 crate 目录下的 AGENTS.md 可以补充更具体的规则，离改动文件最近的优先。
+推送前的自审按这一节判断报什么、不报什么；各 crate 目录下的 AGENTS.md 可以补充更具体的规则，离改动文件最近的优先。自审由负责推进的 agent 派一个独立的只读审阅 agent 完成，它没有参与这次改动的编写，步骤见 [ship-pr](.claude/skills/ship-pr/SKILL.md) 第 2 步。本仓库不再使用 Codex 审阅，PR 上出现的 Codex 评论不需要处理。
 
 只报 P0 和 P1，P2 及以下不留评论。本仓库的级别定义：
 
@@ -71,11 +71,11 @@ Codex 审阅 PR 时按这一节判断报什么、不报什么；各 crate 目录
 
 负责推进的 agent 可以直接合并 PR（squash），以下条件全部满足时才能合并：
 
-1. Codex 已审阅当前最新提交，它留下的意见都已处理（修复，或回复理由）。Codex 没有意见时会留 👍，但这个 reaction 并不稳定，不作为合并条件；「已审阅最新提交」以 Codex 汇总评论里的审阅状态为准（见 [ship-pr](.claude/skills/ship-pr/SKILL.md) 第 3 步）。只改文档的 PR 不需要满足这一条；设计文档 PR 除外。
+1. PR 的最新提交在推送前通过了自审：审阅 agent 没有报出未处理的 P0、P1，PR 上有一条自审记录写明审过的提交（见 [ship-pr](.claude/skills/ship-pr/SKILL.md) 第 2 步）。只改文档的 PR 不需要满足这一条；设计文档和 ADR 的 PR 除外。
 2. CI 全部通过，没有合并冲突。
-3. 所有审阅讨论串都已回复并解决。
+3. 人留下的审阅讨论串都已回复并解决。
 
-审阅意见按 [ship-pr](.claude/skills/ship-pr/SKILL.md) 第 4 步分级处理：P0、P1 修复；P2 只在改动小、属于本 PR 范围、不让文档变复杂时修，否则回复理由（已知限制、实现阶段处理、超出威胁模型）后解决。Codex 审阅失败或没有更新时，在 PR 上评论 `@codex review` 重新触发；不要只为了拿到 👍 重新触发。叠在其他分支上的 PR，先合底层，再把上层的 base 改为 `main`。
+自审意见按 [ship-pr](.claude/skills/ship-pr/SKILL.md) 第 4 步分级处理：P0、P1 在推送前修复，修复后的提交再审一次；P2 只在改动小、属于本 PR 范围、不让文档变复杂时修，否则在自审记录里写明理由（已知限制、实现阶段处理、超出威胁模型）。叠在其他分支上的 PR，先合底层，再把上层的 base 改为 `main`。
 
 ## 工作方式
 
@@ -94,5 +94,5 @@ Claude Code 自动加载 `.claude/skills/` 下的技能；其他 agent 直接读
 |---|---|
 | [design-doc](.claude/skills/design-doc/SKILL.md) | 按模板写模块设计文档，提设计文档 PR |
 | [adr](.claude/skills/adr/SKILL.md) | 写新 ADR 并更新索引 |
-| [ship-pr](.claude/skills/ship-pr/SKILL.md) | 从提交到合并：检查、开 PR、Codex 审阅、处理意见、squash 合并 |
+| [ship-pr](.claude/skills/ship-pr/SKILL.md) | 从提交到合并：检查、推送前自审、开 PR、处理意见、squash 合并 |
 | [gpui](.claude/skills/gpui/SKILL.md) | 写 GPUI 与 gpui-component 代码：按锁定版本读上游指南，Lectern 规则优先 |
