@@ -669,15 +669,36 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
-    // Review's first full comparison (and every `refresh(Full)`), in the
-    // background after the file list is shown: every tracked file skipped
-    // by stat, plus the untracked walk.
+    // A full comparison of a clean worktree, in the background after the
+    // file list is shown: the index parsed (cold, a new `Worktree` each
+    // sample: no parsed index is kept between calls, ADR 0035), every
+    // tracked file skipped by stat, the untracked walk. Every
+    // `refresh(Full)` does the same.
     share(
         "git/changes_clean_100k",
         &[median(Limit::TimeBelow(ms(2000)))],
         GIT,
         ACTIVE,
         Time,
+    ),
+    // That comparison's peak of live bytes (temporary memory, not idle):
+    // the comparison's own parsed index and case-folded copy, the walk,
+    // the change set.
+    share(
+        "git/compare_100k/peak_bytes",
+        &[median(Limit::BytesAtMost(72 * MB))],
+        GIT,
+        ACTIVE,
+        Memory,
+    ),
+    // What the `Worktree` still holds after it, the change set dropped:
+    // no parsed index between calls (ADR 0035); 39 MB until git step 4.
+    share(
+        "git/compare_100k/retained_bytes",
+        &[median(Limit::BytesBelow(MB))],
+        GIT,
+        State::Planned("git 第 4 步"),
+        Memory,
     ),
     // `git/filter_cloudprint_bytes` there.
     share(

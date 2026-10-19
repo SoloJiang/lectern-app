@@ -434,20 +434,39 @@ fn filter_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 }
 
 /// `git/changes_clean` on the large repository: 100 000 tracked files
-/// skipped by stat, plus the untracked walk; the same `Worktree` each time
-/// (its parsed index is reused, as `review` keeps it).
+/// skipped by stat, plus the untracked walk. Cold: a new `Worktree` for
+/// each sample (made untimed), so every comparison parses the index, as
+/// every one does once a `Worktree` keeps no parsed index between calls
+/// (ADR 0035, git design step 4).
 pub const CHANGES_CLEAN_100K: Bench = Bench {
     id: "git/changes_clean_100k",
     run: changes_clean_100k,
 };
 
 fn changes_clean_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use std::cell::Cell;
+
     let t = large(ctx);
-    let wt = worktree::main_worktree(&t)?;
+    let repo = t.repo();
     let cancel = AtomicBool::new(false);
     let limits = Limits::default();
+    let wt = repo.worktree(&WorktreeId::Main)?;
     worktree::expect(&*worktree::changes(&wt, &limits, &cancel)?, 0, 0)?;
-    let time = ctx.time(|| wt.changes(Base::Head, &limits, &cancel));
+    drop(wt);
+    let failed = Cell::new(false);
+    let time = ctx.time_with_setup(
+        || repo.worktree(&WorktreeId::Main),
+        |wt| {
+            let set = wt.map(|wt| (wt.changes(Base::Head, &limits, &cancel), wt));
+            if !matches!(set, Ok((Ok(_), _))) {
+                failed.set(true);
+            }
+            set
+        },
+    );
+    if failed.get() {
+        return Err(BenchError::new("a comparison failed"));
+    }
     Ok(vec![Measured::new(
         "git/changes_clean_100k",
         Value::Time(time),

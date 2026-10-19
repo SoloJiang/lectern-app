@@ -1602,7 +1602,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 空闲内存：monorepo < 100 MB，10 万文件的仓库 < 120 MB（后台暂停时和全部完成后；后者的份额加总见 [ADR 0035](../adr/0035.md)） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、第 5 层本次会话已确认的 blob 集合（每个 8 字节的键，10 万个约 1.2 MB，项目关闭或换会话时释放）、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
 | 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
-| 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）；工作区比较期间的 `TrackedPaths`（10 万文件约 14 MB，由 `git` 的 `git/filter_100k_bytes` 测量） | `code_intel/batch_peak` |
+| 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）。`git` 的工作区比较（`GitAccess::changed_paths`）期间的临时内存不在这 40 MB 里：比较不用 `TrackedPaths`，自己解析 index，10 万文件时一次比较的峰值 65.8 MB（`git/compare_100k/peak_bytes` ≤ 72 MB，`git` 的份额，[ADR 0035](../adr/0035.md)），单独就超过 40 MB；`code_intel/batch_peak` 的夹具用 `FakeGit`，不含它。两者同时出现时进程的临时峰值可达约 110 MB。降低的办法是 ADR 0035 的「比较与 `tracked` 共用一次解析」；比较是否与超过 256 KiB 的文件的抽取错开，由本 crate 的下一步决定 | `code_intel/batch_peak` |
 | 磁盘 | `code_intel.tags` 配额 256 MiB；cloudprint 形状约 1 MB，10 万文件约 270 MiB（第 3 步的合成仓库实测，略超配额，见「存储表」的「规模」） | `code_intel/disk_100k`（只记录） |
 | 安装包 ≤ 80 MB | 六个 grammar crate 与 tree-sitter 运行时，由 #38 测量 | `app/bundle_size` |
 
