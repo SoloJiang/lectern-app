@@ -461,8 +461,11 @@ pub(crate) fn run(
         (Vec::new(), false)
     } else {
         // With `core.ignoreCase` the walk's index lookups use the
-        // case-folded copy; build it here, as its first lookup would, so
-        // that its cost is a phase of its own.
+        // case-folded copy. Only when timing phases (test-support) is it
+        // built here, so that its cost is a phase of its own; otherwise it
+        // stays lazy, built by the walk's first lookup if there is one (a
+        // refresh under a removed directory makes none).
+        #[cfg(any(test, feature = "test-support"))]
         if config.boolean("core.ignoreCase").unwrap_or(false) {
             index.folded();
         }

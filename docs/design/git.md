@@ -1000,7 +1000,7 @@ stat 缓存不持有文件内容（[ADR 0035](../adr/0035.md) 的关键约束，
 
 比较的分阶段计时（`Refs #14`），同一类 Linux 虚拟机：
 
-- `worktree_compare_phases_are_timed_in_order`：一次 `changes` 按顺序记下 11 个阶段；没有可遍历的路径的 `refresh(Paths)` 没有 `fold` 和 `untracked`。`just test -p lectern-git` 226 个测试通过。计时的钩子和计数一样只在 `test-support` 下编译，发布构建里 `Phases` 是空操作。
+- `worktree_compare_phases_are_timed_in_order`：一次 `changes` 按顺序记下 11 个阶段；没有可遍历的路径的 `refresh(Paths)` 没有 `fold` 和 `untracked`。`just test -p lectern-git` 226 个测试通过。计时的钩子和计数一样只在 `test-support` 下编译，发布构建里 `Phases` 是空操作。为了让 `fold` 成为单独的一段，`test-support` 下在遍历之前就建好折叠副本；发布构建不提前建，仍由遍历的第一次查找建（报告的路径在已删除的目录下时不查找，就不建），行为与原来相同。
 - `just bench --measure git/changes_clean_100k`（release）：`phase_base_tree` 284 ms、`phase_stat` 208 ms、`phase_untracked` 176 ms、`phase_classify` 17.7 ms、`phase_index` 14.4 ms、`phase_fold` 4.86 ms、`phase_attributes` 2.32 ms、`phase_rest` 3.1 ms，其余在 0.2 ms 以下；同一次运行里 `…/stat_all` 209 ms，与 `phase_stat` 相同。各阶段之和约 0.71 s。分析见「与设计的差异」的已知差距。
 - 没有验证的：macOS 上各阶段的耗时，由下一次 macOS CI 的 notice 给出。
 
