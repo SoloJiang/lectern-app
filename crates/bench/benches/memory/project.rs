@@ -8,10 +8,11 @@
 //! its watches armed and their first batches handled, and `resolve_package`
 //! has filled the sub-project cache of every inactive worktree (10 in the
 //! `cloudprint` shape, 16 in the large one). The first arms the same
-//! watches without the plugin: the fs_watch subscriptions and the filter,
-//! with the active worktree's parsed index (`TrackedPaths`) it shares with
-//! the handle `project` keeps, are fs_watch's share (`fs_watch/resident`),
-//! so they cancel out. What remains is `project`'s own: the file list with
+//! watches without the plugin: the fs_watch subscriptions (fs_watch's
+//! share, `fs_watch/resident*`) and the filter, with the active worktree's
+//! parsed index (`TrackedPaths`) it shares with the handle `project` keeps
+//! (git's share, `git/filter_*_bytes`, ADR 0035), cancel out. What
+//! remains is `project`'s own: the file list with
 //! its blob OIDs, the sub-projects and their caches, the facts the kernel
 //! keeps, the parse cache; also a consumer plugin holding the service, a
 //! few hundred bytes, counted against `project`.
@@ -201,7 +202,7 @@ fn at_rest(app: &App, repo: &ProjectRepo, with_project: bool) -> Result<u64, Ben
 /// The watches `project` arms for the open fixture, armed without it: the
 /// repository and the main worktree, its filter built from a `lectern-git`
 /// worktree handle's source (the handle `project` keeps shares its parsed
-/// index with that filter). fs_watch's share, not `project`'s.
+/// index with that filter). fs_watch's and git's shares, not `project`'s.
 struct Watching {
     _tree: WorktreeWatch,
     _repo: RepoWatch,

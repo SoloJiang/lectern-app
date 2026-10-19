@@ -146,6 +146,7 @@ const ADR_0017_IMPACT: &str = "docs/adr/0017.md#影响";
 const ADR_0018_DECISION: &str = "docs/adr/0018.md#决策";
 const ADR_0018_IMPACT: &str = "docs/adr/0018.md#影响";
 const ADR_0029_DECISION: &str = "docs/adr/0029.md#决策";
+const ADR_0035_DECISION: &str = "docs/adr/0035.md#决策";
 const AGENTS: &str = "docs/design/agents.md#性能";
 const GIT: &str = "docs/design/git.md#性能";
 const CACHE: &str = "docs/design/cache.md#性能";
@@ -247,6 +248,23 @@ pub static BUDGETS: &[Budget] = &[
         "app/idle_monorepo_indexed",
         &[median(Limit::BytesBelow(100 * MB))],
         ADR_0029_DECISION,
+        State::Planned("#17"),
+        Process,
+    ),
+    // The same two on the large repository (100 000 files, 17 worktrees),
+    // ADR 0035; `app/idle_100k_indexed` is sampled in the launches of
+    // `app/index_100k`, once indexing is done and the app is at rest.
+    top(
+        "app/idle_100k",
+        &[median(Limit::BytesBelow(120 * MB))],
+        ADR_0035_DECISION,
+        State::Planned("project_home"),
+        Process,
+    ),
+    top(
+        "app/idle_100k_indexed",
+        &[median(Limit::BytesBelow(120 * MB))],
+        ADR_0035_DECISION,
         State::Planned("#17"),
         Process,
     ),
@@ -620,6 +638,55 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Memory,
     ),
+    // The current worktree's fs_watch filter with its `Worktree`: the
+    // parsed index shared with `project`'s kept handle, the case-folded
+    // order, the ignore rules. git's share (ADR 0035); `fs_watch/resident*`
+    // and `project/resident_*` exclude it. `cloudprint` shape here, the
+    // large repository below.
+    share(
+        "git/filter_cloudprint_bytes",
+        &[median(Limit::BytesBelow(MB))],
+        GIT,
+        ACTIVE,
+        Memory,
+    ),
+    // ---- the large repository (100 000 tracked files, ADR 0035) ----
+    // `git/open` there: the index parsed with nothing cached; part of
+    // `project/open_100k/files`.
+    share(
+        "git/open_100k",
+        &[median(Limit::TimeBelow(ms(40)))],
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    // The fs_watch filter rebuilt after an index change: index, case-folded
+    // order, untracked walk and `.gitignore` files; batches wait for it.
+    share(
+        "git/filter_100k",
+        &[median(Limit::TimeBelow(ms(400)))],
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    // Review's first full comparison (and every `refresh(Full)`), in the
+    // background after the file list is shown: every tracked file skipped
+    // by stat, plus the untracked walk.
+    share(
+        "git/changes_clean_100k",
+        &[median(Limit::TimeBelow(ms(2000)))],
+        GIT,
+        ACTIVE,
+        Time,
+    ),
+    // `git/filter_cloudprint_bytes` there.
+    share(
+        "git/filter_100k_bytes",
+        &[median(Limit::BytesAtMost(16 * MB))],
+        GIT,
+        ACTIVE,
+        Memory,
+    ),
     // The partition is open and the system file cache warm.
     share(
         "cache/get_4k",
@@ -824,7 +891,8 @@ pub static BUDGETS: &[Budget] = &[
     // without, in one process (kernel「性能」's two launches); the numbers
     // of `plugin/project/resident_*`. The one without arms the same watches,
     // so the fs_watch filter and the parsed index it shares with the
-    // plugin's worktree handle are `fs_watch/resident`'s, not counted here.
+    // plugin's worktree handle (git's, `git/filter_*_bytes`) and
+    // fs_watch's own state cancel out, not counted here.
     share(
         "project/resident_cloudprint_bytes",
         &[median(Limit::BytesBelow(2 * MB))],
@@ -928,10 +996,19 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // `watch_repo` plus the current worktree's `watch_worktree` on an
-    // 11-worktree repository, at rest; the filter's index (`TrackedPaths`,
-    // shared with `project`'s worktree handle) included.
+    // 11-worktree repository, at rest: fs_watch's own state. The filter
+    // and the parsed index it shares with `project`'s worktree handle are
+    // git's (ADR 0035), measured apart and not counted here.
     share(
         "fs_watch/resident",
+        &[median(Limit::BytesBelow(MB))],
+        FS_WATCH,
+        State::Planned("fs_watch 第 4 步"),
+        Memory,
+    ),
+    // The same on the large repository (100 000 files, 17 worktrees).
+    share(
+        "fs_watch/resident_100k",
         &[median(Limit::BytesBelow(MB))],
         FS_WATCH,
         State::Planned("fs_watch 第 4 步"),

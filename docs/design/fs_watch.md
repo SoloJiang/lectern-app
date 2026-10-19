@@ -706,7 +706,8 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 |---|---|
 | 冷启动 20 ms（ADR 0017） | 首帧之前不调用；`Watcher::new` 只分配一个 `Arc` |
 | 空闲内存：空窗口 < 60 MB | 没有打开项目时不建线程、不 arm，常驻 < 64 KB |
-| 空闲内存：打开 monorepo < 100 MB | 每个仓库状态 < 256 KB（reflog 进度每个文件约 150 B，1000 个分支约 150 KB；目录缓存 1024 项）；过滤器的文件列表与 `project` 共用，忽略规则 < 256 KB；非当前 worktree 不 arm 工作区根，只在公共目录目标里计数 |
+| 空闲内存：打开 monorepo < 100 MB | 每个仓库状态 < 256 KB（reflog 进度每个文件约 150 B，1000 个分支约 150 KB；目录缓存 1024 项）；非当前 worktree 不 arm 工作区根，只在公共目录目标里计数。过滤器由 `git` 构造，它的文件列表（与 `project` 的句柄共用的解析后 index）、折叠顺序和忽略规则都是 `git` 的份额（`git/filter_cloudprint_bytes`），不计入本 crate（[ADR 0035](../adr/0035.md)） |
+| 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 本 crate 自己的状态不随跟踪文件数增长，17 个 worktree 时同样 < 1 MB；过滤器 ≤ 16 MB 是 `git` 的份额（`git/filter_100k_bytes`） |
 | 突发时的内存 | 队列最多 16 384 个事件（约 1.6 MB），每个订阅的批次最多 10 000 个路径（约 1 MB），暂存最多 4096 项（超过时合并到上级目录），每个仓库订阅的批次里 reflog 行最多 1 MiB（超过的分到后面的批次）；都有上限，路径超过时改为 `rescan` |
 | 打开项目到项目主页可用 < 100 ms | `watch_*` 只入队；arm 和加载在后台，不在打开路径上 |
 | 切换 worktree / 分支 < 100 ms | 切换后的事件：分类每个事件平均 < 1 µs（目录缓存命中），10 万个事件的突发 < 100 ms 的 fs_watch 线程 CPU；交付延迟是后端延迟 20 ms 加合并窗口 |
@@ -720,7 +721,8 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - `fs_watch/flush_idle`（macOS）：真实后端，没有积压时 `flush_revision` < 5 ms。
 - `fs_watch/write_to_deliver`（macOS）：写一个受跟踪文件到 `WorktreeBatch` 交付，默认合并参数下 < 120 ms。
 - `fs_watch/reflog_append`：追加一行 reflog 到记录进入批次 < 1 ms（不含后端延迟）。
-- `fs_watch/resident`：11 个 worktree 的仓库，`watch_repo` 加当前 worktree 的 `watch_worktree`，静止后本 crate 的常驻增量 < 1 MB，含过滤器持有的当前 worktree 解析后 index（`git` 的 `TrackedPaths`，与 `project` 保留的 worktree 句柄共用一份，算本 crate 的份额，见 [project 设计「性能」](project.md#性能)；728 个文件时约 0.1 MB）。
+- `fs_watch/resident`：11 个 worktree 的仓库，`watch_repo` 加当前 worktree 的 `watch_worktree`，静止后本 crate 的常驻增量 < 1 MB。只计本 crate 自己的状态：过滤器连同它持有的当前 worktree 解析后 index（`git` 的 `TrackedPaths`，与 `project` 保留的 worktree 句柄共用一份）是 `git` 的份额（ADR 0035），基准先建好句柄和过滤器、单独计数，再从增量里减去。
+- `fs_watch/resident_100k`：同上，在 10 万文件、17 个 worktree 的仓库上（[project 设计「性能」](project.md#性能)的大仓库形状），< 1 MB；过滤器在这个仓库上约 14 MB，由 `git/filter_100k_bytes` 计入 `git`。
 
 ## 状态与异常
 
@@ -793,7 +795,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
    - [platform 设计](platform.md)的状态行更新。
 4. **装配与实测**（`app`）
    - `app` 按「对其他 crate 的要求」创建 `Watcher` 并注入；macOS 上 `cargo build --locked -p lectern-app` 通过。
-   - `fs_watch/flush_idle`、`fs_watch/write_to_deliver`、`fs_watch/resident` 改为 `Active`，macOS CI 的 `just bench` 判定通过；`app/cold_start` 不因本 crate 变化。
+   - `fs_watch/flush_idle`、`fs_watch/write_to_deliver`、`fs_watch/resident`、`fs_watch/resident_100k` 改为 `Active`，macOS CI 的 `just bench` 判定通过；`app/cold_start` 不因本 crate 变化。
    - 本文状态行改为「已实现」并列出四个 PR，填写「实际验证」。
 
 ## 实际验证

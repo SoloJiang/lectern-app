@@ -1,6 +1,7 @@
 //! `git/*` (docs/design/git.md「性能」), on repositories built by
 //! `lectern_git::testing::TestRepo` in the `cloudprint-miniapps` shape: 728
-//! tracked files, 11 worktrees each with its own index.
+//! tracked files, 11 worktrees each with its own index; the `*_100k` ones
+//! on the project design's large repository (`git_worktree::large`).
 
 use std::hint::black_box;
 use std::path::Path;
@@ -357,4 +358,98 @@ fn changes_capped(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     worktree::expect(&*worktree::changes(&wt, &limits, &cancel)?, files, listed)?;
     let time = ctx.time(|| wt.changes(Base::Head, &limits, &cancel));
     Ok(vec![Measured::new("git/changes_capped", Value::Time(time))])
+}
+
+/// The large repository (`worktree::large`, 100 000 tracked files) for the
+/// `git/*_100k` benchmarks; a few thousand files in smoke mode.
+fn large(ctx: &Ctx) -> TestRepo {
+    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
+    worktree::large(files, manifests)
+}
+
+/// `git/open` on the large repository: what opening it reads from git
+/// before the file list is built, the index of 100 000 entries parsed
+/// every time (a new `Worktree`, nothing cached). Part of the project
+/// design's `project/open_100k/files`.
+pub const OPEN_100K: Bench = Bench {
+    id: "git/open_100k",
+    run: open_100k,
+};
+
+fn open_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let t = large(ctx);
+    let files = ctx.scale(100_000, 2_000);
+    let cancel = AtomicBool::new(false);
+    let counts = open(t.root(), &cancel)?;
+    if counts != (1, files) {
+        return Err(BenchError::new(format!(
+            "expected 1 worktree and {files} files, got {counts:?}"
+        )));
+    }
+    let time = ctx.time(|| open(black_box(t.root()), &cancel));
+    Ok(vec![Measured::new("git/open_100k", Value::Time(time))])
+}
+
+/// The fs_watch filter rebuilt after the index changed (fs_watch design
+/// 「路径分类」): `WorktreeSource::filter` on a `Worktree` whose index is
+/// not parsed yet, so the index is parsed, the case-folded order sorted
+/// (`core.ignoreCase`), the untracked walk lists every directory and the
+/// `.gitignore` files are read. The filter of each sample is dropped with
+/// its `Worktree`, untimed.
+pub const FILTER_100K: Bench = Bench {
+    id: "git/filter_100k",
+    run: filter_100k,
+};
+
+fn filter_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use std::cell::Cell;
+
+    let t = large(ctx);
+    let repo = t.repo();
+    let cancel = AtomicBool::new(false);
+    let filter = repo
+        .worktree(&WorktreeId::Main)?
+        .watch_source()
+        .filter(&[], &cancel)
+        .map_err(|e| BenchError::new(e.0))?;
+    if !filter.ignored(b"node_modules", true) || filter.rule_files().len() != 1 {
+        return Err(BenchError::new("the filter misses the .gitignore"));
+    }
+    drop(filter);
+    let failed = Cell::new(false);
+    let time = ctx.time_with_setup(
+        || repo.worktree(&WorktreeId::Main),
+        |wt| {
+            let built = wt.map(|wt| (wt.watch_source().filter(&[], &cancel), wt));
+            if !matches!(built, Ok((Ok(_), _))) {
+                failed.set(true);
+            }
+            built
+        },
+    );
+    if failed.get() {
+        return Err(BenchError::new("building a filter failed"));
+    }
+    Ok(vec![Measured::new("git/filter_100k", Value::Time(time))])
+}
+
+/// `git/changes_clean` on the large repository: 100 000 tracked files
+/// skipped by stat, plus the untracked walk; the same `Worktree` each time
+/// (its parsed index is reused, as `review` keeps it).
+pub const CHANGES_CLEAN_100K: Bench = Bench {
+    id: "git/changes_clean_100k",
+    run: changes_clean_100k,
+};
+
+fn changes_clean_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let t = large(ctx);
+    let wt = worktree::main_worktree(&t)?;
+    let cancel = AtomicBool::new(false);
+    let limits = Limits::default();
+    worktree::expect(&*worktree::changes(&wt, &limits, &cancel)?, 0, 0)?;
+    let time = ctx.time(|| wt.changes(Base::Head, &limits, &cancel));
+    Ok(vec![Measured::new(
+        "git/changes_clean_100k",
+        Value::Time(time),
+    )])
 }

@@ -102,11 +102,73 @@ fn git_changes_capped_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> 
     )])
 }
 
+/// `git/filter_cloudprint_bytes`, `git/filter_100k_bytes`: what the
+/// current worktree's fs_watch filter holds (`core.ignoreCase`, as on
+/// macOS), with the `Worktree` handle it is built from: the parsed index
+/// (`TrackedPaths`, the same `Arc` the handle caches and `project`'s kept
+/// handle shares), the case-folded order and the ignore rules. git's
+/// share (ADR 0035); fs_watch's and project's resident budgets exclude it
+/// (docs/design/git.md「性能」). On the `cloudprint` shape (728 files) and
+/// the large repository (100 000).
+const GIT_FILTER_CLOUDPRINT_BYTES: Bench = Bench {
+    id: "git/filter_cloudprint_bytes",
+    run: git_filter_cloudprint_bytes,
+};
+
+fn git_filter_cloudprint_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let t = worktree::shaped(&lectern_project::testing::Shape::cloudprint());
+    Ok(vec![Measured::new(
+        "git/filter_cloudprint_bytes",
+        Value::Bytes(filter_bytes(ctx, &t)?),
+    )])
+}
+
+const GIT_FILTER_100K_BYTES: Bench = Bench {
+    id: "git/filter_100k_bytes",
+    run: git_filter_100k_bytes,
+};
+
+fn git_filter_100k_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
+    let t = worktree::large(files, manifests);
+    Ok(vec![Measured::new(
+        "git/filter_100k_bytes",
+        Value::Bytes(filter_bytes(ctx, &t)?),
+    )])
+}
+
+fn filter_bytes(ctx: &Ctx, t: &lectern_git::testing::TestRepo) -> Result<Vec<u64>, BenchError> {
+    let cancel = AtomicBool::new(false);
+    let mut samples = Vec::new();
+    // Round 0 warms up gix's process-wide lazy state and is not reported.
+    for round in 0..=ctx.scale(SAMPLES, 1) {
+        let before = CountingAlloc::live();
+        let discovered = lectern_git::testing::discover(t.root(), &[])?
+            .ok_or_else(|| BenchError::new("no repository"))?;
+        let wt = discovered.repo.worktree(&WorktreeId::Main)?;
+        let source = wt.watch_source();
+        let filter = source
+            .filter(&[], &cancel)
+            .map_err(|e| BenchError::new(e.0))?;
+        let held = CountingAlloc::live().saturating_sub(before);
+        if !filter.ignored(b"node_modules", true) {
+            return Err(BenchError::new("the filter misses the .gitignore"));
+        }
+        if round > 0 {
+            samples.push(held as u64);
+        }
+        drop((filter, source, wt, discovered));
+    }
+    Ok(samples)
+}
+
 const BENCHES: &[Bench] = &[
     cache::MEMORY,
     code_intel::MAP_100K_BYTES,
     code_intel::BATCH_PEAK,
     GIT_CHANGES_CAPPED_BYTES,
+    GIT_FILTER_CLOUDPRINT_BYTES,
+    GIT_FILTER_100K_BYTES,
     GIT_RESIDENT,
     project::RESIDENT_CLOUDPRINT,
     project::RESIDENT_100K,

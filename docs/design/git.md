@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -754,11 +754,13 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 | 预算 | 本 crate 的份额（M 系列 Mac，`cloudprint-miniapps` 量级：728 个跟踪文件、11 个 worktree） |
 |---|---|
 | 每次顶层调用 | 打开 gix 句柄 < 1 ms（读配置和引用，不读 pack），计入下面各项 |
-| 打开项目到项目主页可用 < 100 ms | `discover` + `worktrees` + `tracked` < 15 ms |
+| 打开项目到项目主页可用 < 100 ms | `discover` + `worktrees` + `tracked` < 15 ms；10 万个跟踪文件时 < 40 ms，计入 `project/open_100k/files`（< 80 ms） |
 | 打开一个会话的 Diff < 50 ms | 50 个改动文件的 `changes`（stat 跳过其余文件）< 15 ms；hunk 未命中时计算 < 20 ms，命中时 < 2 ms |
 | 切换 worktree / 分支 < 100 ms | 内容相同的文件命中同一份 hunk 缓存；`refresh(Full)` < 15 ms |
-| 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB；每个 `ChangeSet` 保留的工作区内容 ≤ 32 MiB（通常只有当前审阅的一个） |
-| 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数 |
+| 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB；每个 `ChangeSet` 保留的工作区内容 ≤ 32 MiB（通常只有当前审阅的一个）；fs_watch 的过滤器（解析后的 index、`core.ignoreCase` 的折叠顺序、忽略规则）是本 crate 的份额，index 与 `project` 保留的句柄共用一份（[ADR 0035](../adr/0035.md)），连同句柄 < 1 MB |
+| 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 过滤器连同它的 `Worktree` 句柄 ≤ 16 MB；空闲时本 crate 只有这一项随跟踪文件数增长 |
+| index 变化后的刷新（10 万个跟踪文件，后台） | 重建 fs_watch 过滤器（解析 index、排序折叠顺序、未跟踪遍历、读 `.gitignore`）< 400 ms，fs_watch 等它完成后才交付这一批；`changes` 的全量比较（首次比较和每次 `refresh(Full)`）< 2 s，项目主页先显示文件列表，改动数随后填入 |
+| 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数；10 万文件仓库的读取、过滤器和全量比较都在打开项目之后的后台任务里 |
 | 安装包 ≤ 80 MB | gix 约 3 MB（ADR 0024） |
 
 刷新是增量的：一次 `refresh(Paths)` 只 stat 和读取报告的路径。大仓库（10 万个跟踪文件）的首次全量比较按 stat 数量线性增长，在后台进行，项目主页先显示会话列表，改动数随后填入。
@@ -773,6 +775,14 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 - `git/diff_50_cold` / `git/diff_50_warm`：728 个文件的两棵树，其中 50 个约 300 行的文件各改 10 行，整个 `diff_trees`（读树、属性、重命名检测、读 blob、hunk），hunk 缓存未命中与命中。比只算 hunk 多出读树、属性和对象头的时间，结果偏保守。
 - `git/changes_capped`：10 000 个未跟踪文件、5000 个之后为 `Listed` 时的 `changes`，耗时 < 1 s；`git/changes_capped_bytes`（`memory` 目标，只记录）是调用后改动集、stat 缓存和解析过的 index 仍占的字节数，不超过 `Limits` 默认上限之和（保留内容 32 MiB 加上每个改动文件的条目）。
 - `git/resident`（`memory` 目标，≤ 48 MB）：打开 11 个 worktree 的仓库、当前 worktree 的句柄并持有一个 50 个文件的改动集时，本 crate 的存活字节（含这次比较写进 hunk 缓存的部分）。
+- `git/filter_cloudprint_bytes`（`memory` 目标，< 1 MB）：project 设计的 `cloudprint` 形状（728 个文件，每个路径都是工作区里的文件，`core.ignoreCase = true`）上，`watch_source().filter(&[], ..)` 构造的过滤器连同 `Repo`、`Worktree` 句柄和 `WorktreeSource` 的存活字节。
+
+10 万个跟踪文件的仓库（[project 设计「性能」](project.md#性能)的 `Shape::monorepo(100_000, 2_000)`，一个 worktree，每个路径都是工作区里的文件，index 带 stat，`core.ignoreCase = true` 与 macOS 默认相同；只写树对象，干净的比较不读 blob）：
+
+- `git/open_100k`（< 40 ms）：同 `git/open`，每次新开 `Worktree`，index 不在缓存里。
+- `git/filter_100k`（< 400 ms）：在 index 还没解析的 `Worktree` 上 `watch_source().filter(&[], ..)`，即 index 变化后 fs_watch 重建过滤器的工作。
+- `git/changes_clean_100k`（< 2 s）：同 `git/changes_clean`，同一个 `Worktree`。`refresh(Full)` 对没有改动的文件做同样的工作。
+- `git/filter_100k_bytes`（`memory` 目标，≤ 16 MB）：同 `git/filter_cloudprint_bytes`，在这个仓库上。
 
 ## 状态与异常
 
@@ -944,6 +954,13 @@ hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)，[#122](https://g
 - 缓存：`CACHE_FORMAT` 为 3；用同样两个 OID、格式 2 的键写入的条目，格式 3 的键查不到；命中的 hunk 与计算的相同（偏移在内），另一个仓库里路径不同、内容相同的文件命中同一条目，偏移对它的文本照样成立。`Hunk` 从 16 字节变为 32 字节，LRU 的开销按 `size_of::<Hunk>()` 计，16 MiB 的预算不变。
 - 计时（`just bench --measure git/`，Linux 上只记录、不判定）：`git/diff_50_cold` 中位数 4.53 ms（改动前同一台机器 4.84 ms，预算 < 20 ms），`git/diff_50_warm` 312 µs（改动前 301 µs，预算 < 2 ms），差别在噪声以内；`git/resident` 874 KB（≤ 48 MB），其余 `git/` 基准都在预算内。
 - 没有验证的：macOS 上没有运行；视图按偏移打开完整文件、按窗口高亮的使用方还没有实现（`file_reader`、`review_view`）。
+
+fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)，bench 的基准，本 crate 的代码没有改动），同一类 Linux 虚拟机（x86_64，4 核）：
+
+- `just bench --measure git/`（release，不判定；运行期间同一台机器上另有构建，负载约 9）：`git/open_100k` 中位数 17.2 ms（< 40 ms），`git/filter_100k` 276 ms（< 400 ms），`git/changes_clean_100k` 881 ms（< 2 s），`git/filter_100k_bytes` 13.9 MB（≤ 16 MB）；另一次单独运行这些基准、机器空闲时是 16.4 ms、214 ms、823 ms 和 13.9 MB。`git/filter_cloudprint_bytes` 111 KB（< 1 MB）。原有的 `git/*` 都在预算内，与上一次记录同一量级。
+- `git/filter_100k_bytes` 的 13.9 MB 比 project 第 5 步测得的 13.5 MB 多出折叠顺序（`core.ignoreCase`，每条 4 字节，约 0.4 MB）；夹具的忽略规则只有三条，占用很小。
+- 预算按 Linux 上的中位数留出约 2 倍余量：macOS CI 的 3 核 M1 虚拟机上 `git/diff_50_warm` 曾比这里慢 1.7 倍（见上文）；`changes` 每个文件一次 `SafeRoot::stat`，macOS 上的 `platform/safe_stat` 预算是 < 10 µs。
+- 没有验证的：macOS 上没有运行，三项计时和两项内存由 macOS CI 判定。
 
 ## 与设计的差异
 
