@@ -59,6 +59,9 @@ pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
         for line in annotations(&merged.report) {
             println!("{line}");
         }
+        for line in notices(&merged.report) {
+            println!("{line}");
+        }
     }
     let text = serde_json::to_string_pretty(&merged.report).unwrap_or_default();
     if let Err(error) = std::fs::write(dir.join("report.json"), text + "\n") {
@@ -78,18 +81,68 @@ pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
     ExitCode::from(merged.exit)
 }
 
-/// GitHub keeps at most 10 error annotations per step.
+/// GitHub keeps at most 10 annotations of each level (error, warning,
+/// notice) per step.
 const MAX_ANNOTATIONS: usize = 10;
+
+/// A workflow command's message, escaped.
+fn escape(text: &str) -> String {
+    text.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+/// A workflow command's `title` property, escaped.
+fn escape_title(text: &str) -> String {
+    escape(text).replace(':', "%3A").replace(',', "%2C")
+}
+
+/// `::notice` workflow commands for the record-only results, so their values
+/// can be read from the check run's annotations without the job log or the
+/// report artifact. One notice per group (the ID's first segment, such as
+/// `git`), one line `<id>: <measured>` per result; past 10 groups the rest
+/// share the last notice, so no result is dropped.
+pub(crate) fn notices(report: &Json) -> Vec<String> {
+    let mut groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for result in report["results"].as_array().into_iter().flatten() {
+        if result["status"].as_str() != Some("record") {
+            continue;
+        }
+        let id = result["id"].as_str().unwrap_or_default();
+        let measured = result["measured"].as_str().unwrap_or_default();
+        let group = id.split('/').next().unwrap_or(id);
+        groups
+            .entry(group)
+            .or_default()
+            .push(format!("{id}: {measured}"));
+    }
+    let mut groups: Vec<(String, Vec<String>)> = groups
+        .into_iter()
+        .map(|(group, lines)| (group.to_owned(), lines))
+        .collect();
+    if groups.len() > MAX_ANNOTATIONS {
+        let rest = groups.split_off(MAX_ANNOTATIONS - 1);
+        let names: Vec<&str> = rest.iter().map(|(group, _)| group.as_str()).collect();
+        let title = names.join(" ");
+        let lines = rest.iter().flat_map(|(_, lines)| lines.clone()).collect();
+        groups.push((title, lines));
+    }
+    groups
+        .into_iter()
+        .map(|(group, lines)| {
+            format!(
+                "::notice title={} record::{}",
+                escape_title(&group),
+                escape(&lines.join("\n"))
+            )
+        })
+        .collect()
+}
 
 /// `::error` workflow commands for every result over budget or in error and
 /// every report-level error, so the check run's annotations say which budget
 /// failed without the job log.
 pub(crate) fn annotations(report: &Json) -> Vec<String> {
-    let escape = |text: &str| {
-        text.replace('%', "%25")
-            .replace('\r', "%0D")
-            .replace('\n', "%0A")
-    };
     let mut failed: Vec<(String, String)> = Vec::new();
     for result in report["results"].as_array().into_iter().flatten() {
         let status = result["status"].as_str().unwrap_or_default();
@@ -121,10 +174,7 @@ pub(crate) fn annotations(report: &Json) -> Vec<String> {
     };
     let mut lines: Vec<String> = failed[..shown]
         .iter()
-        .map(|(title, body)| {
-            let title = escape(title).replace(':', "%3A").replace(',', "%2C");
-            format!("::error title={title}::{}", escape(body))
-        })
+        .map(|(title, body)| format!("::error title={}::{}", escape_title(title), escape(body)))
         .collect();
     if shown < failed.len() {
         let rest: Vec<&str> = failed[shown..].iter().map(|(id, _)| id.as_str()).collect();
