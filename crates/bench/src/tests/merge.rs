@@ -382,3 +382,40 @@ fn report_merge_annotations_stay_within_ten() {
         "::error title=more failed budgets::t/9, t/10, t/11"
     );
 }
+
+#[test]
+fn report_merge_notices_group_record_results() {
+    let report = json!({
+        "results": [
+            {"id": "git/changes_clean_100k/stat_all", "status": "record", "measured": "median 310 ms"},
+            {"id": "git/changes_clean_100k", "status": "planned", "measured": ""},
+            {"id": "cache/zstd_1m/put", "status": "record", "measured": "median 2 ms"},
+            {"id": "git/filter_100k/walk", "status": "record", "measured": "median 1.2 s"},
+            {"id": "t/a", "status": "ok", "measured": "median 1 µs"},
+            {"id": "t/b", "status": "smoke", "measured": "median 5 µs"},
+        ],
+        "errors": [],
+    });
+    assert_eq!(
+        crate::merge::notices(&report),
+        [
+            "::notice title=cache record::cache/zstd_1m/put: median 2 ms",
+            "::notice title=git record::git/changes_clean_100k/stat_all: median 310 ms%0A\
+             git/filter_100k/walk: median 1.2 s",
+        ]
+    );
+}
+
+#[test]
+fn report_merge_notices_keep_every_record_within_ten() {
+    let results: Vec<Json> = (0..12)
+        .map(|i| json!({"id": format!("g{i:02}/x"), "status": "record", "measured": "m"}))
+        .collect();
+    let lines = crate::merge::notices(&json!({"results": results, "errors": []}));
+    assert_eq!(lines.len(), 10);
+    assert_eq!(lines[0], "::notice title=g00 record::g00/x: m");
+    assert_eq!(
+        lines[9],
+        "::notice title=g09 g10 g11 record::g09/x: m%0Ag10/x: m%0Ag11/x: m"
+    );
+}
