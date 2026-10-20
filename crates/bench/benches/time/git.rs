@@ -659,3 +659,61 @@ fn refresh_one_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         Value::Time(time),
     )])
 }
+
+/// `Worktree::canonical_oid` on the large repository, recorded: one call on
+/// a new `Worktree` (made untimed), as code_intel's git access makes it
+/// for each file whose raw OID differs from the file list's; the index is
+/// parsed for the call. `…/batch_100`: `canonical_oids` for 100 paths on a
+/// new `Worktree`, one parse for all of them. The bytes are CRLF, so the
+/// conversion runs; the repository stays read-only.
+pub const CANONICAL_OID_100K: Bench = Bench {
+    id: "git/canonical_oid_100k",
+    run: canonical_oid_100k,
+};
+
+fn canonical_oid_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use std::cell::Cell;
+
+    let t = large(ctx)?;
+    let repo = t.repo();
+    let paths: Vec<RepoPath> = large_paths(ctx)
+        .iter()
+        .filter_map(|p| RepoPath::new(p.as_bytes()))
+        .take(100)
+        .collect();
+    let bytes: &[u8] = b"line one\r\nline two\r\n";
+    let items: Vec<(&RepoPath, &[u8])> = paths.iter().map(|p| (p, bytes)).collect();
+    let wt = repo.worktree(&WorktreeId::Main)?;
+    if wt.canonical_oids(&items)?.len() != paths.len() {
+        return Err(BenchError::new("one OID per path"));
+    }
+    drop(wt);
+    let failed = Cell::new(false);
+    let one = ctx.time_with_setup(
+        || repo.worktree(&WorktreeId::Main),
+        |wt| {
+            let oid = wt.map(|wt| (wt.canonical_oid(&paths[0], bytes), wt));
+            if !matches!(oid, Ok((Ok(Some(_)), _))) {
+                failed.set(true);
+            }
+            oid
+        },
+    );
+    let batch = ctx.time_with_setup(
+        || repo.worktree(&WorktreeId::Main),
+        |wt| {
+            let oids = wt.map(|wt| (wt.canonical_oids(&items), wt));
+            if !matches!(&oids, Ok((Ok(v), _)) if v.len() == items.len()) {
+                failed.set(true);
+            }
+            oids
+        },
+    );
+    if failed.get() {
+        return Err(BenchError::new("canonical_oid failed"));
+    }
+    Ok(vec![
+        Measured::new("git/canonical_oid_100k", Value::Time(one)),
+        Measured::new("git/canonical_oid_100k/batch_100", Value::Time(batch)),
+    ])
+}

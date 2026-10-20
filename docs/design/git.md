@@ -255,6 +255,9 @@ impl Worktree {
     /// 把 `bytes` 当作 `path` 上的普通文件，按这个路径的属性和配置做 to-git 方向的内置转换，返回规范内容的 blob OID
     /// （与 `git add` 记录的相同），不写对象库。设置了 clean / process 过滤器的路径返回 None。见下文「规范内容的 OID」。
     pub fn canonical_oid(&self, path: &RepoPath, bytes: &[u8]) -> Result<Option<Oid>, GitError>;
+    /// 对每个 `(path, bytes)` 求 `canonical_oid`，按输入顺序返回；整批一个 gix 句柄、至多解析一次 index，
+    /// 每个 `.gitattributes` 至多读一次。某个路径出错时整批返回错误。路径多时用它，见「规范内容的 OID」。
+    pub fn canonical_oids(&self, items: &[(&RepoPath, &[u8])]) -> Result<Vec<Option<Oid>>, GitError>;
 }
 
 impl TrackedPaths {
@@ -301,8 +304,12 @@ impl From<lectern_fs_watch::WorktreeName> for WorktreeId { /* … */ }
 - 过滤器：属性 `filter=<名>` 指向配置了 `filter.<名>.clean` 或 `.process` 的驱动时返回 None，不执行任何程序。只有 `smudge` 的驱动和没有配置的驱动不影响 to-git 方向，与 git 相同。
 - 属性：`info/attributes`、全局和系统属性文件按句柄的权限读取（与工作区比较相同）；`.gitattributes` 只取 `path` 所在的各级目录（根目录到 `path` 的父目录）里的那一个。每一级的取法与工作区比较取生效的 `.gitattributes` 相同（「与设计的差异」第 3 步）：index 里有这个 `.gitattributes`（stage 0 的普通文件）时，经 `SafeRoot` 读工作区里的那份，工作区里没有或不是普通文件时用 index 的 blob，skip-worktree 的条目直接用 index 的 blob；有未解决冲突的不用；index 里没有时，工作区里有普通文件就用它。属性栈只用 id-mapping 来源，不按路径读工作区（[ADR 0028](../adr/0028.md)）。
 - 与工作区比较的差别：未跟踪的 `.gitattributes` 是否被忽略、是否在被忽略的目录里都会用上，与 git 的 `git add` 相同；工作区比较只用第 4 步遍历列出的那些（「与设计的差异」第 3 步的已知限制）。两者只在被忽略的 `.gitattributes` 上不同。
-- 读取：`bytes` 由调用方给出，本函数不读 `path` 本身；读 index（与 `changes` 共用同一份按校验和缓存的解析结果）和各级 `.gitattributes`（每级最多一次 `SafeRoot::read`，上限 `Limits::default().read_bytes`）。不写 index 和对象库，不执行外部程序。
-- 代价：每次调用打开一个 gix 句柄。新的 `Worktree` 句柄第一次调用时解析 index；同一个句柄在 index 不变时不再解析。调用方只在原始字节的 OID 与期望的不同时调用。
+- 读取：`bytes` 由调用方给出，本函数不读 `path` 本身；读 index 和各级 `.gitattributes`（每级最多一次 `SafeRoot::read`，上限 `Limits::default().read_bytes`）。不写 index 和对象库，不执行外部程序。
+- index：工作区比较解析的 index 不跨调用保留（「缓存」），这里也不共用它。一次调用（`canonical_oid` 或整批的 `canonical_oids`）里：
+  - `Worktree` 保留的 `.gitattributes` 条目来自当前的 index（校验和相同），并且 `tracked()` 的文件列表也是这个 index 的时，用这两者，不解析；文件列表此前没有读过时由 `tracked()` 读一次，之后与过滤器和 `project` 共用。
+  - 否则（新的 `Worktree`、index 变了、文件列表是另一个 index 的）解析一次 index，属性条目和路径自己的 blob 都从这次的解析结果取，调用返回时释放，只留下 `.gitattributes` 条目。所以每次调用至多解析一次，不会把文件列表和 index 各解析一次，也不会混用两个版本的 index。
+- 代价：每次调用打开一个 gix 句柄。新的 `Worktree` 句柄上每次调用解析一次 index，10 万个跟踪文件时约 22 ms、峰值约 39 MB（`git/canonical_oid_100k`）；`canonical_oids` 整批也只解析一次（100 个路径同样约 22 ms，`git/canonical_oid_100k/batch_100`）。调用方只在原始字节的 OID 与期望的不同时调用。
+- 对 `code_intel` 的要求（后续，code_intel 的设计由它自己的 PR 修改）：`code_intel` 的 git 适配每次调用新开 `Worktree`，所以每次 `canonical_oid` 都解析整个 index。批量抽取和核对任务里一批要核对的路径应改用一次 `canonical_oids`，或者在一批之内复用同一个 `Worktree`；交互路径上的单个调用（跳转时核对当前文本）在 10 万文件的仓库上约 22 ms，计入它所在的延迟预算。
 
 ### 改动集
 
@@ -756,7 +763,7 @@ pub struct Hunk {
 | hunk（`FileDiff`） | 格式版本、`HashKind`、旧 OID、新 OID、算法（Histogram）、空白处理（P1 只有「不忽略」） | 进程内字节 LRU 16 MiB；`cache` 实现后写入它的 SQLite（命名空间 `git.diff`），首帧之后才打开 |
 | 工作区文件的 OID | 路径 + stat | `Worktree` 内的内存缓存，不持久化；缓存项不持有让文件内容保持分配的引用（[ADR 0035](../adr/0035.md)），需要内容时取 `refresh` 传入的改动集保留的字节或按路径重新读取（「工作区比较」） |
 | 工作区比较自己解析的 index（gix 的 `State`、逐条的 stat 与标志、`core.ignoreCase` 的折叠副本） | 不缓存 | 只在一次 `changes` / `refresh` 调用内持有，调用返回时释放，下一次比较重新解析（[ADR 0035](../adr/0035.md)）。10 万个跟踪文件时它是 39 MB；调用返回后 `Worktree` 为比较留下的 < 1 MB（`git/compare_100k/retained_bytes`）。代价是每次 `refresh(Paths)` 也要解析一次，10 万个跟踪文件时约 30 ms（「性能」） |
-| index 里的 `.gitattributes` 条目和没有 stage 0 的冲突路径 | index 校验和 | `Worktree` 内，供 `canonical_oid`：只有这几条，一批调用只解析一次 index；路径自己的 blob 取 `tracked` 的 `TrackedPaths`（同一个 `Arc`） |
+| index 里的 `.gitattributes` 条目和没有 stage 0 的冲突路径 | index 校验和 | `Worktree` 内，供 `canonical_oid` / `canonical_oids`：只有这几条。同一个句柄、同一个 index 上的后续调用用它们加上 `tracked` 的 `TrackedPaths`（同一个 `Arc`，校验和相同才用），不再解析；新句柄的调用解析一次，见「规范内容的 OID」 |
 | 改动集、展示行、词级差异 | 不缓存 | 由缓存的 hunk 重算，耗时与可见行数成正比 |
 
 hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本随时可以按 OID 从对象库取出。条目里另存 patch 正文的字节数和两侧内容的字节数（都只由两个 OID 决定），命中时按这次的上限判断 `TooLarge` 和 `Truncated`，只检查两侧对象是否存在（缺失时仍是 `Unavailable::Missing`），不读也不解压对象头。两侧都是 `Blob` 且是文本时才进缓存；有 `binary` / `-diff` 属性的文件不查缓存。上下文行数不在键里，因为展示行在 hunk 之上计算。
@@ -809,6 +816,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 - `git/changes_clean_100k`（< 2 s）：同 `git/changes_clean`，但每个样本用新的 `Worktree`（不计时），每次比较都解析 index，即第 4 步之后每次 `changes` / `refresh(Full)` 的做法。`refresh(Full)` 对没有改动的文件做同样的工作。
 - 这两项在 macOS 上超标（「与设计的差异」），修正之前是计划中。只记录的 `git/filter_100k/walk`（经 `SafeRoot::list` 列出工作区的每个目录一次）、`git/changes_clean_100k/stat_all`（每个跟踪路径 `SafeRoot::stat` 一次）总是运行，用来定位开销；原来的 `git/changes_clean_100k/read_all`（每个跟踪路径 `SafeRoot::read` 一次）在 macOS CI 上每个样本 14.6 s，已去掉。同一基准另记录几个计数（`Value::Count`）：`…/reads`（夹具建好后新 `Worktree` 上第一次 `changes` 读过的文件数，`testing::worktree_reads` 之差，含未跟踪遍历读的 `.gitignore`，干净时为 1）、`…/stat_racy`、`…/stat_unmatched`、`…/stat_mtime`、`…/stat_size`、`…/stat_ctime`、`…/stat_ino`、`…/stat_owner`（`testing::stat_mismatches`，读取之前 index 的 stat 与 `SafeRoot::stat` 逐项不一致的条目数）。另外按阶段计时一次冷的比较（新 `Worktree`，第一次比较之后页缓存是热的）：`…/phase_open`、`…/phase_index`、`…/phase_base_tree`、`…/phase_setup`、`…/phase_stat`、`…/phase_fold`、`…/phase_untracked`、`…/phase_attributes`、`…/phase_classify`、`…/phase_assemble`、`…/phase_finish`（`testing::compare_phases`）和 `…/phase_rest`（整个调用减去各阶段之和：返回时释放临时状态），各 1 个样本。
 - `git/refresh_one_100k`（只记录）：干净的改动集上对一个没有改动的普通跟踪文件做 `refresh(Paths)`，即一次 fs_watch 事件的开销，主要是重新解析 index。路径不改动，共享的大仓库保持只读。
+- `git/canonical_oid_100k`、`git/canonical_oid_100k/batch_100`（只记录）：每个样本新开 `Worktree`（不计时），一次 `canonical_oid`（CRLF 的字节），和 100 个路径一次 `canonical_oids`。前者是 `code_intel` 的 git 适配现在每次调用的开销。
 - `git/changes_count/total_bytes`（`memory` 目标，只记录）和 `git/changes_count/per_path_bytes`（≤ 1 KB；靠 stat 缓存不持有内容和第 4 步释放比较用的 index 两处修正）：1000 个改了的跟踪文件和 1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 持有的一切（stat 缓存等）的存活字节，和它除以改动路径数。
 - `git/compare_100k/peak_bytes`（`memory` 目标，≤ 72 MB）和 `git/compare_100k/retained_bytes`（`memory` 目标，< 1 MB）：新 `Worktree` 上一次 `changes(Base::Head)` 期间的存活字节峰值，和丢掉改动集之后 `Worktree` 比打开时多持有的字节。
 - `git/filter_100k_bytes`（`memory` 目标，≤ 16 MB）：同 `git/filter_cloudprint_bytes`，在这个仓库上。
@@ -1019,9 +1027,16 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 
 第 4 步里不依赖 `services` 的部分：比较用的 index 不跨调用保留（[ADR 0035](../adr/0035.md)，`Refs #14`），同一类 Linux 虚拟机：
 
-- 新的测试 `compare_releases_its_index_*` 4 个（测试钩子对每次比较解析出的 index 记一个 `Weak`）：`…_when_changes_returns`（`changes` 返回、改动集和 `Worktree` 都还在时，解析过一次的 index 已经释放）；`…_refresh_paths_parses_again`（index 没变时 `refresh(Paths)` 重新解析一次、返回时释放，仍只读报告的路径，结果与重新 `changes` 相同）；`…_refresh_full_parses_again`（`refresh(Full)` 同样）；`…_canonical_oid_keeps_only_attributes`（连续三次 `canonical_oid` 只解析一次 index，不留下它；index 换了之后再解析一次，新的属性生效）。`just test -p lectern-git` 238 个测试通过。
+- 新的测试 `compare_releases_its_index_*` 5 个（测试钩子对每次比较解析出的 index 记一个 `Weak`）：
+  - `…_when_changes_returns`：`changes` 返回、改动集和 `Worktree` 都还在时，解析过一次的 index 已经释放。
+  - `…_refresh_paths_parses_again`：index 没变时 `refresh(Paths)` 重新解析一次、返回时释放，仍只读报告的路径，结果与重新 `changes` 相同。
+  - `…_refresh_full_parses_again`：`refresh(Full)` 同样。
+  - `…_canonical_oid_keeps_only_attributes`：新句柄上的第一次 `canonical_oid` 解析一次 index（index 文件只被解析一次，不另读文件列表），不留下它；同一个句柄再调三次，不再解析比较用的 index，文件列表读一次；index 换了之后再解析一次，新的属性生效。
+  - `…_canonical_oids_parse_once_per_batch`：`text=auto`（index 的 blob 有 CR）、`eol`、子目录和不在 index 里的路径，新句柄上的 `canonical_oids` 只解析一次，结果与逐个在新句柄上调用相同；同一个句柄再调一次（用保留的条目和文件列表），结果仍相同；空的一批返回空。
+  - `just test -p lectern-git` 239 个测试通过。
 - `just bench --measure git/`（release，不判定）：`git/compare_100k/retained_bytes` 64 B（原来 39 MB；< 1 MB，改为生效），`git/changes_count/per_path_bytes` 980 B（原来 1111 B；≤ 1 KB，改为生效），`git/changes_count/total_bytes` 2.12 MB → 1.87 MB。`git/compare_100k/peak_bytes` 60.2 MB、`git/changes_clean_100k` 366 ms、`git/open_100k` 20.5 ms、`git/resident` 651 KB，与上一次同一量级。
 - 刷新多出的解析：`git/refresh_one`（728 个文件）605 µs → 827 µs（< 15 ms；同一改动的另一次运行 755 µs）；新加的只记录的 `git/refresh_one_100k` 187 µs → 32.5 ms（另一次 30.5 ms；旧的数字是同一台机器上临时换回旧代码测得），一次的分阶段：解析 18.7 ms、折叠副本 5.7 ms，其余主要是释放解析结果；`git/refresh_full` 3.4 ms（< 15 ms）。取舍见「性能」。
+- `canonical_oid`（只记录，10 万个跟踪文件，每个样本新开 `Worktree`）：`git/canonical_oid_100k` 21.7 ms，`git/canonical_oid_100k/batch_100`（100 个路径一次 `canonical_oids`）22.2 ms（另一次两者都是 22.1 ms）：时间几乎都是解析一次 index，100 个路径的转换在噪声以内。只记录：`code_intel` 的设计没有给它单独的份额，它计入调用方所在的预算（「规范内容的 OID」末条）。
 - 没有验证的：macOS 上的数字，由下一次 macOS CI 给出。
 
 ## 与设计的差异
@@ -1109,7 +1124,7 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 
 - 签名按 code_intel 设计，路径参数是 `&RepoPath`，返回本 crate 的 `Oid`。
 - 未跟踪的 `.gitattributes` 不看忽略规则，与 git 相同、与工作区比较不同（见「规范内容的 OID」）：单个路径只查各级目录，没有遍历可用；为它另建忽略栈只为了复现工作区比较的已知限制，不值得。
-- 实现放在 `compare.rs`（`compare::canonical_oid`），与工作区比较共用 index 快照、`read_attr_file` 和 `WorktreeAttrs`，`conversion.rs` 不变。（第 4 步不再保留 index 快照之后，改为保留 index 的 `.gitattributes` 条目，路径自己的 blob 取 `TrackedPaths`，见第 4 步。）
+- 实现放在 `compare.rs`（`compare::canonical_oid`），与工作区比较共用 index 快照、`read_attr_file` 和 `WorktreeAttrs`，`conversion.rs` 不变。（第 4 步不再保留 index 快照之后，改为保留 index 的 `.gitattributes` 条目，另有批量的 `canonical_oids`，见第 4 步。）
 
 字节偏移（ADR 0034）：
 
@@ -1143,5 +1158,8 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 第 4 步（比较用的 index 不跨调用保留）：
 
 - 这一部分不依赖 `services` 的设计，先单独实现；第 4 步的改动来源接口仍等那份设计。
-- `canonical_oid` 原来也用比较缓存的 index 快照。快照不再保留之后，每次调用都要解析整个 index，而 `code_intel` 的批量抽取对原始 OID 与文件列表不同的文件逐个调用它（如 LFS 的指针文件、`eol` 转换的文件），10 万个跟踪文件时每次约 20 ms。所以 `Worktree` 改为按 index 校验和保留 `canonical_oid` 只需要的部分：index 里的 `.gitattributes` 条目和没有 stage 0 的冲突路径，只有几条；路径自己的 blob 取 `tracked` 的 `TrackedPaths`，它本来就由过滤器和 `project` 共用一份（ADR 0035）。结果与原来相同：`TrackedPaths` 对冲突路径给的是某个冲突 stage 的 blob，原来是没有，所以冲突路径按保留的那一份判断为没有。
+- `canonical_oid` 原来也用比较缓存的 index 快照，同一个 `Worktree` 上的多次调用只解析一次。快照不再保留之后：
+  - `Worktree` 按 index 校验和保留 `canonical_oid` 只需要的部分：index 里的 `.gitattributes` 条目和没有 stage 0 的冲突路径，只有几条。同一个句柄、同一个 index 上的后续调用用它们加上 `tracked` 的 `TrackedPaths`（它本来就由过滤器和 `project` 共用一份，ADR 0035），两者校验和相同才用，否则重新解析。结果与原来相同：`TrackedPaths` 对冲突路径给的是某个冲突 stage 的 blob，原来是没有，所以冲突路径按保留的那一份判断为没有。
+  - 没有保留的条目时（新句柄），解析一次 index，属性条目和路径的 blob 都从这次的结果取，不另读文件列表：与原来新句柄的第一次调用相同，一次解析（10 万个跟踪文件时约 22 ms、峰值约 39 MB）。这一版的第一稿在这里还读一次文件列表，同一次调用解析两遍（约 40 ms、峰值约 53 MB）。
+  - 唯一的生产调用方 `code_intel` 的 git 适配每次调用都新开 `Worktree`，保留的条目对它不命中，每次调用解析一次，与原来相同。为此新增 `canonical_oids`：整批一次解析；`code_intel` 改用它由它的 PR 处理（「规范内容的 OID」末条）。
 - `refresh(Paths)` 每次重新解析 index，10 万个跟踪文件时从约 0.2 ms 变为约 30 ms（「性能」「实际验证」），没有为它设预算：在后台，和 fs_watch 一批事件一次。可以继续降的部分：带范围的刷新只为范围内的路径建条目、不建整个折叠副本（大约省一半）；gix 一次解码整个文件，解析本身省不掉。现在不做，等 macOS 上的数字。

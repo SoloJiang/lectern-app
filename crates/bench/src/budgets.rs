@@ -851,6 +851,18 @@ pub static BUDGETS: &[Budget] = &[
     // again (ADR 0035). `git/refresh_one`'s 15 ms is for the cloudprint
     // shape.
     share("git/refresh_one_100k", RECORD, GIT, ACTIVE, Time),
+    // Recorded: `canonical_oid` there on a new `Worktree` (one index parse,
+    // as code_intel's git access calls it), and `canonical_oids` for 100
+    // paths in one call. code_intel's design gives no share for it yet; it
+    // counts towards its caller's budget (git design「规范内容的 OID」).
+    share("git/canonical_oid_100k", RECORD, GIT, ACTIVE, Time),
+    share(
+        "git/canonical_oid_100k/batch_100",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
     // That comparison's peak of live bytes (temporary memory, not idle):
     // the comparison's own parsed index and case-folded copy, the walk,
     // the change set.

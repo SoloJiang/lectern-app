@@ -203,16 +203,29 @@ impl Worktree {
     /// writing the object database. None when a configured clean or process
     /// filter applies to `path` (e.g. Git LFS): no external program is ever
     /// run, and without it the content can't be made canonical. Reads the
-    /// index's `.gitattributes` entries (parsed once while the index is
-    /// unchanged; the rest of that parse isn't kept), `path`'s blob from
-    /// [`tracked`](Self::tracked) (the same `Arc`) and, through
-    /// `SafeRoot`, the `.gitattributes` in `path`'s
+    /// index and, through `SafeRoot`, the `.gitattributes` in `path`'s
     /// directories; `bytes` themselves are not read from the worktree. A
     /// conversion that fails (bytes invalid in the declared encoding)
-    /// leaves the content raw, as the comparison does.
+    /// leaves the content raw, as the comparison does. Each call parses
+    /// the index once unless this handle already did for the same index:
+    /// for many paths use [`canonical_oids`](Self::canonical_oids).
     pub fn canonical_oid(&self, path: &RepoPath, bytes: &[u8]) -> Result<Option<Oid>, GitError> {
-        let tracked = self.tracked(&EntryLimits::default(), &AtomicBool::new(false))?;
-        compare::canonical_oid(&self.subject(), &tracked, path, bytes)
+        Ok(self.canonical_oids(&[(path, bytes)])?.pop().flatten())
+    }
+
+    /// [`canonical_oid`](Self::canonical_oid) for each `(path, bytes)`, in
+    /// order, with one gix handle and at most one parse of the index for
+    /// the whole batch; each `.gitattributes` is read at most once. A new
+    /// handle parses the index (and drops it on return); a handle that
+    /// already did, for the same index, answers from the `.gitattributes`
+    /// entries it kept and [`tracked`](Self::tracked). An error for one
+    /// path fails the batch.
+    pub fn canonical_oids(
+        &self,
+        items: &[(&RepoPath, &[u8])],
+    ) -> Result<Vec<Option<Oid>>, GitError> {
+        let tracked = || self.tracked(&EntryLimits::default(), &AtomicBool::new(false));
+        compare::canonical_oids(&self.subject(), &tracked, items)
     }
 
     pub(crate) fn safe_root(&self) -> &SafeRoot {

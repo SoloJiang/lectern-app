@@ -591,6 +591,7 @@ crates/bench/
 | `git/compare_100k/peak_bytes` | 存活字节 ≤ 72 MB（同一仓库上新 `Worktree` 的一次 `changes` 期间的峰值：比较自己解析的 index、折叠副本、未跟踪遍历、改动集；临时内存，不是空闲份额；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
 | `git/compare_100k/retained_bytes` | 存活字节 < 1 MB（同一次比较返回、丢掉改动集之后 `Worktree` 比打开时多持有的字节：比较用的 index 不在调用之间保留；`Memory`） | [git](git.md#性能) | `git` 第 4 步 |
 | `git/refresh_one_100k` | 只记录（同一仓库，干净的改动集上对一个没有改动的普通跟踪文件做 `refresh(Paths)`：一次 fs_watch 事件的开销，主要是每次重新解析 index；`git/refresh_one` 的 < 15 ms 是 cloudprint 量级的） | [git](git.md#性能) | `git` 第 4 步 |
+| `git/canonical_oid_100k`、`git/canonical_oid_100k/batch_100` | 只记录（同一仓库，每个样本新开 `Worktree`：一次 `canonical_oid`，即 `code_intel` 的 git 适配每次调用的开销；100 个路径一次 `canonical_oids`。`code_intel` 的设计没有给它单独的份额，计入调用方的预算） | [git](git.md#性能) | `git` 第 4 步 |
 | `git/filter_cloudprint_bytes`、`git/filter_100k_bytes` | 存活字节 < 1 MB / ≤ 16 MB（`cloudprint` 形状 / 10 万文件的仓库，`core.ignoreCase`；fs_watch 过滤器连同它的 `Worktree` 句柄：与 `project` 的句柄共用的解析后 index、折叠顺序、忽略规则；`git` 的份额，`fs_watch/resident*` 和 `project/resident_*` 不含它；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
 | `cache/get_4k`、`cache/get_many_50`、`cache/get_1m` | 中位数 < 50 µs / < 1 ms / < 2 ms（分库已打开） | [cache](cache.md#性能) | 第 1 步（`cache` 第 1 步先以 `perf_smoke` 测量） |
 | `cache/open_existing`、`cache/open_new` | 中位数 < 5 ms / < 10 ms | [cache](cache.md#性能) | 第 1 步（同上） |
@@ -896,8 +897,8 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 
 `git` 第 4 步里比较用的 index 不跨调用保留（`Refs #14`），同一类 Linux 虚拟机：
 
-- `git/compare_100k/retained_bytes` 和 `git/changes_count/per_path_bytes` 改为生效：前者由 `git/compare_100k` 一并产出（丢掉改动集之后的存活字节减去打开 `Worktree` 之后的），后者由 `git/changes_count` 产出（`total_bytes` 的每个样本除以改动路径数）。加入只记录的 `git/refresh_one_100k`（`time` 目标，共享的大仓库，路径不改动，保持只读）。`just test -p lectern-bench` 70 个测试通过。
-- `just bench --measure git/`：`retained_bytes` 64 B（< 1 MB），`per_path_bytes` 980 B（≤ 1 KB），`git/refresh_one_100k` 32.5 ms。数字和取舍见 [git 设计「实际验证」](git.md#实际验证)。
+- `git/compare_100k/retained_bytes` 和 `git/changes_count/per_path_bytes` 改为生效：前者由 `git/compare_100k` 一并产出（丢掉改动集之后的存活字节减去打开 `Worktree` 之后的），后者由 `git/changes_count` 产出（`total_bytes` 的每个样本除以改动路径数）。加入只记录的 `git/refresh_one_100k`、`git/canonical_oid_100k` 和 `git/canonical_oid_100k/batch_100`（`time` 目标，共享的大仓库，路径不改动，保持只读）。`just test -p lectern-bench` 70 个测试通过。
+- `just bench --measure git/`：`retained_bytes` 64 B（< 1 MB），`per_path_bytes` 980 B（≤ 1 KB），`git/refresh_one_100k` 32.5 ms，`git/canonical_oid_100k` 21.7 ms、`…/batch_100` 22.2 ms。数字和取舍见 [git 设计「实际验证」](git.md#实际验证)。
 
 ## 与设计的差异
 
