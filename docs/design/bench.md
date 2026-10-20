@@ -581,15 +581,16 @@ crates/bench/
 | `git/diff_50_cold` / `git/diff_50_warm` | 中位数 < 20 ms / < 2 ms | [git](git.md#性能) | 第 1 步（`git` 第 2 步先以 `perf_smoke` 测量） |
 | `git/changes_capped` | 中位数 < 1 s | [git](git.md#性能) | `git` 第 3 步 |
 | `git/changes_capped_bytes` | 存活字节 ≤ `Limits` 默认上限之和（数字由 `git` 的实现写入 git 设计） | [git](git.md#性能) | `git` 第 3 步 |
-| `git/changes_count/total_bytes` | 只记录（1000 个改了的跟踪文件、1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 持有的存活字节；stat 缓存不再留住文件内容，比较用的 index 仍在（`git` 第 4 步释放）；`Memory`） | [git](git.md#性能) | 随 [ADR 0035](../adr/0035.md) 加入 |
-| `git/changes_count/per_path_bytes` | 存活字节 ≤ 1 KB（同上除以改动路径数；ADR 0035 按它给首页的改动集定上限；`Memory`） | [git](git.md#性能) | `git` 第 4 步（释放比较用的 index；另一个前提 stat 缓存不持有内容已完成） |
+| `git/changes_count/total_bytes` | 只记录（1000 个改了的跟踪文件、1000 个未跟踪文件，各 10–50 KB，加一个 16 MiB 的未跟踪文件，按项目主页的计数比较取 `retained_bytes = 0`、`total_patch_bytes = 0`；改动集连同 `Worktree` 持有的存活字节；stat 缓存不留住文件内容，比较用的 index 在调用返回时释放；`Memory`） | [git](git.md#性能) | 随 [ADR 0035](../adr/0035.md) 加入 |
+| `git/changes_count/per_path_bytes` | 存活字节 ≤ 1 KB（同上除以改动路径数；ADR 0035 按它给首页的改动集定上限；`Memory`） | [git](git.md#性能) | `git` 第 4 步（释放比较用的 index；另一个前提 stat 缓存不持有内容） |
 | `git/resident` | 存活字节 ≤ 48 MB（hunk LRU 16 MB + 一个 `ChangeSet` 32 MB，空闲时不持有句柄） | [git](git.md#性能) | `git` 第 3 步 |
 | `git/open_100k`、`git/filter_100k`、`git/changes_clean_100k` | 中位数 < 40 ms / < 400 ms / < 2 s（10 万个跟踪文件、`core.ignoreCase`：`git/open` 的读取，index 不在缓存里；index 变化后重建 fs_watch 过滤器；干净工作区的 `changes`，每个样本用新的 `Worktree`，index 每次都解析） | [git](git.md#性能) | `git/open_100k` 随 [ADR 0035](../adr/0035.md) 加入；`git/changes_clean_100k` 在 macOS CI 上是 9.05–9.54 s，cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)）之后改回生效；`git/filter_100k` 在 macOS CI 上是 678–766 ms（目录遍历单独 473 ms），仍是计划中，由减少目录遍历的 `git` PR 加入 |
 | `git/filter_100k/walk`、`git/changes_clean_100k/stat_all` | 只记录（同一仓库：经 `SafeRoot::list` 列出工作区的每个目录一次；对每个跟踪路径 `SafeRoot::stat` 一次。用来定位上一行两项在 macOS 上的开销；原来的 `git/changes_clean_100k/read_all` 已去掉，见「实际验证」） | [git](git.md#性能) | 随 ADR 0035 加入 |
 | `git/changes_clean_100k/reads`、`…/stat_racy`、`…/stat_unmatched`、`…/stat_mtime`、`…/stat_size`、`…/stat_ctime`、`…/stat_ino`、`…/stat_owner` | 只记录，计数（`Value::Count`；同一仓库：新 `Worktree` 上第一次比较读过的文件数，读取之前 index 的 stat 与 `SafeRoot::stat` 逐项不一致的条目数。分辨 macOS 上的开销是比较去读了内容，还是 stat 与遍历本身慢，见 [git 设计「与设计的差异」](git.md#与设计的差异)） | [git](git.md#性能) | `git` 的 stat 缓存修正 |
 | `git/changes_clean_100k/phase_open`、`…/phase_index`、`…/phase_base_tree`、`…/phase_setup`、`…/phase_stat`、`…/phase_fold`、`…/phase_untracked`、`…/phase_attributes`、`…/phase_classify`、`…/phase_assemble`、`…/phase_finish`、`…/phase_rest` | 只记录（同一仓库上一次冷的比较按阶段的墙钟时间，各 1 个样本；`…/phase_rest` 是整个调用减去各阶段之和。ID 用 `phase_<名字>`，不用 `phase/<名字>`：ID 最多三段） | [git](git.md#性能) | `git` 的比较分阶段计时 |
 | `git/compare_100k/peak_bytes` | 存活字节 ≤ 72 MB（同一仓库上新 `Worktree` 的一次 `changes` 期间的峰值：比较自己解析的 index、折叠副本、未跟踪遍历、改动集；临时内存，不是空闲份额；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
-| `git/compare_100k/retained_bytes` | 存活字节 < 1 MB（同一次比较返回、丢掉改动集之后 `Worktree` 仍持有的字节：比较用的 index 不在调用之间保留；`Memory`） | [git](git.md#性能) | `git` 第 4 步 |
+| `git/compare_100k/retained_bytes` | 存活字节 < 1 MB（同一次比较返回、丢掉改动集之后 `Worktree` 比打开时多持有的字节：比较用的 index 不在调用之间保留；`Memory`） | [git](git.md#性能) | `git` 第 4 步 |
+| `git/refresh_one_100k` | 只记录（同一仓库，干净的改动集上对一个没有改动的普通跟踪文件做 `refresh(Paths)`：一次 fs_watch 事件的开销，主要是每次重新解析 index；`git/refresh_one` 的 < 15 ms 是 cloudprint 量级的） | [git](git.md#性能) | `git` 第 4 步 |
 | `git/filter_cloudprint_bytes`、`git/filter_100k_bytes` | 存活字节 < 1 MB / ≤ 16 MB（`cloudprint` 形状 / 10 万文件的仓库，`core.ignoreCase`；fs_watch 过滤器连同它的 `Worktree` 句柄：与 `project` 的句柄共用的解析后 index、折叠顺序、忽略规则；`git` 的份额，`fs_watch/resident*` 和 `project/resident_*` 不含它；`Memory`） | [git](git.md#性能) | 随 ADR 0035 加入 |
 | `cache/get_4k`、`cache/get_many_50`、`cache/get_1m` | 中位数 < 50 µs / < 1 ms / < 2 ms（分库已打开） | [cache](cache.md#性能) | 第 1 步（`cache` 第 1 步先以 `perf_smoke` 测量） |
 | `cache/open_existing`、`cache/open_new` | 中位数 < 5 ms / < 10 ms | [cache](cache.md#性能) | 第 1 步（同上） |
@@ -892,6 +893,11 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
   - 最慢的仍是 `code_intel/disk_100k`（76.7 s、80.5 s）：只记录、只运行一次，时间是 9 万个文件的抽取和写入，本次没有改它。
 - 这两次测量在 #131 合并之前（`git/changes_clean_100k/read_all` 还在，改动后只取 1 个样本）；rebase 到 #131 之后它已不存在，`…/stat_all` 取 1 个样本。
 - 没有验证的：macOS 上的耗时，由下一次 CI 的 `slowest benchmarks` notice 给出。
+
+`git` 第 4 步里比较用的 index 不跨调用保留（`Refs #14`），同一类 Linux 虚拟机：
+
+- `git/compare_100k/retained_bytes` 和 `git/changes_count/per_path_bytes` 改为生效：前者由 `git/compare_100k` 一并产出（丢掉改动集之后的存活字节减去打开 `Worktree` 之后的），后者由 `git/changes_count` 产出（`total_bytes` 的每个样本除以改动路径数）。加入只记录的 `git/refresh_one_100k`（`time` 目标，共享的大仓库，路径不改动，保持只读）。`just test -p lectern-bench` 70 个测试通过。
+- `just bench --measure git/`：`retained_bytes` 64 B（< 1 MB），`per_path_bytes` 980 B（≤ 1 KB），`git/refresh_one_100k` 32.5 ms。数字和取舍见 [git 设计「实际验证」](git.md#实际验证)。
 
 ## 与设计的差异
 

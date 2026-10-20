@@ -622,3 +622,40 @@ fn changes_clean_100k_full(ctx: &mut Ctx, t: &TestRepo) -> Result<Measured, Benc
     }
     Ok(Measured::new("git/changes_clean_100k", Value::Time(time)))
 }
+
+/// `git/refresh_one` on the large repository, recorded: `refresh(Paths)`
+/// of one tracked path from the clean change set, as for one fs_watch
+/// event. The path is unchanged (the shared repository stays read-only),
+/// so the cost is what every such refresh pays: the index parsed again
+/// (no parsed index is kept between calls, ADR 0035), the path's stat,
+/// the scoped walk.
+pub const REFRESH_ONE_100K: Bench = Bench {
+    id: "git/refresh_one_100k",
+    run: refresh_one_100k,
+};
+
+fn refresh_one_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let t = large(ctx)?;
+    // An ordinary file: a `.gitignore` or `.gitattributes` would make it a
+    // full comparison.
+    let path = large_paths(ctx)
+        .into_iter()
+        .find(|p| {
+            !p.rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with('.'))
+        })
+        .and_then(|p| RepoPath::new(p.as_bytes()))
+        .ok_or_else(|| BenchError::new("no tracked path"))?;
+    let wt = worktree::main_worktree(&t)?;
+    let cancel = AtomicBool::new(false);
+    let prev = worktree::changes(&wt, &Limits::default(), &cancel)?;
+    worktree::expect(&prev, 0, 0)?;
+    let paths = std::slice::from_ref(&path);
+    worktree::expect(&*wt.refresh(&prev, Refresh::Paths(paths), &cancel)?, 0, 0)?;
+    let time = ctx.time(|| wt.refresh(&prev, Refresh::Paths(paths), &cancel));
+    Ok(vec![Measured::new(
+        "git/refresh_one_100k",
+        Value::Time(time),
+    )])
+}
