@@ -1825,6 +1825,45 @@ fn worktree_stat_cache_hit_equal_to_the_index_needs_no_bytes() {
 }
 
 #[test]
+fn worktree_compare_phases_are_timed_in_order() {
+    let t = clean_repo(&[("a", b"a\n"), ("d/b", b"b\n")]);
+    t.append_config("[core]\n\tignoreCase = true\n");
+    t.write_file("u", b"untracked\n");
+    let wt = main_worktree(&t);
+    let cancel = no_cancel();
+    let first = wt.changes(Base::Head, &Limits::default(), &cancel).unwrap();
+    let names: Vec<&str> = crate::testing::compare_phases()
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    let all = [
+        "open",
+        "index",
+        "base_tree",
+        "setup",
+        "stat",
+        "fold",
+        "untracked",
+        "attributes",
+        "classify",
+        "assemble",
+        "finish",
+    ];
+    assert_eq!(names, all);
+    // A refresh of no path walks nothing: no `fold` or `untracked`.
+    let _ = wt.refresh(&first, Refresh::Paths(&[]), &cancel).unwrap();
+    let names: Vec<&str> = crate::testing::compare_phases()
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    let expected: Vec<&str> = all
+        .into_iter()
+        .filter(|n| *n != "fold" && *n != "untracked")
+        .collect();
+    assert_eq!(names, expected);
+}
+
+#[test]
 fn worktree_stat_mismatches_of_a_clean_worktree_are_none() {
     // What bench's `git/changes_clean_100k/stat_*` count: none for files
     // whose stat the index recorded, also after every file was read (an

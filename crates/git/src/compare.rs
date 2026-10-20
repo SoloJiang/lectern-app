@@ -286,12 +286,15 @@ pub(crate) fn run(
     refresh: Option<(&ChangeSet, &Origin, &[RepoPath])>,
     held: Option<&Origin>,
 ) -> Result<Arc<ChangeSet>, GitError> {
+    let mut phases = hook::Phases::start();
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let handle = Handle::open(subject.git_dir, subject.repo.scope())?;
+    phases.end("open");
     let hash = subject.repo.hash();
     let index = snapshot(subject, &handle, limits, cancel)?;
+    phases.end("index");
 
     // A refresh of some paths stands only while HEAD (for `Base::Head`) and
     // the index are what the previous comparison saw; otherwise everything
@@ -382,6 +385,7 @@ pub(crate) fn run(
         base_entries.sort_by(|a, b| a.0.cmp(&b.0));
         base_entries.dedup_by(|a, b| a.0 == b.0);
     }
+    phases.end("base_tree");
 
     // The index items in scope.
     let items: Vec<usize> = match &scope {
@@ -414,6 +418,7 @@ pub(crate) fn run(
     let config = handle.config_snapshot();
     let file_mode = config.boolean("core.fileMode").unwrap_or(true);
     let stat_options = handle.stat_options().map_err(GitError::from_gix)?;
+    phases.end("setup");
 
     // Phase A: stat every index path in scope that has a worktree side.
     let mut stats: HashMap<usize, Stat> = HashMap::with_capacity(items.len());
@@ -436,6 +441,7 @@ pub(crate) fn run(
         };
         stats.insert(i, stat);
     }
+    phases.end("stat");
 
     // Phase B: untracked files, listed through `SafeRoot` (ADR 0028).
     let outside_untracked = refresh.map_or(0, |(_, origin, _)| {
@@ -454,6 +460,16 @@ pub(crate) fn run(
     let (untracked, mut untracked_capped) = if scope.as_ref().is_some_and(|s| s.0.is_empty()) {
         (Vec::new(), false)
     } else {
+        // With `core.ignoreCase` the walk's index lookups use the
+        // case-folded copy. Only when timing phases (test-support) is it
+        // built here, so that its cost is a phase of its own; otherwise it
+        // stays lazy, built by the walk's first lookup if there is one (a
+        // refresh under a removed directory makes none).
+        #[cfg(any(test, feature = "test-support"))]
+        if config.boolean("core.ignoreCase").unwrap_or(false) {
+            index.folded();
+        }
+        phases.end("fold");
         let found = untracked::walk(
             &handle,
             hash,
@@ -465,6 +481,7 @@ pub(crate) fn run(
             cancel,
             None,
         )?;
+        phases.end("untracked");
         (found.entries, found.capped)
     };
     if let Some((_, origin, _)) = refresh {
@@ -538,6 +555,7 @@ pub(crate) fn run(
             Err(_) => Rules::All,
         }
     };
+    phases.end("attributes");
 
     let mut reader = Reader {
         root: subject.root,
@@ -698,6 +716,8 @@ pub(crate) fn run(
         return Err(GitError::TooManyEntries);
     }
 
+    phases.end("classify");
+
     // Phase E: renames, then each file's detail under the limits.
     let mut diff_attrs = |path: &RepoPath| attrs.get(path).map(|a| a.diff);
     let pending = pair_renames(&handle, records.clone(), limits, &mut diff_attrs, cancel)?;
@@ -708,6 +728,7 @@ pub(crate) fn run(
         attrs: &mut diff_attrs,
     }
     .run(pending)?;
+    phases.end("assemble");
 
     let mut invalid: Vec<Arc<[u8]>> = index.invalid.clone();
     let base_invalid = match refresh {
@@ -772,14 +793,16 @@ pub(crate) fn run(
         base_invalid,
         untracked_capped,
     });
-    Ok(Arc::new(ChangeSet::from_parts(
+    let set = Arc::new(ChangeSet::from_parts(
         base_tree,
         Target::Worktree(subject.id.clone()),
         assembled,
         totals,
         limits.clone(),
         origin,
-    )))
+    ));
+    phases.end("finish");
+    Ok(set)
 }
 
 /// `refresh`: checks that `prev` is a comparison of this worktree.
@@ -1689,11 +1712,63 @@ pub(crate) mod hook {
     pub(crate) fn reads() -> usize {
         READS.with(Cell::get)
     }
+
+    thread_local! {
+        static PHASES: std::cell::RefCell<Vec<(&'static str, Duration)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// The clock of one comparison's phases (`testing::compare_phases`).
+    pub(crate) struct Phases {
+        last: Instant,
+    }
+
+    impl Phases {
+        /// Starts a comparison: forgets the previous one's phases.
+        pub(crate) fn start() -> Phases {
+            PHASES.with(|p| p.borrow_mut().clear());
+            Phases {
+                last: Instant::now(),
+            }
+        }
+
+        /// Ends phase `name`: the time since the previous phase ended (or
+        /// the comparison started). A phase ended twice adds up.
+        pub(crate) fn end(&mut self, name: &'static str) {
+            let now = Instant::now();
+            let elapsed = now - self.last;
+            self.last = now;
+            PHASES.with(|p| {
+                let mut p = p.borrow_mut();
+                match p.iter_mut().find(|(n, _)| *n == name) {
+                    Some((_, total)) => *total += elapsed,
+                    None => p.push((name, elapsed)),
+                }
+            });
+        }
+    }
+
+    pub(crate) fn phases() -> Vec<(&'static str, Duration)> {
+        PHASES.with(|p| p.borrow().clone())
+    }
+
+    use std::time::{Duration, Instant};
 }
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) mod hook {
     pub(crate) fn read() {}
+
+    /// Without `test-support` the phase clock does nothing.
+    pub(crate) struct Phases;
+
+    impl Phases {
+        pub(crate) fn start() -> Phases {
+            Phases
+        }
+
+        pub(crate) fn end(&mut self, _name: &'static str) {}
+    }
 }
 
 /// How the index stat of every tracked path compares with its

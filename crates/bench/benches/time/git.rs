@@ -542,6 +542,25 @@ fn changes_clean_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     worktree::expect(&*worktree::changes(&wt, &limits, &cancel)?, 0, 0)?;
     let read = testing::worktree_reads() - before;
     drop(wt);
+    // One more cold comparison (a new `Worktree`), timed by phase; the
+    // first one warmed the page cache. `phase_rest` is what the phases
+    // don't cover: dropping the comparison's temporary state, the call.
+    let wt = repo.worktree(&WorktreeId::Main)?;
+    let started = std::time::Instant::now();
+    let set = worktree::changes(&wt, &limits, &cancel)?;
+    let total = started.elapsed();
+    worktree::expect(&set, 0, 0)?;
+    drop((set, wt));
+    let phases = testing::compare_phases();
+    let covered: std::time::Duration = phases.iter().map(|(_, d)| *d).sum();
+    let mut timed: Vec<(String, std::time::Duration)> = phases
+        .into_iter()
+        .map(|(name, d)| (format!("git/changes_clean_100k/phase_{name}"), d))
+        .collect();
+    timed.push((
+        "git/changes_clean_100k/phase_rest".to_owned(),
+        total.saturating_sub(covered),
+    ));
     let mut out = vec![Measured::new(
         "git/changes_clean_100k/reads",
         Value::Count(read as u64),
@@ -560,6 +579,13 @@ fn changes_clean_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             Value::Count(n as u64),
         ));
     }
+    // One sample each, as `Ctx::once` takes for a diagnostic; built by hand
+    // because the one call gives all twelve values.
+    out.extend(
+        timed
+            .into_iter()
+            .map(|(id, d)| Measured::new(id, Value::Time(lectern_bench::Samples(vec![d])))),
+    );
     stat_all()?;
     out.push(Measured::new(
         "git/changes_clean_100k/stat_all",

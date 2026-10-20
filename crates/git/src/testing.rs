@@ -32,6 +32,21 @@ pub fn worktree_reads() -> usize {
     crate::compare::hook::reads()
 }
 
+/// The phases of the last worktree comparison (`changes` or `refresh`) on
+/// this thread, in order, with the wall time each took: `open` (the gix
+/// handle), `index` (reading and parsing the index), `base_tree` (the base
+/// tree's entries), `setup`, `stat` (`SafeRoot::stat` of every tracked
+/// path), `fold` (the case-folded index copy under `core.ignoreCase`),
+/// `untracked` (the walk with its ignore matching and index lookups),
+/// `attributes`, `classify` (each path's worktree side, reads included),
+/// `assemble` (renames and details) and `finish`. A phase that doesn't
+/// run (`fold` and `untracked` of a refresh with nothing to walk) is
+/// absent. Dropping the comparison's temporary state after `finish` isn't
+/// counted. For bench's `git/changes_clean_100k/phase_*`.
+pub fn compare_phases() -> Vec<(&'static str, std::time::Duration)> {
+    crate::compare::hook::phases()
+}
+
 /// [`stat_mismatches`]: for the tracked paths with a stage-0 entry, outside
 /// skip-worktree, that `SafeRoot::stat` finds, how many are racy, how many
 /// a comparison would read because the stat differs (`unmatched`, not
