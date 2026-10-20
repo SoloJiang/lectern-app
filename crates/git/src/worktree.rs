@@ -29,8 +29,9 @@ struct Inner {
     root: SafeRoot,
     /// Held only within one call, never across calls.
     tracked: Mutex<Option<Arc<TrackedPaths>>>,
-    /// The parsed index, stat cache and conversion baseline of `changes`
-    /// and `refresh`. Held only within one call.
+    /// The stat cache and conversion baseline of `changes` and `refresh`,
+    /// and the index's `.gitattributes` entries for `canonical_oid`. The
+    /// index those calls parse is held only within one call.
     compare: Mutex<CompareState>,
 }
 
@@ -202,13 +203,29 @@ impl Worktree {
     /// writing the object database. None when a configured clean or process
     /// filter applies to `path` (e.g. Git LFS): no external program is ever
     /// run, and without it the content can't be made canonical. Reads the
-    /// index (shared with [`changes`](Self::changes) while it is unchanged)
-    /// and, through `SafeRoot`, the `.gitattributes` in `path`'s
+    /// index and, through `SafeRoot`, the `.gitattributes` in `path`'s
     /// directories; `bytes` themselves are not read from the worktree. A
     /// conversion that fails (bytes invalid in the declared encoding)
-    /// leaves the content raw, as the comparison does.
+    /// leaves the content raw, as the comparison does. Each call parses
+    /// the index once unless this handle already did for the same index:
+    /// for many paths use [`canonical_oids`](Self::canonical_oids).
     pub fn canonical_oid(&self, path: &RepoPath, bytes: &[u8]) -> Result<Option<Oid>, GitError> {
-        compare::canonical_oid(&self.subject(), path, bytes)
+        Ok(self.canonical_oids(&[(path, bytes)])?.pop().flatten())
+    }
+
+    /// [`canonical_oid`](Self::canonical_oid) for each `(path, bytes)`, in
+    /// order, with one gix handle and at most one parse of the index for
+    /// the whole batch; each `.gitattributes` is read at most once. A new
+    /// handle parses the index (and drops it on return); a handle that
+    /// already did, for the same index, answers from the `.gitattributes`
+    /// entries it kept and [`tracked`](Self::tracked). An error for one
+    /// path fails the batch.
+    pub fn canonical_oids(
+        &self,
+        items: &[(&RepoPath, &[u8])],
+    ) -> Result<Vec<Option<Oid>>, GitError> {
+        let tracked = || self.tracked(&EntryLimits::default(), &AtomicBool::new(false));
+        compare::canonical_oids(&self.subject(), &tracked, items)
     }
 
     pub(crate) fn safe_root(&self) -> &SafeRoot {

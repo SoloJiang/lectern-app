@@ -76,10 +76,9 @@ fn git_resident(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 /// `total_patch_bytes = 0`, so the change set keeps no content and no
 /// hunks. `total_bytes` (recorded) is the live bytes of that change set
 /// with what its `Worktree` holds, what the home keeps at idle for
-/// incremental refreshes. `per_path_bytes` (the same divided by the
-/// changed paths, ≤ 1 KB) is added by whichever lands later of the git fix
-/// that stops the stat cache from keeping file contents allocated and git
-/// step 4, which releases the comparison index.
+/// incremental refreshes. `per_path_bytes` (≤ 1 KB) is the same divided by
+/// the changed paths: the stat cache keeps no file contents allocated and
+/// the comparison's parsed index is dropped when the call returns.
 const GIT_CHANGES_COUNT: Bench = Bench {
     id: "git/changes_count",
     run: git_changes_count,
@@ -111,10 +110,11 @@ fn git_changes_count(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         samples.push(held as u64);
         drop((set, wt));
     }
-    Ok(vec![Measured::new(
-        "git/changes_count/total_bytes",
-        Value::Bytes(samples),
-    )])
+    let per_path = samples.iter().map(|b| b / paths as u64).collect();
+    Ok(vec![
+        Measured::new("git/changes_count/total_bytes", Value::Bytes(samples)),
+        Measured::new("git/changes_count/per_path_bytes", Value::Bytes(per_path)),
+    ])
 }
 
 /// `git/changes_capped_bytes`: live bytes a change set of 10 000 untracked
@@ -213,10 +213,10 @@ fn filter_bytes(ctx: &Ctx, t: &lectern_git::testing::TestRepo) -> Result<Vec<u64
 /// clean large repository (100 000 tracked files, `core.ignoreCase`) with a
 /// new `Worktree`; the peak of live bytes during the call (the comparison's
 /// own parsed index, its case-folded copy, the walk, the change set),
-/// docs/design/git.md「性能」, ADR 0035. git step 4 adds
-/// `git/compare_100k/retained_bytes` here: what the `Worktree` still holds
-/// once the change set is dropped (live bytes after `drop(set)` below),
-/// with no parsed index kept between calls.
+/// docs/design/git.md「性能」, ADR 0035; and `…/retained_bytes`, what the
+/// `Worktree` still holds once the change set is dropped (the live bytes
+/// after `drop(set)` less those before the comparison): no parsed index is
+/// kept between calls, only the stat cache of what was read.
 const GIT_COMPARE_100K: Bench = Bench {
     id: "git/compare_100k",
     run: git_compare_100k,
@@ -226,27 +226,30 @@ fn git_compare_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let t = worktree::large_shared(ctx)?;
     let cancel = AtomicBool::new(false);
     let limits = Limits::default();
-    let mut peaks = Vec::new();
+    let (mut peaks, mut retained) = (Vec::new(), Vec::new());
     // Round 0 warms up gix's process-wide lazy state and is not reported.
     for round in 0..=ctx.scale(SAMPLES, 1) {
         let before = CountingAlloc::live();
         let discovered = lectern_git::testing::discover(t.root(), &[])?
             .ok_or_else(|| BenchError::new("no repository"))?;
         let wt = discovered.repo.worktree(&WorktreeId::Main)?;
+        let opened = CountingAlloc::live();
         CountingAlloc::reset_peak();
         let set = worktree::changes(&wt, &limits, &cancel)?;
         let peak = CountingAlloc::peak().saturating_sub(before);
         worktree::expect(&set, 0, 0)?;
         drop(set);
+        let kept = CountingAlloc::live().saturating_sub(opened);
         if round > 0 {
             peaks.push(peak as u64);
+            retained.push(kept as u64);
         }
         drop((wt, discovered));
     }
-    Ok(vec![Measured::new(
-        "git/compare_100k/peak_bytes",
-        Value::Bytes(peaks),
-    )])
+    Ok(vec![
+        Measured::new("git/compare_100k/peak_bytes", Value::Bytes(peaks)),
+        Measured::new("git/compare_100k/retained_bytes", Value::Bytes(retained)),
+    ])
 }
 
 const BENCHES: &[Bench] = &[

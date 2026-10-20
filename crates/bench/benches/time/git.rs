@@ -622,3 +622,98 @@ fn changes_clean_100k_full(ctx: &mut Ctx, t: &TestRepo) -> Result<Measured, Benc
     }
     Ok(Measured::new("git/changes_clean_100k", Value::Time(time)))
 }
+
+/// `git/refresh_one` on the large repository, recorded: `refresh(Paths)`
+/// of one tracked path from the clean change set, as for one fs_watch
+/// event. The path is unchanged (the shared repository stays read-only),
+/// so the cost is what every such refresh pays: the index parsed again
+/// (no parsed index is kept between calls, ADR 0035), the path's stat,
+/// the scoped walk.
+pub const REFRESH_ONE_100K: Bench = Bench {
+    id: "git/refresh_one_100k",
+    run: refresh_one_100k,
+};
+
+fn refresh_one_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let t = large(ctx)?;
+    // An ordinary file: a `.gitignore` or `.gitattributes` would make it a
+    // full comparison.
+    let path = large_paths(ctx)
+        .into_iter()
+        .find(|p| {
+            !p.rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with('.'))
+        })
+        .and_then(|p| RepoPath::new(p.as_bytes()))
+        .ok_or_else(|| BenchError::new("no tracked path"))?;
+    let wt = worktree::main_worktree(&t)?;
+    let cancel = AtomicBool::new(false);
+    let prev = worktree::changes(&wt, &Limits::default(), &cancel)?;
+    worktree::expect(&prev, 0, 0)?;
+    let paths = std::slice::from_ref(&path);
+    worktree::expect(&*wt.refresh(&prev, Refresh::Paths(paths), &cancel)?, 0, 0)?;
+    let time = ctx.time(|| wt.refresh(&prev, Refresh::Paths(paths), &cancel));
+    Ok(vec![Measured::new(
+        "git/refresh_one_100k",
+        Value::Time(time),
+    )])
+}
+
+/// `Worktree::canonical_oid` on the large repository, recorded: one call on
+/// a new `Worktree` (made untimed), as code_intel's git access makes it
+/// for each file whose raw OID differs from the file list's; the index is
+/// parsed for the call. `…/batch_100`: `canonical_oids` for 100 paths on a
+/// new `Worktree`, one parse for all of them. The bytes are CRLF, so the
+/// conversion runs; the repository stays read-only.
+pub const CANONICAL_OID_100K: Bench = Bench {
+    id: "git/canonical_oid_100k",
+    run: canonical_oid_100k,
+};
+
+fn canonical_oid_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use std::cell::Cell;
+
+    let t = large(ctx)?;
+    let repo = t.repo();
+    let paths: Vec<RepoPath> = large_paths(ctx)
+        .iter()
+        .filter_map(|p| RepoPath::new(p.as_bytes()))
+        .take(100)
+        .collect();
+    let bytes: &[u8] = b"line one\r\nline two\r\n";
+    let items: Vec<(&RepoPath, &[u8])> = paths.iter().map(|p| (p, bytes)).collect();
+    let wt = repo.worktree(&WorktreeId::Main)?;
+    if wt.canonical_oids(&items)?.len() != paths.len() {
+        return Err(BenchError::new("one OID per path"));
+    }
+    drop(wt);
+    let failed = Cell::new(false);
+    let one = ctx.time_with_setup(
+        || repo.worktree(&WorktreeId::Main),
+        |wt| {
+            let oid = wt.map(|wt| (wt.canonical_oid(&paths[0], bytes), wt));
+            if !matches!(oid, Ok((Ok(Some(_)), _))) {
+                failed.set(true);
+            }
+            oid
+        },
+    );
+    let batch = ctx.time_with_setup(
+        || repo.worktree(&WorktreeId::Main),
+        |wt| {
+            let oids = wt.map(|wt| (wt.canonical_oids(&items), wt));
+            if !matches!(&oids, Ok((Ok(v), _)) if v.len() == items.len()) {
+                failed.set(true);
+            }
+            oids
+        },
+    );
+    if failed.get() {
+        return Err(BenchError::new("canonical_oid failed"));
+    }
+    Ok(vec![
+        Measured::new("git/canonical_oid_100k", Value::Time(one)),
+        Measured::new("git/canonical_oid_100k/batch_100", Value::Time(batch)),
+    ])
+}

@@ -72,6 +72,8 @@ const BENCHES: &[Bench] = &[
     git::OPEN_100K,
     git::FILTER_100K,
     git::CHANGES_CLEAN_100K,
+    git::REFRESH_ONE_100K,
+    git::CANONICAL_OID_100K,
     i18n::FRAME_STRINGS,
     kernel::SERVICE_GET,
     kernel::SERVICE_FOR_EACH,

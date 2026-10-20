@@ -50,14 +50,114 @@ pub enum Refresh<'a> {
     Full,
 }
 
-/// What a `Worktree` keeps between comparisons, in memory only: the parsed
-/// index, the stat cache and the conversion state its stat comparisons are
-/// checked against. Locked only briefly, never across a call.
+/// What a `Worktree` keeps between comparisons, in memory only: the stat
+/// cache, the conversion state its stat comparisons are checked against and
+/// the index's `.gitattributes` entries for `canonical_oid`. Not the parsed
+/// index: each comparison parses it again and drops it when it returns
+/// (ADR 0035; 39 MB for 100 000 tracked files). Locked only briefly, never
+/// across a call.
 #[derive(Default)]
 pub(crate) struct CompareState {
-    index: Option<Arc<IndexSnapshot>>,
     cache: HashMap<RepoPath, Cached>,
     baseline: Option<Arc<ConversionState>>,
+    attributes: Option<Arc<IndexAttributes>>,
+}
+
+/// The `.gitattributes` entries of one index, keyed by its checksum, and
+/// its conflicted paths without a stage-0 entry: what `canonical_oids`
+/// needs from the parsed index beyond `TrackedPaths`, a few entries where
+/// the parsed index is 39 MB at 100 000 files.
+pub(crate) struct IndexAttributes {
+    checksum: Option<Oid>,
+    /// In path order.
+    items: Vec<(RepoPath, AttrEntry)>,
+    /// In path order. `TrackedPaths` gives them a conflict stage's blob;
+    /// for `canonical_oids` they have none.
+    conflicted: Vec<RepoPath>,
+}
+
+/// An index entry as `canonical_oids` uses it.
+#[derive(Clone, Copy)]
+struct AttrEntry {
+    entry: Option<(Mode, Oid)>,
+    conflict: bool,
+    skip_worktree: bool,
+}
+
+impl AttrEntry {
+    fn of(item: &IndexItem) -> AttrEntry {
+        AttrEntry {
+            entry: item.entry,
+            conflict: item.conflict.is_some(),
+            skip_worktree: item.skip_worktree,
+        }
+    }
+}
+
+impl IndexAttributes {
+    fn of(index: &IndexSnapshot) -> IndexAttributes {
+        IndexAttributes {
+            checksum: index.checksum,
+            items: index
+                .items
+                .iter()
+                .filter(|i| basename(i.path.as_bytes()) == b".gitattributes")
+                .map(|i| (i.path.clone(), AttrEntry::of(i)))
+                .collect(),
+            conflicted: index
+                .items
+                .iter()
+                .filter(|i| i.entry.is_none() && i.conflict.is_some())
+                .map(|i| i.path.clone())
+                .collect(),
+        }
+    }
+}
+
+/// Where one `canonical_oids` call looks up index entries.
+enum IndexView {
+    /// Parsed for this call (a new `Worktree`, or the index changed),
+    /// dropped when it returns.
+    Parsed(Arc<IndexSnapshot>),
+    /// The kept `.gitattributes` entries and the `Worktree`'s file list, of
+    /// the same index (equal checksums).
+    Kept(Arc<IndexAttributes>, Arc<tracked::TrackedPaths>),
+}
+
+impl IndexView {
+    /// The index entry of the attribute file `name`.
+    fn attr_entry(&self, name: &[u8]) -> Option<AttrEntry> {
+        match self {
+            IndexView::Parsed(index) => index.find(name).map(AttrEntry::of),
+            IndexView::Kept(kept, _) => kept
+                .items
+                .binary_search_by(|(p, _)| p.as_bytes().cmp(name))
+                .ok()
+                .map(|i| kept.items[i].1),
+        }
+    }
+
+    /// `path`'s stage-0 blob when it is a regular file.
+    fn blob(&self, path: &RepoPath) -> Option<Oid> {
+        let file =
+            |mode: Mode, oid: Oid| matches!(mode, Mode::File | Mode::Executable).then_some(oid);
+        match self {
+            IndexView::Parsed(index) => {
+                let (mode, oid) = index.find(path.as_bytes())?.entry?;
+                file(mode, oid)
+            }
+            // The file list prefers stage 0; a conflicted path without one
+            // has none.
+            IndexView::Kept(kept, tracked) => {
+                if kept.conflicted.binary_search(path).is_ok() {
+                    return None;
+                }
+                let entries = tracked.entries();
+                let i = entries.binary_search_by(|e| e.path.cmp(path)).ok()?;
+                file(entries[i].mode, entries[i].oid)
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for CompareState {
@@ -870,72 +970,76 @@ pub(crate) fn refresh(
     }
 }
 
-/// `Worktree::canonical_oid` (docs/design/git.md「规范内容的 OID」): the
-/// blob OID `git add` would store for `bytes` at `path`, with the attribute
-/// files and conversions of the worktree comparison. None when a configured
-/// clean / process filter applies. Reads the index (the snapshot `changes`
-/// shares) and the `.gitattributes` of `path`'s directories through
-/// `SafeRoot`; runs nothing and writes nothing.
-pub(crate) fn canonical_oid(
+/// `Worktree::canonical_oids` (docs/design/git.md「规范内容的 OID」): for
+/// each `(path, bytes)`, the blob OID `git add` would store for `bytes` at
+/// `path`, with the attribute files and conversions of the worktree
+/// comparison; None when a configured clean / process filter applies. One
+/// gix handle and at most one parse of the index for the whole batch
+/// (`index_view`); each attribute file read at most once through
+/// `SafeRoot`. Runs nothing and writes nothing.
+pub(crate) fn canonical_oids(
     subject: &Subject<'_>,
-    path: &RepoPath,
-    bytes: &[u8],
-) -> Result<Option<Oid>, GitError> {
+    tracked: &dyn Fn() -> Result<Arc<tracked::TrackedPaths>, GitError>,
+    items: &[(&RepoPath, &[u8])],
+) -> Result<Vec<Option<Oid>>, GitError> {
     let handle = Handle::open(subject.git_dir, subject.repo.scope())?;
     let hash = subject.repo.hash();
     let limits = Limits::default();
-    let index = snapshot(subject, &handle, &limits, &AtomicBool::new(false))?;
-
-    // The attribute files that can apply: one per directory from the root
-    // down to `path`'s, chosen as phase C of `run` chooses them.
-    let mut files = Vec::new();
-    let full = path.as_bytes();
-    let dirs = std::iter::once(0).chain(
-        full.iter()
-            .enumerate()
-            .filter(|&(_, &b)| b == b'/')
-            .map(|(i, _)| i + 1),
-    );
-    for end in dirs {
-        let mut name = full[..end].to_vec();
-        name.extend_from_slice(b".gitattributes");
-        let Some(attr_path) = RepoPath::new(&name) else {
-            continue;
-        };
-        match index.find(&name) {
-            Some(item) => {
-                let Some((Mode::File | Mode::Executable, oid)) = item.entry else {
-                    continue;
-                };
-                if item.conflict.is_some() {
-                    continue;
-                }
-                let content = if item.skip_worktree {
-                    None
-                } else {
-                    read_attr_file(subject.root, &attr_path, limits.read_bytes)
-                };
-                files.push(attr_file(hash, &attr_path, oid, content));
-            }
-            None => {
-                if let Some(content) = read_attr_file(subject.root, &attr_path, limits.read_bytes) {
-                    let oid = Oid::for_blob(hash, &content);
-                    files.push(attr_file(hash, &attr_path, oid, Some(content)));
-                }
-            }
+    let index = index_view(subject, tracked, &handle, &limits)?;
+    // Each attribute file as `run`'s phase C chooses it, by name.
+    let mut chosen: HashMap<Vec<u8>, Option<AttrFile>> = HashMap::new();
+    let mut choose = |name: &[u8]| -> Option<AttrFile> {
+        if let Some(file) = chosen.get(name) {
+            return file.clone();
         }
-    }
+        let attr_path = RepoPath::new(name)?;
+        let file = match index.attr_entry(name) {
+            Some(item) => match item.entry {
+                Some((Mode::File | Mode::Executable, oid)) if !item.conflict => {
+                    let content = if item.skip_worktree {
+                        None
+                    } else {
+                        read_attr_file(subject.root, &attr_path, limits.read_bytes)
+                    };
+                    Some(attr_file(hash, &attr_path, oid, content))
+                }
+                _ => None,
+            },
+            None => read_attr_file(subject.root, &attr_path, limits.read_bytes).map(|content| {
+                let oid = Oid::for_blob(hash, &content);
+                attr_file(hash, &attr_path, oid, Some(content))
+            }),
+        };
+        chosen.insert(name.to_vec(), file.clone());
+        file
+    };
 
-    let mut attrs = WorktreeAttrs::new(&handle, hash, &files)?;
-    if attrs.get(path)?.filtered {
-        return Ok(None);
+    let mut out = Vec::with_capacity(items.len());
+    for &(path, bytes) in items {
+        // The attribute files that can apply: one per directory from the
+        // root down to `path`'s.
+        let full = path.as_bytes();
+        let dirs = std::iter::once(0).chain(
+            full.iter()
+                .enumerate()
+                .filter(|&(_, &b)| b == b'/')
+                .map(|(i, _)| i + 1),
+        );
+        let mut files = Vec::new();
+        for end in dirs {
+            let mut name = full[..end].to_vec();
+            name.extend_from_slice(b".gitattributes");
+            files.extend(choose(&name));
+        }
+        let mut attrs = WorktreeAttrs::new(&handle, hash, &files)?;
+        if attrs.get(path)?.filtered {
+            out.push(None);
+            continue;
+        }
+        let canonical = attrs.canonical(path, bytes.to_vec(), index.blob(path))?;
+        out.push(Some(Oid::for_blob(hash, &canonical)));
     }
-    let index_blob = index.find(full).and_then(|item| match item.entry {
-        Some((Mode::File | Mode::Executable, oid)) => Some(oid),
-        _ => None,
-    });
-    let canonical = attrs.canonical(path, bytes.to_vec(), index_blob)?;
-    Ok(Some(Oid::for_blob(hash, &canonical)))
+    Ok(out)
 }
 
 enum Rules<'h> {
@@ -1129,6 +1233,44 @@ fn base_walk(
     Ok(())
 }
 
+/// The index entries for one `canonical_oids` call. While the index
+/// checksum is the one the kept `.gitattributes` entries came from, those
+/// plus `tracked()` (the `Worktree`'s file list, parsed once and shared),
+/// if it has the same checksum. Otherwise (a new `Worktree`, a changed
+/// index, the file list of another index) the index is parsed once for
+/// this call, which answers everything, and the attribute entries are kept.
+fn index_view(
+    subject: &Subject<'_>,
+    tracked: &dyn Fn() -> Result<Arc<tracked::TrackedPaths>, GitError>,
+    handle: &Handle,
+    limits: &Limits,
+) -> Result<IndexView, GitError> {
+    let current = tracked::checksum(&subject.git_dir.join("index"), subject.repo.hash())?;
+    let kept = subject
+        .state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .attributes
+        .clone()
+        .filter(|kept| kept.checksum == current);
+    if let Some(kept) = kept {
+        let paths = tracked()?;
+        if paths.checksum() == kept.checksum {
+            return Ok(IndexView::Kept(kept, paths));
+        }
+    }
+    let index = snapshot(subject, handle, limits, &AtomicBool::new(false))?;
+    subject
+        .state
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .attributes = Some(Arc::new(IndexAttributes::of(&index)));
+    Ok(IndexView::Parsed(index))
+}
+
+/// Parses the worktree's index for one comparison. Never kept between
+/// calls: the caller drops it when the comparison returns (「缓存」, ADR
+/// 0035), so every `changes` and `refresh` parses again.
 fn snapshot(
     subject: &Subject<'_>,
     handle: &Handle,
@@ -1137,18 +1279,6 @@ fn snapshot(
 ) -> Result<Arc<IndexSnapshot>, GitError> {
     let path = subject.git_dir.join("index");
     let hash = subject.repo.hash();
-    let current = tracked::checksum(&path, hash)?;
-    {
-        let state = subject.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(index) = &state.index
-            && index.checksum == current
-        {
-            if index.items.len() > limits.entries {
-                return Err(GitError::TooManyEntries);
-            }
-            return Ok(Arc::clone(index));
-        }
-    }
     let snapshot = match tracked::parse(&path, hash)? {
         None => IndexSnapshot {
             checksum: None,
@@ -1170,11 +1300,8 @@ fn snapshot(
         }
     };
     let snapshot = Arc::new(snapshot);
-    subject
-        .state
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .index = Some(Arc::clone(&snapshot));
+    #[cfg(test)]
+    hook::index_parsed(&snapshot);
     Ok(snapshot)
 }
 
@@ -1873,6 +2000,28 @@ pub(crate) mod hook {
     #[cfg(test)]
     pub(crate) fn trees_read() -> usize {
         TREES.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    thread_local! {
+        static INDEXES: std::cell::RefCell<Vec<std::sync::Weak<super::IndexSnapshot>>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// A comparison parsed its index into `snapshot`.
+    #[cfg(test)]
+    pub(crate) fn index_parsed(snapshot: &std::sync::Arc<super::IndexSnapshot>) {
+        INDEXES.with(|v| v.borrow_mut().push(std::sync::Arc::downgrade(snapshot)));
+    }
+
+    /// How many indexes comparisons on this thread parsed, and how many of
+    /// them are still alive (held by anything: a `Worktree`, a change set).
+    #[cfg(test)]
+    pub(crate) fn indexes() -> (usize, usize) {
+        INDEXES.with(|v| {
+            let v = v.borrow();
+            (v.len(), v.iter().filter(|w| w.strong_count() > 0).count())
+        })
     }
 
     thread_local! {

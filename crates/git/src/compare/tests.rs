@@ -1824,6 +1824,141 @@ fn worktree_stat_cache_hit_equal_to_the_index_needs_no_bytes() {
     assert_eq!(lines(&second), Vec::<String>::new());
 }
 
+// ---- compare_releases_its_index_*: no parsed index between calls ------------
+
+/// A worktree with `a` and `b` modified, its first change set, and how many
+/// indexes were parsed and alive before it.
+fn released_repo() -> (TestRepo, Worktree, Arc<ChangeSet>, (usize, usize)) {
+    let t = clean_repo(&[("a", b"a\n"), ("b", b"b\n"), ("c", b"c\n")]);
+    t.write_file("a", b"a1\n");
+    t.write_file("b", b"b1\n");
+    let wt = main_worktree(&t);
+    let before = hook::indexes();
+    let first = wt
+        .changes(Base::Head, &Limits::default(), &no_cancel())
+        .unwrap();
+    (t, wt, first, before)
+}
+
+#[test]
+fn compare_releases_its_index_when_changes_returns() {
+    let (_t, _wt, first, (parsed, alive)) = released_repo();
+    assert_eq!(first.files().len(), 2);
+    // Parsed once, and neither the `Worktree` nor the change set holds it.
+    assert_eq!(hook::indexes(), (parsed + 1, alive));
+}
+
+#[test]
+fn compare_releases_its_index_refresh_paths_parses_again() {
+    let (t, wt, first, (parsed, alive)) = released_repo();
+    let cancel = no_cancel();
+    t.write_file("a", b"a2\n");
+    let reads = hook::reads();
+    let set = read_only(&t, || {
+        wt.refresh(&first, Refresh::Paths(&[rp("a")]), &cancel)
+            .unwrap()
+    });
+    assert_eq!(
+        hook::indexes(),
+        (parsed + 2, alive),
+        "parsed again, released"
+    );
+    // The index didn't change, so it's still a refresh of `a` alone.
+    assert_eq!(hook::reads(), reads + 1, "only `a` is read");
+    assert_eq!(
+        lines(&set),
+        lines(&wt.changes(Base::Head, &Limits::default(), &cancel).unwrap())
+    );
+}
+
+#[test]
+fn compare_releases_its_index_refresh_full_parses_again() {
+    let (t, wt, first, (parsed, alive)) = released_repo();
+    let cancel = no_cancel();
+    t.write_file("c", b"c1\n");
+    let set = read_only(&t, || wt.refresh(&first, Refresh::Full, &cancel).unwrap());
+    assert_eq!(
+        hook::indexes(),
+        (parsed + 2, alive),
+        "parsed again, released"
+    );
+    assert_eq!(lines(&set).len(), 3, "{:#?}", lines(&set));
+    assert_eq!(
+        lines(&set),
+        lines(&wt.changes(Base::Head, &Limits::default(), &cancel).unwrap())
+    );
+}
+
+#[test]
+fn compare_releases_its_index_canonical_oid_keeps_only_attributes() {
+    let t = clean_repo(&[
+        ("d/.gitattributes", b"*.t text eol=lf\n"),
+        ("d/a.t", b"a\n"),
+    ]);
+    use crate::tracked::hook as files;
+
+    let wt = main_worktree(&t);
+    let (parsed, alive) = hook::indexes();
+    let reads = files::parsed_count();
+    let lf = Some(Oid::for_blob(HashKind::Sha1, b"one\n"));
+    // A new handle parses the index once for the call (no file list) and
+    // keeps none of it beyond its `.gitattributes` entries.
+    assert_eq!(wt.canonical_oid(&rp("d/a.t"), b"one\r\n").unwrap(), lf);
+    assert_eq!(hook::indexes(), (parsed + 1, alive));
+    assert_eq!(files::parsed_count(), reads + 1, "one parse of the file");
+    // The same handle again: the kept entries and the file list, which is
+    // parsed once and then shared.
+    for _ in 0..3 {
+        assert_eq!(wt.canonical_oid(&rp("d/a.t"), b"one\r\n").unwrap(), lf);
+    }
+    assert_eq!(hook::indexes(), (parsed + 1, alive));
+    assert_eq!(files::parsed_count(), reads + 2, "the file list, once");
+    // A new index (another checksum) is parsed again; its rules apply.
+    t.write_file("d/.gitattributes", b"# none\n");
+    t.write_index(t.common_dir(), &[t.add("d/.gitattributes"), t.add("d/a.t")]);
+    assert_eq!(
+        wt.canonical_oid(&rp("d/a.t"), b"one\r\n").unwrap(),
+        Some(Oid::for_blob(HashKind::Sha1, b"one\r\n"))
+    );
+    assert_eq!(hook::indexes(), (parsed + 2, alive));
+}
+
+#[test]
+fn compare_releases_its_index_canonical_oids_parse_once_per_batch() {
+    use crate::tracked::hook as files;
+
+    // `text=auto` looks at the index blob: `e.auto` has CRs in it.
+    let attrs: &[u8] = b"*.auto text=auto\n*.eol eol=lf\n";
+    let lf: &[u8] = b"one\ntwo\n";
+    let crlf: &[u8] = b"one\r\ntwo\r\n";
+    let t = clean_repo(&[
+        (".gitattributes", attrs),
+        ("a.auto", lf),
+        ("d/b.eol", lf),
+        ("d/e.auto", crlf),
+    ]);
+    let paths = [rp("a.auto"), rp("d/b.eol"), rp("d/e.auto"), rp("new.auto")];
+    let items: Vec<(&RepoPath, &[u8])> = paths.iter().map(|p| (p, crlf)).collect();
+    let one_by_one: Vec<Option<Oid>> = paths
+        .iter()
+        .map(|p| main_worktree(&t).canonical_oid(p, crlf).unwrap())
+        .collect();
+    let blob = |c: &[u8]| Some(Oid::for_blob(HashKind::Sha1, c));
+    assert_eq!(one_by_one, [blob(lf), blob(lf), blob(crlf), blob(lf)]);
+
+    // A new handle: one parse for the batch, released, the same answers.
+    let wt = main_worktree(&t);
+    let (parsed, alive) = hook::indexes();
+    let reads = files::parsed_count();
+    assert_eq!(wt.canonical_oids(&items).unwrap(), one_by_one);
+    assert_eq!(hook::indexes(), (parsed + 1, alive));
+    assert_eq!(files::parsed_count(), reads + 1);
+    // The same handle: from the kept entries and the file list.
+    assert_eq!(wt.canonical_oids(&items).unwrap(), one_by_one);
+    assert_eq!(hook::indexes(), (parsed + 1, alive));
+    assert_eq!(wt.canonical_oids(&[]).unwrap(), Vec::<Option<Oid>>::new());
+}
+
 // ---- cache-tree: the base tree's subtrees the index describes ---------------
 
 const CACHE_FILES: &[(&str, &[u8])] = &[

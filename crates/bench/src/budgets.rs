@@ -637,17 +637,16 @@ pub static BUDGETS: &[Budget] = &[
     // 1000 modified tracked and 1000 untracked files of 10–50 KB and one
     // 16 MiB untracked file, with `retained_bytes = 0` and
     // `total_patch_bytes = 0`; the change set and what its `Worktree` holds.
-    // Recorded. The stat cache no longer keeps read contents allocated;
-    // the comparison's parsed index is still kept (git step 4).
+    // Recorded. The stat cache keeps no read contents allocated and the
+    // comparison's parsed index is dropped when the call returns.
     share("git/changes_count/total_bytes", RECORD, GIT, ACTIVE, Memory),
-    // The same per changed path once the comparison index is released as
-    // well (git design「与设计的差异」): 1111 B measured with the stat
-    // cache fixed alone, so active with git step 4.
+    // The same per changed path: what ADR 0035 bounds the home's kept
+    // change set by.
     share(
         "git/changes_count/per_path_bytes",
         &[median(Limit::BytesAtMost(1024))],
         GIT,
-        State::Planned("git 第 4 步（释放比较用的 index；stat 缓存不持有内容已完成）"),
+        ACTIVE,
         Memory,
     ),
     // Hunk LRU 16 MB plus one `ChangeSet` 32 MB; no handle held while idle.
@@ -847,6 +846,23 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // Recorded: `refresh(Paths)` of one unchanged tracked path there, what
+    // one fs_watch event costs now that every refresh parses the index
+    // again (ADR 0035). `git/refresh_one`'s 15 ms is for the cloudprint
+    // shape.
+    share("git/refresh_one_100k", RECORD, GIT, ACTIVE, Time),
+    // Recorded: `canonical_oid` there on a new `Worktree` (one index parse,
+    // as code_intel's git access calls it), and `canonical_oids` for 100
+    // paths in one call. code_intel's design gives no share for it yet; it
+    // counts towards its caller's budget (git design「规范内容的 OID」).
+    share("git/canonical_oid_100k", RECORD, GIT, ACTIVE, Time),
+    share(
+        "git/canonical_oid_100k/batch_100",
+        RECORD,
+        GIT,
+        ACTIVE,
+        Time,
+    ),
     // That comparison's peak of live bytes (temporary memory, not idle):
     // the comparison's own parsed index and case-folded copy, the walk,
     // the change set.
@@ -858,12 +874,12 @@ pub static BUDGETS: &[Budget] = &[
         Memory,
     ),
     // What the `Worktree` still holds after it, the change set dropped:
-    // no parsed index between calls (ADR 0035); 39 MB until git step 4.
+    // no parsed index between calls (ADR 0035; it was 39 MB).
     share(
         "git/compare_100k/retained_bytes",
         &[median(Limit::BytesBelow(MB))],
         GIT,
-        State::Planned("git 第 4 步"),
+        ACTIVE,
         Memory,
     ),
     // `git/filter_cloudprint_bytes` there.
