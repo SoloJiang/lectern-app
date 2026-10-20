@@ -11,6 +11,8 @@ mod code_intel;
 mod code_intel_names;
 #[path = "time/code_intel_query.rs"]
 mod code_intel_query;
+#[path = "fixtures/code_intel_virtual.rs"]
+mod code_intel_virtual;
 #[path = "time/executor.rs"]
 mod executor;
 #[path = "time/fs_watch.rs"]

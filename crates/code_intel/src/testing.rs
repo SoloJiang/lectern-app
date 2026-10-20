@@ -11,8 +11,8 @@ pub mod synthetic;
 pub use fake_git::FakeGit;
 pub use host::{FakePower, FakeProjects, TestHost, host};
 pub use rig::{
-    Rig, packages, route_tree_sitter_allocations, virtual_repo, virtual_repo_sharing,
-    virtual_repo_with,
+    Rig, VirtualTemplate, packages, route_tree_sitter_allocations, virtual_repo,
+    virtual_repo_sharing, virtual_repo_with,
 };
 
 use std::any::Any;

@@ -132,30 +132,26 @@ fn names_100k_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
+/// A [`resident`] sample's repository, its cache and its number of files.
+type Resident = Result<(Arc<FakeGit>, Cache, usize), BenchError>;
+
 /// This crate's resident bytes with a project indexed: a warm start over
 /// virtual files (index entries and stored units), one jump made (its
 /// grammar compiled) and closed. The map, the hints, tier 5's confirmed
 /// set, the compiled grammar, the project's state; not the file list
-/// (`project`'s) and not SQLite's own memory (the cache's).
+/// (`project`'s) and not SQLite's own memory (the cache's). Every sample is a
+/// new rig over a repository and cache of its own (`fixture`, given a
+/// directory under the scratch directory: the repository, its cache, its
+/// number of files).
 fn resident(
     ctx: &Ctx,
     id: &'static str,
-    n: usize,
-    linked: usize,
+    fixture: &dyn Fn(&Path) -> Resident,
 ) -> Result<Vec<Measured>, BenchError> {
     let mut samples = Vec::new();
     for _ in 0..ctx.scale(SAMPLES, 1) {
-        let git = Arc::new(FakeGit::new());
-        let mut worktrees = vec!["main".to_owned()];
-        for w in 0..linked {
-            let name = format!("w{w}");
-            git.add_worktree(&name);
-            worktrees.push(name);
-        }
         let dir = tempfile::tempdir_in(ctx.scratch())?;
-        let cache = cache(dir.path());
-        let names: Vec<&str> = worktrees.iter().map(String::as_str).collect();
-        virtual_repo(&git, &cache, n, &names);
+        let (git, cache, n) = fixture(dir.path())?;
         let path = "packages/pkg000/src/mod00/current.ts";
         let name = synthetic::shared_name();
         let mut text = synthetic::source("ts", 999_999, 16 << 10);
@@ -310,16 +306,35 @@ pub const RESIDENT_CLOUDPRINT: Bench = Bench {
 };
 
 fn resident_cloudprint(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    resident(ctx, "plugin/code-intel/resident_cloudprint", 728, 10)
+    let n = 728;
+    let fixture = |dir: &Path| -> Resident {
+        let git = Arc::new(FakeGit::new());
+        let mut worktrees = vec!["main".to_owned()];
+        for w in 0..10 {
+            let name = format!("w{w}");
+            git.add_worktree(&name);
+            worktrees.push(name);
+        }
+        let cache = cache(dir);
+        let names: Vec<&str> = worktrees.iter().map(String::as_str).collect();
+        virtual_repo(&git, &cache, n, &names);
+        Ok((git, cache, n))
+    };
+    resident(ctx, "plugin/code-intel/resident_cloudprint", &fixture)
 }
 
-/// 100 000 files (≤ 10 MB).
+/// 100 000 files (≤ 10 MB): each sample over its own copy of the shared
+/// virtual repository (`code_intel_virtual`).
 pub const RESIDENT_100K: Bench = Bench {
     id: "plugin/code-intel/resident_100k",
     run: resident_100k,
 };
 
 fn resident_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(100_000, 3_000);
-    resident(ctx, "plugin/code-intel/resident_100k", n, 0)
+    let template = crate::code_intel_virtual::shared(ctx)?;
+    let fixture = |dir: &Path| -> Resident {
+        let (git, cache) = crate::code_intel_virtual::open(&template, dir)?;
+        Ok((git, cache, template.files()))
+    };
+    resident(ctx, "plugin/code-intel/resident_100k", &fixture)
 }

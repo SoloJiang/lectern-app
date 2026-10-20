@@ -9,6 +9,8 @@ mod cache;
 mod code_intel;
 #[path = "fixtures/code_intel_names.rs"]
 mod code_intel_names;
+#[path = "fixtures/code_intel_virtual.rs"]
+mod code_intel_virtual;
 #[path = "fixtures/git_worktree.rs"]
 mod git_worktree;
 #[path = "memory/project.rs"]

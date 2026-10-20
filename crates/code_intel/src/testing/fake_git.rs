@@ -47,9 +47,19 @@ struct State {
     unchanged: bool,
 }
 
+/// Removes a directory when dropped ([`FakeGit::at`]).
+struct RemoveDir(PathBuf);
+
+impl Drop for RemoveDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// An in-memory git over real worktree files.
 pub struct FakeGit {
-    _dir: tempfile::TempDir,
+    /// Removes the repository's directory on drop.
+    _dir: Box<dyn std::any::Any + Send + Sync>,
     common_dir: PathBuf,
     hash: HashKind,
     state: Mutex<State>,
@@ -70,6 +80,25 @@ impl FakeGit {
     pub fn with_hash(hash: HashKind) -> FakeGit {
         let dir = tempfile::tempdir().expect("temp dir");
         let base = dir.path().canonicalize().expect("canonical temp dir");
+        FakeGit::in_base(hash, Box::new(dir), base)
+    }
+
+    /// A SHA-1 repository in the new directory `base`, removed when this is
+    /// dropped. Fails if `base` exists. Repositories made in turn at one
+    /// `base` have the same common directory, which names their cache
+    /// partition ([`super::VirtualTemplate`]).
+    pub fn at(base: &Path) -> std::io::Result<FakeGit> {
+        std::fs::create_dir(base)?;
+        let guard = RemoveDir(base.to_path_buf());
+        let canonical = base.canonicalize()?;
+        Ok(FakeGit::in_base(HashKind::Sha1, Box::new(guard), canonical))
+    }
+
+    fn in_base(
+        hash: HashKind,
+        dir: Box<dyn std::any::Any + Send + Sync>,
+        base: PathBuf,
+    ) -> FakeGit {
         let root = base.join("repo");
         let common_dir = root.join(".git");
         std::fs::create_dir_all(&common_dir).expect("create the git dir");

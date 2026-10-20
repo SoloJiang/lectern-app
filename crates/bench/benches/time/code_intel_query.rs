@@ -1,7 +1,9 @@
 //! `code_intel/*` of the queries and the name table (docs/design/
 //! code_intel.md「性能」, step 4): an indexer over a `FakeGit` repository
 //! whose 100 000 files are virtual (index entries and stored synthetic
-//! extractions, no worktree file) plus the real files a query reads.
+//! extractions, no worktree file) plus the real files a query reads. The
+//! 100 000-file benchmarks start from a copy of the shared virtual
+//! repository (`code_intel_virtual`); each has its own rig.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -12,7 +14,7 @@ use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::SystemClock;
 use lectern_code_intel::names::build_table;
 use lectern_code_intel::testing::{
-    FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_sharing, virtual_repo_with,
+    FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_with,
 };
 use lectern_services::code_intel::{
     CodeIntelEvent, Completeness, Focus, Position, Query, QueryId, QueryKind, QueryState,
@@ -111,8 +113,9 @@ const CURRENT: &str = "packages/pkg000/src/mod00/current.ts";
 /// How a jump fixture is set up.
 #[derive(Clone, Copy, Default)]
 struct Shape {
-    /// Every `k`th unit also defines the jump's name (a popular name).
-    popular: Option<usize>,
+    /// The jump's name is the shared repository's popular one
+    /// (`code_intel_virtual::POPULAR`).
+    popular: bool,
     /// The project's namespace at its quota (`Indexer::set_namespace_full`).
     full: bool,
     /// The current text read as an object (a diff's old side).
@@ -130,27 +133,23 @@ struct Jump {
     _dir: tempfile::TempDir,
 }
 
-/// A jump the index answers in a virtual repository of `n` files in
-/// sub-projects of 1000 (the 「性能」 jump rows): the 100 KB current text
-/// indexed and made the current one, so its parse is kept (ADR 0037).
-fn jump_fixture(ctx: &Ctx, n: usize, shape: Shape) -> Result<Jump, BenchError> {
-    let git = Arc::new(FakeGit::new());
+/// A jump the index answers in a copy of the shared virtual repository
+/// (`code_intel_virtual`: 100 000 files in sub-projects of 1000, the
+/// 「性能」 jump rows): the 100 KB current text indexed and made the current
+/// one, so its parse is kept (ADR 0037). The rig, its cache and its
+/// in-memory state are this benchmark's own. Returns the number of files.
+fn jump_fixture(ctx: &Ctx, shape: Shape) -> Result<(Jump, usize), BenchError> {
+    let template = crate::code_intel_virtual::shared(ctx)?;
+    let n = template.files();
     let dir = tempfile::tempdir_in(ctx.scratch())?;
-    let cache = cache(dir.path());
-    let name = if shape.popular.is_some() {
-        "fetchShared".to_owned()
+    let (git, cache) = crate::code_intel_virtual::open(&template, dir.path())?;
+    let name = if shape.popular {
+        crate::code_intel_virtual::POPULAR.to_owned()
     } else if shape.same_file {
         "jumpTarget".to_owned()
     } else {
         synthetic::shared_name()
     };
-    virtual_repo_sharing(
-        &git,
-        &cache,
-        n,
-        &["main"],
-        shape.popular.map(|k| (name.as_str(), k)),
-    );
     let mut text = current_text(&name);
     if shape.same_file {
         text.extend_from_slice(format!("function {name}(x: number) {{ return x; }}\n").as_bytes());
@@ -185,12 +184,15 @@ fn jump_fixture(ctx: &Ctx, n: usize, shape: Shape) -> Result<Jump, BenchError> {
             position: position(&text, &format!("{name}(x)"))?,
         },
     };
-    Ok(Jump {
-        rig,
-        query,
-        at,
-        _dir: dir,
-    })
+    Ok((
+        Jump {
+            rig,
+            query,
+            at,
+            _dir: dir,
+        },
+        n,
+    ))
 }
 
 /// One `Results` event: its query, its time, and whether its results had
@@ -316,8 +318,7 @@ pub const GOTO_INDEXED: Bench = Bench {
 };
 
 fn goto_indexed(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(100_000, 3_000);
-    let jump = jump_fixture(ctx, n, Shape::default())?;
+    let (jump, _) = jump_fixture(ctx, Shape::default())?;
     let (first, done) = sample_jumps(ctx, &jump, &nothing, &complete)?;
     Ok(vec![
         Measured::new("code_intel/goto_indexed", Value::Time(first)),
@@ -334,8 +335,7 @@ pub const GOTO_UNCACHED: Bench = Bench {
 };
 
 fn goto_uncached(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(100_000, 3_000);
-    let jump = jump_fixture(ctx, n, Shape::default())?;
+    let (jump, _) = jump_fixture(ctx, Shape::default())?;
     let key = jump.rig.git.key();
     let forget = |rig: &Rig| rig.indexer.clear_walks(&key);
     let (first, done) = sample_jumps(ctx, &jump, &forget, &complete)?;
@@ -355,12 +355,11 @@ pub const GOTO_POPULAR: Bench = Bench {
 };
 
 fn goto_popular(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(100_000, 3_000);
     let shape = Shape {
-        popular: Some(17),
+        popular: true,
         ..Shape::default()
     };
-    let jump = jump_fixture(ctx, n, shape)?;
+    let (jump, n) = jump_fixture(ctx, shape)?;
     let want = |r: &lectern_services::code_intel::QueryResults| {
         complete(r)?;
         if r.candidates.len() < n * 3 / 100 - n / 400 {
@@ -389,12 +388,11 @@ pub const GOTO_FULL: Bench = Bench {
 };
 
 fn goto_full(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(100_000, 3_000);
     let shape = Shape {
         full: true,
         ..Shape::default()
     };
-    let jump = jump_fixture(ctx, n, shape)?;
+    let (jump, _) = jump_fixture(ctx, shape)?;
     let (first, done) = sample_jumps(ctx, &jump, &nothing, &answered)?;
     Ok(vec![
         Measured::new("code_intel/goto_full", Value::Time(first)),
@@ -411,8 +409,7 @@ pub const GOTO_COLD_PARSE: Bench = Bench {
 };
 
 fn goto_cold_parse(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(100_000, 3_000);
-    let jump = jump_fixture(ctx, n, Shape::default())?;
+    let (jump, _) = jump_fixture(ctx, Shape::default())?;
     let forget = |rig: &Rig| rig.indexer.clear_kept_parses();
     let (first, _) = sample_jumps(ctx, &jump, &forget, &complete)?;
     Ok(vec![Measured::new(
@@ -429,12 +426,11 @@ pub const GOTO_SAME_FILE: Bench = Bench {
 };
 
 fn goto_same_file(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(100_000, 3_000);
     let shape = Shape {
         same_file: true,
         ..Shape::default()
     };
-    let jump = jump_fixture(ctx, n, shape)?;
+    let (jump, _) = jump_fixture(ctx, shape)?;
     let want = |r: &lectern_services::code_intel::QueryResults| {
         complete(r)?;
         if r.jump.is_none() {
@@ -458,12 +454,11 @@ pub const GOTO_OBJECT: Bench = Bench {
 };
 
 fn goto_object(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(100_000, 3_000);
     let shape = Shape {
         object: true,
         ..Shape::default()
     };
-    let jump = jump_fixture(ctx, n, shape)?;
+    let (jump, _) = jump_fixture(ctx, shape)?;
     if jump.at.origin != TextOrigin::Object {
         return Err(BenchError::new("not an object's text"));
     }
@@ -688,12 +683,11 @@ fn references(ctx: &mut Ctx, full: bool) -> Result<Vec<Measured>, BenchError> {
             "code_intel/references_100k/first",
         )
     };
-    let n = ctx.scale(100_000, 3_000);
     let users = ctx.scale(300, 10);
-    let git = Arc::new(FakeGit::new());
+    let template = crate::code_intel_virtual::shared(ctx)?;
+    let n = template.files();
     let dir = tempfile::tempdir_in(ctx.scratch())?;
-    let cache = cache(dir.path());
-    virtual_repo(&git, &cache, n, &["main"]);
+    let (git, cache) = crate::code_intel_virtual::open(&template, dir.path())?;
     let def_path = "packages/pkg000/src/mod00/orders.ts";
     let def = b"export function findOrder(id: number) {\n  return id;\n}\n".to_vec();
     git.add("main", &[(def_path, &def)]);
