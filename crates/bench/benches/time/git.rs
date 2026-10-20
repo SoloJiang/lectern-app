@@ -579,6 +579,8 @@ fn changes_clean_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             Value::Count(n as u64),
         ));
     }
+    // One sample each, as `Ctx::once` takes for a diagnostic; built by hand
+    // because the one call gives all twelve values.
     out.extend(
         timed
             .into_iter()
