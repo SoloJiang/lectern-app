@@ -177,8 +177,7 @@ const GIT_FILTER_100K_BYTES: Bench = Bench {
 };
 
 fn git_filter_100k_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
-    let t = worktree::large(files, manifests);
+    let t = worktree::large_shared(ctx)?;
     Ok(vec![Measured::new(
         "git/filter_100k_bytes",
         Value::Bytes(filter_bytes(ctx, &t)?),
@@ -224,8 +223,7 @@ const GIT_COMPARE_100K: Bench = Bench {
 };
 
 fn git_compare_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
-    let t = worktree::large(files, manifests);
+    let t = worktree::large_shared(ctx)?;
     let cancel = AtomicBool::new(false);
     let limits = Limits::default();
     let mut peaks = Vec::new();

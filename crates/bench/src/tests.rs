@@ -46,6 +46,7 @@ const FAST: SampleConfig = SampleConfig {
     enough_time: Duration::from_millis(1),
     warmup_calls: 3,
     warmup_time: Duration::from_millis(1),
+    warmup_enough: Duration::from_millis(300),
     batch_time: Duration::from_micros(100),
 };
 

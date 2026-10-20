@@ -55,6 +55,10 @@ jobs:
         # Run metal: on Xcode 26 the launcher can exist without the toolchain.
         run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Debug builds only; the benchmarks job caches its release build
+          # under its own key, so neither evicts the other.
+          key: test
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-nextest
@@ -69,6 +73,24 @@ jobs:
         run: just doctest
       - name: Build app
         run: cargo build --locked -p lectern-app
+
+  # The performance budgets, judged on Apple Silicon, in parallel with the
+  # job above (docs/design/ci.md「任务」).
+  macos-bench:
+    name: Benchmarks (macOS arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Metal toolchain
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - name: Performance budget benchmarks
         run: just bench
       # The report is uploaded even when a budget is exceeded.

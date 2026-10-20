@@ -159,6 +159,7 @@ fn fake_report() -> Report<'static> {
         errors: vec!["基准 fake/extra 不对应本目标的任何预算".into()],
         plugins: Vec::new(),
         language_servers: Vec::new(),
+        benches: Vec::new(),
     }
 }
 

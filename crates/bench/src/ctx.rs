@@ -1,12 +1,16 @@
 //! What a benchmark gets: the mode, sampling and its scratch directory
 //! (docs/design/bench.md「平台与噪声」).
 
+use std::any::Any;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::stats::{median, per_operation};
-use crate::{Mode, Samples};
+use crate::{BenchError, Mode, Samples};
 
 /// Rule 1 of the stopping rules can never go below this many samples.
 pub const MIN_SAMPLES: usize = 5;
@@ -19,7 +23,8 @@ pub struct SampleConfig {
     pub min_samples: usize,
     /// Stop at this many samples...
     pub max_samples: usize,
-    /// ...or once sampling (setup included) has taken this long.
+    /// ...or once warm-up and sampling (setup included) have taken this
+    /// long.
     pub max_wall: Duration,
     /// Stop once there are this many samples...
     pub enough_samples: usize,
@@ -27,8 +32,11 @@ pub struct SampleConfig {
     pub enough_time: Duration,
     /// Warm-up: at least this many calls...
     pub warmup_calls: usize,
-    /// ...and at least this long.
+    /// ...and at least this long...
     pub warmup_time: Duration,
+    /// ...unless the calls so far (at least one) already took this long:
+    /// a slow operation is warm after one call.
+    pub warmup_enough: Duration,
     /// `time` and `compare` batch operations shorter than this so that one
     /// sample is not shorter.
     pub batch_time: Duration,
@@ -39,11 +47,12 @@ impl Default for SampleConfig {
         SampleConfig {
             min_samples: MIN_SAMPLES,
             max_samples: 10_000,
-            max_wall: Duration::from_secs(5),
+            max_wall: Duration::from_secs(3),
             enough_samples: 30,
             enough_time: Duration::from_secs(1),
             warmup_calls: 3,
             warmup_time: Duration::from_millis(100),
+            warmup_enough: Duration::from_millis(300),
             batch_time: Duration::from_millis(1),
         }
     }
@@ -53,19 +62,58 @@ impl Default for SampleConfig {
 /// samples of at least 1 ms.
 const MAX_BATCH: u32 = 1_000_000;
 
+/// The fixtures the benchmarks of one target process share
+/// ([`Ctx::shared`]), by key. Dropped when the target's run ends, which
+/// removes their temporary directories.
+#[derive(Clone, Default)]
+pub(crate) struct Fixtures(Rc<RefCell<HashMap<String, Rc<dyn Any>>>>);
+
 pub struct Ctx {
     mode: Mode,
     config: SampleConfig,
     scratch: PathBuf,
+    fixtures: Fixtures,
 }
 
 impl Ctx {
-    pub(crate) fn new(mode: Mode, config: SampleConfig, scratch: PathBuf) -> Ctx {
+    pub(crate) fn new(
+        mode: Mode,
+        config: SampleConfig,
+        scratch: PathBuf,
+        fixtures: Fixtures,
+    ) -> Ctx {
         Ctx {
             mode,
             config,
             scratch,
+            fixtures,
         }
+    }
+
+    /// A read-only fixture shared by every benchmark of this target process
+    /// that asks for `key`: `build` runs the first time, later calls (other
+    /// benchmarks, retries) get the same value. For large inputs that take
+    /// seconds to generate, such as the 100 000-file worktree. The key names
+    /// the generator and its size (the mode is the same for the whole
+    /// process). A benchmark that modifies its input, on disk or in memory,
+    /// builds its own instead. The fixture must not live under
+    /// [`Ctx::scratch`], which is removed after each benchmark.
+    pub fn shared<T: 'static>(
+        &self,
+        key: &str,
+        build: impl FnOnce() -> Result<T, BenchError>,
+    ) -> Result<Rc<T>, BenchError> {
+        if let Some(found) = self.fixtures.0.borrow().get(key) {
+            return Rc::clone(found)
+                .downcast::<T>()
+                .map_err(|_| BenchError::new(format!("共享夹具 {key} 的类型与先前不同")));
+        }
+        let built = Rc::new(build()?);
+        self.fixtures
+            .0
+            .borrow_mut()
+            .insert(key.to_owned(), Rc::clone(&built) as Rc<dyn Any>);
+        Ok(built)
     }
 
     pub fn mode(&self) -> Mode {
@@ -106,9 +154,10 @@ impl Ctx {
         if self.mode == Mode::Smoke {
             return Samples(vec![once(&mut f)]);
         }
+        let started = Instant::now();
         let k = self.batch(&mut || once(&mut f));
         let mut held = Vec::with_capacity(k as usize);
-        let mut sampler = Sampler::new(self.config);
+        let mut sampler = Sampler::starting(self.config, started);
         while !sampler.done() {
             let elapsed = batch(&mut f, k, &mut held);
             sampler.push(per_operation(elapsed, k), elapsed);
@@ -138,16 +187,24 @@ impl Ctx {
         }
         let started = Instant::now();
         let mut calls = 0;
-        while calls < self.config.warmup_calls || started.elapsed() < self.config.warmup_time {
+        while !warm(&self.config, calls, started.elapsed()) {
             one();
             calls += 1;
         }
-        let mut sampler = Sampler::new(self.config);
+        let mut sampler = Sampler::starting(self.config, started);
         while !sampler.done() {
             let elapsed = one();
             sampler.push(elapsed, elapsed);
         }
         sampler.finish()
+    }
+
+    /// One timed call, without warm-up, in both modes: for record-only
+    /// diagnostics whose value only has to show where the time goes (such
+    /// as `git/filter_100k/walk`), not pass a budget. The benchmark warms
+    /// the operation up itself when that matters.
+    pub fn once<R>(&mut self, mut f: impl FnMut() -> R) -> Samples {
+        Samples(vec![once(&mut f)])
     }
 
     /// Samples the subject and the baseline alternately, cancelling out
@@ -163,11 +220,12 @@ impl Ctx {
                 Samples(vec![once(&mut baseline)]),
             );
         }
+        let started = Instant::now();
         let ks = self.batch(&mut || once(&mut subject));
         let kb = self.batch(&mut || once(&mut baseline));
         let mut held_s = Vec::with_capacity(ks as usize);
         let mut held_b = Vec::with_capacity(kb as usize);
-        let mut subjects = Sampler::new(self.config);
+        let mut subjects = Sampler::starting(self.config, started);
         let mut baselines = Vec::new();
         while !subjects.done() {
             let s = batch(&mut subject, ks, &mut held_s);
@@ -183,8 +241,7 @@ impl Ctx {
     fn batch(&self, call: &mut dyn FnMut() -> Duration) -> u32 {
         let started = Instant::now();
         let mut times = Vec::new();
-        while times.len() < self.config.warmup_calls || started.elapsed() < self.config.warmup_time
-        {
+        while !warm(&self.config, times.len(), started.elapsed()) {
             times.push(call().as_secs_f64());
         }
         times.sort_by(f64::total_cmp);
@@ -196,6 +253,14 @@ impl Ctx {
             ((target / one).ceil() as u32).clamp(1, MAX_BATCH)
         }
     }
+}
+
+/// Whether warm-up is over after `calls` calls that took `elapsed`: at least
+/// `warmup_calls` and `warmup_time`, or at least one call and
+/// `warmup_enough`.
+pub(crate) fn warm(config: &SampleConfig, calls: usize, elapsed: Duration) -> bool {
+    (calls >= config.warmup_calls && elapsed >= config.warmup_time)
+        || (calls >= 1 && elapsed >= config.warmup_enough)
 }
 
 /// Runs `f` once and times it; the result is dropped after the clock stops.
@@ -221,7 +286,7 @@ fn batch<R>(f: &mut impl FnMut() -> R, k: u32, held: &mut Vec<R>) -> Duration {
 
 /// The stopping rules, in order (the earlier wins):
 /// 1. fewer than `min_samples`: go on;
-/// 2. `max_samples`, or `max_wall` since sampling started: stop;
+/// 2. `max_samples`, or `max_wall` since warm-up started: stop;
 /// 3. at least `enough_samples` taking at least `enough_time`: stop.
 pub(crate) struct Sampler {
     config: SampleConfig,
@@ -231,10 +296,11 @@ pub(crate) struct Sampler {
 }
 
 impl Sampler {
-    pub(crate) fn new(config: SampleConfig) -> Sampler {
+    /// Sampling whose warm-up began at `started`.
+    pub(crate) fn starting(config: SampleConfig, started: Instant) -> Sampler {
         Sampler {
             config,
-            started: Instant::now(),
+            started,
             samples: Vec::new(),
             busy: Duration::ZERO,
         }

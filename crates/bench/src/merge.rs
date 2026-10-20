@@ -101,8 +101,53 @@ fn escape_title(text: &str) -> String {
 /// can be read from the check run's annotations without the job log or the
 /// report artifact. One notice per group (the ID's first segment, such as
 /// `git`), one line `<id>: <measured>` per result; past 10 groups the rest
-/// share the last notice, so no result is dropped.
+/// share the last notice, so no result is dropped. When the report lists
+/// benchmark wall times, the first notice names the slowest benchmarks and
+/// the groups share the other 9.
 pub(crate) fn notices(report: &Json) -> Vec<String> {
+    let slowest = slowest(report);
+    let mut out: Vec<String> = slowest
+        .iter()
+        .map(|lines| {
+            format!(
+                "::notice title=slowest benchmarks::{}",
+                escape(&lines.join("\n"))
+            )
+        })
+        .collect();
+    out.extend(record_notices(report, MAX_ANNOTATIONS - out.len()));
+    out
+}
+
+/// How many benchmarks the slowest-benchmarks notice and summary list.
+const SLOWEST: usize = 10;
+
+/// `<id> (<target>): <seconds> s` for the slowest benchmarks of the merged
+/// report, slowest first, after a line with the total; None without wall
+/// times.
+pub(crate) fn slowest(report: &Json) -> Option<Vec<String>> {
+    let benches = report["benches"].as_array().filter(|b| !b.is_empty())?;
+    let seconds = |b: &Json| b["seconds"].as_f64().unwrap_or(0.0);
+    let total: f64 = benches.iter().map(seconds).sum();
+    let mut lines = vec![format!("{} benchmarks, {total:.1} s in all", benches.len())];
+    lines.extend(benches.iter().take(SLOWEST).map(|b| {
+        let retried = if b["attempts"].as_u64().unwrap_or(1) > 1 {
+            ", retried"
+        } else {
+            ""
+        };
+        format!(
+            "{} ({}): {:.1} s{retried}",
+            b["id"].as_str().unwrap_or_default(),
+            b["target"].as_str().unwrap_or_default(),
+            seconds(b)
+        )
+    }));
+    Some(lines)
+}
+
+/// The record notices of [`notices`], at most `max`.
+fn record_notices(report: &Json, max: usize) -> Vec<String> {
     let mut groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for result in report["results"].as_array().into_iter().flatten() {
         if result["status"].as_str() != Some("record") {
@@ -120,8 +165,8 @@ pub(crate) fn notices(report: &Json) -> Vec<String> {
         .into_iter()
         .map(|(group, lines)| (group.to_owned(), lines))
         .collect();
-    if groups.len() > MAX_ANNOTATIONS {
-        let rest = groups.split_off(MAX_ANNOTATIONS - 1);
+    if groups.len() > max {
+        let rest = groups.split_off(max.saturating_sub(1));
         let names: Vec<&str> = rest.iter().map(|(group, _)| group.as_str()).collect();
         let title = names.join(" ");
         let lines = rest.iter().flat_map(|(_, lines)| lines.clone()).collect();
@@ -401,10 +446,31 @@ pub(crate) fn merge(
     } else {
         0
     };
+    // Every benchmark's wall time, slowest first, with its target.
+    let mut benches: Vec<Json> = Vec::new();
+    for r in &reports {
+        for bench in r.json["benches"].as_array().into_iter().flatten() {
+            let mut bench = bench.clone();
+            bench["target"] = json!(r.target.name());
+            benches.push(bench);
+        }
+    }
+    let seconds = |b: &Json| b["seconds"].as_f64().unwrap_or(0.0);
+    benches.sort_by(|a, b| seconds(b).total_cmp(&seconds(a)));
+
     let title = report::title("report", &mode, gated);
-    let text = report::text_table(&title, &results, &errors);
-    let markdown = report::markdown(&title, &results, &errors);
+    let mut text = report::text_table(&title, &results, &errors);
+    let mut markdown = report::markdown(&title, &results, &errors);
+    if let Some(lines) = slowest(&json!({ "benches": benches })) {
+        text.push_str("\nslowest benchmarks:\n");
+        markdown.push_str("\nSlowest benchmarks:\n\n");
+        for line in lines {
+            text.push_str(&format!("  {line}\n"));
+            markdown.push_str(&format!("- {line}\n"));
+        }
+    }
     let mut out = Map::new();
+    out.insert("benches".into(), Json::Array(benches));
     out.insert("version".into(), json!(VERSION));
     out.insert("mode".into(), json!(mode));
     out.insert("gated".into(), json!(gated));

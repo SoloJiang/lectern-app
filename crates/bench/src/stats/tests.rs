@@ -254,14 +254,50 @@ fn stats_frames_at_120_hz_match_max_interval_of_8_3_ms() {
 }
 
 #[test]
+fn stats_warm_up_ends_after_three_calls_or_one_slow_call() {
+    use crate::ctx::warm;
+    let c = SampleConfig::default();
+    let ms = Duration::from_millis;
+    // At least 3 calls and 100 ms.
+    assert!(!warm(&c, 2, ms(250)));
+    assert!(!warm(&c, 3, ms(99)));
+    assert!(warm(&c, 3, ms(100)));
+    assert!(warm(&c, 40, ms(100)));
+    // A call that took 300 ms is warm-up enough.
+    assert!(!warm(&c, 0, ms(500)));
+    assert!(warm(&c, 1, ms(300)));
+    assert!(warm(&c, 2, ms(400)));
+}
+
+/// A 1 s operation: one warm-up call, then the 5-sample minimum, 6 s in
+/// all, where the 5 s cap counted from the end of warm-up took 8 s.
+#[test]
+fn stats_slow_operation_takes_the_minimum() {
+    use crate::ctx::warm;
+    let c = SampleConfig::default();
+    let s = Duration::from_secs;
+    let mut calls = 0;
+    while !warm(&c, calls, s(calls as u64)) {
+        calls += 1;
+    }
+    assert_eq!(calls, 1);
+    let mut samples = 0;
+    while !stop(&c, samples, s((calls + samples) as u64), s(samples as u64)) {
+        samples += 1;
+    }
+    assert_eq!(samples, 5);
+}
+
+#[test]
 fn stats_stop_rules_in_order() {
     let c = SampleConfig::default();
     let s = Duration::from_secs;
-    // 1. fewer than 5 samples: never stop, even past 5 s.
+    // 1. fewer than 5 samples: never stop, even past 3 s.
     assert!(!stop(&c, 4, s(60), s(60)));
-    // 2. 10 000 samples or 5 s of wall time.
+    // 2. 10 000 samples or 3 s of wall time since warm-up began.
     assert!(stop(&c, 10_000, s(0), s(0)));
-    assert!(stop(&c, 5, s(5), s(0)));
+    assert!(stop(&c, 5, s(3), s(0)));
+    assert!(!stop(&c, 5, Duration::from_millis(2999), s(0)));
     // 3. 30 samples taking 1 s.
     assert!(stop(&c, 30, s(2), s(1)));
     assert!(!stop(&c, 30, s(2), Duration::from_millis(999)));
