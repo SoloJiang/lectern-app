@@ -264,6 +264,28 @@ fn deadline_watchdog_idle_does_not_wake() {
     assert!(eventually(|| task.is_finished()));
 }
 
+/// With the system's clock and only a due entry a minute away (a kept
+/// parse's expiry, ADR 0037), the thread sleeps until it instead of waking
+/// every check interval; an earlier entry scheduled meanwhile wakes it and
+/// fires on time.
+#[test]
+fn deadline_watchdog_sleeps_until_a_far_due_entry() {
+    let executor = Executor::manual();
+    let (watchdog, task) = watchdog(&executor, Arc::new(SystemClock));
+    assert!(watchdog.schedule(Instant::now() + Duration::from_secs(60), Box::new(|| {})));
+    assert!(eventually(|| watchdog.waits().0 >= 1));
+    let (timed, _) = watchdog.waits();
+    thread::sleep(Duration::from_millis(100));
+    // At most a spurious wake-up, not one every 10 ms.
+    assert!(watchdog.waits().0 <= timed + 1, "{:?}", watchdog.waits());
+    let fired = watchdog.fired();
+    assert!(watchdog.schedule(Instant::now() + Duration::from_millis(20), Box::new(|| {})));
+    assert!(eventually(|| watchdog.fired() > fired));
+    assert_eq!(watchdog.scheduled(), 1, "the far one is still due");
+    watchdog.stop();
+    assert!(eventually(|| task.is_finished()));
+}
+
 #[test]
 fn deadline_stop_cancels_in_flight_and_exits() {
     let executor = Executor::manual();

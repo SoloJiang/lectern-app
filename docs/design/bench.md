@@ -631,7 +631,7 @@ crates/bench/
 | `code_intel/references_100k/all`、`code_intel/references_100k/first` | 中位数 ≤ 2 s / ≤ 200 ms（10 万个已入索引的文件里 300 个用到这个名字：到最后一批 / 到第一批带引用的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/references_full/all`、`code_intel/references_full/first` | 只记录 / 中位数 ≤ 200 ms（同上，命名空间满额） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/names_100k`、`code_intel/names_100k_bytes` | 中位数 ≤ 1 s / ≤ 8 MB（10 万文件的合成抽取结果，约 32 万个名字；名字表的构建与它的活跃字节；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
-| `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，测量前丢掉那次跳转保留的解析（不在 [ADR 0035](../adr/0035.md) 的采样状态里，见 [ADR 0037](../adr/0037.md)），计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_range` | 中位数 ≤ 同一路径上 `File::open`、`metadata`、两次 `read_at`、`metadata` 的 1.5 倍，且 < 200 µs（64 MiB 的文件，首屏的文件头 8 KiB 加中部目标附近 132 KiB） | [platform](platform.md#性能) | `platform` 范围读取（[#103](https://github.com/SoloJiang/lectern-app/issues/103)） |

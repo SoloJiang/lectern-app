@@ -21,6 +21,14 @@ pub const CHECK_INTERVAL: Duration = Duration::from_millis(10);
 /// same clock; tests use `testing::ManualClock`.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
+
+    /// Whether the clock moves by itself, as the system's does: the
+    /// watchdog then sleeps until its next due entry instead of looking at
+    /// the clock every [`CHECK_INTERVAL`] (a test's manual clock is only
+    /// seen to move by looking).
+    fn moves_by_itself(&self) -> bool {
+        false
+    }
 }
 
 /// The system's monotonic clock.
@@ -30,6 +38,10 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
+    }
+
+    fn moves_by_itself(&self) -> bool {
+        true
     }
 }
 
@@ -370,13 +382,20 @@ impl WatchdogRun {
                 for (_, slot) in &state.in_flight {
                     slot.check(now);
                 }
-                let next = state
+                let due = state
                     .timers
                     .iter()
                     .map(|(at, _)| at.saturating_duration_since(now))
-                    .min()
-                    .unwrap_or(CHECK_INTERVAL)
-                    .min(CHECK_INTERVAL);
+                    .min();
+                // With only due entries and a clock that moves by itself:
+                // asleep until the next one (a kept parse's expiry is a
+                // minute away), woken earlier by a new entry or extraction.
+                let next = match due {
+                    Some(due) if state.in_flight.is_empty() && shared.clock.moves_by_itself() => {
+                        due
+                    }
+                    due => due.unwrap_or(CHECK_INTERVAL).min(CHECK_INTERVAL),
+                };
                 shared.timed_waits.fetch_add(1, Ordering::AcqRel);
                 state = shared
                     .wake
