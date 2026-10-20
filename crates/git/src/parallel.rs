@@ -1,6 +1,8 @@
 //! Spreading one call's independent system calls over a few scoped threads
-//! (ADR 0038): the stat of every tracked path, the listing of directories.
-//! The threads are created inside the call and joined before it returns;
+//! (ADR 0038). Only the comparison's stat of every tracked path uses it; the
+//! untracked walk's directory listing stays serial (prefetching it on other
+//! threads was slower). The threads are created inside the call and joined
+//! before it returns;
 //! results come back in input order, so the outcome never depends on the
 //! scheduling.
 

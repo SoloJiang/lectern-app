@@ -42,7 +42,7 @@
 | `rustix`（dev，只在 Linux） | FIFO 测试里的 `mknodat` | 已在 Cargo.lock（`platform` 依赖它），工作区统一依赖；标准库没有建 FIFO 的接口 |
 | `tempfile`（可选，`test-support` 打开；dev） | `TestRepo` 的临时目录（见「测试」） | 已在 Cargo.lock；gix 0.88 在上面的 feature 下已能写对象、引用文件和 index，`TestRepo` 不需要额外的 gix feature，发布构建的 feature 不变 |
 
-不依赖 `executor`：所有函数都是阻塞的普通函数，由调用方放进后台任务；取消用 `&AtomicBool`（与 gix 的中断约定相同）。本 crate 不自己创建线程。
+不依赖 `executor`：所有函数都是阻塞的普通函数，由调用方放进后台任务；取消用 `&AtomicBool`（与 gix 的中断约定相同）。本 crate 不自己创建线程，唯一的例外是工作区比较的 stat 一遍：在一次调用内用作用域线程并行、返回前全部 join（[ADR 0038](../adr/0038.md)，见「数据流与线程」）。
 
 ### 安全读取
 
@@ -783,7 +783,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 | 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB；每个 `ChangeSet` 保留的工作区内容 ≤ 32 MiB（通常只有当前审阅的一个）；fs_watch 的过滤器（解析后的 index、`core.ignoreCase` 的折叠顺序、忽略规则）是本 crate 的份额，index 与 `project` 保留的句柄共用一份（[ADR 0035](../adr/0035.md)），连同句柄 < 1 MB |
 | 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 过滤器连同它的 `Worktree` 句柄 ≤ 16 MB；工作区比较解析的 index 不在空闲时保留（「缓存」），调用返回后 `Worktree` 为比较留下的 < 1 MB（`git/compare_100k/retained_bytes`，第 4 步生效）。采样状态里唯一保留的改动集是项目主页的计数用改动集（`retained_bytes = 0`、`total_patch_bytes = 0`，没有工作区内容和 hunk）：它连同 stat 缓存随改动路径数增长、不随跟踪文件数增长，要求每个改动路径 ≤ 1 KB（`git/changes_count/per_path_bytes`，计划中）；主页只在 4000 个以内保留它（≤ 4 MB），在 ADR 0035 的 12 MB 余量里。这个上限要等 stat 缓存不再持有文件内容、比较用的 index 在调用返回时释放（第 4 步）两者都完成才成立：前者已完成（`git/changes_count/total_bytes` 从 76.7 MB 降到 2.12 MB，每个改动路径约 1.11 KB），还差第 4 步。上一行 cloudprint 量级的 32 MiB 保留内容是打开 Diff 后的改动集 |
 | 工作区比较期间的临时内存（10 万个跟踪文件，不设顶层预算，同 ADR 0029 的临时内存） | 一次 `changes` 的存活字节峰值 ≤ 72 MB（`git/compare_100k/peak_bytes`）：gix 的 `State`、逐条的 stat 与标志、折叠副本、未跟踪遍历、改动集；比较与 `tracked` 各解析一次 index，合成一次解析是降低它的办法（ADR 0035） |
-| index 变化后的刷新（10 万个跟踪文件，后台） | 重建 fs_watch 过滤器（解析 index、排序折叠顺序、未跟踪遍历、读 `.gitignore`）< 400 ms，fs_watch 等它完成后才交付这一批；`changes` 的全量比较（首次比较和每次 `refresh(Full)`，每次都重新解析 index）< 2 s，项目主页先显示文件列表，改动数随后填入。全量比较按 index 的 cache-tree 跳过未变的基准子树，stat 一遍在至多 4 个作用域线程上进行（ADR 0038），按 macOS 的分阶段数字估计约 1.2 s；过滤器的目录遍历在 macOS 上单独就有 473 ms，仍超标，见「与设计的差异」的已知差距 |
+| index 变化后的刷新（10 万个跟踪文件，后台） | 重建 fs_watch 过滤器（解析 index、排序折叠顺序、未跟踪遍历、读 `.gitignore`）< 400 ms，fs_watch 等它完成后才交付这一批；`changes` 的全量比较（首次比较和每次 `refresh(Full)`，每次都重新解析 index）< 2 s，项目主页先显示文件列表，改动数随后填入。全量比较按 index 的 cache-tree 跳过未变的基准子树，stat 一遍在至多 4 个作用域线程上进行（ADR 0038），按 macOS 的分阶段数字估计约 1.1 s；过滤器的目录遍历在 macOS 上单独就有 473 ms，仍超标，见「与设计的差异」的已知差距 |
 | 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数；10 万文件仓库的读取、过滤器和全量比较都在打开项目之后的后台任务里 |
 | 安装包 ≤ 80 MB | gix 约 3 MB（ADR 0024） |
 
