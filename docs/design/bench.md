@@ -542,7 +542,7 @@ crates/bench/
 | `app/palette_key_200k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 ≤ 16 ms / ≤ 50 ms（20 万条和 100 万条路径的合成仓库：分档预算在档位上界测量） | [性能预算](tech-research.md#性能预算) | ⌘K（#102） |
 | `app/files_open`、`app/files_expand` | 中位数 < 16 ms（目录表已建好；展开 2,000 个子项以内的目录） | [性能预算](tech-research.md#性能预算) | Files（[#10](https://github.com/SoloJiang/lectern-app/issues/10)） |
 | `app/nav_back` | 中位数 < 16 ms（回到最近访问的位置） | [性能预算](tech-research.md#性能预算) | Files（#10） |
-| `app/goto_candidates`、`app/goto_single` | 中位数 ≤ 50 ms（候选列表）/ ≤ 100 ms（唯一候选的目标文件首屏高亮） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
+| `app/goto_candidates`、`app/goto_single` | 中位数 ≤ 50 ms（候选列表，128 KiB 以内的当前文本，[ADR 0037](../adr/0037.md)）/ ≤ 100 ms（唯一候选的目标文件首屏高亮） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/goto_unindexed` | 第一批结果中位数 ≤ 300 ms | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/goto_unindexed_done` | 从请求到限时搜索结束（找完或到时停止）、最后一批结果画出，最大值 ≤ 1.1 s（1 s 限时加 0.1 s 取消与绘制的余量）；夹具里未索引的文件要多到 1 s 内搜不完 | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/references_first`、`app/references_100k` | 中位数 ≤ 200 ms（第一批）/ ≤ 2 s（10 万文件的全部结果） | [性能预算](tech-research.md#性能预算) | 上下文抽屉（[#20](https://github.com/SoloJiang/lectern-app/issues/20)） |
@@ -623,13 +623,14 @@ crates/bench/
 | `code_intel/disk_100k` | 只记录（10 万文件的合成仓库全部写入之后分库文件的大小，含 `-wal`；字节数，由 `time` 目标产出） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
 | `code_intel/goto_indexed`、`code_intel/goto_indexed/done` | 中位数 ≤ 20 ms / 只记录（索引命中的跳转：10 万个已入索引的文件、每 1000 个一个子项目，约 100 KB 的当前文本，它是当前文本、解析已保留（[ADR 0037](../adr/0037.md)），核算的遍历已缓存；从 `query` 到第一批有候选的事件 / 到 `Done`） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/goto_uncached`、`code_intel/goto_popular`、`code_intel/goto_full` 和各自的 `/done` | 中位数 ≤ 20 ms / 只记录，`goto_full/done` 最大值 ≤ 1.02 s（同上，分别在首次跳转会遇到的状态下：每次跳转前忘掉核算缓存的遍历；约 3000 个文件定义的常见名字（每 17 个文件一个，跳转的语言组约占一半）；命名空间满额，核算核对存储） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
-| `code_intel/goto_cold_parse`、`code_intel/goto_same_file`、`code_intel/goto_object` | 只记录（同上的跳转：解析没有保留、为光标处解析；跳到当前文本里 locals 绑定的 `File` 定义；当前文本是对象库里的 blob（Diff 的旧一侧）；对照候选 50 ms） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
-| `code_intel/parse_cache_bytes` | 最大值 ≤ 12 MiB（两个约 100 KB 的 TypeScript 文本先后成为当前文本，两份解析都保留时它们的活跃字节，tree-sitter 的分配计入；`Memory`，[ADR 0037](../adr/0037.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/goto_cold_parse` | 中位数 ≤ 32 ms（同上的跳转，当前文本略小于 128 KiB（保留解析的上限），解析没有保留、为光标处解析的冷路径：候选 50 ms 减去抽屉的 18 ms，[ADR 0037](../adr/0037.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/goto_same_file`、`code_intel/goto_object` | 只记录（同上的跳转：跳到当前文本里 locals 绑定的 `File` 定义；当前文本是对象库里的 blob（Diff 的旧一侧）；对照候选 50 ms） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/parse_cache_bytes` | 最大值 ≤ 12 MiB（保留的上限处：两个略小于 128 KiB 的 TypeScript 文本先后成为当前文本，两份解析都保留时它们的活跃字节，tree-sitter 的分配计入；`Memory`，[ADR 0037](../adr/0037.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/goto_first` | 只记录（新索引的第一次跳转：cloudprint 形状、打开并静止之后，每个样本一个新的语言表；对照候选 50 ms） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/named_50k` | 只记录（`Named` 查约 5 万个文件都定义的名字：从 `query` 到第一批） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/search_stop` | 最大值 ≤ 1.02 s（6000 个未入索引、每个都命中的文件，从 `query` 到最后一批的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/references_100k/all`、`code_intel/references_100k/first` | 中位数 ≤ 2 s / ≤ 200 ms（10 万个已入索引的文件里 300 个用到这个名字：到最后一批 / 到第一批带引用的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
-| `code_intel/references_full/all`、`code_intel/references_full/first` | 只记录 / 中位数 ≤ 200 ms（同上，命名空间满额） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/references_full/all`、`code_intel/references_full/first` | 中位数 ≤ 2 s / ≤ 200 ms（同上，命名空间满额；每次都是 `Complete`：查引用有自己的 1.9 s 时间盒） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/names_100k`、`code_intel/names_100k_bytes` | 中位数 ≤ 1 s / ≤ 8 MB（10 万文件的合成抽取结果，约 32 万个名字；名字表的构建与它的活跃字节；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，测量前丢掉那次跳转保留的解析（不在 [ADR 0035](../adr/0035.md) 的采样状态里，见 [ADR 0037](../adr/0037.md)），计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |

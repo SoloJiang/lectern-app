@@ -28,7 +28,7 @@ use lectern_services::project::{BlobId, RelPath};
 use super::account::{Account, Reason};
 use super::rank::{Ranker, visible};
 use super::search::{FileDeadline, Searched};
-use super::{Run, SEARCH_FOR, Snap, Step, View, ViewCheck};
+use super::{Run, Snap, Step, View, ViewCheck};
 use crate::extract::{
     Deadline, Def, ExtractStatus, Extraction, INTERACTIVE_DEADLINE, Lang, Visibility, compatible,
 };
@@ -619,14 +619,19 @@ impl Inner {
         if !pager.done() {
             let _t = crate::phases::span("3 near lookup (SQL)");
             let lang = prepared.lang.clone();
-            let near = snap.near_oids(from, &|l: &Lang| snap.in_group(l, &lang));
-            crate::phases::count("near files", near.len() as u64);
-            stored.extend(
-                snap.project
-                    .store
-                    .defs_by_name_in(&name, &versions, &near, NAME_IN_LIMIT)
-                    .unwrap_or_default(),
-            );
+            let (siblings, rest) =
+                snap.near_oids(from, &|l: &Lang| snap.in_group(l, &lang), &|p: &str| {
+                    ranker.in_review(p)
+                });
+            crate::phases::count("near files", (siblings.len() + rest.len()) as u64);
+            for near in [&siblings, &rest] {
+                stored.extend(
+                    snap.project
+                        .store
+                        .defs_by_name_in(&name, &versions, near, NAME_IN_LIMIT)
+                        .unwrap_or_default(),
+                );
+            }
         }
         prepared.pager = (!pager.done()).then_some(pager);
         self.add_index_candidates(snap, from, ranker, prepared, stored)
@@ -688,7 +693,7 @@ impl Inner {
             if run.stopped(snap) {
                 return false;
             }
-            if clock.now() >= run.started + SEARCH_FOR {
+            if clock.now() >= run.until {
                 p.left += snap.project.store.defs_left(&pager);
                 break;
             }
@@ -914,7 +919,7 @@ impl Inner {
                 snap,
                 &scope,
                 &name,
-                run.started + SEARCH_FOR,
+                run.until,
                 &mut account,
                 |eff, key, bytes, until| {
                     let extraction = match extracted.get(&(eff.path.clone(), key)) {
@@ -1090,12 +1095,14 @@ impl Inner {
                 && let Some(near) = near
             {
                 let part = |l: &Lang| !snap.disabled.contains(l.name());
-                let oids = snap.near_oids(near, &part);
-                stored.extend(
-                    store
-                        .defs_by_name_in(name, &versions, &oids, NAME_IN_LIMIT)
-                        .unwrap_or_default(),
-                );
+                let (siblings, rest) = snap.near_oids(near, &part, &|p: &str| ranker.in_review(p));
+                for oids in [&siblings, &rest] {
+                    stored.extend(
+                        store
+                            .defs_by_name_in(name, &versions, oids, NAME_IN_LIMIT)
+                            .unwrap_or_default(),
+                    );
+                }
             }
             crate::phases::count("named: stored defs", stored.len() as u64);
             found.add(snap, &ranker, stored);
@@ -1208,7 +1215,7 @@ impl Inner {
             if run.stopped(snap) {
                 return None;
             }
-            if clock.now() >= run.started + SEARCH_FOR {
+            if clock.now() >= run.until {
                 return Some(snap.project.store.defs_left(pager));
             }
             let stored = snap

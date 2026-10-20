@@ -618,6 +618,48 @@ fn account_full_check_is_time_boxed() {
     assert_eq!(done(&r), Completeness::Complete);
 }
 
+/// A hook that lets `by` pass once, at the query's lookup (`Step::Lookup`):
+/// a `ci_ref` pass or a page as slow as 100 000 files make it.
+fn slow_lookup(
+    by: std::time::Duration,
+    clock: crate::testing::ManualClock,
+) -> crate::query::HookFn {
+    Box::new(move |_, _| clock.advance(by))
+}
+
+/// References have their own time box (`REFERENCES_FOR`, within ADR 0030's
+/// 2 s for all results), not the jump's 1 s: a `ci_ref` pass of 1.2 s
+/// leaves the full-mode check room to finish, complete, where the jump's
+/// is cut; past their own box references are cut the same way.
+#[test]
+fn account_references_full_check_has_its_own_time_box() {
+    use crate::query::{REFERENCES_FOR, SEARCH_FOR};
+    use std::time::Duration;
+    let slow = SEARCH_FOR + Duration::from_millis(200);
+    assert!(slow < REFERENCES_FOR);
+    let h = full_two_packages();
+    let of = defined(&h, "pa/b.ts");
+    *lock(&h.indexer.inner().step_hook) = Some((Step::Lookup, slow_lookup(slow, h.clock.clone())));
+    let r = h.ask(QueryKind::References { of: of.clone() });
+    assert_eq!(paths(&r), ["pa/a.ts"]);
+    assert_eq!(done(&r), Completeness::Complete, "references");
+    *lock(&h.indexer.inner().step_hook) = Some((Step::Lookup, slow_lookup(slow, h.clock.clone())));
+    let r = h.goto("pa/a.ts", "item", 0);
+    assert!(
+        matches!(done(&r), Completeness::Partial { .. }),
+        "the jump's box: {:?}",
+        r.state
+    );
+    let past = REFERENCES_FOR + Duration::from_millis(1);
+    *lock(&h.indexer.inner().step_hook) = Some((Step::Lookup, slow_lookup(past, h.clock.clone())));
+    let r = h.ask(QueryKind::References { of });
+    assert!(
+        matches!(done(&r), Completeness::Partial { .. }),
+        "past their own box: {:?}",
+        r.state
+    );
+}
+
 /// A4: the full-mode check of the search's scope (the root: no sub-project,
 /// so every file is in it) stops at the query's time box too: the seven
 /// hinted files besides the current text are unchecked and unsearched; a

@@ -1,5 +1,6 @@
-//! The per-phase breakdowns of `code_intel/goto_indexed` and
-//! `code_intel/named_50k` (docs/design/code_intel.md「实际验证」): the same
+//! The per-phase breakdowns of `code_intel/goto_indexed`,
+//! `code_intel/named_50k` and `code_intel/names_100k`
+//! (docs/design/code_intel.md「实际验证」): the same
 //! fixtures, each query with `lectern_code_intel::phases` recording, the
 //! medians printed. Profiles, not checks: ignored by default; run them in
 //! release:
@@ -197,6 +198,40 @@ fn named_50k_phases() {
     };
     assert_eq!(named().candidates.len(), units);
     profile(&format!("named_50k phases, {units} definitions"), 20, named);
+}
+
+/// `code_intel/names_100k`'s breakdown: the name table of the benchmarks'
+/// 100 000-file virtual repository.
+#[test]
+#[ignore = "a profile; see the module docs"]
+fn names_100k_phases() {
+    use lectern_code_intel::NoGrammarPacks;
+    use lectern_code_intel::extract::LanguageTable;
+    use lectern_code_intel::map::{BaseMap, IndexedHints, LiveMap, Overlay, Provenance};
+    use lectern_code_intel::names::build_table;
+    use lectern_code_intel::store::Store;
+    use lectern_code_intel::testing::VirtualTemplate;
+    let n = files(100_000);
+    let template = VirtualTemplate::build(n, None, Budgets::default()).expect("template");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (git, cache) = template
+        .open(&dir.path().join("cache"), Budgets::default())
+        .expect("a copy");
+    let store = Store::new(&cache.repo(git.common_dir()));
+    let table = LanguageTable::core();
+    let list = Arc::new(synthetic::file_list(n));
+    let map = LiveMap {
+        hints: Arc::new(IndexedHints::new(list.len())),
+        base: Arc::new(BaseMap::build(list, &table, &NoGrammarPacks)),
+        overlay: Arc::new(Overlay::empty()),
+        provenance: Provenance::default(),
+    };
+    let names = build_table(&store, &map, &table, 1, &|| false).expect("a table");
+    profile(
+        &format!("names_100k phases, {} names", names.len()),
+        10,
+        || build_table(&store, &map, &table, 1, &|| false),
+    );
 }
 
 /// Runs `op` a few times, then `runs` times with the phases recording;

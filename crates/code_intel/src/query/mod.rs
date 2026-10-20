@@ -48,14 +48,19 @@ pub(crate) use definition::Prepared;
 pub(crate) use rank::distance;
 #[cfg(test)]
 pub(crate) use search::FileDeadline;
-pub use search::whole_word;
+pub use search::{NEAR_FILES, whole_word};
 
 /// Queries kept at once; a new one closes the oldest beyond this.
 pub const RETAINED: usize = 16;
 /// A prefetch is used by the same query within this long.
 pub const PREFETCH_FOR: Duration = Duration::from_secs(2);
-/// The time-boxed search stops this long after the query started.
+/// The time-boxed search of a jump or `Named` stops this long after the
+/// query started.
 pub const SEARCH_FOR: Duration = Duration::from_secs(1);
+/// The time box of a references query: its search and its full-mode checks
+/// stop this long after it started, 0.1 s before ADR 0030's 2 s for all
+/// results (the same margin for the last batch as the jump's 1.1 s).
+pub const REFERENCES_FOR: Duration = Duration::from_millis(1900);
 /// Prefetches kept at once.
 const PREFETCHES: usize = 4;
 
@@ -274,13 +279,35 @@ impl Snap {
 pub(crate) struct Run {
     pub id: QueryId,
     pub cancel: Arc<AtomicBool>,
-    /// When the query was asked (the search stops [`SEARCH_FOR`] after).
+    /// When the query was asked.
     pub started: Instant,
+    /// Its time box ([`time_box`]): the search, the later pages and the
+    /// full-mode checks stop here.
+    pub until: Instant,
 }
 
 impl Run {
+    fn new(id: QueryId, cancel: Arc<AtomicBool>, started: Instant, kind: &QueryKind) -> Run {
+        Run {
+            id,
+            cancel,
+            started,
+            until: started + time_box(kind),
+        }
+    }
+
     pub fn stopped(&self, snap: &Snap) -> bool {
         self.cancel.load(Ordering::Acquire) || snap.ended.load(Ordering::Acquire)
+    }
+}
+
+/// A query's time box: [`SEARCH_FOR`] for a jump and `Named` (ADR 0030:
+/// stopped and drawn within 1.1 s), [`REFERENCES_FOR`] for references
+/// (all results within 2 s).
+pub fn time_box(kind: &QueryKind) -> Duration {
+    match kind {
+        QueryKind::References { .. } => REFERENCES_FOR,
+        _ => SEARCH_FOR,
     }
 }
 
@@ -354,11 +381,7 @@ impl Inner {
         let prepared = self.take_prefetch(&query);
         self.expire_prefetches();
         let me = self.clone();
-        let run = Run {
-            id,
-            cancel: cancel.clone(),
-            started: self.watchdog.clock().now(),
-        };
+        let run = Run::new(id, cancel.clone(), self.watchdog.clock().now(), &query.kind);
         let spawned = self
             .host
             .spawn_busy("query", Priority::Interactive, move || {
@@ -678,11 +701,7 @@ impl Inner {
                 continue;
             }
             let me = self.clone();
-            let run = Run {
-                id: w.id,
-                cancel: w.cancel,
-                started: self.watchdog.clock().now(),
-            };
+            let run = Run::new(w.id, w.cancel, self.watchdog.clock().now(), &w.query.kind);
             let query = w.query;
             let spawned = self
                 .host
@@ -720,8 +739,7 @@ impl Inner {
 
     /// The accounting's walk ([`Snap::walk`]) for query `run`: the full-mode
     /// check outside the scope stops with the query and at its time box
-    /// (the search's, [`SEARCH_FOR`] after it was asked). None when the
-    /// query stopped.
+    /// (`Run::until`). None when the query stopped.
     pub(crate) fn walk(
         &self,
         run: &Run,
@@ -755,11 +773,11 @@ impl Inner {
     }
 
     /// What stops a full-mode check of query `run` ([`account::Stops`]):
-    /// the query stopped, or its time box (the search's, [`SEARCH_FOR`]
-    /// after it was asked) is due. Checked before every statement.
+    /// the query stopped, or its time box (`Run::until`) is due. Checked
+    /// before every statement.
     fn with_stops<R>(&self, run: &Run, snap: &Snap, f: impl FnOnce(&account::Stops<'_>) -> R) -> R {
         let clock = self.watchdog.clock().clone();
-        let until = run.started + SEARCH_FOR;
+        let until = run.until;
         let stopped = || run.stopped(snap);
         let due = || {
             #[cfg(test)]

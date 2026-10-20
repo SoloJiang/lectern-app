@@ -97,10 +97,10 @@ fn run(
     Ok((id, r))
 }
 
-/// The jumps' current text: about 100 KB of TypeScript (the「性能」row's
-/// size), ending in a call of `name`.
-fn current_text(name: &str) -> Vec<u8> {
-    let mut text = synthetic::source("ts", 999_999, 100 << 10);
+/// The jumps' current text: about `len` bytes of TypeScript, ending in a
+/// call of `name`.
+fn current_text(name: &str, len: usize) -> Vec<u8> {
+    let mut text = synthetic::source("ts", 999_999, len);
     text.extend_from_slice(
         format!("\nexport function jump(x: number) {{ return {name}(x); }}\n").as_bytes(),
     );
@@ -123,6 +123,9 @@ struct Shape {
     /// The jump's name is the current text's own function, which the
     /// current text's locals bind (a `File` definition, step 1).
     same_file: bool,
+    /// The current text just under the largest one kept (ADR 0037's bound
+    /// of the 50 ms) instead of the 「性能」 row's 100 KB.
+    at_bound: bool,
 }
 
 /// A jump fixture: the rig, its query, and the directory its cache lives in.
@@ -150,7 +153,20 @@ fn jump_fixture(ctx: &Ctx, shape: Shape) -> Result<(Jump, usize), BenchError> {
     } else {
         synthetic::shared_name()
     };
-    let mut text = current_text(&name);
+    let max = lectern_code_intel::query::PARSE_CACHE_MAX_SOURCE;
+    // `source` overshoots by a few hundred bytes; the call adds some more.
+    let len = if shape.at_bound {
+        max - (2 << 10)
+    } else {
+        100 << 10
+    };
+    let mut text = current_text(&name, len);
+    if shape.at_bound && !(max - (4 << 10)..=max).contains(&text.len()) {
+        return Err(BenchError::new(format!(
+            "{} bytes, not at the bound {max}",
+            text.len()
+        )));
+    }
     if shape.same_file {
         text.extend_from_slice(format!("function {name}(x: number) {{ return x; }}\n").as_bytes());
     }
@@ -300,6 +316,16 @@ fn complete(r: &lectern_services::code_intel::QueryResults) -> Result<(), BenchE
     Ok(())
 }
 
+/// [`answered`], and complete in every mode: for the full-mode benchmarks,
+/// whose repository holds every unit, so the checks find them all.
+fn strictly_complete(r: &lectern_services::code_intel::QueryResults) -> Result<(), BenchError> {
+    answered(r)?;
+    if r.state != QueryState::Done(Completeness::Complete) {
+        return Err(BenchError::new(format!("not complete: {:?}", r.state)));
+    }
+    Ok(())
+}
+
 fn full_mode() -> bool {
     std::env::var_os("CODE_INTEL_BENCH_FULL").is_some()
 }
@@ -393,7 +419,8 @@ fn goto_full(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         ..Shape::default()
     };
     let (jump, _) = jump_fixture(ctx, shape)?;
-    let (first, done) = sample_jumps(ctx, &jump, &nothing, &answered)?;
+    // The shared repository holds every unit: checked, complete.
+    let (first, done) = sample_jumps(ctx, &jump, &nothing, &strictly_complete)?;
     Ok(vec![
         Measured::new("code_intel/goto_full", Value::Time(first)),
         Measured::new("code_intel/goto_full/done", Value::Time(done)),
@@ -401,15 +428,21 @@ fn goto_full(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 }
 
 /// The jump of [`GOTO_INDEXED`] with no kept parse (forgotten before each,
-/// untimed): the first jump in a text before its parse is warmed, which
-/// parses the text for its site. Recorded, not gated (ADR 0037).
+/// untimed), in a current text just under 128 KiB (the largest kept, where
+/// ADR 0037 holds the 50 ms): the first jump in a text before its parse is
+/// warmed, which parses the text for its site. Gated at the cold path's
+/// share, 50 ms less the drawer's 18 ms (ADR 0037).
 pub const GOTO_COLD_PARSE: Bench = Bench {
     id: "code_intel/goto_cold_parse",
     run: goto_cold_parse,
 };
 
 fn goto_cold_parse(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let (jump, _) = jump_fixture(ctx, Shape::default())?;
+    let shape = Shape {
+        at_bound: true,
+        ..Shape::default()
+    };
+    let (jump, _) = jump_fixture(ctx, shape)?;
     let forget = |rig: &Rig| rig.indexer.clear_kept_parses();
     let (first, _) = sample_jumps(ctx, &jump, &forget, &complete)?;
     Ok(vec![Measured::new(
@@ -746,6 +779,11 @@ fn references(ctx: &mut Ctx, full: bool) -> Result<Vec<Measured>, BenchError> {
                 "{} references for {users} users",
                 r.same_name.len()
             )));
+        }
+        // Every unit is stored: complete, full or not (references' own time
+        // box leaves the full-mode check room after the `ci_ref` pass).
+        if r.state != QueryState::Done(Completeness::Complete) {
+            return Err(BenchError::new(format!("not complete: {:?}", r.state)));
         }
         let events: Vec<(u32, Instant)> = seen
             .lock()

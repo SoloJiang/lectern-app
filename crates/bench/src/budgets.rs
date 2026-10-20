@@ -1231,11 +1231,12 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // The first jump in a text before its parse is kept (the text parsed
-    // for the site), a jump its own locals bind (a `File` definition), and
-    // one from a diff's old side: recorded against the 50 ms candidates.
+    // for the site): the 50 ms candidates less the drawer's 18 ms (one
+    // frame and the event's delivery), ADR 0037. A jump its own locals
+    // bind (a `File` definition), and one from a diff's old side: recorded.
     share(
         "code_intel/goto_cold_parse",
-        RECORD,
+        &[median(Limit::TimeAtMost(ms(32)))],
         CODE_INTEL,
         ACTIVE,
         Time,
@@ -1248,7 +1249,8 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     share("code_intel/goto_object", RECORD, CODE_INTEL, ACTIVE, Time),
-    // The kept parses at their bounds: two 100 KB texts (ADR 0037).
+    // The kept parses at their bounds: two texts just under 128 KiB (ADR
+    // 0037).
     share(
         "code_intel/parse_cache_bytes",
         &[max(Limit::BytesAtMost(12 * MB))],
@@ -1288,11 +1290,11 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
-    // The same with the namespace at its quota: the first batch gated all
-    // the same, the end recorded.
+    // The same with the namespace at its quota: both gated all the same,
+    // complete (references' own time box, `REFERENCES_FOR`).
     share(
         "code_intel/references_full/all",
-        RECORD,
+        &[median(Limit::TimeAtMost(ms(2000)))],
         CODE_INTEL,
         ACTIVE,
         Time,

@@ -781,6 +781,10 @@ impl Inner {
                 };
                 // Their providers' `cancel`, outside the lock.
                 self.finish_ended(ended);
+                // Its current text is no longer current.
+                if let Some(me) = self.arc() {
+                    me.focus_parse(project, None);
+                }
                 {
                     let mut batch = lock(&self.batch_project);
                     if batch.as_ref() == Some(project) {
@@ -800,9 +804,13 @@ impl Inner {
             return;
         };
         // A text that becomes the current one: its parse is kept for the
-        // jumps in it (ADR 0037), made in the background.
+        // jumps in it while it is current (ADR 0037), made in the background.
         let warm = match &focus {
             Focus::Current(Some(text)) => Some(text.clone()),
+            _ => None,
+        };
+        let current = match &focus {
+            Focus::Current(text) => Some(text.as_ref().map(|t| t.oid)),
             _ => None,
         };
         {
@@ -821,6 +829,9 @@ impl Inner {
         if let Some(me) = self.arc() {
             me.enqueue_focus(&project);
             me.kick_batch();
+            if let Some(oid) = current {
+                me.focus_parse(key, oid);
+            }
             if let Some(text) = warm {
                 me.warm_parse(key, &text);
             }

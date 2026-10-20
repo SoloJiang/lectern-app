@@ -7,9 +7,11 @@
 //! found none; a jump never waits for one.
 //!
 //! Bounds: at most [`ENTRIES`] texts of at most [`MAX_SOURCE`] bytes each,
-//! their estimated bytes ([`estimate`]) at most [`BYTES`]; an entry unused
-//! for [`KEEP_FOR`] is dropped (the watchdog's due entry), and so is every
-//! entry of a language the table replaced (its grammar's lease).
+//! their estimated bytes ([`estimate`]) at most [`BYTES`]; the current
+//! text's entry stays while it is current, any other unused for
+//! [`KEEP_FOR`] (from its last use or from when it stopped being current)
+//! is dropped (the watchdog's due entry), and so is every entry of a
+//! language the table replaced (its grammar's lease).
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -59,6 +61,10 @@ struct Kept {
 #[derive(Default)]
 pub(crate) struct ParseCache {
     kept: Vec<Kept>,
+    /// The current text (the last `Focus::Current`) and its project: its
+    /// entry never expires and is evicted last; [`KEEP_FOR`] counts from
+    /// when it stops being the current one.
+    current: Option<(ProjectKey, BlobId)>,
 }
 
 /// What a cache operation dropped: dropped by the caller outside the lock
@@ -115,20 +121,60 @@ impl ParseCache {
             bytes: estimate(len),
             used: now,
         });
+        // The least recently used first, the current text's last.
         while self.kept.len() > ENTRIES || self.bytes() > BYTES {
-            dropped.push(self.kept.remove(0).parsed);
+            let at = self
+                .kept
+                .iter()
+                .position(|k| !self.is_current(k.oid))
+                .unwrap_or(0);
+            dropped.push(self.kept.remove(at).parsed);
         }
         dropped
     }
 
-    /// Drops the entries unused for [`KEEP_FOR`] at `now`; when the next one
-    /// is due, if any is left.
+    fn is_current(&self, oid: BlobId) -> bool {
+        self.current.as_ref().is_some_and(|(_, c)| *c == oid)
+    }
+
+    /// `project`'s current text is now `oid` (None: it has none, or the
+    /// project closed). The text that stops being current is marked used
+    /// at `now`, so it is kept [`KEEP_FOR`] from here; a `None` for
+    /// another project than the current text's changes nothing.
+    pub fn set_current(&mut self, project: &ProjectKey, oid: Option<BlobId>, now: Instant) {
+        let ends = match (&self.current, oid) {
+            (Some((_, old)), Some(new)) => *old != new,
+            (Some((p, _)), None) => p == project,
+            (None, _) => false,
+        };
+        if ends && let Some((_, old)) = self.current.take() {
+            for k in self.kept.iter_mut().filter(|k| k.oid == old) {
+                k.used = now;
+            }
+        }
+        if let Some(new) = oid {
+            for k in self.kept.iter_mut().filter(|k| k.oid == new) {
+                k.used = now;
+            }
+            self.current = Some((project.clone(), new));
+        }
+    }
+
+    /// Drops the entries unused for [`KEEP_FOR`] at `now`, never the
+    /// current text's; when the next one is due, if any is left.
     pub fn expire(&mut self, now: Instant) -> (Dropped, Option<Instant>) {
-        let (gone, kept): (Vec<Kept>, Vec<Kept>) = std::mem::take(&mut self.kept)
-            .into_iter()
-            .partition(|k| now.saturating_duration_since(k.used) >= KEEP_FOR);
+        let current = self.current.as_ref().map(|(_, c)| *c);
+        let (gone, kept): (Vec<Kept>, Vec<Kept>) =
+            std::mem::take(&mut self.kept).into_iter().partition(|k| {
+                Some(k.oid) != current && now.saturating_duration_since(k.used) >= KEEP_FOR
+            });
         self.kept = kept;
-        let next = self.kept.iter().map(|k| k.used + KEEP_FOR).min();
+        let next = self
+            .kept
+            .iter()
+            .filter(|k| Some(k.oid) != current)
+            .map(|k| k.used + KEEP_FOR)
+            .min();
         (gone.into_iter().map(|k| k.parsed).collect(), next)
     }
 
@@ -271,8 +317,18 @@ impl Inner {
         self.expire_parses();
     }
 
-    /// Drops the kept parses unused for [`KEEP_FOR`] and schedules a due
-    /// entry for the next one, so none outlives its use by more than that.
+    /// `project`'s current text is now `oid` (`Focus::Current`; None when
+    /// it has none or closed): its kept parse stays while it is current,
+    /// and the one that stops being current gets its [`KEEP_FOR`] from now.
+    pub(crate) fn focus_parse(self: &Arc<Self>, project: &ProjectKey, oid: Option<BlobId>) {
+        let now = self.watchdog.clock().now();
+        lock(&self.parse_cache).set_current(project, oid, now);
+        self.expire_parses();
+    }
+
+    /// Drops the kept parses unused for [`KEEP_FOR`] (never the current
+    /// text's) and schedules a due entry for the next one, so none outlives
+    /// its use, or its being current, by more than that.
     pub(crate) fn expire_parses(self: &Arc<Self>) {
         let now = self.watchdog.clock().now();
         let (dropped, next) = lock(&self.parse_cache).expire(now);

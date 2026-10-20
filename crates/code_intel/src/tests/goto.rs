@@ -768,6 +768,69 @@ fn goto_popular_name_nearest_first() {
     assert_eq!(&*first.candidates[0].definition.location.path, "zz/near.ts");
 }
 
+/// A3, the near files in the ranker's order: a sub-project of many
+/// directories whose files define `get` and come first in path order, more
+/// than `NEAR_FILES` of them, and in the jump's own directory a committed
+/// sibling and a new file of the worktree (an overlay entry): both
+/// siblings are in the first batch, ahead of every other candidate, for the
+/// jump and for `Named`.
+#[test]
+fn goto_popular_name_nearest_in_a_deep_subproject() {
+    let far = crate::query::NEAR_FILES + 52;
+    let h = Harness::new();
+    for i in 0..far {
+        let text = format!("export function get() {{ return {i}; }}\n");
+        h.git.add(
+            "main",
+            &[(&format!("web/a/d{:02}/f{i:04}.ts", i % 40), text.as_bytes())],
+        );
+    }
+    h.git.add(
+        "main",
+        &[
+            (
+                "web/src/main.ts",
+                b"export function run() { return get(); }\n",
+            ),
+            (
+                "web/src/store.ts",
+                b"export function get() { return -1; }\n",
+            ),
+        ],
+    );
+    h.git.commit("main");
+    h.open_with("main", packages(&["web"]));
+    h.git.write(
+        "main",
+        "web/src/fresh.ts",
+        b"export function get() { return -2; }\n",
+    );
+    h.emit(&[("web/src/fresh.ts", super::support::CREATED)]);
+    h.settle();
+    h.pause();
+    let nearest = ["web/src/fresh.ts", "web/src/store.ts"];
+    let check = |first: &QueryResults| {
+        let lead: Vec<&str> = first.candidates[..2]
+            .iter()
+            .map(|c| &*c.definition.location.path)
+            .collect();
+        assert_eq!(lead, nearest);
+        assert!(first.candidates.len() < far + 2, "a first batch");
+    };
+    let seen = first_batch(&h);
+    let r = h.goto("web/src/main.ts", "get", 0);
+    assert_eq!(r.state, QueryState::Done(Completeness::Complete));
+    assert_eq!(r.candidates.len(), far + 2);
+    check(&seen.lock().unwrap().clone().expect("a later batch"));
+    let seen = first_batch(&h);
+    let r = h.ask(QueryKind::Named {
+        name: "get".into(),
+        near: Some("web/src/main.ts".into()),
+    });
+    assert_eq!(r.candidates.len(), far + 2);
+    check(&seen.lock().unwrap().clone().expect("a later batch"));
+}
+
 /// A3: the later pages stop at the query's time box; the definitions not
 /// read count as unsearched (at most that many files), never complete.
 #[test]
@@ -892,11 +955,68 @@ fn goto_kept_parses_are_bounded() {
     h.current("big.ts");
     h.settle();
     assert_eq!(h.indexer.kept_parses().0, 0);
-    // Unused for long: dropped by the due entry.
+    // Unused for long once no longer current: dropped by the due entry.
     h.current("f1.ts");
     h.settle();
     assert_eq!(h.indexer.kept_parses().0, 1);
+    h.set_focus(Focus::Current(None));
     h.advance_and_fire(PARSE_CACHE_KEEP_FOR + std::time::Duration::from_millis(1));
+    assert_eq!(h.indexer.kept_parses().0, 0);
+}
+
+/// A2: the current text's parse stays while it is current, however long
+/// the reader takes: its jumps never take the cold path. The text before it
+/// gets its `PARSE_CACHE_KEEP_FOR` from when it stopped being current, and
+/// the current one too once its project has none or closes.
+#[test]
+fn goto_current_text_parse_stays_while_current() {
+    use crate::query::PARSE_CACHE_KEEP_FOR;
+    use std::time::Duration;
+    let files = [
+        (
+            "a.ts",
+            "export function a() { return 1; }\nexport const x = a();\n",
+        ),
+        (
+            "b.ts",
+            "export function b() { return 2; }\nexport const y = b();\n",
+        ),
+    ];
+    let h = indexed(&files);
+    h.current("a.ts");
+    h.settle();
+    // Read for five minutes, then jump: no parse.
+    for _ in 0..5 {
+        h.advance_and_fire(PARSE_CACHE_KEEP_FOR);
+    }
+    assert_eq!(h.indexer.kept_parses().0, 1);
+    parsed(&files);
+    h.goto("a.ts", "a", 1);
+    assert!(parsed(&files).is_empty(), "the kept parse answered");
+    // b.ts becomes current: a.ts is kept for its own 60 s, then dropped.
+    h.current("b.ts");
+    h.settle();
+    assert_eq!(h.indexer.kept_parses().0, 2);
+    h.clock
+        .advance(PARSE_CACHE_KEEP_FOR - Duration::from_secs(1));
+    h.settle();
+    assert_eq!(h.indexer.kept_parses().0, 2);
+    h.advance_and_fire(Duration::from_secs(2));
+    assert_eq!(h.indexer.kept_parses().0, 1);
+    parsed(&files);
+    h.goto("b.ts", "b", 1);
+    assert!(parsed(&files).is_empty(), "b.ts is still kept");
+    // No current text: 60 s later nothing is kept.
+    h.set_focus(Focus::Current(None));
+    h.advance_and_fire(PARSE_CACHE_KEEP_FOR + Duration::from_millis(1));
+    assert_eq!(h.indexer.kept_parses().0, 0);
+    // A current text whose project closes is released the same way.
+    h.current("a.ts");
+    h.settle();
+    assert_eq!(h.indexer.kept_parses().0, 1);
+    h.indexer
+        .project_event(&lectern_services::project::ProjectEvent::Closed { project: h.key() });
+    h.advance_and_fire(PARSE_CACHE_KEEP_FOR + Duration::from_millis(1));
     assert_eq!(h.indexer.kept_parses().0, 0);
 }
 

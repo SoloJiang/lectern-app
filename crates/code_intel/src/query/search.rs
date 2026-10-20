@@ -204,34 +204,81 @@ impl Snap {
 
     /// The OIDs of the files nearest `from` in the languages `part` admits,
     /// for the first batch's lookup of a name many units define (「候选的分层
-    /// 与过滤」): `from`'s directory's, then its sub-project's (none without
-    /// one: the whole worktree is no near tier), at most [`NEAR_FILES`],
-    /// each once.
-    pub fn near_oids(&self, from: &str, part: &dyn Fn(&Lang) -> bool) -> Vec<BlobId> {
+    /// 与过滤」), in the ranker's order and in two parts, each looked up by
+    /// its own statements so that one statement's row limit never trades a
+    /// near file for a far one: `from`'s directory's own files (not its
+    /// subdirectories; worktree changes included), those in the review set
+    /// (`in_review`) first; then the other files of its sub-project (of its
+    /// directory's subtree without one; nothing more at the root), the
+    /// review set first, then by path distance from `from`. At most
+    /// [`NEAR_FILES`] in all, each once.
+    pub fn near_oids(
+        &self,
+        from: &str,
+        part: &dyn Fn(&Lang) -> bool,
+        in_review: &dyn Fn(&str) -> bool,
+    ) -> (Vec<BlobId>, Vec<BlobId>) {
         let mut seen = HashSet::new();
-        let mut out = Vec::new();
         let dir = from.rsplit_once('/').map_or("", |(d, _)| d);
-        let sub = self.subproject_of(from);
         let mut admit = |l: &Lang| part(l);
-        for (dir, root) in [(Some(dir), dir.is_empty()), (sub, false)] {
-            let Some(dir) = dir else {
-                continue;
+        let own = |path: &str| {
+            let rest = if dir.is_empty() {
+                Some(path)
+            } else {
+                path.strip_prefix(dir).and_then(|r| r.strip_prefix('/'))
             };
-            self.map.each_file(dir, true, &mut admit, |f| {
-                // The root's own files only, not the whole worktree.
-                if out.len() < NEAR_FILES
-                    && !(root && f.path().contains('/'))
-                    && let Some(oid) = f.oid
-                    && seen.insert(oid)
+            rest.is_some_and(|r| !r.contains('/'))
+        };
+        // (not in review, distance, walk order, OID): one key per file.
+        let mut siblings: Vec<(bool, usize, usize, BlobId)> = Vec::new();
+        self.map.each_file(dir, true, &mut admit, |f| {
+            let path = f.path();
+            if let Some(oid) = f.oid
+                && own(path)
+            {
+                siblings.push((!in_review(path), 0, siblings.len(), oid));
+            }
+        });
+        siblings.sort_unstable();
+        let siblings: Vec<BlobId> = siblings
+            .into_iter()
+            .map(|(.., oid)| oid)
+            .filter(|oid| seen.insert(*oid))
+            .take(NEAR_FILES)
+            .collect();
+        let scope = self
+            .subproject_of(from)
+            .or((!dir.is_empty()).then_some(dir));
+        let room = NEAR_FILES - siblings.len();
+        let mut rest: Vec<(bool, usize, usize, BlobId)> = Vec::new();
+        if let Some(scope) = scope
+            && room > 0
+        {
+            self.map.each_file(scope, true, &mut admit, |f| {
+                let path = f.path();
+                if let Some(oid) = f.oid
+                    && !own(path)
+                    && !seen.contains(&oid)
                 {
-                    out.push(oid);
+                    let key = (!in_review(path), distance(from, path), rest.len(), oid);
+                    rest.push(key);
                 }
             });
-            if out.len() >= NEAR_FILES {
-                break;
-            }
         }
-        out
+        // The nearest `room` (and a few more for repeated OIDs), in order.
+        let keep = (2 * room).min(rest.len());
+        if keep < rest.len() {
+            rest.select_nth_unstable(keep);
+            rest.truncate(keep);
+        }
+        rest.sort_unstable();
+        let rest: Vec<BlobId> = rest
+            .into_iter()
+            .map(|(.., oid)| oid)
+            .filter(|oid| seen.insert(*oid))
+            .take(room)
+            .collect();
+        (siblings, rest)
     }
 
     /// Every file of the map under `dir` (or not under it, `inside` false).

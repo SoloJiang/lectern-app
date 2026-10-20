@@ -1,14 +1,14 @@
 //! The ⌘K name table (docs/design/code_intel.md「名字表」): the definition
 //! names of the current worktree's map, deduplicated (case-sensitive), NFC,
 //! in byte order, each with the set of kinds it was seen with. Built in two
-//! passes: the current versions' units, filtered by the map, then one scan
-//! of `ci_def` in table order that keeps the rows of those units
-//! (`Store::def_names`, no index lookups). This crate keeps only a `Weak`; the table
+//! passes: the current versions' units (one scan of `ci_ext`), filtered by
+//! the map, then `ci_def_name` (name, unit, kind) in index order and in
+//! pages, keeping the rows of those units, each distinct name once
+//! (`Store::def_names`). This crate keeps only a `Weak`; the table
 //! belongs to whoever took it from `CodeIntelEvent::Names`. While someone
 //! holds it, a table behind its inputs is rebuilt in the background, at most
 //! once per `max(1 s, 2 × the last build)`.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,6 @@ use crate::index::state::Project;
 use crate::index::{Inner, lock};
 use crate::map::{LiveMap, Provenance};
 use crate::store::{Store, Version};
-use crate::util::FastBuild;
 
 /// Rebuilds while held start at least this long after the last one did…
 pub const REBUILD_MIN: Duration = Duration::from_secs(1);
@@ -81,38 +80,40 @@ pub fn build_table(
     stop: &dyn Fn() -> bool,
 ) -> Option<NameTable> {
     let versions: Vec<Version> = table.iter().map(Version::of).collect();
-    let mut units: Vec<_> = store
-        .units(&versions)?
-        .into_iter()
-        .filter(|u| map.has(&u.oid, &u.lang.0))
-        .map(|u| u.unit)
-        .collect();
+    let stored = {
+        let _t = crate::phases::span("names: units (SQL)");
+        store.units(&versions)?
+    };
+    let mut units: Vec<_> = {
+        let _t = crate::phases::span("names: filter by the map");
+        stored
+            .into_iter()
+            .filter(|u| map.has(&u.oid, &u.lang.0))
+            .map(|u| u.unit)
+            .collect()
+    };
     if stop() {
         return None;
     }
     units.sort();
     units.dedup();
-    let mut names: HashMap<Box<str>, u16, FastBuild> = HashMap::default();
-    let read = store.def_names(&units, |_, name, kind| {
-        let bit = crate::def_kind_bit(kind);
-        if let Some(kinds) = names.get_mut(name) {
-            *kinds |= bit;
-            return;
-        }
-        let key: Box<str> = if is_nfc(name) {
-            name.into()
-        } else {
-            name.nfc().collect::<String>().into()
-        };
-        *names.entry(key).or_insert(0) |= bit;
-    });
+    // Each distinct name once (the store's index order), NFC once per
+    // name; spellings that NFC makes equal are merged by the builder.
+    let mut builder = NameTable::builder(generation);
+    let read = {
+        let _t = crate::phases::span("names: index scan (SQL)");
+        store.def_names(&units, stop, |name, kinds| {
+            if is_nfc(name) {
+                builder.push(name, kinds);
+            } else {
+                builder.push(&name.nfc().collect::<String>(), kinds);
+            }
+        })
+    };
     if !read || stop() {
         return None;
     }
-    let mut builder = NameTable::builder(generation);
-    for (name, kinds) in names {
-        builder.push(&name, kinds);
-    }
+    let _t = crate::phases::span("names: build the table");
     Some(builder.build())
 }
 

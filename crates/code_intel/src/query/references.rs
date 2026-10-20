@@ -23,7 +23,7 @@ use super::account::{Account, Reason};
 use super::definition::{LocKey, loc_key};
 use super::rank::Ranker;
 use super::search::{FileDeadline, FileLimits, Searched};
-use super::{Run, SEARCH_FOR, Snap, Step, ViewCheck};
+use super::{Run, Snap, Step, ViewCheck};
 use crate::extract::{ExtractStatus, Extraction, INTERACTIVE_MAX_LEN, Lang, compatible};
 use crate::index::Inner;
 use crate::resolve::ResolveContext;
@@ -265,7 +265,7 @@ impl Inner {
                 snap,
                 &scope,
                 &name,
-                run.started + SEARCH_FOR,
+                run.until,
                 &mut account,
                 |eff, key, bytes, until| {
                     let mut found = cell.borrow_mut();

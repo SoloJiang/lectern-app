@@ -232,8 +232,8 @@ fn resident(
 }
 
 /// The kept parses of current texts at their bounds (ADR 0037): two
-/// 100 KB TypeScript texts made the current one in turn, so both parses
-/// are kept; their live bytes (the syntax trees through tree-sitter's
+/// TypeScript texts just under 128 KiB made the current one in turn, so
+/// both parses are kept; their live bytes (the syntax trees through tree-sitter's
 /// allocator, the binding models, the reference positions) are what
 /// forgetting them frees. Against `PARSE_CACHE_BYTES`; also prints the
 /// bytes per source byte the cache's estimate uses.
@@ -249,15 +249,28 @@ fn parse_cache_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         let dir = tempfile::tempdir_in(ctx.scratch())?;
         let cache = cache(dir.path());
         virtual_repo(&git, &cache, 728, &["main"]);
+        // At the bounds: as many texts as are kept, each just under the
+        // largest kept (`source` overshoots its length by a few hundred
+        // bytes).
+        let max = lectern_code_intel::query::PARSE_CACHE_MAX_SOURCE;
         let texts: Vec<(String, Vec<u8>)> = (0..lectern_code_intel::query::PARSE_CACHE_ENTRIES)
             .map(|i| {
                 let path = format!("packages/pkg000/src/mod00/current{i}.ts");
                 (
                     path,
-                    synthetic::source("ts", 990_000 + i + 10 * round, 100 << 10),
+                    synthetic::source("ts", 990_000 + i + 10 * round, max - (1 << 10)),
                 )
             })
             .collect();
+        if let Some((path, text)) = texts
+            .iter()
+            .find(|(_, t)| t.len() > max || t.len() < max - (2 << 10))
+        {
+            return Err(BenchError::new(format!(
+                "{path}: {} bytes, not at the bound {max}",
+                text.len()
+            )));
+        }
         for (path, text) in &texts {
             git.add("main", &[(path, text)]);
         }

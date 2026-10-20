@@ -34,7 +34,7 @@ static TEST_STATEMENTS: &[&str] = &[
     store::DEFS_IN,
     store::REFS_PAGE,
     store::UNITS,
-    store::DEF_NAMES,
+    store::NAMES_PAGE,
     store::EXT_OF_UNIT,
     store::DEFS_OF_UNIT,
     store::REFS_OF_UNIT,
@@ -399,10 +399,176 @@ fn store_lookups_cover_a_compatibility_group() {
     assert_eq!(unit_oids(&all), expected);
 }
 
-/// A3: a name's definitions in pages of at most the limit, in unit order,
-/// each unit's definitions in one page (a unit with two overloads is not
-/// split at a page's end), every definition once; the rows left counted
-/// while pages remain; the other cases of the name read but not returned.
+/// The raw index rows of each page statement of `what` since the last call.
+fn page_rows(what: &str) -> Vec<usize> {
+    store::PAGE_ROWS.with(|p| {
+        p.borrow_mut()
+            .drain(..)
+            .filter(|(w, _)| *w == what)
+            .map(|(_, n)| n)
+            .collect()
+    })
+}
+
+/// Units of `n` files each defining and referring to `name` once, OIDs
+/// from `first`.
+fn naming(first: u32, n: u32, name: &str) -> Vec<(BlobId, Extraction)> {
+    (first..first + n)
+        .map(|i| (oid(i), done(vec![def(name, DefKind::Function, 1)], &[name])))
+        .collect()
+}
+
+fn commit_all(store: &Store, version: &Version, units: &[(BlobId, Extraction)]) {
+    let rows: Vec<_> = units.iter().map(|(o, e)| (*o, version, e)).collect();
+    for chunk in rows.chunks(64) {
+        commit(store, chunk);
+    }
+}
+
+/// The pages of a lookup by name bound the index rows each statement
+/// reads, not the rows that pass: 600 units of the name under an old
+/// version (never deleted before eviction) before three current ones, and
+/// 600 in another language, cost statements of at most a page each, and
+/// every current definition and reference still comes back.
+#[test]
+fn store_lookup_pages_bound_the_rows_read() {
+    let f = Fixture::new();
+    let store = f.store();
+    let old = v("ts", 1, 1);
+    let current = v("ts", 2, 1);
+    let python = v("python", 1, 1);
+    commit_all(&store, &old, &naming(0, 600, "get"));
+    commit_all(&store, &current, &naming(1000, 3, "get"));
+    commit_all(&store, &python, &naming(2000, 600, "get"));
+    page_rows("defs");
+    page_rows("refs");
+
+    let defs = store
+        .defs_by_name("get", std::slice::from_ref(&current))
+        .expect("read");
+    let mut oids: Vec<BlobId> = defs.iter().map(|d| d.oid).collect();
+    oids.sort();
+    assert_eq!(oids, vec![oid(1000), oid(1001), oid(1002)]);
+    let rows = page_rows("defs");
+    assert!(rows.iter().all(|&r| r <= store::NAME_PAGE), "{rows:?}");
+    assert_eq!(rows.iter().sum::<usize>(), 1203, "every row read once");
+    assert_eq!(rows.len(), 1203usize.div_ceil(store::NAME_PAGE));
+
+    let refs = store
+        .refs_by_name("get", std::slice::from_ref(&current))
+        .expect("read");
+    assert_eq!(refs.len(), 3);
+    let rows = page_rows("refs");
+    assert!(rows.iter().all(|&r| r <= store::NAME_PAGE), "{rows:?}");
+    assert_eq!(rows.iter().sum::<usize>(), 1203);
+
+    // A language no unit of the name is in: bounded pages, nothing found.
+    let none = store
+        .defs_by_name("get", std::slice::from_ref(&v("go", 1, 1)))
+        .expect("read");
+    assert!(none.is_empty());
+    let rows = page_rows("defs");
+    assert!(rows.iter().all(|&r| r <= store::NAME_PAGE), "{rows:?}");
+}
+
+/// The name table's scan in pages: more entries than one statement reads,
+/// spellings equal but for case interleaved by unit, only the wanted
+/// units' rows: each distinct spelling once with the union of its kinds,
+/// as a direct computation gives; `stop` ends it between statements.
+#[test]
+fn store_def_names_in_pages() {
+    use std::collections::BTreeMap;
+    let f = Fixture::new();
+    let store = f.store();
+    let js = v("js", 1, 1);
+    let kinds = [DefKind::Function, DefKind::Class, DefKind::Method];
+    let spell = ["get", "Get", "GET"];
+    let units: Vec<(BlobId, Extraction)> = (0..3000u32)
+        .map(|i| {
+            let defs = vec![
+                def(spell[i as usize % 3], kinds[i as usize % 3], 1),
+                def(spell[(i as usize + 1) % 3], kinds[(i as usize / 3) % 3], 2),
+                def(&format!("n{}", i % 50), kinds[i as usize % 2], 3),
+            ];
+            (oid(i), done(defs, &[]))
+        })
+        .collect();
+    commit_all(&store, &js, &units);
+    let all = store.units(std::slice::from_ref(&js)).expect("read");
+    // Every other unit is wanted.
+    let mut wanted: Vec<Unit> = all
+        .iter()
+        .filter(|u| u.oid.as_bytes()[3] % 2 == 0)
+        .map(|u| u.unit)
+        .collect();
+    wanted.sort();
+    let mut expected: BTreeMap<String, u16> = BTreeMap::new();
+    for u in &wanted {
+        for d in store.load(*u).expect("unit").defs {
+            *expected.entry(d.name.to_string()).or_insert(0) |= crate::def_kind_bit(d.kind);
+        }
+    }
+    page_rows("names");
+    let mut seen: Vec<(String, u16)> = Vec::new();
+    assert!(store.def_names(&wanted, &|| false, |n, k| seen.push((n.to_owned(), k))));
+    let rows = page_rows("names");
+    assert!(rows.len() >= 3, "{rows:?}");
+    assert!(
+        rows.iter().all(|&r| r <= store::NAMES_SCAN_PAGE),
+        "{rows:?}"
+    );
+    assert_eq!(rows.iter().sum::<usize>(), 9000, "every entry read once");
+    let names: Vec<&String> = seen.iter().map(|(n, _)| n).collect();
+    let mut distinct = names.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(names.len(), distinct.len(), "each spelling once: {names:?}");
+    seen.sort();
+    assert_eq!(seen, expected.into_iter().collect::<Vec<_>>());
+    // Asked to stop after the first statement.
+    let calls = std::cell::Cell::new(0);
+    let stop = || {
+        calls.set(calls.get() + 1);
+        calls.get() > 1
+    };
+    assert!(!store.def_names(&wanted, &stop, |_, _| {}));
+    assert_eq!(page_rows("names").len(), 1);
+}
+
+/// One unit with more rows of a name than a page holds (600 overloads):
+/// every one comes back, once, across pages; nothing is dropped.
+#[test]
+fn store_lookup_pages_go_on_inside_a_unit() {
+    let f = Fixture::new();
+    let store = f.store();
+    let js = v("js", 1, 1);
+    let overloads: Vec<Def> = (0..600)
+        .map(|i| def("get", [DefKind::Function, DefKind::Method][i % 2], i as u32))
+        .collect();
+    commit(&store, &[(oid(1), &js, &done(overloads, &[]))]);
+    page_rows("defs");
+    let mut pager = NamePager::new("get", std::slice::from_ref(&js));
+    let mut lines = Vec::new();
+    while !pager.done() {
+        lines.extend(
+            store
+                .next_defs(&mut pager, 256)
+                .expect("read")
+                .into_iter()
+                .map(|d| d.def.line),
+        );
+    }
+    lines.sort();
+    assert_eq!(lines, (0..600).collect::<Vec<u32>>());
+    let rows = page_rows("defs");
+    assert!(rows.iter().all(|&r| r <= 256), "{rows:?}");
+    assert_eq!(rows.iter().sum::<usize>(), 600);
+}
+
+/// A3: a name's definitions in pages of at most the limit of index rows,
+/// in index order (a unit's overloads may span pages), every definition
+/// once; the rows left counted while pages remain; the other cases of the
+/// name read but not returned.
 #[test]
 fn store_lookup_by_name_in_pages() {
     let f = Fixture::new();
@@ -493,9 +659,10 @@ fn store_lookup_by_name_in_given_units() {
     );
 }
 
-/// The plans of the lookups by name (`EXPLAIN QUERY PLAN`): every one
-/// seeks `ci_def_name` (or `ci_ref`'s key) by (name, unit), never scans a
-/// table and never sorts, so its cost follows the rows or units it reads.
+/// The plans of the lookups by name and the name table's pages (`EXPLAIN
+/// QUERY PLAN`): every one seeks `ci_def_name` (or `ci_ref`'s key) by name
+/// and cursor, never scans a table and never sorts, so its cost follows the
+/// rows or units it reads.
 #[test]
 fn store_lookups_by_name_use_the_name_and_unit_index() {
     use std::sync::LazyLock;
@@ -506,6 +673,7 @@ fn store_lookups_by_name_use_the_name_and_unit_index() {
             store::DEFS_IN,
             store::DEFS_LEFT,
             store::REFS_PAGE,
+            store::NAMES_PAGE,
         ] {
             statements.push(Box::leak(
                 format!("EXPLAIN QUERY PLAN {sql}").into_boxed_str(),
@@ -547,10 +715,14 @@ fn store_lookups_by_name_use_the_name_and_unit_index() {
         })
         .expect("read")
     };
-    let mut page = vec![Param::Null; 15];
-    page[0] = Param::Text("get");
-    page[13] = Param::Int(0);
-    page[14] = Param::Int(256);
+    let cursor = [Param::Int(0), Param::Int(0), Param::Int(0)];
+    let page = vec![
+        Param::Text("get"),
+        cursor[0],
+        cursor[1],
+        cursor[2],
+        Param::Int(256),
+    ];
     let mut within = vec![Param::Null; 14 + EXISTS_BATCH];
     within[0] = Param::Text("get");
     within[13] = Param::Int(256);
@@ -559,15 +731,16 @@ fn store_lookups_by_name_use_the_name_and_unit_index() {
             store::DEFS_PAGE,
             page.clone(),
             &[
-                "ci_def_name (name=? AND unit>?)",
+                "COVERING INDEX ci_def_name (name=? AND (unit,kind)>(?,?))",
                 "e USING INTEGER PRIMARY KEY",
+                "d USING INTEGER PRIMARY KEY",
             ][..],
         ),
         (
             store::REFS_PAGE,
-            page,
+            vec![Param::Text("get"), Param::Int(0), Param::Int(256)],
             &[
-                "r USING PRIMARY KEY (name=? AND unit>?)",
+                "ci_ref USING PRIMARY KEY (name=? AND unit>?)",
                 "e USING INTEGER PRIMARY KEY",
             ][..],
         ),
@@ -578,18 +751,29 @@ fn store_lookups_by_name_use_the_name_and_unit_index() {
         ),
         (
             store::DEFS_LEFT,
-            vec![Param::Text("get"), Param::Int(0)],
-            &["COVERING INDEX ci_def_name (name=? AND unit>?)"][..],
+            page[..4].to_vec(),
+            &["COVERING INDEX ci_def_name (name=? AND (unit,kind)>(?,?))"][..],
+        ),
+        (
+            store::NAMES_PAGE,
+            page,
+            &[
+                "MERGE",
+                "COVERING INDEX ci_def_name (name=? AND (unit,kind)>(?,?))",
+                "COVERING INDEX ci_def_name (name>?)",
+            ][..],
         ),
     ] {
         let plan = plan(sql, &params);
         for want in wants {
             assert!(plan.contains(want), "{want} in:\n{plan}");
         }
-        assert!(
-            !plan.contains("SCAN") && !plan.contains("TEMP B-TREE"),
-            "{plan}"
-        );
+        // The page's own rows (`raw`, a co-routine) are the only scan.
+        let scans = plan
+            .lines()
+            .filter(|l| l.starts_with("SCAN") && *l != "SCAN raw");
+        assert_eq!(scans.count(), 0, "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     }
 }
 
@@ -658,13 +842,15 @@ fn store_version_filter_returns_current_units_only() {
     let mut ids: Vec<Unit> = units.iter().map(|u| u.unit).collect();
     ids.sort();
     let mut names = Vec::new();
-    assert!(store.def_names(&ids, |_, name, kind| names.push((name.to_string(), kind))));
+    assert!(store.def_names(&ids, &|| false, |name, kinds| {
+        names.push((name.to_string(), kinds))
+    }));
     names.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(
         names,
         vec![
-            ("New".to_string(), DefKind::Type),
-            ("Shared".to_string(), DefKind::Function)
+            ("New".to_string(), crate::def_kind_bit(DefKind::Type)),
+            ("Shared".to_string(), crate::def_kind_bit(DefKind::Function))
         ]
     );
 }
