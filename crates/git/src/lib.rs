@@ -21,6 +21,7 @@ mod gitdir;
 mod handle;
 mod hunks;
 mod oid;
+mod parallel;
 mod path;
 mod reflog;
 mod refs;

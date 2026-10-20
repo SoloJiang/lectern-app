@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」；macOS 上的两项超标仍未定位。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步尚未实现。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」。比较按阶段计时（[#133](https://github.com/SoloJiang/lectern-app/pull/133)）定位了 macOS 上的开销；完整比较按 index 的 cache-tree 跳过未变的基准子树、stat 一遍并行（[ADR 0038](../adr/0038.md)），`git/changes_clean_100k` 改回生效；`git/filter_100k` 的目录遍历仍超标，仍是计划中。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -584,6 +584,9 @@ pub fn stat_mismatches(worktree: &Worktree) -> Result<StatMismatches, GitError>;
 /// 本线程上最近一次工作区比较各阶段的墙钟时间，按顺序：open、index、base_tree、setup、stat、fold、
 /// untracked、attributes、classify、assemble、finish（没有运行的阶段不出现）。计时只在 `test-support` 下进行。
 pub fn compare_phases() -> Vec<(&'static str, Duration)>;
+/// `test-support`：`TestRepo::write_index_with` 的选项另有 cache-tree（ADR 0038 的同一个 PR 加入）：
+/// 按对象库里的这棵树写出 `TREE` 扩展，与 git 提交或 `read-tree` 之后相同；列出的目录（根目录为 `""`）写成失效。
+pub struct IndexOptions<'a> { /* sparse_dirs, skip_hash, */ pub cache_tree: Option<(Oid, &'a [&'a str])> }
 ```
 
 ## 数据结构
@@ -728,6 +731,8 @@ pub struct Hunk {
 - 不写 index（不更新 stat、不刷新 racy 条目），不写对象库、引用和配置；不执行任何外部程序（ADR 0024）。
 - 一次比较读到的工作区内容（新一侧的文本）保存在 `ChangeSet` 里，`texts` 用它，不再按路径重读，所以展示的文本和 OID 一致。超过保留上限的文件没有字节可用，明确标为 `NotRetained`，不落盘另存。
 
+完整比较读基准树时用 index 的 cache-tree（`TREE` 扩展，git 在提交、`read-tree` 和每次改 index 时维护），与 git 的 `traverse_by_cache_tree` 相同：基准树的某个子树，在 cache-tree 里对应的节点有效（条目数不是 -1）、OID 等于这个子树的 OID，且条目数等于 index 在这个目录下的条目数、这些条目都是 stage 0 的普通条目（没有冲突、没有 `git add -N`）时，这个子树的路径、模式和 OID 直接取 index 的条目，不读树对象。根节点满足时整棵基准树都不读。没有这个扩展、index 是 sparse 的、节点失效或 OID 不同的目录照常读树对象，与任何 `Base` 都适用（`Base::Commit` 时只有与 index 相同的子树被跳过）。得到的基准条目与逐个读树对象完全相同，改动集不变；工作区一侧照常 stat 和读取，被跳过的目录下工作区里改了的文件照常报告。已知限制：cache-tree 由写 index 的程序负责维护，gix 写 index 时原样写出它、不重新计算；某个程序改了 index 却留下仍然有效、条目数也对得上的旧节点时，这个目录下暂存的改动会被当成与基准相同。git 自己也信任这个扩展。
+
 `Worktree` 内部为未跟踪文件和已改动文件保留一份 stat 缓存（路径 → stat、OID、计算时刻），stat 没变时不重新读取和计算。缓存项不引用文件内容（包括 `Weak`，ADR 0035）：命中时内容等于 index 的 blob 的不需要字节（对象库里有）；其余内容取 `refresh` 传入的改动集保留的字节（同一路径、同一 OID），没有时按未命中处理，按路径重新读取；文件的 mtime 不早于缓存项的计算时刻时（与 racy-clean 同理，同一时刻内的两次同长度写入 stat 相同）不命中缓存，照常读取内容；只在内存里，`Worktree` 句柄释放时丢弃。规范内容取决于转换规则，所以缓存属于一份「转换状态」：生效的 `.gitattributes`、`info/attributes`、`core.attributesFile` 和影响转换的配置（`core.autocrlf`、`core.eol`、`filter.*`）。`refresh(Full)` 时重新计算这份状态的指纹，与缓存记录的不同就清空整个缓存；并且这一次比较里，转换规则（按新旧两份属性和配置分别求出的 `eol`、`text`、`ident`、`working-tree-encoding`、`filter`）有变化的跟踪路径跳过第 1 步的过滤器快路径和第 2 步的 stat 跳过：新规则有过滤器的按第 1 步是 `Filtered`，其余按第 3 步读取并重新计算 OID。规则没变的路径照常走 stat 跳过。
 
 ### 上限与截断
@@ -763,7 +768,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 4. 视图滚动到某个文件时发出命令，后台任务调用 `texts` 和 `rows`，把展示行交给视图；视图不调用本 crate 的任何函数。
 5. Analyze 快照的数据流随 [#66](https://github.com/SoloJiang/lectern-app/issues/66) 设计。
 
-线程：本 crate 的函数在调用方的后台任务线程上运行，不建线程，不持有跨调用的锁。gix 的 `parallel` 关闭（ADR 0024），它的仓库句柄不是 `Send`，所以 `Repo`、`Worktree` 只保存位置、打开参数和本 crate 自己的数据（`tracked` 的 index 解析结果、stat 缓存；工作区比较自己解析的 index 只在一次调用内持有，见「缓存」），不持有 gix 句柄。gix 句柄不在调用之间保留：每次顶层调用（`changes`、`refresh`、`texts`、`diff_trees`、引用与历史的查询等）在当前线程上打开一个，调用内部复用，返回时释放。worktree 级的调用按这个 worktree 的私有 git 目录（`WorktreeInfo::git_dir`）打开，仓库级的调用按公共目录打开，打开参数（权限、对象格式）固定在 `Repo` 里。所以空闲时内存里没有 gix 句柄和它的 pack 缓存。非当前 worktree 只保留 `WorktreeInfo`，`Worktree` 句柄（index、stat 缓存）由调用方在离开后释放（[技术调研「性能要点」](tech-research.md#性能要点)）。
+线程：本 crate 的函数在调用方的后台任务线程上运行，不持有跨调用的锁。唯一的例外是工作区比较的 stat 一遍（[ADR 0038](../adr/0038.md)）：2048 个路径以上时在调用内用 `std::thread::scope` 起至多 `min(CPU 数, 4) - 1` 个线程分块 stat，结果按路径顺序合并，返回前 join；gix 句柄和其余步骤都在调用线程上。gix 的 `parallel` 关闭（ADR 0024），它的仓库句柄不是 `Send`，所以 `Repo`、`Worktree` 只保存位置、打开参数和本 crate 自己的数据（`tracked` 的 index 解析结果、stat 缓存；工作区比较自己解析的 index 只在一次调用内持有，见「缓存」），不持有 gix 句柄。gix 句柄不在调用之间保留：每次顶层调用（`changes`、`refresh`、`texts`、`diff_trees`、引用与历史的查询等）在当前线程上打开一个，调用内部复用，返回时释放。worktree 级的调用按这个 worktree 的私有 git 目录（`WorktreeInfo::git_dir`）打开，仓库级的调用按公共目录打开，打开参数（权限、对象格式）固定在 `Repo` 里。所以空闲时内存里没有 gix 句柄和它的 pack 缓存。非当前 worktree 只保留 `WorktreeInfo`，`Worktree` 句柄（index、stat 缓存）由调用方在离开后释放（[技术调研「性能要点」](tech-research.md#性能要点)）。
 
 ## 性能
 
@@ -778,7 +783,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 | 空闲内存：打开 monorepo < 100 MB | 空闲时不持有 gix 句柄；调用期间每个句柄的 pack 与对象缓存 ≤ 4 MiB；hunk LRU 16 MiB；每个 `ChangeSet` 保留的工作区内容 ≤ 32 MiB（通常只有当前审阅的一个）；fs_watch 的过滤器（解析后的 index、`core.ignoreCase` 的折叠顺序、忽略规则）是本 crate 的份额，index 与 `project` 保留的句柄共用一份（[ADR 0035](../adr/0035.md)），连同句柄 < 1 MB |
 | 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 过滤器连同它的 `Worktree` 句柄 ≤ 16 MB；工作区比较解析的 index 不在空闲时保留（「缓存」），调用返回后 `Worktree` 为比较留下的 < 1 MB（`git/compare_100k/retained_bytes`，第 4 步生效）。采样状态里唯一保留的改动集是项目主页的计数用改动集（`retained_bytes = 0`、`total_patch_bytes = 0`，没有工作区内容和 hunk）：它连同 stat 缓存随改动路径数增长、不随跟踪文件数增长，要求每个改动路径 ≤ 1 KB（`git/changes_count/per_path_bytes`，计划中）；主页只在 4000 个以内保留它（≤ 4 MB），在 ADR 0035 的 12 MB 余量里。这个上限要等 stat 缓存不再持有文件内容、比较用的 index 在调用返回时释放（第 4 步）两者都完成才成立：前者已完成（`git/changes_count/total_bytes` 从 76.7 MB 降到 2.12 MB，每个改动路径约 1.11 KB），还差第 4 步。上一行 cloudprint 量级的 32 MiB 保留内容是打开 Diff 后的改动集 |
 | 工作区比较期间的临时内存（10 万个跟踪文件，不设顶层预算，同 ADR 0029 的临时内存） | 一次 `changes` 的存活字节峰值 ≤ 72 MB（`git/compare_100k/peak_bytes`）：gix 的 `State`、逐条的 stat 与标志、折叠副本、未跟踪遍历、改动集；比较与 `tracked` 各解析一次 index，合成一次解析是降低它的办法（ADR 0035） |
-| index 变化后的刷新（10 万个跟踪文件，后台） | 重建 fs_watch 过滤器（解析 index、排序折叠顺序、未跟踪遍历、读 `.gitignore`）< 400 ms，fs_watch 等它完成后才交付这一批；`changes` 的全量比较（首次比较和每次 `refresh(Full)`，每次都重新解析 index）< 2 s，项目主页先显示文件列表，改动数随后填入。这两项 macOS 上现在超标（约 0.7 s 和 9 s 多），见「与设计的差异」的已知差距 |
+| index 变化后的刷新（10 万个跟踪文件，后台） | 重建 fs_watch 过滤器（解析 index、排序折叠顺序、未跟踪遍历、读 `.gitignore`）< 400 ms，fs_watch 等它完成后才交付这一批；`changes` 的全量比较（首次比较和每次 `refresh(Full)`，每次都重新解析 index）< 2 s，项目主页先显示文件列表，改动数随后填入。全量比较按 index 的 cache-tree 跳过未变的基准子树，stat 一遍在至多 4 个作用域线程上进行（ADR 0038），按 macOS 的分阶段数字估计约 1.2 s；过滤器的目录遍历在 macOS 上单独就有 473 ms，仍超标，见「与设计的差异」的已知差距 |
 | 冷启动 20 ms | 首帧之前不调用本 crate 的任何函数；10 万文件仓库的读取、过滤器和全量比较都在打开项目之后的后台任务里 |
 | 安装包 ≤ 80 MB | gix 约 3 MB（ADR 0024） |
 
@@ -998,6 +1003,12 @@ stat 缓存不持有文件内容（[ADR 0035](../adr/0035.md) 的关键约束，
 - macOS CI 的第一批 notice（[#130](https://github.com/SoloJiang/lectern-app/pull/130)，修正之前的代码）：`git/filter_100k/walk` 502 ms、`…/stat_all` 1.03 s、`…/read_all` 14.6 s、`git/changes_count/total_bytes` 76.7 MB。`git/changes_clean_100k` 约 9 s，远超 stat 加遍历的约 1.5 s，所以 macOS 上的比较读了大部分文件，即那里的 stat 与 index 不一致；`…/stat_*` 会给出是哪个字段。`read_all` 每个样本 14.6 s，CI 时间过长，已去掉，连同依赖它的 `…/reads_after_read_all`（在 `read_all` 之后再比较一次）：比较是否读、为什么读由 `…/reads` 和读取之前的 `…/stat_*` 回答。
 - 没有验证的：macOS 上的计数和两项超标的原因（「与设计的差异」的已知差距）；`git/changes_clean_100k` 和 `git/filter_100k` 仍是计划中。
 
+cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #14`），同一类 Linux 虚拟机（4 核，另有一个任务在运行）：
+
+- 新的测试：`cache_tree_valid_root_reads_no_base_tree`（没有扩展时读 4 个树对象，根节点有效且等于 HEAD 的树时一个都不读，结果相同）、`cache_tree_skip_still_sees_a_worktree_change_beneath`（index 没变、被跳过的目录下工作区文件改了，照常报告）、`cache_tree_invalidated_directories_are_read`（`git add a/x` 之后根目录和 `a` 失效，只读这两个，`a/deep`、`b` 仍跳过）、`cache_tree_of_another_tree_matches_only_equal_subtrees`（`Base::Commit` 时只跳过与 index 相同的子树）、`cache_tree_with_a_conflict_beneath_is_not_trusted`（目录下有冲突条目时照常读）、`worktree_large_parallel_passes_are_deterministic`（4596 个文件，stat 分成多个线程，改动、删除、未跟踪、被忽略和嵌套仓库各种结果三次都相同），`parallel_map_*` 3 个。每个 cache-tree 测试都把有扩展和没有扩展的结果逐行对比。`just test -p lectern-git` 234 个测试通过。
+- `just bench --measure git/`（release）：`git/changes_clean_100k` 386 ms（改动前约 1.0 s；预算 < 2 s，改回生效），`phase_base_tree` 284 ms → 4.2 ms，`phase_stat` 208 ms → 112 ms，`phase_untracked` 256 ms（代码没变，改动前一次是 176 ms，这台机器上的负载波动），`phase_index` 19.8 ms，`phase_classify` 8.2 ms；`git/compare_100k/peak_bytes` 65.8 MB → 60.2 MB；`git/filter_100k/walk` 146 ms，`git/filter_100k` 仍是计划中（同一台机器上临时改为生效测得 266 ms）。其余 `git/*` 都在预算内，与上一次同一量级（`git/changes_clean` 2.99 ms、`git/changes_50` 3.88 ms、`git/refresh_full` 3.23 ms、`git/open_100k` 18.3 ms）。
+- 没有验证的：macOS 上的数字（下一次 CI 的 `phase_*` 和 `git/changes_clean_100k` 本身）；作用域线程在 macOS 上的 QoS。
+
 比较的分阶段计时（`Refs #14`），同一类 Linux 虚拟机：
 
 - `worktree_compare_phases_are_timed_in_order`：一次 `changes` 按顺序记下 11 个阶段；没有可遍历的路径的 `refresh(Paths)` 没有 `fold` 和 `untracked`。`just test -p lectern-git` 226 个测试通过。计时的钩子和计数一样只在 `test-support` 下编译，发布构建里 `Phases` 是空操作。为了让 `fold` 成为单独的一段，`test-support` 下在遍历之前就建好折叠副本；发布构建不提前建，仍由遍历的第一次查找建（报告的路径在已删除的目录下时不查找，就不建），行为与原来相同。
@@ -1114,3 +1125,8 @@ stat 缓存不持有文件内容（[ADR 0035](../adr/0035.md) 的关键约束，
   - `base_tree` 是 Linux 上最大的一段，也是 `git/filter_100k` 和 `git/open_100k` 都没有的一段：`tree::walk` 为 HEAD 树的每个目录从对象库读一个树对象。夹具只写松散对象，每个目录一个 `objects/xx/…` 文件，每次读取是一次 `open`、读、zlib 解压（gix 的对象缓存关闭，每个树只读一次）。macOS 上打开文件远比 stat 慢（`read_all` 每个文件约 146 µs，`stat_all` 约 7 µs），这一段在 macOS 上可能占几秒，是首要的嫌疑，由下一次 macOS CI 的 `phase_base_tree` 确认。真实仓库的树多在 pack 里，按 pack 索引查找，不逐个打开文件；夹具与真实仓库在这一点上不同。
   - 可能的修正（下一个 PR 按 macOS 的数字决定）：index 的 cache-tree 扩展（`TREE`）记录的根树等于基准树时，index 与基准相同，不必遍历基准树（git 的 `diff-index --cached` 也这样跳过）；或者夹具把树写成 pack。前者对真实仓库也有效，但要求夹具写出 cache-tree。
   - 没有发现逐个条目的路径规范化（`canonicalize` 只在 `discover` 和 `worktrees` 里，每次调用一次）、`getattrlist` 或 `SafeRoot` 之外的 `std::fs` 调用；`core.ignoreCase` 的折叠查找是对折叠副本的二分查找，副本只建一次（`phase_fold`）。完整比较里没有 O(n²) 的循环；`refresh(Paths)` 按报告的路径逐个检查记录（记录数 × 路径数），只在路径很多的刷新里才明显，不影响 `changes_clean_100k`。
+- [#133](https://github.com/SoloJiang/lectern-app/pull/133) 的 macOS 分阶段数字（一次冷的比较约 3.7 s）：`phase_base_tree` 1.84 s、`phase_stat` 1.15 s、`phase_untracked` 645 ms、`phase_index` 19.2 ms、`phase_classify` 12.2 ms、`phase_fold` 3.6 ms，其余约 2 ms；`…/reads` 为 1。处理（本 PR）：
+  - `base_tree`：用 index 的 cache-tree 跳过与 index 相同的基准子树（「工作区比较」）。bench 的夹具按 git 提交之后的样子写出 `TREE` 扩展（`IndexOptions::cache_tree`）。剩下要读的树（cache-tree 失效的目录、其他基准）照旧读；gix 的对象缓存不打开：一次遍历里每个树只读一次，缓存不命中，pack 里的树由已有的 4 MiB 增量基缓存覆盖。
+  - `stat`：在至多 `min(CPU 数, 4)` 个作用域线程上分块进行（ADR 0038），macOS CI 的 3 核虚拟机上约为原来的三分之一。结果改为与 `items` 对齐的 `Vec<Option<Stat>>`，不再是 `HashMap`，`git/compare_100k/peak_bytes` 从 65.8 MB 降到 60.2 MB。
+  - `untracked`：没有改。试过在其他线程上预先列出遍历已经决定进入的目录（结果与串行相同），Linux 上遍历和过滤器都慢了一倍（ADR 0038「决策」）。全部被忽略的目录本来就不进入（`excluded` 为真时跳过）；剩下的约 3.6 万个目录都含跟踪文件，要找未跟踪文件就得逐个列出。
+  - 按 macOS 的分阶段数字估计：0 + 约 0.4 s + 0.65 s + 0.04 s ≈ 1.1 s，即使 stat 不并行也是约 1.85 s，都在 2 s 以内，所以 `git/changes_clean_100k` 改回生效。`git/filter_100k` 不变：它的目录遍历在 macOS 上单独就有 473 ms，超过 400 ms，仍是计划中。要降下来得少列目录（如 git 的 untracked cache：index 里记下每个目录的 stat，没变的目录不再列出），或重新评估这条预算，另行决定。
