@@ -19,6 +19,7 @@ use crate::changes::{
 };
 use crate::conversion::{AttrFile, ConversionState, WorktreeAttrs};
 use crate::handle::Handle;
+use crate::parallel;
 use crate::repo::{normalize, read_head};
 use crate::tree::{self, Found};
 use crate::untracked;
@@ -129,6 +130,36 @@ struct IndexItem {
 }
 
 impl IndexSnapshot {
+    /// The items beneath `dir` (all of them for the root, `dir` empty) when
+    /// the cache-tree `node` vouches that they are exactly the tree `id`:
+    /// the node is valid, names `id`, counts as many entries as there are
+    /// items beneath `dir`, and every one of them is a plain stage-0 entry
+    /// (no conflict, no `git add -N`). None otherwise.
+    fn same_as_tree(
+        &self,
+        node: &gix::index::extension::Tree,
+        id: Oid,
+        dir: &[u8],
+    ) -> Option<std::ops::Range<usize>> {
+        let count = usize::try_from(node.num_entries?).ok()?;
+        if Oid::from_gix(&node.id) != id {
+            return None;
+        }
+        let range = if dir.is_empty() {
+            0..self.items.len()
+        } else {
+            let mut lo = dir.to_vec();
+            lo.push(b'/');
+            let mut hi = dir.to_vec();
+            hi.push(b'/' + 1);
+            let start = self.items.partition_point(|i| i.path.as_bytes() < &lo[..]);
+            let end = self.items.partition_point(|i| i.path.as_bytes() < &hi[..]);
+            start..end
+        };
+        let plain = |i: &IndexItem| i.entry.is_some() && i.conflict.is_none() && !i.intent_to_add;
+        (range.len() == count && self.items[range.clone()].iter().all(plain)).then_some(range)
+    }
+
     fn find(&self, path: &[u8]) -> Option<&IndexItem> {
         self.items
             .binary_search_by(|i| i.path.as_bytes().cmp(path))
@@ -343,18 +374,15 @@ pub(crate) fn run(
         None => {
             let mut out = Vec::new();
             if base_tree != Oid::empty_tree(hash) {
-                tree::walk(&handle, base_tree, b"", cancel, &mut |e| {
-                    match RepoPath::new(&e.path) {
-                        Some(path) => {
-                            if out.len() >= limits.entries {
-                                return Err(GitError::TooManyEntries);
-                            }
-                            out.push((path, e.mode, e.oid));
-                        }
-                        None => base_invalid.push(Arc::from(&e.path[..])),
-                    }
-                    Ok(())
-                })?;
+                base_walk(
+                    &handle,
+                    base_tree,
+                    &index,
+                    limits,
+                    cancel,
+                    &mut out,
+                    &mut base_invalid,
+                )?;
             }
             out
         }
@@ -420,26 +448,28 @@ pub(crate) fn run(
     let stat_options = handle.stat_options().map_err(GitError::from_gix)?;
     phases.end("setup");
 
-    // Phase A: stat every index path in scope that has a worktree side.
-    let mut stats: HashMap<usize, Stat> = HashMap::with_capacity(items.len());
-    for (n, &i) in items.iter().enumerate() {
-        if n % 256 == 0 && cancel.load(Ordering::Relaxed) {
-            return Err(GitError::Cancelled);
+    // Phase A: stat every index path in scope that has a worktree side,
+    // aligned with `items`. Large passes are spread over a few scoped
+    // threads, as git's `core.preloadIndex` does (ADR 0038); the results
+    // are in `items` order whatever the scheduling.
+    let stats: Vec<Option<Stat>> = parallel::map(&items, parallel::threads(), STAT_CHUNK, |&i| {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
         }
         let item = &index.items[i];
         if item.skip_worktree && item.conflict.is_none() {
-            continue;
+            return None;
         }
-        let Some(rel) = item.path.as_rel() else {
-            continue;
-        };
-        let stat = match subject.root.stat(rel) {
+        let rel = item.path.as_rel()?;
+        Some(match subject.root.stat(rel) {
             Ok(meta) => Stat::Meta(meta),
             Err(SafeError::NotFound) => Stat::NotFound,
             Err(SafeError::PathThroughSymlink) => Stat::ThroughSymlink,
             Err(SafeError::Io(_)) => Stat::Unreadable,
-        };
-        stats.insert(i, stat);
+        })
+    });
+    if cancel.load(Ordering::Relaxed) {
+        return Err(GitError::Cancelled);
     }
     phases.end("stat");
 
@@ -619,7 +649,8 @@ pub(crate) fn run(
             continue;
         };
         let it = &index.items[slot];
-        let stat = stats.get(&slot).copied();
+        // `slot` came from `items[i - 1]`; `stats` is aligned with `items`.
+        let stat = stats[i - 1];
         if let Some(mode) = it.conflict {
             let new = match stat {
                 Some(stat) => reader.observe(&mut attrs, &path, stat, Some(mode), None)?,
@@ -981,6 +1012,123 @@ fn resolve_base(
 }
 
 /// The parsed index, reused while its checksum is unchanged.
+/// The stat pass uses another thread only for at least this many paths per
+/// thread: a scoped thread costs tens of microseconds to start, a few
+/// thousand stats several milliseconds.
+const STAT_CHUNK: usize = 2048;
+
+type BaseEntry = (RepoPath, Mode, Oid);
+
+/// Every file entry of the base tree for a full comparison, in path order,
+/// as `tree::walk` gives them (invalid paths go to `invalid`), but without
+/// reading the subtrees the index already describes. A subtree is taken from
+/// the index when its node in the index's cache-tree (the `TREE` extension,
+/// which git keeps up to date on commit, `read-tree` and every change to the
+/// index) is valid, names this very subtree's OID and counts exactly the
+/// index items beneath it, all of them plain stage-0 entries: those entries
+/// then hash to this subtree, so their paths, modes and OIDs are the base's.
+/// This is git's `traverse_by_cache_tree`. Without the extension, in a
+/// sparse index, or where a node is invalidated (an entry count of -1 after
+/// a change beneath it) or differs, the subtree is read as before.
+fn base_walk(
+    handle: &Handle,
+    base_tree: Oid,
+    index: &IndexSnapshot,
+    limits: &Limits,
+    cancel: &AtomicBool,
+    out: &mut Vec<BaseEntry>,
+    invalid: &mut Vec<Arc<[u8]>>,
+) -> Result<(), GitError> {
+    use gix::index::extension::Tree as CacheTree;
+
+    enum Item<'c> {
+        Tree(Oid, Vec<u8>, Option<&'c CacheTree>),
+        File(Vec<u8>, Mode, Oid),
+    }
+    let cache = if index.state.is_sparse() {
+        None
+    } else {
+        index.state.tree()
+    };
+    let hash = base_tree.kind();
+    let mut push = |out: &mut Vec<BaseEntry>, path: &[u8], mode: Mode, oid: Oid| {
+        match RepoPath::new(path) {
+            Some(path) => {
+                if out.len() >= limits.entries {
+                    return Err(GitError::TooManyEntries);
+                }
+                out.push((path, mode, oid));
+            }
+            None => invalid.push(Arc::from(path)),
+        }
+        Ok(())
+    };
+    let mut stack = vec![Item::Tree(base_tree, Vec::new(), cache)];
+    let mut children = Vec::new();
+    while let Some(item) = stack.pop() {
+        let (id, dir, node) = match item {
+            Item::File(path, mode, oid) => {
+                push(out, &path, mode, oid)?;
+                continue;
+            }
+            Item::Tree(id, dir, node) => (id, dir, node),
+        };
+        if cancel.load(Ordering::Relaxed) {
+            return Err(GitError::Cancelled);
+        }
+        if let Some(range) = node.and_then(|node| index.same_as_tree(node, id, &dir)) {
+            for item in &index.items[range] {
+                let (mode, oid) = item.entry.expect("checked by same_as_tree");
+                if out.len() >= limits.entries {
+                    return Err(GitError::TooManyEntries);
+                }
+                out.push((item.path.clone(), mode, oid));
+            }
+            continue;
+        }
+        hook::tree_read();
+        let object = handle
+            .try_find_object(id.to_gix())
+            .map_err(GitError::from_gix)?
+            .ok_or(GitError::ObjectMissing(id))?;
+        if object.kind != gix::objs::Kind::Tree {
+            return Err(GitError::Corrupt(format!(
+                "{id} is a {}, not a tree",
+                object.kind
+            )));
+        }
+        let decoded = gix::objs::TreeRef::from_bytes(&object.data, hash.to_gix())
+            .map_err(|err| GitError::Corrupt(format!("tree {id}: {err}")))?;
+        // Children by name, for the nodes of wide directories.
+        let by_name: Option<HashMap<&[u8], &CacheTree>> = node
+            .filter(|n| n.children.len() > 16)
+            .map(|n| n.children.iter().map(|c| (&c.name[..], c)).collect());
+        children.clear();
+        for entry in &decoded.entries {
+            let mut path = Vec::with_capacity(dir.len() + 1 + entry.filename.len());
+            if !dir.is_empty() {
+                path.extend_from_slice(&dir);
+                path.push(b'/');
+            }
+            path.extend_from_slice(entry.filename);
+            let oid = Oid::from_gix(entry.oid);
+            children.push(match Mode::from_tree(entry.mode) {
+                None => {
+                    let name: &[u8] = entry.filename;
+                    let child = match &by_name {
+                        Some(map) => map.get(name).copied(),
+                        None => node.and_then(|n| n.children.iter().find(|c| &c.name[..] == name)),
+                    };
+                    Item::Tree(oid, path, child)
+                }
+                Some(mode) => Item::File(path, mode, oid),
+            });
+        }
+        stack.extend(children.drain(..).rev());
+    }
+    Ok(())
+}
+
 fn snapshot(
     subject: &Subject<'_>,
     handle: &Handle,
@@ -1714,6 +1862,20 @@ pub(crate) mod hook {
     }
 
     thread_local! {
+        static TREES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// One base-tree object read by a full comparison.
+    pub(crate) fn tree_read() {
+        TREES.with(|c| c.set(c.get() + 1));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trees_read() -> usize {
+        TREES.with(Cell::get)
+    }
+
+    thread_local! {
         static PHASES: std::cell::RefCell<Vec<(&'static str, Duration)>> =
             const { std::cell::RefCell::new(Vec::new()) };
     }
@@ -1758,6 +1920,8 @@ pub(crate) mod hook {
 #[cfg(not(any(test, feature = "test-support")))]
 pub(crate) mod hook {
     pub(crate) fn read() {}
+
+    pub(crate) fn tree_read() {}
 
     /// Without `test-support` the phase clock does nothing.
     pub(crate) struct Phases;

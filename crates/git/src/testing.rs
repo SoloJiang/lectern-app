@@ -134,6 +134,13 @@ pub struct IndexOptions<'a> {
     pub sparse_dirs: &'a [(&'a str, Oid)],
     /// A null trailing checksum, as `index.skipHash = true` writes it.
     pub skip_hash: bool,
+    /// The cache-tree (`TREE` extension) of this tree, as git writes it
+    /// after `commit` or `read-tree`: every directory with its tree OID and
+    /// recursive entry count, read from the object database. The listed
+    /// directories (`""` for the root) are written invalidated (entry
+    /// count -1, no OID), as git leaves the directories above a path it
+    /// stages; each must be in the tree. Not with `sparse_dirs`.
+    pub cache_tree: Option<(Oid, &'a [&'a str])>,
 }
 
 pub struct TestRepo {
@@ -434,6 +441,29 @@ impl TestRepo {
             skip_hash: options.skip_hash,
             ..Default::default()
         };
+        if let Some((tree, invalid)) = options.cache_tree {
+            assert!(
+                options.sparse_dirs.is_empty(),
+                "cache_tree with sparse_dirs"
+            );
+            // gix writes a state's cache-tree as is and can't be given one:
+            // the entries, then the extension, then the checksum over both.
+            let mut cache = cache_tree(&self.gix(), tree, b"", invalid);
+            cache.name.clear();
+            let mut bytes = Vec::new();
+            state.write_to(&mut bytes, write_options).unwrap();
+            cache.write_to(&mut bytes).unwrap();
+            let checksum = if options.skip_hash {
+                vec![0; self.hash.byte_len()]
+            } else {
+                let mut h = gix::hash::hasher(self.hash.to_gix());
+                h.update(&bytes);
+                h.try_finalize().unwrap().as_bytes().to_vec()
+            };
+            bytes.extend_from_slice(&checksum);
+            std::fs::write(&path, bytes).unwrap();
+            return;
+        }
         gix::index::File::from_state(state, &path)
             .write(write_options)
             .unwrap();
@@ -631,6 +661,57 @@ fn write_head(git_dir: &Path, head: TestHead<'_>) {
         TestHead::Detached(oid) => format!("{}\n", oid.to_hex()),
     };
     write(&git_dir.join("HEAD"), text.as_bytes());
+}
+
+/// The cache-tree node of tree `oid` at directory `path` (`b""` for the
+/// root): its OID and recursive count of non-tree entries, with a child per
+/// subtree, read from the object database. Directories in `invalid` are
+/// written invalidated.
+fn cache_tree(
+    repo: &gix::Repository,
+    oid: Oid,
+    path: &[u8],
+    invalid: &[&str],
+) -> gix::index::extension::Tree {
+    cache_tree_counted(repo, oid, path, invalid).0
+}
+
+/// [`cache_tree`] and the node's real entry count (also when invalidated).
+fn cache_tree_counted(
+    repo: &gix::Repository,
+    oid: Oid,
+    path: &[u8],
+    invalid: &[&str],
+) -> (gix::index::extension::Tree, u32) {
+    let object = repo.find_object(oid.to_gix()).unwrap();
+    let tree = gix::objs::TreeRef::from_bytes(&object.data, oid.kind().to_gix()).unwrap();
+    let mut node = gix::index::extension::Tree {
+        name: Default::default(),
+        id: oid.to_gix(),
+        num_entries: Some(0),
+        children: Vec::new(),
+    };
+    node.name
+        .extend_from_slice(path.rsplit(|&b| b == b'/').next().unwrap_or(path));
+    let mut count = 0u32;
+    for entry in &tree.entries {
+        if entry.mode.is_tree() {
+            let mut child_path = path.to_vec();
+            if !child_path.is_empty() {
+                child_path.push(b'/');
+            }
+            child_path.extend_from_slice(entry.filename);
+            let (child, n) =
+                cache_tree_counted(repo, Oid::from_gix(entry.oid), &child_path, invalid);
+            count += n;
+            node.children.push(child);
+        } else {
+            count += 1;
+        }
+    }
+    let invalidated = invalid.iter().any(|d| d.as_bytes() == path);
+    node.num_entries = (!invalidated).then_some(count);
+    (node, count)
 }
 
 /// A tree entry to write: path relative to the tree, mode, object.

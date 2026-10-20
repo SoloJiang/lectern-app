@@ -202,7 +202,9 @@ const fn share(
 const ACTIVE: State = State::Active;
 const STEP_4: State = State::Planned("bench 第 4 步");
 const STEP_5: State = State::Planned("bench 第 5 步");
-const MACOS_100K: State = State::Planned("git：macOS 上 10 万文件的比较与过滤器重建达标");
+/// `git/filter_100k`: the directory walk alone is 473 ms on macOS CI.
+const MACOS_FILTER_100K: State =
+    State::Planned("git：macOS 上 10 万文件的过滤器重建达标（目录遍历）");
 
 use Target::{Memory, Package, Process, Time};
 
@@ -680,13 +682,13 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // The fs_watch filter rebuilt after an index change: index, case-folded
     // order, untracked walk and `.gitignore` files; batches wait for it.
-    // Planned: macOS CI measured 766 and 678 ms (Linux 214–276 ms); a git
-    // PR locates and fixes the cost (git design「与设计的差异」).
+    // Planned: macOS CI measured 766 and 678 ms (Linux 214–276 ms), of which
+    // the directory walk alone is 473 ms (git design「与设计的差异」).
     share(
         "git/filter_100k",
         &[median(Limit::TimeBelow(ms(400)))],
         GIT,
-        MACOS_100K,
+        MACOS_FILTER_100K,
         Time,
     ),
     // Recorded, to locate that cost: one listing of every directory of the
@@ -696,13 +698,14 @@ pub static BUDGETS: &[Budget] = &[
     // file list is shown: the index parsed (cold, a new `Worktree` each
     // sample: no parsed index is kept between calls, ADR 0035), every
     // tracked file skipped by stat, the untracked walk. Every
-    // `refresh(Full)` does the same. Planned: macOS CI measured 9.05 and
-    // 9.54 s (Linux about 1.0 s), as above.
+    // `refresh(Full)` does the same. Active again: macOS CI measured about
+    // 3.7 s (base tree 1.84 s, stat 1.15 s, walk 645 ms); the cache-tree
+    // skips the base tree and the stat pass runs on a few threads (ADR 0038).
     share(
         "git/changes_clean_100k",
         &[median(Limit::TimeBelow(ms(2000)))],
         GIT,
-        MACOS_100K,
+        ACTIVE,
         Time,
     ),
     // Recorded, to locate it: one `SafeRoot::stat` of every tracked path.

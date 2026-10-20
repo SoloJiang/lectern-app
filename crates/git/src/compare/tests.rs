@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use crate::compare::hook;
+use crate::compare::{STAT_CHUNK, hook};
 use crate::testing::{IndexEntry, TestHead, TestRepo};
 use crate::*;
 
@@ -1405,7 +1405,7 @@ fn worktree_sparse_entries_are_not_deleted() {
         &[t.add("README")],
         &crate::testing::IndexOptions {
             sparse_dirs: &[("lib", lib)],
-            skip_hash: false,
+            ..Default::default()
         },
     );
     assert_eq!(lines(&changes(&t)), Vec::<String>::new());
@@ -1822,6 +1822,195 @@ fn worktree_stat_cache_hit_equal_to_the_index_needs_no_bytes() {
         "a stat cache hit, no change set held"
     );
     assert_eq!(lines(&second), Vec::<String>::new());
+}
+
+// ---- cache-tree: the base tree's subtrees the index describes ---------------
+
+const CACHE_FILES: &[(&str, &[u8])] = &[
+    ("README", b"r\n"),
+    ("a/x", b"x\n"),
+    ("a/y", b"y\n"),
+    ("a/deep/z", b"z\n"),
+    ("b/w", b"w\n"),
+];
+
+/// A clean worktree of `CACHE_FILES`, HEAD's tree returned.
+fn cache_repo() -> (TestRepo, Oid) {
+    let t = clean_repo(CACHE_FILES);
+    let tree = t.tree(CACHE_FILES);
+    (t, tree)
+}
+
+/// Writes the index of `entries`, with the cache-tree of `tree` (minus the
+/// `invalid` directories) or without one, and returns the comparison's
+/// lines and how many base-tree objects it read.
+fn with_cache_tree(
+    t: &TestRepo,
+    entries: &[IndexEntry],
+    cache: Option<(Oid, &[&str])>,
+    base: Base,
+) -> (Vec<String>, usize) {
+    let options = crate::testing::IndexOptions {
+        cache_tree: cache,
+        ..Default::default()
+    };
+    t.write_index_with(t.common_dir(), entries, &options);
+    let before = hook::trees_read();
+    let set = changes_with(t, base, &Limits::default());
+    (lines(&set), hook::trees_read() - before)
+}
+
+fn entries(t: &TestRepo) -> Vec<IndexEntry> {
+    CACHE_FILES.iter().map(|(p, _)| t.add(p)).collect()
+}
+
+#[test]
+fn cache_tree_valid_root_reads_no_base_tree() {
+    let (t, tree) = cache_repo();
+    let e = entries(&t);
+    let (plain, read) = with_cache_tree(&t, &e, None, Base::Head);
+    assert_eq!(plain, Vec::<String>::new());
+    assert_eq!(read, 4, "root, a, a/deep, b");
+    let (cached, read) = with_cache_tree(&t, &e, Some((tree, &[])), Base::Head);
+    assert_eq!(cached, plain);
+    assert_eq!(read, 0, "the root's node names HEAD's tree");
+}
+
+#[test]
+fn cache_tree_skip_still_sees_a_worktree_change_beneath() {
+    // The index (and so its cache-tree) is unchanged; the file is not.
+    let (t, tree) = cache_repo();
+    let e = entries(&t);
+    t.write_file("a/deep/z", b"changed\n");
+    let (plain, _) = with_cache_tree(&t, &e, None, Base::Head);
+    assert_eq!(plain.len(), 1, "{plain:?}");
+    let (cached, read) = with_cache_tree(&t, &e, Some((tree, &[])), Base::Head);
+    assert_eq!(cached, plain);
+    assert_eq!(read, 0);
+}
+
+#[test]
+fn cache_tree_invalidated_directories_are_read() {
+    // `git add a/x` with new content: git invalidates `a` and the root.
+    let (t, _) = cache_repo();
+    t.write_file("a/x", b"staged\n");
+    t.backdate("a/x");
+    let e = entries(&t);
+    let staged: Vec<(&str, &[u8])> = CACHE_FILES
+        .iter()
+        .map(|&(p, c)| {
+            if p == "a/x" {
+                (p, &b"staged\n"[..])
+            } else {
+                (p, c)
+            }
+        })
+        .collect();
+    let index_tree = t.tree(&staged);
+    let (plain, _) = with_cache_tree(&t, &e, None, Base::Head);
+    assert_eq!(plain.len(), 1, "{plain:?}");
+    let (cached, read) = with_cache_tree(&t, &e, Some((index_tree, &["", "a"])), Base::Head);
+    assert_eq!(cached, plain);
+    // The root and `a` are read; `a/deep` and `b` are still valid and equal.
+    assert_eq!(read, 2);
+}
+
+#[test]
+fn cache_tree_of_another_tree_matches_only_equal_subtrees() {
+    // Base::Commit of an older commit whose `b` differs: `b` is read, `a`
+    // (same subtree as the index) is not.
+    let (t, tree) = cache_repo();
+    let older: Vec<(&str, &[u8])> = CACHE_FILES
+        .iter()
+        .map(|&(p, c)| {
+            if p == "b/w" {
+                (p, &b"old\n"[..])
+            } else {
+                (p, c)
+            }
+        })
+        .collect();
+    let old = t.commit(t.tree(&older), &[], "old");
+    let e = entries(&t);
+    let (plain, _) = with_cache_tree(&t, &e, None, Base::Commit(old));
+    assert_eq!(plain.len(), 1, "{plain:?}");
+    let (cached, read) = with_cache_tree(&t, &e, Some((tree, &[])), Base::Commit(old));
+    assert_eq!(cached, plain);
+    assert_eq!(read, 2, "the root and b");
+}
+
+#[test]
+fn cache_tree_with_a_conflict_beneath_is_not_trusted() {
+    // A stale node that still counts `a`'s entries, while `a/y` is in
+    // conflict: the entries beneath aren't plain, so `a` is read.
+    let (t, tree) = cache_repo();
+    let mut e = entries(&t);
+    let y = e.iter().position(|x| x.path == b"a/y").unwrap();
+    let ours = IndexEntry {
+        stage: 2,
+        ..e[y].clone()
+    };
+    e[y].stage = 3;
+    e.push(ours);
+    let (plain, _) = with_cache_tree(&t, &e, None, Base::Head);
+    let (cached, read) = with_cache_tree(&t, &e, Some((tree, &[])), Base::Head);
+    assert_eq!(cached, plain);
+    assert!(plain.iter().any(|l| l.contains("a/y")), "{plain:?}");
+    assert!(read >= 2, "the root and a: {read}");
+}
+
+/// A worktree large enough for the parallel stat pass (ADR 0038): the
+/// result is the same, in path order, every time.
+#[test]
+fn worktree_large_parallel_passes_are_deterministic() {
+    let n = 2 * STAT_CHUNK + 500;
+    let files: Vec<(String, Vec<u8>)> = (0..n)
+        .map(|i| {
+            (
+                format!("p{}/src/d{}/f{i:05}.ts", i % 13, i % 7),
+                format!("// {i}\n").into_bytes(),
+            )
+        })
+        .collect();
+    let mut refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_slice()))
+        .collect();
+    refs.push((".gitignore", b"build/\n"));
+    let t = clean_repo(&refs);
+    // Changes spread over every chunk of the stat pass, untracked files in
+    // many directories, an ignored directory and a nested repository.
+    let mut expected = Vec::new();
+    for i in (0..n).step_by(n / 6) {
+        t.write_file(&files[i].0, b"changed\n");
+        expected.push(files[i].0.clone());
+    }
+    t.remove(&files[n - 1].0);
+    expected.push(files[n - 1].0.clone());
+    for i in 0..13 {
+        let path = format!("p{i}/src/d{}/new{i}.ts", i % 7);
+        t.write_file(&path, b"new\n");
+        expected.push(path);
+        t.write_file(&format!("p{i}/build/out.js"), b"ignored\n");
+    }
+    t.write_file("p3/vendor/.git/HEAD", b"ref: refs/heads/main\n");
+    expected.push("p3/vendor".into());
+    expected.sort();
+    let mut previous = None;
+    for _ in 0..3 {
+        let set = changes(&t);
+        let paths: Vec<String> = set
+            .files()
+            .iter()
+            .map(|c| String::from_utf8(c.path.as_bytes().to_vec()).unwrap())
+            .collect();
+        assert_eq!(paths, expected);
+        let lines = lines(&set);
+        if let Some(previous) = &previous {
+            assert_eq!(&lines, previous);
+        }
+        previous = Some(lines);
+    }
 }
 
 #[test]

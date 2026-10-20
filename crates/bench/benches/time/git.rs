@@ -390,10 +390,9 @@ fn open_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     Ok(vec![Measured::new("git/open_100k", Value::Time(time))])
 }
 
-/// Whether the budget `id` is active. `git/filter_100k` and
-/// `git/changes_clean_100k` are planned while their macOS gap is open (git
-/// design「与设计的差异」); their benchmarks produce them again, unchanged,
-/// once the fix makes them active.
+/// Whether the budget `id` is active. `git/filter_100k` is planned while
+/// its macOS gap is open (git design「与设计的差异」); its benchmark
+/// produces it again, unchanged, once the fix makes it active.
 fn active(id: &str) -> bool {
     use lectern_bench::budgets::{BUDGETS, State, lookup};
     lookup(BUDGETS, id).is_some_and(|b| b.state == State::Active)
@@ -503,8 +502,8 @@ fn filter_100k_full(ctx: &mut Ctx, t: &TestRepo) -> Result<Measured, BenchError>
 /// skipped by stat, plus the untracked walk. Cold: a new `Worktree` for
 /// each sample (made untimed), so every comparison parses the index, as
 /// every one does once a `Worktree` keeps no parsed index between calls
-/// (ADR 0035, git design step 4). Planned for now (`active`); always
-/// recorded, through the platform calls the comparison makes:
+/// (ADR 0035, git design step 4). Always recorded besides, through the
+/// platform calls the comparison makes:
 /// `git/changes_clean_100k/stat_all`, one `SafeRoot::stat` of every
 /// tracked path; and counts: `…/reads`, the files the first comparison
 /// read (the untracked walk's `.gitignore` included), and `…/stat_*`, the

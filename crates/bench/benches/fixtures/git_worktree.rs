@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
 
 use lectern_bench::{BenchError, Ctx};
-use lectern_git::testing::{IndexEntry, IndexStat, TestHead, TestRepo};
+use lectern_git::testing::{IndexEntry, IndexOptions, IndexStat, TestHead, TestRepo};
 use lectern_git::{Base, ChangeSet, Limits, Mode, Oid, Worktree, WorktreeId};
 use lectern_project::testing::Shape;
 
@@ -111,8 +111,10 @@ pub fn large_shared(ctx: &Ctx) -> Result<Rc<TestRepo>, BenchError> {
 /// A project design shape as one clean worktree with `core.ignoreCase`,
 /// as on macOS: every path a file on disk (the manifests with their
 /// contents, `.gitignore` with three rules, the rest one line each), the
-/// index with their stat, HEAD a tree with the same blob OIDs. Only the
-/// trees go into the object database: a clean comparison reads no blob.
+/// index with their stat and the cache-tree git writes after a commit, HEAD
+/// a tree with the same blob OIDs. Only the trees go into the object
+/// database (loose): a clean comparison reads no blob, and with the
+/// cache-tree no tree either.
 pub fn shaped(shape: &Shape) -> TestRepo {
     let t = TestRepo::new();
     t.append_config("[core]\n\tignoreCase = true\n");
@@ -141,9 +143,15 @@ pub fn shaped(shape: &Shape) -> TestRepo {
         .zip(&entries)
         .map(|(p, e)| (p.as_str(), e.mode, e.oid))
         .collect();
-    let commit = t.commit(t.tree_entries(&items), &[], "base");
+    let tree = t.tree_entries(&items);
+    let commit = t.commit(tree, &[], "base");
     t.set_ref("refs/heads/main", commit);
-    t.write_index(t.common_dir(), &entries);
+    // With the cache-tree git writes after a commit or `read-tree`.
+    let options = IndexOptions {
+        cache_tree: Some((tree, &[])),
+        ..IndexOptions::default()
+    };
+    t.write_index_with(t.common_dir(), &entries, &options);
     t
 }
 
