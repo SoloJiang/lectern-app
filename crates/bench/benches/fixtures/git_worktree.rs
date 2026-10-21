@@ -116,6 +116,12 @@ pub fn large_shared(ctx: &Ctx) -> Result<Rc<TestRepo>, BenchError> {
 /// database (loose): a clean comparison reads no blob, and with the
 /// cache-tree no tree either.
 pub fn shaped(shape: &Shape) -> TestRepo {
+    shaped_with_entries(shape).0
+}
+
+/// `shaped`, with the index entries it wrote, for a benchmark that writes
+/// another index (`git/filter_100k`).
+pub fn shaped_with_entries(shape: &Shape) -> (TestRepo, Vec<IndexEntry>) {
     let t = TestRepo::new();
     t.append_config("[core]\n\tignoreCase = true\n");
     let hash = t.hash();
@@ -152,7 +158,7 @@ pub fn shaped(shape: &Shape) -> TestRepo {
         ..IndexOptions::default()
     };
     t.write_index_with(t.common_dir(), &entries, &options);
-    t
+    (t, entries)
 }
 
 /// A worktree with realistic changes: `modified` tracked files and

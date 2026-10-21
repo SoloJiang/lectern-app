@@ -25,10 +25,14 @@ pub(crate) struct Stash {
     entries: BTreeMap<Vec<u8>, Held>,
     /// Merging reached the worktree root and still exceeded the limit.
     pub(crate) rescan: bool,
+    /// Some path was held before the first filter: its reload triggers are
+    /// not checked yet.
+    pub(crate) fresh: bool,
 }
 
 impl Stash {
     pub(crate) fn insert(&mut self, path: &[u8], flags: Flags, fresh: bool) {
+        self.fresh |= fresh;
         if self.rescan || self.covered(path) {
             return;
         }

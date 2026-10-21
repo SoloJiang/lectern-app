@@ -13,14 +13,11 @@ use crate::path::WatchPath;
 pub trait WorktreeSource: Send + Sync + 'static {
     /// Reads the index and the ignore rules (including untracked
     /// `.gitignore` files in directories that are not ignored) and builds a
-    /// filter. `gitignores` are the `.gitignore` paths in the events that
-    /// triggered this load: read even when the walk hits its entry limit
-    /// before finding them; those under an ignored directory are still not
-    /// read. Blocks; fs_watch calls it in an executor `Background` task and
+    /// filter. Blocks; fs_watch calls it in an executor `Background` task and
     /// sets `cancel` to give up.
     fn filter(
         &self,
-        gitignores: &[WatchPath],
+        request: &FilterRequest<'_>,
         cancel: &AtomicBool,
     ) -> Result<Arc<dyn PathFilter>, SourceError>;
 
@@ -30,11 +27,29 @@ pub trait WorktreeSource: Send + Sync + 'static {
     fn config_files(&self, cancel: &AtomicBool) -> Result<Vec<PathBuf>, SourceError>;
 }
 
+/// What a filter load is asked for (docs/design/fs_watch.md「路径分类」).
+#[derive(Clone, Copy, Default)]
+pub struct FilterRequest<'a> {
+    /// The `.gitignore` paths in the events that triggered this load: read
+    /// even when the walk hits its entry limit before finding them; those
+    /// under an ignored directory are still not read.
+    pub gitignores: &'a [WatchPath],
+    /// The filter in place, given only when nothing but the index has
+    /// changed since its load started: no event since then touched a
+    /// `.gitignore`, a directory holding one, a moved or removed directory,
+    /// `info/exclude` or the config, and no rescan happened. The source may
+    /// then reuse what that load found on disk (`git` reuses the untracked
+    /// walk) as long as it can prove the result is the same as a full load's;
+    /// otherwise it loads in full. None for every other load.
+    pub previous: Option<&'a dyn PathFilter>,
+}
+
 /// Answers from memory only, no IO, on any thread. Paths are relative to the
 /// worktree root and satisfy the `WatchPath` invariants. Case and Unicode
 /// normalization follow the repository's `core.ignoreCase` and
-/// `core.precomposeUnicode`; that is up to the implementation.
-pub trait PathFilter: Send + Sync + 'static {
+/// `core.precomposeUnicode`; that is up to the implementation. `Any`, so
+/// that a source can recognize its own filter in `FilterRequest::previous`.
+pub trait PathFilter: std::any::Any + Send + Sync + 'static {
     fn tracked(&self, path: &[u8]) -> Tracked;
     /// Whether `path` itself is excluded by the ignore rules, not looking at
     /// its parents; fs_watch checks those one by one.

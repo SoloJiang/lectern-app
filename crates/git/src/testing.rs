@@ -32,6 +32,17 @@ pub fn worktree_reads() -> usize {
     crate::compare::hook::reads()
 }
 
+/// Whether `filter`, built by `Worktree::watch_source().filter`, reused the
+/// untracked walk of the `FilterRequest::previous` it was given instead of
+/// walking (None for a filter from elsewhere). For bench's
+/// `git/filter_100k`, which measures that rebuild.
+pub fn filter_reused(filter: &dyn lectern_fs_watch::PathFilter) -> Option<bool> {
+    let filter: &dyn std::any::Any = filter;
+    filter
+        .downcast_ref::<crate::watch::Filter>()
+        .map(|f| f.reused)
+}
+
 /// The phases of the last worktree comparison (`changes` or `refresh`) on
 /// this thread, in order, with the wall time each took: `open` (the gix
 /// handle), `index` (reading and parsing the index), `base_tree` (the base

@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use lectern_fs_watch::{PathFilter, Tracked, WatchPath};
+use lectern_fs_watch::{FilterRequest, PathFilter, Tracked, WatchPath};
 
 use super::{Env, Filter, config_files};
 use crate::handle::ConfigScope;
@@ -23,7 +23,7 @@ fn main_worktree(t: &TestRepo) -> crate::Worktree {
 fn filter(t: &TestRepo) -> Arc<dyn PathFilter> {
     main_worktree(t)
         .watch_source()
-        .filter(&[], &no_cancel())
+        .filter(&FilterRequest::default(), &no_cancel())
         .unwrap()
 }
 
@@ -384,7 +384,7 @@ fn watch_source_cancelled() {
     let t = ignore_repo(false);
     let cancel = AtomicBool::new(true);
     let source = main_worktree(&t).watch_source();
-    assert!(source.filter(&[], &cancel).is_err());
+    assert!(source.filter(&FilterRequest::default(), &cancel).is_err());
     assert!(source.config_files(&cancel).is_err());
 }
 
@@ -571,9 +571,11 @@ fn watch_source_runs_no_git() {
     t.write_file(".gitignore", b"*.log\n");
     t.write_file("sub/.gitignore", b"*.o\n");
     let source = main_worktree(&t).watch_source();
-    let f = source
-        .filter(&[wp("sub/.gitignore")], &no_cancel())
-        .unwrap();
+    let request = FilterRequest {
+        gitignores: &[wp("sub/.gitignore")],
+        previous: None,
+    };
+    let f = source.filter(&request, &no_cancel()).unwrap();
     assert!(f.ignored(b"a.log", false));
     let files = source.config_files(&no_cancel()).unwrap();
     assert!(files.contains(&t.base().join("attributes")));
@@ -597,4 +599,328 @@ fn watch_source_worktree_names() {
         WorktreeId::from(WorktreeName::Linked("w".into())),
         WorktreeId::Linked("w".into())
     );
+}
+
+// --- the walk reused after an index-only change ---------------------------------
+
+/// What fs_watch asks for after an index-only change: a filter on a new
+/// `Worktree` (the index read again), given the filter in place.
+fn rebuilt(t: &TestRepo, previous: &Arc<dyn PathFilter>) -> Arc<dyn PathFilter> {
+    let request = FilterRequest {
+        gitignores: &[],
+        previous: Some(&**previous),
+    };
+    main_worktree(t)
+        .watch_source()
+        .filter(&request, &no_cancel())
+        .unwrap()
+}
+
+fn reused(f: &Arc<dyn PathFilter>) -> bool {
+    crate::testing::filter_reused(&**f).expect("a git filter")
+}
+
+/// Every answer fs_watch can get from `f` about the worktree's paths and a
+/// few that don't exist, and its rule files.
+fn answers(f: &dyn PathFilter, root: &Path) -> Vec<String> {
+    let mut paths = worktree_paths(root);
+    for (path, is_dir) in [("absent", true), ("absent/x.gen", false), ("x.o", false)] {
+        paths.push((path.to_owned(), is_dir));
+    }
+    let mut out = vec![format!("rules {:?}", rule_files(f))];
+    for (path, is_dir) in paths {
+        out.push(format!(
+            "{path}: {:?} ignored={} effectively={}",
+            f.tracked(path.as_bytes()),
+            f.ignored(path.as_bytes(), is_dir),
+            effectively_ignored(f, &path, is_dir)
+        ));
+    }
+    out
+}
+
+/// `f` answers as a filter built with a full walk on the same worktree.
+fn assert_same_as_a_full_build(t: &TestRepo, f: &dyn PathFilter) {
+    let full = filter(t);
+    assert!(!reused(&full));
+    assert_eq!(answers(f, t.root()), answers(&*full, t.root()));
+}
+
+/// The rebuild walks, and gives what a full build gives.
+fn falls_back(t: &TestRepo, previous: &Arc<dyn PathFilter>) -> Arc<dyn PathFilter> {
+    let f = rebuilt(t, previous);
+    assert!(!reused(&f), "walked");
+    assert_same_as_a_full_build(t, &*f);
+    f
+}
+
+#[test]
+fn watch_source_index_change_reuses_the_walk() {
+    for ignore_case in [false, true] {
+        let t = ignore_repo(ignore_case);
+        t.write_index(t.common_dir(), &[t.add("x.txt"), t.add("sub/a.o")]);
+        let first = filter(&t);
+        assert!(!reused(&first), "the first build walks");
+
+        // `git add newdir/b.txt` and `git rm --cached x.txt`.
+        t.write_index(t.common_dir(), &[t.add("newdir/b.txt"), t.add("sub/a.o")]);
+        let reads = crate::compare::hook::reads();
+        let second = rebuilt(&t, &first);
+        assert!(reused(&second), "core.ignoreCase = {ignore_case}");
+        assert_eq!(
+            crate::compare::hook::reads(),
+            reads,
+            "no `.gitignore` read again"
+        );
+        assert_eq!(second.tracked(b"newdir/b.txt"), Tracked::File);
+        assert_eq!(second.tracked(b"x.txt"), Tracked::No);
+        assert_same_as_a_full_build(&t, &*second);
+
+        // And again from the reused filter.
+        t.write_index(t.common_dir(), &[t.add("sub/a.o")]);
+        let third = rebuilt(&t, &second);
+        assert!(reused(&third));
+        assert_same_as_a_full_build(&t, &*third);
+    }
+}
+
+#[test]
+fn watch_source_reuse_drops_the_rules_of_a_new_nested_repository() {
+    let t = TestRepo::new();
+    t.write_file("vendor/lib/.gitignore", b"*.gen\n");
+    t.write_file("vendor/lib/a.gen", b"x\n");
+    t.write_file("a.txt", b"x\n");
+    t.write_index(t.common_dir(), &[t.add("a.txt")]);
+    let first = filter(&t);
+    assert_eq!(rule_files(&*first), ["vendor/lib/.gitignore"]);
+    // `git init vendor/lib` (fs_watch drops `.git` paths: no reload), then
+    // an index change. The walk wouldn't enter `vendor/lib` now.
+    t.write_file("vendor/lib/.git/HEAD", b"ref: refs/heads/main\n");
+    t.write_file("b.txt", b"x\n");
+    t.write_index(t.common_dir(), &[t.add("a.txt"), t.add("b.txt")]);
+    let second = rebuilt(&t, &first);
+    assert!(reused(&second));
+    assert!(rule_files(&*second).is_empty());
+    assert_same_as_a_full_build(&t, &*second);
+}
+
+#[test]
+fn watch_source_reuse_falls_back_when_submodules_change() {
+    let t = TestRepo::new();
+    t.write_file("module/.gitignore", b"*.m\n");
+    t.write_file("sub/.gitignore", b"*.s\n");
+    let gitlink = |path: &str| IndexEntry::new(path, Mode::Gitlink, Oid::empty_tree(t.hash()));
+    t.write_index(t.common_dir(), &[gitlink("module")]);
+    let first = filter(&t);
+    assert_eq!(rule_files(&*first), ["sub/.gitignore"]);
+    // The submodule removed: the walk enters `module/` now.
+    t.write_index(t.common_dir(), &[]);
+    let second = falls_back(&t, &first);
+    assert_eq!(
+        rule_files(&*second),
+        ["module/.gitignore", "sub/.gitignore"]
+    );
+    // A submodule added where the walk went.
+    t.write_index(t.common_dir(), &[gitlink("sub")]);
+    let third = falls_back(&t, &second);
+    assert_eq!(rule_files(&*third), ["module/.gitignore"]);
+}
+
+#[test]
+fn watch_source_reuse_falls_back_when_a_skipped_repository_changes() {
+    let t = TestRepo::new();
+    t.write_file("nested/.git/HEAD", b"ref: refs/heads/main\n");
+    t.write_file("nested/.gitignore", b"*.n\n");
+    t.write_file("nested/a.txt", b"x\n");
+    t.write_file("other/.git/HEAD", b"ref: refs/heads/main\n");
+    t.write_file("other/.gitignore", b"*.o\n");
+    let first = filter(&t);
+    assert!(
+        rule_files(&*first).is_empty(),
+        "nested repositories aren't entered"
+    );
+    // An index path beneath `nested/`: the walk enters it now.
+    t.write_index(t.common_dir(), &[t.add("nested/a.txt")]);
+    let second = falls_back(&t, &first);
+    assert_eq!(rule_files(&*second), ["nested/.gitignore"]);
+    // `other/.git` removed: no longer a repository, so entered.
+    std::fs::remove_dir_all(t.root().join("other/.git")).unwrap();
+    t.write_index(t.common_dir(), &[]);
+    let third = falls_back(&t, &second);
+    assert_eq!(rule_files(&*third), ["other/.gitignore"]);
+}
+
+#[test]
+fn watch_source_reuse_falls_back_near_the_walk_limit() {
+    let t = TestRepo::new();
+    for name in ["u1", "u2", "t1", "t2", "t3"] {
+        t.write_file(name, b"x\n");
+    }
+    let tracked = [t.add("t1"), t.add("t2"), t.add("t3")];
+    t.write_index(t.common_dir(), &tracked);
+    let build = |previous: Option<&Filter>, limit: usize| {
+        Filter::rebuild(&main_worktree(&t), &[], previous, limit, &no_cancel()).unwrap()
+    };
+    // Two untracked entries; the limit is 4.
+    let first = build(None, 4);
+    // One path untracked: at most 3 entries now, within the limit.
+    t.write_index(t.common_dir(), &tracked[1..]);
+    let second = build(Some(&first), 4);
+    assert!(second.reused);
+    // Two more: possibly 5 entries, beyond it. A walk tells.
+    t.write_index(t.common_dir(), &[]);
+    let third = build(Some(&second), 4);
+    assert!(!third.reused);
+    // A walk that stopped at its limit isn't reused.
+    let capped = build(None, 1);
+    t.write_index(t.common_dir(), &tracked);
+    assert!(!build(Some(&capped), 1).reused);
+}
+
+#[test]
+fn watch_source_reuse_falls_back_for_another_configuration_or_worktree() {
+    let t = TestRepo::new();
+    t.write_file("sub/.gitignore", b"*.s\n");
+    t.write_file("a.txt", b"x\n");
+    t.append_config("[core]\n\tignoreCase = false\n");
+    let first = filter(&t);
+    t.append_config("[core]\n\tignoreCase = true\n");
+    t.write_index(t.common_dir(), &[t.add("a.txt")]);
+    let second = falls_back(&t, &first);
+
+    t.add_worktree("w", &t.base().join("w"), TestHead::Branch("refs/heads/w"));
+    let linked = t.repo().worktree(&WorktreeId::Linked("w".into())).unwrap();
+    let request = FilterRequest {
+        gitignores: &[],
+        previous: Some(&*second),
+    };
+    let other = linked
+        .watch_source()
+        .filter(&request, &no_cancel())
+        .unwrap();
+    assert!(
+        !reused(&other),
+        "the main worktree's walk isn't the linked one's"
+    );
+    assert!(rule_files(&*other).is_empty());
+}
+
+/// fs_watch over the real filter: after an index change (the walk reused),
+/// a `.gitignore` added or changed in an untracked directory applies to the
+/// events that follow, because its event makes fs_watch load without
+/// `previous` (fs_watch design「路径分类」).
+#[test]
+fn watch_source_events_new_and_changed_gitignore_after_an_index_change() {
+    use lectern_fs_watch::testing::{FakeBackend, RecordingSink, manual};
+    use lectern_fs_watch::{
+        Coalesce, Config, Flags, RepoSpec, WorktreeBatch, WorktreeName, WorktreeSpec,
+    };
+
+    let t = TestRepo::new();
+    t.write_file(".gitignore", b"*.log\n");
+    t.write_file("a.txt", b"x\n");
+    t.write_index(t.common_dir(), &[t.add(".gitignore"), t.add("a.txt")]);
+    let backend = FakeBackend::new();
+    let (watcher, driver) = manual(
+        backend.clone(),
+        lectern_executor::Executor::manual(),
+        Config::default(),
+    );
+    let repo_sink = RecordingSink::new(None);
+    let repo = watcher.watch_repo(
+        RepoSpec {
+            common_dir: t.common_dir().to_path_buf(),
+            coalesce: Coalesce::REPO,
+        },
+        repo_sink,
+    );
+    let sink = RecordingSink::<WorktreeBatch>::new(None);
+    let _worktree = repo.watch_worktree(
+        WorktreeSpec {
+            name: WorktreeName::Main,
+            root: t.root().to_path_buf(),
+            source: main_worktree(&t).watch_source(),
+            coalesce: Coalesce::WORKTREE,
+        },
+        sink.clone(),
+    );
+    let settle = || {
+        driver.run_until_idle();
+        driver.advance(std::time::Duration::from_secs(5));
+    };
+    let delivered = || -> Vec<String> {
+        let mut paths: Vec<String> = sink
+            .take()
+            .into_iter()
+            .flat_map(|(batch, _)| batch.paths)
+            .map(|p| String::from_utf8_lossy(p.as_bytes()).into_owned())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    };
+    let file = Flags::FILE;
+    settle();
+    delivered();
+
+    // `git add b.txt`: an index-only reload.
+    t.write_file("b.txt", b"x\n");
+    t.write_index(
+        t.common_dir(),
+        &[t.add(".gitignore"), t.add("a.txt"), t.add("b.txt")],
+    );
+    backend.emit(t.common_dir(), &[("index", file)]);
+    settle();
+    delivered();
+
+    // A new `.gitignore` in an untracked directory, then files beneath it.
+    t.write_file("gen/.gitignore", b"*.gen\n");
+    backend.emit(t.root(), &[("gen/.gitignore", file | Flags::CREATED)]);
+    settle();
+    backend.emit(
+        t.root(),
+        &[
+            ("gen/a.gen", file | Flags::CREATED),
+            ("gen/b.txt", file | Flags::CREATED),
+        ],
+    );
+    settle();
+    assert_eq!(delivered(), ["gen/.gitignore", "gen/b.txt"]);
+
+    // The index again (reused), then the `.gitignore` changed.
+    t.write_index(t.common_dir(), &[t.add(".gitignore"), t.add("a.txt")]);
+    backend.emit(t.common_dir(), &[("index", file)]);
+    settle();
+    delivered();
+    t.write_file("gen/.gitignore", b"*.txt\n");
+    backend.emit(t.root(), &[("gen/.gitignore", file | Flags::MODIFIED)]);
+    settle();
+    backend.emit(
+        t.root(),
+        &[
+            ("gen/c.gen", file | Flags::CREATED),
+            ("gen/d.txt", file | Flags::CREATED),
+        ],
+    );
+    settle();
+    assert_eq!(delivered(), ["gen/.gitignore", "gen/c.gen"]);
+
+    // The index again, then a directory holding a `.gitignore` moved in:
+    // only the directory is reported, and the walk finds the file.
+    t.write_index(t.common_dir(), &[t.add(".gitignore"), t.add("b.txt")]);
+    backend.emit(t.common_dir(), &[("index", file)]);
+    settle();
+    delivered();
+    t.write_file("moved/.gitignore", b"*.mv\n");
+    backend.emit(t.root(), &[("moved", Flags::DIR | Flags::RENAMED)]);
+    settle();
+    backend.emit(
+        t.root(),
+        &[
+            ("moved/a.mv", file | Flags::CREATED),
+            ("moved/b.txt", file | Flags::CREATED),
+        ],
+    );
+    settle();
+    assert_eq!(delivered(), ["moved", "moved/b.txt"]);
 }

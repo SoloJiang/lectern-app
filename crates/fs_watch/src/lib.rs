@@ -31,7 +31,7 @@ pub use backend::{
 };
 pub use path::WatchPath;
 pub use reflog::{Origin, ReadStamp, ReflogFile, ReflogRecord, ReflogReset, ResetReason, RunId};
-pub use source::{PathFilter, Sink, SourceError, Tracked, WorktreeSource};
+pub use source::{FilterRequest, PathFilter, Sink, SourceError, Tracked, WorktreeSource};
 pub use types::{
     Coalesce, Degraded, DirBatch, Failure, FlushError, Health, MetaChanges, RepoBatch, Revision,
     RootState, WorktreeBatch, WorktreeMeta, WorktreeName,

@@ -442,3 +442,105 @@ fn filter_stale_failed_load_degrades_and_delivers_everything() {
     let batches = o.sink.take();
     assert!(batches.iter().any(|(b, _)| b.health == Some(Health::Live)));
 }
+
+// --- what a reload may reuse (`FilterRequest::previous`) -----------------------
+
+#[test]
+fn filter_reuse_index_change_passes_the_filter_in_place() {
+    let fx = Fixture::new();
+    let _o = fx.opened();
+    assert_eq!(fx.source.previous(), [None], "the first load reads it all");
+    fx.emit_common(&[("index", F)]);
+    fx.settle();
+    fx.emit_common(&[("index", F)]);
+    fx.settle();
+    assert_eq!(fx.source.previous(), [None, Some(1), Some(2)]);
+}
+
+#[test]
+fn filter_reuse_every_other_reload_reads_the_worktree() {
+    let fx = Fixture::new();
+    fx.source.track(&["pkg/a/x.rs"]);
+    fx.source.rule_files(&["pkg/a/.gitignore"]);
+    let _o = fx.opened();
+    fx.emit_root(&[("sub/.gitignore", F | Flags::CREATED)]);
+    fx.settle();
+    fx.emit_root(&[("pkg", D | MODIFIED)]);
+    fx.settle();
+    fx.emit_root(&[("vendored", D | Flags::RENAMED)]);
+    fx.settle();
+    fx.emit_common(&[("info/exclude", F)]);
+    fx.settle();
+    fx.emit_common(&[("config", F)]);
+    fx.settle();
+    fx.emit_root(&[("", Flags::RESCAN)]);
+    fx.settle();
+    fx.emit_common(&[("", Flags::RESCAN)]);
+    fx.settle();
+    let previous = fx.source.previous();
+    assert_eq!(previous.len(), 8, "{previous:?}");
+    assert!(previous.iter().all(Option::is_none), "{previous:?}");
+}
+
+#[test]
+fn filter_reuse_gitignore_during_an_index_load_reads_the_worktree_next() {
+    let fx = Fixture::new();
+    let _o = fx.opened();
+    fx.emit_common(&[("index", F)]);
+    pump(&fx);
+    // While that load runs: a new `.gitignore`, then the index again. One
+    // load serves both, and it reads the worktree.
+    write(&fx.root.join("sub/.gitignore"), b"*.o\n");
+    fx.emit_root(&[("sub/.gitignore", F | Flags::CREATED)]);
+    pump(&fx);
+    fx.emit_common(&[("index", F)]);
+    pump(&fx);
+    fx.settle();
+    assert_eq!(fx.source.previous(), [None, Some(1), None]);
+    assert_eq!(
+        fx.source.gitignores().last().unwrap(),
+        &vec![wp("sub/.gitignore")]
+    );
+
+    // Index changes queued behind one another, nothing else: reused.
+    fx.emit_common(&[("index", F)]);
+    pump(&fx);
+    fx.emit_common(&[("index", F)]);
+    pump(&fx);
+    fx.settle();
+    assert_eq!(
+        fx.source.previous(),
+        [None, Some(1), None, Some(3), Some(4)]
+    );
+}
+
+#[test]
+fn filter_reuse_waits_for_paths_held_before_the_first_filter() {
+    let fx = Fixture::new();
+    let (repo, _repo_sink) = fx.repo();
+    let (_worktree, _sink) = fx.worktree(&repo);
+    pump(&fx);
+    // Before the first filter: a new `.gitignore` (held, its trigger not
+    // checked yet), then an index change queued behind the first load.
+    write(&fx.root.join("sub/.gitignore"), b"*.o\n");
+    fx.emit_root(&[("sub/.gitignore", F | Flags::CREATED)]);
+    pump(&fx);
+    fx.emit_common(&[("index", F)]);
+    pump(&fx);
+    fx.settle();
+    let previous = fx.source.previous();
+    assert!(previous.iter().all(Option::is_none), "{previous:?}");
+}
+
+#[test]
+fn filter_reuse_not_after_a_failed_load() {
+    let fx = Fixture::new();
+    let _o = fx.opened();
+    fx.source.fail_filter(Some("index is corrupt"));
+    fx.emit_common(&[("index", F)]);
+    fx.settle();
+    fx.source.fail_filter(None);
+    fx.emit_common(&[("index", F)]);
+    fx.settle();
+    assert_eq!(fx.source.previous(), [None, Some(1), None]);
+}

@@ -49,6 +49,28 @@ enum Filter {
     Failed(String),
 }
 
+/// Why the filter is reloaded (docs/design/fs_watch.md「路径分类」).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Reload {
+    /// Only the worktree's `index` changed: the load may reuse what the
+    /// filter in place found on disk (`FilterRequest::previous`).
+    Index,
+    /// Anything else (the first load, a `.gitignore` or directory event,
+    /// `info/exclude`, the config, a rescan): the load reads the worktree.
+    Full,
+}
+
+impl Reload {
+    /// Two reloads served by one load: `Index` only when both are.
+    fn and(self, other: Reload) -> Reload {
+        if self == Reload::Index && other == Reload::Index {
+            Reload::Index
+        } else {
+            Reload::Full
+        }
+    }
+}
+
 /// Steps 4–9 of the classification.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verdict {
@@ -69,8 +91,9 @@ pub(crate) struct WorktreeState {
     /// installed; also true until the first filter is in.
     stale: bool,
     filter_load: Option<Load>,
-    /// A reload triggered while one was running, with its `.gitignore` paths.
-    filter_again: Option<BTreeSet<WatchPath>>,
+    /// Reloads triggered while one was running, with their `.gitignore`
+    /// paths and their reasons combined.
+    filter_again: Option<(BTreeSet<WatchPath>, Reload)>,
     config_load: Option<Load>,
     config_again: bool,
     config_ready: bool,
@@ -164,7 +187,7 @@ impl WorktreeState {
             Err(BackendError::NotFound) => return self.fail(ctx, common, Failure::RootGone),
             Err(error) => return self.fail(ctx, common, Failure::Backend(error.to_string())),
         }
-        self.reload_filter(ctx, BTreeSet::new());
+        self.reload_filter(ctx, BTreeSet::new(), Reload::Full);
         self.reload_config(ctx, common);
     }
 
@@ -254,7 +277,7 @@ impl WorktreeState {
             }
         }
         if reload {
-            self.reload_filter(ctx, gitignores);
+            self.reload_filter(ctx, gitignores, Reload::Full);
         }
         // Pass 2: classify.
         let mut config = false;
@@ -319,7 +342,7 @@ impl WorktreeState {
             sub.acc.set_rescan();
             sub.sub.touch(now);
         }
-        self.reload_filter(ctx, BTreeSet::new());
+        self.reload_filter(ctx, BTreeSet::new(), Reload::Full);
         self.reload_config(ctx, common);
     }
 
@@ -478,28 +501,54 @@ impl WorktreeState {
         }
         self.meta(ctx, |meta| meta.config = true);
         self.reload_config(ctx, common);
-        self.reload_filter(ctx, BTreeSet::new());
+        self.reload_filter(ctx, BTreeSet::new(), Reload::Full);
     }
 
     // --- loads -------------------------------------------------------------
 
     /// Starts a filter load, or queues one after the running load. The filter
     /// is stale from now until a result is installed.
-    pub(crate) fn reload_filter(&mut self, ctx: &mut Ctx, gitignores: BTreeSet<WatchPath>) {
+    ///
+    /// Every reload requested after a load started is served by the next
+    /// load (queued ones in `filter_again`), so when all of those are
+    /// `Reload::Index`, nothing but the index changed since the filter in
+    /// place began reading the worktree, and it goes to the source as
+    /// `FilterRequest::previous`.
+    pub(crate) fn reload_filter(
+        &mut self,
+        ctx: &mut Ctx,
+        gitignores: BTreeSet<WatchPath>,
+        reload: Reload,
+    ) {
         if self.failure.is_some() {
             return;
         }
         self.stale = true;
         if self.filter_load.is_some() {
-            self.filter_again.get_or_insert_default().extend(gitignores);
+            let again = self
+                .filter_again
+                .get_or_insert_with(|| (BTreeSet::new(), Reload::Index));
+            again.0.extend(gitignores);
+            again.1 = again.1.and(reload);
             return;
         }
         let source = self.source.clone();
         let gitignores: Vec<WatchPath> = gitignores.into_iter().collect();
+        // Paths held before the first filter haven't been checked for
+        // reload triggers yet (`reclassify`): one may be a new `.gitignore`.
+        let previous = match (&self.filter, reload) {
+            (Filter::Ready(filter), Reload::Index) if !self.stash.fresh => Some(filter.clone()),
+            _ => None,
+        };
         let epoch = self.epoch();
         self.filter_load = Some(self.spawn(ctx, move |cancel| {
-            let result = contain(|| source.filter(&gitignores, cancel))
+            let request = crate::source::FilterRequest {
+                gitignores: &gitignores,
+                previous: previous.as_deref(),
+            };
+            let result = contain(|| source.filter(&request, cancel))
                 .unwrap_or_else(|message| Err(SourceError(format!("panicked: {message}"))));
+            drop(previous);
             move |load| Cmd::FilterLoaded {
                 epoch,
                 load,
@@ -590,9 +639,9 @@ impl WorktreeState {
             Err(error) => Filter::Failed(error.0),
         };
         self.cache.clear();
-        if let Some(again) = self.filter_again.take() {
+        if let Some((gitignores, reload)) = self.filter_again.take() {
             // Paths stay held for the newer filter.
-            self.reload_filter(ctx, again);
+            self.reload_filter(ctx, gitignores, reload);
         } else {
             self.stale = false;
             self.reclassify(ctx, unfiltered);
@@ -690,7 +739,7 @@ impl WorktreeState {
             }
         }
         if reload {
-            self.reload_filter(ctx, gitignores);
+            self.reload_filter(ctx, gitignores, Reload::Full);
         }
     }
 
