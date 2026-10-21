@@ -1,0 +1,32 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | /* A synthetic JavaScript sample. */
+    | Comment "/* A synthetic JavaScript sample. */"
+  2 | const path = require("path");
+    | Keyword "const" · Variable "path" · Operator "=" · Function "require" · Punctuation "(" · String "\"path\"" · Punctuation ")" · Punctuation ";"
+  3 | 
+  4 | function walk(root, { depth = 1 } = {}) {
+    | Keyword "function" · Function "walk" · Punctuation "(" · Variable "root" · Punctuation "," · Punctuation "{" · Operator "=" · Number "1" · Punctuation "}" · Operator "=" · Punctuation "{" · Punctuation "}" · Punctuation ")" · Punctuation "{"
+  5 |   if (depth > 3 || root === null) return [];
+    | Keyword "if" · Punctuation "(" · Variable "depth" · Operator ">" · Number "3" · Operator "||" · Variable "root" · Operator "===" · Constant "null" · Punctuation ")" · Keyword "return" · Punctuation "[" · Punctuation "]" · Punctuation ";"
+  6 |   let found = [];
+    | Keyword "let" · Variable "found" · Operator "=" · Punctuation "[" · Punctuation "]" · Punctuation ";"
+  7 |   for (const entry of root.children) {
+    | Keyword "for" · Punctuation "(" · Keyword "const" · Variable "entry" · Keyword "of" · Variable "root" · Punctuation "." · Property "children" · Punctuation ")" · Punctuation "{"
+  8 |     found.push(...walk(entry, { depth: depth + 1 }));
+    | Variable "found" · Punctuation "." · Function "push" · Punctuation "(" · Function "walk" · Punctuation "(" · Variable "entry" · Punctuation "," · Punctuation "{" · Property "depth" · Variable "depth" · Operator "+" · Number "1" · Punctuation "}" · Punctuation ")" · Punctuation ")" · Punctuation ";"
+  9 |   }
+    | Punctuation "}"
+ 10 |   console.log(`walked ${found.length}`);
+    | Keyword "console" · Punctuation "." · Function "log" · Punctuation "(" · String "`walked " · Punctuation "${" · Variable "found" · Punctuation "." · Property "length" · Punctuation "}" · String "`" · Punctuation ")" · Punctuation ";"
+ 11 |   return found;
+    | Keyword "return" · Variable "found" · Punctuation ";"
+ 12 | }
+    | Punctuation "}"
+ 13 | 
+ 14 | const View = () => <section id="main">{walk(this)}</section>;
+    | Keyword "const" · Type "View" · Operator "=" · Punctuation "(" · Punctuation ")" · Operator "=>" · Punctuation "<" · Tag "section" · Attribute "id" · Operator "=" · String "\"main\"" · Punctuation ">" · Punctuation "{" · Function "walk" · Punctuation "(" · Keyword "this" · Punctuation ")" · Punctuation "}" · Punctuation "</" · Tag "section" · Punctuation ">" · Punctuation ";"
+ 15 | module.exports = { walk, View, BATCH_SIZE: 64 };
+    | Keyword "module" · Punctuation "." · Property "exports" · Operator "=" · Punctuation "{" · Punctuation "," · Punctuation "," · Property "BATCH_SIZE" · Number "64" · Punctuation "}" · Punctuation ";"

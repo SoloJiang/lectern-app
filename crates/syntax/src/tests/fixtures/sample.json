@@ -1,0 +1,8 @@
+{
+  "name": "sample",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": { "test": "run \"all\"" },
+  "limits": { "size": 2.5e3, "depth": -1, "owner": null }
+}

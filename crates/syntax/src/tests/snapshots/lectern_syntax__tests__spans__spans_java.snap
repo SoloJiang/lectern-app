@@ -1,0 +1,40 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | // A synthetic Java sample.
+    | Comment "// A synthetic Java sample."
+  2 | package com.example.cache;
+    | Keyword "package" · Variable "com" · Variable "example" · Variable "cache"
+  3 | 
+  4 | import java.util.Map;
+    | Keyword "import" · Variable "java" · Variable "util" · Variable "Map"
+  5 | 
+  6 | @Service
+    | Operator "@" · Attribute "Service"
+  7 | public final class Store<T> {
+    | Keyword "public" · Keyword "final" · Keyword "class" · Type "Store" · Type "T"
+  8 |     private static final int MAX_SIZE = 256;
+    | Keyword "private" · Keyword "static" · Keyword "final" · Type "int" · Constant "MAX_SIZE" · Number "256"
+  9 |     private final Map<String, T> items;
+    | Keyword "private" · Keyword "final" · Type "Map" · Type "String" · Type "T" · Variable "items"
+ 10 | 
+ 11 |     public Store(Map<String, T> items) {
+    | Keyword "public" · Type "Store" · Type "Map" · Type "String" · Type "T" · Variable "items"
+ 12 |         this.items = items;
+    | Keyword "this" · Variable "items" · Variable "items"
+ 13 |     }
+ 14 | 
+ 15 |     /** Returns the item or null. */
+    | Comment "/** Returns the item or null. */"
+ 16 |     public T get(String key) {
+    | Keyword "public" · Type "T" · Function "get" · Type "String" · Variable "key"
+ 17 |         if (key == null || items.size() > MAX_SIZE) {
+    | Keyword "if" · Variable "key" · Constant "null" · Variable "items" · Function "size" · Constant "MAX_SIZE"
+ 18 |             return null;
+    | Keyword "return" · Constant "null"
+ 19 |         }
+ 20 |         return items.get(key + "\n");
+    | Keyword "return" · Variable "items" · Function "get" · Variable "key" · String "\"" · Escape "\\n" · String "\""
+ 21 |     }
+ 22 | }

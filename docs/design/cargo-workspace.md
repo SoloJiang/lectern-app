@@ -51,6 +51,7 @@ layer = "domain"
 | domain | `review` | 改动归因、片段对齐、已看状态、审阅意见 |
 | domain | `git` | gix 读仓库、imara-diff、结构化 diff |
 | domain | `code_intel` | tree-sitter 符号索引、Java / TS 解析、依赖源码 |
+| domain | `syntax` | 语法高亮：语言表与高亮查询、着色区间、文本与行索引、grammar 的卡死检测（非插件的库，[ADR 0041](../adr/0041.md)） |
 | domain | `terminal` | portable-pty + libghostty-vt，独占线程 |
 | domain | `usage` | token 去重与聚合、额度快照（[ADR 0014](../adr/0014.md)、[ADR 0022](../adr/0022.md)） |
 | domain | `forge` | GitHub 与 GitLab 的 MR 与 CI 状态 |

@@ -1,0 +1,17 @@
+# A synthetic CI configuration.
+name: build
+on:
+  push:
+    branches: [main]
+defaults: &defaults
+  timeout: 30
+  retry: false
+jobs:
+  test:
+    <<: *defaults
+    runs-on: "macos-15"
+    steps:
+      - run: |
+          just check
+          just test
+      - { name: deny, run: 'just deny' }

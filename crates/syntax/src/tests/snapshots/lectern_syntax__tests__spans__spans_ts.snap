@@ -1,0 +1,42 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | // A synthetic TypeScript sample.
+    | Comment "// A synthetic TypeScript sample."
+  2 | import { readFile } from "./io";
+    | Keyword "import" · Punctuation "{" · Variable "readFile" · Punctuation "}" · Keyword "from" · String "\"./io\"" · Punctuation ";"
+  3 | 
+  4 | export interface Point {
+    | Keyword "export" · Keyword "interface" · Type "Point" · Punctuation "{"
+  5 |   readonly x: number;
+    | Keyword "readonly" · Property "x" · Type "number" · Punctuation ";"
+  6 |   y?: string;
+    | Property "y" · Type "string" · Punctuation ";"
+  7 | }
+    | Punctuation "}"
+  8 | 
+  9 | const MAX_POINTS = 0x10;
+    | Keyword "const" · Constant "MAX_POINTS" · Operator "=" · Number "0x10" · Punctuation ";"
+ 10 | 
+ 11 | export function scale(p: Point, by: number): Point {
+    | Keyword "export" · Keyword "function" · Function "scale" · Punctuation "(" · Variable "p" · Type "Point" · Punctuation "," · Variable "by" · Type "number" · Punctuation ")" · Type "Point" · Punctuation "{"
+ 12 |   const label = `scaled ${by}x`;
+    | Keyword "const" · Variable "label" · Operator "=" · String "`scaled " · Punctuation "${" · Variable "by" · Punctuation "}" · String "x`" · Punctuation ";"
+ 13 |   return { x: p.x * by, y: label };
+    | Keyword "return" · Punctuation "{" · Property "x" · Variable "p" · Punctuation "." · Property "x" · Operator "*" · Variable "by" · Punctuation "," · Property "y" · Variable "label" · Punctuation "}" · Punctuation ";"
+ 14 | }
+    | Punctuation "}"
+ 15 | 
+ 16 | class Grid<T> extends Base implements Shape {
+    | Keyword "class" · Type "Grid" · Punctuation "<" · Type "T" · Punctuation ">" · Keyword "extends" · Type "Base" · Keyword "implements" · Type "Shape" · Punctuation "{"
+ 17 |   private cells: Array<T> = [];
+    | Keyword "private" · Property "cells" · Type "Array" · Punctuation "<" · Type "T" · Punctuation ">" · Operator "=" · Punctuation "[" · Punctuation "]" · Punctuation ";"
+ 18 |   async load(path: string) {
+    | Keyword "async" · Function "load" · Punctuation "(" · Variable "path" · Type "string" · Punctuation ")" · Punctuation "{"
+ 19 |     await readFile(path, /\.json$/);
+    | Keyword "await" · Function "readFile" · Punctuation "(" · Variable "path" · Punctuation "," · Operator "/" · String "\\.json$" · Operator "/" · Punctuation ")" · Punctuation ";"
+ 20 |   }
+    | Punctuation "}"
+ 21 | }
+    | Punctuation "}"

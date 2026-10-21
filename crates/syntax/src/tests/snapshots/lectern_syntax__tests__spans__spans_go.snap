@@ -1,0 +1,33 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | // A synthetic Go sample.
+    | Comment "// A synthetic Go sample."
+  2 | package store
+    | Keyword "package"
+  3 | 
+  4 | import "fmt"
+    | Keyword "import" · String "\"fmt\""
+  5 | 
+  6 | const maxItems = 128
+    | Keyword "const" · Variable "maxItems" · Operator "=" · Number "128"
+  7 | 
+  8 | type Store struct {
+    | Keyword "type" · Type "Store" · Keyword "struct"
+  9 | 	items map[string]int
+    | Property "items" · Keyword "map" · Type "string" · Type "int"
+ 10 | }
+ 11 | 
+ 12 | func (s *Store) Put(key string, n int) error {
+    | Keyword "func" · Variable "s" · Operator "*" · Type "Store" · Function "Put" · Variable "key" · Type "string" · Variable "n" · Type "int" · Type "error"
+ 13 | 	if len(s.items) >= maxItems {
+    | Keyword "if" · Function "len" · Variable "s" · Property "items" · Operator ">=" · Variable "maxItems"
+ 14 | 		return fmt.Errorf("full: %q\n", key)
+    | Keyword "return" · Variable "fmt" · Function "Errorf" · String "\"full: %q" · Escape "\\n" · String "\"" · Variable "key"
+ 15 | 	}
+ 16 | 	s.items[key] = n
+    | Variable "s" · Property "items" · Variable "key" · Operator "=" · Variable "n"
+ 17 | 	return nil
+    | Keyword "return" · Constant "nil"
+ 18 | }

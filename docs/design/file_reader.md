@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：已接受，尚未实现。
+状态：实现中。「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮）已实现，其余步骤尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -184,9 +184,14 @@ impl Languages {
     /// 按扩展名和少数整文件名（`Cargo.lock` → TOML，`package-lock.json` → JSON）。没有时为 None：显示纯文本。
     pub fn for_path(&self, path: &str) -> Option<&Lang>;
     pub fn get(&self, name: &str) -> Option<&Lang>;
+    pub fn iter(&self) -> impl Iterator<Item = &Lang> + '_;
 }
 
-pub struct Lang { /* name, grammar, 高亮查询, 版本, 规则族 */ }
+/// 捕获变成区间的规则（捕获名的映射、同一节点的优先规则、按行切分）改变时加一，进 `query_version`。
+pub const SPANS_VERSION: u32;
+
+/// 同一节点被几个模式捕获时取查询里的第一个还是最后一个，每种语言一条，写在查询文件头（见「与设计的差异」）。
+pub struct Lang { /* name, grammar, 高亮查询, 版本, 规则族, 优先规则 */ }
 impl Lang {
     /// 与 `code_intel` 的 `LangName` 相同的短名（"ts"、"rust"……），加上 "json"、"yaml"、"toml"、"markdown"。
     pub fn name(&self) -> &str;
@@ -211,14 +216,21 @@ pub enum TokenKind {
 /// 一个着色区间：行内起点（u32）、长度（24 位，超过时拆开）、种类（8 位），共 8 字节。
 #[derive(Clone, Copy)]
 pub struct Token(u64);
-impl Token { pub fn start(self) -> u32; pub fn len(self) -> u32; pub fn kind(self) -> TokenKind; }
+impl Token {
+    pub const MAX_LEN: u32 = (1 << 24) - 1;
+    pub fn new(start: u32, len: u32, kind: TokenKind) -> Option<Token>;   // len 为 0 或超过 MAX_LEN 时为 None
+    pub fn start(self) -> u32; pub fn len(self) -> u32; pub fn end(self) -> u32; pub fn kind(self) -> TokenKind;
+}
 
 /// 一段文本 `[start, end)` 的区间，按行存放。行以行首的字节偏移标识，不需要行号（行号在后台扫描前只是估计）。
+/// 只存有区间的行：`line_starts` 是这些行的行首（相对 `start`），区间不含行尾的 `\n`。
 pub struct WindowSpans { /* start, end, line_starts: Box<[u32]>, offsets: Box<[u32]>, tokens: Box<[Token]>, exact: bool */ }
 impl WindowSpans {
     pub fn range(&self) -> Range<u64>;
     /// `line_start` 处那一行的区间；不在这一段里时为空。
     pub fn line(&self, line_start: u64) -> &[Token];
+    /// 有区间的行，按顺序：行首（绝对偏移）和这一行的区间。
+    pub fn lines(&self) -> impl Iterator<Item = (u64, &[Token])> + '_;
     /// 起点由语法树确认（整文件、按树切的窗口链）为 true；首屏的启发式窗口为 false，之后被替换。
     pub fn exact(&self) -> bool;
     pub fn bytes(&self) -> usize;
@@ -266,6 +278,11 @@ pub mod highlight {
     /// `TimedOut`：这一片用完；`Yielded`：让路探针要求停下。两者都保留解析器的状态，下一次 `step` 从停下处继续。
     /// `Unavailable`：这个 grammar 版本已被 `health` 停用，调用方改为纯文本。
     pub enum Outcome<T> { Done(T), TimedOut, Cancelled, Yielded, Unavailable }
+
+    /// 整个文本一次解析、一次算出全部区间（`exact`），不分片、不能续做：`TimedOut`、`Yielded`、`Cancelled` 之后什么都不留。
+    /// 第一次用到时编译查询的时间不计入预算。查询编译不了时也是 `Unavailable`。第 1 步的整文件高亮；
+    /// `FullParse` 在第 2 步加入，用同一套捕获解析。
+    pub fn whole_file(lang: &Lang, text: &[u8], budget: Budget<'_>) -> Outcome<WindowSpans>;
 
     /// 窗口单独解析，只算 `visible` 的区间。首屏用，预算 8 ms（`FIRST_WINDOW_DEADLINE`），不续：超时就先画文本，
     /// 这个窗口交给档位的后续计算。
@@ -529,6 +546,7 @@ pub mod limits {
     pub const OBJECT_INLINE: u64 = 1 << 20;       // 没有人持有时，首屏路径上直接解压的上限
     pub const PREFETCH_MAX: usize = 4;
     pub const STUCK_GRACE: Duration = Duration::from_secs(1);
+    pub const STUCK_GRACE_WALL: Duration = Duration::from_secs(10);   // 读不到线程 CPU 时钟、按墙上时间计时的宽限
     pub const HISTORY_MAX: usize = 100;
     pub const FIND_MAX: usize = 10_000;
 }
@@ -995,3 +1013,27 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 保存时比较身份与 `renameat` 之间有一个很短的窗口，这期间别的进程写入的内容会被覆盖；原子替换会断开硬链接、不保留扩展属性。
 - 文件夹项目的文件在阅读时不自动刷新（`project` 不监听文件夹项目）。
 - 查找只对 ASCII 字母不区分大小写，最多 10,000 个结果。
+- 高亮查询里的 `#is-not? local` 不求值（没有 locals 查询）：JavaScript 的 `console`、`require` 等内置名，同名的局部变量也按内置名着色。
+
+## 实际验证
+
+第 1 步（`syntax` 骨架、语言表与整文件高亮），在 Linux（x86_64 容器）上运行：
+
+- `just test -p lectern-syntax`：`lang_*`、`spans_*`、`health_*` 全部通过；11 种核心语言各有一份整文件区间的 insta 快照（`crates/syntax/src/tests/snapshots/`），快照逐个看过。`just doctest` 里 `ParseGuard` 的 `compile_fail` 示例通过，`health_parse_guard_is_not_send` 在编译期检查同一点。
+- `cargo tree -e features -i tree-sitter` 里没有 `wasm`；`cargo tree --duplicates -e normal` 里没有 `tree-sitter`（只有 0.27.1 一份，四个新 grammar 没有带进别的版本）；`cargo tree -e features -i tree-sitter-md` 里没有 `parser`。
+- `python3 scripts/check_architecture.py` 通过（含在 `just check` 里）：`syntax` 是领域层、不依赖 GPUI。`just check`、`just deny`、`just test`（不依赖 GPUI 的全部 crate）、`just doctest` 通过。
+- `rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。
+- 没有在 macOS 上运行：`health` 在 macOS 上读 `ThreadCpuClock` 的 `thread_info` 实现，只由 macOS CI 覆盖（`health_global_on_real_clocks`）；本步没有 bench 条目（「验收」第 1 步没有列出，`syntax/*` 的基准从第 2 步开始）。
+
+## 与设计的差异
+
+第 1 步：
+
+- 整文件高亮是一次调用的 `highlight::whole_file`（「接口」已补上）：不分片、不能续做。设计里的 `FullParse`（分片、续做）列在第 2 步，它复用同一套捕获解析；`whole_file` 是否保留为公开项由第 2 步决定。`Budget`、`Outcome` 按设计实现，`Outcome::done()` 是取出结果的便捷方法。
+- 捕获怎样变成区间，设计没有写，按以下规则实现：同一节点（同一字节范围）被几个模式捕获时，取查询里的第一个还是最后一个由语言决定，写在每个查询文件头。上游查询两种写法都有：Rust、Go、JSON 按 tree-sitter-highlight 的规则（第一个优先）写，其余按「最后一个优先」写，逐个改顺序会让查询与上游难以对照，所以保留上游顺序、按语言记下规则。嵌套的捕获内层优先；`@none`、`@embedded`（模板字符串里的 `${…}`）让所在范围不着色。捕获名到 `TokenKind` 的映射在 `lang::classify`（`constructor` 归 `Type`，`variable.builtin` 归 `Keyword`，`boolean` 归 `Constant`，`label` 归 `Other`，Markdown 的 `text.*` 归 `Heading`、`String`、`Link`），`lang_captures_known` 检查核心查询里没有不认识的捕获名。这些规则进 `SPANS_VERSION`。
+- JavaScript 系的查询拆成 `ecmascript`（tree-sitter-javascript 的 highlights.scm，三种语言共用）、`js`（highlights-params.scm，只给 JavaScript：TypeScript 的参数包在 `required_parameter` 里，这些模式在 TS 的 grammar 上编译不了）、`jsx`、`ts`，由 `src/lang.rs` 拼接。各查询对上游的改动写在文件头：Rust 修正全大写常量正则里多余的 `'`、数字改为 `@number`、`(field_identifier) @property` 移到调用模式之后；Go 的内置函数调用移到一般调用之前；TOML 的 `(pair (bare_key) @property)` 只捕获键；Markdown 去掉 `(code_fence_content) @none`；TS 的首字母大写类型模式不再覆盖全大写常量，并补上 `type_parameters` 的尖括号。MIT 的许可声明集中在 `crates/syntax/queries/NOTICE`，各文件头写版权行并指向它。
+- `WindowSpans` 只存有区间的行，`line()` 对没有区间的行返回空（设计没有规定是否存每一行）；增加 `lines()`。`Token` 增加 `new`、`end`、`MAX_LEN`，`Languages` 增加 `iter()`，`SPANS_VERSION` 公开（「接口」已补上）。
+- `limits` 第 1 步只有 `STUCK_GRACE` 和新增的 `STUCK_GRACE_WALL`（正文里的「宽限放大到 10 s」写成常量）；其余常量随用到它们的步骤加入。
+- `health` 按（语言、grammar 版本）登记和停用：TS 和 TSX 来自同一个 grammar crate、grammar 版本相同，各自判定。每个线程第一次登记时打开 `ThreadCpuClock`、之后复用（线程局部）；检查在途项时读不到某个线程的 CPU 时钟（线程已退出）就当作它不在运行。测试经内部的 `Clocks` 换成测试时钟。
+- 依赖：第 1 步只用 `tree-sitter`、十个 grammar crate、`lectern-platform`（`ThreadCpuClock`）、`memchr`，`insta`（dev）；「依赖」表里的其余依赖随后续步骤加入。查询结果的迭代用 `tree-sitter` 再导出的 `StreamingIterator`，不直接依赖 `streaming-iterator`。
+- 扩展名与整文件名：JSON 另认 `jsonc`、`jsonl`；`Cargo.lock`、`poetry.lock`、`uv.lock`、`Pipfile` 是 TOML，`package-lock.json`、`.babelrc`、`.eslintrc` 是 JSON；扩展名先按原样找，找不到再按小写找（与 `code_intel` 相同）。规则族：JSON 为 `Json`，Markdown 为 `Markup`，其余（含 YAML、TOML）为 `Code`。

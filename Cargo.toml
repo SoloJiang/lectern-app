@@ -20,6 +20,7 @@ members = [
     "crates/review",
     "crates/git",
     "crates/code_intel",
+    "crates/syntax",
     "crates/terminal",
     "crates/usage",
     "crates/forge",
@@ -129,6 +130,15 @@ tree-sitter-rust = "=0.24.2"
 tree-sitter-java = "=0.23.5"
 tree-sitter-python = "=0.25.0"
 tree-sitter-go = "=0.25.0"
+# The highlighter's other core languages (docs/adr/0041.md), MIT; their only
+# normal dependency is tree-sitter-language. The versions are repeated in
+# crates/syntax/src/lang.rs and checked against Cargo.lock by
+# `lang_grammar_versions_match_lock`. tree-sitter-md without `parser`: that
+# feature pulls in tree-sitter 0.26; only the block grammar is used.
+tree-sitter-json = "=0.24.8"
+tree-sitter-yaml = "=0.7.2"
+tree-sitter-toml-ng = "=0.7.0"
+tree-sitter-md = { version = "=0.5.3", default-features = false }
 # Snapshot tests for domain logic (AGENTS.md). Test-only.
 insta = "1.49"
 # Test-only: temporary directories for lectern-platform's tests, and mkfifo in
