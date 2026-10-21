@@ -468,8 +468,11 @@ impl Kernel {
     pub fn set_enabled(&self, id: &str, enabled: bool);
 
     /// 退出时按依赖的相反顺序停用全部插件。撤销全部完成、kernel 线程退出后调用 `done`。
-    /// `app` 在 `applicationShouldTerminate:` 里返回 `NSTerminateLater`，`done` 被调用（或等满 2 秒）后
-    /// 再 `replyToApplicationShouldTerminate:`。等待期间主线程照常运行，需要在主线程上执行的守卫 drop 不会死锁。
+    /// 退出的顺序由 `app` 的 `Quit` Action 定（⌘Q 和应用菜单的 Quit 绑定到它，[file_reader 设计「编辑」](file_reader.md#编辑)）：
+    /// 先问离开守卫，通过后调用本方法；`done` 被调用后在后台线程上可选地 `Executor::shutdown`、`Cache::close`；
+    /// 这些合计至多 2 秒，全部完成或到时后在主线程上 `cx.quit()`。
+    /// 等待期间主线程照常运行，需要在主线程上执行的守卫 drop 不会死锁。锁定的 GPUI（gpui-pre 0.3.9）的应用代理只实现
+    /// `applicationWillTerminate:`，不能推迟退出，所以由系统发起的退出不经这个顺序（见「已知限制」）。
     pub fn shutdown(&self, done: impl FnOnce() + Send + 'static);
 
     /// 不属于任何插件的 Emitter（`app` 用），不随插件停用失效。
@@ -916,6 +919,10 @@ impl Kernel {
 - 清单用 `manifest(&self)` 返回运行时数据，进程插件以后可以用同一个类型。
 - P0 不引入插件配置：配置等到设计设置页时一起做，届时以服务的形式提供（`dyn Settings`），不改 `Plugin` trait。
 - 去掉「首次请求服务时激活」：查找时同步激活会让查找的耗时不可预测，还会在激活中途再次进入生命周期操作。需要延迟加载的插件用 `Command` 或 `Workspace` 条件。
+
+## 已知限制
+
+- 由系统发起的退出（注销、关机、Dock 菜单里的退出）不经 `app` 的 `Quit` Action：GPUI 直接退出进程，`shutdown` 不被调用，插件不按依赖的相反顺序停用，守卫在进程退出时随内存一起丢弃。缓存的写入本来就能承受中途退出（cache 设计「生命周期」）；未保存的编辑会丢失（file_reader 设计「已知限制」）。要拦住这类退出，得在 `platform` 里给应用代理加 `applicationShouldTerminate:`，涉及 GPUI 的应用代理（ADR 0016），以后另行决定。
 
 ## 未决问题
 

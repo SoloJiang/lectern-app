@@ -22,7 +22,7 @@
   - Java 的 package、import、全限定名与同名方法消歧（#18）；TS / JS 的相对路径 import、tsconfig `paths`、工作区包名与子项目之间的依赖（#19）。它们是本 crate 的后续 PR，经「解析扩展点」接入，本文只定义接口和调用时机。
   - 上下文抽屉的界面、结果的分组与呈现、「未跟着改的调用方」的判断（[#20](https://github.com/SoloJiang/lectern-app/issues/20)，`context_drawer`）；⌘K 的匹配、排序、分组与界面（#102）。本 crate 只交出数据。
   - jdtls 与 SCIP 导入（#26）：独立进程插件（[ADR 0018](../adr/0018.md)），经「语义导航的注册」接入。
-  - 语法高亮、高亮与文本的 LRU、后退前进（`file_reader`、[#10](https://github.com/SoloJiang/lectern-app/issues/10)）。高亮方与本 crate 依赖同一批 grammar crate，链接进二进制的只有一份；高亮的计算按 ADR 0034 放在领域层的库里（由 `file_reader` 的设计决定）。ADR 0033 的两类只存内存的批量工作（空闲预取的高亮、大文件的整文件高亮）和行检查点（`syntax.lines`）都属于它，不在本 crate。
+  - 语法高亮、高亮与文本的 LRU、后退前进（`file_reader`、[#10](https://github.com/SoloJiang/lectern-app/issues/10)）。高亮方与本 crate 依赖同一批 grammar crate，链接进二进制的只有一份；高亮的计算按 ADR 0034 放在领域层的非插件库 `syntax` 里（[ADR 0041](../adr/0041.md)，设计在 [file_reader 设计](file_reader.md)）。ADR 0033 的两类只存内存的批量工作（空闲预取的高亮、大文件的整文件高亮）和行检查点（`syntax.lines`）都属于它，不在本 crate。
   - 文件列表与子项目（`project`）、工作区比较（`git`）、监听（`fs_watch`）、安全读取（`platform`）、SQLite 的连接与淘汰（`cache`）。本 crate 只调用它们的接口，需要它们新增的部分列在「对其他 crate 的要求」。
   - 语言包的下载、校验和加载（`marketplace` 与 kernel 的 grammar 加载器，ADR 0018）：本 crate 只定义接收已加载 grammar 的接口 `GrammarSource`。
   - Java 的 `-sources.jar`（#26，读它要 zip 解码器，归属按 ADR 0007 决定）与文件内容的全文搜索。npm 等生态的依赖声明（按需解析与依赖层）按 [ADR 0033](../adr/0033.md) 在本 crate 里（「依赖层」）；Cargo、Go、Python 的依赖根在它们的解析扩展点实现时接入，在那之前依赖层只为 TS / JS 运行。
@@ -95,7 +95,7 @@
   由 `git` 的一个 PR 加入（`Refs #17`，「验收」第 8 步的前置条件），测试按区间切分方式不同的输入与 `Oid::for_blob` 对照。已实现；碰撞时返回 None 的原因见 [git 设计「与设计的差异」](git.md#与设计的差异)。
 - `fs_watch`：不需要新接口。
 - kernel 的 grammar 加载器（ADR 0018、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、#42）：`tree_sitter::Language` 和由它得到的 `Parser`、`Query`、`TagsConfiguration`、`Tree` 都持有动态库里的函数指针。加载器给出的每个 `LoadedGrammar` 带一个租约（`GrammarLease`，加载的模块句柄的 `Arc`）；更新、回滚、撤销时加载器只停止交出这个版本，模块的卸载（`dlclose`）推迟到它的最后一个租约 drop 之后。撤销要求的「立即停用」由不再交出新的 `LoadedGrammar`、使用方取消在途工作来满足。
-- 高亮方（`file_reader`）：依赖同一批 grammar crate、同一个 tree-sitter 版本。[#42](https://github.com/SoloJiang/lectern-app/issues/42) 指出 external scanner 不能被进度回调打断，它对 scanner 的处理（如对某个 grammar 停用）同样作用于本 crate。打开候选的一方按 `Location` 读内容：`TextOrigin::Dependency` 的位置经它的 `DepRoot` 读（`Worktree` 的根从工作区根的 `SafeRoot` 经 `open_dir` 打开，路径的各级都不是符号链接；`Cache` 的根按 ADR 0033 只取 Lectern 自己进程的环境），`byte` 有值时按它定位（ADR 0034），这些写进 `file_reader` 的设计。
+- 高亮方（`file_reader`）：依赖同一批 grammar crate、同一个 tree-sitter 版本。[#42](https://github.com/SoloJiang/lectern-app/issues/42) 指出 external scanner 不能被进度回调打断，它对 scanner 的处理（如对某个 grammar 停用）同样作用于本 crate。打开候选的一方按 `Location` 读内容：`TextOrigin::Dependency` 的位置经它的 `DepRoot` 读（`Worktree` 的根从工作区根的 `SafeRoot` 经 `open_dir` 打开，路径的各级都不是符号链接；`Cache` 的根按 ADR 0033 只取 Lectern 自己进程的环境），`byte` 有值时按它定位（ADR 0034），这些写进 `file_reader` 的设计。已写入 [file_reader 设计](file_reader.md)（「数据流与线程」「定位」）；scanner 的处理是 `syntax::health` 的卡死检测（[ADR 0041](../adr/0041.md)）：本 crate 之后的一个 PR 只在调用正在线程上运行时登记（进入 tree-sitter 或 tree-sitter-tags 之前、在调用的线程上，以这次调用的剩余预算登记），以任何结果返回（`Done`、`TimedOut`、`Cancelled`、`Parked`）时注销，`Parked` 的抽取续做时重新登记；判定按线程的 CPU 时间，停下等待的时间不算。同一个 PR 改用 `services::code_intel::DEPENDENCY_EXTENSIONS`。另外，批量循环在每个批次边界 `yield_now()`、重新入队（已实现；任务带着它的 `Parked`，停下的大项连同 `LargeTurn` 一起带走，不放下 `LargeSlot`，任务数不变，活性见 file_reader 设计「批量线程上的先后」）是空闲预取等待上限的前提，本 crate 的一个 PR 补测试把它固定下来（ADR 0041「批量线程上的先后」，[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)）。
 
 ## 接口
 
