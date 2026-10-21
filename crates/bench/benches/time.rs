@@ -58,6 +58,7 @@ const BENCHES: &[Bench] = &[
     cache::TABLES_EVICT,
     code_intel::EXTRACT_THROUGHPUT,
     code_intel::EXTRACT_1MIB,
+    code_intel::YIELD_STOP,
     code_intel::WARM_100K,
     code_intel::WARM_100K_TOUCH,
     code_intel::MAP_100K,

@@ -3,8 +3,8 @@
 //! tests and benchmarks (docs/design/code_intel.md「本 crate 的公开项」).
 
 use std::cell::RefCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tree_sitter_tags::{Error as TagsError, TagsContext};
@@ -35,6 +35,32 @@ pub struct Deadline {
     at: Instant,
     max_len: usize,
     pause: Option<PauseProbe>,
+    /// Yielding work's `yield_requested` and where a stopped extraction
+    /// keeps its state (「交互让路」).
+    yields: Option<(PauseProbe, ResumeSlot)>,
+}
+
+/// Where an extraction stopped to yield keeps its state (and finds it
+/// again): [`Resume`], or nothing for an extraction that can't be resumed.
+pub type ResumeSlot = Arc<Mutex<Option<Resume>>>;
+
+/// A core-language extraction stopped at a slice boundary to yield
+/// (`ExtractStatus::Parked`): the parser with its state, or the tree and
+/// the walk so far, and the deadline's budget left. `Send`; the source it
+/// was taken from must be passed again.
+pub struct Resume {
+    state: ResumeState,
+    /// Time left before the deadline: the deadline counts only the time the
+    /// extraction runs.
+    pub budget: Duration,
+}
+
+enum ResumeState {
+    Parsing(tree_sitter::Parser),
+    Walking {
+        tree: tree_sitter::Tree,
+        walk: walk::WalkResume,
+    },
 }
 
 impl Deadline {
@@ -60,6 +86,7 @@ impl Deadline {
             at,
             max_len,
             pause: None,
+            yields: None,
         }
     }
 
@@ -67,6 +94,17 @@ impl Deadline {
     /// `BackgroundGuard::pause_requested`); checked with the deadline.
     pub fn with_pause(mut self, pause: PauseProbe) -> Deadline {
         self.pause = Some(pause);
+        self
+    }
+
+    /// Also stop when `yields` returns true (yielding work passes
+    /// `BackgroundGuard::yield_requested`): a core language at its next
+    /// slice boundary (a parse progress check, every 1024 nodes of the
+    /// walk), keeping its state in `slot`; a language pack at the
+    /// watchdog's next check, keeping nothing. Either returns `Parked`.
+    /// An extraction started with state in `slot` goes on from there.
+    pub fn yielding(mut self, yields: PauseProbe, slot: ResumeSlot) -> Deadline {
+        self.yields = Some((yields, slot));
         self
     }
 
@@ -116,6 +154,10 @@ pub enum ExtractStatus {
     /// The grammar or its queries do not compile; the language is disabled
     /// for this run. Not written to the cache.
     Unsupported,
+    /// Stopped to yield ([`Deadline::yielding`]): the state is in the
+    /// deadline's slot (a core language), or the work was given up (a
+    /// language pack). Not written to the cache.
+    Parked,
 }
 
 impl ExtractStatus {
@@ -127,7 +169,7 @@ impl ExtractStatus {
             ExtractStatus::TimedOut => Some(1),
             ExtractStatus::TooLarge => Some(2),
             ExtractStatus::Binary => Some(3),
-            ExtractStatus::Cancelled | ExtractStatus::Unsupported => None,
+            ExtractStatus::Cancelled | ExtractStatus::Unsupported | ExtractStatus::Parked => None,
         }
     }
 }
@@ -230,6 +272,13 @@ fn extract_walking(
     deadline: &Deadline,
     cancel: &Arc<AtomicBool>,
 ) -> Extraction {
+    // A resumed extraction takes its state out of the slot; one that stops
+    // to yield puts its new state back.
+    let (yields, slot) = match &deadline.yields {
+        Some((yields, slot)) => (Some(yields.clone()), Some(slot.clone())),
+        None => (None, None),
+    };
+    let resumed = slot.as_ref().and_then(|s| lock(s).take());
     let registration =
         deadline
             .watchdog
@@ -237,19 +286,58 @@ fn extract_walking(
     if registration.slot().tripped().is_some() {
         return interrupted(&registration);
     }
-    let walked = walk::extract(
-        lang.dialect(),
-        lang.language(),
-        source,
-        registration.slot().flag(),
-    );
+    let wants_yield = || yields.as_ref().is_some_and(|y| y());
+    let park = |state: ResumeState| {
+        let budget = deadline
+            .at
+            .saturating_duration_since(deadline.watchdog.clock().now());
+        if let Some(slot) = &slot {
+            *lock(slot) = Some(Resume { state, budget });
+        }
+        Extraction::empty(ExtractStatus::Parked)
+    };
+    let flag = registration.slot().flag();
+    let (tree, walk_resume) = match resumed.map(|r| r.state) {
+        Some(ResumeState::Walking { tree, walk }) => (tree, Some(walk)),
+        resumed => {
+            let parser = match resumed {
+                Some(ResumeState::Parsing(parser)) => Some(parser),
+                _ => None,
+            };
+            let Some(parser) = walk::parser_for(lang.language(), parser) else {
+                log(format_args!("parsing {} failed", lang.name().0));
+                return Extraction::empty(ExtractStatus::Unsupported);
+            };
+            match walk::parse(parser, source, flag, &wants_yield) {
+                walk::Parse::Tree(tree) => (tree, None),
+                walk::Parse::Halted(parser) => return park(ResumeState::Parsing(parser)),
+                walk::Parse::Stopped => return interrupted(&registration),
+            }
+        }
+    };
     if registration.slot().tripped().is_some() {
         return interrupted(&registration);
     }
-    let Some(walked) = walked else {
-        log(format_args!("parsing {} failed", lang.name().0));
-        return Extraction::empty(ExtractStatus::Unsupported);
+    let walked = match walk::walk_from(
+        lang.dialect(),
+        lang.language(),
+        &tree,
+        source,
+        &|| flag.load(Ordering::Acquire) != 0,
+        &wants_yield,
+        walk_resume,
+    ) {
+        walk::WalkStep::Done(walked) => walked,
+        walk::WalkStep::Halted(walk) => return park(ResumeState::Walking { tree, walk }),
+        walk::WalkStep::Stopped if registration.slot().tripped().is_some() => {
+            return interrupted(&registration);
+        }
+        walk::WalkStep::Stopped => {
+            log(format_args!("parsing {} failed", lang.name().0));
+            return Extraction::empty(ExtractStatus::Unsupported);
+        }
     };
+    drop(tree);
     // The rules run under the same registration, and are checked once more
     // after: the deadline covers the whole extraction.
     let finished = rules::finish_with_refs(
@@ -290,10 +378,13 @@ pub(crate) fn extract_tags(
     let Some(compiled) = lang.compiled() else {
         return Extraction::empty(ExtractStatus::Unsupported);
     };
-    let registration =
-        deadline
-            .watchdog
-            .register(deadline.at, Some(cancel.clone()), deadline.pause.clone());
+    // tree-sitter-tags can't keep its state: yielding gives the work up.
+    let registration = deadline.watchdog.register_yielding(
+        deadline.at,
+        Some(cancel.clone()),
+        deadline.pause.clone(),
+        deadline.yields.as_ref().map(|(yields, _)| yields.clone()),
+    );
     // tree-sitter checks the flag only every so many parse steps and tags,
     // so a flag set before the start or near the end is checked here too.
     if registration.slot().tripped().is_some() {
@@ -357,9 +448,14 @@ pub(crate) fn extract_tags(
     }
 }
 
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn interrupted(registration: &Registration) -> Extraction {
     Extraction::empty(match registration.slot().tripped() {
         Some(Trip::Deadline) => ExtractStatus::TimedOut,
+        Some(Trip::Yielded) => ExtractStatus::Parked,
         _ => ExtractStatus::Cancelled,
     })
 }

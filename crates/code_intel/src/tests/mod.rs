@@ -27,3 +27,4 @@ mod template;
 mod view;
 mod warm;
 mod watchdog;
+mod yielding;

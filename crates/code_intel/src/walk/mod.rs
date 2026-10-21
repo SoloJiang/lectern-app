@@ -289,8 +289,10 @@ pub(crate) fn supports(dialect: Dialect, language: &Language) -> bool {
 
 thread_local! {
     /// One parser per thread for the core languages (linked in, so no
-    /// grammar lease is involved).
-    static PARSER: RefCell<Parser> = RefCell::new(Parser::new());
+    /// grammar lease is involved). Taken out while it parses; a parse
+    /// stopped to yield keeps it (`Parse::Halted`), and the thread makes a
+    /// new one.
+    static PARSER: RefCell<Option<Parser>> = const { RefCell::new(None) };
 }
 
 /// The walk's result: definitions and markers, reference names, and the
@@ -301,39 +303,115 @@ pub(crate) struct Walked {
     pub local_scopes: Vec<Range<usize>>,
 }
 
-/// Parses `source` and walks it. None once `stop` is set (the watchdog's
-/// flag: the deadline, cancellation, a pause request), checked while parsing
-/// and every [`CHECK_EVERY`] nodes of the walk; None also when the dialect
-/// has no walker.
-pub(crate) fn extract(
-    dialect: Dialect,
-    language: &Language,
+/// Whether `dialect` has a walker for `language` and parsing can start:
+/// the thread's parser (or `resumed`, a parser stopped to yield) for
+/// [`parse`].
+pub(crate) fn parser_for(language: &Language, resumed: Option<Parser>) -> Option<Parser> {
+    if let Some(parser) = resumed {
+        return Some(parser);
+    }
+    let mut parser = PARSER.with(|p| p.borrow_mut().take()).unwrap_or_default();
+    parser.set_language(language).ok()?;
+    Some(parser)
+}
+
+/// A parser done with: back to the thread for the next extraction.
+pub(crate) fn give_back(mut parser: Parser) {
+    parser.reset();
+    PARSER.with(|p| *p.borrow_mut() = Some(parser));
+}
+
+/// What one call of [`parse`] did.
+pub(crate) enum Parse {
+    Tree(Tree),
+    /// `yields` said so at a progress check: the parser keeps its state,
+    /// and the next `parse` with the same source goes on from there (the
+    /// tree is the one an uninterrupted parse gives, ADR 0034's research).
+    Halted(Parser),
+    /// `stop` was set (the deadline, cancellation, a pause): the parse is
+    /// given up.
+    Stopped,
+}
+
+/// Parses `source` with `parser` (from [`parser_for`]), checking `stop` and
+/// then `yields` at every progress callback (about every 100 parse
+/// operations).
+pub(crate) fn parse(
+    mut parser: Parser,
     source: &[u8],
     stop: &AtomicUsize,
-) -> Option<Walked> {
-    let walker = walker(dialect, language)?;
-    let tree = PARSER.with(|parser| {
-        let mut parser = parser.borrow_mut();
-        parser.set_language(language).ok()?;
+    yields: &dyn Fn() -> bool,
+) -> Parse {
+    let mut halted = false;
+    let tree = {
         let mut progress = |_: &tree_sitter::ParseState| {
             if stop.load(Ordering::Acquire) != 0 {
+                ControlFlow::Break(())
+            } else if yields() {
+                halted = true;
                 ControlFlow::Break(())
             } else {
                 ControlFlow::Continue(())
             }
         };
-        let tree = parser.parse_with_options(
+        parser.parse_with_options(
             &mut |i, _| source.get(i..).unwrap_or(&[]),
             None,
             Some(ParseOptions::new().progress_callback(&mut progress)),
-        );
-        if tree.is_none() {
-            // An interrupted parse leaves state for resuming it.
-            parser.reset();
+        )
+    };
+    match tree {
+        Some(tree) => {
+            give_back(parser);
+            Parse::Tree(tree)
         }
-        tree
-    })?;
-    walk(walker, &tree, source, &|| stop.load(Ordering::Acquire) != 0)
+        None if halted && stop.load(Ordering::Acquire) == 0 => Parse::Halted(parser),
+        None => {
+            // An interrupted parse leaves state for resuming it.
+            give_back(parser);
+            Parse::Stopped
+        }
+    }
+}
+
+/// A walk stopped at a check every [`CHECK_EVERY`] nodes to yield: where
+/// the cursor was and what was collected, without borrows of the tree or
+/// the source (positions in the source instead), so it can wait in a
+/// batch task with the tree and the source it was taken from.
+pub(crate) struct WalkResume {
+    /// The cursor's node, as `TreeCursor::descendant_index` from the root.
+    descendant: usize,
+    steps: u32,
+    tags: Vec<RawTag>,
+    refs: Vec<Range<usize>>,
+    scopes: Vec<(usize, bool, Vec<Range<usize>>)>,
+    local_scopes: Vec<Range<usize>>,
+}
+
+/// What one call of [`walk_from`] did.
+pub(crate) enum WalkStep {
+    Done(Walked),
+    /// `yields` said so at a check; go on with [`walk_from`].
+    Halted(WalkResume),
+    /// `stop` said so, or the dialect has no walker.
+    Stopped,
+}
+
+/// Walks `tree` from the start, or from where `resume` stopped, checking
+/// `stop` and then `yields` every [`CHECK_EVERY`] nodes.
+pub(crate) fn walk_from(
+    dialect: Dialect,
+    language: &Language,
+    tree: &Tree,
+    source: &[u8],
+    stop: &dyn Fn() -> bool,
+    yields: &dyn Fn() -> bool,
+    resume: Option<WalkResume>,
+) -> WalkStep {
+    match walker(dialect, language) {
+        Some(walker) => walk(walker, tree, source, stop, yields, resume),
+        None => WalkStep::Stopped,
+    }
 }
 
 /// Walks a tree parsed elsewhere (`ParsedFile`, with its own deadline and
@@ -346,7 +424,17 @@ pub(crate) fn walk_tree(
     source: &[u8],
     stop: &dyn Fn() -> bool,
 ) -> Option<Walked> {
-    walk(walker(dialect, language)?, tree, source, stop)
+    match walk(
+        walker(dialect, language)?,
+        tree,
+        source,
+        stop,
+        &|| false,
+        None,
+    ) {
+        WalkStep::Done(walked) => Some(walked),
+        WalkStep::Halted(_) | WalkStep::Stopped => None,
+    }
 }
 
 fn walk(
@@ -354,25 +442,36 @@ fn walk(
     tree: &Tree,
     source: &[u8],
     stop: &dyn Fn() -> bool,
-) -> Option<Walked> {
+    yields: &dyn Fn() -> bool,
+    resume: Option<WalkResume>,
+) -> WalkStep {
     let mut walk = Walk {
         walker,
         stop,
+        yields,
         cx: Ctx::new(source),
         stack: Vec::with_capacity(64),
         steps: 0,
     };
     let mut cursor = tree.walk();
-    if !walk.enter(&cursor) {
-        return None;
+    match resume {
+        // The resumed node was entered and visited before the stop.
+        Some(resume) => walk.restore(resume, &mut cursor),
+        None => match walk.enter(&cursor) {
+            Check::Go => {}
+            Check::Stop => return WalkStep::Stopped,
+            Check::Yield => return WalkStep::Halted(walk.save(&cursor)),
+        },
     }
     // Only named nodes are entered: tokens are leaves, and the walkers read
     // the few they need (`export`, `private`) from their parent.
     'outer: loop {
         if cursor.goto_first_child() {
             if to_named(&mut cursor) {
-                if !walk.enter(&cursor) {
-                    return None;
+                match walk.enter(&cursor) {
+                    Check::Go => {}
+                    Check::Stop => return WalkStep::Stopped,
+                    Check::Yield => return WalkStep::Halted(walk.save(&cursor)),
                 }
                 continue;
             }
@@ -381,8 +480,10 @@ fn walk(
         loop {
             walk.leave();
             if cursor.goto_next_sibling() && to_named(&mut cursor) {
-                if !walk.enter(&cursor) {
-                    return None;
+                match walk.enter(&cursor) {
+                    Check::Go => {}
+                    Check::Stop => return WalkStep::Stopped,
+                    Check::Yield => return WalkStep::Halted(walk.save(&cursor)),
                 }
                 continue 'outer;
             }
@@ -392,7 +493,7 @@ fn walk(
         }
     }
     if stop() {
-        return None;
+        return WalkStep::Stopped;
     }
     let cx = walk.cx;
     let mut refs: Vec<Box<str>> = cx
@@ -402,11 +503,18 @@ fn walk(
         .map(Box::from)
         .collect();
     refs.sort_unstable();
-    Some(Walked {
+    WalkStep::Done(Walked {
         tags: cx.tags,
         refs,
         local_scopes: cx.local_scopes,
     })
+}
+
+/// What a check of the walk says.
+enum Check {
+    Go,
+    Stop,
+    Yield,
 }
 
 /// Moves the cursor to the first named node from its position among its
@@ -425,15 +533,16 @@ fn to_named(cursor: &mut tree_sitter::TreeCursor<'_>) -> bool {
 struct Walk<'w, 's, 't> {
     walker: &'w dyn Walker,
     stop: &'w dyn Fn() -> bool,
+    yields: &'w dyn Fn() -> bool,
     cx: Ctx<'s>,
     stack: Vec<Frame<'t>>,
     steps: u32,
 }
 
-impl<'t> Walk<'_, '_, 't> {
-    /// Pushes the cursor's node and visits it when it is named; false once
-    /// the walk is to stop.
-    fn enter(&mut self, cursor: &tree_sitter::TreeCursor<'t>) -> bool {
+impl<'s, 't> Walk<'_, 's, 't> {
+    /// Pushes the cursor's node and visits it when it is named; then, every
+    /// [`CHECK_EVERY`] nodes, whether to stop or yield.
+    fn enter(&mut self, cursor: &tree_sitter::TreeCursor<'t>) -> Check {
         let node = cursor.node();
         self.stack.push(Frame {
             node,
@@ -442,7 +551,78 @@ impl<'t> Walk<'_, '_, 't> {
         });
         self.walker.visit(&mut self.cx, &self.stack);
         self.steps += 1;
-        !(self.steps.is_multiple_of(CHECK_EVERY) && (self.stop)())
+        if !self.steps.is_multiple_of(CHECK_EVERY) {
+            Check::Go
+        } else if (self.stop)() {
+            Check::Stop
+        } else if (self.yields)() {
+            Check::Yield
+        } else {
+            Check::Go
+        }
+    }
+
+    /// The walk's state at the cursor's node, just entered.
+    fn save(self, cursor: &tree_sitter::TreeCursor<'t>) -> WalkResume {
+        let base = self.cx.src.as_ptr() as usize;
+        let range = |s: &[u8]| {
+            let start = s.as_ptr() as usize - base;
+            start..start + s.len()
+        };
+        WalkResume {
+            descendant: cursor.descendant_index(),
+            steps: self.steps,
+            refs: self.cx.refs.iter().map(|r| range(r)).collect(),
+            scopes: self
+                .cx
+                .scopes
+                .iter()
+                .map(|s| {
+                    (
+                        s.depth,
+                        s.inherits,
+                        s.defs.iter().map(|d| range(d)).collect(),
+                    )
+                })
+                .collect(),
+            tags: self.cx.tags,
+            local_scopes: self.cx.local_scopes,
+        }
+    }
+
+    /// Back to the state `save` took: the cursor on that node, the stack of
+    /// its ancestors rebuilt from the tree.
+    fn restore(&mut self, resume: WalkResume, cursor: &mut tree_sitter::TreeCursor<'t>) {
+        cursor.goto_descendant(resume.descendant);
+        let mut up = cursor.clone();
+        let mut frames = Vec::new();
+        loop {
+            let node = up.node();
+            frames.push(Frame {
+                node,
+                kind: node.kind_id(),
+                field: up.field_id().map_or(0, |f| f.get()),
+            });
+            if !up.goto_parent() {
+                break;
+            }
+        }
+        frames.reverse();
+        self.stack = frames;
+        self.steps = resume.steps;
+        let src: &'s [u8] = self.cx.src;
+        self.cx.tags = resume.tags;
+        self.cx.local_scopes = resume.local_scopes;
+        self.cx.refs = resume.refs.into_iter().map(|r| &src[r]).collect();
+        self.cx.scopes = resume
+            .scopes
+            .into_iter()
+            .map(|(depth, inherits, defs)| Scope {
+                depth,
+                inherits,
+                defs: defs.into_iter().map(|r| &src[r]).collect(),
+            })
+            .collect();
     }
 
     /// Pops the last node, and the scopes it opened.

@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层）已实现，见「实际验证」「与设计的差异」；第 5、6、8、9 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -1802,7 +1802,7 @@ pub(crate) struct DepMap {
 
 ### 交互让路
 
-[ADR 0033](../adr/0033.md)「交互时让路」，kernel 的接口见 [kernel 设计「后台工作」](kernel.md#后台工作)（`PluginHandle::background_yielding`、`BackgroundGuard::proceed_item`、`yield_requested`、`Grant`、`SLOT_MAX_BYTES`）。状态：已设计，尚未实现（「验收」第 7 步）。开关由 `app` 在离开交互静止时打开，本 crate 不判断空闲、不读输入状态，开关默认关闭。
+[ADR 0033](../adr/0033.md)「交互时让路」，kernel 的接口见 [kernel 设计「后台工作」](kernel.md#后台工作)（`PluginHandle::background_yielding`、`BackgroundGuard::proceed_item`、`yield_requested`、`Grant`、`SLOT_MAX_BYTES`）。状态：已实现（「验收」第 7 步，第 4、5 层；依赖层随第 9 步接入同一套机制，窗口链随第 8 步，见「与设计的差异」第 7 步）。开关由 `app` 在离开交互静止时打开，本 crate 不判断空闲、不读输入状态，开关默认关闭。
 
 - 守卫：每个批量任务任何时候只持有一个守卫，每个批次边界都检查它，所以 kernel 按守卫记的「已停下」覆盖这个任务，暂停时后台状态能到「全部已暂停」（`yield_pause_reaches_all_paused`）。要做的是窗口链或第 3 层时持有不让路的守卫（`background()`），是第 4 层、依赖层、第 5 层时持有让路的守卫（`background_yielding()`）；下一批的种类变了时先 drop 手里的守卫、再取另一种（drop 让路的守卫同时离开 kernel 的时段队列、交还保留给它的令牌）。换守卫只在批次边界发生，两次之间这个任务没有守卫、也不做工作。
 - 批次边界：持有不让路的守卫时 `guard.proceed().await`（只看暂停），照常跑一批；持有让路的守卫时 `guard.proceed_item(下一项的字节数).await`：
@@ -1817,14 +1817,22 @@ pub(crate) struct DepMap {
 - 不变的：第 1、2 层和查询（`Interactive`、`Background` 任务）不受开关影响；窗口链和第 3 层不让路；`pause_requested()` 的语义、后台状态和代数、bench 的采样都按 kernel 的规则，与开关无关。
 
 ```rust
-// index/batch.rs（内部）
-struct BatchTask { guard: TaskGuard, parked: Option<Parked> }
+// index/batch.rs（内部）。批量任务的循环里有 `guard: TaskGuard` 和 `parked: Option<Parked>`。
 /// 任何时候只有一个守卫（kernel 按守卫记暂停）。
-enum TaskGuard { Near(BackgroundGuard), Far(BackgroundGuard), None }
+enum TaskGuard { Near(Arc<BackgroundGuard>), Far(Arc<BackgroundGuard>), None }
 enum Outcome { Done(Done, usize), Paused, Skip, Parked(Parked) }
-/// 停在分片边界的一项：解析器（未 reset）、输入、已完成的部分语法树或遍历的栈、剩余的截止预算。`Send`，不跨任务共享。
-struct Parked { item: Item, flag: Arc<AtomicBool>, state: ResumeState, budget: Duration }
-enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree: Tree, input: Arc<[u8]>, walk: walk::Resume } }
+/// 让路的任务从一个边界带到下一个边界的一项：已读出、已登记在途；等它的时段（开关打开时超过 256 KiB），
+/// 或停在分片边界、抽取的状态在 `resume` 里。`Send`，每个任务至多一份。
+struct Parked { project: Arc<Project>, session: u64, t: usize, item: Item, flag: Arc<AtomicBool>, key: BlobId,
+                bytes: Vec<u8>, resume: ResumeSlot, large: Option<LargeTurn> }
+
+// extract.rs（公开）：抽取经 `Deadline::yielding` 让路，状态存在 deadline 带的槽里。
+impl Deadline { pub fn yielding(self, yields: PauseProbe, slot: ResumeSlot) -> Deadline; }
+pub type ResumeSlot = Arc<Mutex<Option<Resume>>>;
+/// 解析器（未 reset）或语法树加遍历的状态，以及剩余的截止预算；输入由调用方再传一次。
+pub struct Resume { state: ResumeState, pub budget: Duration }
+enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume } }
+// `ExtractStatus::Parked`：停下（核心语言，状态在槽里）或放弃（语言包，槽是空的），不写入。
 ```
 
 ### 大文件
@@ -2385,6 +2393,14 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 去掉 `query` / `names` 里的 `demand` 之后，`account_timed_out_units_are_not_indexed` 的活性检查失败（查询的限时搜索命中 `TimedOut` 的单元、排进访问标记，没有唤醒批量任务）；补上批量任务之外的写入之后的唤醒后通过。
 - 基准（`just bench --measure code_intel/`，负载 1–3）：`warm_100k` 73.1 ms、`warm_100k_touch` 248 ms，`map_100k` 7.68 ms、`map_100k_bytes` 2.65 MB，`batch_peak` 33.3 MB，`disk_100k` 316 MB（9 万个单元、80 次淘汰），`extract_throughput` 4.96 MB/s；`goto_indexed` 1.18 ms / 1.27 ms，`goto_uncached` 1.28 ms / 2.46 ms，`goto_popular` 4.52 ms / 36.7 ms，`goto_full` 1.4 ms / 最大 389 ms，`goto_cold_parse` 23.5 ms，`named_50k` 10.7 ms，`references_100k/all` 816 ms，`references_full/all` 1.09 s，`names_100k` 489 ms，`names_100k_bytes` 4.66 MB，`parse_cache_bytes` 11.6 MB；全部在预算内，合计 477.6 s。
 
+第 7 步（交互让路），基于包含 [#139](https://github.com/SoloJiang/lectern-app/pull/139) 的 main（0238432），同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+
+- `just check`、`just test`（整个工作区 1475 个测试通过，跳过 7 个）、`just doctest`、`just deny` 全部通过。本 crate 291 个测试，新增 10 个 `yield_*`（设计「测试」点名的 `yield_tier3_does_not_yield`、`yield_tier3_work_does_not_wait_for_a_slot`、`yield_resumed_extraction_is_identical`、`yield_parked_time_is_not_deadline_time`、`yield_pause_reaches_all_paused`、`yield_large_parked_item_gives_way_to_tier3`，以及语言包放弃后重做、超过 256 KiB 的文件等开关关闭、暂停丢掉停下的状态、开关切换 100 次每个文件只写一次）。本 crate `--stress-count 30` 全部通过（862 s，负载约 2–3）；之后 `yield_resumed_extraction_is_identical` 加了 tsx 和接近 1 MiB 的一组，`yield_*` 再 `--stress-count 30` 通过（238 s）。
+- `yield_resumed_extraction_is_identical`：每种核心语言（ts、tsx、js、rust、java、python、go）两组。120 KiB 的文件在保活时段里做，每 40 次让路检查让时段到期一次，解析中、遍历中都停过；1 MiB 减 4 KiB 的文件（后台上限 `BACKGROUND_MAX_LEN` 之内）每 200 次检查打开一次开关，关闭后在批次里接着做。两组写入的单元都与一次做完的 `extract` 相同。
+- 变异检查：改掉剩余预算的计算（继续时不按剩余的预算重新登记）时，`yield_parked_time_is_not_deadline_time`、`yield_resumed_extraction_is_identical`、`yield_switch_toggled_100_times_writes_each_file_once` 失败；去掉第 3 层要 `LargeSlot` 时放弃本任务停下的大项的一支时，`yield_large_parked_item_gives_way_to_tier3` 卡住（单个批量任务等自己手里的 `LargeSlot`）。都已还原。
+- 基准（`just bench --measure code_intel/yield_stop code_intel/warm_100k code_intel/extract_throughput code_intel/batch_peak`，负载约 1.5–2.4）：`yield_stop` 30 个样本，中位数 26.9 µs、p95 40.5 µs、最大 58.9 µs（≤ 10 ms；运行器标为 noisy，最大值约为中位数的两倍）；`batch_peak` 33.3 MB（≤ 40 MB，与前几轮相同）；`warm_100k` 75.9 ms、`warm_100k_touch` 318 ms（前几轮 73–86 ms、248–284 ms）；`extract_throughput` 4.02 MB/s（≥ 4，前几轮 3.8–5.0 MB/s）。这几项都在开关关闭时运行，批次照旧，每个边界多一次 `proceed_item`。
+- 没有验证的：保活时段下批量层合计 ≤ 一个核的 10%（「性能」）没有基准，由 kernel 的时段长度和间隔（50 ms / 500 ms）加上「一个时段只做一项」保证；macOS 上的数值看 macOS CI。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2612,3 +2628,15 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 删除 `PowerSource`、`AlwaysOnAc`、`testing::FakePower`、`CodeIntelDeps::power` 和 `IndexDeps::power`、`Indexer::power_changed`、`Indexer::demand` 与 `State::demand`、`wide_allowed`、`coverage` 里的 `Deferred`、`battery_*` 测试，以及 `services` 的 `TierState::Deferred`。第 3–5 层总是可以运行；`Indexer::subscribe` 只订阅语言包。上文第 3 步、第 4 步各条里提到这些名字的地方是当时的记录，不再是现状。
 - `query` 和 `names` 不再调用 `demand`，所以它们不再唤醒批量任务。原来这次唤醒掩盖了一个漏掉的唤醒：批量任务之外的写入（第 1、2 层，查询的限时搜索现场抽取）命中了要标记访问的单元，或者写入引起淘汰、让遍历重新开始，都会产生第 3–5 层的工作，却没有唤醒（`account_timed_out_units_are_not_indexed` 在去掉 `demand` 之后由 `Harness` 的活性检查发现）。现在这样的写入之后唤醒一次（「调度、批次与取消」的活性一条已补）。自审又找到一处同类的漏洞：第 1、2 层的存在检查命中时不经写入、直接排进访问标记，也没有唤醒；温热的项目里打开一个文件，`set_focus` 唤醒的批量任务可能先跑完、停下，第 1 层才命中，标记一直等到下一次唤醒，配额已满时常常先被淘汰丢弃，打开过的文件因此更早被淘汰、重新抽取。现在排进访问标记只经 `Batch::queue_touches`，它返回必须交给 `Inner::wake` 的 `Wake`；写入之后的唤醒也是一个 `Wake`（`warm_focus_hit_wakes_the_batch_for_its_touch`，去掉第 1 层这一处唤醒时失败）。
 - 测试里在索引背后删除单元的两处（`derived_eviction_rechecks_and_reextracts_only_what_went`、`view_*` 的 `Evict`）原来靠之后的 `demand` 唤醒，现在直接调用 `kick_batch`。已知限制：同一分库里其他命名空间的写入按分库预算淘汰本 crate 的单元时，第 3–5 层要等下一次唤醒（打开、焦点、文件事件、本 crate 的写入）才重新遍历；原来每次查询都会唤醒一次。查询的结果不受影响：淘汰代数变了，提示不再匹配，查询按「完整性的核算」搜索或计为未搜。
+
+第 7 步（交互让路）：
+
+- 只接入第 4、5 层。依赖层还没有实现，随第 9 步用同一套机制（让路的守卫、`proceed_item`、`Parked`）；窗口链随第 8 步，届时与第 3 层一样持有不让路的守卫、按不让路的请求方取 `LargeSlot`。
+- 停下的状态经抽取的 deadline 传递：`Deadline::yielding(probe, slot)` 带让路的探针和 `ResumeSlot`，抽取停下时把 `Resume`（未 reset 的 `Parser`，或语法树加遍历的位置和已有的输出，以及剩余预算）放进槽里、返回 `ExtractStatus::Parked`，批量任务把它包成 `Outcome::Parked`。所以测试换上的抽取钩子（`Indexer::set_extractor`）照样经过停下和继续。查询不用让路的 deadline，`query::definition`、`search` 里的 `Parked` 按 `Cancelled` 处理。遍历停下时保存的是游标的后代序号和各层上下文对应的源码范围，继续时用 `goto_descendant` 回到原处、从祖先重建栈。
+- 遍历之后按规则整理单元的一步（`rules::finish_with_refs`）不分片，在同一次登记下做完；它只读遍历的输出，比解析和遍历短得多。
+- 语言包的放弃经看门狗：tree-sitter-tags 没有分片边界，看门狗每次检查（`CHECK_INTERVAL`，10 ms）也看让路的探针，为 true 时置位停止、记为新的 `Trip::Yielded`，抽取返回 `Parked`、槽是空的，批量任务把这一项放回这一层的小队列。所以语言包至多晚一次检查停下；`yield_stop` 只测核心语言。
+- 批次的顺序：原来先做三层的「恢复后先做」小队列，再按层遍历；现在第 3 层的小队列和遍历在第 4、5 层的小队列之前（`plan` 先看要不要不让路的守卫），否则第 4 层放回的项会让第 3 层的工作排在让路的守卫后面。热启动之后标记访问（`touch_pending`）算作让路的工作，持有让路的守卫做。
+- 下一项在 `proceed_item` 之前读出（要知道字节数），连同登记在途一起放在 `Parked` 里。超过 256 KiB 的一项在开关打开时一直等，它所在的层后面的项也跟着等，直到开关关闭；不让路的工作和暂停不受影响。暂停时 kernel 唤醒等待许可的 future，它看到 `pause_requested()` 就丢掉停下的状态、放回这一项，再按暂停等在边界上。
+- `LargeSlot` 改为记下不让路的请求数（`wanted`），不让路的请求方等待之前唤醒批量任务的唤醒列表；持有它的停下的任务在边界上看到有请求就放弃这一项、交还。本任务自己停下的大项挡着本任务要做的第 3 层大文件时，直接放弃自己的那一项。一个任务停下、另一个任务的第 3 层在批量线程上等 `LargeSlot`，依赖批量任务数不超过 executor 的批量线程数（`default_batch_tasks()` 与线程数相同），停下的任务总有线程可以运行、交还 `LargeSlot`。
+- `code_intel/yield_stop` 直接调用 `extract`，让路的探针读一个由测量线程置位的标志，不经过 kernel 的开关：从置位到抽取返回 `Parked`、状态在槽里。kernel 从开关到 `yield_requested()` 的时间由 kernel 的测试负责。
+- 测试：`yield_resumed_extraction_is_identical` 每种语言用 120 KiB（在时段里停下再继续）和接近 1 MiB（开关打开时停下、关闭后继续）两组，见「实际验证」；`yield_large_parked_item_gives_way_to_tier3` 用第 3 层抽取大文件时停下的那一项已经放回小队列来确认两棵大树不同时在内存里，不读活跃字节；窗口链的部分随第 8 步。测试用的 `Inner::yield_hook`（只在 `cfg(test)` 下）在每次让路检查时运行，用来在抽取进行中推进时段的时钟或打开开关。

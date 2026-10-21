@@ -359,8 +359,7 @@ impl Batch {
         Wake(())
     }
 
-    /// Hits are queued (`Inner::runnable`, tests).
-    #[cfg(test)]
+    /// Hits are queued (`Inner::plan`).
     pub fn has_touches(&self) -> bool {
         !self.touches.is_empty()
     }

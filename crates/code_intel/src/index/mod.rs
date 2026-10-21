@@ -152,6 +152,9 @@ pub(crate) struct BatchRun {
     pub running: usize,
     /// Work may have arrived since a running task last looked.
     kicked: bool,
+    /// Tasks waiting at a yielding boundary: woken by every kick, so tier
+    /// 3 work never waits for a keepalive slot (「交互让路」).
+    pub(crate) waiters: Vec<std::task::Waker>,
     /// The most tasks running at once (tests).
     #[cfg(test)]
     pub peak: usize,
@@ -182,7 +185,7 @@ pub(crate) struct Inner {
     rounds: Mutex<Rounds>,
     pub extract: Mutex<ExtractFn>,
     /// One batch task at a time extracts a large file.
-    pub(crate) large: batch::LargeSlot,
+    pub(crate) large: Arc<batch::LargeSlot>,
     pub stats: Stats,
     next_session: AtomicUsize,
     /// The queries of this activation (`crate::query`).
@@ -234,11 +237,20 @@ pub(crate) struct Inner {
     /// (tests: the batch tasks run, and stop, in that window).
     #[cfg(test)]
     pub before_focus_check: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Run at every yield check of a yielding extraction, before it asks
+    /// the kernel (tests: the `yield_*` tests move the kernel's clock past
+    /// the slot's deadline, or turn the switch on, there).
+    #[cfg(test)]
+    pub yield_hook: YieldHook,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
+
+/// [`Inner::yield_hook`] (tests).
+#[cfg(test)]
+pub(crate) type YieldHook = Arc<Mutex<Option<Box<dyn FnMut() + Send>>>>;
 
 /// The index of a plugin activation. Every method returns at once and may
 /// be called on any thread; the work runs on the executor.
@@ -281,7 +293,7 @@ impl Indexer {
             batch: Mutex::new(BatchRun::default()),
             rounds: Mutex::new(Rounds::default()),
             extract: Mutex::new(Arc::new(extract)),
-            large: batch::LargeSlot::default(),
+            large: Arc::default(),
             stats: Stats::default(),
             next_session: AtomicUsize::new(1),
             queries: Mutex::new(crate::query::Queries::default()),
@@ -309,6 +321,8 @@ impl Indexer {
             tables: Mutex::new(None),
             #[cfg(test)]
             before_focus_check: Mutex::new(None),
+            #[cfg(test)]
+            yield_hook: Arc::default(),
         });
         Indexer { inner }
     }
