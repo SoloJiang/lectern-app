@@ -18,7 +18,7 @@
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
   - 内置转换、OID 计算、stat 比较本身、按路径缓存：`git`。
-  - 写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。
+  - 写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。编辑的保存要的原子替换 `SafeRoot::replace_file` 由 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)提出，实现时在本文加一节，与 #66 共用打开逻辑。
 - 本文不覆盖，以后在本文增加小节或另写设计文档，设计合并之前不写对应的代码：
   - FSEvents 与 kqueue 后端（实现 `fs_watch` 的接口，模块 `fs_events`）：设计、实际验证和与设计的差异都在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)。
   - `open -a`、钥匙串、代码签名校验、线程 QoS（[executor 设计](executor.md)的线程启动钩子）。

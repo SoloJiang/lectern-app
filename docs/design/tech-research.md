@@ -206,6 +206,7 @@ Lectern 以阅读为主：AI 写代码，人负责浏览、审 Diff、切换会�
 | 领域 | `review` | 会话改动归因、片段对齐、「已看」状态、评论回传 |
 | 领域 | `project` | 仓库 → worktree → 子项目模型；清单解析（npm/yarn/pnpm、Maven、Gradle、Go、Cargo） |
 | 领域 | `code_intel` | tree-sitter 符号索引、Java/TS 解析、依赖源码、按需语言服务器 |
+| 领域 | `syntax` | 语法高亮：语言表与高亮查询、首屏窗口、按窗口的区间、文本存储与行检查点（[ADR 0041](../adr/0041.md)） |
 | 领域 | `git` | gix 读仓库，imara-diff 与结构化 diff |
 | 领域 | `terminal` | portable-pty + libghostty-vt，独占线程 |
 | 领域 | `agents` | Claude Code / Codex 会话解析、ACP 客户端 |
