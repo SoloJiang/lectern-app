@@ -251,12 +251,15 @@ fn run_bench<'a>(
     if retry {
         match attempt(options, args.mode, bench, fixtures) {
             Ok(results) => {
-                let mut again: BTreeMap<String, Value> =
-                    results.into_iter().map(|m| (m.id, m.value)).collect();
+                let mut again: BTreeMap<String, (Value, Option<String>)> = results
+                    .into_iter()
+                    .map(|m| (m.id, (m.value, m.note)))
+                    .collect();
                 for entry in entries.iter_mut().filter(|e| e.status == Status::Over) {
                     match again.remove(&entry.id) {
-                        Some(value) => {
+                        Some((value, note)) => {
                             entry.attempts.push(value);
+                            entry.note = note;
                             judge(entry, args.mode);
                         }
                         None => {
@@ -335,6 +338,7 @@ fn collect<'a>(
             budget,
             status: Status::Error,
             reason: None,
+            note: measured.note,
             attempts: vec![measured.value],
         });
     }

@@ -49,6 +49,8 @@ pub(crate) struct Entry<'a> {
     pub budget: &'a Budget,
     pub status: Status,
     pub reason: Option<String>,
+    /// The last attempt's note (`Measured::note`).
+    pub note: Option<String>,
     /// First attempt, and the retry when the first was over budget.
     pub attempts: Vec<Value>,
 }
@@ -60,6 +62,7 @@ impl<'a> Entry<'a> {
             budget,
             status,
             reason,
+            note: None,
             attempts: Vec::new(),
         }
     }
@@ -186,6 +189,9 @@ fn entry_json(entry: &Entry<'_>) -> Json {
     out.insert("status".into(), json!(entry.status.name()));
     if let Some(reason) = &entry.reason {
         out.insert("reason".into(), json!(reason));
+    }
+    if let Some(note) = &entry.note {
+        out.insert("note".into(), json!(note));
     }
     out.insert("budget".into(), json!(entry.budget.describe()));
     out.insert("source".into(), json!(entry.budget.source));

@@ -1,6 +1,6 @@
 # bench 设计
 
-状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2、4、5 步尚未实现（见「验收」）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。
+状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2、4、5 步尚未实现（见「验收」）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。
 
 对应 issue [#7](https://github.com/SoloJiang/lectern-app/issues/7)；安装包体积检查 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 复用本 crate 的运行器和预算表。`bench` 测量[性能预算](tech-research.md#性能预算)、[ADR 0017](../adr/0017.md)、[ADR 0018](../adr/0018.md) 和各 crate 设计文档「性能」一节里的每一项，打印实测值与预算，在 Apple 芯片的 macOS 上超标即以非 0 退出码让 CI 失败。
 
@@ -64,6 +64,8 @@ pub struct Bench {
 pub struct Measured {
     pub id: String,          // "project/resolve_package/hit"
     pub value: Value,
+    /// 报告和注释里写在值旁边的说明，如被时间盒截断的轮次的诊断（`with_note` 设置）。
+    pub note: Option<String>,
 }
 
 pub enum Value {
@@ -440,7 +442,7 @@ crates/bench/
 - `report-package.json` 是可选的：不存在时，合并工具自己为 `Package` 的每条预算加一条 `skipped`（原因「未打包」），不算缺失，所以普通的 `just bench` 不需要打包。打包流程（[#38](https://github.com/SoloJiang/lectern-app/issues/38) 的 macOS 任务）在构建 `.app` 与 `.dmg` 之后运行 `lectern-bench-report package --app <路径> --dmg <路径> target/lectern-bench`，再运行 `lectern-bench-report merge --require package target/lectern-bench`；带 `--require package` 时缺少这份报告按出错处理。
 - `lsp/*/resident` 按 `report-process.json` 记录的语言服务器列表（这次运行里 `Child { kind: LanguageServer }` 报告过的 ID）展开，规则与下面的插件列表相同；没有语言服务器运行时列表为空，`lsp/*/resident` 本身出现一次，状态是 `skipped`（原因「没有运行的语言服务器」）、`planned` 或 `filtered`。
 - 带 `*` 的预算先展开再检查：`report-process.json` 记录这次运行的插件列表（`app/idle_empty` 的 `Plugins` 应答，不含 `bench-probe`），合并工具把 `plugin/*/activate` 展开成列表里每个插件的 `plugin/<id>/activate`（已有具体条目的插件用具体条目），每个展开后的 ID 恰好出现一次。插件列表为空时（Linux、`app` 尚未接入、进程级基准被过滤或跳过），带 `*` 的条目本身出现一次，状态是 `planned`、`skipped` 或 `filtered`；插件列表不为空时，带 `*` 的条目本身不应出现。进程级目标自己的对应检查用同一套展开规则。
-- 合并成 `target/lectern-bench/report.json`；设置了 `GITHUB_STEP_SUMMARY` 时追加一张 Markdown 表。在 GitHub Actions 里（`GITHUB_ACTIONS=true`）另为每条 `over` / `error` 的结果和每条报告级错误输出一条 `::error` 注释（每个步骤最多 10 条，超出的合成最后一条），不下载任务日志也能从 check run 的注释看到是哪条预算没过。同一环境下，状态为 `record` 的结果输出为 `::notice` 注释，按 ID 的第一段分组，每组一条：标题是 `<组> record`（如 `git record`），正文每行一条结果 `<ID>: <实测值>`。GitHub 每个步骤对每一级注释（error、warning、notice）各只保留 10 条，所以组数超过 10 时，第 10 条合并剩下的所有组，标题列出这些组名，正文照样逐行列出，不丢结果。CI 容器里取不到任务日志、产物和步骤摘要，只能经 API 读 check run 的注释，`git/changes_clean_100k/stat_all` 这类只记录的分项靠这些 notice 读出。冒烟模式的结果状态是 `smoke`，不输出 notice。
+- 合并成 `target/lectern-bench/report.json`；设置了 `GITHUB_STEP_SUMMARY` 时追加一张 Markdown 表。在 GitHub Actions 里（`GITHUB_ACTIONS=true`）另为每条 `over` / `error` 的结果和每条报告级错误输出一条 `::error` 注释（每个步骤最多 10 条，超出的合成最后一条），不下载任务日志也能从 check run 的注释看到是哪条预算没过。同一环境下，状态为 `record` 的结果输出为 `::notice` 注释，按 ID 的第一段分组，每组一条：标题是 `<组> record`（如 `git record`），正文每行一条结果 `<ID>: <实测值>`，结果带 `note` 时接在后面（`<ID>: <实测值>; <说明>`）；`::error` 注释同样在原因之后接上 `note`。GitHub 每个步骤对每一级注释（error、warning、notice）各只保留 10 条，所以组数超过 10 时，第 10 条合并剩下的所有组，标题列出这些组名，正文照样逐行列出，不丢结果。CI 容器里取不到任务日志、产物和步骤摘要，只能经 API 读 check run 的注释，`git/changes_clean_100k/stat_all` 这类只记录的分项靠这些 notice 读出。冒烟模式的结果状态是 `smoke`，不输出 notice。
 - 每份报告另有 `benches`：每个运行过的基准一项 `{id, seconds, attempts}`，`seconds` 是这个基准全部尝试的墙钟时间，从建临时目录到删除，夹具生成和重跑都算在内（[ADR 0036](../adr/0036.md)）。合并后的 `report.json` 给每项加上 `target`，按耗时从长到短排序；文本表和步骤摘要之后列出总数、合计耗时和最慢的 10 个。在 GitHub Actions 里这份列表是第一条 notice（标题 `slowest benchmarks`），`record` 的分组 notice 共用剩下的 9 条，超出的照样合进最后一条。
 - 退出码按合并后的结果计算，规则与单个目标相同（0 / 1 / 2），`just bench` 以它为最终结果。
 
@@ -465,6 +467,8 @@ crates/bench/
   ]
 }
 ```
+
+结果的 `note`（`Measured::note`，最后一次尝试的）存在时写在结果对象里，没有时省略。
 
 状态取以下之一：`ok`、`over`、`record`（只记录）、`planned`、`filtered`、`smoke`、`skipped`（附原因，如「只在 macOS 运行」「sudo 不可用」）、`error`（附原因）。
 
@@ -630,7 +634,8 @@ crates/bench/
 | `code_intel/named_50k`、`code_intel/named_50k/done`、`code_intel/named_50k/candidates`、`code_intel/named_50k/unsearched` | 只记录（`Named` 查共享的 10 万文件虚拟仓库里约 4.5 万个文件都定义的名字 `id`：从 `query` 到第一批，第一批必须到达且有候选；到 `Done` 的时间，`Done` 时的候选数和未搜的文件数。其余的查找要用 1 s 时间盒的大半，慢的机器上结果是 `Partial`，只记录、不算失败） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/search_stop` | 最大值 ≤ 1.02 s（6000 个未入索引、每个都命中的文件，从 `query` 到最后一批的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/references_100k/all`、`code_intel/references_100k/first` | 中位数 ≤ 2 s / ≤ 200 ms（10 万个已入索引的文件里 300 个用到这个名字：到最后一批 / 到第一批带引用的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
-| `code_intel/references_full/all`、`code_intel/references_full/first` | 中位数 ≤ 2 s / ≤ 200 ms（同上，命名空间满额；每次都是 `Complete`：查引用有自己的 1.9 s 时间盒） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/references_full/all`、`code_intel/references_full/first` | 中位数 ≤ 2 s / ≤ 200 ms（同上，命名空间满额；每轮都要 `Complete`，查引用有自己的 1.9 s 时间盒；被时间盒截断的一轮是两项都不合格的样本，不是错误，见「时间盒截断的轮次」，[ADR 0043](../adr/0043.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/references_full/partial_rounds`、`code_intel/references_full/outside` | 只记录（被时间盒截断的轮数，含预热；一轮留在范围外的最多文件数；有截断时带最后一轮的诊断，[ADR 0043](../adr/0043.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/names_100k`、`code_intel/names_100k_bytes` | 中位数 ≤ 1 s / ≤ 8 MB（10 万文件的合成抽取结果，约 32 万个名字；名字表的构建与它的活跃字节；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/reread_crlf_1000` | 只记录（`git` 的 `TestRepo` 上 1 万个跟踪文件、`core.autocrlf = true`，1000 个文件进入重新读集合，到覆盖部分装上；整批的 `canonical_oids`） | [code_intel](code_intel.md#性能) | `code_intel` 第 6 步 |
 | `code_intel/yield_stop` | 最大值 ≤ 10 ms（1 MiB 的 TypeScript 在解析中途打开让路开关，到这次抽取停在分片边界；[ADR 0033](../adr/0033.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 7 步 |
@@ -684,6 +689,16 @@ crates/bench/
 - 页缓存：进程内基准测的是热缓存（预热之后）；冷文件缓存只在 `app/cold_start_purged` 里测量。
 
 判定用的机器是 CI 的 `macos-15` runner（Apple M1 虚拟机）。它与实体 M 系列 Mac 的差距由第 4 步的基线测出，见「未决问题」。
+
+### 时间盒截断的轮次
+
+预算含完整性、查询又有时间盒的基准（现在只有 `code_intel/references_full`），每一轮按 `lectern_bench::rounds` 判定（[ADR 0043](../adr/0043.md)）：
+
+- `Complete` 的一轮：样本是实测的时间（`/first` 到第一批带引用的事件，`/all` 到最后一批）。
+- 被时间盒截断的一轮（`Verdict::Cut`）：两个 ID 的样本都记为这一轮的耗时加一个时间盒（`Round::charge`，≥ 3.8 s），超过两条预算；预热轮同样不报错，只计入记录项。中位数照常判定，11 个样本里截断的超过 5 轮时两项都超标，超标重跑一次的规则不变。
+- 截断的依据只来自查询的公开结果和 `diagnose`：`unsearched` 为 0、`outside` 大于 0、从查询到最后一批不短于时间盒（`query::time_box`）、存储里当前版本的单元数不少于夹具写入的（模板的单元加上定义所在文件和 300 个调用方）、淘汰次数为 0。任何一条不成立或不知道，这一轮仍是错误，消息带上 `diagnose` 的输出。`unsearched` 大于 0、没有 `Done`、没有第一批、引用少于调用方数也仍是错误。
+- 截断的轮数和一轮留在范围外的最多文件数是只记录的 `…/partial_rounds`、`…/outside`；有截断时这两项和两条判定项都带 `note`（截断的轮数、最后一轮的 `outside` 和诊断），CI 的 notice 和 error 注释里看得到。
+- 只在命名空间满额时适用（`references_full`，或手动设置 `CODE_INTEL_BENCH_FULL` 的 `references_100k`）：没满时不核对存储，时间盒不会产生 `outside`。`goto_full` 的 `/done` 判定最大值，按「每一轮」判定，不用这条规则；其余要求 `Complete` 的跳转基准离时间盒很远，不完整说明夹具或查询坏了（ADR 0043「决策」）。
 
 ## `just bench` 与 CI
 
@@ -922,6 +937,14 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 
 - `git/compare_100k/retained_bytes` 和 `git/changes_count/per_path_bytes` 改为生效：前者由 `git/compare_100k` 一并产出（丢掉改动集之后的存活字节减去打开 `Worktree` 之后的），后者由 `git/changes_count` 产出（`total_bytes` 的每个样本除以改动路径数）。加入只记录的 `git/refresh_one_100k`、`git/canonical_oid_100k` 和 `git/canonical_oid_100k/batch_100`（`time` 目标，共享的大仓库，路径不改动，保持只读）。`just test -p lectern-bench` 70 个测试通过。
 - `just bench --measure git/`：`retained_bytes` 64 B（< 1 MB），`per_path_bytes` 980 B（≤ 1 KB），`git/refresh_one_100k` 32.5 ms，`git/canonical_oid_100k` 21.7 ms、`…/batch_100` 22.2 ms。数字和取舍见 [git 设计「实际验证」](git.md#实际验证)。
+
+时间盒截断的轮次（[ADR 0043](../adr/0043.md)，`Refs #17`），基于 main b9e0fb8，同一类 Linux 虚拟机（4 核）：
+
+- 原因：macOS CI 上 `code_intel/references_full` 间歇报 `not complete: Done(Partial { unsearched: 0, outside: … })`（ADR 0043「背景」）。在查询里加临时计时复现：无负载时每轮 1.08–1.27 s（`ci_ref` 一轮 0.85–1.02 s，核算的遍历 0.23–0.31 s，52 301 个提示 108 条语句，0 缺失、0 次淘汰）；4 个忙循环占满 4 核时第 11 轮 1.917 s 结束，范围外 7 497 个提示没核对，`Partial { unsearched: 0, outside: 7430 }`。临时计时没有提交。
+- 新的测试：`rounds_complete_rounds_keep_their_times`、`rounds_a_time_boxed_round_is_charged_and_recorded`、`rounds_other_incomplete_rounds_are_errors`（`unsearched`、时间盒之前结束、单元缺失或不知道、有淘汰或不知道、没有留下文件，各自仍是错误）、`rounds_the_median_fails_once_more_than_half_are_cut`（按预算表里的两条预算：11 个样本里 5 轮截断通过、6 轮超标）、`rounds_cuts_give_their_record_results`、`runner_notes_go_into_the_report`（重跑时取后一次的说明）、`report_merge_notes_reach_the_annotations`。`just check` 通过，`just test -p lectern-bench` 77 个通过（跳过 6 个），`just test -p lectern-code-intel` 348 个通过。
+- `just bench --measure code_intel/references_full`，无负载：`/all` 1.19 s、`/first` 10.2 ms，`partial_rounds` 0、`outside` 0。
+- 同样的命令，4 个忙循环：第一次没有轮次被截断（`/all` 1.55 s、`/first` 12.4 ms）；第二次 5 轮被截断，不报错，作为 3.85 s 左右的样本计入（样本最大值 3.85 s），中位数 `/all` 1.93 s、`/first` 24.3 ms，仍在预算内；`partial_rounds` 5、`outside` 33 179。`GITHUB_ACTIONS=true` 合并时 `code_intel record` 的 notice 带上说明：「5 rounds cut by the time box, the last with 33179 outside; done after 1.942528946s of a 1.9s time box; Some(90301) units stored, Some(0) evictions」。
+- 没有验证的：macOS 上截断的频率，由之后的 CI 运行的 notice 给出。
 
 ## 与设计的差异
 
