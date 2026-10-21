@@ -1,5 +1,5 @@
 //! The crate's limits (docs/design/file_reader.md「`syntax` 的公开项」
-//! `limits`). Later steps add the text, page and LRU limits here.
+//! `limits`). Later steps add the prefetch and history limits here.
 
 use std::time::Duration;
 
@@ -32,6 +32,38 @@ pub const SLOW_WINDOW: Duration = Duration::from_millis(128);
 /// than this (under 64 KiB/s) is pathological even on a busy machine; a
 /// window starved further keeps its highlighting rather than losing it.
 pub const SLOW_WINDOW_WALL: Duration = Duration::from_secs(1);
+
+/// 16 MiB: a file up to this size is read whole after the first screen and
+/// becomes a [`crate::text::Text`] (tier B); a larger one is read by pages
+/// (tier C, [`crate::text::Pages`]).
+pub const TIER_B_MAX: u64 = 16 << 20;
+
+/// A page of tier C: 64 KiB, aligned.
+pub const PAGE: u64 = 64 << 10;
+
+/// The pages one tier C document keeps in memory.
+pub const PAGE_LRU: u64 = 8 << 20;
+
+/// The highlight and text LRU of the process (ADR 0030, ADR 0035): filled
+/// only by reading.
+pub const LRU: u64 = 8 << 20;
+
+/// A line checkpoint every 64 KiB ([`crate::text::LineCheckpoints`]).
+pub const CHECKPOINT_STRIDE: u64 = 64 << 10;
+
+/// Content under 1 MiB gets no line checkpoints: reading it whole is the
+/// first screen's one read anyway.
+pub const CHECKPOINT_MIN: u64 = 1 << 20;
+
+/// The largest object database blob taken out whole.
+pub const OBJECT_MAX: u64 = 16 << 20;
+
+/// An object database blob nobody holds is decompressed on the first
+/// screen's path up to this size (ADR 0042).
+pub const OBJECT_INLINE: u64 = 1 << 20;
+
+/// The most matches one find returns.
+pub const FIND_MAX: usize = 10_000;
 
 /// A window of the chain ([`crate::highlight::ChainWindow`]): about 64 KiB,
 /// its tree 2–5 MiB.

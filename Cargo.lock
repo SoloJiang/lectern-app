@@ -4419,8 +4419,15 @@ name = "lectern-syntax"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "lectern-cache",
+ "lectern-executor",
+ "lectern-fs-watch",
+ "lectern-git",
+ "lectern-kernel",
  "lectern-platform",
+ "lectern-services",
  "memchr",
+ "tempfile",
  "tree-sitter",
  "tree-sitter-go",
  "tree-sitter-java",
@@ -4432,6 +4439,7 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
+ "unicode-width",
 ]
 
 [[package]]

@@ -6,6 +6,71 @@
 //! the same arguments give the same bytes.
 
 use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
+
+use lectern_kernel::{
+    Activation, Active, Context, Kernel, Manifest, Plugin, PluginError, PluginHandle, PluginSet,
+};
+
+use crate::util::lock;
+
+/// A kernel with one plugin whose handle the engine starts with
+/// (`Engine::start`). Dropping it shuts the kernel down.
+pub struct TestHost {
+    kernel: Arc<Kernel>,
+    pub handle: PluginHandle,
+}
+
+const HOST: &str = "syntax-test-host";
+
+impl TestHost {
+    pub fn kernel(&self) -> Arc<Kernel> {
+        self.kernel.clone()
+    }
+}
+
+impl Drop for TestHost {
+    fn drop(&mut self) {
+        let (done, wait) = std::sync::mpsc::channel();
+        self.kernel.shutdown(move || {
+            let _ = done.send(());
+        });
+        let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
+    }
+}
+
+struct HostPlugin(Arc<Mutex<Option<PluginHandle>>>);
+
+struct HostActive(Arc<Mutex<Option<PluginHandle>>>);
+
+impl Active for HostActive {
+    fn started(&mut self, handle: PluginHandle) {
+        *lock(&self.0) = Some(handle);
+    }
+}
+
+impl Plugin for HostPlugin {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            provides: Vec::new(),
+            requires: Vec::new(),
+            activation: vec![Activation::AfterFirstFrame],
+        }
+    }
+
+    fn activate(&self, _ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        Ok(Box::new(HostActive(self.0.clone())))
+    }
+}
+
+/// Starts the host kernel and activates its plugin.
+pub fn host() -> TestHost {
+    let slot = Arc::new(Mutex::new(None));
+    let kernel = Kernel::start(PluginSet::new().with(HOST, HostPlugin(slot.clone())));
+    kernel.barrier();
+    let handle = lock(&slot).clone().expect("started got a handle");
+    TestHost { kernel, handle }
+}
 
 /// About `len` bytes of TypeScript (at least `len`, at most one unit more),
 /// unit numbers starting at `seed`.

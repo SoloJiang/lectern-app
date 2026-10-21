@@ -1,0 +1,1134 @@
+//! A document's tasks (docs/design/file_reader.md「数据流与线程」):
+//!
+//! - the first screen (`Interactive`): open, one `read_ranges` (or the
+//!   object content someone holds), `window::plan`, the window's parse with
+//!   the 8 ms deadline;
+//! - the full read (`Background`): `read_all` up to 16 MiB into a `Text`, or
+//!   tier C's streaming scan in 1 MiB reads; the raw bytes' OID, the line
+//!   index, the line checkpoints into `syntax.lines`;
+//! - tier A's whole-file parse (`Interactive`, 8 ms slices);
+//! - the visible window of tiers B and C and tier C's pages (`Interactive`),
+//!   on scrolling;
+//! - find (`Interactive`, 1 MiB blocks).
+//!
+//! Every task holds a `BusyGuard` and checks its load (and the document's
+//! cancel flag) before it publishes anything.
+
+use std::ops::Range;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use lectern_executor::Priority;
+use lectern_git::{BlobHasher, GitError, Oid};
+use lectern_platform::{FileIdentity, FullRead, OpenFile, Opened, RelPath, SafeError};
+use lectern_services::code_intel::TextOrigin;
+use lectern_services::project::{BlobId, ProjectKey};
+use lectern_services::reader::{Anchor, ReadTarget};
+
+use crate::find::{BLOCK, FindQuery, FindResults, Finder, find_in};
+use crate::git_access::blob_id;
+use crate::highlight::{self, Budget, FullParse, Outcome, Source};
+use crate::lang::Rules;
+use crate::limits::{
+    CHECKPOINT_MIN, FIRST_WINDOW_DEADLINE, OBJECT_MAX, PAGE, SLICE, TIER_A_MAX, TIER_B_MAX,
+};
+use crate::lru::{Class, LruKey, LruValue, WHOLE};
+use crate::spans::WindowSpans;
+use crate::text::{IndexBuilder, LineIndex, Text};
+use crate::util::{log, yield_now};
+use crate::window::{self, Encoding, Target};
+
+use super::content::{Content, PageCache, Paged, Piece, Pieces, slice};
+use super::engine::{Doc, DocMut, EngineInner};
+use super::{
+    DocState, Editable, Highlighting, LineCount, NotEditable, ReadError, RowPos, Tier, watch,
+};
+
+/// A visible window of tiers B and C: one call, not resumable.
+const SCROLL_WINDOW_BUDGET: Duration = Duration::from_millis(50);
+/// The visible windows a document keeps (the whole file's spans aside).
+const WINDOWS_MAX: usize = 8;
+/// The streaming scan's reads.
+const SCAN_BLOCK: u64 = 1 << 20;
+/// Tier C reads the pages from 64 KiB before the top to 192 KiB after it.
+const PAGES_BEFORE: u64 = 64 << 10;
+const PAGES_AFTER: u64 = 192 << 10;
+/// The file's head the plan looks at.
+const HEAD: u64 = 8 << 10;
+/// The bytes a visible window's plan reads around the top.
+const AROUND_BEFORE: u64 = 64 << 10;
+const AROUND_AFTER: u64 = 68 << 10;
+
+/// What the first screen found.
+pub(crate) enum First {
+    Failed(DocState),
+    Shown(Box<Shown>),
+}
+
+pub(crate) struct Shown {
+    size: u64,
+    identity: Option<FileIdentity>,
+    /// What the full read continues from.
+    rest: Rest,
+    pieces: Arc<Pieces>,
+    anchor: RowPos,
+    window: Option<Arc<WindowSpans>>,
+    whole: Option<Arc<WindowSpans>>,
+    highlight: Highlighting,
+    lang: Option<&'static str>,
+    lines: u64,
+    oid: Option<BlobId>,
+    relocate: bool,
+}
+
+/// What the full read starts from.
+pub(crate) enum Rest {
+    File(OpenFile),
+    Memory(Arc<[u8]>),
+    Text(Arc<Text>),
+}
+
+/// Starts a new load: cancels the last one's tasks and reads the first
+/// screen at `at`.
+pub(crate) fn start(engine: &Arc<EngineInner>, doc: &Arc<Doc>, at: Anchor) {
+    let (load, cancel, rows) = {
+        let mut st = doc.lock();
+        st.cancel.store(true, Ordering::SeqCst);
+        st.cancel = Arc::new(AtomicBool::new(false));
+        st.load += 1;
+        st.at = at;
+        st.window_busy = false;
+        st.window_again = false;
+        st.pages_busy = false;
+        // A reload finds again in the new content.
+        st.find.waiting = st.find.query.is_some();
+        if st.state == DocState::Ready && st.editable != Editable::No(NotEditable::ReadOnlySource) {
+            st.editable = Editable::No(NotEditable::Reloading);
+        }
+        (st.load, st.cancel.clone(), st.viewport.rows)
+    };
+    let (engine2, doc2) = (engine.clone(), doc.clone());
+    let spawned = engine.spawn(Priority::Interactive, async move {
+        if doc2.stale(&doc2.lock(), load) {
+            return;
+        }
+        let first = first_screen(&engine2, &doc2.target, &doc2.root, at, rows, &cancel);
+        apply_first(&engine2, &doc2, load, first);
+    });
+    if !spawned {
+        log(format_args!(
+            "open before the engine started: the document stays empty"
+        ));
+    }
+}
+
+fn io_error(error: impl std::fmt::Display) -> DocState {
+    DocState::Unreadable(ReadError::Io(error.to_string().into()))
+}
+
+/// The first screen of `target`, on the calling thread.
+pub(crate) fn first_screen(
+    engine: &EngineInner,
+    target: &ReadTarget,
+    root: &Arc<Path>,
+    at: Anchor,
+    rows: u32,
+    cancel: &AtomicBool,
+) -> First {
+    let langs = engine.languages.clone();
+    let lang = langs.for_path(&target.path);
+    let (rest, size, identity) = match target.origin {
+        TextOrigin::Worktree => {
+            let Some(rel) = RelPath::new(target.path.as_bytes()) else {
+                return First::Failed(DocState::Unreadable(ReadError::InvalidPath));
+            };
+            let safe = match engine.root(&target.project, root) {
+                Ok(safe) => safe,
+                Err(e) => return First::Failed(io_error(e)),
+            };
+            match safe.open_file(rel) {
+                Ok(Opened::File(file)) => {
+                    let (size, identity) = (file.meta().size, file.identity());
+                    (Rest::File(file), size, Some(identity))
+                }
+                Ok(Opened::Symlink { target, .. }) => {
+                    return First::Failed(DocState::Symlink {
+                        target: target.into(),
+                    });
+                }
+                Ok(Opened::Unsupported { .. }) => return First::Failed(DocState::Unsupported),
+                Err(SafeError::NotFound) => return First::Failed(DocState::Missing),
+                Err(SafeError::PathThroughSymlink) => {
+                    return First::Failed(DocState::Unreadable(ReadError::PathThroughSymlink));
+                }
+                Err(SafeError::Io(e)) => return First::Failed(io_error(e)),
+            }
+        }
+        TextOrigin::Object => match object(engine, target) {
+            Ok(rest) => {
+                let size = match &rest {
+                    Rest::Memory(b) => b.len() as u64,
+                    Rest::Text(t) => t.len(),
+                    Rest::File(_) => 0,
+                };
+                (rest, size, None)
+            }
+            Err(state) => return First::Failed(state),
+        },
+    };
+    let candidate = target
+        .expect
+        .or_else(|| identity.and_then(|id| engine.known_oid(root, &target.path, id)));
+    let (ranges, plan_target, relocate) = match at {
+        Anchor::Start => (window::first_read(size, 0), Target::Byte(0), false),
+        Anchor::Byte { byte, .. } => {
+            let byte = byte.min(size);
+            (window::first_read(size, byte), Target::Byte(byte), false)
+        }
+        Anchor::Line { line, .. } if size <= TIER_A_MAX => (
+            window::first_read(size, 0),
+            Target::LineFrom {
+                checkpoint_byte: 0,
+                checkpoint_line: 0,
+                line,
+            },
+            false,
+        ),
+        Anchor::Line { line, .. } => {
+            let checkpoints = candidate
+                .and_then(|oid| engine.checkpoints(&target.project, &oid))
+                .filter(|c| c.len == size);
+            match checkpoints {
+                Some(c) => {
+                    let (byte, at_line) = c.before_line(line);
+                    (
+                        window::checkpoint_read(size, byte),
+                        Target::LineFrom {
+                            checkpoint_byte: byte,
+                            checkpoint_line: at_line,
+                            line,
+                        },
+                        false,
+                    )
+                }
+                None => (window::first_read(size, 0), Target::Byte(0), true),
+            }
+        }
+    };
+    let pieces = match read(&rest, &ranges) {
+        Ok(pieces) => pieces,
+        Err(e) => return First::Failed(io_error(e)),
+    };
+    let (Some(head), Some(around)) = (pieces.first(), pieces.last()) else {
+        return First::Failed(io_error("nothing read"));
+    };
+    let rules = lang.map_or(Rules::Code, |l| l.rules());
+    let head_bytes = &head.as_slice()[..(head.len as u64).min(HEAD) as usize];
+    let plan = window::plan(
+        rules,
+        head_bytes,
+        around.as_slice(),
+        around.start,
+        size,
+        plan_target,
+        rows,
+    );
+    let newlines = memchr::memchr_iter(b'\n', around.as_slice()).count();
+    let density = if around.len == 0 {
+        0.0
+    } else {
+        newlines as f64 / around.len as f64
+    };
+    let base = match plan_target {
+        Target::LineFrom { line, .. } => (plan.target_line_start, u64::from(line), true),
+        Target::Byte(_) if around.start == 0 => (0, 0, true),
+        Target::Byte(_) => (around.start, (around.start as f64 * density) as u64, false),
+    };
+    let pieces = Arc::new(normalize(Pieces {
+        size,
+        pieces,
+        base,
+        density,
+    }));
+    let lines = (size as f64 * density) as u64 + 1;
+    let anchor = RowPos {
+        line_start: plan.target_line_start,
+        sub_row: 0,
+    };
+    // Spans: the whole file's from the LRU when the content is known, else
+    // the window parsed alone.
+    let (mut window, mut whole, mut highlight) = (None, None, Highlighting::Pending);
+    match lang {
+        None => highlight = Highlighting::Plain,
+        Some(_) if plan.encoding == Encoding::NotText => highlight = Highlighting::Plain,
+        Some(lang) => {
+            let cached =
+                candidate.and_then(|oid| engine.lru.spans(&whole_key(oid, lang), Class::Opened));
+            if let Some(spans) = cached {
+                whole = Some(spans);
+                highlight = Highlighting::On;
+            } else if let Some(w) = plan.window.clone() {
+                // Compiling the query on first use is outside the budget.
+                lang.prepare();
+                let budget = Budget {
+                    budget: FIRST_WINDOW_DEADLINE,
+                    cancel,
+                    yield_probe: None,
+                };
+                match highlight::window(
+                    lang,
+                    &*pieces,
+                    w,
+                    &plan.json_pad,
+                    plan.visible.clone(),
+                    budget,
+                ) {
+                    Outcome::Done(spans) => {
+                        window = Some(Arc::new(spans));
+                        highlight = Highlighting::On;
+                    }
+                    Outcome::Unavailable => highlight = Highlighting::Plain,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let oid = match target.origin {
+        TextOrigin::Object => target.expect,
+        TextOrigin::Worktree => None,
+    };
+    First::Shown(Box::new(Shown {
+        size,
+        identity,
+        rest,
+        pieces,
+        anchor,
+        window,
+        whole,
+        highlight,
+        lang: lang.map(|l| l.static_name()),
+        lines,
+        oid,
+        relocate,
+    }))
+}
+
+/// An object target's content: registered, in the LRU, or taken out of the
+/// object database (ADR 0042).
+fn object(engine: &EngineInner, target: &ReadTarget) -> Result<Rest, DocState> {
+    let Some(oid) = target.expect else {
+        return Err(DocState::Unreadable(ReadError::ObjectMissing));
+    };
+    if let Some(bytes) = engine.shares.get(&oid) {
+        return Ok(Rest::Memory(bytes));
+    }
+    if let Some(text) = engine.lru.text(oid, Class::Opened) {
+        return Ok(Rest::Text(text));
+    }
+    let ProjectKey::Git { common_dir } = &target.project else {
+        return Err(DocState::Unreadable(ReadError::ObjectMissing));
+    };
+    match engine.git.blob(common_dir, oid, OBJECT_MAX) {
+        Ok(bytes) => Ok(Rest::Memory(bytes)),
+        Err(GitError::TooLarge { .. }) => Err(DocState::Unreadable(ReadError::ObjectTooLarge)),
+        Err(GitError::ObjectMissing(_)) => Err(DocState::Unreadable(ReadError::ObjectMissing)),
+        Err(e) => Err(io_error(e)),
+    }
+}
+
+/// The first screen's read: one `read_ranges`, or views into content in
+/// memory.
+fn read(rest: &Rest, ranges: &[Range<u64>]) -> std::io::Result<Vec<Piece>> {
+    match rest {
+        Rest::File(file) => {
+            let read = file.read_ranges(ranges)?;
+            Ok(ranges
+                .iter()
+                .zip(read.pieces)
+                .map(|(r, bytes)| Piece::owned(r.start, bytes))
+                .collect())
+        }
+        Rest::Memory(bytes) => Ok(view(bytes, ranges)),
+        Rest::Text(text) => Ok(view(text.shared_bytes(), ranges)),
+    }
+}
+
+fn view(bytes: &Arc<[u8]>, ranges: &[Range<u64>]) -> Vec<Piece> {
+    ranges
+        .iter()
+        .map(|r| {
+            let start = (r.start as usize).min(bytes.len());
+            let end = (r.end as usize).min(bytes.len());
+            Piece {
+                start: start as u64,
+                bytes: bytes.clone(),
+                offset: start,
+                len: end - start,
+            }
+        })
+        .collect()
+}
+
+/// Drops pieces another piece holds.
+fn normalize(mut pieces: Pieces) -> Pieces {
+    pieces.pieces.sort_by_key(|p| p.start);
+    let all = pieces.pieces.clone();
+    pieces.pieces.retain(|p| {
+        !all.iter().any(|q| {
+            let (pr, qr) = (p.range(), q.range());
+            qr.start <= pr.start && pr.end <= qr.end && (qr != pr) && q.len > p.len
+        })
+    });
+    pieces
+}
+
+fn whole_key(oid: BlobId, lang: &crate::Lang) -> LruKey {
+    LruKey::Spans {
+        oid,
+        lang: lang.static_name(),
+        grammar: lang.grammar_version(),
+        query: lang.query_version(),
+        start: WHOLE,
+    }
+}
+
+/// What follows a first screen.
+pub(crate) enum Next {
+    Nothing,
+    Complete(Rest),
+}
+
+/// Writes the first screen into the state.
+pub(crate) fn fill_first(st: &mut DocMut, target: &ReadTarget, first: First) -> Next {
+    match first {
+        First::Failed(state) => {
+            st.state = state;
+            st.content = Content::Nothing;
+            st.whole = None;
+            st.windows.clear();
+            st.file = None;
+            st.pages = None;
+            st.size = 0;
+            st.tier = None;
+            st.oid = None;
+            st.highlight = Highlighting::Plain;
+            if target.origin == TextOrigin::Worktree {
+                st.editable = Editable::No(NotEditable::NotLoaded);
+            }
+            st.set_anchor(RowPos::default());
+            Next::Nothing
+        }
+        First::Shown(shown) => {
+            let shown = *shown;
+            st.state = DocState::Ready;
+            st.size = shown.size;
+            st.identity = shown.identity;
+            st.lang = shown.lang;
+            st.tier = Some(if shown.size <= TIER_A_MAX {
+                Tier::A
+            } else if shown.size <= TIER_B_MAX {
+                Tier::B
+            } else {
+                Tier::C
+            });
+            st.oid = shown.oid;
+            st.highlight = shown.highlight;
+            st.lines = LineCount::Estimated(shown.lines);
+            st.widest = 0;
+            if target.origin == TextOrigin::Worktree {
+                st.editable = Editable::No(NotEditable::NotLoaded);
+            }
+            st.whole = shown.whole;
+            st.windows = shown.window.into_iter().collect();
+            st.relocate = shown.relocate;
+            st.set_anchor(shown.anchor);
+            if st.tier == Some(Tier::C) {
+                let cache = PageCache::new(shown.size);
+                st.content = Content::Paged(Arc::new(Paged {
+                    pages: cache.pages().clone(),
+                    pieces: shown.pieces,
+                    index: None,
+                }));
+                st.pages = Some(cache);
+                // Kept for the pages, the scan and finds.
+                if let Rest::File(file) = shown.rest {
+                    st.file = Some(Arc::new(file));
+                }
+                Next::Nothing
+            } else {
+                st.content = Content::Pieces(shown.pieces);
+                st.file = None;
+                st.pages = None;
+                Next::Complete(shown.rest)
+            }
+        }
+    }
+}
+
+fn apply_first(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, first: First) {
+    let mut st = doc.lock();
+    if doc.stale(&st, load) {
+        return;
+    }
+    let next = fill_first(&mut st, &doc.target, first);
+    let tier_c = st.tier == Some(Tier::C);
+    let file = st.file.clone();
+    let find = st.find.waiting;
+    doc.commit(st);
+    if find {
+        run_find(engine, doc);
+    }
+    #[cfg(test)]
+    if let Some(hook) = crate::util::lock(&engine.after_first).take() {
+        hook();
+    }
+    watch::ensure(engine, doc);
+    match next {
+        Next::Nothing => {}
+        Next::Complete(rest) => {
+            let (engine2, doc2) = (engine.clone(), doc.clone());
+            let _ = engine.spawn(Priority::Background, async move {
+                complete(&engine2, &doc2, load, rest);
+            });
+        }
+    }
+    if tier_c {
+        if let Some(file) = file {
+            let (engine2, doc2) = (engine.clone(), doc.clone());
+            let _ = engine.spawn(Priority::Background, async move {
+                scan(&engine2, &doc2, load, &file);
+            });
+        }
+        visible_work(engine, doc);
+    }
+}
+
+/// The full read of content of at most 16 MiB.
+fn complete(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, rest: Rest) {
+    if doc.stale(&doc.lock(), load) {
+        return;
+    }
+    let target = &doc.target;
+    let (text, checkpoints, oid, identity) = match rest {
+        Rest::File(file) => {
+            let (bytes, identity) = match file.read_all(TIER_B_MAX) {
+                Ok(FullRead::File { bytes, meta }) => (bytes, meta.identity()),
+                Ok(FullRead::TooLarge { .. }) => {
+                    // It grew past 16 MiB: open it again as tier C.
+                    drop(file);
+                    let at = doc.lock().at;
+                    start(engine, doc, at);
+                    return;
+                }
+                Err(e) => {
+                    let mut st = doc.lock();
+                    if !doc.stale(&st, load) {
+                        st.state = io_error(e);
+                        st.content = Content::Nothing;
+                        doc.commit(st);
+                    }
+                    return;
+                }
+            };
+            drop(file);
+            let kind = engine.hash_kind(target);
+            let oid = blob_id(&Oid::for_blob(kind, &bytes));
+            let (text, checkpoints) = Text::scanned(Arc::from(bytes));
+            engine.remember(&doc.root, &target.path, identity, oid);
+            (text, checkpoints, oid, Some(identity))
+        }
+        Rest::Memory(bytes) => {
+            let (text, checkpoints) = Text::scanned(bytes);
+            let oid = target.expect.unwrap_or(BlobId::Sha1([0; 20]));
+            (text, checkpoints, oid, None)
+        }
+        Rest::Text(text) => {
+            let oid = target.expect.unwrap_or(BlobId::Sha1([0; 20]));
+            return apply_full(engine, doc, load, text, oid, None);
+        }
+    };
+    if text.len() >= CHECKPOINT_MIN {
+        engine.store_checkpoints(&target.project, &oid, &checkpoints);
+    }
+    apply_full(engine, doc, load, Arc::new(text), oid, identity);
+}
+
+fn editable(origin: TextOrigin, len: u64, index: &LineIndex) -> Editable {
+    let facts = index.facts();
+    Editable::No(if origin == TextOrigin::Object {
+        NotEditable::ReadOnlySource
+    } else if len > TIER_A_MAX {
+        NotEditable::TooLarge
+    } else if index.has_long_line() {
+        NotEditable::LongLine
+    } else if !facts.is_text() {
+        NotEditable::NotText
+    } else if facts.mixed_line_endings() {
+        NotEditable::MixedLineEndings
+    } else {
+        return Editable::Yes;
+    })
+}
+
+/// Where the target is in content whose line index exists: by its byte,
+/// or by its line when `by_line` (the content is not the one the target's
+/// byte was taken from).
+fn target_pos(st: &DocMut, target: &ReadTarget, by_line: bool) -> RowPos {
+    let snapshot = st.snapshot(target);
+    let cols = st.viewport.cols.max(1);
+    let line_pos = |line: u32, column: u32| {
+        let Some(src) = snapshot.content.source() else {
+            return RowPos::default();
+        };
+        let Some(index) = snapshot.content.index() else {
+            return RowPos::default();
+        };
+        let start = index.line_start_in(src, u64::from(line));
+        let next = index.line_start_in(src, u64::from(line) + 1);
+        match start {
+            Some(start) => {
+                let end = next.map_or(st.size, |n| n.saturating_sub(1).max(start));
+                snapshot.pos_of_byte((start + u64::from(column)).min(end), cols)
+            }
+            None => snapshot.pos_of_byte(index.block_before(st.size).1, cols),
+        }
+    };
+    match st.at {
+        Anchor::Start => RowPos::default(),
+        Anchor::Byte { byte, .. } if !by_line => snapshot.pos_of_byte(byte, cols),
+        Anchor::Byte { line, column, .. } | Anchor::Line { line, column } => line_pos(line, column),
+    }
+}
+
+fn apply_full(
+    engine: &Arc<EngineInner>,
+    doc: &Arc<Doc>,
+    load: u64,
+    text: Arc<Text>,
+    oid: BlobId,
+    identity: Option<FileIdentity>,
+) {
+    let target = &doc.target;
+    let mut st = doc.lock();
+    if doc.stale(&st, load) {
+        return;
+    }
+    let changed = identity.is_some() && st.identity.is_some() && identity != st.identity;
+    if identity.is_some() {
+        st.identity = identity;
+    }
+    let index = text.index();
+    let len = text.len();
+    st.size = len;
+    st.oid = Some(oid);
+    st.lines = LineCount::Exact(index.line_count());
+    st.widest = index.widest_cells();
+    st.tier = Some(if len <= TIER_A_MAX && !index.has_long_line() {
+        Tier::A
+    } else {
+        Tier::B
+    });
+    st.editable = editable(target.origin, len, index);
+    st.content = Content::Text(text.clone());
+    if changed {
+        st.whole = None;
+        st.windows.clear();
+    }
+    let by_line = changed
+        || st.relocate
+        || matches!(st.at, Anchor::Byte { .. }) && target.expect.is_some_and(|e| e != oid);
+    st.relocate = false;
+    let anchor = target_pos(&st, target, by_line);
+    st.set_anchor(anchor);
+    let langs = engine.languages.clone();
+    let lang = st.lang.and_then(|name| langs.get(name));
+    if lang.is_none() || !index.facts().is_text() {
+        st.highlight = Highlighting::Plain;
+        st.whole = None;
+        st.windows.clear();
+    }
+    if len <= TIER_A_MAX {
+        engine.lru.insert(
+            LruKey::Text(oid),
+            LruValue::Text(text.clone()),
+            Class::Opened,
+        );
+    }
+    let tier_a = st.tier == Some(Tier::A);
+    let parse = tier_a && st.highlight != Highlighting::Plain && st.whole.is_none();
+    let find = st.find.waiting;
+    doc.commit(st);
+    if parse && let Some(lang) = lang {
+        if let Some(spans) = engine.lru.spans(&whole_key(oid, lang), Class::Opened) {
+            set_whole(doc, load, spans);
+        } else {
+            let (engine2, doc2, name) = (engine.clone(), doc.clone(), lang.static_name());
+            let _ = engine.spawn(Priority::Interactive, async move {
+                whole_parse(&engine2, &doc2, load, text, oid, name).await;
+            });
+        }
+    } else if !tier_a {
+        visible_work(engine, doc);
+    }
+    if find {
+        run_find(engine, doc);
+    }
+}
+
+fn set_whole(doc: &Doc, load: u64, spans: Arc<WindowSpans>) {
+    let mut st = doc.lock();
+    if doc.stale(&st, load) {
+        return;
+    }
+    st.whole = Some(spans);
+    st.windows.clear();
+    st.highlight = Highlighting::On;
+    doc.commit(st);
+}
+
+/// Tier A's whole-file parse, in 8 ms slices with a turn for other tasks
+/// between them.
+async fn whole_parse(
+    engine: &Arc<EngineInner>,
+    doc: &Arc<Doc>,
+    load: u64,
+    text: Arc<Text>,
+    oid: BlobId,
+    lang: &'static str,
+) {
+    let langs = engine.languages.clone();
+    let Some(lang) = langs.get(lang) else {
+        return;
+    };
+    let cancel = doc.lock().cancel.clone();
+    let src: Arc<dyn Source> = text;
+    let mut parse = FullParse::new(lang, src);
+    loop {
+        if doc.stale(&doc.lock(), load) {
+            return;
+        }
+        let budget = Budget {
+            budget: SLICE,
+            cancel: &cancel,
+            yield_probe: None,
+        };
+        match parse.step(budget) {
+            Outcome::Done(spans) => {
+                let spans = Arc::new(spans);
+                engine.lru.insert(
+                    whole_key(oid, lang),
+                    LruValue::Spans(spans.clone()),
+                    Class::Opened,
+                );
+                set_whole(doc, load, spans);
+                return;
+            }
+            Outcome::TimedOut | Outcome::Yielded => yield_now().await,
+            Outcome::Cancelled => return,
+            Outcome::Unavailable => {
+                let mut st = doc.lock();
+                if !doc.stale(&st, load) {
+                    st.highlight = Highlighting::Plain;
+                    st.windows.clear();
+                    doc.commit(st);
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// Tier C's streaming scan: 1 MiB reads on the same `OpenFile`, the blob
+/// hash and the line index in one pass; cancelled between reads.
+fn scan(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, file: &OpenFile) {
+    let target = &doc.target;
+    let (cancel, identity) = {
+        let st = doc.lock();
+        (st.cancel.clone(), st.identity)
+    };
+    let size = file.meta().size;
+    let kind = engine.hash_kind(target);
+    let mut hasher = BlobHasher::new(kind, size);
+    let mut builder = IndexBuilder::new();
+    let mut at = 0;
+    while at < size {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let end = (at + SCAN_BLOCK).min(size);
+        let read = match file.read_ranges(std::slice::from_ref(&(at..end))) {
+            Ok(read) => read,
+            Err(e) => {
+                log(format_args!("scan of {}: {e}", target.path));
+                return;
+            }
+        };
+        let piece = read.pieces.into_iter().next().unwrap_or_default();
+        if Some(read.meta.identity()) != identity || piece.len() as u64 != end - at {
+            // Changed while it was read: open it again.
+            let at = doc.current_line();
+            start(engine, doc, at);
+            return;
+        }
+        hasher.update(&piece);
+        builder.feed(&piece);
+        at = end;
+    }
+    let scanned = builder.finish();
+    let oid = hasher.finish().map(|o| blob_id(&o));
+    if let (Some(oid), Some(identity)) = (oid, identity) {
+        engine.store_checkpoints(&target.project, &oid, &scanned.checkpoints());
+        engine.remember(&doc.root, &target.path, identity, oid);
+    }
+    let mut st = doc.lock();
+    if doc.stale(&st, load) {
+        return;
+    }
+    let index = Arc::new(scanned.index);
+    st.oid = oid;
+    st.lines = LineCount::Exact(index.line_count());
+    st.widest = index.widest_cells();
+    st.editable = Editable::No(NotEditable::TooLarge);
+    if !index.facts().is_text() {
+        st.highlight = Highlighting::Plain;
+        st.windows.clear();
+    }
+    if let Content::Paged(paged) = &st.content {
+        st.content = Content::Paged(Arc::new(Paged {
+            pages: paged.pages.clone(),
+            pieces: paged.pieces.clone(),
+            index: Some(index),
+        }));
+    }
+    let by_line = st.relocate;
+    st.relocate = false;
+    let anchor = target_pos(&st, target, by_line);
+    st.set_anchor(anchor);
+    doc.commit(st);
+    visible_work(engine, doc);
+}
+
+/// After scrolling (or new content): tier C reads the pages around the
+/// top, tiers B and C highlight the window there.
+pub(crate) fn visible_work(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
+    let mut st = doc.lock();
+    if doc.is_closed() || st.state != DocState::Ready {
+        return;
+    }
+    let load = st.load;
+    let top = st.top.unwrap_or(st.anchor).line_start;
+    let mut pages = false;
+    if let Some(cache) = &st.pages
+        && !cache
+            .missing(top.saturating_sub(PAGES_BEFORE)..top + PAGES_AFTER)
+            .is_empty()
+        && !st.pages_busy
+    {
+        st.pages_busy = true;
+        pages = true;
+    }
+    let window = needs_window(&st, top);
+    let start_window = window && !st.window_busy && !st.pages_busy;
+    if window && st.window_busy {
+        st.window_again = true;
+    }
+    if start_window {
+        st.window_busy = true;
+    }
+    drop(st);
+    if pages {
+        let (engine2, doc2) = (engine.clone(), doc.clone());
+        let _ = engine.spawn(Priority::Interactive, async move {
+            read_pages(&engine2, &doc2, load);
+        });
+    }
+    if start_window {
+        let (engine2, doc2) = (engine.clone(), doc.clone());
+        let _ = engine.spawn(Priority::Interactive, async move {
+            visible_window(&engine2, &doc2, load);
+        });
+    }
+}
+
+fn needs_window(st: &DocMut, top: u64) -> bool {
+    if !matches!(st.tier, Some(Tier::B | Tier::C))
+        || st.lang.is_none()
+        || st.highlight == Highlighting::Plain
+        || st.whole.is_some()
+    {
+        return false;
+    }
+    // The visible rows, by the average line length.
+    let average = st.size / st.lines.get().max(1);
+    let reach = (top + (u64::from(st.viewport.rows.max(1)) * average).min(64 << 10)).min(st.size);
+    !st.windows
+        .iter()
+        .any(|w| w.range().start <= top && w.range().end >= reach)
+}
+
+/// Tier C: the pages around the top, read in one `read_ranges`.
+fn read_pages(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
+    loop {
+        let (file, wanted, identity, top) = {
+            let mut st = doc.lock();
+            if doc.stale(&st, load) {
+                return;
+            }
+            let top = st.top.unwrap_or(st.anchor).line_start;
+            let range = top.saturating_sub(PAGES_BEFORE)..top + PAGES_AFTER;
+            let wanted = st
+                .pages
+                .as_ref()
+                .map(|c| c.missing(range))
+                .unwrap_or_default();
+            if wanted.is_empty() || st.file.is_none() {
+                st.pages_busy = false;
+                drop(st);
+                visible_work(engine, doc);
+                return;
+            }
+            (st.file.clone(), wanted, st.identity, top)
+        };
+        let Some(file) = file else { return };
+        // Consecutive pages make one range; at most 1 MiB in all.
+        let mut ranges: Vec<Range<u64>> = Vec::new();
+        for &page in wanted.iter().take(16) {
+            let (start, end) = (page * PAGE, (page + 1) * PAGE);
+            if let Some(last) = ranges.last_mut().filter(|l| l.end == start) {
+                last.end = end;
+            } else if ranges.len() == lectern_platform::MAX_RANGES {
+                break;
+            } else {
+                ranges.push(start..end);
+            }
+        }
+        let read = match file.read_ranges(&ranges) {
+            Ok(read) => read,
+            Err(e) => {
+                log(format_args!("pages of {}: {e}", doc.target.path));
+                doc.lock().pages_busy = false;
+                return;
+            }
+        };
+        if Some(read.meta.identity()) != identity {
+            doc.lock().pages_busy = false;
+            let at = doc.current_line();
+            start(engine, doc, at);
+            return;
+        }
+        let mut got = Vec::new();
+        for (range, bytes) in ranges.iter().zip(read.pieces) {
+            for (i, page) in bytes.chunks(PAGE as usize).enumerate() {
+                got.push((range.start / PAGE + i as u64, Arc::<[u8]>::from(page)));
+            }
+        }
+        let mut st = doc.lock();
+        if doc.stale(&st, load) {
+            return;
+        }
+        if let Some(cache) = st.pages.as_mut() {
+            cache.add(got);
+            cache.touch(top.saturating_sub(PAGES_BEFORE)..top + PAGES_AFTER);
+            let pages = cache.pages().clone();
+            if let Content::Paged(paged) = &st.content {
+                st.content = Content::Paged(Arc::new(Paged {
+                    pages,
+                    pieces: paged.pieces.clone(),
+                    index: paged.index.clone(),
+                }));
+            }
+        }
+        doc.commit(st);
+    }
+}
+
+/// Tiers B and C: the window at the top, parsed alone like the first
+/// screen's (the exact window chain comes with the batch work).
+fn visible_window(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
+    loop {
+        let (content, top, size, rows, lang, cancel) = {
+            let st = doc.lock();
+            if doc.stale(&st, load) {
+                return;
+            }
+            (
+                st.content.clone(),
+                st.top.unwrap_or(st.anchor).line_start,
+                st.size,
+                st.viewport.rows,
+                st.lang,
+                st.cancel.clone(),
+            )
+        };
+        let langs = engine.languages.clone();
+        let spans = lang
+            .and_then(|name| langs.get(name))
+            .and_then(|lang| window_at(lang, &content, top, size, rows, &cancel));
+        let mut st = doc.lock();
+        if doc.stale(&st, load) {
+            return;
+        }
+        if let Some(spans) = spans {
+            st.windows.insert(0, Arc::new(spans));
+            st.windows.truncate(WINDOWS_MAX);
+            st.highlight = Highlighting::On;
+        }
+        if st.window_again {
+            st.window_again = false;
+            doc.commit(st);
+            continue;
+        }
+        st.window_busy = false;
+        doc.commit(st);
+        return;
+    }
+}
+
+fn window_at(
+    lang: &crate::Lang,
+    content: &Content,
+    top: u64,
+    size: u64,
+    rows: u32,
+    cancel: &AtomicBool,
+) -> Option<WindowSpans> {
+    let src = content.source()?;
+    let head = slice(src, 0..HEAD.min(size))?;
+    let around_start = top.saturating_sub(AROUND_BEFORE);
+    let around = slice(src, around_start..(top + AROUND_AFTER).min(size))?;
+    let plan = window::plan(
+        lang.rules(),
+        &head,
+        &around,
+        around_start,
+        size,
+        Target::Byte(top),
+        // Two more screens below, so scrolling a little needs no new window.
+        rows.saturating_mul(3),
+    );
+    let w = plan.window.clone()?;
+    if plan.encoding == Encoding::NotText {
+        return None;
+    }
+    lang.prepare();
+    let budget = Budget {
+        budget: SCROLL_WINDOW_BUDGET,
+        cancel,
+        yield_probe: None,
+    };
+    highlight::window(lang, src, w, &plan.json_pad, plan.visible, budget).done()
+}
+
+/// A new query (or none: clear): cancels the last one.
+pub(crate) fn find(engine: &Arc<EngineInner>, doc: &Arc<Doc>, query: Option<FindQuery>) {
+    let mut st = doc.lock();
+    st.find.cancel.store(true, Ordering::SeqCst);
+    st.find.cancel = Arc::new(AtomicBool::new(false));
+    st.find.generation += 1;
+    st.find.query = query;
+    st.find.results = None;
+    st.find.waiting = st.find.query.is_some();
+    doc.commit(st);
+    run_find(engine, doc);
+}
+
+fn run_find(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
+    let generation = {
+        let st = doc.lock();
+        let ready = st.find.query.is_some()
+            && match &st.content {
+                Content::Text(_) => true,
+                Content::Paged(_) => st.file.is_some(),
+                _ => false,
+            };
+        if !ready {
+            return;
+        }
+        st.find.generation
+    };
+    let doc2 = doc.clone();
+    let _ = engine.spawn(Priority::Interactive, async move {
+        find_task(&doc2, generation);
+    });
+}
+
+fn find_task(doc: &Doc, generation: u64) {
+    let (cancel, query, content, file, size) = {
+        let mut st = doc.lock();
+        if st.find.generation != generation {
+            return;
+        }
+        let Some(query) = st.find.query.clone() else {
+            return;
+        };
+        st.find.waiting = false;
+        (
+            st.find.cancel.clone(),
+            query,
+            st.content.clone(),
+            st.file.clone(),
+            st.size,
+        )
+    };
+    let publish = |results: FindResults| {
+        let mut st = doc.lock();
+        if st.find.generation != generation || doc.is_closed() {
+            return false;
+        }
+        st.find.results = Some(Arc::new(results));
+        doc.commit(st);
+        true
+    };
+    let stopped = || cancel.load(Ordering::SeqCst);
+    let results = match (&content, file) {
+        (Content::Text(text), _) => find_in(text.as_bytes(), &query.text, |partial| {
+            stopped() || !publish(partial.clone())
+        }),
+        (Content::Paged(_), Some(file)) => find_file(&file, size, &query.text, |partial| {
+            stopped() || !publish(partial.clone())
+        }),
+        _ => return,
+    };
+    if let Some(results) = results {
+        publish(results);
+    }
+}
+
+/// Find over a file read in 1 MiB blocks (tier C).
+fn find_file(
+    file: &OpenFile,
+    size: u64,
+    query: &str,
+    mut stop: impl FnMut(&FindResults) -> bool,
+) -> Option<FindResults> {
+    let Some(mut finder) = Finder::new(query) else {
+        return Some(FindResults {
+            done: true,
+            ..FindResults::default()
+        });
+    };
+    let mut at = 0u64;
+    while at < size {
+        let end = (at + BLOCK as u64).min(size);
+        let read = file.read_ranges(std::slice::from_ref(&(at..end))).ok()?;
+        let block = read.pieces.into_iter().next().unwrap_or_default();
+        let limit = if end >= size {
+            size
+        } else {
+            end - finder.overlap() as u64
+        };
+        if finder.feed(&block, at, limit) {
+            break;
+        }
+        if limit <= at {
+            break;
+        }
+        at = limit;
+        if at < size && stop(&finder.results(false)) {
+            return None;
+        }
+    }
+    Some(finder.results(true))
+}

@@ -349,6 +349,11 @@ impl Lang {
         self.compiled().is_some()
     }
 
+    /// [`Lang::name`], for keys that outlive the borrow of the table.
+    pub(crate) fn static_name(&self) -> &'static str {
+        self.spec.name
+    }
+
     pub(crate) fn language(&self) -> &tree_sitter::Language {
         &self.language
     }

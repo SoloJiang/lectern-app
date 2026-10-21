@@ -3,9 +3,16 @@
 mod consistency;
 mod deadline;
 mod degrade;
+mod doc;
+mod find;
 mod health;
 mod lang;
+mod lines;
+mod lru;
+mod object;
+mod rig;
 mod spans;
+mod text;
 mod window;
 
 use std::sync::atomic::AtomicBool;

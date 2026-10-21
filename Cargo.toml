@@ -119,6 +119,9 @@ streaming-iterator = "0.1"
 # NFC (docs/design/code_intel.md「依赖」). Both already in Cargo.lock.
 memchr = "2.8"
 unicode-normalization = "0.1.26"
+# lectern-syntax: long lines are folded by character cells
+# (docs/design/file_reader.md「依赖」). Already in Cargo.lock; MIT OR Apache-2.0.
+unicode-width = "0.2"
 # First-release grammars (docs/design/code_intel.md「未决问题」1, default (a)):
 # the newest release of each whose ABI tree-sitter 0.27.1 loads, MIT. Shared
 # with the highlighter (file_reader); the versions are repeated in
