@@ -3,9 +3,10 @@
 tree-sitter 符号索引（tags → SQLite，增量更新）、Java / TS 解析、跨子项目导航、依赖源码跳转。
 
 - 层：领域层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "code-intel"（`CodeIntelPlugin`），提供 `dyn CodeIntel`、依赖 `dyn Projects`。只依赖 kernel 层（`kernel`、`services`）和非插件的库 crate（`executor`、`cache`、`git`、`fs_watch`、`platform`）；`project` 是插件，只经 `services::project` 往来。只有 `app` 和 tool 层依赖本 crate，消费方（抽屉、⌘K）只依赖 `services::code_intel`。不得直接或间接依赖 GPUI（架构规则 2）。
-- 设计文档：[code_intel 设计](../../docs/design/code_intel.md)（语法索引，#17）。
+- 设计文档：[code_intel 设计](../../docs/design/code_intel.md)（语法索引，#17）；ADR 0033、0034 带来的依赖层、交互让路、大文件和批量核对在设计的「依赖层」「交互让路」「大文件」「规范内容 OID 的批量核对」里，已设计、尚未实现（「验收」第 6–9 步）。
+- 依赖根的读取（ADR 0033）只经 `deps::Roots`：工作区里的根经 `SafeRoot::open_dir` 打开，路径不离开包目录，链接只落在同一 worktree 已发现的依赖根里（ADR 0040），只读允许的扩展名；新代码不得另开依赖目录的 `SafeRoot`，`deps_*` 测试逐条检查越界的情形。
 - issue：[#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#18](https://github.com/SoloJiang/lectern-app/issues/18)、[#19](https://github.com/SoloJiang/lectern-app/issues/19)、[#26](https://github.com/SoloJiang/lectern-app/issues/26)
-- ADR：[0007](../../docs/adr/0007.md)、[0018](../../docs/adr/0018.md)、[0025](../../docs/adr/0025.md)、[0029](../../docs/adr/0029.md)、[0030](../../docs/adr/0030.md)、[0031](../../docs/adr/0031.md)、[0032](../../docs/adr/0032.md)（建索引不区分电源：本 crate 不读电源状态）、[0039](../../docs/adr/0039.md)（基准夹具）
+- ADR：[0007](../../docs/adr/0007.md)、[0018](../../docs/adr/0018.md)、[0025](../../docs/adr/0025.md)、[0029](../../docs/adr/0029.md)、[0030](../../docs/adr/0030.md)、[0031](../../docs/adr/0031.md)、[0032](../../docs/adr/0032.md)（建索引不区分电源：本 crate 不读电源状态）、[0033](../../docs/adr/0033.md)（依赖层、交互让路）、[0034](../../docs/adr/0034.md)（大文件）、[0037](../../docs/adr/0037.md)、[0039](../../docs/adr/0039.md)（基准夹具）、[0040](../../docs/adr/0040.md)（依赖根之间的链接）
 
 ## 边界
 
@@ -21,7 +22,7 @@ cargo check -p lectern-code-intel     # 只改本 crate 时最快的反馈
 just test -p lectern-code-intel
 ```
 
-- 测试在 `src/tests/`，按前缀分文件（`lang_*`、`extract_*`、`deadline_*`、`site_*`、`forms_*`、`scopes_*`、`store_*`、`map_*`、`overlay_*`、`derived_*`、`schedule_*`、`grammar_*`（`grammar_changes.rs`）、`incremental_*`、`warm_*`，第 4 步的 `goto_*`、`read_verify_*`、`search_*`、`refs_*`、`cut_*`、`view_*`、`account_*`、`names_*`、`escalate_*`、`head_dirty_*`、`prefetch_*`、`focus_*`、`plugin_*`、`watchdog_*`，基准夹具的 `template_*`）；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
+- 测试在 `src/tests/`，按前缀分文件（`lang_*`、`extract_*`、`deadline_*`、`site_*`、`forms_*`、`scopes_*`、`store_*`、`map_*`、`overlay_*`、`derived_*`、`schedule_*`、`grammar_*`（`grammar_changes.rs`）、`incremental_*`、`warm_*`，第 4 步的 `goto_*`、`read_verify_*`、`search_*`、`refs_*`、`cut_*`、`view_*`、`account_*`、`names_*`、`escalate_*`、`head_dirty_*`、`prefetch_*`、`focus_*`、`plugin_*`、`watchdog_*`，基准夹具的 `template_*`，设计「验收」第 6–9 步的 `location_byte_*`、`canonical_batch_*`、`yield_*`、`window_*`、`goto_large_*`、`deps_*`）；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
 - 建索引（`src/index/`）的测试用 `src/tests/support.rs` 的 `Harness`：`testing::host()` 的 kernel 给出 `PluginHandle`，`Executor::manual()`，`testing::FakeGit`（git 元数据在内存里，worktree 文件是临时目录里的真实文件，记录每次调用），`testing::FakeProjects`、`FakeGrammars`，fs_watch 的 `FakeBackend` 与手动监听器，临时目录里的 cache，`ManualClock` 上的看门狗。抽取经 `Indexer::set_extractor` 换成计数和可以插入动作的钩子；`Stats` 的计数（基础映射重建、工作区比较、重新读、游标重建、抽取、存在检查）是 `derived_*` 的计数钩子。要在一次抽取进行中改变状态的测试，在钩子里动作，或者用 `std::thread::scope` 在另一个线程上跑 executor。生产的 git 适配（`LecternGit`）由 `overlay_lectern_git_answers_like_the_fake` 用 `lectern_git::testing::TestRepo` 检查；`FakeGit` 的比较结果与它不一致的地方（如目录条目）会掩盖核对任务的问题，新增一种工作区情况时在 `overlay_lectern_git_and_the_fake_list_directories_alike` 里两边各构造一次、比较结果。
 - 工作区文件只经 `SafeRoot` 读取：`rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果（设计「验收」第 3 步）。
 - tags 和 locals 查询在 `queries/`，文件头写明上游版本、commit 和 Lectern 的改动；改查询、升级 grammar 或 tree-sitter 时，抽取快照（`src/tests/snapshots/`）的变化逐个看过，版本常量由 `lang_grammar_versions_match_lock` 对照 Cargo.lock。

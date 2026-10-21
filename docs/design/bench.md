@@ -632,6 +632,11 @@ crates/bench/
 | `code_intel/references_100k/all`、`code_intel/references_100k/first` | 中位数 ≤ 2 s / ≤ 200 ms（10 万个已入索引的文件里 300 个用到这个名字：到最后一批 / 到第一批带引用的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/references_full/all`、`code_intel/references_full/first` | 中位数 ≤ 2 s / ≤ 200 ms（同上，命名空间满额；每次都是 `Complete`：查引用有自己的 1.9 s 时间盒） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/names_100k`、`code_intel/names_100k_bytes` | 中位数 ≤ 1 s / ≤ 8 MB（10 万文件的合成抽取结果，约 32 万个名字；名字表的构建与它的活跃字节；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/reread_crlf_1000` | 只记录（`git` 的 `TestRepo` 上 1 万个跟踪文件、`core.autocrlf = true`，1000 个文件进入重新读集合，到覆盖部分装上；整批的 `canonical_oids`） | [code_intel](code_intel.md#性能) | `code_intel` 第 6 步 |
+| `code_intel/yield_stop` | 最大值 ≤ 10 ms（1 MiB 的 TypeScript 在解析中途打开让路开关，到这次抽取停在分片边界；[ADR 0033](../adr/0033.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 7 步 |
+| `code_intel/goto_large`、`code_intel/goto_large/cold`、`code_intel/goto_large/object` | 中位数 ≤ 20 ms / 只记录 / 只记录（4 MiB 的 TypeScript 当前文本、位置在中部：身份已记下时只读窗口、解析窗口；身份没记下时流式读一遍求 OID；对象库一侧、位置不在保留的窗口里，整份取出 blob；[ADR 0034](../adr/0034.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 8 步 |
+| `code_intel/window_chain_16mib`、`code_intel/window_peak` | 只记录 / 最大值 ≤ 8 MiB（16 MiB 的 TypeScript 被打开，从打开到窗口链写完；期间的活跃字节峰值：流式哈希的 1 MiB 区间或一个 64 KiB 窗口的树，`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 8 步 |
+| `code_intel/deps_ts_project`、`code_intel/deps_identity`、`code_intel/deps_map_bytes` | 只记录 / 中位数 ≤ 50 ms / ≤ 1 MB（合成的 TS 项目：21 个直接依赖、约 5 MiB 声明闭包、4 MiB 的 `package-lock.json`：从空缓存到依赖层完成；路径表和单元都在缓存里时从打开到身份任务结束；2 万个文件的依赖映射的活跃字节，`Memory`；[ADR 0033](../adr/0033.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 9 步 |
 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，测量前丢掉那次跳转保留的解析（不在 [ADR 0035](../adr/0035.md) 的采样状态里，见 [ADR 0037](../adr/0037.md)），计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
