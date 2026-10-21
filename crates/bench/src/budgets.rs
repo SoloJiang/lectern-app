@@ -1468,6 +1468,40 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Memory,
     ),
+    // ---- syntax (file_reader design, step 2) ----
+    // The first screen without its read (the read joins in step 3): the
+    // plan and the window's parse and query with the 8 ms deadline, on
+    // synthetic TypeScript, Rust and JSON of 1–64 MiB, 40 random offsets
+    // each; the same on 4 MiB of JavaScript minified into one line, record
+    // only.
+    share(
+        "syntax/first_screen",
+        &[median(Limit::TimeAtMost(ms(8)))],
+        FILE_READER,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "syntax/first_screen/minified",
+        RECORD,
+        FILE_READER,
+        ACTIVE,
+        Time,
+    ),
+    // The peak of live bytes of one 64 KiB window of the chain (its tree,
+    // the query's captures, the tokens), tree-sitter's allocations counted.
+    share(
+        "syntax/window_peak",
+        &[max(Limit::BytesAtMost(8 * MB))],
+        FILE_READER,
+        ACTIVE,
+        Memory,
+    ),
+    // Tier A's whole-file parse of 1 MiB in 8 ms slices, and tier B's whole
+    // window chain over 16 MiB. Record only.
+    share("syntax/full_parse_1mib", RECORD, FILE_READER, ACTIVE, Time),
+    share("syntax/chain_16mib", RECORD, FILE_READER, ACTIVE, Time),
+    // ---- end syntax ----
     // FakeBackend and the manual driver, without backend latency.
     share(
         "fs_watch/classify_burst",

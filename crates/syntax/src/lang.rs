@@ -263,6 +263,19 @@ pub(crate) fn classify(name: &str) -> Option<Capture> {
     Some(Capture::Kind(kind))
 }
 
+/// What a parse needs of a language, owned: the sliced parses keep it
+/// between their steps without borrowing the [`Lang`].
+#[derive(Clone)]
+pub(crate) struct LangHandle {
+    pub name: &'static str,
+    pub grammar_version: u64,
+    pub precedence: Precedence,
+    pub rules: Rules,
+    pub language: tree_sitter::Language,
+    /// None: the query does not compile.
+    pub compiled: Option<Arc<Compiled>>,
+}
+
 /// A language's compiled highlight query.
 pub(crate) struct Compiled {
     pub query: Query,
@@ -291,7 +304,7 @@ pub struct Lang {
     /// Compiled on first use, on the calling (background) thread; None when
     /// it does not compile, which shows the language as plain text for this
     /// run.
-    compiled: OnceLock<Option<Compiled>>,
+    compiled: OnceLock<Option<Arc<Compiled>>>,
 }
 
 impl Lang {
@@ -344,10 +357,23 @@ impl Lang {
         self.spec.precedence
     }
 
-    pub(crate) fn compiled(&self) -> Option<&Compiled> {
+    /// The owned parts a sliced parse keeps. Compiles the query on first
+    /// use, like [`Lang::prepare`].
+    pub(crate) fn handle(&self) -> LangHandle {
+        LangHandle {
+            name: self.spec.name,
+            grammar_version: self.grammar_version,
+            precedence: self.spec.precedence,
+            rules: self.spec.rules,
+            language: self.language.clone(),
+            compiled: self.compiled().cloned(),
+        }
+    }
+
+    pub(crate) fn compiled(&self) -> Option<&Arc<Compiled>> {
         self.compiled
             .get_or_init(|| match Compiled::new(self.spec, &self.language) {
-                Ok(compiled) => Some(compiled),
+                Ok(compiled) => Some(Arc::new(compiled)),
                 Err(error) => {
                     log(format_args!(
                         "the {} highlight query does not compile, the language is shown as plain text: {error}",

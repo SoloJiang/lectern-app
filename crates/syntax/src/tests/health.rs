@@ -60,11 +60,11 @@ impl ManualClocks {
     }
 
     /// The next `enter` runs on a thread whose CPU clock cannot be read.
-    fn run_without_cpu_clock(&self) {
+    pub(crate) fn run_without_cpu_clock(&self) {
         *self.current.lock().unwrap() = None;
     }
 
-    fn advance_wall(&self, by: Duration) {
+    pub(crate) fn advance_wall(&self, by: Duration) {
         *self.wall.lock().unwrap() += by;
     }
 }

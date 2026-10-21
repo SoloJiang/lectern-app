@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)）已实现；前置条件 E 和第 2–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；前置条件 E 和第 3–8 步尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -260,19 +260,25 @@ pub mod window {
     pub enum Target { Byte(u64), LineFrom { checkpoint_byte: u64, checkpoint_line: u32, line: u32 } }
 
     pub struct Plan {
-        pub encoding: Encoding,          // Utf8 | Utf8Bom | NotText（二进制或不是 UTF-8）
+        pub encoding: Encoding,          // Utf8 | Utf8Bom | NotText（文件头 8 KiB 或窗口里有 NUL，或不是 UTF-8）
+        /// 目标所在行的行首；往前 4 KiB 内找不到换行（长行）时就是目标本身，首屏的显示行从这里开始折。
         pub target_line_start: u64,
         /// 可见部分：目标之前至多 rows / 3 行、之后至多 rows 行，至多 64 KiB；长行按 8 KiB 计。
         pub visible: Range<u64>,
-        /// 窗口：安全位置起、可见部分之后 4 KiB 止；64 KiB 内找不到安全位置、或 `NotText` 时为 None（先画纯文本）。
+        /// 窗口：安全位置起、可见部分之后 4 KiB 止（JSON 截到可见部分之后最后一个完整的值）；
+        /// 目标之前 64 KiB 内找不到安全位置（不超过 1 MiB 的文件整份读入，也只看这 64 KiB）、或 `NotText` 时为 None（先画纯文本）。
         pub window: Option<Range<u64>>,
         /// JSON 在窗口两端补的括号（ADR 0034）。
         pub json_pad: JsonPad,
     }
 
+    /// JSON 窗口单独解析时前后补的字节：窗口里出现的、在窗口之前打开的容器按出现的顺序在前面打开
+    /// （父容器是对象时带空键 `"":`），窗口结束时仍开着的在后面关上。其他语言和从文件开头开始的窗口为空。
+    pub struct JsonPad { pub before: Box<[u8]>, pub after: Box<[u8]> }
+
     /// 安全位置的规则（ADR 0034）：`Code` 取可见区域之前约 8 KiB 处往回 4 KiB 内第 0 列开始、不是右括号和注释续行的行，
     /// 没有时取缩进最少的行；长行取 `;` 或 `}` 之后；`Json` 取形如 `,"键":` 的成员开头（键 ≤ 256 字节、不含反斜杠）；
-    /// `Markup` 取空行之后。只看给出的字节，不从文件开头扫描。
+    /// `Markup` 取空行之后。只看给出的字节，不从文件开头扫描。给出的字节从文件开头开始而又找不到时取 0。
     pub fn safe_start(rules: Rules, bytes: &[u8], base: u64, before: u64) -> Option<u64>;
 }
 
@@ -283,41 +289,60 @@ pub mod highlight {
     /// 每次调用都按 `budget` 向 `health` 登记，返回时（任何结果）注销，见「grammar 的卡死检测」。
     pub struct Budget<'a> { pub budget: Duration, pub cancel: &'a AtomicBool, pub yield_probe: Option<&'a dyn Fn() -> bool> }
 
-    /// `TimedOut`：这一片用完；`Yielded`：让路探针要求停下。两者都保留解析器的状态，下一次 `step` 从停下处继续。
-    /// `Unavailable`：这个 grammar 版本已被 `health` 停用，调用方改为纯文本。
+    /// `TimedOut`：这一片用完；`Yielded`：让路探针要求停下。两者（以及 `Cancelled`）都保留解析器的状态，
+    /// 下一次 `step` 从停下处继续。`Unavailable`：这个 grammar 版本已被 `health` 停用，或查询编译不了，调用方改为纯文本。
     pub enum Outcome<T> { Done(T), TimedOut, Cancelled, Yielded, Unavailable }
 
-    /// 整个文本一次解析、一次算出全部区间（`exact`），不分片、不能续做：`TimedOut`、`Yielded`、`Cancelled` 之后什么都不留。
-    /// 第一次用到时编译查询的时间不计入预算。查询编译不了时也是 `Unavailable`。第 1 步的整文件高亮；
-    /// `FullParse` 在第 2 步加入，用同一套捕获解析。
-    pub fn whole_file(lang: &Lang, text: &[u8], budget: Budget<'_>) -> Outcome<WindowSpans>;
-
-    /// 窗口单独解析，只算 `visible` 的区间。首屏用，预算 8 ms（`FIRST_WINDOW_DEADLINE`），不续：超时就先画文本，
-    /// 这个窗口交给档位的后续计算。
-    pub fn window(lang: &Lang, src: &dyn Source, window: Range<u64>, pad: JsonPad, visible: Range<u64>,
+    /// 窗口单独解析，只算 `visible` 的区间（`exact` 为 false）。首屏用，预算 8 ms（`FIRST_WINDOW_DEADLINE`），不续：
+    /// 超时就先画文本，这个窗口交给档位的后续计算。第一次用到时编译查询的时间不计入预算。
+    pub fn window(lang: &Lang, src: &dyn Source, window: Range<u64>, pad: &JsonPad, visible: Range<u64>,
                   budget: Budget<'_>) -> Outcome<WindowSpans>;
 
-    /// 档位 A 的整文件解析：每次 `step` 至多一片（8 ms），解析完一次性算出整个文件的区间、释放语法树。
-    /// 解析器在两片之间保留状态；`src` 换了时调用方新建一个（tree-sitter 要 `reset`，大文件调研第 3 节）。
-    pub struct FullParse { /* parser, src */ }
+    /// 档位 A 的整文件解析：每次 `step` 至多一片（8 ms）加至多一个 8 KiB 的查询块，解析完按块跑高亮查询，
+    /// 最后一片给出整个文件的区间（`exact`）、释放语法树。解析器和查询的进度在两片之间保留；
+    /// `src` 换了时调用方新建一个（tree-sitter 要 `reset`，大文件调研第 3 节）。`new` 在第一次用到时编译查询，不计入预算。
+    /// `Done` 之后或 `Unavailable` 之后再调 `step` 返回 `Unavailable`。
+    pub struct FullParse { /* 语言、health、src、解析器或查询的进度 */ }
     impl FullParse {
         pub fn new(lang: &Lang, src: Arc<dyn Source>) -> FullParse;
         pub fn step(&mut self, budget: Budget<'_>) -> Outcome<WindowSpans>;
     }
 
-    /// 档位 B / C 的窗口链里的一个窗口：从 `start` 解析约 64 KiB，按树切（与 code_intel「大文件」的「窗口」规则相同），
-    /// 完成时给出这一段的区间和下一个窗口的起点；找不到切点时扩到 256 KiB 再找一次，仍没有时切在最后一个 token 之后。
-    /// 与 `FullParse` 一样可以分片：`TimedOut`、`Yielded` 之后对同一个对象再调 `step` 接着解析（批量任务在两次之间可以停下、
-    /// 让出线程，对象留在任务里）。
-    pub struct ChainWindow { /* parser, src, start, 当前的窗口长度 */ }
+    /// 档位 B / C 的窗口链里的一个窗口：从 `start` 解析约 64 KiB，按树切（与 code_intel「大文件」的「窗口」规则相同，
+    /// `ERROR` 节点里的最后一个子节点见「与设计的差异」第 2 步），完成时给出这一段的区间（`exact`）和下一个窗口的起点；
+    /// 找不到切点时扩到 256 KiB 再找一次，仍没有时切在最后一个 token 之后，连 token 都没有时切在之后的第一个标识符边界。
+    /// JSON 的窗口切在最后一个逗号之后，带 `JsonPad` 解析。与 `FullParse` 一样可以分片：`TimedOut`、`Yielded` 之后
+    /// 对同一个对象再调 `step` 接着解析（批量任务在两次之间可以停下、让出线程，对象留在任务里）。
+    pub struct ChainWindow { /* 语言、health、src、start、读入和解析的范围、JSON 的补齐、进度 */ }
     impl ChainWindow {
         pub fn new(lang: &Lang, src: Arc<dyn Source>, start: u64) -> ChainWindow;
         pub fn step(&mut self, budget: Budget<'_>) -> Outcome<(WindowSpans, u64)>;
+        /// 这个窗口到目前为止的解析用量，交给 `SlowWindows`：各次 `step` 里 tree-sitter 解析的线程 CPU 时间之和
+        /// （不含查询、切点和两次之间的等待），以及解析过的字节数。
+        pub fn spent(&self) -> Spent;
     }
 
-    /// 按字节区间读文本，不要求连续存放（分块、页）。
+    /// 窗口的解析用量。只计解析：ADR 0034 的 128 ms 是解析吞吐（不到 0.5 MiB/s）的界限。
+    pub struct Spent {
+        pub parsed: u64,      // 解析过的字节：这个窗口的，扩到 256 KiB 时加上第一次的
+        pub cpu: Duration,    // 解析时这个线程的 CPU 时间（health 的同一套时钟，`platform::ThreadCpuClock`）
+        pub wall: Duration,   // 读不到 CPU 时钟的那些 step 的墙上时间
+    }
+
+    /// ADR 0034 的降级：一个窗口的解析按每 64 KiB 计用了超过 `SLOW_WINDOW`（128 ms）的 CPU 时间
+    /// （读不到 CPU 时钟时按墙上时间、对照 `SLOW_WINDOW_WALL`），连续两次，这个文件本次打开不再高亮。
+    /// 批量线程在 utility QoS 下被并发的构建挤掉时 CPU 时间不增长，所以不会因此降级。调用方每完成一个窗口记一次。
+    pub struct SlowWindows { /* 连续的慢窗口数 */ }
+    impl SlowWindows {
+        /// 一个完成的窗口的 `spent`；返回 true 之后一直是纯文本。
+        pub fn record(&mut self, spent: Spent) -> bool;
+        pub fn plain(&self) -> bool;
+    }
+
+    /// 按字节区间读文本，不要求连续存放（分块、页）。`Vec<u8>` 实现它（测试、基准、对象库的整份内容）。
     pub trait Source: Send + Sync {
         fn len(&self) -> u64;
+        fn is_empty(&self) -> bool { self.len() == 0 }
         /// `at` 起的一段连续字节；不在内存里时返回 None（解析按到达文件末尾处理，调用方只对已读入的部分调用）。
         fn chunk(&self, at: u64) -> Option<&[u8]>;
     }
@@ -542,7 +567,8 @@ pub mod limits {
     pub const TIER_B_MAX: u64 = 16 << 20;         // 16 MiB：整份读入；更大的按页读
     pub const FIRST_WINDOW_DEADLINE: Duration = Duration::from_millis(8);
     pub const SLICE: Duration = Duration::from_millis(8);
-    pub const SLOW_WINDOW: Duration = Duration::from_millis(128);   // 连续两次：这个文件本次不高亮
+    pub const SLOW_WINDOW: Duration = Duration::from_millis(128);   // 线程 CPU 时间，连续两次：这个文件本次不高亮
+    pub const SLOW_WINDOW_WALL: Duration = Duration::from_secs(1);  // 读不到 CPU 时钟、按墙上时间计时的上限
     pub const WINDOW: u64 = 64 << 10;
     pub const WINDOW_MAX: u64 = 256 << 10;
     pub const PAGE: u64 = 64 << 10;
@@ -882,7 +908,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `window_*`：`first_read`、`checkpoint_read` 的截取（`t = 0`、`t < 64 KiB`、`t` 在末尾、空文件、小于 8 KiB）；`safe_start` 的规则：多行注释、模板字符串、一行的 JSON（补括号之后与整文件一致）、压缩 JS 的 `;` / `}`、64 KiB 内找不到时为 None；`plan` 只看给出的字节（传入的切片之外的偏移从不访问）。
 - `consistency_*`：首屏窗口和窗口链的区间与整文件解析逐字节比较（大文件调研的方法：只比非空白字节，每个字节取最内层的捕获），合成文件 100% 一致，窗口链在合成文件上 100%。
 - `deadline_*`：`highlight::window` 在预算用完后返回 `TimedOut`；`FullParse`、`ChainWindow` 分片后的区间与一次解析相同；`Yielded` 之后对同一个对象再 `step` 得到相同的结果；取消标志生效。
-- `degrade_*`：NUL、无效 UTF-8、`SLOW_WINDOW` 连续两次（用可控的时钟）都得到 `Plain`。
+- `degrade_*`：NUL、无效 UTF-8、`SLOW_WINDOW` 连续两次（用可控的时钟）都得到 `Plain`；墙上时间增长而 CPU 时间不增长（线程被挤掉）时不降级。
 - `text_*`：行索引（`line_start`、`line_of` 与朴素扫描对照）、CRLF、BOM、长行的格数检查点（CJK、制表符）、`rows` 在 64 MiB 的合成内容上只访问可见行（计数的 `Source`）。
 - `lines_*`：`LineCheckpoints` 的编码、≥ 1 MiB 才写、`len` 不同时不用。
 - `doc_*`：用临时目录的真实文件和 `Executor::manual()`：四种 `Anchor`、完整读取的身份与首屏不同时作废首屏、`Byte` 的 OID 与 `expect` 不同时按行号重新定位、档位 C 的页 LRU 上限、`Symlink` / `Unsupported` / `Missing` / `PathThroughSymlink`、依赖根越界（`..`、指向根外的符号链接、不允许的扩展名）、对象库的 blob、fs_watch 的 `FakeBackend` 注入事件后重新打开、文档 drop 后任务取消和 `OpenFile` 关闭（描述符计数）。
@@ -1033,6 +1059,13 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。
 - 没有在 macOS 上运行：`health` 在 macOS 上读 `ThreadCpuClock` 的 `thread_info` 实现，只由 macOS CI 覆盖（`health_global_on_real_clocks`）；本步没有 bench 条目（「验收」第 1 步没有列出，`syntax/*` 的基准从第 2 步开始）。
 
+第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级），在 Linux（x86_64 容器）上运行：
+
+- `just test -p lectern-syntax`：83 个测试通过，新增 `window_*`、`consistency_*`、`deadline_*`、`degrade_*`（`SlowWindows` 在注入的时钟上：线程被挤掉时不降级，CPU 时间连续两次超限时降级，没有 CPU 时钟时按墙上时间）。`consistency_*`：合成的 TypeScript、Rust、多行和一行的 JSON、压缩成一行的 JavaScript（各约 1.1 MiB，首屏读取是两段），每种 44 个目标的首屏窗口、以及整条窗口链，与整文件解析逐字节比较（非空白字节、最内层的捕获）全部一致。`deadline_*`：`FullParse` 和 `ChainWindow` 按 0 到 1 ms 的预算分成多片、在让路和取消之后续做，得到的 token 与一次解析、一次查询整棵树（`one_shot`）逐个相同；每一片在 `health` 里登记的预算就是这一片的预算，两片之间表里没有它，期间这个线程的 CPU 时间和墙上时间前进几十秒也不会被判为卡住。第 1 步的 11 份区间快照经 `FullParse` 生成，没有变化；新增 `window_plan_snapshot`（五种形状各两个目标的窗口起点、可见部分与 JSON 补齐），逐条看过。
+- `just bench --measure syntax/`（Linux 只报告、不判定）：`syntax/first_screen` 中位数 2.27 ms（预算 ≤ 8 ms），`syntax/first_screen/minified` 中位数 8.6 ms，`syntax/window_peak` 最大值 6.86 MB（预算 ≤ 8 MiB，四种形状各 4 个窗口里的最大值），`syntax/full_parse_1mib` 中位数 292 ms（解析加整份查询，8 ms 一片），`syntax/chain_16mib` 中位数 4.41 s（每片 50 ms）。`spent` 改按 CPU 时间计、安全位置限在目标之前 64 KiB 之后重测：2.26 ms、8.69 ms、6.86 MB、318 ms、4.71 s，后两项在这台共享机器的噪声范围内。`just test -p lectern-bench` 通过（预算表的出处、目标与检查）。
+- `just check`、`just deny`、`just doctest`、`just test`（Linux 上不依赖 GPUI 的全部 crate，1679 个）通过；`rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。
+- 没有在 macOS 上运行：上面的基准在 M 系列上由 macOS CI 判定。
+
 前置条件 A（`services`），在 Linux（x86_64 容器）上运行（`services` 不依赖 GPUI）：
 
 - `just test -p lectern-services`：50 个测试通过。新增：`reader_service_id_and_multiple`（`ID == "reader"`、`MULTIPLE == false`，`service::<dyn Reader>()` 的键相同）、`reader_is_a_shared_trait_object`、`object_share_releases_once_on_drop`（在另一个线程上 drop，回调只调用一次）、`reader_targets_round_trip`（两种来源、三种 `Anchor`、SHA-1 与 SHA-256 的 `expect`、文件夹项目）、`reader_event_round_trips`；`dirs_match_a_naive_construction`、`dirs_children_are_in_finder_order`、`dirs_fold_single_child_chains`、`dirs_submodules_are_files`、`dirs_empty_list_has_only_the_root`、`finder_cmp_cases`；`dir_table_serializes_dirs_and_files`、`dir_table_deserializes_from_the_file_list`（乱序、错误、缺少的目录都按 `files` 重建，不合法的路径计入 `skipped`）；`dependency_extensions_are_the_adr_0033_list`。`project_snapshot_round_trips` 的样本带上目录表，检查反序列化后 `dirs.files()` 与 `files` 相等。
@@ -1058,6 +1091,21 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `health` 按（语言、grammar 版本）登记和停用：TS 和 TSX 来自同一个 grammar crate、grammar 版本相同，各自判定。每个线程第一次登记时打开 `ThreadCpuClock`、之后复用（线程局部）；检查在途项时读不到某个线程的 CPU 时钟（线程已退出）就当作它不在运行。测试经内部的 `Clocks` 换成测试时钟。
 - 依赖：第 1 步只用 `tree-sitter`、十个 grammar crate、`lectern-platform`（`ThreadCpuClock`）、`memchr`，`insta`（dev）；「依赖」表里的其余依赖随后续步骤加入。查询结果的迭代用 `tree-sitter` 再导出的 `StreamingIterator`，不直接依赖 `streaming-iterator`。
 - 扩展名与整文件名：JSON 另认 `jsonc`、`jsonl`；`Cargo.lock`、`poetry.lock`、`uv.lock`、`Pipfile` 是 TOML，`package-lock.json`、`.babelrc`、`.eslintrc` 是 JSON；扩展名先按原样找，找不到再按小写找（与 `code_intel` 相同）。规则族：JSON 为 `Json`，Markdown 为 `Markup`，其余（含 YAML、TOML）为 `Code`。
+
+第 2 步：
+
+- `highlight::whole_file` 不再是公开项，由 `FullParse` 取代。档位 A 和空闲预取都要分片，没有调用方需要不能续做的整文件高亮；一次做完就是 `FullParse::new(..).step(足够的预算)`，结果相同。两个公开入口给出同一份结果，以后容易分叉。第 1 步的实现留在测试里（`highlight::one_shot`，只在 `cfg(test)` 下）：整段解析、整棵树一次查询，`spans_*` 和 `deadline_*` 拿分片的结果逐个 token 和它对照。已改「接口」。
+- 分片的查询：解析完成后高亮查询按 8 KiB 的字节块跑（`QueryCursor::set_byte_range`），一片在块的边界停下，下一片从下一块继续。一个字节的颜色只取决于与它相交的捕获，这些捕获都与它所在的块相交，所以每块的解析结果与整棵树一次查询相同；被块尾截断的区间在下一块开头接回同一个 token（只在上一块的最后一段确实越过块尾时接）。每一片的第一块不计时（取消和让路照常生效），保证极小的预算下每片也有进展，所以一片至多超出预算一个块的查询（普通代码约 1 ms，压缩代码 2–4 ms）；首屏的 `window` 不续做，每块都计时。设计没有写查询怎样分片。
+- `Outcome::Cancelled` 之后对象同样保留状态，再调 `step` 接着做；`Done` 或 `Unavailable` 之后再调 `step` 返回 `Unavailable`。`FullParse::new`、`ChainWindow::new` 在第一次用到这种语言时编译查询（阻塞，不计入任何一片的预算）。
+- `window` 收 `&JsonPad`（设计写的是按值），调用方不必复制 `Plan`。`JsonPad` 的形状设计没有写：`before`、`after` 两段字节。窗口之前的容器的种类从窗口本身推出：这一层出现 `:` 是对象，它的右括号说明它是什么，只有不带键的元素是数组；只有父容器是对象时才补空键 `"":`。设计和大文件调研写的是每个右括号「各补一个 `"":{` 或 `"":[`」，父容器是数组时这样补出来的 JSON 不合法；窗口在最外层补出的容器关上之后还有内容时，也要再补一层。JSON 窗口的终点截到可见部分之后最后一个完整的值（右括号之后或逗号之前），补上的括号因此不会落进半个值里；到文件末尾的窗口不截。
+- JSON 的窗口链不按树切：窗口切在最后一个不在字符串里的逗号之后，逗号之前的部分带 `JsonPad` 解析，下一个窗口从逗号之后开始（一个成员或元素的开头）。按 code_intel 的规则切 JSON 时，窗口的根是 `ERROR`，成员后面同一行紧跟着逗号，没有一个子节点算完整，每个窗口都扩到 256 KiB 再切在某个 token 之后，下一个窗口从结构中间开始，键被当成普通字符串。逗号里没有的窗口（一个超过 64 KiB 的字符串）退回按树切。
+- `ERROR` 节点里最后一个子节点的判定与 code_intel 不同：code_intel 把后面没有别的子节点的那一个算作完整，这里要求它后面在这个节点里还有换行。窗口截在一行压缩代码中间时，`run:function(x){return f(x)}` 截成 `…{return ` ，自动分号让 `return` 成为一条完整的语句，切在这里就把对象字面量分到两个窗口里，`run` 在前一个窗口里不再是方法名。`consistency_chain_minified` 覆盖这一点。code_intel 的窗口规则不在本步改动。
+- 降级：「一个 64 KiB 的窗口解析连续两次超过 128 ms」写成 `SlowWindows`，调用方（第 3、4 步的文档和批量任务）每完成一个窗口记一次 `ChainWindow::spent()`。设计没有说按什么时间计。`spent` 按线程的 CPU 时间计，与 `STUCK_GRACE` 同一个理由：档位 B、C 的窗口在 utility QoS 的批量线程上，并发的构建会把一个 10–20 ms 的窗口的墙上时间拉过 128 ms，按墙上时间计时，构建期间打开的 `package-lock.json` 连续两个窗口就会降级；128 ms 指的是病态的输入，不是等不到 CPU 的线程。计时在调用的线程上读 `health` 的同一套时钟（`platform::ThreadCpuClock`，`Health::stopwatch`），只包住 tree-sitter 的解析，不含查询和切点：ADR 0034 的界限是解析吞吐。读不到 CPU 时钟时按墙上时间、对照 `SLOW_WINDOW_WALL`（1 s，`SLOW_WINDOW` 的 8 倍：仍慢于 64 KiB/s 的窗口在繁忙的机器上也算病态，被挤得更厉害的窗口宁可保留高亮）。上限按解析过的字节数放宽（每 64 KiB 一份，扩到 256 KiB 的窗口连第一次的 64 KiB 一起算），不足 64 KiB 的末尾窗口按一份计。`degrade_*` 用 `ManualClocks` 在 tree-sitter 的进度回调里推进时钟：墙上时间增长、CPU 时间不增长时不降级，CPU 时间连续两次超过上限时降级，没有 CPU 时钟时按墙上时间。已改「接口」。
+- `Source` 只为 `Vec<u8>` 实现。为 `Box<[u8]>`、`Arc<[u8]>` 实现时，`Source::len` 在方法解析里排在 `[u8]::len` 之前，导入 `Source` 的代码里 `.len()` 会变成 `u64`；`Text`、`Pages` 随第 3 步加入。另有默认的 `is_empty`（clippy 的 `len_without_is_empty`）。
+- `plan`：目标往前 4 KiB 内找不到换行时（长行），`target_line_start` 取目标本身，可见部分是目标起的 8 KiB。传入的切片不从文件开头开始时，切片的第一个字节不当作行首。`safe_start` 在切片从文件开头开始、规则又没找到位置时取 0。`plan` 只把目标之前 64 KiB 起的字节交给 `safe_start`：不超过 1 MiB 的文件首屏整份读入，不截的话往回找会一直扫到文件开头，与 ADR 0034「选安全位置只看目标之前至多 64 KiB」不符。编码检查允许切片两端被截断的 UTF-8 序列。
+- `limits` 加入 `TIER_A_MAX`、`LONG_LINE`、`FIRST_WINDOW_DEADLINE`、`SLICE`、`SLOW_WINDOW`、`WINDOW`、`WINDOW_MAX`，值与「接口」相同；新增 `SLOW_WINDOW_WALL`（见上一条）。
+- 合成源码：「测试」写的是由 `bench` 的生成器生成，但 `syntax` 的测试不能依赖 tool 层的 `bench`。生成器放在 `syntax` 的 `testing` 模块（`test-support` feature）：TypeScript 和 Rust 是带多行注释、模板字符串或原始字符串、嵌套块的单元重复拼接，JSON 是两格缩进的 `package-lock.json` 形状，另有压缩成一行的 JavaScript；`bench` 经它取得夹具（bench 设计「夹具与 `test-support`」的做法）。
+- `syntax/first_screen` 本步只计 `plan` 与窗口的解析和查询，字节从内存里切出；视口按 60 行。
 
 前置条件 A（`services`）。下面只记上文「接口」没有定下、实现时定下的形状：
 

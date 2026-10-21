@@ -1,0 +1,43 @@
+---
+source: crates/syntax/src/tests/window.rs
+expression: out
+---
+## ts (307884 bytes)
+target 100000: line start 99960
+  visible 99801..100710: "  }⏎  return service;⏎}⏎⏎/**⏎ * Service "
+  window 91318..104806: "export class Service85 implements Queue<"
+target 200017: line start 200006
+  visible 199621..200572: "  private items: Array<{ size: number; n"
+  window 190897..204668: "export class Service177 implements Queue"
+## rust (307614 bytes)
+target 100000: line start 99976
+  visible 99746..100816: "    items: Vec<u64>,⏎    names: HashMap<"
+  window 91431..104912: "impl Queue87 {⏎    pub const MAX: usize "
+target 200017: line start 200011
+  visible 199726..200784: "}⏎⏎pub fn drain189<'a>(queue: &'a mut Qu"
+  window 191530..204880: "#[derive(Clone, Debug, Default)]⏎pub str"
+## json (307417 bytes)
+target 100000: line start 99928
+  visible 99757..100720: "        \"node\": \">=18\"⏎      },⏎      \"b"
+  window 91561..104769: "\"resolved\": \"https://registry.npmjs.org/"
+  pad "{\"\":{" … "}}"
+target 200017: line start 200015
+  visible 199816..200792: "      \"dev\": true,⏎      \"license\": \"MIT"
+  window 191604..204884: "\"bin\": [⏎        \"bin/pkg-412.js\",⏎     "
+  pad "{\"\":{" … "}}"
+## json one line (214196 bytes)
+target 100000: line start 100000
+  visible 100000..108192: "rg/pkg-310/-/pkg-310-1.0.310.tgz\",\"integ"
+  window 91806..112267: "\"node_modules/pkg-285\": {\"version\": \"5.1"
+  pad "{" … "}"
+target 200017: line start 200017
+  visible 200017..208209: "DEF0123456789+/==\",\"dev\": false,\"license"
+  window 191774..212285: "\"resolved\": \"https://registry.npmjs.org/"
+  pad "{\"\":{" … "}}"
+## minified js (307292 bytes)
+target 100000: line start 100000
+  visible 100000..108192: "n(x){return f493(x,493)},n:493.5};functi"
+  window 91808..112288: "var o453={key:\"k453\",run:function(x){ret"
+target 200017: line start 200017
+  visible 200017..208209: "c=a+b*984,d=[1,2,c];if(c>10&&d.length){r"
+  window 191824..212305: ",n:943.5};function f944(a,b){var c=a+b*9"

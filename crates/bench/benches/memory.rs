@@ -21,6 +21,8 @@ mod project;
 )]
 #[path = "fixtures/project_repo.rs"]
 mod project_repo;
+#[path = "memory/syntax.rs"]
+mod syntax;
 
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
@@ -274,6 +276,7 @@ const BENCHES: &[Bench] = &[
     project::RESIDENT_CLOUDPRINT,
     project::RESIDENT_100K,
     project::DIRS_100K_BYTES,
+    syntax::WINDOW_PEAK,
 ];
 
 fn main() -> ExitCode {

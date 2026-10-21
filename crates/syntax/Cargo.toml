@@ -10,6 +10,10 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "domain"
 
+[features]
+# `testing`: synthetic sources for the tests and `lectern-bench`.
+test-support = []
+
 [dependencies]
 # `ThreadCpuClock`: the stuck-grammar check counts a parse's CPU time
 # (health.rs, docs/adr/0041.md).

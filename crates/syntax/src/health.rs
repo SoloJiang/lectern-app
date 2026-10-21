@@ -80,6 +80,14 @@ impl Health {
         }
     }
 
+    /// Another handle on the same table, kept by a sliced parse between its
+    /// steps.
+    pub(crate) fn handle(&self) -> Health {
+        Health {
+            shared: self.shared.clone(),
+        }
+    }
+
     /// Whether this grammar version may still be used in this run. Does not
     /// block (one uncontended lock).
     pub fn allows(&self, lang: &str, grammar_version: u64) -> bool {
@@ -139,6 +147,21 @@ impl Health {
         })
     }
 
+    /// Starts measuring the calling thread's CPU time (wall time when its
+    /// CPU clock cannot be read), on the same clocks as the stuck check.
+    /// Read it back on the same thread.
+    pub(crate) fn stopwatch(&self) -> Stopwatch {
+        Stopwatch {
+            cpu: self
+                .shared
+                .clocks
+                .thread()
+                .and_then(|clock| clock.cpu_time().ok().map(|at| (clock, at))),
+            wall_at: self.shared.clocks.wall(),
+            shared: self.shared.clone(),
+        }
+    }
+
     fn wall_since(&self) -> Since {
         Since::Wall {
             at: self.shared.clocks.wall(),
@@ -163,6 +186,17 @@ impl Health {
     #[cfg(test)]
     pub(crate) fn running(&self) -> usize {
         self.shared.lock().running.len()
+    }
+
+    /// The budgets the calls in the table registered with, for tests.
+    #[cfg(test)]
+    pub(crate) fn running_budgets(&self) -> Vec<Duration> {
+        self.shared
+            .lock()
+            .running
+            .iter()
+            .map(|r| r.budget)
+            .collect()
     }
 }
 
@@ -204,6 +238,39 @@ impl Drop for ParseGuard {
         if let Some(i) = state.running.iter().position(|r| r.id == self.id) {
             state.running.swap_remove(i);
         }
+    }
+}
+
+/// What a [`Health::stopwatch`] measured.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Elapsed {
+    /// The thread's CPU time: it does not grow while the thread waits for a
+    /// CPU.
+    Cpu(Duration),
+    /// Wall time: the thread's CPU clock could not be read.
+    Wall(Duration),
+}
+
+/// A measurement started on one thread.
+pub(crate) struct Stopwatch {
+    cpu: Option<(Arc<dyn ThreadClock>, Duration)>,
+    wall_at: Duration,
+    shared: Arc<Shared>,
+}
+
+impl Stopwatch {
+    pub(crate) fn elapsed(&self) -> Elapsed {
+        match &self.cpu {
+            Some((clock, at)) => match clock.cpu_time() {
+                Ok(now) => Elapsed::Cpu(now.saturating_sub(*at)),
+                Err(_) => self.wall(),
+            },
+            None => self.wall(),
+        }
+    }
+
+    fn wall(&self) -> Elapsed {
+        Elapsed::Wall(self.shared.clocks.wall().saturating_sub(self.wall_at))
     }
 }
 
