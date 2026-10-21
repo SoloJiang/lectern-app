@@ -202,9 +202,6 @@ const fn share(
 const ACTIVE: State = State::Active;
 const STEP_4: State = State::Planned("bench 第 4 步");
 const STEP_5: State = State::Planned("bench 第 5 步");
-/// `git/filter_100k`: the directory walk alone is 473 ms on macOS CI.
-const MACOS_FILTER_100K: State =
-    State::Planned("git：macOS 上 10 万文件的过滤器重建达标（目录遍历）");
 
 use Target::{Memory, Package, Process, Time};
 
@@ -679,19 +676,21 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
-    // The fs_watch filter rebuilt after an index change: index, case-folded
-    // order, untracked walk and `.gitignore` files; batches wait for it.
-    // Planned: macOS CI measured 766 and 678 ms (Linux 214–276 ms), of which
-    // the directory walk alone is 473 ms (git design「与设计的差异」).
+    // The fs_watch filter rebuilt after an index-only change, given the
+    // filter in place: index, case-folded order, the index compared with the
+    // previous one, the untracked walk reused; batches wait for it. The full
+    // build walked every directory: 678–766 ms on macOS CI, the walk alone
+    // 473 ms (git design「index」「性能」).
     share(
         "git/filter_100k",
         &[median(Limit::TimeBelow(ms(400)))],
         GIT,
-        MACOS_FILTER_100K,
+        ACTIVE,
         Time,
     ),
-    // Recorded, to locate that cost: one listing of every directory of the
-    // worktree through `SafeRoot::list`.
+    // Recorded: the first build (no previous filter, the walk included), and
+    // one listing of every directory of the worktree through `SafeRoot::list`.
+    share("git/filter_100k/cold", RECORD, GIT, ACTIVE, Time),
     share("git/filter_100k/walk", RECORD, GIT, ACTIVE, Time),
     // A full comparison of a clean worktree, in the background after the
     // file list is shown: the index parsed (cold, a new `Worktree` each

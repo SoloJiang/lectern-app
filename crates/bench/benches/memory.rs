@@ -199,7 +199,7 @@ fn filter_bytes(ctx: &Ctx, t: &lectern_git::testing::TestRepo) -> Result<Vec<u64
         let wt = discovered.repo.worktree(&WorktreeId::Main)?;
         let source = wt.watch_source();
         let filter = source
-            .filter(&[], &cancel)
+            .filter(&lectern_fs_watch::FilterRequest::default(), &cancel)
             .map_err(|e| BenchError::new(e.0))?;
         let held = CountingAlloc::live().saturating_sub(before);
         if !filter.ignored(b"node_modules", true) {

@@ -8,6 +8,11 @@
 //! explicitly given ones it didn't reach, `info/exclude` and
 //! `core.excludesFile`. Queries only match in memory.
 //!
+//! After an index-only change fs_watch hands back the filter in place
+//! (`FilterRequest::previous`), and the walk is reused instead of repeated
+//! when that provably gives what a new walk would (`Filter::reusable`,
+//! docs/design/git.md「index」).
+//!
 //! The config list comes from the origins of the sections gix loaded and
 //! every `include.path` / `includeIf.*.path` value in them, plus the standard
 //! locations; no git CLI runs.
@@ -23,12 +28,14 @@ use gix::bstr::{BStr, ByteSlice};
 use gix::glob::pattern::Case;
 use gix::glob::search::pattern::List;
 use gix::ignore::search::Ignore;
-use lectern_fs_watch::{PathFilter, SourceError, Tracked, WatchPath, WorktreeName, WorktreeSource};
+use lectern_fs_watch::{
+    FilterRequest, PathFilter, SourceError, Tracked, WatchPath, WorktreeName, WorktreeSource,
+};
 use lectern_platform::{FileKind, Read};
 
 use crate::changes::{Blob, read_blob};
 use crate::handle::{ConfigScope, Handle};
-use crate::untracked::{self, IgnoreFile};
+use crate::untracked::{self, IgnoreFile, Kind};
 use crate::{
     EntryLimits, GitError, Limits, Mode, RepoPath, TrackedEntry, TrackedPaths, Worktree, WorktreeId,
 };
@@ -51,12 +58,17 @@ fn source_error(err: GitError) -> SourceError {
 impl WorktreeSource for Source {
     fn filter(
         &self,
-        gitignores: &[WatchPath],
+        request: &FilterRequest<'_>,
         cancel: &AtomicBool,
     ) -> Result<Arc<dyn PathFilter>, SourceError> {
-        let filter = Filter::build(
+        let previous = request.previous.and_then(|filter| {
+            let filter: &dyn std::any::Any = filter;
+            filter.downcast_ref::<Filter>()
+        });
+        let filter = Filter::rebuild(
             &self.worktree,
-            gitignores,
+            request.gitignores,
+            previous,
             Limits::default().untracked,
             cancel,
         )
@@ -186,10 +198,38 @@ pub(crate) struct Filter {
     precompose: bool,
     /// One pattern list per `.gitignore` read, keyed by its directory (empty
     /// for the root; ASCII-lowercased with `core.ignoreCase`).
-    lists: HashMap<Box<[u8]>, List<Ignore>>,
+    lists: HashMap<Box<[u8]>, Arc<List<Ignore>>>,
     /// `info/exclude`, then `core.excludesFile` (or its default).
     globals: gix::ignore::Search,
     rule_files: Vec<WatchPath>,
+    /// The worktree root it was built for.
+    root: PathBuf,
+    /// What the last untracked walk found, for the next index-only rebuild;
+    /// None when that walk stopped at its limit.
+    walked: Option<Walked>,
+    /// Built from a previous filter's walk, without walking.
+    #[cfg_attr(
+        not(any(test, feature = "test-support")),
+        allow(dead_code, reason = "read by `testing::filter_reused`")
+    )]
+    pub(crate) reused: bool,
+}
+
+/// What an untracked walk found that a rebuild after an index-only change
+/// can reuse, and what it would have to recheck. Only the index decides
+/// whether the walk enters a directory in three ways: a submodule (gitlink)
+/// isn't entered, a directory with its own `.git` and no index path beneath
+/// isn't entered, and the walk stops after `limit` untracked entries.
+#[derive(Clone)]
+struct Walked {
+    /// Every `.gitignore` it read, with its rules.
+    files: Vec<(RepoPath, Arc<List<Ignore>>)>,
+    /// The nested repositories it listed and didn't enter.
+    repositories: Vec<RepoPath>,
+    /// At least the untracked entries a walk would find now: what it found,
+    /// plus one for every index path removed since (only a removed path can
+    /// become untracked, or turn a directory into a nested repository).
+    untracked: usize,
 }
 
 impl Filter {
@@ -198,9 +238,23 @@ impl Filter {
     /// comparison's untracked limit); `gitignores` and the tracked
     /// `.gitignore` files it didn't reach are read afterwards, unless a
     /// directory above them is ignored or a submodule.
+    #[cfg(test)]
     pub(crate) fn build(
         worktree: &Worktree,
         gitignores: &[WatchPath],
+        walk_limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Filter, GitError> {
+        Filter::rebuild(worktree, gitignores, None, walk_limit, cancel)
+    }
+
+    /// `build`, reusing `previous`'s walk when fs_watch passed it (nothing
+    /// but the index changed since it was built) and the reuse gives what a
+    /// new walk would (`reusable`); otherwise walking.
+    pub(crate) fn rebuild(
+        worktree: &Worktree,
+        gitignores: &[WatchPath],
+        previous: Option<&Filter>,
         walk_limit: usize,
         cancel: &AtomicBool,
     ) -> Result<Filter, GitError> {
@@ -224,36 +278,87 @@ impl Filter {
         )?;
 
         let tracked = TrackedView::new(paths, ignore_case);
+        let case = if ignore_case {
+            Case::Fold
+        } else {
+            Case::Sensitive
+        };
         let read_bytes = Limits::default().read_bytes;
-        let mut read: Vec<IgnoreFile> = Vec::new();
-        untracked::walk(
-            &handle,
-            repo.hash(),
-            worktree.safe_root(),
-            &tracked,
-            None,
-            walk_limit,
-            read_bytes,
-            cancel,
-            Some(&mut read),
-        )?;
+        let reused = match previous {
+            Some(previous) => {
+                previous.reusable(worktree, &tracked, case, precompose, walk_limit, cancel)?
+            }
+            None => None,
+        };
 
         let mut filter = Filter {
             index: tracked,
-            case: if ignore_case {
-                Case::Fold
-            } else {
-                Case::Sensitive
-            },
+            case,
             precompose,
             lists: HashMap::new(),
             globals,
             rule_files: Vec::new(),
+            root: worktree.root().to_path_buf(),
+            walked: None,
+            reused: reused.is_some(),
         };
         let mut seen: HashSet<RepoPath> = HashSet::new();
-        for (path, content) in read {
-            filter.add(&path, &content);
-            seen.insert(path);
+        match reused {
+            Some(walked) => {
+                // The walk entered at most the directories it entered then
+                // (`reusable`); of those, one that is now a nested
+                // repository isn't entered. `reachable` tells, with every
+                // list in place: a list only matters beneath its own
+                // directory, which is then unreachable too.
+                for (path, list) in &walked.files {
+                    filter.insert(path, Arc::clone(list));
+                }
+                let kept: Vec<&(RepoPath, Arc<List<Ignore>>)> = walked
+                    .files
+                    .iter()
+                    .filter(|(path, _)| filter.reachable(worktree, path.as_bytes()))
+                    .collect();
+                if kept.len() < walked.files.len() {
+                    filter.lists.clear();
+                    filter.rule_files.clear();
+                    for (path, list) in kept.iter().copied() {
+                        filter.insert(path, Arc::clone(list));
+                    }
+                }
+                seen.extend(kept.into_iter().map(|(path, _)| path.clone()));
+                filter.walked = Some(walked);
+            }
+            None => {
+                let mut read: Vec<IgnoreFile> = Vec::new();
+                let found = untracked::walk(
+                    &handle,
+                    repo.hash(),
+                    worktree.safe_root(),
+                    &filter.index,
+                    None,
+                    walk_limit,
+                    read_bytes,
+                    cancel,
+                    Some(&mut read),
+                )?;
+                let mut files = Vec::with_capacity(read.len());
+                for (path, content) in read {
+                    let list = Arc::new(pattern_list(&path, &content));
+                    filter.insert(&path, Arc::clone(&list));
+                    seen.insert(path.clone());
+                    files.push((path, list));
+                }
+                filter.walked = (!found.capped).then(|| Walked {
+                    files,
+                    untracked: found.entries.len(),
+                    repositories: found
+                        .entries
+                        .into_iter()
+                        .filter(|(_, kind)| *kind == Kind::Repository)
+                        .map(|(path, _)| path)
+                        .collect(),
+                });
+            }
         }
 
         // Tracked `.gitignore` files the walk didn't reach (it stopped at its
@@ -310,17 +415,62 @@ impl Filter {
     }
 
     fn add(&mut self, path: &RepoPath, content: &[u8]) {
+        self.insert(path, Arc::new(pattern_list(path, content)));
+    }
+
+    fn insert(&mut self, path: &RepoPath, list: Arc<List<Ignore>>) {
         let dir = parent(path.as_bytes()).unwrap_or_default();
-        let list = List::from_bytes(
-            content,
-            crate::conversion::os_path(path.as_bytes()),
-            Some(Path::new("")),
-            Ignore::default(),
-        );
         self.lists.insert(self.key(dir), list);
         if let Some(path) = WatchPath::new(path.as_bytes()) {
             self.rule_files.push(path);
         }
+    }
+
+    /// What a walk on `index` would find, when it is provably what this
+    /// filter's walk (or the one it reused) found: same worktree, same
+    /// `core.ignoreCase` and `core.precomposeUnicode`, that walk complete,
+    /// and no directory it didn't enter for the index's sake entered now:
+    /// the same submodules, every nested repository it skipped still one
+    /// with no index path beneath, and not more untracked entries than the
+    /// limit. Directories it entered and a walk now wouldn't (a new nested
+    /// repository) are `rebuild`'s to drop. fs_watch only passes the filter
+    /// when every reload since its load was an index change and every
+    /// worktree event since was judged by a current filter, so none touched
+    /// the rules or moved directories (fs_watch design「路径分类」): the
+    /// files read then are as on disk.
+    fn reusable(
+        &self,
+        worktree: &Worktree,
+        index: &TrackedView,
+        case: Case,
+        precompose: bool,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Option<Walked>, GitError> {
+        let Some(walked) = &self.walked else {
+            return Ok(None);
+        };
+        if self.root != worktree.root() || self.case != case || self.precompose != precompose {
+            return Ok(None);
+        }
+        let Some(removed) = removed_paths(&self.index.paths, &index.paths, cancel)? else {
+            return Ok(None);
+        };
+        let untracked = walked.untracked.saturating_add(removed);
+        if untracked > limit {
+            return Ok(None);
+        }
+        let fold = case == Case::Fold;
+        for repository in &walked.repositories {
+            let dir = repository.as_bytes();
+            if index.has_beneath(dir, fold) || !is_repository(worktree, dir) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(Walked {
+            untracked,
+            ..walked.clone()
+        }))
     }
 
     /// Whether git would read the `.gitignore` at `path`: no directory above
@@ -357,6 +507,66 @@ impl Filter {
         match gix::utils::str::precompose_bstr(Cow::Borrowed(path.as_bstr())) {
             Cow::Borrowed(_) => Cow::Borrowed(path),
             Cow::Owned(path) => Cow::Owned(path.into()),
+        }
+    }
+}
+
+/// The rules of the `.gitignore` at `path`.
+fn pattern_list(path: &RepoPath, content: &[u8]) -> List<Ignore> {
+    List::from_bytes(
+        content,
+        crate::conversion::os_path(path.as_bytes()),
+        Some(Path::new("")),
+        Ignore::default(),
+    )
+}
+
+/// How many of `old`'s paths `new` doesn't have, or None when the two
+/// differ in a submodule (a gitlink added, removed or turned into a file):
+/// that changes which directories the untracked walk enters. One pass over
+/// both sorted lists.
+fn removed_paths(
+    old: &TrackedPaths,
+    new: &TrackedPaths,
+    cancel: &AtomicBool,
+) -> Result<Option<usize>, GitError> {
+    if std::ptr::eq(old, new) {
+        return Ok(Some(0));
+    }
+    let (a, b) = (entries(old), entries(new));
+    let gitlink = |e: &TrackedEntry| e.mode == Mode::Gitlink;
+    let (mut i, mut j, mut removed) = (0, 0, 0);
+    loop {
+        if (i + j) % 4096 == 0 && cancel.load(Ordering::Relaxed) {
+            return Err(GitError::Cancelled);
+        }
+        let step = match (a.get(i), b.get(j)) {
+            (None, None) => return Ok(Some(removed)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) => x.path.as_bytes().cmp(y.path.as_bytes()),
+        };
+        match step {
+            std::cmp::Ordering::Equal => {
+                if gitlink(&a[i]) != gitlink(&b[j]) {
+                    return Ok(None);
+                }
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => {
+                if gitlink(&a[i]) {
+                    return Ok(None);
+                }
+                removed += 1;
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                if gitlink(&b[j]) {
+                    return Ok(None);
+                }
+                j += 1;
+            }
         }
     }
 }

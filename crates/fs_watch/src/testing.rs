@@ -15,7 +15,7 @@ use lectern_kernel::BusyGuard;
 use crate::backend::{Armed, Backend, BackendError, EventSink, Flags, RawBatch, RawEvent, Target};
 use crate::clock::Clock;
 use crate::path::WatchPath;
-use crate::source::{PathFilter, Sink, SourceError, Tracked, WorktreeSource};
+use crate::source::{FilterRequest, PathFilter, Sink, SourceError, Tracked, WorktreeSource};
 use crate::util::lock;
 use crate::watcher::{Config, Mode, Shared, Watcher};
 
@@ -331,6 +331,13 @@ impl Driver {
         self.run_until_idle();
     }
 
+    /// Processes the fs_watch queue once, without running the executor:
+    /// loads it starts stay pending until `run_until_idle` (or the
+    /// executor's own `run_until_idle`). Returns the items processed.
+    pub fn pump(&self) -> usize {
+        self.shared.pump(true)
+    }
+
     #[cfg(test)]
     pub(crate) fn shared(&self) -> &Arc<Shared> {
         &self.shared
@@ -403,6 +410,7 @@ struct SourceState {
     filter_error: Option<String>,
     config_error: Option<String>,
     gitignores: Vec<Vec<WatchPath>>,
+    previous: Vec<Option<usize>>,
 }
 
 /// An in-memory filter and config source. The filter answers from the
@@ -414,8 +422,8 @@ struct SourceState {
 ///   trailing `/` only directories;
 /// - a pattern with an inner `/` ignores exactly that path.
 ///
-/// Counts the calls and records the `gitignores` argument of each filter
-/// load.
+/// Counts the calls and records the `gitignores` and `previous` of each
+/// filter load.
 #[derive(Default)]
 pub struct FakeSource {
     state: Mutex<SourceState>,
@@ -503,17 +511,32 @@ impl FakeSource {
     pub fn gitignores(&self) -> Vec<Vec<WatchPath>> {
         lock(&self.state).gitignores.clone()
     }
+
+    /// For every filter load so far, the load (counted from 1) that built
+    /// the filter given as `FilterRequest::previous`, or None when there
+    /// was none.
+    pub fn previous(&self) -> Vec<Option<usize>> {
+        lock(&self.state).previous.clone()
+    }
 }
 
 impl WorktreeSource for FakeSource {
     fn filter(
         &self,
-        gitignores: &[WatchPath],
+        request: &FilterRequest<'_>,
         _cancel: &AtomicBool,
     ) -> Result<Arc<dyn PathFilter>, SourceError> {
-        self.filter_calls.fetch_add(1, SeqCst);
+        let load = self.filter_calls.fetch_add(1, SeqCst) + 1;
         let mut state = lock(&self.state);
-        state.gitignores.push(gitignores.to_vec());
+        state.gitignores.push(request.gitignores.to_vec());
+        let previous = request.previous.map(|filter| {
+            let filter: &dyn std::any::Any = filter;
+            filter
+                .downcast_ref::<FakeFilter>()
+                .expect("a FakeSource filter")
+                .load
+        });
+        state.previous.push(previous);
         if let Some(error) = &state.filter_error {
             return Err(SourceError(error.clone()));
         }
@@ -526,6 +549,7 @@ impl WorktreeSource for FakeSource {
             }
         }
         Ok(Arc::new(FakeFilter {
+            load,
             tracked: state.tracked.clone(),
             dirs,
             gitlinks: state.gitlinks.clone(),
@@ -545,6 +569,8 @@ impl WorktreeSource for FakeSource {
 }
 
 struct FakeFilter {
+    /// The filter load that built it, counted from 1.
+    load: usize,
     tracked: BTreeSet<Vec<u8>>,
     dirs: BTreeSet<Vec<u8>>,
     gitlinks: BTreeSet<Vec<u8>>,

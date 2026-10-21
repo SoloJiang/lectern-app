@@ -49,6 +49,28 @@ enum Filter {
     Failed(String),
 }
 
+/// Why the filter is reloaded (docs/design/fs_watch.md「路径分类」).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Reload {
+    /// Only the worktree's `index` changed: the load may reuse what the
+    /// filter in place found on disk (`FilterRequest::previous`).
+    Index,
+    /// Anything else (the first load, a `.gitignore` or directory event,
+    /// `info/exclude`, the config, a rescan): the load reads the worktree.
+    Full,
+}
+
+impl Reload {
+    /// Two reloads served by one load: `Index` only when both are.
+    fn and(self, other: Reload) -> Reload {
+        if self == Reload::Index && other == Reload::Index {
+            Reload::Index
+        } else {
+            Reload::Full
+        }
+    }
+}
+
 /// Steps 4–9 of the classification.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verdict {
@@ -69,8 +91,16 @@ pub(crate) struct WorktreeState {
     /// installed; also true until the first filter is in.
     stale: bool,
     filter_load: Option<Load>,
-    /// A reload triggered while one was running, with its `.gitignore` paths.
-    filter_again: Option<BTreeSet<WatchPath>>,
+    /// Reloads triggered while one was running, with their `.gitignore`
+    /// paths and their reasons combined.
+    filter_again: Option<(BTreeSet<WatchPath>, Reload)>,
+    /// Some worktree event arrived while no current filter could judge its
+    /// reload trigger (a load in flight, the filter `Failed` or not built
+    /// yet): it may have been a new rule file that triggered nothing. Until
+    /// a load that started after it installs, no load gets `previous`.
+    /// Cleared when a load without `previous` starts; set again by events
+    /// during that load and by its failure.
+    unsure: bool,
     config_load: Option<Load>,
     config_again: bool,
     config_ready: bool,
@@ -106,6 +136,7 @@ impl WorktreeState {
             stale: true,
             filter_load: None,
             filter_again: None,
+            unsure: false,
             config_load: None,
             config_again: false,
             config_ready: false,
@@ -164,7 +195,7 @@ impl WorktreeState {
             Err(BackendError::NotFound) => return self.fail(ctx, common, Failure::RootGone),
             Err(error) => return self.fail(ctx, common, Failure::Backend(error.to_string())),
         }
-        self.reload_filter(ctx, BTreeSet::new());
+        self.reload_filter(ctx, BTreeSet::new(), Reload::Full);
         self.reload_config(ctx, common);
     }
 
@@ -240,6 +271,11 @@ impl WorktreeState {
             return;
         }
         let now = ctx.now();
+        // Whether pass 1 judged this batch's triggers with a filter that may
+        // not match the rules on disk (`unsure`). Taken before pass 1: a load
+        // it starts reads the worktree after this whole batch.
+        let unjudged = self.stale || matches!(self.filter, Filter::Failed(_));
+        let loading = self.filter_load.is_some();
         // Pass 1: does this raw batch trigger a filter reload? From this raw
         // batch on, the filter is stale.
         let mut gitignores = BTreeSet::new();
@@ -254,8 +290,12 @@ impl WorktreeState {
             }
         }
         if reload {
-            self.reload_filter(ctx, gitignores);
+            self.reload_filter(ctx, gitignores, Reload::Full);
         }
+        // A load pass 1 started (none was running) reads the worktree after
+        // every event of this batch, so none of them is unsure; one queued
+        // behind a running load doesn't help the running one.
+        let unsure = unjudged && !(reload && !loading);
         // Pass 2: classify.
         let mut config = false;
         let mut rescan = false;
@@ -288,6 +328,9 @@ impl WorktreeState {
             if path.split(|&b| b == b'/').any(|name| name == b".git") {
                 continue;
             }
+            if unsure {
+                self.unsure = true;
+            }
             match self.verdict(path, event.flags, unfiltered, self.stale) {
                 Verdict::Deliver { rules } => {
                     self.mark();
@@ -319,7 +362,7 @@ impl WorktreeState {
             sub.acc.set_rescan();
             sub.sub.touch(now);
         }
-        self.reload_filter(ctx, BTreeSet::new());
+        self.reload_filter(ctx, BTreeSet::new(), Reload::Full);
         self.reload_config(ctx, common);
     }
 
@@ -478,28 +521,57 @@ impl WorktreeState {
         }
         self.meta(ctx, |meta| meta.config = true);
         self.reload_config(ctx, common);
-        self.reload_filter(ctx, BTreeSet::new());
+        self.reload_filter(ctx, BTreeSet::new(), Reload::Full);
     }
 
     // --- loads -------------------------------------------------------------
 
     /// Starts a filter load, or queues one after the running load. The filter
     /// is stale from now until a result is installed.
-    pub(crate) fn reload_filter(&mut self, ctx: &mut Ctx, gitignores: BTreeSet<WatchPath>) {
+    ///
+    /// The filter in place goes to the source as `FilterRequest::previous`
+    /// only when nothing but the index can have changed what its load read:
+    /// every reload requested since that load started is served by this one
+    /// (queued ones in `filter_again`) and all are `Reload::Index`, and every
+    /// worktree event since was judged by a current filter (not `unsure`),
+    /// so no rule file or moved directory went by without a trigger.
+    pub(crate) fn reload_filter(
+        &mut self,
+        ctx: &mut Ctx,
+        gitignores: BTreeSet<WatchPath>,
+        reload: Reload,
+    ) {
         if self.failure.is_some() {
             return;
         }
         self.stale = true;
         if self.filter_load.is_some() {
-            self.filter_again.get_or_insert_default().extend(gitignores);
+            let again = self
+                .filter_again
+                .get_or_insert_with(|| (BTreeSet::new(), Reload::Index));
+            again.0.extend(gitignores);
+            again.1 = again.1.and(reload);
             return;
         }
         let source = self.source.clone();
         let gitignores: Vec<WatchPath> = gitignores.into_iter().collect();
+        let previous = match (&self.filter, reload) {
+            (Filter::Ready(filter), Reload::Index) if !self.unsure => Some(filter.clone()),
+            _ => None,
+        };
+        if previous.is_none() {
+            // This load reads the worktree after every event so far.
+            self.unsure = false;
+        }
         let epoch = self.epoch();
         self.filter_load = Some(self.spawn(ctx, move |cancel| {
-            let result = contain(|| source.filter(&gitignores, cancel))
+            let request = crate::source::FilterRequest {
+                gitignores: &gitignores,
+                previous: previous.as_deref(),
+            };
+            let result = contain(|| source.filter(&request, cancel))
                 .unwrap_or_else(|message| Err(SourceError(format!("panicked: {message}"))));
+            drop(previous);
             move |load| Cmd::FilterLoaded {
                 epoch,
                 load,
@@ -587,12 +659,15 @@ impl WorktreeState {
         drop(finished);
         self.filter = match result {
             Ok(filter) => Filter::Ready(filter),
-            Err(error) => Filter::Failed(error.0),
+            Err(error) => {
+                self.unsure = true;
+                Filter::Failed(error.0)
+            }
         };
         self.cache.clear();
-        if let Some(again) = self.filter_again.take() {
+        if let Some((gitignores, reload)) = self.filter_again.take() {
             // Paths stay held for the newer filter.
-            self.reload_filter(ctx, again);
+            self.reload_filter(ctx, gitignores, reload);
         } else {
             self.stale = false;
             self.reclassify(ctx, unfiltered);
@@ -690,7 +765,7 @@ impl WorktreeState {
             }
         }
         if reload {
-            self.reload_filter(ctx, gitignores);
+            self.reload_filter(ctx, gitignores, Reload::Full);
         }
     }
 

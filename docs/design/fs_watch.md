@@ -402,18 +402,30 @@ pub enum ResetReason {
 ```rust
 /// `git` 实现（`git::Worktree::watch_source`），见「对其他 crate 的要求」。
 pub trait WorktreeSource: Send + Sync + 'static {
-    /// 读 index 和忽略规则（含未被忽略目录里未跟踪的 `.gitignore`），构造过滤器。`gitignores` 是触发这次加载的事件里的
-    /// `.gitignore` 路径：遍历达到条目上限、没有找到它们时也读入；上级目录被忽略的照样不读。阻塞；fs_watch 在 executor 的 `Background` 任务里调用，
+    /// 读 index 和忽略规则（含未被忽略目录里未跟踪的 `.gitignore`），构造过滤器。阻塞；fs_watch 在 executor 的 `Background` 任务里调用，
     /// `cancel` 置位时放弃。
-    fn filter(&self, gitignores: &[WatchPath], cancel: &AtomicBool) -> Result<Arc<dyn PathFilter>, SourceError>;
+    fn filter(&self, request: &FilterRequest<'_>, cancel: &AtomicBool) -> Result<Arc<dyn PathFilter>, SourceError>;
     /// 这个 worktree 的生效配置、忽略规则和属性规则读取（或文件出现时会读取）的全部文件，绝对路径，可以不存在。
     /// 阻塞；调用方式同上。
     fn config_files(&self, cancel: &AtomicBool) -> Result<Vec<PathBuf>, SourceError>;
 }
 
+/// 一次过滤器加载要的东西（见「路径分类」）。
+#[derive(Clone, Copy, Default)]
+pub struct FilterRequest<'a> {
+    /// 触发这次加载的事件里的 `.gitignore` 路径：遍历达到条目上限、没有找到它们时也读入；上级目录被忽略的照样不读。
+    pub gitignores: &'a [WatchPath],
+    /// 在用的过滤器，只在它的加载开始以来的重新加载都是 index 变化、其间的工作区事件都由当时有效的过滤器判断过时给出
+    /// （见「路径分类」末段）：其间没有事件动过 `.gitignore`、含规则文件的目录、改名或删除的目录、`info/exclude`
+    /// 和配置，也没有 rescan。来源可以沿用那次加载在工作区里读到的东西
+    /// （`git` 沿用未跟踪遍历），前提是能证明结果与完整加载相同，否则完整加载。其余加载为 None。
+    pub previous: Option<&'a dyn PathFilter>,
+}
+
 /// 只在内存里查询，不做 IO，任何线程。路径相对 worktree 根，满足 `WatchPath` 的不变量。
 /// 大小写与 Unicode 规范化按仓库的 `core.ignoreCase`、`core.precomposeUnicode` 处理，由实现负责。
-pub trait PathFilter: Send + Sync + 'static {
+/// 以 `Any` 为父 trait，来源借此在 `FilterRequest::previous` 里认出自己的过滤器。
+pub trait PathFilter: Any + Send + Sync + 'static {
     fn tracked(&self, path: &[u8]) -> Tracked;
     /// 只看 `path` 自身是否被忽略规则排除，不看上级目录；上级目录由 fs_watch 逐级检查（见「路径分类」）。
     fn ignored(&self, path: &[u8], is_dir: bool) -> bool;
@@ -470,6 +482,8 @@ pub mod testing {
         pub fn run_until_idle(&self) -> usize;
         /// 推进假时钟，触发到期的合并窗口，然后 `run_until_idle`。
         pub fn advance(&self, by: Duration);
+        /// 只处理一次 fs_watch 的队列，不运行 executor：开始的加载留在途中，供测试在加载前后插入事件。
+        pub fn pump(&self) -> usize;
     }
 
     /// 记录收到的批次和是否带守卫。
@@ -501,6 +515,8 @@ pub mod testing {
         pub fn config_calls(&self) -> usize;
         /// 每次 `filter` 调用的 `gitignores` 参数。
         pub fn gitignores(&self) -> Vec<Vec<WatchPath>>;
+        /// 每次 `filter` 调用收到的 `previous` 是第几次加载（从 1 起）构造的过滤器，没有时为 None。
+        pub fn previous(&self) -> Vec<Option<usize>>;
     }
 }
 ```
@@ -522,6 +538,8 @@ worktree 状态收到工作区根目标上的一个事件，路径为 `p`（相�
 第 6 步的结果按目录缓存（每个 worktree 状态最多 1024 个目录，两代缓存近似最近使用淘汰：当前一代满 512 项时变为上一代，上一代里命中的项移回当前一代），过滤器替换时清空，所以 `npm install` 写出的几万个 `node_modules/**` 事件每个只需一次缓存查找。
 
 过滤器在以下情况重新加载（executor 上调用 `WorktreeSource::filter`，同时最多一个，加载期间又触发的在结束后再加载一次）：worktree 状态 arm 时；这个 worktree 的 `index` 变化；任何 `.gitignore` 变化（第 7 步）；事件路径是 `PathFilter::rule_files` 里某个文件的上级目录（目录被改名、删除时后端可能只报告目录本身）；带 `DIR` 且带 `RENAMED` 或 `REMOVED` 的事件（保守处理：移进来的目录里的新 `.gitignore` 由重新加载的遍历找到）；`info/exclude` 变化；公共目录的 `config`、这个 worktree 的 `config.worktree` 或配置清单里的文件变化（`core.excludesFile`、`core.ignoreCase` 可能变了）；工作区根目标上的 `RESCAN`。按事件路径触发的几条（`.gitignore`、规则文件的上级目录、目录改名或删除）只看按当前过滤器不被丢弃的路径：被忽略目录里的目录改名（`npm install` 写 `node_modules/.staging/*` 后改名）不触发；第一次加载完成之前暂存的路径在第一个过滤器装上后按它判断，判为交付的再触发一次。
+
+只由 index 变化触发的重新加载把在用的过滤器作为 `FilterRequest::previous` 交给来源，`git` 据此沿用上一次的未跟踪遍历，不再列目录（[git 设计「index」](git.md#index)）。依据：加载期间又触发的重新加载都由下一次加载完成，所以一次加载服务的是在用过滤器的加载开始以来的全部触发；会改变遍历结果的事件（`.gitignore`、规则文件的上级目录、目录改名或删除）都会触发一次不是 index 的重新加载，但只在判断它的过滤器与磁盘上的规则一致时才可靠：过滤器过期（有加载在途）、失败或还没有第一个时，一个新的规则文件可能被判为丢弃、不触发（加载开始后删掉 `.gitignore` 里的 `out/`，加载的遍历列过 `out/` 之后才新建 `out/.gitignore`，旧过滤器仍忽略 `out/`，这个事件丢弃；失败的过滤器只认 `.gitignore` 路径，移进来的目录不触发；第一次加载之前暂存的项合并成目录、或溢出成 rescan 时，规则文件的信号丢了）。所以 worktree 状态记一个「不确定」标记：这三种情况下到达的任何工作区事件（过了第 3 步的）都置位，加载失败也置位；状态按原始批次到达时判断，所以一个原始批次自己触发、在没有加载在途时开始的那次加载不算（它在整个批次之后才读工作区），排在在途加载之后的仍算；一次不带 `previous` 的加载开始时清除，因为它在这之后才读工作区，看得到此前的一切。只有标记未置位时才给 `previous`。代价是偶尔多一次完整加载（例如 index 加载期间编辑了文件，下一次 index 变化仍完整加载一次），换来不变量：`previous` 给出时，从它的加载开始以来的重新加载都是 index 变化，其间的每个工作区事件都由当时有效的过滤器判断过，所以没有规则文件或目录变化漏掉。所以下列情况都不给 `previous`：第一次加载；服务的触发里有任何一个不是 index 变化（合并进同一次加载的也算）；在用的是失败的加载；「不确定」标记置位。index 本身的变化也可能改变遍历（子模块、嵌套仓库之下有没有跟踪的路径、未跟踪条目是否到上限），由来源自己判断能否沿用。
 
 从触发重新加载的原始批次起，到新过滤器装上为止，过滤器是过期的：走到第 6、8、9 步的路径（旧过滤器认为不受跟踪的，无论判为丢弃还是未跟踪；第 7 步的规则文件照常交付并触发加载）先暂存，照样计入修订号；新过滤器装上后重新分类，交付的路径并入当前批次。第一次加载完成之前的路径同样暂存。这样 `git add -f build/out.js` 之后紧接着的修改不会因为旧过滤器认为它被忽略而丢失，新建 `.gitignore` 之后紧接着写出的 `node_modules/**` 也会按新规则丢弃，而不是按旧规则作为未跟踪路径交付。暂存最多 4096 项：超过时把同一目录下的项合并成这个目录（从最深的目录开始），重新分类时被忽略的目录连同其下全部路径丢弃，否则作为目录路径交付；只有合并到 worktree 根仍超过上限时才改为 `rescan`。暂存期间这个订阅的批次不交付，合并窗口顺延到过滤器装上。
 
@@ -664,7 +682,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 ## 对其他 crate 的要求
 
 - `git`：提供 `Worktree::watch_source(&self) -> Arc<dyn lectern_fs_watch::WorktreeSource>`，持有这个 `Worktree` 句柄（与 `project` 共用同一份 index 解析结果，index 没变时 `tracked` 返回同一个 `Arc`，过滤器不另占一份文件列表的内存）：
-  - `filter`：`tracked()` 加上忽略规则。忽略规则在构造时一次读完：`info/exclude`、`core.excludesFile`（或默认位置）、index 里每个名为 `.gitignore` 的路径在工作区里的文件，以及未被忽略的目录里未跟踪的 `.gitignore`（都经 `SafeRoot` 读取）；`ignored` 只做内存里的模式匹配，不按需读文件。未跟踪的 `.gitignore` 由一次目录遍历找出，与工作区比较的第 4 步（[git 设计「工作区比较」](git.md)）是同一个遍历（经 `SafeRoot` 列目录、读 `.gitignore`，[ADR 0028](../adr/0028.md)）：不进入被忽略的目录，受同一个 20 000 个条目的上限，代价与一次未跟踪文件枚举相同，只在构造过滤器时付出。实现细节（遍历没有走到的 index 里的 `.gitignore`、skip-worktree 条目、配置清单的来源路径）见 [git 设计「index」](git.md#index)。agent 先新建 `.gitignore`、还没 `git add` 就生成 `node_modules/**` 时：`.gitignore` 的事件交付并触发重新加载（「路径分类」第 7 步），新的过滤器读到这份未跟踪的规则，这期间的 `node_modules/**` 事件按「路径分类」的暂存机制留住、由新过滤器重新分类后丢弃，不会溢出成 `rescan`。`gitignores` 参数只绕过遍历的条目上限，不绕过上级目录的检查：上级目录被忽略的 `.gitignore`（如 `node_modules/` 里的）任何情况下都不读，与 git 相同。按 `core.ignoreCase`、`core.precomposeUnicode` 比较路径。
+  - `filter`：`tracked()` 加上忽略规则。忽略规则在构造时一次读完：`info/exclude`、`core.excludesFile`（或默认位置）、index 里每个名为 `.gitignore` 的路径在工作区里的文件，以及未被忽略的目录里未跟踪的 `.gitignore`（都经 `SafeRoot` 读取）；`ignored` 只做内存里的模式匹配，不按需读文件。未跟踪的 `.gitignore` 由一次目录遍历找出，与工作区比较的第 4 步（[git 设计「工作区比较」](git.md)）是同一个遍历（经 `SafeRoot` 列目录、读 `.gitignore`，[ADR 0028](../adr/0028.md)）：不进入被忽略的目录，受同一个 20 000 个条目的上限，代价与一次未跟踪文件枚举相同，只在构造过滤器时付出；给出 `previous` 时，能证明结果相同就沿用那个过滤器的遍历，不再遍历（「路径分类」末段）。实现细节（遍历没有走到的 index 里的 `.gitignore`、skip-worktree 条目、配置清单的来源路径）见 [git 设计「index」](git.md#index)。agent 先新建 `.gitignore`、还没 `git add` 就生成 `node_modules/**` 时：`.gitignore` 的事件交付并触发重新加载（「路径分类」第 7 步），新的过滤器读到这份未跟踪的规则，这期间的 `node_modules/**` 事件按「路径分类」的暂存机制留住、由新过滤器重新分类后丢弃，不会溢出成 `rescan`。`gitignores` 参数只绕过遍历的条目上限，不绕过上级目录的检查：上级目录被忽略的 `.gitignore`（如 `node_modules/` 里的）任何情况下都不读，与 git 相同。按 `core.ignoreCase`、`core.precomposeUnicode` 比较路径。
   - `config_files`：按「配置文件清单」给出的内容，路径来自 gix 配置节的来源元数据和 `include` 值的解析，不运行 git 命令行、不读 `GIT_*` 环境变量。
   - `WorktreeName` 与 `WorktreeId` 的转换。
   - 这是 [git 设计](git.md)「index」一节「`app` 把 `TrackedPaths` 包成 `fs_watch` 定义的过滤接口传进去」的具体做法：适配放在 `git` 里，`project`、`review` 共用，在 Linux 上可以测试。
@@ -759,6 +777,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 
 - 路径分类（`filter_*`）：「路径分类」每一步一个用例：受跟踪文件、未跟踪未忽略文件交付；`node_modules/**` 丢弃；被忽略目录里的受跟踪文件交付；自身被忽略规则排除的 `.gitignore`、`.gitattributes` 交付并置 `rules`，被忽略目录里的（`node_modules/x/.gitignore`）丢弃、不触发重新加载；主 worktree 的 `.git/**` 和嵌套仓库的 `.git/**` 丢弃；子模块内部丢弃、子模块路径本身交付；不过滤清单里的被忽略路径和它们的上级目录交付；不满足 `WatchPath` 不变量的路径丢弃；目录缓存在过滤器替换后失效；只报告目录本身的改名或删除，目录里有 `rule_files` 中的文件、或事件带 `DIR` 与 `RENAMED` 时都触发重新加载。
 - 过期的过滤器（`filter_stale_*`）：`index` 变化后、新过滤器装上之前，旧过滤器认为被忽略的路径暂存，装上后按新过滤器交付（`git add -f` 的场景）；新建未跟踪的 `.gitignore` 后紧接着写出 1 万个 `node_modules/**` 事件，重新加载时 `gitignores` 带上这个路径，这些事件被暂存（超过 4096 项时合并为 `node_modules/`）后丢弃，不变成 `rescan`；暂存期间修订号照样加一；第一次加载完成前的事件不丢；合并到 worktree 根仍超过上限时改为 `rescan`；加载失败为 `Degraded(Filter)` 并全部交付。
+- 沿用的过滤器（`filter_reuse_*`）：`index` 变化的重新加载收到在用的过滤器作为 `previous`（`FakeSource::previous` 给出是第几次加载构造的），连续的也是；`.gitignore`、规则文件的上级目录、目录改名、`info/exclude`、配置、两种 `rescan` 触发的都没有；一次 index 加载期间来了 `.gitignore` 事件又来了 index 变化时，合并的那一次没有，之后只有 index 变化的又有；第一次加载之前暂存了 `.gitignore`、又排上了 index 变化时都没有；失败的加载之后没有。「不确定」标记的三种情形各一个：加载在途时旧过滤器把新的 `out/.gitignore` 判为丢弃（`filter_reuse_not_after_a_rule_file_the_old_filter_dropped`），失败的过滤器之上的加载期间移进来一个目录（`…_events_during_a_load_over_a_failed_filter`），第一次加载之前 5000 个事件合并成目录、其中有 `.gitignore`（`…_an_overflow_before_the_first_filter`）：之后的第一次 index 加载都没有 `previous`，再下一次又有；去掉标记时这三个都失败。`.gitignore` 的修改连同同一批的文件修改和目录改名开始的那次加载之后，下一次 index 变化就沿用它（`filter_reuse_after_the_load_a_batch_started`）。`git` 一侧的端到端测试（`watch_source_events_*`）用这个接口和真实的过滤器：index 变化之后新建、修改未跟踪目录里的 `.gitignore`，移进来一个含 `.gitignore` 的目录，之后的事件都按新规则分类；用 `Driver::pump` 重现上面第一种竞争，之后 index 变化时 `out/a.log` 按新读到的 `out/.gitignore` 丢弃（[git 设计「index」](git.md#index)）。
 - 修订号（`revision_*`）：「修订号」每一条、「git 元数据」表每一行一个用例，各自恰好加一；同一原始批次里多个事件只加一；只有被忽略路径、`.lock` 文件、`objects/` 的批次不加一；另一个 worktree 的 HEAD 不让这个 worktree 加一，`refs/` 让全部 worktree 加一；配置清单里的文件、它的符号链接目标变化时加一；重新监听后 `epoch` 不同。
 - flush（`flush_*`）：`FakeBackend::hold` 留住的事件在 `flush_revision` 之后计入；`flush_revision` 不提前交付正在合并的批次；在 `Sink::deliver` 里调用返回 `WouldDeadlock`；状态失败后返回 `NotWatching`；arm 还没完成时等 arm；超时返回 `Timeout`。
 - 合并（`coalesce_*`）：`quiet` 内的事件合成一批；连续事件在 `max_delay` 时交付；两个句柄用不同参数各自交付；路径超过上限改为 `rescan`；`health` 变化立即交付；没有等待中的批次时不设定时器。
@@ -838,6 +857,12 @@ macOS CI 要确认的：
 
 - `just test -p lectern-platform` 里 `fsevents_*`、`kqueue_*` 全部通过（即验收第 3 步的第一条）；尤其是 FSEvents 在根目录被删除、被改名时确实报告 `RootChanged`，以及 FSEvents 在流刚启动时报告事件的延迟在测试的期限之内。
 - 测试二进制能链接（`CoreServices`、`CoreFoundation` 两个框架和 libdispatch 的符号）。
+
+`FilterRequest::previous`（只有 index 变化时沿用在用的过滤器，[git 设计「index」](git.md#index)，`Refs #14`），Linux：
+
+- `just test -p lectern-fs-watch`：112 个测试通过，新加 `filter_reuse_*` 9 个（见「测试」）。原来的 `filter_*`、`filter_stale_*` 没有改动，照常通过。
+- 自审发现的竞争（「路径分类」末段的「不确定」标记）：只按触发的种类决定 `previous` 时，加载在途时被旧过滤器判为丢弃的新规则文件之后一直不会被读到，直到下一次不是 index 的重新加载；改动之前下一次 index 变化的完整遍历会补上它。现在这三种情形之后的第一次 index 加载完整进行，`filter_reuse_not_after_*` 和 git 的 `watch_source_events_rule_file_missed_during_a_load_is_read_by_the_next_index_load` 在去掉标记时失败。
+- 接口改为 `filter(&FilterRequest, ..)`：`git`、`code_intel` 的 `LazySource`、`FakeSource` 和 bench 的调用一并改了。`git/filter_100k` 的数字见 git 设计「实际验证」。
 
 ## 与设计的差异
 

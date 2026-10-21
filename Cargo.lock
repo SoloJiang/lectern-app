@@ -4334,6 +4334,7 @@ version = "0.0.0"
 dependencies = [
  "gix",
  "insta",
+ "lectern-executor",
  "lectern-fs-watch",
  "lectern-platform",
  "rustix",

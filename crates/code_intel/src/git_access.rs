@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
-use lectern_fs_watch::{PathFilter, SourceError, WatchPath, WorktreeSource};
+use lectern_fs_watch::{FilterRequest, PathFilter, SourceError, WorktreeSource};
 use lectern_git::{
     Base, EntryLimits, GitError, HashKind, HeadState, Limits, Mode, Oid, Repo, RepoPath, Status,
     Worktree, WorktreeId,
@@ -289,10 +289,10 @@ impl LazySource {
 impl WorktreeSource for LazySource {
     fn filter(
         &self,
-        gitignores: &[WatchPath],
+        request: &FilterRequest<'_>,
         cancel: &AtomicBool,
     ) -> Result<Arc<dyn PathFilter>, SourceError> {
-        self.source()?.filter(gitignores, cancel)
+        self.source()?.filter(request, cancel)
     }
 
     fn config_files(&self, cancel: &AtomicBool) -> Result<Vec<PathBuf>, SourceError> {

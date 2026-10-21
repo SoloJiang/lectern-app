@@ -10,7 +10,7 @@ use lectern_kernel::BusyGuard;
 
 use super::config::ConfigPlan;
 use super::sub::{RepoAcc, Sub};
-use super::worktree::WorktreeState;
+use super::worktree::{Reload, WorktreeState};
 use super::{Ctx, Role};
 use crate::backend::{BackendError, Flags, RawBatch, Scope, Target};
 use crate::path::{WatchPath, file_name, is_within};
@@ -215,7 +215,7 @@ impl RepoState {
                     });
                     for worktree in self.named(&name) {
                         worktree.meta(ctx, |meta| meta.index = true);
-                        worktree.reload_filter(ctx, BTreeSet::new());
+                        worktree.reload_filter(ctx, BTreeSet::new(), Reload::Index);
                     }
                 }
                 Meta::ConfigWorktree(name) => {
@@ -239,7 +239,7 @@ impl RepoState {
                     self.repo(now, |acc| acc.config = true);
                     self.all(ctx, |meta| meta.config = true);
                     for worktree in self.worktrees.values_mut() {
-                        worktree.reload_filter(ctx, BTreeSet::new());
+                        worktree.reload_filter(ctx, BTreeSet::new(), Reload::Full);
                     }
                 }
                 Meta::InfoAttributes => {
@@ -291,7 +291,7 @@ impl RepoState {
                     rules: true,
                 }
             });
-            worktree.reload_filter(ctx, BTreeSet::new());
+            worktree.reload_filter(ctx, BTreeSet::new(), Reload::Full);
             worktree.reload_config(ctx, &common);
         }
         self.read_reflogs(ctx, &[Vec::new()]);

@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Value};
+use lectern_fs_watch::{FilterRequest, PathFilter};
 use lectern_git::testing::{self, IndexEntry, TestHead, TestRepo};
 use lectern_git::{Base, EntryLimits, GitError, Limits, Mode, Oid, Refresh, RepoPath, WorktreeId};
 
@@ -439,13 +440,21 @@ fn walk(root: &lectern_platform::SafeRoot) -> Result<usize, BenchError> {
     Ok(seen)
 }
 
-/// The fs_watch filter rebuilt after the index changed (fs_watch design
-/// 「路径分类」): `WorktreeSource::filter` on a `Worktree` whose index is
-/// not parsed yet, so the index is parsed, the case-folded order sorted
-/// (`core.ignoreCase`), the untracked walk lists every directory and the
-/// `.gitignore` files are read. The filter of each sample is dropped with
-/// its `Worktree`, untimed. Planned for now (`active`); always recorded:
-/// `git/filter_100k/walk`, one `walk` of the same worktree.
+/// The fs_watch filter rebuilt after an index-only change, as fs_watch asks
+/// for it (fs_watch design「路径分类」): `WorktreeSource::filter` on a
+/// `Worktree` whose index is not parsed yet, given the filter in place as
+/// `FilterRequest::previous`. The index is parsed, the case-folded order
+/// sorted (`core.ignoreCase`), the index compared with the previous
+/// filter's and the previous untracked walk reused (each sample checks
+/// `testing::filter_reused`). It writes the index, so it has its own copy
+/// of the large repository (ADR 0036): the filter in place is built before
+/// `git add` of one new file, every sample after. The filter of each sample
+/// is dropped with its `Worktree`, untimed.
+///
+/// Also recorded, on the shared repository: `git/filter_100k/cold`, the
+/// first build (no previous filter: the walk lists every directory and the
+/// `.gitignore` files are read), and `git/filter_100k/walk`, one `walk` of
+/// the same worktree.
 pub const FILTER_100K: Bench = Bench {
     id: "git/filter_100k",
     run: filter_100k,
@@ -461,33 +470,37 @@ fn filter_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     // Record-only diagnostic: one sample, warmed by the check above.
     let time = ctx.once(|| walk(black_box(&root)));
     out.push(Measured::new("git/filter_100k/walk", Value::Time(time)));
+    out.push(filter_100k_cold(ctx, &t)?);
+    drop(t);
     if active("git/filter_100k") {
-        out.push(filter_100k_full(ctx, &t)?);
+        out.push(filter_100k_after_index_change(ctx)?);
     }
     Ok(out)
 }
 
-fn filter_100k_full(ctx: &mut Ctx, t: &TestRepo) -> Result<Measured, BenchError> {
+fn source_error(e: lectern_fs_watch::SourceError) -> BenchError {
+    BenchError::new(e.0)
+}
+
+/// Times `filter` with `request` on a new `Worktree` for each sample;
+/// `check` must accept every filter built.
+fn time_filters(
+    ctx: &mut Ctx,
+    repo: &lectern_git::Repo,
+    request: &FilterRequest<'_>,
+    check: impl Fn(&dyn PathFilter) -> bool,
+) -> Result<lectern_bench::Samples, BenchError> {
     use std::cell::Cell;
 
-    let repo = t.repo();
     let cancel = AtomicBool::new(false);
-    let filter = repo
-        .worktree(&WorktreeId::Main)?
-        .watch_source()
-        .filter(&[], &cancel)
-        .map_err(|e| BenchError::new(e.0))?;
-    if !filter.ignored(b"node_modules", true) || filter.rule_files().len() != 1 {
-        return Err(BenchError::new("the filter misses the .gitignore"));
-    }
-    drop(filter);
     let failed = Cell::new(false);
     let time = ctx.time_with_setup(
         || repo.worktree(&WorktreeId::Main),
         |wt| {
-            let built = wt.map(|wt| (wt.watch_source().filter(&[], &cancel), wt));
-            if !matches!(built, Ok((Ok(_), _))) {
-                failed.set(true);
+            let built = wt.map(|wt| (wt.watch_source().filter(request, &cancel), wt));
+            match &built {
+                Ok((Ok(filter), _)) if check(&**filter) => {}
+                _ => failed.set(true),
             }
             built
         },
@@ -495,6 +508,63 @@ fn filter_100k_full(ctx: &mut Ctx, t: &TestRepo) -> Result<Measured, BenchError>
     if failed.get() {
         return Err(BenchError::new("building a filter failed"));
     }
+    Ok(time)
+}
+
+fn filter_100k_cold(ctx: &mut Ctx, t: &TestRepo) -> Result<Measured, BenchError> {
+    let repo = t.repo();
+    let cancel = AtomicBool::new(false);
+    let request = FilterRequest::default();
+    let filter = repo
+        .worktree(&WorktreeId::Main)?
+        .watch_source()
+        .filter(&request, &cancel)
+        .map_err(source_error)?;
+    if !filter.ignored(b"node_modules", true) || filter.rule_files().len() != 1 {
+        return Err(BenchError::new("the filter misses the .gitignore"));
+    }
+    drop(filter);
+    let time = time_filters(ctx, &repo, &request, |f| {
+        testing::filter_reused(f) == Some(false)
+    })?;
+    Ok(Measured::new("git/filter_100k/cold", Value::Time(time)))
+}
+
+fn filter_100k_after_index_change(ctx: &mut Ctx) -> Result<Measured, BenchError> {
+    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
+    let shape = lectern_project::testing::Shape::monorepo(files, manifests);
+    let (t, mut entries) = worktree::shaped_with_entries(&shape);
+    let repo = t.repo();
+    let cancel = AtomicBool::new(false);
+
+    // The filter in place, while the new file is untracked.
+    let added = "packages/added/src/new_file.ts";
+    let content = b"export const added = 1;\n";
+    t.write_file(added, content);
+    t.backdate(added);
+    let previous = repo
+        .worktree(&WorktreeId::Main)?
+        .watch_source()
+        .filter(&FilterRequest::default(), &cancel)
+        .map_err(source_error)?;
+    // `git add` of it: an index-only change.
+    entries.push(IndexEntry {
+        stat: Some(lectern_git::testing::IndexStat::of(&t.root().join(added))),
+        ..IndexEntry::new(added, Mode::File, Oid::for_blob(t.hash(), content))
+    });
+    t.write_index(t.common_dir(), &entries);
+
+    let request = FilterRequest {
+        gitignores: &[],
+        previous: Some(&*previous),
+    };
+    let check = |f: &dyn PathFilter| {
+        testing::filter_reused(f) == Some(true)
+            && f.tracked(added.as_bytes()) == lectern_fs_watch::Tracked::File
+            && f.ignored(b"node_modules", true)
+            && f.rule_files().len() == 1
+    };
+    let time = time_filters(ctx, &repo, &request, check)?;
     Ok(Measured::new("git/filter_100k", Value::Time(time)))
 }
 

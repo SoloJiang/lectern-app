@@ -25,6 +25,9 @@ tempfile = { workspace = true, optional = true }
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
+# `watch_source_events_*`: the filter driven by a manual fs_watch watcher.
+lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 
 # mkfifo for the FIFO test (already in the lock file through platform).
 [target.'cfg(target_os = "linux")'.dev-dependencies]
