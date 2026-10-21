@@ -456,6 +456,121 @@ fn disk_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
+/// 「规范内容 OID 的批量核对」: a checkout leaves 1000 tracked files (about
+/// 8 KiB each) of a 10 000-file repository with CRLF (`core.autocrlf =
+/// true`, the index has LF); fs_watch reports them modified and the
+/// reconcile reads them again until the overlay is installed (unchanged:
+/// every file converts to its index content). One `canonical_oids` per
+/// 256 files and about 2 MiB, four index parses where one `canonical_oid`
+/// per file made 1000. A real repository through the production git
+/// adapter (`testing::RepoRig`), the batch tiers paused. Record only.
+pub const REREAD_CRLF_1000: Bench = Bench {
+    id: "code_intel/reread_crlf_1000",
+    run: reread_crlf_1000,
+};
+
+fn reread_crlf_1000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use lectern_code_intel::testing::RepoRig;
+    use lectern_git::testing::{TestHead, TestRepo};
+    use lectern_services::project::{FileKind, FileList};
+
+    let (total, crlf) = ctx.scale((10_000, 1000), (300, 30));
+    let repo = TestRepo::new();
+    repo.append_config("[core]\n\tautocrlf = true\n");
+    let mut files: Vec<(String, Vec<u8>)> = (0..total)
+        .map(|i| {
+            let path = format!("pkg{:02}/src/f{i:05}.ts", i % 50);
+            let content = if i < crlf {
+                synthetic::source("ts", i, FILE_LEN)
+            } else {
+                format!("export const v{i} = {i};\n").into_bytes()
+            };
+            (path, content)
+        })
+        .collect();
+    files.sort();
+    if files.iter().any(|(_, c)| c.contains(&b'\r')) {
+        return Err(BenchError::new("the committed content has CR"));
+    }
+    for (path, content) in &files {
+        repo.write_file(path, content);
+        repo.backdate(path);
+    }
+    let entries: Vec<_> = files.iter().map(|(path, _)| repo.add(path)).collect();
+    repo.write_index(repo.common_dir(), &entries);
+    let tree: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_slice()))
+        .collect();
+    let commit = repo.commit(repo.tree(&tree), &[], "init");
+    repo.set_ref("refs/heads/main", commit);
+    repo.set_head(TestHead::Branch("refs/heads/main"));
+    let mut list = FileList::builder();
+    for entry in &entries {
+        let path = std::str::from_utf8(&entry.path).map_err(|e| BenchError::new(e.to_string()))?;
+        let oid = BlobId::from_bytes(entry.oid.as_bytes())
+            .ok_or_else(|| BenchError::new("an OID of 20 or 32 bytes"))?;
+        list.push_with_oid(path, FileKind::File, oid);
+    }
+
+    let dir = tempfile::tempdir_in(ctx.scratch())?;
+    let cache = Cache::new(Config {
+        root: dir.path().to_path_buf(),
+        budgets: Budgets::default(),
+        ui_thread: None,
+    });
+    let common = repo.common_dir().canonicalize()?;
+    let root = repo.root().canonicalize()?;
+    let rig = RepoRig::new(
+        lectern_git::testing::discover,
+        &common,
+        &root,
+        Arc::new(list.build()),
+        cache,
+        Arc::new(SystemClock),
+    );
+    rig.pause();
+    rig.open();
+    rig.settle();
+    let overlay = |rig: &RepoRig| {
+        rig.indexer
+            .map(rig.key())
+            .map_or(usize::MAX, |m| m.overlay.entries().len())
+    };
+    if overlay(&rig) != 0 {
+        return Err(BenchError::new("the worktree is not clean after opening"));
+    }
+    // The checkout: CRLF in the worktree, the same content in git's terms.
+    let checked_out: Vec<&str> = files
+        .iter()
+        .filter(|(_, c)| c.len() > 1024)
+        .map(|(p, c)| {
+            let crlf = String::from_utf8_lossy(c).replace('\n', "\r\n");
+            repo.write_file(p, crlf.as_bytes());
+            p.as_str()
+        })
+        .collect();
+    if checked_out.len() != crlf {
+        return Err(BenchError::new("not every large file was checked out"));
+    }
+    let before = rig.indexer.stats().rereads;
+    let time = ctx.time(|| {
+        rig.modified(&checked_out);
+        rig.settle();
+    });
+    let samples = rig.indexer.stats().rereads - before;
+    if samples == 0 || !samples.is_multiple_of(crlf) || overlay(&rig) != 0 {
+        return Err(BenchError::new(format!(
+            "{samples} files read again, overlay of {}: not the checkout's",
+            overlay(&rig)
+        )));
+    }
+    Ok(vec![Measured::new(
+        "code_intel/reread_crlf_1000",
+        Value::Time(time),
+    )])
+}
+
 /// A distinct SHA-1-sized OID per file.
 fn sha1ish(i: usize) -> [u8; 20] {
     let mut b = [0u8; 20];

@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层）已实现，见「实际验证」「与设计的差异」；第 5、6、8、9 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移尚未实现；第 5、8、9 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -1874,14 +1874,15 @@ enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume
 
 ### 规范内容 OID 的批量核对
 
-[git 设计「规范内容的 OID」](git.md#规范内容的-oid)：`canonical_oid` 每次调用在新句柄上解析一次 index（10 万文件约 22 ms），`canonical_oids` 整批也只解析一次（#135）。状态：已设计，尚未实现（「验收」第 6 步）。
+[git 设计「规范内容的 OID」](git.md#规范内容的-oid)：`canonical_oid` 每次调用在新句柄上解析一次 index（10 万文件约 22 ms），`canonical_oids` 整批也只解析一次（#135）。状态：已实现（「验收」第 6 步的这一部分，见「实际验证」「与设计的差异」第 6 步）。
 
 - 改用整批的地方：
   - 核对任务的重新读：一遍里读出的路径先按原始字节的 OID 分出与文件列表不同的那些，再按每批 ≤ 256 项、字节合计 ≤ 2 MiB 调用 `canonical_oids`，一批的内容在这期间留在内存里（≤ 2 MiB，与批量层一批读入的上限相同，计入「性能」建索引期间的临时内存）。单个文件超过 2 MiB 时自成一批。checkout 之后 1000 个约 8 KiB 的 CRLF 文件进入重新读集合时，原来是 1000 次 index 解析（10 万文件约 22 s），现在 4 次（每批 256 个、约 2 MiB）。
-  - 批量层的一批（≤ 64 个文件、≤ 2 MiB）：读到的 OID 与排队时不同的文件在写入之前一次 `canonical_oids`。
-  - 查询结果的写入（限时搜索命中的文件、现场抽取的文件，由 `Background` 任务写入）：一次写入一批。
-- 仍是单个调用：交互路径上只核对一份内容的地方（跳转第 1 步的当前文本、查引用时被查定义所在的文件、窗口链的开始），计入它所在的延迟预算。
-- 出错：整批返回错误时对这一批逐项调用 `canonical_oid`，出错的那一项按读不出处理（覆盖部分里是 `Unindexable`），其余照常。
+  - 批量层的一批（≤ 64 个文件、≤ 2 MiB）：读到的 OID 与排队时不同的工作区文件先按原始字节的 OID 抽取，字节留到这一批写入之前（随这一批的读入计），写入之前按同样的切分一次 `canonical_oids`：规范内容的 OID 等于排队时的 OID 时以它作键，否则（排队之后又改了、外部过滤器）仍以原始字节的 OID 作键。只在开关关闭时的一批（`Grant::Batch`）这样做；第 4、5 层的保活时段里那一个文件在读出时单独调用一次 `canonical_oid`（见下文「取消、暂停与让路」）。
+  - 查询结果的写入（限时搜索命中的文件、现场抽取的文件，由 `Background` 任务写入）：一次写入一批，写入时不再核对：键是查询读取时已经核对过的 OID（`read_content`、`read_text` 只接受就是快照里那份内容的字节），写入任务不调用 git。
+- 仍是单个调用：交互路径上只核对一份内容的地方（跳转第 1 步的当前文本、查引用时被查定义所在的文件、窗口链的开始），计入它所在的延迟预算；第 1、2 层（打开的文件、审阅集合）每次读一个文件；第 4、5 层保活时段里的一个文件在读出时核对（下文「取消、暂停与让路」）；查询逐个读取的文件（导入目标、查引用读的已入索引文件、限时搜索）在读出时就要知道能不能用，也按一个文件核对（见「与设计的差异」第 6 步）。
+- 出错：整批返回错误时对这一批逐项调用 `canonical_oid`（一批只有一项时不重试），出错的那一项按读不出处理（覆盖部分里是 `Unindexable`，批量层里跳过这一项、不写入），其余照常。
+- 取消、暂停与让路：重新读是核对任务（`Background`，持有 `BusyGuard`）的一步，与第 1、2 层一样不受暂停和让路开关影响；每批调用之前检查会话是否已结束，结束就停下、不装上结果。批量层的核对是这一批写入的一部分，在批次边界之前做完；暂停打断的一批照常写入已做完的项，所以照常核对它们。让路开关打开之后不再做 index 解析（一次约 22 ms，超出保活时段和「一片之内停下」的份额）：保活时段里的一个文件在读出时、抽取之前单独调用一次 `canonical_oid`，计入这个时段（与改用整批之前相同），抽取之后不再核对；第 4、5 层的一批在开关打开时结束（或从停下的状态在时段里继续、做完），其中要核对的项不核对、不写入，抽取结果丢掉，按「交互让路」的规则放进这一层的暂缓列表，开关关闭后重新读出、在一批里核对；这一批的其余项照常写入。第 3 层不让路，照常核对。已被取消或被第 1 层接手的项（写入时会丢掉）不核对，会话结束后剩下的批不再调用。
 - 依赖文件不调用：被忽略的文件不做规范化转换（ADR 0033），OID 就是原始字节的哈希。
 
 ## 性能
@@ -1906,7 +1907,7 @@ enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume
 | 交互让路（ADR 0033） | 开关打开后在途的抽取在一片之内停下（解析的进度回调约每 100 次操作一次，遍历每 1024 个节点一次）：≤ 10 ms；之后批量层合计 ≤ 一个核的 10%（kernel 的保活时段，每个时段只做一个 ≤ 256 KiB 的文件）；停下再继续的结果与一次做完的相同；不让路的层不变慢 | `code_intel/yield_stop` 最大值 ≤ 10 ms（1 MiB 的 TS 文件在解析中途打开开关，到这次抽取返回 `Parked`）；帧时间由 `app/scroll_frames_indexing` 判定（bench 设计，ADR 0033） |
 | 大文件的跳转（ADR 0034） | 1–16 MiB 的当前文本，身份已记下时：打开、比较身份、读两段（≤ 68 KiB 与窗口）≤ 1 ms，窗口解析 ≤ 8 ms（截止时间），之后与普通跳转相同，第一批 ≤ 20 ms；身份没记下时流式读一遍求 OID（16 MiB 约 30–40 ms，Linux），只记录；对象库一侧的大文本每次整份取出 blob（不能按区间读），位置在保留的窗口解析里时不取，只记录（已知限制） | `code_intel/goto_large`（4 MiB 的 TypeScript，位置在中部，身份已记下）≤ 20 ms、`code_intel/goto_large/cold`、`code_intel/goto_large/object` 只记录 |
 | 打开文件的窗口链（ADR 0034） | 窗口约 64 KiB（按树切，包住整个文件的 IIFE 也在函数体里切开），一个窗口的语法树约 2–5 MiB；16 MiB 的文件整条链约 4–5 s 的 CPU（Linux 估算），在批量层最前面。临时内存：求 OID 时一个 1 MiB 的区间（流式哈希），之后一个窗口和它的树；找不到切点、扩到 256 KiB 的窗口的树最多约 21 MiB（调研实测，压缩 JS），需要规范化转换的文件开始时整份读入一次（≤ 16 MiB）；三者都在 `LargeSlot` 里、不同时出现，计入建索引期间的 40 MB | `code_intel/window_chain_16mib`（只记录：16 MiB 的 TypeScript 从打开到 `Windowed` 写入）、`code_intel/window_peak` 最大值 ≤ 8 MiB（同上，不需要转换、窗口都是 64 KiB：一个窗口的树约 2 MiB 加 1 MiB 的区间，留约 2 倍的余量） |
-| 规范内容 OID（git 的 `canonical_oids`） | 重新读、批量层的一批、查询结果的写入：每批（≤ 256 项、字节合计 ≤ 2 MiB，内容在这期间留在内存里，计入建索引期间的 40 MB）至多解析一次 index（10 万文件约 22 ms）；交互路径上的单个核对不变 | `code_intel/reread_crlf_1000`（只记录：`git` 的 `TestRepo` 上 1 万个跟踪文件、`core.autocrlf = true`，1000 个文件进入重新读集合，到覆盖部分装上） |
+| 规范内容 OID（git 的 `canonical_oids`） | 重新读、开关关闭时批量层的一批：每批（≤ 256 项、字节合计 ≤ 2 MiB，内容在这期间留在内存里，计入建索引期间的 40 MB）至多解析一次 index（10 万文件约 22 ms）；查询结果的写入用查询读取时核对过的键，不调用；交互路径、第 1、2 层、查询的逐个读取和保活时段里的一个文件仍是单个核对 | `code_intel/reread_crlf_1000`（只记录：`git` 的 `TestRepo` 上 1 万个跟踪文件、`core.autocrlf = true`，1000 个文件进入重新读集合，到覆盖部分装上） |
 | 安装包 ≤ 80 MB | 六个 grammar crate 与 tree-sitter 运行时，由 #38 测量 | `app/bundle_size` |
 
 - 首帧之前不调用本 crate；第一个任务在第一个项目打开之后提交，批量线程在第一次提交 `Batch` 任务时才创建（ADR 0029）。
@@ -2037,9 +2038,9 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 5. **端到端基准**（前置 #20 的抽屉和 `file_reader` 在探针里的里程碑）：bench 探针增加打开抽屉、跳转、覆盖层完成的 `Milestone`，以及读取 `coverage` 的方式。
    - `app/goto_candidates`、`app/goto_single`、`app/goto_unindexed`、`app/goto_unindexed_done`、`app/index_review_set`、`app/index_subproject`、`app/index_100k`、`app/idle_monorepo_indexed` 在 `crates/bench/src/budgets.rs` 里改为生效，macOS CI 上在预算内。
    - `app/idle_monorepo` 在后台工作暂停时仍 < 100 MB。
-6. **存储版本 3、字节偏移与批量核对**（不需要新的前置条件：git 的 `canonical_oids` 和字节偏移已实现）：命名空间版本 3、配额 224 MiB，`Location::byte`（连同 `services` 的字段），`GitAccess::canonical_oids` 和三处整批调用。
+6. **存储版本 3、字节偏移与批量核对**（不需要新的前置条件：git 的 `canonical_oids` 和字节偏移已实现）：命名空间版本 3、配额 224 MiB，`Location::byte`（连同 `services` 的字段），`GitAccess::canonical_oids` 和两处整批调用（重新读、批量层；查询结果的写入不核对，见「与设计的差异」第 6 步）。
    - `location_byte_*`、`canonical_batch_*` 测试通过，原有的 `store_*`、`overlay_*`、`account_*` 照常通过（满额模式的夹具按 224 MiB 改写）。
-   - `canonical_batch_*` 用 `FakeGit` 的调用记录检查：重新读、批量层、查询结果的写入都不调用单个的 `canonical_oid`。
+   - `canonical_batch_*` 用 `FakeGit` 的调用记录检查：重新读、开关关闭时批量层的一批都不调用单个的 `canonical_oid`，查询结果的写入不调用 git；`yield_*` 检查保活时段里的一个文件在抽取之前单独核对、开关打开之后不再整批核对。
    - `code_intel/reread_crlf_1000`（只记录）有结果；`code_intel/disk_100k` 照常只记录，`goto_full`、`references_full` 仍在预算内。
 7. **交互让路**（前置：kernel 的让路开关，[#123](https://github.com/SoloJiang/lectern-app/pull/123) 已实现）：两种守卫、`proceed_item`、可恢复的抽取。
    - `yield_*` 测试通过；`schedule_*`、`deadline_*` 照常通过。
@@ -2410,6 +2411,13 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 变异检查：去掉边界上的换项目和会话检查时，`yield_parked_item_of_another_project_is_given_up` 失败；不让路的请求方不接手、照旧等持有者时，`yield_large_parked_item_gives_way_to_tier3` 的两个任务一组卡住；时段里读出的大文件不放进暂缓列表时，`yield_large_file_waits_for_the_switch` 和 `yield_large_parked_item_gives_way_to_tier3` 失败；语言包的项照旧放回队列前面时，`yield_language_pack_is_given_up_and_redone` 失败。都已还原。
 - 基准（`just bench --measure code_intel/yield_stop code_intel/batch_peak`，负载约 2–2.8）：`yield_stop` 中位数 33.1 µs、p95 70.2 µs、最大 110 µs（≤ 10 ms；这次的改动不在抽取里，与上一轮的差别是负载）；`batch_peak` 33.3 MB（≤ 40 MB）。
 
+第 6 步的规范内容 OID 的批量核对，基于包含 [#141](https://github.com/SoloJiang/lectern-app/pull/141) 的 main（b78728d），同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+
+- `just check`、`just test`（整个工作区 1507 个测试通过，跳过 7 个）、`just doctest`、`just deny` 全部通过。新增 12 个 `canonical_batch_*` 和两个 `yield_*`，本 crate 307 个测试（自审后的修改之后，`just check`、`just test -p lectern-code-intel` 通过）。`canonical_batch_splits_at_256_items`（600 项切成 256、256、88）、`canonical_batch_splits_at_2_mib`（第三个 700 KiB 之前切开，恰好 2 MiB 的一批不切，3 MiB 的一项自成一批）检查切分，两者都逐项对照单个 `canonical_oid` 的结果；`canonical_batch_reread_of_300_crlf_files_makes_two_calls`（设计「测试」：两次 `canonical_oids`、没有 `canonical_oid`）；`canonical_batch_reread_matches_per_file`（CRLF 检出、CRLF 且改过、外部过滤器的指针、没有转换的改动、未改，覆盖部分逐项等于按单个 `canonical_oid` 和「blob → 路径映射」的规则算出的状态，过滤器的一项是 `Excluded`）；`canonical_batch_failed_item_is_retried_one_by_one` 与 `canonical_batch_batch_tier_failure_skips_only_that_file`（一批失败后逐项重试，只有出错的那一项是 `Unindexable` 或不写入）；`canonical_batch_batch_tier_converts_once_per_batch`（100 个 CRLF 文件，每批一次、每批 ≤ 64 项，全部以 index 的 OID 写入、提示匹配）；`canonical_batch_reread_stops_between_batches_when_the_session_ends`；`canonical_batch_interactive_path_converts_one_file`、`canonical_batch_tier1_converts_its_one_file`（交互路径和第 1 层仍是单个调用）；`canonical_batch_query_writes_convert_nothing`；`canonical_batch_lectern_git_matches_per_file`（`TestRepo`、`core.autocrlf = true`，生产适配的整批结果等于逐个调用，含 git 不能表示的路径）；`yield_slot_converts_its_one_file`（开关打开时每个保活时段的文件在抽取之前单独核对、没有整批调用）、`yield_switch_on_sets_unconverted_files_aside`（自审后加：开关在一批的第 4 个抽取时打开，之后没有整批调用，要核对的项进暂缓列表、没有写入，开关关闭后全部以 index 的 OID 写入）。
+- 变异检查：批量层不按核对结果改键时，`canonical_batch_batch_tier_converts_once_per_batch`、`canonical_batch_batch_tier_failure_skips_only_that_file`、`canonical_batch_failed_item_is_retried_one_by_one` 失败；覆盖部分把转换出错记为 `Content` 时，`canonical_batch_failed_item_is_retried_one_by_one` 失败；去掉重新读在批之间的会话检查时，`canonical_batch_reread_stops_between_batches_when_the_session_ends` 失败；时段里的文件也推迟核对时，`yield_slot_converts_its_one_file` 失败；开关打开后照常整批核对时，`yield_switch_on_sets_unconverted_files_aside` 失败。都已还原。
+- 基准（`just bench --measure code_intel/reread_crlf_1000 code_intel/batch_peak`，另一次 `git/canonical_oid_100k`，负载约 2–2.7）：`code_intel/reread_crlf_1000` 中位数 91.9 ms（只记录：1000 个约 8 KiB 的文件读一遍加 4 次 index 解析）；把每批的上限临时改成 1 项（每个文件一次 index 解析，即原来单个调用的做法）时 2 s，已还原。`code_intel/batch_peak` 33.3 MB（≤ 40 MB，与第 7 步相同：夹具没有需要转换的文件）。`git/canonical_oid_100k` 21.5 ms、`…/batch_100` 22.1 ms（只记录，与 git 设计的实测相同；本步没有改 git）。
+- 没有验证的：`goto_full`、`references_full` 和 `code_intel/disk_100k` 属于第 6 步的存储版本 3，这一部分没有改查询和存储，没有重跑；macOS 上的数值看 macOS CI。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2651,3 +2659,14 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - `LargeSlot` 的接手：停下的持有者把 `ResumeSlot` 登记在 `LargeSlot` 里，不让路的请求方取得时清空那份状态、换成新的一轮（`LargeTurn` 带轮次，作废的一轮 drop 时不释放新的一轮），再唤醒等待的批量任务；持有者在边界上看到 `revoked()` 就放回这一项，继续抽取前也先 `unpark()` 确认这一轮还有效。设计写的是请求方等持有者交还，那需要持有者的任务先运行：批量任务数多于批量线程（或测试里单线程的 executor 上两个任务）时，请求方在线程上等、持有者没有线程运行，会卡住。现在不让路的请求方接手不依赖持有者运行；让路的批量任务等 `LargeSlot` 时仍在线程上等持有者交还，所以批量任务数仍不得多于批量线程数（默认配置二者相等，现有测试不触发）。本任务自己停下的大项挡着本任务的第 3 层大文件时，仍直接放弃自己的那一项（提前释放它的字节）。
 - `code_intel/yield_stop` 直接调用 `extract`，让路的探针读一个由测量线程置位的标志，不经过 kernel 的开关：从置位到抽取返回 `Parked`、状态在槽里。kernel 从开关到 `yield_requested()` 的时间由 kernel 的测试负责。
 - 测试：`yield_resumed_extraction_is_identical` 每种语言用 120 KiB（在时段里停下再继续）和接近 1 MiB（开关打开时停下、关闭后继续）两组，见「实际验证」；`yield_large_parked_item_gives_way_to_tier3` 分别用一个和两个批量任务，在第 3 层抽取大文件时检查 `LargeSlot` 里没有登记的停下的状态，确认两棵大树不同时在内存里，不读活跃字节；`yield_large_slot_taken_over_from_a_parked_task` 在两个线程上检查接手不需要持有者运行；窗口链的部分随第 8 步。测试用的 `Inner::yield_hook`（只在 `cfg(test)` 下）在每次让路检查时运行，用来在抽取进行中推进时段的时钟或打开开关。
+
+第 6 步（规范内容 OID 的批量核对；存储版本 3 和字节偏移不在这一部分里）：
+
+- 查询结果的写入没有整批调用：设计把它列为改用整批的第三处，但写入的键（`Scanned::oid`）是查询读取时已经核对过的 OID（`read_content`、`read_text` 只接受原始字节或规范内容等于快照里那个 OID 的字节），写入任务本来就不调用 git，`canonical_batch_query_writes_convert_nothing` 检查它。要核对的是查询读文件的那一步：导入目标、查引用读的已入索引文件、限时搜索在读出一个文件时就要知道能不能用（不是那份内容就是 `Stale`，不搜、不抽取），仍按一个文件调用 `canonical_oid`。改成整批要在时间盒里预读一批文件、等一次 index 解析再开始搜，第一批的时间和取消的 20 ms 都要重新核算，不在这一步做。已知限制：工作区大量是 CRLF 检出（`core.autocrlf`、`eol` 属性）的仓库里，限时搜索每读一个这样的文件多一次 index 解析（10 万文件约 22 ms），时间盒内搜到的文件因此变少，核算照常把没读到的计为未搜。
+- 批量层的核对推迟到写入之前：读出时只算原始字节的 OID，与排队时不同的工作区文件（`read_item` 返回的标记）先抽取，字节随 `Done::check`（停下的项是 `Parked::check`）留到这一批 `commit` 之前，由 `check_keys` 经同一个切分（`canonical::Pending`）调用 `canonical_oids`，按结果改键。这样一批（≤ 64 个文件）只解析一次 index；代价是这些文件的字节在抽取之后多留一会儿，一批的读入本来就 ≤ 2 MiB 加最后一个文件（< 1 MiB），所以「性能」建索引期间 40 MB 的份额不变。第 1、2 层每次读一个文件，仍在读出时调用 `canonical_oid`。
+- 让路开关打开之后不做 index 解析（自审后改）：最初的实现在保活时段里抽取之后才做一次一项的 `canonical_oids`，约 22 ms 的 index 解析落在时段结束之后，CRLF 文件会让时段超过「一个核的 10%」；开关在一批进行中打开时，结束的那一批也在开关打开之后解析一次 index。现在 `read_item` 的 `defer` 只在开关关闭时的一批（`!one`）为真，时段里的文件在读出时、抽取之前单独核对（与改用整批之前相同，只是转换出错时跳过这一项，与整批的规则一致；超过 256 KiB 的文件读出后立即放进暂缓列表，不在时段里核对）；`check_keys` 在第 4、5 层的时段里或开关已打开时（`convert` 为假）不调用 git，把要核对的项放进暂缓列表（`set_aside`），丢掉它们的抽取结果。选暂缓而不是以原始字节的 OID 写入：后者写下一个不会被用到的单元，提示仍不匹配，开关关闭后照样要重新抽取；暂缓正是第 7 步对「时段做不了的工作」的处理，开关关闭后按原来的顺序放回队列前面、重新读出，在一批里核对。代价是开关打开时丢掉这一批里这些项的抽取（一批至多 50 ms 的工作），之后重做。`yield_slot_converts_its_one_file`、`yield_switch_on_sets_unconverted_files_aside` 检查这两条。
+- 出错的处理按设计改了原来的行为：原来单个调用出错时覆盖部分记 `Content`（原始字节的 OID）、批量层以原始字节的 OID 作键，现在覆盖部分记 `Unindexable`，批量层跳过这一项（`release`，不写入）。一批只有一项时出错就是这一项的错，不再逐项重试一次。
+- 生产的 `LecternGit::canonical_oids`：git 不能表示的路径（`RepoPath::new` 拒绝的）不交给 git、结果为 None，与 `canonical_oid` 相同；整批都是这样的路径或为空时不打开 worktree。
+- 取消：设计没有写重新读的取消；实现在每批调用之前检查会话是否已结束（`State::cancel`），结束就返回、不装上结果，`canonical_batch_reread_stops_between_batches_when_the_session_ends` 检查 600 个文件在第一批调用期间结束会话时只调用一次。批量层见上文「取消、暂停与让路」一条。
+- 单个文件超过 2 MiB 自成一批：重新读和批量层读的上限都是 1 MiB（`BACKGROUND_MAX_LEN`），实际不会出现，`Pending` 仍按设计处理，由 `canonical_batch_splits_at_2_mib` 检查。
+- 基准：`code_intel/reread_crlf_1000` 加进预算表（`Tier::Share`，只记录）。它需要真实仓库上的生产适配，`testing` 新增 `RepoRig`（与 `Rig` 相同的内存部分，git 经 `LecternGit::with_discover`，`with_discover` 改为 `test-support` 下也可用）。夹具是 1 万个跟踪文件里 1000 个约 8 KiB 的文件以 CRLF 写回工作区（`core.autocrlf = true`），每个样本发出这 1000 个文件的修改事件、跑到核对任务结束，批量层暂停。

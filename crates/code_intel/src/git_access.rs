@@ -58,6 +58,17 @@ pub(crate) trait GitAccess: Send + Sync {
         raw: &[u8],
     ) -> Result<Option<BlobId>, GitError>;
 
+    /// [`canonical_oid`](Self::canonical_oid) for each `(path, raw)`, in
+    /// order: `Worktree::canonical_oids`, one handle and at most one parse
+    /// of the index for the whole batch. The caller splits the batches
+    /// (`canonical::Pending`: at most 256 items and 2 MiB); an error for
+    /// one item fails the batch, and the caller tries each item on its own.
+    fn canonical_oids(
+        &self,
+        tree: &Tree,
+        items: &[(&str, &[u8])],
+    ) -> Result<Vec<Option<BlobId>>, GitError>;
+
     /// fs_watch's filter and config source for the worktree. No IO: the
     /// handle is opened on the first `filter` call, which happens only when
     /// this crate's subscription created the worktree state.
@@ -136,7 +147,7 @@ impl LecternGit {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_discover(discover: DiscoverFn) -> LecternGit {
         LecternGit { discover }
     }
@@ -255,6 +266,37 @@ impl GitAccess for LecternGit {
             .canonical_oid(&path, raw)?
             .as_ref()
             .map(blob_id))
+    }
+
+    fn canonical_oids(
+        &self,
+        tree: &Tree,
+        items: &[(&str, &[u8])],
+    ) -> Result<Vec<Option<BlobId>>, GitError> {
+        // A path git cannot name has no canonical OID, as `canonical_oid`
+        // answers it.
+        let paths: Vec<Option<RepoPath>> = items
+            .iter()
+            .map(|(path, _)| RepoPath::new(path.as_bytes()))
+            .collect();
+        let valid: Vec<(&RepoPath, &[u8])> = paths
+            .iter()
+            .zip(items)
+            .filter_map(|(path, (_, raw))| Some((path.as_ref()?, *raw)))
+            .collect();
+        if valid.is_empty() {
+            return Ok(vec![None; items.len()]);
+        }
+        let mut oids = self.worktree(tree)?.canonical_oids(&valid)?.into_iter();
+        Ok(paths
+            .iter()
+            .map(|path| {
+                path.as_ref()
+                    .and_then(|_| oids.next().flatten())
+                    .as_ref()
+                    .map(blob_id)
+            })
+            .collect())
     }
 
     fn watch_source(&self, tree: &Tree) -> Arc<dyn WorktreeSource> {

@@ -1176,6 +1176,17 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // The partition's size after the units of 100 000 synthetic files.
     share("code_intel/disk_100k", RECORD, CODE_INTEL, ACTIVE, Time),
+    // A checkout leaves 1000 CRLF files of a 10 000-file repository
+    // (`core.autocrlf = true`) in the re-read set: from fs_watch's events
+    // to the overlay installed, one `canonical_oids` per 256 files
+    // (「规范内容 OID 的批量核对」).
+    share(
+        "code_intel/reread_crlf_1000",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     // A jump the index answers, from the query to its first batch with
     // candidates: 100 000 indexed files, a 100 KB current text whose parse
     // is kept (ADR 0037); this crate's part of the 50 ms candidates budget.

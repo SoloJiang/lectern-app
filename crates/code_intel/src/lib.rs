@@ -10,6 +10,7 @@
 //! navigation's arbitration (`semantic`) and the `code-intel` plugin
 //! (`plugin`, step 4).
 
+mod canonical;
 mod forms;
 mod git_access;
 mod grammar;
