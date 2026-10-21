@@ -285,13 +285,41 @@ fn sample_jumps(
     for round in 0..warmup + runs {
         before(&jump.rig);
         let (first, done, r) = first_and_done(&jump.rig, &seen, &jump.query)?;
-        want(&r)?;
+        want(&r).map_err(|e| {
+            BenchError::new(format!(
+                "{}; {}",
+                e.message(),
+                diagnose(&jump.rig, &jump.query, done)
+            ))
+        })?;
         if round >= warmup {
             firsts.push(first);
             dones.push(done);
         }
     }
     Ok((Samples(firsts), Samples(dones)))
+}
+
+/// What a failed check adds to its message: how long the query ran against
+/// its time box, and what the rig's copy of the store holds (units of the
+/// current versions, evictions), so a query the time box cut tells apart
+/// from units that are missing.
+fn diagnose(rig: &Rig, query: &Query, elapsed: Duration) -> String {
+    use lectern_code_intel::store::Version;
+    let versions: Vec<Version> = lectern_code_intel::extract::LanguageTable::core()
+        .iter()
+        .map(Version::of)
+        .collect();
+    let store = rig.indexer.store(&rig.git.key());
+    let units = store
+        .as_ref()
+        .and_then(|s| s.units(&versions))
+        .map(|u| u.len());
+    let evictions = store.as_ref().map(|s| s.evictions());
+    format!(
+        "done after {elapsed:?} of a {:?} time box; {units:?} units stored, {evictions:?} evictions",
+        lectern_code_intel::query::time_box(&query.kind)
+    )
 }
 
 /// The results a jump of the index must give: candidates, and `Done`.
@@ -601,6 +629,7 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         seen.lock().unwrap().clear();
         let start = Instant::now();
         let (id, r) = run(&rig, &query)?;
+        let elapsed = start.elapsed();
         let first = seen
             .lock()
             .unwrap()
@@ -610,8 +639,10 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             .ok_or_else(|| BenchError::new("no batch"))?;
         if r.candidates.len() < units {
             return Err(BenchError::new(format!(
-                "{} candidates of {units} units",
-                r.candidates.len()
+                "{} candidates of {units} units, {:?}; {}",
+                r.candidates.len(),
+                r.state,
+                diagnose(&rig, &query, elapsed)
             )));
         }
         if round > 0 || ctx.mode() == Mode::Smoke {

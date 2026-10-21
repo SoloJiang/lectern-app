@@ -304,8 +304,37 @@ fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
         if entry.file_type()?.is_dir() {
             copy_tree(&entry.path(), &target)?;
         } else if !entry.file_name().to_string_lossy().ends_with("-shm") {
-            std::fs::copy(entry.path(), target)?;
+            copy_bytes(&entry.path(), &target)?;
         }
     }
     Ok(())
+}
+
+/// Copies `from` to the new file `to` through a buffer: the copy's pages are
+/// written, so they are in the page cache as a partition the indexer just
+/// wrote would be. `std::fs::copy` may clone instead (APFS `clonefile`, a
+/// reflink): the clone shares the template's blocks but not its cached
+/// pages, and a query's random reads of it go to the disk, so the time-boxed
+/// pages of `code_intel/goto_popular` and `named_50k` stop early on a cold
+/// template (one written by another run or another bench target).
+pub(crate) fn copy_bytes(from: &Path, to: &Path) -> io::Result<u64> {
+    use std::io::{Read, Write};
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut copied = 0u64;
+    loop {
+        let read = match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        dst.write_all(&buf[..read])?;
+        copied += read as u64;
+    }
+    Ok(copied)
 }

@@ -144,3 +144,31 @@ fn template_other_key_replaces_the_old() {
     let entries = std::fs::read_dir(root.path()).expect("root").count();
     assert_eq!(entries, 2, "each size keeps its own template");
 }
+
+/// A copy's bytes are its own: written through a buffer (not cloned or
+/// linked), the same content, a file of its own.
+#[test]
+fn template_copy_writes_its_own_bytes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let from = dir.path().join("from");
+    let bytes: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&from, &bytes).expect("write");
+    let to = dir.path().join("to");
+    assert_eq!(
+        crate::testing::copy_bytes(&from, &to).expect("copied"),
+        bytes.len() as u64
+    );
+    assert_eq!(std::fs::read(&to).expect("read"), bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (a, b) = (
+            std::fs::metadata(&from).expect("meta"),
+            std::fs::metadata(&to).expect("meta"),
+        );
+        assert_ne!(a.ino(), b.ino());
+        assert_eq!(a.nlink(), 1);
+    }
+    // Never over an existing file.
+    assert!(crate::testing::copy_bytes(&from, &to).is_err());
+}

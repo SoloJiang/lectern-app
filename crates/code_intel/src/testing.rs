@@ -16,6 +16,8 @@ pub use rig::{
     Rig, packages, route_tree_sitter_allocations, virtual_repo, virtual_repo_sharing,
     virtual_repo_with,
 };
+#[cfg(test)]
+pub(crate) use template::copy_bytes;
 pub use template::{VirtualTemplate, key as template_key};
 
 use std::any::Any;
