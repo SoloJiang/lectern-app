@@ -94,6 +94,13 @@ pub(crate) struct WorktreeState {
     /// Reloads triggered while one was running, with their `.gitignore`
     /// paths and their reasons combined.
     filter_again: Option<(BTreeSet<WatchPath>, Reload)>,
+    /// Some worktree event arrived while no current filter could judge its
+    /// reload trigger (a load in flight, the filter `Failed` or not built
+    /// yet): it may have been a new rule file that triggered nothing. Until
+    /// a load that started after it installs, no load gets `previous`.
+    /// Cleared when a load without `previous` starts; set again by events
+    /// during that load and by its failure.
+    unsure: bool,
     config_load: Option<Load>,
     config_again: bool,
     config_ready: bool,
@@ -129,6 +136,7 @@ impl WorktreeState {
             stale: true,
             filter_load: None,
             filter_again: None,
+            unsure: false,
             config_load: None,
             config_again: false,
             config_ready: false,
@@ -310,6 +318,11 @@ impl WorktreeState {
             // Step 3.
             if path.split(|&b| b == b'/').any(|name| name == b".git") {
                 continue;
+            }
+            // Pass 1 judged its trigger with a filter that may not match the
+            // rules on disk (`unsure`).
+            if self.stale || matches!(self.filter, Filter::Failed(_)) {
+                self.unsure = true;
             }
             match self.verdict(path, event.flags, unfiltered, self.stale) {
                 Verdict::Deliver { rules } => {
@@ -509,11 +522,12 @@ impl WorktreeState {
     /// Starts a filter load, or queues one after the running load. The filter
     /// is stale from now until a result is installed.
     ///
-    /// Every reload requested after a load started is served by the next
-    /// load (queued ones in `filter_again`), so when all of those are
-    /// `Reload::Index`, nothing but the index changed since the filter in
-    /// place began reading the worktree, and it goes to the source as
-    /// `FilterRequest::previous`.
+    /// The filter in place goes to the source as `FilterRequest::previous`
+    /// only when nothing but the index can have changed what its load read:
+    /// every reload requested since that load started is served by this one
+    /// (queued ones in `filter_again`) and all are `Reload::Index`, and every
+    /// worktree event since was judged by a current filter (not `unsure`),
+    /// so no rule file or moved directory went by without a trigger.
     pub(crate) fn reload_filter(
         &mut self,
         ctx: &mut Ctx,
@@ -534,12 +548,14 @@ impl WorktreeState {
         }
         let source = self.source.clone();
         let gitignores: Vec<WatchPath> = gitignores.into_iter().collect();
-        // Paths held before the first filter haven't been checked for
-        // reload triggers yet (`reclassify`): one may be a new `.gitignore`.
         let previous = match (&self.filter, reload) {
-            (Filter::Ready(filter), Reload::Index) if !self.stash.fresh => Some(filter.clone()),
+            (Filter::Ready(filter), Reload::Index) if !self.unsure => Some(filter.clone()),
             _ => None,
         };
+        if previous.is_none() {
+            // This load reads the worktree after every event so far.
+            self.unsure = false;
+        }
         let epoch = self.epoch();
         self.filter_load = Some(self.spawn(ctx, move |cancel| {
             let request = crate::source::FilterRequest {
@@ -636,7 +652,10 @@ impl WorktreeState {
         drop(finished);
         self.filter = match result {
             Ok(filter) => Filter::Ready(filter),
-            Err(error) => Filter::Failed(error.0),
+            Err(error) => {
+                self.unsure = true;
+                Filter::Failed(error.0)
+            }
         };
         self.cache.clear();
         if let Some((gitignores, reload)) = self.filter_again.take() {

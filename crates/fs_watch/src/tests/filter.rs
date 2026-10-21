@@ -532,6 +532,78 @@ fn filter_reuse_waits_for_paths_held_before_the_first_filter() {
     assert!(previous.iter().all(Option::is_none), "{previous:?}");
 }
 
+/// Index changes until one gets `previous`: the loads in between read the
+/// worktree.
+fn index_changes(fx: &Fixture, n: usize) {
+    for _ in 0..n {
+        fx.emit_common(&[("index", F)]);
+        fx.settle();
+    }
+}
+
+#[test]
+fn filter_reuse_not_after_a_rule_file_the_old_filter_dropped() {
+    let fx = Fixture::new();
+    fx.source.ignore(&["out"]);
+    let _o = fx.opened();
+    // `out` taken out of `.gitignore`: a load reading the worktree starts.
+    fx.source.unignore(&["out"]);
+    fx.emit_root(&[(".gitignore", F | MODIFIED)]);
+    pump(&fx);
+    // After that load listed `out/`, a new `out/.gitignore`: the filter in
+    // place still ignores `out/`, so its event drops without a trigger.
+    fx.emit_root(&[("out/.gitignore", F | Flags::CREATED)]);
+    pump(&fx);
+    fx.settle();
+    assert_eq!(fx.source.filter_calls(), 2, "no reload for it");
+    // So the next load reads the worktree again; the one after reuses.
+    index_changes(&fx, 2);
+    assert_eq!(fx.source.previous(), [None, None, None, Some(3)]);
+}
+
+#[test]
+fn filter_reuse_not_after_events_during_a_load_over_a_failed_filter() {
+    let fx = Fixture::new();
+    let _o = fx.opened();
+    fx.source.fail_filter(Some("index is corrupt"));
+    index_changes(&fx, 1);
+    // Over a failed filter only `.gitignore` paths trigger: a directory
+    // moved in during the next load triggers nothing.
+    fx.source.fail_filter(None);
+    fx.emit_common(&[("index", F)]);
+    pump(&fx);
+    fx.emit_root(&[("vendored", D | Flags::RENAMED)]);
+    pump(&fx);
+    fx.settle();
+    assert_eq!(fx.source.filter_calls(), 3, "no reload for it");
+    index_changes(&fx, 2);
+    assert_eq!(fx.source.previous(), [None, Some(1), None, None, Some(4)]);
+}
+
+#[test]
+fn filter_reuse_not_after_an_overflow_before_the_first_filter() {
+    let fx = Fixture::new();
+    let (repo, _repo_sink) = fx.repo();
+    let (_worktree, _sink) = fx.worktree(&repo);
+    pump(&fx);
+    // Before the first filter: more paths than the stash holds, a new
+    // `.gitignore` among them; merged into directories, its trigger is lost.
+    let paths: Vec<String> = (0..5000)
+        .map(|i| format!("gen/d{:02}/f{i}", i % 50))
+        .chain(["gen/d00/.gitignore".to_owned()])
+        .collect();
+    for chunk in paths.chunks(1000) {
+        let events: Vec<(&str, Flags)> = chunk.iter().map(|path| (path.as_str(), F)).collect();
+        fx.emit_root(&events);
+        pump(&fx);
+    }
+    fx.settle();
+    let calls = fx.source.filter_calls();
+    index_changes(&fx, 2);
+    let previous = fx.source.previous();
+    assert_eq!(previous[calls..], [None, Some(calls + 1)], "{previous:?}");
+}
+
 #[test]
 fn filter_reuse_not_after_a_failed_load() {
     let fx = Fixture::new();

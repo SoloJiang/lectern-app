@@ -924,3 +924,87 @@ fn watch_source_events_new_and_changed_gitignore_after_an_index_change() {
     settle();
     assert_eq!(delivered(), ["moved", "moved/b.txt"]);
 }
+
+/// The race of a rule file whose event the filter in place misjudges: a
+/// load starts after `out/` is taken out of `.gitignore`, `out/.gitignore`
+/// appears after that load's walk, and its event is judged by the old
+/// filter (which still ignores `out/`) before the new one is in: dropped,
+/// no reload. The next index change must not reuse that walk.
+#[test]
+fn watch_source_events_rule_file_missed_during_a_load_is_read_by_the_next_index_load() {
+    use lectern_fs_watch::testing::{FakeBackend, RecordingSink, manual};
+    use lectern_fs_watch::{
+        Coalesce, Config, Flags, RepoSpec, WorktreeBatch, WorktreeName, WorktreeSpec,
+    };
+
+    let t = TestRepo::new();
+    t.write_file(".gitignore", b"out/\n");
+    t.write_file("a.txt", b"x\n");
+    t.write_file("out/keep.txt", b"x\n");
+    t.write_index(t.common_dir(), &[t.add(".gitignore"), t.add("a.txt")]);
+    let backend = FakeBackend::new();
+    let executor = lectern_executor::Executor::manual();
+    let (watcher, driver) = manual(backend.clone(), executor.clone(), Config::default());
+    let repo = watcher.watch_repo(
+        RepoSpec {
+            common_dir: t.common_dir().to_path_buf(),
+            coalesce: Coalesce::REPO,
+        },
+        RecordingSink::new(None),
+    );
+    let sink = RecordingSink::<WorktreeBatch>::new(None);
+    let _worktree = repo.watch_worktree(
+        WorktreeSpec {
+            name: WorktreeName::Main,
+            root: t.root().to_path_buf(),
+            source: main_worktree(&t).watch_source(),
+            coalesce: Coalesce::WORKTREE,
+        },
+        sink.clone(),
+    );
+    let settle = || {
+        driver.run_until_idle();
+        driver.advance(std::time::Duration::from_secs(5));
+    };
+    let delivered = || -> Vec<String> {
+        let mut paths: Vec<String> = sink
+            .take()
+            .into_iter()
+            .flat_map(|(batch, _)| batch.paths)
+            .map(|p| String::from_utf8_lossy(p.as_bytes()).into_owned())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    };
+    let file = Flags::FILE;
+    settle();
+    delivered();
+
+    // `out/` no longer ignored: a load starts (queued, not run yet).
+    t.write_file(".gitignore", b"*.tmp\n");
+    backend.emit(t.root(), &[(".gitignore", file | Flags::MODIFIED)]);
+    driver.pump();
+    // The `out/.gitignore` event is queued before the load's result, and
+    // the file is written only after the load's walk.
+    backend.emit(t.root(), &[("out/.gitignore", file | Flags::CREATED)]);
+    executor.run_until_idle();
+    t.write_file("out/.gitignore", b"*.log\n");
+    settle();
+    delivered();
+
+    // `git add a.txt` again: an index change, then a file under the rule.
+    t.write_index(t.common_dir(), &[t.add(".gitignore"), t.add("a.txt")]);
+    backend.emit(t.common_dir(), &[("index", file)]);
+    settle();
+    delivered();
+    backend.emit(
+        t.root(),
+        &[
+            ("out/a.log", file | Flags::CREATED),
+            ("out/b.txt", file | Flags::CREATED),
+        ],
+    );
+    settle();
+    assert_eq!(delivered(), ["out/b.txt"]);
+}

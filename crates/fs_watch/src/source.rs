@@ -34,13 +34,16 @@ pub struct FilterRequest<'a> {
     /// even when the walk hits its entry limit before finding them; those
     /// under an ignored directory are still not read.
     pub gitignores: &'a [WatchPath],
-    /// The filter in place, given only when nothing but the index has
-    /// changed since its load started: no event since then touched a
-    /// `.gitignore`, a directory holding one, a moved or removed directory,
-    /// `info/exclude` or the config, and no rescan happened. The source may
-    /// then reuse what that load found on disk (`git` reuses the untracked
-    /// walk) as long as it can prove the result is the same as a full load's;
-    /// otherwise it loads in full. None for every other load.
+    /// The filter in place, given only when every reload since its load
+    /// started was an index change, and every worktree event since was
+    /// judged by a current filter: none arrived while a load was in flight,
+    /// while the filter was `Failed` or before the first one, when a new
+    /// rule file can go by without a trigger. So no `.gitignore`, directory
+    /// holding one, moved or removed directory, `info/exclude` or config
+    /// change and no rescan happened since that load read the worktree. The
+    /// source may then reuse what that load found on disk (`git` reuses the
+    /// untracked walk) as long as it can prove the result is the same as a
+    /// full load's; otherwise it loads in full. None for every other load.
     pub previous: Option<&'a dyn PathFilter>,
 }
 

@@ -331,6 +331,13 @@ impl Driver {
         self.run_until_idle();
     }
 
+    /// Processes the fs_watch queue once, without running the executor:
+    /// loads it starts stay pending until `run_until_idle` (or the
+    /// executor's own `run_until_idle`). Returns the items processed.
+    pub fn pump(&self) -> usize {
+        self.shared.pump(true)
+    }
+
     #[cfg(test)]
     pub(crate) fn shared(&self) -> &Arc<Shared> {
         &self.shared

@@ -434,8 +434,10 @@ impl Filter {
     /// with no index path beneath, and not more untracked entries than the
     /// limit. Directories it entered and a walk now wouldn't (a new nested
     /// repository) are `rebuild`'s to drop. fs_watch only passes the filter
-    /// when no event since its load touched the rules or moved directories
-    /// (fs_watch design「路径分类」), so the files read then are as on disk.
+    /// when every reload since its load was an index change and every
+    /// worktree event since was judged by a current filter, so none touched
+    /// the rules or moved directories (fs_watch design「路径分类」): the
+    /// files read then are as on disk.
     fn reusable(
         &self,
         worktree: &Worktree,
