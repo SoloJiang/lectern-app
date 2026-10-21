@@ -16,8 +16,7 @@
 | `project` | 领域，插件 | 文件列表就绪后在后台建目录表（[ADR 0030](../adr/0030.md)：约 1 MB，计入 `project`） |
 | `platform` | 基础设施 | `SafeRoot::replace_file`：保存用的原子替换；`ThreadCpuClock`：grammar 卡死检测用的线程 CPU 时钟 |
 | `git` | 领域 | `merge3`：三方合并；`Text::shared`：取 diff 文本内部的 `Arc` |
-| `executor` | 基础设施 | `Priority::BatchFront`：批量线程先取的一级，只供空闲预取 |
-| `code_intel` | 领域，插件 | 批量循环在每个批次边界交还线程；grammar 卡死检测的登记 |
+| `code_intel` | 领域，插件 | 补测试：批量循环在每个批次边界重新入队（已实现）；grammar 卡死检测的登记 |
 | `workspace`、`app` | 视图、入口 | 离开守卫：关闭阅读视图、切换 worktree、关闭项目、关闭窗口和退出之前问本 crate |
 
 - 做：
@@ -571,7 +570,7 @@ impl FileReaderPlugin {
 | 档位 | 条件 | 文本 | 首屏之后 | 守卫与线程 |
 |---|---|---|---|---|
 | A | ≤ 1 MiB，没有超过 4 KiB 的行 | 首屏一次读完（一段 `read_ranges`） | `FullParse`，8 ms 一片，完成后用整文件的区间替换首屏的，释放语法树 | `BusyGuard`、`Interactive`（1 MiB 约 165 ms，Linux） |
-| B | 1–16 MiB，或有超过 4 KiB 的行 | 首屏两段，之后同一个 `OpenFile` 上 `read_all(16 MiB)` 成为 `Text` | 窗口链从文件开头顺序计算，记下每个窗口的起点（每个 8 字节）；区间只为可见附近的窗口留在 LRU 里 | 可见窗口和前后各一个：`BusyGuard`、`Interactive`；其余：`background_yielding()`、`Batch`（ADR 0033 的只存内存的一类），每个文件同时一个任务、一个任务一个窗口（「批量线程上的先后」） |
+| B | 1–16 MiB，或有超过 4 KiB 的行 | 首屏两段，之后同一个 `OpenFile` 上 `read_all(16 MiB)` 成为 `Text` | 窗口链从文件开头顺序计算，记下每个窗口的起点（每个 8 字节）；区间只为可见附近的窗口留在 LRU 里 | 可见窗口和前后各一个：`BusyGuard`、`Interactive`；其余：`background_yielding()`、`Batch`（ADR 0033 的只存内存的一类），同一时刻至多一个任务、一个任务至多一段窗口（「批量线程上的先后」） |
 | C | > 16 MiB | `Pages`，页 LRU ≤ 8 MiB | 只为可见窗口前后各一个算区间，随滚动按需算；窗口起点的顺序计算同档位 B 的「其余」，算到之前用启发式的安全位置 | 同档位 B |
 | 纯文本 | 二进制（文件头 8 KiB 或窗口里有 NUL）、不是 UTF-8、没有这种语言、语言停用（`health`），或一个 64 KiB 的窗口解析连续两次超过 128 ms | 同所在档位 | 不高亮，照常滚动、查找；档位 A 的纯文本文件（不是 `NotText`）仍可编辑 | — |
 
@@ -592,7 +591,7 @@ impl FileReaderPlugin {
 | `Line`，> 1 MiB，没有检查点 | `first_read(size, 0)` | 先显示文件开头；完整读取（≤ 16 MiB）或流式扫描（> 16 MiB）到那一行后滚过去，不在 16 ms 的保证里（ADR 0034「预算」） |
 
 - 上表的读取针对 `OpenFile`（工作区文件、依赖文件）。对象库的内容（`TextOrigin::Object`）不能按区间读，按以下顺序取得，之后按同样的规则在内存里定位；它的 OID 就是 `expect`，不需要核对：
-  1. 有人持有：`Reader::share_object` 登记着的内容，直接用，首屏不做 IO。审阅视图显示一个文件的 diff 时为两侧的文本（`ChangeSet::texts`，它本来就持有）各登记一次、diff 不再显示时 drop 登记，所以从 diff 的旧一侧打开（⇧⌘O、hunk）、从旧一侧发起的跳转候选（抽屉）打开的都是这一类，首屏与工作区文件同样在 16 ms 之内（`app/open_file` 的 Object 场景）。登记表里的内容都是审阅视图同时持有的那几份，不另占内存，总量受 ADR 0035 的「打开 Diff 时改动集保留的内容 ≤ 32 MiB」约束；没有 Diff 显示时（包括 ADR 0035 的采样状态）登记表是空的。
+  1. 有人持有：`Reader::share_object` 登记着的内容，直接用，首屏不做 IO。审阅视图显示一个文件的 diff 时为两侧的文本（`ChangeSet::texts`，它本来就持有）各登记一次、diff 不再显示时 drop 登记，所以从 diff 的旧一侧打开（⇧⌘O、hunk）、从旧一侧发起的跳转候选（抽屉）打开的都是这一类，首屏与工作区文件同样在 16 ms 之内（`app/open_file` 的 Object 场景）。登记表里的内容都是审阅视图同时持有的那几份，在它之外不另占内存：工作区一侧的内容在 ADR 0035 的「打开 Diff 时改动集保留的工作区内容 ≤ 32 MiB」之内，旧一侧来自对象库（`ChangeSet::texts`），不在那个上限里，由审阅视图自己的设计约束它持有多少。没有 Diff 显示时（包括 ADR 0035 的采样状态）登记表是空的。
   2. LRU：≤ 1 MiB 的内容在 LRU 的文本条目里（8 MiB 上限之内）。后退历史只记 OID、来源和位置，不持有内容。
   3. 都没有：≤ 1 MiB（`OBJECT_INLINE`）的 blob 在首屏任务里 `Repo::blob` 解压（约 1–3 ms，`syntax/first_screen/object_1mib`），仍在 16 ms 之内；更大的要等整份解压，不在 16 ms 的保证里，这是 [ADR 0042](../adr/0042.md) 对 ADR 0034「预算」的修订。现有的入口都落在第 1 类里，只有 Diff 关闭之后的后退、前进会走到这里。
   超过 16 MiB（`OBJECT_MAX`）而又没有人持有的不打开。
@@ -632,8 +631,8 @@ dyn Reader::open ─▶ [主线程] 阅读视图 ─▶ Engine::open
    ─▶ [Interactive + BusyGuard] SafeRoot::open_file → read_ranges → window::plan → highlight::window（8 ms）─▶ 快照（首屏）
    ─▶ [Background + BusyGuard] read_all / 流式扫描：BlobHasher、行索引、行检查点 → syntax.lines ─▶ 快照（完整、OID）
    ─▶ 档位 A：[Interactive + BusyGuard] FullParse 8 ms 一片 ─▶ 快照（整文件区间）
-      档位 B/C：可见窗口 ±1 [Interactive + BusyGuard]；其余 [Batch + background_yielding，一个窗口一个任务] ─▶ LRU ─▶ 快照
-Reader::prefetch ─▶ [BatchFront + background_yielding，至多一个] ─▶ LRU
+      档位 B/C：可见窗口 ±1 [Interactive + BusyGuard]；其余 [Batch + background_yielding，一个任务至多一段窗口] ─▶ LRU ─▶ 快照
+Reader::prefetch ─▶ [Batch + background_yielding，至多一个] ─▶ LRU
 WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份 ─▶ 重新打开（阅读）或标记 dirty_on_disk（编辑）
 ```
 
@@ -643,8 +642,8 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 | 档位 A 的整文件解析；档位 B、C 可见窗口和前后各一个；档位 C 可见页的读取 | `BusyGuard` | `Interactive` |
 | 完整读取（≤ 16 MiB）、求 OID、行索引、写 `syntax.lines`；档位 C 的流式扫描（每次 1 MiB 的 `read_ranges`，块之间检查取消） | `BusyGuard` | `Background` |
 | 工作区文件的规范内容 OID（原始字节的 OID 与 `FileList` 的不同时调 `Worktree::canonical_oid`，给 `TextRef`） | `BusyGuard` | `Background` |
-| 档位 B、C 的其余窗口 | `background_yielding()` | `Batch`，每个文件同时一个任务；任务每做完一个窗口就结束，下一个窗口重新入队，排在已在队列里的批量工作之后 |
-| 空闲预取（≤ 4 个文件；≤ 1 MiB 的算整文件，更大的只算第一屏的窗口） | `background_yielding()` | `BatchFront`，同一时刻至多一个任务，一个任务做一个文件 |
+| 档位 B、C 的其余窗口 | `background_yielding()` | `Batch`，同一时刻至多一个任务；一个任务至多一个窗口、50 ms 的解析，之后重新入队，排在已在队列里的批量工作之后 |
+| 空闲预取（≤ 4 个文件；≤ 1 MiB 的算整文件，更大的只算第一屏的窗口） | `background_yielding()` | `Batch`，同一时刻至多一个任务，一个任务做一个文件 |
 | 查找（按 1 MiB 分块，块之间检查取消；新的查询取消旧的） | `BusyGuard` | `Interactive` |
 | 编辑：增量解析、保存、三方合并 | `BusyGuard` | `Interactive` |
 | `fs_watch` 事件：stat 比较、触发重新打开 | `BusyGuard`（`Sink::busy`） | `Background` |
@@ -652,27 +651,27 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - UI 线程只调用 `Engine::open`、`DocHandle` 的命令和 `snapshot`、`EditSession::changed` / `spans`：入队、取锁复制 `Arc`，不做 IO、解析和 git 操作（AGENTS.md「禁止事项」）。`DocSnapshot::rows` 只做与请求行数成正比的工作：分块里取字节、按区间切片、长行用格数检查点。
 - 档位 B、C 的批量窗口满足 ADR 0033「两类只存内存的批量工作」：持有让路的 `BackgroundGuard`、只在批量线程上、结果只进 LRU，暂停、取消或退出最多丢掉在途的一个窗口。解析的进度回调读 `yield_requested()`，`ChainWindow::step` 返回 `Yielded`、保留解析器的状态（大文件调研第 3 节「分片解析与恢复」），任务在 `proceed_item` 上等，下一次从停下处继续。
 - grammar 的卡死检测：每次 `step`、`window` 调用在进入 tree-sitter 之前 `health::global().enter`，返回之前 drop 守卫；`Yielded`、`TimedOut` 之后等待保活时段或下一片时不在表里，续做时以剩余预算重新登记。登记得到 None（这个 grammar 版本已停用）时这个文档改为纯文本。
-
-### 批量线程上的先后
-
-ADR 0033 要求空闲预取排在 `code_intel` 第 3 层之前。现在的 `executor` 只有一个先进先出的 `Batch` 队列，而 `code_intel` 每个批量线程上有一个长期任务（[code_intel 设计「调度、批次与取消」](code_intel.md#调度批次与取消)），它只在暂停或等保活时段时返回 `Pending`，批量线程从不交还，排在后面的 `Batch` 任务要等到建索引结束。所以：
-
-- `executor` 增加 `Priority::BatchFront`：与 `Batch` 同一组批量线程、同样的 QoS 和闸门规则，批量线程取任务时先取它（「对其他 crate 的要求」）。只有空闲预取用它，同一时刻至多一个 `BatchFront` 任务，一个任务做一个文件（≤ 1 MiB 的整文件，或更大的文件的第一屏窗口），所以它占批量线程的时间有上限，不会把 `Batch` 挤到后面无限期。
-- `code_intel` 的批量循环必须改：每个批次边界（写完一批之后、取下一批之前）都返回一次 `Pending` 并立即重新入队，把线程交还执行器。这是硬前提（「验收」的前置条件 F），在它之前空闲预取不能满足 ADR 0033。
-- 档位 B、C 的批量窗口用普通的 `Batch`：一个任务一个窗口，做完就结束，下一个窗口重新入队。它与 `code_intel` 重新入队的批次轮流使用批量线程，不排在第 3 层之前，也不会让 64 MiB 文件的约 1000 个窗口（Linux 11–18 s）整段挡在建索引前面。
-- 等待的上限：一个批次在开始 50 ms 之后的第一个文件边界结束，那个文件可以一直运行到后台的单文件截止时间 250 ms（code_intel 设计「调度、批次与取消」），所以 `BatchFront` 任务入队后至多约 300 ms 开始（每个批量线程都在跑这样一批时）。`Batch` 的窗口再排在已入队的任务之后：队列里同时最多有批量线程数个 `code_intel` 任务、一个窗口任务和一个预取任务，所以一个窗口至多等约两轮（约 600 ms）。这是交互静止时的预取和看不见的窗口，用户不在等它。
-- 与 `code_intel` 的 `LargeSlot`（超过 256 KiB 的一项同时只在一个批量任务里）：
-  - 交还线程不要求放下 `LargeSlot`。让路时停下的超过 256 KiB 的一项连同它的 `LargeTurn` 留在任务的 `Parked` 里，从一个批次边界带到下一个（[code_intel 设计「交互让路」](code_intel.md#交互让路)），重新入队的任务照样带着它，状态不丢，同一时刻也仍只有一棵大树。
-  - 不让路的请求方（窗口链、第 3 层的大文件）照旧当场接手停下的持有者（`LargeSlot::acquire` 的 `near` 一支：丢掉 `LargeTurn::park` 登记的状态、作废那一轮），不需要持有者运行，与它是否在队列里无关。
-  - 让路的请求方在 `LargeSlot::acquire` 里阻塞自己的线程，等持有者交还（每 10 ms 检查一次停止）。活性：`code_intel` 的批量任务数不超过批量线程数 N，持有者是其中之一，所以阻塞的等待方至多占 N − 1 个线程，至少还有一个线程不被等待方占着。这个线程上运行的只可能是：没有在等的 `code_intel` 任务（一批之后重新入队，排在已在队列里的持有者之后）、`syntax` 的任务（从不等 `LargeSlot`、不阻塞，同一时刻至多一个窗口任务和一个预取任务，一个窗口或一个文件就结束；`BatchFront` 的预取能插到前面，但每次进入交互静止至多 4 个），或者持有者本身。所以持有者在有限的几项之后就会被取到。持有者被取到后若开关仍开着，它在 `proceed_item` 上返回 `Pending`、不占线程，等开关关闭才继续，与交还线程之前相同。
-  - 重新入队不增加任务数，「批量任务数不多于批量线程数」这一条照旧成立。
-- `syntax` 的任务不取 `LargeSlot`：同一时刻至多一个窗口任务和一个预取任务，64 KiB 窗口的语法树 2–5 MiB（`syntax/window_peak` 在这种窗口上判定 ≤ 8 MiB），找不到切点、扩到 256 KiB 的最多约 21 MiB（大文件调研实测，压缩 JS），与 `code_intel` 的 `LargeSlot` 内存各自有上限。
 - `OpenFile` 的持有时间（platform 设计「对其他 crate 的影响」）：≤ 16 MiB 的在完整读取之后 drop；> 16 MiB 的到文档关闭或收到这个路径的事件为止，收到事件时重新打开。完整读取的身份与首屏的不同时，首屏结果作废，按完整内容重新定位到同一行号。
 - 根目录：`Engine` 按根路径保留一个 `Arc<SafeRoot>`（工作区根经 `SafeRoot::open`，与 `code_intel` 相同），项目关闭时释放。对象库：每个打开的 git 项目保留一个 `git::Repo`（不持有 gix 句柄），`Repo::blob(oid, OBJECT_MAX)` 整份取出。依赖根：`DepRoot::Worktree { dir }` 经工作区根的 `SafeRoot::open_dir(dir)` 打开，路径必须以 `dir` 开头，扩展名必须在 ADR 0033 的允许列表里（共用 `services::code_intel::DEPENDENCY_EXTENSIONS`），否则 `Unreadable`。
 - 监听：有文档打开时，为它所在的 worktree 订阅一份 `watch_repo` + `watch_worktree`（`Coalesce::WORKTREE`，`source` 用 `git::Worktree::watch_source`，与 `project`、`code_intel` 共用同一份状态），文档关闭时 drop。`WorktreeBatch` 里有这个路径（或它的上级目录）、或 `rescan` 时，`SafeRoot::stat` 比较身份；保存后自己那次写入的身份不算变化。
 - 派生数据的键：区间按 (OID、语言、grammar 版本、查询版本、窗口起点)，行检查点按 OID（架构规则 5，[#42](https://github.com/SoloJiang/lectern-app/issues/42) 的「grammar 版本进键」）。grammar 或查询升级后旧条目不再命中。
 - `code_intel` 的焦点：快照的 `oid` 有值后，工作区文件的 `TextRef::oid` 取规范内容的 OID（原始 OID 等于 `FileList` 的就是它，否则 `canonical_oid`，有外部过滤器时不设焦点），对象库取 `expect`，依赖取原始 OID；文档关闭时 `set_focus(Current(None))`。指针在标识符上停留 150 ms 后调 `prefetch(Definition)`。
 - 首帧之前不做任何事：插件 `AfterFirstFrame` 激活，`activate` 不加载 grammar、不编译查询、不开 `SafeRoot`；第一次 `open` 时才编译这种语言的查询。
+
+### 批量线程上的先后
+
+`executor` 只有一个先进先出的 `Batch` 队列。`code_intel` 每个批量线程上有一个长期任务，它在每个批次边界（`Step::Worked` 之后）调用 `yield_now()`：唤醒自己、返回一次 `Pending`，所以每一批之后都重新入队、排到队尾（已实现，`crates/code_intel/src/index/batch.rs` 的批量循环；本设计只要求补测试，见「对其他 crate 的要求」）。`syntax` 的批量工作都用普通的 `Batch`，不需要新的优先级：
+
+- 空闲预取：同一时刻至多一个任务，一个任务做一个文件（≤ 1 MiB 的整文件，或更大的文件的第一屏窗口），每次进入交互静止至多 4 个。
+- 档位 B、C 的批量窗口：同一时刻至多一个任务；一个任务至多做一个窗口、至多 50 ms 的解析（`ChainWindow::step` 的预算），然后结束，下一段重新入队。它与 `code_intel` 的批次轮流使用批量线程，不会让 64 MiB 文件的约 1000 个窗口（Linux 11–18 s）整段挡在建索引前面。
+- 等待的上限：批量队列和批量线程上至多有 N 个 `code_intel` 任务（N 是批量线程数）、一个窗口任务和一个预取任务。预取入队时排在它前面的，只有已在队列里的 `code_intel` 任务和至多一个窗口任务；正在运行的 `code_intel` 任务做完这一批后排到它后面。一批在开始 50 ms 之后的第一个文件边界结束，那个文件至多运行到后台的单文件截止时间 250 ms（[code_intel 设计「调度、批次与取消」](code_intel.md#调度批次与取消)），所以一批 ≤ 300 ms；窗口任务一次 ≤ 50 ms。预取因此至多等每个批量线程上的一批加上一个窗口任务：≤ 350 ms（`syntax/prefetch_wait`）。窗口任务的等待相同。在 `LargeSlot::acquire` 上阻塞的等待方不在队列里，不改变这个上限（下一条）。
+- 与 [ADR 0033](../adr/0033.md)「空闲预取排在第 3 层之前」：这里是近似地做到，ADR 0041 把它改写为上面的上限。预取不插到已经入队的第 3 层批次前面；它至多等每个线程正在运行的一批（≤ 300 ms）和一个窗口任务，期间第 3 层至多前进这一批。理由：预取在交互静止（300 ms 没有输入）时才发出，算的是用户下一步可能要看的文件，晚 350 ms 开始通常仍在用户的下一个动作之前；严格的先后要给执行器加一级优先级（ADR 0041「放弃的方案」），而这一点等待不值得。
+- 与 `code_intel` 的 `LargeSlot`（超过 256 KiB 的一项同时只在一个批量任务里）：
+  - 交还线程不要求放下 `LargeSlot`。让路时停下的超过 256 KiB 的一项连同它的 `LargeTurn` 留在任务的 `Parked` 里，从一个批次边界带到下一个（[code_intel 设计「交互让路」](code_intel.md#交互让路)），重新入队的任务照样带着它，状态不丢，同一时刻也仍只有一棵大树。
+  - 不让路的请求方（窗口链、第 3 层的大文件）照旧当场接手停下的持有者（`LargeSlot::acquire` 的 `near` 一支：丢掉 `LargeTurn::park` 登记的状态、作废那一轮），不需要持有者运行，与它是否在队列里无关。
+  - 让路的请求方在 `LargeSlot::acquire` 里阻塞自己的线程，等持有者交还（每 10 ms 检查一次停止）。活性：`code_intel` 的批量任务数不超过批量线程数 N，持有者是其中之一，所以阻塞的等待方至多占 N − 1 个线程，至少还有一个线程不被等待方占着。这个线程上运行的只可能是：没有在等的 `code_intel` 任务（一批之后重新入队，排在已在队列里的持有者之后）、`syntax` 的任务（从不等 `LargeSlot`、不阻塞，同一时刻至多一个窗口任务和一个预取任务，一段窗口或一个文件就结束，之后重新入队、排在持有者之后），或者持有者本身。所以持有者在有限的几项之后就会被取到。持有者被取到后若开关仍开着，它在 `proceed_item` 上返回 `Pending`、不占线程，等开关关闭才继续，与交还线程之前相同。
+  - 重新入队不增加任务数，「批量任务数不多于批量线程数」这一条照旧成立。
+- `syntax` 的任务不取 `LargeSlot`：同一时刻至多一个窗口任务和一个预取任务，64 KiB 窗口的语法树 2–5 MiB（`syntax/window_peak` 在这种窗口上判定 ≤ 8 MiB），找不到切点、扩到 256 KiB 的最多约 21 MiB（大文件调研实测，压缩 JS），与 `code_intel` 的 `LargeSlot` 内存各自有上限。
 
 ### 编辑
 
@@ -699,8 +698,13 @@ ADR 0033 要求空闲预取排在 `code_intel` 第 3 层之前。现在的 `exec
 - 守卫的结果：没有未保存的改动时立即通过。有时弹出系统的确认（`file-reader-unsaved-*`：保存 / 不保存 / 取消）：保存 → `EditSession::save`，`Saved` 才通过，`Conflict` 或 `Failed` 时不通过（显示提示行，留在编辑里）；不保存 → 通过，drop `EditSession`；取消 → 不通过。
 - 接口：`dyn Contributions` 提供 `register_leave_guard(guard: Arc<dyn LeaveGuard>) -> 守卫`（`workspace` #30 的设计，见「对其他 crate 的要求」）。`LeaveGuard::ask(scope: LeaveScope, done: Box<dyn FnOnce(bool)>)` 在主线程上调用，不阻塞，结果经 `done` 交回；`LeaveScope` 是 `View`（关闭或离开阅读视图）、`Project(ProjectKey)`、`Worktree(ProjectKey)`、`Window`、`App`。`workspace` 对一个操作按登记顺序逐个问，都通过才执行；本 crate 只对与这个范围相交、而且有未保存改动的文档回答「问用户」。
 - 关闭窗口：`workspace` 在 GPUI 的窗口关闭回调里先返回「不关闭」、问守卫、通过后再关闭。
-- 退出：锁定的 gpui-pre-macos 0.3.9 的应用代理只实现了 `applicationWillTerminate:`，`on_quit` 的返回值被忽略，退出一旦开始就不能取消；改 GPUI 要人确认（[ADR 0016](../adr/0016.md)）。所以 Lectern 自己定义 `Quit` Action（`workspace` 或 `app` 里，纯 GPUI 代码，不碰 AppKit），⌘Q 和应用菜单的 Quit 都绑定到它：它先问 `LeaveScope::App` 的守卫，通过后才调用 `cx.quit()`，取消时什么都不做。由系统发起的退出（注销、关机、Dock 菜单里的退出）不经这个 Action，有未保存的编辑时会丢失（「已知限制」）；以后要拦住它们，得在 `platform` 里给应用代理加 `applicationShouldTerminate:`，涉及 GPUI 的应用代理，那时另行决定。
-- 窗口关闭回调和 `Quit` Action 分别由 `workspace`（#30）和 `workspace` / `app` 提供，是本 crate 编辑模式的前提（「验收」前置条件 E）。
+- 退出：锁定的 gpui-pre-macos 0.3.9 的应用代理只实现了 `applicationWillTerminate:`，`on_quit` 的返回值被忽略，退出一旦开始就不能取消；改 GPUI 要人确认（[ADR 0016](../adr/0016.md)）。所以 `app` 自己定义 `Quit` Action（纯 GPUI 代码，不碰 AppKit），⌘Q 和应用菜单的 Quit 都绑定到它。退出只有这一个顺序：
+  1. 经 `workspace` 问 `LeaveScope::App` 的离开守卫；取消时什么都不做，到此为止。
+  2. 通过后调用 `Kernel::shutdown(done)`，按依赖的相反顺序停用全部插件（[kernel 设计「内核」](kernel.md#内核)）。等待期间主线程照常运行，需要在主线程上 drop 的守卫不会死锁。
+  3. `done` 被调用、或等满 2 秒之后，在主线程上调用 `cx.quit()`。
+
+  由系统发起的退出（注销、关机、Dock 菜单里的退出）不经这个 Action：有未保存的编辑时会丢失，插件也不按顺序停用（「已知限制」，kernel 设计同样记下）；以后要拦住它们，得在 `platform` 里给应用代理加 `applicationShouldTerminate:`，涉及 GPUI 的应用代理，那时另行决定。
+- 窗口关闭回调和 `Quit` Action 分别由 `workspace`（#30）和 `app` 提供，是本 crate 编辑模式的前提（「验收」前置条件 E）。
 - 守卫管不到的丢失：项目根目录消失、`project` 自己关闭了项目、由系统发起的退出（见上）、进程崩溃。前两种情况本 crate 不 drop 有未保存改动的 `EditSession`，缓冲区留在阅读视图里，提示行说明文件已不可用（`file-reader-unavailable-while-editing`），只能复制内容或放弃；`Engine::close_project` 跳过这样的文档，等用户放弃后再释放。系统发起的退出和崩溃时未保存的改动丢失（「已知限制」：不做自动保存）。
 - 退出编辑之后 drop `EditSession`，语法树随之释放（ADR 0034：不计入空闲内存），阅读视图按保存后的内容重新打开同一位置。
 
@@ -722,7 +726,7 @@ ADR 0033 要求空闲预取排在 `code_intel` 第 3 层之前。现在的 `exec
 | 目录表（`project` 的份额） | 10 万文件 ≤ 20 ms、≤ 1.5 MB，计入 `plugin/project/resident_100k` < 16 MB | `project/dirs_100k`、`project/dirs_100k_bytes` |
 | 安装包 ≤ 80 MB | 四个新 grammar 的解析表（`tree-sitter-md` 最大），由 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 测量 | `app/bundle_size` |
 
-批量线程上的等待：`syntax/prefetch_wait`（真实的 `code_intel` 建 10 万文件的索引时，预取从入队到开始）最大值 ≤ 300 ms（「批量线程上的先后」）。
+批量线程上的等待：`syntax/prefetch_wait`（真实的 `code_intel` 建 10 万文件的索引时，预取从入队到开始）最大值 ≤ 350 ms：每个批量线程上的一批（≤ 300 ms）加一个窗口任务（≤ 50 ms），见「批量线程上的先后」。
 
 只记录的基准：`syntax/full_parse_1mib`（档位 A 的整文件解析）、`syntax/chain_16mib`（档位 B 的整条窗口链）、`syntax/scan_64mib`（档位 C 的流式扫描）、`syntax/find_16mib`。
 
@@ -856,8 +860,8 @@ ADR 0033 要求空闲预取排在 `code_intel` 第 3 层之前。现在的 `exec
 - `lines_*`：`LineCheckpoints` 的编码、≥ 1 MiB 才写、`len` 不同时不用。
 - `doc_*`：用临时目录的真实文件和 `Executor::manual()`：四种 `Anchor`、完整读取的身份与首屏不同时作废首屏、`Byte` 的 OID 与 `expect` 不同时按行号重新定位、档位 C 的页 LRU 上限、`Symlink` / `Unsupported` / `Missing` / `PathThroughSymlink`、依赖根越界（`..`、指向根外的符号链接、不允许的扩展名）、对象库的 blob、fs_watch 的 `FakeBackend` 注入事件后重新打开、文档 drop 后任务取消和 `OpenFile` 关闭（描述符计数）。
 - `lru_*`：8 MiB 上限、预取与批量窗口先淘汰、正在显示的条目不受淘汰影响。
-- `prefetch_*`：至多 4 个、同一时刻至多一个 `BatchFront` 任务、让路开关打开时停在分片边界（kernel 的 `set_yield`、`ManualClock`）、结果只进 LRU。
-- `batch_order_*`：用 `Executor` 的真实批量线程（1 个）和一个模拟 `code_intel` 的长期任务（每个批次边界让出一次）：预取在一批之内开始；窗口任务与模拟的批次轮流运行；64 MiB 文件的窗口链运行期间模拟任务照常前进。
+- `prefetch_*`：至多 4 个、同一时刻至多一个预取任务、让路开关打开时停在分片边界（kernel 的 `set_yield`、`ManualClock`）、结果只进 LRU。
+- `batch_order_*`：用 `Executor` 的真实批量线程（1 个和 3 个）和模拟 `code_intel` 的长期任务（与 `index/batch.rs` 相同：每个批次边界 `yield_now`，批次时长可控）：预取在每个线程的一批加一个窗口任务之内开始；窗口任务一次不超过 50 ms 的解析、与模拟的批次轮流运行；64 MiB 文件的窗口链运行期间模拟任务照常前进。
 - `health_*`：`ThreadCpuClock` 换成测试时钟。在途的一次调用 CPU 时间超过预算加 1 s 之后，同一 grammar 版本的 `enter` 返回 None、`allows` 为 false，其他语言不受影响；`Yielded`、`TimedOut` 之后不在表里的调用，不论墙上时间过了多久都不会触发；线程被挤掉、墙上时间前进而 CPU 时间不变时不触发；续做以剩余预算重新登记。`ParseGuard` 不是 `Send`（编译失败测试）。
 - `object_*`：有 `ObjectShare` 时打开 `Object` 不调 `Repo::blob`（计数的 git 替身）；登记 drop 后登记表不再持有那份内容（计数分配器：调用方也放下后字节被释放），≤ 1 MiB 的在首屏任务里解压；同一 OID 登记两次、drop 一次仍可用；超过 16 MiB 又没有登记的为 `Unreadable`；后退历史里的条目不持有内容。
 - `edit_*`：增量解析的区间与整文件解析相同；`changed` 之后 `spans` 立即返回平移后的区间；CRLF 与 BOM 在保存时恢复。
@@ -918,16 +922,16 @@ ADR 0033 要求空闲预取排在 `code_intel` 第 3 层之前。现在的 `exec
   ```
 
   测试 `thread_cpu_*`：忙循环的线程 CPU 时间增长，阻塞在条件变量上的不增长，句柄能在另一个线程上读。
-- `executor`：`Priority::BatchFront`（「批量线程上的先后」）：只在批量线程上运行（与 `Batch` 相同的线程组、QoS、闸门、取消和 panic 规则），批量线程取任务时先取它，工作线程从不取它。执行器不限制它的数量，「同一时刻至多一个」由 `syntax` 保证。测试：`BatchFront` 排在已入队的 `Batch` 之前被取走；批量线程全被 `Batch` 占着时它等到其中一个任务返回 `Pending`；工作线程从不取它。[executor 设计](executor.md)在这个 PR 里增加这一级。
+- `executor`：不改。`syntax` 的批量工作用已有的 `Priority::Batch`。
 - `code_intel`：
-  - 批量循环（硬前提，「验收」的前置条件 F）：每个批次边界都返回一次 `Pending` 并立即重新入队，把批量线程交还执行器；现在的循环只在暂停或等保活时段时返回 `Pending`（code_intel 设计「调度、批次与取消」「交互让路」），要改。重新入队的任务带着它的 `Parked`（含停下的大项的 `LargeTurn`），不放下 `LargeSlot`；批量任务数不变（仍不超过批量线程数），活性的论证见「批量线程上的先后」。测试：批量线程全被 `code_intel` 的任务占着时入队一个 `BatchFront` 任务，它不晚于 `code_intel` 的下一个批次边界开始；一个任务带着停下的大项重新入队、另一个让路的任务在 `LargeSlot::acquire` 上等时，持有者仍能被取到，开关关闭后两者都完成（单个批量线程和两个批量线程各一次）。
+  - 批量循环（前置条件 F，只补测试）：循环已经在每个 `Step::Worked` 之后调用 `yield_now()`，返回一次 `Pending` 并重新入队（`crates/code_intel/src/index/batch.rs`），带着它的 `Parked`（含停下的大项的 `LargeTurn`），不放下 `LargeSlot`，批量任务数不变；活性的论证见「批量线程上的先后」。本设计依赖这一点，所以要测试把它固定下来：批量线程全被 `code_intel` 的任务占着时入队一个 `Batch` 任务，它不晚于每个线程的下一个批次边界开始；一个任务带着停下的大项重新入队、另一个让路的任务在 `LargeSlot::acquire` 上等时，持有者仍能被取到，开关关闭后两者都完成（单个批量线程和两个批量线程各一次）。
   - grammar 的卡死检测共用 `syntax::health`（后续 PR，不阻塞本 issue 的各步）：在调用 tree-sitter 和 tree-sitter-tags 的线程上、每次进入之前以这次调用的剩余预算 `enter`，返回时（`Done`、`TimedOut`、`Cancelled`、`Parked`）drop 守卫；`Parked` 的抽取续做时重新登记。返回 None 时按语言不可用处理（[#42](https://github.com/SoloJiang/lectern-app/issues/42) 的 scanner 一条，code_intel 设计「对其他 crate 的要求」的高亮方一条）。
   - 测试 `lang_extensions_agree_with_code_intel`：两边共有的语言，扩展名表相同。
   - 依赖层的扩展名改用 `services::code_intel::DEPENDENCY_EXTENSIONS`。
 - `git`：`Text` 增加 `pub fn shared(&self) -> &Arc<[u8]>`，返回它内部的那份 `Arc`（`Text::new` 收的就是 `Arc<[u8]>`），不复制。审阅视图用它取得要登记的内容。
 - `review_view`（它的设计）：显示一个文件的 diff 时，为 `ChangeSet::texts` 两侧的 `Text` 各调一次 `Reader::share_object(oid, text.shared().clone())`，`ObjectShare` 与这两份 `Text` 放在一起，diff 不再显示（滚出保留范围、审阅关闭）时一起 drop；从旧一侧打开时 `ReadTarget::origin` 为 `Object`、`expect` 为旧一侧的 OID。
 - `workspace`（#30 的设计）：`dyn Contributions` 提供侧栏面板（Files）、内容区视图（阅读视图）的注册，「回到打开它的视图」的导航栈，以及离开守卫：`register_leave_guard`、`LeaveGuard::ask(scope, done)`、`LeaveScope`（「编辑」）。`workspace` 在弹出阅读视图、切换当前 worktree、关闭项目和关闭窗口之前按顺序问守卫，都通过才执行；窗口关闭在 GPUI 的窗口关闭回调里先拒绝、问完再关。
-- `workspace` 或 `app`：Lectern 自己的 `Quit` Action，⌘Q 和应用菜单的 Quit 绑定到它；它问 `LeaveScope::App` 的守卫，通过后调用 `cx.quit()`。只用 GPUI 的 Action、菜单和 `quit`，不接 AppKit（macOS 专属能力只在 `platform`，架构规则 6），不改 GPUI（ADR 0016）。测试：有未保存编辑时 ⌘Q 弹出确认，取消后应用不退出。
+- `app`：Lectern 自己的 `Quit` Action，⌘Q 和应用菜单的 Quit 绑定到它；它按「编辑」里的顺序退出：经 `workspace` 问 `LeaveScope::App` 的守卫 → `Kernel::shutdown(done)` → `done` 或 2 秒之后 `cx.quit()`（`Kernel::shutdown` 只给 `app`，所以这个 Action 在 `app` 里）。只用 GPUI 的 Action、菜单和 `quit`，不接 AppKit（macOS 专属能力只在 `platform`，架构规则 6），不改 GPUI（ADR 0016）。测试：有未保存编辑时 ⌘Q 弹出确认，取消后应用不退出、插件仍是 `Active`；确认后插件按相反顺序停用，之后才退出；`shutdown` 卡住时 2 秒后仍退出。[kernel 设计「内核」](kernel.md#内核)里 `shutdown` 的说明已按这个顺序改写。
 - `ui`（#6 的设计）：`TokenKind` 到系统色的映射（浅色 / 深色各一组，与 agent 标识色一样通过色觉辨识校验），等宽字体 SF Mono 12pt 的格宽与行高，展开原语。
 - `bench`：探针增加阅读视图首屏画出、编辑可输入、Files 展开完成的 `Milestone`；生成器增加大文件调研的合成形状。
 
@@ -945,7 +949,7 @@ ADR 0033 要求空闲预取排在 `code_intel` 第 3 层之前。现在的 `exec
 - C. `platform`：`SafeRoot::replace_file`；`replace_file_*` 测试通过。
 - D. `git`：`merge3`、`Text::shared`；`merge3_*` 测试通过，`Text::shared` 返回的 `Arc` 与 `Text::new` 收到的是同一份（`Arc::ptr_eq`）。
 - E. `workspace` 的 `dyn Contributions`（#30）、`ui` 的代码配色与等宽度量（#6）：第 7 步之前。离开守卫（`register_leave_guard`、窗口关闭回调）和 `Quit` Action：第 8 步之前，没有它们编辑模式不上线。
-- F. `executor` 的 `Priority::BatchFront`，以及 `code_intel` 的批量循环在每个批次边界交还线程（「对其他 crate 的要求」）：第 4 步之前。两者都是硬前提：没有后者，批量线程从不交还，预取排不到第 3 层之前。
+- F. `code_intel`：固定「批量循环在每个批次边界重新入队、带着停下的项」的测试（行为已实现，「对其他 crate 的要求」）：第 4 步之前。
 - G. `platform` 的 `ThreadCpuClock`：第 1 步之前（`health_*` 用它）。
 
 本 issue 分八步实现，每步一个 PR，写 `Refs #10`，最后一步写 `Closes #10`。每一步都要 `just check`、`just test`（`syntax` 的步骤加 `-p lectern-syntax`）、`just deny` 通过，并把这一步的 bench 条目加进 `budgets.rs`、改为生效。
@@ -961,9 +965,9 @@ ADR 0033 要求空闲预取排在 `code_intel` 第 3 层之前。现在的 `exec
    - `text_*`、`lines_*`、`doc_*`、`lru_*`、`object_*` 测试通过；`syntax/first_screen/object_shared`、`syntax/first_screen/object_1mib` 在预算内，`syntax/first_screen/object_cold` 有结果；[cache 设计「命名空间」](cache.md#命名空间)的 `syntax.lines` 一行与实现一致。
    - `syntax/first_screen`（含首屏读取）、`syntax/lru_bytes` 在预算内；`syntax/scan_64mib`、`syntax/find_16mib` 有结果。
    - `rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 没有结果。
-4. **预取与让路**（前置 F）：`Engine::prefetch`（`BatchFront`，至多一个任务），档位 B、C 的批量窗口接 `background_yielding()`、一个窗口一个 `Batch` 任务。
+4. **预取与让路**（前置 F）：`Engine::prefetch`（`Batch`，至多一个任务），档位 B、C 的批量窗口接 `background_yielding()`、一个任务至多一段窗口（50 ms）。
    - `prefetch_*`、`batch_order_*` 测试通过；让路开关打开后在途窗口在一片之内停下（同 `code_intel/yield_stop` 的测法，≤ 10 ms）。
-   - 合起来的检查：真实的 `code_intel` 在 10 万文件的夹具上建索引时，预取从入队到开始的最大值 ≤ 300 ms（`syntax/prefetch_wait`，只在第 4 步之后、F 合并之后生效）。
+   - 合起来的检查：真实的 `code_intel` 在 10 万文件的夹具上建索引时，预取从入队到开始的最大值 ≤ 350 ms（`syntax/prefetch_wait`）。
 5. **编辑的领域部分**（前置 C、D）：`EditSession`、保存、冲突、合并。
    - `edit_*`、`save_*`、`merge_*` 测试通过；`syntax/edit_tree_bytes` ≤ 41 MiB。
 6. **插件与服务**（前置 A）：本 crate 加 `plugin = true`，`FileReaderPlugin`、`dyn Reader`、`set_focus` / `prefetch` 的调用。
@@ -986,7 +990,7 @@ ADR 0033 要求空闲预取排在 `code_intel` 第 3 层之前。现在的 `exec
 - 制表符固定按 4 格计，不读 `.editorconfig`。
 - 对象库里的 blob 只能整份取出（`Repo::blob`）：没有人持有、超过 1 MiB 的（Diff 关闭之后的后退、前进）首屏要等解压完，不在 16 ms 的保证里（ADR 0042）；超过 16 MiB 又没有人持有的不打开。
 - 不做自动保存：进程崩溃时未保存的编辑丢失。
-- 由系统发起的退出（注销、关机、Dock 菜单里的退出）不经 `Quit` Action，锁定的 GPUI 也不能取消退出，有未保存的编辑时会丢失；拦住它们要在 `platform` 里给应用代理加 `applicationShouldTerminate:`，以后另行决定。
+- 由系统发起的退出（注销、关机、Dock 菜单里的退出）不经 `Quit` Action，锁定的 GPUI 也不能取消或推迟退出：有未保存的编辑时会丢失，插件也不按顺序停用；拦住它们要在 `platform` 里给应用代理加 `applicationShouldTerminate:`，以后另行决定。
 - 保存时比较身份与 `renameat` 之间有一个很短的窗口，这期间别的进程写入的内容会被覆盖；原子替换会断开硬链接、不保留扩展属性。
 - 文件夹项目的文件在阅读时不自动刷新（`project` 不监听文件夹项目）。
 - 查找只对 ASCII 字母不区分大小写，最多 10,000 个结果。
