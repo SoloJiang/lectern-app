@@ -44,12 +44,12 @@ use super::state::{
 use super::{Inner, bump, lock};
 use crate::canonical::{Canonical, Pending};
 use crate::extract::{
-    BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction,
-    INTERACTIVE_MAX_LEN, Lang, LanguageTable, ResumeSlot,
+    BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction, Lang,
+    LanguageTable, ResumeSlot,
 };
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{HintStamp, LangLookup};
-use crate::store::{EXISTS_BATCH, Found, Version};
+use crate::store::{EXISTS_BATCH, Found, UnitMeta, Version};
 use crate::util::log;
 
 /// A batch ends after this many files…
@@ -249,6 +249,8 @@ pub(crate) struct Parked {
     /// one: the batch's `canonical_oids` decides the key before the commit
     /// (`Done::check`).
     check: bool,
+    /// `key` is the raw bytes' OID (`UnitMeta::canonical`).
+    canonical: bool,
     bytes: Vec<u8>,
     /// The extraction's state (`extract::Resume`, with the deadline's
     /// budget left); empty until it starts.
@@ -346,6 +348,8 @@ pub(crate) struct Scanned {
     /// The language as the query's (current) table had it.
     pub lang: Lang,
     pub extraction: Extraction,
+    /// The bytes extracted hash to `oid` (`UnitMeta::canonical`).
+    pub canonical: bool,
 }
 
 impl Clone for Scanned {
@@ -355,23 +359,40 @@ impl Clone for Scanned {
             oid: self.oid,
             lang: self.lang.clone(),
             extraction: self.extraction.clone(),
+            canonical: self.canonical,
         }
     }
 }
 
 /// One extraction ready to be written.
-struct Done {
-    item: Item,
+pub(super) struct Done {
+    pub item: Item,
     /// The OID of the bytes actually read (「存储表」).
-    key: BlobId,
+    pub key: BlobId,
     /// A batch tier's worktree bytes whose raw OID (`key`) is not the
     /// queued OID: kept until the batch's `canonical_oids` before the
     /// commit, which makes the queued OID the key when the built-in
     /// conversions turn the bytes into it (「规范内容 OID 的批量核对」).
-    check: Option<Vec<u8>>,
-    extraction: Extraction,
+    pub check: Option<Vec<u8>>,
+    pub extraction: Extraction,
     /// The cancel flag the item was taken with (`State::finish`).
-    flag: Arc<AtomicBool>,
+    pub flag: Arc<AtomicBool>,
+    /// The unit's part and whether `key` is the raw bytes' OID
+    /// (`UnitMeta::canonical`; a key `check` turns into the queued OID is
+    /// not).
+    pub meta: UnitMeta,
+}
+
+/// One item read ([`Inner::read_item`]).
+struct ReadItem {
+    bytes: Vec<u8>,
+    /// The key: the raw bytes' OID, or the queued OID when the built-in
+    /// conversions turn them into it.
+    key: BlobId,
+    /// `key` is the raw OID, left to the batch's `canonical_oids`.
+    check: bool,
+    /// `key` is the raw bytes' OID (`UnitMeta::canonical`).
+    canonical: bool,
 }
 
 enum Outcome {
@@ -395,11 +416,11 @@ enum Step {
 }
 
 /// The read side of one session, copied out of the lock.
-struct Ctx {
-    session: u64,
-    cancel: Arc<AtomicBool>,
-    root: Option<Arc<SafeRoot>>,
-    tree: Option<Tree>,
+pub(super) struct Ctx {
+    pub session: u64,
+    pub cancel: Arc<AtomicBool>,
+    pub root: Option<Arc<SafeRoot>>,
+    pub tree: Option<Tree>,
 }
 
 impl Inner {
@@ -432,7 +453,7 @@ impl Inner {
 
     /// Wakes the batch tasks waiting at a yielding boundary (tier 3 wants
     /// the large slot).
-    fn wake_waiters(&self) {
+    pub(super) fn wake_waiters(&self) {
         let waiters = std::mem::take(&mut lock(&self.batch).waiters);
         for waker in waiters {
             waker.wake();
@@ -612,7 +633,8 @@ impl Inner {
         if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
             return None;
         }
-        if !st.batch.resume[0].is_empty() {
+        // An opened large file's window chain first (「大文件」).
+        if !st.batch.resume[0].is_empty() || self.chain_ready(&st) {
             return Some(Kind::Near);
         }
         let deps = st.cursor_deps(eviction);
@@ -773,6 +795,11 @@ impl Inner {
         let Some((ctx, stamp)) = self.step_ctx(project) else {
             return Step::Idle;
         };
+        // An opened large file's window chain first, one window a step
+        // (「大文件」); it takes the large slot over from a parked task.
+        if self.chain_step(project, &ctx, guard) {
+            return Step::Worked;
+        }
         // Files known to be missing go first.
         if !lock(&project.state).batch.resume[0].is_empty() {
             self.extract_batch(project, &ctx, 0, guard, Kind::Near, Grant::Batch, own);
@@ -857,7 +884,9 @@ impl Inner {
         // Everything is checked: mark the warm start's hits as used.
         let mut touches = lock(&project.state).batch.take_touches();
         if !touches.is_empty() {
-            project.store.touch_pending(&mut touches);
+            let queued = touches.len();
+            let left = project.store.touch_pending(&mut touches);
+            bump(&self.stats.touched, queued.saturating_sub(left));
             let mut st = lock(&project.state);
             if st.session == ctx.session {
                 st.batch.put_back_touches(touches);
@@ -1156,17 +1185,22 @@ impl Inner {
             }
         }
         let mut found = Vec::new();
+        let mut windows = Vec::new();
         let mut hits = Vec::new();
         let mut statuses = Vec::new();
         for (version, group) in &groups {
             let oids: Vec<BlobId> = group.iter().map(|i| i.oid).collect();
             bump(&self.stats.exists_checks, oids.len().div_ceil(EXISTS_BATCH));
-            let hit = project.store.exists(version, &oids).unwrap_or_default();
+            let (hit, w) = project
+                .store
+                .exists_with_windows(version, &oids)
+                .unwrap_or_default();
             for f in &hit {
                 hits.push((f.oid, version.lang.clone()));
                 statuses.push(f.status);
             }
             found.extend(hit);
+            windows.extend(w);
         }
         let table = lock(&self.langs).table.clone();
         let mut st = lock(&project.state);
@@ -1175,7 +1209,7 @@ impl Inner {
         }
         // From a batch task, which goes on with them: the wake only makes
         // it step once more before it stops.
-        let wake = st.batch.queue_touches(eviction, &found);
+        let wake = st.batch.queue_touches(eviction, &found, &windows);
         for ((oid, lang), status) in hits.iter().zip(&statuses) {
             // A hit stamps hints only for the version the map and the current
             // language table both have, and with the map's own stamp: a hit
@@ -1245,7 +1279,12 @@ impl Inner {
                     };
                     let outcome = match self.read_item(ctx, &item, Mode::Batch, true, &flag) {
                         Err(outcome) => outcome,
-                        Ok((bytes, key, check)) => {
+                        Ok(ReadItem {
+                            bytes,
+                            key,
+                            check,
+                            canonical,
+                        }) => {
                             if bytes.len() > LARGE_FILE
                                 && let Some(p) = own.take_if(|p| p.large.is_some())
                             {
@@ -1256,7 +1295,7 @@ impl Inner {
                             self.extract_bytes(
                                 ctx,
                                 &item,
-                                (key, check),
+                                (key, check, canonical),
                                 bytes,
                                 Mode::Batch,
                                 Some(guard),
@@ -1286,24 +1325,25 @@ impl Inner {
                                     }
                                     continue;
                                 }
-                                Ok((data, _, _)) if one && data.len() as u64 > SLOT_MAX_BYTES => {
+                                Ok(read) if one && read.bytes.len() as u64 > SLOT_MAX_BYTES => {
                                     // Never in a keepalive slot: set aside for
                                     // the switch to turn off; the slot goes on
                                     // with the next item. What was read counts
                                     // toward the batch's bytes.
-                                    bytes += data.len();
+                                    bytes += read.bytes.len();
                                     self.set_aside(project, ctx.session, t, item, &flag);
                                     continue;
                                 }
-                                Ok((data, key, check)) => Parked {
+                                Ok(read) => Parked {
                                     project: project.clone(),
                                     session: ctx.session,
                                     t,
                                     item,
                                     flag,
-                                    key,
-                                    check,
-                                    bytes: data,
+                                    key: read.key,
+                                    check: read.check,
+                                    canonical: read.canonical,
+                                    bytes: read.bytes,
                                     resume: Arc::new(Mutex::new(None)),
                                     large: None,
                                 },
@@ -1394,7 +1434,12 @@ impl Inner {
         for (i, canonical) in results {
             let d = &mut done[i];
             match canonical {
-                Canonical::Oid(oid) if oid == d.item.oid => d.key = oid,
+                Canonical::Oid(oid) if oid == d.item.oid => {
+                    // The conversion made them that content: no byte
+                    // offsets for views (「字节偏移」).
+                    d.key = oid;
+                    d.meta.canonical = false;
+                }
                 Canonical::Oid(_) | Canonical::Filtered => {}
                 Canonical::Failed => failed[i] = true,
             }
@@ -1537,6 +1582,7 @@ impl Inner {
                         check: p.check.then_some(p.bytes),
                         extraction,
                         flag: p.flag,
+                        meta: UnitMeta::whole(p.canonical),
                     },
                     len,
                 )
@@ -1594,9 +1640,20 @@ impl Inner {
         cancel: &Arc<AtomicBool>,
     ) -> Outcome {
         match self.read_item(ctx, item, mode, false, cancel) {
-            Ok((bytes, key, check)) => {
-                self.extract_bytes(ctx, item, (key, check), bytes, mode, guard, cancel)
-            }
+            Ok(ReadItem {
+                bytes,
+                key,
+                check,
+                canonical,
+            }) => self.extract_bytes(
+                ctx,
+                item,
+                (key, check, canonical),
+                bytes,
+                mode,
+                guard,
+                cancel,
+            ),
             Err(outcome) => outcome,
         }
     }
@@ -1624,11 +1681,10 @@ impl Inner {
         mode: Mode,
         defer: bool,
         cancel: &Arc<AtomicBool>,
-    ) -> Result<(Vec<u8>, BlobId, bool), Outcome> {
-        let max = match mode {
-            Mode::Interactive => INTERACTIVE_MAX_LEN,
-            Mode::Background | Mode::Batch => BACKGROUND_MAX_LEN,
-        };
+    ) -> Result<ReadItem, Outcome> {
+        // An opened file over 1 MiB is extracted by windows (「大文件」):
+        // tier 1 reads at most what it extracts whole, as the others do.
+        let max = BACKGROUND_MAX_LEN;
         let too_large = |item: &Item| {
             Outcome::Done(
                 Done {
@@ -1641,6 +1697,7 @@ impl Inner {
                         refs: Vec::new(),
                     },
                     flag: cancel.clone(),
+                    meta: UnitMeta::whole(true),
                 },
                 0,
             )
@@ -1676,8 +1733,14 @@ impl Inner {
             }
         };
         let raw = hash_blob(hash_kind(&item.oid), &bytes);
+        let read = |bytes, key, check| ReadItem {
+            bytes,
+            key,
+            check,
+            canonical: key == raw,
+        };
         if raw == item.oid {
-            return Ok((bytes, raw, false));
+            return Ok(read(bytes, raw, false));
         }
         let key = match &item.source {
             // Another worktree's file that differs from its index waits
@@ -1690,7 +1753,7 @@ impl Inner {
                 Some(_)
                     if mode == Mode::Batch && (defer || bytes.len() as u64 > SLOT_MAX_BYTES) =>
                 {
-                    return Ok((bytes, raw, true));
+                    return Ok(read(bytes, raw, true));
                 }
                 Some(tree) => match self.git.canonical_oid(tree, &item.path, &bytes) {
                     Ok(Some(canonical)) if canonical == item.oid => item.oid,
@@ -1703,7 +1766,7 @@ impl Inner {
                 None => raw,
             },
         };
-        Ok((bytes, key, false))
+        Ok(read(bytes, key, false))
     }
 
     /// Extracts one read item, without yielding: tiers 1 and 2, and tier 3
@@ -1718,7 +1781,7 @@ impl Inner {
         &self,
         ctx: &Ctx,
         item: &Item,
-        (key, check): (BlobId, bool),
+        (key, check, canonical): (BlobId, bool, bool),
         bytes: Vec<u8>,
         mode: Mode,
         guard: Option<&Arc<BackgroundGuard>>,
@@ -1782,6 +1845,7 @@ impl Inner {
                         check: check.then_some(bytes),
                         extraction,
                         flag: cancel.clone(),
+                        meta: UnitMeta::whole(canonical),
                     },
                     len,
                 )
@@ -1804,7 +1868,13 @@ impl Inner {
     /// does not set `Batch::full`.
     ///
     /// True when every item is now stored (written, or found stored).
-    fn commit(&self, project: &Arc<Project>, ctx: &Ctx, done: Vec<Done>, batch: bool) -> bool {
+    pub(super) fn commit(
+        &self,
+        project: &Arc<Project>,
+        ctx: &Ctx,
+        done: Vec<Done>,
+        batch: bool,
+    ) -> bool {
         if done.is_empty() {
             return true;
         }
@@ -1830,6 +1900,8 @@ impl Inner {
         let mut stored = Vec::new();
         let mut written = Vec::new();
         let mut hits = Vec::new();
+        // The window units of `Windowed` hits: marked used with them.
+        let mut windows = Vec::new();
         let (eviction, committed, after) = {
             let _turn = lock(&project.commits);
             // Keys stored since the extraction: one query per version,
@@ -1838,9 +1910,12 @@ impl Inner {
             let mut found: Vec<(Version, Found)> = Vec::new();
             for (version, keys) in &groups {
                 bump(&self.stats.exists_checks, 1);
-                for f in project.store.exists(version, keys).unwrap_or_default() {
-                    found.push((version.clone(), f));
-                }
+                let (hit, w) = project
+                    .store
+                    .exists_with_windows(version, keys)
+                    .unwrap_or_default();
+                found.extend(hit.into_iter().map(|f| (version.clone(), f)));
+                windows.extend(w);
             }
             let eviction = project.store.evictions();
             let mut write = project.store.write();
@@ -1855,7 +1930,7 @@ impl Inner {
                     stored.push((d.key, version, d.item.tier, f.status));
                     continue;
                 }
-                if write.add(d.key, &version, &d.extraction) {
+                if write.add_unit(d.key, &version, &d.extraction, d.meta) {
                     replaces |= stored_as.is_some();
                     written.push((d.key, version, d.item.tier, d.extraction.status));
                 }
@@ -1907,7 +1982,7 @@ impl Inner {
                     st.batch.full = Some(walked);
                 }
             }
-            wakes.push(st.batch.queue_touches(before_raw, &hits));
+            wakes.push(st.batch.queue_touches(before_raw, &hits, &windows));
             // The units just written are the newest: they outlive the
             // eviction they caused.
             let sets = [(stored, st.stamp(before)), (written, st.stamp(after))];
@@ -1995,6 +2070,7 @@ impl Inner {
                 check: None,
                 extraction: s.extraction,
                 flag: Arc::new(AtomicBool::new(false)),
+                meta: UnitMeta::whole(s.canonical),
             })
             .collect();
         self.commit(project, &ctx, done, false);
@@ -2180,9 +2256,9 @@ impl Inner {
             let (before_raw, before) = (project.store.evictions(), project.evictions());
             let version = Version::of(&item.lang);
             bump(&self.stats.exists_checks, 1);
-            let found = project
+            let (found, windows) = project
                 .store
-                .exists(&version, &[item.oid])
+                .exists_with_windows(&version, &[item.oid])
                 .unwrap_or_default();
             if let Some(hit) = found.iter().find(|f| satisfies(item.tier, f.status)) {
                 let status = hit.status;
@@ -2193,7 +2269,7 @@ impl Inner {
                     if t == 0 {
                         st.focused.satisfied.insert((item.oid, version.clone()));
                     }
-                    wake = Some(st.batch.queue_touches(before_raw, &found));
+                    wake = Some(st.batch.queue_touches(before_raw, &found, &windows));
                     if current(&table, &st.map, &version) {
                         let stamp = st.stamp(before);
                         st.hint_paths(&item.oid, &item.lang.name().0, stamp, status);
@@ -2214,6 +2290,12 @@ impl Inner {
             };
             match self.extract_item(&ctx, &item, mode, None, &flag) {
                 Outcome::Done(d, _) => {
+                    // An opened file over 1 MiB: its window chain goes to
+                    // the batch tiers, first in line (「大文件」).
+                    let large = t == 0 && d.extraction.status == ExtractStatus::TooLarge;
+                    if large {
+                        self.enqueue_chain(project, session, &item);
+                    }
                     // Settled for the session only once a result is stored:
                     // a file that could not be read is tried again.
                     if self.commit(project, &ctx, vec![d], false) && t == 0 {
@@ -2247,11 +2329,13 @@ fn unfinished(status: ExtractStatus) -> bool {
 
 /// Whether an extraction with `new` replaces a stored unit with `stored`,
 /// whatever the tier that made it: a `Done` result (tier 1's interactive
-/// limits, a query's search) over a `TooLarge` or `TimedOut` unit. The only
-/// replace `commit` makes: never the other way round, nor an unfinished
-/// result over an unfinished unit.
+/// limits, a query's search), or the `Windowed` marker of a window chain
+/// that reached the file's end (its content is in the window units), over
+/// a `TooLarge` or `TimedOut` unit. The only replaces `commit` makes: never
+/// the other way round, nor an unfinished result over an unfinished unit,
+/// nor anything over `Done` or `Windowed`.
 fn outranks(new: ExtractStatus, stored: ExtractStatus) -> bool {
-    new == ExtractStatus::Done && unfinished(stored)
+    matches!(new, ExtractStatus::Done | ExtractStatus::Windowed) && unfinished(stored)
 }
 
 /// Whether `version` is the version of its language both in the current

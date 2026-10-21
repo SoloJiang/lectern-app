@@ -93,6 +93,11 @@ pub struct Location {
     pub oid: BlobId,
     pub line: u32,
     pub column: u32,
+    /// 起点（定义的名字、引用）在 `oid` 那份内容里的字节偏移（ADR 0034）：视图打开大文件的
+    /// 中部时按它读窗口，不从文件开头扫描换行。口径与 git 的 hunk 偏移相同：`oid` 的 blob 的
+    /// 字节。抽取时读到的字节不是这份内容（原始字节的 OID 与 `oid` 不同、经 `canonical_oid`
+    /// 才对上，如 CRLF 的工作区文件）时为 None，视图按行号定位。
+    pub byte: Option<u64>,
     /// 定义节点的最后一行；引用为引用所在的行。
     pub end_line: u32,
 }

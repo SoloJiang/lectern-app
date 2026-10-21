@@ -78,6 +78,8 @@ pub struct SiteDef {
 pub struct LocalBinding {
     pub name: Box<str>,
     pub at: Position,
+    /// The byte offset of `at` in the source parsed.
+    pub byte: u64,
     /// The definition when tags captured it too; a plain local otherwise.
     pub def: Option<Def>,
     /// Visible in one function or block only: not at file level, not a
@@ -701,6 +703,7 @@ impl ParsedFile {
                 },
                 line: at.line,
                 column: at.column,
+                byte: range.start as u64,
                 end_line: at.line,
                 scope,
                 visibility: crate::extract::Visibility::File,
@@ -719,6 +722,7 @@ impl ParsedFile {
         LocalBinding {
             name: name.into(),
             at: position(&self.lines, local.range.start, &self.source),
+            byte: local.range.start as u64,
             def,
             local: self.locals.is_local(local),
         }

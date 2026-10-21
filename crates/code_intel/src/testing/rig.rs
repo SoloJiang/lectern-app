@@ -53,6 +53,9 @@ impl Rig {
             },
             git.clone(),
         );
+        // The files a benchmark writes are as old as those it stands for:
+        // no window chain waits out the racy-timestamp delay (「大文件」).
+        indexer.set_wall_clock(|| std::time::SystemTime::now() + Duration::from_secs(3600));
         let subscriptions = indexer.subscribe();
         Rig {
             host,
@@ -66,6 +69,39 @@ impl Rig {
             _watchdog: task,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Makes the main worktree's `path` the current text (`Focus::Current`,
+    /// with the OID the map has for it), without running anything; false
+    /// when the map does not have it.
+    pub fn current(&self, path: &str) -> bool {
+        use lectern_services::code_intel::{Focus, TextOrigin, TextRef};
+        let key = self.git.key();
+        let Some(eff) = self.indexer.map(&key).and_then(|m| m.effective(path)) else {
+            return false;
+        };
+        let wt = self.git.worktree_key("main");
+        self.indexer.set_focus(
+            &key,
+            Some(&wt),
+            Focus::Current(Some(TextRef {
+                worktree: Some(wt.clone()),
+                path: path.into(),
+                oid: eff.oid,
+                origin: TextOrigin::Worktree,
+            })),
+        );
+        true
+    }
+
+    /// The stored status of the whole-file unit of `path`'s content in its
+    /// language (`Windowed` once an opened large file's chain is complete).
+    pub fn stored_status(&self, path: &str) -> Option<crate::extract::ExtractStatus> {
+        let key = self.git.key();
+        let eff = self.indexer.map(&key)?.effective(path)?;
+        let version = crate::store::Version::of(&eff.lang);
+        let found = self.indexer.store(&key)?.exists(&version, &[eff.oid])?;
+        found.first().map(|f| f.status)
     }
 
     /// Opens the project with the main worktree active, without running

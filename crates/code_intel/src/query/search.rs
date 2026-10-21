@@ -11,6 +11,7 @@ use lectern_services::project::{BlobId, RelPath};
 
 use super::account::{Account, Reason, Stops};
 use super::rank::distance;
+use super::text::Content;
 use super::{Run, Snap};
 use crate::extract::{
     BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, ExtractStatus, INTERACTIVE_DEADLINE,
@@ -86,8 +87,9 @@ impl FileDeadline {
     /// limit. Such a file is neither stored nor searched.
     pub(crate) fn settles(&self, status: ExtractStatus) -> bool {
         match status {
-            // A query's extraction doesn't yield; never stored either way.
-            ExtractStatus::Cancelled | ExtractStatus::Parked => false,
+            // A query's extraction doesn't yield, nor make window markers;
+            // never stored either way.
+            ExtractStatus::Cancelled | ExtractStatus::Parked | ExtractStatus::Windowed => false,
             ExtractStatus::TimedOut => !self.cut,
             ExtractStatus::Done
             | ExtractStatus::TooLarge
@@ -101,7 +103,9 @@ impl FileDeadline {
     pub(crate) fn reason(&self, status: ExtractStatus) -> Option<Reason> {
         match status {
             ExtractStatus::Done => None,
-            ExtractStatus::Cancelled | ExtractStatus::Parked => Some(Reason::Cancelled),
+            ExtractStatus::Cancelled | ExtractStatus::Parked | ExtractStatus::Windowed => {
+                Some(Reason::Cancelled)
+            }
             ExtractStatus::TimedOut if self.cut => Some(Reason::Cut),
             ExtractStatus::TimedOut => Some(Reason::TimedOut),
             ExtractStatus::TooLarge => Some(Reason::TooLarge),
@@ -382,7 +386,7 @@ impl Inner {
         name: &str,
         until: Instant,
         account: &mut Account,
-        mut hit: impl FnMut(&Effective, BlobId, Vec<u8>, Instant) -> Searched,
+        mut hit: impl FnMut(&Effective, BlobId, Content<Vec<u8>>, Instant) -> Searched,
         mut tick: impl FnMut(),
     ) -> bool {
         let clock = self.watchdog.clock().clone();
@@ -395,8 +399,10 @@ impl Inner {
             }
             match self.read_content(snap, eff, snap.read_limit(eff)) {
                 Err(reason) => account.unsearched(&eff.path, eff.oid, reason),
-                Ok(bytes) if !whole_word(&bytes, name) => account.searched(&eff.path, eff.oid),
-                Ok(bytes) => match hit(eff, eff.oid, bytes, until) {
+                Ok(content) if !whole_word(&content.bytes, name) => {
+                    account.searched(&eff.path, eff.oid);
+                }
+                Ok(content) => match hit(eff, eff.oid, content, until) {
                     Searched::Done => account.searched(&eff.path, eff.oid),
                     Searched::Unsearched(reason) => {
                         account.unsearched(&eff.path, eff.oid, reason);

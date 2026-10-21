@@ -263,7 +263,8 @@ fn first_and_done(
             .find(|e| e.0 == id && want(e))
             .map(|e| e.1 - start)
     };
-    let first = at(&|e| e.2).ok_or_else(|| BenchError::new("no batch with candidates"))?;
+    let first = at(&|e| e.2)
+        .ok_or_else(|| BenchError::new(format!("no batch with candidates: {:?}", r.state)))?;
     let done = at(&|e| e.3).ok_or_else(|| BenchError::new("no end"))?;
     Ok((first, done, r))
 }
@@ -537,6 +538,116 @@ fn goto_object(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
+/// The large current text of the `goto_large` jumps: about 4 MiB of
+/// TypeScript functions, each calling the one before it.
+fn large_text(len: usize) -> Vec<u8> {
+    let mut out = String::with_capacity(len + 256);
+    let mut k = 0;
+    while out.len() < len {
+        out.push_str(&format!(
+            "export function build_{k}(value: number): number {{\n  \
+             return build_{}(value) + {k};\n}}\n\n",
+            k.max(1) - 1
+        ));
+        k += 1;
+    }
+    out.into_bytes()
+}
+
+/// The path of the `goto_large` jumps' current text.
+const LARGE: &str = "src/large.ts";
+
+/// A jump in the middle of a 4 MiB current text (「大文件」, ADR 0034): the
+/// text opened and made the current one, so its window chain is written
+/// and its identity and checkpoints recorded (the warming); the jump reads
+/// the checkpoint's range and parses the window around the target. The
+/// window parse forgotten before each (untimed).
+fn large_fixture(ctx: &Ctx, object: bool) -> Result<Jump, BenchError> {
+    let len = ctx.scale(4 << 20, 1_200_000);
+    let text = large_text(len);
+    let git = Arc::new(FakeGit::new());
+    git.add("main", &[(LARGE, &text)]);
+    git.commit("main");
+    let dir = tempfile::tempdir_in(ctx.scratch())?;
+    let rig = Rig::new(git, cache(dir.path()), Arc::new(SystemClock));
+    rig.open();
+    rig.settle();
+    let mut at = text_ref(&rig.git, LARGE, &text);
+    if object {
+        at.origin = TextOrigin::Object;
+    }
+    // The chain, which only a worktree file has, first: then the warming
+    // of the object's text, if that is the current one.
+    if !rig.current(LARGE) {
+        return Err(BenchError::new("the large text is not in the map"));
+    }
+    rig.settle();
+    rig.indexer.set_focus(
+        &rig.git.key(),
+        Some(&rig.git.worktree_key("main")),
+        Focus::Current(Some(at.clone())),
+    );
+    rig.settle();
+    if rig.indexer.kept_large_texts() != 1 {
+        return Err(BenchError::new("the large text's identity is not recorded"));
+    }
+    let mid = text.len() / 2;
+    let k = text[..mid]
+        .windows(b"export function build_".len())
+        .filter(|w| *w == b"export function build_")
+        .count();
+    let position = position(&text, &format!("build_{}(value) + {k};", k - 1))?;
+    let query = Query {
+        project: rig.git.key(),
+        kind: QueryKind::Definition {
+            at: at.clone(),
+            position,
+        },
+    };
+    Ok(Jump {
+        rig,
+        query,
+        at,
+        _dir: dir,
+    })
+}
+
+/// A jump in a large current text, identity recorded: from the query to
+/// its first batch with candidates, ≤ 20 ms (「性能」「大文件的跳转」).
+/// `…/cold`, the record forgotten too (the first jump before the warming
+/// finished: the text streamed once), and `…/object`, a diff's old side
+/// (the blob taken whole each time), are recorded.
+pub const GOTO_LARGE: Bench = Bench {
+    id: "code_intel/goto_large",
+    run: goto_large,
+};
+
+fn goto_large(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let parses = |rig: &Rig| rig.indexer.clear_kept_parses();
+    let cold = |rig: &Rig| {
+        rig.indexer.clear_kept_parses();
+        rig.indexer.clear_large_texts();
+    };
+    // One fixture per series: the listener's handle closes the projects
+    // when a series ends.
+    let jump = large_fixture(ctx, false)?;
+    let (warm, _) = sample_jumps(ctx, &jump, &parses, &answered)?;
+    drop(jump);
+    let jump = large_fixture(ctx, false)?;
+    let (cold, _) = sample_jumps(ctx, &jump, &cold, &answered)?;
+    drop(jump);
+    let jump = large_fixture(ctx, true)?;
+    if jump.at.origin != TextOrigin::Object {
+        return Err(BenchError::new("not an object's text"));
+    }
+    let (object, _) = sample_jumps(ctx, &jump, &parses, &answered)?;
+    Ok(vec![
+        Measured::new("code_intel/goto_large", Value::Time(warm)),
+        Measured::new("code_intel/goto_large/cold", Value::Time(cold)),
+        Measured::new("code_intel/goto_large/object", Value::Time(object)),
+    ])
+}
+
 /// The first jump of a fresh index (record-only, against the 50 ms
 /// candidates budget): the cloudprint shape (728 files), opened and
 /// settled, so the background task has compiled the languages' queries;
@@ -590,7 +701,12 @@ fn goto_first(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 /// `Named` for a name some 45 000 files define (record-only): every other
 /// file of the shared virtual repository also defines `id`
 /// (`code_intel_virtual::COMMON`). From the query to its first batch: the
-/// first page, the files near the query, ranking them, the event.
+/// first page, the files near the query, ranking them, the event. The
+/// first batch must come and have candidates. The rest of the lookup takes
+/// most of the query's 1 s time box (0.6–0.8 s), so on a slow runner it
+/// may end `Partial`: recorded, not an error. `…/done` is the time to
+/// `Done`; `…/candidates` and `…/unsearched` the candidates and the files
+/// left unsearched at `Done` (the last sample).
 pub const NAMED_50K: Bench = Bench {
     id: "code_intel/named_50k",
     run: named_50k,
@@ -616,7 +732,7 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     rig.open_with(packages(&synthetic::package_dirs(n)));
     rig.settle();
     maybe_full(&rig);
-    let (seen, _subscription) = listen(&rig)?;
+    let (seen, _subscription) = listen_batches(&rig)?;
     let query = Query {
         project: rig.git.key(),
         kind: QueryKind::Named {
@@ -624,35 +740,55 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             near: Some(synthetic::path(0).into()),
         },
     };
-    let mut samples = Vec::new();
+    let (mut firsts, mut dones) = (Vec::new(), Vec::new());
+    let (mut candidates, mut unsearched) = (0, 0);
     for round in 0..slow_samples(ctx) {
         seen.lock().unwrap().clear();
         let start = Instant::now();
         let (id, r) = run(&rig, &query)?;
         let elapsed = start.elapsed();
-        let first = seen
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(i, _, _)| *i == id)
-            .map(|(_, _, t)| *t)
-            .ok_or_else(|| BenchError::new("no batch"))?;
-        if r.candidates.len() < units {
-            return Err(BenchError::new(format!(
-                "{} candidates of {units} units, {:?}; {}",
-                r.candidates.len(),
+        let events = seen.lock().unwrap().clone();
+        let mine = || events.iter().filter(|e| e.0 == id);
+        let first = mine().find(|e| e.2).map(|e| e.1).ok_or_else(|| {
+            BenchError::new(format!(
+                "no batch with candidates: {:?}; {}",
                 r.state,
+                diagnose(&rig, &query, elapsed)
+            ))
+        })?;
+        let done = mine()
+            .find(|e| e.3)
+            .map(|e| e.1)
+            .ok_or_else(|| BenchError::new(format!("no end: {:?}", r.state)))?;
+        // Every unit found unless the time box cut the lookup: then the
+        // rest counts as unsearched, and the numbers show it.
+        candidates = r.candidates.len() as u64;
+        unsearched = match r.state {
+            QueryState::Done(Completeness::Complete) => 0,
+            QueryState::Done(Completeness::Partial {
+                unsearched,
+                outside,
+            }) => u64::from(unsearched) + u64::from(outside),
+            ref state => return Err(BenchError::new(format!("not done: {state:?}"))),
+        };
+        if unsearched == 0 && r.candidates.len() < units {
+            return Err(BenchError::new(format!(
+                "{} candidates of {units} units, complete; {}",
+                r.candidates.len(),
                 diagnose(&rig, &query, elapsed)
             )));
         }
         if round > 0 || ctx.mode() == Mode::Smoke {
-            samples.push(first - start);
+            firsts.push(first - start);
+            dones.push(done - start);
         }
     }
-    Ok(vec![Measured::new(
-        "code_intel/named_50k",
-        Value::Time(Samples(samples)),
-    )])
+    Ok(vec![
+        Measured::new("code_intel/named_50k", Value::Time(Samples(firsts))),
+        Measured::new("code_intel/named_50k/done", Value::Time(Samples(dones))),
+        Measured::new("code_intel/named_50k/candidates", Value::Count(candidates)),
+        Measured::new("code_intel/named_50k/unsearched", Value::Count(unsearched)),
+    ])
 }
 
 /// Samples of an operation taking about a second: one warm-up, then 5.

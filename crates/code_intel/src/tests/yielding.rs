@@ -687,6 +687,72 @@ fn yield_large_parked_item_gives_way_to_tier3() {
     }
 }
 
+/// An opened large file's window chain is non-yielding work (「大文件」):
+/// with the switch on and a tier 4 file parked with the large slot, its
+/// windows take the slot over at once and the chain completes; no window
+/// runs while a parked tree is kept.
+#[test]
+fn yield_window_chain_takes_the_large_slot() {
+    for tasks in [1, 2] {
+        let (h, clock, kernel) = harness(tasks);
+        let parked = big_ts(8, 300 << 10);
+        let large = big_ts(11, 1_200_000);
+        let current = ts("current");
+        h.git.add(
+            "main",
+            &[
+                ("a/big.ts", &parked),
+                ("z/current.ts", &current),
+                ("z/large.ts", &large),
+            ],
+        );
+        h.git.commit("main");
+        let once = Arc::new(AtomicBool::new(false));
+        let (o, k) = (once.clone(), kernel.clone());
+        on_yield_check(&h, move || {
+            if !o.swap(true, Ordering::AcqRel) {
+                k.set_yield(true);
+            }
+        });
+        let saw = Arc::new(Mutex::new(Vec::new()));
+        {
+            let s = saw.clone();
+            let inner = Arc::downgrade(h.indexer.inner());
+            *h.indexer.inner().window_hook.lock().unwrap() = Some(Box::new(move |_| {
+                if let Some(inner) = inner.upgrade() {
+                    s.lock().unwrap().push(inner.large.parked());
+                }
+            }));
+        }
+        h.publish("main", packages(&["a", "z"]));
+        focus(&h, "z/current.ts", &current);
+        h.settle();
+        assert!(
+            h.indexer.inner().large.parked(),
+            "{tasks}: parked with the slot"
+        );
+        focus(&h, "z/large.ts", &large);
+        h.settle();
+        let store = h.indexer.store(&h.key()).expect("open");
+        let ts =
+            crate::store::Version::of(crate::extract::LanguageTable::core().get("ts").expect("ts"));
+        let found = store.exists(&ts, &[h.git.oid(&large)]).expect("read");
+        assert_eq!(
+            found.first().map(|f| f.status),
+            Some(ExtractStatus::Windowed),
+            "{tasks}: the chain did not wait for the switch"
+        );
+        let saw = saw.lock().unwrap().clone();
+        assert!(saw.len() > 10 && saw.iter().all(|p| !p), "{tasks}: {saw:?}");
+        // The parked file comes back once the switch is off.
+        clock.advance(PAST_SLOT);
+        h.settle();
+        kernel.set_yield(false);
+        h.settle();
+        assert!(stored(&h, &parked), "{tasks}");
+    }
+}
+
 /// The large slot changes hands between two batch tasks without the
 /// holder running: its parked state is dropped by the non-yielding
 /// acquirer, its turn revoked (so its drop doesn't free the new turn).

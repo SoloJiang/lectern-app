@@ -409,6 +409,7 @@ fn canonical_batch_query_writes_convert_nothing() {
             oid: index,
             lang,
             extraction,
+            canonical: false,
         }],
     );
     assert_eq!(h.git.calls().len(), calls, "no git call");

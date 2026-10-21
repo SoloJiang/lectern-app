@@ -7,6 +7,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use lectern_cache::Unit;
 use lectern_fs_watch::{RepoWatch, WorktreeWatch};
 use lectern_git::HashKind;
 use lectern_kernel::BusyGuard;
@@ -339,6 +340,11 @@ pub(crate) struct Batch {
     /// Set once this session's own write evicted units (the namespace is
     /// at its quota): the eviction generation the walks keep using.
     pub full: Option<u64>,
+    /// The window chains of opened large files (「大文件」), the batch
+    /// tiers' first work; a batch task takes one out while it does a step.
+    pub chains: VecDeque<super::chain::Chain>,
+    /// The keys of the chains queued or taken: one chain per key.
+    pub chain_keys: HashSet<(BlobId, LangName)>,
 }
 
 /// Work for the batch tasks was made: passed to `Inner::wake` once the
@@ -357,10 +363,13 @@ impl Wake {
 }
 
 impl Batch {
-    /// Queues `found` (read under the store's eviction `generation`) to be
+    /// Queues `found` and `windows` (read under the store's eviction
+    /// `generation` by `Store::exists_with_windows`: a `Windowed` hit's
+    /// window units, marked as used with their marker, 「大文件」) to be
     /// marked as used by the batch tasks.
-    pub fn queue_touches(&mut self, generation: u64, found: &[Found]) -> Wake {
+    pub fn queue_touches(&mut self, generation: u64, found: &[Found], windows: &[Unit]) -> Wake {
         self.touches.push(generation, found);
+        self.touches.push_units(generation, windows);
         Wake(())
     }
 

@@ -155,6 +155,7 @@ fn commit(inner: &Inner, snap: &Snap, path: &str, text: &[u8]) {
             oid: eff.oid,
             lang,
             extraction,
+            canonical: true,
         }],
     );
 }

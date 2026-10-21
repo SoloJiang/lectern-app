@@ -1,10 +1,15 @@
 //! Storage of extractions (docs/design/code_intel.md「存储表」): one
 //! extraction is one unit of `cache`'s custom tables in the namespace
 //! `code_intel.tags`, keyed by (blob OID, language, grammar version, query
-//! version), with its rows in `ci_ext`, `ci_def` and `ci_ref`. Every read is
-//! limited to the current (language, grammar version, query version) triples
-//! (the version filter), so units of an old grammar or query are never
-//! returned and only wait for eviction.
+//! version, part), with its rows in `ci_ext`, `ci_def` and `ci_ref`. Every
+//! read is limited to the current (language, grammar version, query version)
+//! triples (the version filter), so units of an old grammar or query are
+//! never returned and only wait for eviction.
+//!
+//! The part is -1 for the whole file's extraction, the window's start for a
+//! window unit of an opened large file (ADR 0034, 「大文件」). Existence
+//! checks and hints look at the whole extraction only; lookups by name and
+//! the name table read window units like any other `Done` unit.
 //!
 //! All calls but [`Store::new`], [`Store::evictions`] and [`Store::write`]
 //! block on SQLite: executor tasks only. SQL runs through `lectern-cache`'s
@@ -26,12 +31,19 @@ use crate::{DEF_KINDS, DefKind, LangName};
 /// in given units by (name, unit), and the name table reads it in index
 /// order without the table. Version 1's tables are dropped on first use and
 /// its units deleted over later writes (`lectern-cache`「自定义表」): the
-/// units are extracted again, not migrated.
+/// units are extracted again, not migrated. 3 (ADR 0033, 0034): `ci_ext`
+/// gains the part (with the window's end, line and column) and whether the
+/// bytes extracted are the OID's content (`canonical`), status 4
+/// (`Windowed`); the key and the unique index gain the part; `ci_def` gains
+/// the name's byte offset.
 pub const NAMESPACE: Namespace = Namespace {
     name: "code_intel.tags",
-    version: 2,
+    version: 3,
     compression: Compression::None,
 };
+
+/// The part of a whole file's extraction.
+pub const WHOLE: i64 = -1;
 
 /// Most bytes of `code_intel.tags` units in one partition.
 pub const QUOTA: u64 = 256 << 20;
@@ -57,20 +69,32 @@ pub const NAMES_SCAN_PAGE: usize = 4096;
 pub const NAME_IN_LIMIT: usize = 256;
 
 pub(crate) const SCHEMA: &[&str] = &[
+    // `part`: -1 for the whole file's extraction, the window's start for a
+    // window unit; `part_end`, `part_line`, `part_col`: a window's end (the
+    // next window's start) and the line and byte column of its start, for
+    // resuming the chain; on the `Windowed` marker `part_end` is the file's
+    // length (where a complete chain ends). `canonical`: the bytes
+    // extracted are `oid`'s content, so `ci_def.byte` goes to views.
     "CREATE TABLE ci_ext (
-       unit    INTEGER PRIMARY KEY REFERENCES entry (id) ON DELETE CASCADE,
-       oid     BLOB    NOT NULL,
-       lang    TEXT    NOT NULL,
-       grammar INTEGER NOT NULL,
-       query   INTEGER NOT NULL,
-       status  INTEGER NOT NULL,
-       UNIQUE (oid, lang, grammar, query))",
+       unit      INTEGER PRIMARY KEY REFERENCES entry (id) ON DELETE CASCADE,
+       oid       BLOB    NOT NULL,
+       lang      TEXT    NOT NULL,
+       grammar   INTEGER NOT NULL,
+       query     INTEGER NOT NULL,
+       status    INTEGER NOT NULL,
+       part      INTEGER NOT NULL,
+       part_end  INTEGER,
+       part_line INTEGER,
+       part_col  INTEGER,
+       canonical INTEGER NOT NULL,
+       UNIQUE (oid, lang, grammar, query, part))",
     "CREATE TABLE ci_def (
        unit     INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
        name     TEXT    NOT NULL,
        kind     INTEGER NOT NULL,
        line     INTEGER NOT NULL,
        col      INTEGER NOT NULL,
+       byte     INTEGER NOT NULL,
        end_line INTEGER NOT NULL,
        scope    TEXT,
        flags    INTEGER NOT NULL,
@@ -88,17 +112,18 @@ pub(crate) const SCHEMA: &[&str] = &[
     "CREATE INDEX ci_ref_unit ON ci_ref (unit)",
 ];
 
-pub(crate) const INSERT_EXT: &str = "INSERT INTO ci_ext (unit, oid, lang, grammar, query, status)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+pub(crate) const INSERT_EXT: &str = "INSERT INTO ci_ext
+       (unit, oid, lang, grammar, query, status, part, part_end, part_line, part_col, canonical)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
 pub(crate) const INSERT_DEF: &str =
-    "INSERT INTO ci_def (unit, name, kind, line, col, end_line, scope, flags, arity)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+    "INSERT INTO ci_def (unit, name, kind, line, col, byte, end_line, scope, flags, arity)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
 /// References are deduplicated by the extraction; `OR IGNORE` keeps a
 /// duplicate from rolling the whole batch back.
 pub(crate) const INSERT_REF: &str = "INSERT OR IGNORE INTO ci_ref (name, unit) VALUES (?1, ?2)";
 
-const EXISTS_HEAD: &str = "SELECT unit, oid, status FROM ci_ext
-     WHERE lang = ?1 AND grammar = ?2 AND query = ?3 AND oid IN (";
+const EXISTS_HEAD: &str = "SELECT unit, oid, status, part_end FROM ci_ext
+     WHERE part = -1 AND lang = ?1 AND grammar = ?2 AND query = ?3 AND oid IN (";
 /// `?` takes the number after the largest so far: `?4` … `?503`.
 const EXISTS_LEN: usize = EXISTS_HEAD.len() + 2 * EXISTS_BATCH;
 const EXISTS_BYTES: [u8; EXISTS_LEN] = {
@@ -118,9 +143,10 @@ const EXISTS_BYTES: [u8; EXISTS_LEN] = {
     }
     out
 };
-/// The existence check: units of one version triple among up to
-/// [`EXISTS_BATCH`] OIDs. Static text with all 500 placeholders; unused
-/// ones are bound to NULL, which matches nothing.
+/// The existence check: whole-file units (`part = -1`) of one version
+/// triple among up to [`EXISTS_BATCH`] OIDs, with a `Windowed` marker's
+/// file length. Static text with all 500 placeholders; unused ones are
+/// bound to NULL, which matches nothing.
 pub(crate) const EXISTS: &str = match std::str::from_utf8(&EXISTS_BYTES) {
     Ok(sql) => sql,
     Err(_) => panic!("the existence check is ASCII"),
@@ -138,8 +164,8 @@ pub(crate) const EXISTS: &str = match std::str::from_utf8(&EXISTS_BYTES) {
 /// within one (unit, kind), the rows before the cursor: SQLite seeks
 /// (unit, kind) and filters the rowid).
 pub(crate) const DEFS_PAGE: &str =
-    "SELECT d.name, d.kind, d.line, d.col, d.end_line, d.scope, d.flags, d.arity,
-            e.oid, e.lang, e.grammar, e.query, raw.unit, raw.kind, raw.id
+    "SELECT d.name, d.kind, d.line, d.col, d.byte, d.end_line, d.scope, d.flags, d.arity,
+            e.oid, e.lang, e.grammar, e.query, raw.unit, raw.kind, raw.id, e.canonical
      FROM (SELECT rowid AS id, unit, kind FROM ci_def INDEXED BY ci_def_name
            WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)
            ORDER BY unit, kind, rowid LIMIT ?5) AS raw
@@ -155,8 +181,8 @@ pub(crate) const DEFS_LEFT: &str = "SELECT count(*) FROM ci_def INDEXED BY ci_de
 // `?14 > 0` (the limit, always positive) names `?14` before the OIDs, so
 // their bare `?` number from 15.
 const DEFS_IN_HEAD: &str =
-    "SELECT d.name, d.kind, d.line, d.col, d.end_line, d.scope, d.flags, d.arity,
-            e.oid, e.lang, d.unit
+    "SELECT d.name, d.kind, d.line, d.col, d.byte, d.end_line, d.scope, d.flags, d.arity,
+            e.oid, e.lang, d.unit, e.canonical
      FROM ci_ext e CROSS JOIN ci_def d INDEXED BY ci_def_name ON d.unit = e.unit
      WHERE d.name = ?1 COLLATE NOCASE AND e.status = 0
        AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4)
@@ -206,7 +232,8 @@ pub(crate) const DEFS_IN: &str = match std::str::from_utf8(&DEFS_IN_BYTES) {
 /// `?2`, each with its unit's `ci_ext` row when `Done` (`LEFT`: every raw
 /// row comes out once). As [`DEFS_PAGE`]: the limit bounds the rows read,
 /// the caller keeps the current versions, fewer than `?3` end the lookup.
-pub(crate) const REFS_PAGE: &str = "SELECT e.oid, e.lang, e.grammar, e.query, raw.unit
+pub(crate) const REFS_PAGE: &str = "SELECT e.oid, e.lang, e.grammar, e.query, raw.unit,
+            e.part, e.part_end, e.part_line, e.part_col, e.canonical
      FROM (SELECT unit FROM ci_ref WHERE name = ?1 AND unit > ?2 ORDER BY unit LIMIT ?3) AS raw
      LEFT JOIN ci_ext e ON e.unit = raw.unit AND e.status = 0";
 /// The units referring to `?1` after unit `?2`, whatever their version and
@@ -231,8 +258,15 @@ pub(crate) const NAMES_PAGE: &str =
 pub(crate) const EXT_OF_UNIT: &str = "SELECT status FROM ci_ext WHERE unit = ?1";
 /// In insertion order, which is the extraction's order.
 pub(crate) const DEFS_OF_UNIT: &str =
-    "SELECT name, kind, line, col, end_line, scope, flags, arity FROM ci_def
+    "SELECT name, kind, line, col, byte, end_line, scope, flags, arity FROM ci_def
      WHERE unit = ?1 ORDER BY rowid";
+/// The window units of one key (`part >= 0`), by start: the unique index's
+/// order, no sort. A chain resumes at its first gap; a `Windowed` marker is
+/// believed only while its windows reach the file's end.
+pub(crate) const WINDOWS: &str =
+    "SELECT unit, part, part_end, part_line, part_col, status, canonical FROM ci_ext
+     WHERE oid = ?1 AND lang = ?2 AND grammar = ?3 AND query = ?4 AND part >= 0
+     ORDER BY part";
 pub(crate) const REFS_OF_UNIT: &str = "SELECT name FROM ci_ref WHERE unit = ?1 ORDER BY name";
 
 pub(crate) const STATEMENTS: &[&str] = &[
@@ -250,6 +284,7 @@ pub(crate) const STATEMENTS: &[&str] = &[
     EXT_OF_UNIT,
     DEFS_OF_UNIT,
     REFS_OF_UNIT,
+    WINDOWS,
 ];
 
 /// The registration of `code_intel.tags`.
@@ -288,13 +323,82 @@ impl Version {
     }
 }
 
-/// The unit's key: `Key::new().bytes(oid).str(lang).u64(grammar).u64(query)`.
-pub fn unit_key(oid: BlobId, version: &Version) -> Key {
+/// The unit's key: `Key::new().bytes(oid).str(lang).u64(grammar).u64(query)`
+/// and the part, `part` [`WHOLE`] or a window's start, as its 64 bits
+/// (`lectern-cache`'s `Key` has no signed field: -1 is `u64::MAX`, which
+/// no window starts at).
+pub fn unit_key(oid: BlobId, version: &Version, part: i64) -> Key {
     Key::new()
         .bytes(oid.as_bytes())
         .str(&version.lang.0)
         .u64(version.grammar)
         .u64(version.query)
+        .u64(part as u64)
+}
+
+/// Where a window unit's window lies in its file (「大文件」): from `start`
+/// to `end` (the next window's start), `start` at `line` and byte `column`
+/// of the whole file.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Part {
+    pub start: u64,
+    pub end: u64,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// What a unit is besides its extraction ([`StoreWrite::add`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct UnitMeta {
+    /// A window unit's window; None for the whole file's extraction.
+    pub part: Option<Part>,
+    /// The bytes extracted are the OID's content: the raw bytes hash to it,
+    /// or the content comes from the object database or a dependency. Not
+    /// when only `canonical_oid` made them that content (a CRLF worktree
+    /// file): then no byte offset goes to views (「字节偏移」).
+    pub canonical: bool,
+    /// The file's length, on a `Windowed` marker: where a complete chain of
+    /// its windows ends.
+    pub len: Option<u64>,
+}
+
+impl UnitMeta {
+    /// The whole file's extraction.
+    pub fn whole(canonical: bool) -> UnitMeta {
+        UnitMeta {
+            part: None,
+            canonical,
+            len: None,
+        }
+    }
+}
+
+/// One window unit as stored ([`Store::windows`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct WindowRow {
+    pub unit: Unit,
+    pub part: Part,
+    /// `Done`, or `TimedOut` (the window has no rows, its chain is not
+    /// complete).
+    pub status: ExtractStatus,
+    pub canonical: bool,
+}
+
+/// Whether `rows` (by start) chain from 0 to `len` without a gap or a
+/// window that timed out: a `Windowed` marker holds the file's content only
+/// then.
+pub fn chain_complete(rows: &[WindowRow], len: u64) -> bool {
+    let mut at = 0;
+    for row in rows {
+        if row.part.start != at {
+            continue;
+        }
+        if row.status != ExtractStatus::Done {
+            return false;
+        }
+        at = row.part.end;
+    }
+    at == len && len > 0
 }
 
 /// The bytes a unit declares, near its rows plus two index entries each:
@@ -349,6 +453,16 @@ impl PendingTouches {
         self.units.extend(found.iter().map(|f| f.unit));
     }
 
+    /// Queues more units read under `generation` (a `Windowed` hit's
+    /// window units: marked as used with their marker).
+    pub fn push_units(&mut self, generation: u64, units: &[Unit]) {
+        if generation != self.generation {
+            self.units.clear();
+            self.generation = generation;
+        }
+        self.units.extend_from_slice(units);
+    }
+
     pub fn len(&self) -> usize {
         self.units.len()
     }
@@ -374,6 +488,11 @@ pub struct StoredUnit {
     pub unit: Unit,
     pub oid: BlobId,
     pub lang: LangName,
+    /// A window unit's window (by-name references only; the name table
+    /// does not read it).
+    pub part: Option<Part>,
+    /// [`UnitMeta::canonical`] (by-name references only).
+    pub canonical: bool,
 }
 
 /// A definition found by name, with its unit's OID and language.
@@ -383,6 +502,15 @@ pub struct StoredDef {
     pub oid: BlobId,
     pub lang: LangName,
     pub def: Def,
+    /// [`UnitMeta::canonical`]: `def.byte` may go to a view.
+    pub canonical: bool,
+}
+
+impl StoredDef {
+    /// The definition's byte offset for a view (「字节偏移」).
+    pub fn byte(&self) -> Option<u64> {
+        self.canonical.then_some(self.def.byte)
+    }
 }
 
 /// Where a lookup of a name in pages stands ([`Store::next_defs`],
@@ -498,9 +626,25 @@ impl Store {
     /// [`PendingTouches`] and marks them later with [`Store::touch_pending`].
     /// `None` when the partition cannot be read: treat every OID as missing.
     pub fn exists(&self, version: &Version, oids: &[BlobId]) -> Option<Vec<Found>> {
+        self.exists_with_windows(version, oids)
+            .map(|(found, _)| found)
+    }
+
+    /// [`exists`](Self::exists), and the window units of its `Windowed`
+    /// hits, to be marked as used with them. A `Windowed` hit costs one
+    /// more statement ([`WINDOWS`]): its windows must still chain from 0 to
+    /// the file's end without a timed-out one, else (a window evicted) the
+    /// hit is `TooLarge`: the file counts as not searched, and opening it
+    /// resumes its chain.
+    pub fn exists_with_windows(
+        &self,
+        version: &Version,
+        oids: &[BlobId],
+    ) -> Option<(Vec<Found>, Vec<Unit>)> {
         let lang = &*version.lang.0;
         read_counted(&self.set, |r| {
             let mut found = Vec::new();
+            let mut lens = Vec::new();
             let mut params = [Param::Null; 3 + EXISTS_BATCH];
             params[0] = Param::Text(lang);
             params[1] = Param::Int(version.grammar as i64);
@@ -516,6 +660,7 @@ impl Store {
                     let hit = row.unit(0).zip(oid_at(row, 1)).zip(status_at(row, 2));
                     if let Some(((unit, oid), status)) = hit {
                         found.push(Found { oid, unit, status });
+                        lens.push(row.int(3).and_then(|n| u64::try_from(n).ok()));
                     }
                     true
                 });
@@ -523,7 +668,54 @@ impl Store {
                     break;
                 }
             }
-            found
+            let mut windows = Vec::new();
+            for (f, len) in found.iter_mut().zip(lens) {
+                if f.status != ExtractStatus::Windowed {
+                    continue;
+                }
+                let rows = windows_in(r, f.oid, version);
+                if len.is_some_and(|len| chain_complete(&rows, len)) {
+                    windows.extend(rows.iter().map(|w| w.unit));
+                } else {
+                    f.status = ExtractStatus::TooLarge;
+                }
+            }
+            (found, windows)
+        })
+    }
+
+    /// The window units stored for `oid` under `version`, by start.
+    pub fn windows(&self, oid: BlobId, version: &Version) -> Option<Vec<WindowRow>> {
+        read_counted(&self.set, |r| windows_in(r, oid, version))
+    }
+
+    /// The content of a `Windowed` file: its `Done` windows' definitions
+    /// (by start) and reference names (deduplicated, in byte order), as one
+    /// extraction, with whether every window is canonical. None when the
+    /// partition cannot be read.
+    pub fn load_windows(&self, oid: BlobId, version: &Version) -> Option<(Extraction, bool)> {
+        read_counted(&self.set, |r| {
+            let rows = windows_in(r, oid, version);
+            let mut defs = Vec::new();
+            let mut refs: Vec<Box<str>> = Vec::new();
+            let mut canonical = true;
+            for row in rows.iter().filter(|w| w.status == ExtractStatus::Done) {
+                canonical &= row.canonical;
+                if let Some(e) = load(r, row.unit) {
+                    defs.extend(e.defs);
+                    refs.extend(e.refs);
+                }
+            }
+            refs.sort_unstable();
+            refs.dedup();
+            (
+                Extraction {
+                    status: ExtractStatus::Done,
+                    defs,
+                    refs,
+                },
+                canonical,
+            )
         })
     }
 
@@ -587,7 +779,7 @@ impl Store {
             ];
             let ok = counted(r).query(DEFS_PAGE, &params, |row| {
                 raw += 1;
-                if let Some(at) = row.int(12).zip(row.int(13)).zip(row.int(14)) {
+                if let Some(at) = row.int(13).zip(row.int(14)).zip(row.int(15)) {
                     let at = (at.0.0, at.0.1, at.1);
                     last = last.max(at);
                 }
@@ -595,15 +787,16 @@ impl Store {
                 // `Done` unit of a kept version.
                 if row.text(0) == Some(&*p.name)
                     && let Some((((def, oid), lang), unit)) = def_at(row, 0)
-                        .zip(oid_at(row, 8))
-                        .zip(p.version_at(row, 9))
-                        .zip(row.unit(12))
+                        .zip(oid_at(row, 9))
+                        .zip(p.version_at(row, 10))
+                        .zip(row.unit(13))
                 {
                     out.push(StoredDef {
                         unit,
                         oid,
                         lang,
                         def,
+                        canonical: row.int(16) == Some(1),
                     });
                 }
                 true
@@ -682,15 +875,16 @@ impl Store {
                             return true;
                         }
                         let found = def_at(row, 0)
-                            .zip(oid_at(row, 8))
-                            .zip(lang_at(row, 9, group))
-                            .zip(row.unit(10));
+                            .zip(oid_at(row, 9))
+                            .zip(lang_at(row, 10, group))
+                            .zip(row.unit(11));
                         if let Some((((def, oid), lang), unit)) = found {
                             out.push(StoredDef {
                                 unit,
                                 oid,
                                 lang,
                                 def,
+                                canonical: row.int(12) == Some(1),
                             });
                         }
                         true
@@ -740,6 +934,10 @@ impl Store {
                 raw += 1;
                 last = row.int(4).map_or(last, |u| last.max(u));
                 push_unit(&mut out, row, 4, 0, p.version_at(row, 1));
+                if let Some(u) = out.last_mut().filter(|u| Some(u.unit) == row.unit(4)) {
+                    u.part = part_at(row, 5);
+                    u.canonical = row.int(9) == Some(1);
+                }
                 true
             });
             record_page("refs", raw);
@@ -961,8 +1159,53 @@ fn push_unit(
     lang: Option<LangName>,
 ) {
     if let Some(((unit, oid), lang)) = row.unit(unit).zip(oid_at(row, oid)).zip(lang) {
-        out.push(StoredUnit { unit, oid, lang });
+        out.push(StoredUnit {
+            unit,
+            oid,
+            lang,
+            part: None,
+            canonical: false,
+        });
     }
+}
+
+/// A window from the columns `part, part_end, part_line, part_col` at
+/// `at`; None for a whole file's unit.
+fn part_at(row: &Row<'_>, at: usize) -> Option<Part> {
+    let start = u64::try_from(row.int(at)?).ok()?;
+    Some(Part {
+        start,
+        end: u64::try_from(row.int(at + 1)?).ok()?,
+        line: u32::try_from(row.int(at + 2)?).ok()?,
+        column: u32::try_from(row.int(at + 3)?).ok()?,
+    })
+}
+
+/// [`Store::windows`] in a read transaction.
+fn windows_in(r: &mut TableRead<'_>, oid: BlobId, version: &Version) -> Vec<WindowRow> {
+    let mut rows = Vec::new();
+    counted(r).query(
+        WINDOWS,
+        &[
+            Param::Bytes(oid.as_bytes()),
+            Param::Text(&version.lang.0),
+            Param::Int(version.grammar as i64),
+            Param::Int(version.query as i64),
+        ],
+        |row| {
+            let found = row.unit(0).zip(part_at(row, 1)).zip(status_at(row, 5));
+            if let Some(((unit, part), status)) = found {
+                rows.push(WindowRow {
+                    unit,
+                    part,
+                    status,
+                    canonical: row.int(6) == Some(1),
+                });
+            }
+            true
+        },
+    );
+    rows
 }
 
 fn oid_at(row: &Row<'_>, column: usize) -> Option<BlobId> {
@@ -984,6 +1227,7 @@ fn status_at(row: &Row<'_>, column: usize) -> Option<ExtractStatus> {
         1 => Some(ExtractStatus::TimedOut),
         2 => Some(ExtractStatus::TooLarge),
         3 => Some(ExtractStatus::Binary),
+        4 => Some(ExtractStatus::Windowed),
         _ => None,
     }
 }
@@ -1003,8 +1247,8 @@ fn visibility(flags: i64) -> Visibility {
     }
 }
 
-/// A definition from the columns `name, kind, line, col, end_line, scope,
-/// flags, arity` starting at `at`.
+/// A definition from the columns `name, kind, line, col, byte, end_line,
+/// scope, flags, arity` starting at `at`.
 fn def_at(row: &Row<'_>, at: usize) -> Option<Def> {
     let int = |c: usize| row.int(at + c).and_then(|v| u32::try_from(v).ok());
     Some(Def {
@@ -1012,10 +1256,11 @@ fn def_at(row: &Row<'_>, at: usize) -> Option<Def> {
         kind: kind_at(row, at + 1)?,
         line: int(2)?,
         column: int(3)?,
-        end_line: int(4)?,
-        scope: row.text(at + 5).map(Box::from),
-        visibility: visibility(row.int(at + 6)?),
-        arity: row.int(at + 7).map(|a| a.clamp(0, 255) as u8),
+        byte: row.int(at + 4).and_then(|v| u64::try_from(v).ok())?,
+        end_line: int(5)?,
+        scope: row.text(at + 6).map(Box::from),
+        visibility: visibility(row.int(at + 7)?),
+        arity: row.int(at + 8).map(|a| a.clamp(0, 255) as u8),
     })
 }
 
@@ -1027,18 +1272,33 @@ pub struct StoreWrite {
 }
 
 impl StoreWrite {
-    /// Records the extraction of the blob `oid` under `version`, replacing
-    /// a unit of the same key. The key must come from the bytes actually
-    /// extracted (「存储表」). A status other than `Done` stores the
-    /// `ci_ext` row only; `Cancelled` and `Unsupported` are not stored and
-    /// return false. No IO.
+    /// Records the whole-file extraction of the blob `oid` under `version`
+    /// from bytes that are `oid`'s content ([`add_unit`](Self::add_unit)
+    /// with [`UnitMeta::whole`]`(true)`).
     pub fn add(&mut self, oid: BlobId, version: &Version, extraction: &Extraction) -> bool {
+        self.add_unit(oid, version, extraction, UnitMeta::whole(true))
+    }
+
+    /// Records the extraction of the blob `oid` under `version`, replacing
+    /// a unit of the same key (the part included: `meta.part`). The key must
+    /// come from the bytes actually extracted (「存储表」). A status other
+    /// than `Done` stores the `ci_ext` row only; `Cancelled`, `Unsupported`
+    /// and `Parked` are not stored and return false. No IO.
+    pub fn add_unit(
+        &mut self,
+        oid: BlobId,
+        version: &Version,
+        extraction: &Extraction,
+        meta: UnitMeta,
+    ) -> bool {
         let Some(status) = extraction.status.code() else {
             return false;
         };
         let w = &mut self.write;
-        let unit = w.create(&unit_key(oid, version), unit_bytes(extraction));
+        let part = meta.part.map_or(WHOLE, |p| p.start as i64);
+        let unit = w.create(&unit_key(oid, version, part), unit_bytes(extraction));
         let unit = Param::New(unit);
+        let int_or_null = |v: Option<i64>| v.map_or(Param::Null, Param::Int);
         w.execute(
             INSERT_EXT,
             &[
@@ -1048,6 +1308,15 @@ impl StoreWrite {
                 Param::Int(version.grammar as i64),
                 Param::Int(version.query as i64),
                 Param::Int(i64::from(status)),
+                Param::Int(part),
+                int_or_null(
+                    meta.part
+                        .map(|p| p.end as i64)
+                        .or(meta.len.map(|n| n as i64)),
+                ),
+                int_or_null(meta.part.map(|p| i64::from(p.line))),
+                int_or_null(meta.part.map(|p| i64::from(p.column))),
+                Param::Int(i64::from(meta.canonical)),
             ],
         );
         if extraction.status == ExtractStatus::Done {
@@ -1060,6 +1329,7 @@ impl StoreWrite {
                         Param::Int(def.kind as i64),
                         Param::Int(i64::from(def.line)),
                         Param::Int(i64::from(def.column)),
+                        Param::Int(def.byte as i64),
                         Param::Int(i64::from(def.end_line)),
                         def.scope.as_deref().map_or(Param::Null, Param::Text),
                         Param::Int(i64::from(def.visibility.code())),
@@ -1079,7 +1349,15 @@ impl StoreWrite {
     /// some units).
     #[cfg(test)]
     pub(crate) fn remove(&mut self, oid: BlobId, version: &Version) {
-        self.write.remove(&unit_key(oid, version));
+        self.write.remove(&unit_key(oid, version, WHOLE));
+        self.units += 1;
+    }
+
+    /// Deletes the window unit of `oid` starting at `start` (tests: an
+    /// evicted window).
+    #[cfg(test)]
+    pub(crate) fn remove_window(&mut self, oid: BlobId, version: &Version, start: u64) {
+        self.write.remove(&unit_key(oid, version, start as i64));
         self.units += 1;
     }
 

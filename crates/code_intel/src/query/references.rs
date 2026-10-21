@@ -49,6 +49,9 @@ struct File {
     /// of the map read under tier 1's limits (`Snap::file_limits`, the same
     /// rule as its read limit).
     interactive: bool,
+    /// The bytes read are the file's OID's content as they are: byte
+    /// offsets go to views (「字节偏移」).
+    canonical: bool,
 }
 
 /// The query's results so far and its batching.
@@ -117,8 +120,8 @@ impl Inner {
             origin: l.origin,
         };
         // The definition's own file, read as its location says.
-        let bytes = match self.read_text(snap, &own) {
-            Ok(bytes) => bytes,
+        let text = match self.read_text(snap, &own) {
+            Ok(text) => text,
             Err(error) => {
                 let symbol = Symbol {
                     name: of.name.clone(),
@@ -152,7 +155,9 @@ impl Inner {
             lang: lang.clone(),
             // The text the query is about, as a jump's current text.
             interactive: true,
+            canonical: text.canonical,
         };
+        let bytes = text.bytes;
         // The definition's own file, parsed once: its parse says whether the
         // definition is local, whoever made `of` (a jump, a `Named` result
         // from the index, which does not know, a provider), and what to scan
@@ -271,7 +276,7 @@ impl Inner {
                 &name,
                 run.until,
                 &mut account,
-                |eff, key, bytes, until| {
+                |eff, key, content, until| {
                     let mut found = cell.borrow_mut();
                     if found.parsed.contains(&(eff.path.clone(), key)) {
                         return found.outcome(&eff.path, key);
@@ -286,6 +291,7 @@ impl Inner {
                         lang: file_lang,
                         // As the search read it (`Snap::read_limit`).
                         interactive: snap.file_limits(eff).interactive,
+                        canonical: content.canonical,
                     };
                     self.references_in(
                         run,
@@ -294,7 +300,7 @@ impl Inner {
                         &ranker,
                         &file,
                         key,
-                        bytes.into(),
+                        content.bytes.into(),
                         Some(until),
                         &mut found,
                     )
@@ -445,8 +451,8 @@ impl Inner {
                 max_len: INTERACTIVE_MAX_LEN,
                 interactive: true,
             };
-            let bytes = match self.read_content(snap, &eff, limits.max_len) {
-                Ok(bytes) => bytes,
+            let content = match self.read_content(snap, &eff, limits.max_len) {
+                Ok(content) => content,
                 Err(reason) => {
                     account.unsearched(&eff.path, eff.oid, reason);
                     continue;
@@ -463,6 +469,7 @@ impl Inner {
                 origin: TextOrigin::Worktree,
                 lang: file_lang,
                 interactive: limits.interactive,
+                canonical: content.canonical,
             };
             let searched = self.references_in(
                 run,
@@ -471,7 +478,7 @@ impl Inner {
                 ranker,
                 &file,
                 eff.oid,
-                bytes.into(),
+                content.bytes.into(),
                 Some(run.until),
                 found,
             );
@@ -646,6 +653,7 @@ impl Inner {
                 oid,
                 line: r.at.line,
                 column: r.at.column,
+                byte: file.canonical.then_some(r.start as u64),
                 end_line: r.at.line,
             };
             if !found.delivered.insert(loc_key(&location)) {

@@ -1187,6 +1187,24 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // An opened 16 MiB TypeScript file: from the focus to its window chain
+    // written to the end (「大文件」, ADR 0034), and the peak of live bytes
+    // meanwhile: the streamed hash's 1 MiB range or one 64 KiB window and
+    // its tree, about 2 MiB plus 1 MiB, with twice the room.
+    share(
+        "code_intel/window_chain_16mib",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/window_peak",
+        &[max(Limit::BytesAtMost(8 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
     // A jump the index answers, from the query to its first batch with
     // candidates: 100 000 indexed files, a 100 KB current text whose parse
     // is kept (ADR 0037); this crate's part of the 50 ms candidates budget.
@@ -1277,6 +1295,32 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     share("code_intel/goto_object", RECORD, CODE_INTEL, ACTIVE, Time),
+    // A jump in the middle of a 4 MiB current text whose identity and
+    // checkpoints are recorded (「大文件」, ADR 0034): one range read around
+    // the checkpoint, the window around the target parsed (8 ms deadline),
+    // then as any jump. Without the record (streamed once) and from the
+    // object database (the blob taken whole) recorded.
+    share(
+        "code_intel/goto_large",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_large/cold",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_large/object",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     // The kept parses at their bounds: two texts just under 128 KiB (ADR
     // 0037).
     share(
@@ -1291,8 +1335,31 @@ pub static BUDGETS: &[Budget] = &[
     // earlier jump. Recorded against the 50 ms candidates budget.
     share("code_intel/goto_first", RECORD, CODE_INTEL, ACTIVE, Time),
     // `Named` for a name some 50 000 files define: from the query to its
-    // first batch.
+    // first batch; to `Done`, and the candidates and unsearched files at
+    // `Done` (the rest of the lookup takes most of the 1 s time box, so a
+    // slow runner ends `Partial`: recorded, never an error).
     share("code_intel/named_50k", RECORD, CODE_INTEL, ACTIVE, Time),
+    share(
+        "code_intel/named_50k/done",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/named_50k/candidates",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/named_50k/unsearched",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     // The time-boxed search of unindexed hits stops one second after the
     // query; the last batch's event within 20 ms of that.
     share(

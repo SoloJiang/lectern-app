@@ -26,8 +26,10 @@ use lectern_services::code_intel::{
 use lectern_services::project::{BlobId, RelPath};
 
 use super::account::{Account, Reason};
+use super::large::CurrentText;
 use super::rank::{Ranker, visible};
 use super::search::{FileDeadline, Searched};
+use super::text::Content;
 use super::{Run, Snap, Step, View, ViewCheck};
 use crate::extract::{
     Deadline, Def, ExtractStatus, Extraction, INTERACTIVE_DEADLINE, Lang, Visibility, compatible,
@@ -42,23 +44,41 @@ use crate::{DefKind, LangName};
 /// A delivered location: (origin, path, OID, line, column).
 pub(crate) type LocKey = (TextOrigin, RelPath, BlobId, u32, u32);
 
+/// What step 1 has of the current text: the site at the position, the
+/// text's definitions of its name (with whether each is local), the whole
+/// parse for the resolution extension point (None for a large text: its
+/// window's parse is in the window's coordinates), whether byte offsets go
+/// to views, and whether the text is large (「大文件」).
+struct Step1 {
+    site: Site,
+    defs: Vec<(Def, bool)>,
+    parsed: Option<Arc<ParsedFile>>,
+    canonical: bool,
+    large: bool,
+}
+
 pub(crate) fn loc_key(l: &Location) -> LocKey {
     (l.origin, l.path.clone(), l.oid, l.line, l.column)
 }
+
+/// One file's definitions for a query, and whether their byte offsets go to
+/// views (the bytes they were extracted from are the OID's content as they
+/// are: `UnitMeta::canonical`).
+pub(crate) type FileDefs = (Extraction, bool);
 
 /// What step 2's extractions add: units used, extractions to write, each
 /// file's extraction by (path, OID of the bytes read), and what was read.
 type Pending = (
     Vec<Unit>,
     Vec<Scanned>,
-    HashMap<(RelPath, BlobId), Option<Extraction>>,
+    HashMap<(RelPath, BlobId), Option<FileDefs>>,
     Account,
 );
 
 /// One file's extraction for a query ([`Inner::file_extraction`]).
 pub(crate) enum FileExtraction {
-    /// `Done`: its definitions.
-    Defs(Extraction),
+    /// `Done` (or a `Windowed` file's windows): its definitions.
+    Defs(FileDefs),
     /// No definitions, and none to find: a language not in the snapshot's
     /// table, or binary content (stored or extracted `Binary`: no limit
     /// changes it; the accounting takes it as searched).
@@ -73,7 +93,7 @@ pub(crate) enum FileExtraction {
 /// Why a file stored with `status` gives no definitions; None for `Done`.
 fn stored_reason(status: ExtractStatus) -> Option<Reason> {
     match status {
-        ExtractStatus::Done => None,
+        ExtractStatus::Done | ExtractStatus::Windowed => None,
         ExtractStatus::TimedOut => Some(Reason::TimedOut),
         ExtractStatus::TooLarge => Some(Reason::TooLarge),
         ExtractStatus::Binary => Some(Reason::Binary),
@@ -98,7 +118,7 @@ pub(crate) struct Prepared {
     pub skip: HashSet<(RelPath, BlobId)>,
     /// Step 2's extractions by (path, OID): the search uses them instead of
     /// extracting those files again, and dedups what they give.
-    pub extracted: HashMap<(RelPath, BlobId), Option<Extraction>>,
+    pub extracted: HashMap<(RelPath, BlobId), Option<FileDefs>>,
     /// Stored units the candidates came from, marked as used afterwards.
     pub units: Vec<Unit>,
     pub scanned: Vec<Scanned>,
@@ -195,8 +215,15 @@ pub(crate) fn def_ref(
     }
 }
 
-/// A location in the text `at`.
-pub(crate) fn here(at: &TextRef, line: u32, column: u32, end_line: u32) -> Location {
+/// A location in the text `at`, at `byte` when the bytes parsed are that
+/// text's content as they are (「字节偏移」).
+pub(crate) fn here(
+    at: &TextRef,
+    line: u32,
+    column: u32,
+    byte: Option<u64>,
+    end_line: u32,
+) -> Location {
     Location {
         worktree: at.worktree.clone(),
         path: at.path.clone(),
@@ -204,20 +231,34 @@ pub(crate) fn here(at: &TextRef, line: u32, column: u32, end_line: u32) -> Locat
         oid: at.oid,
         line,
         column,
+        byte,
         end_line,
     }
 }
 
-fn binding_ref(b: &LocalBinding, lang: &LangName, at: &TextRef) -> DefinitionRef {
+/// A definition's location in the text `at` (`canonical`: its bytes are
+/// that text as they are).
+pub(crate) fn here_def(at: &TextRef, def: &Def, canonical: bool) -> Location {
+    here(
+        at,
+        def.line,
+        def.column,
+        canonical.then_some(def.byte),
+        def.end_line,
+    )
+}
+
+fn binding_ref(b: &LocalBinding, lang: &LangName, at: &TextRef, canonical: bool) -> DefinitionRef {
     match &b.def {
-        Some(def) => def_ref(
-            def,
-            lang,
-            b.local,
-            here(at, def.line, def.column, def.end_line),
-        ),
+        Some(def) => def_ref(def, lang, b.local, here_def(at, def, canonical)),
         None => DefinitionRef {
-            location: here(at, b.at.line, b.at.column, b.at.line),
+            location: here(
+                at,
+                b.at.line,
+                b.at.column,
+                canonical.then_some(b.byte),
+                b.at.line,
+            ),
             name: Arc::from(&*b.name),
             kind: DefKind::Variable,
             lang: lang.clone(),
@@ -278,7 +319,7 @@ impl Inner {
         snap: &Snap,
         eff: &Effective,
         key: BlobId,
-        bytes: &[u8],
+        content: Content<&[u8]>,
         until: Instant,
         cancel: &Arc<AtomicBool>,
         units: &mut Vec<Unit>,
@@ -287,29 +328,36 @@ impl Inner {
         let Some(lang) = snap.table.get(&eff.lang.name().0).cloned() else {
             return FileExtraction::Nothing;
         };
+        let bytes = content.bytes;
         let version = Version::of(&lang);
         // A unit stored `TooLarge` or `TimedOut` holds nothing of the file:
         // extracted now with tier 1's limits (its hint matches:
         // `Snap::file_limits`), cut at `until`.
-        if let Some(found) = snap
+        if let Some((found, windows)) = snap
             .project
             .store
-            .exists(&version, &[key])
-            .unwrap_or_default()
-            .into_iter()
-            .next()
+            .exists_with_windows(&version, &[key])
+            .and_then(|(found, windows)| Some((found.into_iter().next()?, windows)))
         {
             match found.status {
                 ExtractStatus::TooLarge | ExtractStatus::TimedOut => {}
                 // No definitions to have: as indexed.
                 ExtractStatus::Binary => return FileExtraction::Nothing,
+                // An opened large file's content is its windows (「大文件」).
+                ExtractStatus::Windowed => {
+                    if let Some(defs) = snap.project.store.load_windows(key, &version) {
+                        units.push(found.unit);
+                        units.extend(windows);
+                        return FileExtraction::Defs(defs);
+                    }
+                }
                 status => {
                     if let Some(reason) = stored_reason(status) {
                         return FileExtraction::Unsearched(reason);
                     }
                     if let Some(extraction) = snap.project.store.load(found.unit) {
                         units.push(found.unit);
-                        return FileExtraction::Defs(extraction);
+                        return FileExtraction::Defs((extraction, content.canonical));
                     }
                 }
             }
@@ -329,10 +377,11 @@ impl Inner {
                 oid: key,
                 lang,
                 extraction: extraction.clone(),
+                canonical: content.canonical,
             });
         }
         match file.reason(status) {
-            None => FileExtraction::Defs(extraction),
+            None => FileExtraction::Defs((extraction, content.canonical)),
             Some(Reason::Binary) => FileExtraction::Nothing,
             Some(reason) => FileExtraction::Unsearched(reason),
         }
@@ -363,43 +412,83 @@ impl Inner {
         // it became the current text (ADR 0037): no read, no parse. The text
         // is its OID's content, as a parse kept under that OID was checked to
         // be (`read_text`). Otherwise read, verified and parsed for this site
-        // (the cold path), and its whole parse kept in the background.
+        // (the cold path), and its whole parse kept in the background. A
+        // large text (1–16 MiB, 「大文件」) only around the position.
         let version = Version::of(&lang);
-        let parsed = match self.cached_parse(at.oid, &version) {
-            Some(parsed) => {
+        let whole = match self.cached_parse(at.oid, &version) {
+            Some(kept) => {
                 crate::phases::count("1 kept parses", 1);
-                parsed
+                Ok(kept)
             }
             None => {
-                let bytes = {
+                let text = {
                     let _t = crate::phases::span("1 read + verify current text");
-                    self.read_text(snap, at)?
+                    self.current_text(snap, at, &lang, position, cancel)?
                 };
-                let deadline = clock.now() + INTERACTIVE_DEADLINE;
-                if let Some(me) = self.arc() {
-                    me.warm_parse_of(&lang, at.oid, bytes.clone());
+                match text {
+                    CurrentText::Whole(text) => {
+                        let deadline = clock.now() + INTERACTIVE_DEADLINE;
+                        if let Some(me) = self.arc() {
+                            me.warm_parse_of(&lang, at.oid, text.bytes.clone(), text.canonical);
+                        }
+                        let parsed = {
+                            let _t = crate::phases::span("1 parse + locals + site query");
+                            ParsedFile::parse_at(
+                                &lang, text.bytes, &*clock, deadline, cancel, position,
+                            )
+                            .map_err(|e| match e {
+                                ParseError::Unsupported => QueryError::UnsupportedLanguage,
+                                ParseError::TimedOut => {
+                                    QueryError::Unreadable("parsing timed out".into())
+                                }
+                                ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
+                            })?
+                        };
+                        Ok((Arc::new(parsed), text.canonical))
+                    }
+                    CurrentText::Large(large) => Err(*large),
                 }
-                let parsed = {
-                    let _t = crate::phases::span("1 parse + locals + site query");
-                    ParsedFile::parse_at(&lang, bytes, &*clock, deadline, cancel, position)
-                        .map_err(|e| match e {
-                            ParseError::Unsupported => QueryError::UnsupportedLanguage,
-                            ParseError::TimedOut => {
-                                QueryError::Unreadable("parsing timed out".into())
-                            }
-                            ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
-                        })?
-                };
-                Arc::new(parsed)
             }
         };
-        let site = {
-            let _t = crate::phases::span("1 site_at");
-            parsed.site_at(position).ok_or(QueryError::NoSymbol)?
+        let step1 = match whole {
+            Ok((parsed, canonical)) => {
+                let site = {
+                    let _t = crate::phases::span("1 site_at");
+                    parsed.site_at(position).ok_or(QueryError::NoSymbol)?
+                };
+                let defs = parsed
+                    .defs_with_local()
+                    .filter(|(d, _)| *d.name == *site.name)
+                    .map(|(d, local)| (d.clone(), local))
+                    .collect();
+                Step1 {
+                    site,
+                    defs,
+                    parsed: Some(parsed),
+                    canonical,
+                    large: false,
+                }
+            }
+            Err(large) => Step1 {
+                site: large.site,
+                defs: large.defs,
+                // The window's parse is in its own coordinates: the
+                // resolution extension point gets whole parses only.
+                parsed: None,
+                canonical: large.canonical,
+                large: true,
+            },
         };
+        let Step1 {
+            site,
+            defs: own,
+            parsed,
+            canonical,
+            large,
+        } = step1;
         let name = lang.name().clone();
         let defines = site.defines.as_ref().map(|d| {
-            let location = here(at, d.def.line, d.def.column, d.def.end_line);
+            let location = here_def(at, &d.def, canonical);
             def_ref(&d.def, &name, d.local, location)
         });
         let symbol = Symbol {
@@ -429,8 +518,30 @@ impl Inner {
             left: 0,
         };
         // The current text is read and parsed: its definitions are step 1's
-        // (the map's file when the map has that content at the path).
-        prepared.account.searched(&at.path, at.oid);
+        // (the map's file when the map has that content at the path). A
+        // large text's are its window units (step 3): searched when its
+        // chain is complete (`Windowed`); the marker and its windows are
+        // then marked used with this query's units.
+        let windowed = large
+            .then(|| snap.project.store.exists_with_windows(&version, &[at.oid]))
+            .flatten()
+            .and_then(|(found, windows)| {
+                let marker = found
+                    .into_iter()
+                    .find(|f| f.status == ExtractStatus::Windowed)?;
+                Some((marker.unit, windows))
+            });
+        if let Some((marker, windows)) = &windowed {
+            prepared.units.push(*marker);
+            prepared.units.extend(windows);
+        }
+        if !large || windowed.is_some() {
+            prepared.account.searched(&at.path, at.oid);
+        } else {
+            prepared
+                .account
+                .unsearched(&at.path, at.oid, Reason::TooLarge);
+        }
         let current = |definition: DefinitionRef, evidence: Evidence| Candidate {
             in_review: ranker.in_review(&definition.location.path),
             definition,
@@ -448,7 +559,7 @@ impl Inner {
         }
         if let Some(binding) = &site.binding {
             prepared.push(current(
-                binding_ref(binding, &name, at),
+                binding_ref(binding, &name, at, canonical),
                 Evidence::Bound(Binding::Local),
             ));
             prepared.settled = true;
@@ -456,15 +567,15 @@ impl Inner {
         }
         for possible in &site.possible {
             prepared.push(current(
-                binding_ref(possible, &name, at),
+                binding_ref(possible, &name, at, canonical),
                 Evidence::NameOnly,
             ));
         }
-        for (def, local) in parsed.defs_with_local() {
-            if *def.name == *site.name && accepts(&lang, site.syntax, def.kind) {
-                let location = here(at, def.line, def.column, def.end_line);
+        for (def, local) in &own {
+            if accepts(&lang, site.syntax, def.kind) {
+                let location = here_def(at, def, canonical);
                 prepared.push(current(
-                    def_ref(def, &name, local, location),
+                    def_ref(def, &name, *local, location),
                     Evidence::NameOnly,
                 ));
             }
@@ -480,7 +591,7 @@ impl Inner {
         // extracted once. Only the snapshot's content counts
         // (`read_content`): a file changed since, too large or unreadable
         // gives nothing here, and the accounting counts it unsearched.
-        let load = |path: &str| -> Option<(Effective, BlobId, Option<Extraction>)> {
+        let load = |path: &str| -> Option<(Effective, BlobId, Option<FileDefs>)> {
             let eff = snap.map.effective(path)?;
             let key = eff.oid;
             {
@@ -492,8 +603,8 @@ impl Inner {
                     return Some((eff, key, None));
                 }
             }
-            let bytes = match self.read_content(snap, &eff, snap.read_limit(&eff)) {
-                Ok(bytes) => bytes,
+            let content = match self.read_content(snap, &eff, snap.read_limit(&eff)) {
+                Ok(content) => content,
                 Err(reason) => {
                     pending.borrow_mut().3.unsearched(&eff.path, key, reason);
                     return None;
@@ -501,8 +612,12 @@ impl Inner {
             };
             let mut p = pending.borrow_mut();
             let (units, scanned, extracted, account) = &mut *p;
+            let content = Content {
+                bytes: &content.bytes[..],
+                canonical: content.canonical,
+            };
             let done = match self
-                .file_extraction(snap, &eff, key, &bytes, until, cancel, units, scanned)
+                .file_extraction(snap, &eff, key, content, until, cancel, units, scanned)
             {
                 FileExtraction::Defs(e) => Some(e),
                 FileExtraction::Nothing => None,
@@ -516,18 +631,22 @@ impl Inner {
             extracted.insert((eff.path.clone(), key), done.clone());
             Some((eff, key, done))
         };
-        let extraction = |path: &str| load(path).and_then(|(_, _, e)| e);
+        let extraction = |path: &str| load(path).and_then(|(_, _, e)| e.map(|(e, _)| e));
         let ctx = ResolveContext {
             map: &snap.map,
             files: snap.map.base.files(),
             packages: Some(&snap.packages),
             extraction: &extraction,
         };
-        for import in rules.imports(&parsed, &ctx) {
+        let imports = parsed
+            .as_ref()
+            .map(|p| rules.imports(p, &ctx))
+            .unwrap_or_default();
+        for import in imports {
             let Some(exported) = import.exported(&site.name) else {
                 continue;
             };
-            let Some((eff, key, Some(found))) = load(&import.target) else {
+            let Some((eff, key, Some((found, canonical)))) = load(&import.target) else {
                 continue;
             };
             for def in &found.defs {
@@ -544,6 +663,7 @@ impl Inner {
                     oid: key,
                     line: def.line,
                     column: def.column,
+                    byte: canonical.then_some(def.byte),
                     end_line: def.end_line,
                 };
                 prepared.push(Candidate {
@@ -555,7 +675,7 @@ impl Inner {
                 });
             }
         }
-        if let Some(bound) = rules.bind(&site, &parsed, &ctx) {
+        if let Some(bound) = parsed.as_ref().and_then(|p| rules.bind(&site, p, &ctx)) {
             let l = &bound.definition.location;
             let tier = ranker.tier(&l.path, l.origin, l.oid, false);
             prepared.push(Candidate {
@@ -780,6 +900,7 @@ impl Inner {
                     oid: s.oid,
                     line: s.def.line,
                     column: s.def.column,
+                    byte: s.byte(),
                     end_line: s.def.end_line,
                 };
                 out.push(CandidateDraft {
@@ -922,14 +1043,17 @@ impl Inner {
                 &name,
                 run.until,
                 &mut account,
-                |eff, key, bytes, until| {
+                |eff, key, content, until| {
                     let extraction = match extracted.get(&(eff.path.clone(), key)) {
                         Some(done) => done.clone(),
                         None => match self.file_extraction(
                             snap,
                             eff,
                             key,
-                            &bytes,
+                            Content {
+                                bytes: &content.bytes[..],
+                                canonical: content.canonical,
+                            },
                             until,
                             &run.cancel,
                             &mut units,
@@ -942,7 +1066,7 @@ impl Inner {
                             }
                         },
                     };
-                    let Some(extraction) = extraction else {
+                    let Some((extraction, canonical)) = extraction else {
                         return Searched::Done;
                     };
                     let mut found = Vec::new();
@@ -960,6 +1084,7 @@ impl Inner {
                             oid: key,
                             line: def.line,
                             column: def.column,
+                            byte: canonical.then_some(def.byte),
                             end_line: def.end_line,
                         };
                         found.push(Candidate {
@@ -1038,6 +1163,7 @@ impl Inner {
         p.units.sort_by_key(|u| u.id());
         p.units.dedup();
         crate::phases::count("touched units", p.units.len() as u64);
+        crate::index::bump(&self.stats.touched, p.units.len());
         snap.project.store.touch(&p.units);
     }
 
@@ -1257,6 +1383,7 @@ impl NamedFound {
                     oid: s.oid,
                     line: s.def.line,
                     column: s.def.column,
+                    byte: s.byte(),
                     end_line: s.def.end_line,
                 };
                 if !self.delivered.insert(loc_key(&location)) {
