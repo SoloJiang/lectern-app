@@ -1241,7 +1241,7 @@ impl Inner {
                     let Some((item, flag)) = self.take(project, ctx, t) else {
                         break;
                     };
-                    let outcome = match self.read_item(ctx, &item, Mode::Batch, &flag) {
+                    let outcome = match self.read_item(ctx, &item, Mode::Batch, true, &flag) {
                         Err(outcome) => outcome,
                         Ok((bytes, key, check)) => {
                             if bytes.len() > LARGE_FILE
@@ -1271,7 +1271,9 @@ impl Inner {
                             let Some((item, flag)) = self.take(project, ctx, t) else {
                                 break;
                             };
-                            match self.read_item(ctx, &item, Mode::Batch, &flag) {
+                            // A keepalive slot converts its one file now,
+                            // inside the slot and before the extraction.
+                            match self.read_item(ctx, &item, Mode::Batch, !one, &flag) {
                                 Err(outcome) => {
                                     self.settle_outcome(
                                         project, ctx, t, outcome, item, flag, &mut files,
@@ -1320,7 +1322,11 @@ impl Inner {
         }
         #[cfg(test)]
         lock(&self.batch_log).push(files);
-        let done = self.check_keys(project, ctx, done);
+        // Tier 3 never yields. A yielding tier converts only in a batch
+        // under `Grant::Batch` with the switch still off: no index parse
+        // after a keepalive slot's file nor once the switch is on.
+        let convert = kind == Kind::Near || (!one && !guard.yield_requested());
+        let done = self.check_keys(project, ctx, t, done, convert);
         self.commit(project, ctx, done, true);
     }
 
@@ -1334,10 +1340,34 @@ impl Inner {
     /// one that could not be read: not written, released. Items the commit
     /// would drop (cancelled, taken over by tier 1) are not checked, and
     /// once the session ends nothing more is.
-    fn check_keys(&self, project: &Arc<Project>, ctx: &Ctx, mut done: Vec<Done>) -> Vec<Done> {
+    ///
+    /// Without `convert` (tier 4 or 5 in a keepalive slot, or the switch
+    /// came on during the batch) no conversion runs: those items are work
+    /// a slot can't do, set aside with their extraction dropped, to be
+    /// read and extracted again once the switch is off (「交互让路」's
+    /// set-aside list); the rest of the batch is committed.
+    fn check_keys(
+        &self,
+        project: &Arc<Project>,
+        ctx: &Ctx,
+        t: usize,
+        mut done: Vec<Done>,
+        convert: bool,
+    ) -> Vec<Done> {
         let Some(tree) = &ctx.tree else {
             return done;
         };
+        if !convert {
+            let mut kept = Vec::with_capacity(done.len());
+            for d in done {
+                if d.check.is_some() && !d.flag.load(Ordering::Acquire) {
+                    self.set_aside(project, ctx.session, t, d.item, &d.flag);
+                } else {
+                    kept.push(d);
+                }
+            }
+            return kept;
+        }
         let mut checks: Pending<usize, &[u8]> = Pending::new();
         let mut results = Vec::new();
         for (i, d) in done.iter().enumerate() {
@@ -1561,7 +1591,7 @@ impl Inner {
         guard: Option<&Arc<BackgroundGuard>>,
         cancel: &Arc<AtomicBool>,
     ) -> Outcome {
-        match self.read_item(ctx, item, mode, cancel) {
+        match self.read_item(ctx, item, mode, false, cancel) {
             Ok((bytes, key, check)) => {
                 self.extract_bytes(ctx, item, (key, check), bytes, mode, guard, cancel)
             }
@@ -1571,11 +1601,15 @@ impl Inner {
 
     /// Reads one item: its bytes and their key, the OID of the bytes read:
     /// the raw bytes', or the queued OID when the built-in conversions turn
-    /// them into it (「存储表」). Tiers 1 and 2 convert this one file
-    /// (`canonical_oid`); the batch tiers leave worktree bytes whose raw
-    /// OID is not the queued one to the batch's `canonical_oids` before the
-    /// commit (true in the result: the key is the raw OID until then). Err:
-    /// what to do without extracting (`TooLarge`, gone).
+    /// them into it (「存储表」). With `defer` (a batch tier's batch under
+    /// `Grant::Batch`), worktree bytes whose raw OID is not the queued one
+    /// are left to the batch's `canonical_oids` before the commit (true in
+    /// the result: the key is the raw OID until then). Otherwise this one
+    /// file is converted now (`canonical_oid`): tiers 1 and 2, and a
+    /// keepalive slot, whose one file is converted inside the slot and
+    /// before its extraction; there a failed conversion is as an unreadable
+    /// file (`Skip`), as in a batch. Err: what to do without extracting
+    /// (`TooLarge`, gone).
     #[allow(
         clippy::result_large_err,
         reason = "the outcome is used at once, once per file read"
@@ -1585,6 +1619,7 @@ impl Inner {
         ctx: &Ctx,
         item: &Item,
         mode: Mode,
+        defer: bool,
         cancel: &Arc<AtomicBool>,
     ) -> Result<(Vec<u8>, BlobId, bool), Outcome> {
         let max = match mode {
@@ -1647,9 +1682,13 @@ impl Inner {
             Source::Other(_) => return Err(Outcome::Skip),
             Source::Object => raw,
             Source::Worktree => match &ctx.tree {
-                Some(_) if mode == Mode::Batch => return Ok((bytes, raw, true)),
+                Some(_) if defer && mode == Mode::Batch => return Ok((bytes, raw, true)),
                 Some(tree) => match self.git.canonical_oid(tree, &item.path, &bytes) {
                     Ok(Some(canonical)) if canonical == item.oid => item.oid,
+                    Err(error) if mode == Mode::Batch => {
+                        log(format_args!("converting {} failed: {error}", item.path));
+                        return Err(Outcome::Skip);
+                    }
                     _ => raw,
                 },
                 None => raw,

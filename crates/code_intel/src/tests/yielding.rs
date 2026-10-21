@@ -414,13 +414,10 @@ fn yield_parked_time_is_not_deadline_time() {
     assert!(stored(&h, &source));
 }
 
-/// A keepalive slot does one file: a CRLF checkout read in it is converted
-/// on its own, one `canonical_oids` of one item before the slot's write
-/// (「规范内容 OID 的批量核对」), and stored under its index OID.
-#[test]
-fn yield_slot_converts_its_one_file() {
-    let (h, clock, kernel) = harness(1);
-    let sources: Vec<Vec<u8>> = (0..3).map(|i| ts(&format!("l{i}"))).collect();
+/// `count` CRLF checkouts under `lib/` (tier 4), committed with LF; their
+/// LF sources.
+fn crlf_lib(h: &Harness, count: usize) -> Vec<Vec<u8>> {
+    let sources: Vec<Vec<u8>> = (0..count).map(|i| ts(&format!("l{i}"))).collect();
     for (i, source) in sources.iter().enumerate() {
         let path = format!("lib/l{i}.ts");
         h.git.eol(&path);
@@ -430,13 +427,74 @@ fn yield_slot_converts_its_one_file() {
         h.git.add("main", &[(&path, crlf.as_bytes())]);
     }
     h.git.commit("main");
+    sources
+}
+
+/// A keepalive slot does one file: a CRLF checkout read in it is converted
+/// on its own at read time, inside the slot and before its extraction
+/// (「规范内容 OID 的批量核对」), never after it; stored under its index OID.
+#[test]
+fn yield_slot_converts_its_one_file() {
+    let (h, clock, kernel) = harness(1);
+    let sources = crlf_lib(&h, 3);
+    let converted = Arc::new(Mutex::new(Vec::new()));
+    let seen = converted.clone();
+    let git = h.git.clone();
+    // At each extraction's start: how many files were converted by then.
+    h.set_hook(move |_, _| seen.lock().unwrap().push(git.count("canonical_oid")));
     kernel.set_yield(true);
     open_far(&h);
     settle_until(&h, &clock, 20, || sources.iter().all(|s| stored(&h, s)));
-    let batches = h.git.canonical_batches();
-    assert_eq!(batches.len(), sources.len(), "{batches:?}");
-    assert!(batches.iter().all(|(n, _)| *n == 1), "{batches:?}");
-    assert_eq!(h.git.count("canonical_oid"), 0);
+    assert!(h.git.canonical_batches().is_empty(), "no batch in a slot");
+    assert_eq!(h.git.count("canonical_oid"), sources.len());
+    // The n-th extraction started after the n-th conversion.
+    let converted = converted.lock().unwrap().clone();
+    assert_eq!(converted, (1..=sources.len()).collect::<Vec<_>>());
+}
+
+/// The switch comes on during a batch: the batch makes no index parse
+/// after it. Its files read with another OID than queued are set aside
+/// (their extraction dropped), done and converted in one batch once the
+/// switch is off; the batch's other files are committed as usual.
+#[test]
+fn yield_switch_on_sets_unconverted_files_aside() {
+    let (h, _clock, kernel) = harness(1);
+    let sources = crlf_lib(&h, 6);
+    let plain: Vec<Vec<u8>> = (0..2).map(|i| ts(&format!("p{i}"))).collect();
+    for (i, source) in plain.iter().enumerate() {
+        h.git.add("main", &[(&format!("lib/p{i}.ts"), source)]);
+    }
+    h.git.commit("main");
+    let started = Arc::new(AtomicUsize::new(0));
+    let on = Arc::new(Mutex::new(None));
+    let (k, n, at) = (kernel.clone(), started.clone(), on.clone());
+    let git = h.git.clone();
+    h.set_hook(move |_, _| {
+        // The fourth extraction of the batch: the switch comes on.
+        if n.fetch_add(1, Ordering::SeqCst) == 3 {
+            *at.lock().unwrap() = Some(git.canonical_batches().len());
+            k.set_yield(true);
+        }
+    });
+    open_far(&h);
+    let batches_at_switch = on.lock().unwrap().expect("the switch came on");
+    assert_eq!(
+        h.git.canonical_batches().len(),
+        batches_at_switch,
+        "no batch conversion once the switch is on"
+    );
+    assert!(!aside(&h, 1).is_empty(), "CRLF files set aside");
+    assert!(
+        sources.iter().any(|s| !stored(&h, s)),
+        "set aside, not committed"
+    );
+    kernel.set_yield(false);
+    h.settle();
+    for source in sources.iter().chain(&plain) {
+        assert!(stored(&h, source), "done once the switch is off");
+    }
+    assert!(aside(&h, 1).is_empty());
+    assert!(h.git.canonical_batches().len() > batches_at_switch);
 }
 
 #[test]
