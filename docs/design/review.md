@@ -846,7 +846,10 @@ pub mod analyze {
 
 ### 改动步与声明
 
-一个 worktree 的声明来自这个 worktree 里、`last_activity` 在最近 14 天之内的会话（含子 agent，最多 100 个，按 `last_activity` 从新到旧），从各自的轮次索引得到，不需要 `load`。每个会话派生出的声明（改动步的路径、时刻、调用状态，命令调用的时间窗口）存进 `review.claims`（「归因的缓存」），会话没有新活动时不再读它的轮次索引。每个路径另有一个截止时刻，早于它的改动步和修改时间不参与这个路径：
+一个 worktree 的声明来自这个 worktree 里、`last_activity` 在最近 14 天之内的会话（含子 agent，最多 100 个，按 `last_activity` 从新到旧），从各自的轮次索引得到，不需要 `load`。每个会话派生出的声明（每个改动步的路径、时刻、轮次 ID、调用 ID 与状态、输入与结果的 `ContentRef`，命令调用的时间窗口）存进 `review.claims`（「归因的缓存」），会话没有新活动时不再读它的轮次索引。
+
+- `review.claims` 的条目按轮次索引的身份核对：值里的 `last_activity` 与当前 `SessionSummary` 相同、`tail_pending` 为 false，并且值里的适配器版本等于这个来源当前的适配器版本，才能用。当前的适配器版本取本次运行里从这个来源读到的任一轮次索引的游标（`TurnIndex::cursor` 的 `adapter_version`）；打开会话总会读审阅对象自己的索引，概览在未命中时读。本次运行还没有读过这个来源时，第一份快照先按条目使用，后台为这个来源读一次 `turns_unretained` 核对版本，不同就丢弃这个来源的全部条目、重算受影响的文件。
+- 条目里的 `ContentRef` 是会话文件里的位置。会话只追加写，`last_activity` 不变时位置有效；`load` 失败或给出的不是改动时丢弃这个会话的条目，按未命中读它的索引。每个路径另有一个截止时刻，早于它的改动步和修改时间不参与这个路径：
 
 - **路径的截止时刻**（关键约束）：取这个 worktree 的 HEAD reflog，从基准记录（含）往前、时间在 14 天的窗口之内、旧值与新值不同的记录，最多 256 条。截止时刻是其中最近一条让这个路径在旧、新两个提交的树之间不同的记录（`Repo::tree_changes`，前置条件 B）的时间。
   - 这几类 HEAD 移动会改变这个路径的基准内容，截止时刻因此后移，之前的会话改动不再参与：提交了这个路径、切换到这个路径内容不同的分支（`git checkout feature`）、`reset`、`rebase`、`pull`。
@@ -889,8 +892,8 @@ pub mod analyze {
 |---|---|---|
 | 一个文件的链的结果：每一步的版本 OID、对齐结果与失败的调用、叙事步的 hunk、存活；W 每行来源的游程编码；基准每行去向的游程编码 | 命名空间版本（算法版本）、哈希算法、基准一侧的 OID（没有时为空）、工作区一侧的 OID（`Blob` 或 `NotRetained`；其余身份不缓存）、轮次历史的摘要 | `cache` 的仓库分库，命名空间 `review.attribution`，Zstd；一个文件通常几 KB |
 | 两个提交之间改变的路径（`tree_changes` 的结果，截止时刻用） | 哈希算法、旧提交的 OID（全 0 时为空）、新提交的 OID、`max_paths`（20 000） | `cache` 的仓库分库，命名空间 `review.tree_changes`，Zstd；排好序的路径列表或 `All`。只由两个提交 OID 决定（架构规则 5） |
-| 一个会话派生的声明：改动步的路径、时刻、调用 ID 与状态，命令调用的时间窗口 | 来源 ID、会话 ID（值里带派生时的 `last_activity` 和轮次索引的适配器版本，与 ADR 0026 的做法相同：`last_activity` 与当前 `SessionSummary` 不同、或 `tail_pending` 时不用） | `cache` 的应用级分库，命名空间 `review.claims`，不压缩；一个会话通常几 KB |
-| worktree 的截止时刻 | 路径（只为改动集里的路径保留） | 内存，概览的关注者或打开的审阅持有时存在，随 reflog 的新记录（fs_watch 的 `RepoBatch::reflog`、`meta.head`）增量更新，不每轮重算 |
+| 一个会话派生的声明：每个改动步的路径、时刻、轮次 ID、调用 ID 与状态、输入与结果的 `ContentRef`；命令调用的时间窗口。足够算轮次历史的摘要、按 `load` 回放这个会话的改动步，不必读它的轮次索引 | 来源 ID、会话 ID。值里带派生时轮次索引的身份：`last_activity` 和索引游标的适配器版本（与 ADR 0026 的做法相同，值带位置时按身份核对） | `cache` 的应用级分库，命名空间 `review.claims`，不压缩；一个会话通常几 KB |
+| worktree 的截止时刻表 | 路径（只为改动集里的路径保留）；值是窗口里改变了这个路径的 reflog 记录的时间，从新到旧（≤ 256 个） | 内存，概览的关注者或打开的审阅持有时存在，随 reflog 的新记录（fs_watch 的 `RepoBatch::reflog`、`meta.head`）增量更新，不每轮重算。截止时刻随基准记录而定，表本身不含基准：查询时给出基准记录的时间，取不晚于它的最新一个。会话外的改动和概览里基准是当前 HEAD 的会话用最新的记录；基准不是当前 HEAD 的会话，概览和它自己的审阅都用它自己的基准记录，所以两边的声明相同 |
 | 回放出的中间版本 | 版本的 OID | 内存 LRU，8 MiB，只在有打开的审阅时存在 |
 | 规则简报 | 不缓存 | 每次重算（ADR 0019） |
 | 已看状态 | 不缓存 | 由标注日志和当前改动集算出 |
@@ -1042,7 +1045,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 - 有关注者时，对项目的当前 worktree：
   1. 计数比较：`Worktree::changes(Base::Head)`，`Limits` 取 `retained_bytes = 0`、`total_patch_bytes = 0`（[ADR 0035](../adr/0035.md)，与 `crates/review/AGENTS.md`「边界」相同）。改动路径不超过 4000 个时保留这份改动集，之后按 fs_watch 的批次 `refresh`；超过时只保留计数（`OutsideCount::Capped`），之后的事件触发全量比较。这份改动集直接用 `git`，不转换成 `ChangeList`（只有路径、两侧 OID 与 stat）。
-  2. 声明：声明窗口内的会话（「改动步与声明」，最多 100 个）先查 `review.claims`；没有命中（新会话、有新活动）的才读轮次索引，用 `SessionSource::turns_unretained`（前置条件 G）在 `Background` 上逐个读取，不用 `turns`：概览在 ADR 0035 的采样状态里运行，`turns` 会把这些索引留在 agents 的 8 MB 轮次索引 LRU 里，而那个 LRU 不在采样状态的份额里。每读一个会话，只留下派生的声明（改动步的路径与时刻、命令调用的时间窗口、调用状态）并写进 `review.claims`，索引随即放下；声明计入本 crate 的 < 1 MB。截止时刻用这个 worktree 在内存里的截止时刻表（「归因的缓存」）：第一轮从 `review.tree_changes` 建出，之后只为 reflog 的新记录和计数改动集里新出现的路径补算，不每轮重算；命令声明对改动路径调一次 `Worktree::mtimes`（≤ 4000 个）。
+  2. 声明：声明窗口内的会话（「改动步与声明」，最多 100 个）先查 `review.claims`；没有命中（新会话、有新活动）的才读轮次索引，用 `SessionSource::turns_unretained`（前置条件 G）在 `Background` 上逐个读取，不用 `turns`：概览在 ADR 0035 的采样状态里运行，`turns` 会把这些索引留在 agents 的 8 MB 轮次索引 LRU 里，而那个 LRU 不在采样状态的份额里。每读一个会话，只留下派生的声明（同「改动步与声明」）并写进 `review.claims`，索引随即放下；声明计入本 crate 的 < 1 MB。截止时刻用这个 worktree 在内存里的截止时刻表（「归因的缓存」）：第一轮从 `review.tree_changes` 建出，之后只为 reflog 的新记录和计数改动集里新出现的路径补算，不每轮重算；每个会话按它自己的基准记录查表（基准是当前 HEAD 时用最新的记录），与它的审阅相同；命令声明对改动路径调一次 `Worktree::mtimes`（≤ 4000 个）。
   3. 会话外的改动数 = 计数改动集里没有声明的文件。
   4. 每个会话的进度：文件集合与审阅快照的 `files` 同一定义（「审阅对象与基准」的文件集合）。基准等于当前 HEAD 的会话，文件是计数改动集与它的声明的交集，已看状态按标注日志算出；基准不同的会话，每轮最多为 8 个（按 `last_activity`）另做一次同样 `Limits` 的比较，算完即丢弃改动集，其余为 None。
   5. Drifted 信号只读 `review.attribution` 的缓存（键能从声明和计数改动集的 OID 得到），未命中为 None；不为概览建链。
@@ -1143,6 +1146,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
     - 会话的改动已经提交进基准后不再参与（同样的 `Replace` 不在基准上再应用一次）；amend、rebase 之后同样；基准记录之后 agent 自己的提交不移动截止时刻，它之前的改动步仍在链里；窗口里超过 256 条记录时按第 256 条截止；没有 reflog 时按基准提交的提交时间截止；14 天之前的会话不参与。
     - 缓存：同一对提交的 `tree_changes` 只算一次（`review.tree_changes` 命中时不调用它）；`review.claims` 在会话没有新活动时命中、`last_activity` 变了不用；`Interactive` 上的未命中计算超过 5 ms 时其余记录在后台算完，快照随后更新，结果与一次算完相同。
     - 打开的顺序：其他会话的声明没有缓存时，第一份快照不等它们（`FakeSessions` 记下打开期间对它们的 `turns` / `turns_unretained` 调用数为 0），后台读到一个改了第一个文件的会话后，第一个文件的归因被重算、原来的 Drifted 行变为 `others`。
+    - `claims_warm_open_uses_cached_steps`：两个会话都改了第一个文件，`review.claims` 已有另一个会话的条目。热打开期间对另一个会话没有 `turns` / `turns_unretained` 调用（只有对它的改动步的 `load`），第一份快照里它的行已经是 `others`，轮次历史的摘要与读索引算出的相同；`last_activity` 或适配器版本变了时条目不用；本次运行没读过这个来源时先用、后台核对版本不同后重算。
+    - `overview_progress_matches_review_after_agent_commit`：会话在运行中提交了它改过的文件（HEAD 越过它的基准记录）。概览按它的基准记录截止，这些文件仍是它声明的，`progress.total` 等于它的审阅快照的 `files` 数；会话外的改动按最新的记录截止，不含这些已提交的文件。
   - `files_*`：会话审阅的文件集合。共用的主 worktree 里两个会话和一个手工改动的文件：每个会话的 `files` 只含它声明的文件，`unclaimed` 等于其余的数量；`LooksGood` 只标记这些文件；`Sensitive`、`Deleted` 规则不对没有声明的文件触发；概览里这个会话的 `progress.total` 等于它的审阅快照的 `files` 数；认不出格式的会话按修改时间声明。
   - `narrative_*`：同一轮多次调用合成一步；子 agent 的轮次跟在派出它的那一轮之后，`tool_call` 为 None 时按时间插入；`after_last_seen`；认不出格式时 `turns` 为 None。insta 快照。
   - `rows_*`：最终改动与叙事步的展示行，偏移与 git 的规则一致；中间版本回放后 OID 与缓存的版本 OID 相同；LRU 不超过 8 MiB。
