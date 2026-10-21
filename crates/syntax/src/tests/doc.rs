@@ -552,6 +552,78 @@ fn doc_tier_c_long_line_reads_the_pages_it_scrolls_to() {
 }
 
 #[test]
+fn doc_dependency_files_stay_inside_their_root() {
+    use lectern_services::code_intel::{CacheRoot, DepOrigin, DepRoot, Ecosystem, TextOrigin};
+    let rig = Rig::new();
+    let dir = "node_modules/react";
+    rig.write(
+        "node_modules/react/index.d.ts",
+        b"export declare const a: number;\n",
+    );
+    rig.write("node_modules/react/index.js", b"module.exports = 1;\n");
+    rig.write("secret.d.ts", b"export {};\n");
+    std::os::unix::fs::symlink(
+        "../../secret.d.ts",
+        rig.path("node_modules/react/link.d.ts"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(rig.path("elsewhere")).unwrap();
+    std::fs::write(rig.path("elsewhere/x.d.ts"), b"x").unwrap();
+    std::os::unix::fs::symlink("../../elsewhere", rig.path("node_modules/react/sub")).unwrap();
+    let dep = |path: &str, root: DepRoot| {
+        let mut target = rig.target(path, Anchor::Start);
+        target.origin = TextOrigin::Dependency(DepOrigin {
+            ecosystem: Ecosystem::Npm,
+            package: "react".into(),
+            version: Some("19.0.0".into()),
+            root,
+        });
+        rig.open_settled(target).1
+    };
+    let worktree = || DepRoot::Worktree { dir: dir.into() };
+    let read = dep("node_modules/react/index.d.ts", worktree());
+    assert_eq!(read.state, DocState::Ready);
+    assert_eq!(read.editable, Editable::No(NotEditable::ReadOnlySource));
+    assert_eq!(
+        first_text(&read, read.anchor),
+        "export declare const a: number;"
+    );
+    let state = |path: &str, root: DepRoot| dep(path, root).state.clone();
+    let not_allowed = DocState::Unreadable(ReadError::NotAllowed);
+    // Outside the root, a prefix that is not a directory of it, `..`.
+    assert_eq!(state("secret.d.ts", worktree()), not_allowed);
+    assert_eq!(
+        state("node_modules/react-dom/x.d.ts", worktree()),
+        not_allowed
+    );
+    assert_eq!(
+        state("node_modules/react/../../secret.d.ts", worktree()),
+        DocState::Unreadable(ReadError::InvalidPath)
+    );
+    // An extension not on the list.
+    assert_eq!(
+        state("node_modules/react/index.js", worktree()),
+        not_allowed
+    );
+    // Symbolic links out of the root are not followed.
+    assert_eq!(
+        state("node_modules/react/link.d.ts", worktree()),
+        DocState::Symlink {
+            target: Arc::from(&b"../../secret.d.ts"[..])
+        }
+    );
+    assert_eq!(
+        state("node_modules/react/sub/x.d.ts", worktree()),
+        DocState::Unreadable(ReadError::PathThroughSymlink)
+    );
+    // A cache root is not read.
+    assert_eq!(
+        state("x.rs", DepRoot::Cache(CacheRoot::CargoRegistrySrc)),
+        not_allowed
+    );
+}
+
+#[test]
 fn doc_tier_c_byte_with_another_oid_moves_by_its_line() {
     let rig = Rig::new();
     tier_c(&rig);

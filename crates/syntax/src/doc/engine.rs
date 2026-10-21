@@ -533,7 +533,9 @@ impl Doc {
     ) -> Doc {
         let editable = match target.origin {
             TextOrigin::Worktree => Editable::No(NotEditable::NotLoaded),
-            TextOrigin::Object => Editable::No(NotEditable::ReadOnlySource),
+            TextOrigin::Object | TextOrigin::Dependency(_) => {
+                Editable::No(NotEditable::ReadOnlySource)
+            }
         };
         let st = DocMut {
             generation: 0,

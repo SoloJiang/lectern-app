@@ -82,6 +82,9 @@ pub enum ReadError {
     PathThroughSymlink,
     /// The path is not a valid relative path.
     InvalidPath,
+    /// A dependency file outside its root, with an extension not on ADR
+    /// 0033's list, or in a cache root outside the worktree.
+    NotAllowed,
     /// The object database has no such blob, or the project has none.
     ObjectMissing,
     /// The blob is over 16 MiB ([`OBJECT_MAX`](crate::limits::OBJECT_MAX))

@@ -47,7 +47,7 @@ fn worktree_name(common_dir: &Path, git_dir: &Path) -> Option<WorktreeName> {
 pub(crate) fn ensure(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
     let target = &doc.target;
     let (ProjectKey::Git { common_dir }, Some(worktree), TextOrigin::Worktree) =
-        (&target.project, &target.worktree, target.origin)
+        (&target.project, &target.worktree, &target.origin)
     else {
         return;
     };

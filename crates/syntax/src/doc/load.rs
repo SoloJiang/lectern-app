@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use lectern_executor::Priority;
 use lectern_git::{BlobHasher, GitError, Oid};
-use lectern_platform::{FileIdentity, FullRead, OpenFile, Opened, RelPath, SafeError};
-use lectern_services::code_intel::TextOrigin;
+use lectern_platform::{FileIdentity, FullRead, OpenFile, Opened, RelPath, SafeError, SafeRoot};
+use lectern_services::code_intel::{DEPENDENCY_EXTENSIONS, DepRoot, TextOrigin};
 use lectern_services::project::{BlobId, ProjectKey};
 use lectern_services::reader::{Anchor, ReadTarget};
 
@@ -166,51 +166,30 @@ pub(crate) fn first_screen(
 ) -> First {
     let langs = engine.languages.clone();
     let lang = langs.for_path(&target.path);
-    let (rest, size, identity) = match target.origin {
-        TextOrigin::Worktree => {
-            let Some(rel) = RelPath::new(target.path.as_bytes()) else {
-                return First::Failed(DocState::Unreadable(ReadError::InvalidPath));
+    let opened = match &target.origin {
+        TextOrigin::Worktree => worktree_file(engine, target, root),
+        TextOrigin::Dependency(dep) => dependency_file(engine, target, root, &dep.root),
+        TextOrigin::Object => object(engine, target).map(|rest| {
+            let size = match &rest {
+                Rest::Memory(b) => b.len() as u64,
+                Rest::Text(t) => t.len(),
+                Rest::File(_) => 0,
             };
-            let safe = match engine.root(&target.project, root) {
-                Ok(safe) => safe,
-                Err(e) => return First::Failed(io_error(e)),
-            };
-            match safe.open_file(rel) {
-                Ok(Opened::File(file)) => {
-                    let (size, identity) = (file.meta().size, file.identity());
-                    (Rest::File(file), size, Some(identity))
-                }
-                Ok(Opened::Symlink { target, .. }) => {
-                    return First::Failed(DocState::Symlink {
-                        target: target.into(),
-                    });
-                }
-                Ok(Opened::Unsupported { .. }) => return First::Failed(DocState::Unsupported),
-                Err(SafeError::NotFound) => return First::Failed(DocState::Missing),
-                Err(SafeError::PathThroughSymlink) => {
-                    return First::Failed(DocState::Unreadable(ReadError::PathThroughSymlink));
-                }
-                Err(SafeError::Io(e)) => return First::Failed(io_error(e)),
-            }
-        }
-        TextOrigin::Object => match object(engine, target) {
-            Ok(rest) => {
-                let size = match &rest {
-                    Rest::Memory(b) => b.len() as u64,
-                    Rest::Text(t) => t.len(),
-                    Rest::File(_) => 0,
-                };
-                (rest, size, None)
-            }
-            Err(state) => return First::Failed(state),
-        },
+            (rest, size, None)
+        }),
+    };
+    let (rest, size, identity) = match opened {
+        Ok(opened) => opened,
+        Err(state) => return First::Failed(state),
     };
     // The OID of the content just opened, when it is known for sure: an
     // object's is `expect`; a file's is what an earlier read of this very
     // identity found. Only this one finds spans in the LRU.
     let verified = match target.origin {
         TextOrigin::Object => target.expect,
-        TextOrigin::Worktree => identity.and_then(|id| engine.known_oid(root, &target.path, id)),
+        TextOrigin::Worktree | TextOrigin::Dependency(_) => {
+            identity.and_then(|id| engine.known_oid(root, &target.path, id))
+        }
     };
     // Line checkpoints may also come by the caller's OID: their length is
     // checked, and the full read places the line again anyway.
@@ -333,7 +312,7 @@ pub(crate) fn first_screen(
     }
     let oid = match target.origin {
         TextOrigin::Object => target.expect,
-        TextOrigin::Worktree => None,
+        TextOrigin::Worktree | TextOrigin::Dependency(_) => None,
     };
     First::Shown(Box::new(Shown {
         size,
@@ -350,6 +329,85 @@ pub(crate) fn first_screen(
         oid,
         relocate,
     }))
+}
+
+/// What opening a file gives: the rest to read, its size and identity.
+type Opening = Result<(Rest, u64, Option<FileIdentity>), DocState>;
+
+/// A worktree file, opened beneath the root's `SafeRoot`.
+fn worktree_file(engine: &EngineInner, target: &ReadTarget, root: &Arc<Path>) -> Opening {
+    let rel =
+        RelPath::new(target.path.as_bytes()).ok_or(DocState::Unreadable(ReadError::InvalidPath))?;
+    let safe = engine.root(&target.project, root).map_err(io_error)?;
+    open_in(&safe, rel)
+}
+
+/// A dependency file (ADR 0033): only beneath a dependency root of the
+/// worktree, opened from that directory's own `SafeRoot` (no level of the
+/// root or the path may be a symbolic link), and only with an extension or
+/// a file name on the allowed list. A root in a cache outside the worktree
+/// is not read.
+fn dependency_file(
+    engine: &EngineInner,
+    target: &ReadTarget,
+    root: &Arc<Path>,
+    dep: &DepRoot,
+) -> Opening {
+    let DepRoot::Worktree { dir } = dep else {
+        return Err(DocState::Unreadable(ReadError::NotAllowed));
+    };
+    let path: &str = &target.path;
+    let inside = path
+        .strip_prefix(&**dir)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty());
+    let (Some(dir_rel), Some(inside)) = (RelPath::new(dir.as_bytes()), inside) else {
+        return Err(DocState::Unreadable(ReadError::NotAllowed));
+    };
+    let Some(rel) = RelPath::new(inside.as_bytes()) else {
+        return Err(DocState::Unreadable(ReadError::InvalidPath));
+    };
+    if !dependency_allowed(path) {
+        return Err(DocState::Unreadable(ReadError::NotAllowed));
+    }
+    let safe = engine.root(&target.project, root).map_err(io_error)?;
+    let dir_root = safe.open_dir(dir_rel).map_err(safe_error)?;
+    open_in(&dir_root, rel)
+}
+
+/// ADR 0033's list: an entry starting with `.` is a file name's suffix,
+/// any other a whole file name.
+fn dependency_allowed(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    DEPENDENCY_EXTENSIONS.iter().any(|allowed| {
+        if allowed.starts_with('.') {
+            name.len() > allowed.len() && name.ends_with(allowed)
+        } else {
+            name == *allowed
+        }
+    })
+}
+
+fn open_in(safe: &SafeRoot, rel: RelPath<'_>) -> Opening {
+    match safe.open_file(rel) {
+        Ok(Opened::File(file)) => {
+            let (size, identity) = (file.meta().size, file.identity());
+            Ok((Rest::File(file), size, Some(identity)))
+        }
+        Ok(Opened::Symlink { target, .. }) => Err(DocState::Symlink {
+            target: target.into(),
+        }),
+        Ok(Opened::Unsupported { .. }) => Err(DocState::Unsupported),
+        Err(e) => Err(safe_error(e)),
+    }
+}
+
+fn safe_error(error: SafeError) -> DocState {
+    match error {
+        SafeError::NotFound => DocState::Missing,
+        SafeError::PathThroughSymlink => DocState::Unreadable(ReadError::PathThroughSymlink),
+        SafeError::Io(e) => io_error(e),
+    }
 }
 
 /// An object target's content: registered, in the LRU, or taken out of the
@@ -593,9 +651,9 @@ fn complete(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, rest: Rest) {
     apply_full(engine, doc, load, Arc::new(text), oid, identity);
 }
 
-fn editable(origin: TextOrigin, len: u64, index: &LineIndex) -> Editable {
+fn editable(origin: &TextOrigin, len: u64, index: &LineIndex) -> Editable {
     let facts = index.facts();
-    Editable::No(if origin == TextOrigin::Object {
+    Editable::No(if *origin != TextOrigin::Worktree {
         NotEditable::ReadOnlySource
     } else if len > TIER_A_MAX {
         NotEditable::TooLarge
@@ -673,7 +731,7 @@ fn apply_full(
     } else {
         Tier::B
     });
-    st.editable = editable(target.origin, len, index);
+    st.editable = editable(&target.origin, len, index);
     st.content = Content::Text(text.clone());
     if changed {
         st.whole = None;
