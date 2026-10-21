@@ -88,9 +88,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: bench
-      # The benchmarks' kept fixtures (bench design「夹具与 `test-support`」):
-      # each checks its own key and contents before use, so this key only
-      # decides how often the restore hits.
+      # The benchmarks' kept fixtures (ADR 0039): this key decides how often
+      # the restore hits. Each fixture checks its contents against the
+      # current writer before use; the source hash is a second guard that
+      # also covers changes the sampled check cannot see.
       - name: Restore the benchmarks' kept fixtures
         uses: actions/cache@v4
         with:

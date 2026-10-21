@@ -192,7 +192,7 @@ pub fn virtual_repo_sharing(
     worktrees: &[&str],
     common: &[(&str, usize)],
 ) -> usize {
-    use crate::store::{Store, Version};
+    use crate::store::Store;
     git.assume_unchanged(true);
     let entries: Vec<(String, lectern_services::project::BlobId)> = (0..n)
         .map(|i| (super::synthetic::path(i), super::synthetic::oid(i)))
@@ -204,21 +204,11 @@ pub fn virtual_repo_sharing(
     let table = crate::extract::LanguageTable::core();
     let mut stored = 0;
     let mut write = store.write();
-    for (i, (path, oid)) in entries.iter().enumerate() {
-        let Some(lang) = table.for_path(path, &crate::NoGrammarPacks) else {
+    for (i, (_, oid)) in entries.iter().enumerate() {
+        let Some((version, extraction)) = virtual_unit(&table, i, common) else {
             continue;
         };
-        let mut extraction = super::synthetic::extraction(i);
-        for (k, &(name, every)) in common.iter().enumerate() {
-            if i % every.max(1) == 0 {
-                let mut def = extraction.defs[1].clone();
-                def.name = name.into();
-                def.line = 200 + 10 * k as u32;
-                def.end_line = def.line + 3;
-                extraction.defs.push(def);
-            }
-        }
-        write.add(*oid, &Version::of(lang), &extraction);
+        write.add(*oid, &version, &extraction);
         stored += 1;
         if write.len() == VIRTUAL_BATCH {
             let full = std::mem::replace(&mut write, store.write());
@@ -237,6 +227,29 @@ pub fn virtual_repo_sharing(
         );
     }
     stored
+}
+
+/// The unit [`virtual_repo_sharing`] stores for file `i` (its version and
+/// extraction), `None` when `i` is not a source file. A kept template is
+/// checked against it (`VirtualTemplate::cached`), so what the writer
+/// stores is decided here and nowhere else.
+pub(crate) fn virtual_unit(
+    table: &crate::extract::LanguageTable,
+    i: usize,
+    common: &[(&str, usize)],
+) -> Option<(crate::store::Version, crate::extract::Extraction)> {
+    let lang = table.for_path(&super::synthetic::path(i), &crate::NoGrammarPacks)?;
+    let mut extraction = super::synthetic::extraction(i);
+    for (k, &(name, every)) in common.iter().enumerate() {
+        if i.is_multiple_of(every.max(1)) {
+            let mut def = extraction.defs[1].clone();
+            def.name = name.into();
+            def.line = 200 + 10 * k as u32;
+            def.end_line = def.line + 3;
+            extraction.defs.push(def);
+        }
+    }
+    Some((crate::store::Version::of(lang), extraction))
 }
 
 /// Every block starts with its size, so `free` and `realloc` can rebuild

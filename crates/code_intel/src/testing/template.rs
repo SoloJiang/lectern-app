@@ -10,12 +10,15 @@ use std::sync::Arc;
 use lectern_cache::{Budgets, Cache, Config};
 use lectern_git::HashKind;
 
-use super::{FakeGit, synthetic, virtual_repo_sharing};
+use super::{FakeGit, synthetic, virtual_repo_sharing, virtual_unit};
+use crate::NoGrammarPacks;
 use crate::extract::LanguageTable;
 use crate::store::{NAMESPACE, SCHEMA, Store, Version};
 
 /// Bumped when what a template holds, or how it is laid out on disk,
-/// changes in a way [`key`] does not see.
+/// changes in a way neither [`key`] nor the reuse check
+/// ([`matches_writer`]) sees, such as a change to files outside its sample
+/// only.
 const TEMPLATE_VERSION: u32 = 1;
 
 /// Written last into a kept template: its key, files and units.
@@ -58,17 +61,21 @@ impl VirtualTemplate {
     }
 
     /// The same template kept under `root` between runs: in `root/<key>`,
-    /// where the key ([`key`]) covers everything its content depends on
-    /// (this module's version, the files and common names, the budgets, the
-    /// namespace and its tables, the current version of every core language,
-    /// a sample of the synthetic generator's output and the directory, which
-    /// names the cache partition). A kept one is used when its manifest
-    /// (written last) has the key and a copy of it opens with every unit the
-    /// manifest records (so a changed cache format, which `lectern-cache`
-    /// would drop on open, is caught); otherwise the templates of this size
-    /// under `root` are removed (those of other sizes, such as smoke mode's,
-    /// stay) and the template written again. One benchmark run at a time
-    /// per `root`.
+    /// where the key ([`key`]) names the declared inputs (this module's
+    /// version, the files and common names, the budgets, the namespace and
+    /// its tables, the current version of every core language, a sample of
+    /// the synthetic generator's output and the directory, which names the
+    /// cache partition). A kept one is used when its manifest (written last)
+    /// has the key and a copy of it holds what the current writer would
+    /// store ([`matches_writer`]: the unit count against the current
+    /// language mapping, and a sample of files' units, definitions and
+    /// references, regenerated and read back), so an edited writer or
+    /// mapping, a changed cache format (which `lectern-cache` drops on open)
+    /// or an interrupted write is caught without a version bump; a change
+    /// that only touches files outside the sample and keeps the count is
+    /// not. Otherwise the templates of this size under `root` are removed
+    /// (those of other sizes, such as smoke mode's, stay) and the template
+    /// written again. One benchmark run at a time per `root`.
     pub fn cached(
         root: &Path,
         n: usize,
@@ -88,7 +95,7 @@ impl VirtualTemplate {
                 n,
                 units,
             };
-            if kept.verify(&root.join(format!("{key}.verify")), &budgets)? {
+            if kept.verify(&root.join(format!("{key}.verify")), &budgets, common)? {
                 return Ok(kept);
             }
         }
@@ -151,17 +158,71 @@ impl VirtualTemplate {
         Ok((Arc::new(git), cache))
     }
 
-    /// Whether a copy opened at `at` (removed after) holds the template's
-    /// units in the current versions.
-    fn verify(&self, at: &Path, budgets: &Budgets) -> io::Result<bool> {
+    /// Whether a copy opened at `at` (removed after) holds what the current
+    /// writer stores ([`matches_writer`]).
+    fn verify(&self, at: &Path, budgets: &Budgets, common: &[(&str, usize)]) -> io::Result<bool> {
         let _ = std::fs::remove_dir_all(at);
-        let found = {
+        let matches = {
             let (git, cache) = self.open(at, budgets.clone())?;
-            stored_units(&git, &cache)
+            matches_writer(&git, &cache, self.n, common, self.units)
         };
         std::fs::remove_dir_all(at)?;
-        Ok(found == Some(self.units))
+        Ok(matches)
     }
+}
+
+/// Whether `git`'s partition of `cache` holds what [`virtual_repo_sharing`]
+/// would store now: as many units of the current versions as the current
+/// language mapping makes source files (and the manifest records), and,
+/// for each file of [`sample`], the unit the current writer
+/// ([`virtual_unit`]) gives, read back with its definitions and
+/// references, or no unit where it gives none.
+fn matches_writer(
+    git: &FakeGit,
+    cache: &Cache,
+    n: usize,
+    common: &[(&str, usize)],
+    recorded: usize,
+) -> bool {
+    let table = LanguageTable::core();
+    let sources = (0..n)
+        .filter(|&i| {
+            table
+                .for_path(&synthetic::path(i), &NoGrammarPacks)
+                .is_some()
+        })
+        .count();
+    if sources != recorded || stored_units(git, cache) != Some(sources) {
+        return false;
+    }
+    let versions: Vec<Version> = table.iter().map(Version::of).collect();
+    let store = Store::new(&cache.repo(git.common_dir()));
+    sample(n, common).into_iter().all(|i| {
+        let oid = synthetic::oid(i);
+        match virtual_unit(&table, i, common) {
+            Some((version, extraction)) => match store.exists(&version, &[oid]).as_deref() {
+                Some([found]) => store.load(found.unit) == Some(extraction),
+                _ => false,
+            },
+            None => versions
+                .iter()
+                .all(|v| store.exists(v, &[oid]).is_some_and(|f| f.is_empty())),
+        }
+    })
+}
+
+/// The files whose units a kept template is checked against: 96 spread
+/// over `0..n` and, for each common name, 32 files that define it.
+fn sample(n: usize, common: &[(&str, usize)]) -> Vec<usize> {
+    let mut files: Vec<usize> = (0..96).map(|k| k * n / 96).collect();
+    for &(_, every) in common {
+        let every = every.max(1);
+        files.extend((0..32).map(|k| k * n / 32 / every * every));
+    }
+    files.retain(|&i| i < n);
+    files.sort_unstable();
+    files.dedup();
+    files
 }
 
 /// Writes a template into `dir` (`git`, `cache`) and returns the units its

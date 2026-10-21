@@ -1,14 +1,14 @@
 //! `template_*`: the benchmarks' virtual repository kept between runs
-//! (`testing::VirtualTemplate::cached`): reused while its key and its units
-//! hold, written again otherwise, never used stale.
+//! (`testing::VirtualTemplate::cached`): reused while its key holds and it
+//! matches what the current writer stores, written again otherwise.
 
 use std::path::{Path, PathBuf};
 
-use lectern_cache::Budgets;
+use lectern_cache::{Budgets, Cache, Config, Written};
 
 use crate::extract::LanguageTable;
 use crate::store::{Store, Version};
-use crate::testing::{VirtualTemplate, template_key};
+use crate::testing::{FakeGit, VirtualTemplate, synthetic, template_key, virtual_unit};
 
 const N: usize = 200;
 const NAMES: [(&str, usize); 1] = [("shared", 3)];
@@ -82,6 +82,46 @@ fn template_stale_is_written_again() {
     let t = VirtualTemplate::cached(root.path(), N, &NAMES, Budgets::default()).expect("rebuilt");
     assert!(!reused(&dir));
     assert_eq!(opened_units(&t), t.units());
+}
+
+/// A template an older writer left (here: file 0's common definition one
+/// line off) under the current key and with a matching manifest and unit
+/// count: the reuse check regenerates the sample's units, sees the
+/// difference and writes the template again.
+#[test]
+fn template_changed_writer_is_written_again() {
+    let root = tempfile::tempdir().expect("temp dir");
+    drop(VirtualTemplate::cached(root.path(), N, &NAMES, Budgets::default()).expect("built"));
+    let dir = kept(root.path());
+    {
+        let git = FakeGit::at(&dir.join("git")).expect("repository");
+        let cache = Cache::new(Config {
+            root: dir.join("cache"),
+            budgets: Budgets::default(),
+            ui_thread: None,
+        });
+        let (version, mut extraction) =
+            virtual_unit(&LanguageTable::core(), 0, &NAMES).expect("file 0 is a source file");
+        let def = extraction.defs.last_mut().expect("the common definition");
+        assert_eq!(&*def.name, NAMES[0].0);
+        def.line += 1;
+        let store = Store::new(&cache.repo(git.common_dir()));
+        let mut write = store.write();
+        write.add(synthetic::oid(0), &version, &extraction);
+        assert!(matches!(write.commit(), Written::Committed));
+    }
+    mark(&dir);
+    let t = VirtualTemplate::cached(root.path(), N, &NAMES, Budgets::default()).expect("rebuilt");
+    assert!(
+        !reused(&dir),
+        "a template the current writer would not write is not used"
+    );
+    assert_eq!(opened_units(&t), t.units());
+    drop(t);
+    // Written again by the current writer: reused from now on.
+    mark(&dir);
+    drop(VirtualTemplate::cached(root.path(), N, &NAMES, Budgets::default()).expect("kept"));
+    assert!(reused(&dir));
 }
 
 /// Other common names for the same size are another key: the old template
