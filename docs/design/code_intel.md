@@ -2442,6 +2442,7 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 跨检查点的行：检查点改取行号严格小于目标行的最后一个，长行上的目标在第一段之外时再读窗口那一段，保留窗口的复用按窗口里的字节判断。新增 `goto_large_line_across_a_checkpoint`（约 90 KiB 的一行跨过 128 KiB 的检查点，目标在它的末尾：两段，第一段从 64 KiB 的检查点开始，`Bound(Local)` 的行、列、字节正确；同一窗口里再跳一次不读）、`goto_large_minified_line`（约 1.2 MiB 的一行 JS，中部、末尾和开头三个目标，每个之后再在保留的窗口里跳一次）、`goto_large_minified_object_text`（同样的一行作为对象库一侧，窗口里不取 blob，别处取一次）。改之前这三个都会落在错误的字节上。窗口起点的规则多了「到目标之间第一个 `;` 或 `}` 之后」一条：跨检查点的那一行里窗口起点落在 90 KiB 的字符串里，按标识符边界会从字符串的右引号开始、整个窗口成了字符串。
 - 窗口单元随标记一起标记访问：`window_marker_is_touched_with_its_windows`（重新打开后批量层的检查、第 1 层的检查各标记 `窗口数 + 1` 个单元，跳转标记的单元也包括它们；`Stats::touched` 计数），`store_marker_touch_keeps_its_windows`（64 KiB 配额，按 `Batch::queue_touches` 排进的标记和 10 个窗口在超额写入之后都还在，未标记的单元先被淘汰）。
 - `just check` 通过；`just test -p lectern-code-intel` 344 个测试通过。基准（负载约 1.5–3）：`goto_large` 3.79 ms（≤ 20 ms）、`/cold` 7.54 ms、`/object` 3.63 ms；`goto_cold_parse` 28.9 ms（≤ 32 ms，报告标为 noisy；第一次重跑 30.4 ms，这条路径只多了大文件判断后面的一个分支）、`/at_128k` 33.9 ms。
+- macOS CI 上 `named_50k` 报错（到 `Done` 用了 1.02 s，`Partial`；那次运行器比 main 上一次慢约 38%）。排除存储版本 3 带来的退化：`goto_phases.rs` 的 `named_50k_phases`（release，6 万文件、5.4 万个定义，20 次的中位数）在本分支和 main（d595c4d）上各跑一次：从查询到结果 790 ms / 762 ms，组成候选 121 ms / 123 ms，按名字查找（SQL）13.4 ms / 14.7 ms，读事务和语句 213 / 217 两边相同，分配 221 380 两边相同；差别在噪声之内，没有改存储。基准改为只要求第一批到达且有候选，`Done` 的时间、候选数和未搜的文件数作为 `named_50k/done`、`/candidates`、`/unsearched` 记录，时间盒截断不再算错（[bench 设计「预算表」](bench.md#预算表)）。其他只记录的基准里没有同样依赖时间盒内搜完的：`goto_*` 的完整性检查在几十毫秒内完成，`references_*/all` 的 2 s 本身就包括搜完。
 
 ## 与设计的差异
 

@@ -701,7 +701,12 @@ fn goto_first(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 /// `Named` for a name some 45 000 files define (record-only): every other
 /// file of the shared virtual repository also defines `id`
 /// (`code_intel_virtual::COMMON`). From the query to its first batch: the
-/// first page, the files near the query, ranking them, the event.
+/// first page, the files near the query, ranking them, the event. The
+/// first batch must come and have candidates. The rest of the lookup takes
+/// most of the query's 1 s time box (0.6–0.8 s), so on a slow runner it
+/// may end `Partial`: recorded, not an error. `…/done` is the time to
+/// `Done`; `…/candidates` and `…/unsearched` the candidates and the files
+/// left unsearched at `Done` (the last sample).
 pub const NAMED_50K: Bench = Bench {
     id: "code_intel/named_50k",
     run: named_50k,
@@ -727,7 +732,7 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     rig.open_with(packages(&synthetic::package_dirs(n)));
     rig.settle();
     maybe_full(&rig);
-    let (seen, _subscription) = listen(&rig)?;
+    let (seen, _subscription) = listen_batches(&rig)?;
     let query = Query {
         project: rig.git.key(),
         kind: QueryKind::Named {
@@ -735,35 +740,55 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             near: Some(synthetic::path(0).into()),
         },
     };
-    let mut samples = Vec::new();
+    let (mut firsts, mut dones) = (Vec::new(), Vec::new());
+    let (mut candidates, mut unsearched) = (0, 0);
     for round in 0..slow_samples(ctx) {
         seen.lock().unwrap().clear();
         let start = Instant::now();
         let (id, r) = run(&rig, &query)?;
         let elapsed = start.elapsed();
-        let first = seen
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(i, _, _)| *i == id)
-            .map(|(_, _, t)| *t)
-            .ok_or_else(|| BenchError::new("no batch"))?;
-        if r.candidates.len() < units {
-            return Err(BenchError::new(format!(
-                "{} candidates of {units} units, {:?}; {}",
-                r.candidates.len(),
+        let events = seen.lock().unwrap().clone();
+        let mine = || events.iter().filter(|e| e.0 == id);
+        let first = mine().find(|e| e.2).map(|e| e.1).ok_or_else(|| {
+            BenchError::new(format!(
+                "no batch with candidates: {:?}; {}",
                 r.state,
+                diagnose(&rig, &query, elapsed)
+            ))
+        })?;
+        let done = mine()
+            .find(|e| e.3)
+            .map(|e| e.1)
+            .ok_or_else(|| BenchError::new(format!("no end: {:?}", r.state)))?;
+        // Every unit found unless the time box cut the lookup: then the
+        // rest counts as unsearched, and the numbers show it.
+        candidates = r.candidates.len() as u64;
+        unsearched = match r.state {
+            QueryState::Done(Completeness::Complete) => 0,
+            QueryState::Done(Completeness::Partial {
+                unsearched,
+                outside,
+            }) => u64::from(unsearched) + u64::from(outside),
+            ref state => return Err(BenchError::new(format!("not done: {state:?}"))),
+        };
+        if unsearched == 0 && r.candidates.len() < units {
+            return Err(BenchError::new(format!(
+                "{} candidates of {units} units, complete; {}",
+                r.candidates.len(),
                 diagnose(&rig, &query, elapsed)
             )));
         }
         if round > 0 || ctx.mode() == Mode::Smoke {
-            samples.push(first - start);
+            firsts.push(first - start);
+            dones.push(done - start);
         }
     }
-    Ok(vec![Measured::new(
-        "code_intel/named_50k",
-        Value::Time(Samples(samples)),
-    )])
+    Ok(vec![
+        Measured::new("code_intel/named_50k", Value::Time(Samples(firsts))),
+        Measured::new("code_intel/named_50k/done", Value::Time(Samples(dones))),
+        Measured::new("code_intel/named_50k/candidates", Value::Count(candidates)),
+        Measured::new("code_intel/named_50k/unsearched", Value::Count(unsearched)),
+    ])
 }
 
 /// Samples of an operation taking about a second: one warm-up, then 5.

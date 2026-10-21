@@ -1335,8 +1335,31 @@ pub static BUDGETS: &[Budget] = &[
     // earlier jump. Recorded against the 50 ms candidates budget.
     share("code_intel/goto_first", RECORD, CODE_INTEL, ACTIVE, Time),
     // `Named` for a name some 50 000 files define: from the query to its
-    // first batch.
+    // first batch; to `Done`, and the candidates and unsearched files at
+    // `Done` (the rest of the lookup takes most of the 1 s time box, so a
+    // slow runner ends `Partial`: recorded, never an error).
     share("code_intel/named_50k", RECORD, CODE_INTEL, ACTIVE, Time),
+    share(
+        "code_intel/named_50k/done",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/named_50k/candidates",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/named_50k/unsearched",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     // The time-boxed search of unindexed hits stops one second after the
     // query; the last batch's event within 20 ms of that.
     share(

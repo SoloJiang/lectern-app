@@ -627,7 +627,7 @@ crates/bench/
 | `code_intel/goto_same_file`、`code_intel/goto_object` | 只记录（同上的跳转：跳到当前文本里 locals 绑定的 `File` 定义；当前文本是对象库里的 blob（Diff 的旧一侧）；对照候选 50 ms） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/parse_cache_bytes` | 最大值 ≤ 12 MiB（保留的上限处：两个略小于 128 KiB 的 TypeScript 文本先后成为当前文本，两份解析都保留时它们的活跃字节，tree-sitter 的分配计入；`Memory`，[ADR 0037](../adr/0037.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/goto_first` | 只记录（新索引的第一次跳转：cloudprint 形状、打开并静止之后，每个样本一个新的语言表；对照候选 50 ms） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
-| `code_intel/named_50k` | 只记录（`Named` 查共享的 10 万文件虚拟仓库里约 4.5 万个文件都定义的名字 `id`：从 `query` 到第一批） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/named_50k`、`code_intel/named_50k/done`、`code_intel/named_50k/candidates`、`code_intel/named_50k/unsearched` | 只记录（`Named` 查共享的 10 万文件虚拟仓库里约 4.5 万个文件都定义的名字 `id`：从 `query` 到第一批，第一批必须到达且有候选；到 `Done` 的时间，`Done` 时的候选数和未搜的文件数。其余的查找要用 1 s 时间盒的大半，慢的机器上结果是 `Partial`，只记录、不算失败） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/search_stop` | 最大值 ≤ 1.02 s（6000 个未入索引、每个都命中的文件，从 `query` 到最后一批的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/references_100k/all`、`code_intel/references_100k/first` | 中位数 ≤ 2 s / ≤ 200 ms（10 万个已入索引的文件里 300 个用到这个名字：到最后一批 / 到第一批带引用的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `code_intel/references_full/all`、`code_intel/references_full/first` | 中位数 ≤ 2 s / ≤ 200 ms（同上，命名空间满额；每次都是 `Complete`：查引用有自己的 1.9 s 时间盒） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
