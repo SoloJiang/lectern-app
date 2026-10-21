@@ -45,6 +45,10 @@ pub(crate) struct Options {
     pub batch_tasks: usize,
     /// Language packs installed before the indexer subscribes.
     pub grammars: Option<Arc<FakeGrammars>>,
+    /// A real executor with this many batch threads (and two workers)
+    /// instead of `Executor::manual()`: its tasks run on their own, so
+    /// `settle` and the helpers that call it are not used.
+    pub batch_threads: Option<usize>,
 }
 
 impl Default for Options {
@@ -52,6 +56,7 @@ impl Default for Options {
         Options {
             batch_tasks: 1,
             grammars: None,
+            batch_threads: None,
         }
     }
 }
@@ -73,6 +78,8 @@ pub(crate) struct Harness {
     _subscriptions: Vec<Box<dyn Send>>,
     _cache_dir: Option<tempfile::TempDir>,
     generation: AtomicUsize,
+    /// `Options::batch_threads` was set: the executor runs its own tasks.
+    threads: bool,
 }
 
 impl Harness {
@@ -96,7 +103,14 @@ impl Harness {
 
     fn with_parts(options: Options, git: Arc<FakeGit>, dir: Option<tempfile::TempDir>) -> Harness {
         let host = host();
-        let executor = Executor::manual();
+        let executor = match options.batch_threads {
+            Some(n) => Executor::new(lectern_executor::Config {
+                workers: 2,
+                batch_workers: n,
+                on_thread_start: None,
+            }),
+            None => Executor::manual(),
+        };
         let projects = FakeProjects::new();
         let grammars = options
             .grammars
@@ -162,6 +176,7 @@ impl Harness {
             _subscriptions: subscriptions,
             _cache_dir: Some(dir),
             generation: AtomicUsize::new(1),
+            threads: options.batch_threads.is_some(),
         }
     }
 
@@ -228,6 +243,10 @@ impl Harness {
     /// Runs fs_watch, the executor and the clock past every coalescing
     /// window until nothing is left to do.
     pub(crate) fn settle(&self) {
+        assert!(
+            !self.threads,
+            "settle runs a manual executor; this harness has batch threads"
+        );
         loop {
             let a = self.driver.run_until_idle();
             self.driver.advance(Duration::from_secs(5));

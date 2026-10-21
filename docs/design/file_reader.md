@@ -16,7 +16,7 @@
 | `project` | 领域，插件 | 文件列表就绪后在后台建目录表（[ADR 0030](../adr/0030.md)：约 1 MB，计入 `project`） |
 | `platform` | 基础设施 | `SafeRoot::replace_file`：保存用的原子替换；`ThreadCpuClock`：grammar 卡死检测用的线程 CPU 时钟 |
 | `git` | 领域 | `merge3`：三方合并；`Text::shared`：取 diff 文本内部的 `Arc` |
-| `code_intel` | 领域，插件 | 补测试：批量循环在每个批次边界重新入队（已实现）；grammar 卡死检测的登记 |
+| `code_intel` | 领域，插件 | 补测试：批量循环在每个批次边界重新入队（已实现，测试已补）；grammar 卡死检测的登记 |
 | `workspace`、`app` | 视图、入口 | 离开守卫：关闭阅读视图、切换 worktree、关闭项目、关闭窗口和退出之前问本 crate |
 
 - 做：
@@ -678,7 +678,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 ### 批量线程上的先后
 
-`executor` 只有一个先进先出的 `Batch` 队列。`code_intel` 每个批量线程上有一个长期任务，它在每个批次边界（`Step::Worked` 之后）调用 `yield_now()`：唤醒自己、返回一次 `Pending`，所以每一批之后都重新入队、排到队尾（已实现，`crates/code_intel/src/index/batch.rs` 的批量循环；本设计只要求补测试，见「对其他 crate 的要求」）。`syntax` 的批量工作都用普通的 `Batch`，不需要新的优先级：
+`executor` 只有一个先进先出的 `Batch` 队列。`code_intel` 每个批量线程上有一个长期任务，它在每个批次边界（`Step::Worked` 之后）调用 `yield_now()`：唤醒自己、返回一次 `Pending`，所以每一批之后都重新入队、排到队尾（已实现，`crates/code_intel/src/index/batch.rs` 的批量循环；本设计要求的测试已补，见「对其他 crate 的要求」）。`syntax` 的批量工作都用普通的 `Batch`，不需要新的优先级：
 
 - 空闲预取：同一时刻至多一个任务，一个任务做一个文件（≤ 1 MiB 的整文件，或更大的文件的第一屏窗口），每次进入交互静止至多 4 个。
 - 档位 B、C 的批量窗口：同一时刻至多一个任务；一个任务至多做一个窗口、至多 50 ms 的解析（`ChainWindow::step` 的预算），然后结束，下一段重新入队。它与 `code_intel` 的批次轮流使用批量线程，不会让 64 MiB 文件的约 1000 个窗口（Linux 11–18 s）整段挡在建索引前面。
@@ -943,7 +943,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   测试 `thread_cpu_*`：忙循环的线程 CPU 时间增长，阻塞在条件变量上的不增长，句柄能在另一个线程上读。已实现，见 [platform 设计「线程的 CPU 时钟」](platform.md#线程的-cpu-时钟)。
 - `executor`：不改。`syntax` 的批量工作用已有的 `Priority::Batch`。
 - `code_intel`：
-  - 批量循环（前置条件 F，只补测试）：循环已经在每个 `Step::Worked` 之后调用 `yield_now()`，返回一次 `Pending` 并重新入队（`crates/code_intel/src/index/batch.rs`），带着它的 `Parked`（含停下的大项的 `LargeTurn`），不放下 `LargeSlot`，批量任务数不变；活性的论证见「批量线程上的先后」。本设计依赖这一点，所以要测试把它固定下来：批量线程全被 `code_intel` 的任务占着时入队一个 `Batch` 任务，它不晚于每个线程的下一个批次边界开始；一个任务带着停下的大项重新入队、另一个让路的任务在 `LargeSlot::acquire` 上等时，持有者仍能被取到，开关关闭后两者都完成（单个批量线程和两个批量线程各一次）。
+  - 批量循环（前置条件 F，只补测试）：循环已经在每个 `Step::Worked` 之后调用 `yield_now()`，返回一次 `Pending` 并重新入队（`crates/code_intel/src/index/batch.rs`），带着它的 `Parked`（含停下的大项的 `LargeTurn`），不放下 `LargeSlot`，批量任务数不变；活性的论证见「批量线程上的先后」。本设计依赖这一点，所以要测试把它固定下来：批量线程全被 `code_intel` 的任务占着时入队一个 `Batch` 任务，它不晚于每个线程的下一个批次边界开始；一个任务带着停下的大项重新入队、另一个让路的任务在 `LargeSlot::acquire` 上等时，持有者仍能被取到，开关关闭后两者都完成（单个批量线程和两个批量线程各一次）。已完成：`code_intel` 的 `requeue_*`，单个批量线程只有一个任务、没有等 `acquire` 的一方，由外部的任务在持有者的两次轮询之间运行代替（[code_intel 设计「实际验证」](code_intel.md#实际验证)）。
   - grammar 的卡死检测共用 `syntax::health`（后续 PR，不阻塞本 issue 的各步）：在调用 tree-sitter 和 tree-sitter-tags 的线程上、每次进入之前以这次调用的剩余预算 `enter`，返回时（`Done`、`TimedOut`、`Cancelled`、`Parked`）drop 守卫；`Parked` 的抽取续做时重新登记。返回 None 时按语言不可用处理（[#42](https://github.com/SoloJiang/lectern-app/issues/42) 的 scanner 一条，code_intel 设计「对其他 crate 的要求」的高亮方一条）。
   - 测试 `lang_extensions_agree_with_code_intel`：两边共有的语言，扩展名表相同。
   - 依赖层的扩展名改用 `services::code_intel::DEPENDENCY_EXTENSIONS`。
@@ -968,7 +968,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - C. `platform`：`SafeRoot::replace_file`；`replace_file_*` 测试通过。已完成：接口、步骤和错误见 [platform 设计「原子替换」](platform.md#原子替换)。
 - D. `git`：`merge3`、`Text::shared`；`merge3_*` 测试通过，`Text::shared` 返回的 `Arc` 与 `Text::new` 收到的是同一份（`Arc::ptr_eq`）。
 - E. `workspace` 的 `dyn Contributions`（#30）、`ui` 的代码配色与等宽度量（#6）：第 7 步之前。离开守卫（`register_leave_guard`、窗口关闭回调）和 `Quit` Action：第 8 步之前，没有它们编辑模式不上线。
-- F. `code_intel`：固定「批量循环在每个批次边界重新入队、带着停下的项」的测试（行为已实现，「对其他 crate 的要求」）：第 4 步之前。
+- F. `code_intel`：固定「批量循环在每个批次边界重新入队、带着停下的项」的测试（行为已实现，「对其他 crate 的要求」）：第 4 步之前。已完成：`requeue_*` 测试通过。
 - G. `platform` 的 `ThreadCpuClock`：第 1 步之前（`health_*` 用它）。已完成：见 [platform 设计「线程的 CPU 时钟」](platform.md#线程的-cpu-时钟)。
 
 本 issue 分八步实现，每步一个 PR，写 `Refs #10`，最后一步写 `Closes #10`。每一步都要 `just check`、`just test`（`syntax` 的步骤加 `-p lectern-syntax`）、`just deny` 通过，并把这一步的 bench 条目加进 `budgets.rs`、改为生效。
