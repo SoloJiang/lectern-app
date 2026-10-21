@@ -24,6 +24,7 @@ mod search;
 mod site;
 mod store;
 mod support;
+mod template;
 mod view;
 mod warm;
 mod watchdog;

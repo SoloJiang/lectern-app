@@ -212,7 +212,7 @@ fn names_100k_phases() {
     use lectern_code_intel::store::Store;
     use lectern_code_intel::testing::VirtualTemplate;
     let n = files(100_000);
-    let template = VirtualTemplate::build(n, None, Budgets::default()).expect("template");
+    let template = VirtualTemplate::build(n, &[], Budgets::default()).expect("template");
     let dir = tempfile::tempdir().expect("temp dir");
     let (git, cache) = template
         .open(&dir.path().join("cache"), Budgets::default())

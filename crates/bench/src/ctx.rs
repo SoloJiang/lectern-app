@@ -73,6 +73,7 @@ pub struct Ctx {
     config: SampleConfig,
     scratch: PathBuf,
     fixtures: Fixtures,
+    persistent: PathBuf,
 }
 
 impl Ctx {
@@ -81,13 +82,25 @@ impl Ctx {
         config: SampleConfig,
         scratch: PathBuf,
         fixtures: Fixtures,
+        persistent: PathBuf,
     ) -> Ctx {
         Ctx {
             mode,
             config,
             scratch,
             fixtures,
+            persistent,
         }
+    }
+
+    /// A directory kept between benchmark runs and shared by the targets of
+    /// one run (`<target dir>/lectern-bench/fixtures/`), for fixtures that
+    /// take long to write and are only ever copied: each lives in a
+    /// subdirectory keyed by everything its content depends on, and checks
+    /// itself before it is used (bench design「夹具与 `test-support`」).
+    /// Not created; one run at a time.
+    pub fn persistent(&self) -> &Path {
+        &self.persistent
     }
 
     /// A read-only fixture shared by every benchmark of this target process

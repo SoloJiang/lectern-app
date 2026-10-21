@@ -88,6 +88,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: bench
+      # The benchmarks' kept fixtures (bench design「夹具与 `test-support`」):
+      # each checks its own key and contents before use, so this key only
+      # decides how often the restore hits.
+      - name: Restore the benchmarks' kept fixtures
+        uses: actions/cache@v4
+        with:
+          path: target/lectern-bench/fixtures
+          key: bench-fixtures-${{ runner.os }}-${{ hashFiles('crates/code_intel/src/**', 'crates/cache/src/**', 'crates/bench/benches/fixtures/**', 'Cargo.lock') }}
       - uses: taiki-e/install-action@v2
         with:
           tool: just

@@ -7,13 +7,15 @@ mod fake_git;
 mod host;
 mod rig;
 pub mod synthetic;
+mod template;
 
 pub use fake_git::FakeGit;
 pub use host::{FakePower, FakeProjects, TestHost, host};
 pub use rig::{
-    Rig, VirtualTemplate, packages, route_tree_sitter_allocations, virtual_repo,
-    virtual_repo_sharing, virtual_repo_with,
+    Rig, packages, route_tree_sitter_allocations, virtual_repo, virtual_repo_sharing,
+    virtual_repo_with,
 };
+pub use template::{VirtualTemplate, key as template_key};
 
 use std::any::Any;
 use std::collections::HashMap;

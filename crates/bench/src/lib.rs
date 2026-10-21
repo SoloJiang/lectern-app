@@ -154,6 +154,7 @@ pub fn main(target: Target, tmp_dir: &str, benches: &[Bench]) -> ExitCode {
         apple_silicon: cfg!(all(target_os = "macos", target_arch = "aarch64")),
         macos: cfg!(target_os = "macos"),
         scratch_root: tmp.join("lectern-bench"),
+        fixtures_dir: report_dir.join("fixtures"),
         report_dir,
         config: SampleConfig::default(),
         host: report::Host::current(),

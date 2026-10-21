@@ -25,6 +25,9 @@ pub(crate) struct Options<'a> {
     /// `CARGO_TARGET_TMPDIR/lectern-bench`.
     pub scratch_root: PathBuf,
     pub report_dir: PathBuf,
+    /// `<target dir>/lectern-bench/fixtures`: kept between runs
+    /// ([`Ctx::persistent`]).
+    pub fixtures_dir: PathBuf,
     pub config: SampleConfig,
     pub host: Host,
     pub commit: Option<String>,
@@ -394,7 +397,13 @@ fn attempt(
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)
         .map_err(|e| format!("建不了临时目录 {}：{e}", scratch.display()))?;
-    let mut ctx = Ctx::new(mode, options.config, scratch.clone(), fixtures.clone());
+    let mut ctx = Ctx::new(
+        mode,
+        options.config,
+        scratch.clone(),
+        fixtures.clone(),
+        options.fixtures_dir.clone(),
+    );
     let outcome = catch_unwind(AssertUnwindSafe(|| (bench.run)(&mut ctx)));
     let _ = std::fs::remove_dir_all(&scratch);
     match outcome {

@@ -13,9 +13,7 @@ use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::SystemClock;
 use lectern_code_intel::names::build_table;
-use lectern_code_intel::testing::{
-    FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_with,
-};
+use lectern_code_intel::testing::{FakeGit, Rig, packages, synthetic, virtual_repo};
 use lectern_services::code_intel::{
     CodeIntelEvent, Completeness, Focus, Position, Query, QueryId, QueryKind, QueryState,
     TextOrigin, TextRef,
@@ -561,20 +559,30 @@ fn goto_first(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
-/// `Named` for a name some 50 000 files define (record-only): every unit
-/// of a virtual repository also defines `id`. From the query to its first
-/// (and only) batch: the lookup, ranking every candidate, the event.
+/// `Named` for a name some 45 000 files define (record-only): every other
+/// file of the shared virtual repository also defines `id`
+/// (`code_intel_virtual::COMMON`). From the query to its first batch: the
+/// first page, the files near the query, ranking them, the event.
 pub const NAMED_50K: Bench = Bench {
     id: "code_intel/named_50k",
     run: named_50k,
 };
 
 fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(60_000, 600);
-    let git = Arc::new(FakeGit::new());
+    use crate::code_intel_virtual::{COMMON, COMMON_EVERY};
+    let template = crate::code_intel_virtual::shared(ctx)?;
+    let n = template.files();
+    let table = lectern_code_intel::extract::LanguageTable::core();
+    let units = (0..n)
+        .step_by(COMMON_EVERY)
+        .filter(|&i| {
+            table
+                .for_path(&synthetic::path(i), &lectern_code_intel::NoGrammarPacks)
+                .is_some()
+        })
+        .count();
     let dir = tempfile::tempdir_in(ctx.scratch())?;
-    let cache = cache(dir.path());
-    let units = virtual_repo_with(&git, &cache, n, &["main"], Some("id"));
+    let (git, cache) = crate::code_intel_virtual::open(&template, dir.path())?;
     git.commit("main");
     let rig = Rig::new(git, cache, Arc::new(SystemClock));
     rig.open_with(packages(&synthetic::package_dirs(n)));
@@ -584,7 +592,7 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let query = Query {
         project: rig.git.key(),
         kind: QueryKind::Named {
-            name: "id".into(),
+            name: COMMON.into(),
             near: Some(synthetic::path(0).into()),
         },
     };
