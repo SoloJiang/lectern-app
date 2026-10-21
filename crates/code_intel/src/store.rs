@@ -54,7 +54,8 @@ pub const NAMESPACE: Namespace = Namespace {
 /// files, their module specifiers and the packages' path tables.
 pub const DEPS_NAMESPACE: Namespace = Namespace {
     name: "code_intel.deps",
-    version: 1,
+    // 2: `cd_pkg.wt`, the path tables keyed by worktree.
+    version: 2,
     compression: Compression::None,
 };
 

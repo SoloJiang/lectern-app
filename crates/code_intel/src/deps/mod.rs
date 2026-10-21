@@ -60,7 +60,7 @@ pub const MAP_FILES: usize = 20_000;
 /// indexes and ends, the packages' entries), so it stays within ADR 0033's
 /// 1 MB whatever the paths' lengths and the hash (SHA-256 OIDs are 32
 /// bytes); the files past it are only found on demand.
-pub const MAP_BYTES: usize = 960 << 10;
+pub const MAP_BYTES: usize = 1000 << 10;
 /// The dependency map keeps the packages of this many sub-projects, the
 /// most recently used.
 pub const MAP_SUBPROJECTS: usize = 8;
@@ -232,8 +232,11 @@ pub(crate) struct PkgWalk {
     pub work: PkgWork,
     /// Files to visit, relative to the package directory.
     pub frontier: VecDeque<String>,
-    /// Files queued or visited, relative to the package directory.
-    pub seen: HashSet<String>,
+    /// Files queued or visited, relative to the package directory, with
+    /// the order they were found in (breadth-first from the entry): the
+    /// path table's order, so the map keeps the files nearest the entry
+    /// when its bounds cut a package.
+    pub seen: HashMap<String, u32>,
     pub files: Vec<WalkFile>,
     /// The walk's items not settled yet: queued for extraction, set aside,
     /// parked or in flight.
@@ -252,7 +255,7 @@ impl PkgWalk {
             id,
             work,
             frontier: VecDeque::new(),
-            seen: HashSet::new(),
+            seen: HashMap::new(),
             files: Vec::new(),
             pending: 0,
             bytes: 0,
@@ -267,9 +270,24 @@ impl PkgWalk {
         if self.seen.len() >= limits().package_files {
             return;
         }
-        if self.seen.insert(rel.clone()) {
+        let next = self.seen.len() as u32;
+        if let std::collections::hash_map::Entry::Vacant(e) = self.seen.entry(rel.clone()) {
+            e.insert(next);
             self.frontier.push_back(rel);
         }
+    }
+
+    /// The recorded files in the order they were found (a file recorded
+    /// when its extraction committed comes back to its place).
+    pub(crate) fn sort_files(&mut self) {
+        let prefix = format!("{}/", self.work.pkg.path());
+        let seen = &self.seen;
+        self.files.sort_by_key(|f| {
+            f.path
+                .strip_prefix(prefix.as_str())
+                .and_then(|rel| seen.get(rel).copied())
+                .unwrap_or(u32::MAX)
+        });
     }
 
     pub(crate) fn done(&self) -> bool {
@@ -303,9 +321,17 @@ pub(crate) struct Deps {
     pub walk: Option<PkgWalk>,
     pub walks: u64,
     /// The path tables ready, per sub-project, most recently used first:
-    /// headers only once the map has their files ([`Deps::install_map`]),
+    /// headers only once the map has their files ([`install_map`]),
     /// so the session holds each file once, in the map.
     pub ready: Vec<(RelPath, Vec<Arc<PathTable>>)>,
+    /// Grows with every change of `ready`: a map built from an older
+    /// `ready` is not installed ([`install_map`]).
+    pub ready_gen: u64,
+    /// Each sub-project's packages' places (`2 × i` for its manifest's
+    /// `i`-th direct dependency, `+ 1` for the `@types` package that gave
+    /// its declarations): `ready`'s tables of a sub-project are kept in
+    /// this order, so the map's bounds keep the first direct dependencies.
+    pub ranks: HashMap<RelPath, HashMap<Arc<str>, u32>>,
     pub map: Arc<DepMap>,
     /// Source the dependency tier read this session.
     pub read: u64,
@@ -330,13 +356,22 @@ impl Deps {
         }
     }
 
-    /// The tables of every kept sub-project, each package once (the newest
-    /// sub-project's first).
+    /// The tables of every kept sub-project, each package once: the newest
+    /// sub-project's first, each sub-project's in its manifest's order.
+    /// Linear in the tables.
     pub(crate) fn tables(&self) -> Vec<Arc<PathTable>> {
+        let mut seen = HashSet::new();
         let mut out: Vec<Arc<PathTable>> = Vec::new();
         for (_, tables) in &self.ready {
             for t in tables {
-                if !out.iter().any(|o| o.same_key(t)) {
+                let key = (
+                    &*t.worktree,
+                    &*t.origin.package,
+                    t.origin.version.as_deref(),
+                    &*t.identity,
+                    &*t.dir,
+                );
+                if seen.insert(key) {
                     out.push(t.clone());
                 }
             }
@@ -350,23 +385,9 @@ impl Deps {
         self.ready.retain(|(s, _)| s != subproject);
         self.ready.insert(0, (subproject.clone(), tables));
         self.ready.truncate(MAP_SUBPROJECTS);
-    }
-
-    /// Replaces the dependency map with one of the ready tables (a loaded
-    /// table's files, a header's from the current map), then keeps only
-    /// the headers: the rows stay in the store and are read again when
-    /// needed (`table::reload`).
-    pub(crate) fn install_map(&mut self) {
-        let tables = self.tables();
-        let generation = self.map.generation + 1;
-        self.map = Arc::new(DepMap::build(generation, &tables, Some(&self.map)));
-        for (_, tables) in &mut self.ready {
-            for t in tables.iter_mut() {
-                if t.loaded {
-                    *t = Arc::new(t.header());
-                }
-            }
-        }
+        let ranks: HashSet<&RelPath> = self.ready.iter().map(|(s, _)| s).collect();
+        self.ranks.retain(|s, _| ranks.contains(s));
+        self.order(subproject);
     }
 
     /// Adds one table to `subproject`'s (a walk finished), replacing one of
@@ -376,8 +397,87 @@ impl Deps {
             Some((_, tables)) => {
                 tables.retain(|t| t.dir != table.dir || t.origin.package != table.origin.package);
                 tables.push(table);
+                self.order(subproject);
             }
             None => self.set_ready(subproject, vec![table]),
         }
+    }
+
+    /// Records a package's place among `subproject`'s ([`Deps::ranks`]).
+    pub(crate) fn set_rank(&mut self, subproject: &RelPath, package: &str, rank: u32) {
+        self.ranks
+            .entry(subproject.clone())
+            .or_default()
+            .insert(Arc::from(package), rank);
+        self.order(subproject);
+    }
+
+    /// The place of `package` among `subproject`'s.
+    pub(crate) fn rank(&self, subproject: &RelPath, package: &str) -> Option<u32> {
+        self.ranks.get(subproject)?.get(package).copied()
+    }
+
+    /// `subproject`'s tables sorted by their packages' places (unknown
+    /// ones last, in the order they came); `ready` changed.
+    fn order(&mut self, subproject: &RelPath) {
+        self.ready_gen += 1;
+        let ranks = self.ranks.get(subproject);
+        if let Some((_, tables)) = self.ready.iter_mut().find(|(s, _)| s == subproject) {
+            tables.sort_by_key(|t| {
+                ranks
+                    .and_then(|r| r.get(&*t.origin.package).copied())
+                    .unwrap_or(u32::MAX)
+            });
+        }
+    }
+}
+
+/// What a map is built from, taken under the project's lock: `ready`'s
+/// generation, its tables (cheap: `Arc`s) and the map to replace.
+pub(crate) struct MapInput {
+    session: u64,
+    ready_gen: u64,
+    tables: Vec<Arc<PathTable>>,
+    old: Arc<DepMap>,
+}
+
+impl MapInput {
+    pub(crate) fn of(st: &crate::index::state::State) -> MapInput {
+        MapInput {
+            session: st.session,
+            ready_gen: st.deps.ready_gen,
+            tables: st.deps.tables(),
+            old: st.deps.map.clone(),
+        }
+    }
+}
+
+/// Replaces the session's dependency map with one of the ready tables (a
+/// loaded table's files, a header's from the map it replaces), then keeps
+/// only the headers: the rows stay in the store and are read again when
+/// needed (`table::reload`). The map is built without the project's lock
+/// (`set_focus` takes it on the UI thread); under it only the tables are
+/// listed and the new map swapped in, both linear in the ready tables, not
+/// in their files. When `ready` changed meanwhile the map is built again.
+/// None of the callers is on the UI thread.
+pub(crate) fn install_map(project: &crate::index::state::Project, mut input: MapInput) {
+    loop {
+        let map = DepMap::build(input.old.generation + 1, &input.tables, Some(&input.old));
+        let mut st = crate::index::lock(&project.state);
+        if st.session != input.session {
+            return;
+        }
+        if st.deps.ready_gen == input.ready_gen && Arc::ptr_eq(&st.deps.map, &input.old) {
+            st.deps.map = Arc::new(map);
+            for (_, tables) in &mut st.deps.ready {
+                for t in tables.iter_mut() {
+                    if t.loaded {
+                        *t = Arc::new(t.header());
+                    }
+                }
+            }
+            return;
+        }
+        input = MapInput::of(&st);
     }
 }

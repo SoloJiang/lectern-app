@@ -305,7 +305,9 @@ impl Inner {
         for (sub, t) in updated {
             st.deps.add_ready(&sub, Arc::new(t));
         }
-        crate::deps::tier::rebuild_map(&mut st);
+        let input = crate::deps::MapInput::of(&st);
+        drop(st);
+        crate::deps::install_map(project, input);
     }
 }
 

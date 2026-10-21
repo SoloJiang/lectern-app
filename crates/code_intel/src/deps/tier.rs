@@ -22,8 +22,8 @@ use super::json::Json;
 use super::npm::{entry_candidates, is_relative, spec_candidates, types_package};
 use super::table::{self, PathTable};
 use super::{
-    FILE_MAX, MANIFEST_MAX, PkgDir, PkgWalk, PkgWork, Roots, Stat, WalkFile, dep_lang, vouches,
-    wall_nanos,
+    FILE_MAX, MANIFEST_MAX, MapInput, PkgDir, PkgWalk, PkgWork, Roots, Stat, WalkFile, dep_lang,
+    install_map, vouches, wall_nanos,
 };
 use crate::extract::{ExtractStatus, SpecKind, Specifier};
 use crate::git_access::hash_blob;
@@ -172,10 +172,14 @@ impl Inner {
             walk.visit(entry);
         }
         if let Some((name, w)) = types {
-            walk.types = Some(name);
+            walk.types = Some(name.clone());
+            // Right after the package it gives declarations to.
+            let sub = w.subproject.clone();
+            if let Some(r) = deps.rank(&sub, &work.origin.package) {
+                deps.set_rank(&sub, &name, r + 1);
+            }
             match lookup {
                 Some(super::identity::Found::Ready { table, missing }) => {
-                    let sub = w.subproject.clone();
                     if missing {
                         deps.queue.push_front(PkgWork {
                             stat_table: Some(table.clone()),
@@ -183,7 +187,9 @@ impl Inner {
                         });
                     }
                     deps.add_ready(&sub, table);
-                    rebuild_map(&mut st);
+                    let input = MapInput::of(&st);
+                    drop(st);
+                    install_map(project, input);
                 }
                 _ => {
                     let stat_table = None;
@@ -552,9 +558,10 @@ impl Inner {
             if !st.live(ctx.session) {
                 return;
             }
-            let Some(walk) = st.deps.walk.take_if(|w| w.id == id) else {
+            let Some(mut walk) = st.deps.walk.take_if(|w| w.id == id) else {
                 return;
             };
+            walk.sort_files();
             let table = PathTable {
                 unit: None,
                 origin: walk.work.origin.clone(),
@@ -589,7 +596,9 @@ impl Inner {
             stop(&mut st);
         }
         st.deps.add_ready(&subproject, Arc::new(table));
-        rebuild_map(&mut st);
+        let input = MapInput::of(&st);
+        drop(st);
+        install_map(project, input);
     }
 }
 
@@ -616,11 +625,6 @@ pub(crate) fn stop(st: &mut State) {
     st.deps.walk = None;
     st.batch.resume[QUEUE].clear();
     st.batch.aside[QUEUE].clear();
-}
-
-/// The dependency map rebuilt from the ready tables (`Deps::install_map`).
-pub(crate) fn rebuild_map(st: &mut State) {
-    st.deps.install_map();
 }
 
 /// The files the relative specifiers of `from` (relative to `pkg`'s

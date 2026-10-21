@@ -20,7 +20,9 @@ use super::json::Json;
 use super::lockfile::{Locked, read_locked};
 use super::npm::direct_dependencies;
 use super::table::{self, PathTable};
-use super::{MANIFEST_MAX, PkgDir, PkgWork, Roots, Stat, WalkFile, dep_lang, vouches};
+use super::{
+    MANIFEST_MAX, MapInput, PkgDir, PkgWork, Roots, Stat, WalkFile, dep_lang, install_map, vouches,
+};
 use crate::extract::{ExtractStatus, LanguageTable};
 use crate::git_access::hash_blob;
 use crate::index::batch::subproject;
@@ -198,6 +200,14 @@ impl Inner {
         let mut queue: Vec<PkgWork> = Vec::new();
         let mut touches = Vec::new();
         let mut done: HashSet<String> = HashSet::new();
+        // The packages' places: direct dependencies in the manifest's
+        // order, each one's `@types` package right after it.
+        let mut ranks: HashMap<Arc<str>, u32> = HashMap::new();
+        for (i, name) in names.iter().enumerate() {
+            ranks
+                .entry(Arc::from(name.as_str()))
+                .or_insert(2 * i as u32);
+        }
         let mut todo: Vec<(String, PkgDir, Stat)> = found;
         while let Some((name, pkg, stat)) = todo.pop() {
             if !done.insert(name.clone()) {
@@ -223,6 +233,9 @@ impl Inner {
                         && !done.contains(types)
                         && let Some((pkg, stat)) = locate(&ctx.roots, &chain, types)
                     {
+                        if let Some(&r) = ranks.get(name.as_str()) {
+                            ranks.entry(Arc::from(types.as_str())).or_insert(r + 1);
+                        }
                         todo.push((types.clone(), pkg, stat));
                     }
                     if missing {
@@ -253,6 +266,7 @@ impl Inner {
         }
         let deps = &mut st.deps;
         deps.ran_for = Some(ctx.dir.clone());
+        deps.ranks.insert(ctx.dir.clone(), ranks);
         deps.set_ready(&ctx.dir, ready);
         // The package being walked goes on when it is still wanted as it is.
         let walking = deps.walk.as_ref().map(|w| w.work.clone());
@@ -264,7 +278,9 @@ impl Inner {
             None => {}
         }
         deps.queue = queue.into();
-        deps.install_map();
+        let input = MapInput::of(&st);
+        drop(st);
+        install_map(project, input);
     }
 }
 

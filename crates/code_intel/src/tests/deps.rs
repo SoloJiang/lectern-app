@@ -1673,6 +1673,79 @@ fn deps_map_is_compact() {
 }
 
 #[test]
+fn deps_map_bounds_keep_the_first_tables_and_files() {
+    // 39 packages of 500 files, then one of 1000 whose table order is the
+    // reverse of its OIDs' order: the bound (20 000 files) cuts the last
+    // package after its first 500 files in table order (breadth-first from
+    // the entry), on a build from rows and on a rebuild from headers.
+    let mut tables: Vec<Arc<PathTable>> = (0..39).map(|p| Arc::new(npm_table(p, 500))).collect();
+    let mut last = npm_table(39, 1000);
+    last.files.reverse();
+    let kept: HashSet<String> = last.files[..500]
+        .iter()
+        .map(|f| f.path.to_string())
+        .collect();
+    tables.push(Arc::new(last));
+    let map = DepMap::build(1, &tables, None);
+    let of_last = |m: &DepMap| -> HashSet<String> {
+        m.files()
+            .into_iter()
+            .filter(|(p, _, _)| p == "pkg-039")
+            .map(|(_, path, _)| path)
+            .collect()
+    };
+    assert_eq!(of_last(&map), kept);
+    let headers: Vec<Arc<PathTable>> = tables.iter().map(|t| Arc::new(t.header())).collect();
+    let again = DepMap::build(2, &headers, Some(&map));
+    assert_eq!(of_last(&again), kept, "the rebuild keeps the table order");
+    // A header cut whole stays out: with the first package dropped, the
+    // room is not filled from rows the map never had.
+    let fewer: Vec<Arc<PathTable>> = headers[1..].to_vec();
+    let after = DepMap::build(3, &fewer, Some(&again));
+    assert_eq!(of_last(&after), kept);
+    assert_eq!(after.len(), 19_500);
+}
+
+#[test]
+fn deps_ready_tables_follow_the_manifest() {
+    // Walked (the first open) or found stored (the second, in reverse
+    // order from the identity task's work list): the ready tables, so the
+    // map's bounds, follow the manifest, an `@types` package right after
+    // the package it gives declarations to.
+    let (h, tree) = harness();
+    for name in ["zeta", "alpha", "mid"] {
+        simple(
+            &tree,
+            &format!("node_modules/{name}"),
+            name,
+            "1.0.0",
+            &format!("export declare const {name}: number;\n"),
+            &[],
+        );
+    }
+    tree.package("node_modules/bare", "bare", "1.0.0", "", &[]);
+    simple(
+        &tree,
+        "node_modules/@types/bare",
+        "@types/bare",
+        "1.0.0",
+        "export declare const bare: number;\n",
+        &[],
+    );
+    let order = ["zeta", "bare", "@types/bare", "alpha", "mid"];
+    open(&h, &tree, &["zeta", "bare", "alpha", "mid"]);
+    let names = |h: &Harness| -> Vec<String> {
+        tables(h)
+            .iter()
+            .map(|t| t.origin.package.to_string())
+            .collect()
+    };
+    assert_eq!(names(&h), order);
+    let h = reopen(h);
+    assert_eq!(names(&h), order, "stored tables in the same order");
+}
+
+#[test]
 fn deps_map_is_bounded_by_bytes() {
     // Paths of about 50 bytes and SHA-256 OIDs: fewer than 20 000 files
     // fit, the map's buffers stay within `MAP_BYTES` (under ADR 0033's

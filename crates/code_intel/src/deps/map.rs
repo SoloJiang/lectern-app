@@ -5,14 +5,21 @@
 //!
 //! Compact: the files sorted by OID, the OIDs in one buffer, each file's
 //! path relative to its package directory in one string, a package index
-//! of two bytes. The OID's width plus 6 bytes plus the path per file;
-//! bounded by [`MAP_FILES`] and by [`MAP_BYTES`], so the map's share holds
-//! whatever the paths' lengths and the hash.
+//! and a place in its table of two bytes each. The OID's width plus 8
+//! bytes plus the path per file; bounded by [`MAP_FILES`] and by
+//! [`MAP_BYTES`], so the map's share holds whatever the paths' lengths and
+//! the hash. The tables are taken in `Deps::tables`' order (the current
+//! sub-project's direct dependencies in its manifest's order, each one's
+//! `@types` package after it) and each table's files breadth-first from its
+//! entry, so the bounds cut the last ones.
 //!
 //! The ready path tables keep only their headers once the map has their
-//! files (`Deps::install_map`): a rebuild takes a loaded table's files from
-//! the table, a header's from the map it replaces.
+//! files (`deps::install_map`): a rebuild takes a loaded table's files from
+//! the table, a header's from the map it replaces. A header whose files the
+//! bounds cut stays out of the map until its rows are read again (the next
+//! identity task of its sub-project).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use lectern_services::code_intel::DepOrigin;
@@ -25,6 +32,9 @@ use crate::extract::ExtractStatus;
 const PACKAGE_BYTES: usize = std::mem::size_of::<Arc<DepOrigin>>()
     + std::mem::size_of::<RelPath>()
     + std::mem::size_of::<Arc<[u8]>>();
+/// The bytes of one file besides its OID and path: its package, its place
+/// and its path's end.
+const FILE_BYTES: usize = 2 + 2 + 4;
 
 #[derive(Default, Debug)]
 pub(crate) struct DepMap {
@@ -39,6 +49,9 @@ pub(crate) struct DepMap {
     width: usize,
     /// Each file's package (an index into `packages`).
     pkgs: Box<[u16]>,
+    /// Each file's place in its package's table (breadth-first from the
+    /// entry): a rebuild from a header takes the files in this order.
+    seqs: Box<[u16]>,
     /// Each file's path relative to its package directory ends here in
     /// `buf`.
     ends: Box<[u32]>,
@@ -67,13 +80,18 @@ impl DepMap {
         let mut packages: Vec<Arc<DepOrigin>> = Vec::new();
         let mut dirs: Vec<RelPath> = Vec::new();
         let mut idents: Vec<Arc<[u8]>> = Vec::new();
-        let mut rows: Vec<(&[u8], u16, &str)> = Vec::new();
+        // (OID, package, path in the package, place in the table).
+        let mut rows: Vec<(&[u8], u16, &str, u16)> = Vec::new();
         let mut bytes = 0usize;
+        // The old map's files by package, in one pass: linear in its files.
+        let old = old.map(Buckets::of);
         'tables: for table in tables {
             if packages.len() >= usize::from(u16::MAX) {
                 break;
             }
             let p = packages.len() as u16;
+            // In the table's order (breadth-first from the entry), so a
+            // package cut by the bounds keeps the files nearest its entry.
             let files: Vec<(&[u8], &str)> = if table.loaded {
                 let prefix = format!("{}/", table.dir);
                 table
@@ -86,11 +104,12 @@ impl DepMap {
                     })
                     .collect()
             } else {
-                old.map(|m| m.files_of(table)).unwrap_or_default()
+                old.as_ref().map(|b| b.files_of(table)).unwrap_or_default()
             };
             let mut used = false;
-            for (oid, rel) in files {
-                let cost = oid.len() + 6 + rel.len() + if used { 0 } else { PACKAGE_BYTES };
+            for (seq, (oid, rel)) in files.into_iter().enumerate() {
+                let cost =
+                    oid.len() + FILE_BYTES + rel.len() + if used { 0 } else { PACKAGE_BYTES };
                 if rows.len() >= MAP_FILES || bytes + cost > MAP_BYTES {
                     if used {
                         packages.push(table.origin.clone());
@@ -100,7 +119,7 @@ impl DepMap {
                     break 'tables;
                 }
                 bytes += cost;
-                rows.push((oid, p, rel));
+                rows.push((oid, p, rel, u16::try_from(seq).unwrap_or(u16::MAX)));
                 used = true;
             }
             if used {
@@ -110,16 +129,18 @@ impl DepMap {
             }
         }
         rows.sort();
-        rows.dedup();
+        rows.dedup_by(|a, b| (a.0, a.1, a.2) == (b.0, b.1, b.2));
         let width = rows.first().map_or(20, |r| r.0.len());
         rows.retain(|r| r.0.len() == width);
         let mut oids = Vec::with_capacity(rows.len() * width);
         let mut pkgs = Vec::with_capacity(rows.len());
+        let mut seqs = Vec::with_capacity(rows.len());
         let mut ends = Vec::with_capacity(rows.len());
         let mut buf = String::with_capacity(rows.iter().map(|r| r.2.len()).sum());
-        for (oid, p, rel) in &rows {
+        for (oid, p, rel, seq) in &rows {
             oids.extend_from_slice(oid);
             pkgs.push(*p);
+            seqs.push(*seq);
             buf.push_str(rel);
             ends.push(buf.len() as u32);
         }
@@ -131,6 +152,7 @@ impl DepMap {
             oids: oids.into(),
             width,
             pkgs: pkgs.into(),
+            seqs: seqs.into(),
             ends: ends.into(),
             buf: buf.into(),
         }
@@ -138,25 +160,6 @@ impl DepMap {
 
     pub(crate) fn len(&self) -> usize {
         self.pkgs.len()
-    }
-
-    /// The files this map has of `table`'s package (the same package,
-    /// version, identity and directory): (OID, path relative to the package
-    /// directory).
-    fn files_of(&self, table: &PathTable) -> Vec<(&[u8], &str)> {
-        let Some(p) = (0..self.packages.len()).find(|&p| {
-            let o = &self.packages[p];
-            o.package == table.origin.package
-                && o.version == table.origin.version
-                && self.dirs[p] == table.dir
-                && self.idents[p] == table.identity
-        }) else {
-            return Vec::new();
-        };
-        (0..self.len())
-            .filter(|&i| usize::from(self.pkgs[i]) == p)
-            .map(|i| (self.oid(i), self.rel(i)))
-            .collect()
     }
 
     fn oid(&self, i: usize) -> &[u8] {
@@ -225,6 +228,64 @@ impl DepMap {
             + self.pkgs.len() * 2
             + self.ends.len() * 4
             + self.buf.len()
+            + self.seqs.len() * 2
             + self.packages.len() * PACKAGE_BYTES
+    }
+}
+
+/// A package's key in the map: name, version, directory, identity.
+type PackageKey<'m> = (&'m str, Option<&'m str>, &'m str, &'m [u8]);
+
+/// An old map's files grouped by package, built in one pass, so a rebuild
+/// is linear in the old map's files and the tables, not their product.
+struct Buckets<'m> {
+    map: &'m DepMap,
+    /// A package's key → its index in `map.packages`.
+    keys: HashMap<PackageKey<'m>, usize>,
+    /// Each package's files (indexes into the map), in table order.
+    files: Vec<Vec<u32>>,
+}
+
+impl<'m> Buckets<'m> {
+    fn of(map: &'m DepMap) -> Buckets<'m> {
+        let keys = (0..map.packages.len())
+            .map(|p| {
+                let o = &map.packages[p];
+                let key = (
+                    &*o.package,
+                    o.version.as_deref(),
+                    &*map.dirs[p],
+                    &*map.idents[p],
+                );
+                (key, p)
+            })
+            .collect();
+        let mut files: Vec<Vec<u32>> = vec![Vec::new(); map.packages.len()];
+        for i in 0..map.len() {
+            files[usize::from(map.pkgs[i])].push(i as u32);
+        }
+        for f in &mut files {
+            f.sort_by_key(|&i| map.seqs[i as usize]);
+        }
+        Buckets { map, keys, files }
+    }
+
+    /// The files the map has of `table`'s package (the same package,
+    /// version, directory and identity): (OID, path relative to the
+    /// package directory), in table order.
+    fn files_of(&self, table: &PathTable) -> Vec<(&'m [u8], &'m str)> {
+        let key = (
+            &*table.origin.package,
+            table.origin.version.as_deref(),
+            &*table.dir,
+            &*table.identity,
+        );
+        let Some(&p) = self.keys.get(&key) else {
+            return Vec::new();
+        };
+        self.files[p]
+            .iter()
+            .map(|&i| (self.map.oid(i as usize), self.map.rel(i as usize)))
+            .collect()
     }
 }

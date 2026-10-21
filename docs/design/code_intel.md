@@ -1775,7 +1775,7 @@ pub(crate) struct DepMap {
 }
 ```
 
-- 由身份任务和依赖层在包的路径表就绪时整体替换（新的 `Arc`），查询在取快照时一并取它（`Published` 带 `Arc<DepMap>`），之后不受替换影响。第 3 层换了子项目时原来的包保留，按最近用到的子项目最多保留 8 个子项目的包；一个项目最多 20 000 个文件，多出的不进入映射（只走按需解析）。约每个文件 50 字节加路径，上限处约 1 MB，计入本 crate 的常驻份额（「性能」）。项目关闭、切换当前 worktree 时释放。
+- 由身份任务和依赖层在包的路径表就绪时整体替换（新的 `Arc`），查询在取快照时一并取它（`Published` 带 `Arc<DepMap>`），之后不受替换影响。第 3 层换了子项目时原来的包保留，按最近用到的子项目最多保留 8 个子项目的包。映射按自己的字节数封顶（`deps::MAP_BYTES` = 1000 KiB，每个文件按 OID 宽度加 8 字节加路径计，每个包另计 40 字节），另以 20 000 个文件为上限，所以 ≤ 1 MB 与路径长短、哈希算法无关；放不下的文件不进入映射，只能经按需解析找到。表按当前子项目清单里直接依赖的顺序取（`@types` 包紧跟在用它的包之后，之前的子项目的包在后），每张表的文件按从入口出发的广度优先顺序取，所以截掉的是排在最后的。计入本 crate 的常驻份额（「性能」）。项目关闭、切换当前 worktree 时释放。
 - 名字表不读它：⌘K 的符号搜索不包含依赖（ADR 0033 的调研「决定」第 1 条，产品负责人交给负责推进的 agent 决定），名字表只由 `code_intel.tags` 的单元和工作区映射建成。
 
 **何时建索引**：
@@ -2474,6 +2474,12 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - `just test -p lectern-code-intel -p lectern-services -p lectern-bench` 526 个测试通过（跳过 6 个）。
 - 基准（`just bench --measure code_intel/deps plugin/code-intel/resident_cloudprint`）：`deps_identity` 中位数 19.9 ms（≤ 50 ms）；`deps_map_bytes` 960 KB（≤ 1 MB；夹具改为包内路径约 48 字节、SHA-256，给出 2 万个文件，按字节上限放进 11 075 个）；`deps_ts_project` 1.87 s（只记录）；`resident_cloudprint` 681 KB（≤ 4 MB；夹具加了 `deps_*` 的 TS 项目：21 个直接依赖、252 个声明文件，`coverage.deps` 为 `Done` 才取样；上一次没有依赖时是 650 KB）。
 
+第 9 步复审的四项跟进（映射在锁外建、命名空间版本 2、映射的取舍顺序、「依赖映射」的上限说明），rebase 到 main（b884893）之后，同一台机器。
+
+- 新增 `deps_map_bounds_keep_the_first_tables_and_files`（上限按表内顺序截掉最后一个包的后半，从表头重建时同样；截掉的表头在腾出空间后不回来）和 `deps_ready_tables_follow_the_manifest`（第一次走完、第二次从缓存取出，就绪的表都按清单顺序，`@types` 包紧跟在用它的包之后）。变异检查：去掉按 `ranks` 排序，后一个测试失败，已还原。
+- `just check` 通过；`just test -p lectern-code-intel -p lectern-services -p lectern-bench` 528 个测试通过（跳过 6 个）。
+- 基准：`deps_map_bytes` 1000 KB（≤ 1 MB；每个文件多了两字节的表内序号，上限改为 1000 KiB，放进 11 283 个文件）；`deps_identity` 中位数 27.5 ms、重跑 23.4 ms（≤ 50 ms，报告标为 noisy：同时有另一个构建在运行，上一轮是 19.9 ms；身份任务的工作没有增加，映射的建立只是挪到锁外）；`deps_ts_project` 1.94 s（只记录）；`resident_cloudprint` 683 KB（≤ 4 MB）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2775,8 +2781,11 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 文件过滤：TS 的依赖层只用 `DEPENDENCY_EXTENSIONS` 里 npm 的那一段（`deps::extensions(Ecosystem::Npm)`，即前 6 项：`.d.ts`、`.d.mts`、`.d.cts`、`.ts`、`.tsx`、`package.json`），由 `deps::allowed` 在 `Roots::file` 和 `Roots::file_at` 里检查，不在其中的路径拿不到 `DepFile`，因此不会被 stat 或打开；Rust、Go、Python 的扩展名不参与 TS 的依赖层（`deps_extensions_are_the_npm_entries_of_the_shared_list`、`deps_reads_only_allowed_extensions`）。语言按扩展名取（`.tsx` 是 tsx，其余是 ts）。
 - `cd_spec` 多一列 `kind`：import / export / `require` / `import()` 的模块路径、`/// <reference path>`、`/// <reference types>` 三种。`reference path` 不带 `./` 时也是相对当前文件的路径（`"globals.d.ts"`），与裸模块名的写法相同，只存原样的字符串分不出来。边按源码顺序收集（`deps::specs`，在抽取的遍历之后对同一棵树走一遍顶层语句和注释，只在 `Deadline::with_specifiers` 时做，其他抽取的结果不变）。
 - `cd_pkg` 多一列 `types`：入口来自 `@types/<名字>` 时记下那个包名，身份任务对它做同样的检查。路径表的版本号取 lockfile 里的 `version`（后备身份取已安装的 `package.json` 的）；lockfile 先于安装更新时，`DepOrigin::version` 是 lockfile 的新版本号，内容仍是已安装的旧文件，直到重新安装（已知限制，内容和读取核对都不受影响）。
-- 依赖映射的布局：设计的 `files` 加 `by_oid` 每个文件约 50 字节加路径，2 万个文件、20 来字节的路径就超过 1 MB。实现按 OID 排序，OID 连续放在一个缓冲里，每个文件另有两字节的包下标、四字节的路径终点，路径（相对包目录）放在一个字符串里，查找是二分；语言不存，按路径的扩展名取。除了 2 万个文件，映射还按自己的字节数封顶（`deps::MAP_BYTES` = 960 KiB：每个文件按 OID 宽度加 6 字节加路径计，每个包另计它的三项），所以 1 MB 的份额与路径长短、哈希算法无关；超出的文件只走按需解析。包内路径约 22 字节、SHA-1 时 2 万个文件都放得下；约 48 字节、SHA-256 时约 1.1 万个。
-- 就绪的路径表只留表头：设计没有写 `Deps::ready` 里的表是否带行。表带着行时，每个文件约 200 字节（路径、OID、五项 stat、状态）在会话里一直常驻，8 个子项目的表都留着，也不受 2 万个文件的上限约束。现在映射建好之后（`Deps::install_map`），就绪的表换成表头（`PathTable::header`，`loaded` 为假），每个文件在内存里只有映射里的一份；映射重建时，带行的表取自己的行，表头取被替换的映射里同一个包（包名、版本、身份、目录相同）的文件。要用行的地方从缓存重新读：读取核对的更新（`dep_files_read`，`table::reload`）、修复和 stat 表（身份任务读出的表带行，排进依赖层的工作带着它，走完即释放）。
+- 依赖映射的布局：设计的 `files` 加 `by_oid` 每个文件约 50 字节加路径，2 万个文件、20 来字节的路径就超过 1 MB。实现按 OID 排序，OID 连续放在一个缓冲里，每个文件另有两字节的包下标、两字节的表内序号、四字节的路径终点，路径（相对包目录）放在一个字符串里，查找是二分；语言不存，按路径的扩展名取。除了 2 万个文件，映射还按自己的字节数封顶（`deps::MAP_BYTES` = 1000 KiB：每个文件按 OID 宽度加 8 字节加路径计，每个包另计它的三项），所以 1 MB 的份额与路径长短、哈希算法无关；超出的文件只走按需解析。包内路径约 22 字节、SHA-1 时 2 万个文件都放得下；约 48 字节、SHA-256 时约 1.13 万个。
+- 映射的取舍顺序：表按 `Deps::tables` 的顺序取（最近用到的子项目在前；每个子项目的表按 `Deps::ranks` 排：清单里第 `i` 个直接依赖是 `2i`，给它声明的 `@types` 包是 `2i + 1`，其余在后），身份任务查到的表和走完的表都按它插入；每张表的文件按遍历发现的顺序（从入口出发广度优先，`PkgWalk::seen` 记下序号，`finish_walk` 按它排行），映射里存着表内序号，从表头重建时按它取。所以上限截掉的是最后的直接依赖和每个包离入口最远的文件（`deps_ready_tables_follow_the_manifest`、`deps_map_bounds_keep_the_first_tables_and_files`）。被截掉的表头在本次会话里不会回到映射：腾出空间（别的包换了版本、子项目被挤出 8 个之外）时只重排已有的文件，不去缓存里补读；它在这个子项目的下一次身份任务（下次打开项目、清单或 lockfile 变化、切回这个子项目）读出带行的表时回来。
+- 映射在项目锁之外建：`deps::install_map` 在锁内只做两件事：列出就绪的表（`Deps::tables`，按键去重，与表数成线性）和换上新映射、把带行的表换成表头（同样与表数成线性），中间不碰文件；按文件的工作（取旧映射里表头的文件、排序、拼缓冲）在锁外做，旧映射先按包分桶一次（`Buckets`），重建与文件数成线性。锁内的时间因此只与就绪表的数量有关：最多 8 个子项目、每个最多 512 个直接依赖和它们的 `@types` 包，几千个 `Arc` 的复制，不随依赖的文件数增长；`set_focus`（可能在 UI 线程上）等这把锁的时间也就不含映射的建立。建完之后 `ready` 已经变了（`Deps::ready_gen`）或映射已被别人换掉时，在锁外重建一次再换。调用方是身份任务、依赖层的一步和读取核对的更新，都不在 UI 线程上。
+- `code_intel.deps` 的命名空间版本是 2：`cd_pkg` 加了 `wt` 列，用版本 1 的表结构建过的缓存（本地或 CI）在第一次使用时按 cache 的规则删表重建，不会因为缺列写入失败。
+- 就绪的路径表只留表头：设计没有写 `Deps::ready` 里的表是否带行。表带着行时，每个文件约 200 字节（路径、OID、五项 stat、状态）在会话里一直常驻，8 个子项目的表都留着，也不受 2 万个文件的上限约束。现在映射建好之后（`deps::install_map`），就绪的表换成表头（`PathTable::header`，`loaded` 为假），每个文件在内存里只有映射里的一份；映射重建时，带行的表取自己的行，表头取被替换的映射里同一个包（包名、版本、身份、目录相同）的文件。要用行的地方从缓存重新读：读取核对的更新（`dep_files_read`，`table::reload`）、修复和 stat 表（身份任务读出的表带行，排进依赖层的工作带着它，走完即释放）。
 - 路径表的键加上 worktree（`cd_pkg.wt`，当前 worktree 的根目录；文件夹项目为空字符串）：设计的键是（生态、包名、版本、身份、包目录），一个仓库的各个 worktree 共用分库，各自 `npm install` 的 `node_modules` 是不同的 inode。键里没有 worktree 时，切到另一个 worktree，同一个键的表五项 stat 对不上，依赖层重读一遍并以同一个键重写；切回来又是一样，两个 worktree 来回改写对方的表。现在每个 worktree 有自己的表（一个 TS 项目约 20 KB），stat 表也只取同一个 worktree 的（另一个 worktree 的 inode 不同，取来也对不上）；单元仍按 OID 共用，重读时存在检查命中、不重新抽取（`deps_second_worktree_keeps_its_own_tables`）。
 - 依赖层自己的替换不算配额淘汰：cache 在一次写事务替换同键的单元时也给命名空间的淘汰代数加一（[cache 设计「淘汰代数」](cache.md#淘汰代数)）。路径表在修复、清单的 stat 变了之后重走、racy 的记录重走时都以同一个键重写，依赖层的单元在 `Done` 取代 `TooLarge` / `TimedOut` 时也是替换。原来只要代数变了就停下，结果一次会话只修复第一个包。现在写之前在同一把锁里查这个键是否已存（`table::stored`；单元按存在检查的结果），有替换时允许这一次事务的一次加一（`tier::quota_evicted`），与 `code_intel.tags` 记它自己的替换的做法相同；同一个事务里又有配额淘汰时这一次看不出来，下一次引起淘汰的写入照常停下（`deps_repairs_of_several_packages_all_run`、`deps_rewalks_under_the_same_key_do_not_stop_the_tier`）。
 - 查询的快照在取 `Published` 的同一个锁里取 `State::deps` 的 `Arc<DepMap>` 和本次会话的 `Roots`，没有把它放进 `Published`：依赖映射只由身份任务和依赖层整体替换，与工作区映射的发布无关，取到的总是一份完整的映射。

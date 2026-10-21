@@ -43,14 +43,6 @@ pub(crate) struct PathTable {
 }
 
 impl PathTable {
-    pub(crate) fn same_key(&self, other: &PathTable) -> bool {
-        self.origin.package == other.origin.package
-            && self.origin.version == other.origin.version
-            && self.identity == other.identity
-            && self.dir == other.dir
-            && self.worktree == other.worktree
-    }
-
     /// This table without its rows (kept in `Deps::ready`).
     pub(crate) fn header(&self) -> PathTable {
         PathTable {
