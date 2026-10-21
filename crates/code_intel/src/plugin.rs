@@ -5,8 +5,8 @@
 //! - `activate` provides the service and subscribes to `ProjectEvent`; no
 //!   IO, no grammar loaded, no task.
 //! - `started` builds the index on the activation's handle, starts the
-//!   projects already open and hands the power and language pack
-//!   subscriptions and the watchdog's stop guard to `PluginHandle::own`.
+//!   projects already open and hands the language pack subscription and
+//!   the watchdog's stop guard to `PluginHandle::own`.
 //! - The watchdog's thread starts on its first registration, through
 //!   `own_with` and `run_dedicated_gated`, with its `stop` registered in
 //!   `Executor::on_shutdown`: every deactivation (and the executor's
@@ -37,7 +37,6 @@ use lectern_services::project::{
 use crate::git_access::{GitAccess, LecternGit};
 use crate::grammar::GrammarSource;
 use crate::index::{IndexDeps, Indexer, default_batch_tasks};
-use crate::power::PowerSource;
 use crate::watchdog::{Clock, SystemClock, WATCHDOG_THREAD, Watchdog};
 
 /// What `app` creates once and hands to the plugin (ADR 0025).
@@ -45,10 +44,6 @@ pub struct CodeIntelDeps {
     pub executor: Executor,
     pub cache: Cache,
     pub watcher: Watcher,
-    /// The power source: always `AlwaysOnAc`. Indexing does not depend on
-    /// the power source and `platform` has no power interface (ADR 0032);
-    /// the field goes with the battery code's removal.
-    pub power: Arc<dyn PowerSource>,
     /// Language packs (ADR 0018); `NoGrammarPacks` until the marketplace.
     pub grammars: Arc<dyn GrammarSource>,
 }
@@ -190,7 +185,6 @@ impl Active for CodeIntelActive {
                 executor: self.deps.executor.clone(),
                 cache: self.deps.cache.clone(),
                 watcher: self.deps.watcher.clone(),
-                power: self.deps.power.clone(),
                 grammars: self.deps.grammars.clone(),
                 projects: self.projects.clone(),
                 handle: handle.clone(),

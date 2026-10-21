@@ -21,7 +21,7 @@ use lectern_services::code_intel::{
 use lectern_services::project::{ProjectEvent, Projects};
 
 use crate::plugin::{CodeIntelDeps, CodeIntelPlugin, CodeIntelService, Services};
-use crate::testing::{FakeGit, FakeGrammars, FakePower, FakeProjects, ManualClock};
+use crate::testing::{FakeGit, FakeGrammars, FakeProjects, ManualClock};
 
 use super::support::{pos_in, quiescent};
 
@@ -32,7 +32,6 @@ pub(crate) struct Run {
     pub executor: Executor,
     pub git: Arc<FakeGit>,
     pub projects: Arc<FakeProjects>,
-    pub power: Arc<FakePower>,
     pub grammars: Arc<FakeGrammars>,
     pub backend: Arc<FakeBackend>,
     pub driver: Driver,
@@ -47,7 +46,6 @@ impl Run {
     pub(crate) fn new(git: Arc<FakeGit>, with_projects: bool) -> Run {
         let executor = Executor::manual();
         let projects = FakeProjects::new();
-        let power = FakePower::new(false);
         let grammars = Arc::new(FakeGrammars::new());
         let backend = FakeBackend::new();
         let (watcher, driver) = manual(backend.clone(), Executor::manual(), WatchConfig::default());
@@ -67,7 +65,6 @@ impl Run {
                 executor: executor.clone(),
                 cache,
                 watcher: watcher.clone(),
-                power: power.clone(),
                 grammars: grammars.clone(),
             },
             git.clone(),
@@ -85,7 +82,6 @@ impl Run {
             executor,
             git,
             projects,
-            power,
             grammars,
             backend,
             driver,
@@ -262,8 +258,8 @@ impl NavigationProvider for Recorder {
 }
 
 /// Teardown: closing the project cancels its unanswered semantic requests
-/// and drops its fs_watch subscription; deactivation drops the power and
-/// language pack subscriptions.
+/// and drops its fs_watch subscription; deactivation drops the language
+/// pack subscription.
 #[test]
 fn plugin_teardown_unsubscribes_and_cancels() {
     let git = Arc::new(FakeGit::new());
@@ -278,7 +274,6 @@ fn plugin_teardown_unsubscribes_and_cancels() {
     git.commit("main");
     let run = Run::new(git, true);
     run.kernel.activate().expect("activates");
-    assert_eq!(run.power.subscribers(), 1);
     assert_eq!(run.grammars.subscribers(), 1);
     run.open();
     let root = run.git.root("main");
@@ -319,7 +314,6 @@ fn plugin_teardown_unsubscribes_and_cancels() {
     );
     drop(service);
     run.kernel.deactivate();
-    assert_eq!(run.power.subscribers(), 0);
     assert_eq!(run.grammars.subscribers(), 0);
     assert!(run.services.get().is_none(), "the activation is gone");
 }

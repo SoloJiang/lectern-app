@@ -452,9 +452,6 @@ pub(crate) struct State {
     /// the cut is for a file the lookup may have missed (「输入代数与派生
     /// 状态」).
     pub hinted: u64,
-    /// On battery, a query or `names` lets tiers 4 and 5 go on until the
-    /// project closes or the power source changes.
-    pub demand: bool,
     /// Queries asked while this session has no published snapshot: started
     /// when the reconcile publishes one (`Inner::resume_waiting`).
     pub waiting: Vec<crate::query::Waiting>,
@@ -579,7 +576,6 @@ impl State {
             focused: Focused::default(),
             batch: Batch::default(),
             in_flight: HashMap::new(),
-            demand: false,
             waiting: Vec::new(),
             published: None,
             publishes: 0,

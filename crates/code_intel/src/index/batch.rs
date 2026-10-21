@@ -155,7 +155,7 @@ impl Inner {
     ///
     /// The liveness rule: after every operation that can create batch work
     /// (open, close, a change of the project that runs tiers 3–5, focus,
-    /// power, grammar, the end of a reconcile), either no project has
+    /// grammar, the end of a reconcile), either no project has
     /// runnable tier 3–5 work or the pool is full (`Inner::live`, checked
     /// by the tests' harness).
     pub(crate) fn kick_batch(self: &Arc<Self>) {
@@ -228,9 +228,7 @@ impl Inner {
         if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
             return false;
         }
-        let wide = self.wide_allowed(&st);
-        let tiers = if wide { 3 } else { 1 };
-        if st.batch.resume[..tiers].iter().any(|q| !q.is_empty()) || !st.batch.touches.is_empty() {
+        if st.batch.resume.iter().any(|q| !q.is_empty()) || !st.batch.touches.is_empty() {
             return true;
         }
         let deps = st.cursor_deps(eviction);
@@ -242,11 +240,8 @@ impl Inner {
         else {
             return true;
         };
-        if !cursor.walks[0].done || (wide && !cursor.walks[1].done) {
+        if !cursor.walks[0].done || !cursor.walks[1].done {
             return true;
-        }
-        if !wide {
-            return false;
         }
         let others = &st.batch.others;
         let stamp = st.stamp(eviction);
@@ -281,23 +276,23 @@ impl Inner {
             return Step::Idle;
         };
         let eviction = project.evictions();
-        let (wide, ctx, stamp) = {
+        let (ctx, stamp) = {
             let mut st = lock(&project.state);
             if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
                 return Step::Idle;
             }
             self.ensure_cursor(&mut st, eviction);
-            (self.wide_allowed(&st), ctx(&st), st.stamp(eviction))
+            (ctx(&st), st.stamp(eviction))
         };
-        let tiers: &[usize] = if wide { &[0, 1, 2] } else { &[0] };
+        let tiers = [0, 1, 2];
         // Files known to be missing go first, tier by tier.
-        for &t in tiers {
+        for t in tiers {
             if !lock(&project.state).batch.resume[t].is_empty() {
                 self.extract_batch(&project, &ctx, t, guard);
                 return Step::Worked;
             }
         }
-        for &t in tiers {
+        for t in tiers {
             let items = if t == 2 {
                 match self.gather_other(&project, &ctx, stamp) {
                     Some(items) => items,
@@ -1011,6 +1006,16 @@ impl Inner {
         if committed && let Some(me) = self.arc() {
             // A written batch makes a held name table behind.
             me.names_changed(project);
+        }
+        if !batch
+            && (committed || !hits.is_empty())
+            && let Some(me) = self.arc()
+        {
+            // Batch work from outside the batch tasks (tiers 1 and 2, a
+            // query's search): hits to mark as used, or an eviction that
+            // makes the walks start over. Kick, or it waits for the next
+            // operation that does.
+            me.kick_batch();
         }
         settled
     }

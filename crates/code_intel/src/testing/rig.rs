@@ -13,12 +13,12 @@ use lectern_executor::Executor;
 use lectern_fs_watch::testing::{Driver, FakeBackend, manual};
 use lectern_fs_watch::{Config as WatchConfig, Watcher};
 
-use super::{FakeGit, FakePower, FakeProjects, TestHost, WatchdogTask, host, watchdog};
+use super::{FakeGit, FakeProjects, TestHost, WatchdogTask, host, watchdog};
 use crate::index::{IndexDeps, Indexer};
 use crate::watchdog::Clock;
 
 /// An indexer over a `FakeGit` repository: a host kernel, a manual
-/// executor, a manual fs_watch, AC power and no language packs.
+/// executor, a manual fs_watch and no language packs.
 pub struct Rig {
     pub host: TestHost,
     pub executor: Executor,
@@ -45,7 +45,6 @@ impl Rig {
                 executor: executor.clone(),
                 cache,
                 watcher: watcher.clone(),
-                power: FakePower::new(false),
                 grammars: Arc::new(crate::NoGrammarPacks),
                 projects: projects.clone(),
                 handle: host.handle.clone(),

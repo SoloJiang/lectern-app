@@ -12,7 +12,7 @@ layer = "domain"
 plugin = true
 
 [features]
-# testing::ManualClock, FakeGrammars, FakeGit, FakeProjects, FakePower, the
+# testing::ManualClock, FakeGrammars, FakeGit, FakeProjects, the
 # language fixtures, the synthetic repositories, a watchdog on an executor's
 # dedicated thread and a kernel host, for the tests of this crate and for
 # lectern-bench.

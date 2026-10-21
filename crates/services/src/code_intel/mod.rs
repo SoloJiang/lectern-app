@@ -133,6 +133,4 @@ pub struct Coverage {
 pub enum TierState {
     Pending,
     Done,
-    /// 电池供电时暂缓。
-    Deferred,
 }

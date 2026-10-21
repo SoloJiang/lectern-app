@@ -274,7 +274,8 @@ fn derived_eviction_rechecks_and_reextracts_only_what_went() {
         assert!(!h.hinted(path), "{path}");
     }
     let before = h.stats();
-    h.indexer.demand(&h.key());
+    // The units went behind the indexer's back: kick the batch tasks.
+    h.indexer.inner().kick_batch();
     h.settle();
     assert!(h.stats().cursor_builds > before.cursor_builds);
     let mut again: Vec<_> = h.extracted()[21..].to_vec();

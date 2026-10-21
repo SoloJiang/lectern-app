@@ -1,6 +1,6 @@
 //! Test support (`test-support`): a manual clock, fake language packs, a
 //! watchdog on an executor's dedicated thread, the language fixtures,
-//! `FakeGit`, `FakeProjects`, `FakePower`, a kernel host and the synthetic
+//! `FakeGit`, `FakeProjects`, a kernel host and the synthetic
 //! repositories.
 
 mod fake_git;
@@ -10,7 +10,7 @@ pub mod synthetic;
 mod template;
 
 pub use fake_git::FakeGit;
-pub use host::{FakePower, FakeProjects, TestHost, host};
+pub use host::{FakeProjects, TestHost, host};
 pub(crate) use rig::virtual_unit;
 pub use rig::{
     Rig, packages, route_tree_sitter_allocations, virtual_repo, virtual_repo_sharing,

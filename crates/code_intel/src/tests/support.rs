@@ -21,8 +21,7 @@ use crate::extract::{Deadline, Lang, extract};
 use crate::index::{IndexDeps, Indexer, StatCounts};
 use crate::map::LiveMap;
 use crate::testing::{
-    FakeGit, FakeGrammars, FakePower, FakeProjects, ManualClock, TestHost, WatchdogTask, host,
-    watchdog,
+    FakeGit, FakeGrammars, FakeProjects, ManualClock, TestHost, WatchdogTask, host, watchdog,
 };
 
 pub(crate) const CHANGED: Flags = Flags(Flags::FILE.0 | Flags::MODIFIED.0);
@@ -43,7 +42,6 @@ pub(crate) struct Seen {
 }
 
 pub(crate) struct Options {
-    pub battery: bool,
     pub batch_tasks: usize,
     /// Language packs installed before the indexer subscribes.
     pub grammars: Option<Arc<FakeGrammars>>,
@@ -52,7 +50,6 @@ pub(crate) struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            battery: false,
             batch_tasks: 1,
             grammars: None,
         }
@@ -64,7 +61,6 @@ pub(crate) struct Harness {
     pub executor: Executor,
     pub git: Arc<FakeGit>,
     pub projects: Arc<FakeProjects>,
-    pub power: Arc<FakePower>,
     pub grammars: Arc<FakeGrammars>,
     pub clock: ManualClock,
     pub backend: Arc<FakeBackend>,
@@ -102,7 +98,6 @@ impl Harness {
         let host = host();
         let executor = Executor::manual();
         let projects = FakeProjects::new();
-        let power = FakePower::new(options.battery);
         let grammars = options
             .grammars
             .clone()
@@ -118,7 +113,6 @@ impl Harness {
                 executor: executor.clone(),
                 cache: cache.clone(),
                 watcher: watcher.clone(),
-                power: power.clone(),
                 grammars: grammars.clone(),
                 projects: projects.clone(),
                 handle: host.handle.clone(),
@@ -152,7 +146,6 @@ impl Harness {
             executor,
             git,
             projects,
-            power,
             grammars,
             clock,
             backend,

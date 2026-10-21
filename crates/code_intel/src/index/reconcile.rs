@@ -437,13 +437,11 @@ impl Inner {
                 // Every input record starts over; the focus stays under its
                 // worktree's name.
                 let focus = st.focus.clone();
-                let demand = st.demand;
                 let run = std::mem::take(&mut st.run);
                 st.end();
                 let mut old =
                     std::mem::replace(&mut *st, State::new(self.new_session(), &table, grammar));
                 st.focus = focus;
-                st.demand = demand;
                 st.run = run;
                 // Queries that waited for the old session's map were asked
                 // of the old worktree: closed below with the others.

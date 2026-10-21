@@ -379,7 +379,7 @@ fn code_intel_coverage_and_names_round_trip() {
         focus: TierState::Done,
         subproject: TierState::Done,
         worktree: TierState::Pending,
-        other_worktrees: TierState::Deferred,
+        other_worktrees: TierState::Pending,
     };
     assert_eq!(round_trip(&coverage), coverage);
 
