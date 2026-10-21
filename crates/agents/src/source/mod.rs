@@ -621,9 +621,8 @@ impl<A: Adapter> Engine<A> {
         }
         let activity = self.adapter.activity(&next.cursor)?;
         let next = Arc::new(next);
-        self.indexes().put(next.clone(), Some(now));
+        let seq = self.put_index(next.clone(), Some(now));
         // 刷新任务里：关联在这一轮发布之前派生（「派生的时机」）。
-        let seq = self.next_index_seq();
         self.derive_links(file, &next, seq, continued);
         let mut summary = old.clone();
         if let Some(at) = activity.last_activity {
@@ -951,12 +950,6 @@ impl<A: Adapter> Engine<A> {
         persist: bool,
         continued: bool,
     ) {
-        self.keep_index_only(index.clone(), file, persist);
-        let seq = self.next_index_seq();
-        self.derive_later(session, index, seq, continued);
-    }
-
-    fn keep_index_only(&self, index: Arc<TurnIndex>, file: Option<FileId>, persist: bool) {
         if persist && self.setup.cache.is_some() {
             if self.setup.executor.is_some() {
                 let index = index.clone();
@@ -968,7 +961,17 @@ impl<A: Adapter> Engine<A> {
                     .push(index.clone());
             }
         }
-        self.indexes().put(index, file);
+        let seq = self.put_index(index.clone(), file);
+        self.derive_later(session, index, seq, continued);
+    }
+
+    /// 把索引放进内存，在同一把锁下给出它的序号（`Links::seq`）：后放进内存的索引序号一定更大，
+    /// 并发的 `read` 与 `follow` 不会让较旧的索引的派生胜出。
+    fn put_index(&self, index: Arc<TurnIndex>, file: Option<FileId>) -> u64 {
+        let mut indexes = self.indexes();
+        let seq = self.next_index_seq();
+        indexes.put(index, file);
+        seq
     }
 
     fn write_index(&self, index: &TurnIndex) {

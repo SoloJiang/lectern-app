@@ -325,8 +325,8 @@ impl<A: Adapter> Engine<A> {
         }
     }
 
-    /// 刷新任务在发布之后：活跃的父会话（`open_turn`，或 `last_activity` 在 10 分钟之内）有列出的子会话还没有
-    /// 关联、它的索引又不在内存里时，排一次后台建索引（「摘要的更新」）。
+    /// 刷新任务在发布之后：活跃的父会话（`open_turn`，或 `last_activity` 在 10 分钟之内；压缩或归档的冷文件
+    /// 不算）有列出的子会话还没有关联、它的索引又不在内存里时，排一次后台建索引（「摘要的更新」）。
     pub(super) fn schedule_builds(&self) {
         if !A::LINKS_SPAWNS {
             return;
@@ -346,7 +346,15 @@ impl<A: Adapter> Engine<A> {
             let Some(p) = by_key.get(&parent.session) else {
                 continue;
             };
-            if !(p.open_turn || now - p.last_activity.0 < ACTIVE_MS) {
+            // 冷文件（压缩或归档的）不算活跃：压缩会话补齐之前 `last_activity` 只是文件修改时间（压缩的时刻），
+            // 按它算会在后台把冷归档整份解压。
+            let cold = p.archived
+                || p.tail_pending
+                || self
+                    .adapter
+                    .session_file(&p.file)
+                    .is_some_and(|f| A::compressed(&f));
+            if cold || !(p.open_turn || now - p.last_activity.0 < ACTIVE_MS) {
                 continue;
             }
             if self.indexes().contains(&parent.session) {

@@ -786,7 +786,7 @@ links: Mutex<HashMap<SessionKey, Option<Links>>>,
 `tool_call` 不写进 `Known` 里的摘要，也不进 `agents.summary`：发布时按当时的 `links` 填写，做法与 `place` 相同。所以子会话和父会话谁先被读到、父会话的输出什么时候写出，发布的结果只取决于那一刻列表里有哪些会话、已经派生出哪些关联，与发现顺序无关。这与 #94 对分叉会话「来源后到」的要求一致（「与设计的差异」第 4 步「来源会话的轮次集合不进 `cache`」）。
 
 - 子会话先出现、父会话还没写出输出：子会话以 `tool_call: None` 发布。父会话的索引在内存里时，追加之后 `follow` 接着解析并派生，再发布一次，子会话出现在 `SessionsChanged::changed` 里。
-- 父会话的索引不在内存里时，追加只重新生成摘要（读开头和末尾），不派生。父会话是活跃会话（`open_turn` 为 true，或 `last_activity` 在 10 分钟之内，与「调用方」里的定义相同）、并且有列出的子会话还没有关联时，刷新任务排一次后台建索引：与 `turns` 相同，从 `cache` 里的索引接着解析，没有时解析整个文件（活跃会话在 1 s 以内）。同时最多 1 个；同一父会话 10 分钟之内最多排一次（不按文件身份计：活跃会话每次追加身份都变，索引大到留不进 8 MB 的内存 LRU、子会话又一直没有关联时，按身份计会每次追加都重建一次）。建好、还留在内存里的索引由 `follow` 跟着它的追加。
+- 父会话的索引不在内存里时，追加只重新生成摘要（读开头和末尾），不派生。父会话是活跃会话（`open_turn` 为 true，或 `last_activity` 在 10 分钟之内，与「调用方」里的定义相同；压缩或归档的父会话是冷文件，不算活跃）、并且有列出的子会话还没有关联时，刷新任务排一次后台建索引：与 `turns` 相同，从 `cache` 里的索引接着解析，没有时解析整个文件（活跃会话在 1 s 以内）。同时最多 1 个；同一父会话 10 分钟之内最多排一次（不按文件身份计：活跃会话每次追加身份都变，索引大到留不进 8 MB 的内存 LRU、子会话又一直没有关联时，按身份计会每次追加都重建一次）。建好、还留在内存里的索引由 `follow` 跟着它的追加。
 - 不活跃的父会话不主动读：它的子会话在父会话被打开（`review` 调 `turns`）或被 `usage` 从头读过之后才有关联，之后的运行从 `agents.spawns` 直接得到。
 - 父会话的文件后出现（同步、恢复）：它出现的那一轮刷新查 `agents.spawns`，命中时在同一次发布里填上。
 
@@ -1004,12 +1004,12 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)），在 Linux 上运行（`agents` 不依赖 GPUI；没有在 macOS 上实测）：
 
 - `spawn_agent` 的输出形状按公开的 openai/codex 源码核对（提交 `07cc649`，文件路径见「外部格式」），没有读本机的任何会话日志。默认的 multi_agent v1 输出顶层有 `agent_id`（子线程 ID，规范写法的 UUID），与原来的假设相同，提取规则和 fixtures 不用改；v2 的输出没有子线程 ID，见「与设计的差异」。
-- `just check`、`just test`（Linux 上不依赖 GPUI 的全部 crate，1764 个测试通过，7 个忽略）、`just doctest`、`just deny` 全部通过。没有新增依赖。`lectern-services` 没有改动。
-- `just test -p lectern-agents`：178 个通过，1 个忽略（`redact_file_from_env`）。新增 `spawn_link_*` 12 个：
+- `just check`、`just test`（基于 `19ef118`，Linux 上不依赖 GPUI 的全部 crate，1809 个测试通过，7 个忽略）、`just doctest`、`just deny` 全部通过。没有新增依赖。`lectern-services` 没有改动。
+- `just test -p lectern-agents`：179 个通过，1 个忽略（`redact_file_from_env`）。新增 `spawn_link_*` 13 个：
   - `spawned_thread`：v1 输出（带 `nickname`）和只有 `agent_id` 的对象给出子线程；`agent_id` 太短、带花括号、是数字，v2 的 `task_name` 输出，派出失败的文本，JSON 数组，不是 `spawn_agent` 的调用（输出形状相同），没有输出的调用，都为 None。
   - fixtures：发现时子会话 `tool_call` 为 None；`turns` 父会话之后为 `call_p1_0003`，这次发布的 `changed` 只有子会话；`legacy` 主会话的关联指向不在本机的 `cccccccc-…`，列表不变、不发布。
   - 顺序无关：子会话先到、父会话先到（先建好索引）、父会话的输出在子会话出现之后才追加（由 `follow` 派生），三种情况最后的列表与一次发现全部文件再 `turns` 父会话相同。
-  - 主动建索引：两个 `open_turn` 的父会话各建一次索引（`turns_after` 2 次、`load` 2 次），同时在途的建索引任务最多 1 个，一天前结束的父会话不建；之后的追加由 `follow` 派生，不再建索引。最后活动在 9 分钟之前的父会话建、11 分钟之前的不建。同一父会话（输出没有子线程 ID，子会话一直没有关联）的索引离开内存后，10 分钟之内的追加不再排队，拨过 11 分钟后再排一次。
+  - 主动建索引：两个 `open_turn` 的父会话各建一次索引（`turns_after` 2 次、`load` 2 次），同时在途的建索引任务最多 1 个，一天前结束的父会话不建；之后的追加由 `follow` 派生，不再建索引。最后活动在 9 分钟之前的父会话建、11 分钟之前的不建。刚写出的 `.jsonl.zst` 父会话（`open_turn`，修改时间是当前时刻）在第一次发现时不建索引：`turns_after`、`load` 都是 0 次，没有解压副本。同一父会话（输出没有子线程 ID，子会话一直没有关联）的索引离开内存后，10 分钟之内的追加不再排队，拨过 11 分钟后再排一次。
   - 重启：新建来源的第一次发布就从 `agents.spawns` 得到关联，适配器的 `read`、`turns_after`、`load` 都是 0 次；条目的 `offset` 大于父会话文件长度时丢弃；只有其他适配器版本的条目时不命中。
   - 归档与删除：父会话压缩成 `.jsonl.zst` 并移到 `archived_sessions/` 后关联不变、没有建解压副本；删除后 `tool_call` 为 None、`Parent::session` 不变；文件恢复后从 `agents.spawns` 再次关联，仍不解压；被 `SessionFilter` 隐藏后同删除。
   - 改写：父会话被替换成另一份内容（同一个调用 ID 换了子线程）后，关联按重建的索引重新读，旧的不留下；`seq` 较小的派生晚完成时被丢弃。
@@ -1097,5 +1097,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - **`Adapter::turns_after` 另给出是否续接。** 设计要求「续接的索引沿用已有的项，回放时全部重新读」，但 `turns_after` 原来不告诉调用方游标是否失效、索引是否从头重建。改为返回 `(TurnIndex, bool)`，`bool` 为 true 表示有 `prev`、游标仍有效；`read` 一侧按 `from` 是否等于内存里索引的游标且没有 `reset` 判断。两个适配器公开的 `turns_after` 签名不变，内部的 `turns_continued` 给出这个值。已写进上文「接口」。
 - **派生的细节。** 续接的索引、关联又派生自同一偏移时不提交派生任务。`read` 只在它放进内存的索引上派生（续接或回放的批次）。读某个输出失败（`load` 返回错误）时这份索引的派生整体放弃，关联不变，下一份索引再试。这次运行还没查过 `agents.spawns` 的父会话先查一次，再和新的关联比较：只有关联变了才写 `agents.spawns`（值是 serde JSON），没有任何 `spawn_agent` 调用的会话不写条目。派生任务之后，关联变了、并且有列出的子会话指向这个父会话时才发布。
 - **去掉关联在一轮之后。** 「父会话的全部候选都消失时去掉 `links` 里它的项」与解压副本一样，在这一轮的全部路径处理完之后判断，所以移动到 `archived_sessions/` 时旧路径先被处理也不会丢掉关联。
+- **冷文件不主动建索引。** 设计里的活跃会话按 `open_turn` 和 `last_activity` 判断。没有缓存摘要的 `.jsonl.zst` 在补齐之前 `last_activity` 取文件修改时间，即压缩的时刻，按原规则刚压缩的父会话会被当作活跃、在后台整份解压并建解压副本，与「冷的归档历史不会让应用一直忙碌」相矛盾。所以压缩（`.jsonl.zst`）或在 `archived_sessions/` 下的父会话一律不主动建索引：Codex 只压缩冷文件，归档的会话也不会再写入。它们的子会话在父会话被打开或被 `usage` 读过之后关联，与不活跃的父会话相同。已写进上文「摘要的更新」。
+- **索引的序号与放进内存在同一把锁下。** `keep_index` 和 `follow` 在放进内存索引的那把锁里取 `Links::seq`，所以后放进内存的索引序号一定更大，并发的 `read` 与 `follow` 不会让较旧的索引的派生胜出。
 - **时钟。** 活跃会话的 10 分钟和同一父会话 10 分钟之内只排一次都用系统时间（UTC 毫秒），后者从排队的时刻算起；测试经 `Engine` 的时钟偏移拨动。主动建索引的任务调用与 `SessionSource::turns` 相同的路径，派生照常在另一个任务里进行。
 - **`testing` 的补充。** 新增 `testing::source_with_calls` 与 `AdapterCalls`，bench 据此检查发现时适配器没有读正文，已写进上文「本 crate 的公开项」。`testing::synthetic_rollouts` 写 `legacy` 形状的 rollout，子会话没有 `subagent_history_start_ordinal`，所以发现时它们的 `inheritance_unknown` 为 true（与真实的 `legacy` 子 agent 相同，不影响关联）。

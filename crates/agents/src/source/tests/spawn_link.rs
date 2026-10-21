@@ -428,6 +428,25 @@ fn spawn_link_active_parents_are_indexed_in_the_background_one_at_a_time() {
 }
 
 #[test]
+fn spawn_link_a_compressed_parent_is_never_indexed_in_the_background() {
+    let mut h = Harness::new();
+    let (p, kid) = (uuid(1), uuid(2));
+    // An open turn and a modification time of "now": active, if it were not a cold file.
+    let jsonl = parent(&h, &p, &[&kid], false);
+    compress(&jsonl);
+    std::fs::remove_file(&jsonl).unwrap();
+    child(&h, &kid, &p);
+    h.start();
+    let engine = h.codex_engine();
+    let summary = h.list(&codex_source()).get(&codex_key(&p)).unwrap().clone();
+    assert!(summary.open_turn, "completed from the archive");
+    assert_eq!(tool_call(&h, &kid), None);
+    assert_eq!(calls(&h), (0, 0, 0), "no turns_after, no load");
+    assert_eq!(engine.adapter.decodes(), 0, "no decoded copy");
+    assert_eq!(engine.max_builds_in_flight(), 0);
+}
+
+#[test]
 fn spawn_link_a_parent_is_active_for_ten_minutes_after_its_last_activity() {
     for (after, linked) in [(9 * MINUTE, true), (11 * MINUTE, false)] {
         let mut h = Harness::new();
