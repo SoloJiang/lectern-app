@@ -1386,7 +1386,9 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // The same with the namespace at its quota: both gated all the same,
-    // complete (references' own time box, `REFERENCES_FOR`).
+    // complete (references' own time box, `REFERENCES_FOR`). A round the
+    // time box cut is a failing sample of both (ADR 0043); how many were
+    // cut and the most files one left outside are recorded.
     share(
         "code_intel/references_full/all",
         &[median(Limit::TimeAtMost(ms(2000)))],
@@ -1397,6 +1399,20 @@ pub static BUDGETS: &[Budget] = &[
     share(
         "code_intel/references_full/first",
         &[median(Limit::TimeAtMost(ms(200)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/references_full/partial_rounds",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/references_full/outside",
+        RECORD,
         CODE_INTEL,
         ACTIVE,
         Time,

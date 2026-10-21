@@ -156,10 +156,11 @@ fn record_notices(report: &Json, max: usize) -> Vec<String> {
         let id = result["id"].as_str().unwrap_or_default();
         let measured = result["measured"].as_str().unwrap_or_default();
         let group = id.split('/').next().unwrap_or(id);
-        groups
-            .entry(group)
-            .or_default()
-            .push(format!("{id}: {measured}"));
+        let line = match result["note"].as_str() {
+            Some(note) => format!("{id}: {measured}; {note}"),
+            None => format!("{id}: {measured}"),
+        };
+        groups.entry(group).or_default().push(line);
     }
     let mut groups: Vec<(String, Vec<String>)> = groups
         .into_iter()
@@ -200,9 +201,11 @@ pub(crate) fn annotations(report: &Json) -> Vec<String> {
             field("measured"),
             field("budget")
         );
-        let reason = field("reason");
-        if !reason.is_empty() {
-            body.push_str(&format!("; {reason}"));
+        for key in ["reason", "note"] {
+            let text = field(key);
+            if !text.is_empty() {
+                body.push_str(&format!("; {text}"));
+            }
         }
         failed.push((field("id"), body));
     }

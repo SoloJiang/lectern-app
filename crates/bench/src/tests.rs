@@ -3,6 +3,7 @@
 
 mod merge;
 mod report;
+mod rounds;
 mod runner;
 
 use std::path::Path;

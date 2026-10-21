@@ -54,6 +54,33 @@ fn runner_retries_once_and_a_passing_retry_is_ok() {
     assert_eq!(json["results"][0]["attempts"].as_array().unwrap().len(), 2);
 }
 
+/// A result's note goes into the report beside its value; a retry's note
+/// replaces the first attempt's.
+#[test]
+fn runner_notes_go_into_the_report() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn noted(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        let call = CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![
+            Measured::new("fake/a", time(2)).with_note(Some(format!("attempt {call}"))),
+        ])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: noted,
+    }];
+    let run = run(
+        &options(ONE, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    let entry = status(&run, "fake/a");
+    assert_eq!(entry.attempts.len(), 2, "over budget: retried");
+    assert_eq!(entry.note.as_deref(), Some("attempt 1"));
+    let json = run.report.as_ref().unwrap().to_json();
+    assert_eq!(json["results"][0]["note"], "attempt 1");
+}
+
 #[test]
 fn runner_over_budget_twice_exits_1() {
     static CALLS: AtomicUsize = AtomicUsize::new(0);

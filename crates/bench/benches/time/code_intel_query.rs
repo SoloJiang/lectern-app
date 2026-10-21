@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use lectern_bench::rounds::{Cuts, Round};
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::SystemClock;
@@ -305,7 +306,7 @@ fn sample_jumps(
 /// its time box, and what the rig's copy of the store holds (units of the
 /// current versions, evictions), so a query the time box cut tells apart
 /// from units that are missing.
-fn diagnose(rig: &Rig, query: &Query, elapsed: Duration) -> String {
+fn diagnose(rig: &Rig, query: &Query, elapsed: Duration) -> Diagnosis {
     use lectern_code_intel::store::Version;
     let versions: Vec<Version> = lectern_code_intel::extract::LanguageTable::core()
         .iter()
@@ -317,10 +318,31 @@ fn diagnose(rig: &Rig, query: &Query, elapsed: Duration) -> String {
         .and_then(|s| s.units(&versions))
         .map(|u| u.len());
     let evictions = store.as_ref().map(|s| s.evictions());
-    format!(
-        "done after {elapsed:?} of a {:?} time box; {units:?} units stored, {evictions:?} evictions",
-        lectern_code_intel::query::time_box(&query.kind)
-    )
+    Diagnosis {
+        elapsed,
+        time_box: lectern_code_intel::query::time_box(&query.kind),
+        units,
+        evictions,
+    }
+}
+
+/// [`diagnose`]'s findings; displayed in error messages and notes.
+struct Diagnosis {
+    elapsed: Duration,
+    time_box: Duration,
+    /// Units of the current versions in the rig's store.
+    units: Option<usize>,
+    evictions: Option<u64>,
+}
+
+impl std::fmt::Display for Diagnosis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "done after {:?} of a {:?} time box; {:?} units stored, {:?} evictions",
+            self.elapsed, self.time_box, self.units, self.evictions
+        )
+    }
 }
 
 /// The results a jump of the index must give: candidates, and `Done`.
@@ -878,7 +900,11 @@ fn references_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 
 /// [`REFERENCES_100K`] with the namespace at its quota (the usual state of
 /// 100 000 files): the first batch within 200 ms all the same, the
-/// accounting's store checks after it.
+/// accounting's store checks after it. A round whose store checks outside
+/// the scope the 1.9 s time box cut is a failing sample of both IDs, charged
+/// its time plus one more time box (ADR 0043, `lectern_bench::rounds`);
+/// `…/partial_rounds` counts those rounds and `…/outside` records the most
+/// files one of them left outside (record only).
 pub const REFERENCES_FULL: Bench = Bench {
     id: "code_intel/references_full",
     run: references_full,
@@ -954,6 +980,10 @@ fn references(ctx: &mut Ctx, full: bool) -> Result<Vec<Measured>, BenchError> {
         Mode::Measure => 12,
         Mode::Smoke => 1,
     };
+    // The units the fixture wrote: the template's, the definition's file's
+    // and the users'.
+    let expected = template.units() + users + 1;
+    let mut cuts = Cuts::default();
     for round in 0..rounds {
         seen.lock().unwrap().clear();
         let start = Instant::now();
@@ -964,11 +994,14 @@ fn references(ctx: &mut Ctx, full: bool) -> Result<Vec<Measured>, BenchError> {
                 r.same_name.len()
             )));
         }
-        // Every unit is stored: complete, full or not (references' own time
-        // box leaves the full-mode check room after the `ci_ref` pass).
-        if r.state != QueryState::Done(Completeness::Complete) {
-            return Err(BenchError::new(format!("not complete: {:?}", r.state)));
-        }
+        let partial = match r.state {
+            QueryState::Done(Completeness::Complete) => None,
+            QueryState::Done(Completeness::Partial {
+                unsearched,
+                outside,
+            }) => Some((u64::from(unsearched), u64::from(outside))),
+            ref state => return Err(BenchError::new(format!("not done: {state:?}"))),
+        };
         let events: Vec<(u32, Instant)> = seen
             .lock()
             .unwrap()
@@ -987,15 +1020,43 @@ fn references(ctx: &mut Ctx, full: bool) -> Result<Vec<Measured>, BenchError> {
             .find(|(g, _)| *g == r.generation)
             .ok_or_else(|| BenchError::new("no last batch"))?
             .1;
+        // Every unit is stored: complete, full or not (references' own time
+        // box leaves the full-mode check room after the `ci_ref` pass).
+        // With the namespace full, a round the time box cut outside the
+        // scope is a failing sample of both IDs, warm-up or not (ADR 0043);
+        // any other incomplete round is an error.
+        let elapsed = last - start;
+        let diagnosis = diagnose(&rig, &query, elapsed);
+        let not_complete =
+            |why: &str| BenchError::new(format!("not complete: {:?}: {why}; {diagnosis}", r.state));
+        let charge = if full || full_mode() {
+            let ended = Round {
+                elapsed,
+                time_box: diagnosis.time_box,
+                partial,
+                missing: diagnosis.units.map(|u| expected.saturating_sub(u) as u64),
+                evictions: diagnosis.evictions,
+            };
+            cuts.judge(&ended, &diagnosis.to_string())
+                .map_err(|why| not_complete(&why))?
+        } else if partial.is_some() {
+            return Err(not_complete("the store is not full"));
+        } else {
+            None
+        };
         if round > 0 || ctx.mode() == Mode::Smoke {
-            first.push(first_batch - start);
-            all.push(last - start);
+            first.push(charge.unwrap_or(first_batch - start));
+            all.push(charge.unwrap_or(elapsed));
         }
     }
-    Ok(vec![
-        Measured::new(id_all, Value::Time(Samples(all))),
-        Measured::new(id_first, Value::Time(Samples(first))),
-    ])
+    let mut out = vec![
+        Measured::new(id_all, Value::Time(Samples(all))).with_note(cuts.note()),
+        Measured::new(id_first, Value::Time(Samples(first))).with_note(cuts.note()),
+    ];
+    if full {
+        out.extend(cuts.measured("code_intel/references_full"));
+    }
+    Ok(out)
 }
 
 /// Building the ⌘K name table of 100 000 files (≤ 1 s): the current

@@ -16,6 +16,7 @@ pub mod budgets;
 mod ctx;
 pub mod merge;
 mod report;
+pub mod rounds;
 mod runner;
 mod stats;
 
@@ -43,6 +44,9 @@ pub struct Measured {
     /// "project/resolve_package/hit".
     pub id: String,
     pub value: Value,
+    /// What the report and its annotations say beside the value, such as
+    /// the diagnosis of a round the time box cut ([`rounds`]).
+    pub note: Option<String>,
 }
 
 impl Measured {
@@ -50,7 +54,14 @@ impl Measured {
         Measured {
             id: id.into(),
             value,
+            note: None,
         }
+    }
+
+    /// The same with `note` beside the value (None: none).
+    pub fn with_note(mut self, note: Option<String>) -> Measured {
+        self.note = note;
+        self
     }
 }
 

@@ -1895,7 +1895,7 @@ enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume
 | 跳转：同文件或索引命中，候选 ≤ 50 ms（96 KiB 以内的当前文本任何时候成立；96–128 KiB 的靠保留的解析成立，预热完成之前的冷跳转是已知限制：[ADR 0037](../adr/0037.md) 对 ADR 0030 的修订） | 抽屉的份额是 18 ms（从收到第一批的事件到列表画出：一帧 16 ms 加 2 ms 送到 UI 线程），本 crate 从查询到第一批有候选的结果 ≤ 20 ms（[ADR 0037](../adr/0037.md)）。前提：当前文本（100 KB 以内）是当前文本、解析已保留；在首次跳转会遇到的状态下分别判定：核算的遍历已缓存或未缓存、约 3000 个定义的常见名字、命名空间满额。分项按实测（Linux 容器，「实际验证」）：在保留的解析上查位置 < 0.1 ms；按名字查找，第一页加上最近的文件 ≤ 5 ms（一页 ≤ 256 行，每 500 个文件一条语句，与名字有多少定义无关）；过滤、分层与排序 ≤ 1 ms。`Done` 在查询的 1 s 时间盒之内，最多再加一条语句（满额模式约 0.35 s）。冷路径（文本刚成为当前文本、预热还没完成，为光标处解析，随大小线性增长：128 KiB 的整次冷跳转 Linux 实测 29.6–35.9 ms，其中解析按 ADR 0034 的 TS 约 6 MiB/s 约 21 ms，其余是 locals 和查找）≤ 50 − 18 = 32 ms，在 96 KiB 处判定，128 KiB 处只记录 | `code_intel/goto_indexed`、`goto_uncached`、`goto_popular`、`goto_full`（10 万文件、每 1000 个一个子项目），各自的 `/done` 只记录，`goto_full/done` ≤ 1.02 s、每次 `Complete`；冷路径 `goto_cold_parse`（96 KiB）≤ 32 ms、`goto_cold_parse/at_128k` 只记录；同文件 `goto_same_file`、对象一侧 `goto_object`、新索引的第一次跳转 `goto_first` 只记录 |
 | 跳转：唯一候选的目标首屏高亮 ≤ 100 ms | 本 crate 的部分同上；目标文件的读取与高亮属于 `file_reader` | `app/goto_single` |
 | 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的第一批；限时搜索 1 s 后停止。取消在 20 ms 内生效，每条路径都是：查询里的每条语句都有上限（一页 ≤ 256 行，或 ≤ 500 个 OID），语句之间检查查询是否已停止 | `code_intel/search_stop` ≤ 1.02 s |
-| 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 按页查找，每页读索引的 ≤ 256 行；每个候选文件的现场抽取约 1–2 ms / 10 KB；第一批不等搜索范围的读取和满额模式的核对；时间盒 1.9 s，满额模式的核对在 `ci_ref` 一轮之后有余地完成 | `code_intel/references_100k/all`、`code_intel/references_100k/first`；满额模式 `code_intel/references_full/all` ≤ 2 s、`/first` ≤ 200 ms，每次 `Complete` |
+| 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 按页查找，每页读索引的 ≤ 256 行；每个候选文件的现场抽取约 1–2 ms / 10 KB；第一批不等搜索范围的读取和满额模式的核对；时间盒 1.9 s，满额模式的核对在 `ci_ref` 一轮之后有余地完成 | `code_intel/references_100k/all`、`code_intel/references_100k/first`；满额模式 `code_intel/references_full/all` ≤ 2 s、`/first` ≤ 200 ms，每轮都要 `Complete`；范围外的核对被时间盒截断的一轮是两项都不合格的样本，按中位数判定（[ADR 0043](../adr/0043.md)，[bench 设计「时间盒截断的轮次」](bench.md#时间盒截断的轮次)） |
 | 当前文本的解析（[ADR 0037](../adr/0037.md)） | 最多 2 份，源码 ≤ 128 KiB 的才保留，按每字节源码 48 字节估算合计 ≤ 12 MiB；是当前文本期间一直保留，之后 60 s 不用即释放，语言被替换时立即释放。只因阅读才填充，不在 [ADR 0035](../adr/0035.md) 的采样状态（首页加载完成、没有打开文件、Diff 或会话）里，所以不计入下面的空闲常驻，也不占 ADR 0035 的 12 MB 余量；`resident_*` 测量前丢掉它 | `code_intel/parse_cache_bytes` ≤ 12 MiB，在上限处测量：两份略小于 128 KiB 的 TypeScript（实测见「实际验证」） |
 | 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件），核心语言用一次遍历抽取（[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms，不含之后的访问标记 | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k`、`code_intel/warm_100k_touch`（只记录） |
 | 空闲内存：monorepo < 100 MB，10 万文件的仓库 < 120 MB（后台暂停时和全部完成后；后者的份额加总见 [ADR 0035](../adr/0035.md)） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、依赖映射（≤ 1 MB，ADR 0033；`resident_*` 的夹具没有依赖，由 `deps_map_bytes` 单独测）、第 5 层本次会话已确认的 blob 集合（每个 8 字节的键，10 万个约 1.2 MB，项目关闭或换会话时释放）、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
@@ -2034,7 +2034,7 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 4. **查询与插件**（前置 A、E）：`Cargo.toml` 加 `plugin = true`。
    - `goto_*`、`read_verify_*`、`search_*`、`refs_*`、`cut_*`、`view_*`、`account_*`、`names_*`、`escalate_*`、`head_dirty_*`、`prefetch_*`、`focus_*`、`plugin_*`、`watchdog_*` 测试通过。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、不依赖其他插件 crate，除 `app` 和 tool 层外没有 crate 依赖它。
-   - `code_intel/goto_indexed`、`code_intel/goto_uncached`、`code_intel/goto_popular`、`code_intel/goto_full`（含 `goto_full/done`）、`code_intel/goto_cold_parse`（96 KiB，≤ 32 ms）、`code_intel/search_stop`、`code_intel/references_100k`、`code_intel/references_full`（`/all` ≤ 2 s、`/first` ≤ 200 ms）、`code_intel/parse_cache_bytes`、`code_intel/names_100k`、`code_intel/names_100k_bytes`、`plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` 在预算内。
+   - `code_intel/goto_indexed`、`code_intel/goto_uncached`、`code_intel/goto_popular`、`code_intel/goto_full`（含 `goto_full/done`）、`code_intel/goto_cold_parse`（96 KiB，≤ 32 ms）、`code_intel/search_stop`、`code_intel/references_100k`、`code_intel/references_full`（`/all` ≤ 2 s、`/first` ≤ 200 ms；被时间盒截断的轮次按 [ADR 0043](../adr/0043.md) 计为不合格的样本）、`code_intel/parse_cache_bytes`、`code_intel/names_100k`、`code_intel/names_100k_bytes`、`plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` 在预算内。
 5. **端到端基准**（前置 #20 的抽屉和 `file_reader` 在探针里的里程碑）：bench 探针增加打开抽屉、跳转、覆盖层完成的 `Milestone`，以及读取 `coverage` 的方式。
    - `app/goto_candidates`、`app/goto_single`、`app/goto_unindexed`、`app/goto_unindexed_done`、`app/index_review_set`、`app/index_subproject`、`app/index_100k`、`app/idle_monorepo_indexed` 在 `crates/bench/src/budgets.rs` 里改为生效，macOS CI 上在预算内。
    - `app/idle_monorepo` 在后台工作暂停时仍 < 100 MB。
@@ -2452,6 +2452,11 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 测试用的观察点：`LargeSlot` 只在 `cfg(test)` 下记 `acquire` 等过几次（`waits`、`wait_for_waits`），不改变行为。`Harness` 的 `settle` 只用于手动执行器，有批量线程时会断言失败。
 - `just check`、`just test -p lectern-code-intel`（348 个测试通过）通过；`requeue_*` 在 `--stress-count 30` 下全部通过，`yield_large*` 在 `--stress-count 10` 下全部通过。
 - 变异检查：去掉批次边界的 `yield_now()` 时，两个 `requeue_outside_task_*` 失败（外部任务直到批量任务做完都拿不到线程）；停下时放掉 `LargeTurn` 时，两个 `requeue_parked_large_item_*` 失败。都已还原。
+
+`code_intel/references_full` 在 macOS CI 上间歇报 `Partial { unsearched: 0, outside: … }`，基于 main b9e0fb8，同一台机器。
+
+- 原因是满额模式的核对按设计在 1.9 s 的时间盒停下（「完整性的核算」）：4 个忙循环占满 4 核时，`ci_ref` 一轮用了 1.60 s，范围外 7 497 个提示没核对，结果 `Partial { unsearched: 0, outside: 7430 }`；存储里的单元齐全，0 次淘汰，查询期间没有提示变化。不是夹具准备的竞争、模板的缓存状态或冷页缓存。本 crate 的代码没有改。
+- 判定改为 [ADR 0043](../adr/0043.md)：被时间盒截断的一轮是不合格的样本，按中位数判定，数字见 [bench 设计「实际验证」](bench.md#实际验证)。`just test -p lectern-code-intel` 348 个测试通过。
 
 ## 与设计的差异
 

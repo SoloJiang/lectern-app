@@ -406,6 +406,28 @@ fn report_merge_notices_group_record_results() {
     );
 }
 
+/// A result's note (`Measured::note`, such as the diagnosis of a round the
+/// time box cut) follows its value in the record notice and its reason in
+/// the error annotation.
+#[test]
+fn report_merge_notes_reach_the_annotations() {
+    let report = json!({
+        "results": [
+            {"id": "t/cut", "status": "record", "measured": "1", "note": "cut: 2 s of 1.9 s"},
+            {"id": "t/all", "status": "over", "measured": "median 3 s", "budget": "median ≤ 2 s", "note": "cut: 2 s of 1.9 s"},
+        ],
+        "errors": [],
+    });
+    assert_eq!(
+        crate::merge::notices(&report),
+        ["::notice title=t record::t/cut: 1; cut: 2 s of 1.9 s"]
+    );
+    assert_eq!(
+        crate::merge::annotations(&report),
+        ["::error title=t/all::over: median 3 s (budget: median ≤ 2 s); cut: 2 s of 1.9 s"]
+    );
+}
+
 #[test]
 fn report_merge_notices_keep_every_record_within_ten() {
     let results: Vec<Json> = (0..12)
