@@ -69,6 +69,7 @@ fn options<'a>(budgets: &'a [Budget], target: Target, args: &[&str], dir: &Path)
         macos: true,
         scratch_root: dir.join("scratch"),
         report_dir: dir.join("reports"),
+        fixtures_dir: dir.join("fixtures"),
         config: FAST,
         host: host(),
         commit: None,

@@ -13,9 +13,7 @@ use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::SystemClock;
 use lectern_code_intel::names::build_table;
-use lectern_code_intel::testing::{
-    FakeGit, Rig, packages, synthetic, virtual_repo, virtual_repo_with,
-};
+use lectern_code_intel::testing::{FakeGit, Rig, packages, synthetic, virtual_repo};
 use lectern_services::code_intel::{
     CodeIntelEvent, Completeness, Focus, Position, Query, QueryId, QueryKind, QueryState,
     TextOrigin, TextRef,
@@ -287,13 +285,41 @@ fn sample_jumps(
     for round in 0..warmup + runs {
         before(&jump.rig);
         let (first, done, r) = first_and_done(&jump.rig, &seen, &jump.query)?;
-        want(&r)?;
+        want(&r).map_err(|e| {
+            BenchError::new(format!(
+                "{}; {}",
+                e.message(),
+                diagnose(&jump.rig, &jump.query, done)
+            ))
+        })?;
         if round >= warmup {
             firsts.push(first);
             dones.push(done);
         }
     }
     Ok((Samples(firsts), Samples(dones)))
+}
+
+/// What a failed check adds to its message: how long the query ran against
+/// its time box, and what the rig's copy of the store holds (units of the
+/// current versions, evictions), so a query the time box cut tells apart
+/// from units that are missing.
+fn diagnose(rig: &Rig, query: &Query, elapsed: Duration) -> String {
+    use lectern_code_intel::store::Version;
+    let versions: Vec<Version> = lectern_code_intel::extract::LanguageTable::core()
+        .iter()
+        .map(Version::of)
+        .collect();
+    let store = rig.indexer.store(&rig.git.key());
+    let units = store
+        .as_ref()
+        .and_then(|s| s.units(&versions))
+        .map(|u| u.len());
+    let evictions = store.as_ref().map(|s| s.evictions());
+    format!(
+        "done after {elapsed:?} of a {:?} time box; {units:?} units stored, {evictions:?} evictions",
+        lectern_code_intel::query::time_box(&query.kind)
+    )
 }
 
 /// The results a jump of the index must give: candidates, and `Done`.
@@ -561,20 +587,30 @@ fn goto_first(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
-/// `Named` for a name some 50 000 files define (record-only): every unit
-/// of a virtual repository also defines `id`. From the query to its first
-/// (and only) batch: the lookup, ranking every candidate, the event.
+/// `Named` for a name some 45 000 files define (record-only): every other
+/// file of the shared virtual repository also defines `id`
+/// (`code_intel_virtual::COMMON`). From the query to its first batch: the
+/// first page, the files near the query, ranking them, the event.
 pub const NAMED_50K: Bench = Bench {
     id: "code_intel/named_50k",
     run: named_50k,
 };
 
 fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let n = ctx.scale(60_000, 600);
-    let git = Arc::new(FakeGit::new());
+    use crate::code_intel_virtual::{COMMON, COMMON_EVERY};
+    let template = crate::code_intel_virtual::shared(ctx)?;
+    let n = template.files();
+    let table = lectern_code_intel::extract::LanguageTable::core();
+    let units = (0..n)
+        .step_by(COMMON_EVERY)
+        .filter(|&i| {
+            table
+                .for_path(&synthetic::path(i), &lectern_code_intel::NoGrammarPacks)
+                .is_some()
+        })
+        .count();
     let dir = tempfile::tempdir_in(ctx.scratch())?;
-    let cache = cache(dir.path());
-    let units = virtual_repo_with(&git, &cache, n, &["main"], Some("id"));
+    let (git, cache) = crate::code_intel_virtual::open(&template, dir.path())?;
     git.commit("main");
     let rig = Rig::new(git, cache, Arc::new(SystemClock));
     rig.open_with(packages(&synthetic::package_dirs(n)));
@@ -584,7 +620,7 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let query = Query {
         project: rig.git.key(),
         kind: QueryKind::Named {
-            name: "id".into(),
+            name: COMMON.into(),
             near: Some(synthetic::path(0).into()),
         },
     };
@@ -593,6 +629,7 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         seen.lock().unwrap().clear();
         let start = Instant::now();
         let (id, r) = run(&rig, &query)?;
+        let elapsed = start.elapsed();
         let first = seen
             .lock()
             .unwrap()
@@ -602,8 +639,10 @@ fn named_50k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             .ok_or_else(|| BenchError::new("no batch"))?;
         if r.candidates.len() < units {
             return Err(BenchError::new(format!(
-                "{} candidates of {units} units",
-                r.candidates.len()
+                "{} candidates of {units} units, {:?}; {}",
+                r.candidates.len(),
+                r.state,
+                diagnose(&rig, &query, elapsed)
             )));
         }
         if round > 0 || ctx.mode() == Mode::Smoke {

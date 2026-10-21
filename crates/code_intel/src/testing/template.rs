@@ -1,0 +1,340 @@
+//! The benchmarks' virtual repository written once and opened by many rigs
+//! in turn ([`VirtualTemplate`]), kept on disk between runs when asked
+//! ([`VirtualTemplate::cached`]).
+
+use std::fmt::Write as _;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use lectern_cache::{Budgets, Cache, Config};
+use lectern_git::HashKind;
+
+use super::{FakeGit, synthetic, virtual_repo_sharing, virtual_unit};
+use crate::NoGrammarPacks;
+use crate::extract::LanguageTable;
+use crate::store::{NAMESPACE, SCHEMA, Store, Version};
+
+/// Bumped when what a template holds, or how it is laid out on disk,
+/// changes in a way neither [`key`] nor the reuse check
+/// ([`matches_writer`]) sees, such as a change to files outside its sample
+/// only.
+const TEMPLATE_VERSION: u32 = 1;
+
+/// Written last into a kept template: its key, files and units.
+const MANIFEST: &str = "manifest";
+
+/// A [`virtual_repo_sharing`] of the main worktree written once and opened
+/// by many rigs in turn (the benchmarks' shared fixture, ADR 0036). After it
+/// is written nothing opens its cache again: each [`open`](Self::open)
+/// copies the files and stages the entries in a new `FakeGit`, so what a
+/// rig writes (units, access times, evictions) stays in its own copy.
+pub struct VirtualTemplate {
+    /// `git`: where each opened repository lives (its common directory names
+    /// the cache partition, so every copy must see the same one); `cache`:
+    /// the written cache, only ever copied.
+    dir: PathBuf,
+    /// Removes `dir` when the template is not kept.
+    _temp: Option<tempfile::TempDir>,
+    n: usize,
+    units: usize,
+}
+
+impl VirtualTemplate {
+    /// Writes the units of `n` files (for each `(name, every)` of `common`,
+    /// every `every`th file also defining `name`) into a cache with
+    /// `budgets` in a temporary directory, removed with the template.
+    pub fn build(
+        n: usize,
+        common: &[(&str, usize)],
+        budgets: Budgets,
+    ) -> io::Result<VirtualTemplate> {
+        let temp = tempfile::tempdir()?;
+        let dir = temp.path().canonicalize()?;
+        let units = write(&dir, n, common, budgets)?;
+        Ok(VirtualTemplate {
+            dir,
+            _temp: Some(temp),
+            n,
+            units,
+        })
+    }
+
+    /// The same template kept under `root` between runs: in `root/<key>`,
+    /// where the key ([`key`]) names the declared inputs (this module's
+    /// version, the files and common names, the budgets, the namespace and
+    /// its tables, the current version of every core language, a sample of
+    /// the synthetic generator's output and the directory, which names the
+    /// cache partition). A kept one is used when its manifest (written last)
+    /// has the key and a copy of it holds what the current writer would
+    /// store ([`matches_writer`]: the unit count against the current
+    /// language mapping, and a sample of files' units, definitions and
+    /// references, regenerated and read back), so an edited writer or
+    /// mapping, a changed cache format (which `lectern-cache` drops on open)
+    /// or an interrupted write is caught without a version bump; a change
+    /// that only touches files outside the sample and keeps the count is
+    /// not. Otherwise the templates of this size under `root` are removed
+    /// (those of other sizes, such as smoke mode's, stay) and the template
+    /// written again. One benchmark run at a time per `root`.
+    pub fn cached(
+        root: &Path,
+        n: usize,
+        common: &[(&str, usize)],
+        budgets: Budgets,
+    ) -> io::Result<VirtualTemplate> {
+        std::fs::create_dir_all(root)?;
+        let root = root.canonicalize()?;
+        let key = key(&root, n, common, &budgets);
+        let dir = root.join(&key);
+        if let Some(units) = manifest_units(&dir, &key) {
+            // A repository left by a run that stopped while a copy was open.
+            let _ = std::fs::remove_dir_all(dir.join("git"));
+            let kept = VirtualTemplate {
+                dir: dir.clone(),
+                _temp: None,
+                n,
+                units,
+            };
+            if kept.verify(&root.join(format!("{key}.verify")), &budgets, common)? {
+                return Ok(kept);
+            }
+        }
+        // Every template of this size but the current key goes (stale ones,
+        // a verification left behind); other sizes (smoke mode's) stay.
+        let size = format!("{n}-");
+        for entry in std::fs::read_dir(&root)? {
+            let entry = entry?;
+            if !entry.file_name().to_string_lossy().starts_with(&size) {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        std::fs::create_dir(&dir)?;
+        let units = write(&dir, n, common, budgets)?;
+        std::fs::write(
+            dir.join(MANIFEST),
+            format!("key={key}\nfiles={n}\nunits={units}\n"),
+        )?;
+        Ok(VirtualTemplate {
+            dir,
+            _temp: None,
+            n,
+            units,
+        })
+    }
+
+    /// The number of files.
+    pub fn files(&self) -> usize {
+        self.n
+    }
+
+    /// The number of units stored.
+    pub fn units(&self) -> usize {
+        self.units
+    }
+
+    /// A repository of its own with the entries staged in the main worktree
+    /// (the comparison taken as clean), and a cache with `budgets` rooted at
+    /// `root` (which must not exist) over a copy of the written one. Fails
+    /// while the repository of an earlier `open` is still alive.
+    pub fn open(&self, root: &Path, budgets: Budgets) -> io::Result<(Arc<FakeGit>, Cache)> {
+        let git = FakeGit::at(&self.dir.join("git"))?;
+        git.assume_unchanged(true);
+        git.stage_oids(
+            "main",
+            (0..self.n).map(|i| (synthetic::path(i), synthetic::oid(i))),
+        );
+        copy_tree(&self.dir.join("cache"), root)?;
+        let cache = Cache::new(Config {
+            root: root.to_path_buf(),
+            budgets,
+            ui_thread: None,
+        });
+        Ok((Arc::new(git), cache))
+    }
+
+    /// Whether a copy opened at `at` (removed after) holds what the current
+    /// writer stores ([`matches_writer`]).
+    fn verify(&self, at: &Path, budgets: &Budgets, common: &[(&str, usize)]) -> io::Result<bool> {
+        let _ = std::fs::remove_dir_all(at);
+        let matches = {
+            let (git, cache) = self.open(at, budgets.clone())?;
+            matches_writer(&git, &cache, self.n, common, self.units)
+        };
+        std::fs::remove_dir_all(at)?;
+        Ok(matches)
+    }
+}
+
+/// Whether `git`'s partition of `cache` holds what [`virtual_repo_sharing`]
+/// would store now: as many units of the current versions as the current
+/// language mapping makes source files (and the manifest records), and,
+/// for each file of [`sample`], the unit the current writer
+/// ([`virtual_unit`]) gives, read back with its definitions and
+/// references, or no unit where it gives none.
+fn matches_writer(
+    git: &FakeGit,
+    cache: &Cache,
+    n: usize,
+    common: &[(&str, usize)],
+    recorded: usize,
+) -> bool {
+    let table = LanguageTable::core();
+    let sources = (0..n)
+        .filter(|&i| {
+            table
+                .for_path(&synthetic::path(i), &NoGrammarPacks)
+                .is_some()
+        })
+        .count();
+    if sources != recorded || stored_units(git, cache) != Some(sources) {
+        return false;
+    }
+    let versions: Vec<Version> = table.iter().map(Version::of).collect();
+    let store = Store::new(&cache.repo(git.common_dir()));
+    sample(n, common).into_iter().all(|i| {
+        let oid = synthetic::oid(i);
+        match virtual_unit(&table, i, common) {
+            Some((version, extraction)) => match store.exists(&version, &[oid]).as_deref() {
+                Some([found]) => store.load(found.unit) == Some(extraction),
+                _ => false,
+            },
+            None => versions
+                .iter()
+                .all(|v| store.exists(v, &[oid]).is_some_and(|f| f.is_empty())),
+        }
+    })
+}
+
+/// The files whose units a kept template is checked against: 96 spread
+/// over `0..n` and, for each common name, 32 files that define it.
+fn sample(n: usize, common: &[(&str, usize)]) -> Vec<usize> {
+    let mut files: Vec<usize> = (0..96).map(|k| k * n / 96).collect();
+    for &(_, every) in common {
+        let every = every.max(1);
+        files.extend((0..32).map(|k| k * n / 32 / every * every));
+    }
+    files.retain(|&i| i < n);
+    files.sort_unstable();
+    files.dedup();
+    files
+}
+
+/// Writes a template into `dir` (`git`, `cache`) and returns the units its
+/// store holds once written (after any eviction).
+fn write(dir: &Path, n: usize, common: &[(&str, usize)], budgets: Budgets) -> io::Result<usize> {
+    let git = FakeGit::at(&dir.join("git"))?;
+    let cache = Cache::new(Config {
+        root: dir.join("cache"),
+        budgets,
+        ui_thread: None,
+    });
+    virtual_repo_sharing(&git, &cache, n, &["main"], common);
+    let units = stored_units(&git, &cache)
+        .ok_or_else(|| io::Error::other("the template's store cannot be read"))?;
+    // Closes the partition before anything copies it.
+    drop(cache);
+    drop(git);
+    Ok(units)
+}
+
+/// The `Done` units of the current versions in `git`'s partition of `cache`.
+fn stored_units(git: &FakeGit, cache: &Cache) -> Option<usize> {
+    let versions: Vec<Version> = LanguageTable::core().iter().map(Version::of).collect();
+    Store::new(&cache.repo(git.common_dir()))
+        .units(&versions)
+        .map(|u| u.len())
+}
+
+/// The units a kept template's manifest records, if it has `key`.
+fn manifest_units(dir: &Path, key: &str) -> Option<usize> {
+    let text = std::fs::read_to_string(dir.join(MANIFEST)).ok()?;
+    let mut lines = text.lines();
+    (lines.next()? == format!("key={key}")).then_some(())?;
+    lines.next()?.strip_prefix("files=")?;
+    lines.next()?.strip_prefix("units=")?.parse().ok()
+}
+
+/// The key of a template kept under `root`, its directory's name: the file
+/// count, then a hash of everything its content depends on (see
+/// [`VirtualTemplate::cached`]).
+pub fn key(root: &Path, n: usize, common: &[(&str, usize)], budgets: &Budgets) -> String {
+    let mut text = String::new();
+    let _ = writeln!(text, "template {TEMPLATE_VERSION}");
+    let _ = writeln!(text, "root {}", root.display());
+    let _ = writeln!(text, "files {n} common {common:?} budgets {budgets:?}");
+    let _ = writeln!(text, "namespace {} {}", NAMESPACE.name, NAMESPACE.version);
+    for table in SCHEMA {
+        let _ = writeln!(text, "{table}");
+    }
+    for version in LanguageTable::core().iter().map(Version::of) {
+        let _ = writeln!(text, "{version:?}");
+    }
+    // The generator: its output for the first files and a spread of others.
+    for i in (0..64).chain((0..64).map(|k| k * 1567 + 64)) {
+        let _ = writeln!(
+            text,
+            "{} {:?} {:?}",
+            synthetic::path(i),
+            synthetic::oid(i),
+            synthetic::extraction(i)
+        );
+    }
+    let hash = crate::git_access::hash_blob(HashKind::Sha1, text.as_bytes());
+    hash.as_bytes()[..10]
+        .iter()
+        .fold(format!("{n}-"), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Copies the directory `from` to the new directory `to`, leaving out
+/// SQLite's shared-memory files (rebuilt on open).
+fn copy_tree(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::create_dir(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_tree(&entry.path(), &target)?;
+        } else if !entry.file_name().to_string_lossy().ends_with("-shm") {
+            copy_bytes(&entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copies `from` to the new file `to` through a buffer: the copy's pages are
+/// written, so they are in the page cache as a partition the indexer just
+/// wrote would be. `std::fs::copy` may clone instead (APFS `clonefile`, a
+/// reflink): the clone shares the template's blocks but not its cached
+/// pages, and a query's random reads of it go to the disk, so the time-boxed
+/// pages of `code_intel/goto_popular` and `named_50k` stop early on a cold
+/// template (one written by another run or another bench target).
+pub(crate) fn copy_bytes(from: &Path, to: &Path) -> io::Result<u64> {
+    use std::io::{Read, Write};
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let mut buf = vec![0u8; 1 << 20];
+    let mut copied = 0u64;
+    loop {
+        let read = match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        dst.write_all(&buf[..read])?;
+        copied += read as u64;
+    }
+    Ok(copied)
+}
