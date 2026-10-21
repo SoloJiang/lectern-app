@@ -38,6 +38,9 @@ pub struct Deadline {
     /// Yielding work's `yield_requested` and where a stopped extraction
     /// keeps its state (「交互让路」).
     yields: Option<(PauseProbe, ResumeSlot)>,
+    /// Also collect the module specifiers (`Extraction::specs`): the
+    /// dependency tier's extractions (「依赖层」).
+    specs: bool,
 }
 
 /// Where an extraction stopped to yield keeps its state (and finds it
@@ -87,7 +90,16 @@ impl Deadline {
             max_len,
             pause: None,
             yields: None,
+            specs: false,
         }
+    }
+
+    /// Also collect a TS / JS file's module specifiers
+    /// ([`Extraction::specs`]), from the tree the walk read: the dependency
+    /// tier's edges (「依赖层」). Other languages have none.
+    pub fn with_specifiers(mut self) -> Deadline {
+        self.specs = true;
+        self
     }
 
     /// Also give up when `pause` returns true (the batch tiers pass
@@ -127,6 +139,11 @@ pub struct Extraction {
     /// query resolves to a local definition are not here
     /// (tree-sitter-tags' `#is-not? local`).
     pub refs: Vec<Box<str>>,
+    /// A TS / JS file's module specifiers, in the order they first appear,
+    /// each once: only when the deadline asked for them
+    /// ([`Deadline::with_specifiers`]), and only from a core language's walk
+    /// (「依赖层」的声明闭包). Empty otherwise.
+    pub specs: Vec<Specifier>,
 }
 
 impl Extraction {
@@ -135,6 +152,48 @@ impl Extraction {
             status,
             defs: Vec::new(),
             refs: Vec::new(),
+            specs: Vec::new(),
+        }
+    }
+}
+
+/// A module specifier as written in a TS / JS file (「依赖层」): the closure
+/// follows relative ones and records bare ones.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct Specifier {
+    pub kind: SpecKind,
+    pub text: Box<str>,
+}
+
+/// Where a specifier comes from.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SpecKind {
+    /// `import … from "s"`, `export … from "s"`, `import s = require("s")`,
+    /// `import("s")` (in types or expressions).
+    Module,
+    /// `/// <reference path="s" />`: a path relative to the file, with or
+    /// without `./`.
+    Path,
+    /// `/// <reference types="s" />`: recorded, not followed.
+    Types,
+}
+
+impl SpecKind {
+    /// The code stored in `cd_spec.kind`.
+    pub fn code(self) -> u8 {
+        match self {
+            SpecKind::Module => 0,
+            SpecKind::Path => 1,
+            SpecKind::Types => 2,
+        }
+    }
+
+    pub fn from_code(code: i64) -> Option<SpecKind> {
+        match code {
+            0 => Some(SpecKind::Module),
+            1 => Some(SpecKind::Path),
+            2 => Some(SpecKind::Types),
+            _ => None,
         }
     }
 }
@@ -349,6 +408,12 @@ fn extract_walking(
             return Extraction::empty(ExtractStatus::Unsupported);
         }
     };
+    // The dependency tier's edges, from the same tree (「依赖层」).
+    let specs = if deadline.specs && lang.dialect().is_ecma() {
+        crate::deps::specs::specifiers(&tree, source)
+    } else {
+        Vec::new()
+    };
     drop(tree);
     // The rules run under the same registration, and are checked once more
     // after: the deadline covers the whole extraction.
@@ -368,6 +433,7 @@ fn extract_walking(
         status: ExtractStatus::Done,
         defs: finished.defs.into_iter().map(|d| d.def).collect(),
         refs: finished.refs,
+        specs,
     }
 }
 
@@ -483,6 +549,7 @@ pub(crate) fn extract_window(
             status: ExtractStatus::Done,
             defs: finished.defs.into_iter().map(|d| d.def).collect(),
             refs: finished.refs,
+            specs: Vec::new(),
         },
         cut,
     )
@@ -575,6 +642,7 @@ pub(crate) fn extract_tags(
         status: ExtractStatus::Done,
         defs: finished.defs.into_iter().map(|d| d.def).collect(),
         refs: finished.refs,
+        specs: Vec::new(),
     }
 }
 

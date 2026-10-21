@@ -129,6 +129,7 @@ pub fn extraction(i: usize) -> crate::extract::Extraction {
         status: ExtractStatus::Done,
         defs,
         refs,
+        specs: Vec::new(),
     }
 }
 

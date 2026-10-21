@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#145](https://github.com/SoloJiang/lectern-app/pull/145)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 8 步的窗口抽取与窗口链、`Windowed`（同一 PR 的第二部分）和跳转里的大文件（第三部分）已实现，可见区域的三个窗口和查引用按窗口读没有做（见「与设计的差异」第 8 步）；第 5、9 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#145](https://github.com/SoloJiang/lectern-app/pull/145)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 8 步的窗口抽取与窗口链、`Windowed`（同一 PR 的第二部分）和跳转里的大文件（第三部分）已实现，可见区域的三个窗口和查引用按窗口读没有做（见「与设计的差异」第 8 步）；第 9 步（依赖层，`code_intel.deps` 与 224 MiB 的配额）已实现，见「实际验证」「与设计的差异」第 9 步；第 5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -49,6 +49,7 @@
 | `tree-sitter-typescript`、`tree-sitter-javascript`、`tree-sitter-rust`、`tree-sitter-java`、`tree-sitter-python`、`tree-sitter-go` | 首发语言的 grammar（见「未决问题」1） | ADR 0018 的核心语言集合，MIT；版本取 ABI 落在 tree-sitter 0.27.1 支持范围内的最新版本，在 `[workspace.dependencies]` 用 `=` 锁定，与高亮方共用；体积计入 ADR 0018，由 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 测量 |
 | `memchr` | 限时搜索的整词查找（`memmem`） | 已在 Cargo.lock |
 | `unicode-normalization` | 名字表统一成 NFC（ADR 0030：frizbee 不做规范化） | 已在 Cargo.lock |
+| `serde`、`serde_json` | 依赖层：lockfile 的流式读取（`Deserializer::from_reader` 加 `IgnoredAny`）、`package.json` 的解析 | 工作区统一依赖，已在 Cargo.lock；ADR 0033 不新增依赖 |
 | `insta`、`tempfile`（dev） | 抽取结果的快照；缓存目录与工作区夹具 | 工作区统一依赖 |
 
 不直接依赖 `rusqlite`：SQL 经 `cache` 的自定义表接口执行，`cargo tree -i rusqlite -e normal --depth 1` 仍只列出 `lectern-cache`（[cache 设计「验收」](cache.md#验收)）。不依赖 `frizbee`：模糊匹配属于 ⌘K（ADR 0030）。版本由 Cargo.lock 锁定，新增依赖先跑 `just deny`。
@@ -1737,7 +1738,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ### 依赖层
 
-[ADR 0033](../adr/0033.md)「依赖源码」。状态：已设计，尚未实现（「验收」第 9 步）。依赖目录不进文件列表、不整体索引、不监听；跳转进依赖时按需解析，空闲时只为当前子项目的直接依赖建声明闭包的索引。现在只有 npm（TS / JS，npm、pnpm、yarn 安装的 `node_modules` 都读，包括 pnpm 工作区）；Cargo、Go、Python 的依赖根和闭包规则在它们的解析扩展点实现时经同一个内部接口（`deps::Ecosystem`）接入，键、身份、配额、读取限制和分层不变。
+[ADR 0033](../adr/0033.md)「依赖源码」。状态：已实现（「验收」第 9 步，`src/deps/`、`src/query/deps.rs`；与本节的差异见「与设计的差异」第 9 步）。依赖目录不进文件列表、不整体索引、不监听；跳转进依赖时按需解析，空闲时只为当前子项目的直接依赖建声明闭包的索引。现在只有 npm（TS / JS，npm、pnpm、yarn 安装的 `node_modules` 都读，包括 pnpm 工作区）；Cargo、Go、Python 的依赖根和闭包规则在它们的解析扩展点实现时经同一个内部接口（`deps::Ecosystem`）接入，键、身份、配额、读取限制和分层不变。
 
 **发现**（每个项目的每个会话一个 `deps::Roots`：按当前 worktree 建立，打开项目时为空，用到时建立；切换当前 worktree、项目关闭时随会话释放，所以一个 worktree 的根不会给另一个 worktree 读）：
 
@@ -2458,6 +2459,15 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 原因是满额模式的核对按设计在 1.9 s 的时间盒停下（「完整性的核算」）：4 个忙循环占满 4 核时，`ci_ref` 一轮用了 1.60 s，范围外 7 497 个提示没核对，结果 `Partial { unsearched: 0, outside: 7430 }`；存储里的单元齐全，0 次淘汰，查询期间没有提示变化。不是夹具准备的竞争、模板的缓存状态或冷页缓存。本 crate 的代码没有改。
 - 判定改为 [ADR 0043](../adr/0043.md)：被时间盒截断的一轮是不合格的样本，按中位数判定，数字见 [bench 设计「实际验证」](bench.md#实际验证)。`just test -p lectern-code-intel` 348 个测试通过。
 
+第 9 步（依赖层），基于 main（706cf67），同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+
+- `services` 增加 `TextOrigin::Dependency(DepOrigin)`、`DepOrigin`、`DepRoot`、`CacheRoot`、`Ecosystem`、`CandidateTier::Dependency`（排在最后）、`Coverage::deps`；`TextOrigin` 因此不再是 `Copy`。`just test -p lectern-services` 53 个测试通过（新增 `code_intel_dependency_origins_round_trip`）。
+- `just test -p lectern-code-intel` 392 个测试通过，其中 `deps_*` 40 个，设计「验收」第 9 步列出的测试名都有；另有 `deps_read_verify_changed_file_is_extracted_again`（依赖文件原地改过、lockfile 没变时，跳转当场抽取新字节，路径表的这一行和依赖映射随后更新）和 `deps_map_is_compact`。读取限制的测试看 `Roots` 在 `cfg(test)` 下的记录（打开、重新验证、查找、链接、stat、读，每条带相对 worktree 根的路径），断言里没有根外的路径、没有不允许的扩展名。
+- `rg -n 'open_dir' crates/code_intel/src --glob '!**/tests*'` 只在 `src/deps/roots.rs`；`rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 仍没有结果。
+- 基准（`just bench --measure code_intel/deps`）：`code_intel/deps_identity` 中位数 20.7 ms（≤ 50 ms；其中 4 MiB 的 lockfile 约 18 ms，路径表查找和存在检查约 3 ms）；`code_intel/deps_map_bytes` 934 KB（≤ 1 MB，2 万个文件，包内路径约 22 字节）；`code_intel/deps_ts_project` 中位数 1.88 s（只记录，21 个直接依赖、252 个文件、约 5 MiB，单线程手动执行器上从打开到 `coverage.deps` 为 `Done`，含项目本身的打开）。lockfile 的读取第一版直接把按区间读的读者交给 serde_json，约 37 ms；serde_json 逐字节读，前面加一个 64 KiB 的 `BufReader` 之后约 18 ms。
+- 其余受影响的基准照常：`batch_peak` 33.3 MB（≤ 40 MB）、`window_peak` 2.46 MB、`extract_throughput` 4.05 MB/s（≥ 4 MB/s）、`yield_stop` 45.7 µs、`goto_indexed` 1.49 ms（≤ 20 ms，第 3 步多了依赖的第一页）。
+- `app/index_100k` 的夹具（含达到依赖层上限的 `node_modules`）属于 `app` 的基准，只在 macOS 上构建，本步没有改，留给 macOS CI。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2751,3 +2761,20 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 查引用里的大文件当前文本没有改：`References` 读自己的文本仍经 `read_text`（≤ 4 MiB 整份），4–16 MiB 的计为 `TooLarge`（与上一部分查引用按窗口读的已知限制一起留到后续）。
 - 测试用约 1.2 MiB 的合成 TypeScript（超过 1 MiB 即走窗口），不是 2–16 MiB；4 MiB 由基准跑。设计列的 `goto_large_window_only`、`goto_large_timeout_falls_back_to_the_name`、`goto_large_cold_then_warm`、`goto_large_object_reuses_the_kept_window` 都有；「读的时候活跃字节里只有一个 1 MiB 的区间」按读取的区间检查（每段 ≤ 1 MiB、首尾相接，记在测试专用的 `large::READS`），不按活跃字节计数（计数分配器在 bench crate 里）。另加 `goto_large_finds_the_rest_in_window_units`、`goto_large_racy_record_is_streamed_again`、`goto_large_changed_file_is_stale`、`goto_large_crlf_text_has_no_byte_offsets`、`goto_large_checkpoints_and_windows`，以及审阅后的 `goto_large_line_across_a_checkpoint`、`goto_large_minified_line`、`goto_large_minified_object_text`。超时由测试专用的 `Inner::window_parse_times_out` 触发。
 - 基准：`code_intel/goto_large` 的夹具是只有一个 4 MiB 文件的小仓库（不是 10 万文件的虚拟仓库：窗口那一步与仓库大小无关，第 3 步按名字查找的开销已由 `goto_indexed` 测量），文件被打开、链写完、身份记下；跳转的名字是目标所在函数调用的前一个函数（在窗口里，同时在窗口单元里），每个样本前丢掉保留的解析。`…/cold` 同时丢掉 `LargeText`（`Indexer::clear_large_texts`，`test-support`）。`…/object` 的 `FakeGit::blob` 是内存里的复制，没有 zlib 解压，比真实仓库快（设计估计 16 MiB 几十毫秒，只记录）。
+
+第 9 步（依赖层，`src/deps/`、`src/query/deps.rs`）：
+
+- 依赖层的项走批量层原有的队列：它是第 4 个队列（`deps::tier::QUEUE`，选层顺序在第 4 层之后、第 5 层之前，同设计），读、抽取、让路、停下、暂缓列表、`LargeSlot` 和一批一个写事务都与第 3–5 层共用。一个包的闭包按步走（`Inner::deps_step`）：每步取出待访问的路径，`lstat`、按 stat 表取捷径，在保活时段里每步最多读一个文件；存在检查命中的从 `cd_spec` 取出边，缺的作为 `Source::Dep` 的项排进这个队列，提交时（`commit_deps`）写入单元和 `cd_spec`、记下这个文件和它的出边。走完写路径表、替换依赖映射。同一时刻只走一个包。
+- 路径表排进来的缺失文件（「身份与包的路径表」）不单独处理：这个包以那张路径表为 stat 表重新走一遍闭包，五项 stat 对得上的文件沿用表里的 OID、不读，存在检查命中的不抽取，只有缺的文件被读和抽取。结果与设计相同，多了一遍闭包的 `lstat`。
+- 文件过滤：TS 的依赖层只用 `DEPENDENCY_EXTENSIONS` 里 npm 的那一段（`deps::extensions(Ecosystem::Npm)`，即前 6 项：`.d.ts`、`.d.mts`、`.d.cts`、`.ts`、`.tsx`、`package.json`），由 `deps::allowed` 在 `Roots::file` 和 `Roots::file_at` 里检查，不在其中的路径拿不到 `DepFile`，因此不会被 stat 或打开；Rust、Go、Python 的扩展名不参与 TS 的依赖层（`deps_extensions_are_the_npm_entries_of_the_shared_list`、`deps_reads_only_allowed_extensions`）。语言按扩展名取（`.tsx` 是 tsx，其余是 ts）。
+- `cd_spec` 多一列 `kind`：import / export / `require` / `import()` 的模块路径、`/// <reference path>`、`/// <reference types>` 三种。`reference path` 不带 `./` 时也是相对当前文件的路径（`"globals.d.ts"`），与裸模块名的写法相同，只存原样的字符串分不出来。边按源码顺序收集（`deps::specs`，在抽取的遍历之后对同一棵树走一遍顶层语句和注释，只在 `Deadline::with_specifiers` 时做，其他抽取的结果不变）。
+- `cd_pkg` 多一列 `types`：入口来自 `@types/<名字>` 时记下那个包名，身份任务对它做同样的检查。路径表的版本号取 lockfile 里的 `version`（后备身份取已安装的 `package.json` 的）；lockfile 先于安装更新时，`DepOrigin::version` 是 lockfile 的新版本号，内容仍是已安装的旧文件，直到重新安装（已知限制，内容和读取核对都不受影响）。
+- 依赖映射的布局：设计的 `files` 加 `by_oid` 每个文件约 50 字节加路径，2 万个文件、20 来字节的路径就超过 1 MB。实现按 OID 排序，OID 连续放在一个缓冲里，每个文件另有两字节的包下标、四字节的路径终点，路径（相对包目录）放在一个字符串里，查找是二分；语言不存，按路径的扩展名取。2 万个文件 934 KB。
+- 查询的快照在取 `Published` 的同一个锁里取 `State::deps` 的 `Arc<DepMap>` 和本次会话的 `Roots`，没有把它放进 `Published`：依赖映射只由身份任务和依赖层整体替换，与工作区映射的发布无关，取到的总是一份完整的映射。
+- 按需解析：`ResolveContext::dependency(名字, 子路径)` 带子路径时直接按相对包目录的路径解析，不读 `exports` 的子路径映射；一次查询里同一个名字没有缓存，每次调用都查找一次（#19 的 TS 规则接入时按需要再加）。`ImportTarget` 改成枚举（`Worktree`、`Dependency`），`Import::target` 可以是依赖里的文件。
+- 读取核对：第 3 步的依赖候选按单元和依赖映射给出位置，不读文件；读文件的地方（查询的 `TextRef` 是依赖文件、依赖文件作为当前文本、按需解析）按读到的字节核对。`TextRef` 指向的依赖文件变了时返回 `Stale`；按需解析读到新字节时当场抽取，写入之后由 `Background` 任务更新路径表的这一行和依赖映射（`Inner::dep_files_read`）。
+- 限额：超过 1 MiB 的文件（`TooLarge`，不读）不计入每包的 16 MiB；计入的是实际要读的文件的大小。每次会话的 64 MiB 按实际读入的字节算，到了就停下。
+- 根：`CacheRoot` 的各种根只有类型，没有实现（TS / JS 只用 worktree 里的 `node_modules`，用到 cache 根的生态还没有接入）；`deps_cache_roots_come_from_the_environment` 检查清单里写的绝对路径不被读。根的重新验证在每次身份任务开头和读取得到 `NotFound` 时做；`stat` 得到 `NotFound` 不重新验证（闭包的候选路径大多不存在，否则每次试探都要重新验证）。
+- 存储：`code_intel.deps` 与 `code_intel.tags` 共用一套表结构（`schema_for!`、`sql_for!` 宏按命名空间生成表名不同的 SQL），另加 `cd_spec`、`cd_pkg`、`cd_pkg_file`。两个命名空间合计登记 37 条语句（tags 15 条，deps 22 条），超过 cache 每个连接 32 条的预编译语句缓存；缓存按最近使用淘汰，只有两个命名空间交替使用时才会重新编译。没有改 cache 的上限。
+- 测试：限额用 `cfg(test)` 下的线程局部覆盖（`deps::Limits`），不写 4000 个文件或 64 MiB 的夹具。「16 MiB 的 lockfile 的活跃字节峰值 ≤ 2 MiB」按读取的区间检查（每段 ≤ 1 MiB、首尾相接、覆盖整个文件，`deps_lockfile_read_is_streamed`），没有用计数分配器；读取另有一个 64 KiB 的 `BufReader`。
+- 基准：`code_intel/deps_identity` 测的是这次打开里身份任务从开始到结束的时间之和（`Indexer::deps_identity_times`，`test-support`），不含项目本身的打开、工作区比较和第 3、4 层：这台机器上只有一个文件的项目在 `Rig` 上从打开到静止也要约 220 ms，那部分属于其他预算。`code_intel/deps_map_bytes` 的路径表在测量之前建好、不计入（它们是缓存里的行，只在依赖层运行期间持有），只测映射本身。

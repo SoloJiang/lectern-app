@@ -3,6 +3,7 @@ mod binding;
 mod canonical_batch;
 mod cut;
 mod deadline;
+mod deps;
 mod derived;
 mod escalate;
 mod extract;

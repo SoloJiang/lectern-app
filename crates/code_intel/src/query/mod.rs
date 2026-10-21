@@ -6,6 +6,7 @@
 
 mod account;
 mod definition;
+mod deps;
 pub(crate) mod large;
 mod parsed;
 mod rank;
@@ -251,6 +252,14 @@ pub(crate) struct Snap {
     pub in_flight: HashSet<(BlobId, LangName)>,
     /// The view taken with the snapshot.
     pub view: View,
+    /// The dependency map as of the snapshot (「依赖层」): step 3's
+    /// dependency candidates' paths.
+    pub deps: Arc<crate::deps::DepMap>,
+    /// The session's dependency roots, the only way a query reads a
+    /// dependency file; None before the identity task made them.
+    pub dep_roots: Option<Arc<crate::deps::Roots>>,
+    /// The repository's OID kind (dependency files' OIDs).
+    pub hash: lectern_git::HashKind,
 }
 
 impl Snap {
@@ -689,6 +698,9 @@ impl Inner {
                 hinted: st.hinted,
             },
             map,
+            deps: st.deps.map.clone(),
+            dep_roots: st.deps.roots.clone(),
+            hash: st.hash,
         }))
     }
 

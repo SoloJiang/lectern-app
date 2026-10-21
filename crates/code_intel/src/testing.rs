@@ -5,6 +5,7 @@
 
 mod fake_git;
 mod host;
+pub mod npm;
 mod rig;
 pub mod synthetic;
 mod template;

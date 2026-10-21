@@ -128,6 +128,7 @@ fn done(defs: Vec<Def>, refs: &[&str]) -> Extraction {
         status: ExtractStatus::Done,
         defs,
         refs,
+        specs: Vec::new(),
     }
 }
 
@@ -232,16 +233,13 @@ fn store_write_and_read_back_every_field() {
         status: ExtractStatus::TimedOut,
         defs: vec![def("ignored", DefKind::Function, 0)],
         refs: vec!["ignored".into()],
+        specs: Vec::new(),
     };
     let mut w = store.write();
     assert!(w.add(oid(1), &rust, &extraction));
     assert!(w.add(oid(2), &rust, &timed_out));
     for status in [ExtractStatus::Cancelled, ExtractStatus::Unsupported] {
-        let not_stored = Extraction {
-            status,
-            defs: Vec::new(),
-            refs: Vec::new(),
-        };
+        let not_stored = Extraction::empty(status);
         assert!(!w.add(oid(3), &rust, &not_stored));
     }
     assert_eq!(w.len(), 2);
@@ -1047,11 +1045,7 @@ fn window(start: u64, end: u64, line: u32) -> UnitMeta {
 
 fn marker(len: u64) -> (Extraction, UnitMeta) {
     (
-        Extraction {
-            status: ExtractStatus::Windowed,
-            defs: Vec::new(),
-            refs: Vec::new(),
-        },
+        Extraction::empty(ExtractStatus::Windowed),
         UnitMeta {
             part: None,
             canonical: true,

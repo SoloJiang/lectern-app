@@ -148,6 +148,15 @@ impl Inner {
                 let Ok(path) = std::str::from_utf8(path.as_bytes()) else {
                     continue;
                 };
+                // A manifest or lockfile of the dependency tier's
+                // sub-project or above it: its identity task runs again
+                // (「增量更新」; dependency roots themselves are not watched).
+                let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+                if crate::deps::identity::WATCHED.contains(&name)
+                    && under(&crate::deps::identity::dep_dir(&st), dir)
+                {
+                    st.deps.dirty = true;
+                }
                 let files = st.map.base.files();
                 let known = find_path(files, path).is_some() || st.map.overlay.get(path).is_some();
                 let dir = !known

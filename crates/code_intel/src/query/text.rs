@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use lectern_platform::{Read, RelPath as SafeRel, SafeError, SafeRoot};
-use lectern_services::code_intel::{QueryError, TextOrigin, TextRef};
+use lectern_services::code_intel::{DepOrigin, DepRoot, QueryError, TextOrigin, TextRef};
+
+use crate::deps::roots::DepRead;
 use lectern_services::project::BlobId;
 
 use super::Snap;
@@ -35,7 +37,7 @@ impl Inner {
         snap: &Snap,
         text: &TextRef,
     ) -> Result<Content<Arc<[u8]>>, QueryError> {
-        match text.origin {
+        match &text.origin {
             TextOrigin::Object => {
                 let tree = snap
                     .tree
@@ -69,7 +71,42 @@ impl Inner {
                     None => Err(QueryError::Stale),
                 }
             }
+            TextOrigin::Dependency(origin) => self.read_dependency_text(snap, text, origin),
         }
+    }
+
+    /// A dependency file's bytes (「依赖层」「读取核对」): read only through
+    /// the session's dependency roots, inside the root its origin names,
+    /// with an allowed extension; its raw bytes' OID must be the text's
+    /// (dependency files are not normalized), otherwise `Stale`, as is a
+    /// path outside the roots.
+    pub(crate) fn read_dependency_text(
+        &self,
+        snap: &Snap,
+        text: &TextRef,
+        origin: &DepOrigin,
+    ) -> Result<Content<Arc<[u8]>>, QueryError> {
+        let DepRoot::Worktree { dir } = &origin.root else {
+            return Err(QueryError::Stale);
+        };
+        let roots = snap.dep_roots.as_ref().ok_or(QueryError::Stale)?;
+        let file = roots
+            .file_at(&text.path, Some(dir), origin.ecosystem)
+            .ok_or(QueryError::Stale)?;
+        crate::phases::count("file reads", 1);
+        let bytes = match roots.read(&file, crate::deps::FILE_MAX) {
+            Ok((bytes, _)) => bytes,
+            Err(DepRead::TooLarge) => return Err(QueryError::TooLarge),
+            Err(DepRead::Gone) => return Err(QueryError::Stale),
+            Err(DepRead::Failed(why)) => return Err(QueryError::Unreadable(why.into())),
+        };
+        if hash_blob(hash_kind(&text.oid), &bytes) != text.oid {
+            return Err(QueryError::Stale);
+        }
+        Ok(Content {
+            bytes: bytes.into(),
+            canonical: true,
+        })
     }
 
     /// Whether worktree bytes read at `path` are the blob `oid`: by their

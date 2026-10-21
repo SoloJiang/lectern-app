@@ -235,6 +235,7 @@ fn unit(i: u64) -> Extraction {
         status: ExtractStatus::Done,
         defs,
         refs,
+        specs: Vec::new(),
     }
 }
 
@@ -502,6 +503,140 @@ fn window_chain_16mib(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     }
     Ok(vec![Measured::new(
         "code_intel/window_chain_16mib",
+        Value::Time(lectern_bench::Samples(samples)),
+    )])
+}
+
+/// The dependency tier (「依赖层」, ADR 0033) of a synthetic TS project
+/// (`testing::npm::ts_project`): 21 direct dependencies of 12 declaration
+/// files of about 20 KiB each (about 5 MiB of closure), a 4 MiB
+/// `package-lock.json`, `node_modules` ignored. From opening the project
+/// on an empty cache to `coverage.deps` being `Done`. Record only.
+pub const DEPS_TS_PROJECT: Bench = Bench {
+    id: "code_intel/deps_ts_project",
+    run: deps_ts_project,
+};
+
+/// The same project with every path table and unit in the cache, opened
+/// again: the identity tasks of the open from their start to their end,
+/// summed (the manifest read, each direct dependency's link and manifest
+/// `lstat`ed, the lockfile streamed, one existence check per table's
+/// OIDs, the map built); nothing read in the closure, nothing extracted.
+/// The rest of the open (the worktree comparison, tiers 3 and 4) is other
+/// budgets'.
+pub const DEPS_IDENTITY: Bench = Bench {
+    id: "code_intel/deps_identity",
+    run: deps_identity,
+};
+
+struct DepsProject {
+    git: Arc<lectern_code_intel::testing::FakeGit>,
+    closure: usize,
+}
+
+fn deps_project(ctx: &Ctx) -> DepsProject {
+    use lectern_code_intel::testing::FakeGit;
+    use lectern_code_intel::testing::npm::{NpmTree, ts_project};
+
+    let direct = ctx.scale(21, 3);
+    let files = ctx.scale(12, 3);
+    let file_len = ctx.scale(20 << 10, 4 << 10);
+    let lockfile = ctx.scale(4 << 20, 64 << 10);
+    let git = Arc::new(FakeGit::new());
+    git.ignore("node_modules/");
+    git.add("main", &[("src/main.ts", b"export const main = 1;\n")]);
+    git.commit("main");
+    let tree = NpmTree::new(&git.root("main"));
+    ts_project(&tree, direct, files, file_len, lockfile);
+    DepsProject {
+        git,
+        closure: direct * files,
+    }
+}
+
+fn deps_rig(
+    git: &Arc<lectern_code_intel::testing::FakeGit>,
+    dir: &Path,
+) -> lectern_code_intel::testing::Rig {
+    let cache = Cache::new(Config {
+        root: dir.to_path_buf(),
+        budgets: Budgets::default(),
+        ui_thread: None,
+    });
+    lectern_code_intel::testing::Rig::new(git.clone(), cache, Arc::new(SystemClock))
+}
+
+fn deps_done(rig: &lectern_code_intel::testing::Rig) -> Result<(), BenchError> {
+    use lectern_services::code_intel::TierState;
+    let coverage = rig
+        .indexer
+        .coverage(&rig.git.key())
+        .ok_or_else(|| BenchError::new("the project is not open"))?;
+    if coverage.deps != TierState::Done {
+        return Err(BenchError::new(format!(
+            "the tier ended {:?}",
+            coverage.deps
+        )));
+    }
+    Ok(())
+}
+
+fn deps_ts_project(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(3, 1) {
+        let dir = tempfile::tempdir_in(ctx.scratch())?;
+        let project = deps_project(ctx);
+        let rig = deps_rig(&project.git, dir.path());
+        let start = Instant::now();
+        rig.open();
+        rig.settle();
+        let took = start.elapsed();
+        deps_done(&rig)?;
+        // The closure and the worktree's one file.
+        let extracted = rig.indexer.stats().extractions;
+        if extracted != project.closure + 1 {
+            return Err(BenchError::new(format!(
+                "{extracted} extractions for a closure of {}",
+                project.closure
+            )));
+        }
+        samples.push(took);
+    }
+    Ok(vec![Measured::new(
+        "code_intel/deps_ts_project",
+        Value::Time(lectern_bench::Samples(samples)),
+    )])
+}
+
+fn deps_identity(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let dir = tempfile::tempdir_in(ctx.scratch())?;
+    let project = deps_project(ctx);
+    {
+        let rig = deps_rig(&project.git, dir.path());
+        rig.open();
+        rig.settle();
+        deps_done(&rig)?;
+    }
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(10, 1) {
+        let rig = deps_rig(&project.git, dir.path());
+        rig.open();
+        rig.settle();
+        deps_done(&rig)?;
+        let extracted = rig.indexer.stats().extractions;
+        if extracted != 0 {
+            return Err(BenchError::new(format!("{extracted} extractions")));
+        }
+        // The identity tasks of this open (the project's open itself,
+        // its worktree comparison and tiers 3 and 4 are other budgets').
+        let runs = rig.indexer.deps_identity_times(&rig.git.key());
+        if runs.is_empty() {
+            return Err(BenchError::new("no identity task ran"));
+        }
+        samples.push(runs.iter().sum());
+    }
+    Ok(vec![Measured::new(
+        "code_intel/deps_identity",
         Value::Time(lectern_bench::Samples(samples)),
     )])
 }

@@ -4,23 +4,80 @@
 //! ([`DefaultRules`]); #18 (Java) and #19 (TS / JS) add implementations in
 //! this crate.
 
-use lectern_services::code_intel::{Binding, Candidate, DefinitionRef};
-use lectern_services::project::{FileList, Package, RelPath};
+use std::sync::Arc;
+
+use lectern_services::code_intel::{Binding, Candidate, DefinitionRef, DepOrigin};
+use lectern_services::project::{BlobId, FileList, Package, RelPath};
 
 use crate::LangName;
+use crate::deps::DepFile;
 use crate::extract::Extraction;
 use crate::map::LiveMap;
 use crate::site::{ParsedFile, Site};
 
+/// A dependency file's extraction and the OID of the bytes read.
+pub(crate) type DepExtract<'a> = &'a dyn Fn(&DepTarget) -> Option<(Arc<Extraction>, BlobId)>;
+
 /// What a resolver reads: the query's snapshot. It never does IO itself;
-/// `extraction` gives a path's extraction (a cache hit or extracted now).
-/// #17's empty rules read none of it; #18 and #19 do.
+/// `extraction` gives a path's extraction (a cache hit or extracted now),
+/// `resolve_dep` and `extract_dep` a bare module name's dependency file and
+/// its extraction ([`ResolveContext::dependency`]). #17's empty rules read
+/// none of it; #18 and #19 do.
 #[allow(dead_code, reason = "read by the resolvers of #18 and #19")]
 pub(crate) struct ResolveContext<'a> {
     pub map: &'a LiveMap,
     pub files: &'a FileList,
     pub packages: Option<&'a [Package]>,
     pub extraction: &'a dyn Fn(&str) -> Option<Extraction>,
+    pub resolve_dep: &'a dyn Fn(&str, &str) -> Option<DepTarget>,
+    pub extract_dep: DepExtract<'a>,
+}
+
+#[allow(
+    dead_code,
+    reason = "called by #19's TS resolver (and the tests' resolver)"
+)]
+impl ResolveContext<'_> {
+    /// The dependency file a bare module name (`react`, `@types/node`,
+    /// `lodash/fp`) resolves to from `subproject` (relative to the worktree
+    /// root): the package by the dependency tier's lookup rules, its
+    /// declaration entry (or the subpath's file), read only through the
+    /// session's dependency roots (ADR 0033). Blocking (manifests, stats);
+    /// in a query's task only. None when not found, outside the roots or of
+    /// an extension not allowed.
+    pub(crate) fn dependency(&self, specifier: &str, subproject: &str) -> Option<DepTarget> {
+        (self.resolve_dep)(specifier, subproject)
+    }
+
+    /// A dependency file's extraction and the OID of the bytes read: a
+    /// `code_intel.deps` unit when stored, else read through its root and
+    /// extracted now (the interactive deadline, the background size limit),
+    /// queued to be written there.
+    pub(crate) fn dependency_extraction(
+        &self,
+        target: &DepTarget,
+    ) -> Option<(Arc<Extraction>, BlobId)> {
+        (self.extract_dep)(target)
+    }
+}
+
+/// A file in a dependency root (ADR 0033): its package, and the file built
+/// by the session's `Roots`.
+#[derive(Clone, Debug)]
+pub(crate) struct DepTarget {
+    pub origin: Arc<DepOrigin>,
+    pub file: DepFile,
+}
+
+/// Where an import goes.
+#[allow(dead_code, reason = "the variants are #18's and #19's")]
+pub(crate) enum ImportTarget {
+    /// A file of the worktree (a relative import, tsconfig `paths`, a
+    /// workspace package).
+    Worktree(RelPath),
+    /// A bare module name resolved into a dependency root
+    /// ([`ResolveContext::dependency`]).
+    Dependency(DepTarget),
 }
 
 /// The names one import brings in.
@@ -36,7 +93,7 @@ pub(crate) enum ImportedNames {
 
 /// One import of the current file.
 pub(crate) struct Import {
-    pub target: RelPath,
+    pub target: ImportTarget,
     pub names: ImportedNames,
 }
 

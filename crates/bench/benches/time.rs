@@ -67,6 +67,8 @@ const BENCHES: &[Bench] = &[
     code_intel::DISK_100K,
     code_intel::REREAD_CRLF_1000,
     code_intel::WINDOW_CHAIN_16MIB,
+    code_intel::DEPS_TS_PROJECT,
+    code_intel::DEPS_IDENTITY,
     code_intel_query::GOTO_INDEXED,
     code_intel_query::GOTO_UNCACHED,
     code_intel_query::GOTO_POPULAR,

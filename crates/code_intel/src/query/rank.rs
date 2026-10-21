@@ -92,7 +92,7 @@ impl Ranker<'_> {
     pub fn tier(
         &self,
         path: &str,
-        origin: TextOrigin,
+        origin: &TextOrigin,
         oid: BlobId,
         imported: bool,
     ) -> CandidateTier {
@@ -101,7 +101,12 @@ impl Ranker<'_> {
         };
         // Every tier needs what it compares with to be known: an absent
         // current text, package or sub-project matches nothing.
-        if path == from && self.current.is_some_and(|c| c == (origin, oid)) {
+        if path == from
+            && self
+                .current
+                .as_ref()
+                .is_some_and(|(o, c)| o == origin && *c == oid)
+        {
             return CandidateTier::CurrentFile;
         }
         if imported {

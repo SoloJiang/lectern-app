@@ -36,7 +36,7 @@ use crate::extract::{
 };
 use crate::index::{Inner, Scanned};
 use crate::map::Effective;
-use crate::resolve::{CandidateDraft, ResolveContext};
+use crate::resolve::{CandidateDraft, ImportTarget, ResolveContext};
 use crate::site::{LocalBinding, ParseError, ParsedFile, Site, accepts};
 use crate::store::{NAME_IN_LIMIT, NAME_PAGE, NamePager, StoredDef, Version};
 use crate::{DefKind, LangName};
@@ -58,7 +58,7 @@ struct Step1 {
 }
 
 pub(crate) fn loc_key(l: &Location) -> LocKey {
-    (l.origin, l.path.clone(), l.oid, l.line, l.column)
+    (l.origin.clone(), l.path.clone(), l.oid, l.line, l.column)
 }
 
 /// One file's definitions for a query, and whether their byte offsets go to
@@ -135,6 +135,14 @@ pub(crate) struct Prepared {
     /// The definitions a lookup cut by the time box did not read (an upper
     /// bound, `Store::defs_left`): counted as unsearched.
     pub left: u64,
+    /// Step 3's lookup in `code_intel.deps` when the first batch did not
+    /// read every page (「依赖层」「查询里的依赖」): the rest after the
+    /// project's pages, in the same time box, never counted unsearched.
+    pub dep_pager: Option<NamePager>,
+    /// `code_intel.deps` units the candidates came from, marked used.
+    pub dep_units: Vec<Unit>,
+    /// Step 2's dependency files extracted on demand, to be written.
+    pub dep_scanned: Vec<super::deps::DepScanned>,
 }
 
 impl Prepared {
@@ -227,7 +235,7 @@ pub(crate) fn here(
     Location {
         worktree: at.worktree.clone(),
         path: at.path.clone(),
-        origin: at.origin,
+        origin: at.origin.clone(),
         oid: at.oid,
         line,
         column,
@@ -279,11 +287,15 @@ impl Inner {
     ) -> Ranker<'a> {
         let rules = lang.map(|l| self.resolver(l));
         let none = |_: &str| None;
+        let no_dep = |_: &str, _: &str| None;
+        let no_dep_extraction = |_: &crate::resolve::DepTarget| None;
         let ctx = ResolveContext {
             map: &snap.map,
             files: snap.map.base.files(),
             packages: Some(&snap.packages),
             extraction: &none,
+            resolve_dep: &no_dep,
+            extract_dep: &no_dep_extraction,
         };
         let package = from.and_then(|f| {
             rules
@@ -499,7 +511,12 @@ impl Inner {
         };
         let ranker = {
             let _t = crate::phases::span("ranker");
-            self.ranker(snap, Some(&at.path), Some((at.origin, at.oid)), Some(&name))
+            self.ranker(
+                snap,
+                Some(&at.path),
+                Some((at.origin.clone(), at.oid)),
+                Some(&name),
+            )
         };
         let mut prepared = Prepared {
             symbol,
@@ -516,6 +533,9 @@ impl Inner {
             view: snap.view,
             pager: None,
             left: 0,
+            dep_pager: None,
+            dep_units: Vec::new(),
+            dep_scanned: Vec::new(),
         };
         // The current text is read and parsed: its definitions are step 1's
         // (the map's file when the map has that content at the path). A
@@ -632,11 +652,20 @@ impl Inner {
             Some((eff, key, done))
         };
         let extraction = |path: &str| load(path).and_then(|(_, _, e)| e.map(|(e, _)| e));
+        // Bare module names into the dependency roots, extracted on demand
+        // (「依赖层」按需), written to `code_intel.deps` afterwards.
+        let dep_written: RefCell<Vec<super::deps::DepScanned>> = RefCell::default();
+        let resolve_dep = |spec: &str, sub: &str| self.resolve_dependency(snap, spec, sub);
+        let extract_dep = |t: &crate::resolve::DepTarget| {
+            self.extract_dependency(snap, t, until, cancel, &mut dep_written.borrow_mut())
+        };
         let ctx = ResolveContext {
             map: &snap.map,
             files: snap.map.base.files(),
             packages: Some(&snap.packages),
             extraction: &extraction,
+            resolve_dep: &resolve_dep,
+            extract_dep: &extract_dep,
         };
         let imports = parsed
             .as_ref()
@@ -646,7 +675,44 @@ impl Inner {
             let Some(exported) = import.exported(&site.name) else {
                 continue;
             };
-            let Some((eff, key, Some((found, canonical)))) = load(&import.target) else {
+            let target = match import.target {
+                ImportTarget::Worktree(path) => path,
+                ImportTarget::Dependency(t) => {
+                    // A dependency target's exported definitions: `Imported`,
+                    // `Bound(Import)`, at the file in its root.
+                    let Some((found, key)) = extract_dep(&t) else {
+                        continue;
+                    };
+                    let path: RelPath = Arc::from(t.file.path());
+                    for def in &found.defs {
+                        if *def.name != *exported || def.visibility == Visibility::File {
+                            continue;
+                        }
+                        if !accepts(&lang, site.syntax, def.kind) {
+                            continue;
+                        }
+                        let location = Location {
+                            worktree: snap.worktree.clone(),
+                            path: path.clone(),
+                            origin: TextOrigin::Dependency((*t.origin).clone()),
+                            oid: key,
+                            line: def.line,
+                            column: def.column,
+                            byte: Some(def.byte),
+                            end_line: def.end_line,
+                        };
+                        prepared.push(Candidate {
+                            in_review: false,
+                            definition: def_ref(def, &name, false, location),
+                            tier: CandidateTier::Imported,
+                            evidence: Evidence::Bound(Binding::Import),
+                            source: CandidateSource::Resolver,
+                        });
+                    }
+                    continue;
+                }
+            };
+            let Some((eff, key, Some((found, canonical)))) = load(&target) else {
                 continue;
             };
             for def in &found.defs {
@@ -677,7 +743,7 @@ impl Inner {
         }
         if let Some(bound) = parsed.as_ref().and_then(|p| rules.bind(&site, p, &ctx)) {
             let l = &bound.definition.location;
-            let tier = ranker.tier(&l.path, l.origin, l.oid, false);
+            let tier = ranker.tier(&l.path, &l.origin, l.oid, false);
             prepared.push(Candidate {
                 in_review: ranker.in_review(&l.path),
                 tier,
@@ -688,6 +754,7 @@ impl Inner {
         }
         let (units, scanned, extracted, account) = pending.into_inner();
         drop(step2);
+        prepared.dep_scanned.extend(dep_written.into_inner());
         prepared.units.extend(units);
         prepared.scanned.extend(scanned);
         prepared.extracted = extracted;
@@ -755,7 +822,86 @@ impl Inner {
             }
         }
         prepared.pager = (!pager.done()).then_some(pager);
-        self.add_index_candidates(snap, from, ranker, prepared, stored)
+        let added = self.add_index_candidates(snap, from, ranker, prepared, stored);
+        // The dependencies' first page, after the project's first page and
+        // nearest files (ADR 0033): tier `Dependency`, last.
+        if snap.deps.len() > 0 {
+            let _t = crate::phases::span("3 dependency lookup (SQL)");
+            let mut dep_pager = NamePager::new(&name, &versions);
+            let stored = snap
+                .project
+                .deps
+                .next_defs(&mut dep_pager, NAME_PAGE)
+                .unwrap_or_default();
+            self.add_dep_candidates(snap, from, prepared, stored);
+            prepared.dep_pager = (!dep_pager.done()).then_some(dep_pager);
+        }
+        added
+    }
+
+    /// The dependency candidates of `stored` (definitions by name in
+    /// `code_intel.deps`) at every file the dependency map has for their
+    /// OID (in the language its name gives), visible from `from` and of a
+    /// kind the site accepts: tier `Dependency`, by package, path and line,
+    /// after those already there. Whether it added some.
+    fn add_dep_candidates(
+        &self,
+        snap: &Snap,
+        from: &str,
+        prepared: &mut Prepared,
+        stored: Vec<StoredDef>,
+    ) -> bool {
+        let mut found = Vec::new();
+        for s in stored {
+            if !accepts(&prepared.lang, prepared.site.syntax, s.def.kind) {
+                continue;
+            }
+            let mut used = false;
+            for e in snap.deps.paths(&s.oid) {
+                let lang = crate::deps::dep_lang(&snap.table, &e.path);
+                if lang.is_none_or(|l| *l.name() != s.lang) {
+                    continue;
+                }
+                if !visible(s.def.visibility, &e.path, from) {
+                    continue;
+                }
+                used = true;
+                let location = Location {
+                    worktree: snap.worktree.clone(),
+                    path: Arc::from(e.path),
+                    origin: TextOrigin::Dependency((*e.origin).clone()),
+                    oid: s.oid,
+                    line: s.def.line,
+                    column: s.def.column,
+                    byte: s.byte(),
+                    end_line: s.def.end_line,
+                };
+                found.push(Candidate {
+                    tier: CandidateTier::Dependency,
+                    in_review: false,
+                    definition: def_ref(&s.def, &s.lang, false, location),
+                    evidence: Evidence::NameOnly,
+                    source: CandidateSource::Index,
+                });
+            }
+            if used {
+                prepared.dep_units.push(s.unit);
+            }
+        }
+        // Within the tier: by package name, then path (「候选的分层与过滤」).
+        found.sort_by_cached_key(|c| {
+            let l = &c.definition.location;
+            let package = match &l.origin {
+                TextOrigin::Dependency(o) => o.package.clone(),
+                _ => Arc::from(""),
+            };
+            (package, l.path.clone(), l.line, l.column)
+        });
+        let mut added = false;
+        for c in found {
+            added |= prepared.push(c);
+        }
+        added
     }
 
     /// The candidates of `stored` (stored definitions by name) into
@@ -799,6 +945,54 @@ impl Inner {
     /// search's) is due: then the rows not read count as unsearched
     /// (`Prepared::left`). False when the query stopped.
     fn rest_of_lookup(&self, run: &Run, snap: &Snap, at: &TextRef, p: &mut Prepared) -> bool {
+        if !self.rest_of_project_lookup(run, snap, at, p) {
+            return false;
+        }
+        self.rest_of_dep_lookup(run, snap, at, p)
+    }
+
+    /// The dependency pages the first batch did not read, after the
+    /// project's, in the same time box; what the box leaves is not counted
+    /// (dependencies are not part of any completeness, 「依赖层」). False
+    /// when the query stopped.
+    fn rest_of_dep_lookup(&self, run: &Run, snap: &Snap, at: &TextRef, p: &mut Prepared) -> bool {
+        let Some(mut pager) = p.dep_pager.take() else {
+            return true;
+        };
+        let clock = self.watchdog.clock().clone();
+        while !pager.done() {
+            if run.stopped(snap) {
+                return false;
+            }
+            if clock.now() >= run.until {
+                break;
+            }
+            let stored = snap
+                .project
+                .deps
+                .next_defs(&mut pager, NAME_PAGE)
+                .unwrap_or_default();
+            if self.add_dep_candidates(snap, &at.path, p, stored) {
+                let all: Arc<[Candidate]> = p.candidates.clone().into();
+                let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&p.site));
+                self.publish_in(snap, run.id, |r| {
+                    r.candidates = all;
+                    r.jump = jump;
+                    r.preselect = preselect;
+                });
+            }
+        }
+        true
+    }
+
+    /// The project's pages of step 3's lookup (`rest_of_lookup`).
+    fn rest_of_project_lookup(
+        &self,
+        run: &Run,
+        snap: &Snap,
+        at: &TextRef,
+        p: &mut Prepared,
+    ) -> bool {
         let Some(mut pager) = p.pager.take() else {
             return true;
         };
@@ -806,7 +1000,7 @@ impl Inner {
         let ranker = self.ranker(
             snap,
             Some(&at.path),
-            Some((at.origin, at.oid)),
+            Some((at.origin.clone(), at.oid)),
             Some(p.lang.name()),
         );
         let clock = self.watchdog.clock().clone();
@@ -905,7 +1099,7 @@ impl Inner {
                 };
                 out.push(CandidateDraft {
                     candidate: Candidate {
-                        tier: ranker.tier(&eff.path, TextOrigin::Worktree, s.oid, false),
+                        tier: ranker.tier(&eff.path, &TextOrigin::Worktree, s.oid, false),
                         in_review: ranker.in_review(&eff.path),
                         definition: def_ref(&s.def, &s.lang, false, location),
                         evidence: Evidence::NameOnly,
@@ -975,6 +1169,11 @@ impl Inner {
             }
         };
         let snap = again.as_ref().unwrap_or(snap);
+        self.store_dep_scanned(
+            &snap.project,
+            snap.session,
+            std::mem::take(&mut p.dep_scanned),
+        );
         {
             let _t = crate::phases::span("publish first batch");
             let (jump, preselect) = jump_and_preselect(&p.candidates, Some(&p.site));
@@ -1029,7 +1228,7 @@ impl Inner {
             let ranker = self.ranker(
                 snap,
                 Some(&at.path),
-                Some((at.origin, at.oid)),
+                Some((at.origin.clone(), at.oid)),
                 Some(p.lang.name()),
             );
             let name = p.symbol.name.clone();
@@ -1088,7 +1287,7 @@ impl Inner {
                             end_line: def.end_line,
                         };
                         found.push(Candidate {
-                            tier: ranker.tier(&eff.path, TextOrigin::Worktree, key, false),
+                            tier: ranker.tier(&eff.path, &TextOrigin::Worktree, key, false),
                             in_review: ranker.in_review(&eff.path),
                             definition: def_ref(def, eff.lang.name(), false, location),
                             evidence: Evidence::NameOnly,
@@ -1165,6 +1364,12 @@ impl Inner {
         crate::phases::count("touched units", p.units.len() as u64);
         crate::index::bump(&self.stats.touched, p.units.len());
         snap.project.store.touch(&p.units);
+        if !p.dep_units.is_empty() {
+            p.dep_units.sort_by_key(|u| u.id());
+            p.dep_units.dedup();
+            crate::index::bump(&self.stats.touched, p.dep_units.len());
+            snap.project.deps.touch(&p.dep_units);
+        }
     }
 
     /// Ends a query whose view moved after it published (「查询的视图」):
@@ -1390,7 +1595,7 @@ impl NamedFound {
                     continue;
                 }
                 self.candidates.push(Candidate {
-                    tier: ranker.tier(&eff.path, TextOrigin::Worktree, s.oid, false),
+                    tier: ranker.tier(&eff.path, &TextOrigin::Worktree, s.oid, false),
                     in_review: ranker.in_review(&eff.path),
                     definition: def_ref(&s.def, &s.lang, false, location),
                     evidence: Evidence::NameOnly,

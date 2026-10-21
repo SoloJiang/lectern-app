@@ -517,7 +517,7 @@ impl Resolver for TestResolver {
 
     fn imports(&self, _file: &ParsedFile, _ctx: &ResolveContext<'_>) -> Vec<Import> {
         vec![Import {
-            target: "b.ts".into(),
+            target: crate::resolve::ImportTarget::Worktree("b.ts".into()),
             names: ImportedNames::Named(vec![
                 ("local".into(), "helper".into()),
                 // `b.ts` exports no `missing`: step 2 reads it and finds
@@ -677,7 +677,7 @@ fn goto_object_origin_reads_the_blob() {
     let callers: Vec<(TextOrigin, u32)> = r
         .callers
         .iter()
-        .map(|c| (c.location.origin, c.location.line))
+        .map(|c| (c.location.origin.clone(), c.location.line))
         .collect();
     assert_eq!(callers, [(TextOrigin::Object, 2)]);
 }
@@ -1051,7 +1051,12 @@ fn goto_object_side_parses_only_its_text() {
         .iter()
         .map(|c| {
             let l = &c.definition.location;
-            (l.path.to_string(), l.origin, l.line, c.definition.local)
+            (
+                l.path.to_string(),
+                l.origin.clone(),
+                l.line,
+                c.definition.local,
+            )
         })
         .collect();
     assert_eq!(

@@ -239,6 +239,9 @@ impl Inner {
         // date with them.
         drop(held);
         self.enqueue_focus(&project);
+        // The dependency tier's identities, once there is a map
+        // (「打开项目与热启动」1, 「依赖层」).
+        self.deps_check(&project);
         self.kick_batch();
         self.names_changed(&project);
         self.warm_site_queries(&project);

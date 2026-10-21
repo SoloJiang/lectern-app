@@ -108,6 +108,36 @@ fn batch_peak(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
+/// The live bytes of a dependency map of 20 000 files (「依赖层」, ADR
+/// 0033): 40 packages of 500 indexed files each, paths as long as the
+/// synthetic TS project's; the path tables are built before and not
+/// counted (they are the cache's rows, held while the tier runs).
+pub const DEPS_MAP_BYTES: Bench = Bench {
+    id: "code_intel/deps_map_bytes",
+    run: deps_map_bytes,
+};
+
+fn deps_map_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use lectern_code_intel::testing::npm::DepTables;
+
+    let packages = ctx.scale(40, 4);
+    let tables = DepTables::new(packages, 500);
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(SAMPLES, 1) {
+        let before = CountingAlloc::live();
+        let map = tables.map();
+        samples.push(CountingAlloc::live().saturating_sub(before) as u64);
+        if map.len() != packages * 500 {
+            return Err(BenchError::new(format!("{} files in the map", map.len())));
+        }
+        drop(map);
+    }
+    Ok(vec![Measured::new(
+        "code_intel/deps_map_bytes",
+        Value::Bytes(samples),
+    )])
+}
+
 /// The peak of live bytes while an opened 16 MiB TypeScript file's window
 /// chain runs (「大文件」, ADR 0034), from the focus to the `Windowed`
 /// marker: the streamed hash's 1 MiB range, or one 64 KiB window and its

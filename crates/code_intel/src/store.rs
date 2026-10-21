@@ -11,6 +11,14 @@
 //! checks and hints look at the whole extraction only; lookups by name and
 //! the name table read window units like any other `Done` unit.
 //!
+//! The dependency tier's units (ADR 0033, 「依赖层」) are in a second
+//! namespace, `code_intel.deps`, with the same tables under the prefix `cd_`
+//! (`cd_ext`, `cd_def`, `cd_ref`) and three more: the module specifiers of
+//! each unit (`cd_spec`, the closure's edges) and the packages' path tables
+//! (`cd_pkg`, `cd_pkg_file`, `deps::table`). Both sets of statements come
+//! from one macro by prefix ([`Sql`]); the code here serves either, by the
+//! [`Store`]'s `TableSet`.
+//!
 //! All calls but [`Store::new`], [`Store::evictions`] and [`Store::write`]
 //! block on SQLite: executor tasks only. SQL runs through `lectern-cache`'s
 //! custom-table interface; no rusqlite type appears here.
@@ -21,7 +29,7 @@ use lectern_cache::{
 };
 use lectern_services::project::BlobId;
 
-use crate::extract::{Def, ExtractStatus, Extraction, Lang, Visibility};
+use crate::extract::{Def, ExtractStatus, Extraction, Lang, SpecKind, Specifier, Visibility};
 use crate::{DEF_KINDS, DefKind, LangName};
 
 /// The units' namespace. The version changes with the tables or the units'
@@ -42,11 +50,24 @@ pub const NAMESPACE: Namespace = Namespace {
     compression: Compression::None,
 };
 
+/// The dependency tier's namespace (ADR 0033): the units of dependency
+/// files, their module specifiers and the packages' path tables.
+pub const DEPS_NAMESPACE: Namespace = Namespace {
+    name: "code_intel.deps",
+    version: 1,
+    compression: Compression::None,
+};
+
 /// The part of a whole file's extraction.
 pub const WHOLE: i64 = -1;
 
-/// Most bytes of `code_intel.tags` units in one partition.
-pub const QUOTA: u64 = 256 << 20;
+/// Most bytes of `code_intel.tags` units in one partition: 224 MiB, with
+/// `code_intel.deps`'s [`DEPS_QUOTA`] the 256 MiB of ADR 0033.
+pub const QUOTA: u64 = 224 << 20;
+
+/// Most bytes of `code_intel.deps` units in one partition (ADR 0033); the
+/// dependency units evict only dependency units.
+pub const DEPS_QUOTA: u64 = 32 << 20;
 
 /// OIDs per existence-check query: the fixed `IN (…)` of [`EXISTS`].
 pub const EXISTS_BATCH: usize = 500;
@@ -68,14 +89,48 @@ pub const NAMES_SCAN_PAGE: usize = 4096;
 /// ([`Store::defs_by_name_in`]).
 pub const NAME_IN_LIMIT: usize = 256;
 
-pub(crate) const SCHEMA: &[&str] = &[
-    // `part`: -1 for the whole file's extraction, the window's start for a
-    // window unit; `part_end`, `part_line`, `part_col`: a window's end (the
-    // next window's start) and the line and byte column of its start, for
-    // resuming the chain; on the `Windowed` marker `part_end` is the file's
-    // length (where a complete chain ends). `canonical`: the bytes
-    // extracted are `oid`'s content, so `ci_def.byte` goes to views.
-    "CREATE TABLE ci_ext (
+/// `head`, then [`EXISTS_BATCH`] placeholders `?` separated by commas and
+/// closed by `)`, then `tail`: a statement's static text with all of an
+/// `IN (…)` list's placeholders (`N` is its length).
+const fn with_placeholders<const N: usize>(head: &str, tail: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    let head = head.as_bytes();
+    let mut i = 0;
+    while i < head.len() {
+        out[i] = head[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < EXISTS_BATCH {
+        out[i] = b'?';
+        out[i + 1] = if j + 1 < EXISTS_BATCH { b',' } else { b')' };
+        i += 2;
+        j += 1;
+    }
+    let tail = tail.as_bytes();
+    let mut k = 0;
+    while k < tail.len() {
+        out[i] = tail[k];
+        i += 1;
+        k += 1;
+    }
+    out
+}
+
+/// The tables of one namespace, by table-name prefix (`ci` for
+/// `code_intel.tags`, `cd` for `code_intel.deps`), and any more statements.
+macro_rules! schema_for {
+    ($p:literal $(, $extra:expr)* $(,)?) => {
+        &[
+            // `part`: -1 for the whole file's extraction, the window's start
+            // for a window unit; `part_end`, `part_line`, `part_col`: a
+            // window's end (the next window's start) and the line and byte
+            // column of its start, for resuming the chain; on the `Windowed`
+            // marker `part_end` is the file's length (where a complete chain
+            // ends). `canonical`: the bytes extracted are `oid`'s content, so
+            // `ci_def.byte` goes to views.
+            concat!(
+                "CREATE TABLE ", $p, "_ext (
        unit      INTEGER PRIMARY KEY REFERENCES entry (id) ON DELETE CASCADE,
        oid       BLOB    NOT NULL,
        lang      TEXT    NOT NULL,
@@ -87,8 +142,10 @@ pub(crate) const SCHEMA: &[&str] = &[
        part_line INTEGER,
        part_col  INTEGER,
        canonical INTEGER NOT NULL,
-       UNIQUE (oid, lang, grammar, query, part))",
-    "CREATE TABLE ci_def (
+       UNIQUE (oid, lang, grammar, query, part))"
+            ),
+            concat!(
+                "CREATE TABLE ", $p, "_def (
        unit     INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
        name     TEXT    NOT NULL,
        kind     INTEGER NOT NULL,
@@ -98,194 +155,263 @@ pub(crate) const SCHEMA: &[&str] = &[
        end_line INTEGER NOT NULL,
        scope    TEXT,
        flags    INTEGER NOT NULL,
-       arity    INTEGER)",
-    // With the unit and the kind: a name's rows in (unit, kind, rowid) order
-    // without reading the table (the pages of a lookup, the count of the
-    // rows left), one seek per unit for the lookup in given units, and the
-    // name table's (name, unit, kind) in index order.
-    "CREATE INDEX ci_def_name ON ci_def (name COLLATE NOCASE, unit, kind)",
-    "CREATE INDEX ci_def_unit ON ci_def (unit)",
-    "CREATE TABLE ci_ref (
+       arity    INTEGER)"
+            ),
+            // With the unit and the kind: a name's rows in (unit, kind,
+            // rowid) order without reading the table (the pages of a lookup,
+            // the count of the rows left), one seek per unit for the lookup
+            // in given units, and the name table's (name, unit, kind) in
+            // index order.
+            concat!(
+                "CREATE INDEX ", $p, "_def_name ON ", $p,
+                "_def (name COLLATE NOCASE, unit, kind)"
+            ),
+            concat!("CREATE INDEX ", $p, "_def_unit ON ", $p, "_def (unit)"),
+            concat!(
+                "CREATE TABLE ", $p, "_ref (
        name TEXT    NOT NULL,
        unit INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
-       PRIMARY KEY (name, unit)) WITHOUT ROWID",
-    "CREATE INDEX ci_ref_unit ON ci_ref (unit)",
-];
+       PRIMARY KEY (name, unit)) WITHOUT ROWID"
+            ),
+            concat!("CREATE INDEX ", $p, "_ref_unit ON ", $p, "_ref (unit)"),
+            $($extra,)*
+        ]
+    };
+}
 
-pub(crate) const INSERT_EXT: &str = "INSERT INTO ci_ext
+/// The statements of one namespace's tables (`schema_for!`), by prefix.
+macro_rules! sql_for {
+    ($p:literal, specs: $specs:expr) => {
+        Sql {
+            specs: $specs,
+            insert_ext: concat!(
+                "INSERT INTO ", $p, "_ext
        (unit, oid, lang, grammar, query, status, part, part_end, part_line, part_col, canonical)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
-pub(crate) const INSERT_DEF: &str =
-    "INSERT INTO ci_def (unit, name, kind, line, col, byte, end_line, scope, flags, arity)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
-/// References are deduplicated by the extraction; `OR IGNORE` keeps a
-/// duplicate from rolling the whole batch back.
-pub(crate) const INSERT_REF: &str = "INSERT OR IGNORE INTO ci_ref (name, unit) VALUES (?1, ?2)";
-
-const EXISTS_HEAD: &str = "SELECT unit, oid, status, part_end FROM ci_ext
-     WHERE part = -1 AND lang = ?1 AND grammar = ?2 AND query = ?3 AND oid IN (";
-/// `?` takes the number after the largest so far: `?4` … `?503`.
-const EXISTS_LEN: usize = EXISTS_HEAD.len() + 2 * EXISTS_BATCH;
-const EXISTS_BYTES: [u8; EXISTS_LEN] = {
-    let mut out = [0u8; EXISTS_LEN];
-    let head = EXISTS_HEAD.as_bytes();
-    let mut i = 0;
-    while i < head.len() {
-        out[i] = head[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < EXISTS_BATCH {
-        out[i] = b'?';
-        out[i + 1] = if j + 1 < EXISTS_BATCH { b',' } else { b')' };
-        i += 2;
-        j += 1;
-    }
-    out
-};
-/// The existence check: whole-file units (`part = -1`) of one version
-/// triple among up to [`EXISTS_BATCH`] OIDs, with a `Windowed` marker's
-/// file length. Static text with all 500 placeholders; unused ones are
-/// bound to NULL, which matches nothing.
-pub(crate) const EXISTS: &str = match std::str::from_utf8(&EXISTS_BYTES) {
-    Ok(sql) => sql,
-    Err(_) => panic!("the existence check is ASCII"),
-};
-
-/// One page of the definitions by name (jump step 3, `Named`): the next
-/// `?5` index rows of the name (any case, version or status) after the
-/// cursor (unit, kind, rowid) `?2, ?3, ?4`, in `ci_def_name`'s order. The
-/// limit counts the rows the index gives, not those that pass: every raw row
-/// comes out once (the joins are `LEFT`), its unit's `ci_ext` row when it is
-/// `Done` and its definition then. The caller keeps the exact name and the
-/// current versions, and goes on after the last raw row; fewer than `?5`
-/// raw rows end the lookup. So one statement reads at most `?5` rows of the
-/// name whatever is stale, in another language or another case (plus,
-/// within one (unit, kind), the rows before the cursor: SQLite seeks
-/// (unit, kind) and filters the rowid).
-pub(crate) const DEFS_PAGE: &str =
-    "SELECT d.name, d.kind, d.line, d.col, d.byte, d.end_line, d.scope, d.flags, d.arity,
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+            ),
+            insert_def: concat!(
+                "INSERT INTO ", $p, "_def (unit, name, kind, line, col, byte, end_line, scope, flags, arity)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+            ),
+            insert_ref: concat!(
+                "INSERT OR IGNORE INTO ", $p, "_ref (name, unit) VALUES (?1, ?2)"
+            ),
+            exists: {
+                const HEAD: &str = concat!(
+                    "SELECT unit, oid, status, part_end FROM ", $p, "_ext
+     WHERE part = -1 AND lang = ?1 AND grammar = ?2 AND query = ?3 AND oid IN ("
+                );
+                // `?` takes the number after the largest so far: `?4` …
+                // `?503`.
+                const LEN: usize = HEAD.len() + 2 * EXISTS_BATCH;
+                const BYTES: [u8; LEN] = with_placeholders::<LEN>(HEAD, "");
+                match std::str::from_utf8(&BYTES) {
+                    Ok(sql) => sql,
+                    Err(_) => panic!("the existence check is ASCII"),
+                }
+            },
+            defs_page: concat!(
+                "SELECT d.name, d.kind, d.line, d.col, d.byte, d.end_line, d.scope, d.flags, d.arity,
             e.oid, e.lang, e.grammar, e.query, raw.unit, raw.kind, raw.id, e.canonical
-     FROM (SELECT rowid AS id, unit, kind FROM ci_def INDEXED BY ci_def_name
+     FROM (SELECT rowid AS id, unit, kind FROM ", $p, "_def INDEXED BY ", $p, "_def_name
            WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)
            ORDER BY unit, kind, rowid LIMIT ?5) AS raw
-     LEFT JOIN ci_ext e ON e.unit = raw.unit AND e.status = 0
-     LEFT JOIN ci_def d ON d.rowid = raw.id AND e.unit IS NOT NULL";
-
-/// The rows named `?1` after the cursor `?2, ?3, ?4`, whatever their
-/// version and status: an upper bound of what a lookup cut short did not
-/// read. Read from `ci_def_name` alone.
-pub(crate) const DEFS_LEFT: &str = "SELECT count(*) FROM ci_def INDEXED BY ci_def_name
-     WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)";
-
-// `?14 > 0` (the limit, always positive) names `?14` before the OIDs, so
-// their bare `?` number from 15.
-const DEFS_IN_HEAD: &str =
-    "SELECT d.name, d.kind, d.line, d.col, d.byte, d.end_line, d.scope, d.flags, d.arity,
+     LEFT JOIN ", $p, "_ext e ON e.unit = raw.unit AND e.status = 0
+     LEFT JOIN ", $p, "_def d ON d.rowid = raw.id AND e.unit IS NOT NULL"
+            ),
+            defs_left: concat!(
+                "SELECT count(*) FROM ", $p, "_def INDEXED BY ", $p, "_def_name
+     WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)"
+            ),
+            defs_in: {
+                // `?14 > 0` (the limit, always positive) names `?14` before
+                // the OIDs, so their bare `?` number from 15.
+                const HEAD: &str = concat!(
+                    "SELECT d.name, d.kind, d.line, d.col, d.byte, d.end_line, d.scope, d.flags, d.arity,
             e.oid, e.lang, d.unit, e.canonical
-     FROM ci_ext e CROSS JOIN ci_def d INDEXED BY ci_def_name ON d.unit = e.unit
+     FROM ", $p, "_ext e CROSS JOIN ", $p, "_def d INDEXED BY ", $p, "_def_name ON d.unit = e.unit
      WHERE d.name = ?1 COLLATE NOCASE AND e.status = 0
        AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4)
          OR (e.lang = ?5 AND e.grammar = ?6 AND e.query = ?7)
          OR (e.lang = ?8 AND e.grammar = ?9 AND e.query = ?10)
          OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))
-       AND ?14 > 0 AND e.oid IN (";
-const DEFS_IN_TAIL: &str = " LIMIT ?14";
-/// `?` takes the number after the largest so far: `?15` … `?514`.
-const DEFS_IN_LEN: usize = DEFS_IN_HEAD.len() + 2 * EXISTS_BATCH + DEFS_IN_TAIL.len();
-const DEFS_IN_BYTES: [u8; DEFS_IN_LEN] = {
-    let mut out = [0u8; DEFS_IN_LEN];
-    let head = DEFS_IN_HEAD.as_bytes();
-    let mut i = 0;
-    while i < head.len() {
-        out[i] = head[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < EXISTS_BATCH {
-        out[i] = b'?';
-        out[i + 1] = if j + 1 < EXISTS_BATCH { b',' } else { b')' };
-        i += 2;
-        j += 1;
-    }
-    let tail = DEFS_IN_TAIL.as_bytes();
-    let mut k = 0;
-    while k < tail.len() {
-        out[i] = tail[k];
-        i += 1;
-        k += 1;
-    }
-    out
-};
-/// The definitions by name in the units of up to [`EXISTS_BATCH`] OIDs
-/// (`?15` …, unused ones NULL), at most `?14` rows: the jump's and
-/// `Named`'s first batch, from the files nearest the query (「候选的分层与
-/// 过滤」). Each OID is one seek in `ci_ext`'s key and one in `ci_def_name`
-/// (name, unit): the cost follows the files asked for, not how many units
-/// define the name.
-pub(crate) const DEFS_IN: &str = match std::str::from_utf8(&DEFS_IN_BYTES) {
-    Ok(sql) => sql,
-    Err(_) => panic!("the lookup in units is ASCII"),
-};
-/// One page of the units referring to a name (references step 1), exact
-/// names: the next `?3` rows of `ci_ref`'s key (name, unit) after unit
-/// `?2`, each with its unit's `ci_ext` row when `Done` (`LEFT`: every raw
-/// row comes out once). As [`DEFS_PAGE`]: the limit bounds the rows read,
-/// the caller keeps the current versions, fewer than `?3` end the lookup.
-pub(crate) const REFS_PAGE: &str = "SELECT e.oid, e.lang, e.grammar, e.query, raw.unit,
+       AND ?14 > 0 AND e.oid IN ("
+                );
+                const TAIL: &str = " LIMIT ?14";
+                // `?` takes the number after the largest so far: `?15` …
+                // `?514`.
+                const LEN: usize = HEAD.len() + 2 * EXISTS_BATCH + TAIL.len();
+                const BYTES: [u8; LEN] = with_placeholders::<LEN>(HEAD, TAIL);
+                match std::str::from_utf8(&BYTES) {
+                    Ok(sql) => sql,
+                    Err(_) => panic!("the lookup in units is ASCII"),
+                }
+            },
+            refs_page: concat!(
+                "SELECT e.oid, e.lang, e.grammar, e.query, raw.unit,
             e.part, e.part_end, e.part_line, e.part_col, e.canonical
-     FROM (SELECT unit FROM ci_ref WHERE name = ?1 AND unit > ?2 ORDER BY unit LIMIT ?3) AS raw
-     LEFT JOIN ci_ext e ON e.unit = raw.unit AND e.status = 0";
-/// The units referring to `?1` after unit `?2`, whatever their version and
-/// status: what a references lookup cut short by its time box did not read
-/// (an upper bound of those units). From `ci_ref`'s key alone.
-pub(crate) const REFS_LEFT: &str = "SELECT count(*) FROM ci_ref WHERE name = ?1 AND unit > ?2";
-/// Every `Done` unit with its version (the name table's first pass): one
-/// scan of `ci_ext`, the versions kept by the caller.
-pub(crate) const UNITS: &str =
-    "SELECT unit, oid, lang, grammar, query FROM ci_ext WHERE status = 0";
-/// The next `?5` entries of `ci_def_name` after the cursor (name, unit,
-/// kind, rowid) `?1` … `?4`, in the index's order (the name table's second
-/// pass, in pages): the rest of the cursor's name, then the names after it,
-/// merged in order without a sort. Covering: no table row is read.
-pub(crate) const NAMES_PAGE: &str =
-    "SELECT name, unit, kind, rowid FROM ci_def INDEXED BY ci_def_name
+     FROM (SELECT unit FROM ", $p, "_ref WHERE name = ?1 AND unit > ?2 ORDER BY unit LIMIT ?3) AS raw
+     LEFT JOIN ", $p, "_ext e ON e.unit = raw.unit AND e.status = 0"
+            ),
+            refs_left: concat!(
+                "SELECT count(*) FROM ", $p, "_ref WHERE name = ?1 AND unit > ?2"
+            ),
+            units: concat!(
+                "SELECT unit, oid, lang, grammar, query FROM ", $p, "_ext WHERE status = 0"
+            ),
+            names_page: concat!(
+                "SELECT name, unit, kind, rowid FROM ", $p, "_def INDEXED BY ", $p, "_def_name
        WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)
      UNION ALL
-     SELECT name, unit, kind, rowid FROM ci_def INDEXED BY ci_def_name
+     SELECT name, unit, kind, rowid FROM ", $p, "_def INDEXED BY ", $p, "_def_name
        WHERE name > ?1 COLLATE NOCASE
-     ORDER BY 1 COLLATE NOCASE, 2, 3, 4 LIMIT ?5";
-pub(crate) const EXT_OF_UNIT: &str = "SELECT status FROM ci_ext WHERE unit = ?1";
-/// In insertion order, which is the extraction's order.
-pub(crate) const DEFS_OF_UNIT: &str =
-    "SELECT name, kind, line, col, byte, end_line, scope, flags, arity FROM ci_def
-     WHERE unit = ?1 ORDER BY rowid";
-/// The window units of one key (`part >= 0`), by start: the unique index's
-/// order, no sort. A chain resumes at its first gap; a `Windowed` marker is
-/// believed only while its windows reach the file's end.
-pub(crate) const WINDOWS: &str =
-    "SELECT unit, part, part_end, part_line, part_col, status, canonical FROM ci_ext
+     ORDER BY 1 COLLATE NOCASE, 2, 3, 4 LIMIT ?5"
+            ),
+            ext_of_unit: concat!("SELECT status FROM ", $p, "_ext WHERE unit = ?1"),
+            defs_of_unit: concat!(
+                "SELECT name, kind, line, col, byte, end_line, scope, flags, arity FROM ", $p, "_def
+     WHERE unit = ?1 ORDER BY rowid"
+            ),
+            refs_of_unit: concat!(
+                "SELECT name FROM ", $p, "_ref WHERE unit = ?1 ORDER BY name"
+            ),
+            windows: concat!(
+                "SELECT unit, part, part_end, part_line, part_col, status, canonical FROM ", $p, "_ext
      WHERE oid = ?1 AND lang = ?2 AND grammar = ?3 AND query = ?4 AND part >= 0
-     ORDER BY part";
-pub(crate) const REFS_OF_UNIT: &str = "SELECT name FROM ci_ref WHERE unit = ?1 ORDER BY name";
+     ORDER BY part"
+            ),
+        }
+    };
+}
 
-pub(crate) const STATEMENTS: &[&str] = &[
-    INSERT_EXT,
-    INSERT_DEF,
-    INSERT_REF,
-    EXISTS,
-    DEFS_PAGE,
-    DEFS_LEFT,
-    DEFS_IN,
-    REFS_PAGE,
-    REFS_LEFT,
-    UNITS,
-    NAMES_PAGE,
-    EXT_OF_UNIT,
-    DEFS_OF_UNIT,
-    REFS_OF_UNIT,
-    WINDOWS,
-];
+/// One namespace's statements over its tables ([`schema_for!`]): the same
+/// statements for `code_intel.tags` (`ci_*`) and `code_intel.deps`
+/// (`cd_*`), so the code of this module serves both.
+pub(crate) struct Sql {
+    /// `code_intel.deps`: a unit's specifiers are written with it
+    /// (`cd_spec`).
+    pub specs: bool,
+    pub insert_ext: &'static str,
+    pub insert_def: &'static str,
+    /// References are deduplicated by the extraction; `OR IGNORE` keeps a
+    /// duplicate from rolling the whole batch back.
+    pub insert_ref: &'static str,
+    /// The existence check: whole-file units (`part = -1`) of one version
+    /// triple among up to [`EXISTS_BATCH`] OIDs, with a `Windowed` marker's
+    /// file length. Static text with all 500 placeholders; unused ones are
+    /// bound to NULL, which matches nothing.
+    pub exists: &'static str,
+    /// One page of the definitions by name (jump step 3, `Named`): the next
+    /// `?5` index rows of the name (any case, version or status) after the
+    /// cursor (unit, kind, rowid) `?2, ?3, ?4`, in `ci_def_name`'s order.
+    /// The limit counts the rows the index gives, not those that pass:
+    /// every raw row comes out once (the joins are `LEFT`), its unit's
+    /// `ci_ext` row when it is `Done` and its definition then. The caller
+    /// keeps the exact name and the current versions, and goes on after the
+    /// last raw row; fewer than `?5` raw rows end the lookup. So one
+    /// statement reads at most `?5` rows of the name whatever is stale, in
+    /// another language or another case (plus, within one (unit, kind), the
+    /// rows before the cursor: SQLite seeks (unit, kind) and filters the
+    /// rowid).
+    pub defs_page: &'static str,
+    /// The rows named `?1` after the cursor `?2, ?3, ?4`, whatever their
+    /// version and status: an upper bound of what a lookup cut short did
+    /// not read. Read from `ci_def_name` alone.
+    pub defs_left: &'static str,
+    /// The definitions by name in the units of up to [`EXISTS_BATCH`] OIDs
+    /// (`?15` …, unused ones NULL), at most `?14` rows: the jump's and
+    /// `Named`'s first batch, from the files nearest the query (「候选的分层
+    /// 与过滤」). Each OID is one seek in `ci_ext`'s key and one in
+    /// `ci_def_name` (name, unit): the cost follows the files asked for, not
+    /// how many units define the name.
+    pub defs_in: &'static str,
+    /// One page of the units referring to a name (references step 1), exact
+    /// names: the next `?3` rows of `ci_ref`'s key (name, unit) after unit
+    /// `?2`, each with its unit's `ci_ext` row when `Done` (`LEFT`: every
+    /// raw row comes out once). As `defs_page`: the limit bounds the rows
+    /// read, the caller keeps the current versions, fewer than `?3` end the
+    /// lookup.
+    pub refs_page: &'static str,
+    /// The units referring to `?1` after unit `?2`, whatever their version
+    /// and status: what a references lookup cut short by its time box did
+    /// not read (an upper bound of those units). From `ci_ref`'s key alone.
+    pub refs_left: &'static str,
+    /// Every `Done` unit with its version (the name table's first pass): one
+    /// scan of `ci_ext`, the versions kept by the caller.
+    pub units: &'static str,
+    /// The next `?5` entries of `ci_def_name` after the cursor (name, unit,
+    /// kind, rowid) `?1` … `?4`, in the index's order (the name table's
+    /// second pass, in pages): the rest of the cursor's name, then the names
+    /// after it, merged in order without a sort. Covering: no table row is
+    /// read.
+    pub names_page: &'static str,
+    pub ext_of_unit: &'static str,
+    /// In insertion order, which is the extraction's order.
+    pub defs_of_unit: &'static str,
+    pub refs_of_unit: &'static str,
+    /// The window units of one key (`part >= 0`), by start: the unique
+    /// index's order, no sort. A chain resumes at its first gap; a
+    /// `Windowed` marker is believed only while its windows reach the
+    /// file's end.
+    pub windows: &'static str,
+}
+
+/// `code_intel.tags`'s statements.
+pub(crate) const TAGS_SQL: Sql = sql_for!("ci", specs: false);
+/// `code_intel.deps`'s statements over the same tables.
+pub(crate) const DEPS_SQL: Sql = sql_for!("cd", specs: true);
+
+pub(crate) const SCHEMA: &[&str] = schema_for!("ci");
+
+/// `code_intel.tags`'s statements by name, for the tests' own
+/// registrations (extra statements, smaller quotas).
+#[cfg(test)]
+mod tags_sql {
+    use super::TAGS_SQL;
+    pub(crate) const INSERT_EXT: &str = TAGS_SQL.insert_ext;
+    pub(crate) const INSERT_DEF: &str = TAGS_SQL.insert_def;
+    pub(crate) const INSERT_REF: &str = TAGS_SQL.insert_ref;
+    pub(crate) const EXISTS: &str = TAGS_SQL.exists;
+    pub(crate) const DEFS_PAGE: &str = TAGS_SQL.defs_page;
+    pub(crate) const DEFS_LEFT: &str = TAGS_SQL.defs_left;
+    pub(crate) const DEFS_IN: &str = TAGS_SQL.defs_in;
+    pub(crate) const REFS_PAGE: &str = TAGS_SQL.refs_page;
+    pub(crate) const REFS_LEFT: &str = TAGS_SQL.refs_left;
+    pub(crate) const UNITS: &str = TAGS_SQL.units;
+    pub(crate) const NAMES_PAGE: &str = TAGS_SQL.names_page;
+    pub(crate) const EXT_OF_UNIT: &str = TAGS_SQL.ext_of_unit;
+    pub(crate) const DEFS_OF_UNIT: &str = TAGS_SQL.defs_of_unit;
+    pub(crate) const REFS_OF_UNIT: &str = TAGS_SQL.refs_of_unit;
+    pub(crate) const WINDOWS: &str = TAGS_SQL.windows;
+}
+#[cfg(test)]
+pub(crate) use tags_sql::*;
+
+/// Every statement of one [`Sql`].
+macro_rules! statements_of {
+    ($sql:expr $(, $extra:expr)* $(,)?) => {
+        &[
+            $sql.insert_ext,
+            $sql.insert_def,
+            $sql.insert_ref,
+            $sql.exists,
+            $sql.defs_page,
+            $sql.defs_left,
+            $sql.defs_in,
+            $sql.refs_page,
+            $sql.refs_left,
+            $sql.units,
+            $sql.names_page,
+            $sql.ext_of_unit,
+            $sql.defs_of_unit,
+            $sql.refs_of_unit,
+            $sql.windows,
+            $($extra,)*
+        ]
+    };
+}
+
+pub(crate) const STATEMENTS: &[&str] = statements_of!(TAGS_SQL);
 
 /// The registration of `code_intel.tags`.
 pub static TABLES: Tables = Tables {
@@ -293,6 +419,103 @@ pub static TABLES: Tables = Tables {
     schema: SCHEMA,
     statements: STATEMENTS,
     quota: QUOTA,
+};
+
+/// The module specifiers of a dependency unit (「依赖层」: the closure's
+/// edges, by content): one row per specifier as written, `kind` its
+/// [`SpecKind`] code. Written with the unit, so a unit found stored gives
+/// its edges without being parsed again.
+pub(crate) const DEPS_SPEC_TABLE: &str = "CREATE TABLE cd_spec (
+       unit INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
+       kind INTEGER NOT NULL,
+       spec TEXT    NOT NULL)";
+pub(crate) const DEPS_SPEC_UNIT: &str = "CREATE INDEX cd_spec_unit ON cd_spec (unit)";
+/// A package's path table (「身份与包的路径表」): one row per (ecosystem,
+/// name, version, identity, package directory), with the five stats of the
+/// installed `package.json` (`dev`, `ino`, `size`, `mtime`, `ctime` in
+/// nanoseconds) and when it was recorded (nanoseconds of the wall clock);
+/// `types`: the `@types` package that gave this one's declarations.
+pub(crate) const DEPS_PKG_TABLE: &str = "CREATE TABLE cd_pkg (
+       unit     INTEGER PRIMARY KEY REFERENCES entry (id) ON DELETE CASCADE,
+       eco      INTEGER NOT NULL,
+       name     TEXT    NOT NULL,
+       version  TEXT,
+       identity BLOB    NOT NULL,
+       dev      INTEGER NOT NULL,
+       ino      INTEGER NOT NULL,
+       size     INTEGER NOT NULL,
+       mtime    INTEGER NOT NULL,
+       ctime    INTEGER NOT NULL,
+       dir      TEXT    NOT NULL,
+       recorded INTEGER NOT NULL,
+       types    TEXT)";
+pub(crate) const DEPS_PKG_NAME: &str = "CREATE INDEX cd_pkg_name ON cd_pkg (name, eco, recorded)";
+/// The files of a path table, by their order in the closure (`seq`): the
+/// path relative to the dependency root's directory, the OID (NULL for a
+/// file never read: `TooLarge`), its five stats and status.
+pub(crate) const DEPS_PKG_FILE_TABLE: &str = "CREATE TABLE cd_pkg_file (
+       unit   INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
+       seq    INTEGER NOT NULL,
+       path   TEXT    NOT NULL,
+       oid    BLOB,
+       dev    INTEGER NOT NULL,
+       ino    INTEGER NOT NULL,
+       size   INTEGER NOT NULL,
+       mtime  INTEGER NOT NULL,
+       ctime  INTEGER NOT NULL,
+       status INTEGER NOT NULL)";
+pub(crate) const DEPS_PKG_FILE_UNIT: &str =
+    "CREATE INDEX cd_pkg_file_unit ON cd_pkg_file (unit, seq)";
+
+pub(crate) const INSERT_SPEC: &str = "INSERT INTO cd_spec (unit, kind, spec) VALUES (?1, ?2, ?3)";
+/// A unit's specifiers in the order written (the extraction's).
+pub(crate) const SPECS_OF_UNIT: &str =
+    "SELECT kind, spec FROM cd_spec WHERE unit = ?1 ORDER BY rowid";
+pub(crate) const INSERT_PKG: &str = "INSERT INTO cd_pkg
+       (unit, eco, name, version, identity, dev, ino, size, mtime, ctime, dir, recorded, types)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+pub(crate) const INSERT_PKG_FILE: &str = "INSERT INTO cd_pkg_file
+       (unit, seq, path, oid, dev, ino, size, mtime, ctime, status)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+/// The path table of one key (`?3` the version, NULL for none).
+pub(crate) const PKG_BY_KEY: &str =
+    "SELECT unit, version, identity, dev, ino, size, mtime, ctime, dir, recorded, types
+     FROM cd_pkg WHERE name = ?1 AND eco = ?2 AND version IS ?3 AND identity = ?4 AND dir = ?5";
+/// The newest path table of a package name: the stat table when the
+/// identity changed or is not known.
+pub(crate) const PKG_LATEST: &str =
+    "SELECT unit, version, identity, dev, ino, size, mtime, ctime, dir, recorded, types
+     FROM cd_pkg WHERE name = ?1 AND eco = ?2 ORDER BY recorded DESC LIMIT 1";
+pub(crate) const PKG_FILES: &str =
+    "SELECT seq, path, oid, dev, ino, size, mtime, ctime, status FROM cd_pkg_file
+     WHERE unit = ?1 ORDER BY seq";
+
+pub(crate) const DEPS_SCHEMA: &[&str] = schema_for!(
+    "cd",
+    DEPS_SPEC_TABLE,
+    DEPS_SPEC_UNIT,
+    DEPS_PKG_TABLE,
+    DEPS_PKG_NAME,
+    DEPS_PKG_FILE_TABLE,
+    DEPS_PKG_FILE_UNIT,
+);
+pub(crate) const DEPS_STATEMENTS: &[&str] = statements_of!(
+    DEPS_SQL,
+    INSERT_SPEC,
+    SPECS_OF_UNIT,
+    INSERT_PKG,
+    INSERT_PKG_FILE,
+    PKG_BY_KEY,
+    PKG_LATEST,
+    PKG_FILES,
+);
+
+/// The registration of `code_intel.deps` (ADR 0033).
+pub static DEPS_TABLES: Tables = Tables {
+    namespace: DEPS_NAMESPACE,
+    schema: DEPS_SCHEMA,
+    statements: DEPS_STATEMENTS,
+    quota: DEPS_QUOTA,
 };
 
 /// The current version triple of a language: the part of the key besides
@@ -419,6 +642,19 @@ pub fn unit_bytes(extraction: &Extraction) -> u64 {
         .map(|r| 2 * r.len() as u64 + 24)
         .sum();
     64 + defs + refs
+}
+
+/// The bytes a dependency unit's specifiers add (`cd_spec`, a row and its
+/// index entry each): `Σ (len + 32)`.
+pub fn specs_bytes(extraction: &Extraction) -> u64 {
+    if extraction.status != ExtractStatus::Done {
+        return 0;
+    }
+    extraction
+        .specs
+        .iter()
+        .map(|s| s.text.len() as u64 + 32)
+        .sum()
 }
 
 /// Units per [`Store::touch_pending`] call: one write-back's worth for
@@ -573,12 +809,13 @@ fn record_page(_what: &'static str, _rows: usize) {
     PAGE_ROWS.with(|p| p.borrow_mut().push((_what, _rows)));
 }
 
-/// `code_intel.tags` in one partition (`cache.repo(common_dir)`, or
-/// `cache.folder(root)` for a folder project). `Clone + Send + Sync`; holds
-/// no connection.
+/// `code_intel.tags` (or `code_intel.deps`, [`Store::deps`]) in one
+/// partition (`cache.repo(common_dir)`, or `cache.folder(root)` for a
+/// folder project). `Clone + Send + Sync`; holds no connection.
 #[derive(Clone)]
 pub struct Store {
-    set: TableSet,
+    pub(crate) set: TableSet,
+    sql: &'static Sql,
 }
 
 impl Store {
@@ -587,15 +824,32 @@ impl Store {
         Store::with_tables(partition, &TABLES)
     }
 
+    /// `code_intel.deps` in the partition (ADR 0033): the same reads and
+    /// writes over the `cd_*` tables, plus the specifiers and the path
+    /// tables (`deps::table`). No IO.
+    pub fn deps(partition: &Partition) -> Store {
+        Store::deps_with_tables(partition, &DEPS_TABLES)
+    }
+
     /// The same store under another registration of the namespace (tests: a
     /// smaller quota, extra statements).
     pub(crate) fn with_tables(partition: &Partition, tables: &'static Tables) -> Store {
         Store {
             set: partition.tables(tables),
+            sql: &TAGS_SQL,
         }
     }
 
-    /// The eviction generation of `code_intel.tags` in this partition
+    /// [`Store::deps`] under another registration of `code_intel.deps`
+    /// (tests: a smaller quota).
+    pub(crate) fn deps_with_tables(partition: &Partition, tables: &'static Tables) -> Store {
+        Store {
+            set: partition.tables(tables),
+            sql: &DEPS_SQL,
+        }
+    }
+
+    /// The eviction generation of the namespace in this partition
     /// (「输入代数与派生状态」): changes when units are evicted or deleted,
     /// or the partition is rebuilt. One atomic load; any thread, never
     /// blocks. Unit IDs read before a change are not reused after it.
@@ -607,6 +861,7 @@ impl Store {
     pub fn write(&self) -> StoreWrite {
         StoreWrite {
             write: self.set.write(),
+            sql: self.sql,
             units: 0,
         }
     }
@@ -642,6 +897,7 @@ impl Store {
         oids: &[BlobId],
     ) -> Option<(Vec<Found>, Vec<Unit>)> {
         let lang = &*version.lang.0;
+        let sql = self.sql;
         read_counted(&self.set, |r| {
             let mut found = Vec::new();
             let mut lens = Vec::new();
@@ -656,7 +912,7 @@ impl Store {
                 {
                     *slot = oid.map_or(Param::Null, |o| Param::Bytes(o.as_bytes()));
                 }
-                let ok = counted(r).query(EXISTS, &params, |row| {
+                let ok = counted(r).query(sql.exists, &params, |row| {
                     let hit = row.unit(0).zip(oid_at(row, 1)).zip(status_at(row, 2));
                     if let Some(((unit, oid), status)) = hit {
                         found.push(Found { oid, unit, status });
@@ -673,7 +929,7 @@ impl Store {
                 if f.status != ExtractStatus::Windowed {
                     continue;
                 }
-                let rows = windows_in(r, f.oid, version);
+                let rows = windows_in(sql, r, f.oid, version);
                 if len.is_some_and(|len| chain_complete(&rows, len)) {
                     windows.extend(rows.iter().map(|w| w.unit));
                 } else {
@@ -686,7 +942,7 @@ impl Store {
 
     /// The window units stored for `oid` under `version`, by start.
     pub fn windows(&self, oid: BlobId, version: &Version) -> Option<Vec<WindowRow>> {
-        read_counted(&self.set, |r| windows_in(r, oid, version))
+        read_counted(&self.set, |r| windows_in(self.sql, r, oid, version))
     }
 
     /// The content of a `Windowed` file: its `Done` windows' definitions
@@ -694,14 +950,15 @@ impl Store {
     /// extraction, with whether every window is canonical. None when the
     /// partition cannot be read.
     pub fn load_windows(&self, oid: BlobId, version: &Version) -> Option<(Extraction, bool)> {
+        let sql = self.sql;
         read_counted(&self.set, |r| {
-            let rows = windows_in(r, oid, version);
+            let rows = windows_in(sql, r, oid, version);
             let mut defs = Vec::new();
             let mut refs: Vec<Box<str>> = Vec::new();
             let mut canonical = true;
             for row in rows.iter().filter(|w| w.status == ExtractStatus::Done) {
                 canonical &= row.canonical;
-                if let Some(e) = load(r, row.unit) {
+                if let Some(e) = load(sql, r, row.unit) {
                     defs.extend(e.defs);
                     refs.extend(e.refs);
                 }
@@ -713,6 +970,7 @@ impl Store {
                     status: ExtractStatus::Done,
                     defs,
                     refs,
+                    specs: Vec::new(),
                 },
                 canonical,
             )
@@ -777,7 +1035,7 @@ impl Store {
                 Param::Int(id),
                 Param::Int(limit as i64),
             ];
-            let ok = counted(r).query(DEFS_PAGE, &params, |row| {
+            let ok = counted(r).query(self.sql.defs_page, &params, |row| {
                 raw += 1;
                 if let Some(at) = row.int(13).zip(row.int(14)).zip(row.int(15)) {
                     let at = (at.0.0, at.0.1, at.1);
@@ -828,7 +1086,7 @@ impl Store {
         read_counted(&self.set, |r| {
             let mut n = 0u64;
             counted(r).query(
-                DEFS_LEFT,
+                self.sql.defs_left,
                 &[
                     Param::Text(&pager.name),
                     Param::Int(unit),
@@ -870,7 +1128,7 @@ impl Store {
                     {
                         *slot = oid.map_or(Param::Null, |o| Param::Bytes(o.as_bytes()));
                     }
-                    let ok = counted(r).query(DEFS_IN, &params, |row| {
+                    let ok = counted(r).query(self.sql.defs_in, &params, |row| {
                         if row.text(0) != Some(name) {
                             return true;
                         }
@@ -930,7 +1188,7 @@ impl Store {
                 Param::Int(p.after.0),
                 Param::Int(limit as i64),
             ];
-            let ok = counted(r).query(REFS_PAGE, &params, |row| {
+            let ok = counted(r).query(self.sql.refs_page, &params, |row| {
                 raw += 1;
                 last = row.int(4).map_or(last, |u| last.max(u));
                 push_unit(&mut out, row, 4, 0, p.version_at(row, 1));
@@ -965,7 +1223,7 @@ impl Store {
         read_counted(&self.set, |r| {
             let mut n = 0u64;
             counted(r).query(
-                REFS_LEFT,
+                self.sql.refs_left,
                 &[Param::Text(&pager.name), Param::Int(pager.after.0)],
                 |row| {
                     n = row.int(0).map_or(0, |c| c.max(0) as u64);
@@ -982,7 +1240,7 @@ impl Store {
     pub fn units(&self, versions: &[Version]) -> Option<Vec<StoredUnit>> {
         read_counted(&self.set, |r| {
             let mut out = Vec::new();
-            counted(r).query(UNITS, &[], |row| {
+            counted(r).query(self.sql.units, &[], |row| {
                 push_unit(&mut out, row, 0, 1, version_in(versions, row, 2));
                 true
             });
@@ -1024,7 +1282,7 @@ impl Store {
                     Param::Int(cursor.3),
                     Param::Int(NAMES_SCAN_PAGE as i64),
                 ];
-                let ok = counted(r).query(NAMES_PAGE, &params, |row| {
+                let ok = counted(r).query(self.sql.names_page, &params, |row| {
                     raw += 1;
                     if raw == NAMES_SCAN_PAGE
                         && let (Some(name), Some(id), Some(code), Some(rowid)) =
@@ -1077,7 +1335,33 @@ impl Store {
     /// order, reference names in byte order. `None` when the unit is gone or
     /// the partition cannot be read.
     pub fn load(&self, unit: Unit) -> Option<Extraction> {
-        read_counted(&self.set, |r| load(r, unit)).flatten()
+        read_counted(&self.set, |r| load(self.sql, r, unit)).flatten()
+    }
+
+    /// The module specifiers stored with each of `units`, in order
+    /// (`code_intel.deps` only: the closure's edges of units found stored,
+    /// 「依赖层」). One read transaction; None when the partition cannot be
+    /// read.
+    pub(crate) fn specs_of(&self, units: &[Unit]) -> Option<Vec<Vec<Specifier>>> {
+        read_counted(&self.set, |r| {
+            let mut out = Vec::with_capacity(units.len());
+            for unit in units {
+                let mut specs = Vec::new();
+                counted(r).query(SPECS_OF_UNIT, &[Param::Int(unit.id())], |row| {
+                    if let (Some(kind), Some(text)) =
+                        (row.int(0).and_then(SpecKind::from_code), row.text(1))
+                    {
+                        specs.push(Specifier {
+                            kind,
+                            text: text.into(),
+                        });
+                    }
+                    true
+                });
+                out.push(specs);
+            }
+            out
+        })
     }
 }
 
@@ -1117,25 +1401,31 @@ impl<'a> UnitSet<'a> {
     }
 }
 
-fn load(r: &mut TableRead<'_>, unit: Unit) -> Option<Extraction> {
+/// One unit's extraction, without its specifiers (`Store::specs_of`).
+fn load(sql: &Sql, r: &mut TableRead<'_>, unit: Unit) -> Option<Extraction> {
     let id = [Param::Int(unit.id())];
     let mut status = None;
-    counted(r).query(EXT_OF_UNIT, &id, |row| {
+    counted(r).query(sql.ext_of_unit, &id, |row| {
         status = status_at(row, 0);
         false
     });
     let status = status?;
     let mut defs = Vec::new();
-    counted(r).query(DEFS_OF_UNIT, &id, |row| {
+    counted(r).query(sql.defs_of_unit, &id, |row| {
         defs.extend(def_at(row, 0));
         true
     });
     let mut refs = Vec::new();
-    counted(r).query(REFS_OF_UNIT, &id, |row| {
+    counted(r).query(sql.refs_of_unit, &id, |row| {
         refs.extend(row.text(0).map(Box::from));
         true
     });
-    Some(Extraction { status, defs, refs })
+    Some(Extraction {
+        status,
+        defs,
+        refs,
+        specs: Vec::new(),
+    })
 }
 
 /// `?1` the name, then one (language, grammar, query) triple per version;
@@ -1182,10 +1472,10 @@ fn part_at(row: &Row<'_>, at: usize) -> Option<Part> {
 }
 
 /// [`Store::windows`] in a read transaction.
-fn windows_in(r: &mut TableRead<'_>, oid: BlobId, version: &Version) -> Vec<WindowRow> {
+fn windows_in(sql: &Sql, r: &mut TableRead<'_>, oid: BlobId, version: &Version) -> Vec<WindowRow> {
     let mut rows = Vec::new();
     counted(r).query(
-        WINDOWS,
+        sql.windows,
         &[
             Param::Bytes(oid.as_bytes()),
             Param::Text(&version.lang.0),
@@ -1267,8 +1557,9 @@ fn def_at(row: &Row<'_>, at: usize) -> Option<Def> {
 /// Units recorded for one write transaction (one batch). `Send`: a task
 /// can build it up and commit it later.
 pub struct StoreWrite {
-    write: TableWrite,
-    units: usize,
+    pub(crate) write: TableWrite,
+    sql: &'static Sql,
+    pub(crate) units: usize,
 }
 
 impl StoreWrite {
@@ -1295,12 +1586,19 @@ impl StoreWrite {
             return false;
         };
         let w = &mut self.write;
+        let sql = self.sql;
         let part = meta.part.map_or(WHOLE, |p| p.start as i64);
-        let unit = w.create(&unit_key(oid, version, part), unit_bytes(extraction));
+        let bytes = unit_bytes(extraction)
+            + if sql.specs {
+                specs_bytes(extraction)
+            } else {
+                0
+            };
+        let unit = w.create(&unit_key(oid, version, part), bytes);
         let unit = Param::New(unit);
         let int_or_null = |v: Option<i64>| v.map_or(Param::Null, Param::Int);
         w.execute(
-            INSERT_EXT,
+            sql.insert_ext,
             &[
                 unit,
                 Param::Bytes(oid.as_bytes()),
@@ -1322,7 +1620,7 @@ impl StoreWrite {
         if extraction.status == ExtractStatus::Done {
             for def in &extraction.defs {
                 w.execute(
-                    INSERT_DEF,
+                    sql.insert_def,
                     &[
                         unit,
                         Param::Text(&def.name),
@@ -1338,7 +1636,21 @@ impl StoreWrite {
                 );
             }
             for name in &extraction.refs {
-                w.execute(INSERT_REF, &[Param::Text(name), unit]);
+                w.execute(sql.insert_ref, &[Param::Text(name), unit]);
+            }
+            // A dependency unit's edges (「依赖层」): with the unit, by
+            // content. Only a `Done` extraction has them.
+            if sql.specs {
+                for spec in &extraction.specs {
+                    w.execute(
+                        INSERT_SPEC,
+                        &[
+                            unit,
+                            Param::Int(i64::from(spec.kind.code())),
+                            Param::Text(&spec.text),
+                        ],
+                    );
+                }
             }
         }
         self.units += 1;

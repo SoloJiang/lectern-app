@@ -11,6 +11,7 @@
 //! (`plugin`, step 4).
 
 mod canonical;
+mod deps;
 mod forms;
 mod git_access;
 mod grammar;
