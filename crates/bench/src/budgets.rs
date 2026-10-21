@@ -1497,12 +1497,11 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Memory,
     ),
-    // ---- syntax (file_reader design, step 2) ----
-    // The first screen without its read (the read joins in step 3): the
-    // plan and the window's parse and query with the 8 ms deadline, on
-    // synthetic TypeScript, Rust and JSON of 1–64 MiB, 40 random offsets
-    // each; the same on 4 MiB of JavaScript minified into one line, record
-    // only.
+    // ---- syntax (file_reader design, steps 2 and 3) ----
+    // The first screen: open, the one `read_ranges`, the plan and the
+    // window's parse and query with the 8 ms deadline, on synthetic
+    // TypeScript, Rust and JSON files of 1–64 MiB, 40 random offsets each;
+    // the same on 4 MiB of JavaScript minified into one line, record only.
     share(
         "syntax/first_screen",
         &[median(Limit::TimeAtMost(ms(8)))],
@@ -1530,6 +1529,43 @@ pub static BUDGETS: &[Budget] = &[
     // window chain over 16 MiB. Record only.
     share("syntax/full_parse_1mib", RECORD, FILE_READER, ACTIVE, Time),
     share("syntax/chain_16mib", RECORD, FILE_READER, ACTIVE, Time),
+    // The first screen of object database content (ADR 0042): a 4 MiB
+    // blob the review registered, at its middle; a 1 MiB blob nobody holds,
+    // taken out on the first screen's path; a 4 MiB one nobody holds,
+    // record only.
+    share(
+        "syntax/first_screen/object_shared",
+        &[median(Limit::TimeAtMost(ms(8)))],
+        FILE_READER,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "syntax/first_screen/object_1mib",
+        &[median(Limit::TimeAtMost(ms(8)))],
+        FILE_READER,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "syntax/first_screen/object_cold",
+        RECORD,
+        FILE_READER,
+        ACTIVE,
+        Time,
+    ),
+    // The highlight and text LRU at its fullest (ADR 0030, ADR 0035): the
+    // live bytes the engine releases when dropped, after 24 tier A files.
+    share(
+        "syntax/lru_bytes",
+        &[max(Limit::BytesAtMost(8 * MB))],
+        FILE_READER,
+        ACTIVE,
+        Memory,
+    ),
+    // Tier C's streaming scan of 64 MiB, and find in 16 MiB. Record only.
+    share("syntax/scan_64mib", RECORD, FILE_READER, ACTIVE, Time),
+    share("syntax/find_16mib", RECORD, FILE_READER, ACTIVE, Time),
     // ---- end syntax ----
     // FakeBackend and the manual driver, without backend latency.
     share(

@@ -1,6 +1,6 @@
 [package]
 name = "lectern-syntax"
-description = "Syntax highlighting: the language table, highlight queries, highlight tokens and the stuck-grammar check."
+description = "Syntax highlighting and open documents: the language table, highlight queries, tokens, text, line index, the highlight and text LRU and the stuck-grammar check."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,15 +11,31 @@ publish.workspace = true
 layer = "domain"
 
 [features]
-# `testing`: synthetic sources for the tests and `lectern-bench`.
-test-support = []
+# `testing`: synthetic sources, a kernel host and a synchronous first screen
+# for the tests and `lectern-bench`.
+test-support = ["lectern-kernel/test-support"]
 
 [dependencies]
-# `ThreadCpuClock`: the stuck-grammar check counts a parse's CPU time
-# (health.rs, docs/adr/0041.md).
+# `syntax.lines`, the line checkpoints by content OID (text.rs).
+lectern-cache = { path = "../cache" }
+# The documents' tasks (Interactive and Background).
+lectern-executor = { path = "../executor" }
+# The open document's worktree batches (doc/watch.rs).
+lectern-fs-watch = { path = "../fs_watch" }
+# `BlobHasher`, `Repo::blob`, `Worktree::watch_source`; gix stays in
+# lectern-git (git_access.rs).
+lectern-git = { path = "../git" }
+# PluginHandle, BusyGuard: tasks go through the plugin's handle.
+lectern-kernel = { path = "../kernel" }
+# `ThreadCpuClock` (health.rs, docs/adr/0041.md); `SafeRoot` and `OpenFile`:
+# worktree files are read only through them.
 lectern-platform = { path = "../platform" }
-# Finds line ends when splitting tokens by line.
+# `ReadTarget`, `Anchor`, `BlobId`, `ObjectShare`.
+lectern-services = { path = "../services" }
+# Finds line ends when splitting tokens by line, and the find's `memmem`.
 memchr.workspace = true
+# The cells of a character, for folding long lines.
+unicode-width.workspace = true
 # The same runtime and grammar crates as lectern-code-intel (ADR 0030), so
 # only one copy is linked; plus the four grammars of ADR 0041.
 tree-sitter.workspace = true
@@ -36,6 +52,11 @@ tree-sitter-yaml.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+lectern-cache = { path = "../cache", features = ["test-support"] }
+lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true

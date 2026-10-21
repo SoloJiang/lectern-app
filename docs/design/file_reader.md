@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；前置条件 E 和第 3–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；前置条件 E 和第 4–8 步尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -351,12 +351,16 @@ pub mod highlight {
 // ---- 文本 ----
 
 pub mod text {
-    /// 不超过 16 MiB 的完整内容：不可变的 64 KiB 分块，加每 1024 行一个检查点的行索引。
-    pub struct Text { /* chunks: Arc<[Arc<[u8]>]>, len, index: LineIndex */ }
+    /// 不超过 16 MiB 的完整内容：一块不可变的共享缓冲区（见「与设计的差异」第 3 步），加每 1024 行一个检查点的行索引。
+    pub struct Text { /* bytes: Arc<[u8]>, index: LineIndex */ }
     impl Text {
-        pub fn from_bytes(bytes: Vec<u8>) -> Text;   // 阻塞（建行索引，16 MiB 约 5 ms），后台线程
+        pub fn from_bytes(bytes: Vec<u8>) -> Text;   // 阻塞（复制一次、建行索引），后台线程
+        pub fn shared(bytes: Arc<[u8]>) -> Text;      // 同上，不复制：对象库内容的那份 `Arc`（ADR 0042）
         pub fn len(&self) -> u64;
         pub fn index(&self) -> &LineIndex;
+        pub fn as_bytes(&self) -> &[u8];
+        pub fn shared_bytes(&self) -> &Arc<[u8]>;
+        pub fn bytes(&self) -> usize;                 // 占用的内存，LRU 按它计
     }
     impl highlight::Source for Text { /* … */ }
 
@@ -368,7 +372,13 @@ pub mod text {
         pub fn line_of(&self, text: &Text, byte: u64) -> u64;
         pub fn has_long_line(&self) -> bool;
         pub fn widest_cells(&self) -> u32;
+        pub fn long_lines(&self) -> &[LongLine];
     }
+
+    /// 超过 4 KiB 的行：行首、显示部分的终点（`\n` 或它前面的 `\r`）、下一行的行首、格数，
+    /// 和每 4 KiB 一个的（字节偏移、之前的格数）。从第 `c` 格开始的字符在第 `c / cols` 个显示行。
+    pub struct LongLine { pub start: u64, pub end: u64, pub next: Option<u64>, pub cells: u64, /* marks */ }
+    impl LongLine { pub fn rows(&self, cols: u32) -> u64; }
 
     /// 行检查点（ADR 0034）：每 64 KiB 处的行号。按内容 OID 存进 `syntax.lines`，只为 ≥ 1 MiB 的内容写。
     pub struct LineCheckpoints {
@@ -411,6 +421,8 @@ impl Engine {
                 notify: Arc<dyn Fn() + Send + Sync>) -> DocHandle;
     /// 预取（`Reader::prefetch` 转到这里）。立即返回。
     pub fn prefetch(&self, targets: Vec<(ReadTarget, Arc<Path>)>);
+    /// `Reader::share_object` 转到这里：登记表在 `Engine` 里，`open` 查它。立即返回。
+    pub fn share_object(&self, oid: BlobId, bytes: Arc<[u8]>) -> ObjectShare;
     /// 项目关闭：丢弃它的 `SafeRoot`、`Repo` 和订阅。正在编辑、有未保存改动的文档不丢，等用户放弃（见「编辑」的离开守卫）。
     pub fn close_project(&self, project: &ProjectKey);
 }
@@ -465,6 +477,8 @@ pub enum DocState {
     Unreadable(ReadError),
 }
 
+pub enum ReadError { PathThroughSymlink, InvalidPath, NotAllowed, ObjectMissing, ObjectTooLarge, Io(Arc<str>) }
+
 pub enum Tier { A, B, C }
 pub enum Highlighting { Pending, On, Plain }
 pub enum LineCount { Estimated(u64), Exact(u64) }
@@ -481,8 +495,10 @@ impl DocSnapshot {
     pub fn rows(&self, from: RowPos, n: usize, cols: u32) -> Vec<Row<'_>>;
     /// 从 `from` 前进或后退 `delta` 个显示行（滚轮、键盘）。
     pub fn advance(&self, from: RowPos, delta: i64, cols: u32) -> RowPos;
-    /// 滚动条拖动：按字节比例定位，落到所在行的行首。
-    pub fn at_fraction(&self, fraction: f64) -> RowPos;
+    /// 滚动条拖动：按字节比例定位，落到所在的显示行（普通行是行首，长行按 `cols` 折出的那一行）。
+    pub fn at_fraction(&self, fraction: f64, cols: u32) -> RowPos;
+    /// 含 `byte` 的显示行（查找结果、定位）。
+    pub fn pos_of_byte(&self, byte: u64, cols: u32) -> RowPos;
     /// 估计的总显示行数（滚动条用）：行数加上已知长行多出的行。
     pub fn total_rows(&self, cols: u32) -> u64;
 }
@@ -1066,6 +1082,13 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `just check`、`just deny`、`just doctest`、`just test`（Linux 上不依赖 GPUI 的全部 crate，1679 个）通过；`rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。
 - 没有在 macOS 上运行：上面的基准在 M 系列上由 macOS CI 判定。
 
+第 3 步（文本与文档），在 Linux（x86_64 容器）上运行：
+
+- `just test -p lectern-syntax -p lectern-bench`：204 个测试通过，其中 `lectern-syntax` 127 个，新增 `text_*`、`lines_*`、`lru_*`、`doc_*`、`object_*`、`find_*`。`text_*`：3000 行的混合内容（空行、制表符、CJK、CRLF、4–13 KiB 的长行、无效字节）上行首、行号、最宽行、长行与朴素扫描逐项相同；1–3 字节一段和随机长度分段喂入，索引和行检查点与整段喂入相同；每个长行在 7、80、121 列下每个显示行的字节区间与朴素的折行相同；64 MiB 的虚拟文件只在内存里放 4 页时，那里的 60 行全部给出文字和精确行号，远处的行是 `Pending`。`lines_*`：≥ 1 MiB 才写、按 OID 读回，第二次打开时只给行号的首屏直接落在那一行（按身份记下的 OID 和按 `expect` 各一次），长度不同的检查点不用。`lru_*`：上限、最旧的先淘汰、后台一类先淘汰、超过上限的条目不放，打开的文档在它的整文件区间被淘汰之后高亮不变。`doc_*`：四种 `Anchor`、档位 A 的整文件区间与可编辑、档位 B 滚到的窗口有高亮且小幅滚动不再计算、首屏与完整读取之间文件被改写时按行号重新定位、`Byte` 的 OID 不同时按行号定位、符号链接 / 目录 / 不存在 / 路径中间是符号链接 / 不合法的路径、`FakeBackend` 注入事件后在同一行号重新打开（无关路径和身份不变的事件不触发）、删除后显示不存在、恢复后重新打开、17 MiB 的档位 C 扫描出 OID 和精确行数并写入检查点、在 80 个位置滚动时页始终不超过 8 MiB、drop 之后描述符数回到原值（Linux 读 `/proc/self/fd`，macOS 读 `/dev/fd`，与 platform 的 `fd_*` 相同）且没有在途任务、文件夹项目不订阅、压缩成一行的 JS 在完整读取后按列宽折行；带 `expect` 打开的 TS 文件被外部改写、重新打开之后的整文件区间与新内容一次解析的区间逐行相同，再用同一个过期的 `expect` 打开时首屏也是新内容的区间；身份表把文件映射到另一份内容的 OID 时，首屏取来的区间在完整读取之后被丢掉、按新内容重新解析；查找排队之后开始重新载入，首屏发布时没有旧载入的结果，之后在新内容上重新找到；4 MiB 的一行 JS（档位 B）滚到 1 MiB、3 MiB 处时那里算出新的窗口、有 token；17 MiB 的一行 JS（档位 C）以 12 MiB 处的 `Byte` 目标打开、再滚到 3 MiB、15 MiB 和 12 MiB 加 50,000 字节处，每处的行都读到了页、有 token、第一行含目标字节；档位 C 的 `Byte` 目标的 OID 不同时在扫描之后定位到它的行；依赖根里的文件只读、可以打开，根之外、`..`、不在列表里的扩展名、指向根外的符号链接、路径中间的符号链接和缓存根都打不开。`object_*`：登记的内容打开时不调用 `blob`、`Text` 与登记的是同一个 `Arc`、注销后登记表为空且只剩调用方和 LRU 的引用、同一 OID 登记两次 drop 一次仍可用、没有人持有时在首屏取出、第二次从 LRU 取、超过 16 MiB 和不存在的 blob 为 `Unreadable`。`find_*`：只对 ASCII 字母不区分大小写、匹配不重叠且跨 1 MiB 块、10,000 个封顶、新查询取代旧的、档位 C 的文件末尾也能找到。
+- `just bench --measure syntax/`（Linux 只报告、不判定）：`syntax/first_screen`（含打开和首屏读取）中位数 2.39 ms（预算 ≤ 8 ms），`syntax/first_screen/minified` 8.74 ms，`syntax/first_screen/object_shared` 2.91 ms（≤ 8 ms），`syntax/first_screen/object_1mib` 3.1 ms（≤ 8 ms），`syntax/first_screen/object_cold` 4.38 ms，`syntax/lru_bytes` 最大值 7.64 MB（≤ 8 MiB），`syntax/scan_64mib` 145 ms，`syntax/find_16mib` 3.44 ms；第 2 步的几项不变（`window_peak` 6.86 MB，`full_parse_1mib` 328 ms，`chain_16mib` 4.26 s，在这台共享机器的噪声范围内）。
+- `just check`、`just deny`、`just doctest` 通过；`rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。[cache 设计「命名空间」](cache.md#命名空间)的 `syntax.lines` 一行与实现一致（键是 OID 的字节，值是长度、行数、最宽行的格数、是否有长行和每 64 KiB 的行号，不压缩），没有改动。
+- 没有运行全部 crate 的 `just test`：本步只改 `syntax` 和 `bench`（另在根 `Cargo.toml` 加了一个工作区依赖），这台机器的磁盘不够再编译其余 crate 的测试。没有在 macOS 上运行。
+
 前置条件 A（`services`），在 Linux（x86_64 容器）上运行（`services` 不依赖 GPUI）：
 
 - `just test -p lectern-services`：50 个测试通过。新增：`reader_service_id_and_multiple`（`ID == "reader"`、`MULTIPLE == false`，`service::<dyn Reader>()` 的键相同）、`reader_is_a_shared_trait_object`、`object_share_releases_once_on_drop`（在另一个线程上 drop，回调只调用一次）、`reader_targets_round_trip`（两种来源、三种 `Anchor`、SHA-1 与 SHA-256 的 `expect`、文件夹项目）、`reader_event_round_trips`；`dirs_match_a_naive_construction`、`dirs_children_are_in_finder_order`、`dirs_fold_single_child_chains`、`dirs_submodules_are_files`、`dirs_empty_list_has_only_the_root`、`finder_cmp_cases`；`dir_table_serializes_dirs_and_files`、`dir_table_deserializes_from_the_file_list`（乱序、错误、缺少的目录都按 `files` 重建，不合法的路径计入 `skipped`）；`dependency_extensions_are_the_adr_0033_list`。`project_snapshot_round_trips` 的样本带上目录表，检查反序列化后 `dirs.files()` 与 `files` 相等。
@@ -1106,6 +1129,31 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `limits` 加入 `TIER_A_MAX`、`LONG_LINE`、`FIRST_WINDOW_DEADLINE`、`SLICE`、`SLOW_WINDOW`、`WINDOW`、`WINDOW_MAX`，值与「接口」相同；新增 `SLOW_WINDOW_WALL`（见上一条）。
 - 合成源码：「测试」写的是由 `bench` 的生成器生成，但 `syntax` 的测试不能依赖 tool 层的 `bench`。生成器放在 `syntax` 的 `testing` 模块（`test-support` feature）：TypeScript 和 Rust 是带多行注释、模板字符串或原始字符串、嵌套块的单元重复拼接，JSON 是两格缩进的 `package-lock.json` 形状，另有压缩成一行的 JavaScript；`bench` 经它取得夹具（bench 设计「夹具与 `test-support`」的做法）。
 - `syntax/first_screen` 本步只计 `plan` 与窗口的解析和查询，字节从内存里切出；视口按 60 行。
+
+第 3 步：
+
+- `Text` 是一块共享的 `Arc<[u8]>`，不是 64 KiB 的分块。对象库内容到达时就是审阅视图持有的那份 `Arc<[u8]>`，切成分块要复制一份，与 ADR 0042「在审阅视图持有的之外不另占内存」不符；`Text::shared` 直接用它，`Text::from_bytes` 复制一次。行的读取只需要按字节区间取切片，一块连续的缓冲区也满足 `Source`。ADR 0034「文本存储与定位」写的「不可变的分块」以本条为准：内容同样不可变，只是不分块。已改「接口」。
+- 行索引由 `text::IndexBuilder` 一遍建成，可以分段喂入：`Text` 整段喂，档位 C 的流式扫描按 1 MiB 的读取喂，两种得到的索引、行检查点和编码事实（NUL、无效 UTF-8、BOM、CRLF 与 LF 的行数）逐字段相同（`text_streaming_build_matches_one_pass`，含 1–3 字节一段、切断 UTF-8 序列的喂法）。所以档位 C 扫描之后也有完整的 `LineIndex`（每 1024 行 8 字节、长行的格数检查点），行号在扫描之后是精确的。`LongLine` 改为公开项，带下一行的行首。
+- 设计没有写格数和折行的细则，实现为：`unicode-width` 的宽度；制表符到下一个 4 的倍数；其他控制字符显示为 U+2400 段的符号，一格；不是有效 UTF-8 的每个字节显示为 U+FFFD，一格；`\n` 前面的 `\r` 不显示、不占格；BOM 不显示。从第 `c` 格开始的字符在第 `c / cols` 个显示行，宽字符可以超出行尾一格。这条规则不依赖前面的行怎样折，所以第 `k` 行的起点是一次二分加至多 4 KiB 的扫描。行索引和 `rows` 用同一套解码（`src/cells.rs`）。
+- `at_fraction` 增加 `cols` 参数：长行要落到所在的显示行，没有列宽算不出；另加 `pos_of_byte`，查找结果和定位都用它。已改「接口」。
+- `share_object` 的登记表在 `Engine` 里（`Engine::share_object`），`dyn Reader::share_object` 转到这里：打开 `Object` 目标的是 `Engine`，登记表放在 `file_reader` 里它就查不到。已改「接口」。
+- `ReadError` 设计没有给出，定为路径中间是符号链接、路径不合法、依赖文件不允许读（不在依赖根之下、扩展名不在 ADR 0033 的列表里、`DepRoot::Cache`）、对象缺失（含文件夹项目和没有 `expect` 的 `Object` 目标）、对象超过 16 MiB、其他 IO 错误六种。已改「接口」。
+- 依赖根里的文件（`TextOrigin::Dependency`，本步开始时 `services` 刚加入这个变体）：路径必须是 `dir/` 之下的路径，每次打开都经工作区根的 `SafeRoot::open_dir(dir)` 新开一个目录描述符、再在它下面 `open_file`（不缓存，打开依赖文件不在首屏的预算条件里），根和路径的任何一级都不能是符号链接，最后一级是符号链接时显示链接目标、不跟随。依赖文件只读、不订阅 fs_watch（依赖目录通常被忽略，收不到事件）。测试是 `doc_dependency_files_stay_inside_their_root`。
+- 档位 B、C 的高亮在本步是可见窗口单独解析：`scrolled` 之后，可见区域没有区间覆盖时，在 `Interactive` 任务里按首屏的做法（`window::plan` 加 `highlight::window`，安全位置是启发式的，`exact` 为 false）解析一个窗口，预算 50 ms，计划三屏的行数，滚动不到两屏时不必再算。可见区域是顶部那个显示行自己的字节，由（行首、行内第几个显示行、列宽）求出：字节在内存里时取这个显示行的起点，不在时取它之前最近的格数检查点（至多早 4 KiB），所以长行深处的显示行读的是那里的页、算的是那里的窗口，不是行首的。每个文档至多留 8 个窗口，不进 LRU：它们的起点没有经语法树确认，按起点作键会和第 4 步的窗口链混在一起。窗口链（起点表、批量窗口、LRU 的窗口起点表条目和 `Background` 一类的淘汰）在第 4 步实现，届时可见窗口改用链上的起点。
+- 本次运行内记下（根、路径、`FileIdentity`）到原始字节 OID 的表，至多 64 项，每次完整读取和扫描后更新。设计只为文件夹项目写了这张表；`Engine::open` 拿不到 `FileList` 的 OID，所以对所有项目都用它，第 6 步的插件在调用 `open` 时把 `FileList` 的 OID 填进 `expect`。两种用途的要求不同：
+  - 首屏在 LRU 里取整文件的区间，只按核对过的 OID：工作区文件是这张表按刚打开的身份查到的 OID，对象库内容是 `expect`（内容就是按它取的）。工作区文件的 `expect` 只是调用方看到的那一份，文件可能已经改过，不用它取区间（「性能」的后退、前进同样要求先比较身份）。再次打开没有改过的文件时首屏就是整文件的区间（`lru_reopening_uses_the_whole_files_spans`）。
+  - 完整读取算出 OID 之后再核对一次：首屏从 LRU 取来的区间所属的 OID 与算出的不同（身份相同而内容不同），就丢掉它们、重新解析（`doc_full_read_drops_lru_spans_of_another_oid`）。
+  - 只给行号时的行检查点按核对过的 OID 找，没有时用 `expect`：检查点要先比较长度，完整读取或扫描之后还会按行号重新定位，用错了只影响首屏的位置。
+- 外部改动之后的重新打开不再用 `expect`：它描述的是调用方当时看到的内容，那份内容已经变了。所以重新打开时 `Byte` 目标的 OID 比较和行检查点的候选都不用它（`DocMut::expect`），之后的打开都一样（`doc_reopen_after_an_edit_highlights_the_new_content`）。对象库内容不会被重新打开。
+- 没有人持有、超过 1 MiB 的对象库内容同样在首屏任务里整份取出，不另开一个任务：首屏本来就要等它，ADR 0042 已把它排除在 16 ms 之外。
+- 外部改动后的重新打开停在顶部那一行的行号（`DocMut::at` 记下这次载入用的位置），不是原目标的位置。每次载入开始时取消上一次载入的查找、查找的代数加一、清空结果，旧内容上的查找不会把结果发布到新内容上，查询在新内容上重新运行（`doc_reload_keeps_an_old_find_from_publishing`）。
+- 档位 C 在扫描之后与完整读取之后一样比较 `expect` 和算出的 OID，不同时按行号定位；要按行号定位时（只给行号的目标、OID 不同的 `Byte` 目标），扫描任务先在同一个 `OpenFile` 上读这一行所在的行索引项起的 1 MiB 放进页里，行首因此是精确的（`doc_tier_c_byte_with_another_oid_moves_by_its_line`）。订阅在后台任务里打开 `git::Worktree` 取过滤器的来源（`watch_source`），每个文档一份；订阅建立时 fs_watch 发来的第一批（`rescan`）会触发一次 `stat`，身份相同时什么都不做。
+- 写 `syntax.lines` 之前先读：已有相同的值时不写，同一个文件每次打开不重复写事务。
+- `DocHandle` drop 时把它持有的 `OpenFile`、订阅和内容交给一个 `Background` 任务释放，关闭描述符不在 UI 线程上；任务提交不了（插件已停用）时就地释放。
+- 查找：查询超过 4 KiB 时没有结果；每个 1 MiB 的块之后发布一次部分结果；档位 C 的查找在同一个 `OpenFile` 上按块读，不经过页的 LRU。新增 `find_*` 测试（「测试」没有列出）。
+- `Engine::prefetch` 是第 4 步，`DocHandle::edit` 是第 5 步，本步没有。
+- 依赖：本步加入 `lectern-cache`、`lectern-executor`、`lectern-fs-watch`、`lectern-git`、`lectern-kernel`、`lectern-services` 和 `unicode-width`（根 `Cargo.toml` 的 `[workspace.dependencies]` 加了一行，它已在 Cargo.lock，发布构建不新增 crate）。
+- 基准和测试的入口（`test-support`）：`Engine::first_screen` 在调用线程上算一个目标的首屏，与 `open` 的第一个任务是同一段代码，之后不提交任何任务，`syntax/first_screen` 和对象库的三项用它计时；`Engine::tasks_in_flight`、`lru_bytes`、`lru_len`；`testing::host` 给出一个内核和插件句柄。`syntax/lru_bytes` 测的是装满 LRU 之后 drop `Engine` 释放的活跃字节，含引擎的几张小表（根、身份到 OID 的表），比只算 LRU 的条目略多。
 
 前置条件 A（`services`）。下面只记上文「接口」没有定下、实现时定下的形状：
 
