@@ -25,6 +25,9 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// `replace_file`: reuses the trees and helpers below.
+mod replace;
+
 fn backends() -> Vec<Backend> {
     vec![
         #[cfg(target_os = "linux")]

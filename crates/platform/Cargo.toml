@@ -1,6 +1,6 @@
 [package]
 name = "lectern-platform"
-description = "Safe reads beneath a directory root; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
+description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,14 +17,18 @@ rustix.workspace = true
 # on every platform.
 lectern-fs-watch = { path = "../fs_watch" }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# `ThreadCpuClock`: `pthread_getcpuclockid` and `clock_gettime` on Linux,
+# `pthread_mach_thread_np` and `thread_info` on macOS, which rustix lacks.
+# On macOS also `proc_pid_rusage` (`process::phys_footprint`); the macOS
+# tests create a FIFO with it.
+libc.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # The kqueue thread runs through `Executor::run_dedicated`.
 lectern-executor = { path = "../executor" }
 # kqueue for `Scope::Entries` targets.
 rustix = { workspace = true, features = ["event"] }
-# `proc_pid_rusage` (`process::phys_footprint`); the tests also create a
-# FIFO with it.
-libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

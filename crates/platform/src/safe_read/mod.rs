@@ -1,5 +1,6 @@
-//! Reading files beneath a directory root without following symbolic links at
-//! any level of the path and without leaving the root (docs/design/platform.md).
+//! Reading files beneath a directory root, and replacing one, without
+//! following symbolic links at any level of the path and without leaving the
+//! root (docs/design/platform.md).
 //!
 //! Every call starts from the root's descriptor. A one-step call resolves the
 //! whole path in the kernel (`openat2` with `RESOLVE_BENEATH |
@@ -11,6 +12,10 @@
 //! [`SafeRoot::open_file`] opens a regular file the same way and hands its
 //! descriptor to an [`OpenFile`], which reads byte ranges with `pread`
 //! ([`range`], 「范围读取」 in the design).
+//!
+//! [`SafeRoot::replace_file`] is the one write: an atomic replacement of a
+//! regular file through the descriptor of its directory ([`replace`],
+//! 「原子替换」 in the design).
 
 use std::fmt;
 use std::io;
@@ -28,9 +33,11 @@ use linux::Target;
 #[cfg(target_os = "macos")]
 mod macos;
 mod range;
+mod replace;
 mod walk;
 
 pub use range::{FileIdentity, FullRead, MAX_RANGE_BYTES, MAX_RANGES, OpenFile, Opened, RangeRead};
+pub use replace::ReplaceError;
 
 #[cfg(test)]
 mod tests;
