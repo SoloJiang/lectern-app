@@ -20,7 +20,7 @@ use crate::LangName;
 use crate::extract::{ExtractStatus, Lang, LanguageTable};
 use crate::git_access::Tree;
 use crate::map::{HeadDiff, HintStamp, LiveMap, Provenance};
-use crate::store::{PendingTouches, Store, Version};
+use crate::store::{Found, PendingTouches, Store, Version};
 
 /// One open project.
 pub(crate) struct Project {
@@ -327,11 +327,57 @@ pub(crate) struct Batch {
     pub queued: HashSet<(BlobId, LangName)>,
     /// Extractions in flight per batch tier.
     pub active: [usize; 3],
-    pub touches: PendingTouches,
+    /// Hits to mark as used: queued only through [`Batch::queue_touches`],
+    /// whose [`Wake`] wakes the batch tasks.
+    touches: PendingTouches,
     pub others: Others,
     /// Set once this session's own write evicted units (the namespace is
     /// at its quota): the eviction generation the walks keep using.
     pub full: Option<u64>,
+}
+
+/// Work for the batch tasks was made: passed to `Inner::wake` once the
+/// project's lock is released, which wakes them. Whatever queues tier 3–5
+/// work outside the batch tasks gets one, so it cannot forget the kick (the
+/// liveness rule of `Inner::kick_batch`).
+#[must_use = "batch work was made: pass it to `Inner::wake`"]
+pub(crate) struct Wake(());
+
+impl Wake {
+    /// A write outside the batch tasks: it may have evicted units, which
+    /// starts the walks over.
+    pub fn wrote() -> Wake {
+        Wake(())
+    }
+}
+
+impl Batch {
+    /// Queues `found` (read under the store's eviction `generation`) to be
+    /// marked as used by the batch tasks.
+    pub fn queue_touches(&mut self, generation: u64, found: &[Found]) -> Wake {
+        self.touches.push(generation, found);
+        Wake(())
+    }
+
+    /// Hits are queued (`Inner::runnable`, tests).
+    #[cfg(test)]
+    pub fn has_touches(&self) -> bool {
+        !self.touches.is_empty()
+    }
+
+    /// The queued hits, for the batch task that marks them.
+    pub fn take_touches(&mut self) -> PendingTouches {
+        std::mem::take(&mut self.touches)
+    }
+
+    /// Puts back what [`take_touches`](Self::take_touches) took and did
+    /// not mark, unless hits were queued meanwhile. Called by the batch
+    /// task itself, which goes on with them.
+    pub fn put_back_touches(&mut self, touches: PendingTouches) {
+        if self.touches.is_empty() {
+            self.touches = touches;
+        }
+    }
 }
 
 /// Tiers 1 and 2: explicit small queues on the worker threads.

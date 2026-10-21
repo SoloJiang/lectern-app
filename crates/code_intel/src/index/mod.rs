@@ -230,6 +230,10 @@ pub(crate) struct Inner {
     /// Another registration of `code_intel.tags` for new projects (tests).
     #[cfg(test)]
     pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
+    /// Run once by the next tier 1 or 2 task, before its existence check
+    /// (tests: the batch tasks run, and stop, in that window).
+    #[cfg(test)]
+    pub before_focus_check: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -303,6 +307,8 @@ impl Indexer {
             verify_checks: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             tables: Mutex::new(None),
+            #[cfg(test)]
+            before_focus_check: Mutex::new(None),
         });
         Indexer { inner }
     }

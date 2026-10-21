@@ -22,7 +22,8 @@ use lectern_services::project::{BlobId, ProjectKey};
 
 use super::host::yield_now;
 use super::state::{
-    Cursor, Item, OtherTree, OtherWalk, Owner, Project, Scope, Source, State, Tier, Walk, under,
+    Cursor, Item, OtherTree, OtherWalk, Owner, Project, Scope, Source, State, Tier, Wake, Walk,
+    under,
 };
 use super::{Inner, bump, lock};
 use crate::extract::{
@@ -155,9 +156,11 @@ impl Inner {
     ///
     /// The liveness rule: after every operation that can create batch work
     /// (open, close, a change of the project that runs tiers 3–5, focus,
-    /// grammar, the end of a reconcile), either no project has
-    /// runnable tier 3–5 work or the pool is full (`Inner::live`, checked
-    /// by the tests' harness).
+    /// grammar, the end of a reconcile, and work queued from outside the
+    /// batch tasks: hits to mark as used, a write that may evict, each with
+    /// a [`Wake`] for [`Inner::wake`]), either no project has runnable tier
+    /// 3–5 work or the pool is full (`Inner::live`, checked by the tests'
+    /// harness).
     pub(crate) fn kick_batch(self: &Arc<Self>) {
         // `kicked` first: a task going idle after this sees it and steps
         // again; one that went idle before has left room in the pool, which
@@ -165,6 +168,14 @@ impl Inner {
         // idle in between, leave, and the kick would wait for the next one.
         lock(&self.batch).kicked = true;
         self.fill_pool();
+    }
+
+    /// Wakes the batch tasks for the work `_wake` stands for. Called with
+    /// no project lock held.
+    pub(crate) fn wake(&self, _wake: Wake) {
+        if let Some(me) = self.arc() {
+            me.kick_batch();
+        }
     }
 
     /// Starts batch tasks up to `batch_tasks`.
@@ -228,7 +239,7 @@ impl Inner {
         if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
             return false;
         }
-        if st.batch.resume.iter().any(|q| !q.is_empty()) || !st.batch.touches.is_empty() {
+        if st.batch.resume.iter().any(|q| !q.is_empty()) || st.batch.has_touches() {
             return true;
         }
         let deps = st.cursor_deps(eviction);
@@ -309,12 +320,12 @@ impl Inner {
             return Step::Worked;
         }
         // Everything is checked: mark the warm start's hits as used.
-        let mut touches = std::mem::take(&mut lock(&project.state).batch.touches);
+        let mut touches = lock(&project.state).batch.take_touches();
         if !touches.is_empty() {
             project.store.touch_pending(&mut touches);
             let mut st = lock(&project.state);
-            if st.session == ctx.session && st.batch.touches.is_empty() {
-                st.batch.touches = touches;
+            if st.session == ctx.session {
+                st.batch.put_back_touches(touches);
             }
             return Step::Worked;
         }
@@ -614,7 +625,9 @@ impl Inner {
         if !st.live(ctx.session) {
             return;
         }
-        st.batch.touches.push(eviction, &found);
+        // From a batch task, which goes on with them: the wake only makes
+        // it step once more before it stops.
+        let wake = st.batch.queue_touches(eviction, &found);
         for ((oid, lang), status) in hits.iter().zip(&statuses) {
             // A hit stamps hints only for the version the map and the current
             // language table both have, and with the map's own stamp: a hit
@@ -645,6 +658,8 @@ impl Inner {
                 st.batch.resume[t].push_back(item);
             }
         }
+        drop(st);
+        self.wake(wake);
     }
 
     /// Extracts files of tier `t`'s queue until the batch's limits.
@@ -965,6 +980,7 @@ impl Inner {
             written.clear();
         }
         let settled = stored.len() + written.len() == done.len();
+        let mut wakes = Vec::new();
         let mut st = lock(&project.state);
         if st.session == ctx.session {
             if committed {
@@ -983,7 +999,7 @@ impl Inner {
                     st.batch.full = Some(walked);
                 }
             }
-            st.batch.touches.push(before_raw, &hits);
+            wakes.push(st.batch.queue_touches(before_raw, &hits));
             // The units just written are the newest: they outlive the
             // eviction they caused.
             let sets = [(stored, st.stamp(before)), (written, st.stamp(after))];
@@ -1007,15 +1023,13 @@ impl Inner {
             // A written batch makes a held name table behind.
             me.names_changed(project);
         }
-        if !batch
-            && (committed || !hits.is_empty())
-            && let Some(me) = self.arc()
-        {
-            // Batch work from outside the batch tasks (tiers 1 and 2, a
-            // query's search): hits to mark as used, or an eviction that
-            // makes the walks start over. Kick, or it waits for the next
-            // operation that does.
-            me.kick_batch();
+        if committed && !batch {
+            // A write from outside the batch tasks (tiers 1 and 2, a
+            // query's search) may have evicted, which starts the walks over.
+            wakes.push(Wake::wrote());
+        }
+        for wake in wakes {
+            self.wake(wake);
         }
         settled
     }
@@ -1249,6 +1263,10 @@ impl Inner {
                 st.in_flight.insert(key, owner);
                 (item, c, flag)
             };
+            #[cfg(test)]
+            if let Some(hook) = lock(&self.before_focus_check).take() {
+                hook();
+            }
             let (before_raw, before) = (project.store.evictions(), project.evictions());
             let version = Version::of(&item.lang);
             bump(&self.stats.exists_checks, 1);
@@ -1260,15 +1278,20 @@ impl Inner {
                 let status = hit.status;
                 let table = lock(&self.langs).table.clone();
                 let mut st = lock(&project.state);
+                let mut wake = None;
                 if st.finish(session, &item, &flag) {
                     if t == 0 {
                         st.focused.satisfied.insert((item.oid, version.clone()));
                     }
-                    st.batch.touches.push(before_raw, &found);
+                    wake = Some(st.batch.queue_touches(before_raw, &found));
                     if current(&table, &st.map, &version) {
                         let stamp = st.stamp(before);
                         st.hint_paths(&item.oid, &item.lang.name().0, stamp, status);
                     }
+                }
+                drop(st);
+                if let Some(wake) = wake {
+                    self.wake(wake);
                 }
                 continue;
             }
