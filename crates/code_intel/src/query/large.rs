@@ -15,9 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant, SystemTime};
 
 use lectern_git::BlobHasher;
-use lectern_platform::{
-    FileIdentity, FullRead, MAX_RANGE_BYTES, OpenFile, Opened, RelPath as SafeRel, SafeError,
-};
+use lectern_platform::{FileIdentity, FullRead, OpenFile, Opened, RelPath as SafeRel, SafeError};
 use lectern_services::code_intel::{Position, QueryError, RefSyntax, TextOrigin, TextRef};
 use lectern_services::project::BlobId;
 
@@ -41,8 +39,8 @@ pub const BACK: usize = 8 << 10;
 pub const BACK_MORE: usize = 4 << 10;
 /// …and it ends this far past the target.
 pub const AHEAD: usize = 4 << 10;
-/// What a jump reads around a checkpoint: the 64 KiB after it with the
-/// window's margins.
+/// What a jump reads after a checkpoint: the 64 KiB in which its line
+/// starts, and the window's margin past a target near their end.
 const SPAN: u64 = CHECKPOINT + (AHEAD as u64) + (4 << 10);
 
 /// A large text's identity and line checkpoints (「大文件」), recorded by
@@ -63,13 +61,18 @@ pub(crate) struct LargeText {
 }
 
 impl LargeText {
-    /// The checkpoint at or before `line`: its byte and line.
-    fn checkpoint(&self, line: u32) -> (u64, u32) {
-        let k = self.lines.partition_point(|l| *l <= line).saturating_sub(1);
-        (
-            k as u64 * CHECKPOINT,
-            self.lines.get(k).copied().unwrap_or(0),
-        )
+    /// Where the start of `line` is looked for: the last checkpoint on an
+    /// earlier line (its byte and line). `line` starts within the 64 KiB
+    /// after it: the next checkpoint, if any, is on `line` or later. None
+    /// for line 0, which starts at byte 0. Not the last checkpoint on
+    /// `line` itself: `line` starts before that one (a line longer than
+    /// 64 KiB, every line of a minified file).
+    fn before_line(&self, line: u32) -> Option<(u64, u32)> {
+        if line == 0 {
+            return None;
+        }
+        let k = self.lines.partition_point(|l| *l < line).checked_sub(1)?;
+        Some((k as u64 * CHECKPOINT, self.lines[k]))
     }
 
     /// Whether this record of a worktree file still stands for `file`:
@@ -110,11 +113,19 @@ pub(crate) struct WindowParse {
 }
 
 impl WindowParse {
-    /// The position in the window; None outside it.
+    /// The position in the window; None outside it: before its start, past
+    /// the end of its line, or on a name the window's end cuts (the last
+    /// line of a window is partial, and in a minified file the only one).
     fn local(&self, at: Position) -> Option<Position> {
         let local = local(self.base, at)?;
-        let lines = memchr::memchr_iter(b'\n', self.parsed.source()).count() as u32;
-        (local.line < lines).then_some(local)
+        let source = &**self.parsed.source();
+        let mut start = 0;
+        for _ in 0..local.line {
+            start += memchr::memchr(b'\n', source.get(start..)?)? + 1;
+        }
+        let line_end = memchr::memchr(b'\n', &source[start..]).map_or(source.len(), |i| start + i);
+        let offset = start + local.column as usize;
+        (offset <= line_end && ident_end(source, offset).is_some()).then_some(local)
     }
 }
 
@@ -182,8 +193,9 @@ fn named_defs(w: &WindowParse, site: &Site) -> Vec<(Def, bool)> {
 /// Where a jump's window starts in `buf` (ADR 0034's first-screen window):
 /// from about [`BACK`] before `target`, a safe position at most
 /// [`BACK_MORE`] further back: a line beginning a statement at column 0,
-/// else just after a `;` or `}`, else the first byte there that does not
-/// split an identifier.
+/// else just after a `;` or `}`; else (a long literal or comment there)
+/// just after the first `;` or `}` between there and the target; else the
+/// first byte there that does not split an identifier.
 pub(crate) fn safe_start(buf: &[u8], target: usize) -> usize {
     let from = target.saturating_sub(BACK);
     if from == 0 {
@@ -202,6 +214,12 @@ pub(crate) fn safe_start(buf: &[u8], target: usize) -> usize {
     }
     if let Some(i) = region.iter().rposition(|b| matches!(b, b';' | b'}')) {
         return lo + i + 1;
+    }
+    if let Some(i) = buf[from..target]
+        .iter()
+        .position(|b| matches!(b, b';' | b'}'))
+    {
+        return from + i + 1;
     }
     let mut at = from;
     while at < target && ident(buf[at - 1]) && ident(buf[at]) {
@@ -228,54 +246,86 @@ pub(crate) fn ident_at(bytes: &[u8], at: usize) -> Option<Range<usize>> {
     (!bytes[start].is_ascii_digit()).then_some(start..end)
 }
 
-/// Bytes of a large text from `start`.
+/// Bytes of a large text from `start` (a byte of the file).
 struct Around {
     buf: Arc<[u8]>,
     start: u64,
 }
 
-/// A jump's target in `around`: the byte of (`line`, `column`) and the
-/// start of `line`, counted from the checkpoint (`cp`, its line); None
-/// when `line` does not start inside the bytes.
-fn locate(around: &Around, cp: (u64, u32), line: u32, column: u32) -> Option<(usize, usize)> {
-    let mut i = usize::try_from(cp.0.checked_sub(around.start)?).ok()?;
-    let mut l = cp.1;
+impl Around {
+    /// Whether the bytes hold `range` of the file.
+    fn covers(&self, range: &Range<u64>) -> bool {
+        range.start >= self.start && range.end <= self.start + self.buf.len() as u64
+    }
+}
+
+/// The start of `line` in the file, found in `around`, which holds the 64
+/// KiB after `text`'s checkpoint before `line` ([`LargeText::before_line`]);
+/// None when the file ends first (no such line).
+fn line_start(text: &LargeText, around: &Around, line: u32) -> Option<u64> {
+    let Some((cp, mut l)) = text.before_line(line) else {
+        return Some(0);
+    };
+    let mut i = usize::try_from(cp.checked_sub(around.start)?).ok()?;
     while l < line {
         i += memchr::memchr(b'\n', around.buf.get(i..)?)? + 1;
         l += 1;
     }
-    let target = (i + column as usize).min(around.buf.len());
-    Some((target, i))
+    Some(around.start + i as u64)
 }
 
-/// The window around `target` in `around` (its line starting at
-/// `line_start`, on `line`) and where it starts in the file.
-fn window(around: &Around, target: usize, line_start: usize, line: u32) -> (Range<usize>, Base) {
+/// What a jump reads around its target byte `at` (in a file of `len`
+/// bytes): the window's margins before it and after it.
+fn needed(at: u64, len: u64) -> Range<u64> {
+    at.saturating_sub((BACK + BACK_MORE) as u64)..(at + AHEAD as u64).min(len)
+}
+
+/// The window around the target byte `at` (in the file; `around` holds
+/// [`needed`] of it), on `line`, which starts at the file's byte
+/// `line_start`: the window's range in `around` and where it starts in the
+/// file.
+fn window(around: &Around, at: u64, line_start: u64, line: u32) -> (Range<usize>, Base) {
     let buf = &around.buf;
-    let mut ws = safe_start(buf, target);
+    let target = (at - around.start) as usize;
+    let ws = safe_start(buf, target);
     let we = (target + AHEAD).min(buf.len());
-    let base = |ws: usize, line_no: u32, column: usize| Base {
-        byte: around.start + ws as u64,
-        line: line_no,
-        column: column as u32,
-    };
-    if ws >= line_start {
-        return (ws..we, base(ws, line, ws - line_start));
+    let start = around.start + ws as u64;
+    if start >= line_start {
+        let base = Base {
+            byte: start,
+            line,
+            column: (start - line_start) as u32,
+        };
+        return (ws..we, base);
     }
-    let up = memchr::memchr_iter(b'\n', &buf[ws..line_start]).count() as u32;
+    // The window starts on an earlier line: `line_start` is inside the
+    // bytes, after it.
+    let ls = (line_start - around.start) as usize;
+    let up = memchr::memchr_iter(b'\n', &buf[ws..ls]).count() as u32;
     let column = match memchr::memrchr(b'\n', &buf[..ws]) {
         Some(p) => Some(ws - p - 1),
         None if around.start == 0 => Some(ws),
         None => None,
     };
     match column {
-        Some(c) => (ws..we, base(ws, line - up, c)),
-        // The window's line starts before the bytes read: from the
-        // target's own line.
-        None => {
-            ws = line_start;
-            (ws..we, base(ws, line, 0))
-        }
+        Some(c) => (
+            ws..we,
+            Base {
+                byte: start,
+                line: line - up,
+                column: c as u32,
+            },
+        ),
+        // That line starts before the bytes read: from the target's own
+        // line.
+        None => (
+            ls..we,
+            Base {
+                byte: line_start,
+                line,
+                column: 0,
+            },
+        ),
     }
 }
 
@@ -350,12 +400,24 @@ impl Inner {
                         text
                     }
                 };
+                let len = bytes.len() as u64;
                 let around = Around {
                     buf: bytes,
                     start: 0,
                 };
-                self.parse_large(lang, at, position, &text, &around, cancel)
-                    .map(|s| CurrentText::Large(Box::new(s)))
+                let ls = line_start(&text, &around, position.line).ok_or(QueryError::NoSymbol)?;
+                let target = (ls + u64::from(position.column)).min(len);
+                self.parse_large(
+                    lang,
+                    at,
+                    position,
+                    text.canonical,
+                    &around,
+                    ls,
+                    target,
+                    cancel,
+                )
+                .map(|s| CurrentText::Large(Box::new(s)))
             }
             Source::File(file) => {
                 let len = file.meta().size;
@@ -370,27 +432,39 @@ impl Inner {
                         text
                     }
                 };
-                let cp = text.checkpoint(position.line);
-                let from = cp.0.saturating_sub((BACK + BACK_MORE) as u64);
-                let mut to = (cp.0 + SPAN).min(len);
-                let around = loop {
-                    let buf = read(&file, identity, from, to).ok_or(QueryError::Stale)?;
-                    let around = Around {
+                // The 64 KiB after the checkpoint before the line, where the
+                // line starts, with the window's margins: the window too,
+                // unless the target is further along a long line.
+                let cp = text.before_line(position.line).map_or(0, |(byte, _)| byte);
+                let first = cp.saturating_sub((BACK + BACK_MORE) as u64)..(cp + SPAN).min(len);
+                let read_range = |range: &Range<u64>| -> Result<Around, QueryError> {
+                    let buf =
+                        read(&file, identity, range.start, range.end).ok_or(QueryError::Stale)?;
+                    Ok(Around {
                         buf: buf.into(),
-                        start: from,
-                    };
-                    // A line longer than the bytes read: read on, up to
-                    // what one read takes.
-                    let enough = locate(&around, cp, position.line, 0).is_some_and(|(_, s)| {
-                        s + position.column as usize + AHEAD <= around.buf.len()
-                    });
-                    if enough || to == len || to - from >= MAX_RANGE_BYTES {
-                        break around;
-                    }
-                    to = (from + MAX_RANGE_BYTES).min(len);
+                        start: range.start,
+                    })
                 };
-                self.parse_large(lang, at, position, &text, &around, cancel)
-                    .map(|s| CurrentText::Large(Box::new(s)))
+                let around = read_range(&first)?;
+                let ls = line_start(&text, &around, position.line).ok_or(QueryError::NoSymbol)?;
+                let target = (ls + u64::from(position.column)).min(len);
+                let need = needed(target, len);
+                let around = if around.covers(&need) {
+                    around
+                } else {
+                    read_range(&need)?
+                };
+                self.parse_large(
+                    lang,
+                    at,
+                    position,
+                    text.canonical,
+                    &around,
+                    ls,
+                    target,
+                    cancel,
+                )
+                .map(|s| CurrentText::Large(Box::new(s)))
             }
         }
     }
@@ -405,21 +479,24 @@ impl Inner {
         })
     }
 
-    /// The target's window in `around` parsed (8 ms) and kept; past the
-    /// deadline, the name at the target alone.
+    /// The window around the file's byte `target` (`position`, on a line
+    /// starting at the byte `line_start`) in `around` parsed (8 ms) and
+    /// kept; past the deadline, the name at the target alone.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one jump's text, its target and the bytes read around it"
+    )]
     fn parse_large(
         &self,
         lang: &Lang,
         at: &TextRef,
         position: Position,
-        text: &LargeText,
+        canonical: bool,
         around: &Around,
+        line_start: u64,
+        target: u64,
         cancel: &AtomicBool,
     ) -> Result<LargeSite, QueryError> {
-        let cp = text.checkpoint(position.line);
-        let Some((target, line_start)) = locate(around, cp, position.line, position.column) else {
-            return Err(QueryError::Unreadable("a line too long to read".into()));
-        };
         let (range, base) = window(around, target, line_start, position.line);
         let clock = self.watchdog.clock().clone();
         let source: Arc<[u8]> = Arc::from(&around.buf[range]);
@@ -442,16 +519,17 @@ impl Inner {
                     parsed: Arc::new(parsed),
                     base,
                 };
-                let found = self.window_site(&w, local_at, text.canonical);
-                self.keep_window(at.oid, lang, w, text.canonical, clock.now());
+                let found = self.window_site(&w, local_at, canonical);
+                self.keep_window(at.oid, lang, w, canonical, clock.now());
                 found.ok_or(QueryError::NoSymbol)
             }
             Err(ParseError::Unsupported) => Err(QueryError::UnsupportedLanguage),
             Err(ParseError::Cancelled) => Err(QueryError::Unreadable("cancelled".into())),
             // The name at the target goes on to steps 2 and 3, unbound.
             Err(ParseError::TimedOut) => {
-                let name = ident_at(&around.buf, target).ok_or(QueryError::NoSymbol)?;
-                let start = name.start;
+                let i = (target - around.start) as usize;
+                let name = ident_at(&around.buf, i).ok_or(QueryError::NoSymbol)?;
+                let start = around.start + name.start as u64;
                 let name =
                     std::str::from_utf8(&around.buf[name]).map_err(|_| QueryError::NoSymbol)?;
                 Ok(LargeSite {
@@ -460,16 +538,14 @@ impl Inner {
                         syntax: RefSyntax::Plain,
                         at: Position {
                             line: position.line,
-                            column: position
-                                .column
-                                .saturating_sub((target - start.max(line_start)) as u32),
+                            column: start.saturating_sub(line_start) as u32,
                         },
                         binding: None,
                         possible: Vec::new(),
                         defines: None,
                     },
                     defs: Vec::new(),
-                    canonical: text.canonical,
+                    canonical,
                 })
             }
         }

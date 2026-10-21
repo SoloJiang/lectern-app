@@ -520,18 +520,22 @@ impl Inner {
         // The current text is read and parsed: its definitions are step 1's
         // (the map's file when the map has that content at the path). A
         // large text's are its window units (step 3): searched when its
-        // chain is complete (`Windowed`).
-        if !large
-            || snap
-                .project
-                .store
-                .exists_with_windows(&version, &[at.oid])
-                .is_some_and(|(found, _)| {
-                    found
-                        .first()
-                        .is_some_and(|f| f.status == ExtractStatus::Windowed)
-                })
-        {
+        // chain is complete (`Windowed`); the marker and its windows are
+        // then marked used with this query's units.
+        let windowed = large
+            .then(|| snap.project.store.exists_with_windows(&version, &[at.oid]))
+            .flatten()
+            .and_then(|(found, windows)| {
+                let marker = found
+                    .into_iter()
+                    .find(|f| f.status == ExtractStatus::Windowed)?;
+                Some((marker.unit, windows))
+            });
+        if let Some((marker, windows)) = &windowed {
+            prepared.units.push(*marker);
+            prepared.units.extend(windows);
+        }
+        if !large || windowed.is_some() {
             prepared.account.searched(&at.path, at.oid);
         } else {
             prepared
@@ -1159,6 +1163,7 @@ impl Inner {
         p.units.sort_by_key(|u| u.id());
         p.units.dedup();
         crate::phases::count("touched units", p.units.len() as u64);
+        crate::index::bump(&self.stats.touched, p.units.len());
         snap.project.store.touch(&p.units);
     }
 

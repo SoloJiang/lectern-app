@@ -91,6 +91,9 @@ pub struct Stats {
     /// Windows of opened large files extracted (「大文件」), widened ones
     /// counted once.
     pub windows: AtomicUsize,
+    /// Units marked as used: the batch tasks' queued hits and the queries'
+    /// units.
+    pub touched: AtomicUsize,
 }
 
 /// A snapshot of [`Stats`].
@@ -107,6 +110,7 @@ pub struct StatCounts {
     pub grammar_rounds: usize,
     pub prepares: usize,
     pub windows: usize,
+    pub touched: usize,
 }
 
 impl Stats {
@@ -124,6 +128,7 @@ impl Stats {
             grammar_rounds: get(&self.grammar_rounds),
             prepares: get(&self.prepares),
             windows: get(&self.windows),
+            touched: get(&self.touched),
         }
     }
 }

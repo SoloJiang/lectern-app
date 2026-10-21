@@ -71,12 +71,41 @@ fn assert_done(r: &lectern_services::code_intel::QueryResults) {
 
 /// The body's `value` of `build_<k>`, bound to the parameter.
 fn assert_bound_to_parameter(r: &QueryResultsRef, text: &str, k: usize) {
+    assert_bound_to(r, text, &format!("build_{k}(value"));
+}
+
+/// Bound to the `value` that ends the first `def` in `text`, at its line,
+/// column and byte.
+fn assert_bound_to(r: &QueryResultsRef, text: &str, def: &str) {
     assert_done(r);
-    let c = &r.candidates[0];
+    let c = r.candidates.first().expect("a candidate");
     assert_eq!(c.evidence, Evidence::Bound(Binding::Local));
-    let (line, column, byte) = parameter(text, k);
+    let at = pos_in(text.as_bytes(), def, 0);
+    let byte = text.find(def).unwrap() + def.len() - "value".len();
+    let column = at.column + def.len() as u32 - 5;
     let l = &c.definition.location;
-    assert_eq!((l.line, l.column, l.byte), (line, column, Some(byte)));
+    assert_eq!(
+        (l.line, l.column, l.byte),
+        (at.line, column, Some(byte as u64))
+    );
+}
+
+/// About `len` bytes of JavaScript on one line (a minified bundle): one
+/// function `g_<k>(value)` after the other; and how many.
+fn one_line(len: usize) -> (String, usize) {
+    let mut text = String::with_capacity(len + 64);
+    let mut k = 0;
+    while text.len() < len {
+        text.push_str(&format!("function g_{k}(value) {{ return value + {k}; }} "));
+        k += 1;
+    }
+    text.push('\n');
+    (text, k)
+}
+
+/// A jump on the body's `value` of `g_<k>` in [`one_line`]'s text.
+fn jump_in_line(h: &Harness, at: TextRef, text: &str, k: usize, offset: u32) -> QueryResultsRef {
+    jump(h, at, text, &format!("value + {k};"), offset)
 }
 
 #[test]
@@ -313,6 +342,87 @@ fn goto_large_crlf_text_has_no_byte_offsets() {
     let (line, column, _) = parameter(&text, 6000);
     let l = &c.definition.location;
     assert_eq!((l.line, l.column, l.byte), (line, column, None));
+}
+
+#[test]
+fn goto_large_line_across_a_checkpoint() {
+    // A line from about 100 KiB to 190 KiB: the checkpoint at 128 KiB is on
+    // it, and the line starts before it.
+    let mut text = big("ts", 100_000);
+    text.push_str(&format!(
+        "export const pad = \"{}\"; export function straddle(value: number): number {{ return value + 1; }}\n",
+        "x".repeat(90_000)
+    ));
+    text.push_str(&big("ts", 1_100_000));
+    let line_start = text.find("export const pad").unwrap();
+    assert!(line_start < 2 * CHECKPOINT as usize);
+    assert!(text.find("return value + 1;").unwrap() > 2 * CHECKPOINT as usize + 50_000);
+    let h = opened("big.ts", text.as_bytes());
+    reads();
+    let r = jump(&h, h.text("big.ts"), &text, "value + 1;", 0);
+    assert_bound_to(&r, &text, "straddle(value");
+    // Further along the line than the first read: a second, of the window.
+    let read = reads();
+    assert_eq!(read.len(), 2, "{read:?}");
+    assert!(read.iter().all(|r| r.end - r.start <= AROUND), "{read:?}");
+    // The first from the checkpoint before the line (at 64 KiB), not the
+    // one on it.
+    assert!(
+        read[0].start < CHECKPOINT && read[0].end > CHECKPOINT,
+        "{read:?}"
+    );
+    // The kept window answers in place, nothing read.
+    let r = jump(&h, h.text("big.ts"), &text, "value + 1;", 3);
+    assert_bound_to(&r, &text, "straddle(value");
+    assert!(reads().is_empty());
+}
+
+#[test]
+fn goto_large_minified_line() {
+    let (text, n) = one_line(1_200_000);
+    let h = opened("min.js", text.as_bytes());
+    for k in [n / 2, n - 2, 3] {
+        reads();
+        let r = jump_in_line(&h, h.text("min.js"), &text, k, 0);
+        assert_bound_to(&r, &text, &format!("g_{k}(value"));
+        let read = reads();
+        assert!(read.len() <= 2, "{read:?}");
+        assert!(read.iter().all(|r| r.end - r.start <= AROUND), "{read:?}");
+        // In the kept window (the window's only line), nothing read.
+        let r = jump_in_line(&h, h.text("min.js"), &text, k, 2);
+        assert_bound_to(&r, &text, &format!("g_{k}(value"));
+        assert!(reads().is_empty());
+    }
+}
+
+#[test]
+fn goto_large_minified_object_text() {
+    let (text, n) = one_line(1_200_000);
+    let h = Harness::new();
+    h.git.add("main", &[("min.js", text.as_bytes())]);
+    h.git.commit("main");
+    h.open();
+    h.settle();
+    let at = TextRef {
+        worktree: Some(h.wt()),
+        path: "min.js".into(),
+        oid: h.git.oid(text.as_bytes()),
+        origin: TextOrigin::Object,
+    };
+    let blobs = h.git.count("blob");
+    let k = n / 2 + 7;
+    let r = jump_in_line(&h, at.clone(), &text, k, 0);
+    assert_bound_to(&r, &text, &format!("g_{k}(value"));
+    assert_eq!(h.git.count("blob"), blobs + 1);
+    // The kept window, in place: no blob taken.
+    let r = jump_in_line(&h, at.clone(), &text, k, 4);
+    assert_bound_to(&r, &text, &format!("g_{k}(value"));
+    assert_eq!(h.git.count("blob"), blobs + 1);
+    // Far from it: taken again, still in place.
+    let k = n - 3;
+    let r = jump_in_line(&h, at, &text, k, 0);
+    assert_bound_to(&r, &text, &format!("g_{k}(value"));
+    assert_eq!(h.git.count("blob"), blobs + 2);
 }
 
 #[test]

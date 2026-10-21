@@ -884,7 +884,9 @@ impl Inner {
         // Everything is checked: mark the warm start's hits as used.
         let mut touches = lock(&project.state).batch.take_touches();
         if !touches.is_empty() {
-            project.store.touch_pending(&mut touches);
+            let queued = touches.len();
+            let left = project.store.touch_pending(&mut touches);
+            bump(&self.stats.touched, queued.saturating_sub(left));
             let mut st = lock(&project.state);
             if st.session == ctx.session {
                 st.batch.put_back_touches(touches);
@@ -1183,17 +1185,22 @@ impl Inner {
             }
         }
         let mut found = Vec::new();
+        let mut windows = Vec::new();
         let mut hits = Vec::new();
         let mut statuses = Vec::new();
         for (version, group) in &groups {
             let oids: Vec<BlobId> = group.iter().map(|i| i.oid).collect();
             bump(&self.stats.exists_checks, oids.len().div_ceil(EXISTS_BATCH));
-            let hit = project.store.exists(version, &oids).unwrap_or_default();
+            let (hit, w) = project
+                .store
+                .exists_with_windows(version, &oids)
+                .unwrap_or_default();
             for f in &hit {
                 hits.push((f.oid, version.lang.clone()));
                 statuses.push(f.status);
             }
             found.extend(hit);
+            windows.extend(w);
         }
         let table = lock(&self.langs).table.clone();
         let mut st = lock(&project.state);
@@ -1202,7 +1209,7 @@ impl Inner {
         }
         // From a batch task, which goes on with them: the wake only makes
         // it step once more before it stops.
-        let wake = st.batch.queue_touches(eviction, &found);
+        let wake = st.batch.queue_touches(eviction, &found, &windows);
         for ((oid, lang), status) in hits.iter().zip(&statuses) {
             // A hit stamps hints only for the version the map and the current
             // language table both have, and with the map's own stamp: a hit
@@ -1893,6 +1900,8 @@ impl Inner {
         let mut stored = Vec::new();
         let mut written = Vec::new();
         let mut hits = Vec::new();
+        // The window units of `Windowed` hits: marked used with them.
+        let mut windows = Vec::new();
         let (eviction, committed, after) = {
             let _turn = lock(&project.commits);
             // Keys stored since the extraction: one query per version,
@@ -1901,9 +1910,12 @@ impl Inner {
             let mut found: Vec<(Version, Found)> = Vec::new();
             for (version, keys) in &groups {
                 bump(&self.stats.exists_checks, 1);
-                for f in project.store.exists(version, keys).unwrap_or_default() {
-                    found.push((version.clone(), f));
-                }
+                let (hit, w) = project
+                    .store
+                    .exists_with_windows(version, keys)
+                    .unwrap_or_default();
+                found.extend(hit.into_iter().map(|f| (version.clone(), f)));
+                windows.extend(w);
             }
             let eviction = project.store.evictions();
             let mut write = project.store.write();
@@ -1970,7 +1982,7 @@ impl Inner {
                     st.batch.full = Some(walked);
                 }
             }
-            wakes.push(st.batch.queue_touches(before_raw, &hits));
+            wakes.push(st.batch.queue_touches(before_raw, &hits, &windows));
             // The units just written are the newest: they outlive the
             // eviction they caused.
             let sets = [(stored, st.stamp(before)), (written, st.stamp(after))];
@@ -2244,9 +2256,9 @@ impl Inner {
             let (before_raw, before) = (project.store.evictions(), project.evictions());
             let version = Version::of(&item.lang);
             bump(&self.stats.exists_checks, 1);
-            let found = project
+            let (found, windows) = project
                 .store
-                .exists(&version, &[item.oid])
+                .exists_with_windows(&version, &[item.oid])
                 .unwrap_or_default();
             if let Some(hit) = found.iter().find(|f| satisfies(item.tier, f.status)) {
                 let status = hit.status;
@@ -2257,7 +2269,7 @@ impl Inner {
                     if t == 0 {
                         st.focused.satisfied.insert((item.oid, version.clone()));
                     }
-                    wake = Some(st.batch.queue_touches(before_raw, &found));
+                    wake = Some(st.batch.queue_touches(before_raw, &found, &windows));
                     if current(&table, &st.map, &version) {
                         let stamp = st.stamp(before);
                         st.hint_paths(&item.oid, &item.lang.name().0, stamp, status);

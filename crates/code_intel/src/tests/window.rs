@@ -473,6 +473,40 @@ fn window_units_are_in_names() {
     assert_eq!(r.candidates.len(), 1);
 }
 
+/// Every existence check that hits a `Windowed` marker marks its window
+/// units used with it (「大文件」「淘汰」): the warm start's batch check,
+/// tier 1's when the file is opened again, a jump in it. Otherwise the
+/// windows would age while the marker stays, eviction would take them
+/// first, and the file would fall back to `TooLarge`
+/// (`store_marker_touch_keeps_its_windows` shows the eviction).
+#[test]
+fn window_marker_is_touched_with_its_windows() {
+    let text = big("ts", 1_200_000);
+    let h = opened("big.ts", text.as_bytes());
+    let oid = h.git.oid(text.as_bytes());
+    let n = windows(&h, oid, "ts").len();
+    assert!(n > 10);
+    // The next run: the batch tiers' check hits the marker.
+    let h = h.reopen(Default::default());
+    h.open();
+    h.settle();
+    assert_eq!(h.stats().touched, n + 1, "the marker and its windows");
+    // Opened again: tier 1's check.
+    let before = h.stats().touched;
+    h.current("big.ts");
+    h.settle();
+    assert_eq!(h.stats().touched - before, n + 1);
+    // A jump in it: with the query's units.
+    let before = h.stats().touched;
+    let at = h.text("big.ts");
+    let mut position = super::support::pos_in(text.as_bytes(), "value) + 100;", 0);
+    position.column += 1;
+    let r = h.ask(QueryKind::Definition { at, position });
+    assert!(!r.candidates.is_empty());
+    assert!(h.stats().touched - before > n);
+    assert_eq!(marker(&h, oid, "ts"), Some(ExtractStatus::Windowed));
+}
+
 #[test]
 fn window_chain_resumes_after_pause() {
     let text = big("ts", 1_200_000);

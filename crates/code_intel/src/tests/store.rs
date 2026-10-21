@@ -1147,6 +1147,66 @@ fn store_windowed_marker_needs_its_whole_chain() {
     );
 }
 
+/// A `Windowed` hit queued as the batch state queues it (`Batch::
+/// queue_touches` with the windows `exists_with_windows` gave) marks its
+/// window units used with the marker: over the quota the older units go,
+/// the opened large file's windows stay, and the marker still holds the
+/// file's content.
+#[test]
+fn store_marker_touch_keeps_its_windows() {
+    let f = Fixture::new();
+    let p = f.partition();
+    let store = Store::with_tables(&p, &SMALL_QUOTA);
+    let rust = v("rust", 1, 1);
+    let extractions: Vec<Extraction> = (0..70).map(sized).collect();
+    let big = oid(1000);
+    // Ten windows of about 1 KiB and their marker, then 20 other units.
+    let mut w = store.write();
+    for i in 0..10u64 {
+        assert!(w.add_unit(
+            big,
+            &rust,
+            &extractions[i as usize],
+            window(i * 100, (i + 1) * 100, i as u32 * 10)
+        ));
+    }
+    let (mark, meta) = marker(1000);
+    assert!(w.add_unit(big, &rust, &mark, meta));
+    for i in 10..30 {
+        assert!(w.add(oid(i), &rust, &extractions[i as usize]));
+    }
+    assert_eq!(w.commit(), Written::Committed);
+
+    // Two hours later only the large file is checked (it is opened again).
+    f.clock.advance(Duration::from_secs(2 * 3600));
+    let generation = store.evictions();
+    let (found, windows) = store.exists_with_windows(&rust, &[big]).expect("read");
+    assert_eq!(found[0].status, ExtractStatus::Windowed);
+    assert_eq!(windows.len(), 10);
+    let mut batch = crate::index::state::Batch::default();
+    let _wake = batch.queue_touches(generation, &found, &windows);
+    let mut pending = batch.take_touches();
+    assert_eq!(pending.len(), 11);
+    assert_eq!(store.touch_pending(&mut pending), 0);
+
+    // 40 more units go over the 64 KiB quota.
+    let mut w = store.write();
+    for i in 30..70 {
+        assert!(w.add(oid(i), &rust, &extractions[i as usize]));
+    }
+    assert_eq!(w.commit(), Written::Committed);
+    assert!(store.evictions() > generation, "nothing was evicted");
+    let left = found_oids(
+        &store
+            .exists(&rust, &(10..30).map(oid).collect::<Vec<_>>())
+            .expect("read"),
+    );
+    assert!(left.len() < 20, "the untouched units went first");
+    let (found, windows) = store.exists_with_windows(&rust, &[big]).expect("read");
+    assert_eq!(found[0].status, ExtractStatus::Windowed);
+    assert_eq!(windows.len(), 10, "the windows stayed with their marker");
+}
+
 #[test]
 fn store_chain_complete_follows_the_ends() {
     let row = |start: u64, end: u64, status: ExtractStatus| WindowRow {
