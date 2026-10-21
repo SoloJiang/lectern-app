@@ -46,7 +46,7 @@ pub use compare::{Base, Refresh};
 pub use content::{Content, RawIdentity, Unavailable};
 pub use error::{GitError, UnsupportedRepo};
 pub use hunks::{FileDiff, Hunk};
-pub use oid::{HashKind, Oid};
+pub use oid::{BlobHasher, HashKind, Oid};
 pub use path::{Mode, RefName, RepoPath};
 pub use reflog::{ReflogAction, ReflogEntry, ReflogParseError, parse_reflog_line};
 pub use refs::{BranchInfo, CommitInfo, GitTime, RemoteBranch, RemoteInfo, Signature, StashInfo};

@@ -95,15 +95,21 @@ impl Oid {
     /// a deterministic stand-in: the first 20 bytes of the SHA-256 blob OID.
     /// It never equals an OID in a repository, so it can only miss caches.
     pub fn for_blob(kind: HashKind, content: &[u8]) -> Oid {
-        match gix::objs::compute_hash(kind.to_gix(), gix::objs::Kind::Blob, content) {
-            Ok(id) => Oid::from_gix(&id),
-            Err(_) => {
-                let sha256 = Oid::for_blob(HashKind::Sha256, content);
-                let mut bytes = [0u8; 32];
-                bytes[..kind.byte_len()].copy_from_slice(&sha256.as_bytes()[..kind.byte_len()]);
-                Oid { kind, bytes }
-            }
-        }
+        let mut hasher = BlobHasher::new(kind, content.len() as u64);
+        hasher.update(content);
+        // The length is right, so `None` means a flagged SHA-1 collision.
+        hasher
+            .finish()
+            .unwrap_or_else(|| Oid::stand_in(Oid::for_blob(HashKind::Sha256, content)))
+    }
+
+    /// `for_blob`'s value for SHA-1 content that sha1dc flags: the first 20
+    /// bytes of the content's SHA-256 blob OID.
+    fn stand_in(sha256: Oid) -> Oid {
+        let kind = HashKind::Sha1;
+        let mut bytes = [0u8; 32];
+        bytes[..kind.byte_len()].copy_from_slice(&sha256.as_bytes()[..kind.byte_len()]);
+        Oid { kind, bytes }
     }
 
     /// The empty tree's OID (`4b825dc…` for SHA-1): the base of a root
@@ -137,6 +143,73 @@ impl Oid {
 
     pub(crate) fn to_gix(self) -> gix::ObjectId {
         gix::ObjectId::from_bytes_or_panic(self.as_bytes())
+    }
+}
+
+/// The blob OID of content given in pieces (`blob <len>\0` followed by the
+/// content): the same value as [`Oid::for_blob`] of the whole content (except
+/// flagged SHA-1 collisions, see [`BlobHasher::finish`]), for files too large
+/// to hold in memory at once. `for_blob` goes through it, so there is one
+/// implementation. Pure computation; no IO, never blocks, callable on any
+/// thread.
+///
+/// ```
+/// use lectern_git::{BlobHasher, HashKind, Oid};
+///
+/// let mut hasher = BlobHasher::new(HashKind::Sha1, 6);
+/// hasher.update(b"hel");
+/// hasher.update(b"lo\n");
+/// assert_eq!(hasher.finish(), Some(Oid::for_blob(HashKind::Sha1, b"hello\n")));
+/// ```
+pub struct BlobHasher {
+    kind: HashKind,
+    len: u64,
+    given: u64,
+    hasher: gix::hash::Hasher,
+}
+
+impl BlobHasher {
+    /// `len` is the content's total length, which the blob header records.
+    pub fn new(kind: HashKind, len: u64) -> BlobHasher {
+        let mut hasher = gix::hash::hasher(kind.to_gix());
+        hasher.update(&gix::objs::encode::loose_header(gix::objs::Kind::Blob, len));
+        BlobHasher {
+            kind,
+            len,
+            given: 0,
+            hasher,
+        }
+    }
+
+    /// The next piece of the content.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.given = self.given.saturating_add(bytes.len() as u64);
+        self.hasher.update(bytes);
+    }
+
+    /// `None` when the pieces given do not add up to `len` (the header would
+    /// not describe the content, so no OID is right), or when sha1dc flags
+    /// SHA-1 content as part of a collision attack. In the second case
+    /// `for_blob` gives a stand-in made from the content's SHA-256, which a
+    /// stream can only offer by hashing everything twice (about 65% more
+    /// time per byte); the caller treats `None` as "no match" and falls back
+    /// to reading the whole content (docs/design/git.md「与设计的差异」).
+    pub fn finish(self) -> Option<Oid> {
+        if self.given != self.len {
+            return None;
+        }
+        let id = self.hasher.try_finalize().ok()?;
+        Some(Oid::from_gix(&id))
+    }
+}
+
+impl fmt::Debug for BlobHasher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BlobHasher")
+            .field("kind", &self.kind)
+            .field("len", &self.len)
+            .field("given", &self.given)
+            .finish_non_exhaustive()
     }
 }
 
@@ -206,6 +279,114 @@ mod tests {
             Oid::for_blob(HashKind::Sha256, b"hello\n").to_hex(),
             "2cf8d83d9ee29543b34a87727421fdecb7e3f3a183d337639025de576db9ebb4"
         );
+    }
+
+    const KINDS: [HashKind; 2] = [HashKind::Sha1, HashKind::Sha256];
+
+    /// `content` hashed in pieces of the given lengths (the last piece takes
+    /// the rest).
+    fn streamed(kind: HashKind, content: &[u8], pieces: &[usize]) -> Option<Oid> {
+        let mut hasher = BlobHasher::new(kind, content.len() as u64);
+        let mut rest = content;
+        for &n in pieces {
+            let (piece, tail) = rest.split_at(n.min(rest.len()));
+            hasher.update(piece);
+            rest = tail;
+        }
+        hasher.update(rest);
+        hasher.finish()
+    }
+
+    /// Deterministic bytes and piece lengths (xorshift), no `rand` needed.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn repo_blob_hasher_matches_git_for_the_empty_blob() {
+        for (kind, hex) in [
+            (HashKind::Sha1, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"),
+            (
+                HashKind::Sha256,
+                "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813",
+            ),
+        ] {
+            let want = Oid::from_hex(kind, hex);
+            assert_eq!(BlobHasher::new(kind, 0).finish(), want);
+            // Empty pieces change nothing.
+            assert_eq!(streamed(kind, b"", &[0, 0, 0]), want);
+            assert_eq!(Some(Oid::for_blob(kind, b"")), want);
+        }
+    }
+
+    #[test]
+    fn repo_blob_hasher_matches_for_blob_however_the_content_is_split() {
+        let mut state = 0x9e37_79b9_7f4a_7c15;
+        let content: Vec<u8> = (0..10_000).map(|_| xorshift(&mut state) as u8).collect();
+        for kind in KINDS {
+            let oid = Oid::for_blob(kind, &content);
+            assert_eq!(oid.kind(), kind);
+            let want = Some(oid);
+            assert_eq!(streamed(kind, &content, &[]), want, "one piece");
+            assert_eq!(
+                streamed(kind, &content, &vec![1; content.len()]),
+                want,
+                "1-byte pieces"
+            );
+            // Lengths around the 64-byte block, and empty pieces.
+            assert_eq!(streamed(kind, &content, &[0, 63, 1, 64, 65, 0, 127]), want);
+            for _ in 0..20 {
+                let pieces: Vec<usize> = (0..30)
+                    .map(|_| (xorshift(&mut state) % 700) as usize)
+                    .collect();
+                assert_eq!(streamed(kind, &content, &pieces), want, "{pieces:?}");
+            }
+            let hello = Some(Oid::for_blob(kind, b"hello\n"));
+            assert_eq!(streamed(kind, b"hello\n", &[2, 3]), hello);
+        }
+    }
+
+    #[test]
+    fn repo_blob_hasher_matches_for_blob_on_mebibyte_ranges() {
+        // How code_intel reads a large file: 1 MiB ranges, a partial last one.
+        const MIB: usize = 1 << 20;
+        let mut state = 0x2545_f491_4f6c_dd1d;
+        let content: Vec<u8> = (0..3 * MIB + 12_345)
+            .map(|_| xorshift(&mut state) as u8)
+            .collect();
+        for kind in KINDS {
+            let mut hasher = BlobHasher::new(kind, content.len() as u64);
+            for range in content.chunks(MIB) {
+                hasher.update(range);
+            }
+            assert_eq!(hasher.finish(), Some(Oid::for_blob(kind, &content)));
+        }
+    }
+
+    #[test]
+    fn repo_blob_hasher_is_none_when_the_length_does_not_add_up() {
+        for kind in KINDS {
+            let mut short = BlobHasher::new(kind, 6);
+            short.update(b"hello");
+            assert_eq!(short.finish(), None);
+            let mut long = BlobHasher::new(kind, 6);
+            long.update(b"hello\n");
+            long.update(b"!");
+            assert_eq!(long.finish(), None);
+            let mut nothing = BlobHasher::new(kind, 1);
+            nothing.update(b"");
+            assert_eq!(nothing.finish(), None);
+            assert_eq!(
+                BlobHasher::new(kind, 0).finish().map(|o| o.kind()),
+                Some(kind)
+            );
+            let mut extra = BlobHasher::new(kind, 0);
+            extra.update(b"x");
+            assert_eq!(extra.finish(), None);
+        }
     }
 
     #[test]

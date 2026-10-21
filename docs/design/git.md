@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步部分实现，见本段末。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」。比较按阶段计时（[#133](https://github.com/SoloJiang/lectern-app/pull/133)）定位了 macOS 上的开销；完整比较按 index 的 cache-tree 跳过未变的基准子树、stat 一遍并行（[ADR 0038](../adr/0038.md)），`git/changes_clean_100k` 改回生效；只有 index 变化时过滤器的重建复用上一次的未跟踪遍历、不再列目录（「index」），`git/filter_100k` 改为测这次重建并生效，完整构造另记为只记录的 `git/filter_100k/cold`。第 4 步里不依赖 `services` 的部分已实现：工作区比较解析的 index 不跨调用保留（「缓存」，ADR 0035），`git/compare_100k/retained_bytes`、`git/changes_count/per_path_bytes` 改为生效；改动来源接口仍未实现。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步部分实现，见本段末。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。流式的 blob 哈希 `BlobHasher`（code_intel 设计「对其他 crate 的要求」，「大文件」的前置条件，`Refs #17`）已实现，见「与设计的差异」「实际验证」。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」。比较按阶段计时（[#133](https://github.com/SoloJiang/lectern-app/pull/133)）定位了 macOS 上的开销；完整比较按 index 的 cache-tree 跳过未变的基准子树、stat 一遍并行（[ADR 0038](../adr/0038.md)），`git/changes_clean_100k` 改回生效；只有 index 变化时过滤器的重建复用上一次的未跟踪遍历、不再列目录（「index」），`git/filter_100k` 改为测这次重建并生效，完整构造另记为只记录的 `git/filter_100k/cold`。第 4 步里不依赖 `services` 的部分已实现：工作区比较解析的 index 不跨调用保留（「缓存」，ADR 0035），`git/compare_100k/retained_bytes`、`git/changes_count/per_path_bytes` 改为生效；改动来源接口仍未实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -102,6 +102,19 @@ impl Oid {
     pub fn from_hex(kind: HashKind, hex: &str) -> Option<Oid>;
     /// 按 git 的 blob 格式（`blob <长度>\0` + 内容）计算 OID，不写对象库。纯计算。
     pub fn for_blob(kind: HashKind, content: &[u8]) -> Oid;
+}
+
+/// 按 git 的 blob 格式求 OID，内容分段给出（code_intel 按 1 MiB 的区间求大文件的 OID，不把整个文件读进内存）。
+/// 结果与对整份内容调用 `Oid::for_blob` 相同，`for_blob` 本身也经过它。纯计算，不做 IO、不阻塞，任何线程可调用。
+pub struct BlobHasher { /* kind、len、已给出的字节数、gix 的哈希器 */ }
+
+impl BlobHasher {
+    /// `len` 是内容的总长度，写进 `blob <len>\0`。
+    pub fn new(kind: HashKind, len: u64) -> BlobHasher;
+    pub fn update(&mut self, bytes: &[u8]);
+    /// `update` 给出的字节合计不等于 `len` 时返回 None；SHA-1 内容被 sha1dc 判定为碰撞攻击时也返回 None
+    /// （`for_blob` 这时给出替代值，见「与设计的差异」）。
+    pub fn finish(self) -> Option<Oid>;
 }
 
 /// 相对 worktree 根、以 `/` 分隔的路径，原始字节（git 允许非 UTF-8 的名字）。
@@ -1052,6 +1065,13 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 - `just bench --measure git/`（release）：`git/filter_100k` 中位数 24.2 ms（< 400 ms，改为生效），`git/filter_100k/cold` 262 ms，`git/filter_100k/walk` 126 ms，`git/filter_100k_bytes` 13.9 MB（不变）。完整构造在 macOS 上是 Linux 的约 2.8 倍（678–766 ms 对 214–276 ms）；复用的重建不列目录，剩下的解析 index 在 macOS 上与 Linux 同一量级（`git/open_100k` 两边都 < 40 ms），按同样的倍数也在 100 ms 以内。`git/filter_100k` 自己生成一份 10 万文件的仓库，这个基准连同夹具 38.6 s。其余 `git/*` 都在预算内，与上一次同一量级（`git/open_100k` 27 ms、`git/changes_clean_100k` 386 ms、`git/compare_100k/peak_bytes` 60.2 MB）。
 - 没有验证的：macOS 上的数字，由下一次 macOS CI 给出。
 
+流式的 blob 哈希 `BlobHasher`（code_intel「大文件」的前置条件，`Refs #17`），同一类 Linux 虚拟机：
+
+- `just check`、`just test`（Linux 上的全部 crate，1486 个测试通过，跳过 7 个）、`just doctest`（8 个，新增 `BlobHasher` 的文档示例）、`just deny`（advisories、bans、licenses、sources 都通过）全部通过；`just test -p lectern-git` 共 251 个测试。
+- 新的测试 `repo_blob_hasher_*` 4 个（`src/oid.rs`），SHA-1 和 SHA-256 都测：空内容（不调用 `update`、只给空段）等于 git 的空 blob（`e69de29…`、`473a0f4…`）；10,000 字节的伪随机内容按一段、每段 1 字节、64 字节块边界附近的长度和 20 组随机切分给出，结果都等于 `Oid::for_blob`；3 MiB 加 12,345 字节按 1 MiB 的区间给出（最后一段不满），等于 `Oid::for_blob`；给出的字节比 `len` 少、多、`len` 为 0 时多给一个字节，`finish` 都返回 None。原有的 `repo_oid_for_blob_matches_git_hash_object` 经新的实现照样通过。
+- 计时（开发构建，依赖按 opt-level 2 编译，这台机器的 CPU 有 SHA 扩展指令）：16 MiB 按 1 MiB 的区间，只算 SHA-1（sha1dc）约 20 ms，同时再算一遍 SHA-256 约 32.5 ms，单独算 SHA-256 约 13.5 ms。所以没有为碰撞的替代值在流式时多算 SHA-256（「与设计的差异」）。
+- 没有验证的：sha1dc 判定为碰撞攻击时 `finish` 返回 None 没有测试：已知的碰撞样本（SHAttered）按原始字节构造，加上 `blob <len>\0` 之后块的对齐变了，不再触发检测，没有可用的 blob 夹具；macOS 上没有运行。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1177,3 +1197,9 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
   - 没有保留的条目时（新句柄），解析一次 index，属性条目和路径的 blob 都从这次的结果取，不另读文件列表：与原来新句柄的第一次调用相同，一次解析（10 万个跟踪文件时约 22 ms、峰值约 39 MB）。这一版的第一稿在这里还读一次文件列表，同一次调用解析两遍（约 40 ms、峰值约 53 MB）。
   - 唯一的生产调用方 `code_intel` 的 git 适配每次调用都新开 `Worktree`，保留的条目对它不命中，每次调用解析一次，与原来相同。为此新增 `canonical_oids`：整批一次解析；`code_intel` 改用它由它的 PR 处理（「规范内容的 OID」末条）。
 - `refresh(Paths)` 每次重新解析 index，10 万个跟踪文件时从约 0.2 ms 变为约 30 ms（「性能」「实际验证」），没有为它设预算：在后台，和 fs_watch 一批事件一次。可以继续降的部分：带范围的刷新只为范围内的路径建条目、不建整个折叠副本（大约省一半）；gix 一次解码整个文件，解析本身省不掉。现在不做，等 macOS 上的数字。
+
+`BlobHasher`（code_intel「大文件」的前置条件）：
+
+- 被 sha1dc 判定为碰撞攻击的 SHA-1 内容，`finish` 返回 None，与 `for_blob` 不同（code_intel 设计原文是「与 `Oid::for_blob` 的结果相同」，只在长度不符时返回 None）。`for_blob` 这时的替代值是内容的 SHA-256 blob OID 的前 20 字节（第 1 步），流式时内容已经不在，要给出同一个值只能对每个 SHA-1 的流同时再算一遍 SHA-256，开发构建里 16 MiB 从约 20 ms 变为约 32.5 ms（「实际验证」），而这只为攻击构造的内容服务。返回 None 不会得到错误结果：这样的内容没有 git 接受的 OID，None 不等于任何期望的 OID，调用方按 OID 不等处理（code_intel 在原始字节的 OID 不等时整份读入、用 `canonical_oid` 核对，那里经 `for_blob` 得到替代值）。code_intel 设计「对其他 crate 的要求」已同步。
+- `for_blob` 改为经 `BlobHasher` 计算（一份实现），碰撞时的替代值不变，`git/canonical_oid_100k` 等调用方不多算 SHA-256。`BlobHasher` 用 gix 的 `hash::hasher` 加 `objs::encode::loose_header`，与 gix 的 `compute_hash` 相同，不增加依赖。
+- 增加了 `Debug`（只显示算法、`len` 和已给出的字节数）。

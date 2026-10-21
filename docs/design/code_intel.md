@@ -82,7 +82,8 @@
 
   ```rust
   /// 按 git blob 格式（`blob <len>\0` 加内容）求 OID，内容分段给出；与 `Oid::for_blob` 的结果相同（sha1dc / SHA-256）。
-  /// 不做 IO、不阻塞，任何线程可调用。`len` 是内容的总长度；`update` 给出的字节合计不等于 `len` 时 `finish` 返回 None。
+  /// 不做 IO、不阻塞，任何线程可调用。`len` 是内容的总长度；`update` 给出的字节合计不等于 `len` 时 `finish` 返回 None，
+  /// sha1dc 判定为碰撞攻击的 SHA-1 内容也返回 None（`for_blob` 给出替代值），调用方按 OID 不等处理。
   pub struct BlobHasher { /* … */ }
   impl BlobHasher {
       pub fn new(kind: HashKind, len: u64) -> BlobHasher;
@@ -91,7 +92,7 @@
   }
   ```
 
-  由 `git` 的一个 PR 加入（`Refs #17`，「验收」第 8 步的前置条件），测试按区间切分方式不同的输入与 `Oid::for_blob` 对照。
+  由 `git` 的一个 PR 加入（`Refs #17`，「验收」第 8 步的前置条件），测试按区间切分方式不同的输入与 `Oid::for_blob` 对照。已实现；碰撞时返回 None 的原因见 [git 设计「与设计的差异」](git.md#与设计的差异)。
 - `fs_watch`：不需要新接口。
 - kernel 的 grammar 加载器（ADR 0018、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、#42）：`tree_sitter::Language` 和由它得到的 `Parser`、`Query`、`TagsConfiguration`、`Tree` 都持有动态库里的函数指针。加载器给出的每个 `LoadedGrammar` 带一个租约（`GrammarLease`，加载的模块句柄的 `Arc`）；更新、回滚、撤销时加载器只停止交出这个版本，模块的卸载（`dlclose`）推迟到它的最后一个租约 drop 之后。撤销要求的「立即停用」由不再交出新的 `LoadedGrammar`、使用方取消在途工作来满足。
 - 高亮方（`file_reader`）：依赖同一批 grammar crate、同一个 tree-sitter 版本。[#42](https://github.com/SoloJiang/lectern-app/issues/42) 指出 external scanner 不能被进度回调打断，它对 scanner 的处理（如对某个 grammar 停用）同样作用于本 crate。打开候选的一方按 `Location` 读内容：`TextOrigin::Dependency` 的位置经它的 `DepRoot` 读（`Worktree` 的根从工作区根的 `SafeRoot` 经 `open_dir` 打开，路径的各级都不是符号链接；`Cache` 的根按 ADR 0033 只取 Lectern 自己进程的环境），`byte` 有值时按它定位（ADR 0034），这些写进 `file_reader` 的设计。
