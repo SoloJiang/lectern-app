@@ -27,6 +27,7 @@
 - 未经确认不得升级 GPUI、gpui-component（二者锁同一个 gpui-pre 快照，见 [ADR 0016](docs/adr/0016.md)）、libghostty、Rust 工具链。
 - 改变架构、依赖选型或性能预算前，先对照 [docs/adr/](docs/adr/)，写一条新 ADR（背景、决策、影响、来源），由负责推进的 agent 决定并标为已接受，不必等人确认。产品方向（定位、目标用户、界面结构的大改）仍由人决定。
 - UI 线程上不做 IO、解析或 git 操作。
+- 仓库里的 JavaScript / Node 依赖（脚本、文档或 CI 用的工具）一律用 pnpm 管理：`package.json` 配 `pnpm-lock.yaml` 入库，安装用 `pnpm install --frozen-lockfile`，不用 npm、yarn、`npx`（临时执行用 `pnpm dlx`）。
 
 ## 命令
 
