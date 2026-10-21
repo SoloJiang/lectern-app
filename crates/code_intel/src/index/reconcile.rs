@@ -19,6 +19,7 @@ use lectern_services::project::{BlobId, FileKind, ProjectKey, ProjectSnapshot, R
 use super::state::{Project, Published, State};
 use super::{Inner, bump, lock};
 use crate::LangName;
+use crate::canonical::{Canonical, Pending};
 use crate::extract::BACKGROUND_MAX_LEN;
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{
@@ -698,9 +699,12 @@ impl Inner {
         true
     }
 
-    /// Reads the dirty paths and updates the overlay.
+    /// Reads the dirty paths and updates the overlay. A file whose raw OID
+    /// differs from the file list's waits, its bytes in memory, for its
+    /// batch's `canonical_oids` (「规范内容 OID 的批量核对」); between
+    /// batches the read stops once the session has ended.
     fn reread(&self, project: &Arc<Project>, session: u64) -> bool {
-        let (paths, probe, root, tree, base, deps, hash) = {
+        let (paths, probe, root, tree, base, deps, hash, cancel) = {
             let mut st = lock(&project.state);
             if st.base_for.is_none() {
                 return false;
@@ -736,6 +740,7 @@ impl Inner {
                 // Read against this base map: installed only on it.
                 (st.map.provenance.files, st.map.provenance.grammar),
                 st.hash,
+                st.cancel.clone(),
             )
         };
         // An event path the map does not know may be a new directory (a
@@ -749,14 +754,49 @@ impl Inner {
         let table = base.table().clone();
         let mut lookup = LangLookup::new(&table, &*self.packs);
         let mut updates: HashMap<RelPath, Option<WorktreeState>> = HashMap::new();
+        // Each waiting file's path, raw OID and the file list's OID.
+        let mut checks: Pending<(RelPath, BlobId, BlobId), Vec<u8>> = Pending::new();
+        let check = |checks: &mut Pending<(RelPath, BlobId, BlobId), Vec<u8>>,
+                     updates: &mut HashMap<RelPath, Option<WorktreeState>>,
+                     tree: &Tree| {
+            for ((path, raw, index), canonical) in checks.flush(&*self.git, tree) {
+                updates.insert(path, Some(checked_state(raw, index, canonical)));
+            }
+        };
         let mut read = 0;
         for path in &paths {
             if lookup.code(path) == 0 {
                 continue;
             }
             read += 1;
-            let state = self.read_state(&root, tree.as_ref(), &base, path, hash);
-            updates.insert(path.clone(), state);
+            match self.read_state(&root, tree.as_ref(), &base, path, hash) {
+                Reread::State(state) => {
+                    updates.insert(path.clone(), state);
+                }
+                Reread::Check { bytes, raw, index } => {
+                    // `read_state` asks for a check only with a repository.
+                    let Some(tree) = &tree else {
+                        updates.insert(path.clone(), Some(WorktreeState::Content(raw)));
+                        continue;
+                    };
+                    if checks.full_for(bytes.len()) {
+                        if cancel.load(Ordering::Acquire) {
+                            // The session ended: nothing of it is installed.
+                            return false;
+                        }
+                        check(&mut checks, &mut updates, tree);
+                    }
+                    checks.push((path.clone(), raw, index), path.clone(), bytes);
+                }
+            }
+        }
+        if let Some(tree) = &tree
+            && !checks.is_empty()
+        {
+            if cancel.load(Ordering::Acquire) {
+                return false;
+            }
+            check(&mut checks, &mut updates, tree);
         }
         bump(&self.stats.rereads, read);
         let mut st = lock(&project.state);
@@ -793,7 +833,9 @@ impl Inner {
     }
 
     /// What the worktree holds at `path` (「blob → 路径映射」). A directory
-    /// where the file list has a file is `Absent`.
+    /// where the file list has a file is `Absent`. A file read in full
+    /// whose raw OID differs from the file list's needs its canonical OID
+    /// (`Reread::Check`).
     fn read_state(
         &self,
         root: &SafeRoot,
@@ -801,17 +843,22 @@ impl Inner {
         base: &BaseMap,
         path: &str,
         hash: HashKind,
-    ) -> Option<WorktreeState> {
+    ) -> Reread {
         let files = base.files();
         let at = find_path(files, path);
         let index = at.and_then(|i| files.oid(i));
         let Some(rel) = SafeRel::new(path.as_bytes()) else {
-            return Some(WorktreeState::Excluded);
+            return Reread::State(Some(WorktreeState::Excluded));
         };
-        match root.read(rel, BACKGROUND_MAX_LEN as u64) {
+        let state = match root.read(rel, BACKGROUND_MAX_LEN as u64) {
             Ok(Read::File { bytes, .. }) => {
                 let raw = hash_blob(hash, &bytes);
-                Some(self.content_state(tree, path, &bytes, raw, index))
+                // Untracked, a folder project, or the file list's content:
+                // the raw OID.
+                return match (index, tree) {
+                    (Some(index), Some(_)) if index != raw => Reread::Check { bytes, raw, index },
+                    _ => Reread::State(Some(WorktreeState::Content(raw))),
+                };
             }
             Ok(Read::Unsupported { meta }) if meta.kind == SafeKind::Dir => {
                 at.map(|_| WorktreeState::Absent)
@@ -822,36 +869,36 @@ impl Inner {
             Ok(Read::Symlink { .. } | Read::Unsupported { .. })
             | Err(SafeError::PathThroughSymlink) => Some(WorktreeState::Excluded),
             Err(SafeError::NotFound) => Some(WorktreeState::Absent),
-        }
-    }
-
-    /// The state of a file read in full. Its raw OID is the overlay's OID;
-    /// when the index has the path with another OID, the built-in
-    /// conversions decide whether the content still equals it (CRLF
-    /// checkouts) or a filter's pointer is checked out (`Excluded`).
-    fn content_state(
-        &self,
-        tree: Option<&Tree>,
-        path: &str,
-        bytes: &[u8],
-        raw: BlobId,
-        index: Option<BlobId>,
-    ) -> WorktreeState {
-        let (Some(index), Some(tree)) = (index, tree) else {
-            return WorktreeState::Content(raw);
         };
-        if index == raw {
-            return WorktreeState::Content(raw);
-        }
-        match self.git.canonical_oid(tree, path, bytes) {
-            Ok(None) => WorktreeState::Excluded,
-            Ok(Some(canonical)) if canonical == index => WorktreeState::Content(index),
-            Ok(Some(_)) => WorktreeState::Content(raw),
-            Err(error) => {
-                log(format_args!("converting {path} failed: {error}"));
-                WorktreeState::Content(raw)
-            }
-        }
+        Reread::State(state)
+    }
+}
+
+/// What reading one dirty path gave.
+enum Reread {
+    /// Its state (None: not in the map, a directory the file list does not
+    /// have).
+    State(Option<WorktreeState>),
+    /// A file read in full, its raw OID not the file list's `index`: its
+    /// batch's `canonical_oids` decides.
+    Check {
+        bytes: Vec<u8>,
+        raw: BlobId,
+        index: BlobId,
+    },
+}
+
+/// The state of a file whose raw OID `raw` differs from the file list's
+/// `index`: the built-in conversions decide whether the content still
+/// equals it (CRLF checkouts), a filter's pointer is checked out
+/// (`Excluded`), or it changed (its raw OID is the overlay's). A failed
+/// conversion is as an unreadable file.
+fn checked_state(raw: BlobId, index: BlobId, canonical: Canonical) -> WorktreeState {
+    match canonical {
+        Canonical::Oid(oid) if oid == index => WorktreeState::Content(index),
+        Canonical::Oid(_) => WorktreeState::Content(raw),
+        Canonical::Filtered => WorktreeState::Excluded,
+        Canonical::Failed => WorktreeState::Unindexable,
     }
 }
 

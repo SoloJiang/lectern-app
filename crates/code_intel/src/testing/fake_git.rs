@@ -39,6 +39,12 @@ struct State {
     ignored: Vec<String>,
     filtered: HashSet<String>,
     eol: HashSet<String>,
+    /// Paths whose conversion fails (`canonical_oid`, and every
+    /// `canonical_oids` batch holding them).
+    failing: HashSet<String>,
+    /// Each `canonical_oids` call's item count and bytes.
+    canonical_batches: Vec<(usize, usize)>,
+    before_canonical_oids: Vec<Hook>,
     untracked_cap: Option<usize>,
     commits: u64,
     calls: Vec<String>,
@@ -331,6 +337,23 @@ impl FakeGit {
         self.lock().eol.insert(path.into());
     }
 
+    /// Converting the path fails: `canonical_oid` returns an error, and so
+    /// does every `canonical_oids` batch holding it (as git fails a batch
+    /// for one item).
+    pub fn fail_canonical(&self, path: &str) {
+        self.lock().failing.insert(path.into());
+    }
+
+    /// Each `canonical_oids` call so far: its item count and bytes.
+    pub fn canonical_batches(&self) -> Vec<(usize, usize)> {
+        self.lock().canonical_batches.clone()
+    }
+
+    /// Runs `hook` at the start of the next `canonical_oids` call.
+    pub fn before_canonical_oids(&self, hook: impl FnOnce() + Send + 'static) {
+        self.lock().before_canonical_oids.push(Box::new(hook));
+    }
+
     /// At most `n` untracked files are listed.
     pub fn cap_untracked(&self, n: Option<usize>) {
         self.lock().untracked_cap = n;
@@ -424,6 +447,20 @@ impl FakeGit {
         } else {
             bytes.to_vec()
         }
+    }
+
+    /// One path's conversion, unrecorded.
+    fn convert(&self, path: &str, raw: &[u8]) -> Result<Option<BlobId>, GitError> {
+        {
+            let state = self.lock();
+            if state.failing.contains(path) {
+                return Err(GitError::Corrupt(format!("{path}: conversion failed")));
+            }
+            if state.filtered.contains(path) {
+                return Ok(None);
+            }
+        }
+        Ok(Some(self.oid(&self.canonical(path, raw))))
     }
 
     fn record(&self, call: &str) {
@@ -614,10 +651,25 @@ impl GitAccess for FakeGit {
         raw: &[u8],
     ) -> Result<Option<BlobId>, GitError> {
         self.record("canonical_oid");
-        if self.lock().filtered.contains(path) {
-            return Ok(None);
+        self.convert(path, raw)
+    }
+
+    fn canonical_oids(
+        &self,
+        _tree: &Tree,
+        items: &[(&str, &[u8])],
+    ) -> Result<Vec<Option<BlobId>>, GitError> {
+        self.record("canonical_oids");
+        let hooks = std::mem::take(&mut self.lock().before_canonical_oids);
+        for hook in hooks {
+            hook();
         }
-        Ok(Some(self.oid(&self.canonical(path, raw))))
+        let bytes = items.iter().map(|(_, raw)| raw.len()).sum();
+        self.lock().canonical_batches.push((items.len(), bytes));
+        items
+            .iter()
+            .map(|(path, raw)| self.convert(path, raw))
+            .collect()
     }
 
     fn watch_source(&self, tree: &Tree) -> Arc<dyn WorktreeSource> {

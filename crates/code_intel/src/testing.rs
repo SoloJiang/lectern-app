@@ -13,8 +13,8 @@ pub use fake_git::FakeGit;
 pub use host::{FakeProjects, TestHost, host};
 pub(crate) use rig::virtual_unit;
 pub use rig::{
-    Rig, packages, route_tree_sitter_allocations, virtual_repo, virtual_repo_sharing,
-    virtual_repo_with,
+    Discover, RepoRig, Rig, packages, route_tree_sitter_allocations, virtual_repo,
+    virtual_repo_sharing, virtual_repo_with,
 };
 #[cfg(test)]
 pub(crate) use template::copy_bytes;

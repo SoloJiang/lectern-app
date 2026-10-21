@@ -414,6 +414,31 @@ fn yield_parked_time_is_not_deadline_time() {
     assert!(stored(&h, &source));
 }
 
+/// A keepalive slot does one file: a CRLF checkout read in it is converted
+/// on its own, one `canonical_oids` of one item before the slot's write
+/// (「规范内容 OID 的批量核对」), and stored under its index OID.
+#[test]
+fn yield_slot_converts_its_one_file() {
+    let (h, clock, kernel) = harness(1);
+    let sources: Vec<Vec<u8>> = (0..3).map(|i| ts(&format!("l{i}"))).collect();
+    for (i, source) in sources.iter().enumerate() {
+        let path = format!("lib/l{i}.ts");
+        h.git.eol(&path);
+        let crlf = String::from_utf8(source.clone())
+            .expect("UTF-8")
+            .replace('\n', "\r\n");
+        h.git.add("main", &[(&path, crlf.as_bytes())]);
+    }
+    h.git.commit("main");
+    kernel.set_yield(true);
+    open_far(&h);
+    settle_until(&h, &clock, 20, || sources.iter().all(|s| stored(&h, s)));
+    let batches = h.git.canonical_batches();
+    assert_eq!(batches.len(), sources.len(), "{batches:?}");
+    assert!(batches.iter().all(|(n, _)| *n == 1), "{batches:?}");
+    assert_eq!(h.git.count("canonical_oid"), 0);
+}
+
 #[test]
 fn yield_large_file_waits_for_the_switch() {
     let (h, clock, kernel) = harness(1);

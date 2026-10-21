@@ -63,6 +63,7 @@ const BENCHES: &[Bench] = &[
     code_intel::WARM_100K_TOUCH,
     code_intel::MAP_100K,
     code_intel::DISK_100K,
+    code_intel::REREAD_CRLF_1000,
     code_intel_query::GOTO_INDEXED,
     code_intel_query::GOTO_UNCACHED,
     code_intel_query::GOTO_POPULAR,

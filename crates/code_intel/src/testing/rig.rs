@@ -136,6 +136,150 @@ impl Drop for Rig {
     }
 }
 
+/// How [`RepoRig`] discovers its repository (`lectern_git::testing::discover`
+/// in the benchmarks: repository configuration only).
+pub type Discover = fn(
+    &std::path::Path,
+    &[std::path::PathBuf],
+) -> Result<Option<lectern_git::Discovered>, lectern_git::GitError>;
+
+/// An indexer over a real repository (`lectern_git::testing::TestRepo`)
+/// through the production git adapter, with [`Rig`]'s in-memory rest: a
+/// host kernel, a manual executor, a manual fs_watch over a fake backend
+/// and no language packs (`code_intel/reread_crlf_1000`).
+pub struct RepoRig {
+    pub host: TestHost,
+    pub executor: Executor,
+    pub projects: Arc<FakeProjects>,
+    pub indexer: Indexer,
+    snapshot: lectern_services::project::ProjectSnapshot,
+    root: std::path::PathBuf,
+    backend: Arc<FakeBackend>,
+    driver: Driver,
+    _watcher: Watcher,
+    _watchdog: WatchdogTask,
+    _subscriptions: Vec<Box<dyn Send>>,
+}
+
+impl RepoRig {
+    /// The main worktree of the repository at `common_dir` (its root
+    /// `root`, both canonical) with `files` as its file list (the index's
+    /// paths and OIDs).
+    pub fn new(
+        discover: Discover,
+        common_dir: &std::path::Path,
+        root: &std::path::Path,
+        files: Arc<lectern_services::project::FileList>,
+        cache: Cache,
+        clock: Arc<dyn Clock>,
+    ) -> RepoRig {
+        use lectern_services::project::{
+            ActiveTree, Head, ProjectKey, ProjectSnapshot, Scan, Worktree, WorktreeKey,
+        };
+        let host = host();
+        let executor = Executor::manual();
+        let projects = FakeProjects::new();
+        let backend = FakeBackend::new();
+        let (watcher, driver) = manual(backend.clone(), Executor::manual(), WatchConfig::default());
+        let (wd, task) = watchdog(&executor, clock);
+        let indexer = Indexer::with_git(
+            IndexDeps {
+                executor: executor.clone(),
+                cache,
+                watcher: watcher.clone(),
+                grammars: Arc::new(crate::NoGrammarPacks),
+                projects: projects.clone(),
+                handle: host.handle.clone(),
+                watchdog: wd,
+                batch_tasks: 1,
+            },
+            Arc::new(crate::git_access::LecternGit::with_discover(discover)),
+        );
+        let subscriptions = indexer.subscribe();
+        let key = WorktreeKey(Arc::from(common_dir));
+        let root_path: Arc<std::path::Path> = Arc::from(root);
+        let snapshot = ProjectSnapshot {
+            key: ProjectKey::Git {
+                common_dir: Arc::from(common_dir),
+            },
+            generation: 1,
+            name: "repo".into(),
+            worktrees: vec![Worktree {
+                key: key.clone(),
+                root: root_path.clone(),
+                is_main: true,
+                head: Head::Unknown,
+                locked: false,
+                prunable: false,
+            }]
+            .into(),
+            active: Some(ActiveTree {
+                root: root_path,
+                worktree: Some(key),
+                opened_at: "".into(),
+                files: Scan::Ready(files),
+                packages: Scan::Ready(Vec::new().into()),
+            }),
+        };
+        RepoRig {
+            host,
+            executor,
+            projects,
+            indexer,
+            snapshot,
+            root: root.to_path_buf(),
+            backend,
+            driver,
+            _watcher: watcher,
+            _watchdog: task,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Opens the project, without running anything.
+    pub fn open(&self) {
+        let event = self.projects.set(self.snapshot.clone());
+        self.indexer.project_event(&event);
+    }
+
+    /// Pauses the kernel's background work: the batch tiers stop at their
+    /// next boundary; the reconcile (a `Background` task) goes on.
+    pub fn pause(&self) {
+        self.host.kernel().pause();
+    }
+
+    /// fs_watch reports these worktree files modified.
+    pub fn modified(&self, paths: &[&str]) {
+        use lectern_fs_watch::Flags;
+        let changed = Flags(Flags::FILE.0 | Flags::MODIFIED.0);
+        let events: Vec<(&str, Flags)> = paths.iter().map(|p| (*p, changed)).collect();
+        self.backend.emit(&self.root, &events);
+    }
+
+    /// The project's key.
+    pub fn key(&self) -> &lectern_services::project::ProjectKey {
+        &self.snapshot.key
+    }
+
+    /// Runs everything until nothing is left to do.
+    pub fn settle(&self) {
+        loop {
+            let a = self.driver.run_until_idle();
+            self.driver.advance(Duration::from_secs(5));
+            let b = self.executor.run_until_idle();
+            if a == 0 && b == 0 && self.driver.run_until_idle() == 0 {
+                return;
+            }
+        }
+    }
+}
+
+impl Drop for RepoRig {
+    fn drop(&mut self) {
+        self.indexer.close_all();
+    }
+}
+
 /// Sub-projects at `dirs`.
 pub fn packages(dirs: &[String]) -> Vec<lectern_services::project::Package> {
     dirs.iter()

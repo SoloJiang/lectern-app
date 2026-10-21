@@ -41,6 +41,7 @@ use super::state::{
     under,
 };
 use super::{Inner, bump, lock};
+use crate::canonical::{Canonical, Pending};
 use crate::extract::{
     BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction,
     INTERACTIVE_MAX_LEN, Lang, LanguageTable, ResumeSlot,
@@ -243,6 +244,10 @@ pub(crate) struct Parked {
     item: Item,
     flag: Arc<AtomicBool>,
     key: BlobId,
+    /// `key` is the raw OID of worktree bytes that differ from the queued
+    /// one: the batch's `canonical_oids` decides the key before the commit
+    /// (`Done::check`).
+    check: bool,
     bytes: Vec<u8>,
     /// The extraction's state (`extract::Resume`, with the deadline's
     /// budget left); empty until it starts.
@@ -358,6 +363,11 @@ struct Done {
     item: Item,
     /// The OID of the bytes actually read (「存储表」).
     key: BlobId,
+    /// A batch tier's worktree bytes whose raw OID (`key`) is not the
+    /// queued OID: kept until the batch's `canonical_oids` before the
+    /// commit, which makes the queued OID the key when the built-in
+    /// conversions turn the bytes into it (「规范内容 OID 的批量核对」).
+    check: Option<Vec<u8>>,
     extraction: Extraction,
     /// The cancel flag the item was taken with (`State::finish`).
     flag: Arc<AtomicBool>,
@@ -1233,7 +1243,7 @@ impl Inner {
                     };
                     let outcome = match self.read_item(ctx, &item, Mode::Batch, &flag) {
                         Err(outcome) => outcome,
-                        Ok((bytes, key)) => {
+                        Ok((bytes, key, check)) => {
                             if bytes.len() > LARGE_FILE
                                 && let Some(p) = own.take_if(|p| p.large.is_some())
                             {
@@ -1244,7 +1254,7 @@ impl Inner {
                             self.extract_bytes(
                                 ctx,
                                 &item,
-                                key,
+                                (key, check),
                                 bytes,
                                 Mode::Batch,
                                 Some(guard),
@@ -1272,7 +1282,7 @@ impl Inner {
                                     }
                                     continue;
                                 }
-                                Ok((data, _)) if one && data.len() as u64 > SLOT_MAX_BYTES => {
+                                Ok((data, _, _)) if one && data.len() as u64 > SLOT_MAX_BYTES => {
                                     // Never in a keepalive slot: set aside for
                                     // the switch to turn off; the slot goes on
                                     // with the next item. What was read counts
@@ -1281,13 +1291,14 @@ impl Inner {
                                     self.set_aside(project, ctx.session, t, item, &flag);
                                     continue;
                                 }
-                                Ok((data, key)) => Parked {
+                                Ok((data, key, check)) => Parked {
                                     project: project.clone(),
                                     session: ctx.session,
                                     t,
                                     item,
                                     flag,
                                     key,
+                                    check,
                                     bytes: data,
                                     resume: Arc::new(Mutex::new(None)),
                                     large: None,
@@ -1309,7 +1320,63 @@ impl Inner {
         }
         #[cfg(test)]
         lock(&self.batch_log).push(files);
+        let done = self.check_keys(project, ctx, done);
         self.commit(project, ctx, done, true);
+    }
+
+    /// 「规范内容 OID 的批量核对」 for a batch about to be committed: the
+    /// items read with another OID than queued (`Done::check`) get their
+    /// key from one `canonical_oids` per at most 256 items and 2 MiB, on
+    /// this boundary's side of the batch (the batch's own work, as its
+    /// commit is). The queued OID becomes the key when the built-in
+    /// conversions turn the bytes into it; otherwise (changed since queued,
+    /// a filter) the raw OID stays. An item whose conversion failed is as
+    /// one that could not be read: not written, released. Items the commit
+    /// would drop (cancelled, taken over by tier 1) are not checked, and
+    /// once the session ends nothing more is.
+    fn check_keys(&self, project: &Arc<Project>, ctx: &Ctx, mut done: Vec<Done>) -> Vec<Done> {
+        let Some(tree) = &ctx.tree else {
+            return done;
+        };
+        let mut checks: Pending<usize, &[u8]> = Pending::new();
+        let mut results = Vec::new();
+        for (i, d) in done.iter().enumerate() {
+            let Some(bytes) = &d.check else {
+                continue;
+            };
+            if d.flag.load(Ordering::Acquire) {
+                continue;
+            }
+            if checks.full_for(bytes.len()) {
+                if ctx.cancel.load(Ordering::Acquire) {
+                    break;
+                }
+                results.extend(checks.flush(&*self.git, tree));
+            }
+            checks.push(i, d.item.path.clone(), bytes.as_slice());
+        }
+        if !ctx.cancel.load(Ordering::Acquire) {
+            results.extend(checks.flush(&*self.git, tree));
+        }
+        let mut failed = vec![false; done.len()];
+        for (i, canonical) in results {
+            let d = &mut done[i];
+            match canonical {
+                Canonical::Oid(oid) if oid == d.item.oid => d.key = oid,
+                Canonical::Oid(_) | Canonical::Filtered => {}
+                Canonical::Failed => failed[i] = true,
+            }
+        }
+        let mut kept = Vec::with_capacity(done.len());
+        for (mut d, failed) in done.into_iter().zip(failed) {
+            if failed {
+                self.release(project, ctx, &d.item, &d.flag);
+            } else {
+                d.check = None;
+                kept.push(d);
+            }
+        }
+        kept
     }
 
     /// Books one item's outcome in a batch; true when the batch is to end
@@ -1435,6 +1502,7 @@ impl Inner {
                     Done {
                         item: p.item,
                         key: p.key,
+                        check: p.check.then_some(p.bytes),
                         extraction,
                         flag: p.flag,
                     },
@@ -1494,15 +1562,20 @@ impl Inner {
         cancel: &Arc<AtomicBool>,
     ) -> Outcome {
         match self.read_item(ctx, item, mode, cancel) {
-            Ok((bytes, key)) => self.extract_bytes(ctx, item, key, bytes, mode, guard, cancel),
+            Ok((bytes, key, check)) => {
+                self.extract_bytes(ctx, item, (key, check), bytes, mode, guard, cancel)
+            }
             Err(outcome) => outcome,
         }
     }
 
     /// Reads one item: its bytes and their key, the OID of the bytes read:
     /// the raw bytes', or the queued OID when the built-in conversions turn
-    /// them into it (「存储表」). Err: what to do without extracting
-    /// (`TooLarge`, gone).
+    /// them into it (「存储表」). Tiers 1 and 2 convert this one file
+    /// (`canonical_oid`); the batch tiers leave worktree bytes whose raw
+    /// OID is not the queued one to the batch's `canonical_oids` before the
+    /// commit (true in the result: the key is the raw OID until then). Err:
+    /// what to do without extracting (`TooLarge`, gone).
     #[allow(
         clippy::result_large_err,
         reason = "the outcome is used at once, once per file read"
@@ -1513,7 +1586,7 @@ impl Inner {
         item: &Item,
         mode: Mode,
         cancel: &Arc<AtomicBool>,
-    ) -> Result<(Vec<u8>, BlobId), Outcome> {
+    ) -> Result<(Vec<u8>, BlobId, bool), Outcome> {
         let max = match mode {
             Mode::Interactive => INTERACTIVE_MAX_LEN,
             Mode::Background | Mode::Batch => BACKGROUND_MAX_LEN,
@@ -1523,6 +1596,7 @@ impl Inner {
                 Done {
                     item: item.clone(),
                     key: item.oid,
+                    check: None,
                     extraction: Extraction {
                         status: ExtractStatus::TooLarge,
                         defs: Vec::new(),
@@ -1564,28 +1638,30 @@ impl Inner {
             }
         };
         let raw = hash_blob(hash_kind(&item.oid), &bytes);
-        let key = if raw == item.oid {
-            raw
-        } else {
-            match &item.source {
-                // Another worktree's file that differs from its index waits
-                // until that worktree is the current one.
-                Source::Other(_) => return Err(Outcome::Skip),
-                Source::Object => raw,
-                Source::Worktree => match &ctx.tree {
-                    Some(tree) => match self.git.canonical_oid(tree, &item.path, &bytes) {
-                        Ok(Some(canonical)) if canonical == item.oid => item.oid,
-                        _ => raw,
-                    },
-                    None => raw,
+        if raw == item.oid {
+            return Ok((bytes, raw, false));
+        }
+        let key = match &item.source {
+            // Another worktree's file that differs from its index waits
+            // until that worktree is the current one.
+            Source::Other(_) => return Err(Outcome::Skip),
+            Source::Object => raw,
+            Source::Worktree => match &ctx.tree {
+                Some(_) if mode == Mode::Batch => return Ok((bytes, raw, true)),
+                Some(tree) => match self.git.canonical_oid(tree, &item.path, &bytes) {
+                    Ok(Some(canonical)) if canonical == item.oid => item.oid,
+                    _ => raw,
                 },
-            }
+                None => raw,
+            },
         };
-        Ok((bytes, key))
+        Ok((bytes, key, false))
     }
 
     /// Extracts one read item, without yielding: tiers 1 and 2, and tier 3
-    /// (`Mode::Batch`, interrupted by the pause).
+    /// (`Mode::Batch`, interrupted by the pause). `(key, check)` as
+    /// [`read_item`](Self::read_item) gave them: with `check` the bytes go
+    /// on to the batch's `canonical_oids` (`Done::check`).
     #[allow(
         clippy::too_many_arguments,
         reason = "an item, its bytes and their limits"
@@ -1594,7 +1670,7 @@ impl Inner {
         &self,
         ctx: &Ctx,
         item: &Item,
-        key: BlobId,
+        (key, check): (BlobId, bool),
         bytes: Vec<u8>,
         mode: Mode,
         guard: Option<&Arc<BackgroundGuard>>,
@@ -1649,15 +1725,19 @@ impl Inner {
             }
             // Without a yielding deadline nothing parks.
             ExtractStatus::Parked => Outcome::Skip,
-            _ => Outcome::Done(
-                Done {
-                    item: item.clone(),
-                    key,
-                    extraction,
-                    flag: cancel.clone(),
-                },
-                bytes.len(),
-            ),
+            _ => {
+                let len = bytes.len();
+                Outcome::Done(
+                    Done {
+                        item: item.clone(),
+                        key,
+                        check: check.then_some(bytes),
+                        extraction,
+                        flag: cancel.clone(),
+                    },
+                    len,
+                )
+            }
         }
     }
 
@@ -1863,6 +1943,8 @@ impl Inner {
                     tier: Tier::Review,
                 },
                 key: s.oid,
+                // The query read the bytes as `s.oid`'s content: checked.
+                check: None,
                 extraction: s.extraction,
                 flag: Arc::new(AtomicBool::new(false)),
             })
