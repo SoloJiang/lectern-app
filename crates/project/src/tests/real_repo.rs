@@ -383,7 +383,7 @@ fn real_repo_refresh_matches_fake_git() {
         real_events,
         render_events(&fake.host.take_events(), fake.base())
     );
-    assert!(real_events.contains("[files]"), "{real_events}");
+    assert!(real_events.contains("[files, dirs]"), "{real_events}");
     assert_eq!(real.render(&key), fake.render(&fake_key));
     let after = active_files(&real.model.snapshot(&key).unwrap());
     assert!(before.iter().eq(after.iter()));

@@ -13,7 +13,7 @@ use lectern_fs_watch::{Config, Watcher};
 use lectern_git::{HashKind, Oid};
 use lectern_kernel::{BusyGuard, WorkspaceFacts};
 use lectern_services::project::{
-    BlobId, FileList, OpenError, OpenRequest, PackageMatch, ProjectEvent, ProjectKey,
+    BlobId, DirTable, FileList, OpenError, OpenRequest, PackageMatch, ProjectEvent, ProjectKey,
     ProjectSnapshot, Projects, Scan,
 };
 
@@ -47,6 +47,16 @@ impl QueueHost {
             }
             None => false,
         }
+    }
+
+    /// Takes the oldest queued job out without running it, so the test
+    /// decides when (and whether) it runs.
+    pub(crate) fn hold(&self) -> Option<Job> {
+        self.jobs.lock().unwrap().pop_front()
+    }
+
+    pub(crate) fn queued(&self) -> usize {
+        self.jobs.lock().unwrap().len()
     }
 
     pub(crate) fn take_events(&self) -> Vec<ProjectEvent> {
@@ -194,6 +204,7 @@ pub(crate) fn render_events(events: &[ProjectEvent], base: &Path) -> String {
                     (parts.active, "active"),
                     (parts.files, "files"),
                     (parts.packages, "packages"),
+                    (parts.dirs, "dirs"),
                 ] {
                     if on {
                         names.push(name);
@@ -293,9 +304,46 @@ pub(crate) fn render(snapshot: &ProjectSnapshot, base: &Path) -> String {
                     let _ = writeln!(out, "packages: {other:?}");
                 }
             }
+            check_dirs(snapshot);
+            match &a.dirs {
+                Scan::Ready(table) => {
+                    let _ = writeln!(out, "dirs: {}", table.len());
+                }
+                other => {
+                    let _ = writeln!(out, "dirs: {other:?}");
+                }
+            }
         }
     }
     redact(&out, base)
+}
+
+/// The directory table agrees with the file list: ready only when `files`
+/// is, built from that very list; unavailable with the same error.
+pub(crate) fn check_dirs(snapshot: &ProjectSnapshot) {
+    let Some(a) = &snapshot.active else {
+        return;
+    };
+    match (&a.files, &a.dirs) {
+        (Scan::Ready(files), Scan::Ready(table)) => assert!(
+            Arc::ptr_eq(files, table.files()),
+            "generation {}: the table is from another file list",
+            snapshot.generation
+        ),
+        (_, Scan::Ready(_)) => panic!("generation {}: a table without files", snapshot.generation),
+        (Scan::Unavailable(f), Scan::Unavailable(d)) => assert_eq!(f, d),
+        (_, Scan::Unavailable(_)) => panic!("dirs unavailable, files {:?}", a.files),
+        (Scan::Unavailable(_), Scan::Pending) => panic!("dirs pending, files unavailable"),
+        (_, Scan::Pending) => {}
+    }
+}
+
+/// The active tree's directory table; panics unless it is ready.
+pub(crate) fn active_dirs(snapshot: &ProjectSnapshot) -> Arc<DirTable> {
+    match &snapshot.active.as_ref().expect("no active tree").dirs {
+        Scan::Ready(table) => table.clone(),
+        other => panic!("dirs {other:?}"),
+    }
 }
 
 pub(crate) fn redact(text: &str, base: &Path) -> String {

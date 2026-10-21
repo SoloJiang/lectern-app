@@ -1,6 +1,6 @@
 # project 设计
 
-状态：已实现。第 1 步（清单解析与成员解析，[#68](https://github.com/SoloJiang/lectern-app/pull/68)）、第 2 步（`services` 里的服务接口与数据类型，[#69](https://github.com/SoloJiang/lectern-app/pull/69)）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）、第 5 步（基准，[#127](https://github.com/SoloJiang/lectern-app/pull/127)）；「性能」表的各项都在预算内，见「实际验证」。`services` 的 `BlobId` 与 `FileList::oid`（code_intel 前置条件 A，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）、git 项目的文件列表带 index 的 blob OID（code_intel 前置条件 B，[#114](https://github.com/SoloJiang/lectern-app/pull/114)）已实现。`services` 的 `DirTable`、`ActiveTree::dirs` 与 `ChangedParts::dirs`（[file_reader](file_reader.md) 前置条件 A）已实现；本 crate 建目录表（前置条件 B）尚未实现，在那之前 `dirs` 一直是 `Pending`（见「与设计的差异」）。
+状态：已实现。第 1 步（清单解析与成员解析，[#68](https://github.com/SoloJiang/lectern-app/pull/68)）、第 2 步（`services` 里的服务接口与数据类型，[#69](https://github.com/SoloJiang/lectern-app/pull/69)）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）、第 5 步（基准，[#127](https://github.com/SoloJiang/lectern-app/pull/127)）；「性能」表的各项都在预算内，见「实际验证」。`services` 的 `BlobId` 与 `FileList::oid`（code_intel 前置条件 A，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）、git 项目的文件列表带 index 的 blob OID（code_intel 前置条件 B，[#114](https://github.com/SoloJiang/lectern-app/pull/114)）已实现。`services` 的 `DirTable`、`ActiveTree::dirs` 与 `ChangedParts::dirs`（[file_reader](file_reader.md) 前置条件 A）已实现；本 crate 在后台建目录表并单独一代发布（前置条件 B）已实现，`project/dirs_100k`、`project/dirs_100k_bytes` 在预算内，见「实际验证」「与设计的差异」。
 
 对应 issue [#9](https://github.com/SoloJiang/lectern-app/issues/9)。`project` 把用户打开的路径解析成项目模型：仓库 → worktree → 子项目（[ADR 0006](../adr/0006.md)、[技术调研「Monorepo 与多 worktree 支持」](tech-research.md#monorepo-与多-worktree-支持)），以不可变快照交给视图和其他插件，并通过 `KernelControl::workspace_changed` 提交 `WorkspaceFacts`，驱动 `Activation::Workspace` 的插件（[kernel「依赖与自动启停」](kernel.md#依赖与自动启停)）。
 
@@ -138,6 +138,7 @@ pub struct ChangedParts {
 - 新项目在 `Opened` 之前放入第 1 代快照（`files`、`packages` 为 `Pending`），`Opened` 宣告它；之后每次替换都发一个 `Changed`，包括切换 worktree 时 `Pending` 的那一代。没有可扫描的 worktree（裸仓库没有可用的 linked worktree）时，第 2 代快照内容不变，它的 `Changed` 就是 `Opened` 之后的那一个。
 - 打开一个已经打开的项目：重新列 worktree，当前 worktree 换成路径所在的那个，重读 index 和清单。第 4 步之前这是唯一的刷新方式。
 - `Closed` 之后这个项目不再有 `Changed`：替换快照、发出事件与发出 `Closed` 在同一把锁下。
+- 目录表单独一代：文件列表换成新的一份时，那次替换的 `ChangedParts.dirs` 为 true（`dirs` 回到 `Pending`），表建好后再发一个只有 `dirs` 的 `Changed`。建表与读清单在不同的任务里，打开时 `[dirs]` 与 `[packages]` 两代的先后不定；测试的队列按提交顺序运行，得到 `[files]`、`[packages]`、`[dirs]`，一次刷新是 `[files, …, dirs]`、`[dirs]`。
 
 ### 本 crate 的公开项
 
@@ -224,6 +225,7 @@ pub mod testing {
         pub fn new(home: PathBuf, watcher: Option<Watcher>) -> Driven;
         pub fn projects(&self) -> &dyn Projects;
         pub fn run(&self) -> usize;                       // 运行排队的任务直到没有，返回运行的个数
+        pub fn step(&self) -> bool;                       // 只运行最早的一个任务；没有时 false
         pub fn take_log(&self) -> Vec<(Instant, Logged)>;
     }
     pub enum Logged { Event(ProjectEvent), Facts(Arc<dyn WorkspaceFacts>) }
@@ -413,6 +415,7 @@ pub struct Resolved {
 
 - `worktrees` 里 `key` 和 `root` 都不重复，最多一个 `is_main`；`active.worktree` 是其中一个未 prunable 的 worktree。
 - `files` 先于 `packages` 就绪：`packages` 为 `Ready` 时 `files` 一定是 `Ready`，且子项目来自同一份文件列表。
+- `dirs` 跟着 `files`：`files` 为 `Pending` 时 `dirs` 为 `Pending`；为 `Unavailable` 时 `dirs` 是同一个错误的 `Unavailable`（与 `packages` 相同）；为 `Ready` 时 `dirs` 是 `Pending`，或者是用这同一个 `Arc<FileList>` 建的表（`Arc::ptr_eq(dirs.files(), files)`）。文件列表换成新的 `Arc` 时，同一次替换里 `dirs` 回到 `Pending`，旧表随旧列表释放。
 - 一次替换内的各部分来自同一轮扫描，不会出现「新的 worktree 列表配旧的当前 worktree」。
 
 ### 文件列表
@@ -603,6 +606,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
   - 同一个 worktree 的并发请求合并成一次计算。
   - 不在缓存检查范围内的变化：index 里没有的新清单在 `git add` 之前本来就不算（与当前 worktree 相同）。修改时间精度内、大小不变的连续写入可能漏掉一次，下次 stat 变化时纠正。
 - 切换当前 worktree：先发布 `files: Pending` 的新快照（视图立即显示骨架），旧 worktree 的 `FileList` 随旧快照释放，只保留它的元数据。
+- 目录表（[file_reader 设计「目录表」](file_reader.md#目录表)）：替换快照的那段代码（`publish`）在快照锁里比较新旧文件列表。新快照的文件列表是一份新的 `Arc` 时，`dirs` 置为 `Pending`，发出事件之后提交一个建表任务（与扫描一样经 `own_with`，`Background` 优先级，持有 `BusyGuard`）。任务用 `DirTable::new` 建表，再在快照锁里确认文件列表仍是这一份、`dirs` 仍是 `Pending`，才发布 `dirs: Ready` 的一代；项目已关闭或列表已换代时丢弃结果。新列表的表由它自己的任务建。快照替换基于较早复制的快照（扫描循环先复制、再改、再发布）时，文件列表没变就沿用当前快照的 `dirs`，不会把已发布的表退回 `Pending`。建表只在 `open` 之后发生，首帧之前不做。
 - 插件停用时，kernel 丢弃扫描任务；视图手里的快照仍然有效，只是不再更新。
 - 每个项目的请求（打开、再次打开、切换 worktree）交给它的扫描循环：循环在运行时只记下最新的请求（新的目标覆盖旧的，新的 worktree 列表保留），每一步之间检查，有新请求就放弃当前这一轮的结果。`set_active_worktree` 指向当前 worktree、而且没有排队的请求时直接忽略。
 - 归位的边界：当前 worktree（或文件夹项目）的子项目为 `Unavailable` 时，`locate` 给出 `PackageMatch::None`，`resolve_package` 对当前 worktree 返回 `Err` 带同一个 `ScanError`。`resolve` 遇到不在仓库里的路径时，项目是包含它的最深的已打开文件夹项目，没有时是这个目录本身（文件取所在目录）；路径在 git 目录里时 `worktree` 为 None、`rel` 为 ""，打开这样的路径时 `opened_at` 也是 ""。
@@ -618,6 +622,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 | `resolve_package`，非当前 worktree：缓存命中（读 index 校验和，加上约 25 个清单各一次 `lstat`）/ 未命中、清单缓存已热，`cloudprint` 形状 / 未命中，10 万文件 | < 1 ms / < 20 ms / < 150 ms | `project/resolve_package` |
 | `index` 变化后的刷新（重建文件列表与 facts、重算成员解析，清单缓存已热；不含新 index 的解析，它是 fs_watch 重建过滤器时 `git` 的工作，在批次交付之前完成），`cloudprint` 形状 / 10 万文件 | < 15 ms / < 60 ms | `project/refresh_index` |
 | `contains`：文件名与 `*.ext` 模式 / 含 `/` 的模式（10 万文件，未缓存：这个模式的结果还没有缓存，不是指 facts 建好之后的第一次调用；第一次调用的耗时只记录，`project/facts_contains/name_first`） | < 1 µs / < 5 ms | `project/facts_contains` |
+| 目录表（[file_reader 设计「性能」](file_reader.md#性能)的份额）：10 万文件，建表任务（`DirTable::new` 加发布）/ 表本身的存活字节（不含共用的文件列表） | ≤ 20 ms / ≤ 1.5 MB | `project/dirs_100k`、`project/dirs_100k_bytes` |
 | 常驻内存：`cloudprint` 形状 / 10 万文件（含 16 个非当前 worktree 的子项目列表缓存，文件列表带 blob OID；不含 fs_watch 过滤器持有的、与当前 worktree 句柄共用的解析后 index，那是 `git` 的份额 `git/filter_cloudprint_bytes`、`git/filter_100k_bytes`，见 [ADR 0035](../adr/0035.md)） | < 2 MB / < 16 MB | `project/resident_cloudprint_bytes`、`project/resident_100k_bytes`（进程内的存活字节）；`plugin/project/resident_*`（静止后按 kernel「性能」一节测 `phys_footprint`，随 bench 第 5 步） |
 
 - 对应[性能预算](tech-research.md#性能预算)的「打开项目到项目主页可用 < 100 ms」「切换 worktree / 分支 < 100 ms」和 ADR 0017 的「打开一个 monorepo 后空闲 < 100 MB」；10 万文件的常驻份额对应 ADR 0035 的「10 万文件的仓库空闲 < 120 MB」，各份额的加总见那条 ADR。主页在文件列表就绪后即可用，子项目稍后填入侧栏的 Packages。
@@ -627,8 +632,9 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - 测法（`crates/bench/benches/time/project.rs`、`benches/memory/project.rs`）：
   - 夹具：`testing::Shape` 由 bench 用 `TestRepo` 写出。index 列出形状的全部路径和各自的 blob OID；工作区里只写清单，模型不读 git worktree 里清单以外的文件。linked worktree 有与主 worktree 相同的 index 和清单。`cloudprint` 形状 11 个 worktree；10 万文件的仓库计时用 2 个，测常驻内存用 17 个（16 个非当前 worktree）。
   - 计时基准用 `testing::Driven`：模型的任务在基准线程上运行，fs_watch 用手动驱动的 `FakeBackend`，它自己的工作（arm、合并、过滤器重建）在计时之外。打开项目每个样本用新的模型（解析缓存为空）：从 `open` 到文件列表的 facts 提交是「文件列表就绪」，从那里到 `Changed [packages]` 是「再到子项目就绪」。`index` 变化后的刷新只计模型的那一轮：生产中 fs_watch 收到 index 变化即在自己的线程上重建过滤器，新的 index 在合并窗口结束、批次交付之前已经解析进两者共用的 `TrackedPaths`。
+  - 建表是扫描或刷新那一轮之后的另一个任务。`switch_worktree`、`refresh_index` 用 `Driven::step` 只计那一轮，建表在下一个样本的准备阶段运行；`project/dirs_100k` 在 10 万文件的仓库的两个 worktree 之间轮流切换（不接监听），切换那一轮在准备阶段运行，计时的是它提交的建表任务。`project/dirs_100k_bytes` 在 `memory` 目标里用 10 万文件形状的文件列表直接调 `DirTable::new`，计表本身的存活字节；表也计入 `project/resident_100k_bytes`。
   - `contains` 每组新 facts 上每个模式各问一次（都未缓存），各模式轮流做第一个，每次调用是一个样本，与 kernel 在一次提交之后依次问各插件模式的情形相同。「未缓存」指这个模式的结果还没有缓存。每组 facts 的第一次调用另记为 `project/facts_contains/name_first`，只记录。
-  - 常驻内存在 `memory` 目标里按 kernel「性能」的两次启动在同一进程里测：一个 kernel 只有依赖闭包（空），但 arm 与 `project` 相同的监听（仓库与当前 worktree，过滤器来自一个 `lectern-git` worktree 句柄）；另一个加上 `project`，打开夹具、arm 监听并处理第一批、对每个非当前 worktree 调一次 `resolve_package`。两者静止后计数分配器的存活字节之差是本 crate 的份额。监听归 fs_watch（`fs_watch/resident*`），过滤器连同它持有的、与本 crate 保留的句柄共用的解析后 index（`TrackedPaths`）归 git（`git/filter_*_bytes`，ADR 0035），两边都有，相减抵消。计入本 crate 的有文件列表、子项目及其缓存、kernel 保留的 facts、解析缓存，以及一个持有服务引用的测试插件（几百字节）。进程级的 `plugin/project/resident_*` 要 `app` 的测量构建，随 bench 第 5 步生效，归属相同。
+  - 常驻内存在 `memory` 目标里按 kernel「性能」的两次启动在同一进程里测：一个 kernel 只有依赖闭包（空），但 arm 与 `project` 相同的监听（仓库与当前 worktree，过滤器来自一个 `lectern-git` worktree 句柄）；另一个加上 `project`，打开夹具、arm 监听并处理第一批、对每个非当前 worktree 调一次 `resolve_package`。两者静止后计数分配器的存活字节之差是本 crate 的份额。监听归 fs_watch（`fs_watch/resident*`），过滤器连同它持有的、与本 crate 保留的句柄共用的解析后 index（`TrackedPaths`）归 git（`git/filter_*_bytes`，ADR 0035），两边都有，相减抵消。计入本 crate 的有文件列表、目录表、子项目及其缓存、kernel 保留的 facts、解析缓存，以及一个持有服务引用的测试插件（几百字节）。进程级的 `plugin/project/resident_*` 要 `app` 的测量构建，随 bench 第 5 步生效，归属相同。
 
 ## 状态与异常
 
@@ -640,7 +646,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 | 路径不存在、不是目录、没有权限 | `Opened` 带 `OpenError`，不创建项目 |
 | `.git` 存在但读不出 | `OpenError::RepoUnreadable` |
 | 不是 git 仓库 | 文件夹项目，没有 worktree 和分支 |
-| index 读不出（损坏、不支持的扩展） | `files: Unavailable(IndexUnreadable)`，worktree 列表照常 |
+| index 读不出（损坏、不支持的扩展） | `files: Unavailable(IndexUnreadable)`，`packages`、`dirs` 是同一个错误，worktree 列表照常 |
 | 清单读不出或语法错误 | 子项目照常列出（名字用目录名），`Manifest.error` 有值；不弹错误 |
 | Gradle 用了不支持的写法 | `Manifest.partial`，已识别的部分照常 |
 | worktree 根目录被删除 | 列为 prunable；是当前 worktree 时按「数据流与线程」切换 |
@@ -655,6 +661,7 @@ fs_watch 事件 ─▶ 标记脏 ─▶ [executor] 增量刷新 ─▶ 新快照
 - 模型（`open_*`、`worktrees_*`、`locate_*`、`resolve_*`）：用 `testing::FakeGit`（仓库、worktree 列表、HEAD 与 index 在内存里，worktree 根目录与工作区文件是临时目录里的真实文件，路径能规范化、`lstat` 有效；记录每次调用），任务交给测试里的队列，由测试逐个运行，事件与 facts 记录下来。场景：在子目录打开、同一仓库从另一个 worktree 再打开得到同一个键、裸仓库、主目录 dotfiles 仓库、prunable（根目录已删除，键仍来自管理目录）/ locked / detached / unborn、文件夹项目的上限与跳过规则、git 项目的文件列表每条带 index 的 OID（SHA-1 与 SHA-256）而文件夹项目都为 None、`locate` 取最深的子项目，以及父仓库和其中单独打开的子模块都包含路径时 `locate` 返回子模块的项目；路径在非当前 worktree 时 `locate` 返回 `NotLoaded`，`resolve_package` 按那个 worktree 自己的子项目给出结果（它比当前 worktree 多一个、少一个、移动了一个子项目各一例），index 与清单都未变时第二次调用命中缓存、不读清单；未暂存地修改或删除那个 worktree 的一个清单后，下一次 `resolve_package` 按未命中重算并给出新结果，其余清单不重新解析；已经填过缓存之后 `locate` 对非当前 worktree 仍返回 `NotLoaded`；当前 worktree 的子项目还是 `Pending` 时 `resolve_package` 返回 `NotLoaded`、不做 IO。
 - 刷新（`refresh_*`）：用 fs_watch 的模拟后端驱动事件（`testing::manual`、`FakeBackend`，`FakeGit` 每个 worktree 的 `FakeSource`），模型的任务仍交给测试里的队列；连续事件合并为一轮、扫描中到达的事件触发下一轮、只改普通文件内容不重读 index、新增普通受跟踪文件后 `Package.files` 更新而已有清单不重新解析、清单 OID 未变不重新解析、删除当前 worktree 后的切换、generation 严格递增；另有打开后第一批不替换快照、只刷新 stat 信息的 index 改写、目录事件代表其下的清单、根目录被删除后切换、其他 worktree 的 HEAD 只更新列表、unborn 分支的第一次提交、关闭的项目与文件夹项目不监听；只暂存内容变化（路径不变、OID 变了）时文件列表换代而子项目不变，同样的字节再暂存一次不换代（SHA-1 与 SHA-256 各一遍）。`FakeGit` 的 index 每条带暂存时工作区内容的 blob OID，与真实仓库相同。
 - facts（`facts_*`）：模式语义逐条覆盖；多个项目的并集；不合法的模式返回 false。
+- 目录表（`dirs_*`，另有 `refresh_new_file_list_resets_and_rebuilds_the_dirs`）：文件列表与子项目发布时表还是 `Pending`、建表任务在队列里，之后单独一代发布（`[dirs]`），表的 `files()` 与快照的 `files` 是同一个 `Arc`；文件夹项目同样建表；再次打开、刷新、切换 worktree 得到新列表时同一次替换把 `dirs` 置回 `Pending`，再发布新表；扣住旧列表的建表任务、让新列表先发布之后再运行它，不发布、不改快照；关闭之后运行的建表任务不发布；index 读不出时 `dirs` 是同一个错误、不提交建表任务。`render` 输出 `dirs` 的目录数并检查上面的不变量，`render_events` 输出 `dirs`。
 - bench 的合成仓库（`shape_*`）：`Shape::cloudprint()` 是 728 个文件、25 个清单，`Shape::monorepo(100_000, 2_000)` 是 10 万个文件、2,000 个清单；每个清单都在路径里、能解析且不是 partial，清单合计小于解析缓存的 2 MB，`resolve_packages` 给出的子项目数等于 `packages`。
 - 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`，`PluginSet` 里另放一个依赖 `dyn Projects` 的测试插件（取得服务、记录事件）。`TestKernel` 只容纳被测插件和模拟服务，放不下 `Workspace` 激活的测试插件。`activate` 之后、`open` 之前 `FakeGit` 没有收到任何调用；`open` 之后提交的 facts 让一个 `Workspace(["pom.xml"])` 的测试插件激活；事件顺序为 `Opened` → `Changed`；一次刷新从后端交出事件到快照替换之前 kernel 不静止。`ProjectDeps::watcher` 用 fs_watch 的手动监听器，它有自己的 `Executor::manual()`。
 - 真实仓库（`real_repo_*`）：用 git 的 `test-support` 构造器写出的仓库（含 linked worktree、SHA-256 仓库各一个）跑一遍 open、再次打开、切换 worktree 和 `resolve_package`，确认 `GitAccess` 的生产实现与 `FakeGit` 给出相同的快照和相同的文件列表（连同 OID）；增量刷新（生产实现的 `watch_source` 加 `FakeBackend`）在一次 index 变化和一次未暂存的清单修改之后，事件与快照也与 `FakeGit` 相同。
@@ -825,6 +832,31 @@ git 项目的文件列表带 blob OID（code_intel「验收」前置条件 B）�
 - 进程级的 `plugin/project/resident_*`（两次启动的 `phys_footprint`）要 `app` 的测量构建，仍是计划中（bench 第 5 步）；进程内的存活字节不含分配器的开销与碎片，比它小。
 - 非当前 worktree 的子项目列表与当前 worktree 不同、彼此也不同时（各分支的子项目确实不一样）不能共用，最坏情况仍是每个 worktree 一份（10 万文件的夹具约 0.4 MB 一份）。
 
+目录表的构建与发布（file_reader 前置条件 B），在 Linux（x86_64 容器，4 核，另一个任务同时在编译和跑基准）上运行，没有在 macOS 上实测：
+
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`）、`just deny`、`just doctest`（9 个）通过。没有新增依赖。
+- `just test -p lectern-project`：131 个测试通过。新增 `dirs_*` 7 个和 `refresh_new_file_list_resets_and_rebuilds_the_dirs`（见「测试」）。事件快照随每次换代多出的 `[dirs]` 一代改动，generation 往后移；`render` 多一行 `dirs: <目录数>`，9 个文件快照各多这一行（insta 重写时去掉了 `assertion_line`）。快照逐个看过。
+- `just test -p lectern-services`：52 个测试通过（`DirTable::new` 的改写见 [file_reader 设计「与设计的差异」](file_reader.md#与设计的差异)）。`just test -p lectern-bench`：70 个通过、6 个跳过。
+- `just bench --measure project/`：
+
+  | 基准 | 预算 | 实测 |
+  |---|---|---|
+  | `project/dirs_100k` | ≤ 20 ms | 9.48 ms；负载 1.8 时再测 9.45 ms（`DirTable::new` 改写之前 26.5 ms / 26.2 ms） |
+  | `project/dirs_100k_bytes` | ≤ 1.5 MB | 1.46 MB |
+  | `project/resident_100k_bytes` | < 16 MB | 14.1 MB（第 5 步 12.7 MB；多出的约 1.4 MB 是目录表） |
+  | `project/resident_cloudprint_bytes` | < 2 MB | 144 KB |
+  | `project/open_100k/files`、`…/packages` | < 80 ms / < 150 ms | 37.2 ms / 18.8 ms |
+  | `project/switch_worktree` | < 30 ms | 844 µs |
+  | `project/refresh_index/cloudprint`、`…/100k` | < 15 ms / < 60 ms | 291 µs / 32.2 ms |
+
+  其余 `project/*` 与第 5 步持平，都在预算内。
+- `plugin/project/resident_100k` 仍是计划中（进程级测量随 bench 第 5 步）；进程内的同一测量 `project/resident_100k_bytes` 含目录表，在 16 MB 内。
+
+没有验证到的（前置条件 B）：
+
+- macOS 上的判定。
+- 生产执行器上建表任务与读清单的任务并行时 `[dirs]` 和 `[packages]` 的先后：模型测试的队列按提交顺序运行；两种先后都由 `publish` 在快照锁里的比较保证一致（见「数据流与线程」），没有专门的并发测试。
+
 ## 与设计的差异
 
 第 1 步：
@@ -882,7 +914,7 @@ git 项目的文件列表带 blob OID（code_intel 前置条件 B）：
 
 `services` 的目录表（file_reader 前置条件 A）：
 
-- `ActiveTree` 多了 `dirs`、`ChangedParts` 多了 `dirs`（已写进「服务接口」「快照」）。本 crate 只在构造 `ActiveTree` 的三处填 `Scan::Pending`，`changed` 比较新旧快照的 `dirs`；目录表的构建和发布是前置条件 B，之前 `dirs` 不会变为 `Ready` 或 `Unavailable`，所以「`dirs` 只在 `files` 就绪之后就绪」自然成立。`DirTable` 的形状和与 file_reader 设计的差异记在 [file_reader 设计「与设计的差异」](file_reader.md#与设计的差异)。
+- `ActiveTree` 多了 `dirs`、`ChangedParts` 多了 `dirs`（已写进「服务接口」「快照」）。本 crate 只在构造 `ActiveTree` 的三处填 `Scan::Pending`，`changed` 比较新旧快照的 `dirs`；目录表的构建和发布是前置条件 B，之前 `dirs` 不会变为 `Ready` 或 `Unavailable`，所以「`dirs` 只在 `files` 就绪之后就绪」自然成立（前置条件 B 起不再一直是 `Pending`，见本节末尾的「目录表的构建与发布」）。`DirTable` 的形状和与 file_reader 设计的差异记在 [file_reader 设计「与设计的差异」](file_reader.md#与设计的差异)。
 
 第 5 步：
 
@@ -894,3 +926,11 @@ git 项目的文件列表带 blob OID（code_intel 前置条件 B）：
 - 计时基准不经 kernel：一次打开要拆成「文件列表就绪」（facts 已提交）和「子项目就绪」两段，facts 交给 kernel 之后在外面观察不到，所以用 `Driven` 记录带时间的事件与提交。`refresh_index` 只计模型的那一轮，index 的解析在 fs_watch 的过滤器重建里（两者共用 `TrackedPaths`），是 `git` 的工作。已写进「性能」表与测法。
 - `contains` 对纯文件名与 `*.ext` 不再编译 glob（`facts_contains/name` 超标的原因之一，见「实际验证」）。行为不变，`facts_*` 照常通过；「WorkspaceFacts」一节原来就写的是「查一次哈希表」。
 - 夹具的工作区只写清单：模型读 git worktree 只读清单，文件列表来自 index。
+
+目录表的构建与发布（file_reader 前置条件 B）：
+
+- `files` 为 `Unavailable` 时 `dirs` 是同一个错误的 `Unavailable`。file_reader 设计只写了「`files` 为 `Ready` 之后才可能 `Ready`」，没有写列表读不出时 `dirs` 是什么。留在 `Pending` 会让 Files 一直显示骨架；取同一个错误与 `packages` 的做法一致，视图按错误显示，不再等。已写进「快照」的不变量和「状态与异常」。
+- 「文件列表换代」按 `Arc` 判断，不按内容判断：再次打开读出一份内容相同的新列表，也把 `dirs` 置回 `Pending` 并重建（10 万文件约 10 ms，在后台）。旧表持有旧列表，按内容沿用旧表会让新旧两份列表同时常驻。刷新时只刷新了 stat 信息的 index 沿用原来的 `Arc`，不重建。
+- 一致性在替换快照的唯一入口 `publish` 里保证，不在各个调用处：扫描、刷新、切换 worktree 都先复制快照、修改、再发布，`apply` 里同一 worktree 的 `..a.clone()` 也会带着旧表，`publish` 在快照锁里按新旧文件列表重新决定 `dirs`（见「数据流与线程」），各处不必记得清掉它。
+- 事件顺序：每次文件列表换代多一代（`[dirs]`），`ChangedParts::files` 为 true 的那一代 `dirs` 也为 true。`refresh_*`、`worktrees_*`、`open_*`、`plugin_*` 的事件快照随之改动，generation 往后移；`render` 多一行 `dirs`，9 个文件快照各多一行。
+- 基准：`project/refresh_index` 原来每一代都要求 `files` 变化，现在每轮是两代（列表一代、表一代），按奇偶分别检查；它和 `project/switch_worktree` 改用新增的 `Driven::step` 只计那一轮，建表不计入，测的内容与之前相同。`Driven::step` 已写进「本 crate 的公开项」。

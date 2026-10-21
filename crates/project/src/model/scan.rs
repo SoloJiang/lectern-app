@@ -9,8 +9,8 @@ use std::sync::atomic::AtomicBool;
 use lectern_git::{GitError, HashKind};
 use lectern_platform::SafeRoot;
 use lectern_services::project::{
-    ActiveTree, ChangedParts, FileList, ManifestError, ManifestKind, Package, ProjectEvent,
-    ProjectSnapshot, Scan, ScanError, Worktree, WorktreeKey,
+    ActiveTree, ChangedParts, DirTable, FileList, ManifestError, ManifestKind, Package,
+    ProjectEvent, ProjectSnapshot, Scan, ScanError, Worktree, WorktreeKey,
 };
 
 use super::cache::{OtherSlot, OtherTree, Print};
@@ -41,6 +41,9 @@ impl Model {
             Some(_) => {
                 let target = pick(&worktrees, wanted.active.as_ref(), current);
                 target.map(|w| match current {
+                    // The same worktree keeps its lists until the scan
+                    // replaces them; the table goes with the old file list
+                    // then (`keep_dirs`).
                     Some(a) if a.worktree.as_ref() == Some(&w.key) && *a.root == *w.root => {
                         ActiveTree {
                             opened_at: wanted.opened_at.clone(),
@@ -200,25 +203,66 @@ impl Model {
     }
 
     /// Replaces the snapshot and emits `Changed`. False once the project is
-    /// closed.
-    pub(super) fn publish(&self, project: &Arc<Project>, mut next: ProjectSnapshot) -> bool {
+    /// closed. The directory table follows the file list (`keep_dirs`): a
+    /// new list makes it pending and queues its build.
+    pub(super) fn publish(&self, project: &Arc<Project>, next: ProjectSnapshot) -> bool {
+        self.replace(project, |_| Some(next))
+    }
+
+    /// `publish` of what `make` builds from the current snapshot, under the
+    /// snapshot's lock; None replaces nothing. False when nothing was
+    /// replaced.
+    fn replace(
+        &self,
+        project: &Arc<Project>,
+        make: impl FnOnce(&ProjectSnapshot) -> Option<ProjectSnapshot>,
+    ) -> bool {
         let _emit = lock(&project.emit);
         if lock(&project.control).closed {
             return false;
         }
-        let parts = {
+        let (generation, parts, build) = {
             let mut current = lock(&project.snapshot);
+            let Some(mut next) = make(&current) else {
+                return false;
+            };
+            let build = keep_dirs(&current, &mut next);
             next.generation = current.generation + 1;
             let parts = changed(&current, &next);
             *current = Arc::new(next);
-            (current.generation, parts)
+            (current.generation, parts, build)
         };
         self.emit(ProjectEvent::Changed {
             project: project.key.clone(),
-            generation: parts.0,
-            parts: parts.1,
+            generation,
+            parts,
         });
+        if let Some(list) = build {
+            let project = project.clone();
+            self.spawn(move |model| model.build_dirs(&project, &list));
+        }
         true
+    }
+
+    /// The background task that builds the directory table of `list` and
+    /// publishes it as its own generation (file_reader design「目录表」).
+    /// Nothing is published when the project closed or its file list was
+    /// replaced in the meantime: the newer list queued its own build.
+    fn build_dirs(&self, project: &Arc<Project>, list: &Arc<FileList>) {
+        if !waiting_for(&project.snapshot(), list) {
+            return;
+        }
+        let table = Arc::new(DirTable::new(list.clone()));
+        self.replace(project, |current| {
+            if !waiting_for(current, list) {
+                return None;
+            }
+            let mut next = current.clone();
+            if let Some(a) = next.active.as_mut() {
+                a.dirs = Scan::Ready(table);
+            }
+            Some(next)
+        });
     }
 
     /// Reads and parses the manifests of `files` (parse results cached by
@@ -372,6 +416,54 @@ pub(super) fn pick<'a>(
     usable(wanted)
         .or_else(|| usable(current.and_then(|a| a.worktree.as_ref())))
         .or_else(|| worktrees.iter().find(|w| !w.prunable))
+}
+
+/// Makes `next`'s directory table agree with its file list, given the
+/// snapshot it replaces; Some(list) when a table must be built for `list`.
+///
+/// - `files` pending: `dirs` pending. Unavailable: `dirs` unavailable with
+///   the same error, as `packages`.
+/// - `files` ready with a table built from that very list (`Arc::ptr_eq`):
+///   kept. The list `current` already holds: `current`'s `dirs` (its
+///   table, or pending while the build queued with that list runs), so a
+///   snapshot cloned before the table was published does not drop it.
+/// - Any other list: `dirs` pending, and its build is queued. An older
+///   table never stays next to a newer list.
+fn keep_dirs(current: &ProjectSnapshot, next: &mut ProjectSnapshot) -> Option<Arc<FileList>> {
+    let a = next.active.as_mut()?;
+    let list = match &a.files {
+        Scan::Pending => {
+            a.dirs = Scan::Pending;
+            return None;
+        }
+        Scan::Unavailable(error) => {
+            a.dirs = Scan::Unavailable(error.clone());
+            return None;
+        }
+        Scan::Ready(list) => list,
+    };
+    if matches!(&a.dirs, Scan::Ready(t) if Arc::ptr_eq(t.files(), list)) {
+        return None;
+    }
+    let held = current.active.as_ref().filter(|c| match &c.files {
+        Scan::Ready(files) => Arc::ptr_eq(files, list),
+        _ => false,
+    });
+    if let Some(c) = held {
+        a.dirs = c.dirs.clone();
+        return None;
+    }
+    let list = list.clone();
+    a.dirs = Scan::Pending;
+    Some(list)
+}
+
+/// `snapshot`'s file list is `list` and its directory table is not built.
+fn waiting_for(snapshot: &ProjectSnapshot, list: &Arc<FileList>) -> bool {
+    snapshot.active.as_ref().is_some_and(|a| {
+        matches!(&a.files, Scan::Ready(files) if Arc::ptr_eq(files, list))
+            && matches!(a.dirs, Scan::Pending)
+    })
 }
 
 fn changed(old: &ProjectSnapshot, new: &ProjectSnapshot) -> ChangedParts {

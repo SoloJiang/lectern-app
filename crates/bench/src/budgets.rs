@@ -157,6 +157,7 @@ const EXECUTOR: &str = "docs/design/executor.md#性能";
 const I18N: &str = "docs/design/i18n.md#性能";
 const FS_WATCH: &str = "docs/design/fs_watch.md#性能";
 const CODE_INTEL: &str = "docs/design/code_intel.md#性能";
+const FILE_READER: &str = "docs/design/file_reader.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -1106,6 +1107,24 @@ pub static BUDGETS: &[Budget] = &[
         "project/resident_100k_bytes",
         &[median(Limit::BytesBelow(16 * MB))],
         PROJECT,
+        ACTIVE,
+        Memory,
+    ),
+    // The directory table of Files, `project`'s share of the file reader:
+    // the model's background job building and publishing it for 100k
+    // files, and the table's own live bytes (the file list it shares not
+    // counted); it is part of `project/resident_100k_bytes`.
+    share(
+        "project/dirs_100k",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        FILE_READER,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "project/dirs_100k_bytes",
+        &[median(Limit::BytesAtMost(3 * MB / 2))],
+        FILE_READER,
         ACTIVE,
         Memory,
     ),

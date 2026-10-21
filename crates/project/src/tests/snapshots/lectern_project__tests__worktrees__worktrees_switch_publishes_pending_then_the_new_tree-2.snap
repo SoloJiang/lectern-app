@@ -1,6 +1,5 @@
 ---
 source: crates/project/src/tests/worktrees.rs
-assertion_line: 57
 expression: h.render(&key)
 ---
 key: Git { common_dir: "[base]/repo/.git" }
@@ -15,3 +14,4 @@ files: 2 (skipped 0, truncated false)
 packages:
   "" name=repo declared=false workspace_root=true parent=None files=2 manifests=[go.work]
   "svc" name=example.com/svc declared=true workspace_root=false parent=Some(0) files=1 manifests=[svc/go.mod]
+dirs: 2

@@ -1,6 +1,5 @@
 ---
 source: crates/project/src/tests/real_repo.rs
-assertion_line: 177
 expression: real.render(&key)
 ---
 key: Git { common_dir: "[base]/repo/.git" }
@@ -21,3 +20,4 @@ packages:
   "" name=root declared=false workspace_root=true parent=None files=7 manifests=[package.json, pom.xml]
   "apps/web" name=web declared=true workspace_root=false parent=Some(0) files=2 manifests=[apps/web/package.json]
   "svc" name=svc declared=true workspace_root=false parent=Some(0) files=1 manifests=[]
+dirs: 7

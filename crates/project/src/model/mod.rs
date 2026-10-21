@@ -263,8 +263,8 @@ impl Model {
                         opened_at: "".into(),
                         files: Scan::Pending,
                         packages: Scan::Pending,
-                        // Stays pending until the directory table is built
-                        // here (file_reader design, prerequisite B).
+                        // Built in the background once the file list is
+                        // published (`scan::keep_dirs`).
                         dirs: Scan::Pending,
                     }),
                 };

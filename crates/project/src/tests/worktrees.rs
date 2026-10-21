@@ -42,7 +42,8 @@ fn worktrees_switch_publishes_pending_then_the_new_tree() {
     h.model
         .set_active_worktree(&key, &WorktreeKey(linked.as_path().into()));
     // Nothing changes before the executor runs; then the pending snapshot
-    // (generation 4) comes before the new tree's files and packages.
+    // (generation 5) comes before the new tree's files, packages and
+    // directory table.
     let before = h.snapshot(&key);
     assert_eq!(
         before
@@ -60,9 +61,10 @@ fn worktrees_switch_publishes_pending_then_the_new_tree() {
     let events = h.host.take_events();
     check_event_order(&events);
     insta::assert_snapshot!(render_events(&events, h.base()), @r"
-    Changed 4 [active, files, packages]
-    Changed 5 [files]
-    Changed 6 [packages]
+    Changed 5 [active, files, packages, dirs]
+    Changed 6 [files]
+    Changed 7 [packages]
+    Changed 8 [dirs]
     ");
     insta::assert_snapshot!(h.render(&key));
 }

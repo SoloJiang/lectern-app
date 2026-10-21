@@ -1,6 +1,5 @@
 ---
 source: crates/project/src/tests/open.rs
-assertion_line: 82
 expression: h.render(&first)
 ---
 key: Git { common_dir: "[base]/repo/.git" }
@@ -13,3 +12,4 @@ files: 1 (skipped 0, truncated false)
   package.json File
 packages:
   "" name=feature declared=false workspace_root=false parent=None files=1 manifests=[package.json]
+dirs: 1

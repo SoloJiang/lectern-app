@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B、E 和第 2–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)）已实现；前置条件 E 和第 2–8 步尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -647,7 +647,7 @@ impl FileReaderPlugin {
 ### 目录表
 
 - 每个目录一项：名字在 `names` 里的区间、父目录、子目录在 `subdirs` 里的区间、文件在 `files` 里的区间、子树文件数。`subdirs`、`files` 是按 `finder_cmp` 排好的下标数组。
-- 一遍扫描 `FileList`（已按字节序，同一目录下的文件连续）得出目录和区间，再逐个目录排序；10 万个文件、约 1 万个目录时估算 5–20 ms、约 0.7 MB（每个文件 4 字节的下标，每个目录约 24 字节加名字）。
+- 一遍扫描 `FileList`（已按字节序，同一目录下的文件连续）得出目录和区间，再逐个目录排序；10 万个文件、约 1 万个目录时估算 5–20 ms、约 0.7 MB（每个文件 4 字节的下标，每个目录约 24 字节加名字）。实现与实测见「与设计的差异」前置条件 B。
 - 子模块（`FileKind::Submodule`）是一个文件行，不展开。
 
 ## 数据流与线程
@@ -1040,6 +1040,12 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 改到 `ActiveTree` 和 `ChangedParts` 字面量的 crate：`just test -p lectern-project`（123 个）、`just test -p lectern-code-intel`（344 个）全部通过，`project` 的快照没有变化。
 - `just check`（格式、架构规则、文档链接、clippy `-D warnings`，Linux 上不依赖 GPUI 的全部 crate 的全部目标）、`just deny` 通过；`services`、`project` 的文档测试（0 个）通过。没有新增依赖。
 
+前置条件 B（`project`，连同 `services` 里 `DirTable::new` 的提速），在 Linux（x86_64 容器，4 核）上运行，测法与其余验证见 [project 设计「实际验证」](project.md#实际验证)：
+
+- `project/dirs_100k` 中位数 9.45 ms（负载 1.8 时）、9.48 ms（负载约 3），预算 ≤ 20 ms；提速之前 26.5 ms、26.2 ms。`project/dirs_100k_bytes` 1.46 MB（≤ 1.5 MB），提速前后相同。`project/resident_100k_bytes` 14.1 MB（< 16 MB），含目录表。
+- `just test -p lectern-services`：52 个测试通过。新增 `dirs_match_a_naive_construction_on_interleaved_trees`（`a`、`a-b`、`a.c` 与 `a/…` 交错、深链、非 ASCII 名字，与朴素构造逐目录对照，并检查子目录和文件按 `finder_cmp` 排序）、`finder_cmp_ascii_shortcut_matches_the_character_comparison`（38 个含大小写、数字、非 ASCII 字符的词两两组合，原样和拼接后各比一次，与逐字符解码、`to_lowercase` 的比较结果相同）。提速前后在 10 万文件的形状上建出的表逐字段相等（一次性对照，没有留在测试里）。
+- 没有在 macOS 上运行。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1063,3 +1069,14 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `TextOrigin` 现在只有 `Worktree`、`Object`。`Dependency` 和 `DepRoot` 是 code_intel「验收」第 9 步的前置条件「`services` 的依赖类型」，随它加入；`ReadTarget::origin` 直接用 `TextOrigin`，到时不用改 `reader` 模块。
 - `DEPENDENCY_EXTENSIONS` 取 ADR 0033 的全部条目（TS、Rust、Go、Python 四组共 13 项），不只是 TS 依赖层用到的六项；以 `.` 开头的一项是文件名的后缀，其余是完整的文件名，按字节比较。`code_intel` 还没有依赖层（第 9 步），没有现成的列表可以移过来，依赖层实现时直接用这一份。
 - `project` 在前置条件 B 之前：构造 `ActiveTree` 的三处填 `Scan::Pending`，`changed` 比较新旧快照的 `dirs`，所以 `dirs` 一直是 `Pending`（[project 设计「与设计的差异」](project.md#与设计的差异)）。`code_intel` 的测试辅助和测试同样填 `Pending`。
+
+前置条件 B（`project`，以及 `services`）：
+
+- `project` 的构建与发布、`files` 不可用时 `dirs` 取同一个错误、按 `Arc` 判断列表换代，记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
+- `DirTable::new` 在本 PR 里改写，不改接口、布局、序列化形式和不变式。前置条件 A 的实现在 10 万文件的形状（21,065 个目录）上约 26 ms，超出「性能」的 20 ms。耗时分三段：每段连续文件都把整条上级链压入、再对约 8 万条路径排序去重（约 8.5 ms）；按目录分组时逐个分配 `Vec`、逐条二分查找（约 15 ms）；`finder_cmp` 逐字符解码并 `to_lowercase` 的排序（约 12.7 ms）。改为：
+  - 每段只压入与上一段不共有的上级目录，压入后已基本有序，排序前先检查；
+  - 父目录取自上一个目录的上级栈，栈里没有时才二分查找；
+  - 子目录和文件按计数分组，填进一整块数组，不再为每个目录分配；
+  - 每个文件的名字在第一遍扫描里取出，目录内的文件已按 `finder_cmp` 有序时不排序；
+  - `finder_cmp` 两边都是 ASCII 字节时直接比较小写字节，不解码；结果与逐字符比较相同（`finder_cmp_ascii_shortcut_matches_the_character_comparison`）。
+- 改写后 `project/dirs_100k` 约 9.5 ms，见「实际验证」。
