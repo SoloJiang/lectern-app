@@ -217,9 +217,20 @@ pub(crate) fn created() -> Flags {
     Flags(Flags::FILE.0 | Flags::CREATED.0)
 }
 
-/// The open descriptors of this process (Linux).
+/// The open descriptors of this process: `/proc/self/fd` on Linux, the
+/// fdescfs `/dev/fd` on macOS (the same choice as platform's `fd_*` tests).
+/// The listing's own descriptor is in every count alike. A missing
+/// directory panics: a silent 0 would make every comparison wrong. Counts
+/// are exact under `just test` (nextest runs each test in its own process).
 pub(crate) fn open_fds() -> usize {
-    std::fs::read_dir("/proc/self/fd").map_or(0, |d| d.count())
+    let dir = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("{dir}: {e}"))
+        .count()
 }
 
 /// The text of the rows, `|`-joined.
