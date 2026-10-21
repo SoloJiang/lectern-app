@@ -6,6 +6,10 @@
 //! the current one (`Focus::Current`) and after a jump or prefetch that
 //! found none; a jump never waits for one.
 //!
+//! A large text (1–16 MiB, 「大文件」) keeps its last jump's window parse in
+//! place of a whole one, and its identity and line checkpoints
+//! (`LargeText`) in a list of its own, bounded and expired alike.
+//!
 //! Bounds: at most [`ENTRIES`] texts of at most [`MAX_SOURCE`] bytes each,
 //! their estimated bytes ([`estimate`]) at most [`BYTES`]; the current
 //! text's entry stays while it is current, any other unused for
@@ -21,11 +25,13 @@ use lectern_executor::Priority;
 use lectern_services::code_intel::TextRef;
 use lectern_services::project::{BlobId, ProjectKey};
 
+use super::large::{LargeText, WindowParse};
 use crate::LangName;
 use crate::extract::{INTERACTIVE_DEADLINE, Lang};
 use crate::index::{Inner, lock};
 use crate::site::ParsedFile;
 use crate::store::Version;
+use crate::window::Base;
 
 /// Texts kept at once: the current one and the one before it.
 pub const ENTRIES: usize = 2;
@@ -56,6 +62,10 @@ struct Kept {
     /// The bytes parsed are `oid`'s content as they are (`Content`): byte
     /// offsets in the parse go to views.
     canonical: bool,
+    /// A large text's window parse (「大文件」): where the window starts in
+    /// the text; None for a whole text's parse. A text has one or the
+    /// other, the last one kept.
+    base: Option<Base>,
     bytes: usize,
     used: Instant,
 }
@@ -64,6 +74,9 @@ struct Kept {
 #[derive(Default)]
 pub(crate) struct ParseCache {
     kept: Vec<Kept>,
+    /// The large texts' identities and checkpoints (「大文件」), the most
+    /// recently used last; bounded and expired as the parses are.
+    large: Vec<(LargeText, Instant)>,
     /// The current text (the last `Focus::Current`) and its project: its
     /// entry never expires and is evicted last; [`KEEP_FOR`] counts from
     /// when it stops being the current one.
@@ -86,7 +99,7 @@ impl ParseCache {
         let i = self
             .kept
             .iter()
-            .position(|k| k.oid == oid && k.version == *version)?;
+            .position(|k| k.oid == oid && k.version == *version && k.base.is_none())?;
         let mut kept = self.kept.remove(i);
         kept.used = now;
         let parsed = (kept.parsed.clone(), kept.canonical);
@@ -94,11 +107,76 @@ impl ParseCache {
         Some(parsed)
     }
 
-    /// Whether the parse of `oid` in `version` is kept (tests, warming).
+    /// Whether the whole parse of `oid` in `version` is kept (tests,
+    /// warming).
     pub fn has(&self, oid: BlobId, version: &Version) -> bool {
         self.kept
             .iter()
-            .any(|k| k.oid == oid && k.version == *version)
+            .any(|k| k.oid == oid && k.version == *version && k.base.is_none())
+    }
+
+    /// The kept window parse of the large text `oid` in `version`, if any,
+    /// and whether its bytes were canonical; marks it used.
+    pub fn window(
+        &mut self,
+        oid: BlobId,
+        version: &Version,
+        now: Instant,
+    ) -> Option<(WindowParse, bool)> {
+        let i = self
+            .kept
+            .iter()
+            .position(|k| k.oid == oid && k.version == *version && k.base.is_some())?;
+        let mut kept = self.kept.remove(i);
+        kept.used = now;
+        let found = kept.base.map(|base| {
+            (
+                WindowParse {
+                    parsed: kept.parsed.clone(),
+                    base,
+                },
+                kept.canonical,
+            )
+        });
+        self.kept.push(kept);
+        found
+    }
+
+    /// Keeps `w` as the window parse of the large text `oid` in `version`,
+    /// in place of its earlier parse (whole or window).
+    pub fn put_window(
+        &mut self,
+        oid: BlobId,
+        version: Version,
+        w: WindowParse,
+        canonical: bool,
+        now: Instant,
+    ) -> Dropped {
+        self.keep(oid, version, w.parsed, canonical, Some(w.base), now)
+    }
+
+    /// The recorded large text `oid`, if kept; marks it used.
+    pub fn large(&mut self, oid: BlobId, now: Instant) -> Option<LargeText> {
+        let i = self.large.iter().position(|(t, _)| t.oid == oid)?;
+        let (text, _) = self.large.remove(i);
+        self.large.push((text.clone(), now));
+        Some(text)
+    }
+
+    /// Keeps the record of a large text, in place of an earlier one of the
+    /// same OID, dropping the least recently used ones past [`ENTRIES`]
+    /// (the current text's last).
+    pub fn put_large(&mut self, text: LargeText, now: Instant) {
+        self.large.retain(|(t, _)| t.oid != text.oid);
+        self.large.push((text, now));
+        while self.large.len() > ENTRIES {
+            let at = self
+                .large
+                .iter()
+                .position(|(t, _)| !self.is_current(t.oid))
+                .unwrap_or(0);
+            self.large.remove(at);
+        }
     }
 
     /// Keeps `parsed` as the parse of `oid` in `version`, dropping the least
@@ -110,6 +188,18 @@ impl ParseCache {
         version: Version,
         parsed: Arc<ParsedFile>,
         canonical: bool,
+        now: Instant,
+    ) -> Dropped {
+        self.keep(oid, version, parsed, canonical, None, now)
+    }
+
+    fn keep(
+        &mut self,
+        oid: BlobId,
+        version: Version,
+        parsed: Arc<ParsedFile>,
+        canonical: bool,
+        base: Option<Base>,
         now: Instant,
     ) -> Dropped {
         let mut dropped = Vec::new();
@@ -129,6 +219,7 @@ impl ParseCache {
             version,
             parsed,
             canonical,
+            base,
             bytes: estimate(len),
             used: now,
         });
@@ -159,15 +250,20 @@ impl ParseCache {
             (None, _) => false,
         };
         if ends && let Some((_, old)) = self.current.take() {
-            for k in self.kept.iter_mut().filter(|k| k.oid == old) {
-                k.used = now;
-            }
+            self.touch(old, now);
         }
         if let Some(new) = oid {
-            for k in self.kept.iter_mut().filter(|k| k.oid == new) {
-                k.used = now;
-            }
+            self.touch(new, now);
             self.current = Some((project.clone(), new));
+        }
+    }
+
+    fn touch(&mut self, oid: BlobId, now: Instant) {
+        for k in self.kept.iter_mut().filter(|k| k.oid == oid) {
+            k.used = now;
+        }
+        for (_, used) in self.large.iter_mut().filter(|(t, _)| t.oid == oid) {
+            *used = now;
         }
     }
 
@@ -180,11 +276,20 @@ impl ParseCache {
                 Some(k.oid) != current && now.saturating_duration_since(k.used) >= KEEP_FOR
             });
         self.kept = kept;
+        self.large.retain(|(t, used)| {
+            Some(t.oid) == current || now.saturating_duration_since(*used) < KEEP_FOR
+        });
         let next = self
             .kept
             .iter()
             .filter(|k| Some(k.oid) != current)
             .map(|k| k.used + KEEP_FOR)
+            .chain(
+                self.large
+                    .iter()
+                    .filter(|(t, _)| Some(t.oid) != current)
+                    .map(|(_, used)| *used + KEEP_FOR),
+            )
             .min();
         (gone.into_iter().map(|k| k.parsed).collect(), next)
     }
@@ -206,6 +311,18 @@ impl ParseCache {
             .into_iter()
             .map(|k| k.parsed)
             .collect()
+    }
+
+    /// Drops every large text's record (tests and benchmarks).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn without_large(&mut self) {
+        self.large.clear();
+    }
+
+    /// Large texts recorded now (tests and benchmarks).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn large_len(&self) -> usize {
+        self.large.len()
     }
 
     /// The kept texts' estimated bytes.
@@ -263,9 +380,7 @@ impl Inner {
                 if lock(&me.parse_cache).has(at.oid, &Version::of(&lang)) {
                     return;
                 }
-                if let Ok(text) = me.read_text(&snap, &at) {
-                    me.keep_parse(&lang, at.oid, text.bytes, text.canonical);
-                }
+                me.warm_text(&snap, &lang, &at);
             });
     }
 
@@ -308,7 +423,13 @@ impl Inner {
     /// lock, so a parse of a grammar the table replaced meanwhile is never
     /// kept (the table changes before the cache drops that language's
     /// entries).
-    fn keep_parse(self: &Arc<Self>, lang: &Lang, oid: BlobId, bytes: Arc<[u8]>, canonical: bool) {
+    pub(super) fn keep_parse(
+        self: &Arc<Self>,
+        lang: &Lang,
+        oid: BlobId,
+        bytes: Arc<[u8]>,
+        canonical: bool,
+    ) {
         let version = Version::of(lang);
         if bytes.len() > MAX_SOURCE || lock(&self.parse_cache).has(oid, &version) {
             return;

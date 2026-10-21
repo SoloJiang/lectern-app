@@ -72,6 +72,7 @@ const BENCHES: &[Bench] = &[
     code_intel_query::GOTO_COLD_PARSE,
     code_intel_query::GOTO_SAME_FILE,
     code_intel_query::GOTO_OBJECT,
+    code_intel_query::GOTO_LARGE,
     code_intel_query::GOTO_FIRST,
     code_intel_query::NAMED_50K,
     code_intel_query::SEARCH_STOP,

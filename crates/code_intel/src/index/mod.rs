@@ -257,6 +257,9 @@ pub(crate) struct Inner {
     /// the file, an eviction between two windows).
     #[cfg(test)]
     pub window_hook: Mutex<Option<WindowHook>>,
+    /// Tests: a jump's window parse of a large text runs out of its 8 ms.
+    #[cfg(test)]
+    pub window_parse_times_out: AtomicBool,
 }
 
 /// [`Inner::window_hook`] (tests): given each written window's end.
@@ -350,6 +353,8 @@ impl Indexer {
             wall: Mutex::new(None),
             #[cfg(test)]
             window_hook: Mutex::new(None),
+            #[cfg(test)]
+            window_parse_times_out: AtomicBool::new(false),
         });
         Indexer { inner }
     }
@@ -486,6 +491,20 @@ impl Indexer {
     pub fn clear_kept_parses(&self) {
         let dropped = lock(&self.inner.parse_cache).without_all();
         drop(dropped);
+    }
+
+    /// Forgets the large texts' recorded identities and checkpoints
+    /// (「大文件」), so the next jump in one streams it (benchmarks of the
+    /// cold path).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_large_texts(&self) {
+        lock(&self.inner.parse_cache).without_large();
+    }
+
+    /// The number of large texts whose identity and checkpoints are kept.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn kept_large_texts(&self) -> usize {
+        lock(&self.inner.parse_cache).large_len()
     }
 
     /// The number of the project's cached walks (tests).

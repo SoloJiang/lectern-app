@@ -26,6 +26,7 @@ use lectern_services::code_intel::{
 use lectern_services::project::{BlobId, RelPath};
 
 use super::account::{Account, Reason};
+use super::large::CurrentText;
 use super::rank::{Ranker, visible};
 use super::search::{FileDeadline, Searched};
 use super::text::Content;
@@ -42,6 +43,19 @@ use crate::{DefKind, LangName};
 
 /// A delivered location: (origin, path, OID, line, column).
 pub(crate) type LocKey = (TextOrigin, RelPath, BlobId, u32, u32);
+
+/// What step 1 has of the current text: the site at the position, the
+/// text's definitions of its name (with whether each is local), the whole
+/// parse for the resolution extension point (None for a large text: its
+/// window's parse is in the window's coordinates), whether byte offsets go
+/// to views, and whether the text is large (「大文件」).
+struct Step1 {
+    site: Site,
+    defs: Vec<(Def, bool)>,
+    parsed: Option<Arc<ParsedFile>>,
+    canonical: bool,
+    large: bool,
+}
 
 pub(crate) fn loc_key(l: &Location) -> LocKey {
     (l.origin, l.path.clone(), l.oid, l.line, l.column)
@@ -398,40 +412,80 @@ impl Inner {
         // it became the current text (ADR 0037): no read, no parse. The text
         // is its OID's content, as a parse kept under that OID was checked to
         // be (`read_text`). Otherwise read, verified and parsed for this site
-        // (the cold path), and its whole parse kept in the background.
+        // (the cold path), and its whole parse kept in the background. A
+        // large text (1–16 MiB, 「大文件」) only around the position.
         let version = Version::of(&lang);
-        let (parsed, canonical) = match self.cached_parse(at.oid, &version) {
+        let whole = match self.cached_parse(at.oid, &version) {
             Some(kept) => {
                 crate::phases::count("1 kept parses", 1);
-                kept
+                Ok(kept)
             }
             None => {
                 let text = {
                     let _t = crate::phases::span("1 read + verify current text");
-                    self.read_text(snap, at)?
+                    self.current_text(snap, at, &lang, position, cancel)?
                 };
-                let deadline = clock.now() + INTERACTIVE_DEADLINE;
-                if let Some(me) = self.arc() {
-                    me.warm_parse_of(&lang, at.oid, text.bytes.clone(), text.canonical);
+                match text {
+                    CurrentText::Whole(text) => {
+                        let deadline = clock.now() + INTERACTIVE_DEADLINE;
+                        if let Some(me) = self.arc() {
+                            me.warm_parse_of(&lang, at.oid, text.bytes.clone(), text.canonical);
+                        }
+                        let parsed = {
+                            let _t = crate::phases::span("1 parse + locals + site query");
+                            ParsedFile::parse_at(
+                                &lang, text.bytes, &*clock, deadline, cancel, position,
+                            )
+                            .map_err(|e| match e {
+                                ParseError::Unsupported => QueryError::UnsupportedLanguage,
+                                ParseError::TimedOut => {
+                                    QueryError::Unreadable("parsing timed out".into())
+                                }
+                                ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
+                            })?
+                        };
+                        Ok((Arc::new(parsed), text.canonical))
+                    }
+                    CurrentText::Large(large) => Err(*large),
                 }
-                let parsed = {
-                    let _t = crate::phases::span("1 parse + locals + site query");
-                    ParsedFile::parse_at(&lang, text.bytes, &*clock, deadline, cancel, position)
-                        .map_err(|e| match e {
-                            ParseError::Unsupported => QueryError::UnsupportedLanguage,
-                            ParseError::TimedOut => {
-                                QueryError::Unreadable("parsing timed out".into())
-                            }
-                            ParseError::Cancelled => QueryError::Unreadable("cancelled".into()),
-                        })?
-                };
-                (Arc::new(parsed), text.canonical)
             }
         };
-        let site = {
-            let _t = crate::phases::span("1 site_at");
-            parsed.site_at(position).ok_or(QueryError::NoSymbol)?
+        let step1 = match whole {
+            Ok((parsed, canonical)) => {
+                let site = {
+                    let _t = crate::phases::span("1 site_at");
+                    parsed.site_at(position).ok_or(QueryError::NoSymbol)?
+                };
+                let defs = parsed
+                    .defs_with_local()
+                    .filter(|(d, _)| *d.name == *site.name)
+                    .map(|(d, local)| (d.clone(), local))
+                    .collect();
+                Step1 {
+                    site,
+                    defs,
+                    parsed: Some(parsed),
+                    canonical,
+                    large: false,
+                }
+            }
+            Err(large) => Step1 {
+                site: large.site,
+                defs: large.defs,
+                // The window's parse is in its own coordinates: the
+                // resolution extension point gets whole parses only.
+                parsed: None,
+                canonical: large.canonical,
+                large: true,
+            },
         };
+        let Step1 {
+            site,
+            defs: own,
+            parsed,
+            canonical,
+            large,
+        } = step1;
         let name = lang.name().clone();
         let defines = site.defines.as_ref().map(|d| {
             let location = here_def(at, &d.def, canonical);
@@ -464,8 +518,26 @@ impl Inner {
             left: 0,
         };
         // The current text is read and parsed: its definitions are step 1's
-        // (the map's file when the map has that content at the path).
-        prepared.account.searched(&at.path, at.oid);
+        // (the map's file when the map has that content at the path). A
+        // large text's are its window units (step 3): searched when its
+        // chain is complete (`Windowed`).
+        if !large
+            || snap
+                .project
+                .store
+                .exists_with_windows(&version, &[at.oid])
+                .is_some_and(|(found, _)| {
+                    found
+                        .first()
+                        .is_some_and(|f| f.status == ExtractStatus::Windowed)
+                })
+        {
+            prepared.account.searched(&at.path, at.oid);
+        } else {
+            prepared
+                .account
+                .unsearched(&at.path, at.oid, Reason::TooLarge);
+        }
         let current = |definition: DefinitionRef, evidence: Evidence| Candidate {
             in_review: ranker.in_review(&definition.location.path),
             definition,
@@ -495,11 +567,11 @@ impl Inner {
                 Evidence::NameOnly,
             ));
         }
-        for (def, local) in parsed.defs_with_local() {
-            if *def.name == *site.name && accepts(&lang, site.syntax, def.kind) {
+        for (def, local) in &own {
+            if accepts(&lang, site.syntax, def.kind) {
                 let location = here_def(at, def, canonical);
                 prepared.push(current(
-                    def_ref(def, &name, local, location),
+                    def_ref(def, &name, *local, location),
                     Evidence::NameOnly,
                 ));
             }
@@ -562,7 +634,11 @@ impl Inner {
             packages: Some(&snap.packages),
             extraction: &extraction,
         };
-        for import in rules.imports(&parsed, &ctx) {
+        let imports = parsed
+            .as_ref()
+            .map(|p| rules.imports(p, &ctx))
+            .unwrap_or_default();
+        for import in imports {
             let Some(exported) = import.exported(&site.name) else {
                 continue;
             };
@@ -595,7 +671,7 @@ impl Inner {
                 });
             }
         }
-        if let Some(bound) = rules.bind(&site, &parsed, &ctx) {
+        if let Some(bound) = parsed.as_ref().and_then(|p| rules.bind(&site, p, &ctx)) {
             let l = &bound.definition.location;
             let tier = ranker.tier(&l.path, l.origin, l.oid, false);
             prepared.push(Candidate {

@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 8 步的窗口抽取与窗口链、`Windowed` 已实现（同一 PR 的第二部分），跳转里的大文件尚未实现；第 5、9 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 8 步的窗口抽取与窗口链、`Windowed`（同一 PR 的第二部分）和跳转里的大文件（第三部分）已实现，可见区域的三个窗口和查引用按窗口读没有做（见「与设计的差异」第 8 步）；第 5、9 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -1840,7 +1840,7 @@ enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume
 
 ### 大文件
 
-[ADR 0034](../adr/0034.md)「打开文件的符号抽取」「文本存储与定位」。状态：窗口、窗口链、`Windowed` 和字节偏移已实现，跳转里的大文件尚未实现（「验收」第 8 步，见「实际验证」「与设计的差异」第 8 步）。
+[ADR 0034](../adr/0034.md)「打开文件的符号抽取」「文本存储与定位」。状态：窗口、窗口链、`Windowed`、字节偏移和跳转里的大文件已实现；可见区域的三个窗口和查引用按窗口读没有做（「验收」第 8 步，见「实际验证」「与设计的差异」第 8 步）。
 
 | 大小 | 后台（第 2–5 层、依赖） | 文件被打开（第 1 层） | 查询里的当前文本（跳转第 1 步） |
 |---|---|---|---|
@@ -2430,6 +2430,13 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 基准（`just bench --measure code_intel/window code_intel/batch_peak code_intel/extract_throughput code_intel/yield_stop`，负载约 1.5–2.5）：`window_chain_16mib` 中位数 3.41 s（只记录；约 16 MiB 的合成 TypeScript，从焦点到 `Windowed` 写入，每个样本一个新缓存）；`window_peak` 最大 2.46 MB（≤ 8 MiB）；`batch_peak` 33.3 MB（≤ 40 MB，夹具里没有打开的文件，与第 7 步相同）；`extract_throughput` 4.3 MB/s（≥ 4，遍历多了名字起点的比较）；`yield_stop` 最大 116 µs（≤ 10 ms）。第一次运行时两个窗口基准报错：合成源码按「至少 16 MiB」生成，略超过 16 MiB 的上限，链没有开始；改为至多 16 MiB 之后通过。
 - 没有验证的：macOS 上的数值看 macOS CI；真实的大文件（压缩的 bundle、生成的代码）只按调研的数字估计。
 
+第 8 步的第三部分（跳转里的大文件），同一台机器。
+
+- `just check`、`just doctest`、`just deny` 通过；`just test` 1544 个测试通过（本 crate 339 个），新增 `goto_large_*` 9 个：`goto_large_window_only`（身份已记下时只读一段 ≤ 84 KiB、只解析 ≤ 16 KiB 的窗口，`Bound(Local)` 的位置和字节偏移正确；同一窗口里再跳一次什么都不读、不解析）、`goto_large_finds_the_rest_in_window_units`（一兆之前的定义来自窗口单元，`CurrentFile`、`Index`，`Complete`）、`goto_large_timeout_falls_back_to_the_name`、`goto_large_cold_then_warm`（没有预热时流式读一遍，每段 ≤ 1 MiB、首尾相接，之后只读一段；链没有写过时结果是 `Partial`）、`goto_large_racy_record_is_streamed_again`、`goto_large_changed_file_is_stale`、`goto_large_object_reuses_the_kept_window`（整份取 blob 一次，保留的窗口里不取，别处再取一次）、`goto_large_crlf_text_has_no_byte_offsets`（一次 `canonical_oid`，`byte` 为 None）、`goto_large_checkpoints_and_windows`。
+- 实现过程中被测试抓到的一处：窗口先按 `parse_at` 解析，保留下来之后同一窗口的另一个位置触发 `site_at` 的「parsed for another site」断言；改为整段 `parse`。
+- 基准（`just bench --measure code_intel/goto_large`、`code_intel/goto_cold_parse`、`code_intel/window_peak code_intel/batch_peak`，负载约 1.5–2.5）：`goto_large` 中位数 3.71 ms（≤ 20 ms）；`goto_large/cold` 7.78 ms（只记录：4 MiB 流式读一遍求 OID）；`goto_large/object` 3.46 ms（只记录，`FakeGit` 没有解压）；`goto_cold_parse` 26.3 ms（≤ 32 ms，上一次 24.7 ms：≤ 1 MiB 的当前文本改经 `open_file` 加 `read_all`）、`/at_128k` 33.5 ms；`window_peak` 最大 2.46 MB、`batch_peak` 33.3 MB（与第二部分相同）。
+- 没有验证的：macOS 上的数值看 macOS CI；真实仓库里对象库一侧 4–16 MiB 的 blob 整份取出（zlib）的耗时。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2708,3 +2715,17 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 流式哈希不等时的后备：`BlobHasher::finish` 为 None（sha1dc 判定碰撞）时整份读入后用 `for_blob` 再算一次，等于要建索引的 OID 时照常（`canonical = 1`）；否则调用 `canonical_oid`，等于时 `canonical = 0`，都不等时放弃这条链（内容已经变了，fs_watch 的事件会带来新的 OID）。
 - 查引用对窗口单元仍按整份读（≤ 4 MiB）、整份解析：设计「查询读到的其他大文件」一条的「只读、只解析这些窗口」没有做，4–16 MiB 的 `Windowed` 文件在查引用里计为 `TooLarge`、未搜（已知限制，留到后续）。跳转第 3 步、`Named`、名字表、导入目标（`file_extraction` 取 `Windowed` 文件的全部窗口单元）都已经用窗口单元。
 - 测试：设计写的是 2–16 MiB 的合成文件；`window_chain_equals_whole_extraction` 每种核心语言用约 1.1 MiB（超过 1 MiB 才建链，约 17 个窗口；debug 构建里 7 种语言各 2 MiB 要 100 s），16 MiB 由基准跑。它逐项比较定义（名字、种类、行、列、字节偏移、`end_line`、作用域、可见性、参数个数）和引用名的集合；IIFE 的一项比较定义名和引用名的多重集（每个语句的名字都不同），压缩成一行的变体只检查窗口大小（它的 `ERROR` 根只能按 `;` 判断，丢掉跨窗口的那个定义是已知限制）。CRLF 一项用 `FakeGit::assume_unchanged`：真实的 git 按 stat 认为检出的 CRLF 文件没有改动，映射里是 index 的 OID；重新读会读到超过 1 MiB、记为 `Unindexable`。
+
+第 8 步的第三部分（跳转里的大文件，`query/large.rs`）：
+
+- 第 1 步按大小分开（`Inner::current_text`）：≤ 1 MiB 照旧整份读、核对、整份解析（原来按 4 MiB 整份读，1–4 MiB 的当前文本现在也按窗口，与设计的表一致）；1–16 MiB 按窗口；超过 16 MiB `TooLarge`。工作区一侧 ≤ 1 MiB 的也经 `open_file` 加 `read_all`（与按区间读共用一次打开），核对规则与 `read_text` 相同。
+- 读一段，不是两段：设计写「读那个检查点之后的 64 KiB 加 4 KiB」再「用同一次 `read_ranges` 读出」窗口。实现一次 `read_ranges` 读 `[检查点 − 12 KiB, 检查点 + 72 KiB)`（≤ 84 KiB），目标所在的行和窗口（目标前 8–12 KiB 到目标后 4 KiB）都在里面；这一行比读到的还长时从同一起点重读到 1 MiB（`MAX_RANGE_BYTES`），仍找不到行首时 `Unreadable`。读回的身份与打开时不同就是 `Stale`。
+- 没有加 `ParsedFile::parse_window`：窗口按普通的 `ParsedFile::parse` 整段解析（不用 `parse_at`，保留的窗口因此能回答窗口里任何位置），位置在交出之前按 `window::Base` 移到整个文件里（站点、绑定、可能的绑定、`defines`、定义），由 `query/large.rs` 做，`site.rs` 不变。窗口的起点（`safe_start`）：目标前 8 KiB 处往前至多 4 KiB 里最后一个从第 0 列开始语句的行首，没有时 `;` 或 `}` 之后，再没有时不切开标识符的第一个字节；终点是目标后 4 KiB。超时（8 ms，看门狗的时钟）时名字按限时搜索的整词规则从读到的字节里取出，`Site::at` 是名字的起点，`RefSyntax::Plain`。
+- 保留：窗口的解析与整份解析放在同一个保留表里（`ParseCache` 的条目多一个 `base`，整份解析为 None），一个文本只留最后一个（整份的或窗口的），键是（OID、语言版本），不是设计写的（OID、语言版本、窗口起点）；估算字节照常计入 12 MiB。`LargeText` 另放一个表，最多 2 份，是当前文本期间保留、之后 60 s，与保留的解析相同。检查点只存每 64 KiB 处的行号（字节偏移就是下标乘 64 KiB），16 MiB 是 1 KiB。
+- racy：记下身份时的墙钟（`recorded`）在文件状态改变之后 2 秒以内的，这份记录不算数，跳转照冷路径再流式读一遍并替换它；预热任务不为此推迟。
+- 第 2 步只接整份解析：大文件的窗口解析是窗口的坐标，解析扩展点（#17 是空规则）拿不到它，所以大文件跳过第 2 步的导入和绑定（超时的情形也一样，设计写「接着做第 2、3 步」）；第 3 步照设计，同一 OID 的窗口单元按 `Ranker::tier` 是 `CurrentFile`。
+- 核算：大文件的当前文本只在它的链完整（存在检查是 `Windowed`）时算已搜；否则计为未搜（`TooLarge`），结果是 `Partial`，因为窗口之外的定义不知道。设计没有写这一条。
+- 对象库一侧：工作区一侧的 `LargeText` 在 `canonical` 时同样用于对象库（字节相同，检查点相同）；`canonical` 为假的（CRLF）不用，对象库的检查点按 blob 的内容另算。预热对对象库的文本整份取出一次、只留检查点（同设计）。
+- 查引用里的大文件当前文本没有改：`References` 读自己的文本仍经 `read_text`（≤ 4 MiB 整份），4–16 MiB 的计为 `TooLarge`（与上一部分查引用按窗口读的已知限制一起留到后续）。
+- 测试用约 1.2 MiB 的合成 TypeScript（超过 1 MiB 即走窗口），不是 2–16 MiB；4 MiB 由基准跑。设计列的 `goto_large_window_only`、`goto_large_timeout_falls_back_to_the_name`、`goto_large_cold_then_warm`、`goto_large_object_reuses_the_kept_window` 都有；「读的时候活跃字节里只有一个 1 MiB 的区间」按读取的区间检查（每段 ≤ 1 MiB、首尾相接，记在测试专用的 `large::READS`），不按活跃字节计数（计数分配器在 bench crate 里）。另加 `goto_large_finds_the_rest_in_window_units`、`goto_large_racy_record_is_streamed_again`、`goto_large_changed_file_is_stale`、`goto_large_crlf_text_has_no_byte_offsets`、`goto_large_checkpoints_and_windows`。超时由测试专用的 `Inner::window_parse_times_out` 触发。
+- 基准：`code_intel/goto_large` 的夹具是只有一个 4 MiB 文件的小仓库（不是 10 万文件的虚拟仓库：窗口那一步与仓库大小无关，第 3 步按名字查找的开销已由 `goto_indexed` 测量），文件被打开、链写完、身份记下；跳转的名字是目标所在函数调用的前一个函数（在窗口里，同时在窗口单元里），每个样本前丢掉保留的解析。`…/cold` 同时丢掉 `LargeText`（`Indexer::clear_large_texts`，`test-support`）。`…/object` 的 `FakeGit::blob` 是内存里的复制，没有 zlib 解压，比真实仓库快（设计估计 16 MiB 几十毫秒，只记录）。

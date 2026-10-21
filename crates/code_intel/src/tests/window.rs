@@ -65,7 +65,7 @@ fn unit(ext: &str, k: usize) -> String {
 }
 
 /// At least `len` bytes of `ext` made of [`unit`]s.
-fn big(ext: &str, len: usize) -> String {
+pub(super) fn big(ext: &str, len: usize) -> String {
     let mut out = String::with_capacity(len + 1024);
     if ext == "go" {
         out.push_str("package main\n\n");
@@ -137,7 +137,7 @@ fn whole(lang_name: &str, text: &[u8]) -> Extraction {
 
 /// Opens `path` (as the current text) in a new harness with `text` and
 /// runs everything.
-fn opened(path: &str, text: &[u8]) -> Harness {
+pub(super) fn opened(path: &str, text: &[u8]) -> Harness {
     let h = Harness::new();
     h.git.add("main", &[(path, text)]);
     h.git.commit("main");

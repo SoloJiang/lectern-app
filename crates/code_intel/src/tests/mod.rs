@@ -8,6 +8,7 @@ mod escalate;
 mod extract;
 mod forms;
 mod goto;
+mod goto_large;
 mod grammar_changes;
 mod incremental;
 mod lang;

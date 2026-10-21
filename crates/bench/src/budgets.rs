@@ -1295,6 +1295,32 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     share("code_intel/goto_object", RECORD, CODE_INTEL, ACTIVE, Time),
+    // A jump in the middle of a 4 MiB current text whose identity and
+    // checkpoints are recorded (「大文件」, ADR 0034): one range read around
+    // the checkpoint, the window around the target parsed (8 ms deadline),
+    // then as any jump. Without the record (streamed once) and from the
+    // object database (the blob taken whole) recorded.
+    share(
+        "code_intel/goto_large",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_large/cold",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_large/object",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     // The kept parses at their bounds: two texts just under 128 KiB (ADR
     // 0037).
     share(

@@ -263,7 +263,8 @@ fn first_and_done(
             .find(|e| e.0 == id && want(e))
             .map(|e| e.1 - start)
     };
-    let first = at(&|e| e.2).ok_or_else(|| BenchError::new("no batch with candidates"))?;
+    let first = at(&|e| e.2)
+        .ok_or_else(|| BenchError::new(format!("no batch with candidates: {:?}", r.state)))?;
     let done = at(&|e| e.3).ok_or_else(|| BenchError::new("no end"))?;
     Ok((first, done, r))
 }
@@ -535,6 +536,116 @@ fn goto_object(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         "code_intel/goto_object",
         Value::Time(first),
     )])
+}
+
+/// The large current text of the `goto_large` jumps: about 4 MiB of
+/// TypeScript functions, each calling the one before it.
+fn large_text(len: usize) -> Vec<u8> {
+    let mut out = String::with_capacity(len + 256);
+    let mut k = 0;
+    while out.len() < len {
+        out.push_str(&format!(
+            "export function build_{k}(value: number): number {{\n  \
+             return build_{}(value) + {k};\n}}\n\n",
+            k.max(1) - 1
+        ));
+        k += 1;
+    }
+    out.into_bytes()
+}
+
+/// The path of the `goto_large` jumps' current text.
+const LARGE: &str = "src/large.ts";
+
+/// A jump in the middle of a 4 MiB current text (「大文件」, ADR 0034): the
+/// text opened and made the current one, so its window chain is written
+/// and its identity and checkpoints recorded (the warming); the jump reads
+/// the checkpoint's range and parses the window around the target. The
+/// window parse forgotten before each (untimed).
+fn large_fixture(ctx: &Ctx, object: bool) -> Result<Jump, BenchError> {
+    let len = ctx.scale(4 << 20, 1_200_000);
+    let text = large_text(len);
+    let git = Arc::new(FakeGit::new());
+    git.add("main", &[(LARGE, &text)]);
+    git.commit("main");
+    let dir = tempfile::tempdir_in(ctx.scratch())?;
+    let rig = Rig::new(git, cache(dir.path()), Arc::new(SystemClock));
+    rig.open();
+    rig.settle();
+    let mut at = text_ref(&rig.git, LARGE, &text);
+    if object {
+        at.origin = TextOrigin::Object;
+    }
+    // The chain, which only a worktree file has, first: then the warming
+    // of the object's text, if that is the current one.
+    if !rig.current(LARGE) {
+        return Err(BenchError::new("the large text is not in the map"));
+    }
+    rig.settle();
+    rig.indexer.set_focus(
+        &rig.git.key(),
+        Some(&rig.git.worktree_key("main")),
+        Focus::Current(Some(at.clone())),
+    );
+    rig.settle();
+    if rig.indexer.kept_large_texts() != 1 {
+        return Err(BenchError::new("the large text's identity is not recorded"));
+    }
+    let mid = text.len() / 2;
+    let k = text[..mid]
+        .windows(b"export function build_".len())
+        .filter(|w| *w == b"export function build_")
+        .count();
+    let position = position(&text, &format!("build_{}(value) + {k};", k - 1))?;
+    let query = Query {
+        project: rig.git.key(),
+        kind: QueryKind::Definition {
+            at: at.clone(),
+            position,
+        },
+    };
+    Ok(Jump {
+        rig,
+        query,
+        at,
+        _dir: dir,
+    })
+}
+
+/// A jump in a large current text, identity recorded: from the query to
+/// its first batch with candidates, ≤ 20 ms (「性能」「大文件的跳转」).
+/// `…/cold`, the record forgotten too (the first jump before the warming
+/// finished: the text streamed once), and `…/object`, a diff's old side
+/// (the blob taken whole each time), are recorded.
+pub const GOTO_LARGE: Bench = Bench {
+    id: "code_intel/goto_large",
+    run: goto_large,
+};
+
+fn goto_large(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let parses = |rig: &Rig| rig.indexer.clear_kept_parses();
+    let cold = |rig: &Rig| {
+        rig.indexer.clear_kept_parses();
+        rig.indexer.clear_large_texts();
+    };
+    // One fixture per series: the listener's handle closes the projects
+    // when a series ends.
+    let jump = large_fixture(ctx, false)?;
+    let (warm, _) = sample_jumps(ctx, &jump, &parses, &answered)?;
+    drop(jump);
+    let jump = large_fixture(ctx, false)?;
+    let (cold, _) = sample_jumps(ctx, &jump, &cold, &answered)?;
+    drop(jump);
+    let jump = large_fixture(ctx, true)?;
+    if jump.at.origin != TextOrigin::Object {
+        return Err(BenchError::new("not an object's text"));
+    }
+    let (object, _) = sample_jumps(ctx, &jump, &parses, &answered)?;
+    Ok(vec![
+        Measured::new("code_intel/goto_large", Value::Time(warm)),
+        Measured::new("code_intel/goto_large/cold", Value::Time(cold)),
+        Measured::new("code_intel/goto_large/object", Value::Time(object)),
+    ])
 }
 
 /// The first jump of a fresh index (record-only, against the 50 ms
