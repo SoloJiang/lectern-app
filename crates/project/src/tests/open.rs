@@ -43,6 +43,7 @@ fn open_emits_opened_then_files_then_packages() {
     Opened Ok(Git { common_dir: "[base]/repo/.git" })
     Changed 2 [files]
     Changed 3 [packages]
+    Changed 4 [dirs]
     "#);
 }
 

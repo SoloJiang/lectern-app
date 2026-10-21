@@ -113,6 +113,7 @@ const BENCHES: &[Bench] = &[
     project::SWITCH_WORKTREE,
     project::RESOLVE_PACKAGE,
     project::REFRESH_INDEX,
+    project::DIRS_100K,
     project::FACTS_CONTAINS,
 ];
 

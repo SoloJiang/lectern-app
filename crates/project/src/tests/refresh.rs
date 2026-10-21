@@ -123,12 +123,13 @@ fn refresh_first_batch_after_open_checks_once_and_changes_nothing() {
     let events = f.h.host.take_events();
     check_event_order(&events);
     assert!(opened(&events, request).is_ok());
-    // Opened, files, packages; the first batch of each watch (a rescan)
-    // replaces nothing.
+    // Opened, files, packages, dirs; the first batch of each watch (a
+    // rescan) replaces nothing.
     insta::assert_snapshot!(render_events(&events, f.h.base()), @r#"
     Opened Ok(Git { common_dir: "[base]/repo/.git" })
     Changed 2 [files]
     Changed 3 [packages]
+    Changed 4 [dirs]
     "#);
     // It listed the worktrees, read the index checksum (unchanged, so not
     // the index) and every manifest (the parse cache answered).
@@ -168,7 +169,10 @@ fn refresh_burst_of_events_is_one_round() {
     f.w.driver.advance(LONG);
     f.emit(&root, &[("apps/web/src/c.ts", CHANGED)]);
     f.w.driver.advance(LONG);
-    insta::assert_snapshot!(f.events(), @"Changed 4 [files, packages]");
+    insta::assert_snapshot!(f.events(), @r"
+    Changed 5 [files, packages, dirs]
+    Changed 6 [dirs]
+    ");
     assert_eq!(f.count(is_checksum), 1);
     assert_eq!(f.count(is_index), 1);
     assert_eq!(f.package(&key, "apps/web").files, 5);
@@ -197,8 +201,9 @@ fn refresh_event_during_a_round_starts_another() {
         .write_unstaged(&common, "apps/web/package.json", br#"{ "name": "web2" }"#);
     f.emit(&root, &[("apps/web/package.json", CHANGED)]);
     insta::assert_snapshot!(f.events(), @r"
-    Changed 4 [packages]
-    Changed 5 [files, packages]
+    Changed 5 [packages]
+    Changed 6 [files, packages, dirs]
+    Changed 7 [dirs]
     ");
     assert_eq!(&*f.package(&key, "apps/web").name, "web2");
     assert_eq!(&*f.package(&key, "apps/new").name, "new");
@@ -236,7 +241,10 @@ fn refresh_new_tracked_file_updates_counts_without_rereading_manifests() {
         .write(&common, "apps/web/src/extra.ts", b"export {};\n");
     f.emit(&common, &[("index", CHANGED)]);
     f.emit(&root, &[("apps/web/src/extra.ts", CHANGED)]);
-    insta::assert_snapshot!(f.events(), @"Changed 4 [files, packages]");
+    insta::assert_snapshot!(f.events(), @r"
+    Changed 5 [files, packages, dirs]
+    Changed 6 [dirs]
+    ");
     assert_eq!(f.package(&key, "apps/web").files, 3);
     assert_eq!(f.package(&key, "").files, 8);
     assert_eq!(
@@ -248,6 +256,28 @@ fn refresh_new_tracked_file_updates_counts_without_rereading_manifests() {
     // The new file list reached the facts.
     assert_eq!(f.h.host.facts_count(), facts + 1);
     assert!(f.h.host.facts().unwrap().contains("extra.ts"));
+}
+
+#[test]
+fn refresh_new_file_list_resets_and_rebuilds_the_dirs() {
+    let f = Fixture::new();
+    let (common, root) = repo(&f);
+    let key = f.open(&root);
+    let old = active_dirs(&f.h.snapshot(&key));
+    f.h.git.write(&common, "docs/guide.md", b"# guide\n");
+    f.emit(&common, &[("index", CHANGED)]);
+    // The refresh round makes the table pending with the new list; the
+    // build publishes the new table as the next generation.
+    insta::assert_snapshot!(f.events(), @r"
+    Changed 5 [files, packages, dirs]
+    Changed 6 [dirs]
+    ");
+    let snapshot = f.h.snapshot(&key);
+    check_dirs(&snapshot);
+    let new = active_dirs(&snapshot);
+    assert!(Arc::ptr_eq(new.files(), &active_files(&snapshot)));
+    assert_eq!(old.find("docs"), None);
+    assert!(new.find("docs").is_some());
 }
 
 #[test]
@@ -290,15 +320,17 @@ fn staged_content_change(hash: HashKind) {
     let parses = f.parses();
 
     // `git add` of a new version of a source file: the same paths, one new
-    // OID. The file list is replaced (a new generation), the sub-projects
-    // stay, no manifest is read.
+    // OID. The file list is replaced (a new generation, the directory table
+    // pending), the sub-projects stay, no manifest is read; the table of
+    // the new list follows in its own generation.
     let content = b"export const x = 1;\n";
     f.h.git.write(&common, "apps/web/src/index.ts", content);
     f.emit(&common, &[("index", CHANGED)]);
     f.emit(&root, &[("apps/web/src/index.ts", CHANGED)]);
-    assert_eq!(f.events(), "Changed 4 [files]\n");
+    assert_eq!(f.events(), "Changed 5 [files, dirs]\nChanged 6 [dirs]\n");
     let after = f.h.snapshot(&key);
-    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(after.generation, before.generation + 2);
+    check_dirs(&after);
     let new = active_files(&after);
     assert!(!Arc::ptr_eq(&old, &new));
     assert!(old.iter().eq(new.iter()), "the same paths and kinds");
@@ -362,7 +394,7 @@ fn refresh_manifest_with_the_same_oid_is_not_parsed_again() {
         br#"{ "name": "web-app" }"#,
     );
     f.emit(&root, &[("apps/web/package.json", CHANGED)]);
-    insta::assert_snapshot!(f.events(), @"Changed 4 [packages]");
+    insta::assert_snapshot!(f.events(), @"Changed 5 [packages]");
     assert_eq!(f.h.git.reads(), vec!["apps/web/package.json".to_owned()]);
     assert_eq!(f.parses(), parses + 1);
     assert_eq!(&*f.package(&key, "apps/web").name, "web-app");
@@ -375,7 +407,7 @@ fn refresh_manifest_with_the_same_oid_is_not_parsed_again() {
         &root,
         &[("apps/console", Flags(Flags::DIR.0 | Flags::RENAMED.0))],
     );
-    insta::assert_snapshot!(f.events(), @"Changed 5 [packages]");
+    insta::assert_snapshot!(f.events(), @"Changed 6 [packages]");
     assert_eq!(
         f.h.git.reads(),
         vec!["apps/console/package.json".to_owned()]
@@ -399,9 +431,10 @@ fn refresh_removing_the_active_worktree_switches_to_main() {
     f.h.git.remove_worktree(&linked);
     f.emit(&common, &[("worktrees/feature", REMOVED_DIR)]);
     insta::assert_snapshot!(f.events(), @r"
-    Changed 4 [worktrees, active, files, packages]
-    Changed 5 [files]
-    Changed 6 [packages]
+    Changed 5 [worktrees, active, files, packages, dirs]
+    Changed 6 [files]
+    Changed 7 [packages]
+    Changed 8 [dirs]
     ");
     let snapshot = f.h.snapshot(&key);
     let active = snapshot.active.as_ref().unwrap();
@@ -427,9 +460,10 @@ fn refresh_deleted_active_root_becomes_prunable_and_switches() {
         &[("", Flags(Flags::DIR.0 | Flags::ROOT_CHANGED.0))],
     );
     insta::assert_snapshot!(f.events(), @r"
-    Changed 4 [worktrees, active, files, packages]
-    Changed 5 [files]
-    Changed 6 [packages]
+    Changed 5 [worktrees, active, files, packages, dirs]
+    Changed 6 [files]
+    Changed 7 [packages]
+    Changed 8 [dirs]
     ");
     insta::assert_snapshot!(f.h.render(&key));
 }
@@ -446,7 +480,7 @@ fn refresh_head_of_another_worktree_updates_only_the_list() {
         Head::Detached("0123456789abcdef0123456789abcdef01234567".into()),
     );
     f.emit(&common, &[("worktrees/feature/HEAD", CHANGED)]);
-    insta::assert_snapshot!(f.events(), @"Changed 4 [worktrees]");
+    insta::assert_snapshot!(f.events(), @"Changed 5 [worktrees]");
     assert_eq!(f.h.git.calls(), vec![Call::Worktrees(common.clone())]);
     let after = f.h.snapshot(&key);
     assert_eq!(after.active, before.active);
@@ -464,7 +498,7 @@ fn refresh_first_commit_on_an_unborn_branch_updates_the_head() {
     f.h.git
         .set_head(&common, Head::Branch("refs/heads/main".into()));
     f.emit(&common, &[("refs/heads/main", CHANGED)]);
-    insta::assert_snapshot!(f.events(), @"Changed 4 [worktrees]");
+    insta::assert_snapshot!(f.events(), @"Changed 5 [worktrees]");
     assert!(matches!(
         f.h.snapshot(&key).worktrees[0].head,
         Head::Branch(_)
@@ -511,8 +545,9 @@ fn refresh_generations_strictly_increase() {
     assert_eq!(f.h.snapshot(&key).generation, last);
     assert_eq!(
         last,
-        3 + 3 * 2 + 3,
-        "one per index and HEAD change, three to switch"
+        4 + 3 * 3 + 4,
+        "one per HEAD change, two per index change (the list, then its \
+         directory table), four to switch"
     );
 }
 

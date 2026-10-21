@@ -59,88 +59,134 @@ struct Dir {
 }
 
 impl DirTable {
-    /// Builds the table: one pass over the sorted list for the directories,
-    /// then each directory's children sorted. Pure computation; for a large
-    /// list run it on the executor.
+    /// Builds the table: one pass over the sorted list for the directories
+    /// and the runs of files in each, the children grouped by counting, then
+    /// each directory's children sorted. No hashing and no per-directory
+    /// allocation. Pure computation; for a large list run it on the
+    /// executor.
     pub fn new(list: Arc<FileList>) -> DirTable {
-        // Every directory with a file, and all their ancestors. Files of one
-        // directory are contiguous, so each run adds its chain once.
+        // Every directory with a file, and all their ancestors. Consecutive
+        // files of one directory form a run (a directory can have several
+        // runs: `a/B.rs`, `a/b/x`, `a/c.rs`), and each run adds only the
+        // ancestors it does not share with the run before it; the list is
+        // sorted, so a directory is added again only when a sibling sorts
+        // between it and its subdirectories (`a`, `a-b`, `a/c`).
         let mut paths: Vec<&str> = vec![""];
-        let mut last: Option<&str> = None;
-        for (path, _) in list.iter() {
-            let dir = parent_of(path);
-            if last == Some(dir) {
+        // (directory, index of its first file) of each run.
+        let mut runs: Vec<(&str, u32)> = Vec::new();
+        let mut prev: Option<&str> = None;
+        // Each file's name, for the sorting below.
+        let mut file_names: Vec<&str> = Vec::with_capacity(list.len());
+        for (i, (path, _)) in list.iter().enumerate() {
+            let (dir, name) = split_path(path);
+            file_names.push(name);
+            if prev == Some(dir) {
                 continue;
             }
-            last = Some(dir);
+            runs.push((dir, to_u32(i)));
+            let shared = prev.map_or("", |p| common_dir(p, dir));
+            let start = paths.len();
             let mut d = dir;
-            while !d.is_empty() {
+            while d.len() > shared.len() {
                 paths.push(d);
                 d = parent_of(d);
             }
+            paths[start..].reverse();
+            prev = Some(dir);
         }
-        paths.sort_unstable();
+        if !paths.is_sorted() {
+            paths.sort_unstable();
+        }
         paths.dedup();
+        let n = paths.len();
+        let index = |p: &str| paths.binary_search(&p).map_or(0, to_u32);
 
-        let index = |p: &str| paths.binary_search(&p).ok();
-        let parents: Vec<u32> = paths
-            .iter()
-            .map(|p| {
-                if p.is_empty() {
-                    u32::MAX
-                } else {
-                    index(parent_of(p)).map_or(0, to_u32)
-                }
-            })
-            .collect();
-
-        // Direct subdirectories and files, grouped by directory.
-        let mut children: Vec<Vec<DirId>> = vec![Vec::new(); paths.len()];
-        for (i, &parent) in parents.iter().enumerate().skip(1) {
-            children[parent as usize].push(DirId(to_u32(i)));
-        }
-        let mut direct: Vec<Vec<u32>> = vec![Vec::new(); paths.len()];
-        let mut cached: Option<(&str, usize)> = None;
-        for (i, (path, _)) in list.iter().enumerate() {
-            let dir = parent_of(path);
-            let d = match cached {
-                Some((p, d)) if p == dir => d,
-                _ => {
-                    let d = index(dir).unwrap_or(0);
-                    cached = Some((dir, d));
-                    d
+        // Parents: a parent sorts before its children, so it is usually on
+        // the stack of the previous directory's ancestors.
+        let mut parents: Vec<u32> = Vec::with_capacity(n);
+        parents.push(u32::MAX);
+        let mut stack: Vec<u32> = vec![0];
+        for (i, p) in paths.iter().enumerate().skip(1) {
+            let want = parent_of(p);
+            while let Some(&top) = stack.last()
+                && paths[top as usize] != want
+            {
+                stack.pop();
+            }
+            let parent = match stack.last() {
+                Some(&top) => top,
+                None => {
+                    let found = index(want);
+                    stack.push(found);
+                    found
                 }
             };
-            direct[d].push(to_u32(i));
+            parents.push(parent);
+            stack.push(to_u32(i));
         }
 
+        // Direct subdirectories and files, grouped by counting: `sub_ends`
+        // and `file_ends` count each directory's children, then hold the
+        // end of its slice (the table's `Dir` ends).
+        let run_dirs: Vec<u32> = runs.iter().map(|&(dir, _)| index(dir)).collect();
+        let run_end = |r: usize| runs.get(r + 1).map_or(to_u32(list.len()), |&(_, s)| s);
+        let mut sub_ends = vec![0u32; n];
+        for &parent in &parents[1..] {
+            sub_ends[parent as usize] += 1;
+        }
+        let mut file_ends = vec![0u32; n];
+        for (r, &d) in run_dirs.iter().enumerate() {
+            file_ends[d as usize] += run_end(r) - runs[r].1;
+        }
         // Subtree counts: children come after their parent.
-        let mut counts: Vec<u32> = direct.iter().map(|f| to_u32(f.len())).collect();
-        for i in (1..paths.len()).rev() {
+        let mut counts = file_ends.clone();
+        for i in (1..n).rev() {
             let parent = parents[i] as usize;
             counts[parent] = counts[parent].saturating_add(counts[i]);
         }
+        let sub_starts = prefix_sums(&mut sub_ends);
+        let file_starts = prefix_sums(&mut file_ends);
+        let mut subdirs = vec![DirId(0); n - 1];
+        let mut next = sub_starts.clone();
+        for (i, &parent) in parents.iter().enumerate().skip(1) {
+            let at = &mut next[parent as usize];
+            subdirs[*at as usize] = DirId(to_u32(i));
+            *at += 1;
+        }
+        let mut files = vec![0u32; list.len()];
+        let mut next = file_starts.clone();
+        for (r, &d) in run_dirs.iter().enumerate() {
+            for f in runs[r].1..run_end(r) {
+                let at = &mut next[d as usize];
+                files[*at as usize] = f;
+                *at += 1;
+            }
+        }
+        drop(next);
 
-        let file_name = |i: u32| list.get(i as usize).map_or("", |(p, _)| name_of(p));
-        let mut names = String::new();
-        let mut subdirs = Vec::with_capacity(paths.len().saturating_sub(1));
-        let mut files = Vec::with_capacity(list.len());
-        let mut dirs = Vec::with_capacity(paths.len());
+        // Finder order within each directory; byte order (the list's) often
+        // is already.
+        let file_name = |i: u32| file_names[i as usize];
+        let in_order = |a: &u32, b: &u32| finder_cmp(file_name(*a), file_name(*b)).is_lt();
+        let mut names = String::with_capacity(paths.iter().map(|p| p.len()).sum());
+        let mut dirs = Vec::with_capacity(n);
         for (i, path) in paths.iter().enumerate() {
-            let mut sub = std::mem::take(&mut children[i]);
-            sub.sort_by(|a, b| {
-                finder_cmp(name_of(paths[a.0 as usize]), name_of(paths[b.0 as usize]))
-            });
-            subdirs.extend(sub);
-            let mut own = std::mem::take(&mut direct[i]);
-            own.sort_by(|&a, &b| finder_cmp(file_name(a), file_name(b)));
-            files.extend(own);
+            let sub = &mut subdirs[sub_starts[i] as usize..sub_ends[i] as usize];
+            if sub.len() > 1 {
+                sub.sort_unstable_by(|a, b| {
+                    finder_cmp(name_of(paths[a.0 as usize]), name_of(paths[b.0 as usize]))
+                });
+            }
+            let own = &mut files[file_starts[i] as usize..file_ends[i] as usize];
+            if own.len() > 1 && !own.is_sorted_by(in_order) {
+                own.sort_unstable_by(|&a, &b| finder_cmp(file_name(a), file_name(b)));
+            }
             names.push_str(path);
             dirs.push(Dir {
                 path_end: to_u32(names.len()),
                 parent: parents[i],
-                subdirs_end: to_u32(subdirs.len()),
-                files_end: to_u32(files.len()),
+                subdirs_end: sub_ends[i],
+                files_end: file_ends[i],
                 file_count: counts[i],
             });
         }
@@ -251,6 +297,38 @@ fn name_of(path: &str) -> &str {
     path.rfind('/').map_or(path, |i| &path[i + 1..])
 }
 
+/// `(parent_of(path), name_of(path))` with one search.
+fn split_path(path: &str) -> (&str, &str) {
+    path.rfind('/')
+        .map_or(("", path), |i| (&path[..i], &path[i + 1..]))
+}
+
+/// The deepest directory that is `a` or above it and also `b` or above it
+/// (whole segments; "" when they share none).
+fn common_dir<'a>(a: &'a str, b: &str) -> &'a str {
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    let n = x.iter().zip(y).take_while(|(p, q)| p == q).count();
+    let boundary = |s: &[u8]| n == s.len() || s[n] == b'/';
+    if boundary(x) && boundary(y) {
+        return &a[..n];
+    }
+    // `n` may fall inside a character; a `/` byte never does.
+    let cut = x[..n].iter().rposition(|&c| c == b'/').unwrap_or(0);
+    &a[..cut]
+}
+
+/// Turns counts into running ends in place; returns the starts.
+fn prefix_sums(counts: &mut [u32]) -> Vec<u32> {
+    let mut starts = Vec::with_capacity(counts.len());
+    let mut sum = 0u32;
+    for c in counts.iter_mut() {
+        starts.push(sum);
+        sum = sum.saturating_add(*c);
+        *c = sum;
+    }
+    starts
+}
+
 /// Counts and offsets fit in `u32`: `FileList` keeps its path buffer under
 /// `u32::MAX` bytes, and there are fewer directories than path bytes.
 fn to_u32(n: usize) -> u32 {
@@ -269,6 +347,21 @@ fn folded_cmp(a: &str, b: &str) -> Ordering {
     let (ab, bb) = (a.as_bytes(), b.as_bytes());
     let (mut i, mut j) = (0, 0);
     loop {
+        // Two ASCII bytes: the same result as the characters' path below,
+        // without decoding.
+        if let (Some(&x), Some(&y)) = (ab.get(i), bb.get(j))
+            && x.is_ascii()
+            && y.is_ascii()
+            && !(x.is_ascii_digit() && y.is_ascii_digit())
+        {
+            let ord = x.to_ascii_lowercase().cmp(&y.to_ascii_lowercase());
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            i += 1;
+            j += 1;
+            continue;
+        }
         let (Some(c), Some(d)) = (a[i..].chars().next(), b[j..].chars().next()) else {
             return (i < a.len()).cmp(&(j < b.len()));
         };
@@ -391,8 +484,43 @@ mod tests {
             "docs/README.md",
             "z",
         ];
-        let t = files(&paths);
+        let t = assert_matches_naive(&paths);
+        let root = t.root();
+        assert_eq!((t.path(root), t.name(root), t.parent(root)), ("", "", None));
+        assert_eq!(t.file_count(root), paths.len() as u32);
+        let c = t.find("a/b/c").unwrap();
+        assert_eq!(t.name(c), "c");
+        assert_eq!(t.parent(c), t.find("a/b"));
+        for missing in ["a/b/c/d.rs", "a/", "/a", "q", "a/b/c/"] {
+            assert_eq!(t.find(missing), None, "{missing}");
+        }
+    }
 
+    /// Siblings that sort between a directory and its subdirectories
+    /// (`a-b`, `a.c` between `a` and `a/…`), directories whose files are
+    /// not contiguous with their subdirectories', deep chains, non-ASCII
+    /// names.
+    #[test]
+    fn dirs_match_a_naive_construction_on_interleaved_trees() {
+        let mut paths = Vec::new();
+        for top in ["a", "a-b", "a.c", "a0", "b", "é", "É-x"] {
+            paths.push(format!("{top}/f"));
+            for mid in ["x", "x-y", "x/z", "Y", "10", "9"] {
+                paths.push(format!("{top}/{mid}/g"));
+                paths.push(format!("{top}/{mid}/deep/er/still/h"));
+            }
+        }
+        paths.push("top".to_owned());
+        paths.push("a-b-c/d/e".to_owned());
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        assert_matches_naive(&paths);
+    }
+
+    /// Builds the table of `paths` and checks it against a naive
+    /// construction: every ancestor of every path, with direct children by
+    /// name, in path byte order.
+    fn assert_matches_naive(paths: &[&str]) -> DirTable {
+        let t = files(paths);
         // Naive: every ancestor of every path, with direct children by name.
         let mut naive: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>, u32)> =
             BTreeMap::new();
@@ -424,16 +552,19 @@ mod tests {
             for &sub in t.subdirs(d) {
                 assert_eq!(t.parent(sub), Some(d));
             }
+            // Children in Finder order.
+            let names = |ids: &[DirId]| -> Vec<String> {
+                ids.iter().map(|&s| t.name(s).to_owned()).collect()
+            };
+            let mut sorted = names(t.subdirs(d));
+            sorted.sort_by(|a, b| finder_cmp(a, b));
+            assert_eq!(names(t.subdirs(d)), sorted, "{dir:?}");
+            let (_, own) = listing(&t, dir);
+            let mut sorted = own.clone();
+            sorted.sort_by(|a, b| finder_cmp(a, b));
+            assert_eq!(own, sorted, "{dir:?}");
         }
-        let root = t.root();
-        assert_eq!((t.path(root), t.name(root), t.parent(root)), ("", "", None));
-        assert_eq!(t.file_count(root), paths.len() as u32);
-        let c = t.find("a/b/c").unwrap();
-        assert_eq!(t.name(c), "c");
-        assert_eq!(t.parent(c), t.find("a/b"));
-        for missing in ["a/b/c/d.rs", "a/", "/a", "q", "a/b/c/"] {
-            assert_eq!(t.find(missing), None, "{missing}");
-        }
+        t
     }
 
     #[test]
@@ -498,6 +629,95 @@ mod tests {
         assert!(t.subdirs(root).is_empty() && t.dir_files(root).is_empty());
         assert_eq!((t.file_count(root), t.fold_end(root)), (0, root));
         assert!(t.files().is_empty());
+    }
+
+    /// The comparison with every character decoded and lowercased, as
+    /// before the ASCII shortcut.
+    fn finder_cmp_by_chars(a: &str, b: &str) -> Ordering {
+        let (ab, bb) = (a.as_bytes(), b.as_bytes());
+        let (mut i, mut j) = (0, 0);
+        let folded = loop {
+            let (Some(c), Some(d)) = (a[i..].chars().next(), b[j..].chars().next()) else {
+                break (i < a.len()).cmp(&(j < b.len()));
+            };
+            if c.is_ascii_digit() && d.is_ascii_digit() {
+                let x = digit_run(&ab[i..]);
+                let y = digit_run(&bb[j..]);
+                let (nx, ny) = (trim_zeros(x), trim_zeros(y));
+                let ord = nx.len().cmp(&ny.len()).then_with(|| nx.cmp(ny));
+                if ord != Ordering::Equal {
+                    break ord;
+                }
+                i += x.len();
+                j += y.len();
+            } else {
+                let ord = c.to_lowercase().cmp(d.to_lowercase());
+                if ord != Ordering::Equal {
+                    break ord;
+                }
+                i += c.len_utf8();
+                j += d.len_utf8();
+            }
+        };
+        folded.then_with(|| a.cmp(b))
+    }
+
+    #[test]
+    fn finder_cmp_ascii_shortcut_matches_the_character_comparison() {
+        let words = [
+            "",
+            "a",
+            "A",
+            "b",
+            "Z",
+            "_",
+            "-",
+            ".",
+            "a1",
+            "a01",
+            "a10",
+            "A9",
+            "x9y",
+            "x09Y",
+            "é",
+            "É",
+            "éa",
+            "Ea",
+            "aé",
+            "aÉ",
+            "ß",
+            "SS",
+            "İ",
+            "i̇",
+            "Ω",
+            "ω1",
+            "1ω",
+            "file2.rs",
+            "File10.rs",
+            "日本",
+            "a日",
+            "a-b",
+            "a.c",
+            "a/b",
+            "ǅ",
+            "ǆ",
+            "\u{7f}",
+            "~",
+        ];
+        for a in words {
+            for b in words {
+                for (x, y) in [
+                    (a.to_owned(), b.to_owned()),
+                    (format!("{a}{b}"), format!("{b}{a}")),
+                ] {
+                    assert_eq!(
+                        finder_cmp(&x, &y),
+                        finder_cmp_by_chars(&x, &y),
+                        "{x:?} vs {y:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

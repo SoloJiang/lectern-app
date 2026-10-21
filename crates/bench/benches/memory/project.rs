@@ -13,13 +13,17 @@
 //! parsed index (`TrackedPaths`) it shares with the handle `project` keeps
 //! (git's share, `git/filter_*_bytes`, ADR 0035), cancel out. What
 //! remains is `project`'s own: the file list with
-//! its blob OIDs, the sub-projects and their caches, the facts the kernel
-//! keeps, the parse cache; also a consumer plugin holding the service, a
-//! few hundred bytes, counted against `project`.
+//! its blob OIDs, its directory table, the sub-projects and their caches,
+//! the facts the kernel keeps, the parse cache; also a consumer plugin
+//! holding the service, a few hundred bytes, counted against `project`.
 //!
 //! The executor and the watcher are the app's, created before the count.
 //! The first sample is a warm-up (process-wide lazy state of gix and the
 //! kernel) and is not reported.
+//!
+//! `project/dirs_100k_bytes` (file_reader design「性能」): the live bytes
+//! of the directory table alone, built from the large shape's file list,
+//! which it shares and which is not counted.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -38,8 +42,8 @@ use lectern_kernel::{
     service,
 };
 use lectern_project::testing::Shape;
-use lectern_project::{ProjectDeps, ProjectPlugin};
-use lectern_services::project::{PackageMatch, Projects};
+use lectern_project::{FileKind, FileList, ProjectDeps, ProjectPlugin};
+use lectern_services::project::{DirTable, PackageMatch, Projects};
 
 use crate::project_repo::{self, ProjectRepo};
 
@@ -77,6 +81,38 @@ fn resident_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let samples = resident(ctx, &repo)?;
     Ok(vec![Measured::new(
         "project/resident_100k_bytes",
+        Value::Bytes(samples),
+    )])
+}
+
+pub const DIRS_100K_BYTES: Bench = Bench {
+    id: "project/dirs_100k_bytes",
+    run: dirs_100k_bytes,
+};
+
+fn dirs_100k_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let (files, manifests) = ctx.scale((100_000, 2_000), (2_000, 40));
+    let shape = Shape::monorepo(files, manifests);
+    let mut list = FileList::builder();
+    for path in &shape.paths {
+        list.push(path, FileKind::File);
+    }
+    let list = Arc::new(list.build());
+    let mut samples = Vec::new();
+    for round in 0..=ctx.scale(SAMPLES, 1) {
+        let before = CountingAlloc::live();
+        let table = DirTable::new(list.clone());
+        let held = CountingAlloc::live().saturating_sub(before) as u64;
+        if table.file_count(table.root()) as usize != files {
+            return Err(BenchError::new("the table does not cover the list"));
+        }
+        drop(table);
+        if round > 0 {
+            samples.push(held);
+        }
+    }
+    Ok(vec![Measured::new(
+        "project/dirs_100k_bytes",
         Value::Bytes(samples),
     )])
 }
@@ -309,9 +345,11 @@ fn check_ready(
         .active
         .as_ref()
         .ok_or_else(|| BenchError::new("no active tree"))?;
-    match (&active.files, &active.packages) {
-        (Scan::Ready(f), Scan::Ready(p))
-            if f.len() == repo.shape.paths.len() && p.len() == repo.shape.packages =>
+    match (&active.files, &active.packages, &active.dirs) {
+        (Scan::Ready(f), Scan::Ready(p), Scan::Ready(d))
+            if f.len() == repo.shape.paths.len()
+                && p.len() == repo.shape.packages
+                && Arc::ptr_eq(f, d.files()) =>
         {
             Ok(())
         }

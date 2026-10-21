@@ -203,10 +203,12 @@ fn plugin_events_are_opened_then_changed() {
     Opened Ok(Git { common_dir: "[base]/repo/.git" })
     Changed 2 [files]
     Changed 3 [packages]
+    Changed 4 [dirs]
     "#);
     let key = s.projects().get().unwrap().open_projects().pop().unwrap();
     let snapshot = s.projects().get().unwrap().snapshot(&key).unwrap();
-    assert_eq!(snapshot.generation, 3);
+    assert_eq!(snapshot.generation, 4);
+    check_dirs(&snapshot);
 }
 
 #[test]
@@ -249,11 +251,15 @@ fn plugin_refresh_keeps_the_kernel_busy_until_applied() {
     s.watch.driver.advance(LONG);
     s.kernel.barrier();
     assert!(!s.kernel.is_quiescent(), "the batch's refresh is queued");
+    // The refresh, then the directory table's build it queued.
     s.executor.run_until_idle();
     s.kernel.barrier();
     wait_quiescent(&s.kernel);
     let events = s.events.lock().unwrap().clone();
-    insta::assert_snapshot!(render_events(&events, s.git.base()), @"Changed 4 [files, packages]");
+    insta::assert_snapshot!(render_events(&events, s.git.base()), @r"
+    Changed 5 [files, packages, dirs]
+    Changed 6 [dirs]
+    ");
 }
 
 fn wait_quiescent(kernel: &Kernel) {

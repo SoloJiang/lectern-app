@@ -91,6 +91,20 @@ impl Driven {
         }
     }
 
+    /// Runs the oldest queued job only, on this thread; false when none was
+    /// queued. A scan or refresh round is one job; the directory table's
+    /// build it queues is the next.
+    pub fn step(&self) -> bool {
+        let job = lock(&self.host.jobs).pop_front();
+        match job {
+            Some(job) => {
+                job();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// What the model emitted and submitted since the last call, in order,
     /// with the time it did.
     pub fn take_log(&self) -> Vec<(Instant, Logged)> {

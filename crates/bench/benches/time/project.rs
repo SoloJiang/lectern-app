@@ -100,8 +100,10 @@ fn snapshot(model: &Driven, key: &ProjectKey) -> Result<Arc<ProjectSnapshot>, Be
         .ok_or_else(|| BenchError::new("no snapshot"))
 }
 
-/// The active tree has `files` files and `packages` sub-projects.
+/// The active tree has `files` files and `packages` sub-projects, and the
+/// directory table of that file list.
 fn check_ready(snapshot: &ProjectSnapshot, files: usize, packages: usize) -> Result<(), String> {
+    check_dirs(snapshot, files)?;
     let active = snapshot.active.as_ref().ok_or("no active tree")?;
     let got = (
         match &active.files {
@@ -119,6 +121,22 @@ fn check_ready(snapshot: &ProjectSnapshot, files: usize, packages: usize) -> Res
         Err(format!(
             "expected {files} files and {packages} sub-projects, got {got:?}"
         ))
+    }
+}
+
+/// The active tree's directory table is ready, built from its file list of
+/// `files` files.
+fn check_dirs(snapshot: &ProjectSnapshot, files: usize) -> Result<(), String> {
+    let active = snapshot.active.as_ref().ok_or("no active tree")?;
+    match (&active.files, &active.dirs) {
+        (Scan::Ready(list), Scan::Ready(table))
+            if Arc::ptr_eq(list, table.files())
+                && table.file_count(table.root()) as usize == files =>
+        {
+            Ok(())
+        }
+        (_, Scan::Ready(_)) => Err("the directory table is from another file list".into()),
+        (_, dirs) => Err(format!("the directory table is {dirs:?}")),
     }
 }
 
@@ -244,8 +262,9 @@ fn open_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 /// `set_active_worktree` to the next of the 11 worktrees until its file
 /// list and sub-projects are published (the `Pending` generation, a new
 /// worktree handle and its index, the facts, the 25 manifests read with
-/// the parse cache warm). The watch handover and the new watch's first
-/// batch run in fs_watch and in the setup, outside the clock.
+/// the parse cache warm). The watch handover, the new watch's first batch
+/// and the directory table's build (`project/dirs_100k` times that) run in
+/// fs_watch and in the setup, outside the clock.
 pub const SWITCH_WORKTREE: Bench = Bench {
     id: "project/switch_worktree",
     run: switch_worktree,
@@ -279,10 +298,12 @@ fn switch_worktree(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         },
         |target| {
             model.projects().set_active_worktree(&key, &target);
-            model.run();
+            // The switch's scan: the one job the request queued.
+            model.step();
             target
         },
     );
+    watch.settle(&model);
     // The last switch, checked; the others went the same way.
     let s = snapshot(&model, &key)?;
     let target = &worktrees[*next.borrow()];
@@ -450,9 +471,13 @@ fn refresh_rounds(ctx: &mut Ctx, repo: &ProjectRepo) -> Result<Samples, BenchErr
     let start = snapshot(&model, &key)?.generation;
     let generation = RefCell::new(start);
     let rounds = RefCell::new(0u64);
-    // Each round replaced the file list once and kept the sub-projects; the
-    // log goes before the next round (its facts hold a file list).
+    // Each round is two generations: the round replaced the file list once
+    // and kept the sub-projects (the directory table pending), then the
+    // table's build it queued published the new table alone. The build
+    // runs here, outside the clock, and the log goes before the next round
+    // (its facts hold a file list).
     let drain = || {
+        model.run();
         for (_, logged) in model.take_log() {
             let Logged::Event(ProjectEvent::Changed {
                 generation: g,
@@ -463,7 +488,12 @@ fn refresh_rounds(ctx: &mut Ctx, repo: &ProjectRepo) -> Result<Samples, BenchErr
                 continue;
             };
             let mut last = generation.borrow_mut();
-            if !parts.files || parts.packages || parts.worktrees || g != *last + 1 {
+            let expected = if (g - start) % 2 == 1 {
+                parts.files && parts.dirs && !parts.packages && !parts.worktrees
+            } else {
+                parts.dirs && !parts.files && !parts.packages && !parts.worktrees && !parts.active
+            };
+            if !expected || g != *last + 1 {
                 *failure.borrow_mut() = Some(format!("generation {g} after {last}: {parts:?}"));
             }
             *last = g;
@@ -480,11 +510,12 @@ fn refresh_rounds(ctx: &mut Ctx, repo: &ProjectRepo) -> Result<Samples, BenchErr
             watch.driver.advance(LONG);
             *rounds.borrow_mut() += 1;
         },
-        |()| model.run(),
+        // The refresh round only: the one job the batch queued.
+        |()| model.step(),
     );
     drain();
     let s = snapshot(&model, &key)?;
-    if s.generation != *generation.borrow() || s.generation != start + *rounds.borrow() {
+    if s.generation != *generation.borrow() || s.generation != start + 2 * *rounds.borrow() {
         *failure.borrow_mut() = Some(format!(
             "{} rounds made generation {}",
             rounds.borrow(),
@@ -496,6 +527,78 @@ fn refresh_rounds(ctx: &mut Ctx, repo: &ProjectRepo) -> Result<Samples, BenchErr
         return Err(BenchError::new(message));
     }
     Ok(time)
+}
+
+/// The directory table of the large monorepo's file list (file_reader
+/// design「性能」): the background job the model queues once a new list is
+/// published, which builds the table (`DirTable::new`) and publishes it as
+/// its own generation. Each sample switches to the other of the two
+/// worktrees and runs that scan in the setup (no watcher), then times the
+/// table's job it queued.
+pub const DIRS_100K: Bench = Bench {
+    id: "project/dirs_100k",
+    run: dirs_100k,
+};
+
+fn dirs_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let repo = large(ctx)?;
+    let model = Driven::new(repo.t.base().join("home"), None);
+    let key = open(&model, repo.root())?;
+    let worktrees: Vec<WorktreeKey> = snapshot(&model, &key)?
+        .worktrees
+        .iter()
+        .map(|w| w.key.clone())
+        .collect();
+    let files = repo.shape.paths.len();
+    let next = RefCell::new(0usize);
+    let failure: RefCell<Option<String>> = RefCell::new(None);
+    // The last sample's table was published, and alone in its generation.
+    let check = || {
+        let checked = model
+            .projects()
+            .snapshot(&key)
+            .ok_or_else(|| "no snapshot".to_owned())
+            .and_then(|s| check_dirs(&s, files));
+        let last = model
+            .take_log()
+            .into_iter()
+            .rev()
+            .find_map(|(_, l)| match l {
+                Logged::Event(ProjectEvent::Changed { parts, .. }) => Some(parts),
+                _ => None,
+            });
+        let alone =
+            last.is_none_or(|p| p.dirs && !p.files && !p.packages && !p.active && !p.worktrees);
+        match checked {
+            Err(e) => *failure.borrow_mut() = Some(e),
+            Ok(()) if !alone => {
+                *failure.borrow_mut() = Some(format!("the table's generation changed {last:?}"));
+            }
+            Ok(()) => {}
+        }
+    };
+    let time = ctx.time_with_setup(
+        || {
+            check();
+            let mut n = next.borrow_mut();
+            *n = (*n + 1) % worktrees.len();
+            model.projects().set_active_worktree(&key, &worktrees[*n]);
+            // The switch's scan; the table's build stays queued.
+            if !model.step() {
+                *failure.borrow_mut() = Some("the switch queued no scan".into());
+            }
+            model.take_log();
+        },
+        |()| model.step(),
+    );
+    check();
+    if model.run() != 0 {
+        *failure.borrow_mut() = Some("more than one job per table".into());
+    }
+    if let Some(message) = failure.take() {
+        return Err(BenchError::new(message));
+    }
+    Ok(vec![Measured::new("project/dirs_100k", Value::Time(time))])
 }
 
 /// `WorkspaceFacts::contains` on facts built from the large monorepo's

@@ -273,6 +273,7 @@ const BENCHES: &[Bench] = &[
     GIT_RESIDENT,
     project::RESIDENT_CLOUDPRINT,
     project::RESIDENT_100K,
+    project::DIRS_100K_BYTES,
 ];
 
 fn main() -> ExitCode {

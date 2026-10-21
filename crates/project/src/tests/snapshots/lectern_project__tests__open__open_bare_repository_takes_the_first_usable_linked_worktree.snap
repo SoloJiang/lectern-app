@@ -1,6 +1,5 @@
 ---
 source: crates/project/src/tests/open.rs
-assertion_line: 113
 expression: h.render(&key)
 ---
 key: Git { common_dir: "[base]/repo.git" }
@@ -13,3 +12,4 @@ files: 1 (skipped 0, truncated false)
   Cargo.toml File
 packages:
   "" name=b declared=false workspace_root=false parent=None files=1 manifests=[Cargo.toml]
+dirs: 1

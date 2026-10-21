@@ -1,6 +1,5 @@
 ---
 source: crates/project/src/tests/worktrees.rs
-assertion_line: 26
 expression: h.render(&key)
 ---
 key: Git { common_dir: "[base]/repo/.git" }
@@ -15,3 +14,4 @@ active: [base]/repo worktree=Some("[base]/repo/.git") opened_at=""
 files: 1 (skipped 0, truncated false)
   README.md File
 packages:
+dirs: 1
