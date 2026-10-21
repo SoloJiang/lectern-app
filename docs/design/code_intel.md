@@ -25,7 +25,7 @@
   - 语法高亮、高亮与文本的 LRU、后退前进（`file_reader`、[#10](https://github.com/SoloJiang/lectern-app/issues/10)）。高亮方与本 crate 依赖同一批 grammar crate，链接进二进制的只有一份；高亮的计算按 ADR 0034 放在领域层的库里（由 `file_reader` 的设计决定）。ADR 0033 的两类只存内存的批量工作（空闲预取的高亮、大文件的整文件高亮）和行检查点（`syntax.lines`）都属于它，不在本 crate。
   - 文件列表与子项目（`project`）、工作区比较（`git`）、监听（`fs_watch`）、安全读取（`platform`）、SQLite 的连接与淘汰（`cache`）。本 crate 只调用它们的接口，需要它们新增的部分列在「对其他 crate 的要求」。
   - 语言包的下载、校验和加载（`marketplace` 与 kernel 的 grammar 加载器，ADR 0018）：本 crate 只定义接收已加载 grammar 的接口 `GrammarSource`。
-  - Java 的 `-sources.jar`（#26，读它要 zip 解码器，归属按 ADR 0007 决定）与文件内容的全文搜索。npm 等生态的依赖声明（按需解析与依赖层）按 [ADR 0033](../adr/0033.md) 在本 crate 里（「依赖层」）；Cargo、Go、Python 的依赖根在它们的解析扩展点实现时接入，在那之前依赖层只为 TS / JS 运行。
+  - Java 的 `-sources.jar`（#26，读它要 zip 解码器，归属按 ADR 0007 决定）与文件内容的全文搜索。TS / JS 的依赖声明（按需解析与依赖层）按 [ADR 0033](../adr/0033.md) 在本 crate 里（「依赖层」），这一阶段只支持 pnpm 管理的依赖（[ADR 0040](../adr/0040.md)），npm、yarn 的布局不做；Cargo、Go、Python 的依赖根在它们的解析扩展点实现时接入，在那之前依赖层只为 TS / JS 运行。
 - 本 issue 之外：
   - 文件夹项目的增量更新：`project` 在 P1 不监听文件夹项目（[project 设计「范围」](project.md#范围)），本 crate 同样只在打开时建索引；`project` 加入文件夹监听后，本 crate 改为消费同一来源的事件。
   - `review` 的工作区比较结果如果以后经 `services` 共享，本 crate 改用它，不再自己做一次比较（见「打开项目与热启动」）。
@@ -78,7 +78,20 @@
 - `kernel`：`PluginHandle::background()` 与 `BackgroundGuard`、批次边界的暂停检查，以及不阻塞、任何线程可调用的 `BackgroundGuard::pause_requested()`（看门狗用它在批次中途打断在途抽取）（[kernel 设计「静止」](kernel.md#静止)，ADR 0029 规定由单独的 PR 先于本 crate 实现）。交互让路（ADR 0033）用 kernel 已有的 `PluginHandle::background_yielding()`、`BackgroundGuard::proceed_item`、`yield_requested`、`Grant` 和 `Kernel::set_yield`（[#123](https://github.com/SoloJiang/lectern-app/pull/123)，kernel 设计「后台工作」），不需要新接口（见「交互让路」）。
 - `executor`：批量线程组与 `Priority::Batch`（[executor 设计](executor.md)，同上）；另加 `Executor::on_shutdown(f: Box<dyn FnOnce() + Send>) -> ShutdownHook`：`shutdown` 开始时在调用线程上依次调用已登记的回调（在 `contain` 里），`ShutdownHook` drop 时注销。专用线程上的闭包靠它得知 executor 正在关闭（本 crate 的看门狗，见「调度、批次与取消」）。
 - `platform`：不需要电源接口（ADR 0032 取消了 ADR 0029「影响」里的这一项）。依赖根用已有的 `SafeRoot::open_dir`（ADR 0033），大文件用已有的 `SafeRoot::open_file`、`OpenFile::read_ranges`、`read_all`、`identity`（[#126](https://github.com/SoloJiang/lectern-app/pull/126)，[platform 设计「范围读取」](platform.md#范围读取)），不需要新接口。
-- `git`：`Worktree::canonical_oid(path, bytes) -> Result<Option<Oid>, GitError>`：对一份工作区字节按这个路径的属性和配置做 to-git 方向的内置转换（`text`、`eol`、`ident`、`working-tree-encoding`），返回规范内容的 OID；有外部过滤器时返回 None。工作区比较第 3 步已经在做同样的转换，只是没有单独公开。其余用到的接口（`changes`、`tracked`、`blob`、`head`、`index_checksum`）已经存在。批量的 `Worktree::canonical_oids`（[#135](https://github.com/SoloJiang/lectern-app/pull/135)，整批至多解析一次 index）和 hunk、展示行的字节偏移（[#122](https://github.com/SoloJiang/lectern-app/pull/122)）也已存在，本 crate 按「规范内容 OID 的批量核对」和「大文件」使用。
+- `git`：`Worktree::canonical_oid(path, bytes) -> Result<Option<Oid>, GitError>`：对一份工作区字节按这个路径的属性和配置做 to-git 方向的内置转换（`text`、`eol`、`ident`、`working-tree-encoding`），返回规范内容的 OID；有外部过滤器时返回 None。工作区比较第 3 步已经在做同样的转换，只是没有单独公开。其余用到的接口（`changes`、`tracked`、`blob`、`head`、`index_checksum`）已经存在。批量的 `Worktree::canonical_oids`（[#135](https://github.com/SoloJiang/lectern-app/pull/135)，整批至多解析一次 index）和 hunk、展示行的字节偏移（[#122](https://github.com/SoloJiang/lectern-app/pull/122)）也已存在，本 crate 按「规范内容 OID 的批量核对」和「大文件」使用。新增一个流式的 blob 哈希（「大文件」：按 1 MiB 的区间求大文件的 OID，不把整个文件读进内存）：
+
+  ```rust
+  /// 按 git blob 格式（`blob <len>\0` 加内容）求 OID，内容分段给出；与 `Oid::for_blob` 的结果相同（sha1dc / SHA-256）。
+  /// 不做 IO、不阻塞，任何线程可调用。`len` 是内容的总长度；`update` 给出的字节合计不等于 `len` 时 `finish` 返回 None。
+  pub struct BlobHasher { /* … */ }
+  impl BlobHasher {
+      pub fn new(kind: HashKind, len: u64) -> BlobHasher;
+      pub fn update(&mut self, bytes: &[u8]);
+      pub fn finish(self) -> Option<Oid>;
+  }
+  ```
+
+  由 `git` 的一个 PR 加入（`Refs #17`，「验收」第 8 步的前置条件），测试按区间切分方式不同的输入与 `Oid::for_blob` 对照。
 - `fs_watch`：不需要新接口。
 - kernel 的 grammar 加载器（ADR 0018、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、#42）：`tree_sitter::Language` 和由它得到的 `Parser`、`Query`、`TagsConfiguration`、`Tree` 都持有动态库里的函数指针。加载器给出的每个 `LoadedGrammar` 带一个租约（`GrammarLease`，加载的模块句柄的 `Arc`）；更新、回滚、撤销时加载器只停止交出这个版本，模块的卸载（`dlclose`）推迟到它的最后一个租约 drop 之后。撤销要求的「立即停用」由不再交出新的 `LoadedGrammar`、使用方取消在途工作来满足。
 - 高亮方（`file_reader`）：依赖同一批 grammar crate、同一个 tree-sitter 版本。[#42](https://github.com/SoloJiang/lectern-app/issues/42) 指出 external scanner 不能被进度回调打断，它对 scanner 的处理（如对某个 grammar 停用）同样作用于本 crate。打开候选的一方按 `Location` 读内容：`TextOrigin::Dependency` 的位置经它的 `DepRoot` 读（`Worktree` 的根从工作区根的 `SafeRoot` 经 `open_dir` 打开，路径的各级都不是符号链接；`Cache` 的根按 ADR 0033 只取 Lectern 自己进程的环境），`byte` 有值时按它定位（ADR 0034），这些写进 `file_reader` 的设计。
@@ -166,6 +179,7 @@ pub struct DepOrigin {
     pub root: DepRoot,
 }
 
+/// `Npm`：TS / JS 的包（npm 注册表的包名）。这一阶段只从 pnpm 的布局读（ADR 0040）。
 pub enum Ecosystem { Npm }   // Cargo、Go、Python 随它们的解析扩展点加入
 
 /// 依赖根（ADR 0033「依赖根的读取限制」）。`Location::path` / `TextRef::path` 相对这个根所在的目录：
@@ -682,7 +696,8 @@ pub(crate) struct Bound { pub definition: DefinitionRef, pub binding: Binding }
 impl ResolveContext<'_> {
     /// 裸模块名（"react"、"@types/node"、"lodash/fp"）在 `subproject` 看来解析到的依赖文件：按「依赖层」的发现规则
     /// 找到包目录，按入口规则（`exports` 的 `types` 条件……）找到声明文件。阻塞（读清单、`lstat`），只在查询的任务里调用；
-    /// 结果按（子项目、模块名）在这次查询里缓存。找不到、越界、扩展名不允许时为 None。
+    /// 结果按（子项目、模块名）在这次查询里缓存。找不到、越界、扩展名不允许，或子项目不是 pnpm 的布局
+    /// （ADR 0040：这一阶段只支持 pnpm）时为 None。
     pub fn dependency(&self, specifier: &str, subproject: &RelPath) -> Option<DepFile>;
     /// 一个依赖文件的抽取结果：命中 `code_intel.deps` 就用，否则经它的根读出、按读到的字节求 OID 并当场抽取
     /// （交互上限与截止时间，计入查询），结果交给 `Background` 任务写入 `code_intel.deps`。
@@ -720,7 +735,7 @@ pub(crate) trait GitAccess: Send + Sync {
     /// 设置了外部过滤器（clean / process）的路径返回 None。只在原始字节的 OID 与期望的不同时调用。
     fn canonical_oid(&self, tree: &Tree, path: &str, raw: &[u8]) -> Result<Option<BlobId>, GitError>;
     /// 一批路径的 `canonical_oid`，按输入顺序：`Worktree::canonical_oids`，整批一个句柄、至多解析一次 index（#135）。
-    /// 一批至多 256 项、字节合计至多 16 MiB（调用方切分）；某一项出错时整批返回错误，调用方对这一批逐项调用 `canonical_oid`，
+    /// 一批至多 256 项、字节合计至多 2 MiB（调用方切分，单项超过时自成一批）；某一项出错时整批返回错误，调用方对这一批逐项调用 `canonical_oid`，
     /// 出错的那一项按读不出处理。见「规范内容 OID 的批量核对」。
     fn canonical_oids(&self, tree: &Tree, items: &[(&str, &[u8])]) -> Result<Vec<Option<BlobId>>, GitError>;
     /// fs_watch 的过滤器与配置来源，见下文。不做 IO。
@@ -1299,7 +1314,7 @@ pub enum Visibility {
 
 ### 存储表
 
-两个命名空间用同一套表结构（[ADR 0033](../adr/0033.md)）：项目文件的 `code_intel.tags`（配额 224 MiB）和依赖的 `code_intel.deps`（配额 32 MiB，见「依赖层」），两者合计 256 MiB，依赖的单元只淘汰依赖的单元。两组表在同一个分库文件里，表名不同：`code_intel.tags` 的是下面的 `ci_*`，`code_intel.deps` 的是同样结构的 `cd_ext`、`cd_def`、`cd_ref`，另加包的路径表 `cd_pkg_file`（「依赖层」）；两组语句由同一个宏按表名前缀生成，`store.rs` 的查找、写入代码对两组共用，按 `TableSet` 区分。
+两个命名空间用同一套表结构（[ADR 0033](../adr/0033.md)）：项目文件的 `code_intel.tags`（配额 224 MiB）和依赖的 `code_intel.deps`（配额 32 MiB，见「依赖层」），两者合计 256 MiB，依赖的单元只淘汰依赖的单元。两组表在同一个分库文件里，表名不同：`code_intel.tags` 的是下面的 `ci_*`，`code_intel.deps` 的是同样结构的 `cd_ext`、`cd_def`、`cd_ref`，另加包的路径表 `cd_pkg`、`cd_pkg_file` 和按单元存模块路径（闭包的出边）的 `cd_spec`（「依赖层」）；两组语句由同一个宏按表名前缀生成，`store.rs` 的查找、写入代码对两组共用，按 `TableSet` 区分。
 
 一次抽取是 `cache` 的一个单元，命名空间 `code_intel.tags`（版本 3，不压缩，版本升级的原因见本节「版本」），键是 `Key::new().bytes(oid).str(lang).u64(grammar).u64(query).i64(part)`（`part` 见 `ci_ext`），单元的字节数由本 crate 按行估算（见下）。本 crate 登记的表：
 
@@ -1381,7 +1396,7 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 - 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 对热启动存在检查的命中和查询命中标记访问（存在检查本身只读，命中的单元排进队列，热启动之后再标记，见「调度、批次与取消」），所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
 - 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍。第 3 步用 `testing` 的 10 万文件合成仓库（`testing::synthetic`：语言比例约一成不是源码，每个源码文件约 8 KiB、每个文件里的名字各不相同）测 `code_intel/disk_100k`：9 万个源码文件的单元声明 279.7 MB（266.7 MiB，每个单元平均 3.1 KB），超过 256 MiB 的配额约 4%，写入过程中淘汰了 80 次；分库文件（含 `-wal`）298 MiB。所以 10 万文件的估算校准为约 270 MiB，与配额相当：这个规模的仓库里最久没出现的约 5% 的单元会被挤出，下次用到时重新抽取（「调度、批次与取消」的配额一条保证不会反复抽取）。合成语料每 8 KiB 有 34–53 个定义（函数为主，函数体是普通的调用和条件语句）、8–16 个不同的引用名（第 2 步由夹具拼成的语料是 99–152 个定义、17–50 个引用名）；真实仓库的密度由第 5 步在 macOS 上用真实仓库核对，配额是否调整留到那时决定。
 - 版本：表结构或单元的键变化时命名空间版本加一；只是抽取规则变化时改 `EXTRACTOR_VERSION`，旧单元不再命中、逐步淘汰。版本 2：`ci_def_name` 从 (name NOCASE) 改为 (name NOCASE, unit, kind)，分页的查找、在给定文件里的定位和名字表的按索引读取都要它；旧版本的表在第一次使用时删除，单元随之后的写事务删除、重新抽取一次（[cache 设计「自定义表」](cache.md#自定义表)）。版本 3（ADR 0033、0034，「验收」第 6 步）：`ci_ext` 加 `part`、`part_end`、`part_line`、`canonical` 和状态 4，唯一键和单元的键加 `part`，`ci_def` 加 `byte`；配额从 256 MiB 改为 224 MiB。升级同样重新抽取一次。
-- 整份抽取与窗口单元（ADR 0034，「大文件」）：存在检查、`indexed` 提示、名字表的第一步只看 `part = -1` 的行（存在检查的语句加 `AND part = -1`，`UNIQUE` 的前缀仍可用）；按名字查定义、查引用不看 `part`，窗口单元里的定义和引用与整份抽取的一样找到（它们的状态是 `Done`）。一个 OID 的整份抽取是 `Windowed` 时，它的内容就是这个 OID 的窗口单元；查询用到这个文件的定义时按 `(oid, lang, grammar, query)` 取出它的全部窗口（`part >= 0`，按 `part` 排序，`UNIQUE` 的索引直接给出这个顺序）。
+- 整份抽取与窗口单元（ADR 0034，「大文件」）：存在检查和 `indexed` 提示只看 `part = -1` 的行（存在检查的语句加 `AND part = -1`，`UNIQUE` 的前缀仍可用）。按名字查定义、查引用和名字表都不看 `part`：窗口单元的状态是 `Done`，它们的定义和引用与整份抽取的一样找到，名字表的第一步取出全部 `Done` 的单元（含窗口单元，按 OID 经映射过滤），所以打开过的大文件的名字也在 ⌘K 里；`Windowed` 的标记行没有定义和引用，不是 `Done`，不进入名字表的单元集合。一个 OID 的整份抽取是 `Windowed` 时，它的内容就是这个 OID 的窗口单元；查询用到这个文件的定义时按 `(oid, lang, grammar, query)` 取出它的全部窗口（`part >= 0`，按 `part` 排序，`UNIQUE` 的索引直接给出这个顺序）。
 - 配额（[ADR 0033](../adr/0033.md)）：`code_intel.tags` 224 MiB。10 万文件的合成仓库实测约 270 MiB（上一条「规模」），所以这个规模的仓库更早进入满额模式，被挤出的约 17% 的单元由第 1 层和查询现场补上（「调度、批次与取消」的配额一条、「完整性的核算」的满额模式）。`code_intel/disk_100k` 照常只记录。
 
 ### blob → 路径映射
@@ -1492,7 +1507,7 @@ enum WorktreeState {
 ### 名字表
 
 - 内容：当前 worktree 映射里所有 OID 的定义名（只读 `code_intel.tags`，不含依赖，ADR 0033），去重（区分大小写），NFC 统一，按字节序排序；每个名字带它出现过的 `DefKind` 位集，⌘K 用它显示图标或过滤。
-- 构建：后台任务里先扫描一遍 `ci_ext`，取出语言、grammar 版本、查询版本与当前一致的全部 `Done` 的 `(unit, oid)`，按映射以（OID、语言）过滤成单元集合；再按 `ci_def_name` (name NOCASE, unit, kind) 的顺序分页读索引（每条语句 4096 项，不读表，语句之间检查是否停止），跳过集合以外的单元。大小写不同的同名在索引里相邻，所以每个名字只和它所在的那一串比较：同一串里每种写法记一次、合并种类位集，串结束时交给 `NameTableBuilder`；不为每个定义分配，也没有哈希表，每个不同的名字做一次 NFC（NFC 之后相同的写法由 builder 合并）。正在入索引的 OID 不在其中，下一代名字表再补上。
+- 构建：后台任务里先扫描一遍 `ci_ext`，取出语言、grammar 版本、查询版本与当前一致的全部 `Done` 的 `(unit, oid)`（不论 `part`：打开过的大文件的窗口单元也在其中，ADR 0034），按映射以（OID、语言）过滤成单元集合；再按 `ci_def_name` (name NOCASE, unit, kind) 的顺序分页读索引（每条语句 4096 项，不读表，语句之间检查是否停止），跳过集合以外的单元。大小写不同的同名在索引里相邻，所以每个名字只和它所在的那一串比较：同一串里每种写法记一次、合并种类位集，串结束时交给 `NameTableBuilder`；不为每个定义分配，也没有哈希表，每个不同的名字做一次 NFC（NFC 之后相同的写法由 builder 合并）。正在入索引的 OID 不在其中，下一代名字表再补上。
 - 代：名字表依赖的输入见「输入代数与派生状态」，任何一个变化时代数加一。`names` 发现仍有持有者的表代数落后时开始重建，重建期间仍返回旧表（`Ready`）。
 - 交付：每个项目同时最多一次构建，构建期间的 `names` 返回 `Building`（或仍有持有者的旧表），不另起一次。建好后在 `CodeIntelEvent::Names` 里交出 `Arc<NameTable>`，同时把 `Weak` 换成指向新表；所以第一次调用返回 `Building` 之后，监听方从事件里拿到表，之后的 `names` 只要表还有持有者就返回 `Ready`。所有持有者都释放之后，下一次 `names` 重新构建。
 - 持有期间的刷新：表有持有者（`Weak` 能升级）时，只要代数落后（批次写入、映射换代、淘汰代数或语言包变化），本 crate 就在后台重建，建好后发出新的 `Names`，持有方换上新表，不需要再调 `names`。重建有间隔：上一次构建开始之后至少过 `max(1 s, 2 × 上一次构建的耗时)` 才开始下一次，期间的变化并进下一次；间隔未到时登记一个到期时刻，由看门狗线程（见「调度、批次与取消」）到期后提交重建任务。10 万文件的仓库在建索引期间因此最多每 2 秒左右重建一次，CPU 不会全花在名字表上。构建开始时取映射和淘汰代数的快照，表的代数就是这份快照的代数；建好时代数已经又落后的，照常交出，再按间隔排下一次。持有者全部释放后不再重建。
@@ -1557,7 +1572,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 批量任务的数目：一次唤醒把任务补到批量线程数，一批做完、还留下工作（某层的小队列里有缺的文件）时再补一次。可能产生第 3–5 层工作的每一步之后（打开、关闭、跑第 3–5 层的项目改变、焦点、语言包、核对任务结束，以及批量任务之外排进的工作：第 1、2 层的存在检查命中、要标记访问的单元，第 1、2 层和查询现场抽取的写入）都唤醒一次，所以总是成立：要么没有项目有可做的第 3–5 层工作，要么批量任务数已满。排进访问标记只有一个入口（`Batch::queue_touches`），它返回的 `Wake` 必须交给 `Inner::wake`（`#[must_use]`，clippy 的警告即失败），批量任务之外的写入同样交出一个，所以新增的来源不会漏掉唤醒。测试的 `Harness` 在每次 `settle` 和 `set_focus` 之后检查这一条，漏掉的唤醒让测试失败；`Executor::manual()` 先跑 `Interactive`、`Background` 再跑 `Batch`，批量任务先跑完、第 1 层才命中的次序由 `warm_focus_hit_wakes_the_batch_for_its_touch` 用钩子构造。
 - 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示，缺的抽取。存在检查只读、不标记访问：热启动的耗时就是「已入索引的仓库被认出已入索引」的时间，访问时间的写回不在这条路径上。一次存在检查本身是一批：游标在项目的锁内最多看 4096 个条目，取出至多 500 个提示不匹配的文件（按语言分组查询），缺的进入这一层的小队列，由之后的批次抽取，所以抽取的批次仍按 64 个文件、2 MiB、50 ms 结束。
 - 配额：本次会话自己的写入引起淘汰时（写入前后淘汰代数不同），命名空间已经满了。此后游标的依赖和提示的戳记都用冻结的淘汰代数（命名空间满之前的那一代），淘汰不再让第 3–5 层的游标重新开始，焦点变化也不重建游标（见「输入代数与派生状态」），每个文件在一次会话里由批量层最多抽取一次；被挤出的单元等第 1 层打开它、查询现场用到时（第 4 步）或下次打开项目时再抽取。否则游标会重新抽取刚被挤出的单元，写入又挤出别的单元，不会结束。刚写入的单元的提示按写入之后的淘汰代数记下（冻结后按冻结的那一代）。冻结之后提示不再证明单元在：查询按「完整性的核算」的满额模式与存储核对，被挤出的文件搜索或计为未搜。
-- 替换：写事务在项目的写锁里再查一次存在（所有写入都取这把锁，查过之后、写入之前不会有别的写入落下），已在缓存里的键只在替换时再写。替换只有一种：`Done` 的结果替换 `TimedOut`、`TooLarge` 的单元，不论哪一层写入（第 1 层按交互上限重做的、查询现场抽取的、批量层的）；没有内容的结果从不替换任何单元（不替换 `Done`，也不替换另一个没有内容的单元），层的高低不让没有内容的单元留下而丢掉 `Done` 的结果（`account_too_large_units_are_searched`）。所以写事务里的淘汰除了这种替换只来自配额；cache 把替换计为一次淘汰（每个写事务一次）。写事务和它前后读淘汰代数在项目的写锁里进行：替换了单元、淘汰代数恰好加一的事务记为本 crate 自己的一次，提示、游标和第 5 层用的淘汰代数减去这些次数（替换事务进行期间读到的是它之前的值，cache 的加一与本 crate 的计数之间没有读者能看到多出的一代），所以打开一个大文件不会让全部提示失效、游标重建、第 5 层重来；批量层也不会把它当成配额已满。访问标记的队列仍按 cache 自己的淘汰代数（`Store::touch_pending` 与它比较）。已知限制：同一个替换事务里同时因配额淘汰的单元也被算成替换，本次会话不因它重新检查，等查询用到时或下次打开项目时再抽取。批量层从队列取文件时，跳过入队之后已由第 1、2 层写入（提示已匹配）的文件。
+- 替换：写事务在项目的写锁里再查一次存在（所有写入都取这把锁，查过之后、写入之前不会有别的写入落下），已在缓存里的键只在替换时再写。替换有两种：`Done` 的结果替换 `TimedOut`、`TooLarge` 的单元，不论哪一层写入（第 1 层按交互上限重做的、查询现场抽取的、批量层的）；窗口链完成时写的 `Windowed` 标记替换同一个键（`part = -1`）上 `TimedOut`、`TooLarge` 的整份抽取（ADR 0034，「大文件」），它表示内容在窗口单元里，所以算作有内容。其余没有内容的结果从不替换任何单元（不替换 `Done` 和 `Windowed`，也不替换另一个没有内容的单元），层的高低不让没有内容的单元留下而丢掉 `Done` 的结果（`account_too_large_units_are_searched`）。所以写事务里的淘汰除了这两种替换只来自配额；cache 把替换计为一次淘汰（每个写事务一次）。写事务和它前后读淘汰代数在项目的写锁里进行：替换了单元（两种替换都算）、淘汰代数恰好加一的事务记为本 crate 自己的一次，提示、游标和第 5 层用的淘汰代数减去这些次数（替换事务进行期间读到的是它之前的值，cache 的加一与本 crate 的计数之间没有读者能看到多出的一代），所以打开一个大文件不会让全部提示失效、游标重建、第 5 层重来；批量层也不会把它当成配额已满。访问标记的队列仍按 cache 自己的淘汰代数（`Store::touch_pending` 与它比较）。已知限制：同一个替换事务里同时因配额淘汰的单元也被算成替换，本次会话不因它重新检查，等查询用到时或下次打开项目时再抽取。批量层从队列取文件时，跳过入队之后已由第 1、2 层写入（提示已匹配）的文件。
 - 访问标记：存在检查命中的单元 ID 连同查询之前读到的淘汰代数排进项目的 `PendingTouches` 队列。批量线程在热启动的存在检查之后、在批次边界处每次标记 1024 个（`Store::touch_pending`），批次边界照常检查暂停和取消。淘汰代数变了，队列里的 ID 可能已经属于别的单元，整个队列直接丢弃、不标记。项目关闭或切换 worktree 时队列随项目的批量状态一起丢弃，没标记的单元保留原来的访问时间：丢掉的只是淘汰的先后，查询结果不受影响。
 - 单文件截止时间：后台 250 ms，交互 1 s。原来按线性吞吐估算 M 系列上 1 MiB 的文件约 230 ms；实测吞吐随文件变大而下降（tree-sitter-tags 的局部检查按「引用数 × 作用域数」增长，见 [ADR 0031](../adr/0031.md)），接近 1 MiB 的文件在 M 系列上估计要 360–400 ms，后台记为 `TimedOut`，打开时按交互截止时间重做（已知限制，`code_intel/extract_1mib` 只记录）。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
 - 看门狗线程另外持有一张到期表（名字表的延迟重建，见「名字表」）：`wait_timeout` 取在途抽取的下一个检查时刻与最早到期时刻中较早的一个，到期时提交对应的任务；两张表都空时才不带超时地等待。
@@ -1593,7 +1608,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | `paths` 里的目录路径 | 工作区内容：映射里这个目录下的路径进入重新读集合，并请求一次工作区比较（找出移进来的未跟踪文件） |
 | `rescan`、`health` 为 `Degraded` | 工作区内容（请求比较、全部覆盖项重新读）、忽略规则与配置 |
 | `meta.rules`、`meta.config` | 忽略规则与配置 |
-| `paths` 里第 3 层子项目及其上各级的 `package.json`、`package-lock.json`、`npm-shrinkwrap.json`、`pnpm-lock.yaml`、`yarn.lock`（ADR 0033） | 不改上表的代数；提交依赖的身份任务（「依赖层」）。依赖目录本身不监听 |
+| `paths` 里第 3 层子项目及其上各级的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`（ADR 0033、0040） | 不改上表的代数；提交依赖的身份任务（「依赖层」）。依赖目录本身不监听 |
 | `health` 为 `Failed` | 不改代数；丢掉这份订阅，等下一次 `ProjectEvent` 重新订阅 |
 | 语言包的通知 | 语言包（见「语言包的变化」） |
 | 读到 `cache` 的淘汰代数变化 | 淘汰 |
@@ -1722,25 +1737,41 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ### 依赖层
 
-[ADR 0033](../adr/0033.md)「依赖源码」。状态：已设计，尚未实现（「验收」第 9 步）。依赖目录不进文件列表、不整体索引、不监听；跳转进依赖时按需解析，空闲时只为当前子项目的直接依赖建声明闭包的索引。现在只有 npm（TS / JS）；Cargo、Go、Python 的依赖根和闭包规则在它们的解析扩展点实现时经同一个内部接口（`deps::Ecosystem`）接入，键、身份、配额、读取限制和分层不变。
+[ADR 0033](../adr/0033.md)「依赖源码」。状态：已设计，尚未实现（「验收」第 9 步）。依赖目录不进文件列表、不整体索引、不监听；跳转进依赖时按需解析，空闲时只为当前子项目的直接依赖建声明闭包的索引。
 
-**发现**（每个项目一个 `deps::Roots`，打开项目时为空，用到时建立，项目关闭时释放）：
+这一阶段只支持 pnpm 管理的 TS / JS 依赖（产品负责人 2026-10-21 的决定，[ADR 0040](../adr/0040.md)）：pnpm 的虚拟存储 `node_modules/.pnpm/<名字>@<版本>[_<peer>]/node_modules/<名字>`，加上每个子项目 `node_modules/<名字>` 指向它的链接，包括 pnpm 工作区。用 npm 或 yarn 安装的项目（`node_modules` 里没有 `.pnpm`）没有依赖层，跳转也不按需解析依赖：依赖里的定义不出现，项目自己的结果不受影响（已知限制）。读取的规则（依赖根、链接、扩展名、上限）不依赖 pnpm 的布局，以后加入 npm 的平铺布局只需要另一种身份来源，不改安全模型。Cargo、Go、Python 的依赖根和闭包规则在它们的解析扩展点实现时经同一个内部接口（`deps::Ecosystem`）接入，键、身份、配额、读取限制和分层不变。
+
+**发现**（每个项目的每个会话一个 `deps::Roots`：按当前 worktree 建立，打开项目时为空，用到时建立；切换当前 worktree、项目关闭时随会话释放，所以一个 worktree 的根不会给另一个 worktree 读）：
 
 - 子项目：第 3 层的子项目（「建索引的分层」），它的根目录下的 `package.json`；没有子项目时取 worktree 根的。第 3 层换了子项目时按新的子项目重新发现，原来的包留在依赖映射里（见下）。清单经 worktree 根的 `SafeRoot` 读，上限 1 MiB。
 - 直接依赖：`dependencies`、`devDependencies`、`peerDependencies`、`optionalDependencies` 的键，去重，按清单里的顺序最多 512 个，多出的记日志、只走按需解析。名字按 npm 的规则校验（可选的 `@scope/` 加一段，每段非空、不是 `.` 或 `..`、没有 `/`、`\` 和 NUL，合计 ≤ 214 字节），不合规的跳过。
-- 包目录：按 Node 的查找顺序，从子项目目录往上到 worktree 根，每一级的 `node_modules` 经 worktree 根的 `SafeRoot::open_dir` 打开（路径的任何一级是符号链接都失败，这一级跳过），在其中找 `<名字>`，第一个找到的就是这个包。一个项目最多打开 8 个这样的根（`node_modules` 目录），每个在本次会话里只打开一次。
-- `<名字>` 是目录时就是包目录；是符号链接（pnpm）时读出目标，按词法相对链接所在的目录拼出路径，结果仍在这个 `node_modules` 根之内才继续，最多跟随 4 次，最后一级必须是从这个根出发、各级都不是符号链接的目录；否则这个包读不到。所以 `node_modules/react` → `.pnpm/react@19.0.0/node_modules/react` 可以读，指向根外、`$HOME` 或另一个根的链接不读。
+- 包目录：按 Node 的查找顺序，从子项目目录往上到 worktree 根，每一级的 `node_modules` 经 worktree 根的 `SafeRoot::open_dir` 打开（路径的任何一级是符号链接都失败，这一级跳过），在其中找 `<名字>`，第一个找到的就是这个包。这条链上的 `node_modules` 目录就是这个子项目的依赖根；一个 worktree 最多打开 8 个根，按（worktree、相对 worktree 根的目录）登记，同时记下打开时目录的设备号和 inode。
+- pnpm 的判断：链上离 worktree 根最近、含有 `.pnpm` 目录（经这个根的 `SafeRoot` 打开，不是符号链接）的根就是虚拟存储所在的根（pnpm 默认把 `virtual-store-dir` 放在工作区根的 `node_modules/.pnpm`）。链上没有这样的根时这个子项目不是 pnpm 的布局，依赖层和按需解析都不运行，`coverage.deps` 为 `Done`。`virtual-store-dir` 配到 `node_modules` 之外时，链接的目标不在任何已发现的根里，同样读不到（已知限制）。
+- 根的有效性：`pnpm install` 重建、删掉重装 `node_modules` 之后，打开的描述符指向已删除的目录。每次身份任务运行时，按登记的路径经 worktree 根的 `SafeRoot` 对这个目录 `stat` 一次，设备号或 inode 变了（或已不存在）就重新经 `open_dir` 打开（或删去这个根）；任何依赖读取得到 `NotFound` 时同样重新验证一次、重试一次。所以根不会在一次会话里一直读不到。
+- `<名字>` 是符号链接时（pnpm 的正常情形）读出目标，按词法相对链接所在的目录拼出路径（相对 worktree 根的路径），结果落在这个 worktree 已发现的某个依赖根之内才继续（[ADR 0040](../adr/0040.md)：pnpm 工作区里 `packages/app/node_modules/react` 指向根目录 `node_modules/.pnpm/…`，那是同一个子项目查找链上的另一个根），最多跟随 4 次，最后一级必须是从那个根出发、各级都不是符号链接的目录，之后经那个根的 `SafeRoot` 读；否则这个包读不到。所以 `node_modules/react` → `.pnpm/react@19.0.0/node_modules/react` 和工作区包指向根目录 `.pnpm` 的链接都可以读，指向已发现的根之外（`$HOME`、worktree 之外、没有作为根打开的目录）的链接不读；读取时从不跟随符号链接。包目录必须落在虚拟存储里（`.pnpm/<目录名>/node_modules/<名字>`，目录名按下文解析出名字和版本，名字与要找的相同）；`<名字>` 本身是目录（npm 式的平铺安装）或目标不在虚拟存储里的，这一阶段不作为依赖读（读取规则允许，只是没有身份来源）。
 - 入口（声明文件）：包的 `package.json`（≤ 1 MiB）里 `exports` 的 `"."`（`exports` 是字符串或条件对象时就是它）按对象顺序深度优先找 `types` 条件，`import`、`require`、`node`、`default` 之下也找；没有时依次是 `types`、`typings`、`index.d.ts`、`main` 换成 `.d.ts`；都没有时找 `@types/<名字>`（`@scope/x` 对应 `@types/scope__x`），按同样的规则作为一个单独的包。路径按词法相对包目录解析，离开包目录、扩展名不在允许的列表里的丢弃。
-- 声明闭包：从入口出发，沿相对路径的 `import`、`export … from`、`import("…")` 类型和 `/// <reference path="…">` 走（裸模块名和 `/// <reference types>` 只记录，不跟随）。一个相对路径 `s` 依次试 `s`（扩展名允许时）、`s` 的 `.js` / `.mjs` / `.cjs` 换成 `.d.ts` / `.d.mts` / `.d.cts`、`s.d.ts`、`s.d.mts`、`s.d.cts`、`s.ts`、`s.tsx`、`s/index.d.ts`、`s/index.ts`，第一个存在的就是目标；离开包目录的丢弃。边由 TS / JS 的一次遍历在抽取时一并给出（`walk::ts` 收集这几种语句的模块路径，抽取结果之外另交出 `Vec<Specifier>`，不写入单元）。
-- 只读允许的扩展名（ADR 0033）：`.d.ts`、`.d.mts`、`.d.cts`、`.ts`、`.tsx` 和 `package.json`；其他文件不打开。
+- 声明闭包：从入口出发，沿相对路径的 `import`、`export … from`、`import("…")` 类型和 `/// <reference path="…">` 走（裸模块名和 `/// <reference types>` 只记录，不跟随）。一个相对路径 `s` 依次试 `s`（扩展名允许时）、`s` 的 `.js` / `.mjs` / `.cjs` 换成 `.d.ts` / `.d.mts` / `.d.cts`、`s.d.ts`、`s.d.mts`、`s.d.cts`、`s.ts`、`s.tsx`、`s/index.d.ts`、`s/index.ts`，第一个存在的就是目标；离开包目录的丢弃。边由 TS / JS 的一次遍历在抽取时一并给出（`walk::ts` 收集这几种语句的模块路径），按内容存：依赖单元写入时连同它的模块路径一起写进 `cd_spec`（每个单元每个模块路径一行，原样的字符串，与路径无关），所以单元已经在缓存里（存在检查命中：版本升级而内容没变的文件、跳转时按需写过的入口）时，闭包从 `cd_spec` 读出边，不重新解析，也不会在入口处停下。按需解析和第 1 层写进 `code_intel.deps` 的单元同样带 `cd_spec`。没有内容的单元（`TooLarge`、`TimedOut`）没有边。
+- 只读允许的扩展名（ADR 0033）：`.d.ts`、`.d.mts`、`.d.cts`、`.ts`、`.tsx` 和 `package.json`；另外只有虚拟存储所在的根里的 `.pnpm/lock.yaml` 这一个文件（[ADR 0040](../adr/0040.md)，按完整的相对路径匹配）。其他文件不打开。工作区里的 `pnpm-lock.yaml` 是受跟踪的工作区文件，经 worktree 根的 `SafeRoot` 读，不属于依赖根。
 - 限额（ADR 0033）：每个包的闭包最多 4000 个文件、16 MiB；单个文件最多 1 MiB（超过的记 `TooLarge`，不跟随它的边）；每个项目在一次会话里，依赖层实际读入的源码合计最多 64 MiB，到了就停下（`coverage.deps` 为 `Done`），其余只走按需解析。身份没变、没有读文件的包不计入。
 
 **身份与包的路径表**：
 
-- 身份（决定要不要重读一个包）：npm 的 lockfile（子项目往上到 worktree 根，第一个 `npm-shrinkwrap.json` 或 `package-lock.json`，经 worktree 根的 `SafeRoot` 读，上限 64 MiB）里 `packages["<包目录相对 lockfile 所在目录的路径>"]` 的 `integrity`。lockfile 用 serde_json 的流式访问器读：只留下要找的那些键的 `integrity` 和 `version`，其余按 `IgnoredAny` 跳过，内存与 lockfile 的大小无关。`pnpm-lock.yaml` 和 `yarn.lock` 不解析（要 YAML 和 yarn 格式的解析器，ADR 0033 不新增依赖），身份取 ADR 0033 的后备：包清单（`package.json`）的 OID 加上解析链接后的包目录路径（pnpm 的 `.pnpm/<名字>@<版本>_<peer 哈希>` 目录名含版本和 peer 的哈希，安装另一个版本时路径就变）。
-- 包的路径表：每个（生态、包名、版本、身份、包目录）一个 `code_intel.deps` 的单元，行在 `cd_pkg`（一行：生态、包名、版本、身份、包目录、记录时刻）和 `cd_pkg_file`（每个闭包里的文件一行：序号、相对 `DepRoot` 所在目录的路径、OID、设备号、inode、大小、修改时间和状态改变时间（纳秒）、状态、出边的序号列表）里。单元的字节数按行估算（每行约 80 字节加路径），一个 TS 项目约 250 行、20 KB。它与依赖的单元在同一个配额里按访问时间淘汰；淘汰了就当作身份没见过，走 stat 表或重读。用单元和行，不用 cache 的普通条目：路径表和它引用的单元在同一组表里、同一个写事务里写入，淘汰和配额的规则一致（[cache 设计「命名空间」](cache.md#命名空间)已按此修改）。
-- 打开项目、lockfile 或清单变化、第 3 层换了子项目时（`Background`、`BusyGuard` 的身份任务，每个项目同时最多一个，运行中又有变化的结束后再运行一次）：对每个直接依赖找到包目录、`lstat` 它的 `package.json`、算身份。路径表里有同一个键的单元：直接用它的行，不读、不 stat 闭包里的文件（20 个直接依赖、4 MiB 的 lockfile 约 20–30 ms，`code_intel/deps_identity`）。没有：取这个包名最近的一张路径表作为 stat 表，把这个包排进依赖层。
-- stat 表（身份变了或取不到时，ADR 0033）：闭包里每个文件 `lstat` 一次（经它所在根的 `SafeRoot`），五项都与表里的相同、并且状态改变时间早于那张表的记录时刻 2 秒以上时，沿用表里的 OID 和出边，不读、不解析；否则读出、按读到的字节求 OID（git blob 格式，仓库的哈希算法；被忽略的文件不做规范化转换），解析得到出边。按身份或 stat 表的捷径得到的 OID 在跳转真正读这个文件时核对（下文的读取核对）。
+- 身份（决定要不要重读一个包，[ADR 0040](../adr/0040.md)）：（虚拟存储的目录名、`integrity`、已安装的 `package.json` 的五项 stat）。
+  - 目录名：包目录所在的 `.pnpm/<目录名>`，形如 `react@19.0.0`、`@babel+core@7.24.0`（名字里的 `/` 写作 `+`）、`react-dom@19.0.0_react@19.0.0`（`_` 之后是 peer，长时是哈希）。按最后一个不在开头的 `@` 分出名字和版本（`_` 之前），名字与链接的 `<名字>` 不同时这个包读不到。目录名带着已安装的版本和 peer，所以换了版本的安装路径就变。
+  - `integrity`：先读虚拟存储里的 `.pnpm/lock.yaml`：pnpm 每次安装后按实际装好的树写它，所以它描述的是已安装的内容；`git pull` 或切换分支之后、`pnpm install` 之前，`pnpm-lock.yaml` 已经变了，它还没有变。没有它时读工作区里的 `pnpm-lock.yaml`（子项目往上到 worktree 根的第一个）。在 lockfile 的 `packages:` 里找键等于 `<名字>@<版本>` 的那一项（lockfile 版本 6 的键前面有 `/`，后面可能带 `(peer…)`，比较时去掉；版本 9 的键没有 `/`，peer 只在 `snapshots:` 里），取它的 `resolution` 里的 `integrity`。用的是已安装的目录名里的版本，所以 `pnpm-lock.yaml` 已经改成另一个版本、还没安装时，找不到这个键，走后备，不会把新 lockfile 的 `integrity` 当成已安装内容的身份。
+  - 已安装的 `package.json` 的五项 stat（设备号、inode、大小、修改时间、状态改变时间）：三者都与路径表记下的相同（并且记录时不在 racy 窗口里）才算身份没变。
+  - 后备：取不到 `integrity`（没有 lockfile、超出下面的语法子集、找不到这个键）时，身份是（目录名、包清单的 OID、五项 stat），然后照常走 stat 表。后备只会让身份更容易「变了」、多读一些文件，不会给出错的身份。
+- lockfile 的扫描（不用 YAML 解析器：ADR 0033 不新增依赖）：经 `OpenFile::read_ranges` 按 1 MiB 的区间流式读，按行处理，整个文件上限 64 MiB，一行上限 64 KiB；内存是一个区间、一行和要找的那些键的结果，与文件大小无关。只接受这个子集，超出时按下文处理：
+  - 第一个非注释行是顶层的 `lockfileVersion: <v>`，`<v>` 可以带单引号或双引号，主版本是 6（`6.0`、`6.1`）或 9（`9.0`）；不是时整个文件不用（全部走后备）。
+  - 顶层的键在第 0 列、以 `:` 结尾；`packages:` 段从这一行到下一个第 0 列的键为止，其余段（`importers:`、`snapshots:`、`settings:` 等）跳过。
+  - `packages:` 段里，一项的键在第 2 列、整行是 `<键>:`，键是不带引号、带单引号或带双引号的标量（单引号里的 `''` 是一个 `'`，双引号里不接受转义）；项的内容在第 4 列或更深。
+  - 一项里 `resolution` 只接受两种写法：第 4 列的 `resolution: {…}`（一行的流式映射，取其中 `integrity: ` 之后到 `,` 或 `}` 为止的值），或第 4 列的 `resolution:` 后接第 6 列的 `integrity: <值>`。值必须是 `sha512-`、`sha384-`、`sha256-` 或 `sha1-` 加 base64 字符。
+  - 空行和以 `#` 开头的行跳过；制表符缩进、锚点和别名（`&`、`*`）、多行的流式值、同一个键出现两次、值不合法：只在发生在要找的那一项里时让这一项走后备，其他项不受影响；行超过 64 KiB 或文件超过 64 MiB 时整个文件不用。
+  - 只留下要找的键（直接依赖解析出的 `<名字>@<版本>`）的结果。
+- 读取都在身份任务里（`Background`），两个 lockfile 各读一次；`.pnpm/lock.yaml` 在被忽略的目录里，fs_watch 不交付它，所以它的变化在打开项目、`pnpm-lock.yaml` 或清单变化时（`pnpm install` 会改 `pnpm-lock.yaml` 或清单之一）、依赖读取 `NotFound` 时（根的有效性一条）发现；只在 `node_modules` 里重装、什么受跟踪的文件都没改时，下次打开项目时才发现（已知限制，ADR 0033 同类）。
+- 包的路径表：每个（生态、包名、版本、身份、包目录）一个 `code_intel.deps` 的单元，行在 `cd_pkg`（一行：生态、包名、版本、身份、已安装的 `package.json` 的五项 stat、包目录、记录时刻）和 `cd_pkg_file`（每个闭包里的文件一行：序号、相对 `DepRoot` 所在目录的路径、OID、设备号、inode、大小、修改时间和状态改变时间（纳秒）、状态）里；边不在路径表里，取自 `cd_spec`（上一条）。单元的字节数按行估算（每行约 80 字节加路径），一个 TS 项目约 250 行、20 KB。它与依赖的单元在同一个配额里按访问时间淘汰；淘汰了就当作身份没见过，走 stat 表或重读。用单元和行，不用 cache 的普通条目：路径表和它引用的单元在同一组表里、同一个写事务里写入，淘汰和配额的规则一致（[cache 设计「命名空间」](cache.md#命名空间)已按此修改）。
+- 打开项目、lockfile 或清单变化、第 3 层换了子项目时（`Background`、`BusyGuard` 的身份任务，每个项目同时最多一个，运行中又有变化的结束后再运行一次）：对每个直接依赖找到包目录、`lstat` 它的 `package.json`、算身份。路径表里有同一个键的单元：直接用它的行，不读、不 stat 闭包里的文件；但路径表和它引用的单元分别淘汰（路径表每次打开项目都用到，单元只在查询时用到），所以用之前对表里的 OID 按 500 个一批对 `code_intel.deps` 做一次存在检查：命中的单元连同路径表的单元一起标记访问（两者从此一起变旧），缺的文件排进依赖层重新读和抽取（核对 OID、写入单元），不当作已入索引（20 个直接依赖、约 250 个文件、4 MiB 的 lockfile 合计约 20–30 ms，`code_intel/deps_identity`）。没有：取这个包名最近的一张路径表作为 stat 表，把这个包排进依赖层。
+- stat 表（身份变了或取不到时，ADR 0033）：闭包里每个文件 `lstat` 一次（经它所在根的 `SafeRoot`），五项都与表里的相同、并且状态改变时间早于那张表的记录时刻 2 秒以上时，沿用表里的 OID，不读；否则读出、按读到的字节求 OID（git blob 格式，仓库的哈希算法；被忽略的文件不做规范化转换）。两种情况的出边都按 OID 取：单元在缓存里就读 `cd_spec`，不在就解析（抽取时写入单元和 `cd_spec`）。按身份或 stat 表的捷径得到的 OID 在跳转真正读这个文件时核对（下文的读取核对）。
 
 **依赖映射**：每个项目一份，只在内存里，与工作区的 `LiveMap` 分开（ADR 0033）。
 
@@ -1760,7 +1791,7 @@ pub(crate) struct DepMap {
 
 **何时建索引**：
 
-- 依赖层（批量层，排在第 4 层之后、第 5 层之前，`background_yielding()`）：工作是身份任务排进来的包。每批取一个包的闭包：按出边从入口顺序走，沿用 stat 表的文件不读；要读的经它的根读出、求 OID、按 500 个一批对 `code_intel.deps` 做存在检查，缺的抽取，写入 `code_intel.deps`（一批一个写事务，与第 3–5 层的批次规则相同）。走完一个包，写它的路径表单元，替换依赖映射。抽取与第 3–5 层相同：后台上限 1 MiB、截止时间 250 ms、看门狗、暂停、取消、让路。
+- 依赖层（批量层，排在第 4 层之后、第 5 层之前，`background_yielding()`）：工作是身份任务排进来的包。每批取一个包的闭包：按出边从入口顺序走，沿用 stat 表的文件不读；每个文件的 OID 按 500 个一批对 `code_intel.deps` 做存在检查，命中的从 `cd_spec` 取出边、不读不解析，缺的经它的根读出（沿用 stat 表的也要在这时读）、核对或求 OID、抽取，单元和 `cd_spec` 写入 `code_intel.deps`（一批一个写事务，与第 3–5 层的批次规则相同）；路径表排进来的缺失文件也按这一条补上。走完一个包，写它的路径表单元，替换依赖映射。抽取与第 3–5 层相同：后台上限 1 MiB、截止时间 250 ms、看门狗、暂停、取消、让路。
 - 配额：依赖层自己的写入引起 `code_intel.deps` 的淘汰时（写入前后它的淘汰代数不同），依赖层在本次会话停下，`coverage.deps` 为 `Done`；项目的单元在另一个命名空间里，不受影响。之后按需解析的结果照常写入（只淘汰依赖的单元）。
 - 按需（第一次跳进依赖时）：跳转第 2 步，解析扩展点把裸模块名交给 `ResolveContext::dependency`，找到的文件当场读、求 OID、对 `code_intel.deps` 做存在检查，命中就用，否则当场抽取（`Interactive`、查询的 `BusyGuard`、交互截止时间、后台上限 1 MiB），结果用于这次查询，并交给 `Background` 任务写入 `code_intel.deps`。依赖的依赖只在这里出现，不进入依赖层和依赖映射。TS 的裸模块名解析是 #19 的解析扩展点；在它之前依赖层照常运行，跳转只经第 3 步的依赖一层找到依赖里的定义。
 - 依赖文件成为当前文本（`Focus::Current` 的 `TextRef::origin` 是 `Dependency`）时，第 1 层经它的根读、核对 OID、抽取，写进 `code_intel.deps`。第 2 层不包含依赖文件。
@@ -1777,7 +1808,7 @@ pub(crate) struct DepMap {
 
 1. 工作区里的根经 worktree 根的 `SafeRoot::open_dir` 打开，不按路径另开 `SafeRoot`。
 2. 工作区之外的根（`CacheRoot`）的路径只取 Lectern 自己进程的环境变量和默认值，不读项目文件、不运行外部命令；TS / JS 不用它们。
-3. 包内的路径和链接按词法解析，离开所在的根（包内路径离开包目录）就丢弃；解析后的路径经这个根的 `SafeRoot` 读，各级不得是符号链接。
+3. 包内的路径按词法解析，离开包目录就丢弃；链接按词法解析，目标不在这个 worktree 已发现的某个依赖根之内就丢弃（[ADR 0040](../adr/0040.md) 对 ADR 0033「同一个根」的修订）；解析后的路径经目标所在根的 `SafeRoot` 读，各级不得是符号链接。
 4. 只读允许的扩展名，单个文件 ≤ 1 MiB。
 
 `deps_*` 测试逐条构造越界的情形（见「测试」）。
@@ -1786,20 +1817,23 @@ pub(crate) struct DepMap {
 
 [ADR 0033](../adr/0033.md)「交互时让路」，kernel 的接口见 [kernel 设计「后台工作」](kernel.md#后台工作)（`PluginHandle::background_yielding`、`BackgroundGuard::proceed_item`、`yield_requested`、`Grant`、`SLOT_MAX_BYTES`）。状态：已设计，尚未实现（「验收」第 7 步）。开关由 `app` 在离开交互静止时打开，本 crate 不判断空闲、不读输入状态，开关默认关闭。
 
-- 守卫：每个批量任务在开始时取一个不让路的守卫（`background()`），任务结束时 drop；取第 4 层、依赖层、第 5 层的工作时另取一个让路的守卫（`background_yielding()`），转去做窗口链和第 3 层的工作、或任务空闲时 drop 它（离开 kernel 的时段队列，交还保留给它的令牌）。
-- 批次边界：要做的是窗口链或第 3 层时，`near.proceed().await`（只看暂停），照常跑一批；是让路的层时，`far.proceed_item(下一项的字节数).await`：
+- 守卫：每个批量任务任何时候只持有一个守卫，每个批次边界都检查它，所以 kernel 按守卫记的「已停下」覆盖这个任务，暂停时后台状态能到「全部已暂停」（`yield_pause_reaches_all_paused`）。要做的是窗口链或第 3 层时持有不让路的守卫（`background()`），是第 4 层、依赖层、第 5 层时持有让路的守卫（`background_yielding()`）；下一批的种类变了时先 drop 手里的守卫、再取另一种（drop 让路的守卫同时离开 kernel 的时段队列、交还保留给它的令牌）。换守卫只在批次边界发生，两次之间这个任务没有守卫、也不做工作。
+- 批次边界：持有不让路的守卫时 `guard.proceed().await`（只看暂停），照常跑一批；持有让路的守卫时 `guard.proceed_item(下一项的字节数).await`：
   - `Grant::Batch`：照常跑一批（开关关着，或刚关上）。
   - `Grant::Slot { deadline }`：只做一项，到 `deadline` 为止：一个文件（读、存在检查、抽取，结果在这一项之后立即用一个写事务写入），或一次 ≤ 500 个 OID 的存在检查（大小记为 0）。`yield_requested()` 在 `deadline` 变为 true，在途的抽取在下一个分片边界停下（下一条）。
   - 下一项超过 256 KiB（`SLOT_MAX_BYTES`）时 kernel 不给时段，等开关关闭后返回 `Batch`。
-- 等待时段期间有了窗口链或第 3 层的工作（打开文件、焦点变化，`kick_batch`）：批量任务等待的 future 同时登记在批量状态的唤醒列表里，被唤醒时先看有没有不让路的工作，有就 drop 让路的守卫、去做它。所以第 3 层从不排在保活时段后面。
+- 等待时段期间有了窗口链或第 3 层的工作（打开文件、焦点变化，`kick_batch`）：批量任务等待的 future 同时登记在批量状态的唤醒列表里，被唤醒时先看有没有不让路的工作，有就 drop 让路的守卫（停下的那一项的状态留在任务里，之后取回让路的守卫时接着做；超过 256 KiB 的见下文 `LargeSlot` 一条）、取不让路的守卫去做它。所以第 3 层从不排在保活时段后面。
 - 在途的抽取在分片边界停下、保留状态，不放弃（核心语言）：解析的进度回调在 `yield_requested()` 为 true 时返回 `Break`，`Parser` 不 `reset`、输入保留，下次用同一份输入继续（ADR 0034 调研：恢复后的树与一次解析相同）；一次遍历（ADR 0031）每 1024 个节点检查一次，停下时保存遍历的栈。抽取返回 `Outcome::Parked(Parked)`，批量任务带着它等下一个许可，得到 `Batch` 或 `Slot` 时先接着做它（超过 256 KiB 的等 `Batch`）。语言包用的 tree-sitter-tags 不能恢复，照暂停的规则放弃这一项，放回这一层的「恢复后先做」小队列。
 - 截止时间按运行的时间计：停下时把这次抽取从看门狗的在途表里撤下、记下剩余的预算，继续时按剩余的预算重新登记，所以让路不会让一个文件因为等待而 `TimedOut`。暂停（`pause_requested()`）、取消和会话结束时丢掉保存的状态，按原来的规则放弃这一项。
-- 内存：保存的状态（解析器、部分语法树、遍历的栈、输入）每个批量任务至多一份；超过 256 KiB 的文件仍只在一个批量任务里抽取（`LargeSlot`，停下时也不交还），所以建索引期间的临时内存仍按「性能」的 ≤ 40 MB 计。
+- 超过 256 KiB 的一项停下之后：它拿着 `LargeSlot`（超过 256 KiB 的文件同时只在一个批量任务里抽取），又要等开关关闭才能继续（不进入时段），用户一直在交互时可能一直等。不让路的工作（窗口链的窗口、第 3 层超过 256 KiB 的文件）要 `LargeSlot` 时不等它：`LargeSlot` 记下有不让路的请求、唤醒持有它的停下的任务，那个任务丢掉保存的状态（这一项放回它那一层的「恢复后先做」小队列，下次从头抽取）、交还 `LargeSlot`，请求方在下一次唤醒时取得。所以第 3 层和窗口链不因让路的大文件变慢（ADR 0033「第 3 层不让路」），一棵停下的大树和一个不让路的大工作也不同时在内存里。不大于 256 KiB 的停下的项不占 `LargeSlot`，在时段里继续。
+- 内存：保存的状态（解析器、部分语法树、遍历的栈、输入）每个批量任务至多一份，超过 256 KiB 的至多一份（`LargeSlot`），所以建索引期间的临时内存仍按「性能」的 ≤ 40 MB 计。
 - 不变的：第 1、2 层和查询（`Interactive`、`Background` 任务）不受开关影响；窗口链和第 3 层不让路；`pause_requested()` 的语义、后台状态和代数、bench 的采样都按 kernel 的规则，与开关无关。
 
 ```rust
 // index/batch.rs（内部）
-struct BatchTask { near: BackgroundGuard, far: Option<BackgroundGuard>, parked: Option<Parked> }
+struct BatchTask { guard: TaskGuard, parked: Option<Parked> }
+/// 任何时候只有一个守卫（kernel 按守卫记暂停）。
+enum TaskGuard { Near(BackgroundGuard), Far(BackgroundGuard), None }
 enum Outcome { Done(Done, usize), Paused, Skip, Parked(Parked) }
 /// 停在分片边界的一项：解析器（未 reset）、输入、已完成的部分语法树或遍历的栈、剩余的截止预算。`Send`，不跨任务共享。
 struct Parked { item: Item, flag: Arc<AtomicBool>, state: ResumeState, budget: Duration }
@@ -1816,26 +1850,27 @@ enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree:
 | 1–16 MiB | `TooLarge` | 窗口链（下文），完成后整份抽取一行是 `Windowed` | 只解析位置所在的窗口，8 ms 截止时间 |
 | > 16 MiB | `TooLarge` | 不抽取 | `Failed(TooLarge)` |
 
-**窗口**：一个窗口从起点 `s` 开始，解析 `[s, min(s + 64 KiB, 文件长度))`；终点是语法树根节点的最后一个完整子节点（不是 `ERROR`、不含 `MISSING`，终点在窗口之内）的终点，窗口到文件末尾时是文件末尾。一个完整的子节点也没有（一个顶层节点跨过 64 KiB）时依次试 256 KiB、1 MiB 的窗口，仍没有就在窗口末尾切开（ADR 0034 的已知限制：跨越整个窗口的作用域不完整）。窗口的抽取结果是名字起点在 `[s, 终点)` 里的定义和引用，下一个窗口从终点开始。行号和字节偏移都是在整个文件里的：窗口单元记下起点所在的行（`part_line`），窗口里的行号加上它。一个窗口的语法树约 2–5 MiB，算完即释放。
+**窗口**：一个窗口从起点 `s` 开始，解析 `[s, min(s + 64 KiB, 文件长度))`；窗口到文件末尾时终点是文件末尾。否则按树切（[大文件调研「整个文件按窗口高亮」](../research/large-files-rendering.md#整个文件按窗口高亮)的规则）：从根节点往下，每一层取窗口末尾之前最后一个完整的子节点（不是 `ERROR`、不含 `MISSING`、终点在窗口之内）；被窗口截断的那个子节点里还有这样的子节点时进入它、继续往下，终点取找到的最深的那一个的终点，即窗口末尾之前最后一个由树确认的语句或成员边界。所以包住整个文件的 IIFE、UMD 和压缩成一行的 bundle（`typescript.js`、webpack 的输出、`*.min.js`）也在函数体里的语句之间切开，窗口仍约 64 KiB、语法树仍约 2–5 MiB（调研实测最大 5.3 MiB）。找不到任何完整的节点时（例如窗口里只有一个超过 64 KiB 的字符串或注释）才把窗口扩到 256 KiB 再找一次；仍没有时切在窗口末尾之前最后一个叶子节点（token）的终点；连叶子都没有（一个超过 256 KiB 的 token）时，从窗口末尾向后跳过标识符字符（ASCII 字母数字、`_`、`$`、UTF-8 的多字节序列）找到第一个非标识符字符处切开。任何情况下都不在一个标识符中间切开。窗口单独解析的作用域可能不完整（ADR 0034 的已知限制：窗口从函数体中间开始时，它里面的定义没有外层的 `scope`）。窗口的抽取结果是名字起点在 `[s, 终点)` 里的定义和引用，下一个窗口从终点开始。行号和字节偏移都是在整个文件里的：窗口单元记下起点所在的行（`part_line`），窗口里的行号加上它。一个窗口的语法树约 2–5 MiB，算完即释放。
 
 **窗口链**（文件被打开、大小 1–16 MiB）：
 
-- 开始：`SafeRoot::open_file` 打开，`read_all(16 MiB)` 一次，按读到的字节求 OID，等于要建索引的 OID（映射里的或 `TextRef` 的；原始字节的 OID 不等时用一次 `canonical_oid`，对上了记 `canonical = 0`）才继续，然后释放这份内容，只留下 `OpenFile`（`Arc`）和它的 `identity()`。状态改变时间在读之前 2 秒以内的文件推迟 2 秒再开始（与依赖的 stat 表相同的 racy 规则），避免同一个时间戳里又被改过。
+- 开始：`SafeRoot::open_file` 打开，按 1 MiB 的区间顺序 `read_ranges`，边读边用 `git::BlobHasher`（流式的 blob 哈希，见「对其他 crate 的要求」）求 OID，读完核对每段返回的身份都与打开时相同；OID 等于要建索引的 OID（映射里的或 `TextRef` 的）才继续，内存里同时只有一个 1 MiB 的区间。原始字节的 OID 不等时这个文件需要规范化转换（如 CRLF），`canonical_oid` 要整份字节，这时才 `read_all` 一次（≤ 16 MiB，在 `LargeSlot` 里，用完即释放），对上了记 `canonical = 0`。之后只留下 `OpenFile`（`Arc`）和它的 `identity()`。状态改变时间在读之前 2 秒以内的文件推迟 2 秒再开始（与依赖的 stat 表相同的 racy 规则），避免同一个时间戳里又被改过。
 - 每个窗口：`read_ranges` 读 `[s, s + 窗口长度)`，返回的 `meta.identity()` 与开始时的不同就放弃整条链（内容变了，fs_watch 的事件会带来新的 OID）；抽取，立即作为一个单元写入 `code_intel.tags`（键加 `part = s`，行见「存储表」），所以暂停、取消或退出只丢在途的那个窗口（ADR 0029 第二条）。一个窗口超时（`TimedOut`）也写一行，链从它的窗口末尾继续，但这条链不算完成。
 - 续接：开始之前按 `(oid, lang, grammar, query)` 读出已有的窗口行（`part >= 0`，按 `part` 排序），从 0 起沿 `part_end` 走，第一个断开处就是续接的起点（行号取前一个窗口的 `part_line` 加上它里面的换行数，读那个窗口的字节数出来）；被淘汰的窗口因此会被补上。
-- 完成：最后一个窗口的终点等于文件长度、链上没有 `TimedOut` 时，写整份抽取的一行，状态 `Windowed`，替换 `TooLarge`（「调度、批次与取消」的替换规则：`Windowed` 胜过 `TooLarge`、`TimedOut`），然后按 `Done` 置位 `indexed` 提示。之后这个文件算作已入索引，名字表、按名字查找、查引用经窗口单元用到它的定义和引用。
+- 完成：最后一个窗口的终点等于文件长度、链上没有 `TimedOut` 时，写整份抽取的一行，状态 `Windowed`，替换 `TooLarge` 或 `TimedOut`（「调度、批次与取消」的替换规则，那里列了这第二种替换，以及它算作本 crate 自己的一次淘汰），然后按 `Done` 置位 `indexed` 提示。之后这个文件算作已入索引，名字表、按名字查找、查引用经窗口单元用到它的定义和引用。
 - 淘汰：窗口单元与其他单元一样按访问时间淘汰。存在检查命中 `Windowed` 时多一条语句核对链仍完整，不完整按 `TooLarge` 处理（核算里计为未搜，下次打开时续接）；标记访问时连同它的窗口单元一起标记。
-- 线程：可见区域附近的三个窗口（可见窗口和前后各一个）先在 `Interactive` 上、持有 `BusyGuard`，按 ADR 0034 首屏窗口的启发式起点单独抽取，结果只在内存里（与保留的解析放在一起），供同文件跳转；它们的起点是启发式的，不是语法树确认的切点，所以不写入。持久的链全部在批量层最前面，持有不让路的 `BackgroundGuard`，不延长「静止」的等待。超过 256 KiB 的工作照 `LargeSlot` 一次一个，链开始时的 `read_all` 也在 `LargeSlot` 里，所以临时内存是一份 16 MiB 的内容或一个窗口的树，不同时出现。
+- 线程：可见区域附近的三个窗口（可见窗口和前后各一个）先在 `Interactive` 上、持有 `BusyGuard`，按 ADR 0034 首屏窗口的启发式起点单独抽取，结果只在内存里（与保留的解析放在一起），供同文件跳转；它们的起点是启发式的，不是语法树确认的切点，所以不写入。持久的链全部在批量层最前面，持有不让路的 `BackgroundGuard`，不延长「静止」的等待。每个窗口（读入的窗口和它的语法树）都按超过 256 KiB 的工作计，照 `LargeSlot` 一次一个；需要规范化转换时的那次 `read_all` 也在 `LargeSlot` 里。所以链的临时内存是一个 1 MiB 的哈希区间，或一个窗口和它的树（64 KiB 的窗口约 2–5 MiB，扩到 256 KiB 的最多约 21 MiB，调研实测），或那一份 ≤ 16 MiB 的内容，三者不同时出现（`code_intel/window_peak`）。
 
 **跳转里的大文件**（当前文本 1–16 MiB）：
 
-- 当前文本的身份：文本成为当前文本时，ADR 0037 的预热任务（`Background`）对超过 1 MiB 的文本不整份解析，改为读一次、求 OID、核对 `TextRef::oid`，记下 `LargeText { oid, identity, recorded_at, checkpoints }`：`checkpoints` 是每 64 KiB 一个（字节偏移、该处的行号），16 MiB 约 3 KiB。与保留的解析同一个上限和生命周期（最多 2 份、是当前文本期间保留、之后 60 s）。
+- 当前文本的身份：文本成为当前文本时，ADR 0037 的预热任务（`Background`）对超过 1 MiB 的文本不整份解析，改为按 1 MiB 的区间流式读一次（同窗口链的开始：`BlobHasher`，内存里只有一个区间；需要规范化转换的才整份读入一次）、求 OID、核对 `TextRef::oid`、顺带数换行，记下 `LargeText { oid, identity, recorded_at, checkpoints }`：`checkpoints` 是每 64 KiB 一个（字节偏移、该处的行号），16 MiB 约 3 KiB。与保留的解析同一个上限和生命周期（最多 2 份、是当前文本期间保留、之后 60 s）。
 - 第 1 步：`open_file`，身份等于记下的、记下时不在 racy 窗口里时不再求 OID；按行号找不超过它的检查点，`read_ranges` 读那个检查点之后的 64 KiB 加 4 KiB，数换行找到这一行的行首，目标字节是行首加列。窗口按 ADR 0034 首屏窗口的规则取：从目标之前约 8 KiB 处的安全位置（往前至多再找 4 KiB，只看目标前后各 64 KiB）到目标之后 4 KiB，用同一次 `read_ranges` 读出（至多 4 段、合计 ≤ 1 MiB）。`ParsedFile::parse_window`（基准字节和基准行号）解析它，截止时间 8 ms；locals 和绑定只在窗口里。
 - 超时（8 ms 内没解析完）：按目标字节处的标识符字符（与限时搜索的整词规则相同）取出名字，`RefSyntax::Plain`，没有 `Bound(Local)`，接着做第 2、3 步。所以大文件里的跳转总能列出按名字找到的候选。
 - 同文件里窗口之外的定义：来自同一个 OID 的窗口单元（第 3 步，层是 `CurrentFile`），以及内存里可见区域的三个窗口；链没写完时只有已写入的部分，其余靠第 3 步的其他层和限时搜索。
-- 身份还没记下（预热没完成）或对不上时，第 1 步在 `Interactive` 上整份读入求 OID 并顺带算出检查点（16 MiB 在 Linux 上约 30–40 ms，冷路径，只记录），然后同上。窗口的解析按（OID、语言版本、窗口起点）放进 ADR 0037 的保留解析里，计入它的 12 MiB（一个约 20 KiB 的窗口约 1 MiB）。
+- 身份还没记下（预热没完成）或对不上时，第 1 步在 `Interactive` 上同样流式读一遍求 OID 并顺带算出检查点（16 MiB 在 Linux 上约 30–40 ms，冷路径，只记录），然后同上。
+- 当前文本来自对象库（`TextOrigin::Object`，如大文件 Diff 的旧一侧）：`GitAccess::blob` 只能整份取出，不能按区间读。对象库的内容按 OID 不变，不需要核对身份；预热任务整份取出一次、算出检查点，记进 `LargeText`（不留内容）。跳转时位置落在保留的窗口解析里（上一次跳转解析过的窗口）就直接用它，不读；否则整份取出（≤ 16 MiB，`Interactive` 上的临时内存，取出窗口后立即释放）、解析窗口。整份取出在 16 MiB 时约几十毫秒（zlib 解压加复制），不在 20 ms 的份额里，作为已知限制只记录（`code_intel/goto_large/object`）；不把 16 MiB 的内容留在内存里，因为它超过 ADR 0037 保留解析的 12 MiB 上限，也不属于任何常驻份额。窗口的解析按（OID、语言版本、窗口起点）放进 ADR 0037 的保留解析里，计入它的 12 MiB（一个约 20 KiB 的窗口约 1 MiB）。
 
-**查询读到的其他大文件**：整份抽取是 `Windowed` 的文件（打开过的大文件）按窗口用：查引用用 `ci_ref` 找出含这个名字的窗口单元，`read_all` 一次核对 OID，只解析这些窗口（起点和终点取自单元）；限时搜索不搜它们（已入索引）。其余超过 4 MiB 的文件照旧计为 `TooLarge`、未搜。
+**查询读到的其他大文件**：整份抽取是 `Windowed` 的文件（打开过的大文件）按窗口用：查引用用 `ci_ref` 找出含这个名字的窗口单元，流式读一遍核对 OID（同窗口链的开始），只读、只解析这些窗口（起点和终点取自单元）；限时搜索不搜它们（已入索引）。其余超过 4 MiB 的文件照旧计为 `TooLarge`、未搜。
 
 **字节偏移**（`Location::byte`）：抽取时每个定义记下名字起点的字节偏移（`Def::byte`、`ci_def.byte`），引用位置本来就有字节区间。交给视图时：单元的 `canonical = 1`（抽取的字节就是 `oid` 那份内容：原始字节的 OID 等于键，或对象库一侧、依赖文件）时为 `Some`，经 `canonical_oid` 才对上的为 `None`，视图按行号定位；现场解析的当前文本、引用同理。口径与 `git` 的 hunk 和展示行的偏移相同（[git 设计「展示行」](git.md#展示行)：这一侧 blob 的字节），所以从 hunk 打开、从候选打开都按 blob 的字节定位。
 
@@ -1844,7 +1879,7 @@ enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree:
 [git 设计「规范内容的 OID」](git.md#规范内容的-oid)：`canonical_oid` 每次调用在新句柄上解析一次 index（10 万文件约 22 ms），`canonical_oids` 整批也只解析一次（#135）。状态：已设计，尚未实现（「验收」第 6 步）。
 
 - 改用整批的地方：
-  - 核对任务的重新读：一遍里读出的路径先按原始字节的 OID 分出与文件列表不同的那些，再按每批 ≤ 256 项、字节合计 ≤ 16 MiB 调用 `canonical_oids`，一批的内容在这期间留在内存里。checkout 之后 1000 个 CRLF 文件进入重新读集合时，原来是 1000 次 index 解析（10 万文件约 22 s），现在 4 次左右。
+  - 核对任务的重新读：一遍里读出的路径先按原始字节的 OID 分出与文件列表不同的那些，再按每批 ≤ 256 项、字节合计 ≤ 2 MiB 调用 `canonical_oids`，一批的内容在这期间留在内存里（≤ 2 MiB，与批量层一批读入的上限相同，计入「性能」建索引期间的临时内存）。单个文件超过 2 MiB 时自成一批。checkout 之后 1000 个约 8 KiB 的 CRLF 文件进入重新读集合时，原来是 1000 次 index 解析（10 万文件约 22 s），现在 4 次（每批 256 个、约 2 MiB）。
   - 批量层的一批（≤ 64 个文件、≤ 2 MiB）：读到的 OID 与排队时不同的文件在写入之前一次 `canonical_oids`。
   - 查询结果的写入（限时搜索命中的文件、现场抽取的文件，由 `Background` 任务写入）：一次写入一批。
 - 仍是单个调用：交互路径上只核对一份内容的地方（跳转第 1 步的当前文本、查引用时被查定义所在的文件、窗口链的开始），计入它所在的延迟预算。
@@ -1869,11 +1904,11 @@ enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree:
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
 | 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）。`git` 的工作区比较（`GitAccess::changed_paths`）期间的临时内存不在这 40 MB 里：比较不用 `TrackedPaths`，自己解析 index，10 万文件时一次比较的峰值 65.8 MB（`git/compare_100k/peak_bytes` ≤ 72 MB，`git` 的份额，[ADR 0035](../adr/0035.md)），单独就超过 40 MB；`code_intel/batch_peak` 的夹具用 `FakeGit`，不含它。最坏情况下，打开项目时首页的计数比较和本 crate 的核对比较各在一个新 `Worktree` 上同时做冷比较，加上批量层，进程的临时峰值可达约 2 × 66 + 40 ≈ 170 MB（git 的比较之间没有串行化，这是已知的最坏情况，不设顶层预算，同 ADR 0029 的临时内存）。降低的办法是 ADR 0035 的「比较与 `tracked` 共用一次解析」；比较是否与超过 256 KiB 的文件的抽取错开，由本 crate 的下一步决定 | `code_intel/batch_peak` |
 | 磁盘 | `code_intel.tags` 配额 224 MiB、`code_intel.deps` 配额 32 MiB，合计 256 MiB（[ADR 0033](../adr/0033.md)）；cloudprint 形状约 1 MB，10 万文件约 270 MiB（第 3 步的合成仓库实测，超过 224 MiB 的配额，见「存储表」的「规模」和配额一条）；一个 TS 项目的依赖约 5 MiB 源码，单元约 5–10 MiB | `code_intel/disk_100k`（只记录） |
-| 依赖层（ADR 0033） | 依赖层每个项目每次会话读 ≤ 64 MiB、写 ≤ 32 MiB；21 个直接依赖、约 5 MiB 声明闭包的 TS 项目，从空缓存到依赖层完成单线程约 1.3 s（4 MB/s 的抽取吞吐），在批量层上、排在第 4 层之后，不推迟 `app/index_100k` 的里程碑；身份不变时打开项目只读 lockfile 和每个直接依赖的清单：≤ 50 ms（4 MiB 的 `package-lock.json`，流式扫描）；依赖映射上限 20 000 个文件、≤ 1 MB，计入下面的常驻份额 | `code_intel/deps_ts_project`（只记录：合成的 21 个直接依赖，从空缓存到 `coverage.deps` 为 `Done`）、`code_intel/deps_identity` ≤ 50 ms（同上的项目、缓存里已有全部路径表，从打开到身份任务结束）、`code_intel/deps_map_bytes` ≤ 1 MB（2 万个文件的依赖映射，`Memory`） |
+| 依赖层（ADR 0033） | 依赖层每个项目每次会话读 ≤ 64 MiB、写 ≤ 32 MiB；21 个直接依赖、约 5 MiB 声明闭包的 TS 项目，从空缓存到依赖层完成单线程约 1.3 s（4 MB/s 的抽取吞吐），在批量层上、排在第 4 层之后，不推迟 `app/index_100k` 的里程碑；身份不变时打开项目只读 lockfile、每个直接依赖的链接和清单的 stat，再对路径表里的 OID 做存在检查（约 250 个文件一条语句）：≤ 50 ms（4 MiB 的 `.pnpm/lock.yaml`，按行流式扫描）；依赖映射上限 20 000 个文件、≤ 1 MB，计入下面的常驻份额 | `code_intel/deps_ts_project`（只记录：合成的 pnpm 工作区、21 个直接依赖，从空缓存到 `coverage.deps` 为 `Done`）、`code_intel/deps_identity` ≤ 50 ms（同上的项目、缓存里已有全部路径表和单元，从打开到身份任务结束）、`code_intel/deps_map_bytes` ≤ 1 MB（2 万个文件的依赖映射，`Memory`） |
 | 交互让路（ADR 0033） | 开关打开后在途的抽取在一片之内停下（解析的进度回调约每 100 次操作一次，遍历每 1024 个节点一次）：≤ 10 ms；之后批量层合计 ≤ 一个核的 10%（kernel 的保活时段，每个时段只做一个 ≤ 256 KiB 的文件）；停下再继续的结果与一次做完的相同；不让路的层不变慢 | `code_intel/yield_stop` 最大值 ≤ 10 ms（1 MiB 的 TS 文件在解析中途打开开关，到这次抽取返回 `Parked`）；帧时间由 `app/scroll_frames_indexing` 判定（bench 设计，ADR 0033） |
-| 大文件的跳转（ADR 0034） | 1–16 MiB 的当前文本，身份已记下时：打开、比较身份、读两段（≤ 68 KiB 与窗口）≤ 1 ms，窗口解析 ≤ 8 ms（截止时间），之后与普通跳转相同，第一批 ≤ 20 ms；身份没记下时整份读入求 OID（16 MiB 约 30–40 ms，Linux），只记录 | `code_intel/goto_large`（4 MiB 的 TypeScript，位置在中部，身份已记下）≤ 20 ms、`code_intel/goto_large/cold` 只记录 |
-| 打开文件的窗口链（ADR 0034） | 窗口约 64 KiB，一个窗口的语法树约 2–5 MiB；16 MiB 的文件整条链约 4–5 s 的 CPU（Linux 估算），在批量层最前面；临时内存 ≤ 16 MiB（开始时一份 ≤ 16 MiB 的内容，或一个窗口的树加读入的窗口，二者不同时），计入建索引期间的 40 MB | `code_intel/window_chain_16mib`（只记录：16 MiB 的 TypeScript 从打开到 `Windowed` 写入）、`code_intel/window_peak` 最大值 ≤ 16 MiB（同上的活跃字节峰值） |
-| 规范内容 OID（git 的 `canonical_oids`） | 重新读、批量层的一批、查询结果的写入：每批（≤ 256 项、≤ 16 MiB）至多解析一次 index（10 万文件约 22 ms）；交互路径上的单个核对不变 | `code_intel/reread_crlf_1000`（只记录：`git` 的 `TestRepo` 上 1 万个跟踪文件、`core.autocrlf = true`，1000 个文件进入重新读集合，到覆盖部分装上） |
+| 大文件的跳转（ADR 0034） | 1–16 MiB 的当前文本，身份已记下时：打开、比较身份、读两段（≤ 68 KiB 与窗口）≤ 1 ms，窗口解析 ≤ 8 ms（截止时间），之后与普通跳转相同，第一批 ≤ 20 ms；身份没记下时流式读一遍求 OID（16 MiB 约 30–40 ms，Linux），只记录；对象库一侧的大文本每次整份取出 blob（不能按区间读），位置在保留的窗口解析里时不取，只记录（已知限制） | `code_intel/goto_large`（4 MiB 的 TypeScript，位置在中部，身份已记下）≤ 20 ms、`code_intel/goto_large/cold`、`code_intel/goto_large/object` 只记录 |
+| 打开文件的窗口链（ADR 0034） | 窗口约 64 KiB（按树切，包住整个文件的 IIFE 也在函数体里切开），一个窗口的语法树约 2–5 MiB；16 MiB 的文件整条链约 4–5 s 的 CPU（Linux 估算），在批量层最前面。临时内存：求 OID 时一个 1 MiB 的区间（流式哈希），之后一个窗口和它的树；找不到切点、扩到 256 KiB 的窗口的树最多约 21 MiB（调研实测，压缩 JS），需要规范化转换的文件开始时整份读入一次（≤ 16 MiB）；三者都在 `LargeSlot` 里、不同时出现，计入建索引期间的 40 MB | `code_intel/window_chain_16mib`（只记录：16 MiB 的 TypeScript 从打开到 `Windowed` 写入）、`code_intel/window_peak` 最大值 ≤ 8 MiB（同上，不需要转换、窗口都是 64 KiB：一个窗口的树约 2 MiB 加 1 MiB 的区间，留约 2 倍的余量） |
+| 规范内容 OID（git 的 `canonical_oids`） | 重新读、批量层的一批、查询结果的写入：每批（≤ 256 项、字节合计 ≤ 2 MiB，内容在这期间留在内存里，计入建索引期间的 40 MB）至多解析一次 index（10 万文件约 22 ms）；交互路径上的单个核对不变 | `code_intel/reread_crlf_1000`（只记录：`git` 的 `TestRepo` 上 1 万个跟踪文件、`core.autocrlf = true`，1000 个文件进入重新读集合，到覆盖部分装上） |
 | 安装包 ≤ 80 MB | 六个 grammar crate 与 tree-sitter 运行时，由 #38 测量 | `app/bundle_size` |
 
 - 首帧之前不调用本 crate；第一个任务在第一个项目打开之后提交，批量线程在第一次提交 `Batch` 任务时才创建（ADR 0029）。
@@ -1894,9 +1929,10 @@ enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree:
 | 当前文件超过 16 MiB（ADR 0034） | 不抽取 | `Failed(TooLarge)` |
 | 打开的文件 1–16 MiB，窗口链还没写完 | 已写入的窗口照常可查，其余在批量层续接；跳转第 1 步只解析位置所在的窗口 | 结果照常；这个文件在核算里计为未搜，直到链完成 |
 | 大文件的窗口解析超过 8 ms | 按目标处的标识符取名字，跳过第 1 步的绑定 | 只有按名字找到的候选 |
-| 依赖目标读不到、路径或链接离开所在的根、`node_modules` 本身是符号链接、扩展名不在允许的列表里（ADR 0033） | 不读、不建索引 | 这个候选不出现；不影响完整性 |
+| 依赖目标读不到、路径离开包目录、链接的目标不在已发现的依赖根里、`node_modules` 本身是符号链接、扩展名不在允许的列表里（ADR 0033、0040） | 不读、不建索引 | 这个候选不出现；不影响完整性 |
+| 项目不是 pnpm 的布局（npm、yarn 安装，`node_modules` 里没有 `.pnpm`；ADR 0040） | 没有依赖层，不按需解析依赖 | 依赖里的定义不出现；项目自己的结果和完整性不受影响（已知限制） |
 | `code_intel.deps` 满了（依赖层自己的写入引起淘汰） | 依赖层在本次会话停下 | 项目的单元不受影响；依赖里的定义只经按需解析找到 |
-| lockfile 读不出、超过 64 MiB，或不是 npm 的 lockfile | 身份按包清单的 OID（ADR 0033 的后备） | 照常，重新安装后多一次 stat 或读取 |
+| `.pnpm/lock.yaml` 和 `pnpm-lock.yaml` 都读不出、超过 64 MiB、`lockfileVersion` 不是 6 或 9、要找的那一项超出扫描的语法子集 | 这个包的身份按后备（目录名、包清单的 OID、五项 stat），照常走 stat 表 | 照常，最多多一次 stat 或读取；不会用错的身份 |
 | 交互让路开关打开 | 让路的层在分片边界停下，只在保活时段里前进 | 无可见变化；第 4 层、依赖层、第 5 层完成得更晚 |
 | 某个文件解析超时 | 记 `TimedOut`，不自动重试；被打开时按交互截止时间重做一次 | 这个文件不提供候选，其余照常 |
 | 二进制、超过 1 MiB、读不出 | 记状态（`Binary`、`TooLarge`），工作区里的修改或未跟踪文件标为 `Unindexable` | 不提供候选；二进制算已入索引，其余计为未搜，结果是 `Partial`（「完整性的核算」） |
@@ -1940,15 +1976,18 @@ enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree:
 - 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤（含 Go 的 `Meters(value)` 跳到 `type Meters`）；同一份字节在 `.java` 和 `.js` 下时 `java` 的单元只给出 `.java` 的路径（`goto_oid_language_match`）；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；当前文本的 blob 已入索引时，第 1 步列出的本文件定义不在第 3 步重复出现，现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现（`goto_no_duplicates_*`）；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`NoSymbol`、`UnsupportedLanguage`；从对象库一侧（`TextOrigin::Object`）发起的查询，本文件的候选 `origin` 为 `Object`，由它发起的 `References` 读同一个 blob，不读工作区（`goto_object_origin_*`），也不解析工作区里同一路径的文件（`goto_object_side_parses_only_its_text`）；很多文件定义的名字，第一批里最近的候选排在最前、其余页之后追加、每个定义只出现一次（`goto_popular_name_nearest_first`），其余页在时间盒到时停下、没读的计入未搜（`goto_popular_name_pages_are_time_boxed`）；当前文本的解析保留之后，各个位置的答案与现场解析的相同、不再解析，内容变了就不命中（`goto_kept_parse_answers_as_the_cold_one`），份数、大小和 60 s 的上限（`goto_kept_parses_are_bounded`）。
 - 预取与焦点（`prefetch_*`、`focus_*`）：映射换代或淘汰代数变化之后，2 秒内同样的查询不沿用预取结果；非当前 worktree 的焦点不进入第 1、2 层，切换到那个 worktree 后生效。
 - 限时搜索（`search_*`）：只解析整词命中的文件；`ManualClock` 推进到 1 s 时停止并给出 `Partial` 的计数；命中文件的结果写入缓存；搜完时为 `Complete`；范围里有一个文件正在后台抽取时，搜完其余文件结果仍是 `Partial`、`unsearched` 至少为 1（`search_in_flight_partial`）。
-- 依赖（`deps_*`，ADR 0033，临时目录里的 `node_modules` 夹具，npm 和 pnpm 两种布局都由测试自己生成，只用合成的 `package.json` 和 `.d.ts`）：
-  - 发现：直接依赖的四种字段、512 个的上限、不合规的名字被跳过；从子项目往上找 `node_modules`；`exports` 的 `types` 条件（嵌套在 `import` / `require` 之下）、`types`、`typings`、`index.d.ts`、`main` 的顺序；`@types/<名字>` 和 `@types/scope__x`；闭包沿相对 import、`export * from`、`/// <reference path>` 走，裸模块名不跟随（`deps_entry_*`、`deps_closure_*`）。
-  - 读取限制：`node_modules` 本身是指向根外的符号链接时打不开（`deps_root_symlink_is_not_a_root`）；`"types": "../../.ssh/id_ed25519"` 和 `../` 越过包目录的 import 被丢弃，`SafeRoot` 的读取记录里没有根外的路径（`deps_types_outside_the_package_is_dropped`）；pnpm 的链接在根内解析、指向根外或另一个根的链接不跟随（`deps_pnpm_links_resolve_inside_the_root`、`deps_link_outside_the_root_is_unreadable`）；扩展名不在列表里的文件没有被打开（`deps_reads_only_allowed_extensions`）；工作区之外的根不从项目文件取路径（`deps_cache_roots_come_from_the_environment`，`Roots` 用测试给的环境）。
-  - 身份与 stat 表：身份不变时重新打开项目不读、不 stat 闭包里的文件（`SafeRoot` 的调用计数，`deps_same_identity_reads_nothing`）；`integrity` 变了时只重读五项 stat 变了的文件；修改时间被设回原值、状态改变时间变了的文件被重读（`deps_ctime_defeats_a_restored_mtime`）；记录前 2 秒内改过的文件不走捷径；`pnpm-lock.yaml` 的项目按清单的 OID 和包目录取身份。
+- 依赖（`deps_*`，ADR 0033、0040，临时目录里的 pnpm 布局夹具：单个项目和 pnpm 工作区，由测试自己生成虚拟存储、链接、`.pnpm/lock.yaml` 和 `pnpm-lock.yaml`，只用合成的 `package.json` 和 `.d.ts`）：
+  - 发现：直接依赖的四种字段、512 个的上限、不合规的名字被跳过；从子项目往上找 `node_modules`；虚拟存储的目录名解析出名字和版本（`@babel+core@7.24.0`、带 peer 的 `_…`），与链接的名字不同时读不到；npm 式的平铺 `node_modules`（没有 `.pnpm`）没有依赖层、按需解析也返回 None，`coverage.deps` 为 `Done`（`deps_npm_layout_is_out_of_scope`）；`exports` 的 `types` 条件（嵌套在 `import` / `require` 之下）、`types`、`typings`、`index.d.ts`、`main` 的顺序；`@types/<名字>` 和 `@types/scope__x`；闭包沿相对 import、`export * from`、`/// <reference path>` 走，裸模块名不跟随（`deps_entry_*`、`deps_closure_*`）。
+  - 读取限制：`node_modules` 本身是指向根外的符号链接时打不开（`deps_root_symlink_is_not_a_root`）；`"types": "../../.ssh/id_ed25519"` 和 `../` 越过包目录的 import 被丢弃，`SafeRoot` 的读取记录里没有根外的路径（`deps_types_outside_the_package_is_dropped`）；pnpm 的链接在根内解析（`deps_pnpm_links_resolve_inside_the_root`）；工作区子项目的 `packages/app/node_modules/react` 指向根目录 `node_modules/.pnpm/…`，那是同一条查找链上已发现的根，经那个根的 `SafeRoot` 读到（`deps_link_into_a_discovered_root_is_read`）；指向任何已发现的根之外（`$HOME`、worktree 之外、worktree 里没有作为根打开的目录、另一个 worktree 的根）的链接不读，`SafeRoot` 的读取记录里没有那些路径（`deps_link_outside_the_discovered_roots_is_rejected`）；扩展名不在列表里的文件没有被打开（`deps_reads_only_allowed_extensions`）；工作区之外的根不从项目文件取路径（`deps_cache_roots_come_from_the_environment`，`Roots` 用测试给的环境）。
+  - 身份与 stat 表：身份不变时重新打开项目不读、不 stat 闭包里的文件（`SafeRoot` 的调用计数，`deps_same_identity_reads_nothing`）；`integrity` 变了时只重读五项 stat 变了的文件；修改时间被设回原值、状态改变时间变了的文件被重读（`deps_ctime_defeats_a_restored_mtime`）；记录前 2 秒内改过的文件不走捷径；`.pnpm/lock.yaml` 优先于 `pnpm-lock.yaml`；`pnpm-lock.yaml` 已改成新版本、还没安装时，按已安装的目录名找不到键、走后备，不记下新 lockfile 的 `integrity`（`deps_lockfile_ahead_of_install_is_not_the_identity`）。
+  - lockfile 的扫描（`deps_lock_scan_*`，insta 快照记录取出的（键、`integrity`））：版本 6 的 `/name@ver(peer)` 键和版本 9 的带引号的键、`resolution` 的两种写法；版本 5、7、没有 `lockfileVersion` 的文件全部走后备；要找的那一项里有锚点、制表符缩进、重复的键或不合法的值时只有这一项走后备、其他项照常；一行超过 64 KiB、文件超过 64 MiB 时整个文件不用；扫描的内存与文件大小无关（16 MiB 的 lockfile 的活跃字节峰值 ≤ 2 MiB）；随机截断和改写的 lockfile（种子固定的 1000 份）从不给出与原文件不同的 `integrity`，只会给出后备。
+  - 出边与路径表：版本号变了、内容没变的包（单元都已在缓存里）走完整个闭包，路径表与第一次的相同（`deps_closure_from_stored_specifiers`）；跳转先按需写了入口的单元之后，依赖层仍走完闭包（`deps_closure_after_an_on_demand_entry`）；路径表还在、它引用的单元被淘汰后，打开项目时缺的文件被排进依赖层、补齐之后第 3 步又能找到这些定义（`deps_table_without_units_is_repaired`）。
+  - 根的有效性：会话中删掉重建 `node_modules`（新的 inode）后，下一次身份任务或读取 `NotFound` 时重新打开，读到新的内容（`deps_reinstalled_root_is_reopened`）；切换当前 worktree 后，另一个 worktree 的根不再被读（`deps_roots_are_per_worktree`）。
   - 限额：每包 4000 个文件和 16 MiB、单个文件 1 MiB、每个项目 64 MiB，到了之后依赖层停下、`coverage.deps` 为 `Done`（`deps_limits_*`）。
   - 存储：依赖的单元和路径表在 `code_intel.deps`，配额小于数据量时只淘汰依赖的单元，`code_intel.tags` 的单元一个不少（`deps_quota_evicts_only_dependency_units`）；依赖层自己的写入引起淘汰后在本次会话停下。
   - 查询：第 3 步给出 `Dependency` 层的候选、排在项目的各层之后，`Location::origin` 带包名和版本（`deps_candidates_come_last`）；名字表和 `Named` 里没有依赖的名字（`deps_not_in_names`）；依赖层没完成时跳转仍可以是 `Complete`，`unsearched`、`outside` 不计依赖（`deps_do_not_count_in_completeness`）；读取核对：改过的依赖文件当场重新抽取，`TextRef` 指向改过的依赖文件时返回 `Stale`（`deps_read_verify_*`）；测试 `Resolver` 交出的裸模块名经 `ResolveContext::dependency` 得到 `Bound(Import)`（`deps_on_demand_import`）。
-- 让路（`yield_*`，ADR 0033，kernel 的 `TestKernel` 和 `Kernel::set_clock` 的 `ManualClock`）：开关打开时第 4 层、依赖层、第 5 层在下一个分片边界停下，第 3 层和窗口链照常（`yield_tier3_does_not_yield`）；在途的 1 MiB 文件停下再继续，单元与不停时逐字节相同（核心语言每种一个，`yield_resumed_extraction_is_identical`）；语言包的抽取被放弃、之后重做；停下期间不计截止时间，停 1 s 之后不 `TimedOut`（`yield_parked_time_is_not_deadline_time`）；超过 256 KiB 的文件不进入时段、开关关闭后继续；等时段时来了第 3 层的工作，它不等时段（`yield_tier3_work_does_not_wait_for_a_slot`）；暂停优先：停下的状态被丢掉、文件放回小队列；开关反复切换 100 次，每个文件只写入一次。
-- 大文件（`window_*`、`goto_large_*`，ADR 0034，合成的 2–16 MiB 文件，每种核心语言一个，另有一个顶层节点跨过 1 MiB 的文件）：窗口链合并的定义和引用名与整份抽取的相同（顶层节点不跨窗口的文件逐项相同，`window_chain_equals_whole_extraction`）；行号和字节偏移是在整个文件里的；每个窗口完成即写入，暂停之后从最后一个窗口的终点续接、不重抽已写入的窗口，被淘汰的窗口被补上（`window_chain_resumes_after_pause`、`window_chain_fills_evicted_windows`）；链完成时写 `Windowed`、提示置位，之后这个文件算已入索引；读到一半文件被改（身份变了）时放弃、不以旧 OID 写入后面的窗口（`window_chain_aborts_on_identity_change`）；跳转第 1 步只读两段、只解析窗口（`SafeRoot` 和解析的计数），8 ms 超时时按标识符字符取名字（`goto_large_window_only`、`goto_large_timeout_falls_back_to_the_name`）；身份没记下时整份读一次、之后不再读（`goto_large_cold_then_warm`）。
+- 让路（`yield_*`，ADR 0033，kernel 的 `TestKernel` 和 `Kernel::set_clock` 的 `ManualClock`）：开关打开时第 4 层、依赖层、第 5 层在下一个分片边界停下，第 3 层和窗口链照常（`yield_tier3_does_not_yield`）；在途的 1 MiB 文件停下再继续，单元与不停时逐字节相同（核心语言每种一个，`yield_resumed_extraction_is_identical`）；语言包的抽取被放弃、之后重做；停下期间不计截止时间，停 1 s 之后不 `TimedOut`（`yield_parked_time_is_not_deadline_time`）；超过 256 KiB 的文件不进入时段、开关关闭后继续；等时段时来了第 3 层的工作，它不等时段（`yield_tier3_work_does_not_wait_for_a_slot`）；暂停优先：停下的状态被丢掉、文件放回小队列；第 3 层和第 4 层都有工作、开关打开着时打开暂停，kernel 的后台状态在批次边界之内变为「全部已暂停」（每个批量任务只持有一个守卫，`yield_pause_reaches_all_paused`）；超过 256 KiB 的一项停下拿着 `LargeSlot` 时，第 3 层一个超过 256 KiB 的文件和窗口链的窗口不等开关关闭：停下的状态被丢掉、`LargeSlot` 交给它们，活跃字节里没有两棵大树同时存在（`yield_large_parked_item_gives_way_to_tier3`）；开关反复切换 100 次，每个文件只写入一次。
+- 大文件（`window_*`、`goto_large_*`，ADR 0034，合成的 2–16 MiB 文件，每种核心语言一个，另有一个顶层节点跨过 1 MiB 的文件、一个整个包在 IIFE 里的 UMD 文件和一个压缩成一行的 JS）：窗口链合并的定义和引用名与整份抽取的相同（顶层节点不跨窗口的文件逐项相同，`window_chain_equals_whole_extraction`）；IIFE、UMD 和一行的 JS 也在函数体里按树切开，每个窗口 ≤ 64 KiB、没有窗口扩到 256 KiB（`window_cut_descends_into_the_truncated_node`）；只有一个超过 256 KiB 的字符串字面量的文件按叶子或标识符边界切开，任何窗口的边界都不在标识符中间（`window_cut_never_splits_an_identifier`）；行号和字节偏移是在整个文件里的；`Windowed` 替换 `TooLarge` 的那次事务算作本 crate 自己的淘汰、提示不因它全部失效（`window_marker_replace_is_own_eviction`）；打开过的大文件的名字在名字表里（`window_units_are_in_names`）；每个窗口完成即写入，暂停之后从最后一个窗口的终点续接、不重抽已写入的窗口，被淘汰的窗口被补上（`window_chain_resumes_after_pause`、`window_chain_fills_evicted_windows`）；链完成时写 `Windowed`、提示置位，之后这个文件算已入索引；读到一半文件被改（身份变了）时放弃、不以旧 OID 写入后面的窗口（`window_chain_aborts_on_identity_change`）；跳转第 1 步只读两段、只解析窗口（`SafeRoot` 和解析的计数），8 ms 超时时按标识符字符取名字（`goto_large_window_only`、`goto_large_timeout_falls_back_to_the_name`）；身份没记下时流式读一次、之后不再读，读的时候活跃字节里只有一个 1 MiB 的区间（`goto_large_cold_then_warm`）；对象库一侧的大文本，位置在保留的窗口解析里时不调用 `GitAccess::blob`，不在时调用一次（`goto_large_object_reuses_the_kept_window`）。
 - 字节偏移（`location_byte_*`）：每个候选和引用的 `byte` 处的字节就是名字的第一个字节（工作区、对象库、依赖、窗口单元各一组）；CRLF 的工作区文件经 `canonical_oid` 对上时为 None；版本 2 的表在第一次使用时删除重建。
 - 批量核对（`canonical_batch_*`，`FakeGit` 记录调用）：一遍重新读的 300 个 CRLF 文件只调用两次 `canonical_oids`（每批 ≤ 256 项）、没有调用 `canonical_oid`；一批里一项出错时逐项重试、其余照常；交互路径上仍是一次 `canonical_oid`。
 - 引用（`refs_*`）：局部变量和参数的 `References` 找到它在作用域里的全部用处（这些位置只在 `@local.reference` 里，不在 tags 引用和 `ci_ref` 里），不查 `ci_ref`、没有 `same_name`；locals 记为程序作用域局部定义的顶层函数，它的同文件引用也被找到；同时被 tags 和 locals 捕获的导出顶层函数（根作用域）`local` 为 false，另一个文件里对它的引用经 `ci_ref` 找到、未入索引的文件经限时搜索找到（`refs_toplevel_captured_by_locals`）；函数体里嵌套的 `const helper = () => …` 同时被两者捕获，`local` 为 true，引用只在外层函数的作用域里找，其他文件里同名的 `helper` 不出现（`refs_nested_helper_is_local`）；locals 证明的同文件引用是调用方；同一处引用、同一个文件在多个来源里出现时只列一次、只解析一次（`refs_no_duplicates_*`）；被局部变量遮住的同名引用被丢弃；没有依据的跨文件引用在 `same_name`；测试 `Resolver` 的 `bind` 让跨文件引用成为调用方；未入索引的部分经限时搜索找到；`ci_ref` 一轮找到的在读搜索范围之前交出，限时搜索命中之后的结果按计时交出、不等下一个命中（`refs_indexed_references_go_out_before_the_search`、`refs_search_batches_go_out_on_time`）；被查定义的局部性取自它所在文件的那一次解析，`Named` 列出候选时不解析文件（`refs_nested_helper_from_named_is_local`、`refs_named_parses_no_file`）。
@@ -2008,13 +2047,13 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 7. **交互让路**（前置：kernel 的让路开关，[#123](https://github.com/SoloJiang/lectern-app/pull/123) 已实现）：两种守卫、`proceed_item`、可恢复的抽取。
    - `yield_*` 测试通过；`schedule_*`、`deadline_*` 照常通过。
    - `code_intel/yield_stop` ≤ 10 ms，`code_intel/batch_peak` 仍 ≤ 40 MB。
-8. **大文件**（前置：`platform` 的范围读取，#126 已实现）：窗口抽取与窗口链、`Windowed`、跳转第 1 步的窗口解析、当前文本的身份与检查点。
+8. **大文件**（前置：`platform` 的范围读取，#126 已实现；`git` 的流式 blob 哈希 `BlobHasher`，见「对其他 crate 的要求」）：窗口抽取与窗口链、`Windowed`、跳转第 1 步的窗口解析、当前文本的身份与检查点。
    - `window_*`、`goto_large_*` 测试通过。
    - `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 仍没有结果：大文件的读取也只经 `SafeRoot::open_file` 和 `OpenFile`。
-   - `code_intel/goto_large` ≤ 20 ms，`code_intel/window_peak` ≤ 16 MiB；`code_intel/goto_large/cold`、`code_intel/window_chain_16mib` 有结果。
-9. **依赖层**（前置：`services` 的依赖类型、`Coverage::deps`、`CandidateTier::Dependency`；`platform` 的 `SafeRoot::open_dir` 已实现；按需解析的部分另需 #19 的 TS 解析扩展点）：发现、身份与路径表、依赖映射、依赖层、`code_intel.deps`、查询里的依赖层。
+   - `code_intel/goto_large` ≤ 20 ms，`code_intel/window_peak` ≤ 8 MiB，`code_intel/batch_peak` 仍 ≤ 40 MB；`code_intel/goto_large/cold`、`code_intel/goto_large/object`、`code_intel/window_chain_16mib` 有结果。
+9. **依赖层**（前置：`services` 的依赖类型、`Coverage::deps`、`CandidateTier::Dependency`；`platform` 的 `SafeRoot::open_dir` 已实现；[ADR 0040](../adr/0040.md)；按需解析的部分另需 #19 的 TS 解析扩展点）：pnpm 布局的发现、身份（`.pnpm/lock.yaml` 与 `pnpm-lock.yaml` 的扫描）与路径表、`cd_spec`、依赖映射、依赖层、`code_intel.deps`、查询里的依赖层。
    - `deps_*` 测试通过；`rg -n 'open_dir' crates/code_intel/src --glob '!**/tests*'` 只在 `deps` 模块里（读取限制只有一个入口）。
-   - `code_intel/deps_identity` ≤ 50 ms、`code_intel/deps_map_bytes` ≤ 1 MB；`code_intel/deps_ts_project` 有结果；`app/index_100k` 的夹具含达到依赖层上限的 `node_modules`（bench 设计）之后，macOS CI 上仍 ≤ 120 s。
+   - `code_intel/deps_identity` ≤ 50 ms、`code_intel/deps_map_bytes` ≤ 1 MB；`code_intel/deps_ts_project` 有结果；`app/index_100k` 的夹具含达到依赖层上限的 pnpm `node_modules`（bench 设计）之后，macOS CI 上仍 ≤ 120 s。
 
 ## 实际验证
 
