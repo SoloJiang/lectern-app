@@ -23,7 +23,7 @@
   - 已看状态：三种状态（未看、已看、审过之后又被改过），键按 [pulls.review 调研「对 Lectern 的建议」](../research/pulls-review.md#对-lectern-的建议)；Looks good 一次标记全部。
   - 标注日志：已看标记和会话基准的持久化（ADR 0044）。
   - 噪声文件（lockfile、生成文件、快照）的模式列表，同时决定默认折叠、规则分组和模型输入里的占位；会话日志认不出或没有会话时按规则分组。
-  - 规则简报：只用本地已有的信息生成「值得先看」（ADR 0019），并接收其他插件经 `BriefRules` 补充的条目。
+  - 规则简报：只用本地已有的信息生成「值得先看」（ADR 0019），并接收其他插件经 `Review::register_brief_rules` 登记的 `BriefRules` 提供者补充的条目。
   - 项目主页的概览：每个会话的已看进度和信号、每个 worktree 不属于任何会话的改动数（[ADR 0035](../adr/0035.md) 的计数比较）。
   - 展示行与正文：视图滚到哪个文件、哪一轮，本 crate 在后台准备好展示行、两侧文本和 prompt / 说明的正文。
 - 不做：
@@ -48,7 +48,7 @@
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
 | `lectern-kernel` | `Plugin`、事件、`PluginHandle`、`BusyGuard` | 插件机制 |
-| `lectern-services` | 使用 `Projects`、`SessionSource`、`BriefRules`；提供 `Review`；`ChangeSource` 与数据类型 | 插件之间只经 `services`（架构规则 7） |
+| `lectern-services` | 使用 `Projects`、`SessionSource`；提供 `Review`（含 `BriefRules` 提供者的登记）；`ChangeSource` 与数据类型 | 插件之间只经 `services`（架构规则 7） |
 | `lectern-git` | `Repo`、`Worktree`、`LocalChanges`（`ChangeSource` 的本地实现）、`line_diff`、`rows`、`inline_changes`、`head_at`、`mtimes`、`Oid::for_blob` | gix 只在 `git` 里使用 |
 | `lectern-cache` | `review.attribution` 命名空间 | 派生数据以 blob OID 加轮次历史的摘要为键（架构规则 5） |
 | `lectern-executor` | 后台任务 | UI 线程不做 IO |
@@ -72,6 +72,7 @@ pub struct ReviewDeps {
     pub git_ceilings: Arc<[PathBuf]>,
 }
 /// 插件 ID "review"：provides `dyn Review`，requires `dyn Projects`、`dyn SessionSource`，激活条件 `AfterFirstFrame`。
+/// 不 requires 简报规则的提供者：kernel 没有可选依赖，提供者反过来 requires `dyn Review` 并登记（「简报规则的扩展点」）。
 pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin);
 ```
 
@@ -79,8 +80,8 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin);
 
 以下改动各由对应 crate 的 PR 完成，写 `Refs #15`，在「验收」里列为前置条件。
 
-- **A. `services`**：`changes` 模块和 `review` 模块，按本文「接口」。只有 trait、数据类型、服务 ID；例外是 `ChangeList::handle`（实现方放进去的不透明句柄，不序列化）和 `BriefReply`、`OverviewInterest` 包着的回调，与 `ObjectShare`、`SemanticReply` 的做法相同。`crates/services/AGENTS.md` 的模块列表随本文加上这两个模块。
-- **B. `git`**：三个函数，不新增依赖。
+- **A. `services`**：`changes` 模块和 `review` 模块，按本文「接口」。只有 trait、数据类型、服务 ID；例外是 `ChangeList::handle`（实现方放进去的不透明句柄，不序列化）和 `BriefReply`、`BriefRulesRegistration`、`OverviewInterest` 包着的回调，与 `ObjectShare`、`SemanticReply` 的做法相同。`crates/services/AGENTS.md` 的模块列表随本文加上这两个模块。
+- **B. `git`**：四个函数，不新增依赖。
 
   ```rust
   /// 按行 diff 两段内容，算法与 hunk 缓存相同（Histogram），hunk 带两侧第一行的字节偏移。纯计算，任何线程；
@@ -106,12 +107,43 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin);
   ```
 
   测试 `line_diff_*`（与 `diff_trees` 对同一对内容给出的 hunk 和偏移相同）、`head_at_*`（归档夹具里的 reflog：时间正好相等、在全部记录之前、全 0 的旧值、没有 reflog、超过 4 MiB 的 reflog 只读末尾）、`mtimes_*`（中间一级是符号链接时为 None）。
+  第四个是路径的提交时刻（「改动步与声明」），只读对象库：
+
+  ```rust
+  impl Repo {
+      /// 从 `tip` 沿第一父提交向前，只看提交时间不早于 `since`（Unix 秒）的提交，至多 `limit` 个：每个路径取最近一次
+      /// 改动它的提交（这个提交的树与它的第一父提交的树在这个路径上不同；合并提交按第一父提交比较）的提交时间。
+      /// 按输入顺序返回。阻塞，检查 `cancel`。
+      pub fn path_commit_times(&self, tip: Oid, paths: &[RepoPath], since: i64, limit: usize, cancel: &AtomicBool)
+          -> Result<Vec<PathCommitTime>, GitError>;
+  }
+
+  pub enum PathCommitTime {
+      /// 最近一次改动它的提交的提交时间。
+      Changed(i64),
+      /// 走过的范围里没有改动它（范围到了 `since`）。
+      NotSince,
+      /// 到了 `limit` 还没有找到：调用方按走到的最早那个提交的提交时间截止（保守，只会少算会话的改动）。
+      Truncated { oldest: i64 },
+  }
+  ```
+
+  `review` 传 `since` = 14 天前、`limit` = 2000；只比较需要的路径所在的子树，不读 blob。测试 `path_commit_times_*`：只改别的路径的提交不影响结果；合并提交按第一父提交；`limit` 截断时为 `Truncated`；超过 `since` 时为 `NotSince`。[git 设计「范围」](git.md#范围)的「本 issue 之外」有一条指向这里。
 - **C. `git` 第 4 步**：为本地 worktree 实现 `ChangeSource`，按本文「改动来源」的对照表转换 `ChangeSet`，`Cargo.toml` 加 `lectern-services`。这一步的接口与验收以本文为准，[git 设计「验收」](git.md#验收)第 4 步指向这里。
 - **D. `platform` 与 `app`**：`platform` 提供应用数据目录（macOS 为 `~/Library/Application Support/` 下的应用目录，Linux 为 `$XDG_DATA_HOME` 或 `~/.local/share` 下的 `lectern/`，供 CI 测试），不创建目录、不做其他 IO；`app` 在启动屏障放开后用它构造 `ReviewDeps::data_dir`，放进 `PluginSet`。`usage` 的数据库以后用同一个目录（ADR 0044）。
 - **E. `cache`**：[cache 设计「命名空间」](cache.md#命名空间)加一行 `review.attribution`（本 PR 已加）。不改代码。
-- **F. `code_intel`（后续，不阻塞本 issue）**：实现 `BriefRules`，给出「调用方未同步修改」和「改到的公开接口」两条规则（见「简报规则」）。接口、规则的判定和预算由 code_intel 设计的修订规定。
+- **F. `code_intel`（后续，不阻塞本 issue）**：实现 `BriefRules`，给出「调用方未同步修改」和「改到的公开接口」两条规则（见「简报规则」）。登记放在 `code_intel` crate 里另一个小插件（如 "code-intel-brief"）：它 requires `dyn Review` 和 `dyn CodeIntel`，在 `started` 里调 `Review::register_brief_rules`，把返回的登记交给 `PluginHandle::own`。不放进 "code-intel" 插件本身，否则 `review` 停用或失败时导航也随之停用。规则的判定、查询上限和预算由 code_intel 设计的修订规定。
+- **G. `agents` 与 `services` 的 `session` 模块**：`SessionSource` 加一个不进内存 LRU 的读取，供概览派生声明（「概览」第 2 步）。接口按 agents 设计的修订，本文要求的行为：
 
-`agents` 不改：本 crate 用 `turns`、`load`、`SessionsChanged` 和 `Parent::tool_call`。`fs_watch` 不改：本 crate 是 [fs_watch 设计「对其他 crate 的要求」](fs_watch.md#对其他-crate-的要求)里写好的 `review` 一方。
+  ```rust
+  /// 与 `turns` 相同，但结果不放进 8 MB 的轮次索引 LRU：已在 LRU 里时照样复制 `Arc`；从 `cache` 读出或解析出的索引
+  /// 照常写回 `cache`，返回后由调用方放下。阻塞，只在 executor 上调用。
+  fn turns_unretained(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError>;
+  ```
+
+  ADR 0035 的采样状态不含这个 LRU；概览在采样状态里运行，用 `turns` 会把最多 50 个会话的索引留在 LRU 里（[agents 设计「性能」](agents.md#性能)：`turns` 保留索引）。测试 `turns_unretained_*`：调用前后 LRU 的字节数不变，结果与 `turns` 相同，`cache` 里写入了索引。
+
+`agents` 其余不改：本 crate 用 `turns`（打开的审阅）、`load`、`SessionsChanged` 和 `Parent::tool_call`。`fs_watch` 不改：本 crate 是 [fs_watch 设计「对其他 crate 的要求」](fs_watch.md#对其他-crate-的要求)里写好的 `review` 一方。
 
 ## 概念
 
@@ -119,7 +151,7 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin);
 |---|---|
 | 审阅对象（`ReviewTarget`） | 一次审阅看的范围：一个会话、一个 worktree 里不属于任何会话的改动，或一个 worktree 相对某个基准的全部改动。已看标记按审阅对象分开记录。 |
 | 基准 | 改动集的旧一侧，总是一棵树。会话的基准是会话开始时 HEAD 指向的提交；会话外的改动用当前 HEAD。 |
-| 基准时刻 | HEAD 开始指向基准的时刻（reflog 记录的时间）。这之后的会话改动才参与归因。 |
+| 路径的提交时刻 | 基准的提交历史里最后一次改动这个路径的提交的提交时间。这之后的会话改动才参与这个路径的归因（「改动步与声明」）。 |
 | 改动来源（`ChangeSource`） | 给出改动集和两侧内容的对象：本地 worktree（`git`）或 MR（`forge`，P3）。 |
 | 改动步 | 一次改文件的工具调用（`ToolKind::Edit`）对一个路径的改动，来自 `load` 给出的 `FileEdit`。 |
 | 改动链 | 一个路径上，基准内容依次应用各会话的改动步得到的一串版本。 |
@@ -330,6 +362,10 @@ pub trait Review: Send + Sync {
 
     /// 关注一个项目的概览：返回值持有期间本 crate 计算并保持它（含 ADR 0035 的计数比较），drop 后释放。立即返回。
     fn watch_overview(&self, project: &ProjectKey) -> OverviewInterest;
+
+    /// 登记一个简报规则的提供者（「简报规则的扩展点」）。立即返回，任何线程。本 crate 每次调用提供者之前
+    /// `token.enter()`，取不到（提供者已停用）就当作没有登记。返回值 drop 时注销。
+    fn register_brief_rules(&self, provider: Arc<dyn BriefRules>, token: ActivationToken) -> BriefRulesRegistration;
 }
 
 /// 在 executor 线程上、快照替换之后发出。监听只更新状态或安排重绘，不做 IO。
@@ -358,7 +394,7 @@ pub enum ReviewTarget {
 pub enum ReviewCommand {
     MarkSeen(FileKey),
     MarkUnseen(FileKey),
-    /// 把当前快照里的全部文件标为已看。
+    /// 把当前快照 `files` 里的全部文件标为已看（会话审阅只含它声明的文件，见「审阅对象与基准」）。
     LooksGood,
     /// 视图即将显示的行与正文。替换这个审阅上一次的请求：不在新请求里、也不在保留范围内的会被丢弃。
     Prepare(Arc<[Need]>),
@@ -385,8 +421,11 @@ pub struct ReviewSnapshot {
     pub base: Option<BaseInfo>,
     /// 下标 0 是审阅对象的会话，其后是它在同一 worktree 里的子 agent 会话；其余审阅对象为空。
     pub sessions: Arc<[SessionRef]>,
-    /// 进度列表：会话按叙事里第一次出现的顺序，噪声文件在最后；其余审阅对象按分组、路径。
+    /// 进度列表。会话审阅：改动集里本审阅对象声明的文件（有它的改动步或命令声明，「审阅对象与基准」的文件集合），
+    /// 按叙事里第一次出现的顺序，噪声文件在最后；会话外的改动：没有声明的文件；比较范围：全部文件。后两者按分组、路径。
     pub files: Arc<[FileEntry]>,
+    /// 改动集里不在 `files` 里的文件数（会话审阅：别的会话或会话外的改动）。
+    pub unclaimed: u32,
     /// 与 `files` 一一对应。单独一个数组，勾选时只换这一份。
     pub seen: Arc<[SeenState]>,
     pub progress: Progress,
@@ -612,7 +651,7 @@ pub struct Brief {
     pub items: Arc<[BriefItem]>,
     /// 超出 12 条没有列出的数量。
     pub omitted: u32,
-    /// 经 `BriefRules` 请求、还没有答复的提供者数（视图可以显示「还在补充」）。
+    /// 已登记、请求过、还没有答复的 `BriefRules` 提供者数（视图可以显示「还在补充」）。
     pub pending_providers: u32,
     pub analysis: AnalysisState,
 }
@@ -662,7 +701,7 @@ pub enum AnalysisState {
 pub struct Overview {
     pub project: ProjectKey,
     pub generation: u64,
-    /// 当前 worktree 里、`last_activity` 不早于当前 HEAD 基准时刻的会话，按 `last_activity` 从新到旧，最多 50 个。
+    /// 当前 worktree 里在声明窗口内（最近 14 天，「改动步与声明」）、至少声明了一个改动文件的会话，按 `last_activity` 从新到旧，最多 50 个。
     pub sessions: Arc<[SessionOverview]>,
     /// 当前 worktree 不属于任何会话的改动。
     pub outside: OutsideCount,
@@ -670,7 +709,7 @@ pub struct Overview {
 
 pub struct SessionOverview {
     pub session: SessionKey,
-    /// 已看进度；还没算出（会话的基准不是当前 HEAD，且超出了每轮的计算数量）时为 None。
+    /// 已看进度，文件集合与这个会话的审阅快照的 `files` 相同；还没算出（会话的基准不是当前 HEAD，且超出了每轮的计算数量）时为 None。
     pub progress: Option<Progress>,
     /// 有 Drifted 的文件：只在归因缓存命中时知道，否则为 None。
     pub drifted: Option<bool>,
@@ -695,10 +734,9 @@ pub enum OutsideCount {
 
 ### 简报规则的扩展点（`BriefRules`）
 
-需要别的插件知识的简报规则经这个多实现服务加入，本 crate 不依赖提供者；没有提供者时简报照常生成。
+需要别的插件知识的简报规则由提供者登记进来，本 crate 不依赖提供者；没有提供者时简报照常生成。`BriefRules` 不是 kernel 服务：kernel 没有可选依赖，本 crate 若 requires 一个 `MULTIPLE` 服务，就要等到至少一个提供者激活才能激活；查找不在 requires 里的服务则让插件失败（[kernel 设计「激活时的上下文」](kernel.md#激活时的上下文)）。所以方向反过来，与 code_intel 的 `NavigationProvider`（[code_intel 设计「语义导航的注册」](code_intel.md#语义导航的注册26-的升级钩子)）相同：提供者的插件 requires `dyn Review`，在 `started` 里调 `Review::register_brief_rules`，把返回的登记交给 `PluginHandle::own`。登记带着提供者这次激活的 `ActivationToken`，本 crate 每次调用提供者之前 `token.enter()`，持有准入直到调用返回；提供者停用时登记随撤销 drop，本 crate 丢弃它在途的答复。
 
 ```rust
-/// impl Service for dyn BriefRules { const ID = "brief-rules"; const MULTIPLE = true; }
 pub trait BriefRules: Send + Sync {
     /// 提供者的稳定 ID（插件 ID），也是 `BriefRule::Provided::provider`。不阻塞。
     fn id(&self) -> Arc<str>;
@@ -738,6 +776,11 @@ impl BriefReply {
     pub fn send(&self, items: Vec<ProvidedItem>, done: bool);
     pub fn cancelled(&self) -> bool;
 }
+
+/// `register_brief_rules` 的登记，drop 时注销（任何线程，不阻塞）。`Send`，可以交给 `PluginHandle::own`。
+/// 包着本 crate 传入的注销回调（与 `ProviderRegistration` 相同），不序列化。
+pub struct BriefRulesRegistration { /* … */ }
+impl BriefRulesRegistration { pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self; }
 ```
 
 提供者的条目经过与模型备注相同的对账：`file` 不在快照里的丢弃；`line` 不是最终改动里显示的行时降为文件备注；每个提供者最多 8 条。超过 10 秒没有 `done` 的提供者按完成处理，`pending_providers` 不再计它。
@@ -778,7 +821,7 @@ pub mod analyze {
     /// 输出 schema 的版本，进分析请求的哈希（ADR 0019 约束 11）。
     pub const SCHEMA_VERSION: u32 = 1;
 
-    /// 模型的输入清单：每个文件一行（路径、状态、增删行数、`[generated]` / `[lockfile]` / `[snapshot]` / `[binary]` / `[truncated]` 标签）；
+    /// 模型的输入清单，只含快照的 `files`（会话审阅是它声明的文件，ADR 0019 约束 2）：每个文件一行（路径、状态、增删行数、`[generated]` / `[lockfile]` / `[snapshot]` / `[binary]` / `[truncated]` 标签）；
     /// 噪声文件只留这一行，不附 patch。`patches` 是其余文件规范化后的统一 diff（来自同一份 `ChangeList`）。
     pub struct Manifest { pub files: Arc<[ManifestFile]>, pub patches: Arc<[(FileKey, Arc<[u8]>)]>, pub noise_rules: u32 }
     /// 阻塞（读两侧文本），在 executor 上调用。
@@ -805,20 +848,25 @@ pub mod analyze {
 
 - **会话**：`SessionSummary::place` 为 `Located` 且有 worktree 的会话（未归位、项目没有打开时 `ReviewError::NotInOpenProject`）。审阅对象包括它的子 agent 会话中归位到同一 worktree 的（`SessionSummary::parent` 指向它，递归）；子 agent 在别的 worktree 里时是单独的审阅对象，叙事里只有一行 `Subagent`（见「未决问题」1）。基准按顺序取：
   1. 标注日志里这个会话的 `base` 记录（`BaseHow::Recorded`）。
-  2. `Worktree::head_at(session.started_at)`：`Found` 为 `Reflog`，`BeforeLog` 为 `BeforeLog`，基准时刻分别是记录的时间和负无穷。
-  3. `NoLog`：当前 HEAD（`CurrentHead`），基准时刻取 HEAD reflog 不可用时的保守值：会话开始时刻。
+  2. `Worktree::head_at(session.started_at)`：`Found` 为 `Reflog`，`BeforeLog` 为 `BeforeLog`。
+  3. `NoLog`：当前 HEAD（`CurrentHead`）。
 
   unborn 时基准是空树。会话第一次被标记已看时，把当时用的基准写进标注日志（`base` 记录），之后 reflog 过期、HEAD 移动都不改变它，已看标记的键保持有效。
-- **会话外的改动**：基准是当前 HEAD（`BaseSpec::Head`），基准时刻是 `head_at(now)` 的 `since`。文件是改动集里没有任何声明的那些。
-- **比较范围**：按 `BaseSpec` 比较整个工作区；文件级归因只列出声明它的会话（不建改动链：基准不是某个会话开始时的状态，链的起点对不上）。
+
+  **文件集合**：会话审阅的 `files` 是改动集（基准到工作区）里这个审阅对象（会话和它在同一 worktree 的子 agent）声明的文件，即有它的改动步，或有它的命令声明（「改动步与声明」）。改动集里其余的文件不进 `files`，只计入 `ReviewSnapshot::unclaimed`：它们属于别的会话的审阅或会话外的改动。声明的文件里来自其他会话的行照常显示在 hunk 的 `others` 里。会话日志认不出格式时没有改动步，声明改为按时间：工作区修改时间落在 `[started_at - 1 s, last_activity + 2 s]` 里、且没有被别的会话声明的文件。进度、`LooksGood`、简报规则、项目主页的进度（「概览」第 4 步）和模型的输入清单（`analyze::manifest`，ADR 0019 约束 2「快照只含属于审阅对象的改动」）都只用这个集合。
+- **会话外的改动**：基准是当前 HEAD（`BaseSpec::Head`）。文件是改动集里没有任何声明的那些。
+- **比较范围**：按 `BaseSpec` 比较整个工作区，`files` 是改动集的全部文件；文件级归因只列出声明它的会话（不建改动链：基准不是某个会话开始时的状态，链的起点对不上）。
 
 ### 改动步与声明
 
-一个 worktree 的声明来自这个 worktree 里、`last_activity` 不早于基准时刻的全部会话（含子 agent），从各自的 `turns()` 得到，不需要 `load`：
+一个 worktree 的声明来自这个 worktree 里、`last_activity` 在最近 14 天之内的会话（含子 agent，最多 100 个，按 `last_activity` 从新到旧），从各自的轮次索引得到，不需要 `load`。每个路径另有一个截止时刻，早于它的改动步和修改时间不参与这个路径：
 
+- **路径的提交时刻**（关键约束）：从审阅对象的基准提交沿第一父提交向前，最近一次改动这个路径的提交的提交时间（committer time），由 `Repo::path_commit_times`（前置条件 B）给出；最近 14 天里没有改动过的路径没有截止时刻（只受 14 天的窗口限制）。截止时刻按路径算，不取 HEAD 最后一次移动的时刻：`git checkout -b`、提交一个无关的文件都会让 HEAD 的 reflog 前进，却不改变别的路径的基准内容。按 HEAD 移动的时刻截止时，这之前还没提交的会话改动会从链里消失，后来的会话的 `Replace` 因此应用不上，正常的改动被标成 Drifted，或整份变成会话外的改动。
+- 一个会话的改动已经提交进基准（截止时刻晚于它）时不再参与，不会把同样的改动在基准上再应用一次。被 rebase、amend、cherry-pick 重写的提交，提交时间是重写的时刻，所以改动同样不再参与。截止之后仍有少数链外改动（时钟偏差、提交了一部分）时，`Write` / `Add` 让链重新对齐（「改动链」）。
 - 改动步：`ToolKind::Edit { paths }` 的每个路径。路径是绝对路径：先去掉 worktree 根的前缀；不匹配时用会话日志里的 cwd 与归位用的规范 cwd 之间的前缀替换（`/tmp` 与 `/private/tmp` 这类）再试；都不在 worktree 里的忽略。时间取 `ToolCall::finished` 的时刻；没有结果的调用（还在运行，或日志里没有结果）不参与，下一次 `SessionsChanged` 再看。状态不是 `Completed` 的调用不应用，记为失败的改动（简报的 `EditFailed`）。
-- 命令声明（文件级）：改动集里有、没有任何改动步的文件，工作区修改时间（`Worktree::mtimes`）落在某个会话的 `ToolKind::Execute` 调用的 `[started_at - 1 s, finished + 2 s]` 里（日志时间与命令真正运行的时间有偏差，见 agents 设计）。只落在一个会话的窗口里时归给那次调用；落在几个会话的窗口里时都不归，算会话外的改动。基准时刻之前的修改时间不算。
+- 命令声明（文件级）：改动集里有、没有任何改动步的文件，工作区修改时间（`Worktree::mtimes`）落在某个会话的 `ToolKind::Execute` 调用的 `[started_at - 1 s, finished + 2 s]` 里（日志时间与命令真正运行的时间有偏差，见 agents 设计）。只落在一个会话的窗口里时归给那次调用；落在几个会话的窗口里时都不归，算会话外的改动。早于路径的提交时刻的修改时间不算。
 - 改动步和命令声明的顺序：按时刻，同一时刻按（会话在列表里的顺序，`Positioned` 的位置）。
+- 已知限制：14 天之前开始、之后再没有活动、改动一直没有提交的会话，它的文件算会话外的改动。
 
 ### 改动链
 
@@ -911,6 +959,7 @@ pub(crate) enum TargetKey {
 - 内存里的索引：每个审阅对象、每个文件标识（`new_path`，没有时 `old_path`）只保留最近一条 `seen` 或 `unseen`，加上每个会话的 `base`。项目关闭后释放。
 - 写入：命令在内存里生效后把记录放进待写队列；队列在 100 ms 内没有新记录、或累计 64 条时，由一个 `Background` 任务（持有 `BusyGuard`）追加并 `fdatasync`。写失败时保留队列，下一次再试，记日志；进程退出前没写完的标记丢失（已知限制）。
 - 压缩：文件超过 4 MiB 时，在下一次写入的任务里写一份只含文件头、内存索引里的记录和认不出的记录的新文件，`fsync` 后改名替换并 `fsync` 目录。超过一年的 `seen` / `unseen` 记录在压缩时丢弃。
+- 压缩的前提（关键约束，ADR 0044）：内存索引来自对这个文件的一次完整、成功的读取（读到文件末尾，没有 IO 错误，没有因 64 MiB 的上限只读一部分，文件头的仓库相符），加上本进程在那之后自己的追加；并且文件的身份（设备号、inode）和长度与「读取的结束位置加本进程追加的字节」相同，说明期间没有别的写入者。任何一条不满足时只追加、不压缩：读取失败或只读了一部分时，内存索引缺记录，用它重写文件会丢掉用户的标记。下一次完整读取成功后恢复压缩。
 - 文件夹项目不写日志（见「未决问题」2）。
 
 ### 噪声文件与规则分组
@@ -938,7 +987,7 @@ pub(crate) enum TargetKey {
 
 ### 简报规则
 
-规则只用本地已有的信息（ADR 0019），在后台随快照一起重算，不缓存。按下表顺序，critical 的条目排在最前：
+规则只用本地已有的信息（ADR 0019），在后台随快照一起重算，不缓存。规则只看快照的 `files`：会话审阅里没有声明的文件（别的会话、手工改动）不触发任何规则。按下表顺序，critical 的条目排在最前：
 
 | 规则 | 条件 | critical | 条目 |
 |---|---|---|---|
@@ -993,9 +1042,9 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 - 有关注者时，对项目的当前 worktree：
   1. 计数比较：`Worktree::changes(Base::Head)`，`Limits` 取 `retained_bytes = 0`、`total_patch_bytes = 0`（[ADR 0035](../adr/0035.md)，与 `crates/review/AGENTS.md`「边界」相同）。改动路径不超过 4000 个时保留这份改动集，之后按 fs_watch 的批次 `refresh`；超过时只保留计数（`OutsideCount::Capped`），之后的事件触发全量比较。这份改动集直接用 `git`，不转换成 `ChangeList`（只有路径、两侧 OID 与 stat）。
-  2. 声明：当前 worktree 里 `last_activity` 不早于 HEAD 基准时刻的会话（最多 50 个）的 `turns()`，在 `Background` 上逐个读取；命令声明对改动路径调一次 `Worktree::mtimes`（≤ 4000 个）。
+  2. 声明：声明窗口内的会话（「改动步与声明」，最多 100 个）的轮次索引，用 `SessionSource::turns_unretained`（前置条件 G）在 `Background` 上逐个读取，不用 `turns`：概览在 ADR 0035 的采样状态里运行，`turns` 会把这些索引留在 agents 的 8 MB 轮次索引 LRU 里，而那个 LRU 不在采样状态的份额里。每读一个会话，只留下派生的声明（改动步的路径与时刻、命令调用的时间窗口、调用状态），索引随即放下；声明计入本 crate 的 < 1 MB。路径的提交时刻对计数改动集的路径调一次 `Repo::path_commit_times`；命令声明对改动路径调一次 `Worktree::mtimes`（≤ 4000 个）。
   3. 会话外的改动数 = 计数改动集里没有声明的文件。
-  4. 每个会话的进度：基准等于当前 HEAD 的会话，文件是计数改动集与它的声明的交集，已看状态按标注日志算出；基准不同的会话，每轮最多为 8 个（按 `last_activity`）另做一次同样 `Limits` 的比较，算完即丢弃改动集，其余为 None。
+  4. 每个会话的进度：文件集合与审阅快照的 `files` 同一定义（「审阅对象与基准」的文件集合）。基准等于当前 HEAD 的会话，文件是计数改动集与它的声明的交集，已看状态按标注日志算出；基准不同的会话，每轮最多为 8 个（按 `last_activity`）另做一次同样 `Limits` 的比较，算完即丢弃改动集，其余为 None。
   5. Drifted 信号只读 `review.attribution` 的缓存（键能从声明和计数改动集的 OID 得到），未命中为 None；不为概览建链。
 - 重算的时机：fs_watch 的批次、`SessionsChanged`、标注日志的写入、`ProjectEvent` 的 worktree 变化，合并 2 秒后在 `Background` 上跑一轮。关注者都放下后释放计数改动集和声明。
 
@@ -1009,7 +1058,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 打开一个会话的 Diff < 50 ms（`app/open_diff`，`review_view`） | 从 `open` 到快照 `Ready`，含叙事顺序第一个文件的归因：归因缓存未命中 < 35 ms，命中 < 20 ms（50 个约 300 行的改动文件，20 轮、120 次改动调用，`turns` 已在 agents 的内存里，git 的 hunk 缓存已热）。其中 `ChangeSource::fetch`（git 份额 < 15 ms）、`turns` 命中（agents 份额）都计入。第一个文件的展示行 < 3 ms。其余文件的归因在后台，50 个文件合计 < 300 ms（只记录） |
 | 刷新 | agent 追加一轮、改一个文件后，从 `SessionsChanged` 和 fs_watch 的批次到新快照 < 20 ms |
 | 勾选 | `command(MarkSeen)` 到新快照替换 < 0.2 ms（5000 个文件） |
-| 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB，从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`） |
+| 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、派生的声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB，从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`）。概览不经 `turns` 读轮次索引（前置条件 G），agents 的轮次索引 LRU 在采样状态里不因概览而增长 |
 | 审阅打开时的内存（不在采样状态，按 ADR 0035「关键约束」各自设上限） | `ChangeList` 和它持有的 `ChangeSet`（git 的 32 MiB 保留上限）；中间版本 LRU 8 MiB；`FileRows` 只为 `Prepare` 的范围保留，合计 ≤ 8 MiB，超出时丢弃离可见范围最远的；正文 ≤ 2 MiB |
 | 磁盘 | 标注日志每个仓库 ≤ 4 MiB（之后压缩）；`review.attribution` 在仓库分库的 512 MiB 预算里，按 LRU 淘汰 |
 
@@ -1046,7 +1095,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 文件夹项目 | `Degraded::FolderProject`：只有轮次和调用记录里的改动（按日志原文），没有进度、Drifted 和最终改动 | 隐藏进度 |
 | 没有 reflog | `BaseHow::CurrentHead` | 简报上方一行提示基准可能不准 |
 | 改动集失败（不支持的仓库格式、没有 merge-base） | `Failed(Changes(…))`；`NoMergeBase` 时比较范围改为相对 HEAD 并在快照里注明 | 显示原因 |
-| 标注日志读不出、写不进 | 已看状态全部为 `Unseen`，写入在下一次重试；记日志 | 照常，不弹错误 |
+| 标注日志读不出、写不进 | 已看状态全部为 `Unseen`；新的标记照常追加（写不进的在下一次重试），这期间不压缩（「标注日志」的压缩前提），下一次完整读取成功后之前的标记都在；记日志 | 照常，不弹错误 |
 | 归因缓存写不进 | 忽略，下次重算 | 照常 |
 | 路径不是 UTF-8 | 照常归因和标记（`ChangePath` 是字节）；不进 `focus_*` 和 `BriefRequest` | 显示时替换无效字节 |
 | 不满足路径不变量的路径 | 在 `totals.invalid_paths` 里，不进文件列表 | 列出并说明「路径无效，未读取」 |
@@ -1062,18 +1111,23 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - 插件测试用 kernel 的 `TestKernel`、fs_watch 的 `FakeBackend`、`Executor::manual()`。
 - 场景（前缀即测试名的前缀）：
   - `noise_*`：模式表每一行一个用例；`linguist-generated` 优先；`group_*`：匹配顺序（`package-lock.json` 是噪声，不是依赖）、显示顺序、按子项目排序；`sensitive_*`：表里每一种。
-  - `log_*`：写入后重新读出；末尾不完整的一行被丢弃并在下次追加前截掉；坏行跳过并计数；认不出的记录在压缩后仍在；超过 4 MiB 时压缩，压缩中途失败（写临时文件出错）原文件不变；文件头的仓库不同时改名另建；非 UTF-8 路径往返不变。
+  - `log_*`：写入后重新读出；末尾不完整的一行被丢弃并在下次追加前截掉；坏行跳过并计数；认不出的记录在压缩后仍在；超过 4 MiB 时压缩，压缩中途失败（写临时文件出错）原文件不变；`log_no_compaction_after_failed_read`：读取失败（注入的 IO 错误）之后继续标记、追加写到超过 4 MiB，文件只追加、不压缩，之后成功读取时原有的记录都在；读取成功之后的压缩只在索引来自这次完整读取加本进程之后的追加时进行；文件头的仓库不同时改名另建；非 UTF-8 路径往返不变。
   - `seen_*`：三种状态；重命名成对匹配；旧路径被无关的新文件占用时为 `Unseen`；删除后重建为 `Unseen`；审过之后改名、删除为 `ChangedSinceSeen`；`unseen` 取消之前的 `seen`；两侧模式、身份、状态任一变化时为 `ChangedSinceSeen`；不同审阅对象的标记互不影响；`LooksGood` 之后进度为全部已看。
   - `chain_*`：五种 `EditOp` 的应用；`Replace` 找不到、出现多次时应用不上，后续步照常；`Patch` 在偏移处匹配，上下文不同时应用不上；`Write` 之后重新对齐；`move_to` 跟到新路径；CRLF 归一化重试；超过上限时为 `FileOnly`。结果（每一步的 hunk、对齐、存活）用 insta 快照。
   - `provenance_*`、`attribute_*`：最终 hunk 归到正确的轮次；两个会话先后改同一文件，`others` 指向另一个会话；会话结束后手工改动的行为 Drifted；手工删除基准里的行计入 `drifted`；只有命令声明的文件为文件级；命令窗口落在两个会话里时不归。快照覆盖 `HunkAttribution`。
   - `history_digest_*`：两个会话改成相同内容时摘要不同；同一会话在两个 worktree 里摘要相同；调用状态、适配器版本变化时摘要不同；缓存命中时不调用 `load`（`FakeSessions` 计数）。
   - `base_*`：`head_at` 的三种结果；`base` 记录优先；第一次 `MarkSeen` 写入 `base` 记录；HEAD 之后移动，会话的基准不变。
+  - `claims_*`：路径的提交时刻截止。
+    - `claims_survive_unrelated_commit`：会话 B 改 f（不提交），用户提交一个无关的文件 g，会话 A 再改 f。B 的改动步仍在 f 的链里，A 的 `Replace` 都能应用，B 的行在 A 的审阅里是 `others`，没有 Drifted。
+    - `claims_survive_checkout_b`：几个会话改了文件都没提交，之后 `git checkout -b` 新分支。这些文件仍归各自的会话，会话外的改动数不变，概览里这些会话仍在。
+    - 会话的改动已经提交进基准后不再参与（同样的 `Replace` 不在基准上再应用一次）；amend 之后同样；`Truncated` 时按最早的提交时间截止；14 天之前的会话不参与。
+  - `files_*`：会话审阅的文件集合。共用的主 worktree 里两个会话和一个手工改动的文件：每个会话的 `files` 只含它声明的文件，`unclaimed` 等于其余的数量；`LooksGood` 只标记这些文件；`Sensitive`、`Deleted` 规则不对没有声明的文件触发；概览里这个会话的 `progress.total` 等于它的审阅快照的 `files` 数；认不出格式的会话按修改时间声明。
   - `narrative_*`：同一轮多次调用合成一步；子 agent 的轮次跟在派出它的那一轮之后，`tool_call` 为 None 时按时间插入；`after_last_seen`；认不出格式时 `turns` 为 None。insta 快照。
   - `rows_*`：最终改动与叙事步的展示行，偏移与 git 的规则一致；中间版本回放后 OID 与缓存的版本 OID 相同；LRU 不超过 8 MiB。
-  - `brief_*`：每条规则一个用例；排序与 12 条上限；`BriefRules` 的假提供者：分批答复、10 秒超时、条目对账（不在快照里的文件丢弃、行不在显示范围内降为文件备注）。
-  - `overview_*`：计数比较用 `retained_bytes = 0`、`total_patch_bytes = 0`；4001 个改动路径时只保留计数；会话外的改动数；基准不同的会话每轮最多算 8 个；放下关注后释放。
+  - `brief_*`：每条规则一个用例；排序与 12 条上限；`BriefRules` 的假提供者经 `register_brief_rules` 登记：分批答复、10 秒超时、登记 drop 或 token 失效后不再调用它且丢弃在途的答复、条目对账（不在快照里的文件丢弃、行不在显示范围内降为文件备注）。
+  - `overview_*`：计数比较用 `retained_bytes = 0`、`total_patch_bytes = 0`；4001 个改动路径时只保留计数；会话外的改动数；基准不同的会话每轮最多算 8 个；放下关注后释放。`overview_never_calls_turns`：一轮概览（20 个会话）之后，`FakeSessions` 记下的 `turns` 调用数为 0，只有 `turns_unretained`；本 crate 只保留派生的声明（`review/resident_*_bytes` 覆盖它的大小）。
   - `plugin_*`：`TestKernel` 激活后提供 `dyn Review`；`open` 立即返回，快照经 `Loading` 到 `Ready`；fs_watch 批次和 `SessionsChanged` 触发刷新；kernel 在结果发布后静止；关闭 30 秒后释放；`command` 在 UI 线程上调用时不做 IO（`cache` 的 `ui_thread` 检查和 `data_dir` 的访问计数都为 0）。
-  - `services` 的 `changes`、`review` 模块（前置条件 A）：类型的 JSON 往返；`dyn Review` 的 `ID == "review"`、`MULTIPLE == false`，`dyn BriefRules` 的 `MULTIPLE == true`。
+  - `services` 的 `changes`、`review` 模块（前置条件 A）：类型的 JSON 往返；`dyn Review` 的 `ID == "review"`、`MULTIPLE == false`；`BriefRules` 没有实现 `Service`；`BriefRulesRegistration`、`OverviewInterest` drop 时各调用一次注销回调。
 - 结构化输出（链、归因、叙事、简报、分组）都用 insta 快照验收。
 
 ## 未决问题
@@ -1101,11 +1155,12 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 前置条件（其他 crate 的 PR，写 `Refs #15`）：
 
 - A. `services`：`changes`、`review` 模块；`rg -n 'pub trait ChangeSource|pub trait Review\b|pub trait BriefRules' crates/services/src` 各有一处；JSON 往返和服务 ID 的测试通过；`crates/services/AGENTS.md` 列出两个模块。
-- B. `git`：`line_diff`、`Worktree::head_at`、`Worktree::mtimes`；`line_diff_*`、`head_at_*`、`mtimes_*` 测试通过。
+- B. `git`：`line_diff`、`Worktree::head_at`、`Worktree::mtimes`、`Repo::path_commit_times`；`line_diff_*`、`head_at_*`、`mtimes_*`、`path_commit_times_*` 测试通过。
 - C. `git` 第 4 步：`LocalChanges` 实现 `ChangeSource`；`change_source_*` 测试通过（见「改动来源」的对照表之后一段）。
 - D. `platform` 与 `app`：应用数据目录；`app` 构造 `ReviewDeps` 并把插件放进 `PluginSet`（第 4 步之前）。
 - E. `cache`：命名空间表的 `review.attribution` 一行（本 PR 已加）。
-- F. `code_intel`：实现 `BriefRules`（后续，不阻塞下面任何一步）。
+- F. `code_intel`：实现 `BriefRules`，由 requires `dyn Review` 的另一个小插件登记（后续，不阻塞下面任何一步）。
+- G. `agents` 与 `services`：`SessionSource::turns_unretained`；`turns_unretained_*` 测试通过（第 5 步之前）。
 
 #15 的领域部分分五步，每步一个 PR，都写 `Refs #15`（#15 由 `review_view` 最后完成的 PR 关闭）。每一步都要 `just check`、`just test -p lectern-review`、`just deny` 通过；新增 bench 条目在这一步加进 `budgets.rs`、改为生效。
 
@@ -1117,12 +1172,12 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
    - `chain_*`、`provenance_*`、`attribute_*`、`history_digest_*` 测试通过，带 insta 快照。
    - `review/chain_3000_lines` 有结果。
 3. **审阅引擎与快照**（前置 A、B、C）：审阅对象与基准、声明、改动叙事、快照、命令、`Prepare` 与展示行、中间版本 LRU、标注日志接入；用 `testing::Driven` 驱动，不经插件。
-   - `base_*`、`narrative_*`、`rows_*` 测试通过。
+   - `base_*`、`claims_*`、`files_*`、`narrative_*`、`rows_*` 测试通过，其中有 `claims_survive_unrelated_commit`、`claims_survive_checkout_b`。
    - `review/open_session_50`、`review/open_session_50_warm`、`review/rows_first`、`review/mark_seen_5000` 在预算内，`review/attribute_session_50` 有结果。
    - `rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 没有结果：本 crate 只在标注日志里直接访问文件系统，工作区经 `git` 读取。
 4. **插件、监听与刷新**（前置 D）：`plugin = true`、`ReviewPlugin`、`dyn Review`、fs_watch 与 `SessionsChanged` 的刷新、关闭后释放。
    - `plugin_*` 测试通过；`python3 scripts/check_architecture.py` 通过：本 crate 不依赖其他插件 crate、不依赖 GPUI，只有 `app` 和 tool 层依赖它。
    - `review/refresh_one` 在预算内；`plugin/review/activate` < 1 ms。
-5. **规则简报与项目主页的概览**：简报规则、`BriefRules` 的请求与对账、概览（计数比较、声明、会话外的改动数、进度）。
+5. **规则简报与项目主页的概览**（前置 G）：简报规则、`register_brief_rules` 与提供者的请求和对账、概览（计数比较、声明、会话外的改动数、进度）。
    - `brief_*`、`overview_*` 测试通过；`overview_capped` 检查 4001 个改动路径时只保留计数。
    - `review/brief_5000`、`review/resident_cloudprint_bytes`、`review/resident_100k_bytes` 在预算内，`review/overview_cloudprint` 有结果。
