@@ -322,8 +322,13 @@ pub(crate) struct Batch {
     /// Files whose existence check missed, per batch tier, extracted first;
     /// a file the pause abandoned goes back to the front.
     pub resume: [VecDeque<Item>; 3],
-    /// Keys queued or in the resume queues: one OID on several paths is
-    /// extracted once.
+    /// Items of tiers 4 and 5 a keepalive slot can't do (over 256 KiB, a
+    /// language pack's extraction longer than a slot), in the order they
+    /// were taken: back to the front of their queue once a batch runs with
+    /// the yield switch off (「交互让路」).
+    pub aside: [VecDeque<Item>; 3],
+    /// Keys queued, in the resume queues or set aside: one OID on several
+    /// paths is extracted once.
     pub queued: HashSet<(BlobId, LangName)>,
     /// Extractions in flight per batch tier.
     pub active: [usize; 3],

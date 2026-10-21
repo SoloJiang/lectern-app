@@ -16,7 +16,10 @@
 //! item's size; in a keepalive slot only that item runs. An extraction of
 //! a core language stops at its next slice boundary when asked to yield and
 //! keeps its state in the task (`Parked`) until the next grant; a language
-//! pack's is given up and queued again.
+//! pack's is given up. Items a slot can't do (over 256 KiB, a pack's
+//! extraction longer than a slot) are set aside, in order, until a batch
+//! runs with the switch off, and the tier goes on with the items behind
+//! them.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -58,9 +61,12 @@ const SCAN_LIMIT: usize = 4096;
 /// Files larger than this are extracted by one batch task at a time.
 pub const LARGE_FILE: usize = 256 << 10;
 
-/// The one batch extraction of a large file (`LARGE_FILE`), and the
-/// non-yielding work waiting for it: a yielding task parked with the slot
-/// gives it up for them (「交互让路」).
+/// The one batch extraction of a large file (`LARGE_FILE`). A yielding
+/// task's extraction stopped with the slot registers its saved state here
+/// (`LargeTurn::park`): non-yielding work (tier 3) that wants the slot
+/// takes it over at once, dropping that state, instead of waiting for the
+/// parked task to run again (「交互让路」). So no batch task ever waits for
+/// another one to be polled, whatever the number of tasks and threads.
 #[derive(Default)]
 pub(crate) struct LargeSlot {
     state: Mutex<LargeState>,
@@ -69,20 +75,28 @@ pub(crate) struct LargeSlot {
 
 #[derive(Default)]
 struct LargeState {
-    busy: bool,
-    /// Non-yielding acquirers waiting.
-    wanted: usize,
+    /// The turn holding the slot (`LargeTurn`'s number), if any.
+    holder: Option<u64>,
+    /// The last turn handed out.
+    turns: u64,
+    /// The holder is parked, its extraction's state here.
+    parked: Option<ResumeSlot>,
 }
 
-/// The slot, held; released on drop.
-pub(crate) struct LargeTurn(Arc<LargeSlot>);
+/// The slot, held while the slot's holder is this turn; released on drop.
+/// A parked turn taken over by non-yielding work is revoked: it holds
+/// nothing any more.
+pub(crate) struct LargeTurn {
+    slot: Arc<LargeSlot>,
+    turn: u64,
+}
 
 impl LargeSlot {
     /// Waits for the slot, checking `stop` every 10 ms; None once `stop`
-    /// says so. `near`: non-yielding work (tier 3), which a yielding task
-    /// parked with the slot gives way to: while waiting it counts as
-    /// wanting the slot, and `wake` (the batch tasks waiting at a
-    /// boundary) runs once, so the holder sees it.
+    /// says so. `near`: non-yielding work (tier 3), which takes the slot
+    /// over from a parked holder (its saved state is dropped, its turn
+    /// revoked) and then runs `wake` (the batch tasks waiting at a
+    /// boundary), so the holder puts its item back.
     pub(crate) fn acquire(
         self: &Arc<Self>,
         stop: impl Fn() -> bool,
@@ -90,21 +104,16 @@ impl LargeSlot {
         wake: impl FnOnce(),
     ) -> Option<LargeTurn> {
         let mut st = lock(&self.state);
-        let wants = near && st.busy;
-        if wants {
-            st.wanted += 1;
-            drop(st);
-            wake();
-            st = lock(&self.state);
-        }
+        let mut revoked = None;
         loop {
             if stop() {
-                if wants {
-                    st.wanted -= 1;
-                }
                 return None;
             }
-            if !st.busy {
+            if st.holder.is_none() {
+                break;
+            }
+            if near && let Some(resume) = st.parked.take() {
+                revoked = Some(resume);
                 break;
             }
             st = self
@@ -113,23 +122,74 @@ impl LargeSlot {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .0;
         }
-        if wants {
-            st.wanted -= 1;
+        st.turns += 1;
+        let turn = st.turns;
+        st.holder = Some(turn);
+        drop(st);
+        if let Some(resume) = revoked {
+            // The parked tree goes now, before this turn's work starts.
+            drop(lock(&resume).take());
+            wake();
         }
-        st.busy = true;
-        Some(LargeTurn(self.clone()))
+        Some(LargeTurn {
+            slot: self.clone(),
+            turn,
+        })
+    }
+}
+
+#[cfg(test)]
+impl LargeSlot {
+    /// Whether a turn holds the slot.
+    pub(crate) fn busy(&self) -> bool {
+        lock(&self.state).holder.is_some()
     }
 
-    /// Whether non-yielding work waits for the slot.
-    pub(crate) fn wanted(&self) -> bool {
-        lock(&self.state).wanted > 0
+    /// Whether the holder is parked, its saved state registered.
+    pub(crate) fn parked(&self) -> bool {
+        lock(&self.state).parked.is_some()
+    }
+}
+
+impl LargeTurn {
+    /// The holder's extraction stopped to yield, its state in `resume`:
+    /// non-yielding work may take the slot over.
+    pub(crate) fn park(&self, resume: &ResumeSlot) {
+        let mut st = lock(&self.slot.state);
+        if st.holder == Some(self.turn) {
+            st.parked = Some(resume.clone());
+            drop(st);
+            self.slot.freed.notify_all();
+        }
+    }
+
+    /// The holder goes on: false when its turn was revoked meanwhile (its
+    /// saved state is gone and the slot is someone else's).
+    pub(crate) fn unpark(&self) -> bool {
+        let mut st = lock(&self.slot.state);
+        if st.holder == Some(self.turn) {
+            st.parked = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Taken over by non-yielding work.
+    pub(crate) fn revoked(&self) -> bool {
+        lock(&self.slot.state).holder != Some(self.turn)
     }
 }
 
 impl Drop for LargeTurn {
     fn drop(&mut self) {
-        lock(&self.0.state).busy = false;
-        self.0.freed.notify_all();
+        let mut st = lock(&self.slot.state);
+        if st.holder == Some(self.turn) {
+            st.holder = None;
+            st.parked = None;
+            drop(st);
+            self.slot.freed.notify_all();
+        }
     }
 }
 
@@ -172,9 +232,10 @@ impl TaskGuard {
 }
 
 /// An item a yielding batch task carries from one boundary to the next
-/// (「交互让路」): read and registered in flight, waiting for its turn (over
-/// `SLOT_MAX_BYTES` with the switch on) or stopped at a slice boundary with
-/// its extraction's state. At most one per task.
+/// (「交互让路」): read and registered in flight, stopped at a slice boundary
+/// with its extraction's state, or waiting for the large slot. At most one
+/// per task; one over `SLOT_MAX_BYTES` goes on only with the switch off,
+/// and is set aside when the task's keepalive slot work stops in turn.
 pub(crate) struct Parked {
     project: Arc<Project>,
     session: u64,
@@ -199,22 +260,28 @@ impl Parked {
 /// A yielding batch boundary's answer.
 enum Boundary {
     Grant(Grant),
-    /// Tier 3 work came, or tier 3 wants the large slot this task's parked
-    /// item holds: look again.
+    /// Tier 3 work came, the project that runs tiers 3–5 changed, the
+    /// parked item's session ended, or tier 3 took the large slot over
+    /// from it: look again.
     Interrupted,
 }
 
-/// Waits at a yielding boundary for `proceed_item(bytes)`, registered in
-/// the batch tasks' wake list (`kick_batch` wakes it), so tier 3 work never
-/// waits for a keepalive slot.
+/// Over `SLOT_MAX_BYTES`: `proceed_item` returns only once the switch is
+/// off (`Grant::Batch`).
+const BATCH_ONLY: u64 = SLOT_MAX_BYTES + 1;
+
+/// Waits at a yielding boundary for `proceed_item`, registered in the batch
+/// tasks' wake list (`kick_batch` wakes it), so tier 3 work never waits for
+/// a keepalive slot. The size asked for is worked out at every poll
+/// (`Inner::boundary_bytes`): what a slot would run changes while it waits.
 struct FarBoundary<'a> {
     inner: &'a Inner,
     project: &'a Arc<Project>,
     guard: &'a BackgroundGuard,
-    bytes: u64,
-    /// The task carries a parked item (which the pause drops).
-    parked: bool,
-    holds_large: bool,
+    /// The task's parked item: its session and size.
+    parked: Option<(u64, u64)>,
+    /// The parked item's large-slot turn.
+    large: Option<&'a LargeTurn>,
 }
 
 impl Future for FarBoundary<'_> {
@@ -228,16 +295,28 @@ impl Future for FarBoundary<'_> {
             }
         }
         // The kernel wakes waiting work for a pause: a parked item's state
-        // goes first.
-        if (self.parked && self.guard.pause_requested())
+        // goes first. A parked item of a project that no longer runs tiers
+        // 3–5, or of an ended session, is given up at once: its state and
+        // the large slot are not held while the other project waits.
+        let moved = !self
+            .inner
+            .batch_project()
+            .is_some_and(|p| Arc::ptr_eq(&p, self.project));
+        let ended = self
+            .parked
+            .is_some_and(|(session, _)| !lock(&self.project.state).live(session));
+        if moved
+            || ended
+            || (self.parked.is_some() && self.guard.pause_requested())
             || self.inner.plan(self.project) == Some(Kind::Near)
-            || (self.holds_large && self.inner.large.wanted())
+            || self.large.is_some_and(LargeTurn::revoked)
         {
             return Poll::Ready(Boundary::Interrupted);
         }
-        self.guard
-            .poll_proceed_item(cx, self.bytes)
-            .map(Boundary::Grant)
+        let bytes = self
+            .inner
+            .boundary_bytes(self.project, self.parked.map(|(_, b)| b));
+        self.guard.poll_proceed_item(cx, bytes).map(Boundary::Grant)
     }
 }
 
@@ -286,13 +365,15 @@ struct Done {
 
 enum Outcome {
     Done(Done, usize),
-    /// The pause interrupted it, or a language pack's extraction gave way
-    /// to the yield: back to the front of its queue.
+    /// The pause interrupted it: back to the front of its queue.
     Paused,
     /// Nothing to write (gone, changed in another worktree, cancelled).
     Skip,
     /// Stopped to yield, its state kept (「交互让路」).
     Parked(Parked),
+    /// Can't be done in a keepalive slot (a language pack's extraction
+    /// gave way to the yield): set aside until the switch is off.
+    Aside,
 }
 
 /// What a batch task should do next.
@@ -450,17 +531,20 @@ impl Inner {
                         inner: &self,
                         project: &project,
                         guard: &g,
-                        bytes: parked.as_ref().map_or(0, Parked::bytes),
-                        parked: parked.is_some(),
-                        holds_large: parked.as_ref().is_some_and(|p| p.large.is_some()),
+                        parked: parked.as_ref().map(|p| (p.session, p.bytes())),
+                        large: parked.as_ref().and_then(|p| p.large.as_ref()),
                     };
                     match boundary.await {
                         Boundary::Interrupted => {
-                            if self.large.wanted()
-                                && let Some(p) = parked.take_if(|p| p.large.is_some())
+                            // Tier 3 took the large slot over: the saved
+                            // state is gone, the item goes back.
+                            if let Some(p) =
+                                parked.take_if(|p| p.large.as_ref().is_some_and(LargeTurn::revoked))
                             {
                                 self.abandon(p);
                             }
+                            // The loop's top gives up a parked item of another
+                            // project or an ended session.
                             idled = None;
                             continue;
                         }
@@ -485,8 +569,33 @@ impl Inner {
     /// Which kind of work the project that runs tiers 3–5 has for a batch
     /// task now, in the tiers' order: tier 3 (its queue, a walk to rebuild
     /// or to go on with) before tiers 4 and 5 (their queues and walks,
-    /// other worktrees left, touches). None: nothing to do.
+    /// other worktrees left, touches, items set aside). None: nothing to
+    /// do.
     pub(crate) fn plan(&self, project: &Arc<Project>) -> Option<Kind> {
+        self.plan_with(project, true)
+    }
+
+    /// Whether tiers 4 and 5 have work a keepalive slot can do: anything
+    /// but the items set aside for the switch to turn off.
+    fn slot_work(&self, project: &Arc<Project>) -> bool {
+        self.plan_with(project, false) == Some(Kind::Far)
+    }
+
+    /// The size a yielding boundary asks `proceed_item` for. A parked item
+    /// that fits a slot goes on in one. Otherwise a slot takes the next
+    /// queued item (`far_step` sets a parked item over `SLOT_MAX_BYTES`
+    /// aside first), when there is one; with only items that need the
+    /// switch off (a parked large item, the set-aside lists), the task
+    /// waits for `Grant::Batch`, its parked state kept.
+    fn boundary_bytes(&self, project: &Arc<Project>, parked: Option<u64>) -> u64 {
+        match parked {
+            Some(bytes) if bytes <= SLOT_MAX_BYTES => bytes,
+            _ if self.slot_work(project) => 0,
+            _ => BATCH_ONLY,
+        }
+    }
+
+    fn plan_with(&self, project: &Arc<Project>, aside: bool) -> Option<Kind> {
         let eviction = project.evictions();
         let st = lock(&project.state);
         if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
@@ -526,7 +635,8 @@ impl Inner {
                     .iter()
                     .any(|w| !w.prunable && Some(&w.key) != active && !others.done.contains(&w.key))
             });
-        left.then_some(Kind::Far)
+        let set_aside = aside && st.batch.aside[1..].iter().any(|q| !q.is_empty());
+        (left || set_aside).then_some(Kind::Far)
     }
 
     /// Whether the project that runs tiers 3–5 has work a new batch task
@@ -567,6 +677,51 @@ impl Inner {
         if st.finish(session, &item, flag) && !flag.load(Ordering::Acquire) {
             st.batch.queued.insert(item.key());
             st.batch.resume[t].push_front(item);
+        }
+    }
+
+    /// Sets aside an item of tier `t` (4 or 5) that a keepalive slot can't
+    /// do (over `SLOT_MAX_BYTES`, or a language pack's extraction longer
+    /// than a slot): it waits in the tier's set-aside list, in the order it
+    /// was taken, until a batch runs with the switch off
+    /// (`drain_aside`), and the tier goes on with the items behind it.
+    fn set_aside(
+        &self,
+        project: &Arc<Project>,
+        session: u64,
+        t: usize,
+        item: Item,
+        flag: &Arc<AtomicBool>,
+    ) {
+        let mut st = lock(&project.state);
+        if st.finish(session, &item, flag) && !flag.load(Ordering::Acquire) {
+            st.batch.queued.insert(item.key());
+            st.batch.aside[t].push_back(item);
+        }
+    }
+
+    /// A parked item set aside: its saved state and its large-slot turn go.
+    fn set_aside_parked(&self, parked: Parked) {
+        let Parked {
+            project,
+            session,
+            t,
+            item,
+            flag,
+            ..
+        } = parked;
+        self.set_aside(&project, session, t, item, &flag);
+    }
+
+    /// The switch is off (`Grant::Batch`): the items set aside go back to
+    /// the front of their tiers' queues, in the order they were set aside.
+    fn drain_aside(&self, project: &Arc<Project>) {
+        let mut st = lock(&project.state);
+        let batch = &mut st.batch;
+        for t in [1, 2] {
+            while let Some(item) = batch.aside[t].pop_back() {
+                batch.resume[t].push_front(item);
+            }
         }
     }
 
@@ -630,24 +785,61 @@ impl Inner {
         let Some((ctx, stamp)) = self.step_ctx(project) else {
             return Step::Idle;
         };
+        // A parked item over 256 KiB never goes on in a keepalive slot: the
+        // slot takes the next item, the parked one kept meanwhile. Only
+        // when that item stops in turn (a task keeps one saved state) is the
+        // large one set aside, its state dropped.
+        let held = match grant {
+            Grant::Slot { .. } => own.take_if(|p| p.bytes() > SLOT_MAX_BYTES),
+            Grant::Batch => {
+                self.drain_aside(project);
+                None
+            }
+        };
+        let step = self.far_work(project, &ctx, stamp, guard, grant, own);
+        match held {
+            Some(p) if own.is_some() => {
+                self.set_aside_parked(p);
+                step
+            }
+            Some(p) => {
+                *own = Some(p);
+                // It waits for the switch to turn off: the task doesn't
+                // stop (`boundary_bytes`).
+                Step::Worked
+            }
+            None => step,
+        }
+    }
+
+    /// `far_step`'s work, with the parked item it can go on with in `own`.
+    fn far_work(
+        self: &Arc<Self>,
+        project: &Arc<Project>,
+        ctx: &Ctx,
+        stamp: HintStamp,
+        guard: &Arc<BackgroundGuard>,
+        grant: Grant,
+        own: &mut Option<Parked>,
+    ) -> Step {
         if let Some(t) = own.as_ref().map(|p| p.t) {
-            self.extract_batch(project, &ctx, t, guard, Kind::Far, grant, own);
+            self.extract_batch(project, ctx, t, guard, Kind::Far, grant, own);
             return Step::Worked;
         }
         // Files known to be missing go first, tier by tier.
         for t in [1, 2] {
             if !lock(&project.state).batch.resume[t].is_empty() {
-                self.extract_batch(project, &ctx, t, guard, Kind::Far, grant, own);
+                self.extract_batch(project, ctx, t, guard, Kind::Far, grant, own);
                 return Step::Worked;
             }
         }
         // An existence check is one item, of size 0, in a slot.
         if let Some(items) = self.gather(project, 1, stamp) {
-            self.exists(project, &ctx, items, stamp);
+            self.exists(project, ctx, items, stamp);
             return Step::Worked;
         }
-        if let Some(items) = self.gather_other(project, &ctx, stamp) {
-            self.exists(project, &ctx, items, stamp);
+        if let Some(items) = self.gather_other(project, ctx, stamp) {
+            self.exists(project, ctx, items, stamp);
             return Step::Worked;
         }
         // Everything is checked: mark the warm start's hits as used.
@@ -658,6 +850,15 @@ impl Inner {
             if st.session == ctx.session {
                 st.batch.put_back_touches(touches);
             }
+            return Step::Worked;
+        }
+        // Only items set aside are left: the next boundary waits for the
+        // switch to turn off (`boundary_bytes`); the task doesn't stop, as
+        // nothing would start it again when the switch turns off.
+        let aside = lock(&project.state).batch.aside[1..]
+            .iter()
+            .any(|q| !q.is_empty());
+        if aside {
             return Step::Worked;
         }
         Step::Idle
@@ -691,7 +892,10 @@ impl Inner {
             range,
             walks: [Walk::default(); 2],
         });
-        for queue in &mut st.batch.resume[..2] {
+        for queue in st.batch.resume[..2]
+            .iter_mut()
+            .chain(&mut st.batch.aside[..2])
+        {
             queue.clear();
         }
         st.batch.queued.clear();
@@ -802,6 +1006,7 @@ impl Inner {
                         ..Default::default()
                     };
                     st.batch.resume[2].clear();
+                    st.batch.aside[2].clear();
                 }
                 if st.batch.others.current.is_some() {
                     None
@@ -1067,26 +1272,29 @@ impl Inner {
                                     }
                                     continue;
                                 }
-                                Ok((bytes, key)) => Parked {
+                                Ok((data, _)) if one && data.len() as u64 > SLOT_MAX_BYTES => {
+                                    // Never in a keepalive slot: set aside for
+                                    // the switch to turn off; the slot goes on
+                                    // with the next item. What was read counts
+                                    // toward the batch's bytes.
+                                    bytes += data.len();
+                                    self.set_aside(project, ctx.session, t, item, &flag);
+                                    continue;
+                                }
+                                Ok((data, key)) => Parked {
                                     project: project.clone(),
                                     session: ctx.session,
                                     t,
                                     item,
                                     flag,
                                     key,
-                                    bytes,
+                                    bytes: data,
                                     resume: Arc::new(Mutex::new(None)),
                                     large: None,
                                 },
                             }
                         }
                     };
-                    if one && parked.bytes() > SLOT_MAX_BYTES {
-                        // Never in a keepalive slot: it waits, read, for the
-                        // switch to turn off.
-                        *own = Some(parked);
-                        break;
-                    }
                     let (item, flag) = (parked.item.clone(), parked.flag.clone());
                     (self.extract_far(ctx, parked, guard), item, flag)
                 }
@@ -1140,6 +1348,10 @@ impl Inner {
                 *own = Some(p);
                 true
             }
+            Outcome::Aside => {
+                self.set_aside(project, ctx.session, t, item, &flag);
+                true
+            }
         }
     }
 
@@ -1147,6 +1359,12 @@ impl Inner {
     /// with the deadline's budget left (the deadline counts only the time
     /// it runs), stopping again at a slice boundary when asked to yield.
     fn extract_far(&self, ctx: &Ctx, mut p: Parked, guard: &Arc<BackgroundGuard>) -> Outcome {
+        if p.large.as_ref().is_some_and(|turn| !turn.unpark()) {
+            // Tier 3 took the slot over while it was parked: its saved
+            // state is gone; it starts over once it has the slot again.
+            p.large = None;
+            *lock(&p.resume) = None;
+        }
         if p.bytes.len() > LARGE_FILE && p.large.is_none() {
             // A large file's syntax tree is most of a batch's memory: one
             // batch task at a time extracts one. Given up on a pause or a
@@ -1188,10 +1406,16 @@ impl Inner {
         bump(&self.stats.extractions, 1);
         let extraction = extract(&p.item.lang, &p.bytes, &deadline, &p.flag);
         match extraction.status {
-            // A core language kept its state; a language pack's work is
-            // given up and done again from its queue.
-            ExtractStatus::Parked if lock(&p.resume).is_some() => Outcome::Parked(p),
-            ExtractStatus::Parked => Outcome::Paused,
+            // A core language kept its state (tier 3 may take a large
+            // file's slot over meanwhile); a language pack's work is given
+            // up and set aside, to be done again with the switch off.
+            ExtractStatus::Parked if lock(&p.resume).is_some() => {
+                if let Some(turn) = &p.large {
+                    turn.park(&p.resume);
+                }
+                Outcome::Parked(p)
+            }
+            ExtractStatus::Parked => Outcome::Aside,
             ExtractStatus::Cancelled => {
                 if guard.pause_requested() && !ctx.cancel.load(Ordering::Acquire) {
                     Outcome::Paused
@@ -1380,7 +1604,7 @@ impl Inner {
         // 1 MiB about 31 MiB): one batch task at a time extracts one, so the
         // temporary memory stays within its share with several batch
         // threads. The wait gives up on a pause or a cancel. Tier 3 doesn't
-        // yield: a yielding task parked with the slot gives it up.
+        // yield: it takes the slot over from a yielding task parked with it.
         let _large = if mode == Mode::Batch && bytes.len() > LARGE_FILE {
             let stop =
                 || guard.is_some_and(|g| g.pause_requested()) || ctx.cancel.load(Ordering::Acquire);
@@ -1869,7 +2093,7 @@ impl Inner {
                         }
                     }
                 }
-                Outcome::Paused | Outcome::Skip | Outcome::Parked(_) => {
+                Outcome::Paused | Outcome::Skip | Outcome::Parked(_) | Outcome::Aside => {
                     lock(&project.state).finish(session, &item, &flag);
                 }
             }

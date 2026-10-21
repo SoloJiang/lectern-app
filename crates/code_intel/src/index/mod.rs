@@ -980,7 +980,11 @@ impl Inner {
             });
         let tier = |t: usize| {
             let walked = current && st.batch.cursor.as_ref().is_some_and(|c| c.walks[t].done);
-            if walked && st.batch.resume[t].is_empty() && st.batch.active[t] == 0 {
+            if walked
+                && st.batch.resume[t].is_empty()
+                && st.batch.aside[t].is_empty()
+                && st.batch.active[t] == 0
+            {
                 TierState::Done
             } else {
                 TierState::Pending
@@ -1001,6 +1005,7 @@ impl Inner {
                 && all_done
                 && o.current.is_none()
                 && st.batch.resume[2].is_empty()
+                && st.batch.aside[2].is_empty()
                 && st.batch.active[2] == 0
             {
                 TierState::Done

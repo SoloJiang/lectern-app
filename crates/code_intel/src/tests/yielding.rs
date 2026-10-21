@@ -102,6 +102,17 @@ fn queued(h: &Harness, t: usize) -> Vec<String> {
         .collect()
 }
 
+/// The paths set aside in tier `t` of the open project, for the switch to
+/// turn off.
+fn aside(h: &Harness, t: usize) -> Vec<String> {
+    let project = h.indexer.inner().project(&h.key()).expect("open");
+    let st = project.state.lock().unwrap();
+    st.batch.aside[t]
+        .iter()
+        .map(|item| item.path.to_string())
+        .collect()
+}
+
 fn big_ts(seed: usize, len: usize) -> Vec<u8> {
     synthetic::source("ts", seed, len)
 }
@@ -167,6 +178,7 @@ fn yield_tier3_work_does_not_wait_for_a_slot() {
 struct Results {
     statuses: Mutex<Vec<(BlobId, ExtractStatus)>>,
     done: Mutex<HashMap<BlobId, Vec<Extraction>>>,
+    langs: Mutex<HashMap<BlobId, Lang>>,
 }
 
 fn record(h: &Harness) -> Arc<Results> {
@@ -178,6 +190,7 @@ fn record(h: &Harness) -> Arc<Results> {
             let oid = crate::git_access::hash_blob(hash, bytes);
             let extraction = extract(lang, bytes, deadline, cancel);
             r.statuses.lock().unwrap().push((oid, extraction.status));
+            r.langs.lock().unwrap().insert(oid, lang.clone());
             if extraction.status == ExtractStatus::Done {
                 r.done
                     .lock()
@@ -200,6 +213,17 @@ impl Results {
             .iter()
             .filter(|(o, s)| *o == oid && *s == ExtractStatus::Parked)
             .count()
+    }
+
+    /// The OIDs extracted to the end, in order.
+    fn done_order(&self) -> Vec<BlobId> {
+        self.statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, s)| *s == ExtractStatus::Done)
+            .map(|(o, _)| *o)
+            .collect()
     }
 
     fn done(&self, oid: BlobId) -> Vec<Extraction> {
@@ -306,13 +330,18 @@ fn yield_resumed_extraction_is_identical() {
 fn yield_language_pack_is_given_up_and_redone() {
     let (h, clock, kernel) = harness(1);
     const SOURCE: &[u8] = b"class Packed { void run() { helper(); } }\n";
+    // The pack's file comes first in tier 4's walk, small files after it.
+    let small: Vec<Vec<u8>> = (0..3).map(|i| ts(&format!("q{i}"))).collect();
     h.git.add("main", &[("lib/Packed.jpack", SOURCE)]);
+    for (i, s) in small.iter().enumerate() {
+        h.git.add("main", &[(format!("lib/q{i}.ts").as_str(), s)]);
+    }
     h.git.commit("main");
     h.grammars
         .install("jpack", &["jpack"], java_pack(1, Arc::new(())));
     let results = record(&h);
-    // The pack's extraction is registered with the slot already over: it
-    // can't keep its state, so it is given up.
+    // The pack's extraction outlasts its slot (the slot's end comes at its
+    // first check): it can't keep its state, so it is set aside.
     let k = clock.clone();
     let once = Arc::new(AtomicBool::new(false));
     let o = once.clone();
@@ -324,9 +353,38 @@ fn yield_language_pack_is_given_up_and_redone() {
     kernel.set_yield(true);
     let oid = h.git.oid(SOURCE);
     open_far(&h);
-    settle_until(&h, &clock, 20, || !results.done(oid).is_empty());
-    assert!(results.parks(oid) >= 1, "given up once");
-    assert_eq!(results.done(oid).len(), 1, "then done again from scratch");
+    // The rest of the tier goes on in slots meanwhile.
+    settle_until(&h, &clock, 20, || small.iter().all(|s| stored(&h, s)));
+    for _ in 0..5 {
+        clock.advance(PAST_SLOT);
+        h.settle();
+    }
+    assert_eq!(results.parks(oid), 1, "given up once, not tried again");
+    assert!(results.done(oid).is_empty());
+    assert_eq!(aside(&h, 1), ["lib/Packed.jpack"]);
+    // Redone from scratch once the interaction is over.
+    kernel.set_yield(false);
+    h.settle();
+    assert!(aside(&h, 1).is_empty());
+    let lang = results.langs.lock().unwrap()[&oid].clone();
+    let whole = extract(
+        &lang,
+        SOURCE,
+        &Deadline::background(&h.indexer.inner().watchdog),
+        &Arc::new(AtomicBool::new(false)),
+    );
+    assert_eq!(whole.status, ExtractStatus::Done);
+    assert_eq!(results.done(oid), [whole], "the same unit");
+    assert!(stored_pack(&h, oid, &lang));
+}
+
+/// Whether `oid` is stored for the pack language `lang`.
+fn stored_pack(h: &Harness, oid: BlobId, lang: &Lang) -> bool {
+    let store = h.indexer.store(&h.key()).expect("an open project");
+    let version = crate::store::Version::of(lang);
+    store
+        .exists(&version, &[oid])
+        .is_some_and(|found| !found.is_empty())
 }
 
 #[test]
@@ -359,25 +417,36 @@ fn yield_parked_time_is_not_deadline_time() {
 #[test]
 fn yield_large_file_waits_for_the_switch() {
     let (h, clock, kernel) = harness(1);
-    let big = big_ts(5, 300 << 10);
+    let big = [big_ts(5, 300 << 10), big_ts(6, 300 << 10)];
     let small: Vec<Vec<u8>> = (0..3).map(|i| ts(&format!("s{i}"))).collect();
+    // The large files come first in the queue, the small ones after them.
+    let mut lib: Vec<(&str, Vec<u8>)> =
+        vec![("a_big0.ts", big[0].clone()), ("a_big1.ts", big[1].clone())];
     let names = ["b0.ts", "b1.ts", "b2.ts"];
-    let mut lib: Vec<(&str, Vec<u8>)> = names.iter().copied().zip(small.iter().cloned()).collect();
-    lib.push(("z_big.ts", big.clone()));
+    lib.extend(names.iter().copied().zip(small.iter().cloned()));
     files(&h, &[], &lib);
+    let results = record(&h);
     kernel.set_yield(true);
     open_far(&h);
-    // Slots go by: the small files are done in them, one each; the large
-    // one, next in the queue, never enters one.
+    // Slots go by: the large files never enter one and are set aside; the
+    // small files behind them are done, one a slot.
     for _ in 0..10 {
         clock.advance(PAST_SLOT);
         h.settle();
     }
-    assert!(small.iter().all(|s| stored(&h, s)));
-    assert!(!stored(&h, &big), "over 256 KiB: no slot");
+    assert!(small.iter().all(|s| stored(&h, s)), "the tier went on");
+    assert!(big.iter().all(|b| !stored(&h, b)), "over 256 KiB: no slot");
+    assert_eq!(aside(&h, 1), ["lib/a_big0.ts", "lib/a_big1.ts"]);
+    let before = results.done_order().len();
     kernel.set_yield(false);
     h.settle();
-    assert!(stored(&h, &big), "done once the switch is off");
+    assert!(
+        big.iter().all(|b| stored(&h, b)),
+        "done once the switch is off"
+    );
+    assert!(aside(&h, 1).is_empty());
+    let oids: Vec<BlobId> = big.iter().map(|b| h.git.oid(b)).collect();
+    assert_eq!(results.done_order()[before..], oids, "in their order");
 }
 
 #[test]
@@ -455,77 +524,219 @@ fn yield_pause_reaches_all_paused() {
 
 #[test]
 fn yield_large_parked_item_gives_way_to_tier3() {
+    // One batch task (the task's own parked item gives way) and two (the
+    // tier 3 work takes the slot over from the other task's parked item,
+    // without waiting for that task to run: on the manual executor both
+    // tasks share one thread).
+    for tasks in [1, 2] {
+        let (h, clock, kernel) = harness(tasks);
+        let parked = big_ts(8, 300 << 10);
+        let tier3 = big_ts(9, 300 << 10);
+        let current = ts("current");
+        // `z/` is tier 3 (its current text) and done first; `a/big.ts`, the
+        // only tier 4 file, stops early with the large slot and waits for
+        // the switch to turn off, its state kept.
+        h.git
+            .add("main", &[("a/big.ts", &parked), ("z/current.ts", &current)]);
+        h.git.commit("main");
+        let results = Arc::new(Results::default());
+        let once = Arc::new(AtomicBool::new(false));
+        let (o, k) = (once.clone(), kernel.clone());
+        on_yield_check(&h, move || {
+            if !o.swap(true, Ordering::AcqRel) {
+                k.set_yield(true);
+            }
+        });
+        // While tier 3 extracts its large file, no parked state is left
+        // with the large slot: the parked tree is gone.
+        let saw = Arc::new(Mutex::new(None));
+        let s = saw.clone();
+        let inner = Arc::downgrade(h.indexer.inner());
+        let tier3_oid = h.git.oid(&tier3);
+        let hash = h.git.hash();
+        let r = results.clone();
+        h.indexer.set_extractor(
+            move |lang: &Lang, bytes: &[u8], deadline: &Deadline, cancel: &Arc<AtomicBool>| {
+                let oid = crate::git_access::hash_blob(hash, bytes);
+                if oid == tier3_oid
+                    && let Some(inner) = inner.upgrade()
+                {
+                    *s.lock().unwrap() = Some(inner.large.parked());
+                }
+                let extraction = extract(lang, bytes, deadline, cancel);
+                r.statuses.lock().unwrap().push((oid, extraction.status));
+                extraction
+            },
+        );
+        h.publish("main", packages(&["a", "z"]));
+        focus(&h, "z/current.ts", &current);
+        h.settle();
+        let parked_oid = h.git.oid(&parked);
+        assert!(stored(&h, &current));
+        assert_eq!(results.parks(parked_oid), 1, "{tasks}: parked");
+        assert!(h.indexer.inner().large.parked(), "{tasks}: with the slot");
+        // A large file in `z/`: tier 3.
+        h.git.add("main", &[("z/huge.ts", &tier3)]);
+        h.git.commit("main");
+        h.refresh_files();
+        assert!(stored(&h, &tier3), "{tasks}: tier 3 didn't wait");
+        assert_eq!(*saw.lock().unwrap(), Some(false), "{tasks}: state gone");
+        assert!(!h.indexer.inner().large.busy(), "{tasks}: slot free");
+        // The parked file is back in tier 4; the next slot sets it aside
+        // for the switch.
+        assert!(!stored(&h, &parked));
+        clock.advance(PAST_SLOT);
+        h.settle();
+        assert_eq!(aside(&h, 1), ["a/big.ts"], "{tasks}");
+        kernel.set_yield(false);
+        h.settle();
+        assert!(stored(&h, &parked), "{tasks}");
+    }
+}
+
+/// The large slot changes hands between two batch tasks without the
+/// holder running: its parked state is dropped by the non-yielding
+/// acquirer, its turn revoked (so its drop doesn't free the new turn).
+#[test]
+fn yield_large_slot_taken_over_from_a_parked_task() {
+    use crate::index::batch::LargeSlot;
+    use std::sync::mpsc;
+
+    let h = Harness::new();
+    let watchdog = h.indexer.inner().watchdog.clone();
+    let source = big_ts(14, 300 << 10);
+    let lang = crate::extract::LanguageTable::core()
+        .get("ts")
+        .cloned()
+        .expect("ts");
+    let slot = Arc::new(LargeSlot::default());
+    let resume: crate::extract::ResumeSlot = Arc::default();
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    std::thread::scope(|s| {
+        // The first task: extracts with the slot, stops to yield, and then
+        // doesn't run until told.
+        let (slot, resume, watchdog, lang, source) = (&slot, &resume, &watchdog, &lang, &source);
+        let holder = s.spawn(move || {
+            let turn = slot.acquire(|| false, false, || {}).expect("free");
+            let calls = AtomicUsize::new(0);
+            let probe = Arc::new(move || calls.fetch_add(1, Ordering::AcqRel) >= 5);
+            let deadline = Deadline::background(watchdog).yielding(probe, resume.clone());
+            let e = extract(lang, source, &deadline, &Arc::new(AtomicBool::new(false)));
+            assert_eq!(e.status, ExtractStatus::Parked);
+            turn.park(resume);
+            parked_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+            assert!(turn.revoked(), "taken over");
+            assert!(!turn.unpark(), "its state is gone");
+            // Dropping a revoked turn frees nothing.
+            drop(turn);
+        });
+        parked_rx.recv().unwrap();
+        assert!(resume.lock().unwrap().is_some(), "the state is kept");
+        // The second task (tier 3) takes the slot at once.
+        let woke = AtomicBool::new(false);
+        let turn = slot
+            .acquire(|| false, true, || woke.store(true, Ordering::Release))
+            .expect("taken over");
+        assert!(resume.lock().unwrap().is_none(), "the parked tree went");
+        assert!(woke.load(Ordering::Acquire), "the waiting tasks are woken");
+        go_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(slot.busy(), "still the second task's");
+        // A holder that isn't parked keeps the slot, even from tier 3.
+        let tries = AtomicUsize::new(0);
+        let stop = || tries.fetch_add(1, Ordering::AcqRel) >= 2;
+        assert!(slot.acquire(stop, true, || {}).is_none());
+        drop(turn);
+        assert!(!slot.busy());
+        assert!(slot.acquire(|| false, false, || {}).is_some());
+    });
+}
+
+/// A parked item of the project that ran tiers 3–5 is given up when
+/// another project takes them over: that project's tier 3 work doesn't wait
+/// behind the yielding boundary, and the large slot is free again.
+#[test]
+fn yield_parked_item_of_another_project_is_given_up() {
+    use lectern_services::project::{
+        ActiveTree, FileKind, FileList, ProjectKey, ProjectSnapshot, Scan,
+    };
+
     let (h, _clock, kernel) = harness(1);
-    let parked = big_ts(8, 300 << 10);
-    let tier3 = big_ts(9, 300 << 10);
-    let current = ts("current");
-    // `a/` comes first in the walk: its large file is the first extracted
-    // while everything is tier 4; `z/` becomes tier 3 later.
-    h.git.add(
-        "main",
-        &[
-            ("a/big.ts", &parked),
-            ("z/current.ts", &current),
-            ("z/huge.ts", &tier3),
-        ],
-    );
-    h.git.commit("main");
-    let results = Arc::new(Results::default());
-    // The first far extraction (a/big.ts) stops early and keeps the large
-    // slot.
-    let once = Arc::new(AtomicBool::new(false));
-    let (o, k) = (once.clone(), kernel.clone());
+    let parked = big_ts(12, 300 << 10);
+    files(&h, &[], &[("big.ts", parked.clone())]);
+    let results = record(&h);
+    // A folder project opens first, with the batch tiers paused; the git
+    // project, opened last, runs them.
+    h.pause();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().canonicalize().expect("canonical");
+    let huge = big_ts(13, 300 << 10);
+    std::fs::write(root.join("huge.ts"), &huge).expect("write");
+    let folder = ProjectKey::Folder {
+        root: Arc::from(root.as_path()),
+    };
+    let mut list = FileList::builder();
+    list.push("huge.ts", FileKind::File);
+    let event = h.projects.set(ProjectSnapshot {
+        key: folder.clone(),
+        generation: 1,
+        name: "folder".into(),
+        worktrees: Arc::from(Vec::new()),
+        active: Some(ActiveTree {
+            root: Arc::from(root.as_path()),
+            worktree: None,
+            opened_at: "".into(),
+            files: Scan::Ready(Arc::new(list.build())),
+            packages: Scan::Ready(Arc::from(Vec::new())),
+        }),
+    });
+    h.indexer.project_event(&event);
+    h.settle();
+    let checks = Arc::new(AtomicUsize::new(0));
+    let (c, k) = (checks.clone(), kernel.clone());
     on_yield_check(&h, move || {
-        if !o.swap(true, Ordering::AcqRel) {
+        if c.fetch_add(1, Ordering::AcqRel) == 5 {
             k.set_yield(true);
         }
     });
-    // While tier 3 extracts its large file, the parked one is back in its
-    // queue: its tree is gone.
-    let saw = Arc::new(Mutex::new(None));
-    let s = saw.clone();
-    let inner = Arc::downgrade(h.indexer.inner());
-    let key = h.key();
-    let tier3_oid = h.git.oid(&tier3);
-    let hash = h.git.hash();
-    let r = results.clone();
-    h.indexer.set_extractor(
-        move |lang: &Lang, bytes: &[u8], deadline: &Deadline, cancel: &Arc<AtomicBool>| {
-            let oid = crate::git_access::hash_blob(hash, bytes);
-            if oid == tier3_oid
-                && let Some(inner) = inner.upgrade()
-                && let Some(project) = inner.project(&key)
-            {
-                let st = project.state.lock().unwrap();
-                let queue: Vec<String> = st.batch.resume[1]
-                    .iter()
-                    .map(|i| i.path.to_string())
-                    .collect();
-                *s.lock().unwrap() = Some(queue);
-            }
-            let extraction = extract(lang, bytes, deadline, cancel);
-            r.statuses.lock().unwrap().push((oid, extraction.status));
-            extraction
-        },
-    );
-    h.publish("main", packages(&["a", "z"]));
+    open_far(&h);
+    h.resume();
     h.settle();
     let parked_oid = h.git.oid(&parked);
     assert_eq!(results.parks(parked_oid), 1, "parked with the large slot");
-    assert!(!stored(&h, &tier3));
-    // A current text in `z/`: its large file is tier 3 now.
-    focus(&h, "z/current.ts", &current);
-    h.settle();
-    assert!(stored(&h, &tier3), "tier 3 didn't wait for the switch");
-    assert_eq!(
-        saw.lock().unwrap().clone(),
-        Some(vec!["a/big.ts".to_owned()]),
-        "the parked file gave the slot up"
+    assert!(h.indexer.inner().large.busy());
+    // The folder's large file becomes its current text: the folder runs
+    // tiers 3–5 now, the file tier 3.
+    let oid = h
+        .indexer
+        .map(&folder)
+        .and_then(|m| m.effective("huge.ts").map(|e| e.oid))
+        .expect("read");
+    h.indexer.set_focus(
+        &folder,
+        None,
+        Focus::Current(Some(TextRef {
+            worktree: None,
+            path: "huge.ts".into(),
+            oid,
+            origin: TextOrigin::Worktree,
+        })),
     );
-    assert!(!stored(&h, &parked));
-    kernel.set_yield(false);
     h.settle();
-    assert!(stored(&h, &parked));
+    let store = h.indexer.store(&folder).expect("open");
+    let version = crate::store::Version::of(&results.langs.lock().unwrap()[&parked_oid]);
+    assert!(
+        store
+            .exists(&version, &[oid])
+            .is_some_and(|f| !f.is_empty()),
+        "the folder's tier 3 didn't wait for the switch"
+    );
+    assert!(!h.indexer.inner().large.busy(), "the slot is free");
+    // The git project's file is back in its queue, its state gone.
+    assert_eq!(queued(&h, 1), ["lib/big.ts"]);
+    assert!(!stored(&h, &parked));
 }
 
 #[test]

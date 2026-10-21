@@ -1808,11 +1808,11 @@ pub(crate) struct DepMap {
 - 批次边界：持有不让路的守卫时 `guard.proceed().await`（只看暂停），照常跑一批；持有让路的守卫时 `guard.proceed_item(下一项的字节数).await`：
   - `Grant::Batch`：照常跑一批（开关关着，或刚关上）。
   - `Grant::Slot { deadline }`：只做一项，到 `deadline` 为止：一个文件（读、存在检查、抽取，结果在这一项之后立即用一个写事务写入），或一次 ≤ 500 个 OID 的存在检查（大小记为 0）。`yield_requested()` 在 `deadline` 变为 true，在途的抽取在下一个分片边界停下（下一条）。
-  - 下一项超过 256 KiB（`SLOT_MAX_BYTES`）时 kernel 不给时段，等开关关闭后返回 `Batch`。
-- 等待时段期间有了窗口链或第 3 层的工作（打开文件、焦点变化，`kick_batch`）：批量任务等待的 future 同时登记在批量状态的唤醒列表里，被唤醒时先看有没有不让路的工作，有就 drop 让路的守卫（停下的那一项的状态留在任务里，之后取回让路的守卫时接着做；超过 256 KiB 的见下文 `LargeSlot` 一条）、取不让路的守卫去做它。所以第 3 层从不排在保活时段后面。
-- 在途的抽取在分片边界停下、保留状态，不放弃（核心语言）：解析的进度回调在 `yield_requested()` 为 true 时返回 `Break`，`Parser` 不 `reset`、输入保留，下次用同一份输入继续（ADR 0034 调研：恢复后的树与一次解析相同）；一次遍历（ADR 0031）每 1024 个节点检查一次，停下时保存遍历的栈。抽取返回 `Outcome::Parked(Parked)`，批量任务带着它等下一个许可，得到 `Batch` 或 `Slot` 时先接着做它（超过 256 KiB 的等 `Batch`）。语言包用的 tree-sitter-tags 不能恢复，照暂停的规则放弃这一项，放回这一层的「恢复后先做」小队列。
+  - 时段做不了的项（超过 256 KiB，`SLOT_MAX_BYTES`；语言包的抽取一个时段做不完）放进这一层的「暂缓」列表（`Batch::aside`），按取出的顺序排着，这一层接着做后面的项；开关关闭后的第一批（`Grant::Batch`）先把暂缓的项按原来的顺序放回队列前面，再照常做。所以用户一直在交互时第 4、5 层照样前进（ADR 0033），时段做不了的项等交互结束。只剩暂缓的项（或停下的超过 256 KiB 的一项）时，边界向 `proceed_item` 要一个超过 256 KiB 的大小，kernel 等开关关闭后才返回 `Batch`，任务不退出。
+- 等待时段期间有了窗口链或第 3 层的工作（打开文件、焦点变化，`kick_batch`）：批量任务等待的 future 同时登记在批量状态的唤醒列表里，被唤醒时先看有没有不让路的工作，有就 drop 让路的守卫（停下的那一项的状态留在任务里，之后取回让路的守卫时接着做；超过 256 KiB 的见下文 `LargeSlot` 一条）、取不让路的守卫去做它。所以第 3 层从不排在保活时段后面。换了运行第 3–5 层的项目（焦点到了另一个项目、项目关闭）或停下的那一项的会话结束时，等待的 future 同样被唤醒，任务丢掉停下的状态、交还 `LargeSlot`，再按新的项目取守卫，所以另一个项目的工作不排在原来项目的让路边界后面。
+- 在途的抽取在分片边界停下、保留状态，不放弃（核心语言）：解析的进度回调在 `yield_requested()` 为 true 时返回 `Break`，`Parser` 不 `reset`、输入保留，下次用同一份输入继续（ADR 0034 调研：恢复后的树与一次解析相同）；一次遍历（ADR 0031）每 1024 个节点检查一次，停下时保存遍历的栈。抽取返回 `Outcome::Parked(Parked)`，批量任务带着它等下一个许可，得到 `Batch` 或 `Slot` 时先接着做它（超过 256 KiB 的等 `Batch`）。语言包用的 tree-sitter-tags 不能恢复，放弃这一项、放进暂缓列表，交互结束后从头重做。
 - 截止时间按运行的时间计：停下时把这次抽取从看门狗的在途表里撤下、记下剩余的预算，继续时按剩余的预算重新登记，所以让路不会让一个文件因为等待而 `TimedOut`。暂停（`pause_requested()`）、取消和会话结束时丢掉保存的状态，按原来的规则放弃这一项。
-- 超过 256 KiB 的一项停下之后：它拿着 `LargeSlot`（超过 256 KiB 的文件同时只在一个批量任务里抽取），又要等开关关闭才能继续（不进入时段），用户一直在交互时可能一直等。不让路的工作（窗口链的窗口、第 3 层超过 256 KiB 的文件）要 `LargeSlot` 时不等它：`LargeSlot` 记下有不让路的请求、唤醒持有它的停下的任务，那个任务丢掉保存的状态（这一项放回它那一层的「恢复后先做」小队列，下次从头抽取）、交还 `LargeSlot`，请求方在下一次唤醒时取得。所以第 3 层和窗口链不因让路的大文件变慢（ADR 0033「第 3 层不让路」），一棵停下的大树和一个不让路的大工作也不同时在内存里。不大于 256 KiB 的停下的项不占 `LargeSlot`，在时段里继续。
+- 超过 256 KiB 的一项停下之后：它拿着 `LargeSlot`（超过 256 KiB 的文件同时只在一个批量任务里抽取），要等开关关闭才能继续（不进入时段）。等待期间这一层还有时段能做的项时，时段做下一项、停下的大项留着；时段里那一项也停下时（每个任务只留一份保存的状态），大项丢掉保存的状态、交还 `LargeSlot`、放进暂缓列表。不让路的工作（窗口链的窗口、第 3 层超过 256 KiB 的文件）要 `LargeSlot` 时不等它：停下的持有者把保存的状态登记在 `LargeSlot` 里（`LargeTurn::park`），请求方直接接手，丢掉那份状态、作废持有者的那一轮（`revoked`），并唤醒等待的批量任务；持有者被唤醒后把这一项放回它那一层的队列，下次从头抽取。接手不需要持有者先运行，所以与批量任务数和线程数无关。第 3 层和窗口链因此不因让路的大文件变慢（ADR 0033「第 3 层不让路」），一棵停下的大树和一个不让路的大工作也不同时在内存里。不大于 256 KiB 的停下的项不占 `LargeSlot`，在时段里继续。
 - 内存：保存的状态（解析器、部分语法树、遍历的栈、输入）每个批量任务至多一份，超过 256 KiB 的至多一份（`LargeSlot`），所以建索引期间的临时内存仍按「性能」的 ≤ 40 MB 计。
 - 不变的：第 1、2 层和查询（`Interactive`、`Background` 任务）不受开关影响；窗口链和第 3 层不让路；`pause_requested()` 的语义、后台状态和代数、bench 的采样都按 kernel 的规则，与开关无关。
 
@@ -1820,7 +1820,9 @@ pub(crate) struct DepMap {
 // index/batch.rs（内部）。批量任务的循环里有 `guard: TaskGuard` 和 `parked: Option<Parked>`。
 /// 任何时候只有一个守卫（kernel 按守卫记暂停）。
 enum TaskGuard { Near(Arc<BackgroundGuard>), Far(Arc<BackgroundGuard>), None }
-enum Outcome { Done(Done, usize), Paused, Skip, Parked(Parked) }
+enum Outcome { Done(Done, usize), Paused, Skip, Parked(Parked), Aside }
+// state.rs：`Batch::aside: [VecDeque<Item>; 3]`，第 4、5 层时段做不了的项，`Grant::Batch` 时放回队列前面。
+// `LargeSlot`：停下的持有者登记保存的状态（`LargeTurn::park`），不让路的请求方接手、作废那一轮（`LargeTurn::revoked`）。
 /// 让路的任务从一个边界带到下一个边界的一项：已读出、已登记在途；等它的时段（开关打开时超过 256 KiB），
 /// 或停在分片边界、抽取的状态在 `resume` 里。`Send`，每个任务至多一份。
 struct Parked { project: Arc<Project>, session: u64, t: usize, item: Item, flag: Arc<AtomicBool>, key: BlobId,
@@ -2401,6 +2403,12 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 基准（`just bench --measure code_intel/yield_stop code_intel/warm_100k code_intel/extract_throughput code_intel/batch_peak`，负载约 1.5–2.4）：`yield_stop` 30 个样本，中位数 26.9 µs、p95 40.5 µs、最大 58.9 µs（≤ 10 ms；运行器标为 noisy，最大值约为中位数的两倍）；`batch_peak` 33.3 MB（≤ 40 MB，与前几轮相同）；`warm_100k` 75.9 ms、`warm_100k_touch` 318 ms（前几轮 73–86 ms、248–284 ms）；`extract_throughput` 4.02 MB/s（≥ 4，前几轮 3.8–5.0 MB/s）。这几项都在开关关闭时运行，批次照旧，每个边界多一次 `proceed_item`。
 - 没有验证的：保活时段下批量层合计 ≤ 一个核的 10%（「性能」）没有基准，由 kernel 的时段长度和间隔（50 ms / 500 ms）加上「一个时段只做一项」保证；macOS 上的数值看 macOS CI。
 
+第 7 步自审之后（换项目时放弃停下的项、暂缓列表、`LargeSlot` 的接手，「与设计的差异」），同一台机器。
+
+- `just check`、`just test -p lectern-code-intel`（293 个测试通过）通过；`yield_*` 与 `schedule_*` `--stress-count 30` 全部通过（380 s）。新增 `yield_parked_item_of_another_project_is_given_up`、`yield_large_slot_taken_over_from_a_parked_task`；`yield_large_file_waits_for_the_switch` 改为两个大文件排在最前（小文件在时段里做完、大文件按原顺序在开关关闭后做完），`yield_language_pack_is_given_up_and_redone` 检查同一层后面的项照常前进、语言包只试一次、开关关闭后重做的单元与一次做完的相同，`yield_large_parked_item_gives_way_to_tier3` 分别用一个和两个批量任务。
+- 变异检查：去掉边界上的换项目和会话检查时，`yield_parked_item_of_another_project_is_given_up` 失败；不让路的请求方不接手、照旧等持有者时，`yield_large_parked_item_gives_way_to_tier3` 的两个任务一组卡住；时段里读出的大文件不放进暂缓列表时，`yield_large_file_waits_for_the_switch` 和 `yield_large_parked_item_gives_way_to_tier3` 失败；语言包的项照旧放回队列前面时，`yield_language_pack_is_given_up_and_redone` 失败。都已还原。
+- 基准（`just bench --measure code_intel/yield_stop code_intel/batch_peak`，负载约 2–2.8）：`yield_stop` 中位数 33.1 µs、p95 70.2 µs、最大 110 µs（≤ 10 ms；这次的改动不在抽取里，与上一轮的差别是负载）；`batch_peak` 33.3 MB（≤ 40 MB）。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2634,9 +2642,11 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 只接入第 4、5 层。依赖层还没有实现，随第 9 步用同一套机制（让路的守卫、`proceed_item`、`Parked`）；窗口链随第 8 步，届时与第 3 层一样持有不让路的守卫、按不让路的请求方取 `LargeSlot`。
 - 停下的状态经抽取的 deadline 传递：`Deadline::yielding(probe, slot)` 带让路的探针和 `ResumeSlot`，抽取停下时把 `Resume`（未 reset 的 `Parser`，或语法树加遍历的位置和已有的输出，以及剩余预算）放进槽里、返回 `ExtractStatus::Parked`，批量任务把它包成 `Outcome::Parked`。所以测试换上的抽取钩子（`Indexer::set_extractor`）照样经过停下和继续。查询不用让路的 deadline，`query::definition`、`search` 里的 `Parked` 按 `Cancelled` 处理。遍历停下时保存的是游标的后代序号和各层上下文对应的源码范围，继续时用 `goto_descendant` 回到原处、从祖先重建栈。
 - 遍历之后按规则整理单元的一步（`rules::finish_with_refs`）不分片，在同一次登记下做完；它只读遍历的输出，比解析和遍历短得多。
-- 语言包的放弃经看门狗：tree-sitter-tags 没有分片边界，看门狗每次检查（`CHECK_INTERVAL`，10 ms）也看让路的探针，为 true 时置位停止、记为新的 `Trip::Yielded`，抽取返回 `Parked`、槽是空的，批量任务把这一项放回这一层的小队列。所以语言包至多晚一次检查停下；`yield_stop` 只测核心语言。
+- 语言包的放弃经看门狗：tree-sitter-tags 没有分片边界，看门狗每次检查（`CHECK_INTERVAL`，10 ms）也看让路的探针，为 true 时置位停止、记为新的 `Trip::Yielded`，抽取返回 `Parked`、槽是空的，批量任务把这一项放进暂缓列表（`Outcome::Aside`）。所以语言包至多晚一次检查停下；`yield_stop` 只测核心语言。
 - 批次的顺序：原来先做三层的「恢复后先做」小队列，再按层遍历；现在第 3 层的小队列和遍历在第 4、5 层的小队列之前（`plan` 先看要不要不让路的守卫），否则第 4 层放回的项会让第 3 层的工作排在让路的守卫后面。热启动之后标记访问（`touch_pending`）算作让路的工作，持有让路的守卫做。
-- 下一项在 `proceed_item` 之前读出（要知道字节数），连同登记在途一起放在 `Parked` 里。超过 256 KiB 的一项在开关打开时一直等，它所在的层后面的项也跟着等，直到开关关闭；不让路的工作和暂停不受影响。暂停时 kernel 唤醒等待许可的 future，它看到 `pause_requested()` 就丢掉停下的状态、放回这一项，再按暂停等在边界上。
-- `LargeSlot` 改为记下不让路的请求数（`wanted`），不让路的请求方等待之前唤醒批量任务的唤醒列表；持有它的停下的任务在边界上看到有请求就放弃这一项、交还。本任务自己停下的大项挡着本任务要做的第 3 层大文件时，直接放弃自己的那一项。一个任务停下、另一个任务的第 3 层在批量线程上等 `LargeSlot`，依赖批量任务数不超过 executor 的批量线程数（`default_batch_tasks()` 与线程数相同），停下的任务总有线程可以运行、交还 `LargeSlot`。
+- 边界向 `proceed_item` 要的大小在每次 poll 时重新算（`boundary_bytes`）：停下的项不超过 256 KiB 时是它的大小；否则这一层还有时段能做的工作时是 0（时段里读出下一项，读出来超过 256 KiB 就放进暂缓列表、接着取下一项，读的字节计入这一批）；只剩暂缓的项或停下的大项时是 `SLOT_MAX_BYTES + 1`，等开关关闭。暂停时 kernel 唤醒等待许可的 future，它看到 `pause_requested()` 就丢掉停下的状态、放回这一项，再按暂停等在边界上。
+- 暂缓列表（`Batch::aside`）是设计之外加的：设计里超过 256 KiB 的项和放弃的语言包项放回队列前面，开关打开时会挡住这一层后面的项，与 ADR 0033「持续滚动时第 4、5 层照样前进」不符。暂缓的项保留 `queued` 里的键（同一 OID 不重复排队），换代重建游标、第 5 层换代时与队列一起清空，`coverage` 把暂缓的项计为未完成。开关关闭后 `far_step` 先把它们按原顺序放回队列前面（`drain_aside`），读出时照常核对 OID。
+- 换项目时放弃停下的项：等待的 future 每次 poll 都检查运行第 3–5 层的项目还是不是它（`Arc::ptr_eq`）、停下那一项的会话是否还在，不是就返回 `Interrupted`，循环开头丢掉停下的状态、交还 `LargeSlot`，再按新的项目取守卫。设计只写了第 3 层的工作打断等待。
+- `LargeSlot` 的接手：停下的持有者把 `ResumeSlot` 登记在 `LargeSlot` 里，不让路的请求方取得时清空那份状态、换成新的一轮（`LargeTurn` 带轮次，作废的一轮 drop 时不释放新的一轮），再唤醒等待的批量任务；持有者在边界上看到 `revoked()` 就放回这一项，继续抽取前也先 `unpark()` 确认这一轮还有效。设计写的是请求方等持有者交还，那需要持有者的任务先运行：批量任务数多于批量线程（或测试里单线程的 executor 上两个任务）时，请求方在线程上等、持有者没有线程运行，会卡住。现在接手不依赖持有者运行，对批量任务数和线程数没有要求。本任务自己停下的大项挡着本任务的第 3 层大文件时，仍直接放弃自己的那一项（提前释放它的字节）。
 - `code_intel/yield_stop` 直接调用 `extract`，让路的探针读一个由测量线程置位的标志，不经过 kernel 的开关：从置位到抽取返回 `Parked`、状态在槽里。kernel 从开关到 `yield_requested()` 的时间由 kernel 的测试负责。
-- 测试：`yield_resumed_extraction_is_identical` 每种语言用 120 KiB（在时段里停下再继续）和接近 1 MiB（开关打开时停下、关闭后继续）两组，见「实际验证」；`yield_large_parked_item_gives_way_to_tier3` 用第 3 层抽取大文件时停下的那一项已经放回小队列来确认两棵大树不同时在内存里，不读活跃字节；窗口链的部分随第 8 步。测试用的 `Inner::yield_hook`（只在 `cfg(test)` 下）在每次让路检查时运行，用来在抽取进行中推进时段的时钟或打开开关。
+- 测试：`yield_resumed_extraction_is_identical` 每种语言用 120 KiB（在时段里停下再继续）和接近 1 MiB（开关打开时停下、关闭后继续）两组，见「实际验证」；`yield_large_parked_item_gives_way_to_tier3` 分别用一个和两个批量任务，在第 3 层抽取大文件时检查 `LargeSlot` 里没有登记的停下的状态，确认两棵大树不同时在内存里，不读活跃字节；`yield_large_slot_taken_over_from_a_parked_task` 在两个线程上检查接手不需要持有者运行；窗口链的部分随第 8 步。测试用的 `Inner::yield_hook`（只在 `cfg(test)` 下）在每次让路检查时运行，用来在抽取进行中推进时段的时钟或打开开关。
