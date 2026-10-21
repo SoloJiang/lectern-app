@@ -469,7 +469,8 @@ impl Kernel {
 
     /// 退出时按依赖的相反顺序停用全部插件。撤销全部完成、kernel 线程退出后调用 `done`。
     /// 退出的顺序由 `app` 的 `Quit` Action 定（⌘Q 和应用菜单的 Quit 绑定到它，[file_reader 设计「编辑」](file_reader.md#编辑)）：
-    /// 先问离开守卫，通过后调用本方法，`done` 被调用（或等满 2 秒）后在主线程上 `cx.quit()`。
+    /// 先问离开守卫，通过后调用本方法；`done` 被调用后在后台线程上可选地 `Executor::shutdown`、`Cache::close`；
+    /// 这些合计至多 2 秒，全部完成或到时后在主线程上 `cx.quit()`。
     /// 等待期间主线程照常运行，需要在主线程上执行的守卫 drop 不会死锁。锁定的 GPUI（gpui-pre 0.3.9）的应用代理只实现
     /// `applicationWillTerminate:`，不能推迟退出，所以由系统发起的退出不经这个顺序（见「已知限制」）。
     pub fn shutdown(&self, done: impl FnOnce() + Send + 'static);
