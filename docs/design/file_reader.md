@@ -897,7 +897,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   pub enum ReplaceError { Changed { now: FileIdentity }, NotFound, PathThroughSymlink, Unsupported, Io(io::Error) }
   ```
 
-  比较身份和 `renameat` 之间仍有一个很短的窗口（「已知限制」）。测试 `replace_file_*`：内容与权限、身份变化时不替换且临时文件不留下、中间一级是符号链接、`rel` 是符号链接或目录、并发的 `race_replace_never_escapes`。platform 设计「范围」的「写文件」一条改为由这个接口和 #66 共用打开逻辑。
+  比较身份和 `renameat` 之间仍有一个很短的窗口（「已知限制」）。测试 `replace_file_*`：内容与权限、身份变化时不替换且临时文件不留下、中间一级是符号链接、`rel` 是符号链接或目录、并发的 `race_replace_never_escapes`。platform 设计「范围」的「写文件」一条改为由这个接口和 #66 共用打开逻辑。已实现，见 [platform 设计「原子替换」](platform.md#原子替换)：权限位是 `0o777`，`fchmod` 在 `fsync` 之前，`rel` 不存在时为 `NotFound`、不创建文件。
 - `git`：三方合并，纯计算，用已有的 `gix::diff::blob`（Histogram），不新增依赖。
 
   ```rust
@@ -922,7 +922,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   }
   ```
 
-  测试 `thread_cpu_*`：忙循环的线程 CPU 时间增长，阻塞在条件变量上的不增长，句柄能在另一个线程上读。
+  测试 `thread_cpu_*`：忙循环的线程 CPU 时间增长，阻塞在条件变量上的不增长，句柄能在另一个线程上读。已实现，见 [platform 设计「线程的 CPU 时钟」](platform.md#线程的-cpu-时钟)。
 - `executor`：不改。`syntax` 的批量工作用已有的 `Priority::Batch`。
 - `code_intel`：
   - 批量循环（前置条件 F，只补测试）：循环已经在每个 `Step::Worked` 之后调用 `yield_now()`，返回一次 `Pending` 并重新入队（`crates/code_intel/src/index/batch.rs`），带着它的 `Parked`（含停下的大项的 `LargeTurn`），不放下 `LargeSlot`，批量任务数不变；活性的论证见「批量线程上的先后」。本设计依赖这一点，所以要测试把它固定下来：批量线程全被 `code_intel` 的任务占着时入队一个 `Batch` 任务，它不晚于每个线程的下一个批次边界开始；一个任务带着停下的大项重新入队、另一个让路的任务在 `LargeSlot::acquire` 上等时，持有者仍能被取到，开关关闭后两者都完成（单个批量线程和两个批量线程各一次）。
@@ -947,11 +947,11 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 - A. `services`：`reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`；`rg -n 'pub trait Reader' crates/services/src` 有一处，`dyn Reader` 的 `ID == "reader"`、`MULTIPLE == false` 的测试通过。
 - B. `project`：目录表；`dirs_*` 测试通过，`project/dirs_100k`、`project/dirs_100k_bytes`、`plugin/project/resident_100k` 在预算内。
-- C. `platform`：`SafeRoot::replace_file`；`replace_file_*` 测试通过。
+- C. `platform`：`SafeRoot::replace_file`；`replace_file_*` 测试通过。已完成：接口、步骤和错误见 [platform 设计「原子替换」](platform.md#原子替换)。
 - D. `git`：`merge3`、`Text::shared`；`merge3_*` 测试通过，`Text::shared` 返回的 `Arc` 与 `Text::new` 收到的是同一份（`Arc::ptr_eq`）。
 - E. `workspace` 的 `dyn Contributions`（#30）、`ui` 的代码配色与等宽度量（#6）：第 7 步之前。离开守卫（`register_leave_guard`、窗口关闭回调）和 `Quit` Action：第 8 步之前，没有它们编辑模式不上线。
 - F. `code_intel`：固定「批量循环在每个批次边界重新入队、带着停下的项」的测试（行为已实现，「对其他 crate 的要求」）：第 4 步之前。
-- G. `platform` 的 `ThreadCpuClock`：第 1 步之前（`health_*` 用它）。
+- G. `platform` 的 `ThreadCpuClock`：第 1 步之前（`health_*` 用它）。已完成：见 [platform 设计「线程的 CPU 时钟」](platform.md#线程的-cpu-时钟)。
 
 本 issue 分八步实现，每步一个 PR，写 `Refs #10`，最后一步写 `Closes #10`。每一步都要 `just check`、`just test`（`syntax` 的步骤加 `-p lectern-syntax`）、`just deny` 通过，并把这一步的 bench 条目加进 `budgets.rs`、改为生效。
 

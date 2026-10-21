@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -14,11 +14,13 @@
   - 读取结果的分类：普通文件、符号链接（读出目标，不跟随）、超过上限、不读取的类型（目录、FIFO、socket、设备文件）；错误分为不存在、路径中间是符号链接、其他 IO 错误。
   - 三个实现：Linux 的 `openat2`、macOS 的 `O_NOFOLLOW_ANY` 与 `AT_SYMLINK_NOFOLLOW_ANY`、两个平台共用的逐级 `openat`（Linux 没有 `openat2` 时的后备，也是出错时判定原因的实现）。
   - `process::phys_footprint`：一个进程在活动监视器里的「内存」，供 `lectern-bench` 测量（见「进程」）。
+  - 原子替换（`SafeRoot::replace_file`）：编辑模式的保存，在同一目录里写临时文件、比较身份后 `renameat` 替换（见「原子替换」）。
+  - 线程的 CPU 时钟（`ThreadCpuClock`）：`syntax::health` 判定 grammar 卡死（[ADR 0041](../adr/0041.md)，见「线程的 CPU 时钟」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
   - 内置转换、OID 计算、stat 比较本身、按路径缓存：`git`。
-  - 写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。编辑的保存要的原子替换 `SafeRoot::replace_file` 由 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)提出，实现时在本文加一节，与 #66 共用打开逻辑；同一处还提出了线程的 CPU 时钟 `ThreadCpuClock`（[ADR 0041](../adr/0041.md) 的卡死检测），同样在实现时加一节。
+  - 原子替换以外的写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。`replace_file` 打开父目录用的就是这套逻辑（`list` 与 `open_dir` 共用的目录打开函数），#66 的写出与它共用。
 - 本文不覆盖，以后在本文增加小节或另写设计文档，设计合并之前不写对应的代码：
   - FSEvents 与 kqueue 后端（实现 `fs_watch` 的接口，模块 `fs_events`）：设计、实际验证和与设计的差异都在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)。
   - `open -a`、钥匙串、代码签名校验、线程 QoS（[executor 设计](executor.md)的线程启动钩子）。
@@ -29,9 +31,9 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `rustix` 1.1（`default-features = false`，`std`、`fs`） | `openat2`、`openat`、`fstatat`、`fstat`、`readlinkat`、`read` | 见下 |
+| `rustix` 1.1（`default-features = false`，`std`、`fs`） | `openat2`、`openat`、`fstatat`、`fstat`、`readlinkat`、`read`；`replace_file` 的 `write`、`fchmod`、`fsync`、`renameat`、`unlinkat` | 见下 |
 | `tempfile`（dev） | 测试用的临时目录 | 已在 Cargo.lock（3.27，经 `insta`），MIT OR Apache-2.0 |
-| `libc`（只在 macOS 上） | `proc_pid_rusage`（`process::phys_footprint`）；测试里创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190）；rustix 没有 `proc_pid_rusage` |
+| `libc`（Linux 和 macOS） | `ThreadCpuClock`：Linux 的 `pthread_getcpuclockid`、`clock_gettime`，macOS 的 `pthread_mach_thread_np`、`thread_info`；macOS 上还有 `proc_pid_rusage`（`process::phys_footprint`）和测试里创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190），原来只在 macOS 上依赖，加上 Linux 不改 Cargo.lock；rustix 没有这几个调用（它的 `clock_gettime` 只接受固定的几种时钟） |
 | `lectern-fs-watch` | `fs_events` 实现它的 `Backend`；事件转换是纯函数，在所有平台上编译和测试 | 基础设施层，方向向下（[fs_watch 设计「依赖」](fs_watch.md#依赖)） |
 | `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
 | `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
@@ -88,6 +90,10 @@ impl SafeRoot {
     /// 与其他方法不同，打开的描述符不在返回前关闭，而是转交给 `OpenFile`，在它 drop 时关闭（见「数据流与线程」的描述符生命周期）。
     /// 见「范围读取」。
     pub fn open_file(&self, rel: RelPath<'_>) -> Result<Opened, SafeError>;
+
+    /// 原子替换一个普通文件，比较身份之后 `renameat`。错误类型是 `ReplaceError`，见「原子替换」。
+    pub fn replace_file(&self, rel: RelPath<'_>, bytes: &[u8], expect: Option<FileIdentity>)
+        -> Result<FileIdentity, ReplaceError>;
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -638,8 +644,156 @@ pub mod process {
 }
 ```
 
-- 模块在所有平台上编译，macOS 的实现在 `#[cfg(target_os = "macos")]` 后面，是本 crate 里除测试外唯一的 `unsafe`（一次 FFI 调用和读取它填好的结构体）。
+- 模块在所有平台上编译，macOS 的实现在 `#[cfg(target_os = "macos")]` 后面，`unsafe` 只有一次 FFI 调用和读取它填好的结构体。本 crate 里另外用到 `unsafe` 的是 `fs_events` 的绑定和 `ThreadCpuClock`（见「线程的 CPU 时钟」）；`safe_read`（含 `replace_file`）的实现代码没有 `unsafe`。
 - 测试（`process_*`）：macOS 上，分配并写满 64 MiB 后本进程的 `phys_footprint` 至少增加 60 MiB；不存在的 pid 返回错误。Linux 上返回 `Unsupported`。
+
+## 原子替换
+
+`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的前置条件 C：编辑模式的保存（⌘S）经 `EditSession::save` 调用它（[file_reader 设计「编辑」](file_reader.md#编辑)）。读者（阅读视图、`git` 的工作区比较、agent）在任何时刻看到的都是旧文件或完整的新文件，不会是写了一半的文件；磁盘上的文件在用户读入之后被别人改过时不写。
+
+### 接口
+
+模块 `safe_read`（`safe_read/replace.rs`），`ReplaceError` 在 crate 根重新导出。
+
+```rust
+impl SafeRoot {
+    /// 用 `bytes` 原子替换 `rel` 这个普通文件。在 `rel` 所在的目录里建临时文件，写入、`fchmod` 成原文件的权限位、`fsync`，
+    /// 再对 `rel` 做不跟随符号链接的 `fstatat`：`expect` 有值且当前身份与它不同时删除临时文件、返回 `Changed`；
+    /// 否则 `renameat` 替换，返回新文件的身份（下次保存的 `expect`）。不创建原来不存在的文件。
+    /// 阻塞，在后台线程上调用；多个线程可以同时调用同一个 `SafeRoot`。
+    pub fn replace_file(&self, rel: RelPath<'_>, bytes: &[u8], expect: Option<FileIdentity>)
+        -> Result<FileIdentity, ReplaceError>;
+}
+
+#[derive(Debug)]
+pub enum ReplaceError {
+    /// `expect` 有值，磁盘上的文件已不是这个身份：用户读入之后被写入、截短、`chmod` 或换成了别的文件。
+    /// `now` 是比较时的身份。没有写入。
+    Changed { now: FileIdentity },
+    /// `rel` 不存在，或中间某一级不存在、不是目录（与 `SafeError::NotFound` 相同）。
+    NotFound,
+    /// 路径的任何一级是符号链接，包括最后一级。
+    PathThroughSymlink,
+    /// `rel` 不是普通文件：目录、FIFO、socket、设备文件。
+    Unsupported,
+    /// 其他错误，保留原始的 `io::Error`。
+    Io(io::Error),
+}
+// 实现 `Display` 和 `std::error::Error`（`source` 是 `Io` 里的错误）。
+```
+
+身份就是「范围读取」的 `FileIdentity`（`dev`、`ino`、`size`、`mtime`、`ctime`），比较规则与「文件身份」相同：`expect` 来自 `OpenFile::identity()`（读入时）或上一次 `replace_file` 的返回值。`expect` 为 None 时不比较，只检查类型，对应 file_reader 的「强制保存」（`save_anyway`）。
+
+### 步骤
+
+1. 复核并拆分 `rel`（同「路径复核」）；不通过为 `Io(InvalidInput)`，不发系统调用。
+2. 打开父目录：`rel` 只有一级时就是根描述符；否则用 `list` 与 `open_dir` 共用的目录打开函数（一步打开、`fstat` 确认是目录、`Walk` 后备）。之后的调用都是这个目录描述符上的 `*at` 调用，名字只有一级，不再解析路径。
+3. `fstatat(dir, 名字, AT_SYMLINK_NOFOLLOW)`：确认是普通文件，记下它的权限位。在建临时文件之前检查，不存在、符号链接、其他类型都不在目录里留下任何东西。
+4. 建临时文件：`openat(dir, 临时名, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600)`。名字已被占用（`EEXIST`，是文件还是符号链接都一样，不打开它）时换下一个名字，最多 16 个。
+5. 写入全部字节（`EINTR` 时重试），`fchmod` 成第 3 步的权限位，`fsync`。
+6. 再做一次第 3 步的 `fstatat`，类型检查相同；`expect` 有值且这次的 `identity()` 与它不同时为 `Changed { now }`。
+7. `renameat(dir, 临时名, dir, 名字)`。
+8. 对临时文件的描述符 `fstat`，返回它的 `identity()`，然后关闭描述符。在 `renameat` 之后取：有的文件系统（如 ext4）改名时更新被改名的 inode 的 `ctime`。
+
+第 4 步之后任何一步出错（含 `Changed`），先 `unlinkat` 删除临时文件再返回；删除本身失败时仍返回原来的错误。系统调用数：父目录在根目录之下时 1 次打开父目录（一步打开时，加 1 次 `fstat`），2 次 `fstatat`，打开、若干次 `write`、`fchmod`、`fsync`、`renameat`、`fstat`、2 次关闭；耗时主要是 `fsync`。
+
+### 关键约束
+
+- 不写到根目录之外，不经过符号链接写：父目录的描述符不跟随任何一级符号链接；临时文件用 `O_CREAT | O_EXCL`，从不打开已有的条目（`O_NOFOLLOW` 再挡一次）；`renameat` 替换的是目录项本身，名字在第 6 步之后被换成符号链接时被替换的是这个链接，不写它指向的文件。
+- 权限：只带过权限位 `0o777`（属主、组、其他的读写执行，POSIX 的 file permission bits），setuid、setgid、sticky 不带过。写入期间是 `0600`，内容完整之前其他用户读不到。属主和组是当前进程的，不 `fchown`（与 `git checkout` 写出的文件相同）。
+- 落盘：`fsync` 在 `fchmod` 之后、`renameat` 之前，覆盖内容和权限位。崩溃之后路径上是旧文件或完整的新文件。
+- 临时名：`.lectern-save-<pid>-<序号>-<纳秒>.tmp`（十六进制），点开头的隐藏文件，与原文件在同一目录（同一文件系统，`renameat` 不会是 `EXDEV`）。序号是进程内递增的计数，同一进程内不重复；pid 和时钟让它与其他进程、以前运行留下的文件不同。不含原文件名：长度固定，不受 `NAME_MAX` 影响，也不会截断 UTF-8 的名字（APFS 拒绝非法的 UTF-8）。
+- 线程：同一个 `rel` 的两次保存由调用方串行（`EditSession` 同一时刻只有一个保存），本模块不加锁。
+
+### 结果
+
+| 结果 | 情况 | `rel` | 临时文件 |
+|---|---|---|---|
+| `Ok(identity)` | 替换成功 | 新内容，权限位同原文件 | 已改名为 `rel` |
+| `Err(Changed { now })` | `expect` 有值，身份不同：磁盘上的文件已改动（file_reader 显示「磁盘上的文件已改动」，`SaveResult::Conflict`） | 不变 | 已删除 |
+| `Err(NotFound)` | `rel` 不存在（含两次 `fstatat` 之间被删除）；中间一级不存在或不是目录；根目录已被删除 | 不创建 | 没有或已删除 |
+| `Err(PathThroughSymlink)` | 任何一级是符号链接（含两次 `fstatat` 之间被换成链接） | 不变，链接不变 | 没有或已删除 |
+| `Err(Unsupported)` | 目录、FIFO、socket、设备文件 | 不变 | 没有或已删除 |
+| `Err(Io(InvalidInput))` | 绕过 `RelPath::new` 传入不合法的路径 | — | 没有 |
+| `Err(Io(AlreadyExists))` | 16 个临时名都已被占用 | 不变 | 没有 |
+| `Err(Io(_))` 其他 | 目录没有写权限（`PermissionDenied`）、只读文件系统、空间或配额不足（`StorageFull`、`QuotaExceeded`）、`EIO`、`fsync` 失败 | 不变 | 已删除 |
+| `Err(Io(_))`，在第 8 步 | `renameat` 之后的 `fstat` 失败：新内容已经就位，身份未知；本地文件系统上对打开的描述符 `fstat` 不会失败 | 新内容 | 已改名 |
+
+### 已知限制
+
+- 第 6 步的比较与第 7 步的 `renameat` 之间有一个很短的窗口，这期间别的进程写入的内容会被覆盖（file_reader 设计「已知限制」）。
+- 替换会断开硬链接，不保留扩展属性、ACL 和 setuid、setgid、sticky 位，属主和组变为当前进程的。
+- 只读文件（如 `0444`）也会被替换：`renameat` 只要目录的写权限。是否允许编辑只读文件由调用方决定。
+- 进程在第 4 到 7 步之间崩溃时临时文件留下，以后的保存不清理它（名字不同）。
+- 不对目录 `fsync`：断电时 `renameat` 可能还没落盘，路径上仍是旧文件，不会是半个文件。macOS 的 `fsync` 不让磁盘刷写自己的缓存（没有用 `F_FULLFSYNC`），断电时刚保存的内容可能丢失。
+- 挂载点与并发移动目录的限制同「已知限制」：父目录在打开之后被移到根目录之外时，写入的是移走之后的那个目录，要以用户身份在本机运行程序才能做到。
+
+### 测试
+
+写在 `crates/platform/src/safe_read/tests/replace.rs`（`safe_read/tests.rs` 的子模块，共用它的目录树和辅助函数），对当前平台的每个后端各运行一次（Linux：`Openat2`、`Walk`；macOS：`NofollowAny`、`NofollowAnyParent`、`Walk`）：
+
+- `replace_file_replaces_content_and_keeps_permissions`：根目录下一级和多级路径、`0o640`、`0o751`、`0o604` 的文件；替换之后内容是新的，权限位不变，`ino` 不同，返回的身份等于 `stat` 的 `identity()`，用它作 `expect` 连续再存 3 MiB 和空内容都成功；`expect` 为 None 时照样替换；目录里没有多余的条目。
+- `replace_file_changed_on_disk_is_not_replaced`：追加、大小不变的改写（先等到粗粒度时钟前进）、只 `chmod`、被另一个文件 `rename` 覆盖之后为 `Changed`，`now` 等于当前身份，磁盘上是别人写的内容，没有临时文件留下；删除之后为 `NotFound`，不重新创建。
+- `replace_file_through_a_symlink_is_refused`：最后一级是符号链接（指向根目录之内、之外、悬空、`/etc/passwd`），中间一级是符号链接（之内、之外、指回根目录），`expect` 为 None 和有值都为 `PathThroughSymlink`；根目录之内和之外的文件、各个链接都不变，没有临时文件。
+- `replace_file_of_other_types_and_missing_paths`：目录、FIFO、socket 为 `Unsupported`；不存在、中间一级不存在、中间一级是普通文件或 FIFO 为 `NotFound`，不创建文件。
+- `replace_file_temp_name_collision`：前几个临时名已被普通文件、指向根目录之外文件的链接、悬空链接（跟随它会在根目录之外建文件）占用时跳过它们、用下一个名字，占用的条目和它们指向的文件都不变；名字全被占用时第 16 个之后为 `Io(AlreadyExists)`，原文件不变。
+- `replace_file_parent_outside_the_root`：绕过 `RelPath::new` 传入 `../secret`、`a/../../secret`、绝对路径、`..`、`a//b.txt`、`a/./b.txt`，在系统调用之前为 `Io(InvalidInput)`；`open_dir` 返回的根上指向原来根目录的链接 `a/up` 为 `PathThroughSymlink`；打开之后把原路径换成指向根目录之外的链接，保存仍写进原来的目录。
+- `race_replace_never_escapes`：同 `race_swap_never_escapes`，一个线程反复交换目录 `a` 与指向根目录之外的符号链接，另一个线程保存 500 次 `a/secret`；结果只有成功、`NotFound`、`PathThroughSymlink`，根目录之外的文件不变、那个目录里没有临时文件，`a` 里只剩 `secret`。
+- `fd_replace_file_keeps_no_descriptor`：每种结果（成功、`Changed`、`NotFound`、`PathThroughSymlink`、`Unsupported`、临时名全被占用）反复调用之后，进程打开的描述符数不变。
+- `replace_error_is_send_sync_and_displays`：`ReplaceError` 是 `Send + Sync + Error`，`Io` 的 `source` 是原来的错误。
+
+## 线程的 CPU 时钟
+
+`file_reader`（#10）的前置条件 G：`syntax::health` 按线程的 CPU 时间判定一次解析调用是否卡住（[ADR 0041](../adr/0041.md)「external scanner 的处理」，[file_reader 设计「本 crate 的公开项」](file_reader.md#本-crate-的公开项)的 `STUCK_GRACE`）。线程在 utility QoS 下等不到 CPU 时 CPU 时间不增长，所以并发的构建不会让它误判。
+
+### 接口
+
+模块 `thread_clock`（私有），`ThreadCpuClock` 在 crate 根导出。
+
+```rust
+/// 一个线程的 CPU 时钟。`current()` 在要测量的线程上调用，得到的句柄可以在任何线程上读。`Send + Sync`，不可克隆。
+#[derive(Debug)]
+pub struct ThreadCpuClock { /* … */ }
+
+impl ThreadCpuClock {
+    /// 调用线程的时钟。平台没有线程的 CPU 时钟，或者读不到（这里先读一次）时为 `ErrorKind::Unsupported`
+    /// （系统的错误作为它的 source），调用方改用墙上时间。不阻塞。
+    pub fn current() -> io::Result<ThreadCpuClock>;
+    /// 这个线程到目前为止用掉的 CPU 时间（用户态加内核态）。线程已退出时返回错误。不阻塞。
+    pub fn cpu_time(&self) -> io::Result<Duration>;
+}
+```
+
+墙上时间的回退和 10 s 的宽限由调用方（`syntax::health`）实现，本模块只报告读不到。
+
+### 实现
+
+| 平台 | `current` | `cpu_time` | 精度 |
+|---|---|---|---|
+| Linux | `pthread_getcpuclockid(pthread_self())` 得到 `clockid_t` | `clock_gettime(clockid)` | 纳秒 |
+| macOS | `pthread_mach_thread_np(pthread_self())` 得到线程的端口名（不增加引用），`mach_port_mod_refs(…, MACH_PORT_RIGHT_SEND, +1)` 为这个时钟加一个用户引用 | `thread_info(port, THREAD_BASIC_INFO)` 的 `user_time + system_time` | 微秒 |
+| 其他 | `Unsupported` | — | — |
+
+- macOS 的引用：线程退出时 libpthread 释放它的端口名，之后同一个名字可能分给别的端口，包括别的线程的端口，读到的就是别的线程的时间。时钟自己持有一个用户引用时，线程退出后这个名字变成 dead name，`thread_info` 返回错误；drop 时 `mach_port_deallocate` 只释放这一个引用。不用 `mach_thread_self()`：它每次调用都加一个引用，不释放就泄漏。
+- `current()` 先读一次，读不到在创建时就报告，调用方之后只在 `cpu_time` 出错（线程已退出）时处理。
+- `unsafe` 只在这几次 FFI 调用上，每处写明成立的理由。`mach_port_mod_refs`、`mach_port_deallocate` 和 `mach_task_self_` 在本模块里手写声明：libc 0.2 没有前两个，它的 `mach_task_self()` 已标为弃用。
+- 开销：Linux 上线程 CPU 时钟的 `clock_gettime` 不经 vDSO，是一次系统调用，macOS 的 `thread_info` 是一次 Mach 调用，都在微秒以下到几微秒；`syntax::health` 只在登记时读，不在渲染路径上。
+
+### 已知限制
+
+- Linux：glibc 把线程 id 编进 `clockid_t`。线程退出之后、这个 id 又分给本进程的新线程时，读到的是新线程的时间（内核只接受同一线程组里的线程）。`syntax::health` 只在调用登记期间读，线程这时正在调用里，不受影响。
+- macOS：`THREAD_BASIC_INFO` 是微秒精度；正在另一个 CPU 上运行的线程，时间只更新到内核上一次为它记账的时刻。卡死的宽限是 1 s，不受影响。
+- macOS 上每个存活的时钟占线程端口的一个用户引用，同一个线程同时存活的时钟不超过 65 535 个。
+
+### 测试
+
+写在 `crates/platform/src/thread_clock/tests.rs`：
+
+- `thread_cpu_busy_thread_grows`：忙循环的线程的时钟在另一个线程上读，CPU 时间 20 秒内增长到 100 ms 以上。
+- `thread_cpu_blocked_thread_barely_moves`：阻塞在 channel 上的线程，主线程忙循环 300 ms 期间它的 CPU 时间增长不到 20 ms；在第三个线程上读同一个时钟。
+- `thread_cpu_after_the_thread_exits_is_an_error`：线程 `join` 之后（2 秒内）`cpu_time` 返回错误。
+- `thread_cpu_clocks_are_released`：在同一个线程上依次创建并 drop 70 000 个时钟都成功（macOS 上超过一个端口的 65 535 个用户引用，引用没有泄漏）。
+- `thread_cpu_clock_is_send_and_sync`；其他平台上 `thread_cpu_is_unsupported_elsewhere`。
 
 ## 未决问题
 
@@ -665,6 +819,14 @@ pub mod process {
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果（`pread` 来自已有的 `rustix`）。
 - `platform/safe_read_range`、`platform/safe_read_page` 的基准加在 `crates/bench/benches/time/platform.rs`，`crates/bench/src/budgets.rs` 里的这两条由 `Planned("#103")` 改为 `Active`（[bench 设计「预算表」](bench.md#预算表)）；macOS CI 的 `just bench platform/` 在「范围读取」的「性能」预算之内，数字写进「实际验证」。
 - 本文的状态行改为已实现并附 PR 编号，填写「实际验证」和「与设计的差异」。
+
+原子替换与线程的 CPU 时钟（file_reader 的前置条件 C、G）一个实现 PR，写 `Refs #10`，在 file_reader 的第 1 步之前合并：
+
+- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「原子替换」的 `replace_file_*`、`race_replace_never_escapes`、`fd_replace_file_keeps_no_descriptor`、`replace_error_is_send_sync_and_displays` 和「线程的 CPU 时钟」的 `thread_cpu_*`；原有的测试结果不变。
+- `rg -l 'unsafe' crates/platform/src/safe_read` 仍只列出 `tests.rs`；`rg -n 'mach_|thread_info|pthread_' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
+- `git diff origin/main -- Cargo.lock` 为空（`libc` 已在 Cargo.lock，也已是本 crate 在 macOS 上的依赖）。
+- `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
+- 本文的状态行、「实际验证」「与设计的差异」，file_reader 设计「验收」的前置条件 C、G 标为已完成。
 
 ## 实际验证
 
@@ -699,6 +861,12 @@ pub mod process {
     | `platform/safe_read_page` | 28.4–61.3 µs | 30.1–63.5 µs | 0.94–1.03 | ≤ 1.5，< 50 µs |
 
     比值 4 次都在预算之内。`safe_read_page` 的绝对时间有 1 次（61.3 µs，std 对照 63.5 µs）超过 50 µs，其余 3 次（28.4、34.6、41.2 µs）在预算之内。预算按 M 系列 Mac 制定，由 macOS CI 判定；Linux 上只报告。同一次运行里原有的 `platform/safe_stat`（比值 0.88，1.25 µs）、`platform/safe_read_4k`（比值 0.77）也在预算之内。
+- 原子替换与线程的 CPU 时钟（file_reader 的前置条件 C、G）在 Linux（x86_64，内核 6.18，`openat2` 可用，`/tmp` 是 ext4）上：
+  - `just test -p lectern-platform` 86 个测试通过，其中新增 14 个：「原子替换」的 9 个（`replace_file_*` 6 个、`race_replace_never_escapes`、`fd_replace_file_keeps_no_descriptor`、`replace_error_is_send_sync_and_displays`），对 `Openat2` 和 `Walk` 各运行一次；「线程的 CPU 时钟」的 5 个（`thread_cpu_*`，`thread_cpu_is_unsupported_elsewhere` 只在其他平台上编译）。原有的 72 个结果不变；用 `cargo test` 在同一个进程里运行，86 个也都通过。
+  - 新增的测试和 `race_*`、`fd_*` 连续运行 30 次都通过。`race_replace_never_escapes` 每次运行中三种结果都出现，一次运行的分布：`Openat2` 89 次保存成功、398 次 `NotFound`、13 次 `PathThroughSymlink`；`Walk` 依次为 78、337、85 次。`thread_cpu_busy_thread_grows` 在约 100 ms 的墙上时间里读到 101 ms 的 CPU 时间。
+  - `just check`、`just test`（整个工作区 1563 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：macOS 的 `thread_info`、`pthread_mach_thread_np`、手写的 `mach_port_mod_refs`、`mach_port_deallocate`、`mach_task_self_` 通过了类型检查和 clippy，没有运行；macOS 上的 `thread_cpu_*` 和三个后端上的 `replace_file_*` 由 macOS CI 运行。
+  - 验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`；`rg -n 'mach_|thread_info|pthread_' crates --glob '!crates/platform/**' -t rust` 没有结果。
+  - 测试环境以 root 运行，目录没有写权限时的 `Io(PermissionDenied)` 没有测试（root 不受权限位限制）。
 
 ## 与设计的差异
 
@@ -716,3 +884,9 @@ pub mod process {
   - 「读取的规则」第 3 步的按需扩容：一段的缓冲读满而这段还没读完时（读到了打开时的 `size`），先用栈上 4 KiB 的缓冲 `pread` 一次，返回 0 就是 EOF，不分配；读到数据（文件变长了）才按倍增扩容，不超过段长。所以分配总是不超过 `min(段长, 打开时的 size − 起点)`，除非文件确实变长。终点到达 EOF 的段因此多一次返回 0 的 `pread`，与「系统调用数」里「短读时多几次」一致。
   - 一段里最后取字节的那个区间覆盖了这段读到的全部字节时，这段的缓冲直接移给它的 `pieces[i]`，不复制；其余区间从段的缓冲复制。首屏在文件中部时两段不合并，两个区间都不复制。
 - 范围读取的测试里对 `clippy::single_range_in_vec_init` 加了 `allow`（附理由）：`read_ranges` 的参数是区间的切片，`&[0..100]` 是正常的单区间调用，这个 lint 把它当作误写的 `Vec`。bench 里用 `std::slice::from_ref` 传单个区间。
+- 原子替换与线程的 CPU 时钟的接口与 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)一致，这里补上了那里没有写的约束（「原子替换」「线程的 CPU 时钟」），有四处与那里的文字不同：
+  - `fchmod` 在 `fsync` 之前（那里的顺序是写入、`fsync`、`fchmod`）：这样 `fsync` 同时落盘内容和权限位，崩溃之后不会出现内容是新的、权限还是 `0600` 的文件。
+  - 建临时文件之前先对 `rel` 做一次不跟随符号链接的 `fstatat`（那里只写了替换之前的那一次）：`rel` 不存在、是符号链接或不是普通文件时不在目录里建任何东西，要带过的权限位也从这次得到。替换之前的那一次照常做，身份在那里比较。
+  - 「原文件的权限位」定为 `0o777`，setuid、setgid、sticky 不带过；临时名被占用时换名重试，最多 16 个，之后为 `Io(AlreadyExists)`。那里没有写。
+  - `ThreadCpuClock::current()` 创建时先读一次，读不到在这里返回 `Unsupported`；macOS 的时钟为线程端口多持有一个用户引用，线程退出后 `cpu_time` 因此可靠地返回错误（「线程的 CPU 时钟」的「实现」）。阻塞线程的测试用 channel 的 `recv`，不用条件变量，两者都让线程睡在内核里。
+- 增加了那里没有列出的测试：`replace_file_temp_name_collision`、`replace_file_parent_outside_the_root`、`fd_replace_file_keeps_no_descriptor`、`replace_error_is_send_sync_and_displays`、`thread_cpu_after_the_thread_exits_is_an_error`、`thread_cpu_clocks_are_released`。`libc` 原来只在 macOS 上依赖，现在 Linux 也依赖（`pthread_getcpuclockid`、`clock_gettime`），Cargo.lock 不变；「依赖」已改。
