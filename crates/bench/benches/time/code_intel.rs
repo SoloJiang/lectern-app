@@ -219,6 +219,7 @@ fn unit(i: u64) -> Extraction {
             kind: DefKind::Function,
             line: j * 10,
             column: 4,
+            byte: u64::from(j) * 400 + 4,
             end_line: j * 10 + 5,
             scope: None,
             visibility: Visibility::Public,

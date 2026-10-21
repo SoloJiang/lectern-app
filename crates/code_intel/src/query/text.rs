@@ -15,12 +15,26 @@ use crate::git_access::{hash_blob, hash_kind};
 use crate::index::Inner;
 use crate::map::Effective;
 
+/// Bytes read as a blob's content, and whether they are that content as
+/// they are (`canonical`: their raw OID is the blob's, or they come from
+/// the object database) rather than through `canonical_oid`'s built-in
+/// conversions (a CRLF worktree file): only then do byte offsets in them
+/// go to views (「字节偏移」).
+pub(crate) struct Content<B> {
+    pub bytes: B,
+    pub canonical: bool,
+}
+
 impl Inner {
     /// The bytes of `text`, only when they are provably that content: the
     /// raw bytes' OID is `text.oid`, or the built-in conversions turn them
     /// into it (`canonical_oid`); otherwise `Stale`, whatever the map still
     /// records. An object's bytes are read by OID and need no check.
-    pub(crate) fn read_text(&self, snap: &Snap, text: &TextRef) -> Result<Arc<[u8]>, QueryError> {
+    pub(crate) fn read_text(
+        &self,
+        snap: &Snap,
+        text: &TextRef,
+    ) -> Result<Content<Arc<[u8]>>, QueryError> {
         match text.origin {
             TextOrigin::Object => {
                 let tree = snap
@@ -28,7 +42,10 @@ impl Inner {
                     .as_ref()
                     .ok_or_else(|| QueryError::Unreadable("no repository".into()))?;
                 match self.git.blob(tree, text.oid, INTERACTIVE_MAX_LEN as u64) {
-                    Ok(bytes) => Ok(bytes),
+                    Ok(bytes) => Ok(Content {
+                        bytes,
+                        canonical: true,
+                    }),
                     Err(lectern_git::GitError::TooLarge { .. }) => Err(QueryError::TooLarge),
                     Err(error) => Err(QueryError::Unreadable(error.to_string().into())),
                 }
@@ -44,28 +61,36 @@ impl Inner {
                     Err(Reading::Gone) => return Err(QueryError::Stale),
                     Err(Reading::Failed(why)) => return Err(QueryError::Unreadable(why.into())),
                 };
-                if self.is_content(snap, &text.path, &bytes, text.oid) {
-                    Ok(bytes.into())
-                } else {
-                    Err(QueryError::Stale)
+                match self.content_kind(snap, &text.path, &bytes, text.oid) {
+                    Some(canonical) => Ok(Content {
+                        bytes: bytes.into(),
+                        canonical,
+                    }),
+                    None => Err(QueryError::Stale),
                 }
             }
         }
     }
 
     /// Whether worktree bytes read at `path` are the blob `oid`: by their
-    /// raw OID, or after the path's built-in conversions. A folder project
-    /// (no repository) has raw OIDs only; a path with an external filter
-    /// never matches when the raw OID differs.
-    pub(crate) fn is_content(&self, snap: &Snap, path: &str, bytes: &[u8], oid: BlobId) -> bool {
+    /// raw OID (`Some(true)`), or after the path's built-in conversions
+    /// (`Some(false)`); None when they are not. A folder project (no
+    /// repository) has raw OIDs only; a path with an external filter never
+    /// matches when the raw OID differs.
+    pub(crate) fn content_kind(
+        &self,
+        snap: &Snap,
+        path: &str,
+        bytes: &[u8],
+        oid: BlobId,
+    ) -> Option<bool> {
         crate::phases::count("hashed bytes", bytes.len() as u64);
         if hash_blob(hash_kind(&oid), bytes) == oid {
-            return true;
+            return Some(true);
         }
-        let Some(tree) = &snap.tree else {
-            return false;
-        };
+        let tree = snap.tree.as_ref()?;
         matches!(self.git.canonical_oid(tree, path, bytes), Ok(Some(c)) if c == oid)
+            .then_some(false)
     }
 
     /// A file of the snapshot's map, read for a query: the only way a query
@@ -88,14 +113,17 @@ impl Inner {
         snap: &Snap,
         eff: &Effective,
         max: usize,
-    ) -> Result<Vec<u8>, Reason> {
+    ) -> Result<Content<Vec<u8>>, Reason> {
         self.step_hook(super::Step::Read, snap);
         let Some(root) = snap.root_of(None) else {
             return Err(Reason::Unreadable);
         };
         match read(&root, &eff.path, max) {
-            Ok(Some(bytes)) if self.is_content(snap, &eff.path, &bytes, eff.oid) => Ok(bytes),
-            Ok(Some(_)) | Err(Reading::Gone) => Err(Reason::Stale),
+            Ok(Some(bytes)) => match self.content_kind(snap, &eff.path, &bytes, eff.oid) {
+                Some(canonical) => Ok(Content { bytes, canonical }),
+                None => Err(Reason::Stale),
+            },
+            Err(Reading::Gone) => Err(Reason::Stale),
             Ok(None) => Err(Reason::TooLarge),
             Err(Reading::Failed(_)) => Err(Reason::Unreadable),
         }

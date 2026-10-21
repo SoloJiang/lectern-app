@@ -101,6 +101,7 @@ pub fn extraction(i: usize) -> crate::extract::Extraction {
         kind,
         line,
         column: 4,
+        byte: u64::from(line) * 40 + 4,
         end_line: line + 3,
         scope: None,
         visibility: Visibility::Public,

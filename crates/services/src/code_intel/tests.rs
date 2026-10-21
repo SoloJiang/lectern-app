@@ -121,6 +121,7 @@ fn location(p: &str, line: u32, origin: TextOrigin) -> Location {
         oid: BlobId::Sha256([0x5e; 32]),
         line,
         column: 4,
+        byte: Some(u64::from(line) * 100 + 4),
         end_line: line + 2,
     }
 }

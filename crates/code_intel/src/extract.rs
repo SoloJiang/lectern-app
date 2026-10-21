@@ -147,6 +147,12 @@ pub enum ExtractStatus {
     TimedOut,
     /// Larger than the deadline's `max_len`.
     TooLarge,
+    /// The content is in window units (ADR 0034, 「大文件」): the whole
+    /// extraction's row of an opened 1–16 MiB file is only this marker,
+    /// written once its window chain reaches the end of the file; its
+    /// definitions and references are in the same OID's window units.
+    /// Replaces `TooLarge` and `TimedOut`.
+    Windowed,
     /// A NUL in the first [`BINARY_PROBE`] bytes.
     Binary,
     /// Cancelled, paused, or the watchdog stopped. Not written to the cache.
@@ -169,6 +175,7 @@ impl ExtractStatus {
             ExtractStatus::TimedOut => Some(1),
             ExtractStatus::TooLarge => Some(2),
             ExtractStatus::Binary => Some(3),
+            ExtractStatus::Windowed => Some(4),
             ExtractStatus::Cancelled | ExtractStatus::Unsupported | ExtractStatus::Parked => None,
         }
     }
@@ -183,6 +190,10 @@ pub struct Def {
     pub line: u32,
     /// Byte column of the name's start.
     pub column: u32,
+    /// Offset of the name's start in the bytes extracted (ADR 0034); in a
+    /// window unit, in the whole file. Handed to views only when those
+    /// bytes are the unit's OID's content (`ci_ext.canonical`).
+    pub byte: u64,
     /// The last row of the definition node.
     pub end_line: u32,
     /// The innermost enclosing definition (for Rust, the type of the `impl`

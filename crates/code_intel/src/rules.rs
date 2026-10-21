@@ -340,6 +340,7 @@ fn finish_inner(
                     kind: *kind,
                     line: tag.row,
                     column: tag.column,
+                    byte: tag.name_range.start as u64,
                     end_line: lines.last_row(tag.range.start, tag.range.end),
                     scope,
                     visibility,
@@ -445,6 +446,7 @@ fn finish_inner(
                     kind: DefKind::Field,
                     line: tag.row,
                     column: tag.column,
+                    byte: tag.name_range.start as u64,
                     end_line: lines.last_row(tag.range.start, tag.range.end),
                     scope: Some(containers[class].name.clone()),
                     visibility: if local[class] {

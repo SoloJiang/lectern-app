@@ -49,7 +49,7 @@ use crate::extract::{
 };
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{HintStamp, LangLookup};
-use crate::store::{EXISTS_BATCH, Found, Version};
+use crate::store::{EXISTS_BATCH, Found, UnitMeta, Version};
 use crate::util::log;
 
 /// A batch ends after this many files…
@@ -249,6 +249,8 @@ pub(crate) struct Parked {
     /// one: the batch's `canonical_oids` decides the key before the commit
     /// (`Done::check`).
     check: bool,
+    /// `key` is the raw bytes' OID (`UnitMeta::canonical`).
+    canonical: bool,
     bytes: Vec<u8>,
     /// The extraction's state (`extract::Resume`, with the deadline's
     /// budget left); empty until it starts.
@@ -346,6 +348,8 @@ pub(crate) struct Scanned {
     /// The language as the query's (current) table had it.
     pub lang: Lang,
     pub extraction: Extraction,
+    /// The bytes extracted hash to `oid` (`UnitMeta::canonical`).
+    pub canonical: bool,
 }
 
 impl Clone for Scanned {
@@ -355,6 +359,7 @@ impl Clone for Scanned {
             oid: self.oid,
             lang: self.lang.clone(),
             extraction: self.extraction.clone(),
+            canonical: self.canonical,
         }
     }
 }
@@ -372,6 +377,22 @@ struct Done {
     extraction: Extraction,
     /// The cancel flag the item was taken with (`State::finish`).
     flag: Arc<AtomicBool>,
+    /// The unit's part and whether `key` is the raw bytes' OID
+    /// (`UnitMeta::canonical`; a key `check` turns into the queued OID is
+    /// not).
+    meta: UnitMeta,
+}
+
+/// One item read ([`Inner::read_item`]).
+struct ReadItem {
+    bytes: Vec<u8>,
+    /// The key: the raw bytes' OID, or the queued OID when the built-in
+    /// conversions turn them into it.
+    key: BlobId,
+    /// `key` is the raw OID, left to the batch's `canonical_oids`.
+    check: bool,
+    /// `key` is the raw bytes' OID (`UnitMeta::canonical`).
+    canonical: bool,
 }
 
 enum Outcome {
@@ -1245,7 +1266,12 @@ impl Inner {
                     };
                     let outcome = match self.read_item(ctx, &item, Mode::Batch, true, &flag) {
                         Err(outcome) => outcome,
-                        Ok((bytes, key, check)) => {
+                        Ok(ReadItem {
+                            bytes,
+                            key,
+                            check,
+                            canonical,
+                        }) => {
                             if bytes.len() > LARGE_FILE
                                 && let Some(p) = own.take_if(|p| p.large.is_some())
                             {
@@ -1256,7 +1282,7 @@ impl Inner {
                             self.extract_bytes(
                                 ctx,
                                 &item,
-                                (key, check),
+                                (key, check, canonical),
                                 bytes,
                                 Mode::Batch,
                                 Some(guard),
@@ -1286,24 +1312,25 @@ impl Inner {
                                     }
                                     continue;
                                 }
-                                Ok((data, _, _)) if one && data.len() as u64 > SLOT_MAX_BYTES => {
+                                Ok(read) if one && read.bytes.len() as u64 > SLOT_MAX_BYTES => {
                                     // Never in a keepalive slot: set aside for
                                     // the switch to turn off; the slot goes on
                                     // with the next item. What was read counts
                                     // toward the batch's bytes.
-                                    bytes += data.len();
+                                    bytes += read.bytes.len();
                                     self.set_aside(project, ctx.session, t, item, &flag);
                                     continue;
                                 }
-                                Ok((data, key, check)) => Parked {
+                                Ok(read) => Parked {
                                     project: project.clone(),
                                     session: ctx.session,
                                     t,
                                     item,
                                     flag,
-                                    key,
-                                    check,
-                                    bytes: data,
+                                    key: read.key,
+                                    check: read.check,
+                                    canonical: read.canonical,
+                                    bytes: read.bytes,
                                     resume: Arc::new(Mutex::new(None)),
                                     large: None,
                                 },
@@ -1394,7 +1421,12 @@ impl Inner {
         for (i, canonical) in results {
             let d = &mut done[i];
             match canonical {
-                Canonical::Oid(oid) if oid == d.item.oid => d.key = oid,
+                Canonical::Oid(oid) if oid == d.item.oid => {
+                    // The conversion made them that content: no byte
+                    // offsets for views (「字节偏移」).
+                    d.key = oid;
+                    d.meta.canonical = false;
+                }
                 Canonical::Oid(_) | Canonical::Filtered => {}
                 Canonical::Failed => failed[i] = true,
             }
@@ -1537,6 +1569,7 @@ impl Inner {
                         check: p.check.then_some(p.bytes),
                         extraction,
                         flag: p.flag,
+                        meta: UnitMeta::whole(p.canonical),
                     },
                     len,
                 )
@@ -1594,9 +1627,20 @@ impl Inner {
         cancel: &Arc<AtomicBool>,
     ) -> Outcome {
         match self.read_item(ctx, item, mode, false, cancel) {
-            Ok((bytes, key, check)) => {
-                self.extract_bytes(ctx, item, (key, check), bytes, mode, guard, cancel)
-            }
+            Ok(ReadItem {
+                bytes,
+                key,
+                check,
+                canonical,
+            }) => self.extract_bytes(
+                ctx,
+                item,
+                (key, check, canonical),
+                bytes,
+                mode,
+                guard,
+                cancel,
+            ),
             Err(outcome) => outcome,
         }
     }
@@ -1624,7 +1668,7 @@ impl Inner {
         mode: Mode,
         defer: bool,
         cancel: &Arc<AtomicBool>,
-    ) -> Result<(Vec<u8>, BlobId, bool), Outcome> {
+    ) -> Result<ReadItem, Outcome> {
         let max = match mode {
             Mode::Interactive => INTERACTIVE_MAX_LEN,
             Mode::Background | Mode::Batch => BACKGROUND_MAX_LEN,
@@ -1641,6 +1685,7 @@ impl Inner {
                         refs: Vec::new(),
                     },
                     flag: cancel.clone(),
+                    meta: UnitMeta::whole(true),
                 },
                 0,
             )
@@ -1676,8 +1721,14 @@ impl Inner {
             }
         };
         let raw = hash_blob(hash_kind(&item.oid), &bytes);
+        let read = |bytes, key, check| ReadItem {
+            bytes,
+            key,
+            check,
+            canonical: key == raw,
+        };
         if raw == item.oid {
-            return Ok((bytes, raw, false));
+            return Ok(read(bytes, raw, false));
         }
         let key = match &item.source {
             // Another worktree's file that differs from its index waits
@@ -1690,7 +1741,7 @@ impl Inner {
                 Some(_)
                     if mode == Mode::Batch && (defer || bytes.len() as u64 > SLOT_MAX_BYTES) =>
                 {
-                    return Ok((bytes, raw, true));
+                    return Ok(read(bytes, raw, true));
                 }
                 Some(tree) => match self.git.canonical_oid(tree, &item.path, &bytes) {
                     Ok(Some(canonical)) if canonical == item.oid => item.oid,
@@ -1703,7 +1754,7 @@ impl Inner {
                 None => raw,
             },
         };
-        Ok((bytes, key, false))
+        Ok(read(bytes, key, false))
     }
 
     /// Extracts one read item, without yielding: tiers 1 and 2, and tier 3
@@ -1718,7 +1769,7 @@ impl Inner {
         &self,
         ctx: &Ctx,
         item: &Item,
-        (key, check): (BlobId, bool),
+        (key, check, canonical): (BlobId, bool, bool),
         bytes: Vec<u8>,
         mode: Mode,
         guard: Option<&Arc<BackgroundGuard>>,
@@ -1782,6 +1833,7 @@ impl Inner {
                         check: check.then_some(bytes),
                         extraction,
                         flag: cancel.clone(),
+                        meta: UnitMeta::whole(canonical),
                     },
                     len,
                 )
@@ -1855,7 +1907,7 @@ impl Inner {
                     stored.push((d.key, version, d.item.tier, f.status));
                     continue;
                 }
-                if write.add(d.key, &version, &d.extraction) {
+                if write.add_unit(d.key, &version, &d.extraction, d.meta) {
                     replaces |= stored_as.is_some();
                     written.push((d.key, version, d.item.tier, d.extraction.status));
                 }
@@ -1995,6 +2047,7 @@ impl Inner {
                 check: None,
                 extraction: s.extraction,
                 flag: Arc::new(AtomicBool::new(false)),
+                meta: UnitMeta::whole(s.canonical),
             })
             .collect();
         self.commit(project, &ctx, done, false);
@@ -2247,11 +2300,13 @@ fn unfinished(status: ExtractStatus) -> bool {
 
 /// Whether an extraction with `new` replaces a stored unit with `stored`,
 /// whatever the tier that made it: a `Done` result (tier 1's interactive
-/// limits, a query's search) over a `TooLarge` or `TimedOut` unit. The only
-/// replace `commit` makes: never the other way round, nor an unfinished
-/// result over an unfinished unit.
+/// limits, a query's search), or the `Windowed` marker of a window chain
+/// that reached the file's end (its content is in the window units), over
+/// a `TooLarge` or `TimedOut` unit. The only replaces `commit` makes: never
+/// the other way round, nor an unfinished result over an unfinished unit,
+/// nor anything over `Done` or `Windowed`.
 fn outranks(new: ExtractStatus, stored: ExtractStatus) -> bool {
-    new == ExtractStatus::Done && unfinished(stored)
+    matches!(new, ExtractStatus::Done | ExtractStatus::Windowed) && unfinished(stored)
 }
 
 /// Whether `version` is the version of its language both in the current

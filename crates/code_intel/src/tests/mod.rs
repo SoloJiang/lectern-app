@@ -11,6 +11,7 @@ mod goto;
 mod grammar_changes;
 mod incremental;
 mod lang;
+mod location_byte;
 mod map;
 mod names;
 mod overlay;

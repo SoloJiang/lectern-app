@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移尚未实现；第 5、8、9 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 5、8、9 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -2418,6 +2418,11 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 基准（`just bench --measure code_intel/reread_crlf_1000 code_intel/batch_peak`，另一次 `git/canonical_oid_100k`，负载约 2–2.7）：`code_intel/reread_crlf_1000` 中位数 91.9 ms（只记录：1000 个约 8 KiB 的文件读一遍加 4 次 index 解析）；把每批的上限临时改成 1 项（每个文件一次 index 解析，即原来单个调用的做法）时 2 s，已还原。`code_intel/batch_peak` 33.3 MB（≤ 40 MB，与第 7 步相同：夹具没有需要转换的文件）。`git/canonical_oid_100k` 21.5 ms、`…/batch_100` 22.1 ms（只记录，与 git 设计的实测相同；本步没有改 git）。
 - 没有验证的：`goto_full`、`references_full` 和 `code_intel/disk_100k` 属于第 6 步的存储版本 3，这一部分没有改查询和存储，没有重跑；macOS 上的数值看 macOS CI。
 
+第 8 步的第一部分（存储版本 3 和字节偏移），基于包含 [#143](https://github.com/SoloJiang/lectern-app/pull/143) 的 main（8bb6059），同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+
+- `just check` 通过；`just test -p lectern-code-intel -p lectern-services` 350 个测试通过（本 crate 新增 `location_byte_*` 4 个、`store_*` 3 个）。`location_byte_points_at_the_names` 对每个位置同时核对 `byte` 处是名字的第一个字节、`byte` 等于行首加列；`location_byte_is_none_for_a_converted_checkout` 的 CRLF 文件经第 3 层的整批 `canonical_oids` 以 index 的 OID 写入（`canonical = 0`）。
+- 基准（`just bench --measure code_intel/goto_full code_intel/references_full code_intel/warm_100k code_intel/disk_100k`，负载约 1.5–2.5）：`goto_full` 1.49 ms、`goto_full/done` 最大 345 ms（≤ 20 ms、≤ 1.02 s）；`references_full/all` 1.27 s、`/first` 10.7 ms（≤ 2 s、≤ 200 ms）；`warm_100k` 81.7 ms（≤ 500 ms，存在检查多了 `part = -1`，仍走唯一索引）、`warm_100k_touch` 353 ms（只记录）；`disk_100k` 9 万个单元声明 279.7 MB（与版本 2 相同：单元字节数的估算没有改），分库文件 326 MiB（上一次 316 MiB，`ci_def.byte` 和 `ci_ext` 的五列），83 次淘汰。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2670,3 +2675,13 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 取消：设计没有写重新读的取消；实现在每批调用之前检查会话是否已结束（`State::cancel`），结束就返回、不装上结果，`canonical_batch_reread_stops_between_batches_when_the_session_ends` 检查 600 个文件在第一批调用期间结束会话时只调用一次。批量层见上文「取消、暂停与让路」一条。
 - 单个文件超过 2 MiB 自成一批：重新读和批量层读的上限都是 1 MiB（`BACKGROUND_MAX_LEN`），实际不会出现，`Pending` 仍按设计处理，由 `canonical_batch_splits_at_2_mib` 检查。
 - 基准：`code_intel/reread_crlf_1000` 加进预算表（`Tier::Share`，只记录）。它需要真实仓库上的生产适配，`testing` 新增 `RepoRig`（与 `Rig` 相同的内存部分，git 经 `LecternGit::with_discover`，`with_discover` 改为 `test-support` 下也可用）。夹具是 1 万个跟踪文件里 1000 个约 8 KiB 的文件以 CRLF 写回工作区（`core.autocrlf = true`），每个样本发出这 1000 个文件的修改事件、跑到核对任务结束，批量层暂停。
+
+第 8 步的第一部分（存储版本 3 和字节偏移，原属第 6 步，窗口链要用这些列，所以与第 8 步一起做）：
+
+- 配额仍是 256 MiB：设计的版本 3 同时把 `code_intel.tags` 的配额改为 224 MiB，留 32 MiB 给 `code_intel.deps`。依赖层（第 9 步）之前没有第二个命名空间，先改只会让项目文件少 32 MiB、满额模式提前到来，所以配额与 `code_intel.deps` 的登记一起随第 9 步改；`account_*` 的满额夹具因此不改写。表结构、单元的键和状态 4 按设计改为版本 3。
+- 单元的键：`lectern-cache` 的 `Key` 没有有符号字段，`part` 按 64 位写入（`-1` 是 `u64::MAX`，没有窗口从那里开始），即 `Key::new().bytes(oid).str(lang).u64(grammar).u64(query).u64(part as u64)`，与设计的 `.i64(part)` 区分同样的值。
+- `ci_ext` 多一列 `part_col`：窗口起点在它那一行里的字节列。压缩成一行的文件里窗口从一行的中间开始，窗口第一行里的定义的列要加上它；续接时由前一个窗口的 `part_line`、`part_col` 和它里面的换行算出，不需要从文件开头扫描。
+- `Windowed` 标记行的 `part_end` 记文件长度（设计写整份抽取为 NULL）：存在检查命中 `Windowed` 时那一条核对语句（`store::WINDOWS`）要知道链应当走到哪里。核对在 `Store::exists_with_windows` 里：窗口从 0 起沿 `part_end` 连到文件长度、其中没有 `TimedOut` 才算命中，否则这一项按 `TooLarge` 返回；命中时连同窗口单元的 ID 一起交出，调用方排进访问标记（`PendingTouches::push_units`），淘汰时窗口与标记一起保留。`exists` 只是丢掉窗口 ID 的同一个调用。
+- `ci_def.byte` 来自名字节点的起点（`rules` 的两处、`ParsedFile` 的普通局部定义；`LocalBinding` 多一个 `byte`）。`ci_ext.canonical` 由读取决定：批量层和第 1、2 层是「键等于原始字节的 OID」（`read_item` 的 `ReadItem::canonical`，`check_keys` 按 `canonical_oids` 改键时置为假），查询写入的单元取查询读取时的结果（`Scanned::canonical`）。查询里读出的内容带同样的标记（`query::text::Content`：`read_text`、`read_content` 和限时搜索的回调；保留的解析也记下它），交给视图的 `Location::byte` 只在它为真时有值。语义导航的提供者只给行和列，`byte` 为 None。
+- 替换规则：`outranks` 加上 `Windowed` 替换 `TooLarge`、`TimedOut`（「调度、批次与取消」的第二种替换），由窗口链完成时的写入用到。
+- 测试：`location_byte_*` 覆盖工作区（索引的候选、当前文本冷解析与保留的解析、定义自己的名字、两个文件里的引用）、对象库一侧和 CRLF 检出（经 `canonical_oid` 对上的单元、当前文本、引用都是 None，同一次查询里没有转换的文件照常有值）；版本 2 的表在第一次使用时删除重建由 `location_byte_version_2_tables_are_rebuilt` 检查（用旧的建表语句写一个单元）。依赖一组随第 9 步（依赖层还没有实现），窗口单元一组在 `window_*`。`store_windows_*`、`store_windowed_marker_needs_its_whole_chain`、`store_chain_complete_follows_the_ends` 检查窗口单元的读写、存在检查不看窗口、按名字查找和查引用照常找到窗口单元、标记的核对。

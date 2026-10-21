@@ -53,6 +53,9 @@ struct Kept {
     oid: BlobId,
     version: Version,
     parsed: Arc<ParsedFile>,
+    /// The bytes parsed are `oid`'s content as they are (`Content`): byte
+    /// offsets in the parse go to views.
+    canonical: bool,
     bytes: usize,
     used: Instant,
 }
@@ -72,15 +75,21 @@ pub(crate) struct ParseCache {
 pub(crate) type Dropped = Vec<Arc<ParsedFile>>;
 
 impl ParseCache {
-    /// The parse of the text `oid` in `version`, if kept; marks it used.
-    pub fn get(&mut self, oid: BlobId, version: &Version, now: Instant) -> Option<Arc<ParsedFile>> {
+    /// The parse of the text `oid` in `version`, if kept, and whether its
+    /// bytes were canonical; marks it used.
+    pub fn get(
+        &mut self,
+        oid: BlobId,
+        version: &Version,
+        now: Instant,
+    ) -> Option<(Arc<ParsedFile>, bool)> {
         let i = self
             .kept
             .iter()
             .position(|k| k.oid == oid && k.version == *version)?;
         let mut kept = self.kept.remove(i);
         kept.used = now;
-        let parsed = kept.parsed.clone();
+        let parsed = (kept.parsed.clone(), kept.canonical);
         self.kept.push(kept);
         Some(parsed)
     }
@@ -100,6 +109,7 @@ impl ParseCache {
         oid: BlobId,
         version: Version,
         parsed: Arc<ParsedFile>,
+        canonical: bool,
         now: Instant,
     ) -> Dropped {
         let mut dropped = Vec::new();
@@ -118,6 +128,7 @@ impl ParseCache {
             oid,
             version,
             parsed,
+            canonical,
             bytes: estimate(len),
             used: now,
         });
@@ -213,8 +224,13 @@ impl ParseCache {
 }
 
 impl Inner {
-    /// The kept parse of the text `oid` in `version`, if any.
-    pub(crate) fn cached_parse(&self, oid: BlobId, version: &Version) -> Option<Arc<ParsedFile>> {
+    /// The kept parse of the text `oid` in `version`, if any, and whether
+    /// its bytes were canonical.
+    pub(crate) fn cached_parse(
+        &self,
+        oid: BlobId,
+        version: &Version,
+    ) -> Option<(Arc<ParsedFile>, bool)> {
         let now = self.watchdog.clock().now();
         lock(&self.parse_cache).get(oid, version, now)
     }
@@ -247,8 +263,8 @@ impl Inner {
                 if lock(&me.parse_cache).has(at.oid, &Version::of(&lang)) {
                     return;
                 }
-                if let Ok(bytes) = me.read_text(&snap, &at) {
-                    me.keep_parse(&lang, at.oid, bytes);
+                if let Ok(text) = me.read_text(&snap, &at) {
+                    me.keep_parse(&lang, at.oid, text.bytes, text.canonical);
                 }
             });
     }
@@ -256,7 +272,13 @@ impl Inner {
     /// [`warm_parse`](Self::warm_parse) of bytes a query already read and
     /// verified as the text `oid` (a jump's cold path): parsed in a
     /// `Background` task, nothing read again.
-    pub(crate) fn warm_parse_of(self: &Arc<Self>, lang: &Lang, oid: BlobId, bytes: Arc<[u8]>) {
+    pub(crate) fn warm_parse_of(
+        self: &Arc<Self>,
+        lang: &Lang,
+        oid: BlobId,
+        bytes: Arc<[u8]>,
+        canonical: bool,
+    ) {
         if bytes.len() > MAX_SOURCE || !self.warms() {
             return;
         }
@@ -264,7 +286,7 @@ impl Inner {
         let lang = lang.clone();
         self.host
             .spawn_busy("warm parse", Priority::Background, move || {
-                me.keep_parse(&lang, oid, bytes);
+                me.keep_parse(&lang, oid, bytes, canonical);
             });
     }
 
@@ -286,7 +308,7 @@ impl Inner {
     /// lock, so a parse of a grammar the table replaced meanwhile is never
     /// kept (the table changes before the cache drops that language's
     /// entries).
-    fn keep_parse(self: &Arc<Self>, lang: &Lang, oid: BlobId, bytes: Arc<[u8]>) {
+    fn keep_parse(self: &Arc<Self>, lang: &Lang, oid: BlobId, bytes: Arc<[u8]>, canonical: bool) {
         let version = Version::of(lang);
         if bytes.len() > MAX_SOURCE || lock(&self.parse_cache).has(oid, &version) {
             return;
@@ -310,7 +332,7 @@ impl Inner {
                 drop(parsed);
                 return;
             }
-            cache.put(oid, version, Arc::new(parsed), now)
+            cache.put(oid, version, Arc::new(parsed), canonical, now)
         };
         // Outside the lock: a dropped parse may hold a grammar's last lease.
         drop(dropped);

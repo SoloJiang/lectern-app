@@ -190,6 +190,8 @@ impl SemQuery {
                     oid: eff.oid,
                     line: loc.line,
                     column: loc.column,
+                    // Providers give lines and columns only.
+                    byte: None,
                     end_line: loc.end_line,
                 });
             }

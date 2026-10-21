@@ -541,6 +541,7 @@ impl Resolver for TestResolver {
                     oid: eff.oid,
                     line: 0,
                     column: 16,
+                    byte: Some(16),
                     end_line: 0,
                 },
                 name: "bound".into(),

@@ -13,8 +13,9 @@ use tempfile::TempDir;
 use super::extract::run;
 use crate::extract::{Def, ExtractStatus, Extraction, LanguageTable, Visibility};
 use crate::store::{
-    self, EXISTS, EXISTS_BATCH, Found, NAMESPACE, NamePager, PendingTouches, SCHEMA, STATEMENTS,
-    Store, StoredUnit, TOUCH_CHUNK, Version, unit_bytes,
+    self, EXISTS, EXISTS_BATCH, Found, NAMESPACE, NamePager, Part, PendingTouches, SCHEMA,
+    STATEMENTS, Store, StoredUnit, TOUCH_CHUNK, UnitMeta, Version, WindowRow, chain_complete,
+    unit_bytes,
 };
 use crate::testing::FIXTURES;
 use crate::{DefKind, lang_name};
@@ -39,6 +40,7 @@ static TEST_STATEMENTS: &[&str] = &[
     store::EXT_OF_UNIT,
     store::DEFS_OF_UNIT,
     store::REFS_OF_UNIT,
+    store::WINDOWS,
     COUNT_EXT,
     COUNT_DEF,
     COUNT_REF,
@@ -110,6 +112,7 @@ fn def(name: &str, kind: DefKind, line: u32) -> Def {
         kind,
         line,
         column: 4,
+        byte: u64::from(line) * 30 + 4,
         end_line: line + 2,
         scope: None,
         visibility: Visibility::Public,
@@ -1027,4 +1030,249 @@ fn store_dropped_write_does_not_panic() {
     p.set_max_page_count(None);
     f.clock.advance(Duration::from_secs(61));
     commit(&store, &[(oid(0), &rust, &extractions[0])]);
+}
+
+fn window(start: u64, end: u64, line: u32) -> UnitMeta {
+    UnitMeta {
+        part: Some(Part {
+            start,
+            end,
+            line,
+            column: 0,
+        }),
+        canonical: true,
+        len: None,
+    }
+}
+
+fn marker(len: u64) -> (Extraction, UnitMeta) {
+    (
+        Extraction {
+            status: ExtractStatus::Windowed,
+            defs: Vec::new(),
+            refs: Vec::new(),
+        },
+        UnitMeta {
+            part: None,
+            canonical: true,
+            len: Some(len),
+        },
+    )
+}
+
+#[test]
+fn store_windows_are_units_of_their_own() {
+    let f = Fixture::new();
+    let store = f.store();
+    let ts = v("ts", 1, 1);
+    let a = done(vec![def("alpha", DefKind::Function, 0)], &["beta"]);
+    let b = done(vec![def("beta", DefKind::Function, 900)], &["alpha"]);
+    let mut w = store.write();
+    // Out of order: the windows come back by start.
+    assert!(w.add_unit(oid(1), &ts, &b, window(100, 250, 900)));
+    assert!(w.add_unit(oid(1), &ts, &a, window(0, 100, 0)));
+    assert_eq!(w.commit(), Written::Committed);
+    // The existence check and the hints look at the whole extraction only.
+    assert_eq!(store.exists(&ts, &[oid(1)]), Some(vec![]));
+    let rows = store.windows(oid(1), &ts).expect("read");
+    let parts: Vec<(u64, u64, u32)> = rows
+        .iter()
+        .map(|r| (r.part.start, r.part.end, r.part.line))
+        .collect();
+    assert_eq!(parts, vec![(0, 100, 0), (100, 250, 900)]);
+    assert!(
+        rows.iter()
+            .all(|r| r.status == ExtractStatus::Done && r.canonical)
+    );
+    // Lookups by name read window units like any `Done` unit.
+    let found = store
+        .defs_by_name("beta", std::slice::from_ref(&ts))
+        .expect("read");
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        (found[0].def.line, found[0].byte()),
+        (900, Some(900 * 30 + 4))
+    );
+    let refs = store
+        .refs_by_name("alpha", std::slice::from_ref(&ts))
+        .expect("read");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(
+        refs[0].part.map(|p| (p.start, p.end, p.line)),
+        Some((100, 250, 900))
+    );
+    assert_eq!(
+        store.units(std::slice::from_ref(&ts)).map(|u| u.len()),
+        Some(2)
+    );
+    let (all, canonical) = store.load_windows(oid(1), &ts).expect("read");
+    let names: Vec<&str> = all.defs.iter().map(|d| &*d.name).collect();
+    assert_eq!((names, canonical), (vec!["alpha", "beta"], true));
+    assert_eq!(all.refs, vec![Box::from("alpha"), Box::from("beta")]);
+}
+
+#[test]
+fn store_windowed_marker_needs_its_whole_chain() {
+    let f = Fixture::new();
+    let store = f.store();
+    let ts = v("ts", 1, 1);
+    let one = done(vec![def("one", DefKind::Function, 0)], &[]);
+    let (mark, meta) = marker(300);
+    let mut w = store.write();
+    assert!(w.add_unit(oid(1), &ts, &one, window(0, 100, 0)));
+    assert!(w.add_unit(oid(1), &ts, &one, window(100, 300, 10)));
+    assert!(w.add_unit(oid(1), &ts, &mark, meta));
+    assert_eq!(w.commit(), Written::Committed);
+    let (found, windows) = store.exists_with_windows(&ts, &[oid(1)]).expect("read");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].status, ExtractStatus::Windowed);
+    assert_eq!(windows.len(), 2, "touched with the marker");
+
+    // A window evicted: the marker no longer holds the file's content.
+    let mut w = store.write();
+    w.remove_window(oid(1), &ts, 100);
+    assert_eq!(w.commit(), Written::Committed);
+    let (found, windows) = store.exists_with_windows(&ts, &[oid(1)]).expect("read");
+    assert_eq!(found[0].status, ExtractStatus::TooLarge);
+    assert!(windows.is_empty());
+
+    // A window that timed out leaves the chain incomplete too.
+    let timed_out = Extraction::empty(ExtractStatus::TimedOut);
+    let mut w = store.write();
+    assert!(w.add_unit(oid(1), &ts, &timed_out, window(100, 300, 10)));
+    assert_eq!(w.commit(), Written::Committed);
+    assert_eq!(
+        store.exists(&ts, &[oid(1)]).expect("read")[0].status,
+        ExtractStatus::TooLarge
+    );
+}
+
+#[test]
+fn store_chain_complete_follows_the_ends() {
+    let row = |start: u64, end: u64, status: ExtractStatus| WindowRow {
+        unit: Unit::from_id(start as i64 + 1),
+        part: Part {
+            start,
+            end,
+            line: 0,
+            column: 0,
+        },
+        status,
+        canonical: true,
+    };
+    let done = ExtractStatus::Done;
+    assert!(chain_complete(&[row(0, 10, done), row(10, 20, done)], 20));
+    assert!(!chain_complete(&[row(0, 10, done), row(10, 20, done)], 30));
+    assert!(!chain_complete(&[row(0, 10, done), row(12, 20, done)], 20));
+    assert!(!chain_complete(&[row(10, 20, done)], 20));
+    assert!(!chain_complete(
+        &[row(0, 10, ExtractStatus::TimedOut), row(10, 20, done)],
+        20
+    ));
+    // A stale window off the chain (another cut) is passed over.
+    assert!(chain_complete(
+        &[row(0, 10, done), row(5, 15, done), row(10, 20, done)],
+        20
+    ));
+    assert!(!chain_complete(&[], 0));
+}
+
+/// Version 2's tables, as the last release wrote them.
+static VERSION_2: Tables = Tables {
+    namespace: lectern_cache::Namespace {
+        name: "code_intel.tags",
+        version: 2,
+        compression: lectern_cache::Compression::None,
+    },
+    schema: &[
+        "CREATE TABLE ci_ext (
+           unit    INTEGER PRIMARY KEY REFERENCES entry (id) ON DELETE CASCADE,
+           oid     BLOB    NOT NULL,
+           lang    TEXT    NOT NULL,
+           grammar INTEGER NOT NULL,
+           query   INTEGER NOT NULL,
+           status  INTEGER NOT NULL,
+           UNIQUE (oid, lang, grammar, query))",
+        "CREATE TABLE ci_def (
+           unit     INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
+           name     TEXT    NOT NULL,
+           kind     INTEGER NOT NULL,
+           line     INTEGER NOT NULL,
+           col      INTEGER NOT NULL,
+           end_line INTEGER NOT NULL,
+           scope    TEXT,
+           flags    INTEGER NOT NULL,
+           arity    INTEGER)",
+        "CREATE INDEX ci_def_name ON ci_def (name COLLATE NOCASE, unit, kind)",
+        "CREATE INDEX ci_def_unit ON ci_def (unit)",
+        "CREATE TABLE ci_ref (
+           name TEXT    NOT NULL,
+           unit INTEGER NOT NULL REFERENCES entry (id) ON DELETE CASCADE,
+           PRIMARY KEY (name, unit)) WITHOUT ROWID",
+        "CREATE INDEX ci_ref_unit ON ci_ref (unit)",
+    ],
+    statements: &[
+        "INSERT INTO ci_ext (unit, oid, lang, grammar, query, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO ci_def (unit, name, kind, line, col, end_line, scope, flags, arity)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 0, NULL)",
+    ],
+    quota: store::QUOTA,
+};
+
+#[test]
+fn location_byte_version_2_tables_are_rebuilt() {
+    let f = Fixture::new();
+    let p = f.partition();
+    let rust = v("rust", 1, 1);
+    let old = p.tables(&VERSION_2);
+    let mut w = old.write();
+    let unit = w.create(&lectern_cache::Key::new().bytes(oid(1).as_bytes()), 100);
+    let unit = Param::New(unit);
+    w.execute(
+        VERSION_2.statements[0],
+        &[
+            unit,
+            Param::Bytes(oid(1).as_bytes()),
+            Param::Text("rust"),
+            Param::Int(1),
+            Param::Int(1),
+            Param::Int(0),
+        ],
+    );
+    w.execute(
+        VERSION_2.statements[1],
+        &[
+            unit,
+            Param::Text("old"),
+            Param::Int(1),
+            Param::Int(0),
+            Param::Int(0),
+            Param::Int(0),
+        ],
+    );
+    assert_eq!(w.commit(), Written::Committed);
+    drop(old);
+    // Version 3's first use drops version 2's tables: nothing of the old
+    // unit is found, and the new tables take the byte offsets.
+    let store = Store::new(&p);
+    let before = store.evictions();
+    assert_eq!(store.exists(&rust, &[oid(1)]), Some(vec![]));
+    assert_eq!(
+        store.defs_by_name("old", std::slice::from_ref(&rust)),
+        Some(vec![])
+    );
+    assert!(store.evictions() > before, "the old tables went");
+    commit(
+        &store,
+        &[(
+            oid(1),
+            &rust,
+            &done(vec![def("new", DefKind::Function, 3)], &[]),
+        )],
+    );
+    let found = store
+        .defs_by_name("new", std::slice::from_ref(&rust))
+        .expect("read");
+    assert_eq!(found[0].byte(), Some(3 * 30 + 4));
 }
