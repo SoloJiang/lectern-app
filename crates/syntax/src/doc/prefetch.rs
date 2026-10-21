@@ -117,7 +117,7 @@ async fn one(
     let opened = match &target.origin {
         TextOrigin::Worktree => load::worktree_file(engine, target, root),
         TextOrigin::Dependency(dep) => load::dependency_file(engine, target, root, &dep.root),
-        TextOrigin::Object => load::object(engine, target).map(|rest| {
+        TextOrigin::Object => load::object(engine, target, Class::Background).map(|rest| {
             let size = match &rest {
                 Rest::Memory(bytes) => bytes.len() as u64,
                 Rest::Text(text) => text.len(),
@@ -137,6 +137,22 @@ async fn one(
         whole(engine, guard, target, root, lang, rest, identity).await;
     } else {
         screen(engine, guard, target, root, lang, rest, identity).await;
+    }
+}
+
+/// The OID of a file whose identity was hashed before (an earlier prefetch
+/// or opening): a repeated prefetch reads and hashes nothing again.
+fn known(
+    engine: &EngineInner,
+    target: &ReadTarget,
+    root: &Arc<Path>,
+    identity: Option<FileIdentity>,
+) -> Option<BlobId> {
+    match target.origin {
+        TextOrigin::Object => None,
+        TextOrigin::Worktree | TextOrigin::Dependency(_) => {
+            engine.known_oid(root, &target.path, identity?)
+        }
     }
 }
 
@@ -169,6 +185,20 @@ async fn whole(
     rest: Rest,
     identity: Option<FileIdentity>,
 ) {
+    // Already there: looked up as background work, so it stays in the
+    // class it has.
+    let done = known(engine, target, root, identity).or(match target.origin {
+        TextOrigin::Object => target.expect,
+        _ => None,
+    });
+    if let Some(oid) = done
+        && engine
+            .lru
+            .spans(&load::whole_key(oid, lang), Class::Background)
+            .is_some()
+    {
+        return;
+    }
     let bytes: Arc<[u8]> = match rest {
         Rest::File(file) => match file.read_all(TIER_A_MAX) {
             Ok(FullRead::File { bytes, meta }) if Some(meta.identity()) == identity => bytes.into(),
@@ -267,18 +297,45 @@ async fn screen(
             let Some(identity) = identity else {
                 return;
             };
-            let Some((oid, scanned)) = stream(engine, guard, &file, identity, target).await else {
-                return;
-            };
-            drop(file);
-            if size >= CHECKPOINT_MIN {
-                engine.store_checkpoints(&target.project, &oid, &scanned.checkpoints());
+            // Hashed before with this identity (its checkpoints written
+            // then): not read again.
+            if let Some(oid) = known(engine, target, root, Some(identity)) {
+                (oid, size, None)
+            } else {
+                trace!(
+                    engine,
+                    Trace::PrefetchHash {
+                        path: target.path.clone()
+                    }
+                );
+                let Some((oid, scanned)) = stream(engine, guard, &file, identity, target).await
+                else {
+                    return;
+                };
+                drop(file);
+                if size >= CHECKPOINT_MIN {
+                    engine.store_checkpoints(&target.project, &oid, &scanned.checkpoints());
+                }
+                engine.remember(root, &target.path, identity, oid);
+                (oid, size, None)
             }
-            engine.remember(root, &target.path, identity, oid);
-            (oid, size, None)
         }
         _ => return,
     };
+    screen_window(engine, guard, target, root, lang, oid, size).await;
+}
+
+/// The first screen's window of content whose OID is `oid`, kept under
+/// the target's line start unless it is there already.
+async fn screen_window(
+    engine: &Arc<EngineInner>,
+    guard: &BackgroundGuard,
+    target: &ReadTarget,
+    root: &Arc<Path>,
+    lang: &Lang,
+    oid: BlobId,
+    size: u64,
+) {
     trace!(
         engine,
         Trace::PrefetchParse {
@@ -294,7 +351,18 @@ async fn screen(
                 cancel: &never,
                 yield_probe: Some(&probe),
             };
-            load::first_screen(engine, target, root, target.at, target.expect, ROWS, budget)
+            // Found in the LRU as background work: a prefetch never makes
+            // its own entries the user's.
+            load::first_screen(
+                engine,
+                target,
+                root,
+                target.at,
+                target.expect,
+                ROWS,
+                budget,
+                Class::Background,
+            )
         };
         let First::Shown(shown) = first else {
             return;
@@ -317,9 +385,16 @@ async fn screen(
             of: SpansOf::new(oid, lang),
             target_line_start: shown.anchor.line_start,
         };
-        engine
+        // A window the first screen took from there is left as it is.
+        let kept = engine
             .lru
-            .insert(key, LruValue::Spans(window), Class::Background);
+            .spans(&key, Class::Background)
+            .is_some_and(|kept| Arc::ptr_eq(&kept, &window));
+        if !kept {
+            engine
+                .lru
+                .insert(key, LruValue::Spans(window), Class::Background);
+        }
         trace!(
             engine,
             Trace::PrefetchDone {

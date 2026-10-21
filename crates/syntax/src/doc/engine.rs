@@ -102,6 +102,9 @@ pub enum Trace {
     /// A turn of the prefetch task begins: it got a thread, first or back
     /// from the end of the batch queue.
     PrefetchTask,
+    /// The prefetch begins to read and hash `path` (over 1 MiB, its OID
+    /// not known for its identity).
+    PrefetchHash { path: Arc<str> },
     /// The prefetch begins the parse of `path`: the whole file up to 1 MiB,
     /// else the first screen's window.
     PrefetchParse { path: Arc<str> },
@@ -307,6 +310,7 @@ impl Engine {
             doc.target.expect,
             viewport.rows,
             load::first_budget(&cancel),
+            crate::lru::Class::Opened,
         );
         let mut st = doc.lock();
         let _ = load::fill_first(&mut st, &doc.target, first);

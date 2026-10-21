@@ -146,6 +146,7 @@ pub(crate) fn start(engine: &Arc<EngineInner>, doc: &Arc<Doc>, at: Anchor) {
             expect,
             rows,
             first_budget(&cancel),
+            Class::Opened,
         );
         apply_first(&engine2, &doc2, load, first);
     });
@@ -171,7 +172,13 @@ pub(crate) fn first_budget(cancel: &AtomicBool) -> Budget<'_> {
 
 /// The first screen of `target`, on the calling thread; its window is
 /// parsed with `budget` ([`first_budget`] when opening, the prefetch's
-/// otherwise).
+/// otherwise). What it finds in the LRU is used as `class`: `Opened` when
+/// the user opens, `Background` for the prefetch, which must not make its
+/// own entries the user's.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the target, where it opens, the window's budget and the LRU class"
+)]
 pub(crate) fn first_screen(
     engine: &EngineInner,
     target: &ReadTarget,
@@ -180,13 +187,14 @@ pub(crate) fn first_screen(
     expect: Option<BlobId>,
     rows: u32,
     budget: Budget<'_>,
+    class: Class,
 ) -> First {
     let langs = engine.languages.clone();
     let lang = langs.for_path(&target.path);
     let opened = match &target.origin {
         TextOrigin::Worktree => worktree_file(engine, target, root),
         TextOrigin::Dependency(dep) => dependency_file(engine, target, root, &dep.root),
-        TextOrigin::Object => object(engine, target).map(|rest| {
+        TextOrigin::Object => object(engine, target, class).map(|rest| {
             let size = match &rest {
                 Rest::Memory(b) => b.len() as u64,
                 Rest::Text(t) => t.len(),
@@ -297,14 +305,13 @@ pub(crate) fn first_screen(
         None => highlight = Highlighting::Plain,
         Some(_) if plan.encoding == Encoding::NotText => highlight = Highlighting::Plain,
         Some(lang) => {
-            let cached =
-                verified.and_then(|oid| engine.lru.spans(&whole_key(oid, lang), Class::Opened));
+            let cached = verified.and_then(|oid| engine.lru.spans(&whole_key(oid, lang), class));
             let screen = || {
                 let key = LruKey::Screen {
                     of: SpansOf::new(verified?, lang),
                     target_line_start: plan.target_line_start,
                 };
-                let spans = engine.lru.spans(&key, Class::Opened)?;
+                let spans = engine.lru.spans(&key, class)?;
                 let r = spans.range();
                 (r.start <= plan.visible.start && plan.visible.end <= r.end).then_some(spans)
             };
@@ -443,15 +450,19 @@ fn safe_error(error: SafeError) -> DocState {
 }
 
 /// An object target's content: registered, in the LRU, or taken out of the
-/// object database (ADR 0042).
-pub(crate) fn object(engine: &EngineInner, target: &ReadTarget) -> Result<Rest, DocState> {
+/// object database (ADR 0042). A text found in the LRU is used as `class`.
+pub(crate) fn object(
+    engine: &EngineInner,
+    target: &ReadTarget,
+    class: Class,
+) -> Result<Rest, DocState> {
     let Some(oid) = target.expect else {
         return Err(DocState::Unreadable(ReadError::ObjectMissing));
     };
     if let Some(bytes) = engine.shares.get(&oid) {
         return Ok(Rest::Memory(bytes));
     }
-    if let Some(text) = engine.lru.text(oid, Class::Opened) {
+    if let Some(text) = engine.lru.text(oid, class) {
         return Ok(Rest::Text(text));
     }
     let ProjectKey::Git { common_dir } = &target.project else {

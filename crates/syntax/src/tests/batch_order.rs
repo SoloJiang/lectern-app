@@ -233,18 +233,39 @@ fn batch_order_window_stops_within_a_slice_when_yielding() {
     let t = Threaded::new(1);
     t.write("big.ts", &testing::ts(8 << 20, 0));
     let doc = t.open(t.target("big.ts", Anchor::Start));
-    let (from, _) = t.wait_for(0, |e| matches!(e, Trace::ChainStep { .. }));
-    // A step from here on is one in flight.
-    let (step, _) = t.wait_for(from + 1, |e| matches!(e, Trace::ChainStep { .. }));
-    std::thread::sleep(Duration::from_millis(3));
-    let switched = Instant::now();
-    t.host.kernel().set_yield(true);
-    let (ended, at) = t.wait_for(step, |e| matches!(e, Trace::ChainStepEnd { .. }));
-    // Zero when the step ended on its own before the switch.
-    let stop = at.saturating_duration_since(switched);
-    let how = t.events()[ended].1.clone();
-    eprintln!("{how:?} {stop:?} after the switch");
-    assert!(stop <= Duration::from_millis(10), "{how:?} {stop:?}");
+    /// Steps tried: one that ends on its own around the switch does not
+    /// count, and the next one is tried.
+    const ATTEMPTS: usize = 10;
+    let (mut from, _) = t.wait_for(0, |e| matches!(e, Trace::ChainStep { .. }));
+    let mut stopped = None;
+    for attempt in 0..ATTEMPTS {
+        // A step that begins after the last one ended: in flight when the
+        // switch turns on, unless it is over within these 3 ms.
+        let (step, _) = t.wait_for(from + 1, |e| matches!(e, Trace::ChainStep { .. }));
+        std::thread::sleep(Duration::from_millis(3));
+        let switched = Instant::now();
+        t.host.kernel().set_yield(true);
+        let (ended, at) = t.wait_for(step, |e| matches!(e, Trace::ChainStepEnd { .. }));
+        let how = t.events()[ended].1.clone();
+        let yielded = matches!(
+            how,
+            Trace::ChainStepEnd {
+                end: StepEnd::Yielded,
+                ..
+            }
+        );
+        if yielded && at >= switched {
+            stopped = Some((ended, at.duration_since(switched)));
+            break;
+        }
+        // It ended on its own: not a stop to measure.
+        eprintln!("attempt {attempt}: {how:?} on its own");
+        t.host.kernel().set_yield(false);
+        from = ended;
+    }
+    let (ended, stop) = stopped.expect("a step in flight when the switch turned on");
+    eprintln!("stopped {stop:?} after the switch");
+    assert!(stop <= Duration::from_millis(10), "{stop:?}");
     // The manual clock does not move: one keepalive slot at most, then
     // nothing until the switch is off.
     std::thread::sleep(Duration::from_millis(200));

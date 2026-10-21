@@ -62,6 +62,17 @@ fn prefetch_computes_at_most_four_and_only_fills_the_lru() {
             assert!(!lru.contains(&key), "{path} is past the first four");
         }
     }
+    // Prefetched again: found before any read or parse, still background.
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = events.clone();
+    rig.engine
+        .set_trace(move |event| log.lock().unwrap().push(event));
+    let (path, bytes) = &files[0];
+    rig.engine
+        .prefetch(vec![(rig.target(path, Anchor::Start), rig.root.clone())]);
+    rig.settle();
+    assert_eq!(*events.lock().unwrap(), vec![Trace::PrefetchTask]);
+    assert_eq!(lru.class(&whole_key(bytes, "ts")), Some(Class::Background));
     // Nothing was opened or told.
     assert_eq!(rig.notified.load(Ordering::SeqCst), 0);
     assert_eq!(rig.engine.tasks_in_flight(), 0);
@@ -142,9 +153,20 @@ fn prefetch_larger_files_get_the_first_screens_window() {
         line: 0,
         column: 0,
     };
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = events.clone();
+    rig.engine
+        .set_trace(move |event| log.lock().unwrap().push(event));
     rig.engine
         .prefetch(vec![(rig.target("big.ts", at), rig.root.clone())]);
     rig.settle();
+    let hashed = |events: &[Trace]| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Trace::PrefetchHash { .. }))
+            .count()
+    };
+    assert_eq!(hashed(&events.lock().unwrap()), 1);
     let lru = &rig.engine.inner().lru;
     let screens: Vec<LruKey> = lru
         .keys()
@@ -153,6 +175,21 @@ fn prefetch_larger_files_get_the_first_screens_window() {
         .collect();
     assert_eq!(screens.len(), 1, "{:?}", lru.keys());
     assert_eq!(lru.class(&screens[0]), Some(Class::Background));
+    // Prefetched again (the pointer rests there once more): the file is
+    // not hashed again and the window stays background work, the same one.
+    let before = lru.spans(&screens[0], Class::Background).unwrap();
+    events.lock().unwrap().clear();
+    rig.engine
+        .prefetch(vec![(rig.target("big.ts", at), rig.root.clone())]);
+    rig.settle();
+    let again = events.lock().unwrap().clone();
+    assert_eq!(hashed(&again), 0, "{again:?}");
+    assert!(again.contains(&Trace::PrefetchDone {
+        path: "big.ts".into()
+    }));
+    assert_eq!(lru.class(&screens[0]), Some(Class::Background));
+    let after = lru.spans(&screens[0], Class::Background).unwrap();
+    assert!(Arc::ptr_eq(&before, &after));
     // The line checkpoints were written with the OID.
     let oid = blob_id(&Oid::for_blob(HashKind::Sha1, &bytes));
     assert!(
