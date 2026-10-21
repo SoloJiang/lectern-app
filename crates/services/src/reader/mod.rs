@@ -48,11 +48,11 @@ impl Service for dyn Reader {
 /// 和登记序号；登记表已不在时回调不做任何事。回调最多调用一次，不得 panic。
 /// 不序列化：进程插件的代理在宿主进程里持有它。
 pub struct ObjectShare {
-    release: Option<Box<dyn FnOnce() + Send>>,
+    release: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
 impl ObjectShare {
-    pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
+    pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self {
         ObjectShare {
             release: Some(Box::new(release)),
         }
