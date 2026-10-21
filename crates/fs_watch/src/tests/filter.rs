@@ -542,6 +542,22 @@ fn index_changes(fx: &Fixture, n: usize) {
 }
 
 #[test]
+fn filter_reuse_after_the_load_a_batch_started() {
+    let fx = Fixture::new();
+    let _o = fx.opened();
+    // A `.gitignore` edit and its batch-mates start a load that reads the
+    // worktree after all of them: the next index change reuses that load.
+    fx.emit_root(&[
+        (".gitignore", F | MODIFIED),
+        ("a.txt", F | MODIFIED),
+        ("moved", D | Flags::RENAMED),
+    ]);
+    fx.settle();
+    index_changes(&fx, 1);
+    assert_eq!(fx.source.previous(), [None, None, Some(2)]);
+}
+
+#[test]
 fn filter_reuse_not_after_a_rule_file_the_old_filter_dropped() {
     let fx = Fixture::new();
     fx.source.ignore(&["out"]);

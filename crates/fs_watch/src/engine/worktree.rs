@@ -271,6 +271,11 @@ impl WorktreeState {
             return;
         }
         let now = ctx.now();
+        // Whether pass 1 judged this batch's triggers with a filter that may
+        // not match the rules on disk (`unsure`). Taken before pass 1: a load
+        // it starts reads the worktree after this whole batch.
+        let unjudged = self.stale || matches!(self.filter, Filter::Failed(_));
+        let loading = self.filter_load.is_some();
         // Pass 1: does this raw batch trigger a filter reload? From this raw
         // batch on, the filter is stale.
         let mut gitignores = BTreeSet::new();
@@ -287,6 +292,10 @@ impl WorktreeState {
         if reload {
             self.reload_filter(ctx, gitignores, Reload::Full);
         }
+        // A load pass 1 started (none was running) reads the worktree after
+        // every event of this batch, so none of them is unsure; one queued
+        // behind a running load doesn't help the running one.
+        let unsure = unjudged && !(reload && !loading);
         // Pass 2: classify.
         let mut config = false;
         let mut rescan = false;
@@ -319,9 +328,7 @@ impl WorktreeState {
             if path.split(|&b| b == b'/').any(|name| name == b".git") {
                 continue;
             }
-            // Pass 1 judged its trigger with a filter that may not match the
-            // rules on disk (`unsure`).
-            if self.stale || matches!(self.filter, Filter::Failed(_)) {
+            if unsure {
                 self.unsure = true;
             }
             match self.verdict(path, event.flags, unfiltered, self.stale) {
