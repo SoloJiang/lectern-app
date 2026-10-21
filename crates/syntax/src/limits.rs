@@ -20,10 +20,18 @@ pub const FIRST_WINDOW_DEADLINE: Duration = Duration::from_millis(8);
 /// One slice of a tier A whole-file parse.
 pub const SLICE: Duration = Duration::from_millis(8);
 
-/// A 64 KiB window whose parse takes longer than this twice in a row turns
-/// the file's highlighting off for this opening
-/// ([`crate::highlight::SlowWindows`]).
+/// A 64 KiB window whose parse takes longer than this, in the thread's CPU
+/// time, twice in a row turns the file's highlighting off for this opening
+/// ([`crate::highlight::SlowWindows`]): under 0.5 MiB/s, a pathological
+/// input (ADR 0034).
 pub const SLOW_WINDOW: Duration = Duration::from_millis(128);
+
+/// The same limit when the thread's CPU clock cannot be read and wall time
+/// is used: wall time also grows while a utility-QoS batch thread waits for
+/// a CPU, so the limit is eight times wider. A 64 KiB window still slower
+/// than this (under 64 KiB/s) is pathological even on a busy machine; a
+/// window starved further keeps its highlighting rather than losing it.
+pub const SLOW_WINDOW_WALL: Duration = Duration::from_secs(1);
 
 /// A window of the chain ([`crate::highlight::ChainWindow`]): about 64 KiB,
 /// its tree 2–5 MiB.

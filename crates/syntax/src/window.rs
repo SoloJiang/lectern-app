@@ -207,8 +207,15 @@ pub fn plan(
     let visible = around_start + start as u64..around_start + end as u64;
 
     // The window.
-    let before = visible.start.saturating_sub(SAFE_BACK).max(around_start);
-    let mut window = safe_start(rules, around, around_start, before)
+    // The safe start is looked for at most 64 KiB before the target (ADR
+    // 0034), also when the bytes read go further back (a file of at most
+    // 1 MiB is read whole).
+    let floor = (around_start + t as u64)
+        .saturating_sub(AROUND_BEFORE)
+        .max(around_start);
+    let before = visible.start.saturating_sub(SAFE_BACK).max(floor);
+    let searched = &around[(floor - around_start) as usize..];
+    let mut window = safe_start(rules, searched, floor, before)
         .filter(|&s| s <= visible.start)
         .map(|s| s..(visible.end + WINDOW_AFTER).min(around_end));
     let checked = window.as_ref().unwrap_or(&visible);

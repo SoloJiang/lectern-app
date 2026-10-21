@@ -386,6 +386,29 @@ fn window_plan_long_line() {
     assert!(window.start <= target - 8 * KIB);
 }
 
+/// A file of at most 1 MiB is read whole, but the safe start is still only
+/// looked for in the 64 KiB before the target (ADR 0034): a `}` 100 KiB
+/// back is not taken, the first screen is plain text.
+#[test]
+fn window_plan_looks_back_at_most_64_kib() {
+    let mut text = b"fn a() {}\n".to_vec();
+    text.extend(std::iter::repeat_n(b'x', 100 << 10));
+    let target = text.len() as u64 - 10;
+    let plan = plan_whole(Rules::Code, &text, Target::Byte(target));
+    assert_eq!(plan.window, None);
+    // Within 64 KiB it is found.
+    let mut text = b"fn a() {}\n".to_vec();
+    text.extend(std::iter::repeat_n(b'x', 40 << 10));
+    let target = text.len() as u64 - 10;
+    assert_eq!(
+        plan_whole(Rules::Code, &text, Target::Byte(target))
+            .window
+            .unwrap()
+            .start,
+        9
+    );
+}
+
 #[test]
 fn window_plan_line_from_a_checkpoint() {
     let text = testing::ts(2 << 20, 0);

@@ -223,7 +223,9 @@ fn deadline_chain_window_resumes_to_the_same_window() {
         assert_eq!(sliced_next, next);
         assert_eq!(spans.range(), whole.range());
         assert_eq!(lines(&spans), lines(&whole), "{name}");
-        assert!(sliced.spent() > Duration::ZERO);
+        let spent = sliced.spent();
+        assert!(spent.parsed > 0);
+        assert!(spent.cpu + spent.wall > Duration::ZERO);
         let calls = Cell::new(0u32);
         let probe = || {
             calls.set(calls.get() + 1);

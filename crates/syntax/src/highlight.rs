@@ -40,9 +40,10 @@ use tree_sitter::{
 };
 
 use crate::cut::{self, Bytes};
+use crate::health::Elapsed;
 use crate::health::{self, Health};
 use crate::lang::{Capture, Compiled, Lang, LangHandle, Precedence, Rules};
-use crate::limits::{SLOW_WINDOW, WINDOW, WINDOW_MAX};
+use crate::limits::{SLOW_WINDOW, SLOW_WINDOW_WALL, WINDOW, WINDOW_MAX};
 use crate::spans::{Lines, SpansBuilder, TokenKind, WindowSpans};
 use crate::window::{JsonPad, json_last_comma, json_pad};
 
@@ -277,7 +278,7 @@ pub struct ChainWindow {
     src: Arc<dyn Source>,
     start: u64,
     state: Chain,
-    spent: Duration,
+    spent: Spent,
 }
 
 enum Chain {
@@ -347,26 +348,20 @@ impl ChainWindow {
             src,
             start,
             state,
-            spent: Duration::ZERO,
+            spent: Spent::default(),
         }
     }
 
-    /// The time this window's steps took so far (wall time inside `step`,
-    /// not the waits between steps), for [`SlowWindows`].
-    pub fn spent(&self) -> Duration {
+    /// What this window's parse took so far, for [`SlowWindows`]: the
+    /// thread's CPU time inside tree-sitter's parse, summed over the steps
+    /// (not the query, the cut or the waits between steps).
+    pub fn spent(&self) -> Spent {
         self.spent
     }
 
     /// One slice. `Done` once; a step after `Done` or `Unavailable` returns
     /// `Unavailable`.
     pub fn step(&mut self, budget: Budget<'_>) -> Outcome<(WindowSpans, u64)> {
-        let began = Instant::now();
-        let outcome = self.run(budget);
-        self.spent += began.elapsed();
-        outcome
-    }
-
-    fn run(&mut self, budget: Budget<'_>) -> Outcome<(WindowSpans, u64)> {
         let Some(compiled) = self.lang.compiled.clone() else {
             return Outcome::Unavailable;
         };
@@ -390,7 +385,10 @@ impl ChainWindow {
         } = &mut self.state
         {
             let input = extent.input(src, start);
-            let tree = match parse_step(parser, input, &watch) {
+            let stopwatch = self.health.stopwatch();
+            let parse = parse_step(parser, input, &watch);
+            self.spent.add(stopwatch.elapsed());
+            let tree = match parse {
                 Ok(tree) => tree,
                 Err(halt) => {
                     if halt == Halt::Unavailable {
@@ -400,6 +398,7 @@ impl ChainWindow {
                 }
             };
             let parsed = extent.parsed;
+            self.spent.parsed += parsed as u64;
             let cut = if let Some(cut) = extent.cut {
                 Some(cut)
             } else if !*wide {
@@ -446,22 +445,53 @@ impl ChainWindow {
     }
 }
 
-/// ADR 0034's degradation: a window's parse slower than [`SLOW_WINDOW`]
-/// (per 64 KiB) twice in a row turns the file's highlighting off for this
-/// opening. Fed by the caller with each finished window of the chain.
+/// What a window's parse took ([`ChainWindow::spent`]): tree-sitter's parse
+/// only, as ADR 0034's 128 ms is a parse throughput (under 0.5 MiB/s);
+/// the query and the cut are not counted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Spent {
+    /// The bytes parsed: the window's, plus the first attempt's when it was
+    /// widened.
+    pub parsed: u64,
+    /// The thread's CPU time in the parse. It does not grow while a batch
+    /// thread at utility QoS waits for a CPU (a concurrent build), so a
+    /// starved window is not taken for a slow one.
+    pub cpu: Duration,
+    /// Wall time of the steps whose thread's CPU clock could not be read.
+    pub wall: Duration,
+}
+
+impl Spent {
+    fn add(&mut self, elapsed: Elapsed) {
+        match elapsed {
+            Elapsed::Cpu(d) => self.cpu += d,
+            Elapsed::Wall(d) => self.wall += d,
+        }
+    }
+}
+
+/// ADR 0034's degradation: a window whose parse takes longer than
+/// [`SLOW_WINDOW`] of CPU time per 64 KiB parsed (wall time where the CPU
+/// clock cannot be read: [`SLOW_WINDOW_WALL`]), twice in a row, turns the
+/// file's highlighting off for this opening. Fed by the caller with each
+/// finished window of the chain.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct SlowWindows {
     in_a_row: u8,
 }
 
 impl SlowWindows {
-    /// A window of `len` bytes took `spent` ([`ChainWindow::spent`]).
-    /// True once two windows in a row were slow: plain text from now on.
-    pub fn record(&mut self, len: u64, spent: Duration) -> bool {
-        let units = len.max(WINDOW).div_ceil(WINDOW);
-        let limit = SLOW_WINDOW.saturating_mul(u32::try_from(units).unwrap_or(u32::MAX));
+    /// A finished window's [`ChainWindow::spent`]. True once two windows in
+    /// a row were slow: plain text from now on.
+    pub fn record(&mut self, spent: Spent) -> bool {
+        // The share of the limit used: CPU time against `SLOW_WINDOW`, wall
+        // time against `SLOW_WINDOW_WALL`, for each 64 KiB parsed (at least
+        // one: a short last window has the whole limit).
+        let units = (spent.parsed as f64 / WINDOW as f64).max(1.0);
+        let used = spent.cpu.as_secs_f64() / SLOW_WINDOW.as_secs_f64()
+            + spent.wall.as_secs_f64() / SLOW_WINDOW_WALL.as_secs_f64();
         if self.in_a_row < 2 {
-            self.in_a_row = if spent > limit { self.in_a_row + 1 } else { 0 };
+            self.in_a_row = if used > units { self.in_a_row + 1 } else { 0 };
         }
         self.plain()
     }
