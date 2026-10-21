@@ -1,5 +1,5 @@
 //! The crate's limits (docs/design/file_reader.md「`syntax` 的公开项」
-//! `limits`). Later steps add the prefetch and history limits here.
+//! `limits`). Later steps add the history limit here.
 
 use std::time::Duration;
 
@@ -64,6 +64,17 @@ pub const OBJECT_INLINE: u64 = 1 << 20;
 
 /// The most matches one find returns.
 pub const FIND_MAX: usize = 10_000;
+
+/// The most targets one prefetch request computes (ADR 0033): the rest are
+/// dropped.
+pub const PREFETCH_MAX: usize = 4;
+
+/// The parse one batch task of the window chain does at most (tiers B and
+/// C, the windows away from the visible ones): one window's
+/// [`crate::highlight::ChainWindow::step`] with this budget, then the task
+/// ends and the rest is queued again, behind the batch work already queued
+/// (「批量线程上的先后」).
+pub const BATCH_SEGMENT: Duration = Duration::from_millis(50);
 
 /// A window of the chain ([`crate::highlight::ChainWindow`]): about 64 KiB,
 /// its tree 2–5 MiB.

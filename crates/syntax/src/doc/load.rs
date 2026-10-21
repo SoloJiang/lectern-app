@@ -7,12 +7,13 @@
 //!   tier C's streaming scan in 1 MiB reads; the raw bytes' OID, the line
 //!   index, the line checkpoints into `syntax.lines`;
 //! - tier A's whole-file parse (`Interactive`, 8 ms slices);
-//! - the visible window of tiers B and C and tier C's pages (`Interactive`),
-//!   on scrolling;
+//! - the visible windows of tiers B and C (the chain's, one on each side,
+//!   `chain`) and tier C's pages (`Interactive`), on scrolling;
 //! - find (`Interactive`, 1 MiB blocks).
 //!
 //! Every task holds a `BusyGuard` and checks its load (and the document's
-//! cancel flag) before it publishes anything.
+//! cancel flag) before it publishes anything. The rest of the window chain
+//! is batch work (`chain`).
 
 use std::ops::Range;
 use std::path::Path;
@@ -34,24 +35,24 @@ use crate::lang::Rules;
 use crate::limits::{
     CHECKPOINT_MIN, FIRST_WINDOW_DEADLINE, OBJECT_MAX, PAGE, SLICE, TIER_A_MAX, TIER_B_MAX,
 };
-use crate::lru::{Class, LruKey, LruValue, WHOLE};
+use crate::lru::{Class, LruKey, LruValue, SpansOf, WHOLE};
 use crate::spans::WindowSpans;
 use crate::text::{IndexBuilder, LineIndex, Text};
 use crate::util::{log, yield_now};
 use crate::window::{self, Encoding, Target};
 
+use super::chain::{self, Computed, Want};
 use super::content::{Content, PageCache, Paged, Piece, Pieces, slice};
 use super::engine::{Doc, DocMut, EngineInner};
 use super::{
     DocState, Editable, Highlighting, LineCount, NotEditable, ReadError, RowPos, Tier, watch,
 };
 
-/// A visible window of tiers B and C: one call, not resumable.
+/// A visible window of tiers B and C parsed alone (before the chain gets
+/// there): one call, not resumable.
 const SCROLL_WINDOW_BUDGET: Duration = Duration::from_millis(50);
-/// The visible windows a document keeps (the whole file's spans aside).
-const WINDOWS_MAX: usize = 8;
 /// The streaming scan's reads.
-const SCAN_BLOCK: u64 = 1 << 20;
+pub(crate) const SCAN_BLOCK: u64 = 1 << 20;
 /// Tier C reads the pages from 64 KiB before the top to 192 KiB after it.
 const PAGES_BEFORE: u64 = 64 << 10;
 const PAGES_AFTER: u64 = 192 << 10;
@@ -73,8 +74,11 @@ pub(crate) struct Shown {
     /// What the full read continues from.
     rest: Rest,
     pieces: Arc<Pieces>,
-    anchor: RowPos,
-    window: Option<Arc<WindowSpans>>,
+    /// Its line start is the plan's target line start.
+    pub(crate) anchor: RowPos,
+    pub(crate) window: Option<Arc<WindowSpans>>,
+    /// The window's parse stopped for the yield probe (the prefetch).
+    pub(crate) yielded: bool,
     whole: Option<Arc<WindowSpans>>,
     /// The verified OID `whole` was found by.
     whole_from: Option<BlobId>,
@@ -115,6 +119,8 @@ pub(crate) fn start(engine: &Arc<EngineInner>, doc: &Arc<Doc>, at: Anchor) {
         st.window_busy = false;
         st.window_again = false;
         st.pages_busy = false;
+        // The chain is of the last load's content.
+        st.chain = None;
         // A find of the last load publishes nothing more; the query runs
         // again in the new content.
         st.find.cancel.store(true, Ordering::SeqCst);
@@ -139,7 +145,8 @@ pub(crate) fn start(engine: &Arc<EngineInner>, doc: &Arc<Doc>, at: Anchor) {
             at,
             expect,
             rows,
-            &cancel,
+            first_budget(&cancel),
+            Class::Opened,
         );
         apply_first(&engine2, &doc2, load, first);
     });
@@ -154,7 +161,24 @@ fn io_error(error: impl std::fmt::Display) -> DocState {
     DocState::Unreadable(ReadError::Io(error.to_string().into()))
 }
 
-/// The first screen of `target`, on the calling thread.
+/// The first screen's window budget: the 8 ms deadline, no yield.
+pub(crate) fn first_budget(cancel: &AtomicBool) -> Budget<'_> {
+    Budget {
+        budget: FIRST_WINDOW_DEADLINE,
+        cancel,
+        yield_probe: None,
+    }
+}
+
+/// The first screen of `target`, on the calling thread; its window is
+/// parsed with `budget` ([`first_budget`] when opening, the prefetch's
+/// otherwise). What it finds in the LRU is used as `class`: `Opened` when
+/// the user opens, `Background` for the prefetch, which must not make its
+/// own entries the user's.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the target, where it opens, the window's budget and the LRU class"
+)]
 pub(crate) fn first_screen(
     engine: &EngineInner,
     target: &ReadTarget,
@@ -162,14 +186,15 @@ pub(crate) fn first_screen(
     at: Anchor,
     expect: Option<BlobId>,
     rows: u32,
-    cancel: &AtomicBool,
+    budget: Budget<'_>,
+    class: Class,
 ) -> First {
     let langs = engine.languages.clone();
     let lang = langs.for_path(&target.path);
     let opened = match &target.origin {
         TextOrigin::Worktree => worktree_file(engine, target, root),
         TextOrigin::Dependency(dep) => dependency_file(engine, target, root, &dep.root),
-        TextOrigin::Object => object(engine, target).map(|rest| {
+        TextOrigin::Object => object(engine, target, class).map(|rest| {
             let size = match &rest {
                 Rest::Memory(b) => b.len() as u64,
                 Rest::Text(t) => t.len(),
@@ -271,27 +296,35 @@ pub(crate) fn first_screen(
         sub_row: 0,
     };
     // Spans: the whole file's from the LRU when the content is known, else
-    // the window parsed alone.
+    // the window a prefetch left there for this target, else the window
+    // parsed alone.
     let (mut window, mut whole, mut highlight) = (None, None, Highlighting::Pending);
     let mut whole_from = None;
+    let mut yielded = false;
     match lang {
         None => highlight = Highlighting::Plain,
         Some(_) if plan.encoding == Encoding::NotText => highlight = Highlighting::Plain,
         Some(lang) => {
-            let cached =
-                verified.and_then(|oid| engine.lru.spans(&whole_key(oid, lang), Class::Opened));
+            let cached = verified.and_then(|oid| engine.lru.spans(&whole_key(oid, lang), class));
+            let screen = || {
+                let key = LruKey::Screen {
+                    of: SpansOf::new(verified?, lang),
+                    target_line_start: plan.target_line_start,
+                };
+                let spans = engine.lru.spans(&key, class)?;
+                let r = spans.range();
+                (r.start <= plan.visible.start && plan.visible.end <= r.end).then_some(spans)
+            };
             if let Some(spans) = cached {
                 whole = Some(spans);
                 whole_from = verified;
                 highlight = Highlighting::On;
+            } else if let Some(spans) = screen() {
+                window = Some(spans);
+                highlight = Highlighting::On;
             } else if let Some(w) = plan.window.clone() {
                 // Compiling the query on first use is outside the budget.
                 lang.prepare();
-                let budget = Budget {
-                    budget: FIRST_WINDOW_DEADLINE,
-                    cancel,
-                    yield_probe: None,
-                };
                 match highlight::window(
                     lang,
                     &*pieces,
@@ -305,7 +338,8 @@ pub(crate) fn first_screen(
                         highlight = Highlighting::On;
                     }
                     Outcome::Unavailable => highlight = Highlighting::Plain,
-                    _ => {}
+                    Outcome::Yielded => yielded = true,
+                    Outcome::TimedOut | Outcome::Cancelled => {}
                 }
             }
         }
@@ -321,6 +355,7 @@ pub(crate) fn first_screen(
         pieces,
         anchor,
         window,
+        yielded,
         whole,
         whole_from,
         highlight,
@@ -332,10 +367,14 @@ pub(crate) fn first_screen(
 }
 
 /// What opening a file gives: the rest to read, its size and identity.
-type Opening = Result<(Rest, u64, Option<FileIdentity>), DocState>;
+pub(crate) type Opening = Result<(Rest, u64, Option<FileIdentity>), DocState>;
 
 /// A worktree file, opened beneath the root's `SafeRoot`.
-fn worktree_file(engine: &EngineInner, target: &ReadTarget, root: &Arc<Path>) -> Opening {
+pub(crate) fn worktree_file(
+    engine: &EngineInner,
+    target: &ReadTarget,
+    root: &Arc<Path>,
+) -> Opening {
     let rel =
         RelPath::new(target.path.as_bytes()).ok_or(DocState::Unreadable(ReadError::InvalidPath))?;
     let safe = engine.root(&target.project, root).map_err(io_error)?;
@@ -347,7 +386,7 @@ fn worktree_file(engine: &EngineInner, target: &ReadTarget, root: &Arc<Path>) ->
 /// root or the path may be a symbolic link), and only with an extension or
 /// a file name on the allowed list. A root in a cache outside the worktree
 /// is not read.
-fn dependency_file(
+pub(crate) fn dependency_file(
     engine: &EngineInner,
     target: &ReadTarget,
     root: &Arc<Path>,
@@ -411,15 +450,19 @@ fn safe_error(error: SafeError) -> DocState {
 }
 
 /// An object target's content: registered, in the LRU, or taken out of the
-/// object database (ADR 0042).
-fn object(engine: &EngineInner, target: &ReadTarget) -> Result<Rest, DocState> {
+/// object database (ADR 0042). A text found in the LRU is used as `class`.
+pub(crate) fn object(
+    engine: &EngineInner,
+    target: &ReadTarget,
+    class: Class,
+) -> Result<Rest, DocState> {
     let Some(oid) = target.expect else {
         return Err(DocState::Unreadable(ReadError::ObjectMissing));
     };
     if let Some(bytes) = engine.shares.get(&oid) {
         return Ok(Rest::Memory(bytes));
     }
-    if let Some(text) = engine.lru.text(oid, Class::Opened) {
+    if let Some(text) = engine.lru.text(oid, class) {
         return Ok(Rest::Text(text));
     }
     let ProjectKey::Git { common_dir } = &target.project else {
@@ -479,14 +522,8 @@ fn normalize(mut pieces: Pieces) -> Pieces {
     pieces
 }
 
-fn whole_key(oid: BlobId, lang: &crate::Lang) -> LruKey {
-    LruKey::Spans {
-        oid,
-        lang: lang.static_name(),
-        grammar: lang.grammar_version(),
-        query: lang.query_version(),
-        start: WHOLE,
-    }
+pub(crate) fn whole_key(oid: BlobId, lang: &crate::Lang) -> LruKey {
+    SpansOf::new(oid, lang).spans(WHOLE)
 }
 
 /// What follows a first screen.
@@ -778,6 +815,7 @@ fn apply_full(
             });
         }
     } else if !tier_a {
+        chain::begin(engine, doc, load);
         visible_work(engine, doc);
     }
     if find {
@@ -953,12 +991,13 @@ fn scan(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, file: &OpenFile) {
     let anchor = target_pos(&st, target, by_line);
     st.set_anchor(anchor);
     doc.commit(st);
+    chain::begin(engine, doc, load);
     visible_work(engine, doc);
 }
 
 /// The bytes the viewport shows from the top: the display row's own bytes,
 /// not its line's start (a row deep in a long line is megabytes on).
-fn visible(st: &DocMut, target: &ReadTarget) -> Range<u64> {
+pub(crate) fn visible(st: &DocMut, target: &ReadTarget) -> Range<u64> {
     let top = st.top.unwrap_or(st.anchor);
     st.snapshot(target)
         .visible_bytes(top, st.viewport.rows, st.viewport.cols)
@@ -1003,12 +1042,18 @@ pub(crate) fn visible_work(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
     }
     if start_window {
         let (engine2, doc2) = (engine.clone(), doc.clone());
-        let _ = engine.spawn(Priority::Interactive, async move {
-            visible_window(&engine2, &doc2, load);
+        let spawned = engine.spawn(Priority::Interactive, async move {
+            visible_window(&engine2, &doc2, load).await;
         });
+        if !spawned {
+            doc.lock().window_busy = false;
+        }
     }
 }
 
+/// Whether the visible bytes lack a window: one of the chain's (the
+/// visible ones and one on each side) where the chain reaches them, else
+/// any window covering them.
 fn needs_window(st: &DocMut, shown: &Range<u64>) -> bool {
     if !matches!(st.tier, Some(Tier::B | Tier::C))
         || st.lang.is_none()
@@ -1017,9 +1062,7 @@ fn needs_window(st: &DocMut, shown: &Range<u64>) -> bool {
     {
         return false;
     }
-    !st.windows
-        .iter()
-        .any(|w| w.range().start <= shown.start && w.range().end >= shown.end)
+    chain::missing(st, &chain::want(st.chain.as_ref(), shown), shown)
 }
 
 /// Tier C: the pages around the top, read in one `read_ranges`.
@@ -1104,45 +1147,137 @@ fn split_pages(start: u64, bytes: Vec<u8>) -> Vec<(u64, Arc<[u8]>)> {
         .collect()
 }
 
-/// Tiers B and C: the window at the top, parsed alone like the first
-/// screen's (the exact window chain comes with the batch work).
-fn visible_window(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
+/// The most windows one round of [`visible_window`] computes: the visible
+/// ones and one on each side, and the frontier's few on the way to them.
+const ROUND_MAX: usize = 12;
+
+/// Tiers B and C: the windows the visible bytes want (`chain::want`): the
+/// chain's from their starts, taken from the LRU or computed here, where
+/// the chain reaches the top; else the window at the top parsed alone like
+/// the first screen's.
+async fn visible_window(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
+    let langs = engine.languages.clone();
+    let mut computed = 0;
     loop {
-        let (content, top, size, rows, lang, cancel) = {
+        let (want, shown, content, file, identity, size, rows, lang, cancel, of) = {
             let st = doc.lock();
             if doc.stale(&st, load) {
                 return;
             }
+            let shown = visible(&st, &doc.target);
+            let want = chain::want(st.chain.as_ref(), &shown);
+            // The first window of the chain the document lacks.
+            let want = match want {
+                Want::Windows(starts) => {
+                    starts.into_iter().find(|s| !chain::has(&st, *s)).map(Some)
+                }
+                Want::Heuristic => chain::missing(&st, &Want::Heuristic, &shown).then_some(None),
+            };
             (
+                want,
+                shown,
                 st.content.clone(),
-                visible(&st, &doc.target).start,
+                st.file.clone(),
+                st.identity,
                 st.size,
                 st.viewport.rows,
-                st.lang,
+                st.lang.and_then(|name| langs.get(name)),
                 st.cancel.clone(),
+                st.chain.as_ref().map(|c| c.of),
             )
         };
-        let langs = engine.languages.clone();
-        let spans = lang
-            .and_then(|name| langs.get(name))
-            .and_then(|lang| window_at(lang, &content, top, size, rows, &cancel));
+        let more = match (want, lang) {
+            (Some(Some(start)), Some(lang)) if computed < ROUND_MAX => {
+                computed += 1;
+                let content = (content, file, identity, size);
+                chain_window(engine, doc, load, start, content, lang, &cancel, of).await
+            }
+            (Some(None), Some(lang)) if computed == 0 => {
+                computed += 1;
+                let spans = window_at(lang, &content, shown.start, size, rows, &cancel);
+                let mut st = doc.lock();
+                if doc.stale(&st, load) {
+                    return;
+                }
+                if let Some(spans) = spans {
+                    chain::add(&mut st, Arc::new(spans));
+                    st.highlight = Highlighting::On;
+                }
+                doc.commit(st);
+                false
+            }
+            _ => false,
+        };
+        if more {
+            continue;
+        }
         let mut st = doc.lock();
         if doc.stale(&st, load) {
             return;
         }
-        if let Some(spans) = spans {
-            st.windows.insert(0, Arc::new(spans));
-            st.windows.truncate(WINDOWS_MAX);
-            st.highlight = Highlighting::On;
-        }
         if st.window_again {
             st.window_again = false;
-            doc.commit(st);
+            computed = 0;
+            drop(st);
             continue;
         }
         st.window_busy = false;
-        doc.commit(st);
         return;
+    }
+}
+
+/// The chain's window from `start` for the visible bytes: from the LRU, or
+/// computed. Whether to go on with the next one.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the window, the document's content and its load"
+)]
+async fn chain_window(
+    engine: &Arc<EngineInner>,
+    doc: &Arc<Doc>,
+    load: u64,
+    start: u64,
+    (content, file, identity, size): (Content, Option<Arc<OpenFile>>, Option<FileIdentity>, u64),
+    lang: &crate::Lang,
+    cancel: &AtomicBool,
+    of: Option<SpansOf>,
+) -> bool {
+    let Some(of) = of else {
+        return false;
+    };
+    if let Some(spans) = engine.lru.spans(&of.spans(start), Class::Opened) {
+        let mut st = doc.lock();
+        if doc.stale(&st, load) {
+            return false;
+        }
+        // A window's spans end where the next window starts.
+        let next = spans.range().end;
+        let moved = st
+            .chain
+            .as_mut()
+            .is_some_and(|c| c.advance(start, next, size));
+        chain::add(&mut st, spans);
+        st.highlight = Highlighting::On;
+        doc.commit(st);
+        if moved {
+            chain::kick(engine);
+        }
+        return true;
+    }
+    let Some(src) = chain::source(&content, file.as_ref(), identity, start, size) else {
+        return false;
+    };
+    drop(content);
+    match chain::compute(lang, src, start, cancel).await {
+        Computed::Done(spans, next, spent) => {
+            chain::land(engine, doc, load, start, spans, next, spent, true);
+            true
+        }
+        Computed::Unavailable => {
+            chain::plain(doc, load);
+            false
+        }
+        Computed::Stopped => false,
     }
 }
 

@@ -31,6 +31,8 @@ pub use doc::{
     DocHandle, DocSnapshot, DocState, Editable, Engine, EngineDeps, Highlighting, LineCount,
     LineNo, NotEditable, ReadError, Row, RowPos, Tier, Viewport,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use doc::{StepEnd, Trace};
 pub use find::{FindQuery, FindResults};
 pub use lang::{Lang, Languages, Rules, SPANS_VERSION};
 pub use spans::{Token, TokenKind, WindowSpans};

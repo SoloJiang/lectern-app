@@ -6,21 +6,22 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use lectern_cache::{Budgets, Cache, Config as CacheConfig};
-use lectern_executor::Executor;
+use lectern_executor::{Config as ExecutorConfig, Executor};
 use lectern_fs_watch::testing::{Driver, FakeBackend, FakeSource, manual};
-use lectern_fs_watch::{Config as WatchConfig, Flags, WorktreeSource};
+use lectern_fs_watch::{Config as WatchConfig, Flags, Watcher, WorktreeSource};
 use lectern_git::{GitError, HashKind, Oid};
+use lectern_kernel::testing::ManualClock;
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{BlobId, ProjectKey, WorktreeKey};
 use lectern_services::reader::{Anchor, ReadTarget};
 
 use crate::git_access::{GitAccess, Tree, blob_id};
 use crate::testing::{TestHost, host};
-use crate::{DocHandle, DocSnapshot, Engine, EngineDeps, Languages, Viewport};
+use crate::{DocHandle, DocSnapshot, Engine, EngineDeps, Languages, Trace, Viewport};
 
 /// The git stand-in.
 #[derive(Default)]
@@ -199,6 +200,131 @@ impl Rig {
         self.settle();
         self.driver.advance(Duration::from_secs(1));
         self.settle();
+    }
+}
+
+/// An engine on a real executor with `batch` batch threads, for the order
+/// of the batch work and the yield: files in a temporary folder project (not
+/// watched), the kernel's keepalive slots on a manual clock, and every
+/// [`Trace`] event logged with its time.
+pub(crate) struct Threaded {
+    pub engine: Engine,
+    pub host: TestHost,
+    pub executor: Executor,
+    /// Never moved: one keepalive slot, then none while the switch is on.
+    _clock: ManualClock,
+    pub root: Arc<Path>,
+    events: Arc<Events>,
+    _cache_dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+}
+
+/// The events logged, and a signal for each.
+type Events = (Mutex<Vec<(Instant, Trace)>>, Condvar);
+
+/// How long a wait for an event may take before the test fails.
+const EVENT_LIMIT: Duration = Duration::from_secs(60);
+
+impl Threaded {
+    pub(crate) fn new(batch: usize) -> Threaded {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let root: Arc<Path> = Arc::from(dir.path().canonicalize().unwrap());
+        let executor = Executor::new(ExecutorConfig {
+            workers: 2,
+            batch_workers: batch,
+            on_thread_start: None,
+        });
+        let watcher = Watcher::new(FakeBackend::new(), executor.clone(), WatchConfig::default());
+        let cache = Cache::new(CacheConfig {
+            root: cache_dir.path().to_path_buf(),
+            budgets: Budgets::default(),
+            ui_thread: None,
+        });
+        let engine = Engine::with_git(
+            EngineDeps {
+                executor: executor.clone(),
+                cache,
+                watcher,
+                languages: Languages::core(),
+            },
+            Arc::new(FakeGit::default()),
+        );
+        let host = host();
+        let clock = ManualClock::new();
+        host.kernel().set_clock(Arc::new(clock.clone()));
+        engine.start(host.handle.clone());
+        let events: Arc<Events> = Arc::default();
+        let log = events.clone();
+        engine.set_trace(move |event| {
+            log.0.lock().unwrap().push((Instant::now(), event));
+            log.1.notify_all();
+        });
+        Threaded {
+            engine,
+            host,
+            executor,
+            _clock: clock,
+            root,
+            events,
+            _cache_dir: cache_dir,
+            _dir: dir,
+        }
+    }
+
+    pub(crate) fn write(&self, rel: &str, bytes: &[u8]) {
+        std::fs::write(self.root.join(rel), bytes).unwrap();
+    }
+
+    pub(crate) fn target(&self, rel: &str, at: Anchor) -> ReadTarget {
+        ReadTarget {
+            project: ProjectKey::Folder {
+                root: self.root.clone(),
+            },
+            worktree: None,
+            path: rel.into(),
+            origin: TextOrigin::Worktree,
+            expect: None,
+            at,
+        }
+    }
+
+    pub(crate) fn open(&self, target: ReadTarget) -> DocHandle {
+        self.engine
+            .open(target, self.root.clone(), VIEW, Arc::new(|| {}))
+    }
+
+    /// Every event so far.
+    pub(crate) fn events(&self) -> Vec<(Instant, Trace)> {
+        self.events.0.lock().unwrap().clone()
+    }
+
+    /// Waits for an event from the `from`th on that `matches`: its index
+    /// and time.
+    pub(crate) fn wait_for(
+        &self,
+        from: usize,
+        matches: impl Fn(&Trace) -> bool,
+    ) -> (usize, Instant) {
+        let (log, changed) = &*self.events;
+        let deadline = Instant::now() + EVENT_LIMIT;
+        let mut events = log.lock().unwrap();
+        loop {
+            if let Some(i) = (from..events.len()).find(|i| matches(&events[*i].1)) {
+                return (i, events[i].0);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "no such event within {EVENT_LIMIT:?}");
+            events = changed.wait_timeout(events, left).unwrap().0;
+        }
+    }
+}
+
+impl Drop for Threaded {
+    fn drop(&mut self) {
+        // The batch work may wait for the switch.
+        self.host.kernel().set_yield(false);
+        self.executor.shutdown(Duration::from_secs(10));
     }
 }
 
