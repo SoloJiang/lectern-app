@@ -214,7 +214,7 @@ impl Key {
 | `agents.summary` | 应用 | `agents` | 来源 ID、会话 ID、压缩文件的设备号、inode、大小、修改时间、适配器版本（摘要格式版本是命名空间版本） | 补齐后的会话摘要 | 不压缩 |
 | `analyze.result` | 仓库 | Analyze（#66） | 完整分析请求的哈希（ADR 0019，构成见 `crates/cache/AGENTS.md`） | 校验后的分析结果 | 随 #66 决定 |
 | `code_intel.tags` | 仓库、文件夹 | `code_intel` | OID、语言、grammar 版本、查询版本（表结构和单元的键是命名空间版本） | 没有值：单元，行在 `ci_ext`、`ci_def`、`ci_ref` 三张自定义表里（「自定义表」，[code_intel 设计「存储表」](code_intel.md#存储表)）；配额 224 MiB（[ADR 0033](../adr/0033.md) 从原来的 256 MiB 里划出 32 MiB 给 `code_intel.deps`）；打开的大文件按窗口写的单元也在这里，键另加窗口起点（[ADR 0034](../adr/0034.md)） | 不使用 |
-| `code_intel.deps` | 仓库、文件夹 | `code_intel` | 依赖的单元：与 `code_intel.tags` 相同；包的路径表：生态、包名、版本、身份 | 依赖的单元（同一组自定义表）；包的（相对路径、OID）表作为普通条目；配额 32 MiB，依赖的单元只淘汰依赖的单元（[ADR 0033](../adr/0033.md)） | 不使用 |
+| `code_intel.deps` | 仓库、文件夹 | `code_intel` | 依赖的单元：与 `code_intel.tags` 相同；包的路径表：生态、包名、版本、身份 | 依赖的单元（同一组自定义表）；包的（相对路径、OID）表也是这个命名空间的单元，行在本 crate 的另一张自定义表里（[code_intel 设计「依赖层」](code_intel.md#依赖层)，不用普通条目：与它引用的单元在同一组表、同一个写事务里）；配额 32 MiB，依赖的单元只淘汰依赖的单元（[ADR 0033](../adr/0033.md)） | 不使用 |
 | `syntax.lines` | 仓库、文件夹 | 高亮的领域库（随 `file_reader` 的设计） | 内容 OID | 每 64 KiB 处的行号（行检查点，[ADR 0034](../adr/0034.md)），64 MiB 的文件约 4 KiB | 不压缩 |
 
 规则生成的简报不缓存（ADR 0019）。`agents` 的两个命名空间不在 git 里、没有 blob OID，键按 ADR 0026。
