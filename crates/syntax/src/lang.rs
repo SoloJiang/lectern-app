@@ -63,8 +63,9 @@ macro_rules! query {
 }
 
 /// ADR 0018's core highlighting languages: `code_intel`'s seven, with the
-/// same names and extensions (`lang_extensions_agree_with_code_intel` in
-/// `code_intel`), and ADR 0041's four.
+/// same names and extensions (`health` keys by name; a cross-check against
+/// `code_intel`'s table comes with its `health` registration), and ADR
+/// 0041's four.
 pub(crate) static CORE_LANGUAGES: &[CoreSpec] = &[
     CoreSpec {
         name: "ts",
