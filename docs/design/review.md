@@ -12,7 +12,7 @@
 |---|---|---|
 | `review`（本 crate） | 领域，插件 | 审阅对象与基准、改动链与逐行来源、归因与 Drifted、改动叙事、已看状态与标注日志、噪声文件与规则分组、规则简报、项目主页的概览、`dyn Review` 服务 |
 | `services` | kernel | `changes` 模块（改动来源接口，ADR 0019）、`review` 模块（审阅服务、快照、命令、事件、简报规则的扩展点） |
-| `git` | 领域，库 | 为本地 worktree 实现 `ChangeSource`（[git 设计「验收」](git.md#验收)第 4 步）；`line_diff`、`Worktree::head_at`、`Worktree::mtimes` |
+| `git` | 领域，库 | 为本地 worktree 实现 `ChangeSource`（[git 设计「验收」](git.md#验收)第 4 步）；`line_diff`、`Worktree::head_reflog`、`Worktree::mtimes`、`Repo::tree_changes` |
 | `platform`、`app` | 基础设施、入口 | 应用数据目录；构造本 crate 的插件 |
 
 - 做：
@@ -49,7 +49,7 @@
 |---|---|---|
 | `lectern-kernel` | `Plugin`、事件、`PluginHandle`、`BusyGuard` | 插件机制 |
 | `lectern-services` | 使用 `Projects`、`SessionSource`；提供 `Review`（含 `BriefRules` 提供者的登记）；`ChangeSource` 与数据类型 | 插件之间只经 `services`（架构规则 7） |
-| `lectern-git` | `Repo`、`Worktree`、`LocalChanges`（`ChangeSource` 的本地实现）、`line_diff`、`rows`、`inline_changes`、`head_at`、`mtimes`、`Oid::for_blob` | gix 只在 `git` 里使用 |
+| `lectern-git` | `Repo`、`Worktree`、`LocalChanges`（`ChangeSource` 的本地实现）、`line_diff`、`rows`、`inline_changes`、`head_reflog`、`tree_changes`、`mtimes`、`Oid::for_blob` | gix 只在 `git` 里使用 |
 | `lectern-cache` | `review.attribution` 命名空间 | 派生数据以 blob OID 加轮次历史的摘要为键（架构规则 5） |
 | `lectern-executor` | 后台任务 | UI 线程不做 IO |
 | `lectern-fs-watch` | 被审阅 worktree 的 `WorktreeBatch`、仓库的 `RepoBatch` | 与 `project` 共用同一份 worktree 状态 |
@@ -81,7 +81,7 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin);
 以下改动各由对应 crate 的 PR 完成，写 `Refs #15`，在「验收」里列为前置条件。
 
 - **A. `services`**：`changes` 模块和 `review` 模块，按本文「接口」。只有 trait、数据类型、服务 ID；例外是 `ChangeList::handle`（实现方放进去的不透明句柄，不序列化）和 `BriefReply`、`BriefRulesRegistration`、`OverviewInterest` 包着的回调，与 `ObjectShare`、`SemanticReply` 的做法相同。`crates/services/AGENTS.md` 的模块列表随本文加上这两个模块。
-- **B. `git`**：四个函数，不新增依赖。
+- **B. `git`**：四个函数（`ReflogEntry` 与 `parse_reflog_line` 已有），不新增依赖。
 
   ```rust
   /// 按行 diff 两段内容，算法与 hunk 缓存相同（Histogram），hunk 带两侧第一行的字节偏移。纯计算，任何线程；
@@ -89,49 +89,36 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin);
   pub fn line_diff(old: &[u8], new: &[u8], max_bytes: u64) -> Option<FileDiff>;
 
   impl Worktree {
-      /// HEAD 在 `at_ms`（Unix 毫秒）时指向的提交。读这个 worktree 的 `logs/HEAD`（git 目录里的文件，不经工作区），
-      /// 从末尾向前找最后一条时间不晚于 `at_ms` 的记录，最多读 4 MiB。阻塞。
-      pub fn head_at(&self, at_ms: i64) -> Result<HeadAt, GitError>;
+      /// 这个 worktree 的 HEAD reflog（`logs/HEAD`，git 目录里的文件，不经工作区）的末尾部分，从新到旧：
+      /// 从文件末尾向前逐行解析（`parse_reflog_line`），读到第一条时间早于 `stop`（Unix 秒）的记录为止（含这一条），
+      /// 至多 `max_entries` 条、4 MiB。阻塞。
+      pub fn head_reflog(&self, stop: i64, max_entries: usize) -> Result<HeadReflog, GitError>;
       /// 每个路径在工作区里的修改时间（纳秒），经 `SafeRoot::stat`、不跟随符号链接；不存在或不是普通文件、符号链接时为 None。阻塞。
       pub fn mtimes(&self, paths: &[RepoPath]) -> Result<Vec<Option<i64>>, GitError>;
   }
 
-  pub enum HeadAt {
-      /// `commit` 是那条记录的新值，`since` 是它的时间（Unix 秒）。
-      Found { commit: Oid, since: i64 },
-      /// 最早的记录也晚于 `at_ms`：取最早一条的旧值（全 0 为 None，那时还没有提交），`until` 是那条记录的时间。
-      BeforeLog { commit: Option<Oid>, until: i64 },
-      /// 没有 reflog 文件（`core.logAllRefUpdates = false`）或文件为空。
-      NoLog,
+  pub struct HeadReflog {
+      /// 没有 reflog 文件（`core.logAllRefUpdates = false`）时为 false，`entries` 为空。
+      pub exists: bool,
+      /// 从新到旧。
+      pub entries: Vec<ReflogEntry>,
+      /// 读到了文件开头（没有因为 `max_entries` 或 4 MiB 停下，也没有更早的记录）。
+      pub complete: bool,
   }
-  ```
 
-  测试 `line_diff_*`（与 `diff_trees` 对同一对内容给出的 hunk 和偏移相同）、`head_at_*`（归档夹具里的 reflog：时间正好相等、在全部记录之前、全 0 的旧值、没有 reflog、超过 4 MiB 的 reflog 只读末尾）、`mtimes_*`（中间一级是符号链接时为 None）。
-  第四个是路径的提交时刻（「改动步与声明」），只读对象库：
-
-  ```rust
   impl Repo {
-      /// 从 `tip` 沿第一父提交向前，只看提交时间不早于 `since`（Unix 秒）的提交，至多 `limit` 个：每个路径取最近一次
-      /// 改动它的提交（这个提交的树与它的第一父提交的树在这个路径上不同；合并提交按第一父提交比较）的提交时间。
-      /// 按输入顺序返回。阻塞，检查 `cancel`。
-      pub fn path_commit_times(&self, tip: Oid, paths: &[RepoPath], since: i64, limit: usize, cancel: &AtomicBool)
-          -> Result<Vec<PathCommitTime>, GitError>;
+      /// 两个提交的树之间内容或模式不同的路径，按路径排序。子树 OID 相同时整棵跳过，不读 blob、不做重命名检测；
+      /// `old` 为 None（reflog 里全 0 的旧值）时是 `new` 树里的全部路径。超过 `max_paths` 时返回 `All`。阻塞，检查 `cancel`。
+      pub fn tree_changes(&self, old: Option<Oid>, new: Oid, max_paths: usize, cancel: &AtomicBool) -> Result<TreeChanges, GitError>;
   }
 
-  pub enum PathCommitTime {
-      /// 最近一次改动它的提交的提交时间。
-      Changed(i64),
-      /// 走过的范围里没有改动它（范围到了 `since`）。
-      NotSince,
-      /// 到了 `limit` 还没有找到：调用方按走到的最早那个提交的提交时间截止（保守，只会少算会话的改动）。
-      Truncated { oldest: i64 },
-  }
+  pub enum TreeChanges { Paths(Arc<[RepoPath]>), All }
   ```
 
-  `review` 传 `since` = 14 天前、`limit` = 2000；只比较需要的路径所在的子树，不读 blob。测试 `path_commit_times_*`：只改别的路径的提交不影响结果；合并提交按第一父提交；`limit` 截断时为 `Truncated`；超过 `since` 时为 `NotSince`。[git 设计「范围」](git.md#范围)的「本 issue 之外」有一条指向这里。
+  测试 `line_diff_*`（与 `diff_trees` 对同一对内容给出的 hunk 和偏移相同）、`head_reflog_*`（归档夹具里的 reflog：`stop` 正好等于某条记录的时间、全部记录都晚于 `stop`、全 0 的旧值、没有 reflog、`max_entries` 与 4 MiB 的上限、末尾不完整的一行）、`tree_changes_*`（只改一个深层文件时其余子树不读；模式变化算改动；`max_paths` 时为 `All`；与 `diff_trees` 给出的路径集合相同，不含重命名配对）、`mtimes_*`（中间一级是符号链接时为 None）。[git 设计「范围」](git.md#范围)的「本 issue 之外」有一条指向这里。
 - **C. `git` 第 4 步**：为本地 worktree 实现 `ChangeSource`，按本文「改动来源」的对照表转换 `ChangeSet`，`Cargo.toml` 加 `lectern-services`。这一步的接口与验收以本文为准，[git 设计「验收」](git.md#验收)第 4 步指向这里。
 - **D. `platform` 与 `app`**：`platform` 提供应用数据目录（macOS 为 `~/Library/Application Support/` 下的应用目录，Linux 为 `$XDG_DATA_HOME` 或 `~/.local/share` 下的 `lectern/`，供 CI 测试），不创建目录、不做其他 IO；`app` 在启动屏障放开后用它构造 `ReviewDeps::data_dir`，放进 `PluginSet`。`usage` 的数据库以后用同一个目录（ADR 0044）。
-- **E. `cache`**：[cache 设计「命名空间」](cache.md#命名空间)加一行 `review.attribution`（本 PR 已加）。不改代码。
+- **E. `cache`**：[cache 设计「命名空间」](cache.md#命名空间)加 `review.attribution`、`review.tree_changes`、`review.claims` 三行（本 PR 已加）。不改代码。
 - **F. `code_intel`（后续，不阻塞本 issue）**：实现 `BriefRules`，给出「调用方未同步修改」和「改到的公开接口」两条规则（见「简报规则」）。登记放在 `code_intel` crate 里另一个小插件（如 "code-intel-brief"）：它 requires `dyn Review` 和 `dyn CodeIntel`，在 `started` 里调 `Review::register_brief_rules`，把返回的登记交给 `PluginHandle::own`。不放进 "code-intel" 插件本身，否则 `review` 停用或失败时导航也随之停用。规则的判定、查询上限和预算由 code_intel 设计的修订规定。
 - **G. `agents` 与 `services` 的 `session` 模块**：`SessionSource` 加一个不进内存 LRU 的读取，供概览派生声明（「概览」第 2 步）。接口按 agents 设计的修订，本文要求的行为：
 
@@ -151,7 +138,7 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin);
 |---|---|
 | 审阅对象（`ReviewTarget`） | 一次审阅看的范围：一个会话、一个 worktree 里不属于任何会话的改动，或一个 worktree 相对某个基准的全部改动。已看标记按审阅对象分开记录。 |
 | 基准 | 改动集的旧一侧，总是一棵树。会话的基准是会话开始时 HEAD 指向的提交；会话外的改动用当前 HEAD。 |
-| 路径的提交时刻 | 基准的提交历史里最后一次改动这个路径的提交的提交时间。这之后的会话改动才参与这个路径的归因（「改动步与声明」）。 |
+| 路径的截止时刻 | HEAD reflog 里（到基准那条记录为止）最近一次让这个路径在旧、新两个提交之间不同的记录的时间。这之后的会话改动才参与这个路径的归因（「改动步与声明」）。 |
 | 改动来源（`ChangeSource`） | 给出改动集和两侧内容的对象：本地 worktree（`git`）或 MR（`forge`，P3）。 |
 | 改动步 | 一次改文件的工具调用（`ToolKind::Edit`）对一个路径的改动，来自 `load` 给出的 `FileEdit`。 |
 | 改动链 | 一个路径上，基准内容依次应用各会话的改动步得到的一串版本。 |
@@ -848,10 +835,10 @@ pub mod analyze {
 
 - **会话**：`SessionSummary::place` 为 `Located` 且有 worktree 的会话（未归位、项目没有打开时 `ReviewError::NotInOpenProject`）。审阅对象包括它的子 agent 会话中归位到同一 worktree 的（`SessionSummary::parent` 指向它，递归）；子 agent 在别的 worktree 里时是单独的审阅对象，叙事里只有一行 `Subagent`（见「未决问题」1）。基准按顺序取：
   1. 标注日志里这个会话的 `base` 记录（`BaseHow::Recorded`）。
-  2. `Worktree::head_at(session.started_at)`：`Found` 为 `Reflog`，`BeforeLog` 为 `BeforeLog`。
-  3. `NoLog`：当前 HEAD（`CurrentHead`）。
+  2. `Worktree::head_reflog`（读到早于会话开始时刻的那条为止）里最后一条时间不晚于会话开始的记录：它的新值，`BaseHow::Reflog`；这条记录是「基准记录」。读到的记录都晚于会话开始（reflog 从那之后才有）时取最早一条的旧值（全 0 为空树），`BaseHow::BeforeLog`，没有基准记录。
+  3. 没有 reflog：当前 HEAD（`CurrentHead`）。
 
-  unborn 时基准是空树。会话第一次被标记已看时，把当时用的基准写进标注日志（`base` 记录），之后 reflog 过期、HEAD 移动都不改变它，已看标记的键保持有效。
+  unborn 时基准是空树。会话第一次被标记已看时，把当时用的基准和基准记录的时间写进标注日志（`base` 记录），之后 reflog 过期、HEAD 移动都不改变它，已看标记的键保持有效。会话外的改动的基准记录是 reflog 的最新一条。
 
   **文件集合**：会话审阅的 `files` 是改动集（基准到工作区）里这个审阅对象（会话和它在同一 worktree 的子 agent）声明的文件，即有它的改动步，或有它的命令声明（「改动步与声明」）。改动集里其余的文件不进 `files`，只计入 `ReviewSnapshot::unclaimed`：它们属于别的会话的审阅或会话外的改动。声明的文件里来自其他会话的行照常显示在 hunk 的 `others` 里。会话日志认不出格式时没有改动步，声明改为按时间：工作区修改时间落在 `[started_at - 1 s, last_activity + 2 s]` 里、且没有被别的会话声明的文件。进度、`LooksGood`、简报规则、项目主页的进度（「概览」第 4 步）和模型的输入清单（`analyze::manifest`，ADR 0019 约束 2「快照只含属于审阅对象的改动」）都只用这个集合。
 - **会话外的改动**：基准是当前 HEAD（`BaseSpec::Head`）。文件是改动集里没有任何声明的那些。
@@ -859,12 +846,19 @@ pub mod analyze {
 
 ### 改动步与声明
 
-一个 worktree 的声明来自这个 worktree 里、`last_activity` 在最近 14 天之内的会话（含子 agent，最多 100 个，按 `last_activity` 从新到旧），从各自的轮次索引得到，不需要 `load`。每个路径另有一个截止时刻，早于它的改动步和修改时间不参与这个路径：
+一个 worktree 的声明来自这个 worktree 里、`last_activity` 在最近 14 天之内的会话（含子 agent，最多 100 个，按 `last_activity` 从新到旧），从各自的轮次索引得到，不需要 `load`。每个会话派生出的声明（改动步的路径、时刻、调用状态，命令调用的时间窗口）存进 `review.claims`（「归因的缓存」），会话没有新活动时不再读它的轮次索引。每个路径另有一个截止时刻，早于它的改动步和修改时间不参与这个路径：
 
-- **路径的提交时刻**（关键约束）：从审阅对象的基准提交沿第一父提交向前，最近一次改动这个路径的提交的提交时间（committer time），由 `Repo::path_commit_times`（前置条件 B）给出；最近 14 天里没有改动过的路径没有截止时刻（只受 14 天的窗口限制）。截止时刻按路径算，不取 HEAD 最后一次移动的时刻：`git checkout -b`、提交一个无关的文件都会让 HEAD 的 reflog 前进，却不改变别的路径的基准内容。按 HEAD 移动的时刻截止时，这之前还没提交的会话改动会从链里消失，后来的会话的 `Replace` 因此应用不上，正常的改动被标成 Drifted，或整份变成会话外的改动。
-- 一个会话的改动已经提交进基准（截止时刻晚于它）时不再参与，不会把同样的改动在基准上再应用一次。被 rebase、amend、cherry-pick 重写的提交，提交时间是重写的时刻，所以改动同样不再参与。截止之后仍有少数链外改动（时钟偏差、提交了一部分）时，`Write` / `Add` 让链重新对齐（「改动链」）。
+- **路径的截止时刻**（关键约束）：取这个 worktree 的 HEAD reflog，从基准记录（含）往前、时间在 14 天的窗口之内、旧值与新值不同的记录，最多 256 条。截止时刻是其中最近一条让这个路径在旧、新两个提交的树之间不同的记录（`Repo::tree_changes`，前置条件 B）的时间。
+  - 这几类 HEAD 移动会改变这个路径的基准内容，截止时刻因此后移，之前的会话改动不再参与：提交了这个路径、切换到这个路径内容不同的分支（`git checkout feature`）、`reset`、`rebase`、`pull`。
+  - `git checkout -b`（旧值等于新值）、提交别的文件（树在这个路径上相同）不移动截止时刻，所以还没提交的会话改动留在链里。
+  - 窗口里没有任何记录改变这个路径时没有截止时刻，只受 14 天的窗口限制。窗口里的记录超过 256 条时，其余路径按第 256 条的时间截止（保守：只会少算会话的改动，多出的行显示为 Drifted 或会话外的改动）。
+  - 没有 reflog（`BaseHow::CurrentHead`）时，全部路径按基准提交的提交时间截止（已知限制：这时提交无关的文件也会让之前未提交的会话改动离开链）。
+  - 基准记录之后的 reflog 记录不参与：会话审阅的基准是会话开始时的提交，会话里 agent 自己的提交在基准到工作区的改动里，它之前的改动步要留在链里。
+- 理由：按「HEAD 最后一次移动」一刀截止时，`checkout -b` 或一次无关的提交就让之前未提交的会话改动从链里消失，后来的会话的 `Replace` 应用不上，正常的改动被标成 Drifted 或整份变成会话外的改动；只看基准提交历史里路径最后一次被提交的时间时，切换到另一个分支后旧分支上的会话改动又会被重放到新分支的基准上。reflog 记录了这个 worktree 的基准内容在什么时刻、对哪些路径发生了变化，两种情况都按实际的变化处理。
+- 已经提交进基准的改动（截止时刻晚于它）不再参与，不会在基准上再应用一次；rebase、amend、cherry-pick 也是一条改变路径的 reflog 记录。截止之后仍有少数链外改动（时钟偏差、只提交了一部分）时，`Write` / `Add` 让链重新对齐（「改动链」）。
+- 代价的上限：`tree_changes` 跳过 OID 相同的子树，结果按（旧提交，新提交）缓存在 `review.tree_changes`（「归因的缓存」），同一对提交只算一次，跨重启有效；每个 worktree 在内存里只保留改动集里那些路径的截止时刻（≤ 4000 个）。打开审阅时在 `Interactive` 上最多计算 5 ms 的未命中，其余记录在 `Background` 上计算，之前先按「改变了全部路径」处理（保守），算完后重算受影响的文件并换出快照。
 - 改动步：`ToolKind::Edit { paths }` 的每个路径。路径是绝对路径：先去掉 worktree 根的前缀；不匹配时用会话日志里的 cwd 与归位用的规范 cwd 之间的前缀替换（`/tmp` 与 `/private/tmp` 这类）再试；都不在 worktree 里的忽略。时间取 `ToolCall::finished` 的时刻；没有结果的调用（还在运行，或日志里没有结果）不参与，下一次 `SessionsChanged` 再看。状态不是 `Completed` 的调用不应用，记为失败的改动（简报的 `EditFailed`）。
-- 命令声明（文件级）：改动集里有、没有任何改动步的文件，工作区修改时间（`Worktree::mtimes`）落在某个会话的 `ToolKind::Execute` 调用的 `[started_at - 1 s, finished + 2 s]` 里（日志时间与命令真正运行的时间有偏差，见 agents 设计）。只落在一个会话的窗口里时归给那次调用；落在几个会话的窗口里时都不归，算会话外的改动。早于路径的提交时刻的修改时间不算。
+- 命令声明（文件级）：改动集里有、没有任何改动步的文件，工作区修改时间（`Worktree::mtimes`）落在某个会话的 `ToolKind::Execute` 调用的 `[started_at - 1 s, finished + 2 s]` 里（日志时间与命令真正运行的时间有偏差，见 agents 设计）。只落在一个会话的窗口里时归给那次调用；落在几个会话的窗口里时都不归，算会话外的改动。早于路径的截止时刻的修改时间不算。
 - 改动步和命令声明的顺序：按时刻，同一时刻按（会话在列表里的顺序，`Positioned` 的位置）。
 - 已知限制：14 天之前开始、之后再没有活动、改动一直没有提交的会话，它的文件算会话外的改动。
 
@@ -894,6 +888,9 @@ pub mod analyze {
 | 数据 | 键 | 存放 |
 |---|---|---|
 | 一个文件的链的结果：每一步的版本 OID、对齐结果与失败的调用、叙事步的 hunk、存活；W 每行来源的游程编码；基准每行去向的游程编码 | 命名空间版本（算法版本）、哈希算法、基准一侧的 OID（没有时为空）、工作区一侧的 OID（`Blob` 或 `NotRetained`；其余身份不缓存）、轮次历史的摘要 | `cache` 的仓库分库，命名空间 `review.attribution`，Zstd；一个文件通常几 KB |
+| 两个提交之间改变的路径（`tree_changes` 的结果，截止时刻用） | 哈希算法、旧提交的 OID（全 0 时为空）、新提交的 OID、`max_paths`（20 000） | `cache` 的仓库分库，命名空间 `review.tree_changes`，Zstd；排好序的路径列表或 `All`。只由两个提交 OID 决定（架构规则 5） |
+| 一个会话派生的声明：改动步的路径、时刻、调用 ID 与状态，命令调用的时间窗口 | 来源 ID、会话 ID（值里带派生时的 `last_activity` 和轮次索引的适配器版本，与 ADR 0026 的做法相同：`last_activity` 与当前 `SessionSummary` 不同、或 `tail_pending` 时不用） | `cache` 的应用级分库，命名空间 `review.claims`，不压缩；一个会话通常几 KB |
+| worktree 的截止时刻 | 路径（只为改动集里的路径保留） | 内存，概览的关注者或打开的审阅持有时存在，随 reflog 的新记录（fs_watch 的 `RepoBatch::reflog`、`meta.head`）增量更新，不每轮重算 |
 | 回放出的中间版本 | 版本的 OID | 内存 LRU，8 MiB，只在有打开的审阅时存在 |
 | 规则简报 | 不缓存 | 每次重算（ADR 0019） |
 | 已看状态 | 不缓存 | 由标注日志和当前改动集算出 |
@@ -950,7 +947,7 @@ pub(crate) enum TargetKey {
 {"lectern":"review-log","v":1,"repo":"/abs/common/dir"}
 {"t":"seen","at":1760000000000,"target":{"session":{"source":"session-claude-code","id":"…"}},"key":{…}}
 {"t":"unseen","at":…,"target":…,"file":{"old":null,"new":"src/a.rs"}}
-{"t":"base","at":…,"session":{"source":"…","id":"…"},"commit":"<40 或 64 位十六进制>"}
+{"t":"base","at":…,"session":{"source":"…","id":"…"},"commit":"<40 或 64 位十六进制>","entry_at":<基准记录的时间，Unix 秒；没有时为 null>}
 ```
 
 - 路径是 UTF-8 时写成字符串，否则写成字节数组。OID 写成十六进制。`at` 是 Unix 毫秒。
@@ -1019,17 +1016,20 @@ pub(crate) enum TargetKey {
 ## 数据流与线程
 
 ```
-open(target) ─▶ [Interactive] 定位会话与 worktree ─▶ 基准（日志 / head_at）─▶ fetch 改动集 ─▶ turns
-                                                      │
-              快照 v1：文件、轮次骨架、规则分组（归因 Pending）◀┘
-                    ─▶ 叙事顺序第一个文件的归因（缓存或计算）─▶ 快照 v2
-                    ─▶ [Background] 其余文件的归因，每完成 8 个文件或 50 ms 换一次快照 ─▶ 简报
+open(target) ─▶ [Interactive] 定位会话与 worktree ─▶ 基准（日志 / head_reflog）─▶ fetch 改动集
+               ─▶ 审阅对象自己的会话的 turns ─▶ 截止时刻（tree_changes 缓存，未命中最多算 5 ms）
+               ─▶ 其他会话的声明（只读 review.claims，一次 get_many）
+               ─▶ 快照 v1：文件、轮次骨架、规则分组、叙事顺序第一个文件的归因
+fs_watch / 后台 ─▶ [Background] review.claims 没有命中的会话：turns_unretained ─▶ 派生声明并写回缓存
+               ─▶ 其余 tree_changes ─▶ 声明或截止时刻有变化的文件重算（含第一个文件）─▶ 新快照
+               ─▶ 其余文件的归因，每完成 8 个文件或 50 ms 换一次快照 ─▶ 简报
 fs_watch WorktreeBatch ─▶ refresh(Paths / Full) ─▶ 只重算变了的文件 ─▶ 新快照
 SessionsChanged ─▶ turns ─▶ 改动步变了的路径重算 ─▶ 新快照
 command(MarkSeen) ─▶ [调用线程] 换出 seen 数组 ─▶ 事件 ─▶ [Background] 追加日志
 Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ Prepared
 ```
 
+- 第一份快照只等审阅对象自己的数据：它自己的会话（叙事要用）、改动集、截止时刻的缓存和已缓存的声明。其他会话没有缓存的声明时不在 `Interactive` 上读它们的轮次索引，而是先按已知的声明给出归因，后台读到之后改动了哪个文件就重算哪个文件，换出新快照（可能让第一个文件里原来标为 Drifted 的行改为 `others`）。所以打开的耗时与 worktree 里的会话数、reflog 的长度无关。
 - 首帧之前什么都不做：插件 `AfterFirstFrame` 激活，`activate` 只建空表、取 `Projects` 和 `SessionSource` 的引用；没有打开的审阅、也没有概览的关注者时没有任何任务。
 - 每个打开的审阅一个状态对象，放在 `Mutex` 里，只在内存操作时持锁，IO 和计算都在锁外。快照每次整体替换为新的 `Arc`。
 - 任务都经 `PluginHandle::own_with` 提交，持有 `BusyGuard`，结果发布后才释放（[kernel 设计「静止」](kernel.md#静止)）。用户等着的工作（打开、刷新、`Prepare`）在 `Interactive`，其余文件的归因、概览、写日志在 `Background`。没有周期性任务。
@@ -1042,7 +1042,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 - 有关注者时，对项目的当前 worktree：
   1. 计数比较：`Worktree::changes(Base::Head)`，`Limits` 取 `retained_bytes = 0`、`total_patch_bytes = 0`（[ADR 0035](../adr/0035.md)，与 `crates/review/AGENTS.md`「边界」相同）。改动路径不超过 4000 个时保留这份改动集，之后按 fs_watch 的批次 `refresh`；超过时只保留计数（`OutsideCount::Capped`），之后的事件触发全量比较。这份改动集直接用 `git`，不转换成 `ChangeList`（只有路径、两侧 OID 与 stat）。
-  2. 声明：声明窗口内的会话（「改动步与声明」，最多 100 个）的轮次索引，用 `SessionSource::turns_unretained`（前置条件 G）在 `Background` 上逐个读取，不用 `turns`：概览在 ADR 0035 的采样状态里运行，`turns` 会把这些索引留在 agents 的 8 MB 轮次索引 LRU 里，而那个 LRU 不在采样状态的份额里。每读一个会话，只留下派生的声明（改动步的路径与时刻、命令调用的时间窗口、调用状态），索引随即放下；声明计入本 crate 的 < 1 MB。路径的提交时刻对计数改动集的路径调一次 `Repo::path_commit_times`；命令声明对改动路径调一次 `Worktree::mtimes`（≤ 4000 个）。
+  2. 声明：声明窗口内的会话（「改动步与声明」，最多 100 个）先查 `review.claims`；没有命中（新会话、有新活动）的才读轮次索引，用 `SessionSource::turns_unretained`（前置条件 G）在 `Background` 上逐个读取，不用 `turns`：概览在 ADR 0035 的采样状态里运行，`turns` 会把这些索引留在 agents 的 8 MB 轮次索引 LRU 里，而那个 LRU 不在采样状态的份额里。每读一个会话，只留下派生的声明（改动步的路径与时刻、命令调用的时间窗口、调用状态）并写进 `review.claims`，索引随即放下；声明计入本 crate 的 < 1 MB。截止时刻用这个 worktree 在内存里的截止时刻表（「归因的缓存」）：第一轮从 `review.tree_changes` 建出，之后只为 reflog 的新记录和计数改动集里新出现的路径补算，不每轮重算；命令声明对改动路径调一次 `Worktree::mtimes`（≤ 4000 个）。
   3. 会话外的改动数 = 计数改动集里没有声明的文件。
   4. 每个会话的进度：文件集合与审阅快照的 `files` 同一定义（「审阅对象与基准」的文件集合）。基准等于当前 HEAD 的会话，文件是计数改动集与它的声明的交集，已看状态按标注日志算出；基准不同的会话，每轮最多为 8 个（按 `last_activity`）另做一次同样 `Limits` 的比较，算完即丢弃改动集，其余为 None。
   5. Drifted 信号只读 `review.attribution` 的缓存（键能从声明和计数改动集的 OID 得到），未命中为 None；不为概览建链。
@@ -1055,12 +1055,28 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 预算 | 本 crate 的份额 |
 |---|---|
 | 冷启动 20 ms | 首帧之前不做任何事；插件激活（`plugin/review/activate`）< 1 ms，只建空表 |
-| 打开一个会话的 Diff < 50 ms（`app/open_diff`，`review_view`） | 从 `open` 到快照 `Ready`，含叙事顺序第一个文件的归因：归因缓存未命中 < 35 ms，命中 < 20 ms（50 个约 300 行的改动文件，20 轮、120 次改动调用，`turns` 已在 agents 的内存里，git 的 hunk 缓存已热）。其中 `ChangeSource::fetch`（git 份额 < 15 ms）、`turns` 命中（agents 份额）都计入。第一个文件的展示行 < 3 ms。其余文件的归因在后台，50 个文件合计 < 300 ms（只记录） |
+| 打开一个会话的 Diff < 50 ms（`app/open_diff`，`review_view`） | 从 `open` 到第一份快照（`Ready`，含叙事顺序第一个文件的归因）：缓存全空时 < 35 ms，缓存已热时 < 20 ms。分项见下表；第一个文件的展示行另 < 3 ms。后台的其余工作（其他会话的声明、其余 reflog 记录的 `tree_changes`、其余文件的归因）只记录 |
+| 每天的仓库规模 | 夹具：约 2000 个提交的历史，14 天里 300 条 HEAD reflog 记录（含 10 次分支切换），worktree 里 50 个会话（5 个改到改动集里的文件），审阅对象的会话 20 轮、120 次改动调用，50 个约 300 行的改动文件 |
 | 刷新 | agent 追加一轮、改一个文件后，从 `SessionsChanged` 和 fs_watch 的批次到新快照 < 20 ms |
 | 勾选 | `command(MarkSeen)` 到新快照替换 < 0.2 ms（5000 个文件） |
 | 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、派生的声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB，从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`）。概览不经 `turns` 读轮次索引（前置条件 G），agents 的轮次索引 LRU 在采样状态里不因概览而增长 |
 | 审阅打开时的内存（不在采样状态，按 ADR 0035「关键约束」各自设上限） | `ChangeList` 和它持有的 `ChangeSet`（git 的 32 MiB 保留上限）；中间版本 LRU 8 MiB；`FileRows` 只为 `Prepare` 的范围保留，合计 ≤ 8 MiB，超出时丢弃离可见范围最远的；正文 ≤ 2 MiB |
 | 磁盘 | 标注日志每个仓库 ≤ 4 MiB（之后压缩）；`review.attribution` 在仓库分库的 512 MiB 预算里，按 LRU 淘汰 |
+
+打开会话的分项（上面的夹具，M 系列；缓存全空 / 缓存已热）：
+
+| 步骤 | 缓存全空 | 缓存已热 |
+|---|---|---|
+| 定位、打开句柄、读 reflog 尾部（`head_reflog`，14 天、≤ 300 条） | < 2 ms | < 2 ms |
+| `ChangeSource::fetch`（git 的份额） | < 15 ms | < 15 ms |
+| 审阅对象自己的会话（含子 agent）的 `turns`：agents 的 `cache` 命中加解析追加部分 / 内存命中 | < 8 ms | < 1 ms |
+| 截止时刻：`review.tree_changes` 的 `get_many`，加上最多 5 ms 的未命中计算 | < 6 ms | < 1 ms |
+| 其他会话的声明：`review.claims` 的一次 `get_many`（≤ 100 个键），不读轮次索引 | < 1 ms | < 1 ms |
+| 第一个文件的归因：链的计算（几次 `load` 和 `line_diff`）/ `review.attribution` 命中 | < 3 ms | < 0.5 ms |
+| 规则简报、组装并发布快照 | < 0.5 ms | < 0.5 ms |
+| 合计 | < 35 ms | < 20 ms |
+
+缓存全空时第一份快照可能先按保守的截止时刻和不完整的声明给出归因，后台在 `review/open_session_settled` 之内换成准确的结果。
 
 一次链的计算：每步一次 `line_diff`（300 行的文件 < 0.1 ms）加一次 `load`（< 1 ms），一个文件 5 步约 3 ms，其中 `load` 占大头。所以缓存键只用轮次索引，命中时不 `load`。
 
@@ -1068,8 +1084,11 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 | ID | 统计量与预算 |
 |---|---|
-| `review/open_session_50` | 中位数 < 35 ms（归因缓存为空的新缓存目录） |
-| `review/open_session_50_warm` | 中位数 < 20 ms（归因缓存命中） |
+| `review/open_session_50` | 中位数 < 35 ms（「每天的仓库规模」的夹具：2000 个提交、300 条 reflog 记录、50 个会话；新的缓存目录，`review.*` 的命名空间全空；agents 的轮次索引在 `cache` 里、不在内存里） |
+| `review/open_session_50_warm` | 中位数 < 20 ms（同一夹具，`review.attribution`、`review.tree_changes`、`review.claims` 都已命中，审阅对象的轮次索引在内存里） |
+| `review/open_session_settled` | 只记录（同一夹具、缓存全空：从 `open` 到后台全部完成、最后一份快照发布） |
+| `review/cutoffs_cold` | 只记录（同一夹具：300 条 reflog 记录的 `tree_changes` 全部未命中时建出截止时刻表） |
+| `review/overview_round_warm` | 中位数 < 20 ms（同一夹具，第二轮概览：声明和截止时刻都来自缓存，不调用 `turns_unretained` 和 `tree_changes`；后台） |
 | `review/attribute_session_50` | 只记录（其余 49 个文件的归因合计） |
 | `review/rows_first` | 中位数 < 3 ms（第一个文件的 `Prepare` 到 `Prepared`，hunk 缓存已热） |
 | `review/refresh_one` | 中位数 < 20 ms |
@@ -1116,11 +1135,14 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `chain_*`：五种 `EditOp` 的应用；`Replace` 找不到、出现多次时应用不上，后续步照常；`Patch` 在偏移处匹配，上下文不同时应用不上；`Write` 之后重新对齐；`move_to` 跟到新路径；CRLF 归一化重试；超过上限时为 `FileOnly`。结果（每一步的 hunk、对齐、存活）用 insta 快照。
   - `provenance_*`、`attribute_*`：最终 hunk 归到正确的轮次；两个会话先后改同一文件，`others` 指向另一个会话；会话结束后手工改动的行为 Drifted；手工删除基准里的行计入 `drifted`；只有命令声明的文件为文件级；命令窗口落在两个会话里时不归。快照覆盖 `HunkAttribution`。
   - `history_digest_*`：两个会话改成相同内容时摘要不同；同一会话在两个 worktree 里摘要相同；调用状态、适配器版本变化时摘要不同；缓存命中时不调用 `load`（`FakeSessions` 计数）。
-  - `base_*`：`head_at` 的三种结果；`base` 记录优先；第一次 `MarkSeen` 写入 `base` 记录；HEAD 之后移动，会话的基准不变。
-  - `claims_*`：路径的提交时刻截止。
+  - `base_*`：reflog 里有不晚于会话开始的记录、全部记录都晚于会话开始、没有 reflog 三种情况；`base` 记录优先；第一次 `MarkSeen` 写入 `base` 记录（含基准记录的时间）；HEAD 之后移动，会话的基准不变。
+  - `claims_*`：路径的截止时刻。
     - `claims_survive_unrelated_commit`：会话 B 改 f（不提交），用户提交一个无关的文件 g，会话 A 再改 f。B 的改动步仍在 f 的链里，A 的 `Replace` 都能应用，B 的行在 A 的审阅里是 `others`，没有 Drifted。
     - `claims_survive_checkout_b`：几个会话改了文件都没提交，之后 `git checkout -b` 新分支。这些文件仍归各自的会话，会话外的改动数不变，概览里这些会话仍在。
-    - 会话的改动已经提交进基准后不再参与（同样的 `Replace` 不在基准上再应用一次）；amend 之后同样；`Truncated` 时按最早的提交时间截止；14 天之前的会话不参与。
+    - `claims_after_branch_switch`：会话 B 在 `main` 上改 f 并提交，用户在同一个 worktree 里 `git checkout feature`（f 在 `feature` 上三周前改过），再手工改 f。B 的改动步不进 f 的链，f 不在 B 的审阅和进度里，是会话外的改动。
+    - 会话的改动已经提交进基准后不再参与（同样的 `Replace` 不在基准上再应用一次）；amend、rebase 之后同样；基准记录之后 agent 自己的提交不移动截止时刻，它之前的改动步仍在链里；窗口里超过 256 条记录时按第 256 条截止；没有 reflog 时按基准提交的提交时间截止；14 天之前的会话不参与。
+    - 缓存：同一对提交的 `tree_changes` 只算一次（`review.tree_changes` 命中时不调用它）；`review.claims` 在会话没有新活动时命中、`last_activity` 变了不用；`Interactive` 上的未命中计算超过 5 ms 时其余记录在后台算完，快照随后更新，结果与一次算完相同。
+    - 打开的顺序：其他会话的声明没有缓存时，第一份快照不等它们（`FakeSessions` 记下打开期间对它们的 `turns` / `turns_unretained` 调用数为 0），后台读到一个改了第一个文件的会话后，第一个文件的归因被重算、原来的 Drifted 行变为 `others`。
   - `files_*`：会话审阅的文件集合。共用的主 worktree 里两个会话和一个手工改动的文件：每个会话的 `files` 只含它声明的文件，`unclaimed` 等于其余的数量；`LooksGood` 只标记这些文件；`Sensitive`、`Deleted` 规则不对没有声明的文件触发；概览里这个会话的 `progress.total` 等于它的审阅快照的 `files` 数；认不出格式的会话按修改时间声明。
   - `narrative_*`：同一轮多次调用合成一步；子 agent 的轮次跟在派出它的那一轮之后，`tool_call` 为 None 时按时间插入；`after_last_seen`；认不出格式时 `turns` 为 None。insta 快照。
   - `rows_*`：最终改动与叙事步的展示行，偏移与 git 的规则一致；中间版本回放后 OID 与缓存的版本 OID 相同；LRU 不超过 8 MiB。
@@ -1155,7 +1177,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 前置条件（其他 crate 的 PR，写 `Refs #15`）：
 
 - A. `services`：`changes`、`review` 模块；`rg -n 'pub trait ChangeSource|pub trait Review\b|pub trait BriefRules' crates/services/src` 各有一处；JSON 往返和服务 ID 的测试通过；`crates/services/AGENTS.md` 列出两个模块。
-- B. `git`：`line_diff`、`Worktree::head_at`、`Worktree::mtimes`、`Repo::path_commit_times`；`line_diff_*`、`head_at_*`、`mtimes_*`、`path_commit_times_*` 测试通过。
+- B. `git`：`line_diff`、`Worktree::head_reflog`、`Worktree::mtimes`、`Repo::tree_changes`；`line_diff_*`、`head_reflog_*`、`mtimes_*`、`tree_changes_*` 测试通过。
 - C. `git` 第 4 步：`LocalChanges` 实现 `ChangeSource`；`change_source_*` 测试通过（见「改动来源」的对照表之后一段）。
 - D. `platform` 与 `app`：应用数据目录；`app` 构造 `ReviewDeps` 并把插件放进 `PluginSet`（第 4 步之前）。
 - E. `cache`：命名空间表的 `review.attribution` 一行（本 PR 已加）。
@@ -1173,11 +1195,11 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
    - `review/chain_3000_lines` 有结果。
 3. **审阅引擎与快照**（前置 A、B、C）：审阅对象与基准、声明、改动叙事、快照、命令、`Prepare` 与展示行、中间版本 LRU、标注日志接入；用 `testing::Driven` 驱动，不经插件。
    - `base_*`、`claims_*`、`files_*`、`narrative_*`、`rows_*` 测试通过，其中有 `claims_survive_unrelated_commit`、`claims_survive_checkout_b`。
-   - `review/open_session_50`、`review/open_session_50_warm`、`review/rows_first`、`review/mark_seen_5000` 在预算内，`review/attribute_session_50` 有结果。
+   - `review/open_session_50`、`review/open_session_50_warm`、`review/rows_first`、`review/mark_seen_5000` 在预算内（夹具有 2000 个提交、300 条 reflog 记录、50 个会话），`review/attribute_session_50`、`review/open_session_settled`、`review/cutoffs_cold` 有结果；[cache 设计「命名空间」](cache.md#命名空间)的 `review.attribution`、`review.tree_changes`、`review.claims` 三行与实现一致。
    - `rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 没有结果：本 crate 只在标注日志里直接访问文件系统，工作区经 `git` 读取。
 4. **插件、监听与刷新**（前置 D）：`plugin = true`、`ReviewPlugin`、`dyn Review`、fs_watch 与 `SessionsChanged` 的刷新、关闭后释放。
    - `plugin_*` 测试通过；`python3 scripts/check_architecture.py` 通过：本 crate 不依赖其他插件 crate、不依赖 GPUI，只有 `app` 和 tool 层依赖它。
    - `review/refresh_one` 在预算内；`plugin/review/activate` < 1 ms。
 5. **规则简报与项目主页的概览**（前置 G）：简报规则、`register_brief_rules` 与提供者的请求和对账、概览（计数比较、声明、会话外的改动数、进度）。
    - `brief_*`、`overview_*` 测试通过；`overview_capped` 检查 4001 个改动路径时只保留计数。
-   - `review/brief_5000`、`review/resident_cloudprint_bytes`、`review/resident_100k_bytes` 在预算内，`review/overview_cloudprint` 有结果。
+   - `review/brief_5000`、`review/overview_round_warm`、`review/resident_cloudprint_bytes`、`review/resident_100k_bytes` 在预算内，`review/overview_cloudprint` 有结果。

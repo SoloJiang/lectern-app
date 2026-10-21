@@ -27,7 +27,7 @@
   - MR 的 diff：`forge`（[#25](https://github.com/SoloJiang/lectern-app/issues/25)）。
   - Analyze 快照的输入与审阅对象的指纹：随 [#66](https://github.com/SoloJiang/lectern-app/issues/66) 设计，见「Analyze 快照」。
   - 实现 `services` 的改动来源接口：接口在 [review 设计「改动来源」](review.md#改动来源lectern-services-的-changes-模块)里定义，见「验收」第 4 步。
-  - `review` 用的 `line_diff`、`Worktree::head_at`、`Worktree::mtimes` 和 `Repo::path_commit_times`（沿第一父提交找每个路径最近一次改动的提交时间）：接口与测试在 [review 设计「对其他 crate 的要求」](review.md#对其他-crate-的要求)前置条件 B，写 `Refs #15`。
+  - `review` 用的 `line_diff`、`Worktree::head_reflog`（HEAD reflog 的末尾部分）、`Worktree::mtimes` 和 `Repo::tree_changes`（两个提交的树之间改变的路径，不读 blob）：接口与测试在 [review 设计「对其他 crate 的要求」](review.md#对其他-crate-的要求)前置条件 B，写 `Refs #15`。
 
 本 crate 在领域层，是普通的库 crate，不是插件：不实现 kernel 的 `Plugin`，不注册服务。`project`、`review`、`usage` 等领域 crate 直接依赖并调用它（[#47](https://github.com/SoloJiang/lectern-app/issues/47) 以后若决定把插件做成包装领域库的薄 crate，本 crate 仍是被包装的库）。
 
