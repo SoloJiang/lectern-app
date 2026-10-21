@@ -281,6 +281,7 @@ const BENCHES: &[Bench] = &[
     project::DIRS_100K_BYTES,
     syntax::WINDOW_PEAK,
     syntax::LRU_BYTES,
+    syntax::EDIT_TREE_BYTES,
 ];
 
 fn main() -> ExitCode {

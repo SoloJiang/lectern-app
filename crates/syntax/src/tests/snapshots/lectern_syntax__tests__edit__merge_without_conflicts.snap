@@ -1,0 +1,11 @@
+---
+source: crates/syntax/src/tests/edit.rs
+expression: render(&outcome)
+---
+line 1
+line 2 (editor)
+line 3
+line 4
+line 5 (disk)
+line 6
+line 7 (both)

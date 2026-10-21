@@ -28,6 +28,15 @@
 //! Every call and every step registers with [`health`] right before it
 //! enters tree-sitter, for the budget it was given, and unregisters when it
 //! returns, with any result: between steps nothing is registered.
+//!
+//! Edit mode's incremental parse (`incremental`) keeps a tree between edits
+//! and runs the query again only on the lines an edit changed.
+
+mod incremental;
+
+pub(crate) use incremental::EditParse;
+#[cfg(test)]
+pub(crate) use incremental::input_edit;
 
 use std::cell::Cell;
 use std::ops::{ControlFlow, Range};
@@ -776,11 +785,22 @@ impl Lines for View<'_> {
 /// Parses `input`, or resumes the parse the progress callback halted last
 /// time (same parser, same input).
 fn parse_step(parser: &mut Parser, input: Input<'_>, watch: &Watch<'_, '_>) -> Result<Tree, Halt> {
+    parse_from(parser, input, None, watch)
+}
+
+/// [`parse_step`] reusing `old`, a tree of the text before an edit that
+/// was edited to match this input (`Tree::edit`).
+fn parse_from(
+    parser: &mut Parser,
+    input: Input<'_>,
+    old: Option<&Tree>,
+    watch: &Watch<'_, '_>,
+) -> Result<Tree, Halt> {
     let mut progress = |_: &tree_sitter::ParseState| watch.check();
     let len = input.len();
     let tree = parser.parse_with_options(
         &mut |at, _| if at < len { input.chunk(at) } else { &[] },
-        None,
+        old,
         Some(ParseOptions::new().progress_callback(&mut progress)),
     );
     match tree {
@@ -1021,10 +1041,17 @@ pub(crate) fn resolve_for_tests(
 /// chunks (step 1's `whole_file`). No budget, no health registration.
 #[cfg(test)]
 pub(crate) fn one_shot(lang: &Lang, text: &[u8]) -> WindowSpans {
-    let compiled = lang.compiled().expect("the query compiles");
     let mut parser = Parser::new();
     parser.set_language(lang.language()).unwrap();
     let tree = parser.parse(text, None).expect("a tree");
+    query_tree(lang, &tree, text)
+}
+
+/// One query over the whole of `tree`, a tree of `text`, without ranges or
+/// chunks.
+#[cfg(test)]
+pub(crate) fn query_tree(lang: &Lang, tree: &Tree, text: &[u8]) -> WindowSpans {
+    let compiled = lang.compiled().expect("the query compiles");
     let src: Vec<u8> = text.to_vec();
     let input = Input::of(&src, 0, src.len() as u64);
     let cancel = AtomicBool::new(false);
@@ -1037,7 +1064,7 @@ pub(crate) fn one_shot(lang: &Lang, text: &[u8]) -> WindowSpans {
     let hits = captures(
         lang.precedence(),
         compiled,
-        &tree,
+        tree,
         input,
         0..text.len(),
         &watch,
