@@ -4,7 +4,7 @@
 
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。普通库 crate，不是插件，`project`、`review` 等直接调用。
 - 设计文档：[docs/design/git.md](../../docs/design/git.md)。
-- issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#21](https://github.com/SoloJiang/lectern-app/issues/21)
+- issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#21](https://github.com/SoloJiang/lectern-app/issues/21)；[#10](https://github.com/SoloJiang/lectern-app/issues/10) 的前置条件（`merge3`、`Text::shared`）
 - ADR：[0006](../../docs/adr/0006.md)、[0024](../../docs/adr/0024.md)、[0028](../../docs/adr/0028.md)、[0034](../../docs/adr/0034.md)、[0038](../../docs/adr/0038.md)
 
 ## 边界
@@ -34,5 +34,6 @@ just test -p lectern-git
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。需要和 git 输出对照的夹具是目录格式（[说明](tests/fixtures/README.md)），由 `tests/fixtures/scripts/` 用真实的 git 生成一次；测试只用 `TestRepo::import_fixture` / `import_worktree_fixture` 导入，不运行 git。
 - 测试仓库用 `testing::TestRepo`（`test-support` feature）构造，不调用 git 命令行；发现仓库用 `testing::discover`，只读仓库自己的配置（和其中 `include` 引入的文件），不受机器上的 git 配置影响。`watch_source_*`（`src/watch/tests.rs`）测 `fs_watch` 的过滤器与配置清单（复用遍历的 `watch_source_reuse_*` 与完整构造逐条比较答案；`watch_source_events_*` 用 fs_watch 的 `testing::manual` 和 `FakeBackend` 驱动真实的过滤器），配置清单里仓库之外的位置用测试给出的 `HOME` / `XDG_CONFIG_HOME`，不读进程环境。
 - git 目录里的管理文件只在 `src/gitdir.rs` 里按路径读；工作区文件只经 `SafeRoot`。
+- 三方合并（`merge3_*`，`src/merge3/tests.rs`）是纯计算：期望的字节写在测试里，与 `git merge-file` 的结果核对过，测试不运行 git。
 - 工作区比较的测试（`compare/tests.rs`）每次比较前后对 git 目录做快照，必须相同（只读）；用 `hook::reads` 检查哪些文件被读了。和 git 的转换结果对照的工作区夹具见[夹具说明](tests/fixtures/README.md)「工作区夹具」。
 - 计时：`lectern-bench` 的 `git/open`、`git/open_handle`、`git/diff_50_cold`、`git/diff_50_warm`、`git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/refresh_full`、`git/changes_capped`，10 万文件的 `git/open_100k`、`git/filter_100k`（只有 index 变化后复用遍历的重建，用 `testing::filter_reused` 确认）、`git/changes_clean_100k` 和只记录的 `git/refresh_one_100k`、`git/canonical_oid_100k`、`…/batch_100`、`git/filter_100k/cold`、`git/filter_100k/walk`、`git/changes_clean_100k/stat_all`、计数 `git/changes_clean_100k/reads`、`…/stat_*`（`time` 目标；后者用 `testing::worktree_reads`、`testing::stat_mismatches`）和 `git/changes_capped_bytes`、`git/changes_count/total_bytes`、`git/resident`、`git/filter_cloudprint_bytes`、`git/filter_100k_bytes`、`git/compare_100k/peak_bytes`、`git/compare_100k/retained_bytes`、`git/changes_count/per_path_bytes`（`memory` 目标；工作区比较解析的 index 只在一次调用内持有，`compare_releases_its_index_*` 检查；fs_watch 过滤器连同它持有的解析后 index 是本 crate 的份额，[ADR 0035](../../docs/adr/0035.md)），夹具由 `TestRepo` 生成：`just bench git/`（Linux 上是冒烟运行，`just bench --measure git/` 采样并打印实测值）。`bench` 只经公开接口和 `testing`（如 `testing::open_handle`）调用本 crate。

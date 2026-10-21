@@ -1072,3 +1072,28 @@ fn hunk_cache_skips_additions_and_type_changes() {
     assert_eq!(detail_str(&set.files()[0].detail), "text +1 -1 [0..1>0..1]");
     assert_eq!(set.files()[0].status, Status::TypeChanged);
 }
+
+#[test]
+fn text_shared_is_the_arc_it_was_given() {
+    let bytes: Arc<[u8]> = Arc::from(&b"one\ntwo\n"[..]);
+    let text = Text::new(bytes.clone());
+    assert!(Arc::ptr_eq(text.shared(), &bytes));
+    // A clone of the text shares the same allocation too.
+    let clone = text.clone();
+    assert!(Arc::ptr_eq(clone.shared(), &bytes));
+    assert_eq!(Arc::strong_count(&bytes), 3);
+}
+
+#[test]
+fn text_shared_from_texts_is_the_texts_bytes() {
+    let t = TestRepo::new();
+    let old = t.tree(&[("f", &b"a\nb\n"[..])]);
+    let new = t.tree(&[("f", &b"a\nc\n"[..])]);
+    let set = diff(&t, old, new);
+    let texts = set.texts(&t.repo(), 0).unwrap();
+    let SideText::Text(text) = &texts.new else {
+        panic!("{texts:?}")
+    };
+    assert_eq!(&text.shared()[..], text.bytes());
+    assert!(std::ptr::eq(text.shared().as_ptr(), text.bytes().as_ptr()));
+}

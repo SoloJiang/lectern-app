@@ -218,6 +218,13 @@ impl Text {
         &self.bytes
     }
 
+    /// The `Arc` this text holds, the one [`Text::new`] took: no copy. The
+    /// review view registers it with the reader (`Reader::share_object`,
+    /// ADR 0042).
+    pub fn shared(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
+
     pub fn line_count(&self) -> u32 {
         u32::try_from(self.starts.len() - 1).unwrap_or(u32::MAX)
     }
