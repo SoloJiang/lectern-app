@@ -1231,12 +1231,21 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // The first jump in a text before its parse is kept (the text parsed
-    // for the site): the 50 ms candidates less the drawer's 18 ms (one
-    // frame and the event's delivery), ADR 0037. A jump its own locals
-    // bind (a `File` definition), and one from a diff's old side: recorded.
+    // for the site), the text just under 96 KiB: the 50 ms candidates less
+    // the drawer's 18 ms (one frame and the event's delivery), ADR 0037.
+    // Just under 128 KiB (the largest kept, where the 50 ms holds through
+    // the kept parse only), a jump its own locals bind (a `File`
+    // definition), and one from a diff's old side: recorded.
     share(
         "code_intel/goto_cold_parse",
         &[median(Limit::TimeAtMost(ms(32)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_cold_parse/at_128k",
+        RECORD,
         CODE_INTEL,
         ACTIVE,
         Time,

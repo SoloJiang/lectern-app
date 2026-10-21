@@ -123,10 +123,14 @@ struct Shape {
     /// The jump's name is the current text's own function, which the
     /// current text's locals bind (a `File` definition, step 1).
     same_file: bool,
-    /// The current text just under the largest one kept (ADR 0037's bound
-    /// of the 50 ms) instead of the 「性能」 row's 100 KB.
-    at_bound: bool,
+    /// The current text just under this many bytes instead of the 「性能」
+    /// row's 100 KB (the cold path's bounds, ADR 0037).
+    under: Option<usize>,
 }
+
+/// The largest current text whose cold jump ADR 0037 holds within the
+/// 50 ms (its share 32 ms): gated.
+const COLD_GATED: usize = 96 << 10;
 
 /// A jump fixture: the rig, its query, and the directory its cache lives in.
 struct Jump {
@@ -153,17 +157,14 @@ fn jump_fixture(ctx: &Ctx, shape: Shape) -> Result<(Jump, usize), BenchError> {
     } else {
         synthetic::shared_name()
     };
-    let max = lectern_code_intel::query::PARSE_CACHE_MAX_SOURCE;
     // `source` overshoots by a few hundred bytes; the call adds some more.
-    let len = if shape.at_bound {
-        max - (2 << 10)
-    } else {
-        100 << 10
-    };
+    let len = shape.under.map_or(100 << 10, |max| max - (2 << 10));
     let mut text = current_text(&name, len);
-    if shape.at_bound && !(max - (4 << 10)..=max).contains(&text.len()) {
+    if let Some(max) = shape.under
+        && !(max - (4 << 10)..=max).contains(&text.len())
+    {
         return Err(BenchError::new(format!(
-            "{} bytes, not at the bound {max}",
+            "{} bytes, not just under {max}",
             text.len()
         )));
     }
@@ -428,27 +429,35 @@ fn goto_full(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
 }
 
 /// The jump of [`GOTO_INDEXED`] with no kept parse (forgotten before each,
-/// untimed), in a current text just under 128 KiB (the largest kept, where
-/// ADR 0037 holds the 50 ms): the first jump in a text before its parse is
-/// warmed, which parses the text for its site. Gated at the cold path's
-/// share, 50 ms less the drawer's 18 ms (ADR 0037).
+/// untimed): the first jump in a text before its warm-up finishes, which
+/// parses the text for its site. In a current text just under 96 KiB, the
+/// largest whose cold jump ADR 0037 holds within the 50 ms: gated at the
+/// cold path's share, 50 ms less the drawer's 18 ms. `…/at_128k`, just
+/// under the largest text kept (128 KiB), is recorded: there the 50 ms
+/// holds through the kept parse only (a known limitation of ADR 0037).
 pub const GOTO_COLD_PARSE: Bench = Bench {
     id: "code_intel/goto_cold_parse",
     run: goto_cold_parse,
 };
 
 fn goto_cold_parse(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let shape = Shape {
-        at_bound: true,
-        ..Shape::default()
-    };
-    let (jump, _) = jump_fixture(ctx, shape)?;
     let forget = |rig: &Rig| rig.indexer.clear_kept_parses();
-    let (first, _) = sample_jumps(ctx, &jump, &forget, &complete)?;
-    Ok(vec![Measured::new(
-        "code_intel/goto_cold_parse",
-        Value::Time(first),
-    )])
+    // One fixture after the other: each repository lives at the shared
+    // repository's path while its rig is alive.
+    let cold = |under: usize| -> Result<Samples, BenchError> {
+        let shape = Shape {
+            under: Some(under),
+            ..Shape::default()
+        };
+        let (jump, _) = jump_fixture(ctx, shape)?;
+        Ok(sample_jumps(ctx, &jump, &forget, &complete)?.0)
+    };
+    let gated = cold(COLD_GATED)?;
+    let at_bound = cold(lectern_code_intel::query::PARSE_CACHE_MAX_SOURCE)?;
+    Ok(vec![
+        Measured::new("code_intel/goto_cold_parse", Value::Time(gated)),
+        Measured::new("code_intel/goto_cold_parse/at_128k", Value::Time(at_bound)),
+    ])
 }
 
 /// A jump to the current text's own function, a `File` definition its
