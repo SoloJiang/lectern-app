@@ -75,8 +75,9 @@ pub(crate) struct EngineInner {
     pub after_first: Mutex<Option<Hook>>,
 }
 
+/// Gets the snapshot just published.
 #[cfg(test)]
-pub(crate) type Hook = Box<dyn FnOnce() + Send>;
+pub(crate) type Hook = Box<dyn FnOnce(&DocSnapshot) + Send>;
 
 /// The roots' `SafeRoot`s, by project and root path.
 type Roots = HashMap<(ProjectKey, Arc<Path>), Arc<SafeRoot>>;
@@ -221,6 +222,7 @@ impl Engine {
             &doc.target,
             &doc.root,
             doc.target.at,
+            doc.target.expect,
             viewport.rows,
             &cancel,
         );
@@ -437,6 +439,14 @@ impl DocHandle {
     pub(crate) fn is_watched(&self) -> bool {
         self.doc.lock().watch.is_some()
     }
+
+    /// Starts a reload as an outside change would.
+    pub(crate) fn reload(&self) {
+        if let Some(engine) = self.doc.engine.upgrade() {
+            let at = self.doc.current_line();
+            load::reload(&engine, &self.doc, at);
+        }
+    }
 }
 
 impl Drop for DocHandle {
@@ -476,8 +486,14 @@ pub(crate) struct DocMut {
     pub editable: Editable,
     pub anchor: RowPos,
     pub content: Content,
+    /// The caller's OID of the content (`ReadTarget::expect`); None after
+    /// a reload, since the content it described changed.
+    pub expect: Option<BlobId>,
     /// The whole file's spans (tier A), exact.
     pub whole: Option<Arc<WindowSpans>>,
+    /// The OID `whole` belongs to, when the first screen took it from the
+    /// LRU: the full read drops it unless the content's OID is that one.
+    pub whole_from: Option<BlobId>,
     /// The first screen's and the visible windows' spans, newest first.
     pub windows: Vec<Arc<WindowSpans>>,
     /// The identity of the file read.
@@ -536,7 +552,9 @@ impl Doc {
             editable,
             anchor: RowPos::default(),
             content: Content::Nothing,
+            expect: target.expect,
             whole: None,
+            whole_from: None,
             windows: Vec::new(),
             identity: None,
             file: None,
@@ -564,6 +582,12 @@ impl Doc {
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, DocMut> {
         lock(&self.st)
+    }
+
+    /// The snapshot published last.
+    #[cfg(test)]
+    pub(crate) fn current(&self) -> Arc<DocSnapshot> {
+        lock(&self.snapshot).clone()
     }
 
     pub(crate) fn is_closed(&self) -> bool {

@@ -21,6 +21,11 @@ use crate::text::{LineIndex, LongLine, unit_at};
 use super::content::slice;
 use super::{DocSnapshot, LineNo, Row, RowPos};
 
+/// What a plan shows of a long line from its target (`window::plan`).
+const LONG_VISIBLE: u64 = 8 << 10;
+/// The most a plan shows of short lines.
+const VISIBLE_MAX: u64 = 64 << 10;
+
 /// One line as the rows see it.
 struct Line<'a> {
     start: u64,
@@ -172,6 +177,47 @@ impl DocSnapshot {
             Some(index) => index.line_count() + index.extra_rows(cols.max(1)),
             None => self.lines.get(),
         }
+    }
+
+    /// The first byte display row `pos` shows: exact when its bytes are in
+    /// memory; in a long line without them, the last cell mark before it
+    /// (at most 4 KiB earlier); before the line index, `cols` bytes per
+    /// display row.
+    pub(crate) fn row_start_byte(&self, pos: RowPos, cols: u32) -> u64 {
+        if pos.sub_row == 0 {
+            return pos.line_start.min(self.size);
+        }
+        let cols = cols.max(1);
+        let k = u64::from(pos.sub_row);
+        if let Some(long) = self.index().and_then(|i| i.long_at(pos.line_start)) {
+            let k = k.min(long.rows(cols) - 1);
+            return self
+                .src()
+                .and_then(|src| long.row_range(src, k, cols))
+                .map_or_else(|| long.row_floor(k, cols), |r| r.start);
+        }
+        (pos.line_start + k * u64::from(cols)).min(self.size)
+    }
+
+    /// The bytes the viewport shows from `top` on, for reading pages and
+    /// highlighting: from [`row_start_byte`](Self::row_start_byte), `rows`
+    /// display rows of a long line (at most the 8 KiB a first-screen plan
+    /// covers there), else `rows` lines of the average length (at most
+    /// 64 KiB).
+    pub(crate) fn visible_bytes(&self, top: RowPos, rows: u32, cols: u32) -> Range<u64> {
+        let start = self.row_start_byte(top, cols);
+        let long = top.sub_row > 0
+            || self
+                .src()
+                .and_then(|src| self.line(src, top.line_start.min(self.size)))
+                .is_some_and(|l| !matches!(l.kind, Kind::Short));
+        let rows = u64::from(rows.max(1));
+        let span = if long {
+            (rows * u64::from(cols.max(1))).min(LONG_VISIBLE)
+        } else {
+            (rows * (self.size / self.lines.get().max(1))).min(VISIBLE_MAX)
+        };
+        start..(start + span).min(self.size)
     }
 
     fn ends_with_newline(&self) -> bool {

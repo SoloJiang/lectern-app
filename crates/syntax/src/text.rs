@@ -128,6 +128,19 @@ impl LongLine {
         Some(start..end.max(start))
     }
 
+    /// A byte at most one mark stride (4 KiB) before display row `k`'s
+    /// start, from the marks alone: no byte of the line is needed, so it
+    /// tells which pages to read for that row.
+    pub(crate) fn row_floor(&self, k: u64, cols: u32) -> u64 {
+        let target = k * u64::from(cols.max(1));
+        let i = self.marks.partition_point(|&(_, c)| c < target);
+        if i == 0 {
+            self.start
+        } else {
+            self.marks[i - 1].0
+        }
+    }
+
     /// The display row holding `byte`.
     pub(crate) fn row_of(&self, src: &dyn Source, byte: u64, cols: u32) -> Option<u64> {
         let byte = byte.clamp(self.start, self.end);
@@ -297,6 +310,16 @@ impl LineIndex {
     /// Display rows beyond one per line, at `cols`.
     pub(crate) fn extra_rows(&self, cols: u32) -> u64 {
         self.longs.iter().map(|l| l.rows(cols) - 1).sum()
+    }
+
+    /// The start of the index entry holding line `line` (a line start at
+    /// most 1023 lines before it).
+    pub(crate) fn block_start(&self, line: u64) -> u64 {
+        let block = (line / LINE_BLOCK) as usize;
+        self.block_starts
+            .get(block.min(self.block_starts.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The last index entry at or before `byte`: its line and start.

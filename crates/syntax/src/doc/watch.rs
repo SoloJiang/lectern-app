@@ -189,7 +189,7 @@ fn check(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
             }
             drop(st);
             let at = doc.current_line();
-            load::start(engine, doc, at);
+            load::reload(engine, doc, at);
         }
         Err(SafeError::NotFound) => {
             if st.state == DocState::Missing {
@@ -205,12 +205,17 @@ fn check(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
             st.windows.clear();
             st.identity = None;
             st.size = 0;
+            st.find
+                .cancel
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            st.find.generation += 1;
+            st.find.results = None;
             doc.commit(st);
         }
         Err(_) => {
             drop(st);
             let at = doc.current_line();
-            load::start(engine, doc, at);
+            load::reload(engine, doc, at);
         }
     }
 }

@@ -146,7 +146,7 @@ fn doc_full_read_of_another_version_drops_the_first_screen() {
     let path = rig.path("a.ts");
     let replacement = numbered(3_000, 10);
     let swap = replacement.clone();
-    *crate::util::lock(&rig.engine.inner().after_first) = Some(Box::new(move || {
+    *crate::util::lock(&rig.engine.inner().after_first) = Some(Box::new(move |_| {
         // Between the first screen and the full read.
         std::fs::write(&path, &swap).unwrap();
     }));
@@ -382,4 +382,193 @@ fn doc_long_lines_fold_after_the_full_read() {
         s.total_rows(VIEW.cols),
         (bytes.len() as u64).div_ceil(u64::from(VIEW.cols))
     );
+}
+
+fn line_tokens(spans: &crate::WindowSpans) -> Vec<(u64, Vec<crate::Token>)> {
+    spans.lines().map(|(at, t)| (at, t.to_vec())).collect()
+}
+
+/// The tokens of `n` rows from `at`, and whether every row was in memory.
+fn row_tokens(s: &crate::DocSnapshot, at: RowPos, n: usize) -> (usize, bool) {
+    let mut tokens = 0;
+    for row in s.rows(at, n, VIEW.cols) {
+        match row {
+            Row::Text { tokens: t, .. } => tokens += t.len(),
+            Row::Pending { .. } => return (tokens, false),
+        }
+    }
+    (tokens, true)
+}
+
+#[test]
+fn doc_reopen_after_an_edit_highlights_the_new_content() {
+    let rig = Rig::new();
+    let old = testing::ts(64 << 10, 0);
+    rig.write("a.ts", &old);
+    let old_oid = blob_id(&Oid::for_blob(HashKind::Sha1, &old));
+    // Opened from a hunk: `expect` is the content the review showed.
+    let mut target = rig.target(
+        "a.ts",
+        Anchor::Byte {
+            byte: 100,
+            line: 3,
+            column: 0,
+        },
+    );
+    target.expect = Some(old_oid);
+    let (doc, s) = rig.open_settled(target.clone());
+    assert_eq!(s.oid, Some(old_oid));
+    assert!(s.spans[0].exact());
+    // The agent edits the file: the reopen must not take the old spans by
+    // the stale `expect`.
+    let new = testing::ts(48 << 10, 900);
+    std::fs::write(rig.path("a.ts"), &new).unwrap();
+    rig.touch("a.ts", modified());
+    let after = doc.snapshot();
+    assert_eq!(
+        after.oid,
+        Some(blob_id(&Oid::for_blob(HashKind::Sha1, &new)))
+    );
+    assert!(after.spans[0].exact());
+    let want = line_tokens(&super::full(super::lang("ts"), &new));
+    assert_eq!(line_tokens(&after.spans[0]), want);
+    // A new open with the same stale `expect`: the spans found by the
+    // identity just read are the new content's.
+    let first = rig.engine.first_screen(target, rig.root.clone(), VIEW);
+    assert_eq!(line_tokens(&first.spans[0]), want);
+}
+
+#[test]
+fn doc_full_read_drops_lru_spans_of_another_oid() {
+    let rig = Rig::new();
+    let old = testing::ts(32 << 10, 0);
+    rig.write("a.ts", &old);
+    let (a, s) = rig.open_settled(rig.target("a.ts", Anchor::Start));
+    let old_oid = s.oid.unwrap();
+    drop(a);
+    rig.settle();
+    // An identity mapped to the wrong OID (the identity table is only
+    // as good as the file times): the first screen takes those spans, the
+    // full read sees the content's own OID and parses again.
+    let new = testing::ts(40 << 10, 700);
+    rig.write("b.ts", &new);
+    let identity = lectern_platform::SafeRoot::open(&rig.root)
+        .unwrap()
+        .stat(lectern_platform::RelPath::new(b"b.ts").unwrap())
+        .unwrap()
+        .identity();
+    rig.engine
+        .inner()
+        .remember(&rig.root, &Arc::from("b.ts"), identity, old_oid);
+    let first = rig
+        .engine
+        .first_screen(rig.target("b.ts", Anchor::Start), rig.root.clone(), VIEW);
+    assert!(first.spans[0].exact(), "taken from the LRU");
+    let (_b, t) = rig.open_settled(rig.target("b.ts", Anchor::Start));
+    assert_eq!(t.oid, Some(blob_id(&Oid::for_blob(HashKind::Sha1, &new))));
+    assert_eq!(
+        line_tokens(&t.spans[0]),
+        line_tokens(&super::full(super::lang("ts"), &new))
+    );
+}
+
+#[test]
+fn doc_reload_keeps_an_old_find_from_publishing() {
+    let rig = Rig::new();
+    rig.write("a.txt", &numbered(3_000, 20));
+    let (doc, _) = rig.open_settled(rig.target("a.txt", Anchor::Start));
+    let seen: Arc<std::sync::Mutex<Option<Option<Arc<crate::FindResults>>>>> = Arc::default();
+    let record = seen.clone();
+    *crate::util::lock(&rig.engine.inner().after_first) = Some(Box::new(move |s| {
+        *record.lock().unwrap() = Some(s.find.clone());
+    }));
+    // The find is queued, then a reload starts before it runs.
+    doc.find(crate::FindQuery {
+        text: Arc::from("line 1"),
+    });
+    doc.reload();
+    rig.settle();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some(None),
+        "the old load's find published nothing"
+    );
+    let found = doc.snapshot().find.clone().expect("found again");
+    assert!(found.done);
+    // `line 1`, `line 10`–`19`, `line 100`–`199`, `line 1000`–`1999`.
+    assert_eq!(found.ranges.len(), 1 + 10 + 100 + 1000);
+}
+
+#[test]
+fn doc_tier_b_long_line_highlights_where_it_scrolls() {
+    let rig = Rig::new();
+    let bytes = testing::minified_js(4 << 20, 0);
+    rig.write("app.min.js", &bytes);
+    let (doc, s) = rig.open_settled(rig.target("app.min.js", Anchor::Start));
+    assert_eq!(s.tier, Some(Tier::B));
+    assert_eq!(s.lines, LineCount::Exact(1));
+    for byte in [3 << 20, 1 << 20] {
+        let deep = doc.snapshot().pos_of_byte(byte, VIEW.cols);
+        assert!(deep.sub_row > 0);
+        assert_eq!(row_tokens(&doc.snapshot(), deep, 10).0, 0, "not yet");
+        doc.scrolled(deep);
+        rig.settle();
+        let (tokens, whole) = row_tokens(&doc.snapshot(), deep, 10);
+        assert!(whole && tokens > 10, "at {byte}: {tokens}");
+    }
+}
+
+#[test]
+fn doc_tier_c_long_line_reads_the_pages_it_scrolls_to() {
+    let rig = Rig::new();
+    let bytes = testing::minified_js(TIER_B_MAX as usize + (1 << 20), 0);
+    rig.write("huge.js", &bytes);
+    let byte = 12u64 << 20;
+    let (doc, s) = rig.open_settled(rig.target(
+        "huge.js",
+        Anchor::Byte {
+            byte,
+            line: 0,
+            column: byte as u32,
+        },
+    ));
+    assert_eq!(s.tier, Some(Tier::C));
+    assert_eq!(s.anchor.line_start, 0);
+    assert_eq!(u64::from(s.anchor.sub_row), byte / u64::from(VIEW.cols));
+    let (tokens, whole) = row_tokens(&s, s.anchor, 10);
+    assert!(whole && tokens > 10, "{tokens}");
+    for byte in [3u64 << 20, 15 << 20, (12 << 20) + 50_000] {
+        let pos = doc.snapshot().pos_of_byte(byte, VIEW.cols);
+        doc.scrolled(pos);
+        rig.settle();
+        let now = doc.snapshot();
+        let (tokens, whole) = row_tokens(&now, pos, 10);
+        assert!(whole && tokens > 10, "at {byte}: {tokens}");
+        let Row::Text { bytes: range, .. } = &now.rows(pos, 1, VIEW.cols)[0] else {
+            unreachable!()
+        };
+        assert!(range.contains(&byte), "{range:?} holds {byte}");
+    }
+}
+
+#[test]
+fn doc_tier_c_byte_with_another_oid_moves_by_its_line() {
+    let rig = Rig::new();
+    tier_c(&rig);
+    let mut target = rig.target(
+        "huge.txt",
+        Anchor::Byte {
+            byte: 10,
+            line: 400_000,
+            column: 0,
+        },
+    );
+    target.expect = Some(blob_id(&Oid::for_blob(HashKind::Sha1, b"other")));
+    let (doc, _) = rig.open_settled(target);
+    let s = doc.snapshot();
+    assert_eq!(s.tier, Some(Tier::C));
+    doc.scrolled(s.anchor);
+    rig.settle();
+    let now = doc.snapshot();
+    assert_eq!(first_text(&now, now.anchor), "line 400000");
 }

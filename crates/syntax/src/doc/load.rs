@@ -76,6 +76,8 @@ pub(crate) struct Shown {
     anchor: RowPos,
     window: Option<Arc<WindowSpans>>,
     whole: Option<Arc<WindowSpans>>,
+    /// The verified OID `whole` was found by.
+    whole_from: Option<BlobId>,
     highlight: Highlighting,
     lang: Option<&'static str>,
     lines: u64,
@@ -90,10 +92,21 @@ pub(crate) enum Rest {
     Text(Arc<Text>),
 }
 
-/// Starts a new load: cancels the last one's tasks and reads the first
-/// screen at `at`.
+/// Opens the content again after it changed on disk, at `at`. The caller's
+/// `expect` described the content it saw, which is gone: this load and the
+/// later ones use no `expect` (the byte anchor's OID check, the line
+/// checkpoints' candidate).
+pub(crate) fn reload(engine: &Arc<EngineInner>, doc: &Arc<Doc>, at: Anchor) {
+    if doc.target.origin == TextOrigin::Worktree {
+        doc.lock().expect = None;
+    }
+    start(engine, doc, at);
+}
+
+/// Starts a new load: cancels the last one's tasks (a find in flight
+/// included) and reads the first screen at `at`.
 pub(crate) fn start(engine: &Arc<EngineInner>, doc: &Arc<Doc>, at: Anchor) {
-    let (load, cancel, rows) = {
+    let (load, cancel, rows, expect) = {
         let mut st = doc.lock();
         st.cancel.store(true, Ordering::SeqCst);
         st.cancel = Arc::new(AtomicBool::new(false));
@@ -102,19 +115,32 @@ pub(crate) fn start(engine: &Arc<EngineInner>, doc: &Arc<Doc>, at: Anchor) {
         st.window_busy = false;
         st.window_again = false;
         st.pages_busy = false;
-        // A reload finds again in the new content.
+        // A find of the last load publishes nothing more; the query runs
+        // again in the new content.
+        st.find.cancel.store(true, Ordering::SeqCst);
+        st.find.cancel = Arc::new(AtomicBool::new(false));
+        st.find.generation += 1;
+        st.find.results = None;
         st.find.waiting = st.find.query.is_some();
         if st.state == DocState::Ready && st.editable != Editable::No(NotEditable::ReadOnlySource) {
             st.editable = Editable::No(NotEditable::Reloading);
         }
-        (st.load, st.cancel.clone(), st.viewport.rows)
+        (st.load, st.cancel.clone(), st.viewport.rows, st.expect)
     };
     let (engine2, doc2) = (engine.clone(), doc.clone());
     let spawned = engine.spawn(Priority::Interactive, async move {
         if doc2.stale(&doc2.lock(), load) {
             return;
         }
-        let first = first_screen(&engine2, &doc2.target, &doc2.root, at, rows, &cancel);
+        let first = first_screen(
+            &engine2,
+            &doc2.target,
+            &doc2.root,
+            at,
+            expect,
+            rows,
+            &cancel,
+        );
         apply_first(&engine2, &doc2, load, first);
     });
     if !spawned {
@@ -134,6 +160,7 @@ pub(crate) fn first_screen(
     target: &ReadTarget,
     root: &Arc<Path>,
     at: Anchor,
+    expect: Option<BlobId>,
     rows: u32,
     cancel: &AtomicBool,
 ) -> First {
@@ -178,9 +205,16 @@ pub(crate) fn first_screen(
             Err(state) => return First::Failed(state),
         },
     };
-    let candidate = target
-        .expect
-        .or_else(|| identity.and_then(|id| engine.known_oid(root, &target.path, id)));
+    // The OID of the content just opened, when it is known for sure: an
+    // object's is `expect`; a file's is what an earlier read of this very
+    // identity found. Only this one finds spans in the LRU.
+    let verified = match target.origin {
+        TextOrigin::Object => target.expect,
+        TextOrigin::Worktree => identity.and_then(|id| engine.known_oid(root, &target.path, id)),
+    };
+    // Line checkpoints may also come by the caller's OID: their length is
+    // checked, and the full read places the line again anyway.
+    let candidate = verified.or(expect);
     let (ranges, plan_target, relocate) = match at {
         Anchor::Start => (window::first_read(size, 0), Target::Byte(0), false),
         Anchor::Byte { byte, .. } => {
@@ -260,14 +294,16 @@ pub(crate) fn first_screen(
     // Spans: the whole file's from the LRU when the content is known, else
     // the window parsed alone.
     let (mut window, mut whole, mut highlight) = (None, None, Highlighting::Pending);
+    let mut whole_from = None;
     match lang {
         None => highlight = Highlighting::Plain,
         Some(_) if plan.encoding == Encoding::NotText => highlight = Highlighting::Plain,
         Some(lang) => {
             let cached =
-                candidate.and_then(|oid| engine.lru.spans(&whole_key(oid, lang), Class::Opened));
+                verified.and_then(|oid| engine.lru.spans(&whole_key(oid, lang), Class::Opened));
             if let Some(spans) = cached {
                 whole = Some(spans);
+                whole_from = verified;
                 highlight = Highlighting::On;
             } else if let Some(w) = plan.window.clone() {
                 // Compiling the query on first use is outside the budget.
@@ -307,6 +343,7 @@ pub(crate) fn first_screen(
         anchor,
         window,
         whole,
+        whole_from,
         highlight,
         lang: lang.map(|l| l.static_name()),
         lines,
@@ -441,6 +478,7 @@ pub(crate) fn fill_first(st: &mut DocMut, target: &ReadTarget, first: First) -> 
                 st.editable = Editable::No(NotEditable::NotLoaded);
             }
             st.whole = shown.whole;
+            st.whole_from = shown.whole_from;
             st.windows = shown.window.into_iter().collect();
             st.relocate = shown.relocate;
             st.set_anchor(shown.anchor);
@@ -482,7 +520,7 @@ fn apply_first(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, first: Firs
     }
     #[cfg(test)]
     if let Some(hook) = crate::util::lock(&engine.after_first).take() {
-        hook();
+        hook(&doc.current());
     }
     watch::ensure(engine, doc);
     match next {
@@ -519,7 +557,7 @@ fn complete(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, rest: Rest) {
                     // It grew past 16 MiB: open it again as tier C.
                     drop(file);
                     let at = doc.lock().at;
-                    start(engine, doc, at);
+                    reload(engine, doc, at);
                     return;
                 }
                 Err(e) => {
@@ -592,7 +630,12 @@ fn target_pos(st: &DocMut, target: &ReadTarget, by_line: bool) -> RowPos {
                 let end = next.map_or(st.size, |n| n.saturating_sub(1).max(start));
                 snapshot.pos_of_byte((start + u64::from(column)).min(end), cols)
             }
-            None => snapshot.pos_of_byte(index.block_before(st.size).1, cols),
+            // The bytes are not in memory: the line start the index holds
+            // before it.
+            None => RowPos {
+                line_start: index.block_start(u64::from(line)),
+                sub_row: 0,
+            },
         }
     };
     match st.at {
@@ -636,9 +679,16 @@ fn apply_full(
         st.whole = None;
         st.windows.clear();
     }
-    let by_line = changed
-        || st.relocate
-        || matches!(st.at, Anchor::Byte { .. }) && target.expect.is_some_and(|e| e != oid);
+    // Whole-file spans belong to the OID they were found by: not this
+    // content's, they go (and the parse below makes this content's).
+    if st.whole.is_some() && st.whole_from != Some(oid) {
+        st.whole = None;
+        if st.windows.is_empty() {
+            st.highlight = Highlighting::Pending;
+        }
+    }
+    st.whole_from = None;
+    let by_line = changed || st.relocate || moved_by_line(&st, Some(oid));
     st.relocate = false;
     let anchor = target_pos(&st, target, by_line);
     st.set_anchor(anchor);
@@ -675,6 +725,12 @@ fn apply_full(
     if find {
         run_find(engine, doc);
     }
+}
+
+/// A byte anchor whose OID is not the content's: its byte means nothing
+/// here, its line does (after the full read and after the scan alike).
+fn moved_by_line(st: &DocMut, oid: Option<BlobId>) -> bool {
+    matches!(st.at, Anchor::Byte { .. }) && st.expect.is_some() && oid.is_some() && st.expect != oid
 }
 
 fn set_whole(doc: &Doc, load: u64, spans: Arc<WindowSpans>) {
@@ -769,7 +825,7 @@ fn scan(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, file: &OpenFile) {
         if Some(read.meta.identity()) != identity || piece.len() as u64 != end - at {
             // Changed while it was read: open it again.
             let at = doc.current_line();
-            start(engine, doc, at);
+            reload(engine, doc, at);
             return;
         }
         hasher.update(&piece);
@@ -782,11 +838,43 @@ fn scan(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, file: &OpenFile) {
         engine.store_checkpoints(&target.project, &oid, &scanned.checkpoints());
         engine.remember(&doc.root, &target.path, identity, oid);
     }
+    let index = Arc::new(scanned.index);
+    // A line to move to: its index entry's pages are read now, so the
+    // line's start is exact (the first screen read other bytes).
+    let at_line = {
+        let st = doc.lock();
+        if doc.stale(&st, load) {
+            return;
+        }
+        let by_line = st.relocate || moved_by_line(&st, oid);
+        match st.at {
+            Anchor::Line { line, .. } => Some(line),
+            Anchor::Byte { line, .. } if by_line => Some(line),
+            _ => None,
+        }
+    };
+    let pages = at_line.and_then(|line| {
+        let start = index.block_start(u64::from(line)) / PAGE * PAGE;
+        let end = (start + SCAN_BLOCK).min(size);
+        let read = file.read_ranges(std::slice::from_ref(&(start..end))).ok()?;
+        (Some(read.meta.identity()) == identity)
+            .then(|| split_pages(start, read.pieces.into_iter().next().unwrap_or_default()))
+    });
     let mut st = doc.lock();
     if doc.stale(&st, load) {
         return;
     }
-    let index = Arc::new(scanned.index);
+    if let (Some(got), Some(cache)) = (pages, st.pages.as_mut()) {
+        cache.add(got);
+        let pages = cache.pages().clone();
+        if let Content::Paged(paged) = &st.content {
+            st.content = Content::Paged(Arc::new(Paged {
+                pages,
+                pieces: paged.pieces.clone(),
+                index: paged.index.clone(),
+            }));
+        }
+    }
     st.oid = oid;
     st.lines = LineCount::Exact(index.line_count());
     st.widest = index.widest_cells();
@@ -802,12 +890,25 @@ fn scan(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, file: &OpenFile) {
             index: Some(index),
         }));
     }
-    let by_line = st.relocate;
+    let by_line = st.relocate || moved_by_line(&st, oid);
     st.relocate = false;
     let anchor = target_pos(&st, target, by_line);
     st.set_anchor(anchor);
     doc.commit(st);
     visible_work(engine, doc);
+}
+
+/// The bytes the viewport shows from the top: the display row's own bytes,
+/// not its line's start (a row deep in a long line is megabytes on).
+fn visible(st: &DocMut, target: &ReadTarget) -> Range<u64> {
+    let top = st.top.unwrap_or(st.anchor);
+    st.snapshot(target)
+        .visible_bytes(top, st.viewport.rows, st.viewport.cols)
+}
+
+/// The pages tier C reads for the visible bytes.
+fn page_range(visible: &Range<u64>) -> Range<u64> {
+    visible.start.saturating_sub(PAGES_BEFORE)..visible.end.max(visible.start + PAGES_AFTER)
 }
 
 /// After scrolling (or new content): tier C reads the pages around the
@@ -818,18 +919,16 @@ pub(crate) fn visible_work(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
         return;
     }
     let load = st.load;
-    let top = st.top.unwrap_or(st.anchor).line_start;
+    let shown = visible(&st, &doc.target);
     let mut pages = false;
     if let Some(cache) = &st.pages
-        && !cache
-            .missing(top.saturating_sub(PAGES_BEFORE)..top + PAGES_AFTER)
-            .is_empty()
+        && !cache.missing(page_range(&shown)).is_empty()
         && !st.pages_busy
     {
         st.pages_busy = true;
         pages = true;
     }
-    let window = needs_window(&st, top);
+    let window = needs_window(&st, &shown);
     let start_window = window && !st.window_busy && !st.pages_busy;
     if window && st.window_busy {
         st.window_again = true;
@@ -852,7 +951,7 @@ pub(crate) fn visible_work(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
     }
 }
 
-fn needs_window(st: &DocMut, top: u64) -> bool {
+fn needs_window(st: &DocMut, shown: &Range<u64>) -> bool {
     if !matches!(st.tier, Some(Tier::B | Tier::C))
         || st.lang.is_none()
         || st.highlight == Highlighting::Plain
@@ -860,28 +959,24 @@ fn needs_window(st: &DocMut, top: u64) -> bool {
     {
         return false;
     }
-    // The visible rows, by the average line length.
-    let average = st.size / st.lines.get().max(1);
-    let reach = (top + (u64::from(st.viewport.rows.max(1)) * average).min(64 << 10)).min(st.size);
     !st.windows
         .iter()
-        .any(|w| w.range().start <= top && w.range().end >= reach)
+        .any(|w| w.range().start <= shown.start && w.range().end >= shown.end)
 }
 
 /// Tier C: the pages around the top, read in one `read_ranges`.
 fn read_pages(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
     loop {
-        let (file, wanted, identity, top) = {
+        let (file, wanted, identity, range) = {
             let mut st = doc.lock();
             if doc.stale(&st, load) {
                 return;
             }
-            let top = st.top.unwrap_or(st.anchor).line_start;
-            let range = top.saturating_sub(PAGES_BEFORE)..top + PAGES_AFTER;
+            let range = page_range(&visible(&st, &doc.target));
             let wanted = st
                 .pages
                 .as_ref()
-                .map(|c| c.missing(range))
+                .map(|c| c.missing(range.clone()))
                 .unwrap_or_default();
             if wanted.is_empty() || st.file.is_none() {
                 st.pages_busy = false;
@@ -889,7 +984,7 @@ fn read_pages(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
                 visible_work(engine, doc);
                 return;
             }
-            (st.file.clone(), wanted, st.identity, top)
+            (st.file.clone(), wanted, st.identity, range)
         };
         let Some(file) = file else { return };
         // Consecutive pages make one range; at most 1 MiB in all.
@@ -915,14 +1010,12 @@ fn read_pages(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
         if Some(read.meta.identity()) != identity {
             doc.lock().pages_busy = false;
             let at = doc.current_line();
-            start(engine, doc, at);
+            reload(engine, doc, at);
             return;
         }
         let mut got = Vec::new();
         for (range, bytes) in ranges.iter().zip(read.pieces) {
-            for (i, page) in bytes.chunks(PAGE as usize).enumerate() {
-                got.push((range.start / PAGE + i as u64, Arc::<[u8]>::from(page)));
-            }
+            got.extend(split_pages(range.start, bytes));
         }
         let mut st = doc.lock();
         if doc.stale(&st, load) {
@@ -930,7 +1023,7 @@ fn read_pages(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
         }
         if let Some(cache) = st.pages.as_mut() {
             cache.add(got);
-            cache.touch(top.saturating_sub(PAGES_BEFORE)..top + PAGES_AFTER);
+            cache.touch(range);
             let pages = cache.pages().clone();
             if let Content::Paged(paged) = &st.content {
                 st.content = Content::Paged(Arc::new(Paged {
@@ -944,6 +1037,15 @@ fn read_pages(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
     }
 }
 
+/// Bytes read from `start` (a page boundary) as pages.
+fn split_pages(start: u64, bytes: Vec<u8>) -> Vec<(u64, Arc<[u8]>)> {
+    bytes
+        .chunks(PAGE as usize)
+        .enumerate()
+        .map(|(i, page)| (start / PAGE + i as u64, Arc::from(page)))
+        .collect()
+}
+
 /// Tiers B and C: the window at the top, parsed alone like the first
 /// screen's (the exact window chain comes with the batch work).
 fn visible_window(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
@@ -955,7 +1057,7 @@ fn visible_window(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
             }
             (
                 st.content.clone(),
-                st.top.unwrap_or(st.anchor).line_start,
+                visible(&st, &doc.target).start,
                 st.size,
                 st.viewport.rows,
                 st.lang,
