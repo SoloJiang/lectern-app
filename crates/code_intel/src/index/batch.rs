@@ -73,6 +73,9 @@ pub const LARGE_FILE: usize = 256 << 10;
 pub(crate) struct LargeSlot {
     state: Mutex<LargeState>,
     freed: std::sync::Condvar,
+    /// Notified when an acquirer starts waiting (tests: `wait_for_waits`).
+    #[cfg(test)]
+    waited: std::sync::Condvar,
 }
 
 #[derive(Default)]
@@ -83,6 +86,9 @@ struct LargeState {
     turns: u64,
     /// The holder is parked, its extraction's state here.
     parked: Option<ResumeSlot>,
+    /// The `acquire` calls that had to wait for the slot (tests).
+    #[cfg(test)]
+    waits: usize,
 }
 
 /// The slot, held while the slot's holder is this turn; released on drop.
@@ -107,6 +113,8 @@ impl LargeSlot {
     ) -> Option<LargeTurn> {
         let mut st = lock(&self.state);
         let mut revoked = None;
+        #[cfg(test)]
+        let mut counted = false;
         loop {
             if stop() {
                 return None;
@@ -117,6 +125,12 @@ impl LargeSlot {
             if near && let Some(resume) = st.parked.take() {
                 revoked = Some(resume);
                 break;
+            }
+            #[cfg(test)]
+            if !counted {
+                counted = true;
+                st.waits += 1;
+                self.waited.notify_all();
             }
             st = self
                 .freed
@@ -150,6 +164,23 @@ impl LargeSlot {
     /// Whether the holder is parked, its saved state registered.
     pub(crate) fn parked(&self) -> bool {
         lock(&self.state).parked.is_some()
+    }
+
+    /// The `acquire` calls so far that found the slot held and waited.
+    pub(crate) fn waits(&self) -> usize {
+        lock(&self.state).waits
+    }
+
+    /// Blocks until `waits()` reaches `n`; false if `timeout` passes first.
+    /// An acquirer is counted under the lock just before it waits, so once
+    /// this returns true it is waiting (or has since got the slot).
+    pub(crate) fn wait_for_waits(&self, n: usize, timeout: std::time::Duration) -> bool {
+        let st = lock(&self.state);
+        let (st, _) = self
+            .waited
+            .wait_timeout_while(st, timeout, |st| st.waits < n)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.waits >= n
     }
 }
 

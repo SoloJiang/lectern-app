@@ -20,6 +20,7 @@ mod plugin;
 mod prefetch;
 mod read_verify;
 mod refs;
+mod requeue;
 mod schedule;
 mod scopes;
 mod search;
