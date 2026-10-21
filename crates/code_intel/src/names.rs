@@ -137,7 +137,6 @@ impl Inner {
         let Some(project) = self.project(key) else {
             return Names::Unavailable;
         };
-        self.demand(key);
         let Some(inputs) = self.name_inputs(&project) else {
             return Names::Unavailable;
         };

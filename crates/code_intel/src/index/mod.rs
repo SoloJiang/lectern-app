@@ -34,7 +34,6 @@ use crate::extract::{Deadline, Extraction, Lang, LanguageTable, extract};
 use crate::git_access::{GitAccess, LecternGit};
 use crate::grammar::{GrammarChange, GrammarSource};
 use crate::map::{HeadDiff, LiveMap};
-use crate::power::PowerSource;
 use crate::store::Store;
 use crate::watchdog::Watchdog;
 
@@ -49,7 +48,6 @@ pub struct IndexDeps {
     pub executor: Executor,
     pub cache: Cache,
     pub watcher: Watcher,
-    pub power: Arc<dyn PowerSource>,
     pub grammars: Arc<dyn GrammarSource>,
     pub projects: Arc<dyn Projects>,
     /// The activation the tasks belong to and take their guards from.
@@ -168,7 +166,6 @@ pub(crate) struct Inner {
     pub host: Host,
     pub cache: Cache,
     pub watcher: Watcher,
-    pub power: Arc<dyn PowerSource>,
     pub packs: Arc<dyn GrammarSource>,
     pub projects: Arc<dyn Projects>,
     pub watchdog: Watchdog,
@@ -181,7 +178,6 @@ pub(crate) struct Inner {
     pub(crate) batch_project: Mutex<Option<ProjectKey>>,
     /// Some `set_focus` happened: opening a project no longer picks it.
     focused_once: AtomicBool,
-    pub battery: AtomicBool,
     pub(crate) batch: Mutex<BatchRun>,
     rounds: Mutex<Rounds>,
     pub extract: Mutex<ExtractFn>,
@@ -234,6 +230,10 @@ pub(crate) struct Inner {
     /// Another registration of `code_intel.tags` for new projects (tests).
     #[cfg(test)]
     pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
+    /// Run once by the next tier 1 or 2 task, before its existence check
+    /// (tests: the batch tasks run, and stop, in that window).
+    #[cfg(test)]
+    pub before_focus_check: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -259,13 +259,11 @@ impl Indexer {
     }
 
     pub(crate) fn with_git(deps: IndexDeps, git: Arc<dyn GitAccess>) -> Indexer {
-        let battery = deps.power.on_battery();
         let inner = Arc::new_cyclic(|me| Inner {
             me: me.clone(),
             host: Host::new(deps.handle, deps.executor),
             cache: deps.cache,
             watcher: deps.watcher,
-            power: deps.power,
             packs: deps.grammars,
             projects: deps.projects,
             watchdog: deps.watchdog,
@@ -280,7 +278,6 @@ impl Indexer {
             open: Mutex::new(Vec::new()),
             batch_project: Mutex::new(None),
             focused_once: AtomicBool::new(false),
-            battery: AtomicBool::new(battery),
             batch: Mutex::new(BatchRun::default()),
             rounds: Mutex::new(Rounds::default()),
             extract: Mutex::new(Arc::new(extract)),
@@ -310,22 +307,16 @@ impl Indexer {
             verify_checks: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             tables: Mutex::new(None),
+            #[cfg(test)]
+            before_focus_check: Mutex::new(None),
         });
         Indexer { inner }
     }
 
-    /// Subscribes to the power source and the language packs; the plugin
-    /// hands the returned values to `PluginHandle::own`, so they are dropped
-    /// (unsubscribed) on deactivation. Picks up packs already installed.
+    /// Subscribes to the language packs; the plugin hands the returned
+    /// values to `PluginHandle::own`, so they are dropped (unsubscribed) on
+    /// deactivation. Picks up packs already installed.
     pub fn subscribe(&self) -> Vec<Box<dyn Send>> {
-        let power = {
-            let me = Arc::downgrade(&self.inner);
-            self.inner.power.subscribe(Box::new(move |on_battery| {
-                if let Some(inner) = me.upgrade() {
-                    inner.power_changed(on_battery);
-                }
-            }))
-        };
         let grammars = {
             let me = Arc::downgrade(&self.inner);
             self.inner.packs.subscribe(Box::new(move |change| {
@@ -337,7 +328,7 @@ impl Indexer {
         if self.inner.packs.generation() > 0 || !self.inner.packs.installed().is_empty() {
             self.inner.grammar_changed(None);
         }
-        vec![power, grammars]
+        vec![grammars]
     }
 
     /// Handles a `ProjectEvent`: only bumps inputs and requests a reconcile.
@@ -359,20 +350,9 @@ impl Indexer {
         self.inner.set_focus(project, worktree, focus);
     }
 
-    /// The power source changed (`PowerSource::subscribe`).
-    pub fn power_changed(&self, on_battery: bool) {
-        self.inner.power_changed(on_battery);
-    }
-
     /// The language packs changed (`GrammarSource::subscribe`).
     pub fn grammar_changed(&self, change: GrammarChange) {
         self.inner.grammar_changed(Some(change));
-    }
-
-    /// The user asked something of this project (`query`, `names`): on
-    /// battery, tiers 4 and 5 go on until it closes or the power changes.
-    pub fn demand(&self, project: &ProjectKey) {
-        self.inner.demand(project);
     }
 
     /// `CodeIntel::coverage`: memory only, never blocks.
@@ -838,28 +818,6 @@ impl Inner {
         }
     }
 
-    fn power_changed(&self, on_battery: bool) {
-        let was = self.battery.swap(on_battery, Ordering::AcqRel);
-        if was != on_battery {
-            let projects = lock(&self.open).clone();
-            for p in projects {
-                lock(&p.state).demand = false;
-            }
-        }
-        if let Some(me) = self.arc() {
-            me.kick_batch();
-        }
-    }
-
-    pub(crate) fn demand(&self, key: &ProjectKey) {
-        if let Some(p) = self.project(key) {
-            lock(&p.state).demand = true;
-        }
-        if let Some(me) = self.arc() {
-            me.kick_batch();
-        }
-    }
-
     /// Queues a grammar round; `change` None asks for one without a
     /// notification (packs installed before the subscription).
     fn grammar_changed(&self, change: Option<GrammarChange>) {
@@ -982,11 +940,6 @@ impl Inner {
         }
     }
 
-    /// Whether tiers 4 and 5 may run for a project.
-    pub(crate) fn wide_allowed(&self, st: &State) -> bool {
-        !self.battery.load(Ordering::Acquire) || st.demand
-    }
-
     fn coverage(&self, key: &ProjectKey) -> Option<Coverage> {
         let project = self.project(key)?;
         let eviction = project.evictions();
@@ -1019,14 +972,6 @@ impl Inner {
                 TierState::Pending
             }
         };
-        let wide = self.wide_allowed(&st);
-        let deferred = |state: TierState| {
-            if wide || state == TierState::Done {
-                state
-            } else {
-                TierState::Deferred
-            }
-        };
         let others = {
             let o = &st.batch.others;
             let all_done = st.snapshot.as_ref().is_some_and(|s| {
@@ -1053,8 +998,8 @@ impl Inner {
             generation: st.map.provenance.generation(),
             focus,
             subproject: tier(0),
-            worktree: deferred(tier(1)),
-            other_worktrees: deferred(others),
+            worktree: tier(1),
+            other_worktrees: others,
         })
     }
 }

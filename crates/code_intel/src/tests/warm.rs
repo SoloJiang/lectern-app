@@ -51,6 +51,43 @@ fn warm_reopen_extracts_nothing() {
     }
 }
 
+/// Tier 1 finds the opened file stored and queues its access mark: work for
+/// the batch tasks, which may already have run and stopped (the kick of
+/// `set_focus` started one; on the real executor it can run before tier 1's
+/// check, so the hook runs it there). The mark is still made, with no
+/// further operation; the harness's liveness check would fail otherwise.
+#[test]
+fn warm_focus_hit_wakes_the_batch_for_its_touch() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::index::lock;
+
+    let h = Harness::new();
+    let files = fill(&h, 10);
+    h.open();
+    let h = h.reopen(Options::default());
+    h.open();
+    let project = h.indexer.inner().project(&h.key()).expect("open");
+    assert!(!lock(&project.state).batch.has_touches());
+    let executor = h.executor.clone();
+    let ran = Arc::new(AtomicUsize::new(0));
+    let r = ran.clone();
+    *lock(&h.indexer.inner().before_focus_check) = Some(Box::new(move || {
+        r.store(executor.run_until_idle(), Ordering::Release);
+    }));
+    h.current(&files[0].0);
+    h.settle();
+    assert!(
+        ran.load(Ordering::Acquire) > 0,
+        "the batch task ran, and stopped, before tier 1's check"
+    );
+    assert!(
+        !lock(&project.state).batch.has_touches(),
+        "the opened file's hit was marked as used"
+    );
+}
+
 #[test]
 fn warm_extracts_only_the_missing_units() {
     let h = Harness::new();

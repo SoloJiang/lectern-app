@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现；第 5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -345,7 +345,7 @@ pub struct Coverage {
     pub other_worktrees: TierState,  // 第 5 层
 }
 
-pub enum TierState { Pending, Done, Deferred /* 不再产生（ADR 0032），随后续的代码 PR 删除 */ }
+pub enum TierState { Pending, Done }
 ```
 
 调用方：
@@ -433,8 +433,6 @@ pub struct CodeIntelDeps {
     pub executor: lectern_executor::Executor,
     pub cache: lectern_cache::Cache,
     pub watcher: lectern_fs_watch::Watcher,
-    /// 不再使用（ADR 0032）：只传 `AlwaysOnAc`，随后续的代码 PR 删除。
-    pub power: Arc<dyn PowerSource>,
     /// 语言包里的 grammar（ADR 0018）。插件市场实现之前 `app` 传 `NoGrammarPacks`。
     pub grammars: Arc<dyn GrammarSource>,
 }
@@ -450,18 +448,9 @@ impl CodeIntelPlugin {
 // Manifest { provides: [service::<dyn CodeIntel>()], requires: [service::<dyn Projects>()], activation: [AfterFirstFrame] }
 // activate：建空的项目表，provide 服务，订阅 `ProjectEvent`；不做 IO，不加载 grammar。
 // started：对 `open_projects()` 里已经打开的项目各提交一次「打开」处理（见「打开项目与热启动」）；
-//   `PowerSource::subscribe`、`GrammarSource::subscribe` 的返回值交给 `PluginHandle::own`，停用时随守卫 drop。
+//   `GrammarSource::subscribe` 的返回值交给 `PluginHandle::own`，停用时随守卫 drop。
 // 项目关闭、切换当前 worktree 时：drop 这个项目的 `RepoWatch` / `WorktreeWatch`、取消它的任务、对未回复的语义请求调用 `cancel`；
 //   停用时 kernel 撤销守卫和任务，同样的清理在 `Active` 的 `Drop` 里做完（看门狗见「调度、批次与取消」）。
-
-// `PowerSource`、`AlwaysOnAc` 不再使用（ADR 0032），随后续的代码 PR 删除。
-pub trait PowerSource: Send + Sync {
-    /// 当前是否用电池供电。不阻塞。
-    fn on_battery(&self) -> bool;
-    /// 电源状态变化时在任意线程上调用 `f`；`f` 只入队，不阻塞。返回值 drop 时退订。
-    fn subscribe(&self, f: Box<dyn Fn(bool) + Send + Sync>) -> Box<dyn Send>;
-}
-pub struct AlwaysOnAc;
 
 pub trait GrammarSource: Send + Sync {
     /// 已加载、已校验的语言包 grammar（kernel 的 grammar 加载器给出）。阻塞，只在 executor 上调用。
@@ -615,7 +604,7 @@ pub mod site {
     pub fn accepts(lang: &Lang, syntax: RefSyntax, kind: DefKind) -> bool;
 }
 
-/// `test-support`：`FakeGit`、`FakeProjects`（内存里的 `dyn Projects`）、`FakePower`、`FakeGrammars`（可以安装、更新、回滚、撤销的语言包）、`ManualClock`、
+/// `test-support`：`FakeGit`、`FakeProjects`（内存里的 `dyn Projects`）、`FakeGrammars`（可以安装、更新、回滚、撤销的语言包）、`ManualClock`、
 /// 合成仓库的形状（cloudprint 形状、10 万文件）、语言夹具的生成。
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
@@ -1478,13 +1467,13 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 只有最近一次收到 `set_focus` 的项目跑第 3–5 层，其他打开的项目只做第 1、2 层和查询。
 - 第 5 层逐个处理非当前、非 prunable 的 worktree：读它的 index，按批做存在检查，缺的经那个 worktree 根的 `SafeRoot` 读出；原始字节的 OID 与 index 的 OID 相同才抽取（有改动的文件等它成为当前 worktree 时再处理）。处理完一个 worktree 就丢掉它的 `TrackedPaths`。某个 worktree 的 index 变化只让这一个 worktree 重新处理；本次会话已经确认在缓存里的（OID、语言），以及当前映射里有匹配提示的，不再做存在检查、不再排进访问标记。这个集合存 8 字节的键（OID 的前 8 字节与语言混合），10 万个约 1.2 MB，计入常驻内存（「性能」）；键冲突只让一次检查推迟到下次会话。淘汰（配额未满时）、语言包变化和换会话时这个集合清空。
 - 第 1 层只认 `Done`（`Binary` 也算，上限改不了它）：存在检查命中 `TimedOut` 或 `TooLarge` 时按交互截止时间和 4 MiB 上限重做，替换那个单元；每个（OID、版本）在命中或写入成功之后本次会话不再检查，所以重做后仍超时的不会反复重做；读不出来的（文件暂时不在）下次打开时再试。第 2–5 层认缓存里的任何状态。第 1、2 层要的键正在批量层抽取时，它们取消那次抽取、自己抽取，不排在批量任务后面（ADR 0029），批量任务暂停时也不等；第 1 层也接管第 2 层在途的键（换成交互上限），第 2 层不接管第 1、2 层的。
-- 电源（ADR 0032，见「未决问题」3）：第 1–5 层不论接电源还是用电池都照常运行，没有电池专属的行为，`coverage` 不报告 `Deferred`。第 3 步按 ADR 0029 原来的默认值实现了电池策略（`PowerSource`、`AlwaysOnAc`、`testing::FakePower`、`Indexer::power_changed`、`Indexer::demand` 与 `State::demand`、`wide_allowed` 和 `coverage` 里的 `Deferred`、`battery_*` 测试，以及 `services` 的 `TierState::Deferred`），第 4 步之后由单独的代码 PR 删除；在那之前只传 `AlwaysOnAc`，行为与本条相同。
+- 电源（ADR 0032，见「未决问题」3）：第 1–5 层不论接电源还是用电池都照常运行，本 crate 不读电源状态，没有电池专属的行为；`coverage` 每层只有 `Pending` 和 `Done`。
 
 ### 调度、批次与取消
 
 - 第 3–5 层：每个批量线程一个长期任务，循环：取一批 → 存在检查 → 抽取缺的 → 一个写事务写入 → 在批次边界询问 `BackgroundGuard`（暂停时登记 waker、返回 `Pending`）。一批在 64 个文件、读入 2 MiB，或开始 50 ms 之后的第一个文件边界处结束，先到者为准；所以一个大文件可以一直运行到它自己的截止时间。暂停和取消仍在约 50 ms 内生效，靠的是看门狗打断在途的那个文件（见下文），与 ADR 0029「每批约 64 个文件或 50 ms」「取消和暂停在约 50 ms 内生效」的要求一致：单个文件由截止时间约束，50 ms 的响应由看门狗保证。
 - 每批开始时重新选层：第 3 层有剩余就先取第 3 层。第 1、2 层在另外的工作线程上运行，不排在批量任务后面（ADR 0029）。
-- 批量任务的数目：一次唤醒把任务补到批量线程数，一批做完、还留下工作（某层的小队列里有缺的文件）时再补一次。可能产生第 3–5 层工作的每一步之后（打开、关闭、跑第 3–5 层的项目改变、焦点、电源、语言包、核对任务结束）都唤醒一次，所以总是成立：要么没有项目有可做的第 3–5 层工作，要么批量任务数已满。测试的 `Harness` 在每次 `settle` 和 `set_focus` 之后检查这一条，漏掉的唤醒让测试失败。
+- 批量任务的数目：一次唤醒把任务补到批量线程数，一批做完、还留下工作（某层的小队列里有缺的文件）时再补一次。可能产生第 3–5 层工作的每一步之后（打开、关闭、跑第 3–5 层的项目改变、焦点、语言包、核对任务结束，以及批量任务之外排进的工作：第 1、2 层的存在检查命中、要标记访问的单元，第 1、2 层和查询现场抽取的写入）都唤醒一次，所以总是成立：要么没有项目有可做的第 3–5 层工作，要么批量任务数已满。排进访问标记只有一个入口（`Batch::queue_touches`），它返回的 `Wake` 必须交给 `Inner::wake`（`#[must_use]`，clippy 的警告即失败），批量任务之外的写入同样交出一个，所以新增的来源不会漏掉唤醒。测试的 `Harness` 在每次 `settle` 和 `set_focus` 之后检查这一条，漏掉的唤醒让测试失败；`Executor::manual()` 先跑 `Interactive`、`Background` 再跑 `Batch`，批量任务先跑完、第 1 层才命中的次序由 `warm_focus_hit_wakes_the_batch_for_its_touch` 用钩子构造。
 - 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示，缺的抽取。存在检查只读、不标记访问：热启动的耗时就是「已入索引的仓库被认出已入索引」的时间，访问时间的写回不在这条路径上。一次存在检查本身是一批：游标在项目的锁内最多看 4096 个条目，取出至多 500 个提示不匹配的文件（按语言分组查询），缺的进入这一层的小队列，由之后的批次抽取，所以抽取的批次仍按 64 个文件、2 MiB、50 ms 结束。
 - 配额：本次会话自己的写入引起淘汰时（写入前后淘汰代数不同），命名空间已经满了。此后游标的依赖和提示的戳记都用冻结的淘汰代数（命名空间满之前的那一代），淘汰不再让第 3–5 层的游标重新开始，焦点变化也不重建游标（见「输入代数与派生状态」），每个文件在一次会话里由批量层最多抽取一次；被挤出的单元等第 1 层打开它、查询现场用到时（第 4 步）或下次打开项目时再抽取。否则游标会重新抽取刚被挤出的单元，写入又挤出别的单元，不会结束。刚写入的单元的提示按写入之后的淘汰代数记下（冻结后按冻结的那一代）。冻结之后提示不再证明单元在：查询按「完整性的核算」的满额模式与存储核对，被挤出的文件搜索或计为未搜。
 - 替换：写事务在项目的写锁里再查一次存在（所有写入都取这把锁，查过之后、写入之前不会有别的写入落下），已在缓存里的键只在替换时再写。替换只有一种：`Done` 的结果替换 `TimedOut`、`TooLarge` 的单元，不论哪一层写入（第 1 层按交互上限重做的、查询现场抽取的、批量层的）；没有内容的结果从不替换任何单元（不替换 `Done`，也不替换另一个没有内容的单元），层的高低不让没有内容的单元留下而丢掉 `Done` 的结果（`account_too_large_units_are_searched`）。所以写事务里的淘汰除了这种替换只来自配额；cache 把替换计为一次淘汰（每个写事务一次）。写事务和它前后读淘汰代数在项目的写锁里进行：替换了单元、淘汰代数恰好加一的事务记为本 crate 自己的一次，提示、游标和第 5 层用的淘汰代数减去这些次数（替换事务进行期间读到的是它之前的值，cache 的加一与本 crate 的计数之间没有读者能看到多出的一代），所以打开一个大文件不会让全部提示失效、游标重建、第 5 层重来；批量层也不会把它当成配额已满。访问标记的队列仍按 cache 自己的淘汰代数（`Store::touch_pending` 与它比较）。已知限制：同一个替换事务里同时因配额淘汰的单元也被算成替换，本次会话不因它重新检查，等查询用到时或下次打开项目时再抽取。批量层从队列取文件时，跳过入队之后已由第 1、2 层写入（提示已匹配）的文件。
@@ -1698,7 +1687,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ## 测试
 
-全部在 Linux 上运行（`just test -p lectern-code-intel`），不依赖 GPUI，不调用 git 命令行、不访问网络。用到的替身：`testing::FakeGit`（工作区比较、其他 worktree 的 index、blob，按内存里的状态回答并记录调用）、`testing::FakeProjects`（内存里的 `dyn Projects`，可以发 `ProjectEvent`）、fs_watch 的 `FakeBackend` 与手动监听器、`Executor::manual()`、`testing::FakePower`、`testing::ManualClock`（截止时间和限时搜索用，看门狗读同一个时钟）、`cache` 的临时目录。
+全部在 Linux 上运行（`just test -p lectern-code-intel`），不依赖 GPUI，不调用 git 命令行、不访问网络。用到的替身：`testing::FakeGit`（工作区比较、其他 worktree 的 index、blob，按内存里的状态回答并记录调用）、`testing::FakeProjects`（内存里的 `dyn Projects`，可以发 `ProjectEvent`）、fs_watch 的 `FakeBackend` 与手动监听器、`Executor::manual()`、`testing::ManualClock`（截止时间和限时搜索用，看门狗读同一个时钟）、`cache` 的临时目录。
 
 - 语言（`lang_*`）：扩展名到语言、兼容组；语言包认领扩展名，与核心语言冲突时核心语言优先。
 - 抽取（`extract_*`）：每种语言的夹具用 insta 快照记录定义（名字、种类、位置、作用域、可见性、参数个数）和引用名；TS 叠加 JS 的查询；局部变量的引用不在引用名里；二进制和超过上限的内容；`EXTRACTOR_VERSION` 或查询文本变化时查询版本变化。
@@ -1722,7 +1711,6 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 覆盖（`overlay_*`）：`FakeGit` 构造 git 设计「工作区比较」表里的情况，覆盖项与工作区实际内容一致：未暂存的修改、`StagedOnly`（工作区等于基准）、未暂存的删除、未跟踪文件、重命名、`Filtered` 与超过 1 MiB 的文件为 `Unindexable`。
 - 调度（`schedule_*`）：层的先后；第 1、2 层持有 `BusyGuard`、在 `Interactive` / `Background` 上运行，第 3–5 层持有 `BackgroundGuard`、在 `Batch` 上运行；暂停开关在批次边界生效；一次抽取正在运行时打开暂停开关，`ManualClock` 推进 50 ms 内这次抽取返回 `Cancelled`、它的结果没有写入、`indexed` 提示不变，恢复后这个文件先被重新抽取（`schedule_pause_abandons_in_flight`）；一批在 64 个文件、2 MiB 或 50 ms 之后的第一个文件边界处结束，一个 200 ms 的大文件让这一批超过 50 ms、但暂停仍在 50 ms 内打断它；切换 worktree 后游标重建、已写入的不重复抽取；同一 OID 在两个路径上只抽取一次；一个文件以 OID A 排队、读之前被改成 B 时，结果只写在 B 下，A 的键下没有单元，A 的提示不置位（`schedule_key_from_bytes_read`）；第 5 层只抽取缓存里没有、且工作区内容与 index 相同的文件。
 - 语言包（`grammar_*`，用 `testing::FakeGrammars`）：`grammar_installed_*`：安装后新扩展名的跟踪文件和未跟踪文件进入映射并被抽取；`grammar_updated_*`：更新后旧版本的单元不再命中、这种语言的文件按新版本重新抽取，旧版本在途抽取的结果没有写入；`grammar_rolled_back_*`：回滚后之前那个版本写过的单元重新命中、不重新抽取；`grammar_removed_*`：撤销后这种语言的文件从映射和 `coverage` 里消失，查询返回 `UnsupportedLanguage`，在途抽取被取消、结果没有写入；`grammar_merged_*`：连续多个通知并成一轮，结果与逐个处理相同，过时的代数被丢弃；`grammar_lease_*`：`FakeGrammars` 记录模块的卸载，撤销或更新时有一个在途抽取和一个仍被查询持有的 `ParsedFile`，两者都结束之前模块没有被卸载，结束之后恰好卸载一次。
-- 电池（`battery_*`）：第 3 步按 ADR 0029 原来的默认值写的测试，ADR 0032 之后不再适用，随删除电池代码的 PR 一起删除（见「建索引的分层」）。
 - 增量（`incremental_*`）：用 `FakeBackend` 驱动 `WorktreeBatch`，检查「增量更新」表里每个事件让对应的输入代数加一：修改一个文件后按新 OID 抽取、旧 OID 不再返回；目录事件请求一次比较；`rescan`；`meta.refs` 让 HEAD 代数加一；连续事件并成一轮；从后端交出事件到覆盖部分更新完之前 kernel 不静止。
 - 热启动（`warm_*`）：缓存里已有全部单元时重新打开项目，抽取函数一次也没被调用（计数钩子），只有存在检查；删掉一部分单元后只抽取这一部分。
 - 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤（含 Go 的 `Meters(value)` 跳到 `type Meters`）；同一份字节在 `.java` 和 `.js` 下时 `java` 的单元只给出 `.java` 的路径（`goto_oid_language_match`）；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；当前文本的 blob 已入索引时，第 1 步列出的本文件定义不在第 3 步重复出现，现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现（`goto_no_duplicates_*`）；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`NoSymbol`、`UnsupportedLanguage`；从对象库一侧（`TextOrigin::Object`）发起的查询，本文件的候选 `origin` 为 `Object`，由它发起的 `References` 读同一个 blob，不读工作区（`goto_object_origin_*`），也不解析工作区里同一路径的文件（`goto_object_side_parses_only_its_text`）；很多文件定义的名字，第一批里最近的候选排在最前、其余页之后追加、每个定义只出现一次（`goto_popular_name_nearest_first`），其余页在时间盒到时停下、没读的计入未搜（`goto_popular_name_pages_are_time_boxed`）；当前文本的解析保留之后，各个位置的答案与现场解析的相同、不再解析，内容变了就不命中（`goto_kept_parse_answers_as_the_cold_one`），份数、大小和 60 s 的上限（`goto_kept_parses_are_bounded`）。
@@ -1731,7 +1719,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 引用（`refs_*`）：局部变量和参数的 `References` 找到它在作用域里的全部用处（这些位置只在 `@local.reference` 里，不在 tags 引用和 `ci_ref` 里），不查 `ci_ref`、没有 `same_name`；locals 记为程序作用域局部定义的顶层函数，它的同文件引用也被找到；同时被 tags 和 locals 捕获的导出顶层函数（根作用域）`local` 为 false，另一个文件里对它的引用经 `ci_ref` 找到、未入索引的文件经限时搜索找到（`refs_toplevel_captured_by_locals`）；函数体里嵌套的 `const helper = () => …` 同时被两者捕获，`local` 为 true，引用只在外层函数的作用域里找，其他文件里同名的 `helper` 不出现（`refs_nested_helper_is_local`）；locals 证明的同文件引用是调用方；同一处引用、同一个文件在多个来源里出现时只列一次、只解析一次（`refs_no_duplicates_*`）；被局部变量遮住的同名引用被丢弃；没有依据的跨文件引用在 `same_name`；测试 `Resolver` 的 `bind` 让跨文件引用成为调用方；未入索引的部分经限时搜索找到；`ci_ref` 一轮找到的在读搜索范围之前交出，限时搜索命中之后的结果按计时交出、不等下一个命中（`refs_indexed_references_go_out_before_the_search`、`refs_search_batches_go_out_on_time`）；被查定义的局部性取自它所在文件的那一次解析，`Named` 列出候选时不解析文件（`refs_nested_helper_from_named_is_local`、`refs_named_parses_no_file`）。
 - 名字表（`names_*`）：去重、NFC、只含当前 worktree 映射里的 OID（另一个 worktree 独有的名字不在其中）；第一次 `names` 返回 `Building`，`Names` 事件带着表，监听方保存后再调 `names` 返回 `Ready`、是同一个 `Arc`（`names_ready_after_build`）；构建期间重复调用不另起构建；代数落后时重建、期间返回旧表；所有持有者释放后再调用重新构建；表被持有时索引写入新的批次，`ManualClock` 推进过间隔后后台重建并发出带新 `Arc` 的 `Names`，间隔内的多次变化只触发一次重建，持有者释放后不再重建（`names_refresh_while_held`）。
 - 升级（`escalate_*`）：Java 多候选和唯一 `NameOnly` 候选时调用提供者，其他语言不调用；提供者的 token 为 `Dead` 时不调用；结果相同时 `Same`、不同时 `Ready`；`head_only` 的提供者只在 `head_clean` 时被调用，返回的位置里内容与 HEAD 不同的文件被丢掉；只暂存、未提交的文件（工作区等于 index、不等于 HEAD）的 `head_clean` 为 false，提交之后为 true；index 变化之后、新的工作区比较完成之前为 false（`head_dirty_*`）；登记 drop 后不再调用；SCIP 与 jdtls 两个假提供者同时处理 Java 时，按两种回复顺序得到相同的合并结果，HEAD 相同的文件取 SCIP 的位置、有改动的文件取 jdtls 的位置，过时 ID 的回复被丢弃，查询关闭时未回复的请求收到 `cancel`；SCIP 先回复、已知候选都与 HEAD 相同时，jdtls 的请求不被取消，它之后返回的未跟踪文件里的位置进入合并结果（`escalate_arbitration_*`）；提供者接受请求后注销，只有它在请求中的查询 `semantic` 变为 `Failed`、不再停在 `Pending`，另有 SCIP 回复的查询按剩下的回复重新合并，注销之后到达的回复被丢弃（`escalate_unregister_*`）。
-- 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`；`activate` 之后、第一个项目打开之前没有任何 IO（`FakeGit`、缓存目录、`SafeRoot` 都没有被调用）；依赖 `dyn Projects`；`Results` 事件的顺序与 generation；一次查询从提交到最后一批写入之前 kernel 不静止；停用之后电源、语言包的订阅都已退订，fs_watch 的订阅都已 drop，项目关闭时未回复的语义请求收到 `cancel`（`plugin_teardown_*`）。
+- 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`；`activate` 之后、第一个项目打开之前没有任何 IO（`FakeGit`、缓存目录、`SafeRoot` 都没有被调用）；依赖 `dyn Projects`；`Results` 事件的顺序与 generation；一次查询从提交到最后一批写入之前 kernel 不静止；停用之后语言包的订阅已退订，fs_watch 的订阅都已 drop，项目关闭时未回复的语义请求收到 `cancel`（`plugin_teardown_*`）。
 
 ## 未决问题
 
@@ -1739,7 +1727,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 1. **首发语言范围。** 选 (a)：符号抽取覆盖 ADR 0018 核心里的 TypeScript / JavaScript（含 JSX、TSX）、Rust、Java、Python、Go，第 1 步已按此实现；按 import 解析先做 Java 和 TS（#18、#19），其余语言只按同文件、同目录、同子项目分层。不采用只做 Java 与 TS / JS 的 (b)。产品负责人交给负责推进的 agent 决定，按默认值。
 2. **索引没建完时是否提示。** 选 (a)：不提示，符合「界面不显示索引状态」的规则。不采用在结果末尾显示「仍在搜索」的 (b)。`QueryState::Done(Completeness)` 照常给出完整性，本 crate 不随这个决定改变。产品负责人交给负责推进的 agent 决定，按默认值。
-3. **电池供电时的索引范围。** 选 (b)：不区分电源，始终索引整个仓库；省电模式暂不做。产品负责人决定，记录在 [ADR 0032](../adr/0032.md)；本文改动见「建索引的分层」的电源一条，电池代码的删除见同一条。
+3. **电池供电时的索引范围。** 选 (b)：不区分电源，始终索引整个仓库；省电模式暂不做。产品负责人决定，记录在 [ADR 0032](../adr/0032.md)；本文改动见「建索引的分层」的电源一条，第 3 步的电池代码已删除（「与设计的差异」）。
 
 技术问题都已在上文决定，没有其他未决项。「实际验证」里一度留给设计决定的一项（当前文本的解析与 locals 超出原来 ≤ 10 ms 的分项）已由 [ADR 0037](../adr/0037.md) 决定：份额按第一批计，当前文本的解析按 blob OID 保留，不再有单独的解析分项（「性能」）。
 
@@ -1764,7 +1752,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
    - `store_*` 测试通过（含读取淘汰代数）；`cargo tree -i rusqlite -e normal --depth 1` 仍只列出 `lectern-cache`。
    - `code_intel/warm_100k`（存在检查部分）在预算内。
 3. **映射、调度与增量更新**（前置 B、D）：
-   - `map_*`、`derived_*`、`overlay_*`、`schedule_*`、`grammar_*`、`battery_*`、`incremental_*`、`warm_*` 测试通过。
+   - `map_*`、`derived_*`、`overlay_*`、`schedule_*`、`grammar_*`、`incremental_*`、`warm_*` 测试通过（第 3 步时还有 `battery_*`，已按 ADR 0032 删除）。
    - `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果：工作区文件只经 `SafeRoot` 读取。
    - `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 没有结果。
    - `code_intel/map_100k`、`code_intel/map_100k_bytes`、`code_intel/batch_peak` 在预算内。
@@ -2115,6 +2103,12 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 第三轮（查引用第 2 步按时间盒截断，「与设计的差异」）之后：`just check`、`just test`（1462 个通过，跳过 7 个，新增 `refs_indexed_files_stop_at_the_time_box`）、`just doctest`、`just deny` 通过；`just bench --measure code_intel/references`：`references_100k/all` 779 ms、`/first` 9.04 ms，`references_full/all` 1.17 s、`/first` 10 ms，每次 `Complete`（300 个调用方都在时间盒之内）。
 - 没有验证的：`goto_cold_parse` 在 M 系列上的值。Linux 上 128 KiB 是 30–36 ms，按 ADR 0034 整文件解析约 6 MiB/s 的估算还要加 locals，32 ms 的判定在 macOS 上是否通过要看 CI。
 
+删除电源代码（ADR 0032，「与设计的差异」），基于 8ca16f1，同一台机器；之后 rebase 到包含 #136 的 main（bea815a）。
+
+- `just check`、`just test`（1459 个通过，跳过 7 个；少了 3 个 `battery_*`）、`just doctest`、`just deny` 通过。本 crate `--stress-count 30` 全部通过（729 s）。`rg -n 'PowerSource|AlwaysOnAc|FakePower|Deferred|wide_allowed|power_changed' crates` 没有结果。
+- 去掉 `query` / `names` 里的 `demand` 之后，`account_timed_out_units_are_not_indexed` 的活性检查失败（查询的限时搜索命中 `TimedOut` 的单元、排进访问标记，没有唤醒批量任务）；补上批量任务之外的写入之后的唤醒后通过。
+- 基准（`just bench --measure code_intel/`，负载 1–3）：`warm_100k` 73.1 ms、`warm_100k_touch` 248 ms，`map_100k` 7.68 ms、`map_100k_bytes` 2.65 MB，`batch_peak` 33.3 MB，`disk_100k` 316 MB（9 万个单元、80 次淘汰），`extract_throughput` 4.96 MB/s；`goto_indexed` 1.18 ms / 1.27 ms，`goto_uncached` 1.28 ms / 2.46 ms，`goto_popular` 4.52 ms / 36.7 ms，`goto_full` 1.4 ms / 最大 389 ms，`goto_cold_parse` 23.5 ms，`named_50k` 10.7 ms，`references_100k/all` 816 ms，`references_full/all` 1.09 s，`names_100k` 489 ms，`names_100k_bytes` 4.66 MB，`parse_cache_bytes` 11.6 MB；全部在预算内，合计 477.6 s。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2336,3 +2330,9 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   - 查引用第 2 步读 `ci_ref` 给出的已入索引文件时不看时间盒：每个文件的解析截止时间是交互的 1 s，逐个文件只检查是否已停止，几千个文件用到的名字约 5–15 s，超出 1.9 s 的时间盒和 ADR 0030 的 2 s；`ViewCheck::Grew` 时的第二次调用一样。现在截止时间截到时间盒，逐个文件之前和读 `ci_ref` 的页之间都检查时间盒，到时剩下的文件记为 `NotReached`、没读的单元按索引数出，都计入 `unsearched`（`refs_indexed_files_stop_at_the_time_box`：每次读文件让时钟走 400 ms，12 个用到它的文件，找到的加上未搜的正好是 12、少于 12 个被搜；按原来的代码 12 个都被搜）。基准的 300 个调用方测不出这一点。
   - 本节第二轮里两处「128 KiB」的说法、「验收」第 4 步少了 `goto_cold_parse` 和 `references_full/all` 两条判定，一并改正。限时搜索的超出取决于看门狗 10 ms 的检查间隔，没有改：在抽取的进度回调里比较时刻需要把「自己停下」与「看门狗置位」区分开（否则记为解析失败），而且每次回调读一次时钟，`extract_throughput` 本来就贴着 4 MB/s；超出仍在 20 ms 的取消预算之内（`search_stop` ≤ 1.02 s）。
 - 基准夹具跨运行保留（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0039](../adr/0039.md)，[bench 设计「夹具与 `test-support`」](bench.md#夹具与-test-support)）：`testing::VirtualTemplate` 移到 `testing/template.rs`，另有 `cached(root, n, common, budgets)`：写好的模板按键（`testing::template_key`）保留在 `root/<键>/`，使用前复制一份，对照当前的写入逻辑核对单元数和抽样文件的单元，不符就重写（`template_*`）。一个文件写什么只由 `testing::virtual_unit` 决定，`virtual_repo_sharing` 和核对都用它。`open` 的副本经缓冲区逐字节写出，不用 `std::fs::copy`（APFS 上可能是 `clonefile`，克隆不共用页缓存，限时分页的查询在冷的副本上提前停下；#136 的第一次 macOS CI 里 `goto_popular` 剩下 686 个未搜、`named_50k` 只列出 22016 个，Linux 上同样的查询 36 ms 内完成）；`goto_*` 和 `named_50k` 的检查失败时报告查询用了多久、时间盒多长、副本里存着多少单元和淘汰代数（`code_intel_query.rs` 的 `diagnose`）。`build` 和 `virtual_repo_sharing` 的公共名字改为 `&[(名字, 每几个文件一个)]`，共享仓库另带 `id`（每 2 个文件一个），`code_intel/named_50k` 改用它（约 4.5 万个定义，原来是自己的 6 万文件仓库、约 5.4 万个）。虚拟仓库每 1024 个单元一个事务（原来 64 个），10 万文件写入约为原来的三分之一时间。
+
+删除电源代码（[ADR 0032](../adr/0032.md)「影响」）：
+
+- 删除 `PowerSource`、`AlwaysOnAc`、`testing::FakePower`、`CodeIntelDeps::power` 和 `IndexDeps::power`、`Indexer::power_changed`、`Indexer::demand` 与 `State::demand`、`wide_allowed`、`coverage` 里的 `Deferred`、`battery_*` 测试，以及 `services` 的 `TierState::Deferred`。第 3–5 层总是可以运行；`Indexer::subscribe` 只订阅语言包。上文第 3 步、第 4 步各条里提到这些名字的地方是当时的记录，不再是现状。
+- `query` 和 `names` 不再调用 `demand`，所以它们不再唤醒批量任务。原来这次唤醒掩盖了一个漏掉的唤醒：批量任务之外的写入（第 1、2 层，查询的限时搜索现场抽取）命中了要标记访问的单元，或者写入引起淘汰、让遍历重新开始，都会产生第 3–5 层的工作，却没有唤醒（`account_timed_out_units_are_not_indexed` 在去掉 `demand` 之后由 `Harness` 的活性检查发现）。现在这样的写入之后唤醒一次（「调度、批次与取消」的活性一条已补）。自审又找到一处同类的漏洞：第 1、2 层的存在检查命中时不经写入、直接排进访问标记，也没有唤醒；温热的项目里打开一个文件，`set_focus` 唤醒的批量任务可能先跑完、停下，第 1 层才命中，标记一直等到下一次唤醒，配额已满时常常先被淘汰丢弃，打开过的文件因此更早被淘汰、重新抽取。现在排进访问标记只经 `Batch::queue_touches`，它返回必须交给 `Inner::wake` 的 `Wake`；写入之后的唤醒也是一个 `Wake`（`warm_focus_hit_wakes_the_batch_for_its_touch`，去掉第 1 层这一处唤醒时失败）。
+- 测试里在索引背后删除单元的两处（`derived_eviction_rechecks_and_reextracts_only_what_went`、`view_*` 的 `Evict`）原来靠之后的 `demand` 唤醒，现在直接调用 `kick_batch`。已知限制：同一分库里其他命名空间的写入按分库预算淘汰本 crate 的单元时，第 3–5 层要等下一次唤醒（打开、焦点、文件事件、本 crate 的写入）才重新遍历；原来每次查询都会唤醒一次。查询的结果不受影响：淘汰代数变了，提示不再匹配，查询按「完整性的核算」搜索或计为未搜。

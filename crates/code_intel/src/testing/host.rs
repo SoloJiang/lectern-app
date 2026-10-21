@@ -1,8 +1,7 @@
-//! `FakeProjects` (an in-memory `dyn Projects`), `FakePower`, and a kernel
-//! with one plugin whose `PluginHandle` the tests use.
+//! `FakeProjects` (an in-memory `dyn Projects`) and a kernel with one
+//! plugin whose `PluginHandle` the tests use.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use lectern_kernel::{
@@ -12,8 +11,6 @@ use lectern_services::project::{
     FileList, OpenError, OpenRequest, Package, PackageMatch, ProjectEvent, ProjectKey,
     ProjectSnapshot, Projects, ResolveError, Resolved, Scan, ScanError, WorktreeKey,
 };
-
-use crate::power::PowerSource;
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -164,8 +161,6 @@ impl Projects for FakeProjects {
     }
 }
 
-type PowerFn = Arc<dyn Fn(bool) + Send + Sync>;
-
 /// Live subscribers by ID; a subscription's guard removes its own.
 pub(crate) type Subscribers<F> = Arc<SubscriberList<F>>;
 
@@ -196,49 +191,6 @@ pub(crate) fn subscribe<F: Send + Sync + 'static>(list: &Subscribers<F>, f: F) -
         list: Arc::downgrade(list),
         id,
     })
-}
-
-/// A power source the test switches.
-#[derive(Default)]
-pub struct FakePower {
-    battery: AtomicBool,
-    subscribers: Subscribers<PowerFn>,
-}
-
-impl FakePower {
-    pub fn new(on_battery: bool) -> Arc<FakePower> {
-        let power = FakePower::default();
-        power.battery.store(on_battery, Ordering::Release);
-        Arc::new(power)
-    }
-
-    /// Switches the source and notifies the subscribers.
-    pub fn set(&self, on_battery: bool) {
-        self.battery.store(on_battery, Ordering::Release);
-        let subscribers: Vec<PowerFn> = lock(&self.subscribers)
-            .1
-            .iter()
-            .map(|(_, f)| f.clone())
-            .collect();
-        for f in subscribers {
-            f(on_battery);
-        }
-    }
-
-    /// Subscriptions not dropped yet.
-    pub fn subscribers(&self) -> usize {
-        lock(&self.subscribers).1.len()
-    }
-}
-
-impl PowerSource for FakePower {
-    fn on_battery(&self) -> bool {
-        self.battery.load(Ordering::Acquire)
-    }
-
-    fn subscribe(&self, f: Box<dyn Fn(bool) + Send + Sync>) -> Box<dyn Send> {
-        subscribe(&self.subscribers, Arc::from(f))
-    }
 }
 
 /// A kernel running one plugin that does nothing but hand out its

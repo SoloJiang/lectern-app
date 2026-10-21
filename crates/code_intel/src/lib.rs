@@ -15,7 +15,6 @@ mod git_access;
 mod grammar;
 mod lang;
 mod locals;
-mod power;
 mod resolve;
 mod rules;
 mod semantic;
@@ -43,7 +42,6 @@ pub use crate::grammar::{
     GrammarChange, GrammarChangeKind, GrammarLease, GrammarSource, LoadedGrammar, NoGrammarPacks,
 };
 pub use crate::plugin::{CodeIntelDeps, CodeIntelPlugin, CodeIntelService};
-pub use crate::power::{AlwaysOnAc, PowerSource};
 pub use crate::watchdog::{
     CHECK_INTERVAL, Clock, Due, PauseProbe, Starter, SystemClock, WATCHDOG_THREAD, Watchdog,
     WatchdogRun, WatchdogStop,

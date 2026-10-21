@@ -345,9 +345,6 @@ impl Inner {
     /// `CodeIntel::query`: an entry and a task. Returns at once.
     pub(crate) fn query(self: &Arc<Self>, query: Query) -> QueryId {
         let project = self.project(&query.project);
-        if project.is_some() {
-            self.demand(&query.project);
-        }
         let cancel = Arc::new(AtomicBool::new(false));
         let state = if project.is_some() {
             QueryState::Running

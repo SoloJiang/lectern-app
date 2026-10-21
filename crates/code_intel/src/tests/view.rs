@@ -219,7 +219,7 @@ fn change(h: &Harness, kind: Kind, c: Change) -> HookFn {
         Change::Commit => Box::new(move |inner, snap| {
             commit(inner, snap, target, contents(target).0.as_bytes());
         }),
-        Change::Evict => Box::new(move |_, snap| {
+        Change::Evict => Box::new(move |inner, snap| {
             let eff = snap.map.effective(target).expect("in the map");
             let version = Version::of(&eff.lang);
             let found = snap
@@ -232,6 +232,9 @@ fn change(h: &Harness, kind: Kind, c: Change) -> HookFn {
                 write.remove_unit(f.unit);
             }
             let _ = write.commit();
+            // Removed behind the indexer's back: nothing of its own kicks
+            // the batch tasks, which start their walks over.
+            inner.arc().expect("live").kick_batch();
         }),
         Change::Map => Box::new(move |inner, snap| {
             git.write("main", target, contents(target).1.as_bytes());
