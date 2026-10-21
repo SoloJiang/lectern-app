@@ -263,6 +263,9 @@ impl Model {
                         opened_at: "".into(),
                         files: Scan::Pending,
                         packages: Scan::Pending,
+                        // Stays pending until the directory table is built
+                        // here (file_reader design, prerequisite B).
+                        dirs: Scan::Pending,
                     }),
                 };
                 let wanted = Wanted {
@@ -298,6 +301,7 @@ impl Model {
                         opened_at: opened_at.clone(),
                         files: Scan::Pending,
                         packages: Scan::Pending,
+                        dirs: Scan::Pending,
                     }),
                 };
                 let wanted = Wanted {

@@ -55,6 +55,7 @@ impl Model {
                         opened_at: wanted.opened_at.clone(),
                         files: Scan::Pending,
                         packages: Scan::Pending,
+                        dirs: Scan::Pending,
                     },
                 })
             }
@@ -381,11 +382,13 @@ fn changed(old: &ProjectSnapshot, new: &ProjectSnapshot) -> ChangedParts {
     };
     let files = |s: &ProjectSnapshot| s.active.as_ref().map(|a| a.files.clone());
     let packages = |s: &ProjectSnapshot| s.active.as_ref().map(|a| a.packages.clone());
+    let dirs = |s: &ProjectSnapshot| s.active.as_ref().map(|a| a.dirs.clone());
     ChangedParts {
         worktrees: old.worktrees != new.worktrees,
         active: tree(old) != tree(new),
         files: files(old) != files(new),
         packages: packages(old) != packages(new),
+        dirs: dirs(old) != dirs(new),
     }
 }
 

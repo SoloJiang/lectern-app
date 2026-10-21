@@ -427,6 +427,7 @@ impl FakeGit {
                 opened_at: "".into(),
                 files: Scan::Ready(files),
                 packages: Scan::Ready(packages.into()),
+                dirs: Scan::Pending,
             }),
         }
     }

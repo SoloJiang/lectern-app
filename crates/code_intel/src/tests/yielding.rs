@@ -849,6 +849,7 @@ fn yield_parked_item_of_another_project_is_given_up() {
             opened_at: "".into(),
             files: Scan::Ready(Arc::new(list.build())),
             packages: Scan::Ready(Arc::from(Vec::new())),
+            dirs: Scan::Pending,
         }),
     });
     h.indexer.project_event(&event);

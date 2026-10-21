@@ -86,6 +86,30 @@ impl Service for dyn CodeIntel {
     const MULTIPLE: bool = false;
 }
 
+/// 依赖根里允许读的文件（ADR 0033「只读声明和源码的扩展名」）。以 `.` 开头的一项是
+/// 文件名的后缀（`.d.ts` 也以 `.ts` 结尾，单列出来与 ADR 的清单对照），其余是完整的
+/// 文件名；文件名按字节比较，区分大小写。`code_intel` 的依赖层和 `file_reader` 打开
+/// 依赖文件时都只用这一份，不在别处另列。
+pub const DEPENDENCY_EXTENSIONS: &[&str] = &[
+    // TypeScript / JavaScript
+    ".d.ts",
+    ".d.mts",
+    ".d.cts",
+    ".ts",
+    ".tsx",
+    "package.json",
+    // Rust
+    ".rs",
+    "Cargo.toml",
+    // Go
+    ".go",
+    "go.mod",
+    // Python
+    ".py",
+    ".pyi",
+    "RECORD",
+];
+
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Focus {
     /// 当前打开的文本：完整文件阅读里的文件，或 Diff 里正在看的那一侧。第 1 层。

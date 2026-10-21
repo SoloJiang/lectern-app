@@ -1132,6 +1132,7 @@ fn goto_site_queries_of_every_open_project() {
             opened_at: "".into(),
             files: Scan::Ready(Arc::new(files.build())),
             packages: Scan::Ready(Arc::from(Vec::new())),
+            dirs: Scan::Pending,
         }),
     });
     h.indexer.project_event(&event);

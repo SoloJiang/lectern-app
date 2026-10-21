@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现，其余步骤尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现，其余步骤尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -95,7 +95,12 @@ pub trait Reader: Send + Sync {
 
 /// `share_object` 的登记。drop 时注销（任何线程，不阻塞）；同一个 OID 登记多次时，最后一个 drop 才移除。
 /// 已经打开的文档自己持有它用到的那份 `Arc`，到文档关闭为止，不受注销影响。
-pub struct ObjectShare { /* Weak<登记表>, OID, 登记序号 */ }
+/// `services` 不知道登记表的类型：本 crate 用 `new` 构造，传入的注销回调持有 `Weak<登记表>`、OID 和登记序号，
+/// drop 时调用一次（与 `code_intel::ProviderRegistration` 相同）。不序列化。
+pub struct ObjectShare { /* 注销回调 */ }
+impl ObjectShare {
+    pub fn new(release: impl FnOnce() + Send + 'static) -> Self;
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct OpenTicket(pub u64);
@@ -140,14 +145,17 @@ pub enum Anchor {
 ```rust
 /// 当前 worktree 的目录表，由 `project` 在 `FileList` 就绪之后在后台建（ADR 0030），与它来自同一份文件列表。
 /// 只读、不做 IO，任何线程可调用。
-pub struct DirTable { /* dirs: Box<[Dir]>, names: Box<str>, subdirs: Box<[u32]>, files: Box<[u32]>, list: Arc<FileList> */ }
+pub struct DirTable { /* dirs: Box<[Dir]>, names: Box<str>, subdirs: Box<[DirId]>, files: Box<[u32]>, list: Arc<FileList> */ }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct DirId(pub u32);
+pub struct DirId(pub u32);   // 表里的下标，根为 0
 
 impl DirTable {
+    /// 建表（「数据结构」的「目录表」）。纯计算，`project` 在 `Background` 任务里调用；反序列化也经它。
+    pub fn new(list: Arc<FileList>) -> DirTable;
     pub fn files(&self) -> &Arc<FileList>;    // 建表用的那份文件列表
     pub fn root(&self) -> DirId;
+    pub fn len(&self) -> usize;               // 目录数，含根；`is_empty` 总是 false
     pub fn find(&self, dir: &str) -> Option<DirId>;          // 二分查找
     pub fn path(&self, dir: DirId) -> &str;                  // 根为 ""
     pub fn name(&self, dir: DirId) -> &str;
@@ -168,7 +176,7 @@ pub fn finder_cmp(a: &str, b: &str) -> Ordering;
 ```
 
 - `ActiveTree` 增加 `dirs: Scan<Arc<DirTable>>`：`files` 为 `Ready` 之后才可能 `Ready`；`ChangedParts` 增加 `dirs: bool`。目录表单独一代发布，不推迟 `files` 的就绪（`project/open_100k/files` 不变）。
-- 不序列化内部布局：序列化为 `{ "dirs": [[路径, 父下标], …] }`，反序列化按 `FileList` 重建排序，与 `FileList` 的做法相同。
+- 不序列化内部布局：序列化为 `{ "dirs": [[路径, 父下标], …], "files": FileList }`（根的父下标为 null），反序列化只读 `files`（经 `FileListBuilder`），用 `DirTable::new` 重建，不信任 `dirs`，与 `FileList` 的做法相同。
 
 ### `syntax` 的公开项
 
@@ -892,7 +900,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `#[gpui::test]`：元素只为可见的显示行排版（计数的排版钩子）；64 MiB 文件的滚动位置在 `RowPos` 与像素之间换算、拖动滚动条到末尾；长行折行与改变宽度后的重新折行；⌘F 的结果跳转；⌘[ / ⌘] 的历史；进入编辑、改动后 Esc 弹出确认、保存冲突时出现提示行；`leave_guard_*`：有未保存改动时 `Reader::open`、后退前进（探针触发）、`LeaveScope::Worktree` / `Project` / `Window` / `App` 都先弹出确认，取消后文档和缓冲区不变、`ReaderEvent::Open` 为 `Cancelled`，保存冲突时不通过，不保存时通过，没有改动时不弹出；编辑时 ⌘[ / ⌘] 改变缩进、不触发后退；Files 的展开、折叠、目录链、定位当前文件、Finder 顺序。测试直接构造 `DocSnapshot` 和 `DirTable`，不做文件 IO。
 - UI 探针完成后（[#6](https://github.com/SoloJiang/lectern-app/issues/6)），阅读视图、编辑模式、Files 的语义树用 insta 快照验收；减弱动态效果时查找栏的展开没有位移。
 
-`project`：`dirs_*`（目录表与朴素构造对照、Finder 顺序、折叠链、子模块、空列表、反序列化乱序的输入）；`finder_cmp` 的表驱动测试（`file2` < `file10`、`A` 与 `a`、数字前导零）。`platform`：`replace_file_*`（见「对其他 crate 的要求」）。`git`：`merge3_*`。
+`services`（目录表的构建在 `DirTable::new` 里）：`dirs_*`（目录表与朴素构造对照、Finder 顺序、折叠链、子模块、空列表）、`dir_table_*`（序列化形式、反序列化乱序和错误的 `dirs`）；`finder_cmp` 的表驱动测试（`file2` < `file10`、`A` 与 `a`、数字前导零）。`project`：文件列表换代后目录表单独一代发布（`ChangedParts::dirs`），`dirs` 只在 `files` 就绪之后就绪、与它来自同一份列表。`platform`：`replace_file_*`（见「对其他 crate 的要求」）。`git`：`merge3_*`。
 
 夹具：只用合成的源码，由 `bench` 的生成器按大文件调研的形状生成（TS、Rust、JSON、压缩 JS、64 MiB），放在 `target/` 下，不提交。
 
@@ -901,7 +909,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 以下改动各由对应 crate 的 PR 完成，写 `Refs #10`，在「验收」里列为前置条件。
 
 - `services`：`reader` 模块（「接口」）；`project` 模块的 `DirTable`、`DirId`、`finder_cmp`、`ActiveTree::dirs`、`ChangedParts::dirs`；`code_intel` 模块增加 `pub const DEPENDENCY_EXTENSIONS: &[&str]`（ADR 0033 允许的扩展名，`code_intel` 的依赖层改用它，两边只有一份）。
-- `project`：文件列表换代之后，在 `Background` 任务里（`BusyGuard`）建目录表、单独一代发布；`plugin/project/resident_100k` 的份额在同一个 PR 里核对（目录表 ≤ 1.5 MB，合计仍 < 16 MB）；新增 `project/dirs_100k`、`project/dirs_100k_bytes`。
+- `project`：文件列表换代之后，在 `Background` 任务里（`BusyGuard`）用 `DirTable::new` 建目录表、单独一代发布；`plugin/project/resident_100k` 的份额在同一个 PR 里核对（目录表 ≤ 1.5 MB，合计仍 < 16 MB）；新增 `project/dirs_100k`、`project/dirs_100k_bytes`。
 - `platform`：保存用的原子替换。
 
   ```rust
@@ -964,7 +972,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 前置条件（其他 crate 的 PR，写 `Refs #10`）：
 
 - A. `services`：`reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`；`rg -n 'pub trait Reader' crates/services/src` 有一处，`dyn Reader` 的 `ID == "reader"`、`MULTIPLE == false` 的测试通过。
-- B. `project`：目录表；`dirs_*` 测试通过，`project/dirs_100k`、`project/dirs_100k_bytes`、`plugin/project/resident_100k` 在预算内。
+- B. `project`：目录表的构建与发布；「测试」里 `project` 的一条通过，`project/dirs_100k`、`project/dirs_100k_bytes`、`plugin/project/resident_100k` 在预算内。
 - C. `platform`：`SafeRoot::replace_file`；`replace_file_*` 测试通过。已完成：接口、步骤和错误见 [platform 设计「原子替换」](platform.md#原子替换)。
 - D. `git`：`merge3`、`Text::shared`；`merge3_*` 测试通过，`Text::shared` 返回的 `Arc` 与 `Text::new` 收到的是同一份（`Arc::ptr_eq`）。
 - E. `workspace` 的 `dyn Contributions`（#30）、`ui` 的代码配色与等宽度量（#6）：第 7 步之前。离开守卫（`register_leave_guard`、窗口关闭回调）和 `Quit` Action：第 8 步之前，没有它们编辑模式不上线。
@@ -1025,6 +1033,13 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。
 - 没有在 macOS 上运行：`health` 在 macOS 上读 `ThreadCpuClock` 的 `thread_info` 实现，只由 macOS CI 覆盖（`health_global_on_real_clocks`）；本步没有 bench 条目（「验收」第 1 步没有列出，`syntax/*` 的基准从第 2 步开始）。
 
+前置条件 A（`services`），在 Linux（x86_64 容器）上运行（`services` 不依赖 GPUI）：
+
+- `just test -p lectern-services`：50 个测试通过。新增：`reader_service_id_and_multiple`（`ID == "reader"`、`MULTIPLE == false`，`service::<dyn Reader>()` 的键相同）、`reader_is_a_shared_trait_object`、`object_share_releases_once_on_drop`（在另一个线程上 drop，回调只调用一次）、`reader_targets_round_trip`（两种来源、三种 `Anchor`、SHA-1 与 SHA-256 的 `expect`、文件夹项目）、`reader_event_round_trips`；`dirs_match_a_naive_construction`、`dirs_children_are_in_finder_order`、`dirs_fold_single_child_chains`、`dirs_submodules_are_files`、`dirs_empty_list_has_only_the_root`、`finder_cmp_cases`；`dir_table_serializes_dirs_and_files`、`dir_table_deserializes_from_the_file_list`（乱序、错误、缺少的目录都按 `files` 重建，不合法的路径计入 `skipped`）；`dependency_extensions_are_the_adr_0033_list`。`project_snapshot_round_trips` 的样本带上目录表，检查反序列化后 `dirs.files()` 与 `files` 相等。
+- `rg -n 'pub trait Reader' crates/services/src` 只有一处（`crates/services/src/reader/mod.rs`）。
+- 改到 `ActiveTree` 和 `ChangedParts` 字面量的 crate：`just test -p lectern-project`（123 个）、`just test -p lectern-code-intel`（344 个）全部通过，`project` 的快照没有变化。
+- `just check`（格式、架构规则、文档链接、clippy `-D warnings`，Linux 上不依赖 GPUI 的全部 crate 的全部目标）、`just deny` 通过；`services`、`project` 的文档测试（0 个）通过。没有新增依赖。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1037,3 +1052,14 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `health` 按（语言、grammar 版本）登记和停用：TS 和 TSX 来自同一个 grammar crate、grammar 版本相同，各自判定。每个线程第一次登记时打开 `ThreadCpuClock`、之后复用（线程局部）；检查在途项时读不到某个线程的 CPU 时钟（线程已退出）就当作它不在运行。测试经内部的 `Clocks` 换成测试时钟。
 - 依赖：第 1 步只用 `tree-sitter`、十个 grammar crate、`lectern-platform`（`ThreadCpuClock`）、`memchr`，`insta`（dev）；「依赖」表里的其余依赖随后续步骤加入。查询结果的迭代用 `tree-sitter` 再导出的 `StreamingIterator`，不直接依赖 `streaming-iterator`。
 - 扩展名与整文件名：JSON 另认 `jsonc`、`jsonl`；`Cargo.lock`、`poetry.lock`、`uv.lock`、`Pipfile` 是 TOML，`package-lock.json`、`.babelrc`、`.eslintrc` 是 JSON；扩展名先按原样找，找不到再按小写找（与 `code_intel` 相同）。规则族：JSON 为 `Json`，Markdown 为 `Markup`，其余（含 YAML、TOML）为 `Code`。
+
+前置条件 A（`services`）。下面只记上文「接口」没有定下、实现时定下的形状：
+
+- `DirTable::new` 在 `services` 里。上文只写了「由 `project` 建」，没有构造器；`DirTable` 的字段是私有的（与 `FileList` 一样），反序列化又要重建，所以构建只能放在 `services`，`project`（前置条件 B）在后台任务里调用它。目录表本身的测试（`dirs_*`、`finder_cmp`）因此也在 `services`，前置条件 B 只剩发布与基准。已改「接口」「测试」「对其他 crate 的要求」「验收」。
+- 序列化形式多了 `files`。上文写的是 `{ "dirs": [[路径, 父下标], …] }`，但目录的文件是 `FileList` 里的下标，没有文件列表就不能重建，反序列化的结果也不能只靠 `dirs` 保证不变式。实现写出 `dirs` 和 `files`，读回时只用 `files` 经 `DirTable::new` 重建，`dirs` 不读。`ActiveTree` 序列化时文件列表因此出现两次；读回之后 `dirs.files()` 与 `ActiveTree::files` 相等，但不是同一个 `Arc`。已改「接口」。
+- 布局：`DirId` 是按路径字节序排好的下标，根为 0，父目录排在子目录之前，`find` 二分查找；每个目录 20 字节（路径、子目录、文件三段区间的终点，父目录，子树文件数；起点取上一个目录的终点），`names` 存完整路径，`path` 直接返回切片；`subdirs` 存为 `Box<[DirId]>`（`DirId` 是 `repr(transparent)`）。另有 `len`、`is_empty`，供序列化和探针遍历。`fold_end` 对根也按同一规则，视图决定根要不要折叠。
+- `ObjectShare` 包着实现方传入的注销回调（`ObjectShare::new`），与 `code_intel::ProviderRegistration` 相同：`services` 不知道登记表的类型。已改「接口」。
+- 派生：`ReadTarget`、`Anchor`、`OpenTicket`、`OpenOutcome` 另派生 `Hash`，`Anchor`、`OpenOutcome` 另派生 `Copy`；`ReaderEvent` 派生 `Clone`、`PartialEq`、`Eq`、`Debug` 和 serde（`TestKernel::emitted` 要 `Clone`）。
+- `TextOrigin` 现在只有 `Worktree`、`Object`。`Dependency` 和 `DepRoot` 是 code_intel「验收」第 9 步的前置条件「`services` 的依赖类型」，随它加入；`ReadTarget::origin` 直接用 `TextOrigin`，到时不用改 `reader` 模块。
+- `DEPENDENCY_EXTENSIONS` 取 ADR 0033 的全部条目（TS、Rust、Go、Python 四组共 13 项），不只是 TS 依赖层用到的六项；以 `.` 开头的一项是文件名的后缀，其余是完整的文件名，按字节比较。`code_intel` 还没有依赖层（第 9 步），没有现成的列表可以移过来，依赖层实现时直接用这一份。
+- `project` 在前置条件 B 之前：构造 `ActiveTree` 的三处填 `Scan::Pending`，`changed` 比较新旧快照的 `dirs`，所以 `dirs` 一直是 `Pending`（[project 设计「与设计的差异」](project.md#与设计的差异)）。`code_intel` 的测试辅助和测试同样填 `Pending`。

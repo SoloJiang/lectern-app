@@ -79,7 +79,7 @@ fn project_event_shape() {
     event::<ProjectEvent>();
 
     let parts = ChangedParts::default();
-    assert!(!parts.worktrees && !parts.active && !parts.files && !parts.packages);
+    assert!(!parts.worktrees && !parts.active && !parts.files && !parts.packages && !parts.dirs);
 
     let key = ProjectKey::Git {
         common_dir: path("/r/.git"),
@@ -259,6 +259,7 @@ fn sample_snapshot() -> ProjectSnapshot {
             root: path("/r"),
             worktree: Some(main),
             opened_at: Arc::from("crates/a"),
+            dirs: Scan::Ready(Arc::new(DirTable::new(files.clone()))),
             files: Scan::Ready(files),
             packages: Scan::Ready(packages),
         }),
@@ -280,6 +281,18 @@ fn project_snapshot_round_trips() {
     assert_eq!(files.skipped(), 1);
     assert_eq!(files.find("crates/a/run.sh"), Some(FileKind::Executable));
     assert_eq!(files.oid(2), Some(BlobId::Sha1([2; 20])));
+    let Some(ActiveTree {
+        dirs: Scan::Ready(dirs),
+        ..
+    }) = &back.active
+    else {
+        panic!("active tree with a directory table");
+    };
+    assert_eq!(dirs.files(), files, "rebuilt from the same list");
+    assert_eq!(
+        dirs.find("crates/a").map(|d| dirs.dir_files(d).len()),
+        Some(2)
+    );
 
     let folder = ProjectSnapshot {
         key: ProjectKey::Folder { root: path("/f") },
@@ -290,6 +303,7 @@ fn project_snapshot_round_trips() {
             opened_at: Arc::from(""),
             files: Scan::Unavailable(ScanError::IndexUnreadable(Arc::from("bad index"))),
             packages: Scan::Pending,
+            dirs: Scan::Unavailable(ScanError::IndexUnreadable(Arc::from("bad index"))),
         }),
         ..snapshot
     };
@@ -336,6 +350,7 @@ fn project_events_round_trip() {
                 active: false,
                 files: true,
                 packages: false,
+                dirs: true,
             },
         },
         ProjectEvent::Closed { project: key },
@@ -490,4 +505,58 @@ fn blob_id_bytes_and_hex() {
     assert_eq!(round_trip(&sha256), sha256);
     assert!(serde_json::from_str::<BlobId>("\"abc\"").is_err());
     assert!(serde_json::from_str::<BlobId>("[1,2]").is_err());
+}
+
+fn dir_table(paths: &[&str]) -> DirTable {
+    let mut b = FileList::builder();
+    for p in paths {
+        b.push(p, FileKind::File);
+    }
+    DirTable::new(Arc::new(b.build()))
+}
+
+#[test]
+fn dir_table_serializes_dirs_and_files() {
+    let table = dir_table(&["src/b.rs", "README", "src/a/x.rs"]);
+    assert_eq!(
+        serde_json::to_string(&table).unwrap(),
+        concat!(
+            r#"{"dirs":[["",null],["src",0],["src/a",1]],"#,
+            r#""files":{"entries":[["README","File",null],["src/a/x.rs","File",null],["src/b.rs","File",null]],"skipped":0,"truncated":false}}"#,
+        )
+    );
+    assert_eq!(round_trip(&table), table);
+    assert_eq!(round_trip(&DirId(7)), DirId(7));
+
+    let empty = dir_table(&[]);
+    assert_eq!(round_trip(&empty), empty);
+    assert_eq!(round_trip(&empty).len(), 1, "only the root");
+}
+
+#[test]
+fn dir_table_deserializes_from_the_file_list() {
+    // Shuffled, wrong and missing directories from another process: the
+    // table is rebuilt from `files`, which goes through the builder.
+    let json = concat!(
+        r#"{"dirs":[["src/a",0],["zzz",5],["",null]],"#,
+        r#""files":{"entries":[["src/b.rs","File",null],["src/a/x.rs","File",null],["../x","File",null],["docs/y.md","File",null]],"skipped":0,"truncated":false}}"#,
+    );
+    let table: DirTable = serde_json::from_str(json).expect("deserializes");
+    assert_eq!(
+        format!("{table:?}"),
+        format!("{:?}", dir_table(&["src/a/x.rs", "src/b.rs", "docs/y.md"]))
+    );
+    assert_eq!(
+        format!("{table:?}"),
+        r#"DirTable { dirs: ["", "docs", "src", "src/a"], files: 3 }"#
+    );
+    assert_eq!(table.files().skipped(), 1);
+    assert_eq!(table.find("zzz"), None);
+    assert!(table.find("docs").is_some());
+
+    // `files` is required; a bad file list fails the whole table.
+    assert!(serde_json::from_str::<DirTable>(r#"{"dirs":[]}"#).is_err());
+    let bad =
+        r#"{"dirs":[],"files":{"entries":[["a","File","xyz"]],"skipped":0,"truncated":false}}"#;
+    assert!(serde_json::from_str::<DirTable>(bad).is_err());
 }

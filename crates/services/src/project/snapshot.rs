@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::{FileList, Package};
+use super::{DirTable, FileList, Package};
 
 /// A path inside a worktree, `/` separated, no leading or trailing `/`;
 /// the root is "".
@@ -35,8 +35,9 @@ pub struct WorktreeKey(pub Arc<Path>);
 ///
 /// Invariants (kept by `project`): worktree keys and roots are unique, at
 /// most one worktree `is_main`, and `active.worktree` is one of them and
-/// not prunable; `packages` is `Ready` only when `files` is, from the same
-/// file list; all parts of one snapshot come from the same scan.
+/// not prunable; `packages` and `dirs` are `Ready` only when `files` is,
+/// from the same file list; all parts of one snapshot come from the same
+/// scan.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ProjectSnapshot {
     pub key: ProjectKey,
@@ -92,6 +93,10 @@ pub struct ActiveTree {
     pub opened_at: RelPath,
     pub files: Scan<Arc<FileList>>,
     pub packages: Scan<Arc<[Package]>>,
+    /// The directory table of `files` (the Files tree). `Ready` only when
+    /// `files` is, built from the same list (`DirTable::files`); published
+    /// in its own generation after `files`, so it never delays them.
+    pub dirs: Scan<Arc<DirTable>>,
 }
 
 /// A part of the snapshot that is computed in the background.

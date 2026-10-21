@@ -521,3 +521,34 @@ fn provider_registration_unregisters_once_on_drop() {
     silent.cancel(SemanticRequestId(9));
     assert_eq!(*silent.cancelled.lock().unwrap(), [SemanticRequestId(9)]);
 }
+
+#[test]
+fn dependency_extensions_are_the_adr_0033_list() {
+    // ADR 0033「只读声明和源码的扩展名」, in its order.
+    assert_eq!(
+        DEPENDENCY_EXTENSIONS,
+        [
+            ".d.ts",
+            ".d.mts",
+            ".d.cts",
+            ".ts",
+            ".tsx",
+            "package.json",
+            ".rs",
+            "Cargo.toml",
+            ".go",
+            "go.mod",
+            ".py",
+            ".pyi",
+            "RECORD",
+        ]
+    );
+    for (i, entry) in DEPENDENCY_EXTENSIONS.iter().enumerate() {
+        assert!(!entry.is_empty() && !entry.contains('/'), "{entry}");
+        assert!(entry.len() > 1, "{entry}: a suffix needs more than the dot");
+        assert!(
+            !DEPENDENCY_EXTENSIONS[..i].contains(entry),
+            "{entry} listed twice"
+        );
+    }
+}

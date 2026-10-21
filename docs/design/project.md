@@ -1,6 +1,6 @@
 # project 设计
 
-状态：已实现。第 1 步（清单解析与成员解析，[#68](https://github.com/SoloJiang/lectern-app/pull/68)）、第 2 步（`services` 里的服务接口与数据类型，[#69](https://github.com/SoloJiang/lectern-app/pull/69)）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）、第 5 步（基准，[#127](https://github.com/SoloJiang/lectern-app/pull/127)）；「性能」表的各项都在预算内，见「实际验证」。`services` 的 `BlobId` 与 `FileList::oid`（code_intel 前置条件 A，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）、git 项目的文件列表带 index 的 blob OID（code_intel 前置条件 B，[#114](https://github.com/SoloJiang/lectern-app/pull/114)）已实现。
+状态：已实现。第 1 步（清单解析与成员解析，[#68](https://github.com/SoloJiang/lectern-app/pull/68)）、第 2 步（`services` 里的服务接口与数据类型，[#69](https://github.com/SoloJiang/lectern-app/pull/69)）、第 3 步（项目模型与插件，[#85](https://github.com/SoloJiang/lectern-app/pull/85)）、第 4 步（增量刷新，[#99](https://github.com/SoloJiang/lectern-app/pull/99)）、第 5 步（基准，[#127](https://github.com/SoloJiang/lectern-app/pull/127)）；「性能」表的各项都在预算内，见「实际验证」。`services` 的 `BlobId` 与 `FileList::oid`（code_intel 前置条件 A，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）、git 项目的文件列表带 index 的 blob OID（code_intel 前置条件 B，[#114](https://github.com/SoloJiang/lectern-app/pull/114)）已实现。`services` 的 `DirTable`、`ActiveTree::dirs` 与 `ChangedParts::dirs`（[file_reader](file_reader.md) 前置条件 A）已实现；本 crate 建目录表（前置条件 B）尚未实现，在那之前 `dirs` 一直是 `Pending`（见「与设计的差异」）。
 
 对应 issue [#9](https://github.com/SoloJiang/lectern-app/issues/9)。`project` 把用户打开的路径解析成项目模型：仓库 → worktree → 子项目（[ADR 0006](../adr/0006.md)、[技术调研「Monorepo 与多 worktree 支持」](tech-research.md#monorepo-与多-worktree-支持)），以不可变快照交给视图和其他插件，并通过 `KernelControl::workspace_changed` 提交 `WorkspaceFacts`，驱动 `Activation::Workspace` 的插件（[kernel「依赖与自动启停」](kernel.md#依赖与自动启停)）。
 
@@ -129,6 +129,7 @@ pub struct ChangedParts {
     pub active: bool,    // 当前 worktree 变了
     pub files: bool,
     pub packages: bool,
+    pub dirs: bool,      // 目录表（file_reader 设计「目录表」）
 }
 ```
 
@@ -360,6 +361,9 @@ pub struct ActiveTree {
     pub opened_at: RelPath,            // 打开的路径相对 root；直接打开根时为 ""
     pub files: Scan<Arc<FileList>>,
     pub packages: Scan<Arc<[Package]>>,
+    /// Files 的目录表（file_reader 设计「接口」的目录表）：`files` 为 `Ready` 之后才可能
+    /// `Ready`，来自同一份列表；单独一代发布，不推迟 `files`。
+    pub dirs: Scan<Arc<DirTable>>,
 }
 
 pub enum Scan<T> {
@@ -875,6 +879,10 @@ git 项目的文件列表带 blob OID（code_intel 前置条件 B）：
 
 - `FakeGit` 的 index 每条存（类型，OID），OID 是暂存时工作区内容的 blob OID（`write`、`track`；符号链接取目标，没有文件或是子模块目录时取空内容），index 校验和包括 OID。设计只要求 git 项目每条都有 OID，测试辅助怎样给出 OID 是实现时定的：这样 `FakeGit` 与真实仓库的文件列表逐字相同，`real_repo_*` 能直接比较。已写进「测试」。
 - 预算只改 10 万文件一条（12 MB 改为 16 MB）：code_intel 设计给出的增量是 2 MB（SHA-1）或 3.2 MB（SHA-256），按 SHA-256 取整；`cloudprint` 形状只多约 23 KB，2 MB 不变。已写进「性能」。
+
+`services` 的目录表（file_reader 前置条件 A）：
+
+- `ActiveTree` 多了 `dirs`、`ChangedParts` 多了 `dirs`（已写进「服务接口」「快照」）。本 crate 只在构造 `ActiveTree` 的三处填 `Scan::Pending`，`changed` 比较新旧快照的 `dirs`；目录表的构建和发布是前置条件 B，之前 `dirs` 不会变为 `Ready` 或 `Unavailable`，所以「`dirs` 只在 `files` 就绪之后就绪」自然成立。`DirTable` 的形状和与 file_reader 设计的差异记在 [file_reader 设计「与设计的差异」](file_reader.md#与设计的差异)。
 
 第 5 步：
 

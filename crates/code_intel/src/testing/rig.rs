@@ -255,6 +255,7 @@ impl RepoRig {
                 opened_at: "".into(),
                 files: Scan::Ready(files),
                 packages: Scan::Ready(Vec::new().into()),
+                dirs: Scan::Pending,
             }),
         };
         RepoRig {
