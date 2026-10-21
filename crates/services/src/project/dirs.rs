@@ -65,8 +65,9 @@ impl DirTable {
     /// allocation. Pure computation; for a large list run it on the
     /// executor.
     pub fn new(list: Arc<FileList>) -> DirTable {
-        // Every directory with a file, and all their ancestors. Files of one
-        // directory are contiguous (a run), and each run adds only the
+        // Every directory with a file, and all their ancestors. Consecutive
+        // files of one directory form a run (a directory can have several
+        // runs: `a/B.rs`, `a/b/x`, `a/c.rs`), and each run adds only the
         // ancestors it does not share with the run before it; the list is
         // sorted, so a directory is added again only when a sibling sorts
         // between it and its subdirectories (`a`, `a-b`, `a/c`).
