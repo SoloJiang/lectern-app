@@ -436,6 +436,13 @@ fn crlf_lib(h: &Harness, count: usize) -> Vec<Vec<u8>> {
 #[test]
 fn yield_slot_converts_its_one_file() {
     let (h, clock, kernel) = harness(1);
+    // First in the queue, over 256 KiB: set aside unconverted.
+    let big = big_ts(7, 300 << 10);
+    h.git.eol("lib/a_big.ts");
+    let big_crlf = String::from_utf8(big.clone())
+        .expect("UTF-8")
+        .replace('\n', "\r\n");
+    h.git.add("main", &[("lib/a_big.ts", big_crlf.as_bytes())]);
     let sources = crlf_lib(&h, 3);
     let converted = Arc::new(Mutex::new(Vec::new()));
     let seen = converted.clone();
@@ -446,7 +453,10 @@ fn yield_slot_converts_its_one_file() {
     open_far(&h);
     settle_until(&h, &clock, 20, || sources.iter().all(|s| stored(&h, s)));
     assert!(h.git.canonical_batches().is_empty(), "no batch in a slot");
+    // The small files only: the large one was not converted in a slot.
     assert_eq!(h.git.count("canonical_oid"), sources.len());
+    assert_eq!(aside(&h, 1), ["lib/a_big.ts"]);
+    assert!(!stored(&h, &big));
     // The n-th extraction started after the n-th conversion.
     let converted = converted.lock().unwrap().clone();
     assert_eq!(converted, (1..=sources.len()).collect::<Vec<_>>());

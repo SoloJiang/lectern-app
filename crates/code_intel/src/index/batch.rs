@@ -17,7 +17,8 @@
 //! a core language stops at its next slice boundary when asked to yield and
 //! keeps its state in the task (`Parked`) until the next grant; a language
 //! pack's is given up. Items a slot can't do (over 256 KiB, a pack's
-//! extraction longer than a slot) are set aside, in order, until a batch
+//! extraction longer than a slot, or a canonical-OID check still due once
+//! the switch is on: `check_keys`) are set aside, in order, until a batch
 //! runs with the switch off, and the tier goes on with the items behind
 //! them.
 
@@ -691,8 +692,9 @@ impl Inner {
     }
 
     /// Sets aside an item of tier `t` (4 or 5) that a keepalive slot can't
-    /// do (over `SLOT_MAX_BYTES`, or a language pack's extraction longer
-    /// than a slot): it waits in the tier's set-aside list, in the order it
+    /// do (over `SLOT_MAX_BYTES`, a language pack's extraction longer than
+    /// a slot, or a canonical-OID check still due after the switch came on,
+    /// its extraction dropped: `check_keys`): it waits in the tier's set-aside list, in the order it
     /// was taken, until a batch runs with the switch off
     /// (`drain_aside`), and the tier goes on with the items behind it.
     fn set_aside(
@@ -1608,7 +1610,8 @@ impl Inner {
     /// file is converted now (`canonical_oid`): tiers 1 and 2, and a
     /// keepalive slot, whose one file is converted inside the slot and
     /// before its extraction; there a failed conversion is as an unreadable
-    /// file (`Skip`), as in a batch. Err: what to do without extracting
+    /// file (`Skip`), as in a batch. A slot's file over `SLOT_MAX_BYTES` is
+    /// not converted: the slot sets it aside at once. Err: what to do without extracting
     /// (`TooLarge`, gone).
     #[allow(
         clippy::result_large_err,
@@ -1682,7 +1685,13 @@ impl Inner {
             Source::Other(_) => return Err(Outcome::Skip),
             Source::Object => raw,
             Source::Worktree => match &ctx.tree {
-                Some(_) if defer && mode == Mode::Batch => return Ok((bytes, raw, true)),
+                // A slot's file over `SLOT_MAX_BYTES` is set aside right
+                // after this read: not converted in the slot either.
+                Some(_)
+                    if mode == Mode::Batch && (defer || bytes.len() as u64 > SLOT_MAX_BYTES) =>
+                {
+                    return Ok((bytes, raw, true));
+                }
                 Some(tree) => match self.git.canonical_oid(tree, &item.path, &bytes) {
                     Ok(Some(canonical)) if canonical == item.oid => item.oid,
                     Err(error) if mode == Mode::Batch => {
