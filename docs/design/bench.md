@@ -576,6 +576,7 @@ crates/bench/
 | `agents/append_4k` | 中位数 < 1 ms | [agents](agents.md#性能) | 第 1 步 |
 | `agents/discover_1000` | 中位数 < 500 ms | [agents](agents.md#性能) | `agents` 第 4 步 |
 | `agents/turns_cached_50mb` | 中位数 < 10 ms | [agents](agents.md#性能) | `agents` 第 4 步 |
+| `agents/discover_codex_1000` | 中位数 < 500 ms | [agents](agents.md#性能) | `agents` 第 5 步（[#97](https://github.com/SoloJiang/lectern-app/issues/97)） |
 | `agents/zst_throughput` | 中位数吞吐 ≥ 100 MB/s | [agents](agents.md#性能) | 第 1 步（`agents` 第 3 步先以 `perf_smoke` 测量） |
 | `agents/zst_load_decoded` | 中位数 < 1 ms | [agents](agents.md#性能) | 第 1 步（同上） |
 | `git/open` | 中位数 < 15 ms | [git](git.md#性能) | 第 1 步 |
