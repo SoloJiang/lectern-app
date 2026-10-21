@@ -1,32 +1,26 @@
 //! `spans_*`: whole-file highlight snapshots per language, the token
 //! encoding, the per-line store and how captures resolve.
 
-use std::cell::Cell;
 use std::fmt::Write as _;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
-use crate::highlight::{Budget, Outcome, resolve_for_tests, whole_file, whole_file_in};
+use crate::highlight::{one_shot, resolve_for_tests};
 use crate::spans::{SpansBuilder, push_tokens};
-use crate::tests::health::ManualClocks;
-use crate::{Languages, Token, TokenKind, WindowSpans};
+use crate::{Token, TokenKind, WindowSpans};
 
-fn budget(cancel: &AtomicBool) -> Budget<'_> {
-    Budget {
-        budget: Duration::from_secs(60),
-        cancel,
-        yield_probe: None,
-    }
-}
+use super::{full, lang};
 
-fn highlight(lang: &str, text: &str) -> WindowSpans {
-    let langs = Languages::core();
-    let lang = langs.get(lang).expect("core language");
-    let cancel = AtomicBool::new(false);
-    match whole_file(lang, text.as_bytes(), budget(&cancel)) {
-        Outcome::Done(spans) => spans,
-        other => panic!("{}: {other:?}", lang.name()),
-    }
+/// The whole file through `FullParse` (chunked queries), checked against
+/// one query over the whole tree.
+fn highlight(name: &str, text: &str) -> WindowSpans {
+    let lang = lang(name);
+    let spans = full(lang, text.as_bytes());
+    let reference = one_shot(lang, text.as_bytes());
+    assert_eq!(
+        spans.lines().collect::<Vec<_>>(),
+        reference.lines().collect::<Vec<_>>(),
+        "{name}: FullParse and one query over the tree differ"
+    );
+    spans
 }
 
 /// Each line with its tokens under it: `Kind "text"`.
@@ -134,10 +128,10 @@ fn spans_long_tokens_split_at_24_bits() {
 /// store keeps only lines with tokens and finds them by their start.
 #[test]
 fn spans_builder_splits_lines() {
-    let text = b"ab\n\ncd\r\nef";
-    let mut builder = SpansBuilder::new(text, 100);
-    builder.push(1, 9, TokenKind::Comment);
-    builder.push(9, 10, TokenKind::Keyword);
+    let text: &[u8] = b"ab\n\ncd\r\nef";
+    let mut builder = SpansBuilder::new(&text, 100);
+    builder.push(&text, 1, 9, TokenKind::Comment);
+    builder.push(&text, 9, 10, TokenKind::Keyword);
     let spans = builder.finish(true);
     assert_eq!(spans.range(), 100..110);
     type Line = (u64, Vec<(u32, u32, TokenKind)>);
@@ -253,117 +247,4 @@ fn spans_precedence_per_language() {
         kinds("json", r#"{"k": "v"}"#, r#""v""#),
         Some(TokenKind::String)
     );
-}
-
-#[test]
-fn spans_whole_file_cancelled() {
-    let langs = Languages::core();
-    let lang = langs.get("json").unwrap();
-    let cancel = AtomicBool::new(true);
-    let text = big_json();
-    assert!(matches!(
-        whole_file(lang, text.as_bytes(), budget(&cancel)),
-        Outcome::Cancelled
-    ));
-}
-
-#[test]
-fn spans_whole_file_timed_out() {
-    let langs = Languages::core();
-    let lang = langs.get("json").unwrap();
-    let cancel = AtomicBool::new(false);
-    let text = big_json();
-    let budget = Budget {
-        budget: Duration::ZERO,
-        cancel: &cancel,
-        yield_probe: None,
-    };
-    assert!(matches!(
-        whole_file(lang, text.as_bytes(), budget),
-        Outcome::TimedOut
-    ));
-}
-
-#[test]
-fn spans_whole_file_yielded() {
-    let langs = Languages::core();
-    let lang = langs.get("json").unwrap();
-    let cancel = AtomicBool::new(false);
-    let text = big_json();
-    let probe = || true;
-    let budget = Budget {
-        budget: Duration::from_secs(60),
-        cancel: &cancel,
-        yield_probe: Some(&probe),
-    };
-    assert!(matches!(
-        whole_file(lang, text.as_bytes(), budget),
-        Outcome::Yielded
-    ));
-}
-
-/// The call is in the health table while it runs, with its budget, and not
-/// after it returns; a disabled grammar version gives `Unavailable` without
-/// parsing.
-#[test]
-fn spans_whole_file_registers_with_health() {
-    let clocks = ManualClocks::new();
-    let health = clocks.health();
-    let langs = Languages::core();
-    let lang = langs.get("json").unwrap();
-    let cancel = AtomicBool::new(false);
-    let text = big_json();
-    let seen = Cell::new(0);
-    let probe = || {
-        seen.set(seen.get().max(health.running()));
-        false
-    };
-    let budget = Budget {
-        budget: Duration::from_secs(60),
-        cancel: &cancel,
-        yield_probe: Some(&probe),
-    };
-    assert!(matches!(
-        whole_file_in(&health, lang, text.as_bytes(), budget),
-        Outcome::Done(_)
-    ));
-    assert_eq!(seen.get(), 1);
-    assert_eq!(health.running(), 0);
-
-    // A stuck json call on another (simulated) thread disables json.
-    let stuck = clocks.new_thread();
-    clocks.run_on(&stuck);
-    let guard = health
-        .enter("json", lang.grammar_version(), Duration::from_millis(8))
-        .unwrap();
-    stuck.add_cpu(Duration::from_secs(2));
-    clocks.run_on(&clocks.new_thread());
-    let probe_calls = Cell::new(0);
-    let probe = || {
-        probe_calls.set(probe_calls.get() + 1);
-        false
-    };
-    let budget = Budget {
-        budget: Duration::from_secs(60),
-        cancel: &cancel,
-        yield_probe: Some(&probe),
-    };
-    assert!(matches!(
-        whole_file_in(&health, lang, text.as_bytes(), budget),
-        Outcome::Unavailable
-    ));
-    assert_eq!(probe_calls.get(), 0, "never entered tree-sitter");
-    assert!(!health.allows("json", lang.grammar_version()));
-    drop(guard);
-}
-
-/// About 200 KiB of JSON: enough for tree-sitter to call the progress
-/// callback.
-fn big_json() -> String {
-    let mut text = String::from("[\n");
-    for i in 0..10_000 {
-        writeln!(text, "  {{\"id\": {i}, \"name\": \"item {i}\"}},").unwrap();
-    }
-    text.push_str("  null\n]\n");
-    text
 }

@@ -190,14 +190,33 @@ impl fmt::Debug for WindowSpans {
     }
 }
 
+/// The text a [`SpansBuilder`] splits at line ends, which need not be
+/// contiguous in memory (a chunked source, a window with padding around it).
+pub(crate) trait Lines {
+    fn len(&self) -> usize;
+    /// The offset of the first `\n` at or after `from`, or [`Lines::len`].
+    fn line_end(&self, from: usize) -> usize;
+}
+
+impl Lines for &[u8] {
+    fn len(&self) -> usize {
+        <[u8]>::len(self)
+    }
+
+    fn line_end(&self, from: usize) -> usize {
+        line_end(self, from)
+    }
+}
+
 /// Builds a [`WindowSpans`] from non-overlapping, ascending segments of the
 /// text `[start, start + text.len())`, splitting them at line ends. The
-/// `\n` of a line is never part of a token.
-pub(crate) struct SpansBuilder<'t> {
-    text: &'t [u8],
+/// `\n` of a line is never part of a token. The text is passed to each
+/// call, so a builder can wait between the slices of a sliced parse.
+pub(crate) struct SpansBuilder {
     start: u64,
+    len: usize,
     /// The current line: its start and the offset of its `\n` (or the end
-    /// of the text), relative to `text`.
+    /// of the text), relative to the text.
     line_start: usize,
     line_end: usize,
     line_starts: Vec<u32>,
@@ -205,13 +224,13 @@ pub(crate) struct SpansBuilder<'t> {
     tokens: Vec<Token>,
 }
 
-impl<'t> SpansBuilder<'t> {
-    pub(crate) fn new(text: &'t [u8], start: u64) -> SpansBuilder<'t> {
+impl SpansBuilder {
+    pub(crate) fn new(text: &dyn Lines, start: u64) -> SpansBuilder {
         SpansBuilder {
-            text,
             start,
+            len: text.len(),
             line_start: 0,
-            line_end: line_end(text, 0),
+            line_end: text.line_end(0),
             line_starts: Vec::new(),
             offsets: vec![0],
             tokens: Vec::new(),
@@ -220,16 +239,30 @@ impl<'t> SpansBuilder<'t> {
 
     /// Adds the segment `[from, to)` (relative to the text). Segments come
     /// in ascending order and do not overlap.
-    pub(crate) fn push(&mut self, from: usize, to: usize, kind: TokenKind) {
-        let to = to.min(self.text.len());
+    pub(crate) fn push(&mut self, text: &dyn Lines, from: usize, to: usize, kind: TokenKind) {
+        self.add(text, from, to, kind, false);
+    }
+
+    /// Adds the rest of a segment whose start was added before and cut at
+    /// `from`: the tokens come out as if the segment had been added whole.
+    pub(crate) fn push_rest(&mut self, text: &dyn Lines, from: usize, to: usize, kind: TokenKind) {
+        self.add(text, from, to, kind, true);
+    }
+
+    fn add(&mut self, text: &dyn Lines, from: usize, to: usize, kind: TokenKind, rest: bool) {
+        let to = to.min(self.len);
         let mut from = from;
+        let mut rest = rest;
         while from < to {
             while self.line_end < from {
-                self.next_line();
+                self.next_line(text);
             }
             let end = to.min(self.line_end);
             if end > from {
-                self.token(from, end, kind);
+                if !(rest && self.join(from, end, kind)) {
+                    self.token(from, end, kind);
+                }
+                rest = false;
             }
             if to <= self.line_end {
                 break;
@@ -238,9 +271,36 @@ impl<'t> SpansBuilder<'t> {
         }
     }
 
-    fn next_line(&mut self) {
+    fn next_line(&mut self, text: &dyn Lines) {
         self.line_start = self.line_end + 1;
-        self.line_end = line_end(self.text, self.line_start);
+        self.line_end = text.line_end(self.line_start).min(self.len);
+    }
+
+    /// Extends the last token over `[from, to)` when it is on this line,
+    /// ends at `from` and has this kind (up to [`Token::MAX_LEN`]; the rest
+    /// becomes new tokens, as [`push_tokens`] splits). False otherwise.
+    fn join(&mut self, from: usize, to: usize, kind: TokenKind) -> bool {
+        let (Ok(line), Ok(start)) = (
+            u32::try_from(self.line_start),
+            u32::try_from(from - self.line_start),
+        ) else {
+            return false;
+        };
+        let Some(last) = self.tokens.last_mut() else {
+            return false;
+        };
+        if self.line_starts.last() != Some(&line) || last.end() != start || last.kind() != kind {
+            return false;
+        }
+        let Ok(len) = u32::try_from(to - from) else {
+            return false;
+        };
+        let take = len.min(Token::MAX_LEN - last.len());
+        if let Some(joined) = Token::new(last.start(), last.len() + take, kind) {
+            *last = joined;
+        }
+        push_tokens(&mut self.tokens, start + take, len - take, kind);
+        true
     }
 
     fn token(&mut self, from: usize, to: usize, kind: TokenKind) {
@@ -268,7 +328,7 @@ impl<'t> SpansBuilder<'t> {
         }
         WindowSpans {
             start: self.start,
-            end: self.start + self.text.len() as u64,
+            end: self.start + self.len as u64,
             line_starts: self.line_starts.into_boxed_slice(),
             offsets: self.offsets.into_boxed_slice(),
             tokens: self.tokens.into_boxed_slice(),

@@ -31,6 +31,8 @@ mod platform;
 mod project;
 #[path = "fixtures/project_repo.rs"]
 mod project_repo;
+#[path = "time/syntax.rs"]
+mod syntax;
 
 use std::process::ExitCode;
 
@@ -115,6 +117,9 @@ const BENCHES: &[Bench] = &[
     project::REFRESH_INDEX,
     project::DIRS_100K,
     project::FACTS_CONTAINS,
+    syntax::FIRST_SCREEN,
+    syntax::FULL_PARSE_1MIB,
+    syntax::CHAIN_16MIB,
 ];
 
 fn main() -> ExitCode {

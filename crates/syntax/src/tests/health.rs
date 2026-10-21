@@ -64,7 +64,7 @@ impl ManualClocks {
         *self.current.lock().unwrap() = None;
     }
 
-    fn advance_wall(&self, by: Duration) {
+    pub(crate) fn advance_wall(&self, by: Duration) {
         *self.wall.lock().unwrap() += by;
     }
 }

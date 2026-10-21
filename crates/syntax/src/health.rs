@@ -80,6 +80,14 @@ impl Health {
         }
     }
 
+    /// Another handle on the same table, kept by a sliced parse between its
+    /// steps.
+    pub(crate) fn handle(&self) -> Health {
+        Health {
+            shared: self.shared.clone(),
+        }
+    }
+
     /// Whether this grammar version may still be used in this run. Does not
     /// block (one uncontended lock).
     pub fn allows(&self, lang: &str, grammar_version: u64) -> bool {
@@ -163,6 +171,17 @@ impl Health {
     #[cfg(test)]
     pub(crate) fn running(&self) -> usize {
         self.shared.lock().running.len()
+    }
+
+    /// The budgets the calls in the table registered with, for tests.
+    #[cfg(test)]
+    pub(crate) fn running_budgets(&self) -> Vec<Duration> {
+        self.shared
+            .lock()
+            .running
+            .iter()
+            .map(|r| r.budget)
+            .collect()
     }
 }
 

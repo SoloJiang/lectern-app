@@ -4245,6 +4245,7 @@ dependencies = [
  "lectern-platform",
  "lectern-project",
  "lectern-services",
+ "lectern-syntax",
  "serde_json",
  "tempfile",
 ]
