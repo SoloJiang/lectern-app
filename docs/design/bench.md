@@ -426,7 +426,7 @@ crates/bench/
   tests/fixtures/     本 crate 自己的小样本（目前没有）
 ```
 
-三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
+三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)）；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
 
 另有一个 `src/bin/lectern-bench-report.rs`，有两个子命令：`merge` 合并各目标的报告，`package --app <.app> --dmg <.dmg>` 测量安装包、写 `report-package.json`（见「报告」）。它只用本 crate 的普通依赖。
 
@@ -542,7 +542,7 @@ crates/bench/
 | `app/palette_key_200k`、`app/palette_key_1m` | 每次按键到结果更新，中位数 ≤ 16 ms / ≤ 50 ms（20 万条和 100 万条路径的合成仓库：分档预算在档位上界测量） | [性能预算](tech-research.md#性能预算) | ⌘K（#102） |
 | `app/files_open`、`app/files_expand` | 中位数 < 16 ms（目录表已建好；展开 2,000 个子项以内的目录） | [性能预算](tech-research.md#性能预算) | Files（[#10](https://github.com/SoloJiang/lectern-app/issues/10)） |
 | `app/nav_back` | 中位数 < 16 ms（回到最近访问的位置） | [性能预算](tech-research.md#性能预算) | Files（#10） |
-| `app/goto_candidates`、`app/goto_single` | 中位数 ≤ 50 ms（候选列表）/ ≤ 100 ms（唯一候选的目标文件首屏高亮） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
+| `app/goto_candidates`、`app/goto_single` | 中位数 ≤ 50 ms（候选列表，96 KiB 以内的当前文本；96–128 KiB 的在解析保留之后，[ADR 0037](../adr/0037.md)）/ ≤ 100 ms（唯一候选的目标文件首屏高亮） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/goto_unindexed` | 第一批结果中位数 ≤ 300 ms | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/goto_unindexed_done` | 从请求到限时搜索结束（找完或到时停止）、最后一批结果画出，最大值 ≤ 1.1 s（1 s 限时加 0.1 s 取消与绘制的余量）；夹具里未索引的文件要多到 1 s 内搜不完 | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/references_first`、`app/references_100k` | 中位数 ≤ 200 ms（第一批）/ ≤ 2 s（10 万文件的全部结果） | [性能预算](tech-research.md#性能预算) | 上下文抽屉（[#20](https://github.com/SoloJiang/lectern-app/issues/20)） |
@@ -621,6 +621,18 @@ crates/bench/
 | `code_intel/map_100k`、`code_intel/map_100k_bytes` | 中位数 ≤ 20 ms / ≤ 3 MB（10 万文件的「blob → 路径」映射重建：基础部分和按路径沿用的提示，合成的 OID；字节数不含 `project` 的文件列表；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
 | `code_intel/batch_peak` | 最大值 ≤ 40 MB（批量层为合成仓库建索引期间的活跃字节峰值：8 KiB 的文件和接近 1 MiB 的文件，语法树经 tree-sitter 的分配器计入；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
 | `code_intel/disk_100k` | 只记录（10 万文件的合成仓库全部写入之后分库文件的大小，含 `-wal`；字节数，由 `time` 目标产出） | [code_intel](code_intel.md#性能) | `code_intel` 第 3 步 |
+| `code_intel/goto_indexed`、`code_intel/goto_indexed/done` | 中位数 ≤ 20 ms / 只记录（索引命中的跳转：10 万个已入索引的文件、每 1000 个一个子项目，约 100 KB 的当前文本，它是当前文本、解析已保留（[ADR 0037](../adr/0037.md)），核算的遍历已缓存；从 `query` 到第一批有候选的事件 / 到 `Done`） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/goto_uncached`、`code_intel/goto_popular`、`code_intel/goto_full` 和各自的 `/done` | 中位数 ≤ 20 ms / 只记录，`goto_full/done` 最大值 ≤ 1.02 s（同上，分别在首次跳转会遇到的状态下：每次跳转前忘掉核算缓存的遍历；约 3000 个文件定义的常见名字（每 17 个文件一个，跳转的语言组约占一半）；命名空间满额，核算核对存储） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/goto_cold_parse`、`code_intel/goto_cold_parse/at_128k` | 中位数 ≤ 32 ms / 只记录（同上的跳转，解析没有保留、为光标处解析的冷路径：当前文本略小于 96 KiB，候选 50 ms 减去抽屉的 18 ms；略小于 128 KiB（保留解析的上限），那里的 50 ms 只靠保留的解析成立，冷路径是已知限制，[ADR 0037](../adr/0037.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/goto_same_file`、`code_intel/goto_object` | 只记录（同上的跳转：跳到当前文本里 locals 绑定的 `File` 定义；当前文本是对象库里的 blob（Diff 的旧一侧）；对照候选 50 ms） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/parse_cache_bytes` | 最大值 ≤ 12 MiB（保留的上限处：两个略小于 128 KiB 的 TypeScript 文本先后成为当前文本，两份解析都保留时它们的活跃字节，tree-sitter 的分配计入；`Memory`，[ADR 0037](../adr/0037.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/goto_first` | 只记录（新索引的第一次跳转：cloudprint 形状、打开并静止之后，每个样本一个新的语言表；对照候选 50 ms） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/named_50k` | 只记录（`Named` 查约 5 万个文件都定义的名字：从 `query` 到第一批） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/search_stop` | 最大值 ≤ 1.02 s（6000 个未入索引、每个都命中的文件，从 `query` 到最后一批的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/references_100k/all`、`code_intel/references_100k/first` | 中位数 ≤ 2 s / ≤ 200 ms（10 万个已入索引的文件里 300 个用到这个名字：到最后一批 / 到第一批带引用的事件） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/references_full/all`、`code_intel/references_full/first` | 中位数 ≤ 2 s / ≤ 200 ms（同上，命名空间满额；每次都是 `Complete`：查引用有自己的 1.9 s 时间盒） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `code_intel/names_100k`、`code_intel/names_100k_bytes` | 中位数 ≤ 1 s / ≤ 8 MB（10 万文件的合成抽取结果，约 32 万个名字；名字表的构建与它的活跃字节；`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，测量前丢掉那次跳转保留的解析（不在 [ADR 0035](../adr/0035.md) 的采样状态里，见 [ADR 0037](../adr/0037.md)），计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_range` | 中位数 ≤ 同一路径上 `File::open`、`metadata`、两次 `read_at`、`metadata` 的 1.5 倍，且 < 200 µs（64 MiB 的文件，首屏的文件头 8 KiB 加中部目标附近 132 KiB） | [platform](platform.md#性能) | `platform` 范围读取（[#103](https://github.com/SoloJiang/lectern-app/issues/103)） |
@@ -712,7 +724,7 @@ CI：
 - 被测 crate 用 `test-support` feature 导出 `pub mod testing`（`#[cfg(any(test, feature = "test-support"))]`）：夹具生成器，以及公开接口之外 bench 需要的入口（如 `agents::testing::parse_file`）。`git` 的 `TestRepo`、`project` 的合成仓库形状、`kernel` 的 `TestKernel`、`executor` 的手动执行器都按这个约定放置。
 - bench 只调用公开接口和 `testing`，不复制被测 crate 的内部逻辑，也不按相对路径读别的 crate 的目录；需要的样本由 `testing` 用 `include_bytes!` 嵌入或在运行时生成。
 - 生成器是确定的（固定种子，不取时钟），接受规模参数，冒烟用小规模。生成的文件放在 `Ctx::scratch()` 下，每个基准、每次重试都重新生成，会修改夹具的基准（`append_4k`、`refresh_one`）不影响别的基准。
-- 例外是共享夹具（[ADR 0036](../adr/0036.md)）：生成要几秒以上、只读的大型夹具用 `Ctx::shared(key, build)` 在一个基准目标进程里只生成一次，之后的基准和重跑拿到同一份（`Rc`），目标运行结束时释放。键写明生成器和规模，如 `git_worktree::large(100000, 2000)`；同一个键换了类型时返回错误。共享夹具不放在 `scratch()` 下（每个基准结束时删除）。用它的基准只读：不写工作区和 git 目录，句柄和缓存各自新建。现在共享的只有 10 万文件的 git 工作区（`git_worktree::large_shared`：`time` 目标的 `git/open_100k`、`git/filter_100k`、`git/changes_clean_100k`，`memory` 目标的 `git/compare_100k`、`git/filter_100k_bytes`）。不缓存到 `target/` 下跨运行复用：index 记着每个文件的 ctime 和 inode，复制或还原都会改变它们。
+- 例外是共享夹具（[ADR 0036](../adr/0036.md)）：生成要几秒以上、只读的大型夹具用 `Ctx::shared(key, build)` 在一个基准目标进程里只生成一次，之后的基准和重跑拿到同一份（`Rc`），目标运行结束时释放。键写明生成器和规模，如 `git_worktree::large(100000, 2000)`；同一个键换了类型时返回错误。共享夹具不放在 `scratch()` 下（每个基准结束时删除）。用它的基准只读：不写工作区和 git 目录，句柄和缓存各自新建。现在共享的有 10 万文件的 git 工作区（`git_worktree::large_shared`：`time` 目标的 `git/open_100k`、`git/filter_100k`、`git/changes_clean_100k`，`memory` 目标的 `git/compare_100k`、`git/filter_100k_bytes`）和 `code_intel` 的 10 万文件虚拟仓库（`code_intel_virtual::shared`，`code_intel::testing::VirtualTemplate`：写好单元的缓存目录，`time` 目标的 `code_intel/goto_indexed`、`goto_uncached`、`goto_popular`、`goto_full`、`goto_cold_parse`、`goto_same_file`、`goto_object`、`references_100k`、`references_full`、`names_100k`，`memory` 目标的 `code_intel/names_100k_bytes`、`plugin/code-intel/resident_100k`）。虚拟仓库的基准会写缓存（当前文本的单元、访问时间、淘汰），所以共享的只是写好的文件：每个基准（`resident_100k` 是每个样本）复制一份缓存目录，在同一个公共目录路径上新建自己的 `FakeGit`（分库按这个路径命名），再建自己的 rig；建好之后没有任何东西再打开共享的那份。要冷状态的基准照旧在自己的 rig 上每次清掉（`goto_cold_parse` 的保留解析、`goto_uncached` 的遍历缓存），`names_*` 每个样本重建名字表。不缓存到 `target/` 下跨运行复用：index 记着每个文件的 ctime 和 inode，复制或还原都会改变它们。
 - 只有 bench 的 dev-dependencies 打开被测 crate 的 `test-support`，没有哪个 crate 的普通依赖打开它，`app` 的 `bench-probe` 也不打开。发布构建里既没有 `lectern-bench` 也没有 `test-support`（见「验收」里的 `cargo tree` 检查）。
 - 大型样例项目不提交进仓库：`cloudprint` 形状（728 个文件、11 个 worktree、约 25 个清单）和 10 万文件的仓库都由 `project` 的形状描述加 `git` 的 `TestRepo` 生成。`crates/bench/tests/fixtures/` 只放本 crate 自己的小样本。
 

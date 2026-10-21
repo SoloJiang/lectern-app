@@ -1168,6 +1168,185 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // The partition's size after the units of 100 000 synthetic files.
     share("code_intel/disk_100k", RECORD, CODE_INTEL, ACTIVE, Time),
+    // A jump the index answers, from the query to its first batch with
+    // candidates: 100 000 indexed files, a 100 KB current text whose parse
+    // is kept (ADR 0037); this crate's part of the 50 ms candidates budget.
+    // In the states a first jump meets: the accounting's walk not cached,
+    // a name some 3000 files define, the namespace at its quota. To the
+    // query's end recorded; within the 1 s time box once full.
+    share(
+        "code_intel/goto_indexed",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_indexed/done",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_uncached",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_uncached/done",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_popular",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_popular/done",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_full",
+        &[median(Limit::TimeAtMost(ms(20)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_full/done",
+        &[max(Limit::TimeAtMost(ms(1020)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // The first jump in a text before its parse is kept (the text parsed
+    // for the site), the text just under 96 KiB: the 50 ms candidates less
+    // the drawer's 18 ms (one frame and the event's delivery), ADR 0037.
+    // Just under 128 KiB (the largest kept, where the 50 ms holds through
+    // the kept parse only), a jump its own locals bind (a `File`
+    // definition), and one from a diff's old side: recorded.
+    share(
+        "code_intel/goto_cold_parse",
+        &[median(Limit::TimeAtMost(ms(32)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_cold_parse/at_128k",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/goto_same_file",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share("code_intel/goto_object", RECORD, CODE_INTEL, ACTIVE, Time),
+    // The kept parses at their bounds: two texts just under 128 KiB (ADR
+    // 0037).
+    share(
+        "code_intel/parse_cache_bytes",
+        &[max(Limit::BytesAtMost(12 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
+    // The first jump of a fresh index: the project opened and settled (its
+    // languages' queries compiled in the background), nothing warmed by an
+    // earlier jump. Recorded against the 50 ms candidates budget.
+    share("code_intel/goto_first", RECORD, CODE_INTEL, ACTIVE, Time),
+    // `Named` for a name some 50 000 files define: from the query to its
+    // first batch.
+    share("code_intel/named_50k", RECORD, CODE_INTEL, ACTIVE, Time),
+    // The time-boxed search of unindexed hits stops one second after the
+    // query; the last batch's event within 20 ms of that.
+    share(
+        "code_intel/search_stop",
+        &[max(Limit::TimeAtMost(ms(1020)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // References of a function 300 of 100 000 indexed files use: all of
+    // them, and the first batch.
+    share(
+        "code_intel/references_100k/all",
+        &[median(Limit::TimeAtMost(ms(2000)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/references_100k/first",
+        &[median(Limit::TimeAtMost(ms(200)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // The same with the namespace at its quota: both gated all the same,
+    // complete (references' own time box, `REFERENCES_FOR`).
+    share(
+        "code_intel/references_full/all",
+        &[median(Limit::TimeAtMost(ms(2000)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/references_full/first",
+        &[median(Limit::TimeAtMost(ms(200)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    // The ⌘K name table of 100 000 files (synthetic, about 320 000 names):
+    // its build and its live bytes.
+    share(
+        "code_intel/names_100k",
+        &[median(Limit::TimeAtMost(ms(1000)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/names_100k_bytes",
+        &[median(Limit::BytesAtMost(8 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
+    // This crate's live bytes with a project indexed (counting allocator,
+    // tree-sitter's allocations routed through it), not the file list.
+    share(
+        "plugin/code-intel/resident_cloudprint",
+        &[median(Limit::BytesAtMost(4 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
+    share(
+        "plugin/code-intel/resident_100k",
+        &[median(Limit::BytesAtMost(10 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
     // FakeBackend and the manual driver, without backend latency.
     share(
         "fs_watch/classify_burst",

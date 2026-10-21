@@ -21,6 +21,14 @@ pub const CHECK_INTERVAL: Duration = Duration::from_millis(10);
 /// same clock; tests use `testing::ManualClock`.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
+
+    /// Whether the clock moves by itself, as the system's does: the
+    /// watchdog then sleeps until its next due entry instead of looking at
+    /// the clock every [`CHECK_INTERVAL`] (a test's manual clock is only
+    /// seen to move by looking).
+    fn moves_by_itself(&self) -> bool {
+        false
+    }
 }
 
 /// The system's monotonic clock.
@@ -30,6 +38,10 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
+    }
+
+    fn moves_by_itself(&self) -> bool {
+        true
     }
 }
 
@@ -103,10 +115,17 @@ impl Slot {
     }
 }
 
+/// Work the thread submits once its time comes (the name table's delayed
+/// rebuild, docs/design/code_intel.md「名字表」): it only submits, never
+/// blocks.
+pub type Due = Box<dyn FnOnce() + Send>;
+
 struct State {
     stop: bool,
     next_id: u64,
     in_flight: Vec<(u64, Arc<Slot>)>,
+    /// The due table: (time, callback), unordered.
+    timers: Vec<(Instant, Due)>,
     starter: Option<Starter>,
 }
 
@@ -116,6 +135,14 @@ struct Shared {
     wake: Condvar,
     /// Loop iterations of the thread, for the tests.
     rounds: AtomicU64,
+    /// Waits the thread entered, with and without a timeout, counted under
+    /// the lock right before waiting: the tests see the thread parked in
+    /// the untimed wait instead of inferring it from elapsed time.
+    timed_waits: AtomicU64,
+    untimed_waits: AtomicU64,
+    /// Due entries whose callback has returned (tests: an entry leaves the
+    /// table before its callback runs).
+    fired: AtomicU64,
 }
 
 impl Shared {
@@ -141,10 +168,14 @@ impl Watchdog {
                     stop: false,
                     next_id: 0,
                     in_flight: Vec::new(),
+                    timers: Vec::new(),
                     starter: Some(starter),
                 }),
                 wake: Condvar::new(),
                 rounds: AtomicU64::new(0),
+                timed_waits: AtomicU64::new(0),
+                untimed_waits: AtomicU64::new(0),
+                fired: AtomicU64::new(0),
             }),
         }
     }
@@ -159,12 +190,43 @@ impl Watchdog {
     pub fn stop(&self) {
         let mut state = self.shared.lock();
         state.stop = true;
-        state.starter = None;
+        let starter = state.starter.take();
         for (_, slot) in &state.in_flight {
             slot.trip(Trip::Stopped);
         }
+        let timers = std::mem::take(&mut state.timers);
         drop(state);
         self.shared.wake.notify_all();
+        // Dropped outside the lock: they may hold anything.
+        drop((starter, timers));
+    }
+
+    /// Calls `f` on the watchdog's thread once the clock reaches `at` (the
+    /// due table, docs/design/code_intel.md「调度、批次与取消」); `f` only
+    /// submits work. Starts the thread if it is not running. False, with
+    /// `f` dropped, once the watchdog has stopped.
+    pub fn schedule(&self, at: Instant, f: Due) -> bool {
+        let mut state = self.shared.lock();
+        if state.stop {
+            drop(state);
+            drop(f);
+            return false;
+        }
+        state.timers.push((at, f));
+        let starter = state.starter.take();
+        drop(state);
+        self.shared.wake.notify_all();
+        if let Some(starter) = starter {
+            starter(WatchdogRun {
+                shared: self.shared.clone(),
+            });
+        }
+        true
+    }
+
+    /// Entries of the due table (tests).
+    pub fn scheduled(&self) -> usize {
+        self.shared.lock().timers.len()
     }
 
     /// A guard whose drop calls [`stop`](Self::stop). The plugin hands it to
@@ -183,6 +245,23 @@ impl Watchdog {
     /// nothing is in flight).
     pub fn rounds(&self) -> u64 {
         self.shared.rounds.load(Ordering::Acquire)
+    }
+
+    /// Waits the thread has entered so far: (with a timeout, without one).
+    /// The untimed count goes up, under the lock, right before the thread
+    /// parks with nothing in flight and no due entry (tests).
+    /// Due entries whose callback has returned (tests: an entry leaves the
+    /// table before its callback runs, so an empty table does not mean its
+    /// work was submitted).
+    pub fn fired(&self) -> u64 {
+        self.shared.fired.load(Ordering::Acquire)
+    }
+
+    pub fn waits(&self) -> (u64, u64) {
+        (
+            self.shared.timed_waits.load(Ordering::Acquire),
+            self.shared.untimed_waits.load(Ordering::Acquire),
+        )
     }
 
     /// The number of extractions in flight.
@@ -266,7 +345,10 @@ impl WatchdogRun {
     }
 
     /// Runs until the watchdog stops: with extractions in flight, checks them
-    /// every [`CHECK_INTERVAL`]; otherwise waits without a timeout.
+    /// every [`CHECK_INTERVAL`]; with due entries, runs those whose time
+    /// came and waits until the next one (at most [`CHECK_INTERVAL`] at a
+    /// time, so a test's manual clock is seen to move); with neither, waits
+    /// without a timeout.
     pub fn run(self) {
         let shared = &*self.shared;
         let mut state = shared.lock();
@@ -274,19 +356,50 @@ impl WatchdogRun {
             if state.stop {
                 return;
             }
-            if state.in_flight.is_empty() {
+            let now = shared.clock.now();
+            if state.timers.iter().any(|(at, _)| *at <= now) {
+                let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut state.timers)
+                    .into_iter()
+                    .partition(|(at, _)| *at <= now);
+                state.timers = later;
+                drop(state);
+                for (_, f) in due {
+                    // A callback only submits work; a panic in it does not
+                    // take the watchdog down.
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+                    shared.fired.fetch_add(1, Ordering::AcqRel);
+                }
+                state = shared.lock();
+                continue;
+            }
+            if state.in_flight.is_empty() && state.timers.is_empty() {
+                shared.untimed_waits.fetch_add(1, Ordering::AcqRel);
                 state = shared
                     .wake
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner);
             } else {
-                let now = shared.clock.now();
                 for (_, slot) in &state.in_flight {
                     slot.check(now);
                 }
+                let due = state
+                    .timers
+                    .iter()
+                    .map(|(at, _)| at.saturating_duration_since(now))
+                    .min();
+                // With only due entries and a clock that moves by itself:
+                // asleep until the next one (a kept parse's expiry is a
+                // minute away), woken earlier by a new entry or extraction.
+                let next = match due {
+                    Some(due) if state.in_flight.is_empty() && shared.clock.moves_by_itself() => {
+                        due
+                    }
+                    due => due.unwrap_or(CHECK_INTERVAL).min(CHECK_INTERVAL),
+                };
+                shared.timed_waits.fetch_add(1, Ordering::AcqRel);
                 state = shared
                     .wake
-                    .wait_timeout(state, CHECK_INTERVAL)
+                    .wait_timeout(state, next)
                     .unwrap_or_else(PoisonError::into_inner)
                     .0;
             }

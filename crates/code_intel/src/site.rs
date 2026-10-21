@@ -21,7 +21,7 @@ use crate::extract::{Def, Lang};
 use crate::lang::{Capture, Dialect, TagClass};
 use crate::locals::{Collector, LocalDef, Locals, Namespace};
 use crate::rules::{self, FileDef, RawTag};
-use crate::util::LineIndex;
+use crate::util::{FastBuild, LineIndex};
 use crate::watchdog::Clock;
 use crate::{DefKind, RefSyntax};
 
@@ -154,6 +154,14 @@ pub(crate) fn local_scopes(
     Some(collector.finish(source).local_scopes())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: the source of every file parsed on this thread, in order (a
+    /// harness runs its queries on the test's thread, `Executor::manual`).
+    pub(crate) static PARSED: std::cell::RefCell<Vec<Arc<[u8]>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// One parsed file, kept while a query uses it and then dropped; never
 /// cached. Holds the grammar's lease through its [`Lang`].
 ///
@@ -173,6 +181,9 @@ pub struct ParsedFile {
     /// composite literal key): the only names `site_at` resolves locally.
     local_refs: Vec<(Range<usize>, bool)>,
     refs: Vec<RefSite>,
+    /// Parsed for one site (`parse_at`): `local_refs` is complete only at
+    /// it and `refs` is empty.
+    only_site: Option<Position>,
     lang: Lang,
 }
 
@@ -187,8 +198,77 @@ impl ParsedFile {
         at: Instant,
         cancel: &AtomicBool,
     ) -> Result<ParsedFile, ParseError> {
-        let compiled = lang.compiled().ok_or(ParseError::Unsupported)?;
+        ParsedFile::parse_inner(lang, source, clock, at, cancel, false, None)
+    }
+
+    /// [`parse`](Self::parse) for what a jump asks at `site`: `site_at`
+    /// there, the definitions, the binding model; no
+    /// [`references`](Self::references). On a core language the query run
+    /// over the whole tree has only the locals patterns that build the
+    /// binding model (`SiteQuery::jump`); the locals query's verdict on the
+    /// site's own name comes from the full query run on the site's bytes.
+    /// `site_at(site)` and the definitions are what `parse` gives
+    /// (`site_parse_at_matches_parse`).
+    pub fn parse_at(
+        lang: &Lang,
+        source: Arc<[u8]>,
+        clock: &dyn Clock,
+        at: Instant,
+        cancel: &AtomicBool,
+        site: Position,
+    ) -> Result<ParsedFile, ParseError> {
+        ParsedFile::parse_inner(lang, source, clock, at, cancel, false, Some(site))
+    }
+
+    /// `parse`; with `full_query`, every tags pattern stays enabled even
+    /// when the walker gives the definitions (the tests' reference:
+    /// `site_reference_query_matches_full`).
+    #[cfg(test)]
+    pub(crate) fn parse_with(
+        lang: &Lang,
+        source: Arc<[u8]>,
+        clock: &dyn Clock,
+        at: Instant,
+        cancel: &AtomicBool,
+        full_query: bool,
+    ) -> Result<ParsedFile, ParseError> {
+        ParsedFile::parse_inner(lang, source, clock, at, cancel, full_query, None)
+    }
+
+    fn parse_inner(
+        lang: &Lang,
+        source: Arc<[u8]>,
+        clock: &dyn Clock,
+        at: Instant,
+        cancel: &AtomicBool,
+        full_query: bool,
+        site: Option<Position>,
+    ) -> Result<ParsedFile, ParseError> {
+        #[cfg(test)]
+        PARSED.with_borrow_mut(|p| p.push(source.clone()));
         let dialect = lang.dialect();
+        // A core language's definitions and markers come from its walker,
+        // as in `extract` (ADR 0031): its query only has the locals
+        // patterns and the tags patterns that give references enabled.
+        let walking = lang.walks();
+        // One site on a core language: the jump's query (`SiteQuery::jump`).
+        let for_site = walking && !full_query && site.is_some();
+        let (query, captures, locals_patterns) = if walking && !full_query {
+            let q = if for_site {
+                lang.jump_query()
+            } else {
+                lang.site_query()
+            };
+            let q = q.ok_or(ParseError::Unsupported)?;
+            (&q.query, &q.captures[..], q.locals_patterns)
+        } else {
+            let compiled = lang.compiled().ok_or(ParseError::Unsupported)?;
+            (
+                &compiled.tags.query,
+                &compiled.captures[..],
+                compiled.locals_patterns,
+            )
+        };
         let stop = || cancel.load(Ordering::Acquire) || clock.now() >= at;
         let interrupted = || {
             if cancel.load(Ordering::Acquire) {
@@ -214,6 +294,7 @@ impl ParsedFile {
                 ControlFlow::Continue(())
             }
         };
+        let ts_parse = crate::phases::span("1a tree-sitter parse");
         let tree = parser
             .parse_with_options(
                 &mut |i, _| text.get(i..).unwrap_or(&[]),
@@ -221,8 +302,9 @@ impl ParsedFile {
                 Some(ParseOptions::new().progress_callback(&mut progress)),
             )
             .ok_or_else(interrupted)?;
+        drop(ts_parse);
+        let query_run = crate::phases::span("1b site query (locals + refs)");
 
-        let query = &compiled.tags.query;
         let mut cursor = QueryCursor::new();
         let mut query_progress = |_: &tree_sitter::QueryCursorState| {
             if stop() {
@@ -237,16 +319,18 @@ impl ParsedFile {
             text,
             QueryCursorOptions::new().progress_callback(&mut query_progress),
         );
+        let parents = Parents::new(&tree);
         let mut collector = Collector::new(dialect, text.len());
         let mut ref_ranges: Vec<Range<usize>> = Vec::new();
         let mut local_refs: Vec<(Range<usize>, bool)> = Vec::new();
         // One tag per name node, from the lowest pattern (tree-sitter-tags).
-        let mut tags: HashMap<(usize, usize), (usize, RawTag)> = HashMap::new();
+        let mut tags: HashMap<(usize, usize), (usize, RawTag), FastBuild> = HashMap::default();
         while let Some(m) = matches.next() {
-            if m.pattern_index < compiled.locals_patterns {
+            crate::phases::count("site query matches", 1);
+            if m.pattern_index < locals_patterns {
                 let props = query.property_settings(m.pattern_index);
                 for capture in m.captures() {
-                    match compiled.captures[capture.index as usize] {
+                    match captures[capture.index as usize] {
                         Capture::LocalScope => collector.scope(capture.node, props),
                         Capture::LocalDefinition => {
                             collector.definition(capture.node, props, text);
@@ -256,7 +340,7 @@ impl ParsedFile {
                         // and tag names, which never refer to a local
                         // (the forms table's positions).
                         Capture::LocalReference if collector.reference(capture.node, props) => {
-                            let at = variable_position(dialect, capture.node, text);
+                            let at = variable_position(dialect, capture.node, &parents, text);
                             if at != Variable::No {
                                 let range = capture.node.byte_range();
                                 local_refs.push((range.clone(), at == Variable::Uncertain));
@@ -273,7 +357,7 @@ impl ParsedFile {
             let mut params: Option<Node<'_>> = None;
             let mut ignored = false;
             for capture in m.captures() {
-                match compiled.captures[capture.index as usize] {
+                match captures[capture.index as usize] {
                     Capture::Name => name = Some(capture.node),
                     Capture::Doc => params = Some(capture.node),
                     Capture::Ignore => ignored = true,
@@ -308,38 +392,93 @@ impl ParsedFile {
             }
         }
         drop(matches);
+        drop(query_run);
         if stop() {
             return Err(interrupted());
         }
 
+        let lines = LineIndex::new(text);
+        if let (true, Some(site)) = (for_site, site) {
+            // The locals query's verdict on the site's own name: the full
+            // query's captures over the bytes around the site (`site_at`
+            // looks at the offset and the byte before it). Directives were
+            // taken by the run above, so only plain references count.
+            let _t = crate::phases::span("1b' site query at the site");
+            let full = lang.site_query().ok_or(ParseError::Unsupported)?;
+            if let Some(offset) = lines.offset(site.line, site.column, text.len()) {
+                let mut cursor = QueryCursor::new();
+                cursor.set_byte_range(offset.saturating_sub(1)..(offset + 1).min(text.len()));
+                let mut query_progress = |_: &tree_sitter::QueryCursorState| {
+                    if stop() {
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                };
+                let mut matches = cursor.matches_with_options(
+                    &full.query,
+                    tree.root_node(),
+                    text,
+                    QueryCursorOptions::new().progress_callback(&mut query_progress),
+                );
+                while let Some(m) = matches.next() {
+                    if m.pattern_index >= full.locals_patterns {
+                        continue;
+                    }
+                    let props = full.query.property_settings(m.pattern_index);
+                    if !crate::locals::is_plain_reference(props) {
+                        continue;
+                    }
+                    for capture in m.captures() {
+                        if full.captures[capture.index as usize] != Capture::LocalReference {
+                            continue;
+                        }
+                        let at = variable_position(dialect, capture.node, &parents, text);
+                        if at != Variable::No {
+                            local_refs.push((capture.node.byte_range(), at == Variable::Uncertain));
+                        }
+                    }
+                }
+            }
+            if stop() {
+                return Err(interrupted());
+            }
+        }
+
+        let finish = crate::phases::span("1c locals finish");
         let locals = collector.finish(text);
+        drop(finish);
 
         let mut tags: Vec<RawTag> = tags.into_values().map(|(_, t)| t).collect();
-        // A core language's definitions and markers come from its walker,
-        // as in `extract` (ADR 0031); the query's tags give the reference
-        // positions.
-        if lang.lease().is_static() && crate::walk::supports(dialect, lang.language()) {
+        // The query's tags give the reference positions.
+        if walking {
             // The walk stops with the same deadline and cancellation as the
             // parse and the query run.
+            let _t = crate::phases::span("1d walker");
             let walked = crate::walk::walk_tree(dialect, lang.language(), &tree, text, &stop)
                 .ok_or_else(interrupted)?;
             tags.retain(|t| t.class == TagClass::Ref);
             tags.extend(walked.tags);
         }
+        let rest = crate::phases::span("1e rules + reference sites");
         tags.sort_by_key(|t| t.name_range.start);
         // Tags references, and the names markers take from the reference
         // patterns (`Marker::consumes_name`): an exported name, an
-        // implemented or receiver type, an attribute write.
-        ref_ranges.extend(
-            tags.iter()
-                .filter(|t| match t.class {
-                    TagClass::Ref => true,
-                    TagClass::Marker(marker) => marker.consumes_name(),
-                    TagClass::Def(_) => false,
-                })
-                .map(|t| t.name_range.clone()),
-        );
-        let lines = LineIndex::new(text);
+        // implemented or receiver type, an attribute write. Not for one
+        // site: it has no `references`.
+        if !for_site {
+            ref_ranges.extend(
+                tags.iter()
+                    .filter(|t| match t.class {
+                        TagClass::Ref => true,
+                        TagClass::Marker(marker) => marker.consumes_name(),
+                        TagClass::Def(_) => false,
+                    })
+                    .map(|t| t.name_range.clone()),
+            );
+        } else {
+            ref_ranges.clear();
+        }
         ref_ranges.sort_by_key(|r| (r.start, r.end));
         ref_ranges.dedup();
         local_refs.sort_by_key(|(r, _)| (r.start, r.end));
@@ -354,7 +493,7 @@ impl ParsedFile {
         let finished = rules::finish(lang.dialect(), text, tags, local_scopes.as_deref());
         // `(identifier) @local.reference` matches definition names too; a
         // marker's name that became a definition (a Python field) is one.
-        let named: std::collections::HashSet<(usize, usize)> = tag_defs
+        let named: std::collections::HashSet<(usize, usize), FastBuild> = tag_defs
             .into_iter()
             .chain(
                 finished
@@ -373,6 +512,7 @@ impl ParsedFile {
                 end: r.end,
             })
             .collect();
+        drop(rest);
         // Checked once more before returning: the rules and the binding model
         // run after the last check above.
         if stop() {
@@ -388,6 +528,7 @@ impl ParsedFile {
             locals,
             local_refs,
             refs,
+            only_site: site.filter(|_| for_site),
             lang: lang.clone(),
         })
     }
@@ -416,10 +557,42 @@ impl ParsedFile {
         self.defs.iter().map(|d| &d.def)
     }
 
+    /// The definitions, each with whether it is a local definition: a
+    /// `@local.definition` in a non-root scope (`DefinitionRef::local`).
+    pub fn defs_with_local(&self) -> impl Iterator<Item = (&Def, bool)> + '_ {
+        self.defs.iter().map(|d| {
+            let local = self
+                .locals
+                .def_at(&d.name_range)
+                .is_some_and(|l| self.locals.is_local(l));
+            (&d.def, local)
+        })
+    }
+
+    /// The innermost definition whose node holds byte `offset` outside its
+    /// own name: who a reference there is in (the callers' `enclosing`).
+    pub fn enclosing(&self, offset: usize) -> Option<&Def> {
+        self.defs
+            .iter()
+            .filter(|d| d.range.start <= offset && offset < d.range.end)
+            .filter(|d| !(d.name_range.start <= offset && offset < d.name_range.end))
+            .max_by_key(|d| (d.range.start, std::cmp::Reverse(d.range.end)))
+            .map(|d| &d.def)
+    }
+
+    /// The source text of a reference position.
+    pub fn text(&self, site: &RefSite) -> &[u8] {
+        self.source.get(site.start..site.end).unwrap_or(&[])
+    }
+
     /// Every reference position: tags references and `@local.reference`,
     /// deduplicated by position. Tags leaves out references that locals
     /// resolves; the union keeps them.
     pub fn references(&self) -> &[RefSite] {
+        debug_assert!(
+            self.only_site.is_none(),
+            "parsed for one site: no references"
+        );
         &self.refs
     }
 
@@ -427,6 +600,10 @@ impl ParsedFile {
     /// its end) and what it is; None when there is no identifier there
     /// (`QueryError::NoSymbol`).
     pub fn site_at(&self, at: Position) -> Option<Site> {
+        debug_assert!(
+            self.only_site.is_none_or(|s| s == at),
+            "parsed for another site"
+        );
         let text = &*self.source;
         let offset = self.lines.offset(at.line, at.column, text.len())?;
         let dialect = self.lang.dialect();
@@ -769,12 +946,66 @@ pub(crate) enum Variable {
 
 /// What an identifier's position is, by the positions the forms table
 /// gives its parent's row (`forms::Pos`); a language pack has none.
-pub(crate) fn variable_position(dialect: Dialect, node: Node<'_>, text: &[u8]) -> Variable {
+/// `Node::parent` over one tree, with the root's level found by binary
+/// search. tree-sitter finds a parent by descending from the root and
+/// scanning each level's children (`ts_node_parent`): on a file of many
+/// top-level items every call scans all of them. Below the root this
+/// descends as tree-sitter does (`child_with_descendant`); an empty node,
+/// or one the root's children do not contain, falls back to
+/// `Node::parent` (`site_parents_match_tree_sitter`).
+pub(crate) struct Parents<'t> {
+    root: Node<'t>,
+    /// The root's children, in order: they do not overlap.
+    children: Vec<Node<'t>>,
+}
+
+impl<'t> Parents<'t> {
+    pub(crate) fn new(tree: &'t Tree) -> Parents<'t> {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let children = root.children(&mut cursor).collect();
+        Parents { root, children }
+    }
+
+    pub(crate) fn of(&self, node: Node<'t>) -> Option<Node<'t>> {
+        let (start, end) = (node.start_byte(), node.end_byte());
+        if start == end || node.id() == self.root.id() {
+            return node.parent();
+        }
+        // The last child starting at or before the node: the only one that
+        // can contain it.
+        let at = self.children.partition_point(|c| c.start_byte() <= start);
+        let Some(&top) = at.checked_sub(1).and_then(|i| self.children.get(i)) else {
+            return node.parent();
+        };
+        if top.id() == node.id() {
+            return Some(self.root);
+        }
+        if top.end_byte() < end {
+            return node.parent();
+        }
+        let mut at = top;
+        loop {
+            match at.child_with_descendant(node) {
+                Some(next) if next.id() == node.id() => return Some(at),
+                Some(next) => at = next,
+                None => return node.parent(),
+            }
+        }
+    }
+}
+
+pub(crate) fn variable_position<'t>(
+    dialect: Dialect,
+    node: Node<'t>,
+    parents: &Parents<'t>,
+    text: &[u8],
+) -> Variable {
     use crate::forms::Pos;
     let Some(lang) = core_name(dialect) else {
         return Variable::Yes;
     };
-    let Some(parent) = node.parent() else {
+    let Some(parent) = parents.of(node) else {
         return Variable::Yes;
     };
     let rows = crate::forms::positions(lang);
@@ -799,7 +1030,7 @@ pub(crate) fn variable_position(dialect: Dialect, node: Node<'_>, text: &[u8]) -
             }
         }
     }
-    if let Some(grand) = parent.parent()
+    if let Some(grand) = parents.of(parent)
         && let Some(positions) = rows.get(grand.kind())
         && positions
             .iter()

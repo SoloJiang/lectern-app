@@ -21,9 +21,15 @@ use crate::{DEF_KINDS, DefKind, LangName};
 
 /// The units' namespace. The version changes with the tables or the units'
 /// key; a change of extraction rules changes `EXTRACTOR_VERSION` instead.
+/// 2: `ci_def_name` is (name NOCASE, unit, kind) instead of (name): the
+/// lookups by name read it in pages from a (unit, kind, rowid) cursor and
+/// in given units by (name, unit), and the name table reads it in index
+/// order without the table. Version 1's tables are dropped on first use and
+/// its units deleted over later writes (`lectern-cache`「自定义表」): the
+/// units are extracted again, not migrated.
 pub const NAMESPACE: Namespace = Namespace {
     name: "code_intel.tags",
-    version: 1,
+    version: 2,
     compression: Compression::None,
 };
 
@@ -36,6 +42,19 @@ pub const EXISTS_BATCH: usize = 500;
 /// Version triples per by-name query: a compatibility group of up to this
 /// many languages is one query, a larger one several.
 pub const GROUP_TRIPLES: usize = 4;
+
+/// Index rows per page of a lookup by name ([`Store::next_defs`],
+/// [`Store::next_refs`]): the rows one statement reads, whatever passes,
+/// a few milliseconds whatever the name.
+pub const NAME_PAGE: usize = 256;
+
+/// Index entries per statement of the name table's scan
+/// ([`Store::def_names`]); `stop` is asked between statements.
+pub const NAMES_SCAN_PAGE: usize = 4096;
+
+/// Definitions per statement of a lookup by name in given units
+/// ([`Store::defs_by_name_in`]).
+pub const NAME_IN_LIMIT: usize = 256;
 
 pub(crate) const SCHEMA: &[&str] = &[
     "CREATE TABLE ci_ext (
@@ -56,7 +75,11 @@ pub(crate) const SCHEMA: &[&str] = &[
        scope    TEXT,
        flags    INTEGER NOT NULL,
        arity    INTEGER)",
-    "CREATE INDEX ci_def_name ON ci_def (name COLLATE NOCASE)",
+    // With the unit and the kind: a name's rows in (unit, kind, rowid) order
+    // without reading the table (the pages of a lookup, the count of the
+    // rows left), one seek per unit for the lookup in given units, and the
+    // name table's (name, unit, kind) in index order.
+    "CREATE INDEX ci_def_name ON ci_def (name COLLATE NOCASE, unit, kind)",
     "CREATE INDEX ci_def_unit ON ci_def (unit)",
     "CREATE TABLE ci_ref (
        name TEXT    NOT NULL,
@@ -103,31 +126,108 @@ pub(crate) const EXISTS: &str = match std::str::from_utf8(&EXISTS_BYTES) {
     Err(_) => panic!("the existence check is ASCII"),
 };
 
-/// Definitions by name (jump step 3, `Named`), in the units of up to
-/// [`GROUP_TRIPLES`] version triples. `NOCASE` uses `ci_def_name`; names
-/// are compared exactly afterwards.
-pub(crate) const DEFS_BY_NAME: &str =
+/// One page of the definitions by name (jump step 3, `Named`): the next
+/// `?5` index rows of the name (any case, version or status) after the
+/// cursor (unit, kind, rowid) `?2, ?3, ?4`, in `ci_def_name`'s order. The
+/// limit counts the rows the index gives, not those that pass: every raw row
+/// comes out once (the joins are `LEFT`), its unit's `ci_ext` row when it is
+/// `Done` and its definition then. The caller keeps the exact name and the
+/// current versions, and goes on after the last raw row; fewer than `?5`
+/// raw rows end the lookup. So one statement reads at most `?5` rows of the
+/// name whatever is stale, in another language or another case (plus,
+/// within one (unit, kind), the rows before the cursor: SQLite seeks
+/// (unit, kind) and filters the rowid).
+pub(crate) const DEFS_PAGE: &str =
+    "SELECT d.name, d.kind, d.line, d.col, d.end_line, d.scope, d.flags, d.arity,
+            e.oid, e.lang, e.grammar, e.query, raw.unit, raw.kind, raw.id
+     FROM (SELECT rowid AS id, unit, kind FROM ci_def INDEXED BY ci_def_name
+           WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)
+           ORDER BY unit, kind, rowid LIMIT ?5) AS raw
+     LEFT JOIN ci_ext e ON e.unit = raw.unit AND e.status = 0
+     LEFT JOIN ci_def d ON d.rowid = raw.id AND e.unit IS NOT NULL";
+
+/// The rows named `?1` after the cursor `?2, ?3, ?4`, whatever their
+/// version and status: an upper bound of what a lookup cut short did not
+/// read. Read from `ci_def_name` alone.
+pub(crate) const DEFS_LEFT: &str = "SELECT count(*) FROM ci_def INDEXED BY ci_def_name
+     WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)";
+
+// `?14 > 0` (the limit, always positive) names `?14` before the OIDs, so
+// their bare `?` number from 15.
+const DEFS_IN_HEAD: &str =
     "SELECT d.name, d.kind, d.line, d.col, d.end_line, d.scope, d.flags, d.arity,
             e.oid, e.lang, d.unit
-     FROM ci_def d JOIN ci_ext e ON e.unit = d.unit
+     FROM ci_ext e CROSS JOIN ci_def d INDEXED BY ci_def_name ON d.unit = e.unit
      WHERE d.name = ?1 COLLATE NOCASE AND e.status = 0
        AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4)
          OR (e.lang = ?5 AND e.grammar = ?6 AND e.query = ?7)
          OR (e.lang = ?8 AND e.grammar = ?9 AND e.query = ?10)
-         OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))";
-/// The units referring to a name (references step 1); exact names.
-pub(crate) const REFS_BY_NAME: &str = "SELECT e.oid, e.lang, e.unit
-     FROM ci_ref r JOIN ci_ext e ON e.unit = r.unit
-     WHERE r.name = ?1 AND e.status = 0
-       AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4)
-         OR (e.lang = ?5 AND e.grammar = ?6 AND e.query = ?7)
-         OR (e.lang = ?8 AND e.grammar = ?9 AND e.query = ?10)
-         OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))";
-/// Every `Done` unit of one version triple (the name table's first pass).
-pub(crate) const UNITS: &str = "SELECT unit, oid FROM ci_ext
-     WHERE lang = ?1 AND grammar = ?2 AND query = ?3 AND status = 0";
-/// The definition names of one unit (the name table's scan by `ci_def_unit`).
-pub(crate) const DEF_NAMES: &str = "SELECT name, kind FROM ci_def WHERE unit = ?1";
+         OR (e.lang = ?11 AND e.grammar = ?12 AND e.query = ?13))
+       AND ?14 > 0 AND e.oid IN (";
+const DEFS_IN_TAIL: &str = " LIMIT ?14";
+/// `?` takes the number after the largest so far: `?15` … `?514`.
+const DEFS_IN_LEN: usize = DEFS_IN_HEAD.len() + 2 * EXISTS_BATCH + DEFS_IN_TAIL.len();
+const DEFS_IN_BYTES: [u8; DEFS_IN_LEN] = {
+    let mut out = [0u8; DEFS_IN_LEN];
+    let head = DEFS_IN_HEAD.as_bytes();
+    let mut i = 0;
+    while i < head.len() {
+        out[i] = head[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < EXISTS_BATCH {
+        out[i] = b'?';
+        out[i + 1] = if j + 1 < EXISTS_BATCH { b',' } else { b')' };
+        i += 2;
+        j += 1;
+    }
+    let tail = DEFS_IN_TAIL.as_bytes();
+    let mut k = 0;
+    while k < tail.len() {
+        out[i] = tail[k];
+        i += 1;
+        k += 1;
+    }
+    out
+};
+/// The definitions by name in the units of up to [`EXISTS_BATCH`] OIDs
+/// (`?15` …, unused ones NULL), at most `?14` rows: the jump's and
+/// `Named`'s first batch, from the files nearest the query (「候选的分层与
+/// 过滤」). Each OID is one seek in `ci_ext`'s key and one in `ci_def_name`
+/// (name, unit): the cost follows the files asked for, not how many units
+/// define the name.
+pub(crate) const DEFS_IN: &str = match std::str::from_utf8(&DEFS_IN_BYTES) {
+    Ok(sql) => sql,
+    Err(_) => panic!("the lookup in units is ASCII"),
+};
+/// One page of the units referring to a name (references step 1), exact
+/// names: the next `?3` rows of `ci_ref`'s key (name, unit) after unit
+/// `?2`, each with its unit's `ci_ext` row when `Done` (`LEFT`: every raw
+/// row comes out once). As [`DEFS_PAGE`]: the limit bounds the rows read,
+/// the caller keeps the current versions, fewer than `?3` end the lookup.
+pub(crate) const REFS_PAGE: &str = "SELECT e.oid, e.lang, e.grammar, e.query, raw.unit
+     FROM (SELECT unit FROM ci_ref WHERE name = ?1 AND unit > ?2 ORDER BY unit LIMIT ?3) AS raw
+     LEFT JOIN ci_ext e ON e.unit = raw.unit AND e.status = 0";
+/// The units referring to `?1` after unit `?2`, whatever their version and
+/// status: what a references lookup cut short by its time box did not read
+/// (an upper bound of those units). From `ci_ref`'s key alone.
+pub(crate) const REFS_LEFT: &str = "SELECT count(*) FROM ci_ref WHERE name = ?1 AND unit > ?2";
+/// Every `Done` unit with its version (the name table's first pass): one
+/// scan of `ci_ext`, the versions kept by the caller.
+pub(crate) const UNITS: &str =
+    "SELECT unit, oid, lang, grammar, query FROM ci_ext WHERE status = 0";
+/// The next `?5` entries of `ci_def_name` after the cursor (name, unit,
+/// kind, rowid) `?1` … `?4`, in the index's order (the name table's second
+/// pass, in pages): the rest of the cursor's name, then the names after it,
+/// merged in order without a sort. Covering: no table row is read.
+pub(crate) const NAMES_PAGE: &str =
+    "SELECT name, unit, kind, rowid FROM ci_def INDEXED BY ci_def_name
+       WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)
+     UNION ALL
+     SELECT name, unit, kind, rowid FROM ci_def INDEXED BY ci_def_name
+       WHERE name > ?1 COLLATE NOCASE
+     ORDER BY 1 COLLATE NOCASE, 2, 3, 4 LIMIT ?5";
 pub(crate) const EXT_OF_UNIT: &str = "SELECT status FROM ci_ext WHERE unit = ?1";
 /// In insertion order, which is the extraction's order.
 pub(crate) const DEFS_OF_UNIT: &str =
@@ -140,10 +240,13 @@ pub(crate) const STATEMENTS: &[&str] = &[
     INSERT_DEF,
     INSERT_REF,
     EXISTS,
-    DEFS_BY_NAME,
-    REFS_BY_NAME,
+    DEFS_PAGE,
+    DEFS_LEFT,
+    DEFS_IN,
+    REFS_PAGE,
+    REFS_LEFT,
     UNITS,
-    DEF_NAMES,
+    NAMES_PAGE,
     EXT_OF_UNIT,
     DEFS_OF_UNIT,
     REFS_OF_UNIT,
@@ -282,6 +385,66 @@ pub struct StoredDef {
     pub def: Def,
 }
 
+/// Where a lookup of a name in pages stands ([`Store::next_defs`],
+/// [`Store::next_refs`]): the versions it keeps and the last raw index row
+/// read, (unit, kind, rowid) for definitions, the unit for references. One
+/// raw scan covers every version. Holds no connection; a query keeps it
+/// between its batches.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct NamePager {
+    name: Box<str>,
+    versions: Vec<Version>,
+    after: (i64, i64, i64),
+    finished: bool,
+}
+
+impl NamePager {
+    pub fn new(name: &str, versions: &[Version]) -> NamePager {
+        NamePager {
+            name: name.into(),
+            versions: versions.to_vec(),
+            after: (i64::MIN, i64::MIN, i64::MIN),
+            finished: versions.is_empty(),
+        }
+    }
+
+    /// Every page is read.
+    pub fn done(&self) -> bool {
+        self.finished
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+
+    fn version_at(&self, row: &Row<'_>, at: usize) -> Option<LangName> {
+        version_in(&self.versions, row, at)
+    }
+}
+
+/// The language of a row's (language, grammar, query) at columns `at` …
+/// `at + 2` when that triple is one of `versions`.
+fn version_in(versions: &[Version], row: &Row<'_>, at: usize) -> Option<LangName> {
+    let (lang, grammar, query) = (row.text(at)?, row.int(at + 1)?, row.int(at + 2)?);
+    versions
+        .iter()
+        .find(|v| &*v.lang.0 == lang && v.grammar as i64 == grammar && v.query as i64 == query)
+        .map(|v| v.lang.clone())
+}
+
+// Raw index rows each page statement read, by statement (tests: the bound
+// per statement).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PAGE_ROWS: std::cell::RefCell<Vec<(&'static str, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn record_page(_what: &'static str, _rows: usize) {
+    #[cfg(test)]
+    PAGE_ROWS.with(|p| p.borrow_mut().push((_what, _rows)));
+}
+
 /// `code_intel.tags` in one partition (`cache.repo(common_dir)`, or
 /// `cache.folder(root)` for a folder project). `Clone + Send + Sync`; holds
 /// no connection.
@@ -336,7 +499,7 @@ impl Store {
     /// `None` when the partition cannot be read: treat every OID as missing.
     pub fn exists(&self, version: &Version, oids: &[BlobId]) -> Option<Vec<Found>> {
         let lang = &*version.lang.0;
-        self.set.read(|r| {
+        read_counted(&self.set, |r| {
             let mut found = Vec::new();
             let mut params = [Param::Null; 3 + EXISTS_BATCH];
             params[0] = Param::Text(lang);
@@ -349,7 +512,7 @@ impl Store {
                 {
                     *slot = oid.map_or(Param::Null, |o| Param::Bytes(o.as_bytes()));
                 }
-                let ok = r.query(EXISTS, &params, |row| {
+                let ok = counted(r).query(EXISTS, &params, |row| {
                     let hit = row.unit(0).zip(oid_at(row, 1)).zip(status_at(row, 2));
                     if let Some(((unit, oid), status)) = hit {
                         found.push(Found { oid, unit, status });
@@ -377,37 +540,164 @@ impl Store {
         let at = pending.units.len().saturating_sub(TOUCH_CHUNK);
         let chunk = pending.units.split_off(at);
         self.touch(&chunk);
+        if pending.units.is_empty() {
+            // A warm start queues every unit: its buffer does not stay.
+            pending.units = Vec::new();
+        }
         pending.units.len()
     }
 
     /// The definitions named exactly `name` (case-sensitive) in `Done` units
-    /// of `versions` (the current triples of a compatibility group). Not
-    /// marked as used: the caller touches what it delivers.
+    /// of `versions` (the current triples of a compatibility group), every
+    /// page of them ([`next_defs`](Self::next_defs)). Not marked as used:
+    /// the caller touches what it delivers.
     pub fn defs_by_name(&self, name: &str, versions: &[Version]) -> Option<Vec<StoredDef>> {
-        self.set.read(|r| {
+        let mut pager = NamePager::new(name, versions);
+        let mut out = Vec::new();
+        while !pager.done() {
+            out.extend(self.next_defs(&mut pager, NAME_PAGE)?);
+        }
+        Some(out)
+    }
+
+    /// The next page of a lookup by name ([`NamePager`]): the definitions
+    /// named exactly `name` in `Done` units of the pager's versions among
+    /// the next `limit` index rows of the name (any case, version or status)
+    /// after the pager's cursor ([`DEFS_PAGE`]). One statement of at most
+    /// `limit` raw rows; a page may hold no definition. Fewer raw rows than
+    /// `limit` end the lookup. `None` when the partition cannot be read (the
+    /// pager is then done: nothing more can be learned).
+    pub fn next_defs(&self, pager: &mut NamePager, limit: usize) -> Option<Vec<StoredDef>> {
+        if pager.done() {
+            return Some(Vec::new());
+        }
+        let limit = limit.max(1);
+        let (unit, kind, id) = pager.after;
+        let p: &NamePager = pager;
+        let read = read_counted(&self.set, |r| {
             let mut out = Vec::new();
-            for group in versions.chunks(GROUP_TRIPLES) {
-                let params = group_params(name, group);
-                let ok = r.query(DEFS_BY_NAME, &params, |row| {
-                    if row.text(0) != Some(name) {
-                        return true;
-                    }
-                    let found = def_at(row, 0)
+            let mut raw = 0usize;
+            let mut last = p.after;
+            let params = [
+                Param::Text(&p.name),
+                Param::Int(unit),
+                Param::Int(kind),
+                Param::Int(id),
+                Param::Int(limit as i64),
+            ];
+            let ok = counted(r).query(DEFS_PAGE, &params, |row| {
+                raw += 1;
+                if let Some(at) = row.int(12).zip(row.int(13)).zip(row.int(14)) {
+                    let at = (at.0.0, at.0.1, at.1);
+                    last = last.max(at);
+                }
+                // The exact name (`NOCASE` reads the other cases too), a
+                // `Done` unit of a kept version.
+                if row.text(0) == Some(&*p.name)
+                    && let Some((((def, oid), lang), unit)) = def_at(row, 0)
                         .zip(oid_at(row, 8))
-                        .zip(lang_at(row, 9, group))
-                        .zip(row.unit(10));
-                    if let Some((((def, oid), lang), unit)) = found {
-                        out.push(StoredDef {
-                            unit,
-                            oid,
-                            lang,
-                            def,
-                        });
+                        .zip(p.version_at(row, 9))
+                        .zip(row.unit(12))
+                {
+                    out.push(StoredDef {
+                        unit,
+                        oid,
+                        lang,
+                        def,
+                    });
+                }
+                true
+            });
+            record_page("defs", raw);
+            ok.then_some((out, raw, last))
+        })
+        .flatten();
+        let Some((out, raw, last)) = read else {
+            pager.finish();
+            return None;
+        };
+        pager.after = last;
+        if raw < limit {
+            pager.finish();
+        }
+        Some(out)
+    }
+
+    /// The rows named `name` (any case, version or status) that a lookup
+    /// cut short at `pager` has not read: those after its cursor. An upper
+    /// bound of the definitions it left out (index only, no table row
+    /// read). 0 when the partition cannot be read.
+    pub fn defs_left(&self, pager: &NamePager) -> u64 {
+        if pager.done() {
+            return 0;
+        }
+        let (unit, kind, id) = pager.after;
+        read_counted(&self.set, |r| {
+            let mut n = 0u64;
+            counted(r).query(
+                DEFS_LEFT,
+                &[
+                    Param::Text(&pager.name),
+                    Param::Int(unit),
+                    Param::Int(kind),
+                    Param::Int(id),
+                ],
+                |row| {
+                    n = row.int(0).map_or(0, |c| c.max(0) as u64);
+                    false
+                },
+            );
+            n
+        })
+        .unwrap_or(0)
+    }
+
+    /// The definitions named exactly `name` in `Done` units of `versions`
+    /// whose OID is among `oids`: one statement per [`EXISTS_BATCH`] OIDs
+    /// and version group, each at most `limit` rows (what one statement
+    /// returns beyond them is left to the paged lookup). The cost follows
+    /// the OIDs, not the name's count.
+    pub fn defs_by_name_in(
+        &self,
+        name: &str,
+        versions: &[Version],
+        oids: &[BlobId],
+        limit: usize,
+    ) -> Option<Vec<StoredDef>> {
+        read_counted(&self.set, |r| {
+            let mut out = Vec::new();
+            let mut params = [Param::Null; 14 + EXISTS_BATCH];
+            params[13] = Param::Int(limit.max(1) as i64);
+            for group in versions.chunks(GROUP_TRIPLES) {
+                params[..13].copy_from_slice(&group_params(name, group));
+                for chunk in oids.chunks(EXISTS_BATCH) {
+                    for (slot, oid) in params[14..]
+                        .iter_mut()
+                        .zip(chunk.iter().map(Some).chain(std::iter::repeat(None)))
+                    {
+                        *slot = oid.map_or(Param::Null, |o| Param::Bytes(o.as_bytes()));
                     }
-                    true
-                });
-                if !ok {
-                    break;
+                    let ok = counted(r).query(DEFS_IN, &params, |row| {
+                        if row.text(0) != Some(name) {
+                            return true;
+                        }
+                        let found = def_at(row, 0)
+                            .zip(oid_at(row, 8))
+                            .zip(lang_at(row, 9, group))
+                            .zip(row.unit(10));
+                        if let Some((((def, oid), lang), unit)) = found {
+                            out.push(StoredDef {
+                                unit,
+                                oid,
+                                lang,
+                                def,
+                            });
+                        }
+                        true
+                    });
+                    if !ok {
+                        return out;
+                    }
                 }
             }
             out
@@ -415,91 +705,235 @@ impl Store {
     }
 
     /// The `Done` units of `versions` whose reference names include `name`
-    /// exactly. Not marked as used.
+    /// exactly, every page of them ([`next_refs`](Self::next_refs)). Not
+    /// marked as used.
     pub fn refs_by_name(&self, name: &str, versions: &[Version]) -> Option<Vec<StoredUnit>> {
-        self.set.read(|r| {
+        let mut pager = NamePager::new(name, versions);
+        let mut out = Vec::new();
+        while !pager.done() {
+            out.extend(self.next_refs(&mut pager, NAME_PAGE)?);
+        }
+        Some(out)
+    }
+
+    /// The next page of the units referring to a name ([`NamePager`]): the
+    /// `Done` units of the pager's versions among the next `limit` rows of
+    /// `ci_ref`'s key for the name after the pager's unit ([`REFS_PAGE`]).
+    /// One statement of at most `limit` raw rows; a page may hold no unit.
+    /// `None` when the partition cannot be read (the pager is then done).
+    pub fn next_refs(&self, pager: &mut NamePager, limit: usize) -> Option<Vec<StoredUnit>> {
+        if pager.done() {
+            return Some(Vec::new());
+        }
+        let limit = limit.max(1);
+        let p: &NamePager = pager;
+        let read = read_counted(&self.set, |r| {
             let mut out = Vec::new();
-            for group in versions.chunks(GROUP_TRIPLES) {
-                let params = group_params(name, group);
-                let ok = r.query(REFS_BY_NAME, &params, |row| {
-                    push_unit(&mut out, row, 2, 0, lang_at(row, 1, group));
-                    true
-                });
-                if !ok {
-                    break;
-                }
-            }
-            out
+            let mut last = p.after.0;
+            let mut raw = 0usize;
+            let params = [
+                Param::Text(&p.name),
+                Param::Int(p.after.0),
+                Param::Int(limit as i64),
+            ];
+            let ok = counted(r).query(REFS_PAGE, &params, |row| {
+                raw += 1;
+                last = row.int(4).map_or(last, |u| last.max(u));
+                push_unit(&mut out, row, 4, 0, p.version_at(row, 1));
+                true
+            });
+            record_page("refs", raw);
+            ok.then_some((out, last, raw))
         })
+        .flatten();
+        let Some((out, last, raw)) = read else {
+            pager.finish();
+            return None;
+        };
+        pager.after.0 = last;
+        if raw < limit {
+            pager.finish();
+        }
+        Some(out)
+    }
+
+    /// The units referring to the pager's name that a references lookup cut
+    /// short at `pager` has not read: those after its unit, any version or
+    /// status ([`REFS_LEFT`]). An upper bound; 0 when done or unreadable.
+    pub fn refs_left(&self, pager: &NamePager) -> u64 {
+        if pager.done() {
+            return 0;
+        }
+        read_counted(&self.set, |r| {
+            let mut n = 0u64;
+            counted(r).query(
+                REFS_LEFT,
+                &[Param::Text(&pager.name), Param::Int(pager.after.0)],
+                |row| {
+                    n = row.int(0).map_or(0, |c| c.max(0) as u64);
+                    false
+                },
+            );
+            n
+        })
+        .unwrap_or(0)
     }
 
     /// Every `Done` unit of `versions` (the name table's first pass, before
-    /// filtering by the map).
+    /// filtering by the map): one scan of `ci_ext`.
     pub fn units(&self, versions: &[Version]) -> Option<Vec<StoredUnit>> {
-        self.set.read(|r| {
+        read_counted(&self.set, |r| {
             let mut out = Vec::new();
-            for version in versions {
-                let params = [
-                    Param::Text(&version.lang.0),
-                    Param::Int(version.grammar as i64),
-                    Param::Int(version.query as i64),
-                ];
-                let ok = r.query(UNITS, &params, |row| {
-                    push_unit(&mut out, row, 0, 1, Some(version.lang.clone()));
-                    true
-                });
-                if !ok {
-                    break;
-                }
-            }
+            counted(r).query(UNITS, &[], |row| {
+                push_unit(&mut out, row, 0, 1, version_in(versions, row, 2));
+                true
+            });
             out
         })
     }
 
-    /// Calls `f` with each definition name and kind of `units`, in the
-    /// order given (sorted units scan `ci_def_unit` in order). False when the
-    /// partition cannot be read; `f` then saw part of the names.
-    pub fn def_names(&self, units: &[Unit], mut f: impl FnMut(Unit, &str, DefKind)) -> bool {
-        self.set
-            .read(|r| {
-                for &unit in units {
-                    let ok = r.query(DEF_NAMES, &[Param::Int(unit.id())], |row| {
-                        if let Some((name, kind)) = row.text(0).zip(kind_at(row, 1)) {
-                            f(unit, name, kind);
-                        }
-                        true
-                    });
-                    if !ok {
-                        return;
+    /// Calls `f` once with each distinct definition name (exact case) of
+    /// `units` (sorted by ID) and the union of its kinds' bits
+    /// (`def_kind_bit`), in `ci_def_name`'s order: names equal but for
+    /// ASCII case are next to each other, so a name is compared with the
+    /// run it falls in, and nothing is allocated per definition. Read in
+    /// statements of [`NAMES_SCAN_PAGE`] index entries, `stop` asked
+    /// between them. False when the partition cannot be read or `stop` said
+    /// so; `f` then saw part of the names.
+    pub fn def_names(
+        &self,
+        units: &[Unit],
+        stop: &dyn Fn() -> bool,
+        mut f: impl FnMut(&str, u16),
+    ) -> bool {
+        debug_assert!(units.is_sorted(), "def_names takes sorted units");
+        let wanted = UnitSet::of(units);
+        // The run of names equal but for ASCII case: each spelling once.
+        let mut run: Vec<(String, u16)> = Vec::new();
+        let mut cursor = (String::new(), i64::MIN, i64::MIN, i64::MIN);
+        loop {
+            if stop() {
+                return false;
+            }
+            let read = self.set.read(|r| {
+                let mut raw = 0usize;
+                let mut next: Option<(i64, i64, i64)> = None;
+                let mut next_name: Option<String> = None;
+                let params = [
+                    Param::Text(&cursor.0),
+                    Param::Int(cursor.1),
+                    Param::Int(cursor.2),
+                    Param::Int(cursor.3),
+                    Param::Int(NAMES_SCAN_PAGE as i64),
+                ];
+                let ok = counted(r).query(NAMES_PAGE, &params, |row| {
+                    raw += 1;
+                    if raw == NAMES_SCAN_PAGE
+                        && let (Some(name), Some(id), Some(code), Some(rowid)) =
+                            (row.text(0), row.int(1), row.int(2), row.int(3))
+                    {
+                        next = Some((id, code, rowid));
+                        next_name = Some(name.to_owned());
                     }
-                }
-            })
-            .is_some()
+                    // In index order the units change from row to row: the
+                    // unit is looked up first, the name read only for those
+                    // wanted.
+                    if !row.int(1).is_some_and(|id| wanted.contains(id)) {
+                        return true;
+                    }
+                    let (Some(name), Some(kind)) = (row.text(0), kind_at(row, 2)) else {
+                        return true;
+                    };
+                    let bit = crate::def_kind_bit(kind);
+                    if run
+                        .first()
+                        .is_some_and(|(n, _)| !n.eq_ignore_ascii_case(name))
+                    {
+                        for (n, kinds) in run.drain(..) {
+                            f(&n, kinds);
+                        }
+                    }
+                    match run.iter_mut().find(|(n, _)| n == name) {
+                        Some((_, kinds)) => *kinds |= bit,
+                        None => run.push((name.to_owned(), bit)),
+                    }
+                    true
+                });
+                record_page("names", raw);
+                crate::phases::count("names: index entries", raw as u64);
+                ok.then_some(next.zip(next_name))
+            });
+            match read.flatten() {
+                None => return false,
+                Some(Some(((id, code, rowid), name))) => cursor = (name, id, code, rowid),
+                Some(None) => break,
+            }
+        }
+        for (n, kinds) in run.drain(..) {
+            f(&n, kinds);
+        }
+        true
     }
 
     /// One unit's extraction as stored: definitions in the extraction's
     /// order, reference names in byte order. `None` when the unit is gone or
     /// the partition cannot be read.
     pub fn load(&self, unit: Unit) -> Option<Extraction> {
-        self.set.read(|r| load(r, unit)).flatten()
+        read_counted(&self.set, |r| load(r, unit)).flatten()
+    }
+}
+
+/// A set of unit IDs asked once per index row: a bitset over the IDs when
+/// they are dense enough (the largest at most [`UnitSet::BITS_UP_TO`]),
+/// else the sorted list, searched.
+enum UnitSet<'a> {
+    Bits(Vec<u64>),
+    Sorted(&'a [Unit]),
+}
+
+impl<'a> UnitSet<'a> {
+    /// 16 Mi IDs: a 2 MiB bitset at most, freed with the build.
+    const BITS_UP_TO: i64 = 1 << 24;
+
+    fn of(units: &'a [Unit]) -> UnitSet<'a> {
+        let max = units.last().map_or(0, |u| u.id());
+        if units.first().is_some_and(|u| u.id() < 0) || max > Self::BITS_UP_TO {
+            return UnitSet::Sorted(units);
+        }
+        let mut bits = vec![0u64; (max as usize) / 64 + 1];
+        for u in units {
+            let id = u.id() as usize;
+            bits[id / 64] |= 1 << (id % 64);
+        }
+        UnitSet::Bits(bits)
+    }
+
+    fn contains(&self, id: i64) -> bool {
+        match self {
+            UnitSet::Bits(bits) => usize::try_from(id)
+                .ok()
+                .and_then(|id| bits.get(id / 64).map(|w| w & (1 << (id % 64)) != 0))
+                .unwrap_or(false),
+            UnitSet::Sorted(units) => units.binary_search_by_key(&id, |u| u.id()).is_ok(),
+        }
     }
 }
 
 fn load(r: &mut TableRead<'_>, unit: Unit) -> Option<Extraction> {
     let id = [Param::Int(unit.id())];
     let mut status = None;
-    r.query(EXT_OF_UNIT, &id, |row| {
+    counted(r).query(EXT_OF_UNIT, &id, |row| {
         status = status_at(row, 0);
         false
     });
     let status = status?;
     let mut defs = Vec::new();
-    r.query(DEFS_OF_UNIT, &id, |row| {
+    counted(r).query(DEFS_OF_UNIT, &id, |row| {
         defs.extend(def_at(row, 0));
         true
     });
     let mut refs = Vec::new();
-    r.query(REFS_OF_UNIT, &id, |row| {
+    counted(r).query(REFS_OF_UNIT, &id, |row| {
         refs.extend(row.text(0).map(Box::from));
         true
     });
@@ -669,4 +1103,23 @@ impl StoreWrite {
     pub fn commit(self) -> Written {
         self.write.commit()
     }
+
+    /// Deletes `unit`, as an eviction does: the namespace's eviction
+    /// generation grows (tests: an eviction at a chosen moment).
+    #[cfg(test)]
+    pub fn remove_unit(&mut self, unit: Unit) {
+        self.write.remove_unit(unit);
+    }
+}
+
+/// `r`, counting one statement (`phases`).
+fn counted<'r, 'a>(r: &'r mut TableRead<'a>) -> &'r mut TableRead<'a> {
+    crate::phases::count("sql statements", 1);
+    r
+}
+
+/// A read transaction, counted (`phases`).
+fn read_counted<T>(set: &TableSet, f: impl FnOnce(&mut TableRead<'_>) -> T) -> Option<T> {
+    crate::phases::count("sql read transactions", 1);
+    set.read(f)
 }

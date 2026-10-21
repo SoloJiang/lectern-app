@@ -7,6 +7,12 @@ mod agents;
 mod cache;
 #[path = "time/code_intel.rs"]
 mod code_intel;
+#[path = "fixtures/code_intel_names.rs"]
+mod code_intel_names;
+#[path = "time/code_intel_query.rs"]
+mod code_intel_query;
+#[path = "fixtures/code_intel_virtual.rs"]
+mod code_intel_virtual;
 #[path = "time/executor.rs"]
 mod executor;
 #[path = "time/fs_watch.rs"]
@@ -56,6 +62,19 @@ const BENCHES: &[Bench] = &[
     code_intel::WARM_100K_TOUCH,
     code_intel::MAP_100K,
     code_intel::DISK_100K,
+    code_intel_query::GOTO_INDEXED,
+    code_intel_query::GOTO_UNCACHED,
+    code_intel_query::GOTO_POPULAR,
+    code_intel_query::GOTO_FULL,
+    code_intel_query::GOTO_COLD_PARSE,
+    code_intel_query::GOTO_SAME_FILE,
+    code_intel_query::GOTO_OBJECT,
+    code_intel_query::GOTO_FIRST,
+    code_intel_query::NAMED_50K,
+    code_intel_query::SEARCH_STOP,
+    code_intel_query::REFERENCES_100K,
+    code_intel_query::REFERENCES_FULL,
+    code_intel_query::NAMES_100K,
     executor::SPAWN_10K,
     executor::WAKE_1000X100,
     fs_watch::CLASSIFY_BURST,

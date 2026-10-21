@@ -244,21 +244,44 @@ fn deadline_watchdog_idle_does_not_wake() {
     assert!(!task.started());
     let registration = watchdog.register(Instant::now() + Duration::from_secs(60), None, None);
     assert!(eventually(|| watchdog.rounds() >= 2));
+    // While the registration is in the table the thread only waits with a
+    // timeout, so this is the untimed count before it can park.
+    let (_, parked) = watchdog.waits();
     drop(registration);
-    // One more round notices the table is empty; then it waits untimed. Wait
-    // until the count stops changing instead of assuming how soon that round
-    // runs on a loaded machine.
-    let mut rounds = watchdog.rounds();
-    assert!(eventually(|| {
-        thread::sleep(Duration::from_millis(30));
-        let now = watchdog.rounds();
-        let settled = now == rounds;
-        rounds = now;
-        settled
-    }));
+    // The round that notices the table is empty parks the thread in the
+    // untimed wait: wait for that, not for a quiet stretch of time.
+    assert!(eventually(|| watchdog.waits().1 > parked));
+    let (timed, untimed) = watchdog.waits();
+    let rounds = watchdog.rounds();
     thread::sleep(Duration::from_millis(100));
-    assert_eq!(watchdog.rounds(), rounds);
+    // Parked: no timed wait since, and every round since (a spurious
+    // wake-up) went straight back into the untimed wait.
+    let (timed_after, untimed_after) = watchdog.waits();
+    assert_eq!(timed_after, timed, "a timed wait with nothing in flight");
+    assert_eq!(watchdog.rounds() - rounds, untimed_after - untimed);
     assert!(!task.is_finished());
+    watchdog.stop();
+    assert!(eventually(|| task.is_finished()));
+}
+
+/// With the system's clock and only a due entry a minute away (a kept
+/// parse's expiry, ADR 0037), the thread sleeps until it instead of waking
+/// every check interval; an earlier entry scheduled meanwhile wakes it and
+/// fires on time.
+#[test]
+fn deadline_watchdog_sleeps_until_a_far_due_entry() {
+    let executor = Executor::manual();
+    let (watchdog, task) = watchdog(&executor, Arc::new(SystemClock));
+    assert!(watchdog.schedule(Instant::now() + Duration::from_secs(60), Box::new(|| {})));
+    assert!(eventually(|| watchdog.waits().0 >= 1));
+    let (timed, _) = watchdog.waits();
+    thread::sleep(Duration::from_millis(100));
+    // At most a spurious wake-up, not one every 10 ms.
+    assert!(watchdog.waits().0 <= timed + 1, "{:?}", watchdog.waits());
+    let fired = watchdog.fired();
+    assert!(watchdog.schedule(Instant::now() + Duration::from_millis(20), Box::new(|| {})));
+    assert!(eventually(|| watchdog.fired() > fired));
+    assert_eq!(watchdog.scheduled(), 1, "the far one is still due");
     watchdog.stop();
     assert!(eventually(|| task.is_finished()));
 }
@@ -405,9 +428,11 @@ fn deadline_parsed_file_checks_every_phase() {
 #[test]
 fn deadline_parsed_file_walk_reads_the_deadline() {
     // The same Java source as core `java` (walked) and as a language pack
-    // with Java's grammar and queries (not walked): parsing, the query run
-    // and the check before returning read the clock equally often, so the
-    // difference is the walk's checks.
+    // with Java's grammar and queries (not walked), both with the full
+    // query (core languages otherwise run fewer patterns,
+    // `Lang::site_query`): parsing, the query run and the check before
+    // returning read the clock equally often, so the difference is the
+    // walk's checks.
     let source: Arc<[u8]> = Arc::from(crate::testing::corpus("java", 64 << 10));
     let table = LanguageTable::core().with_pack(
         crate::lang_name("kotlin"),
@@ -420,12 +445,13 @@ fn deadline_parsed_file_walk_reads_the_deadline() {
             reads: std::sync::atomic::AtomicU32::new(0),
             expire_at: u32::MAX,
         };
-        crate::site::ParsedFile::parse(
+        crate::site::ParsedFile::parse_with(
             lang,
             source.clone(),
             &clock,
             clock.start + MINUTE,
             &AtomicBool::new(false),
+            true,
         )
         .unwrap();
         clock.reads.load(Ordering::SeqCst)

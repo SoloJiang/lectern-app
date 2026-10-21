@@ -285,6 +285,12 @@ const DECLARATION_KINDS: &[&str] = &[
     "type_alias_statement",
 ];
 
+/// Whether a `@local.reference` with `props` is a plain reference, not a
+/// `global` / `nonlocal` directive ([`Collector::reference`]).
+pub(crate) fn is_plain_reference(props: &[QueryProperty]) -> bool {
+    !matches!(property(props, "local.nonlocal"), Some("global" | "true"))
+}
+
 fn property<'p>(props: &'p [QueryProperty], key: &str) -> Option<&'p str> {
     props
         .iter()
@@ -434,6 +440,9 @@ impl Collector {
     /// A reference capture; Python's `global` / `nonlocal` names carry
     /// `local.nonlocal "global"` / `"true"`.
     pub(crate) fn reference(&mut self, node: Node<'_>, props: &[QueryProperty]) -> bool {
+        if is_plain_reference(props) {
+            return true;
+        }
         let directive = match property(props, "local.nonlocal") {
             Some("global") => Directive::Global,
             Some("true") => Directive::Nonlocal,

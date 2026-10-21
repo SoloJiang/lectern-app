@@ -181,9 +181,13 @@ pub enum WorktreeState {
     /// No file at the path: a deletion not staged, an entry outside the
     /// sparse checkout.
     Absent,
-    /// A file not indexed: over 1 MiB, unreadable, a path through a
-    /// symbolic link, a filter's pointer file (Git LFS).
+    /// A file of the worktree not indexed: over 1 MiB, or unreadable. Its
+    /// content is not known; a query counts it as not searched.
     Unindexable,
+    /// Not a source file this crate indexes: a symbolic link or a path
+    /// through one, a file of another kind, a filter's pointer file (Git
+    /// LFS). Not one of a query's files.
+    Excluded,
 }
 
 /// The overlay: worktree states of paths with a supported language, in
@@ -248,7 +252,7 @@ impl Overlay {
             let redundant = match state {
                 WorktreeState::Content(oid) => index_oid == Some(oid),
                 WorktreeState::Absent => at.is_none(),
-                WorktreeState::Unindexable => false,
+                WorktreeState::Unindexable | WorktreeState::Excluded => false,
             };
             if redundant {
                 continue;
@@ -441,24 +445,33 @@ impl IndexedHints {
         }
     }
 
-    pub fn set(&self, slot: &HintSlot, oid: &BlobId, stamp: HintStamp) {
+    /// Sets a hint; whether it did not match before. Writers hold the
+    /// project's lock ([`State::hint_paths`](crate::index::state::State::hint_paths)).
+    pub fn set(&self, slot: &HintSlot, oid: &BlobId, stamp: HintStamp) -> bool {
+        let want = (prefix(oid), stamp.word());
         match slot {
             HintSlot::Base(i) => {
                 let i = *i as usize * 2;
-                if let Some(s) = self.slots.get(i..i + 2) {
-                    // Clear the stamp first: a reader between the stores sees
-                    // an unset hint, never the new prefix with an old stamp.
-                    s[1].store(0, Ordering::Release);
-                    s[0].store(prefix(oid), Ordering::Release);
-                    s[1].store(stamp.word(), Ordering::Release);
+                let Some(s) = self.slots.get(i..i + 2) else {
+                    return false;
+                };
+                if s[0].load(Ordering::Acquire) == want.0 && s[1].load(Ordering::Acquire) == want.1
+                {
+                    return false;
                 }
+                // Clear the stamp first: a reader between the stores sees
+                // an unset hint, never the new prefix with an old stamp.
+                s[1].store(0, Ordering::Release);
+                s[0].store(want.0, Ordering::Release);
+                s[1].store(want.1, Ordering::Release);
+                true
             }
-            HintSlot::Extra(path) => {
-                self.extra
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(path.clone(), (prefix(oid), stamp.word()));
-            }
+            HintSlot::Extra(path) => self
+                .extra
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(path.clone(), want)
+                .is_none_or(|old| old != want),
         }
     }
 
@@ -475,6 +488,33 @@ pub struct Effective {
     pub oid: BlobId,
     pub lang: Lang,
     pub slot: HintSlot,
+}
+
+/// One file of the map as a walk sees it, borrowed from the map: nothing is
+/// allocated for an index entry ([`LiveMap::each_file`]).
+pub(crate) struct FileRef<'a> {
+    /// None for an `Unindexable` overlay entry: a file of the worktree whose
+    /// content is not known (over 1 MiB, unreadable).
+    pub oid: Option<BlobId>,
+    pub lang: &'a Lang,
+    pub slot: HintSlot,
+    at: FileAt<'a>,
+}
+
+/// Where a [`FileRef`]'s path is: looked up only when asked for.
+enum FileAt<'a> {
+    Base(&'a FileList, usize),
+    Overlay(&'a str),
+}
+
+impl FileRef<'_> {
+    /// The file's path, looked up now (no allocation).
+    pub fn path(&self) -> &str {
+        match self.at {
+            FileAt::Base(files, i) => files.get(i).map_or("", |(p, _)| p),
+            FileAt::Overlay(path) => path,
+        }
+    }
 }
 
 /// The input generations a map was built from: the file list and the
@@ -519,6 +559,20 @@ impl LiveMap {
     /// The version of a language in the table this map was built with.
     pub fn lang(&self, name: &str) -> Option<&Lang> {
         self.base.table().get(name)
+    }
+
+    /// The languages some file of the map is in, in table order.
+    pub fn languages(&self) -> Vec<Lang> {
+        let mut seen = [false; 256];
+        for &code in self.base.langs.iter().chain(self.overlay.langs.iter()) {
+            seen[usize::from(code)] = true;
+        }
+        seen.iter()
+            .enumerate()
+            .filter(|(_, s)| **s)
+            .filter_map(|(code, _)| u8::try_from(code).ok())
+            .filter_map(|code| self.base.lang_of_code(code).cloned())
+            .collect()
     }
 
     /// Whether some path with content `oid` in language `lang` has a
@@ -580,6 +634,82 @@ impl LiveMap {
     pub(crate) fn overlay_effective(&self, i: usize) -> Option<Effective> {
         let (path, _) = self.overlay.entries.get(i)?;
         self.effective(path)
+    }
+
+    /// Every file of the map under `dir` ("" holds everything), or every
+    /// one not under it (`inside` false), in a language `admit` admits
+    /// (asked once per language of the map's table): index entries not
+    /// hidden by an overlay entry, then the overlay's `Content` and
+    /// `Unindexable` entries (the latter without an OID). No `Effective` and
+    /// no path is built: 100 000 files take about a millisecond.
+    pub(crate) fn each_file(
+        &self,
+        dir: &str,
+        inside: bool,
+        admit: &mut dyn FnMut(&Lang) -> bool,
+        mut f: impl FnMut(FileRef<'_>),
+    ) {
+        let mut admitted: [Option<bool>; 256] = [None; 256];
+        let mut lang_of = |code: u8| -> Option<&Lang> {
+            let lang = self.base.lang_of_code(code)?;
+            admitted[usize::from(code)]
+                .get_or_insert_with(|| admit(lang))
+                .then_some(lang)
+        };
+        let files = self.base.files();
+        let under_dir = files.range_under(dir);
+        let ranges = if inside {
+            [under_dir, 0..0]
+        } else if dir.is_empty() {
+            [0..0, 0..0]
+        } else {
+            [0..under_dir.start, under_dir.end..files.len()]
+        };
+        for i in ranges.into_iter().flatten() {
+            let code = self.base.langs.get(i).copied().unwrap_or(0);
+            if code == 0 {
+                continue;
+            }
+            let Some(lang) = lang_of(code) else {
+                continue;
+            };
+            if self.overlay.hides(i) {
+                continue;
+            }
+            let Some(oid) = files.oid(i) else {
+                continue;
+            };
+            f(FileRef {
+                oid: Some(oid),
+                lang,
+                slot: HintSlot::Base(i as u32),
+                at: FileAt::Base(files, i),
+            });
+        }
+        for (i, (path, state)) in self.overlay.entries.iter().enumerate() {
+            if crate::index::state::under(path, dir) != inside {
+                continue;
+            }
+            // `Absent` and `Excluded` entries are no files of a query's.
+            let oid = match state {
+                WorktreeState::Content(oid) => Some(*oid),
+                WorktreeState::Unindexable => None,
+                WorktreeState::Absent | WorktreeState::Excluded => continue,
+            };
+            let Some(lang) = lang_of(self.overlay.lang_code(i)) else {
+                continue;
+            };
+            let slot = match self.overlay.base_index(i) {
+                Some(b) => HintSlot::Base(b as u32),
+                None => HintSlot::Extra(path.clone()),
+            };
+            f(FileRef {
+                oid,
+                lang,
+                slot,
+                at: FileAt::Overlay(path),
+            });
+        }
     }
 
     /// Every path whose effective content is `oid` in the language named

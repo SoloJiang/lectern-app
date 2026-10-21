@@ -475,6 +475,9 @@ fn extract_export_forms_change_visibility() {
     let mut failures = Vec::new();
     for (lang, form, exported, plain, name) in EXPORT_FORMS {
         let l = table.get(lang).unwrap();
+        // Compiled before the deadline starts: compiling the tags query is
+        // not part of either extraction's time.
+        assert!(l.compiled().is_some());
         for (source, want) in [(exported, Visibility::Public), (plain, Visibility::File)] {
             let deadline = Deadline::interactive(&watchdog);
             let walked = extract(l, source.as_bytes(), &deadline, &cancel);
@@ -605,6 +608,9 @@ fn extract_markers_keep_their_names() {
     let mut failures = Vec::new();
     for (marker, lang, source, (needle, nth)) in MARKER_SAMPLES {
         let l = table.get(lang).unwrap();
+        // Compiled before the deadline starts: compiling the tags query is
+        // not part of either extraction's time.
+        assert!(l.compiled().is_some());
         let deadline = Deadline::interactive(&watchdog);
         let walked = extract(l, source.as_bytes(), &deadline, &cancel);
         let tagged = crate::extract::extract_tags(l, source.as_bytes(), &deadline, &cancel);
@@ -676,6 +682,8 @@ fn extract_python_module_level_and_attributes() {
     let watchdog = test_watchdog();
     let cancel = Arc::new(AtomicBool::new(false));
     let python = table.get("python").unwrap();
+    // Compiled before the deadline starts (see `extract_markers_keep_their_names`).
+    assert!(python.compiled().is_some());
     let deadline = Deadline::interactive(&watchdog);
     let walked = extract(python, source.as_bytes(), &deadline, &cancel);
     let tagged = crate::extract::extract_tags(python, source.as_bytes(), &deadline, &cancel);
@@ -765,6 +773,8 @@ fn extract_rust_impl_self_types() {
     let watchdog = test_watchdog();
     let cancel = Arc::new(AtomicBool::new(false));
     let rust = table.get("rust").unwrap();
+    // Compiled before the deadline starts (see `extract_markers_keep_their_names`).
+    assert!(rust.compiled().is_some());
     let deadline = Deadline::interactive(&watchdog);
     let walked = extract(rust, source.as_bytes(), &deadline, &cancel);
     let tagged = crate::extract::extract_tags(rust, source.as_bytes(), &deadline, &cancel);
@@ -865,7 +875,7 @@ fn extract_definitions_on_one_node_are_siblings() {
 
 /// Sources for the walkers' parity test beyond the fixtures: each pattern
 /// of the tags and locals queries and its near misses.
-const WALKER_CASES: &[(&str, &str)] = &[
+pub(super) const WALKER_CASES: &[(&str, &str)] = &[
     (
         "rust",
         "pub(crate) struct S<T>(T);\nunion U { a: u8 }\npub type Alias = u8;\nmod m { pub fn f() {} }\nmacro_rules! mac { ($x:ident) => { $x }; }\n\

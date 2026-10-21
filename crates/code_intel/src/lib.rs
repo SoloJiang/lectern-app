@@ -1,12 +1,14 @@
 //! tree-sitter symbol index, Java and TypeScript resolution, dependency sources.
 //!
-//! Steps 1–3 of docs/design/code_intel.md「验收」: the language registry,
+//! Steps 1–4 of docs/design/code_intel.md「验收」: the language registry,
 //! extraction keyed by (blob OID, language, grammar version, query version),
 //! the per-file deadline watchdog, and the reference-site analysis of one
 //! parsed file (step 1); the storage of extractions in `cache`'s custom
 //! tables (`store`, step 2); the blob → path map of the current worktree
 //! (`map`), its incremental updates and the five indexing tiers (`index`,
-//! step 3). Queries and the plugin are step 4.
+//! step 3); the queries (`query`), the ⌘K name table (`names`), semantic
+//! navigation's arbitration (`semantic`) and the `code-intel` plugin
+//! (`plugin`, step 4).
 
 mod forms;
 mod git_access;
@@ -14,7 +16,9 @@ mod grammar;
 mod lang;
 mod locals;
 mod power;
+mod resolve;
 mod rules;
+mod semantic;
 mod util;
 mod walk;
 mod watchdog;
@@ -22,6 +26,10 @@ mod watchdog;
 pub mod extract;
 pub mod index;
 pub mod map;
+pub mod names;
+pub mod phases;
+pub mod plugin;
+pub mod query;
 pub mod site;
 pub mod store;
 
@@ -34,9 +42,10 @@ mod tests;
 pub use crate::grammar::{
     GrammarChange, GrammarChangeKind, GrammarLease, GrammarSource, LoadedGrammar, NoGrammarPacks,
 };
+pub use crate::plugin::{CodeIntelDeps, CodeIntelPlugin, CodeIntelService};
 pub use crate::power::{AlwaysOnAc, PowerSource};
 pub use crate::watchdog::{
-    CHECK_INTERVAL, Clock, PauseProbe, Starter, SystemClock, WATCHDOG_THREAD, Watchdog,
+    CHECK_INTERVAL, Clock, Due, PauseProbe, Starter, SystemClock, WATCHDOG_THREAD, Watchdog,
     WatchdogRun, WatchdogStop,
 };
 /// The shared types of `services::code_intel` this crate's own interface

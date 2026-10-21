@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static CALLS: AtomicUsize = AtomicUsize::new(0);
 
 /// The global allocator of the `memory` benchmark target: wraps `System`
 /// and counts live bytes and their peak in two atomics. Registered only
@@ -23,6 +24,11 @@ impl CountingAlloc {
         PEAK.load(Ordering::Relaxed)
     }
 
+    /// Allocations so far (`alloc`, `alloc_zeroed` and `realloc` calls).
+    pub fn allocations() -> usize {
+        CALLS.load(Ordering::Relaxed)
+    }
+
     /// Sets the peak to the current live bytes.
     pub fn reset_peak() {
         PEAK.store(LIVE.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -30,6 +36,7 @@ impl CountingAlloc {
 }
 
 fn grow(bytes: usize) {
+    CALLS.fetch_add(1, Ordering::Relaxed);
     let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
     PEAK.fetch_max(live, Ordering::Relaxed);
 }

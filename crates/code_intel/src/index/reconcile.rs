@@ -6,17 +6,19 @@
 //! tasks) and installs each result only if the generations it was computed
 //! from are still current.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use lectern_executor::Priority;
 use lectern_git::HashKind;
 use lectern_platform::{FileKind as SafeKind, Read, RelPath as SafeRel, SafeError, SafeRoot};
-use lectern_services::project::{BlobId, ProjectKey, RelPath, Scan};
+use lectern_services::code_intel::{QueryError, QueryState};
+use lectern_services::project::{BlobId, FileKind, ProjectKey, ProjectSnapshot, RelPath, Scan};
 
-use super::state::{Project, State};
+use super::state::{Project, Published, State};
 use super::{Inner, bump, lock};
+use crate::LangName;
 use crate::extract::BACKGROUND_MAX_LEN;
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{
@@ -45,6 +47,54 @@ fn pending(st: &State, grammar: u64) -> bool {
         || (base
             && st.root.is_some()
             && !(st.dirty.is_empty() && st.dirty_dirs.is_empty() && st.probe.is_empty()))
+}
+
+/// Publishes what queries answer from (`State::published`): the current
+/// map with the table it was built with, and the session's root and
+/// sub-projects, as one object. Only once the base is built; otherwise,
+/// when nothing will build it until the next event, why
+/// (`State::unavailable`). True when published.
+fn publish(st: &mut State, disabled: HashSet<LangName>) -> bool {
+    if st.base_for.is_none() {
+        let active = st.snapshot.as_ref().map(|s| s.active.as_ref());
+        st.unavailable = match active {
+            // Not read yet: no reconcile has seen the project.
+            None => None,
+            Some(None) => Some(Arc::from("the project has no current worktree")),
+            Some(Some(a)) => match &a.files {
+                Scan::Unavailable(error) => Some(Arc::from(format!(
+                    "the file list is unavailable: {error:?}"
+                ))),
+                // Still being listed: its event brings the list.
+                Scan::Pending | Scan::Ready(_) => None,
+            },
+        };
+        return false;
+    }
+    st.unavailable = None;
+    // A Git project's overlay comes from the comparison, which needs the
+    // root; a folder project's from reading every file through it.
+    let incomplete = st.root.is_none() || (st.tree.is_some() && st.compare_failed);
+    // Sessions are numbered across the activation: (session, count) never
+    // repeats.
+    st.publishes += 1;
+    st.published = Some(Arc::new(Published {
+        seq: (st.session << 32) | (st.publishes & 0xffff_ffff),
+        incomplete,
+        session: st.session,
+        table: st.map.base.table().clone(),
+        map: st.map.clone(),
+        disabled,
+        snapshot: st.snapshot.clone(),
+        root: st.root.clone(),
+        tree: st.tree.clone(),
+        packages: st
+            .seen
+            .packages
+            .clone()
+            .unwrap_or_else(|| Arc::from(Vec::new())),
+    }));
+    true
 }
 
 /// Whether `path`'s content equals HEAD, by the rule of「依赖 git、fs_watch 与
@@ -144,12 +194,44 @@ impl Inner {
                     break;
                 }
             }
+            // The language table before the state (lock order).
+            let (grammar, disabled) = {
+                let langs = lock(&self.langs);
+                (langs.generation, langs.disabled.clone())
+            };
             let mut st = lock(&project.state);
             if st.run.again {
                 st.run.again = false;
                 continue;
             }
             st.run.running = false;
+            // All input consumed: the base and the overlay are complete for
+            // the current inputs; queries answer from this from now on, and
+            // those that waited for a snapshot start.
+            // None can be published until the next event: those waiting
+            // fail with why.
+            let (waiting, failed) = if pending(&st, grammar) || st.cancel.load(Ordering::Acquire) {
+                (Vec::new(), Vec::new())
+            } else if publish(&mut st, disabled) {
+                (std::mem::take(&mut st.waiting), Vec::new())
+            } else if let Some(why) = st.unavailable.clone() {
+                let failed: Vec<_> = std::mem::take(&mut st.waiting)
+                    .into_iter()
+                    .map(|w| (w.id, why.clone()))
+                    .collect();
+                (Vec::new(), failed)
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            drop(st);
+            if !waiting.is_empty() {
+                self.resume_waiting(waiting);
+            }
+            for (id, why) in failed {
+                self.publish(id, |r| {
+                    r.state = QueryState::Failed(QueryError::Unreadable(why));
+                });
+            }
             break;
         }
         // The batches fs_watch delivered are handled: the overlay is up to
@@ -157,6 +239,77 @@ impl Inner {
         drop(held);
         self.enqueue_focus(&project);
         self.kick_batch();
+        self.names_changed(&project);
+        self.warm_site_queries(&project);
+    }
+
+    /// Compiles `ParsedFile`'s query for every language some open
+    /// project's map has a file in and that is not compiled yet, in one
+    /// `Background` task: a jump's step 1, the search and find references
+    /// parse files on the `Interactive` thread, and a core language's
+    /// extraction (the walker) never compiles it, so the first jump in each
+    /// language would pay 30–140 ms. After the first frame like the whole
+    /// plugin (`AfterFirstFrame`); it holds the kernel busy.
+    ///
+    /// Level-triggered: a request only makes sure the task runs; the task
+    /// itself looks at every open project, compiles until it finds nothing
+    /// left, and looks once more after clearing `warming`, so a request
+    /// that found the task running (another project's reconcile, a map
+    /// installed meanwhile) is never lost.
+    pub(crate) fn warm_site_queries(self: &Arc<Self>, project: &Arc<Project>) {
+        // Nothing of this project's is cold: its request asks for nothing.
+        if !lock(&project.state)
+            .map
+            .languages()
+            .iter()
+            .any(|l| !l.site_query_ready())
+        {
+            return;
+        }
+        if self.warming.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let me = self.clone();
+        let spawned = self
+            .host
+            .spawn_busy("site queries", Priority::Background, move || {
+                loop {
+                    let cold = me.cold_languages();
+                    if cold.is_empty() {
+                        me.warming.store(false, Ordering::Release);
+                        // A request between the look and the store found
+                        // `warming` set and left its languages to this task.
+                        if me.cold_languages().is_empty() || me.warming.swap(true, Ordering::AcqRel)
+                        {
+                            return;
+                        }
+                        continue;
+                    }
+                    for lang in &cold {
+                        lang.prepare_site();
+                    }
+                }
+            });
+        if !spawned {
+            self.warming.store(false, Ordering::Release);
+        }
+    }
+
+    /// The languages of every open project's map whose `ParsedFile` query
+    /// is not compiled yet. A language in several maps is compiled once
+    /// (`prepare_site` again is a no-op).
+    pub(crate) fn cold_languages(&self) -> Vec<crate::extract::Lang> {
+        let open: Vec<Arc<Project>> = lock(&self.open).clone();
+        let mut cold = Vec::new();
+        for project in open {
+            let map = lock(&project.state).map.clone();
+            cold.extend(
+                map.languages()
+                    .into_iter()
+                    .filter(|l| !l.site_query_ready()),
+            );
+        }
+        cold
     }
 
     /// One pass over the steps, in dependency order: whether some step
@@ -165,7 +318,15 @@ impl Inner {
         let session = self.sync_snapshot(project)?;
         let mut progress = self.open_root(project, session);
         progress |= self.check_head_index(project, session);
-        progress |= self.rebuild_base(project, session);
+        let rebuilt = self.rebuild_base(project, session);
+        #[cfg(test)]
+        if rebuilt {
+            let hook = lock(&self.after_base).take();
+            if let Some(f) = hook {
+                f(self);
+            }
+        }
+        progress |= rebuilt;
         progress |= self.compare(project, session);
         progress |= self.reread(project, session);
         Some(progress)
@@ -198,21 +359,13 @@ impl Inner {
             .as_ref()
             .and_then(|s| s.active.as_ref())
             .map(|a| (a.worktree.clone(), a.root.clone()));
-        if st.snapshot.is_some() && new_active != old_active {
-            // A new current worktree: every input record starts over; the
-            // focus stays under its worktree's name.
-            let (table, grammar) = {
-                let langs = lock(&self.langs);
-                (langs.table.clone(), langs.generation)
-            };
-            let focus = st.focus.clone();
-            let demand = st.demand;
-            let run = std::mem::take(&mut st.run);
-            st.end();
-            *st = State::new(self.new_session(), &table, grammar);
-            st.focus = focus;
-            st.demand = demand;
-            st.run = run;
+        let switched = st.snapshot.is_some() && new_active != old_active;
+        if switched {
+            // Normally ended by the `Changed` event already
+            // (`switch_session`); a snapshot the event did not mark.
+            drop(st);
+            self.switch_session(project, &snapshot);
+            st = lock(&project.state);
         }
         if let Some(active) = &snapshot.active {
             st.tree = match (&project.key, &active.worktree) {
@@ -244,12 +397,79 @@ impl Inner {
             }
         }
         st.snapshot = Some(snapshot);
-        Some(st.session)
+        let session = st.session;
+        drop(st);
+        Some(session)
+    }
+
+    /// Ends the session when `snapshot`'s current worktree is not the
+    /// session's (「查询的视图」): a new session starts with no map, the old
+    /// one's queries are closed and their semantic requests cancelled, all
+    /// under the lock that orders publication, so no query of the old
+    /// session publishes after this returns. The queries asked from now on
+    /// wait for the new session's map. The old state is dropped in a task
+    /// (its watches and map). True when it switched.
+    pub(crate) fn switch_session(
+        &self,
+        project: &Arc<Project>,
+        snapshot: &ProjectSnapshot,
+    ) -> bool {
+        let new_active = snapshot
+            .active
+            .as_ref()
+            .map(|a| (a.worktree.clone(), a.root.clone()));
+        let (table, grammar) = {
+            let langs = lock(&self.langs);
+            (langs.table.clone(), langs.generation)
+        };
+        let (old, ended) = {
+            let _order = lock(&self.publishing);
+            let old = {
+                let mut st = lock(&project.state);
+                let old_active = st
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.active.as_ref())
+                    .map(|a| (a.worktree.clone(), a.root.clone()));
+                if st.snapshot.is_none() || new_active == old_active {
+                    return false;
+                }
+                // Every input record starts over; the focus stays under its
+                // worktree's name.
+                let focus = st.focus.clone();
+                let demand = st.demand;
+                let run = std::mem::take(&mut st.run);
+                st.end();
+                let mut old =
+                    std::mem::replace(&mut *st, State::new(self.new_session(), &table, grammar));
+                st.focus = focus;
+                st.demand = demand;
+                st.run = run;
+                // Queries that waited for the old session's map were asked
+                // of the old worktree: closed below with the others.
+                old.waiting.clear();
+                old
+            };
+            (old, self.close_queries(Some(&project.key)))
+        };
+        // Their providers' `cancel`, outside the lock.
+        self.finish_ended(ended);
+        // Without an activation the task is dropped unrun, and `old` with it.
+        let _ = self
+            .host
+            .spawn_busy("old session", Priority::Background, move || drop(old));
+        if let Some(me) = self.arc() {
+            me.request_reconcile(project);
+        }
+        true
     }
 
     /// Opens the worktree root and subscribes to fs_watch, once the file
     /// list is ready (「打开项目与热启动」1).
     fn open_root(self: &Arc<Self>, project: &Arc<Project>, session: u64) -> bool {
+        if matches!(project.key, ProjectKey::Folder { .. }) {
+            return self.open_folder(project, session);
+        }
         let tree = {
             let mut st = lock(&project.state);
             if st.root.is_some() || st.root_tried || st.seen.files.is_none() {
@@ -279,6 +499,45 @@ impl Inner {
         st.watches = watches;
         // Whatever happened before the subscription: compare once more.
         st.gens.compare += 1;
+        true
+    }
+
+    /// A folder project (「blob → 路径映射」, the last point): no index, no
+    /// fs_watch, no comparison. Its root is opened once the file list is
+    /// ready, and every file of the list is read: its raw bytes' SHA-1 is
+    /// its OID, an overlay entry like an untracked file's. A new file list
+    /// is read again in full (`rebuild_base`); `project` does not watch
+    /// folders, so nothing changes in between.
+    fn open_folder(&self, project: &Arc<Project>, session: u64) -> bool {
+        let path = {
+            let mut st = lock(&project.state);
+            if st.root.is_some() || st.root_tried || st.seen.files.is_none() {
+                return false;
+            }
+            let Some(path) = st
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.active.as_ref())
+                .map(|a| a.root.clone())
+            else {
+                return false;
+            };
+            st.root_tried = true;
+            path
+        };
+        let root = match SafeRoot::open(&path) {
+            Ok(root) => Arc::new(root),
+            Err(error) => {
+                log(format_args!("cannot open {}: {error}", path.display()));
+                return false;
+            }
+        };
+        let mut st = lock(&project.state);
+        if st.session != session {
+            return false;
+        }
+        st.root = Some(root);
+        queue_folder(&mut st);
         true
     }
 
@@ -370,6 +629,10 @@ impl Inner {
             },
         };
         st.base_for = Some(deps);
+        if matches!(project.key, ProjectKey::Folder { .. }) {
+            // A new list: every file is read again for its OID.
+            queue_folder(&mut st);
+        }
         true
     }
 
@@ -398,11 +661,14 @@ impl Inner {
         let changed = match result {
             Ok(changed) => changed,
             Err(error) => {
-                // Keep the overlay; the next event tries again.
+                // Keep the overlay; the next event tries again. Until then
+                // the map lacks the worktree's content.
                 log(format_args!("comparing the worktree failed: {error}"));
+                st.compare_failed = true;
                 return true;
             }
         };
+        st.compare_failed = false;
         st.head_diff = Arc::new(HeadDiff::new(
             changed.head,
             st.gens.head,
@@ -542,7 +808,7 @@ impl Inner {
         let at = find_path(files, path);
         let index = at.and_then(|i| files.oid(i));
         let Some(rel) = SafeRel::new(path.as_bytes()) else {
-            return Some(WorktreeState::Unindexable);
+            return Some(WorktreeState::Excluded);
         };
         match root.read(rel, BACKGROUND_MAX_LEN as u64) {
             Ok(Read::File { bytes, .. }) => {
@@ -552,20 +818,19 @@ impl Inner {
             Ok(Read::Unsupported { meta }) if meta.kind == SafeKind::Dir => {
                 at.map(|_| WorktreeState::Absent)
             }
-            Ok(Read::Symlink { .. } | Read::TooLarge { .. } | Read::Unsupported { .. }) => {
-                Some(WorktreeState::Unindexable)
-            }
+            // Over the limit, or unreadable: a source file whose content is
+            // not known (queries count it).
+            Ok(Read::TooLarge { .. }) | Err(SafeError::Io(_)) => Some(WorktreeState::Unindexable),
+            Ok(Read::Symlink { .. } | Read::Unsupported { .. })
+            | Err(SafeError::PathThroughSymlink) => Some(WorktreeState::Excluded),
             Err(SafeError::NotFound) => Some(WorktreeState::Absent),
-            Err(SafeError::PathThroughSymlink | SafeError::Io(_)) => {
-                Some(WorktreeState::Unindexable)
-            }
         }
     }
 
     /// The state of a file read in full. Its raw OID is the overlay's OID;
     /// when the index has the path with another OID, the built-in
     /// conversions decide whether the content still equals it (CRLF
-    /// checkouts) or a filter's pointer is checked out (`Unindexable`).
+    /// checkouts) or a filter's pointer is checked out (`Excluded`).
     fn content_state(
         &self,
         tree: Option<&Tree>,
@@ -581,13 +846,30 @@ impl Inner {
             return WorktreeState::Content(raw);
         }
         match self.git.canonical_oid(tree, path, bytes) {
-            Ok(None) => WorktreeState::Unindexable,
+            Ok(None) => WorktreeState::Excluded,
             Ok(Some(canonical)) if canonical == index => WorktreeState::Content(index),
             Ok(Some(_)) => WorktreeState::Content(raw),
             Err(error) => {
                 log(format_args!("converting {path} failed: {error}"));
                 WorktreeState::Content(raw)
             }
+        }
+    }
+}
+
+/// Every file of a folder project's list goes to the paths to read, once
+/// its root is open: a folder's OIDs come from its bytes (the base part is
+/// empty, every file an overlay entry).
+fn queue_folder(st: &mut State) {
+    if st.root.is_none() {
+        return;
+    }
+    let Some(files) = st.seen.files.clone() else {
+        return;
+    };
+    for (path, kind) in files.iter() {
+        if matches!(kind, FileKind::File | FileKind::Executable) {
+            st.dirty.insert(path.into());
         }
     }
 }

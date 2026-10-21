@@ -9,6 +9,7 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "domain"
+plugin = true
 
 [features]
 # testing::ManualClock, FakeGrammars, FakeGit, FakeProjects, FakePower, the
@@ -42,6 +43,10 @@ lectern-cache = { path = "../cache" }
 # The shared code_intel types (LangName, DefKind, RefSyntax, Position).
 lectern-services = { path = "../services" }
 streaming-iterator.workspace = true
+# The time-boxed search's whole-word lookup (`memmem`).
+memchr.workspace = true
+# The name table's names are NFC (ADR 0030: frizbee does not normalize).
+unicode-normalization.workspace = true
 tree-sitter.workspace = true
 tree-sitter-tags.workspace = true
 tree-sitter-go.workspace = true

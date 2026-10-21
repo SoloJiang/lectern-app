@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）已实现；第 4、5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现；第 5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -221,6 +221,10 @@ pub struct DefinitionRef {
     /// 不论 tags 是否也捕获了它；只在所在文件的这个作用域里可见，`References` 只扫描这个作用域（见「查找引用与调用方」）。
     /// 根作用域（程序、模块顶层）的定义和只被 tags 捕获的定义为 false，按跨文件的方式查引用。
     /// tags 也捕获的非根作用域定义在 `ci_def` 里按 `Visibility::File` 记录，不作为其他文件的候选。
+    /// 只有来自解析的值是确定的（跳转第 1 步对当前文本的解析）。`ci_def` 不存这个标记，来自索引的定义
+    /// （跳转第 3 步、`Named`）一律为 false，意思是「不知道」：列出候选时不为它解析任何文件。
+    /// `References` 不论 `DefinitionRef` 由谁给出，都按被查定义所在文件的解析确定它，用的是查引用本来就要做的
+    /// 那一次解析（每个文件解析一次）；那次解析失败时沿用给出的值，false 时按跨文件的方式查，结果只多不少。
     pub local: bool,
 }
 
@@ -378,6 +382,7 @@ pub trait NavigationProvider: Send + Sync {
     /// 立即返回，不阻塞；结果经 `reply` 在任意线程上交回。按需启动、空闲退出由提供者自己负责（架构规则 3）。
     fn definition(&self, request: SemanticRequest, reply: SemanticReply);
     fn references(&self, request: SemanticRequest, reply: SemanticReply);
+    /// 立即返回，不阻塞；可在任意线程调用（包括 UI 线程：关闭查询时）。只登记取消，停止请求的工作由提供者自己在别处完成。`code_intel` 调用它时不持有自己的任何锁。
     fn cancel(&self, request: SemanticRequestId);
 }
 
@@ -410,7 +415,7 @@ pub struct ProviderRegistration { /* Weak<登记表>, 登记序号 */ }
 - 只对工作区一侧发起的查询升级：`TextOrigin::Object`（Diff 的旧一侧）的文本是历史内容，提供者回答的是当前工作区，不发请求，`semantic` 保持 `NotRequested`。
 - `head_only` 的提供者只在 `head_clean` 时调用；它返回的位置里，当前内容与 HEAD 不同的文件被丢掉，这些文件以 blob 索引的结果为准。
 - 多个提供者处理同一种语言时（SCIP 导入与 jdtls 都处理 Java）按固定规则仲裁，结果不取决于激活顺序和回复的先后：
-  - 先后：`head_only` 的提供者（SCIP，索引对应的提交与 HEAD 相同）负责内容与 HEAD 相同的文件；其余提供者（jdtls）负责有改动和未跟踪的文件，`head_clean` 为 false 时只请求它们。同一类里按提供者 ID 的字节序。
+  - 先后：`head_only` 的提供者（SCIP，索引对应的提交与 HEAD 相同）负责内容与 HEAD 相同的文件；其余提供者（jdtls）负责有改动和未跟踪的文件，`head_clean` 为 false 时只请求它们。同一类里按提供者 ID 的字节序。`head_only` 一类只在它的请求还在等回复或已经带着位置回复时拥有与 HEAD 相同的文件；出错、超时或作废的请求不拥有任何文件，这些文件归另一类（`escalate_arbitration_by_outcome`：两类各四种结果、两种回复顺序）。
   - 合并：每个回复的位置按所在文件归给负责它的那一类，同一文件有多个回复时取先后靠前的提供者的位置。合并结果只取决于已到达的回复集合，每到一个回复重新算一次，再与候选比较。
   - 取消：每个请求有自己的 `SemanticRequestId`，只采用 ID 仍是这次查询当前请求的回复。查询关闭或被新的查询取代时，对还没回复的请求调用 `cancel`。非 `head_only` 的提供者（jdtls）在回复之前不因为别的提供者已经回复而被取消：它可能返回语法索引没找到的、在有改动或未跟踪文件里的位置。
   - 具体的提供者由 #26 实现，这里只规定 `code_intel` 一侧的仲裁。
@@ -1240,7 +1245,7 @@ pub enum Visibility {
 
 > [ADR 0033](../adr/0033.md)：依赖的单元写进单独的命名空间 `code_intel.deps`（配额 32 MiB），`code_intel.tags` 的配额从 256 MiB 改为 224 MiB，两者合计不变；[ADR 0034](../adr/0034.md)：超过 1 MiB 的打开文件按窗口写单元，键另加窗口起点。详细设计在 #17 的下一个 PR 里写进本节，在那之前实现仍按下文。
 
-一次抽取是 `cache` 的一个单元，命名空间 `code_intel.tags`（版本 1，不压缩），键是 `Key::new().bytes(oid).str(lang).u64(grammar).u64(query)`，单元的字节数由本 crate 按行估算（见下）。本 crate 登记的表：
+一次抽取是 `cache` 的一个单元，命名空间 `code_intel.tags`（版本 2，不压缩，版本升级的原因见本节「版本」），键是 `Key::new().bytes(oid).str(lang).u64(grammar).u64(query)`，单元的字节数由本 crate 按行估算（见下）。本 crate 登记的表：
 
 ```sql
 -- 一次抽取一行。unit 是 cache 分配的单元 ID；单元被淘汰或删除时，外键级联在同一条语句里删除下面三张表里它的全部行
@@ -1266,7 +1271,7 @@ CREATE TABLE ci_def (
   flags    INTEGER NOT NULL,          -- 位 0–2：Visibility
   arity    INTEGER
 );
-CREATE INDEX ci_def_name ON ci_def (name COLLATE NOCASE);
+CREATE INDEX ci_def_name ON ci_def (name COLLATE NOCASE, unit, kind);
 CREATE INDEX ci_def_unit ON ci_def (unit);
 
 -- 每个单元每个名字一行，不存位置：位置在用到时对候选文件现场抽取。
@@ -1279,28 +1284,42 @@ CREATE INDEX ci_ref_unit ON ci_ref (unit);
 ```
 
 - 状态不是 `Done` 的抽取也写一行 `ci_ext`、没有定义和引用：超时和超过上限的内容不会在每次打开项目时重试。
-- `ci_def_name` 用 `NOCASE`（ASCII 大小写折叠）：跳转按 `name = ?1 COLLATE NOCASE` 取出后在 Rust 里按原样比较；大小写不敏感的语言包可以直接用这个索引。`ci_ref` 只按原样的名字查。
-- `ci_def_unit`、`ci_ref_unit` 供删除单元和建名字表按单元扫描。
-- 版本过滤：所有读取都经 `ci_ext` 限定在当前语言表的版本上。每种语言有一个当前三元组（语言、grammar 版本、查询版本），查询把兼容组内每种语言的当前三元组作为参数：
+- `ci_def_name` 用 `NOCASE`（ASCII 大小写折叠）：跳转按 `name = ?1 COLLATE NOCASE` 取出后在 Rust 里按原样比较；大小写不敏感的语言包可以直接用这个索引。`ci_ref` 只按原样的名字查。`ci_def_name` 是 (name NOCASE, unit, kind)（[ADR 0037](../adr/0037.md)，命名空间版本 2）：一个名字的行按 (unit, kind, rowid) 的顺序直接从索引读出，按名字查找因此分页，每页一条语句，从上一页最后一行的 (unit, kind, rowid) 之后接着读；在给定文件里的查找按 (name, unit) 直接定位（每个 OID 在 `ci_ext` 的键和 `ci_def_name` 里各查一次）；剩下多少行只读索引就能数出；名字表按索引的顺序读 (name, unit, kind)，不读表。`ci_ref` 的主键 (name, unit) 给出同样的顺序，查引用的单元也按页读。`store_lookups_by_name_use_the_name_and_unit_index` 用 `EXPLAIN QUERY PLAN` 检查这几条语句都按名字和游标定位、不扫描整张表、不排序。
+- 一页的 `LIMIT` 数的是索引给出的行，不是通过筛选的行（[ADR 0037](../adr/0037.md)）：页先在索引里取名字的下 256 行（子查询），再 `LEFT JOIN` 到 `ci_ext`（只连 `Done` 的单元）和定义的行，每一行原样出来一次，版本在 Rust 里与查询的版本比对。所以一条语句最多读 256 行，不论其中多少是旧版本、其他语言或名字的其他大小写；一次扫描覆盖查询的所有版本，不按版本分组；一个单元的同名定义可以跨页；一页可以一个定义也没有，原始行少于 256 时查找结束（`store_lookup_pages_bound_the_rows_read`、`store_lookup_pages_go_on_inside_a_unit` 用测试里的计数检查每条语句读的行数）。SQLite 按 (unit, kind) 定位、在其中按 rowid 过滤，所以一个单元里同一种类的同名定义超过一页时，后面的页会再走过它前面的行，以这个单元自己的行为限。
+- `ci_def_unit`、`ci_ref_unit` 供删除单元和按单元读定义、引用。
+- 版本过滤：所有读取都限定在当前语言表的版本上。每种语言有一个当前三元组（语言、grammar 版本、查询版本）。分页的查找和名字表的第一步在 Rust 里比对 `ci_ext` 的三元组；存在检查和在给定 OID 里的查找把三元组作为参数（兼容组每 4 种语言一条语句）：
 
   ```sql
-  -- 按名字查定义（跳转第 3 步、按名字查定义）
-  SELECT d.name, d.kind, d.line, d.col, d.end_line, d.scope, d.flags, d.arity, e.oid, e.lang
-  FROM ci_def d JOIN ci_ext e ON e.unit = d.unit
-  WHERE d.name = ?1 COLLATE NOCASE AND e.status = 0
-    AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4) OR …);
-  -- 按名字查引用的单元（查找引用第 1 步）
-  SELECT e.oid, e.lang FROM ci_ref r JOIN ci_ext e ON e.unit = r.unit
-  WHERE r.name = ?1 AND e.status = 0 AND ((e.lang = ?2 AND e.grammar = ?3 AND e.query = ?4) OR …);
+  -- 按名字查定义的一页（跳转第 3 步、按名字查定义）：索引里的下 ?5 行，每行原样出来一次
+  SELECT d.name, d.kind, d.line, d.col, d.end_line, d.scope, d.flags, d.arity,
+         e.oid, e.lang, e.grammar, e.query, raw.unit, raw.kind, raw.id
+  FROM (SELECT rowid AS id, unit, kind FROM ci_def INDEXED BY ci_def_name
+        WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)
+        ORDER BY unit, kind, rowid LIMIT ?5) AS raw
+  LEFT JOIN ci_ext e ON e.unit = raw.unit AND e.status = 0
+  LEFT JOIN ci_def d ON d.rowid = raw.id AND e.unit IS NOT NULL;
+  -- 在给定的 OID 里按名字查定义（第一批里离查询最近的文件，每条至多 500 个 OID）
+  SELECT … FROM ci_ext e CROSS JOIN ci_def d INDEXED BY ci_def_name ON d.unit = e.unit
+  WHERE d.name = ?1 COLLATE NOCASE AND e.status = 0 AND (…三元组…) AND e.oid IN (?15, …) LIMIT ?14;
+  -- 按名字查引用的单元的一页（查找引用第 1 步）
+  SELECT e.oid, e.lang, e.grammar, e.query, raw.unit
+  FROM (SELECT unit FROM ci_ref WHERE name = ?1 AND unit > ?2 ORDER BY unit LIMIT ?3) AS raw
+  LEFT JOIN ci_ext e ON e.unit = raw.unit AND e.status = 0;
+  -- 名字表的第二步的一页：游标所在名字的其余行，再接后面的名字，两段按索引顺序归并，不排序
+  SELECT name, unit, kind, rowid FROM ci_def INDEXED BY ci_def_name
+    WHERE name = ?1 COLLATE NOCASE AND (unit, kind, rowid) > (?2, ?3, ?4)
+  UNION ALL
+  SELECT name, unit, kind, rowid FROM ci_def INDEXED BY ci_def_name WHERE name > ?1 COLLATE NOCASE
+  ORDER BY 1 COLLATE NOCASE, 2, 3, 4 LIMIT ?5;
   ```
 
-  存在检查和名字表的构建用同样的三元组条件。grammar 或查询升级、`EXTRACTOR_VERSION` 变化之后，旧版本的单元不再出现在任何结果里，只等淘汰。
+  grammar 或查询升级、`EXTRACTOR_VERSION` 变化之后，旧版本的单元不再出现在任何结果里，只等淘汰。
 - 单元字节数：`64 + Σ定义 (2 × 名字长度 + 作用域长度 + 40) + Σ引用 (2 × 名字长度 + 24)`，近似行加两份索引的大小，计入 `meta.bytes` 和命名空间配额。
 - 写入的键来自读到的字节：任何一次抽取（批量、按需、限时搜索、第 5 层）写入之前，都对实际读到的字节重新算 OID（原始字节的 OID；工作区一侧与排队时的 OID 不同时再用 `canonical_oid` 算一次），用这个 OID 作键。排队时记下的 OID 只用来挑选要读的文件，不作键。两者不同（排队之后文件又被改了）时，结果只写在实际的 OID 下，原来那个 OID 的 `indexed` 提示不置位；路径的新内容随 fs_watch 的事件进入覆盖部分，有效 OID 变成实际的 OID 后提示才会匹配。所以一份内容的抽取结果不会写到另一个 OID 的键下。
 - 写入：一批（见「调度、批次与取消」）在一个写事务里建单元、插入全部行，一批约 100 KB，远低于 `MAX_BATCH`；写失败（`Dropped`）时这一批的结果留在内存里供本次查询使用，下次需要时重新抽取。
 - 淘汰：按单元的访问时间（LRU，精度 1 小时）。本 crate 对热启动存在检查的命中和查询命中标记访问（存在检查本身只读，命中的单元排进队列，热启动之后再标记，见「调度、批次与取消」），所以访问时间即「最后一次出现在某个 worktree 里或被用到的时间」；不在任何 worktree 里的旧 OID 的行留给淘汰，不主动删除。当前 worktree 的单元也可能被淘汰，内存里的 `indexed` 提示按「输入代数与派生状态」处理。
 - 规模（调研第 4 节，Rust 语料的密度）：`cloudprint-miniapps` 形状约 1 MB；10 万文件约 200–250 MB，在 256 MiB 的配额以内。超过配额时最久没出现的 blob 先被淘汰，下次需要时重新抽取。调研的引用数只含调用一类的引用；兜底的引用模式（见「外部格式」）让每个单元多出普通标识符和成员名的行，第 1 步的夹具里每个文件的引用名是原来的 1.5–3.5 倍。第 3 步用 `testing` 的 10 万文件合成仓库（`testing::synthetic`：语言比例约一成不是源码，每个源码文件约 8 KiB、每个文件里的名字各不相同）测 `code_intel/disk_100k`：9 万个源码文件的单元声明 279.7 MB（266.7 MiB，每个单元平均 3.1 KB），超过 256 MiB 的配额约 4%，写入过程中淘汰了 80 次；分库文件（含 `-wal`）298 MiB。所以 10 万文件的估算校准为约 270 MiB，与配额相当：这个规模的仓库里最久没出现的约 5% 的单元会被挤出，下次用到时重新抽取（「调度、批次与取消」的配额一条保证不会反复抽取）。合成语料每 8 KiB 有 34–53 个定义（函数为主，函数体是普通的调用和条件语句）、8–16 个不同的引用名（第 2 步由夹具拼成的语料是 99–152 个定义、17–50 个引用名）；真实仓库的密度由第 5 步在 macOS 上用真实仓库核对，配额是否调整留到那时决定。
-- 版本：表结构或单元的键变化时命名空间版本加一；只是抽取规则变化时改 `EXTRACTOR_VERSION`，旧单元不再命中、逐步淘汰。
+- 版本：表结构或单元的键变化时命名空间版本加一；只是抽取规则变化时改 `EXTRACTOR_VERSION`，旧单元不再命中、逐步淘汰。版本 2：`ci_def_name` 从 (name NOCASE) 改为 (name NOCASE, unit, kind)，分页的查找、在给定文件里的定位和名字表的按索引读取都要它；旧版本的表在第一次使用时删除，单元随之后的写事务删除、重新抽取一次（[cache 设计「自定义表」](cache.md#自定义表)）。
 
 ### blob → 路径映射
 
@@ -1332,20 +1351,22 @@ enum WorktreeState {
     Content(BlobId),
     /// 工作区里没有这个文件（未暂存的删除、sparse 范围外的条目）。
     Absent,
-    /// 存在，但不建索引：超过 1 MiB、读不出、路径中间是符号链接、LFS 这类过滤器的指针文件。
+    /// 存在，但不建索引：超过 1 MiB、读不出。内容不知道，查询计为未搜（「完整性的核算」）。
     Unindexable,
+    /// 不是本 crate 索引的源文件：符号链接、路径中间是符号链接、其他种类的文件、LFS 这类过滤器的指针文件。不参与查询的核算。
+    Excluded,
 }
 ```
 
 规则：
 
 - 基础部分来自 `ActiveTree::files`：每条有 OID、语言受支持、`FileKind` 是 `File` 或 `Executable` 的文件。子模块和符号链接不进入。
-- 覆盖部分来自工作区：对一个要重新读的路径，经 `SafeRoot::read`（上限 1 MiB）读出内容，按仓库的哈希算法计算 `Oid::for_blob`。等于文件列表里的 OID 时删掉这个路径的覆盖项；文件列表里有这个路径、OID 不等时调用一次 `canonical_oid`：返回 None（设置了 clean / process 过滤器，如 LFS 的指针文件）记为 `Unindexable`，等于文件列表里的 OID（`eol`、`core.autocrlf` 这类内置转换）时删掉覆盖项，否则记为 `Content`；文件列表里没有这个路径时记为 `Content`；`NotFound` 记为 `Absent`；`TooLarge`、`PathThroughSymlink`、读取失败记为 `Unindexable`。路径的语言不受支持时不读；这样的路径不在文件列表里、却是一个目录时（目录事件），请求一次工作区比较。
+- 覆盖部分来自工作区：对一个要重新读的路径，经 `SafeRoot::read`（上限 1 MiB）读出内容，按仓库的哈希算法计算 `Oid::for_blob`。等于文件列表里的 OID 时删掉这个路径的覆盖项；文件列表里有这个路径、OID 不等时调用一次 `canonical_oid`：返回 None（设置了 clean / process 过滤器，如 LFS 的指针文件）记为 `Excluded`，等于文件列表里的 OID（`eol`、`core.autocrlf` 这类内置转换）时删掉覆盖项，否则记为 `Content`；文件列表里没有这个路径时记为 `Content`；`NotFound` 记为 `Absent`；`TooLarge`、读取失败记为 `Unindexable`；符号链接、`PathThroughSymlink`、其他种类的文件记为 `Excluded`。路径的语言不受支持时不读；这样的路径不在文件列表里、却是一个目录时（目录事件），请求一次工作区比较。
 - 覆盖项的 OID 按原始字节计算。未跟踪的文件不调用 `canonical_oid`：设置了 `eol` 一类转换的未跟踪文件按原始字节的 OID 存结果，与以后 `git add` 得到的 OID 不同，暂存之后再抽取一次（已知限制，只多一次抽取）。
 - 查找按（OID、语言）进行：在两个 `by_oid` 里按前缀二分查找，核对完整 OID，跳过基础部分里被覆盖项遮住的路径，再只留按路径判断的语言等于这个单元 `ci_ext.lang` 的路径。同一份字节放在 `.java` 和 `.js` 下 OID 相同，`java` 的单元只对应 `.java` 的路径。
 - 基础部分、覆盖部分何时重算见「输入代数与派生状态」。
 - 内存：10 万文件的 `by_oid` 1.2 MB（每条 12 字节，前缀和下标分两个数组存放），每条的语言 0.1 MB，`indexed` 提示约 1.6 MB（每条 16 字节）；覆盖项通常几十条，未跟踪文件最多 20 000 条（`git` 的上限）时约 1.5 MB。
-- 文件夹项目：`FileList` 没有 OID，基础部分为空，每个文件在第一次被读到时作为 `Content` 加入覆盖部分（上限是文件夹遍历的 20 000 个条目）。第 3 步不实现，见「与设计的差异」。
+- 文件夹项目：`FileList` 没有 OID，基础部分为空，每个文件在第一次被读到时作为 `Content` 加入覆盖部分（上限是文件夹遍历的 20 000 个条目）。根目录在文件列表就绪后打开，文件列表里的每个文件随即读一遍（每次换文件列表时也是），没有 fs_watch 订阅和工作区比较；第 4 步实现，见「与设计的差异」。
 
 ### 输入代数与派生状态
 
@@ -1391,10 +1412,24 @@ enum WorktreeState {
 - 有效 OID 变了：一个路径的有效 OID 是它的覆盖项的 OID，没有覆盖项时是文件列表的 OID。`indexed` 提示每条存（有效 OID 的前 8 字节、淘汰代数、语言包代数），读的时候与当前的有效 OID 和代数比较，所以 OID 一变提示就不再匹配，不需要逐个清除；新 OID 的存在检查命中或写入成功之后才重新置位。命中或写入的版本与当前语言表、映射的语言表里这种语言的版本都相同时才置位。
 - 淘汰：淘汰代数加一后全部提示不再匹配，第 3–5 层的游标重建、按层重新做存在检查。仍在的单元只重新置位、不重新抽取，被淘汰的重新抽取。查询现场用到一个文件的抽取结果时（第 2 步的 import 目标、引用的候选文件、限时搜索的命中文件）先做存在检查，没有就现场抽取，并按所在层排队写入。
 
+#### 查询的视图
+
+一次查询的结果与一个视图一致。查询在取快照时记下视图（`query::View`），之后每一步只读这个快照和视图允许的共享输入；读完一步之后在一个地方（`Inner::check_view`）与当前比较一次，按比较结果处理。
+
+- 快照只来自一个发布的对象（`State::published`，`Published`）：核对任务在消费完全部输入（基础映射和覆盖部分对当前输入都已完整，`pending` 为假）的时候，在项目锁下整体发布当前映射、建它用的语言表（`BaseMap::table`）、停用的语言、会话的根、HEAD 树和子项目。查询只读它，不读核对中的状态，也不读当前的全局语言表：语言包刚升级、映射还没重建时，查询仍按旧表的版本查，与旧映射的提示戳记一致。核对进行中，上一个发布的对象照常给查询用；新会话（项目刚打开、刚切换 worktree）还没有发布时，问来的查询排进 `State::waiting`，发布时开始。文件夹项目打开时，基础映射建好、文件还没读进覆盖部分的那段时间没有可用的快照（`view_folder_project_opening_has_no_snapshot_before_its_overlay`）。核对任务消费完输入、仍建不出基础映射（没有当前 worktree、文件列表 `Unavailable`）时，记下原因（`State::unavailable`）：等着的查询以 `Failed(Unreadable(原因))` 结束，之后问来的查询在没有核对任务运行时立即同样结束，不会一直 `Running`；文件列表还在 `Pending` 时照常等待（`view_queries_end_when_no_snapshot_can_be_published`）。
+- 发布对象另记映射是否缺工作区内容（`Published::incomplete`）：根目录打不开（什么都没读到），或最近一次工作区比较失败（覆盖部分停在比较之前）。这样的快照里，没有读过的文件都不算已入索引（`Unverified`），结果也不会是 `Complete`：比较本来会列出的未跟踪、已修改的文件映射不知道，按至少一个未搜计入 `unsearched`；比较成功之后的发布恢复（`view_map_without_the_worktree_is_never_complete`）。
+
+- 视图的成员：会话（含当前 worktree 和它的根；项目关闭、当前 worktree 改变时结束）、映射代数、淘汰代数（提示戳记用的那个：`Project::evictions`，命名空间满了之后是冻结的那一代，与批量层同一个值，所以批量层自己的配额淘汰不让查询以 `Stale` 结束，见「完整性的核算」的满额模式）、命名空间是否已满（变化时按淘汰处理）、语言表代数、提示置位次数（`State::hinted`：每次在项目锁内让某条提示从不匹配变为匹配就加一，只有 `State::hint_paths` 一处置位提示）。文件内容按读核对：查询读的每个文件都要是快照的映射给这个路径的内容（`read_content`），否则这个文件计入 `unsearched`。
+- 映射和语言表是快照自己的副本（`Arc`），查询读的是它们，不是共享状态，所以运行中的查询不因新映射、新语言表失效：结果与旧视图一致（位置带旧 OID，打开前核对）。查询手里由映射推出的数据（第 1–3 步的结果）必须与快照同一份映射：复用预取要求会话、映射、淘汰、满额、语言表都与查询任务自己取的快照相同（`View::same_basis`；`query` 在调用方线程上的比较只决定交不交给任务，`query` 返回到任务取快照之间发布的新映射会让它作废、重做第 1–3 步）；`check_view` 也先比较数据的视图与快照的映射和语言表，不同按淘汰处理（重做一次）。
+- 比较点：跳转在第 1–3 步（含复用的预取）之后、限时搜索的范围读完提示之后、搜索结束算完计数之后；查引用在 `ci_ref` 那一遍之后、范围之后、搜索之后；`Named` 在计数之后。每次发布结果（`publish_in`）还在决定发布顺序的锁（`publishing`）下检查会话。
+- 变化的处理：只多了提示（`Grew`），就再查一次索引，把新出现的候选追加进结果：读提示之前已置位的提示，它的写入在第二次查索引之前已经提交，所以不会再漏；有淘汰（`Evicted`），还没发布结果时用新快照重做一次（跳转的第 1–3 步，`Named` 整个），已经发布了或重做时又变了，查询以 `Failed(Stale)` 结束，已发布的结果留下，消费方再问一次；查引用从第一个文件就交出结果，所以有淘汰就以 `Stale` 结束；会话结束（`Ended`），查询已随会话关闭，不再发布任何结果。任何变化之后都不报 `Complete`。
+- 会话在触发它的事件里同步结束：`Changed` 带来新的当前 worktree 时（`switch_session`）、`Closed` 时，在 `publishing` 锁下结束旧会话、关闭它的查询（语义请求的 `cancel` 在放开这把锁之后调用，查询持有的映射和预取的结果交给 `Background` 任务释放：关闭查询可能在 UI 线程上）；之后不会再发布旧会话的结果，也不会用旧映射回答新 worktree 的文本；新会话发布快照之前，查询等它（不再用空映射或只有基础部分的映射回答、报 `Complete`）。
+- 查询读的、不来自发布对象的输入，逐项：会话、淘汰、提示置位次数（视图的成员，按上面比较）；提示本身（映射里共享的 `IndexedHints`，增长由置位次数覆盖）；在途抽取的键（取快照时读，计入 `unsearched`，只会让结果更保守）；会话的根（发布对象里的，发布时还没打开时用同一会话的根，路径相同）；当前文本的语言（映射里这个路径的语言；映射没有这个路径时按扩展名在快照的表里找，只决定怎么解析当前文本）；审阅集合（取快照时读的焦点，只影响排序和分层，不影响完整性）；解析扩展点的实现（每次激活注册一次）；名字表（查询不读，`Named` 直接查存储）；语义导航的提供者集合（只影响 `semantic` 一栏，不影响 `state` 的完整性；查询开始时选定要问的提供者）；`coverage`（查询不读）。
+
 ### 名字表
 
 - 内容：当前 worktree 映射里所有 OID 的定义名，去重（区分大小写），NFC 统一，按字节序排序；每个名字带它出现过的 `DefKind` 位集，⌘K 用它显示图标或过滤。
-- 构建：后台任务里先取出 `ci_ext` 中键的语言、grammar 版本、查询版本与当前一致的全部 `(unit, oid)`，按映射以（OID、语言）过滤成单元集合，再按 `ci_def_unit` 顺序扫描 `ci_def`，合并去重。正在入索引的 OID 不在其中，下一代名字表再补上。
+- 构建：后台任务里先扫描一遍 `ci_ext`，取出语言、grammar 版本、查询版本与当前一致的全部 `Done` 的 `(unit, oid)`，按映射以（OID、语言）过滤成单元集合；再按 `ci_def_name` (name NOCASE, unit, kind) 的顺序分页读索引（每条语句 4096 项，不读表，语句之间检查是否停止），跳过集合以外的单元。大小写不同的同名在索引里相邻，所以每个名字只和它所在的那一串比较：同一串里每种写法记一次、合并种类位集，串结束时交给 `NameTableBuilder`；不为每个定义分配，也没有哈希表，每个不同的名字做一次 NFC（NFC 之后相同的写法由 builder 合并）。正在入索引的 OID 不在其中，下一代名字表再补上。
 - 代：名字表依赖的输入见「输入代数与派生状态」，任何一个变化时代数加一。`names` 发现仍有持有者的表代数落后时开始重建，重建期间仍返回旧表（`Ready`）。
 - 交付：每个项目同时最多一次构建，构建期间的 `names` 返回 `Building`（或仍有持有者的旧表），不另起一次。建好后在 `CodeIntelEvent::Names` 里交出 `Arc<NameTable>`，同时把 `Weak` 换成指向新表；所以第一次调用返回 `Building` 之后，监听方从事件里拿到表，之后的 `names` 只要表还有持有者就返回 `Ready`。所有持有者都释放之后，下一次 `names` 重新构建。
 - 持有期间的刷新：表有持有者（`Weak` 能升级）时，只要代数落后（批次写入、映射换代、淘汰代数或语言包变化），本 crate 就在后台重建，建好后发出新的 `Names`，持有方换上新表，不需要再调 `names`。重建有间隔：上一次构建开始之后至少过 `max(1 s, 2 × 上一次构建的耗时)` 才开始下一次，期间的变化并进下一次；间隔未到时登记一个到期时刻，由看门狗线程（见「调度、批次与取消」）到期后提交重建任务。10 万文件的仓库在建索引期间因此最多每 2 秒左右重建一次，CPU 不会全花在名字表上。构建开始时取映射和淘汰代数的快照，表的代数就是这份快照的代数；建好时代数已经又落后的，照常交出，再按间隔排下一次。持有者全部释放后不再重建。
@@ -1451,8 +1486,8 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 每批开始时重新选层：第 3 层有剩余就先取第 3 层。第 1、2 层在另外的工作线程上运行，不排在批量任务后面（ADR 0029）。
 - 批量任务的数目：一次唤醒把任务补到批量线程数，一批做完、还留下工作（某层的小队列里有缺的文件）时再补一次。可能产生第 3–5 层工作的每一步之后（打开、关闭、跑第 3–5 层的项目改变、焦点、电源、语言包、核对任务结束）都唤醒一次，所以总是成立：要么没有项目有可做的第 3–5 层工作，要么批量任务数已满。测试的 `Harness` 在每次 `settle` 和 `set_focus` 之后检查这一条，漏掉的唤醒让测试失败。
 - 存在检查：一条 `SELECT oid FROM ci_ext WHERE lang = ? AND grammar = ? AND query = ? AND oid IN (…)`（最多 500 个参数；登记的语句是静态文本，`IN` 里写满 500 个占位符，不够时其余绑定 NULL），命中的按当前有效 OID 和代数写入 `indexed` 提示，缺的抽取。存在检查只读、不标记访问：热启动的耗时就是「已入索引的仓库被认出已入索引」的时间，访问时间的写回不在这条路径上。一次存在检查本身是一批：游标在项目的锁内最多看 4096 个条目，取出至多 500 个提示不匹配的文件（按语言分组查询），缺的进入这一层的小队列，由之后的批次抽取，所以抽取的批次仍按 64 个文件、2 MiB、50 ms 结束。
-- 配额：本次会话自己的写入引起淘汰时（写入前后淘汰代数不同），命名空间已经满了。此后游标的依赖和提示的戳记都用冻结的淘汰代数（命名空间满之前的那一代），淘汰不再让第 3–5 层的游标重新开始，焦点变化也不重建游标（见「输入代数与派生状态」），每个文件在一次会话里由批量层最多抽取一次；被挤出的单元等第 1 层打开它、查询现场用到时（第 4 步）或下次打开项目时再抽取。否则游标会重新抽取刚被挤出的单元，写入又挤出别的单元，不会结束。刚写入的单元的提示按写入之后的淘汰代数记下（冻结后按冻结的那一代）。
-- 替换：写事务之前再查一次存在，已在缓存里、状态满足这一层的键不再写，所以批量层的写事务只新增单元，其间的淘汰只来自配额。只有第 1 层会替换单元（重做的 `TimedOut`、`TooLarge`）；cache 把替换计为一次淘汰（每个写事务一次）。写事务和它前后读淘汰代数在项目的写锁里进行：替换了单元、淘汰代数恰好加一的事务记为本 crate 自己的一次，提示、游标和第 5 层用的淘汰代数减去这些次数（替换事务进行期间读到的是它之前的值，cache 的加一与本 crate 的计数之间没有读者能看到多出的一代），所以打开一个大文件不会让全部提示失效、游标重建、第 5 层重来；批量层也不会把它当成配额已满。访问标记的队列仍按 cache 自己的淘汰代数（`Store::touch_pending` 与它比较）。已知限制：同一个替换事务里同时因配额淘汰的单元也被算成替换，本次会话不因它重新检查，等查询用到时或下次打开项目时再抽取。批量层从队列取文件时，跳过入队之后已由第 1、2 层写入（提示已匹配）的文件。
+- 配额：本次会话自己的写入引起淘汰时（写入前后淘汰代数不同），命名空间已经满了。此后游标的依赖和提示的戳记都用冻结的淘汰代数（命名空间满之前的那一代），淘汰不再让第 3–5 层的游标重新开始，焦点变化也不重建游标（见「输入代数与派生状态」），每个文件在一次会话里由批量层最多抽取一次；被挤出的单元等第 1 层打开它、查询现场用到时（第 4 步）或下次打开项目时再抽取。否则游标会重新抽取刚被挤出的单元，写入又挤出别的单元，不会结束。刚写入的单元的提示按写入之后的淘汰代数记下（冻结后按冻结的那一代）。冻结之后提示不再证明单元在：查询按「完整性的核算」的满额模式与存储核对，被挤出的文件搜索或计为未搜。
+- 替换：写事务在项目的写锁里再查一次存在（所有写入都取这把锁，查过之后、写入之前不会有别的写入落下），已在缓存里的键只在替换时再写。替换只有一种：`Done` 的结果替换 `TimedOut`、`TooLarge` 的单元，不论哪一层写入（第 1 层按交互上限重做的、查询现场抽取的、批量层的）；没有内容的结果从不替换任何单元（不替换 `Done`，也不替换另一个没有内容的单元），层的高低不让没有内容的单元留下而丢掉 `Done` 的结果（`account_too_large_units_are_searched`）。所以写事务里的淘汰除了这种替换只来自配额；cache 把替换计为一次淘汰（每个写事务一次）。写事务和它前后读淘汰代数在项目的写锁里进行：替换了单元、淘汰代数恰好加一的事务记为本 crate 自己的一次，提示、游标和第 5 层用的淘汰代数减去这些次数（替换事务进行期间读到的是它之前的值，cache 的加一与本 crate 的计数之间没有读者能看到多出的一代），所以打开一个大文件不会让全部提示失效、游标重建、第 5 层重来；批量层也不会把它当成配额已满。访问标记的队列仍按 cache 自己的淘汰代数（`Store::touch_pending` 与它比较）。已知限制：同一个替换事务里同时因配额淘汰的单元也被算成替换，本次会话不因它重新检查，等查询用到时或下次打开项目时再抽取。批量层从队列取文件时，跳过入队之后已由第 1、2 层写入（提示已匹配）的文件。
 - 访问标记：存在检查命中的单元 ID 连同查询之前读到的淘汰代数排进项目的 `PendingTouches` 队列。批量线程在热启动的存在检查之后、在批次边界处每次标记 1024 个（`Store::touch_pending`），批次边界照常检查暂停和取消。淘汰代数变了，队列里的 ID 可能已经属于别的单元，整个队列直接丢弃、不标记。项目关闭或切换 worktree 时队列随项目的批量状态一起丢弃，没标记的单元保留原来的访问时间：丢掉的只是淘汰的先后，查询结果不受影响。
 - 单文件截止时间：后台 250 ms，交互 1 s。原来按线性吞吐估算 M 系列上 1 MiB 的文件约 230 ms；实测吞吐随文件变大而下降（tree-sitter-tags 的局部检查按「引用数 × 作用域数」增长，见 [ADR 0031](../adr/0031.md)），接近 1 MiB 的文件在 M 系列上估计要 360–400 ms，后台记为 `TimedOut`，打开时按交互截止时间重做（已知限制，`code_intel/extract_1mib` 只记录）。tree-sitter-tags 只接受一个取消标志，所以截止时间由看门狗线程实现：每个在途抽取登记（标志、截止时刻），看门狗每 10 ms 检查一次，到时置位；没有在途抽取时阻塞等待，不唤醒。生命周期见下一条。查询的按需解析由本 crate 自己调用 `Parser::parse_with_options`，进度回调直接比较时刻，不经看门狗。
 - 看门狗线程另外持有一张到期表（名字表的延迟重建，见「名字表」）：`wait_timeout` 取在途抽取的下一个检查时刻与最早到期时刻中较早的一个，到期时提交对应的任务；两张表都空时才不带超时地等待。
@@ -1520,12 +1555,18 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 `query(Definition)` 在一个 `Interactive` 任务里按下面的顺序回答。前一步得到有绑定依据的候选就停下；没有时继续，结果逐批追加：
 
-1. **当前文本**：按 `TextRef` 读出内容。工作区一侧经 `SafeRoot` 读，只有能证明读到的字节就是 `TextRef::oid` 那份内容时才回答：原始字节的 OID 等于它，或 `GitAccess::canonical_oid` 把这些字节转成规范内容后的 OID 等于它；两者都不等（或有外部过滤器）时返回 `Stale`，不因为映射里还记着这个 OID 就接受。对象库一侧经 `GitAccess::blob` 读，按 OID 取出的内容不需要核对。然后解析，求出位置上的标识符和 `RefSyntax`。按「绑定规则」在引用处确定可见的局部定义是 `Bound(Local)`；不确定可见的局部定义（`Site::possible`）和本文件里其余同名定义是第 1 层的 `NameOnly` 候选，前者在前。光标在定义的名字上时，`symbol.defines` 是这个定义（`local` 按上面 `DefinitionRef::local` 的规则：locals 在非根作用域里给出时为 true），它本身作为唯一的 `Bound(Local)` 候选。
+1. **当前文本**：按 `TextRef` 读出内容。工作区一侧经 `SafeRoot` 读，只有能证明读到的字节就是 `TextRef::oid` 那份内容时才回答：原始字节的 OID 等于它，或 `GitAccess::canonical_oid` 把这些字节转成规范内容后的 OID 等于它；两者都不等（或有外部过滤器）时返回 `Stale`，不因为映射里还记着这个 OID 就接受。对象库一侧经 `GitAccess::blob` 读，按 OID 取出的内容不需要核对。然后解析，求出位置上的标识符和 `RefSyntax`。这份内容的解析已保留时（「当前文本的解析」）不读、不解析，位置直接在保留的解析上查。按「绑定规则」在引用处确定可见的局部定义是 `Bound(Local)`；不确定可见的局部定义（`Site::possible`）和本文件里其余同名定义是第 1 层的 `NameOnly` 候选，前者在前。光标在定义的名字上时，`symbol.defines` 是这个定义（`local` 按上面 `DefinitionRef::local` 的规则：locals 在非根作用域里给出时为 true），它本身作为唯一的 `Bound(Local)` 候选。
 2. **import**：解析扩展点给出这个名字的 import 目标，按路径取目标文件的抽取结果（缓存命中或现场抽取），其中导出的同名定义是 `Bound(Import)`；扩展点的 `bind` 给出的结果按它的 `Binding`。#17 的空实现在这一步没有结果。
-3. **索引**：`ci_def` 按名字取出全部定义，经 `ci_ext` 得到 OID 和语言，只取语言、grammar 版本、查询版本与当前语言表一致的单元（见「存储表」的版本过滤），按「候选的分层与过滤」过滤和分层，只留映射里有的 OID。
+3. **索引**：`ci_def` 按名字取出定义，经 `ci_ext` 得到 OID 和语言，只取语言、grammar 版本、查询版本与当前语言表一致的单元（见「存储表」的版本过滤），按「候选的分层与过滤」过滤和分层，只留映射里有的 OID。按页取（[ADR 0037](../adr/0037.md)）：第一批只有第一页（索引里名字的 256 行，见「存储表」）；名字还有更多页（很多文件定义的名字）时，第一批另加离跳转最近的文件里的定义，按 OID 查找（见「存储表」）。最近的文件按分层的顺序取，分两段、各自用语句查，一条语句的行数上限不会让近的文件让位给远的：先是所在目录自己的文件（不含子目录，含覆盖部分里工作区的改动，审阅集合在前）；再是所在子项目的其他文件（没有子项目时是所在目录的子树，在根目录时没有），审阅集合在前、按路径距离由近到远。合计至多 2048 个（`goto_popular_name_nearest_in_a_deep_subproject`）。所以最近的候选总在第一批里，不论这个名字有多少定义。其余页在第一批之后、限时搜索之前逐页追加，每页一条语句，页与页之间检查查询是否已停止、时间盒是否已到；时间盒到时没读的定义行数计入 `Partial::unsearched`（文件数的上限）。
 4. **限时搜索**：第 3 步之后仍没有 `Bound` 候选、且当前子项目里还有未入索引的文件时进行，见「限时搜索」。
 
-第 1–3 步的结果作为第一批交出（目标：索引命中时 ≤ 50 ms），限时搜索的结果逐批追加。结果只追加：后到的候选排在已有候选之后，已有条目不重排、下标不变（调研第 5 节「索引不完整时」的呈现规则）。
+第 1、2 步和第 3 步的第一批（见上）作为第一批交出（目标：索引命中时 ≤ 50 ms，本 crate 的份额 ≤ 20 ms，见「性能」），第 3 步的其余页和限时搜索的结果逐批追加。结果只追加：后到的候选排在已有候选之后，已有条目不重排、下标不变（调研第 5 节「索引不完整时」的呈现规则）；每批新到的候选在批内按分层排序。第一批不等核算：遍历和满额模式的存储核对都在它之后。
+
+**当前文本的解析**（[ADR 0037](../adr/0037.md)）：第 1 步的整份解析（`ParsedFile`：任意位置的标识符、定义和绑定模型）按（blob OID、语言版本）保留在内存里，同一文本里的下一次跳转不读文件、不解析，答案与为光标处现场解析的相同（`goto_kept_parse_answers_as_the_cold_one`）。
+
+- 上限：最多 2 份；源码 ≤ 128 KiB 的才保留；按每字节源码 48 字节估算合计 ≤ 12 MiB（实测 46.6 字节，`code_intel/parse_cache_bytes`），超过时去掉最久未用的，当前文本的那份最后去掉。当前文本（最近一次 `Focus::Current`）的那份在它是当前文本期间不过期，读多久之后跳转都不走冷路径；它不再是当前文本时（另一份成为当前文本、`Focus::Current(None)`、它的项目关闭）从那时起计 60 s，其他的从最后一次用到起计 60 s，没用到即释放（看门狗的到期项，`goto_current_text_parse_stays_while_current`）；语言表替换了它的语言时立即释放，不留住旧 grammar 的租约，换表之后才完成的解析不保留（`goto_kept_parses_are_bounded`、`grammar_lease_released_by_an_expired_prefetch`）。
+- 预热：文本成为当前文本（`Focus::Current`）时，以及冷路径的跳转、预取之后，在 `Background` 任务里读出、整份解析并保留，排在首屏的 `Interactive` 工作之后；冷路径交给它已经读出并核对过的字节，不再读一次。跳转不等预热：没有保留的解析时按光标处解析（`parse_at`，冷路径），96 KiB 以内按 32 ms 判定，96–128 KiB 只记录（见「性能」）。预热进行中到来的跳转也不等它、自己再解析一遍：跳转在 `Interactive` 任务里，预热在 `Background` 任务里，让前者等后者要把跳转改成预热完成后的续接（单线程的手动 executor 下直接阻塞等待会死锁），复杂度不值得，窗口只有预热的那几十毫秒（已知限制，[ADR 0037](../adr/0037.md)）。
+- 键是内容：同一个 OID 在对象库一侧（Diff 的旧一侧）和工作区一侧共用一份；文本变了 OID 就变了，旧的那份只等释放。
 
 去重：每次查询持有一个已交出集合，键是（来源、路径、OID、行、列），来源即 `Location::origin`。每一步的候选在加入结果之前先查这个集合，已经由前面的步骤交出的跳过，保留先交出的那一条（它的层更靠前）。例如当前文本的 blob 已经入索引时，第 3 步会再次查到第 1 步列出的本文件定义；第 2 步现场抽取过的文件，在第 3 步和限时搜索里也会再次出现。同一份内容出现在两个路径上时是两个候选。`semantic` 的结果与候选按位置集合比较，不进入这个集合。集合只存在于这次查询的任务里，查询关闭时释放。
 
@@ -1535,11 +1576,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 只有 `NameOnly` 候选时，即使只有一个也不跳，`preselect` 为第一个。方法调用、接收者类型不明的成员访问都属于这一类。
 - Java 的候选满足「语义导航的注册」里的升级条件时，同时发出语义请求，`semantic` 为 `Pending`。
 
-`query(Named)` 只做第 3 步（不分 `CurrentFile`、`Imported` 两层，`near` 给出的路径决定其余各层），全部是 `NameOnly`，不跳转。
+`query(Named)` 只做第 3 步（不分 `CurrentFile`、`Imported` 两层，`near` 给出的路径决定其余各层），全部是 `NameOnly`，不跳转。它的第一批同样是第一页加上离 `near` 最近的文件里的定义，在核算的遍历之前交出（满额模式下遍历要核对存储，直到时间盒）；其余页逐页追加，遍历之后交出 `Done`。
 
 ### 候选的分层与过滤
 
-候选按 `CandidateTier` 分层（调研第 6 节）：当前文件 → import 指向的文件 → 同包（扩展点的 `package_of`，默认同一目录）→ 同一子项目 → 当前子项目依赖的子项目（扩展点的 `dependencies`，#17 为空）→ 其余。同层内依次按：在 `Focus::Review` 里的优先、路径距离（去掉公共前缀后两边剩余的段数之和）由近到远、路径字节序、行号。
+候选按 `CandidateTier` 分层（调研第 6 节）：当前文件 → import 指向的文件 → 同包（扩展点的 `package_of`，默认同一目录）→ 同一子项目 → 当前子项目依赖的子项目（扩展点的 `dependencies`，#17 为空）→ 其余。每一层都要所比较的一方已知：没有当前文本（`Named`）时没有候选是「当前文件」，`near` 只决定其余各层和距离；项目有子项目时，两个都不在任何子项目里的文件不算同一子项目（没有子项目时整个 worktree 是一个）（`goto_tiers_need_what_they_compare_with`）。同层内依次按：在 `Focus::Review` 里的优先、路径距离（去掉公共前缀后两边剩余的段数之和）由近到远、路径字节序、行号。
 
 过滤：
 
@@ -1566,26 +1607,47 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 `query(References { of })` 在 `Interactive` 任务里进行：
 
-1. 候选文件：被查定义所在的文件（按 `of.location.origin` 读：`Object` 时读对象库里的那个 blob，这份内容里的引用的 `origin` 也是 `Object`），加上 `ci_ref` 里有这个名字的单元经映射得到的路径（语言兼容组过滤）。顺序：在 `Focus::Review` 里的、同一子项目、依赖的子项目、其余，同层按路径距离。被查定义是局部定义（`DefinitionRef::local`）时，候选文件只有它所在的文件，只扫描它的作用域，不查 `ci_ref`、不做限时搜索，结果没有 `same_name`（locals 能完整解析同一作用域里的引用）。
-2. 逐个候选文件读出内容、解析，用 `ParsedFile` 的引用位置（tags 引用与 `@local.reference` 的并集）找出这个名字的每一处引用，逐处解析绑定：
+1. 候选文件：被查定义所在的文件（按 `of.location.origin` 读：`Object` 时读对象库里的那个 blob，这份内容里的引用的 `origin` 也是 `Object`），加上 `ci_ref` 里有这个名字的单元经映射得到的路径（语言兼容组过滤）。顺序：在 `Focus::Review` 里的、同一子项目、依赖的子项目、其余，同层按路径距离。被查定义是局部定义（`DefinitionRef::local`，不论给出它的是跳转、`Named` 还是别的调用方，都按被查定义所在文件的解析确定：这个文件最先解析，同一次解析既给出局部性、也给出这个文件里的引用，不另外解析；解析失败时沿用给出的值）时，候选文件只有它所在的文件，只扫描它的作用域，不查 `ci_ref`、不做限时搜索，结果没有 `same_name`（locals 能完整解析同一作用域里的引用）。
+   `ci_ref` 按页读（每页读索引的 ≤ 256 行，页与页之间检查查询是否已停止、时间盒是否已到），全部读完再按上面的顺序排列，所以很多文件用到的名字也不会让关闭的查询多等一条以上的语句。时间盒在读页时就到了，没读的单元按索引数出、计入 `unsearched`（`Store::refs_left`，上限）。
+   这些文件在第 2 步里同样受时间盒约束（[ADR 0037](../adr/0037.md)）：每个文件的解析截止时间截到时间盒，逐个文件之前检查时间盒，到时剩下的文件不再读，记为 `NotReached`、计入 `unsearched`，结果是 `Partial`（`refs_indexed_files_stop_at_the_time_box`）。原来它们各按交互的 1 s 解析、不看时间盒，几千个文件用到的名字要 5–15 s。
+2. 逐个候选文件读出内容、解析，读的上限和解析的截止时间按同一条规则（`Snap::file_limits`，见「限时搜索」）：被查定义所在的文件、有单元的文件（`ci_ref` 给出的、提示匹配的，含 `TooLarge`、`TimedOut` 的单元）和第 1 层的文件按交互上限（4 MiB、1 s），其余按后台上限（1 MiB、250 ms），截到查询的时间盒；所以 1.5 MiB 的 `TooLarge` 文件和第 1 层抽取过的 2 MiB 文件不会读进来之后在 250 ms 时超时（`account_files_are_parsed_under_their_units_limit`）。用 `ParsedFile` 的引用位置（tags 引用与 `@local.reference` 的并集）找出这个名字的每一处引用，逐处解析绑定：
    - locals 解析到被查定义（同一文件、同一位置）：调用方。
    - locals 解析到别的局部定义：丢弃，这处引用与被查定义无关。
    - 扩展点的 `bind` 给出被查定义：调用方；给出别的定义：丢弃。
    - 其余：同名引用（`same_name`），不计入调用方，也不用于判断 agent 是否漏改了调用方（调研第 5 节）。
-3. 当前子项目里未入索引的文件走限时搜索，命中的文件按第 2 步处理。
-4. 结果逐批追加：第一批在处理完前几个候选文件或 150 ms 时交出（目标 ≤ 200 ms），之后每 100 ms 或每 32 个文件一批；10 万文件的仓库全部结果目标 ≤ 2 s。
+3. 当前子项目里未入索引的文件走限时搜索，命中的文件按第 2 步处理。查引用的时间盒是 1.9 s（`REFERENCES_FOR`，ADR 0030 全部结果 ≤ 2 s，同样留 0.1 s 画出最后一批），限时搜索和满额模式的核对都在这里停止（[ADR 0037](../adr/0037.md)）。
+4. 结果逐批追加：第一批在处理完前几个候选文件或 150 ms 时交出（目标 ≤ 200 ms），之后每 100 ms 或每 32 个文件一批；10 万文件的仓库全部结果目标 ≤ 2 s。计时不只在解析完一个文件之后检查：限时搜索每读一个文件（命中或没命中）检查一次，所以命中之后一长串没有命中的文件不会把它压到查询结束；`ci_ref` 一轮之后、读搜索范围（满额模式下要核对存储）之前，已找到的立即交出；限时搜索之后、核算的遍历之前再交出一次（`refs_indexed_references_go_out_before_the_search`、`refs_search_batches_go_out_on_time`）。
 5. 去重：与「跳转到定义」相同，每次查询一个已交出集合，键是（来源、路径、OID、行、列），`callers` 和 `same_name` 共用，一处引用只进其中一组、只出现一次。另记已处理的（路径、OID）：被查定义所在的文件、第 1 步的候选文件、限时搜索命中的文件有重叠时，每个文件只解析一次。
 
 #17 的空扩展点下，跨文件的引用只有 locals 能证明的那部分是调用方，其余都在同名引用里；#18、#19 的 `bind` 让 Java、TS 的调用方变准。Java 的 `References` 按升级条件同时请求语义导航。
 
 ### 限时搜索
 
-- 范围：当前子项目（按查询快照里的子项目边界）里语言在兼容组内、`indexed` 提示与当前有效 OID 和代数不匹配（见「输入代数与派生状态」）、也不在在途抽取里的文件，按与当前文件的路径距离排序，同一目录的在前。在途抽取里的文件不重复抽取，但它们对这次查询不可见（索引里还没有，搜索也不扫描），所以计入 `Partial` 的 `unsearched`：有这样的文件时结果不会是 `Complete`。
-- 每个文件经 `SafeRoot` 读出（上限 1 MiB），用 `memchr::memmem` 找这个名字的字节串，命中处前后不是标识符字符（ASCII 字母数字、`_`、`$` 和 UTF-8 的多字节序列）才算整词命中。没有命中的文件不解析。
+- 范围：当前子项目（按查询快照里的子项目边界）里语言在兼容组内、`indexed` 提示与当前有效 OID 和代数不匹配（见「输入代数与派生状态」）、也不在在途抽取里的文件，按与当前文件的路径距离排序，同一目录的在前。命名空间满了之后，范围里提示匹配的文件先按批与存储核对（见「完整性的核算」），单元已不在的也在范围里；单元是 `TooLarge`、`TimedOut` 的提示匹配文件（单元里没有它的定义）也在范围里，按第 1 层的交互上限读和抽取，截到查询的时间盒。在途抽取里的文件不重复抽取，但它们对这次查询不可见（索引里还没有，搜索也不扫描），所以计入 `Partial` 的 `unsearched`：有这样的文件时结果不会是 `Complete`。范围只是搜索读哪些文件；子项目之外没入索引的文件不搜，但照样计入完整性（`outside`），见「完整性的核算」。
+- 每个文件经 `SafeRoot` 读出，上限是它的单元抽取时的上限（`Snap::file_limits`）：有单元（提示匹配，或满额模式下被挤出的）或在第 1 层（当前文本、抽屉）的文件 4 MiB，其余 1 MiB；超过上限、二进制、读不出的文件计入 `unsearched`，不当作搜过。查引用读 `ci_ref` 给出的已入索引文件时同样按 4 MiB 读。抽取和解析的截止时间按同一条规则（同一个 `FileLimits`）：读的上限是 4 MiB 的文件用交互截止时间（1 s），其余用后台的 250 ms，不让一个文件按一层的上限读、按另一层的截止时间解析。用 `memchr::memmem` 找这个名字的字节串，命中处前后不是标识符字符（ASCII 字母数字、`_`、`$` 和 UTF-8 的多字节序列）才算整词命中。没有命中的文件不解析。
 - 命中的文件先做一次存在检查，缓存里有就直接用；没有就按后台截止时间抽取，结果用于这次查询，并交给一个 `Background` 任务写入缓存，写入成功后写入 `indexed` 提示。
-- 从查询开始计 1 s 后停止：文件之间检查时刻，抽取的截止时间取「250 ms」与「剩余时间」中较小的一个。停止后交出最后一批，`state` 为 `Done(Partial { … })`；全部搜完为 `Done(Complete)`。
+- 从查询开始计 1 s 后停止：文件之间检查时刻，抽取的截止时间取「250 ms」与「剩余时间」中较小的一个。停止后交出最后一批，`state` 由「完整性的核算」决定：没搜到的文件是 `Done(Partial { … })`，每个能参与回答的文件都已入索引或搜过才是 `Done(Complete)`。
+- 截止时间被剩余时间截短、抽取因此 `TimedOut` 时，是查询的时间用完了，不是这个文件超时：结果不写入缓存，这个文件计入 `unsearched`，之后由批量层按自己的截止时间抽取。`Cancelled` 同样不写入、计入 `unsearched`。查询读文件的每条路径（跳转第 2 步、限时搜索、查引用的解析）都用同一个截止时间和同一条规则。
 - 结果每 50 ms 或每个命中文件交出一批。
 - 搜索只读、不建索引的文件不改变 `indexed` 提示，第 3 层的批量任务之后照常处理它们。
+
+### 完整性的核算
+
+`Completeness` 只在一处决定（`query::account`）：查询结束时把能参与回答的每个文件分类一次，`Complete` 当且仅当没有一个是「未搜」。能参与回答的文件是快照映射里语言在范围内的全部文件，不分层（当前文件、同一目录、同一子项目、依赖的子项目、其余）：跳转和查引用是语言在当前语言兼容组内的，`Named` 是全部启用的语言。
+
+| 分类 | 条件 |
+|---|---|
+| 已入索引 | 没有被这次查询读过；提示匹配，单元不是 `TooLarge`、`TimedOut`（`Binary` 算：二进制内容没有定义和引用，上限改不了它），满额模式下还经存储核对单元仍在，快照不缺工作区内容 |
+| 搜过 | 这次查询读到快照的内容并看过（当前文本、第 2 步的目标、`ci_ref` 的文件、搜索命中或没命中的文件） |
+| 未搜（原因） | 搜索范围内没轮到（`NotReached`）、截短（`Cut`）、取消、自身超时或单元 `TimedOut`（`TimedOut`）、内容已变（`Stale`）、超过上限或单元 `TooLarge`（`TooLarge`）、读不出、覆盖部分读不出的工作区文件（`Unindexable`）、在途、范围之外（`Outside`）、被挤出（`Evicted`）、满额模式下没来得及核对（`Unchecked`）、快照缺工作区内容（`Unverified`） |
+
+- 计数：未搜的文件在搜索范围之内的计入 `Partial::unsearched`，之外的计入 `outside`；查询读过、没能搜的文件不论在哪里都计入 `unsearched`。范围之外没入索引的文件因此让跳转、查引用、`Named` 都是 `Partial { outside }`，不再因为只搜了当前子项目就报 `Complete`（`account_outside_the_scope_is_partial`）。
+- 没有内容的单元：批量层存成 `TooLarge`（超过 1 MiB、没打开过的生成文件）或 `TimedOut` 的文件也有匹配的提示，但单元里没有这个文件的定义和引用。本次会话记下这些键（`State::unfinished`，置位提示时按单元的状态更新；记录的变化也算一次提示置位），快照带上它的 `Arc`。核算把它们计为未搜；搜索范围包括它们，按交互上限（4 MiB、1 s，截到查询的时间盒）现场抽取，所以跳转和查引用能找到只在这样的文件里的定义和调用方，`Named` 不搜，报告它们（`account_too_large_units_are_searched`、`account_timed_out_units_are_not_indexed`、`account_binary_units_count_as_indexed`）。
+- 覆盖部分里的工作区文件：修改过或未跟踪、超过 1 MiB 或读不出的文件是 `Unindexable`，内容不知道，计为未搜；过滤器的指针文件（LFS）、符号链接或路径经过符号链接的、其他种类的文件是 `Excluded`，不是本 crate 索引的源文件，不参与核算（`account_unindexable_worktree_files_are_unsearched`）。
+- 有绑定依据就结束的跳转（第 1、2 步得到 `Bound`）是 `Complete`：依据本身证明了答案，其余文件改变不了它。局部定义的查引用只看它所在的文件：这个文件搜过才是 `Complete`，否则 `Partial { unsearched: 1 }`；被查定义所在的文件按第 1 层的交互上限（1 s、4 MiB）解析（`account_local_references_need_their_file_searched`）。按 OID 读的被查定义所在的文件（对象库里的、工作区里已经变了的）没能搜时也计入 `unsearched`，即使映射在这个路径上是另一份内容（`account_definition_read_as_an_object_counts_when_unsearched`）。
+- 一次遍历（`Snap::walk`）读全部提示，并定下此时已读过的文件在遍历里的分类，都在查询最后一次比较视图之前；`Snap::finish` 不读提示：遍历定下分类的文件换成读到的结果，遍历之后才读的文件（比较发现只多了提示、再查一次索引时读的）只在没能搜时计入（保守）。已置位的提示都被那次查索引覆盖。遍历不建 `Effective`、不取路径，10 万个文件约 1.2 ms。
+- 遍历的结果按项目缓存（`Project::walks`，最多 2 个）：键是发布对象、提示戳记、提示置位次数、搜索范围的目录和语言组，任何一个变了就不用；满额模式不缓存。同一个索引上重复的跳转因此不再遍历（`account_walks_are_cached_until_the_index_changes`）。
+- 满额模式：命名空间满了之后（`Batch::full`）提示的戳记冻结在满之前那一代，被配额挤出的单元的提示仍然匹配，提示不再证明单元在。查询把计为「已入索引」之前的提示匹配文件按批与存储核对（与批量层同一条 `IN (…)` 语句，每条 500 个，按版本分组）：范围里的在搜索之前核对（10 万文件、子项目 1000 个文件约 2.3 ms），不在的进入搜索；范围之外的在遍历时核对。范围内外的每条语句之前都检查查询是否已停止、是否到了查询的时间盒（与搜索同一个：跳转和 `Named` 是查询开始后 1 s，查引用是 1.9 s，`REFERENCES_FOR`，在 ADR 0030 的 2 s 之内；查引用的 `ci_ref` 一轮在 10 万文件时就要 0.8–1 s，与跳转共用 1 s 时核对总被截断，`account_references_full_check_has_its_own_time_box`），停止时立即返回；到时没核对的计为 `Unchecked`：范围里的计入 `unsearched`，范围之外的计入 `outside`，都不算已入索引。所以根作用域（没有子项目）、`Named` 不带 `near` 时的整个 worktree 也不会让查询过了取消还在核对（[ADR 0037](../adr/0037.md)，`account_full_namespace_checks_the_hinted_files`、`account_full_check_stops_with_the_query`、`account_full_check_is_time_boxed`、`account_full_scope_check_stops_with_the_query`）。核对不推迟第一批：跳转在核对之前交出第 1–3 步，`Named` 在遍历之前交出候选，查引用在读搜索范围之前交出 `ci_ref` 一轮的结果（`account_named_candidates_go_out_before_the_walk`）。冻结之后再写入同一个单元不会让提示由不匹配变为匹配，所以满额模式下每次置位都让提示置位次数加一，查询据此再查一次索引。没满时不核对。
 
 ## 性能
 
@@ -1594,13 +1656,14 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 预算 | 本 crate 的份额 | 基准 |
 |---|---|---|
 | 冷启动 20 ms | 首帧之前不做任何事：`AfterFirstFrame` 激活，`activate` 只建空表、不加载 grammar | `plugin/code-intel/activate`（kernel 的 < 1 ms） |
-| 跳转：同文件或索引命中，候选 ≤ 50 ms | 当前文本（100 KB 以内）解析与 locals ≤ 10 ms；名字查找 ≤ 2 ms；过滤、分层与排序 ≤ 3 ms；合计 ≤ 20 ms，余下的给抽屉 | `code_intel/goto_indexed`（cloudprint 形状、10 万文件） |
+| 跳转：同文件或索引命中，候选 ≤ 50 ms（96 KiB 以内的当前文本任何时候成立；96–128 KiB 的靠保留的解析成立，预热完成之前的冷跳转是已知限制：[ADR 0037](../adr/0037.md) 对 ADR 0030 的修订） | 抽屉的份额是 18 ms（从收到第一批的事件到列表画出：一帧 16 ms 加 2 ms 送到 UI 线程），本 crate 从查询到第一批有候选的结果 ≤ 20 ms（[ADR 0037](../adr/0037.md)）。前提：当前文本（100 KB 以内）是当前文本、解析已保留；在首次跳转会遇到的状态下分别判定：核算的遍历已缓存或未缓存、约 3000 个定义的常见名字、命名空间满额。分项按实测（Linux 容器，「实际验证」）：在保留的解析上查位置 < 0.1 ms；按名字查找，第一页加上最近的文件 ≤ 5 ms（一页 ≤ 256 行，每 500 个文件一条语句，与名字有多少定义无关）；过滤、分层与排序 ≤ 1 ms。`Done` 在查询的 1 s 时间盒之内，最多再加一条语句（满额模式约 0.35 s）。冷路径（文本刚成为当前文本、预热还没完成，为光标处解析，随大小线性增长：128 KiB 的整次冷跳转 Linux 实测 29.6–35.9 ms，其中解析按 ADR 0034 的 TS 约 6 MiB/s 约 21 ms，其余是 locals 和查找）≤ 50 − 18 = 32 ms，在 96 KiB 处判定，128 KiB 处只记录 | `code_intel/goto_indexed`、`goto_uncached`、`goto_popular`、`goto_full`（10 万文件、每 1000 个一个子项目），各自的 `/done` 只记录，`goto_full/done` ≤ 1.02 s、每次 `Complete`；冷路径 `goto_cold_parse`（96 KiB）≤ 32 ms、`goto_cold_parse/at_128k` 只记录；同文件 `goto_same_file`、对象一侧 `goto_object`、新索引的第一次跳转 `goto_first` 只记录 |
 | 跳转：唯一候选的目标首屏高亮 ≤ 100 ms | 本 crate 的部分同上；目标文件的读取与高亮属于 `file_reader` | `app/goto_single` |
-| 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的结果；限时搜索 1 s 后停止，取消在 20 ms 内生效 | `code_intel/search_stop` ≤ 1.02 s |
-| 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 查找 ≤ 5 ms；每个候选文件的现场抽取约 1–2 ms / 10 KB | `code_intel/references_100k` |
+| 跳转：未覆盖，第一批 ≤ 300 ms，到停止 ≤ 1.1 s | 第一批是第 1–3 步的第一批；限时搜索 1 s 后停止。取消在 20 ms 内生效，每条路径都是：查询里的每条语句都有上限（一页 ≤ 256 行，或 ≤ 500 个 OID），语句之间检查查询是否已停止 | `code_intel/search_stop` ≤ 1.02 s |
+| 引用：第一批 ≤ 200 ms，10 万文件全部 ≤ 2 s | `ci_ref` 按页查找，每页读索引的 ≤ 256 行；每个候选文件的现场抽取约 1–2 ms / 10 KB；第一批不等搜索范围的读取和满额模式的核对；时间盒 1.9 s，满额模式的核对在 `ci_ref` 一轮之后有余地完成 | `code_intel/references_100k/all`、`code_intel/references_100k/first`；满额模式 `code_intel/references_full/all` ≤ 2 s、`/first` ≤ 200 ms，每次 `Complete` |
+| 当前文本的解析（[ADR 0037](../adr/0037.md)） | 最多 2 份，源码 ≤ 128 KiB 的才保留，按每字节源码 48 字节估算合计 ≤ 12 MiB；是当前文本期间一直保留，之后 60 s 不用即释放，语言被替换时立即释放。只因阅读才填充，不在 [ADR 0035](../adr/0035.md) 的采样状态（首页加载完成、没有打开文件、Diff 或会话）里，所以不计入下面的空闲常驻，也不占 ADR 0035 的 12 MB 余量；`resident_*` 测量前丢掉它 | `code_intel/parse_cache_bytes` ≤ 12 MiB，在上限处测量：两份略小于 128 KiB 的 TypeScript（实测见「实际验证」） |
 | 索引覆盖：审阅集合 ≤ 2 s，子项目 ≤ 10 s，10 万文件 ≤ 2 分钟（接电源） | 单线程抽取吞吐 ≥ 4 MB/s，按仓库形状的语料测量（每种首发语言约 1 MiB，切成约 8 KiB 的文件），核心语言用一次遍历抽取（[ADR 0031](../adr/0031.md)）；热启动 10 万文件的存在检查 ≤ 500 ms，不含之后的访问标记 | `code_intel/extract_throughput`、`code_intel/extract_1mib`（只记录）、`code_intel/warm_100k`、`code_intel/warm_100k_touch`（只记录） |
 | 空闲内存：monorepo < 100 MB，10 万文件的仓库 < 120 MB（后台暂停时和全部完成后；后者的份额加总见 [ADR 0035](../adr/0035.md)） | 本 crate 常驻 cloudprint 形状 ≤ 4 MB、10 万文件 ≤ 10 MB：映射、覆盖部分、`indexed` 提示、第 5 层本次会话已确认的 blob 集合（每个 8 字节的键，10 万个约 1.2 MB，项目关闭或换会话时释放）、已编译的 grammar 配置（按用到的语言加载）、项目表；不含名字表和 `file_reader` 的 8 MB 高亮与文本 LRU，与后者合计在 ADR 0030 的 ≤ 10 MB / ≤ 20 MB 目标之内 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` |
-| 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
+| 名字表 | 10 万文件 ≤ 8 MB，构建 ≤ 1 s（一遍 `ci_ext`，再按 `ci_def_name` 的顺序分页读索引，每条语句 4096 项，见「名字表」）；cloudprint 形状 ≤ 0.1 MB、≤ 30 ms | `code_intel/names_100k`、`code_intel/names_100k_bytes` |
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
 | 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）。`git` 的工作区比较（`GitAccess::changed_paths`）期间的临时内存不在这 40 MB 里：比较不用 `TrackedPaths`，自己解析 index，10 万文件时一次比较的峰值 65.8 MB（`git/compare_100k/peak_bytes` ≤ 72 MB，`git` 的份额，[ADR 0035](../adr/0035.md)），单独就超过 40 MB；`code_intel/batch_peak` 的夹具用 `FakeGit`，不含它。最坏情况下，打开项目时首页的计数比较和本 crate 的核对比较各在一个新 `Worktree` 上同时做冷比较，加上批量层，进程的临时峰值可达约 2 × 66 + 40 ≈ 170 MB（git 的比较之间没有串行化，这是已知的最坏情况，不设顶层预算，同 ADR 0029 的临时内存）。降低的办法是 ADR 0035 的「比较与 `tracked` 共用一次解析」；比较是否与超过 256 KiB 的文件的抽取错开，由本 crate 的下一步决定 | `code_intel/batch_peak` |
 | 磁盘 | `code_intel.tags` 配额 256 MiB；cloudprint 形状约 1 MB，10 万文件约 270 MiB（第 3 步的合成仓库实测，略超配额，见「存储表」的「规模」） | `code_intel/disk_100k`（只记录） |
@@ -1623,10 +1686,12 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | 当前文本已经变了 | 不回答 | `Failed(Stale)`，调用方用新内容的 OID 重新查询 |
 | 当前文件超过 4 MiB | 不抽取 | `Failed(TooLarge)` |
 | 某个文件解析超时 | 记 `TimedOut`，不自动重试；被打开时按交互截止时间重做一次 | 这个文件不提供候选，其余照常 |
-| 二进制、超过 1 MiB、读不出、路径中间是符号链接 | 记状态或标为 `Unindexable` | 不提供候选 |
+| 二进制、超过 1 MiB、读不出 | 记状态（`Binary`、`TooLarge`），工作区里的修改或未跟踪文件标为 `Unindexable` | 不提供候选；二进制算已入索引，其余计为未搜，结果是 `Partial`（「完整性的核算」） |
+| 符号链接、路径经过符号链接、过滤器的指针文件（LFS）、其他种类的文件 | 标为 `Excluded`，不读、不建索引 | 不提供候选；不是本 crate 索引的源文件，不参与核算 |
 | `cache` 分库不可用、写入被丢弃 | 结果只在内存里用于本次查询，下次重新抽取 | 照常，只是变慢 |
 | grammar 或查询编译失败 | 这种语言在本次运行中停用，向 stderr 写一行（`lectern-code-intel:` 前缀） | `Failed(UnsupportedLanguage)` |
-| 工作区比较失败（`GitError`） | 保留上一份覆盖部分，下一次事件再试 | 未暂存的修改可能暂时按 index 的内容回答 |
+| 工作区比较失败（`GitError`）、根目录打不开 | 保留上一份覆盖部分，下一次事件再试；发布的快照标为缺工作区内容 | 未暂存的修改可能暂时按 index 的内容回答；结果不是 `Complete`，直到比较成功 |
+| 当前 worktree 没有，或文件列表 `Unavailable` | 没有可发布的快照 | 查询 `Failed(Unreadable)`，不一直 `Running` |
 | `fs_watch` 的监听失败 | 丢掉订阅，等下一次 `ProjectEvent` | 同上 |
 | 语义导航的提供者失败或停用 | 作废它未回复的请求，按剩下的回复重新合并；都没有时 `semantic` 为 `Failed`，候选不变 | 抽屉保留已有结果 |
 | 插件停用 | kernel 丢弃任务；视图手里的 `QueryResults` 仍有效，只是不再更新 | — |
@@ -1637,10 +1702,10 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 - 语言（`lang_*`）：扩展名到语言、兼容组；语言包认领扩展名，与核心语言冲突时核心语言优先。
 - 抽取（`extract_*`）：每种语言的夹具用 insta 快照记录定义（名字、种类、位置、作用域、可见性、参数个数）和引用名；TS 叠加 JS 的查询；局部变量的引用不在引用名里；二进制和超过上限的内容；`EXTRACTOR_VERSION` 或查询文本变化时查询版本变化。
-- 截止时间（`deadline_*`）：病态输入在 1 ms 截止时间下返回 `TimedOut`；取消标志置位时返回 `Cancelled`；看门狗在截止时刻置位，没有在途抽取时不唤醒。看门狗的生命周期（`watchdog_*`）：插件停用后线程退出（`run_dedicated_gated` 返回的任务句柄 `is_finished`，`/proc/self/task/*/comm` 里没有 `code-intel-watchdog`）；连续激活、停用 20 次后，这个名字的线程最多一个；`Executor::shutdown` 在激活仍然存活时也让线程退出；停用时正在运行的抽取返回 `Cancelled`；激活在线程启动前失效时不建线程。
+- 截止时间（`deadline_*`）：病态输入在 1 ms 截止时间下返回 `TimedOut`；取消标志置位时返回 `Cancelled`；看门狗在截止时刻置位，没有在途抽取时不唤醒。看门狗的生命周期（`watchdog_*`）：插件停用后线程退出（线程自己的闭包记录的 `plugin::WatchdogThread` 为 `Exited`；只在 Linux 上、且在它退出之后，再确认 `/proc/self/task/*/comm` 里没有 `code-intel-watchdog`）；连续激活、停用 20 次，每次激活的线程在下一次激活前都已退出；`Executor::shutdown` 在激活仍然存活时也让线程退出；停用时正在运行的抽取返回 `Cancelled`；激活在线程启动前失效时不建线程。
 - 位置分析（`site_*`）：位置上的标识符与 `RefSyntax`；locals 解析到的定义；光标在定义名上时的 `defines`。
 - 定义形式（`forms_*`）与作用域形式（`scopes_*`）：两张表对照 grammar 的覆盖、样例、locals 查询和本文的表（见「定义形式」「作用域形式」）；局部定义的可见性对照 locals 查询的作用域（`forms_local_definitions_are_file_visible`）。
-- 存储（`store_*`）：单元的写入与读回；存在检查只返回键完全相同的单元、不标记访问，排队的命中在之后按块标记，淘汰代数变化后的队列被丢弃；按名字查找区分大小写；单元被淘汰后三张表里没有它的行；配额小于数据量时按访问时间淘汰本命名空间的单元；同一个 OID 有旧 grammar 版本或旧查询版本的单元时，按名字查定义、查引用、存在检查和名字表都只返回当前版本的单元（`store_version_filter_*`）；写入被丢弃时不 panic、内存里的结果仍可用。
+- 存储（`store_*`）：单元的写入与读回；存在检查只返回键完全相同的单元、不标记访问，排队的命中在之后按块标记，淘汰代数变化后的队列被丢弃；按名字查找区分大小写；按名字查定义分页，每页不超过上限、每个定义只出现一次，剩下的行数按索引数出（`store_lookup_by_name_in_pages`）；每条语句读的索引行数不超过一页（测试里的计数 `store::PAGE_ROWS`），不论其中多少是旧版本的单元或其他语言，定义和引用都照样全部找到（`store_lookup_pages_bound_the_rows_read`）；一个单元里同名定义超过一页时跨页读完，一个不少（`store_lookup_pages_go_on_inside_a_unit`）；名字表的扫描按页、每种写法一次、种类位集与直接计算的相同，`stop` 在语句之间生效（`store_def_names_in_pages`）；在给定的 OID 里查找只返回这些单元的定义，每条语句不超过上限（`store_lookup_by_name_in_given_units`）；这几条语句的查询计划按名字和游标定位、不扫描、不排序（`store_lookups_by_name_use_the_name_and_unit_index`）；单元被淘汰后三张表里没有它的行；配额小于数据量时按访问时间淘汰本命名空间的单元；同一个 OID 有旧 grammar 版本或旧查询版本的单元时，按名字查定义、查引用、存在检查和名字表都只返回当前版本的单元（`store_version_filter_*`）；写入被丢弃时不 panic、内存里的结果仍可用。
 - 输入代数（`derived_*`），每种输入一组，检查只改这一个输入时依赖它的派生状态都被重算、不依赖它的没有重算（计数钩子）：
   - `derived_files_*`：文件列表换代后基础映射重建，路径和 OID 都相同的覆盖项被删除。
   - `derived_packages_*`：只改子项目（文件列表不变），第 3 层的范围和游标、候选的子项目层、限时搜索的范围按新的子项目计算。
@@ -1660,10 +1725,10 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 电池（`battery_*`）：第 3 步按 ADR 0029 原来的默认值写的测试，ADR 0032 之后不再适用，随删除电池代码的 PR 一起删除（见「建索引的分层」）。
 - 增量（`incremental_*`）：用 `FakeBackend` 驱动 `WorktreeBatch`，检查「增量更新」表里每个事件让对应的输入代数加一：修改一个文件后按新 OID 抽取、旧 OID 不再返回；目录事件请求一次比较；`rescan`；`meta.refs` 让 HEAD 代数加一；连续事件并成一轮；从后端交出事件到覆盖部分更新完之前 kernel 不静止。
 - 热启动（`warm_*`）：缓存里已有全部单元时重新打开项目，抽取函数一次也没被调用（计数钩子），只有存在检查；删掉一部分单元后只抽取这一部分。
-- 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤（含 Go 的 `Meters(value)` 跳到 `type Meters`）；同一份字节在 `.java` 和 `.js` 下时 `java` 的单元只给出 `.java` 的路径（`goto_oid_language_match`）；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；当前文本的 blob 已入索引时，第 1 步列出的本文件定义不在第 3 步重复出现，现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现（`goto_no_duplicates_*`）；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`NoSymbol`、`UnsupportedLanguage`；从对象库一侧（`TextOrigin::Object`）发起的查询，本文件的候选 `origin` 为 `Object`，由它发起的 `References` 读同一个 blob，不读工作区（`goto_object_origin_*`）。
+- 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤（含 Go 的 `Meters(value)` 跳到 `type Meters`）；同一份字节在 `.java` 和 `.js` 下时 `java` 的单元只给出 `.java` 的路径（`goto_oid_language_match`）；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；当前文本的 blob 已入索引时，第 1 步列出的本文件定义不在第 3 步重复出现，现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现（`goto_no_duplicates_*`）；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`NoSymbol`、`UnsupportedLanguage`；从对象库一侧（`TextOrigin::Object`）发起的查询，本文件的候选 `origin` 为 `Object`，由它发起的 `References` 读同一个 blob，不读工作区（`goto_object_origin_*`），也不解析工作区里同一路径的文件（`goto_object_side_parses_only_its_text`）；很多文件定义的名字，第一批里最近的候选排在最前、其余页之后追加、每个定义只出现一次（`goto_popular_name_nearest_first`），其余页在时间盒到时停下、没读的计入未搜（`goto_popular_name_pages_are_time_boxed`）；当前文本的解析保留之后，各个位置的答案与现场解析的相同、不再解析，内容变了就不命中（`goto_kept_parse_answers_as_the_cold_one`），份数、大小和 60 s 的上限（`goto_kept_parses_are_bounded`）。
 - 预取与焦点（`prefetch_*`、`focus_*`）：映射换代或淘汰代数变化之后，2 秒内同样的查询不沿用预取结果；非当前 worktree 的焦点不进入第 1、2 层，切换到那个 worktree 后生效。
 - 限时搜索（`search_*`）：只解析整词命中的文件；`ManualClock` 推进到 1 s 时停止并给出 `Partial` 的计数；命中文件的结果写入缓存；搜完时为 `Complete`；范围里有一个文件正在后台抽取时，搜完其余文件结果仍是 `Partial`、`unsearched` 至少为 1（`search_in_flight_partial`）。
-- 引用（`refs_*`）：局部变量和参数的 `References` 找到它在作用域里的全部用处（这些位置只在 `@local.reference` 里，不在 tags 引用和 `ci_ref` 里），不查 `ci_ref`、没有 `same_name`；locals 记为程序作用域局部定义的顶层函数，它的同文件引用也被找到；同时被 tags 和 locals 捕获的导出顶层函数（根作用域）`local` 为 false，另一个文件里对它的引用经 `ci_ref` 找到、未入索引的文件经限时搜索找到（`refs_toplevel_captured_by_locals`）；函数体里嵌套的 `const helper = () => …` 同时被两者捕获，`local` 为 true，引用只在外层函数的作用域里找，其他文件里同名的 `helper` 不出现（`refs_nested_helper_is_local`）；locals 证明的同文件引用是调用方；同一处引用、同一个文件在多个来源里出现时只列一次、只解析一次（`refs_no_duplicates_*`）；被局部变量遮住的同名引用被丢弃；没有依据的跨文件引用在 `same_name`；测试 `Resolver` 的 `bind` 让跨文件引用成为调用方；未入索引的部分经限时搜索找到。
+- 引用（`refs_*`）：局部变量和参数的 `References` 找到它在作用域里的全部用处（这些位置只在 `@local.reference` 里，不在 tags 引用和 `ci_ref` 里），不查 `ci_ref`、没有 `same_name`；locals 记为程序作用域局部定义的顶层函数，它的同文件引用也被找到；同时被 tags 和 locals 捕获的导出顶层函数（根作用域）`local` 为 false，另一个文件里对它的引用经 `ci_ref` 找到、未入索引的文件经限时搜索找到（`refs_toplevel_captured_by_locals`）；函数体里嵌套的 `const helper = () => …` 同时被两者捕获，`local` 为 true，引用只在外层函数的作用域里找，其他文件里同名的 `helper` 不出现（`refs_nested_helper_is_local`）；locals 证明的同文件引用是调用方；同一处引用、同一个文件在多个来源里出现时只列一次、只解析一次（`refs_no_duplicates_*`）；被局部变量遮住的同名引用被丢弃；没有依据的跨文件引用在 `same_name`；测试 `Resolver` 的 `bind` 让跨文件引用成为调用方；未入索引的部分经限时搜索找到；`ci_ref` 一轮找到的在读搜索范围之前交出，限时搜索命中之后的结果按计时交出、不等下一个命中（`refs_indexed_references_go_out_before_the_search`、`refs_search_batches_go_out_on_time`）；被查定义的局部性取自它所在文件的那一次解析，`Named` 列出候选时不解析文件（`refs_nested_helper_from_named_is_local`、`refs_named_parses_no_file`）。
 - 名字表（`names_*`）：去重、NFC、只含当前 worktree 映射里的 OID（另一个 worktree 独有的名字不在其中）；第一次 `names` 返回 `Building`，`Names` 事件带着表，监听方保存后再调 `names` 返回 `Ready`、是同一个 `Arc`（`names_ready_after_build`）；构建期间重复调用不另起构建；代数落后时重建、期间返回旧表；所有持有者释放后再调用重新构建；表被持有时索引写入新的批次，`ManualClock` 推进过间隔后后台重建并发出带新 `Arc` 的 `Names`，间隔内的多次变化只触发一次重建，持有者释放后不再重建（`names_refresh_while_held`）。
 - 升级（`escalate_*`）：Java 多候选和唯一 `NameOnly` 候选时调用提供者，其他语言不调用；提供者的 token 为 `Dead` 时不调用；结果相同时 `Same`、不同时 `Ready`；`head_only` 的提供者只在 `head_clean` 时被调用，返回的位置里内容与 HEAD 不同的文件被丢掉；只暂存、未提交的文件（工作区等于 index、不等于 HEAD）的 `head_clean` 为 false，提交之后为 true；index 变化之后、新的工作区比较完成之前为 false（`head_dirty_*`）；登记 drop 后不再调用；SCIP 与 jdtls 两个假提供者同时处理 Java 时，按两种回复顺序得到相同的合并结果，HEAD 相同的文件取 SCIP 的位置、有改动的文件取 jdtls 的位置，过时 ID 的回复被丢弃，查询关闭时未回复的请求收到 `cancel`；SCIP 先回复、已知候选都与 HEAD 相同时，jdtls 的请求不被取消，它之后返回的未跟踪文件里的位置进入合并结果（`escalate_arbitration_*`）；提供者接受请求后注销，只有它在请求中的查询 `semantic` 变为 `Failed`、不再停在 `Pending`，另有 SCIP 回复的查询按剩下的回复重新合并，注销之后到达的回复被丢弃（`escalate_unregister_*`）。
 - 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`；`activate` 之后、第一个项目打开之前没有任何 IO（`FakeGit`、缓存目录、`SafeRoot` 都没有被调用）；依赖 `dyn Projects`；`Results` 事件的顺序与 generation；一次查询从提交到最后一批写入之前 kernel 不静止；停用之后电源、语言包的订阅都已退订，fs_watch 的订阅都已 drop，项目关闭时未回复的语义请求收到 `cancel`（`plugin_teardown_*`）。
@@ -1676,7 +1741,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 2. **索引没建完时是否提示。** 选 (a)：不提示，符合「界面不显示索引状态」的规则。不采用在结果末尾显示「仍在搜索」的 (b)。`QueryState::Done(Completeness)` 照常给出完整性，本 crate 不随这个决定改变。产品负责人交给负责推进的 agent 决定，按默认值。
 3. **电池供电时的索引范围。** 选 (b)：不区分电源，始终索引整个仓库；省电模式暂不做。产品负责人决定，记录在 [ADR 0032](../adr/0032.md)；本文改动见「建索引的分层」的电源一条，电池代码的删除见同一条。
 
-技术问题都已在上文决定，没有其他未决项。
+技术问题都已在上文决定，没有其他未决项。「实际验证」里一度留给设计决定的一项（当前文本的解析与 locals 超出原来 ≤ 10 ms 的分项）已由 [ADR 0037](../adr/0037.md) 决定：份额按第一批计，当前文本的解析按 blob OID 保留，不再有单独的解析分项（「性能」）。
 
 ## 验收
 
@@ -1705,9 +1770,9 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
    - `code_intel/map_100k`、`code_intel/map_100k_bytes`、`code_intel/batch_peak` 在预算内。
    - `code_intel/disk_100k`（只记录）用 10 万文件的合成仓库测量，结果写进「存储表」的「规模」一条。
 4. **查询与插件**（前置 A、E）：`Cargo.toml` 加 `plugin = true`。
-   - `goto_*`、`read_verify_*`、`search_*`、`refs_*`、`names_*`、`escalate_*`、`plugin_*`、`watchdog_*` 测试通过。
+   - `goto_*`、`read_verify_*`、`search_*`、`refs_*`、`cut_*`、`view_*`、`account_*`、`names_*`、`escalate_*`、`head_dirty_*`、`prefetch_*`、`focus_*`、`plugin_*`、`watchdog_*` 测试通过。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖 GPUI、不依赖其他插件 crate，除 `app` 和 tool 层外没有 crate 依赖它。
-   - `code_intel/goto_indexed`、`code_intel/search_stop`、`code_intel/references_100k`、`code_intel/names_100k`、`code_intel/names_100k_bytes`、`plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` 在预算内。
+   - `code_intel/goto_indexed`、`code_intel/goto_uncached`、`code_intel/goto_popular`、`code_intel/goto_full`（含 `goto_full/done`）、`code_intel/goto_cold_parse`（96 KiB，≤ 32 ms）、`code_intel/search_stop`、`code_intel/references_100k`、`code_intel/references_full`（`/all` ≤ 2 s、`/first` ≤ 200 ms）、`code_intel/parse_cache_bytes`、`code_intel/names_100k`、`code_intel/names_100k_bytes`、`plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` 在预算内。
 5. **端到端基准**（前置 #20 的抽屉和 `file_reader` 在探针里的里程碑）：bench 探针增加打开抽屉、跳转、覆盖层完成的 `Milestone`，以及读取 `coverage` 的方式。
    - `app/goto_candidates`、`app/goto_single`、`app/goto_unindexed`、`app/goto_unindexed_done`、`app/index_review_set`、`app/index_subproject`、`app/index_100k`、`app/idle_monorepo_indexed` 在 `crates/bench/src/budgets.rs` 里改为生效，macOS CI 上在预算内。
    - `app/idle_monorepo` 在后台工作暂停时仍 < 100 MB。
@@ -1881,6 +1946,175 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
   `disk_100k`：9 万个源码单元声明 279.7 MB，分库文件 298 MiB，写入过程中淘汰 80 次，4 个线程 70 s；结论写在「存储表」的「规模」一条。
 - 没有验证的：M 系列上的各项基准（由 macOS CI 判定）；`PowerSource` 的真实实现（`platform` 还没有电源接口，测试只用 `testing::FakePower`）；真实的 fs_watch 后端（测试用 `FakeBackend`）；几个批量线程同时运行（测试用 `Executor::manual()`，大文件轮流抽取由 `LargeSlot` 的单元测试检查）；文件夹项目的建索引（第 3 步不实现，`coverage` 报告 `Pending`）。
 
+第 4 步（查询与插件），rebase 到包含 kernel 的 barrier 修正（#96，[#118](https://github.com/SoloJiang/lectern-app/pull/118)）的 main 之后，同一台机器（Linux x86_64，4 核 Xeon 2.1 GHz）。
+
+- `just check`（含 `python3 scripts/check_architecture.py`：30 个 crate 通过，本 crate 的 `plugin = true` 生效，只有 `bench`（tool 层）依赖它）、`just test`（整个工作区 1318 个测试通过，跳过 1 个）、`just doctest`（7 个通过）、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。Cargo.lock 只有本 crate 的依赖列表变化（`memchr`、`unicode-normalization` 原已在锁文件里），没有新增 crate。`Harness::quiescent` 仍是第 3 步的宽容等待（barrier 不等 kernel 线程自己排入的请求）。
+- `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 和 `rg -n 'Command::new|thread::spawn' crates/code_intel/src` 仍没有结果。
+- `just test -p lectern-code-intel`：214 个测试通过，第 4 步新增 55 个。按前缀：
+  - `goto_*` 10：第 1–3 步各自在有依据时停下（局部绑定、`Resolver::bind`、索引）；一个有依据的候选直接跳转，只有同名依据时预选第一个；分层与排序（当前文件、审阅集合、子项目、依赖、其余）；按兼容组、可见性和语法种类过滤；当前文件的定义不重复列出；同一份字节在 `.java` 和 `.js` 下是一个 OID、两个单元，`java` 单元只给出 `.java` 的路径；没有标识符和语言不受支持时 `Failed`；`Object` 来源（Diff 的旧侧）按 OID 读 blob、不读 worktree；结果只增不减（后一批只追加，第一批的下标不变）；测试自己的 `Resolver` 给出第 2 步的 import 目标，第 2 步读过的目标不被限时搜索重复抽取、不重复列出。
+  - `read_verify_*` 1（表驱动）：原始字节的 OID 相符、CRLF 检出时规范 OID 相符，这两种回答；映射里的旧 OID 已不是磁盘内容（还没有事件）、外部过滤器（没有规范 OID）、文件已删除，这三种不回答。
+  - `search_*` 5：整词匹配的表（标识符字符、Unicode、边界）；只解析整词命中的文件；1 s 停下，`Partial` 的计数与未搜的文件数一致；后台正在抽取的文件不搜索，其余文件都搜完结果仍是 `Partial`；跳转的限时搜索把命中文件的抽取结果写入缓存，那个路径的提示随之匹配。
+  - `refs_*` 8：同文件的调用方；局部变量只在自己的作用域里；嵌套的同名函数是局部的；被遮蔽的使用不列出；顶层名字被 locals 捕获时仍是引用；`bind` 给出依据时是调用方；三个来源（当前文件、`ci_ref`、限时搜索）不重复；未入索引的文件经限时搜索找到。
+  - `names_*` 4：去重、NFC、只含当前 worktree 映射里的 OID；`Building` 之后在 `Names` 事件里交出表，之后 `Ready`；持有中、代数落后时 `names` 仍返回旧表，新表等间隔到了由看门狗的到期项构建，几次变化只建一次，持有者全部释放后不再重建（`clear_events` 之后数 `name_builds`）；没有项目或没有索引时 `Unavailable`。
+  - `escalate_*` 9：只有一个或几个同名候选时向 Java 提供者升级；`head_only` 提供者只对与 HEAD 相同的文本调用，它在与 HEAD 不同的文件里给出的位置被丢掉；回复的先后不影响合并结果；`Same` 与 `Ready`；关闭查询、淘汰时取消、作废的请求 ID 被忽略；SCIP 的回复不取消 jdtls 的请求；死掉或已注销的提供者不再调用，注销时未回复的请求作废并重新合并；查引用同样升级。`head_dirty_*` 1：暂存、改 index、提交三种情况下 `head_clean` 的变化。
+  - `prefetch_*` 2、`focus_*` 1：2 s 内同一查询沿用预取（`Stats::prepares` 不增加）；过了 2 s、换了映射、发生淘汰之后不沿用（表驱动）；对不是当前 worktree 的焦点不进第 1、2 层，切换过去之后才进。
+  - `plugin_*` 4（`TestKernel` 加模拟的 `dyn Projects`）：激活时不做 IO，没有项目时不建任何东西；缺少 `dyn Projects` 时激活失败；结果事件按代数顺序发出，最后一批交出之前 kernel 忙；关闭项目时取消它未回复的语义请求、退掉 fs_watch 订阅，停用时退掉电源和语言包的订阅。
+  - `watchdog_*` 5（读 `/proc/self/task/*/comm`）：停用后看门狗线程退出；executor 关闭时退出；线程启动前已经结束的激活不起线程（抽取照常运行，没有截止时间的执行者）；激活 20 次之后最多一个线程；停用时进行中的抽取返回 `Cancelled`、不写入。
+  - `derived_*` 新增 3：覆盖项改了 OID 的文件被搜索；被淘汰的定义经限时搜索找回；子项目变化后分层和搜索范围随之变化。`site_*` 新增 2：`site_reference_query_matches_full`、`site_parents_match_tree_sitter`（见「与设计的差异」）。`schedule_folder_project_indexes_at_open` 替换第 3 步的文件夹项目测试：打开即读出全部文件、各层走完、`coverage` 为 `Done`。
+- 基准（`just bench --measure code_intel/ plugin/code-intel/`，release，MB 为 2^20 字节）：
+
+  | 基准 | 结果 | 预算 |
+  |---|---|---|
+  | `code_intel/goto_indexed` | 中位数 30.6 ms（第一版）；`site_query` 之后 25.2 ms；`Parents` 之后 25.0、23.2 ms | ≤ 20 ms（macOS 判定） |
+  | `code_intel/search_stop` | 最大 1 s | ≤ 1.02 s |
+  | `code_intel/references_100k/all` | 中位数 1.26 s（第一版）；1.03 s | ≤ 2 s |
+  | `code_intel/references_100k/first` | 中位数 12.4 ms；10.6 ms | ≤ 200 ms |
+  | `code_intel/names_100k` | 中位数 1.07 s（逐个单元查 `ci_def_unit`）；一次扫描之后 814、796 ms | ≤ 1 s |
+  | `code_intel/names_100k_bytes` | 4.66 MB（29 万个名字） | ≤ 8 MB |
+  | `plugin/code-intel/resident_cloudprint` | 241 KB（第一版）；155 KB | ≤ 4 MB |
+  | `plugin/code-intel/resident_100k` | 11.5 MB（第一版）；2.86 MB | ≤ 10 MB |
+
+  同一次运行里第 1–3 步的基准：`map_100k` 9.22 ms、`map_100k_bytes` 2.65 MB、`batch_peak` 32.7 MB、`extract_throughput` 4.22 MB/s、`warm_100k` 83.5 ms，都在预算内；`disk_100k` 9 万个单元，分库文件 298 MiB，80 次淘汰。
+
+  `goto_indexed` 在这台机器上超出 20 ms。拆分（release，64 KiB 的 TS 当前文本）：解析约 9 ms，locals 与引用模式的查询约 4.5 ms，处理匹配（作用域、局部引用的变量位置）约 4 ms，遍历约 2 ms，规则与收尾约 1 ms，合计约 20 ms，其余（读取与核对、按名字查定义、约 130 个候选的过滤与排序）约 3 ms。设计的分项是「解析与 locals ≤ 10 ms」，这台机器上单是解析就接近它；这一项与 `extract_throughput`、`warm_100k` 一样在 Apple 芯片上判定（[bench 设计](bench.md)），预算没有因 Linux 的结果调高。`resident_100k` 第一版的 11.5 MB 里约 9 MB 不属于本 crate：基准没有像 `project` 那样先订阅 worktree，fs_watch 为本 crate 的订阅建的跟踪路径过滤器算进了测量窗口（`Rig::watch_as_project` 改正）；另外 `touch_pending` 排空后保留了队列的容量（已释放）；核心语言不再编译 `Compiled` 也减少了常驻。
+- 没有验证的：M 系列上的各项基准（`goto_indexed` 在这台机器上超出，见上）；`app` 装配本插件（`app` 依赖 GPUI，Linux 上不编译，第 5 步）；真实的 fs_watch 后端和语义导航提供者（测试用 `FakeBackend` 和测试里的假提供者，jdtls / SCIP 属于 #26；电源接口按 ADR 0032 不再需要）；几个批量线程同时运行；文件夹项目超过 2 万个文件时的行为（由 `project` 的遍历上限决定，没有测）；cloudprint 形状的名字表（≤ 0.1 MB、≤ 30 ms，没有对应的基准）。
+
+第 4 步，处理预审意见之后，rebase 到包含 #119、#120（5eff366）的 main，同一台机器。
+
+- `just check`、`just test`（整个工作区 1322 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。`just test -p lectern-code-intel` 218 个测试通过，本轮新增 4 个：`search_cut_extraction_is_not_stored`（5 个未入索引的文件各抽取 200 ms，第 5 个在剩余的 200 ms 里被截短：结果是 `Partial { unsearched: 1 }`，它没有写入；批量层之后按自己的截止时间写入，下一次跳转找到全部 5 个、`Complete`）、`search_file_deadline_table`、`search_distance_table`、`goto_site_queries_compiled_after_open`（映射里有 TS 和 Rust 文件：静止之后两者的查询已编译，Go 的没有）。
+- 不再依赖 OS 或时间窗口推断状态的测试：`watchdog_*` 看 `plugin::WatchdogThread`，`/proc` 只在 Linux 上、线程退出之后确认；`deadline_watchdog_idle_does_not_wake` 等看门狗的无超时等待计数加一，再确认 100 ms 里没有有超时的等待（原来只看 30 ms 内轮数不变，负载高时最后一轮落在窗口之后，macOS CI 上失败过）；`names_refresh_while_held` 的「不再重建」等到期表清空；`schedule_large_files_take_turns` 等等待方调用过两次停止探针。
+- 压力运行（同时 4 个占满 CPU 的进程）：`-E 'test(watchdog) or test(deadline) or test(search)'`（32 个测试）`--stress-count 150` 全部通过；整个本 crate（218 个）`--stress-count 30` 全部通过。预审时这两组的失败：`watchdog_one_thread_after_20_activations` 150 次里 54 次，`deadline_one_mib_returns_soon_after_the_deadline` 的 TS `ParsedFile` 一项 150 次里 38 次（计时里包含第一次编译）。
+- 基准（`just bench --measure code_intel/ plugin/code-intel/`）：
+
+  | 基准 | 结果 | 预算 |
+  |---|---|---|
+  | `code_intel/goto_first`（新增） | 中位数 6.37、6.86 ms | 只记录（候选 50 ms） |
+  | `code_intel/goto_indexed` | 中位数 23.7、23.9 ms | ≤ 20 ms（macOS 判定） |
+  | `code_intel/search_stop` | 最大 1 s | ≤ 1.02 s |
+  | `code_intel/references_100k/all`、`/first` | 1.01 s、951 ms；11 ms、10 ms | ≤ 2 s；≤ 200 ms |
+  | `code_intel/names_100k`、`names_100k_bytes` | 881 ms；4.66 MB | ≤ 1 s；≤ 8 MB |
+  | `plugin/code-intel/resident_cloudprint` | 374 KB（上一轮 155 KB） | ≤ 4 MB |
+  | `plugin/code-intel/resident_100k` | 3.07 MB（上一轮 2.86 MB） | ≤ 10 MB |
+
+  常驻增加的约 0.2 MB 是映射里七种语言的 `SiteQuery`（上一轮只编译了跳转用到的 TS）。同一次运行里 `extract_throughput` 为 3.78 MB/s，低于 4 MB/s：抽取的代码本轮没有改，这台机器上这一项在 3.3–4.27 MB/s 之间波动，在 Apple 芯片上判定；其余第 1–3 步的基准都在预算内。预审时 Linux 上第一次跳转的编译耗时（release）：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms；现在由后台任务承担，`goto_first` 不含它。
+- 没有验证的：同上一轮；另外，第一次跳转发生在后台编译完成之前时，查询等这次编译结束（不会比自己编译更久），没有单独测量。
+
+第 4 步，处理 #121 上 Codex 的两条 P1 之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1328 个测试通过，跳过 1 个）、`just doctest`、`just deny` 全部通过。本 crate 224 个测试，新增 6 个：`cut_jump_finds_a_file_indexed_after_the_lookup`、`cut_prefetch_reused_after_a_batch_finds_its_file`、`cut_references_find_a_file_indexed_after_the_lookup`、`cut_named_finds_a_file_indexed_after_the_lookup`（批次在查索引与第一次读提示之间写入 c.ts：四种查询都列出它；去掉第二次查索引时这四个都失败）、`cut_unchanged_hint_is_no_installation`、`goto_site_queries_of_every_open_project`（两个项目的核对都排在编译任务之前：TS 和 Python 都已编译；换回原来按项目重看的实现时这个测试失败，Python 没有编译）。
+- 压力运行（同时 4 个占满 CPU 的进程）：`-E 'test(cut_) or test(goto_site_queries) or test(search_) or test(prefetch_)'` （19 个测试）`--stress-count 150` 全部通过；整个本 crate（224 个）`--stress-count 30` 全部通过。
+- 基准：本轮只改了查询在提示变化时的补查、编译任务的调度和批量任务的唤醒顺序。没有批次写入时，补查只多读一次项目锁里的计数，所以没有重跑基准。
+- 没有验证的：`kick_batch` 的顺序只在多个 executor 线程同时运行时有区别，测试用的手动 executor 是单线程，没有专门的测试。
+
+第 4 步，`goto_indexed` 在 macOS CI（3 核 M1 虚拟机）上中位数 24.2、26.5 ms，超出 20 ms 之后，同一台 Linux 机器。
+
+- 分项（`crates/bench/tests/goto_phases.rs`：与 `goto_indexed` 相同的夹具，10 万文件、64 KiB 的 TS 当前文本、69 个候选，release，300 次跳转的中位数；每次跳转从提交查询到取回结果，`src/phases.rs` 计时，计时本身的开销算在内）：
+
+  | 阶段 | 改前 | 改后 |
+  |---|---|---|
+  | 跳转合计 | 25.7 ms | 18.9 ms |
+  | 读取并核对当前文本（1 次读、64 KiB 的哈希） | 0.11 ms | 0.10 ms |
+  | tree-sitter 解析 | 9.3 ms | 8.8 ms |
+  | 整棵树上的查询（locals；改前另有引用模式） | 9.6 ms（11 478 个匹配） | 4.9 ms（2 506 个匹配） |
+  | 光标处再跑完整查询 | — | 0.02 ms |
+  | locals 收尾 | 0.21 ms | 0.20 ms |
+  | 遍历（定义） | 1.96 ms | 1.90 ms |
+  | 规则与引用位置 | 1.47 ms | 0.22 ms |
+  | `site_at`、排序器、第 2 步 | < 0.02 ms | < 0.02 ms |
+  | 按名字查定义（1 个读事务、1 条语句，`prepare_cached`） | 1.22 ms | 1.16 ms |
+  | 过滤与分层 | 0.25 ms | 0.25 ms |
+  | 消歧与排序 | 0.04 ms | 0.04 ms |
+  | 交出结果（两次）、限时搜索范围（0 个文件）、切面检查、访问标记 | 约 0.17 ms | 约 0.17 ms |
+  | 每次跳转的分配（含 realloc） | 约 10 500 次 | 约 5 700 次 |
+
+  随仓库或候选数增长的部分（查定义、过滤、排序、搜索范围）合计约 1.6 ms；候选不读文件、不算哈希；切面计数没有引起第二次查索引；名字表和映射没有复制。时间在当前文本的解析和整棵树上的查询：设计的分项「解析与 locals ≤ 10 ms」，改后仍是 8.8 + 4.9 = 13.7 ms（加上 locals 收尾和遍历 15.8 ms），超出它。解析本身接近 10 ms，不经缓存或重新组织 locals（按作用域只匹配光标所在的部分，或并入遍历）降不下去；这两种都改变绑定模型的取法或要设计决定，本轮没有做，预算也没有改。
+- `just bench --measure code_intel/ plugin/code-intel/`：`goto_indexed` 中位数 18 ms（上一轮 23.7、23.9 ms），`goto_first` 5.07 ms，`references_100k/all` 1 s、`/first` 10.1 ms，`search_stop` 1 s，`names_100k` 803 ms，`resident_cloudprint` 650 KB（上一轮 374 KB，多了七种语言的 `jump_query`），`resident_100k` 3.34 MB；`extract_throughput` 3.98 MB/s，同前几轮在 4 MB/s 上下波动，本轮没有改抽取。
+- `just check`、`just test`（整个工作区 1329 个测试通过，跳过 2 个：另一个是忽略的 `goto_phases`）、`just doctest`、`just deny` 全部通过；本 crate 225 个测试，新增 `site_parse_at_matches_parse`。同时 4 个占满 CPU 的进程下整个本 crate `--stress-count 30` 全部通过。
+
+第 4 步，试过把跳转的 locals 查询限制在光标外围的顶层条目上（`QueryCursor::set_byte_range`，范围是根节点下包含光标的那个子节点），没有采用。
+
+- 前提不成立：`Locals::resolve` 从光标所在的作用域一直走到模块作用域（作用域 0），模块级的 locals 定义（顶层的 `const`、`function`、`class`、`interface`、`import`，块里提升到顶层的 `var`，Python 模块级的赋值和 import，Rust 的 `use` 和顶层条目，Java 的 import）也绑定条目里的引用，给出 `Bound(Local)` 和 `jump`。遍历给出的是 tags 的定义，不进入绑定模型，补不上这一部分。
+- 扩充后的 `site_parse_at_matches_parse`（见「与设计的差异」，约 6 000 个位置）在限制之后失败：`site_at` 有 161 个位置不同，例如 TS 夹具里 `implements Shape`、`extends Base` 原来绑定到同一文件的 `interface Shape` 和 `class Base`，限制后没有绑定；另有 2 649 个位置的定义的 `local` 标记不同。按语言：ts 1 203、tsx 281、js 403、python 697、rust 164、java 62。只有 Go 没有差异：它的包级定义模式以 `source_file` 为根，根节点与任何范围都相交，限制后仍被匹配。
+- 限制的潜在收益（不成立的版本，3 000 个文件，64 KiB 的 TS）：整棵树的查询从 4.9 ms 降到 0.1 ms，跳转从 18.1 ms 降到 11.8 ms。要在结果不变的前提下拿到它，模块作用域的 locals 定义需要另外的来源（例如由遍历同时给出，ADR 0031 的遍历范围要扩大，每种语言要与 locals 查询做对照），这一项留给设计决定。
+- 结论：所有语言都退回整棵树（即现状）。只对 Go 打开限制对 `goto_indexed`（TS）没有作用，也没有做。分项与上一轮相同：跳转 18.9 ms，其中解析 8.8 ms、整棵树的 locals 查询 4.9 ms，「解析与 locals ≤ 10 ms」这一项仍然超出。本轮只改了测试，生产代码与上一轮相同，基准没有重跑（上一轮 `goto_indexed` 18 ms）。
+
+第 4 步，处理 #121 上 Codex 对 346f911 的三条 P1 之后（预取等的保留期限、排序比较里的重复计算、所有读文件的核对），同一台机器。
+
+- `just check`、`just test`（整个工作区 1334 个测试通过，跳过 3 个：`goto_phases` 的两个分项）、`just doctest`、`just deny` 全部通过。本 crate 230 个测试，新增 5 个：`prefetch_expires_unused`、`grammar_lease_released_by_an_expired_prefetch`（关掉到期清理时这两个失败）、`escalate_answered_query_releases_its_map`、`read_verify_search_skips_a_file_changed_after_the_snapshot`、`read_verify_references_skip_an_indexed_file_changed_after_the_snapshot`（读出的字节不核对时这两个失败）。同时 4 个占满 CPU 的进程下：第一次整个本 crate `--stress-count 30` 里两个到期测试失败 4 次，原因在测试：等到期表清空再静止，而看门狗是先把到期的项移出表、再调用它的回调，回调提交的清理任务可能还没提交；改为数完成的回调（`Watchdog::fired`，`Harness::advance_and_fire`，名字表测试原来的 `fire_due` 有同样的问题，一并改掉）之后，新增与计时相关的 20 个测试 `--stress-count 150` 全部通过，整个本 crate `--stress-count 30` 全部通过。
+- 基准（`just bench --measure code_intel/ plugin/code-intel/`）：`goto_indexed` 17.2 ms，`goto_first` 4.87 ms，`named_50k`（新增，只记录；54 000 个定义）493 ms，`references_100k/all` 971 ms、`/first` 9.93 ms，`search_stop` 1 s（每个读到的文件都核对 OID 之后），`names_100k` 919 ms，`resident_cloudprint` 650 KB，`resident_100k` 3.34 MB；`extract_throughput` 3.95 MB/s，同前几轮在 4 MB/s 上下波动，本轮没有改抽取。
+- `named_50k` 的分项（`goto_phases.rs` 的 `named_50k_phases`，release，20 次的中位数）：按名字查定义（SQL）383 ms，组成候选 72 ms，排序 16 ms，访问标记 11 ms，计数 5 ms，交出 4 ms；合计 501 ms，约 27 万次分配。
+
+第 4 步，查询改为按视图（「查询的视图」）之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1340 个测试通过，跳过 3 个）、`just doctest`、`just deny` 全部通过。本 crate 236 个测试。
+- 交错矩阵（`view_*`）：4 种查询（跳转、复用预取的跳转、查引用、`Named`）× 5 个步骤（取快照后、查索引后、读提示后、每次读文件前、发布前；复用预取另加「预取与查询之间」）× 7 种后台变化（批次提交、淘汰、映射重建、磁盘上改文件、切换 worktree、关闭项目、语言包变化），每格一个新仓库，共 147 格，其中 140 格的变化确实发生在那一步（`Named` 不读文件，它的 7 格「读文件前」走不到；测试按格数断言）。每格断言：结果是旧视图的、新视图的，或者不是 `Complete`；列出的每一项都属于其中一个视图；会话结束之后不再有这个查询的 `Results` 事件。另有 `view_query_right_after_a_switch_answers_from_the_new_worktree`（切换后立刻问新 worktree 的文本：按新映射回答或不是 `Complete`）和 `view_eviction_moves_the_generation`。分别去掉修复的各部分时：去掉淘汰这一成员，跳转和 `Named` 的矩阵失败（`Definition Step(Snapshot) Evict: complete but neither view's`）；去掉事件里的同步切换，四个矩阵都失败（`published after its session ended`），切换后立刻查询的测试也失败；去掉等映射，切换后立刻查询的测试失败（`Named` 按空映射报 `Complete`）；去掉发布时的会话检查，矩阵仍然通过：同步关闭在同一把锁下已经去掉了这些查询的条目，两者保证的是同一件事。
+- 压力运行（同时 4 个占满 CPU 的进程）：`view_*`、`cut_*`、`read_verify_*`（18 个测试）`--stress-count 150` 跑满 147 次全部通过、第 148 次时到了后台任务的 60 分钟上限被中止，又补跑 `--stress-count 10` 全部通过，合计 157 次没有失败；整个本 crate（236 个）`--stress-count 30` 全部通过。
+- 基准：`goto_indexed` 18.6 ms（视图的比较每次跳转合计约 0.35 µs，`goto_phases`），`goto_first` 4.73 ms，`named_50k` 492 ms，`references_100k/all` 972 ms、`/first` 10 ms，`search_stop` 1 s，`names_100k` 842 ms，`resident_cloudprint` 650 KB，`resident_100k` 3.34 MB；`extract_throughput` 3.88 MB/s，同前几轮在 4 MB/s 上下波动，本轮没有改抽取。
+
+第 4 步，快照改为只来自发布的对象、语义仲裁区分失败之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1342 个测试通过，跳过 3 个）、`just doctest`、`just deny` 全部通过。本 crate 238 个测试。
+- 交错矩阵扩到 8 种变化（加「语言包升级」：k.jpack 所在的语言包换版本，换表之后、重建映射之前）、6 个位置（加「变化之后立刻查询」：核对任务还排在后面，切换之后没有可用快照，其余仍用上一个快照），复用预取另加「预取与查询之间」：4 种查询共 200 格，192 格的变化确实发生（`Named` 的 8 格「读文件前」走不到）。另有 `view_folder_project_opening_has_no_snapshot_before_its_overlay`：核对任务的测试钩子（`Inner::after_base`）在基础映射建好、覆盖部分还没读的时候取快照，必须没有；打开前就问的 `Named` 等到发布，结果不是没有 c.ts 的 `Complete`。分别去掉修复时：快照取当前的全局语言表，`Named Before Upgrade` 失败（`complete but neither view's`，少了 k.jpack）；`rebuild_base` 之后立刻发布，文件夹项目的测试失败（窗口里有快照）。
+- 语义仲裁：`escalate_arbitration_by_outcome`，SCIP（`head_only`）与 jdtls 各四种结果（等待、成功、出错、超时）、两种回复顺序，共 32 种；恢复原来的规则（出错的回复也拥有与 HEAD 相同的文件）时 `scip Err, jdtls Ok` 失败。
+- 压力运行（同时 4 个占满 CPU 的进程）：`view_*`、`cut_*`、`read_verify_*`、`escalate_*`（30 个测试）分两次各 `--stress-count 75` 全部通过（合计 150 次，分别 2589 s、2539 s）；整个本 crate（238 个）分两次各 `--stress-count 15` 全部通过（合计 30 次）。
+- 基准：`goto_indexed` 18 ms，`goto_first` 4.15 ms，`named_50k` 444 ms，`references_100k/all` 867 ms、`/first` 9.1 ms，`search_stop` 1 s，`names_100k` 780 ms，`resident_cloudprint` 650 KB，`resident_100k` 3.34 MB，`extract_throughput` 4.34 MB/s；全部在预算内。
+
+第 4 步，完整性改为一次核算、预取按任务的快照沿用之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1349 个测试通过，跳过 4 个；`lectern-platform` 的 `openat2_rejects_escape` 在一次满负载的运行里失败过一次，单独运行和再跑一遍都通过，本轮没有改它）、`just doctest`、`just deny` 全部通过。本 crate 245 个测试。
+- 交错矩阵改用语言包的语言（`jpack`），8 种变化 × 7 个位置（加「`query` 返回之后、任务取快照之前」），复用预取另加「预取与查询之间」：4 种查询共 232 格，224 格的变化确实发生（`Named` 的 8 格「读文件前」走不到）。变化作用于对这种查询有贡献的文件：查引用的提交、淘汰、换映射、改文件作用于 e、f。
+- 每项修复分别去掉时，对应的测试失败：预取不按任务的快照判断，`Prefetch AfterAsk Map` 失败（`complete but neither view's`：c.jpack 的两个 OID）；快照取当前的全局语言表，`Definition`、`References`、`Named` 的 `Before Upgrade` 都失败（原来只有 `Named` 能测出）；查引用把读不出的已入索引文件直接跳过，`References Step(Snapshot) Map` 失败（原来改的是没有引用的 d.ts，测不出）；`rebuild_base` 之后立刻发布，文件夹项目的测试失败；不计范围之外，`account_outside_the_scope_is_partial` 和 `derived_packages_tiers_and_search_scope_follow` 失败；满额模式不核对，`account_full_namespace_checks_the_hinted_files` 失败；已入索引的文件按 1 MiB 读、超过就跳过，`account_files_are_read_under_their_units_limit` 失败；`cancel` 在 `publishing` 锁里调用，`escalate_cancel_runs_outside_publishing` 失败；等着的查询不结束，`view_queries_end_when_no_snapshot_can_be_published` 失败（一直 `Running`）；比较失败的快照不标记，`view_map_without_the_worktree_is_never_complete` 失败；恢复原来的仲裁规则，`scip Err, jdtls Ok` 失败。
+- 满额模式的代价（`goto_phases` 的 `goto_indexed_full_phases`，10 万文件、命名空间满）：核算核对约 52 000 个提示、108 条语句，`4 accounting` 中位数约 280 ms（范围里的核对 `4 search scope` 约 2.3 ms）；第一批（第 1–3 步，约 18–22 ms）不变，`Done` 晚约 280 ms。没满时核算只是一次遍历，`4 accounting` 约 0.95 ms。
+- 压力运行（同时 4 个占满 CPU 的进程）：`view_*`、`cut_*`、`read_verify_*`、`escalate_*`、`account_*`（37 个测试）分两次 `--stress-count 50` 和 `--stress-count 100` 全部通过（合计 150 次，555 s、1301 s）；整个本 crate（245 个）`--stress-count 30` 全部通过（1679 s）。
+- 基准：`goto_indexed` 19.1 ms（单独测 17.4–19.3 ms；核算的遍历约 0.95 ms，原来搜完就报 `Complete`、不看子项目之外），`goto_first` 4.54 ms，`named_50k` 473 ms，`references_100k/all` 855 ms、`/first` 9.11 ms，`search_stop` 1 s，`names_100k` 870 ms，`warm_100k` 84 ms，`map_100k` 10.1 ms，`batch_peak` 33.3 MB；`extract_throughput` 一次 3.98 MB/s（与编译同时运行），单独再测 4.04 MB/s，本轮没有改抽取。
+
+第 4 步，没有内容的单元与 `Unindexable` 计入核算、满额核对按时间盒、遍历缓存之后，同一台机器。
+
+- `just check`、`just test`、`just doctest`、`just deny` 全部通过（整个工作区 1358 个测试通过，跳过 5 个）。本 crate 254 个测试。
+- 每项修复分别去掉时，对应的测试失败：不看没有内容的单元，`account_too_large_units_are_searched`、`account_timed_out_units_are_not_indexed` 失败；`Unindexable` 覆盖项不计，`account_unindexable_worktree_files_are_unsearched` 失败；局部定义的查引用不看自己的文件，`account_local_references_need_their_file_searched` 失败；按 OID 读、映射里是另一份内容的文件没能搜时丢掉，`account_definition_read_as_an_object_counts_when_unsearched` 失败；满额核对不检查停止，`account_full_check_stops_with_the_query` 失败（关闭之后又做了语句）；不检查时间盒，`account_full_check_is_time_boxed` 失败；缓存的键不含提示置位次数，`account_walks_are_cached_until_the_index_changes`、文件夹项目的测试和 `view_matrix_definition`、`view_matrix_prefetch` 都失败。
+- 跳转的分项（`goto_phases`，10 万文件）：重复跳转（遍历已缓存）`query to results` 16.2 ms、`4 accounting` 2.7 µs；索引变化之后的第一次（`goto_indexed_uncached_phases`，每次跳转前清掉缓存）19.5 ms、`4 accounting` 1.24 ms（这一次 `prepare` 也比前者慢约 2 ms，机器有波动）。
+- 压力运行（同时 4 个占满 CPU 的进程）：`view_*`、`cut_*`、`read_verify_*`、`escalate_*`、`account_*`（46 个测试）`--stress-count 150` 全部通过（1825 s）；整个本 crate（254 个）`--stress-count 30` 全部通过（1575 s）。
+- 基准：`goto_indexed` 17.3 ms（基准重复同一个跳转，量的是遍历已缓存的稳定状态；第一次跳转见上面的分项），`goto_first` 4.88 ms，`named_50k` 471 ms，`references_100k/all` 902 ms、`/first` 9.28 ms，`search_stop` 1 s，`names_100k` 916 ms，`warm_100k` 77.3 ms，`map_100k` 8.98 ms，`batch_peak` 33.3 MB，`extract_throughput` 4.31 MB/s。
+- 满额模式（`CODE_INTEL_BENCH_FULL=1`，只记录）：`goto_indexed` 到 `Done` 287 ms（第一批不变；范围之外约 52 000 个提示在时间盒内核对完），`references_100k/all` 1.02 s，`search_stop` 1 s（没有入索引的文件，没有要核对的），`named_50k` 732 ms。核对超过查询的 1 s 时间盒时停下、没核对的计入 `outside`，所以 `Done` 不晚于时间盒加一条语句（500 个 OID，几毫秒）。
+
+第 4 步，`Done` 替换没有内容的单元、来自索引的定义恢复局部性、分层要所比较的一方已知之后，同一台机器（rebase 到 #126 之后）。
+
+- `just check`、`just test`（整个工作区 1409 个测试通过，跳过 5 个）、`just doctest`、`just deny` 全部通过。本 crate 256 个测试；整个本 crate `--stress-count 30` 在 4 个占满 CPU 的进程同时运行时全部通过（1533 s）。
+- 每项修复分别去掉时，对应的测试失败：`Done` 不替换没有内容的单元，`account_too_large_units_are_searched` 失败（gen.ts 仍未搜，下一次跳转又抽取它）；`Named` 不恢复局部性、或查引用沿用给出的 `local`，`refs_nested_helper_from_named_is_local` 失败；没有当前文本时 `near` 路径算作当前文件、或两个都不在子项目里的文件算作同一子项目，`goto_tiers_need_what_they_compare_with` 失败。
+- `goto_indexed`：分项（`goto_phases`）17.8 ms，`prepare` 17.5 ms，没有局部性的解析（基准的候选都是 `Public`），核算 2.8 µs；`just bench --measure code_intel/goto_indexed` 两次 22.7 ms（报告标为 noisy）、17.5 ms，这台机器的波动，跳转的路径与上一轮相同。
+
+第 4 步，去掉来自索引的定义的局部性恢复（上一轮的 `recover_locality`，见「与设计的差异」）、查引用的局部性取自被查定义所在文件的那一次解析、写入时在写锁里查存在之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1411 个测试通过，跳过 5 个）、`just doctest`、`just deny` 全部通过。本 crate 258 个测试；整个本 crate `--stress-count 30` 在 4 个占满 CPU 的进程同时运行时全部通过（1965 s）。此前一次中途停下的同样运行在第 16 轮有一次 `extract_markers_keep_their_names` 失败（walker 与 tags 的抽取结果不同）；两次抽取都按墙钟的交互截止时间，占满 CPU 时推测是其中一次超时，与本轮改动的代码无关，未复现。
+- 解析次数由测试里的计数（`ParsedFile` 的每次解析都记下源码，`support::parsed`）直接检查：`Named` 列出 40 个 `File` 候选，不解析任何文件（`refs_named_parses_no_file`）；`Object` 一侧的跳转只解析自己的文本，不解析工作区里同一路径的文件（`goto_object_side_parses_only_its_text`）；从 `Named` 的候选查嵌套 `helper` 的引用，不论给出的 `local` 是什么，只解析 a.js 一次，结果是两个调用方、没有同名引用、`Complete`，`defines.local` 为 true；顶层定义给出 `local: true` 时改正为 false（`refs_nested_helper_from_named_is_local`）。
+- `goto_indexed`：分项（`goto_phases`）19.7 ms，`prepare` 19.4 ms（其中 tree-sitter 解析 9.25 ms），核算 4 µs；`just bench --measure code_intel/goto_indexed` 三次 19.1 ms、24.1 ms（报告标为 noisy）、19.8 ms。跳转的路径与上一轮相同（去掉的恢复在基准里不运行：候选都是 `Public`；解析计数只在测试里编译），差别是第 1 步的解析，这台机器的波动。满额模式的分项 `query to results` 297 ms（只记录）。
+
+第 4 步，份额按第一批计、当前文本的解析保留、按名字查找分页、核对按时间盒停止、查引用的截止时间与批次（[ADR 0037](../adr/0037.md)，见「与设计的差异」）之后，同一台机器（另一个 agent 同时在用，负载约 2）。
+
+- `just check`、`just test`（整个工作区 1423 个测试通过，跳过 6 个，新增的是忽略的 `goto_indexed_cold_phases`）、`just doctest`、`just deny` 全部通过。本 crate 270 个测试；整个本 crate `--stress-count 30` 在 4 个占满 CPU 的进程同时运行时全部通过（1685 s）。上一轮中途那次 `extract_markers_keep_their_names` 的失败已找到原因：测试在取交互截止时间之后才编译 tags 查询，满负载时编译本身就用掉了 1 s；现在这几个测试先编译再取截止时间（`extract_*`、`forms_*` 里五处）。
+- 每项修复分别去掉时，对应的测试失败：不查最近的文件，`goto_popular_name_nearest_first` 失败（第一批的第一个候选是 `aa/f000.ts`，不是同目录的 `zz/near.ts`）；搜索范围里的核对不检查时间盒，`account_full_scope_check_stops_with_the_query` 失败（`Complete`，应为 `Partial { unsearched: 7 }`）；查引用的截止时间只看是不是被查定义的文件，`account_files_are_parsed_under_their_units_limit` 失败（api.ts 没搜到）；`ci_ref` 一轮之后不交出、或搜索的文件之间不检查计时，`refs_indexed_references_go_out_before_the_search`、`refs_search_batches_go_out_on_time` 失败。
+- 分项（`goto_phases`，10 万文件，100 KB 的当前文本，300 次的中位数）：解析已保留时 `prepare`（第 1–3 步）0.63 ms，其中按名字查（SQL）0.41 ms、过滤与分层 0.16 ms，查询任务 0.83 ms；没保留时（冷路径）`prepare` 27.2 ms，其中光标处的解析与 locals 24.4 ms，查询任务 27.4 ms（`query to results` 63 ms 含之后在后台整份解析并保留的约 35 ms，不在第一批之前）。
+- 基准（`just bench --measure code_intel/ plugin/code-intel/`，从查询到第一批有候选的事件 / 到 `Done`）：`goto_indexed` 1.08 ms / 1.18 ms；遍历未缓存 `goto_uncached` 1.18 ms / 2.59 ms；约 3000 个定义的常见名字 `goto_popular` 5.31 ms / 31.7 ms（第一次单独测 4.99 ms / 29.4 ms）；满额 `goto_full` 1.28 ms / 最大 345 ms（≤ 1.02 s）；冷路径 `goto_cold_parse` 30.1 ms（第一次 33.1 ms，都在 50 ms 之内）；同文件 `goto_same_file` 16 µs；对象一侧 `goto_object` 1.14 ms；`goto_first` 11.7 ms。`parse_cache_bytes` 两份 100 KB 9.15 MB（每字节源码 46.6 字节，估算 9.85 MB）。`references_100k/all` 1.04 s、`/first` 11.1 ms，满额 `references_full/all` 1.15 s、`/first` 12.1 ms；`named_50k` 11.7 ms（量的是第一批，现在是第一页加最近的文件；原来的 471 ms 是查全部定义的一批）；`search_stop` 1 s；`names_100k` 995 ms；`names_100k_bytes` 4.66 MB；`warm_100k` 96.3 ms；`map_100k` 10.4 ms、`map_100k_bytes` 2.65 MB；`batch_peak` 33.3 MB；`resident_cloudprint` 650 KB、`resident_100k` 3.34 MB（测量前丢掉那次跳转保留的解析，见 ADR 0037）。`extract_throughput` 3.28 MB/s，单独再测 3.82 MB/s，低于 4 MB/s：本轮没有改抽取，测量时机器负载约 2，前几轮 3.9–4.3 MB/s。
+- 存储：`ci_def_name` 带上 `unit` 之后，`disk_100k` 的分库文件 311 MiB（含 `-wal`，原来 298 MiB），声明的字节数不变（279.7 MB）。
+
+同一轮 rebase 到 #129（[ADR 0035](../adr/0035.md)）之后，ADR 编号改为 0037；看门狗在系统时钟下等到最早的到期时刻（见「与设计的差异」）。
+
+- `just check`、`just test`（整个工作区 1435 个测试通过，跳过 6 个）、`just doctest`、`just deny` 全部通过。本 crate 271 个测试，新增 `deadline_watchdog_sleeps_until_a_far_due_entry`；用到看门狗到期表的 `deadline_*`、`watchdog_*`、`names_*`、`prefetch_*` `--stress-count 30` 全部通过。
+- 基准（从查询到第一批有候选的事件 / 到 `Done`）：`goto_indexed` 844 µs / 935 µs；`goto_uncached` 982 µs / 2.16 ms；`goto_popular` 4.39 ms / 26 ms；`goto_full` 1.07 ms / 最大 283 ms；`goto_cold_parse` 23.8 ms；`goto_same_file` 10.4 µs；`goto_object` 866 µs；`goto_first` 9.23 ms。`named_50k` 10 ms，`references_100k/all` 833 ms、`/first` 9.33 ms，`references_full/all` 1.02 s、`/first` 9.67 ms，`search_stop` 1 s，`names_100k` 815 ms、`names_100k_bytes` 4.66 MB，`warm_100k` 73.6 ms、`warm_100k_touch` 284 ms，`map_100k` 8.45 ms、`map_100k_bytes` 2.65 MB，`batch_peak` 33.3 MB，`parse_cache_bytes` 9.15 MB，`resident_cloudprint` 650 KB、`resident_100k` 3.34 MB，`disk_100k` 311 MB；`extract_1mib` 4.28 MB/s（只记录）。全部在预算内。
+- `extract_throughput` 4.71 MB/s（≥ 4），上一轮的 3.28 / 3.82 MB/s 是负载约 2 时测的。本分支涉及抽取的改动只有：`Extraction::empty` 改为 `pub(crate)`；locals 的 `Collector::reference` 对普通引用提前返回（`is_plain_reference`）；语言表加了位置和跳转的查询；看门狗的到期项。都不在抽取的热路径上。
+- 再 rebase 到 #133（含 [ADR 0036](../adr/0036.md) 的封顶采样和共享夹具）之后：`just check`、`just test`（1441 个通过，跳过 6 个）、`just doctest`、`just deny` 全部通过。基准（负载约 1.6–2）：`goto_indexed` 1.06 ms / 1.16 ms，`goto_uncached` 1.13 ms / 2.54 ms，`goto_popular` 4.84 ms / 28.1 ms，`goto_full` 1.14 ms / 最大 274 ms，`goto_cold_parse` 28.1 ms，`goto_first` 12.1 ms，`named_50k` 11.6 ms，`references_100k/all` 987 ms、`/first` 10.3 ms，`references_full/first` 10.5 ms，`search_stop` 1 s，`names_100k` 873 ms，`warm_100k` 86.2 ms，`map_100k` 9.82 ms，`parse_cache_bytes` 9.15 MB，`resident_100k` 3.34 MB；预算项全部在内，只有 `extract_throughput` 在整组运行里两次都是 3.83 MB/s，随后单独测 4.06 MB/s（负载约 1.1）。这组基准合计 1878 s：10 万文件的查询基准各自生成一次虚拟仓库，每个 115–135 s，`resident_100k` 332 s。
+- 共享夹具（[ADR 0036](../adr/0036.md)，[bench 设计「夹具与 `test-support`」](bench.md#夹具与-test-support)）：10 万文件的虚拟仓库每个基准目标只写一次（`testing::VirtualTemplate`），基准和 `resident_100k` 的每个样本各复制一份缓存目录、在同一个公共目录路径上新建自己的 `FakeGit` 和 rig，所以写入、访问时间和淘汰都只落在自己的副本上；冷状态照旧（`goto_cold_parse` 每次清掉保留的解析，`goto_uncached` 每次清掉遍历缓存，`resident_100k` 每个样本一个新 rig，`names_*` 每个样本重建名字表）。`goto_popular` 的常见名字并入共享仓库（每 17 个文件一个 `fetchShared`），其他基准的单元也带着它，名字表多一个名字（290 001 个）。`just bench --measure code_intel/ plugin/code-intel/` 的墙钟时间（报告的 `benches`）合计 1898 s → 567 s：用虚拟仓库的 12 个基准 1693 s → 318 s，其中各目标第一个用到它的基准（`time` 的 `goto_cold_parse` 120 s、`memory` 的 `names_100k_bytes` 125 s）包含写仓库，其余每个 2–16 s（复制约 1–2 s）。没有改的 `disk_100k` 两次分别 67 s、114 s，第二次负载约 3.4。测量值与前一轮相同，只有 `names_100k` 这次是 1.01 s（负载约 3.4），单独再测 957 ms；前几轮 780–995 ms。
+
+第 4 步，交互份额的第二轮自审之后（「与设计的差异」），rebase 到 #134 之后，同一台机器。
+
+- `just check`、`just test`（整个工作区 1456 个测试通过，跳过 7 个）、`just doctest`、`just deny` 全部通过。本 crate 277 个测试，`--stress-count 30` 全部通过（867 s，负载约 3）。新增：`store_lookup_pages_bound_the_rows_read`、`store_lookup_pages_go_on_inside_a_unit`、`store_def_names_in_pages`、`goto_popular_name_nearest_in_a_deep_subproject`、`goto_current_text_parse_stays_while_current`、`account_references_full_check_has_its_own_time_box`。把最近文件的取法换回原来的（按路径走子树、截在 2048 个）时，`goto_popular_name_nearest_in_a_deep_subproject` 失败（第一批的前两个是 `web/a/d00/f0000.ts`、`web/a/d00/f0040.ts`，不是同目录的两个）。`goto_current_text_parse_stays_while_current` 和 `account_references_full_check_has_its_own_time_box` 断言的正是原来不成立的行为（读五分钟后跳转不重新解析；1.2 s 的 `ci_ref` 一轮之后仍是 `Complete`），没有对原来的代码单独运行。
+- 名字表的分项（`goto_phases` 的 `names_100k_phases`，release）：10 万文件、270 万条定义、29 万个名字。按索引顺序分页之后、按单元二分查找时 998 ms，其中读索引 918 ms（660 条语句），`ci_ext` 一遍 25 ms、按映射过滤 15 ms、建表 35 ms。按索引顺序读时相邻两行几乎总是不同的单元，原来按「上一个单元」缓存的判断不再命中；3 万文件时同样的读取不做任何逐行处理是 92 ms、按二分查找 256 ms，改成单元 ID 的位图并只为要的单元读名字之后 189 ms。
+- 基准（`just bench --measure code_intel/ plugin/code-intel/`，负载 1–3）：`goto_indexed` 1.32 ms / 1.43 ms；`goto_uncached` 1.94 ms / 3.89 ms；`goto_popular` 4.49 ms / 36.5 ms；`goto_full` 1.33 ms / 最大 339 ms，每次 `Complete`；`goto_cold_parse`（当前文本 126 KiB）35.3 ms，前一次 35.9 ms，超过 32 ms（Linux 只报告，100 KB 时是 28 ms）；`goto_same_file` 11.6 µs；`goto_object` 1.23 ms；`goto_first` 10.6 ms；`named_50k` 11.5 ms；`search_stop` 1 s；`references_100k/all` 1.01 s、`/first` 10.8 ms；`references_full/all` 1.2 s、`/first` 10.8 ms，每次 `Complete`（原来 1.02 s 是被截断的 `Partial`）；`names_100k` 704 ms（原来 873–988 ms）、`names_100k_bytes` 4.66 MB；`parse_cache_bytes` 在上限处 11.6 MiB（两份共 260 186 字节源码，每字节 46.7 字节，估算 12.49 MB，≤ 12 MiB）；`warm_100k` 86.1 ms；`map_100k` 9.7 ms；`batch_peak` 33.3 MB；`resident_100k` 3.35 MB；`extract_throughput` 3.98 MB/s（本轮没有改抽取，同前几轮在 4 MB/s 上下）。合计 515 s。
+- rebase 到 #135 之后在最终的代码上重跑：`just check`、`just test`（1461 个通过，跳过 7 个）、`just doctest`、`just deny` 全部通过；本 crate `--stress-count 30` 全部通过（800 s）。基准（负载 1–3，比上面低）：`goto_indexed` 1.23 ms / 1.33 ms，`goto_uncached` 1.16 ms / 2.29 ms，`goto_popular` 4.36 ms / 35.8 ms，`goto_full` 1.43 ms / 最大 332 ms，`goto_cold_parse` 32.4 ms（判定 32 ms，Linux 只报告），`goto_object` 1.3 ms，`goto_first` 8.79 ms，`named_50k` 10.5 ms，`search_stop` 1 s，`references_100k/all` 814 ms、`/first` 9.36 ms，`references_full/all` 1.05 s、`/first` 9.31 ms，`names_100k` 544 ms，`names_100k_bytes` 4.66 MB，`parse_cache_bytes` 11.6 MiB，`resident_100k` 3.35 MB，`warm_100k` 79.2 ms，`map_100k` 7.78 ms，`extract_throughput` 4.47 MB/s；合计 482 s。
+- 冷路径的判定点改到 96 KiB（[ADR 0037](../adr/0037.md)：128 KiB 的整次冷跳转 29.6–35.9 ms，与 32 ms 没有余量）之后：`goto_cold_parse`（当前文本略小于 96 KiB）24.7 ms ≤ 32 ms，`goto_cold_parse/at_128k` 29.6 ms（只记录；前几次 32.4–35.9 ms，负载更高）；其余跳转 `goto_indexed` 1.19 ms / 1.28 ms，`goto_uncached` 1.81 ms / 3.46 ms，`goto_popular` 4.65 ms / 38.3 ms，`goto_full` 1.43 ms / 最大 320 ms，`goto_object` 1.22 ms，`goto_first` 9.25 ms（`just bench --measure code_intel/goto_`，负载 1–2）。`just check`、本 crate 与 bench 的测试（347 个）通过。
+- 第三轮（查引用第 2 步按时间盒截断，「与设计的差异」）之后：`just check`、`just test`（1462 个通过，跳过 7 个，新增 `refs_indexed_files_stop_at_the_time_box`）、`just doctest`、`just deny` 通过；`just bench --measure code_intel/references`：`references_100k/all` 779 ms、`/first` 9.04 ms，`references_full/all` 1.17 s、`/first` 10 ms，每次 `Complete`（300 个调用方都在时间盒之内）。
+- 没有验证的：`goto_cold_parse` 在 M 系列上的值。Linux 上 128 KiB 是 30–36 ms，按 ADR 0034 整文件解析约 6 MiB/s 的估算还要加 locals，32 ms 的判定在 macOS 上是否通过要看 CI。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -1984,13 +2218,13 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 第 2 步：
 
 - 设计没有给存储的接口。实现为公开的 `store` 模块，供第 3、4 步和 bench 使用：
-  - `TABLES`（`code_intel.tags` 的登记，`NAMESPACE` 版本 1、`QUOTA` 256 MiB）和 `Version`（语言、grammar 版本、查询版本，`Version::of(&Lang)` 取当前语言表里的三元组）。
+  - `TABLES`（`code_intel.tags` 的登记，`NAMESPACE` 第 2 步是版本 1，第 4 步因 `ci_def_name` 改为 (name NOCASE, unit, kind) 升为 2，见「存储表」的「版本」；`QUOTA` 256 MiB）和 `Version`（语言、grammar 版本、查询版本，`Version::of(&Lang)` 取当前语言表里的三元组）。
   - `unit_key`、`unit_bytes`：「存储表」的键和字节数估算。
   - `Store`（`Store::new(&Partition)`，`Clone`、不持有连接）：
     - `evictions()`：淘汰代数，只读一个原子变量。
     - `exists(&Version, &[BlobId]) -> Option<Vec<Found>>`：存在检查，`Found` 带 OID、单元和状态。
-    - `defs_by_name(name, &[Version]) -> Option<Vec<StoredDef>>`、`refs_by_name(name, &[Version]) -> Option<Vec<StoredUnit>>`：按名字查定义、查引用的单元，区分大小写。
-    - `units(&[Version])`、`def_names(&[Unit], f)`：名字表的两步。
+    - `defs_by_name(name, &[Version]) -> Option<Vec<StoredDef>>`、`refs_by_name(name, &[Version]) -> Option<Vec<StoredUnit>>`：按名字查定义、查引用的单元，区分大小写。第 4 步（ADR 0037）加了分页：`NamePager::new(name, &[Version])`，`next_defs(&mut NamePager, limit)`、`next_refs(&mut NamePager, limit)` 各读一页（一条语句），`defs_left(&NamePager) -> u64` 数出没读的行；`defs_by_name_in(name, &[Version], &[BlobId], limit)` 在给定的 OID 里查。前两个改为逐页读完。
+    - `units(&[Version])`、`def_names(&[Unit], f)`：名字表的两步。第 4 步改为 `def_names(&[Unit], stop, f(name, kinds))`：按索引分页读，每个不同的名字调用一次。
     - `load(Unit) -> Option<Extraction>`：读回一个单元，供解析扩展点「按路径取已抽取的结果」使用。
     - `touch(&[Unit])`、`write() -> StoreWrite`。
     - `touch_pending(&mut PendingTouches) -> usize`：标记排队的命中，每次最多 `TOUCH_CHUNK`（1024）个，返回还剩多少。`PendingTouches::push(generation, &[Found])` 把存在检查的命中连同查询之前读到的淘汰代数排进队列。
@@ -1998,11 +2232,11 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
   读取返回 None 表示分库读不出，调用方按全部未命中处理。
 - 存在检查查出 `unit, oid, status`，设计写的是 `SELECT oid`：标记访问要用单元 ID；状态让调用方区分 `TimedOut`、`TooLarge` 的单元（文件被打开时按交互截止时间重做）。按名字查定义、查引用也多查出单元 ID，调用方交出结果之后用它标记访问（[cache 设计「访问时间」](cache.md#访问时间)）。存在检查和按名字的查找都不标记，由调用方决定时机（存在检查见下面「把访问标记移出热启动」一条）。
-- 版本过滤的 `OR …` 写成固定的 4 组三元组（`GROUP_TRIPLES`），用不到的组绑定 NULL，超过 4 种语言的兼容组分几次查询再合并：登记的语句是静态文本，参数个数固定（cache 设计「登记的规则」）。首发语言最大的组（`ts`、`tsx`、`js`）一次查询。存在检查和名字表的第一步只查一种语言，各用一组三元组。
+- 版本过滤的 `OR …` 写成固定的 4 组三元组（`GROUP_TRIPLES`），用不到的组绑定 NULL，超过 4 种语言的兼容组分几次查询再合并：登记的语句是静态文本，参数个数固定（cache 设计「登记的规则」）。首发语言最大的组（`ts`、`tsx`、`js`）一次查询。存在检查和名字表的第一步只查一种语言，各用一组三元组。第 4 步：分页的查找和名字表的第一步不再在 SQL 里按三元组过滤，在 Rust 里比对（「存储表」），分组只留给存在检查和在给定 OID 里的查找。
 - `ci_ref` 的插入用 `INSERT OR IGNORE`：抽取结果的引用名本来已经去重，重复的一行不至于让整批回滚。
 - grammar 版本和查询版本是 `u64`，按位存成 SQLite 的 64 位有符号整数，读写用同一种转换。
 - 语句共 11 条（三条插入、存在检查、两条按名字的查找、名字表两条、读回单元三条），在 cache 每连接 32 条的预编译缓存以内。
-- 名字表的第二步按单元逐个查 `ci_def_unit`（`def_names` 的单元按 ID 排序后传入）：设计写的是「按 `ci_def_unit` 顺序扫描」，没有规定是一条语句还是逐个单元，逐个单元不需要在 SQL 里表达映射过滤后的单元集合。
+- 名字表的第二步按单元逐个查 `ci_def_unit`（`def_names` 的单元按 ID 排序后传入）：设计写的是「按 `ci_def_unit` 顺序扫描」，没有规定是一条语句还是逐个单元，逐个单元不需要在 SQL 里表达映射过滤后的单元集合。第 4 步改为一次扫描整张表，见下。
 - `store_dropped_write_does_not_panic` 不检查恢复后写入的单元仍在：`SQLITE_FULL` 之后 cache 把分库预算降到文件大小以下，刚写入的单元会被立即淘汰（cache 设计「淘汰」），这是 cache 的行为。
 - 早期数据：第 2 步用抽取夹具拼成的语料对照了单元字节数的估算与实际文件，实际文件约为估算的 1.12 倍（见「实际验证」）。这份语料的定义密度远高于真实代码，不用来校准 10 万文件的总量；校准由第 3 步的 `code_intel/disk_100k` 完成（「验收」第 3 步）。
 - 把访问标记移出热启动。设计原来让存在检查给命中的单元标记访问（「调度、批次与取消」的存在检查一条、「存储表」的淘汰一条）。第 2 步第一版这样实现之后，`code_intel/warm_100k` 在 macOS CI 上中位数 537、549 ms，超过 500 ms 的预算。Linux 上的拆分：200 次查询约 82 ms，其余约 370 ms 是 `TableSet::touch` 写回 10 万个单元的访问时间。改动：
@@ -2017,7 +2251,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 设计把映射、核对任务和各层写成插件内部的状态，没有给第 3 步（还没有插件）的入口。实现为公开的 `index` 模块：`Indexer`（`Indexer::new(IndexDeps)`，测试和 bench 用 `with_fake_git`）持有每个打开项目的状态，第 4 步的插件在 `activate` / `started` 里构造它，把 `ProjectEvent`、`set_focus`、电源和语言包的通知转给它：`project_event`、`open_existing`、`set_focus`、`power_changed`、`grammar_changed`、`demand`（电池供电时的 `query` / `names`）、`coverage`、`map`、`head_diff`、`head_clean`、`subscribe`（电源和语言包的订阅，返回值交给 `PluginHandle::own`）、`close_all`。`IndexDeps` 是「本 crate 的公开项」里 `CodeIntelDeps` 的字段加上 `projects`（`Arc<dyn Projects>`）、这次激活的 `PluginHandle`、看门狗和批量任务数（`default_batch_tasks()`，与 executor 的批量线程数相同）：executor 不公开批量线程数，插件也只能在 `started` 之后拿到句柄。
 - 映射的类型在公开的 `map` 模块（`BaseMap`、`Overlay`、`WorktreeState`、`IndexedHints`、`LiveMap`、`HeadDiff`），供第 4 步的查询和 bench 使用。`by_oid` 拆成前缀和下标两个数组（每条 12 字节，`(u64, u32)` 的元组对齐后是 16 字节），另存每条的语言（1 字节），10 万文件合计 2.8 MB，在 3 MB 以内（「blob → 路径映射」已改）。提示的戳记取淘汰代数的低 32 位和语言包代数的低 31 位，与 OID 前缀共 16 字节。
 - `GitAccess` 的参数从 `root: &Path` 改为 `&Tree`（公共目录、git 目录、根目录）：生产实现要按公共目录打开仓库、按 git 目录取 worktree，只有根目录找不到它们。`tracked` 返回 `Vec<(RelPath, BlobId)>`（只有普通文件和可执行文件、UTF-8 路径），不返回 `Arc<git::TrackedPaths>`：第 5 层只用这些条目，`FakeGit` 也构造不出 `TrackedPaths`。`canonical_oid` 的路径改为 `&str`（「依赖 git、fs_watch 与 cache 的接口」已改）。
-- 覆盖部分对文件列表里有、原始字节的 OID 不等的路径调用一次 `canonical_oid`：设计只按原始字节计算，`Filtered`（LFS 的指针文件）因此认不出来，`overlay_*` 要求它是 `Unindexable`；顺带，CRLF 检出的跟踪文件不再被当作有改动。未跟踪的文件仍按原始字节（「blob → 路径映射」已改）。
+- 覆盖部分对文件列表里有、原始字节的 OID 不等的路径调用一次 `canonical_oid`：设计只按原始字节计算，`Filtered`（LFS 的指针文件）因此认不出来，`overlay_*` 要求它是 `Excluded`（原为 `Unindexable`，见下面「完整性的核算」第二条）；顺带，CRLF 检出的跟踪文件不再被当作有改动。未跟踪的文件仍按原始字节（「blob → 路径映射」已改）。
 - 游标由批量任务在每批开始时按依赖的代数重建，不在核对任务里：游标只有批量任务用，依赖表不变。
 - 第 3 层的范围：设计在没有当前文本和审阅集合时没有给出取法，实现依次取当前文本、审阅集合的第一个文件、项目打开时的路径（根目录除外）；有子项目、但没有这样的路径或没有子项目包含它时第 3 层为空。理由：取整个 worktree 时，电池供电下的第 3 层就是整个仓库，与 ADR 0029 的电池策略相反（「建索引的分层」已改）。只有最近一次收到 `set_focus` 的项目跑第 3–5 层；还没有任何 `set_focus` 时取最后打开的项目。
 - 存在检查自成一批，游标每步最多看 4096 个条目、取出至多 500 个文件，缺的进入这一层的小队列（「调度、批次与取消」已补）：设计没有规定存在检查的批与抽取的批怎样划分；按 64 个文件做存在检查时 10 万文件要 1600 次查询，超过「约 200 次」。看 4096 个条目的上限让 UI 线程上的 `set_focus` 不会等一次长的扫描。
@@ -2044,3 +2278,60 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 - 测试：`derived_*` 里依赖查询的部分（限时搜索不跳过有效 OID 已变的文件、淘汰之后经限时搜索找到定义、候选的子项目层、名字表的重建）随第 4 步的查询和名字表加入；第 3 步检查它们依赖的输入代数和派生状态（提示、游标、第 3 层的范围、写入代数）。分库被删除重建时 cache 让淘汰代数加一，与单元被删除走同一条路径，由 `derived_eviction_*` 覆盖。`battery_*` 里「一次 `query`」用 `Indexer::demand`（`query` 属于第 4 步）。
 - `FakeGit` 与 lectern-git 一样把含 `.git` 的目录（嵌套仓库）列为一个未跟踪的目录路径，被目录替换的跟踪文件列为这个文件和目录里的文件；`overlay_lectern_git_and_the_fake_list_directories_alike` 在 `TestRepo` 和 `FakeGit` 上构造同样的情况、比较两者的结果。原来的 `FakeGit` 会走进嵌套仓库，掩盖了上面的核对循环。
 - `testing` 新增 `FakeGit`、`FakeProjects`、`FakePower`、`host()`（只交出 `PluginHandle` 的插件）、`Rig`（bench 用的完整建索引环境）、`synthetic`（合成仓库：语言比例、路径、8 KiB 的源码）和 `route_tree_sitter_allocations`（让 tree-sitter 的 C 分配经过 Rust 的全局分配器，`code_intel/batch_peak` 才能计入语法树）。`Indexer::set_extractor` 让测试计数和控制抽取。依赖新增 `lectern-kernel`、`lectern-git`、`lectern-fs-watch`、`lectern-platform`，`lectern-executor` 改为普通依赖；都是已有的 crate，Cargo.lock 没有新增 crate。
+
+第 4 步：
+
+- 查询、名字表和语义导航的登记做在 `Indexer` 上（`query`、`results`、`close`、`prefetch`、`names`、`register_provider`，并 `impl CodeIntel for Indexer`），模块是 `query`（跳转、按名字、查引用、限时搜索、读取核对、分层）、`names`（`build_table` 公开，供 bench）、`semantic`（内部）和 `resolve`（解析扩展点，内部）。设计把它们写成插件内部的状态；理由与第 3 步的 `Indexer` 相同：测试和 bench 不经 kernel 就能驱动。
+- 插件：`activate` 里提供的服务对象是 `CodeIntelService`，`Indexer` 在 `started` 里才建（`PluginHandle` 只在 `started` 拿到，第 3 步的 `IndexDeps` 要它）。kernel 在 `started` 之前不准入任何调用，服务在那之前按「没有打开的项目」回答（`query` 返回 `QueryId(0)`，结果是 `Failed(NotOpen)`）。`dyn Projects` 经 `ServiceRef` 包成 `ProjectsRef`，每次调用取提供者的准入。`CodeIntelPlugin` 另有 `test-support` 的 `with_clock`、`with_batch_tasks` 和 `services()`（最近一次激活的服务，只存 `Weak`，不延长停用的激活）。`app` 还没有装配本插件（`app` 依赖 GPUI，Linux 上不编译），留给第 5 步。
+- 看门狗的到期表：`Watchdog::schedule(at, f)`（`Due`）。用 `ManualClock` 时，线程在有到期项时每次最多等 `CHECK_INTERVAL`（10 ms），所以测试的手动时钟推进后能被看到；用系统时钟（`Clock::moves_by_itself` 为 true）且没有在途抽取时，直接等到最早的到期时刻，不再每 10 ms 醒一次（原来保留的解析排着 60 s 的到期项，这 60 s 里看门狗每秒醒约 100 次；`deadline_watchdog_sleeps_until_a_far_due_entry`）。没有在途抽取也没有到期项时仍不带超时地等待。`stop` 丢弃到期表。
+- 第 1 步的候选 `source` 是 `Scanned`（当前文本为这次查询现场解析，不是查索引得到的），设计没有规定。解析超时时返回 `Failed(Unreadable("parsing timed out"))`：`QueryError` 没有超时一项，交互截止时间是 1 s。
+- 第 2 步读过的 import 目标，限时搜索不跳过、用第 2 步的抽取结果，按已交出的位置去重；只跳过当前文本（第 1 步已列出它的同名定义）。设计写「现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现」，按文件跳过会丢掉这个文件里第 2 步没有列出的同名定义，所以按位置去重。
+- 限时搜索的范围：有子项目、但没有子项目包含当前文本时搜整个 worktree（设计没有规定这种情况；第 3 层建索引在这时为空，见第 3 步的「第 3 层的范围」，搜索有 1 s 的上限，不受它影响）。`Partial::outside` 由「完整性的核算」计算，搜完也计算（见下面「完整性的核算」一条）。
+- 解析扩展点：`Resolver::package_of` 返回 None 时用默认的「同一目录」；`Import::exported` 给出本地名对应的导出名。#17 只有空规则 `DefaultRules`，测试经 `Indexer::set_resolver` 装入自己的实现。
+- 查引用：import 语句里的名字（`import { helper } from './a'`）也是引用位置，没有依据时列在 `same_name`，`bind` 给出依据时是调用方；这是 `ParsedFile` 的引用位置本来就包含的。限时搜索命中的文件只解析、不写入缓存：`ParsedFile` 不是抽取结果（它的引用位置包含局部引用），为写入再抽取一遍要多一倍时间；第 3 层的批量任务之后照常为它们建索引（设计「限时搜索」写的写入只对跳转做）。第一批在处理完 4 个文件或 150 ms 时交出，之后每 32 个文件或 100 ms。
+- `Named`：`symbol` 为 None（`Symbol` 要求语言，按名字查询没有）；不按可见性和语法种类过滤（没有引用位置）；不做限时搜索，所以 `near` 所在子项目（没有 `near` 时整个 worktree）里还有未入索引的文件、或在途抽取时结果是 `Done(Partial)`，`outside` 是其余未入索引的文件，都入索引后才是 `Complete`。设计只说「只做第 3 步」，没有说完整性。
+- 预取的沿用条件另含项目的会话号（切换 worktree 之后不沿用）；最多保留 4 个预取。用过一次即丢弃。
+- 名字表的代数是本 crate 按项目记的计数：每次看到输入（会话、映射来历、淘汰代数、语言包代数、写入代数）与上次不同就加一。设计写「名字表依赖的输入……任何一个变化时代数加一」；直接用输入代数之和不行，切换 worktree 时项目的输入代数从零重新开始，表的代数会变小。名字表的状态放在 `Project` 上（不随会话重置），持有中的表在切换 worktree 后也会重建。重建的触发点是批次写入之后、核对任务结束时和 `names` 本身；淘汰代数的变化在这些点上读到。
+- 语义导航：合并时「与 HEAD 相同的文件归 `head_only` 一类」只在这次查询还有等回复的、或带着位置回复的 `head_only` 请求时成立，否则全部文件归另一类：设计没有说 SCIP 注销、出错或超时之后它的文件归谁（原来出错的回复也算「已回复」，SCIP 出错、jdtls 成功时 jdtls 在与 HEAD 相同的文件里的位置被丢掉，「先后」已补）。`Same` / `Ready` 按（路径、行、列）的集合比较。注销后的重新合并、回复的处理都在 `Background` 任务里（回复只入队），事件在 executor 线程上发出。切换当前 worktree 时关闭这个项目的全部查询（未回复的请求收到 `cancel`）：它们回答的是旧 worktree 的内容。
+- 覆盖：`coverage` 另外要求没有待读的路径、git 项目的工作区比较是当前的，否则第 3、4 层是 `Pending`：原来在核对任务装上基础映射、还没读完覆盖部分的间隙里，第 3、4 层可能报 `Done`。
+- 文件夹项目在第 4 步建索引（第 3 步把它推迟到这一步，见上）：文件列表就绪时打开根目录的 `SafeRoot`，把文件列表里的每个文件放进重新读集合，核对任务读出、按原始字节的 SHA-1 记为覆盖项（`Content`），之后与 git 项目走同一套映射、各层和查询；换文件列表时全部重新读。没有 fs_watch 订阅、工作区比较和 HEAD（`head_clean` 总是 false），`ProjectEvent::Changed` 不再让文件夹项目重新打开根目录。热启动要读每个文件求 OID，命中的不解析（`schedule_folder_project_indexes_at_open`）。
+- 名字表的第二步改为一条语句扫描整张 `ci_def`（`SELECT unit, name, kind FROM ci_def`，表的顺序），跳过单元集合以外的行；同一单元的行连续写入，对上一行单元的判断沿用到下一行。逐个单元查 `ci_def_unit` 时 10 万个单元要 10 万次语句执行和 300 万次按 rowid 回表，`code_intel/names_100k` 为 1.07 s，超出 1 s；一次扫描为 0.81 s。
+- `ParsedFile`（跳转第 1 步、查引用和限时搜索现场解析的文件）在核心语言上不再跑 `Compiled` 的完整查询：定义和标记本来就取自遍历（ADR 0031），只需要 locals 的模式和给出引用的 tags 模式。`Lang::site_query` 用与 `Compiled` 相同的文本另编译一个查询，停用其余 tags 模式，模式和捕获的编号、属性、谓词与完整查询相同；它不经 `TagsConfiguration`，所以核心语言在生产中只编译这一个查询。`site_reference_query_matches_full` 在夹具、遍历的样例和每种扩展名的合成源码上检查两者的定义、引用位置和每个位置的 `site_at` 相同。另外，局部引用是否处在变量位置要看父节点，tree-sitter 的 `Node::parent` 每次从根往下逐层扫描子节点，顶层条目多的文件每次都扫描全部顶层条目；`site::Parents` 用二分查找定位根的子节点，往下与 tree-sitter 相同（`site_parents_match_tree_sitter` 检查每个节点的父节点与 `Node::parent` 相同）。64 KiB 的 TS 文件上 `ParsedFile` 从约 27 ms 降到约 20 ms（解析本身约 9 ms）。
+- `ParsedFile` 要的查询（核心语言的 `SiteQuery`，语言包的 `Compiled`）不在查询线程上第一次编译：核心语言的抽取走遍历，从不编译它，第一次跳转原来要在 `Interactive` 线程上先编译（release，Linux：ts 138 ms、tsx 109 ms、rust 82 ms、js 42 ms、python 33 ms），超出候选 50 ms 的预算。每次核对任务结束时，这个项目的映射里有还没编译的语言，就请求一个 `Background` 任务编译（`warm_site_queries`）。任务同时最多一个，请求只保证它在运行；任务自己扫描所有打开项目的映射，编译到扫描为空，清除标志后再扫描一次，所以任务进行中别的项目发来的请求不会丢（原来请求方带上自己项目的语言，任务结束时只重看这个项目：几个项目同时打开时，后来者的语言要等到下一次与它无关的核对，`goto_site_queries_of_every_open_project`）。插件本身在首帧之后激活，所以这也在首帧之后。查询在编译进行中用到它时等这次编译（`OnceLock`），不会比自己编译更久。`Lang::prepare` 也编译它，测试和基准计时之前调用。设计没有写这些查询何时编译。
+- 查询的视图（「输入代数与派生状态」的「查询的视图」，取代原来按输入逐个补的检查：提示的切面、预取的 `Inputs`）：一次查询读几个各自前进的输入（会话与当前 worktree、映射、淘汰、提示、文件内容、项目的打开与关闭），原来是逐个输入临时检查，Codex 先后指出三处同一个根因：读提示与查索引之间提交的批次（切面）、快照与查索引之间的淘汰（冻结的提示戳记仍然匹配，查不到的单元被当成已入索引，结果报 `Complete`）、切换 worktree 后旧会话、旧映射和运行中的查询要等核对任务才结束（新 worktree 的文本按旧映射回答，运行中的查询在切换之后还发布旧结果）。另外发现第四处：新会话（项目刚打开、刚切换）的映射建好之前，查询按空映射回答并报 `Complete`。现在：一个 `View`、一个比较（`Inner::check_view`，一次项目锁、一次原子读，O(1)），比较结果决定追加、重做一次、`Stale` 或停止；发布经 `publish_in` 在 `publishing` 锁下核对会话；切换 worktree 和关闭项目在事件里同步结束会话；没有映射的会话里，查询排队等它。测试：`view_*` 的交错矩阵（见「实际验证」），`cut_*` 改用同一组钩子（`Inner::step_hook`，代替 `after_lookup`）。名字表只按单元建表、不判断完整性，不受影响；它的重建由 `gens.writes` 触发。
+- 发布的快照（「查询的视图」第一条）：原来查询的快照由几处拼成，当前状态的映射、全局语言表、根和子项目各取当前值。Codex 又指出两处同一个根因：文件夹项目打开时，等着的查询在基础映射装好、覆盖部分还没读的时候就开始，`Named` 和跨文件的搜索看到零个文件、报 `Complete`；语言包升级时全局语言表先换、映射后重建，这段时间的查询按新版本查存储，提示却按旧戳记匹配，跳过的文件没有结果，仍报 `Complete`。现在快照只来自核对任务消费完全部输入时整体发布的 `Published`（映射连同建它的语言表、停用的语言、根、HEAD 树、子项目），等着的查询在发布时开始，不在 `rebuild_base` 之后；当前文本的语言也取映射里的。交错矩阵加了「语言包升级（换表与重建映射之间）」这种变化和「变化之后立刻查询（核对任务还没运行：切换之后没有可用快照，其余仍用上一个）」这个位置，文件夹项目另有一个测试在基础映射与覆盖部分之间取快照（见「实际验证」）。
+- 批量任务的唤醒（`kick_batch`）先置 `kicked` 再补满任务池：原来先补池再置位，池满时最后一个任务恰好在两步之间空闲退出，这次唤醒要等下一次。其余单飞的入口（核对的 `again`、语言包一轮的 `again`、名字表建完后的重查、语义回复的队列、看门狗按表运行）都在同一把锁里记下请求，不会丢。
+- 跳转第 1 步解析当前文本用 `ParsedFile::parse_at`，不用 `parse`：跳转只看光标处一个位置、本文件的定义和绑定模型，用不到文件里其余引用的位置（`references`，只有查引用用）。核心语言上，整棵树只跑建绑定模型的 locals 模式（作用域、定义、`global` / `nonlocal`，`Lang::jump_query`）；光标处名字是不是 locals 的引用、在不在变量位置，由完整的查询在光标前后两个字节上再跑一次给出；引用位置不再收集。64 KiB 的 TS 文本上，查询从 9.3 ms 降到 4.9 ms，匹配从 11 478 个降到 2 506 个，引用位置的整理从 1.5 ms 降到 0.2 ms，分配从约 10 500 次降到约 5 700 次。`site_parse_at_matches_parse` 检查 `site_at` 与本文件的定义（连同 `local` 标记）都与 `parse` 相同：每种核心语言一段跨作用域绑定的样例（模块级的名字在函数、类、方法里使用，内层作用域遮蔽它，JSX / TSX 组件，Python 的 `global` / `nonlocal`，Go 的包级名字，Rust 的 crate 级条目，Java 的字段和 import）、夹具和遍历的样例上每个标识符的起止位置，8 KiB 的合成源码上每个来源约 150 个位置，合计约 6 000 个；`parse_at` 的结果在别的位置调用 `site_at` 或取 `references` 时 debug 断言失败。`jump_query` 与 `site_query` 一起由后台任务编译（`prepare_site`）。语言包仍走完整的 `parse`。
+- 查询读文件只经 `Inner::read_content`（「跳转到定义」第 1 步核对当前文本的规则用到每一次读）：读出的字节只有是快照的映射给这个路径的内容（`Effective::oid`，原始 OID 或经内置转换）时才算数，否则 `Stale`，计入 `unsearched`，不抽取、不写入，也不以新字节的 OID 交出位置。用到它的是第 2 步的 import 目标、查引用的已入索引文件、限时搜索；预取走同样的步骤，名字表不读文件。没有 index 条目的路径（未跟踪的文件、文件夹项目）按映射里覆盖项记下的 OID，规则相同。原来这三处在字节不符时改用新字节的原始 OID（`key_of`），快照之后改动的文件会以新内容给出候选和引用、结果还报 `Complete`，消费方也发现不了（`read_verify_search_skips_a_file_changed_after_the_snapshot`、`read_verify_references_skip_an_indexed_file_changed_after_the_snapshot`）。查引用里这样的已入索引文件记在 `Found::unsearched`，结果为 `Partial`。超过 1 MiB 的文件与批量层一样不读（`TooLarge`）。
+- 保留的查询状态都有界，用完即放（设计只写了个数上限）：预取最多 4 个，过了 `PREFETCH_FOR`（2 s）或输入变了就丢弃：每次预取和查询时清理，另在看门狗的到期表里排一项，到期时由一个 `Background` 任务清理（`expire_prefetches`），所以没有后续操作时也不会一直留着它的候选、抽取结果和语言包的租约（`prefetch_expires_unused`、`grammar_lease_released_by_an_expired_prefetch`）；原来只在第 5 个预取或同一查询取用时才丢。保留的查询最多 16 个（`RETAINED`），结果留到关闭或被新查询挤出，这是接口约定；其中语义导航部分（`SemQuery`）原来一直持有查询开始时的映射（含语言表的租约，10 万文件约 3 MB），现在只在还有请求未答复时持有，最后一个答复或提供者离开后放掉（`escalate_answered_query_releases_its_map`）。名字表只留 `Weak`；`Snap` 只活在查询任务里。
+- 排序键每个候选只算一次（`sort_by_cached_key`）：候选的排序原来每次比较都重算路径距离并克隆路径（`Arc<str>`，克隆不分配，但每次比较两次原子操作和两次路径遍历），查引用的文件排序每次比较都扫描审阅集合、子项目和依赖。其余排序、二分和去重的比较都只借用。`Named` 查约 5 万个文件都定义的名字时（`code_intel/named_50k`，只记录），第一批要约 0.5 s，其中按名字查定义的 SQL 约 380 ms（每行约 7 µs）、组成候选约 70 ms、排序约 16 ms：先交出前 k 个也要读完所有行才能排序，降下来要改存储（覆盖索引）或给 `Named` 定预算，本轮没有做。
+- 查询读文件的截止时间统一为 `query::search::FileDeadline`：后台截止时间（250 ms）与查询剩余时间中较小的一个（跳转第 2 步、限时搜索、查引用的解析；查引用原来在限时搜索里不看剩余时间）。被剩余时间截短后 `TimedOut`，以及 `Cancelled`，都不写入缓存、文件计入 `unsearched`（`FileDeadline::settles`，「限时搜索」已补这一条）：原来这样的 `TimedOut` 被写入，批量层不再重做，这个文件的定义要等打开它才出现，查询还报 `Complete`（`search_cut_extraction_is_not_stored`）。查询的其他写入只有访问标记，名字表和预取不写入。
+- 看门狗线程的测试不用 `run_dedicated_gated` 的任务句柄：它交给 `own_with` 由这次激活持有，停用时丢弃。线程自己的闭包在开始和返回时记录到 `plugin::WatchdogThread`（`NotStarted` / `Running` / `Exited`），测试看它；`/proc/self/task` 只在 Linux 上、在线程已退出之后再确认（原来在 macOS 上没有 `/proc`，两个测试必然失败、两个空过；Linux 负载高时线程名在启动之后才设置，20 次激活的测试会失败）。「测试」已改。
+- 基准：
+  - `plugin/code-intel/resident_*` 在 `Memory` 目标里用计数分配器测本 crate 的活跃字节（tree-sitter 的分配经 `route_tree_sitter_allocations` 计入，不含 `project` 的文件列表和 SQLite 自己的内存）：`Process` 目标的进程级基准（bench 第 4、5 步）还没有实现，按 bench 设计的划分它们属于 `Process`，`budgets_belong_to_the_documented_targets` 为它们加了例外（[bench 设计「基准目标」](bench.md#基准目标)已改）。
+  - `code_intel/references_100k` 拆成 `code_intel/references_100k/all`（≤ 2 s）和 `code_intel/references_100k/first`（≤ 200 ms）：「性能」这一行有两个预算。
+  - bench 的 `budgets_ids_are_crate_slash_name` 允许 `plugin/<id>/…` 的插件 ID 一段里有 `-`：插件 ID 是 kebab-case，`plugin/code-intel/*` 是预算表里第一批带 `-` 的具体条目。
+  - 10 万文件的基准用虚拟仓库：`testing::virtual_repo`（`FakeGit::stage_oids` 只有 index 条目，`assume_unchanged` 让工作区比较为空，单元是 `synthetic::extraction` 的合成抽取结果：每个文件 3 个自己的名字、27 个取自 2 万个共用名字，10 万文件约 32 万个不同的名字，对应调研对名字表 4–8 MB 的估算）；查询要读的文件才写到磁盘上。`goto_indexed` 的当前文本 64 KiB，目标名字有约 130 个定义。
+- `testing`：`TestHost` 改为直接启动 `Kernel`、不经 `TestKernel`（`TestKernel` 记下目标插件发出的每个事件，会一直持有名字表）；`FakePower`、`FakeGrammars` 的订阅返回可退订的守卫（`subscribers()` 只数没退订的）。`Stats` 新增 `prepares`（跳转第 1–3 步的次数，预取的测试用）。
+- 依赖：`memchr`（限时搜索的 `memmem`）和 `unicode-normalization`（名字表的 NFC）加入 `[workspace.dependencies]`，两者原已在 Cargo.lock 里，没有新增 crate。
+- 完整性的核算（新增「完整性的核算」一节，「限时搜索」「查询的视图」已改）：原来 `Complete` 由几处各自的计数决定：搜索在范围搜完、没有在途时直接报 `Complete`，不看子项目之外；查引用另记读不出的已入索引文件；`Named` 自己数；读到超过 1 MiB 的文件直接跳过。审阅指出三处由此而来的漏报：子项目之外没入索引的文件不计（`pa/a.ts` 跳到只在 `pb/c.ts` 里定义的名字，返回空的 `Complete`，查引用漏掉其他包的调用方）；命名空间满了之后提示冻结，被挤出的文件提示仍匹配，搜索把它当作已入索引跳过（10 万文件的仓库约 5%）；第 1 层按 4 MiB 入索引的 1–4 MiB 文件，查引用按 1 MiB 读，读不出就丢掉。现在只有一处决定完整性：每个能参与回答的文件分类一次。决定：`Complete` 保持接口文档的含义（「能参与回答的文件都已入索引或在这次查询里搜过」），范围之外没入索引的文件计入 `outside`，三种查询一样；限时搜索仍只搜当前子项目。满额模式的核对除了范围里的文件（搜索之前，约 2.3 ms），也核对范围之外提示匹配的文件（遍历时）：只核对范围里的会让范围之外被挤出的文件仍算已入索引，正是这一类漏报；范围之外的核对按时间盒分条进行（见下一轮）。`View` 的淘汰代数改为提示戳记用的那个（满额后冻结），另加「是否已满」：满额后批量层自己的配额淘汰不再让并发的查询以 `Stale` 结束（`account_full_namespace_eviction_during_a_query_is_not_stale`）。
+- 预取的沿用改在查询任务里、按它自己取的快照判断（「查询的视图」已改）：原来 `query` 在调用方线程上用当前视图判断，任务稍后才取快照，两者之间核对任务发布了新映射时，第 1–3 步来自旧映射、搜索来自新映射，同一个文件的两个 OID 都列出且 `Complete`。`check_view` 也比较数据的视图与快照的映射代数（`view_matrix_prefetch` 的「`query` 返回之后、任务取快照之前」）。
+- 没有可发布快照的会话（「查询的视图」已补）：原来没有当前 worktree、文件列表 `Unavailable` 时等着的查询一直 `Running`；现在以 `Failed(Unreadable)` 结束。工作区比较失败或根目录打不开时发布的快照标为缺工作区内容，结果不是 `Complete`（原来按只有基础部分的映射回答 `Complete`）。
+- `NavigationProvider::cancel` 写明「立即返回，不阻塞；可在任意线程调用」（「语义导航的注册」的接口已补）：它在 UI 线程上被调用（`close`、超过 16 个查询时挤出最旧的）。会话结束时原来在 `publishing` 锁里调用它，现在收集起来，放开锁之后再调用（`escalate_cancel_runs_outside_publishing`）；关闭的查询持有的映射、作废的预取交给 `Background` 任务释放，不在 UI 线程上放掉最后一份语言包租约或约 3 MB 的映射。
+- 完整性的核算，第二轮（「完整性的核算」「blob → 路径映射」已改）：审阅又指出三处。批量层存成 `TooLarge`（没打开过的 1.5 MiB 生成文件）或 `TimedOut` 的文件有匹配的提示，原来算已入索引、搜索也跳过，只在它里面定义的类型跳转返回空的 `Complete`；修改过或未跟踪、超过 1 MiB 的文件是 `Unindexable` 覆盖项，遮住了基础条目，原来从核算里消失。决定修复、不作为已知限制：本次会话记下单元没有内容的键（`State::unfinished`），核算计为未搜，搜索按交互上限读它们；`Binary` 算已入索引（没有定义可找）；`WorktreeState` 分出 `Excluded`（过滤器的指针文件、符号链接），`Unindexable` 只剩超过 1 MiB 和读不出，计为未搜。局部定义的查引用原来不看自己的文件有没有搜成（大文件按后台的 250 ms 解析，超时就是零个引用、`Complete`），现在要它搜过，并按交互上限解析；按 OID 读、映射在这个路径上是另一份内容的被查定义所在的文件没能搜时也计入。`finish` 原来在最后一次比较视图之后又读提示（被读过的文件按当时的提示算出遍历里的分类）；现在遍历时定下这些分类，`finish` 不读提示。满额模式范围之外的核对原来一口气做完（10 万文件约 280 ms），不检查停止，`Done` 晚到约 1.28 s，超过「到停止 ≤ 1.1 s」，关闭查询也不停；现在每条语句之前检查停止和时间盒，没核对的计入 `outside`。另按审阅的建议缓存遍历的结果，`goto_indexed` 的重复跳转不再遍历（「实际验证」有第一次与重复两个数字）。
+- 替换、局部性和分层（「调度、批次与取消」「候选的分层与过滤」「查找引用与调用方」和 `DefinitionRef::local` 已改）：审阅指出三处。查询现场按交互上限重做一个 `TooLarge`、`TimedOut` 的文件得到 `Done`，写入时按第 2 层判断，存着的单元「满足」这一层，`Done` 的结果被丢掉，`State::unfinished` 不变，每次跳转都在时间盒里重新解析它，`Named` 一直列不出它的定义；现在 `Done` 替换没有内容的单元，不论哪一层写入（`outranks`）。再审又指出写入前的存在检查在取写锁之前，其间另一次写入落下的 `Done` 会被第 1 层的 `TimedOut` 覆盖；现在存在检查在写锁里进行（所有写入都取这把锁），替换只有 `outranks` 这一种，没有内容的结果也不再替换另一个没有内容的单元（原来第 1 层会这样做，只多一次淘汰计数）。`Named` 的候选原来把 `local` 固定为 false，从 ⌘K 选中一个嵌套的 `const helper` 查引用时会查整个项目；`ci_def` 不存这个标记，持久化要在抽取时跑 locals 查询的定义判断、改存储格式和全部抽取快照，所以不持久化，由 `References` 确定：不论 `DefinitionRef` 由谁给出，都按被查定义所在文件的解析确定，用的是查引用本来就要做的那一次解析（`refs_nested_helper_from_named_is_local`）。第一版修复在跳转第 3 步和 `Named` 里为每个 `File` 候选的文件读一次、解析一次来恢复它，再审指出这在 ⌘K 交出结果之前加了没有上限的整文件解析（`File` 的候选有多少个文件就解析多少个），`Object` 一侧的跳转还会为工作区里的同一路径再解析一次；现在去掉了，来自索引的定义的 `local` 一律为 false（不知道），列出候选时不解析任何文件（`refs_named_parses_no_file`、`goto_object_side_parses_only_its_text`）。其余构造 `DefinitionRef` 的地方：第 1 步来自当前文本的解析；第 2 步只取不是 `File` 的导出定义；限时搜索的候选按可见性只来自其他文件，`File` 的进不来；都已正确。分层原来在没有当前文本时把 `near` 路径上的定义算作「当前文件」（`is_none_or`），两个都不在任何子项目里的文件算作同一子项目（两边都是 None）；现在每一层都要所比较的一方已知，`file_order` 同样（`goto_tiers_need_what_they_compare_with`）。
+- 交错矩阵：文件改用语言包的语言（`jpack`，Java grammar，`jvm` 组），语言包升级和同组安装改变查询用的语言；每种变化作用于对这种查询有贡献的文件（跳转和 `Named` 是定义所在的 c、d，查引用是引用所在的 e、f），原来提交、换映射、改文件都作用于没有引用的 d.ts，查引用的那几格测不出遗漏。另加位置「`query` 返回之后、任务取快照之前」。
+- 交互份额、解析的保留、按名字查找的上限、核对的停止和查引用的批次（[ADR 0037](../adr/0037.md)；「跳转到定义」「候选的分层与过滤」「查找引用与调用方」「限时搜索」「完整性的核算」「存储表」「性能」已改）：自审指出份额只在最容易的状态下成立。`goto_indexed` 重复同一次跳转（遍历已缓存）、当前文本只有 64 KiB，按名字查找没有上限（约 3000 个定义的名字多约 25 ms），10 万文件通常处在满额模式，根作用域和不带 `near` 的 `Named` 的核对没有上限也不能取消；性能表的分项与实际验证互相矛盾。现在份额是到第一批有候选的结果，在遍历未缓存、常见名字、满额模式下分别判定，当前文本是 100 KB；当前文本的解析按 blob OID 保留，同一文本里的跳转不再解析，冷路径只记录；按名字查找分页，第一批是第一页加最近的文件，其余页在之后的批次里；每条核对语句之前检查停止和时间盒，没核对的计为 `Unchecked`；`Named` 在遍历之前交出候选。`ci_def_name` 改为 (name, unit)，命名空间版本 2。查引用另有两处：读的上限按单元的上限（4 MiB），解析的截止时间却按「是不是被查定义的文件」，1.5 MiB 的 `TooLarge` 文件和第 1 层抽取过的 1–4 MiB 的文件读进来之后总在 250 ms 时超时、调用方找不到；现在两者按同一条规则（`Snap::file_limits`）。结果的批次只在解析完一个文件之后检查计时，`ci_ref` 一轮的结果可能等到约 1 s 之后；现在 `ci_ref` 一轮之后立即交出，限时搜索每读一个文件检查一次计时。另：`Store::defs_by_name`、`refs_by_name` 保留，改为逐页读完（存储的测试用）。
+- 交互份额，第二轮（[ADR 0037](../adr/0037.md) 已改，并修订 [ADR 0030](../adr/0030.md)；「存储表」「名字表」「跳转到定义」「查找引用与调用方」「完整性的核算」「性能」已改）：自审又指出七处，各自从根上改：
+  - 一页的 `LIMIT 256` 数的是通过 `ci_ext` 连接和版本、状态筛选的行：旧版本的单元（淘汰之前不删除）、另一语言组的页要走过名字的全部行，一条不能取消的语句可读几千到约 5 万行（`named_50k` 的第 2 组约 5 万次查找）；一个单元里同名定义超过 256 个时，其余的不读却仍报 `Complete`。现在页先在索引里取 256 行、再 `LEFT JOIN`，版本在 Rust 里比对，一次扫描覆盖所有版本，游标是 (unit, kind, rowid)。
+  - 第一批的「最近的文件」按路径顺序走整个子树、覆盖部分排在最后，截在 2048 个，再按 OID 顺序每条 `LIMIT 256`：同目录的文件或刚改的文件可能不在第一批里，结果只追加，预选也就偏远。现在先查所在目录自己的文件（含覆盖部分，审阅集合在前），再按距离查子项目的其他文件，两段各自用语句。
+  - 保留的解析从最后一次用到起 60 s 过期，读了一分钟的文本里跳转走冷路径（约 24–33 ms，只记录），与「冷路径在 50 ms 之内」的说法不符。现在当前文本的那份一直保留，不再是当前文本时才开始计时；冷路径按 50 − 18（抽屉）= 32 ms 判定（判定点见下面第三轮：96 KiB）。
+  - 查引用与跳转共用 1 s 的时间盒，`ci_ref` 一轮就要 0.83–1.04 s，满额模式的核对总被截断，全部已入索引的 10 万文件报 `Partial { outside }`，基准也没检查。现在查引用的时间盒是 1.9 s；`references_full/all` ≤ 2 s，`references_full` 和 `goto_full` 每次都要 `Complete`。
+  - 超过 128 KiB 的当前文本每次跳转都重新解析，超过 50 ms，ADR 0037 改了 ADR 0030 的 50 ms 却没有记下：现在记为对 ADR 0030 的修订，两边的状态行和索引都已改（修订的范围见下面第三轮：96 KiB 以内任何时候成立，96–128 KiB 靠保留的解析成立）。
+  - 命名空间版本在本文里写成 1 和 2 两种：现在统一为 2，「存储表」的「版本」写明原因。
+  - 名字表一条语句扫描整张 `ci_def`（约 1 s，不能停），每个定义查一次哈希表、为新名字分配：现在按 `ci_def_name` 的顺序分页读索引，与前一串比较去重，每个不同的名字一次 NFC。
+  - 另：`parse_cache_bytes` 原来测两份 100 KB，说的是上限；现在在上限处测两份略小于 128 KiB。
+- 交互份额，第三轮（[ADR 0037](../adr/0037.md)、[ADR 0030](../adr/0030.md) 的状态行、「查找引用与调用方」「性能」「验收」已改）：
+  - 冷路径的判定点从 128 KiB 改到 96 KiB：128 KiB 的冷跳转在 Linux 上实测 29.6–35.9 ms（整次跳转：按 ADR 0034 的 TS 约 6 MiB/s，解析约 21 ms，其余是 locals 和查找），与 32 ms 的份额没有余量，macOS 上解析不比它快。现在 ADR 0030 的 50 ms 对 96 KiB 以内的当前文本任何时候成立，对 96–128 KiB 的靠保留的解析成立（成为当前文本时预热，是当前文本期间一直保留），预热完成之前的冷跳转是已知限制；`goto_cold_parse` 在略小于 96 KiB 的文本上判定 ≤ 32 ms（24.7 ms），`goto_cold_parse/at_128k` 只记录。预热进行中到来的冷跳转不等预热，理由见「跳转到定义」的「当前文本的解析」。
+  - 查引用第 2 步读 `ci_ref` 给出的已入索引文件时不看时间盒：每个文件的解析截止时间是交互的 1 s，逐个文件只检查是否已停止，几千个文件用到的名字约 5–15 s，超出 1.9 s 的时间盒和 ADR 0030 的 2 s；`ViewCheck::Grew` 时的第二次调用一样。现在截止时间截到时间盒，逐个文件之前和读 `ci_ref` 的页之间都检查时间盒，到时剩下的文件记为 `NotReached`、没读的单元按索引数出，都计入 `unsearched`（`refs_indexed_files_stop_at_the_time_box`：每次读文件让时钟走 400 ms，12 个用到它的文件，找到的加上未搜的正好是 12、少于 12 个被搜；按原来的代码 12 个都被搜）。基准的 300 个调用方测不出这一点。
+  - 本节第二轮里两处「128 KiB」的说法、「验收」第 4 步少了 `goto_cold_parse` 和 `references_full/all` 两条判定，一并改正。限时搜索的超出取决于看门狗 10 ms 的检查间隔，没有改：在抽取的进度回调里比较时刻需要把「自己停下」与「看门狗置位」区分开（否则记为解析失败），而且每次回调读一次时钟，`extract_throughput` 本来就贴着 4 MB/s；超出仍在 20 ms 的取消预算之内（`search_stop` ≤ 1.02 s）。

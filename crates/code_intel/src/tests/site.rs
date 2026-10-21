@@ -1027,3 +1027,241 @@ fn site_member_names_do_not_bind_locals() {
         assert!(s.binding.is_some(), "{lang}: plain {} unbound", plain.0);
     }
 }
+
+/// The fixtures, the walkers' cases and a synthetic source per extension,
+/// each with its core language.
+fn parity_sources() -> Vec<(&'static crate::extract::Lang, String)> {
+    let table = core_table();
+    let mut sources: Vec<(&crate::extract::Lang, String)> = Vec::new();
+    for (lang, _, source) in crate::testing::FIXTURES {
+        sources.push((table.get(lang).expect(lang), (*source).to_owned()));
+    }
+    for (lang, source) in super::extract::WALKER_CASES {
+        sources.push((table.get(lang).expect(lang), (*source).to_owned()));
+    }
+    for ext in ["ts", "tsx", "js", "rs", "py", "go", "java"] {
+        let lang = table
+            .for_path(&format!("f.{ext}"), &crate::NoGrammarPacks)
+            .expect(ext);
+        let text = crate::testing::synthetic::source(ext, 7, 8 << 10);
+        sources.push((lang, String::from_utf8(text).unwrap()));
+    }
+    sources
+}
+
+/// `site::Parents` gives every node of a tree, named or not, the parent
+/// tree-sitter gives it.
+#[test]
+fn site_parents_match_tree_sitter() {
+    for (lang, source) in parity_sources() {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(lang.language()).unwrap();
+        let tree = parser.parse(source.as_bytes(), None).unwrap();
+        let parents = crate::site::Parents::new(&tree);
+        let mut cursor = tree.walk();
+        let mut checked = 0;
+        loop {
+            let node = cursor.node();
+            assert_eq!(
+                parents.of(node).map(|p| p.id()),
+                node.parent().map(|p| p.id()),
+                "{} {node:?}: {source}",
+                lang.name().0
+            );
+            checked += 1;
+            if cursor.goto_first_child() || cursor.goto_next_sibling() {
+                continue;
+            }
+            while cursor.goto_parent() && !cursor.goto_next_sibling() {}
+            if cursor.node().id() == tree.root_node().id() {
+                break;
+            }
+        }
+        assert!(checked > 1, "{source}");
+    }
+}
+
+/// On a core language `ParsedFile` runs the query with only the locals
+/// patterns and the reference patterns enabled (`Lang::site_query`):
+/// the definitions, the reference positions and what is at each of them
+/// are what the full query gives, over the fixtures, the walkers' cases
+/// and the synthetic sources.
+#[test]
+fn site_reference_query_matches_full() {
+    for (lang, source) in parity_sources() {
+        let text: Arc<[u8]> = Arc::from(source.as_bytes());
+        let reduced = ParsedFile::parse(
+            lang,
+            text.clone(),
+            &SystemClock,
+            Instant::now() + Duration::from_secs(10),
+            &AtomicBool::new(false),
+        )
+        .expect("parsed");
+        let full = ParsedFile::parse_with(
+            lang,
+            text,
+            &SystemClock,
+            Instant::now() + Duration::from_secs(10),
+            &AtomicBool::new(false),
+            true,
+        )
+        .expect("parsed");
+        let name = &lang.name().0;
+        assert_eq!(
+            reduced.defs_with_local().collect::<Vec<_>>(),
+            full.defs_with_local().collect::<Vec<_>>(),
+            "{name}: {source}"
+        );
+        assert_eq!(reduced.references(), full.references(), "{name}: {source}");
+        let positions = full
+            .references()
+            .iter()
+            .map(|r| r.at)
+            .chain(full.defs().map(|d| Position {
+                line: d.line,
+                column: d.column,
+            }));
+        for at in positions {
+            assert_eq!(
+                reduced.site_at(at),
+                full.site_at(at),
+                "{name} {at:?}: {source}"
+            );
+        }
+    }
+}
+
+/// Names bound across scopes, one source per core language: a module-level
+/// name used inside a function, class or method; a nested scope shadowing
+/// it; JSX and TSX components; Python `global` and `nonlocal`; Go and Rust
+/// package and crate items; Java fields and imports.
+const SCOPE_CASES: &[(&str, &str)] = &[
+    (
+        "ts",
+        "import { other } from \"./o\";\nconst limit = 1;\ntype Size = number;\nfunction f(): Size { return limit + other(); }\nfunction g() { const limit = 2; type Size = string; const s: Size = \"\"; return limit; }\nexport class C { limit = 3; m() { return limit + this.limit; } }\nenum E { A } \nnamespace N { export const limit = 4; export function k() { return limit; } }\nconst arrow = (limit: number) => limit + E.A;\nif (limit) { var hoisted = limit; }\nfunction late() { return hoisted + later(); }\nfunction later() { return 0; }\n",
+    ),
+    (
+        "tsx",
+        "import { Box } from \"./box\";\nconst Title = (p: { text: string }) => <h1>{p.text}</h1>;\nexport function App() { return <Box><Title text=\"a\" /></Box>; }\nfunction Shadow() { const Title = () => <b />; return <Title />; }\n",
+    ),
+    (
+        "js",
+        "var count = 0;\nconst Item = () => <li>{count}</li>;\nfunction inc() { count++; return count; }\nfunction shadow() { let count = 5; return count; }\nfunction List() { return <ul><Item /></ul>; }\nclass K { static n = count; m() { return count; } }\nfor (var i = 0; i < 2; i++) { inc(); }\nfunction usesI() { return i; }\ntry { inc(); } catch (count) { console.log(count); }\n",
+    ),
+    (
+        "python",
+        "import os\nfrom sys import path\nlimit = 1\nif os:\n    flag = True\ndef f():\n    return limit + len(path) + flag\ndef g():\n    global limit\n    limit = 2\n    return limit\ndef h():\n    x = 1\n    def inner():\n        nonlocal x\n        x = 2\n        return x\n    return inner\ndef s():\n    limit = 3\n    return limit\nclass C:\n    limit = 4\n    def m(self):\n        return limit\n    k = [limit for limit in range(3)]\n",
+    ),
+    (
+        "rust",
+        "use std::fmt;\nconst LIMIT: u32 = 1;\nstatic NAME: &str = \"n\";\nstruct S { v: u32 }\nfn f() -> u32 { LIMIT }\nfn g() -> u32 { let LIMIT = 2; LIMIT }\nfn h(x: fmt::Arguments) -> S { let _ = (x, NAME); S { v: LIMIT } }\nimpl S { fn m(&self) -> u32 { self.v + LIMIT } }\nmod inner { pub fn k() -> u32 { super::LIMIT } }\n",
+    ),
+    (
+        "go",
+        "package p\nimport \"fmt\"\nvar limit = 1\nconst name = \"n\"\ntype T struct{ v int }\nfunc f() int { return limit }\nfunc g() int { limit := 2; return limit }\nfunc h() { fmt.Println(name, T{v: limit}) }\nfunc (t T) m() int { return t.v + limit }\n",
+    ),
+    (
+        "java",
+        "import java.util.List;\nclass A {\n  static int limit = 1;\n  int f() { return limit; }\n  int g() { int limit = 2; return limit; }\n  List<String> h() { return null; }\n  class B { int k() { return limit; } }\n}\nclass Other { int o() { return A.limit; } }\n",
+    ),
+];
+
+/// `ParsedFile::parse_at` (a jump's parse) gives at its site what `parse`
+/// gives there, and the same definitions: at the start and the end of
+/// every identifier-like run of [`SCOPE_CASES`], the fixtures and the
+/// walkers' cases, and of about 150 per synthetic source (8 KiB each).
+#[test]
+fn site_parse_at_matches_parse() {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+    let deadline = || Instant::now() + Duration::from_secs(10);
+    let mut checked = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    let mut def_mismatches: Vec<String> = Vec::new();
+    let table = core_table();
+    let mut sources = parity_sources();
+    for (lang, source) in SCOPE_CASES {
+        sources.push((table.get(lang).expect(lang), (*source).to_owned()));
+    }
+    for (lang, source) in sources {
+        let text: Arc<[u8]> = Arc::from(source.as_bytes());
+        let full = ParsedFile::parse(
+            lang,
+            text.clone(),
+            &SystemClock,
+            deadline(),
+            &AtomicBool::new(false),
+        )
+        .expect("parsed");
+        let bytes = source.as_bytes();
+        // The start and the end of every identifier-like run.
+        let mut at = Vec::new();
+        let (mut line, mut column) = (0u32, 0u32);
+        for (i, &b) in bytes.iter().enumerate() {
+            let starts = ident(b) && (i == 0 || !ident(bytes[i - 1]));
+            let ends = !ident(b) && i > 0 && ident(bytes[i - 1]);
+            if starts || ends {
+                at.push(Position { line, column });
+            }
+            if b == b'\n' {
+                line += 1;
+                column = 0;
+            } else {
+                column += 1;
+            }
+        }
+        let stride = if source.len() > 4 << 10 {
+            (at.len() / 150).max(1)
+        } else {
+            1
+        };
+        let name = &lang.name().0;
+        for &p in at.iter().step_by(stride) {
+            let one = ParsedFile::parse_at(
+                lang,
+                text.clone(),
+                &SystemClock,
+                deadline(),
+                &AtomicBool::new(false),
+                p,
+            )
+            .expect("parsed");
+            let (got, want) = (one.site_at(p), full.site_at(p));
+            if got != want {
+                let line = source.lines().nth(p.line as usize).unwrap_or("");
+                mismatches.push(format!(
+                    "{name} {}:{} in `{}`\n  parse_at: {got:?}\n  parse:    {want:?}",
+                    p.line,
+                    p.column,
+                    line.trim()
+                ));
+            }
+            if one.defs_with_local().ne(full.defs_with_local()) {
+                def_mismatches.push(format!("{name} {p:?}: the definitions differ"));
+            }
+            checked += 1;
+        }
+    }
+    let site_mismatches = mismatches.len();
+    mismatches.extend(def_mismatches);
+    let mut by_lang: Vec<(&str, usize)> = Vec::new();
+    for m in &mismatches {
+        let lang = m.split(' ').next().unwrap_or("");
+        match by_lang.iter_mut().find(|(l, _)| *l == lang) {
+            Some((_, n)) => *n += 1,
+            None => by_lang.push((lang, 1)),
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatches over {checked} positions ({site_mismatches} of `site_at`) {by_lang:?}; the first:\n{}",
+        mismatches.len(),
+        mismatches
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    assert!(checked > 3000, "{checked} positions");
+}

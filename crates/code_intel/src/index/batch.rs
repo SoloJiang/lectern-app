@@ -95,6 +95,28 @@ enum Mode {
     Batch,
 }
 
+/// An extraction a query made of a file not stored yet (a search hit, an
+/// import target), to be written like tier 2's (「输入代数与派生状态」).
+pub(crate) struct Scanned {
+    pub path: lectern_services::project::RelPath,
+    /// The OID of the bytes extracted.
+    pub oid: BlobId,
+    /// The language as the query's (current) table had it.
+    pub lang: Lang,
+    pub extraction: Extraction,
+}
+
+impl Clone for Scanned {
+    fn clone(&self) -> Scanned {
+        Scanned {
+            path: self.path.clone(),
+            oid: self.oid,
+            lang: self.lang.clone(),
+            extraction: self.extraction.clone(),
+        }
+    }
+}
+
 /// One extraction ready to be written.
 struct Done {
     item: Item,
@@ -137,8 +159,12 @@ impl Inner {
     /// runnable tier 3–5 work or the pool is full (`Inner::live`, checked
     /// by the tests' harness).
     pub(crate) fn kick_batch(self: &Arc<Self>) {
-        self.fill_pool();
+        // `kicked` first: a task going idle after this sees it and steps
+        // again; one that went idle before has left room in the pool, which
+        // `fill_pool` fills. Set after, a full pool's last task could go
+        // idle in between, leave, and the kick would wait for the next one.
         lock(&self.batch).kicked = true;
+        self.fill_pool();
     }
 
     /// Starts batch tasks up to `batch_tasks`.
@@ -577,12 +603,14 @@ impl Inner {
         }
         let mut found = Vec::new();
         let mut hits = Vec::new();
+        let mut statuses = Vec::new();
         for (version, group) in &groups {
             let oids: Vec<BlobId> = group.iter().map(|i| i.oid).collect();
             bump(&self.stats.exists_checks, oids.len().div_ceil(EXISTS_BATCH));
             let hit = project.store.exists(version, &oids).unwrap_or_default();
             for f in &hit {
                 hits.push((f.oid, version.lang.clone()));
+                statuses.push(f.status);
             }
             found.extend(hit);
         }
@@ -592,7 +620,7 @@ impl Inner {
             return;
         }
         st.batch.touches.push(eviction, &found);
-        for (oid, lang) in &hits {
+        for ((oid, lang), status) in hits.iter().zip(&statuses) {
             // A hit stamps hints only for the version the map and the current
             // language table both have, and with the map's own stamp: a hit
             // of an older grammar never makes a newer map's path look stored.
@@ -601,9 +629,7 @@ impl Inner {
             {
                 continue;
             }
-            for eff in st.map.paths(oid, &lang.0) {
-                st.map.hints.set(&eff.slot, oid, stamp);
-            }
+            st.hint_paths(oid, &lang.0, stamp, *status);
         }
         for (_, group) in groups {
             for item in group {
@@ -849,11 +875,15 @@ impl Inner {
     /// with the current grammar; then sets the hints of every path with that
     /// content.
     ///
-    /// A key stored meanwhile with a status that satisfies the item's tier
-    /// (`satisfies`) is not written again, so a batch commit only adds
-    /// units: an eviction during it is the quota's (`Batch::full`). Only a
-    /// tier 1 commit replaces a unit (a `TimedOut` or `TooLarge` one), which
-    /// the cache counts as an eviction; it never sets `full`.
+    /// A key already stored is written again only when the extraction
+    /// outranks the stored unit (`outranks`: `Done` over `TimedOut` or
+    /// `TooLarge`), whichever tier writes; an unfinished extraction never
+    /// replaces anything. The check runs under the project's commit lock,
+    /// which every store write takes, so a unit written by another commit
+    /// between the extraction and this one is seen. A replace is counted
+    /// by the cache as an eviction and is not taken as the quota's: the
+    /// transaction's own bump is subtracted (`Project::replaced`), so it
+    /// does not set `Batch::full`.
     ///
     /// True when every item is now stored (written, or found stored).
     fn commit(&self, project: &Arc<Project>, ctx: &Ctx, done: Vec<Done>, batch: bool) -> bool {
@@ -868,7 +898,6 @@ impl Inner {
                     .get(&d.item.lang.name().0)
                     .is_some_and(|l| Version::of(l) == Version::of(&d.item.lang))
         };
-        // Keys stored since the existence check: one query per version.
         // The touches keep the store's own eviction generation, the hints
         // the one without our replaces.
         let (before_raw, before) = (project.store.evictions(), project.evictions());
@@ -880,32 +909,37 @@ impl Inner {
                 None => groups.push((version, vec![d.key])),
             }
         }
-        let mut found: Vec<(Version, Found)> = Vec::new();
-        for (version, keys) in &groups {
-            bump(&self.stats.exists_checks, 1);
-            for f in project.store.exists(version, keys).unwrap_or_default() {
-                found.push((version.clone(), f));
-            }
-        }
         let mut stored = Vec::new();
         let mut written = Vec::new();
         let mut hits = Vec::new();
         let (eviction, committed, after) = {
             let _turn = lock(&project.commits);
+            // Keys stored since the extraction: one query per version,
+            // under the lock every store write takes, so no commit lands
+            // between this check and the write.
+            let mut found: Vec<(Version, Found)> = Vec::new();
+            for (version, keys) in &groups {
+                bump(&self.stats.exists_checks, 1);
+                for f in project.store.exists(version, keys).unwrap_or_default() {
+                    found.push((version.clone(), f));
+                }
+            }
             let eviction = project.store.evictions();
             let mut write = project.store.write();
             let mut replaces = false;
             for d in done.iter().filter(|d| live(d)) {
                 let version = Version::of(&d.item.lang);
                 let stored_as = found.iter().find(|(v, f)| *v == version && f.oid == d.key);
-                if let Some((_, f)) = stored_as.filter(|(_, f)| satisfies(d.item.tier, f.status)) {
+                if let Some((_, f)) =
+                    stored_as.filter(|(_, f)| !outranks(d.extraction.status, f.status))
+                {
                     hits.push(*f);
-                    stored.push((d.key, version, d.item.tier));
+                    stored.push((d.key, version, d.item.tier, f.status));
                     continue;
                 }
                 if write.add(d.key, &version, &d.extraction) {
                     replaces |= stored_as.is_some();
-                    written.push((d.key, version, d.item.tier));
+                    written.push((d.key, version, d.item.tier, d.extraction.status));
                 }
             }
             if replaces {
@@ -959,23 +993,82 @@ impl Inner {
             // eviction they caused.
             let sets = [(stored, st.stamp(before)), (written, st.stamp(after))];
             for (units, stamp) in sets {
-                for (key, version, tier) in units {
+                for (key, version, tier, status) in units {
                     if !current(&table, &st.map, &version) {
                         continue;
                     }
                     if tier == Tier::Other {
                         st.batch.others.confirmed.insert(&key, &version.lang);
                     }
-                    for eff in st.map.paths(&key, &version.lang.0) {
-                        st.map.hints.set(&eff.slot, &key, stamp);
-                    }
+                    st.hint_paths(&key, &version.lang.0, stamp, status);
                 }
             }
         }
         for d in &done {
             st.finish(ctx.session, &d.item, &d.flag);
         }
+        drop(st);
+        if committed && let Some(me) = self.arc() {
+            // A written batch makes a held name table behind.
+            me.names_changed(project);
+        }
         settled
+    }
+
+    /// Writes a query's extractions in a `Background` task, as tier 2 would:
+    /// a key stored meanwhile is not written again, the hints of every path
+    /// with that content are set once committed. Nothing for an ended
+    /// session.
+    pub(crate) fn store_scanned(
+        &self,
+        project: &Arc<Project>,
+        session: u64,
+        scanned: Vec<Scanned>,
+    ) {
+        if scanned.is_empty() {
+            return;
+        }
+        let Some(me) = self.arc() else {
+            return;
+        };
+        let p = project.clone();
+        self.host
+            .spawn_busy("store", Priority::Background, move || {
+                me.commit_scanned(&p, session, scanned);
+            });
+    }
+
+    /// [`store_scanned`](Self::store_scanned)'s write, on this thread: one
+    /// transaction, then the hints, as a batch commits. Blocking (SQLite).
+    pub(crate) fn commit_scanned(
+        &self,
+        project: &Arc<Project>,
+        session: u64,
+        scanned: Vec<Scanned>,
+    ) {
+        let ctx = {
+            let st = lock(&project.state);
+            if !st.live(session) {
+                return;
+            }
+            ctx(&st)
+        };
+        let done = scanned
+            .into_iter()
+            .map(|s| Done {
+                item: Item {
+                    path: s.path,
+                    oid: s.oid,
+                    lang: s.lang,
+                    source: Source::Worktree,
+                    tier: Tier::Review,
+                },
+                key: s.oid,
+                extraction: s.extraction,
+                flag: Arc::new(AtomicBool::new(false)),
+            })
+            .collect();
+        self.commit(project, &ctx, done, false);
     }
 
     /// Queues the focus's files that are not indexed for tiers 1 and 2, and
@@ -1158,7 +1251,8 @@ impl Inner {
                 .store
                 .exists(&version, &[item.oid])
                 .unwrap_or_default();
-            if found.iter().any(|f| satisfies(item.tier, f.status)) {
+            if let Some(hit) = found.iter().find(|f| satisfies(item.tier, f.status)) {
+                let status = hit.status;
                 let table = lock(&self.langs).table.clone();
                 let mut st = lock(&project.state);
                 if st.finish(session, &item, &flag) {
@@ -1168,9 +1262,7 @@ impl Inner {
                     st.batch.touches.push(before_raw, &found);
                     if current(&table, &st.map, &version) {
                         let stamp = st.stamp(before);
-                        for eff in st.map.paths(&item.oid, &item.lang.name().0) {
-                            st.map.hints.set(&eff.slot, &item.oid, stamp);
-                        }
+                        st.hint_paths(&item.oid, &item.lang.name().0, stamp, status);
                     }
                 }
                 continue;
@@ -1201,11 +1293,27 @@ impl Inner {
     }
 }
 
-/// Whether a stored unit of status `status` satisfies `tier`: an opened
-/// file (tier 1) needs `Done`, or `Binary`, which no limit changes; the
-/// other tiers take any stored status.
+/// Whether a stored unit of status `status` satisfies `tier`, so that the
+/// tier does not extract the file again: an opened file (tier 1) needs
+/// `Done`, or `Binary`, which no limit changes; the other tiers take any
+/// stored status (their limits would give the same). It never decides
+/// against a better result already made ([`outranks`]).
 fn satisfies(tier: Tier, status: ExtractStatus) -> bool {
-    tier != Tier::Current || !matches!(status, ExtractStatus::TimedOut | ExtractStatus::TooLarge)
+    tier != Tier::Current || !unfinished(status)
+}
+
+/// A unit without the file's definitions (`State::unfinished`).
+fn unfinished(status: ExtractStatus) -> bool {
+    matches!(status, ExtractStatus::TimedOut | ExtractStatus::TooLarge)
+}
+
+/// Whether an extraction with `new` replaces a stored unit with `stored`,
+/// whatever the tier that made it: a `Done` result (tier 1's interactive
+/// limits, a query's search) over a `TooLarge` or `TimedOut` unit. The only
+/// replace `commit` makes: never the other way round, nor an unfinished
+/// result over an unfinished unit.
+fn outranks(new: ExtractStatus, stored: ExtractStatus) -> bool {
+    new == ExtractStatus::Done && unfinished(stored)
 }
 
 /// Whether `version` is the version of its language both in the current

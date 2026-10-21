@@ -5,9 +5,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lectern_kernel::testing::TestKernel;
 use lectern_kernel::{
-    Activation, Active, Context, Kernel, Manifest, Plugin, PluginError, PluginHandle,
+    Activation, Active, Context, Kernel, Manifest, Plugin, PluginError, PluginHandle, PluginSet,
 };
 use lectern_services::project::{
     FileList, OpenError, OpenRequest, Package, PackageMatch, ProjectEvent, ProjectKey,
@@ -167,11 +166,43 @@ impl Projects for FakeProjects {
 
 type PowerFn = Arc<dyn Fn(bool) + Send + Sync>;
 
+/// Live subscribers by ID; a subscription's guard removes its own.
+pub(crate) type Subscribers<F> = Arc<SubscriberList<F>>;
+
+/// The last ID given and the live subscribers.
+pub(crate) type SubscriberList<F> = Mutex<(u64, Vec<(u64, F)>)>;
+
+/// Removes a subscriber when dropped.
+pub(crate) struct Unsubscribe<F: Send + 'static> {
+    pub(crate) list: std::sync::Weak<SubscriberList<F>>,
+    pub(crate) id: u64,
+}
+
+impl<F: Send + 'static> Drop for Unsubscribe<F> {
+    fn drop(&mut self) {
+        if let Some(list) = self.list.upgrade() {
+            lock(&list).1.retain(|(id, _)| *id != self.id);
+        }
+    }
+}
+
+/// Adds a subscriber; the returned guard removes it.
+pub(crate) fn subscribe<F: Send + Sync + 'static>(list: &Subscribers<F>, f: F) -> Box<dyn Send> {
+    let mut l = lock(list);
+    l.0 += 1;
+    let id = l.0;
+    l.1.push((id, f));
+    Box::new(Unsubscribe {
+        list: Arc::downgrade(list),
+        id,
+    })
+}
+
 /// A power source the test switches.
 #[derive(Default)]
 pub struct FakePower {
     battery: AtomicBool,
-    subscribers: Mutex<Vec<PowerFn>>,
+    subscribers: Subscribers<PowerFn>,
 }
 
 impl FakePower {
@@ -184,14 +215,19 @@ impl FakePower {
     /// Switches the source and notifies the subscribers.
     pub fn set(&self, on_battery: bool) {
         self.battery.store(on_battery, Ordering::Release);
-        let subscribers = lock(&self.subscribers).clone();
+        let subscribers: Vec<PowerFn> = lock(&self.subscribers)
+            .1
+            .iter()
+            .map(|(_, f)| f.clone())
+            .collect();
         for f in subscribers {
             f(on_battery);
         }
     }
 
+    /// Subscriptions not dropped yet.
     pub fn subscribers(&self) -> usize {
-        lock(&self.subscribers).len()
+        lock(&self.subscribers).1.len()
     }
 }
 
@@ -201,21 +237,41 @@ impl PowerSource for FakePower {
     }
 
     fn subscribe(&self, f: Box<dyn Fn(bool) + Send + Sync>) -> Box<dyn Send> {
-        lock(&self.subscribers).push(Arc::from(f));
-        Box::new(())
+        subscribe(&self.subscribers, Arc::from(f))
     }
 }
 
 /// A kernel running one plugin that does nothing but hand out its
-/// `PluginHandle`: the activation the indexer's tasks belong to.
+/// `PluginHandle`: the activation the indexer's tasks belong to. The
+/// kernel keeps no log of the events emitted (a `TestKernel` would, and
+/// hold every name table it saw).
 pub struct TestHost {
-    pub kernel: TestKernel,
+    kernel: Arc<Kernel>,
     pub handle: PluginHandle,
 }
 
+/// The host plugin's ID.
+const HOST: &str = "code-intel-test-host";
+
 impl TestHost {
     pub fn kernel(&self) -> Arc<Kernel> {
-        self.kernel.inner().expect("a running kernel")
+        self.kernel.clone()
+    }
+
+    /// Deactivates the host plugin: its token is dead from then on.
+    pub fn deactivate(&self) {
+        self.kernel.set_enabled(HOST, false);
+        self.kernel.barrier();
+    }
+}
+
+impl Drop for TestHost {
+    fn drop(&mut self) {
+        let (done, wait) = std::sync::mpsc::channel();
+        self.kernel.shutdown(move || {
+            let _ = done.send(());
+        });
+        let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
     }
 }
 
@@ -246,8 +302,8 @@ impl Plugin for HostPlugin {
 /// Starts the host kernel and activates its plugin.
 pub fn host() -> TestHost {
     let slot = Arc::new(Mutex::new(None));
-    let kernel = TestKernel::new(HostPlugin(slot.clone()));
-    kernel.activate().expect("the host plugin activates");
+    let kernel = Kernel::start(PluginSet::new().with(HOST, HostPlugin(slot.clone())));
+    kernel.barrier();
     let handle = lock(&slot).clone().expect("started got a handle");
     TestHost { kernel, handle }
 }

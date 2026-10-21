@@ -25,13 +25,18 @@ fn budgets_ids_are_crate_slash_name() {
             "{}: <crate or category>/<name>[/<scenario>]",
             budget.id
         );
-        for segment in segments {
+        for (i, segment) in segments.iter().enumerate() {
+            // `plugin/<id>/…`: plugin IDs are kebab-case (`code-intel`).
+            let plugin_id = i == 1 && segments[0] == "plugin";
             assert!(
                 !segment.is_empty()
-                    && segment
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                    || segment == "*",
+                    && segment.chars().all(|c| {
+                        c.is_ascii_lowercase()
+                            || c.is_ascii_digit()
+                            || c == '_'
+                            || (plugin_id && c == '-')
+                    })
+                    || *segment == "*",
                 "{}: segment {segment:?}",
                 budget.id
             );
@@ -201,6 +206,7 @@ fn budgets_belong_to_the_documented_targets() {
             || budget.id == "cache/memory"
             || budget.id == "fs_watch/resident"
             || budget.id == "fs_watch/resident_100k"
+            || budget.id.starts_with("plugin/code-intel/resident_")
         {
             Target::Memory
         } else if ["app/", "plugin/", "lsp/", "baseline/"]

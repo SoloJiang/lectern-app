@@ -92,7 +92,7 @@ pub struct Extraction {
 }
 
 impl Extraction {
-    fn empty(status: ExtractStatus) -> Extraction {
+    pub(crate) fn empty(status: ExtractStatus) -> Extraction {
         Extraction {
             status,
             defs: Vec::new(),

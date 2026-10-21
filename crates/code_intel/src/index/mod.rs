@@ -22,8 +22,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use lectern_cache::Cache;
 use lectern_executor::{Executor, Priority};
 use lectern_fs_watch::Watcher;
-use lectern_kernel::PluginHandle;
-use lectern_services::code_intel::{Coverage, Focus, TierState};
+use lectern_kernel::{ActivationToken, PluginHandle};
+use lectern_services::code_intel::{
+    CodeIntel, Coverage, Focus, Names, NavigationProvider, ProviderRegistration, Query, QueryId,
+    QueryResults, TierState,
+};
 use lectern_services::project::{ProjectEvent, ProjectKey, Projects, WorktreeKey};
 
 use crate::LangName;
@@ -35,6 +38,7 @@ use crate::power::PowerSource;
 use crate::store::Store;
 use crate::watchdog::Watchdog;
 
+pub(crate) use batch::Scanned;
 pub(crate) use host::Host;
 use state::{Project, State};
 
@@ -83,6 +87,8 @@ pub struct Stats {
     /// Passes over the reconcile's steps (each reconcile makes at least one).
     pub reconcile_passes: AtomicUsize,
     pub grammar_rounds: AtomicUsize,
+    /// Jumps' steps 1–3 run (a prefetch reused runs none).
+    pub prepares: AtomicUsize,
 }
 
 /// A snapshot of [`Stats`].
@@ -97,6 +103,7 @@ pub struct StatCounts {
     pub reconciles: usize,
     pub reconcile_passes: usize,
     pub grammar_rounds: usize,
+    pub prepares: usize,
 }
 
 impl Stats {
@@ -112,6 +119,7 @@ impl Stats {
             reconciles: get(&self.reconciles),
             reconcile_passes: get(&self.reconcile_passes),
             grammar_rounds: get(&self.grammar_rounds),
+            prepares: get(&self.prepares),
         }
     }
 }
@@ -151,8 +159,12 @@ pub(crate) struct BatchRun {
     pub peak: usize,
 }
 
+/// [`Inner::after_base`] (tests).
+#[cfg(test)]
+pub(crate) type AfterBase = Box<dyn FnOnce(&Inner) + Send>;
+
 pub(crate) struct Inner {
-    me: Weak<Inner>,
+    pub(crate) me: Weak<Inner>,
     pub host: Host,
     pub cache: Cache,
     pub watcher: Watcher,
@@ -177,9 +189,48 @@ pub(crate) struct Inner {
     pub(crate) large: batch::LargeSlot,
     pub stats: Stats,
     next_session: AtomicUsize,
+    /// The queries of this activation (`crate::query`).
+    pub(crate) queries: Mutex<crate::query::Queries>,
+    /// The parsed current texts kept for jumps (ADR 0037).
+    pub(crate) parse_cache: Mutex<crate::query::ParseCache>,
+    /// When the due entry that expires kept parses fires, if scheduled.
+    pub(crate) parse_expiry: Mutex<Option<std::time::Instant>>,
+    /// Held around replacing a query's results and emitting its event, so
+    /// one query's events go out in generation order.
+    pub(crate) publishing: Mutex<()>,
+    /// The resolution extension point's implementations (none in #17: the
+    /// empty rules answer for every language).
+    pub(crate) resolvers: Mutex<Vec<Arc<dyn crate::resolve::Resolver>>>,
+    /// Registered semantic providers (#26).
+    pub(crate) providers: Mutex<crate::semantic::Providers>,
+    pub(crate) replies: Mutex<crate::semantic::Replies>,
+    pub(crate) next_request: std::sync::atomic::AtomicU64,
+    /// A task compiling `ParsedFile`'s queries is submitted or running
+    /// (`warm_site_queries`).
+    pub(crate) warming: std::sync::atomic::AtomicBool,
     /// The files of each extraction batch of tiers 3–5, in order (tests).
     #[cfg(test)]
     pub batch_log: Mutex<Vec<usize>>,
+    /// Run once by the next query that reaches its step (tests: the
+    /// interleaving matrix injects a background change there).
+    #[cfg(test)]
+    pub step_hook: Mutex<Option<crate::query::StepHook>>,
+    /// Run once by the next reconcile pass that rebuilt the base map, before
+    /// the overlay is read (tests: a query snapshot in that window).
+    #[cfg(test)]
+    pub after_base: Mutex<Option<AfterBase>>,
+    /// Tests: no text is warmed (`Inner::warm_parse`), so no kept parse's
+    /// due entry is scheduled (tests that count the watchdog's entries).
+    #[cfg(test)]
+    pub no_warm: std::sync::atomic::AtomicBool,
+    /// Tests: find references parses this path as if the parse took this
+    /// long: past its deadline, it times out.
+    #[cfg(test)]
+    pub parse_takes: Mutex<Option<(String, std::time::Duration)>>,
+    /// Tests: the full-mode statements the accountings' walks were allowed
+    /// to make outside the scope (`Stops::due` asked).
+    #[cfg(test)]
+    pub verify_checks: std::sync::atomic::AtomicUsize,
     /// Another registration of `code_intel.tags` for new projects (tests).
     #[cfg(test)]
     pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
@@ -236,8 +287,27 @@ impl Indexer {
             large: batch::LargeSlot::default(),
             stats: Stats::default(),
             next_session: AtomicUsize::new(1),
+            queries: Mutex::new(crate::query::Queries::default()),
+            parse_cache: Mutex::new(crate::query::ParseCache::default()),
+            parse_expiry: Mutex::new(None),
+            publishing: Mutex::new(()),
+            resolvers: Mutex::new(Vec::new()),
+            providers: Mutex::new(crate::semantic::Providers::default()),
+            replies: Mutex::new(crate::semantic::Replies::default()),
+            next_request: std::sync::atomic::AtomicU64::new(0),
+            warming: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             batch_log: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            step_hook: Mutex::new(None),
+            #[cfg(test)]
+            after_base: Mutex::new(None),
+            #[cfg(test)]
+            no_warm: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            parse_takes: Mutex::new(None),
+            #[cfg(test)]
+            verify_checks: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             tables: Mutex::new(None),
         });
@@ -340,6 +410,63 @@ impl Indexer {
         self.inner.stats.counts()
     }
 
+    /// Marks the project's namespace as full, as the batch layer does when
+    /// its own write evicts units (`Batch::full`): the hints' stamp freezes
+    /// at the walks' generation (tests and the full-mode profile).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_namespace_full(&self, project: &ProjectKey) {
+        let Some(p) = self.inner.project(project) else {
+            return;
+        };
+        let eviction = p.evictions();
+        let mut st = lock(&p.state);
+        let walked = st.walk_eviction(eviction);
+        st.batch.full = Some(walked);
+    }
+
+    /// Forgets the project's cached walks (`Project::walks`), so the next
+    /// query walks every file, as the first one after a change does (the
+    /// profiles of the first jump).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_walks(&self, project: &ProjectKey) {
+        if let Some(p) = self.inner.project(project) {
+            lock(&p.walks).clear();
+        }
+    }
+
+    /// Another handle to the same activation (benchmarks: an event listener
+    /// reads the results it is told about).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn handle(&self) -> Indexer {
+        Indexer {
+            inner: self.inner.clone(),
+        }
+    }
+
+    /// The kept parses of current texts (ADR 0037): how many, and their
+    /// estimated bytes (tests and benchmarks).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn kept_parses(&self) -> (usize, usize) {
+        let cache = lock(&self.inner.parse_cache);
+        (cache.len(), cache.bytes())
+    }
+
+    /// Forgets every kept parse, so the next jump parses its text, as the
+    /// first one in a text does (benchmarks of the cold path).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clear_kept_parses(&self) {
+        let dropped = lock(&self.inner.parse_cache).without_all();
+        drop(dropped);
+    }
+
+    /// The number of the project's cached walks (tests).
+    #[cfg(test)]
+    pub(crate) fn walks(&self, project: &ProjectKey) -> usize {
+        self.inner
+            .project(project)
+            .map_or(0, |p| lock(&p.walks).len())
+    }
+
     /// Replaces the extraction the tiers call (tests count, block or steer
     /// it).
     #[cfg(any(test, feature = "test-support"))]
@@ -394,13 +521,56 @@ impl Indexer {
         })
     }
 
+    /// `CodeIntel::query`: returns at once; the results come in batches.
+    pub fn query(&self, query: Query) -> QueryId {
+        self.inner.query(query)
+    }
+
+    /// `CodeIntel::results`: one lock, one `Arc` clone.
+    pub fn results(&self, id: QueryId) -> Option<Arc<QueryResults>> {
+        self.inner.results(id)
+    }
+
+    /// `CodeIntel::close`.
+    pub fn close(&self, id: QueryId) {
+        self.inner.close(id);
+    }
+
+    /// `CodeIntel::prefetch`.
+    pub fn prefetch(&self, query: Query) {
+        self.inner.prefetch(query);
+    }
+
+    /// `CodeIntel::names`.
+    pub fn names(&self, project: &ProjectKey) -> Names {
+        self.inner.names(project)
+    }
+
+    /// `CodeIntel::register_provider`.
+    pub fn register_provider(
+        &self,
+        provider: Arc<dyn NavigationProvider>,
+        token: ActivationToken,
+    ) -> ProviderRegistration {
+        self.inner.register_provider(provider, token)
+    }
+
+    /// Installs a resolver (tests of the extension point).
+    #[cfg(test)]
+    pub(crate) fn set_resolver(&self, resolver: Arc<dyn crate::resolve::Resolver>) {
+        lock(&self.inner.resolvers).push(resolver);
+    }
+
     /// Ends every project's session: tasks stop, extractions in flight are
-    /// cancelled, subscriptions to fs_watch dropped.
+    /// cancelled, subscriptions to fs_watch dropped, every query closed (its
+    /// unanswered semantic requests cancelled).
     pub fn close_all(&self) {
         let projects = std::mem::take(&mut *lock(&self.inner.open));
         for p in projects {
             lock(&p.state).end();
         }
+        let ended = self.inner.close_queries(None);
+        self.inner.finish_ended(ended);
     }
 }
 
@@ -410,8 +580,46 @@ impl Drop for Indexer {
     }
 }
 
+impl CodeIntel for Indexer {
+    fn set_focus(&self, project: &ProjectKey, worktree: Option<&WorktreeKey>, focus: Focus) {
+        Indexer::set_focus(self, project, worktree, focus);
+    }
+
+    fn query(&self, query: Query) -> QueryId {
+        Indexer::query(self, query)
+    }
+
+    fn results(&self, id: QueryId) -> Option<Arc<QueryResults>> {
+        Indexer::results(self, id)
+    }
+
+    fn close(&self, id: QueryId) {
+        Indexer::close(self, id);
+    }
+
+    fn prefetch(&self, query: Query) {
+        Indexer::prefetch(self, query);
+    }
+
+    fn names(&self, project: &ProjectKey) -> Names {
+        Indexer::names(self, project)
+    }
+
+    fn register_provider(
+        &self,
+        provider: Arc<dyn NavigationProvider>,
+        token: ActivationToken,
+    ) -> ProviderRegistration {
+        Indexer::register_provider(self, provider, token)
+    }
+
+    fn coverage(&self, project: &ProjectKey) -> Option<Coverage> {
+        Indexer::coverage(self, project)
+    }
+}
+
 impl Inner {
-    fn arc(&self) -> Option<Arc<Inner>> {
+    pub(crate) fn arc(&self) -> Option<Arc<Inner>> {
         self.me.upgrade()
     }
 
@@ -495,6 +703,8 @@ impl Inner {
                         replacing: std::sync::atomic::AtomicU64::new(0),
                         steady: std::sync::atomic::AtomicU64::new(0),
                         state: Mutex::new(State::new(self.new_session(), &table, grammar)),
+                        names: Mutex::new(crate::names::NameState::default()),
+                        walks: Mutex::new(Vec::new()),
                     });
                     open.push(p.clone());
                     (p, true)
@@ -521,6 +731,15 @@ impl Inner {
             ProjectEvent::Opened { result: Err(_), .. } => {}
             ProjectEvent::Changed { project, parts, .. } => {
                 let p = self.project(project).unwrap_or_else(|| self.touch(project));
+                // A new current worktree ends the old session here, not in
+                // the reconcile: from now on no query reads the new
+                // worktree's files against the old map, and nothing of the
+                // old session is published.
+                if parts.active
+                    && let Some(snapshot) = self.projects.snapshot(project)
+                {
+                    self.switch_session(&p, &snapshot);
+                }
                 {
                     let mut st = lock(&p.state);
                     // The worktree list or a HEAD changed: tier 5 is not
@@ -535,8 +754,8 @@ impl Inner {
                         st.check_index = true;
                     }
                     // A failed watch (or root) is tried again on the next
-                    // event.
-                    if st.watches.is_none() {
+                    // event; a folder project has no watch.
+                    if st.watches.is_none() && matches!(project, ProjectKey::Git { .. }) {
                         st.root = None;
                         st.root_tried = false;
                     }
@@ -551,8 +770,20 @@ impl Inner {
                     let at = open.iter().position(|p| &p.key == project);
                     at.map(|i| open.remove(i))
                 };
-                if let Some(p) = removed {
-                    lock(&p.state).end();
+                let ended = {
+                    // Ordered against publication: nothing of the session
+                    // is published after this.
+                    let _order = lock(&self.publishing);
+                    if let Some(p) = &removed {
+                        lock(&p.state).end();
+                    }
+                    self.close_queries(Some(project))
+                };
+                // Their providers' `cancel`, outside the lock.
+                self.finish_ended(ended);
+                // Its current text is no longer current.
+                if let Some(me) = self.arc() {
+                    me.focus_parse(project, None);
                 }
                 {
                     let mut batch = lock(&self.batch_project);
@@ -572,6 +803,16 @@ impl Inner {
         let Some(project) = self.project(key) else {
             return;
         };
+        // A text that becomes the current one: its parse is kept for the
+        // jumps in it while it is current (ADR 0037), made in the background.
+        let warm = match &focus {
+            Focus::Current(Some(text)) => Some(text.clone()),
+            _ => None,
+        };
+        let current = match &focus {
+            Focus::Current(text) => Some(text.as_ref().map(|t| t.oid)),
+            _ => None,
+        };
         {
             let mut st = lock(&project.state);
             let wt = worktree.cloned();
@@ -588,6 +829,12 @@ impl Inner {
         if let Some(me) = self.arc() {
             me.enqueue_focus(&project);
             me.kick_batch();
+            if let Some(oid) = current {
+                me.focus_parse(key, oid);
+            }
+            if let Some(text) = warm {
+                me.warm_parse(key, &text);
+            }
         }
     }
 
@@ -604,7 +851,7 @@ impl Inner {
         }
     }
 
-    fn demand(&self, key: &ProjectKey) {
+    pub(crate) fn demand(&self, key: &ProjectKey) {
         if let Some(p) = self.project(key) {
             lock(&p.state).demand = true;
         }
@@ -706,6 +953,11 @@ impl Inner {
                 open.clone()
             };
             if !changed.is_empty() {
+                // Kept parses of a changed language hold its old grammar's
+                // lease: dropped now (here, a background task), not when
+                // they expire.
+                let dropped = lock(&self.parse_cache).without(&changed);
+                drop(dropped);
                 for p in &projects {
                     let st = lock(&p.state);
                     // In-flight extractions of a changed language give up;
@@ -737,17 +989,6 @@ impl Inner {
 
     fn coverage(&self, key: &ProjectKey) -> Option<Coverage> {
         let project = self.project(key)?;
-        if matches!(key, ProjectKey::Folder { .. }) {
-            // Folder projects are not indexed yet (step 3): every tier is
-            // `Pending`, never `Done`, so callers answer from a search.
-            return Some(Coverage {
-                generation: lock(&project.state).map.provenance.generation(),
-                focus: TierState::Pending,
-                subproject: TierState::Pending,
-                worktree: TierState::Pending,
-                other_worktrees: TierState::Pending,
-            });
-        }
         let eviction = project.evictions();
         let grammar = self.grammar();
         let st = lock(&project.state);
@@ -759,8 +1000,14 @@ impl Inner {
             TierState::Pending
         };
         // The walks are of the current map (built from the current file
-        // list and grammar) with the current scope.
-        let current = st.base_for == Some((st.gens.files, grammar))
+        // list and grammar, with no path left to read and, for a git
+        // project, its comparison current) with the current scope.
+        let git = matches!(key, ProjectKey::Git { .. });
+        let read = st.dirty.is_empty() && st.dirty_dirs.is_empty() && st.probe.is_empty();
+        let compared = !git || st.compare_for == Some(st.gens.compare_deps(grammar));
+        let current = read
+            && compared
+            && st.base_for == Some((st.gens.files, grammar))
             && st.batch.cursor.as_ref().is_some_and(|c| {
                 c.deps == st.cursor_deps(eviction) && c.scope == batch::subproject(&st)
             });

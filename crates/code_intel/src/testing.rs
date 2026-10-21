@@ -10,7 +10,10 @@ pub mod synthetic;
 
 pub use fake_git::FakeGit;
 pub use host::{FakePower, FakeProjects, TestHost, host};
-pub use rig::{Rig, route_tree_sitter_allocations};
+pub use rig::{
+    Rig, VirtualTemplate, packages, route_tree_sitter_allocations, virtual_repo,
+    virtual_repo_sharing, virtual_repo_with,
+};
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -133,13 +136,15 @@ impl WatchdogTask {
 pub struct FakeGrammars {
     state: Mutex<FakeState>,
     loads: AtomicUsize,
+    subscribers: host::Subscribers<GrammarFn>,
 }
+
+type GrammarFn = Arc<dyn Fn(GrammarChange) + Send + Sync>;
 
 #[derive(Default)]
 struct FakeState {
     generation: u64,
     packs: HashMap<LangName, (Vec<String>, LoadedGrammar)>,
-    subscribers: Vec<Arc<dyn Fn(GrammarChange) + Send + Sync>>,
 }
 
 impl FakeGrammars {
@@ -179,23 +184,39 @@ impl FakeGrammars {
         self.loads.load(Ordering::Acquire)
     }
 
+    /// Subscriptions not dropped yet.
+    pub fn subscribers(&self) -> usize {
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
+            .len()
+    }
+
     fn change(
         &self,
         lang: &str,
         kind: GrammarChangeKind,
         f: impl FnOnce(&mut HashMap<LangName, (Vec<String>, LoadedGrammar)>),
     ) {
-        let (change, subscribers) = {
+        let change = {
             let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             f(&mut state.packs);
             state.generation += 1;
-            let change = GrammarChange {
+            GrammarChange {
                 generation: state.generation,
                 lang: crate::lang_name(lang),
                 kind,
-            };
-            (change, state.subscribers.clone())
+            }
         };
+        let subscribers: Vec<GrammarFn> = self
+            .subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .1
+            .iter()
+            .map(|(_, f)| f.clone())
+            .collect();
         for subscriber in subscribers {
             subscriber(change.clone());
         }
@@ -237,12 +258,7 @@ impl GrammarSource for FakeGrammars {
     }
 
     fn subscribe(&self, f: Box<dyn Fn(GrammarChange) + Send + Sync>) -> Box<dyn Send> {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .subscribers
-            .push(Arc::from(f));
-        Box::new(())
+        host::subscribe(&self.subscribers, Arc::from(f))
     }
 }
 
