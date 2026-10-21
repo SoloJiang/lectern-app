@@ -26,7 +26,7 @@
   - 结构化 diff（[#21](https://github.com/SoloJiang/lectern-app/issues/21)），扩展点见「结构化 diff 的扩展点」。
   - MR 的 diff：`forge`（[#25](https://github.com/SoloJiang/lectern-app/issues/25)）。
   - Analyze 快照的输入与审阅对象的指纹：随 [#66](https://github.com/SoloJiang/lectern-app/issues/66) 设计，见「Analyze 快照」。
-  - 实现 `services` 的改动来源接口：等 `services` 的设计文档确定，见「验收」第 4 步。
+  - 实现 `services` 的改动来源接口：接口在 [review 设计「改动来源」](review.md#改动来源lectern-services-的-changes-模块)里定义，见「验收」第 4 步。
 
 本 crate 在领域层，是普通的库 crate，不是插件：不实现 kernel 的 `Plugin`，不注册服务。`project`、`review`、`usage` 等领域 crate 直接依赖并调用它（[#47](https://github.com/SoloJiang/lectern-app/issues/47) 以后若决定把插件做成包装领域库的薄 crate，本 crate 仍是被包装的库）。
 
@@ -958,7 +958,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
    - `worktree_*`、`read_only_*`、`no_external_programs` 测试通过。
    - `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' crates/git/src --glob '!gitdir.rs' --glob '!testing.rs' --glob '!**/tests.rs'` 没有结果：工作区只经 `SafeRoot` 读取。git 目录里的管理文件（`HEAD`、`commondir`、`gitdir`、`locked`、`config`、index 末尾的校验和）都在 `gitdir.rs` 里读；`testing.rs` 和测试代码构造夹具。
    - `git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/changes_capped` 和内存基准在预算内。
-4. **改动来源接口**：`services` 的设计文档合并后，为本地仓库实现它的改动来源接口（取 diff、加载完整文件；指纹随 #66），按那份文档的验收条件测试。由哪个插件把它注册为服务按 #47 的结论处理，不在本 crate。
+4. **改动来源接口**：为本地 worktree 实现 `services::changes::ChangeSource`（`LocalChanges`：取改动集、增量刷新、两侧内容、指纹），接口、与本 crate 类型的对照表和测试见 [review 设计「改动来源」](review.md#改动来源lectern-services-的-changes-模块)（review 设计的前置条件 C，写 `Refs #15`）。`ChangeSource` 不注册为 kernel 服务：`review` 直接构造 `LocalChanges`（#47 的结论，ADR 0025）。review 设计的前置条件 B 另加 `line_diff`、`Worktree::head_at`、`Worktree::mtimes`。
    - 同一步（已完成，不依赖 `services`，单独一个 PR，见「实际验证」）：工作区比较解析的 index 只在一次 `changes` / `refresh` 调用内持有（「缓存」，[ADR 0035](../adr/0035.md)）。`compare_releases_its_index_*` 测试检查调用返回后 `Worktree` 不再持有它、下一次 `refresh(Paths)` / `refresh(Full)` 重新解析且结果不变；bench 的 `git/compare_100k/retained_bytes` 改为 `Active`（< 1 MB）；stat 缓存不持有内容的修正已经完成，`git/changes_count/per_path_bytes` 也在这一步改为 `Active`（≤ 1 KB）；`git/refresh_one`、`git/refresh_full` 仍在预算内，`git/changes_clean_100k` 已经生效时也在预算内。
 
 ## 实际验证
