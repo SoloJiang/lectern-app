@@ -4,7 +4,8 @@
 //! `project` implements [`Projects`]; consumers (`project_home`,
 //! `worktrees`, `agents`, `usage`, `review`, `code_intel`) depend only on
 //! this module. Everything here is data without behaviour, apart from the
-//! `FileList` lookups and the `BlobId` conversions.
+//! `FileList` lookups, the `BlobId` conversions and building and reading the
+//! `DirTable` (docs/design/file_reader.md「目录表」).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use lectern_kernel::{Event, Service};
 
 mod blob;
+mod dirs;
 mod files;
 mod packages;
 mod snapshot;
@@ -22,6 +24,7 @@ mod snapshot;
 mod tests;
 
 pub use blob::BlobId;
+pub use dirs::{DirId, DirTable, finder_cmp};
 pub use files::{FileKind, FileList, FileListBuilder};
 pub use packages::{Ecosystem, MAX_MANIFEST_BYTES, Manifest, ManifestError, ManifestKind, Package};
 pub use snapshot::{
@@ -139,4 +142,6 @@ pub struct ChangedParts {
     pub active: bool,
     pub files: bool,
     pub packages: bool,
+    /// The active tree's directory table (`ActiveTree::dirs`).
+    pub dirs: bool,
 }

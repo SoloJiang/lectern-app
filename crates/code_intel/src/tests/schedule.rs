@@ -511,6 +511,7 @@ fn schedule_folder_project_indexes_at_open() {
                 opened_at: "".into(),
                 files: Scan::Ready(Arc::new(files.build())),
                 packages: Scan::Ready(Arc::from(Vec::new())),
+                dirs: Scan::Pending,
             }),
         });
         h.indexer.project_event(&event);
@@ -961,6 +962,7 @@ fn open_folder(
             opened_at: "".into(),
             files: Scan::Ready(Arc::new(files.build())),
             packages: Scan::Ready(Arc::from(Vec::new())),
+            dirs: Scan::Pending,
         }),
     });
     h.indexer.project_event(&event);

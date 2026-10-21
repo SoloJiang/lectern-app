@@ -7,10 +7,14 @@
 //! - [`code_intel`]: code navigation (`dyn CodeIntel`) and semantic
 //!   navigation providers, designed in `docs/design/code_intel.md`.
 //! - [`project`]: the project model (`dyn Projects`), designed in
-//!   `docs/design/project.md`.
+//!   `docs/design/project.md`; its directory table (`DirTable`) in
+//!   `docs/design/file_reader.md`.
+//! - [`reader`]: full file reading (`dyn Reader`), designed in
+//!   `docs/design/file_reader.md`.
 //! - [`session`]: agent session sources (`dyn SessionSource`), designed in
 //!   `docs/design/agents.md`.
 
 pub mod code_intel;
 pub mod project;
+pub mod reader;
 pub mod session;

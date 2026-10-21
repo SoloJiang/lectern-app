@@ -51,6 +51,7 @@ impl FakeProjects {
                     active: true,
                     files: true,
                     packages: true,
+                    dirs: true,
                 },
             }
         }

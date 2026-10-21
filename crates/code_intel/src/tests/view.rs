@@ -534,6 +534,7 @@ fn view_folder_project_opening_has_no_snapshot_before_its_overlay() {
             opened_at: "".into(),
             files: Scan::Ready(Arc::new(files.build())),
             packages: Scan::Ready(Arc::from(Vec::new())),
+            dirs: Scan::Pending,
         }),
     });
     h.indexer.project_event(&event);
@@ -650,6 +651,7 @@ fn view_queries_end_when_no_snapshot_can_be_published() {
             opened_at: "".into(),
             files: Scan::Unavailable(ScanError::RootMissing),
             packages: Scan::Ready(Arc::from(Vec::new())),
+            dirs: Scan::Pending,
         }),
     });
     h.indexer.project_event(&event);
