@@ -18,13 +18,67 @@ pub struct TextRef {
     pub origin: TextOrigin,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum TextOrigin {
     /// 工作区里的当前内容。实现方经 `SafeRoot` 读，内容与 `oid` 对不上时查询返回
     /// `Stale`。
     Worktree,
     /// 对象库里的 blob，如 Diff 的旧一侧。实现方按 `oid` 从对象库读。
     Object,
+    /// 依赖根里的文件（ADR 0033）：被忽略、不在 index 里，`oid` 是原始字节按 git
+    /// blob 格式的哈希（没有规范化转换）。实现方只经 `DepRoot` 读，路径不在本项目
+    /// 已发现的依赖根里、扩展名不在允许的列表里时查询返回 `Stale`。
+    Dependency(DepOrigin),
+}
+
+/// 一个依赖文件所在的包（ADR 0033）。视图在候选的次要文字里显示 `package` 和
+/// `version`。
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct DepOrigin {
+    pub ecosystem: Ecosystem,
+    /// 包名，如 "react"、"@types/node"。
+    pub package: Arc<str>,
+    /// 包清单里的版本；清单没有写时为 None。
+    pub version: Option<Arc<str>>,
+    pub root: DepRoot,
+}
+
+/// 依赖所属的生态。`Npm`：TS / JS 的包（npm 注册表的包名），npm、pnpm、yarn
+/// 安装的都是。Cargo、Go、Python 随它们的解析扩展点加入。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Ecosystem {
+    Npm,
+}
+
+/// 依赖根（ADR 0033「依赖根的读取限制」）。`Location::path` / `TextRef::path`
+/// 相对这个根所在的目录：`Worktree` 时相对 worktree 根（路径以 `dir` 开头），
+/// `Cache` 时相对那个缓存根。
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum DepRoot {
+    /// 工作区里的依赖目录（`node_modules`、`.venv`、`vendor`）。`dir` 相对
+    /// worktree 根，各级都不是符号链接；路径是解析过 pnpm 链接之后的真实路径
+    /// （`node_modules/.pnpm/react@19.0.0/node_modules/react/index.d.ts`），也没有
+    /// 符号链接。
+    Worktree { dir: RelPath },
+    /// 工作区之外依赖缓存的源码子树，路径取自 Lectern 自己进程的环境。TS / JS
+    /// 不用，留给 Cargo、Go 和 #26。
+    Cache(CacheRoot),
+}
+
+/// 工作区之外的依赖缓存（ADR 0033）：只是名字，路径由实现方从自己进程的环境
+/// 得到。
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum CacheRoot {
+    /// `$CARGO_HOME/registry/src`。
+    CargoRegistrySrc,
+    /// `$CARGO_HOME/git/checkouts`。
+    CargoGitCheckouts,
+    /// `$GOMODCACHE` 里 `cache/` 之外的部分。
+    GoModCache,
+    /// `~/.m2/repository`。
+    Maven,
+    /// `~/.gradle/caches/modules-2/files-2.1`。
+    Gradle,
 }
 
 /// 行和列都从 0 起；列是这一行里的字节偏移。
@@ -102,7 +156,9 @@ pub struct Location {
     pub end_line: u32,
 }
 
-/// 候选的六层，靠前的先列出（派生的顺序即声明顺序）。
+/// 候选的六层，加上 ADR 0033 的依赖一层，靠前的先列出（派生的顺序即声明顺序）。
+/// `Dependency`：依赖层的单元（经依赖映射）和按需解析的依赖文件；import 解析给出
+/// 的依赖目标仍是 `Imported` 层的 `Bound(Import)`。
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
 pub enum CandidateTier {
     CurrentFile,
@@ -111,6 +167,7 @@ pub enum CandidateTier {
     SameSubproject,
     DependentSubproject,
     Elsewhere,
+    Dependency,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]

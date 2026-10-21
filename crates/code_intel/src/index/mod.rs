@@ -244,6 +244,9 @@ pub(crate) struct Inner {
     /// Another registration of `code_intel.tags` for new projects (tests).
     #[cfg(test)]
     pub tables: Mutex<Option<&'static lectern_cache::Tables>>,
+    /// Another registration of `code_intel.deps` for new projects (tests).
+    #[cfg(test)]
+    pub deps_tables: Mutex<Option<&'static lectern_cache::Tables>>,
     /// Run once by the next tier 1 or 2 task, before its existence check
     /// (tests: the batch tasks run, and stop, in that window).
     #[cfg(test)]
@@ -351,6 +354,8 @@ impl Indexer {
             #[cfg(test)]
             tables: Mutex::new(None),
             #[cfg(test)]
+            deps_tables: Mutex::new(None),
+            #[cfg(test)]
             before_focus_check: Mutex::new(None),
             #[cfg(test)]
             yield_hook: Arc::default(),
@@ -447,6 +452,17 @@ impl Indexer {
     /// Counters of recomputations so far.
     pub fn stats(&self) -> StatCounts {
         self.inner.stats.counts()
+    }
+
+    /// How long each of this session's dependency identity tasks took
+    /// (「依赖层」, `code_intel/deps_identity`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn deps_identity_times(&self, project: &ProjectKey) -> Vec<std::time::Duration> {
+        let Some(p) = self.inner.project(project) else {
+            return Vec::new();
+        };
+        let st = lock(&p.state);
+        st.deps.identity.took.clone()
     }
 
     /// Marks the project's namespace as full, as the batch layer does when
@@ -728,6 +744,20 @@ impl Inner {
         }
     }
 
+    #[cfg(not(test))]
+    fn deps_store_for(&self, partition: &lectern_cache::Partition) -> Store {
+        Store::deps(partition)
+    }
+
+    /// Tests may register `code_intel.deps` with a smaller quota.
+    #[cfg(test)]
+    fn deps_store_for(&self, partition: &lectern_cache::Partition) -> Store {
+        match *lock(&self.deps_tables) {
+            Some(tables) => Store::deps_with_tables(partition, tables),
+            None => Store::deps(partition),
+        }
+    }
+
     /// Runs a reconcile of the project on this thread now (tests that
     /// change the session while an extraction is in flight).
     #[cfg(test)]
@@ -760,6 +790,8 @@ impl Inner {
                     let p = Arc::new(Project {
                         key: key.clone(),
                         store: self.store_for(&partition),
+                        deps: self.deps_store_for(&partition),
+                        deps_commits: Mutex::new(()),
                         commits: Mutex::new(()),
                         replaced: std::sync::atomic::AtomicU64::new(0),
                         replacing: std::sync::atomic::AtomicU64::new(0),
@@ -890,6 +922,8 @@ impl Inner {
         *lock(&self.batch_project) = Some(key.clone());
         if let Some(me) = self.arc() {
             me.enqueue_focus(&project);
+            // Tier 3's sub-project may have changed: its dependencies'.
+            me.deps_check(&project);
             me.kick_batch();
             if let Some(oid) = current {
                 me.focus_parse(key, oid);
@@ -1081,12 +1115,34 @@ impl Inner {
                 TierState::Pending
             }
         };
+        // The dependency tier: the identity task ran for the current
+        // sub-project and every package it queued is walked (or the tier
+        // stopped for the session); not part of any completeness.
+        let deps = {
+            let d = &st.deps;
+            let q = crate::deps::tier::QUEUE;
+            let identified = d.ran_for.as_ref() == Some(&crate::deps::identity::dep_dir(&st))
+                && !d.identity.running
+                && !d.dirty;
+            let walked = d.stopped
+                || (d.queue.is_empty()
+                    && d.walk.is_none()
+                    && st.batch.resume[q].is_empty()
+                    && st.batch.aside[q].is_empty()
+                    && st.batch.active[q] == 0);
+            if identified && walked {
+                TierState::Done
+            } else {
+                TierState::Pending
+            }
+        };
         Some(Coverage {
             generation: st.map.provenance.generation(),
             focus,
             subproject: tier(0),
             worktree: tier(1),
             other_worktrees: others,
+            deps,
         })
     }
 }

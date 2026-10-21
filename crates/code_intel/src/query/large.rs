@@ -636,7 +636,9 @@ impl Inner {
     /// built-in conversions), else the open worktree file or the object's
     /// content; over 16 MiB `TooLarge`.
     fn open_text(&self, snap: &Snap, at: &TextRef) -> Result<Source, QueryError> {
-        match at.origin {
+        match &at.origin {
+            // A dependency file is at most 1 MiB (ADR 0033): read whole.
+            TextOrigin::Dependency(_) => self.read_text(snap, at).map(Source::Whole),
             TextOrigin::Object => {
                 let tree = snap
                     .tree
@@ -716,6 +718,8 @@ impl Inner {
         let usable = match at.origin {
             TextOrigin::Object => kept.is_some_and(|t| t.canonical),
             TextOrigin::Worktree => kept.is_some_and(|t| t.identity.is_some()),
+            // Never large: its parse is kept whole.
+            TextOrigin::Dependency(_) => false,
         };
         if usable {
             return;

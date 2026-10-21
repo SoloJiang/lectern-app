@@ -1224,6 +1224,35 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Memory,
     ),
+    // The dependency tier (「依赖层」, ADR 0033) of a synthetic TS project:
+    // 21 direct dependencies, a declaration closure of about 5 MiB and a
+    // 4 MiB `package-lock.json`. From an empty cache to the tier done
+    // (recorded); with every path table and unit cached, the identity
+    // tasks' own durations when the project is opened again (from each
+    // task's start to its end, summed; the rest of the open is other
+    // budgets'); the live bytes of the dependency map at its limits
+    // (20 000 files offered, paths of about 48 bytes, SHA-256).
+    share(
+        "code_intel/deps_ts_project",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/deps_identity",
+        &[median(Limit::TimeAtMost(ms(50)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/deps_map_bytes",
+        &[median(Limit::BytesAtMost(MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
     // A jump the index answers, from the query to its first batch with
     // candidates: 100 000 indexed files, a 100 KB current text whose parse
     // is kept (ADR 0037); this crate's part of the 50 ms candidates budget.

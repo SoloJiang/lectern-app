@@ -31,8 +31,9 @@ pub use semantic::{
     SemanticRequest, SemanticRequestId,
 };
 pub use symbol::{
-    Binding, Candidate, CandidateSource, CandidateTier, DefKind, DefinitionRef, Evidence, LangName,
-    Location, Position, RefSyntax, Reference, Symbol, TextOrigin, TextRef,
+    Binding, CacheRoot, Candidate, CandidateSource, CandidateTier, DefKind, DefinitionRef,
+    DepOrigin, DepRoot, Ecosystem, Evidence, LangName, Location, Position, RefSyntax, Reference,
+    Symbol, TextOrigin, TextRef,
 };
 
 /// 单实现服务，`code-intel` 插件提供。
@@ -151,6 +152,10 @@ pub struct Coverage {
     pub worktree: TierState,
     /// 第 5 层。
     pub other_worktrees: TierState,
+    /// 依赖层（ADR 0033）：当前子项目的直接依赖都已按身份对照、闭包里缺的都已
+    /// 抽取（或到了限额）时为 `Done`；没有可识别的直接依赖时也是 `Done`。不参与
+    /// 完整性的核算。
+    pub deps: TierState,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]

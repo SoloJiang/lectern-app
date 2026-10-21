@@ -39,6 +39,16 @@ pub(crate) enum Dialect {
     Pack,
 }
 
+impl Dialect {
+    /// TypeScript, TSX or JavaScript: files with module specifiers.
+    pub(crate) fn is_ecma(self) -> bool {
+        matches!(
+            self,
+            Dialect::TypeScript | Dialect::Tsx | Dialect::JavaScript
+        )
+    }
+}
+
 /// One core language: linked into the binary (ADR 0018's core set).
 pub(crate) struct CoreSpec {
     pub name: &'static str,

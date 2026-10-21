@@ -103,8 +103,7 @@ pub struct ReadTarget {
     /// 文件夹项目为 None。
     pub worktree: Option<WorktreeKey>,
     pub path: RelPath,
-    /// 工作区或对象库；依赖根随 `code_intel` 的依赖类型（`TextOrigin::Dependency`）
-    /// 加入。
+    /// 工作区、对象库或依赖根（`TextOrigin::Dependency`：经它的 `DepRoot` 读）。
     pub origin: TextOrigin,
     /// 调用方看到的那份内容的 OID（hunk 的新旧一侧、`Location::oid`）。`Object`
     /// 必须有。

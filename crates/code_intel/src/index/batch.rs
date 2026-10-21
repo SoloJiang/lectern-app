@@ -396,7 +396,7 @@ impl Clone for Scanned {
 }
 
 /// One extraction ready to be written.
-pub(super) struct Done {
+pub(crate) struct Done {
     pub item: Item,
     /// The OID of the bytes actually read (「存储表」).
     pub key: BlobId,
@@ -447,7 +447,7 @@ enum Step {
 }
 
 /// The read side of one session, copied out of the lock.
-pub(super) struct Ctx {
+pub(crate) struct Ctx {
     pub session: u64,
     pub cancel: Arc<AtomicBool>,
     pub root: Option<Arc<SafeRoot>>,
@@ -687,6 +687,10 @@ impl Inner {
         {
             return Some(Kind::Far);
         }
+        // The dependency tier, after tier 4 and before tier 5 (ADR 0033).
+        if st.deps.has_work() {
+            return Some(Kind::Far);
+        }
         let others = &st.batch.others;
         let stamp = st.stamp(eviction);
         if others.deps != Some((st.session, stamp.eviction, stamp.grammar)) {
@@ -739,8 +743,12 @@ impl Inner {
         let mut st = lock(&project.state);
         // Not when tier 1 took it over (`focus_task`).
         if st.finish(session, &item, flag) && !flag.load(Ordering::Acquire) {
-            st.batch.queued.insert(item.key());
+            if !matches!(item.source, Source::Dep(_)) {
+                st.batch.queued.insert(item.key());
+            }
             st.batch.resume[t].push_front(item);
+        } else if st.session == session {
+            self.release_dep(&mut st, &item);
         }
     }
 
@@ -760,8 +768,12 @@ impl Inner {
     ) {
         let mut st = lock(&project.state);
         if st.finish(session, &item, flag) && !flag.load(Ordering::Acquire) {
-            st.batch.queued.insert(item.key());
+            if !matches!(item.source, Source::Dep(_)) {
+                st.batch.queued.insert(item.key());
+            }
             st.batch.aside[t].push_back(item);
+        } else if st.session == session {
+            self.release_dep(&mut st, &item);
         }
     }
 
@@ -783,7 +795,7 @@ impl Inner {
     fn drain_aside(&self, project: &Arc<Project>) {
         let mut st = lock(&project.state);
         let batch = &mut st.batch;
-        for t in [1, 2] {
+        for t in [1, 2, crate::deps::tier::QUEUE] {
             while let Some(item) = batch.aside[t].pop_back() {
                 batch.resume[t].push_front(item);
             }
@@ -896,8 +908,9 @@ impl Inner {
             self.extract_batch(project, ctx, t, guard, Kind::Far, grant, own);
             return Step::Worked;
         }
-        // Files known to be missing go first, tier by tier.
-        for t in [1, 2] {
+        // Files known to be missing go first, tier by tier: 4, the
+        // dependency tier, 5.
+        for t in [1, crate::deps::tier::QUEUE, 2] {
             if !lock(&project.state).batch.resume[t].is_empty() {
                 self.extract_batch(project, ctx, t, guard, Kind::Far, grant, own);
                 return Step::Worked;
@@ -906,6 +919,11 @@ impl Inner {
         // An existence check is one item, of size 0, in a slot.
         if let Some(items) = self.gather(project, 1, stamp) {
             self.exists(project, ctx, items, stamp);
+            return Step::Worked;
+        }
+        // The dependency tier's walks (「依赖层」): one step, one item in a
+        // slot.
+        if self.deps_step(project, ctx, matches!(grant, Grant::Slot { .. })) {
             return Step::Worked;
         }
         if let Some(items) = self.gather_other(project, ctx, stamp) {
@@ -1577,6 +1595,11 @@ impl Inner {
                 }),
                 p.resume.clone(),
             );
+        let deadline = if matches!(p.item.source, Source::Dep(_)) {
+            deadline.with_specifiers()
+        } else {
+            deadline
+        };
         let extract = lock(&self.extract).clone();
         bump(&self.stats.extractions, 1);
         let extraction = extract(&p.item.lang, &p.bytes, &deadline, &p.flag);
@@ -1633,6 +1656,14 @@ impl Inner {
         let stamp = st.stamp(eviction);
         loop {
             let item = st.batch.resume[t].pop_front()?;
+            if let Source::Dep(_) = item.source {
+                // The dependency tier's: its walk dedups, its namespace is
+                // its own (no hints, not in `in_flight`).
+                let cancel = ctx.cancel.load(Ordering::Acquire);
+                let flag = crate::deps::tier::register(&mut st, &item, cancel);
+                st.batch.active[t] += 1;
+                return Some((item, flag));
+            }
             let key = item.key();
             if st.in_flight.contains_key(&key)
                 || st
@@ -1658,7 +1689,10 @@ impl Inner {
 
     /// Forgets an item that gave nothing to write.
     fn release(&self, project: &Arc<Project>, ctx: &Ctx, item: &Item, flag: &Arc<AtomicBool>) {
-        lock(&project.state).finish(ctx.session, item, flag);
+        let mut st = lock(&project.state);
+        if st.finish(ctx.session, item, flag) {
+            self.release_dep(&mut st, item);
+        }
     }
 
     /// Reads and extracts one item (`read_item`, `extract_bytes`).
@@ -1722,11 +1756,7 @@ impl Inner {
                     item: item.clone(),
                     key: item.oid,
                     check: None,
-                    extraction: Extraction {
-                        status: ExtractStatus::TooLarge,
-                        defs: Vec::new(),
-                        refs: Vec::new(),
-                    },
+                    extraction: Extraction::empty(ExtractStatus::TooLarge),
                     flag: cancel.clone(),
                     meta: UnitMeta::whole(true),
                 },
@@ -1751,6 +1781,13 @@ impl Inner {
                 Some(Ok(bytes)) => bytes,
                 Some(Err(())) => return Err(too_large(item)),
                 None => return Err(Outcome::Skip),
+            },
+            // Only through its roots (「依赖根的读取限制」). A file grown
+            // past the limit since it was visited is not written under the
+            // OID it was queued with.
+            Source::Dep(dep) => match dep.roots.read(&dep.file, max as u64) {
+                Ok((bytes, _)) => bytes,
+                Err(_) => return Err(Outcome::Skip),
             },
             Source::Object => {
                 let Some(tree) = &ctx.tree else {
@@ -1777,7 +1814,8 @@ impl Inner {
             // Another worktree's file that differs from its index waits
             // until that worktree is the current one.
             Source::Other(_) => return Err(Outcome::Skip),
-            Source::Object => raw,
+            // Ignored files are not normalized (ADR 0033): the raw OID.
+            Source::Object | Source::Dep(_) => raw,
             Source::Worktree => match &ctx.tree {
                 // A slot's file over `SLOT_MAX_BYTES` is set aside right
                 // after this read: not converted in the slot either.
@@ -1848,6 +1886,12 @@ impl Inner {
                 }
             }
         };
+        // A dependency file's edges come with its extraction (「依赖层」).
+        let deadline = if matches!(item.source, Source::Dep(_)) {
+            deadline.with_specifiers()
+        } else {
+            deadline
+        };
         let extract = lock(&self.extract).clone();
         bump(&self.stats.extractions, 1);
         let extraction = extract(&item.lang, &bytes, &deadline, cancel);
@@ -1906,6 +1950,16 @@ impl Inner {
         done: Vec<Done>,
         batch: bool,
     ) -> bool {
+        // Dependency files go to `code_intel.deps`, with their edges
+        // (「依赖层」).
+        let (deps, done): (Vec<Done>, Vec<Done>) = done
+            .into_iter()
+            .partition(|d| matches!(d.item.source, Source::Dep(_)));
+        if !deps.is_empty()
+            && let Some(me) = self.arc()
+        {
+            me.commit_deps(project, ctx, deps, batch);
+        }
         if done.is_empty() {
             return true;
         }
@@ -2128,7 +2182,7 @@ impl Inner {
         if let Some((w, text)) = &focus.current
             && *w == wt
         {
-            match text.origin {
+            match &text.origin {
                 TextOrigin::Worktree => {
                     if let Some(eff) = map.effective(&text.path)
                         && !satisfied(eff.oid, &eff.lang)
@@ -2148,6 +2202,42 @@ impl Inner {
                             oid: text.oid,
                             lang: lang.clone(),
                             source: Source::Object,
+                            tier: Tier::Current,
+                        });
+                    }
+                }
+                // A dependency file is tier 1 through its root, into
+                // `code_intel.deps` (「依赖层」).
+                TextOrigin::Dependency(origin) => {
+                    let table = map.base.table().clone();
+                    let file = st.deps.roots.as_ref().and_then(|roots| {
+                        let dir = match &origin.root {
+                            lectern_services::code_intel::DepRoot::Worktree { dir } => dir,
+                            lectern_services::code_intel::DepRoot::Cache(_) => return None,
+                        };
+                        let file = roots.file_at(&text.path, Some(dir), origin.ecosystem)?;
+                        Some((roots.clone(), file))
+                    });
+                    if let Some((roots, file)) = file
+                        && let Some(lang) = crate::deps::dep_lang(&table, &text.path)
+                    {
+                        wanted[0].push(Item {
+                            path: text.path.clone(),
+                            oid: text.oid,
+                            lang: lang.clone(),
+                            source: Source::Dep(Arc::new(super::state::DepSource {
+                                file,
+                                roots,
+                                walk: None,
+                                stat: crate::deps::Stat {
+                                    dev: 0,
+                                    ino: 0,
+                                    size: 0,
+                                    mtime: 0,
+                                    ctime: 0,
+                                },
+                                rel: String::new(),
+                            })),
                             tier: Tier::Current,
                         });
                     }
@@ -2239,6 +2329,40 @@ impl Inner {
         }
     }
 
+    /// Tier 1 of a dependency file that is the current text (「依赖层」):
+    /// stored `Done` in `code_intel.deps`, it is marked used; else read
+    /// through its root, extracted with the interactive limits and written
+    /// there with its edges.
+    fn focus_dep(
+        self: &Arc<Self>,
+        project: &Arc<Project>,
+        ctx: &Ctx,
+        item: Item,
+        flag: Arc<AtomicBool>,
+    ) {
+        let version = Version::of(&item.lang);
+        bump(&self.stats.exists_checks, 1);
+        let hit = project
+            .deps
+            .exists(&version, &[item.oid])
+            .unwrap_or_default()
+            .into_iter()
+            .find(|f| satisfies(item.tier, f.status));
+        if let Some(hit) = hit {
+            project.deps.touch(&[hit.unit]);
+            lock(&project.state).finish(ctx.session, &item, &flag);
+            return;
+        }
+        match self.extract_item(ctx, &item, Mode::Interactive, None, &flag) {
+            Outcome::Done(d, _) => {
+                self.commit(project, ctx, vec![d], false);
+            }
+            Outcome::Paused | Outcome::Skip | Outcome::Parked(_) | Outcome::Aside => {
+                lock(&project.state).finish(ctx.session, &item, &flag);
+            }
+        }
+    }
+
     /// A tier 1 or 2 task: takes files from its queue until it is empty.
     fn focus_task(self: &Arc<Self>, project: &Arc<Project>, t: usize, session: u64) {
         loop {
@@ -2254,6 +2378,14 @@ impl Inner {
                     return;
                 };
                 let c = ctx(&st);
+                if let Source::Dep(_) = item.source {
+                    // A dependency file, into its own namespace.
+                    let cancel = c.cancel.load(Ordering::Acquire);
+                    let flag = crate::deps::tier::register(&mut st, &item, cancel);
+                    drop(st);
+                    self.focus_dep(project, &c, item, flag);
+                    continue;
+                }
                 let key = item.key();
                 let version = Version::of(&item.lang);
                 if t == 0 && st.focused.satisfied.contains(&(item.oid, version)) {
@@ -2400,6 +2532,11 @@ fn item(eff: crate::map::Effective, tier: Tier) -> Item {
     }
 }
 
+/// The read side of `st`'s session (for a write outside the batch tasks).
+pub(crate) fn ctx_of(st: &State) -> Ctx {
+    ctx(st)
+}
+
 fn ctx(st: &State) -> Ctx {
     Ctx {
         session: st.session,
@@ -2417,7 +2554,7 @@ fn cursor_hinted(map: &crate::map::LiveMap, eff: &crate::map::Effective, stamp: 
 /// review set's first file, else the path the project was opened at (when
 /// not its root). The whole worktree without sub-projects; empty when no
 /// sub-project contains the anchor or there is none.
-pub(super) fn subproject(st: &State) -> Scope {
+pub(crate) fn subproject(st: &State) -> Scope {
     let Some(packages) = st.seen.packages.as_ref().filter(|p| !p.is_empty()) else {
         return Scope::Whole;
     };

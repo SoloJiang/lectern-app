@@ -42,6 +42,11 @@ tempfile = { workspace = true, optional = true }
 lectern-cache = { path = "../cache" }
 # The shared code_intel types (LangName, DefKind, RefSyntax, Position).
 lectern-services = { path = "../services" }
+# The dependency tier's manifests (an ordered JSON value) and the streamed
+# identities of npm's lockfile (`Deserializer::from_reader` with
+# `IgnoredAny`, ADR 0033); both already in Cargo.lock.
+serde.workspace = true
+serde_json.workspace = true
 streaming-iterator.workspace = true
 # The time-boxed search's whole-word lookup (`memmem`).
 memchr.workspace = true
@@ -63,8 +68,6 @@ lectern-executor = { path = "../executor", features = ["test-support"] }
 lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 lectern-git = { path = "../git", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
-# forms_cover_grammar reads each grammar's NODE_TYPES.
-serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

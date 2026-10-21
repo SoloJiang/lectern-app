@@ -353,6 +353,7 @@ fn code_intel_results_round_trip() {
 fn code_intel_candidate_tiers_sort_in_listing_order() {
     let mut tiers = vec![
         CandidateTier::Elsewhere,
+        CandidateTier::Dependency,
         CandidateTier::SameSubproject,
         CandidateTier::CurrentFile,
         CandidateTier::DependentSubproject,
@@ -360,6 +361,7 @@ fn code_intel_candidate_tiers_sort_in_listing_order() {
         CandidateTier::SamePackage,
     ];
     tiers.sort();
+    // ADR 0033: dependencies come after every tier of the project.
     assert_eq!(
         tiers,
         [
@@ -369,8 +371,62 @@ fn code_intel_candidate_tiers_sort_in_listing_order() {
             CandidateTier::SameSubproject,
             CandidateTier::DependentSubproject,
             CandidateTier::Elsewhere,
+            CandidateTier::Dependency,
         ]
     );
+}
+
+fn dep_origin(root: DepRoot, version: Option<&str>) -> DepOrigin {
+    DepOrigin {
+        ecosystem: Ecosystem::Npm,
+        package: text("@types/node"),
+        version: version.map(text),
+        root,
+    }
+}
+
+#[test]
+fn code_intel_dependency_origins_round_trip() {
+    let worktree_root = DepRoot::Worktree {
+        dir: text("packages/app/node_modules"),
+    };
+    let origins = [
+        TextOrigin::Dependency(dep_origin(worktree_root.clone(), Some("22.1.0"))),
+        TextOrigin::Dependency(dep_origin(worktree_root, None)),
+        TextOrigin::Dependency(dep_origin(
+            DepRoot::Cache(CacheRoot::CargoRegistrySrc),
+            Some("1.0.0"),
+        )),
+    ];
+    for origin in origins {
+        assert_eq!(round_trip(&origin), origin);
+        let at = TextRef {
+            path: text("node_modules/.pnpm/x@1.0.0/node_modules/x/index.d.ts"),
+            ..text_ref(origin.clone())
+        };
+        assert_eq!(round_trip(&at), at);
+        let candidate = Candidate {
+            definition: DefinitionRef {
+                location: location("node_modules/x/index.d.ts", 3, origin),
+                ..definition()
+            },
+            tier: CandidateTier::Dependency,
+            evidence: Evidence::NameOnly,
+            in_review: false,
+            source: CandidateSource::Index,
+        };
+        assert_eq!(round_trip(&candidate), candidate);
+    }
+    for root in [
+        CacheRoot::CargoRegistrySrc,
+        CacheRoot::CargoGitCheckouts,
+        CacheRoot::GoModCache,
+        CacheRoot::Maven,
+        CacheRoot::Gradle,
+    ] {
+        let root = DepRoot::Cache(root);
+        assert_eq!(round_trip(&root), root);
+    }
 }
 
 #[test]
@@ -381,6 +437,7 @@ fn code_intel_coverage_and_names_round_trip() {
         subproject: TierState::Done,
         worktree: TierState::Pending,
         other_worktrees: TierState::Pending,
+        deps: TierState::Done,
     };
     assert_eq!(round_trip(&coverage), coverage);
 

@@ -27,6 +27,13 @@ use crate::store::{Found, PendingTouches, Store, Version};
 pub(crate) struct Project {
     pub key: ProjectKey,
     pub store: Store,
+    /// `code_intel.deps` in the same partition (ADR 0033, 「依赖层」).
+    pub deps: Store,
+    /// Held around each write transaction of `deps` and the eviction
+    /// generations read on either side of it: the dependency tier tells
+    /// its own evictions (the quota) from the others' writes. Never held
+    /// with another lock of this crate.
+    pub deps_commits: std::sync::Mutex<()>,
     /// Held around each write transaction and the eviction generations read
     /// on either side of it: a batch commit tells its own evictions from a
     /// tier 1 replace. Never held with another lock of this crate.
@@ -137,6 +144,9 @@ pub(crate) enum Tier {
     Subproject,
     Worktree,
     Other,
+    /// The dependency tier (ADR 0033, 「依赖层」): after tier 4, before
+    /// tier 5, yielding like them.
+    Deps,
 }
 
 impl Tier {
@@ -146,9 +156,24 @@ impl Tier {
             Tier::Subproject => Some(0),
             Tier::Worktree => Some(1),
             Tier::Other => Some(2),
+            Tier::Deps => Some(crate::deps::tier::QUEUE),
             Tier::Current | Tier::Review => None,
         }
     }
+}
+
+/// A dependency file to index (「依赖层」): read only through its
+/// session's `Roots`.
+pub(crate) struct DepSource {
+    pub file: crate::deps::DepFile,
+    pub roots: Arc<crate::deps::Roots>,
+    /// The dependency tier's walk (`PkgWalk::id`) it belongs to; None for
+    /// tier 1's (a dependency file that is the current text).
+    pub walk: Option<u64>,
+    /// Its five stats when visited (the path table's record).
+    pub stat: crate::deps::Stat,
+    /// Relative to its package directory (its edges resolve from there).
+    pub rel: String,
 }
 
 /// Another worktree being indexed (tier 5): its root and index entries.
@@ -166,6 +191,8 @@ pub(crate) enum Source {
     Object,
     /// Another worktree's root.
     Other(Arc<OtherTree>),
+    /// A dependency root (ADR 0033): written to `code_intel.deps`.
+    Dep(Arc<DepSource>),
 }
 
 /// One file to index.
@@ -320,19 +347,21 @@ pub(crate) struct OtherWalk {
 #[derive(Default)]
 pub(crate) struct Batch {
     pub cursor: Option<Cursor>,
-    /// Files whose existence check missed, per batch tier, extracted first;
-    /// a file the pause abandoned goes back to the front.
-    pub resume: [VecDeque<Item>; 3],
-    /// Items of tiers 4 and 5 a keepalive slot can't do (over 256 KiB, a
-    /// language pack's extraction longer than a slot), in the order they
-    /// were taken: back to the front of their queue once a batch runs with
-    /// the yield switch off (「交互让路」).
-    pub aside: [VecDeque<Item>; 3],
+    /// Files whose existence check missed, per batch tier (3, 4, 5 and the
+    /// dependency tier, `deps::tier::QUEUE`), extracted first; a file the
+    /// pause abandoned goes back to the front.
+    pub resume: [VecDeque<Item>; 4],
+    /// Items of tiers 4 and 5 and the dependency tier a keepalive slot
+    /// can't do (over 256 KiB, a language pack's extraction longer than a
+    /// slot), in the order they were taken: back to the front of their
+    /// queue once a batch runs with the yield switch off (「交互让路」).
+    pub aside: [VecDeque<Item>; 4],
     /// Keys queued, in the resume queues or set aside: one OID on several
-    /// paths is extracted once.
+    /// paths is extracted once. Not the dependency tier's (its walk dedups
+    /// by path; its units are in another namespace).
     pub queued: HashSet<(BlobId, LangName)>,
     /// Extractions in flight per batch tier.
-    pub active: [usize; 3],
+    pub active: [usize; 4],
     /// Hits to mark as used: queued only through [`Batch::queue_touches`],
     /// whose [`Wake`] wakes the batch tasks.
     touches: PendingTouches,
@@ -531,6 +560,9 @@ pub(crate) struct State {
     /// why. Queries asked while no reconcile runs fail with it at once;
     /// those waiting failed with it.
     pub unavailable: Option<Arc<str>>,
+    /// The dependency tier's state (「依赖层」): its roots, queue, walk and
+    /// map, all of this session's worktree.
+    pub deps: crate::deps::Deps,
 }
 
 impl State {
@@ -640,6 +672,7 @@ impl State {
             publishes: 0,
             unfinished: Arc::default(),
             unavailable: None,
+            deps: crate::deps::Deps::default(),
         }
     }
 
@@ -655,6 +688,9 @@ impl State {
         self.cancel.store(true, Ordering::Release);
         for owner in self.in_flight.values() {
             owner.flag.store(true, Ordering::Release);
+        }
+        for flag in self.deps.in_flight.values() {
+            flag.store(true, Ordering::Release);
         }
         self.watches = None;
         self.held.clear();
@@ -698,6 +734,21 @@ impl State {
     pub fn finish(&mut self, session: u64, item: &Item, flag: &Arc<AtomicBool>) -> bool {
         if self.session != session {
             return false;
+        }
+        if let Source::Dep(_) = item.source {
+            // Not in `in_flight` or `queued`: the dependency tier's own.
+            if self
+                .deps
+                .in_flight
+                .get(&item.path)
+                .is_some_and(|f| Arc::ptr_eq(f, flag))
+            {
+                self.deps.in_flight.remove(&item.path);
+            }
+            if let Some(t) = item.tier.batch() {
+                self.batch.active[t] = self.batch.active[t].saturating_sub(1);
+            }
+            return true;
         }
         let key = item.key();
         if self

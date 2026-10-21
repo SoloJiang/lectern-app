@@ -710,6 +710,7 @@ fn schedule_opened_timed_out_file_is_redone_once() {
                     status: ExtractStatus::TimedOut,
                     defs: Vec::new(),
                     refs: Vec::new(),
+                    specs: Vec::new(),
                 }
             } else {
                 crate::extract::extract(lang, bytes, deadline, cancel)
@@ -772,6 +773,7 @@ fn schedule_opened_file_read_failure_is_tried_again() {
                     status: ExtractStatus::TimedOut,
                     defs: Vec::new(),
                     refs: Vec::new(),
+                    specs: Vec::new(),
                 }
             } else {
                 crate::extract::extract(lang, bytes, deadline, cancel)
@@ -855,6 +857,7 @@ fn takes_over_a_batch_extraction(focus: impl Fn(&[u8], &Harness) -> Focus) {
                     status: ExtractStatus::Cancelled,
                     defs: Vec::new(),
                     refs: Vec::new(),
+                    specs: Vec::new(),
                 };
             }
             crate::extract::extract(lang, bytes, deadline, cancel)

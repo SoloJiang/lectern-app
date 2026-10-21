@@ -313,7 +313,7 @@ impl Inner {
             worktree: l.worktree.clone(),
             path: l.path.clone(),
             oid: l.oid,
-            origin: l.origin,
+            origin: l.origin.clone(),
         };
         let position = Position {
             line: l.line,

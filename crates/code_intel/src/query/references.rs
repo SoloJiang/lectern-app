@@ -117,7 +117,7 @@ impl Inner {
             worktree: l.worktree.clone(),
             path: l.path.clone(),
             oid: l.oid,
-            origin: l.origin,
+            origin: l.origin.clone(),
         };
         // The definition's own file, read as its location says.
         let text = match self.read_text(snap, &own) {
@@ -151,7 +151,7 @@ impl Inner {
         let file = File {
             worktree: l.worktree.clone(),
             path: l.path.clone(),
-            origin: l.origin,
+            origin: l.origin.clone(),
             lang: lang.clone(),
             // The text the query is about, as a jump's current text.
             interactive: true,
@@ -177,7 +177,12 @@ impl Inner {
             syntax: RefSyntax::Plain,
             defines: Some(of.clone()),
         };
-        let ranker = self.ranker(snap, Some(&l.path), Some((l.origin, l.oid)), Some(&of.lang));
+        let ranker = self.ranker(
+            snap,
+            Some(&l.path),
+            Some((l.origin.clone(), l.oid)),
+            Some(&of.lang),
+        );
         self.publish_in(snap, run.id, |r| r.symbol = Some(symbol));
         let own = match parsed {
             Ok(parsed) => {
@@ -600,11 +605,16 @@ impl Inner {
                 .find(|f| f.status == ExtractStatus::Done)?;
             snap.project.store.load(found.unit)
         };
+        // Callers are looked for in the project only: no dependency here.
+        let no_dep = |_: &str, _: &str| None;
+        let no_dep_extraction = |_: &crate::resolve::DepTarget| None;
         let ctx = ResolveContext {
             map: &snap.map,
             files: snap.map.base.files(),
             packages: Some(&snap.packages),
             extraction: &stored,
+            resolve_dep: &no_dep,
+            extract_dep: &no_dep_extraction,
         };
         let name = of.name.as_bytes();
         for r in parsed.references() {
@@ -649,7 +659,7 @@ impl Inner {
             let location = Location {
                 worktree: file.worktree.clone(),
                 path: file.path.clone(),
-                origin: file.origin,
+                origin: file.origin.clone(),
                 oid,
                 line: r.at.line,
                 column: r.at.column,
