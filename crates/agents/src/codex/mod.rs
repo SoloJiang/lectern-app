@@ -5,6 +5,7 @@
 //! `decoded_dir` 下的只读副本，之后在副本上按偏移读（「压缩会话的随机读取」）。第 4 步的发现、监听与插件
 //! 在它外面包一层：按 `SessionKey` 找到文件，并实现 [`Lineage`] 让分叉会话找到来源会话。
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
@@ -14,8 +15,9 @@ use std::sync::{Arc, Mutex};
 
 use lectern_services::session::{
     Batch, Content, ContentRef, Cursor, Format, ResumeCommand, SessionError, SessionKey,
-    SessionSummary, SourceId, TurnIndex,
+    SessionSummary, SourceId, ToolCall, ToolKind, TurnIndex,
 };
+use serde::Deserialize;
 
 use crate::codec;
 use crate::index::IndexBuilder;
@@ -517,6 +519,15 @@ impl Codex {
         file: &SessionFile,
         prev: Option<&TurnIndex>,
     ) -> Result<TurnIndex, SessionError> {
+        self.turns_continued(file, prev).map(|(index, _)| index)
+    }
+
+    /// `turns_after`，另给出新索引是否接在 `prev` 之后（有 `prev`，游标仍有效、没有从头重建）。
+    pub(crate) fn turns_continued(
+        &self,
+        file: &SessionFile,
+        prev: Option<&TurnIndex>,
+    ) -> Result<(TurnIndex, bool), SessionError> {
         let (mut builder, from) = match prev {
             Some(prev) => (IndexBuilder::from_index(prev), prev.cursor.clone()),
             None => (IndexBuilder::default(), Cursor::START),
@@ -525,7 +536,11 @@ impl Codex {
         if !self.recognized(&parsed.batch.cursor) {
             return Err(SessionError::Unrecognized);
         }
-        Ok(builder.build(file.key.clone(), parsed.batch.cursor))
+        let continued = prev.is_some() && !parsed.batch.reset;
+        Ok((
+            builder.build(file.key.clone(), parsed.batch.cursor),
+            continued,
+        ))
     }
 
     /// 解析整个文件：全部记录和轮次索引（`testing::parse_file`）。
@@ -566,6 +581,26 @@ impl Codex {
     pub fn load(&self, file: &SessionFile, at: &ContentRef) -> Result<Content, SessionError> {
         let (body, _) = self.body(file)?;
         load::load(body, at)
+    }
+
+    /// 读这次 `spawn_agent` 调用的输出（对 `call.result` 一次 `load`），取子线程 ID（docs/design/agents.md
+    /// 「Codex 子 agent 与派出它的调用」）。阻塞，只在 executor 上调用。`call.kind` 不是 `SpawnAgent`、调用没有
+    /// 结果、输出不是 JSON 对象或顶层没有规范写法的 `agent_id` 时为 None。
+    pub fn spawned_thread(
+        &self,
+        file: &SessionFile,
+        call: &ToolCall,
+    ) -> Result<Option<Arc<str>>, SessionError> {
+        if call.kind != ToolKind::SpawnAgent {
+            return Ok(None);
+        }
+        let Some(result) = &call.result else {
+            return Ok(None);
+        };
+        Ok(match self.load(file, result)? {
+            Content::Text(output) => spawned_agent_id(&output),
+            Content::Edits(_) => None,
+        })
     }
 
     /// 会话摘要（第 4 步的发现用它生成 `SessionSummary`）：读开头 256 KB 和末尾，`place` 为 `Pending`。
@@ -640,6 +675,24 @@ impl Codex {
         std::mem::forget(guard);
         Some(path)
     }
+}
+
+/// `spawn_agent` 的输出：multi_agent v1 的 `SpawnAgentResult`（`{"agent_id": "<子线程 ID>", "nickname": …}`，
+/// openai/codex `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`）。只取顶层的 `agent_id`，必须是 UUID 的
+/// 规范写法；v2（`{"task_name": …}`）、派出失败的文本和其他形状没有子线程。
+fn spawned_agent_id(output: &str) -> Option<Arc<str>> {
+    #[derive(Deserialize)]
+    struct Spawned<'a> {
+        #[serde(borrow)]
+        agent_id: Option<Cow<'a, str>>,
+    }
+    // 只认 JSON 对象（serde 的结构也接受数组）。
+    if !output.trim_start().starts_with('{') {
+        return None;
+    }
+    let spawned: Spawned = serde_json::from_str(output).ok()?;
+    let id = spawned.agent_id?;
+    is_uuid(&id).then(|| Arc::from(&*id))
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

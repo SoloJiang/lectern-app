@@ -1,5 +1,6 @@
-//! 轮次索引与压缩会话摘要的缓存：内存里的字节 LRU，和 `cache` 应用级分库里的两个命名空间
-//! （docs/design/agents.md「数据流与线程」第 7 步、「压缩会话的随机读取」；docs/design/cache.md 的命名空间表）。
+//! 轮次索引、压缩会话摘要与 Codex 子 agent 关联的缓存：内存里的字节 LRU，和 `cache` 应用级分库里的三个命名空间
+//! （docs/design/agents.md「数据流与线程」第 7 步、「压缩会话的随机读取」、「Codex 子 agent 与派出它的调用」；
+//! docs/design/cache.md 的命名空间表）。
 
 use std::collections::HashMap;
 use std::mem::size_of;
@@ -110,6 +111,38 @@ pub(crate) fn summary_key(session: &SessionKey, id: &FileId, adapter_version: u3
         .u32(adapter_version)
 }
 
+/// `agents.spawns`：一个父会话的 `spawn_agent` 调用派出的子线程（docs/design/agents.md「Codex 子 agent 与派出
+/// 它的调用」）。键是来源 ID、父会话 ID、适配器版本；值是派生时索引游标的偏移（解压后的字节）和按文件顺序的
+/// （调用 ID，子线程 ID）。命名空间版本即值的格式版本。几百字节，不压缩。
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub(crate) struct CachedSpawns {
+    pub(crate) offset: u64,
+    pub(crate) spawns: Vec<(Arc<str>, Option<Arc<str>>)>,
+}
+
+impl Entry for CachedSpawns {
+    const NAMESPACE: Namespace = Namespace {
+        name: "agents.spawns",
+        version: 1,
+        compression: Compression::None,
+    };
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        let _ = serde_json::to_writer(out, self);
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+}
+
+pub(crate) fn spawns_key(parent: &SessionKey, adapter_version: u32) -> Key {
+    Key::new()
+        .str(&parent.source.0)
+        .str(&parent.id)
+        .u32(adapter_version)
+}
+
 /// 内存里的轮次索引，按估算的字节数做 LRU。
 #[derive(Default)]
 pub(crate) struct Indexes {
@@ -183,7 +216,7 @@ impl Indexes {
         self.bytes
     }
 
-    #[cfg(test)]
+    /// 不算一次使用（不改变 LRU 的顺序）。
     pub(crate) fn contains(&self, key: &SessionKey) -> bool {
         self.entries.contains_key(key)
     }

@@ -301,6 +301,15 @@ impl ClaudeCode {
         file: &SessionFile,
         prev: Option<&TurnIndex>,
     ) -> Result<TurnIndex, SessionError> {
+        self.turns_continued(file, prev).map(|(index, _)| index)
+    }
+
+    /// `turns_after`，另给出新索引是否接在 `prev` 之后（有 `prev`，游标仍有效、没有从头重建）。
+    pub(crate) fn turns_continued(
+        &self,
+        file: &SessionFile,
+        prev: Option<&TurnIndex>,
+    ) -> Result<(TurnIndex, bool), SessionError> {
         let (mut builder, from) = match prev {
             Some(prev) => (IndexBuilder::from_index(prev), prev.cursor.clone()),
             None => (IndexBuilder::default(), Cursor::START),
@@ -309,7 +318,11 @@ impl ClaudeCode {
         if !self.recognized(&parsed.batch.cursor) {
             return Err(SessionError::Unrecognized);
         }
-        Ok(builder.build(file.key.clone(), parsed.batch.cursor))
+        let continued = prev.is_some() && !parsed.batch.reset;
+        Ok((
+            builder.build(file.key.clone(), parsed.batch.cursor),
+            continued,
+        ))
     }
 
     /// 解析整个文件：全部记录和轮次索引（`testing::parse_file`）。
