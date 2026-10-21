@@ -4,9 +4,11 @@
 //! [`DocSnapshot`]s through a [`DocHandle`]. The UI thread only queues
 //! commands and copies an `Arc`.
 
+mod chain;
 pub(crate) mod content;
 mod engine;
 mod load;
+mod prefetch;
 mod rows;
 mod watch;
 
@@ -22,6 +24,8 @@ use crate::spans::{Token, WindowSpans};
 
 pub(crate) use content::{Content, Pieces};
 pub use engine::{DocHandle, Engine, EngineDeps};
+#[cfg(any(test, feature = "test-support"))]
+pub use engine::{StepEnd, Trace};
 
 /// What the viewport holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

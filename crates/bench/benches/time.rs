@@ -126,6 +126,7 @@ const BENCHES: &[Bench] = &[
     syntax::CHAIN_16MIB,
     syntax::SCAN_64MIB,
     syntax::FIND_16MIB,
+    syntax::PREFETCH_WAIT,
 ];
 
 fn main() -> ExitCode {

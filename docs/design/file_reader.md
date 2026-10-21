@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；前置条件 E 和第 4–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现；前置条件 E 和第 5–8 步尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -419,7 +419,7 @@ impl Engine {
     /// （任意线程；视图在里面只安排一次重绘）。`root` 是 worktree 根或文件夹根（来自项目快照）。
     pub fn open(&self, target: ReadTarget, root: Arc<Path>, viewport: Viewport,
                 notify: Arc<dyn Fn() + Send + Sync>) -> DocHandle;
-    /// 预取（`Reader::prefetch` 转到这里）。立即返回。
+    /// 预取（`Reader::prefetch` 转到这里）：只取前 4 个，替换上一次请求里还没开始的目标；结果只进 LRU。立即返回。
     pub fn prefetch(&self, targets: Vec<(ReadTarget, Arc<Path>)>);
     /// `Reader::share_object` 转到这里：登记表在 `Engine` 里，`open` 查它。立即返回。
     pub fn share_object(&self, oid: BlobId, bytes: Arc<[u8]>) -> ObjectShare;
@@ -595,6 +595,7 @@ pub mod limits {
     pub const OBJECT_MAX: u64 = 16 << 20;         // 对象库里的 blob 整份取出的上限
     pub const OBJECT_INLINE: u64 = 1 << 20;       // 没有人持有时，首屏路径上直接解压的上限
     pub const PREFETCH_MAX: usize = 4;
+    pub const BATCH_SEGMENT: Duration = Duration::from_millis(50);   // 一个批量窗口任务至多这么久的解析
     pub const STUCK_GRACE: Duration = Duration::from_secs(1);
     pub const STUCK_GRACE_WALL: Duration = Duration::from_secs(10);   // 读不到线程 CPU 时钟、按墙上时间计时的宽限
     pub const HISTORY_MAX: usize = 100;
@@ -681,6 +682,7 @@ impl FileReaderPlugin {
 | 区间 | (OID、语言、grammar 版本、查询版本、窗口起点；整文件为 `u64::MAX`) | `Arc<WindowSpans>` | 预取的和档位 B、C 的批量窗口先于用户打开过的（ADR 0033） |
 | 文本 | OID | ≤ 1 MiB 的 `Arc<Text>`（后退、前进不再读文件） | 同上 |
 | 窗口起点表 | (OID、语言、grammar 版本、查询版本) | `Arc<[u64]>` | 同上 |
+| 预取的第一屏窗口（超过 1 MiB 的文件） | (OID、语言、grammar 版本、查询版本、目标的行首) | `Arc<WindowSpans>`（`exact` 为 false） | 同上 |
 
 - 合计 ≤ 8 MiB，按条目的 `bytes()` 计。这是 ADR 0030 和 ADR 0035 里的「`file_reader` 的 8 MB 高亮与文本 LRU」：只因阅读才填充，不在 ADR 0035 的采样状态里。
 - OID 还不知道时（首屏到扫描完成之间），区间只属于这个文档，不进 LRU；OID 有了之后一次放进去。
@@ -1089,6 +1091,14 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `just check`、`just deny`、`just doctest` 通过；`rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。[cache 设计「命名空间」](cache.md#命名空间)的 `syntax.lines` 一行与实现一致（键是 OID 的字节，值是长度、行数、最宽行的格数、是否有长行和每 64 KiB 的行号，不压缩），没有改动。
 - 没有运行全部 crate 的 `just test`：本步只改 `syntax` 和 `bench`（另在根 `Cargo.toml` 加了一个工作区依赖），这台机器的磁盘不够再编译其余 crate 的测试。没有在 macOS 上运行。
 
+第 4 步（预取、窗口链与批量窗口、让路），在 Linux（x86_64 容器，4 核，默认配置下 1 个批量线程）上运行：
+
+- `just test -p lectern-syntax -p lectern-bench`：216 个测试通过，其中 `lectern-syntax` 139 个，新增 `prefetch_*`、`batch_order_*` 和两个 `doc_*`。`prefetch_*`：6 个目标只算前 4 个，区间在 LRU 里是后台一类，没有通知、没有在途任务，首屏取到的就是预取算出的那份 `Arc`（与一次整文件解析逐行相同），打开之后改为用户打开过的一类；第二次请求替换第一次还没开始的目标；3 个批量线程上预取任务的每一轮开始时引擎只有它这一个任务（第一版在每个文件之后结束再提交新任务，全部测试一起跑时有一次看到两个，见「与设计的差异」第 4 步）；3 MiB 的文件在 2 MiB 处的目标得到一份第一屏窗口和行检查点，首屏直接用它；1 MiB 的文件解析中途打开让路开关，26 µs 后停在分片边界，开关开着时不再前进（超过 256 KiB 的一项不进保活时段），关上后完成，区间与一次解析相同。`batch_order_*`：模拟的 `code_intel` 批次 30 ms、8 MiB 文件的链在运行，1 个和 3 个批量线程上各 6 轮预取，每轮从请求到任务开始之间每个模拟任务至多跑完一批、至多一个窗口任务（1 个线程上约 52 ms，3 个线程上 8–29 ms）；1 个批量线程上每个窗口任务的预算是 50 ms、用时不超过 150 ms，两个窗口任务之间都有模拟的批次；64 MiB 的文件的链运行的 1.5 s 里，模拟任务跑了 27 批，窗口任务 27 个；在途的批量窗口在开关打开后 20 µs 停下（`Yielded`），手动时钟不前进时之后至多一个保活时段，开关关上后继续。`doc_*`：3 MiB 的档位 B 文件的链与测试里对整段文本算的链起点逐个相同，起点表在 LRU 里，滚到中部之后可见窗口和前后各一个都是链的窗口，可见部分每个非空白字节的种类与整文件解析相同，再次打开时链从起点表接上、不再计算；17 MiB 的档位 C 文件的链算到末尾，滚到 12 MiB 处的链窗口（从文件读的一段）与对整段文本从同一起点算的窗口相同。新增的 12 个测试和原有的档位 B / C 的 `doc_*` 连续运行 5 次都通过。
+- `just test`（Linux 上不依赖 GPUI 的全部 crate）：1808 个测试通过。
+- `syntax/prefetch_wait`：没有按完整规模运行。10 万个 8 KiB 的文件约 800 MB，加上 `code_intel` 的缓存，超过这台机器剩下的不到 2 GB 磁盘；发布构建的基准目标也放不下，所以只在调试构建（`just bench` 的冒烟方式）里运行。冒烟规模（2000 个文件、5 次）：中位数 62.6 ms，p95 和最大值 228 ms；临时把冒烟规模改为 3 万个文件、40 次（测完改回）：中位数 64.2 ms，p95 83.2 ms，最大 91.2 ms，期间 `code_intel` 抽取了约 3400 个文件、索引仍在进行。这台机器只有 1 个批量线程，调试构建里一批多在 50 ms 的边界结束，比「批量线程上的先后」估计的约 350 ms 短；完整规模和预算由 macOS CI 的基准任务判定。
+- `just bench syntax/`（冒烟）：其余 `syntax/*` 照常运行，`syntax/first_screen` 中位数 2.85 ms，`syntax/window_peak` 6.86 MB，`syntax/lru_bytes` 3.53 MB（冒烟规模）。没有运行 `just bench --measure syntax/`：发布构建放不下（见上一条）。
+- `just check`、`just deny`、`just doctest` 通过；`rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。没有在 macOS 上运行。
+
 前置条件 A（`services`），在 Linux（x86_64 容器）上运行（`services` 不依赖 GPUI）：
 
 - `just test -p lectern-services`：50 个测试通过。新增：`reader_service_id_and_multiple`（`ID == "reader"`、`MULTIPLE == false`，`service::<dyn Reader>()` 的键相同）、`reader_is_a_shared_trait_object`、`object_share_releases_once_on_drop`（在另一个线程上 drop，回调只调用一次）、`reader_targets_round_trip`（两种来源、三种 `Anchor`、SHA-1 与 SHA-256 的 `expect`、文件夹项目）、`reader_event_round_trips`；`dirs_match_a_naive_construction`、`dirs_children_are_in_finder_order`、`dirs_fold_single_child_chains`、`dirs_submodules_are_files`、`dirs_empty_list_has_only_the_root`、`finder_cmp_cases`；`dir_table_serializes_dirs_and_files`、`dir_table_deserializes_from_the_file_list`（乱序、错误、缺少的目录都按 `files` 重建，不合法的路径计入 `skipped`）；`dependency_extensions_are_the_adr_0033_list`。`project_snapshot_round_trips` 的样本带上目录表，检查反序列化后 `dirs.files()` 与 `files` 相等。
@@ -1154,6 +1164,20 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `Engine::prefetch` 是第 4 步，`DocHandle::edit` 是第 5 步，本步没有。
 - 依赖：本步加入 `lectern-cache`、`lectern-executor`、`lectern-fs-watch`、`lectern-git`、`lectern-kernel`、`lectern-services` 和 `unicode-width`（根 `Cargo.toml` 的 `[workspace.dependencies]` 加了一行，它已在 Cargo.lock，发布构建不新增 crate）。
 - 基准和测试的入口（`test-support`）：`Engine::first_screen` 在调用线程上算一个目标的首屏，与 `open` 的第一个任务是同一段代码，之后不提交任何任务，`syntax/first_screen` 和对象库的三项用它计时；`Engine::tasks_in_flight`、`lru_bytes`、`lru_len`；`testing::host` 给出一个内核和插件句柄。`syntax/lru_bytes` 测的是装满 LRU 之后 drop `Engine` 释放的活跃字节，含引擎的几张小表（根、身份到 OID 的表），比只算 LRU 的条目略多。
+
+第 4 步：
+
+- 窗口链（第 3 步移到这里）：完整读取（档位 B）或流式扫描（档位 C）得到 OID 之后，文档按 (OID、语言、grammar 版本、查询版本) 在 LRU 里找起点表，有就从断开处接着算，没有就从 0 开始。文档自己保存起点（每个 8 字节）和链是否到了文件末尾；每算完一个窗口，起点表作为后台一类的条目重新放进 LRU。整文件区间已经从 LRU 取到（不超过 1 MiB、有长行的档位 B 文件）时不建链。
+- 可见窗口改为链上的窗口：可见部分落在链已有的起点上时，要的是与可见部分相交的窗口和前后各一个，先从 LRU 取，没有就在 `Interactive` 任务里算（8 ms 一片，片间让出），算出的放进文档和 LRU（用户打开过的一类）。可见部分在链的前沿之后、离前沿不到 256 KiB 时，先算前沿的窗口，链随之前进；更远处仍用第 3 步的做法（启发式安全位置起单独解析，`exact` 为 false）。链的窗口放进文档时替换与它相交的启发式窗口，每个文档仍至多 8 个。从 LRU 取到的窗口，区间的终点就是下一个窗口的起点，链照样前进。设计没有写链还没到可见部分时怎样高亮档位 B，这里与档位 C 相同。
+- 批量窗口：整个引擎同一时刻至多一个任务，持有让路的 `BackgroundGuard`；每一轮先在 `proceed_item(64 KiB)` 上等（暂停、让路），再取一个窗口、`step` 一次（`BATCH_SEGMENT` 50 ms，新增常量），然后 `yield_now()`、排到批量队列末尾，与 `code_intel` 的批量循环相同；某一轮没有窗口可算时任务结束，之后有了再提交。设计写的是「然后结束，下一段重新入队」：排队的先后相同，但结束再提交时新任务在旧任务的守卫和计数释放之前就入队了，同一时刻会有两个任务，所以改为同一个任务让出线程。没算完（超时、让路、暂停）的窗口留在引擎里（至多一个），下一轮先接着算它；它的文档关闭时随文档的内容一起释放。有链要算的文档轮流取前沿。批量窗口的区间只在它是可见部分要的窗口时才放进 LRU（后台一类），并让文档从 LRU 取；其余只记下起点。
+- 档位 C 的链窗口每次从文档的 `OpenFile` 读 `[起点, 起点 + 256 KiB + 4 KiB)` 一段（不经过页的 LRU），读到的身份与文档的不同时这一次不算。
+- `SlowWindows`：批量和可见的链窗口每算完一个记一次，连续两次慢就改为纯文本、链停止。
+- 预取：一次请求只留前 4 个目标，替换上一次请求里还没开始的（设计只写了每次进入交互静止至多 4 个）。整个引擎同一时刻至多一个任务，每一轮做一个文件，下一轮之前同样 `yield_now()`、排到批量队列末尾，没有目标时结束。工作区文件和依赖文件读入后求原始字节的 OID，连同身份记进身份到 OID 的表，首屏按身份查到的就是这个 OID，所以能直接用预取的结果；对象库内容的 OID 是 `expect`。不是文本（有 NUL 或不是 UTF-8）的不算。
+- 预取超过 1 MiB 的文件：按 1 MiB 一次的 `read_ranges` 求 OID 和行索引（与档位 C 的扫描相同），写入行检查点，再按 `open` 的做法规划第一屏（按 180 行规划，覆盖打开时视口里的行）并以 50 ms 的预算解析那个窗口。这个窗口的起点是启发式的，所以 LRU 里另设一类键：(OID、语言、grammar 版本、查询版本、目标的行首)；首屏按核对过的 OID 和规划出的目标行首取它，区间覆盖可见部分时直接用，不再解析。行首与视口的行数无关，所以预取和打开规划出的相同。对象库内容在这一步里临时登记（`share_object`），首屏不再从对象库解压第二次。已改「LRU」的表。
+- 让路与暂停：预取和批量窗口的让路探针是 `yield_requested() || pause_requested()`。`FullParse`、`ChainWindow` 停在分片边界、保留状态：预取在这一轮里于 `proceed_item` 上等，之后接着解析；批量窗口停下后由下一轮接着算。预取求 OID 时在两次读之间等。预取的第一屏窗口是一次调用、不能续做，停下之后整个窗口重算（至多约 70 KiB）。设计只写了让路，暂停按 ADR 0029 同样在批次边界停下。
+- LRU 替换已有的条目时保留较晚淘汰的一类：后台工作重算用户打开过的条目（预取一个已经打开过的文件）不把它降为后台一类。
+- 测试和基准的入口（`test-support`）：`Engine::set_trace` 和 `Trace`、`StepEnd`，在做这些工作的线程上报告预取任务每一轮的开始、解析开始、让路停下、完成，以及批量窗口每一轮的开始、每次 `step` 的开始和结果。`syntax/prefetch_wait` 用它取预取任务开始做这个目标的那一轮的时刻；「验收」第 4 步「在一片之内停下」的检查放在测试里（`prefetch_stops_at_a_slice_boundary_when_yielding`、`batch_order_window_stops_within_a_slice_when_yielding`），从 `Kernel::set_yield(true)` 量到 `step` 返回，经过 kernel 的开关和 `yield_requested`，不是另一个基准。
+- `syntax/prefetch_wait` 的夹具：`code_intel` 的 `FakeGit` 在磁盘上写 10 万个 `synthetic::source` 的 8 KiB 文件，暂存它们的 OID、不在内存里留 blob，工作区视为与 index 相同；索引器按插件的做法建在同一个真实的 executor 上，每个批量线程一个批量任务。引擎在同一个 executor 上打开一个 16 MiB 的 TypeScript 文件，让窗口链的批量任务也参与轮流；每隔 150–350 ms 请求一次小文件的预取，共 40 次。索引在采样结束之前完成时基准报错。
 
 前置条件 A（`services`）。下面只记上文「接口」没有定下、实现时定下的形状：
 

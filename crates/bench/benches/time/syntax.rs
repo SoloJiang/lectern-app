@@ -2,7 +2,8 @@
 //! (open, the one `read_ranges`, the plan and the window's parse) on files
 //! and on object database content, tier A's sliced whole-file parse, tier
 //! B's window chain, tier C's streaming scan and find, on the synthetic
-//! shapes of `lectern_syntax::testing`.
+//! shapes of `lectern_syntax::testing`; and a prefetch's wait on the batch
+//! threads while the real `code_intel` indexes.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -270,6 +271,142 @@ fn find_16mib(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     }
     Ok(vec![Measured::new(
         "syntax/find_16mib",
+        Value::Time(Samples(samples)),
+    )])
+}
+
+/// `syntax/prefetch_wait` (「批量线程上的先后」): the real `code_intel`
+/// indexes a repository of 100 000 synthetic 8 KiB files (2000 in smoke
+/// mode) on the executor's batch threads, one batch task per thread, while
+/// a 16 MiB TypeScript file is open on the same executor, its window chain's
+/// batch tasks taking turns with the batches. Every 150–350 ms a prefetch
+/// of a small file is requested: the time from the request to the start of
+/// the prefetch task's turn that takes it (`Trace::PrefetchTask`). p95 ≤
+/// 500 ms (each thread's batch, about 350 ms, and one
+/// window task, 50 ms, 25% over); the maximum is only recorded.
+pub const PREFETCH_WAIT: Bench = Bench {
+    id: "syntax/prefetch_wait",
+    run: prefetch_wait,
+};
+
+fn prefetch_wait(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use std::sync::mpsc::channel;
+
+    use lectern_cache::{Budgets, Cache, Config as CacheConfig};
+    use lectern_code_intel::index::{IndexDeps, Indexer, default_batch_tasks};
+    use lectern_code_intel::testing::{FakeGit, FakeProjects, host, synthetic, watchdog};
+    use lectern_code_intel::{NoGrammarPacks, SystemClock};
+    use lectern_fs_watch::testing::FakeBackend;
+    use lectern_fs_watch::{Config as WatchConfig, Watcher};
+    use lectern_services::code_intel::TierState;
+    use lectern_syntax::Trace;
+
+    let files = ctx.scale(100_000, 2_000);
+    let rounds = ctx.scale(40, 5);
+    let scratch = ctx.scratch().to_path_buf();
+    // The repository: worktree files on disk, the index's OIDs staged
+    // without blobs in memory, the worktree equal to the index.
+    let git = Arc::new(FakeGit::at(&scratch.join("repo"))?);
+    git.assume_unchanged(true);
+    let mut entries = Vec::with_capacity(files);
+    for i in 0..files {
+        let path = synthetic::path(i);
+        let source = synthetic::source(synthetic::extension(i), i, 8 << 10);
+        git.write("main", &path, &source);
+        entries.push((path, git.oid(&source)));
+    }
+    git.stage_oids("main", entries);
+    git.commit("main");
+    // The reader's engine over a folder of its own, on the executor the
+    // indexer uses too.
+    let folder = scratch.join("folder");
+    std::fs::create_dir(&folder)?;
+    let rig = Rig::with_executor(&folder, lectern_executor::Executor::new(Default::default()))?;
+    let executor = rig.executor.clone();
+    write(
+        &rig.root.join("big.ts"),
+        &testing::ts(16 * MIB - (64 << 10), 0),
+    )?;
+    let small = 4;
+    for i in 0..small {
+        write(
+            &rig.root.join(format!("p{i}.ts")),
+            &testing::ts(16 << 10, i * 100),
+        )?;
+    }
+    let (tx, started) = channel();
+    rig.engine.set_trace(move |event| {
+        if event == Trace::PrefetchTask {
+            let _ = tx.send(Instant::now());
+        }
+    });
+    // The indexer: as the plugin builds it, with one batch task per batch
+    // thread.
+    let ci_host = host();
+    let projects = FakeProjects::new();
+    let watcher = Watcher::new(FakeBackend::new(), executor.clone(), WatchConfig::default());
+    let (wd, _watchdog) = watchdog(&executor, Arc::new(SystemClock));
+    let indexer = Indexer::with_fake_git(
+        IndexDeps {
+            executor: executor.clone(),
+            cache: Cache::new(CacheConfig {
+                root: scratch.join("cache"),
+                budgets: Budgets::default(),
+                ui_thread: None,
+            }),
+            watcher,
+            grammars: Arc::new(NoGrammarPacks),
+            projects: projects.clone(),
+            handle: ci_host.handle.clone(),
+            watchdog: wd,
+            batch_tasks: default_batch_tasks(),
+        },
+        git.clone(),
+    );
+    let _subscriptions = indexer.subscribe();
+    let key = git.key();
+    let indexing = || {
+        indexer
+            .coverage(&key)
+            .is_some_and(|c| c.worktree != TierState::Done)
+    };
+    indexer.project_event(&projects.set(git.snapshot(1, "main", Vec::new())));
+    let begun = Instant::now();
+    while indexer.stats().extractions == 0 {
+        if begun.elapsed() > Duration::from_secs(120) {
+            return Err(BenchError::new("indexing did not begin"));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (doc, notified) = rig.open(rig.target("big.ts", Anchor::Start));
+    wait(&doc, &notified, |s| s.oid.is_some())?;
+    let mut rng = Rng(0x9e37);
+    let mut samples = Vec::with_capacity(rounds);
+    for round in 0..rounds {
+        if !indexing() {
+            return Err(BenchError::new(format!(
+                "indexing ended after {round} prefetches"
+            )));
+        }
+        let path = format!("p{}.ts", round % small);
+        let queued = Instant::now();
+        rig.engine
+            .prefetch(vec![(rig.target(&path, Anchor::Start), rig.root.clone())]);
+        let at = started
+            .recv_timeout(Duration::from_secs(60))
+            .map_err(|_| BenchError::new("the prefetch did not start"))?;
+        samples.push(at.saturating_duration_since(queued));
+        std::thread::sleep(Duration::from_millis(150 + rng.below(200)));
+    }
+    eprintln!(
+        "syntax/prefetch_wait: {} extractions, indexing {}",
+        indexer.stats().extractions,
+        if indexing() { "still running" } else { "done" }
+    );
+    drop(doc);
+    indexer.close_all();
+    Ok(vec![Measured::new(
+        "syntax/prefetch_wait",
         Value::Time(Samples(samples)),
     )])
 }

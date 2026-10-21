@@ -649,6 +649,7 @@ crates/bench/
 | `syntax/scan_64mib`、`syntax/find_16mib` | 只记录（64 MiB 的 TypeScript 从 `Engine::open` 到流式扫描给出 OID 和精确行数；16 MiB 的 `Text` 上从 `find` 到最后一批结果） | [file_reader](file_reader.md#性能) | file_reader 第 3 步 |
 | `syntax/window_peak` | 最大值 ≤ 8 MiB（窗口链里一个 64 KiB 窗口的解析与高亮期间的活跃字节峰值，TypeScript、Rust、JSON、压缩 JavaScript 各几个窗口，tree-sitter 的分配计入；`Memory`） | [file_reader](file_reader.md#性能) | file_reader 第 2 步 |
 | `syntax/full_parse_1mib`、`syntax/chain_16mib` | 只记录（1 MiB 的 TypeScript 按 8 ms 一片的整文件解析；16 MiB 的 TypeScript 的整条窗口链，每片 50 ms） | [file_reader](file_reader.md#性能) | file_reader 第 2 步 |
+| `syntax/prefetch_wait` | p95 ≤ 500 ms，最大值只记录（真实的 `code_intel` 在 10 万个 8 KiB 文件的夹具上建索引、同一个 executor 上打开的 16 MiB 文件的窗口链在运行时，预取从请求到预取任务开始做它的那一轮；每个批量线程的一批约 350 ms 加一个 50 ms 的窗口任务，留 25% 余量） | [file_reader](file_reader.md#性能) | file_reader 第 4 步 |
 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，测量前丢掉那次跳转保留的解析（不在 [ADR 0035](../adr/0035.md) 的采样状态里，见 [ADR 0037](../adr/0037.md)），计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |

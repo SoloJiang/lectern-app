@@ -644,3 +644,110 @@ fn doc_tier_c_byte_with_another_oid_moves_by_its_line() {
     let now = doc.snapshot();
     assert_eq!(first_text(&now, now.anchor), "line 400000");
 }
+
+/// The windows of the chain the snapshot holds meeting `range`, which they
+/// must cover.
+fn chain_windows<'s>(
+    s: &'s crate::DocSnapshot,
+    range: &std::ops::Range<u64>,
+) -> Vec<&'s crate::WindowSpans> {
+    let windows: Vec<&crate::WindowSpans> = s
+        .spans
+        .iter()
+        .map(|w| &**w)
+        .filter(|w| w.range().start < range.end && range.start < w.range().end)
+        .collect();
+    assert!(
+        windows.iter().all(|w| w.exact()),
+        "only the chain's windows"
+    );
+    let from = windows.iter().map(|w| w.range().start).min().unwrap();
+    let to = windows.iter().map(|w| w.range().end).max().unwrap();
+    assert!(
+        from <= range.start && range.end <= to,
+        "{from}..{to} covers {range:?}"
+    );
+    windows
+}
+
+#[test]
+fn doc_tier_b_visible_windows_are_the_chains() {
+    let rig = Rig::new();
+    let bytes = testing::ts(3 << 20, 0);
+    rig.write("big.ts", &bytes);
+    let ts = super::lang("ts");
+    let (doc, s) = rig.open_settled(rig.target("big.ts", Anchor::Start));
+    assert_eq!(s.tier, Some(Tier::B));
+    // The batch work ran the chain to its end, cut as the chain over the
+    // text is.
+    let expected = super::chain(ts, &bytes);
+    let starts: Vec<u64> = expected.iter().map(|w| w.range().start).collect();
+    assert_eq!(doc.chain(), Some((starts.clone(), true)));
+    let oid = s.oid.unwrap();
+    let of = crate::lru::SpansOf::new(oid, ts);
+    let lru = &rig.engine.inner().lru;
+    let table = lru.starts(of, crate::lru::Class::Background).unwrap();
+    assert_eq!((table.starts.to_vec(), table.done), (starts.clone(), true));
+    // Scrolled to the middle: the chain's windows there and one on each
+    // side, colouring each byte as the whole file's parse does.
+    let middle = s.pos_of_byte(3 << 19, VIEW.cols);
+    doc.scrolled(middle);
+    rig.settle();
+    let now = doc.snapshot();
+    let shown = now.visible_bytes(middle, VIEW.rows, VIEW.cols);
+    let windows = chain_windows(&now, &shown);
+    let k = starts.partition_point(|&s| s <= shown.start) - 1;
+    for start in [starts[k - 1], starts[k], starts[k + 1]] {
+        assert!(
+            now.spans
+                .iter()
+                .any(|w| w.exact() && w.range().start == start),
+            "the window from {start}"
+        );
+    }
+    let whole = super::full(ts, &bytes);
+    let got = super::kinds(&windows, shown.clone());
+    let want = super::kinds(&[&whole], shown.clone());
+    assert_eq!(super::differences(&bytes, shown, &got, &want), vec![]);
+    // Opened again, the chain starts from the table: nothing left to do.
+    drop(doc);
+    rig.settle();
+    let again = rig.open(rig.target("big.ts", Anchor::Start));
+    rig.settle();
+    assert_eq!(again.chain(), Some((starts, true)));
+}
+
+#[test]
+fn doc_tier_c_chain_windows_are_read_from_the_file() {
+    let rig = Rig::new();
+    let bytes = testing::ts(TIER_B_MAX as usize + (1 << 20), 0);
+    rig.write("huge.ts", &bytes);
+    let ts = super::lang("ts");
+    let (doc, s) = rig.open_settled(rig.target("huge.ts", Anchor::Start));
+    assert_eq!(s.tier, Some(Tier::C));
+    let (starts, done) = doc.chain().unwrap();
+    assert!(done);
+    assert!(starts.windows(2).all(|w| w[0] < w[1]));
+    let byte = 12u64 << 20;
+    let pos = s.pos_of_byte(byte, VIEW.cols);
+    doc.scrolled(pos);
+    rig.settle();
+    let now = doc.snapshot();
+    let shown = now.visible_bytes(pos, VIEW.rows, VIEW.cols);
+    let windows = chain_windows(&now, &shown);
+    // Each is the window the chain over the text has from its start.
+    let src: Arc<dyn crate::highlight::Source> = Arc::new(bytes);
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    for window in windows {
+        let start = window.range().start;
+        let mut alone = crate::highlight::ChainWindow::new(ts, src.clone(), start);
+        let crate::highlight::Outcome::Done((spans, next)) = alone.step(super::ample(&cancel))
+        else {
+            panic!("the window from {start}");
+        };
+        assert_eq!(window.range(), start..next);
+        let a: Vec<_> = window.lines().map(|(at, t)| (at, t.len())).collect();
+        let b: Vec<_> = spans.lines().map(|(at, t)| (at, t.len())).collect();
+        assert_eq!(a, b, "the window from {start}");
+    }
+}

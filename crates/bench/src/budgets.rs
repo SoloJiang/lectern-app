@@ -138,6 +138,13 @@ const fn max(limit: Limit) -> Check {
     }
 }
 
+const fn p95(limit: Limit) -> Check {
+    Check {
+        stat: Stat::P95,
+        limit,
+    }
+}
+
 const RECORD: &[Check] = &[];
 
 const TECH: &str = "docs/design/tech-research.md#性能预算";
@@ -1497,7 +1504,7 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Memory,
     ),
-    // ---- syntax (file_reader design, steps 2 and 3) ----
+    // ---- syntax (file_reader design, steps 2 to 4) ----
     // The first screen: open, the one `read_ranges`, the plan and the
     // window's parse and query with the 8 ms deadline, on synthetic
     // TypeScript, Rust and JSON files of 1–64 MiB, 40 random offsets each;
@@ -1566,6 +1573,18 @@ pub static BUDGETS: &[Budget] = &[
     // Tier C's streaming scan of 64 MiB, and find in 16 MiB. Record only.
     share("syntax/scan_64mib", RECORD, FILE_READER, ACTIVE, Time),
     share("syntax/find_16mib", RECORD, FILE_READER, ACTIVE, Time),
+    // A prefetch's wait on the batch threads while the real code_intel
+    // indexes 100 000 files and a 16 MiB file's window chain runs: from
+    // the request to the prefetch task's turn. Each thread's batch (about
+    // 350 ms) and one window task (50 ms), 25% over; the maximum is only
+    // recorded (「批量线程上的先后」).
+    share(
+        "syntax/prefetch_wait",
+        &[p95(Limit::TimeAtMost(ms(500)))],
+        FILE_READER,
+        ACTIVE,
+        Time,
+    ),
     // ---- end syntax ----
     // FakeBackend and the manual driver, without backend latency.
     share(

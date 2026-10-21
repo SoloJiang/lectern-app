@@ -29,6 +29,7 @@ pub const VIEW: Viewport = Viewport {
 pub struct Rig {
     pub engine: Engine,
     pub root: Arc<Path>,
+    pub executor: Executor,
     _host: TestHost,
     _cache: Cache,
 }
@@ -36,11 +37,15 @@ pub struct Rig {
 impl Rig {
     /// The engine over `root` (a folder project: no watching).
     pub fn new(root: &Path) -> Result<Rig, BenchError> {
+        Rig::with_executor(root, Executor::new(ExecutorConfig::default()))
+    }
+
+    /// The same on `executor`, shared with other work.
+    pub fn with_executor(root: &Path, executor: Executor) -> Result<Rig, BenchError> {
         let root: Arc<Path> = Arc::from(
             root.canonicalize()
                 .map_err(|e| BenchError::new(e.to_string()))?,
         );
-        let executor = Executor::new(ExecutorConfig::default());
         let cache = Cache::new(CacheConfig {
             root: root.join(".cache"),
             budgets: Budgets::default(),
@@ -48,7 +53,7 @@ impl Rig {
         });
         let watcher = Watcher::new(FakeBackend::new(), executor.clone(), WatchConfig::default());
         let engine = Engine::new(EngineDeps {
-            executor,
+            executor: executor.clone(),
             cache: cache.clone(),
             watcher,
             languages: Languages::core(),
@@ -58,6 +63,7 @@ impl Rig {
         Ok(Rig {
             engine,
             root,
+            executor,
             _host: host,
             _cache: cache,
         })

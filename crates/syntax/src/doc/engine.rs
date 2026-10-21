@@ -3,19 +3,23 @@
 //! A document's tasks are numbered by load: opening, and every reload after
 //! an outside change, starts a new load and cancels the old one's tasks
 //! (their results are dropped when they land). Every task goes through the
-//! plugin's handle (`own_with`) holding a `BusyGuard`.
+//! plugin's handle (`own_with`) holding a `BusyGuard`, except the
+//! memory-only batch work (the prefetch, the window chain's batch windows),
+//! which holds a yielding `BackgroundGuard` (ADR 0033).
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+#[cfg(any(test, feature = "test-support"))]
+use std::time::Duration;
 
 use lectern_cache::{Cache, Partition};
 use lectern_executor::{Executor, Priority};
 use lectern_fs_watch::Watcher;
 use lectern_git::HashKind;
-use lectern_kernel::{BusyGuard, PluginHandle};
+use lectern_kernel::{BackgroundGuard, BusyGuard, PluginHandle};
 use lectern_platform::{FileIdentity, OpenFile, SafeRoot};
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{BlobId, ProjectKey};
@@ -31,10 +35,11 @@ use crate::spans::WindowSpans;
 use crate::text::LineCheckpoints;
 use crate::util::{lock, log};
 
+use super::chain::{self, ChainState};
 use super::content::{Content, PageCache};
 use super::{
     DocSnapshot, DocState, Editable, Highlighting, LineCount, NotEditable, RowPos, Tier, Viewport,
-    load, watch,
+    load, prefetch, watch,
 };
 
 /// How many file identities and the OIDs their scans found are kept, so a
@@ -70,14 +75,69 @@ pub(crate) struct EngineInner {
     known: Mutex<VecDeque<Known>>,
     docs: Mutex<Vec<Weak<Doc>>>,
     in_flight: Arc<AtomicUsize>,
+    /// The window chain's batch task (at most one) and the window it
+    /// stopped in.
+    pub chain: Mutex<chain::Sched>,
+    /// The prefetch's targets and its task (at most one).
+    pub prefetch: Mutex<prefetch::Queue>,
     /// Runs once right after the next first screen is published (tests).
     #[cfg(test)]
     pub after_first: Mutex<Option<Hook>>,
+    #[cfg(any(test, feature = "test-support"))]
+    trace: Mutex<Option<Tracer>>,
 }
 
 /// Gets the snapshot just published.
 #[cfg(test)]
 pub(crate) type Hook = Box<dyn FnOnce(&DocSnapshot) + Send>;
+
+#[cfg(any(test, feature = "test-support"))]
+type Tracer = Arc<dyn Fn(Trace) + Send + Sync>;
+
+/// What the engine's batch work does, as it happens (`test-support`: the
+/// tests and `syntax/prefetch_wait`). Called on the thread doing it.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Trace {
+    /// A turn of the prefetch task begins: it got a thread, first or back
+    /// from the end of the batch queue.
+    PrefetchTask,
+    /// The prefetch begins the parse of `path`: the whole file up to 1 MiB,
+    /// else the first screen's window.
+    PrefetchParse { path: Arc<str> },
+    /// That parse stopped at a slice boundary for the yield switch (or the
+    /// pause), keeping its state.
+    PrefetchYielded { path: Arc<str> },
+    /// The prefetch put `path`'s spans in the LRU.
+    PrefetchDone { path: Arc<str> },
+    /// A turn of the window chain's batch task begins.
+    ChainTask,
+    /// A batch window's step from `start` begins with `budget`.
+    ChainStep { start: u64, budget: Duration },
+    /// It returned.
+    ChainStepEnd { start: u64, end: StepEnd },
+}
+
+/// How a traced step ended.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StepEnd {
+    Done,
+    TimedOut,
+    Yielded,
+    Cancelled,
+    Unavailable,
+}
+
+/// Reports a [`Trace`] event when the tracer is set; nothing outside
+/// `test-support`.
+macro_rules! trace {
+    ($engine:expr, $event:expr) => {
+        #[cfg(any(test, feature = "test-support"))]
+        $engine.trace($event);
+    };
+}
+pub(crate) use trace;
 
 /// The roots' `SafeRoot`s, by project and root path.
 type Roots = HashMap<(ProjectKey, Arc<Path>), Arc<SafeRoot>>;
@@ -110,8 +170,12 @@ impl Engine {
                 known: Mutex::new(VecDeque::new()),
                 docs: Mutex::new(Vec::new()),
                 in_flight: Arc::new(AtomicUsize::new(0)),
+                chain: Mutex::new(chain::Sched::default()),
+                prefetch: Mutex::new(prefetch::Queue::default()),
                 #[cfg(test)]
                 after_first: Mutex::new(None),
+                #[cfg(any(test, feature = "test-support"))]
+                trace: Mutex::new(None),
             }),
         }
     }
@@ -142,6 +206,18 @@ impl Engine {
         let at = doc.target.at;
         load::start(&self.inner, &doc, at);
         DocHandle { doc }
+    }
+
+    /// Prefetch while interaction is quiet (`Reader::prefetch`, ADR 0033):
+    /// the first [`PREFETCH_MAX`](crate::limits::PREFETCH_MAX) targets, each
+    /// with its root, replace those of the last request not started yet.
+    /// One `Batch` task at a time, one file a turn, holding a yielding
+    /// `BackgroundGuard`: a file up to 1 MiB gets its whole spans, a larger
+    /// one its first screen's window; the results go only into the LRU (as
+    /// background work, evicted first), nothing is opened or notified.
+    /// Returns at once.
+    pub fn prefetch(&self, targets: Vec<(ReadTarget, Arc<Path>)>) {
+        prefetch::request(&self.inner, targets);
     }
 
     /// Registers object database content someone holds (the review's diff
@@ -207,6 +283,12 @@ impl Engine {
         self.inner.lru.len()
     }
 
+    /// Reports what the batch work does from now on ([`Trace`]), on the
+    /// threads doing it.
+    pub fn set_trace(&self, tracer: impl Fn(Trace) + Send + Sync + 'static) {
+        *lock(&self.inner.trace) = Some(Arc::new(tracer));
+    }
+
     /// The first screen of `target` on the calling thread, as `open`'s
     /// first task computes it, with no task after it: for the benchmarks.
     pub fn first_screen(
@@ -224,7 +306,7 @@ impl Engine {
             doc.target.at,
             doc.target.expect,
             viewport.rows,
-            &cancel,
+            load::first_budget(&cancel),
         );
         let mut st = doc.lock();
         let _ = load::fill_first(&mut st, &doc.target, first);
@@ -236,6 +318,14 @@ impl Engine {
 impl Engine {
     pub(crate) fn inner(&self) -> &Arc<EngineInner> {
         &self.inner
+    }
+}
+
+#[cfg(test)]
+impl EngineInner {
+    /// The count of tasks submitted and not ended.
+    pub(crate) fn in_flight(&self) -> Arc<AtomicUsize> {
+        self.in_flight.clone()
     }
 }
 
@@ -278,6 +368,48 @@ impl EngineInner {
                 work.await;
             })
         })
+    }
+
+    /// Submits memory-only batch work (ADR 0033): a `Batch` task holding a
+    /// yielding `BackgroundGuard`, which `work` gets. False when the engine
+    /// has not started or the plugin is gone; nothing runs then.
+    pub(crate) fn spawn_yielding<F, Fut>(&self, work: F) -> bool
+    where
+        F: FnOnce(BackgroundGuard) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let Some(handle) = self.handle() else {
+            return false;
+        };
+        let Some(guard) = handle.background_yielding() else {
+            return false;
+        };
+        let count = InFlight::new(&self.in_flight);
+        let executor = self.executor.clone();
+        let work = work(guard);
+        handle.own_with(move |gate| {
+            executor.spawn_gated(&gate, Priority::Batch, async move {
+                let _count = count;
+                work.await;
+            })
+        })
+    }
+
+    /// The documents still open.
+    pub(crate) fn live_docs(&self) -> Vec<Arc<Doc>> {
+        lock(&self.docs)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|d| !d.is_closed())
+            .collect()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn trace(&self, event: Trace) {
+        let tracer = lock(&self.trace).clone();
+        if let Some(tracer) = tracer {
+            tracer(event);
+        }
     }
 
     /// The root's `SafeRoot`, opened on first use. Blocking.
@@ -440,6 +572,12 @@ impl DocHandle {
         self.doc.lock().watch.is_some()
     }
 
+    /// The window chain's starts, and whether it reached the end.
+    pub(crate) fn chain(&self) -> Option<(Vec<u64>, bool)> {
+        let st = self.doc.lock();
+        st.chain.as_ref().map(|c| (c.starts().to_vec(), c.done))
+    }
+
     /// Starts a reload as an outside change would.
     pub(crate) fn reload(&self) {
         if let Some(engine) = self.doc.engine.upgrade() {
@@ -494,8 +632,13 @@ pub(crate) struct DocMut {
     /// The OID `whole` belongs to, when the first screen took it from the
     /// LRU: the full read drops it unless the content's OID is that one.
     pub whole_from: Option<BlobId>,
-    /// The first screen's and the visible windows' spans, newest first.
+    /// The first screen's and the visible windows' spans, newest first:
+    /// windows of the chain (exact), or parsed alone where the chain has not
+    /// got to yet.
     pub windows: Vec<Arc<WindowSpans>>,
+    /// Tiers B and C once the content's OID is known: the window chain's
+    /// starts.
+    pub chain: Option<ChainState>,
     /// The identity of the file read.
     pub identity: Option<FileIdentity>,
     /// Tier C's open file, kept for page reads and finds.
@@ -558,6 +701,7 @@ impl Doc {
             whole: None,
             whole_from: None,
             windows: Vec::new(),
+            chain: None,
             identity: None,
             file: None,
             pages: None,
@@ -624,10 +768,14 @@ impl Doc {
                 st.pages.take(),
                 std::mem::take(&mut st.windows),
                 st.whole.take(),
+                st.chain.take(),
             )
         };
         match self.engine.upgrade() {
             Some(engine) => {
+                // The window a batch task stopped in holds this content.
+                let parked = chain::forget(&engine, self);
+                let garbage = (garbage, parked);
                 // The descriptor is closed off this thread when it can be.
                 let _ = engine.spawn(Priority::Background, async move { drop(garbage) });
             }
