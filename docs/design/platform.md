@@ -18,7 +18,7 @@
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
   - 内置转换、OID 计算、stat 比较本身、按路径缓存：`git`。
-  - 写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。编辑的保存要的原子替换 `SafeRoot::replace_file` 由 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)提出，实现时在本文加一节，与 #66 共用打开逻辑。
+  - 写文件、克隆文件：随 Analyze 快照（[#66](https://github.com/SoloJiang/lectern-app/issues/66)）设计，复用本模块的打开逻辑（见「数据流与线程」）。编辑的保存要的原子替换 `SafeRoot::replace_file` 由 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)提出，实现时在本文加一节，与 #66 共用打开逻辑；同一处还提出了线程的 CPU 时钟 `ThreadCpuClock`（[ADR 0041](../adr/0041.md) 的卡死检测），同样在实现时加一节。
 - 本文不覆盖，以后在本文增加小节或另写设计文档，设计合并之前不写对应的代码：
   - FSEvents 与 kqueue 后端（实现 `fs_watch` 的接口，模块 `fs_events`）：设计、实际验证和与设计的差异都在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)。
   - `open -a`、钥匙串、代码签名校验、线程 QoS（[executor 设计](executor.md)的线程启动钩子）。
@@ -581,8 +581,8 @@ impl Meta {
   - 首屏：`open_file` 加一次 `read_ranges`（「首屏的一次调用」）。不超过 16 MiB 的文件，完整读取用同一个 `OpenFile` 在后台调用 `read_all(16 MiB)`，按「文件身份」核对：身份相同时保留首屏的结果；不同时首屏的结果作废，按完整读取的内容重新显示，重新定位的规则由 `file_reader` 决定。
   - 超过 16 MiB 的文件：持有 `OpenFile`（放进 `Arc`，可见的页和后台扫描共用），每页一次 `read_ranges`；返回的身份与打开时不同时，已读的页全部作废，重新打开。
   - 持有时间：不超过 16 MiB 的文件在完整读取之后 drop `OpenFile`；超过 16 MiB 的在阅读视图关闭或收到这个路径的 `fs_watch` 事件时 drop，收到事件时重新打开。
-  - 偏移的口径：范围读取的偏移和字节都是磁盘上的原始字节。`git` 的 `*_byte` 和按 blob OID 缓存的行检查点按规范内容计（[git 设计「展示行」](git.md#展示行)），文件有 to-git 方向的转换（`core.autocrlf` 下的 CRLF、`working-tree-encoding`、`ident`）时两种偏移不同。工作区文件按哪种口径显示、偏移怎样换算，由 `file_reader` 的设计决定；本模块不做转换。
-  - 工作区文件的 OID：查行检查点要先知道 OID。`OpenFile::meta()` 是完整的 `Meta`，可以按 git 的 stat 比较规则与 index 条目比较（一致且不是 racy-clean 时就是 index 里的 OID）；需要的接口由 `file_reader` 的设计向 `git` 提出。
+  - 偏移的口径：范围读取的偏移和字节都是磁盘上的原始字节。`git` 的 `*_byte` 按规范内容计（[git 设计「展示行」](git.md#展示行)），文件有 to-git 方向的转换（`core.autocrlf` 下的 CRLF、`working-tree-encoding`、`ident`）时两种偏移不同。行检查点按原始字节计数，键是原始字节按 git blob 格式求得的 OID（[file_reader 设计「定位」](file_reader.md#定位)、[cache 设计「命名空间」](cache.md#命名空间)），与范围读取同一口径。工作区文件按原始字节显示，规范内容的偏移怎样使用见 file_reader 设计「定位」；本模块不做转换。
+  - 工作区文件的 OID：查行检查点要先知道 OID。file_reader 的设计取 `FileList` 里这个路径的 OID 作候选、用检查点里记下的内容长度与 `OpenFile::meta().size` 比较，完整读取或扫描之后再核对，不需要向 `git` 增加 stat 比较的接口（file_reader 设计「定位」）。
   - 取得 `SafeRoot` 的途径（经 `git` 的 `Worktree`，或 `project`）由 `file_reader` 的设计决定。
 - `git`：不改，`read` 的行为不变。`file_reader` 经 `Worktree` 打开文件时，`git` 增加一个转发 `open_file` 的方法，随 `file_reader` 的设计。
 - `bench`：预算表增加 `platform/safe_read_range`、`platform/safe_read_page`，[bench 设计「预算表」](bench.md#预算表)和 `crates/bench/src/budgets.rs` 里都已加上（设计 PR 登记为 `Planned("#103")`），实现 PR 加了基准并改为 `Active`，见下文「性能」。
