@@ -457,6 +457,55 @@ fn disk_100k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
+/// An opened 16 MiB TypeScript file (「大文件」, ADR 0034): from the focus
+/// to its window chain written to the end (the `Windowed` marker stored),
+/// on a fresh cache each sample: the stream of its OID in 1 MiB ranges,
+/// then about 260 windows of 64 KiB, each written as it is done. Record
+/// only.
+pub const WINDOW_CHAIN_16MIB: Bench = Bench {
+    id: "code_intel/window_chain_16mib",
+    run: window_chain_16mib,
+};
+
+fn window_chain_16mib(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use lectern_code_intel::testing::{FakeGit, Rig};
+
+    // At most 16 MiB, the largest file opened by windows: the source ends
+    // past the length asked for by up to one unit.
+    let len = ctx.scale((16 << 20) - (64 << 10), 1_200_000);
+    let source = synthetic::source("ts", 16, len);
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(3, 1) {
+        let git = Arc::new(FakeGit::new());
+        git.add("main", &[("big.ts", &source)]);
+        git.commit("main");
+        let dir = tempfile::tempdir_in(ctx.scratch())?;
+        let cache = Cache::new(Config {
+            root: dir.path().to_path_buf(),
+            budgets: Budgets::default(),
+            ui_thread: None,
+        });
+        let rig = Rig::new(git, cache, Arc::new(SystemClock));
+        rig.open();
+        rig.settle();
+        let start = Instant::now();
+        if !rig.current("big.ts") {
+            return Err(BenchError::new("big.ts is not in the map"));
+        }
+        rig.settle();
+        let took = start.elapsed();
+        let status = rig.stored_status("big.ts");
+        if status != Some(ExtractStatus::Windowed) {
+            return Err(BenchError::new(format!("the chain ended {status:?}")));
+        }
+        samples.push(took);
+    }
+    Ok(vec![Measured::new(
+        "code_intel/window_chain_16mib",
+        Value::Time(lectern_bench::Samples(samples)),
+    )])
+}
+
 /// 「规范内容 OID 的批量核对」: a checkout leaves 1000 tracked files (about
 /// 8 KiB each) of a 10 000-file repository with CRLF (`core.autocrlf =
 /// true`, the index has LF); fs_watch reports them modified and the

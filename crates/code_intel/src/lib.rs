@@ -22,6 +22,7 @@ mod semantic;
 mod util;
 mod walk;
 mod watchdog;
+mod window;
 
 pub mod extract;
 pub mod index;

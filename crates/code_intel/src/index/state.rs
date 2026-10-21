@@ -339,6 +339,11 @@ pub(crate) struct Batch {
     /// Set once this session's own write evicted units (the namespace is
     /// at its quota): the eviction generation the walks keep using.
     pub full: Option<u64>,
+    /// The window chains of opened large files (「大文件」), the batch
+    /// tiers' first work; a batch task takes one out while it does a step.
+    pub chains: VecDeque<super::chain::Chain>,
+    /// The keys of the chains queued or taken: one chain per key.
+    pub chain_keys: HashSet<(BlobId, LangName)>,
 }
 
 /// Work for the batch tasks was made: passed to `Inner::wake` once the

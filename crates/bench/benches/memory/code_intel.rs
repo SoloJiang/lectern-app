@@ -108,6 +108,50 @@ fn batch_peak(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
+/// The peak of live bytes while an opened 16 MiB TypeScript file's window
+/// chain runs (「大文件」, ADR 0034), from the focus to the `Windowed`
+/// marker: the streamed hash's 1 MiB range, or one 64 KiB window and its
+/// syntax tree (tree-sitter's allocations counted), never both. The file
+/// needs no conversion and no window is widened.
+pub const WINDOW_PEAK: Bench = Bench {
+    id: "code_intel/window_peak",
+    run: window_peak,
+};
+
+fn window_peak(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    // At most 16 MiB (the source ends past the length asked for by up to
+    // one unit).
+    let len = ctx.scale((16 << 20) - (64 << 10), 1_200_000);
+    let source = synthetic::source("ts", 16, len);
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(SAMPLES, 1) {
+        let git = Arc::new(FakeGit::new());
+        git.add("main", &[("big.ts", &source)]);
+        git.commit("main");
+        let dir = tempfile::tempdir_in(ctx.scratch())?;
+        let rig = Rig::new(git, cache(dir.path()), Arc::new(SystemClock));
+        rig.open();
+        rig.settle();
+        let before = CountingAlloc::live();
+        CountingAlloc::reset_peak();
+        if !rig.current("big.ts") {
+            return Err(BenchError::new("big.ts is not in the map"));
+        }
+        rig.settle();
+        let peak = CountingAlloc::peak().saturating_sub(before);
+        let status = rig.stored_status("big.ts");
+        if status != Some(lectern_code_intel::extract::ExtractStatus::Windowed) {
+            return Err(BenchError::new(format!("the chain ended {status:?}")));
+        }
+        samples.push(peak as u64);
+        drop(rig);
+    }
+    Ok(vec![Measured::new(
+        "code_intel/window_peak",
+        Value::Bytes(samples),
+    )])
+}
+
 /// The ⌘K name table of 100 000 files (≤ 8 MB): its live bytes once built.
 pub const NAMES_100K_BYTES: Bench = Bench {
     id: "code_intel/names_100k_bytes",

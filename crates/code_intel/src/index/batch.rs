@@ -44,8 +44,8 @@ use super::state::{
 use super::{Inner, bump, lock};
 use crate::canonical::{Canonical, Pending};
 use crate::extract::{
-    BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction,
-    INTERACTIVE_MAX_LEN, Lang, LanguageTable, ResumeSlot,
+    BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction, Lang,
+    LanguageTable, ResumeSlot,
 };
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{HintStamp, LangLookup};
@@ -365,22 +365,22 @@ impl Clone for Scanned {
 }
 
 /// One extraction ready to be written.
-struct Done {
-    item: Item,
+pub(super) struct Done {
+    pub item: Item,
     /// The OID of the bytes actually read (「存储表」).
-    key: BlobId,
+    pub key: BlobId,
     /// A batch tier's worktree bytes whose raw OID (`key`) is not the
     /// queued OID: kept until the batch's `canonical_oids` before the
     /// commit, which makes the queued OID the key when the built-in
     /// conversions turn the bytes into it (「规范内容 OID 的批量核对」).
-    check: Option<Vec<u8>>,
-    extraction: Extraction,
+    pub check: Option<Vec<u8>>,
+    pub extraction: Extraction,
     /// The cancel flag the item was taken with (`State::finish`).
-    flag: Arc<AtomicBool>,
+    pub flag: Arc<AtomicBool>,
     /// The unit's part and whether `key` is the raw bytes' OID
     /// (`UnitMeta::canonical`; a key `check` turns into the queued OID is
     /// not).
-    meta: UnitMeta,
+    pub meta: UnitMeta,
 }
 
 /// One item read ([`Inner::read_item`]).
@@ -416,11 +416,11 @@ enum Step {
 }
 
 /// The read side of one session, copied out of the lock.
-struct Ctx {
-    session: u64,
-    cancel: Arc<AtomicBool>,
-    root: Option<Arc<SafeRoot>>,
-    tree: Option<Tree>,
+pub(super) struct Ctx {
+    pub session: u64,
+    pub cancel: Arc<AtomicBool>,
+    pub root: Option<Arc<SafeRoot>>,
+    pub tree: Option<Tree>,
 }
 
 impl Inner {
@@ -453,7 +453,7 @@ impl Inner {
 
     /// Wakes the batch tasks waiting at a yielding boundary (tier 3 wants
     /// the large slot).
-    fn wake_waiters(&self) {
+    pub(super) fn wake_waiters(&self) {
         let waiters = std::mem::take(&mut lock(&self.batch).waiters);
         for waker in waiters {
             waker.wake();
@@ -633,7 +633,8 @@ impl Inner {
         if st.base_for.is_none() || st.cancel.load(Ordering::Acquire) {
             return None;
         }
-        if !st.batch.resume[0].is_empty() {
+        // An opened large file's window chain first (「大文件」).
+        if !st.batch.resume[0].is_empty() || self.chain_ready(&st) {
             return Some(Kind::Near);
         }
         let deps = st.cursor_deps(eviction);
@@ -794,6 +795,11 @@ impl Inner {
         let Some((ctx, stamp)) = self.step_ctx(project) else {
             return Step::Idle;
         };
+        // An opened large file's window chain first, one window a step
+        // (「大文件」); it takes the large slot over from a parked task.
+        if self.chain_step(project, &ctx, guard) {
+            return Step::Worked;
+        }
         // Files known to be missing go first.
         if !lock(&project.state).batch.resume[0].is_empty() {
             self.extract_batch(project, &ctx, 0, guard, Kind::Near, Grant::Batch, own);
@@ -1669,10 +1675,9 @@ impl Inner {
         defer: bool,
         cancel: &Arc<AtomicBool>,
     ) -> Result<ReadItem, Outcome> {
-        let max = match mode {
-            Mode::Interactive => INTERACTIVE_MAX_LEN,
-            Mode::Background | Mode::Batch => BACKGROUND_MAX_LEN,
-        };
+        // An opened file over 1 MiB is extracted by windows (「大文件」):
+        // tier 1 reads at most what it extracts whole, as the others do.
+        let max = BACKGROUND_MAX_LEN;
         let too_large = |item: &Item| {
             Outcome::Done(
                 Done {
@@ -1856,7 +1861,13 @@ impl Inner {
     /// does not set `Batch::full`.
     ///
     /// True when every item is now stored (written, or found stored).
-    fn commit(&self, project: &Arc<Project>, ctx: &Ctx, done: Vec<Done>, batch: bool) -> bool {
+    pub(super) fn commit(
+        &self,
+        project: &Arc<Project>,
+        ctx: &Ctx,
+        done: Vec<Done>,
+        batch: bool,
+    ) -> bool {
         if done.is_empty() {
             return true;
         }
@@ -2267,6 +2278,12 @@ impl Inner {
             };
             match self.extract_item(&ctx, &item, mode, None, &flag) {
                 Outcome::Done(d, _) => {
+                    // An opened file over 1 MiB: its window chain goes to
+                    // the batch tiers, first in line (「大文件」).
+                    let large = t == 0 && d.extraction.status == ExtractStatus::TooLarge;
+                    if large {
+                        self.enqueue_chain(project, session, &item);
+                    }
                     // Settled for the session only once a result is stored:
                     // a file that could not be read is tried again.
                     if self.commit(project, &ctx, vec![d], false) && t == 0 {

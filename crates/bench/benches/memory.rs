@@ -260,6 +260,7 @@ const BENCHES: &[Bench] = &[
     cache::MEMORY,
     code_intel::MAP_100K_BYTES,
     code_intel::BATCH_PEAK,
+    code_intel::WINDOW_PEAK,
     code_intel::NAMES_100K_BYTES,
     code_intel::PARSE_CACHE_BYTES,
     code_intel::RESIDENT_CLOUDPRINT,

@@ -67,20 +67,23 @@ pub(crate) fn finish(
     tags: Vec<RawTag>,
     local_scopes: Option<&[Range<usize>]>,
 ) -> Finished {
-    finish_inner(dialect, source, tags, None, local_scopes)
+    finish_inner(dialect, source, tags, None, local_scopes, usize::MAX)
 }
 
 /// `finish` for the walkers (`crate::walk`): `tags` holds definitions and
 /// markers only, `refs` the reference names, deduplicated, in byte order,
-/// without the definitions' own names.
+/// without the definitions' own names. The names markers keep as
+/// references count only when they start before `limit` (a window's cut,
+/// as the walk's own `limit`).
 pub(crate) fn finish_with_refs(
     dialect: Dialect,
     source: &[u8],
     tags: Vec<RawTag>,
     refs: Vec<Box<str>>,
     local_scopes: &[Range<usize>],
+    limit: usize,
 ) -> Finished {
-    finish_inner(dialect, source, tags, Some(refs), Some(local_scopes))
+    finish_inner(dialect, source, tags, Some(refs), Some(local_scopes), limit)
 }
 
 /// The Rust `impl` blocks as containers: an `Impl` marker names the
@@ -170,6 +173,7 @@ fn finish_inner(
     tags: Vec<RawTag>,
     ref_names: Option<Vec<Box<str>>>,
     local_scopes: Option<&[Range<usize>]>,
+    limit: usize,
 ) -> Finished {
     let text = |r: &Range<usize>| {
         source
@@ -475,6 +479,7 @@ fn finish_inner(
             .iter()
             .filter(|(marker, tag, _)| {
                 marker.consumes_name()
+                    && tag.name_range.start < limit
                     && !def_names.contains(&(tag.name_range.start, tag.name_range.end))
             })
             .map(|(_, _, name)| name.clone()),

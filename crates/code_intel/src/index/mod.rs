@@ -10,6 +10,7 @@
 //! only if the generations it read are still current.
 
 pub(crate) mod batch;
+pub(crate) mod chain;
 pub(crate) mod host;
 mod reconcile;
 pub(crate) mod state;
@@ -87,6 +88,9 @@ pub struct Stats {
     pub grammar_rounds: AtomicUsize,
     /// Jumps' steps 1–3 run (a prefetch reused runs none).
     pub prepares: AtomicUsize,
+    /// Windows of opened large files extracted (「大文件」), widened ones
+    /// counted once.
+    pub windows: AtomicUsize,
 }
 
 /// A snapshot of [`Stats`].
@@ -102,6 +106,7 @@ pub struct StatCounts {
     pub reconcile_passes: usize,
     pub grammar_rounds: usize,
     pub prepares: usize,
+    pub windows: usize,
 }
 
 impl Stats {
@@ -118,6 +123,7 @@ impl Stats {
             reconcile_passes: get(&self.reconcile_passes),
             grammar_rounds: get(&self.grammar_rounds),
             prepares: get(&self.prepares),
+            windows: get(&self.windows),
         }
     }
 }
@@ -242,7 +248,24 @@ pub(crate) struct Inner {
     /// the slot's deadline, or turn the switch on, there).
     #[cfg(test)]
     pub yield_hook: YieldHook,
+    /// The wall clock the racy-timestamp rule compares a file's status
+    /// change time with (「大文件」); `SystemTime::now` when unset (tests
+    /// and benchmarks set it).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) wall: Mutex<Option<WallClock>>,
+    /// Run after every window a chain writes (tests: a pause, a change of
+    /// the file, an eviction between two windows).
+    #[cfg(test)]
+    pub window_hook: Mutex<Option<WindowHook>>,
 }
+
+/// [`Inner::window_hook`] (tests): given each written window's end.
+#[cfg(test)]
+pub(crate) type WindowHook = Box<dyn FnMut(u64) + Send>;
+
+/// [`Inner::wall`].
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) type WallClock = Arc<dyn Fn() -> std::time::SystemTime + Send + Sync>;
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -323,8 +346,20 @@ impl Indexer {
             before_focus_check: Mutex::new(None),
             #[cfg(test)]
             yield_hook: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            wall: Mutex::new(None),
+            #[cfg(test)]
+            window_hook: Mutex::new(None),
         });
         Indexer { inner }
+    }
+
+    /// Replaces the wall clock of the racy-timestamp rule (「大文件」):
+    /// tests put files' status changes in the past or the present, and
+    /// benchmarks open a file just written as one written long ago.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_wall_clock(&self, f: impl Fn() -> std::time::SystemTime + Send + Sync + 'static) {
+        *lock(&self.inner.wall) = Some(Arc::new(f));
     }
 
     /// Subscribes to the language packs; the plugin hands the returned
@@ -615,6 +650,15 @@ impl CodeIntel for Indexer {
 impl Inner {
     pub(crate) fn arc(&self) -> Option<Arc<Inner>> {
         self.me.upgrade()
+    }
+
+    /// The wall clock (`Inner::wall`).
+    pub(crate) fn wall_now(&self) -> std::time::SystemTime {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(f) = lock(&self.wall).as_ref() {
+            return f();
+        }
+        std::time::SystemTime::now()
     }
 
     /// Lock order: `batch_project`, then `open`, then a project's state;

@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 5、8、9 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 8 步的窗口抽取与窗口链、`Windowed` 已实现（同一 PR 的第二部分），跳转里的大文件尚未实现；第 5、9 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -1840,7 +1840,7 @@ enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume
 
 ### 大文件
 
-[ADR 0034](../adr/0034.md)「打开文件的符号抽取」「文本存储与定位」。状态：已设计，尚未实现（「验收」第 8 步；`Location::byte` 在第 6 步）。
+[ADR 0034](../adr/0034.md)「打开文件的符号抽取」「文本存储与定位」。状态：窗口、窗口链、`Windowed` 和字节偏移已实现，跳转里的大文件尚未实现（「验收」第 8 步，见「实际验证」「与设计的差异」第 8 步）。
 
 | 大小 | 后台（第 2–5 层、依赖） | 文件被打开（第 1 层） | 查询里的当前文本（跳转第 1 步） |
 |---|---|---|---|
@@ -2423,6 +2423,13 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - `just check` 通过；`just test -p lectern-code-intel -p lectern-services` 350 个测试通过（本 crate 新增 `location_byte_*` 4 个、`store_*` 3 个）。`location_byte_points_at_the_names` 对每个位置同时核对 `byte` 处是名字的第一个字节、`byte` 等于行首加列；`location_byte_is_none_for_a_converted_checkout` 的 CRLF 文件经第 3 层的整批 `canonical_oids` 以 index 的 OID 写入（`canonical = 0`）。
 - 基准（`just bench --measure code_intel/goto_full code_intel/references_full code_intel/warm_100k code_intel/disk_100k`，负载约 1.5–2.5）：`goto_full` 1.49 ms、`goto_full/done` 最大 345 ms（≤ 20 ms、≤ 1.02 s）；`references_full/all` 1.27 s、`/first` 10.7 ms（≤ 2 s、≤ 200 ms）；`warm_100k` 81.7 ms（≤ 500 ms，存在检查多了 `part = -1`，仍走唯一索引）、`warm_100k_touch` 353 ms（只记录）；`disk_100k` 9 万个单元声明 279.7 MB（与版本 2 相同：单元字节数的估算没有改），分库文件 326 MiB（上一次 316 MiB，`ci_def.byte` 和 `ci_ext` 的五列），83 次淘汰。
 
+第 8 步的第二部分（窗口链），同一台机器。
+
+- `just check` 通过；`just test -p lectern-code-intel` 330 个测试通过，新增 `window_*` 15 个和 `yield_window_chain_takes_the_large_slot`。`window_chain_equals_whole_extraction` 对七种核心语言逐项相同；`window_chain_equals_whole_extraction_in_an_iife` 的 IIFE 和 UMD 两种文件定义名、引用名的多重集相同；`window_cut_skips_a_node_ending_at_the_window_end` 检查 `const fo` 的例子、叶子的后备和 `ERROR` 根上的片段；`window_cut_descends_into_the_truncated_node`（IIFE、UMD、一行）、`window_cut_never_splits_an_identifier`（约 1.3 MiB 的字符串字面量）、`window_byte_offsets_are_in_the_whole_file`、`window_marker_replace_is_own_eviction`、`window_units_are_in_names`、`window_chain_resumes_after_pause`、`window_chain_fills_evicted_windows`、`window_chain_aborts_on_identity_change`、`window_streamed_oid_matches_for_blob`（跨 1–3 个 1 MiB 的区间，没有调用 `canonical_oid`）、`window_chain_converts_a_crlf_checkout`（整份读一次、一次 `canonical_oid`，窗口 `canonical = 0`，候选的 `byte` 为 None、行号正确）、`window_chain_waits_out_a_racy_timestamp`、`window_racy_and_resume_rules`；`yield_window_chain_takes_the_large_slot`（一个和两个批量任务，让路开关打开、第 4 层的大文件停下拿着 `LargeSlot` 时，链照常做完，每个窗口抽取时 `LargeSlot` 里都没有停下的状态）。
+- 实现过程中被测试抓到的两处（已在「与设计的差异」第 8 步记下的规则里改掉）：按「最深」切时合成 TS 的窗口切在 `get(): number` 之后、根是 `ERROR`，`Box_1141` 和它的成员两个窗口里都没有；Rust 的 `pub` 是命名节点，按「第一个匿名 token 之前」判断片段时切在 `pub` 之后，`build_1098` 的可见性变成 `Module`。
+- 基准（`just bench --measure code_intel/window code_intel/batch_peak code_intel/extract_throughput code_intel/yield_stop`，负载约 1.5–2.5）：`window_chain_16mib` 中位数 3.41 s（只记录；约 16 MiB 的合成 TypeScript，从焦点到 `Windowed` 写入，每个样本一个新缓存）；`window_peak` 最大 2.46 MB（≤ 8 MiB）；`batch_peak` 33.3 MB（≤ 40 MB，夹具里没有打开的文件，与第 7 步相同）；`extract_throughput` 4.3 MB/s（≥ 4，遍历多了名字起点的比较）；`yield_stop` 最大 116 µs（≤ 10 ms）。第一次运行时两个窗口基准报错：合成源码按「至少 16 MiB」生成，略超过 16 MiB 的上限，链没有开始；改为至多 16 MiB 之后通过。
+- 没有验证的：macOS 上的数值看 macOS CI；真实的大文件（压缩的 bundle、生成的代码）只按调研的数字估计。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2685,3 +2692,19 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - `ci_def.byte` 来自名字节点的起点（`rules` 的两处、`ParsedFile` 的普通局部定义；`LocalBinding` 多一个 `byte`）。`ci_ext.canonical` 由读取决定：批量层和第 1、2 层是「键等于原始字节的 OID」（`read_item` 的 `ReadItem::canonical`，`check_keys` 按 `canonical_oids` 改键时置为假），查询写入的单元取查询读取时的结果（`Scanned::canonical`）。查询里读出的内容带同样的标记（`query::text::Content`：`read_text`、`read_content` 和限时搜索的回调；保留的解析也记下它），交给视图的 `Location::byte` 只在它为真时有值。语义导航的提供者只给行和列，`byte` 为 None。
 - 替换规则：`outranks` 加上 `Windowed` 替换 `TooLarge`、`TimedOut`（「调度、批次与取消」的第二种替换），由窗口链完成时的写入用到。
 - 测试：`location_byte_*` 覆盖工作区（索引的候选、当前文本冷解析与保留的解析、定义自己的名字、两个文件里的引用）、对象库一侧和 CRLF 检出（经 `canonical_oid` 对上的单元、当前文本、引用都是 None，同一次查询里没有转换的文件照常有值）；版本 2 的表在第一次使用时删除重建由 `location_byte_version_2_tables_are_rebuilt` 检查（用旧的建表语句写一个单元）。依赖一组随第 9 步（依赖层还没有实现），窗口单元一组在 `window_*`。`store_windows_*`、`store_windowed_marker_needs_its_whole_chain`、`store_chain_complete_follows_the_ends` 检查窗口单元的读写、存在检查不看窗口、按名字查找和查引用照常找到窗口单元、标记的核对。
+
+第 8 步的第二部分（窗口抽取与窗口链、`Windowed`、racy 推迟）：
+
+- 切点取第一层有完整子节点的那一层，不取最深的一层（设计自相矛盾，按研究的规则决定）：「大文件」写「终点取找到的最深的那一个的终点」，又写「即窗口末尾之前最后一个由树确认的语句或成员边界」和「顶层节点不跨窗口的文件逐项相同」。最深的完整子节点常常是被截断的顶层函数最后一个语句里的标识符（`return helper(va` 里的 `helper`），切在那里把顶层节点分成两半，定义的 `end_line` 截短、下一个窗口从表达式中间开始，后两条都不成立。[大文件调研「整个文件按窗口高亮」](../research/large-files-rendering.md#整个文件按窗口高亮)的规则是「进入被窗口截断的那个节点，直到找到这样的兄弟节点」，即从根往下第一层有完整子节点的那一层，实现照它（`window::tree_cut`）。包住整个文件的 IIFE、UMD 和压缩成一行的文件根上没有完整的子节点，切点进入函数：第一个窗口切在函数的参数之后（很短），之后的窗口从函数体的语句之间开始，每个窗口仍 ≤ 64 KiB、不扩到 256 KiB（`window_cut_descends_into_the_truncated_node` 允许至多 4 个不到 32 KiB 的窗口）。
+- `ERROR` 根上的片段：解析器在窗口末尾收不拢的结构（`export class B { … n(): number` 截在中间）让根成为 `ERROR`，它的子节点是解析栈：完整的语句，以及未完成结构的片段（名字、参数列表、类型注解），片段自己是完整的节点。切在片段之后会让它命名的定义两个窗口里都没有（实测：合成 TS 的一个窗口切在 `get(): number` 之后，`Box_1141` 和它的成员都丢了）。所以在 `ERROR` 节点里，子节点只有像语句那样结束时才算：下一个子节点从更后面的行开始（或后面没有子节点；片段与它所在结构的其余部分同在一行），或它的最后一个字节是 `;`（压缩成一行的代码）。完整性用 `has_error()` 判断，比设计的「不含 `MISSING`」更严：里面有 `ERROR` 的节点也不算。
+- 解析之前截到行首（设计之外加的，`window::parse_len`）：不到文件末尾的窗口，只解析到它后半段里最后一个从第 0 列开始语句的行首（不是空白、不是右括号），没有时到后半段里最后一个换行，都没有时整段。所以普通的代码里窗口截在顶层结构之前，解析器能用 `MISSING` 收拢、根不是 `ERROR`；只有一行的文件照设计整段解析。这让窗口在一个顶层结构很长的文件里可能只有 32 KiB 多，换来 ADR 0034「安全位置」那样干净的末尾。
+- 窗口的抽取（`extract::extract_window`）是一次遍历加上名字起点的限制：遍历的 `Ctx::limit` 之后的定义和引用名不记录，标记照样记录（导出之类可能决定切点之前某个定义的可见性），`rules::finish_with_refs` 把标记留下的引用名同样按 `limit` 过滤。所以抽取只解析一次窗口，不为切点之前的部分再解析一次。行号、列和字节偏移在写入前加上窗口起点的 `window::Base`（窗口第一行的列加上 `part_col`）。只有核心语言（有遍历的语言）建窗口链：语言包用 tree-sitter-tags，没有按名字位置的限制，超过 1 MiB 的语言包文件仍是 `TooLarge`（已知限制）。
+- 第 1 层读的上限从 4 MiB 改为 1 MiB（`read_item`）：设计的表里 1–16 MiB 的打开文件按窗口链，所以原来 1–4 MiB 整份抽取的那段也改走窗口。第 1 层读到 `TooLarge` 时照常写一行 `TooLarge`，同时把链排进批量状态（`Batch::chains`，每个键一条，`Batch::chain_keys`），唤醒批量任务。只对工作区一侧：对象库一侧（Diff 的旧一侧）的大 blob 只能整份取出，16 MiB 要在整条链（约 4–5 s）期间留在内存里，超出 `window_peak`，所以不建链（跳转第 1 步对它按「大文件」的对象库一条处理）。开头 8000 字节里有 NUL 的大文件不建链，保持 `TooLarge`。
+- 可见区域附近的三个窗口没有做：`Focus::Current` 只带 `TextRef`，没有可见区域，本 crate 不知道视图在看哪里（首屏属于 `file_reader`，#10）。同文件跳转由跳转第 1 步的窗口解析回答（第三部分）；接口带上可见区域之后再加。
+- 链在批量层最前面（`plan` 先看有没有到期的链，有就是不让路的工作，`FarBoundary` 因此也被它打断），一步是链的开始或一个窗口：批量任务把链从队列里取出、做完这一步放回最前面，所以几个批量任务不会同时做同一条链，别的任务照常做第 3 层。每一步持有 `LargeSlot`（`acquire(near = true)`：停下的让路任务的保存状态被丢掉、它的那一轮作废），流式哈希的 1 MiB 区间、需要转换时的整份内容、一个窗口和它的树都在其中，三者不同时出现。窗口单元由 `commit_window` 一个事务写一个，不设提示；写入引起配额淘汰时照批量层的规则置满额。链完成且没有 `TimedOut` 的窗口时，`Windowed` 标记经 `commit` 写入（替换 `TooLarge`、`TimedOut`，算作本 crate 自己的淘汰），然后提示按 `Windowed` 置位、第 1 层记为满足。会话结束时链随批量状态丢弃。
+- 续接：开始时读一次这个键的窗口行（`store::WINDOWS`），从 0 沿 `part_end` 走到第一个缺口；起点的行和列由前一个窗口的 `part_line`、`part_col` 加上它的字节里的换行算出（按 ≤ 1 MiB 的区间读，`chain::base_after`）。每写一个窗口之后再读一次窗口行：补上的缺口的终点碰上已有的窗口时，沿已有的窗口跳到下一个缺口，不重抽它们（`window_chain_fills_evicted_windows`：只抽取被删掉的那一个）。
+- 超时的窗口：写一行 `TimedOut`，终点是它解析到的行首（`parse_len` 截过时），否则是窗口末尾之后的标识符边界，链从那里继续、不算完成。暂停打断的窗口不写入，链停在原处，恢复后从这个窗口重做（`window_chain_resumes_after_pause`）。
+- racy 规则按墙钟比较 `ctime`（`chain::racy_wait`：变化不到 2 秒的推迟到满 2 秒；比墙钟还新的推迟 2 秒），推迟用看门狗的到期表，到期时唤醒批量任务；推迟中的链不算可做的工作（活性检查不把它当成漏掉的唤醒）。墙钟可以换（`Indexer::set_wall_clock`，`test-support`）：测试的 `Harness` 和基准的 `Rig` 把它设成一小时之后，因为它们写下的文件刚刚改过；`window_chain_waits_out_a_racy_timestamp` 设成文件的 `ctime` 加 1 秒。
+- 流式哈希不等时的后备：`BlobHasher::finish` 为 None（sha1dc 判定碰撞）时整份读入后用 `for_blob` 再算一次，等于要建索引的 OID 时照常（`canonical = 1`）；否则调用 `canonical_oid`，等于时 `canonical = 0`，都不等时放弃这条链（内容已经变了，fs_watch 的事件会带来新的 OID）。
+- 查引用对窗口单元仍按整份读（≤ 4 MiB）、整份解析：设计「查询读到的其他大文件」一条的「只读、只解析这些窗口」没有做，4–16 MiB 的 `Windowed` 文件在查引用里计为 `TooLarge`、未搜（已知限制，留到后续）。跳转第 3 步、`Named`、名字表、导入目标（`file_extraction` 取 `Windowed` 文件的全部窗口单元）都已经用窗口单元。
+- 测试：设计写的是 2–16 MiB 的合成文件；`window_chain_equals_whole_extraction` 每种核心语言用约 1.1 MiB（超过 1 MiB 才建链，约 17 个窗口；debug 构建里 7 种语言各 2 MiB 要 100 s），16 MiB 由基准跑。它逐项比较定义（名字、种类、行、列、字节偏移、`end_line`、作用域、可见性、参数个数）和引用名的集合；IIFE 的一项比较定义名和引用名的多重集（每个语句的名字都不同），压缩成一行的变体只检查窗口大小（它的 `ERROR` 根只能按 `;` 判断，丢掉跨窗口的那个定义是已知限制）。CRLF 一项用 `FakeGit::assume_unchanged`：真实的 git 按 stat 认为检出的 CRLF 文件没有改动，映射里是 index 的 OID；重新读会读到超过 1 MiB、记为 `Unindexable`。

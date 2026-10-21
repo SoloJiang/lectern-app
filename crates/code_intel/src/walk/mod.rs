@@ -47,6 +47,10 @@ pub(crate) struct Frame<'t> {
 /// The walk's output and tree-sitter-tags' local scopes.
 pub(crate) struct Ctx<'s> {
     src: &'s [u8],
+    /// Names starting at or after this byte are not recorded as
+    /// definitions or references (a window's cut, 「大文件」); markers are
+    /// kept, as they may decide something about a definition before it.
+    limit: usize,
     tags: Vec<RawTag>,
     refs: HashSet<&'s [u8], crate::util::FastBuild>,
     scopes: Vec<Scope<'s>>,
@@ -63,9 +67,10 @@ struct Scope<'s> {
 }
 
 impl<'s> Ctx<'s> {
-    fn new(src: &'s [u8]) -> Ctx<'s> {
+    fn new(src: &'s [u8], limit: usize) -> Ctx<'s> {
         Ctx {
             src,
+            limit,
             tags: Vec::new(),
             refs: HashSet::default(),
             // The file: tree-sitter-tags' root scope does not inherit.
@@ -122,7 +127,7 @@ impl<'s> Ctx<'s> {
 
     /// A reference name from a pattern without `#is-not? local`.
     pub fn reference(&mut self, name: Node<'_>) {
-        if !name.has_error() {
+        if !name.has_error() && name.start_byte() < self.limit {
             self.refs.insert(self.text(name));
         }
     }
@@ -130,7 +135,7 @@ impl<'s> Ctx<'s> {
     /// A reference name from a pattern with `#is-not? local`.
     pub fn nonlocal(&mut self, name: Node<'_>) {
         let text = self.text(name);
-        if !name.has_error() && !self.is_local(text) {
+        if !name.has_error() && name.start_byte() < self.limit && !self.is_local(text) {
             self.refs.insert(text);
         }
     }
@@ -150,7 +155,9 @@ impl<'s> Ctx<'s> {
     }
 
     fn push(&mut self, name: Node<'_>, tag: Node<'_>, class: TagClass, params: Option<String>) {
-        if name.has_error() {
+        if name.has_error()
+            || (matches!(class, TagClass::Def(_)) && name.start_byte() >= self.limit)
+        {
             return;
         }
         let name_range = name.byte_range();
@@ -398,7 +405,13 @@ pub(crate) enum WalkStep {
 }
 
 /// Walks `tree` from the start, or from where `resume` stopped, checking
-/// `stop` and then `yields` every [`CHECK_EVERY`] nodes.
+/// `stop` and then `yields` every [`CHECK_EVERY`] nodes. Definitions and
+/// references whose name starts at or after `limit` are left out (a
+/// window's cut; `usize::MAX` for a whole file).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the tree, its source, the checks and where to stop"
+)]
 pub(crate) fn walk_from(
     dialect: Dialect,
     language: &Language,
@@ -407,9 +420,10 @@ pub(crate) fn walk_from(
     stop: &dyn Fn() -> bool,
     yields: &dyn Fn() -> bool,
     resume: Option<WalkResume>,
+    limit: usize,
 ) -> WalkStep {
     match walker(dialect, language) {
-        Some(walker) => walk(walker, tree, source, stop, yields, resume),
+        Some(walker) => walk(walker, tree, source, stop, yields, resume, limit),
         None => WalkStep::Stopped,
     }
 }
@@ -431,6 +445,7 @@ pub(crate) fn walk_tree(
         stop,
         &|| false,
         None,
+        usize::MAX,
     ) {
         WalkStep::Done(walked) => Some(walked),
         WalkStep::Halted(_) | WalkStep::Stopped => None,
@@ -444,12 +459,13 @@ fn walk(
     stop: &dyn Fn() -> bool,
     yields: &dyn Fn() -> bool,
     resume: Option<WalkResume>,
+    limit: usize,
 ) -> WalkStep {
     let mut walk = Walk {
         walker,
         stop,
         yields,
-        cx: Ctx::new(source),
+        cx: Ctx::new(source, limit),
         stack: Vec::with_capacity(64),
         steps: 0,
     };

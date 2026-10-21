@@ -140,6 +140,10 @@ impl Harness {
                 extraction
             },
         );
+        // Files the tests write are an hour old for the racy-timestamp rule
+        // of window chains (`window_chain_waits_out_a_racy_timestamp` sets
+        // its own clock).
+        indexer.set_wall_clock(|| SystemTime::now() + Duration::from_secs(3600));
         let subscriptions = indexer.subscribe();
         Harness {
             host,

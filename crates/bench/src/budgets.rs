@@ -1187,6 +1187,24 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // An opened 16 MiB TypeScript file: from the focus to its window chain
+    // written to the end (「大文件」, ADR 0034), and the peak of live bytes
+    // meanwhile: the streamed hash's 1 MiB range or one 64 KiB window and
+    // its tree, about 2 MiB plus 1 MiB, with twice the room.
+    share(
+        "code_intel/window_chain_16mib",
+        RECORD,
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "code_intel/window_peak",
+        &[max(Limit::BytesAtMost(8 * MB))],
+        CODE_INTEL,
+        ACTIVE,
+        Memory,
+    ),
     // A jump the index answers, from the query to its first batch with
     // candidates: 100 000 indexed files, a 100 KB current text whose parse
     // is kept (ADR 0037); this crate's part of the 50 ms candidates budget.

@@ -337,6 +337,7 @@ fn extract_walking(
         &|| flag.load(Ordering::Acquire) != 0,
         &wants_yield,
         walk_resume,
+        usize::MAX,
     ) {
         walk::WalkStep::Done(walked) => walked,
         walk::WalkStep::Halted(walk) => return park(ResumeState::Walking { tree, walk }),
@@ -357,6 +358,7 @@ fn extract_walking(
         walked.tags,
         walked.refs,
         &walked.local_scopes,
+        usize::MAX,
     );
     if registration.slot().tripped().is_some() {
         return interrupted(&registration);
@@ -367,6 +369,123 @@ fn extract_walking(
         defs: finished.defs.into_iter().map(|d| d.def).collect(),
         refs: finished.refs,
     }
+}
+
+/// Where a window's extraction cuts it (「大文件」).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CutRule {
+    /// The window reaches the end of the file: no cut.
+    Eof,
+    /// The tree's cut ([`crate::window::tree_cut`]); none found is
+    /// [`Windowed::NoCut`] (the caller widens the window).
+    Tree,
+    /// The widened window: the tree's cut, else the last leaf's
+    /// ([`crate::window::leaf_cut`]); none found is `NoCut` (the caller cuts
+    /// at the identifier boundary after the window).
+    TreeOrLeaf,
+    /// A cut the caller found: at this offset.
+    At(usize),
+}
+
+/// What [`extract_window`] made of one window.
+pub(crate) enum Windowed {
+    /// The definitions and references whose names start before the cut
+    /// (offsets, lines and columns in the window), and the cut.
+    Cut(Extraction, usize),
+    /// No cut by the rule asked for.
+    NoCut,
+    /// `TimedOut`, `Cancelled` (cancel flag, pause, watchdog stopped) or
+    /// `Unsupported`.
+    Stopped(ExtractStatus),
+}
+
+/// One window of an opened large file (「大文件」), a core language only:
+/// parsed alone (its end taken as the end of a file), cut by `rule`, and
+/// extracted up to the cut. Blocking; any thread but the UI thread. The
+/// deadline and the cancellation as [`extract`]'s; no size limit and no
+/// binary check (the chain checks the file's head once).
+pub(crate) fn extract_window(
+    lang: &Lang,
+    window: &[u8],
+    rule: CutRule,
+    deadline: &Deadline,
+    cancel: &Arc<AtomicBool>,
+) -> Windowed {
+    if cancel.load(Ordering::Acquire) {
+        return Windowed::Stopped(ExtractStatus::Cancelled);
+    }
+    if !lang.walks() {
+        return Windowed::Stopped(ExtractStatus::Unsupported);
+    }
+    let registration =
+        deadline
+            .watchdog
+            .register(deadline.at, Some(cancel.clone()), deadline.pause.clone());
+    let stopped = |registration: &Registration| Windowed::Stopped(interrupted(registration).status);
+    if registration.slot().tripped().is_some() {
+        return stopped(&registration);
+    }
+    let flag = registration.slot().flag();
+    let Some(parser) = walk::parser_for(lang.language(), None) else {
+        return Windowed::Stopped(ExtractStatus::Unsupported);
+    };
+    let tree = match walk::parse(parser, window, flag, &|| false) {
+        walk::Parse::Tree(tree) => tree,
+        walk::Parse::Halted(parser) => {
+            walk::give_back(parser);
+            return stopped(&registration);
+        }
+        walk::Parse::Stopped => return stopped(&registration),
+    };
+    let cut = match rule {
+        CutRule::Eof => Some(window.len()),
+        CutRule::At(at) => Some(at),
+        CutRule::Tree => crate::window::tree_cut(&tree, window),
+        CutRule::TreeOrLeaf => crate::window::tree_cut(&tree, window)
+            .or_else(|| crate::window::leaf_cut(&tree, window.len())),
+    };
+    let Some(cut) = cut else {
+        return Windowed::NoCut;
+    };
+    let walked = match walk::walk_from(
+        lang.dialect(),
+        lang.language(),
+        &tree,
+        window,
+        &|| flag.load(Ordering::Acquire) != 0,
+        &|| false,
+        None,
+        cut,
+    ) {
+        walk::WalkStep::Done(walked) => walked,
+        walk::WalkStep::Halted(_) | walk::WalkStep::Stopped => {
+            if registration.slot().tripped().is_some() {
+                return stopped(&registration);
+            }
+            return Windowed::Stopped(ExtractStatus::Unsupported);
+        }
+    };
+    drop(tree);
+    let finished = rules::finish_with_refs(
+        lang.dialect(),
+        window,
+        walked.tags,
+        walked.refs,
+        &walked.local_scopes,
+        cut,
+    );
+    if registration.slot().tripped().is_some() {
+        return stopped(&registration);
+    }
+    drop(registration);
+    Windowed::Cut(
+        Extraction {
+            status: ExtractStatus::Done,
+            defs: finished.defs.into_iter().map(|d| d.def).collect(),
+            refs: finished.refs,
+        },
+        cut,
+    )
 }
 
 /// tree-sitter-tags with the language's queries: language packs, and the
