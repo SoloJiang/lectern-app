@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：已实现。第 1–4 步都已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)），见「验收」。
+状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」）已接受，尚未实现。见「验收」。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -67,7 +67,7 @@ pub fn plugins(deps: AgentsDeps) -> [(Name, SessionPlugin); 2];
 ### 对其他 crate 的要求
 
 - `fs_watch`：提供不过滤的递归目录监听，监视 git 仓库之外的目录（会话目录），事件只带路径，合并后交付。已写进 `crates/fs_watch/AGENTS.md`。
-- `cache`：提供不属于任何仓库的应用级分库，存本 crate 的轮次索引（键见 ADR 0026）和压缩会话的摘要（键是压缩文件的身份加适配器版本和摘要格式版本），按字节 LRU，与其他条目一样可以随时删除重建。已写进 `crates/cache/AGENTS.md`。
+- `cache`：提供不属于任何仓库的应用级分库，存本 crate 的轮次索引（键见 ADR 0026）和压缩会话的摘要（键是压缩文件的身份加适配器版本和摘要格式版本），以及第 5 步的 Codex 子 agent 关联（`agents.spawns`，键是来源 ID、父会话 ID 和适配器版本），按字节 LRU，与其他条目一样可以随时删除重建。已写进 `crates/cache/AGENTS.md`。
 - `services`：采纳本文「接口」一节定义的 `session` 模块，`services` 的设计文档引用本节，不重复定义。
 
 ## 接口
@@ -190,6 +190,8 @@ pub mod testing {
     pub fn synthetic_long_session(len: usize) -> Vec<u8>;
     /// `projects/` 下写 `sessions` 个主会话文件（每 20 个一个项目目录，`sessionId` 各不相同）：`agents/discover_1000`。
     pub fn synthetic_projects(projects: &Path, sessions: usize) -> io::Result<Vec<String>>;
+    /// `sessions/` 下写 `parents` 个 Codex 父会话，每个用 `spawn_agent` 派出 `children` 个子会话（第 5 步）：`agents/discover_codex_1000`。
+    pub fn synthetic_rollouts(sessions: &Path, parents: usize, children: usize) -> io::Result<Vec<String>>;
     /// 不经过插件的会话来源：在调用线程上同步完成第一次发现（不监听、不发事件），`complete` 同步补齐；
     /// `projects` 为 None 时不归位，`cache` 为 None 时不读写持久缓存（`agents/discover_1000`、`agents/turns_cached_50mb`）。
     pub fn source(agent: Agent, roots: &AgentRoots, cache: Option<&Cache>, projects: Option<Arc<dyn Projects>>, decoded_dir: &Path) -> Option<Arc<dyn SessionSource>>;
@@ -348,6 +350,8 @@ pub struct SessionSummary {
 pub struct Parent {
     pub session: SessionKey,
     /// 派出它的工具调用。Claude Code 取 `agent-<id>.meta.json` 的 `toolUseId`，没有这个文件时为 None。
+    /// Codex 取父会话 `spawn_agent` 输出里给出这个子线程的那次调用；父会话不在列表里、或还没有从它的轮次索引
+    /// 派生出关联时为 None（「Codex 子 agent 与派出它的调用」）。
     pub tool_call: Option<ToolCallId>,
 }
 
@@ -694,6 +698,7 @@ pub enum EditOp {
 - `turn_context`：`turn_id`、`cwd`、`model`。
 - 轮次：`event_msg` 的 `task_started`（别名 `turn_started`）到同一 `turn_id` 的 `task_complete`（`turn_complete`）或 `turn_aborted`。prompt 和 agent 说明：`legacy` 模式取 `event_msg` 的 `user_message` / `agent_message`；`paginated` 模式取 `item_completed` 里的 `UserMessage` / `AgentMessage`。`response_item` 里 `role: "user"` 的消息含环境说明和指令文件，不作为 prompt。
 - 工具：两种模式都从 `response_item` 取 `function_call{name, arguments, call_id}`、`custom_tool_call{name, input, call_id}`、`local_shell_call`，结果取 `function_call_output` / `custom_tool_call_output`。`exec_command_begin/end`、`patch_apply_begin` 不写入文件；改动另取 `legacy` 的 `patch_apply_end.changes` 或 `paginated` 的 `item_completed` / `FileChange`。
+- `spawn_agent` 的输出：按 `function_call_output.output` 是 JSON 对象文本 `{"agent_id": "<子线程 ID>"}` 处理。这个形状只来自本仓库的合成 fixtures，上面列出的源码文件不包括 `spawn_agent` 的处理代码，没有上游出处，也没有用真实日志核对过；第 5 步实现时先按公开源码核对（见「Codex 子 agent 与派出它的调用」）。
 - 用量：顶层 `token_usage_record{thread_id, turn_id, response_id, usage}`（每个响应一条），以及 `event_msg` / `token_count` 的 `info.{last_token_usage, total_token_usage}`；两路只用一路，规则见「记录」里的「只用一路用量」。模型取最近一条 `turn_context`；额度取 `token_count` 的 `rate_limits.{primary, secondary}`。
 - 继承前缀：子 agent 与分叉会话先重放来源的历史。有 `subagent_history_start_ordinal` 时，`ordinal` 小于它的行是继承前缀。没有这个字段时（`legacy` 分叉），复制进来的前缀里本身就有来源的 `task_started`，所以按轮次 ID 判断：取来源会话（`forked_from_id` / `parent_thread_id`）文件里全部 `task_started` 的 `turn_id`，包括来源自己继承的轮次（轮次索引不含这些，所以不用轮次索引），多级分叉因此同样成立；这份集合在解析来源时顺带记下，与轮次索引一起缓存。`read` 读到这样的分叉、来源在 `SessionList` 里但集合还没有建立时，先在同一次调用里解析来源建立集合，再判断边界，所以结果与发现和补读的顺序无关。`turn_id` 出现在这份集合里的轮次是继承的，第一条 `turn_id` 不在来源里的 `task_started`（或 `trigger_turn: true` 的 `inter_agent_communication_metadata`）开始自己的部分（ADR 0014）。找不到来源会话时（已删除或不在本机）无法判断边界：全部记录不标 `inherited`，`SessionSummary::inheritance_unknown` 为 true，`usage` 据此提示这个会话的用量可能含继承部分；游标里记下边界未定，来源之后出现时，下一次 `read` 返回 `reset` 并按边界重新回放。
 
@@ -705,6 +710,102 @@ fixtures（`crates/agents/tests/fixtures/`）：每个上游格式版本一份�
 
 - 子 agent 会话是独立的 `SessionSummary`，用 `parent` 指回父会话和派出它的工具调用，按自己的 cwd 归位（Claude Code 的子 agent 常在 `.claude/worktrees/` 下的另一个 worktree 里）。合到父会话的合计、在列表里折叠到父会话下，由 `usage` 和视图决定。
 - 继承前缀里的记录照样交出、标为 `inherited`，由 `usage` 按 ADR 0014 只计自己的部分；轮次索引不含它们。
+- 派出子 agent 的调用：Claude Code 取子 agent 自己的 `meta.json`；Codex 的子 rollout 里没有调用 ID，从父会话一侧派生，见下一节。
+
+### Codex 子 agent 与派出它的调用
+
+Codex 的子 rollout 只记父线程 ID（`session_meta` 的 `parent_thread_id` 或 `source.subagent.thread_spawn.parent_thread_id`），没有派出它的调用 ID；子线程 ID 在父会话 `spawn_agent` 调用的输出里。`Parent::tool_call` 因此从父会话一侧派生：父会话的轮次索引建好或更新之后，读出索引里每个已结束的 `spawn_agent` 调用的输出，得到「调用 → 子线程」的关联；发布列表时按关联填写子会话的 `tool_call`。
+
+**关联规则**
+
+- 输出格式按「外部格式」里的假设：取输出 JSON 对象顶层的 `agent_id`，必须是 UUID 的规范写法（与 rollout 文件名里的线程 ID 相同）。字段缺失、不是 JSON 对象、不是规范写法（派出失败、格式变了）时，这次调用没有子线程。
+- 只看父会话自己的轮次：继承前缀不进轮次索引，分叉或子 agent 复制进来的 `spawn_agent` 调用不关联。只看已结束、有结果引用（`ToolCall::result`）的调用。
+- 子会话的 `Parent::session` 不变，仍取子 rollout 自己的父线程 ID。关联来自的父会话等于它时才填 `tool_call`；同一父会话里有两个调用给出同一个子线程时，取文件里靠前的那个。父线程 ID 为空的子 agent（`{"subagent": "review"}` 一类）不关联。
+- Claude Code 不变。
+
+**接口**
+
+`services` 不变：`Parent::tool_call` 已经是 `Option<ToolCallId>`，只是 Codex 的来源开始填它。本 crate 新增：
+
+```rust
+impl codex::Codex {
+    /// 读这次 `spawn_agent` 调用的输出（对 `call.result` 一次 `load`），取子线程 ID。阻塞，只在 executor 上调用。
+    /// `call.kind` 不是 `SpawnAgent`、调用没有结果、输出里没有规范写法的 `agent_id` 时为 None。
+    pub fn spawned_thread(&self, file: &SessionFile, call: &ToolCall) -> Result<Option<Arc<str>>, SessionError>;
+}
+
+// `source::Adapter`（crate 内部）新增，Claude Code 用默认值：
+/// 是否从父会话关联子 agent。为 false 时下面的方法不会被调用。
+const LINKS_SPAWNS: bool = false;
+fn spawned_thread(&self, file: &Self::File, call: &ToolCall) -> Result<Option<Arc<str>>, SessionError> { Ok(None) }
+```
+
+`Engine` 内部的数据：
+
+```rust
+/// 一个父会话的关联，派生自它的某一份轮次索引。
+struct Links {
+    /// 派生时用的索引：`keep_index` 放进内存时给的序号（从 `agents.spawns` 读出的为 0），
+    /// 以及索引游标的偏移（解压后的字节）。
+    seq: u64,
+    offset: u64,
+    /// 索引里每个已结束的 `SpawnAgent` 调用一项，按文件顺序；输出里没有子线程 ID 的记为 None，下次不再读它。
+    spawns: Arc<[(ToolCallId, Option<Arc<str>>)]>,
+}
+/// `Engine` 新增的字段：父会话 → 关联。值为 None 表示这次运行里查过 `agents.spawns`、没有条目。
+links: Mutex<HashMap<SessionKey, Option<Links>>>,
+```
+
+**缓存**
+
+`agents.spawns`：应用级分库，命名空间版本 1，不压缩。键是来源 ID、父会话 ID、适配器版本；值是 `Links` 的 `offset` 和 `spawns`。它与 `agents.turns` 一样按 [ADR 0026](../adr/0026.md) 以会话和适配器版本为键、值里带派生时的位置，内容是 `agents.turns` 里那份索引的派生物；单独存一条几百字节的小值，是为了发现时不读出整份索引（大会话的索引有几 MB）。派生之后在同一个 `Background` 任务里写。条目可以随时删除，丢了只是父会话下一次建索引之前没有关联。
+
+**发现时的代价**
+
+发现仍只读每个文件的开头和末尾，不读父会话的正文。刷新任务在发布之前，对列出的 Codex 子会话指向的父会话（在列表里、`links` 里还没有它）各查一次 `agents.spawns`，同一父会话每次运行只查一次，没有条目也记下。条目的 `offset` 大于父会话当前长度时丢弃（未压缩的文件按这一轮已有的 `stat` 判断，`.jsonl.zst` 不判断）。
+
+发现时不比较游标前缀：那要读父会话文件中间的 256 字节。关联只用来填一个字段，不用来跳过解析；父会话下一次建索引时，按 ADR 0026 用游标前缀核对索引，对不上就从头重建，关联随之重新派生并发布。父会话在两次运行之间被改写、索引还没重建时，`tool_call` 可能指向父会话里已经不存在的调用；消费方在父会话的 `turns` 里找不到这次调用时按 None 处理。两种 agent 都只追加写，与 ADR 0026 的已知限制相同。
+
+**派生的时机**
+
+- 父会话的索引放进内存之后（`keep_index`：`read` 顺带建的、`turns`、追加之后的 `follow`），索引里有还不在 `Links` 里的已结束 `SpawnAgent` 调用时，为它们各 `load` 一次。索引是续接的（不是 `reset` 的回放）时，已有的项按调用 ID 沿用；回放时全部重新读。没有新调用时只遍历一遍内存里的索引，不做 IO。
+- `read` 和 `turns` 的调用方不等派生：派生在另一个 `Background` 任务里进行，与写回 `cache` 相同。`follow` 本来就在刷新任务里，派生在这一轮发布之前完成。
+- 新 `Links` 的 `seq` 不大于已有的时丢弃（先建的索引晚完成派生）。关联有变化、并且有列出的子会话指向这个父会话时，按「数据流与线程」第 4 步发布。
+
+**摘要的更新**
+
+`tool_call` 不写进 `Known` 里的摘要，也不进 `agents.summary`：发布时按当时的 `links` 填写，做法与 `place` 相同。所以子会话和父会话谁先被读到、父会话的输出什么时候写出，发布的结果只取决于那一刻列表里有哪些会话、已经派生出哪些关联，与发现顺序无关。这与 #94 对分叉会话「来源后到」的要求一致（「与设计的差异」第 4 步「来源会话的轮次集合不进 `cache`」）。
+
+- 子会话先出现、父会话还没写出输出：子会话以 `tool_call: None` 发布。父会话的索引在内存里时，追加之后 `follow` 接着解析并派生，再发布一次，子会话出现在 `SessionsChanged::changed` 里。
+- 父会话的索引不在内存里时，追加只重新生成摘要（读开头和末尾），不派生。父会话是活跃会话（`open_turn` 为 true，或 `last_activity` 在 10 分钟之内，与「调用方」里的定义相同）、并且有列出的子会话还没有关联时，刷新任务排一次后台建索引：与 `turns` 相同，从 `cache` 里的索引接着解析，没有时解析整个文件（活跃会话在 1 s 以内）。同时最多 1 个，同一父会话的同一文件身份只排一次；建好之后由 `follow` 跟着它的追加。
+- 不活跃的父会话不主动读：它的子会话在父会话被打开（`review` 调 `turns`）或被 `usage` 从头读过之后才有关联，之后的运行从 `agents.spawns` 直接得到。
+- 父会话的文件后出现（同步、恢复）：它出现的那一轮刷新查 `agents.spawns`，命中时在同一次发布里填上。
+
+**父会话被归档或删除**
+
+- 归档：移到 `archived_sessions/`、压缩成 `.jsonl.zst` 都不改父会话的 `SessionKey`；`links` 和 `agents.spawns` 的键不含路径和文件身份，关联保留。`offset` 按解压后的内容计，压缩前后一致。
+- 删除：父会话的全部候选都消失时（「不变量」），去掉 `links` 里它的项，下一次发布时子会话的 `tool_call` 回到 None；`Parent::session` 照旧指向它（「不变量」：`parent` 指向的会话可能不在列表里）。`agents.spawns` 的条目不删，父会话文件恢复后再次命中。被 `SessionFilter` 隐藏的父会话按不在列表处理。
+- 所以 Codex 子会话的 `tool_call` 有值时，父会话一定在列表里，能打开到那次调用。这与 #94 里来源消失后分叉改回「边界未定」相同：摘要只反映当前在本机的文件。Claude Code 子 agent 的 `toolUseId` 取自它自己的 `meta.json`，父会话删除后仍在；消费方不依赖父会话删除之后的 `tool_call`。
+
+**线程**
+
+全部在 executor 的 `Background` 任务里，带 `BusyGuard`：查 `agents.spawns` 在刷新任务里，`load` 在派生任务或刷新任务里。`sessions()` 仍只复制 `Arc`，UI 线程上不做任何新的工作。`links` 的锁只在内存操作时短暂持有，取锁顺序在 `state` 之后。
+
+**放弃的方案**
+
+- 发现时扫描父会话找 `spawn_agent` 的输出：打破只读开头和末尾的规则，代价随父会话的大小增长。
+- 读末尾时顺带找输出：只覆盖最后一轮里末尾 64 行之内的调用，结果取决于什么时候读的末尾。
+- 解析时直接从输出行取子线程 ID，不再 `load`：要在游标状态里记下还在等输出的 `spawn_agent` 调用，游标布局变了就要加适配器版本，所有 Codex 游标从头回放。现在的做法每个调用多一次 `load`（< 1 ms），每份索引只读一次。
+- 把子线程 ID 加进 `services` 的 `ToolCall` 或 `ToolKind::SpawnAgent`：要改 `services` 的类型和序列化，超出 `agents` 一个 crate。
+- 把关联写进子会话的摘要缓存：父会话之后消失或被改写时，缓存里的值不会随之失效。
+
+**实现步骤**（第 5 步，一个 PR）
+
+1. 按公开源码核对 `spawn_agent` 的输出形状（「验收」第 5 步第一条），再写 `Codex::spawned_thread` 和它的单元测试。
+2. `Adapter` 加 `LINKS_SPAWNS` 与 `spawned_thread`；`Engine` 加 `links`、`keep_index` 的序号和派生任务，在 `read`、`turns`、`follow` 之后触发。
+3. 加 `agents.spawns`：写入在派生任务里，刷新任务在发布之前为子会话的父会话读取；发布时填 `tool_call`；父会话的全部候选消失时去掉它的项。
+4. 活跃父会话的主动建索引（队列，同时最多 1 个）。
+5. `spawn_link_*` 测试、`testing::synthetic_rollouts` 与 `agents/discover_codex_1000`；更新本节、「实际验证」、状态行和 `crates/agents/AGENTS.md` 的测试前缀。
 
 ### 压缩会话的随机读取
 
@@ -729,7 +830,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - 已经在增量读取的文件（第 5 步）不再读末尾，这两个字段从解析器状态里直接取。
    - `.zst` 没有办法直接读末尾：先查摘要缓存（见「压缩会话的随机读取」），命中就用；没命中时只流式解压开头 256 KB，用开头和文件的 `stat` 生成摘要、标 `tail_pending`，照常发布。补齐末尾字段要整份解压，按需进行：列表发布后只主动补齐修改时间最近的 8 个压缩会话（M 系列上约 3 s，之后不再有后台工作，kernel 能在首帧后 30 秒内静止，[ADR 0017](../adr/0017.md)），其余等视图调 `complete`（会话行显示出来或被打开）时才补齐；同时最多 2 个补齐任务，补齐后按第 4 步再发布，并写入摘要缓存。冷的归档历史不会让应用一直忙碌。
 3. 归位：先在 executor 上把去重后的 cwd 规范化（`std::fs::canonicalize`，解开 `/tmp` 一类的符号链接），失败（目录已不存在）为 `Missing`；`SessionSummary::cwd` 仍保留日志里的原样路径，规范路径只用于归位。对规范路径先调 `Projects::locate`（只查内存，匹配已打开的项目，取最深的根），匹配到就记为 `Place::Located`，所以已打开的文件夹项目的子目录也归到该项目；没有匹配时再调 `Projects::resolve`（阻塞，在 executor 上），记为 `Place::Resolved`。结果按 cwd 缓存，目录变化或收到 `ProjectEvent`（项目打开、关闭、worktree 变化）时对受影响的 cwd 重新归位；`locate` 返回 `NotLoaded` 时按项目设计的规则处理：路径在非当前 worktree 时调 `Projects::resolve_package`（阻塞，在 executor 上）取这个 worktree 自己的子项目；在当前 worktree 或加载中的文件夹项目时，先记下项目与 worktree，等下一次 `Changed` 再补子项目。cwd 不存在时为 `Missing`。
-4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。
+4. 发布：整体替换 `Arc<SessionList>`，发出 `SessionsChanged`。Codex 子会话的 `Parent::tool_call` 在这一步按当时的关联填写（见「Codex 子 agent 与派出它的调用」）。
 5. 监听：`fs_watch` 递归监听每个会话目录；会话根目录（`<CLAUDE_CONFIG_DIR>/projects`、`<CODEX_HOME>/sessions`、`archived_sessions`）还不存在时（第一次使用），监听它最近的已存在的上级目录，根目录出现后改为递归监听它并按第 2 步扫描一次。事件合并 250 ms 后处理：新文件按第 2 步读摘要；已有文件只读游标之后追加的部分更新摘要；删除的文件按「不变量」里的规则核对同一 `SessionKey` 的所有候选路径：另一个候选仍在就改用它，所有候选都不在时才从列表移除。处理完再按第 4 步发布。
 6. 消费：`usage` 按自己的游标 `read`；`review` 调 `turns` / `load`。
 7. 轮次索引：`read` 解析记录时顺带更新这个会话的轮次索引（同一遍解析，不另读文件）：`from` 等于已有索引的 `cursor` 时在它之后追加，`reset` 时从头重建，其余情况不动索引。所以 `usage` 补读完历史之后，每个会话都已有缓存的索引。内存里按字节 LRU 保留（上限 8 MB）；索引更新后写入 `cache` 的应用级分库，键见 ADR 0026。`turns` 命中缓存时只解析缓存之后追加的部分。
@@ -750,6 +851,12 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 没有缓存索引时打开（首次启动、`usage` 的补读还没读到这个会话，或缓存被淘汰）：`turns` 解析整个文件，56 MB 的会话约 0.3 s，超出预算；界面与第一次打开压缩会话一样显示骨架或进度。`usage` 补读完成后，只有缓存被淘汰的会话会再遇到这种情况。这是已知限制（ADR 0026）。
 - 预期耗时（M 系列，单线程，release）：发现 1000 个会话文件 < 500 ms；整文件解析 ≥ 200 MB/s；追加 4 KB 后 `read` < 1 ms；`.zst` 解压后解析 ≥ 100 MB/s。实现时用 bench 实测后校准，写进 bench 的预算表。
 - `bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增：`agents/discover_1000`（合成 1000 个会话目录）、`agents/parse_throughput`（fixtures 拼成 50 MB）、`agents/append_4k`、`agents/turns_cached_50mb`、`agents/zst_throughput`、`agents/zst_load_decoded`（副本建好后 `load` 一次）。
+- Codex 子 agent 的关联（第 5 步）：
+  - 发现：不读父会话的正文；每个有子会话列出、内存里还没有关联的父会话一次 `agents.spawns` 读取（几百字节）。新增 `agents/discover_codex_1000`：1000 个 Codex rollout，100 个父会话各派出 9 个子会话，`agents.spawns` 已写好，计时第一次发现，预算与 `agents/discover_1000` 相同（< 500 ms），并检查 900 个子会话都有 `tool_call`、适配器的 `read`、`turns_after`、`load` 都没有被调用。会话由新的 `testing::synthetic_rollouts(sessions: &Path, parents: usize, children: usize)` 生成，`agents.spawns` 由一次预热的发现与 `turns` 写好。
+  - 派生：每个新的 `spawn_agent` 调用一次 `load`（与 `agents/zst_load_decoded` 同一条路径，实测十几 µs），在后台，每份索引只做一次；没有新调用时只遍历一遍内存里的索引。
+  - 现有基准：`agents/discover_1000`、`agents/turns_cached_50mb` 用 Claude Code 的会话（`LINKS_SPAWNS` 为 false，不走新代码），`agents/parse_throughput`、`agents/append_4k`、`agents/zst_*` 不经过 `Engine`，都不受影响；实现 PR 重跑 `just bench --measure agents/`，把前后数字写进「实际验证」。
+  - 空闲内存：每个关联约 100 字节，只为有子会话列出、或这次运行建过索引的父会话保留，1000 个关联约 100 KB。
+  - 静止（[ADR 0017](../adr/0017.md)）：主动建索引只针对活跃的父会话，同时最多 1 个，单个在 1 s 以内，持有 `BusyGuard`；不活跃的父会话没有后台工作。
 
 ## 状态与异常
 
@@ -780,6 +887,16 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 末尾字段：最后一条记录大于 64 KB（至 16 MB）时仍能取到它的时间戳和 `open_turn`；末尾跟着非消息记录时向前找到最后一条消息记录；最后一条记录超过 16 MB 时按「数据流与线程」第 2 步的回退规则；已在增量读取的文件不再读末尾（`tail_*`）。
 - 压缩会话的补齐：冷缓存下发现 100 个 `.zst` 之后，只补齐最近的 8 个，kernel 在补齐完成后静止；对其余会话调 `complete` 才补齐（`complete_*`）。
 - 子 agent：父会话、`toolUseId` 关联，`meta.json` 缺失时 `tool_call` 为 None（`subagent_*`）。
+- Codex 子 agent 关联派出它的调用（第 5 步，`spawn_link_*`）。全部用合成数据：现有的 `codex/0.140.0-paginated/` 已有父会话（`call_p1_0003` 的输出给出 `bbbbbbbb-…-000000000002`）和对应的子 rollout，`0.140.0-legacy/` 的主会话派出不在本机的 `cccccccc-…`；其余输出形状和文件顺序在测试的临时目录里生成。本步不调用外部命令行，不需要假命令。
+  - `spawned_thread`：`{"agent_id": <规范 UUID>}` 给出子线程；非规范 UUID、没有 `agent_id`、不是 JSON 的失败文本、不是 `SpawnAgent` 的调用、没有结果的调用为 None。
+  - fixtures：父会话 `turns` 之后，子会话的 `tool_call` 为 `call_p1_0003`，这次发布的 `SessionsChanged::changed` 带上子会话；`legacy` 主会话的关联指向不在列表里的线程，列表不变。
+  - 顺序无关：子会话先于父会话写入临时目录、父会话先于子会话、父会话的输出在子会话出现之后才追加（内存里有父会话的索引），三种情况最后发布的列表与一次发现全部文件再 `turns` 父会话相同。
+  - 主动建索引：活跃的父会话有未关联的子会话时建一次索引、之后的追加由 `follow` 派生；不活跃的不建（计数 `turns_after` 的调用）；同时最多 1 个。
+  - 重启：新建来源，第一次发现就从 `agents.spawns` 得到关联，适配器的 `read`、`turns_after`、`load` 都没有被调用；条目的 `offset` 大于父会话文件长度时丢弃；适配器版本变化后不命中。
+  - 归档与删除：父会话移到 `archived_sessions/` 并压缩成 `.jsonl.zst` 后关联不变、不解压；删除父会话后 `tool_call` 为 None、`Parent::session` 不变，文件恢复后关联回来；被 `SessionFilter` 隐藏的父会话同删除。
+  - 改写：父会话被替换成另一份内容（`reset`）后关联按新索引重新派生，旧的不留下；先建的索引晚完成派生时结果被丢弃。
+  - 匹配：子会话声明的父线程与给出它的父会话不同时不填；同一父会话两次调用给出同一个子线程时取靠前的；父线程 ID 为空的子 agent 不填。
+  - Claude Code 的 `subagent_*`、`watch_*` 不变。
 - 去重键：Claude Code 同一响应的多行给出相同的 `UsageKey`；两个 Codex 线程写出相同的 `total_token_usage` 时键不同，同一线程重复写出的相同累计值键相同；键里没有 `SourceId`；`info` 为 null 的 `token_count` 只给出 `RateLimits`（`usage_keys_*`）。
 - 工具分类：分类表每一行一个用例，表外工具名归 `Other` 并计数（`tool_kind_*`）。
 - 异常：不认识的类型、坏行、超长行、末尾不完整的行、认不出格式的文件（`format_*`）。
@@ -806,7 +923,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 
 ## 验收
 
-分四步，每步一个 PR。前三步写 `Refs #13`，最后一步写 `Closes #13`。
+#13 分四步，每步一个 PR。前三步写 `Refs #13`，第 4 步写 `Closes #13`。第 5 步是 #97，一个 PR，写 `Closes #97`。
 
 1. **`services` 的会话接口**（改 `lectern-services`，[#71](https://github.com/SoloJiang/lectern-app/pull/71)）
    - `SessionSource`、`SessionsChanged` 和「数据结构」里的类型在 `services::session` 里，`cargo check -p lectern-services` 通过。
@@ -823,6 +940,11 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - `discover_*`、`watch_*`、`place_*`、`index_cache_*`、`complete_*`、`plugin_*` 通过。
    - `python3 scripts/check_architecture.py` 通过；`rg gpui crates/agents/Cargo.toml` 没有结果。
    - `agents/discover_1000`、`agents/turns_cached_50mb` 达标；macOS 上冷启动基准（#7）不因本插件变化。
+5. **Codex 子 agent 关联派出它的调用**（[#97](https://github.com/SoloJiang/lectern-app/issues/97)，只改 `agents`）
+   - 先核对 `spawn_agent` 输出的形状：在公开的 openai/codex 源码（实现时的最新提交）里找到 `spawn_agent` 输出的序列化代码，把文件路径和提交写进「外部格式」和两份 `SOURCE.md`，不读本机日志。与「外部格式」里的假设不同时，改提取规则和合成 fixtures，写进「与设计的差异」；输出里没有子线程 ID 时停下，在 #97 里说明，`tool_call` 保持 None。
+   - `just test -p lectern-agents` 的 `spawn_link_*` 通过，`subagent_*`、`watch_*` 的快照不变。
+   - `rg 'tool_call: None' crates/agents/src/codex/summary.rs` 仍有结果（摘要里不填，发布时填）；`rg -n 'agents.spawns' docs/design/cache.md` 有结果。
+   - `agents/discover_codex_1000` 达标；`just bench --measure agents/` 的其余各项与改动前相比没有超出预算。
 
 ## 实际验证
 
@@ -933,7 +1055,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - **解压副本在全部候选都消失之后才删。** 一轮刷新里先处理完全部路径，再对候选全部不在的会话删副本：移动到 `archived_sessions/` 时旧路径的删除可能先被处理，同一会话的另一个压缩候选被删时选中的那个仍在用副本。
 - **缓存的编码与写回。** `agents.turns`（命名空间版本 1，不压缩）存索引的紧凑二进制编码（`src/source/index_codec.rs`：变长整数、长度前缀的字符串，解码时工具名和工作目录共用 `Arc`），`agents.summary`（不压缩）存摘要（`place` 为 `Pending`）和计数的 serde JSON。先用 JSON 加 zstd 时，`synthetic_session` 拼成的 50 MB 会话（8508 轮、34031 项，JSON 8.1 MB）打开一次要 133 ms，其中解码 38 ms、压缩 67 ms，所以改成二进制（同一份索引 2.9 MB）、不压缩，并把写回 `cache` 移出调用：插件在另一个 `Background` 任务里写（`testing::source` 在 drop 时写），`turns` 的调用方只等读和解析。
 - **来源会话的轮次集合不进 `cache`。** cache 设计的命名空间表留给本 crate 决定。集合只在内存里（最多 64 个），重启后第一次读到 `legacy` 分叉时扫描一遍来源文件（只做子串匹配，不解析其余记录）。分叉的摘要在发现时边界未定，第一次 `read` / `turns` 它之后重新生成一次（每个文件身份一次，按需扫描来源），`inheritance_unknown` 和标题随之更新并发布；每份摘要记下它的继承边界依赖哪个来源会话（`session_meta` 里的来源线程 ID），这个来源之后出现时，读过的、边界未定的会话按需扫描来源、重新生成；来源消失时，边界已定的会话重新生成、改回未定，不等它们再被读。
-- **Codex 子 agent 的 `Parent::tool_call` 仍为 None。** 第 3 步留给这一步的「从父会话 `spawn_agent` 的输出关联子线程」没有做：要在发现时读父会话的工具输出，代价和一致性规则都需要另外设计。是已知限制，Claude Code 的子 agent 不受影响（`meta.json` 后到时，它的事件让子 agent 的摘要重新生成）。
+- **Codex 子 agent 的 `Parent::tool_call` 仍为 None。** 第 3 步留给这一步的「从父会话 `spawn_agent` 的输出关联子线程」没有做：要在发现时读父会话的工具输出，代价和一致性规则都需要另外设计。是已知限制，Claude Code 的子 agent 不受影响（`meta.json` 后到时，它的事件让子 agent 的摘要重新生成）。设计已补在「Codex 子 agent 与派出它的调用」，由第 5 步（[#97](https://github.com/SoloJiang/lectern-app/issues/97)）实现。
 - **归位的细节。** 归位在发布之前的同一个刷新任务里完成，所以通常不会先发一版 `Pending`（`Projects` 不可用时留在 `Pending`）。`resolve` 的结果按规范路径缓存，只在它依据的目录或 worktree 集合可能变了时丢掉：同一个目录没变时只 `resolve` 一次；它返回 `NotFound` 记为 `Missing`。收到某个项目的 `ProjectEvent`（打开、关闭、变化）时，归在这个项目里的 cwd 丢掉缓存的 `resolve` 结果，重新规范化和归位（worktree 被删除为 `Missing`，删除后重建照常归位，目录还在但已不属于任何 worktree 时重新 `resolve`）；`Pending`、`Missing` 的 cwd 一起重新核对；项目打开时其余没有 `Located` 的只重新 `locate`（只查内存）；其他项目里的不动。每轮刷新只重新核对这一轮读过摘要的会话的 cwd 和 `Missing` 的 cwd：重新规范化一次，规范路径变了（目录消失、出现、解析到别处）才丢掉缓存重新归位，所以没打开的项目里 worktree 被删除，也在它的会话下一次变化时归为 `Missing`。代价按受影响的 cwd 计，每个一次 `canonicalize`，必要时一次 `resolve`。`locate` 给出 `NotLoaded` 且带 worktree 时调 `resolve_package`，当前 worktree 还在加载时它仍给 `NotLoaded`，等下一次 `Changed`。
 - **监听的细节。** 每个批次（包括 arm 之后第一个 `rescan: true` 的批次）都直接交给刷新任务；带 `rescan` 或根目录出现、消失的批次重新枚举这个根目录，枚举只比较文件身份，没变的不重新读摘要，所以启动时第一次发现之后的这一遍只是一轮 `stat`。批次里的目录路径（只报告了目录的删除、改名）按目录之下的全部已知文件核对。刷新任务同时只有一个，排队期间到达的批次并进同一轮，守卫随之保留到那一轮结束。
 - **`Diagnostics` 的来源。** 计数来自列出的会话的摘要（开头与末尾读到的行）和读不了的目录；`read` 的计数不并进来（重复读同一段会重复计数），读不到 cwd、不列出的文件没有对应的计数项（`Diagnostics` 没有这一项，不改 `services`）。

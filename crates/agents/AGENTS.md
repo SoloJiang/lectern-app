@@ -4,7 +4,7 @@ Claude Code / Codex 会话发现与解析，按 cwd 归位到项目和 worktree�
 
 - 层：领域层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：两个插件 "session-claude-code"、"session-codex"（`plugins`）。只依赖 kernel 层（`kernel`、`services`）和非插件的库 crate（`executor`、`fs_watch`、`cache`）；`project`、`usage`、`review` 是插件，只经 `services` 的接口往来。不得直接或间接依赖 GPUI（架构规则 2）。
 - 设计文档：[docs/design/agents.md](../../docs/design/agents.md)。P1 范围是会话发现与解析；Analyze 的机制（下面「边界」里的命令行、凭据转发端点、沙箱与监护）另开 issue，设计写进该文档的后续修订。
-- issue：[#13](https://github.com/SoloJiang/lectern-app/issues/13)、[#23](https://github.com/SoloJiang/lectern-app/issues/23)
+- issue：[#13](https://github.com/SoloJiang/lectern-app/issues/13)、[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#97](https://github.com/SoloJiang/lectern-app/issues/97)（Codex 子 agent 关联派出它的调用，设计见 agents 设计「Codex 子 agent 与派出它的调用」）
 - ADR：[0012](../../docs/adr/0012.md)、[0014](../../docs/adr/0014.md)、[0019](../../docs/adr/0019.md)、[0020](../../docs/adr/0020.md)、[0026](../../docs/adr/0026.md)
 
 ## 边界
