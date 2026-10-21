@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步部分实现，见本段末。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。流式的 blob 哈希 `BlobHasher`（code_intel 设计「对其他 crate 的要求」，「大文件」的前置条件，`Refs #17`）已实现，见「与设计的差异」「实际验证」。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」。比较按阶段计时（[#133](https://github.com/SoloJiang/lectern-app/pull/133)）定位了 macOS 上的开销；完整比较按 index 的 cache-tree 跳过未变的基准子树、stat 一遍并行（[ADR 0038](../adr/0038.md)），`git/changes_clean_100k` 改回生效；只有 index 变化时过滤器的重建复用上一次的未跟踪遍历、不再列目录（「index」），`git/filter_100k` 改为测这次重建并生效，完整构造另记为只记录的 `git/filter_100k/cold`。第 4 步里不依赖 `services` 的部分已实现：工作区比较解析的 index 不跨调用保留（「缓存」，ADR 0035），`git/compare_100k/retained_bytes`、`git/changes_count/per_path_bytes` 改为生效；改动来源接口仍未实现。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步部分实现，见本段末。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。流式的 blob 哈希 `BlobHasher`（code_intel 设计「对其他 crate 的要求」，「大文件」的前置条件，`Refs #17`）已实现，见「与设计的差异」「实际验证」。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」。比较按阶段计时（[#133](https://github.com/SoloJiang/lectern-app/pull/133)）定位了 macOS 上的开销；完整比较按 index 的 cache-tree 跳过未变的基准子树、stat 一遍并行（[ADR 0038](../adr/0038.md)），`git/changes_clean_100k` 改回生效；只有 index 变化时过滤器的重建复用上一次的未跟踪遍历、不再列目录（「index」），`git/filter_100k` 改为测这次重建并生效，完整构造另记为只记录的 `git/filter_100k/cold`。第 4 步里不依赖 `services` 的部分已实现：工作区比较解析的 index 不跨调用保留（「缓存」，ADR 0035），`git/compare_100k/retained_bytes`、`git/changes_count/per_path_bytes` 改为生效；改动来源接口仍未实现。`Text::shared` 和三方合并 `merge3`（[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)，前置条件 D，`Refs #10`）已实现，见「三方合并」「与设计的差异」「实际验证」。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -14,6 +14,7 @@
   - 改动集：树 ↔ 树（提交、分支相对 merge-base），树 ↔ 工作区（含未跟踪文件）；重命名检测、二进制判断、行 diff、单文件和整体的截断。
   - 展示行：统一视图与双栏视图共用的行模型、上下文折叠、增删配对、词级差异。
   - 以两端 blob OID 为键的 hunk 缓存；工作区内容按 git 的 blob 格式计算 OID，不写对象库。
+  - 按行的三方合并（`merge3`）：`file_reader` 保存时磁盘上的文件已被改动，用它合并编辑器和磁盘两边的内容。纯计算，不读写仓库。
 - 不做：
   - 绘制 diff、Fluent 文案、UI 探针节点：`review_view`。本 crate 只返回枚举，不产生界面字符串。
   - 归因、Drifted、已看状态、噪声文件列表：`review`。本 crate 只给出 `.gitattributes` 里的 `linguist-generated`。
@@ -34,7 +35,7 @@
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
 | `gix` =0.88.0 | 对象库、引用、index、配置、属性与忽略规则、内置转换（`text` / `eol` / `ident` / `working-tree-encoding`）、树 diff 与重命名检测；工作区的目录遍历不用它，`dirwalk` feature 已去掉（[ADR 0028](../adr/0028.md)） | 纯 Rust，MIT OR Apache-2.0；feature 与使用边界见 [ADR 0024](../adr/0024.md)，`dirwalk` 除外；release 约 3 MB，`just deny` 通过 |
-| `gix::diff::blob`（`gix-imara-diff` 0.3） | 行 diff 与词级 diff，Histogram 算法 | gix 维护的 imara-diff 副本，Apache-2.0；随 gix 一起升级，不再引入上游 `imara-diff`（ADR 0024） |
+| `gix::diff::blob`（`gix-imara-diff` 0.3） | 行 diff 与词级 diff，Histogram 算法；三方合并的两次 diff | gix 维护的 imara-diff 副本，Apache-2.0；随 gix 一起升级，不再引入上游 `imara-diff`（ADR 0024） |
 | `lectern-platform` | 安全读取和列出工作区文件（见「安全读取」） | 架构规则 6 |
 | `lectern-cache` | hunk 的持久缓存 | 架构规则 5；`cache` 实现之前只用进程内的 LRU |
 | `lectern-fs-watch` | 实现它的 `WorktreeSource` / `PathFilter`（`Worktree::watch_source`） | 领域层依赖基础设施层；见 [fs_watch 设计](fs_watch.md)「对其他 crate 的要求」 |
@@ -405,6 +406,33 @@ pub fn inline_changes(old: &[u8], new: &[u8]) -> Option<InlineChanges>;
 
 其余情形：CRLF 行的 `\r` 计入这一行，最后一行没有 `\n` 也算一行；二进制、`TooLarge`、`Truncated`、`Listed` 没有 hunk，也就没有偏移；重命名的旧一侧按来源路径的 blob 计。词级差异的区间相对所在行，加上展示行的偏移就是在文本里的位置。一侧的 `SideText` 不是 `Text` 也不是 `Absent` 时，这一侧的展示行偏移为 None（见「与设计的差异」）。
 
+### 三方合并
+
+`file_reader` 保存时磁盘上的文件已被改动，选「合并」后用它合并两边（[file_reader 设计「编辑」](file_reader.md#编辑)）：`base` 是进入编辑（或上次保存、合并）时的内容，`ours` 是缓冲区，`theirs` 是磁盘上的内容。
+
+```rust
+/// 按行的三方合并。两边改了同一段时为冲突，冲突段按 `markers` 写出两边的内容。纯计算，任何线程。
+pub fn merge3(base: &[u8], ours: &[u8], theirs: &[u8], markers: &Markers<'_>) -> Merge3;
+/// `<<<<<<<` 和 `>>>>>>>` 后的标签。它们是文件内容，不走 i18n；`file_reader` 传 `editor` 和 `disk`。
+pub struct Markers<'a> { pub ours: &'a str, pub theirs: &'a str }
+pub struct Merge3 {
+    pub bytes: Vec<u8>,
+    /// 每个冲突在 `bytes` 里的字节区间，按顺序：从 `<<<<<<<` 行首到 `>>>>>>>` 行的行尾（含换行）。没有冲突时为空。
+    pub conflicts: Vec<Range<usize>>,
+}
+impl Merge3 { pub fn is_clean(&self) -> bool; }
+```
+
+结果按 `git merge-file` 的默认级别和样式（`-L editor -L base -L disk`），算法按 diff3 的描述自己实现，不参照 git 的代码（架构规则 8）：
+
+- 行：与 hunk 相同，行在 `\n` 之后结束，`\r` 属于这一行，最后一行没有 `\n` 也算一行，与带 `\n` 的同一文本不同。所以一边把 CRLF 改成 LF 也是改了这一行，一边给最后一行补上换行也是改了最后一行。
+- 两次 diff：`base → ours` 和 `base → theirs`，都用 `gix::diff::blob` 的 Histogram，hunk 尽量往下滑，不用缩进启发。两边的 hunk 在基准里重叠或相接（一个结束处是另一个开始处，或在同一点插入）时归为同一段改动，只要还有 hunk 从这一段内部或末尾开始就继续延伸。所以相邻两行分别被两边改动也是冲突，与 git 相同。
+- 一段改动只有一边动过：取那一边。两边动过、结果相同：取一次。否则对这一段的两边再做一次 diff，两边相同的行放在冲突之外，只有不同的部分是冲突。
+- 合并相近的冲突：两个冲突之间只有两边共有的行，并且不超过 3 行、或其中没有一行含 ASCII 字母或数字时，并成一个冲突，中间的行在两边各写一次。中间夹着只有一边的改动时不合并。
+- 冲突的写法：`<<<<<<< {ours}`、`ours` 的行、`=======`、`theirs` 的行、`>>>>>>> {theirs}`，没有基准一节（`|||||||`）。标签为空时标记后不加空格。一边在冲突里的最后一行没有 `\n` 时补一个换行，使每个标记都从行首开始；所以冲突在文件末尾时结果总以换行结束。
+- 标记的换行：`ours` 和 `theirs` 里冲突前一行（冲突在开头时取第一行）和 `base` 的第一行各按自己的换行投票。最后一行没有换行时看它的前一行；没有行、或只有一行而且没有换行的文件不投票。所有投票都是 CRLF、并且至少有一票时用 `\r\n`，否则用 `\n`。全是 CRLF 的文件合并后仍全是 CRLF，`file_reader` 仍能编辑。
+- 没有冲突的部分照原样复制所取那一边的字节，所以末尾没有换行的文件合并干净时仍没有换行。
+
 ### Analyze 快照
 
 Analyze 快照的输入（[ADR 0019](../adr/0019.md)）：基准树条目、叠加的工作区改动、截断文件改动前的版本、审阅对象的指纹，随 [#66](https://github.com/SoloJiang/lectern-app/issues/66) 设计，不在本文。那份设计要满足 ADR 0019 的约束：快照只含属于审阅对象的改动；省略的内容、使用了过滤器的文件、子模块、超过上限的内容都让结果标为「部分内容未提供」；模型读到的内容、显示的 patch 和指纹来自同一份状态。它建立在本文的 `ChangeSet`、`Content`（含 `Unavailable::Filtered { raw }`、`NotRetained`）、`texts` 和 `Repo::blob` 之上。
@@ -553,6 +581,8 @@ pub struct Text { /* Arc<[u8]> + 行首偏移 */ }
 impl Text {
     pub fn new(bytes: Arc<[u8]>) -> Text;
     pub fn bytes(&self) -> &[u8];
+    /// `new` 收到的那份 `Arc`，不复制（审阅视图经它登记 `Reader::share_object`，ADR 0042）。
+    pub fn shared(&self) -> &Arc<[u8]>;
     pub fn line_count(&self) -> u32;
     pub fn line(&self, n: u32) -> &[u8];       // 不含 `\n`
     pub fn ends_with_newline(&self) -> bool;
@@ -888,8 +918,10 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 - 字节偏移：全部树夹具和工作区转换夹具（三种 `core.autocrlf`）里每个文本文件的 hunk 偏移等于这一行在 `texts` 文本里的行首；上下文为 0、3 和全部显示时，每个展示行的偏移处恰好是这一行的文本，之后是 `\n` 或文本末尾；词级差异的区间加上行的偏移得到同样的字节。覆盖 CRLF、末尾没有换行、重命名、新增和删除；`core.autocrlf = true` 下 CRLF 的工作区文件按规范内容（LF）计偏移。
 - 缓存：同一对 OID 第二次计算命中，命中的 hunk 带同样的偏移；格式版本 2 的条目不被版本 3 读出；键里的 `HashKind` 不同时不命中；命中时按这次的 `diff_bytes` 判断 `TooLarge`，另一个仓库里缺失的一侧仍是 `Missing`。
 - 取消：`cancel` 置位后返回 `Cancelled`，没有部分结果。
+- 三方合并（`merge3_*`，`src/merge3/tests.rs`）：没有改动、只有一边改动、两边相同的改动、互不重叠的改动、重叠的改动（冲突，冲突只含两边不同的行）、相邻行的改动、相隔 3 行和相隔 4 行无字母数字的冲突合并、中间夹着单边改动的冲突不合并、在开头和末尾插入、删除（含一边删除、一边修改）、CRLF、末尾没有换行、空文件。期望的字节写在测试里，LF 的冲突、合并和末尾换行的输入由真实的 `git merge-file` 核对过一次；测试不运行 git。每个结果另检查 `conflicts` 的区间恰好覆盖各个冲突、区间之外没有标记行，并用 insta 快照记录。
+- `Text::shared`：返回的 `Arc` 与 `Text::new` 收到的是同一份（`Arc::ptr_eq`），`texts` 给出的文本的 `shared` 与 `bytes` 是同一块内存。
 
-改动集、hunk 和展示行的结构化输出都用 insta 快照验收。
+改动集、hunk、展示行和三方合并的结构化输出都用 insta 快照验收。
 
 ## 结构化 diff 的扩展点（#21）
 
@@ -1072,6 +1104,13 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 - 计时（开发构建，依赖按 opt-level 2 编译，这台机器的 CPU 有 SHA 扩展指令）：16 MiB 按 1 MiB 的区间，只算 SHA-1（sha1dc）约 20 ms，同时再算一遍 SHA-256 约 32.5 ms，单独算 SHA-256 约 13.5 ms。所以没有为碰撞的替代值在流式时多算 SHA-256（「与设计的差异」）。
 - 没有验证的：sha1dc 判定为碰撞攻击时 `finish` 返回 None 没有测试：已知的碰撞样本（SHAttered）按原始字节构造，加上 `blob <len>\0` 之后块的对齐变了，不再触发检测，没有可用的 blob 夹具；macOS 上没有运行。
 
+`Text::shared` 与三方合并 `merge3`（file_reader 的前置条件 D，`Refs #10`），同一类 Linux 虚拟机：
+
+- `just check` 通过；`just test -p lectern-git` 271 个测试通过（新增 20 个）；`cargo test --doc -p lectern-git` 通过；`just deny` 的 advisories、bans、licenses、sources 都通过。`Cargo.toml` 和 `Cargo.lock` 不变，没有新增依赖：两次 diff 用已有的 `gix::diff::blob`。
+- `merge3_*` 18 个（「测试」）。期望的字节由 `git merge-file -p -L editor -L base -L disk ours base theirs`（git 2.43）在同样的合成输入上核对过，包括：相邻行的改动是冲突；冲突只含两边不同的行；相隔 3 行的冲突合并，相隔 4 行有字母的不合并，4 行 `}` 的合并；中间夹着单边改动时不合并；一边删除、一边修改；空基准两边各自添加；两边同时在开头和末尾插入；末尾没有换行的冲突在每个标记前补换行；一边给最后一行补换行、另一边改第一行时干净合并。核对只在写测试时做了一次，测试本身不运行 git。
+- `text_shared_is_the_arc_it_was_given`：`Text::shared` 与 `Text::new` 收到的 `Arc` 满足 `Arc::ptr_eq`，克隆的 `Text` 也是同一份；`text_shared_from_texts_is_the_texts_bytes`：`ChangeSet::texts` 给出的文本，`shared` 与 `bytes` 指向同一块内存。
+- 没有验证的：CRLF 的几种情形没有与真实的 git 核对，期望值按「三方合并」的标记换行规则手写；Histogram 与 git 默认的 Myers 结果不同的输入没有构造；macOS 上没有运行（本功能不含平台相关的代码）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1203,3 +1242,10 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 - 被 sha1dc 判定为碰撞攻击的 SHA-1 内容，`finish` 返回 None，与 `for_blob` 不同（code_intel 设计原文是「与 `Oid::for_blob` 的结果相同」，只在长度不符时返回 None）。`for_blob` 这时的替代值是内容的 SHA-256 blob OID 的前 20 字节（第 1 步），流式时内容已经不在，要给出同一个值只能对每个 SHA-1 的流同时再算一遍 SHA-256，开发构建里 16 MiB 从约 20 ms 变为约 32.5 ms（「实际验证」），而这只为攻击构造的内容服务。返回 None 不会得到错误结果：这样的内容没有 git 接受的 OID，None 不等于任何期望的 OID，调用方按 OID 不等处理（code_intel 在原始字节的 OID 不等时整份读入、用 `canonical_oid` 核对，那里经 `for_blob` 得到替代值）。code_intel 设计「对其他 crate 的要求」已同步。
 - `for_blob` 改为经 `BlobHasher` 计算（一份实现），碰撞时的替代值不变，`git/canonical_oid_100k` 等调用方不多算 SHA-256。`BlobHasher` 用 gix 的 `hash::hasher` 加 `objs::encode::loose_header`，与 gix 的 `compute_hash` 相同，不增加依赖。
 - 增加了 `Debug`（只显示算法、`len` 和已给出的字节数）。
+
+`Text::shared` 与三方合并 `merge3`（file_reader 的前置条件 D）：
+
+- file_reader 设计只给出了 `merge3` 的签名和结构体，没有写 `conflicts` 区间的口径、标记的换行、末尾没有换行的处理和相近冲突的合并，按「三方合并」一节决定，都与 `git merge-file` 的默认行为相同，只有标记的换行另有规定（见本节末条）。另外增加 `Merge3::is_clean`，`Markers`、`Merge3` 派生 `Clone`、`PartialEq`、`Eq`、`Debug`（`Markers` 还有 `Copy`）。
+- file_reader 设计写的是「测试 `merge3_*` 对照 `git merge-file` 的结果（测试里的假命令按夹具回放）」。`merge3` 是纯计算，不调用任何命令，没有可以替换的命令；所以期望的字节直接写在测试里，写测试时用真实的 git 核对过一次（「实际验证」），与「测试仓库不调用 git 命令行」一致。
+- diff 算法按设计用 Histogram，git 默认用 Myers。两者对同一输入通常给出相同的 hunk；结果不同时（重复行多、改动位置有歧义），冲突的边界可能与 git 不同，合并结果仍然正确，只是冲突的划分不同。hunk 尽量往下滑、不用 `line_diff` 的缩进启发，让 hunk 的位置不受缩进影响。
+- 标记的换行由投票决定（「三方合并」）：基准为空、两边都是 CRLF 时用 `\r\n`。这是本 crate 自己的规定，没有与 git 核对；这样全是 CRLF 的文件合并后仍全是 CRLF，`file_reader` 只能编辑换行一致的文件。

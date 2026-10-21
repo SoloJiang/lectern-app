@@ -4,8 +4,8 @@
 //! worktree files only through `lectern_platform::SafeRoot`.
 //!
 //! Every function blocks (object database, index, worktree) and belongs on a
-//! background task, never the UI thread; `rows` and `inline_changes` are
-//! pure. `Repo`, `Worktree` and `ChangeSet` are `Send + Sync` and hold no
+//! background task, never the UI thread; `rows`, `inline_changes` and
+//! `merge3` are pure. `Repo`, `Worktree` and `ChangeSet` are `Send + Sync` and hold no
 //! gix handle: each top-level call opens one on the calling thread and
 //! drops it before returning. Functions taking `cancel` return
 //! `GitError::Cancelled` once it is set.
@@ -20,6 +20,7 @@ mod format;
 mod gitdir;
 mod handle;
 mod hunks;
+mod merge3;
 mod oid;
 mod parallel;
 mod path;
@@ -46,6 +47,7 @@ pub use compare::{Base, Refresh};
 pub use content::{Content, RawIdentity, Unavailable};
 pub use error::{GitError, UnsupportedRepo};
 pub use hunks::{FileDiff, Hunk};
+pub use merge3::{Markers, Merge3, merge3};
 pub use oid::{BlobHasher, HashKind, Oid};
 pub use path::{Mode, RefName, RepoPath};
 pub use reflog::{ReflogAction, ReflogEntry, ReflogParseError, parse_reflog_line};
