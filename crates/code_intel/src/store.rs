@@ -430,13 +430,16 @@ pub(crate) const DEPS_SPEC_TABLE: &str = "CREATE TABLE cd_spec (
        kind INTEGER NOT NULL,
        spec TEXT    NOT NULL)";
 pub(crate) const DEPS_SPEC_UNIT: &str = "CREATE INDEX cd_spec_unit ON cd_spec (unit)";
-/// A package's path table (「身份与包的路径表」): one row per (ecosystem,
-/// name, version, identity, package directory), with the five stats of the
-/// installed `package.json` (`dev`, `ino`, `size`, `mtime`, `ctime` in
-/// nanoseconds) and when it was recorded (nanoseconds of the wall clock);
-/// `types`: the `@types` package that gave this one's declarations.
+/// A package's path table (「身份与包的路径表」): one row per (worktree,
+/// ecosystem, name, version, identity, package directory), with the five
+/// stats of the installed `package.json` (`dev`, `ino`, `size`, `mtime`,
+/// `ctime` in nanoseconds) and when it was recorded (nanoseconds of the
+/// wall clock); `wt`: the worktree's root (every worktree has its own
+/// install, so its own stats); `types`: the `@types` package that gave this
+/// one's declarations.
 pub(crate) const DEPS_PKG_TABLE: &str = "CREATE TABLE cd_pkg (
        unit     INTEGER PRIMARY KEY REFERENCES entry (id) ON DELETE CASCADE,
+       wt       TEXT    NOT NULL,
        eco      INTEGER NOT NULL,
        name     TEXT    NOT NULL,
        version  TEXT,
@@ -449,7 +452,8 @@ pub(crate) const DEPS_PKG_TABLE: &str = "CREATE TABLE cd_pkg (
        dir      TEXT    NOT NULL,
        recorded INTEGER NOT NULL,
        types    TEXT)";
-pub(crate) const DEPS_PKG_NAME: &str = "CREATE INDEX cd_pkg_name ON cd_pkg (name, eco, recorded)";
+pub(crate) const DEPS_PKG_NAME: &str =
+    "CREATE INDEX cd_pkg_name ON cd_pkg (name, eco, wt, recorded)";
 /// The files of a path table, by their order in the closure (`seq`): the
 /// path relative to the dependency root's directory, the OID (NULL for a
 /// file never read: `TooLarge`), its five stats and status.
@@ -472,20 +476,23 @@ pub(crate) const INSERT_SPEC: &str = "INSERT INTO cd_spec (unit, kind, spec) VAL
 pub(crate) const SPECS_OF_UNIT: &str =
     "SELECT kind, spec FROM cd_spec WHERE unit = ?1 ORDER BY rowid";
 pub(crate) const INSERT_PKG: &str = "INSERT INTO cd_pkg
-       (unit, eco, name, version, identity, dev, ino, size, mtime, ctime, dir, recorded, types)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+       (unit, eco, name, version, identity, dev, ino, size, mtime, ctime, dir, recorded, types, wt)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 pub(crate) const INSERT_PKG_FILE: &str = "INSERT INTO cd_pkg_file
        (unit, seq, path, oid, dev, ino, size, mtime, ctime, status)
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
-/// The path table of one key (`?3` the version, NULL for none).
+/// The path table of one key (`?3` the version, NULL for none; `?6` the
+/// worktree).
 pub(crate) const PKG_BY_KEY: &str =
     "SELECT unit, version, identity, dev, ino, size, mtime, ctime, dir, recorded, types
-     FROM cd_pkg WHERE name = ?1 AND eco = ?2 AND version IS ?3 AND identity = ?4 AND dir = ?5";
-/// The newest path table of a package name: the stat table when the
-/// identity changed or is not known.
+     FROM cd_pkg WHERE name = ?1 AND eco = ?2 AND version IS ?3 AND identity = ?4 AND dir = ?5
+       AND wt = ?6";
+/// The newest path table of a package name in a worktree (`?3`): the stat
+/// table when the identity changed or is not known. Another worktree's
+/// table is never one: its install has other inodes, so no stat matches.
 pub(crate) const PKG_LATEST: &str =
     "SELECT unit, version, identity, dev, ino, size, mtime, ctime, dir, recorded, types
-     FROM cd_pkg WHERE name = ?1 AND eco = ?2 ORDER BY recorded DESC LIMIT 1";
+     FROM cd_pkg WHERE name = ?1 AND eco = ?2 AND wt = ?3 ORDER BY recorded DESC LIMIT 1";
 pub(crate) const PKG_FILES: &str =
     "SELECT seq, path, oid, dev, ino, size, mtime, ctime, status FROM cd_pkg_file
      WHERE unit = ?1 ORDER BY seq";

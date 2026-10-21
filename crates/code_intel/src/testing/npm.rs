@@ -15,18 +15,40 @@ use crate::extract::ExtractStatus;
 
 /// The path table of package `p` (`pkg-<p>`) with `files` indexed files,
 /// paths in the package as long as [`ts_project`]'s (about 22 bytes, as
-/// `types/m3/part_123.d.ts`), distinct OIDs.
+/// `types/m3/part_123.d.ts`), distinct SHA-1 OIDs.
+#[cfg(test)]
 pub(crate) fn npm_table(p: usize, files: usize) -> PathTable {
+    npm_table_shaped(p, files, 0, 20)
+}
+
+/// The same with paths in the package of about `path_len` bytes (0: as
+/// [`ts_project`]'s), as `dist/types/components/…/m3/part_123.d.ts`, and
+/// OIDs of `width` bytes (20 for SHA-1, 32 for SHA-256).
+pub(crate) fn npm_table_shaped(p: usize, files: usize, path_len: usize, width: usize) -> PathTable {
+    const SEGMENTS: [&str; 6] = ["dist", "types", "components", "internal", "helpers", "esm"];
     let name = format!("pkg-{p:03}");
     let dir: Arc<str> = Arc::from(format!("node_modules/{name}"));
     let done = ExtractStatus::Done.code().unwrap_or(0);
     let files = (0..files)
         .map(|f| {
-            let mut oid = [0u8; 20];
+            let mut oid = vec![0u8; width];
             oid[..8].copy_from_slice(&(p as u64).to_be_bytes());
             oid[8..16].copy_from_slice(&(f as u64).to_be_bytes());
+            let tail = format!("m{}/part_{f}.d.ts", f % 7);
+            let mut rel = if path_len == 0 {
+                String::from("types/")
+            } else {
+                String::new()
+            };
+            let mut s = 0;
+            while rel.len() + tail.len() < path_len {
+                rel.push_str(SEGMENTS[(s + f) % SEGMENTS.len()]);
+                rel.push('/');
+                s += 1;
+            }
+            rel.push_str(&tail);
             WalkFile {
-                path: Arc::from(format!("{dir}/types/m{}/part_{f}.d.ts", f % 7)),
+                path: Arc::from(format!("{dir}/{rel}")),
                 oid: BlobId::from_bytes(&oid),
                 stat: Stat::default(),
                 status: done,
@@ -46,6 +68,8 @@ pub(crate) fn npm_table(p: usize, files: usize) -> PathTable {
         dir,
         recorded: 0,
         types: None,
+        worktree: Arc::from("/wt"),
+        loaded: true,
         files,
     }
 }
@@ -59,16 +83,23 @@ pub struct DepTables(Vec<Arc<PathTable>>);
 pub struct DepMapProbe(DepMap);
 
 impl DepTables {
-    pub fn new(packages: usize, files: usize) -> DepTables {
+    /// Paths in the package of about `path_len` bytes, OIDs of `width`
+    /// bytes (32: SHA-256).
+    pub fn new(packages: usize, files: usize, path_len: usize, width: usize) -> DepTables {
         DepTables(
             (0..packages)
-                .map(|p| Arc::new(npm_table(p, files)))
+                .map(|p| Arc::new(npm_table_shaped(p, files, path_len, width)))
                 .collect(),
         )
     }
 
     pub fn map(&self) -> DepMapProbe {
-        DepMapProbe(DepMap::build(1, &self.0))
+        DepMapProbe(DepMap::build(1, &self.0, None))
+    }
+
+    /// The files of the tables.
+    pub fn files(&self) -> usize {
+        self.0.iter().map(|t| t.files.len()).sum()
     }
 }
 

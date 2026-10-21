@@ -1114,8 +1114,8 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 布局：`DirId` 是按路径字节序排好的下标，根为 0，父目录排在子目录之前，`find` 二分查找；每个目录 20 字节（路径、子目录、文件三段区间的终点，父目录，子树文件数；起点取上一个目录的终点），`names` 存完整路径，`path` 直接返回切片；`subdirs` 存为 `Box<[DirId]>`（`DirId` 是 `repr(transparent)`）。另有 `len`、`is_empty`，供序列化和探针遍历。`fold_end` 对根也按同一规则，视图决定根要不要折叠。
 - `ObjectShare` 包着实现方传入的注销回调（`ObjectShare::new`），与 `code_intel::ProviderRegistration` 相同：`services` 不知道登记表的类型。已改「接口」。
 - 派生：`ReadTarget`、`Anchor`、`OpenTicket`、`OpenOutcome` 另派生 `Hash`，`Anchor`、`OpenOutcome` 另派生 `Copy`；`ReaderEvent` 派生 `Clone`、`PartialEq`、`Eq`、`Debug` 和 serde（`TestKernel::emitted` 要 `Clone`）。
-- `TextOrigin` 现在只有 `Worktree`、`Object`。`Dependency` 和 `DepRoot` 是 code_intel「验收」第 9 步的前置条件「`services` 的依赖类型」，随它加入；`ReadTarget::origin` 直接用 `TextOrigin`，到时不用改 `reader` 模块。
-- `DEPENDENCY_EXTENSIONS` 取 ADR 0033 的全部条目（TS、Rust、Go、Python 四组共 13 项），不只是 TS 依赖层用到的六项；以 `.` 开头的一项是文件名的后缀，其余是完整的文件名，按字节比较。`code_intel` 还没有依赖层（第 9 步），没有现成的列表可以移过来，依赖层实现时直接用这一份。
+- `TextOrigin` 当时只有 `Worktree`、`Object`。`Dependency` 和 `DepRoot` 是 code_intel「验收」第 9 步的前置条件「`services` 的依赖类型」，已随第 9 步加入（`TextOrigin` 因此不再是 `Copy`）；`ReadTarget::origin` 直接用 `TextOrigin`，`reader` 模块只改了字段的注释。
+- `DEPENDENCY_EXTENSIONS` 取 ADR 0033 的全部条目（TS、Rust、Go、Python 四组共 13 项），不只是 TS 依赖层用到的六项；以 `.` 开头的一项是文件名的后缀，其余是完整的文件名，按字节比较。当时 `code_intel` 还没有依赖层（第 9 步），没有现成的列表可以移过来；第 9 步的依赖层直接用这一份，TS 一层只取其中 npm 的六项（`deps::extensions`）。
 - `project` 在前置条件 B 之前：构造 `ActiveTree` 的三处填 `Scan::Pending`，`changed` 比较新旧快照的 `dirs`，所以 `dirs` 一直是 `Pending`（[project 设计「与设计的差异」](project.md#与设计的差异)）。`code_intel` 的测试辅助和测试同样填 `Pending`。
 
 前置条件 B（`project`，以及 `services`）：

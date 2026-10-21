@@ -54,8 +54,13 @@ pub const FILE_MAX: u64 = crate::extract::BACKGROUND_MAX_LEN as u64;
 pub const SESSION_BYTES: u64 = 64 << 20;
 /// A manifest (`package.json`) is read up to this size.
 pub const MANIFEST_MAX: u64 = 1 << 20;
-/// The dependency map holds at most this many files.
+/// The dependency map holds at most this many files…
 pub const MAP_FILES: usize = 20_000;
+/// …and at most this many bytes of its own buffers (OIDs, paths, package
+/// indexes and ends, the packages' entries), so it stays within ADR 0033's
+/// 1 MB whatever the paths' lengths and the hash (SHA-256 OIDs are 32
+/// bytes); the files past it are only found on demand.
+pub const MAP_BYTES: usize = 960 << 10;
 /// The dependency map keeps the packages of this many sub-projects, the
 /// most recently used.
 pub const MAP_SUBPROJECTS: usize = 8;
@@ -192,13 +197,16 @@ pub(crate) struct PkgWork {
     pub stat_table: Option<Arc<PathTable>>,
     /// The sub-project it is a direct dependency of.
     pub subproject: RelPath,
+    /// The worktree's root: the path table key's first part.
+    pub worktree: Arc<str>,
 }
 
 impl PkgWork {
-    /// The path table key's parts: (ecosystem, name, version, identity,
-    /// package directory).
+    /// The path table key's parts: (worktree, ecosystem, name, version,
+    /// identity, package directory).
     pub(crate) fn same_key(&self, other: &PkgWork) -> bool {
-        self.origin.package == other.origin.package
+        self.worktree == other.worktree
+            && self.origin.package == other.origin.package
             && self.origin.version == other.origin.version
             && self.identity == other.identity
             && self.pkg.path() == other.pkg.path()
@@ -294,7 +302,9 @@ pub(crate) struct Deps {
     pub queue: VecDeque<PkgWork>,
     pub walk: Option<PkgWalk>,
     pub walks: u64,
-    /// The path tables ready, per sub-project, most recently used first.
+    /// The path tables ready, per sub-project, most recently used first:
+    /// headers only once the map has their files ([`Deps::install_map`]),
+    /// so the session holds each file once, in the map.
     pub ready: Vec<(RelPath, Vec<Arc<PathTable>>)>,
     pub map: Arc<DepMap>,
     /// Source the dependency tier read this session.
@@ -340,6 +350,23 @@ impl Deps {
         self.ready.retain(|(s, _)| s != subproject);
         self.ready.insert(0, (subproject.clone(), tables));
         self.ready.truncate(MAP_SUBPROJECTS);
+    }
+
+    /// Replaces the dependency map with one of the ready tables (a loaded
+    /// table's files, a header's from the current map), then keeps only
+    /// the headers: the rows stay in the store and are read again when
+    /// needed (`table::reload`).
+    pub(crate) fn install_map(&mut self) {
+        let tables = self.tables();
+        let generation = self.map.generation + 1;
+        self.map = Arc::new(DepMap::build(generation, &tables, Some(&self.map)));
+        for (_, tables) in &mut self.ready {
+            for t in tables.iter_mut() {
+                if t.loaded {
+                    *t = Arc::new(t.header());
+                }
+            }
+        }
     }
 
     /// Adds one table to `subproject`'s (a walk finished), replacing one of

@@ -5,6 +5,7 @@
 //! tables, edges from stored specifiers, the roots' validity, the limits,
 //! the namespace's quota, queries and the yield.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -18,7 +19,7 @@ use lectern_services::project::{BlobId, RelPath};
 use super::support::{CHANGED, Harness, Options, packages};
 use crate::deps::json::Json;
 use crate::deps::npm::{direct_dependencies, entry_candidates, spec_candidates};
-use crate::deps::{DepMap, Limits, PathTable, allowed, extensions};
+use crate::deps::{DepMap, Limits, MAP_BYTES, PathTable, allowed, extensions};
 use crate::extract::{Deadline, ExtractStatus, LanguageTable, SpecKind, extract};
 use crate::index::lock;
 use crate::index::state::Project;
@@ -27,7 +28,7 @@ use crate::resolve::{
 };
 use crate::site::{ParsedFile, Site};
 use crate::store::{DEPS_NAMESPACE, DEPS_SCHEMA, DEPS_STATEMENTS, Version};
-use crate::testing::npm::{NpmTree, declarations, npm_table, ts_project};
+use crate::testing::npm::{NpmTree, declarations, npm_table, npm_table_shaped, ts_project};
 use crate::{LangName, lang_name};
 
 /// A harness whose `node_modules` (and `packages/*/node_modules`) are
@@ -112,16 +113,20 @@ fn deps_state(h: &Harness) -> TierState {
     h.coverage().deps
 }
 
-/// The ready path tables of the session.
+/// The ready path tables of the session (headers: the map has their
+/// files).
 fn tables(h: &Harness) -> Vec<Arc<PathTable>> {
     lock(&project(h).state).deps.tables()
 }
 
+/// A ready table with its rows, read again from the store.
 fn table_of(h: &Harness, package: &str) -> Arc<PathTable> {
-    tables(h)
+    let header = tables(h)
         .into_iter()
         .find(|t| &*t.origin.package == package)
-        .unwrap_or_else(|| panic!("a table of {package}"))
+        .unwrap_or_else(|| panic!("a table of {package}"));
+    assert!(!header.loaded, "a ready table keeps only its header");
+    Arc::new(crate::deps::table::reload(&project(h).deps, &header).expect("stored"))
 }
 
 /// A package whose `index.d.ts` is `index` and whose other files are `files`.
@@ -979,6 +984,90 @@ fn deps_table_without_units_is_repaired() {
 }
 
 #[test]
+fn deps_repairs_of_several_packages_all_run() {
+    // Both packages' tables are current but lost units: each repair walk
+    // rewrites its table under the same key, which the cache counts as an
+    // eviction of the namespace; that is the walk's own replace, not the
+    // quota's, so the tier goes on to the second package.
+    let (h, tree) = harness();
+    locked_tree(&tree, "sha512-a1", "1.0.0");
+    let b = "export declare const b: number;\n";
+    let c = "export declare const c: number;\n";
+    open(&h, &tree, &["a", "c"]);
+    let mut w = project(&h).deps.write();
+    w.remove(h.git.oid(b.as_bytes()), &ts_version());
+    w.remove(h.git.oid(c.as_bytes()), &ts_version());
+    assert_eq!(w.commit(), lectern_cache::Written::Committed);
+    let h = reopen(h);
+    assert_eq!(deps_state(&h), TierState::Done);
+    assert!(!stopped(&h), "the repairs' own replaces");
+    assert!(dep_stored(&h, b) && dep_stored(&h, c), "both repaired");
+    assert_eq!(dep_paths(&h).len(), 3);
+}
+
+#[test]
+fn deps_rewalks_under_the_same_key_do_not_stop_the_tier() {
+    // A reinstall that keeps the lockfile and the contents: each installed
+    // `package.json` is written again (other stats), so both packages are
+    // walked again with their own tables as stat tables and written under
+    // the same keys.
+    let (h, tree) = harness();
+    locked_tree(&tree, "sha512-a1", "1.0.0");
+    open(&h, &tree, &["a", "c"]);
+    let before: Vec<i64> = ["a", "c"]
+        .iter()
+        .map(|p| table_of(&h, p).recorded)
+        .collect();
+    for dir in ["node_modules/a", "node_modules/c"] {
+        let path = h.git.root("main").join(dir).join("package.json");
+        let bytes = std::fs::read(&path).expect("manifest");
+        tree.remove(&format!("{dir}/package.json"));
+        tree.write(&format!("{dir}/package.json"), &bytes);
+    }
+    let h = reopen(h);
+    assert_eq!(deps_state(&h), TierState::Done);
+    assert!(!stopped(&h), "the walks' own replaces");
+    for (p, was) in ["a", "c"].iter().zip(before) {
+        assert!(table_of(&h, p).recorded > was, "{p} recorded again");
+    }
+    assert_eq!(dep_paths(&h).len(), 3);
+}
+
+#[test]
+fn deps_second_worktree_keeps_its_own_tables() {
+    // Two worktrees, each with its own install of the same lockfile: the
+    // path tables are per worktree (the partition is shared), so neither
+    // rewrites the other's and switching back reads nothing.
+    let (h, tree) = harness();
+    locked_tree(&tree, "sha512-a1", "1.0.0");
+    open(&h, &tree, &["a", "c"]);
+    let feature = h.git.add_worktree("feature");
+    let f = NpmTree::new(&feature);
+    f.manifest("", &["a", "c"], "");
+    locked_tree(&f, "sha512-a1", "1.0.0");
+    h.publish("feature", Vec::new());
+    ignore(&h);
+    h.settle();
+    assert_eq!(deps_state(&h), TierState::Done);
+    assert!(!stopped(&h));
+    assert_eq!(dep_paths(&h).len(), 3, "both packages in feature");
+    let feature_root = h.git.root("feature").to_string_lossy().into_owned();
+    for t in tables(&h) {
+        assert_eq!(&*t.worktree, feature_root.as_str());
+    }
+    h.publish("main", Vec::new());
+    h.settle();
+    assert_eq!(deps_state(&h), TierState::Done);
+    assert!(!stopped(&h));
+    assert_eq!(dep_paths(&h).len(), 3);
+    assert!(
+        reads(&h).is_empty(),
+        "main's tables as stored: {:?}",
+        reads(&h)
+    );
+}
+
+#[test]
 fn deps_reinstalled_root_is_reopened() {
     let (h, tree) = harness();
     locked_tree(&tree, "sha512-a1", "1.0.0");
@@ -1564,9 +1653,9 @@ fn deps_map_is_compact() {
     // 20 000 files of 40 packages: the map's own buffers stay within ADR
     // 0033's 1 MB (`code_intel/deps_map_bytes` measures the live bytes).
     let tables: Vec<Arc<PathTable>> = (0..40).map(|p| Arc::new(npm_table(p, 500))).collect();
-    let map = DepMap::build(1, &tables);
+    let map = DepMap::build(1, &tables, None);
     assert_eq!(map.len(), 20_000);
-    assert!(map.heap_bytes() < 1 << 20, "{}", map.heap_bytes());
+    assert!(map.heap_bytes() <= MAP_BYTES, "{}", map.heap_bytes());
     let t = &tables[3];
     let f = &t.files[7];
     let found = map.paths(&f.oid.expect("an OID"));
@@ -1575,7 +1664,31 @@ fn deps_map_is_compact() {
     assert_eq!(found[0].origin.package, t.origin.package);
     // Past the limit, files are left out.
     let more: Vec<Arc<PathTable>> = (0..41).map(|p| Arc::new(npm_table(p, 500))).collect();
-    assert_eq!(DepMap::build(2, &more).len(), crate::deps::MAP_FILES);
+    assert_eq!(DepMap::build(2, &more, None).len(), crate::deps::MAP_FILES);
+    // Headers take their files from the map they replace.
+    let headers: Vec<Arc<PathTable>> = tables.iter().map(|t| Arc::new(t.header())).collect();
+    let again = DepMap::build(3, &headers, Some(&map));
+    assert_eq!(again.files(), map.files());
+    assert_eq!(DepMap::build(4, &headers, None).len(), 0);
+}
+
+#[test]
+fn deps_map_is_bounded_by_bytes() {
+    // Paths of about 50 bytes and SHA-256 OIDs: fewer than 20 000 files
+    // fit, the map's buffers stay within `MAP_BYTES` (under ADR 0033's
+    // 1 MB) by construction.
+    let tables: Vec<Arc<PathTable>> = (0..40)
+        .map(|p| Arc::new(npm_table_shaped(p, 500, 50, 32)))
+        .collect();
+    let map = DepMap::build(1, &tables, None);
+    assert!(map.len() < 20_000, "{}", map.len());
+    assert!(map.len() > 10_000, "{}", map.len());
+    assert!(map.heap_bytes() <= MAP_BYTES, "{}", map.heap_bytes());
+    // The tables are taken in order: the first package whole, the last
+    // not at all.
+    let packages: HashSet<String> = map.files().into_iter().map(|(p, _, _)| p).collect();
+    assert!(packages.contains("pkg-000"));
+    assert!(!packages.contains("pkg-039"));
 }
 
 #[test]

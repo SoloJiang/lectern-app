@@ -296,7 +296,7 @@ PRAGMA cell_size_check = ON;          -- 读页时多做一次检查，损坏更
 PRAGMA query_only = ON;               -- 只在读连接上
 ```
 
-预编译语句缓存每个连接 32 条（rusqlite 的 `cache` feature）。写连接上本 crate 自己的语句约 22 条，加上自定义表使用方的写入语句（code_intel 3 条）；读连接上本 crate 2 条，加上使用方的查询（code_intel 约 9 条）。第 1、2 步是 16 条。
+预编译语句缓存每个连接 32 条（rusqlite 的 `cache` feature）。写连接上本 crate 自己的语句约 22 条，加上自定义表使用方的写入语句（code_intel 两个命名空间合计 9 条：`code_intel.tags` 3 条，`code_intel.deps` 6 条），共约 31 条；读连接上本 crate 2 条，加上使用方的查询（code_intel 合计 28 条：tags 12 条，deps 16 条），共约 30 条。第 1、2 步是 16 条。
 
 ### 统计
 

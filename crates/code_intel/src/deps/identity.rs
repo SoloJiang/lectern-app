@@ -20,7 +20,7 @@ use super::json::Json;
 use super::lockfile::{Locked, read_locked};
 use super::npm::direct_dependencies;
 use super::table::{self, PathTable};
-use super::{DepMap, MANIFEST_MAX, PkgDir, PkgWork, Roots, Stat, WalkFile, dep_lang, vouches};
+use super::{MANIFEST_MAX, PkgDir, PkgWork, Roots, Stat, WalkFile, dep_lang, vouches};
 use crate::extract::{ExtractStatus, LanguageTable};
 use crate::git_access::hash_blob;
 use crate::index::batch::subproject;
@@ -58,6 +58,17 @@ struct IdCtx {
     roots: Arc<Roots>,
     dir: RelPath,
     hash: HashKind,
+    /// The session's worktree (its root), the path tables' first key part.
+    worktree: Arc<str>,
+}
+
+/// The worktree part of the path tables' keys: the current worktree's root
+/// (a folder project has none: "").
+pub(crate) fn worktree_of(st: &State) -> Arc<str> {
+    match &st.tree {
+        Some(t) => Arc::from(t.root.to_string_lossy().as_ref()),
+        None => Arc::from(""),
+    }
 }
 
 /// What became of one package.
@@ -143,6 +154,7 @@ impl Inner {
                             roots,
                             dir,
                             hash: st.hash,
+                            worktree: worktree_of(&st),
                         })
                     }
                     None => None,
@@ -191,9 +203,16 @@ impl Inner {
             if !done.insert(name.clone()) {
                 continue;
             }
-            let Some(work) =
-                package_work(&ctx.roots, ctx.hash, &name, pkg, stat, &locked, &ctx.dir)
-            else {
+            let Some(work) = package_work(
+                &ctx.roots,
+                ctx.hash,
+                &name,
+                pkg,
+                stat,
+                &locked,
+                &ctx.dir,
+                &ctx.worktree,
+            ) else {
                 continue;
             };
             match look_up(store, &table, &work, &mut touches) {
@@ -215,7 +234,8 @@ impl Inner {
                     ready.push(t);
                 }
                 Found::Walk => {
-                    let stat_table = table::latest(store, &work.origin).map(Arc::new);
+                    let stat_table =
+                        table::latest(store, &work.worktree, &work.origin).map(Arc::new);
                     queue.push(PkgWork { stat_table, ..work });
                 }
             }
@@ -244,9 +264,7 @@ impl Inner {
             None => {}
         }
         deps.queue = queue.into();
-        let tables = deps.tables();
-        let generation = deps.map.generation + 1;
-        deps.map = Arc::new(DepMap::build(generation, &tables));
+        deps.install_map();
     }
 }
 
@@ -342,6 +360,7 @@ fn lock_key(lockdir: &str, lookup: &str) -> Option<String> {
 /// the lockfile has its directory, else the fallback (ADR 0033): the
 /// installed manifest's OID and the package directory. None when neither
 /// can be had (the manifest unreadable).
+#[allow(clippy::too_many_arguments, reason = "the parts of one work item")]
 pub(crate) fn package_work(
     roots: &Roots,
     hash: HashKind,
@@ -350,6 +369,7 @@ pub(crate) fn package_work(
     stat: Stat,
     locked: &LockEntries,
     subproject: &RelPath,
+    worktree: &Arc<str>,
 ) -> Option<PkgWork> {
     let entry = locked.as_ref().and_then(|(lockdir, entries)| {
         let key = lock_key(lockdir, &pkg.lookup)?;
@@ -389,6 +409,7 @@ pub(crate) fn package_work(
         manifest: stat,
         stat_table: None,
         subproject: subproject.clone(),
+        worktree: worktree.clone(),
     })
 }
 
@@ -402,7 +423,13 @@ pub(crate) fn look_up(
     work: &PkgWork,
     touches: &mut Vec<lectern_cache::Unit>,
 ) -> Found {
-    let Some(t) = table::by_key(store, &work.origin, &work.identity, &work.pkg.path()) else {
+    let Some(t) = table::by_key(
+        store,
+        &work.worktree,
+        &work.origin,
+        &work.identity,
+        &work.pkg.path(),
+    ) else {
         return Found::Walk;
     };
     if !vouches(&t.manifest, t.recorded, &work.manifest) {

@@ -10,6 +10,7 @@ use lectern_cache::{Budgets, Cache, Config};
 use lectern_code_intel::extract::LanguageTable;
 use lectern_code_intel::map::{BaseMap, IndexedHints};
 use lectern_code_intel::names::build_table;
+use lectern_code_intel::testing::npm::{NpmTree, ts_project};
 use lectern_code_intel::testing::{FakeGit, Rig, packages, synthetic, virtual_repo};
 use lectern_code_intel::{NoGrammarPacks, SystemClock};
 use lectern_services::code_intel::{Position, Query, QueryKind, TextOrigin, TextRef, TierState};
@@ -108,10 +109,14 @@ fn batch_peak(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
-/// The live bytes of a dependency map of 20 000 files (「依赖层」, ADR
-/// 0033): 40 packages of 500 indexed files each, paths as long as the
-/// synthetic TS project's; the path tables are built before and not
-/// counted (they are the cache's rows, held while the tier runs).
+/// The live bytes of the dependency map at its limits (「依赖层」, ADR
+/// 0033): 40 packages of 500 indexed files each offered, paths in the
+/// package of about 48 bytes (`dist/types/components/…/part_123.d.ts`) and
+/// SHA-256 OIDs, so the byte bound (`MAP_BYTES`) and not the 20 000 files
+/// decides how many go in. The path tables are built before and not
+/// counted: they are the store's rows, read while the identity task or a
+/// walk runs; the ready tables keep only their headers once the map has
+/// their files.
 pub const DEPS_MAP_BYTES: Bench = Bench {
     id: "code_intel/deps_map_bytes",
     run: deps_map_bytes,
@@ -121,15 +126,20 @@ fn deps_map_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     use lectern_code_intel::testing::npm::DepTables;
 
     let packages = ctx.scale(40, 4);
-    let tables = DepTables::new(packages, 500);
+    let tables = DepTables::new(packages, 500, 48, 32);
     let mut samples = Vec::new();
     for _ in 0..ctx.scale(SAMPLES, 1) {
         let before = CountingAlloc::live();
         let map = tables.map();
         samples.push(CountingAlloc::live().saturating_sub(before) as u64);
-        if map.len() != packages * 500 {
+        if map.is_empty() || map.len() > tables.files() {
             return Err(BenchError::new(format!("{} files in the map", map.len())));
         }
+        eprintln!(
+            "code_intel/deps_map_bytes: {} of {} files in the map",
+            map.len(),
+            tables.files()
+        );
         drop(map);
     }
     Ok(vec![Measured::new(
@@ -295,8 +305,9 @@ fn resident(
             coverage.subproject,
             coverage.worktree,
             coverage.other_worktrees,
+            coverage.deps,
         ];
-        if tiers != [TierState::Done; 3] {
+        if tiers != [TierState::Done; 4] {
             return Err(BenchError::new(format!("not indexed: {coverage:?}")));
         }
         samples.push(CountingAlloc::live().saturating_sub(before) as u64);
@@ -405,6 +416,16 @@ fn resident_cloudprint(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         let cache = cache(dir);
         let names: Vec<&str> = worktrees.iter().map(String::as_str).collect();
         virtual_repo(&git, &cache, n, &names);
+        // The miniapps' dependencies: the synthetic TS project of
+        // `code_intel/deps_*` (21 direct dependencies, 252 declaration
+        // files, about 5 MiB) installed in the main worktree, so the
+        // dependency tier's resident part (the map, the ready tables'
+        // headers, the roots) is in this crate's share.
+        git.ignore("node_modules/");
+        let tree = NpmTree::new(&git.root("main"));
+        let deps = ts_project(&tree, 21, 12, 20 << 10, 4 << 20);
+        let refs: Vec<&str> = deps.iter().map(String::as_str).collect();
+        tree.manifest("packages/pkg000", &refs, "");
         Ok((git, cache, n))
     };
     resident(ctx, "plugin/code-intel/resident_cloudprint", &fixture)

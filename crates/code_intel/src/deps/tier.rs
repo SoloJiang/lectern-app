@@ -22,8 +22,8 @@ use super::json::Json;
 use super::npm::{entry_candidates, is_relative, spec_candidates, types_package};
 use super::table::{self, PathTable};
 use super::{
-    DepMap, FILE_MAX, MANIFEST_MAX, PkgDir, PkgWalk, PkgWork, Roots, Stat, WalkFile, dep_lang,
-    vouches, wall_nanos,
+    FILE_MAX, MANIFEST_MAX, PkgDir, PkgWalk, PkgWork, Roots, Stat, WalkFile, dep_lang, vouches,
+    wall_nanos,
 };
 use crate::extract::{ExtractStatus, SpecKind, Specifier};
 use crate::git_access::hash_blob;
@@ -147,6 +147,7 @@ impl Inner {
                     stat,
                     &None,
                     &work.subproject,
+                    &work.worktree,
                 )?;
                 Some((name, w))
             }),
@@ -423,10 +424,13 @@ impl Inner {
         // Each item's edges: its extraction's, or a stored unit's.
         let mut specs: Vec<Option<Vec<Specifier>>> = vec![None; done.len()];
         let mut statuses: Vec<Option<ExtractStatus>> = vec![None; done.len()];
-        let (evicted, committed) = {
+        let evicted = {
             let _turn = lock(&project.deps_commits);
             let before = project.deps.evictions();
             let mut write = project.deps.write();
+            // A `Done` extraction over a stored `TooLarge` or `TimedOut`
+            // unit replaces it: our own bump, not the quota's.
+            let mut replaces = false;
             let mut stored: Vec<(usize, Unit)> = Vec::new();
             for (i, d) in done.iter().enumerate() {
                 if !live(d) {
@@ -446,8 +450,9 @@ impl Inner {
                             stored.push((i, f.unit));
                         }
                     }
-                    _ => {
+                    found => {
                         if write.add_unit(d.key, &version, &d.extraction, d.meta) {
+                            replaces |= found.is_some();
                             statuses[i] = Some(d.extraction.status);
                             specs[i] = Some(d.extraction.specs.clone());
                         }
@@ -465,9 +470,8 @@ impl Inner {
             }
             let committed = !write.is_empty() && matches!(write.commit(), Written::Committed);
             let after = project.deps.evictions();
-            (committed && after != before, committed)
+            committed && quota_evicted(before, after, replaces)
         };
-        let _ = committed;
         // The edges, resolved outside the lock (stats).
         let mut edges: Vec<Vec<String>> = vec![Vec::new(); done.len()];
         for (i, d) in done.iter().enumerate() {
@@ -559,17 +563,23 @@ impl Inner {
                 dir: Arc::from(walk.work.pkg.path()),
                 recorded: wall_nanos(self.wall_now()),
                 types: walk.types.clone(),
+                worktree: walk.work.worktree.clone(),
+                loaded: true,
                 files: walk.files,
             };
             (table, walk.work.subproject)
         };
         let evicted = {
             let _turn = lock(&project.deps_commits);
+            // A table of this key already stored (a repair, a re-walk after
+            // the manifest's stats or a racy record): the write replaces
+            // it, which the cache counts as one eviction of the namespace.
+            let replaces = table::stored(&project.deps, &table);
             let before = project.deps.evictions();
             let mut write = project.deps.write();
             table::write(&mut write, &table);
             let committed = matches!(write.commit(), Written::Committed);
-            committed && project.deps.evictions() != before
+            committed && quota_evicted(before, project.deps.evictions(), replaces)
         };
         let mut st = lock(&project.state);
         if !st.live(ctx.session) {
@@ -581,6 +591,16 @@ impl Inner {
         st.deps.add_ready(&subproject, Arc::new(table));
         rebuild_map(&mut st);
     }
+}
+
+/// Whether a committed write of `code_intel.deps` evicted for the quota:
+/// the namespace's eviction generation moved from `before` to `after`, and
+/// not only by the write's own replace of a unit of the same key (one bump
+/// a transaction, as tags counts its replaces, 「存储」). Should the same
+/// transaction also evict for the quota, that is not seen; the next write
+/// that evicts is.
+pub(crate) fn quota_evicted(before: u64, after: u64, replaces: bool) -> bool {
+    after > before + u64::from(replaces)
 }
 
 /// Whether an extraction replaces a stored unit (as `batch::outranks`).
@@ -598,11 +618,9 @@ pub(crate) fn stop(st: &mut State) {
     st.batch.aside[QUEUE].clear();
 }
 
-/// The dependency map rebuilt from the ready tables.
+/// The dependency map rebuilt from the ready tables (`Deps::install_map`).
 pub(crate) fn rebuild_map(st: &mut State) {
-    let tables = st.deps.tables();
-    let generation = st.deps.map.generation + 1;
-    st.deps.map = Arc::new(DepMap::build(generation, &tables));
+    st.deps.install_map();
 }
 
 /// The files the relative specifiers of `from` (relative to `pkg`'s

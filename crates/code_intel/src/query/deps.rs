@@ -238,14 +238,16 @@ impl Inner {
 
     /// Files of ready path tables read with these OIDs (「读取核对」): a row
     /// whose OID differs is updated, its table written again and the
-    /// dependency map replaced. Blocking; a `Background` task.
+    /// dependency map replaced. The ready tables are headers: a table with
+    /// a read file under its directory has its rows read again from the
+    /// store. Blocking; a `Background` task.
     fn dep_files_read(
         &self,
         project: &Arc<Project>,
         session: u64,
         read: &[(String, BlobId, Stat)],
     ) {
-        let tables = {
+        let headers = {
             let st = lock(&project.state);
             if !st.live(session) {
                 return;
@@ -253,8 +255,20 @@ impl Inner {
             st.deps.ready.clone()
         };
         let mut updated = Vec::new();
-        for (sub, tables) in &tables {
-            for t in tables {
+        for (sub, headers) in &headers {
+            for h in headers {
+                let prefix = format!("{}/", h.dir);
+                if !read.iter().any(|(path, _, _)| path.starts_with(&prefix)) {
+                    continue;
+                }
+                let t = if h.loaded {
+                    (**h).clone()
+                } else {
+                    match crate::deps::table::reload(&project.deps, h) {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                };
                 let mut table: Option<crate::deps::PathTable> = None;
                 for (path, oid, stat) in read {
                     let Some(i) = t.files.iter().position(|f| &*f.path == path) else {
@@ -263,7 +277,7 @@ impl Inner {
                     if t.files[i].oid == Some(*oid) {
                         continue;
                     }
-                    let tbl = table.get_or_insert_with(|| (**t).clone());
+                    let tbl = table.get_or_insert_with(|| t.clone());
                     tbl.files[i].oid = Some(*oid);
                     tbl.files[i].stat = *stat;
                     tbl.files[i].status = ExtractStatus::Done.code().unwrap_or(0);
