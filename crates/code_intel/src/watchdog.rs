@@ -61,6 +61,10 @@ pub(crate) enum Trip {
     Cancelled = 2,
     Paused = 3,
     Stopped = 4,
+    /// The kernel asked yielding work to stop at its next slice boundary
+    /// (ADR 0033): a language pack's extraction, which can't be resumed, is
+    /// given up and done again later.
+    Yielded = 5,
 }
 
 /// One extraction in flight: the flag tree-sitter-tags reads, and what sets it.
@@ -70,6 +74,8 @@ pub(crate) struct Slot {
     at: Instant,
     cancel: Option<Arc<AtomicBool>>,
     pause: Option<PauseProbe>,
+    /// `BackgroundGuard::yield_requested` of yielding work.
+    yields: Option<PauseProbe>,
 }
 
 impl Slot {
@@ -85,6 +91,7 @@ impl Slot {
             2 => Some(Trip::Cancelled),
             3 => Some(Trip::Paused),
             4 => Some(Trip::Stopped),
+            5 => Some(Trip::Yielded),
             _ => None,
         }
     }
@@ -109,6 +116,8 @@ impl Slot {
             self.trip(Trip::Cancelled);
         } else if self.pause.as_ref().is_some_and(|p| p()) {
             self.trip(Trip::Paused);
+        } else if self.yields.as_ref().is_some_and(|y| y()) {
+            self.trip(Trip::Yielded);
         } else if now >= self.at {
             self.trip(Trip::Deadline);
         }
@@ -282,12 +291,26 @@ impl Watchdog {
         cancel: Option<Arc<AtomicBool>>,
         pause: Option<PauseProbe>,
     ) -> Registration {
+        self.register_yielding(at, cancel, pause, None)
+    }
+
+    /// [`register`](Self::register), also tripped ([`Trip::Yielded`]) once
+    /// `yields` says so: for an extraction that can't stop at a slice
+    /// boundary and keep its state (a language pack's).
+    pub(crate) fn register_yielding(
+        &self,
+        at: Instant,
+        cancel: Option<Arc<AtomicBool>>,
+        pause: Option<PauseProbe>,
+        yields: Option<PauseProbe>,
+    ) -> Registration {
         let slot = Arc::new(Slot {
             flag: AtomicUsize::new(0),
             trip: AtomicU8::new(0),
             at,
             cancel,
             pause,
+            yields,
         });
         slot.check(self.shared.clock.now());
         let mut state = self.shared.lock();

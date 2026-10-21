@@ -86,7 +86,8 @@ impl FileDeadline {
     /// limit. Such a file is neither stored nor searched.
     pub(crate) fn settles(&self, status: ExtractStatus) -> bool {
         match status {
-            ExtractStatus::Cancelled => false,
+            // A query's extraction doesn't yield; never stored either way.
+            ExtractStatus::Cancelled | ExtractStatus::Parked => false,
             ExtractStatus::TimedOut => !self.cut,
             ExtractStatus::Done
             | ExtractStatus::TooLarge
@@ -100,7 +101,7 @@ impl FileDeadline {
     pub(crate) fn reason(&self, status: ExtractStatus) -> Option<Reason> {
         match status {
             ExtractStatus::Done => None,
-            ExtractStatus::Cancelled => Some(Reason::Cancelled),
+            ExtractStatus::Cancelled | ExtractStatus::Parked => Some(Reason::Cancelled),
             ExtractStatus::TimedOut if self.cut => Some(Reason::Cut),
             ExtractStatus::TimedOut => Some(Reason::TimedOut),
             ExtractStatus::TooLarge => Some(Reason::TooLarge),

@@ -419,8 +419,8 @@ fn schedule_tier5_extracts_only_missing_clean_files() {
 fn schedule_large_files_take_turns() {
     use crate::index::batch::LargeSlot;
 
-    let slot = LargeSlot::default();
-    let first = slot.acquire(|| false).expect("free");
+    let slot = Arc::new(LargeSlot::default());
+    let first = slot.acquire(|| false, false, || {}).expect("free");
     let stop = AtomicBool::new(false);
     // The waiter checks its stop probe before each wait: two checks mean
     // it found the slot busy and waited at least once (no guessing from
@@ -437,10 +437,14 @@ fn schedule_large_files_take_turns() {
         // A second batch task waits while the first holds the slot, and
         // gives up when it is told to stop (a pause, a cancel).
         let waiter = s.spawn(|| {
-            slot.acquire(|| {
-                checks.fetch_add(1, Ordering::AcqRel);
-                stop.load(Ordering::Acquire)
-            })
+            slot.acquire(
+                || {
+                    checks.fetch_add(1, Ordering::AcqRel);
+                    stop.load(Ordering::Acquire)
+                },
+                false,
+                || {},
+            )
             .is_some()
         });
         waited(2);
@@ -451,10 +455,14 @@ fn schedule_large_files_take_turns() {
     checks.store(0, Ordering::Release);
     std::thread::scope(|s| {
         let waiter = s.spawn(|| {
-            slot.acquire(|| {
-                checks.fetch_add(1, Ordering::AcqRel);
-                false
-            })
+            slot.acquire(
+                || {
+                    checks.fetch_add(1, Ordering::AcqRel);
+                    false
+                },
+                false,
+                || {},
+            )
             .is_some()
         });
         waited(2);

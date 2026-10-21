@@ -77,7 +77,8 @@ fn stored_reason(status: ExtractStatus) -> Option<Reason> {
         ExtractStatus::TimedOut => Some(Reason::TimedOut),
         ExtractStatus::TooLarge => Some(Reason::TooLarge),
         ExtractStatus::Binary => Some(Reason::Binary),
-        ExtractStatus::Cancelled => Some(Reason::Cancelled),
+        // Never stored; a query's extraction doesn't yield.
+        ExtractStatus::Cancelled | ExtractStatus::Parked => Some(Reason::Cancelled),
         ExtractStatus::Unsupported => Some(Reason::Unreadable),
     }
 }

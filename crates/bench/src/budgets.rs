@@ -1122,6 +1122,15 @@ pub static BUDGETS: &[Budget] = &[
     ),
     // One 1 MiB file per language, against the 250 ms per-file deadline.
     share("code_intel/extract_1mib", RECORD, CODE_INTEL, ACTIVE, Time),
+    // The yield switch comes on while a 1 MiB TypeScript file is parsed: the
+    // extraction stops at its next slice boundary, its state kept (ADR 0033).
+    share(
+        "code_intel/yield_stop",
+        &[max(Limit::TimeAtMost(ms(10)))],
+        CODE_INTEL,
+        ACTIVE,
+        Time,
+    ),
     // A warm start's existence checks over 100 000 stored files: 200 queries
     // of 500 OIDs, read only (access marking is deferred off this path).
     share(

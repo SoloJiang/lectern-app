@@ -123,6 +123,85 @@ fn extract_1mib(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     measure(ctx, "code_intel/extract_1mib", &sources)
 }
 
+/// The yield switch comes on while a 1 MiB TypeScript file is being parsed
+/// (「交互让路」, ≤ 10 ms): from the switch to the extraction returning
+/// `Parked`, stopped at the parse's next progress check with its state
+/// kept. The switch is a flag the yield probe reads, as yielding work's
+/// probe reads `BackgroundGuard::yield_requested`; it turns on once the
+/// probe has been asked 200 times (mid-parse). Each sample is a new
+/// extraction on its own thread.
+pub const YIELD_STOP: Bench = Bench {
+    id: "code_intel/yield_stop",
+    run: yield_stop,
+};
+
+fn yield_stop(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let len = ctx.scale(1 << 20, 64 << 10);
+    let source = synthetic::source("ts", 1, len);
+    let table = LanguageTable::core();
+    let lang = table
+        .get("ts")
+        .cloned()
+        .ok_or_else(|| BenchError::new("no TypeScript"))?;
+    if !lang.prepare() {
+        return Err(BenchError::new("TypeScript does not compile"));
+    }
+    let executor = Executor::manual();
+    let (watchdog, _thread) = watchdog(&executor, Arc::new(SystemClock));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let rounds = match ctx.mode() {
+        lectern_bench::Mode::Measure => 30,
+        lectern_bench::Mode::Smoke => 1,
+    };
+    let mut samples = Vec::new();
+    for _ in 0..rounds {
+        let on = Arc::new(AtomicBool::new(false));
+        let checks = Arc::new(AtomicUsize::new(0));
+        let slot: lectern_code_intel::extract::ResumeSlot = Arc::default();
+        let (o, c) = (on.clone(), checks.clone());
+        let deadline = Deadline::at(
+            &watchdog,
+            Instant::now() + Duration::from_secs(60),
+            usize::MAX,
+        )
+        .yielding(
+            Arc::new(move || {
+                c.fetch_add(1, Ordering::AcqRel);
+                o.load(Ordering::Acquire)
+            }),
+            slot.clone(),
+        );
+        let (status, stopped, switched) = std::thread::scope(|s| {
+            let worker = s.spawn(|| {
+                let extraction = extract(&lang, black_box(&source), &deadline, &cancel);
+                (extraction.status, Instant::now())
+            });
+            while checks.load(Ordering::Acquire) < 200 && !worker.is_finished() {
+                std::hint::spin_loop();
+            }
+            let switched = Instant::now();
+            on.store(true, Ordering::Release);
+            let (status, stopped) = worker.join().expect("the extraction");
+            (status, stopped, switched)
+        });
+        let kept = slot.lock().is_ok_and(|s| s.is_some());
+        if status != ExtractStatus::Parked || !kept {
+            watchdog.stop();
+            return Err(BenchError::new(format!(
+                "not stopped mid-parse: {status:?}"
+            )));
+        }
+        samples.push(stopped.saturating_duration_since(switched));
+    }
+    watchdog.stop();
+    Ok(vec![Measured::new(
+        "code_intel/yield_stop",
+        Value::Time(lectern_bench::Samples(samples)),
+    )])
+}
+
 /// The OID of file `i`.
 fn oid(i: u64) -> BlobId {
     let mut b = [0u8; 20];

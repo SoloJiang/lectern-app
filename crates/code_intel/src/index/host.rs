@@ -4,7 +4,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use lectern_executor::{Executor, Priority};
@@ -80,23 +79,37 @@ impl Host {
     }
 
     /// Runs a pausable batch task (`Priority::Batch`) holding a
-    /// `BackgroundGuard` (ADR 0029). False when the activation is gone.
+    /// `BackgroundGuard` (ADR 0029), taken here: `background_yielding()`
+    /// when `yields` (ADR 0033), else `background()`. The task may swap it
+    /// for the other kind at a batch boundary ([`background`](Self::background)).
+    /// False when the activation is gone.
     pub(crate) fn spawn_batch<F>(
         &self,
         what: &'static str,
-        work: impl FnOnce(Arc<BackgroundGuard>) -> F + Send + 'static,
+        yields: bool,
+        work: impl FnOnce(BackgroundGuard) -> F + Send + 'static,
     ) -> bool
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let Some(guard) = self.handle.background() else {
+        let Some(guard) = self.background(yields) else {
             return false;
         };
         self.record(what, Priority::Batch, Guard::Background);
         let executor = self.executor.clone();
-        self.handle.own_with(move |gate| {
-            executor.spawn_gated(&gate, Priority::Batch, work(Arc::new(guard)))
-        })
+        self.handle
+            .own_with(move |gate| executor.spawn_gated(&gate, Priority::Batch, work(guard)))
+    }
+
+    /// A guard of pausable background work: yielding to interaction
+    /// (`background_yielding()`, tiers 4 and 5) or not (`background()`,
+    /// tier 3). None once the activation is gone.
+    pub(crate) fn background(&self, yields: bool) -> Option<BackgroundGuard> {
+        if yields {
+            self.handle.background_yielding()
+        } else {
+            self.handle.background()
+        }
     }
 
     #[cfg(test)]
