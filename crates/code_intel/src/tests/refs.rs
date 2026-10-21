@@ -336,6 +336,60 @@ fn refs_search_batches_go_out_on_time() {
     assert_eq!(at(&before.same_name), [("a.ts".to_owned(), 0)]);
 }
 
+/// A hook that lets `by` pass before every file read, from now on.
+fn reads_take(by: std::time::Duration, clock: crate::testing::ManualClock) -> crate::query::HookFn {
+    Box::new(move |inner, _| {
+        clock.advance(by);
+        *lock(&inner.step_hook) = Some((Step::Read, reads_take(by, clock)));
+    })
+}
+
+/// P1: the indexed files of the `ci_ref` pass are read and parsed within
+/// the query's time box (`REFERENCES_FOR`), not each under its own 1 s:
+/// with every read taking 400 ms, the query ends once the box is due, the
+/// files it did not get to counted unsearched, so references found and
+/// files unsearched add up to the twelve users, and fewer than twelve were
+/// searched.
+#[test]
+fn refs_indexed_files_stop_at_the_time_box() {
+    let users = 12;
+    let mut files = vec![(
+        "c.ts".to_owned(),
+        "export function item() { return 2; }\n".to_owned(),
+    )];
+    for i in 0..users {
+        files.push((
+            format!("u{i:02}.ts"),
+            format!("export function u{i}() {{ return item(); }}\n"),
+        ));
+    }
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, t)| (p.as_str(), t.as_str()))
+        .collect();
+    let h = indexed(&pairs);
+    let of = def(&h, "c.ts", "item", 0);
+    let by = std::time::Duration::from_millis(400);
+    *lock(&h.indexer.inner().step_hook) = Some((Step::Read, reads_take(by, h.clock.clone())));
+    let r = refs(&h, &of);
+    let found = r.same_name.len() + r.callers.len();
+    assert!(found < users, "{found} files searched after the box");
+    match r.state {
+        QueryState::Done(Completeness::Partial {
+            unsearched,
+            outside,
+        }) => {
+            assert_eq!(outside, 0);
+            assert_eq!(
+                found + unsearched as usize,
+                users,
+                "every user accounted for"
+            );
+        }
+        ref other => panic!("not cut at the time box: {other:?}"),
+    }
+}
+
 /// A use bound by the locals to another (shadowing) local is dropped.
 #[test]
 fn refs_shadowed_uses_are_dropped() {

@@ -209,6 +209,10 @@ pub(crate) const DEFS_IN: &str = match std::str::from_utf8(&DEFS_IN_BYTES) {
 pub(crate) const REFS_PAGE: &str = "SELECT e.oid, e.lang, e.grammar, e.query, raw.unit
      FROM (SELECT unit FROM ci_ref WHERE name = ?1 AND unit > ?2 ORDER BY unit LIMIT ?3) AS raw
      LEFT JOIN ci_ext e ON e.unit = raw.unit AND e.status = 0";
+/// The units referring to `?1` after unit `?2`, whatever their version and
+/// status: what a references lookup cut short by its time box did not read
+/// (an upper bound of those units). From `ci_ref`'s key alone.
+pub(crate) const REFS_LEFT: &str = "SELECT count(*) FROM ci_ref WHERE name = ?1 AND unit > ?2";
 /// Every `Done` unit with its version (the name table's first pass): one
 /// scan of `ci_ext`, the versions kept by the caller.
 pub(crate) const UNITS: &str =
@@ -240,6 +244,7 @@ pub(crate) const STATEMENTS: &[&str] = &[
     DEFS_LEFT,
     DEFS_IN,
     REFS_PAGE,
+    REFS_LEFT,
     UNITS,
     NAMES_PAGE,
     EXT_OF_UNIT,
@@ -750,6 +755,28 @@ impl Store {
             pager.finish();
         }
         Some(out)
+    }
+
+    /// The units referring to the pager's name that a references lookup cut
+    /// short at `pager` has not read: those after its unit, any version or
+    /// status ([`REFS_LEFT`]). An upper bound; 0 when done or unreadable.
+    pub fn refs_left(&self, pager: &NamePager) -> u64 {
+        if pager.done() {
+            return 0;
+        }
+        read_counted(&self.set, |r| {
+            let mut n = 0u64;
+            counted(r).query(
+                REFS_LEFT,
+                &[Param::Text(&pager.name), Param::Int(pager.after.0)],
+                |row| {
+                    n = row.int(0).map_or(0, |c| c.max(0) as u64);
+                    false
+                },
+            );
+            n
+        })
+        .unwrap_or(0)
     }
 
     /// Every `Done` unit of `versions` (the name table's first pass, before

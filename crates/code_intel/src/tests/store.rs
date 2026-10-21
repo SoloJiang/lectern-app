@@ -33,6 +33,7 @@ static TEST_STATEMENTS: &[&str] = &[
     store::DEFS_LEFT,
     store::DEFS_IN,
     store::REFS_PAGE,
+    store::REFS_LEFT,
     store::UNITS,
     store::NAMES_PAGE,
     store::EXT_OF_UNIT,
@@ -461,6 +462,13 @@ fn store_lookup_pages_bound_the_rows_read() {
     let rows = page_rows("refs");
     assert!(rows.iter().all(|&r| r <= store::NAME_PAGE), "{rows:?}");
     assert_eq!(rows.iter().sum::<usize>(), 1203);
+    // Cut short after one page: the units not read are counted, any
+    // version.
+    let mut pager = NamePager::new("get", std::slice::from_ref(&current));
+    assert_eq!(store.refs_left(&pager), 1203);
+    store.next_refs(&mut pager, store::NAME_PAGE).expect("read");
+    assert_eq!(store.refs_left(&pager), 1203 - store::NAME_PAGE as u64);
+    page_rows("refs");
 
     // A language no unit of the name is in: bounded pages, nothing found.
     let none = store

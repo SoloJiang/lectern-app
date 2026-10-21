@@ -20,7 +20,7 @@ use lectern_services::code_intel::{
 use lectern_services::project::{BlobId, RelPath, WorktreeKey};
 
 use super::account::{Account, Reason};
-use super::definition::{LocKey, loc_key};
+use super::definition::{LocKey, loc_key, plus_unsearched};
 use super::rank::Ranker;
 use super::search::{FileDeadline, FileLimits, Searched};
 use super::{Run, Snap, Step, ViewCheck};
@@ -185,6 +185,8 @@ impl Inner {
         record(&mut account, &l.path, l.oid, own);
 
         let mut units: Vec<Unit> = Vec::new();
+        // `ci_ref` units the time box left unread (counted unsearched).
+        let mut left = 0u64;
         // The view the lookups are made under (「查询的视图」).
         let mut view = snap.view;
         // 1. Indexed files whose reference names include the name.
@@ -198,6 +200,7 @@ impl Inner {
                 &mut found,
                 &mut account,
                 &mut units,
+                &mut left,
             )
         {
             return;
@@ -251,6 +254,7 @@ impl Inner {
                         &mut found,
                         &mut account,
                         &mut units,
+                        &mut left,
                     ) {
                         return;
                     }
@@ -328,6 +332,7 @@ impl Inner {
                             &mut found,
                             &mut account,
                             &mut units,
+                            &mut left,
                         ) {
                             return;
                         }
@@ -336,7 +341,7 @@ impl Inner {
                         return self.end_stale(snap, run.id);
                     }
                 }
-                Some(snap.finish(&account, walked))
+                Some(plus_unsearched(snap.finish(&account, walked), left))
             } else {
                 None
             }
@@ -356,8 +361,10 @@ impl Inner {
     }
 
     /// The indexed files whose reference names include the name (`ci_ref`),
-    /// nearest first, each not read yet read and parsed, what it learned in
-    /// `account`. Run again when hints were installed after the lookup
+    /// nearest first, each not read yet read and parsed (cut at the query's
+    /// time box), what it learned in `account`; once the box is due, the
+    /// files left are `NotReached` and the units not read yet add to
+    /// `left`. Run again when hints were installed after the lookup
     /// (`ViewCheck::Grew`). False when the query stopped.
     #[allow(
         clippy::too_many_arguments,
@@ -373,6 +380,7 @@ impl Inner {
         found: &mut Found,
         account: &mut Account,
         units: &mut Vec<Unit>,
+        left: &mut u64,
     ) -> bool {
         let versions: Vec<Version> = snap
             .table
@@ -385,11 +393,18 @@ impl Inner {
         // between two: a name many units use never holds a closed query
         // longer than one statement. Then sorted, so the files are read
         // nearest first whatever the page they came in.
+        // The time box (`Run::until`) ends the pages too: the units not read
+        // then count as unsearched (`left`).
+        let clock = self.watchdog.clock().clone();
         let mut pager = NamePager::new(&of.name, &versions);
         let mut stored = Vec::new();
         while !pager.done() {
             if run.stopped(snap) {
                 return false;
+            }
+            if clock.now() >= run.until {
+                *left += snap.project.store.refs_left(&pager);
+                break;
             }
             stored.extend(
                 snap.project
@@ -414,6 +429,11 @@ impl Inner {
             if found.parsed.contains(&(eff.path.clone(), eff.oid))
                 || account.outcome(&eff.path, eff.oid).is_some()
             {
+                continue;
+            }
+            // Past the time box: not read, never complete.
+            if clock.now() >= run.until {
+                account.unsearched(&eff.path, eff.oid, Reason::NotReached);
                 continue;
             }
             // Its unit was extracted from these bytes, under at most the
@@ -452,7 +472,7 @@ impl Inner {
                 &file,
                 eff.oid,
                 bytes.into(),
-                None,
+                Some(run.until),
                 found,
             );
             record(account, &eff.path, eff.oid, searched);
