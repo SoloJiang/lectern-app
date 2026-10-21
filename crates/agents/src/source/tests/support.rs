@@ -218,6 +218,25 @@ impl Harness {
         });
     }
 
+    /// 启动，在第一次发现之前把 Codex 来源的时钟拨到 `now`（UTC 毫秒；活跃会话与主动建索引的 10 分钟）。
+    pub(crate) fn start_at(&mut self, now: i64) {
+        self.start_without_settling();
+        self.set_codex_clock(now);
+        self.settle();
+    }
+
+    /// 把 Codex 来源的时钟拨到 `now`（UTC 毫秒）。
+    pub(crate) fn set_codex_clock(&self, now: i64) {
+        let real = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let real = i64::try_from(real).unwrap();
+        self.codex_engine()
+            .clock_skew
+            .store(now - real, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn claude_engine(&self) -> Arc<Engine<ClaudeCode>> {
         self.engine(0)
     }

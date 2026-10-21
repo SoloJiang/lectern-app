@@ -28,6 +28,38 @@ pub fn source(
     projects: Option<Arc<dyn Projects>>,
     decoded_dir: &Path,
 ) -> Option<Arc<dyn SessionSource>> {
+    source_with_calls(agent, roots, cache, projects, decoded_dir).map(|(source, _)| source)
+}
+
+/// 适配器读会话正文的调用次数：`read`、`turns_after`、`load`（派生 Codex 子 agent 关联时读 `spawn_agent`
+/// 输出的那一次也算 `load`）。发现只读文件的开头和末尾，不计入。
+#[derive(Clone, Debug)]
+pub struct AdapterCalls(Arc<crate::source::Calls>);
+
+impl AdapterCalls {
+    pub fn read(&self) -> usize {
+        self.0.read.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn turns_after(&self) -> usize {
+        self.0
+            .turns_after
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn load(&self) -> usize {
+        self.0.load.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// [`source`]，另交出这个来源的 [`AdapterCalls`]（`agents/discover_codex_1000` 检查第一次发现没有读父会话）。
+pub fn source_with_calls(
+    agent: Agent,
+    roots: &AgentRoots,
+    cache: Option<&Cache>,
+    projects: Option<Arc<dyn Projects>>,
+    decoded_dir: &Path,
+) -> Option<(Arc<dyn SessionSource>, AdapterCalls)> {
     let setup = |roots: Vec<std::path::PathBuf>, adapter_version| Setup {
         roots,
         executor: None,
@@ -46,8 +78,10 @@ pub fn source(
                 |_| ClaudeCode::new(SourceId(claude::SOURCE_ID.into())),
                 setup(roots.claude_sessions(), claude::ADAPTER_VERSION),
             );
+            let calls = AdapterCalls(engine.calls.clone());
             engine.start(None);
-            Some(engine)
+            let engine: Arc<dyn SessionSource> = engine;
+            Some((engine, calls))
         }
         Agent::Codex => {
             let decoded = decoded_dir.to_path_buf();
@@ -58,8 +92,10 @@ pub fn source(
                 },
                 setup(roots.codex_sessions(), codex::ADAPTER_VERSION),
             );
+            let calls = AdapterCalls(engine.calls.clone());
             engine.start(None);
-            Some(engine)
+            let engine: Arc<dyn SessionSource> = engine;
+            Some((engine, calls))
         }
         Agent::Other(_) => None,
     }
@@ -204,6 +240,125 @@ pub fn synthetic_rollout(len: usize) -> Vec<u8> {
 /// 用 `ruzstd` 的最快档压缩成一个 zstd 帧，即 `.jsonl.zst` 文件的内容。
 pub fn compress_zst(data: &[u8]) -> Vec<u8> {
     ruzstd::encoding::compress_to_vec(data, ruzstd::encoding::CompressionLevel::Fastest)
+}
+
+/// 在 `sessions`（Codex 主目录下的 `sessions/`）里写 `parents` 个 Codex 父会话，每个在一轮里用 `spawn_agent`
+/// 派出 `children` 个子会话；子会话的 `session_meta` 用 `source.subagent.thread_spawn.parent_thread_id` 指回父线程。
+/// 记录形状与 `tests/fixtures/codex/0.140.0-legacy/` 相同，`spawn_agent` 的输出是 multi_agent v1 的
+/// `{"agent_id": <子线程 ID>, "nickname": null}`（docs/design/agents.md「外部格式」）。每 100 个文件一个日期目录，
+/// 时间戳都在 2026-10 月初（不是活跃会话）。返回写下的全部会话 ID：每个父会话之后跟着它的子会话。供 bench 的
+/// `agents/discover_codex_1000`。
+pub fn synthetic_rollouts(
+    sessions: &Path,
+    parents: usize,
+    children: usize,
+) -> std::io::Result<Vec<String>> {
+    const CWD: &str = "/Users/dev/fixture/repo";
+    let mut ids = Vec::with_capacity(parents * (children + 1));
+    let mut files = 0usize;
+    let mut write = |id: &str, body: &str| -> std::io::Result<()> {
+        let day = 1 + (files / 100) % 28;
+        files += 1;
+        let dir = sessions.join(format!("2026/10/{day:02}"));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(
+            dir.join(format!("rollout-2026-10-{day:02}T09-00-00-{id}.jsonl")),
+            body,
+        )
+    };
+    for p in 0..parents {
+        let parent = format!("{p:08x}-0000-4000-8000-000000000000");
+        let ts = |n: usize| format!("2026-10-01T09:{:02}:{:02}.000Z", n / 60 % 60, n % 60);
+        let mut body = String::new();
+        let mut line = 0usize;
+        let mut push = |body: &mut String, text: String| {
+            body.push_str(&format!("{{\"timestamp\":\"{}\",{text}}}\n", ts(line)));
+            line += 1;
+        };
+        push(
+            &mut body,
+            format!(
+                r#""type":"session_meta","payload":{{"id":"{parent}","session_id":"{parent}","timestamp":"{}","cwd":"{CWD}","originator":"codex_cli_rs","cli_version":"0.140.0","source":"cli","model_provider":"fixture-provider","history_mode":"legacy","git":{{"branch":"main"}}}}"#,
+                ts(0)
+            ),
+        );
+        push(
+            &mut body,
+            format!(
+                r#""type":"turn_context","payload":{{"turn_id":"turn-{p}","cwd":"{CWD}","model":"fixture-model-x"}}"#
+            ),
+        );
+        push(
+            &mut body,
+            format!(
+                r#""type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-{p}"}}"#
+            ),
+        );
+        push(
+            &mut body,
+            r#""type":"event_msg","payload":{"type":"user_message","message":"Placeholder prompt: split the work.","images":[]}"#.to_owned(),
+        );
+        let mut kids = Vec::with_capacity(children);
+        for c in 0..children {
+            let child = format!("{p:08x}-{:04x}-4000-8000-000000000000", c + 1);
+            push(
+                &mut body,
+                format!(
+                    r#""type":"response_item","payload":{{"type":"function_call","name":"spawn_agent","namespace":"multi_agent_v1","arguments":"{{\"message\":\"Placeholder subagent task {c}.\"}}","call_id":"call_{p}_{c}"}}"#
+                ),
+            );
+            push(
+                &mut body,
+                format!(
+                    r#""type":"response_item","payload":{{"type":"function_call_output","call_id":"call_{p}_{c}","output":"{{\"agent_id\":\"{child}\",\"nickname\":null}}"}}"#
+                ),
+            );
+            kids.push(child);
+        }
+        push(
+            &mut body,
+            format!(
+                r#""type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-{p}","last_agent_message":"Placeholder report."}}"#
+            ),
+        );
+        write(&parent, &body)?;
+        ids.push(parent.clone());
+        for (c, child) in kids.into_iter().enumerate() {
+            let t = |s: usize| format!("2026-10-01T10:{:02}:{:02}.000Z", c % 60, s);
+            let body = [
+                format!(
+                    r#"{{"timestamp":"{}","type":"session_meta","payload":{{"id":"{child}","session_id":"{child}","timestamp":"{}","cwd":"{CWD}","originator":"codex_cli_rs","cli_version":"0.140.0","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"{parent}","depth":1}}}}}},"model_provider":"fixture-provider","history_mode":"legacy","git":{{"branch":"main"}}}}}}"#,
+                    t(0),
+                    t(0)
+                ),
+                format!(
+                    r#"{{"timestamp":"{}","type":"turn_context","payload":{{"turn_id":"turn-{p}-{c}","cwd":"{CWD}","model":"fixture-model-x"}}}}"#,
+                    t(1)
+                ),
+                format!(
+                    r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"task_started","turn_id":"turn-{p}-{c}"}}}}"#,
+                    t(2)
+                ),
+                format!(
+                    r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"user_message","message":"Placeholder subagent task {c}.","images":[]}}}}"#,
+                    t(3)
+                ),
+                format!(
+                    r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"agent_message","message":"Placeholder subagent report."}}}}"#,
+                    t(4)
+                ),
+                format!(
+                    r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-{p}-{c}","last_agent_message":"Placeholder subagent report."}}}}"#,
+                    t(5)
+                ),
+            ]
+            .join("\n")
+                + "\n";
+            write(&child, &body)?;
+            ids.push(child);
+        }
+    }
+    Ok(ids)
 }
 
 /// 在 `projects`（Claude Code 配置目录下的 `projects/`）里写 `sessions` 个会话文件，每 20 个一个项目目录：

@@ -551,6 +551,13 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     share(
+        "agents/discover_codex_1000",
+        &[median(Limit::TimeBelow(ms(500)))],
+        AGENTS,
+        ACTIVE,
+        Time,
+    ),
+    share(
         "agents/zst_throughput",
         &[median(Limit::ThroughputAtLeast(100 * MB))],
         AGENTS,

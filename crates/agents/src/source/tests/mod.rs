@@ -10,6 +10,7 @@ mod discover;
 mod index_cache;
 mod place;
 mod plugin;
+mod spawn_link;
 pub(crate) mod support;
 mod watch;
 

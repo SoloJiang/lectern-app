@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use lectern_services::session::{
     Agent, Content, ContentRef, Cursor, ResumeCommand, SessionError, SessionKey, SessionSummary,
-    SourceId, TurnIndex,
+    SourceId, ToolCall, TurnIndex,
 };
 
 use crate::claude::{self, ClaudeCode};
@@ -48,16 +48,29 @@ pub(crate) trait Adapter: Send + Sync + 'static {
         max_bytes: u64,
         index: &mut IndexBuilder,
     ) -> Result<Parsed, SessionError>;
+    /// 从 `prev` 接着建索引；第二个值：新索引是否接在 `prev` 之后（不是从头重建的）。
     fn turns_after(
         &self,
         file: &Self::File,
         prev: Option<&TurnIndex>,
-    ) -> Result<TurnIndex, SessionError>;
+    ) -> Result<(TurnIndex, bool), SessionError>;
     fn load(&self, file: &Self::File, at: &ContentRef) -> Result<Content, SessionError>;
     fn resume(&self, summary: &SessionSummary) -> Option<ResumeCommand>;
     fn activity(&self, cursor: &Cursor) -> Option<Activity>;
     /// 会话的全部候选路径都消失之后（Codex 删掉解压副本）。
     fn removed(&self, key: &SessionKey);
+
+    /// 是否从父会话一侧关联子 agent 与派出它的调用（Codex，docs/design/agents.md「Codex 子 agent 与派出它的
+    /// 调用」）。为 false 时 [`Adapter::spawned_thread`] 不会被调用。
+    const LINKS_SPAWNS: bool = false;
+    /// 这次 `SpawnAgent` 调用派出的子线程 ID（读它的输出）。阻塞，只在 executor 上调用。
+    fn spawned_thread(
+        &self,
+        _file: &Self::File,
+        _call: &ToolCall,
+    ) -> Result<Option<Arc<str>>, SessionError> {
+        Ok(None)
+    }
 }
 
 impl Adapter for ClaudeCode {
@@ -126,8 +139,8 @@ impl Adapter for ClaudeCode {
         &self,
         file: &Self::File,
         prev: Option<&TurnIndex>,
-    ) -> Result<TurnIndex, SessionError> {
-        ClaudeCode::turns_after(self, file, prev)
+    ) -> Result<(TurnIndex, bool), SessionError> {
+        self.turns_continued(file, prev)
     }
 
     fn load(&self, file: &Self::File, at: &ContentRef) -> Result<Content, SessionError> {
@@ -212,8 +225,8 @@ impl Adapter for Codex {
         &self,
         file: &Self::File,
         prev: Option<&TurnIndex>,
-    ) -> Result<TurnIndex, SessionError> {
-        Codex::turns_after(self, file, prev)
+    ) -> Result<(TurnIndex, bool), SessionError> {
+        self.turns_continued(file, prev)
     }
 
     fn load(&self, file: &Self::File, at: &ContentRef) -> Result<Content, SessionError> {
@@ -230,5 +243,15 @@ impl Adapter for Codex {
 
     fn removed(&self, key: &SessionKey) {
         self.remove_decoded(key);
+    }
+
+    const LINKS_SPAWNS: bool = true;
+
+    fn spawned_thread(
+        &self,
+        file: &Self::File,
+        call: &ToolCall,
+    ) -> Result<Option<Arc<str>>, SessionError> {
+        Codex::spawned_thread(self, file, call)
     }
 }

@@ -11,8 +11,8 @@ use lectern_agents::AgentRoots;
 use lectern_agents::claude::{ClaudeCode, SOURCE_ID};
 use lectern_agents::codex::{self, Codex};
 use lectern_agents::testing::{
-    append_chunk, compress_zst, parse_file, source, synthetic_long_session, synthetic_projects,
-    synthetic_rollout, synthetic_session,
+    append_chunk, compress_zst, parse_file, source, source_with_calls, synthetic_long_session,
+    synthetic_projects, synthetic_rollout, synthetic_rollouts, synthetic_session,
 };
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Value};
 use lectern_cache::{Budgets, Cache, Config};
@@ -205,6 +205,72 @@ fn discover_1000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let time = ctx.time(|| source(Agent::ClaudeCode, black_box(&roots), None, None, &decoded));
     Ok(vec![Measured::new(
         "agents/discover_1000",
+        Value::Time(time),
+    )])
+}
+
+/// The first discovery of 1000 Codex rollouts: 100 parents that each spawned
+/// 9 subagents, with `agents.spawns` already written (by a warm-up discovery
+/// and a `turns` of every parent). Every subagent gets its `tool_call` from
+/// the cache; the adapter reads no session body (`read`, `turns_after`,
+/// `load`). No placement and no watch, as `agents/discover_1000`.
+pub const DISCOVER_CODEX_1000: Bench = Bench {
+    id: "agents/discover_codex_1000",
+    run: discover_codex_1000,
+};
+
+fn discover_codex_1000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let parents = ctx.scale(100, 4);
+    let children = 9;
+    let home = ctx.scratch().join("codex_discover");
+    let roots = AgentRoots {
+        claude: Vec::new(),
+        codex: vec![home.clone()],
+    };
+    synthetic_rollouts(&home.join("sessions"), parents, children)?;
+    let decoded = ctx.scratch().join("decoded");
+    let cache = Cache::new(Config {
+        root: ctx.scratch().join("codex_cache"),
+        budgets: Budgets::default(),
+        ui_thread: None,
+    });
+    let open = || {
+        source_with_calls(Agent::Codex, &roots, Some(&cache), None, &decoded)
+            .ok_or_else(|| BenchError::new("no Codex source"))
+    };
+    // Warm-up: index every parent once, which writes `agents.spawns`.
+    {
+        let (warm, _) = open()?;
+        let list = warm.sessions();
+        for s in list.sessions.iter().filter(|s| s.parent.is_none()) {
+            warm.turns(&s.key)
+                .map_err(|e| BenchError::debug("turns", e))?;
+        }
+    }
+    // Checked outside the clock: every subagent is linked, and no body was read.
+    let (checked, calls) = open()?;
+    let list = checked.sessions();
+    let expected = parents * children;
+    let linked = list
+        .sessions
+        .iter()
+        .filter(|s| s.parent.as_ref().is_some_and(|p| p.tool_call.is_some()))
+        .count();
+    if list.sessions.len() != parents * (children + 1) || linked != expected {
+        return Err(BenchError::new(format!(
+            "listed {} sessions, {linked} of {expected} subagents linked",
+            list.sessions.len()
+        )));
+    }
+    if calls.read() + calls.turns_after() + calls.load() != 0 {
+        return Err(BenchError::new(format!(
+            "the discovery read session bodies: {calls:?}"
+        )));
+    }
+    drop(checked);
+    let time = ctx.time(|| open().map(|(source, _)| black_box(source)));
+    Ok(vec![Measured::new(
+        "agents/discover_codex_1000",
         Value::Time(time),
     )])
 }

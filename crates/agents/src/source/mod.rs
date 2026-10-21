@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 
 use lectern_cache::Partition;
@@ -27,6 +28,7 @@ pub(crate) mod adapter;
 mod cached;
 pub(crate) mod discover;
 mod index_codec;
+mod links;
 pub(crate) mod place;
 
 #[cfg(test)]
@@ -35,6 +37,9 @@ mod tests;
 pub(crate) use adapter::Adapter;
 use cached::{CachedIndex, CachedSummary, Indexes, index_key, summary_key};
 use discover::{FileId, walk};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use links::Calls;
+use links::{Builds, Call, Links};
 use place::{Places, ProjectsRef};
 
 /// 列表发布之后主动补齐末尾字段的压缩会话数（按修改时间取最近的）。
@@ -73,6 +78,19 @@ pub(crate) struct Engine<A: Adapter> {
     watches: Mutex<Vec<DirWatch>>,
     /// 没有 executor 时（`testing`）还没写进 `cache` 的索引，drop 时写。
     deferred: Mutex<Vec<Arc<TurnIndex>>>,
+    /// Codex 子 agent 的关联：父会话 → 关联（`links.rs`）。值为 None：这次运行查过 `agents.spawns`、没有条目。
+    /// 锁只在内存操作时短暂持有，取锁顺序在其他锁之后。
+    links: Mutex<HashMap<SessionKey, Option<Links>>>,
+    /// `keep_index` 每放进一份索引加一，即 `Links::seq`（从 `agents.spawns` 读出的关联为 0）。
+    index_seq: AtomicU64,
+    /// 活跃父会话的主动建索引（`links.rs`）。
+    builds: Mutex<Builds>,
+    /// 适配器读会话正文的调用次数（测试与 bench）。
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) calls: Arc<Calls>,
+    /// 测试用：加在当前时间上的毫秒数（活跃会话与主动建索引的 10 分钟）。
+    #[cfg(test)]
+    pub(crate) clock_skew: std::sync::atomic::AtomicI64,
     /// 测试用：适配器生成整份摘要的次数。
     #[cfg(test)]
     pub(crate) full_summaries: std::sync::atomic::AtomicUsize,
@@ -101,6 +119,8 @@ struct State<F> {
     /// 一个会话的全部候选都消失、要删掉它的解压副本：处理完这一轮的全部路径之后再判断（文件从
     /// `sessions/` 移到 `archived_sessions/` 时，旧路径的删除可能先于新路径的出现被处理）。
     gone: HashSet<SessionKey>,
+    /// 有候选路径消失的会话：这一轮的全部路径处理完之后，全部候选都不在的去掉它在 `links` 里的项。
+    vanished: HashSet<SessionKey>,
 }
 
 #[derive(Default)]
@@ -178,12 +198,20 @@ impl<A: Adapter> Engine<A> {
                 completion: Completion::default(),
                 resummarized: HashSet::new(),
                 gone: HashSet::new(),
+                vanished: HashSet::new(),
             }),
             places: Mutex::new(Places::default()),
             indexes: Mutex::new(Indexes::default()),
             published: Mutex::new(Published::default()),
             watches: Mutex::new(Vec::new()),
             deferred: Mutex::new(Vec::new()),
+            links: Mutex::new(HashMap::new()),
+            index_seq: AtomicU64::new(0),
+            builds: Mutex::new(Builds::default()),
+            #[cfg(any(test, feature = "test-support"))]
+            calls: Arc::default(),
+            #[cfg(test)]
+            clock_skew: std::sync::atomic::AtomicI64::new(0),
             #[cfg(test)]
             full_summaries: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -325,10 +353,12 @@ impl<A: Adapter> Engine<A> {
             };
             let first = !self.state().published_once;
             self.process(&work);
+            self.lookup_spawns();
             self.publish(first);
             if first {
                 self.auto_complete();
             }
+            self.schedule_builds();
             drop(work.guards);
         }
     }
@@ -413,6 +443,21 @@ impl<A: Adapter> Engine<A> {
         for key in gone {
             self.adapter.removed(&key);
         }
+        // 父会话的全部候选都消失：去掉它的关联（「父会话被归档或删除」）。
+        let vanished: Vec<SessionKey> = {
+            let mut state = self.state();
+            let vanished: Vec<SessionKey> = state.vanished.drain().collect();
+            vanished
+                .into_iter()
+                .filter(|key| !state.known.values().any(|k| A::key(&k.file) == key))
+                .collect()
+        };
+        if !vanished.is_empty() {
+            let mut links = self.links();
+            for key in &vanished {
+                links.remove(key);
+            }
+        }
 
         // 归位：事件影响的 cwd，这一轮检查过的会话的 cwd，以及还没有归位的 cwd。
         let (cwds, touched): (Vec<Arc<Path>>, HashSet<Arc<Path>>) = {
@@ -450,9 +495,12 @@ impl<A: Adapter> Engine<A> {
             _ => {
                 let removed = self.state().known.remove(path);
                 if let Some(old) = removed {
+                    let mut state = self.state();
                     if A::compressed(&old.file) {
-                        self.state().gone.insert(key.clone());
+                        state.gone.insert(key.clone());
                     }
+                    state.vanished.insert(key.clone());
+                    drop(state);
                     self.forget_index_if_gone(&key);
                 }
                 return;
@@ -565,7 +613,8 @@ impl<A: Adapter> Engine<A> {
         }
         let (index, _) = self.indexes().get(key)?;
         let now = FileId::stat(A::path(file)).ok()?;
-        let next = self.adapter.turns_after(file, Some(&index)).ok()?;
+        self.count(Call::TurnsAfter);
+        let (next, continued) = self.adapter.turns_after(file, Some(&index)).ok()?;
         if next.cursor.offset() < index.cursor.offset() {
             // 文件被改写：重新生成整份摘要。
             return None;
@@ -573,6 +622,9 @@ impl<A: Adapter> Engine<A> {
         let activity = self.adapter.activity(&next.cursor)?;
         let next = Arc::new(next);
         self.indexes().put(next.clone(), Some(now));
+        // 刷新任务里：关联在这一轮发布之前派生（「派生的时机」）。
+        let seq = self.next_index_seq();
+        self.derive_links(file, &next, seq, continued);
         let mut summary = old.clone();
         if let Some(at) = activity.last_activity {
             summary.last_activity = at;
@@ -581,15 +633,13 @@ impl<A: Adapter> Engine<A> {
         Some(summary)
     }
 
-    /// 组装列表并发布（整体替换、发出 `SessionsChanged`）。没有变化时不发布，第一次总是发布。
-    fn publish(&self, first: bool) {
-        let mut published = self.published.lock().unwrap_or_else(|e| e.into_inner());
-        let places = self.places.lock().unwrap_or_else(|e| e.into_inner());
-        let mut state = self.state();
-
-        // 每个会话选一个候选路径（「不变量」）。
+    /// 每个会话选一个候选路径（「不变量」）：`sessions/` 优先于归档、未压缩优先于压缩，再取修改时间最新的，
+    /// 最后按路径。
+    fn best(
+        known: &HashMap<Arc<Path>, Known<A::File>>,
+    ) -> HashMap<&SessionKey, (&Arc<Path>, &Known<A::File>)> {
         let mut best: HashMap<&SessionKey, (&Arc<Path>, &Known<A::File>)> = HashMap::new();
-        for (path, known) in &state.known {
+        for (path, known) in known {
             let key = A::key(&known.file);
             let better = match best.get(key) {
                 None => true,
@@ -605,6 +655,16 @@ impl<A: Adapter> Engine<A> {
                 best.insert(key, (path, known));
             }
         }
+        best
+    }
+
+    /// 组装列表并发布（整体替换、发出 `SessionsChanged`）。没有变化时不发布，第一次总是发布。
+    fn publish(&self, first: bool) {
+        let mut published = self.published.lock().unwrap_or_else(|e| e.into_inner());
+        let places = self.places.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state();
+
+        let best = Self::best(&state.known);
         let mut chosen = HashMap::new();
         let mut sessions: Vec<SessionSummary> = Vec::new();
         let mut stats = ParseStats::default();
@@ -641,6 +701,7 @@ impl<A: Adapter> Engine<A> {
         state.chosen = chosen;
         state.published_once = true;
         drop(state);
+        self.fill_tool_calls(&mut sessions);
 
         let mut changed = Vec::new();
         let mut added: Vec<Arc<str>> = Vec::new();
@@ -880,8 +941,22 @@ impl<A: Adapter> Engine<A> {
     }
 
     /// 把新的索引放进内存；`persist` 时也写进 `cache`。写入在另一个后台任务里，不让 `turns` 的调用方等它；
-    /// 没有 executor 时（`testing`）留到 drop。
-    fn keep_index(&self, index: Arc<TurnIndex>, file: Option<FileId>, persist: bool) {
+    /// 没有 executor 时（`testing`）留到 drop。之后在另一个后台任务里从它派生子 agent 的关联
+    /// （`continued`：索引接在内存或 `cache` 里的上一份之后，不是从头建的）。
+    fn keep_index(
+        &self,
+        session: &A::File,
+        index: Arc<TurnIndex>,
+        file: Option<FileId>,
+        persist: bool,
+        continued: bool,
+    ) {
+        self.keep_index_only(index.clone(), file, persist);
+        let seq = self.next_index_seq();
+        self.derive_later(session, index, seq, continued);
+    }
+
+    fn keep_index_only(&self, index: Arc<TurnIndex>, file: Option<FileId>, persist: bool) {
         if persist && self.setup.cache.is_some() {
             if self.setup.executor.is_some() {
                 let index = index.clone();
@@ -958,6 +1033,7 @@ impl<A: Adapter> SessionSource for Engine<A> {
             None if from.is_start() => (IndexBuilder::default(), true),
             _ => (IndexBuilder::default(), false),
         };
+        self.count(Call::Read);
         let parsed = self.adapter.read(&file, from, max_bytes, &mut builder)?;
         let batch = parsed.batch;
         if follows || batch.reset {
@@ -965,9 +1041,10 @@ impl<A: Adapter> SessionSource for Engine<A> {
             let changed = held
                 .as_ref()
                 .is_none_or(|(old, _)| old.cursor != index.cursor);
+            let continued = held.is_some() && follows && !batch.reset;
             // 没读到末尾时文件身份不说明索引完整：下一次 `turns` 接着解析。
             let file_id = batch.at_end.then_some(id);
-            self.keep_index(index, file_id, batch.at_end && changed);
+            self.keep_index(&file, index, file_id, batch.at_end && changed, continued);
         }
         self.after_parse(session, &file, id);
         Ok(batch)
@@ -986,15 +1063,18 @@ impl<A: Adapter> SessionSource for Engine<A> {
             Some((index, _)) => Some(index),
             None => self.cached_index(session).map(Arc::new),
         };
-        let index = Arc::new(self.adapter.turns_after(&file, prev.as_deref())?);
+        self.count(Call::TurnsAfter);
+        let (index, continued) = self.adapter.turns_after(&file, prev.as_deref())?;
+        let index = Arc::new(index);
         let changed = prev.as_ref().is_none_or(|p| p.cursor != index.cursor);
-        self.keep_index(index.clone(), Some(id), changed);
+        self.keep_index(&file, index.clone(), Some(id), changed, continued);
         self.after_parse(session, &file, id);
         Ok(index)
     }
 
     fn load(&self, session: &SessionKey, at: &ContentRef) -> Result<Content, SessionError> {
         let (file, _) = self.chosen_file(session).ok_or(SessionError::NotFound)?;
+        self.count(Call::Load);
         self.adapter.load(&file, at)
     }
 

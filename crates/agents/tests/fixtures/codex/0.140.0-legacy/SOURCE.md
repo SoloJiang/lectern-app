@@ -16,3 +16,7 @@
 | `sessions/2026/10/04/rollout-…-aaaaaaaa-…-000000000003.jsonl` | 分叉的分叉（`forked_from_id` 指向上一个分叉）：复制的前缀里既有主会话的轮次（上一个分叉自己继承的），也有上一个分叉自己的轮次，之后是自己的一轮。 |
 
 超长行（超过 16 MB）、没写完的末尾行、坏行和认不出格式的文件不放进 fixtures，由测试在临时目录里生成。
+
+## `spawn_agent` 的输出
+
+输出 `{"agent_id": "<子线程 ID>"}` 在 2026-10-21 按公开源码核对过（openai/codex 提交 `07cc649c658be7018b6913299f12f843b24679f8`）：multi_agent v1 的 `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`（`SpawnAgentResult { agent_id, nickname }`）经 `codex-rs/core/src/tools/handlers/multi_agents_common.rs` 的 `tool_output_response_item` 写成 JSON 文本。上游还带 `nickname`，这里省略（提取时忽略）。参数里的 `task_name` 是 multi_agent v2 的写法，v1 没有这个参数；提取只看输出，参数没有改（改了会改变快照）。详见 [agents 设计「外部格式」](../../../../../../docs/design/agents.md#外部格式)。
