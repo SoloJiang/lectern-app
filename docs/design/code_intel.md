@@ -25,7 +25,7 @@
   - 语法高亮、高亮与文本的 LRU、后退前进（`file_reader`、[#10](https://github.com/SoloJiang/lectern-app/issues/10)）。高亮方与本 crate 依赖同一批 grammar crate，链接进二进制的只有一份；高亮的计算按 ADR 0034 放在领域层的库里（由 `file_reader` 的设计决定）。ADR 0033 的两类只存内存的批量工作（空闲预取的高亮、大文件的整文件高亮）和行检查点（`syntax.lines`）都属于它，不在本 crate。
   - 文件列表与子项目（`project`）、工作区比较（`git`）、监听（`fs_watch`）、安全读取（`platform`）、SQLite 的连接与淘汰（`cache`）。本 crate 只调用它们的接口，需要它们新增的部分列在「对其他 crate 的要求」。
   - 语言包的下载、校验和加载（`marketplace` 与 kernel 的 grammar 加载器，ADR 0018）：本 crate 只定义接收已加载 grammar 的接口 `GrammarSource`。
-  - Java 的 `-sources.jar`（#26，读它要 zip 解码器，归属按 ADR 0007 决定）与文件内容的全文搜索。TS / JS 的依赖声明（按需解析与依赖层）按 [ADR 0033](../adr/0033.md) 在本 crate 里（「依赖层」），这一阶段只支持 pnpm 管理的依赖（[ADR 0040](../adr/0040.md)），npm、yarn 的布局不做；Cargo、Go、Python 的依赖根在它们的解析扩展点实现时接入，在那之前依赖层只为 TS / JS 运行。
+  - Java 的 `-sources.jar`（#26，读它要 zip 解码器，归属按 ADR 0007 决定）与文件内容的全文搜索。npm 等生态的依赖声明（按需解析与依赖层）按 [ADR 0033](../adr/0033.md) 在本 crate 里（「依赖层」）；Cargo、Go、Python 的依赖根在它们的解析扩展点实现时接入，在那之前依赖层只为 TS / JS 运行。
 - 本 issue 之外：
   - 文件夹项目的增量更新：`project` 在 P1 不监听文件夹项目（[project 设计「范围」](project.md#范围)），本 crate 同样只在打开时建索引；`project` 加入文件夹监听后，本 crate 改为消费同一来源的事件。
   - `review` 的工作区比较结果如果以后经 `services` 共享，本 crate 改用它，不再自己做一次比较（见「打开项目与热启动」）。
@@ -179,7 +179,7 @@ pub struct DepOrigin {
     pub root: DepRoot,
 }
 
-/// `Npm`：TS / JS 的包（npm 注册表的包名）。这一阶段只从 pnpm 的布局读（ADR 0040）。
+/// `Npm`：TS / JS 的包（npm 注册表的包名），npm、pnpm、yarn 安装的都是。
 pub enum Ecosystem { Npm }   // Cargo、Go、Python 随它们的解析扩展点加入
 
 /// 依赖根（ADR 0033「依赖根的读取限制」）。`Location::path` / `TextRef::path` 相对这个根所在的目录：
@@ -696,8 +696,7 @@ pub(crate) struct Bound { pub definition: DefinitionRef, pub binding: Binding }
 impl ResolveContext<'_> {
     /// 裸模块名（"react"、"@types/node"、"lodash/fp"）在 `subproject` 看来解析到的依赖文件：按「依赖层」的发现规则
     /// 找到包目录，按入口规则（`exports` 的 `types` 条件……）找到声明文件。阻塞（读清单、`lstat`），只在查询的任务里调用；
-    /// 结果按（子项目、模块名）在这次查询里缓存。找不到、越界、扩展名不允许，或子项目不是 pnpm 的布局
-    /// （ADR 0040：这一阶段只支持 pnpm）时为 None。
+    /// 结果按（子项目、模块名）在这次查询里缓存。找不到、越界或扩展名不允许时为 None。
     pub fn dependency(&self, specifier: &str, subproject: &RelPath) -> Option<DepFile>;
     /// 一个依赖文件的抽取结果：命中 `code_intel.deps` 就用，否则经它的根读出、按读到的字节求 OID 并当场抽取
     /// （交互上限与截止时间，计入查询），结果交给 `Background` 任务写入 `code_intel.deps`。
@@ -1608,7 +1607,7 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 | `paths` 里的目录路径 | 工作区内容：映射里这个目录下的路径进入重新读集合，并请求一次工作区比较（找出移进来的未跟踪文件） |
 | `rescan`、`health` 为 `Degraded` | 工作区内容（请求比较、全部覆盖项重新读）、忽略规则与配置 |
 | `meta.rules`、`meta.config` | 忽略规则与配置 |
-| `paths` 里第 3 层子项目及其上各级的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`（ADR 0033、0040） | 不改上表的代数；提交依赖的身份任务（「依赖层」）。依赖目录本身不监听 |
+| `paths` 里第 3 层子项目及其上各级的 `package.json`、`package-lock.json`、`npm-shrinkwrap.json`、`pnpm-lock.yaml`、`yarn.lock`（ADR 0033） | 不改上表的代数；提交依赖的身份任务（「依赖层」）。依赖目录本身不监听 |
 | `health` 为 `Failed` | 不改代数；丢掉这份订阅，等下一次 `ProjectEvent` 重新订阅 |
 | 语言包的通知 | 语言包（见「语言包的变化」） |
 | 读到 `cache` 的淘汰代数变化 | 淘汰 |
@@ -1737,38 +1736,26 @@ UI 线程只调用 `set_focus`、`query`、`results`、`close`、`prefetch`、`n
 
 ### 依赖层
 
-[ADR 0033](../adr/0033.md)「依赖源码」。状态：已设计，尚未实现（「验收」第 9 步）。依赖目录不进文件列表、不整体索引、不监听；跳转进依赖时按需解析，空闲时只为当前子项目的直接依赖建声明闭包的索引。
-
-这一阶段只支持 pnpm 管理的 TS / JS 依赖（产品负责人 2026-10-21 的决定，[ADR 0040](../adr/0040.md)）：pnpm 的虚拟存储 `node_modules/.pnpm/<名字>@<版本>[_<peer>]/node_modules/<名字>`，加上每个子项目 `node_modules/<名字>` 指向它的链接，包括 pnpm 工作区。用 npm 或 yarn 安装的项目（`node_modules` 里没有 `.pnpm`）没有依赖层，跳转也不按需解析依赖：依赖里的定义不出现，项目自己的结果不受影响（已知限制）。读取的规则（依赖根、链接、扩展名、上限）不依赖 pnpm 的布局，以后加入 npm 的平铺布局只需要另一种身份来源，不改安全模型。Cargo、Go、Python 的依赖根和闭包规则在它们的解析扩展点实现时经同一个内部接口（`deps::Ecosystem`）接入，键、身份、配额、读取限制和分层不变。
+[ADR 0033](../adr/0033.md)「依赖源码」。状态：已设计，尚未实现（「验收」第 9 步）。依赖目录不进文件列表、不整体索引、不监听；跳转进依赖时按需解析，空闲时只为当前子项目的直接依赖建声明闭包的索引。现在只有 npm（TS / JS，npm、pnpm、yarn 安装的 `node_modules` 都读，包括 pnpm 工作区）；Cargo、Go、Python 的依赖根和闭包规则在它们的解析扩展点实现时经同一个内部接口（`deps::Ecosystem`）接入，键、身份、配额、读取限制和分层不变。
 
 **发现**（每个项目的每个会话一个 `deps::Roots`：按当前 worktree 建立，打开项目时为空，用到时建立；切换当前 worktree、项目关闭时随会话释放，所以一个 worktree 的根不会给另一个 worktree 读）：
 
 - 子项目：第 3 层的子项目（「建索引的分层」），它的根目录下的 `package.json`；没有子项目时取 worktree 根的。第 3 层换了子项目时按新的子项目重新发现，原来的包留在依赖映射里（见下）。清单经 worktree 根的 `SafeRoot` 读，上限 1 MiB。
 - 直接依赖：`dependencies`、`devDependencies`、`peerDependencies`、`optionalDependencies` 的键，去重，按清单里的顺序最多 512 个，多出的记日志、只走按需解析。名字按 npm 的规则校验（可选的 `@scope/` 加一段，每段非空、不是 `.` 或 `..`、没有 `/`、`\` 和 NUL，合计 ≤ 214 字节），不合规的跳过。
 - 包目录：按 Node 的查找顺序，从子项目目录往上到 worktree 根，每一级的 `node_modules` 经 worktree 根的 `SafeRoot::open_dir` 打开（路径的任何一级是符号链接都失败，这一级跳过），在其中找 `<名字>`，第一个找到的就是这个包。这条链上的 `node_modules` 目录就是这个子项目的依赖根；一个 worktree 最多打开 8 个根，按（worktree、相对 worktree 根的目录）登记，同时记下打开时目录的设备号和 inode。
-- pnpm 的判断：链上离 worktree 根最近、含有 `.pnpm` 目录（经这个根的 `SafeRoot` 打开，不是符号链接）的根就是虚拟存储所在的根（pnpm 默认把 `virtual-store-dir` 放在工作区根的 `node_modules/.pnpm`）。链上没有这样的根时这个子项目不是 pnpm 的布局，依赖层和按需解析都不运行，`coverage.deps` 为 `Done`。`virtual-store-dir` 配到 `node_modules` 之外时，链接的目标不在任何已发现的根里，同样读不到（已知限制）。
-- 根的有效性：`pnpm install` 重建、删掉重装 `node_modules` 之后，打开的描述符指向已删除的目录。每次身份任务运行时，按登记的路径经 worktree 根的 `SafeRoot` 对这个目录 `stat` 一次，设备号或 inode 变了（或已不存在）就重新经 `open_dir` 打开（或删去这个根）；任何依赖读取得到 `NotFound` 时同样重新验证一次、重试一次。所以根不会在一次会话里一直读不到。
-- `<名字>` 是符号链接时（pnpm 的正常情形）读出目标，按词法相对链接所在的目录拼出路径（相对 worktree 根的路径），结果落在这个 worktree 已发现的某个依赖根之内才继续（[ADR 0040](../adr/0040.md)：pnpm 工作区里 `packages/app/node_modules/react` 指向根目录 `node_modules/.pnpm/…`，那是同一个子项目查找链上的另一个根），最多跟随 4 次，最后一级必须是从那个根出发、各级都不是符号链接的目录，之后经那个根的 `SafeRoot` 读；否则这个包读不到。所以 `node_modules/react` → `.pnpm/react@19.0.0/node_modules/react` 和工作区包指向根目录 `.pnpm` 的链接都可以读，指向已发现的根之外（`$HOME`、worktree 之外、没有作为根打开的目录）的链接不读；读取时从不跟随符号链接。包目录必须落在虚拟存储里（`.pnpm/<目录名>/node_modules/<名字>`，目录名按下文解析出名字和版本，名字与要找的相同）；`<名字>` 本身是目录（npm 式的平铺安装）或目标不在虚拟存储里的，这一阶段不作为依赖读（读取规则允许，只是没有身份来源）。
+- 根的有效性：`npm ci` 重建、删掉重装 `node_modules` 之后，打开的描述符指向已删除的目录。每次身份任务运行时，按登记的路径经 worktree 根的 `SafeRoot` 对这个目录 `stat` 一次，设备号或 inode 变了（或已不存在）就重新经 `open_dir` 打开（或删去这个根）；任何依赖读取得到 `NotFound` 时同样重新验证一次、重试一次。所以根不会在一次会话里一直读不到。
+- `<名字>` 是目录时就是包目录；是符号链接（pnpm）时读出目标，按词法相对链接所在的目录拼出路径（相对 worktree 根的路径），结果落在这个 worktree 已发现的某个依赖根之内才继续（[ADR 0040](../adr/0040.md)：pnpm 工作区里 `packages/app/node_modules/react` 指向根目录 `node_modules/.pnpm/…`，那是同一个子项目查找链上的另一个根），最多跟随 4 次，最后一级必须是从那个根出发、各级都不是符号链接的目录，之后经那个根的 `SafeRoot` 读；否则这个包读不到。所以 `node_modules/react` → `.pnpm/react@19.0.0/node_modules/react` 和工作区包指向根目录 `.pnpm` 的链接都可以读，指向已发现的根之外（`$HOME`、worktree 之外、没有作为根打开的目录）的链接不读；读取时从不跟随符号链接。pnpm 的 `virtual-store-dir` 配到 `node_modules` 之外时，链接的目标不在任何已发现的根里，读不到（已知限制，ADR 0040）。
 - 入口（声明文件）：包的 `package.json`（≤ 1 MiB）里 `exports` 的 `"."`（`exports` 是字符串或条件对象时就是它）按对象顺序深度优先找 `types` 条件，`import`、`require`、`node`、`default` 之下也找；没有时依次是 `types`、`typings`、`index.d.ts`、`main` 换成 `.d.ts`；都没有时找 `@types/<名字>`（`@scope/x` 对应 `@types/scope__x`），按同样的规则作为一个单独的包。路径按词法相对包目录解析，离开包目录、扩展名不在允许的列表里的丢弃。
 - 声明闭包：从入口出发，沿相对路径的 `import`、`export … from`、`import("…")` 类型和 `/// <reference path="…">` 走（裸模块名和 `/// <reference types>` 只记录，不跟随）。一个相对路径 `s` 依次试 `s`（扩展名允许时）、`s` 的 `.js` / `.mjs` / `.cjs` 换成 `.d.ts` / `.d.mts` / `.d.cts`、`s.d.ts`、`s.d.mts`、`s.d.cts`、`s.ts`、`s.tsx`、`s/index.d.ts`、`s/index.ts`，第一个存在的就是目标；离开包目录的丢弃。边由 TS / JS 的一次遍历在抽取时一并给出（`walk::ts` 收集这几种语句的模块路径），按内容存：依赖单元写入时连同它的模块路径一起写进 `cd_spec`（每个单元每个模块路径一行，原样的字符串，与路径无关），所以单元已经在缓存里（存在检查命中：版本升级而内容没变的文件、跳转时按需写过的入口）时，闭包从 `cd_spec` 读出边，不重新解析，也不会在入口处停下。按需解析和第 1 层写进 `code_intel.deps` 的单元同样带 `cd_spec`。没有内容的单元（`TooLarge`、`TimedOut`）没有边。
-- 只读允许的扩展名（ADR 0033）：`.d.ts`、`.d.mts`、`.d.cts`、`.ts`、`.tsx` 和 `package.json`；另外只有虚拟存储所在的根里的 `.pnpm/lock.yaml` 这一个文件（[ADR 0040](../adr/0040.md)，按完整的相对路径匹配）。其他文件不打开。工作区里的 `pnpm-lock.yaml` 是受跟踪的工作区文件，经 worktree 根的 `SafeRoot` 读，不属于依赖根。
+- 只读允许的扩展名（ADR 0033）：`.d.ts`、`.d.mts`、`.d.cts`、`.ts`、`.tsx` 和 `package.json`；其他文件不打开。lockfile 是工作区文件，经 worktree 根的 `SafeRoot` 读，不属于依赖根。
 - 限额（ADR 0033）：每个包的闭包最多 4000 个文件、16 MiB；单个文件最多 1 MiB（超过的记 `TooLarge`，不跟随它的边）；每个项目在一次会话里，依赖层实际读入的源码合计最多 64 MiB，到了就停下（`coverage.deps` 为 `Done`），其余只走按需解析。身份没变、没有读文件的包不计入。
 
 **身份与包的路径表**：
 
-- 身份（决定要不要重读一个包，[ADR 0040](../adr/0040.md)）：（虚拟存储的目录名、`integrity`、已安装的 `package.json` 的五项 stat）。
-  - 目录名：包目录所在的 `.pnpm/<目录名>`，形如 `react@19.0.0`、`@babel+core@7.24.0`（名字里的 `/` 写作 `+`）、`react-dom@19.0.0_react@19.0.0`（`_` 之后是 peer，长时是哈希）。按最后一个不在开头的 `@` 分出名字和版本（`_` 之前），名字与链接的 `<名字>` 不同时这个包读不到。目录名带着已安装的版本和 peer，所以换了版本的安装路径就变。
-  - `integrity`：先读虚拟存储里的 `.pnpm/lock.yaml`：pnpm 每次安装后按实际装好的树写它，所以它描述的是已安装的内容；`git pull` 或切换分支之后、`pnpm install` 之前，`pnpm-lock.yaml` 已经变了，它还没有变。没有它时读工作区里的 `pnpm-lock.yaml`（子项目往上到 worktree 根的第一个）。在 lockfile 的 `packages:` 里找键等于 `<名字>@<版本>` 的那一项（lockfile 版本 6 的键前面有 `/`，后面可能带 `(peer…)`，比较时去掉；版本 9 的键没有 `/`，peer 只在 `snapshots:` 里），取它的 `resolution` 里的 `integrity`。用的是已安装的目录名里的版本，所以 `pnpm-lock.yaml` 已经改成另一个版本、还没安装时，找不到这个键，走后备，不会把新 lockfile 的 `integrity` 当成已安装内容的身份。
-  - 已安装的 `package.json` 的五项 stat（设备号、inode、大小、修改时间、状态改变时间）：三者都与路径表记下的相同（并且记录时不在 racy 窗口里）才算身份没变。
-  - 后备：取不到 `integrity`（没有 lockfile、超出下面的语法子集、找不到这个键）时，身份是（目录名、包清单的 OID、五项 stat），然后照常走 stat 表。后备只会让身份更容易「变了」、多读一些文件，不会给出错的身份。
-- lockfile 的扫描（不用 YAML 解析器：ADR 0033 不新增依赖）：经 `OpenFile::read_ranges` 按 1 MiB 的区间流式读，按行处理，整个文件上限 64 MiB，一行上限 64 KiB；内存是一个区间、一行和要找的那些键的结果，与文件大小无关。只接受这个子集，超出时按下文处理：
-  - 第一个非注释行是顶层的 `lockfileVersion: <v>`，`<v>` 可以带单引号或双引号，主版本是 6（`6.0`、`6.1`）或 9（`9.0`）；不是时整个文件不用（全部走后备）。
-  - 顶层的键在第 0 列、以 `:` 结尾；`packages:` 段从这一行到下一个第 0 列的键为止，其余段（`importers:`、`snapshots:`、`settings:` 等）跳过。
-  - `packages:` 段里，一项的键在第 2 列、整行是 `<键>:`，键是不带引号、带单引号或带双引号的标量（单引号里的 `''` 是一个 `'`，双引号里不接受转义）；项的内容在第 4 列或更深。
-  - 一项里 `resolution` 只接受两种写法：第 4 列的 `resolution: {…}`（一行的流式映射，取其中 `integrity: ` 之后到 `,` 或 `}` 为止的值），或第 4 列的 `resolution:` 后接第 6 列的 `integrity: <值>`。值必须是 `sha512-`、`sha384-`、`sha256-` 或 `sha1-` 加 base64 字符。
-  - 空行和以 `#` 开头的行跳过；制表符缩进、锚点和别名（`&`、`*`）、多行的流式值、同一个键出现两次、值不合法：只在发生在要找的那一项里时让这一项走后备，其他项不受影响；行超过 64 KiB 或文件超过 64 MiB 时整个文件不用。
-  - 只留下要找的键（直接依赖解析出的 `<名字>@<版本>`）的结果。
-- 读取都在身份任务里（`Background`），两个 lockfile 各读一次；`.pnpm/lock.yaml` 在被忽略的目录里，fs_watch 不交付它，所以它的变化在打开项目、`pnpm-lock.yaml` 或清单变化时（`pnpm install` 会改 `pnpm-lock.yaml` 或清单之一）、依赖读取 `NotFound` 时（根的有效性一条）发现；只在 `node_modules` 里重装、什么受跟踪的文件都没改时，下次打开项目时才发现（已知限制，ADR 0033 同类）。
+- 身份（决定要不要重读一个包）：npm 的 lockfile（子项目往上到 worktree 根，第一个 `npm-shrinkwrap.json` 或 `package-lock.json`，经 worktree 根的 `SafeRoot::open_file` 打开，上限 64 MiB）里 `packages["<包目录相对 lockfile 所在目录的路径>"]` 的 `integrity`。lockfile 用 serde_json 的流式访问器读（`Deserializer::from_reader`，读者按 1 MiB 的区间调用 `OpenFile::read_ranges`，读完核对身份）：只留下要找的那些键的 `integrity` 和 `version`，其余按 `IgnoredAny` 跳过，所以内存是一个 1 MiB 的区间加结果，与 lockfile 的大小无关（整个读进内存时不成立，所以必须按区间读）。
+  - 已安装的状态：lockfile 记的是应当安装的内容，不是已经安装的：`git pull` 或切换分支之后、`npm install` 之前，lockfile 已经是新的，`node_modules` 还是旧的。所以身份另含包目录里已安装的 `package.json` 的五项 stat（设备号、inode、大小、修改时间、状态改变时间）：只有 `integrity` 和这五项都与路径表记下的相同（并且记录时不在 racy 窗口里）才算身份没变，任何一项不同都走下面的 stat 表。npm 解包时重写每个文件（新的 inode 和状态改变时间），所以换了版本的安装总会改变这五项。没有用 npm 自己写的 `node_modules/.package-lock.json`（隐藏的 lockfile，记的是已安装的树）：它在被忽略的目录里，要多一个允许读的文件，npm 在它比 `node_modules` 里的目录旧时也不用它；stat 已经足够发现安装状态的变化。
+  - 后备：`pnpm-lock.yaml` 和 `yarn.lock` 不解析（要 YAML 和 yarn 格式的解析器，ADR 0033 不新增依赖），身份取 ADR 0033 的后备：包清单（`package.json`）的 OID 加上解析链接后的包目录路径（pnpm 的 `.pnpm/<名字>@<版本>_<peer 哈希>` 目录名含版本和 peer 的哈希，安装另一个版本时路径就变），同样另含已安装的 `package.json` 的五项 stat。没有 lockfile、lockfile 里没有这个键时同样用后备。后备只会让身份更容易「变了」、多读一些文件，不会给出错的身份。
+- 读取都在身份任务里（`Background`），lockfile 每次任务读一次；lockfile 读不出、超过 64 MiB、不是 JSON 或没有 `packages` 时整个按后备。`node_modules` 不监听，所以只在 `node_modules` 里重装、lockfile 和清单都没改时，已安装的 `package.json` 的变化在下次打开项目或依赖读取 `NotFound` 时（根的有效性一条）才发现（已知限制，ADR 0033 同类）。
 - 包的路径表：每个（生态、包名、版本、身份、包目录）一个 `code_intel.deps` 的单元，行在 `cd_pkg`（一行：生态、包名、版本、身份、已安装的 `package.json` 的五项 stat、包目录、记录时刻）和 `cd_pkg_file`（每个闭包里的文件一行：序号、相对 `DepRoot` 所在目录的路径、OID、设备号、inode、大小、修改时间和状态改变时间（纳秒）、状态）里；边不在路径表里，取自 `cd_spec`（上一条）。单元的字节数按行估算（每行约 80 字节加路径），一个 TS 项目约 250 行、20 KB。它与依赖的单元在同一个配额里按访问时间淘汰；淘汰了就当作身份没见过，走 stat 表或重读。用单元和行，不用 cache 的普通条目：路径表和它引用的单元在同一组表里、同一个写事务里写入，淘汰和配额的规则一致（[cache 设计「命名空间」](cache.md#命名空间)已按此修改）。
 - 打开项目、lockfile 或清单变化、第 3 层换了子项目时（`Background`、`BusyGuard` 的身份任务，每个项目同时最多一个，运行中又有变化的结束后再运行一次）：对每个直接依赖找到包目录、`lstat` 它的 `package.json`、算身份。路径表里有同一个键的单元：直接用它的行，不读、不 stat 闭包里的文件；但路径表和它引用的单元分别淘汰（路径表每次打开项目都用到，单元只在查询时用到），所以用之前对表里的 OID 按 500 个一批对 `code_intel.deps` 做一次存在检查：命中的单元连同路径表的单元一起标记访问（两者从此一起变旧），缺的文件排进依赖层重新读和抽取（核对 OID、写入单元），不当作已入索引（20 个直接依赖、约 250 个文件、4 MiB 的 lockfile 合计约 20–30 ms，`code_intel/deps_identity`）。没有：取这个包名最近的一张路径表作为 stat 表，把这个包排进依赖层。
 - stat 表（身份变了或取不到时，ADR 0033）：闭包里每个文件 `lstat` 一次（经它所在根的 `SafeRoot`），五项都与表里的相同、并且状态改变时间早于那张表的记录时刻 2 秒以上时，沿用表里的 OID，不读；否则读出、按读到的字节求 OID（git blob 格式，仓库的哈希算法；被忽略的文件不做规范化转换）。两种情况的出边都按 OID 取：单元在缓存里就读 `cd_spec`，不在就解析（抽取时写入单元和 `cd_spec`）。按身份或 stat 表的捷径得到的 OID 在跳转真正读这个文件时核对（下文的读取核对）。
@@ -1904,7 +1891,7 @@ enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree:
 | 映射 | 10 万文件重建 ≤ 20 ms、≤ 3 MB | `code_intel/map_100k`、`code_intel/map_100k_bytes` |
 | 建索引期间的临时内存（不设顶层预算，ADR 0029） | ≤ 40 MB：每个批量任务读入的内容 ≤ 2 MiB，加一棵 1 MiB 以内文件的语法树和遍历（实测接近 1 MiB 的 TS 文件约 31 MiB；超过 256 KiB 的文件同时只在一个批量任务里抽取，所以有几个批量线程都只有一棵大树）。`git` 的工作区比较（`GitAccess::changed_paths`）期间的临时内存不在这 40 MB 里：比较不用 `TrackedPaths`，自己解析 index，10 万文件时一次比较的峰值 65.8 MB（`git/compare_100k/peak_bytes` ≤ 72 MB，`git` 的份额，[ADR 0035](../adr/0035.md)），单独就超过 40 MB；`code_intel/batch_peak` 的夹具用 `FakeGit`，不含它。最坏情况下，打开项目时首页的计数比较和本 crate 的核对比较各在一个新 `Worktree` 上同时做冷比较，加上批量层，进程的临时峰值可达约 2 × 66 + 40 ≈ 170 MB（git 的比较之间没有串行化，这是已知的最坏情况，不设顶层预算，同 ADR 0029 的临时内存）。降低的办法是 ADR 0035 的「比较与 `tracked` 共用一次解析」；比较是否与超过 256 KiB 的文件的抽取错开，由本 crate 的下一步决定 | `code_intel/batch_peak` |
 | 磁盘 | `code_intel.tags` 配额 224 MiB、`code_intel.deps` 配额 32 MiB，合计 256 MiB（[ADR 0033](../adr/0033.md)）；cloudprint 形状约 1 MB，10 万文件约 270 MiB（第 3 步的合成仓库实测，超过 224 MiB 的配额，见「存储表」的「规模」和配额一条）；一个 TS 项目的依赖约 5 MiB 源码，单元约 5–10 MiB | `code_intel/disk_100k`（只记录） |
-| 依赖层（ADR 0033） | 依赖层每个项目每次会话读 ≤ 64 MiB、写 ≤ 32 MiB；21 个直接依赖、约 5 MiB 声明闭包的 TS 项目，从空缓存到依赖层完成单线程约 1.3 s（4 MB/s 的抽取吞吐），在批量层上、排在第 4 层之后，不推迟 `app/index_100k` 的里程碑；身份不变时打开项目只读 lockfile、每个直接依赖的链接和清单的 stat，再对路径表里的 OID 做存在检查（约 250 个文件一条语句）：≤ 50 ms（4 MiB 的 `.pnpm/lock.yaml`，按行流式扫描）；依赖映射上限 20 000 个文件、≤ 1 MB，计入下面的常驻份额 | `code_intel/deps_ts_project`（只记录：合成的 pnpm 工作区、21 个直接依赖，从空缓存到 `coverage.deps` 为 `Done`）、`code_intel/deps_identity` ≤ 50 ms（同上的项目、缓存里已有全部路径表和单元，从打开到身份任务结束）、`code_intel/deps_map_bytes` ≤ 1 MB（2 万个文件的依赖映射，`Memory`） |
+| 依赖层（ADR 0033） | 依赖层每个项目每次会话读 ≤ 64 MiB、写 ≤ 32 MiB；21 个直接依赖、约 5 MiB 声明闭包的 TS 项目，从空缓存到依赖层完成单线程约 1.3 s（4 MB/s 的抽取吞吐），在批量层上、排在第 4 层之后，不推迟 `app/index_100k` 的里程碑；身份不变时打开项目只读 lockfile、每个直接依赖的链接和清单的 stat，再对路径表里的 OID 做存在检查（约 250 个文件一条语句）：≤ 50 ms（4 MiB 的 `package-lock.json`，按 1 MiB 的区间流式扫描）；依赖映射上限 20 000 个文件、≤ 1 MB，计入下面的常驻份额 | `code_intel/deps_ts_project`（只记录：合成的 21 个直接依赖，从空缓存到 `coverage.deps` 为 `Done`）、`code_intel/deps_identity` ≤ 50 ms（同上的项目、缓存里已有全部路径表和单元，从打开到身份任务结束）、`code_intel/deps_map_bytes` ≤ 1 MB（2 万个文件的依赖映射，`Memory`） |
 | 交互让路（ADR 0033） | 开关打开后在途的抽取在一片之内停下（解析的进度回调约每 100 次操作一次，遍历每 1024 个节点一次）：≤ 10 ms；之后批量层合计 ≤ 一个核的 10%（kernel 的保活时段，每个时段只做一个 ≤ 256 KiB 的文件）；停下再继续的结果与一次做完的相同；不让路的层不变慢 | `code_intel/yield_stop` 最大值 ≤ 10 ms（1 MiB 的 TS 文件在解析中途打开开关，到这次抽取返回 `Parked`）；帧时间由 `app/scroll_frames_indexing` 判定（bench 设计，ADR 0033） |
 | 大文件的跳转（ADR 0034） | 1–16 MiB 的当前文本，身份已记下时：打开、比较身份、读两段（≤ 68 KiB 与窗口）≤ 1 ms，窗口解析 ≤ 8 ms（截止时间），之后与普通跳转相同，第一批 ≤ 20 ms；身份没记下时流式读一遍求 OID（16 MiB 约 30–40 ms，Linux），只记录；对象库一侧的大文本每次整份取出 blob（不能按区间读），位置在保留的窗口解析里时不取，只记录（已知限制） | `code_intel/goto_large`（4 MiB 的 TypeScript，位置在中部，身份已记下）≤ 20 ms、`code_intel/goto_large/cold`、`code_intel/goto_large/object` 只记录 |
 | 打开文件的窗口链（ADR 0034） | 窗口约 64 KiB（按树切，包住整个文件的 IIFE 也在函数体里切开），一个窗口的语法树约 2–5 MiB；16 MiB 的文件整条链约 4–5 s 的 CPU（Linux 估算），在批量层最前面。临时内存：求 OID 时一个 1 MiB 的区间（流式哈希），之后一个窗口和它的树；找不到切点、扩到 256 KiB 的窗口的树最多约 21 MiB（调研实测，压缩 JS），需要规范化转换的文件开始时整份读入一次（≤ 16 MiB）；三者都在 `LargeSlot` 里、不同时出现，计入建索引期间的 40 MB | `code_intel/window_chain_16mib`（只记录：16 MiB 的 TypeScript 从打开到 `Windowed` 写入）、`code_intel/window_peak` 最大值 ≤ 8 MiB（同上，不需要转换、窗口都是 64 KiB：一个窗口的树约 2 MiB 加 1 MiB 的区间，留约 2 倍的余量） |
@@ -1930,9 +1917,9 @@ enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree:
 | 打开的文件 1–16 MiB，窗口链还没写完 | 已写入的窗口照常可查，其余在批量层续接；跳转第 1 步只解析位置所在的窗口 | 结果照常；这个文件在核算里计为未搜，直到链完成 |
 | 大文件的窗口解析超过 8 ms | 按目标处的标识符取名字，跳过第 1 步的绑定 | 只有按名字找到的候选 |
 | 依赖目标读不到、路径离开包目录、链接的目标不在已发现的依赖根里、`node_modules` 本身是符号链接、扩展名不在允许的列表里（ADR 0033、0040） | 不读、不建索引 | 这个候选不出现；不影响完整性 |
-| 项目不是 pnpm 的布局（npm、yarn 安装，`node_modules` 里没有 `.pnpm`；ADR 0040） | 没有依赖层，不按需解析依赖 | 依赖里的定义不出现；项目自己的结果和完整性不受影响（已知限制） |
 | `code_intel.deps` 满了（依赖层自己的写入引起淘汰） | 依赖层在本次会话停下 | 项目的单元不受影响；依赖里的定义只经按需解析找到 |
-| `.pnpm/lock.yaml` 和 `pnpm-lock.yaml` 都读不出、超过 64 MiB、`lockfileVersion` 不是 6 或 9、要找的那一项超出扫描的语法子集 | 这个包的身份按后备（目录名、包清单的 OID、五项 stat），照常走 stat 表 | 照常，最多多一次 stat 或读取；不会用错的身份 |
+| lockfile 读不出、超过 64 MiB，或不是 npm 的 lockfile（`pnpm-lock.yaml`、`yarn.lock`） | 身份按包清单的 OID 和包目录（ADR 0033 的后备），另含已安装的 `package.json` 的五项 stat，照常走 stat 表 | 照常，最多多一次 stat 或读取；不会用错的身份 |
+| lockfile 已经更新、`node_modules` 还没重新安装 | `integrity` 变了，走 stat 表：闭包里的文件没变，沿用原来的 OID；新的路径表记下的是已安装的 `package.json` 的 stat | 照常，结果是已安装的内容；安装之后那五项变了，再走 stat 表重读 |
 | 交互让路开关打开 | 让路的层在分片边界停下，只在保活时段里前进 | 无可见变化；第 4 层、依赖层、第 5 层完成得更晚 |
 | 某个文件解析超时 | 记 `TimedOut`，不自动重试；被打开时按交互截止时间重做一次 | 这个文件不提供候选，其余照常 |
 | 二进制、超过 1 MiB、读不出 | 记状态（`Binary`、`TooLarge`），工作区里的修改或未跟踪文件标为 `Unindexable` | 不提供候选；二进制算已入索引，其余计为未搜，结果是 `Partial`（「完整性的核算」） |
@@ -1976,11 +1963,10 @@ enum ResumeState { Parsing { parser: Parser, input: Arc<[u8]> }, Walking { tree:
 - 跳转（`goto_*`）：四步的顺序与停下的条件；唯一 `Bound` 候选给出 `jump`；唯一 `NameOnly` 候选只有 `preselect`；兼容组、可见性、语法种类的过滤（含 Go 的 `Meters(value)` 跳到 `type Meters`）；同一份字节在 `.java` 和 `.js` 下时 `java` 的单元只给出 `.java` 的路径（`goto_oid_language_match`）；分层与同层排序；审阅集合优先；结果只追加、已有下标不变；当前文本的 blob 已入索引时，第 1 步列出的本文件定义不在第 3 步重复出现，现场抽取过的 import 目标不在第 3 步和限时搜索里重复出现（`goto_no_duplicates_*`）；用测试里的 `Resolver` 实现检查第 2 步和 `Bound(Import)`；`NoSymbol`、`UnsupportedLanguage`；从对象库一侧（`TextOrigin::Object`）发起的查询，本文件的候选 `origin` 为 `Object`，由它发起的 `References` 读同一个 blob，不读工作区（`goto_object_origin_*`），也不解析工作区里同一路径的文件（`goto_object_side_parses_only_its_text`）；很多文件定义的名字，第一批里最近的候选排在最前、其余页之后追加、每个定义只出现一次（`goto_popular_name_nearest_first`），其余页在时间盒到时停下、没读的计入未搜（`goto_popular_name_pages_are_time_boxed`）；当前文本的解析保留之后，各个位置的答案与现场解析的相同、不再解析，内容变了就不命中（`goto_kept_parse_answers_as_the_cold_one`），份数、大小和 60 s 的上限（`goto_kept_parses_are_bounded`）。
 - 预取与焦点（`prefetch_*`、`focus_*`）：映射换代或淘汰代数变化之后，2 秒内同样的查询不沿用预取结果；非当前 worktree 的焦点不进入第 1、2 层，切换到那个 worktree 后生效。
 - 限时搜索（`search_*`）：只解析整词命中的文件；`ManualClock` 推进到 1 s 时停止并给出 `Partial` 的计数；命中文件的结果写入缓存；搜完时为 `Complete`；范围里有一个文件正在后台抽取时，搜完其余文件结果仍是 `Partial`、`unsearched` 至少为 1（`search_in_flight_partial`）。
-- 依赖（`deps_*`，ADR 0033、0040，临时目录里的 pnpm 布局夹具：单个项目和 pnpm 工作区，由测试自己生成虚拟存储、链接、`.pnpm/lock.yaml` 和 `pnpm-lock.yaml`，只用合成的 `package.json` 和 `.d.ts`）：
-  - 发现：直接依赖的四种字段、512 个的上限、不合规的名字被跳过；从子项目往上找 `node_modules`；虚拟存储的目录名解析出名字和版本（`@babel+core@7.24.0`、带 peer 的 `_…`），与链接的名字不同时读不到；npm 式的平铺 `node_modules`（没有 `.pnpm`）没有依赖层、按需解析也返回 None，`coverage.deps` 为 `Done`（`deps_npm_layout_is_out_of_scope`）；`exports` 的 `types` 条件（嵌套在 `import` / `require` 之下）、`types`、`typings`、`index.d.ts`、`main` 的顺序；`@types/<名字>` 和 `@types/scope__x`；闭包沿相对 import、`export * from`、`/// <reference path>` 走，裸模块名不跟随（`deps_entry_*`、`deps_closure_*`）。
+- 依赖（`deps_*`，ADR 0033、0040，临时目录里的 `node_modules` 夹具，npm 和 pnpm（含 pnpm 工作区）两种布局都由测试自己生成，只用合成的 `package.json`、`package-lock.json` 和 `.d.ts`）：
+  - 发现：直接依赖的四种字段、512 个的上限、不合规的名字被跳过；从子项目往上找 `node_modules`；`exports` 的 `types` 条件（嵌套在 `import` / `require` 之下）、`types`、`typings`、`index.d.ts`、`main` 的顺序；`@types/<名字>` 和 `@types/scope__x`；闭包沿相对 import、`export * from`、`/// <reference path>` 走，裸模块名不跟随（`deps_entry_*`、`deps_closure_*`）。
   - 读取限制：`node_modules` 本身是指向根外的符号链接时打不开（`deps_root_symlink_is_not_a_root`）；`"types": "../../.ssh/id_ed25519"` 和 `../` 越过包目录的 import 被丢弃，`SafeRoot` 的读取记录里没有根外的路径（`deps_types_outside_the_package_is_dropped`）；pnpm 的链接在根内解析（`deps_pnpm_links_resolve_inside_the_root`）；工作区子项目的 `packages/app/node_modules/react` 指向根目录 `node_modules/.pnpm/…`，那是同一条查找链上已发现的根，经那个根的 `SafeRoot` 读到（`deps_link_into_a_discovered_root_is_read`）；指向任何已发现的根之外（`$HOME`、worktree 之外、worktree 里没有作为根打开的目录、另一个 worktree 的根）的链接不读，`SafeRoot` 的读取记录里没有那些路径（`deps_link_outside_the_discovered_roots_is_rejected`）；扩展名不在列表里的文件没有被打开（`deps_reads_only_allowed_extensions`）；工作区之外的根不从项目文件取路径（`deps_cache_roots_come_from_the_environment`，`Roots` 用测试给的环境）。
-  - 身份与 stat 表：身份不变时重新打开项目不读、不 stat 闭包里的文件（`SafeRoot` 的调用计数，`deps_same_identity_reads_nothing`）；`integrity` 变了时只重读五项 stat 变了的文件；修改时间被设回原值、状态改变时间变了的文件被重读（`deps_ctime_defeats_a_restored_mtime`）；记录前 2 秒内改过的文件不走捷径；`.pnpm/lock.yaml` 优先于 `pnpm-lock.yaml`；`pnpm-lock.yaml` 已改成新版本、还没安装时，按已安装的目录名找不到键、走后备，不记下新 lockfile 的 `integrity`（`deps_lockfile_ahead_of_install_is_not_the_identity`）。
-  - lockfile 的扫描（`deps_lock_scan_*`，insta 快照记录取出的（键、`integrity`））：版本 6 的 `/name@ver(peer)` 键和版本 9 的带引号的键、`resolution` 的两种写法；版本 5、7、没有 `lockfileVersion` 的文件全部走后备；要找的那一项里有锚点、制表符缩进、重复的键或不合法的值时只有这一项走后备、其他项照常；一行超过 64 KiB、文件超过 64 MiB 时整个文件不用；扫描的内存与文件大小无关（16 MiB 的 lockfile 的活跃字节峰值 ≤ 2 MiB）；随机截断和改写的 lockfile（种子固定的 1000 份）从不给出与原文件不同的 `integrity`，只会给出后备。
+  - 身份与 stat 表：身份不变时重新打开项目不读、不 stat 闭包里的文件（`SafeRoot` 的调用计数，`deps_same_identity_reads_nothing`）；`integrity` 变了时只重读五项 stat 变了的文件；修改时间被设回原值、状态改变时间变了的文件被重读（`deps_ctime_defeats_a_restored_mtime`）；记录前 2 秒内改过的文件不走捷径；`pnpm-lock.yaml` 的项目按清单的 OID 和包目录取身份；`package-lock.json` 已改成新版本、`node_modules` 还没重新安装时，已安装的文件照常沿用；之后重新安装（新的 `package.json` 的 inode）时，`integrity` 虽与路径表记下的相同，内容变了的文件仍被重读（`deps_lockfile_ahead_of_install_is_not_the_identity`）；`package-lock.json` 按 1 MiB 的区间流式读，16 MiB 的 lockfile 的活跃字节峰值 ≤ 2 MiB（`deps_lockfile_read_is_streamed`）。
   - 出边与路径表：版本号变了、内容没变的包（单元都已在缓存里）走完整个闭包，路径表与第一次的相同（`deps_closure_from_stored_specifiers`）；跳转先按需写了入口的单元之后，依赖层仍走完闭包（`deps_closure_after_an_on_demand_entry`）；路径表还在、它引用的单元被淘汰后，打开项目时缺的文件被排进依赖层、补齐之后第 3 步又能找到这些定义（`deps_table_without_units_is_repaired`）。
   - 根的有效性：会话中删掉重建 `node_modules`（新的 inode）后，下一次身份任务或读取 `NotFound` 时重新打开，读到新的内容（`deps_reinstalled_root_is_reopened`）；切换当前 worktree 后，另一个 worktree 的根不再被读（`deps_roots_are_per_worktree`）。
   - 限额：每包 4000 个文件和 16 MiB、单个文件 1 MiB、每个项目 64 MiB，到了之后依赖层停下、`coverage.deps` 为 `Done`（`deps_limits_*`）。
@@ -2051,9 +2037,9 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
    - `window_*`、`goto_large_*` 测试通过。
    - `rg -n 'std::fs::|File::open' crates/code_intel/src --glob '!**/tests*' --glob '!**/testing*'` 仍没有结果：大文件的读取也只经 `SafeRoot::open_file` 和 `OpenFile`。
    - `code_intel/goto_large` ≤ 20 ms，`code_intel/window_peak` ≤ 8 MiB，`code_intel/batch_peak` 仍 ≤ 40 MB；`code_intel/goto_large/cold`、`code_intel/goto_large/object`、`code_intel/window_chain_16mib` 有结果。
-9. **依赖层**（前置：`services` 的依赖类型、`Coverage::deps`、`CandidateTier::Dependency`；`platform` 的 `SafeRoot::open_dir` 已实现；[ADR 0040](../adr/0040.md)；按需解析的部分另需 #19 的 TS 解析扩展点）：pnpm 布局的发现、身份（`.pnpm/lock.yaml` 与 `pnpm-lock.yaml` 的扫描）与路径表、`cd_spec`、依赖映射、依赖层、`code_intel.deps`、查询里的依赖层。
+9. **依赖层**（前置：`services` 的依赖类型、`Coverage::deps`、`CandidateTier::Dependency`；`platform` 的 `SafeRoot::open_dir` 已实现；链接按 [ADR 0040](../adr/0040.md)；按需解析的部分另需 #19 的 TS 解析扩展点）：发现、身份与路径表、`cd_spec`、依赖映射、依赖层、`code_intel.deps`、查询里的依赖层。
    - `deps_*` 测试通过；`rg -n 'open_dir' crates/code_intel/src --glob '!**/tests*'` 只在 `deps` 模块里（读取限制只有一个入口）。
-   - `code_intel/deps_identity` ≤ 50 ms、`code_intel/deps_map_bytes` ≤ 1 MB；`code_intel/deps_ts_project` 有结果；`app/index_100k` 的夹具含达到依赖层上限的 pnpm `node_modules`（bench 设计）之后，macOS CI 上仍 ≤ 120 s。
+   - `code_intel/deps_identity` ≤ 50 ms、`code_intel/deps_map_bytes` ≤ 1 MB；`code_intel/deps_ts_project` 有结果；`app/index_100k` 的夹具含达到依赖层上限的 `node_modules`（bench 设计）之后，macOS CI 上仍 ≤ 120 s。
 
 ## 实际验证
 

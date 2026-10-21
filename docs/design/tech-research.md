@@ -386,7 +386,7 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 |---|---|---|---|
 | 1. 语法索引 | tree-sitter tags 查询抽取定义与引用，存入本地 SQLite；经 `fs_watch` 增量更新 | 审阅集合 2 秒内，当前子项目 10 秒内，其余在后台继续（[ADR 0029](../adr/0029.md)、[ADR 0030](../adr/0030.md)、[代码导航调研](../research/code-navigation.md)） | 所有语言的类、函数、字段按名跳转 |
 | 2. Java 解析器 | 读 package / import / 内部类，全限定名映射到文件；同名方法按所在类与参数个数消歧 | 与第 1 层同时 | 项目内 Java 跳转基本准确，无需编译 |
-| 3. 依赖源码 | TS / JS：跳转时按需解析到依赖的声明文件，当前子项目的直接依赖在后台建声明闭包的索引（[ADR 0033](../adr/0033.md)）；这一阶段只支持 pnpm 管理的依赖，npm、yarn 的布局以后再做（[ADR 0040](../adr/0040.md)）；Java：解析 pom.xml / build.gradle 依赖坐标，到 `~/.m2/repository` 与 Gradle 缓存找 `-sources.jar` 直接解压（#26） | 按需；直接依赖在后台 | 跳进 React、Spring 等三方库源码 |
+| 3. 依赖源码 | npm 等生态：跳转时按需解析到依赖的声明文件，当前子项目的直接依赖在后台建声明闭包的索引（[ADR 0033](../adr/0033.md)）；Java：解析 pom.xml / build.gradle 依赖坐标，到 `~/.m2/repository` 与 Gradle 缓存找 `-sources.jar` 直接解压（#26） | 按需；直接依赖在后台 | 跳进 React、Spring 等三方库源码 |
 | 4. 精确语义（可选） | 后台启动 jdtls（自动找 JDK 21），或导入 scip-java 生成的 SCIP 索引 | 分钟级 | 重载、泛型、继承链等精确结果 |
 
 Maven 与 Gradle 都要支持，但两者的难度不同。Maven 的 pom.xml 是 XML，静态解析即可拿到模块和依赖坐标。Gradle 的构建脚本是 Groovy 或 Kotlin 代码，无法完整静态解析，所以分三步处理：

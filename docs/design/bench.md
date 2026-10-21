@@ -546,7 +546,7 @@ crates/bench/
 | `app/goto_unindexed` | 第一批结果中位数 ≤ 300 ms | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/goto_unindexed_done` | 从请求到限时搜索结束（找完或到时停止）、最后一批结果画出，最大值 ≤ 1.1 s（1 s 限时加 0.1 s 取消与绘制的余量）；夹具里未索引的文件要多到 1 s 内搜不完 | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/references_first`、`app/references_100k` | 中位数 ≤ 200 ms（第一批）/ ≤ 2 s（10 万文件的全部结果） | [性能预算](tech-research.md#性能预算) | 上下文抽屉（[#20](https://github.com/SoloJiang/lectern-app/issues/20)） |
-| `app/index_review_set`、`app/index_subproject`、`app/index_100k` | 打开项目到这一层全部入索引，中位数 ≤ 2 s / ≤ 10 s / ≤ 120 s（接电源）；`app/index_100k` 的夹具含一个达到依赖层上限（64 MiB 源码）的 pnpm 布局的 `node_modules`（依赖层这一阶段只支持 pnpm，[ADR 0040](../adr/0040.md)），依赖层排在第 4 层之后，不推迟里程碑（[ADR 0033](../adr/0033.md)） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
+| `app/index_review_set`、`app/index_subproject`、`app/index_100k` | 打开项目到这一层全部入索引，中位数 ≤ 2 s / ≤ 10 s / ≤ 120 s（接电源）；`app/index_100k` 的夹具含一个达到依赖层上限（64 MiB 源码）的 `node_modules`，依赖层排在第 4 层之后，不推迟里程碑（[ADR 0033](../adr/0033.md)） | [性能预算](tech-research.md#性能预算) | `code_intel`（#17） |
 | `app/index_100k_interaction` | 只记录（与 `app/index_100k` 相同，建索引期间按脚本持续滚动，记下第 3、4 层的完成时间） | [ADR 0033](../adr/0033.md) | `code_intel`（#17） |
 | `app/scroll_frames` | 每帧工作时间最大值 ≤ 8.3 ms，且相邻帧间隔都 ≤ 1.5 个刷新周期；场景另有 64 MiB 的合成源码、压缩成一行的文件和编辑模式下 1 MiB 的文件（[ADR 0034](../adr/0034.md)） | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `file_reader` |
 | `app/scroll_frames_indexing` | 同 `app/scroll_frames`，在批量层有工作（打开 10 万文件的夹具后立即滚动）时测量；不让路就超标时启用 kernel 的让路开关，并以这个基准校准它（[ADR 0033](../adr/0033.md)） | [性能预算](tech-research.md#性能预算)「滚动与输入」 | `file_reader`、`code_intel`（#17） |
@@ -636,7 +636,7 @@ crates/bench/
 | `code_intel/yield_stop` | 最大值 ≤ 10 ms（1 MiB 的 TypeScript 在解析中途打开让路开关，到这次抽取停在分片边界；[ADR 0033](../adr/0033.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 7 步 |
 | `code_intel/goto_large`、`code_intel/goto_large/cold`、`code_intel/goto_large/object` | 中位数 ≤ 20 ms / 只记录 / 只记录（4 MiB 的 TypeScript 当前文本、位置在中部：身份已记下时只读窗口、解析窗口；身份没记下时流式读一遍求 OID；对象库一侧、位置不在保留的窗口里，整份取出 blob；[ADR 0034](../adr/0034.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 8 步 |
 | `code_intel/window_chain_16mib`、`code_intel/window_peak` | 只记录 / 最大值 ≤ 8 MiB（16 MiB 的 TypeScript 被打开，从打开到窗口链写完；期间的活跃字节峰值：流式哈希的 1 MiB 区间或一个 64 KiB 窗口的树，`Memory`） | [code_intel](code_intel.md#性能) | `code_intel` 第 8 步 |
-| `code_intel/deps_ts_project`、`code_intel/deps_identity`、`code_intel/deps_map_bytes` | 只记录 / 中位数 ≤ 50 ms / ≤ 1 MB（合成的 pnpm 工作区：21 个直接依赖、约 5 MiB 声明闭包、4 MiB 的 `.pnpm/lock.yaml`：从空缓存到依赖层完成；路径表和单元都在缓存里时从打开到身份任务结束；2 万个文件的依赖映射的活跃字节，`Memory`；[ADR 0033](../adr/0033.md)、[ADR 0040](../adr/0040.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 9 步 |
+| `code_intel/deps_ts_project`、`code_intel/deps_identity`、`code_intel/deps_map_bytes` | 只记录 / 中位数 ≤ 50 ms / ≤ 1 MB（合成的 TS 项目：21 个直接依赖、约 5 MiB 声明闭包、4 MiB 的 `package-lock.json`：从空缓存到依赖层完成；路径表和单元都在缓存里时从打开到身份任务结束；2 万个文件的依赖映射的活跃字节，`Memory`；[ADR 0033](../adr/0033.md)） | [code_intel](code_intel.md#性能) | `code_intel` 第 9 步 |
 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，测量前丢掉那次跳转保留的解析（不在 [ADR 0035](../adr/0035.md) 的采样状态里，见 [ADR 0037](../adr/0037.md)），计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
