@@ -907,7 +907,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   pub struct Merge3 { pub bytes: Vec<u8>, pub conflicts: Vec<Range<usize>> }
   ```
 
-  测试 `merge3_*` 对照 `git merge-file` 在同一组合成输入上的结果（测试里的假命令按夹具回放，见 AGENTS.md「工作方式」）。
+  测试 `merge3_*` 是纯计算：期望的字节写在测试里，与 `git merge-file` 在同一组合成输入上的结果核对过，测试不运行 git（[git 设计「与设计的差异」](git.md#与设计的差异)）。调用前由本 crate 把基准、缓冲区和磁盘内容统一成同样的行尾和 BOM 处理。
 - `platform`：线程的 CPU 时钟，供 `syntax::health`（「grammar 的卡死检测」）。
 
   ```rust

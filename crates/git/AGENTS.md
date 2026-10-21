@@ -5,7 +5,7 @@
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。普通库 crate，不是插件，`project`、`review` 等直接调用。
 - 设计文档：[docs/design/git.md](../../docs/design/git.md)。
 - issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#21](https://github.com/SoloJiang/lectern-app/issues/21)；[#10](https://github.com/SoloJiang/lectern-app/issues/10) 的前置条件（`merge3`、`Text::shared`）
-- ADR：[0006](../../docs/adr/0006.md)、[0024](../../docs/adr/0024.md)、[0028](../../docs/adr/0028.md)、[0034](../../docs/adr/0034.md)、[0038](../../docs/adr/0038.md)
+- ADR：[0006](../../docs/adr/0006.md)、[0024](../../docs/adr/0024.md)、[0028](../../docs/adr/0028.md)、[0034](../../docs/adr/0034.md)、[0038](../../docs/adr/0038.md)、[0042](../../docs/adr/0042.md)
 
 ## 边界
 
