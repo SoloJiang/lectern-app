@@ -1,0 +1,15 @@
+# A synthetic manifest.
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { version = "1.0", default-features = false }
+tree-sitter.workspace = true
+
+[[bench]]
+name = "time"
+harness = false
+released = 2026-10-21
+ratio = 0.75

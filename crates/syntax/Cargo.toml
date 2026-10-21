@@ -1,0 +1,37 @@
+[package]
+name = "lectern-syntax"
+description = "Syntax highlighting: the language table, highlight queries, highlight tokens and the stuck-grammar check."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[package.metadata.lectern]
+layer = "domain"
+
+[dependencies]
+# `ThreadCpuClock`: the stuck-grammar check counts a parse's CPU time
+# (health.rs, docs/adr/0041.md).
+lectern-platform = { path = "../platform" }
+# Finds line ends when splitting tokens by line.
+memchr.workspace = true
+# The same runtime and grammar crates as lectern-code-intel (ADR 0030), so
+# only one copy is linked; plus the four grammars of ADR 0041.
+tree-sitter.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-md.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-toml-ng.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-yaml.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+
+[lints]
+workspace = true

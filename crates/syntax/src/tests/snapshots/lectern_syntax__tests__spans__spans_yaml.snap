@@ -1,0 +1,38 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | # A synthetic CI configuration.
+    | Comment "# A synthetic CI configuration."
+  2 | name: build
+    | Property "name" · Punctuation ":" · String "build"
+  3 | on:
+    | Property "on" · Punctuation ":"
+  4 |   push:
+    | Property "push" · Punctuation ":"
+  5 |     branches: [main]
+    | Property "branches" · Punctuation ":" · Punctuation "[" · String "main" · Punctuation "]"
+  6 | defaults: &defaults
+    | Property "defaults" · Punctuation ":" · Punctuation "&" · Other "defaults"
+  7 |   timeout: 30
+    | Property "timeout" · Punctuation ":" · Number "30"
+  8 |   retry: false
+    | Property "retry" · Punctuation ":" · Constant "false"
+  9 | jobs:
+    | Property "jobs" · Punctuation ":"
+ 10 |   test:
+    | Property "test" · Punctuation ":"
+ 11 |     <<: *defaults
+    | Property "<<" · Punctuation ":" · Punctuation "*" · Other "defaults"
+ 12 |     runs-on: "macos-15"
+    | Property "runs-on" · Punctuation ":" · String "\"macos-15\""
+ 13 |     steps:
+    | Property "steps" · Punctuation ":"
+ 14 |       - run: |
+    | Punctuation "-" · Property "run" · Punctuation ":" · Punctuation "|"
+ 15 |           just check
+    | String "          just check"
+ 16 |           just test
+    | String "          just test"
+ 17 |       - { name: deny, run: 'just deny' }
+    | Punctuation "-" · Punctuation "{" · Property "name" · Punctuation ":" · String "deny" · Punctuation "," · Property "run" · Punctuation ":" · String "'just deny'" · Punctuation "}"

@@ -1,0 +1,52 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | //! A synthetic Rust sample.
+    | Comment "//! A synthetic Rust sample."
+  2 | use std::collections::HashMap;
+    | Keyword "use" · Punctuation "::" · Punctuation "::" · Type "HashMap" · Punctuation ";"
+  3 | 
+  4 | /// The largest batch.
+    | Comment "/// The largest batch."
+  5 | pub const MAX_BATCH: usize = 1_024;
+    | Keyword "pub" · Keyword "const" · Constant "MAX_BATCH" · Punctuation ":" · Type "usize" · Number "1_024" · Punctuation ";"
+  6 | 
+  7 | #[derive(Debug, Clone)]
+    | Attribute "#" · Punctuation "[" · Attribute "derive" · Punctuation "(" · Type "Debug" · Punctuation "," · Attribute " " · Type "Clone" · Punctuation ")" · Punctuation "]"
+  8 | pub struct Cache<'a> {
+    | Keyword "pub" · Keyword "struct" · Type "Cache" · Punctuation "<" · Operator "'" · Other "a" · Punctuation ">" · Punctuation "{"
+  9 |     names: HashMap<&'a str, u32>,
+    | Property "names" · Punctuation ":" · Type "HashMap" · Punctuation "<" · Operator "&" · Operator "'" · Other "a" · Type "str" · Punctuation "," · Type "u32" · Punctuation ">" · Punctuation ","
+ 10 | }
+    | Punctuation "}"
+ 11 | 
+ 12 | impl<'a> Cache<'a> {
+    | Keyword "impl" · Punctuation "<" · Operator "'" · Other "a" · Punctuation ">" · Type "Cache" · Punctuation "<" · Operator "'" · Other "a" · Punctuation ">" · Punctuation "{"
+ 13 |     pub fn insert(&mut self, name: &'a str) -> Option<u32> {
+    | Keyword "pub" · Keyword "fn" · Function "insert" · Punctuation "(" · Operator "&" · Keyword "mut" · Keyword "self" · Punctuation "," · Variable "name" · Punctuation ":" · Operator "&" · Operator "'" · Other "a" · Type "str" · Punctuation ")" · Type "Option" · Punctuation "<" · Type "u32" · Punctuation ">" · Punctuation "{"
+ 14 |         let next = self.names.len() as u32 + 1;
+    | Keyword "let" · Keyword "self" · Punctuation "." · Property "names" · Punctuation "." · Function "len" · Punctuation "(" · Punctuation ")" · Keyword "as" · Type "u32" · Number "1" · Punctuation ";"
+ 15 |         println!("insert {name}\n");
+    | Function "println" · Function "!" · Punctuation "(" · String "\"insert {name}" · Escape "\\n" · String "\"" · Punctuation ")" · Punctuation ";"
+ 16 |         self.names.insert(name, next)
+    | Keyword "self" · Punctuation "." · Property "names" · Punctuation "." · Function "insert" · Punctuation "(" · Punctuation "," · Punctuation ")"
+ 17 |     }
+    | Punctuation "}"
+ 18 | }
+    | Punctuation "}"
+ 19 | 
+ 20 | fn main() {
+    | Keyword "fn" · Function "main" · Punctuation "(" · Punctuation ")" · Punctuation "{"
+ 21 |     let mut cache = Cache { names: HashMap::new() };
+    | Keyword "let" · Keyword "mut" · Type "Cache" · Punctuation "{" · Property "names" · Punctuation ":" · Type "HashMap" · Punctuation "::" · Function "new" · Punctuation "(" · Punctuation ")" · Punctuation "}" · Punctuation ";"
+ 22 |     match cache.insert("a") {
+    | Keyword "match" · Punctuation "." · Function "insert" · Punctuation "(" · String "\"a\"" · Punctuation ")" · Punctuation "{"
+ 23 |         Some(id) if id > 0 => {}
+    | Type "Some" · Punctuation "(" · Punctuation ")" · Keyword "if" · Number "0" · Punctuation "{" · Punctuation "}"
+ 24 |         _ => unreachable!(),
+    | Function "unreachable" · Function "!" · Punctuation "(" · Punctuation ")" · Punctuation ","
+ 25 |     }
+    | Punctuation "}"
+ 26 | }
+    | Punctuation "}"

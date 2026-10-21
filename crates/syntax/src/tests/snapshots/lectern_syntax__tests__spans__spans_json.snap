@@ -1,0 +1,18 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | {
+  2 |   "name": "sample",
+    | Property "\"name\"" · String "\"sample\""
+  3 |   "version": "1.0.0",
+    | Property "\"version\"" · String "\"1.0.0\""
+  4 |   "private": true,
+    | Property "\"private\"" · Constant "true"
+  5 |   "workspaces": ["packages/*"],
+    | Property "\"workspaces\"" · String "\"packages/*\""
+  6 |   "scripts": { "test": "run \"all\"" },
+    | Property "\"scripts\"" · Property "\"test\"" · String "\"run " · Escape "\\\"" · String "all" · Escape "\\\"" · String "\""
+  7 |   "limits": { "size": 2.5e3, "depth": -1, "owner": null }
+    | Property "\"limits\"" · Property "\"size\"" · Number "2.5e3" · Property "\"depth\"" · Number "-1" · Property "\"owner\"" · Constant "null"
+  8 | }

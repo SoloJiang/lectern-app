@@ -1,0 +1,39 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | # Sample
+    | Punctuation "#" · Heading "Sample"
+  2 | 
+  3 | A paragraph with a [link][ref] and an escaped \* star.
+  4 | 
+  5 | Setext heading
+    | Heading "Setext heading"
+  6 | --------------
+    | Punctuation "--------------"
+  7 | 
+  8 | - one
+    | Punctuation "- "
+  9 | - two
+    | Punctuation "- "
+ 10 |   1. nested
+    | Punctuation "  " · Punctuation "1. "
+ 11 | 
+ 12 | > A quote.
+    | Punctuation "> "
+ 13 | 
+ 14 | ```rust
+    | Punctuation "```" · String "rust"
+ 15 | fn main() {}
+    | String "fn main() {}"
+ 16 | ```
+    | Punctuation "```"
+ 17 | 
+ 18 |     indented code
+    | String "    indented code"
+ 19 | 
+ 20 | ***
+    | Punctuation "***"
+ 21 | 
+ 22 | [ref]: https://example.com "Title"
+    | Link "[ref]" · Link "https://example.com" · String "\"Title\""

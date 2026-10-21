@@ -1,0 +1,36 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | # A synthetic Python sample.
+    | Comment "# A synthetic Python sample."
+  2 | from dataclasses import dataclass
+    | Keyword "from" · Variable "dataclasses" · Keyword "import" · Variable "dataclass"
+  3 | 
+  4 | LIMIT = 10
+    | Constant "LIMIT" · Operator "=" · Number "10"
+  5 | 
+  6 | 
+  7 | @dataclass
+    | Function "@" · Function "dataclass"
+  8 | class Entry:
+    | Keyword "class" · Type "Entry"
+  9 |     name: str
+    | Variable "name" · Type "str"
+ 10 |     size: int = 0
+    | Variable "size" · Type "int" · Operator "=" · Number "0"
+ 11 | 
+ 12 |     def label(self) -> str:
+    | Keyword "def" · Function "label" · Variable "self" · Operator "->" · Type "str"
+ 13 |         return f"{self.name} ({self.size} B)\n"
+    | Keyword "return" · String "f\"" · Punctuation "{" · Variable "self" · Property "name" · Punctuation "}" · String " (" · Punctuation "{" · Variable "self" · Property "size" · Punctuation "}" · String " B)" · Escape "\\n" · String "\""
+ 14 | 
+ 15 | 
+ 16 | def largest(entries, limit=LIMIT):
+    | Keyword "def" · Function "largest" · Variable "entries" · Variable "limit" · Operator "=" · Constant "LIMIT"
+ 17 |     if not entries or limit is None:
+    | Keyword "if" · Operator "not" · Variable "entries" · Operator "or" · Variable "limit" · Operator "is" · Constant "None"
+ 18 |         return []
+    | Keyword "return"
+ 19 |     return sorted(entries, key=lambda e: e.size)[-limit:]
+    | Keyword "return" · Function "sorted" · Variable "entries" · Variable "key" · Operator "=" · Keyword "lambda" · Variable "e" · Variable "e" · Property "size" · Operator "-" · Variable "limit"

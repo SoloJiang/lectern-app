@@ -1,0 +1,32 @@
+---
+source: crates/syntax/src/tests/spans.rs
+expression: "render(text, & spans)"
+---
+  1 | # A synthetic manifest.
+    | Comment "# A synthetic manifest."
+  2 | [package]
+    | Punctuation "[" · Type "package" · Punctuation "]"
+  3 | name = "sample"
+    | Property "name" · Operator "=" · String "\"sample\""
+  4 | version = "0.1.0"
+    | Property "version" · Operator "=" · String "\"0.1.0\""
+  5 | edition = "2024"
+    | Property "edition" · Operator "=" · String "\"2024\""
+  6 | 
+  7 | [dependencies]
+    | Punctuation "[" · Type "dependencies" · Punctuation "]"
+  8 | serde = { version = "1.0", default-features = false }
+    | Property "serde" · Operator "=" · Punctuation "{" · Property "version" · Operator "=" · String "\"1.0\"" · Punctuation "," · Property "default-features" · Operator "=" · Constant "false" · Punctuation "}"
+  9 | tree-sitter.workspace = true
+    | Property "tree-sitter" · Punctuation "." · Property "workspace" · Operator "=" · Constant "true"
+ 10 | 
+ 11 | [[bench]]
+    | Punctuation "[[" · Type "bench" · Punctuation "]]"
+ 12 | name = "time"
+    | Property "name" · Operator "=" · String "\"time\""
+ 13 | harness = false
+    | Property "harness" · Operator "=" · Constant "false"
+ 14 | released = 2026-10-21
+    | Property "released" · Operator "=" · String "2026-10-21"
+ 15 | ratio = 0.75
+    | Property "ratio" · Operator "=" · Number "0.75"
