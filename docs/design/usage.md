@@ -41,9 +41,10 @@
 | `lectern-git` | `Repo::discover`、`worktrees`、`Worktree::head`、`branches`、`remotes`、`default_branch`、`root_commits`、`stash`、`tree_paths`、`tree_changes`、`is_ancestor`、`parse_reflog_line`、`line_diff`、计数用的 `Worktree::changes`、`Worktree::read_file`；前置条件 D 的 `ref_reflog`、`patch_id` | gix 只在 `git` 里使用 |
 | `rusqlite` =0.40.2（`bundled`、`cache`） | 本 crate 自己的数据库 | ADR 0027 选定，工作区依赖 |
 | `serde`、`serde_json` | statusline JSON、观察里的 JSON 列、`services` 类型 | 工作区已有 |
+| `ruzstd` 0.9 | 冷数据段的压缩与解压（「冷热分层」） | 已是工作区依赖（`agents`、`cache` 在用，[ADR 0026](../adr/0026.md)），纯 Rust，不改 Cargo.lock |
 | `insta`、`tempfile`（dev）；`lectern-git`、`lectern-fs-watch`、`lectern-kernel` 的 `test-support`（dev） | 快照、临时目录、`TestRepo`、`FakeBackend`、`TestKernel` | 工作区统一依赖 |
 
-不依赖 `agents`、`project`、`review`、`forge`（插件之间不得依赖，dev-dependency 也算）：测试用本 crate `testing` 里的假会话来源、假项目服务和假 MR 来源。不依赖 `platform`：本地时区经 `LocalZone` 由 `app` 注入，数据目录由 `app` 传入。不用 `cache`：用量记录不能删除重建（cache 设计「范围」）。除 ADR 0027 已选定的 `rusqlite` 外不新增外部依赖；项目 ID 用 SQLite 的 `randomblob(16)` 生成。
+不依赖 `agents`、`project`、`review`、`forge`（插件之间不得依赖，dev-dependency 也算）：测试用本 crate `testing` 里的假会话来源、假项目服务和假 MR 来源。不依赖 `platform`：本地时区经 `LocalZone` 由 `app` 注入，数据目录由 `app` 传入。不用 `cache`：用量记录不能删除重建（cache 设计「范围」）。除 ADR 0027 已选定的 `rusqlite` 和工作区已有的 `ruzstd` 外不新增外部依赖；项目 ID 用 SQLite 的 `randomblob(16)` 生成。
 
 ```rust
 pub struct UsageDeps {
@@ -178,6 +179,9 @@ pub enum UsageQuery {
     Session { session: SessionKey },
     /// 一个 MR 的累计与按会话、按轮次的明细，「编写」与「审阅」分开（P3，MR 视图）。
     Mr { mr: MrRef },
+    /// 超过热窗口的历史（「冷热分层」）。现有视图都不用，留给以后的界面：`days` 为 false 时只读一直热的按月汇总，
+    /// 为 true 时另外逐段解压这个范围里的冷数据段，给出按日的明细。
+    History { project: ProjectRef, from: LocalDate, to: LocalDate, days: bool },
 }
 
 pub enum ProjectRef { Open(ProjectKey), Id(UsageProjectId) }
@@ -198,6 +202,7 @@ pub enum UsageSnapshot {
     Worktree(WorktreeUsage),
     Session(SessionUsage),
     Mr(MrUsage),
+    History(HistoryUsage),
 }
 
 /// 每份快照都带。
@@ -353,6 +358,15 @@ pub struct MrUsage {
 }
 pub struct MrSessionRow { pub session: SessionKey, pub tokens: Tokens, pub turns: Arc<[(TurnId, Tokens)]> }
 
+pub struct HistoryUsage {
+    pub header: SnapshotHeader,
+    pub project: ProjectInfo,
+    /// 每个本地年月一行：热窗口里的月份按事实行求和，更早的取 `cold_month`。
+    pub months: Arc<[((i32, u8), Tokens)]>,
+    /// `days` 为 true 时的按日明细（冷的部分按记录时间戳和当前时区重新分日）。
+    pub days: Option<Arc<[(LocalDate, Tokens)]>>,
+}
+
 pub struct Limits {
     pub generation: u64,
     pub windows: Arc<[LimitWindow]>,
@@ -369,7 +383,7 @@ pub struct LimitWindow {
     pub used_percent: f32,
     pub resets_at: Option<Timestamp>,
     pub sampled_at: Timestamp,
-    /// 已过 `resets_at`，之后没有新的样本（见「未决问题」2）。
+    /// 已过 `resets_at`，之后没有新的样本（见「未决问题」1）。
     pub expired: bool,
 }
 pub enum LimitSource { SessionLog, Statusline }
@@ -566,7 +580,7 @@ statusline JSON 的字段名在第 2 步按公开文档核对：实现之前读 
 ### 数据库
 
 - 位置：`<data_dir>/usage.db`（加 `-wal`、`-shm`），不在 `cache` 的目录里，不能删除重建（ADR 0027、ADR 0044）。
-- 连接：两个，一个写、一个读，都只在 executor 的任务里打开和调用，UI 线程上不做任何 SQLite 调用。`journal_mode = WAL`，`synchronous = FULL`（计量要求 `Prepared` 在转发之前落盘；入库按批提交，代价摊到一批上），`cache_size = -1024`（每个连接 1 MiB，合计 ≤ 2 MiB，ADR 0027），`mmap_size = 0`，不用共享缓存模式，`foreign_keys = ON`。写连接由一把锁串行使用。
+- 连接：两个，一个写、一个读，都只在 executor 的任务里打开和调用，UI 线程上不做任何 SQLite 调用。`journal_mode = WAL`，`synchronous = FULL`（计量要求 `Prepared` 在转发之前落盘；入库按批提交，代价摊到一批上），`cache_size = -1024`（每个连接 1 MiB，合计 ≤ 2 MiB，ADR 0027），`mmap_size = 0`，不用共享缓存模式，`foreign_keys = ON`；建库时（建表之前）设 `auto_vacuum = INCREMENTAL`，空间回收见「冷热分层」。写连接由一把锁串行使用。
 - 版本：`PRAGMA user_version` 是表结构版本，只向前迁移，迁移不删除观察。`meta` 表另记派生算法的版本：版本变了，派生表在后台按批从观察重建（「数据流与线程」）。数据库的版本比本 crate 认识的新时只读打开，快照为 `Degraded(NewerDatabase)`。
 - 损坏（打开或查询时 `SQLITE_CORRUPT` / `SQLITE_NOTADB`，或启动后第一次空闲时的 `PRAGMA quick_check` 失败）：把三个文件改名为 `usage.db.corrupt-<Unix 毫秒>` 等，不删除；新建数据库，游标从 `START` 开始重新读现存的会话日志；快照为 `Degraded(Recovered)`。项目 ID 和别名也随之丢失，已删除的日志的用量找不回，这是已知限制。
 
@@ -597,8 +611,28 @@ statusline JSON 的字段名在第 2 步按公开文档核对：实现之前读 
 | `usage_value` | D | 每个键当前计数的那个来源 | 来源增删时 |
 | `share` | D | 轮次、目标（项目或位置、片段或「不属于任何 MR」的种类）、权重与权重和 | 轮次定稿、转移、受影响的轮次重算 |
 | `fact` | D | 时刻、15 分钟桶、项目或位置、片段或种类、编写 / 审阅、agent、模型、会话、轮次、四类 token（百万分之一） | 随 `share` |
+| `cold_part` | O | UTC 年月、表、段序号、行数、未压缩字节数、压缩后的块、写入时刻 | 冷归档（「冷热分层」） |
+| `cold_month` | O | 项目或位置、本地年月、agent、模型、编写 / 审阅、四类 token | 冷归档，与 `cold_part` 同一事务 |
+| `cold_total` | O | 片段或会话、编写 / 审阅、四类 token（已归档部分的累计） | 同上 |
+| `cold_anchor` | O | 会话、已归档的最后一个有改动轮次及其份额；派出仍有热数据的子会话的父轮次及其份额 | 同上 |
 
 索引：`fact` 按（时刻）、（片段）、（会话）；`usage_source` 按（键）、（会话、代）；`reflog` 按（仓库、文件、`seq`）；`call` 按（会话、代、轮次）。
+
+### 冷热分层
+
+人的决定（2026-10-22，「用量数据按年维度吧」「超过一年的可以压缩作为冷数据」）：最近一年是热数据，更早的压缩成冷数据保留，不提供手动清除。
+
+- **热窗口**：截止点是今天往前第 364 个本地自然日的零点（`window::days` 的同一套规则，`LocalZone` 取当前时区），截止点之后的记录都在上面的普通表里，明细完整。7D / 14D / 30D 和全部现有快照只读热数据；交互规范里最长的窗口是 30 天，本文不加更长的界面。
+- **按 UTC 月归档**：一个 UTC 日历月整个早于「截止点减 1 天」（留出 ±14 小时的时区偏移）时，它的有时间戳的行移到冷数据，所以热数据实际保留 365 到 396 天。按整月而不是按天归档：一个月只写一次、段更大、压缩比更高，截止点每天移动也不会产生一串小段。
+- **哪些行归档**：带时间戳的高频表，每一行按它自己的时间戳分月：`usage_source`、`usage_value`、`turn`、`call`、`call_obs`、`item`、`transfer`、`share`、`fact`、`reflog`、`reflog_reset`、`head_baseline`、`watch_span`、`boundary_obs`、`worktree_obs`、`stash_obs`、`meter`。小的实体表一直是热的：`meta`、`run`、`location`、`project`、`project_fact`、`alias`、`session`、`segment`、`segment_name`、`analysis`、`limit_sample` 和冷数据的三张汇总表。所以跨过截止点的会话、轮次、片段、MR 按记录的时间戳拆开，热的一部分和冷的一部分相加等于原来的合计。
+- **冷数据段的格式**：放在同一个数据库的 `cold_part` 表里，不另放文件：归档和删除热数据在同一个 SQLite 事务里完成，不需要跨文件的提交协议。一段是一个表在一个 UTC 月里的一组行，未压缩不超过 4 MiB（一个月可以有多段，段序号递增）：文件头（格式版本、表、表结构版本、行数），之后按列存放（整数列差分后变长编码，字符串和路径用驻留表的 ID），整段用 `ruzstd` 的 Fastest 级别压成一个带内容校验和的帧。观察和派生的事实行都进冷数据段：前者用于完整重建，后者让冷数据的聚合不必重算归属。
+- **一直热的汇总**：同一事务里更新 `cold_month`（项目或位置 × 归档时的本地年月 × agent × 模型 × 编写 / 审阅的四类 token），长时间范围的合计不用解压；`cold_total`（每个片段、每个会话已归档部分的累计），所以 worktree 的累计、MR 的累计和会话的合计仍然是完整的值；`cold_anchor`（每个仍有热数据的会话里已归档的最后一个有改动轮次和它的份额，以及派出仍有热数据的子会话的父轮次），所以热数据里的轮次跟随、子 agent 跟随父轮次不需要冷数据。
+- **归档的步骤与持久性**：每一段一个事务：读出这一段的热行，编码、压缩，再解码一遍与原始行逐字节核对；核对通过后在同一个事务里插入 `cold_part`、更新三张汇总表、删除这些热行，提交（`synchronous = FULL`，提交返回时已落盘）。崩溃或失败时事务回滚，热行原样还在；下一轮按（月、表）重新选出还在热表里的行，所以重复执行不会重复归档。核对失败时不删除热行，记 error，这个月停止归档，等下一次版本修正后再试。
+- **之后到达的旧记录**：补读第一次见到的、早于已归档月份的记录（新安装时 Codex 一年多以前的会话）照常写进热表，下一轮归档为这个月追加新的段。会话重放（`Batch::reset`）时，这个会话在已归档月份里已有冷数据的记录不再写入（冷数据为准，计数进日志），避免同一份用量计两次。不同会话之间、跨过截止点的同一个键不去重（已知限制：日志里非继承的重复记录几乎都在同一时期）。
+- **节奏**：归档在首帧之后、按补读的节奏运行（kernel 静止 10 秒后一段，持有 `BusyGuard`），不在 UI 线程上；每月月初之后第一次有工作的那天检查一次。一个重度月约 30 MB 的热行，约 8 段。
+- **空间回收**：删除的热行留下空闲页。热数据大致稳定在一年的量，新的记录会复用这些页，所以默认不回收。空闲页超过文件的 25% 且超过 64 MiB 时（比如用量明显变少之后），在同样的节奏里每批 `PRAGMA incremental_vacuum(2048)`（每批最多 8 MiB），不做整库 `VACUUM`：它要重写整个数据库、临时占用同样大的磁盘、持续几秒的写入。两者都不改变页缓存的上限（每个连接仍是 1 MiB）。
+- **读冷数据**：只在请求时进行。现有的快照都不读冷数据段；`UsageQuery::History` 给以后的界面用：按月的合计只读 `cold_month`，按日的明细逐段解压这个范围里的 `fact` 段（后台，每次一段，结果不常驻）。MR 区间的起点或终点落在冷数据里时（一年多以前开出、仍开着的 MR），`Mr` 和 `Worktree` 查询为那一个月的 `fact` 段解压一次，按时间切分。
+- **重建**：重建热窗口只读热表和三张汇总表，不需要冷数据。完整重建（派生算法版本变化时可选、数据库恢复之后）逐月解压冷数据段里的观察，重算这些月的事实行和汇总，写成新的段替换旧的段（同样先写后删、同一个事务），再重建热窗口。冷数据里的轮次不因之后的转移、跟随而重算：它们的份额在归档时固定（已知限制），别名、`uses`、MR 区间照常在汇总时映射到冷数据的事实行和汇总上。
 
 ### 项目标识
 
@@ -753,6 +787,7 @@ ADR 0020「已知限制」照旧：同一个提交被 cherry-pick 到几个分�
 | ccusage `--json` 只在测试里对照 | 合成记录 | 每日合计 | `ccusage_*` | 1 |
 | 自己的数据库、应用数据目录、页缓存 ≤ 2 MB、记录与游标同一事务 | `usage.db` | 「数据库」 | `store_*` | 1 |
 | 时间窗口按记录时间戳、本地时区自然日 | `fact` 的时刻 | `window::days` | `window_*` | 1 |
+| 最近一年为热数据，更早的压缩为冷数据保留，不提供手动清除（人的决定） | `cold_part`、汇总表 | 「冷热分层」 | `archive_*` | 1 |
 | 分摊按分数保存、最大余数法、各行相加等于合计 | `share`、`fact` | `round` | `round_*` | 1 |
 | Codex 额度来自日志，Claude Code 额度来自 statusline 的 JSON | `limit_sample` | 「外部格式」 | `limits_*`、`statusline_*` | 2 |
 | 公共目录识别、固定 ID 写进观察、同一仓库的 worktree 是一个项目 | `location`、`project` | 「项目标识」 | `identity_location_*`、`identity_worktrees_*` | 3 |
@@ -815,7 +850,8 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - 每个关注的查询一个快照对象，放在 `Mutex` 里，只在内存操作时持锁；快照整体替换为新的 `Arc`。新的事实行到达时，受影响的快照按增量（加上新事实行、减去被替换的临时事实行）更新；别名、`uses`、MR 数据变化时整体重算。同一个查询同时最多一个计算任务，期间的变化合并到下一轮。
 - 读连接用于快照的查询，写连接用于入库、定稿、命令和计量；两者都只在 executor 上。`meter` 在调用方（agents 的转发端点）的 executor 任务里同步提交。
 - UI 线程上只调用 `snapshot`、`limits`（复制 `Arc`）和立即返回的 `watch`、`command`、`register_mr_source`，不做 IO、不调用 SQLite。
-- 派生数据重建（派生算法版本变化、数据库恢复）：按会话分批，每批 ≤ 50 ms，节奏与补读相同；重建期间快照为 `Backfilling`，旧的派生数据在一批重建完成前照常可见。
+- 派生数据重建（派生算法版本变化、数据库恢复）：按会话分批，每批 ≤ 50 ms，节奏与补读相同；重建期间快照为 `Backfilling`，旧的派生数据在一批重建完成前照常可见。只重建热窗口，完整重建另外逐月处理冷数据段（「冷热分层」）。
+- 冷归档：每段一个事务，节奏与补读相同，不在 UI 线程上；补读、重建和归档共用同一个后台队列，同时只有一个在运行。
 - 架构规则 5：本 crate 没有以内容为键的派生缓存。`tree_changes`、`patch_id` 的结果只在算观察时用一次，结果写进观察。
 
 ## 性能
@@ -830,7 +866,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 | 空闲内存：空窗口 < 60 MB | 页缓存 ≤ 2 MiB 加本 crate 的常驻 ≤ 2 MB（驻留表、会话与片段的索引、额度、没有关注者时没有快照），`usage/resident_bytes` |
 | 空闲内存：打开 monorepo / 10 万文件（ADR 0035 的余量） | 每个打开的项目 < 0.5 MB（侧栏的 7 天快照、片段表）；`RepoWatch` 的状态归 `fs_watch` 的份额。从 ADR 0035 的余量里分配，review 之后的 7 MB 余量剩 6.5 MB |
 | UI 线程不做 IO | `snapshot`、`limits` 只复制 `Arc` |
-| 磁盘 | 「重度一天」（50 个会话、2000 轮、6000 条用量、2 万次工具调用）约 1 MB；只保存解析出的事实和提到 git 的命令原文，读文件和搜索只存 worktree。全部保留，没有自动清理（「未决问题」1） |
+| 磁盘 | 「重度一天」（50 个会话、2000 轮、6000 条用量、2 万次工具调用）约 1 MB 的热数据；只保存解析出的事实和提到 git 的命令原文，读文件和搜索只存 worktree。热窗口 365 到 396 天，重度使用约 400 MB，一般使用约为它的五分之一。冷数据是按列编码的整数和驻留 ID，按 4:1 的压缩比估算（实测由 `usage/archive_month` 记录），每年重度使用约 100 MB；汇总表每年 < 1 MB。数据全部保留，不提供手动清除（「冷热分层」）；空闲页的回收规则同上 |
 
 `bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增，夹具由 `testing::heavy_days` 和 `testing::Scenario` 生成，`git` 的 `TestRepo` 写仓库：
 
@@ -844,7 +880,9 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 | `usage/snapshot_increment` | 中位数 < 2 ms（关注着 30 天快照时一轮定稿到快照替换） |
 | `usage/rebuild_30d` | 只记录（同一夹具的派生表从观察整体重建） |
 | `usage/resident_bytes` | 存活字节 ≤ 2 MB（同一夹具打开数据库、补读完成并静止后，不含 SQLite 页缓存；`Memory`） |
-| `usage/disk_day_heavy` | 只记录（一个重度日写入后数据库文件的增长，含 `-wal`） |
+| `usage/disk_day_heavy` | 只记录（一个重度日写入后数据库文件的增长，含 `-wal`；乘以 396 天是热数据的上限估算，对照「磁盘」一行的 400 MB） |
+| `usage/archive_month` | 每段中位数 < 150 ms（一个重度月约 30 MB 的热行归档：编码、压缩、解码核对、写段、删热行、提交）；压缩比只记录，低于 3:1 时重新评估「磁盘」一行 |
+| `usage/cold_read_month` | 中位数 < 1 s（解压一个重度月的 `fact` 段并按日聚合，`History` 的按日明细） |
 
 页缓存的上限由测试检查（`store_page_cache_is_bounded`：两个连接的 `PRAGMA cache_size` 都是 -1024，`mmap_size` 为 0）。
 
@@ -893,6 +931,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - 场景（前缀即测试名的前缀；结构化输出——去重结果、改动项、份额、片段到使用的映射、MR 区间、快照——都用 insta 快照验收）：
   - `normalize_*`、`dedup_claude_*`、`dedup_codex_*`、`ccusage_*`、`reset_*`（回放期间旧一代可见、读完时替换、同一个键在另一个会话里仍计数）。
   - `store_*`：记录与游标同一事务（在两者之间注入失败，重启后不重复也不遗漏）；版本迁移不删观察；更新的版本只读；损坏时改名保留并从 `START` 重读；`store_page_cache_is_bounded`。
+  - `archive_*`：截止点按本地时区计算（`TableZone` 的东 14 区、西 12 区，以及截止点正好落在夏令时切换日），只有整个早于「截止点减 1 天」的 UTC 月被归档；跨过截止点的活跃会话和 MR 按记录的时间戳拆开，热的一部分加 `cold_total` 等于归档前的合计，`Worktree`、`Session`、`Mr` 快照与归档前相同，7D / 14D / 30D 的快照不读 `cold_part`（读取计数为 0）；在写段、更新汇总、删除热行之间的每一处注入崩溃，重启后热行和冷数据段合起来与归档前逐行相同，再跑一次不重复归档；解码核对失败时热行不删；冷数据段解压后重算的按月与按日合计与归档前的事实行相同；重放的会话不把已归档月份的记录再写进热表；之后到达的旧记录为这个月追加新段；完整重建与只重建热窗口的结果都与重建前相同；空闲页超过阈值时才回收，每批不超过 2048 页。
   - `window_*`：`TableZone` 的夏令时切换日是 23 / 25 小时；+05:45 的时区；跨零点的记录归到正确的日期；`round_*`：和不变、余数相同按下标、拆分后精确相加。
   - `limits_*`、`statusline_*`：Codex 的样本只留最新；statusline 文件替换后更新；过期标记；`tightest` 的选择。
   - `identity_*`：「项目标识」判定表每一行一个用例，加上主远端的选定与重选、地址的统一、别名重放与撤销、文件夹的最深根认领。
@@ -909,17 +948,16 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 
 ## 未决问题
 
-1. **用量数据的保留与清除。** 观察全部保留，用于重建和以后打开的项目认领以前的用量。选项：
-   - (a) 永久保留，不提供清除（倾向）。重度使用约 1 MB/天。
-   - (b) 设置里提供「清除用量数据」和保留期限。
-
-   默认按 (a) 实现；需要 (b) 时由 #32 的界面加设置，本 crate 加删除早于某个时刻的观察的命令。
-2. **过了重置时刻的额度。** statusline 只在 Claude Code 运行时更新，Codex 的额度只在有会话时写入日志，最后一个样本可能早已过了 `resets_at`。选项：
+1. **过了重置时刻的额度。** statusline 只在 Claude Code 运行时更新，Codex 的额度只在有会话时写入日志，最后一个样本可能早已过了 `resets_at`。选项：
    - (a) 标为 `expired`，额度卡片显示「已重置，等待新数据」，不参与 `tightest`（倾向）。
    - (b) 按 0% 显示。
    - (c) 照常显示最后一个样本的百分比和采样时间。
 
    默认按 (a) 实现，文案由 `usage_view` 的设计确认。
+
+已由人决定的问题：
+
+- **用量数据的保留**（2026-10-22，「用量数据按年维度吧」「超过一年的可以压缩作为冷数据」）：最近一年为热数据，更早的压缩为冷数据保留，不提供手动清除。按「冷热分层」实现。
 
 技术问题都已在上文决定。
 
@@ -937,9 +975,9 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 
 #31 的领域部分分八步，每步一个 PR，都写 `Refs #31`；#31 由最后完成的一个 PR 关闭（[AGENTS.md「工作方式」](../../AGENTS.md#工作方式)）。每一步都要 `just check`、`just test -p lectern-usage`、`just deny` 通过；新增的 bench 条目在这一步加进 `budgets.rs` 并改为生效。
 
-1. **存储、去重与项目合计**（前置 A、B）：数据库、读取与游标、规范化与去重、按 cwd 的位置和项目合计（这一步每个轮次按 cwd 归属，`rows` 为空）、时间窗口、取整、`dyn Usage` 的 `Project` / `AllProjects` 查询、插件与读取节奏；`Cargo.toml` 的描述去掉 price table，加 `plugin = true`。
-   - `normalize_*`、`dedup_claude_*`、`dedup_codex_*`、`ccusage_*`、`reset_*`、`store_*`、`window_*`、`round_*`、`folder_*`、`rows_other_*`、`plugin_*` 通过，快照已逐个看过。
-   - `usage/ingest_append_4k`、`usage/backfill_batch`、`usage/project_30d`、`usage/all_projects_30d`、`usage/snapshot_increment`、`usage/resident_bytes` 在预算内，`usage/disk_day_heavy` 有结果；`plugin/usage/activate` < 1 ms。
+1. **存储、去重与项目合计**（前置 A、B）：数据库、读取与游标、规范化与去重、按 cwd 的位置和项目合计（这一步每个轮次按 cwd 归属，`rows` 为空）、时间窗口、取整、冷热分层（这一步已有的表；之后每一步新增的带时间戳的表同时加进归档清单和 `archive_*` 用例）与 `History` 查询、`dyn Usage` 的 `Project` / `AllProjects` 查询、插件与读取节奏；`Cargo.toml` 的描述去掉 price table，加 `plugin = true`。
+   - `normalize_*`、`dedup_claude_*`、`dedup_codex_*`、`ccusage_*`、`reset_*`、`store_*`、`window_*`、`round_*`、`archive_*`、`folder_*`、`rows_other_*`、`plugin_*` 通过，快照已逐个看过。
+   - `usage/ingest_append_4k`、`usage/backfill_batch`、`usage/project_30d`、`usage/all_projects_30d`、`usage/snapshot_increment`、`usage/resident_bytes`、`usage/archive_month`、`usage/cold_read_month` 在预算内，`usage/disk_day_heavy` 有结果；`plugin/usage/activate` < 1 ms。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖其他插件 crate、不依赖 GPUI；`rg -n 'rusqlite' crates/*/Cargo.toml` 只出现在 `cache` 和 `usage`。
    - `rg -n 'price|LiteLLM|cost' crates/usage/src crates/usage/Cargo.toml` 没有结果。
 2. **额度快照**（前置 A）：Codex 的 `RateLimits`、statusline JSON（先按「外部格式」核对公开文档的字段名）、`limits()`、`UsageEvent::Limits`。
