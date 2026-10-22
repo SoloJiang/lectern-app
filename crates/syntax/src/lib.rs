@@ -10,6 +10,7 @@
 //! executor threads; nothing here blocks the UI thread.
 
 mod cells;
+mod change;
 mod cut;
 mod doc;
 pub mod find;
@@ -27,9 +28,11 @@ pub mod text;
 mod util;
 pub mod window;
 
+pub use change::TextEdit;
 pub use doc::{
-    DocHandle, DocSnapshot, DocState, Editable, Engine, EngineDeps, Highlighting, LineCount,
-    LineNo, NotEditable, ReadError, Row, RowPos, Tier, Viewport,
+    DocHandle, DocSnapshot, DocState, EditSession, EditState, Editable, Engine, EngineDeps,
+    Highlighting, LineCount, LineNo, MergeOutcome, NotEditable, ReadError, Row, RowPos, SaveResult,
+    Tier, Viewport,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use doc::{StepEnd, Trace};

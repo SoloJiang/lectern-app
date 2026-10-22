@@ -1,0 +1,21 @@
+---
+source: crates/syntax/src/tests/edit.rs
+expression: render(&outcome)
+---
+line 1
+line 2
+line 3
+<<<<<<< editor
+line four
+=======
+line 4!
+>>>>>>> disk
+line 5
+line 6
+line 7
+--- conflict 0: 21..75
+<<<<<<< editor
+line four
+=======
+line 4!
+>>>>>>> disk

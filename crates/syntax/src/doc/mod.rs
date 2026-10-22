@@ -6,6 +6,7 @@
 
 mod chain;
 pub(crate) mod content;
+mod edit;
 mod engine;
 mod load;
 mod prefetch;
@@ -23,6 +24,7 @@ use crate::find::FindResults;
 use crate::spans::{Token, WindowSpans};
 
 pub(crate) use content::{Content, Pieces};
+pub use edit::{EditSession, EditState, MergeOutcome, SaveResult};
 pub use engine::{DocHandle, Engine, EngineDeps};
 #[cfg(any(test, feature = "test-support"))]
 pub use engine::{StepEnd, Trace};

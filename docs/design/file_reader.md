@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；前置条件 E 和第 5–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；前置条件 E 和第 6–8 步尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -441,7 +441,9 @@ impl DocHandle {
     pub fn scrolled(&self, top: RowPos);
     pub fn find(&self, query: FindQuery);
     pub fn clear_find(&self);
-    /// 进入编辑（只对 `editable == Yes`）。返回编辑会话，见「编辑」。
+    /// 进入编辑（只对 `editable == Yes`）。返回编辑会话，见「编辑」；已有会话时返回同一个会话的另一个句柄，
+    /// 它的 `initial_text` 是会话当前的缓冲区；刚结束的会话还有保存没写完、文档还没重新读取时为 `Reloading`。
+    /// 在调用的线程上把内容复制成缓冲区的文本（去掉 BOM、`\r\n` 换成 `\n`），第一次解析在任务里。
     pub fn edit(&self) -> Result<EditSession, NotEditable>;
 }
 
@@ -527,29 +529,41 @@ pub struct FindResults { pub ranges: Arc<[Range<u64>]>, pub done: bool, pub capp
 
 // ---- 编辑（见「编辑」）----
 
-/// 编辑会话。持有进入编辑时的内容（三方合并的基准）和一棵语法树；drop 时释放树。
-pub struct EditSession { /* … */ }
+/// 编辑会话。持有进入编辑时的内容（三方合并的基准）和一棵语法树；最后一个句柄 drop 时结束：
+/// 树交给后台任务释放，已排队的保存照常写入，之后文档按磁盘上的内容需要时重新读取（见「与设计的差异」第 5 步）。
+pub struct EditSession { /* Arc<会话>、这个句柄的初始文本 */ }
 
 impl EditSession {
-    /// 进入编辑时的文本（BOM 已去掉，CRLF 已换成 LF），交给 `InputState::set_value`。
+    /// 交给 `InputState::set_value` 的文本：进入编辑时的文本（BOM 已去掉，CRLF 已换成 LF）；
+    /// 会话活着时再次 `edit` 得到的句柄是会话当时的缓冲区。
     pub fn initial_text(&self) -> Arc<str>;
-    /// 缓冲区变了：新文本的快照和 tree-sitter 的编辑描述。立即返回；增量解析在 `Interactive` 任务里。
+    /// 缓冲区变了：新文本的快照，和从上一次调用（或 `initial_text`）的文本起、依次发生的编辑。
+    /// 立即返回；区间当场按编辑平移，增量解析在 `Interactive` 任务里。编辑与两份文本的长度对不上时改用两份文本的差异。
     pub fn changed(&self, text: Arc<str>, edits: &[TextEdit]);
     /// 最新的区间（编辑到达但还没重新解析时，旧区间按编辑平移）。UI 线程上读，不解析。
     pub fn spans(&self) -> Arc<WindowSpans>;
-    /// 保存：恢复 BOM 和原来的换行，经 `SafeRoot::replace_file` 原子替换，期望的身份是上次读取或保存时的。
+    /// 保存：恢复 BOM 和原来的换行（合并之后是磁盘上那份的），经 `SafeRoot::replace_file` 原子替换，期望的身份是上次读取、保存或合并时的。
     /// 磁盘上的文件已被别人改过时不写，返回 `SaveResult::Conflict`。立即返回，结果经 `notify` 交给视图。
     pub fn save(&self, text: Arc<str>);
     /// 用户选了「强制保存」：不比较身份，照常原子替换。
     pub fn save_anyway(&self, text: Arc<str>);
-    /// 三方合并：基准是进入编辑（或上次保存、合并）时的内容，一方是缓冲区，另一方是磁盘上的当前内容。
+    /// 三方合并：基准是进入编辑（或上次保存、合并）时的内容，一方是缓冲区，另一方是磁盘上的当前内容；
+    /// 之后磁盘上的这份成为基准，它的 BOM 和换行成为保存时恢复的格式。
     pub fn merge(&self, ours: Arc<str>);
     pub fn state(&self) -> Arc<EditState>;
 }
 
+/// 缓冲区的一次改动，字节偏移：之前文本的 `[start, old_end)` 变成之后文本的 `[start, new_end)`。
+/// 与 tree-sitter 的 `InputEdit` 是同样的三个数，不带行列，视图不必依赖 tree-sitter。
+pub struct TextEdit { pub start: usize, pub old_end: usize, pub new_end: usize }
+
+/// 每种结果保留到下一个同类结果，计数让视图分辨新的结果。
 pub struct EditState {
-    pub dirty_on_disk: bool,                      // 收到事件、磁盘内容与基准不同
+    pub dirty_on_disk: bool,                      // 收到事件、磁盘上的字节与保存基准会写出的不同（含只改 BOM 或换行）；或保存时身份不同
+    pub unavailable: bool,                        // 磁盘上的文件读不成缓冲区的文本（不存在、不是普通文件、不是 UTF-8）
+    pub saves: u64,                               // 完成的保存数（任何结果），`save` 是最后一次的
     pub save: Option<SaveResult>,
+    pub merges: u64,                              // 完成的合并数，`merged` 是最后一次的，读不到文件时为 None
     pub merged: Option<Arc<MergeOutcome>>,         // 合并结果交给视图写回缓冲区
 }
 pub enum SaveResult { Saved, Conflict, Failed(Arc<str>) }
@@ -1063,6 +1077,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - 不做自动保存：进程崩溃时未保存的编辑丢失。
 - 由系统发起的退出（注销、关机、Dock 菜单里的退出）不经 `Quit` Action，锁定的 GPUI 也不能取消或推迟退出：有未保存的编辑时会丢失，插件也不按顺序停用；拦住它们要在 `platform` 里给应用代理加 `applicationShouldTerminate:`，以后另行决定。
 - 保存时比较身份与 `renameat` 之间有一个很短的窗口，这期间别的进程写入的内容会被覆盖；原子替换会断开硬链接、不保留扩展属性。
+- 编辑模式里，有语法错误的文本经过一次超过 8 ms、分片停下又续做的解析时，树（和高亮）可能与不停下的解析不同，直到之后的编辑让那一段重新解析。
 - 文件夹项目的文件在阅读时不自动刷新（`project` 不监听文件夹项目）。
 - 查找只对 ASCII 字母不区分大小写，最多 10,000 个结果。
 - 高亮查询里的 `#is-not? local` 不求值（没有 locals 查询）：JavaScript 的 `console`、`require` 等内置名，同名的局部变量也按内置名着色。
@@ -1098,6 +1113,13 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `syntax/prefetch_wait`：没有按完整规模运行。10 万个 8 KiB 的文件约 800 MB，加上 `code_intel` 的缓存，超过这台机器剩下的不到 2 GB 磁盘；发布构建的基准目标也放不下，所以只在调试构建（`just bench` 的冒烟方式）里运行。冒烟规模（2000 个文件、5 次）：中位数 62.6 ms，p95 和最大值 228 ms；临时把冒烟规模改为 3 万个文件、40 次（测完改回）：中位数 64.2 ms，p95 83.2 ms，最大 91.2 ms，期间 `code_intel` 抽取了约 3400 个文件、索引仍在进行。这台机器只有 1 个批量线程，调试构建里一批多在 50 ms 的边界结束，比「批量线程上的先后」估计的约 350 ms 短；完整规模和预算由 macOS CI 的基准任务判定。
 - `just bench syntax/`（冒烟）：其余 `syntax/*` 照常运行，`syntax/first_screen` 中位数 2.85 ms，`syntax/window_peak` 6.86 MB，`syntax/lru_bytes` 3.53 MB（冒烟规模）。没有运行 `just bench --measure syntax/`：发布构建放不下（见上一条）。
 - `just check`、`just deny`、`just doctest` 通过；`rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。没有在 macOS 上运行。
+
+第 5 步（编辑的领域部分），在 Linux（x86_64 容器）上运行：
+
+- `just test -p lectern-syntax -p lectern-bench`：245 个测试通过，其中 `lectern-syntax` 168 个，新增 29 个 `edit_*`、`save_*`、`merge_*`（`src/tests/edit.rs`）。`edit_*`：24 KiB 的合成 TypeScript、Rust、JSON 上各 120 次随机编辑（插入、删除、替换，含不成对的引号、括号、注释开头和多字节字符；每 9 次里有一次不给编辑、一次给错的编辑），每次一轮增量解析，拼出的区间与对增量树整棵查询一次逐行相同，不分片时增量树的 S 表达式与测试里 tree-sitter 自己的增量解析相同，第一轮与整文件解析相同；与整文件的一次解析相同的轮数 TS 119、Rust 120、JSON 120（只计数，见「与设计的差异」第 5 步）。每片预算为 0 的分片轮次下拼出的区间同样是增量树的。保持文本合法的 80 次编辑（整行语句、删行、空行、两行的块注释，三分之一分片）之后每次都与整文件解析逐行相同。`changed` 两次插入之后、任何任务运行之前，编辑之外的行的 token 与新文本的整文件解析相同、插入的行还没有 token，解析之后全部相同；行内插入时这一行编辑前后的 token 都留着。第一轮解析期间到达的编辑（打开一个块注释）在这一轮落地后合成到下一轮，最终与整文件解析相同。进入编辑时 `spans()` 就是阅读视图的整文件区间（同一个 `Arc`），重复进入得到同一个会话；BOM 加 CRLF 的文件在第一轮解析开始时已有挪到缓冲区偏移上的区间，非空白字节的种类与整文件解析相同。完整读取之前、对象库内容、超过 1 MiB 的文件分别是 `NotLoaded`、`ReadOnlySource`、`TooLarge`；没有语言的文件可以编辑、没有区间、照常保存。编辑的合成与差异：300 组随机编辑序列合成后都描述首尾两份文本；BOM 与 CRLF 的往返，缓冲区里已有的 `\r\n` 不会变成 `\r\r\n`。`save_*`：BOM 与 CRLF 在保存时恢复，第二次保存按第一次留下的身份比较、不冲突；外部写入之后保存为 `Conflict`、文件内容不变、`dirty_on_disk`，`save_anyway` 写入；文件被删时保存失败、`unavailable`、不创建文件；编辑期间的事件：同样的字节重写不置 `dirty_on_disk`、之后的保存不冲突，内容不同时置 `dirty_on_disk`，文档不重新打开（快照还是同一个 `Arc`、仍可编辑），删除后 `unavailable`；保存过的会话结束后文档先是 `Reloading`、读取之后是新内容、可编辑，之后的事件照常重新打开，没保存过的会话结束后文档不变；`save` 之后、任何任务运行之前 drop 最后一个句柄：`edit` 返回 `Reloading`，文件照常写入、结果为 `Saved`，文档重新读取后可编辑、新会话从保存后的内容开始；结束时有排队的操作而文件没有重新读取，`editable` 改回 `Yes` 的那次通知里调用 `edit` 得到会话，没有要写的会话结束后快照是 `Yes`、`edit` 当场成功；磁盘上只把 CRLF 改成 LF、只去掉 BOM 时都置 `dirty_on_disk`，普通保存为 `Conflict`、文件不变，合并之后保存按磁盘上的 LF 写出；会话活着时再次 `edit`，新句柄的 `initial_text` 是保存过的缓冲区，计数接着累计，它的编辑和保存照常；项目关闭后会话仍能保存、文档保留订阅。`merge_*`：没有冲突（两边改不同的行，两边相同的改动只取一次）、有冲突（相邻的两行与一行重叠）、两边改同一行，三份 insta 快照逐个看过；合并之后基准是磁盘上的内容，保存合并结果为 `Saved`、文件就是合并的文本；文件被删时 `merged` 为 None、`unavailable`。
+- `syntax/edit_tree_bytes`（调试构建、按测量规模运行 `memory` 目标的这一项，字节数与优化级别无关）：1 MiB 减 4 KiB 的 TypeScript 和 Rust 各 3 次，6 个样本中位数 36.8 MiB、最大 37.9 MiB（预算 ≤ 41 MiB）；会话结束后释放的字节都不少于持有的四分之三（基准里检查）。连同缓冲区文本和区间一起计入时最大 40.8 MiB。冒烟规模（128 KiB）5.17 MB。
+- `just check`、`just deny`、`just doctest` 通过；`rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。
+- 没有运行全部 crate 的 `just test`：本步只改 `syntax` 和 `bench`（只有 `bench` 依赖 `syntax`），这台机器的磁盘不够再编译其余 crate 的测试。没有在 macOS 上运行；`changed` 在 UI 线程上的平移没有单独测量，由第 8 步编辑模式的 `app/scroll_frames` 判定。
 
 前置条件 A（`services`），在 Linux（x86_64 容器）上运行（`services` 不依赖 GPUI）：
 
@@ -1178,6 +1200,25 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - LRU 替换已有的条目时保留较晚淘汰的一类：后台工作重算用户打开过的条目（预取一个已经打开过的文件）不把它降为后台一类。反过来，预取在 LRU 里查到的条目按后台一类使用，不升为用户打开过的一类：首屏的计算多了一个参数，打开时按用户打开过的一类查，预取经它规划第一屏时按后台一类查（对象库内容的文本条目同样）。重复预取同一个目标（指针再次停在同一个标识符上）时，按身份查到 OID 的文件不再读取和求 OID，整文件区间已在 LRU 里的直接结束，第一屏窗口已在 LRU 里的不再放入。
 - 测试和基准的入口（`test-support`）：`Engine::set_trace` 和 `Trace`、`StepEnd`，在做这些工作的线程上报告预取任务每一轮的开始、解析开始、让路停下、完成，以及批量窗口每一轮的开始、每次 `step` 的开始和结果。`syntax/prefetch_wait` 用它取预取任务开始做这个目标的那一轮的时刻；「验收」第 4 步「在一片之内停下」的检查放在测试里（`prefetch_stops_at_a_slice_boundary_when_yielding`、`batch_order_window_stops_within_a_slice_when_yielding`），从 `Kernel::set_yield(true)` 量到 `step` 返回，经过 kernel 的开关和 `yield_requested`，不是另一个基准。
 - `syntax/prefetch_wait` 的夹具：`code_intel` 的 `FakeGit` 在磁盘上写 10 万个 `synthetic::source` 的 8 KiB 文件，暂存它们的 OID、不在内存里留 blob，工作区视为与 index 相同；索引器按插件的做法建在同一个真实的 executor 上，每个批量线程一个批量任务。引擎在同一个 executor 上打开一个 16 MiB 的 TypeScript 文件，让窗口链的批量任务也参与轮流；每隔 150–350 ms 请求一次小文件的预取，共 40 次。索引在采样结束之前完成时基准报错。
+
+第 5 步：
+
+- `TextEdit` 设计没有给出，定为三个字节偏移 `start`、`old_end`、`new_end`（tree-sitter `InputEdit` 的字节部分，不带行列，视图不依赖 tree-sitter）。一次 `changed` 的编辑相对上一次 `changed`（或 `initial_text`）的文本，依次作用；会话把它们合成一个编辑（`src/change.rs` 的 `compose`），行列在后台任务里按文本算。编辑与两份文本的长度对不上、或列表为空时，在调用的线程上改用两份文本的公共前后缀求出的差异（线性，只在视图给错时发生）；后台开始一轮解析之前再核对一次编辑两侧的字节确实相同，不同时同样改用差异，旧树照样复用。已改「接口」。
+- 增量高亮（`src/highlight/incremental.rs` 的 `EditParse`）：一轮解析拿缓冲区的一份文本和从上一轮文本到它的编辑，把上一轮的树复制一份、`Tree::edit` 之后交给解析复用，解析完只对编辑碰到的行（含新终点所在的那一行：平移时丢掉了跨过编辑两端的 token）和 `Tree::changed_ranges` 覆盖的行重新跑高亮查询，其余行用上一轮的区间按编辑平移（`WindowSpans::shifted`）。这些行之外的字节，祖先节点和文本都没有变，捕获也就不变，所以拼出来的区间与对整棵新树查询一次相同（`edit_incremental_spans_are_their_trees_*` 逐行对照）。一轮与 `FullParse` 一样按 8 ms 分片、片间让出，`health` 每片登记。设计没有写查询怎样增量。
+- 一轮总是做完它开始时的那份文本：解析期间到达的编辑合成到下一轮，这一轮落地时它的区间按这些编辑平移后发布。设计写的是「换输入时 `Parser::reset`」：换输入就重来的话，1 MiB 文件约 165 ms 的第一次解析在持续输入时一直做不完；`reset` 改在每轮开始时调用，清掉上一轮可能留下的半途状态。第一轮没有旧树，解析和查询整个文本。
+- `spans()` 的平移在 `changed` 里、调用的线程上做：编辑之前的行原样保留，之后的行按编辑的位移挪动行首（token 是行内偏移，不用改），编辑碰到的行只留完全在编辑之前或之后的 token。工作量与有 token 的行数成正比，复制一份 token 数组（1 MiB 的文件约 1 MiB）；没有在 M 系列上测量，编辑模式的 `app/scroll_frames`（第 8 步）判定。
+- 进入编辑时的区间：文件的字节就是缓冲区的文本（没有 BOM、不是 CRLF）时直接用阅读视图的整文件区间（同一个 `Arc`）；否则第一轮解析之前先把阅读视图的区间挪到缓冲区的偏移上（每行减去它之前丢掉的 `\r` 和 BOM，token 截到这一行的文本为止），发布后再解析。`DocHandle::edit` 在调用的线程上把内容复制成 `Arc<str>`（UTF-8 检查、复制，CRLF 文件另做一次替换），与适配器每帧复制缓冲区同一量级；设计没有写这一步在哪个线程上。
+- 磁盘一侧的操作（保存、合并、fs_watch 事件后的检查、会话结束）在会话里排成一列，同一时刻一个 `Interactive` 任务按顺序做（`platform` 设计要求同一个 `rel` 的两次保存由调用方串行），检查因此不会看到半个保存。这个任务一次 poll 做完队列，没有 `await`，插件停用时要么还没开始，要么已经做完；`replace_file` 本身是原子替换。
+- 编辑期间的 fs_watch 事件不重新打开文档（「数据流与线程」写的「标记 `dirty_on_disk`（编辑）」）：`watch::check` 看到有活着的会话就交给会话检查。会话 `stat` 比较身份，相同时什么都不做；不同时读出文件，与保存基准会写出的字节（基准文本按会话的 BOM 和换行编码）相同时（同样的字节重写、`touch`）只记下新的身份，下一次保存不会冲突；不同时 `dirty_on_disk`，只改了 BOM 或换行（agent 运行 `dos2unix`）也算，所以之后的普通保存是 `Conflict`，不会把旧格式写回去；读不出（不存在、不是普通文件、不是 UTF-8）时另加 `unavailable`。保存遇到身份不同时同样置 `dirty_on_disk`。
+- `EditState` 增加 `unavailable`、`saves`、`merges`。`unavailable` 对应界面已有的 `file-reader-unavailable-while-editing`：文件被删、合并读不到文件时，视图需要知道只剩复制或放弃。两个计数让视图分辨新结果：两次保存都是 `Saved` 时字段不变，离开守卫要等「这一次」保存的结果；`merged` 也只在计数变了时写回缓冲区。合并读不到文件时 `merged` 为 None、`unavailable` 为 true。已改「接口」。
+- 合并之后的基准是这次读到的磁盘内容，期望的身份是读它时的身份，所以保存合并结果不会冲突；`dirty_on_disk` 清掉。三份文本都已统一成 LF、无 BOM，冲突标记按 LF 写出。保存时恢复的格式也换成磁盘上那份的 BOM 和换行：合并把磁盘一侧的改动收进来，只改格式的改动（`dos2unix`）同样收进来，否则保存合并结果会把它撤掉。磁盘上混用换行时按「有 `\r\n`」处理，保存后全是 CRLF。`merge3` 在会话的锁之外运行。
+- 会话的结束与文档：最后一个句柄 drop 时，取消解析，树交给 `Background` 任务释放；队列里的合并和检查丢掉，已排队的保存照常写入（同一帧里 ⌘S 之后关闭不丢改动），结果照常发布。有保存做过、在排队或可能在途时，文档的 `editable` 先置为 `Reloading`。磁盘队列做完之前的保存之后，文档按阅读时的规则比较身份、需要时重新打开同一行；没有重新读取时 `editable` 改回 `Yes`，发布之前先放行进入编辑，视图在这次通知里就能进入。在这之前 `DocHandle::edit` 返回 `Reloading`，新会话不会从保存之前的内容和身份开始。没有要写的（没保存过、队列空、没有在途的操作）时快照保持 `Yes`，`edit` 也当场放行，结束时的检查交给新会话。「缓冲区没有改动时静默重新载入」「Discard My Changes」由视图按同一条路径做：结束会话，等文档重新读取，再进入编辑（光标按行号保留是视图的事）；领域一侧不判断缓冲区有没有改动。设计没有写「按保存后的内容重新打开」由谁触发。
+- `DocHandle::edit` 在会话还活着时返回同一个会话的另一个句柄，最后一个句柄 drop 时会话才结束。新句柄的 `initial_text` 是会话最后一次 `changed` 收到的缓冲区（不是进入编辑时的文本），它的 `changed` 从这份文本算起；保存之后再进入编辑时视图因此拿到的是保存过的内容，不会把进入编辑时的文本加上新改动写回去。`state` 是整个会话的，计数跨句柄累计，新句柄拿到时先记下当时的 `saves`、`merges`。设计没有写重复进入的情况。
+- `Engine::close_project` 跳过有活着的会话的文档（保留它的订阅），会话在开始时取下根目录的 `SafeRoot`，项目关闭之后仍能保存。领域一侧不知道缓冲区有没有未保存的改动，所以按「有会话」判断。
+- 退出顺序（kernel 设计「内核」）在领域一侧只需要保存的结果经 `state` 和 `notify` 交给视图：离开守卫选「保存」时等 `saves` 加一、结果是 `Saved` 再通过，之后才 `Kernel::shutdown`。本步没有别的改动。
+- 分片的解析停下再续做时，有语法错误的文本可能得到与不停下时不同的树：同样的随机编辑，每片预算为 0 时得到的树与一次做完的不同，错误恢复的选择随停下的位置变化。高亮是那棵树的；单个按键的增量解析通常在一片之内完成，不停下。见「已知限制」。
+- `syntax/edit_tree_bytes` 测编辑会话完成第一次解析之后持有的活跃字节，减去缓冲区文本和区间的字节：即语法树和解析器。设计写的是「编辑模式的语法树」，文本和区间不是树。
+- 测试与设计的对应：`edit_*` 的「增量解析的区间与整文件解析相同」分成两条。随机编辑（含不成对的引号、注释开头）下，拼出的区间与对增量树整棵查询一次逐行相同（分片与不分片都查），不分片时增量树与 tree-sitter 自己对同样编辑的增量解析相同；整文件的一次解析在错误恢复上可能不同，只计数（120 轮里 TS 119 轮、Rust 和 JSON 120 轮相同）。保持文本合法的编辑（整行语句、空行、成对的块注释）下与整文件解析逐行相同。
 
 前置条件 A（`services`）。下面只记上文「接口」没有定下、实现时定下的形状：
 

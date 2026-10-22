@@ -5,6 +5,7 @@ mod consistency;
 mod deadline;
 mod degrade;
 mod doc;
+mod edit;
 mod find;
 mod health;
 mod lang;

@@ -37,6 +37,7 @@ use crate::util::{lock, log};
 
 use super::chain::{self, ChainState};
 use super::content::{Content, PageCache};
+use super::edit::{self, EditSession};
 use super::{
     DocSnapshot, DocState, Editable, Highlighting, LineCount, NotEditable, RowPos, Tier, Viewport,
     load, prefetch, watch,
@@ -231,7 +232,9 @@ impl Engine {
     }
 
     /// The project closed: drops its roots, its repository handle and its
-    /// documents' subscriptions. Never blocks.
+    /// documents' subscriptions. A document with a live edit session keeps
+    /// its subscription, and the session its root, until the session ends
+    /// (the view may hold unsaved changes). Never blocks.
     pub fn close_project(&self, project: &ProjectKey) {
         let inner = &self.inner;
         let roots: Vec<Arc<SafeRoot>> = {
@@ -246,7 +249,7 @@ impl Engine {
         let docs: Vec<Arc<Doc>> = lock(&inner.docs)
             .iter()
             .filter_map(Weak::upgrade)
-            .filter(|d| &d.target.project == project)
+            .filter(|d| &d.target.project == project && d.editing().is_none())
             .collect();
         let watches: Vec<_> = docs.iter().filter_map(|d| d.lock().watch.take()).collect();
         let git = inner.git.clone();
@@ -416,6 +419,17 @@ impl EngineInner {
         }
     }
 
+    /// The root's `SafeRoot` if it is open already. Never blocks.
+    pub(crate) fn cached_root(
+        &self,
+        project: &ProjectKey,
+        root: &Arc<Path>,
+    ) -> Option<Arc<SafeRoot>> {
+        lock(&self.roots)
+            .get(&(project.clone(), root.clone()))
+            .cloned()
+    }
+
     /// The root's `SafeRoot`, opened on first use. Blocking.
     pub(crate) fn root(
         &self,
@@ -568,6 +582,15 @@ impl DocHandle {
             load::find(&engine, &self.doc, None);
         }
     }
+
+    /// Enters edit mode (only when the snapshot's `editable` is `Yes`): a
+    /// session over the full content, or another handle to the one that
+    /// lives. Copies the content into the buffer's text on the calling
+    /// thread (no BOM, `\r\n` as `\n`); the first parse runs in a task.
+    pub fn edit(&self) -> Result<EditSession, NotEditable> {
+        let engine = self.doc.engine.upgrade().ok_or(NotEditable::NotLoaded)?;
+        edit::begin(&engine, &self.doc)
+    }
 }
 
 #[cfg(test)]
@@ -658,6 +681,9 @@ pub(crate) struct DocMut {
     pub window_busy: bool,
     pub window_again: bool,
     pub pages_busy: bool,
+    /// The edit session, while one lives: fs_watch events go to it instead
+    /// of reloading the document.
+    pub edit: Option<Weak<edit::Session>>,
 }
 
 #[derive(Default)]
@@ -717,6 +743,7 @@ impl Doc {
             window_busy: false,
             window_again: false,
             pages_busy: false,
+            edit: None,
         };
         let snapshot = Arc::new(st.snapshot(&target));
         Doc {
@@ -742,6 +769,20 @@ impl Doc {
 
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+
+    /// The live edit session, if any.
+    pub(crate) fn editing(&self) -> Option<Arc<edit::Session>> {
+        self.lock()
+            .edit
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .filter(|s| !s.is_closed())
+    }
+
+    /// What tells the view a new snapshot (or edit state) is there.
+    pub(crate) fn notifier(&self) -> Arc<dyn Fn() + Send + Sync> {
+        self.notify.clone()
     }
 
     /// Whether `load` is no longer the current one.

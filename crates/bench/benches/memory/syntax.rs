@@ -1,16 +1,16 @@
 //! `syntax/*` in bytes (docs/design/file_reader.md「性能」): the temporary
-//! memory of one window of the chain, and the highlight and text LRU.
-//! tree-sitter's allocations go through the counting allocator
-//! (`memory.rs`'s `main`).
+//! memory of one window of the chain, the highlight and text LRU, and an
+//! edit session's tree. tree-sitter's allocations go through the counting
+//! allocator (`memory.rs`'s `main`).
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lectern_bench::{Bench, BenchError, CountingAlloc, Ctx, Measured, Value};
 use lectern_services::reader::Anchor;
 use lectern_syntax::highlight::{Budget, ChainWindow, Outcome, Source};
-use lectern_syntax::{Highlighting, Languages, Tier, testing};
+use lectern_syntax::{Editable, Highlighting, Languages, Tier, testing};
 
 use crate::syntax_engine::{Rig, wait};
 
@@ -84,6 +84,73 @@ fn lru_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     }
     Ok(vec![Measured::new(
         "syntax/lru_bytes",
+        Value::Bytes(samples),
+    )])
+}
+
+/// `syntax/edit_tree_bytes`: the live bytes an edit session holds once its
+/// first parse of a file at tier A's limit is done (1 MiB less 4 KiB of
+/// TypeScript and of Rust, no line over 4 KiB), less its buffer's text and
+/// spans: the tree and the parser; the largest ≤ 41 MiB (ADR 0034).
+/// Dropping the session gives them back.
+pub const EDIT_TREE_BYTES: Bench = Bench {
+    id: "syntax/edit_tree_bytes",
+    run: edit_tree_bytes,
+};
+
+fn edit_tree_bytes(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let len = ctx.scale((1 << 20) - (4 << 10), 128 << 10);
+    let dir = ctx.scratch().join("edit");
+    std::fs::create_dir_all(&dir).map_err(|e| BenchError::new(e.to_string()))?;
+    for (name, bytes) in [
+        ("a.ts", testing::ts(len, 0)),
+        ("a.rs", testing::rust(len, 0)),
+    ] {
+        std::fs::write(dir.join(name), bytes).map_err(|e| BenchError::new(e.to_string()))?;
+    }
+    let rig = Rig::new(&dir)?;
+    let mut samples = Vec::new();
+    for _ in 0..ctx.scale(3, 1) {
+        for name in ["a.ts", "a.rs"] {
+            let (doc, notified) = rig.open(rig.target(name, Anchor::Start));
+            wait(&doc, &notified, |s| {
+                s.editable == Editable::Yes && s.highlight == Highlighting::On
+            })?;
+            rig.idle()?;
+            let before = CountingAlloc::live();
+            let session = doc
+                .edit()
+                .map_err(|why| BenchError::new(format!("{name}: not editable: {why:?}")))?;
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while !session.idle() {
+                if Instant::now() > deadline {
+                    return Err(BenchError::new(format!(
+                        "{name}: the first parse did not end"
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            rig.idle()?;
+            // Less the buffer's text and its spans: the tree and the parser.
+            let others = session.initial_text().len() + session.spans().bytes();
+            let held = CountingAlloc::live()
+                .saturating_sub(before)
+                .saturating_sub(others);
+            drop(session);
+            rig.idle()?;
+            let left = CountingAlloc::live().saturating_sub(before);
+            if left > held / 4 {
+                return Err(BenchError::new(format!(
+                    "{name}: the session held {held} bytes, {left} were left after it ended"
+                )));
+            }
+            samples.push(held as u64);
+            drop(doc);
+            rig.idle()?;
+        }
+    }
+    Ok(vec![Measured::new(
+        "syntax/edit_tree_bytes",
         Value::Bytes(samples),
     )])
 }

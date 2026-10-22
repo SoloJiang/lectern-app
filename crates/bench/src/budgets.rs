@@ -1511,7 +1511,7 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Memory,
     ),
-    // ---- syntax (file_reader design, steps 2 to 4) ----
+    // ---- syntax (file_reader design, steps 2 to 5) ----
     // The first screen: open, the one `read_ranges`, the plan and the
     // window's parse and query with the 8 ms deadline, on synthetic
     // TypeScript, Rust and JSON files of 1–64 MiB, 40 random offsets each;
@@ -1591,6 +1591,16 @@ pub static BUDGETS: &[Budget] = &[
         FILE_READER,
         ACTIVE,
         Time,
+    ),
+    // An edit session's tree at tier A's limit (1 MiB of TypeScript and of
+    // Rust), with the buffer and its spans, after the first parse; released
+    // when the session ends (ADR 0034).
+    share(
+        "syntax/edit_tree_bytes",
+        &[max(Limit::BytesAtMost(41 * MB))],
+        FILE_READER,
+        ACTIVE,
+        Memory,
     ),
     // ---- end syntax ----
     // FakeBackend and the manual driver, without backend latency.

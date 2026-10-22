@@ -5,7 +5,8 @@
 //! rescan, makes a `Background` task compare the file's identity
 //! (`SafeRoot::stat`): a change reopens the document at the line at its
 //! top, a deleted file shows as missing, and a file that comes back is
-//! opened again. Folder projects are not watched.
+//! opened again. Folder projects are not watched. While an edit session
+//! lives, the session checks the file instead (`edit`).
 
 use std::path::Path;
 use std::sync::{Arc, Weak};
@@ -165,9 +166,15 @@ impl Sink<WorktreeBatch> for DocSink {
     }
 }
 
-/// Compares the file's identity with the one read.
-fn check(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
+/// Compares the file's identity with the one read. While an edit session
+/// lives, the session checks the file instead: the document is not reloaded
+/// under it (docs/design/file_reader.md「编辑」).
+pub(crate) fn check(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
     if doc.is_closed() {
+        return;
+    }
+    if let Some(session) = doc.editing() {
+        session.disk_event();
         return;
     }
     let target = &doc.target;

@@ -4,6 +4,8 @@
 use std::fmt;
 use std::ops::Range;
 
+use crate::change::{self, Format, TextEdit};
+
 /// What a highlight query's capture names come down to. `ui` maps each
 /// kind to a system colour; the view never defines colours itself.
 #[repr(u8)]
@@ -187,6 +189,171 @@ impl fmt::Debug for WindowSpans {
             .field("tokens", &self.tokens.len())
             .field("exact", &self.exact)
             .finish()
+    }
+}
+
+/// Edit mode: the spans of a whole buffer (from 0) carried across edits.
+impl WindowSpans {
+    /// No tokens over a text of `len` bytes.
+    pub(crate) fn empty(len: u64) -> WindowSpans {
+        ByLine::new(len, false).finish()
+    }
+
+    /// These spans of the text `old` moved to the text `new`, which `edit`
+    /// made of it: the lines before the edit stay, the lines after it move
+    /// by its shift, and of the lines it touches only the tokens wholly
+    /// before or after it are kept (they are parsed again later). Work in
+    /// proportion to the lines with tokens; no parse.
+    pub(crate) fn shifted(&self, edit: TextEdit, old: &[u8], new: &[u8]) -> WindowSpans {
+        let start = edit.start.min(old.len());
+        let old_end = edit.old_end.clamp(start, old.len());
+        let new_end = edit.new_end.clamp(start, new.len());
+        let first = change::line_start(old, start) as u64;
+        let last = change::line_start(old, old_end) as u64;
+        let landing = change::line_start(new, new_end) as u64;
+        let (start, old_end, new_end) = (start as u64, old_end as u64, new_end as u64);
+        let mut out = ByLine::new(new.len() as u64, self.exact);
+        for (line, tokens) in self.lines() {
+            if line < first {
+                out.line(line, tokens.iter().copied());
+            } else if line > last {
+                out.line(line - old_end + new_end, tokens.iter().copied());
+            } else {
+                if line == first {
+                    let head = tokens
+                        .iter()
+                        .copied()
+                        .filter(|t| line + u64::from(t.end()) <= start);
+                    out.line(first, head);
+                }
+                if line == last {
+                    // After the edit: the same bytes at the new end, on the
+                    // line that holds it in the new text.
+                    let tail = tokens.iter().filter_map(|t| {
+                        let at = line + u64::from(t.start());
+                        let moved = (at >= old_end).then(|| at - old_end + new_end - landing)?;
+                        Token::new(u32::try_from(moved).ok()?, t.len(), t.kind())
+                    });
+                    out.line(landing, tail);
+                }
+            }
+        }
+        out.finish()
+    }
+
+    /// The spans of a text of `len` bytes: `inner`'s lines in `region` (both
+    /// ends line starts, or the text's end), `outer`'s elsewhere.
+    pub(crate) fn splice(
+        outer: Option<&WindowSpans>,
+        inner: &WindowSpans,
+        region: Range<u64>,
+        len: u64,
+    ) -> WindowSpans {
+        let mut out = ByLine::new(len, true);
+        let outer: Vec<(u64, &[Token])> = outer.map(|o| o.lines().collect()).unwrap_or_default();
+        for &(line, tokens) in outer.iter().filter(|(line, _)| *line < region.start) {
+            out.line(line, tokens.iter().copied());
+        }
+        for (line, tokens) in inner.lines().filter(|(line, _)| region.contains(line)) {
+            out.line(line, tokens.iter().copied());
+        }
+        for &(line, tokens) in outer.iter().filter(|(line, _)| *line >= region.end) {
+            out.line(line, tokens.iter().copied());
+        }
+        out.finish()
+    }
+
+    /// The reading view's spans of a file's raw `bytes` (from 0) as spans of
+    /// the buffer's text, which leaves out the BOM and the `\r` of each
+    /// `\r\n`: every line moves back by what it lost before it, tokens are
+    /// cut where the line's text ends.
+    pub(crate) fn decoded(&self, bytes: &[u8], format: Format, len: u64) -> WindowSpans {
+        let bom = if format.bom { 3 } else { 0 };
+        let mut out = ByLine::new(len, self.exact);
+        // The line breaks before `at`, counted from the last line on.
+        let (mut at, mut breaks) = (0usize, 0u64);
+        for (line, tokens) in self.lines() {
+            let line = line as usize;
+            if line > bytes.len() {
+                break;
+            }
+            breaks += memchr::memchr_iter(b'\n', &bytes[at..line]).count() as u64;
+            at = line;
+            let lost = if format.crlf { breaks } else { 0 };
+            // The line's text in the raw bytes, without its `\r\n`.
+            let mut end = change::line_end(bytes, line);
+            if bytes[..end].ends_with(b"\n") {
+                end -= 1;
+            }
+            if format.crlf && bytes[..end].ends_with(b"\r") {
+                end -= 1;
+            }
+            let from = if line == 0 { bom } else { 0 };
+            let width = (end - line) as u64;
+            let start = (line as u64 + from).saturating_sub(bom + lost);
+            let kept = tokens.iter().filter_map(|t| {
+                let (a, b) = (
+                    u64::from(t.start()).max(from),
+                    u64::from(t.end()).min(width),
+                );
+                let len = u32::try_from(b.checked_sub(a).filter(|n| *n > 0)?).ok()?;
+                Token::new(u32::try_from(a - from).ok()?, len, t.kind())
+            });
+            out.line(start, kept);
+        }
+        out.finish()
+    }
+}
+
+/// Collects lines with tokens in ascending order into a [`WindowSpans`]
+/// from 0; a line given twice in a row gets the tokens of both, and a line
+/// with none is left out.
+struct ByLine {
+    len: u64,
+    exact: bool,
+    line_starts: Vec<u32>,
+    offsets: Vec<u32>,
+    tokens: Vec<Token>,
+}
+
+impl ByLine {
+    fn new(len: u64, exact: bool) -> ByLine {
+        ByLine {
+            len,
+            exact,
+            line_starts: Vec::new(),
+            offsets: vec![0],
+            tokens: Vec::new(),
+        }
+    }
+
+    fn line(&mut self, start: u64, tokens: impl Iterator<Item = Token>) {
+        let Ok(start) = u32::try_from(start) else {
+            return;
+        };
+        let before = self.tokens.len();
+        self.tokens.extend(tokens);
+        if self.tokens.len() == before {
+            return;
+        }
+        if self.line_starts.last() == Some(&start) {
+            *self.offsets.last_mut().expect("one more offset than lines") =
+                self.tokens.len() as u32;
+        } else {
+            self.line_starts.push(start);
+            self.offsets.push(self.tokens.len() as u32);
+        }
+    }
+
+    fn finish(self) -> WindowSpans {
+        WindowSpans {
+            start: 0,
+            end: self.len,
+            line_starts: self.line_starts.into_boxed_slice(),
+            offsets: self.offsets.into_boxed_slice(),
+            tokens: self.tokens.into_boxed_slice(),
+            exact: self.exact,
+        }
     }
 }
 
