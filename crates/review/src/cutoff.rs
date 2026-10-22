@@ -22,7 +22,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use lectern_cache::{Compression, Entry, Key, Namespace, Partition};
-use lectern_git::{HashKind, Oid, ReflogAction, ReflogEntry, Repo, RepoPath, TreeChanges};
+use lectern_git::{HashKind, Oid, ReflogEntry, Repo, RepoPath, TreeChanges};
 use lectern_services::changes::ChangePath;
 
 use crate::chain::codec::{Reader, bytes, uint};
@@ -63,22 +63,25 @@ impl Record {
 /// The records a review takes into account, newest first, within the
 /// window, old ≠ new, at most [`MAX_RECORDS`]: from the base entry (index
 /// into `entries`, newest first; `entries.len()` when there is none) back,
-/// and after it the moves that are not commits. A commit after the base
-/// (the agent's own, an amend) keeps the steps before it in the chain, as
-/// its change is in the base-to-worktree diff; a branch switch, reset,
-/// rebase or pull after it changed the paths' content under those steps.
-/// The second value is the floor when more were there: the last record's
-/// time.
+/// and after it those that `leaves` says left the session's line of
+/// history (the base commit is not an ancestor of their new commit: a
+/// switch to an unrelated branch). Moves that stay on it (the agent's own
+/// commits, an amend, `pull --rebase`, a squash by `reset --soft`, merging
+/// main in, a fast-forward) keep the steps before them in the chain: their
+/// changes are in the base-to-worktree diff. The second value is the floor
+/// when more were there: the last record's time.
 pub(crate) fn window(
     entries: &[ReflogEntry],
     base: usize,
     window_start_s: i64,
+    leaves: &mut dyn FnMut(&ReflogEntry) -> bool,
 ) -> (Vec<Record>, Option<i64>) {
     let mut out = Vec::new();
-    let after = entries[..base.min(entries.len())]
+    let after: Vec<&ReflogEntry> = entries[..base.min(entries.len())]
         .iter()
-        .filter(|e| !matches!(e.action, ReflogAction::Commit { .. }));
-    for e in after.chain(entries.iter().skip(base)) {
+        .filter(|e| Record::of(e).is_some() && leaves(e))
+        .collect();
+    for e in after.into_iter().chain(entries.iter().skip(base)) {
         if e.time.seconds < window_start_s {
             break;
         }
@@ -259,6 +262,57 @@ pub(crate) fn key(hash: HashKind, record: &Record) -> Key {
         .u64(MAX_TREE_PATHS as u64)
 }
 
+/// Whether `ancestor` is an ancestor of `of` (`Repo::is_ancestor`), from
+/// `review.ancestry` or computed and written there. None on an error (an
+/// object missing). Blocking.
+pub(crate) fn descends(
+    repo: &Repo,
+    partition: &Partition,
+    ancestor: Oid,
+    of: Oid,
+    cancel: &AtomicBool,
+) -> Option<bool> {
+    let hash = repo.location().hash;
+    let key = Key::new()
+        .str(match hash {
+            HashKind::Sha1 => "sha1",
+            HashKind::Sha256 => "sha256",
+        })
+        .bytes(ancestor.as_bytes())
+        .bytes(of.as_bytes());
+    if let Some(CachedAncestry(found)) = partition.get::<CachedAncestry>(&key) {
+        return Some(found);
+    }
+    let found = repo.is_ancestor(ancestor, of, cancel).ok()?;
+    // A failed write only means walking the history again.
+    let _ = partition.put(&key, &CachedAncestry(found));
+    Some(found)
+}
+
+/// `review.ancestry`: whether one commit is an ancestor of another; only
+/// the two OIDs decide it (architecture rule 5).
+pub(crate) struct CachedAncestry(pub bool);
+
+impl Entry for CachedAncestry {
+    const NAMESPACE: Namespace = Namespace {
+        name: "review.ancestry",
+        version: 1,
+        compression: Compression::None,
+    };
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(u8::from(self.0));
+    }
+
+    fn decode(input: &[u8]) -> Option<Self> {
+        match input {
+            [0] => Some(CachedAncestry(false)),
+            [1] => Some(CachedAncestry(true)),
+            _ => None,
+        }
+    }
+}
+
 /// `review.tree_changes`: the sorted paths, or `All`.
 pub(crate) struct CachedTreeChanges(pub TreeChanges);
 
@@ -351,14 +405,15 @@ mod tests {
             entry(300, 1, 2),
             entry(10, 0, 1),
         ];
-        let (records, floor) = window(&entries, 0, 100);
+        let (records, floor) = window(&entries, 0, 100, &mut |_| true);
         assert_eq!(
             records.iter().map(|r| r.time).collect::<Vec<_>>(),
             [400, 300]
         );
         assert_eq!(floor, None);
-        // After the base entry (index 2) only moves that are not commits:
-        // a checkout at 400 takes part, a commit at 450 does not.
+        // After the base entry (index 3) only moves that leave the base's
+        // line of history: the one to commit 3 does (at 400), the one to
+        // commit 5 does not (at 450).
         let entries = vec![
             entry(500, 3, 3),
             commit(450, 4, 5),
@@ -366,22 +421,26 @@ mod tests {
             entry(300, 1, 2),
             entry(10, 0, 1),
         ];
-        let (records, _) = window(&entries, 3, 0);
+        let mut leaves = |e: &ReflogEntry| e.new == Some(oid(3));
+        let (records, _) = window(&entries, 3, 0, &mut leaves);
         assert_eq!(
             records.iter().map(|r| r.time).collect::<Vec<_>>(),
             [400, 300, 10]
         );
-        // No base entry: every move that is not a commit.
-        let (records, _) = window(&entries, entries.len(), 0);
+        // No base entry: only the moves that leave the base's line.
+        let (records, _) = window(&entries, entries.len(), 0, &mut leaves);
+        assert_eq!(records.iter().map(|r| r.time).collect::<Vec<_>>(), [400]);
+        // Nothing leaves it: only the records from the base entry back.
+        let (records, _) = window(&entries, 3, 0, &mut |_| false);
         assert_eq!(
             records.iter().map(|r| r.time).collect::<Vec<_>>(),
-            [400, 300, 10]
+            [300, 10]
         );
 
         let many: Vec<ReflogEntry> = (0..300)
             .map(|i| entry(10_000 - i, (i % 200 + 1) as u8, (i % 200 + 2) as u8))
             .collect();
-        let (records, floor) = window(&many, 0, 0);
+        let (records, floor) = window(&many, 0, 0, &mut |_| true);
         assert_eq!(records.len(), MAX_RECORDS);
         assert_eq!(floor, Some(10_000 - 255));
     }

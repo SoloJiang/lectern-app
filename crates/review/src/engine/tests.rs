@@ -590,6 +590,153 @@ fn claims_after_branch_switch() {
     assert_eq!(paths(&outside), ["f.txt"]);
 }
 
+/// Session "s", started at T - 4000, replacing `(old, new)` lines of f in
+/// one turn, one call per pair at the given times.
+fn agent(fx: &Fx, steps: &[(i64, &str, &str)]) -> Arc<FakeSessions> {
+    let items = steps
+        .iter()
+        .enumerate()
+        .map(|(n, (at, old, new))| {
+            edit(&format!("e{n}"), ms(*at), vec![replace("f.txt", old, new)])
+        })
+        .collect();
+    fx.sessions(vec![session(
+        "s",
+        &fx.root(),
+        ms(T - 4000),
+        vec![turn("t", ms(T - 3990), items)],
+    )])
+}
+
+/// The steps of f in the agent's review: every one of them, in the chain.
+fn agent_steps(d: &Driven) -> (Arc<ReviewSnapshot>, usize) {
+    let (id, s) = open(d, target("s"));
+    let work = d.engine.work(id).unwrap();
+    assert_eq!(paths(&s), ["f.txt"], "f is the agent's");
+    (s, work.files[0].history.len())
+}
+
+#[test]
+fn claims_survive_pull_rebase_after_an_agent_commit() {
+    let fx = Fx::new();
+    let a = fx.commit(&[("f.txt", "a\nb\n"), ("g.txt", "g\n")], None, T - 5000);
+    // The agent commits its first change; upstream changed f and g.
+    let c = fx.commit(&[("f.txt", "A\nb\n"), ("g.txt", "g\n")], Some(a), T - 3800);
+    let u = fx.commit(&[("f.txt", "a\nb\n"), ("g.txt", "g2\n")], Some(a), T - 3700);
+    // `git pull --rebase`: HEAD to upstream, the agent's commit picked on it.
+    let picked = fx.commit(&[("f.txt", "A\nb\n"), ("g.txt", "g2\n")], Some(u), T - 3500);
+    fx.head(
+        "refs/heads/main",
+        picked,
+        &[("f.txt", "A\nb\n"), ("g.txt", "g2\n")],
+    );
+    fx.reflog(&[
+        (None, a, T - 5000, "commit (initial): start"),
+        (Some(a), c, T - 3800, "commit: A"),
+        (Some(c), u, T - 3500, "pull --rebase (start): checkout u"),
+        (Some(u), picked, T - 3500, "pull --rebase (pick): A"),
+        (
+            Some(picked),
+            picked,
+            T - 3500,
+            "pull --rebase (finish): returning to refs/heads/main",
+        ),
+    ]);
+    fx.write("f.txt", "A\nB\n");
+    fx.write("g.txt", "g2\n");
+    let d = fx.driven(vec![agent(
+        &fx,
+        &[(T - 3900, "a\n", "A\n"), (T - 3000, "b\n", "B\n")],
+    )]);
+    let (s, steps) = agent_steps(&d);
+    assert_eq!(steps, 2, "both of the agent's steps stay in f's chain");
+    let f = &s.files[0].attribution;
+    assert_eq!((f.state, f.drifted_hunks), (AttributionState::Lines, 0));
+    assert_eq!(s.unclaimed, 1, "g came from upstream");
+}
+
+#[test]
+fn claims_survive_a_squash_by_reset_soft() {
+    let fx = Fx::new();
+    let a = fx.commit(&[("f.txt", "a\nb\nc\n")], None, T - 5000);
+    let c1 = fx.commit(&[("f.txt", "A\nb\nc\n")], Some(a), T - 3800);
+    let c2 = fx.commit(&[("f.txt", "A\nB\nc\n")], Some(c1), T - 3600);
+    // `git reset --soft A && git commit`: one commit for both.
+    let squash = fx.commit(&[("f.txt", "A\nB\nc\n")], Some(a), T - 3400);
+    fx.head("refs/heads/main", squash, &[("f.txt", "A\nB\nc\n")]);
+    fx.reflog(&[
+        (None, a, T - 5000, "commit (initial): start"),
+        (Some(a), c1, T - 3800, "commit: A"),
+        (Some(c1), c2, T - 3600, "commit: B"),
+        (Some(c2), a, T - 3500, "reset: moving to a"),
+        (Some(a), squash, T - 3400, "commit: A and B"),
+    ]);
+    fx.write("f.txt", "A\nB\nC\n");
+    let d = fx.driven(vec![agent(
+        &fx,
+        &[
+            (T - 3900, "a\n", "A\n"),
+            (T - 3700, "b\n", "B\n"),
+            (T - 3000, "c\n", "C\n"),
+        ],
+    )]);
+    let (s, steps) = agent_steps(&d);
+    assert_eq!(steps, 3);
+    let f = &s.files[0].attribution;
+    assert_eq!((f.state, f.drifted_hunks), (AttributionState::Lines, 0));
+}
+
+#[test]
+fn claims_survive_merging_main_into_the_agent_branch() {
+    let fx = Fx::new();
+    let a = fx.commit(&[("f.txt", "a\nb\nc\n"), ("g.txt", "g\n")], None, T - 5000);
+    let c = fx.commit(
+        &[("f.txt", "A\nb\nc\n"), ("g.txt", "g\n")],
+        Some(a),
+        T - 3800,
+    );
+    // main changed f's last line and g meanwhile; `git merge main`.
+    let m1 = fx.commit(
+        &[("f.txt", "a\nb\nc2\n"), ("g.txt", "g2\n")],
+        Some(a),
+        T - 3700,
+    );
+    let merge = fx.repo.commit_at(
+        fx.repo
+            .tree(&[("f.txt", b"A\nb\nc2\n"), ("g.txt", b"g2\n")]),
+        &[c, m1],
+        "merge",
+        T - 3500,
+    );
+    fx.repo.set_ref("refs/heads/main", m1);
+    fx.head(
+        "refs/heads/agent",
+        merge,
+        &[("f.txt", "A\nb\nc2\n"), ("g.txt", "g2\n")],
+    );
+    fx.reflog(&[
+        (None, a, T - 5000, "commit (initial): start"),
+        (Some(a), c, T - 3800, "commit: A"),
+        (
+            Some(c),
+            merge,
+            T - 3500,
+            "merge main: Merge made by the 'ort' strategy.",
+        ),
+    ]);
+    fx.write("f.txt", "A\nB\nc2\n");
+    fx.write("g.txt", "g2\n");
+    let d = fx.driven(vec![agent(
+        &fx,
+        &[(T - 3900, "a\n", "A\n"), (T - 3000, "b\n", "B\n")],
+    )]);
+    let (s, steps) = agent_steps(&d);
+    assert_eq!(steps, 2, "the merge does not cut the agent's steps");
+    let f = &s.files[0].attribution;
+    assert_eq!(f.state, AttributionState::Lines);
+    assert_eq!(f.turns.len(), 1);
+}
+
 #[test]
 fn claims_committed_changes_are_not_applied_again() {
     let fx = Fx::new();
@@ -751,11 +898,12 @@ fn claims_tree_changes_cached_and_finished_in_the_background() {
     );
     let id = d.open(target("a"));
     d.run();
-    let events = d.take_events();
-    assert!(
-        events.len() >= 2,
-        "a provisional snapshot, then the settled one"
-    );
+    // The first snapshot was provisional: f cut at the newest record, B's
+    // step out of the chain and B's line Drifted.
+    let snapshots = d.take_snapshots();
+    assert!(snapshots.len() >= 2);
+    let first = &snapshots[0].files[0].attribution;
+    assert_eq!((first.drifted_hunks, first.other_sessions.len()), (1, 0));
     let settled = render(&d, id);
     let (fresh, _) = {
         let dir = tempfile::tempdir().unwrap();
@@ -769,7 +917,7 @@ fn claims_tree_changes_cached_and_finished_in_the_background() {
     let work = d.engine.work(id).unwrap();
     assert!(work.pending.is_empty(), "the last round had it all");
     let reflog = work.git.worktree.head_reflog(0, 100).unwrap();
-    let (records, _) = crate::cutoff::window(&reflog.entries, 0, 0);
+    let (records, _) = crate::cutoff::window(&reflog.entries, 0, 0, &mut |_| false);
     assert_eq!(records.len(), 2);
     let partition = d.engine.cfg.cache.repo(work.git.common_dir());
     let paths = [path("f.txt")].into_iter().collect();
@@ -790,10 +938,12 @@ fn claims_others_first_snapshot_does_not_wait() {
     let d = fx.driven(vec![Arc::clone(&sessions)]);
     let id = d.open(target("a"));
     d.run();
-    let events = d.take_events();
     // B's claims were not cached: the first snapshot shows B's line as
     // Drifted, the background reads B's index and fixes it.
-    assert!(events.len() >= 2);
+    let snapshots = d.take_snapshots();
+    assert!(snapshots.len() >= 2);
+    let first = &snapshots[0].files[0].attribution;
+    assert_eq!((first.drifted_hunks, first.other_sessions.len()), (1, 0));
     let s = d.snapshot(id).unwrap();
     assert_eq!(s.files[0].attribution.drifted_hunks, 0);
     assert_eq!(&*s.files[0].attribution.other_sessions[0].id, "b");
@@ -1178,6 +1328,67 @@ fn rows_final_and_step_rows() {
     );
     assert!(d.rows(id, &final_key).is_none());
     assert!(d.rows(id, &step_key).is_some());
+}
+
+#[test]
+fn rows_prepared_again_after_a_refresh() {
+    let (fx, sessions) = unrelated_commit();
+    let d = fx.driven(vec![sessions]);
+    let (id, _) = open(&d, target("a"));
+    let key = RowsKey::Final {
+        file: modified("f.txt"),
+        context: 3,
+    };
+    let prepare = || {
+        d.command(
+            id,
+            ReviewCommand::Prepare(vec![Need::Rows(key.clone())].into()),
+        )
+    };
+    prepare();
+    d.run();
+    let before = d.rows(id, &key).unwrap();
+    // The file changes by hand, the user refreshes.
+    fx.write("f.txt", "A\nb\nC\nD\n");
+    d.command(id, ReviewCommand::Refresh);
+    d.run();
+    // The new work's install prepared the request again.
+    let again = d.rows(id, &key).unwrap();
+    assert_ne!(again.rows, before.rows);
+    assert_eq!(again.hunks.len(), 2);
+    assert_eq!(again.hunks[1].attribution.drifted, 1, "D has no source");
+    // The view sending the same request again gets the new rows too.
+    prepare();
+    d.run();
+    assert_eq!(d.rows(id, &key).unwrap().rows, again.rows);
+}
+
+#[test]
+fn rows_of_a_provisional_round_are_replaced() {
+    let (fx, sessions) = unrelated_commit();
+    let d = fx.driven(vec![sessions]);
+    let key = RowsKey::Final {
+        file: modified("f.txt"),
+        context: 3,
+    };
+    // Asked for before the first snapshot: prepared once the first round
+    // is in, when B's claims are not known yet, and again after the
+    // background's round with them.
+    let id = d.open(target("a"));
+    d.command(
+        id,
+        ReviewCommand::Prepare(vec![Need::Rows(key.clone())].into()),
+    );
+    d.run();
+    let prepared = d
+        .take_events()
+        .iter()
+        .filter(|(e, _)| matches!(e, lectern_services::review::ReviewEvent::Prepared { .. }))
+        .count();
+    assert!(prepared >= 2, "{prepared}");
+    let rows = d.rows(id, &key).unwrap();
+    let first = &rows.hunks[0].attribution;
+    assert_eq!((first.others.len(), first.drifted), (1, 0), "B's line");
 }
 
 #[test]

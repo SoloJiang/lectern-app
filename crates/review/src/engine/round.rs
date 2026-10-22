@@ -592,8 +592,15 @@ pub(crate) fn prepare(
             std::iter::once(f.path.clone()).chain(from)
         })
         .collect();
+    // A record after the base entry cuts only when it left the base's line
+    // of history; an empty-tree base is everything's ancestor.
+    let base_oid = base.commit.and_then(|c| oid_of(hash, &c));
+    let mut leaves = |e: &lectern_git::ReflogEntry| match (base_oid, e.new) {
+        (Some(base), Some(new)) => !engine.descends(&git, base, new, cancel),
+        _ => false,
+    };
     let (records, floor) = match mode {
-        CutoffMode::Records(i) => cutoff::window(&reflog.entries, i, window_s),
+        CutoffMode::Records(i) => cutoff::window(&reflog.entries, i, window_s, &mut leaves),
         CutoffMode::CommitTime(_) => (Vec::new(), None),
     };
     let commit_time = match mode {

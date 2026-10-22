@@ -289,7 +289,8 @@ impl SessionFixture {
         let worktree = repo.worktree(&lectern_git::WorktreeId::Main).unwrap();
         let window_s = (self.now.0 - cutoff::WINDOW_MS) / 1000;
         let reflog = worktree.head_reflog(window_s, 4096).unwrap();
-        let (records, _) = cutoff::window(&reflog.entries, 0, window_s);
+        // The target's base is the newest record: nothing comes after it.
+        let (records, _) = cutoff::window(&reflog.entries, 0, window_s, &mut |_| false);
         let paths: HashSet<ChangePath> = self
             .src
             .iter()

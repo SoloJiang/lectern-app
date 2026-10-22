@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Instant;
 
 use lectern_cache::{Budgets, Cache, Config as CacheConfig};
@@ -25,6 +25,7 @@ pub struct Driven {
     pub(crate) engine: Arc<Engine>,
     executor: Executor,
     events: Arc<Mutex<Vec<(ReviewEvent, Instant)>>>,
+    snapshots: Arc<Mutex<Vec<Arc<ReviewSnapshot>>>>,
     now: Arc<AtomicI64>,
     projects: Arc<FakeProjects>,
     cache: Cache,
@@ -69,6 +70,12 @@ impl Driven {
         });
         let events: Arc<Mutex<Vec<(ReviewEvent, Instant)>>> = Arc::default();
         let sink = Arc::clone(&events);
+        let snapshots: Arc<Mutex<Vec<Arc<ReviewSnapshot>>>> = Arc::default();
+        let kept = Arc::clone(&snapshots);
+        // The engine, for the snapshot each `Changed` published (the event
+        // is emitted with no lock held).
+        let me: Arc<OnceLock<Weak<Engine>>> = Arc::default();
+        let get = Arc::clone(&me);
         let clock = Arc::new(AtomicI64::new(now.0));
         let read = Arc::clone(&clock);
         let sources: Vec<Arc<dyn SessionSource>> = sessions
@@ -83,22 +90,46 @@ impl Driven {
             projects: Arc::clone(&projects) as _,
             sources: sources.into(),
             emit: Arc::new(move |e| {
+                let at = Instant::now();
+                if let ReviewEvent::Changed { id, .. } = &e
+                    && let Some(snapshot) = get
+                        .get()
+                        .and_then(Weak::upgrade)
+                        .and_then(|engine| engine.snapshot(*id))
+                {
+                    kept.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(snapshot);
+                }
                 sink.lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .push((e, Instant::now()))
+                    .push((e, at))
             }),
             clock: Arc::new(move || Timestamp(read.load(Ordering::Relaxed))),
             discover: Arc::new(lectern_git::testing::discover),
             interactive_budget,
         });
+        let _ = me.set(Arc::downgrade(&engine));
         Driven {
             engine,
             executor,
             events,
+            snapshots,
             now: clock,
             projects,
             cache,
         }
+    }
+
+    /// The snapshots published with each `Changed` so far, in order; the
+    /// list is emptied.
+    pub fn take_snapshots(&self) -> Vec<Arc<ReviewSnapshot>> {
+        std::mem::take(
+            &mut *self
+                .snapshots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     pub fn set_now(&self, now: Timestamp) {

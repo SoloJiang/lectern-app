@@ -97,6 +97,8 @@ pub(crate) struct Engine {
     claims: Mutex<HashMap<SessionKey, Arc<Claims>>>,
     adapters: Mutex<HashMap<SourceId, u32>>,
     versions: Mutex<Versions>,
+    /// (ancestor, commit) → is it its ancestor; `review.ancestry` behind it.
+    ancestry: Mutex<HashMap<(lectern_git::Oid, lectern_git::Oid), bool>>,
 }
 
 #[derive(Default)]
@@ -185,6 +187,7 @@ impl Engine {
             claims: Mutex::new(HashMap::new()),
             adapters: Mutex::new(HashMap::new()),
             versions: Mutex::new(Versions::default()),
+            ancestry: Mutex::new(HashMap::new()),
         })
     }
 
@@ -277,12 +280,20 @@ impl Engine {
             .values()
             .filter_map(|o| o.work.as_ref().map(|w| w.git.key.clone()))
             .collect();
+        let sessions: HashSet<SessionKey> = state
+            .reviews
+            .values()
+            .filter_map(|o| o.work.as_ref())
+            .flat_map(|w| w.whos.iter().map(|who| who.key.clone()))
+            .collect();
         let empty = state.reviews.is_empty();
         drop(state);
         lock(&self.gits).retain(|k, _| used.contains(k));
         lock(&self.tables).retain(|k, _| used.contains(k));
+        lock(&self.claims).retain(|k, _| sessions.contains(k));
         if empty {
             lock(&self.versions).clear();
+            lock(&self.ancestry).clear();
         }
     }
 
@@ -416,8 +427,16 @@ impl Engine {
                 return;
             };
             open.work = Some(Arc::clone(&work));
+            // Rows of the previous work show its texts and attribution:
+            // drop them and prepare what the view asked for again. Texts
+            // are at fixed positions of append-only session files: kept.
+            open.rows.clear();
+            let needs = Arc::clone(&open.needs);
             let snapshot = self.assemble(open, &work, Some(&log));
             events.push(changed(open, snapshot));
+            if !needs.is_empty() {
+                self.prepare(&mut state, id, needs);
+            }
         }
         self.emit(events);
         self.submit(Priority::Background, move |engine| {
@@ -949,7 +968,10 @@ impl Engine {
             let Some(open) = state.reviews.get_mut(&id) else {
                 return;
             };
-            if open.prepare != seq {
+            // A newer request, or a newer round whose work these rows are
+            // not of (its install prepares the request again).
+            let same_work = open.work.as_ref().is_some_and(|w| Arc::ptr_eq(w, &work));
+            if open.prepare != seq || !same_work {
                 return;
             }
             open.rows.extend(rows);
@@ -1069,6 +1091,27 @@ impl Engine {
         let after = table.unknown(records).len();
         lock(&self.tables).insert(git.key.clone(), table);
         after < before
+    }
+
+    /// Whether `ancestor` is an ancestor of `of`: from memory, else
+    /// `review.ancestry`, else walked. An error counts as not (the record
+    /// then cuts the paths it changed: the conservative side). Blocking.
+    pub(crate) fn descends(
+        &self,
+        git: &Git,
+        ancestor: lectern_git::Oid,
+        of: lectern_git::Oid,
+        cancel: &AtomicBool,
+    ) -> bool {
+        if let Some(&found) = lock(&self.ancestry).get(&(ancestor, of)) {
+            return found;
+        }
+        let partition = self.cfg.cache.repo(git.common_dir());
+        let Some(found) = cutoff::descends(&git.repo, &partition, ancestor, of, cancel) else {
+            return false;
+        };
+        lock(&self.ancestry).insert((ancestor, of), found);
+        found
     }
 
     pub(crate) fn adapter(&self, source: &SourceId) -> Option<u32> {
