@@ -652,6 +652,7 @@ crates/bench/
 | `syntax/edit_tree_bytes` | 最大值 ≤ 41 MiB（编辑会话对档位 A 上限处的文件（1 MiB 减 4 KiB 的 TypeScript、Rust）完成第一次解析之后持有的活跃字节：语法树为主，加缓冲区的文本和区间，tree-sitter 的分配计入；结束会话后释放；`Memory`，[ADR 0034](../adr/0034.md)） | [file_reader](file_reader.md#性能) | file_reader 第 5 步 |
 | `syntax/prefetch_wait` | p95 ≤ 500 ms，最大值只记录（真实的 `code_intel` 在 10 万个 8 KiB 文件的夹具上建索引、同一个 executor 上打开的 16 MiB 文件的窗口链在运行时，预取从请求到预取任务开始做它的那一轮；每个批量线程的一批约 350 ms 加一个 50 ms 的窗口任务，留 25% 余量） | [file_reader](file_reader.md#性能) | file_reader 第 4 步 |
 | `plugin/code-intel/resident_cloudprint`、`plugin/code-intel/resident_100k` | 中位数 ≤ 4 MB / ≤ 10 MB（一个项目建完索引、做过一次跳转之后本 crate 的活跃字节，测量前丢掉那次跳转保留的解析（不在 [ADR 0035](../adr/0035.md) 的采样状态里，见 [ADR 0037](../adr/0037.md)），计数分配器，tree-sitter 的分配计入，不含文件列表；`Memory`，进程级基准实现之前在进程内测量） | [code_intel](code_intel.md#性能) | `code_intel` 第 4 步 |
+| `review/log_load_16k` | 中位数 < 30 ms（16 000 条记录、约 5.3 MiB 的标注日志整份读入并建索引，后台；夹具是 `lectern_review::testing::write_log`） | [review](review.md#性能) | `review` 第 1 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_range` | 中位数 ≤ 同一路径上 `File::open`、`metadata`、两次 `read_at`、`metadata` 的 1.5 倍，且 < 200 µs（64 MiB 的文件，首屏的文件头 8 KiB 加中部目标附近 132 KiB） | [platform](platform.md#性能) | `platform` 范围读取（[#103](https://github.com/SoloJiang/lectern-app/issues/103)） |

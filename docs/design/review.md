@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；其余前置条件与第 1–5 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）；其余前置条件与第 2–5 步尚未实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分），审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 只预留数据模型。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)）。
 
@@ -952,15 +952,15 @@ pub(crate) enum TargetKey {
 
 ```text
 {"lectern":"review-log","v":1,"repo":"/abs/common/dir"}
-{"t":"seen","at":1760000000000,"target":{"session":{"source":"session-claude-code","id":"…"}},"key":{…}}
+{"t":"seen","at":1760000000000,"target":{"session":{"source":"session-claude-code","id":"…"}},"key":{"old_path":"src/a.rs","new_path":"src/a.rs","old":{"mode":"file","content":{"blob":"…"}},"new":{…},"status":"modified"}}
 {"t":"unseen","at":…,"target":…,"file":{"old":null,"new":"src/a.rs"}}
-{"t":"base","at":…,"session":{"source":"…","id":"…"},"commit":"<40 或 64 位十六进制>","entry_at":<基准记录的时间，Unix 秒；没有时为 null>}
+{"t":"base","at":…,"session":{"source":"…","id":"…"},"commit":"<40 或 64 位十六进制；空树（unborn）为 null>","entry_at":<基准记录的时间，Unix 秒；没有时为 null>}
 ```
 
-- 路径是 UTF-8 时写成字符串，否则写成字节数组。OID 写成十六进制。`at` 是 Unix 毫秒。
+- 路径是 UTF-8 时写成字符串，否则写成字节数组。OID 写成十六进制。`at` 是 Unix 毫秒。`target` 的另两种是 `{"outside":{"worktree":"…"}}`、`{"range":{"worktree":"…","base":"head" | {"commit":"…"} | {"merge_base":"refs/heads/main"}}}`；`content` 是 `blob`、`unhashed`、`filtered`（`sha256` 或 `stat`）、`unavailable` 之一，`NotRetained` 记作 `blob`（见「已看状态」）。日志的编码由本 crate 自己定义，不随 `services` 类型的序列化变化。
 - 文件头的 `repo` 与当前仓库不同（文件被复制、哈希碰撞）时把文件改名为 `<h>.jsonl.foreign-<时刻>` 后新建，不读它的记录。
-- 读取：打开项目的概览或审阅时，在 `Background` 任务里整份读入（上限 64 MiB，超过时只读最后 64 MiB 并从第一个完整行开始）。坏行跳过并计数；认不出的 `t` 原样保留；末尾没有换行的一行丢弃，下一次追加之前截掉它。
-- 内存里的索引：每个审阅对象、每个文件标识（`new_path`，没有时 `old_path`）只保留最近一条 `seen` 或 `unseen`，加上每个会话的 `base`。项目关闭后释放。
+- 读取：打开项目的概览或审阅时，在 `Background` 任务里整份读入（上限 64 MiB，超过时只读最后 64 MiB 并从第一个完整行开始）。坏行跳过并计数；认不出的 `t` 原样保留；末尾没有换行的一行丢弃，下一次追加之前截掉它。本进程不知道文件末尾的状态时（读取失败、别的写入者追加过）不截断，文件不以换行结尾就先补一个换行，残行成为一个坏行，新记录不受影响。文件头的 `v` 不是 1 或文件头坏了时照常读记录，但只追加、不压缩。
+- 内存里的索引：每个审阅对象、每个文件标识（`new_path`，没有时 `old_path`）只保留最近一条 `seen` 或 `unseen`，加上每个会话的 `base`（同一会话有多条时取最早的一条，它是已看标记所依据的基准）。项目关闭后释放。
 - 写入：命令在内存里生效后把记录放进待写队列；队列在 100 ms 内没有新记录、或累计 64 条时，由一个 `Background` 任务（持有 `BusyGuard`）追加并 `fdatasync`。写失败时保留队列，下一次再试，记日志；进程退出前没写完的标记丢失（已知限制）。
 - 压缩：文件超过 4 MiB 时，在下一次写入的任务里写一份只含文件头、内存索引里的记录和认不出的记录的新文件，`fsync` 后改名替换并 `fsync` 目录。超过一年的 `seen` / `unseen` 记录在压缩时丢弃。
 - 压缩的前提（关键约束，ADR 0044）：内存索引来自对这个文件的一次完整、成功的读取（读到文件末尾，没有 IO 错误，没有因 64 MiB 的上限只读一部分，文件头的仓库相符），加上本进程在那之后自己的追加；并且文件的身份（设备号、inode）和长度与「读取的结束位置加本进程追加的字节」相同，说明期间没有别的写入者。任何一条不满足时只追加、不压缩：读取失败或只读了一部分时，内存索引缺记录，用它重写文件会丢掉用户的标记。下一次完整读取成功后恢复压缩。
@@ -1101,7 +1101,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | `review/refresh_one` | 中位数 < 20 ms |
 | `review/mark_seen_5000` | 中位数 < 0.2 ms |
 | `review/chain_3000_lines` | 只记录（3000 行的文件、40 次 `Replace`，含 `line_diff`，不含 `load`） |
-| `review/log_load_16k` | 中位数 < 30 ms（16 000 条记录、约 4 MiB 的日志整份读入并建索引，后台） |
+| `review/log_load_16k` | 中位数 < 30 ms（16 000 条记录、约 5.3 MiB 的日志整份读入并建索引，后台） |
 | `review/overview_cloudprint` | 只记录（cloudprint 形状，20 个会话，计数比较之后的一轮概览） |
 | `review/resident_cloudprint_bytes`、`review/resident_100k_bytes` | 存活字节 < 1 MB / < 1 MB（概览就绪后本 crate 的常驻，不含计数改动集；`Memory`） |
 | `review/brief_5000` | 中位数 < 5 ms（5000 个文件的规则简报） |
@@ -1215,7 +1215,9 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 ## 实际验证
 
-前置条件 A（`services` 的 `changes`、`review` 模块），在 Linux（x86_64 容器）上运行：
+### 前置条件 A
+
+`services` 的 `changes`、`review` 模块，在 Linux（x86_64 容器）上运行：
 
 - `rg -n 'pub trait ChangeSource|pub trait Review\b|pub trait BriefRules' crates/services/src` 各有一处（`changes/mod.rs`、`review/mod.rs`、`review/rules.rs`）。
 - `just test -p lectern-services`：70 个测试通过，新增 17 个。
@@ -1227,12 +1229,32 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - `just check`、`just doctest`、`just deny` 通过。全量 `just test`（不依赖 GPUI 的全部 crate）第一次运行时 `lectern-syntax` 的 `object_content_nobody_holds_is_taken_out_on_the_first_screen` 失败一次（断言首屏高亮为 `On`，实际是 `Pending`）。这个 crate 不使用新模块；单独重跑三次都通过，`--no-fail-fast` 重跑全量时 1838 个测试全部通过，判断为并行负载下的时序抖动。
 - 没有在 macOS 上运行：`services` 不依赖 GPUI，Linux 与 macOS 编译的代码相同。本步没有 bench 条目。
 
+### 第 1 步
+
+在 Linux（x86_64，4 核，内核 6.18，与其他编译任务共用机器）上运行。本步不依赖 GPUI，也没有 macOS 专属代码。
+
+- `just check`、`just test`（整个工作区 1871 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `just test -p lectern-review`：50 个测试通过。按前缀：`noise_*` 6、`group_*` 4、`sensitive_*` 8、`seen_*` 12、`log_*` 20（含 `log_no_compaction_after_failed_read`）。insta 快照 4 个（日志的行格式、压缩后保留认不出的记录的文件、噪声与分组的路径表、按子项目排序的分组），逐个看过。
+- `log_no_compaction_after_failed_read`：注入的读取错误之后继续标记，追加到超过压缩上限（测试里调小为 8 KiB，写到 32 KiB），文件的 inode 不变、原有字节仍在开头；之后一次完整读取里原有的 20 个已看标记和基准都在，这次读取之后的写入恢复压缩。`log_compaction_needs_the_index_to_be_the_file` 覆盖另外几种只追加的情况：读取之后有别的写入者追加、本进程追加之后到压缩之前有别的写入者（压缩前的身份核对拦下，没有开始写临时文件）、只读了最后一部分（`READ_MAX` 调小）、文件头的 `v` 为 2。`log_compacts_above_4_mib` 用真实的 4 MiB 上限。
+- `review/log_load_16k`（`cargo bench -p lectern-bench --all-features --bench time -- review/`，采样模式）：中位数 22.8 ms，p95 27.6 ms，42 个样本，预算 < 30 ms。夹具 16 000 条记录、5 556 267 字节。第一版每行解析两遍（先取类型再按类型解析）时中位数是 32.5 ms，改为一遍解析、重复的字符串（来源、会话 ID、worktree）共用一份之后降到上面的数字。没有在 macOS 上测量。
+- `rg -n 'rusqlite' crates/review/Cargo.toml` 没有结果。
+- 没有验证的：待写队列的 100 ms / 64 条合并、`Background` 任务与 `BusyGuard`、首帧之前不读，属于第 3 步接入审阅引擎时的内容；本步只提供 `LogFile`、`Index` 和 `flush`。
+
 ## 与设计的差异
 
-前置条件 A：
+### 前置条件 A
 
 - `ListHandle` 的比较（「接口」已补上）：`ChangeList` 派生 `PartialEq`、`Eq`、`Debug`，`#[serde(skip)]` 要求 `Default`，所以 `ListHandle` 手写这几项。两个句柄比较时总是相等，`Debug` 不打印内容。句柄只是实现方的缓存，不属于改动集的值；这样 `ChangeList` 的比较与 JSON 往返结果一致，git 第 4 步按字段核对转换结果时也不受句柄影响。
 - `review` 模块的数据类型同样派生 `Clone`、`PartialEq`、`Eq`、`Debug`、`Serialize`、`Deserialize`（「接口」已补上）。设计只对 `changes` 写明了这一点，但 `crates/services/AGENTS.md`「边界」要求类型能经 JSON-RPC 传给进程插件。
 - 设计没有列出的派生：除 `ChangeList`、`ReviewSnapshot` 外的数据类型都派生 `Hash`。`Review::open` 按 `ReviewTarget` 找已打开的审阅，`FileKey`、`RowsKey`、`TextKey`、`StepId` 用作缓存与视图状态的键。不含 `Arc` 的小类型派生 `Copy`。`ChangePath`、`FileKey`、`TurnRef`、`StepId`、`ReviewId` 派生 `Ord`，路径按字节序；`GroupKind`、`NoiseKind` 派生 `Ord`，按声明顺序即显示顺序。`Capabilities`、`ChangeTotals`、`Progress`、`Note` 派生 `Default`。
 - `ChangePath` 用派生的序列化，JSON 里是字节数组。标注日志里「UTF-8 时写成字符串」的规则属于 `review` 自己的日志格式，不在这里实现。
 - `BriefReply::send` 只调用回调，不检查 `cancelled`：丢弃过期答复由 `review` 传入的回调负责。`cancelled()` 以 `Acquire` 读取。`Debug` 输出 `cancelled` 的当前值。
+
+### 第 1 步
+
+- **前置条件 A 的类型用替身。** 第 1 步不需要前置条件，但 `noise::sensitive` 的 `FileChange`、`SeenKey` 用到的 `ChangePath`、`FileMode`、`SideIdentity`、`BaseSpec` 和 `NoiseKind`、`GroupKind`、`SensitiveKind`、`FileKey`、`SeenState`、`Progress` 都在还没有合并的 `services` 模块里。本步在 `src/types.rs` 里按「接口」的名字和字段写了替身（`FileChange` 只含 `status`、`path`、`old`、`new`、`generated`），第 3 步删掉它，改用 `lectern_services` 的类型。已有的 `BlobId`、`Timestamp` 直接用 `lectern-services` 的。标注日志的编码是本 crate 自己的（`log/wire.rs`），替换类型不改变文件格式。
+- **`NotRetained` 与 `Blob` 是同一个内容。** `SeenKey` 把 `SideIdentity::NotRetained(oid)` 记作 `Blob(oid)`，`Sensitive(Symlink)`、`Sensitive(Submodule)` 比较两侧时也一样：工作区内容是否保留取决于改动集的保留预算，不取决于内容，否则一次刷新就会让已看的文件变成「审过之后又被改过」。
+- **`Sensitive` 的路径匹配范围。** 「简报规则」表写的是「路径是」「在……下」。`CLAUDE.md`、`AGENTS.md`、`GEMINI.md` 和 `.gitattributes` 按文件名在任何目录里匹配（agent 也加载子目录里的指令文件，子目录的 `.gitattributes` 同样生效）；`.claude/`、`.codex/`、`.cursor/` 是任何一级目录；其余（`.mcp.json`、`.github/copilot-instructions.md`、`.github/workflows/`、`.circleci/`、`.gitlab-ci.yml`、`Jenkinsfile`、`azure-pipelines.yml`、`.husky/`、`.githooks/`、`.pre-commit-config.yaml`、`lefthook.yml`、`.gitmodules`）从 worktree 根匹配。路径规则同时看重命名的来源，删除的文件也触发路径规则。
+- **标注日志的细节**（已写进「标注日志」）：`key` 的编码；空树的基准 `commit` 为 `null`；同一会话有多条 `base` 时取最早的一条；不知道文件末尾状态时补换行而不截断；文件头坏了或 `v` 不是 1 时只追加、不压缩。
+- **`testing` 的日志夹具。** `testing::write_log`、`testing::load_log` 给 `review/log_load_16k` 用；「本 crate 的公开项」里的 `FakeSessions`、`FakeProjects`、`Driven` 随第 3 步加入。
+- **`review/log_load_16k` 的夹具大小。** 一条已看记录约 350 字节（ADR 0044 估计 250 字节），16 000 条是 5.3 MiB，不是 4 MiB；基准按 16 000 条测量，比原来的估计更重，「性能」表已改。

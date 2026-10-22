@@ -165,6 +165,7 @@ const I18N: &str = "docs/design/i18n.md#性能";
 const FS_WATCH: &str = "docs/design/fs_watch.md#性能";
 const CODE_INTEL: &str = "docs/design/code_intel.md#性能";
 const FILE_READER: &str = "docs/design/file_reader.md#性能";
+const REVIEW: &str = "docs/design/review.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -1693,6 +1694,17 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // ---- review (review design, step 1) ----
+    // The annotation log read whole and its index built: 16 000 records
+    // (about 5.3 MiB), in the background when a project opens.
+    share(
+        "review/log_load_16k",
+        &[median(Limit::TimeBelow(ms(30)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
+    // ---- end review ----
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),
     share("executor/wake_1000x100", RECORD, EXECUTOR, ACTIVE, Time),
     share("kernel/service_get", RECORD, KERNEL, ACTIVE, Time),

@@ -1,0 +1,9 @@
+---
+source: crates/review/src/log/tests.rs
+expression: fx.text()
+---
+{"lectern":"review-log","v":1,"repo":"/work/repo/.git"}
+{"t":"note","at":1760000000000,"anchor":{"side":"new","line":3},"text":"why \u00e9?"}
+{"t":"seen","at":1760000000000,"target":{"session":{"source":"session-claude-code","id":"a"}},"key":{"old_path":"b.rs","new_path":"b.rs","old":{"mode":"file","content":{"blob":"0101010101010101010101010101010101010101"}},"new":{"mode":"file","content":{"blob":"0202020202020202020202020202020202020202"}},"status":"modified"}}
+{"t":"notes_sent","at":1760000000001,"to":[1,2]}
+{"t":"seen","at":1760000000000,"target":{"session":{"source":"session-claude-code","id":"a"}},"key":{"old_path":"a.rs","new_path":"a.rs","old":{"mode":"file","content":{"blob":"0101010101010101010101010101010101010101"}},"new":{"mode":"file","content":{"blob":"2727272727272727272727272727272727272727"}},"status":"modified"}}

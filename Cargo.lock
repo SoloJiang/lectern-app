@@ -4244,6 +4244,7 @@ dependencies = [
  "lectern-kernel",
  "lectern-platform",
  "lectern-project",
+ "lectern-review",
  "lectern-services",
  "lectern-syntax",
  "serde_json",
@@ -4401,6 +4402,14 @@ version = "0.0.0"
 [[package]]
 name = "lectern-review"
 version = "0.0.0"
+dependencies = [
+ "insta",
+ "lectern-services",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-review-view"

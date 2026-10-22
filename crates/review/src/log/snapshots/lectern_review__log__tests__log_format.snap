@@ -1,0 +1,13 @@
+---
+source: crates/review/src/log/tests.rs
+expression: fx.text()
+---
+{"lectern":"review-log","v":1,"repo":"/work/repo/.git"}
+{"t":"base","at":1760000000000,"session":{"source":"session-claude-code","id":"8f2c1a64-5b7e-4d3a-9c10-000000000001"},"commit":"0707070707070707070707070707070707070707","entry_at":1759999970}
+{"t":"seen","at":1760000000000,"target":{"session":{"source":"session-claude-code","id":"8f2c1a64-5b7e-4d3a-9c10-000000000001"}},"key":{"old_path":"src/lib.rs","new_path":"src/lib.rs","old":{"mode":"file","content":{"blob":"0101010101010101010101010101010101010101"}},"new":{"mode":"file","content":{"blob":"0202020202020202020202020202020202020202"}},"status":"modified"}}
+{"t":"seen","at":1760000000001,"target":{"session":{"source":"session-claude-code","id":"8f2c1a64-5b7e-4d3a-9c10-000000000001"}},"key":{"old_path":"src/old.rs","new_path":"src/new.rs","old":{"mode":"file","content":{"blob":"0101010101010101010101010101010101010101"}},"new":{"mode":"executable","content":{"blob":"0202020202020202020202020202020202020202020202020202020202020202"}},"status":"renamed"}}
+{"t":"seen","at":1760000000002,"target":{"range":{"worktree":"worktrees/feature","base":{"merge_base":"refs/heads/main"}}},"key":{"old_path":null,"new_path":[100,97,116,97,47,255,254,46,98,105,110],"old":null,"new":{"mode":"file","content":{"unhashed":{"size":1099511627776,"mtime_ns":1760000000123456789,"inode":42}}},"status":"added"}}
+{"t":"seen","at":1760000000003,"target":{"outside":{"worktree":""}},"key":{"old_path":"assets/logo.png","new_path":"assets/logo.png","old":{"mode":"symlink","content":{"filtered":{"sha256":"abababababababababababababababababababababababababababababababab"}}},"new":{"mode":"gitlink","content":{"filtered":{"stat":{"size":7,"mtime_ns":-1,"inode":9}}}},"status":"type_changed"}}
+{"t":"seen","at":1760000000004,"target":{"outside":{"worktree":""}},"key":{"old_path":"vendor/sock","new_path":null,"old":{"mode":"special","content":{"unavailable":"unsupported_type"}},"new":null,"status":"deleted"}}
+{"t":"unseen","at":1760000000005,"target":{"session":{"source":"session-claude-code","id":"8f2c1a64-5b7e-4d3a-9c10-000000000001"}},"file":{"old":"src/lib.rs","new":"src/lib.rs"}}
+{"t":"base","at":1760000000006,"session":{"source":"session-claude-code","id":"unborn"},"commit":null,"entry_at":1759999970}
