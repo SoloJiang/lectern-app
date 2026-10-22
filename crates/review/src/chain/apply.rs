@@ -4,17 +4,20 @@
 
 use lectern_services::changes::ChangePath;
 
-use super::{Edit, Op, lines};
+use super::{Edit, Op, Rename, lines};
 
 /// The version and path after `edits` (a call's edits, all paths) on
 /// `version` at `path`: in order, the edits on the path the chain is on,
-/// following moves. None when one of them does not apply or none is on the
-/// path; a call is atomic, as the tools apply a `MultiEdit` or a multi-file
-/// patch. `worktree_cr`: the worktree side has a `\r`, so a `Write`'s CRLF
-/// stays as written.
+/// following moves, and the rename's target once the chain meets an edit
+/// on it while still on the source (`Rename::follows`). None when one of
+/// them does not apply or none is on the path; a call is atomic, as the
+/// tools apply a `MultiEdit` or a multi-file patch, so a call that fails
+/// does not move the chain either. `worktree_cr`: the worktree side has a
+/// `\r`, so a `Write`'s CRLF stays as written.
 pub(super) fn step(
     version: Option<&[u8]>,
     path: &ChangePath,
+    rename: Rename<'_>,
     edits: &[Edit],
     worktree_cr: bool,
 ) -> Option<(Option<Vec<u8>>, ChangePath)> {
@@ -23,7 +26,10 @@ pub(super) fn step(
     let mut any = false;
     for edit in edits {
         if edit.path != path {
-            continue;
+            if !rename.follows(&path, &edit.path) {
+                continue;
+            }
+            path = edit.path.clone();
         }
         any = true;
         current = match &edit.op {
@@ -130,8 +136,28 @@ struct Hunk {
     /// insertion, the line it goes after). None for `apply_patch`'s `@@` and
     /// `@@ <context>`, which carry no line numbers.
     start: Option<u32>,
+    /// `apply_patch`'s `@@ <context>` lines, in order (stacked headers are
+    /// nested): each is sought as a whole line after the one before, and
+    /// the hunk matches after the last.
+    seek: Vec<Vec<u8>>,
     old: Vec<Vec<u8>>,
     new: Vec<Vec<u8>>,
+}
+
+impl Hunk {
+    fn new(start: Option<u32>, seek: Option<&str>) -> Hunk {
+        Hunk {
+            start,
+            seek: seek.map(|s| s.as_bytes().to_vec()).into_iter().collect(),
+            old: Vec::new(),
+            new: Vec::new(),
+        }
+    }
+
+    /// No lines yet, and no line number: a header that only seeks.
+    fn only_seeks(&self) -> bool {
+        self.start.is_none() && self.old.is_empty() && self.new.is_empty()
+    }
 }
 
 /// Parses the hunks of a unified diff without file headers: Claude Code's
@@ -140,7 +166,11 @@ struct Hunk {
 /// empty line is an empty context line; `\ No newline at end of file`
 /// takes the newline off the line before it. Lines before the first `@@`
 /// form a hunk without a line number (`apply_patch` may omit the first
-/// `@@`). Anything else is not a patch this reads: None.
+/// `@@`). A header without line numbers keeps its text after `@@ ` as a
+/// line to seek (`apply_patch`'s `@@ <context>`, which `load(input)` keeps
+/// in the body); consecutive such headers (`@@ class A` then `@@ fn f`)
+/// are one hunk with nested seeks. Anything else is not a patch this
+/// reads: None.
 fn parse(text: &str) -> Option<Vec<Hunk>> {
     #[derive(Clone, Copy)]
     enum Last {
@@ -157,20 +187,22 @@ fn parse(text: &str) -> Option<Vec<Hunk>> {
     }
     for line in body.split('\n') {
         if let Some(header) = line.strip_prefix("@@") {
-            hunks.push(Hunk {
-                start: header_start(header),
-                old: Vec::new(),
-                new: Vec::new(),
-            });
+            let start = header_start(header);
+            let seek = match start {
+                Some(_) => None,
+                None => Some(header.strip_prefix(' ').unwrap_or(header)).filter(|s| !s.is_empty()),
+            };
+            match hunks.last_mut() {
+                Some(h) if start.is_none() && h.only_seeks() => {
+                    h.seek.extend(seek.map(|s| s.as_bytes().to_vec()))
+                }
+                _ => hunks.push(Hunk::new(start, seek)),
+            }
             last = Last::None;
             continue;
         }
         if hunks.is_empty() {
-            hunks.push(Hunk {
-                start: None,
-                old: Vec::new(),
-                new: Vec::new(),
-            });
+            hunks.push(Hunk::new(None, None));
         }
         let h = hunks.last_mut()?;
         let with_newline = |rest: &str| {
@@ -235,9 +267,12 @@ fn header_start(header: &str) -> Option<u32> {
 /// header puts it (shifted by the offset the hunks before it were found
 /// at), then at the nearest position that matches, as `git apply` does;
 /// hunks apply in order and never overlap. A hunk without a line number
-/// takes the first match after the hunk before it, and a pure insertion
-/// without one goes at the end. No fuzzy matching: one hunk that does not
-/// match and the patch does not apply.
+/// works as `apply_patch` does: each of its `@@ <context>` lines is the
+/// first whole line equal to it after the previous one (from the end of
+/// the hunk before), and the hunk takes the first match after the last of
+/// them; a pure insertion goes right after it, or at the end when there is
+/// none. No fuzzy matching: one context line or hunk that does not match
+/// and the patch does not apply.
 fn patch(version: &[u8], text: &str) -> Option<Vec<u8>> {
     let hunks = parse(text)?;
     let have: Vec<&[u8]> = lines(version).collect();
@@ -250,14 +285,24 @@ fn patch(version: &[u8], text: &str) -> Option<Vec<u8>> {
             let s = i64::from(s) - i64::from(n > 0);
             s + offset
         });
+        let mut from = cursor;
+        for line in &h.seek {
+            let found = (from..have.len())
+                .find(|&p| have[p].strip_suffix(b"\n").unwrap_or(have[p]) == line.as_slice())?;
+            from = found + 1;
+        }
         let at = if n == 0 {
-            let at = want.unwrap_or(have.len() as i64);
+            let at = match want {
+                Some(want) => want,
+                None if h.seek.is_empty() => have.len() as i64,
+                None => from as i64,
+            };
             if at < cursor as i64 || at > have.len() as i64 {
                 return None;
             }
             at as usize
         } else {
-            find(&have, &h.old, cursor, want)?
+            find(&have, &h.old, from, want)?
         };
         if let Some(want) = want {
             offset += at as i64 - want;
@@ -326,14 +371,60 @@ mod tests {
             hunks,
             [Hunk {
                 start: Some(2),
+                seek: Vec::new(),
                 old: vec![b"a\n".to_vec(), b"b".to_vec()],
                 new: vec![b"a\n".to_vec(), b"B".to_vec()],
             }]
         );
-        assert_eq!(parse("@@ fn main\n-x\n+y\n").unwrap()[0].start, None);
+        let ctx = parse("@@ fn main\n-x\n+y\n").unwrap();
+        assert_eq!(
+            (ctx[0].start, &ctx[0].seek[..]),
+            (None, &[b"fn main".to_vec()][..])
+        );
+        // Git's function context after a numbered header is not sought.
+        assert!(
+            parse("@@ -1 +1 @@ fn main\n-x\n+y\n").unwrap()[0]
+                .seek
+                .is_empty()
+        );
         assert_eq!(parse("@@ -0,0 +1 @@\n+x\n").unwrap()[0].start, Some(0));
+        assert!(parse("@@\n-x\n").unwrap()[0].seek.is_empty());
         assert!(parse("@@\n*x\n").is_none());
         assert!(parse("").is_none());
+    }
+
+    #[test]
+    fn chain_patch_stacked_headers_are_nested_seeks() {
+        let hunks = parse("@@ class A\n@@   fn f\n-    x\n+    y\n@@ fn g\n-z\n+Z\n").unwrap();
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].seek, [b"class A".to_vec(), b"  fn f".to_vec()]);
+        assert_eq!(hunks[1].seek, [b"fn g".to_vec()]);
+    }
+
+    #[test]
+    fn chain_patch_context_header_places_the_hunk() {
+        // The same block twice: `@@ fn b() {` puts the change in the second,
+        // where `apply_patch` made it.
+        let version = b"fn a() {\n    x\n}\nfn b() {\n    x\n}\n";
+        assert_eq!(
+            patch(version, "@@ fn b() {\n-    x\n+    y\n").unwrap(),
+            b"fn a() {\n    x\n}\nfn b() {\n    y\n}\n"
+        );
+        // Stacked headers seek in turn: `class B`, then its `fn f`.
+        let version = b"class A\n  fn f\n    x\nclass B\n  fn f\n    x\n";
+        assert_eq!(
+            patch(version, "@@ class B\n@@   fn f\n-    x\n+    y\n").unwrap(),
+            b"class A\n  fn f\n    x\nclass B\n  fn f\n    y\n"
+        );
+        // An insertion goes right after its context line.
+        assert_eq!(
+            patch(b"a\nb\nc\n", "@@ b\n+new\n").unwrap(),
+            b"a\nb\nnew\nc\n"
+        );
+        // A context line that is not there: the patch does not apply.
+        assert!(patch(version, "@@ class C\n-    x\n+    y\n").is_none());
+        // Whole lines only: `fn b() {` is not a line of this version.
+        assert!(patch(b"  fn b() {\n x\n", "@@ fn b() {\n- x\n+ y\n").is_none());
     }
 
     #[test]

@@ -74,14 +74,22 @@ fn side(text: Option<&str>) -> Side<'_> {
 }
 
 fn run(base: Option<&str>, worktree: Option<&str>, steps: &[StepInput]) -> Chain {
-    run_at("f.rs", base, worktree, steps)
+    run_at(("f.rs", "f.rs"), base, worktree, steps)
 }
 
-fn run_at(start: &str, base: Option<&str>, worktree: Option<&str>, steps: &[StepInput]) -> Chain {
-    let start = path(start);
+/// A chain from `paths.0` (the base side's path) to `paths.1` (the
+/// worktree side's).
+fn run_at(
+    paths: (&str, &str),
+    base: Option<&str>,
+    worktree: Option<&str>,
+    steps: &[StepInput],
+) -> Chain {
+    let (start, end) = (path(paths.0), path(paths.1));
     build(&ChainInput {
         hash: HashKind::Sha1,
         start: &start,
+        end: &end,
         base: side(base),
         worktree: side(worktree),
         steps,
@@ -348,7 +356,7 @@ fn chain_follows_move_to() {
         // The chain is on b.rs now: an edit of a.rs is not on its path.
         step(3, vec![replace("a.rs", "one\n", "uno\n")]),
     ];
-    let chain = run_at("a.rs", base, worktree, &steps);
+    let chain = run_at(("a.rs", "b.rs"), base, worktree, &steps);
     let outcomes: Vec<Outcome> = chain.steps.iter().map(|s| s.outcome).collect();
     assert_eq!(
         outcomes,
@@ -356,6 +364,97 @@ fn chain_follows_move_to() {
     );
     let owners = [own(1), own(2), own(3)];
     snapshot("chain_follows_move_to", &chain, &owners, base, worktree);
+}
+
+#[test]
+fn chain_follows_a_rename_by_command() {
+    // Turn 1 edits a.rs, turn 2 runs `git mv a.rs b.rs` (a command, no
+    // change step), turn 3 edits b.rs: the change set has a.rs → b.rs.
+    let base = Some("1\n2\n3\n");
+    let worktree = Some("one\n2\nthree\n");
+    let steps = [
+        step(1, vec![replace("a.rs", "1\n", "one\n")]),
+        step(3, vec![replace("b.rs", "3\n", "three\n")]),
+    ];
+    let chain = run_at(("a.rs", "b.rs"), base, worktree, &steps);
+    assert!(chain.steps.iter().all(|s| s.outcome == Outcome::Applied));
+    let owners = [own(1), own(3)];
+    let hunks = attribute::hunks(&chain, &owners, &final_hunks(base, worktree));
+    assert!(hunks.iter().all(|h| h.drifted == 0 && h.turns.len() == 1));
+    snapshot("chain_rename_by_command", &chain, &owners, base, worktree);
+
+    // Without the rename, the edit of b.rs is not on the chain's path.
+    let alone = run(base, worktree, &steps);
+    assert_eq!(alone.steps[1].outcome, Outcome::Failed);
+
+    // A `Write` of the new path before the old one is removed by hand
+    // realigns the chain on b.rs as well.
+    let written = [step(1, vec![write("b.rs", "one\n2\nthree\n")])];
+    let chain = run_at(("a.rs", "b.rs"), base, worktree, &written);
+    assert!(matches!(&chain.detail, Detail::Lines(l) if l.aligned));
+    assert_eq!(chain.steps[0].outcome, Outcome::Applied);
+}
+
+#[test]
+fn chain_follows_a_delete_and_add_in_one_patch() {
+    // Codex's `*** Delete File: a.rs` and `*** Add File: b.rs` in one
+    // `apply_patch`, then an edit of b.rs.
+    let base = Some("x\ny\n");
+    let worktree = Some("x\ny\nZ\n");
+    let steps = [
+        step(1, vec![delete("a.rs"), write("b.rs", "x\ny\nz\n")]),
+        step(2, vec![replace("b.rs", "z\n", "Z\n")]),
+    ];
+    let chain = run_at(("a.rs", "b.rs"), base, worktree, &steps);
+    assert!(chain.steps.iter().all(|s| s.outcome == Outcome::Applied));
+    let Detail::Lines(lines) = &chain.detail else {
+        panic!("line-level")
+    };
+    assert!(lines.aligned);
+    // The lines the addition kept from the old file stay base lines.
+    assert_eq!(
+        &*lines.worktree,
+        [Source::Base(0), Source::Base(1), Source::Step(1)]
+    );
+    let owners = [own(1), own(2)];
+    snapshot("chain_delete_and_add", &chain, &owners, base, worktree);
+
+    // File-level chains follow the rename the same way.
+    let oid = blob_id(HashKind::Sha1, b"x\ny\nz\n");
+    let (start, end) = (path("a.rs"), path("b.rs"));
+    let file_only = build(&ChainInput {
+        hash: HashKind::Sha1,
+        start: &start,
+        end: &end,
+        base: Side::Text(b"x\ny\n"),
+        worktree: Side::Opaque(Some(oid)),
+        steps: &steps[..1],
+    });
+    assert!(matches!(
+        file_only.detail,
+        Detail::FileOnly {
+            matched: Some(0),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn chain_patch_context_header_keeps_the_change_where_it_was_made() {
+    // Codex's `@@ fn b() {` in a `load(input)` body: the change goes in the
+    // second of two identical blocks, as `apply_patch` made it, and nothing
+    // is Drifted.
+    let base = Some("fn a() {\n    x\n}\nfn b() {\n    x\n}\n");
+    let worktree = Some("fn a() {\n    x\n}\nfn b() {\n    y\n}\n");
+    let steps = [step(
+        1,
+        vec![patch("f.rs", "@@ fn b() {\n-    x\n+    y\n", None)],
+    )];
+    let chain = run(base, worktree, &steps);
+    assert!(matches!(&chain.detail, Detail::Lines(l) if l.aligned));
+    let hunks = attribute::hunks(&chain, &[own(1)], &final_hunks(base, worktree));
+    assert_eq!(hunks.len(), 1);
+    assert_eq!((hunks[0].turns.len(), hunks[0].drifted), (1, 0));
 }
 
 #[test]
@@ -456,6 +555,7 @@ fn chain_beyond_the_limits_is_file_level() {
     let chain = build(&ChainInput {
         hash: HashKind::Sha1,
         start: &start,
+        end: &start,
         base: Side::Text(b"a\n"),
         worktree: Side::Opaque(Some(oid)),
         steps: &steps,
@@ -659,6 +759,7 @@ fn attribute_file_level_goes_to_the_matching_write() {
     let input = |worktree| ChainInput {
         hash: HashKind::Sha1,
         start: &start,
+        end: &start,
         base: Side::Absent,
         worktree,
         steps: &steps,
@@ -740,11 +841,53 @@ fn history_digest_differs_between_sessions_with_the_same_content() {
 
 #[test]
 fn history_digest_is_the_same_in_two_worktrees() {
-    // The digest has no worktree in it: the same session's steps on the
-    // same relative path, with the same contents, hit the same entry.
-    let one = digest(&[call("a", 1), call("a", 2)], &["src/f.rs"]);
-    let two = digest(&[call("a", 1), call("a", 2)], &["src/f.rs"]);
+    // The same session history replayed in two worktrees of one repository
+    // (the main one and a linked one): the logged edits carry absolute
+    // paths under each worktree's root, and both are made relative before
+    // the digest and the chain see them. Nothing worktree-specific is left,
+    // so both look up the same entry and would store the same chain.
+    let in_worktree = |root: &str| {
+        let relative = |p: &Path| p.strip_prefix(root).ok().and_then(|p| p.to_str()).map(path);
+        let logged = FileEdit {
+            path: Path::new(root).join("src/f.rs"),
+            op: EditOp::Replace {
+                old: "b\n".into(),
+                new: "B\n".into(),
+                all: false,
+            },
+        };
+        let edit = Edit::from_file_edit(&logged, &relative).unwrap();
+        let claimed = relative(&logged.path).unwrap();
+        let calls = [call("a", 1)];
+        let steps: Vec<HistoryStep<'_>> = calls
+            .iter()
+            .map(|c| HistoryStep {
+                session: &c.session,
+                adapter_version: c.adapter,
+                turn: &c.turn,
+                call: &c.call,
+                status: c.status,
+                input: c.input,
+                result: c.result,
+            })
+            .collect();
+        let digest = history::digest(&steps, std::slice::from_ref(&claimed));
+        let chain = run_at(
+            ("src/f.rs", "src/f.rs"),
+            Some("a\nb\n"),
+            Some("a\nB\n"),
+            &[step(1, vec![edit])],
+        );
+        (digest, chain)
+    };
+    let (one, chain_one) = in_worktree("/work/repo");
+    let (two, chain_two) = in_worktree("/work/repo/.claude/worktrees/feature");
+    assert_eq!(chain_one.steps[0].outcome, Outcome::Applied);
     assert_eq!(one, two);
+    assert_eq!(chain_one, chain_two);
+    assert_eq!(one, digest(&[call("a", 1)], &["src/f.rs"]));
+    // The relative path itself is part of the history.
+    assert_ne!(one, digest(&[call("a", 1)], &["lib/f.rs"]));
     let w = SideIdentity::Blob(blob_id(HashKind::Sha1, b"w\n"));
     let not_retained = SideIdentity::NotRetained(blob_id(HashKind::Sha1, b"w\n"));
     let base = Some(blob_id(HashKind::Sha1, b"b\n"));
@@ -853,6 +996,7 @@ fn history_digest_cache_hit_does_not_load() {
         build(&ChainInput {
             hash: HashKind::Sha1,
             start: &start,
+            end: &start,
             base: Side::Text(base.as_bytes()),
             worktree: Side::Opaque(None),
             steps: &[],

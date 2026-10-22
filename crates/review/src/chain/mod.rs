@@ -254,9 +254,42 @@ pub(crate) struct ChainInput<'a> {
     /// The path the chain starts on: the base side's path (a rename's
     /// source), or the new path when the base has none.
     pub start: &'a ChangePath,
+    /// The worktree side's path (a rename's target); `start` for a
+    /// deletion and when the path did not change.
+    pub end: &'a ChangePath,
     pub base: Side<'a>,
     pub worktree: Side<'a>,
     pub steps: &'a [StepInput],
+}
+
+impl<'a> ChainInput<'a> {
+    fn rename(&self) -> Rename<'a> {
+        Rename {
+            start: self.start,
+            end: self.end,
+        }
+    }
+}
+
+/// The file's rename in the change set, which the chain follows even when
+/// no `move_to` says so: a rename by command (`mv`, `git mv`) followed by
+/// edits on the new path, Codex's `Delete File` of the source with `Add
+/// File` of the target, or a `Write` of the target before the source is
+/// removed. While the chain is still on the source, the first edit on the
+/// target moves it there (within a call, so a deletion of the source and an
+/// addition of the target in one patch carry over); the content moves with
+/// it, and a `Write` / `Add` realigns it as anywhere else.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Rename<'a> {
+    pub start: &'a ChangePath,
+    pub end: &'a ChangePath,
+}
+
+impl Rename<'_> {
+    /// An edit on `edit_path` moves the chain from `path` to it.
+    pub(crate) fn follows(&self, path: &ChangePath, edit_path: &ChangePath) -> bool {
+        self.start != self.end && path == self.start && edit_path == self.end
+    }
 }
 
 /// The lines of `text`: each ends after `\n`, a last line without one is a
@@ -339,7 +372,13 @@ pub(crate) fn build(input: &ChainInput<'_>) -> Chain {
             before[g] = Some(version.clone());
         }
         let outcome = if step.completed {
-            match apply::step(version.as_deref(), &path, &step.edits, worktree_cr) {
+            match apply::step(
+                version.as_deref(),
+                &path,
+                input.rename(),
+                &step.edits,
+                worktree_cr,
+            ) {
                 Some((next, next_path)) => {
                     if next.as_deref().is_some_and(too_large) {
                         return file_only(input, Limit::Size);
@@ -492,14 +531,16 @@ fn hunk(h: &lectern_git::Hunk) -> DiffHunk {
 }
 
 /// A file-level chain: nothing is applied. The file goes to the last
-/// `Write` / `Add` on the path when its content (or its content with CRLF
-/// made LF, as for a canonical side) is the worktree side's blob.
+/// `Write` / `Add` on the path (followed as `build` does, through `move_to`
+/// and the rename) when its content (or its content with CRLF made LF, as
+/// for a canonical side) is the worktree side's blob.
 fn file_only(input: &ChainInput<'_>, reason: Limit) -> Chain {
     let worktree = match input.worktree {
         Side::Absent => None,
         Side::Text(text) => Some(blob_id(input.hash, text)),
         Side::Opaque(oid) => oid,
     };
+    let rename = input.rename();
     let mut path = input.start.clone();
     let mut last_write: Option<(u32, &str)> = None;
     for (k, step) in input.steps.iter().enumerate() {
@@ -508,7 +549,10 @@ fn file_only(input: &ChainInput<'_>, reason: Limit) -> Chain {
         }
         for edit in step.edits.iter() {
             if edit.path != path {
-                continue;
+                if !rename.follows(&path, &edit.path) {
+                    continue;
+                }
+                path = edit.path.clone();
             }
             match &edit.op {
                 Op::Write { content } => last_write = Some((k as u32, content)),

@@ -80,6 +80,7 @@ impl ChainFixture {
         let chain = chain::build(&ChainInput {
             hash: HashKind::Sha1,
             start: &self.path,
+            end: &self.path,
             base: Side::Text(&self.base),
             worktree: Side::Text(&self.worktree),
             steps: &self.steps,
