@@ -1234,7 +1234,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 在 Linux（x86_64，4 核，内核 6.18，与其他编译任务共用机器）上运行。本步不依赖 GPUI，也没有 macOS 专属代码。
 
 - 用的是前置条件 A（#161）合并进来的 `services::changes`、`services::review` 类型，本 crate 没有自己的替身。
-- `just check`、`just test`（整个工作区 1945 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `just check`、`just test`（整个工作区 1949 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
 - `just test -p lectern-review`：55 个测试通过。按前缀：`noise_*` 6、`group_*` 4、`sensitive_*` 8、`seen_*` 14、`log_*` 23（含 `log_no_compaction_after_failed_read`；重命名撤掉旧路径的记录有 `seen_unseen_of_a_rename_is_unseen`、`seen_new_file_at_the_old_path_after_a_seen_rename_is_unseen`、`log_rename_retires_the_old_path_on_replay`；压缩的两倍条件有 `log_compaction_waits_for_twice_the_live_size`；目录 `fsync` 失败有 `log_failed_directory_sync_goes_append_only`）。insta 快照 4 个（日志的行格式、压缩后保留认不出的记录的文件、噪声与分组的路径表、按子项目排序的分组），逐个看过。
 - `log_no_compaction_after_failed_read`：注入的读取错误之后继续标记，追加到超过压缩上限（测试里调小为 8 KiB，写到 32 KiB），文件的 inode 不变、原有字节仍在开头；之后一次完整读取里原有的 20 个已看标记和基准都在，这次读取之后的写入恢复压缩。`log_compaction_needs_the_index_to_be_the_file` 覆盖另外几种只追加的情况：读取之后有别的写入者追加、本进程追加之后到压缩之前有别的写入者（压缩前的身份核对拦下，没有开始写临时文件）、只读了最后一部分（`READ_MAX` 调小）、文件头的 `v` 为 2。`log_compacts_above_4_mib` 用真实的 4 MiB 上限。
 - `review/log_load_16k`（`cargo bench -p lectern-bench --all-features --bench time -- review/`，采样模式）：中位数 22.8 ms，p95 27.6 ms，42 个样本，预算 < 30 ms；换用 `services` 的类型之后重测，中位数 23.4 ms，p95 26.6 ms（机器负载约 7）；读取时重命名撤掉旧路径下的记录之后重测，中位数 22.6 ms。夹具 16 000 条记录、5 556 267 字节。第一版每行解析两遍（先取类型再按类型解析）时中位数是 32.5 ms，改为一遍解析、重复的字符串（来源、会话 ID、worktree）共用一份之后降到上面的数字。没有在 macOS 上测量。
