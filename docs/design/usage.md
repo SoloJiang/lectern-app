@@ -1,6 +1,6 @@
 # usage 设计
 
-状态：已接受，尚未实现。
+状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）已实现；其余前置条件与第 1–8 步尚未实现。
 
 对应 issue [#31](https://github.com/SoloJiang/lectern-app/issues/31)，[#32](https://github.com/SoloJiang/lectern-app/issues/32) 的 Usage 页与额度读本文定义的快照。`usage` 把 `agents` 交来的用量记录去重、规范化后落进自己的 SQLite，把每一轮的 token 归属到项目、分支的「一次使用」和 MR，按时间窗口聚合，并保存额度快照（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)、[ADR 0022](../adr/0022.md)、[交互规范「用量」](interaction.md#用量)）。改动权重的来源按 [ADR 0047](../adr/0047.md)，数据库按 [ADR 0027](../adr/0027.md)，位置按 [ADR 0044](../adr/0044.md) 的应用数据目录。
 
@@ -127,7 +127,7 @@ pub fn plugin(deps: UsageDeps) -> (Name, UsagePlugin);
 
 ### 用量服务（`lectern-services` 的 `usage` 模块）
 
-类型都派生 `Clone`、`PartialEq`、`Debug`、`Serialize`、`Deserialize`（外部标记的枚举），不含浮点数的另派生 `Eq`；trait 和包着回调的 `UsageInterest`、`MrSourceRegistration` 除外。额度里的 `used_percent` 是 `f32`。
+类型都派生 `Clone`、`PartialEq`、`Debug`、`Serialize`、`Deserialize`（外部标记的枚举），不含浮点数的另派生 `Eq`、`Hash`；不含 `Arc` 的小类型派生 `Copy`；`UsageProjectId`、`AliasId`、`LocalDate`、`UseId`、`AnalysisId`、`ForgeRepo`、`MrRef` 派生 `Ord`；`Tokens`、`Limits` 派生 `Default`（`Limits::default()` 是数据库还没打开时的空快照）。trait 和包着回调的 `UsageInterest`、`MrSourceRegistration` 除外。额度里的 `used_percent` 是 `f32`，所以 `Limits`、`LimitWindow` 没有 `Eq`、`Hash`。`UsageEvent` 实现 kernel 的 `Event`。
 
 ```rust
 /// 单实现服务，"usage" 插件提供。
@@ -192,7 +192,7 @@ pub struct UsageProjectId(pub [u8; 16]);
 pub struct AliasId(pub u64);
 pub struct LocalDate { pub year: i32, pub month: u8, pub day: u8 }
 
-/// 四类互不重叠的 token（ADR 0022）。`total()` 是四者之和；缓存命中率由视图从这些类别算出。
+/// 四类互不重叠的 token（ADR 0022）。`total()` 是四者之和（超过 `u64::MAX` 时取 `u64::MAX`）；缓存命中率由视图从这些类别算出。
 pub struct Tokens { pub input: u64, pub output: u64, pub cache_read: u64, pub cache_write: u64 }
 impl Tokens { pub fn total(&self) -> u64; }
 
@@ -273,8 +273,11 @@ pub struct ProjectUsage {
     pub by_model: Arc<[(Agent, Arc<str>, Tokens)]>,
     pub by_agent: Arc<[(Agent, Tokens)]>,
     /// 与 `days` 一一对应：每天按 agent 的 token 合计（柱状图按 agent 堆叠），每天各项相加等于那天的合计。
-    pub daily: Arc<[Arc<[(Agent, u64)]>]>,
+    pub daily: Arc<[DayTotals]>,
 }
+
+/// 一天按 agent 的 token 合计。
+pub type DayTotals = Arc<[(Agent, u64)]>;
 
 pub struct UsageRow {
     pub key: RowKey,
@@ -310,7 +313,7 @@ pub struct AllUsage {
     pub projects: Arc<[(ProjectInfo, Tokens)]>,
     /// 「其他」：还没有打开过的项目和不在任何项目里的用量。
     pub other: Tokens,
-    pub daily: Arc<[Arc<[(Agent, u64)]>]>,
+    pub daily: Arc<[DayTotals]>,
 }
 
 pub struct WorktreeUsage {
@@ -1015,3 +1018,28 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
    - `use_forge_*`、`mr_interval_*`、`mr_default_branch_*`、`mr_shared_*`、`rows_mr_*`、`detail_*`、`transfer_forge_head_*`、`identity_forge_pending_*` 通过。
 8. **审阅的计量**（前置 G）：`begin_analysis`、`meter`、重启时的结算、审阅的事实行。
    - `meter_*`、`review_usage_*` 通过。
+
+## 实际验证
+
+### 前置条件 A
+
+`services` 的 `usage` 模块，在 Linux（x86_64 容器）上运行：
+
+- `rg -n 'pub trait Usage\b|pub trait MrSource' crates/services/src` 各有一处（`usage/mod.rs`、`usage/mr.rs`）。
+- `just test -p lectern-services`：84 个测试通过，新增 15 个，都以 `usage_` 开头。
+  - JSON 往返：`usage_event_round_trips`、`usage_queries_and_commands_round_trip`、`usage_snapshots_round_trip`、`usage_limits_round_trip`、`usage_metering_round_trips`、`usage_mr_types_round_trip`。覆盖每个枚举的每个变体（六种快照、四种 `UsageState`、三种 `UsageDegraded`、四种 `ProjectStatus` 与 `TemporaryReason`、三种 `RowKey`、五种 `MeterState`、三种 `AnalysisTarget`、四种 `LimitKind`），以及 SHA-1 与 SHA-256 的 `BlobId`、`u64::MAX`、负的年份与时间戳、`f32` 的百分比。`usage_enums_are_externally_tagged` 检查枚举是 serde 默认的外部标记。
+  - 服务 ID：`usage_service_id_and_multiple` 检查 `ID == "usage"`、`MULTIPLE == false`。
+  - 不是服务：`usage_mr_source_is_not_a_service` 检查 `dyn MrSource` 没有实现 `Service`，同一个探针对 `dyn Usage` 给出 true。
+  - 注销回调：`usage_interest_releases_once_on_drop`、`usage_mr_source_registration_releases_once_on_drop` 在另一个线程上 drop，回调各调用一次。
+  - 其余：`usage_is_a_shared_trait_object`、`usage_mr_source_is_a_shared_trait_object` 检查两个 trait 能作为 `Arc<dyn …>` 跨线程使用，快照、事件可共享，关注与登记可 `Send`；`usage_tokens_total_sums_the_four_kinds` 检查 `total` 与溢出时的饱和。
+- `just check`、`just test`（不依赖 GPUI 的全部 crate，2058 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `Cargo.toml`、`Cargo.lock` 没有改动：只用已有的 `lectern-kernel`、`serde`（dev 的 `serde_json`）。
+- 没有在 macOS 上运行：`services` 不依赖 GPUI，Linux 与 macOS 编译的代码相同。本步没有 bench 条目。
+
+## 与设计的差异
+
+### 前置条件 A
+
+- 设计没有列出的派生（「接口」已补上）：不含浮点数的类型都派生 `Hash`，`usage` 按 `UsageQuery` 找关注和快照，`RowKey`、`MrRef`、`UsageProjectId` 用作聚合和视图状态的键。不含 `Arc` 的小类型派生 `Copy`。几个标识和 `LocalDate` 派生 `Ord`，`LocalDate` 按年、月、日比较。`Tokens` 派生 `Default`（全 0）；`Limits` 派生 `Default`，作为数据库还没打开时 `limits()` 的空快照。做法与 review 设计「与设计的差异」前置条件 A 相同。
+- `Tokens::total` 用饱和加法：四类之和超过 `u64::MAX` 时取 `u64::MAX`，不在调试构建里 panic。实际的 token 数远小于这个上限，只是让损坏的记录不能让视图崩溃。
+- `ProjectUsage::daily`、`AllUsage::daily` 的元素类型命名为 `DayTotals`（`Arc<[(Agent, u64)]>`，「接口」已补上）：`Arc<[Arc<[(Agent, u64)]>]>` 触发 clippy 的 `type_complexity`，本仓库警告即失败。JSON 形状不变。

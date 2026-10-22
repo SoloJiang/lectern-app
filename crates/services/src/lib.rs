@@ -18,6 +18,9 @@
 //!   service), designed in `docs/design/review.md`.
 //! - [`session`]: agent session sources (`dyn SessionSource`), designed in
 //!   `docs/design/agents.md`.
+//! - [`usage`]: token usage and rate limit snapshots, project merge commands
+//!   and Analyze metering (`dyn Usage`) and MR sources (`MrSource`, not a
+//!   kernel service), designed in `docs/design/usage.md`.
 
 pub mod changes;
 pub mod code_intel;
@@ -25,3 +28,4 @@ pub mod project;
 pub mod reader;
 pub mod review;
 pub mod session;
+pub mod usage;
