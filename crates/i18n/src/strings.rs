@@ -2,6 +2,8 @@ use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use lectern_logging::warn;
+
 use crate::args::{Args, MAX_ARGS, Value};
 use crate::table::{self, Part, Selector, Table, VarType};
 use crate::{FmtKey, Key, Locale, keys, plural};
@@ -49,11 +51,26 @@ impl Strings {
         let (text, error) = self.format_checked(index, args);
         if let Some(error) = error {
             if first_report(index) {
-                eprintln!("lectern-i18n: {}: {error}", table::NAMES[index]);
+                self.report(index, error);
             }
             debug_assert!(false, "{}: {error}", table::NAMES[index]);
         }
         text
+    }
+
+    /// The log record of an argument error (docs/design/i18n.md「日志与诊断」):
+    /// the locale, the key and the variable's name from the static tables and
+    /// the error's kind. Never the text, the arguments or the error's `Display`.
+    /// With the level off the macro only compares the level.
+    fn report(&self, index: usize, error: ArgError) {
+        warn!(
+            "a message was formatted with a missing or mistyped argument; the placeholder is shown";
+            locale = self.locale.tag(),
+            key = table::NAMES[index],
+            error = error.kind(),
+            var = error.var(),
+            expected = error.expected(),
+        );
     }
 
     /// "just now", "5 min ago", "3 days ago" / "刚刚", "5 分钟前", "3 天前".
@@ -188,6 +205,36 @@ pub(crate) enum ArgError {
         name: &'static str,
         expected: VarType,
     },
+}
+
+impl ArgError {
+    /// `missing` or `wrong_type`.
+    fn kind(&self) -> &'static str {
+        match self {
+            ArgError::Missing { .. } => "missing",
+            ArgError::WrongType { .. } => "wrong_type",
+        }
+    }
+
+    /// The variable's name, from the compiled table (`VARS`), not from the
+    /// caller's `Args`.
+    fn var(&self) -> &'static str {
+        match *self {
+            ArgError::Missing { name } | ArgError::WrongType { name, .. } => name,
+        }
+    }
+
+    /// For `wrong_type`, what the variable takes: `num`, `str` or `any`.
+    fn expected(&self) -> Option<&'static str> {
+        match self {
+            ArgError::Missing { .. } => None,
+            ArgError::WrongType { expected, .. } => Some(match expected {
+                VarType::Num => "num",
+                VarType::Str => "str",
+                VarType::Any => "any",
+            }),
+        }
+    }
 }
 
 impl fmt::Display for ArgError {
@@ -432,6 +479,91 @@ mod tests {
         assert!(first_report(index));
         assert!(!first_report(index));
         assert!(!first_report(index));
+    }
+
+    /// The raw JSON text of field `name` in a captured record.
+    fn field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
+        let start = line.find(&format!("\"{name}\":"))? + name.len() + 3;
+        let rest = &line[start..];
+        let end = if let Some(text) = rest.strip_prefix('"') {
+            text.find('"')? + 2
+        } else {
+            rest.find([',', '}'])?
+        };
+        Some(&rest[..end])
+    }
+
+    /// Formats `key` with `args`, which have an argument error: the record
+    /// is written first, then debug builds fail the `debug_assert!`.
+    fn format_bad(strings: Strings, key: FmtKey, args: &Args<'_>) {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| strings.format(key, args)));
+        assert_eq!(result.is_err(), cfg!(debug_assertions));
+    }
+
+    /// Argument errors are logged with the locale, the key, the variable and
+    /// the error's kind; the arguments, which can be file names or session
+    /// titles, and the formatted text never reach a record.
+    #[test]
+    fn logs_hold_no_arguments() {
+        const CANARY: &str = "canary5k8w2m7r1t";
+        let log = lectern_logging::testing::capture();
+
+        // A string where review-comments selects on a number, plus an
+        // argument the message does not use, named and valued as the canary.
+        format_bad(
+            Strings::of(Locale::En),
+            review::COMMENTS,
+            &Args::new().str("count", CANARY).str(CANARY, CANARY),
+        );
+        // `$total` missing; the canary is in the text formatted around it.
+        format_bad(
+            Strings::of(Locale::ZhCn),
+            review::PROGRESS,
+            &Args::new().str("reviewed", CANARY),
+        );
+        // Once per key: the same error again writes nothing.
+        format_bad(
+            Strings::of(Locale::En),
+            review::COMMENTS,
+            &Args::new().str("count", CANARY),
+        );
+        // A good call writes nothing either.
+        Strings::of(Locale::En).format(review::REVIEWING, &Args::new().str("path", CANARY));
+
+        let records: Vec<String> = log
+            .lines()
+            .into_iter()
+            .filter(|l| field(l, "tg") == Some("\"i18n\""))
+            .collect();
+        let of = |key: &str| -> Vec<&String> {
+            let key = format!("\"{key}\"");
+            records
+                .iter()
+                .filter(|l| field(l, "key") == Some(key.as_str()))
+                .collect()
+        };
+        let msg = "\"a message was formatted with a missing or mistyped argument; the placeholder is shown\"";
+
+        let wrong = of("review-comments");
+        assert_eq!(wrong.len(), 1, "{records:#?}");
+        assert_eq!(field(wrong[0], "lv"), Some("\"warn\""));
+        assert_eq!(field(wrong[0], "msg"), Some(msg));
+        assert_eq!(field(wrong[0], "locale"), Some("\"en\""));
+        assert_eq!(field(wrong[0], "error"), Some("\"wrong_type\""));
+        assert_eq!(field(wrong[0], "var"), Some("\"count\""));
+        assert_eq!(field(wrong[0], "expected"), Some("\"num\""));
+
+        let missing = of("review-progress");
+        assert_eq!(missing.len(), 1, "{records:#?}");
+        assert_eq!(field(missing[0], "lv"), Some("\"warn\""));
+        assert_eq!(field(missing[0], "locale"), Some("\"zh-CN\""));
+        assert_eq!(field(missing[0], "error"), Some("\"missing\""));
+        assert_eq!(field(missing[0], "var"), Some("\"total\""));
+        assert_eq!(field(missing[0], "expected"), Some("null"));
+
+        assert!(of("review-reviewing").is_empty(), "{records:#?}");
+        log.assert_absent(CANARY);
     }
 
     trait EscapeIsolates {
