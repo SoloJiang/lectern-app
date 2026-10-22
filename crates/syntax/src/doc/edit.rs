@@ -460,6 +460,11 @@ impl Session {
                 !std::mem::replace(&mut st.io_busy, true),
             )
         };
+        // Nothing to write: a new session may begin now, as the snapshot
+        // (still `Yes`) says; it gets the close's check of the file.
+        if !writing {
+            self.finished.store(true, Ordering::SeqCst);
+        }
         // The file is likely read again: not editable until the close is
         // through (the close puts it back when nothing was read again).
         if writing && let Some(doc) = self.doc.upgrade() {
@@ -610,18 +615,22 @@ fn disk(engine: &Arc<EngineInner>, session: &Arc<Session>) {
                 // The saves queued before the close are written. The
                 // reading view gets what is on disk now: another version
                 // after a save, or the agent's.
-                if let Some(doc) = session.doc.upgrade() {
-                    let load = doc.lock().load;
-                    watch::check(engine, &doc);
-                    let mut st = doc.lock();
-                    // Not read again (no save went through, nothing
-                    // changed): editable as before.
-                    if st.load == load && st.editable == Editable::No(NotEditable::Reloading) {
-                        st.editable = Editable::Yes;
-                        doc.commit(st);
-                    }
-                }
+                let Some(doc) = session.doc.upgrade() else {
+                    session.finished.store(true, Ordering::SeqCst);
+                    continue;
+                };
+                let load = doc.lock().load;
+                watch::check(engine, &doc);
+                let mut st = doc.lock();
+                // Done before the snapshot below is published: a view that
+                // enters edit from its notification gets a session.
                 session.finished.store(true, Ordering::SeqCst);
+                // Not read again (no save went through, nothing changed):
+                // editable as before.
+                if st.load == load && st.editable == Editable::No(NotEditable::Reloading) {
+                    st.editable = Editable::Yes;
+                    doc.commit(st);
+                }
             }
         }
     }

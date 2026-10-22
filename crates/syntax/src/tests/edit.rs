@@ -701,6 +701,70 @@ fn edit_ending_right_after_a_save_still_writes_it() {
     assert_eq!(&*again.initial_text(), "let a = 1;\nlet b = 2;\n");
 }
 
+/// The close puts `editable` back to `Yes` when nothing was read again; a
+/// view entering edit from that notification gets a session. A close with
+/// nothing to write leaves the snapshot at `Yes`, and `edit` agrees.
+#[test]
+fn edit_from_the_notification_after_a_close_succeeds() {
+    use std::sync::Mutex;
+
+    let rig = Rig::new();
+    rig.write("a.ts", b"let a = 1;\n");
+    type Slot = Mutex<Option<DocHandle>>;
+    let slot: Arc<Slot> = Arc::default();
+    let got: Arc<Mutex<Vec<Result<EditSession, NotEditable>>>> = Arc::default();
+    let armed = Arc::new(AtomicBool::new(false));
+    let (slot2, got2, armed2) = (slot.clone(), got.clone(), armed.clone());
+    let notify = move || {
+        let slot = slot2.lock().unwrap();
+        let Some(doc) = slot.as_ref() else { return };
+        if doc.snapshot().editable == Editable::Yes
+            && armed2.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            got2.lock().unwrap().push(doc.edit());
+        }
+    };
+    let doc = rig.engine.open(
+        rig.target("a.ts", Anchor::Start),
+        rig.root.clone(),
+        super::rig::VIEW,
+        Arc::new(notify),
+    );
+    rig.settle();
+    let session = doc.edit().unwrap();
+    rig.settle();
+    *slot.lock().unwrap() = Some(doc);
+    // A check is queued and not run: the close has disk work before it.
+    session.session().disk_event();
+    drop(session);
+    {
+        let slot = slot.lock().unwrap();
+        let doc = slot.as_ref().unwrap();
+        assert_eq!(
+            doc.snapshot().editable,
+            Editable::No(NotEditable::Reloading)
+        );
+        assert_eq!(doc.edit().err(), Some(NotEditable::Reloading));
+    }
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.settle();
+    let entered = got.lock().unwrap().pop().expect("notified with Yes");
+    let session = entered.expect("a session from the notification");
+    rig.settle();
+    // Nothing queued: the snapshot stays `Yes` and `edit` agrees at once.
+    drop(session);
+    {
+        let slot = slot.lock().unwrap();
+        let doc = slot.as_ref().unwrap();
+        assert_eq!(doc.snapshot().editable, Editable::Yes);
+        assert!(doc.edit().is_ok());
+    }
+    got.lock().unwrap().clear();
+    rig.settle();
+    // Breaks the cycle through the notify closure.
+    drop(slot.lock().unwrap().take());
+}
+
 /// Another handle to a live session starts from the buffer as the session
 /// has it, not from the text at entering edit; the counters go on.
 #[test]
