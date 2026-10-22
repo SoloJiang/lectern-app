@@ -8,6 +8,7 @@
 
 mod background;
 mod clock;
+mod diag;
 mod event;
 mod gate;
 mod handle;

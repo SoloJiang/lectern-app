@@ -10,8 +10,14 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "kernel"
 
+# Standard library plus the logging call sites (docs/design/kernel.md「依赖」,
+# ADR 0046): the only dependency.
+[dependencies]
+lectern-logging = { path = "../logging" }
+
 [dev-dependencies]
 insta.workspace = true
+lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [features]
 # TestKernel and Kernel::barrier, for plugin crates' tests.

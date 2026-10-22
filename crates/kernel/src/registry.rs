@@ -7,10 +7,14 @@ use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 use std::thread;
 
+use lectern_logging::warn;
+
+use crate::diag::Phase;
 use crate::handle::PluginHandle;
+use crate::panic::contain_plugin;
 use crate::service::ServiceKey;
 use crate::token::{ActivationToken, Admission, TokenState};
-use crate::util::{log, read, write};
+use crate::util::{read, write};
 
 pub(crate) type ListenerFn = Arc<dyn Fn(&dyn Any, &PluginHandle) + Send + Sync>;
 
@@ -181,16 +185,13 @@ impl Registry {
 }
 
 /// Drops replaced registry values outside the lock, isolating panics in
-/// closures and services the kernel releases.
+/// closures and services the kernel releases (logged as `plugin failed` in
+/// the `drop` phase, under the caller's scope).
 pub(crate) fn drop_garbage(garbage: Garbage) {
     if garbage.is_empty() {
         return;
     }
-    if let Err(message) = crate::panic::contain(move || drop(garbage)) {
-        log(format_args!(
-            "dropping a released service or listener panicked: {message}"
-        ));
-    }
+    let _ = contain_plugin(Phase::Drop, move || drop(garbage));
 }
 
 /// Handle to a single-provider service, kept in the `Active` state. Each call
@@ -239,10 +240,10 @@ impl<S: ?Sized> Deref for Admitted<S> {
 impl<S: ?Sized> Drop for Admitted<S> {
     fn drop(&mut self) {
         if thread::panicking() {
-            let _ = &self.admission;
-            log(format_args!(
-                "unwinding while holding a provider's admission"
-            ));
+            warn!(
+                "unwinding while holding a provider's admission";
+                provider_act = self.admission.act_id(),
+            );
         }
     }
 }

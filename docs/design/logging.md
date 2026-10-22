@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -590,3 +590,7 @@ level     := off | error | warn | info | debug | trace
 - **`testing` 多了基准用的入口**：`third_party`、`set_callsite_limit`、`flush`、`install_early_again`（见「测试辅助」）。panic 记录的 `tg` 是 `logging`。
 - **基准的写法。** bench 的统计量没有 p99：`log/contended_call` 在测量模式下正好采 10 000 次，预算写成「超过 5 µs 的不超过 100 次」，与 p99 ≤ 5 µs 相同。`log/enabled_call` 每个样本是写盘线程清空缓冲后的 256 次调用，期间调高调用点上限，测的是写出的路径而不是限流。`log/idle_memory/verbose` 是「性能」里「另报一个数」的那一项，只记录。
 - **单元测试只在开启 `sink` 时编译**（`just test` 用 `--all-features`）；`cargo test -p lectern-logging` 不带 feature 时只跑文档测试。
+
+「对其他 crate 的要求」第 4 项（`kernel`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+
+- **`plugin failed` 多了两个阶段。** 第 4 项列出的七个阶段之外，kernel 的边界还包住两段插件代码：`WorkspaceFacts::contains`（阶段 `workspace`）和 `own_with` 的 `start`（阶段 `own_with`，它用保留 payload 的 `catch`，同样记这条）。两者的 panic 都让插件进入 `Failed`，不记就查不到原因。记录的字段和其余规则见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)。

@@ -7,10 +7,13 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use lectern_logging::{PluginTag, Value, error, info, warn};
+
 use crate::background::{Background, BackgroundStatus};
+use crate::diag::{Phase, plugin_scope, plugin_tag};
 use crate::event::{BackgroundChanged, Busy, Emitter, Quiescent, Tap, dispatch_transition};
 use crate::handle::{Context, PluginHandle, ServiceEventFn};
-use crate::panic::contain;
+use crate::panic::{contain_plugin, run_shutdown_callback};
 use crate::plugin::{
     Activation, Active, Manifest, Name, Plugin, PluginError, PluginState, PluginStatus,
 };
@@ -20,7 +23,7 @@ use crate::set::{PluginSet, Plugins, PreparedSet, analyze, manifest_failure, rea
 use crate::token::{
     ActivationToken, Counters, Entry, StagedItem, TokenState, Transition, drop_rejected,
 };
-use crate::util::{lock, log, write};
+use crate::util::{lock, write};
 
 /// An immutable snapshot of the open project's files. `contains` only reads
 /// memory and may be called on any thread. The last reference may be released
@@ -157,9 +160,7 @@ fn reject(request: Request, counters: &Counters) {
         }
         Request::Shutdown(done) => {
             counters.dec();
-            if let Err(message) = contain(done) {
-                log(format_args!("shutdown callback panicked: {message}"));
-            }
+            run_shutdown_callback(done);
         }
         Request::Barrier(reply) => {
             counters.dec();
@@ -174,13 +175,14 @@ fn reject(request: Request, counters: &Counters) {
     }
 }
 
-/// Calls a command callback inside the requester's admission. A requester
-/// that is no longer live never sees the callback run.
+/// Calls a command callback inside the requester's admission and log scope.
+/// A requester that is no longer live never sees the callback run.
 fn call_done(
     done: Done,
     requester: Option<&ActivationToken>,
     result: Result<ActivationToken, PluginError>,
 ) {
+    let _scope = requester.map(ActivationToken::scope);
     let admission = match requester {
         Some(token) => match token.enter() {
             Some(admission) => Some(admission),
@@ -191,9 +193,7 @@ fn call_done(
         },
         None => None,
     };
-    if let Err(message) = contain(move || done(result)) {
-        log(format_args!("command callback panicked: {message}"));
-    }
+    let _ = contain_plugin(Phase::Command, move || done(result));
     drop(admission);
 }
 
@@ -319,7 +319,7 @@ impl Kernel {
             .name("kernel".to_owned())
             .spawn(move || run(thread_shared, plugins, receiver));
         if let Err(error) = spawned {
-            log(format_args!("could not start the kernel thread: {error}"));
+            error!("could not start the kernel thread"; error = Value::io(&error));
         }
         Arc::new(Kernel { shared })
     }
@@ -478,6 +478,8 @@ struct Current {
 
 struct Slot {
     id: Name,
+    /// The log tag of `id`, registered once when the plugin is loaded.
+    tag: Option<PluginTag>,
     plugin: Option<Arc<dyn Plugin>>,
     manifest: Option<Manifest>,
     enabled: bool,
@@ -506,6 +508,7 @@ struct Lifecycle {
 impl Slot {
     fn new(id: Name, plugin: Arc<dyn Plugin>) -> Slot {
         Slot {
+            tag: plugin_tag(&id),
             id,
             plugin: Some(plugin),
             manifest: None,
@@ -522,6 +525,22 @@ impl Slot {
             commit_time: None,
             started_time: None,
         }
+    }
+
+    /// Logs info `plugin activated` with the timings of the latest
+    /// activation, which just went live.
+    fn log_activated(&self) {
+        let took: Duration = [self.activate_time, self.commit_time, self.started_time]
+            .into_iter()
+            .flatten()
+            .sum();
+        info!(
+            "plugin activated";
+            took_us = took,
+            activate_us = self.activate_time,
+            commit_us = self.commit_time,
+            started_us = self.started_time,
+        );
     }
 }
 
@@ -599,9 +618,7 @@ fn run(shared: Arc<Shared>, plugins: Plugins, receiver: Receiver<Request>) {
     }
     drop(lifecycle);
     for done in finish {
-        if let Err(message) = contain(done) {
-            log(format_args!("shutdown callback panicked: {message}"));
-        }
+        run_shutdown_callback(done);
     }
 }
 
@@ -624,7 +641,7 @@ impl Lifecycle {
                             slot.manual_met = true;
                         }
                     }
-                    None => log(format_args!("activate: unknown plugin {id}")),
+                    None => warn!("unknown plugin"; request = "activate"),
                 }
             }
             Request::SetEnabled { id, enabled } => self.set_enabled(&id, enabled),
@@ -636,6 +653,7 @@ impl Lifecycle {
             Request::Workspace { facts, from } => self.workspace(facts, from),
             Request::Sweep => {}
             Request::Reclaim { token, seq } => {
+                let _scope = token.scope();
                 let entry = lock(&token.0.guards).take(seq);
                 drop_rejected(entry);
             }
@@ -676,7 +694,7 @@ impl Lifecycle {
             let Some(plugin) = slot.plugin.clone() else {
                 continue;
             };
-            let (result, time) = read_manifest(plugin.as_ref());
+            let (result, time) = read_manifest(plugin.as_ref(), slot.tag);
             slot.manifest_time = Some(time);
             match result {
                 Ok(manifest) => slot.manifest = Some(manifest),
@@ -691,7 +709,12 @@ impl Lifecycle {
             .collect();
         let report = analyze(&entries);
         for (index, error) in report.blamed {
-            log(format_args!("{error}"));
+            let _scope = plugin_scope(self.slots[index].tag);
+            error!(
+                "plugin rejected by the dependency graph";
+                error = Value::text(error.kind()),
+                service = error.service(),
+            );
             let slot = &mut self.slots[index];
             if slot.failed.is_none() {
                 slot.failed = Some(PluginError::InvalidGraph(error.to_string()));
@@ -871,13 +894,16 @@ impl Lifecycle {
             Arc::downgrade(&self.shared),
             id.clone(),
             self.slots[index].generation,
+            self.slots[index].tag,
         );
+        // Everything below runs this activation's code or drops its values.
+        let _scope = token.scope();
         self.set_live_act(index, Some(token.clone()));
 
         // Phase 1: activate, with everything held in the context.
         let mut ctx = Context::new(&self.shared, &manifest, token.clone());
         let begin = Instant::now();
-        let result = contain(|| plugin.activate(&mut ctx));
+        let result = contain_plugin(Phase::Activate, || plugin.activate(&mut ctx));
         self.slots[index].activate_time = Some(begin.elapsed());
         let held = Held {
             services: mem::take(&mut ctx.services),
@@ -968,7 +994,7 @@ impl Lifecycle {
             announced: false,
         });
         for mut guard in staged {
-            if let Err(message) = contain(|| guard.commit(token.clone())) {
+            if let Err(message) = contain_plugin(Phase::Commit, || guard.commit(token.clone())) {
                 invalidate(
                     &token,
                     Some(PluginError::Panicked(format!(
@@ -997,7 +1023,8 @@ impl Lifecycle {
             .and_then(|c| c.active.as_mut())
         {
             let started_handle = handle.clone();
-            if let Err(message) = contain(|| active.started(started_handle)) {
+            if let Err(message) = contain_plugin(Phase::Started, || active.started(started_handle))
+            {
                 invalidate(
                     &token,
                     Some(PluginError::Panicked(format!(
@@ -1028,8 +1055,8 @@ impl Lifecycle {
                 break;
             }
             let outcome = match item {
-                StagedItem::Emit(emit) => contain(emit),
-                StagedItem::Start(start) => contain(|| start(&handle)),
+                StagedItem::Emit(emit) => contain_plugin(Phase::Started, emit),
+                StagedItem::Start(start) => contain_plugin(Phase::Started, || start(&handle)),
             };
             if let Err(message) = outcome {
                 invalidate(
@@ -1053,6 +1080,9 @@ impl Lifecycle {
         }
         drop_rejected(services);
         self.slots[index].started_time = Some(begin.elapsed());
+        if token.state() == TokenState::Live {
+            self.slots[index].log_activated();
+        }
     }
 
     /// Ends an activation that never committed.
@@ -1061,10 +1091,11 @@ impl Lifecycle {
         self.clear_live_act(index, token);
         if let Some(error) = failure {
             token.record_failure(error.clone());
-            log(format_args!(
-                "plugin {} failed: {error}",
-                self.slots[index].id
-            ));
+            error!(
+                "plugin activation failed";
+                error = Value::text(error.kind()),
+                service = error.service(),
+            );
             self.slots[index].failed = Some(error);
         }
     }
@@ -1092,6 +1123,7 @@ impl Lifecycle {
         };
         let token = current.token.clone();
         let id = self.slots[index].id.clone();
+        let _scope = token.scope();
 
         // Step 2: remove the services.
         let mut garbage = Garbage::default();
@@ -1120,11 +1152,11 @@ impl Lifecycle {
         drop_garbage(garbage);
         for (_, entry) in entries.into_iter().rev() {
             let outcome = match entry {
-                Entry::Guard(guard) => contain(move || drop(guard)),
+                Entry::Guard(guard) => contain_plugin(Phase::Drop, move || drop(guard)),
                 Entry::Listener => Ok(()),
                 Entry::Task { gate, handle } => {
                     gate.close();
-                    contain(move || drop(handle))
+                    contain_plugin(Phase::Drop, move || drop(handle))
                 }
             };
             if let Err(message) = outcome {
@@ -1142,7 +1174,7 @@ impl Lifecycle {
             drop_rejected(item);
         }
         if let Some(active) = current.active
-            && let Err(message) = contain(move || drop(active))
+            && let Err(message) = contain_plugin(Phase::Drop, move || drop(active))
         {
             token.record_failure(PluginError::Panicked(format!(
                 "dropping the Active state panicked: {message}"
@@ -1163,12 +1195,19 @@ impl Lifecycle {
                 removed(&self.shared, &id);
             }
         }
-        if let Some(error) = token.failure() {
-            log(format_args!("plugin {id} failed: {error}"));
-            self.slots[index].failed = Some(error.clone());
-            for waiter in mem::take(&mut self.slots[index].waiters) {
-                call_done(waiter.done, waiter.requester.as_ref(), Err(error.clone()));
+        match token.failure() {
+            Some(error) => {
+                error!(
+                    "plugin deactivated after a failure";
+                    error = Value::text(error.kind()),
+                    service = error.service(),
+                );
+                self.slots[index].failed = Some(error.clone());
+                for waiter in mem::take(&mut self.slots[index].waiters) {
+                    call_done(waiter.done, waiter.requester.as_ref(), Err(error.clone()));
+                }
             }
+            None => info!("plugin deactivated"),
         }
     }
 
@@ -1243,7 +1282,7 @@ impl Lifecycle {
 
     fn set_enabled(&mut self, id: &str, enabled: bool) {
         let Some(index) = self.find(id) else {
-            log(format_args!("set_enabled: unknown plugin {id}"));
+            warn!("unknown plugin"; request = "set_enabled");
             return;
         };
         let slot = &mut self.slots[index];
@@ -1274,11 +1313,14 @@ impl Lifecycle {
 
     fn workspace(&mut self, facts: Arc<dyn WorkspaceFacts>, from: ActivationToken) {
         if from.state() == TokenState::Dead {
+            let _scope = from.scope();
             drop_rejected(facts);
             return;
         }
-        let old = self.facts.replace((facts, from));
-        drop_rejected(old);
+        if let Some((old, owner)) = self.facts.replace((facts, from)) {
+            let _scope = owner.scope();
+            drop_rejected(old);
+        }
         self.evaluate_workspace(None);
     }
 
@@ -1286,6 +1328,8 @@ impl Lifecycle {
         let Some((facts, owner)) = self.facts.clone() else {
             return;
         };
+        // `contains` and dropping the facts are the submitter's code.
+        let _scope = owner.scope();
         for index in 0..self.slots.len() {
             if only.is_some_and(|only| only != index) {
                 continue;
@@ -1307,7 +1351,9 @@ impl Lifecycle {
             if patterns.is_empty() {
                 continue;
             }
-            match contain(|| patterns.iter().any(|pattern| facts.contains(pattern))) {
+            match contain_plugin(Phase::Workspace, || {
+                patterns.iter().any(|pattern| facts.contains(pattern))
+            }) {
                 Ok(true) => self.slots[index].workspace_met = true,
                 Ok(false) => {}
                 Err(message) => {
@@ -1346,9 +1392,12 @@ impl Lifecycle {
         }
         self.sweep();
         self.shared.counters.close_pending(Duration::from_secs(2));
-        let facts = self.facts.take();
-        drop_rejected(facts);
+        if let Some((facts, owner)) = self.facts.take() {
+            let _scope = owner.scope();
+            drop_rejected(facts);
+        }
         for slot in &mut self.slots {
+            let _scope = plugin_scope(slot.tag);
             let plugin = slot.plugin.take();
             drop_rejected(plugin);
         }

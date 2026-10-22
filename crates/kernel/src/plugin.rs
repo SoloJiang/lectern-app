@@ -110,6 +110,32 @@ impl PluginError {
     pub fn new(message: impl Into<String>) -> Self {
         PluginError::Failed(message.into())
     }
+
+    /// The variant's name for log records, which never carry the text.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            PluginError::Failed(_) => "failed",
+            PluginError::Panicked(_) => "panicked",
+            PluginError::MissingService(_) => "missing_service",
+            PluginError::UndeclaredService(_) => "undeclared_service",
+            PluginError::DuplicateService(_) => "duplicate_service",
+            PluginError::InvalidGraph(_) => "invalid_graph",
+            PluginError::DependencyUnavailable => "dependency_unavailable",
+            PluginError::Disabled => "disabled",
+            PluginError::ShuttingDown => "shutting_down",
+            PluginError::UnknownCommand(_) => "unknown_command",
+        }
+    }
+
+    /// The stable ID of the service the error is about, if any.
+    pub(crate) fn service(&self) -> Option<&'static str> {
+        match self {
+            PluginError::MissingService(id)
+            | PluginError::UndeclaredService(id)
+            | PluginError::DuplicateService(id) => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for PluginError {
@@ -199,6 +225,34 @@ pub enum GraphError {
     /// [`PreparedSet::dependency_closure`](crate::PreparedSet::dependency_closure)
     /// was asked about a plugin that is not in the set.
     UnknownPlugin(Name),
+}
+
+impl GraphError {
+    /// The variant's name for log records, which never carry plugin IDs,
+    /// command names or panic messages.
+    pub(crate) fn kind(&self) -> &'static str {
+        match self {
+            GraphError::DuplicatePlugin(_) => "duplicate_plugin",
+            GraphError::DuplicateCommand { .. } => "duplicate_command",
+            GraphError::ConflictingServiceId(_) => "conflicting_service_id",
+            GraphError::MissingProvider { .. } => "missing_provider",
+            GraphError::MultipleProviders { .. } => "multiple_providers",
+            GraphError::EmptyActivation(_) => "empty_activation",
+            GraphError::Cycle(_) => "cycle",
+            GraphError::ManifestPanicked { .. } => "manifest_panicked",
+            GraphError::UnknownPlugin(_) => "unknown_plugin",
+        }
+    }
+
+    /// The stable ID of the service the error is about, if any.
+    pub(crate) fn service(&self) -> Option<&'static str> {
+        match self {
+            GraphError::ConflictingServiceId(service)
+            | GraphError::MissingProvider { service, .. }
+            | GraphError::MultipleProviders { service, .. } => Some(*service),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for GraphError {

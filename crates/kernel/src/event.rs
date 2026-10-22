@@ -7,8 +7,9 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
 use crate::background::BackgroundState;
+use crate::diag::Phase;
 use crate::kernel::{Shared, invalidate};
-use crate::panic::contain;
+use crate::panic::contain_plugin;
 use crate::plugin::{Name, PluginError};
 use crate::registry::{Garbage, drop_garbage};
 use crate::token::{ActivationToken, StagedItem, TokenState, drop_rejected};
@@ -109,7 +110,10 @@ impl Emitter {
         };
         match token.state() {
             TokenState::Live => dispatch(&shared, Some(token), event),
-            TokenState::Dead => drop_rejected(event),
+            TokenState::Dead => {
+                let _scope = token.scope();
+                drop_rejected(event);
+            }
             TokenState::Pending => {
                 let mut staging = lock(&token.0.staging);
                 if token.state() == TokenState::Pending && !staging.sealed {
@@ -184,16 +188,21 @@ pub(crate) fn dispatch<E: Event>(shared: &Arc<Shared>, token: Option<&Activation
     }
 }
 
+/// Runs a dispatch inside the emitter's admission and, for an activation's
+/// emitter, its log scope (the event value is the emitter's).
 fn run_admitted<'a>(token: Option<&ActivationToken>, run: Box<dyn FnOnce() + 'a>) {
     match token {
         None => run(),
-        Some(token) => match token.enter() {
-            Some(admission) => {
-                run();
-                drop(admission);
+        Some(token) => {
+            let _scope = token.scope();
+            match token.enter() {
+                Some(admission) => {
+                    run();
+                    drop(admission);
+                }
+                None => drop_rejected(run),
             }
-            None => drop_rejected(run),
-        },
+        }
     }
 }
 
@@ -206,7 +215,10 @@ fn deliver<E: Event>(shared: &Arc<Shared>, event: Tapped<E>) {
             let Some(admission) = listener.handle.act.enter() else {
                 continue;
             };
-            if let Err(message) = contain(|| (listener.f)(value as &dyn Any, &listener.handle)) {
+            let scope = listener.handle.act.scope();
+            if let Err(message) = contain_plugin(Phase::Listener, || {
+                (listener.f)(value as &dyn Any, &listener.handle)
+            }) {
                 invalidate(
                     &listener.handle.act,
                     Some(PluginError::Panicked(format!(
@@ -215,6 +227,7 @@ fn deliver<E: Event>(shared: &Arc<Shared>, event: Tapped<E>) {
                     ))),
                 );
             }
+            drop(scope);
             drop(admission);
         }
     }
@@ -237,7 +250,10 @@ pub(crate) fn dispatch_transition<E: Event>(shared: &Arc<Shared>, event: E) {
         let Some(admission) = listener.handle.act.enter_uncounted() else {
             continue;
         };
-        if let Err(message) = contain(|| (listener.f)(&event as &dyn Any, &listener.handle)) {
+        let scope = listener.handle.act.scope();
+        if let Err(message) = contain_plugin(Phase::Listener, || {
+            (listener.f)(&event as &dyn Any, &listener.handle)
+        }) {
             invalidate(
                 &listener.handle.act,
                 Some(PluginError::Panicked(format!(
@@ -246,6 +262,7 @@ pub(crate) fn dispatch_transition<E: Event>(shared: &Arc<Shared>, event: E) {
                 ))),
             );
         }
+        drop(scope);
         drop(admission);
     }
     drop_rejected(listeners);
