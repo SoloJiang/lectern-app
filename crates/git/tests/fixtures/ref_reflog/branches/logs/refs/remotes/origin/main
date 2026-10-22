@@ -1,0 +1,2 @@
+0000000000000000000000000000000000000000 9cc0057c3b01148bcf8551286f1f6d9c1ac68906 Fixture <fixture@example.com> 1700001200 +0100	fetch -q origin: storing head
+9cc0057c3b01148bcf8551286f1f6d9c1ac68906 49e62587374db0311dfc4ea975d6c1f12c7ffae1 Fixture <fixture@example.com> 1700001400 +0100	fetch -q origin: fast-forward

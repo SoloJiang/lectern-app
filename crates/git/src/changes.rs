@@ -823,7 +823,7 @@ pub(crate) fn pair_renames(
 
 /// Regular files, symbolic links, submodules and special entries are
 /// different kinds: a change between them is `TypeChanged`.
-fn kind_of(mode: Mode) -> u8 {
+pub(crate) fn kind_of(mode: Mode) -> u8 {
     match mode {
         Mode::File | Mode::Executable => 0,
         Mode::Symlink => 1,
@@ -841,7 +841,7 @@ fn tree_side((mode, oid): (Mode, Oid)) -> PendingSide {
 }
 
 /// git's binary check: a NUL in the first 8000 bytes.
-fn has_nul(bytes: &[u8]) -> bool {
+pub(crate) fn has_nul(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(8000)].contains(&0)
 }
 

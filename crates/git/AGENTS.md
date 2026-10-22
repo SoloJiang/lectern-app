@@ -4,7 +4,7 @@
 
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。普通库 crate，不是插件，`project`、`review` 等直接调用。
 - 设计文档：[docs/design/git.md](../../docs/design/git.md)。
-- issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#21](https://github.com/SoloJiang/lectern-app/issues/21)；[#10](https://github.com/SoloJiang/lectern-app/issues/10) 的前置条件（`merge3`、`Text::shared`）；[#15](https://github.com/SoloJiang/lectern-app/issues/15) 的前置条件（`line_diff`、`head_reflog`、`mtimes`、`tree_changes`、`LocalChanges`）
+- issue：[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#21](https://github.com/SoloJiang/lectern-app/issues/21)；[#10](https://github.com/SoloJiang/lectern-app/issues/10) 的前置条件（`merge3`、`Text::shared`）；[#15](https://github.com/SoloJiang/lectern-app/issues/15) 的前置条件（`line_diff`、`head_reflog`、`mtimes`、`tree_changes`、`LocalChanges`）；[#31](https://github.com/SoloJiang/lectern-app/issues/31) 的前置条件 D（`ref_reflog`、`patch_id`）
 - ADR：[0006](../../docs/adr/0006.md)、[0024](../../docs/adr/0024.md)、[0028](../../docs/adr/0028.md)、[0034](../../docs/adr/0034.md)、[0038](../../docs/adr/0038.md)、[0042](../../docs/adr/0042.md)
 
 ## 边界
@@ -19,6 +19,7 @@
 - 实现 `fs_watch` 的 `WorktreeSource`（`Worktree::watch_source`）：过滤器是 index 路径加一次读完的忽略规则（含未被忽略目录里未跟踪的 `.gitignore`），只在内存里查询；配置文件清单从 gix 已加载配置的来源和 `include` 值得出，不运行 git 命令行（[fs_watch 设计](../../docs/design/fs_watch.md)「对其他 crate 的要求」）。
 - 未跟踪文件的遍历也只经 `SafeRoot`（`list` 列目录、`read` 读 `.gitignore`），忽略规则在内存里匹配；gix 的属性栈和排除栈只用 id-mapping 来源，不按路径读工作区里的任何文件，`dirwalk` 不用于工作区（[ADR 0028](../../docs/adr/0028.md)）。子模块的 HEAD 同样经 `SafeRoot` 读，`gitdir:` 只接受本仓库 `modules/` 之下的目录，并经以公共目录为根的 `SafeRoot` 读，不跟随其中的符号链接。
 - 实现 `services` 的 `ChangeSource`（`LocalChanges`，[review 设计「改动来源」](../../docs/design/review.md#改动来源lectern-services-的-changes-模块)）：只按对照表转换 `ChangeSet`，路径共用 `RepoPath` 的 `Arc`，`texts` 的工作区一侧给出比较时保留的那个 `Arc`，不按路径重读。
+- `patch_id` 按 git 文档描述的口径和对 git 输出的黑盒对照实现，不参照 git 的代码（架构规则 8）；diff 用本 crate 的 Histogram，行 diff 经 hunk 缓存。超过上限（5000 个路径、单个 blob 16 MiB、合计 64 MiB）时返回错误，不给出只算了一部分的 ID（[设计文档「usage 用的读取」](../../docs/design/git.md#usage-用的读取)）。
 - 不往仓库的对象库里写任何东西：未跟踪文件直接读出来与空内容比较，不用 `git add --intent-to-add`。
 - 工作区的指纹由基准树 OID 和每个改动文件的路径、改动状态、新旧文件模式、完整内容（符号链接为目标）的哈希组成，在按上限截断 diff 之前计算，被截断、只列出路径的文件也计入；超过单文件读取上限（默认 64 MB）的文件不读内容，指纹里用它的大小、修改时间和 inode 代替内容哈希，Analyze 的结果标为「部分内容未提供」，不在每次刷新时扫描几十 GB 的文件（性能预算），用来判断缓存的结果是否过期。Analyze 用的 diff 和指纹从它的快照计算，不从可能还在变化的工作区计算（ADR 0019）。设计依据见 [pulls.review 调研](../../docs/research/pulls-review.md#对-lectern-的建议)。
 
@@ -32,10 +33,11 @@ just test -p lectern-git
 ```
 
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
-- 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。需要和 git 输出对照的夹具是目录格式（[说明](tests/fixtures/README.md)），由 `tests/fixtures/scripts/` 用真实的 git 生成一次；测试只用 `TestRepo::import_fixture` / `import_worktree_fixture` 导入，不运行 git。
+- 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。需要和 git 输出对照的夹具是目录格式（[说明](tests/fixtures/README.md)），由 `tests/fixtures/scripts/` 用真实的 git 生成一次；测试只用 `TestRepo::import_fixture` / `import_worktree_fixture`（reflog、`ref_reflog`、`patch_id` 夹具由各自的测试按夹具说明复制或重建）导入，不运行 git。
 - 测试仓库用 `testing::TestRepo`（`test-support` feature）构造，不调用 git 命令行；发现仓库用 `testing::discover`，只读仓库自己的配置（和其中 `include` 引入的文件），不受机器上的 git 配置影响。`watch_source_*`（`src/watch/tests.rs`）测 `fs_watch` 的过滤器与配置清单（复用遍历的 `watch_source_reuse_*` 与完整构造逐条比较答案；`watch_source_events_*` 用 fs_watch 的 `testing::manual` 和 `FakeBackend` 驱动真实的过滤器），配置清单里仓库之外的位置用测试给出的 `HOME` / `XDG_CONFIG_HOME`，不读进程环境。
 - git 目录里的管理文件只在 `src/gitdir.rs` 里按路径读；工作区文件只经 `SafeRoot`。
 - 改动来源（`change_source_*`，`src/local/tests.rs`）把每个 `ChangeList` 与它的 `ChangeSet` 逐字段比较，再用 insta 快照记录。
+- 引用 reflog 和补丁 ID（`ref_reflog_*` 在 `src/repo/tests.rs`，`patch_id_*` 在 `src/patch_id/tests.rs`）与 git 的输出对照：夹具 `tests/fixtures/ref_reflog`、`tests/fixtures/patch_id` 由 `scripts/ref_reflog.sh`、`scripts/patch_id.sh` 生成一次，期望值是 git 自己读出的 reflog 和 `git patch-id --stable` 的结果（[夹具说明](tests/fixtures/README.md)）。改动 `patch_id` 的口径后，先用脚本确认 git 的值没有变，再改代码。
 - 三方合并（`merge3_*`，`src/merge3/tests.rs`）是纯计算：期望的字节写在测试里，与 `git merge-file` 的结果核对过，测试不运行 git。
 - 工作区比较的测试（`compare/tests.rs`）每次比较前后对 git 目录做快照，必须相同（只读）；用 `hook::reads` 检查哪些文件被读了。和 git 的转换结果对照的工作区夹具见[夹具说明](tests/fixtures/README.md)「工作区夹具」。
 - 计时：`lectern-bench` 的 `git/open`、`git/open_handle`、`git/diff_50_cold`、`git/diff_50_warm`、`git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/refresh_full`、`git/changes_capped`，10 万文件的 `git/open_100k`、`git/filter_100k`（只有 index 变化后复用遍历的重建，用 `testing::filter_reused` 确认）、`git/changes_clean_100k` 和只记录的 `git/refresh_one_100k`、`git/canonical_oid_100k`、`…/batch_100`、`git/filter_100k/cold`、`git/filter_100k/walk`、`git/changes_clean_100k/stat_all`、计数 `git/changes_clean_100k/reads`、`…/stat_*`（`time` 目标；后者用 `testing::worktree_reads`、`testing::stat_mismatches`）和 `git/changes_capped_bytes`、`git/changes_count/total_bytes`、`git/resident`、`git/filter_cloudprint_bytes`、`git/filter_100k_bytes`、`git/compare_100k/peak_bytes`、`git/compare_100k/retained_bytes`、`git/changes_count/per_path_bytes`（`memory` 目标；工作区比较解析的 index 只在一次调用内持有，`compare_releases_its_index_*` 检查；fs_watch 过滤器连同它持有的解析后 index 是本 crate 的份额，[ADR 0035](../../docs/adr/0035.md)），夹具由 `TestRepo` 生成：`just bench git/`（Linux 上是冒烟运行，`just bench --measure git/` 采样并打印实测值）。`bench` 只经公开接口和 `testing`（如 `testing::open_handle`）调用本 crate。

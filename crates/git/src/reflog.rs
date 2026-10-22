@@ -1,6 +1,7 @@
 //! Parsing reflog lines (docs/design/git.md「引用与历史」), pure functions on
-//! any thread, and reading the tail of a worktree's HEAD reflog backwards
-//! (`Worktree::head_reflog`, blocking).
+//! any thread, and reading the tail of a worktree's HEAD reflog
+//! (`Worktree::head_reflog`) or of a reference's reflog
+//! (`Repo::ref_reflog`) backwards, blocking.
 
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -64,6 +65,63 @@ pub(crate) fn head_reflog(
     };
     let (entries, complete) = read_tail(&mut file, len, hash, tail)?;
     Ok(HeadReflog {
+        exists: true,
+        entries,
+        complete,
+    })
+}
+
+/// One reference's reflog (`logs/<full name>` in the common directory), as
+/// [`Repo::ref_reflog`](crate::Repo::ref_reflog) read it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct RefReflog {
+    /// False without a reflog file: the reference doesn't exist (a deleted
+    /// branch, the old name of a renamed one, `refs/stash` after the last
+    /// drop) or its updates aren't logged. Then `entries` is empty and
+    /// `complete` true.
+    pub exists: bool,
+    /// Oldest first, as in the file.
+    pub entries: Vec<ReflogEntry>,
+    /// The reading reached the file's first line, so the file has no record
+    /// older than the first of `entries`. False when the file is longer than
+    /// `max_bytes` and only its end was read.
+    pub complete: bool,
+}
+
+/// `Repo::ref_reflog` for the reflog at `path`: the end of the file, at
+/// most `max_bytes`, read backwards like the HEAD reflog and returned
+/// oldest first.
+pub(crate) fn ref_reflog(
+    path: &Path,
+    hash: HashKind,
+    max_bytes: u64,
+) -> Result<RefReflog, GitError> {
+    let absent = RefReflog {
+        exists: false,
+        entries: Vec::new(),
+        complete: true,
+    };
+    // `logs/refs/heads/a/b` when `a` is a branch: no such reference.
+    let mut file = match gitdir::open(path) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(absent),
+        Err(err) if err.kind() == io::ErrorKind::NotADirectory => return Ok(absent),
+        Err(err) => return Err(err.into()),
+    };
+    let meta = file.metadata()?;
+    // `logs/refs/heads/a` is a directory when only `a/…` branches exist.
+    if !meta.is_file() {
+        return Ok(absent);
+    }
+    let tail = Tail {
+        stop: i64::MIN,
+        max_entries: usize::MAX,
+        max_bytes,
+        chunk: CHUNK_BYTES,
+    };
+    let (mut entries, complete) = read_tail(&mut file, meta.len(), hash, tail)?;
+    entries.reverse();
+    Ok(RefReflog {
         exists: true,
         entries,
         complete,
