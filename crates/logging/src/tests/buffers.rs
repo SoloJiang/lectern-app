@@ -14,6 +14,34 @@ fn numbered(i: u64) {
 }
 
 #[test]
+fn records_after_a_batch_need_no_wake_up() {
+    let fx = Fixture::new();
+    let logging = fx.start(None);
+    LECTERN_LIMIT.store(u32::MAX, Ordering::Relaxed);
+    numbered(0);
+    // The flush writes a batch; the writer then waits up to 1 s for more.
+    assert!(logging.flush(Duration::from_secs(5)));
+    let wakes = crate::sink::WAKES.load(Ordering::SeqCst);
+    for i in 1..=10 {
+        numbered(i);
+    }
+    assert_eq!(
+        crate::sink::WAKES.load(Ordering::SeqCst),
+        wakes,
+        "no caller woke the writer"
+    );
+    // They are written when that wait ends, without a flush.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while with_msg(&records(fx.path()), "numbered record").len() < 11 {
+        assert!(
+            Instant::now() < deadline,
+            "records written within the batch wait"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn early_buffer_overflow_drops_newest_and_counts() {
     let fx = Fixture::new();
     let _early = fx.install(None, None);

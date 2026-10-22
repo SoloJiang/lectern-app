@@ -338,6 +338,8 @@ struct Writer {
     pending: Vec<(Level, Vec<u8>)>,
     reported: (u64, u64),
     wait_started: Option<Instant>,
+    /// The end of the wait for more records after the last batch.
+    linger_until: Option<Instant>,
     /// Bytes discarded since the last attempt to open the directory.
     discarded: u64,
 }
@@ -358,6 +360,7 @@ pub(crate) fn run(shared: &'static Shared, mut config: Config) {
             pending: Vec::new(),
             reported: (0, 0),
             wait_started: None,
+            linger_until: None,
             discarded: 0,
         };
         writer.startup();
@@ -546,7 +549,8 @@ impl Writer {
                 return;
             }
             let (pending, urgent) = self.peek();
-            let waited = self.wait_started.is_some_and(|s| s.elapsed() >= BATCH_WAIT);
+            let waited = self.wait_started.is_some_and(|s| s.elapsed() >= BATCH_WAIT)
+                || self.linger_until.is_some_and(|d| Instant::now() >= d);
             if pending && (urgent || waited || flush_to.is_some()) {
                 self.write_pending();
             }
@@ -569,9 +573,21 @@ impl Writer {
         if urgent || self.control_pending() {
             return;
         }
-        if pending {
-            let started = *self.wait_started.get_or_insert_with(Instant::now);
-            let left = BATCH_WAIT.saturating_sub(started.elapsed());
+        // After a batch the writer waits (lingers) up to 1 s for more
+        // records instead of sleeping without a deadline: records that come
+        // in that time need no wake-up from their callers (no system call on
+        // the calling thread), and are written when the linger ends, at most
+        // 1 s after they came. Without records it then sleeps until the next
+        // one; it never wakes periodically.
+        let now = Instant::now();
+        let deadline = match (pending, self.linger_until) {
+            (_, Some(linger)) if linger > now => Some(linger),
+            (true, Some(_)) => return,
+            (true, None) => Some(*self.wait_started.get_or_insert(now) + BATCH_WAIT),
+            (false, _) => None,
+        };
+        if let Some(deadline) = deadline {
+            let left = deadline.saturating_duration_since(now);
             if left.is_zero() {
                 return;
             }
@@ -582,6 +598,7 @@ impl Writer {
             std::thread::park_timeout(left);
             return;
         }
+        self.linger_until = None;
         state.writer_state.store(IDLE, Ordering::SeqCst);
         if self.peek().0 || self.control_pending() {
             return;
@@ -635,6 +652,7 @@ impl Writer {
             }
             std::mem::swap(&mut b.front, &mut self.back);
         }
+        self.linger_until = Some(Instant::now() + BATCH_WAIT);
         let back = std::mem::take(&mut self.back);
         self.write_frames(&back);
         self.back = back;

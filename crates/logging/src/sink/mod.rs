@@ -196,11 +196,47 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// `try_lock` attempts before a caller blocks on the buffer lock. The lock
+/// is held for one copy of at most 4 KiB, well under a microsecond, while
+/// a blocked waiter costs a sleep and a wake-up in the kernel (and the
+/// releasing caller the wake-up call): on macOS the contended path of
+/// `std::sync::Mutex` goes to the kernel at once. A few hundred attempts
+/// are about 1–2 µs.
+const SPINS: u32 = 256;
+
+/// How often callers met the buffer lock taken, blocked on it after
+/// spinning, and woke the writer: the cost `log/contended_call` measures,
+/// counted on the slow paths only.
+pub(crate) static CONTENDED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static BLOCKED: AtomicU64 = AtomicU64::new(0);
+pub(crate) static WAKES: AtomicU64 = AtomicU64::new(0);
+
+/// The buffer lock for a caller: spins briefly before blocking.
+fn lock_buffers(m: &Mutex<Buffers>) -> MutexGuard<'_, Buffers> {
+    match m.try_lock() {
+        Ok(guard) => return guard,
+        Err(std::sync::TryLockError::Poisoned(e)) => return e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            CONTENDED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for _ in 0..SPINS {
+        std::hint::spin_loop();
+        match m.try_lock() {
+            Ok(guard) => return guard,
+            Err(std::sync::TryLockError::Poisoned(e)) => return e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+    }
+    BLOCKED.fetch_add(1, Ordering::Relaxed);
+    lock(m)
+}
+
 impl State {
     /// Copies a record into the buffer; false when it is dropped.
     pub(crate) fn push(&self, level: Level, line: &[u8]) -> bool {
         let (pushed, newly_urgent) = {
-            let mut b = lock(&self.buffers);
+            let mut b = lock_buffers(&self.buffers);
             let was_urgent = b.urgent;
             let pushed = b.push(level, line);
             if pushed && b.phase == Phase::Running {
@@ -232,10 +268,14 @@ impl State {
                     .compare_exchange(IDLE, BUSY, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
+                    WAKES.fetch_add(1, Ordering::Relaxed);
                     thread.unpark();
                 }
             }
-            WAITING if urgent => thread.unpark(),
+            WAITING if urgent => {
+                WAKES.fetch_add(1, Ordering::Relaxed);
+                thread.unpark();
+            }
             _ => {}
         }
     }

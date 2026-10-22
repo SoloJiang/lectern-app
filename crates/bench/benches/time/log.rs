@@ -173,6 +173,7 @@ fn contended_call(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let per_round = ROUND_RECORDS.div_ceil(callers);
     let rounds = ctx.scale(SAMPLES.div_ceil(callers * per_round), 1);
     let dropped = logger.logging.status().dropped;
+    let before = testing::contention();
     let start = Barrier::new(callers + 1);
     let end = Barrier::new(callers + 1);
     let (mut samples, failed) = std::thread::scope(|s| {
@@ -218,9 +219,17 @@ fn contended_call(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     if ctx.mode() == Mode::Measure {
         samples.truncate(SAMPLES);
     }
+    // The callers' slow paths during the run (warm-up calls included): a
+    // proxy that shows on Linux what costs most on macOS.
+    let after = testing::contention();
+    let note = format!(
+        "{callers} callers; lock taken {}, blocked after spinning {}, writer woken {}",
+        after.contended - before.contended,
+        after.blocked - before.blocked,
+        after.wakes - before.wakes,
+    );
     Ok(vec![
-        Measured::new("log/contended_call", Value::Time(Samples(samples)))
-            .with_note(Some(format!("{callers} callers"))),
+        Measured::new("log/contended_call", Value::Time(Samples(samples))).with_note(Some(note)),
     ])
 }
 

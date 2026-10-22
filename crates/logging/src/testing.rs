@@ -125,6 +125,27 @@ mod sink_support {
         logging.flush(timeout)
     }
 
+    /// The callers' slow paths so far in this process (`log/contended_call`
+    /// reports the difference over its run).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Contention {
+        /// A caller found the buffer lock taken.
+        pub contended: u64,
+        /// A caller still found it taken after spinning, and blocked.
+        pub blocked: u64,
+        /// A caller woke the writer (a system call on the calling thread).
+        pub wakes: u64,
+    }
+
+    pub fn contention() -> Contention {
+        use std::sync::atomic::Ordering::Relaxed;
+        Contention {
+            contended: crate::sink::CONTENDED.load(Relaxed),
+            blocked: crate::sink::BLOCKED.load(Relaxed),
+            wakes: crate::sink::WAKES.load(Relaxed),
+        }
+    }
+
     /// What [`install_early_again`] allocated; freed when dropped.
     pub struct EarlyAgain(#[allow(dead_code, reason = "held to be dropped")] InstallCost);
 
