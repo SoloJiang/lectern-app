@@ -99,7 +99,7 @@ pub fn plugin(deps: UsageDeps) -> (Name, UsagePlugin);
   `ref_reflog` 读末尾：文件超过 `max_bytes` 时缺的是最早的记录，与 git 清掉旧记录的情形相同，`complete` 为 false 的分支按「片段」的「向过去开放」处理；arm 之后的新记录由 `fs_watch` 交付，两段之间没有缺口。`patch_id` 的补充口径（二进制文件、上限）见 [git 设计「usage 用的读取」](git.md#usage-用的读取)：超过上限时返回错误，调用方按这个提交没有补丁 ID 处理，不算一一对应。
 
   测试 `ref_reflog_*`（分支的创建、改名、`branch -f`、`refs/stash` 的增删，与 git 读出的结果相同；夹具由脚本用 git 生成一次，测试本身不运行 git）、`patch_id_*`（与 `git patch-id --stable` 对夹具给出的值相同；只改空白的两个提交补丁 ID 相同；文件顺序不同的同一组改动补丁 ID 相同）。
-- **E. `fs_watch`**：`ReflogFile` 加 `Remote(Arc<[u8]>)`，读 `logs/refs/remotes/**`，规则与 `Branch` 相同（arm 前的第 1 段、补读、`NewFile`、`Reset`、目录重新列出）。detached 推送的转移要用远端跟踪分支在调用期间的更新时刻。测试 `reflog_remote_*`。
+- **E.（取消）** 原计划让 `fs_watch` 监听 `logs/refs/remotes/**`。不这样做：每个远端跟踪分支要常驻一份读取进度（实测约 330 B），长期使用的 monorepo 克隆有几千个，超出 [ADR 0035](../adr/0035.md) 给 `fs_watch` 自身状态的 1 MB；每次 fetch 还会把成百上千条与用量无关的记录写进本 crate 的数据库。detached 推送的转移改为推送观察：`Execute` 调用的命令解析出 `git push <远端> HEAD:<分支>`（「命令文本」）时，在这次调用的 `call_obs` 里用前置条件 D 的 `Repo::ref_reflog("refs/remotes/<远端>/<分支>", 64 KiB)` 读一次这个远端跟踪分支的 reflog，记下是否有一条新 OID 等于调用开始时 detached HEAD 的提交、行时刻在 [S − 1 秒, T + 1 秒] 内的推送记录（「转移」）。`<远端>` 是推送地址而不是已配置的远端名时没有远端跟踪分支，只能按 `MrSource::mrs_containing` 转移。不需要新的前置条件。
 - **F. `forge`（#25）**：实现「接口」里的 `MrSource`，由 `forge` crate 里另一个小插件（如 "forge-usage"）登记：它 requires `dyn Usage` 和 forge 自己的服务，在 `started` 里调 `Usage::register_mr_source`，把返回的登记交给 `PluginHandle::own`。数据的口径以 `crates/forge/AGENTS.md`「边界」最后一条为准：仓库按平台主机加不变 ID 标识，MR 带源仓库与源分支、目标仓库与目标分支、历史 base、合并前目标分支的提交、源分支 head、完整的状态时间线。forge 的设计可以细化签名，语义不变。
 - **G. `agents`（#66）**：Analyze 的插件 requires `dyn Usage`。分析开始时调 `begin_analysis`；凭据转发端点对每个模型请求调 `meter`：转发之前 `Prepared`（带按上限估算的 token），返回 Ok 之后才转发；请求体写入上游后 `Forwarded`，收到 2xx 后 `Accepted`，收到用量时 `Usage`，非 2xx 且没有用量时 `Rejected`。辅助会话不写入用户的会话目录（ADR 0019），所以计量与日志不重复。
 - **H. `git`、`fs_watch`（以后，不阻塞本 issue）**：reftable 仓库的 reflog 读取与监听时刻。在那之前 reftable 仓库是文件夹项目。
@@ -557,7 +557,7 @@ pub mod testing {
 |---|---|---|
 | 会话记录 | `services::session`（[agents 设计「记录」](agents.md#记录)）。日志格式由 `agents` 按版本适配，本 crate 只读这些类型 | `Context`、`TurnStarted`、`TurnEnded`、`ToolStarted`、`ToolFinished`、`Usage`、`RateLimits`；`Positioned` 的 `pos`、`seq`、`inherited`；`Batch::reset`、`at_end`；`SessionSummary` 的 `parent`、`cwd`、`place`、`logged_branch`、`open_turn`、`inheritance_unknown`；`TurnIndex` 与 `load` 给出的 `FileEdit` |
 | statusline JSON | Claude Code statusline 的输入（ADR 0014 的来源 <https://code.claude.com/docs/en/statusline>），`platform` 原样存下（前置条件 C） | 顶层 `rate_limits` 的 `five_hour`、`seven_day` 两个窗口：已用百分比、重置时刻；文件的修改时间是采样时刻。其余字段忽略 |
-| reflog 记录 | `fs_watch::ReflogRecord`、`ReflogReset`（[fs_watch 设计「reflog 记录」](fs_watch.md#reflog-记录)），行由 `git::parse_reflog_line` 解析 | `logs/HEAD`、各 worktree 的 `logs/HEAD`、`logs/refs/heads/**`、`logs/refs/stash`、前置条件 E 的 `logs/refs/remotes/**` |
+| reflog 记录 | `fs_watch::ReflogRecord`、`ReflogReset`（[fs_watch 设计「reflog 记录」](fs_watch.md#reflog-记录)），行由 `git::parse_reflog_line` 解析 | `logs/HEAD`、各 worktree 的 `logs/HEAD`、`logs/refs/heads/**`、`logs/refs/stash`；远端跟踪分支不监听，推送观察按需经 `Repo::ref_reflog` 读（前置条件 E 的说明） |
 | MR | `MrSource`（前置条件 F） | 见「接口」 |
 
 statusline JSON 的字段名在第 2 步按公开文档核对：实现之前读 ADR 0014 来源里的 statusline 文档，把每个窗口里百分比和重置时刻的字段名、取值范围、文档日期写进本节；文档里没有 `rate_limits` 时停下，在 #32 里说明，Claude Code 的额度为空。不读本机的 Claude Code 配置和会话。解析只声明用到的字段；文件超过 1 MiB、不是 JSON、没有这两个窗口时不更新额度，计数进日志。
@@ -609,10 +609,10 @@ statusline JSON 的字段名在第 2 步按公开文档核对：实现之前读 
 | `usage_source` | O | 键（`UsageKey` 的规范编码）、会话、代、`pos`、`seq`、时间戳、轮次、模型、四类 token、`sidechain`、`superseded`、`inherited` | 每批读取的事务里 |
 | `limit_sample` | O | agent、来源、`limit_id`、窗口种类、百分比、窗口分钟数、重置时刻、采样时刻；每个（agent、来源、`limit_id`、窗口种类）只留最新的一条 | `RateLimits` 记录、statusline 文件变化 |
 | `watch_span` | O | 仓库、运行序号、arm 之后第一批的读取戳、结束的读取戳（句柄 drop、`Failed`） | `RepoWatch` 的批次 |
-| `reflog`、`reflog_reset` | O | 仓库、文件（HEAD 与 worktree / 分支 / stash / 远端）、偏移、行、`seq`、`observed` 与 `after`（运行序号、读取编号、纳秒时刻）、`origin`；重置的原因 | `RepoBatch` 到达时 |
+| `reflog`、`reflog_reset` | O | 仓库、文件（HEAD 与 worktree / 分支 / stash）、偏移、行、`seq`、`observed` 与 `after`（运行序号、读取编号、纳秒时刻）、`origin`；重置的原因 | `RepoBatch` 到达时 |
 | `head_baseline` | O | 仓库、worktree、读取戳、`HeadState` | arm 之后读一次每个 worktree 的 HEAD |
 | `call_fact` | O | 会话、调用 ID、路径（不分代）：位置、worktree、相对路径、进入的 worktree | 读到这个调用时，只写一次 |
-| `call_obs` | O | 会话、调用 ID、worktree（不分代）：片段（或 detached 的提交）、HEAD 的提交、确定性（确定 / 不确定）、调用期间确定停留过的片段；`Read`、`Search` 的连续相同观察合成一行 | 结果时刻之后 2 秒，或定稿时补算（「轮次的观察与改动项」「分支观察」） |
+| `call_obs` | O | 会话、调用 ID、worktree（不分代）：片段（或 detached 的提交）、HEAD 的提交、确定性（确定 / 不确定）、调用期间确定停留过的片段；`Execute` 解析出 `git push <远端> HEAD:<分支>` 时另有推送观察：远端跟踪引用名、匹配的推送记录（新 OID、行时刻）或「没有」「读不到」；`Read`、`Search` 的连续相同观察合成一行 | 结果时刻之后 2 秒，或定稿时补算（「轮次的观察与改动项」「分支观察」） |
 | `turn_obs` | O | 会话、`TurnId`（不分代）：轮次的最后时刻 L、cwd 的 worktree、片段、确定性 | L 之后 2 秒，或定稿时补算 |
 | `segment`、`segment_name` | O | 片段 ID（16 字节）、仓库、开始的原因与时刻、前一个片段、结束的原因与时刻；片段的分支名与生效时刻（改名） | reflog 的创建、改名、删除、重置记录到达时 |
 | `boundary_obs` | O | 前后两个片段、种类（删除重建、丢弃独有提交的重置、回到起点）、新旧位置的提交关系、改写的证据、当时有没有挂起的 stash | 边界发生时（「一次使用」） |
@@ -755,7 +755,7 @@ reflog 记录 R 的写入时刻区间：下界取 `R.after.at` 与行里的时�
 | 切到已有分支时带过去的未提交改动 | 切换记录到达时（跟踪中的仓库）读这个 worktree 的未提交路径写 `worktree_obs`；默认分支或 detached 上还没有提交、路径在其中的改动项转到目标分支的片段 |
 | stash 恢复到另一个分支 | 按改动块认定（`stash::restored`）：stash 的每个改动块按恢复后的工作区文件判断，加上的行都在、删掉的行已不在，目标分支 HEAD 已有一部分也算满足，且至少有一行出现在工作区相对 HEAD 的改动里；二进制和只改模式的改动按 blob OID 与模式比较；`-u` / `-a` 存下的文件取自 stash 提交的第三个父提交（`git::Repo::stash`），这些路径经 `RepoWatch::set_unfiltered` 加进不过滤清单。恢复的证据：这个 worktree 上执行过的 `git stash apply` / `pop`，或这条 stash 从 `refs/stash` 的 reflog 消失的时刻与改动出现的时刻相差不超过 5 秒。匹配的改动至少有一处要在恢复时（命令证据含结果之后 5 秒）被文件监听记到变化：本 crate 为有候选 stash、且有跟踪中会话的 worktree 持有 `WorktreeWatch`，没有监听的 worktree 不认定恢复。命令里的 stash 按执行前的 reflog 解析，只认它指向的那一条；解析不出来时内容匹配的候选要恰好一条。产生这些改动的轮次的改动项转到目标片段 |
 | cherry-pick 到新分支 | HEAD 记录是 `cherry-pick`；原提交先按命令里的提交 OID，没有命令时按 `patch_id` 在已入库、带去向的提交里找，候选要恰好一个；原提交的改动项目标是默认分支、detached 或无法归属时，改动项转到新片段 |
-| detached 上的提交推到某个 MR 的源分支 | 命令是 `git push <远端> HEAD:<分支>`，远端跟踪分支的 reflog（前置条件 E）在调用期间更新到推送前的 HEAD；或之后 `MrSource::mrs_containing` 只给出一个 MR。detached 片段上这些提交的改动项转到那个 MR 源分支的片段（没有本地分支时新建一个只有远端名的片段） |
+| detached 上的提交推到某个 MR 的源分支 | 命令是 `git push <远端> HEAD:<分支>`，这次调用的推送观察（`call_obs`）找到了远端跟踪分支在 [S − 1 秒, T + 1 秒] 内更新到推送前 HEAD 的记录；或之后 `MrSource::mrs_containing` 只给出一个 MR。detached 片段上这些提交的改动项转到那个 MR 源分支的片段（没有本地分支时新建一个只有远端名的片段） |
 
 ADR 0020「已知限制」照旧：同一个提交被 cherry-pick 到几个分支、各自开 MR 时，改动项只转到第一个满足条件的分支；`git branch` 后 `reset` 再推送这类补救流程不转移。
 
@@ -839,7 +839,7 @@ ADR 0020「已知限制」照旧：同一个提交被 cherry-pick 到几个分�
 | `switch -c` 带进新分支；切到已有分支带过去的未提交改动 | `worktree_obs`、`transfer` | 「工作转入新分支」 | `transfer_switch_*` | 6 |
 | stash 恢复到另一个分支：改动块、证据、5 秒、文件监听、`stash@{n}` 的解析、候选恰好一条 | `stash_obs`、`transfer` | `stash::restored` | `stash_*` | 6 |
 | cherry-pick 按命令的 OID 或 `patch-id`，原提交不属于 MR 时转移 | `call`、`reflog`、`transfer` | 同上 | `transfer_cherry_pick_*` | 6 |
-| detached 推到 MR 源分支（远端跟踪分支在调用期间更新） | `reflog`（远端）、`transfer` | 同上 | `transfer_push_*` | 6 |
+| detached 推到 MR 源分支（远端跟踪分支在调用期间更新） | `call_obs`（推送观察）、`transfer` | 同上 | `transfer_push_*` | 6 |
 | `forge` 证明边界时开着 MR、关闭后在边界之后重新打开、仍对应开着的 MR 时合并片段 | `boundary_obs`、MR 数据 | `uses` | `use_forge_*` | 7 |
 | MR 区间的起点、终点、开 MR 之前的工作、关闭期间并入 | MR 时间线 | `mr_intervals` | `mr_interval_*` | 7 |
 | `forge` 有对应 MR 时优先于默认分支 | MR 数据 | 汇总 | `mr_default_branch_*` | 7 |
@@ -995,7 +995,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - B. `platform`：`time::utc_offset`；`utc_offset_*` 测试在 Linux CI 和 macOS CI 上通过（第 1 步之前）。
 - C. `platform` 与 `app`：`app` 构造 `UsageDeps` 并把插件放进 `PluginSet`（第 1 步的插件部分之后）；statusline 脚本写 `<app_data>/usage/statusline/claude-code.json`（#32，第 2 步的端到端之前；第 2 步本身用 fixtures 验收）。
 - D. `git`：`Repo::ref_reflog`、`Repo::patch_id`；`ref_reflog_*`、`patch_id_*` 测试通过（第 5 步之前）。已完成（[#178](https://github.com/SoloJiang/lectern-app/pull/178)）。
-- E. `fs_watch`：`ReflogFile::Remote`；`reflog_remote_*` 测试通过（第 6 步之前）。
+- E. 取消：推送观察按需读 `Repo::ref_reflog`（前置条件 D），不监听远端跟踪分支（见「对其他 crate 的要求」的 E）。
 - F. `forge`：`MrSource` 的实现与登记（第 7 步之前）。
 - G. `agents`：Analyze 调用 `begin_analysis`、`meter`（第 8 步之前）。
 
@@ -1015,7 +1015,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
    - `usage/finalize_turn_20` 在预算内。
 5. **分支观察与分支归属**（前置 D）：`RepoWatch` 与 reflog 入库、`watch_span`、`call_obs`、片段、分摊规则 2、3、6 的分支部分、`Worktree` 与 `Session` 查询的分支行（P1 / P2 的「分支用量」）。
    - `observe_*`、`order_*`、`multi_switch_*`、`branch_by_change_*`、`enter_*`、`follow_switched_*`、`cwd_branch_*`、`imported_*`、`segment_*`、`rebuild_*` 通过；`usage/rebuild_30d` 有结果。
-6. **一次使用与工作转入新分支**（前置 D、E）：边界观察、`uses`、`worktree_obs`、`stash_obs` 与 `stash::restored`、`transfer` 的五种规则（`forge` 的那一种除外）、「不属于任何 MR」的行。
+6. **一次使用与工作转入新分支**（前置 D）：边界观察、`uses`、`worktree_obs`、`stash_obs` 与 `stash::restored`、`transfer` 的五种规则（`forge` 的那一种除外）、「不属于任何 MR」的行。
    - `use_boundary_*`、`use_stash_suspend_*`、`use_same_name_reuse`、`rows_unassigned_*`、`transfer_*`（`transfer_forge_head_*` 除外）、`stash_*` 通过。
 7. **MR 区间**（前置 F）：`register_mr_source`、项目标识里的仓库 ID、`uses` 的 `forge` 条件、`mr_intervals`、Usage 页的 MR 行、`Mr` 查询、detached 提交按 MR head 转移。
    - `use_forge_*`、`mr_interval_*`、`mr_default_branch_*`、`mr_shared_*`、`rows_mr_*`、`detail_*`、`transfer_forge_head_*`、`identity_forge_pending_*` 通过。
