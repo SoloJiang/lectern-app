@@ -1,6 +1,11 @@
 //! In-process timing benchmarks, one module per crate under test
 //! (docs/design/bench.md「基准目标」).
 
+#![allow(
+    clippy::print_stderr,
+    reason = "a tool crate: benchmarks print fixture notes for the terminal and CI (docs/design/logging.md「对其他 crate 的要求」)"
+)]
+
 #[path = "time/agents.rs"]
 mod agents;
 #[path = "time/cache.rs"]

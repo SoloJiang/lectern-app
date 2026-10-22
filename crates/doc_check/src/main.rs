@@ -1,6 +1,12 @@
 //! `cargo run -p lectern-doc-check`: check the relative links in every tracked
 //! Markdown file. Exits with status 1 when any link is broken.
 
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "a tool crate: the check reports its result to the terminal and CI (docs/design/logging.md「对其他 crate 的要求」)"
+)]
+
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 

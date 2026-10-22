@@ -1,6 +1,6 @@
 # CI 与约束检查
 
-状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。macOS 的基准拆成单独的任务（[ADR 0036](../adr/0036.md)），见「任务」「实际验证」。
+状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。macOS 的基准拆成单独的任务（[ADR 0036](../adr/0036.md)），见「任务」「实际验证」。打印 lint 与架构规则检查第 8 条由 [#195](https://github.com/SoloJiang/lectern-app/pull/195) 加入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 10 项，验证见 [logging 设计「实际验证」](logging.md#实际验证)）。
 
 对应 issue [#4](https://github.com/SoloJiang/lectern-app/issues/4)。规则以脚本执行，违反时构建立即失败（[技术调研](tech-research.md)「约束检查」）。
 
@@ -39,6 +39,7 @@
 5. 每个 crate 的 `Cargo.toml` 写有 `[lints] workspace = true`，继承工作区的 lint 配置（见「Lint」）。
 6. 只有 `app` 和 tool 层启用 `lectern-logging` 的 `sink` feature：依赖声明里的 feature 和 crate 自己的 feature 表（`lectern-logging/sink`、`lectern-logging?/sink`，含改名的依赖）都算（[logging 设计](logging.md)）。
 7. `Value::panic_message` 只出现在 `crates/kernel`、`crates/executor`、`crates/logging` 的源码里：其他 crate 目录下任何 `.rs` 文件（去掉注释和字符串后）出现 `panic_message` 这个名字即报错（[logging 设计「隐私」](logging.md#隐私)）。
+8. 工作区的 `[workspace.lints.clippy]` 把 `print_stderr`、`print_stdout` 设为 `warn`（或 `deny`、`forbid`）；tool 层之外的 crate 目录下，除 crate 根目录的 `build.rs` 外，任何 `.rs` 文件（去掉注释和字符串后）出现这两个名字即报错，即不能用 `allow`、`expect` 关掉它们（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 10 项）。
 
 每条报错末尾的方括号写明规则出处（AGENTS.md 的规则编号或设计文档），agent 可以直接找到规则原文。
 
@@ -56,15 +57,16 @@ python3 scripts/check_architecture.py
 
 ## Lint
 
-工作区的 `[workspace.lints.clippy]` 在 clippy 默认规则之外增加三条，`-D warnings` 下都是错误：
+工作区的 `[workspace.lints.clippy]` 在 clippy 默认规则之外增加五条，`-D warnings` 下都是错误：
 
 - `allow_attributes_without_reason`：`#[allow]` 和 `#[expect]` 必须写 `reason = "..."`，说明为什么关掉这条规则。
 - `dbg_macro`：提交的代码里不留 `dbg!`。
 - `undocumented_unsafe_blocks`：每个 `unsafe` 块前用 `// SAFETY:` 注释说明为什么安全。
+- `print_stderr`、`print_stdout`：运行时的输出只经 `lectern-logging` 的宏（[ADR 0046](../adr/0046.md)）。`clippy.toml` 的 `allow-print-in-tests = true` 放过 `#[test]` 函数和 `#[cfg(test)]` 里的代码；tool crate（`bench`、`doc_check`）在打印的目标根上 `#![allow]`，`i18n` 的 `build.rs` 在报错的函数上 `#[allow(clippy::print_stderr)]`。其他 crate 不能关掉它们，由架构规则检查第 8 条执行。
 
 今后用 `clippy.toml` 的 `disallowed-methods`、`disallowed-types` 禁用某个 API 时，`reason` 写明对应的架构规则或 ADR，例如 `reason = "视图层不做 IO（AGENTS.md 架构规则 4）"`。
 
-`clippy.toml` 现有的配置都来自 [ADR 0046](../adr/0046.md)（[logging 设计「隐私」](logging.md#隐私)）：`disallowed-macros` 禁止 `log` 的六个宏，`disallowed-methods` 禁止 GPUI 的错误日志辅助方法（`gpui_util::ResultExt`、`gpui_util::TryFutureExt` 的 `log_err` 等和 `gpui::TaskExt::detach_and_log_err` 等；这些路径只在依赖 GPUI 的 crate 里解析得到，条目带 `allow-invalid = true`），`await-holding-invalid-types` 禁止跨 `.await` 持有 `lectern_logging::Scope`。
+`clippy.toml` 现有的配置都来自 [ADR 0046](../adr/0046.md)（[logging 设计「隐私」](logging.md#隐私)）：`disallowed-macros` 禁止 `log` 的六个宏，`disallowed-methods` 禁止 GPUI 的错误日志辅助方法（`gpui_util::ResultExt`、`gpui_util::TryFutureExt` 的 `log_err` 等和 `gpui::TaskExt::detach_and_log_err` 等；这些路径只在依赖 GPUI 的 crate 里解析得到，条目带 `allow-invalid = true`），`await-holding-invalid-types` 禁止跨 `.await` 持有 `lectern_logging::Scope`，`allow-print-in-tests` 让测试代码不受上面两条打印 lint 的限制。
 
 ## 文档链接检查
 

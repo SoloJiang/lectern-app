@@ -49,6 +49,13 @@ publish = false
 allow_attributes_without_reason = "warn"
 dbg_macro = "warn"
 undocumented_unsafe_blocks = "warn"
+# Runtime output goes through lectern-logging's macros, not stdout or stderr
+# (ADR 0046, docs/design/logging.md「对其他 crate 的要求」). Tests are exempt
+# through clippy.toml's allow-print-in-tests; the tool crates and build
+# scripts allow them where they print, and the architecture check keeps
+# every other crate from allowing them.
+print_stderr = "warn"
+print_stdout = "warn"
 
 [workspace.dependencies]
 # GPUI comes from Zed's crates.io snapshots (gpui-pre 0.3.9 = zed@93d7456),

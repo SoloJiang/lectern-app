@@ -3,6 +3,12 @@
 //! `cache/memory` measures the resident size of a child process instead:
 //! SQLite's memory is not allocated through `CountingAlloc`.
 
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "a tool crate: the child process reports on stdout, benchmarks print notes on stderr (docs/design/logging.md「对其他 crate 的要求」)"
+)]
+
 #[path = "memory/cache.rs"]
 mod cache;
 #[path = "memory/code_intel.rs"]

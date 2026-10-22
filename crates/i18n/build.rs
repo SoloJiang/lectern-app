@@ -10,6 +10,10 @@ mod compile;
 use std::path::PathBuf;
 use std::{env, fs, process};
 
+#[allow(
+    clippy::print_stderr,
+    reason = "a build script reports invalid resources to Cargo on stderr; it is not runtime output (ADR 0046)"
+)]
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-changed=build");

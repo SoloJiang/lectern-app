@@ -8,6 +8,7 @@ import unittest
 import check_architecture
 from check_architecture import has_impl_plugin, implements_plugin, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 from check_architecture import enables_sink, panic_message_errors, sink_feature_errors, uses_panic_message
+from check_architecture import print_lint_allow_errors, workspace_print_lint_errors
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -294,6 +295,58 @@ class PanicMessageRule(unittest.TestCase):
                 [
                     "lectern-agents: crates/agents/tests/t.rs uses Value::panic_message; only kernel, executor and logging may [docs/design/logging.md]",
                     "lectern-cache: crates/cache/src/lib.rs uses Value::panic_message; only kernel, executor and logging may [docs/design/logging.md]",
+                ],
+            )
+
+
+class PrintLintRule(unittest.TestCase):
+    def test_workspace_sets_both_lints(self):
+        cases = {
+            '[workspace.lints.clippy]\nprint_stderr = "warn"\nprint_stdout = "deny"\n': [],
+            '[workspace.lints.clippy]\nprint_stderr = { level = "warn", priority = 1 }\nprint_stdout = "forbid"\n': [],
+            '[workspace.lints.clippy]\nprint_stderr = "allow"\n': [
+                'workspace: set `print_stderr = "warn"` in [workspace.lints.clippy] [docs/design/logging.md]',
+                'workspace: set `print_stdout = "warn"` in [workspace.lints.clippy] [docs/design/logging.md]',
+            ],
+            '[workspace]\nresolver = "3"\n\n[workspace.lints.clippy]\nprint_stdout = "warn"\n': [
+                'workspace: set `print_stderr = "warn"` in [workspace.lints.clippy] [docs/design/logging.md]',
+            ],
+        }
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "Cargo.toml")
+            for text, expected in cases.items():
+                with self.subTest(text=text):
+                    with open(path, "w") as f:
+                        f.write(text)
+                    self.assertEqual(workspace_print_lint_errors(path), expected)
+
+    def test_only_tool_crates_and_build_scripts_allow_them(self):
+        allow = '#![allow(clippy::print_stderr, reason = "prints")]\nfn main() { eprintln!("x"); }\n'
+        with tempfile.TemporaryDirectory() as root:
+            dirs, layers = {}, {"lectern-bench": "tool", "lectern-i18n": "infra", "lectern-cache": "infra", "lectern-welcome": "view"}
+            for name in ("bench", "i18n", "cache", "welcome"):
+                d = os.path.join(root, "crates", name)
+                os.makedirs(os.path.join(d, "src"))
+                with open(os.path.join(d, "src", "lib.rs"), "w") as f:
+                    f.write("// clippy::print_stdout is on for this crate.\nconst S: &str = \"print_stdout\";\n")
+                dirs[f"lectern-{name}"] = d
+            with open(os.path.join(dirs["lectern-bench"], "src", "lib.rs"), "w") as f:
+                f.write(allow)
+            with open(os.path.join(dirs["lectern-i18n"], "build.rs"), "w") as f:
+                f.write(allow)
+            self.assertEqual(print_lint_allow_errors(dirs, layers), [])
+            os.makedirs(os.path.join(dirs["lectern-cache"], "src", "build"))
+            with open(os.path.join(dirs["lectern-cache"], "src", "build", "build.rs"), "w") as f:
+                f.write(allow)
+            with open(os.path.join(dirs["lectern-welcome"], "src", "lib.rs"), "w") as f:
+                f.write("#[expect(clippy::print_stdout, reason = \"x\")]\nfn f() { println!(); }\n")
+            self.assertEqual(
+                print_lint_allow_errors(dirs, layers),
+                [
+                    "lectern-cache: crates/cache/src/build/build.rs allows clippy::print_stderr or print_stdout; "
+                    "log through lectern-logging's macros [docs/design/logging.md]",
+                    "lectern-welcome: crates/welcome/src/lib.rs allows clippy::print_stderr or print_stdout; "
+                    "log through lectern-logging's macros [docs/design/logging.md]",
                 ],
             )
 

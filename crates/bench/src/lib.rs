@@ -11,6 +11,12 @@
 //! budget (only on Apple silicon macOS, in measure mode); 2 a benchmark
 //! failed, or the benchmarks and the budget table disagree.
 
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "a tool crate: the runner prints its table and errors for the terminal and CI (docs/design/logging.md「对其他 crate 的要求」)"
+)]
+
 mod alloc;
 pub mod budgets;
 mod ctx;

@@ -13,6 +13,11 @@
 //! `GOTO_PHASES_FILES` sets the repository size (100 000 for the jump,
 //! 60 000 for `Named`).
 
+#![allow(
+    clippy::print_stdout,
+    reason = "a tool crate: the profile prints its medians (docs/design/logging.md「对其他 crate 的要求」)"
+)]
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

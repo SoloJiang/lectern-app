@@ -1,6 +1,11 @@
 # Workspace clippy configuration. Each `reason` names the rule or ADR
 # (docs/design/ci.md「Lint」).
 
+# The workspace lints turn on print_stderr and print_stdout (ADR 0046):
+# test functions and #[cfg(test)] code may still print diagnostics, which
+# nextest shows only for failing tests.
+allow-print-in-tests = true
+
 # Runtime logging goes through lectern-logging's macros: a literal message
 # and typed fields, so no runtime string reaches a log file (ADR 0046,
 # docs/design/logging.md「隐私」). lectern-logging's own macros build the
