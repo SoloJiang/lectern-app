@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#182](https://github.com/SoloJiang/lectern-app/pull/182)）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -1028,7 +1028,7 @@ impl Kernel {
 - 发布构建里的热路径：不让路的守卫在开关关着时多一次布尔判断，`poll_proceed` 和 `pause_requested` 仍然只读原子标志、不加锁；让路的守卫在两个开关都关着时多读两个原子量。忙碌守卫、准入、服务调用和事件分发的代码没有改动，`kernel/` 的基准不经过本次改动的代码，本次没有重新测量。
 - 没有验证的：`SystemClock` 的计时线程只有 `the_system_clock_wakes_at_the_instant_and_not_before` 一个测试，1 秒没有计时器后退出没有测试，其余测试全部用 `ManualClock`；`code_intel` 怎样接入（之后的 PR）；`app` 的交互静止判断和 `app/scroll_frames_indexing` 的校准（macOS）。
 
-运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 4 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），在 Linux（x86_64，4 核虚拟机）上运行：
+运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 4 项，[#182](https://github.com/SoloJiang/lectern-app/pull/182)），在 Linux（x86_64，4 核虚拟机）上运行：
 
 - `just test -p lectern-kernel`：109 个测试通过，其中新增 5 个（`crates/kernel/src/tests/logs.rs`，见「测试」的「日志」一条）；`cargo test -p lectern-kernel --all-features --lib` 在同一进程里运行全部 109 个也通过（各测试共用一个捕获器，按插件 ID 和激活序号筛选）；`cargo nextest run -p lectern-kernel --all-features -E 'test(logs)' --stress-count 30` 30 轮全部通过。`just check`、`just test`（工作区 2150 个测试，在加入 `app_command_callbacks_run_outside_the_failed_plugins_scope` 之前运行）、`just doctest`、`just deny` 全部通过。
 - logging 设计「验收」第 4 步起的检查：`rg 'eprintln!|util::log' crates/kernel/src --glob '!**/tests*'` 没有结果，`util::log` 已删除；金丝雀测试通过；`panic_records_carry_plugin_and_act` 检查 panic 记录里的 `plugin`、`act`。
