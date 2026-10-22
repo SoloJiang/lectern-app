@@ -1,6 +1,6 @@
 # usage 设计
 
-状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）已实现；其余前置条件与第 1–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）已实现；其余前置条件与第 1–8 步尚未实现。
 
 对应 issue [#31](https://github.com/SoloJiang/lectern-app/issues/31)，[#32](https://github.com/SoloJiang/lectern-app/issues/32) 的 Usage 页与额度读本文定义的快照。`usage` 把 `agents` 交来的用量记录去重、规范化后落进自己的 SQLite，把每一轮的 token 归属到项目、分支的「一次使用」和 MR，按时间窗口聚合，并保存额度快照（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)、[ADR 0022](../adr/0022.md)、[交互规范「用量」](interaction.md#用量)）。改动权重的来源按 [ADR 0047](../adr/0047.md)，数据库按 [ADR 0027](../adr/0027.md)，位置按 [ADR 0044](../adr/0044.md) 的应用数据目录。
 
@@ -69,12 +69,12 @@ pub fn plugin(deps: UsageDeps) -> (Name, UsagePlugin);
 以下改动各由对应 crate 的 PR 完成，写 `Refs #31`，在「验收」里列为前置条件。
 
 - **A. `services`**：`usage` 模块，按本文「接口」。只有 trait、数据类型和服务 ID；例外是 `UsageInterest`、`MrSourceRegistration` 包着的注销回调，与 `OverviewInterest` 的做法相同。`crates/services/AGENTS.md` 的模块列表加上这个模块。测试：类型的 JSON 往返，`dyn Usage` 的 `ID == "usage"`、`MULTIPLE == false`，`MrSource` 没有实现 `Service`，两个注销包装 drop 时各调用一次回调（`usage_*`）。
-- **B. `platform`**：本地时区的偏移，两个平台都用 POSIX 的 `localtime_r`（不是 macOS 专属能力，与 `ThreadCpuClock` 一样放在 `platform`，供 CI 测试）。不缓存时区规则以外的状态，不做 IO。
+- **B. `platform`**：本地时区的偏移，两个平台都用 POSIX 的 `localtime_r`（不是 macOS 专属能力，与 `ThreadCpuClock` 一样放在 `platform`，供 CI 测试）。不缓存时区规则以外的状态。第一次调用（以及 macOS 上系统时区改变之后的第一次调用）由 C 库读一次时区文件，之后只在内存里查找，所以不在 UI 线程上、首帧之前调用。
 
   ```rust
   pub mod time {
-      /// `unix_secs` 这一刻本地时间相对 UTC 的偏移（秒，东正西负），含夏令时。任何线程，不阻塞。
-      /// `localtime_r` 失败（超出 `time_t` 的范围）时为 None。
+      /// `unix_secs` 这一刻本地时间相对 UTC 的偏移（秒，东正西负），含夏令时。任何线程；第一次调用可能读时区文件，不在 UI 线程上调用。
+      /// `localtime_r` 失败（年份放不进 `struct tm`）或偏移超出 TZif 的范围时为 None；毫秒时间戳除以 1000 后总有偏移。
       pub fn utc_offset(unix_secs: i64) -> Option<i32>;
   }
   ```
@@ -496,7 +496,7 @@ impl MrSourceRegistration { pub fn new(release: impl FnOnce() + Send + Sync + 's
 ```rust
 /// 本地时区。`app` 用 `platform::time::utc_offset` 实现（前置条件 B），测试用 `testing::TableZone`。
 pub trait LocalZone: Send + Sync {
-    /// `unix_ms` 这一刻相对 UTC 的偏移（秒，东正西负）。不阻塞。
+    /// `unix_ms` 这一刻相对 UTC 的偏移（秒，东正西负）。第一次调用可能读时区文件，只在后台线程上调用。
     fn offset_at(&self, unix_ms: i64) -> i32;
 }
 
