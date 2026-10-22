@@ -383,40 +383,41 @@ impl Threaded {
     }
 
     /// Turns the yield switch on from inside a batch parse's step, at a
-    /// slice boundary: from the probe hook, at the `nth` ask of the first
-    /// step that is `ours`, after that ask read the switch off. The step has
-    /// parsed `nth` slices then and is still in flight; its next ask must
-    /// see the switch.
+    /// slice boundary: from the probe hook, at the `nth` ask that is `ours`
+    /// (counted across steps), after that ask read the switch off. The step
+    /// is in flight then; its next ask must see the switch. Counted across
+    /// steps, the switch turns on however few asks each step gets: on a busy
+    /// machine a step can run out of its wall-time budget after only a few.
     pub(crate) fn flip_inside(
         &self,
         nth: u32,
         ours: impl Fn(&Probe) -> bool + Send + Sync + 'static,
     ) -> Arc<Mutex<Flip>> {
         let flip = Arc::new(Mutex::new(Flip::default()));
-        let (log, kernel) = (flip.clone(), self.host.kernel());
+        let (log, kernel, events) = (flip.clone(), self.host.kernel(), self.events.clone());
         self.engine.set_probe(move |probe| {
-            let asked = match probe {
-                Probe::Chain { asked, .. } | Probe::Prefetch { asked } => asked,
-            };
+            let asked = probe.asked();
             let mut flip = log.lock().unwrap();
-            if flip.on.is_none() {
-                if asked == nth && ours(&probe) {
-                    let switched = Instant::now();
-                    flip.on_cpu = thread_cpu();
-                    kernel.set_yield(true);
-                    flip.on = Some((probe, switched));
-                }
-            } else {
+            if let Some((on, _)) = flip.on {
                 if ours(&probe) {
                     flip.since.push(probe);
                 }
                 if !flip.over {
                     // A later step counts from 1 again.
-                    if asked > nth {
+                    if asked > on.asked() {
                         flip.after.push(probe);
                     } else {
                         flip.over = true;
                     }
+                }
+            } else if ours(&probe) {
+                flip.asks += 1;
+                if flip.asks == nth {
+                    flip.event = events.0.lock().unwrap().events.len();
+                    let switched = Instant::now();
+                    flip.on_cpu = thread_cpu();
+                    kernel.set_yield(true);
+                    flip.on = Some((probe, switched));
                 }
             }
         });
@@ -424,9 +425,19 @@ impl Threaded {
     }
 }
 
-/// The ask of a step's yield probe at which [`Threaded::flip_inside`] turns
-/// the switch on: some slices into the step's parse. Every step tested
-/// (a 64 KiB window, an 8 ms slice of a 1 MiB parse) asks hundreds of times.
+impl Probe {
+    /// The ask of its step, from 1.
+    pub(crate) fn asked(self) -> u32 {
+        match self {
+            Probe::Chain { asked, .. } | Probe::Prefetch { asked } => asked,
+        }
+    }
+}
+
+/// The ask of the yield probe, counted across steps, at which
+/// [`Threaded::flip_inside`] turns the switch on: some slices into the
+/// parse. Every step tested (a 64 KiB window, an 8 ms slice of a 1 MiB
+/// parse) asks hundreds of times on an idle machine.
 pub(crate) const FLIP_AT: u32 = 8;
 
 /// The yield switch turned on inside a step ([`Threaded::flip_inside`]).
@@ -436,6 +447,9 @@ pub(crate) struct Flip {
     pub on: Option<(Probe, Instant)>,
     /// The CPU time of the step's thread just before ([`thread_cpu`]).
     pub on_cpu: Option<Duration>,
+    /// The number of trace events logged when it was turned on: the step's
+    /// end is logged at this index or later.
+    pub event: usize,
     /// The same step's asks after that one: one, the ask that saw the
     /// switch and stopped the step.
     pub after: Vec<Probe>,
@@ -445,8 +459,18 @@ pub(crate) struct Flip {
     /// of its time budget in the very check it was turned on in (a busy
     /// machine), the next step's first.
     pub since: Vec<Probe>,
+    /// The asks that are `ours` before it was turned on.
+    asks: u32,
     /// That step is over.
     over: bool,
+}
+
+impl Flip {
+    /// Waits to be turned on again, at the `nth` ask from now: the switch
+    /// itself is the caller's to turn off.
+    pub(crate) fn rearm(&mut self) {
+        *self = Flip::default();
+    }
 }
 
 impl Drop for Threaded {

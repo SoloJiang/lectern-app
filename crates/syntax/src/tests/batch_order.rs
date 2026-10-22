@@ -281,52 +281,92 @@ fn batch_order_batches_go_on_while_a_64mib_chain_runs() {
 /// goes on once the switch is off. The switch turns on from inside a step,
 /// at a slice boundary (`Threaded::flip_inside`), so the step is in flight
 /// by construction, however fast the machine parses.
+///
+/// On a busy machine the step can run out of its 50 ms of wall time in the
+/// very check the switch turned on in: it ends `TimedOut` with no ask after
+/// the switch, stopped by its budget and not by the switch, and its window
+/// goes on in a keepalive slot. Then the switch is turned off (the clock
+/// moved past the slot interval, so the next slot can start at once) and
+/// turned on again in a later step, at most 20 times; any other end of the
+/// step fails.
 #[test]
 fn batch_order_window_stops_within_a_slice_when_yielding() {
+    const ATTEMPTS: usize = 20;
     let t = Threaded::new(1);
     t.write("big.ts", &testing::ts(8 << 20, 0));
     let flip = t.flip_inside(FLIP_AT, |p| matches!(p, Probe::Chain { .. }));
     let doc = t.open(t.target("big.ts", Anchor::Start));
-    let (ended, at) = t.wait_for(0, |e| {
-        matches!(
-            e,
-            Trace::ChainStepEnd {
-                end: StepEnd::Yielded,
-                ..
-            }
-        )
-    });
-    let (on, switched, on_cpu) = {
-        let flip = flip.lock().unwrap();
-        let (on, switched) = flip.on.expect("turned on inside a step");
-        (on, switched, flip.on_cpu)
+    let mut attempts = 0;
+    let (ended, at, on, switched, on_cpu) = loop {
+        attempts += 1;
+        assert!(
+            attempts <= ATTEMPTS,
+            "the step never stopped for the switch"
+        );
+        t.wait_until("the switch", || flip.lock().unwrap().on.is_some());
+        let (on, switched, on_cpu, event) = {
+            let flip = flip.lock().unwrap();
+            let (on, switched) = flip.on.expect("turned on");
+            (on, switched, flip.on_cpu, flip.event)
+        };
+        let Probe::Chain { start, .. } = on else {
+            panic!("{on:?}");
+        };
+        // The step it was turned on in: the next step end, and its step
+        // began before the switch. No step stops for the switch before it
+        // is on.
+        let (ended, at) = t.wait_for(event, |e| matches!(e, Trace::ChainStepEnd { .. }));
+        let events = t.events();
+        assert!(
+            !events[..event].iter().any(|(_, e)| matches!(
+                e,
+                Trace::ChainStepEnd {
+                    end: StepEnd::Yielded,
+                    ..
+                }
+            )),
+            "stopped before the switch"
+        );
+        let (began, ref step) = events[ended - 1];
+        assert!(
+            matches!(step, Trace::ChainStep { start: s, .. } if *s == start),
+            "{step:?}"
+        );
+        assert!(began <= switched && switched <= at);
+        let Trace::ChainStepEnd { start: s, end } = events[ended].1 else {
+            unreachable!("matched above");
+        };
+        assert_eq!(s, start);
+        if end == StepEnd::Yielded {
+            break (ended, at, on, switched, on_cpu);
+        }
+        // Over at its budget in the check the switch turned on in: no ask
+        // of the step after it, and more than the budget on the clock.
+        let after = flip.lock().unwrap().after.clone();
+        let took = at.duration_since(began);
+        assert!(
+            end == StepEnd::TimedOut && after.is_empty() && took > BATCH_SEGMENT,
+            "attempt {attempts}: {end:?} after {took:?}, asked {after:?} after the switch"
+        );
+        eprintln!("attempt {attempts}: the step ran out of its budget at the switch ({took:?})");
+        // Its window goes on in a keepalive slot, then waits for the next.
+        t.wait_until("the wait for the next slot", || {
+            t.clock.pending_timers() == 1
+        });
+        t.host.kernel().set_yield(false);
+        t.clock.advance(SLOT_INTERVAL);
+        flip.lock().unwrap().rearm();
     };
-    let Probe::Chain { start, .. } = on else {
+    let Probe::Chain { start, asked } = on else {
         panic!("{on:?}");
     };
-    // The step it was turned on in, and nothing between: no step stops
-    // before the switch is on.
-    let events = t.events();
-    assert_eq!(
-        events[ended].1,
-        Trace::ChainStepEnd {
-            start,
-            end: StepEnd::Yielded
-        }
-    );
-    let (began, ref step) = events[ended - 1];
-    assert!(
-        matches!(step, Trace::ChainStep { start: s, .. } if *s == start),
-        "{step:?}"
-    );
-    assert!(began <= switched && switched <= at);
     // Stopped at the next slice boundary: the step asked once more.
     let after = flip.lock().unwrap().after.clone();
     assert_eq!(
         after,
         vec![Probe::Chain {
             start,
-            asked: FLIP_AT + 1
+            asked: asked + 1
         }]
     );
     // The switch and the step's end are both on the batch thread.

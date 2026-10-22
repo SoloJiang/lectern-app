@@ -254,9 +254,10 @@ fn prefetch_stops_at_a_slice_boundary_when_yielding() {
     t.engine
         .prefetch(vec![(t.target("one.ts", Anchor::Start), t.root.clone())]);
     let (yielded, at) = t.wait_for(0, |e| matches!(e, Trace::PrefetchYielded { .. }));
-    let (switched, on_cpu) = {
+    let (on, switched, on_cpu) = {
         let flip = flip.lock().unwrap();
-        (flip.on.expect("turned on inside a step").1, flip.on_cpu)
+        let (on, switched) = flip.on.expect("turned on inside a step");
+        (on, switched, flip.on_cpu)
     };
     let (from, began) = t.wait_for(0, |e| matches!(e, Trace::PrefetchParse { .. }));
     assert!(from < yielded && began <= switched && switched <= at);
@@ -271,9 +272,11 @@ fn prefetch_stops_at_a_slice_boundary_when_yielding() {
     // in the check the switch turned on in (a busy machine), the next
     // step's first.
     let since = flip.lock().unwrap().since.clone();
+    let next = Probe::Prefetch {
+        asked: on.asked() + 1,
+    };
     assert!(
-        since == [Probe::Prefetch { asked: FLIP_AT + 1 }]
-            || since == [Probe::Prefetch { asked: 1 }],
+        since == [next] || since == [Probe::Prefetch { asked: 1 }],
         "{since:?}"
     );
     eprintln!("asked after the switch: {since:?}");
