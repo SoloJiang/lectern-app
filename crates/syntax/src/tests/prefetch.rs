@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use lectern_git::{HashKind, Oid};
 use lectern_services::reader::Anchor;
 
-use super::rig::{Rig, Threaded, VIEW};
+use super::rig::{FLIP_AT, Rig, Threaded, VIEW};
 use super::{full, lang};
+use crate::doc::Probe;
 use crate::git_access::blob_id;
 use crate::limits::PREFETCH_MAX;
 use crate::lru::{Class, LruKey, SpansOf, WHOLE};
@@ -213,26 +214,36 @@ fn prefetch_stops_at_a_slice_boundary_when_yielding() {
     let t = Threaded::new(1);
     let bytes = testing::ts((1 << 20) - (16 << 10), 0);
     t.write("one.ts", &bytes);
+    // Turned on from inside a step of the parse, at a slice boundary: in
+    // flight by construction, however fast the machine parses.
+    let flip = t.flip_inside(FLIP_AT, |p| matches!(p, Probe::Prefetch { .. }));
     t.engine
         .prefetch(vec![(t.target("one.ts", Anchor::Start), t.root.clone())]);
-    let (from, _) = t.wait_for(0, |e| matches!(e, Trace::PrefetchParse { .. }));
-    // Well inside the parse (some 150–300 ms).
-    std::thread::sleep(Duration::from_millis(5));
-    let switched = Instant::now();
-    t.host.kernel().set_yield(true);
-    let (yielded, at) = t.wait_for(from, |e| matches!(e, Trace::PrefetchYielded { .. }));
-    let stop = at.duration_since(switched);
-    eprintln!("prefetch stopped {stop:?} after the switch");
-    assert!(stop <= Duration::from_millis(10), "{stop:?}");
+    let (yielded, at) = t.wait_for(0, |e| matches!(e, Trace::PrefetchYielded { .. }));
+    let (_, switched) = flip.lock().unwrap().on.expect("turned on inside a step");
+    let (from, began) = t.wait_for(0, |e| matches!(e, Trace::PrefetchParse { .. }));
+    assert!(from < yielded && began <= switched && switched <= at);
     assert!(
         !t.events()[from..]
             .iter()
             .any(|(_, e)| matches!(e, Trace::PrefetchDone { .. })),
         "stopped before its end"
     );
+    // Stopped at the next slice boundary: the step asked once more.
+    assert_eq!(
+        flip.lock().unwrap().after,
+        vec![Probe::Prefetch { asked: FLIP_AT + 1 }]
+    );
+    let stop = at.duration_since(switched);
+    eprintln!("prefetch stopped {stop:?} after the switch");
+    assert!(stop <= Duration::from_millis(10), "{stop:?}");
     // A file over 256 KiB waits for the switch to turn off, keeping its
-    // state; then it goes on to the same spans as one parse.
+    // state: no keepalive slot (no timer on the clock), no probe asked, no
+    // event. That nothing moves is watched for 100 ms (a slow machine
+    // cannot make it fail); then it goes on to the same spans as one parse.
     std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(t.clock.pending_timers(), 0);
+    assert_eq!(flip.lock().unwrap().after.len(), 1);
     assert_eq!(
         t.events().len(),
         yielded + 1,

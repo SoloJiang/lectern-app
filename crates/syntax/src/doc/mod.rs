@@ -25,6 +25,8 @@ use crate::spans::{Token, WindowSpans};
 
 pub(crate) use content::{Content, Pieces};
 pub use edit::{EditSession, EditState, MergeOutcome, SaveResult};
+#[cfg(test)]
+pub(crate) use engine::Probe;
 pub use engine::{DocHandle, Engine, EngineDeps};
 #[cfg(any(test, feature = "test-support"))]
 pub use engine::{StepEnd, Trace};

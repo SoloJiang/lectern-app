@@ -86,11 +86,31 @@ pub(crate) struct EngineInner {
     pub after_first: Mutex<Option<Hook>>,
     #[cfg(any(test, feature = "test-support"))]
     trace: Mutex<Option<Tracer>>,
+    /// Told of every ask of a batch parse's yield probe (tests).
+    #[cfg(test)]
+    probe: Mutex<Option<ProbeHook>>,
 }
 
 /// Gets the snapshot just published.
 #[cfg(test)]
 pub(crate) type Hook = Box<dyn FnOnce(&DocSnapshot) + Send>;
+
+#[cfg(test)]
+type ProbeHook = Arc<dyn Fn(Probe) + Send + Sync>;
+
+/// A batch parse asked its yield probe, at a slice boundary of the step in
+/// flight (tests: [`Engine::set_probe`]). Reported after the probe read the
+/// switches, so a switch turned on from the hook is seen at the step's next
+/// boundary. `asked` counts this step's asks, from 1.
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Probe {
+    /// A batch window's step from `start`.
+    Chain { start: u64, asked: u32 },
+    /// A step of the prefetch's parse: the whole file's, or the first
+    /// screen's window.
+    Prefetch { asked: u32 },
+}
 
 #[cfg(any(test, feature = "test-support"))]
 type Tracer = Arc<dyn Fn(Trace) + Send + Sync>;
@@ -180,6 +200,8 @@ impl Engine {
                 after_first: Mutex::new(None),
                 #[cfg(any(test, feature = "test-support"))]
                 trace: Mutex::new(None),
+                #[cfg(test)]
+                probe: Mutex::new(None),
             }),
         }
     }
@@ -343,6 +365,14 @@ impl Engine {
     pub(crate) fn inner(&self) -> &Arc<EngineInner> {
         &self.inner
     }
+
+    /// Reports every ask of a batch parse's yield probe from now on
+    /// ([`Probe`]), on the thread parsing, from inside tree-sitter's
+    /// progress callback or between query chunks: a test turns the switch
+    /// on from here to have it flip inside a step, at a slice boundary.
+    pub(crate) fn set_probe(&self, hook: impl Fn(Probe) + Send + Sync + 'static) {
+        *lock(&self.inner.probe) = Some(Arc::new(hook));
+    }
 }
 
 #[cfg(test)]
@@ -350,6 +380,26 @@ impl EngineInner {
     /// The count of tasks submitted and not ended.
     pub(crate) fn in_flight(&self) -> Arc<AtomicUsize> {
         self.in_flight.clone()
+    }
+
+    /// `probe`, reporting each ask to the hook of [`Engine::set_probe`] as
+    /// `at(n)` (the nth ask of this step) once it has read the switches.
+    /// Made once per step.
+    pub(crate) fn reported<'p>(
+        &self,
+        probe: impl Fn() -> bool + 'p,
+        at: impl Fn(u32) -> Probe + 'p,
+    ) -> impl Fn() -> bool + 'p {
+        let hook = lock(&self.probe).clone();
+        let asked = std::cell::Cell::new(0);
+        move || {
+            let stop = probe();
+            if let Some(hook) = &hook {
+                asked.set(asked.get() + 1);
+                hook(at(asked.get()));
+            }
+            stop
+        }
     }
 }
 

@@ -19,6 +19,7 @@ use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{BlobId, ProjectKey, WorktreeKey};
 use lectern_services::reader::{Anchor, ReadTarget};
 
+use crate::doc::Probe;
 use crate::git_access::{GitAccess, Tree, blob_id};
 use crate::testing::{TestHost, host};
 use crate::{DocHandle, DocSnapshot, Engine, EngineDeps, Languages, Trace, Viewport};
@@ -211,8 +212,9 @@ pub(crate) struct Threaded {
     pub engine: Engine,
     pub host: TestHost,
     pub executor: Executor,
-    /// Never moved: one keepalive slot, then none while the switch is on.
-    _clock: ManualClock,
+    /// Moved only by a test: one keepalive slot, then none while the
+    /// switch is on (the next slot's timer stays pending).
+    pub clock: ManualClock,
     pub root: Arc<Path>,
     events: Arc<Events>,
     _cache_dir: tempfile::TempDir,
@@ -264,7 +266,7 @@ impl Threaded {
             engine,
             host,
             executor,
-            _clock: clock,
+            clock,
             root,
             events,
             _cache_dir: cache_dir,
@@ -318,6 +320,70 @@ impl Threaded {
             events = changed.wait_timeout(events, left).unwrap().0;
         }
     }
+
+    /// Waits until `done` holds, which no event signals (polled).
+    pub(crate) fn wait_until(&self, what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + EVENT_LIMIT;
+        while !done() {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: not within {EVENT_LIMIT:?}"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Turns the yield switch on from inside a batch parse's step, at a
+    /// slice boundary: from the probe hook, at the `nth` ask of the first
+    /// step that is `ours`, after that ask read the switch off. The step has
+    /// parsed `nth` slices then and is still in flight; its next ask must
+    /// see the switch.
+    pub(crate) fn flip_inside(
+        &self,
+        nth: u32,
+        ours: impl Fn(&Probe) -> bool + Send + Sync + 'static,
+    ) -> Arc<Mutex<Flip>> {
+        let flip = Arc::new(Mutex::new(Flip::default()));
+        let (log, kernel) = (flip.clone(), self.host.kernel());
+        self.engine.set_probe(move |probe| {
+            let asked = match probe {
+                Probe::Chain { asked, .. } | Probe::Prefetch { asked } => asked,
+            };
+            let mut flip = log.lock().unwrap();
+            if flip.on.is_none() {
+                if asked == nth && ours(&probe) {
+                    let switched = Instant::now();
+                    kernel.set_yield(true);
+                    flip.on = Some((probe, switched));
+                }
+            } else if !flip.over {
+                // A later step counts from 1 again.
+                if asked > nth {
+                    flip.after.push(probe);
+                } else {
+                    flip.over = true;
+                }
+            }
+        });
+        flip
+    }
+}
+
+/// The ask of a step's yield probe at which [`Threaded::flip_inside`] turns
+/// the switch on: some slices into the step's parse. Every step tested
+/// (a 64 KiB window, an 8 ms slice of a 1 MiB parse) asks hundreds of times.
+pub(crate) const FLIP_AT: u32 = 8;
+
+/// The yield switch turned on inside a step ([`Threaded::flip_inside`]).
+#[derive(Default)]
+pub(crate) struct Flip {
+    /// The ask it was turned on at, and the time just before.
+    pub on: Option<(Probe, Instant)>,
+    /// The same step's asks after that one: one, the ask that saw the
+    /// switch and stopped the step.
+    pub after: Vec<Probe>,
+    /// That step is over.
+    over: bool,
 }
 
 impl Drop for Threaded {

@@ -38,6 +38,8 @@ use crate::lru::{Class, LruKey, LruValue, SpansOf};
 use crate::text::{IndexBuilder, Scanned, Text};
 use crate::util::{lock, yield_now};
 
+#[cfg(test)]
+use super::engine::Probe;
 #[cfg(any(test, feature = "test-support"))]
 use super::engine::Trace;
 use super::engine::{EngineInner, trace};
@@ -232,6 +234,8 @@ async fn whole(
     loop {
         let outcome = {
             let probe = || stop_asked(guard);
+            #[cfg(test)]
+            let probe = engine.reported(probe, |asked| Probe::Prefetch { asked });
             parse.step(Budget {
                 budget: SLICE,
                 cancel: &never,
@@ -346,6 +350,8 @@ async fn screen_window(
     loop {
         let first = {
             let probe = || stop_asked(guard);
+            #[cfg(test)]
+            let probe = engine.reported(probe, |asked| Probe::Prefetch { asked });
             let budget = Budget {
                 budget: BATCH_SEGMENT,
                 cancel: &never,
