@@ -1,6 +1,6 @@
 [package]
 name = "lectern-platform"
-description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data and log directories, the OS version; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
+description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data and log directories, the OS version, the local UTC offset; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,7 @@ lectern-fs-watch = { path = "../fs_watch" }
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # `ThreadCpuClock`: `pthread_getcpuclockid` and `clock_gettime` on Linux,
 # `pthread_mach_thread_np` and `thread_info` on macOS, which rustix lacks.
+# On both also `localtime_r` (`time::utc_offset`).
 # On macOS also `proc_pid_rusage` (`process::phys_footprint`) and
 # `sysctlbyname` (`system::os_version`); the macOS tests create a FIFO with
 # it.

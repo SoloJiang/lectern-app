@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -18,6 +18,7 @@
   - 线程的 CPU 时钟（`ThreadCpuClock`）：`syntax::health` 判定 grammar 卡死（[ADR 0041](../adr/0041.md)，见「线程的 CPU 时钟」）。
   - 应用数据目录（`dirs::app_data`）：不能重建的用户数据的位置，review 的标注日志用它（[ADR 0044](../adr/0044.md)，见「应用数据目录」）。
   - 日志目录（`dirs::logs`）与系统版本（`system::os_version`）：`logging` 落盘的位置和文件头里的系统版本（[ADR 0046](../adr/0046.md)，见「日志目录与系统版本」）。
+  - 本地时区的偏移（`time::utc_offset`）：`usage` 的 `LocalZone` 按它把时间窗口分成本地自然日（[ADR 0020](../adr/0020.md)，见「本地时区的偏移」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -35,7 +36,7 @@
 |---|---|---|
 | `rustix` 1.1（`default-features = false`，`std`、`fs`） | `openat2`、`openat`、`fstatat`、`fstat`、`readlinkat`、`read`；`replace_file` 的 `write`、`fchmod`、`fsync`、`renameat`、`unlinkat` | 见下 |
 | `tempfile`（dev） | 测试用的临时目录 | 已在 Cargo.lock（3.27，经 `insta`），MIT OR Apache-2.0 |
-| `libc`（Linux 和 macOS） | `ThreadCpuClock`：Linux 的 `pthread_getcpuclockid`、`clock_gettime`，macOS 的 `pthread_mach_thread_np`、`thread_info`；macOS 上还有 `proc_pid_rusage`（`process::phys_footprint`）、`sysctlbyname`（`system::os_version`）和测试里创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190），原来只在 macOS 上依赖，加上 Linux 不改 Cargo.lock；rustix 没有这几个调用（它的 `clock_gettime` 只接受固定的几种时钟） |
+| `libc`（Linux 和 macOS） | `ThreadCpuClock`：Linux 的 `pthread_getcpuclockid`、`clock_gettime`，macOS 的 `pthread_mach_thread_np`、`thread_info`；两个平台的 `localtime_r`（`time::utc_offset`）；macOS 上还有 `proc_pid_rusage`（`process::phys_footprint`）、`sysctlbyname`（`system::os_version`）和测试里创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190），原来只在 macOS 上依赖，加上 Linux 不改 Cargo.lock；rustix 没有这几个调用（它的 `clock_gettime` 只接受固定的几种时钟） |
 | `lectern-fs-watch` | `fs_events` 实现它的 `Backend`；事件转换是纯函数，在所有平台上编译和测试 | 基础设施层，方向向下（[fs_watch 设计「依赖」](fs_watch.md#依赖)） |
 | `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
 | `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
@@ -373,10 +374,10 @@ pub enum FileKind {
 
 本节覆盖整个 crate，规则见 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。
 
-- 默认记录：`safe_read`、`dirs`、`system`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。唯一的运行时记录在 `fs_events`：kqueue 线程因 `kevent` 出错而停止时记一条，带系统错误；订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。这一条目前写 stderr，在 logging 设计「对其他 crate 的要求」第 9 项接入：改为 error，target `platform`，错误用 `Value::io`（种类和错误码），删掉 `eprintln!`。
+- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。唯一的运行时记录在 `fs_events`：kqueue 线程因 `kevent` 出错而停止时记一条，带系统错误；订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。这一条目前写 stderr，在 logging 设计「对其他 crate 的要求」第 9 项接入：改为 error，target `platform`，错误用 `Value::io`（种类和错误码），删掉 `eprintln!`。
 - 详细级别：不多记。
 - 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
-- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。
+- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。
 - 金丝雀测试：接入 `lectern-logging` 时随那一条记录加上；在此之前本 crate 没有经日志器的记录，`dirs` 和 `system` 也不经日志器输出，不需要。
 
 ## 测试
@@ -656,7 +657,7 @@ pub mod process {
 }
 ```
 
-- 模块在所有平台上编译，macOS 的实现在 `#[cfg(target_os = "macos")]` 后面，`unsafe` 只有一次 FFI 调用和读取它填好的结构体。本 crate 里另外用到 `unsafe` 的是 `fs_events` 的绑定和 `ThreadCpuClock`（见「线程的 CPU 时钟」）；`safe_read`（含 `replace_file`）的实现代码没有 `unsafe`。
+- 模块在所有平台上编译，macOS 的实现在 `#[cfg(target_os = "macos")]` 后面，`unsafe` 只有一次 FFI 调用和读取它填好的结构体。本 crate 里另外用到 `unsafe` 的是 `fs_events` 的绑定、`ThreadCpuClock`（见「线程的 CPU 时钟」）、`system::os_version` 和 `time::utc_offset`；`safe_read`（含 `replace_file`）的实现代码没有 `unsafe`。
 - 测试（`process_*`）：macOS 上，分配并写满 64 MiB 后本进程的 `phys_footprint` 至少增加 60 MiB；不存在的 pid 返回错误。Linux 上返回 `Unsupported`。
 
 ## 原子替换
@@ -895,6 +896,52 @@ pub mod system {
 - `os_version_length_is_capped`：32 字节的版本号接受，33 字节的为 None。
 - macOS 上 `os_version_reads_the_running_macos`：读到 `macOS ` 开头的版本，主版本不小于 11；其他平台上 `os_version_is_none_elsewhere`。
 
+## 本地时区的偏移
+
+[usage 设计「对其他 crate 的要求」](usage.md#对其他-crate-的要求)的 B（[#31](https://github.com/SoloJiang/lectern-app/issues/31)）。`app` 用它实现 `usage::LocalZone`（usage 的前置条件 C），`usage` 的 `window::days` 按它把时间窗口分成本地自然日（[ADR 0020](../adr/0020.md)）。这不是 macOS 专属能力：两个平台都用 POSIX 的 `localtime_r`，与 `ThreadCpuClock` 一样放在本 crate，在 Linux CI 上也能测试。
+
+### 接口
+
+模块 `lectern_platform::time`（`time.rs`）。
+
+```rust
+pub mod time {
+    /// `unix_secs` 这一刻本地时间相对 UTC 的偏移（秒，东正西负），含夏令时。任何线程可调用，不阻塞。
+    /// `localtime_r` 失败（年份放不进 `struct tm` 的 `int tm_year`，如 `i64::MAX`）、
+    /// 偏移超出 TZif 能表示的范围（RFC 8536：−89 999 到 93 599 秒）时为 None；macOS 和 Linux 以外的平台总是 None。
+    pub fn utc_offset(unix_secs: i64) -> Option<i32>;
+}
+```
+
+### 规则
+
+- 取值：一次 `localtime_r`，返回 `struct tm` 的 `tm_gmtoff`。偏移按给定的时刻求，夏令时切换前后的时刻各得到各自的偏移，不拿「现在」的偏移去推算过去或将来。
+- 时区：C 库的本地时区，即 `TZ`，`TZ` 未设置时是系统时区。本模块不读 `TZ`，不调用 `tzset`，自己不缓存任何东西：两个 C 库的 `localtime_r` 都在自己的锁下初始化时区状态（glibc 的 `tzset_internal`，macOS 的 `tzset_basic`），第一次调用时读入时区规则并留在内存里。macOS 上 `TZ` 未设置时，`localtime_r` 经系统通知（`com.apple.system.timezone`）发现系统时区的更改并重新读入（Apple Libc 的 `localtime.c`），所以用户在运行中改了时区之后，`usage` 的下一次查询就用新规则（usage 设计「取整与时间窗口」：过去的日子随之重算）。
+- 线程：`localtime_r` 是可重入的版本，不用静态的结果缓冲；C 库的时区状态由它自己的锁保护，任何线程可以同时调用。会与它竞争的只有另一个线程同时修改环境变量（C 库的 `getenv("TZ")` 与 `setenv`）；edition 2024 里 `std::env::set_var` 是 `unsafe`，库代码不调用它。
+- IO：第一次调用（以及 macOS 上系统时区改变之后的第一次调用）由 C 库读一次时区文件（几 KiB），之后只在内存里查找。`usage` 在后台线程上查询，首帧之前不调用。
+- 范围：`time_t` 在 Lectern 构建的 64 位 target 上就是 `i64`，转换不会失败（32 位 target 上超出范围的为 None）。`localtime_r` 只在年份放不进 `int tm_year` 时失败，约 ±6.8 × 10¹⁶ 秒；毫秒时间戳除以 1000 后绝对值不超过 9.3 × 10¹⁵ 秒，所以 `LocalZone::offset_at` 收到的任何时刻都有偏移。None 时的处理由 `app` 的包装决定（usage 的前置条件 C）。
+- 毫秒换成秒由调用方做，用向下取整的 `div_euclid(1000)`：截断除法让 1970 年之前的时刻多出最多 999 毫秒，落在切换点之前的最后一秒里的时刻会取到切换之后的偏移。
+- 偏移的检查：`tm_gmtoff` 超出 TZif 的范围时为 None（纯函数 `offset_from_gmtoff`，在所有平台上编译和测试）。真实的时区不会给出这样的值，这一步保证返回值放得进 `i32`，加到时刻上也不溢出。
+- 不是整分钟的偏移原样返回：一些地方平时（LMT）不是 15 分钟的整数倍，如 Asia/Kathmandu 1920 年以前的 +05:41:16、Africa/Monrovia 到 1972 年的 −00:44:30。`usage` 按 15 分钟的 UTC 桶求和，依赖的「偏移都是 15 分钟的整数倍」只对现行规则成立；它的记录都在 2020 年之后，不受影响。
+- `unsafe` 只有两处：`localtime_r` 的调用和读取它填好的 `struct tm`（初值全零，全零也是合法的 `struct tm`）。
+- 开销：Linux（glibc，release，x86_64）上 `TZ=UTC` 每次约 34 ns，`TZ=America/New_York` 约 280 ns（glibc 在转换表里顺序查找）。macOS 上没有测过；`window::days` 每个本地日调用几次，30 天的窗口在微秒级。
+
+### 已知限制
+
+- Linux：glibc 只在第一次调用时读入系统时区，之后 `/etc/localtime` 改变不会被发现（`tzset` 也只在 `TZ` 的值变化时重读）。Linux 上的构建只供 CI，不影响用户。
+- `TZ` 指向不存在的时区时，两个 C 库都按 UTC 处理，返回 0 而不是 None，分不出「时区就是 UTC」和「时区文件缺失」。系统时区的文件总是存在；只有手动设了错误的 `TZ` 才会这样。
+
+### 测试
+
+写在 `crates/platform/src/time/tests.rs`，不修改本进程的环境变量（edition 2024 里 `set_var` 是 `unsafe`，`cargo test` 在同一进程的多个线程上并行运行测试）。除最后一个以外都在 Linux CI 和 macOS CI 上运行：
+
+- `utc_offset_follows_the_zone_table`：对表里的每个 `TZ` 把本测试二进制作为子进程运行一次（`current_exe` 加 `--exact`，与 `cache` 的 `crash_*` 相同），`TZ` 只设在子进程上；子进程的入口 `utc_offset_child_prints_the_rows_of_its_zone` 打印每个时刻的偏移，没有标记变量时直接返回。表：`UTC`；`Asia/Shanghai`（+08:00）；`America/New_York` 2024 年夏令时开始和结束前后各一秒，以及 1970 年之前的 −1；`Asia/Kathmandu`（+05:45，1986 年由 +05:30 改为 +05:45 的前后各一秒）；POSIX 规则串 `EST5EDT,M3.2.0,M11.1.0` 和 `<+0545>-5:45`（不依赖系统的时区文件）。期望值与 Python `zoneinfo` 对同一批时刻给出的相同。
+- `utc_offset_out_of_range_is_none`：`i64::MAX`、`i64::MIN` 为 None。
+- `utc_offset_covers_every_millisecond_timestamp`：从 `i64::MIN.div_euclid(1000)` 到 `i64::MAX.div_euclid(1000)` 的几个时刻在本进程的时区里都为 Some，且在 TZif 的范围之内。
+- `utc_offset_from_many_threads_agrees`：8 个线程同时各调用 20 000 次，结果与单线程相同。
+- `utc_offset_gmtoff_range`：`offset_from_gmtoff` 接受范围的两端和不是整分钟的偏移，拒绝范围之外和 `i64` 的两端。
+- 其他平台上 `utc_offset_is_none_elsewhere`。
+
 ## 未决问题
 
 没有需要产品决定的问题。技术问题都已在上文决定。
@@ -941,6 +988,13 @@ pub mod system {
 - `git diff origin/main -- Cargo.lock` 为空（`sysctlbyname` 来自已有的 `libc`）；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果；`rg -n 'sysctl' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
 - `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
 - 本文的状态行、「实际验证」，logging 设计的状态行写明第 2 步已实现。
+
+本地时区的偏移（usage 的前置条件 B）一个实现 PR，写 `Refs #31`，在 usage 第 1 步之前合并：
+
+- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「本地时区的偏移」的 `utc_offset_*`；原有的测试结果不变。
+- `git diff origin/main -- Cargo.lock` 为空（`localtime_r` 来自已有的 `libc`）；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果；`rg -n 'localtime|tm_gmtoff' crates --glob '!crates/platform/**' -t rust` 没有结果。
+- `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
+- 本文的状态行、「实际验证」，usage 设计的状态行写明前置条件 B 已实现。
 
 ## 实际验证
 
@@ -989,6 +1043,12 @@ pub mod system {
   - `just test -p lectern-platform` 104 个测试通过，其中新增 11 个：7 个 `logs_*`（macOS 规则的 `logs_macos_is_under_library_logs` 等也在 Linux 上运行）和 4 个 `os_version_*`（`os_version_is_none_elsewhere` 只在其他平台上编译）；原有的 93 个结果不变。
   - `just check`、`just test`（整个工作区 2013 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`cargo check --target aarch64-apple-darwin -p lectern-platform` 和 `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：macOS 上 `logs` 选 `mac_logs`、非测试构建不编译 `xdg_logs`，`sysctlbyname` 的调用通过了类型检查和 clippy（`undocumented_unsafe_blocks`）。macOS 上 `sysctl` 的读取和 `os_version_reads_the_running_macos` 没有运行过，由 macOS CI 运行。
   - 验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果；`rg -n 'sysctl' crates --glob '!crates/platform/**' -t rust` 没有结果。
+- 本地时区的偏移（usage 的前置条件 B，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）在 Linux（x86_64 容器，glibc，系统 tzdata 在 `/usr/share/zoneinfo`）上：
+  - `just test -p lectern-platform` 110 个测试通过，其中新增 6 个 `utc_offset_*`（`utc_offset_is_none_elsewhere` 只在其他平台上编译）；原有的 104 个结果不变。用 `cargo test` 在同一个进程里运行，110 个也都通过（测试不修改环境变量，子进程的入口没有标记变量时直接返回）。
+  - `utc_offset_follows_the_zone_table` 的 6 个 `TZ`（4 个 IANA 时区、2 个 POSIX 规则串）在子进程里的结果都与表相同，表的期望值先用 Python `zoneinfo` 核对过；`i64::MAX`、`i64::MIN` 为 None，`i64::MIN.div_euclid(1000)` 到 `i64::MAX.div_euclid(1000)` 的时刻都为 Some。
+  - 开销（release，临时的计时循环，没有提交）：`TZ=UTC` 每次约 34 ns，`TZ=America/New_York` 约 280 ns。
+  - `just check`、`just test`（整个工作区 2050 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：macOS 上的 `localtime_r` 调用通过了类型检查和 clippy，没有运行；macOS 上的 `utc_offset_*`（含 Apple Libc 对超出范围的年份返回 null）由 macOS CI 运行。运行中改系统时区之后 macOS 重新读入规则，是按 Apple Libc 的源码写的，没有测试。
+  - 验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果；`rg -n 'localtime|tm_gmtoff' crates --glob '!crates/platform/**' -t rust` 没有结果。
 
 ## 与设计的差异
 
@@ -1013,3 +1073,6 @@ pub mod system {
   - `ThreadCpuClock::current()` 创建时先读一次，读不到在这里返回 `Unsupported`；macOS 的时钟为线程端口多持有一个用户引用，线程退出后 `cpu_time` 因此可靠地返回错误（「线程的 CPU 时钟」的「实现」）。阻塞线程的测试用 channel 的 `recv`，不用条件变量，两者都让线程睡在内核里。
 - 增加了那里没有列出的测试：`replace_file_temp_name_collision`、`replace_file_parent_outside_the_root`、`fd_replace_file_keeps_no_descriptor`、`replace_error_is_send_sync_and_displays`、`thread_cpu_after_the_thread_exits_is_an_error`、`thread_cpu_clocks_are_released`。`libc` 原来只在 macOS 上依赖，现在 Linux 也依赖（`pthread_getcpuclockid`、`clock_gettime`），Cargo.lock 不变；「依赖」已改。
 - 日志目录与系统版本按 [logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 2 项实现，那里没有写的约束补在「日志目录与系统版本」：系统版本的接口（`system::os_version() -> Option<String>`，值为 `macOS <版本>`，与 logging 设计 `Header::os` 的示例一致）、字符集与长度的检查、其他平台返回 None。第 2 项里的写盘线程 utility QoS 不在这个 PR：logging 设计「验收」的第 2 步只要求 `dirs::logs()` 和系统版本，而 QoS 要沿用的 executor 线程启动钩子在本 crate 还没有对应的接口（「范围」里「本文不覆盖」的线程 QoS），随它的设计一起做；`Config::on_writer_start` 是 `Option`，接口不受影响。
+- 本地时区的偏移按 [usage 设计「对其他 crate 的要求」](usage.md#对其他-crate-的要求)的 B 实现，接口没有改，那里没有写的约束补在「本地时区的偏移」。与那里的文字不同的有两处：
+  - None 多了一种情况：`tm_gmtoff` 超出 TZif 的范围。B 写的「超出 `time_t` 的范围」改为「年份放不进 `tm_year`」：64 位的 `time_t` 能放下任何 `i64`，`localtime_r` 失败只因为年份；usage 设计 B 的注释同时改正。
+  - 测试在 B 的表之外加了 Kathmandu 1986 年的切换、两个 POSIX 规则串（不依赖系统的时区文件）、`utc_offset_out_of_range_is_none`、`utc_offset_covers_every_millisecond_timestamp`、`utc_offset_from_many_threads_agrees` 和 `utc_offset_gmtoff_range`。子进程的入口不标 `#[ignore]`，没有标记变量时直接返回，与 `cache` 的 `crash_*` 相同，`just test` 不因此多出跳过的测试。
