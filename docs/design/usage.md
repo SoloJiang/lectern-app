@@ -1066,7 +1066,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
   - `log_canary_never_reaches_a_record`：trace 级别跑完补读、回放和删除，捕获的记录里没有放在模型名、消息与请求 ID、`TurnId`、命令文本里的金丝雀。
 - insta 快照 9 个（`src/tests/snapshots/`），逐个看过。
 - `cargo nextest run -p lectern-usage --stress-count 15`（全部测试）与 `--stress-count 40`（`plugin_*`、`log_*`）都通过。压力运行发现过两次时序问题：测试推进时钟时插件可能还没登记补读的定时器，`Rig::settle` 改为等定时器登记之后才返回；收到 `Busy` 时清除补读许可会与刚到时的许可抢先后，改为许可用不上时当场作废（「与设计的差异」）。
-- `just check`、`just test`（不依赖 GPUI 的全部 crate，2202 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `just check`、`just test`（不依赖 GPUI 的全部 crate，2204 个测试通过，跳过 7 个；基于 #181 之后的 `main`）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
 - `python3 scripts/check_architecture.py` 通过（本 crate 是插件 crate，不依赖其他插件 crate、不依赖 GPUI）；`rg -n 'rusqlite' crates/*/Cargo.toml` 只出现在 `cache` 和 `usage`；`rg -n 'price|LiteLLM|cost' crates/usage/src crates/usage/Cargo.toml` 没有结果。
 - `Cargo.lock` 只多了 `lectern-usage` 的依赖列表，没有新的外部 crate。
 - 没有在 macOS 上运行：本 crate 不依赖 GPUI，Linux 与 macOS 编译的代码相同。`plugin/usage/activate` 和第 1 步的其余 bench 条目在后一部分加入，本部分没有 bench 数字。
