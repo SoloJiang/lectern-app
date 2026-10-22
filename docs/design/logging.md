@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 5 项（`executor`）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 5 项（`executor`）已实现（[#186](https://github.com/SoloJiang/lectern-app/pull/186)，见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -575,7 +575,7 @@ level     := off | error | warn | info | debug | trace
   `log/contended_call` 的尾部来自这几处，依次处理：写盘线程在计时的窗口里每一轮要取三次缓冲锁，现在只在交换时取，其余读锁下同步写入的原子标志；每轮新建线程使第一次调用的冷启动落进样本，现在线程只建一次、先各写一条不计时的记录；调用线程加写盘线程多于核数，现在调用线程取 `min(4, 可用核数 − 1)`；争用时调用线程在内核里阻塞（macOS 上 `std::sync::Mutex` 的争用路径直接进内核），现在先自旋；每轮第一条记录要唤醒空闲的写盘线程（调用线程上的一次系统调用），现在写盘线程写完一批后再等 1 s，这期间到达的记录不唤醒它。第一次在 Linux 上试自旋时没有看出效果，是因为那时尾部主要来自其余几处；上面的对照运行里，只去掉自旋，阻塞从 0 回到 5000 次以上，超过 5 µs 的回到 93–135 次。
 - `log/idle_memory` 是计数分配器看到的活跃字节：运行时的两块缓冲（各 128 KiB）、默认文件的 `BufWriter`（64 KiB）、限流表和日志器的状态；不含写盘线程的栈。详细日志开启后是 1.13 MB（两块 512 KiB 的缓冲、两个 `BufWriter`）。
 
-作用域改为指针栈（「对其他 crate 的要求」第 5 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），Linux（x86_64，4 核虚拟机，同时有其他构建）：
+作用域改为指针栈（「对其他 crate 的要求」第 5 项，[#186](https://github.com/SoloJiang/lectern-app/pull/186)），Linux（x86_64，4 核虚拟机，同时有其他构建）：
 
 - `just test -p lectern-logging` 通过，新增 `src/tests/scopes.rs` 的 6 个测试，发布构建（`cargo test --release`，不做嵌套检查）里也通过。
 - 临时的微基准（没有提交）：`within` 进入并离开 1.1–1.7 ns；`scope` 设并恢复从 20–21 ns 降到 8–9 ns；`current()` 读整个 `Ctx` 改动前后都是约 6.5 ns，只读一个字段都不到 1 ns。
@@ -619,7 +619,7 @@ level     := off | error | warn | info | debug | trace
 
 - **`plugin failed` 多了两个阶段。** 第 4 项列出的七个阶段之外，kernel 的边界还包住两段插件代码：`WorkspaceFacts::contains`（阶段 `workspace`）和 `own_with` 的 `start`（阶段 `own_with`，它用保留 payload 的 `catch`，同样记这条）。两者的 panic 都让插件进入 `Failed`，不记就查不到原因。记录的字段和其余规则见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)。
 
-「对其他 crate 的要求」第 5 项（`executor`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+「对其他 crate 的要求」第 5 项（`executor`，[#186](https://github.com/SoloJiang/lectern-app/pull/186)）：
 
 - **kernel 公开了两个只读方法。** 任务要带「闸门的插件和激活」，`PanicText` 要按 payload 的类型构造，原有的公开接口里取不到这两样：kernel 加上 `SubmitGate::log_ctx` 和 `PanicPayload::text`（[kernel 设计「与设计的差异」](kernel.md#与设计的差异)）。
 - **专用任务也有序号和作用域**，不只是 `spawn` 提交的任务；`util::log` 实际是 12 处调用。其余见 [executor 设计「日志与诊断」](executor.md#日志与诊断)和它的「与设计的差异」。

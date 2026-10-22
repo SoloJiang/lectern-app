@@ -1,6 +1,6 @@
 # executor 设计
 
-状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。关闭回调 `on_shutdown`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）在 [#109](https://github.com/SoloJiang/lectern-app/pull/109) 实现。运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 5 项）在 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 实现。
+状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。关闭回调 `on_shutdown`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）在 [#109](https://github.com/SoloJiang/lectern-app/pull/109) 实现。运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 5 项）在 [#186](https://github.com/SoloJiang/lectern-app/pull/186) 实现。
 
 `executor` 运行 UI 线程之外的 IO、解析和 git 操作（[技术调研「不同步阻塞 UI」](tech-research.md)）。它实现 kernel 对执行器的约定（[kernel 设计](kernel.md)「撤销」里的后台任务、`SubmitGate`、`GateSlot`），让插件提交的任务随激活失效而丢弃、任务 panic 时插件进入 `Failed`。
 
@@ -306,7 +306,7 @@ struct TaskCell<T> {
 - `just test -p lectern-executor` 连续运行 40 次、用 `taskset -c 0` 限制在单核上再运行 15 次，全部通过；`cargo test`（所有测试在同一进程的多个线程里）也通过。
 - 批量线程组（[#106](https://github.com/SoloJiang/lectern-app/pull/106)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 61 个测试；同样连续运行 40 次、`taskset -c 0` 单核 15 次，`cargo test` 同一进程，全部通过。`just bench --measure executor/` 改动前后在同一台 4 核 Linux 容器上各跑 3 次，中位数：`executor/spawn_10k` 改动前 21.1、36.3、18.3 ms，改动后 12.5、14.3、17.2 ms（两边都标为 noisy）；`executor/wake_1000x100` 改动前 64.2、69.6、73.9 ms，改动后 64.0、53.1、55.2 ms。差别在同一版本多次运行的波动之内，没有变慢（只记录，不设预算）。两项都只提交 `Background` 任务，不创建批量线程。
 - 关闭回调（[#109](https://github.com/SoloJiang/lectern-app/pull/109)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 68 个测试；`just test -p lectern-executor hooks` 连续运行 40 次、`taskset -c 0` 单核 15 次，全部通过。只增加登记表和 `shutdown` 开头的一次加锁，没有改提交和调度路径，没有重跑基准。
-- 运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 5 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），在 Linux（x86_64，4 核虚拟机，同时有其他构建）上运行：
+- 运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 5 项，[#186](https://github.com/SoloJiang/lectern-app/pull/186)），在 Linux（x86_64，4 核虚拟机，同时有其他构建）上运行：
   - `just check`、`just test`（工作区 2156 个测试）、`just doctest`、`just deny` 通过。`just test -p lectern-executor` 共 71 个测试，新增 3 个（`src/tests/logs.rs`）；`cargo test -p lectern-executor --all-features --lib` 在同一进程里运行全部测试也通过（共用一个捕获器，按激活序号和任务序号筛选）；`cargo nextest run -p lectern-executor --all-features -E 'test(logs)' --stress-count 30` 30 轮全部通过。kernel 的 109 个测试照常通过。
   - logging 设计「验收」第 4 步起的检查：`rg 'eprintln!|util::log' crates/executor/src --glob '!**/tests*'` 没有结果，`util::log` 已删除；金丝雀测试通过；`panic_records_carry_plugin_act_and_task` 检查记录里的 `plugin`、`act`、`task`。
   - `just bench --measure executor/`（只记录）：改动前是 `origin/main` 的另一个 worktree，与改动后交替运行，每次的中位数依次列出：
@@ -377,7 +377,7 @@ struct TaskCell<T> {
 - 关闭回调（[#109](https://github.com/SoloJiang/lectern-app/pull/109)）：
   - 接口按 [code_intel 设计](code_intel.md#对其他-crate-的要求)，参数是 `Box<dyn FnOnce() + Send>`。code_intel 设计没有规定的部分在本文「关闭回调」里补全：`shutdown` 开始之后的登记立即在登记线程上调用（不拒绝），drop 不等已被取走的回调，回调按登记顺序调用。选择立即调用而不拒绝：调用方只需要一条路径，拒绝时它仍要自己调用同一个停止函数。
   - 登记表单独一把锁（`ShutdownHooks`），不放进 `Sched`：回调的登记和注销不与任务调度争用同一把锁。
-- 运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 5 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，接口见「日志与诊断」）：
+- 运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 5 项，[#186](https://github.com/SoloJiang/lectern-app/pull/186)，接口见「日志与诊断」）：
   - kernel 多了两个公开方法：`SubmitGate::log_ctx`（闸门所属激活的 `plugin`、`act`）和 `PanicPayload::text`（按 payload 的类型给出 `PanicText`，原来只在 kernel 内部用）。第 5 项要求任务带「闸门的插件和激活」、`PanicText` 与 kernel 一样按 payload 的类型构造，原有的公开接口里取不到这两样。只读 `logging::current()` 时，`start` 把闸门交给另一个线程再提交的任务就没有 `plugin`、`act`。
   - 任务序号是进程内的计数，同时作为登记表的键，取代原来每个 `Executor` 各自从 0 开始的编号；专用任务和替放弃的句柄 drop 结果的任务也取序号，后者设原任务的作用域，所以序号递增但不连续。
   - 专用任务也设作用域（第 5 项只写了 `spawn`）：它的闭包同样是提交方的代码，`run_dedicated_gated` 的闭包 panic 也要带闸门的 `plugin`、`act`。
