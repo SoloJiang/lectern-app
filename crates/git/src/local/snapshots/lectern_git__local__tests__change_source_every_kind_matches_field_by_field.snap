@@ -1,0 +1,30 @@
+---
+source: crates/git/src/local/tests.rs
+expression: rendered
+---
+base d2c4a05
+A 01-untracked (untracked) - -> f:5ea2ed4 text(+1,-0)[0..0@0/0..1@0]
+A 02-add-rm - -> f:19d9cc8 staged-only staged=f:19d9cc8
+A 03-added - -> f:19d9cc8 text(+1,-0)[0..0@0/0..1@0]
+A 04-added-changed - -> f:5ea2ed4 text(+1,-0)[0..0@0/0..1@0] staged=f:19d9cc8
+A 05-added-socket - -> s:UnsupportedType no-diff staged=f:19d9cc8
+D 06-removed f:df967b9 -> - text(+0,-1)[0..1@0/0..0@0]
+D 07-rm-cached f:df967b9 -> - text(+0,-1)[0..1@0/0..0@0]
+A 07-rm-cached (untracked) - -> f:df967b9 text(+1,-0)[0..0@0/0..1@0]
+D 08-unstaged-rm f:df967b9 -> - text(+0,-1)[0..1@0/0..0@0] staged=f:df967b9
+M 10-unstaged f:df967b9 -> f:5ea2ed4 text(+1,-1)[0..1@0/0..1@0] staged=f:df967b9
+T 11-socket f:df967b9 -> s:UnsupportedType no-diff staged=f:df967b9
+D 12-staged-rm f:df967b9 -> - text(+0,-1)[0..1@0/0..0@0] staged=f:19d9cc8
+M 13-staged f:df967b9 -> f:19d9cc8 text(+1,-1)[0..1@0/0..1@0]
+M 14-staged-reverted f:df967b9 -> f:19d9cc8 staged-only staged=f:19d9cc8
+M 15-staged-changed f:df967b9 -> f:5ea2ed4 text(+1,-1)[0..1@0/0..1@0] staged=f:19d9cc8
+T 16-staged-socket f:df967b9 -> s:UnsupportedType no-diff staged=f:19d9cc8
+A big (untracked) - -> f:unhashed(300) no-diff
+A bin.dat (untracked) - -> f:f00f0a1 binary(None,Some(8))
+C conflict - -> f:950b81b text(+1,-0)[0..0@0/0..1@0]
+A link (untracked) - -> l:3630c14 text(+1,-0)[0..0@0/0..1@0]
+R100(m-old) m-new f:a92d664 -> f:a92d664 text(+0,-0)[]
+A new.bin (untracked) - -> f:filtered no-diff
+M run f:f5bdd21 -> x:f5bdd21 mode-only staged=f:f5bdd21
+M x.gen f:814f4a4 -> f:879de50 text(+1,-1)[1..2@4/1..2@4] staged=f:814f4a4 generated
+totals files=24 +10 -8 truncated=0 too_large=0 listed=0 not_retained=0 capped=false invalid=../evil

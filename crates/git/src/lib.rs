@@ -1,6 +1,8 @@
 //! Repository reading with gix (docs/design/git.md, ADR 0024): repositories,
 //! worktrees, references, history, the index, change sets between trees,
-//! hunks and display rows. Read-only; runs no external program; reads
+//! hunks and display rows, and `LocalChanges`, the local worktree's
+//! `services::changes::ChangeSource` (docs/design/review.md「改动来源」).
+//! Read-only; runs no external program; reads
 //! worktree files only through `lectern_platform::SafeRoot`.
 //!
 //! Every function blocks (object database, index, worktree) and belongs on a
@@ -20,6 +22,7 @@ mod format;
 mod gitdir;
 mod handle;
 mod hunks;
+mod local;
 mod merge3;
 mod oid;
 mod parallel;
@@ -47,6 +50,7 @@ pub use compare::{Base, Refresh};
 pub use content::{Content, RawIdentity, Unavailable};
 pub use error::{GitError, UnsupportedRepo};
 pub use hunks::{FileDiff, Hunk, line_diff};
+pub use local::LocalChanges;
 pub use merge3::{Markers, Merge3, merge3};
 pub use oid::{BlobHasher, HashKind, Oid};
 pub use path::{Mode, RefName, RepoPath};
@@ -68,6 +72,7 @@ mod send_sync {
         assert::<crate::TrackedPaths>();
         assert::<crate::ChangeSet>();
         assert::<crate::FileTexts>();
+        assert::<crate::LocalChanges>();
         assert::<crate::GitError>();
     }
 }

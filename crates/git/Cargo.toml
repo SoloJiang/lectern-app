@@ -20,6 +20,8 @@ gix.workspace = true
 # `WorktreeSource` / `PathFilter`, implemented by `Worktree::watch_source`.
 lectern-fs-watch = { path = "../fs_watch" }
 lectern-platform = { path = "../platform" }
+# `ChangeSource` and its types, implemented by `LocalChanges` (kernel layer).
+lectern-services = { path = "../services" }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]

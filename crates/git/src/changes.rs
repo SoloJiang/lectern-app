@@ -450,6 +450,32 @@ impl ChangeSet {
     /// (up to `Limits::diff_bytes`); a worktree side is the content read
     /// during the comparison, never reread by path.
     pub fn texts(&self, repo: &Repo, file: usize) -> Result<FileTexts, GitError> {
+        let wrap = |side| match side {
+            RawText::Absent => SideText::Absent,
+            RawText::Bytes(bytes) => SideText::Text(Text::new(bytes)),
+            RawText::TooLarge { size } => SideText::TooLarge { size },
+            RawText::NotRetained => SideText::NotRetained,
+            RawText::Unavailable => SideText::Unavailable,
+        };
+        let (old, new) = self.raw_texts(repo, file, self.limits.diff_bytes, u64::MAX)?;
+        Ok(FileTexts {
+            old: wrap(old),
+            new: wrap(new),
+        })
+    }
+
+    /// The two sides of `files()[file]` as [`texts`](ChangeSet::texts) finds
+    /// them, before they become a [`Text`]: object-database sides are read up
+    /// to `blob_max` bytes, a kept worktree side larger than `retained_max`
+    /// is `TooLarge`. `LocalChanges::texts` passes its caller's limit for
+    /// both.
+    pub(crate) fn raw_texts(
+        &self,
+        repo: &Repo,
+        file: usize,
+        blob_max: u64,
+        retained_max: u64,
+    ) -> Result<(RawText, RawText), GitError> {
         let Some(change) = self.files.get(file) else {
             return Err(GitError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -459,36 +485,54 @@ impl ChangeSet {
         let handle = repo.open_common()?;
         let side = |side: Option<&Side>,
                     retained: Option<&Arc<[u8]>>|
-         -> Result<SideText, GitError> {
+         -> Result<RawText, GitError> {
             let Some(side) = side else {
-                return Ok(SideText::Absent);
+                return Ok(RawText::Absent);
             };
             if side.mode == Mode::Gitlink || side.mode == Mode::Special {
-                return Ok(SideText::Unavailable);
+                return Ok(RawText::Unavailable);
             }
             match &side.content {
-                Content::Unavailable(Unavailable::NotRetained { .. }) => Ok(SideText::NotRetained),
-                Content::Unavailable(_) | Content::Unhashed { .. } => Ok(SideText::Unavailable),
+                Content::Unavailable(Unavailable::NotRetained { .. }) => Ok(RawText::NotRetained),
+                Content::Unavailable(_) | Content::Unhashed { .. } => Ok(RawText::Unavailable),
                 Content::Blob(oid) => {
                     if let Some(bytes) = retained {
-                        return Ok(SideText::Text(Text::new(Arc::clone(bytes))));
+                        let size = bytes.len() as u64;
+                        if size > retained_max {
+                            return Ok(RawText::TooLarge { size });
+                        }
+                        return Ok(RawText::Bytes(Arc::clone(bytes)));
                     }
-                    match read_blob(&handle, *oid, self.limits.diff_bytes)? {
-                        Blob::Bytes(bytes) => Ok(SideText::Text(Text::new(bytes.into()))),
-                        Blob::TooLarge(size) => Ok(SideText::TooLarge { size }),
-                        Blob::Missing => Ok(SideText::Unavailable),
+                    match read_blob(&handle, *oid, blob_max)? {
+                        Blob::Bytes(bytes) => Ok(RawText::Bytes(bytes.into())),
+                        Blob::TooLarge(size) => Ok(RawText::TooLarge { size }),
+                        Blob::Missing => Ok(RawText::Unavailable),
                     }
                 }
             }
         };
-        Ok(FileTexts {
-            old: side(change.old.as_ref(), None)?,
-            new: side(
+        Ok((
+            side(change.old.as_ref(), None)?,
+            side(
                 change.new.as_ref(),
                 self.retained.get(file).and_then(Option::as_ref),
             )?,
-        })
+        ))
     }
+}
+
+/// One side found by [`ChangeSet::raw_texts`]: [`SideText`] with the bytes
+/// not yet wrapped in a [`Text`].
+pub(crate) enum RawText {
+    Absent,
+    /// The retained `Arc` itself for a kept worktree side; a fresh read for
+    /// an object-database side.
+    Bytes(Arc<[u8]>),
+    TooLarge {
+        size: u64,
+    },
+    NotRetained,
+    Unavailable,
 }
 
 pub(crate) enum Blob {

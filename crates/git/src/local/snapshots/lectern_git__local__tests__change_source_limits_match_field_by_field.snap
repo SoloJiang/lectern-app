@@ -1,0 +1,12 @@
+---
+source: crates/git/src/local/tests.rs
+expression: render(&list)
+---
+base 6b5c2e6
+A a.txt (untracked) - -> f:5d308e1 text(+1,-0)[0..0@0/0..1@0]
+A b.bin (untracked) - -> f:not-retained:f1050c0 binary(None,Some(15))
+A c.txt (untracked) - -> f:not-retained:4cb29ea truncated(+3,-0)
+A d.big (untracked) - -> f:not-retained:7e7abc7 too-large
+A e.txt (untracked) - -> f:not-retained:94ebaf9 truncated(+4,-0)
+A f.txt (untracked) - -> f:not-retained:51d36e7 listed
+totals files=6 +8 -0 truncated=2 too_large=1 listed=1 not_retained=5 capped=false
