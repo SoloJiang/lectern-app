@@ -69,11 +69,11 @@ pub fn plugin(deps: UsageDeps) -> (Name, UsagePlugin);
 以下改动各由对应 crate 的 PR 完成，写 `Refs #31`，在「验收」里列为前置条件。
 
 - **A. `services`**：`usage` 模块，按本文「接口」。只有 trait、数据类型和服务 ID；例外是 `UsageInterest`、`MrSourceRegistration` 包着的注销回调，与 `OverviewInterest` 的做法相同。`crates/services/AGENTS.md` 的模块列表加上这个模块。测试：类型的 JSON 往返，`dyn Usage` 的 `ID == "usage"`、`MULTIPLE == false`，`MrSource` 没有实现 `Service`，两个注销包装 drop 时各调用一次回调（`usage_*`）。
-- **B. `platform`**：本地时区的偏移，两个平台都用 POSIX 的 `localtime_r`（不是 macOS 专属能力，与 `ThreadCpuClock` 一样放在 `platform`，供 CI 测试）。不缓存时区规则以外的状态，不做 IO。
+- **B. `platform`**：本地时区的偏移，两个平台都用 POSIX 的 `localtime_r`（不是 macOS 专属能力，与 `ThreadCpuClock` 一样放在 `platform`，供 CI 测试）。不缓存时区规则以外的状态。第一次调用（以及 macOS 上系统时区改变之后的第一次调用）由 C 库读一次时区文件，之后只在内存里查找，所以不在 UI 线程上、首帧之前调用。
 
   ```rust
   pub mod time {
-      /// `unix_secs` 这一刻本地时间相对 UTC 的偏移（秒，东正西负），含夏令时。任何线程，不阻塞。
+      /// `unix_secs` 这一刻本地时间相对 UTC 的偏移（秒，东正西负），含夏令时。任何线程；第一次调用可能读时区文件，不在 UI 线程上调用。
       /// `localtime_r` 失败（年份放不进 `struct tm`）或偏移超出 TZif 的范围时为 None；毫秒时间戳除以 1000 后总有偏移。
       pub fn utc_offset(unix_secs: i64) -> Option<i32>;
   }
@@ -496,7 +496,7 @@ impl MrSourceRegistration { pub fn new(release: impl FnOnce() + Send + Sync + 's
 ```rust
 /// 本地时区。`app` 用 `platform::time::utc_offset` 实现（前置条件 B），测试用 `testing::TableZone`。
 pub trait LocalZone: Send + Sync {
-    /// `unix_ms` 这一刻相对 UTC 的偏移（秒，东正西负）。不阻塞。
+    /// `unix_ms` 这一刻相对 UTC 的偏移（秒，东正西负）。第一次调用可能读时区文件，只在后台线程上调用。
     fn offset_at(&self, unix_ms: i64) -> i32;
 }
 

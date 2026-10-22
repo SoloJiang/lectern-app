@@ -906,7 +906,7 @@ pub mod system {
 
 ```rust
 pub mod time {
-    /// `unix_secs` 这一刻本地时间相对 UTC 的偏移（秒，东正西负），含夏令时。任何线程可调用，不阻塞。
+    /// `unix_secs` 这一刻本地时间相对 UTC 的偏移（秒，东正西负），含夏令时。任何线程可调用；第一次调用可能读时区文件（见「规则」的 IO），不在 UI 线程上、首帧之前调用。
     /// `localtime_r` 失败（年份放不进 `struct tm` 的 `int tm_year`，如 `i64::MAX`）、
     /// 偏移超出 TZif 能表示的范围（RFC 8536：−89 999 到 93 599 秒）时为 None；macOS 和 Linux 以外的平台总是 None。
     pub fn utc_offset(unix_secs: i64) -> Option<i32>;
@@ -918,7 +918,7 @@ pub mod time {
 - 取值：一次 `localtime_r`，返回 `struct tm` 的 `tm_gmtoff`。偏移按给定的时刻求，夏令时切换前后的时刻各得到各自的偏移，不拿「现在」的偏移去推算过去或将来。
 - 时区：C 库的本地时区，即 `TZ`，`TZ` 未设置时是系统时区。本模块不读 `TZ`，不调用 `tzset`，自己不缓存任何东西：两个 C 库的 `localtime_r` 都在自己的锁下初始化时区状态（glibc 的 `tzset_internal`，macOS 的 `tzset_basic`），第一次调用时读入时区规则并留在内存里。macOS 上 `TZ` 未设置时，`localtime_r` 经系统通知（`com.apple.system.timezone`）发现系统时区的更改并重新读入（Apple Libc 的 `localtime.c`），所以用户在运行中改了时区之后，`usage` 的下一次查询就用新规则（usage 设计「取整与时间窗口」：过去的日子随之重算）。
 - 线程：`localtime_r` 是可重入的版本，不用静态的结果缓冲；C 库的时区状态由它自己的锁保护，任何线程可以同时调用。会与它竞争的只有另一个线程同时修改环境变量（C 库的 `getenv("TZ")` 与 `setenv`）；edition 2024 里 `std::env::set_var` 是 `unsafe`，库代码不调用它。
-- IO：第一次调用（以及 macOS 上系统时区改变之后的第一次调用）由 C 库读一次时区文件（几 KiB），之后只在内存里查找。`usage` 在后台线程上查询，首帧之前不调用。
+- IO：第一次调用（以及 macOS 上系统时区改变之后的第一次调用）由 C 库读一次时区文件（几 KiB），之后只在内存里查找。所以调用方都不在 UI 线程上、首帧之前调用；`usage` 在后台线程上查询。
 - 范围：`time_t` 在 Lectern 构建的 64 位 target 上就是 `i64`，转换不会失败（32 位 target 上超出范围的为 None）。`localtime_r` 只在年份放不进 `int tm_year` 时失败，约 ±6.8 × 10¹⁶ 秒；毫秒时间戳除以 1000 后绝对值不超过 9.3 × 10¹⁵ 秒，所以 `LocalZone::offset_at` 收到的任何时刻都有偏移。None 时的处理由 `app` 的包装决定（usage 的前置条件 C）。
 - 毫秒换成秒由调用方做，用向下取整的 `div_euclid(1000)`：截断除法让 1970 年之前的时刻多出最多 999 毫秒，落在切换点之前的最后一秒里的时刻会取到切换之后的偏移。
 - 偏移的检查：`tm_gmtoff` 超出 TZif 的范围时为 None（纯函数 `offset_from_gmtoff`，在所有平台上编译和测试）。真实的时区不会给出这样的值，这一步保证返回值放得进 `i32`，加到时刻上也不溢出。
@@ -1073,6 +1073,7 @@ pub mod time {
   - `ThreadCpuClock::current()` 创建时先读一次，读不到在这里返回 `Unsupported`；macOS 的时钟为线程端口多持有一个用户引用，线程退出后 `cpu_time` 因此可靠地返回错误（「线程的 CPU 时钟」的「实现」）。阻塞线程的测试用 channel 的 `recv`，不用条件变量，两者都让线程睡在内核里。
 - 增加了那里没有列出的测试：`replace_file_temp_name_collision`、`replace_file_parent_outside_the_root`、`fd_replace_file_keeps_no_descriptor`、`replace_error_is_send_sync_and_displays`、`thread_cpu_after_the_thread_exits_is_an_error`、`thread_cpu_clocks_are_released`。`libc` 原来只在 macOS 上依赖，现在 Linux 也依赖（`pthread_getcpuclockid`、`clock_gettime`），Cargo.lock 不变；「依赖」已改。
 - 日志目录与系统版本按 [logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 2 项实现，那里没有写的约束补在「日志目录与系统版本」：系统版本的接口（`system::os_version() -> Option<String>`，值为 `macOS <版本>`，与 logging 设计 `Header::os` 的示例一致）、字符集与长度的检查、其他平台返回 None。第 2 项里的写盘线程 utility QoS 不在这个 PR：logging 设计「验收」的第 2 步只要求 `dirs::logs()` 和系统版本，而 QoS 要沿用的 executor 线程启动钩子在本 crate 还没有对应的接口（「范围」里「本文不覆盖」的线程 QoS），随它的设计一起做；`Config::on_writer_start` 是 `Option`，接口不受影响。
-- 本地时区的偏移按 [usage 设计「对其他 crate 的要求」](usage.md#对其他-crate-的要求)的 B 实现，接口没有改，那里没有写的约束补在「本地时区的偏移」。与那里的文字不同的有两处：
+- 本地时区的偏移按 [usage 设计「对其他 crate 的要求」](usage.md#对其他-crate-的要求)的 B 实现，接口没有改，那里没有写的约束补在「本地时区的偏移」。与那里的文字不同的有三处：
+  - B 写的「不做 IO」不成立：第一次调用（以及 macOS 上系统时区改变之后的第一次调用）由 C 库读时区文件。usage 设计 B 与 `LocalZone::offset_at` 的注释同时改为不在 UI 线程上、首帧之前调用。
   - None 多了一种情况：`tm_gmtoff` 超出 TZif 的范围。B 写的「超出 `time_t` 的范围」改为「年份放不进 `tm_year`」：64 位的 `time_t` 能放下任何 `i64`，`localtime_r` 失败只因为年份；usage 设计 B 的注释同时改正。
   - 测试在 B 的表之外加了 Kathmandu 1986 年的切换、两个 POSIX 规则串（不依赖系统的时区文件）、`utc_offset_out_of_range_is_none`、`utc_offset_covers_every_millisecond_timestamp`、`utc_offset_from_many_threads_agrees` 和 `utc_offset_gmtoff_range`。子进程的入口不标 `#[ignore]`，没有标记变量时直接返回，与 `cache` 的 `crash_*` 相同，`just test` 不因此多出跳过的测试。

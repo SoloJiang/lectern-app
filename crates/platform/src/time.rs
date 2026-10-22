@@ -17,8 +17,10 @@ mod tests;
 ///
 /// The time zone is the C library's: `TZ`, or the system zone when `TZ`
 /// is unset. The C library loads the zone's rules on first use and keeps
-/// them; nothing else is cached. Any thread may call it; it takes the C
-/// library's time zone lock and does not block otherwise.
+/// them; nothing else is cached. Any thread may call it and it takes the
+/// C library's time zone lock, but the first call (and on macOS the first
+/// call after the system zone changes) reads the zone file from disk, so
+/// do not call it on the UI thread or before the first frame.
 pub fn utc_offset(unix_secs: i64) -> Option<i32> {
     imp::utc_offset(unix_secs)
 }
