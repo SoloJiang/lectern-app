@@ -27,7 +27,9 @@ use std::io::{self, Write};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
+use lectern_logging::{Value, debug, info, warn};
 use lectern_services::changes::ChangePath;
 use lectern_services::project::BlobId;
 use lectern_services::review::FileKey;
@@ -279,7 +281,7 @@ pub(crate) enum Op {
     CompactSyncDir,
 }
 
-type Faults = Arc<dyn Fn(Op) -> io::Result<()> + Send + Sync>;
+pub(crate) type Faults = Arc<dyn Fn(Op) -> io::Result<()> + Send + Sync>;
 
 /// What this process knows of the file on disk.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -313,6 +315,13 @@ pub(crate) struct ReadReport {
     /// The last line had no newline; it was dropped and is cut before the
     /// next append.
     pub torn: bool,
+    /// The length of that unfinished last line.
+    pub torn_bytes: u64,
+    /// The file was over `READ_MAX`: its length; only the end was read.
+    pub partial: Option<u64>,
+    /// The header is of another version: records are read, the file is only
+    /// appended to.
+    pub other_version: bool,
     /// The read failed; the index is empty.
     pub error: Option<io::Error>,
     /// The file had another repository's header and was renamed here.
@@ -354,16 +363,29 @@ pub(crate) struct LogFile {
 /// the name `cache` gives the repository's partition, with another
 /// extension.
 pub(crate) fn file_name(common_dir: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"repo\0");
-    hasher.update(common_dir.as_os_str().as_encoded_bytes());
-    let digest = hasher.finalize();
     let mut name = String::with_capacity(38);
-    for byte in &digest[..16] {
+    for byte in repo_hash(common_dir) {
         name.push_str(&format!("{byte:02x}"));
     }
     name.push_str(".jsonl");
     name
+}
+
+/// The repository's hash `h`: `SHA-256("repo\0" + common_dir)`, first 16
+/// bytes (the log's file name, and part of the `review` log scope).
+pub(crate) fn repo_hash(common_dir: &Path) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"repo\0");
+    hasher.update(common_dir.as_os_str().as_encoded_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+/// The log's encoding of a review target (its `target` value).
+pub(crate) fn target_bytes(target: &TargetKey) -> Vec<u8> {
+    wire::target_bytes(target)
 }
 
 impl LogFile {
@@ -401,6 +423,11 @@ impl LogFile {
         self.faults = Some(Arc::new(faults));
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_shared_faults(&mut self, faults: Faults) {
+        self.faults = Some(faults);
+    }
+
     fn fault(&self, op: Op) -> io::Result<()> {
         self.faults.as_ref().map_or(Ok(()), |f| f(op))
     }
@@ -417,11 +444,14 @@ impl LogFile {
     pub(crate) fn load(&mut self, now: Timestamp) -> (Index, ReadReport) {
         self.known = Known::Unknown;
         self.complete = false;
+        let started = Instant::now();
         let mut index = Index::default();
         let mut report = ReadReport::default();
         if let Err(error) = self.read_into(&mut index, &mut report, now) {
             self.known = Known::Unknown;
             self.complete = false;
+            warn!("annotation log read failed; append only until the next read";
+                path = Value::path(&self.path), io = Value::io(&error));
             let report = ReadReport {
                 error: Some(error),
                 ..ReadReport::default()
@@ -429,7 +459,38 @@ impl LogFile {
             return (Index::default(), report);
         }
         report.complete = self.complete;
+        self.log_read(&report, &index, started);
         (index, report)
+    }
+
+    /// The records of a read (docs/design/review.md「日志与诊断」): what was
+    /// recovered or set aside at warn, the rest at debug.
+    fn log_read(&self, report: &ReadReport, index: &Index, started: Instant) {
+        let path = Value::path(&self.path);
+        if let Some(foreign) = &report.foreign {
+            warn!("annotation log of another repository; renamed";
+                path = path, renamed = Value::path(foreign));
+        }
+        if let Some(len) = report.partial {
+            warn!("annotation log over the read limit; read its end only";
+                path = path, bytes = len, read = self.limits.read_max);
+        }
+        if report.other_version {
+            warn!("annotation log of another version; append only"; path = path);
+        }
+        if report.bad_lines > 0 || report.torn {
+            warn!("annotation log recovered";
+                path = path,
+                bad_lines = report.bad_lines,
+                torn_bytes = report.torn_bytes,
+                unknown = report.unknown);
+        }
+        debug!("annotation log read";
+            path = path,
+            records = index.len(),
+            unknown = report.unknown,
+            complete = report.complete,
+            took_us = started.elapsed());
     }
 
     fn read_into(
@@ -465,6 +526,7 @@ impl LogFile {
                     // Empty, or a single unfinished line (the header's
                     // first write was cut short): nothing to read.
                     report.torn = !buf.is_empty();
+                    report.torn_bytes = buf.len() as u64;
                     let torn_at = report.torn.then_some(0);
                     self.known = Known::File {
                         dev,
@@ -477,6 +539,7 @@ impl LogFile {
                 }
             }
         } else {
+            report.partial = Some(len);
             let first = read_at(&file, 0, HEADER_MAX.min(len))?;
             let head = newline(&first).map_or(Vec::new(), |i| first[..i].to_vec());
             // The first line of the tail started before it: skip it.
@@ -501,6 +564,7 @@ impl LogFile {
                     self.complete = true;
                     return Ok(());
                 }
+                report.other_version = h.v != wire::VERSION;
                 h.v == wire::VERSION
             }
             _ => {
@@ -517,6 +581,7 @@ impl LogFile {
             let Some(i) = newline(rest) else {
                 torn_at = Some(at);
                 report.torn = true;
+                report.torn_bytes = rest.len() as u64;
                 break;
             };
             read_line(&rest[..i], &mut strs, index, report);
@@ -590,12 +655,16 @@ impl LogFile {
         match tail {
             Some(Some(torn_at)) => {
                 file.set_len(torn_at)?;
+                debug!("annotation log tail cut";
+                    path = Value::path(&self.path), bytes = len - torn_at);
                 len = torn_at;
             }
             Some(None) => {}
             None => {
                 self.complete = false;
                 if len > 0 && !ends_with_newline(&file, len) {
+                    debug!("annotation log of unknown state; newline added before the records";
+                        path = Value::path(&self.path));
                     out.push(b'\n');
                 }
             }
@@ -654,13 +723,23 @@ impl LogFile {
         let Known::File { dev, ino, len, .. } = self.known else {
             return Ok(false);
         };
-        let meta = fs::symlink_metadata(&self.path)?;
+        let meta = match fs::symlink_metadata(&self.path) {
+            Ok(meta) => meta,
+            Err(e) => {
+                warn!("annotation log compaction failed; the file is unchanged";
+                    path = Value::path(&self.path), io = Value::io(&e));
+                return Err(e);
+            }
+        };
         if !meta.is_file() || (meta.dev(), meta.ino(), meta.len()) != (dev, ino, len) {
             // Another writer: the index is no longer the file.
+            info!("annotation log changed by another writer; append only";
+                path = Value::path(&self.path), expected = len, found = meta.len());
             self.known = Known::Unknown;
             self.complete = false;
             return Ok(false);
         }
+        let started = Instant::now();
         let bytes = index.compacted(self.repo_bytes(), now);
         let temp = self
             .path
@@ -669,17 +748,27 @@ impl LogFile {
             Ok(meta) => meta,
             Err(e) => {
                 let _ = fs::remove_file(&temp);
+                warn!("annotation log compaction failed; the file is unchanged";
+                    path = Value::path(&self.path), io = Value::io(&e));
                 return Err(e);
             }
         };
         self.compacted_len = bytes.len() as u64;
         index.prune(now);
+        info!("annotation log compacted";
+            path = Value::path(&self.path),
+            before = len,
+            after = bytes.len(),
+            records = index.len(),
+            took_us = started.elapsed());
         let synced = self.fault(Op::CompactSyncDir);
-        if synced.and_then(|()| sync_dir(&self.dir)).is_err() {
+        if let Err(e) = synced.and_then(|()| sync_dir(&self.dir)) {
             // The rename may not be durable yet: a crash could bring back
             // the old file. Treat the file as unknown (append only until the
             // next complete read) and sync the directory again with the
             // next append.
+            warn!("annotation log directory sync failed; append only";
+                path = Value::path(&self.dir), io = Value::io(&e));
             self.known = Known::Unknown;
             self.complete = false;
             self.dir_unsynced = true;

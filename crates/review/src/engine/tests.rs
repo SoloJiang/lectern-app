@@ -24,6 +24,8 @@ use lectern_services::session::{SessionKey, SourceId, Timestamp};
 use crate::log::{LogFile, SessionId};
 use crate::testing::{Driven, FakeProjects, FakeSessions, ReflogLine, write_reflog};
 
+mod logs;
+
 const SOURCE: &str = "session-claude-code";
 /// Unix seconds around which the scenarios happen.
 const T: i64 = 1_760_000_000;

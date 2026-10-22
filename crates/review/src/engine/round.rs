@@ -12,10 +12,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lectern_cache::Key;
 use lectern_git::{HashKind, HeadReflog, HeadState, LocalChanges, Oid, Repo, Worktree};
+use lectern_logging::{Ctx, debug, info, warn};
 use lectern_services::changes::{
     BaseSpec, ChangeError, ChangeList, ChangePath, ChangeSource, ChangeStatus, FileChange,
     RefreshHint, SideIdentity,
@@ -35,6 +36,7 @@ use super::narrative::{self, Own, Placement};
 use crate::chain::attribute::Owner;
 use crate::claims::{self, CachedClaims, ClaimKind, Claims, Relative};
 use crate::cutoff::{self, Record, Table};
+use crate::diag;
 use crate::group::{self, GroupInput};
 use crate::log::SessionId;
 use crate::noise;
@@ -178,6 +180,25 @@ pub(crate) struct Work {
     pub pending: Pending,
     /// The attribution of each file, as it is computed.
     pub results: Mutex<Vec<Option<Arc<super::attribute::FileResult>>>>,
+    /// The log scope of the review's tasks: `review` and `session`.
+    pub ctx: Ctx,
+    /// How long the parts of `prepare` took (the `review ready` record).
+    pub timing: Timing,
+}
+
+/// The parts of a round's `prepare`, for the log.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Timing {
+    /// Resolving the target, the worktree's handles, the HEAD reflog.
+    pub locate: Duration,
+    /// The target's sessions' turn indexes.
+    pub turns: Duration,
+    /// The change set: fetch, refresh or the previous one.
+    pub fetch: Duration,
+    /// The other sessions' claims.
+    pub claims: Duration,
+    /// The cutoff window and table.
+    pub cutoffs: Duration,
 }
 
 #[derive(Default)]
@@ -368,6 +389,9 @@ fn session_base(
 }
 
 fn change_error(e: ChangeError) -> ReviewError {
+    if !matches!(e, ChangeError::Cancelled) {
+        warn!("change set unavailable"; error = diag::change_error(&e));
+    }
     ReviewError::Changes(e)
 }
 
@@ -384,9 +408,17 @@ pub(crate) fn prepare(
     let now = (engine.cfg.clock)();
     let window_ms = now.0.saturating_sub(cutoff::WINDOW_MS);
     let window_s = window_ms.div_euclid(1000);
+    let mut timing = Timing::default();
+    let mut lap = Instant::now();
     let resolved = resolve(engine, target)?;
     let git = resolved.git;
     let hash = git.hash;
+    let target_key = target_key(target, &git);
+    // The records from here on carry the review's `review` too.
+    let ctx = diag::review_ctx(target, git.common_dir(), &target_key);
+    let _scope = lectern_logging::scope(ctx);
+    timing.locate = lap.elapsed();
+    lap = Instant::now();
 
     // The target's own sessions and their turn indexes.
     let mut own: Vec<Own> = Vec::with_capacity(resolved.own.len());
@@ -401,7 +433,11 @@ pub(crate) fn prepare(
                 Some(index)
             }
             Err(SessionError::NotFound) if i == 0 => return Err(ReviewError::Missing),
-            Err(_) => {
+            Err(e) => {
+                warn!("session turns unavailable; reviewed without them";
+                    from = diag::session(&summary.key),
+                    error = diag::session_error(&e),
+                    target = i == 0);
                 if i == 0 {
                     degraded = Some(Degraded::UnrecognizedSession);
                 }
@@ -410,6 +446,8 @@ pub(crate) fn prepare(
         };
         own.push(Own { summary, index });
     }
+    timing.turns = lap.elapsed();
+    lap = Instant::now();
 
     // The base and the reflog.
     let started_s = own
@@ -419,10 +457,15 @@ pub(crate) fn prepare(
     let reflog = git
         .worktree
         .head_reflog(stop, MAX_REFLOG)
-        .unwrap_or(HeadReflog {
-            exists: false,
-            entries: Vec::new(),
-            complete: true,
+        .unwrap_or_else(|e| {
+            let (error, io) = diag::git_error(&e);
+            warn!("head reflog unreadable; the base is the current head";
+                error = error, io = io);
+            HeadReflog {
+                exists: false,
+                entries: Vec::new(),
+                complete: true,
+            }
         });
     let (base, session, mode, spec) = match target {
         ReviewTarget::Session(key) => {
@@ -475,6 +518,9 @@ pub(crate) fn prepare(
         }
     };
 
+    timing.locate += lap.elapsed();
+    lap = Instant::now();
+
     // The change set.
     let reuse = match (kind, prev) {
         (Kind::Reuse | Kind::Refresh(_), Some(prev)) if prev.source_spec() == &spec => Some(prev),
@@ -491,6 +537,8 @@ pub(crate) fn prepare(
         }
         _ => fetch(&git, target, spec, cancel)?,
     };
+    timing.fetch = lap.elapsed();
+    lap = Instant::now();
 
     // Claims: the target's from its indexes, the others' from memory or
     // `review.claims`.
@@ -529,10 +577,14 @@ pub(crate) fn prepare(
         cached = engine.cfg.cache.app().get_many::<CachedClaims>(&keys);
     }
     let mut unverified: HashSet<SessionKey> = HashSet::new();
+    let (mut from_memory, mut from_cache, mut stale) = (0u32, 0u32, 0u32);
     for (n, s) in others.iter().enumerate() {
         let rel = Arc::new(relative(&git, s));
         let claims = match &in_memory[n] {
-            Some(c) => Some(Arc::clone(c)),
+            Some(c) => {
+                from_memory += 1;
+                Some(Arc::clone(c))
+            }
             None => {
                 let adapter = engine.adapter(&s.key.source);
                 match cached.get_mut(n).and_then(Option::take) {
@@ -540,9 +592,13 @@ pub(crate) fn prepare(
                         if adapter.is_none() && unverified.insert(s.key.clone()) {
                             pending.unverified.push(s.key.clone());
                         }
+                        from_cache += 1;
                         Some(Arc::new(c))
                     }
-                    _ => {
+                    found => {
+                        // Cached for another `last_activity` or adapter
+                        // version, or not cached.
+                        stale += u32::from(found.is_some());
                         pending.missing.push((
                             s.key.clone(),
                             Arc::clone(&rel),
@@ -564,6 +620,15 @@ pub(crate) fn prepare(
             });
         }
     }
+    debug!("claims";
+        sessions = others.len(),
+        memory = from_memory,
+        cached = from_cache,
+        stale = stale,
+        missing = pending.missing.len(),
+        unverified = pending.unverified.len());
+    timing.claims = lap.elapsed();
+    lap = Instant::now();
 
     // Paths' histories.
     let mut by_path: HashMap<ChangePath, Vec<(u32, u32)>> = HashMap::new();
@@ -621,6 +686,7 @@ pub(crate) fn prepare(
             .map_or(i64::MIN, |s| s.saturating_mul(1000));
         at.max(window_ms)
     };
+    timing.cutoffs = lap.elapsed();
 
     // Each file's history and claim.
     let mut groups_of: HashMap<(u32, u32), u32> = HashMap::new();
@@ -771,7 +837,6 @@ pub(crate) fn prepare(
         })
         .collect();
 
-    let target_key = target_key(target, &git);
     let mut files: Vec<FileWork> = chosen
         .iter()
         .map(|&i| {
@@ -991,6 +1056,8 @@ pub(crate) fn prepare(
         step_of,
         pending,
         results,
+        ctx,
+        timing,
     })
 }
 
@@ -1048,6 +1115,7 @@ fn fetch(
         Ok(list) => Ok((source, list)),
         // A range without a merge base compares with HEAD instead.
         Err(ChangeError::NoMergeBase) if matches!(target, ReviewTarget::Range { .. }) => {
+            info!("no merge base; the range compares with head");
             let source = make(BaseSpec::Head);
             let list = source.fetch(cancel).map_err(change_error)?;
             Ok((source, list))
@@ -1155,8 +1223,15 @@ pub(crate) fn settle(engine: &Engine, work: &Work, cancel: &AtomicBool) -> bool 
         let Some(source) = source_of(engine, key) else {
             continue;
         };
-        let Ok(index) = source.turns_unretained(key) else {
-            continue;
+        let index = match source.turns_unretained(key) {
+            Ok(index) => index,
+            Err(e) => {
+                // Its claims stay unknown this round; the next activity
+                // tries again.
+                debug!("claims not derived";
+                    from = diag::session(key), error = diag::session_error(&e));
+                continue;
+            }
         };
         if let Some(v) = index.cursor.adapter_version() {
             engine.adapter_seen(&key.source, v);

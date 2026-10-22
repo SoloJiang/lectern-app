@@ -8,7 +8,9 @@
 //! review engine (`engine`) with its claims (`claims`), path cutoffs
 //! (`cutoff`), snapshots, commands, rows and the version LRU (`lru`),
 //! driven without the plugin by `testing::Driven`. The plugin comes with
-//! step 4.
+//! step 4. Runtime logging goes through `lectern-logging`; `diag` holds
+//! what a record keeps of this crate's values (docs/design/review.md
+//! 「日志与诊断」).
 
 // Without `test-support` nothing calls the engine until the plugin (step 4).
 #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
@@ -17,6 +19,8 @@ mod chain;
 mod claims;
 #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod cutoff;
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+mod diag;
 #[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod engine;
 #[cfg_attr(not(feature = "test-support"), allow(dead_code))]

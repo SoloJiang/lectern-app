@@ -8,12 +8,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use lectern_logging::{Value, debug, warn};
 use lectern_services::changes::{ChangeDetail, ChangeSource, SideText};
 use lectern_services::review::{
     Alignment, AttributionState, CallRef, FileAttribution, HunkAttribution, StepEntry, Survival,
     TurnRef,
 };
-use lectern_services::session::{Content, ToolCallId, ToolStatus};
+use lectern_services::session::{Content, ContentRef, SessionKey, ToolCallId, ToolStatus};
 
 use super::Engine;
 use super::round::{FileWork, Hist, MAX_TEXT, Work, ends, side_oid, source_of};
@@ -21,6 +22,7 @@ use crate::chain::attribute::{self as attr, Owner};
 use crate::chain::history::{self, HistoryStep};
 use crate::chain::{self, Chain, ChainInput, Edit, Side, StepInput, codec};
 use crate::claims::ClaimKind;
+use crate::diag;
 
 /// A file's attribution.
 #[derive(Clone, Debug)]
@@ -99,12 +101,23 @@ fn load(engine: &Engine, work: &Work, h: &Hist) -> Option<Arc<[Edit]>> {
     };
     let source = source_of(engine, &who.key)?;
     let edits = |content| match content {
-        Ok(Content::Edits(edits)) => Some(edits),
-        _ => None,
+        Ok(Content::Edits(edits)) => Ok(edits),
+        Ok(_) => Err(Value::text("not_edits")),
+        Err(e) => Err(diag::session_error(&e)),
     };
-    let loaded = result
+    let loaded = match result
+        .ok_or(Value::text("no_result"))
         .and_then(|r| edits(source.load(&who.key, &r)))
-        .or_else(|| edits(source.load(&who.key, input)))?;
+    {
+        Ok(edits) => edits,
+        Err(_) => match edits(source.load(&who.key, input)) {
+            Ok(edits) => edits,
+            Err(error) => {
+                not_loaded(&who.key, input, error);
+                return None;
+            }
+        },
+    };
     let rel = &who.rel;
     Some(
         loaded
@@ -112,6 +125,19 @@ fn load(engine: &Engine, work: &Work, h: &Hist) -> Option<Arc<[Edit]>> {
             .filter_map(|e| Edit::from_file_edit(e, &|p| rel.rel(p)))
             .collect(),
     )
+}
+
+/// The step does not apply; its lines show as Drifted. Out of line: the
+/// load is on the attribution's path, the failure is rare.
+#[cold]
+#[inline(never)]
+fn not_loaded(key: &SessionKey, input: &ContentRef, error: Value<'static>) {
+    warn!("change step did not load; it does not apply";
+        from = diag::session(key),
+        pos = input.pos(),
+        line_len = input.line_len(),
+        part = input.part(),
+        error = error);
 }
 
 /// The chain's inputs: the steps with their edits loaded.
@@ -178,7 +204,11 @@ pub(crate) fn file(engine: &Engine, work: &Work, n: usize, cancel: &AtomicBool) 
         &digest,
     );
     let partition = engine.cfg.cache.repo(work.git.common_dir());
-    let chain = codec::cached(&partition, key.as_ref(), || build(engine, work, file));
+    let built = std::cell::Cell::new(false);
+    let chain = codec::cached(&partition, key.as_ref(), || {
+        built.set(true);
+        build(engine, work, file)
+    });
     let owners: Vec<Owner> = file.history.iter().map(|h| work.owner(h)).collect();
     let hunks: &[lectern_services::changes::DiffHunk] = match &f.detail {
         ChangeDetail::Text { hunks, .. } => hunks,
@@ -191,6 +221,13 @@ pub(crate) fn file(engine: &Engine, work: &Work, n: usize, cancel: &AtomicBool) 
     }
     let mut attribution = attr::file(&chain, &owners, &hunk_attrs);
     attribution.turns = sorted(&attribution.turns, &order);
+    debug!("file attributed";
+        file = n,
+        path = diag::path(&f.path),
+        cached = !built.get(),
+        steps = file.history.len(),
+        hunks = hunk_attrs.len(),
+        drifted_hunks = attribution.drifted_hunks);
     FileResult {
         attribution,
         hunks: hunk_attrs.into(),

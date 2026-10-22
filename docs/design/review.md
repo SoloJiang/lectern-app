@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；其余前置条件与第 4、5 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；其余前置条件与第 4、5 步尚未实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分），审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 只预留数据模型。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)，压缩的条件按 [ADR 0045](../adr/0045.md)）。
 
@@ -53,6 +53,7 @@
 | `lectern-cache` | `review.attribution` 命名空间 | 派生数据以 blob OID 加轮次历史的摘要为键（架构规则 5） |
 | `lectern-executor` | 后台任务 | UI 线程不做 IO |
 | `lectern-fs-watch` | 被审阅 worktree 的 `WorktreeBatch`、仓库的 `RepoBatch` | 与 `project` 共用同一份 worktree 状态 |
+| `lectern-logging` | 运行日志（「日志与诊断」）；测试用它的 `test-support` feature 捕获记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)） |
 | `serde`、`serde_json` | 标注日志的记录 | 已是工作区依赖（ADR 0044） |
 | `sha2` | 轮次历史的摘要、标注日志的文件名 | 已在 Cargo.lock（`cache` 用同一版本） |
 | `insta`、`tempfile`（dev）；`lectern-git` 的 `test-support`（dev） | 快照、临时目录、`TestRepo` | 工作区统一依赖 |
@@ -1058,14 +1059,55 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 ### 日志与诊断
 
-按 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。`lectern-logging` crate 还没有合并，第 3 步的审阅引擎没有日志调用；下面是接入时要记的事件（target 为 `review`）。默认过滤记到 info，详细模式是用户在设置里开启的 debug。
+经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 是 `review`。默认过滤记到 info；详细级别是用户在设置里开启的 debug。记录在调用线程上编码进日志的内存缓冲，不做 IO；持有本 crate 的锁时写出的记录只多一次复制（[logging 设计「数据流与线程」](logging.md#数据流与线程)）。字段值的写法集中在 `src/diag.rs`：错误只记种类，不记消息文字。
 
 - 默认记录：
-  - warn：改动集取不到（`ChangeError` 的种类）；标注日志读取失败、只读了最后 64 MiB、文件头的仓库不符被改名、追加失败、压缩失败（IO 错误的种类和日志文件名）；改动步 `load` 失败或给出的不是改动（会话键和 `ContentRef`，这一步按应用不上处理）；`tree_changes` 失败（两个提交的 OID，这条记录按改变了全部路径处理）。
-  - info：打开审阅到第一份 `Ready` 快照的耗时和分项（定位与 reflog、`fetch`、审阅对象的 `turns`、截止时刻、声明、第一个文件的归因），后台完成时的耗时和因声明或截止时刻补齐而重新准备的轮数；基准的来源（`BaseHow`）。
-- 详细模式（debug）：每一轮的种类（打开、刷新、补齐后重新准备）；截止时刻表的命中数、未命中数和留给后台的记录数；声明的命中、失效（`last_activity` 或适配器版本不同）与缺失的会话数；每个文件的归因是否命中 `review.attribution`、改动步数、Drifted 的 hunk 数；`Prepare` 的键和耗时；中间版本 LRU 的字节数。
-- 关联 ID：任务里设置 logging 的作用域（`Ctx`）：`review` 是审阅对象的 64 位哈希，取 SHA-256（仓库的哈希 `h`、标注日志里 `target` 的编码）的前 8 字节，同一审阅对象跨运行相同；`session` 是审阅对象会话的 UUID；`task` 由 executor 填。字段另带 `ReviewId`、轮次序号和会话键（来源 ID、会话 ID）。仓库用标注日志文件名里的哈希 `h`，worktree 用相对公共目录的 git 目录（与标注日志的 `target` 相同）；文件用 `FileKey`。路径只在详细模式里记，非 UTF-8 的字节替换掉。
-- 不记：文件内容、改动步的正文（`load` 的结果）、prompt、agent 说明、命令文本、diff 的行；凭据和 token。
+
+  | 事件 | 级别 | `msg` | 字段 |
+  |---|---|---|---|
+  | 改动集取不到（取消不记） | warn | `change set unavailable` | `error`（`ChangeError` 的种类：`unsupported`、`no_merge_base`、`too_many_entries`、`io`） |
+  | 审阅对象或它的子 agent 的轮次读不出（审阅照常进行，认不出格式时为 `Degraded::UnrecognizedSession`） | warn | `session turns unavailable; reviewed without them` | `from`（会话标识）、`error`（`SessionError` 的种类：`io`、`unrecognized`、`too_large`；子 agent 的会话文件不在了时为 `not_found`）、`target`（是不是审阅对象本身） |
+  | HEAD reflog 读不出，基准按当前 HEAD | warn | `head reflog unreadable; the base is the current head` | `error`（`GitError` 的种类）、`io` |
+  | 改动步加载失败或给出的不是改动，这一步按应用不上处理 | warn | `change step did not load; it does not apply` | `from`、`pos`、`line_len`、`part`（输入的 `ContentRef`）、`error`（`not_edits` 或 `SessionError` 的种类） |
+  | `tree_changes` 失败，这条记录按改变了全部路径处理 | warn | `tree changes failed; the record cuts every path` | `old`、`new`（两个提交的 OID）、`error`、`io` |
+  | `is_ancestor` 失败，这条记录按离开了基准的历史处理 | warn | `ancestry check failed; the record cuts the paths it changed` | `ancestor`、`commit`、`error`、`io` |
+  | 标注日志读取失败，读成功之前只追加 | warn | `annotation log read failed; append only until the next read` | `path`（日志文件）、`io` |
+  | 文件头的仓库不符，文件被改名 | warn | `annotation log of another repository; renamed` | `path`、`renamed`（改名后的路径） |
+  | 文件超过 64 MiB，只读最后 64 MiB | warn | `annotation log over the read limit; read its end only` | `path`、`bytes`（文件长度）、`read`（读取上限） |
+  | 文件头的 `v` 不是 1，只追加 | warn | `annotation log of another version; append only` | `path` |
+  | 读取时跳过坏行、丢弃末尾不完整的一行 | warn | `annotation log recovered` | `path`、`bad_lines`（跳过的坏行数，含坏的文件头）、`torn_bytes`（末尾不完整的一行的字节数，下一次追加之前截掉）、`unknown`（保留的认不出的记录数） |
+  | 追加失败，记录留在待写队列 | warn | `annotation log append failed; kept for the next mark` | `path`、`io`、`records`（这一批的条数）、`failures`（连续失败的次数） |
+  | 失败之后再次追加成功 | warn | `annotation log append retried` | `path`、`records`（含之前留下的）、`failures` |
+  | 压缩失败，原文件不变 | warn | `annotation log compaction failed; the file is unchanged` | `path`、`io` |
+  | 压缩改名之后目录的 `fsync` 失败，只追加 | warn | `annotation log directory sync failed; append only` | `path`（目录）、`io` |
+  | 压缩完成 | info | `annotation log compacted` | `path`、`before`、`after`（压缩前后的字节数）、`records`（保留的记录数）、`took_us` |
+  | 压缩前发现别的写入者改过文件，只追加 | info | `annotation log changed by another writer; append only` | `path`、`expected`、`found`（预期与实际的长度） |
+  | 打开审阅到第一份 `Ready` 快照 | info | `review ready` | `id`（`ReviewId`）、`round`、`base`（`BaseHow`：`recorded`、`reflog`、`before_log`、`current_head`、`spec`）、`files`、`took_us`（从 `open` 起），分项 `locate_us`（定位、句柄与 reflog）、`turns_us`、`fetch_us`、`claims_us`、`cutoffs_us`、`first_us`（第一个文件的归因） |
+  | 后台完成（全部文件归因完、没有待补齐的部分），每次打开记一次 | info | `review settled` | `id`、`round`、`files`、`reprepared`（因声明或截止时刻补齐而重新准备的轮数）、`took_us`（从 `open` 起） |
+  | 一轮准备失败（快照为 `Failed`；已被 `close` 或更新的一轮取消的不记） | info | `review failed` | `id`、`round`、`kind`、`error`（`missing`、`not_in_open_project` 或改动集错误的种类） |
+  | 比较范围没有 merge-base，改为相对 HEAD | info | `no merge base; the range compares with head` | — |
+
+  - 会话标识（`from` 和作用域的 `session`）：会话 ID 是 UUID 时取它的 16 个字节，否则（Claude Code 子 agent 的 `<父会话>/agent-<id>`）取 128 位哈希，与 `usage` 的算法相同，两个 crate 对同一会话的记录可以对照。来源 ID 不写出。
+  - `path` 都经 `Value::path`，主目录写成 `~`。默认级别里的路径只有标注日志的文件和目录（应用数据目录下本 crate 的文件）。
+  - 同一个调用点每 10 秒最多写 20 条（[logging 设计「限流」](logging.md#限流)）：一个坏掉的仓库反复失败时，省略的条数记在下一条的 `n` 里。
+- 详细级别（debug）：
+
+  | 事件 | `msg` | 字段 |
+  |---|---|---|
+  | 每一轮准备完 | `review round` | `id`、`round`、`kind`（`fetch`、`refresh_full`、`refresh_paths`、`reuse`）、`files`、`unclaimed`、`pending`（有没有留给后台的部分）、`took_us` |
+  | 其他会话的声明 | `claims` | `sessions`、`memory`（本次运行内存里的）、`cached`（`review.claims` 命中）、`stale`（条目的 `last_activity` 或适配器版本不同）、`missing`（留给后台读取）、`unverified` |
+  | 后台读不出一个会话的轮次，声明这一轮仍未知 | `claims not derived` | `from`、`error` |
+  | 截止时刻表 | `cutoff table built` | `records`、`paths`、`hits`（`review.tree_changes` 命中）、`computed`、`left`（超出 `Interactive` 预算或失败、留给后台的记录数）、`took_us` |
+  | 后台补齐截止时刻表 | `cutoff table completed` | `records`、`unknown`（仍未知的）、`took_us` |
+  | 一个文件的归因 | `file attributed` | `file`（快照里的下标）、`path`（工作区里的路径）、`cached`（`review.attribution` 命中）、`steps`、`hunks`、`drifted_hunks` |
+  | `Prepare` 完成 | `prepared` | `id`、`request`（请求的序号）、`needs`、`rows`、`texts`、`row_bytes`、`text_bytes`、`versions_bytes`（中间版本 LRU）、`took_us` |
+  | 标注日志读完 | `annotation log read` | `path`、`records`、`unknown`、`complete`（索引是不是整个文件，决定能否压缩）、`took_us` |
+  | 追加之前截掉末尾不完整的一行 | `annotation log tail cut` | `path`、`bytes` |
+  | 文件状态未知、不以换行结尾，追加之前补一个换行 | `annotation log of unknown state; newline added before the records` | `path` |
+
+- 关联 ID：本 crate 的每个 executor 任务（一轮的准备、后台补齐与归因、`Prepare`、标注日志的读取与追加）都在作用域里运行（`Engine::submit` 设置 `Ctx`）。`session` 是审阅对象会话的标识，从 `open` 起就有；`review` 是审阅对象的 64 位哈希，取 SHA-256（仓库的哈希 `h` 的 16 个字节、标注日志里 `target` 的编码）的前 8 字节，同一审阅对象跨运行相同，在一轮解析出仓库之后加上。标注日志按仓库共用，它的读取和追加任务带发起它的那个审阅的作用域。`task` 由 executor 填（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 5 项）。
+- 不记录：文件内容、diff 的行、改动步的正文（`load` 的结果）、prompt、agent 说明、命令文本、提交说明（reflog 的说明文字）、标注日志的行（坏行、认不出的记录照原样留在文件里，不进日志）；来源 ID，以及不是 UUID 的会话 ID 的原文（只记哈希）；worktree 的名字、分支名、`Prepare` 的键（含路径和会话里的位置）；`ChangeError::Io`、`SessionError::Io`、`GitError::Corrupt` 的消息文字和 `io::Error` 的消息（只记种类和系统错误码）；凭据和 token。工作区里的路径只在详细级别的 `file attributed` 里出现。
+- 金丝雀测试（`src/engine/tests/logs.rs`，`testing::capture()` 在 trace 级别）：`logs_hold_no_contents` 把金丝雀放进基准和工作区的文件内容、提交说明、审阅对象会话的 prompt、agent 说明和改动内容、另一个会话的 prompt 和命令、标注日志的坏行、认不出的记录和末尾不完整的一行，以及注入的追加错误的消息里；打开审阅、`Prepare` 展示行和 prompt 正文、标记已看（截掉残行、压缩）、追加失败、再次标记（重试成功），再打开会话外的改动和比较范围，确认 `annotation log recovered`、`annotation log compacted`、追加失败与重试几条记录的字段，以及它们和 `review ready` 都带 `review`、`session`，任何记录都不含金丝雀。`logs_tree_changes_failure_is_a_warn`：reflog 里一条记录的新提交不在仓库里，`tree_changes` 在交互任务和后台各失败一次，各记一条 warn，带两个 OID 和 `object_missing`。`logs_unreadable_turns_are_a_warn`：认不出格式的会话记一条 warn，`error` 为 `unrecognized`。`logs_round_closed_before_it_ran_is_not_a_failure`：打开后一轮还没运行就 `close`，这一轮被取消，不记 `review failed`。`logs_session_tag_is_the_uuid_or_a_hash`：UUID 取原字节，子 agent 的 ID 取哈希。
 
 ## 性能
 
@@ -1170,6 +1212,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `brief_*`：每条规则一个用例；排序与 12 条上限；`BriefRules` 的假提供者经 `register_brief_rules` 登记：分批答复、10 秒超时、登记 drop 或 token 失效后不再调用它且丢弃在途的答复、条目对账（不在快照里的文件丢弃、行不在显示范围内降为文件备注）。
   - `overview_*`：计数比较用 `retained_bytes = 0`、`total_patch_bytes = 0`；4001 个改动路径时只保留计数；会话外的改动数；基准不同的会话每轮最多算 8 个；放下关注后释放。`overview_never_calls_turns`：一轮概览（20 个会话）之后，`FakeSessions` 记下的 `turns` 调用数为 0，只有 `turns_unretained`；本 crate 只保留派生的声明（`review/resident_*_bytes` 覆盖它的大小）。
   - `plugin_*`：`TestKernel` 激活后提供 `dyn Review`；`open` 立即返回，快照经 `Loading` 到 `Ready`；fs_watch 批次和 `SessionsChanged` 触发刷新；kernel 在结果发布后静止；关闭 30 秒后释放；`command` 在 UI 线程上调用时不做 IO（`cache` 的 `ui_thread` 检查和 `data_dir` 的访问计数都为 0）。
+  - `logs_*`（`src/engine/tests/logs.rs`，用 `lectern-logging` 的 `testing::capture()`）：金丝雀与 warn 路径的记录，见「日志与诊断」。标注日志的 IO 故障和尺寸上限经 `Engine::set_log_test`（`cfg(test)`）作用在引擎之后打开的日志上。
   - `services` 的 `changes`、`review` 模块（前置条件 A）：类型的 JSON 往返；`dyn Review` 的 `ID == "review"`、`MULTIPLE == false`；`BriefRules` 没有实现 `Service`；`BriefRulesRegistration`、`OverviewInterest` drop 时各调用一次注销回调。
 - 结构化输出（链、归因、叙事、简报、分组）都用 insta 快照验收。
 
@@ -1224,6 +1267,12 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 5. **规则简报与项目主页的概览**（前置 G）：简报规则、`register_brief_rules` 与提供者的请求和对账、概览（计数比较、声明、会话外的改动数、进度）。
    - `brief_*`、`overview_*` 测试通过；`overview_capped` 检查 4001 个改动路径时只保留计数。
    - `review/brief_5000`、`review/overview_round_warm`、`review/resident_cloudprint_bytes`、`review/resident_100k_bytes` 在预算内，`review/overview_cloudprint` 有结果。
+
+日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项，`Refs #170`）：
+
+- `rg 'eprintln!|util::log' crates/review/src --glob '!**/tests*'` 没有结果。
+- `logs_*` 通过，其余测试照常通过。
+- `just bench --measure review/` 与改动前相比不变慢。
 
 ## 实际验证
 
@@ -1291,6 +1340,32 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - 30 秒的保留、fs_watch 与 `SessionsChanged` 的刷新、`BusyGuard` 与插件的静止属于第 4 步；简报规则与概览属于第 5 步。文件夹项目的会话没有测试（`FakeProjects` 只有仓库项目）。
   - 没有在 macOS 上运行和测量。
 
+### 日志接入
+
+在 Linux（x86_64，4 核，与其他 agent 的编译任务共用机器，Rust 1.97.0）上运行，基于合并了 #182、#183、#184 的 main。
+
+- `just check`、`just test`（不依赖 GPUI 的全部 crate，2218 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。`cargo test -p lectern-review --all-features --lib` 在同一个进程里跑全部 122 个测试也通过（捕获器由各测试共用，`logs_*` 按自己的会话 ID 或临时目录筛选记录）。
+- `just test -p lectern-review`：原有的 117 个测试照常通过，新增 `logs_hold_no_contents`、`logs_tree_changes_failure_is_a_warn`、`logs_unreadable_turns_are_a_warn`、`logs_round_closed_before_it_ran_is_not_a_failure`（第一版在检查这一轮是否仍是当前一轮之前就记 `review failed`，被 `close` 取消的一轮记成 `error` 为 `cancelled` 的失败，自审时改正，这个测试在改正之前失败）、`logs_session_tag_is_the_uuid_or_a_hash`。`logs_hold_no_contents` 里 `annotation log recovered` 的 `bad_lines` 为 1、`unknown` 为 1、`torn_bytes` 等于写进去的残行长度；压缩记录的 `after` 小于 `before`；追加失败记 `failures` 1、`records` 1，下一次标记的重试记 `records` 2；这四条和 `review ready` 都带 `review`（与 `diag::review_ctx` 算出的相同）和 `session`（会话的 UUID）。
+- `rg 'eprintln!|util::log' crates/review/src --glob '!**/tests*'` 没有结果（本 crate 原来就没有 stderr 输出）。Cargo.lock 只在 `lectern-review` 的依赖里多了 `lectern-logging`。
+- `just bench --measure review/`，改动前是 origin/main 的同一个提交（另一个分离的 worktree），依次运行改动前、改动后、改动前、改动后，之后对三项再各补一对：
+
+  | 基准 | 改动前 | 改动后 |
+  |---|---|---|
+  | `log_load_16k` | 28.1、28.6 ms | 26.8、25.5 ms |
+  | `chain_3000_lines` | 18.7、19.1、25.1、25.4 ms | 19.8、30.7、20.5、25.6 ms |
+  | `open_session_50` | 10.5、9.82 ms | 10.2、10.8 ms |
+  | `open_session_50_warm` | 5.65、5.81 ms | 5.71、5.85 ms |
+  | `open_session_settled` | 153、171 ms | 143、165 ms |
+  | `cutoffs_cold` | 111、124 ms | 106、139 ms |
+  | `attribute_session_50` | 16.3、17.9、18.3、23.3 ms | 19.7、19.4、19.7、18.9 ms |
+  | `rows_first` | 186、209 µs | 147、160 µs |
+  | `mark_seen_5000` | 23.8、26.2、27.3、39.1 µs | 28.3、28.6、26.5、31.4 µs |
+
+  改动前后的差别都在同一组运行里的波动之内：`chain_3000_lines` 测的代码没有改动，同一边的几次运行在 18.7 到 30.7 ms 之间。`attribute_session_50` 前三对改动后高约 1.5 ms，它计时的路径（`attribute::build` → `step_inputs` → `load`）不经过任何写出的日志调用；把 `load` 的 warn 移进 `#[cold]` 函数之后的一对是 18.9 ms 对 23.3 ms。只跑 `review/` 时 `log/` 的基准不运行、进程里没有装日志器，`log::max_level()` 为 off，每个调用点只多一次级别比较。没有在 macOS 上测量。
+- 没有验证的：
+  - `is_ancestor` 失败的 warn 没有测试触发：reflog 里的新提交不在仓库里时，`merge_base` 找不到共同祖先，返回「不是祖先」而不报错（`logs_tree_changes_failure_is_a_warn` 的注释）。改动步加载失败、HEAD reflog 读不出、改动集取不到的记录没有测试触发；压缩失败与目录 `fsync` 失败的路径由 `log_failed_compaction_leaves_the_file`、`log_failed_directory_sync_goes_append_only` 走到，但没有断言记录。这些记录的字段只经 `Value` 的构造函数和 `diag` 的种类，金丝雀测试覆盖了同一套写法。
+  - 记录写进真实日志文件要等 `app` 接入（logging 设计第 3 步）；这里只经 `testing::capture()` 检查编码后的行。`task` 要等 executor 的第 5 项。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -1346,4 +1421,15 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **本次运行的声明留在内存里**：审阅对象自己的和后台为其他会话派生的声明按会话键保存在引擎里（`last_activity` 相同才用），`tail_pending` 的会话派生的声明只在内存里用、不写 `review.claims`。截止时刻表按 worktree 保存，记录或改动集的路径变了就从 `review.tree_changes` 重建，不按 `RepoBatch::reflog` 增量更新（随第 4 步的监听）。关闭审阅时释放没有打开的审阅用到的 worktree 的表和 git 句柄、会话的声明，没有打开的审阅时清空版本 LRU 和内存里的祖先判断。
 - **`ReviewError` 的映射**：会话不在列表里、`Place::Missing`、worktree 不在项目快照里或已 prunable、`turns` 返回 `NotFound` 为 `Missing`；未归位或项目没打开为 `NotInOpenProject`；审阅对象自己的 `turns` 返回 `Unrecognized` 或 `Io` 时都按认不出格式处理（`Degraded::UnrecognizedSession`）。
 - **测试支持多于「本 crate 的公开项」**：`testing` 另有 `write_reflog`（写 `logs/HEAD`）、`Driven::with_budget`（把 `Interactive` 上计算 `tree_changes` 的 5 ms 预算设为别的值，测试用 0）、`Driven::touch_cache`、`Driven::attribute_uncached`，以及 bench 的夹具 `SessionFixture`、`MarkSeenFixture`。`FakeSessions` 的脚本在测试里用 `serde_json::json!` 拼出（格式写在 `src/testing/fake.rs`），没有放进 `tests/fixtures/sessions/`：会话的 cwd 是 `TestRepo` 的临时目录，每次不同。
-- **没有日志调用**：ADR 0046 和 logging 设计已经合并，`lectern-logging` crate 还没有，要记的事件和关联 ID 写在「日志与诊断」。
+- **第 3 步没有日志调用**：那时 `lectern-logging` crate 还没有合并，「日志与诊断」只写了接入的计划。日志已经接入，实现与那份计划的差别见下一节「日志接入」。
+
+### 日志接入
+
+第 1 到 3 步时「日志与诊断」写的是接入时的计划，现在改成了实现的规格。与那份计划相比：
+
+- **多记的 warn 与 info。** 计划只列了改动集、标注日志的读写与压缩、改动步加载和 `tree_changes`。另外加了：审阅对象的会话轮次读不出、HEAD reflog 读不出、`is_ancestor` 失败（三者都让审阅降级而不报错，不记就查不到原因）；标注日志的恢复（坏行数、截掉的尾部字节数）、文件头版本不是 1、压缩改名之后目录 `fsync` 失败、失败之后的重试（logging 设计第 8 项要求的恢复、写失败与重试）；压缩完成和压缩前发现别的写入者（info）；一轮准备失败和比较范围没有 merge-base（info）。
+- **会话键只记会话标识。** 计划写「字段另带会话键（来源 ID、会话 ID）」。宏不接受运行时字符串，来源 ID 不写出；会话 ID 写成 `Value::uuid`：UUID 取原字节，否则取 128 位哈希，算法与 `usage` 相同（`diag::session_tag`）。
+- **worktree 和 `Prepare` 的键不记。** 计划写 worktree 用相对公共目录的 git 目录、详细级别记 `Prepare` 的键。前者是运行时字符串（worktree 的名字），由 `review` 作用域代替：它的哈希已经覆盖了仓库和 `target`。后者含路径和会话里的位置，改为记请求的序号和条数、字节数。
+- **标注日志的路径在默认级别里。** 计划写「路径只在详细模式里记」。日志文件和目录在应用数据目录下，文件名是仓库的哈希 `h`，不是被审阅仓库里的路径；计划的 warn 一项也要求记「日志文件名」，所以默认级别的标注日志记录带完整路径。工作区里的路径仍只在详细级别。
+- **作用域由 `Engine::submit` 设置。** executor 的第 5 项（任务继承提交时的作用域）还没有合并，本 crate 的每个任务显式带审阅的 `Ctx`。`review` 在一轮解析出仓库之后才有，所以一轮里定位仓库之前的记录只带 `session`。标注日志按仓库共用，读取与追加任务带发起它的审阅的作用域。
+- **`LogFile` 自己记读取与压缩，引擎记追加失败与重试。** 读取报告（`ReadReport`）多了 `torn_bytes`、`partial`、`other_version`；连续失败的次数在引擎的 `LogMem::failures` 里，追加成功时清零。

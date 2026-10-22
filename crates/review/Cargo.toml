@@ -27,6 +27,8 @@ lectern-executor = { path = "../executor" }
 # `line_diff`, `Oid::for_blob`, `LocalChanges`, `head_reflog`,
 # `tree_changes`, `mtimes`, `rows` and `inline_changes`; gix stays in git.
 lectern-git = { path = "../git" }
+# Runtime logging (docs/design/review.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
 lectern-services = { path = "../services" }
 # The annotation log's records (docs/adr/0044.md).
 serde.workspace = true
@@ -38,6 +40,8 @@ sha2.workspace = true
 insta.workspace = true
 lectern-executor = { path = "../executor", features = ["test-support"] }
 lectern-git = { path = "../git", features = ["test-support"] }
+# testing::capture for the logs_* tests (docs/design/review.md「日志与诊断」).
+lectern-logging = { path = "../logging", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

@@ -36,7 +36,8 @@ use std::time::{Duration, Instant};
 use lectern_cache::Cache;
 use lectern_executor::{Executor, Priority};
 use lectern_git::{Discovered, GitError};
-use lectern_services::changes::{ChangePath, RefreshHint};
+use lectern_logging::{Ctx, Value, debug, info, warn};
+use lectern_services::changes::{ChangeError, ChangePath, RefreshHint};
 use lectern_services::project::{ProjectKey, Projects, WorktreeKey};
 use lectern_services::review::{
     AnalysisState, Brief, Degraded, FileEntry, FileKey, FileRows, LoadState, Need, Progress,
@@ -49,6 +50,7 @@ use lectern_services::session::{
 
 use crate::claims::Claims;
 use crate::cutoff::{self, Record, Table};
+use crate::diag;
 use crate::log::{BaseRecord, Index, LogFile, Record as LogRecord, SessionId};
 use crate::lru::Versions;
 use crate::seen;
@@ -99,6 +101,16 @@ pub(crate) struct Engine {
     versions: Mutex<Versions>,
     /// (ancestor, commit) → is it its ancestor; `review.ancestry` behind it.
     ancestry: Mutex<HashMap<(lectern_git::Oid, lectern_git::Oid), bool>>,
+    /// IO faults and size limits for the logs opened from now on.
+    #[cfg(test)]
+    log_test: Mutex<LogTest>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct LogTest {
+    faults: Option<crate::log::Faults>,
+    limits: Option<crate::log::Limits>,
 }
 
 #[derive(Default)]
@@ -120,10 +132,24 @@ struct LogMem {
     loaded: bool,
     loading: bool,
     flushing: bool,
+    /// Appends that failed in a row, kept for the next retry.
+    failures: u32,
 }
 
 struct Open {
     target: ReviewTarget,
+    /// The log scope of its tasks: the target session's tag, then with the
+    /// review's hash once a round resolved the repository.
+    ctx: Ctx,
+    /// When `open` was called: the `review ready` and `review settled`
+    /// records' `took_us`.
+    opened: Instant,
+    /// Whether `review ready` and `review settled` were written.
+    ready: bool,
+    settled: bool,
+    /// Rounds prepared again since the open because claims or cutoffs
+    /// became known.
+    reprepared: u32,
     refs: u32,
     snapshot: Arc<ReviewSnapshot>,
     work: Option<Arc<Work>>,
@@ -188,14 +214,37 @@ impl Engine {
             adapters: Mutex::new(HashMap::new()),
             versions: Mutex::new(Versions::default()),
             ancestry: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            log_test: Mutex::new(LogTest::default()),
         })
     }
 
-    fn submit(&self, priority: Priority, job: impl FnOnce(&Arc<Engine>) + Send + 'static) {
+    /// The annotation logs opened from now on fail where `faults` says and
+    /// use `limits` (the `logs_*` tests).
+    #[cfg(test)]
+    pub(crate) fn set_log_test(
+        &self,
+        faults: impl Fn(crate::log::Op) -> std::io::Result<()> + Send + Sync + 'static,
+        limits: crate::log::Limits,
+    ) {
+        let mut test = lock(&self.log_test);
+        test.faults = Some(Arc::new(faults));
+        test.limits = Some(limits);
+    }
+
+    /// Runs `job` on an executor task, inside the log scope `ctx` (the
+    /// review's `review` and `session`, docs/design/review.md「日志与诊断」).
+    fn submit(
+        &self,
+        priority: Priority,
+        ctx: Ctx,
+        job: impl FnOnce(&Arc<Engine>) + Send + 'static,
+    ) {
         let me = self.me.clone();
         self.cfg
             .executor
             .run(priority, move || {
+                let _scope = lectern_logging::scope(ctx);
                 if let Some(engine) = me.upgrade() {
                     job(&engine);
                 }
@@ -226,6 +275,11 @@ impl Engine {
             id,
             Open {
                 target: target.clone(),
+                ctx: diag::target_ctx(&target),
+                opened: Instant::now(),
+                ready: false,
+                settled: false,
+                reprepared: 0,
                 refs: 1,
                 snapshot: Arc::new(loading(id, target)),
                 work: None,
@@ -350,7 +404,7 @@ impl Engine {
         let step_ids = Arc::clone(&open.step_ids);
         let target = open.target.clone();
         let interactive = priority == Priority::Interactive;
-        self.submit(priority, move |engine| {
+        self.submit(priority, open.ctx, move |engine| {
             engine.run_round(id, seq, target, kind, prev, step_ids, cancel, interactive);
         });
     }
@@ -376,6 +430,7 @@ impl Engine {
             self.folder_round(id, seq, summary);
             return;
         }
+        let started = Instant::now();
         let budget = interactive.then_some(self.cfg.interactive_budget);
         let prepared = round::prepare(
             self,
@@ -392,7 +447,16 @@ impl Engine {
                 let mut events = Vec::new();
                 {
                     let mut state = lock(&self.state);
+                    // A round cancelled by `close` or a newer round is not a
+                    // failure: no record, no `Failed` snapshot.
                     if let Some(open) = current(&mut state, id, seq) {
+                        if !matches!(error, ReviewError::Changes(ChangeError::Cancelled)) {
+                            info!("review failed";
+                                id = id.0,
+                                round = seq,
+                                kind = diag::kind(&kind),
+                                error = diag::review_error(&error));
+                        }
                         let snapshot = ReviewSnapshot {
                             generation: open.snapshot.generation + 1,
                             state: LoadState::Failed(error),
@@ -413,19 +477,48 @@ impl Engine {
                 return;
             }
         };
+        let _scope = lectern_logging::scope(work.ctx);
+        let prepared_in = started.elapsed();
         // The first file in the narrative's order is attributed before the
         // first snapshot.
+        let first = Instant::now();
         if matches!(target, ReviewTarget::Session(_)) && !work.files.is_empty() {
             let result = attribute::file(self, &work, 0, &cancel);
             lock(&work.results)[0] = Some(Arc::new(result));
         }
+        let first = first.elapsed();
+        debug!("review round";
+            id = id.0,
+            round = seq,
+            kind = diag::kind(&kind),
+            files = work.files.len(),
+            unclaimed = work.unclaimed,
+            pending = !work.pending.is_empty(),
+            took_us = prepared_in);
         let mut events = Vec::new();
         {
             let mut state = lock(&self.state);
-            let log = self.log_for(&mut state, work.git.common_dir());
+            let log = self.log_for(&mut state, work.git.common_dir(), work.ctx);
             let Some(open) = current(&mut state, id, seq) else {
                 return;
             };
+            open.ctx = work.ctx;
+            if !open.ready {
+                open.ready = true;
+                let t = &work.timing;
+                info!("review ready";
+                    id = id.0,
+                    round = seq,
+                    base = diag::base_how(work.base.how),
+                    files = work.files.len(),
+                    took_us = open.opened.elapsed(),
+                    locate_us = t.locate,
+                    turns_us = t.turns,
+                    fetch_us = t.fetch,
+                    claims_us = t.claims,
+                    cutoffs_us = t.cutoffs,
+                    first_us = first);
+            }
             open.work = Some(Arc::clone(&work));
             // Rows of the previous work show its texts and attribution:
             // drop them and prepare what the view asked for again. Texts
@@ -439,7 +532,8 @@ impl Engine {
             }
         }
         self.emit(events);
-        self.submit(Priority::Background, move |engine| {
+        let ctx = work.ctx;
+        self.submit(Priority::Background, ctx, move |engine| {
             engine.settle(id, seq, work, cancel)
         });
     }
@@ -453,7 +547,10 @@ impl Engine {
                 open.running = false;
                 let kind = match open.again.take() {
                     Some(kind) => kind,
-                    None => Kind::Reuse,
+                    None => {
+                        open.reprepared += 1;
+                        Kind::Reuse
+                    }
                 };
                 self.start_round(&mut state, id, kind, Priority::Background);
             }
@@ -461,8 +558,10 @@ impl Engine {
         }
         let mut done = 0;
         let mut since = Instant::now();
+        let mut finished = true;
         for n in 0..work.files.len() {
             if cancel.load(Ordering::Acquire) || self.wants_again(id, seq) {
+                finished = false;
                 break;
             }
             if lock(&work.results)[n].is_some() {
@@ -483,6 +582,15 @@ impl Engine {
         let mut state = lock(&self.state);
         if let Some(open) = current(&mut state, id, seq) {
             open.running = false;
+            if finished && !open.settled && open.again.is_none() {
+                open.settled = true;
+                info!("review settled";
+                    id = id.0,
+                    round = seq,
+                    files = work.files.len(),
+                    reprepared = open.reprepared,
+                    took_us = open.opened.elapsed());
+            }
             if let Some(kind) = open.again.take() {
                 self.start_round(&mut state, id, kind, Priority::Interactive);
             }
@@ -511,7 +619,7 @@ impl Engine {
             let Some(work) = open.work.clone() else {
                 return;
             };
-            let log = self.log_for(&mut state, work.git.common_dir());
+            let log = self.log_for(&mut state, work.git.common_dir(), work.ctx);
             let Some(open) = state.reviews.get_mut(&id) else {
                 return;
             };
@@ -661,7 +769,7 @@ impl Engine {
             // Still loading: nothing to mark yet.
             return;
         };
-        let log = self.log_for(state, work.git.common_dir());
+        let log = self.log_for(state, work.git.common_dir(), work.ctx);
         let Some(open) = state.reviews.get_mut(&id) else {
             return;
         };
@@ -721,7 +829,9 @@ impl Engine {
         };
         events.push(changed(open, snapshot));
         if flush {
-            self.submit(Priority::Background, move |engine| engine.flush(&log));
+            self.submit(Priority::Background, work.ctx, move |engine| {
+                engine.flush(&log)
+            });
         }
     }
 
@@ -755,17 +865,33 @@ impl Engine {
         }
     }
 
-    fn log_for(&self, state: &mut State, common_dir: &Path) -> Arc<RepoLog> {
+    /// The repository's log; the first call reads it on a `Background`
+    /// task, in the scope `ctx` of the review that asked (a log is per
+    /// repository: its records carry that review's IDs).
+    fn log_for(&self, state: &mut State, common_dir: &Path, ctx: Ctx) -> Arc<RepoLog> {
         if let Some(log) = state.logs.get(common_dir) {
             return Arc::clone(log);
         }
+        #[allow(unused_mut, reason = "faults and limits are set in tests only")]
+        let mut file = LogFile::new(&self.cfg.data_dir, common_dir);
+        #[cfg(test)]
+        {
+            let test = lock(&self.log_test);
+            if let Some(faults) = &test.faults {
+                file.set_shared_faults(Arc::clone(faults));
+            }
+            if let Some(limits) = test.limits {
+                file.set_limits(limits);
+            }
+        }
         let log = Arc::new(RepoLog {
-            file: Mutex::new(LogFile::new(&self.cfg.data_dir, common_dir)),
+            file: Mutex::new(file),
             mem: Mutex::new(LogMem {
                 index: Index::default(),
                 loaded: false,
                 loading: true,
                 flushing: false,
+                failures: 0,
             }),
         });
         state
@@ -773,7 +899,7 @@ impl Engine {
             .insert(common_dir.to_path_buf(), Arc::clone(&log));
         let path = common_dir.to_path_buf();
         let task = Arc::clone(&log);
-        self.submit(Priority::Background, move |engine| {
+        self.submit(Priority::Background, ctx, move |engine| {
             engine.load_log(&path, &task)
         });
         log
@@ -862,12 +988,26 @@ impl Engine {
             };
             let now = (self.cfg.clock)();
             let mut file = lock(&log.file);
-            if file.append(&batch).is_err() {
+            if let Err(e) = file.append(&batch) {
+                let path = file.path().to_path_buf();
                 drop(file);
                 let mut mem = lock(&log.mem);
+                mem.failures += 1;
+                warn!("annotation log append failed; kept for the next mark";
+                    path = Value::path(&path),
+                    io = Value::io(&e),
+                    records = batch.len(),
+                    failures = mem.failures);
                 mem.index.restore_pending(batch);
                 mem.flushing = false;
                 return;
+            }
+            let failures = std::mem::take(&mut lock(&log.mem).failures);
+            if failures > 0 {
+                warn!("annotation log append retried";
+                    path = Value::path(file.path()),
+                    records = batch.len(),
+                    failures = failures);
             }
             if file.should_compact() {
                 // The index as it is now: records queued since are written
@@ -907,7 +1047,7 @@ impl Engine {
         };
         let have_rows: HashSet<RowsKey> = open.rows.keys().cloned().collect();
         let have_texts: HashSet<TextKey> = open.texts.keys().copied().collect();
-        self.submit(Priority::Interactive, move |engine| {
+        self.submit(Priority::Interactive, work.ctx, move |engine| {
             engine.run_prepare(id, seq, work, needs, have_rows, have_texts);
         });
     }
@@ -921,6 +1061,7 @@ impl Engine {
         have_rows: HashSet<RowsKey>,
         have_texts: HashSet<TextKey>,
     ) {
+        let started = Instant::now();
         let cancel = AtomicBool::new(false);
         let result = |n: usize| -> Arc<FileResult> {
             if let Some(r) = lock(&work.results)[n].clone() {
@@ -962,6 +1103,16 @@ impl Engine {
                 _ => {}
             }
         }
+        debug!("prepared";
+            id = id.0,
+            request = seq,
+            needs = needs.len(),
+            rows = rows.len(),
+            texts = texts.len(),
+            row_bytes = row_bytes,
+            text_bytes = text_bytes,
+            versions_bytes = lock(&self.versions).bytes(),
+            took_us = started.elapsed());
         let mut events = Vec::new();
         {
             let mut state = lock(&self.state);
