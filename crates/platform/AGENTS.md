@@ -1,11 +1,11 @@
 # platform（`lectern-platform`）
 
-macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名校验、Claude Code statusline 安装；以及按平台实现的安全读取与原子替换（`SafeRoot`，Linux 实现也在这里）和线程的 CPU 时钟（`ThreadCpuClock`）。macOS 系统绑定只能出现在本 crate（架构规则 6）。
+macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名校验、Claude Code statusline 安装；以及按平台实现的安全读取与原子替换（`SafeRoot`，Linux 实现也在这里）、线程的 CPU 时钟（`ThreadCpuClock`）和应用数据目录（`dirs::app_data`）。macOS 系统绑定只能出现在本 crate（架构规则 6）。
 
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
-- 设计文档：[docs/design/platform.md](../../docs/design/platform.md)，目前只覆盖安全读取（`SafeRoot`，含范围读取 `open_file` 与 `OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，已实现）、原子替换（`SafeRoot::replace_file`，已实现）、线程的 CPU 时钟（`ThreadCpuClock`，已实现）和 bench 用的进程测量（`process::phys_footprint`）。FSEvents 与 kqueue 后端（`fs_events`，已实现）的设计在 [docs/design/fs_watch.md](../../docs/design/fs_watch.md)「platform 后端」。`open -a`、钥匙串、Seatbelt、statusline 尚未设计：先在这份文档里增加小节或另写设计文档，按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写对应的代码。
-- issue：[#10](https://github.com/SoloJiang/lectern-app/issues/10)（file_reader 的前置条件：`replace_file`、`ThreadCpuClock`）、[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#103](https://github.com/SoloJiang/lectern-app/issues/103)
-- ADR：[0004](../../docs/adr/0004.md)、[0014](../../docs/adr/0014.md)、[0018](../../docs/adr/0018.md)、[0019](../../docs/adr/0019.md)、[0024](../../docs/adr/0024.md)、[0041](../../docs/adr/0041.md)
+- 设计文档：[docs/design/platform.md](../../docs/design/platform.md)，目前只覆盖安全读取（`SafeRoot`，含范围读取 `open_file` 与 `OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，已实现）、原子替换（`SafeRoot::replace_file`，已实现）、线程的 CPU 时钟（`ThreadCpuClock`，已实现）、应用数据目录（`dirs::app_data`，已实现）和 bench 用的进程测量（`process::phys_footprint`）。FSEvents 与 kqueue 后端（`fs_events`，已实现）的设计在 [docs/design/fs_watch.md](../../docs/design/fs_watch.md)「platform 后端」。`open -a`、钥匙串、Seatbelt、statusline 尚未设计：先在这份文档里增加小节或另写设计文档，按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写对应的代码。
+- issue：[#10](https://github.com/SoloJiang/lectern-app/issues/10)（file_reader 的前置条件：`replace_file`、`ThreadCpuClock`）、[#14](https://github.com/SoloJiang/lectern-app/issues/14)、[#15](https://github.com/SoloJiang/lectern-app/issues/15)（review 的前置条件 D：应用数据目录）、[#27](https://github.com/SoloJiang/lectern-app/issues/27)、[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#103](https://github.com/SoloJiang/lectern-app/issues/103)
+- ADR：[0004](../../docs/adr/0004.md)、[0014](../../docs/adr/0014.md)、[0018](../../docs/adr/0018.md)、[0019](../../docs/adr/0019.md)、[0024](../../docs/adr/0024.md)、[0041](../../docs/adr/0041.md)、[0044](../../docs/adr/0044.md)
 
 ## 边界
 
@@ -13,6 +13,7 @@ macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名�
 - 范围读取（`safe_read/range.rs`）：`open_file` 与 `read` 共用打开、`fstat` 和 `Walk` 后备，普通文件的描述符转交给 `OpenFile`，在它 drop 时关闭；`OpenFile` 上的读取只用 `pread`，不用文件偏移，不另开描述符，每次读完 `fstat` 一次，返回的 `Meta::identity()` 供调用方核对版本。一次 `read_ranges` 最多 `MAX_RANGES` 段、`MAX_RANGE_BYTES` 字节。不做内存映射，不建行索引（行检查点由 `file_reader` 按 blob OID 缓存）。
 - 原子替换（`safe_read/replace.rs`）：`replace_file` 是 `safe_read` 里唯一的写。父目录用 `list` 与 `open_dir` 的目录打开函数打开，之后只在这个目录描述符上做单级名字的 `*at` 调用；临时文件 `O_CREAT | O_EXCL | O_NOFOLLOW`，比较身份之后 `renameat`，任何出错路径都删除临时文件。不创建原来不存在的文件。
 - 线程的 CPU 时钟（`thread_clock.rs`）：Linux 用 `pthread_getcpuclockid` 加 `clock_gettime`，macOS 用 `thread_info(THREAD_BASIC_INFO)`，端口名来自 `pthread_mach_thread_np`，时钟自己持有一个用户引用、drop 时释放；读不到时为 `ErrorKind::Unsupported`，墙上时间的回退由调用方做。
+- 应用数据目录（`dirs.rs`）：`app_data` 只读 `HOME`、`XDG_DATA_HOME` 两个环境变量拼出路径，不创建目录，不做其他 IO；两个平台的拼接是纯函数，测试直接传值，不修改进程的环境变量。
 - 实现其他 crate 定义的接口（`fs_watch`、`kernel` 的插件宿主等），由 `app` 注入；不依赖这些 crate 的实现。
 - 文件监听后端（`fs_events`，只在 macOS）：`fs_events::backend(executor)` 返回 `lectern_fs_watch::Backend`。`Tree` 目标每个一个 FSEvents 流，都在后端私有的串行 dispatch 队列上；`Entries` 目标共用一个 kqueue 和一个经 `executor.run_dedicated` 启动的线程。CoreServices、CoreFoundation、libdispatch 的绑定手写在 `fs_events/ffi.rs`，不引入绑定 crate。`Armed` 的 drop 返回之后不再调用 `EventSink`（FSEvents 用 `dispatch_sync` 栅栏，kqueue 在同一把锁下交付和移除）。FSEvents 事件的转换是纯函数（`fs_events/convert.rs`），在所有平台上编译和测试。
 - statusline 默认开启：用户已有 statusline 时保留原命令，Lectern 的脚本保存一份输入，再原样转发给原命令，关闭时恢复原配置（[ADR 0014](../../docs/adr/0014.md)）。
@@ -27,7 +28,7 @@ cargo check -p lectern-platform
 just test -p lectern-platform   # macOS 上覆盖全部代码
 ```
 
-- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY`（`read`、`open_file`）与 `AT_SYMLINK_NOFOLLOW_ANY`（`stat`）的实现在 macOS CI 上测试。范围读取的测试（`open_file_*`、`range_*`、`identity_*`、`read_all_*` 等，见设计文档「范围读取」的「测试」）同样对每个后端各运行一次；合并区间的 `range::plan` 是纯函数，单独测试。原子替换的测试（`replace_file_*`、`race_replace_never_escapes` 等，在 `safe_read/tests/replace.rs`）也对每个后端各运行一次。线程的 CPU 时钟的测试（`thread_cpu_*`）在 Linux 和 macOS 上都运行。
+- 安全读取的 Linux 实现（`openat2` 与逐级 `openat`）在 Linux CI 上测试，`O_NOFOLLOW_ANY`（`read`、`open_file`）与 `AT_SYMLINK_NOFOLLOW_ANY`（`stat`）的实现在 macOS CI 上测试。范围读取的测试（`open_file_*`、`range_*`、`identity_*`、`read_all_*` 等，见设计文档「范围读取」的「测试」）同样对每个后端各运行一次；合并区间的 `range::plan` 是纯函数，单独测试。原子替换的测试（`replace_file_*`、`race_replace_never_escapes` 等，在 `safe_read/tests/replace.rs`）也对每个后端各运行一次。线程的 CPU 时钟的测试（`thread_cpu_*`）在 Linux 和 macOS 上都运行。应用数据目录的测试（`app_data_*`）在所有平台上覆盖 macOS 和 Linux 两套规则。
 - 计时：`lectern-bench` 的 `platform/safe_stat`、`platform/safe_read_4k`、`platform/safe_read_range`、`platform/safe_read_page`（`just bench platform/`，Linux 上用 `just bench --measure platform/` 采样），只测 `SafeRoot::open` 选中的生产后端。
 - 文件监听后端：`fsevents_convert_*` 在所有平台上运行；`fsevents_*`、`kqueue_*` 只在 macOS CI 上运行，用真实的临时目录，经 `MacBackend::arm_with` 把批次交给记录用的闭包。FSEvents 是异步的：按期限等待（`Recorder::wait_until`，每次等待之间 `flush`），流刚启动时先写探针文件直到报告出现（`wait_live`），不用固定的 sleep 判断结果。在 Linux 上至少交叉检查：`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings`。
 - 其余调用系统 API 的行为只能在 macOS CI 上验证；能抽成纯函数的部分（如生成 Seatbelt 配置、合并 statusline 配置）写单元测试和 insta 快照，在任何平台上都能运行。
