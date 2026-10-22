@@ -1,6 +1,6 @@
 # usage 设计
 
-状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）已实现；其余前置条件与第 1–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现；其余前置条件与第 1–8 步尚未实现。
 
 对应 issue [#31](https://github.com/SoloJiang/lectern-app/issues/31)，[#32](https://github.com/SoloJiang/lectern-app/issues/32) 的 Usage 页与额度读本文定义的快照。`usage` 把 `agents` 交来的用量记录去重、规范化后落进自己的 SQLite，把每一轮的 token 归属到项目、分支的「一次使用」和 MR，按时间窗口聚合，并保存额度快照（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)、[ADR 0022](../adr/0022.md)、[交互规范「用量」](interaction.md#用量)）。改动权重的来源按 [ADR 0047](../adr/0047.md)，数据库按 [ADR 0027](../adr/0027.md)，位置按 [ADR 0044](../adr/0044.md) 的应用数据目录。
 
@@ -86,15 +86,17 @@ pub fn plugin(deps: UsageDeps) -> (Name, UsagePlugin);
   ```rust
   impl Repo {
       /// 一个引用的 reflog（`logs/<完整引用名>`，如 `refs/heads/feat`、`refs/stash`），从旧到新，解析规则与 `head_reflog` 相同；
-      /// 只读文件开头的 `max_bytes`（调用方给 4 MiB），超过时 `complete` 为 false。没有这个文件时 `exists` 为 false。阻塞。
+      /// 只读文件末尾的 `max_bytes`（调用方给 4 MiB），超过时 `complete` 为 false。没有这个文件时 `exists` 为 false。阻塞。
       pub fn ref_reflog(&self, name: &RefName, max_bytes: u64) -> Result<RefReflog, GitError>;
       /// 与 `git patch-id --stable` 相同口径的补丁 ID：提交相对第一个父提交的改动，每个文件的 diff 先按路径排序、
-      /// 去掉行号与空白差异后求哈希，各文件的结果相加。合并提交和根提交为 None。按 git 文档描述的口径自己实现，不参照 git 的代码（架构规则 8）。阻塞。
+      /// 去掉行号与空白差异后求哈希，各文件的结果相加。合并提交、根提交和没有改动的提交为 None。按 git 文档描述的口径自己实现，不参照 git 的代码（架构规则 8）。阻塞。
       pub fn patch_id(&self, commit: Oid) -> Result<Option<PatchId>, GitError>;
   }
   pub struct RefReflog { pub exists: bool, pub entries: Vec<ReflogEntry>, pub complete: bool }
   pub struct PatchId(pub Oid);
   ```
+
+  `ref_reflog` 读末尾：文件超过 `max_bytes` 时缺的是最早的记录，与 git 清掉旧记录的情形相同，`complete` 为 false 的分支按「片段」的「向过去开放」处理；arm 之后的新记录由 `fs_watch` 交付，两段之间没有缺口。`patch_id` 的补充口径（二进制文件、上限）见 [git 设计「usage 用的读取」](git.md#usage-用的读取)：超过上限时返回错误，调用方按这个提交没有补丁 ID 处理，不算一一对应。
 
   测试 `ref_reflog_*`（分支的创建、改名、`branch -f`、`refs/stash` 的增删，与 git 读出的结果相同；夹具由脚本用 git 生成一次，测试本身不运行 git）、`patch_id_*`（与 `git patch-id --stable` 对夹具给出的值相同；只改空白的两个提交补丁 ID 相同；文件顺序不同的同一组改动补丁 ID 相同）。
 - **E. `fs_watch`**：`ReflogFile` 加 `Remote(Arc<[u8]>)`，读 `logs/refs/remotes/**`，规则与 `Branch` 相同（arm 前的第 1 段、补读、`NewFile`、`Reset`、目录重新列出）。detached 推送的转移要用远端跟踪分支在调用期间的更新时刻。测试 `reflog_remote_*`。
@@ -725,7 +727,7 @@ reflog 记录 R 的写入时刻区间：下界取 `R.after.at` 与行里的时�
 
 片段：
 
-- 新建：分支 reflog 的创建记录（`branch: Created from …`、`checkout -b`、`worktree add -b`），或第一次在 HEAD 或 `head_baseline` 里见到一个没有片段的分支。arm 时为每个分支读一次 `Repo::ref_reflog`（前置条件 D），按其中的创建、删除重建和重置记录补出历史上的片段，导入的轮次按日志记录的分支名和时刻找到对应的片段。现存分支的 reflog 里没有创建记录时（git 默认 90 天后清掉可达的旧记录，或分支创建时没有写 reflog），它最早的片段的起点记为「向过去开放」：早于最早一条 reflog 记录的导入轮次也落在这个片段上，与之后的历史是同一次使用。
+- 新建：分支 reflog 的创建记录（`branch: Created from …`、`checkout -b`、`worktree add -b`），或第一次在 HEAD 或 `head_baseline` 里见到一个没有片段的分支。arm 时为每个分支读一次 `Repo::ref_reflog`（前置条件 D），按其中的创建、删除重建和重置记录补出历史上的片段，导入的轮次按日志记录的分支名和时刻找到对应的片段。现存分支的 reflog 里没有创建记录时（git 默认 90 天后清掉可达的旧记录，或分支创建时没有写 reflog，或 `complete` 为 false、只读了末尾 4 MiB），它最早的片段的起点记为「向过去开放」：早于最早一条 reflog 记录的导入轮次也落在这个片段上，与之后的历史是同一次使用。
 - 名称片段：导入的轮次记录的分支名在那个时刻没有 reflog 片段时，只在两种情况下用：这个仓库已经没有这个名字的分支（合并之后删掉的分支没有 reflog 文件，补读的 30 天里这是常见情况），或现存同名分支的 reflog 有创建记录、且创建晚于这一轮（同名分支复用）。这时为（仓库、分支名）建一个只有名字的片段，同一仓库、同一名字的导入轮次共用它。它自己是一次使用，不与同名的 reflog 片段合并（同名分支复用的规则）；默认分支的名字映射到默认分支的片段。P3 起按这个名字和仓库的主远端调 `mrs_for_branch`，MR 的时间线覆盖轮次时刻时按「MR 区间」归到那个 MR；同一个名字先后有几个 MR 时按区间切分，都不覆盖时是一行未开 MR 的分支。
 - 改名：`BranchRenamed` 记录让同一个片段换名，片段 ID 不变。
 - 结束并开始新片段：分支 reflog 文件被删除（`ReflogReset::Removed`，不是改名的旧名字）后同名分支重建；`reset`、`branch -f`、`checkout -B` 让分支离开了旧位置的独有提交（旧位置不是新位置的祖先）；只有未提交改动的分支回到起点且工作区干净（下一节）。每个边界写一条 `boundary_obs`，前后是否属于同一次使用在汇总时判断。
@@ -991,7 +993,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - A. `services`：`usage` 模块；`rg -n 'pub trait Usage\b|pub trait MrSource' crates/services/src` 各有一处；`usage_*` 测试通过；`crates/services/AGENTS.md` 列出这个模块（第 1 步之前）。
 - B. `platform`：`time::utc_offset`；`utc_offset_*` 测试在 Linux CI 和 macOS CI 上通过（第 1 步之前）。
 - C. `platform` 与 `app`：`app` 构造 `UsageDeps` 并把插件放进 `PluginSet`（第 1 步的插件部分之后）；statusline 脚本写 `<app_data>/usage/statusline/claude-code.json`（#32，第 2 步的端到端之前；第 2 步本身用 fixtures 验收）。
-- D. `git`：`Repo::ref_reflog`、`Repo::patch_id`；`ref_reflog_*`、`patch_id_*` 测试通过（第 5 步之前）。
+- D. `git`：`Repo::ref_reflog`、`Repo::patch_id`；`ref_reflog_*`、`patch_id_*` 测试通过（第 5 步之前）。已完成（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
 - E. `fs_watch`：`ReflogFile::Remote`；`reflog_remote_*` 测试通过（第 6 步之前）。
 - F. `forge`：`MrSource` 的实现与登记（第 7 步之前）。
 - G. `agents`：Analyze 调用 `begin_analysis`、`meter`（第 8 步之前）。

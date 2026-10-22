@@ -1,0 +1,11 @@
+fn a() {
+    one();
+}
+
+fn b() {
+    two();
+}
+
+fn c() {
+    three();
+}

@@ -26,6 +26,7 @@ mod local;
 mod merge3;
 mod oid;
 mod parallel;
+mod patch_id;
 mod path;
 mod reflog;
 mod refs;
@@ -53,8 +54,11 @@ pub use hunks::{FileDiff, Hunk, line_diff};
 pub use local::LocalChanges;
 pub use merge3::{Markers, Merge3, merge3};
 pub use oid::{BlobHasher, HashKind, Oid};
+pub use patch_id::PatchId;
 pub use path::{Mode, RefName, RepoPath};
-pub use reflog::{HeadReflog, ReflogAction, ReflogEntry, ReflogParseError, parse_reflog_line};
+pub use reflog::{
+    HeadReflog, RefReflog, ReflogAction, ReflogEntry, ReflogParseError, parse_reflog_line,
+};
 pub use refs::{BranchInfo, CommitInfo, GitTime, RemoteBranch, RemoteInfo, Signature, StashInfo};
 pub use repo::{Discovered, HeadState, Location, Repo, WorktreeId, WorktreeInfo};
 pub use rows::{INLINE_MAX_LINE_BYTES, InlineChanges, Row, inline_changes, rows};

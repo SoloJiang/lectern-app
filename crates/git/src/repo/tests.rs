@@ -879,3 +879,300 @@ fn refs_branches_upstream_and_push_targets() {
     let p = pushes("[remote \"origin\"]\n\tpush = refs/heads/*:refs/heads/mine/*\n");
     assert_eq!(p[0], rb("origin", origin, "refs/heads/mine/b1"));
 }
+
+// ---- ref_reflog_* -----------------------------------------------------------
+
+/// The 4 MiB `usage` passes.
+const REFLOG_BYTES: u64 = 4 * 1024 * 1024;
+
+/// One step of the archived reference reflogs (tests/fixtures/README.md
+/// 「ref_reflog 夹具」).
+fn ref_reflog_step(step: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/ref_reflog")
+        .join(step)
+}
+
+/// Every file under `dir`, as `/`-separated paths relative to it, sorted.
+fn files_under(dir: &Path) -> Vec<String> {
+    fn visit(base: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(base, &path, out);
+            } else {
+                let rel = path.strip_prefix(base).unwrap();
+                out.push(rel.to_str().unwrap().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// A fresh repository with the step's `logs/` copied into its common
+/// directory, and the references that have a reflog there.
+fn with_step_reflogs(step: &str) -> (TestRepo, Vec<String>) {
+    let t = TestRepo::new();
+    let logs = ref_reflog_step(step).join("logs");
+    let refs = files_under(&logs);
+    for rel in &refs {
+        let to = t.common_dir().join("logs").join(rel);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(logs.join(rel), to).unwrap();
+    }
+    (t, refs)
+}
+
+/// git's reading of one reflog, oldest first: (seconds, new OID, message).
+fn git_reading(step: &str, name: &str) -> Vec<(i64, String, String)> {
+    let path = ref_reflog_step(step).join("expected").join(name);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut out: Vec<(i64, String, String)> = text
+        .lines()
+        .map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let seconds = parts.next().unwrap().parse().unwrap();
+            let new = parts.next().unwrap().to_owned();
+            (seconds, new, parts.next().unwrap().to_owned())
+        })
+        .collect();
+    // `git log -g` lists newest first.
+    out.reverse();
+    out
+}
+
+fn reading(entries: &[ReflogEntry]) -> Vec<(i64, String, String)> {
+    entries
+        .iter()
+        .map(|e| {
+            (
+                e.time.seconds,
+                e.new.map(|o| o.to_hex()).unwrap_or_default(),
+                String::from_utf8(e.message.to_vec()).unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn ref_reflog_of(t: &TestRepo, name: &str) -> RefReflog {
+    t.repo()
+        .ref_reflog(&RefName::new(name).unwrap(), REFLOG_BYTES)
+        .unwrap()
+}
+
+#[test]
+fn ref_reflog_reads_every_fixture_reflog_as_git_does() {
+    let mut read = 0;
+    for step in ["branches", "stash", "stash-drop", "stash-cleared"] {
+        let (t, refs) = with_step_reflogs(step);
+        assert_eq!(files_under(&ref_reflog_step(step).join("expected")), refs);
+        for name in &refs {
+            let log = ref_reflog_of(&t, name);
+            assert!(log.exists && log.complete, "{step} {name}");
+            assert_eq!(
+                reading(&log.entries),
+                git_reading(step, name),
+                "{step} {name}"
+            );
+            read += 1;
+        }
+        let absent = std::fs::read_to_string(ref_reflog_step(step).join("absent")).unwrap();
+        for name in absent.lines() {
+            assert_eq!(
+                ref_reflog_of(&t, name),
+                RefReflog {
+                    exists: false,
+                    entries: Vec::new(),
+                    complete: true
+                },
+                "{step} {name}"
+            );
+        }
+    }
+    // Six reflogs after the branch steps, then the stash in two steps.
+    assert_eq!(read, 8);
+}
+
+#[test]
+fn ref_reflog_branch_created_renamed_and_reset() {
+    let (t, _) = with_step_reflogs("branches");
+    // `branch feat`, a commit, `branch -m feat topic`, `branch -f topic main`:
+    // the rename took the old name's records along.
+    let topic = ref_reflog_of(&t, "refs/heads/topic").entries;
+    assert_eq!(topic.len(), 4);
+    assert_eq!(topic[0].old, None);
+    assert_eq!(topic[0].action, ReflogAction::BranchCreated);
+    assert_eq!(&*topic[0].message, b"branch: Created from main");
+    assert!(matches!(
+        topic[1].action,
+        ReflogAction::Commit {
+            amend: false,
+            initial: false
+        }
+    ));
+    assert_eq!(
+        topic[2].action,
+        ReflogAction::BranchRenamed {
+            from: RefName::new("refs/heads/feat").unwrap(),
+            to: RefName::new("refs/heads/topic").unwrap(),
+        }
+    );
+    assert_eq!(topic[2].old, topic[2].new);
+    // `branch -f` is not classified; its old value is the dropped commit.
+    assert_eq!(&*topic[3].message, b"branch: Reset to main");
+    assert_eq!(topic[3].action, ReflogAction::Other);
+    assert_eq!(topic[3].old, topic[2].new);
+    assert_ne!(topic[3].new, topic[3].old);
+    assert!(
+        topic
+            .windows(2)
+            .all(|w| w[0].time.seconds < w[1].time.seconds)
+    );
+    // The old name has no reflog any more.
+    assert!(!ref_reflog_of(&t, "refs/heads/feat").exists);
+    let other = ref_reflog_of(&t, "refs/heads/other").entries;
+    assert_eq!(other.len(), 1);
+    assert_eq!(other[0].action, ReflogAction::BranchCreated);
+    assert_eq!(&*other[0].message, b"branch: Created from HEAD");
+    assert!(!ref_reflog_of(&t, "refs/heads/gone").exists);
+}
+
+#[test]
+fn ref_reflog_remote_tracking_branches() {
+    let (t, _) = with_step_reflogs("branches");
+    let main = ref_reflog_of(&t, "refs/remotes/origin/main").entries;
+    assert_eq!(main.len(), 2);
+    assert_eq!(main[0].old, None);
+    assert_eq!(main[1].old, main[0].new);
+    assert_eq!(&*main[0].message, b"fetch -q origin: storing head");
+    assert_eq!(&*main[1].message, b"fetch -q origin: fast-forward");
+    assert!(main.iter().all(|e| e.action == ReflogAction::Other));
+}
+
+#[test]
+fn ref_reflog_stash_push_and_drop() {
+    let (t, _) = with_step_reflogs("stash");
+    let pushed = ref_reflog_of(&t, "refs/stash").entries;
+    let messages: Vec<&[u8]> = pushed.iter().map(|e| &*e.message).collect();
+    assert_eq!(
+        messages,
+        [
+            &b"On main: stash one"[..],
+            b"On main: stash two",
+            b"On main: stash three"
+        ]
+    );
+    // `stash drop stash@{1}` rewrites the file without the middle entry,
+    // and chains the old values again.
+    let (t, _) = with_step_reflogs("stash-drop");
+    let dropped = ref_reflog_of(&t, "refs/stash").entries;
+    assert_eq!(dropped.len(), 2);
+    assert_eq!(dropped[0].new, pushed[0].new);
+    assert_eq!(dropped[1].new, pushed[2].new);
+    assert_eq!(dropped[1].old, dropped[0].new);
+    // Dropping the last entry deletes the reflog with the reference.
+    let (t, _) = with_step_reflogs("stash-cleared");
+    assert!(!ref_reflog_of(&t, "refs/stash").exists);
+}
+
+/// A synthetic reflog of `n` records, one second apart, and where each
+/// line starts.
+fn synthetic_reflog(n: i64) -> (Vec<u8>, Vec<u64>) {
+    let (a, b) = ("1".repeat(40), "2".repeat(40));
+    let mut bytes = Vec::new();
+    let mut starts = Vec::new();
+    for i in 0..n {
+        starts.push(bytes.len() as u64);
+        bytes.extend_from_slice(
+            format!(
+                "{a} {b} Fixture <fixture@example.com> {} +0100\tcommit: {i:05}\n",
+                1_700_000_000 + i
+            )
+            .as_bytes(),
+        );
+    }
+    (bytes, starts)
+}
+
+fn write_ref_log(t: &TestRepo, name: &str, bytes: &[u8]) {
+    let path = t.common_dir().join("logs").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn ref_reflog_reads_at_most_max_bytes_from_the_end() {
+    let t = TestRepo::new();
+    let (bytes, starts) = synthetic_reflog(500);
+    write_ref_log(&t, "refs/heads/long", &bytes);
+    let name = RefName::new("refs/heads/long").unwrap();
+    let len = bytes.len() as u64;
+    for max in [1000, 4096, len / 2, len - 1] {
+        let log = t.repo().ref_reflog(&name, max).unwrap();
+        assert!(log.exists && !log.complete, "{max}");
+        // Lines that start after the bound, oldest first; the one cut by
+        // the bound is dropped.
+        let floor = len - max;
+        let first = starts.iter().position(|&s| s > floor).unwrap() as i64;
+        let seconds: Vec<i64> = log.entries.iter().map(|e| e.time.seconds).collect();
+        let want: Vec<i64> = (first..500).map(|i| 1_700_000_000 + i).collect();
+        assert_eq!(seconds, want, "{max}");
+    }
+    // The whole file fits: everything, complete.
+    for max in [len, len + 1, u64::MAX] {
+        let log = t.repo().ref_reflog(&name, max).unwrap();
+        assert!(log.complete);
+        assert_eq!(log.entries.len(), 500);
+        assert_eq!(log.entries[0].time.seconds, 1_700_000_000);
+    }
+    let log = t.repo().ref_reflog(&name, 0).unwrap();
+    assert!(log.exists && log.entries.is_empty() && !log.complete);
+}
+
+#[test]
+fn ref_reflog_without_a_file_or_with_a_directory_in_its_place() {
+    let t = TestRepo::new();
+    let (bytes, _) = synthetic_reflog(3);
+    // `a/b` exists, so `logs/refs/heads/a` is a directory: `a` has no reflog.
+    write_ref_log(&t, "refs/heads/a/b", &bytes);
+    assert!(!ref_reflog_of(&t, "refs/heads/a").exists);
+    assert_eq!(ref_reflog_of(&t, "refs/heads/a/b").entries.len(), 3);
+    // `x` exists, so `x/y` can't: its path goes through a file.
+    write_ref_log(&t, "refs/heads/x", &bytes);
+    let log = ref_reflog_of(&t, "refs/heads/x/y");
+    assert!(!log.exists && log.complete && log.entries.is_empty());
+    // An empty file exists and has nothing; a line still being appended
+    // is not read.
+    write_ref_log(&t, "refs/heads/empty", b"");
+    let log = ref_reflog_of(&t, "refs/heads/empty");
+    assert!(log.exists && log.complete && log.entries.is_empty());
+    let mut partial = bytes.clone();
+    partial.extend_from_slice(&bytes[..60]);
+    write_ref_log(&t, "refs/heads/partial", &partial);
+    let log = ref_reflog_of(&t, "refs/heads/partial");
+    assert!(log.complete);
+    assert_eq!(log.entries.len(), 3);
+}
+
+#[test]
+fn ref_reflog_of_head_is_the_main_worktrees() {
+    let t = TestRepo::new();
+    let fixture = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reflog/logs/HEAD"),
+    )
+    .unwrap();
+    write_ref_log(&t, "HEAD", &fixture);
+    let log = ref_reflog_of(&t, "HEAD");
+    let wt = t.repo().worktree(&WorktreeId::Main).unwrap();
+    let mut head = wt.head_reflog(i64::MIN, usize::MAX).unwrap().entries;
+    head.reverse();
+    assert!(log.exists && log.complete);
+    assert_eq!(log.entries, head);
+    assert_eq!(log.entries.len(), 9);
+}

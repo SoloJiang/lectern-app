@@ -1,0 +1,4 @@
+0000000000000000000000000000000000000000 817b50f5b001feb59cade37a434009e377ed4386 Fixture <fixture@example.com> 1700000100 +0100	branch: Created from main
+817b50f5b001feb59cade37a434009e377ed4386 5aee62e3b70dc059ac0d0be2b48b011f0de9c877 Fixture <fixture@example.com> 1700000300 +0100	commit: on feat
+5aee62e3b70dc059ac0d0be2b48b011f0de9c877 5aee62e3b70dc059ac0d0be2b48b011f0de9c877 Fixture <fixture@example.com> 1700000400 +0100	Branch: renamed refs/heads/feat to refs/heads/topic
+5aee62e3b70dc059ac0d0be2b48b011f0de9c877 9cc0057c3b01148bcf8551286f1f6d9c1ac68906 Fixture <fixture@example.com> 1700000700 +0100	branch: Reset to main

@@ -61,7 +61,7 @@ pub(crate) struct Computed {
 }
 
 /// Lines of context in the patch the limits measure (`git diff`'s default).
-const CONTEXT: u32 = 3;
+pub(crate) const CONTEXT: u32 = 3;
 const NO_NEWLINE: &[u8] = b"\\ No newline at end of file\n";
 
 /// The line diff of two contents, with the algorithm of the hunk cache

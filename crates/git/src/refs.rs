@@ -7,7 +7,7 @@ use gix::bstr::ByteSlice;
 
 use crate::error::gix_err;
 use crate::handle::Handle;
-use crate::{EntryLimits, GitError, Mode, Oid, RefName, Repo, RepoPath, tree};
+use crate::{EntryLimits, GitError, Mode, Oid, RefName, RefReflog, Repo, RepoPath, tree};
 
 /// Seconds since the epoch and the UTC offset in seconds (east positive),
 /// as git records them.
@@ -168,6 +168,21 @@ impl Repo {
         let handle = self.open_common()?;
         // If `ancestor` is reachable from `of`, it is their only best merge base.
         Ok(merge_base(&handle, ancestor, of, cancel)? == Some(ancestor))
+    }
+
+    /// One reference's reflog, `logs/<full name>` in the common directory
+    /// (`refs/heads/feat`, `refs/remotes/origin/main`, `refs/stash`), oldest
+    /// first, each line parsed by [`parse_reflog_line`](crate::parse_reflog_line).
+    /// Reads at most the last `max_bytes` of the file (`usage` gives
+    /// 4 MiB); `complete` is false when there is more before them. No file
+    /// gives `exists` false. `HEAD` and per-worktree references are the
+    /// main worktree's; [`Worktree::head_reflog`](crate::Worktree::head_reflog)
+    /// reads another worktree's HEAD. Blocks.
+    pub fn ref_reflog(&self, name: &RefName, max_bytes: u64) -> Result<RefReflog, GitError> {
+        // `RefName` holds `git check-ref-format` names: no `..`, no
+        // component starting with `.`, so the path stays under `logs/`.
+        let path = self.location().common_dir.join("logs").join(name.as_str());
+        crate::reflog::ref_reflog(&path, self.hash(), max_bytes)
     }
 
     /// Local branches, sorted by name, with upstream and push target
@@ -366,7 +381,7 @@ pub(crate) fn missing_or(err: gix::Error, id: Oid) -> GitError {
     }
 }
 
-fn commit_info(handle: &Handle, id: Oid) -> Result<CommitInfo, GitError> {
+pub(crate) fn commit_info(handle: &Handle, id: Oid) -> Result<CommitInfo, GitError> {
     let object = handle
         .try_find_object(id.to_gix())
         .map_err(GitError::from_gix)?
