@@ -1,7 +1,8 @@
 //! Salvage of a corrupt database (docs/design/usage.md「数据库」, steps 2–4
 //! of 损坏的处理). Every row that can still be read is copied by rowid ranges
 //! into `usage.db.salvage`, with the original attached read only and left
-//! where it is; rows that point at a lost row are dropped, the derived
+//! where it is; rows that point at a lost row are kept and their references
+//! made whole (placeholders under the lost IDs), the derived
 //! tables are rebuilt, and sessions that may have lost rows read their logs
 //! again from the start (keys deduplicate, nothing counts twice). Only the
 //! finished, synced copy replaces `usage.db`; the original is kept as
@@ -17,7 +18,9 @@ use lectern_services::session::Cursor;
 use rusqlite::{Connection, OpenFlags, params};
 
 use super::schema::{OBSERVATION_TABLES, Schema};
-use super::{DB_FILE, Files, Mode, configure, create, dedup, ingest, open_connection, set_meta};
+use super::{
+    DB_FILE, Files, Mode, configure, create, dedup, ingest, open_connection, set_meta, sync_dir,
+};
 
 /// The copy a salvage builds before it replaces `usage.db`.
 pub(crate) const SALVAGE_FILE: &str = "usage.db.salvage";
@@ -33,8 +36,9 @@ pub(crate) struct Recovery {
     /// once the bisection narrows a failing range down to them).
     pub(crate) copied: u64,
     pub(crate) lost: u64,
-    /// Copied rows dropped because they pointed at a lost row.
-    pub(crate) dangling: u64,
+    /// Copied rows whose reference to a lost row was made whole, and
+    /// placeholder rows put back under lost IDs.
+    pub(crate) repaired: u64,
     /// Sessions whose cursor went back to the start.
     pub(crate) sessions_reread: u64,
 }
@@ -133,7 +137,7 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
     reached(Step::Created)?;
     let mut copied = 0;
     let mut lost = 0;
-    let mut dangling = 0;
+    let mut repaired = 0;
     let mut sessions_reread = 0;
     // A file whose header is gone cannot even be attached: nothing to copy,
     // every session reads its log again (they have no rows here).
@@ -150,7 +154,7 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
         copy_meta(&out);
         out.execute_batch("DETACH DATABASE old;")?;
         if lost > 0 {
-            dangling = drop_dangling(&out)?;
+            repaired = repair_references(&out)?;
             sessions_reread = restart_sessions(&out)?;
         }
     } else {
@@ -166,7 +170,7 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
     reached(Step::Synced)?;
 
     let kept = keep(dir, &file, at).map_err(io_error)?;
-    sync(dir).map_err(io_error)?;
+    sync_dir(dir);
     reached(Step::Kept)?;
     // The original's journal must not meet the new file; the kept copy has
     // its own link to it.
@@ -179,7 +183,7 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
     }
     reached(Step::Unjournaled)?;
     fs::rename(&temp, &file).map_err(io_error)?;
-    sync(dir).map_err(io_error)?;
+    sync_dir(dir);
 
     let writer = open_connection(&file, false)?;
     set_meta(&writer, "clean", 0)?;
@@ -190,7 +194,7 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
         kept = Value::path(&kept),
         copied = copied,
         lost = lost,
-        dangling = dangling,
+        repaired = repaired,
         sessions_reread = sessions_reread
     );
     Ok((
@@ -206,7 +210,7 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
             kept,
             copied,
             lost,
-            dangling,
+            repaired,
             sessions_reread,
         },
     ))
@@ -247,7 +251,7 @@ fn link_or_copy(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
-/// `fsync` of a file or a directory.
+/// `fsync` of a file.
 fn sync(path: &Path) -> io::Result<()> {
     fs::File::open(path)?.sync_all()
 }
@@ -343,42 +347,135 @@ fn copy_meta(conn: &Connection) {
     );
 }
 
+/// The prefix of placeholder strings and paths. No UTF-8 text contains the
+/// byte 0xFF, so a placeholder never equals a real ID or path, and it sorts
+/// after every real source and session ID: a source of a placeholder session
+/// loses the dedupe tie against the same usage read again from its log.
+const LOST: &[u8] = b"\xFFlost";
+
+fn lost_text(kind: &str, id: i64) -> Vec<u8> {
+    let mut out = LOST.to_vec();
+    out.extend_from_slice(format!(":{kind}:{id}").as_bytes());
+    out
+}
+
+/// The agent label of a session whose agent string was lost.
+const LOST_AGENT: &[u8] = b"agent:other:lost";
+
+/// IDs that rows refer to and `table` no longer has.
+fn missing(conn: &Connection, table: &str, refs: &[(&str, &str)]) -> rusqlite::Result<Vec<i64>> {
+    let union = refs
+        .iter()
+        .map(|(t, c)| format!("SELECT {c} AS id FROM {t} WHERE {c} IS NOT NULL"))
+        .collect::<Vec<_>>()
+        .join(" UNION ");
+    let sql = format!(
+        "SELECT DISTINCT id FROM ({union}) WHERE id > 0 AND id NOT IN (SELECT id FROM {table})"
+    );
+    conn.prepare(&sql)?.query_map([], |r| r.get(0))?.collect()
+}
+
 /// Rows that point at a lost row would point at whatever row later takes the
-/// lost ID (a new ID is the largest plus one), so they go: a session without
-/// its source, ID or agent string, and every row of a session that is gone;
-/// turns without their ID string or location; sources without their
-/// location. Lighter losses are repaired in place: a lost parent, turn or
-/// reading state is cleared, a lost model becomes the empty string. The
-/// sessions read their logs again and put the dropped rows back. Returns the
-/// rows dropped or changed.
-fn drop_dangling(conn: &Connection) -> rusqlite::Result<u64> {
-    const STEPS: &[&str] = &[
-        "DELETE FROM project WHERE location NOT IN (SELECT id FROM location)",
-        "DELETE FROM session WHERE source NOT IN (SELECT id FROM intern)
-           OR sid NOT IN (SELECT id FROM intern) OR agent NOT IN (SELECT id FROM intern)",
-        "UPDATE session SET parent_source = NULL, parent_sid = NULL
-         WHERE parent_source NOT IN (SELECT id FROM intern)
-            OR parent_sid NOT IN (SELECT id FROM intern)",
-        "DELETE FROM turn WHERE session NOT IN (SELECT id FROM session)
-           OR tid NOT IN (SELECT id FROM intern) OR location NOT IN (SELECT id FROM location)",
-        "DELETE FROM usage_source WHERE session NOT IN (SELECT id FROM session)
-           OR location NOT IN (SELECT id FROM location)",
-        "UPDATE usage_source SET turn = NULL WHERE turn NOT IN (SELECT id FROM turn)",
-        "DELETE FROM session_gen WHERE session NOT IN (SELECT id FROM session)",
-        "UPDATE session_gen SET cwd = NULL WHERE cwd NOT IN (SELECT id FROM location)",
-        "UPDATE session_gen SET model = NULL WHERE model NOT IN (SELECT id FROM intern)",
-        "UPDATE session_gen SET turn = NULL WHERE turn NOT IN (SELECT id FROM turn)",
-        // Marked first: the empty string may itself take a lost ID.
-        "UPDATE usage_source SET model = -1 WHERE model NOT IN (SELECT id FROM intern)",
-    ];
+/// lost ID (a new ID is the largest plus one). They are kept, so the usage
+/// they hold still counts when its log is gone, and their references are made
+/// whole (docs/design/usage.md「数据库」, 损坏的处理 step 3):
+///
+/// - A lost string a session or turn needs (source ID, session ID, parent,
+///   `TurnId`) and a lost session come back under their old IDs as
+///   placeholders. A session read again from its log gets a new row, and
+///   its sources win the dedupe tie against the placeholder's.
+/// - A lost model becomes the empty string, a lost agent `agent:other:lost`,
+///   a lost location of a source the unknown place; such sources are marked
+///   `repaired` and take the turn, location and model of the same record
+///   when its log is read again. A lost location or turn of a turn or a
+///   reading state is cleared; a project without its location goes.
+///
+/// Returns the rows changed.
+fn repair_references(conn: &Connection) -> rusqlite::Result<u64> {
     let mut n = 0u64;
-    for sql in STEPS {
+    let mut run = |sql: &str| -> rusqlite::Result<()> {
         n += conn.execute(sql, [])? as u64;
+        Ok(())
+    };
+    // Marked first: the replacements are new rows and may take a lost ID.
+    // (`NULL NOT IN` an empty table is true: nullable columns check for
+    // NULL first.)
+    run("UPDATE usage_source SET model = -1, repaired = 1
+         WHERE model NOT IN (SELECT id FROM intern)")?;
+    run("UPDATE session_gen SET model = NULL
+         WHERE model IS NOT NULL AND model NOT IN (SELECT id FROM intern)")?;
+    run("UPDATE session SET agent = -1 WHERE agent NOT IN (SELECT id FROM intern)")?;
+    run("DELETE FROM project WHERE location NOT IN (SELECT id FROM location)")?;
+    run("UPDATE turn SET location = NULL
+         WHERE location IS NOT NULL AND location NOT IN (SELECT id FROM location)")?;
+    run("UPDATE session_gen SET cwd = NULL
+         WHERE cwd IS NOT NULL AND cwd NOT IN (SELECT id FROM location)")?;
+    run("UPDATE usage_source SET location = -1, repaired = 1
+         WHERE location IS NOT NULL AND location NOT IN (SELECT id FROM location)")?;
+    run("UPDATE usage_source SET turn = NULL, repaired = 1
+         WHERE turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)")?;
+    run("UPDATE session_gen SET turn = NULL
+         WHERE turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)")?;
+
+    let strings = missing(
+        conn,
+        "intern",
+        &[
+            ("session", "source"),
+            ("session", "sid"),
+            ("session", "parent_source"),
+            ("session", "parent_sid"),
+            ("turn", "tid"),
+        ],
+    )?;
+    for &id in &strings {
+        conn.execute(
+            "INSERT INTO intern (id, text) VALUES (?1, ?2)",
+            params![id, lost_text("string", id)],
+        )?;
     }
+    n += strings.len() as u64;
+
+    let sessions = missing(
+        conn,
+        "session",
+        &[
+            ("usage_source", "session"),
+            ("turn", "session"),
+            ("session_gen", "session"),
+        ],
+    )?;
+    if !sessions.is_empty() {
+        let source = ingest::intern(conn, LOST)?;
+        for &id in &sessions {
+            let sid = ingest::intern(conn, &lost_text("session", id))?;
+            conn.execute(
+                "INSERT INTO session (id, source, sid, agent, gen, cursor)
+                 VALUES (?1, ?2, ?3, -1, coalesce((
+                   SELECT max(gen) FROM (
+                     SELECT gen FROM usage_source WHERE session = ?1
+                     UNION ALL SELECT gen FROM turn WHERE session = ?1
+                     UNION ALL SELECT gen FROM session_gen WHERE session = ?1)), 1), ?4)",
+                params![id, source, sid, Cursor::START.to_bytes()],
+            )?;
+        }
+        n += sessions.len() as u64;
+    }
+
     let empty = ingest::intern(conn, b"")?;
     conn.execute(
         "UPDATE usage_source SET model = ?1 WHERE model = -1",
         params![empty],
+    )?;
+    let agent = ingest::intern(conn, LOST_AGENT)?;
+    conn.execute(
+        "UPDATE session SET agent = ?1 WHERE agent = -1",
+        params![agent],
+    )?;
+    let unknown = ingest::location(conn, &ingest::Place::Unknown)?;
+    conn.execute(
+        "UPDATE usage_source SET location = ?1 WHERE location = -1",
+        params![unknown],
     )?;
     Ok(n)
 }

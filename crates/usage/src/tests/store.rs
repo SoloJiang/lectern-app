@@ -402,22 +402,48 @@ fn long_id(i: usize) -> String {
     format!("session-with-a-long-name-{i:04}")
 }
 
-/// Usage rows not under the session, directory and model they were
+/// Counted usage not under the session, directory, model and agent it was
 /// written for: every key and every directory contains its session's ID.
 fn misattributed(path: &Path) -> i64 {
     raw(path)
         .query_row(
-            "SELECT count(*) FROM usage_source u
+            "SELECT count(*) FROM usage_value v
+               JOIN usage_source u ON u.id = v.source
                LEFT JOIN session s ON s.id = u.session
                LEFT JOIN intern i ON i.id = s.sid
+               LEFT JOIN intern a ON a.id = s.agent
                LEFT JOIN location l ON l.id = u.location
                LEFT JOIN intern m ON m.id = u.model
-             WHERE i.text IS NULL OR l.path IS NULL OR m.text IS NULL
-                OR instr(u.key, i.text) = 0 OR instr(l.path, i.text) = 0",
+             WHERE i.text IS NULL OR l.path IS NULL OR m.text IS NULL OR a.text IS NULL
+                OR instr(u.key, i.text) = 0 OR instr(l.path, i.text) = 0
+                OR m.text != CAST('model-a' AS BLOB)
+                OR a.text != CAST('agent:claude-code' AS BLOB)",
             [],
             |r| r.get(0),
         )
         .unwrap()
+}
+
+/// References to rows that do not exist (`NULL NOT IN` an empty table is
+/// true, so nullable columns are checked for NULL first).
+fn dangling(path: &Path) -> i64 {
+    let sql = "SELECT
+        (SELECT count(*) FROM session WHERE source NOT IN (SELECT id FROM intern)
+           OR sid NOT IN (SELECT id FROM intern) OR agent NOT IN (SELECT id FROM intern)
+           OR (parent_source IS NOT NULL AND parent_source NOT IN (SELECT id FROM intern))
+           OR (parent_sid IS NOT NULL AND parent_sid NOT IN (SELECT id FROM intern)))
+      + (SELECT count(*) FROM usage_source WHERE session NOT IN (SELECT id FROM session)
+           OR location NOT IN (SELECT id FROM location) OR model NOT IN (SELECT id FROM intern)
+           OR (turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)))
+      + (SELECT count(*) FROM turn WHERE session NOT IN (SELECT id FROM session)
+           OR tid NOT IN (SELECT id FROM intern)
+           OR (location IS NOT NULL AND location NOT IN (SELECT id FROM location)))
+      + (SELECT count(*) FROM session_gen WHERE session NOT IN (SELECT id FROM session)
+           OR (cwd IS NOT NULL AND cwd NOT IN (SELECT id FROM location))
+           OR (model IS NOT NULL AND model NOT IN (SELECT id FROM intern))
+           OR (turn IS NOT NULL AND turn NOT IN (SELECT id FROM turn)))
+      + (SELECT count(*) FROM project WHERE location NOT IN (SELECT id FROM location))";
+    raw(path).query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
 /// The last child of an interior table page.
@@ -430,34 +456,50 @@ fn last_child(path: &Path, page_size: usize, page: usize) -> usize {
 }
 
 #[test]
-fn store_salvage_drops_rows_that_point_at_lost_rows() {
-    for table in ["intern", "session", "location"] {
+fn store_salvage_keeps_rows_that_point_at_lost_rows() {
+    // The first leaf of `intern` holds the source ID, the agent label and the
+    // model every session shares; the last leaves hold the newest rows,
+    // whose IDs new rows would take.
+    let cases = [
+        ("intern", true),
+        ("intern", false),
+        ("session", false),
+        ("location", false),
+    ];
+    for (table, first) in cases {
+        let case = format!("{table} {}", if first { "first" } else { "last" });
         let mut h = Harness::new();
         let fake = FakeSessions::new("session-claude-code", Agent::ClaudeCode);
         many(&fake, 0..300);
         h.read_every(&fake);
         let before = h.total();
         h.close(false);
-        // The rows with the largest IDs are lost: new rows will take them.
         let (size, root) = root_page(&h.db_path(), table);
-        let leaf = last_child(&h.db_path(), size, root);
+        let leaf = if first {
+            first_child(&h.db_path(), size, root)
+        } else {
+            last_child(&h.db_path(), size, root)
+        };
         garbage(&h.db_path(), size, leaf);
         h.reopen(false);
         let Checked::Recovered(r) = h.store().check(h.now).unwrap() else {
-            panic!("{table}: not salvaged");
+            panic!("{case}: not salvaged");
         };
-        assert!(r.lost > 0 && r.dangling > 0, "{table}: {r:?}");
-        assert_eq!(misattributed(&h.db_path()), 0, "{table}: after the salvage");
-        // New sessions first, so they take the lost IDs; then the old ones
-        // read their logs again.
+        assert!(r.lost > 0 && r.repaired > 0, "{case}: {r:?}");
+        assert_eq!(dangling(&h.db_path()), 0, "{case}: after the salvage");
+        // Every usage still counts, logs or not.
+        assert_eq!(h.total(), before, "{case}: after the salvage");
+        // New sessions first, so they would take lost IDs; then the old ones
+        // read their logs again and win back their usage, counted once.
         many(&fake, 300..400);
         for i in 300..400 {
             h.read_all(&fake, &long_id(i));
         }
         h.read_every(&fake);
-        assert_eq!(misattributed(&h.db_path()), 0, "{table}: after reading");
-        assert_eq!(h.total().input, before.input + 100, "{table}");
-        assert_eq!(count(&raw(&h.db_path()), "usage_source"), 400, "{table}");
+        assert_eq!(dangling(&h.db_path()), 0, "{case}: after reading");
+        assert_eq!(misattributed(&h.db_path()), 0, "{case}: after reading");
+        assert_eq!(h.total().input, before.input + 100, "{case}");
+        assert_eq!(count(&raw(&h.db_path()), "usage_value"), 400, "{case}");
     }
 }
 

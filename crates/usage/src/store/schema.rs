@@ -140,9 +140,11 @@ CREATE TABLE usage_source (
   sidechain   INTEGER NOT NULL,
   superseded  INTEGER NOT NULL,
   inherited   INTEGER NOT NULL,
+  repaired    INTEGER NOT NULL DEFAULT 0,
   UNIQUE (session, gen, pos, seq, part)
 );
 CREATE INDEX usage_source_key ON usage_source (key);
+CREATE INDEX usage_source_repaired ON usage_source (id) WHERE repaired = 1;
 
 CREATE TABLE usage_value (
   key    BLOB PRIMARY KEY NOT NULL,

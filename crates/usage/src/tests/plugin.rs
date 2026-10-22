@@ -434,12 +434,24 @@ fn plugin_restart_reads_only_changed_logs() {
 #[test]
 fn plugin_adapter_upgrade_replays_unchanged_logs() {
     let logs = tempfile::tempdir().unwrap();
-    let rig = read_rig(logs.path());
+    let fake = FakeSessions::with_files("session-claude-code", Agent::ClaudeCode, logs.path());
+    // Six inactive sessions of one batch each.
+    let ids: Vec<String> = (0..6).map(|i| format!("s{i}")).collect();
+    for (i, id) in ids.iter().enumerate() {
+        session(&fake, id, (1 + i as i64) * HOUR, 1);
+    }
+    let rig = Rig::new(fake, |_| {});
+    for _ in 0..20 {
+        rig.advance(PACE);
+    }
+    assert_eq!(rig.engine.dirty_sessions(), 0);
     let total = rig.all().total;
-    let older = rig.sessions.reads("older");
+    assert_eq!(total.input, 6);
+    let reads: Vec<usize> = ids.iter().map(|id| rig.sessions.reads(id)).collect();
+
     let rig = rig.restart(|fake| fake.set_adapter(2));
     // The probe of the newest session replays it from the start; the other
-    // session of that source follows, paced.
+    // sessions of that source follow, paced.
     let all = rig.all();
     assert!(
         matches!(all.header.state, UsageState::Backfilling { .. }),
@@ -449,7 +461,11 @@ fn plugin_adapter_upgrade_replays_unchanged_logs() {
     for _ in 0..20 {
         rig.advance(PACE);
     }
-    assert!(rig.sessions.reads("older") > older);
+    // Each session is read once more: an old cursor's replay does not queue
+    // the source again.
+    for (id, before) in ids.iter().zip(&reads) {
+        assert_eq!(rig.sessions.reads(id), before + 1, "{id}");
+    }
     let all = rig.all();
     assert_eq!(all.header.state, UsageState::Ready);
     assert_eq!(all.total, total, "replayed, not counted twice");

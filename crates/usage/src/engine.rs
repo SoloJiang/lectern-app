@@ -116,6 +116,8 @@ struct State {
     /// version changed (it then replays from the start).
     probe: HashSet<SessionKey>,
     probed: HashSet<SourceId>,
+    /// Sources whose sessions were all queued again after an adapter change.
+    replayed: HashSet<SourceId>,
     reading: bool,
     /// A write failed: no more reading until the next `SessionsChanged`.
     blocked: bool,
@@ -478,11 +480,14 @@ impl Engine {
         });
         let outcome = self.read_batch(&key);
         // The source's adapter changed: its unchanged sessions replay too.
+        // Once per source and run: every session still on an old cursor
+        // replays when read and reports the change again.
         let mut replays: Vec<SessionKey> = Vec::new();
         if let Read::Done {
             adapter_changed: true,
             ..
         } = &outcome
+            && self.state().replayed.insert(key.source.clone())
         {
             info!("session adapter changed; its sessions are read again");
             replays = self

@@ -12,7 +12,7 @@ pub(crate) mod schema;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -167,6 +167,9 @@ pub(crate) struct Store {
     /// Calls that reached SQLite or the data directory; tests check the UI
     /// thread never adds to it.
     io: AtomicU64,
+    /// Some sources were repaired by a salvage (`usage_source.repaired`):
+    /// ingest then lets a record read again replace their references.
+    repairing: AtomicBool,
     #[cfg(test)]
     pub(crate) faults: Mutex<Faults>,
 }
@@ -231,9 +234,11 @@ impl Store {
             reader: Mutex::new(Some(files.reader)),
             mode: Mutex::new(files.mode),
             io: AtomicU64::new(1),
+            repairing: AtomicBool::new(false),
             #[cfg(test)]
             faults: Mutex::new(Faults::default()),
         };
+        store.refresh_repairing();
         if recovered.is_some() {
             // A salvaged file was not closed by anyone yet.
             let _ = store.write(|c| set_meta(c, "clean", 0));
@@ -364,7 +369,28 @@ impl Store {
         *writer = Some(files.writer);
         *reader = Some(files.reader);
         *lock(&self.mode) = files.mode;
+        drop((writer, reader));
+        self.refresh_repairing();
         Ok(Checked::Recovered(recovery))
+    }
+
+    /// Whether any source still waits for its record to be read again after
+    /// a salvage.
+    fn refresh_repairing(&self) {
+        let any = self
+            .read(|c| {
+                c.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM usage_source WHERE repaired = 1)",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap_or(false);
+        self.repairing.store(any, Ordering::Relaxed);
+    }
+
+    pub(crate) fn repairing(&self) -> bool {
+        self.repairing.load(Ordering::Relaxed)
     }
 
     /// The settings of both connections, one line each, for the page cache
@@ -621,9 +647,17 @@ fn backup(conn: &Connection, dir: &Path, from: i32) -> io::Result<()> {
     conn.execute("VACUUM INTO ?1", params![target])
         .map_err(|_| io::Error::other("vacuum into"))?;
     fs::File::open(&path)?.sync_all()?;
-    fs::File::open(dir)?.sync_all()?;
+    sync_dir(dir);
     prune_backups(dir);
     Ok(())
+}
+
+/// `fsync` of a directory, best effort as SQLite does it: some file systems
+/// refuse it, and that must not stop a migration or a salvage.
+pub(crate) fn sync_dir(dir: &Path) {
+    if let Err(e) = fs::File::open(dir).and_then(|f| f.sync_all()) {
+        warn!("directory sync failed"; path = Value::path(dir), io = Value::io(&e));
+    }
 }
 
 fn prune_backups(dir: &Path) {

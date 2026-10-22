@@ -240,7 +240,8 @@ impl Store {
         let fail_before_cursor = std::mem::take(&mut super::lock(&self.faults).before_cursor);
         #[cfg(not(test))]
         let fail_before_cursor = false;
-        self.transaction(|tx| ingest(tx, input, fail_before_cursor))
+        let repairing = self.repairing();
+        self.transaction(|tx| ingest(tx, input, fail_before_cursor, repairing))
     }
 }
 
@@ -248,6 +249,7 @@ fn ingest(
     tx: &Transaction<'_>,
     input: &Ingest<'_>,
     fail_before_cursor: bool,
+    repairing: bool,
 ) -> rusqlite::Result<Ingested> {
     let mut ids = Ids::default();
     let info = &input.session;
@@ -300,13 +302,16 @@ fn ingest(
                 };
                 next_seq = Some(seq + 1);
                 let tid = ids.text(tx, turn.0.as_bytes())?;
+                // A location a salvage could not keep (NULL) is filled in.
                 tx.prepare_cached(
-                    "INSERT OR IGNORE INTO turn (session, gen, tid, seq, started_at, location)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO turn (session, gen, tid, seq, started_at, location)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT (session, gen, tid) DO UPDATE SET location = excluded.location
+                     WHERE turn.location IS NULL",
                 )?
                 .execute(params![row.id, target, tid, seq, at.0, state.cwd])?;
-                let (turn_id, location) =
-                    turn_of(tx, row.id, target, tid)?.unwrap_or((0, state.cwd));
+                let (turn_id, location) = turn_of(tx, row.id, target, tid)?
+                    .map_or((0, state.cwd), |(id, loc)| (id, loc.unwrap_or(state.cwd)));
                 turns.insert(&turn.0, (turn_id, location));
                 state.turn = Some(turn_id);
             }
@@ -325,6 +330,7 @@ fn ingest(
                             let tid = ids.text(tx, t.0.as_bytes())?;
                             match turn_of(tx, row.id, target, tid)? {
                                 Some((id, loc)) => {
+                                    let loc = loc.unwrap_or(state.cwd);
                                     turns.insert(&t.0, (id, loc));
                                     (Some(id), loc)
                                 }
@@ -349,6 +355,7 @@ fn ingest(
                     inherited: rec.inherited,
                     turn,
                     location,
+                    repairing,
                 };
                 let main = key::encode(&usage.key);
                 insert_source(tx, &source, 0, &main, model, usage, &usage.tokens)?;
@@ -432,6 +439,9 @@ fn ingest(
     Ok(out)
 }
 
+/// A session row as found: ID, generation, replay, cursor, agent.
+type FoundSession = (i64, i64, Option<i64>, Vec<u8>, i64);
+
 /// The session's row, created on first sight.
 fn session_row(
     tx: &Connection,
@@ -448,16 +458,22 @@ fn session_row(
         )),
         None => None,
     };
-    let found: Option<(i64, i64, Option<i64>, Vec<u8>)> = tx
+    let found: Option<FoundSession> = tx
         .prepare_cached(
-            "SELECT id, gen, replay, cursor FROM session WHERE source = ?1 AND sid = ?2",
+            "SELECT id, gen, replay, cursor, agent FROM session WHERE source = ?1 AND sid = ?2",
         )?
         .query_row(params![source, sid], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })
         .optional()?;
     match found {
-        Some((id, generation, replay, cursor)) => {
+        Some((id, generation, replay, cursor, old_agent)) => {
+            // The agent changes only when a salvage lost it: the session's
+            // facts carry the agent too.
+            if old_agent != agent {
+                tx.prepare_cached("UPDATE fact SET agent = ?2 WHERE session = ?1")?
+                    .execute(params![id, agent])?;
+            }
             tx.prepare_cached(
                 "UPDATE session SET agent = ?2, parent_source = ?3, parent_sid = ?4,
                    inheritance_unknown = ?5 WHERE id = ?1",
@@ -533,20 +549,18 @@ fn gen_state(
     Ok(GenState { cwd, model, turn })
 }
 
-/// A turn's row and location in a generation.
+/// A turn's row and location in a generation (None after a salvage lost it).
 fn turn_of(
     tx: &Connection,
     session: i64,
     generation: i64,
     tid: i64,
-) -> rusqlite::Result<Option<(i64, i64)>> {
-    tx.prepare_cached(
-        "SELECT id, coalesce(location, 0) FROM turn WHERE session = ?1 AND gen = ?2 AND tid = ?3",
-    )?
-    .query_row(params![session, generation, tid], |r| {
-        Ok((r.get(0)?, r.get(1)?))
-    })
-    .optional()
+) -> rusqlite::Result<Option<(i64, Option<i64>)>> {
+    tx.prepare_cached("SELECT id, location FROM turn WHERE session = ?1 AND gen = ?2 AND tid = ?3")?
+        .query_row(params![session, generation, tid], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()
 }
 
 /// Deletes a generation's rows, collecting the keys to choose again.
@@ -582,11 +596,30 @@ struct Source {
     inherited: bool,
     turn: Option<i64>,
     location: i64,
+    /// Sources repaired by a salvage may exist (`Store::repairing`).
+    repairing: bool,
 }
 
 fn clamp(n: u64) -> i64 {
     n.min(MAX_TOKENS) as i64
 }
+
+const INSERT_SOURCE: &str = "INSERT OR IGNORE INTO usage_source
+       (key, session, gen, pos, seq, part, at, turn, location, model,
+        input, output, cache_read, cache_write, sidechain, superseded, inherited)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)";
+
+/// After a salvage: the same record read again replaces the turn, location
+/// and model a salvage could not keep. Returns the row inserted or replaced.
+const UPSERT_SOURCE: &str = "INSERT INTO usage_source
+       (key, session, gen, pos, seq, part, at, turn, location, model,
+        input, output, cache_read, cache_write, sidechain, superseded, inherited)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+     ON CONFLICT (session, gen, pos, seq, part) DO UPDATE SET
+       turn = excluded.turn, location = excluded.location, model = excluded.model,
+       repaired = 0
+     WHERE usage_source.repaired = 1
+     RETURNING id";
 
 fn insert_source(
     tx: &Connection,
@@ -598,13 +631,7 @@ fn insert_source(
     raw: &lectern_services::session::RawTokens,
 ) -> rusqlite::Result<()> {
     let t = normalize(raw);
-    tx.prepare_cached(
-        "INSERT OR IGNORE INTO usage_source
-           (key, session, gen, pos, seq, part, at, turn, location, model,
-            input, output, cache_read, cache_write, sidechain, superseded, inherited)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-    )?
-    .execute(params![
+    let values = params![
         key,
         s.session,
         s.generation,
@@ -622,6 +649,21 @@ fn insert_source(
         usage.sidechain,
         usage.superseded,
         s.inherited
-    ])?;
+    ];
+    if !s.repairing {
+        tx.prepare_cached(INSERT_SOURCE)?.execute(values)?;
+        return Ok(());
+    }
+    let written: Option<i64> = tx
+        .prepare_cached(UPSERT_SOURCE)?
+        .query_row(values, |r| r.get(0))
+        .optional()?;
+    // A replaced row's facts are stale: the key is chosen again from scratch.
+    if let Some(id) = written {
+        tx.prepare_cached("DELETE FROM fact WHERE source = ?1")?
+            .execute(params![id])?;
+        tx.prepare_cached("DELETE FROM usage_value WHERE key = ?1 AND source = ?2")?
+            .execute(params![key, id])?;
+    }
     Ok(())
 }
