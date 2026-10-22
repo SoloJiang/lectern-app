@@ -1097,3 +1097,229 @@ fn text_shared_from_texts_is_the_texts_bytes() {
     assert_eq!(&text.shared()[..], text.bytes());
     assert!(std::ptr::eq(text.shared().as_ptr(), text.bytes().as_ptr()));
 }
+
+/// The tree fixtures (those with a `trees` file), sorted.
+fn tree_fixtures() -> Vec<String> {
+    let mut names: Vec<_> = std::fs::read_dir(fixtures())
+        .unwrap()
+        .map(|e| e.unwrap())
+        .filter(|e| e.file_type().unwrap().is_dir() && e.path().join("trees").is_file())
+        .map(|e| e.file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert!(names.len() >= 4, "{names:?}");
+    names
+}
+
+// ---- line_diff_* -------------------------------------------------------------
+
+/// The public `line_diff` gives the hunks and offsets `diff_trees` gives
+/// for the same pair of contents, in every tree fixture (CRLF, no final
+/// newline, renames, symbolic links and histogram's degenerate case).
+#[test]
+fn line_diff_matches_diff_trees_in_every_fixture() {
+    let mut checked = Vec::new();
+    for name in tree_fixtures() {
+        let (t, old, new) = fixture(&name, "default");
+        let repo = t.repo();
+        let set = diff(&t, old, new);
+        for change in set.files() {
+            let Detail::Text(expected) = &change.detail else {
+                continue;
+            };
+            // A type change is every old line out and every new line in,
+            // not a line diff.
+            if change.status == Status::TypeChanged {
+                continue;
+            }
+            let bytes = |side: Option<&Side>| match side {
+                Some(side) => repo.blob(side.content.oid().unwrap(), u64::MAX).unwrap(),
+                None => Arc::from(&b""[..]),
+            };
+            let (a, b) = (bytes(change.old.as_ref()), bytes(change.new.as_ref()));
+            let what = format!("{name}/{}", path_str(&change.path));
+            assert_eq!(
+                line_diff(&a, &b, u64::MAX).as_ref(),
+                Some(expected),
+                "{what}"
+            );
+            let longer = a.len().max(b.len()) as u64;
+            assert_eq!(line_diff(&a, &b, longer).as_ref(), Some(expected), "{what}");
+            if longer > 0 {
+                assert_eq!(line_diff(&a, &b, longer - 1), None, "{what}");
+            }
+            checked.push(what);
+        }
+    }
+    for covered in [
+        "basic/crlf.txt",
+        "basic/noeol.txt",
+        "basic/src/new.rs",
+        "renames/new/hi.txt",
+        "real/",
+    ] {
+        assert!(
+            checked.iter().any(|f| f.starts_with(covered)),
+            "{covered} not checked: {checked:?}"
+        );
+    }
+}
+
+// ---- tree_changes_* ----------------------------------------------------------
+
+fn changed(t: &TestRepo, old: Option<Oid>, new: Oid, max_paths: usize) -> TreeChanges {
+    t.repo()
+        .tree_changes(old, new, max_paths, &no_cancel())
+        .unwrap()
+}
+
+fn paths_of(changes: &TreeChanges) -> Vec<String> {
+    match changes {
+        TreeChanges::Paths(paths) => paths.iter().map(path_str).collect(),
+        TreeChanges::All => panic!("All"),
+    }
+}
+
+/// The same set of paths as `diff_trees`, with both paths of each rename
+/// instead of a pair, in every tree fixture.
+#[test]
+fn tree_changes_matches_diff_trees_paths_in_every_fixture() {
+    let mut renames = 0;
+    for name in tree_fixtures() {
+        let (t, old, new) = fixture(&name, "default");
+        let set = diff(&t, old, new);
+        let mut expected = std::collections::BTreeSet::new();
+        for change in set.files() {
+            expected.insert(path_str(&change.path));
+            if let Status::Renamed { from, .. } = &change.status {
+                expected.insert(path_str(from));
+                renames += 1;
+            }
+        }
+        let expected: Vec<String> = expected.into_iter().collect();
+        assert_eq!(
+            paths_of(&changed(&t, Some(old), new, usize::MAX)),
+            expected,
+            "{name}"
+        );
+    }
+    assert!(renames >= 40, "{renames} renames");
+}
+
+#[test]
+fn tree_changes_reads_only_the_trees_on_the_changed_path_and_no_blob() {
+    let t = TestRepo::new();
+    let unchanged: &[(&str, &[u8])] = &[
+        ("top.txt", b"top\n"),
+        ("a/b/side.txt", b"side\n"),
+        ("a/other/x.txt", b"x\n"),
+        ("z/y/w.txt", b"w\n"),
+    ];
+    let with = |deep: &'static [u8]| {
+        let mut files = unchanged.to_vec();
+        files.push(("a/b/c/deep.txt", deep));
+        t.tree(&files)
+    };
+    let (old_tree, new_tree) = (with(b"old\n"), with(b"new\n"));
+    let old = t.commit(old_tree, &[], "old");
+    let new = t.commit(new_tree, &[old], "new");
+    // No blob is needed: removing both versions of the changed file from
+    // the object database changes nothing.
+    for content in [&b"old\n"[..], b"new\n"] {
+        let hex = Oid::for_blob(HashKind::Sha1, content).to_hex();
+        let loose = t
+            .common_dir()
+            .join("objects")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        std::fs::remove_file(loose).unwrap();
+    }
+    crate::tree_diff::hook::take();
+    assert_eq!(
+        paths_of(&changed(&t, Some(old), new, usize::MAX)),
+        ["a/b/c/deep.txt"]
+    );
+    let read = crate::tree_diff::hook::take();
+    // The root, a, a/b and a/b/c of each side; not a/other, z or z/y.
+    assert_eq!(read.len(), 8, "{read:?}");
+    for (subtree, files) in [
+        ("a/other", &[("x.txt", &b"x\n"[..])][..]),
+        ("z", &[("y/w.txt", &b"w\n"[..])][..]),
+        ("z/y", &[("w.txt", &b"w\n"[..])][..]),
+    ] {
+        assert!(!read.contains(&t.tree(files)), "{subtree} was read");
+    }
+    // The same commit twice reads nothing.
+    assert_eq!(paths_of(&changed(&t, Some(new), new, usize::MAX)), [""; 0]);
+    assert!(crate::tree_diff::hook::take().is_empty());
+}
+
+#[test]
+fn tree_changes_mode_change_is_a_change() {
+    let t = TestRepo::new();
+    let script = t.blob(b"#!/bin/sh\n");
+    let same = t.blob(b"same\n");
+    let old = t.tree_entries(&[("run.sh", Mode::File, script), ("f", Mode::File, same)]);
+    let new = t.tree_entries(&[
+        ("run.sh", Mode::Executable, script),
+        ("f", Mode::File, same),
+    ]);
+    assert_eq!(
+        paths_of(&changed(&t, Some(old), new, usize::MAX)),
+        ["run.sh"]
+    );
+    // A file that becomes a symbolic link with the same blob, too.
+    let link = t.tree_entries(&[("run.sh", Mode::Symlink, script), ("f", Mode::File, same)]);
+    assert_eq!(
+        paths_of(&changed(&t, Some(old), link, usize::MAX)),
+        ["run.sh"]
+    );
+}
+
+#[test]
+fn tree_changes_over_max_paths_is_all() {
+    let t = TestRepo::new();
+    let old = t.tree(&[("keep", b"k\n")]);
+    let new = t.tree(&[("keep", b"k\n"), ("a", b"1"), ("d/b", b"2"), ("d/c", b"3")]);
+    assert_eq!(changed(&t, Some(old), new, 2), TreeChanges::All);
+    assert_eq!(
+        paths_of(&changed(&t, Some(old), new, 3)),
+        ["a", "d/b", "d/c"]
+    );
+    assert_eq!(changed(&t, Some(old), new, 0), TreeChanges::All);
+    assert_eq!(paths_of(&changed(&t, Some(old), old, 0)), [""; 0]);
+}
+
+#[test]
+fn tree_changes_without_old_is_every_path_of_new() {
+    let t = TestRepo::new();
+    let tree = t.tree(&[("z", b"z\n"), ("a/b/c", b"c\n"), ("a.txt", b"a\n")]);
+    let root = t.commit(tree, &[], "root");
+    // Sorted by path bytes ("a.txt" before "a/b/c").
+    assert_eq!(
+        paths_of(&changed(&t, None, root, usize::MAX)),
+        ["a.txt", "a/b/c", "z"]
+    );
+    assert_eq!(changed(&t, None, root, 2), TreeChanges::All);
+}
+
+#[test]
+fn tree_changes_errors() {
+    let t = TestRepo::new();
+    let old = t.tree(&[("f", b"a\n")]);
+    let new = t.tree(&[("f", b"b\n")]);
+    let err = t
+        .repo()
+        .tree_changes(Some(old), new, usize::MAX, &AtomicBool::new(true))
+        .unwrap_err();
+    assert!(matches!(err, GitError::Cancelled), "{err:?}");
+    let ghost = Oid::for_blob(HashKind::Sha1, b"never written");
+    let err = t
+        .repo()
+        .tree_changes(Some(ghost), new, usize::MAX, &no_cancel())
+        .unwrap_err();
+    assert!(
+        matches!(err, GitError::ObjectMissing(id) if id == ghost),
+        "{err:?}"
+    );
+}

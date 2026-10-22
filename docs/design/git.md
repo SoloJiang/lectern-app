@@ -1,6 +1,6 @@
 # git 设计
 
-状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步部分实现，见本段末。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。流式的 blob 哈希 `BlobHasher`（code_intel 设计「对其他 crate 的要求」，「大文件」的前置条件，`Refs #17`）已实现，见「与设计的差异」「实际验证」。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」。比较按阶段计时（[#133](https://github.com/SoloJiang/lectern-app/pull/133)）定位了 macOS 上的开销；完整比较按 index 的 cache-tree 跳过未变的基准子树、stat 一遍并行（[ADR 0038](../adr/0038.md)），`git/changes_clean_100k` 改回生效；只有 index 变化时过滤器的重建复用上一次的未跟踪遍历、不再列目录（「index」），`git/filter_100k` 改为测这次重建并生效，完整构造另记为只记录的 `git/filter_100k/cold`。第 4 步里不依赖 `services` 的部分已实现：工作区比较解析的 index 不跨调用保留（「缓存」，ADR 0035），`git/compare_100k/retained_bytes`、`git/changes_count/per_path_bytes` 改为生效；改动来源接口仍未实现。`Text::shared` 和三方合并 `merge3`（[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)，前置条件 D，`Refs #10`）已实现，见「三方合并」「与设计的差异」「实际验证」。
+状态：实现中。第 1–3 步已实现：第 1 步（仓库、worktree、引用与 index，[#76](https://github.com/SoloJiang/lectern-app/pull/76)），第 2 步（树之间的改动集、hunk 与展示行，[#79](https://github.com/SoloJiang/lectern-app/pull/79)），第 3 步（工作区比较、只读刷新与指纹，[#87](https://github.com/SoloJiang/lectern-app/pull/87)）；第 4 步部分实现，见本段末。`Worktree::watch_source` 随 fs_watch 的第 2 步实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)）。`Worktree::canonical_oid`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)，前置条件 E）在 [#110](https://github.com/SoloJiang/lectern-app/pull/110) 实现。hunk 与展示行的字节偏移（[ADR 0034](../adr/0034.md)）在 [#122](https://github.com/SoloJiang/lectern-app/pull/122) 实现。流式的 blob 哈希 `BlobHasher`（code_intel 设计「对其他 crate 的要求」，「大文件」的前置条件，`Refs #17`）已实现，见「与设计的差异」「实际验证」。fs_watch 过滤器的内存归属与 10 万文件的份额（[ADR 0035](../adr/0035.md)）随 bench 的基准加入，见「性能」「实际验证」。stat 缓存不持有文件内容（ADR 0035 的关键约束）已实现，并加入定位 macOS 上 10 万文件比较开销的计数（`git/changes_clean_100k/reads`、`…/stat_*`），见「与设计的差异」「实际验证」。比较按阶段计时（[#133](https://github.com/SoloJiang/lectern-app/pull/133)）定位了 macOS 上的开销；完整比较按 index 的 cache-tree 跳过未变的基准子树、stat 一遍并行（[ADR 0038](../adr/0038.md)），`git/changes_clean_100k` 改回生效；只有 index 变化时过滤器的重建复用上一次的未跟踪遍历、不再列目录（「index」），`git/filter_100k` 改为测这次重建并生效，完整构造另记为只记录的 `git/filter_100k/cold`。第 4 步里不依赖 `services` 的部分已实现：工作区比较解析的 index 不跨调用保留（「缓存」，ADR 0035），`git/compare_100k/retained_bytes`、`git/changes_count/per_path_bytes` 改为生效；改动来源接口仍未实现。`Text::shared` 和三方合并 `merge3`（[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)，前置条件 D，`Refs #10`）已实现，见「三方合并」「与设计的差异」「实际验证」。`line_diff`、`Worktree::head_reflog`、`Worktree::mtimes`、`Repo::tree_changes`（[review 设计「对其他 crate 的要求」](review.md#对其他-crate-的要求)，前置条件 B，`Refs #15`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现，见「review 用的读取」「与设计的差异」「实际验证」。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（P1）；结构化 diff [#21](https://github.com/SoloJiang/lectern-app/issues/21) 在 P2，本文只留扩展点。`git` 只读地读取仓库：列出 worktree、引用和历史，计算树之间和工作区相对某棵树的改动，给出 hunk 和统一 / 双栏视图共用的展示行（[技术调研「代码与 Diff 查看」](tech-research.md#3-代码与-diff-查看)、[「性能要点」](tech-research.md#性能要点)）。依赖选型见 [ADR 0024](../adr/0024.md)。
 
@@ -27,7 +27,7 @@
   - MR 的 diff：`forge`（[#25](https://github.com/SoloJiang/lectern-app/issues/25)）。
   - Analyze 快照的输入与审阅对象的指纹：随 [#66](https://github.com/SoloJiang/lectern-app/issues/66) 设计，见「Analyze 快照」。
   - 实现 `services` 的改动来源接口：接口在 [review 设计「改动来源」](review.md#改动来源lectern-services-的-changes-模块)里定义，见「验收」第 4 步。
-  - `review` 用的 `line_diff`、`Worktree::head_reflog`（HEAD reflog 的末尾部分）、`Worktree::mtimes` 和 `Repo::tree_changes`（两个提交的树之间改变的路径，不读 blob）：接口与测试在 [review 设计「对其他 crate 的要求」](review.md#对其他-crate-的要求)前置条件 B，写 `Refs #15`。
+  - `review` 用的 `line_diff`、`Worktree::head_reflog`（HEAD reflog 的末尾部分）、`Worktree::mtimes` 和 `Repo::tree_changes`（两个提交的树之间改变的路径，不读 blob）：接口与测试在 [review 设计「对其他 crate 的要求」](review.md#对其他-crate-的要求)前置条件 B，写 `Refs #15`；已实现，补充的规则见「review 用的读取」。
 
 本 crate 在领域层，是普通的库 crate，不是插件：不实现 kernel 的 `Plugin`，不注册服务。`project`、`review`、`usage` 等领域 crate 直接依赖并调用它（[#47](https://github.com/SoloJiang/lectern-app/issues/47) 以后若决定把插件做成包装领域库的薄 crate，本 crate 仍是被包装的库）。
 
@@ -433,6 +433,42 @@ impl Merge3 { pub fn is_clean(&self) -> bool; }
 - 冲突的写法：`<<<<<<< {ours}`、`ours` 的行、`=======`、`theirs` 的行、`>>>>>>> {theirs}`，没有基准一节（`|||||||`）。标签为空时标记后不加空格。一边在冲突里的最后一行没有 `\n` 时补一个换行，使每个标记都从行首开始；所以冲突在文件末尾时结果总以换行结束。
 - 标记的换行：`ours` 和 `theirs` 里冲突前一行（冲突在开头时取第一行）和 `base` 的第一行各按自己的换行投票。最后一行没有换行时看它的前一行；没有行、或只有一行而且没有换行的文件不投票。所有投票都是 CRLF、并且至少有一票时用 `\r\n`，否则用 `\n`。全是 CRLF 的文件合并后仍全是 CRLF，`file_reader` 仍能编辑。
 - 没有冲突的部分照原样复制所取那一边的字节，所以末尾没有换行的文件合并干净时仍没有换行。
+
+### review 用的读取
+
+[review 设计「对其他 crate 的要求」](review.md#对其他-crate-的要求)前置条件 B（`Refs #15`）：改动链的逐行来源、会话的基准、路径的截止时刻和命令声明用到的四个函数。接口以 review 设计为准，本节补上它没有写的规则（原因见「与设计的差异」）。
+
+```rust
+/// 按行 diff 两段内容，与 hunk 缓存的算法相同（Histogram，按 git 的缩进启发滑动 hunk）；hunk 带两侧第一行的字节偏移。
+/// 任一侧超过 `max_bytes` 时返回 None。纯计算，任何线程；不读对象库、不查缓存。
+pub fn line_diff(old: &[u8], new: &[u8], max_bytes: u64) -> Option<FileDiff>;
+
+impl Worktree {
+    /// HEAD reflog（这个 worktree 的 git 目录里的 `logs/HEAD`）的末尾部分，从新到旧。阻塞。
+    pub fn head_reflog(&self, stop: i64, max_entries: usize) -> Result<HeadReflog, GitError>;
+    /// 每个路径在工作区里的修改时间（Unix 纳秒），经 `SafeRoot::stat`、不跟随符号链接。阻塞。
+    pub fn mtimes(&self, paths: &[RepoPath]) -> Result<Vec<Option<i64>>, GitError>;
+}
+
+pub struct HeadReflog { pub exists: bool, pub entries: Vec<ReflogEntry>, pub complete: bool }
+
+impl Repo {
+    /// 两个提交（或两棵树）的树之间内容或模式不同的路径，按路径字节序，每个一次。阻塞，检查 `cancel`。
+    pub fn tree_changes(&self, old: Option<Oid>, new: Oid, max_paths: usize, cancel: &AtomicBool)
+        -> Result<TreeChanges, GitError>;
+}
+
+pub enum TreeChanges { Paths(Arc<[RepoPath]>), All }
+```
+
+- `line_diff` 与 `diff_trees` 对同一对内容给出的 `FileDiff` 相同（同一个计算，不经缓存），只是不算 patch 的字节数、不判断二进制。它 diff 的是 review 回放出的中间版本，不是 blob，所以不以 OID 为键缓存；调用方按自己的键缓存结果（review 的 `review.attribution`）。
+- `head_reflog`：在 `gitdir.rs` 里打开文件，从末尾按 64 KiB 一块向前读，最多读末尾 4 MiB；每读一块就把其中的完整行从新到旧交给 `parse_reflog_line`。停止的条件：取到第一条时间早于 `stop` 的记录（含这一条），或取满 `max_entries` 条。
+  - 最后一个 `\n` 之后的字节是 git 正在追加的一行，不解析，即使它本身是一条完整的记录。4 MiB 边界处的第一行也丢弃：只读到它的后半段时无法判断它是否完整。
+  - 解析失败的行（包括空行）跳过，不计入 `max_entries`，与 git 读 reflog 时相同。
+  - `complete`：解析一直进行到文件的第一行。停在 `max_entries` 或早于 `stop` 的记录上时为 false，除非那条记录就是文件的第一行；停在 4 MiB 边界上时为 false。没有 reflog 文件时 `exists` 为 false、`entries` 为空、`complete` 为 true；`max_entries` 为 0 时 `entries` 为空，`complete` 只在文件为空时为 true。
+  - 读取期间 git 追加了新行不影响结果：只读打开时文件的长度。
+- `mtimes`：路径不存在、中间一级是符号链接或不是目录、不是普通文件也不是符号链接（目录、FIFO、socket、设备文件）、`stat` 出错、时间超出 `i64` 纳秒的范围时，这个路径为 None；一个路径的失败不影响其余路径，`Err` 留给以后需要整体失败的情形，现在不返回。符号链接给出链接本身的时间。不读文件内容。
+- `tree_changes`：用树之间比较的同一个遍历（`tree_diff`），OID 和模式都相同的条目跳过，子树 OID 相同时整棵不读，不读任何 blob，不做重命名检测（重命名的两个路径都在结果里）。`old`、`new` 可以是提交、标签或树，按 `diff_trees` 的规则剥到树；`old` 为 None 时与空树比较，是 `new` 的树里的全部路径。文件和同名目录之间的变化列出文件的路径和目录下的各个路径。名字不满足 `RepoPath` 不变量的条目不在结果里，也不进入其下的子树（git 自己不会写出这样的树，改动集里也没有这些路径）。改动的路径超过 `max_paths` 时立即停止遍历，返回 `All`。对象缺失时返回 `GitError::ObjectMissing`。
 
 ### Analyze 快照
 
@@ -894,7 +930,7 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 测试仓库有两种来源：
 
 - **构造器**：`TestRepo`，不调用 git 命令行。用 gix 的写入接口在临时目录里建仓库（普通、裸、SHA-1 / SHA-256）、写 blob / 树 / 提交 / 引用 / index，直接写 linked worktree 的管理文件（`<公共目录>/worktrees/<名字>/{HEAD,gitdir,commondir,locked}` 和工作区里的 `.git` 文件）来增加、锁定或制造 prunable 的 worktree，用标准库写工作区文件，提供符号链接、可执行位、FIFO、改 mtime（制造 racy-clean）等操作。放在 `test-support` feature 下导出，供 `project`、`review` 和 `bench` 的测试使用。
-- **归档夹具**：需要 git 自己生成的格式放在 `tests/fixtures/<名字>/`（目录格式，见 [夹具说明](../../crates/git/tests/fixtures/README.md)），由同名的 `tests/fixtures/scripts/<名字>.sh` 用真实的 git 生成，脚本头部记录 git 版本；同时保存 `git diff --no-ext-diff --no-textconv -M --histogram --numstat` 等命令的输出作为对照。CI 只导入，不运行 git；git 升级导致格式变化时新增一份样本，不覆盖旧的。包括：linked worktree（锁定、prunable）、SHA-256 仓库、packed-refs、index v4 与 split index、sparse index（`index.sparse` 加 cone 模式的 sparse checkout）、`core.autocrlf` 与 `eol`、UTF-16 的 `working-tree-encoding`、`ident`、Git LFS 属性与过滤器配置、子模块、未解决的冲突、reftable 仓库、各种 reflog 消息。
+- **归档夹具**：需要 git 自己生成的格式放在 `tests/fixtures/<名字>/`（目录格式，见 [夹具说明](../../crates/git/tests/fixtures/README.md)），由同名的 `tests/fixtures/scripts/<名字>.sh` 用真实的 git 生成，脚本头部记录 git 版本；同时保存 `git diff --no-ext-diff --no-textconv -M --histogram --numstat` 等命令的输出作为对照。CI 只导入，不运行 git；git 升级导致格式变化时新增一份样本，不覆盖旧的。包括：linked worktree（锁定、prunable）、SHA-256 仓库、packed-refs、index v4 与 split index、sparse index（`index.sparse` 加 cone 模式的 sparse checkout）、`core.autocrlf` 与 `eol`、UTF-16 的 `working-tree-encoding`、`ident`、Git LFS 属性与过滤器配置、子模块、未解决的冲突、reftable 仓库、各种 reflog 消息，以及 git 写出的一份 HEAD reflog（`head_reflog_*` 用）。
 
 场景：
 
@@ -921,6 +957,11 @@ hunk 只存行号区间和两侧第一行的字节偏移，不存文本：文本
 - 取消：`cancel` 置位后返回 `Cancelled`，没有部分结果。
 - 三方合并（`merge3_*`，`src/merge3/tests.rs`）：没有改动、只有一边改动、两边相同的改动、互不重叠的改动、重叠的改动（冲突，冲突只含两边不同的行）、相邻行的改动、相隔 3 行和相隔 4 行无字母数字的冲突合并、中间夹着单边改动的冲突不合并、在开头和末尾插入、删除（含一边删除、一边修改）、CRLF、末尾没有换行、空文件。期望的字节写在测试里，LF 的冲突、合并和末尾换行的输入由真实的 `git merge-file` 核对过一次；测试不运行 git。每个结果另检查 `conflicts` 的区间恰好覆盖各个冲突、区间之外没有标记行，并用 insta 快照记录。
 - `Text::shared`：返回的 `Arc` 与 `Text::new` 收到的是同一份（`Arc::ptr_eq`），`texts` 给出的文本的 `shared` 与 `bytes` 是同一块内存。
+- review 用的读取（「review 用的读取」）：
+  - `line_diff_*`：全部树夹具里每个有行 diff 的文件（类型变化除外），`line_diff` 对两侧内容给出的 hunk、偏移和增删行数与 `diff_trees` 相同；`max_bytes` 等于较长一侧时有结果，少一个字节时为 None。
+  - `head_reflog_*`：归档的 reflog 夹具（`tests/fixtures/reflog`，[夹具说明](../../crates/git/tests/fixtures/README.md)「reflog 夹具」）按 git 自己读出的顺序、时间、新值和消息；`stop` 正好等于某条记录的时间时多读一条更早的；全部记录都晚于 `stop`；初始提交的旧值（全 0）为 None，`checkout -b` 的旧值等于新值；没有 reflog 文件；`max_entries`；超过 4 MiB 的合成 reflog 只读末尾 4 MiB 里的完整行；末尾不完整的一行（完整记录缺 `\n`，或只有开头）不解析；坏行和空行跳过；块大小从 1 到 300 字节时结果都与 64 KiB 相同；linked worktree 读自己的 `logs/HEAD`。
+  - `tree_changes_*`：全部树夹具里与 `diff_trees` 的路径集合相同（重命名换成两个路径）；只改一个深层文件时只读这条路径上的树（计数钩子），删掉改动文件的两个 blob 后结果不变；只改模式、普通文件换成同一 blob 的符号链接都算改动；`max_paths` 的边界与 `All`；`old` 为 None 时是新树的全部路径；取消与对象缺失。
+  - `mtimes_*`：普通文件（纳秒精度）、符号链接本身（含悬空的）有时间；中间一级是符号链接（含指向 worktree 之外的）、经过普通文件、不存在的路径、目录和 FIFO 为 None。
 
 改动集、hunk、展示行和三方合并的结构化输出都用 insta 快照验收。
 
@@ -959,7 +1000,7 @@ P2 的结构化 diff（忽略纯格式变化、识别移动的代码）在本 cr
    - `worktree_*`、`read_only_*`、`no_external_programs` 测试通过。
    - `rg 'std::fs::(File::open|read|metadata|symlink_metadata)' crates/git/src --glob '!gitdir.rs' --glob '!testing.rs' --glob '!**/tests.rs'` 没有结果：工作区只经 `SafeRoot` 读取。git 目录里的管理文件（`HEAD`、`commondir`、`gitdir`、`locked`、`config`、index 末尾的校验和）都在 `gitdir.rs` 里读；`testing.rs` 和测试代码构造夹具。
    - `git/changes_clean`、`git/changes_50`、`git/refresh_one`、`git/changes_capped` 和内存基准在预算内。
-4. **改动来源接口**：为本地 worktree 实现 `services::changes::ChangeSource`（`LocalChanges`：取改动集、增量刷新、两侧内容、指纹），接口、与本 crate 类型的对照表和测试见 [review 设计「改动来源」](review.md#改动来源lectern-services-的-changes-模块)（review 设计的前置条件 C，写 `Refs #15`）。`ChangeSource` 不注册为 kernel 服务：`review` 直接构造 `LocalChanges`（#47 的结论，ADR 0025）。review 设计的前置条件 B 另加 `line_diff`、`Worktree::head_at`、`Worktree::mtimes`。
+4. **改动来源接口**：为本地 worktree 实现 `services::changes::ChangeSource`（`LocalChanges`：取改动集、增量刷新、两侧内容、指纹），接口、与本 crate 类型的对照表和测试见 [review 设计「改动来源」](review.md#改动来源lectern-services-的-changes-模块)（review 设计的前置条件 C，写 `Refs #15`）。`ChangeSource` 不注册为 kernel 服务：`review` 直接构造 `LocalChanges`（#47 的结论，ADR 0025）。review 设计的前置条件 B 另加 `line_diff`、`Worktree::head_reflog`、`Worktree::mtimes`、`Repo::tree_changes`（已实现，单独一个 PR，见「review 用的读取」「实际验证」）。
    - 同一步（已完成，不依赖 `services`，单独一个 PR，见「实际验证」）：工作区比较解析的 index 只在一次 `changes` / `refresh` 调用内持有（「缓存」，[ADR 0035](../adr/0035.md)）。`compare_releases_its_index_*` 测试检查调用返回后 `Worktree` 不再持有它、下一次 `refresh(Paths)` / `refresh(Full)` 重新解析且结果不变；bench 的 `git/compare_100k/retained_bytes` 改为 `Active`（< 1 MB）；stat 缓存不持有内容的修正已经完成，`git/changes_count/per_path_bytes` 也在这一步改为 `Active`（≤ 1 KB）；`git/refresh_one`、`git/refresh_full` 仍在预算内，`git/changes_clean_100k` 已经生效时也在预算内。
 
 ## 实际验证
@@ -1112,6 +1153,13 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 - `text_shared_is_the_arc_it_was_given`：`Text::shared` 与 `Text::new` 收到的 `Arc` 满足 `Arc::ptr_eq`，克隆的 `Text` 也是同一份；`text_shared_from_texts_is_the_texts_bytes`：`ChangeSet::texts` 给出的文本，`shared` 与 `bytes` 指向同一块内存。
 - 没有验证的：CRLF 的几种情形没有与真实的 git 核对，期望值按「三方合并」的标记换行规则手写；Histogram 与 git 默认的 Myers 结果不同的输入没有构造；macOS 上没有运行（本功能不含平台相关的代码）。
 
+`line_diff`、`Worktree::head_reflog`、`Worktree::mtimes`、`Repo::tree_changes`（review 的前置条件 B，`Refs #15`），同一类 Linux 虚拟机（x86_64，4 核 Xeon 2.1 GHz）：
+
+- `just check`、`just test`（Linux 上的全部 crate，1844 个测试通过，跳过 7 个）、`just doctest`（10 个，新增 `line_diff` 的文档示例）、`just deny`（advisories、bans、licenses、sources 都通过）全部通过；`just test -p lectern-git` 294 个测试通过（新增 22 个）。`Cargo.toml` 和 `Cargo.lock` 不变，没有新增依赖；`rg 'Command::new' crates/git/src` 没有结果。
+- 新的测试（「测试」）：`line_diff_*` 3 个、`head_reflog_*` 10 个、`tree_changes_*` 6 个、`mtimes_*` 3 个（FIFO 的那个只在 Linux 上）。`line_diff_matches_diff_trees_in_every_fixture` 覆盖四个树夹具里全部有行 diff 的文件；`tree_changes_matches_diff_trees_paths_in_every_fixture` 覆盖四个树夹具，其中有 40 多个重命名。
+- reflog 夹具由 `tests/fixtures/scripts/reflog.sh` 用 git 2.43.0 生成一次（9 条记录，见[夹具说明](../../crates/git/tests/fixtures/README.md)「reflog 夹具」）；`expected/entries` 是 git 自己读出的结果，`head_reflog_reads_the_fixture_newest_first_as_git_does` 与它逐条相同。测试本身不运行 git。
+- 没有验证的：没有测时间。review 设计给这几个函数的份额（读 reflog 尾部 < 2 ms，未命中的 `tree_changes` 在 `Interactive` 上最多 5 ms）计入 `review/open_session_50`、`review/cutoffs_cold`，随 review 的第 3 步测量；本 crate 没有为它们加 bench 条目（review 设计没有为前置条件 B 列出）。macOS 上没有运行，`mtimes` 经 `SafeRoot::stat`，macOS 上的不跟随符号链接由 `platform` 的测试覆盖。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1250,3 +1298,11 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 - file_reader 设计写的是「测试 `merge3_*` 对照 `git merge-file` 的结果（测试里的假命令按夹具回放）」。`merge3` 是纯计算，不调用任何命令，没有可以替换的命令；所以期望的字节直接写在测试里，写测试时用真实的 git 核对过一次（「实际验证」），与「测试仓库不调用 git 命令行」一致。
 - diff 算法按设计用 Histogram，git 默认用 Myers。两者对同一输入通常给出相同的 hunk；结果不同时（重复行多、改动位置有歧义），冲突的边界可能与 git 不同，合并结果仍然正确，只是冲突的划分不同。hunk 尽量往下滑、不用 `line_diff` 的缩进启发，让 hunk 的位置不受缩进影响。
 - 标记的换行由投票决定（「三方合并」）：基准为空、两边都是 CRLF 时用 `\r\n`。这是本 crate 自己的规定，没有与 git 核对；这样全是 CRLF 的文件合并后仍全是 CRLF，`file_reader` 只能编辑换行一致的文件。
+
+`line_diff`、`Worktree::head_reflog`、`Worktree::mtimes`、`Repo::tree_changes`（review 的前置条件 B）：
+
+- 签名和结果类型与 review 设计相同。review 设计没有写的规则在「review 用的读取」里决定：reflog 末尾不完整的一行、4 MiB 边界处的第一行和解析失败的行都不进 `entries`；`complete` 在停下的那条记录正好是文件第一行时为 true（这时文件里确实没有更早的记录，与「读到了文件开头」一致）；没有 reflog 文件时 `complete` 为 true；`mtimes` 把 `stat` 出错和超出 `i64` 的时间也给成 None，单个路径不让整个调用失败。review 设计的 B 不需要修改。
+- `tree_changes` 也接受树和标签（与 `diff_trees` 共用剥到树的规则），review 只传提交。名字无效的条目及其下的子树不在结果里，与 `diff_trees` 把它们放进 `invalid_paths`、不进 `files` 相同。
+- `HeadReflog`、`TreeChanges` 派生 `Clone`、`PartialEq`、`Eq`、`Debug`。`line_diff` 用 `diff_trees` 的同一个内部计算（原来叫 `hunks::line_diff`，改名为 `hunks::compute`，公开的名字留给 review 设计的函数），所以两者的 hunk 和偏移不会分开演变；多算的 patch 字节数与 hunk 的行数成正比，结果里不返回。
+- `head_reflog_*` 用的「归档夹具里的 reflog」原来没有：新增 `tests/fixtures/reflog` 和生成它的 `scripts/reflog.sh`，格式是只含 `logs/HEAD` 与 git 读出结果的目录，不是树夹具（[夹具说明](../../crates/git/tests/fixtures/README.md)「reflog 夹具」）。4 MiB 的上限、坏行和末尾不完整的一行用在测试里合成的 reflog 检查，不另存夹具。
+- 「验收」第 4 步原来写的是 `Worktree::head_at`，是 review 设计改成 `head_reflog`、加上 `tree_changes` 之前的名字，已改正。

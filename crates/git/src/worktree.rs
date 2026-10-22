@@ -5,14 +5,15 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lectern_platform::{Read, SafeError, SafeRoot};
+use lectern_platform::{FileKind, Read, SafeError, SafeRoot};
 
 use crate::compare::{self, Base, CompareState, Refresh, Subject};
 use crate::handle::Handle;
 use crate::repo::read_head;
 use crate::tracked::{self, EntryLimits, TrackedPaths};
 use crate::{
-    ChangeSet, GitError, HeadState, Limits, Oid, Repo, RepoPath, WorktreeId, WorktreeInfo,
+    ChangeSet, GitError, HeadReflog, HeadState, Limits, Oid, Repo, RepoPath, WorktreeId,
+    WorktreeInfo,
 };
 
 /// One worktree: its own HEAD, index and files. `Send + Sync`; cloning is
@@ -131,6 +132,37 @@ impl Worktree {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&paths));
         Ok(paths)
+    }
+
+    /// The end of this worktree's HEAD reflog (`logs/HEAD` in its git
+    /// directory, not in the worktree), newest first: lines parsed with
+    /// [`parse_reflog_line`](crate::parse_reflog_line) backwards from the
+    /// end of the file up to and including the first record older than
+    /// `stop` (Unix seconds), at most `max_entries` records and 4 MiB.
+    /// Lines that don't parse are skipped; an incomplete last line (no
+    /// `\n` yet) is ignored. Blocks. `review` finds a session's base and
+    /// the paths' cutoffs with it (docs/design/review.md「改动步与声明」).
+    pub fn head_reflog(&self, stop: i64, max_entries: usize) -> Result<HeadReflog, GitError> {
+        let path = self.git_dir().join("logs").join("HEAD");
+        crate::reflog::head_reflog(&path, self.0.repo.hash(), stop, max_entries)
+    }
+
+    /// Each path's modification time in the worktree, in nanoseconds since
+    /// the epoch, from `SafeRoot::stat`: no symbolic link is followed, a
+    /// link's own time is given. None when nothing is there, when a
+    /// component is a symbolic link or not a directory, when it is neither
+    /// a regular file nor a symbolic link, when it can't be stat'ed, and
+    /// for times outside `i64` nanoseconds; one path never fails the
+    /// others. Reads no content. Blocks.
+    pub fn mtimes(&self, paths: &[RepoPath]) -> Result<Vec<Option<i64>>, GitError> {
+        let mtime = |path: &RepoPath| {
+            let meta = self.0.root.stat(path.as_rel()?).ok()?;
+            match meta.kind {
+                FileKind::File | FileKind::Symlink => i64::try_from(meta.mtime.as_nanos()).ok(),
+                _ => None,
+            }
+        };
+        Ok(paths.iter().map(mtime).collect())
     }
 
     /// Reads one file's raw bytes (no conversion), at most `max`, through

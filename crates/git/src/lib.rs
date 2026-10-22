@@ -4,8 +4,8 @@
 //! worktree files only through `lectern_platform::SafeRoot`.
 //!
 //! Every function blocks (object database, index, worktree) and belongs on a
-//! background task, never the UI thread; `rows`, `inline_changes` and
-//! `merge3` are pure. `Repo`, `Worktree` and `ChangeSet` are `Send + Sync` and hold no
+//! background task, never the UI thread; `rows`, `inline_changes`,
+//! `line_diff` and `merge3` are pure. `Repo`, `Worktree` and `ChangeSet` are `Send + Sync` and hold no
 //! gix handle: each top-level call opens one on the calling thread and
 //! drops it before returning. Functions taking `cancel` return
 //! `GitError::Cancelled` once it is set.
@@ -41,16 +41,16 @@ pub mod testing;
 
 pub use changes::{
     Change, ChangeSet, Detail, FileTexts, Fingerprint, Limits, Side, SideText, Staged, Status,
-    Target, Text, Totals,
+    Target, Text, Totals, TreeChanges,
 };
 pub use compare::{Base, Refresh};
 pub use content::{Content, RawIdentity, Unavailable};
 pub use error::{GitError, UnsupportedRepo};
-pub use hunks::{FileDiff, Hunk};
+pub use hunks::{FileDiff, Hunk, line_diff};
 pub use merge3::{Markers, Merge3, merge3};
 pub use oid::{BlobHasher, HashKind, Oid};
 pub use path::{Mode, RefName, RepoPath};
-pub use reflog::{ReflogAction, ReflogEntry, ReflogParseError, parse_reflog_line};
+pub use reflog::{HeadReflog, ReflogAction, ReflogEntry, ReflogParseError, parse_reflog_line};
 pub use refs::{BranchInfo, CommitInfo, GitTime, RemoteBranch, RemoteInfo, Signature, StashInfo};
 pub use repo::{Discovered, HeadState, Location, Repo, WorktreeId, WorktreeInfo};
 pub use rows::{INLINE_MAX_LINE_BYTES, InlineChanges, Row, inline_changes, rows};

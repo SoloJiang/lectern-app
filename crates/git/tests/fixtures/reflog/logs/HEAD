@@ -1,0 +1,9 @@
+0000000000000000000000000000000000000000 8728fe264737f918c2659c594a7b355e0f545e6d Fixture <fixture@example.com> 1700000000 +0100	commit (initial): first
+8728fe264737f918c2659c594a7b355e0f545e6d eec3909302d9b1ef4b7946623051c197f7f6649e Fixture <fixture@example.com> 1700000100 +0100	commit: second
+eec3909302d9b1ef4b7946623051c197f7f6649e eec3909302d9b1ef4b7946623051c197f7f6649e Fixture <fixture@example.com> 1700000200 +0100	checkout: moving from main to feature
+eec3909302d9b1ef4b7946623051c197f7f6649e 64163dcb0ff6afd97c8a5db49c8a88abee4f56ae Fixture <fixture@example.com> 1700000300 +0100	commit: on feature
+64163dcb0ff6afd97c8a5db49c8a88abee4f56ae eec3909302d9b1ef4b7946623051c197f7f6649e Fixture <fixture@example.com> 1700000400 +0100	checkout: moving from feature to main
+eec3909302d9b1ef4b7946623051c197f7f6649e 52f5799238f3cae3503c497205386f57074d9b80 Fixture <fixture@example.com> 1700000450 +0100	commit: third
+52f5799238f3cae3503c497205386f57074d9b80 eec3909302d9b1ef4b7946623051c197f7f6649e Fixture <fixture@example.com> 1700000500 +0100	reset: moving to HEAD~1
+eec3909302d9b1ef4b7946623051c197f7f6649e 7186d67e1067475ce4119f7ded6bde1ded87867f Fixture <fixture@example.com> 1700000600 +0100	commit (amend): second, amended
+7186d67e1067475ce4119f7ded6bde1ded87867f 40c3594c3969aa47727f25124352fa07338a505c Fixture <fixture@example.com> 1700000700 +0100	merge feature: Merge made by the 'ort' strategy.

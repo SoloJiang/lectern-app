@@ -1,10 +1,151 @@
-//! Parsing reflog lines (docs/design/git.md「引用与历史」). Pure functions,
-//! any thread.
+//! Parsing reflog lines (docs/design/git.md「引用与历史」), pure functions on
+//! any thread, and reading the tail of a worktree's HEAD reflog backwards
+//! (`Worktree::head_reflog`, blocking).
 
 use std::fmt;
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::Path;
 use std::sync::Arc;
 
-use crate::{GitTime, HashKind, Oid, RefName};
+use crate::{GitError, GitTime, HashKind, Oid, RefName, gitdir};
+
+/// The end of a worktree's HEAD reflog (`logs/HEAD` in its git directory),
+/// as [`Worktree::head_reflog`](crate::Worktree::head_reflog) read it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct HeadReflog {
+    /// False without a reflog file (`core.logAllRefUpdates = false`); then
+    /// `entries` is empty and `complete` true.
+    pub exists: bool,
+    /// Newest first.
+    pub entries: Vec<ReflogEntry>,
+    /// The reading reached the file's first line, so the file has no record
+    /// older than the last of `entries`. False when it stopped at
+    /// `max_entries`, at the 4 MiB bound or at the record older than
+    /// `stop`, unless that record is the first line.
+    pub complete: bool,
+}
+
+/// How much of the end of the HEAD reflog `head_reflog` reads at most.
+pub(crate) const HEAD_REFLOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// The reads backwards from the end, one chunk at a time.
+const CHUNK_BYTES: usize = 64 * 1024;
+
+/// When the backwards reading stops.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tail {
+    /// Stop after the first record older than this (Unix seconds).
+    pub stop: i64,
+    pub max_entries: usize,
+    /// Bytes from the end of the file.
+    pub max_bytes: u64,
+    pub chunk: usize,
+}
+
+/// `Worktree::head_reflog` for the reflog at `path`.
+pub(crate) fn head_reflog(
+    path: &Path,
+    hash: HashKind,
+    stop: i64,
+    max_entries: usize,
+) -> Result<HeadReflog, GitError> {
+    let Some(mut file) = gitdir::open(path)? else {
+        return Ok(HeadReflog {
+            exists: false,
+            entries: Vec::new(),
+            complete: true,
+        });
+    };
+    let len = file.metadata()?.len();
+    let tail = Tail {
+        stop,
+        max_entries,
+        max_bytes: HEAD_REFLOG_MAX_BYTES,
+        chunk: CHUNK_BYTES,
+    };
+    let (entries, complete) = read_tail(&mut file, len, hash, tail)?;
+    Ok(HeadReflog {
+        exists: true,
+        entries,
+        complete,
+    })
+}
+
+/// Parses the complete lines of the first `len` bytes of `src` from the
+/// last one backwards, reading at most `tail.max_bytes` from the end in
+/// chunks. Bytes after the last `\n` are a line still being appended and
+/// are dropped, as is a line cut by the byte bound; lines that don't parse
+/// are skipped, as git skips them. Returns the records newest first and
+/// whether the file's first line was reached.
+pub(crate) fn read_tail<R: Read + Seek>(
+    src: &mut R,
+    len: u64,
+    hash: HashKind,
+    tail: Tail,
+) -> io::Result<(Vec<ReflogEntry>, bool)> {
+    let mut entries = Vec::new();
+    if tail.max_entries == 0 {
+        return Ok((entries, len == 0));
+    }
+    let floor = len.saturating_sub(tail.max_bytes);
+    let chunk = tail.chunk.max(1) as u64;
+    // `pending` holds the bytes from `start` that are not parsed yet. Once
+    // the incomplete last line is dropped it ends with `\n`, and every line
+    // in it but the first is known to be whole.
+    let mut start = len;
+    let mut pending: Vec<u8> = Vec::new();
+    let mut trimmed = false;
+    loop {
+        if start > floor {
+            let from = start.saturating_sub(chunk).max(floor);
+            let mut bytes = vec![0; usize::try_from(start - from).unwrap_or(usize::MAX)];
+            src.seek(SeekFrom::Start(from))?;
+            src.read_exact(&mut bytes)?;
+            bytes.extend_from_slice(&pending);
+            pending = bytes;
+            start = from;
+        }
+        let exhausted = start == floor;
+        if !trimmed {
+            match pending.iter().rposition(|&b| b == b'\n') {
+                Some(newline) => pending.truncate(newline + 1),
+                // Nothing but one incomplete line.
+                None if exhausted => return Ok((entries, start == 0)),
+                None => continue,
+            }
+            trimmed = true;
+        }
+        let mut end = pending.len();
+        // Every line that starts after a `\n` in `pending`, newest first.
+        while let Some(newline) = pending[..end - 1].iter().rposition(|&b| b == b'\n') {
+            let at = start + newline as u64 + 1;
+            if take(&pending[newline + 1..end], at, hash, tail, &mut entries) {
+                return Ok((entries, false));
+            }
+            end = newline + 1;
+        }
+        pending.truncate(end);
+        if start == 0 {
+            // The first line of the file.
+            take(&pending, 0, hash, tail, &mut entries);
+            return Ok((entries, true));
+        }
+        if exhausted {
+            // Cut by the byte bound: it may be the end of a longer line.
+            return Ok((entries, false));
+        }
+    }
+}
+
+/// Parses one line (starting at byte `at` of the file) into `entries`.
+/// True when the reading stops here and older lines remain.
+fn take(line: &[u8], at: u64, hash: HashKind, tail: Tail, entries: &mut Vec<ReflogEntry>) -> bool {
+    let Ok(entry) = parse_reflog_line(hash, line) else {
+        return false;
+    };
+    let older = entry.time.seconds < tail.stop;
+    entries.push(entry);
+    (older || entries.len() >= tail.max_entries) && at > 0
+}
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ReflogEntry {

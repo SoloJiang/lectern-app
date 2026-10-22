@@ -607,6 +607,50 @@ impl Repo {
             origin: None,
         }))
     }
+
+    /// The paths whose content or mode differs between two commits' trees
+    /// (or two trees), sorted by path bytes: both paths of a rename, no
+    /// rename detection. Subtrees with the same OID are skipped whole and
+    /// no blob is read. With `old` None (all zeros in a reflog record) it
+    /// is every path of `new`'s tree. More than `max_paths` paths give
+    /// [`TreeChanges::All`]. Names that break the `RepoPath` invariants are
+    /// left out, with everything under them. Blocks; checks `cancel` before
+    /// each pair of trees.
+    pub fn tree_changes(
+        &self,
+        old: Option<Oid>,
+        new: Oid,
+        max_paths: usize,
+        cancel: &AtomicBool,
+    ) -> Result<TreeChanges, GitError> {
+        let handle = self.open_common()?;
+        let old_tree = match old {
+            Some(old) => peel_to_tree(&handle, old)?,
+            None => Oid::empty_tree(self.hash()),
+        };
+        let new_tree = peel_to_tree(&handle, new)?;
+        let walk = match tree_diff::diff(&handle, old_tree, new_tree, max_paths, cancel) {
+            Ok(walk) => walk,
+            Err(GitError::TooManyEntries) => return Ok(TreeChanges::All),
+            Err(err) => return Err(err),
+        };
+        let mut paths: Vec<RepoPath> = walk
+            .entries
+            .iter()
+            .filter_map(|entry| RepoPath::new(&entry.path))
+            .collect();
+        paths.dedup();
+        Ok(TreeChanges::Paths(paths.into()))
+    }
+}
+
+/// What [`Repo::tree_changes`] found.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TreeChanges {
+    /// Sorted by path bytes, each once.
+    Paths(Arc<[RepoPath]>),
+    /// More than `max_paths` paths changed.
+    All,
 }
 
 /// git's default `diff.renameLimit`.
@@ -1015,7 +1059,7 @@ impl Assembler<'_> {
                     return Ok((binary, 0));
                 }
                 let computed = if both {
-                    hunks::line_diff(old, new)
+                    hunks::compute(old, new)
                 } else {
                     hunks::whole(old, new)
                 };

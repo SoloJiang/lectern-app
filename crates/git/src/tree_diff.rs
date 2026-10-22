@@ -154,6 +154,8 @@ fn read_tree(handle: &Handle, tree: Option<Oid>) -> Result<Vec<u8>, GitError> {
     let Some(id) = tree else {
         return Ok(Vec::new());
     };
+    #[cfg(test)]
+    hook::read(id);
     let object = handle
         .try_find_object(id.to_gix())
         .map_err(GitError::from_gix)?
@@ -186,4 +188,25 @@ fn entries(data: &[u8], tree: Option<Oid>, hash: HashKind) -> Result<Vec<Entry<'
     // breaking the merge.
     out.sort_by(tree_order);
     Ok(out)
+}
+
+/// Counting hook: the tree objects `diff` read on this thread.
+#[cfg(test)]
+pub(crate) mod hook {
+    use std::cell::RefCell;
+
+    use crate::Oid;
+
+    thread_local! {
+        static READ: RefCell<Vec<Oid>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn read(tree: Oid) {
+        READ.with(|r| r.borrow_mut().push(tree));
+    }
+
+    /// The trees read since the last call, in order.
+    pub(crate) fn take() -> Vec<Oid> {
+        READ.with(|r| std::mem::take(&mut *r.borrow_mut()))
+    }
 }
