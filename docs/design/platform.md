@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -16,6 +16,7 @@
   - `process::phys_footprint`：一个进程在活动监视器里的「内存」，供 `lectern-bench` 测量（见「进程」）。
   - 原子替换（`SafeRoot::replace_file`）：编辑模式的保存，在同一目录里写临时文件、比较身份后 `renameat` 替换（见「原子替换」）。
   - 线程的 CPU 时钟（`ThreadCpuClock`）：`syntax::health` 判定 grammar 卡死（[ADR 0041](../adr/0041.md)，见「线程的 CPU 时钟」）。
+  - 应用数据目录（`dirs::app_data`）：不能重建的用户数据的位置，review 的标注日志用它（[ADR 0044](../adr/0044.md)，见「应用数据目录」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -795,6 +796,45 @@ impl ThreadCpuClock {
 - `thread_cpu_clocks_are_released`：在同一个线程上依次创建并 drop 70 000 个时钟都成功（macOS 上超过一个端口的 65 535 个用户引用，引用没有泄漏）。
 - `thread_cpu_clock_is_send_and_sync`；其他平台上 `thread_cpu_is_unsupported_elsewhere`。
 
+## 应用数据目录
+
+review（[#15](https://github.com/SoloJiang/lectern-app/issues/15)）的前置条件 D 的 `platform` 部分（[review 设计「对其他 crate 的要求」](review.md#对其他-crate-的要求)、[ADR 0044](../adr/0044.md)）。应用数据目录存放不能重建的用户数据：`app` 取其中的 `review/` 作为 `ReviewDeps::data_dir`（标注日志），`usage` 的数据库以后也放在这里。可以随时删除重建的派生数据归 `cache`，不放这里。
+
+### 接口
+
+模块 `lectern_platform::dirs`（`dirs.rs`）。
+
+```rust
+pub mod dirs {
+    /// 应用数据目录。macOS 是 `$HOME/Library/Application Support/Lectern`；其他平台（Linux，供 CI 测试）是
+    /// `$XDG_DATA_HOME/lectern`，`XDG_DATA_HOME` 未设置、为空或是相对路径时是 `$HOME/.local/share/lectern`。
+    /// 用到的 `HOME` 未设置、为空或是相对路径时为 None。
+    /// 只读这两个环境变量：不创建目录，不检查目录是否存在，不做其他 IO，任何线程可调用。
+    pub fn app_data() -> Option<PathBuf>;
+}
+```
+
+### 规则
+
+- 目录名：macOS 用 `Lectern`，与 [ADR 0018](../adr/0018.md) 的插件目录 `~/Library/Application Support/Lectern/plugins/` 是同一个目录。Linux 按 XDG 的惯例用小写的 `lectern`。
+- `HOME` 只取环境变量。`std::env::home_dir` 在变量缺失时还会查询用户数据库（`getpwuid_r`），那一步是 IO，这里不做；从 Finder、Dock 或终端启动的进程都有 `HOME`。
+- 相对路径视为未设置：XDG Base Directory 规范要求忽略相对路径；`HOME` 是相对路径时拼出的目录随进程的工作目录变化，同样忽略。
+- 路径的字节原样保留，不要求是 UTF-8。
+- 返回 None 时的处理由调用方决定，`app` 的处理随前置条件 D 的 `app` 部分规定。
+- 两个平台的拼接是纯函数（`mac_app_data`、`xdg_app_data`），测试构建在所有平台上都编译这两个函数；`app_data` 读环境变量，按 `cfg(target_os = "macos")` 选其中一个。没有 `unsafe`，不新增依赖。
+
+### 测试
+
+写在 `crates/platform/src/dirs/tests.rs`。测试把变量的值直接传给两个纯函数，不修改进程的环境变量：edition 2024 里 `std::env::set_var` 是 `unsafe`，`cargo test` 在同一进程的多个线程上并行运行测试。
+
+- `app_data_xdg_data_home_set_is_used`：`XDG_DATA_HOME` 是绝对路径时为它下面的 `lectern`，末尾的 `/` 不产生空的一级；这时不需要 `HOME`。
+- `app_data_xdg_data_home_unset_empty_or_relative_falls_back_to_home`：`XDG_DATA_HOME` 未设置、为空、是相对路径（`data/share`、`./share`、`~/share`）时为 `$HOME/.local/share/lectern`。
+- `app_data_without_a_usable_home_is_none`：`HOME` 未设置、为空、是相对路径（含 `~`）时，`XDG_DATA_HOME` 不可用的 Linux 规则和 macOS 规则都为 None。
+- `app_data_macos_is_under_application_support`：`/Users/dev` 和 `/Users/dev/` 都为 `/Users/dev/Library/Application Support/Lectern`。
+- `app_data_keeps_non_utf8_bytes`：`HOME`、`XDG_DATA_HOME` 里非 UTF-8 的字节原样出现在结果里。
+- `app_data_does_not_create_the_directory`：`HOME` 和 `XDG_DATA_HOME` 指向临时目录下不存在的路径，三种结果都正确，临时目录之后仍是空的。
+- `app_data_reads_the_process_environment`：只读当前进程的 `HOME`、`XDG_DATA_HOME`，`app_data()` 与对应平台的纯函数的结果相同。
+
 ## 未决问题
 
 没有需要产品决定的问题。技术问题都已在上文决定。
@@ -827,6 +867,13 @@ impl ThreadCpuClock {
 - `git diff origin/main -- Cargo.lock` 为空（`libc` 已在 Cargo.lock，也已是本 crate 在 macOS 上的依赖）。
 - `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
 - 本文的状态行、「实际验证」「与设计的差异」，file_reader 设计「验收」的前置条件 C、G 标为已完成。
+
+应用数据目录（review 前置条件 D 的 `platform` 部分）一个实现 PR，写 `Refs #15`，在 review 第 4 步之前合并：
+
+- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「应用数据目录」的 `app_data_*`；原有的测试结果不变。
+- `git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果。
+- `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
+- 本文的状态行、「实际验证」，review 设计的状态行写明前置条件 D 的 `platform` 部分已实现。
 
 ## 实际验证
 
@@ -867,6 +914,10 @@ impl ThreadCpuClock {
   - `just check`、`just test`（整个工作区 1563 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：macOS 的 `thread_info`、`pthread_mach_thread_np`、手写的 `mach_port_mod_refs`、`mach_port_deallocate`、`mach_task_self_` 通过了类型检查和 clippy，没有运行；macOS 上的 `thread_cpu_*` 和三个后端上的 `replace_file_*` 由 macOS CI 运行。
   - 验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -l 'unsafe' crates/platform/src/safe_read` 只列出 `tests.rs`；`rg -n 'mach_|thread_info|pthread_' crates --glob '!crates/platform/**' -t rust` 没有结果。
   - 测试环境以 root 运行，目录没有写权限时的 `Io(PermissionDenied)` 没有测试（root 不受权限位限制）。
+- 应用数据目录（review 前置条件 D 的 `platform` 部分，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）在 Linux（x86_64 容器）上：
+  - `just test -p lectern-platform` 93 个测试通过，其中新增 7 个 `app_data_*`，macOS 规则的 `app_data_macos_is_under_application_support` 等也在 Linux 上运行；原有的 86 个结果不变。用 `cargo test` 在同一个进程里运行，7 个也都通过（测试不修改环境变量）。
+  - `just check`、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：macOS 上 `app_data` 选 `mac_app_data`、非测试构建不编译 `xdg_app_data`，没有未使用的函数；macOS 上的 `app_data_reads_the_process_environment` 由 macOS CI 运行。
+  - 验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果。
 
 ## 与设计的差异
 

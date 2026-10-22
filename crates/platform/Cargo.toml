@@ -1,6 +1,6 @@
 [package]
 name = "lectern-platform"
-description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
+description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data directory; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
