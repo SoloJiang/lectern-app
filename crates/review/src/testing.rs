@@ -1,8 +1,17 @@
 //! Test and benchmark support (the `test-support` feature).
 //!
-//! The annotation log fixture of `review/log_load_16k` (step 1) and the
-//! change chain fixture of `review/chain_3000_lines` (step 2);
-//! `FakeSessions`, `FakeProjects` and `Driven` come with step 3.
+//! The annotation log fixture of `review/log_load_16k` (step 1), the
+//! change chain fixture of `review/chain_3000_lines` (step 2), and for the
+//! review engine (step 3) `FakeSessions`, `FakeProjects`, `Driven`, a HEAD
+//! reflog writer and the fixture of the `review/open_session_*` benches.
+
+mod driven;
+mod fake;
+mod fixture;
+
+pub use driven::{Driven, ReflogLine, write_reflog};
+pub use fake::{Calls, FakeProjects, FakeSessions};
+pub use fixture::{CutoffRun, MarkSeenFixture, SessionFixture};
 
 use std::io;
 use std::path::Path;

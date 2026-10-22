@@ -4405,6 +4405,7 @@ version = "0.0.0"
 dependencies = [
  "insta",
  "lectern-cache",
+ "lectern-executor",
  "lectern-git",
  "lectern-services",
  "serde",

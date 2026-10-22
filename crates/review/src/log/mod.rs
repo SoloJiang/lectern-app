@@ -119,6 +119,19 @@ impl Index {
         self.marks.get(target)?.get(identity).map(|e| &e.record)
     }
 
+    /// The time of the most recent `seen` kept for `target`: a narrative
+    /// turn that started after it is `after_last_seen`.
+    pub(crate) fn last_seen(&self, target: &TargetKey) -> Option<Timestamp> {
+        self.marks
+            .get(target)?
+            .values()
+            .filter_map(|e| match &e.record {
+                Record::Seen { at, .. } => Some(*at),
+                _ => None,
+            })
+            .max()
+    }
+
     /// The session's base, the first one recorded.
     pub(crate) fn base(&self, session: &SessionId) -> Option<&BaseRecord> {
         match &self.bases.get(session)?.record {
@@ -149,6 +162,7 @@ impl Index {
         self.pending = batch;
     }
 
+    #[cfg(test)]
     pub(crate) fn pending(&self) -> &[Record] {
         &self.pending
     }
@@ -306,6 +320,7 @@ pub(crate) struct ReadReport {
 }
 
 /// What a [`flush`] did.
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct Flushed {
     pub appended: usize,
@@ -699,6 +714,9 @@ impl LogFile {
 /// Appends the queued records of `index` to `file` and compacts when due.
 /// When the append fails the records go back to the front of the queue and
 /// the error is returned; a failed compaction is reported in `Flushed`.
+/// The tests' flush: the engine does the same in steps (`engine::flush`),
+/// so that no lock on the index is held while the file is written.
+#[cfg(test)]
 pub(crate) fn flush(file: &mut LogFile, index: &mut Index, now: Timestamp) -> io::Result<Flushed> {
     let batch = index.take_pending();
     if let Err(e) = file.append(&batch) {

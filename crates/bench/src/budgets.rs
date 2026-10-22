@@ -1707,6 +1707,43 @@ pub static BUDGETS: &[Budget] = &[
     // (step 2) One file's change chain: 3000 lines, 40 `Replace` steps,
     // each with its `line_diff`, no `load`. Recorded.
     share("review/chain_3000_lines", RECORD, REVIEW, ACTIVE, Time),
+    // (step 3) The review engine through `testing::Driven`, on the fixture
+    // of「每天的仓库规模」(2000 commits, 300 reflog records, 50 sessions):
+    // `open` to the first `Ready` snapshot with the `review.*` namespaces
+    // empty / warm; to the last background snapshot; the cutoff table with
+    // every `tree_changes` a miss; the other 49 files' attribution.
+    share(
+        "review/open_session_50",
+        &[median(Limit::TimeBelow(ms(35)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "review/open_session_50_warm",
+        &[median(Limit::TimeBelow(ms(20)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
+    share("review/open_session_settled", RECORD, REVIEW, ACTIVE, Time),
+    share("review/cutoffs_cold", RECORD, REVIEW, ACTIVE, Time),
+    share("review/attribute_session_50", RECORD, REVIEW, ACTIVE, Time),
+    // The first file's `Prepare` to `Prepared`; a seen mark on 5000 files.
+    share(
+        "review/rows_first",
+        &[median(Limit::TimeBelow(ms(3)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "review/mark_seen_5000",
+        &[median(Limit::TimeBelow(us(200)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
     // ---- end review ----
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),
     share("executor/wake_1000x100", RECORD, EXECUTOR, ACTIVE, Time),

@@ -4,17 +4,29 @@
 //! Step 1 of the design: the noise list and rule grouping ([`noise`]), the
 //! annotation log (`log`, ADR 0044) and the three seen states (`seen`).
 //! Step 2: change chains, line provenance and attribution, the turn-history
-//! digest and the `review.attribution` cache value (`chain`). The review
-//! engine that uses them comes with step 3.
+//! digest and the `review.attribution` cache value (`chain`). Step 3: the
+//! review engine (`engine`) with its claims (`claims`), path cutoffs
+//! (`cutoff`), snapshots, commands, rows and the version LRU (`lru`),
+//! driven without the plugin by `testing::Driven`. The plugin comes with
+//! step 4.
 
-#[allow(dead_code, reason = "the review engine (step 3) builds chains")]
+// Without `test-support` nothing calls the engine until the plugin (step 4).
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod chain;
-#[allow(dead_code, reason = "the review engine (step 3) arranges groups")]
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+mod claims;
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+mod cutoff;
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+mod engine;
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod group;
-#[allow(dead_code, reason = "the review engine (step 3) uses the log")]
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod log;
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+mod lru;
 pub mod noise;
-#[allow(dead_code, reason = "the review engine (step 3) uses seen states")]
+#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod seen;
 
 #[cfg(any(test, feature = "test-support"))]

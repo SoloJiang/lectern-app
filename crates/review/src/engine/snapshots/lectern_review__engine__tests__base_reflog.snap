@@ -1,0 +1,10 @@
+---
+source: crates/review/src/engine/tests.rs
+expression: "render(&d, id)"
+---
+base Reflog 51017795
+unclaimed 0 progress Progress { total: 1, seen: 0, changed_since_seen: 0 }
+file a.txt Modified Lines turns [(0, 1)] commands [] others [] drifted_hunks 0 seen Unseen
+  hunk lines true turns [(0, 1)] others [] drifted 0
+turn 0:1 t1 "prompt t1" after_last_seen false
+  step a.txt calls ["c1", "c2"] +2 -1 Aligned All
