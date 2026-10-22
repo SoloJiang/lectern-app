@@ -11,10 +11,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use lectern_logging::{debug, warn};
+use lectern_logging::{debug, info, warn};
 use lectern_services::session::{Agent, Batch, Cursor, Record, SessionKey, UsageRecord};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use super::cold::{self, Frozen};
+use super::dedup::{Deltas, FactDelta};
 use super::schema::{LOCATION_DIR, LOCATION_GIT, PROJECT_GIT};
 use super::{Store, StoreError, dedup};
 use crate::key;
@@ -44,6 +46,10 @@ pub(crate) struct SessionInfo<'a> {
 /// What [`Store::ingest`] writes.
 pub(crate) struct Ingest<'a> {
     pub(crate) session: SessionInfo<'a>,
+    /// The cursor the batch was read from. The batch is discarded when the
+    /// session's saved cursor is no longer this one (a salvage reset it
+    /// while the batch was being read).
+    pub(crate) from: &'a Cursor,
     pub(crate) batch: &'a Batch,
     /// The place of every cwd of the batch's `Context` records.
     pub(crate) places: &'a HashMap<PathBuf, Place>,
@@ -106,6 +112,22 @@ pub(crate) struct Ingested {
     pub(crate) replay_started: bool,
     pub(crate) replay_done: bool,
     pub(crate) at_end: bool,
+    /// Nothing was written: the saved cursor is not the one the batch was
+    /// read from. The session is read again from the saved one.
+    pub(crate) stale: bool,
+    /// Usage records of a replay skipped because their month is archived
+    /// and the cold data already has this session's records of it.
+    pub(crate) kept_cold: usize,
+    /// The fact rows the batch added and removed, for the watched
+    /// snapshots.
+    pub(crate) facts: Vec<FactDelta>,
+    /// Facts changed in a way `facts` does not say: the watched snapshots
+    /// are computed again.
+    pub(crate) facts_unknown: bool,
+    /// The session may include inherited usage (`inheritance_unknown`).
+    pub(crate) inheritance_unknown: bool,
+    /// The ingest commit counter (`meta.commits`) of this batch.
+    pub(crate) commit: i64,
     /// Cursor offsets before and after.
     pub(crate) from: u64,
     pub(crate) to: u64,
@@ -235,14 +257,59 @@ impl Store {
     }
 
     /// Writes a batch, its cursor and the re-chosen keys in one transaction.
+    ///
+    /// Two things are read inside the transaction, never before it: the
+    /// saved cursor, which must still be the one the batch was read from (a
+    /// salvage may have reset it meanwhile; the batch is then discarded and
+    /// `Ingested::stale` set), and whether any source still waits for a
+    /// salvage repair (`usage_source.repaired`).
     pub(crate) fn ingest(&self, input: &Ingest<'_>) -> Result<Ingested, StoreError> {
         #[cfg(test)]
         let fail_before_cursor = std::mem::take(&mut super::lock(&self.faults).before_cursor);
         #[cfg(not(test))]
         let fail_before_cursor = false;
-        let repairing = self.repairing();
-        self.transaction(|tx| ingest(tx, input, fail_before_cursor, repairing))
+        self.transaction(|tx| {
+            if saved_cursor(tx, input.session.key)? != input.from.to_bytes() {
+                debug!("batch discarded: the saved cursor moved"; from = input.from.offset());
+                return Ok(Ingested {
+                    stale: true,
+                    from: input.from.offset(),
+                    ..Ingested::default()
+                });
+            }
+            let repairing = super::any_repaired(tx)?;
+            let frozen = cold::frozen(tx)?;
+            let mut out = ingest(tx, input, fail_before_cursor, repairing, &frozen)?;
+            // Counts the commits whose facts snapshots apply as deltas.
+            out.commit = tx
+                .prepare_cached(
+                    "INSERT INTO meta (name, value) VALUES ('commits', 1)
+                     ON CONFLICT (name) DO UPDATE SET value = value + 1
+                     RETURNING value",
+                )?
+                .query_row([], |r| r.get(0))?;
+            Ok(out)
+        })
     }
+}
+
+/// The saved cursor's bytes; `START`'s for a session the database does not
+/// have, as [`Store::cursor`] gives.
+fn saved_cursor(tx: &Connection, key: &SessionKey) -> rusqlite::Result<Vec<u8>> {
+    let bytes: Option<Vec<u8>> = tx
+        .prepare_cached(
+            "SELECT s.cursor FROM session s
+             JOIN intern a ON a.id = s.source JOIN intern b ON b.id = s.sid
+             WHERE a.text = ?1 AND b.text = ?2",
+        )?
+        .query_row(params![key.source.0.as_bytes(), key.id.as_bytes()], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(bytes
+        .and_then(|b| Cursor::from_bytes(&b))
+        .unwrap_or(Cursor::START)
+        .to_bytes())
 }
 
 fn ingest(
@@ -250,11 +317,13 @@ fn ingest(
     input: &Ingest<'_>,
     fail_before_cursor: bool,
     repairing: bool,
+    frozen: &Frozen,
 ) -> rusqlite::Result<Ingested> {
     let mut ids = Ids::default();
     let info = &input.session;
     let batch = input.batch;
-    let mut row = session_row(tx, &mut ids, info)?;
+    let deltas = &mut Deltas::collect();
+    let mut row = session_row(tx, &mut ids, info, frozen, deltas)?;
     let mut keys: HashSet<Vec<u8>> = HashSet::new();
     let mut out = Ingested {
         records: batch.records.len(),
@@ -266,7 +335,7 @@ fn ingest(
 
     if batch.reset && !row.fresh {
         if let Some(unfinished) = row.replay {
-            drop_generation(tx, row.id, unfinished, &mut keys)?;
+            drop_generation(tx, row.id, unfinished, &mut keys, frozen)?;
         }
         let next = row.generation.max(row.replay.unwrap_or(row.generation)) + 1;
         row.replay = Some(next);
@@ -277,6 +346,10 @@ fn ingest(
     let mut state = gen_state(tx, &mut ids, row.id, target, info.start)?;
     let mut next_seq: Option<i64> = None;
     let mut turns: HashMap<&str, (i64, i64)> = HashMap::new();
+    // Per archived (frozen) month, during a replay: whether the session's
+    // records of that month are already in the database (cold, or hot in an
+    // older generation). They then stay as they are: cold data rules.
+    let mut keep_cold: HashMap<cold::Month, bool> = HashMap::new();
 
     for rec in &batch.records {
         match &rec.value {
@@ -292,6 +365,11 @@ fn ingest(
                 }
             }
             Record::TurnStarted { turn, at } => {
+                // The turn is cold already: not written again.
+                if frozen.contains(at.0) && kept(tx, &mut keep_cold, &row, target, at.0)? {
+                    state.turn = None;
+                    continue;
+                }
                 let seq = match next_seq {
                     Some(s) => s,
                     None => tx
@@ -323,6 +401,12 @@ fn ingest(
                 .execute(params![row.id, target, tid, at.0])?;
             }
             Record::Usage(usage) => {
+                if frozen.contains(usage.at.0)
+                    && kept(tx, &mut keep_cold, &row, target, usage.at.0)?
+                {
+                    out.kept_cold += 1;
+                    continue;
+                }
                 let (turn, location) = match &usage.turn {
                     Some(t) => match turns.get(&*t.0) {
                         Some(&found) => (Some(found.0), found.1),
@@ -356,22 +440,27 @@ fn ingest(
                     turn,
                     location,
                     repairing,
+                    frozen: frozen.contains(usage.at.0),
                 };
                 let main = key::encode(&usage.key);
-                insert_source(tx, &source, 0, &main, model, usage, &usage.tokens)?;
+                let record = Part {
+                    part: 0,
+                    key: &main,
+                    model,
+                    raw: &usage.tokens,
+                };
+                insert_source(tx, &source, record, usage, deltas)?;
                 out.sources += 1;
                 if let Some(advisor) = &usage.advisor {
                     let advisor_key = key::advisor(main.clone());
                     let advisor_model = ids.text(tx, advisor.model.as_bytes())?;
-                    insert_source(
-                        tx,
-                        &source,
-                        1,
-                        &advisor_key,
-                        advisor_model,
-                        usage,
-                        &advisor.tokens,
-                    )?;
+                    let part = Part {
+                        part: 1,
+                        key: &advisor_key,
+                        model: advisor_model,
+                        raw: &advisor.tokens,
+                    };
+                    insert_source(tx, &source, part, usage, deltas)?;
                     out.sources += 1;
                     keys.insert(advisor_key);
                 }
@@ -391,7 +480,7 @@ fn ingest(
     if batch.at_end
         && let Some(replay) = row.replay
     {
-        drop_generation(tx, row.id, row.generation, &mut keys)?;
+        drop_generation(tx, row.id, row.generation, &mut keys, frozen)?;
         row.generation = replay;
         row.replay = None;
         out.replay_done = true;
@@ -425,8 +514,14 @@ fn ingest(
 
     out.keys = keys.len();
     for key in &keys {
-        dedup::reselect(tx, key)?;
+        dedup::reselect(tx, key, frozen, deltas)?;
     }
+    if out.kept_cold > 0 {
+        info!("replayed records of archived months kept cold"; records = out.kept_cold);
+    }
+    out.facts = std::mem::take(&mut deltas.facts);
+    out.facts_unknown = deltas.unknown;
+    out.inheritance_unknown = info.inheritance_unknown;
     debug!(
         "batch stored";
         from = out.from,
@@ -439,6 +534,26 @@ fn ingest(
     Ok(out)
 }
 
+/// Whether a record of a frozen month is already in the database for this
+/// session (cold, or hot in an older generation during a replay): it is
+/// then not written again (docs/design/usage.md「之后到达的旧记录」: cold data
+/// rules). Remembered per month for the batch.
+fn kept(
+    tx: &Connection,
+    memo: &mut HashMap<cold::Month, bool>,
+    row: &SessionRow,
+    target: i64,
+    at: i64,
+) -> rusqlite::Result<bool> {
+    let month = cold::month_of(at);
+    if let Some(&k) = memo.get(&month) {
+        return Ok(k);
+    }
+    let k = cold::session_has_month(tx, row.id, target, row.replay.is_some(), month)?;
+    memo.insert(month, k);
+    Ok(k)
+}
+
 /// A session row as found: ID, generation, replay, cursor, agent.
 type FoundSession = (i64, i64, Option<i64>, Vec<u8>, i64);
 
@@ -447,6 +562,8 @@ fn session_row(
     tx: &Connection,
     ids: &mut Ids,
     info: &SessionInfo<'_>,
+    frozen: &Frozen,
+    deltas: &mut Deltas,
 ) -> rusqlite::Result<SessionRow> {
     let source = ids.text(tx, info.key.source.0.as_bytes())?;
     let sid = ids.text(tx, info.key.id.as_bytes())?;
@@ -469,10 +586,15 @@ fn session_row(
     match found {
         Some((id, generation, replay, cursor, old_agent)) => {
             // The agent changes only when a salvage lost it: the session's
-            // facts carry the agent too.
+            // facts carry the agent too (not those of frozen months).
             if old_agent != agent {
-                tx.prepare_cached("UPDATE fact SET agent = ?2 WHERE session = ?1")?
-                    .execute(params![id, agent])?;
+                tx.prepare_cached(&format!(
+                    "UPDATE fact SET agent = ?2 WHERE session = ?1 AND NOT {}",
+                    frozen.sql("at")
+                ))?
+                .execute(params![id, agent])?;
+                dedup::rebuild_buckets(tx)?;
+                deltas.unknown = true;
             }
             tx.prepare_cached(
                 "UPDATE session SET agent = ?2, parent_source = ?3, parent_sid = ?4,
@@ -563,25 +685,35 @@ fn turn_of(
         .optional()
 }
 
-/// Deletes a generation's rows, collecting the keys to choose again.
+/// Deletes a generation's rows, collecting the keys to choose again. Rows
+/// of frozen months stay (docs/design/usage.md「冷热分层」: an archived
+/// month's data is not replaced by a replay); they keep their old
+/// generation number.
 fn drop_generation(
     tx: &Connection,
     session: i64,
     generation: i64,
     keys: &mut HashSet<Vec<u8>>,
+    frozen: &Frozen,
 ) -> rusqlite::Result<()> {
+    let hot_source = format!("NOT {}", frozen.sql("at"));
     {
-        let mut stmt = tx.prepare_cached(
-            "SELECT DISTINCT key FROM usage_source WHERE session = ?1 AND gen = ?2",
-        )?;
+        let mut stmt = tx.prepare_cached(&format!(
+            "SELECT DISTINCT key FROM usage_source WHERE session = ?1 AND gen = ?2 AND {hot_source}"
+        ))?;
         let mut rows = stmt.query(params![session, generation])?;
         while let Some(r) = rows.next()? {
             keys.insert(r.get(0)?);
         }
     }
-    for table in ["usage_source", "turn", "session_gen"] {
+    let hot_turn = format!("NOT {}", frozen.sql("started_at"));
+    for (table, hot) in [
+        ("usage_source", hot_source.as_str()),
+        ("turn", hot_turn.as_str()),
+        ("session_gen", "1"),
+    ] {
         tx.execute(
-            &format!("DELETE FROM {table} WHERE session = ?1 AND gen = ?2"),
+            &format!("DELETE FROM {table} WHERE session = ?1 AND gen = ?2 AND {hot}"),
             params![session, generation],
         )?;
     }
@@ -596,8 +728,10 @@ struct Source {
     inherited: bool,
     turn: Option<i64>,
     location: i64,
-    /// Sources repaired by a salvage may exist (`Store::repairing`).
+    /// Sources repaired by a salvage may exist (`usage_source.repaired`).
     repairing: bool,
+    /// The record falls in a frozen month: its facts must not change.
+    frozen: bool,
 }
 
 fn clamp(n: u64) -> i64 {
@@ -621,15 +755,36 @@ const UPSERT_SOURCE: &str = "INSERT INTO usage_source
      WHERE usage_source.repaired = 1
      RETURNING id";
 
+/// The same in a frozen month: its facts stay as archived, so the record
+/// read again only clears the mark.
+const UNMARK_SOURCE: &str = "INSERT INTO usage_source
+       (key, session, gen, pos, seq, part, at, turn, location, model,
+        input, output, cache_read, cache_write, sidechain, superseded, inherited)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+     ON CONFLICT (session, gen, pos, seq, part) DO UPDATE SET repaired = 0
+     WHERE usage_source.repaired = 1";
+
+/// One part of a usage record: the record itself (0) or its advisor (1).
+struct Part<'a> {
+    part: i64,
+    key: &'a [u8],
+    model: i64,
+    raw: &'a lectern_services::session::RawTokens,
+}
+
 fn insert_source(
     tx: &Connection,
     s: &Source,
-    part: i64,
-    key: &[u8],
-    model: i64,
+    p: Part<'_>,
     usage: &UsageRecord,
-    raw: &lectern_services::session::RawTokens,
+    deltas: &mut Deltas,
 ) -> rusqlite::Result<()> {
+    let Part {
+        part,
+        key,
+        model,
+        raw,
+    } = p;
     let t = normalize(raw);
     let values = params![
         key,
@@ -654,14 +809,17 @@ fn insert_source(
         tx.prepare_cached(INSERT_SOURCE)?.execute(values)?;
         return Ok(());
     }
+    if s.frozen {
+        tx.prepare_cached(UNMARK_SOURCE)?.execute(values)?;
+        return Ok(());
+    }
     let written: Option<i64> = tx
         .prepare_cached(UPSERT_SOURCE)?
         .query_row(values, |r| r.get(0))
         .optional()?;
     // A replaced row's facts are stale: the key is chosen again from scratch.
     if let Some(id) = written {
-        tx.prepare_cached("DELETE FROM fact WHERE source = ?1")?
-            .execute(params![id])?;
+        dedup::delete_facts(tx, id, deltas)?;
         tx.prepare_cached("DELETE FROM usage_value WHERE key = ?1 AND source = ?2")?
             .execute(params![key, id])?;
     }

@@ -9,6 +9,7 @@
 //! `usage.db.corrupt-<ms>`. A salvage cut short leaves `usage.db` as it was
 //! and the half-built copy behind, and the next open salvages again.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,8 @@ use rusqlite::{Connection, OpenFlags, params};
 
 use super::schema::{OBSERVATION_TABLES, Schema};
 use super::{
-    DB_FILE, Files, Mode, configure, create, dedup, ingest, open_connection, set_meta, sync_dir,
+    DB_FILE, Files, Mode, cold, configure, create, dedup, ingest, open_connection, segment,
+    set_meta, sync_dir,
 };
 
 /// The copy a salvage builds before it replaces `usage.db`.
@@ -146,12 +148,21 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
         .is_ok()
     {
         for &table in OBSERVATION_TABLES {
-            let (c, l) = copy_table(&out, table);
+            let (c, l) = copy_table(&out, table, "1");
             info!("salvaged table"; table = table, copied = c, lost = l);
             copied += c;
             lost += l;
         }
+        let (bad, cold_top) = drop_bad_segments(&out)?;
+        if bad > 0 {
+            error!("cold segments that do not decode stay in the kept file"; segments = bad);
+            lost += bad;
+        }
         copy_meta(&out);
+        let (c, l) = copy_frozen_derived(&out)?;
+        copied += c;
+        lost += l;
+        raise_sequences(&out, &cold_top)?;
         out.execute_batch("DETACH DATABASE old;")?;
         if lost > 0 {
             repaired = repair_references(&out)?;
@@ -285,10 +296,122 @@ fn read_only_uri(path: &Path) -> String {
     out
 }
 
-/// Copies `old.<table>` into `main.<table>` by rowid ranges; a range that
-/// fails is halved until single rowids, which are skipped. Returns (rows
-/// copied, rowids lost).
-fn copy_table(conn: &Connection, table: &'static str) -> (u64, u64) {
+/// Segments copied from the old file that do not decode: deleted from the
+/// copy (the kept file still has them) and counted. Also gives the highest
+/// row ID per table in the segments that decode.
+fn drop_bad_segments(conn: &Connection) -> rusqlite::Result<(u64, HashMap<String, i64>)> {
+    let mut bad = Vec::new();
+    let mut top: HashMap<String, i64> = HashMap::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, data FROM main.cold_part")?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let data: Vec<u8> = r.get(1)?;
+            match segment::decompress(&data).and_then(|raw| segment::decode(&raw)) {
+                None => bad.push(r.get::<_, i64>(0)?),
+                Some(seg) => {
+                    let Some(i) = seg.column("id") else { continue };
+                    let max = seg.rows.iter().filter_map(|row| match row[i] {
+                        rusqlite::types::Value::Integer(id) => Some(id),
+                        _ => None,
+                    });
+                    if let Some(max) = max.max() {
+                        let slot = top.entry(seg.table.clone()).or_insert(0);
+                        *slot = (*slot).max(max);
+                    }
+                }
+            }
+        }
+    }
+    for id in &bad {
+        conn.execute("DELETE FROM main.cold_part WHERE id = ?1", params![id])?;
+    }
+    Ok((bad.len() as u64, top))
+}
+
+/// Source and turn IDs are never reused (`AUTOINCREMENT`), but the copy
+/// does not carry `sqlite_sequence`: when the highest rows were archived
+/// (or lost), new rows would take IDs that cold rows already have, and a
+/// source at or below a frozen month's `archive_mark` would never be
+/// counted. Each sequence starts above the surviving rows, the old file's
+/// sequence when it is readable, the IDs in the cold segments and, for
+/// the sources, every `archive_mark`.
+fn raise_sequences(conn: &Connection, cold_top: &HashMap<String, i64>) -> rusqlite::Result<()> {
+    let old: HashMap<String, i64> = conn
+        .prepare("SELECT name, seq FROM old.sqlite_sequence")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect()
+        })
+        .unwrap_or_default();
+    let marks: i64 = conn.query_row(
+        "SELECT coalesce(max(value), 0) FROM main.meta
+         WHERE name >= 'archive_mark:' AND name < 'archive_mark;'",
+        [],
+        |r| r.get(0),
+    )?;
+    for table in ["usage_source", "turn"] {
+        let hot: i64 = conn.query_row(
+            &format!("SELECT coalesce(max(id), 0) FROM main.{table}"),
+            [],
+            |r| r.get(0),
+        )?;
+        let mut floor = hot
+            .max(old.get(table).copied().unwrap_or(0))
+            .max(cold_top.get(table).copied().unwrap_or(0));
+        if table == "usage_source" {
+            floor = floor.max(marks);
+        }
+        let updated = conn.execute(
+            "UPDATE main.sqlite_sequence SET seq = max(seq, ?2) WHERE name = ?1",
+            params![table, floor],
+        )?;
+        if updated == 0 && floor > 0 {
+            conn.execute(
+                "INSERT INTO main.sqlite_sequence (name, seq) VALUES (?1, ?2)",
+                params![table, floor],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The derived rows of frozen months (docs/design/usage.md「冷热分层」): a
+/// rebuild leaves those months alone, and their sources may already be
+/// cold, so their facts and counted sources are copied rather than
+/// rebuilt. Returns (rows copied, rows lost).
+fn copy_frozen_derived(conn: &Connection) -> rusqlite::Result<(u64, u64)> {
+    let frozen = cold::frozen(conn)?;
+    if frozen.is_empty() {
+        return Ok((0, 0));
+    }
+    let (mut copied, mut lost) = copy_table(conn, "fact", &frozen.sql("at"));
+    match conn.execute(
+        "INSERT OR IGNORE INTO main.usage_value
+         SELECT * FROM old.usage_value WHERE source IN (SELECT source FROM main.fact)",
+        [],
+    ) {
+        Ok(n) => copied += n as u64,
+        Err(_) => lost += 1,
+    }
+    info!("salvaged frozen derived rows"; copied = copied, lost = lost);
+    Ok((copied, lost))
+}
+
+/// Copies `old.<table>` into `main.<table>` by rowid ranges, the rows where
+/// `filter` holds; a range that fails is halved until single rowids, which
+/// are skipped. Returns (rows copied, rowids lost).
+fn copy_table(conn: &Connection, table: &'static str, filter: &str) -> (u64, u64) {
+    // An older file may not have the table at all (the cold tables of
+    // version 2): nothing to copy, nothing lost.
+    let exists = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM old.sqlite_schema WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |r| r.get::<_, bool>(0),
+    );
+    if matches!(exists, Ok(false)) {
+        return (0, 0);
+    }
     let bound = |f: &str| -> Result<Option<i64>, ()> {
         conn.query_row(&format!("SELECT {f}(rowid) FROM old.{table}"), [], |r| {
             r.get::<_, Option<i64>>(0)
@@ -305,8 +428,9 @@ fn copy_table(conn: &Connection, table: &'static str) -> (u64, u64) {
             hi.ok().flatten().unwrap_or(ROWID_CEILING),
         ),
     };
-    let sql =
-        format!("INSERT INTO main.{table} SELECT * FROM old.{table} WHERE rowid BETWEEN ?1 AND ?2");
+    let sql = format!(
+        "INSERT INTO main.{table} SELECT * FROM old.{table} WHERE rowid BETWEEN ?1 AND ?2 AND {filter}"
+    );
     // The old table's columns cannot even be read: nothing of it is copied.
     let Ok(mut insert) = conn.prepare(&sql) else {
         return (0, 1);
@@ -476,6 +600,17 @@ fn repair_references(conn: &Connection) -> rusqlite::Result<u64> {
     conn.execute(
         "UPDATE usage_source SET location = ?1 WHERE location = -1",
         params![unknown],
+    )?;
+    // A placeholder session (or one whose source or session ID is a
+    // placeholder) is never read again: no log has that ID, so its repaired
+    // sources would wait for a replacement forever. They keep what the
+    // salvage gave them.
+    conn.execute(
+        "UPDATE usage_source SET repaired = 0 WHERE repaired = 1 AND session IN (
+           SELECT s.id FROM session s
+           JOIN intern a ON a.id = s.source JOIN intern b ON b.id = s.sid
+           WHERE substr(a.text, 1, 1) = x'FF' OR substr(b.text, 1, 1) = x'FF')",
+        [],
     )?;
     Ok(n)
 }

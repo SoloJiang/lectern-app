@@ -428,7 +428,7 @@ crates/bench/
   tests/fixtures/     本 crate 自己的小样本（目前没有）
 ```
 
-三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)），`log/idle_memory` 及其场景也是；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
+三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)），`log/idle_memory` 及其场景也是；`app/bundle_size`、`app/dmg_size` 属于 `Package`；`plugin/usage/activate` 在进程级插件基准实现之前属于 `Time`（`TestKernel` 下进程内取 kernel 的四段耗时）；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
 
 另有一个 `src/bin/lectern-bench-report.rs`，有两个子命令：`merge` 合并各目标的报告，`package --app <.app> --dmg <.dmg>` 测量安装包、写 `report-package.json`（见「报告」）。它只用本 crate 的普通依赖。
 
@@ -657,6 +657,15 @@ crates/bench/
 | `review/open_session_50`、`review/open_session_50_warm` | 中位数 < 35 ms / < 20 ms（`testing::Driven` 驱动审阅引擎，不经插件；夹具 `testing::SessionFixture`：2000 个提交、300 条 HEAD reflog 记录（10 次分支切换）、50 个会话，审阅对象的会话 20 轮、120 次改动调用，50 个 300 行的改动文件。从 `open` 到第一份 `Ready` 快照：新的缓存目录、`review.*` 全空 / 同一缓存目录上的新引擎、`review.*` 都已命中；缓存的数据库文件在计时前已打开） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/open_session_settled`、`review/cutoffs_cold`、`review/attribute_session_50` | 只记录（同一夹具：缓存全空时从 `open` 到最后一份快照；300 条记录的 `tree_changes` 全部未命中时建出截止时刻表；其余 49 个文件的改动链与归因，每一步都 `load`，不含缓存的读写） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/rows_first`、`review/mark_seen_5000` | 中位数 < 3 ms / < 0.2 ms（同一夹具、审阅已完成时第一个文件的 `Prepare` 到 `Prepared`；`testing::MarkSeenFixture` 的 5000 个文件的会话外改动上 `command(MarkSeen)` 到快照替换） | [review](review.md#性能) | `review` 第 3 步 |
+| `usage/ingest_append_4k`、`usage/backfill_batch` | 中位数 < 5 ms / < 150 ms（`lectern_usage::testing::Scenario` 不经插件驱动存储；夹具 `testing::heavy_days`：30 个重度日、20 个仓库、约 18 万条事实行。活跃会话追加约 4 KiB（一个轮次开始、两条用量记录）从读取到游标提交；一批 8 MiB 的合成会话（约 390 轮、1170 条用量记录）的读取与入库） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `usage/backfill_large_session` | 每批最大值 < 300 ms、中位数 < 150 ms（同一夹具上一个 200 MB 的合成会话按 8 MiB 分批补读，每批一个样本；来源交出的字节合计超过日志的 1.2 倍时基准出错。定稿在 `usage` 第 4 步加入） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `usage/project_30d`、`usage/all_projects_30d` | 中位数 < 50 ms / < 80 ms（同一夹具：一个项目 / 所有项目的 30 天快照从事实行整体计算，即快照任务的工作） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `usage/snapshot_increment` | 中位数 < 2 ms（同一夹具上关注着第一个项目的 30 天快照，一批入库之后：事实行增量应用到快照的累加器、替换快照。这一批的入库本身由 `usage/ingest_append_4k` 计时；定稿在 `usage` 第 4 步加入） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `usage/archive_month` | 每段中位数 < 150 ms（同一夹具在时钟推后 400 天之后归档，每写一段（读热行、编码、压缩、解码核对、插入、删热行、提交）一个样本；段数、行数、压缩比和归档前的数据库大小写在备注里） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `usage/cold_read_month` | 中位数 < 1 s（归档之后一个项目一个月的 `History` 按日明细：逐段解压这个月的 `fact` 段并按本地日求和） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `usage/disk_day_heavy` | 只记录（空数据库写入一个重度日之后数据库文件与 `-wal` 的增长；字节数，由 `time` 目标产出） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `usage/resident_bytes` | 存活字节中位数 ≤ 2 MB（插件在 `TestKernel` 下打开同一夹具，会话来源列出夹具的全部 1500 个会话、每个从保存的游标读一次、kernel 静止之后；与只依赖同样服务的空插件之差；SQLite 的内存（含页缓存）不经计数分配器，不计入；`Memory`） | [usage](usage.md#性能) | `usage` 第 1 步 |
+| `plugin/usage/activate` | 中位数 < 1 ms（kernel 记下的四段耗时之和，`TestKernel` 下进程内测量；第 5 步的进程级插件基准实现后改为 `Process`，与 `plugin/*/activate` 的展开一致） | [kernel](kernel.md#性能) | `usage` 第 1 步 |
 | `platform/safe_stat` | 中位数 ≤ 同一路径 `symlink_metadata` 的 3 倍，且 < 10 µs | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_4k` | 中位数 ≤ `std::fs::read` 的 1.5 倍 | [platform](platform.md#性能) | 第 1 步 |
 | `platform/safe_read_range` | 中位数 ≤ 同一路径上 `File::open`、`metadata`、两次 `read_at`、`metadata` 的 1.5 倍，且 < 200 µs（64 MiB 的文件，首屏的文件头 8 KiB 加中部目标附近 132 KiB） | [platform](platform.md#性能) | `platform` 范围读取（[#103](https://github.com/SoloJiang/lectern-app/issues/103)） |

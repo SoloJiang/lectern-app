@@ -538,3 +538,71 @@ fn plugin_stop_marks_the_database_closed() {
     let clean: i64 = conn.query_row(sql, [], |r| r.get(0)).unwrap();
     assert_eq!(clean, 1);
 }
+
+#[test]
+fn plugin_archive_takes_one_step_per_quiet_stretch() {
+    // A session of a year and a half ago: its month is archived after the
+    // backfill, one step per quiet stretch, as the backfill's batches are.
+    let fake = sources();
+    let at = NOW - 500 * DAY;
+    fake.add("ancient", Path::new("/work/app"), at, None);
+    let mut records = vec![context(0, at, "/work/app")];
+    for i in 0..3 {
+        records.push(tokens_at(100 * (i + 1), at, &format!("ancient-{i}"), 1));
+    }
+    fake.push("ancient", records);
+    let rig = Rig::new(fake, open_app);
+    rig.settle();
+    let query = UsageQuery::History {
+        project: ProjectRef::Open(app_key()),
+        from: lectern_services::usage::LocalDate {
+            year: 2025,
+            month: 1,
+            day: 1,
+        },
+        to: lectern_services::usage::LocalDate {
+            year: 2026,
+            month: 10,
+            day: 22,
+        },
+        days: true,
+    };
+    let _interest = rig.usage().watch(query.clone());
+    rig.settle();
+    let total = |rig: &Rig| -> u64 {
+        match rig.usage().snapshot(&query).as_deref() {
+            Some(UsageSnapshot::History(h)) => h.months.iter().map(|(_, t)| t.input).sum(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let conn = rusqlite::Connection::open(rig.db()).unwrap();
+    let parts = || -> i64 {
+        conn.query_row("SELECT count(*) FROM cold_part", [], |r| r.get(0))
+            .unwrap()
+    };
+    // The backfill's batch.
+    rig.advance(PACE);
+    assert_eq!(rig.engine.dirty_sessions(), 0);
+    assert_eq!(total(&rig), 3);
+    assert_eq!(parts(), 0, "nothing archived in the batch's stretch");
+    // Then the plan, setting the month to archiving, and a segment per
+    // stretch (the sources with their counted-source rows, the turns'
+    // table is empty, the facts).
+    let mut seen = vec![parts()];
+    for _ in 0..6 {
+        rig.advance(PACE / 2);
+        assert_eq!(
+            parts(),
+            *seen.last().unwrap(),
+            "only after ten quiet seconds"
+        );
+        rig.advance(PACE / 2);
+        seen.push(parts());
+    }
+    assert_eq!(seen, [0, 0, 0, 2, 3, 3, 3], "{seen:?}");
+    assert_eq!(total(&rig), 3, "the history is the same");
+    let hot: i64 = conn
+        .query_row("SELECT count(*) FROM usage_source", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(hot, 0);
+}

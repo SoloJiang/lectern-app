@@ -171,6 +171,7 @@ const CODE_INTEL: &str = "docs/design/code_intel.md#性能";
 const FILE_READER: &str = "docs/design/file_reader.md#性能";
 const REVIEW: &str = "docs/design/review.md#性能";
 const LOGGING: &str = "docs/design/logging.md#性能";
+const USAGE: &str = "docs/design/usage.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -1750,6 +1751,89 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // ---- end review ----
+    // ---- usage (usage design, step 1) ----
+    // `testing::Scenario` on `testing::heavy_days` (30 heavy days, 20
+    // repositories, about 180 000 fact rows).
+    share(
+        "usage/ingest_append_4k",
+        &[median(Limit::TimeBelow(ms(5)))],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "usage/backfill_batch",
+        &[median(Limit::TimeBelow(ms(150)))],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
+    // A 200 MB session in 8 MiB batches, each batch a sample.
+    share(
+        "usage/backfill_large_session",
+        &[
+            max(Limit::TimeBelow(ms(300))),
+            median(Limit::TimeBelow(ms(150))),
+        ],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "usage/project_30d",
+        &[median(Limit::TimeBelow(ms(50)))],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "usage/all_projects_30d",
+        &[median(Limit::TimeBelow(ms(80)))],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "usage/snapshot_increment",
+        &[median(Limit::TimeBelow(ms(2)))],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
+    // Each segment of a heavy month a sample; the compression ratio in the
+    // note.
+    share(
+        "usage/archive_month",
+        &[median(Limit::TimeBelow(ms(150)))],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "usage/cold_read_month",
+        &[median(Limit::TimeBelow(ms(1000)))],
+        USAGE,
+        ACTIVE,
+        Time,
+    ),
+    share("usage/disk_day_heavy", RECORD, USAGE, ACTIVE, Time),
+    share(
+        "usage/resident_bytes",
+        &[median(Limit::BytesAtMost(2 * MB))],
+        USAGE,
+        ACTIVE,
+        Memory,
+    ),
+    // In process until the process-level plugin benchmarks (step 5): the
+    // kernel's four timings under a `TestKernel`.
+    share(
+        "plugin/usage/activate",
+        &[median(Limit::TimeBelow(ms(1)))],
+        KERNEL,
+        ACTIVE,
+        Time,
+    ),
+    // ---- end usage ----
     // ---- logging (logging design, step 1) ----
     // On the calling thread: a call below the global level; one the global
     // level lets through and its target rejects; a written info record with

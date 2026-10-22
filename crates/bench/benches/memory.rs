@@ -27,6 +27,8 @@ mod project_repo;
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
 mod syntax_engine;
+#[path = "memory/usage.rs"]
+mod usage;
 
 use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
@@ -285,6 +287,7 @@ const BENCHES: &[Bench] = &[
     syntax::WINDOW_PEAK,
     syntax::LRU_BYTES,
     syntax::EDIT_TREE_BYTES,
+    usage::RESIDENT,
 ];
 
 fn main() -> ExitCode {

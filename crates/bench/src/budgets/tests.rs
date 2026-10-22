@@ -200,6 +200,9 @@ fn budgets_belong_to_the_documented_targets() {
     for budget in BUDGETS {
         let expected = if budget.id == "app/bundle_size" || budget.id == "app/dmg_size" {
             Target::Package
+        } else if budget.id == "plugin/usage/activate" {
+            // In process until the process-level plugin benchmarks.
+            Target::Time
         } else if budget.id.ends_with("_bytes")
             || budget.id.ends_with("_peak")
             || budget.id == "git/resident"

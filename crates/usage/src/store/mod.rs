@@ -3,25 +3,26 @@
 //! rebuild. Two connections, a writer and a reader, both used only inside
 //! executor tasks; the writer is behind a lock.
 
+pub(crate) mod cold;
 mod dedup;
 mod ingest;
 mod query;
 mod recover;
 pub(crate) mod schema;
+mod segment;
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use lectern_logging::{Value, error, info, warn};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
-#[cfg(test)]
-pub(crate) use ingest::Ingested;
-pub(crate) use ingest::{FileStamp, Ingest, Place, SessionInfo, agent_of, path_bytes};
+pub(crate) use dedup::FactDelta;
+pub(crate) use ingest::{FileStamp, Ingest, Ingested, Place, SessionInfo, agent_of, path_bytes};
 pub(crate) use query::{FolderRoot, ProjectRow, Totals, under};
 pub(crate) use recover::Recovery;
 #[cfg(test)]
@@ -167,9 +168,11 @@ pub(crate) struct Store {
     /// Calls that reached SQLite or the data directory; tests check the UI
     /// thread never adds to it.
     io: AtomicU64,
-    /// Some sources were repaired by a salvage (`usage_source.repaired`):
-    /// ingest then lets a record read again replace their references.
-    repairing: AtomicBool,
+    /// Cold segments decoded so far (`cold_part`); the window snapshots never
+    /// add to it.
+    cold_reads: AtomicU64,
+    /// The largest uncompressed segment the archive writes.
+    segment_bytes: AtomicUsize,
     #[cfg(test)]
     pub(crate) faults: Mutex<Faults>,
 }
@@ -180,6 +183,10 @@ pub(crate) struct Store {
 pub(crate) struct Faults {
     /// Fail the next ingest after its records, before the cursor.
     pub(crate) before_cursor: bool,
+    /// Fail the next archive step at this point of its transaction.
+    pub(crate) archive: Option<cold::Fault>,
+    /// The next archive step's check finds the decoded segment different.
+    pub(crate) mismatch: bool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -234,11 +241,11 @@ impl Store {
             reader: Mutex::new(Some(files.reader)),
             mode: Mutex::new(files.mode),
             io: AtomicU64::new(1),
-            repairing: AtomicBool::new(false),
+            cold_reads: AtomicU64::new(0),
+            segment_bytes: AtomicUsize::new(cold::SEGMENT_BYTES),
             #[cfg(test)]
             faults: Mutex::new(Faults::default()),
         };
-        store.refresh_repairing();
         if recovered.is_some() {
             // A salvaged file was not closed by anyone yet.
             let _ = store.write(|c| set_meta(c, "clean", 0));
@@ -370,27 +377,41 @@ impl Store {
         *reader = Some(files.reader);
         *lock(&self.mode) = files.mode;
         drop((writer, reader));
-        self.refresh_repairing();
         Ok(Checked::Recovered(recovery))
     }
 
-    /// Whether any source still waits for its record to be read again after
-    /// a salvage.
-    fn refresh_repairing(&self) {
-        let any = self
-            .read(|c| {
-                c.query_row(
-                    "SELECT EXISTS (SELECT 1 FROM usage_source WHERE repaired = 1)",
-                    [],
-                    |r| r.get(0),
-                )
-            })
-            .unwrap_or(false);
-        self.repairing.store(any, Ordering::Relaxed);
+    /// A salvage of a sound file (every row copied), for tests of what the
+    /// copy must carry over.
+    #[cfg(test)]
+    pub(crate) fn salvage_now(&self, now_ms: i64) -> Result<Recovery, StoreError> {
+        let mut writer = lock(&self.writer);
+        let mut reader = lock(&self.reader);
+        *reader = None;
+        *writer = None;
+        let (files, recovery) = recover::salvage(&self.dir, self.schema, now_ms)?;
+        *writer = Some(files.writer);
+        *reader = Some(files.reader);
+        Ok(recovery)
     }
 
+    /// Whether any source still waits for its record to be read again after
+    /// a salvage. Ingest asks the same inside its own transaction.
+    #[cfg(test)]
     pub(crate) fn repairing(&self) -> bool {
-        self.repairing.load(Ordering::Relaxed)
+        self.read(any_repaired).unwrap()
+    }
+
+    /// Cold segments decoded so far.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn cold_reads(&self) -> u64 {
+        self.cold_reads.load(Ordering::Relaxed)
+    }
+
+    /// The largest uncompressed segment of later archive steps (tests use
+    /// small ones to get several segments a month).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn set_segment_bytes(&self, bytes: usize) {
+        self.segment_bytes.store(bytes.max(1), Ordering::Relaxed);
     }
 
     /// The settings of both connections, one line each, for the page cache
@@ -588,6 +609,19 @@ pub(crate) fn create(conn: &mut Connection, schema: &Schema) -> rusqlite::Result
     tx.commit()
 }
 
+/// Runs `f`'s reads in one read transaction (one snapshot of the file).
+pub(crate) fn read_transaction<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    conn.execute_batch("BEGIN DEFERRED")?;
+    let out = f(conn);
+    let end = conn.execute_batch("COMMIT");
+    let out = out?;
+    end?;
+    Ok(out)
+}
+
 pub(crate) fn set_meta(conn: &Connection, name: &str, value: i64) -> rusqlite::Result<()> {
     conn.prepare_cached(
         "INSERT INTO meta (name, value) VALUES (?1, ?2)
@@ -595,6 +629,12 @@ pub(crate) fn set_meta(conn: &Connection, name: &str, value: i64) -> rusqlite::R
     )?
     .execute(params![name, value])?;
     Ok(())
+}
+
+/// Some source still carries a salvage's `repaired` mark (partial index).
+pub(crate) fn any_repaired(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.prepare_cached("SELECT EXISTS (SELECT 1 FROM usage_source WHERE repaired = 1)")?
+        .query_row([], |r| r.get(0))
 }
 
 pub(crate) fn quick_check(conn: &Connection) -> bool {

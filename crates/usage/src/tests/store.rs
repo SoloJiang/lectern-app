@@ -9,7 +9,7 @@ use lectern_services::usage::{Tokens, Window};
 use rusqlite::Connection;
 
 use super::support::*;
-use crate::store::schema::{CREATE_V1, CURRENT, Migration, Schema};
+use crate::store::schema::{CREATE_V2, CURRENT, Migration, Schema, V1};
 use crate::store::{BACKUP_PREFIX, Checked, Mode, SALVAGE_FILE, Step, StoreError, fail_at};
 use crate::testing::FakeSessions;
 
@@ -92,38 +92,39 @@ fn store_records_and_cursor_commit_together() {
     assert_eq!(count(&conn, "fact"), 30);
 }
 
-const V2_STEPS: &[Migration] = &[Migration {
-    from: 1,
-    sql: "CREATE TABLE extra_v2 (id INTEGER PRIMARY KEY);",
+/// Versions after the current one (2), for the migration tests.
+const V3_STEPS: &[Migration] = &[Migration {
+    from: 2,
+    sql: "CREATE TABLE extra_v3 (id INTEGER PRIMARY KEY);",
 }];
-static V2: Schema = Schema {
-    version: 2,
-    create: CREATE_V1,
-    migrations: V2_STEPS,
+static V3: Schema = Schema {
+    version: 3,
+    create: CREATE_V2,
+    migrations: V3_STEPS,
 };
-const V4_STEPS: &[Migration] = &[
-    Migration {
-        from: 1,
-        sql: "CREATE TABLE extra_v2 (id INTEGER PRIMARY KEY);",
-    },
+const V5_STEPS: &[Migration] = &[
     Migration {
         from: 2,
-        sql: "ALTER TABLE extra_v2 ADD COLUMN note TEXT;",
+        sql: "CREATE TABLE extra_v3 (id INTEGER PRIMARY KEY);",
     },
     Migration {
         from: 3,
-        sql: "CREATE TABLE extra_v4 (id INTEGER PRIMARY KEY);",
+        sql: "ALTER TABLE extra_v3 ADD COLUMN note TEXT;",
+    },
+    Migration {
+        from: 4,
+        sql: "CREATE TABLE extra_v5 (id INTEGER PRIMARY KEY);",
     },
 ];
-static V3: Schema = Schema {
-    version: 3,
-    create: CREATE_V1,
-    migrations: V4_STEPS,
-};
 static V4: Schema = Schema {
     version: 4,
-    create: CREATE_V1,
-    migrations: V4_STEPS,
+    create: CREATE_V2,
+    migrations: V5_STEPS,
+};
+static V5: Schema = Schema {
+    version: 5,
+    create: CREATE_V2,
+    migrations: V5_STEPS,
 };
 
 fn backups(dir: &Path) -> Vec<String> {
@@ -143,16 +144,16 @@ fn store_migration_keeps_observations_after_a_backup() {
     h.read_all(&fake, "s");
     let before = h.total();
     h.close(true);
-    let reopened = h.open_with(&V2);
-    assert_eq!(reopened.migrated_from, Some(1));
+    let reopened = h.open_with(&V3);
+    assert_eq!(reopened.migrated_from, Some(2));
     assert_eq!(h.store().mode(), Mode::Writable);
     assert_eq!(h.total(), before);
-    // The copy is the version-1 file, whole.
-    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}1")));
-    assert_eq!(pragma(&copy, "user_version"), 1);
+    // The copy is the version-2 file, whole.
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}2")));
+    assert_eq!(pragma(&copy, "user_version"), 2);
     assert_eq!(count(&copy, "usage_source"), 5);
     let main = raw(&h.db_path());
-    assert_eq!(pragma(&main, "user_version"), 2);
+    assert_eq!(pragma(&main, "user_version"), 3);
     assert_eq!(count(&main, "usage_source"), 5);
     drop((copy, main));
     // Writing still works on the migrated file.
@@ -162,14 +163,72 @@ fn store_migration_keeps_observations_after_a_backup() {
 
     // Two more migrations: only the two most recent copies stay.
     h.close(true);
-    h.open_with(&V3);
-    h.close(true);
     h.open_with(&V4);
+    h.close(true);
+    h.open_with(&V5);
     assert_eq!(
         backups(h.dir.path()),
-        [format!("{BACKUP_PREFIX}2"), format!("{BACKUP_PREFIX}3")]
+        [format!("{BACKUP_PREFIX}3"), format!("{BACKUP_PREFIX}4")]
     );
     assert_eq!(h.total().input, 7);
+}
+
+#[test]
+fn store_migration_from_version_1_adds_the_cold_tables() {
+    let mut h = Harness::new();
+    let fake = session("s", 5);
+    h.read_all(&fake, "s");
+    let before = h.total();
+    h.close(true);
+    // A file of the first part of step 1: the same rows, without what
+    // version 2 adds.
+    let conn = raw(&h.db_path());
+    conn.execute_batch(
+        "DROP TABLE cold_part; DROP TABLE cold_month; DROP TABLE cold_total;
+         DROP TABLE cold_anchor; DROP TABLE cold_seen; DROP TABLE fact_bucket;
+         DROP INDEX usage_source_at; DROP INDEX turn_started;
+         PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    let v1: String = conn
+        .query_row(
+            "SELECT group_concat(name) FROM (SELECT name FROM sqlite_schema ORDER BY name)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    // The schema of version 1 as written by `CREATE_V1`.
+    let fresh = tempfile::tempdir().unwrap();
+    let written = crate::store::Store::open_with(fresh.path(), &V1, h.now).unwrap();
+    drop(written);
+    let expected: String = raw(&fresh.path().join("usage.db"))
+        .query_row(
+            "SELECT group_concat(name) FROM (SELECT name FROM sqlite_schema ORDER BY name)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v1, expected);
+    let reopened = h.open_with(&CURRENT);
+    assert_eq!(reopened.migrated_from, Some(1));
+    assert_eq!(h.total(), before);
+    let main = raw(&h.db_path());
+    assert_eq!(pragma(&main, "user_version"), 2);
+    for table in [
+        "cold_part",
+        "cold_month",
+        "cold_total",
+        "cold_anchor",
+        "cold_seen",
+    ] {
+        assert_eq!(count(&main, table), 0, "{table}");
+    }
+    assert_eq!(count(&main, "usage_source"), 5);
+    assert_eq!(count(&main, "fact_bucket"), 1, "the facts summed");
+    assert_buckets(&h);
+    let copy = raw(&h.dir.path().join(format!("{BACKUP_PREFIX}1")));
+    assert_eq!(pragma(&copy, "user_version"), 1);
 }
 
 #[test]
@@ -180,14 +239,14 @@ fn store_failed_backup_leaves_the_old_version_read_only() {
     let before = h.total();
     h.close(true);
     // Something that cannot be replaced sits where the copy goes.
-    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}1"));
+    let blocker = h.dir.path().join(format!("{BACKUP_PREFIX}2"));
     std::fs::create_dir(&blocker).unwrap();
     std::fs::write(blocker.join("keep"), b"x").unwrap();
-    let reopened = h.open_with(&V2);
+    let reopened = h.open_with(&V3);
     assert_eq!(reopened.migrated_from, None);
     assert!(matches!(h.store().mode(), Mode::Unwritable(_)));
     let version = pragma(&raw(&h.db_path()), "user_version");
-    assert_eq!(version, 1, "not migrated");
+    assert_eq!(version, 2, "not migrated");
     // Read only: no write, the old data still readable.
     let more = session("t", 2);
     let refused = h.try_read_once(&more, "t", 1 << 20);
@@ -500,7 +559,107 @@ fn store_salvage_keeps_rows_that_point_at_lost_rows() {
         assert_eq!(misattributed(&h.db_path()), 0, "{case}: after reading");
         assert_eq!(h.total().input, before.input + 100, "{case}");
         assert_eq!(count(&raw(&h.db_path()), "usage_value"), 400, "{case}");
+        // Nothing waits for a repair any more, placeholder sessions
+        // included: no log will ever give their records again.
+        let marked: i64 = raw(&h.db_path())
+            .query_row(
+                "SELECT count(*) FROM usage_source WHERE repaired = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(marked, 0, "{case}: sources still marked");
+        assert!(!h.store().repairing(), "{case}");
+        assert_buckets(&h);
     }
+}
+
+#[test]
+fn store_salvage_does_not_mark_placeholder_sessions() {
+    // The first leaves of `intern` and `location` hold the first sessions'
+    // IDs and directories: those sessions become placeholders whose
+    // sources lost their location (and are repaired).
+    let mut h = Harness::new();
+    let fake = FakeSessions::new("session-claude-code", Agent::ClaudeCode);
+    many(&fake, 0..300);
+    h.read_every(&fake);
+    h.close(false);
+    for table in ["intern", "location"] {
+        let (size, root) = root_page(&h.db_path(), table);
+        garbage(&h.db_path(), size, first_child(&h.db_path(), size, root));
+    }
+    h.reopen(false);
+    assert!(matches!(
+        h.store().check(h.now).unwrap(),
+        Checked::Recovered(_)
+    ));
+    let unknown: i64 = raw(&h.db_path())
+        .query_row(
+            "SELECT count(*) FROM usage_source u JOIN session s ON s.id = u.session
+             JOIN intern b ON b.id = s.sid JOIN location l ON l.id = u.location
+             WHERE substr(b.text, 1, 1) = x'FF' AND l.path = x''",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(unknown > 0, "placeholder sessions with repaired sources");
+    let placeholder_marked: i64 = raw(&h.db_path())
+        .query_row(
+            "SELECT count(*) FROM usage_source u JOIN session s ON s.id = u.session
+             JOIN intern b ON b.id = s.sid
+             WHERE u.repaired = 1 AND substr(b.text, 1, 1) = x'FF'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(placeholder_marked, 0);
+    let placeholders: i64 = raw(&h.db_path())
+        .query_row(
+            "SELECT count(*) FROM session s JOIN intern b ON b.id = s.sid
+             WHERE substr(b.text, 1, 1) = x'FF'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(placeholders > 0, "the case has placeholder sessions");
+    // No source waits for a log that will never come: ingest stops
+    // looking for repairs once the other sessions are read again
+    // (`store_salvage_keeps_rows_that_point_at_lost_rows` clears marks by
+    // reading).
+    h.read_every(&fake);
+    assert!(!h.store().repairing());
+}
+
+#[test]
+fn store_batch_read_across_a_salvage_is_read_again() {
+    let mut h = Harness::new();
+    let fake = FakeSessions::new("session-claude-code", Agent::ClaudeCode);
+    for id in ["a", "b"] {
+        add(&fake, id, 300);
+    }
+    h.read_once(&fake, "a", 2000);
+    h.read_all(&fake, "b");
+    // A read of "a" is under way (cursor and batch taken, not yet stored)
+    // when the file turns out corrupt and is salvaged: every cursor goes
+    // back to the start.
+    let pending = h.read_batch(&fake, "a", 2000);
+    assert!(pending.cursor.offset() > 0);
+    h.close(false);
+    damage_sources(&h.db_path());
+    h.reopen(false);
+    assert!(matches!(
+        h.store().check(h.now).unwrap(),
+        Checked::Recovered(_)
+    ));
+    assert_eq!(h.store().cursor(&fake.key("a")).unwrap().offset(), 0);
+    // The read in flight stores now: its cursor is stale, nothing is
+    // written, and the start of the log is not skipped.
+    let out = h.commit(&pending).unwrap();
+    assert!(out.stale);
+    assert_eq!(h.store().cursor(&fake.key("a")).unwrap().offset(), 0);
+    h.read_every(&fake);
+    assert_eq!(h.total().input, 600);
+    assert_eq!(count(&raw(&h.db_path()), "usage_value"), 600);
 }
 
 #[test]

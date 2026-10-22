@@ -14,6 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use super::ingest::{FileStamp, Place, location, path_bytes};
 use super::schema::{LOCATION_DIR, LOCATION_GIT, PROJECT_FOLDER};
 use super::{Store, StoreError};
+use crate::window::BUCKET_MS;
 
 /// A project row with its location.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +61,8 @@ pub(crate) struct Sum {
     pub(crate) agent: i64,
     pub(crate) model: i64,
     pub(crate) micro: [u64; 4],
+    /// Fact rows in the group.
+    pub(crate) rows: u64,
 }
 
 /// A session's saved reading position.
@@ -78,6 +81,12 @@ pub(crate) struct Totals {
     pub(crate) texts: HashMap<i64, Vec<u8>>,
     /// A session counted here has `inheritance_unknown`.
     pub(crate) may_include_inherited: bool,
+    /// The ingest commits these sums include (`meta.commits`, read in the
+    /// same read transaction): later batches' fact deltas apply on top.
+    pub(crate) commits: i64,
+    /// The largest location ID: a delta at a newer location may belong to
+    /// a folder project, the snapshot is computed again.
+    pub(crate) max_location: i64,
 }
 
 fn os_path(bytes: Vec<u8>) -> PathBuf {
@@ -245,58 +254,126 @@ impl Store {
         range: Range<i64>,
     ) -> Result<Totals, StoreError> {
         self.read(|conn| {
-            let mut totals = Totals::default();
-            let mut stmt = conn.prepare_cached(
-                "SELECT bucket, agent, model, sum(input), sum(output), sum(cache_read), sum(cache_write)
-                 FROM fact WHERE location = ?1 AND at >= ?2 AND at < ?3
-                 GROUP BY bucket, agent, model",
-            )?;
-            for &location in locations {
-                let rows = stmt.query_map(params![location, range.start, range.end], |r| {
-                    Ok(Sum {
-                        location,
-                        bucket: r.get(0)?,
-                        agent: r.get(1)?,
-                        model: r.get(2)?,
-                        micro: micro(r, 3)?,
-                    })
-                })?;
-                for row in rows {
-                    totals.sums.push(row?);
+            snapshot_read(conn, |conn| {
+                let mut totals = Totals::default();
+                let mut stmt = conn.prepare_cached(
+                    "SELECT bucket, agent, model, sum(input), sum(output), sum(cache_read),
+                            sum(cache_write), sum(rows)
+                     FROM fact_bucket WHERE bucket >= ?2 AND bucket < ?3 AND location = ?1
+                     GROUP BY bucket, agent, model",
+                )?;
+                let (from, to) = buckets(&range);
+                for &location in locations {
+                    let rows = stmt.query_map(params![location, from, to], |r| {
+                        Ok(Sum {
+                            location,
+                            bucket: r.get(0)?,
+                            agent: r.get(1)?,
+                            model: r.get(2)?,
+                            micro: micro(r, 3)?,
+                            rows: r.get::<_, i64>(7)?.max(0) as u64,
+                        })
+                    })?;
+                    for row in rows {
+                        totals.sums.push(row?);
+                    }
                 }
-            }
-            totals.may_include_inherited = inherited_unknown(conn, Some(locations), &range)?;
-            fill_texts(conn, &mut totals)?;
-            Ok(totals)
+                totals.may_include_inherited = inherited_unknown(conn, Some(locations), &range)?;
+                fill_texts(conn, &mut totals)?;
+                Ok(totals)
+            })
         })
+    }
+
+    /// The text of interned IDs (agent labels and models of new deltas).
+    pub(crate) fn texts(&self, ids: &[i64]) -> Result<HashMap<i64, Vec<u8>>, StoreError> {
+        self.read(|conn| {
+            let mut stmt = conn.prepare_cached("SELECT text FROM intern WHERE id = ?1")?;
+            let mut out = HashMap::new();
+            for &id in ids {
+                let text: Option<Vec<u8>> = stmt.query_row(params![id], |r| r.get(0)).optional()?;
+                out.insert(id, text.unwrap_or_default());
+            }
+            Ok(out)
+        })
+    }
+
+    /// Whether a session counted at these locations in `range` (hot facts)
+    /// has `inheritance_unknown`.
+    pub(crate) fn inherited_in(
+        &self,
+        locations: &[i64],
+        range: Range<i64>,
+    ) -> Result<bool, StoreError> {
+        self.read(|conn| inherited_unknown(conn, Some(locations), &range))
     }
 
     /// Sums of every fact in `range`, by location, bucket and agent.
     pub(crate) fn sums_all(&self, range: Range<i64>) -> Result<Totals, StoreError> {
         self.read(|conn| {
-            let mut totals = Totals::default();
-            let rows: Vec<Sum> = conn
-                .prepare_cached(
-                    "SELECT location, bucket, agent, sum(input), sum(output), sum(cache_read), sum(cache_write)
-                     FROM fact WHERE at >= ?1 AND at < ?2
-                     GROUP BY location, bucket, agent",
-                )?
-                .query_map(params![range.start, range.end], |r| {
-                    Ok(Sum {
-                        location: r.get(0)?,
-                        bucket: r.get(1)?,
-                        agent: r.get(2)?,
-                        model: 0,
-                        micro: micro(r, 3)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<_>>()?;
-            totals.sums = rows;
-            totals.may_include_inherited = inherited_unknown(conn, None, &range)?;
-            fill_texts(conn, &mut totals)?;
-            Ok(totals)
+            snapshot_read(conn, |conn| {
+                let mut totals = Totals::default();
+                let (from, to) = buckets(&range);
+                let rows: Vec<Sum> = conn
+                    .prepare_cached(
+                        "SELECT location, bucket, agent, sum(input), sum(output), sum(cache_read),
+                                sum(cache_write), sum(rows)
+                         FROM fact_bucket WHERE bucket >= ?1 AND bucket < ?2
+                         GROUP BY bucket, location, agent",
+                    )?
+                    .query_map(params![from, to], |r| {
+                        Ok(Sum {
+                            location: r.get(0)?,
+                            bucket: r.get(1)?,
+                            agent: r.get(2)?,
+                            model: 0,
+                            micro: micro(r, 3)?,
+                            rows: r.get::<_, i64>(7)?.max(0) as u64,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                totals.sums = rows;
+                totals.may_include_inherited = inherited_unknown(conn, None, &range)?;
+                fill_texts(conn, &mut totals)?;
+                Ok(totals)
+            })
         })
     }
+}
+
+/// The buckets of a range of local days: their bounds are local midnights,
+/// whole quarters of an hour in UTC (window module).
+fn buckets(range: &Range<i64>) -> (i64, i64) {
+    (
+        range.start.div_euclid(BUCKET_MS),
+        range.end.div_euclid(BUCKET_MS),
+    )
+}
+
+/// Runs `f` in one read transaction, with the commit counter and the
+/// largest location ID of the same snapshot of the database.
+fn snapshot_read(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> rusqlite::Result<Totals>,
+) -> rusqlite::Result<Totals> {
+    conn.execute_batch("BEGIN DEFERRED")?;
+    let out = (|| -> rusqlite::Result<Totals> {
+        let commits: Option<i64> = conn
+            .prepare_cached("SELECT value FROM meta WHERE name = 'commits'")?
+            .query_row([], |r| r.get(0))
+            .optional()?;
+        let max_location: Option<i64> = conn
+            .prepare_cached("SELECT max(id) FROM location")?
+            .query_row([], |r| r.get(0))?;
+        let mut totals = f(conn)?;
+        totals.commits = commits.unwrap_or(0);
+        totals.max_location = max_location.unwrap_or(0);
+        Ok(totals)
+    })();
+    let end = conn.execute_batch("COMMIT");
+    let totals = out?;
+    end?;
+    Ok(totals)
 }
 
 fn key_parts(key: &ProjectKey) -> (i64, &Path) {
@@ -319,28 +396,49 @@ fn micro(r: &rusqlite::Row<'_>, from: usize) -> rusqlite::Result<[u64; 4]> {
     Ok(out)
 }
 
+/// Whether a session with `inheritance_unknown` counts in the range (at
+/// these locations). The sessions are few and looked at first; their facts
+/// through the session index, never a scan of the window's facts.
 fn inherited_unknown(
     conn: &Connection,
     locations: Option<&[i64]>,
     range: &Range<i64>,
 ) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT EXISTS (
-           SELECT 1 FROM fact f JOIN session s ON s.id = f.session
-           WHERE s.inheritance_unknown = 1 AND f.at >= ?1 AND f.at < ?2
-             AND (?3 IS NULL OR f.location = ?3))",
+    let sessions: Vec<i64> = conn
+        .prepare_cached("SELECT id FROM session WHERE inheritance_unknown = 1")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if sessions.is_empty() {
+        return Ok(false);
+    }
+    let mut any = conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM fact WHERE session = ?1 AND at >= ?2 AND at < ?3)",
     )?;
-    match locations {
-        None => stmt.query_row(params![range.start, range.end, None::<i64>], |r| r.get(0)),
-        Some(locations) => {
-            for &l in locations {
-                if stmt.query_row(params![range.start, range.end, l], |r| r.get::<_, bool>(0))? {
-                    return Ok(true);
+    let mut at = conn.prepare_cached(
+        "SELECT EXISTS (SELECT 1 FROM fact
+                        WHERE session = ?1 AND at >= ?2 AND at < ?3 AND location = ?4)",
+    )?;
+    for session in sessions {
+        let found = match locations {
+            None => any.query_row(params![session, range.start, range.end], |r| r.get(0))?,
+            Some(locations) => {
+                let mut found = false;
+                for &l in locations {
+                    if at.query_row(params![session, range.start, range.end, l], |r| {
+                        r.get::<_, bool>(0)
+                    })? {
+                        found = true;
+                        break;
+                    }
                 }
+                found
             }
-            Ok(false)
+        };
+        if found {
+            return Ok(true);
         }
     }
+    Ok(false)
 }
 
 fn fill_texts(conn: &Connection, totals: &mut Totals) -> rusqlite::Result<()> {

@@ -3,10 +3,11 @@
 //! local days, and the `dyn Usage` service (docs/design/usage.md). Tokens
 //! only, no amounts of money: ADR 0022.
 //!
-//! Implemented so far: step 1 of the design's 「验收」 up to the hot / cold
-//! split (the database, reading and cursors, dedupe, per-cwd places and
-//! project totals, windows, rounding, the `Project` and `AllProjects`
-//! queries, the plugin and its reading cadence).
+//! Implemented so far: step 1 of the design's 「验收」 (the database,
+//! reading and cursors, dedupe, per-cwd places and project totals, windows,
+//! rounding, the hot / cold split and the `History` query, the `Project`
+//! and `AllProjects` queries kept up to date by fact deltas, the plugin
+//! with its reading and archive cadence, `testing::Scenario`).
 
 mod engine;
 mod key;

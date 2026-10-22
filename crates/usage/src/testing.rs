@@ -27,6 +27,14 @@ use lectern_services::session::{
 use crate::LocalZone;
 use crate::time::Time;
 
+mod scenario;
+
+pub use scenario::{
+    ArchiveStep, ArchiveTotals, HEAVY_NOW, HEAVY_REPOS, HEAVY_SESSIONS, HEAVY_TURNS, HEAVY_USAGES,
+    HeavySession, LINE_BYTES, Scenario, Stored, TURN_BYTES, TURN_LINES, heavy_days, heavy_fill,
+    heavy_open, heavy_roots, heavy_sessions, synthetic_turns,
+};
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
