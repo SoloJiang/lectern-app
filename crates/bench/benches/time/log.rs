@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::Barrier;
 use std::time::{Duration, Instant};
 
-use lectern_bench::{Bench, BenchError, Ctx, Measured, Samples, Value};
+use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 use lectern_logging::{
     Config, EarlyConfig, Header, Logging, Value as LogValue, debug, info, install_early, testing,
     trace,
@@ -143,13 +143,23 @@ fn enabled_call(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     )])
 }
 
-/// Threads and calls per thread in one round of `log/contended_call`: 400
-/// records, about 80 KiB, below the running buffer.
-const THREADS: usize = 4;
-const CALLS: usize = 100;
+/// Records per round of `log/contended_call`, all callers together: about
+/// 90 KiB, below the 128 KiB running buffer.
+const ROUND_RECORDS: usize = 400;
+/// Samples in measure mode: the budget's「at most 100 above 5 µs」is the
+/// p99 of exactly this many.
+const SAMPLES: usize = 10_000;
 
-/// Four threads writing at once; each call timed on its own. 25 rounds,
-/// 10 000 calls: the budget's「at most 100 above 5 µs」is the p99.
+/// The callers: 4, but leaving a core for the writer thread
+/// (`available_parallelism − 1`, at least 1).
+fn callers() -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    cores.saturating_sub(1).clamp(1, 4)
+}
+
+/// Callers writing at once; each call timed on its own. The threads start
+/// once and make one untimed call each; then 25 rounds, each after the
+/// writer has emptied the buffer, every caller starting together.
 pub const CONTENDED_CALL: Bench = Bench {
     id: "log/contended_call",
     run: contended_call,
@@ -159,42 +169,59 @@ fn contended_call(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let logger = installed(ctx)?;
     let _unlimited = Unlimited::new();
     let path = Path::new("/Users/bench/src/lectern-app/crates/cache/src/store.rs");
-    let rounds = ctx.scale(25, 1);
+    let callers = callers();
+    let per_round = ROUND_RECORDS.div_ceil(callers);
+    let rounds = ctx.scale(SAMPLES.div_ceil(callers * per_round), 1);
     let dropped = logger.logging.status().dropped;
-    let mut samples = Vec::with_capacity(rounds * THREADS * CALLS);
-    for _ in 0..rounds {
-        flush(&logger.logging)?;
-        let barrier = Barrier::new(THREADS);
-        let round: Vec<Vec<Duration>> = std::thread::scope(|s| {
-            let handles: Vec<_> = (0..THREADS)
-                .map(|_| {
-                    s.spawn(|| {
-                        let mut times = Vec::with_capacity(CALLS);
-                        barrier.wait();
-                        for i in 0..CALLS as u64 {
-                            let start = Instant::now();
+    let start = Barrier::new(callers + 1);
+    let end = Barrier::new(callers + 1);
+    let (mut samples, failed) = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..callers)
+            .map(|_| {
+                s.spawn(|| {
+                    written(black_box(path), 0);
+                    let mut times = Vec::with_capacity(rounds * per_round);
+                    for _ in 0..rounds {
+                        start.wait();
+                        for i in 0..per_round as u64 {
+                            let begin = Instant::now();
                             written(black_box(path), i);
-                            times.push(start.elapsed());
+                            times.push(begin.elapsed());
                         }
-                        times
-                    })
+                        end.wait();
+                    }
+                    times
                 })
-                .collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_default())
-                .collect()
-        });
-        samples.extend(round.into_iter().flatten());
+            })
+            .collect();
+        let mut failed = None;
+        for _ in 0..rounds {
+            if let Err(e) = flush(&logger.logging) {
+                failed.get_or_insert(e);
+            }
+            start.wait();
+            end.wait();
+        }
+        let samples: Vec<Duration> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect();
+        (samples, failed)
+    });
+    if let Some(e) = failed {
+        return Err(e);
     }
     flush(&logger.logging)?;
     if logger.logging.status().dropped != dropped {
         return Err(BenchError::new("records were dropped"));
     }
-    Ok(vec![Measured::new(
-        "log/contended_call",
-        Value::Time(Samples(samples)),
-    )])
+    if ctx.mode() == Mode::Measure {
+        samples.truncate(SAMPLES);
+    }
+    Ok(vec![
+        Measured::new("log/contended_call", Value::Time(Samples(samples)))
+            .with_note(Some(format!("{callers} callers"))),
+    ])
 }
 
 /// A third-party record (as GPUI writes them) whose call site is over its

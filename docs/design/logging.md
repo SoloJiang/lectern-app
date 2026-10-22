@@ -352,7 +352,7 @@ level     := off | error | warn | info | debug | trace
 1. 首帧前，主线程：`install_early`。之后任何线程的记录都进首帧前缓冲。
 2. 调用：调用点的级别低于 `log::max_level()` 时返回；否则查过滤（Lectern 调用点的缓存，或第三方记录的 `Log::enabled`）和限流（调用点的计数，或第三方的固定表）；放行的在调用线程上编码，复制进缓冲；写盘线程在睡眠时 `unpark` 它。调用线程不做 IO，UI 线程上的记录同样如此。
 3. 启动屏障放开后，主线程：`Early::start` 建 `lectern-log` 线程后返回。写盘线程依次：调用 `on_writer_start`，建目录，清理，读 `verbose.json`，检查上一次运行，打开文件写文件头，写出首帧前缓冲的内容，然后让调用线程改用运行时缓冲。
-4. 写盘线程的循环：有 error 记录或 panic 钩子在等时立即写；其余记录到达后最多等 1 s 或攒到 32 KiB 再写；写完没有新记录就无限期 `park`。唯一的定时等待是设置开启的详细日志到期，到期时恢复原来的过滤、删除 `verbose.json`、记一条 info。写只到 `write(2)` 为止，不 `fsync`；`shutdown` 和 panic 钩子之后才 `fsync`。
+4. 写盘线程的循环：有 error 记录或 panic 钩子在等时立即写；其余记录到达后最多等 1 s 或攒到运行时缓冲容量的一半（默认 64 KiB，详细日志开启时 256 KiB）再写；只有让缓冲第一次变为需要立即写的那条记录唤醒等待中的写盘线程。写盘线程从缓冲锁下同步写入的原子标志读「有没有记录」「要不要立即写」，只在交换两块缓冲时取这把锁；写完没有新记录就无限期 `park`。唯一的定时等待是设置开启的详细日志到期，到期时恢复原来的过滤、删除 `verbose.json`、记一条 info。写只到 `write(2)` 为止，不 `fsync`；`shutdown` 和 panic 钩子之后才 `fsync`。
 5. panic 钩子（在 panic 的线程上）：编码一条 error 记录（`msg` 为 `panic`，字段 `message` 用 `Value::panic_message`，按 `payload()` 能否转成 `&'static str` 或 `String` 选 `PanicText` 的变体，带作用域和 `location()`；`RUST_BACKTRACE` 设置了或详细日志开启时附回溯的帧名），放进缓冲，等写盘线程写完这条，最多 100 ms，然后调用原来的钩子。写盘线程还没启动时，钩子在当前线程上打开本次运行的文件，写出首帧前缓冲和这条记录。
 6. 退出：`app` 依次关闭 kernel、executor，再调用 `Logging::shutdown`。
 
@@ -374,7 +374,7 @@ level     := off | error | warn | info | debug | trace
 | 低于全局级别的调用 | ≤ 2 ns | `log/disabled_call` |
 | 全局级别放行、按 target 拒绝 | ≤ 5 ns | `log/filtered_call` |
 | 写出的调用（info，4 个字段），调用线程上 | p50 ≤ 1 µs，不分配内存 | `log/enabled_call` |
-| 4 个线程同时写，调用线程上 | p99 ≤ 5 µs，不丢记录（总量小于缓冲） | `log/contended_call` |
+| 4 个线程同时写（核数不够时为可用核数减 1，至少 1 个，给写盘线程留一个核），调用线程上 | p99 ≤ 5 µs，不丢记录（总量小于缓冲） | `log/contended_call` |
 | 被限流的第三方记录，调用线程上 | ≤ 30 ns，不编码 | `log/third_party_limited` |
 | `install_early` | ≤ 20 µs | `log/install_early` |
 | 写出 1 万条记录、静止 5 s 后的常驻内存增量 | 默认配置 ≤ 512 KiB | `log/idle_memory` |

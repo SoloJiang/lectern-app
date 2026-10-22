@@ -10,7 +10,7 @@ mod writer;
 
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{JoinHandle, Thread};
 use std::time::{Duration, Instant, SystemTime};
@@ -172,6 +172,13 @@ pub(crate) struct State {
     /// Filter directives `install_early` could not read.
     pub skipped: Vec<usize>,
     pub buffers: Mutex<Buffers>,
+    /// Mirrors of `buffers` written under its lock, so that the writer reads
+    /// them without the lock and takes it only to swap: the running buffer
+    /// has records; it is urgent.
+    pub pending: AtomicBool,
+    pub urgent: AtomicBool,
+    /// The running buffers' capacity (`Buffers::cap`).
+    pub cap: AtomicUsize,
     /// Files a panic before `start` opened; the writer takes them over.
     pub handoff: Mutex<Option<writer::Files>>,
     pub writer: OnceLock<Thread>,
@@ -196,6 +203,12 @@ impl State {
             let mut b = lock(&self.buffers);
             let was_urgent = b.urgent;
             let pushed = b.push(level, line);
+            if pushed && b.phase == Phase::Running {
+                // SeqCst pairs with the writer's store of IDLE / WAITING and
+                // its load of these flags: one of the two sides sees the other.
+                self.pending.store(true, Ordering::SeqCst);
+                self.urgent.store(b.urgent, Ordering::SeqCst);
+            }
             (pushed, b.urgent && !was_urgent)
         };
         if pushed {
@@ -212,11 +225,11 @@ impl State {
         let Some(thread) = self.writer.get() else {
             return;
         };
-        match self.writer_state.load(Ordering::Acquire) {
+        match self.writer_state.load(Ordering::SeqCst) {
             IDLE => {
                 if self
                     .writer_state
-                    .compare_exchange(IDLE, BUSY, Ordering::AcqRel, Ordering::Acquire)
+                    .compare_exchange(IDLE, BUSY, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
                     thread.unpark();
@@ -274,7 +287,9 @@ impl State {
     }
 
     fn set_cap(&self, cap: usize) {
-        lock(&self.buffers).set_cap(cap);
+        let mut b = lock(&self.buffers);
+        b.set_cap(cap);
+        self.cap.store(cap, Ordering::Relaxed);
     }
 
     pub(crate) fn verbose_on(&self) -> bool {
@@ -336,6 +351,9 @@ fn prepare(config: EarlyConfig, env: Env, caps: AllCaps) -> (Filter, Shared) {
             explicit: source != FilterSource::Default,
         }),
         disk_bytes: AtomicU64::new(0),
+        pending: AtomicBool::new(false),
+        urgent: AtomicBool::new(false),
+        cap: AtomicUsize::new(RUN_CAP),
     };
     let home = env
         .home

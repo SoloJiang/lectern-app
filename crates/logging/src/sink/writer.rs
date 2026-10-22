@@ -444,6 +444,7 @@ impl Writer {
             let mut b = lock(&state.buffers);
             b.front = Vec::with_capacity(cap);
             b.cap = cap;
+            state.cap.store(cap, Ordering::Relaxed);
             b.phase = Phase::Running;
             std::mem::take(&mut b.early)
         };
@@ -574,14 +575,14 @@ impl Writer {
             if left.is_zero() {
                 return;
             }
-            state.writer_state.store(WAITING, Ordering::Release);
+            state.writer_state.store(WAITING, Ordering::SeqCst);
             if self.peek().1 || self.control_pending() {
                 return;
             }
             std::thread::park_timeout(left);
             return;
         }
-        state.writer_state.store(IDLE, Ordering::Release);
+        state.writer_state.store(IDLE, Ordering::SeqCst);
         if self.peek().0 || self.control_pending() {
             return;
         }
@@ -591,9 +592,14 @@ impl Writer {
         }
     }
 
+    /// (the running buffer has records, it is urgent), from the mirrors
+    /// callers write under the buffer lock: the writer takes that lock only
+    /// to swap, so a waiting caller seldom finds it held by the writer.
     fn peek(&self) -> (bool, bool) {
-        let b = lock(&self.state.buffers);
-        (!b.front.is_empty(), b.urgent)
+        (
+            self.state.pending.load(Ordering::SeqCst),
+            self.state.urgent.load(Ordering::SeqCst),
+        )
     }
 
     fn control_pending(&self) -> bool {
@@ -614,19 +620,21 @@ impl Writer {
 
     fn write_pending(&mut self) {
         self.wait_started = None;
-        let cap = {
+        let cap = self.state.cap.load(Ordering::Relaxed);
+        // Allocate outside the lock (only after the capacity grew).
+        if self.back.capacity() < cap {
+            self.back.reserve_exact(cap - self.back.len());
+        }
+        {
             let mut b = lock(&self.state.buffers);
             b.urgent = false;
+            self.state.urgent.store(false, Ordering::SeqCst);
+            self.state.pending.store(false, Ordering::SeqCst);
             if b.front.is_empty() {
                 return;
             }
-            let cap = b.cap;
-            if self.back.capacity() < cap {
-                self.back.reserve_exact(cap - self.back.len());
-            }
             std::mem::swap(&mut b.front, &mut self.back);
-            cap
-        };
+        }
         let back = std::mem::take(&mut self.back);
         self.write_frames(&back);
         self.back = back;

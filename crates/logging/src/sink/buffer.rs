@@ -11,8 +11,6 @@ pub(crate) const EARLY_CAP: usize = 64 << 10;
 pub(crate) const RUN_CAP: usize = 128 << 10;
 /// Each of the two running buffers while verbose logging is on.
 pub(crate) const VERBOSE_CAP: usize = 512 << 10;
-/// A buffer this full wakes the writer at once.
-pub(crate) const URGENT_BYTES: usize = 32 << 10;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Phase {
@@ -28,7 +26,8 @@ pub(crate) struct Buffers {
     pub(crate) front: Vec<u8>,
     /// The running buffers' capacity.
     pub(crate) cap: usize,
-    /// An error record or [`URGENT_BYTES`] arrived since the last swap.
+    /// An error record arrived, or the running buffer reached half its
+    /// capacity (64 KiB by default), since the last swap.
     pub(crate) urgent: bool,
 }
 
@@ -61,7 +60,7 @@ impl Buffers {
         let header = (level as u32) << 24 | line.len() as u32;
         buf.extend_from_slice(&header.to_le_bytes());
         buf.extend_from_slice(line);
-        if level == Level::Error || (self.phase == Phase::Running && buf.len() >= URGENT_BYTES) {
+        if level == Level::Error || (self.phase == Phase::Running && buf.len() >= self.cap / 2) {
             self.urgent = true;
         }
         true
