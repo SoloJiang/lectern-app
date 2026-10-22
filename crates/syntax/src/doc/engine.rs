@@ -20,6 +20,7 @@ use lectern_executor::{Executor, Priority};
 use lectern_fs_watch::Watcher;
 use lectern_git::HashKind;
 use lectern_kernel::{BackgroundGuard, BusyGuard, PluginHandle};
+use lectern_logging::warn;
 use lectern_platform::{FileIdentity, OpenFile, SafeRoot};
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{BlobId, ProjectKey};
@@ -33,7 +34,7 @@ use crate::lru::Lru;
 use crate::objects::Shares;
 use crate::spans::WindowSpans;
 use crate::text::LineCheckpoints;
-use crate::util::{lock, log};
+use crate::util::lock;
 
 use super::chain::{self, ChainState};
 use super::content::{Content, PageCache};
@@ -287,9 +288,7 @@ impl Engine {
                 git.forget(&common);
             }
         }) {
-            log(format_args!(
-                "close_project before the engine started; nothing to release"
-            ));
+            warn!("close_project before the engine started; nothing to release");
         }
     }
 }

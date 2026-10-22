@@ -12,6 +12,7 @@
 mod cells;
 mod change;
 mod cut;
+mod diag;
 mod doc;
 pub mod find;
 mod git_access;

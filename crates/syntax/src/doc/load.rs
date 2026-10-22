@@ -23,11 +23,13 @@ use std::time::Duration;
 
 use lectern_executor::Priority;
 use lectern_git::{BlobHasher, GitError, Oid};
+use lectern_logging::{Value, error, warn};
 use lectern_platform::{FileIdentity, FullRead, OpenFile, Opened, RelPath, SafeError, SafeRoot};
 use lectern_services::code_intel::{DEPENDENCY_EXTENSIONS, DepRoot, TextOrigin};
 use lectern_services::project::{BlobId, ProjectKey};
 use lectern_services::reader::{Anchor, ReadTarget};
 
+use crate::diag;
 use crate::find::{BLOCK, FindQuery, FindResults, Finder, find_in};
 use crate::git_access::blob_id;
 use crate::highlight::{self, Budget, FullParse, Outcome, Source};
@@ -38,7 +40,7 @@ use crate::limits::{
 use crate::lru::{Class, LruKey, LruValue, SpansOf, WHOLE};
 use crate::spans::WindowSpans;
 use crate::text::{IndexBuilder, LineIndex, Text};
-use crate::util::{log, yield_now};
+use crate::util::yield_now;
 use crate::window::{self, Encoding, Target};
 
 use super::chain::{self, Computed, Want};
@@ -151,9 +153,10 @@ pub(crate) fn start(engine: &Arc<EngineInner>, doc: &Arc<Doc>, at: Anchor) {
         apply_first(&engine2, &doc2, load, first);
     });
     if !spawned {
-        log(format_args!(
-            "open before the engine started: the document stays empty"
-        ));
+        error!(
+            "open before the engine started; the document stays empty";
+            path = diag::path(&doc.target.path),
+        );
     }
 }
 
@@ -913,7 +916,13 @@ fn scan(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64, file: &OpenFile) {
         let read = match file.read_ranges(std::slice::from_ref(&(at..end))) {
             Ok(read) => read,
             Err(e) => {
-                log(format_args!("scan of {}: {e}", target.path));
+                error!(
+                    "the scan of a large file stopped";
+                    path = diag::path(&target.path),
+                    offset = at,
+                    size = size,
+                    io = Value::io(&e),
+                );
                 return;
             }
         };
@@ -1103,7 +1112,11 @@ fn read_pages(engine: &Arc<EngineInner>, doc: &Arc<Doc>, load: u64) {
         let read = match file.read_ranges(&ranges) {
             Ok(read) => read,
             Err(e) => {
-                log(format_args!("pages of {}: {e}", doc.target.path));
+                warn!(
+                    "cannot read the visible pages";
+                    path = diag::path(&doc.target.path),
+                    io = Value::io(&e),
+                );
                 doc.lock().pages_busy = false;
                 return;
             }

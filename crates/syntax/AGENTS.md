@@ -5,7 +5,7 @@
 - 层：领域层，普通的库 crate（不实现 `Plugin`，没有 `plugin = true`，[ADR 0041](../../docs/adr/0041.md)）。`file_reader`、`review_view` 和 `code_intel` 都可以依赖它；它不依赖任何插件 crate，不依赖 GPUI（架构规则 2）、`gix`、`rusqlite`、`ropey`。
 - 设计文档：[file_reader 设计](../../docs/design/file_reader.md)的「`syntax` 的公开项」；实现进度见那里的状态行和「验收」。已实现第 1 步（`Languages`、`Lang`、`Token`、`TokenKind`、`WindowSpans`、`health`）和第 2 步（`window::{first_read, checkpoint_read, plan, safe_start}`、`highlight::{window, FullParse, ChainWindow, SlowWindows, Source}`、`limits` 里的档位与窗口常量、`test-support` 的 `testing`）、第 3 步（`text::{Text, LineIndex, LongLine, LineCheckpoints, Pages}`、`find`、`Engine`、`DocHandle`、`DocSnapshot` 与它的 `rows` / `advance` / `at_fraction` / `pos_of_byte` / `total_rows`、LRU、`share_object`、fs_watch 的订阅与重新打开）、第 4 步（`Engine::prefetch`、`limits::{PREFETCH_MAX, BATCH_SEGMENT}`、窗口链 `src/doc/chain.rs`、预取 `src/doc/prefetch.rs`、`test-support` 的 `Engine::set_trace` 与 `Trace`）、第 5 步（`DocHandle::edit`、`EditSession`、`EditState`、`SaveResult`、`MergeOutcome`、`TextEdit`，会话 `src/doc/edit.rs`、增量解析 `src/highlight/incremental.rs`、编辑的合成与文件格式 `src/change.rs`，`test-support` 的 `EditSession::idle`）。第 1 步的 `highlight::whole_file` 已由 `FullParse` 取代。
 - issue：[#10](https://github.com/SoloJiang/lectern-app/issues/10)
-- ADR：[0018](../../docs/adr/0018.md)（核心高亮语言）、[0030](../../docs/adr/0030.md)（与 `code_intel` 共用 tree-sitter 和 grammar）、[0033](../../docs/adr/0033.md)、[0034](../../docs/adr/0034.md)、[0041](../../docs/adr/0041.md)、[0042](../../docs/adr/0042.md)
+- ADR：[0018](../../docs/adr/0018.md)（核心高亮语言）、[0030](../../docs/adr/0030.md)（与 `code_intel` 共用 tree-sitter 和 grammar）、[0033](../../docs/adr/0033.md)、[0034](../../docs/adr/0034.md)、[0041](../../docs/adr/0041.md)、[0042](../../docs/adr/0042.md)、[0046](../../docs/adr/0046.md)（运行日志）
 
 ## 边界
 
@@ -25,6 +25,7 @@
 - 内存的归属（ADR 0035）：LRU 按条目的 `bytes()` 加固定开销计、合计不超过 8 MiB，超过上限的条目不放；对象库内容的登记表只在 `ObjectShare` 存活期间持有强引用，不用 `Weak`；档位 C 的页每个文档至多 8 MiB；`Pages` 不可变，读到新页时换一份。
 - 首屏只按核对过的 OID 从 LRU 取整文件的区间（工作区文件：按刚打开的身份记下的 OID；对象库内容：`expect`），完整读取算出 OID 之后再核对一次；外部改动之后的重新打开不用 `expect`（`load::reload`）。可见区域、页和窗口都按顶部显示行自己的字节算（`DocSnapshot::visible_bytes`），不按它所在行的行首。
 - 编辑会话（`src/doc/edit.rs`）：UI 线程上只有 `changed`（合成编辑、按编辑平移区间，`WindowSpans::shifted`）、`spans`、`state`，其余排队。解析一个任务、磁盘一个任务，各自同一时刻至多一个：解析一轮做完它开始时的那份文本，期间到达的编辑合成到下一轮，落地时区间按它们平移；磁盘的保存、合并、事件后的检查和结束按顺序做，检查不会看到半个保存。会话活着时 `watch::check` 把事件交给会话，不重新打开文档；`close_project` 跳过这样的文档。会话结束时已排队的保存照常写入；有要写的时快照置为 `Reloading`，`Close` 做完之前 `DocHandle::edit` 返回 `Reloading`，`Close` 先放行再发布 `Yes`，`edit` 与快照始终一致（`edit_from_the_notification_after_a_close_succeeds`）。检查比较的是磁盘上的字节和按会话格式编码的基准，只改 BOM 或换行也算改动。两把锁只按「文档的锁在外、会话的锁在内」嵌套（`edit::begin` 取会话当前的缓冲区），持有会话的锁时不取文档的锁。增量查询只重跑编辑碰到的行（含新终点所在的行）和 `changed_ranges` 的行，改平移或拼接时 `edit_incremental_spans_are_their_trees_*` 的逐行对照必须仍然通过。冲突标记 `editor`、`disk` 是文件内容，不走 i18n。
+- 日志经 `lectern-logging` 的宏（[ADR 0046](../../docs/adr/0046.md)），不写 stderr、不启用 `sink`；字段值的写法集中在 `src/diag.rs`，路径只经 `Value::path`，错误只记种类、行列和 `Value::io`。文件内容、高亮区间、查找的查询、高亮查询的文字和错误消息不进日志；首屏、解析、查询、`rows` 和查找的热路径上不加记录（设计「日志与诊断」）。
 - 行检查点（`text::LineCheckpoints`）只为 ≥ 1 MiB 的内容写，键是原始字节的 OID；命名空间 `syntax.lines` 的版本在编码或计算方式改变时加一，并改 [cache 设计「命名空间」](../../docs/design/cache.md#命名空间)的那一行。
 
 ## 测试
@@ -42,5 +43,6 @@ just doctest                      # ParseGuard 不是 Send 的 compile_fail 示�
 - 合成源码在 `src/testing.rs`（`test-support` feature，`lectern-bench` 也用它）：TypeScript、Rust、JSON（`package-lock.json` 形状）、压缩成一行的 JavaScript；另有 `testing::host`（一个内核和插件句柄）。改生成器会改变 `window_plan_snapshot` 和基准的输入。
 - 基准在 `crates/bench/benches/time/syntax.rs`、`memory/syntax.rs`，引擎由 `benches/fixtures/syntax_engine.rs` 搭建；首屏的几项经 `Engine::first_screen`（`test-support`，与 `open` 的第一个任务同一段代码）计时；`syntax/prefetch_wait` 与真实的 `code_intel` 索引器共用一个 executor，经 `Engine::set_trace` 取预取任务开始的时刻；`syntax/edit_tree_bytes` 等 `EditSession::idle`（`test-support`）之后数会话持有的字节，减去缓冲区文本和区间。改首屏、读取或 LRU 时运行 `just bench --measure syntax/`（Linux 上只报告，macOS CI 判定预算）。
 - 快照的源码是 `src/tests/fixtures/` 下合成的小文件；改查询、升级 grammar 或 tree-sitter 时，`src/tests/snapshots/` 的变化逐个看过。
+- `logs_*`（`src/tests/logs.rs`）用 `lectern-logging` 的 `testing::capture()` 在 trace 级别检查记录，金丝雀放在文件内容、查找的查询、编辑、git 错误的文字和坏查询里，`assert_absent` 确认它们不进日志；`FakeGit::watch_error` 让订阅失败。`cargo test` 在同一进程里共用捕获器，按消息和相对路径筛选记录。
 - `health_*` 用 `src/tests/health.rs` 的 `ManualClocks` 代替 `platform::ThreadCpuClock`：测试推进每个模拟线程的 CPU 时间和墙上时间，`run_on` 决定下一次 `enter` 在哪个线程上；`health_global_on_real_clocks` 用真实时钟。
 - `rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 和 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。

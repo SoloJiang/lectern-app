@@ -25,16 +25,18 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use lectern_executor::Priority;
 use lectern_git::{Markers, merge3};
+use lectern_logging::{error, warn};
 use lectern_platform::{
     FileIdentity, FullRead, Opened, RelPath, ReplaceError, SafeError, SafeRoot,
 };
 use lectern_services::project::ProjectKey;
 
 use crate::change::{self, Format, TextEdit};
+use crate::diag::{self, Failure};
 use crate::highlight::{Budget, EditParse, Outcome};
 use crate::limits::{SLICE, TIER_B_MAX};
 use crate::spans::WindowSpans;
-use crate::util::{lock, log, yield_now};
+use crate::util::{lock, yield_now};
 
 use super::content::Content;
 use super::engine::{Doc, EngineInner};
@@ -493,11 +495,14 @@ impl Session {
     /// The root's `SafeRoot`: the one taken at the start, else the
     /// engine's (blocking).
     fn safe_root(&self, engine: &EngineInner) -> Result<Arc<SafeRoot>, Arc<str>> {
+        self.safe_root_io(engine).map_err(|e| e.to_string().into())
+    }
+
+    /// [`Session::safe_root`] with the `io::Error` kept, for a log record.
+    fn safe_root_io(&self, engine: &EngineInner) -> std::io::Result<Arc<SafeRoot>> {
         match &self.safe {
             Some(safe) => Ok(safe.clone()),
-            None => engine
-                .root(&self.project, &self.root)
-                .map_err(|e| e.to_string().into()),
+            None => engine.root(&self.project, &self.root),
         }
     }
 
@@ -684,7 +689,7 @@ fn save(engine: &EngineInner, session: &Session, text: Arc<str>, force: bool) {
 enum Unreadable {
     Gone,
     NotText,
-    Failed(Arc<str>),
+    Failed(Failure),
 }
 
 /// The file as read from disk.
@@ -703,14 +708,17 @@ impl Disk {
 
 /// The file on disk, with the identity it was read with. Blocking.
 fn read_disk(engine: &EngineInner, session: &Session) -> Result<Disk, Unreadable> {
-    let safe = session.safe_root(engine).map_err(Unreadable::Failed)?;
-    let rel = session.rel().map_err(Unreadable::Failed)?;
+    let safe = session
+        .safe_root_io(engine)
+        .map_err(|e| Unreadable::Failed(Failure::io("root", e)))?;
+    let rel = RelPath::new(session.path.as_bytes())
+        .ok_or_else(|| Unreadable::Failed(Failure::invalid_path()))?;
     let file = match safe.open_file(rel) {
         Ok(Opened::File(file)) => file,
         Ok(Opened::Symlink { .. } | Opened::Unsupported { .. }) | Err(SafeError::NotFound) => {
             return Err(Unreadable::Gone);
         }
-        Err(e) => return Err(Unreadable::Failed(e.to_string().into())),
+        Err(e) => return Err(Unreadable::Failed(Failure::safe("open", e))),
     };
     match file.read_all(TIER_B_MAX) {
         Ok(FullRead::File { bytes, meta }) => Ok(Disk {
@@ -718,7 +726,7 @@ fn read_disk(engine: &EngineInner, session: &Session) -> Result<Disk, Unreadable
             identity: meta.identity(),
         }),
         Ok(FullRead::TooLarge { .. }) => Err(Unreadable::NotText),
-        Err(e) => Err(Unreadable::Failed(e.to_string().into())),
+        Err(e) => Err(Unreadable::Failed(Failure::io("read", e))),
     }
 }
 
@@ -753,8 +761,14 @@ fn merge(engine: &EngineInner, session: &Session, ours: &str) {
             Some((Arc::new(outcome), theirs, format, identity))
         }
         Err(why) => {
-            if let Unreadable::Failed(e) = &why {
-                log(format_args!("merge of {}: {e}", session.path));
+            if let Unreadable::Failed(f) = &why {
+                error!(
+                    "cannot read the file to merge";
+                    path = diag::path(&session.path),
+                    op = f.op,
+                    error = f.error,
+                    io = f.io_value(),
+                );
             }
             None
         }
@@ -808,8 +822,14 @@ fn check(engine: &EngineInner, session: &Session) {
         }
         Ok(disk) => (true, disk.decode().is_none()),
         Err(why) => {
-            if let Unreadable::Failed(e) = &why {
-                log(format_args!("check of {}: {e}", session.path));
+            if let Unreadable::Failed(f) = &why {
+                warn!(
+                    "cannot read the edited file after a change on disk";
+                    path = diag::path(&session.path),
+                    op = f.op,
+                    error = f.error,
+                    io = f.io_value(),
+                );
             }
             (true, true)
         }

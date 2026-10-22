@@ -27,6 +27,8 @@ lectern-fs-watch = { path = "../fs_watch" }
 lectern-git = { path = "../git" }
 # PluginHandle, BusyGuard: tasks go through the plugin's handle.
 lectern-kernel = { path = "../kernel" }
+# The runtime log's macros and typed fields (diag.rs, ADR 0046).
+lectern-logging = { path = "../logging" }
 # `ThreadCpuClock` (health.rs, docs/adr/0041.md); `SafeRoot` and `OpenFile`:
 # worktree files are read only through them.
 lectern-platform = { path = "../platform" }
@@ -56,6 +58,8 @@ lectern-cache = { path = "../cache", features = ["test-support"] }
 lectern-executor = { path = "../executor", features = ["test-support"] }
 lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# testing::capture for the logs_* tests (docs/design/file_reader.md「日志与诊断」).
+lectern-logging = { path = "../logging", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

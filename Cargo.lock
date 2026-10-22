@@ -4453,6 +4453,7 @@ dependencies = [
  "lectern-fs-watch",
  "lectern-git",
  "lectern-kernel",
+ "lectern-logging",
  "lectern-platform",
  "lectern-services",
  "memchr",
