@@ -18,6 +18,46 @@ fn verbose_probe() {
     crate::debug!("verbose probe");
 }
 
+fn plugin_probe() {
+    crate::debug!("plugin probe");
+}
+
+#[test]
+fn registered_plugin_directive_survives_verbose_json() {
+    // What `register` accepts, a directive can name and verbose.json keeps.
+    for bad in ["Foo", "a.b", "", "with space"] {
+        assert_eq!(crate::PluginTag::register(bad), None, "{bad:?}");
+    }
+    let tag = crate::PluginTag::register("proc-plugin_2").expect("a valid ID");
+    let fx = Fixture::new();
+    let logging = fx.start(None);
+    logging.set_verbose(Some(Verbose {
+        filter: Filter::parse("@proc-plugin_2=debug").0,
+        lasts: HOUR,
+    }));
+    assert!(logging.flush(Duration::from_secs(5)));
+    fx.restart(&logging);
+
+    let logging = fx.start(None);
+    let status = logging.status();
+    assert_eq!(status.source, FilterSource::Setting);
+    assert_eq!(status.filter.to_string(), "@proc-plugin_2=debug");
+    {
+        let _s = crate::scope(crate::Ctx {
+            plugin: Some(tag),
+            ..crate::Ctx::default()
+        });
+        plugin_probe();
+    }
+    plugin_probe();
+    assert!(logging.flush(Duration::from_secs(5)));
+    let written = with_msg(&verbose_records(fx.path()), "plugin probe")
+        .into_iter()
+        .map(|r| r["plugin"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(written, [serde_json::json!("proc-plugin_2")]);
+}
+
 #[test]
 fn setting_survives_restart_until_it_expires() {
     let fx = Fixture::new();

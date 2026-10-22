@@ -17,4 +17,4 @@ expression: "text.join(\"\\n\")"
 "@=debug" -> "" skipped [0] max info
 "Cache Store=debug" -> "" skipped [0] max info
 "debug,,info" -> "info" skipped [] max info
-"trace,bad!,@x.y=info,off" -> "off,@x.y=info" skipped [1] max info
+"trace,bad!,@x.y=info,off" -> "off" skipped [1, 2] max warn

@@ -63,16 +63,12 @@ impl PluginTag {
         PluginTag(id)
     }
 
-    /// Registers a process plugin's ID: `[A-Za-z0-9._-]`, 1 to 64 bytes.
+    /// Registers a process plugin's ID: `[a-z0-9_-]`, 1 to 64 bytes, what an
+    /// `@plugin=level` directive can name (and `verbose.json` can keep).
     /// The same ID returns the same tag. None for another ID, or once 1024
     /// IDs are registered (the record then has no `plugin`).
     pub fn register(id: &str) -> Option<PluginTag> {
-        let valid = !id.is_empty()
-            && id.len() <= 64
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-        if !valid {
+        if !crate::filter::is_plugin_id(id) {
             return None;
         }
         let mut names = REGISTERED.lock().unwrap_or_else(|e| e.into_inner());

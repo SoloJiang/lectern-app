@@ -182,14 +182,21 @@ fn target_name(s: &str) -> Option<String> {
     .then_some(s)
 }
 
-/// A plugin ID: `[a-z0-9._-]`, at most 64 bytes.
+/// A plugin ID as directives name it: lowercased, then `[a-z0-9_-]`, at
+/// most 64 bytes.
 fn plugin_name(s: &str) -> Option<String> {
     let s = s.trim().to_ascii_lowercase();
-    (!s.is_empty()
-        && s.len() <= 64
-        && s.bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b)))
-    .then_some(s)
+    is_plugin_id(&s).then_some(s)
+}
+
+/// The plugin IDs a directive can name and `verbose.json` keeps as written:
+/// `[a-z0-9_-]`, 1 to 64 bytes. `PluginTag::register` accepts the same.
+pub(crate) fn is_plugin_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 /// The active filter with its generation; call sites cache their level per

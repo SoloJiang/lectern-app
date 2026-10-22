@@ -116,6 +116,7 @@ pub struct Ctx {
 pub struct PluginTag(&'static str);
 impl PluginTag {
     pub const fn new(id: &'static str) -> PluginTag;
+    /// 只接受 `[a-z0-9_-]`、1 到 64 字节的 ID（`@plugin=level` 能写出的范围），其他返回 None。
     pub fn register(id: &str) -> Option<PluginTag>;
 }
 
@@ -327,7 +328,7 @@ level     := off | error | warn | info | debug | trace
 ```
 
 - 单独的 `level` 只作用于 Lectern 的 target；第三方 target 要写出名字（`gpui=debug`），没写时保持 warn。
-- `target=level` 按 crate 短名精确匹配；`@plugin=level` 匹配作用域里 `plugin` 等于它的记录，与 target 规则同时命中时取较详细的一个。
+- `target=level` 按 crate 短名精确匹配；`@plugin=level` 匹配作用域里 `plugin` 等于它的记录（插件 ID 为 `[a-z0-9_-]`，与 `PluginTag::register` 接受的相同），与 target 规则同时命中时取较详细的一个。
 - 默认过滤：Lectern 的 target 为 info，第三方为 warn。
 - 来源的优先级：`--log` > `LECTERN_LOG` > 设置（`verbose.json`）> 默认。命令行或环境变量给出时，设置里的开关在本次运行中不改变过滤，`Status::source` 反映实际来源。
 - `log::max_level()` 取全部指令里最详细的级别；更细的判断在调用点的缓存和 `Log::enabled` 里。过滤变化时代数加一，各调用点下次调用时重新计算。
@@ -565,7 +566,7 @@ level     := off | error | warn | info | debug | trace
 - **第三方调用点的键按地址哈希。** target 和 `file()` 取字符串的地址与长度，不逐字节哈希（「限流」已改）。运行时拼出的 target 每次地址不同，只会多占表项，由溢出项兜住。
 - **`Value::io` 写进了接口。** 「日志与诊断」已经用到它，「调用点」的接口里补上；写成 `{"kind":…,"code":…}`。panic 消息的写出形式也补进「隐私」。
 - **宏在编译期多查两项。** 消息不能含 `{`、`}`（不插值，避免读者以为会插值），不超过 512 字节；字段不超过 12 个。trybuild 的用例按出错的位置拆成 6 个文件：rustc 在一个文件里遇到宏匹配失败或类型错误后，不再报后面的错误。
-- **`PluginTag::register` 只接受 `[A-Za-z0-9._-]`、1 到 64 字节的 ID**，其他返回 None。
+- **插件 ID 限于 `[a-z0-9_-]`、1 到 64 字节。** `PluginTag::register` 只接受这些字符，其他返回 None；`@plugin=level` 的名字先转小写，也只接受这些字符。这是指令能写出、`verbose.json` 能原样保存的范围：大写的 ID 永远匹配不到转小写的指令，带 `.` 的指令写进 `verbose.json` 时 `.` 变成 `?`，下次启动读不回来。测试 `registered_plugin_directive_survives_verbose_json`。
 - **过滤的规范形式。** `Display` 依次写单独的级别、`target=level`、`@plugin=level`；名字转成小写，target 里的 `-` 读作 `_`；同名指令后面的覆盖前面的；空指令（如 `debug,,info` 中间那个）忽略，不算无法识别。`Filter` 在不开 `sink` 时也导出，调用点的过滤缓存用到它。
 - **写盘线程启动时就打开默认文件、写文件头**，不等第一条记录，第 3 步「启动后 1 s 内出现本次运行的文件」依赖这一点。
 - **首帧前 panic 写出的文件头没有 `version`、`build`、`os`、`arch`**：这些在 `start` 的 `Config` 里才有。写盘线程启动后接着写这个文件，不再写第二个文件头。
