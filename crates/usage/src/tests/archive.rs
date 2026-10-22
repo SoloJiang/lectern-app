@@ -125,6 +125,20 @@ fn history(h: &Harness, repo: &ProjectKey, days: bool) -> HistoryUsage {
     }
 }
 
+/// The history of `from` to `to`, months only.
+fn history_of(h: &Harness, repo: &ProjectKey, from: LocalDate, to: LocalDate) -> HistoryUsage {
+    let query = UsageQuery::History {
+        project: ProjectRef::Open(repo.clone()),
+        from,
+        to,
+        days: false,
+    };
+    match h.snapshot(&query) {
+        Some(UsageSnapshot::History(u)) => u,
+        other => panic!("not a history: {other:?}"),
+    }
+}
+
 fn render_history(u: &HistoryUsage) -> String {
     let mut out = String::new();
     for ((y, m), t) in u.months.iter() {
@@ -337,6 +351,23 @@ fn archive_moves_old_months_and_keeps_every_total() {
     assert_eq!(windows, before.windows);
     // August and September from `cold_month`, the rest from hot facts.
     insta::assert_snapshot!(render_history(&months_only));
+    // A range inside a month gives the whole month's row, cold (September
+    // 2025) and hot (October 2026) alike.
+    let date = |year, month, day| LocalDate { year, month, day };
+    let whole = |ym: (i32, u8)| {
+        months_only
+            .months
+            .iter()
+            .find(|(m, _)| *m == ym)
+            .map(|(_, t)| *t)
+            .unwrap()
+    };
+    let part = history_of(&h, &repo, date(2025, 9, 15), date(2025, 9, 16));
+    assert_eq!(part.months.len(), 1);
+    assert_eq!(part.months[0].1, whole((2025, 9)));
+    let part = history_of(&h, &repo, date(2026, 10, 5), date(2026, 10, 6));
+    assert_eq!(part.months[0].1, whole((2026, 10)));
+    assert!(whole((2026, 10)).total() > 0);
     assert_buckets(&h);
     // Nothing more to do; another run archives nothing.
     assert!(h.store().archive_plan(h.now, &h.zone).unwrap().is_empty());
@@ -566,6 +597,65 @@ fn archive_late_records_get_their_own_segment() {
         .map(|(_, t)| t.input)
         .sum();
     assert!(late_days >= 33);
+}
+
+#[test]
+fn archive_salvage_keeps_new_source_ids_above_the_cold_ones() {
+    let mut h = Harness::new();
+    let repo = h.open_repo("/work/app");
+    let fake = FakeSessions::new("session-claude-code", Agent::ClaudeCode);
+    // The recent session is read first: the archived sources get the
+    // highest IDs, and none of them is left hot.
+    let sessions = [
+        (
+            "recent",
+            every(utc(2026, 10, 20, 8), utc(2026, 10, 22, 8), 1),
+        ),
+        ("old", every(utc(2025, 9, 3, 15), utc(2025, 9, 27, 15), 3)),
+    ];
+    for (id, times) in &sessions {
+        fake.add(id, Path::new("/work/app"), times[0], None);
+        fake.push(id, records("/work/app", id, times));
+        h.read_all(&fake, id);
+    }
+    archive(&h);
+    let hot_top = count(&h, "SELECT max(id) FROM usage_source");
+    let cold_top = h
+        .store()
+        .cold_rows("usage_source")
+        .iter()
+        .filter_map(|r| match r[0] {
+            Value::Integer(id) => Some(id),
+            _ => None,
+        })
+        .max()
+        .unwrap();
+    assert!(cold_top > hot_top);
+    // The copy holds only the hot rows; their IDs alone would let new
+    // sources take the cold ones' IDs, at or below September's mark.
+    let r = h.store().salvage_now(h.now).unwrap();
+    assert_eq!(r.lost, 0);
+    let seq = count(
+        &h,
+        "SELECT seq FROM sqlite_sequence WHERE name = 'usage_source'",
+    );
+    assert!(seq >= cold_top, "{seq} < {cold_top}");
+    // A first read of an old September log after the salvage is counted by
+    // the next archive.
+    let sept = |u: &HistoryUsage| {
+        u.months
+            .iter()
+            .find(|(ym, _)| *ym == (2025, 9))
+            .map(|(_, t)| t.input)
+            .unwrap()
+    };
+    let before = sept(&history(&h, &repo, false));
+    let at = utc(2025, 9, 10, 10);
+    fake.add("late", Path::new("/work/app"), at, None);
+    fake.push("late", records("/work/app", "late", &[at]));
+    h.read_all(&fake, "late");
+    archive(&h);
+    assert_eq!(sept(&history(&h, &repo, false)), before + 10);
 }
 
 #[test]

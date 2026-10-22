@@ -243,6 +243,42 @@ fn window_deltas_give_what_a_full_compute_gives() {
     assert!(removed.get() > 0, "some deltas take facts away");
 }
 
+#[test]
+fn window_deltas_out_of_order_compute_again() {
+    // Two reads store commits C+1 and C+2; the second's deltas reach the
+    // watched window first. They cannot apply over the gap: the window is
+    // computed again, and C+1 then changes nothing.
+    use crate::snapshot::Applied;
+    let mut h = Harness::new();
+    let repo = h.open_repo("/work/a");
+    let query = UsageQuery::Project {
+        project: ProjectRef::Open(repo),
+        window: Window::D7,
+    };
+    let fake = FakeSessions::new("session-claude-code", Agent::ClaudeCode);
+    let at = OCT_20 + 9 * HOUR;
+    // The location is known before the window is watched: only the order
+    // of the commits is in question.
+    one(&fake, "seed", "/work/a", at, 1);
+    h.read_every(&fake);
+    let mut w = h.watched(&query);
+    one(&fake, "first", "/work/a", at, 10);
+    one(&fake, "second", "/work/a", at + HOUR, 100);
+    let first = h.read_once(&fake, "first", u64::MAX);
+    let second = h.read_once(&fake, "second", u64::MAX);
+    assert_eq!(second.commit, first.commit + 1);
+    assert!(!first.facts.is_empty() && !second.facts.is_empty());
+    assert_eq!(h.apply(&mut w, &second), Applied::Recompute);
+    w = h.watched(&query);
+    assert_eq!(h.apply(&mut w, &first), Applied::Unchanged);
+    let full = h.snapshot(&query).unwrap();
+    assert_eq!(w.snapshot(UsageState::Ready), full);
+    let UsageSnapshot::Project(p) = full else {
+        panic!("not a project");
+    };
+    assert_eq!(p.total.input, 111);
+}
+
 /// The records of [`session`], to push again or replace with.
 fn claude_records(
     id: &str,

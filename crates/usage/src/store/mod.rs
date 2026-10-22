@@ -380,6 +380,20 @@ impl Store {
         Ok(Checked::Recovered(recovery))
     }
 
+    /// A salvage of a sound file (every row copied), for tests of what the
+    /// copy must carry over.
+    #[cfg(test)]
+    pub(crate) fn salvage_now(&self, now_ms: i64) -> Result<Recovery, StoreError> {
+        let mut writer = lock(&self.writer);
+        let mut reader = lock(&self.reader);
+        *reader = None;
+        *writer = None;
+        let (files, recovery) = recover::salvage(&self.dir, self.schema, now_ms)?;
+        *writer = Some(files.writer);
+        *reader = Some(files.reader);
+        Ok(recovery)
+    }
+
     /// Whether any source still waits for its record to be read again after
     /// a salvage. Ingest asks the same inside its own transaction.
     #[cfg(test)]
@@ -593,6 +607,19 @@ pub(crate) fn create(conn: &mut Connection, schema: &Schema) -> rusqlite::Result
     set_meta(&tx, "derived", DERIVED_VERSION)?;
     set_meta(&tx, "clean", 0)?;
     tx.commit()
+}
+
+/// Runs `f`'s reads in one read transaction (one snapshot of the file).
+pub(crate) fn read_transaction<T>(
+    conn: &Connection,
+    f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    conn.execute_batch("BEGIN DEFERRED")?;
+    let out = f(conn);
+    let end = conn.execute_batch("COMMIT");
+    let out = out?;
+    end?;
+    Ok(out)
 }
 
 pub(crate) fn set_meta(conn: &Connection, name: &str, value: i64) -> rusqlite::Result<()> {

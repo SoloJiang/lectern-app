@@ -547,7 +547,6 @@ impl Engine {
                 .collect();
         }
         let mut state = self.state();
-        state.reading = false;
         state.probe.remove(&key);
         if !replays.is_empty() {
             if state.backfill.started.is_none() {
@@ -590,6 +589,8 @@ impl Engine {
             Some(out) => self.apply_facts(&out),
             None => self.mark_all_dirty(),
         }
+        // Only now may the next read start: its deltas come after these.
+        self.state().reading = false;
         self.compute();
         self.pump();
     }
@@ -863,10 +864,7 @@ impl Engine {
         match store.ingest(&input) {
             // A salvage reset the cursor while this batch was read: read
             // again from the saved one.
-            Ok(out) if out.stale => {
-                debug!("batch read across a salvage dropped"; offset = cursor.offset());
-                Read::Stale
-            }
+            Ok(out) if out.stale => Read::Stale,
             Ok(out) => Read::Done {
                 adapter_changed,
                 out: Box::new(out),

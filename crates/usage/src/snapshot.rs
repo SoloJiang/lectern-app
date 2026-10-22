@@ -601,7 +601,9 @@ impl Watched {
     }
 
     /// Applies the fact deltas of ingest commit `commit` (their texts known,
-    /// see [`Watched::missing`]).
+    /// see [`Watched::missing`]). Only the next commit applies: one already
+    /// in the sums changes nothing, and one after a gap (an earlier
+    /// commit's deltas not applied yet) needs a full compute.
     pub(crate) fn apply(
         &mut self,
         commit: i64,
@@ -611,7 +613,7 @@ impl Watched {
         if commit <= self.commits {
             return Applied::Unchanged;
         }
-        if deltas.iter().any(|d| d.location > self.max_location) {
+        if commit != self.commits + 1 || deltas.iter().any(|d| d.location > self.max_location) {
             return Applied::Recompute;
         }
         self.commits = commit;

@@ -9,6 +9,7 @@
 //! `usage.db.corrupt-<ms>`. A salvage cut short leaves `usage.db` as it was
 //! and the half-built copy behind, and the next open salvages again.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -152,7 +153,7 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
             copied += c;
             lost += l;
         }
-        let bad = drop_bad_segments(&out)?;
+        let (bad, cold_top) = drop_bad_segments(&out)?;
         if bad > 0 {
             error!("cold segments that do not decode stay in the kept file"; segments = bad);
             lost += bad;
@@ -161,6 +162,7 @@ pub(crate) fn salvage(dir: &Path, schema: &Schema, at: i64) -> rusqlite::Result<
         let (c, l) = copy_frozen_derived(&out)?;
         copied += c;
         lost += l;
+        raise_sequences(&out, &cold_top)?;
         out.execute_batch("DETACH DATABASE old;")?;
         if lost > 0 {
             repaired = repair_references(&out)?;
@@ -295,26 +297,83 @@ fn read_only_uri(path: &Path) -> String {
 }
 
 /// Segments copied from the old file that do not decode: deleted from the
-/// copy (the kept file still has them) and counted.
-fn drop_bad_segments(conn: &Connection) -> rusqlite::Result<u64> {
+/// copy (the kept file still has them) and counted. Also gives the highest
+/// row ID per table in the segments that decode.
+fn drop_bad_segments(conn: &Connection) -> rusqlite::Result<(u64, HashMap<String, i64>)> {
     let mut bad = Vec::new();
+    let mut top: HashMap<String, i64> = HashMap::new();
     {
         let mut stmt = conn.prepare("SELECT id, data FROM main.cold_part")?;
         let mut rows = stmt.query([])?;
         while let Some(r) = rows.next()? {
             let data: Vec<u8> = r.get(1)?;
-            if segment::decompress(&data)
-                .and_then(|raw| segment::decode(&raw))
-                .is_none()
-            {
-                bad.push(r.get::<_, i64>(0)?);
+            match segment::decompress(&data).and_then(|raw| segment::decode(&raw)) {
+                None => bad.push(r.get::<_, i64>(0)?),
+                Some(seg) => {
+                    let Some(i) = seg.column("id") else { continue };
+                    let max = seg.rows.iter().filter_map(|row| match row[i] {
+                        rusqlite::types::Value::Integer(id) => Some(id),
+                        _ => None,
+                    });
+                    if let Some(max) = max.max() {
+                        let slot = top.entry(seg.table.clone()).or_insert(0);
+                        *slot = (*slot).max(max);
+                    }
+                }
             }
         }
     }
     for id in &bad {
         conn.execute("DELETE FROM main.cold_part WHERE id = ?1", params![id])?;
     }
-    Ok(bad.len() as u64)
+    Ok((bad.len() as u64, top))
+}
+
+/// Source and turn IDs are never reused (`AUTOINCREMENT`), but the copy
+/// does not carry `sqlite_sequence`: when the highest rows were archived
+/// (or lost), new rows would take IDs that cold rows already have, and a
+/// source at or below a frozen month's `archive_mark` would never be
+/// counted. Each sequence starts above the surviving rows, the old file's
+/// sequence when it is readable, the IDs in the cold segments and, for
+/// the sources, every `archive_mark`.
+fn raise_sequences(conn: &Connection, cold_top: &HashMap<String, i64>) -> rusqlite::Result<()> {
+    let old: HashMap<String, i64> = conn
+        .prepare("SELECT name, seq FROM old.sqlite_sequence")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect()
+        })
+        .unwrap_or_default();
+    let marks: i64 = conn.query_row(
+        "SELECT coalesce(max(value), 0) FROM main.meta
+         WHERE name >= 'archive_mark:' AND name < 'archive_mark;'",
+        [],
+        |r| r.get(0),
+    )?;
+    for table in ["usage_source", "turn"] {
+        let hot: i64 = conn.query_row(
+            &format!("SELECT coalesce(max(id), 0) FROM main.{table}"),
+            [],
+            |r| r.get(0),
+        )?;
+        let mut floor = hot
+            .max(old.get(table).copied().unwrap_or(0))
+            .max(cold_top.get(table).copied().unwrap_or(0));
+        if table == "usage_source" {
+            floor = floor.max(marks);
+        }
+        let updated = conn.execute(
+            "UPDATE main.sqlite_sequence SET seq = max(seq, ?2) WHERE name = ?1",
+            params![table, floor],
+        )?;
+        if updated == 0 && floor > 0 {
+            conn.execute(
+                "INSERT INTO main.sqlite_sequence (name, seq) VALUES (?1, ?2)",
+                params![table, floor],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// The derived rows of frozen months (docs/design/usage.md「冷热分层」): a

@@ -768,9 +768,11 @@ impl Store {
     }
 
     /// The history of some locations (docs/design/usage.md「读冷数据」):
-    /// per local month the hot facts plus `cold_month`; with `days`, per
-    /// local day the hot facts plus the cold `fact` segments of the range,
-    /// decoded one at a time. Blocking.
+    /// per local month, whole months, the hot facts plus `cold_month`; with
+    /// `days`, per local day of the range the hot facts plus the cold
+    /// `fact` segments, decoded one at a time. The hot sums, the summaries
+    /// and the list of segments are read in one transaction, so an archive
+    /// step in between counts nothing twice. Blocking.
     pub(crate) fn history(
         &self,
         locations: &[i64],
@@ -782,6 +784,29 @@ impl Store {
         let first = window::day_number(from);
         let last = window::day_number(to).max(first);
         let range = window::start(from, zone)..window::start(window::date_of(last + 1), zone);
+        // The month rows cover whole local months, as `cold_month` does.
+        let to_date = window::date_of(last);
+        let next_month = if to_date.month == 12 {
+            LocalDate {
+                year: to_date.year + 1,
+                month: 1,
+                day: 1,
+            }
+        } else {
+            LocalDate {
+                year: to_date.year,
+                month: to_date.month + 1,
+                day: 1,
+            }
+        };
+        let months_range = window::start(
+            LocalDate {
+                year: from.year,
+                month: from.month,
+                day: 1,
+            },
+            zone,
+        )..window::start(next_month, zone);
         let wanted: HashSet<i64> = locations.iter().copied().collect();
         let mut out = HistoryTotals {
             months: BTreeMap::new(),
@@ -795,15 +820,16 @@ impl Store {
             (first..=last).contains(&d).then(|| (d - first) as usize)
         };
         let mut segments: Vec<i64> = Vec::new();
-        self.read(|conn| {
+        let sums = |conn: &Connection| -> rusqlite::Result<()> {
             let mut hot = conn.prepare_cached(
                 "SELECT bucket, sum(input), sum(output), sum(cache_read), sum(cache_write)
                  FROM fact WHERE location = ?1 AND at >= ?2 AND at < ?3 GROUP BY bucket",
             )?;
             for &l in locations {
-                let rows = hot.query_map(params![l, range.start, range.end], |r| {
-                    Ok((r.get::<_, i64>(0)?, micro(r, 1)?))
-                })?;
+                let rows = hot
+                    .query_map(params![l, months_range.start, months_range.end], |r| {
+                        Ok((r.get::<_, i64>(0)?, micro(r, 1)?))
+                    })?;
                 for row in rows {
                     let (bucket, m) = row?;
                     let at = bucket * BUCKET_MS;
@@ -845,8 +871,10 @@ impl Store {
                     .collect::<rusqlite::Result<_>>()?;
             }
             Ok(())
-        })?;
-        // One segment at a time, nothing of it kept.
+        };
+        self.read(|conn| super::read_transaction(conn, sums))?;
+        // One segment at a time, nothing of it kept. A listed segment is
+        // never rewritten; one a full rebuild removed meanwhile is skipped.
         for id in segments {
             let Some(seg) = self.cold_segment(id)? else {
                 continue;
