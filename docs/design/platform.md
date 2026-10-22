@@ -373,7 +373,7 @@ pub enum FileKind {
 
 本节覆盖整个 crate，规则见 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。
 
-- 默认记录：`safe_read`、`dirs`、`system`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。唯一的运行时记录在 `fs_events`：kqueue 线程因 `kevent` 出错而停止时记一条，带系统错误；订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。这一条目前写 stderr；本 crate 不在 logging 设计「对其他 crate 的要求」的接入顺序里，在 `logging` 第 1 步合并之后的下一次改动中接入：改为 error，target `platform`，错误用 `Value::io`（种类和错误码），删掉 `eprintln!`。
+- 默认记录：`safe_read`、`dirs`、`system`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。唯一的运行时记录在 `fs_events`：kqueue 线程因 `kevent` 出错而停止时记一条，带系统错误；订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。这一条目前写 stderr，在 logging 设计「对其他 crate 的要求」第 9 项接入：改为 error，target `platform`，错误用 `Value::io`（种类和错误码），删掉 `eprintln!`。
 - 详细级别：不多记。
 - 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
 - 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。

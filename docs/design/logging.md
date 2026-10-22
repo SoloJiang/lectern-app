@@ -470,14 +470,14 @@ level     := off | error | warn | info | debug | trace
 每一项是一个 PR，按下面的顺序；各 crate 接入时在自己的设计文档里补上「日志与诊断」一节，删掉「写到 stderr、由 `app` 重定向」的描述，并加一条金丝雀测试（`testing::capture()` 在 trace 级别跑一次带金丝雀的流程，`assert_absent`）。
 
 1. `logging`：本文的第 1 步。
-2. `platform`：`dirs::logs()`（规则同 `dirs::app_data`：只读环境变量，不建目录；macOS `$HOME/Library/Logs/Lectern`，其他平台 `$XDG_STATE_HOME/lectern/logs`，变量不可用时 `$HOME/.local/state/lectern/logs`）；系统版本字符串（`sysctl kern.osproductversion`）；写盘线程的 utility QoS 沿用 executor 批量线程的接口。导出那一步再加 `dirs::crash_reports()` 和 zip 压缩。
+2. `platform`：`dirs::logs()`（规则同 `dirs::app_data`：只读环境变量，不建目录；macOS `$HOME/Library/Logs/Lectern`，其他平台 `$XDG_STATE_HOME/lectern/logs`，变量不可用时 `$HOME/.local/state/lectern/logs`）；系统版本字符串（`sysctl kern.osproductversion`）；写盘线程的 utility QoS 沿用 executor 批量线程的接口，`platform` 有这个接口之后再接入（`Config::on_writer_start` 是可选的，在此之前写盘线程用默认 QoS）。导出那一步再加 `dirs::crash_reports()` 和 zip 压缩。
 3. `app`（macOS）：`main` 第一行 `install_early`，解析 `--log`；启动屏障放开后 `start`；退出时 `shutdown(500 ms)`；把 `Logging` 交给设置与导出命令。
 4. `kernel`：`ActivationToken` 带激活序号（`fn id(&self) -> u64`，进程内从 1 递增）；每段 `contain` 包住的插件代码外设 `plugin`、`act` 作用域；`contain` 捕获 panic 后记 error（`plugin failed`，带阶段：`manifest`、`activate`、`commit`、`started`、`listener`、`command`、`drop`，以及 `Value::panic_message`，`PanicText` 的变体按 payload 是 `&'static str` 还是 `String` 构造）；插件激活记 info（`took_us`）；进程插件的名字用 `PluginTag::register` 登记；15 处 `util::log` 改为宏；kernel 设计「只用标准库」改为「标准库加 `lectern-logging`」。
 5. `executor`：任务序号；`spawn` 时取 `logging::current()` 并加上任务序号、闸门的插件和激活，每次 poll 和最终 drop 外设这个作用域；`catch` 捕获的 panic 记 error（`PanicText` 同 kernel）；13 处 `util::log` 改为宏；executor 设计「依赖」一节已在 [#170](https://github.com/SoloJiang/lectern-app/issues/170) 的设计 PR 里加上 `lectern-logging`。`executor/` 的基准与改动前相比不变慢。
 6. `cache`：分库停用（error，原因、SQLite 扩展错误码、路径）、版本或身份不符与损坏（warn）、清理时删除失败（warn）；9 处。
 7. `agents`：会话解析失败（warn，会话 UUID、路径、字节偏移、行长度、错误种类，不记行的内容）；副本写失败退回慢路径（warn）；命令行的启动与退出（程序名、参数个数、pid、退出状态）；Analyze 的凭据转发端点按「隐私」的网络请求规则记录，带 `analysis`、`req`。金丝雀放在会话 JSONL、提示词和占位令牌、真实令牌里。
 8. `review`：标注日志的恢复（warn：截掉的尾部字节数、跳过的坏行数）、写失败与重试（warn）、压缩（info：前后字节数）；作用域带 `review`、`session`。金丝雀放在文件内容和会话内容里。
-9. `fs_watch`（3 处）、`syntax`（12 处）、`code_intel`（26 处）、`i18n`（stderr 一处）：改为宏，按各自现有的「记日志」处记录。
+9. `fs_watch`（3 处）、`platform`（kqueue 线程 1 处）、`syntax`（12 处）、`code_intel`（26 处）、`i18n`（stderr 一处）：改为宏，按各自现有的「记日志」处记录。
 10. CI：各 crate 接入完成后，在非 tool crate 开启 `clippy::print_stderr`、`clippy::print_stdout`。
 11. `workspace` 与视图层：主线程上执行注册内容的闭包时设 `plugin`、`act` 作用域。
 12. 导出界面：等「未决问题」1、3 答复后，由对应的视图 crate 和 `platform` 实现。
