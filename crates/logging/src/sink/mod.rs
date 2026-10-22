@@ -612,4 +612,4 @@ pub(crate) fn install_for_test(
 #[cfg(test)]
 pub(crate) use buffer::EARLY_CAP as EARLY_CAP_FOR_TESTS;
 #[cfg(test)]
-pub(crate) use files::{Caps, cleanup, file_name, list, parse_name};
+pub(crate) use files::{Caps, Keep, Listed, Name, cleanup, file_name, list, parse_name, plan};

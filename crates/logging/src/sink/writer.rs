@@ -192,14 +192,17 @@ impl Files {
         Ok(())
     }
 
-    /// Cleans one kind's directory, keeping this run's files.
+    /// Cleans one kind's directory after a rotation: the caps apply to this
+    /// run's earlier files too, only the file just opened stays.
     pub(crate) fn cleanup(&mut self, kind: Kind) {
-        let cleanup = files::cleanup(
-            &self.dir_of(kind),
-            (&self.stamp, self.pid),
-            clock::now(),
-            self.caps_of(kind),
-        );
+        let slot = self.slot(kind);
+        let open_seq = slot.file.as_ref().map(|_| slot.next_seq - 1);
+        let keep = files::Keep {
+            stamp: &self.stamp,
+            pid: self.pid,
+            open_seq,
+        };
+        let cleanup = files::cleanup(&self.dir_of(kind), keep, clock::now(), self.caps_of(kind));
         self.disk[kind as usize] = cleanup.remaining_bytes;
         self.events.push(Event::Cleaned { kind, cleanup });
     }
@@ -403,7 +406,14 @@ impl Writer {
                     (Kind::Default, dir.clone(), state.caps.default),
                     (Kind::Verbose, files::verbose_dir(&dir), state.caps.verbose),
                 ] {
-                    cleanups.push((kind, files::cleanup(&path, current, now, caps)));
+                    // This run's first file is the one the writer opens (or
+                    // took over from a panic before `start`).
+                    let keep = files::Keep {
+                        stamp: &state.stamp,
+                        pid: state.pid,
+                        open_seq: Some(0),
+                    };
+                    cleanups.push((kind, files::cleanup(&path, keep, now, caps)));
                 }
                 self.read_verbose(now);
                 previous = files::previous_run(&dir, current);

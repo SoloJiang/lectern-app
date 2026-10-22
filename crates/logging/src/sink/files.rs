@@ -87,6 +87,7 @@ pub(crate) struct Listed {
     pub name: Name,
     pub path: PathBuf,
     pub bytes: u64,
+    pub modified: Option<SystemTime>,
 }
 
 /// The log files in `dir`, oldest run first, files of a run in order.
@@ -94,11 +95,12 @@ pub(crate) fn list(dir: &Path) -> Vec<Listed> {
     let mut out: Vec<Listed> = fs::list(dir)
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|(name, path, bytes)| {
+        .filter_map(|e| {
             Some(Listed {
-                name: parse_name(&name)?,
-                path,
-                bytes,
+                name: parse_name(&e.name)?,
+                path: e.path,
+                bytes: e.bytes,
+                modified: e.modified,
             })
         })
         .collect();
@@ -106,22 +108,41 @@ pub(crate) fn list(dir: &Path) -> Vec<Listed> {
     out
 }
 
+/// This run, and the file of it that is open (never removed).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Keep<'a> {
+    pub stamp: &'a str,
+    pub pid: u32,
+    pub open_seq: Option<u32>,
+}
+
+impl Keep<'_> {
+    fn is_current_run(&self, name: &Name) -> bool {
+        name.stamp == self.stamp && name.pid == self.pid
+    }
+}
+
 /// Which files to remove, oldest first: older than the age cap, or while
-/// the total or the count is over its cap. The current run's files stay.
-pub(crate) fn plan(
-    files: &[Listed],
-    current: (&str, u32),
-    now: SystemTime,
-    caps: Caps,
-) -> Vec<usize> {
+/// the total or the count is over its cap. Only the file that is open stays
+/// whatever the caps; this run's earlier files are removed like any other,
+/// so the caps hold within one long run. A file's age is the time in its
+/// name (the run's start); for this run's files, which all carry the same
+/// start, it is their last write.
+pub(crate) fn plan(files: &[Listed], keep: Keep<'_>, now: SystemTime, caps: Caps) -> Vec<usize> {
     let mut total: u64 = files.iter().map(|f| f.bytes).sum();
     let mut count = files.len();
     let mut remove = Vec::new();
     for (i, f) in files.iter().enumerate() {
-        if (f.name.stamp.as_str(), f.name.pid) == current {
+        let current = keep.is_current_run(&f.name);
+        if current && Some(f.name.seq) == keep.open_seq {
             continue;
         }
-        let started = time::parse_file_stamp(&f.name.stamp).unwrap_or(now);
+        let stamp = time::parse_file_stamp(&f.name.stamp).unwrap_or(now);
+        let started = if current {
+            f.modified.unwrap_or(now)
+        } else {
+            stamp
+        };
         let old = now.duration_since(started).unwrap_or_default() > caps.age;
         let over = total > caps.total_bytes || caps.files.is_some_and(|max| count > max);
         if !old && !over {
@@ -144,13 +165,13 @@ pub(crate) struct Cleanup {
     pub remaining_bytes: u64,
 }
 
-pub(crate) fn cleanup(dir: &Path, current: (&str, u32), now: SystemTime, caps: Caps) -> Cleanup {
+pub(crate) fn cleanup(dir: &Path, keep: Keep<'_>, now: SystemTime, caps: Caps) -> Cleanup {
     let files = list(dir);
     let mut result = Cleanup {
         remaining_bytes: files.iter().map(|f| f.bytes).sum(),
         ..Cleanup::default()
     };
-    for i in plan(&files, current, now, caps) {
+    for i in plan(&files, keep, now, caps) {
         let f = &files[i];
         match fs::remove_file(&f.path) {
             Ok(()) => {

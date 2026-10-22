@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 use super::{Fixture, base_time, config};
 use crate::callsite::LECTERN_LIMIT;
 use crate::engine::time::file_stamp;
-use crate::sink::{AllCaps, Caps, cleanup, file_name, list, parse_name};
+use crate::sink::{AllCaps, Caps, Keep, Listed, Name, cleanup, file_name, list, parse_name, plan};
 
 const DAY: Duration = Duration::from_secs(86_400);
 
@@ -40,7 +40,11 @@ fn caps(total_bytes: u64, files: Option<usize>, age_days: u64) -> Caps {
     }
 }
 
-const CURRENT: (&str, u32) = ("20261022T032701Z", 1);
+const CURRENT: Keep<'static> = Keep {
+    stamp: "20261022T032701Z",
+    pid: 1,
+    open_seq: Some(0),
+};
 
 #[test]
 fn names_round_trip() {
@@ -193,21 +197,81 @@ fn verbose_files_have_their_own_caps() {
 }
 
 #[test]
-fn current_run_is_never_removed() {
+fn open_file_is_never_removed() {
     let dir = tempfile::tempdir().expect("dir");
     let started = base_time() - DAY * 30;
-    make(dir.path(), started, 7, 0, 500);
-    make(dir.path(), started, 7, 1, 500);
+    for seq in 0..3 {
+        make(dir.path(), started, 7, seq, 500);
+    }
     make(dir.path(), base_time() - DAY * 31, 8, 0, 500);
     let current = file_stamp(started);
-    let result = cleanup(
-        dir.path(),
-        (&current, 7),
-        base_time(),
-        caps(100, Some(1), 14),
+    let keep = Keep {
+        stamp: &current,
+        pid: 7,
+        open_seq: Some(2),
+    };
+    // Over every cap: the other run and this run's earlier files go, the
+    // open file stays.
+    let result = cleanup(dir.path(), keep, base_time(), caps(100, Some(1), 14));
+    assert_eq!(result.removed, 3);
+    assert_eq!(names(dir.path()), [file_name(&current, 7, 2)]);
+}
+
+#[test]
+fn current_run_files_age_by_their_last_write() {
+    let stamp = file_stamp(base_time() - DAY * 30);
+    let file = |seq: u32, written: SystemTime| Listed {
+        name: Name {
+            stamp: stamp.clone(),
+            pid: 7,
+            seq,
+        },
+        path: file_name(&stamp, 7, seq).into(),
+        bytes: 10,
+        modified: Some(written),
+    };
+    let files = [
+        file(0, base_time() - DAY * 20),
+        file(1, base_time() - DAY),
+        file(2, base_time()),
+    ];
+    let keep = Keep {
+        stamp: &stamp,
+        pid: 7,
+        open_seq: Some(2),
+    };
+    // The run started 30 days ago; only the file last written 20 days ago
+    // is past the 14-day cap.
+    assert_eq!(plan(&files, keep, base_time(), Caps::DEFAULT), [0]);
+}
+
+#[test]
+fn rotation_applies_the_caps_within_a_run() {
+    let fx = Fixture::new();
+    let small = AllCaps {
+        default: Caps {
+            file_bytes: 2048,
+            total_bytes: 8192,
+            ..Caps::DEFAULT
+        },
+        verbose: Caps::VERBOSE,
+    };
+    let logging = fx.install_with(None, None, small).start(config());
+    LECTERN_LIMIT.store(u32::MAX, Ordering::Relaxed);
+    for i in 0..400_u32 {
+        crate::info!("filling the run"; i = i);
+    }
+    assert!(logging.flush(Duration::from_secs(5)));
+    let files = list(fx.path());
+    let total: u64 = files.iter().map(|f| f.bytes).sum();
+    assert!(total <= 8192 + 2048, "{total} bytes in {files:?}");
+    assert!(files.len() < 8, "{files:?}");
+    assert!(
+        files.iter().all(|f| f.name.seq > 0),
+        "the first file was removed: {files:?}"
     );
-    assert_eq!(result.removed, 1);
-    assert_eq!(names(dir.path()).len(), 2);
+    let open = files.last().expect("the open file");
+    assert!(open.name.seq > 10, "{files:?}");
 }
 
 #[test]

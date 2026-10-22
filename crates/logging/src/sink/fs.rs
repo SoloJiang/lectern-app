@@ -4,6 +4,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::hooks::file_op;
 
@@ -48,8 +49,16 @@ pub(crate) fn sync(file: &File) -> io::Result<()> {
     file.sync_data()
 }
 
-/// The names and sizes of the regular files in `dir`.
-pub(crate) fn list(dir: &Path) -> io::Result<Vec<(String, PathBuf, u64)>> {
+/// A regular file in a directory.
+pub(crate) struct Entry {
+    pub name: String,
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub modified: Option<SystemTime>,
+}
+
+/// The regular files in `dir`.
+pub(crate) fn list(dir: &Path) -> io::Result<Vec<Entry>> {
     file_op("read_dir");
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -60,7 +69,12 @@ pub(crate) fn list(dir: &Path) -> io::Result<Vec<(String, PathBuf, u64)>> {
             continue;
         }
         if let Some(name) = entry.file_name().to_str() {
-            out.push((name.to_owned(), entry.path(), meta.len()));
+            out.push(Entry {
+                name: name.to_owned(),
+                path: entry.path(),
+                bytes: meta.len(),
+                modified: meta.modified().ok(),
+            });
         }
     }
     Ok(out)

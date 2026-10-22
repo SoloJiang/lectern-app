@@ -314,7 +314,7 @@ pub mod testing {
 | 保留 | 14 天 | 3 天 |
 
 - 文件名里的时间是这次运行开始时的 UTC 时间，加进程号。滚动时关闭当前文件，新开 `.<seq>.log`，写一行文件头。
-- 清理在 `start` 后的写盘线程上做一次，之后每次滚动做一次：按文件名里的时间从旧到新删，直到满足上表；当前运行的文件不删。只处理符合命名规则的文件，目录里的其他文件不动。删除失败记一条 warn，不重试。
+- 清理在 `start` 后的写盘线程上做一次，之后每次滚动做一次：按文件名里的时间从旧到新删，直到满足上表。只有正在写的那个文件（本次运行这一类文件里序号最大的）不删；本次运行滚动出的较早的文件和其他运行的文件一样计入上限、照样删除，所以一次运行开着一周、详细日志开着、或者几个调用点按上限刷屏时，上表的上限仍然成立。本次运行的文件名里都是运行开始的时间，按保留期限判断它们时改用文件的最后修改时间。只处理符合命名规则的文件，目录里的其他文件不动。删除失败记一条 warn，不重试。
 - `start` 时读上一次运行的最后一个文件的末尾 4 KiB：没有结束记录时，在新文件里记 `previous run ended unexpectedly`，带上那次的 `run`。
 - `verbose.json` 只由写盘线程读写：`start` 时读，`set_verbose` 时写（写临时文件后改名）。已经过期、坏了或认不出的当作没有，删除。
 
@@ -469,7 +469,7 @@ level     := off | error | warn | info | debug | trace
   - `third_party_table_overflow_shares_one_limit`：超过表容量的调用点共用溢出项，写出的条数仍有上限，表不增长。
   - `limited_calls_do_not_encode`：被限流的调用不调用编码器（测试钩子计数为零）。
 - 缓冲：`early_buffer_overflow_drops_newest_and_counts`、`running_buffer_never_blocks_callers`（写盘线程被测试钩子卡住时，调用线程照常返回）、`drops_are_reported_on_the_next_write`。
-- 滚动与清理：`rotates_at_the_file_cap_with_a_header`、`total_cap_removes_oldest_first`、`age_cap_removes_old_runs`、`file_count_cap`、`verbose_files_have_their_own_caps`、`current_run_is_never_removed`、`unrelated_files_are_untouched`。
+- 滚动与清理：`rotates_at_the_file_cap_with_a_header`、`total_cap_removes_oldest_first`、`age_cap_removes_old_runs`、`file_count_cap`、`verbose_files_have_their_own_caps`、`open_file_is_never_removed`（本次运行较早的文件照样删除）、`current_run_files_age_by_their_last_write`、`rotation_applies_the_caps_within_a_run`、`unrelated_files_are_untouched`。
 - 首帧前没有 IO：`install_early_touches_no_files`（目录为空，文件操作钩子记录零次）、`install_early_spawns_no_thread`、`panic_before_start_writes_the_early_buffer`。
 - UI 线程上没有 IO：`file_operations_only_on_the_writer_thread`：测试构建里全部文件操作经一个钩子，记录发起的线程；从多个线程写记录、开关详细日志、滚动、导出之后，除 `export` 的调用线程外只出现 `lectern-log`（首帧前 panic 的路径由 `panic_before_start_writes_the_early_buffer` 单独测试）。
 - 过滤：`filter_parse` 的快照（合法与非法的指令）；`filter_change_invalidates_callsite_cache`；`plugin_directive_matches_the_scope`；`cli_beats_env_beats_setting`。
