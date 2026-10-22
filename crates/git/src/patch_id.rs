@@ -27,6 +27,13 @@ use crate::{GitError, HashKind, Mode, Oid, Repo, RepoPath, tree_diff};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct PatchId(pub Oid);
 
+impl PatchId {
+    /// The version of the measure: bumped whenever a change here (the diff
+    /// algorithm, the binary rule, the whitespace rule) can give a commit a
+    /// different ID. IDs stored under different versions are not compared.
+    pub const VERSION: u32 = 1;
+}
+
 /// How much one `patch_id` call reads at most (docs/design/git.md「usage
 /// 用的读取」). Beyond them it fails instead of giving an ID made from part
 /// of the change.

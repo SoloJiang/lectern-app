@@ -493,6 +493,11 @@ impl Repo {
 pub struct RefReflog { pub exists: bool, pub entries: Vec<ReflogEntry>, pub complete: bool }
 /// 仓库哈希算法的 OID：SHA-1 仓库 40 位，SHA-256 仓库 64 位。
 pub struct PatchId(pub Oid);
+impl PatchId {
+    /// 口径的版本。diff 算法、二进制文件或空白的规则改变、可能让同一个提交得到不同 ID 时加一；
+    /// `usage` 把它与 ID 一起写进观察，不同版本的 ID 不互相比较。
+    pub const VERSION: u32 = 1;
+}
 ```
 
 - `ref_reflog`：路径是公共目录下的 `logs/` 加完整引用名。`RefName` 只接受 `HEAD` 和满足 `git check-ref-format` 的 `refs/…`（没有 `..`、没有以 `.` 开头的一级），路径不会离开 `logs/`；文件在 `gitdir.rs` 里打开，与 `head_reflog` 相同。读取与 `head_reflog` 共用同一个从末尾按 64 KiB 一块向前读的过程，没有 `stop` 和条数的限制，读到的记录反转成从旧到新。
@@ -1411,5 +1416,5 @@ cache-tree 跳过基准树与并行 stat（[ADR 0038](../adr/0038.md)，`Refs #1
 - diff 用本 crate 的 Histogram（与 hunk 缓存相同），git 的默认是 Myers：两者给出不同 hunk 时（重复行多、改动位置有歧义），上下文行不同，补丁 ID 与 `git show | git patch-id --stable` 不同，与 `git show --histogram` 的相同。夹具按 `diff.algorithm = histogram` 生成。`usage` 只比较本 crate 自己算出的 ID，所以不影响一一对应的判断；为此另算一遍 Myers 不值得。
 - 路径的引号按 `core.quotePath = true`（git 的默认值）固定，不读仓库的 `core.quotePath`：口径不随配置变化，同一个改动在不同的仓库配置下得到同一个 ID。
 - 上限（5000 个路径、单个 blob 16 MiB、合计 64 MiB）和超过时返回错误是 usage 设计没有写的；usage 设计的 D 已补上「调用方按没有补丁 ID 处理」。
-- 签名为 `pub fn patch_id(&self, commit: Oid)`，与 usage 设计相同；测试用的 `patch_id_within` 是 crate 内部的函数，传入较小的上限。`PatchId` 另外派生 `Copy`、`Hash`、`PartialOrd`、`Ord`，`usage` 可以把它放进集合。
+- 签名为 `pub fn patch_id(&self, commit: Oid)`，与 usage 设计相同；测试用的 `patch_id_within` 是 crate 内部的函数，传入较小的上限。`PatchId` 另外派生 `Copy`、`Hash`、`PartialOrd`、`Ord`，`usage` 可以把它放进集合。另加 `PatchId::VERSION`（口径版本，初值 1）：ID 会写进 usage 的观察，以后的版本改了 diff 或二进制的规则时，旧 ID 不与新 ID 比较（usage 设计「数据流与线程」的「补丁 ID 的版本」）。
 - 「对其他 crate 的要求」写的夹具是「由脚本用 git 生成一次」：新增 `tests/fixtures/ref_reflog`（按步骤的快照）、`tests/fixtures/patch_id`（树、blob 与 git 的补丁 ID）和生成它们的 `scripts/ref_reflog.sh`、`scripts/patch_id.sh`，格式见[夹具说明](../../crates/git/tests/fixtures/README.md)；`patch_id` 夹具的树列表用 `ls-tree -z`，路径里有 tab、引号和反斜杠。
