@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use lectern_kernel::{PanicPayload, SubmitGate, catch};
-use lectern_logging::{Ctx, Field, Value, error};
+use lectern_logging::{Ctx, Field, PluginTag, Value, error};
 
 use crate::ThreadKind;
 
@@ -32,6 +32,73 @@ pub(crate) fn task_ctx(task: u64, gate: Option<&SubmitGate>) -> Ctx {
     }
     ctx.task = Some(task);
     ctx
+}
+
+/// A task's log scope as the task keeps it: 32 bytes instead of a 120-byte
+/// `Ctx`, since every byte of the task's allocation is paid on each
+/// submission. Usually only `plugin` and `act` are set (with `task`, the
+/// cell's own number); a context with any other field (`session`, `review`,
+/// `req`, `analysis`) is boxed once at submission.
+pub(crate) struct TaskScope {
+    plugin: Option<PluginTag>,
+    /// `act`, or 0 for none (activation numbers start at 1).
+    act: u64,
+    /// The whole context, when it has more than `plugin`, `act` and `task`.
+    full: Option<Box<Ctx>>,
+}
+
+impl TaskScope {
+    /// See [`task_ctx`].
+    pub(crate) fn new(task: u64, gate: Option<&SubmitGate>) -> TaskScope {
+        TaskScope::from_ctx(task_ctx(task, gate))
+    }
+
+    /// `ctx` as a task keeps it (`ctx.task` is the task's number).
+    pub(crate) fn from_ctx(ctx: Ctx) -> TaskScope {
+        // Field by field: comparing whole `Ctx` values compiles to a long
+        // vectorized routine.
+        let light = ctx.session.is_none()
+            && ctx.review.is_none()
+            && ctx.req.is_none()
+            && ctx.analysis.is_none()
+            && ctx.act != Some(0);
+        if light {
+            TaskScope {
+                plugin: ctx.plugin,
+                act: ctx.act.unwrap_or(0),
+                full: None,
+            }
+        } else {
+            TaskScope {
+                plugin: None,
+                act: 0,
+                full: Some(Box::new(ctx)),
+            }
+        }
+    }
+
+    /// The task's whole context; `task` is the number it was made with.
+    pub(crate) fn ctx(&self, task: u64) -> Ctx {
+        match &self.full {
+            Some(ctx) => **ctx,
+            None => Ctx {
+                plugin: self.plugin,
+                act: (self.act != 0).then_some(self.act),
+                task: Some(task),
+                ..Ctx::default()
+            },
+        }
+    }
+
+    /// Runs `f` with the task's context entered (`logging::within`): a
+    /// pointer to the boxed context, or to one built on the stack.
+    #[inline]
+    pub(crate) fn enter<R>(&self, task: u64, f: impl FnOnce() -> R) -> R {
+        match &self.full {
+            Some(ctx) => lectern_logging::within(ctx, f),
+            None => lectern_logging::within(&self.ctx(task), f),
+        }
+    }
 }
 
 /// What was running when a task's panic was caught: the `phase` field.

@@ -785,7 +785,7 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件需要一份匹配它们全部 pattern 的 `WorkspaceFacts`：bench 在两次启动里都加入同一个合成的 `bench-facts` 插件（`AfterFirstFrame` 激活，在 `started` 里通过 `control().workspace_changed` 提交这份 facts，由 bench 的探针提供，见 [bench 设计「探针」](bench.md#探针lectern_benchprobeprobe-feature)），两次的差不受它影响；`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。这两种组合由 `PluginSet::prepare`、`PreparedSet::dependency_closure` / `retain` / `with` 和 `Kernel::start_prepared` 组装（见「插件集合的闭包与裁剪」）。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `ServiceRef` / `ServiceSet`，保存在激活内的状态对象里（见「激活的提交」）。`ServiceRef::get()` 的开销是一次准入（两次原子操作）；`ServiceSet::for_each` 每个提供者一次准入、不分配；`ServiceSet::current()` 另外分配一个 `Vec`。两种多实现路径都在 bench 里按 1、4、16 个提供者测量。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
-- 日志的作用域（见「日志与诊断」）：设置时读出当前线程的 `Ctx`，写入覆盖了 `plugin`、`act` 的新值，嵌套深度加一；drop 时写回原值，深度减一。只有几次线程本地变量的读写，不分配内存，不加锁。事件分发每调用一个监听设一次，`kernel/` 的基准与接入前相比不变慢（「实际验证」）。
+- 日志的作用域（见「日志与诊断」）：设置时读出当前线程的 `Ctx`，把覆盖了 `plugin`、`act` 的新值写进这一层的槽位，深度加一；drop 时深度减一（[logging 设计「作用域与关联 ID」](logging.md#作用域与关联-id)）。只有几次线程本地变量的读写，不分配内存，不加锁，在 Linux 虚拟机上设和恢复合计约 9 ns（原来每次复制整个 `Ctx`，约 20 ns）。事件分发每调用一个监听设一次，`kernel/` 的基准与接入前相比不变慢（「实际验证」）。
 
 ## 日志与诊断
 

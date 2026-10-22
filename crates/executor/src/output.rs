@@ -3,9 +3,7 @@
 use std::sync::{Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
-use lectern_logging::Ctx;
-
-use crate::diag::{Phase, contain_task};
+use crate::diag::{Phase, TaskScope, contain_task};
 use crate::sched::Inner;
 use crate::util::lock;
 use crate::{Priority, TaskError};
@@ -65,10 +63,15 @@ impl<T> Output<T> {
     /// `priority`'s pool (after shutdown, on the reclaim thread) under
     /// `contain`, so the handle's thread never runs its `Drop`. Errors carry
     /// only a message, and values without drop glue run no code, so both are
-    /// dropped here. `ctx` is the task's scope, set wherever the value is
-    /// dropped.
-    pub(crate) fn abandon(&self, exec: &Weak<Inner>, priority: Priority, ctx: &Ctx)
-    where
+    /// dropped here. `scope` and `task` are the task's log scope and number,
+    /// entered wherever the value is dropped.
+    pub(crate) fn abandon(
+        &self,
+        exec: &Weak<Inner>,
+        priority: Priority,
+        scope: &TaskScope,
+        task: u64,
+    ) where
         T: Send + 'static,
     {
         let (stored, waker) = {
@@ -82,13 +85,12 @@ impl<T> Output<T> {
             return;
         }
         match exec.upgrade() {
-            Some(exec) => exec.drop_later(Box::new(value), priority, *ctx),
+            Some(exec) => exec.drop_later(Box::new(value), priority, scope.ctx(task)),
             // The executor is gone (a dropped `manual()` executor): nowhere
             // else to drop it.
-            None => {
-                let _scope = lectern_logging::scope(*ctx);
+            None => scope.enter(task, || {
                 let _ = contain_task(Phase::Result, move || drop(value));
-            }
+            }),
         }
     }
 

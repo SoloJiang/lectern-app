@@ -6,9 +6,8 @@ use std::task::{Context, Wake, Waker};
 use std::thread::{self, Thread};
 
 use lectern_kernel::{GatePoll, GateSlot, catch};
-use lectern_logging::Ctx;
 
-use crate::diag::{Phase, contain_task, task_panicked};
+use crate::diag::{Phase, TaskScope, contain_task, task_panicked};
 use crate::output::Output;
 use crate::sched::{Inner, Job, TaskId, run_hook};
 use crate::task::Handle;
@@ -29,9 +28,9 @@ pub(crate) struct DedicatedCell<T> {
     slot: Mutex<Option<GateSlot>>,
     /// The thread running this task, once it has started; `cancel` unparks it.
     thread: Mutex<Option<Thread>>,
-    /// The log scope set around the thread body (after the start hook) and
-    /// the drop of an unrun closure.
-    ctx: Ctx,
+    /// The log scope entered around the thread body (after the start hook)
+    /// and the drop of an unrun closure.
+    scope: TaskScope,
     output: Output<T>,
     exec: Weak<Inner>,
 }
@@ -40,7 +39,7 @@ impl<T: Send + 'static> DedicatedCell<T> {
     pub(crate) fn new(
         exec: &Arc<Inner>,
         id: TaskId,
-        ctx: Ctx,
+        scope: TaskScope,
         work: BoxFn<T>,
         slot: Option<GateSlot>,
     ) -> Arc<Self> {
@@ -50,7 +49,7 @@ impl<T: Send + 'static> DedicatedCell<T> {
             work: Mutex::new(Some(work)),
             slot: Mutex::new(slot),
             thread: Mutex::new(None),
-            ctx,
+            scope,
             output: Output::new(),
             exec: Arc::downgrade(exec),
         })
@@ -123,9 +122,10 @@ impl<T: Send + 'static> Job for DedicatedCell<T> {
         let hook = self.exec.upgrade().and_then(|exec| exec.hook.clone());
         run_hook(hook.as_ref(), ThreadKind::Dedicated);
         drop(hook);
-        let _scope = lectern_logging::scope(self.ctx);
-        let finished = self.body();
-        self.finish(finished);
+        self.scope.enter(self.id, || {
+            let finished = self.body();
+            self.finish(finished);
+        });
     }
 
     fn cancel(self: Arc<Self>) {
@@ -136,9 +136,10 @@ impl<T: Send + 'static> Job for DedicatedCell<T> {
     }
 
     fn discard(self: Arc<Self>) {
-        let _scope = lectern_logging::scope(self.ctx);
-        let finished = self.drop_unrun();
-        self.finish(finished);
+        self.scope.enter(self.id, || {
+            let finished = self.drop_unrun();
+            self.finish(finished);
+        });
     }
 }
 
@@ -153,7 +154,7 @@ impl<T: Send + 'static> Handle<T> for DedicatedCell<T> {
 
     fn abandon(&self) {
         self.output
-            .abandon(&self.exec, Priority::Background, &self.ctx);
+            .abandon(&self.exec, Priority::Background, &self.scope, self.id);
     }
 }
 

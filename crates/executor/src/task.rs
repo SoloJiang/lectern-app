@@ -8,10 +8,9 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 
 use lectern_kernel::{GatePoll, GateSlot, catch};
-use lectern_logging::Ctx;
 
 use crate::Priority;
-use crate::diag::{Phase, contain_task, task_panicked};
+use crate::diag::{Phase, TaskScope, contain_task, task_panicked};
 use crate::output::Output;
 use crate::sched::{Inner, Job, TaskId};
 use crate::util::lock;
@@ -133,19 +132,19 @@ pub(crate) struct TaskCell<T> {
     future: Mutex<Option<BoxFuture<T>>>,
     /// Only for `spawn_gated`. Dropped after the task is `DONE`.
     slot: Mutex<Option<GateSlot>>,
-    /// The log scope set around each step and the final drop.
-    ctx: Ctx,
+    /// The log scope entered around each step and the final drop.
+    scope: TaskScope,
     output: Output<T>,
     exec: Weak<Inner>,
 }
 
 impl<T: Send + 'static> TaskCell<T> {
     /// A new task in the `QUEUED` state; the caller queues it. `id` and
-    /// `ctx` come from `diag::next_task` and `diag::task_ctx`.
+    /// `scope` come from `diag::next_task` and `TaskScope::new`.
     pub(crate) fn new(
         exec: &Arc<Inner>,
         id: TaskId,
-        ctx: Ctx,
+        scope: TaskScope,
         priority: Priority,
         future: BoxFuture<T>,
         slot: Option<GateSlot>,
@@ -157,7 +156,7 @@ impl<T: Send + 'static> TaskCell<T> {
             cancelled: AtomicBool::new(false),
             future: Mutex::new(Some(future)),
             slot: Mutex::new(slot),
-            ctx,
+            scope,
             output: Output::new(),
             exec: Arc::downgrade(exec),
         })
@@ -280,10 +279,10 @@ impl<T: Send + 'static> Job for TaskCell<T> {
         {
             return;
         }
-        // Around the gate check, the poll, the final drop and handing over
-        // the result: thread-local copies only, no allocation, no lock.
-        let _scope = lectern_logging::scope(self.ctx);
-        match self.step() {
+        // The task's context around the gate check, the poll, the final drop
+        // and handing over the result: a pointer swap, no copy, no
+        // allocation, no lock.
+        self.scope.enter(self.id, || match self.step() {
             Some(result) => self.finish(result),
             None => {
                 if self
@@ -296,7 +295,7 @@ impl<T: Send + 'static> Job for TaskCell<T> {
                     self.enqueue();
                 }
             }
-        }
+        });
     }
 
     fn cancel(self: Arc<Self>) {
@@ -305,9 +304,10 @@ impl<T: Send + 'static> Job for TaskCell<T> {
     }
 
     fn discard(self: Arc<Self>) {
-        let _scope = lectern_logging::scope(self.ctx);
-        self.drop_unfinished();
-        self.finish(Err(TaskError::Cancelled));
+        self.scope.enter(self.id, || {
+            self.drop_unfinished();
+            self.finish(Err(TaskError::Cancelled));
+        });
     }
 }
 
@@ -327,7 +327,8 @@ impl<T: Send + 'static> Handle<T> for TaskCell<T> {
             Priority::Batch => Priority::Batch,
             Priority::Interactive | Priority::Background => Priority::Background,
         };
-        self.output.abandon(&self.exec, priority, &self.ctx);
+        self.output
+            .abandon(&self.exec, priority, &self.scope, self.id);
     }
 }
 

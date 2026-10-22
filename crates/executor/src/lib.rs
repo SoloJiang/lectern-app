@@ -26,7 +26,7 @@ use lectern_kernel::{GateSlot, SubmitGate};
 use lectern_logging::{Value, error};
 
 use crate::dedicated::DedicatedCell;
-use crate::diag::{Phase, contain_task, next_task, task_ctx};
+use crate::diag::{Phase, TaskScope, contain_task, next_task, task_ctx};
 use crate::sched::{Inner, Job};
 use crate::task::TaskCell;
 
@@ -260,8 +260,8 @@ impl Executor {
         gate: Option<&SubmitGate>,
     ) -> Task<T> {
         let id = next_task();
-        let ctx = task_ctx(id, gate);
-        let cell = TaskCell::new(&self.inner, id, ctx, priority, future, slot);
+        let scope = TaskScope::new(id, gate);
+        let cell = TaskCell::new(&self.inner, id, scope, priority, future, slot);
         if self.inner.submit(id, priority, cell.clone()) {
             Task::new(cell)
         } else {
@@ -278,7 +278,7 @@ impl Executor {
     ) -> Task<T> {
         let id = next_task();
         let ctx = task_ctx(id, gate);
-        let cell = DedicatedCell::new(&self.inner, id, ctx, f, slot);
+        let cell = DedicatedCell::new(&self.inner, id, TaskScope::from_ctx(ctx), f, slot);
         if !self.inner.register_dedicated(id, cell.clone()) {
             return Task::cancelled();
         }
@@ -287,11 +287,10 @@ impl Executor {
             .name(name.to_owned())
             .spawn(move || body.run());
         if let Err(error) = spawned {
-            {
-                // The thread name is the caller's string: not logged.
-                let _scope = lectern_logging::scope(ctx);
+            // The thread name is the caller's string: not logged.
+            lectern_logging::within(&ctx, || {
                 error!("could not start a dedicated thread"; error = Value::io(&error));
-            }
+            });
             cell.clone().discard();
         }
         Task::new(cell)

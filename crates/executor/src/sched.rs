@@ -485,9 +485,10 @@ struct Unread {
 
 impl Unread {
     fn release(&self) {
-        let _scope = lectern_logging::scope(self.ctx);
         let value = lock(&self.value).take();
-        let _ = contain_task(Phase::Result, move || drop(value));
+        lectern_logging::within(&self.ctx, || {
+            let _ = contain_task(Phase::Result, move || drop(value));
+        });
     }
 }
 
