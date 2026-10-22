@@ -10,8 +10,12 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "infra"
 
-# No runtime dependencies: the resources are compiled into static tables by
-# build.rs, so the binary contains no Fluent parser (docs/design/i18n.md).
+# No Fluent crate at run time: the resources are compiled into static tables
+# by build.rs, so the binary contains no Fluent parser (docs/design/i18n.md).
+
+[dependencies]
+# The runtime log's macros: a format call with a bad argument (ADR 0046).
+lectern-logging = { path = "../logging" }
 
 [features]
 # `testing::frame_strings`, for lectern-bench (docs/design/i18n.md「性能」).
@@ -28,6 +32,8 @@ intl_pluralrules.workspace = true
 unic-langid.workspace = true
 insta.workspace = true
 trybuild.workspace = true
+# testing::capture for the logs_* test (docs/design/i18n.md「日志与诊断」).
+lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [lints]
 workspace = true

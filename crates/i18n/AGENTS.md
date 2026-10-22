@@ -5,14 +5,15 @@ Fluent 资源与语言切换：en 与 zh-CN，默认跟随系统语言（[ADR 00
 - 层：基础设施层。只依赖基础设施和 kernel 层；不依赖 GPUI。
 - 设计文档：[docs/design/i18n.md](../../docs/design/i18n.md)
 - issue：[#28](https://github.com/SoloJiang/lectern-app/issues/28)
-- ADR：[0013](../../docs/adr/0013.md)
+- ADR：[0013](../../docs/adr/0013.md)、[0046](../../docs/adr/0046.md)（运行日志）
 
 ## 边界
 
 - 所有界面字符串都在这里的资源文件里，视图不硬编码。
 - en 与 zh-CN 的键必须一致，由 CI 检查（[#28](https://github.com/SoloJiang/lectern-app/issues/28)）。
 - 额外的界面语言作为数据包从插件市场下载（[ADR 0018](../../docs/adr/0018.md)）。
-- 运行时没有依赖：`build.rs` 在构建时解析、校验 `locales/` 并生成静态表格和 `keys` 模块，`fluent-syntax` 只是构建依赖，`fluent-bundle` 等只用于测试。不要给 `[dependencies]` 加 Fluent 相关的 crate。
+- 运行时没有 Fluent 相关的依赖：`build.rs` 在构建时解析、校验 `locales/` 并生成静态表格和 `keys` 模块，`fluent-syntax` 只是构建依赖，`fluent-bundle` 等只用于测试。不要给 `[dependencies]` 加 Fluent 相关的 crate；运行时的依赖只有 `lectern-logging`。
+- 日志经 `lectern-logging` 的宏（[ADR 0046](../../docs/adr/0046.md)），不写 stderr、不启用 `sink`。只记语言、消息 ID、变量名和错误种类，都取自静态表格；格式化出的文本、`Args` 的参数名和值不进日志。`get`、`format` 的正常路径上不加记录（设计「日志与诊断」）。
 - 不读写系统语言设置（归 `platform`），不做 GPUI 胶水（归 `ui`）。
 
 ## 目录
@@ -35,3 +36,4 @@ just test -p lectern-i18n
 - 键的类型：`tests/compile_fail.rs` 用 trybuild 编译 `tests/ui/*.rs`，期望的编译错误在同名 `.stderr` 里。
 - 更新快照：`INSTA_UPDATE=always just test -p lectern-i18n`；更新 `.stderr`：`TRYBUILD=overwrite just test -p lectern-i18n`。之后用 `git diff` 逐个检查。
 - `just doctest` 运行公开 API 的示例和两个 `compile_fail` 示例。
+- `strings::tests::logs_hold_no_arguments` 用 `lectern-logging` 的 `testing::capture()` 在 trace 级别检查记录，金丝雀放在 `Args` 的参数名和值里，`assert_absent` 确认它们不进日志。每个键只记一次，`cargo test` 在同一进程里共用捕获器和去重标志，所以这个测试用的键（`review-comments`、`review-progress`）不要在其他测试里以出错的参数调用 `format`。

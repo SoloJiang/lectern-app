@@ -4358,6 +4358,7 @@ dependencies = [
  "fluent-syntax",
  "insta",
  "intl_pluralrules",
+ "lectern-logging",
  "trybuild",
  "unic-langid",
 ]
