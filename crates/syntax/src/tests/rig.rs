@@ -406,12 +406,17 @@ impl Threaded {
                     kernel.set_yield(true);
                     flip.on = Some((probe, switched));
                 }
-            } else if !flip.over {
-                // A later step counts from 1 again.
-                if asked > nth {
-                    flip.after.push(probe);
-                } else {
-                    flip.over = true;
+            } else {
+                if ours(&probe) {
+                    flip.since.push(probe);
+                }
+                if !flip.over {
+                    // A later step counts from 1 again.
+                    if asked > nth {
+                        flip.after.push(probe);
+                    } else {
+                        flip.over = true;
+                    }
                 }
             }
         });
@@ -434,6 +439,12 @@ pub(crate) struct Flip {
     /// The same step's asks after that one: one, the ask that saw the
     /// switch and stopped the step.
     pub after: Vec<Probe>,
+    /// Every ask that is `ours` after the one it was turned on at, of that
+    /// step or a later one (asked from 1 again). One ask, the one that
+    /// stopped the parse: the same step's next, or, when that step ran out
+    /// of its time budget in the very check it was turned on in (a busy
+    /// machine), the next step's first.
+    pub since: Vec<Probe>,
     /// That step is over.
     over: bool,
 }

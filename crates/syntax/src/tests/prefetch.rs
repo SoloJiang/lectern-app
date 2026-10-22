@@ -13,7 +13,7 @@ use super::rig::{FLIP_AT, Rig, Threaded, VIEW, ran};
 use super::{full, lang};
 use crate::doc::Probe;
 use crate::git_access::blob_id;
-use crate::limits::PREFETCH_MAX;
+use crate::limits::{BATCH_SEGMENT, PREFETCH_MAX};
 use crate::lru::{Class, LruKey, SpansOf, WHOLE};
 use crate::{DocState, Highlighting, Trace, testing};
 
@@ -157,23 +157,56 @@ fn prefetch_larger_files_get_the_first_screens_window() {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let log = events.clone();
     rig.engine
-        .set_trace(move |event| log.lock().unwrap().push(event));
-    rig.engine
-        .prefetch(vec![(rig.target("big.ts", at), rig.root.clone())]);
-    rig.settle();
-    let hashed = |events: &[Trace]| {
+        .set_trace(move |event| log.lock().unwrap().push((Instant::now(), event)));
+    let hashed = |events: &[(Instant, Trace)]| {
         events
             .iter()
-            .filter(|e| matches!(e, Trace::PrefetchHash { .. }))
+            .filter(|(_, e)| matches!(e, Trace::PrefetchHash { .. }))
             .count()
     };
-    assert_eq!(hashed(&events.lock().unwrap()), 1);
     let lru = &rig.engine.inner().lru;
-    let screens: Vec<LruKey> = lru
-        .keys()
-        .into_iter()
-        .filter(|k| matches!(k, LruKey::Screen { .. }))
-        .collect();
+    let screens = || -> Vec<LruKey> {
+        lru.keys()
+            .into_iter()
+            .filter(|k| matches!(k, LruKey::Screen { .. }))
+            .collect()
+    };
+    // The window is parsed in one call of `BATCH_SEGMENT` of wall time. A
+    // busy machine can keep the thread waiting for a CPU past it: the
+    // parse times out and nothing is kept, as it is meant to. Then the
+    // target is prefetched again (the pointer rests there once more): its
+    // OID is known by the file's identity, so only the window is parsed
+    // again. Keeping nothing any other way fails.
+    const ATTEMPTS: usize = 20;
+    let mut attempts = 0;
+    while screens().is_empty() {
+        attempts += 1;
+        assert!(attempts <= ATTEMPTS, "{:?}", lru.keys());
+        let from = events.lock().unwrap().len();
+        rig.engine
+            .prefetch(vec![(rig.target("big.ts", at), rig.root.clone())]);
+        rig.settle();
+        let settled = Instant::now();
+        if screens().is_empty() {
+            let events = events.lock().unwrap();
+            let tried = &events[from..];
+            let (began, _) = tried
+                .iter()
+                .find(|(_, e)| matches!(e, Trace::PrefetchParse { .. }))
+                .unwrap_or_else(|| panic!("attempt {attempts}: no parse: {tried:?}"));
+            let took = settled.duration_since(*began);
+            assert!(
+                took > BATCH_SEGMENT
+                    && !tried
+                        .iter()
+                        .any(|(_, e)| matches!(e, Trace::PrefetchDone { .. })),
+                "attempt {attempts}: nothing kept after {took:?}: {tried:?}"
+            );
+            eprintln!("attempt {attempts}: the window's parse timed out ({took:?})");
+        }
+    }
+    assert_eq!(hashed(&events.lock().unwrap()), 1);
+    let screens = screens();
     assert_eq!(screens.len(), 1, "{:?}", lru.keys());
     assert_eq!(lru.class(&screens[0]), Some(Class::Background));
     // Prefetched again (the pointer rests there once more): the file is
@@ -185,9 +218,10 @@ fn prefetch_larger_files_get_the_first_screens_window() {
     rig.settle();
     let again = events.lock().unwrap().clone();
     assert_eq!(hashed(&again), 0, "{again:?}");
-    assert!(again.contains(&Trace::PrefetchDone {
-        path: "big.ts".into()
-    }));
+    assert!(again.iter().any(|(_, e)| *e
+        == Trace::PrefetchDone {
+            path: "big.ts".into()
+        }));
     assert_eq!(lru.class(&screens[0]), Some(Class::Background));
     let after = lru.spans(&screens[0], Class::Background).unwrap();
     assert!(Arc::ptr_eq(&before, &after));
@@ -232,11 +266,17 @@ fn prefetch_stops_at_a_slice_boundary_when_yielding() {
             .any(|(_, e)| matches!(e, Trace::PrefetchDone { .. })),
         "stopped before its end"
     );
-    // Stopped at the next slice boundary: the step asked once more.
-    assert_eq!(
-        flip.lock().unwrap().after,
-        vec![Probe::Prefetch { asked: FLIP_AT + 1 }]
+    // Stopped at the next slice boundary, by the one ask after the switch:
+    // the step's next, or, when the step ran out of its 8 ms of wall time
+    // in the check the switch turned on in (a busy machine), the next
+    // step's first.
+    let since = flip.lock().unwrap().since.clone();
+    assert!(
+        since == [Probe::Prefetch { asked: FLIP_AT + 1 }]
+            || since == [Probe::Prefetch { asked: 1 }],
+        "{since:?}"
     );
+    eprintln!("asked after the switch: {since:?}");
     // The batch thread's CPU time from the switch to the stop, both on that
     // thread: a busy machine's wait for a CPU is not parsing.
     let wall = at.duration_since(switched);
@@ -252,7 +292,7 @@ fn prefetch_stops_at_a_slice_boundary_when_yielding() {
     // cannot make it fail); then it goes on to the same spans as one parse.
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(t.clock.pending_timers(), 0);
-    assert_eq!(flip.lock().unwrap().after.len(), 1);
+    assert_eq!(flip.lock().unwrap().since, since);
     assert_eq!(
         t.events().len(),
         yielded + 1,
