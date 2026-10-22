@@ -151,6 +151,9 @@ pub(crate) fn reset() {
         crate::callsite::PER_WINDOW,
         std::sync::atomic::Ordering::Relaxed,
     );
+    // The process-wide suppressed count would otherwise carry earlier
+    // tests' counts into `Status::suppressed` when they share a process.
+    crate::callsite::SUPPRESSED.store(0, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Every file under `dir`, recursively, with its text.
