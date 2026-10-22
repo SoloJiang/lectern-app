@@ -12,10 +12,14 @@ use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::thread;
 use std::time::Duration;
 
-use lectern_fs_watch::{BackendError, Flags};
+use std::ffi::OsString;
+
+use lectern_fs_watch::{Armed, BackendError, Flags};
+use lectern_logging::testing;
+use rustix::io::Errno;
 
 use super::support::{Recorder, backend, entries, flags_of, has};
-use crate::fs_events::kqueue::MAX_DESCRIPTORS;
+use crate::fs_events::kqueue::{Kqueue, MAX_DESCRIPTORS};
 
 fn append(path: &Path, bytes: &[u8]) {
     OpenOptions::new()
@@ -329,4 +333,60 @@ fn kqueue_watches_share_one_thread_and_stay_apart() {
         || b.flush().unwrap(),
         |events| has(events, "f", Flags::MODIFIED),
     );
+}
+
+/// The record of a kqueue thread that stops on a `kevent` error
+/// (docs/design/platform.md「日志与诊断」): an error with target `platform`,
+/// the number of watches and the errno's kind and code. A canary in the
+/// watched directory's name, the entry's name and its contents never
+/// reaches the log. `kevent` cannot be made to fail on demand, so the test
+/// calls `fail` with `EBADF` while the thread runs, as `run` does.
+#[test]
+fn kqueue_stop_is_logged_without_paths() {
+    const CANARY: &str = "canary5k2w8p1r6z";
+    let log = testing::capture();
+    let dir = tempfile::tempdir().unwrap();
+    let watched = dir.path().join(format!("{CANARY}-dir"));
+    fs::create_dir(&watched).unwrap();
+    let name = format!("{CANARY}-entry");
+    fs::write(watched.join(&name), CANARY).unwrap();
+
+    let kqueue = Arc::new(Kqueue::new().unwrap());
+    let body = kqueue.clone();
+    let thread = thread::spawn(move || body.run());
+    let recorder = Recorder::new();
+    let armed = kqueue
+        .arm(&watched, &[OsString::from(&name)], recorder.deliver())
+        .unwrap();
+    append(&watched.join(&name), CANARY.as_bytes());
+    recorder.wait_until(
+        "the entry modified",
+        || armed.flush().unwrap(),
+        |events| has(events, &name, Flags::MODIFIED),
+    );
+
+    kqueue.fail(Errno::BADF);
+    assert!(!kqueue.is_running());
+    assert!(armed.flush().is_err());
+    kqueue.stop();
+    thread.join().unwrap();
+
+    let stopped: Vec<String> = log
+        .lines()
+        .into_iter()
+        .filter(|line| {
+            line.contains(
+                "\"msg\":\"the kqueue thread stopped on a kevent error; its watches get no more events\"",
+            )
+        })
+        .collect();
+    assert_eq!(stopped.len(), 1, "{:#?}", log.lines());
+    let line = &stopped[0];
+    assert!(line.contains("\"lv\":\"error\""), "{line}");
+    assert!(line.contains("\"tg\":\"platform\""), "{line}");
+    assert!(line.contains("\"watches\":1"), "{line}");
+    let code = format!("\"code\":{}}}", Errno::BADF.raw_os_error());
+    assert!(line.contains("\"io\":{\"kind\":\""), "{line}");
+    assert!(line.contains(&code), "{line}");
+    log.assert_absent(CANARY);
 }

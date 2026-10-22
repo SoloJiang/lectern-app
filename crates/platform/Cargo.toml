@@ -29,6 +29,9 @@ libc.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # The kqueue thread runs through `Executor::run_dedicated`.
 lectern-executor = { path = "../executor" }
+# The kqueue thread's stop record (docs/design/platform.md「日志与诊断」,
+# ADR 0046); nothing else in this crate logs.
+lectern-logging = { path = "../logging" }
 # kqueue for `Scope::Entries` targets.
 rustix = { workspace = true, features = ["event"] }
 
@@ -39,6 +42,8 @@ tempfile.workspace = true
 # `BusyGuard`, to implement `lectern_fs_watch::Sink` in the test that drives
 # the backend through a real `Watcher`.
 lectern-kernel = { path = "../kernel" }
+# testing::capture for kqueue_stop_is_logged_without_paths.
+lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [lints]
 workspace = true
