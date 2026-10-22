@@ -38,6 +38,7 @@ lectern-i18n = { path = "../i18n", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 lectern-platform = { path = "../platform" }
 lectern-project = { path = "../project", features = ["test-support"] }
+lectern-review = { path = "../review", features = ["test-support"] }
 lectern-services = { path = "../services" }
 lectern-syntax = { path = "../syntax", features = ["test-support"] }
 tempfile.workspace = true

@@ -1,0 +1,15 @@
+---
+source: crates/review/src/noise/tests.rs
+expression: out
+---
+Code
+  None build.rs
+  None tools/x.rs
+  Some("crates/a") crates/a/src/b.rs
+  Some("crates/a") crates/a/src/z.rs
+  Some("crates/b") crates/b/src/lib.rs
+  Some("web") web/src/a.ts
+  Some("web") web/src/z.ts
+Tests
+  Some("crates/a") crates/a/tests/t.rs
+  Some("web") web/src/a.test.ts

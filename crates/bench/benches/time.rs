@@ -31,6 +31,8 @@ mod platform;
 mod project;
 #[path = "fixtures/project_repo.rs"]
 mod project_repo;
+#[path = "time/review.rs"]
+mod review;
 #[path = "time/syntax.rs"]
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
@@ -122,6 +124,7 @@ const BENCHES: &[Bench] = &[
     project::REFRESH_INDEX,
     project::DIRS_100K,
     project::FACTS_CONTAINS,
+    review::LOG_LOAD_16K,
     syntax::FIRST_SCREEN,
     syntax::FULL_PARSE_1MIB,
     syntax::CHAIN_16MIB,
