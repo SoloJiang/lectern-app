@@ -361,6 +361,11 @@ pub(super) fn header(repo: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A review target as a record writes it.
+pub(super) fn target_bytes(t: &TargetKey) -> Vec<u8> {
+    serde_json::to_vec(&target(t)).expect("a target serializes")
+}
+
 fn bytes(path: &ChangePath) -> Bytes<'_> {
     Bytes(Cow::Borrowed(&path.0))
 }

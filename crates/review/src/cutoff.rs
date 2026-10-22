@@ -22,10 +22,12 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use lectern_cache::{Compression, Entry, Key, Namespace, Partition};
-use lectern_git::{HashKind, Oid, ReflogEntry, Repo, RepoPath, TreeChanges};
+use lectern_git::{GitError, HashKind, Oid, ReflogEntry, Repo, RepoPath, TreeChanges};
+use lectern_logging::{Value, debug, warn};
 use lectern_services::changes::ChangePath;
 
 use crate::chain::codec::{Reader, bytes, uint};
+use crate::diag;
 
 /// Records in the window after the base record taken into account; the rest
 /// of the paths are cut off at the last one's time.
@@ -192,22 +194,36 @@ pub(crate) fn build(
     let keys: Vec<Key> = records.iter().map(|r| key(hash, r)).collect();
     let cached = partition.get_many::<CachedTreeChanges>(&keys);
     let started = Instant::now();
+    let (mut hits, mut computed, mut left) = (0u32, 0u32, 0u32);
     for ((record, key), hit) in records.iter().zip(&keys).zip(cached) {
         if let Some(CachedTreeChanges(changes)) = hit {
             table.set(*record, &changes);
+            hits += 1;
             continue;
         }
         if budget.is_some_and(|b| started.elapsed() >= b) {
             table.changes.insert(*record, Changed::Unknown);
+            left += 1;
             continue;
         }
         match compute(repo, partition, record, key, cancel) {
-            Some(changes) => table.set(*record, &changes),
+            Some(changes) => {
+                table.set(*record, &changes);
+                computed += 1;
+            }
             None => {
                 table.changes.insert(*record, Changed::Unknown);
+                left += 1;
             }
         }
     }
+    debug!("cutoff table built";
+        records = records.len(),
+        paths = table.covered.len(),
+        hits = hits,
+        computed = computed,
+        left = left,
+        took_us = started.elapsed());
     table
 }
 
@@ -220,7 +236,10 @@ pub(crate) fn complete(
     cancel: &AtomicBool,
 ) {
     let hash = repo.location().hash;
-    for record in table.unknown(records) {
+    let started = Instant::now();
+    let unknown = table.unknown(records);
+    let mut still = 0u32;
+    for &record in &unknown {
         let key = key(hash, &record);
         let changes = match partition.get::<CachedTreeChanges>(&key) {
             Some(CachedTreeChanges(changes)) => Some(changes),
@@ -228,10 +247,15 @@ pub(crate) fn complete(
         };
         // An error (an object missing after a gc) stays `Unknown`: every
         // path is cut off there, the conservative side.
-        if let Some(changes) = changes {
-            table.set(record, &changes);
+        match changes {
+            Some(changes) => table.set(record, &changes),
+            None => still += 1,
         }
     }
+    debug!("cutoff table completed";
+        records = unknown.len(),
+        unknown = still,
+        took_us = started.elapsed());
 }
 
 fn compute(
@@ -241,9 +265,20 @@ fn compute(
     key: &Key,
     cancel: &AtomicBool,
 ) -> Option<TreeChanges> {
-    let changes = repo
-        .tree_changes(record.old, record.new, MAX_TREE_PATHS, cancel)
-        .ok()?;
+    let changes = match repo.tree_changes(record.old, record.new, MAX_TREE_PATHS, cancel) {
+        Ok(changes) => changes,
+        Err(GitError::Cancelled) => return None,
+        Err(e) => {
+            // The record then cuts every path: the conservative side.
+            let (error, io) = diag::git_error(&e);
+            warn!("tree changes failed; the record cuts every path";
+                old = record.old.as_ref().map(|o| Value::oid(o.as_bytes())),
+                new = Value::oid(record.new.as_bytes()),
+                error = error,
+                io = io);
+            return None;
+        }
+    };
     // A failed write only means computing it again.
     let _ = partition.put(key, &CachedTreeChanges(changes.clone()));
     Some(changes)
@@ -283,7 +318,19 @@ pub(crate) fn descends(
     if let Some(CachedAncestry(found)) = partition.get::<CachedAncestry>(&key) {
         return Some(found);
     }
-    let found = repo.is_ancestor(ancestor, of, cancel).ok()?;
+    let found = match repo.is_ancestor(ancestor, of, cancel) {
+        Ok(found) => found,
+        Err(GitError::Cancelled) => return None,
+        Err(e) => {
+            let (error, io) = diag::git_error(&e);
+            warn!("ancestry check failed; the record cuts the paths it changed";
+                ancestor = Value::oid(ancestor.as_bytes()),
+                commit = Value::oid(of.as_bytes()),
+                error = error,
+                io = io);
+            return None;
+        }
+    };
     // A failed write only means walking the history again.
     let _ = partition.put(&key, &CachedAncestry(found));
     Some(found)

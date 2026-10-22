@@ -4421,6 +4421,7 @@ dependencies = [
  "lectern-cache",
  "lectern-executor",
  "lectern-git",
+ "lectern-logging",
  "lectern-services",
  "serde",
  "serde_json",
