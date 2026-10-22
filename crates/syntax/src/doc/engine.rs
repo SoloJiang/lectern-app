@@ -303,6 +303,20 @@ impl Engine {
         root: Arc<Path>,
         viewport: Viewport,
     ) -> Arc<DocSnapshot> {
+        self.first_screen_within(target, root, viewport, crate::limits::FIRST_WINDOW_DEADLINE)
+    }
+
+    /// [`Engine::first_screen`] with the window's parse given `deadline`
+    /// of wall time instead of the 8 ms: for a test whose subject is not
+    /// the deadline (`deadline_*` test it), which a busy machine misses
+    /// when the thread waits for a CPU.
+    pub(crate) fn first_screen_within(
+        &self,
+        target: ReadTarget,
+        root: Arc<Path>,
+        viewport: Viewport,
+        deadline: Duration,
+    ) -> Arc<DocSnapshot> {
         let doc = Doc::new(&self.inner, target, root, viewport, Arc::new(|| {}));
         let cancel = AtomicBool::new(false);
         let first = load::first_screen(
@@ -312,7 +326,10 @@ impl Engine {
             doc.target.at,
             doc.target.expect,
             viewport.rows,
-            load::first_budget(&cancel),
+            crate::highlight::Budget {
+                budget: deadline,
+                ..load::first_budget(&cancel)
+            },
             crate::lru::Class::Opened,
         );
         let mut st = doc.lock();

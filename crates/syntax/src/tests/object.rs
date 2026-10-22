@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use lectern_services::reader::Anchor;
 
@@ -84,10 +85,13 @@ fn object_content_nobody_holds_is_taken_out_on_the_first_screen() {
     // Up to 1 MiB: the LRU keeps the text.
     let bytes = testing::json(900 << 10, 0);
     let oid = rig.git.add_blob(&bytes);
-    let first = rig.engine.first_screen(
+    // The window is parsed from the bytes taken out; the 8 ms deadline is
+    // wall time, which a busy machine misses (`deadline_*` test it).
+    let first = rig.engine.first_screen_within(
         rig.object("package-lock.json", oid, Anchor::Start),
         rig.root.clone(),
         super::rig::VIEW,
+        Duration::from_secs(60),
     );
     assert_eq!(blob_calls(&rig), 1);
     assert_eq!(first.state, DocState::Ready);
