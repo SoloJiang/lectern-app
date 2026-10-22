@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现。见「验收」与「实际验证」。
+状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现。见「验收」与「实际验证」。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -103,6 +103,13 @@ pub trait SessionSource: Send + Sync {
     /// 再解析索引之后追加的部分；都没有时解析整个文件（大会话超出打开预算，见「性能」）。会话还在写入时，返回截至当前末尾的索引。
     fn turns(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError>;
 
+    /// 与 `turns` 相同，但结果不放进 8 MB 的轮次索引 LRU（review 设计前置条件 G，供项目主页的概览在 ADR 0035 的
+    /// 采样状态里读索引）：已在 LRU 里、文件没变时照样复制 `Arc`，不算一次使用（不改变淘汰顺序）；否则同样从内存
+    /// 或 `cache` 里的索引接着解析，都没有时解析整个文件。游标变了时在这次调用里同步写回 `cache`（不另提交任务：
+    /// 排队的写入任务会持有这些索引）。LRU 里的条目不增不减，返回后由调用方放下。不派生 Codex 子 agent 的关联
+    /// （见「派生的时机」）；继承边界未定的摘要照样在读过之后重新生成一次。阻塞，只在 executor 上调用。
+    fn turns_unretained(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError>;
+
     /// 读一段正文（prompt、agent 说明、工具输入与结果、文件改动）。阻塞，只在 executor 上调用；
     /// 按偏移定位、读一行并解析，与文件大小无关。`.jsonl.zst` 会话从它的解压副本里定位（见「压缩会话的随机读取」）。
     fn load(&self, session: &SessionKey, at: &ContentRef) -> Result<Content, SessionError>;
@@ -150,7 +157,7 @@ pub enum ResumeCommand {
 - `welcome`、`project_home`、`worktrees` 在渲染时调 `sessions()`；收到 `SessionsChanged` 后安排重绘。
 - `usage` 收到 `SessionsChanged` 后在 executor 上对变化的会话调 `read`，把记录和新游标在同一个 SQLite 事务里写入，所以重启后从自己的游标继续，不重复也不遗漏。
 - 对消费方的约束：第一次发现时（或游标丢失后）要补读的历史可能有几 GB，消费方不得一次读完。补读分批进行，每批之后提交游标、可以中断并在下次从存下的游标继续；在 `Background` 优先级运行；不得让 kernel 无法静止（[ADR 0017](../adr/0017.md)：首帧后 30 秒内静止），即正在运行的一批持有 `BusyGuard`，这一批的结果写入、游标提交之后才释放；批与批之间不持有守卫，剩余的历史不预先排队，等 kernel 发出 `Quiescent` 事件、并且静止持续 10 秒（长于 [kernel 设计](kernel.md)「静止」里内存采样要求的 5 秒连续静止）后才调度下一批；其间出现忙碌就重新计时。所以每一批都计入忙碌，批与批之间留出完整的采样窗口。每批的大小和节奏由 `usage` 的设计文档规定。活跃会话（`open_turn` 为 true，或 `last_activity` 在 10 分钟之内）不受这条节奏限制：它的历史一批接一批连续读完，每批仍持有 `BusyGuard`，读完之后追加的内容收到 `SessionsChanged` 就读；游标只有一个，所以必须先读完历史才能读到新追加的内容，活跃会话的数量和大小有限（单个会话的完整解析在 1 s 以内），不会让 kernel 长时间忙碌。
-- `review` 在 executor 上调 `turns` 和 `load`，`review_view` 只读 `review` 的快照。
+- `review` 在 executor 上调 `turns` 和 `load`（打开的审阅），项目主页的概览调 `turns_unretained`，`review_view` 只读 `review` 的快照。
 - `terminal` 调 `resume`，按上面的规则映射成命令。
 - `project_home`、`welcome` 在显示或打开 `tail_pending` 的会话行时调 `complete`。
 
@@ -778,6 +785,7 @@ links: Mutex<HashMap<SessionKey, Option<Links>>>,
 **派生的时机**
 
 - 父会话的索引放进内存之后（`keep_index`：`read` 顺带建的、`turns`、追加之后的 `follow`），索引里有还不在 `Links` 里的已结束 `SpawnAgent` 调用时，为它们各 `load` 一次。索引是续接的（不是 `reset` 的回放）时，已有的项按调用 ID 沿用；回放时全部重新读。没有新调用时只遍历一遍内存里的索引，不做 IO。
+- `turns_unretained` 的索引不放进内存，不派生：派生要在另一个任务里持有索引，或在概览的任务里为每个调用 `load` 一次，都与「不留下索引」相违。只被概览读过的父会话，关联等它被打开（`turns`）、被 `usage` 读过或作为活跃会话主动建索引时再派生；之后的 `turns` 从 `cache` 里的索引接着解析，关联还不在这个偏移上，照常派生一次。
 - `read` 和 `turns` 的调用方不等派生：派生在另一个 `Background` 任务里进行，与写回 `cache` 相同。`follow` 本来就在刷新任务里，派生在这一轮发布之前完成。
 - 新 `Links` 的 `seq` 不大于已有的时丢弃（先建的索引晚完成派生）。关联有变化、并且有列出的子会话指向这个父会话时，按「数据流与线程」第 4 步发布。
 
@@ -854,7 +862,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 ## 性能
 
 - 冷启动（ADR 0017）：首帧之前不调用本 crate；插件在首帧之后激活，发现在 `Background` 优先级运行。
-- 空闲内存（ADR 0017）：`SessionList` 每个会话约 1 KB（1000 个会话约 1 MB）；轮次索引只为打开过的会话保留，LRU 上限 8 MB；读取用 64 KB 缓冲逐行处理，单行上限 16 MB，任何时候只持有一行；超长行边读边丢弃，不缓存。
+- 空闲内存（ADR 0017）：`SessionList` 每个会话约 1 KB（1000 个会话约 1 MB）；轮次索引只为打开过的会话保留，LRU 上限 8 MB（`turns_unretained` 读的索引不进 LRU，ADR 0035 的采样状态里 LRU 不因概览增长）；读取用 64 KB 缓冲逐行处理，单行上限 16 MB，任何时候只持有一行；超长行边读边丢弃，不缓存。
 - 磁盘：压缩会话的解压副本合计上限 1 GB，字节 LRU（见「压缩会话的随机读取」）。
 - 打开一个会话的 Diff < 50 ms（[性能预算](tech-research.md#性能预算)）：本 crate 的份额是 `turns` 命中缓存加解析追加部分 < 10 ms，`load` 一次 < 1 ms（压缩会话从解压副本读，同样适用；第一次打开压缩会话除外，见上节）。
 - 没有缓存索引时打开（首次启动、`usage` 的补读还没读到这个会话，或缓存被淘汰）：`turns` 解析整个文件，56 MB 的会话约 0.3 s，超出预算；界面与第一次打开压缩会话一样显示骨架或进度。`usage` 补读完成后，只有缓存被淘汰的会话会再遇到这种情况。这是已知限制（ADR 0026）。
@@ -913,6 +921,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 归位：模拟的 `Projects`，相同 cwd 只 `resolve` 一次，cwd 不存在为 `Missing`；已打开项目里的 cwd 为 `Located` 并带子项目，非当前 worktree 的 `NotLoaded` 由 `resolve_package` 补齐；经符号链接记录的 cwd 归到已打开的项目，`cwd` 字段保留原样（`place_*`）。
 - 交互式 shell：`exec_command` 的 `session_id` 出现在 `ToolFinished::exec_session` 上，之后的 `write_stdin` 的 `ToolKind::Execute::exec_session` 与它相同（`tool_kind_*`）。
 - 轮次索引缓存：命中后只解析追加部分；适配器版本变化后不命中（`index_cache_*`）。
+- 不进 LRU 的读取：`turns_unretained` 前后 LRU 的字节数和条目不变；结果与 `turns`、适配器整份解析相同；索引在返回之前写进 `cache`，之后的 `turns` 从它接着解析；不派生 Codex 子 agent 的关联，之后的 `turns` 照常派生一次（`turns_unretained_*`）。
 - 插件：`TestKernel` 注入模拟的 `Projects`，激活后提供两个 `SessionSource`，首次发现后发出 `SessionsChanged`（`plugin_*`）。
 
 本 issue 的代码不调用外部命令行。Analyze 的后续 issue 按根目录 AGENTS.md 的规定测试：在 PATH 最前面放一个假命令，记录参数、标准输入和工作目录，按夹具回放 JSON 行输出。
@@ -954,6 +963,8 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
    - `just test -p lectern-agents` 的 `spawn_link_*` 通过，`subagent_*`、`watch_*` 的快照不变。
    - `rg 'tool_call: None' crates/agents/src/codex/summary.rs` 仍有结果（摘要里不填，发布时填）；`rg -n 'agents.spawns' docs/design/cache.md` 有结果。
    - `agents/discover_codex_1000` 达标；`just bench --measure agents/` 的其余各项与改动前相比没有超出预算。
+
+review 设计的前置条件 G（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，一个 PR，写 `Refs #15`，改 `services` 的 `session` 模块和本 crate）：`SessionSource::turns_unretained` 按上文「服务接口」；`just test -p lectern-agents` 的 `turns_unretained_*` 和 `just test -p lectern-services` 的 `session_*` 通过。
 
 ## 实际验证
 
@@ -1019,6 +1030,18 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - `just bench --measure agents/`（Linux 容器，x86_64，只报告不判定），改动前（`origin/main` `58684cb`）与改动后：`agents/parse_throughput` 281 / 268 MB/s，`agents/append_4k` 14.6 / 14.9 µs，`agents/discover_1000` 24.3 / 28.8 ms（再跑一次 24.4 ms，差别是噪声：Claude Code 的发现不走新代码），`agents/turns_cached_50mb` 1.0 / 0.97 ms，`agents/zst_throughput` 163 / 155 MB/s，`agents/zst_load_decoded` 10.9 / 11.6 µs，都在预算内。新增的 `agents/discover_codex_1000` 中位数 22.6 ms（再跑一次 21.4 ms，预算 < 500 ms）：1000 个 rollout（100 个父会话各派出 9 个子会话），基准在计时之前检查 900 个子会话都有 `tool_call`、适配器的 `read`、`turns_after`、`load` 都是 0 次。
 
 没有验证到的：macOS 上的 bench 判定；真实的 Codex 日志（fixtures 和 `testing::synthetic_rollouts` 都是按源码构造的合成数据）；`07cc649` 的 `codex-rs/rollout/src/policy.rs` 是否仍把 `function_call_output` 写进两种模式的 rollout（第 3 步按 `3b8f43a` 核对过，这一步没有重新核对）。
+
+review 设计的前置条件 G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)），在 Linux 上运行（`agents`、`services` 不依赖 GPUI；没有在 macOS 上实测）：
+
+- `just check`、`just test`（基于 `3bb7279`，Linux 上不依赖 GPUI 的全部 crate，1854 个测试通过，7 个跳过）、`just doctest`、`just deny` 全部通过。没有新增依赖。`services` 里 `SessionSource` 加了一个必需的方法（没有默认实现：`services` 只放接口），实现它的只有本 crate 的 `Engine` 和 `services` 测试里的空实现，都已更新。
+- `just test -p lectern-agents -p lectern-services`：基于 `5190f4f`，253 个通过（`agents` 183 个、`services` 70 个），1 个跳过（`redact_file_from_env`）。`session_source_is_a_shared_trait_object` 经 `Arc<dyn SessionSource>` 调用了新方法。新增 `turns_unretained_*` 4 个：
+  - LRU 不变：内存里有会话 A 的索引时读会话 B，之后 LRU 的字节数不变、没有 B、A 仍在；读 A 时返回内存里同一个 `Arc`；A 的文件追加之后再读，结果有新的一轮，内存里仍是原来那个 `Arc`，字节数不变。
+  - 结果相同：Claude Code 会话的结果等于适配器整份解析和之后的 `turns`；Codex 的 `paginated` 父会话的结果等于另一次运行里只调 `turns` 的结果和适配器整份解析。
+  - 写进 `cache`：调用返回时 `agents.turns` 里已有这份索引（不等后台任务），内存里没有它；把文件中间的一个 prompt 原地改写之后，`turns` 的结果仍是旧值，证明是从 `cache` 里的索引接着解析的，之后内存里有它。
+  - 不派生：`turns_unretained` 读 Codex 父会话之后，适配器只多一次 `turns_after`、没有 `load`，`links` 不变，子会话的 `tool_call` 仍为 None，不发布；之后的 `turns` 多一次 `turns_after`，`load` 的次数与另一次运行里单独 `turns` 的派生相同（没有重复），子会话得到 `call_p1_0003`，发布一次、`changed` 只有子会话。
+- `just bench --measure agents/`（Linux 容器，x86_64，只报告不判定）：`agents/parse_throughput` 293 MB/s，`agents/append_4k` 14.7 µs，`agents/discover_1000` 23.6 ms，`agents/turns_cached_50mb` 0.90 ms，`agents/discover_codex_1000` 21.9 ms，`agents/zst_throughput` 176 MB/s，`agents/zst_load_decoded` 9.9 µs，都在预算内，与第 5 步记下的数字相当（`turns` 改为与 `turns_unretained` 共用一个函数，路径不变）。
+
+没有验证到的：macOS 上的 bench 判定；`review` 的概览还没有实现，`overview_never_calls_turns` 和采样状态里 LRU 不增长由 review 实现第 5 步验收。
 
 ## 与设计的差异
 
@@ -1101,3 +1124,10 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - **索引的序号与放进内存在同一把锁下。** `keep_index` 和 `follow` 在放进内存索引的那把锁里取 `Links::seq`，所以后放进内存的索引序号一定更大，并发的 `read` 与 `follow` 不会让较旧的索引的派生胜出。
 - **时钟。** 活跃会话的 10 分钟和同一父会话 10 分钟之内只排一次都用系统时间（UTC 毫秒），后者从排队的时刻算起；测试经 `Engine` 的时钟偏移拨动。主动建索引的任务调用与 `SessionSource::turns` 相同的路径，派生照常在另一个任务里进行。
 - **`testing` 的补充。** 新增 `testing::source_with_calls` 与 `AdapterCalls`，bench 据此检查发现时适配器没有读正文，已写进上文「本 crate 的公开项」。`testing::synthetic_rollouts` 写 `legacy` 形状的 rollout，子会话没有 `subagent_history_start_ordinal`，所以发现时它们的 `inheritance_unknown` 为 true（与真实的 `legacy` 子 agent 相同，不影响关联）。
+
+review 设计的前置条件 G：
+
+- **写回 `cache` 是同步的。** review 设计只写「照常写回 `cache`」，`turns` 的写入在另一个后台任务里。概览在一个 `Background` 任务里逐个读最多 100 个会话，另提交的写入任务排在它后面时会一直持有这些索引，与「返回后由调用方放下」相违，所以在这次调用里写；游标没变（`cache` 命中、没有追加）时不写。
+- **内存命中不算一次使用。** 设计写「已在 LRU 里时照样复制 `Arc`」，没写是否更新 LRU 的顺序。概览的读取不改变打开过的会话谁先被淘汰（`Indexes::peek`）。内存里的索引在旧的文件身份上时，从它接着解析，LRU 里那一份不替换。
+- **不派生子 agent 的关联，照样重新生成继承边界未定的摘要。** 前者见「派生的时机」；后者与 `turns` 相同（每个文件身份一次，只改摘要，不留下索引）。已写进上文「服务接口」。
+- **`turns` 与 `turns_unretained` 共用 `Engine::next_index`。** 只差内存里的查找是否算一次使用、结果放不放进内存和派生；`turns` 的行为不变。

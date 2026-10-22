@@ -36,6 +36,9 @@ impl SessionSource for Empty {
     fn turns(&self, _session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
         Err(SessionError::NotFound)
     }
+    fn turns_unretained(&self, _session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
+        Err(SessionError::NotFound)
+    }
     fn load(&self, _session: &SessionKey, _at: &ContentRef) -> Result<Content, SessionError> {
         Err(SessionError::Unrecognized)
     }
@@ -95,6 +98,7 @@ fn session_source_is_a_shared_trait_object() {
     let batch = sessions.read(&k, &Cursor::START, 1).expect("reads");
     assert!(batch.at_end && batch.cursor.is_start());
     assert_eq!(sessions.turns(&k), Err(SessionError::NotFound));
+    assert_eq!(sessions.turns_unretained(&k), Err(SessionError::NotFound));
     assert_eq!(
         sessions.load(&k, &ContentRef::new(0, 1, 0)),
         Err(SessionError::Unrecognized)
