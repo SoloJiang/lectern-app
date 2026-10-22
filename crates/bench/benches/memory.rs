@@ -13,6 +13,8 @@ mod code_intel_names;
 mod code_intel_virtual;
 #[path = "fixtures/git_worktree.rs"]
 mod git_worktree;
+#[path = "memory/log.rs"]
+mod log;
 #[path = "memory/project.rs"]
 mod project;
 #[allow(
@@ -276,6 +278,7 @@ const BENCHES: &[Bench] = &[
     GIT_FILTER_CLOUDPRINT_BYTES,
     GIT_FILTER_100K_BYTES,
     GIT_RESIDENT,
+    log::IDLE_MEMORY,
     project::RESIDENT_CLOUDPRINT,
     project::RESIDENT_100K,
     project::DIRS_100K_BYTES,

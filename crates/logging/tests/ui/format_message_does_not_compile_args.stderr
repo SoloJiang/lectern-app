@@ -1,0 +1,7 @@
+error: no rules expected `,`
+ --> tests/ui/format_message_does_not_compile_args.rs:4:38
+  |
+4 |     lectern_logging::warn!("value {}", x);
+  |                                      ^ no rules expected this token in macro call
+  |
+  = note: while trying to match sequence start

@@ -7,6 +7,7 @@ import unittest
 
 import check_architecture
 from check_architecture import has_impl_plugin, implements_plugin, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
+from check_architecture import enables_sink, panic_message_errors, sink_feature_errors, uses_panic_message
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -215,6 +216,86 @@ class BindingNames(unittest.TestCase):
         for name in ("serde", "memchr", "gpui-pre", "lectern-platform", "lectern-review", "block-buffer"):
             with self.subTest(name=name):
                 self.assertFalse(is_macos_binding_name(name))
+
+
+def package(name, deps=(), features=None):
+    """A `cargo metadata` package entry: deps are (name, features, rename)."""
+    return {
+        "name": name,
+        "dependencies": [{"name": n, "features": list(f), "rename": r, "kind": None} for n, f, r in deps],
+        "features": features or {},
+    }
+
+
+class LoggingSinkRule(unittest.TestCase):
+    LAYERS = {
+        "lectern-app": "app",
+        "lectern-bench": "tool",
+        "lectern-cache": "infra",
+        "lectern-kernel": "kernel",
+        "lectern-review-view": "view",
+        "lectern-logging": "kernel",
+    }
+
+    def test_enables_sink(self):
+        self.assertTrue(enables_sink(package("a", [("lectern-logging", ["sink"], None)])))
+        self.assertTrue(enables_sink(package("a", [("lectern-logging", [], None)], {"x": ["lectern-logging/sink"]})))
+        self.assertTrue(enables_sink(package("a", [("lectern-logging", [], None)], {"x": ["lectern-logging?/sink"]})))
+        self.assertTrue(enables_sink(package("a", [("lectern-logging", [], "logging")], {"x": ["logging/sink"]})))
+        self.assertFalse(enables_sink(package("a", [("lectern-logging", ["test-support"], None)])))
+        self.assertFalse(enables_sink(package("a", [("other", ["sink"], None)], {"sink": ["other/sink"]})))
+        self.assertFalse(enables_sink(package("a", [("lectern-logging", [], None)], {"sink": []})))
+
+    def test_only_app_and_tool_crates(self):
+        packages = [
+            package("lectern-app", [("lectern-logging", ["sink"], None)]),
+            package("lectern-bench", [("lectern-logging", ["sink", "test-support"], None)]),
+            package("lectern-logging", features={"sink": [], "test-support": []}),
+            package("lectern-kernel", [("lectern-logging", [], None)]),
+            package("lectern-cache", [("lectern-logging", ["test-support"], None)]),
+        ]
+        self.assertEqual(sink_feature_errors(packages, self.LAYERS), [])
+        packages += [
+            package("lectern-cache", [("lectern-logging", ["sink"], None)]),
+            package("lectern-review-view", [("lectern-logging", [], None)], {"disk": ["lectern-logging/sink"]}),
+        ]
+        self.assertEqual(
+            sink_feature_errors(packages, self.LAYERS),
+            [
+                "lectern-cache (infra): enables lectern-logging's `sink` feature; only the app and tool crates may [docs/design/logging.md]",
+                "lectern-review-view (view): enables lectern-logging's `sink` feature; only the app and tool crates may [docs/design/logging.md]",
+            ],
+        )
+
+
+class PanicMessageRule(unittest.TestCase):
+    def test_uses_panic_message(self):
+        self.assertTrue(uses_panic_message("let v = Value::panic_message(text);"))
+        self.assertTrue(uses_panic_message("use lectern_logging::Value; fn f() { Value::panic_message }"))
+        self.assertFalse(uses_panic_message('// Value::panic_message\nconst S: &str = "panic_message";'))
+        self.assertFalse(uses_panic_message("let panic_messages = 1; fn my_panic_message_count() {}"))
+
+    def test_only_kernel_executor_and_logging(self):
+        with tempfile.TemporaryDirectory() as root:
+            dirs = {}
+            for name in ("kernel", "executor", "logging", "cache", "agents"):
+                d = os.path.join(root, "crates", name)
+                os.makedirs(os.path.join(d, "src"))
+                os.makedirs(os.path.join(d, "tests"))
+                with open(os.path.join(d, "src", "lib.rs"), "w") as f:
+                    f.write("fn f(t: PanicText) -> Value { Value::panic_message(t) }\n")
+                dirs[f"lectern-{name}"] = d
+            with open(os.path.join(dirs["lectern-agents"], "src", "lib.rs"), "w") as f:
+                f.write("// Value::panic_message is for kernel and executor only.\n")
+            with open(os.path.join(dirs["lectern-agents"], "tests", "t.rs"), "w") as f:
+                f.write("#[test] fn t() { let _ = lectern_logging::Value::panic_message; }\n")
+            self.assertEqual(
+                panic_message_errors(dirs),
+                [
+                    "lectern-agents: crates/agents/tests/t.rs uses Value::panic_message; only kernel, executor and logging may [docs/design/logging.md]",
+                    "lectern-cache: crates/cache/src/lib.rs uses Value::panic_message; only kernel, executor and logging may [docs/design/logging.md]",
+                ],
+            )
 
 
 class WorkspaceLints(unittest.TestCase):

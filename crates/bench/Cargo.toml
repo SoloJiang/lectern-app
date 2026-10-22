@@ -36,6 +36,9 @@ lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 lectern-git = { path = "../git", features = ["test-support"] }
 lectern-i18n = { path = "../i18n", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `sink`: the benchmarks install the real logger (tool crates may,
+# docs/design/logging.md).
+lectern-logging = { path = "../logging", features = ["sink", "test-support"] }
 lectern-platform = { path = "../platform" }
 lectern-project = { path = "../project", features = ["test-support"] }
 lectern-review = { path = "../review", features = ["test-support"] }

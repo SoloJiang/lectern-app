@@ -4242,6 +4242,7 @@ dependencies = [
  "lectern-git",
  "lectern-i18n",
  "lectern-kernel",
+ "lectern-logging",
  "lectern-platform",
  "lectern-project",
  "lectern-review",
@@ -4362,6 +4363,17 @@ name = "lectern-kernel"
 version = "0.0.0"
 dependencies = [
  "insta",
+]
+
+[[package]]
+name = "lectern-logging"
+version = "0.0.0"
+dependencies = [
+ "insta",
+ "log",
+ "serde_json",
+ "tempfile",
+ "trybuild",
 ]
 
 [[package]]

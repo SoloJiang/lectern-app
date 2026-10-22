@@ -1,0 +1,15 @@
+error[E0277]: the trait bound `String: lectern_logging::Field` is not satisfied
+ --> tests/ui/string_field_does_not_compile.rs:4:5
+  |
+4 |     lectern_logging::info!("owned string"; text = owned);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     the trait `lectern_logging::Field` is not implemented for `String`
+  |     required by a bound introduced by this call
+  |
+help: the trait `lectern_logging::Field` is implemented for `&str`
+ --> src/value.rs
+  |
+  | impl Field for &'static str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: this error originates in the macro `$crate::__log` which comes from the expansion of the macro `lectern_logging::info` (in Nightly builds, run with -Z macro-backtrace for more info)
