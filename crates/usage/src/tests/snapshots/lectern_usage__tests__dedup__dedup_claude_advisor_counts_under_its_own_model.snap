@@ -1,0 +1,12 @@
+---
+source: crates/usage/src/tests/dedup.rs
+expression: "render_project(&h.project(&repo, Window::D7))"
+---
+project: app folder=false open=true state=Ready inherited=false
+window: D7 2026-10-16 .. 2026-10-22 (7 days)
+total: in 7 out 6 read 0 write 0 (= 13)
+rows: 0
+agent ClaudeCode: in 7 out 6 read 0 write 0 (= 13)
+model ClaudeCode "model-a": in 5 out 5 read 0 write 0 (= 10)
+model ClaudeCode "model-b": in 2 out 1 read 0 write 0 (= 3)
+day 2026-10-20: [(ClaudeCode, 13)]

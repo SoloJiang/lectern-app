@@ -1,0 +1,11 @@
+---
+source: crates/usage/src/tests/dedup.rs
+expression: render_project(&p)
+---
+project: app folder=false open=true state=Ready inherited=true
+window: D7 2026-10-16 .. 2026-10-22 (7 days)
+total: in 57 out 39 read 140 write 0 (= 236)
+rows: 0
+agent Codex: in 57 out 39 read 140 write 0 (= 236)
+model Codex "model-c": in 57 out 39 read 140 write 0 (= 236)
+day 2026-10-20: [(Codex, 236)]

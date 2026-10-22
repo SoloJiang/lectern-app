@@ -1,0 +1,577 @@
+//! Test support (`test-support` feature, docs/design/usage.md「本 crate 的公开项」):
+//! a session source replaying `services::session` records, a projects
+//! service without IO, a time zone from a table and manual clocks. Every
+//! fixture is synthetic; nothing here reads an agent's real session
+//! directories.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use serde::Deserialize;
+
+use lectern_kernel::Clock;
+use lectern_kernel::testing::ManualClock;
+use lectern_services::project::{
+    Head, Location, OpenError, OpenRequest, PackageMatch, ProjectKey, ProjectSnapshot, Projects,
+    RelPath, ResolveError, Resolved, ScanError, Worktree, WorktreeKey,
+};
+use lectern_services::session::{
+    Agent, Batch, Content, ContentRef, Cursor, Diagnostics, Format, Parent, Place, Positioned,
+    Record, ResumeCommand, SessionError, SessionKey, SessionList, SessionSource, SessionSummary,
+    SessionsChanged, SourceId, Timestamp, TurnIndex,
+};
+
+use crate::LocalZone;
+use crate::time::Time;
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A time zone given as (from Unix milliseconds, offset in seconds) rows,
+/// in order; before the first row the first offset applies.
+pub struct TableZone {
+    rows: Vec<(i64, i32)>,
+}
+
+impl TableZone {
+    pub fn new(rows: &[(i64, i32)]) -> TableZone {
+        let mut rows = rows.to_vec();
+        rows.sort_by_key(|r| r.0);
+        TableZone { rows }
+    }
+
+    /// One offset at all times.
+    pub fn fixed(offset_secs: i32) -> TableZone {
+        TableZone::new(&[(i64::MIN, offset_secs)])
+    }
+}
+
+impl LocalZone for TableZone {
+    fn offset_at(&self, unix_ms: i64) -> i32 {
+        let i = self.rows.partition_point(|r| r.0 <= unix_ms);
+        self.rows[i.saturating_sub(1)].1
+    }
+}
+
+/// A monotonic clock and a wall clock that only move when told to, in step.
+#[derive(Clone)]
+pub struct ManualTime {
+    clock: ManualClock,
+    start: Instant,
+    wall_start: i64,
+}
+
+impl ManualTime {
+    /// Starting at Unix milliseconds `wall_ms`.
+    pub fn new(wall_ms: i64) -> ManualTime {
+        let clock = ManualClock::new();
+        let start = clock.now();
+        ManualTime {
+            clock,
+            start,
+            wall_start: wall_ms,
+        }
+    }
+
+    /// Moves both clocks; timers that come due are woken on this thread.
+    pub fn advance(&self, by: Duration) {
+        self.clock.advance(by);
+    }
+
+    pub fn now_ms(&self) -> i64 {
+        let since = self.clock.now() - self.start;
+        self.wall_start + i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+    }
+
+    /// Timers not yet due.
+    pub fn pending_timers(&self) -> usize {
+        self.clock.pending_timers()
+    }
+
+    pub(crate) fn time(&self) -> Time {
+        let me = self.clone();
+        Time {
+            clock: Arc::new(self.clock.clone()),
+            wall: Arc::new(move || me.now_ms()),
+        }
+    }
+}
+
+/// The bytes one record line takes in a [`FakeSessions`] file: positions are
+/// given by the records, the last line is this long.
+pub const LAST_LINE: u64 = 100;
+
+/// A session script: summaries and the records of their logs, in the serde
+/// form of `services::session`.
+///
+/// ```text
+/// { "source": "session-claude-code", "agent": "ClaudeCode",
+///   "sessions": [ { "id", "cwd", "started_at"?, "last_activity"?,
+///                   "open_turn"?, "parent"?, "inheritance_unknown"?,
+///                   "records": [Positioned<Record>…] } ] }
+/// ```
+#[derive(Deserialize)]
+struct Script {
+    source: String,
+    agent: Agent,
+    sessions: Vec<ScriptSession>,
+}
+
+#[derive(Deserialize)]
+struct ScriptSession {
+    id: String,
+    cwd: PathBuf,
+    #[serde(default)]
+    started_at: i64,
+    #[serde(default)]
+    last_activity: Option<i64>,
+    #[serde(default)]
+    open_turn: bool,
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    inheritance_unknown: bool,
+    #[serde(default)]
+    records: Vec<Positioned<Record>>,
+}
+
+struct FakeSession {
+    summary: SessionSummary,
+    records: Vec<Positioned<Record>>,
+    /// The next `read` gives `reset` (an adapter upgrade).
+    reset: bool,
+}
+
+impl FakeSession {
+    fn len(&self) -> u64 {
+        self.records.last().map_or(0, |r| r.pos + LAST_LINE)
+    }
+}
+
+struct Inner {
+    adapter: u32,
+    generation: u64,
+    sessions: Vec<FakeSession>,
+    reads: HashMap<Arc<str>, usize>,
+}
+
+/// A `SessionSource` replaying record scripts; counts its reads.
+pub struct FakeSessions {
+    source: SourceId,
+    agent: Agent,
+    inner: Mutex<Inner>,
+}
+
+impl FakeSessions {
+    /// An empty source.
+    pub fn new(source: &str, agent: Agent) -> FakeSessions {
+        FakeSessions {
+            source: SourceId(source.into()),
+            agent,
+            inner: Mutex::new(Inner {
+                adapter: 1,
+                generation: 1,
+                sessions: Vec::new(),
+                reads: HashMap::new(),
+            }),
+        }
+    }
+
+    /// A source from a JSON script (see [`Script`]). Panics on a bad script:
+    /// test code.
+    pub fn from_json(json: &str) -> FakeSessions {
+        let script: Script = serde_json::from_str(json).expect("session script");
+        let fake = FakeSessions::new(&script.source, script.agent);
+        for s in script.sessions {
+            let parent = s.parent.as_deref();
+            fake.add(&s.id, &s.cwd, s.started_at, parent);
+            fake.edit(&s.id, |summary| {
+                summary.open_turn = s.open_turn;
+                summary.inheritance_unknown = s.inheritance_unknown;
+                if let Some(at) = s.last_activity {
+                    summary.last_activity = Timestamp(at);
+                }
+            });
+            fake.push(&s.id, s.records);
+        }
+        fake
+    }
+
+    pub fn key(&self, id: &str) -> SessionKey {
+        SessionKey {
+            source: self.source.clone(),
+            id: id.into(),
+        }
+    }
+
+    /// Adds a session with no records.
+    pub fn add(&self, id: &str, cwd: &Path, started_at: i64, parent: Option<&str>) {
+        let key = self.key(id);
+        let parent = parent.map(|p| Parent {
+            session: self.key(p),
+            tool_call: None,
+        });
+        let summary = SessionSummary {
+            key,
+            agent: self.agent.clone(),
+            parent,
+            file: Arc::from(Path::new(&format!("/fake/{id}.jsonl"))),
+            cwd: Arc::from(cwd),
+            place: Place::Pending,
+            started_at: Timestamp(started_at),
+            last_activity: Timestamp(started_at),
+            title: None,
+            agent_version: None,
+            logged_branch: None,
+            open_turn: false,
+            tail_pending: false,
+            archived: false,
+            inheritance_unknown: false,
+            format: Format::Known,
+        };
+        let mut inner = lock(&self.inner);
+        inner.generation += 1;
+        inner.sessions.push(FakeSession {
+            summary,
+            records: Vec::new(),
+            reset: false,
+        });
+    }
+
+    /// Changes a session's summary.
+    pub fn edit(&self, id: &str, f: impl FnOnce(&mut SessionSummary)) {
+        let mut inner = lock(&self.inner);
+        inner.generation += 1;
+        if let Some(s) = inner.sessions.iter_mut().find(|s| &*s.summary.key.id == id) {
+            f(&mut s.summary);
+        }
+    }
+
+    /// Appends records; their positions must follow the existing ones.
+    pub fn push(&self, id: &str, records: Vec<Positioned<Record>>) {
+        let mut inner = lock(&self.inner);
+        inner.generation += 1;
+        let s = inner
+            .sessions
+            .iter_mut()
+            .find(|s| &*s.summary.key.id == id)
+            .expect("session in the source");
+        if let Some(at) = records.iter().filter_map(|r| record_at(&r.value)).max() {
+            s.summary.last_activity = Timestamp(s.summary.last_activity.0.max(at));
+        }
+        s.records.extend(records);
+    }
+
+    /// Replaces a session's records; the next read gives `reset` (the
+    /// adapter was upgraded and parses the file again).
+    pub fn replace(&self, id: &str, records: Vec<Positioned<Record>>) {
+        let mut inner = lock(&self.inner);
+        inner.generation += 1;
+        if let Some(s) = inner.sessions.iter_mut().find(|s| &*s.summary.key.id == id) {
+            s.records = records;
+            s.reset = true;
+        }
+    }
+
+    /// Removes a session (its log was deleted).
+    pub fn remove(&self, id: &str) {
+        let mut inner = lock(&self.inner);
+        inner.generation += 1;
+        inner.sessions.retain(|s| &*s.summary.key.id != id);
+    }
+
+    /// The event announcing new records in `ids`.
+    pub fn changed(&self, ids: &[&str]) -> SessionsChanged {
+        let generation = lock(&self.inner).generation;
+        SessionsChanged {
+            source: self.source.clone(),
+            generation,
+            changed: ids.iter().map(|id| self.key(id)).collect::<Vec<_>>().into(),
+            removed: Arc::from(Vec::new()),
+        }
+    }
+
+    /// `read` calls for a session so far.
+    pub fn reads(&self, id: &str) -> usize {
+        lock(&self.inner).reads.get(id).copied().unwrap_or(0)
+    }
+
+    /// `read` calls for every session so far.
+    pub fn total_reads(&self) -> usize {
+        lock(&self.inner).reads.values().sum()
+    }
+}
+
+fn record_at(r: &Record) -> Option<i64> {
+    match r {
+        Record::Context { at, .. }
+        | Record::TurnStarted { at, .. }
+        | Record::TurnEnded { at, .. } => Some(at.0),
+        Record::ToolStarted(t) => Some(t.at.0),
+        Record::ToolFinished(t) => Some(t.at.0),
+        Record::Usage(u) => Some(u.at.0),
+        Record::RateLimits(r) => Some(r.at.0),
+    }
+}
+
+impl SessionSource for FakeSessions {
+    fn id(&self) -> SourceId {
+        self.source.clone()
+    }
+
+    fn agent(&self) -> Agent {
+        self.agent.clone()
+    }
+
+    fn sessions(&self) -> Arc<SessionList> {
+        let inner = lock(&self.inner);
+        let mut sessions: Vec<SessionSummary> =
+            inner.sessions.iter().map(|s| s.summary.clone()).collect();
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+        Arc::new(SessionList {
+            generation: inner.generation,
+            sessions: sessions.into(),
+            diagnostics: Diagnostics::default(),
+        })
+    }
+
+    /// Records from the cursor's offset, whole lines (one `pos`) at a time,
+    /// until about `max_bytes`; at least one line.
+    fn read(&self, key: &SessionKey, from: &Cursor, max_bytes: u64) -> Result<Batch, SessionError> {
+        let mut inner = lock(&self.inner);
+        *inner.reads.entry(key.id.clone()).or_default() += 1;
+        let adapter = inner.adapter;
+        let s = inner
+            .sessions
+            .iter_mut()
+            .find(|s| s.summary.key == *key)
+            .ok_or(SessionError::NotFound)?;
+        let reset = std::mem::take(&mut s.reset) && !from.is_start();
+        let offset = if reset { 0 } else { from.offset() };
+        let mut records = Vec::new();
+        let mut next = s.len();
+        let mut line_start: Option<u64> = None;
+        for r in s.records.iter().filter(|r| r.pos >= offset) {
+            if line_start != Some(r.pos) {
+                if let Some(first) = records.first().map(|f: &Positioned<Record>| f.pos)
+                    && r.pos - first >= max_bytes
+                {
+                    next = r.pos;
+                    break;
+                }
+                line_start = Some(r.pos);
+            }
+            records.push(r.clone());
+        }
+        let len = s.len();
+        Ok(Batch {
+            reset,
+            records,
+            cursor: Cursor::new(self.source.clone(), adapter, next, Vec::new()),
+            at_end: next >= len,
+        })
+    }
+
+    fn turns(&self, _: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
+        Err(SessionError::Unrecognized)
+    }
+
+    fn turns_unretained(&self, _: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
+        Err(SessionError::Unrecognized)
+    }
+
+    fn load(&self, _: &SessionKey, _: &ContentRef) -> Result<Content, SessionError> {
+        Err(SessionError::NotFound)
+    }
+
+    fn resume(&self, _: &SessionKey) -> Option<ResumeCommand> {
+        None
+    }
+
+    fn complete(&self, _: &[SessionKey]) {}
+}
+
+/// A `Projects` without IO: repositories (root → common directory) and
+/// folders the test declares, which of them are open, and `resolve` by
+/// prefix. Unknown paths resolve to themselves as folders, as `project`
+/// does for a directory outside any repository; `missing` paths fail.
+#[derive(Default)]
+pub struct FakeProjects {
+    repos: Mutex<Vec<(PathBuf, PathBuf)>>,
+    folders: Mutex<Vec<PathBuf>>,
+    missing: Mutex<Vec<PathBuf>>,
+    open: Mutex<Vec<ProjectKey>>,
+    resolves: AtomicUsize,
+}
+
+impl FakeProjects {
+    pub fn new() -> FakeProjects {
+        FakeProjects::default()
+    }
+
+    /// A repository with its main worktree at `root`.
+    pub fn repo(&self, root: &Path, common_dir: &Path) -> ProjectKey {
+        lock(&self.repos).push((root.to_owned(), common_dir.to_owned()));
+        ProjectKey::Git {
+            common_dir: common_dir.into(),
+        }
+    }
+
+    /// A folder project's root (not yet open).
+    pub fn folder(&self, root: &Path) -> ProjectKey {
+        lock(&self.folders).push(root.to_owned());
+        ProjectKey::Folder { root: root.into() }
+    }
+
+    /// `resolve` fails for this path (the directory no longer exists).
+    pub fn missing(&self, path: &Path) {
+        lock(&self.missing).push(path.to_owned());
+    }
+
+    pub fn set_open(&self, key: &ProjectKey, open: bool) {
+        let mut list = lock(&self.open);
+        list.retain(|k| k != key);
+        if open {
+            list.push(key.clone());
+        }
+    }
+
+    /// `resolve` calls so far.
+    pub fn resolves(&self) -> usize {
+        self.resolves.load(Ordering::Relaxed)
+    }
+
+    fn root_of(&self, key: &ProjectKey) -> Option<PathBuf> {
+        match key {
+            ProjectKey::Git { common_dir } => lock(&self.repos)
+                .iter()
+                .find(|(_, c)| c.as_path() == &**common_dir)
+                .map(|(r, _)| r.clone()),
+            ProjectKey::Folder { root } => Some(root.to_path_buf()),
+        }
+    }
+}
+
+fn rel(path: &Path, root: &Path) -> RelPath {
+    path.strip_prefix(root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .into()
+}
+
+impl Projects for FakeProjects {
+    fn open(&self, _: &Path) -> OpenRequest {
+        OpenRequest(0)
+    }
+
+    fn close(&self, _: &ProjectKey) {}
+
+    fn set_active_worktree(&self, _: &ProjectKey, _: &WorktreeKey) {}
+
+    fn snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
+        let root = self.root_of(project)?;
+        let worktrees: Vec<Worktree> = match project {
+            ProjectKey::Git { common_dir } => vec![Worktree {
+                key: WorktreeKey(common_dir.clone()),
+                root: root.as_path().into(),
+                is_main: true,
+                head: Head::Unknown,
+                locked: false,
+                prunable: false,
+            }],
+            ProjectKey::Folder { .. } => Vec::new(),
+        };
+        Some(Arc::new(ProjectSnapshot {
+            key: project.clone(),
+            generation: 1,
+            name: root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+                .into(),
+            worktrees: worktrees.into(),
+            active: None,
+        }))
+    }
+
+    fn open_projects(&self) -> Vec<ProjectKey> {
+        lock(&self.open).clone()
+    }
+
+    fn locate(&self, path: &Path) -> Option<Location> {
+        let open = lock(&self.open).clone();
+        let resolved = self.resolve_inner(path).ok()?;
+        if !open.contains(&resolved.project) {
+            return None;
+        }
+        Some(Location {
+            project: resolved.project,
+            worktree: resolved.worktree,
+            rel: resolved.rel,
+            package: PackageMatch::None,
+        })
+    }
+
+    fn resolve(&self, path: &Path) -> Result<Resolved, ResolveError> {
+        self.resolves.fetch_add(1, Ordering::Relaxed);
+        self.resolve_inner(path)
+    }
+
+    fn resolve_package(
+        &self,
+        _: &ProjectKey,
+        _: &WorktreeKey,
+        _: &str,
+    ) -> Result<PackageMatch, ScanError> {
+        Ok(PackageMatch::None)
+    }
+}
+
+impl FakeProjects {
+    fn resolve_inner(&self, path: &Path) -> Result<Resolved, ResolveError> {
+        if lock(&self.missing).iter().any(|m| path.starts_with(m)) {
+            return Err(OpenError::NotFound);
+        }
+        if let Some((root, common)) = lock(&self.repos)
+            .iter()
+            .filter(|(r, _)| path.starts_with(r))
+            .max_by_key(|(r, _)| r.as_os_str().len())
+        {
+            return Ok(Resolved {
+                project: ProjectKey::Git {
+                    common_dir: common.as_path().into(),
+                },
+                worktree: Some(WorktreeKey(common.as_path().into())),
+                rel: rel(path, root),
+            });
+        }
+        let open = lock(&self.open).clone();
+        if let Some(root) = lock(&self.folders)
+            .iter()
+            .filter(|r| path.starts_with(r))
+            .filter(|r| {
+                open.contains(&ProjectKey::Folder {
+                    root: r.as_path().into(),
+                })
+            })
+            .max_by_key(|r| r.as_os_str().len())
+        {
+            return Ok(Resolved {
+                project: ProjectKey::Folder {
+                    root: root.as_path().into(),
+                },
+                worktree: None,
+                rel: rel(path, root),
+            });
+        }
+        Ok(Resolved {
+            project: ProjectKey::Folder { root: path.into() },
+            worktree: None,
+            rel: "".into(),
+        })
+    }
+}

@@ -1,0 +1,58 @@
+{
+  "source": "session-claude-code",
+  "agent": "ClaudeCode",
+  "sessions": [
+    {
+      "id": "0b6f2a4e-1d3c-4e5f-8a9b-0c1d2e3f4a01",
+      "cwd": "/work/app",
+      "started_at": 1792490400000,
+      "records": [
+        {"pos": 0, "seq": 0, "inherited": false, "value": {"Context": {"at": 1792490400000, "cwd": "/work/app", "logged_branch": null, "model": null}}},
+        {"pos": 100, "seq": 0, "inherited": false, "value": {"TurnStarted": {"turn": "t1", "at": 1792490401000}}},
+        {"pos": 200, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490402000, "turn": "t1", "model": "model-a",
+          "tokens": {"Anthropic": {"input": 10, "output": 5, "cache_read": 100, "cache_write": 20, "cache_write_5m": 0, "cache_write_1h": 0}},
+          "key": {"Claude": {"message_id": "msg_1", "request_id": "req_1"}}, "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 300, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490403000, "turn": "t1", "model": "model-a",
+          "tokens": {"Anthropic": {"input": 10, "output": 40, "cache_read": 100, "cache_write": 20, "cache_write_5m": 0, "cache_write_1h": 0}},
+          "key": {"Claude": {"message_id": "msg_1", "request_id": "req_1"}}, "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 400, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490403000, "turn": "t1", "model": "model-a",
+          "tokens": {"Anthropic": {"input": 10, "output": 40, "cache_read": 100, "cache_write": 20, "cache_write_5m": 0, "cache_write_1h": 0}},
+          "key": {"Claude": {"message_id": "msg_1", "request_id": "req_1"}}, "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 500, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490404000, "turn": "t1", "model": "model-a",
+          "tokens": {"Anthropic": {"input": 1, "output": 9, "cache_read": 0, "cache_write": 0, "cache_write_5m": 0, "cache_write_1h": 0}},
+          "key": {"Claude": {"message_id": "msg_2", "request_id": "req_2"}}, "advisor": null, "superseded": false, "sidechain": true, "origin": "SessionLog"}}},
+        {"pos": 600, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490405000, "turn": "t1", "model": "model-a",
+          "tokens": {"Anthropic": {"input": 1, "output": 2, "cache_read": 0, "cache_write": 0, "cache_write_5m": 0, "cache_write_1h": 0}},
+          "key": {"Claude": {"message_id": "msg_2", "request_id": "req_2"}}, "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 700, "seq": 0, "inherited": false, "value": {"TurnStarted": {"turn": "t2", "at": 1792576800000}}},
+        {"pos": 800, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792576801000, "turn": "t2", "model": "model-a",
+          "tokens": {"Anthropic": {"input": 3, "output": 7, "cache_read": 50, "cache_write": 0, "cache_write_5m": 30, "cache_write_1h": 10}},
+          "key": {"Claude": {"message_id": "msg_3", "request_id": "req_3"}}, "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}}
+      ]
+    },
+    {
+      "id": "0b6f2a4e-1d3c-4e5f-8a9b-0c1d2e3f4a02",
+      "cwd": "/work/app",
+      "started_at": 1792490400000,
+      "records": [
+        {"pos": 0, "seq": 0, "inherited": false, "value": {"Context": {"at": 1792490400000, "cwd": "/work/app", "logged_branch": null, "model": null}}},
+        {"pos": 100, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490403000, "turn": null, "model": "model-a",
+          "tokens": {"Anthropic": {"input": 10, "output": 40, "cache_read": 100, "cache_write": 20, "cache_write_5m": 0, "cache_write_1h": 0}},
+          "key": {"Claude": {"message_id": "msg_1", "request_id": "req_1"}}, "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}}
+      ]
+    },
+    {
+      "id": "0b6f2a4e-1d3c-4e5f-8a9b-0c1d2e3f4a01/agent-a1",
+      "parent": "0b6f2a4e-1d3c-4e5f-8a9b-0c1d2e3f4a01",
+      "cwd": "/work/app",
+      "started_at": 1792490400000,
+      "records": [
+        {"pos": 0, "seq": 0, "inherited": false, "value": {"Context": {"at": 1792490405500, "cwd": "/work/app", "logged_branch": null, "model": null}}},
+        {"pos": 100, "seq": 0, "inherited": false, "value": {"TurnStarted": {"turn": "ta1", "at": 1792490405600}}},
+        {"pos": 200, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490406000, "turn": "ta1", "model": "model-a",
+          "tokens": {"Anthropic": {"input": 4, "output": 8, "cache_read": 0, "cache_write": 0, "cache_write_5m": 0, "cache_write_1h": 0}},
+          "key": {"Claude": {"message_id": "msg_4", "request_id": "req_4"}}, "advisor": null, "superseded": false, "sidechain": true, "origin": "SessionLog"}}}
+      ]
+    }
+  ]
+}

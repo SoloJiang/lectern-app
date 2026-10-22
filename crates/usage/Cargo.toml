@@ -1,6 +1,6 @@
 [package]
 name = "lectern-usage"
-description = "Token dedupe and aggregation, price table and limit snapshots."
+description = "Token dedupe, attribution and aggregation in SQLite, and limit snapshots."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,42 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "domain"
+plugin = true
+
+[features]
+# testing::FakeSessions, FakeProjects, TableZone and ManualTime, for the tests
+# of this crate and for lectern-bench.
+test-support = [
+    "dep:serde",
+    "dep:serde_json",
+    "lectern-kernel/test-support",
+    "lectern-executor/test-support",
+]
+
+[dependencies]
+# Background tasks (reading, snapshots, the database); timers are futures on
+# the kernel's `Clock`.
+lectern-executor = { path = "../executor" }
+# Plugin, PluginHandle, BusyGuard, Quiescent / Busy, Clock.
+lectern-kernel = { path = "../kernel" }
+# Typed log records (ADR 0046); the sink stays in app.
+lectern-logging = { path = "../logging" }
+# Usage (provided), SessionSource and Projects (required).
+lectern-services = { path = "../services" }
+# This crate's own database (ADR 0027).
+rusqlite.workspace = true
+# The JSON record scripts of testing::FakeSessions.
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+insta.workspace = true
+lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+lectern-logging = { path = "../logging", features = ["test-support"] }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

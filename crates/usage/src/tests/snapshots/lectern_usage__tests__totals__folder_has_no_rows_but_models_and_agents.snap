@@ -1,0 +1,15 @@
+---
+source: crates/usage/src/tests/totals.rs
+expression: render_project(&p)
+---
+project: notes folder=true open=true state=Ready inherited=false
+window: D7 2026-10-16 .. 2026-10-22 (7 days)
+total: in 35 out 8 read 5 write 0 (= 48)
+rows: 0
+agent ClaudeCode: in 30 out 3 read 0 write 0 (= 33)
+agent Codex: in 5 out 5 read 5 write 0 (= 15)
+model ClaudeCode "model-a": in 10 out 1 read 0 write 0 (= 11)
+model ClaudeCode "model-b": in 20 out 2 read 0 write 0 (= 22)
+model Codex "model-c": in 5 out 5 read 5 write 0 (= 15)
+day 2026-10-20: [(ClaudeCode, 33), (Codex, 0)]
+day 2026-10-21: [(ClaudeCode, 0), (Codex, 15)]

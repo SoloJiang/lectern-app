@@ -1,0 +1,10 @@
+---
+source: crates/usage/src/tests/totals.rs
+expression: render_all(&all)
+---
+state=Ready inherited=false
+total: in 110 out 0 read 0 write 0 (= 110)
+project work folder=true open=true: in 100 out 0 read 0 write 0 (= 100)
+project notes folder=true open=true: in 10 out 0 read 0 write 0 (= 10)
+other: in 0 out 0 read 0 write 0 (= 0)
+day 2026-10-20: [(ClaudeCode, 110)]

@@ -1,0 +1,24 @@
+---
+source: crates/usage/src/tests/store.rs
+expression: h.store().pragmas()
+---
+writer:
+cache_size = Integer(-1024)
+mmap_size = Integer(0)
+journal_mode = Text("wal")
+synchronous = Integer(2)
+foreign_keys = Integer(1)
+query_only = Integer(0)
+auto_vacuum = Integer(2)
+application_id = Integer(1279481171)
+user_version = Integer(1)
+reader:
+cache_size = Integer(-1024)
+mmap_size = Integer(0)
+journal_mode = Text("wal")
+synchronous = Integer(2)
+foreign_keys = Integer(1)
+query_only = Integer(1)
+auto_vacuum = Integer(2)
+application_id = Integer(1279481171)
+user_version = Integer(1)

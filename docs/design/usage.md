@@ -1,6 +1,6 @@
 # usage 设计
 
-状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#178](https://github.com/SoloJiang/lectern-app/pull/178)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现；其余前置条件与第 1–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#178](https://github.com/SoloJiang/lectern-app/pull/178)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现。第 1 步的前一部分（数据库、读取与游标、规范化与去重、按 cwd 的位置和项目合计、时间窗口、取整、`Project` / `AllProjects` 查询、插件与读取节奏）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）；第 1 步的后一部分（冷热分层与 `History` 查询、`testing::Scenario` 与 `heavy_days`、bench 条目）、其余前置条件与第 2–8 步尚未实现。
 
 对应 issue [#31](https://github.com/SoloJiang/lectern-app/issues/31)，[#32](https://github.com/SoloJiang/lectern-app/issues/32) 的 Usage 页与额度读本文定义的快照。`usage` 把 `agents` 交来的用量记录去重、规范化后落进自己的 SQLite，把每一轮的 token 归属到项目、分支的「一次使用」和 MR，按时间窗口聚合，并保存额度快照（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)、[ADR 0022](../adr/0022.md)、[交互规范「用量」](interaction.md#用量)）。改动权重的来源按 [ADR 0047](../adr/0047.md)，数据库按 [ADR 0027](../adr/0027.md)，位置按 [ADR 0044](../adr/0044.md) 的应用数据目录。
 
@@ -535,12 +535,16 @@ pub mod stash {
 pub mod testing {
     /// 按 JSON 的记录序列（`services::session` 的 serde 形式）实现 `SessionSource`，可追加并发出 `SessionsChanged`。
     pub struct FakeSessions;
-    /// 只有快照的 `Projects`，worktree 来自 `TestRepo`。
+    /// 只有快照的 `Projects`：仓库与文件夹由测试声明，`resolve` 按路径前缀判断、不做 IO；
+    /// 第 5 步起 worktree 来自 `TestRepo`。
     pub struct FakeProjects;
     /// 按脚本给出 MR 与时间线的 `MrSource`。
     pub struct FakeMrSource;
     /// 按（生效时刻，偏移）表实现的 `LocalZone`，用来测夏令时。
     pub struct TableZone;
+    /// 一同推进的单调时钟（kernel 的 `testing::ManualClock`）与墙上时钟，经 `UsagePlugin::with_time`
+    /// 交给插件；推进时到期的定时器回调在推进的线程上执行。
+    pub struct ManualTime;
     /// 场景：按时间顺序注入会话记录、reflog 记录与监听时刻、工作区状态、MR 时间线，
     /// 不经插件驱动引擎（`Executor::manual()`、`fs_watch` 的 `FakeBackend`），之后读快照和归属表。
     pub struct Scenario;
@@ -575,7 +579,7 @@ statusline JSON 的字段名在第 2 步按公开文档核对：实现之前读 
 
 去重：
 
-- 每条用量记录按 `UsageKey` 的规范编码（变体标签加各字段的长度前缀字节）入库，每次出现是一个「来源」（会话、这个会话的代、`pos`、`seq`）。键相同的来源只计一次，计数的那一份按下面的顺序选出：不是 `inherited` 的优先；不是 `sidechain` 的优先；token 合计大的优先（ADR 0014 的「保留合计最大的一条」）；最后按（时间戳、来源 ID、会话 ID、`pos`、`seq`）最小的。选出的来源决定这条用量属于哪个会话、哪一轮。
+- 每条用量记录按 `UsageKey` 的规范编码（变体标签加各字段的长度前缀字节）入库，每次出现是一个「来源」（会话、这个会话的代、`pos`、`seq`）。键相同的来源只计一次，计数的那一份从可计数的来源（不是 `inherited`、不是被取代的 `CodexTokenCount`，见下两条）里按下面的顺序选出：不是 `sidechain` 的优先；token 合计大的优先（ADR 0014 的「保留合计最大的一条」）；再按（时间戳、来源 ID、会话 ID、`pos`、`seq`）最小的；最后按来源行的 ID。没有可计数的来源时这个键不计数。选出的来源决定这条用量属于哪个会话、哪一轮。来源行与轮次行的 ID 用 `AUTOINCREMENT`，删掉的 ID 不再分配：回放删除一代的来源时，旧来源的事实行按来源 ID 删除，不会删到新来源的事实行。
 - `inherited` 的来源不计数：子 agent 和分叉会话重放的前缀（ADR 0014「只统计 `task_started` 之后的用量」由 `agents` 标出）。`inheritance_unknown` 的会话照常计数，快照的 `may_include_inherited` 为 true。
 - `CodexTokenCount` 只计 `superseded` 为 false 的，`CodexResponse` 全计（agents 设计「只用一路用量」）。
 - 子 agent 会话的用量属于它自己的会话，按它自己的轮次归属；会话的合计（`SessionUsage::total`）加上全部子孙会话（ADR 0014「计入父会话」）。
@@ -599,14 +603,16 @@ statusline JSON 的字段名在第 2 步按公开文档核对：实现之前读 
 
 | 表 | 类 | 主要列 | 写入时机 |
 |---|---|---|---|
-| `meta` | — | 键值：派生算法版本、补读进度 | 版本变化、补读 |
+| `meta` | — | 键值：派生算法版本、关闭标记、补读进度 | 版本变化、打开与正常关闭、补读 |
+| `intern` | O | 驻留表：字符串与字节串（来源 ID、会话 ID、`TurnId`、模型名、agent 标签）→ ID | 第一次出现 |
 | `run` | O | fs_watch 的 `RunId` → 本 crate 分配的递增序号 | 第一次收到某个 `RunId` 的记录（fs_watch 设计「reflog」的先后规则） |
 | `location` | O | 种类（git 公共目录 / 目录）、规范路径（字节） | 第一次出现 |
 | `project`、`project_fact`、`alias` | O | 项目 ID、种类、状态；每次识别时的标识事实（根提交、主远端、远端集合、仓库 ID、位置）；别名记录（种类、从、到、被撤销的别名） | 识别、命令（「项目标识」） |
-| `session` | O | 来源 ID、会话 ID、agent、父会话、派出它的调用、当前代与回放中的代、游标（`Cursor::to_bytes`）、`inheritance_unknown` | 每批读取的事务里 |
+| `session` | O | 来源 ID、会话 ID、agent、父会话、派出它的调用、当前代与回放中的代、游标（`Cursor::to_bytes`）、`inheritance_unknown`、是否读到过末尾 | 每批读取的事务里 |
+| `session_gen` | O | 会话、代：读到这一批末尾时的 cwd 位置、模型、所在轮次（下一批从这里接着读） | 每批读取的事务里 |
 | `turn` | O | 会话、代、`TurnId`、序号、开始与结束时刻、cwd 的位置与 worktree、日志记录的分支、是否已定稿、跟踪中或导入 | 读到 `TurnStarted`；定稿时更新一次 |
 | `call` | O | 会话、代、调用 ID、轮次、开始与结果时刻、种类、状态、工作目录、进入的 worktree、git 子命令的事实（「命令文本」）、改动路径 | 读到 `ToolStarted` / `ToolFinished` |
-| `usage_source` | O | 键（`UsageKey` 的规范编码）、会话、代、`pos`、`seq`、时间戳、轮次、模型、四类 token、`sidechain`、`superseded`、`inherited` | 每批读取的事务里 |
+| `usage_source` | O | 键（`UsageKey` 的规范编码）、会话、代、`pos`、`seq`、份（0 为记录本身、1 为 advisor）、时间戳、轮次、记录所在轮次的 cwd 位置、模型、四类 token、`sidechain`、`superseded`、`inherited` | 每批读取的事务里 |
 | `limit_sample` | O | agent、来源、`limit_id`、窗口种类、百分比、窗口分钟数、重置时刻、采样时刻；每个（agent、来源、`limit_id`、窗口种类）只留最新的一条 | `RateLimits` 记录、statusline 文件变化 |
 | `watch_span` | O | 仓库、运行序号、arm 之后第一批的读取戳、结束的读取戳（句柄 drop、`Failed`） | `RepoWatch` 的批次 |
 | `reflog`、`reflog_reset` | O | 仓库、文件（HEAD 与 worktree / 分支 / stash）、偏移、行、`seq`、`observed` 与 `after`（运行序号、读取编号、纳秒时刻）、`origin`；重置的原因 | `RepoBatch` 到达时 |
@@ -857,7 +863,7 @@ ADR 0020「已知限制」照旧：同一个提交被 cherry-pick 到几个分�
 SessionsChanged ─▶ [Background] read(游标, 8 MiB) ─▶ 规范化、去重、call、turn、usage_source、游标：一个事务
                  ─▶ 定稿的轮次：turns_unretained + load ─▶ item、share、fact：一个事务 ─▶ 受影响的快照
 RepoBatch ─▶ [Background] reflog、reflog_reset、watch_span、head_baseline、segment、boundary_obs、worktree_obs、stash_obs
-定时线程 ─▶ 结果后 2 秒：call_obs；L 后 2 秒：turn_obs；定稿等到最后的结果或 L 加 2 秒；补读的节奏；本地零点
+定时器 ─▶ 结果后 2 秒：call_obs；L 后 2 秒：turn_obs；定稿等到最后的结果或 L 加 2 秒；补读的节奏；本地零点
 ProjectEvent::Opened ─▶ [Background] RepoFacts ─▶ identify ─▶ project、alias ─▶ watch_repo
 watch(query) ─▶ [Background] SQL 按桶求和 + 内存里的映射（别名、uses、MR 区间）─▶ 取整 ─▶ 快照 ─▶ UsageEvent
 command ─▶ [Background] alias ─▶ 重算受影响的快照
@@ -865,9 +871,9 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 ```
 
 - 首帧之前不做任何事：插件 `AfterFirstFrame` 激活，`activate` 只建空表、provide 服务；`started` 里提交打开数据库的任务（`BusyGuard`），之后订阅 `SessionsChanged`、`ProjectEvent`、`Quiescent` / `Busy`，为已打开的 git 项目 `watch_repo`，`watch_dir` statusline 目录。数据库打开之前 `snapshot` 为 None，`limits` 为空，`meter` 返回 `Unavailable`。
-- 读取的节奏（agents 设计「接口」对消费方的约束）：每次 `read` 的 `max_bytes` 为 8 MiB，一批的读取、入库和定稿持有 `BusyGuard`，结果提交后才释放。活跃会话（`open_turn` 为 true，或 `last_activity` 在 10 分钟之内）一批接一批读完。其余会话的补读按 `last_activity` 从新到旧，每个会话（活跃的也一样）第一次读到末尾之后才分批定稿之前的轮次（「补读的定稿」），批与批之间不持有守卫、不预先排队：收到 `Quiescent` 后由定时线程等 10 秒，期间收到 `Busy` 就重新计时，到时 `quiescent_epoch()` 不变才提交下一批。
+- 读取的节奏（agents 设计「接口」对消费方的约束）：每次 `read` 的 `max_bytes` 为 8 MiB，一批的读取、入库和定稿持有 `BusyGuard`，结果提交后才释放。活跃会话（`open_turn` 为 true，或 `last_activity` 在 10 分钟之内）一批接一批读完。其余会话的补读按 `last_activity` 从新到旧，每个会话（活跃的也一样）第一次读到末尾之后才分批定稿之前的轮次（「补读的定稿」），批与批之间不持有守卫、不预先排队：收到 `Quiescent` 后由定时器等 10 秒，期间收到 `Busy` 就重新计时，到时最近一次收到的仍是同一个 `Quiescent`（`seq` 相同，之后没有 `Busy`；插件拿不到 `Kernel::quiescent_epoch`，按事件的 `seq` 判断，`seq` 不大于已见最大值的事件忽略）才提交下一批。
 - 仓库监听：已打开的 git 项目各一个 `RepoWatch`；活跃会话的 cwd 或改动所在、但项目没有打开的仓库也各一个，最多 16 个，会话不再活跃 10 分钟后释放。`WorktreeWatch` 只为「有候选 stash、且有跟踪中会话」的 worktree 持有，候选消失后释放；同一 worktree 已被 `project` 监听时 fs_watch 共用那一份状态。
-- 定时线程：经 `Executor::run_dedicated("usage-timer", …)` 在第一次需要定时时启动，只等待截止时刻、到时提交 `Background` 任务，自己不做 IO；没有待定的时刻时阻塞在条件变量上，不醒来。
+- 定时器：每个截止时刻是交给 kernel 的 `Clock::wake_at` 的一个回调（`SystemClock` 的定时线程按需启动、空闲 1 秒后退出，与 kernel 的交互让路共用），回调只改内存里的状态、需要时提交 `Background` 任务，自己不做 IO、不阻塞，panic 被接住、记 error。定时不用 executor 任务等待：任务被唤醒执行时要取激活的准入，这本身让 kernel 离开静止，补读的 10 秒就永远等不满。测试用 `testing::ManualTime` 的手动时钟，回调在推进时钟的线程上执行。
 - 每个关注的查询一个快照对象，放在 `Mutex` 里，只在内存操作时持锁；快照整体替换为新的 `Arc`。新的事实行到达时，受影响的快照按增量（加上新事实行、减去被替换的临时事实行）更新；别名、`uses`、MR 数据变化时整体重算。同一个查询同时最多一个计算任务，期间的变化合并到下一轮。
 - 读连接用于快照的查询，写连接用于入库、定稿、命令和计量；两者都只在 executor 上。`meter` 在调用方（agents 的转发端点）的 executor 任务里同步提交。
 - UI 线程上只调用 `snapshot`、`limits`（复制 `Arc`）和立即返回的 `watch`、`command`、`register_mr_source`，不做 IO、不调用 SQLite。
@@ -1006,6 +1012,8 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
    - `usage/ingest_append_4k`、`usage/backfill_batch`、`usage/project_30d`、`usage/all_projects_30d`、`usage/snapshot_increment`、`usage/resident_bytes`、`usage/archive_month`、`usage/cold_read_month`、`usage/backfill_large_session` 在预算内，`usage/disk_day_heavy` 有结果；`plugin/usage/activate` < 1 ms。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖其他插件 crate、不依赖 GPUI；`rg -n 'rusqlite' crates/*/Cargo.toml` 只出现在 `cache` 和 `usage`。
    - `rg -n 'price|LiteLLM|cost' crates/usage/src crates/usage/Cargo.toml` 没有结果。
+
+   第 1 步分两个 PR。前一部分：数据库、读取与游标、规范化与去重、按 cwd 的位置和项目合计、时间窗口、取整、`Project` / `AllProjects` 查询、插件与读取节奏、`Cargo.toml`，验收是上面除 `archive_*` 和 bench 条目以外的各项。后一部分：冷热分层与 `History` 查询、`testing::Scenario` 与 `heavy_days`、全部 bench 条目，验收是 `archive_*` 和 bench 条目。
 2. **额度快照**（前置 A）：Codex 的 `RateLimits`、statusline JSON（先按「外部格式」核对公开文档的字段名）、`limits()`、`UsageEvent::Limits`。
    - `limits_*`、`statusline_*` 通过；`tests/fixtures/statusline/SOURCE.md` 写明文档地址与核对日期。
 3. **项目标识**：位置与项目 ID、`identity::identify`、别名与命令、文件夹认领、「其他」。
@@ -1039,6 +1047,25 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - `Cargo.toml`、`Cargo.lock` 没有改动：只用已有的 `lectern-kernel`、`serde`（dev 的 `serde_json`）。
 - 没有在 macOS 上运行：`services` 不依赖 GPUI，Linux 与 macOS 编译的代码相同。本步没有 bench 条目。
 
+### 第 1 步（前一部分）
+
+在 Linux（x86_64 容器）上运行：
+
+- `just test -p lectern-usage`：50 个测试通过，按前缀：
+  - `normalize_*` 4 个（Anthropic 的输入不含缓存；`cache_write` 为 0 时取 5m + 1h；OpenAI 减去缓存命中、推理已在输出里；缓存命中超过输入时截到输入）、`round_*` 5 个（和不变、每行偏差小于 1；余数相同按下标；余数大的先进位；`split` 精确相加并能取整回整数；全 0 权重平分、空权重、0 token、超大 token）、`window_*` 7 个（日序号与日期互换；窗口以今天结束、天与天首尾相接；纽约 2026 年夏令时切换日 23 / 25 小时；+05:45 的日界在 15 分钟桶的边界上；零点被跳过时从切换时刻开始、零点出现两次时从第一次开始；下一个本地零点；跨本地零点的两条记录分在两天、8 天前的记录在 14 天窗口里、不在 7 天窗口里）。
+  - `dedup_claude_*` 4 个、`dedup_codex_*` 3 个、`ccusage_*` 1 个：`tests/fixtures/records/` 的合成记录（同一响应的多个内容块与重复行只计合计最大的一份；另一个会话文件里的同一个键只计一次；sidechain 重放让位于非 sidechain；子 agent 的用量计入它自己的会话；advisor 按自己的模型另计、重复行也只计一次；Codex 被取代的 `token_count` 不计、`token_usage_record` 全计；子 agent 继承的前缀不计；边界未定的分叉照常计、键仍只计一次、快照的 `may_include_inherited` 为 true；模型取 `Context` 的模型）。`ccusage_daily_totals_match` 与 `tests/fixtures/ccusage/claude.json` 手写的日汇总逐日相同。
+  - `reset_*` 3 个：回放期间旧一代照常计数、读到末尾时换成新一代；被回放会话删掉的键由另一个会话里的同一个键接着计数；回放中途再次重置时丢弃未完成的一代。
+  - `store_*` 10 个：数据库在数据目录下、旁边没有别的文件；`store_page_cache_is_bounded`（两个连接的 `cache_size` 都是 -1024、`mmap_size` 为 0、WAL、`synchronous = FULL`、外键开启，读连接 `query_only`）；在记录与游标之间注入失败，重启后不重复也不遗漏；迁移不删观察、迁移前写出副本、连续迁移只留两份副本；副本写不出来时不迁移、按旧版本只读；更新的版本只读、不改动文件；只坏了索引页时 `REINDEX` 后照常使用、没有改名的文件；表的一整页损坏时读得出的行都在新库里，项目仍在，三个会话从 `START` 重读后合计与损坏前相同；文件头损坏时在打开时抢救、会话重读后合计相同；写满（`max_page_count`）时游标不前进、空间恢复后照常写入。
+  - `folder_*` 2 个、`rows_other_*` 2 个：文件夹项目没有 `rows`、按模型和 agent 的明细相加等于合计；文件夹打开之前的用量在「其他」，打开后按最深的根认领；没有打开过的仓库、不在项目里的目录、已不存在的 cwd 进「其他」，各行相加等于合计，按 ID 仍能查到没有打开过的仓库，打开后移出「其他」；不认识的项目 ID 没有快照。
+  - `plugin_*` 8 个：激活后提供 `dyn Usage`，任务运行之前没有数据库文件、`snapshot` 为 None、`limits` 为空；补读等满 10 秒静止才读下一批，期间的一次忙碌让等待重新开始，旧的 `Busy` 被忽略，补读完成后状态为 `Ready`；活跃会话不受节奏限制、新记录随 `SessionsChanged` 读入；`snapshot` 和 `limits` 调用 100 次，数据库的访问计数不变，`UsageEvent::Changed` 已发出，关注 drop 后快照释放；`ProjectEvent::Opened` / `Closed` 更新所有项目的列表；本地零点到时窗口快照重算；写满时快照为 `Degraded(Unwritable)`、不反复重试，下一次 `SessionsChanged` 重试成功后为 `Ready`；停用时写入关闭标记。
+  - `log_canary_never_reaches_a_record`：trace 级别跑完补读、回放和删除，捕获的记录里没有放在模型名、消息与请求 ID、`TurnId`、命令文本里的金丝雀。
+- insta 快照 9 个（`src/tests/snapshots/`），逐个看过。
+- `cargo nextest run -p lectern-usage --stress-count 15`（全部测试）与 `--stress-count 40`（`plugin_*`、`log_*`）都通过。压力运行发现过一次时序问题：测试推进时钟时插件可能还没登记补读的定时器，`Rig::settle` 改为等定时器登记之后才返回。
+- `just check`、`just test`（不依赖 GPUI 的全部 crate，2196 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- `python3 scripts/check_architecture.py` 通过（本 crate 是插件 crate，不依赖其他插件 crate、不依赖 GPUI）；`rg -n 'rusqlite' crates/*/Cargo.toml` 只出现在 `cache` 和 `usage`；`rg -n 'price|LiteLLM|cost' crates/usage/src crates/usage/Cargo.toml` 没有结果。
+- `Cargo.lock` 只多了 `lectern-usage` 的依赖列表，没有新的外部 crate。
+- 没有在 macOS 上运行：本 crate 不依赖 GPUI，Linux 与 macOS 编译的代码相同。`plugin/usage/activate` 和第 1 步的其余 bench 条目在后一部分加入，本部分没有 bench 数字。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -1046,3 +1073,21 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - 设计没有列出的派生（「接口」已补上）：不含浮点数的类型都派生 `Hash`，`usage` 按 `UsageQuery` 找关注和快照，`RowKey`、`MrRef`、`UsageProjectId` 用作聚合和视图状态的键。不含 `Arc` 的小类型派生 `Copy`。几个标识和 `LocalDate` 派生 `Ord`，`LocalDate` 按年、月、日比较。`Tokens` 派生 `Default`（全 0）；`Limits` 派生 `Default`，作为数据库还没打开时 `limits()` 的空快照。做法与 review 设计「与设计的差异」前置条件 A 相同。
 - `Tokens::total` 用饱和加法：四类之和超过 `u64::MAX` 时取 `u64::MAX`，不在调试构建里 panic。实际的 token 数远小于这个上限，只是让损坏的记录不能让视图崩溃。
 - `ProjectUsage::daily`、`AllUsage::daily` 的元素类型命名为 `DayTotals`（`Arc<[(Agent, u64)]>`，「接口」已补上）：`Arc<[Arc<[(Agent, u64)]>]>` 触发 clippy 的 `type_complexity`，本仓库警告即失败。JSON 形状不变。
+
+### 第 1 步（前一部分）
+
+- **定时器不用专用线程。** 设计原来写 `Executor::run_dedicated("usage-timer", …)`。实现里每个截止时刻是交给 kernel `Clock::wake_at` 的一个回调（「数据流与线程」已改）。在 executor 任务里等截止时刻行不通：任务被唤醒执行时要取激活的准入，kernel 因此离开静止，补读要等的「静止 10 秒」永远等不满。专用线程还要另写一套可在测试里推进的时钟；`Clock` 已有按需启动的 `SystemClock` 定时线程和测试用的 `ManualClock`。
+- **补读节奏按事件的 `seq` 判断静止。** 插件拿不到 `Kernel::quiescent_epoch`，按 `Quiescent` / `Busy` 事件的 `seq` 判断，`seq` 不大于已见最大值的事件忽略（「数据流与线程」已改）。
+- **快照整体重算。** 设计要求新的事实行到达时按增量更新快照。这一部分在每次提交、项目打开或关闭、本地零点之后，在后台整体重算被关注的查询（同时只有一个计算任务，期间的变化合并到下一轮）。增量更新与 `usage/snapshot_increment` 一起放到第 1 步后一部分，按实测决定。
+- **第 1 步没有 `share` 表。** 每个轮次按 cwd 归属，每个计数的来源一行事实（`round::split(tokens, &[1])`，即全部 token）。`share`、`item` 与定稿随第 4 步加入（表结构版本 2，迁移前写副本）。新增 `session_gen`，记下每一代读到这一批末尾时的 cwd 位置、模型和所在轮次，下一批从这里接着读；`intern` 是设计里的驻留表（「数据库」的表已补上）。`fact` 已带后续步骤要用的列（`segment`、`kind`、`review`），第 1 步为空或 0。
+- **不计数的来源。** 选择顺序原来第一项是「不是 inherited 的优先」，同一节又写「inherited 的来源不计数」。实现以后者为准：只在不是 inherited、不是被取代的来源里选，一个键只有这两类来源时不计数；最后一级按来源行的 ID，结果确定（「规范化与去重」已改）。
+- **来源与轮次的 ID 不重用。** `usage_source`、`turn` 用 `AUTOINCREMENT`（「规范化与去重」已写明）。测试 `reset_during_a_replay_starts_it_again` 发现：回放删除一代的来源后，新来源拿到同一个 rowid，旧来源的事实行按来源 ID 删除时删掉了新来源的事实行。
+- **cwd 的归位。** 会话开始时的 cwd 用 `SessionSummary::place`（`agents` 已归位）；`Context` 记录里的其他 cwd 用 `Projects::resolve`，结果按路径记在内存里（最多 4096 条）。不用 `locate`：它要求规范路径，日志里的 cwd 不一定是。`resolve` 失败（目录已不存在）时按日志里的路径记为目录位置，汇总时进「其他」。用量记录的位置取它所在轮次开始时的 cwd，不在任何已读轮次里时取当时的 cwd。
+- **从未打开的仓库。** 仓库位置第一次出现就分配项目（`randomblob(16)`），`opened` 为 0，用量进「其他」；`ProjectEvent::Opened` 和启动时的 `open_projects` 把它标为打开过并记下显示名。关闭之后仍在「所有项目」里单列，`ProjectInfo::key` 为 None。`ProjectRef::Open` 指向一个打开着、数据库还没有记录的项目时，计算快照前先记录它。根提交、远端和别名的比对在第 3 步。
+- **数据库的几处补充。** `PRAGMA application_id` 为 `0x4C435553`（"LCUS"），不是本应用写的文件按 `SQLITE_NOTADB` 处理（改名保留、新建）。迁移前的副本写不出来时进入只读的 `Unwritable`，本次运行不再写；一般的写失败同样标为 `Unwritable`，下一次写入成功后恢复。派生算法版本变化时在打开任务里用一个事务重建（目前只有版本 1；分批重建随第 5 步的 `rebuild_*`）。抢救时无法知道读不出的行属于哪个会话，只要有行丢失，全部会话的游标回到 `START`、未完成的回放作废，丢失数按读不出的 rowid 计；文件头坏到无法 `ATTACH` 时什么也复制不了，全部会话从头重读。抢救期间写连接用 `synchronous = OFF`，完成后改回 `FULL` 并做检查点。
+- **`UsageDeps` 还没有 `watcher`、`git_ceilings`。** 它们在第 2 步（statusline 目录）和第 5 步（reflog 监听）才用到，届时加入，在 `app` 构造插件（前置条件 C）之前补齐。测试与 bench 经 `UsagePlugin::with_time`（`test-support`）换时钟。
+- **后续步骤的接口先给空结果。** `Worktree`、`Session`、`Mr`、`History` 查询的快照为 None；`limits()` 是空快照；`command` 只记 debug；`begin_analysis`、`meter` 返回 `Unavailable`；`register_mr_source` 立即放下提供者，返回的登记 drop 时什么也不做，从不调用提供者。
+- **快照的细节。** `daily` 的每一天列出窗口里出现过的全部 agent（那天没有用量的记 0），柱状图的系列不随天数变化；agent 按 Claude Code、Codex、其他（按名字）排序；`by_model` 按 agent 再按模型名排序，模型未知时名字是空串；`AllUsage::projects` 按合计从大到小、再按名字排序。合计每类按最大余数法取整；`round::largest_remainder` 的输入之和不是整数 token 时取最近的整数（第 1 步每条记录的事实行都是整数 token，不会出现）。
+- **补读进度。** `Backfilling { done, total }` 的 `total` 是打开数据库时已知会话的文件大小之和，`done` 是这些会话的游标偏移（不超过文件大小）之和。`.jsonl.zst` 的游标是解压后的偏移，进度会偏快，是已知限制。
+- **日志。** 用已合并的 `lectern-logging`（#177）。读一个会话时设 `session` 作用域：会话 ID 是 UUID 时取它的 16 字节，否则取 128 位哈希。默认级别记数据库打开（版本、迁移、是否可写）、损坏与抢救（改名后的路径、复制与丢失的行数、重读的会话数）、写失败（SQLite 扩展错误码）、回放、补读开始与完成、项目打开；每批的游标前后位置在 debug 级别。`log_canary_never_reaches_a_record` 是 logging 设计「对其他 crate 的要求」里的金丝雀测试。
+- **测试辅助。** `testing::FakeSessions` 的脚本是会话摘要加 `services::session` serde 形式的 `Positioned<Record>` 序列（格式写在 `src/testing.rs`），行的长度由相邻记录的 `pos` 给出；`testing::FakeProjects` 按测试声明的仓库与文件夹归位，不做 IO；新增 `testing::ManualTime`。`testing::Scenario`、`heavy_days` 放到第 1 步后一部分，`FakeMrSource` 随第 7 步。

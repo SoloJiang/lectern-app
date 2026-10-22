@@ -1,0 +1,69 @@
+{
+  "source": "session-codex",
+  "agent": "Codex",
+  "sessions": [
+    {
+      "id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e01",
+      "cwd": "/work/app",
+      "started_at": 1792490400000,
+      "records": [
+        {"pos": 0, "seq": 0, "inherited": false, "value": {"Context": {"at": 1792490400000, "cwd": "/work/app", "logged_branch": null, "model": "model-c"}}},
+        {"pos": 100, "seq": 0, "inherited": false, "value": {"TurnStarted": {"turn": "turn-1", "at": 1792490401000}}},
+        {"pos": 200, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490402000, "turn": "turn-1", "model": null,
+          "tokens": {"OpenAi": {"input": 100, "cached_input": 60, "cache_write": 0, "output": 20, "reasoning_output": 5}},
+          "key": {"CodexTokenCount": {"thread_id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e01", "total": {"OpenAi": {"input": 100, "cached_input": 60, "cache_write": 0, "output": 20, "reasoning_output": 5}}}},
+          "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 300, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490403000, "turn": "turn-1", "model": null,
+          "tokens": {"OpenAi": {"input": 50, "cached_input": 50, "cache_write": 0, "output": 10, "reasoning_output": 0}},
+          "key": {"CodexResponse": {"thread_id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e01", "response_id": "resp-1"}},
+          "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 400, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490403000, "turn": "turn-1", "model": null,
+          "tokens": {"OpenAi": {"input": 50, "cached_input": 50, "cache_write": 0, "output": 10, "reasoning_output": 0}},
+          "key": {"CodexTokenCount": {"thread_id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e01", "total": {"OpenAi": {"input": 150, "cached_input": 110, "cache_write": 0, "output": 30, "reasoning_output": 5}}}},
+          "advisor": null, "superseded": true, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 500, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490404000, "turn": "turn-1", "model": null,
+          "tokens": {"OpenAi": {"input": 30, "cached_input": 40, "cache_write": 0, "output": 5, "reasoning_output": 2}},
+          "key": {"CodexResponse": {"thread_id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e01", "response_id": "resp-2"}},
+          "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 600, "seq": 0, "inherited": false, "value": {"TurnEnded": {"turn": "turn-1", "at": 1792490405000, "aborted": false}}}
+      ]
+    },
+    {
+      "id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e02",
+      "parent": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e01",
+      "cwd": "/work/app",
+      "started_at": 1792490406000,
+      "records": [
+        {"pos": 0, "seq": 0, "inherited": false, "value": {"Context": {"at": 1792490406000, "cwd": "/work/app", "logged_branch": null, "model": "model-c"}}},
+        {"pos": 100, "seq": 0, "inherited": true, "value": {"TurnStarted": {"turn": "turn-1", "at": 1792490401000}}},
+        {"pos": 200, "seq": 0, "inherited": true, "value": {"Usage": {"at": 1792490403000, "turn": "turn-1", "model": null,
+          "tokens": {"OpenAi": {"input": 50, "cached_input": 50, "cache_write": 0, "output": 10, "reasoning_output": 0}},
+          "key": {"CodexResponse": {"thread_id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e01", "response_id": "resp-1"}},
+          "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 300, "seq": 0, "inherited": false, "value": {"TurnStarted": {"turn": "turn-s1", "at": 1792490407000}}},
+        {"pos": 400, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490408000, "turn": "turn-s1", "model": null,
+          "tokens": {"OpenAi": {"input": 10, "cached_input": 0, "cache_write": 0, "output": 3, "reasoning_output": 0}},
+          "key": {"CodexTokenCount": {"thread_id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e02", "total": {"OpenAi": {"input": 10, "cached_input": 0, "cache_write": 0, "output": 3, "reasoning_output": 0}}}},
+          "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}}
+      ]
+    },
+    {
+      "id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e03",
+      "cwd": "/work/app",
+      "started_at": 1792490409000,
+      "inheritance_unknown": true,
+      "records": [
+        {"pos": 0, "seq": 0, "inherited": false, "value": {"Context": {"at": 1792490409000, "cwd": "/work/app", "logged_branch": null, "model": "model-c"}}},
+        {"pos": 100, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490403000, "turn": "turn-1", "model": null,
+          "tokens": {"OpenAi": {"input": 50, "cached_input": 50, "cache_write": 0, "output": 10, "reasoning_output": 0}},
+          "key": {"CodexResponse": {"thread_id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e01", "response_id": "resp-1"}},
+          "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}},
+        {"pos": 200, "seq": 0, "inherited": false, "value": {"TurnStarted": {"turn": "turn-f1", "at": 1792490410000}}},
+        {"pos": 300, "seq": 0, "inherited": false, "value": {"Usage": {"at": 1792490411000, "turn": "turn-f1", "model": null,
+          "tokens": {"OpenAi": {"input": 7, "cached_input": 0, "cache_write": 0, "output": 1, "reasoning_output": 0}},
+          "key": {"CodexResponse": {"thread_id": "7c1e9d20-5b4a-4c3d-9e8f-1a2b3c4d5e03", "response_id": "resp-f"}},
+          "advisor": null, "superseded": false, "sidechain": false, "origin": "SessionLog"}}}
+      ]
+    }
+  ]
+}
