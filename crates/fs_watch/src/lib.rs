@@ -14,6 +14,7 @@
 
 mod backend;
 mod clock;
+mod diag;
 mod engine;
 mod path;
 mod queue;

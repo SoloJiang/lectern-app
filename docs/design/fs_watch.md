@@ -1,6 +1,6 @@
 # fs_watch 设计
 
-状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)，基准 [#92](https://github.com/SoloJiang/lectern-app/pull/92)）；第 2 步（`git` 的适配）已实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)，实际验证与差异见 [git 设计](git.md)「实际验证」「与设计的差异」）；第 3 步（macOS 后端）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），只在 Linux 上交叉检查过，macOS 上的运行由 macOS CI 验证；第 4 步（装配与实测）尚未实现。reflog 进度的压缩、锁文件的过滤和已知文件的前缀查找已实现（[#184](https://github.com/SoloJiang/lectern-app/pull/184)，见「实际验证」）。
+状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)，基准 [#92](https://github.com/SoloJiang/lectern-app/pull/92)）；第 2 步（`git` 的适配）已实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)，实际验证与差异见 [git 设计](git.md)「实际验证」「与设计的差异」）；第 3 步（macOS 后端）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），只在 Linux 上交叉检查过，macOS 上的运行由 macOS CI 验证；第 4 步（装配与实测）尚未实现。reflog 进度的压缩、锁文件的过滤和已知文件的前缀查找已实现（[#184](https://github.com/SoloJiang/lectern-app/pull/184)，见「实际验证」）。运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `fs_watch` 部分）已实现。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（没有单独的 issue；与 [platform 设计](platform.md)相同，随 Git 与 Diff 推进），消费方分属 [#9](https://github.com/SoloJiang/lectern-app/issues/9)（`project` 的增量刷新）、[#13](https://github.com/SoloJiang/lectern-app/issues/13)（`agents` 的会话目录）、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`usage` 的 reflog 时刻）和 [#66](https://github.com/SoloJiang/lectern-app/issues/66)（Analyze 的修订号）。`fs_watch` 是与平台无关的文件监听：把后端交来的原始事件按 git index 和忽略规则过滤、合并成批交给消费方，按 worktree 维护修订号，给 reflog 的新增记录打上监听时刻和序号。FSEvents 与 kqueue 后端在 `platform`，由 `app` 注入（[技术调研「性能要点」](tech-research.md#性能要点)、[ADR 0019](../adr/0019.md)、[ADR 0020](../adr/0020.md)、[ADR 0026](../adr/0026.md)）。
 
@@ -29,6 +29,7 @@
 |---|---|---|
 | `lectern-kernel` | `BusyGuard`（静止计数）、`contain`（隔离消费方回调的 panic） | kernel 层，任何层可用 |
 | `lectern-executor` | fs_watch 线程（`run_dedicated`）、加载过滤器和配置清单的后台任务（`run`，`Background`） | 后台线程只由 `executor` 管理（[ADR 0024](../adr/0024.md)、[executor 设计](executor.md)） |
+| `lectern-logging` | 运行日志的宏与类型化字段（「日志与诊断」） | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；测试用它的 `test-support` feature 捕获记录 |
 | `insta`、`tempfile`（dev） | 批次与 reflog 记录的快照；reflog 读取和符号链接展开用真实的临时目录 | 已在工作区依赖与 Cargo.lock 里 |
 
 不引入外部依赖：不用 `notify`（它自带后端和线程，事件模型不带 FSEvents 的 `MustScanSubDirs`、`FlushSync`），不用 `bitflags`（事件标志是手写的 `u32` 常量）。锁用 `std::sync::Mutex` 与 `Condvar`。
@@ -248,7 +249,7 @@ pub trait Sink<B>: Send + Sync + 'static {
     /// 交付一个合并好的批次。在 fs_watch 线程上、`contain` 里调用；只更新状态或提交后台任务，不阻塞、不做 IO，
     /// 不调用 `flush_revision`。`busy` 是这一批第一个事件到达时用 `busy()` 取的守卫，
     /// 消费方把它移进处理这一批的任务，任务结束才 drop（[kernel 设计](kernel.md)「静止」）。
-    /// panic 时这个订阅不再交付，记日志，其余订阅照常。
+    /// panic 时这个订阅不再交付，记一条 error（「日志与诊断」），其余订阅照常。
     fn deliver(&self, batch: B, busy: Option<BusyGuard>);
 
     /// 取一个守卫，插件实现为 `PluginHandle::busy()`。在 fs_watch 线程、调用 `watch_*` 的线程或后端的回调线程
@@ -763,7 +764,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 | `filter` 失败（index 损坏、条目超过上限） | `Degraded(Filter)`：除第 1–3 步丢弃的之外全部交付并计入修订号；下一次触发时重试 | 照常处理，只是事件更多 |
 | `config_files` 失败 | `Degraded(Config)`：只按「git 元数据」表监视仓库里的配置；下一次触发时重试 | 照常处理 |
 | reflog 读不了（权限、是符号链接） | `ReflogReset { Unreadable }`；下一次事件时重试 | `usage` 记下缺口 |
-| `Sink::deliver` panic | `contain` 截住，这个订阅不再交付，记日志 | — |
+| `Sink::deliver` panic | `contain` 截住，这个订阅不再交付，记一条 error（「日志与诊断」） | — |
 | FSEvents 的 `EventIdsWrapped`、`HistoryDone` | 丢弃 | — |
 | 系统时间被调整 | `ReadStamp::at` 可能不单调；同一运行内按 `read` 判断先后，跨运行按 `usage` 的运行序号 | — |
 
@@ -774,6 +775,26 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - `git status` 这类只刷新 stat 信息的 index 改写同样让修订号加一，Analyze 可能把内容没变的结果标为「基于较早的版本」。
 - `FSEventStreamFlushSync` 交付的是 FSEvents 服务已经收到的事件；写入在 `flush_revision` 之前几毫秒内完成、内核还没交给 FSEvents 服务的，这一次可能看不到。Analyze 同时比较指纹（ADR 0019 约束 9），内容的变化仍能发现。
 - 条件不满足的 `includeIf` 引入的文件里再嵌套的引入，条件满足、清单重新计算之前不监视（「配置文件清单」）。
+
+## 日志与诊断
+
+本 crate 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `fs_watch`；字段值的写法集中在 `crates/fs_watch/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。
+
+- 默认记录：
+
+  | 事件 | 级别 | `msg` | 字段 |
+  |---|---|---|---|
+  | `Sink::deliver` panic，这个订阅不再交付（「状态与异常」） | error | `a sink panicked; it is no longer delivered to` | `watch`（`repo`、`worktree`、`dir`）、`root` |
+  | `shutdown` 在 fs_watch 线程之外调用，等线程退出超过 `flush_timeout`，照常返回 | warn | `the fs_watch thread did not stop in time` | `timeout_us`（`Config::flush_timeout`，微秒） |
+
+  - `root` 是这个监听的根，经 `Value::path`（主目录写成 `~`）：仓库监听是 git 公共目录，worktree 监听是工作区根，目录监听是 `DirSpec::root`。
+  - panic 的消息不写进这条记录：它可能引用批次里的路径或使用方的数据，`Value::panic_message` 也只允许 `kernel`、`executor` 和 `logging` 调用。`lectern-logging` 的 panic 钩子（`app` 装上后）在 panic 的线程上另记一条 `panic`，带源码位置和按「隐私」处理过的消息，使用方的代码由位置定位。
+  - 同一个调用点每 10 秒最多写 20 条（[logging 设计「限流」](logging.md#限流)）。
+- 不另记的：后端 arm 失败、过滤器或配置清单加载失败、reflog 读不了、队列溢出、根目录消失，都经批次的 `health`、`rescan` 和 `ReflogReset` 交给使用方（「状态与异常」），本 crate 不再各记一条。
+- 详细级别：不另加 debug、trace 记录。分类每个事件、读 reflog、合并和交付是热路径（「性能」的 `classify_burst` 按每个事件 < 1 µs 计），按次记录会占去可观的份额。上表的两处都在失败分支上，级别关闭时只做一次级别比较，字段不求值、不分配。交付多传一个根路径的引用（`&Path`），不复制。
+- 关联 ID：本 crate 不设作用域。fs_watch 线程是 executor 的专用任务（`run_dedicated`），它上面的记录（sink panic）带这个任务的 `task`，以及第一次 `watch_*` 时调用方作用域里的 `plugin`、`act`，那不一定是 panic 的那个使用方，用 `root`、`watch` 和钩子记录的位置对照。`shutdown` 的记录在调用 `shutdown`（或 drop 最后一个 `Watcher`）的线程上，带那里的作用域。手动驱动的监听器（`testing::manual`）在驱动它的线程上记录。
+- 不记录：批次里的路径（工作区文件、reflog 文件和目录监听下的路径）、reflog 行（含引用名、提交说明和命令文字）、`ReflogFile::Branch` 的引用名、文件内容、`Failure::Backend` 和 `SourceError` 里的错误文字、panic 消息。只记监听的根、监听的种类和时长。
+- 金丝雀测试：`logs_hold_no_file_or_reflog_contents`（`testing::capture()`，trace 级别）：受跟踪文件的内容、`logs/HEAD` 新增行的提交说明和一个新分支的名字里放金丝雀，经分类、reflog 读取和交付；再给仓库、worktree、目录监听各接一个 panic 消息里带金丝雀的 sink。检查三条 error 的级别、`watch` 和 `root`，之后 `assert_absent`。`logs_shutdown_past_the_timeout_is_a_warn` 用真实线程让一个 sink 阻塞 fs_watch 线程，`shutdown` 超时后检查 warn 和 `timeout_us`。
 
 ## 测试
 
@@ -791,6 +812,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - 异常（`rescan_*`、`health_*`）：「状态与异常」表的每一行；队列溢出按 `RESCAN` 处理；`Sink` panic 后其他订阅照常。
 - 生命周期（`lifecycle_*`）：`Watcher::new` 不建线程、不调用后端；第一次 `watch_*` 才启动；同一公共目录、同一 worktree 共享一份状态和一个后端目标；最后一个句柄 drop 后目标被 drop；`shutdown` 之后不再交付。
 - 静止（`quiescence_*`）：用 kernel 的 `TestKernel` 取真实的守卫：批次合并期间不静止，交付后守卫在消费方手里、drop 后静止；`EventSink::send` 返回之后、fs_watch 线程分类之前不静止；只有被忽略路径的事件在分类完后不再让 kernel 忙碌；加载任务进行中不静止；空闲时静止。
+- 日志（`logs_*`，用 `lectern-logging` 的 `testing::capture()`）：金丝雀和两种记录的级别与字段，见「日志与诊断」。
 
 `git` 的适配在 `git` 里测试（`watch_source_*`，用 `TestRepo`）：`.gitignore`、`info/exclude`、`core.excludesFile` 的忽略结果与 git 的判定一致；未跟踪目录里和根目录下未跟踪的 `.gitignore` 生效，被忽略目录里的 `.gitignore` 不读；遍历达到上限时显式给出的 `.gitignore` 路径仍然生效，显式给出、但上级目录被忽略的不读；目录改名后 `rule_files` 给出新的位置；`core.ignoreCase` 下大小写不同的路径判为受跟踪；`config_files` 列出 `include.path`、`includeIf "onbranch:"`（满足与不满足）、不存在的引入目标和 XDG 默认位置；不调用 git 命令行。
 
@@ -806,7 +828,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 
 1. **本 crate**（`lectern-fs-watch`）
    - `just test -p lectern-fs-watch` 里 `filter_*`、`filter_stale_*`、`revision_*`、`flush_*`、`coalesce_*`、`reflog_*`、`config_*`、`dir_*`、`rescan_*`、`health_*`、`lifecycle_*`、`quiescence_*` 通过，快照已逐个看过。
-   - `cargo tree -p lectern-fs-watch -e normal --depth 1` 只列出 `lectern-kernel`、`lectern-executor`。
+   - `cargo tree -p lectern-fs-watch -e normal --depth 1` 只列出 `lectern-kernel`、`lectern-executor`（日志接入之后另有 `lectern-logging`）。
    - `rg -n 'cfg\(target_os|Command::new|std::process' crates/fs_watch/src` 没有结果；`python3 scripts/check_architecture.py` 通过。
    - bench 预算表新增「性能」一节的全部 `fs_watch/*` 条目；`fs_watch/classify_burst`、`fs_watch/reflog_append` 改为 `Active`，macOS CI 的 `just bench` 判定通过，其余条目为 `planned`。这一条和两项基准在 bench 运行器合并之后由 [#92](https://github.com/SoloJiang/lectern-app/pull/92) 加入（见「与设计的差异」）。
 2. **`git` 的适配**（`lectern-git`）
@@ -820,6 +842,12 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
    - `app` 按「对其他 crate 的要求」创建 `Watcher` 并注入；macOS 上 `cargo build --locked -p lectern-app` 通过。
    - `fs_watch/flush_idle`、`fs_watch/write_to_deliver`、`fs_watch/resident`、`fs_watch/resident_100k` 改为 `Active`，macOS CI 的 `just bench` 判定通过；`app/cold_start` 不因本 crate 变化。
    - 本文状态行改为「已实现」并列出四个 PR，填写「实际验证」。
+
+日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `fs_watch` 部分，`Refs #170`）：
+
+- `rg 'eprintln!|util::log' crates/fs_watch/src` 没有结果。
+- `logs_*` 通过，其余测试照常通过。
+- `just bench --measure fs_watch/` 与改动前相比不变慢。
 
 ## 实际验证
 
@@ -882,6 +910,22 @@ reflog 进度的压缩、锁文件的过滤和已知文件的前缀查找（[#18
   `reflog_append` 的中位数多了 0.24 µs，在这台机器两次运行的波动之内（第 1 步记录的四次运行在 6.8–10.9 µs 之间）；每次读取多算两次 64 字节的哈希。两次运行都没有标为 `noisy`。
 - `just check`、`just test`（Linux 上的全部 crate，2158 个测试）、`just doctest`、`just deny` 通过。macOS 上没有运行；本 crate 没有平台相关代码。
 
+日志接入（logging 设计第 9 项的 `fs_watch` 部分，`Refs #170`），Linux（x86_64 容器，4 核，Rust 1.97.0）：
+
+- `just test -p lectern-fs-watch`：119 个测试通过（含 `tests/reflog_memory.rs` 的仓库状态上限，没有变化），新增 `logs_hold_no_file_or_reflog_contents`、`logs_shutdown_past_the_timeout_is_a_warn`；`cargo test -p lectern-fs-watch --lib` 在同一进程里运行 118 个测试也通过（捕获器共用，记录按消息、根路径和 `timeout_us` 筛选）。
+- `logs_hold_no_file_or_reflog_contents` 确认受跟踪文件的事件、`logs/HEAD` 新增行（`Appended`，提交说明里有金丝雀）和名字里有金丝雀的新分支（`NewFile`）都交付了，三种监听的 sink panic 各写出一条 error，`watch` 为 `repo`、`worktree`、`dir`，`root` 是各自的根；`assert_absent` 通过。`logs_shutdown_past_the_timeout_is_a_warn` 确认 warn 的 `timeout_us` 为 150000。
+- `rg 'eprintln!|util::log' crates/fs_watch/src` 没有结果。`cargo tree -p lectern-fs-watch -e normal --depth 1` 列出 `lectern-executor`、`lectern-kernel`、`lectern-logging`；Cargo.lock 只在 `lectern-fs-watch` 的依赖里多了 `lectern-logging`，没有新的外部 crate。
+- `just bench --measure fs_watch/`：改动前是从本分支建的另一个 worktree（`origin/main` 的 ccec871，detach），与改动后交替运行；`classify_burst` 另各跑一次第四轮。中位数依次列出：
+
+  | 基准 | 改动前 | 改动后 | 预算 |
+  |---|---|---|---|
+  | `fs_watch/classify_burst` | 18.3 / 17.1 / 20.1 / 19.6 ms | 20.5 / 18.0 / 20.1 / 21.7 ms | < 100 ms |
+  | `fs_watch/reflog_append` | 6.63 / 6.38 / 6.60 µs | 6.77 / 6.39 / 6.39 µs | < 1 ms |
+
+  测量时这台机器上同时有其他 agent 的构建和测试（负载约 6.5），`classify_burst` 有四次运行标为 noisy（改动前后各两次）。`classify_burst` 四次的中位数改动前 19.0 ms、改动后 20.3 ms，相差在同一份代码几次运行的波动之内（改动前自己就在 17.1–20.1 ms 之间）；分类的代码没有改，改动只是每次交付多传一个 `&Path`，这个基准一次只交付一个批次。`reflog_append` 三次的中位数改动前 6.60 µs、改动后 6.39 µs。
+- `just check`、`just doctest`、`just deny` 通过。`just test`（工作区 2250 个测试，跳过 7 个）通过一次；与它同时运行的第二次里 `lectern-syntax` 的 `batch_order_window_tasks_take_turns_with_batches` 超过 200 ms 的期限失败一次（两次全量测试叠加时的负载），单独重跑 `batch_order` 的 5 个测试通过。
+- 没有验证的：没有在 macOS 上运行；记录写进真实日志文件要等 `app` 接入（logging 设计第 3 步），这里只经 `testing::capture()` 检查编码后的行；panic 钩子另记的 `panic` 记录由 logging 的测试覆盖，本 crate 的测试里没有装钩子。
+
 ## 与设计的差异
 
 - 「路径分类」第 6 步：上级目录不是子模块且被忽略规则排除时就丢弃，不再要求它不受跟踪。设计原来只丢弃「不受跟踪且被忽略」的上级目录，于是 `build/` 被忽略、`build/keep.txt` 受跟踪时，`build/out.js` 会走到第 8 步，而 `PathFilter::ignored` 只看路径自身（`out.js` 不匹配），结果被当作未跟踪路径交付；git 不重新包含被排除目录之下的路径，`git status` 不会列出它。受跟踪的路径在第 5 步已经交付，所以改动只影响未跟踪的路径。上文第 6 步已改。
@@ -905,3 +949,10 @@ reflog 进度的压缩、锁文件的过滤和已知文件的前缀查找（[#18
 - 第 3 步：测试比设计多了 `fsevents_convert_*`（所有平台）、`fsevents_root_renamed_reports_root_changed`、`fsevents_arm_missing_path_is_not_found`、`fsevents_streams_share_one_queue_and_stay_apart`、`fsevents_watcher_dir_appears_changes_and_vanishes`（经真实 `Watcher` 和 `EventSink`，为它在 macOS 上加了 `lectern-kernel` 的 dev 依赖，实现 `Sink` 要用 `BusyGuard`），以及 kqueue 的目录改名、具名条目出现与消失、没有 `names`、不存在的目录、描述符上限、drop、两个目标各一个用例。测试经 `MacBackend::arm_with` 把批次交给一个记录用的闭包，不经 fs_watch 的队列；`Backend::arm` 只是把 `EventSink::send` 包成同样的闭包。
 - reflog 进度（[#184](https://github.com/SoloJiang/lectern-app/pull/184)）：偏移之前的 64 字节只存长度和哈希，不存副本；键是 `logs/refs/heads/` 之下的路径（分支）或相对公共目录的路径（`logs/HEAD`、`logs/refs/stash`、linked worktree 的 `HEAD`），分在两张表里；`after` 不存 `run`，读出时取这次运行的 `run`。原来的布局（64 字节的副本、完整相对路径的 `Vec<u8>` 键、`after` 带 `run`）实测每个文件 257 B，1000 个分支的仓库状态约 258 KB，超过「性能」的 256 KB；原来写的「约 150 B」是估算。哈希用每个进程随机密钥的 SipHash，把改写误判为未改写需要 64 位哈希碰撞（「reflog」第 1 步）。上文「reflog」与「性能」已改。
 - `logs/refs/heads/` 下的锁文件：原来只在事件路径上丢弃 `.lock`，列出目录时仍会把 `<分支>.lock` 当作新分支读入，以 `NewFile` 交付后再报告 `Removed`。现在列出目录和路径映射也跳过任何一级名字以 `.lock` 结尾的路径；上文「reflog」已补充。
+
+日志接入（logging 设计第 9 项的 `fs_watch` 部分）：
+
+- logging 设计第 9 项写的是「3 处」，与实际相同：`util::log` 里的一个 `eprintln!` 和它的 2 个调用点（`engine/sub.rs` 的 sink panic、`watcher.rs` 的 `shutdown` 超时）。`util::log` 删除，2 个调用点改为「日志与诊断」表里的 2 种记录，不新增调用点。`tests/reflog_memory.rs` 里打印实测值的 `eprintln!` 是测试二进制的输出，不是日志，保留。
+- 本文原来只写了 sink panic「记日志」，没有写级别；`shutdown` 超时没有写。级别按 ADR 0046「默认日志」的定义定：sink panic 后这个订阅之后的批次都被放弃，记 error；`shutdown` 超时之后照常返回，记 warn。
+- 原来 sink panic 的那一行带 `contain` 返回的 panic 消息。消息可能引用批次里的路径或使用方的数据，`Value::panic_message` 又只允许 `kernel`、`executor` 和 `logging` 调用，所以不再写出；改为监听的种类（`watch`）和根（`root`），消息和位置由 `lectern-logging` 的 panic 钩子记录。为了带上根，`Sub::deliver` 多了一个 `&Path` 参数，由持有根的仓库、worktree、目录状态传入，订阅本身不另存路径，仓库状态的常驻内存不变。
+- 原来 `shutdown` 超时的那一行没有字段，现在带 `timeout_us`。

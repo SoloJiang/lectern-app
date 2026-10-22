@@ -4332,6 +4332,7 @@ dependencies = [
  "insta",
  "lectern-executor",
  "lectern-kernel",
+ "lectern-logging",
  "tempfile",
 ]
 

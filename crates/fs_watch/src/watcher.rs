@@ -9,6 +9,7 @@ use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use lectern_executor::{Executor, Task};
+use lectern_logging::warn;
 
 use crate::backend::{Armed, Backend};
 use crate::clock::Clock;
@@ -20,7 +21,7 @@ use crate::source::{Sink, WorktreeSource};
 use crate::types::{
     Coalesce, DirBatch, Failure, FlushError, RepoBatch, Revision, WorktreeBatch, WorktreeName,
 };
-use crate::util::{lock, log, wait_timeout};
+use crate::util::{lock, wait_timeout};
 
 /// Watcher settings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -409,7 +410,13 @@ impl Shared {
             while !*done {
                 let now = Instant::now();
                 if now >= deadline {
-                    log(format_args!("the fs_watch thread did not stop in time"));
+                    // Shutdown returns anyway; the thread stops once the
+                    // item it is processing (a sink's delivery, a reflog
+                    // read) returns.
+                    warn!(
+                        "the fs_watch thread did not stop in time";
+                        timeout_us = self.flush_timeout,
+                    );
                     break;
                 }
                 done = wait_timeout(changed, done, deadline - now);

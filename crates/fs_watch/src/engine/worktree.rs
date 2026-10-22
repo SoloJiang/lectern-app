@@ -827,10 +827,10 @@ impl WorktreeState {
             for sub in self.subs.iter_mut().filter(|sub| sub.sub.started()) {
                 if sub.sub.is_open() {
                     let batch = sub.acc.take(revision, None, false);
-                    sub.sub.deliver(batch);
+                    sub.sub.deliver(batch, &self.root);
                 }
                 let batch = WorktreeAcc::default().take(revision, Some(health.clone()), false);
-                sub.sub.deliver(batch);
+                sub.sub.deliver(batch, &self.root);
             }
             self.told = health.clone();
         }
@@ -847,7 +847,7 @@ impl WorktreeState {
         let revision = self.shared.revision();
         for sub in self.subs.iter_mut().filter(|sub| !sub.sub.started()) {
             let batch = sub.acc.take(revision, Some(health.clone()), true);
-            sub.sub.deliver(batch);
+            sub.sub.deliver(batch, &self.root);
         }
         if self.subs.iter().all(|sub| sub.sub.started()) {
             self.told = health;
@@ -866,7 +866,7 @@ impl WorktreeState {
         for sub in self.subs.iter_mut().filter(|sub| sub.sub.started()) {
             if sub.sub.deadline().is_some_and(|deadline| deadline <= now) {
                 let batch = sub.acc.take(revision, None, false);
-                sub.sub.deliver(batch);
+                sub.sub.deliver(batch, &self.root);
                 delivered += 1;
             }
         }
