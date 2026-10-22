@@ -230,6 +230,119 @@ fn reflog_new_and_renamed_branches_are_new_files() {
 }
 
 #[test]
+fn reflog_lock_files_are_not_reflogs() {
+    let fx = Fixture::new();
+    let topic = fx.common.join("logs/refs/heads/topic");
+    write(&topic, b"t1\nt2\nt3\n");
+    // A lock file left from before the watch starts.
+    write(&fx.common.join("logs/refs/heads/stale.lock"), b"s1\n");
+    let o = fx.opened();
+    // `git reflog expire`: the new log goes to `topic.lock`; a walk of the
+    // directory lists it before the rename.
+    let lock = fx.common.join("logs/refs/heads/topic.lock");
+    write(&lock, b"t3\n");
+    fx.emit_common(&[("logs/refs/heads", D | MODIFIED)]);
+    fx.settle();
+    fs::rename(&lock, &topic).unwrap();
+    fs::remove_file(fx.common.join("logs/refs/heads/stale.lock")).unwrap();
+    fx.emit_common(&[
+        ("logs/refs/heads/topic.lock", F | Flags::RENAMED),
+        ("logs/refs/heads/topic", F | Flags::RENAMED),
+        ("logs/refs/heads/stale.lock", F | Flags::REMOVED),
+    ]);
+    fx.settle();
+    // A directory named like a lock file is not walked either.
+    write(&fx.common.join("logs/refs/heads/odd.lock/inner"), b"i1\n");
+    fx.emit_common(&[("logs/refs/heads", D | MODIFIED)]);
+    fx.settle();
+    fx.emit_common(&[("logs/refs/heads/odd.lock", D | Flags::CREATED)]);
+    fx.settle();
+    fx.wait();
+    // Only the rename shows: `topic` got shorter. No record or reset for a
+    // lock file, before, during or after.
+    assert_snapshot!(repo_batches(&o.repo_sink.take()), @r#"
+    worktrees=[] []
+      seq=0 "refs/heads/topic" reset Rewritten observed=r3
+    "#);
+}
+
+#[test]
+fn reflog_directory_event_reads_every_known_file_under_it() {
+    let fx = Fixture::new();
+    let names = [
+        "a",
+        "feature-z",
+        "feature/x",
+        "feature/y/deep",
+        "featurez",
+        "zz",
+    ];
+    for name in names {
+        write(&fx.common.join(format!("logs/refs/heads/{name}")), b"old\n");
+    }
+    let o = fx.opened();
+    for name in names {
+        append(
+            &fx.common.join(format!("logs/refs/heads/{name}")),
+            format!("{name}\n").as_bytes(),
+        );
+    }
+    // The baseline reads files in directory order, so read numbers are left
+    // out: what was read, in `seq` order.
+    let read = |fx: &Fixture| {
+        fx.settle();
+        fx.wait();
+        let (records, resets) = all(&o.repo_sink.take());
+        let mut lines: Vec<(u64, String)> = records
+            .iter()
+            .map(|r| {
+                let line = String::from_utf8_lossy(&r.line);
+                (r.seq, format!("{} {line:?} {:?}", file(&r.file), r.origin))
+            })
+            .chain(
+                resets
+                    .iter()
+                    .map(|r| (r.seq, format!("{} reset {:?}", file(&r.file), r.reason))),
+            )
+            .collect();
+        lines.sort();
+        lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>()
+    };
+    // Only the files under `feature/`, not `feature-z` or `featurez`.
+    fx.emit_common(&[("logs/refs/heads/feature", D | MODIFIED)]);
+    assert_eq!(
+        read(&fx),
+        [
+            r#"refs/heads/feature/x "feature/x" Appended"#,
+            r#"refs/heads/feature/y/deep "feature/y/deep" Appended"#,
+        ]
+    );
+    // The directory is gone: only the known files can say what was in it.
+    fs::remove_dir_all(fx.common.join("logs/refs/heads/feature")).unwrap();
+    fx.emit_common(&[("logs/refs/heads/feature", D | Flags::REMOVED)]);
+    assert_eq!(
+        read(&fx),
+        [
+            "refs/heads/feature/x reset Removed",
+            "refs/heads/feature/y/deep reset Removed",
+        ]
+    );
+    // A file event touches that file only.
+    fx.emit_common(&[("logs/refs/heads/featurez", F | MODIFIED)]);
+    assert_eq!(read(&fx), [r#"refs/heads/featurez "featurez" Appended"#]);
+    // The whole directory: the rest, in path order.
+    fx.emit_common(&[("logs/refs/heads", D | MODIFIED)]);
+    assert_eq!(
+        read(&fx),
+        [
+            r#"refs/heads/a "a" Appended"#,
+            r#"refs/heads/feature-z "feature-z" Appended"#,
+            r#"refs/heads/zz "zz" Appended"#,
+        ]
+    );
+}
+
+#[test]
 fn reflog_linked_worktree_head_and_stash() {
     let fx = Fixture::new();
     let o = fx.opened();
