@@ -25,6 +25,8 @@ mod git_worktree;
 mod i18n;
 #[path = "time/kernel.rs"]
 mod kernel;
+#[path = "time/log.rs"]
+mod log;
 #[path = "time/platform.rs"]
 mod platform;
 #[path = "time/project.rs"]
@@ -112,6 +114,12 @@ const BENCHES: &[Bench] = &[
     kernel::SERVICE_CURRENT,
     kernel::EMIT,
     kernel::EMIT_NESTED,
+    log::DISABLED_CALL,
+    log::FILTERED_CALL,
+    log::ENABLED_CALL,
+    log::CONTENDED_CALL,
+    log::THIRD_PARTY_LIMITED,
+    log::INSTALL_EARLY,
     platform::SAFE_STAT,
     platform::SAFE_READ_4K,
     platform::SAFE_READ_RANGE,

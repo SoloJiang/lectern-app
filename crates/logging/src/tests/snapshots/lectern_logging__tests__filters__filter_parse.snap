@@ -1,0 +1,20 @@
+---
+source: crates/logging/src/tests/filters.rs
+assertion_line: 31
+expression: "text.join(\"\\n\")"
+---
+"" -> "" skipped [] max info
+"info" -> "info" skipped [] max info
+"DEBUG" -> "debug" skipped [] max debug
+"cache=trace" -> "cache=trace" skipped [] max trace
+"debug,cache=trace,gpui=info" -> "debug,cache=trace,gpui=info" skipped [] max trace
+"@review=debug" -> "@review=debug" skipped [] max debug
+"warn, @code-intel=trace ,gix-odb=debug" -> "warn,gix_odb=debug,@code-intel=trace" skipped [] max trace
+"cache=trace,cache=warn" -> "cache=warn" skipped [] max info
+"verbose" -> "" skipped [0] max info
+"cache=loud" -> "" skipped [0] max info
+"=debug" -> "" skipped [0] max info
+"@=debug" -> "" skipped [0] max info
+"Cache Store=debug" -> "" skipped [0] max info
+"debug,,info" -> "info" skipped [] max info
+"trace,bad!,@x.y=info,off" -> "off,@x.y=info" skipped [1] max info

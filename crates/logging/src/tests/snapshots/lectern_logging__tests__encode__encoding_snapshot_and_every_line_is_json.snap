@@ -1,0 +1,10 @@
+---
+source: crates/logging/src/tests/encode.rs
+assertion_line: 128
+expression: lines.concat()
+---
+{"t":"2026-10-22T03:27:01.123Z","up":1834211,"lv":"warn","tg":"cache","th":"lectern-worker-2","at":"crates/cache/src/store.rs:212","plugin":"review","act":12,"task":3401,"msg":"partition disabled","reason":"corrupt","path":"~/Library/Caches/Lectern/repo/ab12cd.db","sqlite":11}
+{"t":"2026-10-22T03:27:01.123Z","up":1834211,"lv":"info","tg":"cache","th":"lectern-worker-2","at":"crates/cache/src/store.rs:212","session":"12345678-9abc-def0-0102-030405060708","review":"000000000000ab12","req":7,"analysis":2,"msg":"values","yes":true,"neg":-5,"big":340282366920938463463374607431768211455,"ratio":0.25,"nan":null,"took":3000,"text":"a \"quoted\"\u0009line\u000a","oid":"abcdef0123456789abcdef0123456789abcdef01","hex":"0000000000009f2c","url":"https://api.github.com:443/repos/a/b","error":{"kind":"NotFound","code":2},"none":null,"n":3}
+{"t":"2026-10-22T03:27:01.123Z","up":1834211,"lv":"error","tg":"cache","th":"lectern-worker-2","at":"crates/cache/src/store.rs:212","msg":"panics","static":"called `Option::unwrap()` on a `None` value","formatted":{"len":52,"prefix":"index out of bounds","nums":[3,5]},"other":{"type":"unknown"}}
+{"t":"2026-10-22T03:27:01.123Z","up":1834211,"lv":"warn","tg":"cache","th":"lectern-worker-2","at":"crates/cache/src/store.rs:212","msg":"window not found"}
+{"t":"2026-10-22T03:27:01.123Z","up":1834211,"lv":"warn","tg":"cache","th":"lectern-worker-2","at":"crates/cache/src/store.rs:212","msg":"failed to open \"…\": …"}

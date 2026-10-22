@@ -1,0 +1,11 @@
+error: no rules expected `format`
+ --> tests/ui/format_message_does_not_compile.rs:4:28
+  |
+4 |     lectern_logging::warn!(format!("value {}", x));
+  |                            ^^^^^^ no rules expected this token in macro call
+  |
+note: while trying to match meta-variable `$msg:literal`
+ --> src/lib.rs
+  |
+  |     ($level:expr, $msg:literal $(;)?) => {
+  |                   ^^^^^^^^^^^^

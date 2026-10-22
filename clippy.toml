@@ -1,0 +1,36 @@
+# Workspace clippy configuration. Each `reason` names the rule or ADR
+# (docs/design/ci.md「Lint」).
+
+# Runtime logging goes through lectern-logging's macros: a literal message
+# and typed fields, so no runtime string reaches a log file (ADR 0046,
+# docs/design/logging.md「隐私」). lectern-logging's own macros build the
+# `log::Record` directly and never expand to these.
+disallowed-macros = [
+    { path = "log::error", reason = "use lectern_logging::error!: literal message, typed fields (ADR 0046)" },
+    { path = "log::warn", reason = "use lectern_logging::warn!: literal message, typed fields (ADR 0046)" },
+    { path = "log::info", reason = "use lectern_logging::info!: literal message, typed fields (ADR 0046)" },
+    { path = "log::debug", reason = "use lectern_logging::debug!: literal message, typed fields (ADR 0046)" },
+    { path = "log::trace", reason = "use lectern_logging::trace!: literal message, typed fields (ADR 0046)" },
+    { path = "log::log", reason = "use lectern_logging's macros: literal message, typed fields (ADR 0046)" },
+]
+
+# GPUI's error-logging helpers format the error as third-party text and
+# bypass the typed fields: handle the `Result` and log it with
+# lectern_logging's macros before `detach` (ADR 0046). The paths only
+# resolve in crates that depend on GPUI.
+disallowed-methods = [
+    { path = "gpui_util::ResultExt::log_err", reason = "log the error with lectern_logging's macros (ADR 0046)", allow-invalid = true },
+    { path = "gpui_util::ResultExt::log_err_with_backtrace", reason = "log the error with lectern_logging's macros (ADR 0046)", allow-invalid = true },
+    { path = "gpui_util::ResultExt::warn_on_err", reason = "log the error with lectern_logging's macros (ADR 0046)", allow-invalid = true },
+    { path = "gpui_util::ResultExt::log_with_level", reason = "log the error with lectern_logging's macros (ADR 0046)", allow-invalid = true },
+    { path = "gpui_util::TryFutureExt::log_err", reason = "log the error with lectern_logging's macros (ADR 0046)", allow-invalid = true },
+    { path = "gpui_util::TryFutureExt::warn_on_err", reason = "log the error with lectern_logging's macros (ADR 0046)", allow-invalid = true },
+    { path = "gpui::TaskExt::detach_and_log_err", reason = "handle the Result and log it with lectern_logging's macros before detach (ADR 0046)", allow-invalid = true },
+    { path = "gpui::TaskExt::detach_and_log_err_with_backtrace", reason = "handle the Result and log it with lectern_logging's macros before detach (ADR 0046)", allow-invalid = true },
+]
+
+# A correlation scope is thread-local: a task's scope is set by the
+# executor around each poll (docs/design/logging.md「作用域与关联 ID」).
+await-holding-invalid-types = [
+    { path = "lectern_logging::Scope", reason = "a logging scope is thread-local; do not hold it across .await (ADR 0046)" },
+]

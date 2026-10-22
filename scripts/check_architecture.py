@@ -19,6 +19,12 @@ Rules checked:
      on another plugin crate, and only app and tool crates depend on a plugin
      crate (dev-dependencies included). A crate whose sources contain
      `impl Plugin for` must carry the marker.
+  7. Only app and tool crates enable lectern-logging's `sink` feature, in a
+     dependency's features or through one of their own features
+     (docs/design/logging.md).
+  8. `Value::panic_message` (any use of the name `panic_message` in code)
+     appears only in the sources of crates/kernel, crates/executor and
+     crates/logging (docs/design/logging.md「隐私」).
 
 Each error names the rule's source (AGENTS.md or a design doc) in brackets.
 
@@ -254,6 +260,65 @@ def implements_plugin(src_dir):
                     if has_impl_plugin(strip_comments_and_strings(code)):
                         return True
     return False
+
+
+LOGGING_CRATE = "lectern-logging"
+# Crate directories under crates/ whose sources may call Value::panic_message.
+PANIC_MESSAGE_DIRS = ("kernel", "executor", "logging")
+_PANIC_MESSAGE = re.compile(r"\bpanic_message\b")
+
+
+def enables_sink(pkg):
+    """Whether a package (an entry of `cargo metadata`'s packages) turns on
+    lectern-logging's `sink` feature: in the features of its dependency
+    (any kind), or through one of its own features (`lectern-logging/sink`,
+    `lectern-logging?/sink`, or the same under a renamed dependency)."""
+    deps = [d for d in pkg.get("dependencies", []) if d["name"] == LOGGING_CRATE]
+    if any("sink" in d.get("features", []) for d in deps):
+        return True
+    keys = {d.get("rename") or d["name"] for d in deps}
+    wanted = {f"{k}/sink" for k in keys} | {f"{k}?/sink" for k in keys}
+    return any(f in wanted for values in pkg.get("features", {}).values() for f in values)
+
+
+def sink_feature_errors(packages, layers):
+    """Rule 7. `packages` are workspace members' metadata entries, `layers`
+    maps a crate's name to its layer."""
+    return [
+        f"{pkg['name']} ({layers.get(pkg['name'])}): enables lectern-logging's `sink` feature; "
+        "only the app and tool crates may [docs/design/logging.md]"
+        for pkg in packages
+        if pkg["name"] != LOGGING_CRATE and layers.get(pkg["name"]) not in ("app", "tool") and enables_sink(pkg)
+    ]
+
+
+def uses_panic_message(src):
+    """Whether Rust source uses the name `panic_message` outside comments and
+    string literals."""
+    return bool(_PANIC_MESSAGE.search(strip_comments_and_strings(src)))
+
+
+def panic_message_errors(crate_dirs):
+    """Rule 8. `crate_dirs` maps a workspace crate's name to its directory;
+    every `.rs` file under it (src, tests, benches, examples, build.rs)
+    counts, except for crates/kernel, crates/executor and crates/logging."""
+    errors = []
+    for name, crate_dir in sorted(crate_dirs.items()):
+        if os.path.basename(os.path.normpath(crate_dir)) in PANIC_MESSAGE_DIRS:
+            continue
+        for root, dirs, files in os.walk(crate_dir):
+            dirs[:] = sorted(d for d in dirs if d != "target")
+            for file in sorted(files):
+                if not file.endswith(".rs"):
+                    continue
+                path = os.path.join(root, file)
+                with open(path, encoding="utf-8") as f:
+                    if uses_panic_message(f.read()):
+                        rel = os.path.relpath(path, os.path.dirname(os.path.dirname(crate_dir)))
+                        errors.append(
+                            f"{name}: {rel} uses Value::panic_message; only kernel, executor and logging may [docs/design/logging.md]"
+                        )
+    return errors
 
 
 def metadata(platform=None, all_features=True):
@@ -523,6 +588,10 @@ def main():
             }
         )
     )
+
+    member_pkgs = [packages[pid] for pid in members]
+    errors.extend(sink_feature_errors(member_pkgs, {packages[pid]["name"]: layer[pid] for pid in members}))
+    errors.extend(panic_message_errors({p["name"]: os.path.dirname(p["manifest_path"]) for p in member_pkgs}))
 
     for pid in members:
         if layer[pid] not in GPUI_FREE_LAYERS:

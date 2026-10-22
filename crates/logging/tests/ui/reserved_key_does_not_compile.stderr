@@ -1,0 +1,15 @@
+error: `msg` is a reserved log key
+ --> tests/ui/reserved_key_does_not_compile.rs:3:5
+  |
+3 |     lectern_logging::info!("reserved"; msg = 1);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `$crate::__reserved_key` which comes from the expansion of the macro `lectern_logging::info` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: `plugin` is a scope key; set it with `scope`
+ --> tests/ui/reserved_key_does_not_compile.rs:4:5
+  |
+4 |     lectern_logging::info!("scope key"; plugin = 2);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `$crate::__reserved_key` which comes from the expansion of the macro `lectern_logging::info` (in Nightly builds, run with -Z macro-backtrace for more info)

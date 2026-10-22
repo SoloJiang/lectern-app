@@ -1,0 +1,11 @@
+error[E0597]: `owned` does not live long enough
+ --> tests/ui/string_field_does_not_compile_borrowed.rs:5:26
+  |
+4 |     let owned = String::from("file contents");
+  |         ----- binding `owned` declared here
+5 |     let borrowed: &str = &owned;
+  |                          ^^^^^^ borrowed value does not live long enough
+6 |     lectern_logging::info!("borrowed string"; text = borrowed);
+  |     ---------------------------------------------------------- argument requires that `owned` is borrowed for `'static`
+7 | }
+  | - `owned` dropped here while still borrowed

@@ -124,6 +124,10 @@ const fn us(n: u64) -> Duration {
     Duration::from_micros(n)
 }
 
+const fn ns(n: u64) -> Duration {
+    Duration::from_nanos(n)
+}
+
 const fn median(limit: Limit) -> Check {
     Check {
         stat: Stat::Median,
@@ -166,6 +170,7 @@ const FS_WATCH: &str = "docs/design/fs_watch.md#性能";
 const CODE_INTEL: &str = "docs/design/code_intel.md#性能";
 const FILE_READER: &str = "docs/design/file_reader.md#性能";
 const REVIEW: &str = "docs/design/review.md#性能";
+const LOGGING: &str = "docs/design/logging.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -1745,6 +1750,70 @@ pub static BUDGETS: &[Budget] = &[
         Time,
     ),
     // ---- end review ----
+    // ---- logging (logging design, step 1) ----
+    // On the calling thread: a call below the global level; one the global
+    // level lets through and its target rejects; a written info record with
+    // 4 fields (each sample 256 calls after the writer emptied the buffer).
+    share(
+        "log/disabled_call",
+        &[median(Limit::TimeAtMost(ns(2)))],
+        LOGGING,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "log/filtered_call",
+        &[median(Limit::TimeAtMost(ns(5)))],
+        LOGGING,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "log/enabled_call",
+        &[median(Limit::TimeAtMost(us(1)))],
+        LOGGING,
+        ACTIVE,
+        Time,
+    ),
+    // Four threads writing at once, each call timed on its own: exactly
+    // 10 000 calls in measure mode, so「at most 100 above 5 µs」is the p99
+    // ≤ 5 µs of the design. No record dropped.
+    share(
+        "log/contended_call",
+        &[Check {
+            stat: Stat::CountAbove(us(5)),
+            limit: Limit::CountAtMost(100),
+        }],
+        LOGGING,
+        ACTIVE,
+        Time,
+    ),
+    // A third-party record whose call site is over its limit.
+    share(
+        "log/third_party_limited",
+        &[median(Limit::TimeAtMost(ns(30)))],
+        LOGGING,
+        ACTIVE,
+        Time,
+    ),
+    share(
+        "log/install_early",
+        &[median(Limit::TimeAtMost(us(20)))],
+        LOGGING,
+        ACTIVE,
+        Time,
+    ),
+    // Live bytes after 10 000 records and 5 s at rest, default
+    // configuration; with verbose logging on, record only.
+    share(
+        "log/idle_memory",
+        &[median(Limit::BytesAtMost(512 << 10))],
+        LOGGING,
+        ACTIVE,
+        Memory,
+    ),
+    share("log/idle_memory/verbose", RECORD, LOGGING, ACTIVE, Memory),
+    // ---- end logging ----
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),
     share("executor/wake_1000x100", RECORD, EXECUTOR, ACTIVE, Time),
     share("kernel/service_get", RECORD, KERNEL, ACTIVE, Time),

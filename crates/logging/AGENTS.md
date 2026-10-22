@@ -3,7 +3,7 @@
 运行日志：调用点的 `error!`、`warn!`、`info!`、`debug!`、`trace!` 宏、类型化字段和关联作用域；落盘部分（`sink` feature）负责首帧前的内存缓冲、写盘线程、文件滚动与清理、过滤与详细日志、panic 钩子和导出（[ADR 0046](../../docs/adr/0046.md)）。
 
 - 层：kernel 层。只依赖 kernel 层和外部的 `log` crate，不依赖 `platform`、`executor` 和 GPUI；任何层都可以依赖本 crate。
-- 设计文档：[docs/design/logging.md](../../docs/design/logging.md)。设计已接受，crate 尚未建立：第 1 步的实现 PR 加入 `Cargo.toml` 和源码。
+- 设计文档：[docs/design/logging.md](../../docs/design/logging.md)。第 1 步（本 crate、`clippy.toml`、架构检查、`log/` 基准）已实现，其他 crate 的接入见设计文档「对其他 crate 的要求」。
 - ADR：[0046](../../docs/adr/0046.md)、[0017](../../docs/adr/0017.md)（首帧前不做 IO）、[0018](../../docs/adr/0018.md)（安装包体积）
 
 ## 边界
@@ -23,6 +23,7 @@ just test -p lectern-logging
 just bench --measure log/          # log/ 的基准
 ```
 
-- 单元测试在 `src/tests/`，用 `ManualClock` 和临时目录，不靠 sleep；编码结果和过滤解析用 insta 快照验收。
+- 单元测试在 `src/tests/`，只在开启 `sink` feature 时编译（`just test` 带 `--all-features`），用 `ManualClock` 和临时目录，不靠 sleep；编码结果和过滤解析用 insta 快照验收。每个测试经 `Fixture` 安装日志器，`cargo test` 在同一进程里运行时也按顺序执行。
+- `tests/no_alloc.rs` 用按线程计数的全局分配器检查写出的调用不分配内存。
 - 隐私规则用 `tests/ui/` 的 trybuild 编译失败测试和自由文本处理的测试覆盖；金丝雀字符串不得出现在测试写出的任何文件里。
 - 文件操作经测试钩子记录发起的线程，「UI 线程上没有 IO」和「首帧前没有 IO」都按钩子的记录判断。

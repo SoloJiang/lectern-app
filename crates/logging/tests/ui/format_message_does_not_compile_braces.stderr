@@ -1,0 +1,18 @@
+error[E0080]: evaluation panicked: a log message is a plain literal; put values in fields: `name = value`
+ --> tests/ui/format_message_does_not_compile_braces.rs:5:5
+  |
+5 |     lectern_logging::warn!("value {x}");
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `main::_` failed inside this call
+  |
+note: inside `lectern_logging::__private::check_message`
+ --> $RUST/core/src/panic.rs
+  |
+  = note: the failure occurred here
+  |
+ ::: src/callsite.rs
+  |
+  | /         assert!(
+  | |             bytes[i] != b'{' && bytes[i] != b'}',
+  | |             "a log message is a plain literal; put values in fields: `name = value`"
+  | |         );
+  | |_________- in this macro invocation

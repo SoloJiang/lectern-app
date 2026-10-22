@@ -428,7 +428,7 @@ crates/bench/
   tests/fixtures/     本 crate 自己的小样本（目前没有）
 ```
 
-三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)）；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
+三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)），`log/idle_memory` 及其场景也是；`app/bundle_size`、`app/dmg_size` 属于 `Package`；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
 
 另有一个 `src/bin/lectern-bench-report.rs`，有两个子命令：`merge` 合并各目标的报告，`package --app <.app> --dmg <.dmg>` 测量安装包、写 `report-package.json`（见「报告」）。它只用本 crate 的普通依赖。
 
@@ -664,6 +664,10 @@ crates/bench/
 | `executor/spawn_10k`、`executor/wake_1000x100` | 只记录 | [executor](executor.md#性能) | 第 1 步 |
 | `kernel/service_get`、`kernel/service_for_each/{1,4,16}`、`kernel/service_current/{1,4,16}`、`kernel/emit`、`kernel/emit_nested` | 只记录 | [kernel](kernel.md#性能) | 第 1 步 |
 | `i18n/frame_strings` | 只记录（en 资源里每条消息各取一次、带变量的用样例参数格式化） | [i18n](i18n.md#性能) | 第 1 步 |
+| `log/disabled_call`、`log/filtered_call`、`log/enabled_call` | 中位数 ≤ 2 ns / ≤ 5 ns / ≤ 1 µs（调用线程上：低于全局级别的调用；全局级别放行、按 target 拒绝的调用；写出的 info 记录，4 个字段，每个样本是写盘线程清空缓冲后的 256 次调用） | [logging](logging.md#性能) | `logging` 第 1 步 |
+| `log/contended_call` | 10 000 次里超过 5 µs 的不超过 100 次，即 p99 ≤ 5 µs（4 个线程同时写，每次调用单独计时，每轮 400 条小于缓冲，不丢记录） | [logging](logging.md#性能) | `logging` 第 1 步 |
+| `log/third_party_limited`、`log/install_early` | 中位数 ≤ 30 ns / ≤ 20 µs（被限流的第三方记录；`install_early` 的全部工作，经 `testing::install_early_again`） | [logging](logging.md#性能) | `logging` 第 1 步 |
+| `log/idle_memory`、`log/idle_memory/verbose` | ≤ 512 KiB / 只记录（写出 1 万条记录、静止 5 s 后日志器的活跃字节，默认配置 / 详细日志开启；`Memory`） | [logging](logging.md#性能) | `logging` 第 1 步 |
 
 基准 ID 一律写成 `<crate 或类别>/<名字>[/<场景>]`。git 与 platform 设计文档里原来的名字（`git_open`、`safe_stat` 等）已在本 PR 中改成这种写法。
 

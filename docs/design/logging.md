@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；其余步骤尚未实现。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -71,6 +71,8 @@ impl<'a> Value<'a> {
     pub const fn hex(v: u64) -> Value<'static>;
     /// 只写 `scheme://host[:port]/path`，去掉 userinfo、查询串和片段；解析不了时写 `"<url>"`。
     pub fn url(s: &'a str) -> Value<'a>;
+    /// `io::Error` 的种类和系统错误码，写成 `{"kind":"NotFound","code":2}`；不写错误消息。
+    pub fn io(e: &io::Error) -> Value<'static>;
     /// panic 消息，写出时按「隐私」的 panic 消息规则处理。
     /// 只有 kernel、executor 和本 crate 调用，由架构检查限制调用位置。
     pub fn panic_message(text: PanicText<'a>) -> Value<'a>;
@@ -242,6 +244,18 @@ pub mod testing {
         /// 金丝雀检查：任何一行包含 `needle` 时 panic，并打印那一行。
         pub fn assert_absent(&self, needle: &str);
     }
+
+    // 以下供 lectern-bench 使用。
+    pub use log::Level;
+    /// 经 `log::logger()` 写一条第三方记录，与 GPUI 直接调用 `log` 时相同。
+    pub fn third_party(level: Level, target: &str, file: Option<&'static str>, line: Option<u32>, args: fmt::Arguments<'_>);
+    /// Lectern 调用点每个窗口的条数上限（平时 20）。基准调高它，在同一个调用点上反复测写出的路径。
+    pub fn set_callsite_limit(per_window: u32);
+    /// `sink` 同时开启时：让写盘线程写完缓冲并等它，最多 `timeout`。
+    pub fn flush(logging: &Logging, timeout: Duration) -> bool;
+    /// `sink` 同时开启时：再做一遍 `install_early` 的工作（读环境变量、解析过滤、分配首帧前缓冲和限流表、
+    /// 设全局级别、`set_logger`（已装过，返回失败）、panic 钩子取出再放回），不替换已装的日志器。`log/install_early` 用它。
+    pub fn install_early_again(config: EarlyConfig) -> EarlyAgain;
 }
 ```
 
@@ -329,9 +343,9 @@ level     := off | error | warn | info | debug | trace
 
 - 规则：同一调用点的 error、warn、info 以 10 秒为一个窗口，每个窗口最多写 20 条；超出的不编码，只计数，这个调用点下一条写出的记录带 `n`（省略的条数）。debug、trace 不按调用点限流，只受缓冲容量限制。
 - Lectern 的调用点：计数在宏展开的 `static Callsite` 里，一个 `AtomicU64` 存窗口编号和条数。
-- 第三方记录：`Log::log` 在编码之前按（target、`file()`、`line()`）的哈希查一张 256 项的固定表，每项存键的哈希和同样的计数，线性探测最多 8 项。没有文件和行的记录按 target 计。探测不到空位时，这条记录计入一个共用的溢出项，溢出项按同样的规则限流。表在 `install_early` 时一次分配（约 4 KiB），之后不增长。
+- 第三方记录：`Log::log` 在编码之前按（target、`file()`、`line()`）的哈希查一张 256 项的固定表，每项存键的哈希和同样的计数，线性探测最多 8 项。哈希取 target 和 `file()` 两个字符串的地址与长度，加上行号：调用点的这两个值是字符串字面量，不必逐字节哈希。没有文件和行的记录按 target 计。探测不到空位时，这条记录计入一个共用的溢出项，溢出项按同样的规则限流。表在 `install_early` 时一次分配（约 4 KiB），之后不增长。
 - 第三方合计：warn、info 的第三方记录每个窗口另有合计上限 50 条，超出的同样只计数，所以几个调用点同时刷屏也只占默认文件很小的一部分。error 级别不受合计上限限制，只受各自调用点每窗口 20 条的限制，刷屏的 warn 不会挤掉 error。
-- 被限流的调用在调用线程上的开销是一次哈希和两三次原子操作，不编码、不复制（`log/third_party_limited`）。
+- 被限流的调用在调用线程上的开销是一次哈希和两三次原子操作，不编码、不复制（`log/third_party_limited`）。判断窗口不每次读单调时钟（Linux 虚拟机上一次约 20–40 ns）：每个线程记下上一次读时钟时的窗口和 CPU 计数器（x86_64 的 TSC、aarch64 的 `cntvct_el0`），计数器走过 2^20 之前沿用这个窗口（3 GHz 下 0.3 ms，Apple 芯片的 24 MHz 下 44 ms），之后再读时钟。窗口的切换在一个线程上最多晚这么久被看到；其他架构每次读时钟。Lectern 调用点的限流用同一个窗口。
 
 ## 数据流与线程
 
@@ -389,10 +403,11 @@ level     := off | error | warn | info | debug | trace
 1. **字面量**：`PanicText::Static`，以及第三方记录里 `fmt::Arguments::as_str()` 为 Some 的消息。它们是编译进二进制的文字，不含运行时数据。规则：截到 256 字节。
 2. **格式化的 panic 消息**：`PanicText::Formatted`。`panic!("{x}")`、`expect(&format!(..))`、`assert!(c, "{s}")`、`Result::expect`（消息是 `{msg}: {err:?}`）以及 std 的运行时检查（字符串切片越界的消息形如 ``byte index 5 is not a char boundary; it is inside 'é' (bytes 4..6) of `…` ``，原文在反引号里）都属于这一类，其中可能含文件、会话或提示词的文字。规则：
    - 只写 `len`（原消息的字节数）和源码位置，位置来自 `PanicHookInfo::location()`，`contain` 的记录由 kernel 另带阶段。
-   - 消息以固定表里的 std 前缀开头时，写出这个前缀。表：``called `Result::unwrap()` on an `Err` value``、``called `Result::unwrap_err()` on an `Ok` value``、`index out of bounds`、`byte index`、`begin <= end`、`range start index`、`range end index`、`slice index starts at`、``assertion `left == right` failed``、``assertion `left != right` failed``。
-   - 前缀标为「带数字」的（`index out of bounds`、`byte index`、`begin <= end`、`range start index`、`range end index`、`slice index starts at`）：先把双引号、单引号、反引号括住的片段整段去掉（没有配对的引号去掉到行尾），再从剩下的文字里按顺序取最多 6 个十进制整数，写成 `nums`。
+   - 消息以固定表里的 std 前缀开头时，写出这个前缀。表：``called `Result::unwrap()` on an `Err` value``、``called `Result::unwrap_err()` on an `Ok` value``、`index out of bounds`、`byte index`、`start byte index`、`end byte index`、`byte range starts at`、`begin <= end`、`range start index`、`range end index`、`slice index starts at`、``assertion `left == right` failed``、``assertion `left != right` failed``。其中 `start byte index`、`end byte index`、`byte range starts at` 是 Rust 1.97 的 std 对字符串切片越界写出的形式（如 `end byte index 4 is not a char boundary; it is inside 'é' (bytes 3..5 of string)`）。
+   - 前缀标为「带数字」的（`index out of bounds`、`byte index`、`start byte index`、`end byte index`、`byte range starts at`、`begin <= end`、`range start index`、`range end index`、`slice index starts at`）：先把双引号、单引号、反引号括住的片段整段去掉（没有配对的引号去掉到行尾），再从剩下的文字里按顺序取最多 6 个十进制整数，写成 `nums`。
    - ``called `Result::unwrap()` on an `Err` value`` 之后，去掉引号片段，保留 Debug 输出开头的标识符（到第一个 `{`、`(`、空格为止，只含 `[A-Za-z0-9_]`，最多 32 字节），写成 `variant`，如 `Os`。
    - 其余文字一律不写。不在表里的格式化消息只有位置和长度。
+   - 写出的形式：`PanicText::Static` 是字符串；`Formatted` 是对象 `{"len":…,"prefix":"…","nums":[…],"variant":"…"}`，后三项只在有时出现；`Other` 是 `{"type":"unknown"}`。
 3. **格式化的第三方记录**：`as_str()` 为 None 的第三方消息，以及 target 是 Lectern crate、但消息不是字面量的记录（不经本 crate 宏写出的，按这一类兜底）。规则：
    - 双引号、单引号括住的片段换成 `"…"`、`'…'`；反引号括住的片段换成 `` `…` ``，只有 `Option::…()`、`Result::…()` 形式的 std 方法名和 `None`、`Some`、`Ok`、`Err` 保留；没有配对的引号，从它到行尾换成 `…`。
    - 第一个 `: ` 之后的文字换成 `…`：插值的错误信息和取值多在这一段。
@@ -513,3 +528,48 @@ level     := off | error | warn | info | debug | trace
 - `LECTERN_LOG=debug` 和 `--log cache=trace` 启动时文件头的 `filter` 与之相同。
 
 **第 4 步起：** 「对其他 crate 的要求」第 4 到 11 项各一个 PR，每个 PR 的验收是：`rg 'eprintln!|util::log' crates/<crate>/src --glob '!**/tests*'` 没有结果；这个 crate 的金丝雀测试通过；涉及 panic 的（kernel、executor）有测试检查记录里的 `plugin`、`act`、`task`。
+
+## 实际验证
+
+第 1 步（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），全部在 Linux（x86_64，4 核虚拟机，Rust 1.97.0）上运行：
+
+- `just check`、`just test`（工作区 2061 个测试）、`just doctest`、`just deny` 通过。`just test -p lectern-logging` 共 59 个测试：`src/tests/` 的 57 个单元测试（「测试」一节列出的全部，另有 `names_round_trip`、`install_twice_returns_already_installed`、`turning_verbose_off_restores_the_default`、`export_without_a_directory`），`tests/compile_fail.rs`（trybuild，6 个编译失败用例），`tests/no_alloc.rs`（写出的调用在调用线程上不分配内存，用按线程计数的全局分配器检查）。nextest 连续运行 8 次、`cargo test` 同一进程运行一次，全部通过。
+- `cargo tree -p lectern-logging -e normal --all-features` 只列出 `log v0.4.34`。`log` 0.4.34 原本就在 Cargo.lock 里（GPUI 依赖它），Cargo.lock 只多了 `lectern-logging` 这一项；`cargo metadata --locked --offline` 通过。
+- `cargo tree --offline --target aarch64-apple-darwin -p lectern-app -e features -i log` 在 Linux 上离线可以运行：`log` 的 feature 是 `alloc`、`default`、`serde`、`serde_core`、`std`，没有 `max_level_` 或 `release_max_level_`。`lectern-app` 到第 3 步才依赖本 crate，那时 `kv` 会出现在这里。
+- `clippy.toml`：在一个临时 crate 里确认 `log::warn!` 报 `disallowed_macros`、跨 `.await` 持有 `lectern_logging::Scope` 报 `await_holding_invalid_type`。工作区里没有直接调用 `log` 宏或 GPUI 错误日志辅助方法的代码，不需要任何 `allow`。GPUI 辅助方法的路径（`gpui_util::ResultExt::log_err`、`gpui::TaskExt::detach_and_log_err` 等）在 Linux 上解析不到（这些 crate 不在 Linux 的构建里），条目带 `allow-invalid = true`；「验收」里在 macOS 上用临时文件确认 clippy 报错的一项**没有验证**，要在 macOS 上补做。
+- 架构检查的两条新规则及其测试：`python3 scripts/test_check_architecture.py`（19 个测试）、`python3 scripts/check_architecture.py`（32 个 crate）通过。
+- `just bench --measure log/`（Linux 只报告、不判定），两次运行：
+
+  | 基准 | 实测 | 预算 |
+  |---|---|---|
+  | `log/disabled_call` | < 1 ns | ≤ 2 ns |
+  | `log/filtered_call` | 1 ns | ≤ 5 ns |
+  | `log/enabled_call` | 602、630 ns（noisy） | ≤ 1 µs |
+  | `log/contended_call` | 10 000 次里超过 5 µs 的 330、347 次 | ≤ 100 次（p99 ≤ 5 µs） |
+  | `log/third_party_limited` | 49、47 ns | ≤ 30 ns |
+  | `log/install_early` | 4.06、3.69 µs | ≤ 20 µs |
+  | `log/idle_memory` | 325 KB | ≤ 512 KB |
+  | `log/idle_memory/verbose` | 1.13 MB | 只记录 |
+
+  两项在这台虚拟机上超出预算，macOS 上的判定**没有验证**：
+  - `log/third_party_limited`：去掉时钟之后单独测过 32 ns，其余是构造 `log::Record`、`Log::log` 的动态调用、过滤和两次原子加。每次读单调时钟时是 68–73 ns，改为线程本地的窗口加 CPU 计数器（「限流」）后是 47–49 ns；这台机器上读一次 TSC 也要十几 ns。
+  - `log/contended_call`：只用一个线程时，2500 次里也有 31 次超过 5 µs，主要是每轮第一条记录唤醒空闲的写盘线程（一次系统调用）和缓冲到 32 KiB 时的唤醒；4 个线程加写盘线程多于 4 个虚拟核，被抢占的调用也落在尾部。改为只在缓冲第一次变为紧急时唤醒、调用线程在锁上先自旋，都没有让这个数稳定下降，自旋已撤回。
+- `log/idle_memory` 是计数分配器看到的活跃字节：运行时的两块缓冲（各 128 KiB）、默认文件的 `BufWriter`（64 KiB）、限流表和日志器的状态；不含写盘线程的栈。详细日志开启后是 1.13 MB（两块 512 KiB 的缓冲、两个 `BufWriter`）。
+
+## 与设计的差异
+
+第 1 步（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+
+- **std 前缀表加了三项。** Rust 1.97 的 std 对字符串切片越界写的是 `start byte index …`、`end byte index …`、`byte range starts at …`，不再以 `byte index` 开头，也不再带原字符串；按原表这些消息只剩长度。这三项加进表里，都带数字（「隐私」已改）。`canary_str_slicing_panic` 检查前缀以 `byte index` 结尾。
+- **限流不每次读时钟。** 读单调时钟比被限流的调用的其余部分还慢，`log/third_party_limited` 达不到预算。改为每个线程缓存窗口，用 CPU 计数器限定缓存的新旧（「限流」已改）。aarch64 读计数器用一行内联汇编（`mrs cntvct_el0`），x86_64 用 `_rdtsc`；这是 CPU 架构的能力，不是 macOS 的系统接口，不经 `platform`。窗口的切换在一个线程上最多晚 44 ms 被看到。
+- **第三方调用点的键按地址哈希。** target 和 `file()` 取字符串的地址与长度，不逐字节哈希（「限流」已改）。运行时拼出的 target 每次地址不同，只会多占表项，由溢出项兜住。
+- **`Value::io` 写进了接口。** 「日志与诊断」已经用到它，「调用点」的接口里补上；写成 `{"kind":…,"code":…}`。panic 消息的写出形式也补进「隐私」。
+- **宏在编译期多查两项。** 消息不能含 `{`、`}`（不插值，避免读者以为会插值），不超过 512 字节；字段不超过 12 个。trybuild 的用例按出错的位置拆成 6 个文件：rustc 在一个文件里遇到宏匹配失败或类型错误后，不再报后面的错误。
+- **`PluginTag::register` 只接受 `[A-Za-z0-9._-]`、1 到 64 字节的 ID**，其他返回 None。
+- **过滤的规范形式。** `Display` 依次写单独的级别、`target=level`、`@plugin=level`；名字转成小写，target 里的 `-` 读作 `_`；同名指令后面的覆盖前面的；空指令（如 `debug,,info` 中间那个）忽略，不算无法识别。`Filter` 在不开 `sink` 时也导出，调用点的过滤缓存用到它。
+- **写盘线程启动时就打开默认文件、写文件头**，不等第一条记录，第 3 步「启动后 1 s 内出现本次运行的文件」依赖这一点。
+- **首帧前 panic 写出的文件头没有 `version`、`build`、`os`、`arch`**：这些在 `start` 的 `Config` 里才有。写盘线程启动后接着写这个文件，不再写第二个文件头。
+- **详细文件的开关。** 过滤来自 `--log`、`LECTERN_LOG` 或设置时，都算详细日志开启（文件头 `verbose` 为 true），另写详细文件。
+- **`testing` 多了基准用的入口**：`third_party`、`set_callsite_limit`、`flush`、`install_early_again`（见「测试辅助」）。panic 记录的 `tg` 是 `logging`。
+- **基准的写法。** bench 的统计量没有 p99：`log/contended_call` 在测量模式下正好采 10 000 次，预算写成「超过 5 µs 的不超过 100 次」，与 p99 ≤ 5 µs 相同。`log/enabled_call` 每个样本是写盘线程清空缓冲后的 256 次调用，期间调高调用点上限，测的是写出的路径而不是限流。`log/idle_memory/verbose` 是「性能」里「另报一个数」的那一项，只记录。
+- **单元测试只在开启 `sink` 时编译**（`just test` 用 `--all-features`）；`cargo test -p lectern-logging` 不带 feature 时只跑文档测试。

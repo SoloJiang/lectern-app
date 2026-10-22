@@ -37,6 +37,8 @@
 3. `domain`、`infra`、`kernel` 层的依赖图（含间接依赖）里没有 GPUI。`cargo metadata` 会在整个工作区统一 feature，所以只经过间接依赖的 GPUI 路径会再用 `cargo tree -p <crate>` 单独解析确认，避免别的 crate 打开的 feature 造成误报。
 4. macOS 系统绑定只能是 `platform` 的直接依赖。绑定按两种方式识别。一是名字：前缀 objc*、cocoa*、core-foundation*、security-framework*、metal*、dispatch*、screencapturekit* 等，或名字里按 - 和 _ 切出的词含 macos、darwin、appkit、metal 等。二是 target 条件只在 Apple 平台成立的依赖，不论名字。脚本用 `rustc --print cfg` 取得 rustc 已知的全部 target 的真实 cfg（按 rustc 版本缓存在 `target/` 下），条件在某个 Apple target 上成立、在其他 target 上都不成立，即为 Apple 专属。与 Cargo 一致，target 不设置的 cfg（`feature`、`test`、`proc_macro` 等）一律为假。target 按默认配置取，不应用本机的 rustflags，因此同一个提交在任何机器和 CI 上结果一致。工作区内的 crate 也按名字检查。`scripts/test_check_architecture.py` 是这部分的单元测试，CI 先跑它。
 5. 每个 crate 的 `Cargo.toml` 写有 `[lints] workspace = true`，继承工作区的 lint 配置（见「Lint」）。
+6. 只有 `app` 和 tool 层启用 `lectern-logging` 的 `sink` feature：依赖声明里的 feature 和 crate 自己的 feature 表（`lectern-logging/sink`、`lectern-logging?/sink`，含改名的依赖）都算（[logging 设计](logging.md)）。
+7. `Value::panic_message` 只出现在 `crates/kernel`、`crates/executor`、`crates/logging` 的源码里：其他 crate 目录下任何 `.rs` 文件（去掉注释和字符串后）出现 `panic_message` 这个名字即报错（[logging 设计「隐私」](logging.md#隐私)）。
 
 每条报错末尾的方括号写明规则出处（AGENTS.md 的规则编号或设计文档），agent 可以直接找到规则原文。
 
@@ -61,6 +63,8 @@ python3 scripts/check_architecture.py
 - `undocumented_unsafe_blocks`：每个 `unsafe` 块前用 `// SAFETY:` 注释说明为什么安全。
 
 今后用 `clippy.toml` 的 `disallowed-methods`、`disallowed-types` 禁用某个 API 时，`reason` 写明对应的架构规则或 ADR，例如 `reason = "视图层不做 IO（AGENTS.md 架构规则 4）"`。
+
+`clippy.toml` 现有的配置都来自 [ADR 0046](../adr/0046.md)（[logging 设计「隐私」](logging.md#隐私)）：`disallowed-macros` 禁止 `log` 的六个宏，`disallowed-methods` 禁止 GPUI 的错误日志辅助方法（`gpui_util::ResultExt`、`gpui_util::TryFutureExt` 的 `log_err` 等和 `gpui::TaskExt::detach_and_log_err` 等；这些路径只在依赖 GPUI 的 crate 里解析得到，条目带 `allow-invalid = true`），`await-holding-invalid-types` 禁止跨 `.await` 持有 `lectern_logging::Scope`。
 
 ## 文档链接检查
 
