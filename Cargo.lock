@@ -4248,6 +4248,7 @@ dependencies = [
  "lectern-review",
  "lectern-services",
  "lectern-syntax",
+ "lectern-usage",
  "serde_json",
  "tempfile",
 ]
@@ -4501,6 +4502,7 @@ dependencies = [
  "lectern-logging",
  "lectern-services",
  "rusqlite",
+ "ruzstd",
  "serde",
  "serde_json",
  "tempfile",

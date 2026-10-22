@@ -6,7 +6,7 @@ use std::path::Path;
 
 use lectern_services::session::{Agent, Record};
 use lectern_services::usage::{
-    ProjectRef, Tokens, UsageProjectId, UsageQuery, UsageSnapshot, Window,
+    ProjectRef, Tokens, UsageProjectId, UsageQuery, UsageSnapshot, UsageState, Window,
 };
 
 use super::support::*;
@@ -144,6 +144,123 @@ fn rows_other_unknown_project_reference_has_no_snapshot() {
         window: Window::D7,
     };
     assert!(h.snapshot(&query).is_none());
+}
+
+#[test]
+fn window_deltas_give_what_a_full_compute_gives() {
+    let mut h = Harness::new();
+    let repo = h.open_repo("/work/a");
+    let notes = h.projects.folder(Path::new("/work/notes"));
+    h.open_project(&notes);
+    let queries = [
+        UsageQuery::Project {
+            project: ProjectRef::Open(repo.clone()),
+            window: Window::D7,
+        },
+        UsageQuery::Project {
+            project: ProjectRef::Open(notes.clone()),
+            window: Window::D30,
+        },
+        UsageQuery::AllProjects {
+            window: Window::D14,
+        },
+    ];
+    let claude = FakeSessions::new("session-claude-code", Agent::ClaudeCode);
+    let codex = FakeSessions::new("session-codex", Agent::Codex);
+    let at = OCT_20 + 9 * HOUR;
+    session(&claude, "a", "/work/a", at, &[("model-a", [10, 1, 0, 0])]);
+    h.read_every(&claude);
+    let mut watched: Vec<_> = queries.iter().map(|q| h.watched(q)).collect();
+    // Each step stores batches; the deltas of each are applied to the
+    // accumulators, and the snapshot must equal a full compute.
+    let mut recomputed = 0;
+    let removed = std::cell::Cell::new(0);
+    let mut check =
+        |h: &Harness, watched: &mut Vec<crate::snapshot::Watched>, out: &crate::store::Ingested| {
+            removed.set(removed.get() + out.facts.iter().filter(|d| d.rows < 0).count());
+            for (w, q) in watched.iter_mut().zip(&queries) {
+                if h.apply(w, out) == crate::snapshot::Applied::Recompute {
+                    recomputed += 1;
+                    *w = h.watched(q);
+                }
+                let full = h.snapshot(q).unwrap();
+                assert_eq!(w.snapshot(UsageState::Ready), full, "{q:?}");
+            }
+            assert_buckets(h);
+        };
+    let mut read = |h: &Harness, fake: &FakeSessions, id: &str, watched: &mut Vec<_>| loop {
+        let out = h.read_once(fake, id, 300);
+        check(h, watched, &out);
+        if out.at_end {
+            break;
+        }
+    };
+    // New records in batches: a new model, a new agent, an old record
+    // outside the windows.
+    let more = [("model-b", [20, 2, 3, 4]), ("model-a", [1, 1, 1, 1])];
+    session(&claude, "b", "/work/a/sub", at + DAY, &more);
+    read(&h, &claude, "b", &mut watched);
+    session(&codex, "c", "/work/a", at, &[("model-c", [5, 5, 5, 0])]);
+    read(&h, &codex, "c", &mut watched);
+    session(
+        &claude,
+        "old",
+        "/work/a",
+        at - 20 * DAY,
+        &[("model-a", [7, 0, 0, 0])],
+    );
+    read(&h, &claude, "old", &mut watched);
+    // The same keys again, larger in another session: the counted source
+    // moves (a fact deleted, one inserted).
+    claude.add("b2", Path::new("/work/a"), at + DAY, None);
+    let mut dup = claude_records("b", "/work/a", at + DAY, &more);
+    for r in &mut dup {
+        if let Record::Usage(u) = &mut r.value
+            && let lectern_services::session::RawTokens::Anthropic { input, .. } = &mut u.tokens
+        {
+            *input += 100;
+        }
+    }
+    claude.push("b2", dup);
+    read(&h, &claude, "b2", &mut watched);
+    // A replay of the first session.
+    claude.replace(
+        "a",
+        claude_records("a", "/work/a", at, &[("model-a", [10, 1, 0, 0])]),
+    );
+    read(&h, &claude, "a", &mut watched);
+    // A directory first seen under the open folder: a new location the
+    // folder claims, so its windows are computed again.
+    session(
+        &claude,
+        "n",
+        "/work/notes/new",
+        at,
+        &[("model-a", [3, 0, 0, 0])],
+    );
+    read(&h, &claude, "n", &mut watched);
+    assert!(recomputed > 0, "the new directory needs a full compute");
+    assert!(removed.get() > 0, "some deltas take facts away");
+}
+
+/// The records of [`session`], to push again or replace with.
+fn claude_records(
+    id: &str,
+    cwd: &str,
+    at: i64,
+    usages: &[Use<'_>],
+) -> Vec<lectern_services::session::Positioned<Record>> {
+    let fake = FakeSessions::new("scratch", Agent::ClaudeCode);
+    session(&fake, id, cwd, at, usages);
+    let key = fake.key(id);
+    lectern_services::session::SessionSource::read(
+        &fake,
+        &key,
+        &lectern_services::session::Cursor::START,
+        u64::MAX,
+    )
+    .unwrap()
+    .records
 }
 
 #[test]

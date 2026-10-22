@@ -1,0 +1,19 @@
+---
+source: crates/usage/src/tests/archive.rs
+expression: render_history(&months_only)
+---
+month 2025-08: in 33 out 3 read 9 write 3 (= 48)
+month 2025-09: in 219 out 69 read 45 write 15 (= 348)
+month 2025-10: in 129 out 69 read 18 write 6 (= 222)
+month 2025-11: in 165 out 105 read 18 write 6 (= 294)
+month 2025-12: in 201 out 141 read 18 write 6 (= 366)
+month 2026-01: in 237 out 177 read 18 write 6 (= 438)
+month 2026-02: in 273 out 213 read 18 write 6 (= 510)
+month 2026-03: in 309 out 249 read 18 write 6 (= 582)
+month 2026-04: in 345 out 285 read 18 write 6 (= 654)
+month 2026-05: in 381 out 321 read 18 write 6 (= 726)
+month 2026-06: in 417 out 357 read 18 write 6 (= 798)
+month 2026-07: in 532 out 462 read 21 write 7 (= 1022)
+month 2026-08: in 495 out 435 read 18 write 6 (= 954)
+month 2026-09: in 531 out 471 read 18 write 6 (= 1026)
+month 2026-10: in 407 out 337 read 21 write 7 (= 772)

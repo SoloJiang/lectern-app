@@ -11,7 +11,7 @@
 //!   every commit, after a project opens or closes, and at the next local
 //!   midnight; `snapshot` only copies an `Arc`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -32,9 +32,11 @@ use lectern_services::usage::{
 };
 
 use crate::LocalZone;
-use crate::snapshot::{self, Owners};
+use crate::snapshot::{self, Applied, Owners, Watched};
+use crate::store::cold::{self, Month, Stepped};
 use crate::store::{
-    Checked, FileStamp, Ingest, Mode, Place, ProjectRow, SessionInfo, Store, StoreError, Totals,
+    Checked, FileStamp, Ingest, Ingested, Mode, Place, ProjectRow, SessionInfo, Store, StoreError,
+    Totals,
 };
 use crate::time::Time;
 use crate::window;
@@ -67,7 +69,14 @@ enum Db {
 struct Interest {
     count: usize,
     snapshot: Option<Arc<UsageSnapshot>>,
+    /// Computed again from the database by the next snapshot task.
     dirty: bool,
+    /// A snapshot task is computing it: deltas that arrive meanwhile are not
+    /// applied, the query is computed again instead.
+    computing: bool,
+    /// The accumulators of a window query, which later commits' fact
+    /// deltas update in place.
+    watched: Option<Watched>,
 }
 
 #[derive(Default)]
@@ -101,6 +110,26 @@ impl Backfill {
     }
 }
 
+/// The archive and the space reclaim (docs/design/usage.md「冷热分层」):
+/// background work with the backfill's cadence, one step per quiet stretch.
+#[derive(Default)]
+struct Maintenance {
+    /// Ask the store which months to archive (after opening, and at every
+    /// local midnight after that).
+    check: bool,
+    months: VecDeque<Month>,
+    /// Free pages may be over the thresholds.
+    reclaim: bool,
+    /// The next local midnight a check is armed for.
+    midnight: Option<i64>,
+}
+
+impl Maintenance {
+    fn pending(&self) -> bool {
+        self.check || !self.months.is_empty() || self.reclaim
+    }
+}
+
 #[derive(Default)]
 struct State {
     handle: Option<PluginHandle>,
@@ -123,6 +152,7 @@ struct State {
     blocked: bool,
     pace: Pace,
     backfill: Backfill,
+    maintenance: Maintenance,
     places: HashMap<PathBuf, Place>,
     interests: HashMap<UsageQuery, Interest>,
     computing: bool,
@@ -289,6 +319,7 @@ impl Engine {
                 let mut state = self.state();
                 state.needs_check = opened.needs_check;
                 state.recovered = opened.recovered.map(|r| r.at);
+                state.maintenance.check = true;
                 drop(state);
                 self.register_open_projects(&store);
                 let keys: Vec<SessionKey> = self.summaries().into_keys().collect();
@@ -423,8 +454,27 @@ impl Engine {
             return;
         }
         {
-            let state = self.state();
-            if state.stopped || state.reading || state.blocked || state.dirty.is_empty() {
+            let mut state = self.state();
+            if state.stopped || state.reading || state.blocked {
+                return;
+            }
+            if state.dirty.is_empty() {
+                // Nothing to read: the archive and the reclaim share the
+                // backfill's queue and cadence.
+                if !state.maintenance.pending() {
+                    return;
+                }
+                if !state.pace.allowed {
+                    drop(state);
+                    self.arm_pace();
+                    return;
+                }
+                state.pace.allowed = false;
+                state.reading = true;
+                drop(state);
+                if !self.spawn(true, |engine| engine.maintain()) {
+                    self.state().reading = false;
+                }
                 return;
             }
         }
@@ -508,8 +558,10 @@ impl Engine {
                 state.dirty.insert(k);
             }
         }
+        let mut stored = None;
         match outcome {
-            Read::Done { at_end, to, .. } => {
+            Read::Done { out, .. } => {
+                let (at_end, to) = (out.at_end, out.to);
                 if let Some(entry) = state.backfill.sessions.get_mut(&key) {
                     entry.1 = if at_end { entry.0.max(to) } else { to };
                 }
@@ -519,6 +571,7 @@ impl Engine {
                         entry.1 = entry.0;
                     }
                 }
+                stored = Some(out);
             }
             Read::Gone => {
                 state.dirty.remove(&key);
@@ -527,15 +580,212 @@ impl Engine {
             Read::Later => {
                 state.dirty.remove(&key);
             }
+            // Still dirty: the next pump reads it from the saved cursor.
+            Read::Stale => {}
             Read::Blocked => state.blocked = true,
         }
         self.log_backfill(&mut state);
-        for interest in state.interests.values_mut() {
-            interest.dirty = true;
-        }
         drop(state);
+        match stored {
+            Some(out) => self.apply_facts(&out),
+            None => self.mark_all_dirty(),
+        }
         self.compute();
         self.pump();
+    }
+
+    /// After a stored batch: the watched windows take its fact deltas and
+    /// are replaced at once; the other queries (and windows that cannot
+    /// take them) are computed again in the background.
+    fn apply_facts(&self, out: &Ingested) {
+        let missing: Vec<i64> = {
+            let state = self.state();
+            let mut ids: Vec<i64> = state
+                .interests
+                .values()
+                .filter_map(|i| i.watched.as_ref())
+                .flat_map(|w| w.missing(&out.facts))
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let texts = match (missing.is_empty(), self.store()) {
+            (false, Some(store)) => store.texts(&missing).ok(),
+            _ => Some(HashMap::new()),
+        };
+        let usage_state = self.usage_state();
+        let mut changed = Vec::new();
+        {
+            let mut state = self.state();
+            let mut generation = state.generation;
+            for (query, interest) in state.interests.iter_mut() {
+                let window = matches!(
+                    query,
+                    UsageQuery::Project { .. } | UsageQuery::AllProjects { .. }
+                );
+                let usable = window && !interest.dirty && !interest.computing;
+                let (Some(watched), true, Some(texts)) =
+                    (interest.watched.as_mut(), usable, texts.as_ref())
+                else {
+                    interest.dirty = true;
+                    continue;
+                };
+                if out.facts_unknown {
+                    interest.dirty = true;
+                    continue;
+                }
+                watched.add_texts(texts);
+                let applied = watched.apply(out.commit, &out.facts, out.inheritance_unknown);
+                let header_moved = interest
+                    .snapshot
+                    .as_deref()
+                    .is_some_and(|s| state_of(s) != Some(&usage_state));
+                match applied {
+                    Applied::Recompute => interest.dirty = true,
+                    Applied::Changed | Applied::Unchanged
+                        if applied == Applied::Changed || header_moved =>
+                    {
+                        generation += 1;
+                        let s = watched.snapshot(usage_state.clone());
+                        interest.snapshot = Some(Arc::new(with_generation(s, generation)));
+                        changed.push((query.clone(), generation));
+                    }
+                    Applied::Changed | Applied::Unchanged => {}
+                }
+            }
+            state.generation = generation;
+        }
+        let emitter = self.state().handle.as_ref().map(PluginHandle::emitter);
+        if let Some(emitter) = emitter {
+            for (query, generation) in changed {
+                emitter.emit(UsageEvent::Changed { query, generation });
+            }
+        }
+    }
+
+    /// One step of background maintenance, in a quiet stretch with nothing
+    /// to read: the archive plan when due, else one archive step (one
+    /// segment), else one reclaim batch.
+    fn maintain(&self) {
+        let Some(store) = self.store() else {
+            self.state().reading = false;
+            return;
+        };
+        let now = self.deps.time.now_ms();
+        let zone = self.deps.zone.as_ref();
+        let (check, month) = {
+            let state = self.state();
+            (
+                state.maintenance.check,
+                state.maintenance.months.front().copied(),
+            )
+        };
+        let mut archived = false;
+        if check {
+            match store.archive_plan(now, zone) {
+                Ok(plan) => {
+                    if !plan.is_empty() {
+                        info!("archive due"; months = plan.len());
+                    }
+                    let mut state = self.state();
+                    state.maintenance.months = plan.into();
+                    state.maintenance.check = false;
+                    state.maintenance.reclaim = true;
+                }
+                Err(e) => {
+                    warn!("archive plan failed"; sqlite = e.code());
+                    self.state().maintenance.check = false;
+                }
+            }
+            self.arm_archive_check(now);
+        } else if let Some(m) = month {
+            let done = match store.archive_step(m, now, zone) {
+                Ok(Stepped::Segment {
+                    table,
+                    rows,
+                    raw_bytes,
+                    packed_bytes,
+                    finished,
+                }) => {
+                    debug!(
+                        "cold segment written";
+                        month = m,
+                        table = table,
+                        rows = rows,
+                        raw_bytes = raw_bytes,
+                        packed_bytes = packed_bytes
+                    );
+                    archived = true;
+                    finished
+                }
+                Ok(Stepped::Started) => false,
+                Ok(Stepped::Finished) => {
+                    archived = true;
+                    true
+                }
+                Ok(Stepped::Mismatch) => true,
+                Err(e) => {
+                    if e.is_corrupt() {
+                        self.spawn(true, |engine| engine.repair());
+                    } else {
+                        warn!("archive step failed"; month = m, sqlite = e.code());
+                    }
+                    true
+                }
+            };
+            if done {
+                if archived {
+                    info!("month archived"; month = m);
+                }
+                self.state().maintenance.months.pop_front();
+            }
+        } else {
+            match store.reclaim(&cold::RECLAIM) {
+                Ok(Some(pages)) => debug!("free pages given back"; pages = pages),
+                Ok(None) => self.state().maintenance.reclaim = false,
+                Err(e) => {
+                    warn!("reclaim failed"; sqlite = e.code());
+                    self.state().maintenance.reclaim = false;
+                }
+            }
+        }
+        {
+            let mut state = self.state();
+            state.reading = false;
+            if archived {
+                for (query, interest) in state.interests.iter_mut() {
+                    if matches!(query, UsageQuery::History { .. }) {
+                        interest.dirty = true;
+                    }
+                }
+            }
+        }
+        self.compute();
+        self.pump();
+    }
+
+    /// The archive plan is asked again at the next local midnight.
+    fn arm_archive_check(&self, now: i64) {
+        let next = window::next_midnight(now, self.deps.zone.as_ref());
+        {
+            let mut state = self.state();
+            if state.maintenance.midnight.is_some_and(|m| m <= next) {
+                return;
+            }
+            state.maintenance.midnight = Some(next);
+        }
+        let fire = self.timer(move |engine| {
+            {
+                let mut state = engine.state();
+                if state.maintenance.midnight == Some(next) {
+                    state.maintenance.midnight = None;
+                }
+                state.maintenance.check = true;
+            }
+            engine.arm_pace();
+        });
+        self.deps.time.at_wall(next, fire);
     }
 
     /// Ends the backfill once none of its sessions waits.
@@ -601,6 +851,7 @@ impl Engine {
                 inheritance_unknown: summary.inheritance_unknown,
                 start: &start,
             },
+            from: &cursor,
             batch: &batch,
             places: &places,
             stamp,
@@ -610,10 +861,15 @@ impl Engine {
                 .adapter_version()
                 .is_some_and(|v| batch.cursor.adapter_version() != Some(v));
         match store.ingest(&input) {
+            // A salvage reset the cursor while this batch was read: read
+            // again from the saved one.
+            Ok(out) if out.stale => {
+                debug!("batch read across a salvage dropped"; offset = cursor.offset());
+                Read::Stale
+            }
             Ok(out) => Read::Done {
-                at_end: out.at_end,
-                to: out.to,
                 adapter_changed,
+                out: Box::new(out),
             },
             Err(e) => self.store_failed(&store, &e),
         }
@@ -753,7 +1009,7 @@ impl Engine {
             if state.stopped
                 || state.pace.allowed
                 || state.pace.timer == Some(quiet)
-                || state.dirty.is_empty()
+                || (state.dirty.is_empty() && !state.maintenance.pending())
             {
                 return;
             }
@@ -896,6 +1152,7 @@ impl Engine {
                     .find(|(_, i)| i.dirty)
                     .map(|(q, i)| {
                         i.dirty = false;
+                        i.computing = true;
                         q.clone()
                     });
                 match next {
@@ -906,13 +1163,30 @@ impl Engine {
                     }
                 }
             };
-            let snapshot = self.compute_one(&query);
+            let computed = self.compute_one(&query);
+            let usage_state = self.usage_state();
             let generation = {
                 let mut state = self.state();
                 state.generation += 1;
                 let generation = state.generation;
                 let Some(interest) = state.interests.get_mut(&query) else {
                     continue;
+                };
+                interest.computing = false;
+                let snapshot = match computed {
+                    Some(Computed::Watched(w)) => {
+                        let s = w.snapshot(usage_state);
+                        interest.watched = Some(w);
+                        Some(s)
+                    }
+                    Some(Computed::Snapshot(s)) => {
+                        interest.watched = None;
+                        Some(s)
+                    }
+                    None => {
+                        interest.watched = None;
+                        None
+                    }
                 };
                 interest.snapshot = snapshot.map(|s| Arc::new(with_generation(s, generation)));
                 generation
@@ -959,7 +1233,7 @@ impl Engine {
         }
     }
 
-    fn compute_one(&self, query: &UsageQuery) -> Option<UsageSnapshot> {
+    fn compute_one(&self, query: &UsageQuery) -> Option<Computed> {
         let now = self.deps.time.now_ms();
         let open = self.state().open.clone();
         if matches!(
@@ -978,7 +1252,8 @@ impl Engine {
                 self.deps.zone.as_ref(),
                 &open,
                 projects.as_deref(),
-            );
+            )
+            .map(Computed::Snapshot);
         };
         let context = Context {
             store: &store,
@@ -988,7 +1263,7 @@ impl Engine {
             open: &open,
             state: self.usage_state(),
         };
-        match compute(&context, query) {
+        match compute_full(&context, query) {
             Ok(s) => s,
             Err(e) => {
                 self.query_failed(&e);
@@ -1090,13 +1365,66 @@ impl Context<'_> {
 
 /// The snapshot of a query; None for a project the database does not know
 /// and for the queries of later steps.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn compute(
     cx: &Context<'_>,
     query: &UsageQuery,
 ) -> Result<Option<UsageSnapshot>, StoreError> {
+    Ok(compute_full(cx, query)?.map(|c| match c {
+        Computed::Watched(w) => w.snapshot(cx.state.clone()),
+        Computed::Snapshot(s) => s,
+    }))
+}
+
+/// A query computed from the database: a window's accumulators (kept to
+/// apply later commits' deltas), or a snapshot computed whole every time.
+pub(crate) enum Computed {
+    Watched(Watched),
+    Snapshot(UsageSnapshot),
+}
+
+pub(crate) fn compute_full(
+    cx: &Context<'_>,
+    query: &UsageQuery,
+) -> Result<Option<Computed>, StoreError> {
     match query {
         UsageQuery::Project { project, window } => {
             let days = window::days(*window, cx.now_ms, cx.zone);
+            let Some(row) = project_row(cx, project)? else {
+                return Ok(None);
+            };
+            // A project never opened has its one location; an opened one
+            // claims directories, and a newer location may be one of them.
+            let (locations, max_location) = if row.opened {
+                let owners = Owners::new(&cx.store.projects()?, &cx.store.dir_locations()?);
+                (owners.locations_of(row.id), owners.max_location)
+            } else {
+                (vec![row.location], i64::MAX)
+            };
+            let totals = cx.store.sums_at(&locations, range_of(&days))?;
+            Ok(Some(Computed::Watched(Watched::project(
+                snapshot::info(&row, cx.open),
+                *window,
+                &days,
+                locations,
+                max_location,
+                &totals,
+            ))))
+        }
+        UsageQuery::AllProjects { window } => {
+            let days = window::days(*window, cx.now_ms, cx.zone);
+            let owners = Owners::new(&cx.store.projects()?, &cx.store.dir_locations()?);
+            let totals = cx.store.sums_all(range_of(&days))?;
+            Ok(Some(Computed::Watched(Watched::all(
+                *window, &days, owners, cx.open, &totals,
+            ))))
+        }
+        UsageQuery::History {
+            project,
+            from,
+            to,
+            days,
+        } => {
             let Some(row) = project_row(cx, project)? else {
                 return Ok(None);
             };
@@ -1105,33 +1433,23 @@ pub(crate) fn compute(
             } else {
                 vec![row.location]
             };
-            let totals = cx.store.sums_at(&locations, range_of(&days))?;
-            Ok(Some(UsageSnapshot::Project(snapshot::project(
-                cx.header(totals.may_include_inherited),
-                snapshot::info(&row, cx.open),
-                *window,
-                &days,
-                &totals,
-            ))))
-        }
-        UsageQuery::AllProjects { window } => {
-            let days = window::days(*window, cx.now_ms, cx.zone);
-            let owners = Owners::new(&cx.store.projects()?, &cx.store.dir_locations()?);
-            let totals = cx.store.sums_all(range_of(&days))?;
-            Ok(Some(UsageSnapshot::All(snapshot::all(
-                cx.header(totals.may_include_inherited),
-                *window,
-                &days,
-                &totals,
-                &owners,
-                cx.open,
+            let totals = cx.store.history(&locations, *from, *to, *days, cx.zone)?;
+            let range = window::start(*from, cx.zone)
+                ..window::start(window::date_of(window::day_number(*to) + 1), cx.zone);
+            let inherited = cx.store.inherited_in(&locations, range)?;
+            Ok(Some(Computed::Snapshot(UsageSnapshot::History(
+                snapshot::history(
+                    cx.header(inherited),
+                    snapshot::info(&row, cx.open),
+                    *from,
+                    &totals,
+                ),
             ))))
         }
         // Later steps of docs/design/usage.md「验收」.
-        UsageQuery::Worktree { .. }
-        | UsageQuery::Session { .. }
-        | UsageQuery::Mr { .. }
-        | UsageQuery::History { .. } => Ok(None),
+        UsageQuery::Worktree { .. } | UsageQuery::Session { .. } | UsageQuery::Mr { .. } => {
+            Ok(None)
+        }
     }
 }
 
@@ -1214,6 +1532,14 @@ fn project_row(cx: &Context<'_>, project: &ProjectRef) -> Result<Option<ProjectR
     }
 }
 
+fn state_of(snapshot: &UsageSnapshot) -> Option<&UsageState> {
+    match snapshot {
+        UsageSnapshot::Project(p) => Some(&p.header.state),
+        UsageSnapshot::All(a) => Some(&a.header.state),
+        _ => None,
+    }
+}
+
 fn with_generation(snapshot: UsageSnapshot, generation: u64) -> UsageSnapshot {
     match snapshot {
         UsageSnapshot::Project(mut p) => {
@@ -1223,6 +1549,10 @@ fn with_generation(snapshot: UsageSnapshot, generation: u64) -> UsageSnapshot {
         UsageSnapshot::All(mut a) => {
             a.header.generation = generation;
             UsageSnapshot::All(a)
+        }
+        UsageSnapshot::History(mut h) => {
+            h.header.generation = generation;
+            UsageSnapshot::History(h)
         }
         other => other,
     }
@@ -1234,16 +1564,17 @@ fn is_active(s: &SessionSummary, now: i64) -> bool {
 
 enum Read {
     Done {
-        at_end: bool,
-        to: u64,
         /// The batch replays from the start because the cursor came from
         /// another adapter version.
         adapter_changed: bool,
+        out: Box<Ingested>,
     },
     /// The session or its source no longer exists.
     Gone,
     /// Not readable now; read again after the next `SessionsChanged`.
     Later,
+    /// Discarded: the saved cursor moved meanwhile (a salvage).
+    Stale,
     /// The database refused the write.
     Blocked,
 }
@@ -1256,6 +1587,8 @@ impl Usage for Engine {
                 count: 0,
                 snapshot: None,
                 dirty: true,
+                computing: false,
+                watched: None,
             });
             interest.count += 1;
         }

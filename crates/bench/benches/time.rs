@@ -39,6 +39,8 @@ mod review;
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
 mod syntax_engine;
+#[path = "time/usage.rs"]
+mod usage;
 
 use std::process::ExitCode;
 
@@ -147,6 +149,16 @@ const BENCHES: &[Bench] = &[
     syntax::SCAN_64MIB,
     syntax::FIND_16MIB,
     syntax::PREFETCH_WAIT,
+    usage::INGEST_APPEND_4K,
+    usage::BACKFILL_BATCH,
+    usage::BACKFILL_LARGE_SESSION,
+    usage::PROJECT_30D,
+    usage::ALL_PROJECTS_30D,
+    usage::SNAPSHOT_INCREMENT,
+    usage::ARCHIVE_MONTH,
+    usage::COLD_READ_MONTH,
+    usage::DISK_DAY_HEAVY,
+    usage::PLUGIN_ACTIVATE,
 ];
 
 fn main() -> ExitCode {

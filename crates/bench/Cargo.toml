@@ -44,6 +44,7 @@ lectern-project = { path = "../project", features = ["test-support"] }
 lectern-review = { path = "../review", features = ["test-support"] }
 lectern-services = { path = "../services" }
 lectern-syntax = { path = "../syntax", features = ["test-support"] }
+lectern-usage = { path = "../usage", features = ["test-support"] }
 tempfile.workspace = true
 
 # In-process timing; the counting allocator stays out of it.

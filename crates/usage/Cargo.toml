@@ -12,8 +12,8 @@ layer = "domain"
 plugin = true
 
 [features]
-# testing::FakeSessions, FakeProjects, TableZone and ManualTime, for the tests
-# of this crate and for lectern-bench.
+# testing::FakeSessions, FakeProjects, TableZone, ManualTime, Scenario and the
+# heavy_days fixture, for the tests of this crate and for lectern-bench.
 test-support = [
     "dep:serde",
     "dep:serde_json",
@@ -33,6 +33,8 @@ lectern-logging = { path = "../logging" }
 lectern-services = { path = "../services" }
 # This crate's own database (ADR 0027).
 rusqlite.workspace = true
+# The cold segments' compression (docs/design/usage.md「冷热分层」, ADR 0026).
+ruzstd.workspace = true
 # The JSON record scripts of testing::FakeSessions.
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

@@ -227,6 +227,13 @@ impl Harness {
         id: &str,
         max: u64,
     ) -> Result<Ingested, crate::store::StoreError> {
+        let read = self.read_batch(fake, id, max);
+        self.commit(&read)
+    }
+
+    /// The first half of a read, as the engine does it outside any
+    /// transaction: the saved cursor, then the batch from it.
+    pub(crate) fn read_batch(&self, fake: &FakeSessions, id: &str, max: u64) -> PendingRead {
         let key = fake.key(id);
         let summary = lectern_services::session::SessionSource::sessions(fake)
             .get(&key)
@@ -243,17 +250,32 @@ impl Harness {
                 places.insert(cwd.to_path_buf(), self.place(&summary, cwd));
             }
         }
+        PendingRead {
+            summary,
+            cursor,
+            batch,
+            stamp,
+            places,
+            start,
+        }
+    }
+
+    /// The second half: stores the batch (the cursor it was read from may
+    /// be stale by now).
+    pub(crate) fn commit(&self, read: &PendingRead) -> Result<Ingested, crate::store::StoreError> {
+        let summary = &read.summary;
         self.store().ingest(&Ingest {
             session: SessionInfo {
-                key: &key,
+                key: &summary.key,
                 agent: &summary.agent,
                 parent: summary.parent.as_ref().map(|p| &p.session),
                 inheritance_unknown: summary.inheritance_unknown,
-                start: &start,
+                start: &read.start,
             },
-            batch: &batch,
-            places: &places,
-            stamp,
+            from: &read.cursor,
+            batch: &read.batch,
+            places: &read.places,
+            stamp: read.stamp,
         })
     }
 
@@ -308,6 +330,36 @@ impl Harness {
         compute(&cx, query).unwrap()
     }
 
+    /// A window query's accumulators, computed in full.
+    pub(crate) fn watched(&self, query: &UsageQuery) -> crate::snapshot::Watched {
+        let cx = Context {
+            store: self.store(),
+            projects: Some(&self.projects),
+            zone: &self.zone,
+            now_ms: self.now,
+            open: &self.open,
+            state: UsageState::Ready,
+        };
+        match crate::engine::compute_full(&cx, query).unwrap() {
+            Some(crate::engine::Computed::Watched(w)) => w,
+            _ => panic!("not a window query"),
+        }
+    }
+
+    /// Applies a stored batch's fact deltas, as the engine does.
+    pub(crate) fn apply(
+        &self,
+        watched: &mut crate::snapshot::Watched,
+        out: &Ingested,
+    ) -> crate::snapshot::Applied {
+        if out.facts_unknown {
+            return crate::snapshot::Applied::Recompute;
+        }
+        let texts = self.store().texts(&watched.missing(&out.facts)).unwrap();
+        watched.add_texts(&texts);
+        watched.apply(out.commit, &out.facts, out.inheritance_unknown)
+    }
+
     pub(crate) fn project(&self, key: &ProjectKey, window: Window) -> ProjectUsage {
         match self.snapshot(&UsageQuery::Project {
             project: ProjectRef::Open(key.clone()),
@@ -359,6 +411,16 @@ impl Harness {
     pub(crate) fn total(&self) -> Tokens {
         self.all(Window::D30).total
     }
+}
+
+/// A batch read but not stored yet.
+pub(crate) struct PendingRead {
+    pub(crate) summary: SessionSummary,
+    pub(crate) cursor: lectern_services::session::Cursor,
+    pub(crate) batch: lectern_services::session::Batch,
+    pub(crate) stamp: Option<FileStamp>,
+    pub(crate) places: HashMap<PathBuf, Place>,
+    pub(crate) start: Place,
 }
 
 /// What reopening found.
@@ -445,6 +507,27 @@ pub(crate) fn render_all(a: &AllUsage) -> String {
         }
     }
     out
+}
+
+/// Checks that `fact_bucket` is the facts summed per bucket (a settled
+/// database: no month half archived).
+pub(crate) fn assert_buckets(h: &Harness) {
+    let conn = rusqlite::Connection::open(h.db_path()).unwrap();
+    let rows = |sql: &str| -> Vec<Vec<i64>> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        stmt.query_map([], |r| (0..10).map(|i| r.get(i)).collect())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let facts = rows(
+        "SELECT bucket, location, agent, model, review, sum(input), sum(output),
+                sum(cache_read), sum(cache_write), count(*)
+         FROM fact GROUP BY bucket, location, agent, model, review
+         ORDER BY bucket, location, agent, model, review",
+    );
+    let buckets = rows("SELECT * FROM fact_bucket ORDER BY bucket, location, agent, model, review");
+    assert_eq!(buckets, facts, "fact_bucket is not the sum of the facts");
 }
 
 /// Checks that rows add up to the total kind by kind.
