@@ -50,8 +50,9 @@ pub fn ident(b: u8) -> bool {
 /// is complete by itself, and cutting after one would leave the
 /// definition it names in neither window, so there a child counts only
 /// when it ends as a statement does: the next child starts on a later
-/// line (or none follows; a piece shares its line with the rest of its
-/// construct), or its last byte is `;` (one minified line).
+/// line (or none follows but a line break does; a piece shares its line
+/// with the rest of its construct), or its last byte is `;` (one minified
+/// line).
 pub(crate) fn tree_cut(tree: &Tree, window: &[u8]) -> Option<usize> {
     let len = window.len();
     let mut node = tree.root_node();
@@ -82,7 +83,14 @@ pub(crate) fn tree_cut(tree: &Tree, window: &[u8]) -> Option<usize> {
                 }
             }
         }
-        if let Some(p) = pending {
+        // The last one, when a line break follows it: with nothing after it
+        // on its line it ended as a statement does. Not otherwise: on the
+        // window's last line it may be complete only because the window
+        // ends there (`return` before ` f(x)}` in one minified line, closed
+        // by an automatic semicolon), the same rule as `syntax`'s cut.
+        if let Some(p) = pending
+            && node.end_position().row > p.end_position().row
+        {
             complete = Some(p.end_byte());
         }
         if complete.is_some() {

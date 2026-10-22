@@ -749,3 +749,48 @@ fn window_racy_and_resume_rules() {
         }
     );
 }
+
+#[test]
+fn window_cut_ignores_a_last_piece_ended_by_the_window() {
+    // One minified line: the window ends after `return ` inside
+    // `run:function(x){return f2(x,2)}`. Alone, `return` is a complete
+    // statement (an automatic semicolon) ending one byte before the
+    // window's end, the last child of the `ERROR` root with nothing after
+    // it on its line. Cutting there would split `o2`'s object literal
+    // across windows: the cut is the last `;` before it.
+    let js = lang("js");
+    let mut text = String::from("!function(e,t){\"use strict\";");
+    for i in 0..3 {
+        text.push_str(&format!(
+            "function f{i}(a,b){{var c=a+b*{i},d=[1,2,c];if(c>10&&d.length){{return c*2}}\
+             for(var k=0;k<d.length;k++){{c+=d[k]%3?d[k]:-d[k]}}\
+             return\"v\"+c+'s'}}var o{i}={{key:\"k{i}\",run:function(x){{return f{i}(x,{i})}},n:{i}.5}};"
+        ));
+    }
+    let end = text.rfind("{return f2").unwrap() + "{return ".len();
+    let window = &text.as_bytes()[..end];
+    let o1 = text.find("n:1.5};").unwrap() + "n:1.5};".len();
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(js.language()).unwrap();
+    let tree = parser.parse(window, None).unwrap();
+    assert!(tree.root_node().is_error());
+    assert_eq!(tree_cut(&tree, window), Some(o1), "after `var o1={{…}};`");
+    // The same window with a line break after `return `: the line break
+    // ends it as a statement.
+    let broken = [window, b"\n"].concat();
+    let tree = parser.parse(&broken[..], None).unwrap();
+    assert_eq!(tree_cut(&tree, &broken), Some(end - 1));
+    let watchdog = test_watchdog();
+    let deadline = Deadline::interactive(&watchdog);
+    let cancel = Arc::new(AtomicBool::new(false));
+    match extract_window(&js, window, CutRule::Tree, &deadline, &cancel) {
+        Windowed::Cut(e, cut) => {
+            assert_eq!(cut, o1);
+            // `f2` and `o2`'s `run` are the next window's.
+            let names: Vec<&str> = e.defs.iter().map(|d| &*d.name).collect();
+            assert_eq!(names, ["f0", "run", "f1", "run"]);
+        }
+        _ => panic!("a cut"),
+    }
+    watchdog.stop();
+}

@@ -12,7 +12,7 @@
 - 解析和高亮查询只在 executor 的线程上运行，UI 线程不调用本 crate 的阻塞函数。每次调用、每次 `step` 进入 tree-sitter 之前在调用的线程上 `health` 登记这一次的预算，返回时（任何结果）drop 守卫；两次 `step` 之间不在表里。得到 None 时这种语言显示纯文本。
 - `window` 模块是纯计算，只看传入的切片；新规则不得从文件开头扫描或用行索引（ADR 0034「首屏路径的准备工作」）。
 - 分片的解析（`FullParse`、`ChainWindow`）在两次 `step` 之间保留 tree-sitter 的解析器和查询进度；查询按 8 KiB 的字节块跑，被块尾截断的区间在下一块开头接上，所以分片的结果与一次查询整棵树相同（`highlight::one_shot` 是测试里的对照）。改捕获解析或分块方式时，`deadline_*` 和 `spans_*` 的对照必须仍然逐个 token 相同。
-- 窗口链的切点规则在 `src/cut.rs`，与 `crates/code_intel/src/window.rs` 同源；`ERROR` 节点里最后一个子节点的判定不同（见设计「与设计的差异」第 2 步），改其中一边时对照另一边。
+- 窗口链的切点规则在 `src/cut.rs`，与 `crates/code_intel/src/window.rs` 同源、规则相同（`ERROR` 节点里最后一个子节点要求它后面在这个节点里还有换行，见设计「与设计的差异」第 2 步，code_intel 随后采用同一条件），改其中一边时对照另一边。
 - 首帧之前不做任何事：`Languages::core()` 只建表，不编译查询、不做 IO；查询在第一次高亮时编译。
 - 核心语言只在 `src/lang.rs` 的 `CORE_LANGUAGES` 和两个 `Cargo.toml` 的 grammar 依赖里列出；名字和扩展名与 `code_intel` 的语言表一致。
 - 高亮查询在 `queries/<语言>/highlights.scm`，文件头写上游文件、版本、commit、版权行、这个查询用的优先规则（同一节点被几个模式捕获时取第一个还是最后一个）和 Lectern 的改动；MIT 的许可声明在 `queries/NOTICE`。JavaScript、TypeScript、TSX 由 `ecmascript`、`js`、`jsx`、`ts` 几个文件拼成。

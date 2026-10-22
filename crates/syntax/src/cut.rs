@@ -66,7 +66,7 @@ pub(crate) fn tree_cut(tree: &Tree, window: &dyn Bytes, len: usize) -> Option<us
         // on its line it ended as a statement does. Not otherwise: on the
         // window's last line it may be complete only because the window
         // ends there (`return` before ` f(x)}` in one minified line, closed
-        // by an automatic semicolon), unlike code_intel's rule.
+        // by an automatic semicolon), the same rule as code_intel's cut.
         if let Some(p) = pending
             && node.end_position().row > p.end_position().row
         {
