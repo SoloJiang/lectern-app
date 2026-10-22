@@ -1058,13 +1058,13 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 ### 日志与诊断
 
-日志的接口随 ADR 0046（#170）合并，第 3 步的审阅引擎还没有日志调用。下面是接入时要记的事件，按 ADR 0046 的级别和格式补上。
+按 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。`lectern-logging` crate 还没有合并，第 3 步的审阅引擎没有日志调用；下面是接入时要记的事件（target 为 `review`）。默认过滤记到 info，详细模式是用户在设置里开启的 debug。
 
 - 默认记录：
   - warn：改动集取不到（`ChangeError` 的种类）；标注日志读取失败、只读了最后 64 MiB、文件头的仓库不符被改名、追加失败、压缩失败（IO 错误的种类和日志文件名）；改动步 `load` 失败或给出的不是改动（会话键和 `ContentRef`，这一步按应用不上处理）；`tree_changes` 失败（两个提交的 OID，这条记录按改变了全部路径处理）。
   - info：打开审阅到第一份 `Ready` 快照的耗时和分项（定位与 reflog、`fetch`、审阅对象的 `turns`、截止时刻、声明、第一个文件的归因），后台完成时的耗时和因声明或截止时刻补齐而重新准备的轮数；基准的来源（`BaseHow`）。
-- 详细模式（用户打开）：每一轮的种类（打开、刷新、补齐后重新准备）；截止时刻表的命中数、未命中数和留给后台的记录数；声明的命中、失效（`last_activity` 或适配器版本不同）与缺失的会话数；每个文件的归因是否命中 `review.attribution`、改动步数、Drifted 的 hunk 数；`Prepare` 的键和耗时；中间版本 LRU 的字节数。
-- 关联 ID：`ReviewId` 加轮次序号；会话键（来源 ID、会话 ID）；仓库用标注日志文件名里的哈希 `h`，worktree 用相对公共目录的 git 目录（与标注日志的 `target` 相同）；文件用 `FileKey`。路径只在详细模式里记，非 UTF-8 的字节替换掉。
+- 详细模式（debug）：每一轮的种类（打开、刷新、补齐后重新准备）；截止时刻表的命中数、未命中数和留给后台的记录数；声明的命中、失效（`last_activity` 或适配器版本不同）与缺失的会话数；每个文件的归因是否命中 `review.attribution`、改动步数、Drifted 的 hunk 数；`Prepare` 的键和耗时；中间版本 LRU 的字节数。
+- 关联 ID：任务里设置 logging 的作用域（`Ctx`）：`review` 是审阅对象的 64 位哈希，取 SHA-256（仓库的哈希 `h`、标注日志里 `target` 的编码）的前 8 字节，同一审阅对象跨运行相同；`session` 是审阅对象会话的 UUID；`task` 由 executor 填。字段另带 `ReviewId`、轮次序号和会话键（来源 ID、会话 ID）。仓库用标注日志文件名里的哈希 `h`，worktree 用相对公共目录的 git 目录（与标注日志的 `target` 相同）；文件用 `FileKey`。路径只在详细模式里记，非 UTF-8 的字节替换掉。
 - 不记：文件内容、改动步的正文（`load` 的结果）、prompt、agent 说明、命令文本、diff 的行；凭据和 token。
 
 ## 性能
@@ -1346,4 +1346,4 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **本次运行的声明留在内存里**：审阅对象自己的和后台为其他会话派生的声明按会话键保存在引擎里（`last_activity` 相同才用），`tail_pending` 的会话派生的声明只在内存里用、不写 `review.claims`。截止时刻表按 worktree 保存，记录或改动集的路径变了就从 `review.tree_changes` 重建，不按 `RepoBatch::reflog` 增量更新（随第 4 步的监听）。关闭审阅时释放没有打开的审阅用到的 worktree 的表和 git 句柄、会话的声明，没有打开的审阅时清空版本 LRU 和内存里的祖先判断。
 - **`ReviewError` 的映射**：会话不在列表里、`Place::Missing`、worktree 不在项目快照里或已 prunable、`turns` 返回 `NotFound` 为 `Missing`；未归位或项目没打开为 `NotInOpenProject`；审阅对象自己的 `turns` 返回 `Unrecognized` 或 `Io` 时都按认不出格式处理（`Degraded::UnrecognizedSession`）。
 - **测试支持多于「本 crate 的公开项」**：`testing` 另有 `write_reflog`（写 `logs/HEAD`）、`Driven::with_budget`（把 `Interactive` 上计算 `tree_changes` 的 5 ms 预算设为别的值，测试用 0）、`Driven::touch_cache`、`Driven::attribute_uncached`，以及 bench 的夹具 `SessionFixture`、`MarkSeenFixture`。`FakeSessions` 的脚本在测试里用 `serde_json::json!` 拼出（格式写在 `src/testing/fake.rs`），没有放进 `tests/fixtures/sessions/`：会话的 cwd 是 `TestRepo` 的临时目录，每次不同。
-- **没有日志调用**：日志的接口（ADR 0046）还没合并，要记的事件写在「日志与诊断」。
+- **没有日志调用**：ADR 0046 和 logging 设计已经合并，`lectern-logging` crate 还没有，要记的事件和关联 ID 写在「日志与诊断」。
