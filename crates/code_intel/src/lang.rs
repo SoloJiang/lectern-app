@@ -6,11 +6,13 @@ use std::ffi::CString;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
+use lectern_logging::error;
 use tree_sitter::{CaptureQuantifier, Query};
 use tree_sitter_tags::TagsConfiguration;
 
+use crate::diag::{self, CompileError};
 use crate::grammar::{GrammarLease, GrammarSource, LoadedGrammar};
-use crate::util::{fnv64, log};
+use crate::util::fnv64;
 use crate::{DefKind, LangName};
 
 /// Bumped when the extractor's own rules change (visibility, parameter
@@ -40,6 +42,20 @@ pub(crate) enum Dialect {
 }
 
 impl Dialect {
+    /// The dialect's name, for the log.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Dialect::TypeScript => "ts",
+            Dialect::Tsx => "tsx",
+            Dialect::JavaScript => "js",
+            Dialect::Rust => "rust",
+            Dialect::Java => "java",
+            Dialect::Python => "python",
+            Dialect::Go => "go",
+            Dialect::Pack => "pack",
+        }
+    }
+
     /// TypeScript, TSX or JavaScript: files with module specifiers.
     pub(crate) fn is_ecma(self) -> bool {
         matches!(
@@ -295,7 +311,7 @@ impl Lang {
     /// Compiles the queries now if they are not yet, `ParsedFile`'s
     /// [`SiteQuery`] included. Blocking; background threads only. False
     /// when the grammar or a query does not compile: the language is then
-    /// unavailable for this run (one line on stderr).
+    /// unavailable for this run (an error in the log).
     pub fn prepare(&self) -> bool {
         self.compiled().is_some()
             && (!self.walks() || (self.site_query().is_some() && self.jump_query().is_some()))
@@ -344,11 +360,15 @@ impl Lang {
             .compiled
             .get_or_init(|| match Compiled::new(&self.0) {
                 Ok(compiled) => Some(Arc::new(compiled)),
-                Err(error) => {
-                    log(format_args!(
-                        "the {} grammar or its queries do not compile, the language is disabled: {error}",
-                        self.0.name.0
-                    ));
+                Err(e) => {
+                    error!(
+                        "the tags queries do not compile; the language is disabled for this run";
+                        lang = diag::lang(self),
+                        grammar = diag::grammar(self),
+                        error = e.kind,
+                        row = e.row,
+                        column = e.column,
+                    );
                     None
                 }
             })
@@ -356,17 +376,21 @@ impl Lang {
     }
 
     /// `SiteQuery`, compiled on first use, on the calling (background)
-    /// thread; None when it does not compile (one line on stderr).
+    /// thread; None when it does not compile (an error in the log).
     pub(crate) fn site_query(&self) -> Option<&SiteQuery> {
         self.0
             .site
             .get_or_init(|| match SiteQuery::new(&self.0) {
                 Ok(query) => Some(query),
-                Err(error) => {
-                    log(format_args!(
-                        "the {} queries do not compile, the language is disabled: {error}",
-                        self.0.name.0
-                    ));
+                Err(e) => {
+                    error!(
+                        "the site query does not compile; the language is disabled for this run";
+                        lang = diag::lang(self),
+                        grammar = diag::grammar(self),
+                        error = e.kind,
+                        row = e.row,
+                        column = e.column,
+                    );
                     None
                 }
             })
@@ -380,11 +404,15 @@ impl Lang {
             .jump
             .get_or_init(|| match SiteQuery::jump(&self.0) {
                 Ok(query) => Some(query),
-                Err(error) => {
-                    log(format_args!(
-                        "the {} queries do not compile, the language is disabled: {error}",
-                        self.0.name.0
-                    ));
+                Err(e) => {
+                    error!(
+                        "the jump query does not compile; the language is disabled for this run";
+                        lang = diag::lang(self),
+                        grammar = diag::grammar(self),
+                        error = e.kind,
+                        row = e.row,
+                        column = e.column,
+                    );
                     None
                 }
             })
@@ -547,7 +575,7 @@ struct Classified<'q> {
     locals_patterns: usize,
 }
 
-fn classify(query: &Query, locals_len: usize) -> Result<Classified<'_>, String> {
+fn classify(query: &Query, locals_len: usize) -> Result<Classified<'_>, CompileError> {
     let mut kinds: Vec<&str> = Vec::new();
     for name in query.capture_names() {
         let Some(kind) = name
@@ -567,8 +595,7 @@ fn classify(query: &Query, locals_len: usize) -> Result<Classified<'_>, String> 
             // so it never becomes a tag.
             Some("local") => TagClass::Ref,
             Some(marker) => TagClass::Marker(
-                Marker::from_kind(marker)
-                    .ok_or_else(|| format!("unknown marker reference.{kind}"))?,
+                Marker::from_kind(marker).ok_or(CompileError::other("unknown_marker"))?,
             ),
             None => TagClass::Ref,
         };
@@ -614,9 +641,9 @@ fn classify(query: &Query, locals_len: usize) -> Result<Classified<'_>, String> 
 }
 
 impl SiteQuery {
-    fn new(lang: &LangInner) -> Result<SiteQuery, String> {
+    fn new(lang: &LangInner) -> Result<SiteQuery, CompileError> {
         let source = format!("{}{}", lang.locals_query, lang.tags_query);
-        let mut query = Query::new(&lang.language, &source).map_err(|e| e.to_string())?;
+        let mut query = Query::new(&lang.language, &source)?;
         let Classified {
             captures,
             locals_patterns,
@@ -648,9 +675,9 @@ impl SiteQuery {
     /// query's verdict on one reference only, the site's, which
     /// `parse_at` takes from [`new`](Self::new)'s query run on the site's
     /// bytes; the reference tags only give `ParsedFile::references`.
-    fn jump(lang: &LangInner) -> Result<SiteQuery, String> {
+    fn jump(lang: &LangInner) -> Result<SiteQuery, CompileError> {
         let source = format!("{}{}", lang.locals_query, lang.tags_query);
-        let mut query = Query::new(&lang.language, &source).map_err(|e| e.to_string())?;
+        let mut query = Query::new(&lang.language, &source)?;
         let Classified {
             captures,
             locals_patterns,
@@ -678,10 +705,9 @@ impl SiteQuery {
 }
 
 impl Compiled {
-    fn new(lang: &LangInner) -> Result<Compiled, String> {
+    fn new(lang: &LangInner) -> Result<Compiled, CompileError> {
         let tags =
-            TagsConfiguration::new(lang.language.clone(), &lang.tags_query, &lang.locals_query)
-                .map_err(|e| e.to_string())?;
+            TagsConfiguration::new(lang.language.clone(), &lang.tags_query, &lang.locals_query)?;
         // tree-sitter-tags numbers the kinds after `definition.` and
         // `reference.` in capture order, one ID per distinct kind; the same
         // walk gives the same IDs, checked against `syntax_type_name`.
@@ -692,9 +718,9 @@ impl Compiled {
             locals_patterns,
         } = classify(&tags.query, lang.locals_query.len())?;
         for (id, kind) in kinds.iter().enumerate() {
-            let id = u32::try_from(id).map_err(|e| e.to_string())?;
+            let id = u32::try_from(id).map_err(|_| CompileError::other("syntax_type"))?;
             if tags.syntax_type_name(id) != *kind {
-                return Err(format!("syntax type {id} is not {kind:?}"));
+                return Err(CompileError::other("syntax_type"));
             }
         }
         Ok(Compiled {

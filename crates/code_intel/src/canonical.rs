@@ -4,10 +4,11 @@
 //! bytes. The overlay's re-read and the batch tiers' batches use it; a
 //! single file on an interactive path still calls `canonical_oid`.
 
+use lectern_logging::{Value, warn};
 use lectern_services::project::{BlobId, RelPath};
 
+use crate::diag;
 use crate::git_access::{GitAccess, Tree};
-use crate::util::log;
 
 /// At most this many items in one `canonical_oids` call.
 pub(crate) const CANONICAL_BATCH_ITEMS: usize = 256;
@@ -91,25 +92,48 @@ impl<T, B: AsRef<[u8]>> Pending<T, B> {
 /// tried again.
 fn check(git: &dyn GitAccess, tree: &Tree, items: &[(&str, &[u8])]) -> Vec<Canonical> {
     let of = |oid: Option<BlobId>| oid.map_or(Canonical::Filtered, Canonical::Oid);
-    let error = match git.canonical_oids(tree, items) {
+    // The failure as the log keeps it: the error's kind, its `io::Error`,
+    // and how many OIDs came back when the count was wrong.
+    let (error, io, oids) = match git.canonical_oids(tree, items) {
         Ok(oids) if oids.len() == items.len() => return oids.into_iter().map(of).collect(),
-        Ok(oids) => format!("{} OIDs for {} paths", oids.len(), items.len()),
-        Err(error) => error.to_string(),
+        Ok(oids) => ("count_mismatch", None, Some(oids.len())),
+        Err(e) => {
+            let (kind, io) = diag::git_error(&e);
+            (kind, io, None)
+        }
     };
-    if let [(path, _)] = items {
-        log(format_args!("converting {path} failed: {error}"));
+    if let [(path, bytes)] = items {
+        warn!(
+            "cannot convert a file to its canonical form; it is not indexed";
+            path = diag::path(path),
+            bytes = bytes.len(),
+            error = error,
+            io = io,
+            oids = oids,
+        );
         return vec![Canonical::Failed];
     }
-    log(format_args!(
-        "converting a batch of {} files failed ({error}): one by one",
-        items.len()
-    ));
+    warn!(
+        "converting a batch to canonical form failed; converting its files one by one";
+        root = Value::path(&tree.root),
+        files = items.len(),
+        error = error,
+        io = io,
+        oids = oids,
+    );
     items
         .iter()
         .map(|(path, bytes)| match git.canonical_oid(tree, path, bytes) {
             Ok(oid) => of(oid),
-            Err(error) => {
-                log(format_args!("converting {path} failed: {error}"));
+            Err(e) => {
+                let (error, io) = diag::git_error(&e);
+                warn!(
+                    "cannot convert a file to its canonical form; it is not indexed";
+                    path = diag::path(path),
+                    bytes = bytes.len(),
+                    error = error,
+                    io = io,
+                );
                 Canonical::Failed
             }
         })

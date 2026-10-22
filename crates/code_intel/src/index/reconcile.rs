@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 
 use lectern_executor::Priority;
 use lectern_git::HashKind;
+use lectern_logging::{Value, warn};
 use lectern_platform::{FileKind as SafeKind, Read, RelPath as SafeRel, SafeError, SafeRoot};
 use lectern_services::code_intel::{QueryError, QueryState};
 use lectern_services::project::{BlobId, FileKind, ProjectKey, ProjectSnapshot, RelPath, Scan};
@@ -20,13 +21,13 @@ use super::state::{Project, Published, State};
 use super::{Inner, bump, lock};
 use crate::LangName;
 use crate::canonical::{Canonical, Pending};
+use crate::diag;
 use crate::extract::BACKGROUND_MAX_LEN;
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{
     BaseMap, HeadDiff, IndexedHints, LangLookup, LiveMap, Overlay, Provenance, WorktreeState,
     find_path,
 };
-use crate::util::log;
 
 /// A reconcile stops after this many passes even with input left (it never
 /// should: `reconcile_settles_*` bound the passes per input change).
@@ -188,10 +189,11 @@ impl Inner {
                     break;
                 }
                 if pass == MAX_PASSES {
-                    log(format_args!(
-                        "the reconcile of {:?} did not settle in {MAX_PASSES} passes",
-                        project.key
-                    ));
+                    warn!(
+                        "the reconcile did not settle; the rest waits for the next event";
+                        project = diag::project(&project.key),
+                        passes = MAX_PASSES,
+                    );
                     break;
                 }
             }
@@ -487,8 +489,12 @@ impl Inner {
         };
         let root = match SafeRoot::open(&tree.root) {
             Ok(root) => Arc::new(root),
-            Err(error) => {
-                log(format_args!("cannot open {}: {error}", tree.root.display()));
+            Err(e) => {
+                warn!(
+                    "cannot open the worktree root; tried again on the next project event";
+                    root = Value::path(&tree.root),
+                    io = Value::io(&e),
+                );
                 return false;
             }
         };
@@ -529,8 +535,12 @@ impl Inner {
         };
         let root = match SafeRoot::open(&path) {
             Ok(root) => Arc::new(root),
-            Err(error) => {
-                log(format_args!("cannot open {}: {error}", path.display()));
+            Err(e) => {
+                warn!(
+                    "cannot open the folder root; tried again on the next project event";
+                    root = Value::path(&path),
+                    io = Value::io(&e),
+                );
                 return false;
             }
         };
@@ -572,7 +582,15 @@ impl Inner {
                     changed = true;
                 }
             }
-            Some(Err(error)) => log(format_args!("reading HEAD failed: {error}")),
+            Some(Err(e)) => {
+                let (error, io) = diag::git_error(&e);
+                warn!(
+                    "cannot read HEAD; tried again on the next event";
+                    root = Value::path(&tree.root),
+                    error = error,
+                    io = io,
+                );
+            }
             None => {}
         }
         match index {
@@ -583,7 +601,15 @@ impl Inner {
                     changed = true;
                 }
             }
-            Some(Err(error)) => log(format_args!("reading the index checksum failed: {error}")),
+            Some(Err(e)) => {
+                let (error, io) = diag::git_error(&e);
+                warn!(
+                    "cannot read the index checksum; tried again on the next event";
+                    root = Value::path(&tree.root),
+                    error = error,
+                    io = io,
+                );
+            }
             None => {}
         }
         changed
@@ -662,10 +688,16 @@ impl Inner {
         st.compare_for = Some(deps);
         let changed = match result {
             Ok(changed) => changed,
-            Err(error) => {
+            Err(e) => {
                 // Keep the overlay; the next event tries again. Until then
                 // the map lacks the worktree's content.
-                log(format_args!("comparing the worktree failed: {error}"));
+                let (error, io) = diag::git_error(&e);
+                warn!(
+                    "the worktree comparison failed; the overlay is kept until the next event";
+                    root = Value::path(&tree.root),
+                    error = error,
+                    io = io,
+                );
                 st.compare_failed = true;
                 return true;
             }

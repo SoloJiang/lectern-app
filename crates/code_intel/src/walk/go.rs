@@ -62,7 +62,7 @@ ids! {
 pub(super) struct Go(Ids);
 
 impl Go {
-    pub(super) fn new(language: &Language) -> Result<Go, String> {
+    pub(super) fn new(language: &Language) -> Result<Go, super::Missing> {
         Ids::new(language).map(Go)
     }
 }

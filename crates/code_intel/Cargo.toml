@@ -29,6 +29,8 @@ test-support = [
 lectern-executor = { path = "../executor" }
 # PluginHandle, BusyGuard and BackgroundGuard (ADR 0029).
 lectern-kernel = { path = "../kernel" }
+# The runtime log's macros and typed fields (diag.rs, ADR 0046).
+lectern-logging = { path = "../logging" }
 # The worktree comparison, HEAD, the index checksum, blobs and canonical
 # OIDs (git_access.rs); gix stays inside lectern-git.
 lectern-git = { path = "../git" }
@@ -68,6 +70,8 @@ lectern-executor = { path = "../executor", features = ["test-support"] }
 lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 lectern-git = { path = "../git", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# testing::capture for the logs_* tests (docs/design/code_intel.md「日志与诊断」).
+lectern-logging = { path = "../logging", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

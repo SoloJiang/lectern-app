@@ -59,7 +59,7 @@ ids! {
 pub(super) struct Python(Ids);
 
 impl Python {
-    pub(super) fn new(language: &Language) -> Result<Python, String> {
+    pub(super) fn new(language: &Language) -> Result<Python, super::Missing> {
         Ids::new(language).map(Python)
     }
 }
