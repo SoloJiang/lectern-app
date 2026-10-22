@@ -36,7 +36,8 @@ use sha2::{Digest, Sha256};
 
 use crate::seen::{SeenKey, TargetKey};
 
-/// A file above this is compacted on the next write.
+/// A file above this, and above twice the length this process's last
+/// compaction left (ADR 0045), is compacted on the next write.
 pub(crate) const COMPACT_ABOVE: u64 = 4 << 20;
 /// At most this much of the end of the file is read.
 pub(crate) const READ_MAX: u64 = 64 << 20;
@@ -613,8 +614,9 @@ impl LogFile {
     /// `max(compact_above, 2 × the length the last compaction left)`, and
     /// the compaction precondition holds as far as this process knows. The
     /// doubling keeps a log whose live records alone are over the limit
-    /// from being rewritten on every write: rewrites stay amortized, and the
-    /// file stays under twice its live size plus one batch.
+    /// from being rewritten on every write (ADR 0045): rewrites stay
+    /// amortized, and while compaction is allowed the file stays under
+    /// `max(compact_above, twice its live size)` plus one batch.
     pub(crate) fn should_compact(&self) -> bool {
         let doubled = self.compacted_len.saturating_mul(2);
         let above = self.limits.compact_above.max(doubled);

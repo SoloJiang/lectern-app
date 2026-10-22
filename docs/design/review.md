@@ -2,7 +2,7 @@
 
 状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）；其余前置条件与第 2–5 步尚未实现。
 
-对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分），审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 只预留数据模型。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)）。
+对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分），审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 只预留数据模型。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)，压缩的条件按 [ADR 0045](../adr/0045.md)）。
 
 ## 范围
 
@@ -21,7 +21,7 @@
   - 归因：把基准到工作区的每个改动文件、每个 hunk 对到会话和轮次。会话日志里的每次改动按时间顺序作用在基准内容上，得到一串版本（改动链），逐行记下每行来自哪一步；对不上的行不归因（Drifted）。
   - 改动叙事：每一轮的 prompt、agent 说明、这一轮对每个文件的改动（同一轮对同一文件的多次调用合成一步）、命令期间改动的文件、派出的子 agent。
   - 已看状态：三种状态（未看、已看、审过之后又被改过），键按 [pulls.review 调研「对 Lectern 的建议」](../research/pulls-review.md#对-lectern-的建议)；Looks good 一次标记全部。
-  - 标注日志：已看标记和会话基准的持久化（ADR 0044）。
+  - 标注日志：已看标记和会话基准的持久化（ADR 0044、ADR 0045）。
   - 噪声文件（lockfile、生成文件、快照）的模式列表，同时决定默认折叠、规则分组和模型输入里的占位；会话日志认不出或没有会话时按规则分组。
   - 规则简报：只用本地已有的信息生成「值得先看」（ADR 0019），并接收其他插件经 `Review::register_brief_rules` 登记的 `BriefRules` 提供者补充的条目。
   - 项目主页的概览：每个会话的已看进度和信号、每个 worktree 不属于任何会话的改动数（[ADR 0035](../adr/0035.md) 的计数比较）。
@@ -962,7 +962,7 @@ pub(crate) enum TargetKey {
 - 读取：打开项目的概览或审阅时，在 `Background` 任务里整份读入（上限 64 MiB，超过时只读最后 64 MiB 并从第一个完整行开始）。坏行跳过并计数；认不出的 `t` 原样保留；末尾没有换行的一行丢弃，下一次追加之前截掉它。本进程不知道文件末尾的状态时（读取失败、别的写入者追加过）不截断，文件不以换行结尾就先补一个换行，残行成为一个坏行，新记录不受影响。文件头的 `v` 不是 1 或文件头坏了时照常读记录，但只追加、不压缩。
 - 内存里的索引：每个审阅对象、每个文件标识（`new_path`，没有时 `old_path`）只保留最近一条 `seen` 或 `unseen`，加上每个会话的 `base`（同一会话有多条时取最早的一条，它是已看标记所依据的基准）。重命名（`old_path` 与 `new_path` 不同）的 `seen` / `unseen` 同时撤掉这个审阅对象在 `old_path` 下的记录：那个改动已经成了这次重命名，之后 `old_path` 上的新文件不是同一个改动，对重命名的 `unseen` 也不会被旧路径上的 `seen` 抵消。重放日志得到同样的索引，压缩不需要额外的记录。项目关闭后释放。
 - 写入：命令在内存里生效后把记录放进待写队列；队列在 100 ms 内没有新记录、或累计 64 条时，由一个 `Background` 任务（持有 `BusyGuard`）追加并 `fdatasync`。写失败时保留队列，下一次再试，记日志；进程退出前没写完的标记丢失（已知限制）。
-- 压缩：文件超过 4 MiB、且超过本进程上一次压缩后长度的两倍时（本进程还没压缩过时只看 4 MiB），在下一次写入的任务里写一份只含文件头、内存索引里的记录和认不出的记录的新文件，`fsync` 后改名替换并 `fsync` 目录。超过一年的 `seen` / `unseen` 记录在压缩时丢弃。两倍的条件让仍然有效的记录本身超过 4 MiB 时不会每次写入都重写整个文件：重写的代价摊到至少同样多的追加上，文件不超过 max(4 MiB, 有效记录的两倍) 加一批记录。改名之后目录的 `fsync` 失败时，本进程把文件当作状态未知（只追加，直到下一次完整读取），下一次追加时再 `fsync` 目录。
+- 压缩：文件超过 4 MiB、且超过本进程上一次压缩后长度的两倍时（本进程还没压缩过时只看 4 MiB；[ADR 0045](../adr/0045.md)），在下一次写入的任务里写一份只含文件头、内存索引里的记录和认不出的记录的新文件，`fsync` 后改名替换并 `fsync` 目录。超过一年的 `seen` / `unseen` 记录在压缩时丢弃。两倍的条件让仍然有效的记录本身超过 4 MiB 时不会每次写入都重写整个文件：重写的代价摊到至少同样多的追加上；压缩的前提成立时，文件不超过 max(4 MiB, 有效记录的两倍) 加一批记录。改名之后目录的 `fsync` 失败时，本进程把文件当作状态未知（只追加，直到下一次完整读取），下一次追加时再 `fsync` 目录。
 - 压缩的前提（关键约束，ADR 0044）：内存索引来自对这个文件的一次完整、成功的读取（读到文件末尾，没有 IO 错误，没有因 64 MiB 的上限只读一部分，文件头的仓库相符），加上本进程在那之后自己的追加；并且文件的身份（设备号、inode）和长度与「读取的结束位置加本进程追加的字节」相同，说明期间没有别的写入者。任何一条不满足时只追加、不压缩：读取失败或只读了一部分时，内存索引缺记录，用它重写文件会丢掉用户的标记。下一次完整读取成功后恢复压缩。
 - 文件夹项目不写日志（见「未决问题」2）。
 
@@ -1068,7 +1068,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 勾选 | `command(MarkSeen)` 到新快照替换 < 0.2 ms（5000 个文件） |
 | 空闲内存（采样状态：首页加载完成，没有打开审阅；ADR 0035） | 计数改动集按 ADR 0035 是余量里的 ≤ 4 MB，测量归 `git/changes_count/per_path_bytes`；本 crate 自己的常驻（概览、派生的声明、标注日志的索引、插件状态）cloudprint 形状 < 1 MB、10 万文件的形状 < 1 MB，从 ADR 0035 的 12 MB 余量里分配（合计 ≤ 5 MB，余量剩 7 MB 给 `project_home`、`worktrees`）。概览不经 `turns` 读轮次索引（前置条件 G），agents 的轮次索引 LRU 在采样状态里不因概览而增长 |
 | 审阅打开时的内存（不在采样状态，按 ADR 0035「关键约束」各自设上限） | `ChangeList` 和它持有的 `ChangeSet`（git 的 32 MiB 保留上限）；中间版本 LRU 8 MiB；`FileRows` 只为 `Prepare` 的范围保留，合计 ≤ 8 MiB，超出时丢弃离可见范围最远的；正文 ≤ 2 MiB |
-| 磁盘 | 标注日志每个仓库 ≤ max(4 MiB, 一年内仍然有效的记录的两倍) 加一批记录（「标注日志」的压缩）；`review.attribution` 在仓库分库的 512 MiB 预算里，按 LRU 淘汰 |
+| 磁盘 | 标注日志每个仓库 ≤ max(4 MiB, 一年内仍然有效的记录的两倍) 加一批记录，在压缩的前提成立时（「标注日志」的压缩，[ADR 0045](../adr/0045.md)）；只追加时（读取失败或只读了一部分、文件头坏了或 `v` 不是 1、别的写入者改过文件、压缩改名之后目录的 `fsync` 失败）文件一直增长，到下一次完整读取恢复压缩为止；`review.attribution` 在仓库分库的 512 MiB 预算里，按 LRU 淘汰 |
 
 打开会话的分项（上面的夹具，M 系列；缓存全空 / 缓存已热）：
 
@@ -1257,7 +1257,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **`Sensitive` 的路径匹配范围。** 「简报规则」表写的是「路径是」「在……下」。`CLAUDE.md`、`CLAUDE.local.md`、`AGENTS.md`、`GEMINI.md` 和 `.gitattributes` 按文件名在任何目录里匹配（agent 也加载子目录里的指令文件，子目录的 `.gitattributes` 同样生效）；`.claude/`、`.codex/`、`.cursor/`、`.gemini/` 是任何一级目录；其余（`.mcp.json`、`.github/copilot-instructions.md`、`.github/workflows/`、`.circleci/`、`.gitlab-ci.yml`、`Jenkinsfile`、`azure-pipelines.yml`、`.husky/`、`.githooks/`、`.pre-commit-config.yaml`、`lefthook.yml`、`.gitmodules`）从 worktree 根匹配。路径规则同时看重命名的来源，删除的文件也触发路径规则。
 - **标注日志的细节**（已写进「标注日志」）：`key` 的编码；空树的基准 `commit` 为 `null`；同一会话有多条 `base` 时取最早的一条；不知道文件末尾状态时补换行而不截断；文件头坏了或 `v` 不是 1 时只追加、不压缩。
 - **重命名撤掉旧路径下的记录**（已写进「标注日志」的内存索引）。只按文件标识保留最近一条时，审过修改 `a`、`a` 又被改名为 `b` 之后，旧路径 `a` 下的 `seen` 一直留着：对 `a → b` 标 `unseen` 后仍显示「审过之后又被改过」，`a` 上之后出现的无关新文件也是「审过之后又被改过」，与「已看状态」的规则不符。已知限制：同一份改动集里同时有 `a → b` 的重命名和 `a` 上的新文件时，标记重命名会撤掉那个新文件在 `a` 下的标记，它回到「未看」。
-- **压缩的两倍条件**（已写进「标注日志」，[ADR 0044](../adr/0044.md) 的关键约束同步修改）。原来只看「超过 4 MiB」：有效记录本身超过 4 MiB 时（一年的标记，`review/log_load_16k` 的夹具就是这样），每批写入都会重写整个文件、`fsync` 并改名。「性能」的磁盘一行改为实际的上限。
+- **压缩的两倍条件**（已写进「标注日志」，[ADR 0045](../adr/0045.md) 修订 [ADR 0044](../adr/0044.md) 的这一条关键约束）。原来只看「超过 4 MiB」：有效记录本身超过 4 MiB 时（一年的标记，`review/log_load_16k` 的夹具就是这样），每批写入都会重写整个文件、`fsync` 并改名。「性能」的磁盘一行改为实际的上限。
 - **目录 `fsync` 失败后只追加。** 压缩改名之后目录的 `fsync` 失败时，改名不一定持久，本进程把文件当作状态未知，直到下一次完整读取；下一次追加时重试目录的 `fsync`。
 - **`testing` 的日志夹具。** `testing::write_log`、`testing::load_log` 给 `review/log_load_16k` 用；「本 crate 的公开项」里的 `FakeSessions`、`FakeProjects`、`Driven` 随第 3 步加入。
 - **`review/log_load_16k` 的夹具大小。** 一条已看记录约 350 字节（ADR 0044 估计 250 字节），16 000 条是 5.3 MiB，不是 4 MiB；基准按 16 000 条测量，比原来的估计更重，「性能」表已改。
