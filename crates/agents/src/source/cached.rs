@@ -167,6 +167,12 @@ impl Indexes {
         Some((held.index.clone(), held.file))
     }
 
+    /// 与 `get` 相同，但不算一次使用（不改变 LRU 的顺序）：`turns_unretained` 的读取不影响谁先被淘汰。
+    pub(crate) fn peek(&self, key: &SessionKey) -> Option<(Arc<TurnIndex>, Option<FileId>)> {
+        let held = self.entries.get(key)?;
+        Some((held.index.clone(), held.file))
+    }
+
     /// 放进一个索引，按 LRU 淘汰到预算之内。比整个预算还大的索引不留在内存里（调用方用完就释放，
     /// 下次从 `cache` 读），同一会话的旧索引也一并去掉。
     pub(crate) fn put(&mut self, index: Arc<TurnIndex>, file: Option<FileId>) {

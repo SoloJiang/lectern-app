@@ -62,6 +62,12 @@ pub trait SessionSource: Send + Sync {
     /// 返回截至当前末尾的索引。
     fn turns(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError>;
 
+    /// 与 `turns` 相同，但结果不放进内存里的轮次索引 LRU（review 设计前置条件 G）：
+    /// 已在 LRU 里、文件没变时照样复制 `Arc`（不算一次使用）；从 `cache` 读出或解析出的
+    /// 索引照常写回 `cache`，返回后由调用方放下。LRU 里的条目不增不减。阻塞，只在
+    /// executor 上调用。
+    fn turns_unretained(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError>;
+
     /// 读一段正文（prompt、agent 说明、工具输入与结果、文件改动）。阻塞，只在
     /// executor 上调用；按偏移定位、读一行并解析，与文件大小无关。
     fn load(&self, session: &SessionKey, at: &ContentRef) -> Result<Content, SessionError>;

@@ -173,6 +173,24 @@ type Previous = (
     Option<Arc<str>>,
 );
 
+/// `Engine::next_index` 的结果。
+enum Next<F> {
+    /// 内存里的索引，在当前文件身份上建好。
+    Held(Arc<TurnIndex>),
+    Built(Built<F>),
+}
+
+/// 新建或接着解析出的索引。
+struct Built<F> {
+    file: F,
+    id: FileId,
+    index: Arc<TurnIndex>,
+    /// 游标与接着解析的那一份不同（或从头建的）：要写进 `cache`。
+    changed: bool,
+    /// 接在内存或 `cache` 里的上一份之后（`Adapter::turns_after` 的第二个值）。
+    continued: bool,
+}
+
 /// 要检查的路径，`forced` 时身份没变也重新生成摘要。
 struct Check {
     path: PathBuf,
@@ -987,6 +1005,36 @@ impl<A: Adapter> Engine<A> {
         (index.session == *key).then_some(index)
     }
 
+    /// `turns` 与 `turns_unretained` 共用：内存里的索引在当前文件身份上建好时为 `Held`；否则从内存或 `cache`
+    /// 里的索引接着解析追加的部分，都没有时解析整个文件。`touch`：内存里的查找算一次使用（`turns`）。
+    fn next_index(&self, session: &SessionKey, touch: bool) -> Result<Next<A::File>, SessionError> {
+        let (file, id) = self.file(session)?;
+        let held = if touch {
+            self.indexes().get(session)
+        } else {
+            self.indexes().peek(session)
+        };
+        if let Some((index, Some(built))) = &held
+            && *built == id
+        {
+            return Ok(Next::Held(index.clone()));
+        }
+        let prev: Option<Arc<TurnIndex>> = match held {
+            Some((index, _)) => Some(index),
+            None => self.cached_index(session).map(Arc::new),
+        };
+        self.count(Call::TurnsAfter);
+        let (index, continued) = self.adapter.turns_after(&file, prev.as_deref())?;
+        let changed = prev.as_ref().is_none_or(|p| p.cursor != index.cursor);
+        Ok(Next::Built(Built {
+            file,
+            id,
+            index: Arc::new(index),
+            changed,
+            continued,
+        }))
+    }
+
     #[cfg(test)]
     pub(crate) fn completion_running(&self) -> usize {
         self.state().completion.running
@@ -1055,24 +1103,34 @@ impl<A: Adapter> SessionSource for Engine<A> {
 
     /// 内存命中且文件没变时只复制 `Arc`；否则从内存或 `cache` 里的索引接着解析追加的部分，都没有时解析整个文件。
     fn turns(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
-        let (file, id) = self.file(session)?;
-        let held = self.indexes().get(session);
-        if let Some((index, Some(built))) = &held
-            && *built == id
-        {
-            return Ok(index.clone());
-        }
-        let prev: Option<Arc<TurnIndex>> = match held {
-            Some((index, _)) => Some(index),
-            None => self.cached_index(session).map(Arc::new),
+        let built = match self.next_index(session, true)? {
+            Next::Held(index) => return Ok(index),
+            Next::Built(built) => built,
         };
-        self.count(Call::TurnsAfter);
-        let (index, continued) = self.adapter.turns_after(&file, prev.as_deref())?;
-        let index = Arc::new(index);
-        let changed = prev.as_ref().is_none_or(|p| p.cursor != index.cursor);
-        self.keep_index(&file, index.clone(), Some(id), changed, continued);
-        self.after_parse(session, &file, id);
-        Ok(index)
+        self.keep_index(
+            &built.file,
+            built.index.clone(),
+            Some(built.id),
+            built.changed,
+            built.continued,
+        );
+        self.after_parse(session, &built.file, built.id);
+        Ok(built.index)
+    }
+
+    /// 与 `turns` 相同，但不放进内存（review 设计前置条件 G）：内存里的查找不算一次使用；索引变了时在这次调用里
+    /// 同步写进 `cache`（不另提交任务，否则排队的写入任务会一直持有这些索引）；不派生子 agent 的关联（「派生的
+    /// 时机」：派生跟着放进内存的索引）。读过之后重新生成继承边界未定的摘要，与 `turns` 相同。
+    fn turns_unretained(&self, session: &SessionKey) -> Result<Arc<TurnIndex>, SessionError> {
+        let built = match self.next_index(session, false)? {
+            Next::Held(index) => return Ok(index),
+            Next::Built(built) => built,
+        };
+        if built.changed {
+            self.write_index(&built.index);
+        }
+        self.after_parse(session, &built.file, built.id);
+        Ok(built.index)
     }
 
     fn load(&self, session: &SessionKey, at: &ContentRef) -> Result<Content, SessionError> {

@@ -12,6 +12,7 @@ mod place;
 mod plugin;
 mod spawn_link;
 pub(crate) mod support;
+mod unretained;
 mod watch;
 
 /// 递归复制一个 fixtures 目录（只复制文件，不复制 `SOURCE.md`）。
