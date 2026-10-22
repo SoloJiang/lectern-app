@@ -1,6 +1,6 @@
 # usage 设计
 
-状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现；其余前置条件与第 1–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `usage` 模块，[#175](https://github.com/SoloJiang/lectern-app/pull/175)）、B（`platform` 的 `time::utc_offset`，[#176](https://github.com/SoloJiang/lectern-app/pull/176)，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)）、D（`git` 的 `Repo::ref_reflog`、`Repo::patch_id`，[#178](https://github.com/SoloJiang/lectern-app/pull/178)，见 [git 设计「usage 用的读取」](git.md#usage-用的读取)）已实现；其余前置条件与第 1–8 步尚未实现。
 
 对应 issue [#31](https://github.com/SoloJiang/lectern-app/issues/31)，[#32](https://github.com/SoloJiang/lectern-app/issues/32) 的 Usage 页与额度读本文定义的快照。`usage` 把 `agents` 交来的用量记录去重、规范化后落进自己的 SQLite，把每一轮的 token 归属到项目、分支的「一次使用」和 MR，按时间窗口聚合，并保存额度快照（[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)、[ADR 0022](../adr/0022.md)、[交互规范「用量」](interaction.md#用量)）。改动权重的来源按 [ADR 0047](../adr/0047.md)，数据库按 [ADR 0027](../adr/0027.md)，位置按 [ADR 0044](../adr/0044.md) 的应用数据目录。
 
@@ -994,7 +994,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 - A. `services`：`usage` 模块；`rg -n 'pub trait Usage\b|pub trait MrSource' crates/services/src` 各有一处；`usage_*` 测试通过；`crates/services/AGENTS.md` 列出这个模块（第 1 步之前）。
 - B. `platform`：`time::utc_offset`；`utc_offset_*` 测试在 Linux CI 和 macOS CI 上通过（第 1 步之前）。
 - C. `platform` 与 `app`：`app` 构造 `UsageDeps` 并把插件放进 `PluginSet`（第 1 步的插件部分之后）；statusline 脚本写 `<app_data>/usage/statusline/claude-code.json`（#32，第 2 步的端到端之前；第 2 步本身用 fixtures 验收）。
-- D. `git`：`Repo::ref_reflog`、`Repo::patch_id`；`ref_reflog_*`、`patch_id_*` 测试通过（第 5 步之前）。已完成（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
+- D. `git`：`Repo::ref_reflog`、`Repo::patch_id`；`ref_reflog_*`、`patch_id_*` 测试通过（第 5 步之前）。已完成（[#178](https://github.com/SoloJiang/lectern-app/pull/178)）。
 - E. `fs_watch`：`ReflogFile::Remote`；`reflog_remote_*` 测试通过（第 6 步之前）。
 - F. `forge`：`MrSource` 的实现与登记（第 7 步之前）。
 - G. `agents`：Analyze 调用 `begin_analysis`、`meter`（第 8 步之前）。
