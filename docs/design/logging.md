@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 6 项（`cache`）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 

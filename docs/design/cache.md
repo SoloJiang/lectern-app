@@ -1,6 +1,6 @@
 # cache 设计
 
-状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)，第 3 步（自定义表）[#111](https://github.com/SoloJiang/lectern-app/pull/111)（见「验收」）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 6 项）[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)。
+状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)，第 3 步（自定义表）[#111](https://github.com/SoloJiang/lectern-app/pull/111)（见「验收」）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 6 项）[#181](https://github.com/SoloJiang/lectern-app/pull/181)。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`crates/cache/AGENTS.md` 列出的两个 issue；本 crate 是它们的前置，不单独关闭其中任何一个）。`cache` 是派生数据的本地持久缓存：解析、diff、索引这类可以从 git 对象或会话日志重新算出的结果，以内容的身份为键存进 SQLite，下次启动、切换 worktree 时直接命中（架构规则 5，[技术调研「性能要点」](tech-research.md#性能要点)）。存储选型见 [ADR 0027](../adr/0027.md)。
 
@@ -643,7 +643,7 @@ impl TableWrite {
    - `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果。
    - bench 的 `cache/tables_write`、`cache/tables_read`、`cache/tables_touch`、`cache/tables_evict` 加入预算表并生效，在预算内；第 1、2 步的 `cache/*` 仍在预算内。
 
-日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 6 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，`Refs #170`）：
+日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 6 项，[#181](https://github.com/SoloJiang/lectern-app/pull/181)，`Refs #170`）：
 
 - `rg 'eprintln!|util::log' crates/cache/src --glob '!**/tests*'` 没有结果。
 - `logs_*` 通过，其余测试照常通过。
@@ -729,7 +729,7 @@ impl TableWrite {
 - 更大的规模（一次性的测量，没有提交）：5 万个 `testing::tags` 单元，每次 `touch` 500 个、共 100 次。访问时间都已过期（全部要改）时，逐行 154 ms，每组 256 个 138 ms，每组 1024 个 127 ms；访问时间都在一小时以内（一行也不改）时，逐行 179 ms，集合 8.0 ms。用 `json_each` 一次传入全部 ID 时分别是 151 ms 和 13.7 ms，所以选了固定占位符、每组 1024 个。
 - callgrind（`tables_touch`，集合写回）：要改的行占绝大部分开销，几乎都在索引维护上。`sqlite3BtreeInsert` 45%，`sqlite3BtreeIndexMoveto` 44%，页的分裂 `balance` 21%，`sqlite3BtreeDelete` 12%。每改一行，`entry_atime` 和配额淘汰的部分索引 `entry_ns<id>` 都要删掉旧键、插入新键。语句本身的开销（绑定、单步执行、重置）是逐行写回时省下的那部分。
 
-日志接入（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），同一台机器（Rust 1.97.0）。
+日志接入（[#181](https://github.com/SoloJiang/lectern-app/pull/181)），同一台机器（Rust 1.97.0）。
 
 - `just check`、`just test`（整个工作区 2148 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`just test -p lectern-cache`：91 个测试通过，原有的 89 个照常通过，新增 `logs_hold_no_keys_values_or_parameters`、`logs_disabled_partition_is_an_error`；`cargo test -p lectern-cache --all-features --lib` 在同一个进程里跑全部 91 个也通过（捕获器由各测试共用，`logs_*` 按自己临时目录的路径筛选记录）。
 - `logs_disabled_partition_is_an_error` 确认了两个分支的错误码：随机字节在打开时是 `sqlite` 26（`SQLITE_NOTADB`），记 warn 后重建；中间的页被改写后在读取时是 `SQLITE_CORRUPT`（主码 11），第二次损坏记 error，`reason` 为 `corrupt`，`op` 为 `call`。
@@ -803,7 +803,7 @@ impl TableWrite {
 - 「访问时间」原来写的是逐个 ID 执行 `… WHERE id = ? AND atime < ?`。现在每 1024 个 ID 执行一条 `UPDATE entry SET atime = ?1 WHERE atime < ?2 AND id IN (…)`（「访问时间」已改）。精度规则不变：一小时以内写入或写回过的条目不改。读命中和 `touch` 的写回都走这条路径，写在自己的事务里或其他写事务的开头，位置不变。这条语句占预编译语句缓存的一条。
 - 要改的行很多时（第二天的热启动，所有单元都过期），收益只有约 15%：开销在两个以 `atime` 为键的索引上（见「实际验证」），只改写回的方式省不掉。要再快，就得减少以 `atime` 为键的索引（比如让配额淘汰改用 `entry_atime` 加 `ns` 过滤），这会改变表结构和 `SCHEMA_VERSION`，不在这次改动里。
 
-日志接入（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+日志接入（[#181](https://github.com/SoloJiang/lectern-app/pull/181)）：
 
 - logging 设计第 6 项说的「9 处」是 `util::log` 里的 `eprintln!` 和它的 8 个调用点（`slot.rs` 5 处、`sweep.rs` 3 处）。`util::log` 删除，8 个调用点改为「日志与诊断」表里的 9 种记录：原来的「rebuilding」一条按原因分成版本或身份不符、损坏两条；停用原来只有一个调用点，用格式化的文字区分 7 种情况，现在由 `reason`、`op` 和 `sqlite` / `io` 区分。
 - 原来每行带分库的描述（种类和项目路径）和错误的 `Display` 文字。错误文字不再写出：SQLite 的消息会引用 SQL 文本，登记违规的说明含使用方的 SQL 和从文件里读出的表名。改为扩展错误码、rusqlite 错误的种类和 `Value::io`。
