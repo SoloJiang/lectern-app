@@ -36,6 +36,8 @@ use crate::spans::WindowSpans;
 use crate::util::{lock, yield_now};
 
 use super::content::Content;
+#[cfg(test)]
+use super::engine::Probe;
 use super::engine::{Doc, DocMut, EngineInner, trace};
 #[cfg(any(test, feature = "test-support"))]
 use super::engine::{StepEnd, Trace};
@@ -458,6 +460,11 @@ async fn segment(engine: &Arc<EngineInner>, guard: &BackgroundGuard) -> bool {
         return false;
     };
     let probe = || guard.yield_requested() || guard.pause_requested();
+    #[cfg(test)]
+    let probe = {
+        let start = job.start;
+        engine.reported(probe, move |asked| Probe::Chain { start, asked })
+    };
     let budget = Budget {
         budget: BATCH_SEGMENT,
         cancel: &job.cancel,

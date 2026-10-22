@@ -13,9 +13,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use lectern_executor::{Executor, Priority};
+use lectern_kernel::SLOT_INTERVAL;
 use lectern_services::reader::Anchor;
 
-use super::rig::Threaded;
+use super::rig::{FLIP_AT, Threaded};
+use crate::doc::Probe;
 use crate::limits::BATCH_SEGMENT;
 use crate::util::yield_now;
 use crate::{StepEnd, Trace, testing};
@@ -227,53 +229,84 @@ fn batch_order_batches_go_on_while_a_64mib_chain_runs() {
 /// A batch window in flight stops within a slice once the yield switch is
 /// on (measured as `code_intel/yield_stop` is: from the switch to the step
 /// returning with its state kept), then moves only in keepalive slots, and
-/// goes on once the switch is off.
+/// goes on once the switch is off. The switch turns on from inside a step,
+/// at a slice boundary (`Threaded::flip_inside`), so the step is in flight
+/// by construction, however fast the machine parses.
 #[test]
 fn batch_order_window_stops_within_a_slice_when_yielding() {
     let t = Threaded::new(1);
     t.write("big.ts", &testing::ts(8 << 20, 0));
+    let flip = t.flip_inside(FLIP_AT, |p| matches!(p, Probe::Chain { .. }));
     let doc = t.open(t.target("big.ts", Anchor::Start));
-    /// Steps tried: one that ends on its own around the switch does not
-    /// count, and the next one is tried.
-    const ATTEMPTS: usize = 10;
-    let (mut from, _) = t.wait_for(0, |e| matches!(e, Trace::ChainStep { .. }));
-    let mut stopped = None;
-    for attempt in 0..ATTEMPTS {
-        // A step that begins after the last one ended: in flight when the
-        // switch turns on, unless it is over within these 3 ms.
-        let (step, _) = t.wait_for(from + 1, |e| matches!(e, Trace::ChainStep { .. }));
-        std::thread::sleep(Duration::from_millis(3));
-        let switched = Instant::now();
-        t.host.kernel().set_yield(true);
-        let (ended, at) = t.wait_for(step, |e| matches!(e, Trace::ChainStepEnd { .. }));
-        let how = t.events()[ended].1.clone();
-        let yielded = matches!(
-            how,
+    let (ended, at) = t.wait_for(0, |e| {
+        matches!(
+            e,
             Trace::ChainStepEnd {
                 end: StepEnd::Yielded,
                 ..
             }
-        );
-        if yielded && at >= switched {
-            stopped = Some((ended, at.duration_since(switched)));
-            break;
+        )
+    });
+    let (on, switched) = flip.lock().unwrap().on.expect("turned on inside a step");
+    let Probe::Chain { start, .. } = on else {
+        panic!("{on:?}");
+    };
+    // The step it was turned on in, and nothing between: no step stops
+    // before the switch is on.
+    let events = t.events();
+    assert_eq!(
+        events[ended].1,
+        Trace::ChainStepEnd {
+            start,
+            end: StepEnd::Yielded
         }
-        // It ended on its own: not a stop to measure.
-        eprintln!("attempt {attempt}: {how:?} on its own");
-        t.host.kernel().set_yield(false);
-        from = ended;
-    }
-    let (ended, stop) = stopped.expect("a step in flight when the switch turned on");
+    );
+    let (began, ref step) = events[ended - 1];
+    assert!(
+        matches!(step, Trace::ChainStep { start: s, .. } if *s == start),
+        "{step:?}"
+    );
+    assert!(began <= switched && switched <= at);
+    // Stopped at the next slice boundary: the step asked once more.
+    let after = flip.lock().unwrap().after.clone();
+    assert_eq!(
+        after,
+        vec![Probe::Chain {
+            start,
+            asked: FLIP_AT + 1
+        }]
+    );
+    let stop = at.duration_since(switched);
     eprintln!("stopped {stop:?} after the switch");
     assert!(stop <= Duration::from_millis(10), "{stop:?}");
-    // The manual clock does not move: one keepalive slot at most, then
-    // nothing until the switch is off.
-    std::thread::sleep(Duration::from_millis(200));
-    let during = steps(&t.events()[ended + 1..]).len();
-    assert!(during <= 2, "{during} steps while yielding");
+    // The manual clock does not move: the window goes on in one keepalive
+    // slot, then the task waits for the next one, its timer pending on the
+    // clock, and nothing moves.
+    t.wait_until("the wait for the next slot", || {
+        t.clock.pending_timers() == 1
+    });
+    let during = steps(&t.events()[ended + 1..]);
+    assert_eq!(during.len(), 1, "one step in the slot: {during:?}");
+    let in_flight = |events: &[(Instant, Trace)]| {
+        events
+            .iter()
+            .filter(|(_, e)| matches!(e, Trace::ChainStep { .. }))
+            .count()
+    };
+    assert_eq!(
+        in_flight(&t.events()[ended + 1..]),
+        1,
+        "no step begun after it"
+    );
+    // The next slot: one more step, then the wait again.
     let quiet = t.events().len();
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(t.events().len(), quiet, "nothing moves between slots");
+    t.clock.advance(SLOT_INTERVAL);
+    t.wait_until("the wait after the second slot", || {
+        t.clock.pending_timers() == 1
+    });
+    assert_eq!(steps(&t.events()[quiet..]).len(), 1);
+    assert_eq!(in_flight(&t.events()[quiet..]), 1);
+    let quiet = t.events().len();
     t.host.kernel().set_yield(false);
     t.wait_for(quiet, |e| matches!(e, Trace::ChainStepEnd { .. }));
     drop(doc);
