@@ -267,12 +267,13 @@ fn header_start(header: &str) -> Option<u32> {
 /// header puts it (shifted by the offset the hunks before it were found
 /// at), then at the nearest position that matches, as `git apply` does;
 /// hunks apply in order and never overlap. A hunk without a line number
-/// works as `apply_patch` does: each of its `@@ <context>` lines is the
-/// first whole line equal to it after the previous one (from the end of
-/// the hunk before), and the hunk takes the first match after the last of
-/// them; a pure insertion goes right after it, or at the end when there is
-/// none. No fuzzy matching: one context line or hunk that does not match
-/// and the patch does not apply.
+/// works as `apply_patch` does: each of its `@@ <context>` lines is found
+/// after the previous one (from the end of the hunk before; see [`seek`]),
+/// and the hunk takes the first match after the last of them. A pure
+/// insertion without a line number goes at the end of the file, its
+/// context lines only having to be there, as `apply_patch` places it. No
+/// fuzzy matching of the old lines: one context line or hunk that is not
+/// found and the patch does not apply.
 fn patch(version: &[u8], text: &str) -> Option<Vec<u8>> {
     let hunks = parse(text)?;
     let have: Vec<&[u8]> = lines(version).collect();
@@ -287,16 +288,10 @@ fn patch(version: &[u8], text: &str) -> Option<Vec<u8>> {
         });
         let mut from = cursor;
         for line in &h.seek {
-            let found = (from..have.len())
-                .find(|&p| have[p].strip_suffix(b"\n").unwrap_or(have[p]) == line.as_slice())?;
-            from = found + 1;
+            from = seek(&have, line, from)? + 1;
         }
         let at = if n == 0 {
-            let at = match want {
-                Some(want) => want,
-                None if h.seek.is_empty() => have.len() as i64,
-                None => from as i64,
-            };
+            let at = want.unwrap_or(have.len() as i64);
             if at < cursor as i64 || at > have.len() as i64 {
                 return None;
             }
@@ -319,6 +314,27 @@ fn patch(version: &[u8], text: &str) -> Option<Vec<u8>> {
         out.extend_from_slice(l);
     }
     Some(out)
+}
+
+/// The first line at or after `from` that is the `@@ <context>` line
+/// `line`, as `apply_patch`'s `seek_sequence` finds it: equal, else equal
+/// without trailing whitespace, else equal without whitespace at either
+/// end (each pass over every line before the next). The agent writes the
+/// context without the method's indentation, so a header like
+/// `@@ def save(self):` names an indented line. Only context lines are
+/// matched this way; the old lines stay exact.
+fn seek(have: &[&[u8]], line: &[u8], from: usize) -> Option<usize> {
+    /// One pass's normalization of a line.
+    type Norm = fn(&[u8]) -> &[u8];
+    fn exact(l: &[u8]) -> &[u8] {
+        l
+    }
+    let content = |p: usize| have[p].strip_suffix(b"\n").unwrap_or(have[p]);
+    let passes: [Norm; 3] = [exact, <[u8]>::trim_ascii_end, <[u8]>::trim_ascii];
+    passes.iter().find_map(|norm| {
+        let want = norm(line);
+        (from..have.len()).find(|&p| norm(content(p)) == want)
+    })
 }
 
 /// The position at or after `from` where `old` matches `have`, nearest to
@@ -416,15 +432,43 @@ mod tests {
             patch(version, "@@ class B\n@@   fn f\n-    x\n+    y\n").unwrap(),
             b"class A\n  fn f\n    x\nclass B\n  fn f\n    y\n"
         );
-        // An insertion goes right after its context line.
-        assert_eq!(
-            patch(b"a\nb\nc\n", "@@ b\n+new\n").unwrap(),
-            b"a\nb\nnew\nc\n"
-        );
         // A context line that is not there: the patch does not apply.
         assert!(patch(version, "@@ class C\n-    x\n+    y\n").is_none());
-        // Whole lines only: `fn b() {` is not a line of this version.
-        assert!(patch(b"  fn b() {\n x\n", "@@ fn b() {\n- x\n+ y\n").is_none());
+        // Whole lines only: `fn b` is part of a line, not a line.
+        assert!(patch(b"fn b() {\n x\n", "@@ fn b\n- x\n+ y\n").is_none());
+    }
+
+    #[test]
+    fn chain_patch_context_line_ignores_surrounding_whitespace() {
+        // `@@ def load(self):` names a method indented in its class.
+        let version = b"class Store:\n    def save(self):\n        x = 1\n    def load(self):\n        x = 1\n";
+        assert_eq!(
+            patch(version, "@@ def load(self):\n-        x = 1\n+        x = 2\n").unwrap(),
+            b"class Store:\n    def save(self):\n        x = 1\n    def load(self):\n        x = 2\n"
+        );
+        // Trailing whitespace (and a CRLF line's `\r`) on the version's line.
+        assert_eq!(
+            patch(b"fn a() {  \r\n x\n", "@@ fn a() {\n- x\n+ y\n").unwrap(),
+            b"fn a() {  \r\n y\n"
+        );
+        // An exact line wins over an earlier one that only matches trimmed.
+        assert_eq!(
+            patch(b"  fn f\n x\nfn f\n x\n", "@@ fn f\n- x\n+ y\n").unwrap(),
+            b"  fn f\n x\nfn f\n y\n"
+        );
+        // The old lines stay exact: different indentation does not apply.
+        assert!(patch(version, "@@ def load(self):\n-    x = 1\n+    x = 2\n").is_none());
+    }
+
+    #[test]
+    fn chain_patch_insertion_after_a_context_line_goes_at_the_end() {
+        // `apply_patch` appends a pure addition at the end of the file
+        // whatever its context; the context line still has to be there.
+        assert_eq!(
+            patch(b"a\nb\nc\n", "@@ b\n+new\n").unwrap(),
+            b"a\nb\nc\nnew\n"
+        );
+        assert!(patch(b"a\nb\nc\n", "@@ z\n+new\n").is_none());
     }
 
     #[test]

@@ -32,7 +32,9 @@ const DOMAIN: &[u8] = b"lectern-review-history\0v1\0";
 /// SHA-256 over, in order, each step's source ID, session ID, adapter
 /// version, turn ID, call ID, call status and input and result positions,
 /// then the paths of the rename chain (`paths`: those the steps were taken
-/// on, the base side's path first). Every field is length-prefixed or
+/// on, the base side's path first and the worktree side's, the chain's
+/// `ChainInput::end`, last; the chain follows the rename to it, so it
+/// changes how the same steps apply). Every field is length-prefixed or
 /// fixed-size, so no two histories encode the same.
 pub(crate) fn digest(steps: &[HistoryStep<'_>], paths: &[ChangePath]) -> [u8; 32] {
     let mut h = Sha256::new();
