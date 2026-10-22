@@ -1123,7 +1123,7 @@ impl Lifecycle {
         };
         let token = current.token.clone();
         let id = self.slots[index].id.clone();
-        let _scope = token.scope();
+        let scope = token.scope();
 
         // Step 2: remove the services.
         let mut garbage = Garbage::default();
@@ -1195,7 +1195,7 @@ impl Lifecycle {
                 removed(&self.shared, &id);
             }
         }
-        match token.failure() {
+        let failed = match token.failure() {
             Some(error) => {
                 error!(
                     "plugin deactivated after a failure";
@@ -1203,11 +1203,20 @@ impl Lifecycle {
                     service = error.service(),
                 );
                 self.slots[index].failed = Some(error.clone());
-                for waiter in mem::take(&mut self.slots[index].waiters) {
-                    call_done(waiter.done, waiter.requester.as_ref(), Err(error.clone()));
-                }
+                Some((mem::take(&mut self.slots[index].waiters), error))
             }
-            None => info!("plugin deactivated"),
+            None => {
+                info!("plugin deactivated");
+                None
+            }
+        };
+        // The callbacks are the requesters' code, not this plugin's: each runs
+        // in its requester's scope, or none for `app`'s.
+        drop(scope);
+        if let Some((waiters, error)) = failed {
+            for waiter in waiters {
+                call_done(waiter.done, waiter.requester.as_ref(), Err(error.clone()));
+            }
         }
     }
 

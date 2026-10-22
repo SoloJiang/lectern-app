@@ -234,6 +234,40 @@ fn panic_records_carry_plugin_and_act() {
 }
 
 #[test]
+fn app_command_callbacks_run_outside_the_failed_plugins_scope() {
+    // `started` panics: the activation is revoked and the waiting `done` gets
+    // the error from the revocation, which runs in the plugin's scope.
+    let set = PluginSet::new().with(
+        "scope-command",
+        TestPlugin::new(manifest(
+            vec![],
+            vec![],
+            vec![Activation::Command(Name::Borrowed("scope.run"))],
+        ))
+        .activate(|_| {
+            Ok(Box::new(OnStarted(Some(Box::new(|_| {
+                panic!("started");
+            })))))
+        }),
+    );
+    let kernel = start(set);
+    let seen: Arc<Mutex<Option<(bool, lectern_logging::Ctx)>>> = Arc::default();
+    let slot = seen.clone();
+    kernel.command("scope.run", move |result| {
+        *slot.lock().unwrap() = Some((result.is_err(), lectern_logging::current()));
+    });
+    wait_until("the command callback", || seen.lock().unwrap().is_some());
+    let (failed, ctx) = seen.lock().unwrap().take().unwrap();
+    assert!(failed, "the command reports the failure");
+    assert_eq!(
+        ctx,
+        lectern_logging::Ctx::default(),
+        "app's callback has no scope"
+    );
+    shutdown(&kernel);
+}
+
+#[test]
 fn activation_logs_took_us_and_ids_increase() {
     let capture = capture();
     let first = Id::default();

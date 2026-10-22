@@ -777,7 +777,7 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件需要一份匹配它们全部 pattern 的 `WorkspaceFacts`：bench 在两次启动里都加入同一个合成的 `bench-facts` 插件（`AfterFirstFrame` 激活，在 `started` 里通过 `control().workspace_changed` 提交这份 facts，由 bench 的探针提供，见 [bench 设计「探针」](bench.md#探针lectern_benchprobeprobe-feature)），两次的差不受它影响；`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。这两种组合由 `PluginSet::prepare`、`PreparedSet::dependency_closure` / `retain` / `with` 和 `Kernel::start_prepared` 组装（见「插件集合的闭包与裁剪」）。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `ServiceRef` / `ServiceSet`，保存在激活内的状态对象里（见「激活的提交」）。`ServiceRef::get()` 的开销是一次准入（两次原子操作）；`ServiceSet::for_each` 每个提供者一次准入、不分配；`ServiceSet::current()` 另外分配一个 `Vec`。两种多实现路径都在 bench 里按 1、4、16 个提供者测量。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
-- 日志的作用域（见「日志与诊断」）是线程本地的两次拷贝，不分配内存。事件分发每调用一个监听设一次，`kernel/` 的基准与接入前相比不变慢（「实际验证」）。
+- 日志的作用域（见「日志与诊断」）：设置时读出当前线程的 `Ctx`，写入覆盖了 `plugin`、`act` 的新值，嵌套深度加一；drop 时写回原值，深度减一。只有几次线程本地变量的读写，不分配内存，不加锁。事件分发每调用一个监听设一次，`kernel/` 的基准与接入前相比不变慢（「实际验证」）。
 
 ## 日志与诊断
 
@@ -905,7 +905,7 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - 静止：有正在进行的 `emit` 时不静止；静止后又变忙时发出 `Busy`。
 - 按命令激活：停用后重新启用的命令插件，再次触发命令仍能激活。
 - 生命周期的结果（激活顺序、停用顺序、状态）用 insta 快照记录。
-- 日志（`crates/kernel/src/tests/logs.rs`，见「日志与诊断」）：金丝雀测试 `canary_stays_out_of_kernel_logs`；`panic_records_carry_plugin_and_act`：`activate`、`started`、监听、守卫的 drop 各 panic 一次，每条 `plugin failed` 带正确的 `phase`、`plugin` 和等于 `ActivationToken::id()` 的 `act`，消息按 payload 类型写出；`activation_logs_took_us_and_ids_increase`：`plugin activated` 带 `took_us`，激活序号不小于 1 且依次递增；`process_plugin_names_are_registered`：`Cow::Owned` 的 ID 经 `PluginTag::register` 出现在 `plugin` 里，登记不了的 ID 不带 `plugin`。
+- 日志（`crates/kernel/src/tests/logs.rs`，见「日志与诊断」）：金丝雀测试 `canary_stays_out_of_kernel_logs`；`panic_records_carry_plugin_and_act`：`activate`、`started`、监听、守卫的 drop 各 panic 一次，每条 `plugin failed` 带正确的 `phase`、`plugin` 和等于 `ActivationToken::id()` 的 `act`，消息按 payload 类型写出；`activation_logs_took_us_and_ids_increase`：`plugin activated` 带 `took_us`，激活序号不小于 1 且依次递增；`process_plugin_names_are_registered`：`Cow::Owned` 的 ID 经 `PluginTag::register` 出现在 `plugin` 里，登记不了的 ID 不带 `plugin`；`app_command_callbacks_run_outside_the_failed_plugins_scope`：`app` 发起的命令在目标插件 `started` panic、撤销时收到错误，`done` 里读到的作用域为空，不是失败插件的。
 - 插件集合的闭包（`set_closure_*`）：多层依赖；`MULTIPLE` 服务的多个提供者都进入闭包；缺提供者、提供者的清单 panic、单实现服务有多个提供者、`id` 不在集合里时返回对应的 `GraphError`；对每个插件 `retain` 闭包（加或不加它自己）之后 `validate` 通过；`MULTIPLE` 服务的提供者反过来依赖目标插件时，只留闭包的集合报 `MissingProvider`（已知限制）。
 - 预读清单（`set_prepare_*`）：`prepare`、`dependency_closure`、`retain`、`with`、`validate`、`start_prepared` 走完、kernel 停止之后，每个插件的 `manifest()` 恰好被调用一次（含被 `retain` 去掉的插件）；`status()` 的 `manifest_time` 等于 `prepare` / `with` 记下的耗时；`manifest()` panic 的插件（`prepare` 和 `with` 加入的各一个）进入 `Failed`，状态与 `Kernel::start` 相同；`start_prepared` 的 kernel 照常提供 `lazy_commands` 和 `Manual` 激活。
 
@@ -1030,7 +1030,7 @@ impl Kernel {
 
 运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 4 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），在 Linux（x86_64，4 核虚拟机）上运行：
 
-- `just test -p lectern-kernel`：108 个测试通过，其中新增 4 个（`crates/kernel/src/tests/logs.rs`，见「测试」的「日志」一条）；`cargo test -p lectern-kernel --all-features --lib` 在同一进程里运行全部 108 个也通过（各测试共用一个捕获器，按插件 ID 和激活序号筛选）；`cargo nextest run -p lectern-kernel --all-features -E 'test(logs)' --stress-count 30` 30 轮全部通过。`just check`、`just test`（工作区 2150 个测试）、`just doctest`、`just deny` 全部通过。
+- `just test -p lectern-kernel`：109 个测试通过，其中新增 5 个（`crates/kernel/src/tests/logs.rs`，见「测试」的「日志」一条）；`cargo test -p lectern-kernel --all-features --lib` 在同一进程里运行全部 109 个也通过（各测试共用一个捕获器，按插件 ID 和激活序号筛选）；`cargo nextest run -p lectern-kernel --all-features -E 'test(logs)' --stress-count 30` 30 轮全部通过。`just check`、`just test`（工作区 2150 个测试，在加入 `app_command_callbacks_run_outside_the_failed_plugins_scope` 之前运行）、`just doctest`、`just deny` 全部通过。
 - logging 设计「验收」第 4 步起的检查：`rg 'eprintln!|util::log' crates/kernel/src --glob '!**/tests*'` 没有结果，`util::log` 已删除；金丝雀测试通过；`panic_records_carry_plugin_and_act` 检查 panic 记录里的 `plugin`、`act`。
 - `just bench --measure kernel/`（不判定、只记录）：改动前的源码树是 `origin/main`（一次在本分支改动之前运行，三次在 `origin/main` 的另一个 worktree 里），与改动后交替运行；同一台机器上同时有其他构建，波动很大。中位数依次列出（改动后的第三次只跑了 `kernel/emit`）：
 
