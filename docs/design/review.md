@@ -1275,16 +1275,16 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
   | ID | 结果 | 预算 |
   |---|---|---|
-  | `review/open_session_50` | 中位数 9.78 ms | < 35 ms |
-  | `review/open_session_50_warm` | 中位数 4.77 ms | < 20 ms |
-  | `review/open_session_settled` | 中位数 119 ms | 只记录 |
-  | `review/cutoffs_cold` | 中位数 86.8 ms | 只记录 |
-  | `review/attribute_session_50` | 中位数 14.7 ms | 只记录 |
-  | `review/rows_first` | 中位数 130 µs | < 3 ms |
-  | `review/mark_seen_5000` | 中位数 26.5 µs（报告标为 noisy） | < 0.2 ms |
+  | `review/open_session_50` | 中位数 9.7 ms | < 35 ms |
+  | `review/open_session_50_warm` | 中位数 4.9 ms | < 20 ms |
+  | `review/open_session_settled` | 中位数 130 ms | 只记录 |
+  | `review/cutoffs_cold` | 中位数 157 ms | 只记录 |
+  | `review/attribute_session_50` | 中位数 15.6 ms | 只记录 |
+  | `review/rows_first` | 中位数 126 µs | < 3 ms |
+  | `review/mark_seen_5000` | 中位数 21 µs（报告标为 noisy） | < 0.2 ms |
 
-  同一次运行里 `review/log_load_16k` 中位数 22.8 ms（< 30 ms），`review/chain_3000_lines` 16.7 ms。夹具 `testing::SessionFixture`：2000 个提交（1700 个共用一棵树，300 个各改历史文件里的一个）、300 条 HEAD reflog 记录（其中 10 次分支切换）、50 个会话（审阅对象 20 轮 120 次改动调用，另 4 个会话在它之前改过其中 40 个文件，其余 45 个会话改别的文件）、50 个 300 行的改动文件；`review/mark_seen_5000` 用 `testing::MarkSeenFixture` 的 5000 个未跟踪文件。冷打开时 300 条记录的 `tree_changes` 只有 5 ms 的预算，其余留给后台（`cutoffs_cold` 说明一次算完约 87 ms），所以第一份快照的截止时刻是保守的，`open_session_settled` 包含后台补齐后的重新准备和其余 49 个文件的归因。
-- `just check`、`just test`（不依赖 GPUI 的全部 crate，2028 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+  这是自审修正（祖先判断、换轮时丢掉展示行）之后在 origin/main 上重测的结果，机器负载约 6；修正之前的一次 `cutoffs_cold` 是 86.8 ms，`cutoffs_cold` 不经祖先判断，差别按机器负载看待。同一次运行里 `review/log_load_16k` 中位数 23 ms（< 30 ms），`review/chain_3000_lines` 17.4 ms。`Driven` 只在 `capture_snapshots` 之后保留每份快照：一直保留时 `mark_seen_5000` 留下几千份 5000 项的已看数组，测到 319 µs，测的是夹具而不是引擎。夹具 `testing::SessionFixture`：2000 个提交（1700 个共用一棵树，300 个各改历史文件里的一个）、300 条 HEAD reflog 记录（其中 10 次分支切换）、50 个会话（审阅对象 20 轮 120 次改动调用，另 4 个会话在它之前改过其中 40 个文件，其余 45 个会话改别的文件）、50 个 300 行的改动文件；`review/mark_seen_5000` 用 `testing::MarkSeenFixture` 的 5000 个未跟踪文件。冷打开时 300 条记录的 `tree_changes` 只有 5 ms 的预算，其余留给后台（`cutoffs_cold` 说明一次算完约 87 ms），所以第一份快照的截止时刻是保守的，`open_session_settled` 包含后台补齐后的重新准备和其余 49 个文件的归因。
+- `just check`、`just test`（不依赖 GPUI 的全部 crate，2033 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
 - 没有验证的：
   - 冷打开的计时不含 agents 的轮次索引从 `cache` 读出与解析的部分（「性能」分项表 < 8 ms 那一行）：`FakeSessions` 的索引一直在内存里。缓存的数据库文件在计时之前已经打开（`Driven::touch_cache`），建库的耗时不计入。
   - `review/attribute_session_50` 不含 `review.attribution` 的读写；`review/cutoffs_cold` 含新缓存目录的建库。

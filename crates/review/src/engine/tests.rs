@@ -896,6 +896,7 @@ fn claims_tree_changes_cached_and_finished_in_the_background() {
         NOW,
         Duration::ZERO,
     );
+    d.capture_snapshots();
     let id = d.open(target("a"));
     d.run();
     // The first snapshot was provisional: f cut at the newest record, B's
@@ -936,6 +937,7 @@ fn claims_tree_changes_cached_and_finished_in_the_background() {
 fn claims_others_first_snapshot_does_not_wait() {
     let (fx, sessions) = unrelated_commit();
     let d = fx.driven(vec![Arc::clone(&sessions)]);
+    d.capture_snapshots();
     let id = d.open(target("a"));
     d.run();
     // B's claims were not cached: the first snapshot shows B's line as

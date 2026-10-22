@@ -4,7 +4,7 @@
 //! `Background`; the events are kept with the instant they were emitted.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Instant;
 
@@ -26,6 +26,9 @@ pub struct Driven {
     executor: Executor,
     events: Arc<Mutex<Vec<(ReviewEvent, Instant)>>>,
     snapshots: Arc<Mutex<Vec<Arc<ReviewSnapshot>>>>,
+    /// Whether `snapshots` is filled (off by default: a bench making
+    /// thousands of snapshots would keep them all).
+    capture: Arc<AtomicBool>,
     now: Arc<AtomicI64>,
     projects: Arc<FakeProjects>,
     cache: Cache,
@@ -72,6 +75,8 @@ impl Driven {
         let sink = Arc::clone(&events);
         let snapshots: Arc<Mutex<Vec<Arc<ReviewSnapshot>>>> = Arc::default();
         let kept = Arc::clone(&snapshots);
+        let capture = Arc::new(AtomicBool::new(false));
+        let capturing = Arc::clone(&capture);
         // The engine, for the snapshot each `Changed` published (the event
         // is emitted with no lock held).
         let me: Arc<OnceLock<Weak<Engine>>> = Arc::default();
@@ -92,6 +97,7 @@ impl Driven {
             emit: Arc::new(move |e| {
                 let at = Instant::now();
                 if let ReviewEvent::Changed { id, .. } = &e
+                    && capturing.load(Ordering::Relaxed)
                     && let Some(snapshot) = get
                         .get()
                         .and_then(Weak::upgrade)
@@ -115,14 +121,21 @@ impl Driven {
             executor,
             events,
             snapshots,
+            capture,
             now: clock,
             projects,
             cache,
         }
     }
 
-    /// The snapshots published with each `Changed` so far, in order; the
-    /// list is emptied.
+    /// From now on, keep the snapshot each `Changed` published, for
+    /// [`Driven::take_snapshots`].
+    pub fn capture_snapshots(&self) {
+        self.capture.store(true, Ordering::Relaxed);
+    }
+
+    /// The snapshots published with each `Changed` since
+    /// [`Driven::capture_snapshots`], in order; the list is emptied.
     pub fn take_snapshots(&self) -> Vec<Arc<ReviewSnapshot>> {
         std::mem::take(
             &mut *self
