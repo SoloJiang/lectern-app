@@ -1,0 +1,9 @@
+---
+source: crates/usage/src/tests/dedup.rs
+expression: render_all(&all)
+---
+state=Ready inherited=true
+total: in 57 out 39 read 140 write 0 (= 236)
+project app folder=false open=true: in 57 out 39 read 140 write 0 (= 236)
+other: in 0 out 0 read 0 write 0 (= 0)
+day 2026-10-20: [(Codex, 236)]

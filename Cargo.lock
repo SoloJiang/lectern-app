@@ -4492,6 +4492,17 @@ version = "0.0.0"
 [[package]]
 name = "lectern-usage"
 version = "0.0.0"
+dependencies = [
+ "insta",
+ "lectern-executor",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-usage-view"
