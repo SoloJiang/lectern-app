@@ -316,7 +316,7 @@ pub(crate) fn reflog_lines(batch: &RepoBatch) -> String {
     out
 }
 
-fn file(file: &crate::ReflogFile) -> String {
+pub(crate) fn file(file: &crate::ReflogFile) -> String {
     match file {
         crate::ReflogFile::Head(WorktreeName::Main) => "HEAD".to_owned(),
         crate::ReflogFile::Head(WorktreeName::Linked(name)) => format!("HEAD({name})"),

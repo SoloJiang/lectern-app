@@ -1,6 +1,6 @@
 # fs_watch 设计
 
-状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)，基准 [#92](https://github.com/SoloJiang/lectern-app/pull/92)）；第 2 步（`git` 的适配）已实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)，实际验证与差异见 [git 设计](git.md)「实际验证」「与设计的差异」）；第 3 步（macOS 后端）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），只在 Linux 上交叉检查过，macOS 上的运行由 macOS CI 验证；第 4 步（装配与实测）尚未实现。
+状态：验收第 1 步（本 crate）已实现（[#86](https://github.com/SoloJiang/lectern-app/pull/86)，基准 [#92](https://github.com/SoloJiang/lectern-app/pull/92)）；第 2 步（`git` 的适配）已实现（[#95](https://github.com/SoloJiang/lectern-app/pull/95)，实际验证与差异见 [git 设计](git.md)「实际验证」「与设计的差异」）；第 3 步（macOS 后端）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），只在 Linux 上交叉检查过，macOS 上的运行由 macOS CI 验证；第 4 步（装配与实测）尚未实现。reflog 进度的压缩、锁文件的过滤和已知文件的前缀查找已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见「实际验证」）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)（没有单独的 issue；与 [platform 设计](platform.md)相同，随 Git 与 Diff 推进），消费方分属 [#9](https://github.com/SoloJiang/lectern-app/issues/9)（`project` 的增量刷新）、[#13](https://github.com/SoloJiang/lectern-app/issues/13)（`agents` 的会话目录）、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`usage` 的 reflog 时刻）和 [#66](https://github.com/SoloJiang/lectern-app/issues/66)（Analyze 的修订号）。`fs_watch` 是与平台无关的文件监听：把后端交来的原始事件按 git index 和忽略规则过滤、合并成批交给消费方，按 worktree 维护修订号，给 reflog 的新增记录打上监听时刻和序号。FSEvents 与 kqueue 后端在 `platform`，由 `app` 注入（[技术调研「性能要点」](tech-research.md#性能要点)、[ADR 0019](../adr/0019.md)、[ADR 0020](../adr/0020.md)、[ADR 0026](../adr/0026.md)）。
 
@@ -600,17 +600,21 @@ Analyze 的用法（ADR 0019 约束 9）：计算指纹之前调 `flush_revision
 
 仓库状态的 reflog 进度分两段建立，都在 fs_watch 线程上：
 
-1. **arm 之前**：列出 `logs/HEAD`、`logs/refs/heads/` 下的全部文件、`logs/refs/stash` 和每个 `worktrees/<名字>/logs/HEAD`，为每个文件记下读取进度：已读到的偏移（当时的文件长度）、偏移之前最多 64 字节的副本、这次读取的 `ReadStamp`。这时已有的记录不交付。
+1. **arm 之前**：列出 `logs/HEAD`、`logs/refs/heads/` 下的全部文件、`logs/refs/stash` 和每个 `worktrees/<名字>/logs/HEAD`，为每个文件记下读取进度：已读到的偏移（当时的文件长度）、偏移之前最多 64 字节的长度和哈希、这次读取的 `ReadStamp`（不含 `run`，同一仓库状态的进度共用一个 `run`）。这时已有的记录不交付。
 2. **arm 之后**：公共目录目标 arm 成功后，立即对第 1 段的每个文件按下文的步骤补读一次，并重新列出这几个目录。第 1 段与 arm 之间追加的行由补读交付（`Appended`，`after` 是第 1 段的 `ReadStamp`）；这段时间新出现的文件为 `NewFile`，消失的为 `Removed`。
 
 补读与随后排队的事件触发的读取都从同一份进度继续，进度只前进，所以 arm 前后重叠的那段时间里写入的行不会落在已记录的偏移之内而丢失，也不会交付两次：一次运行内，同一文件的同一偏移最多交付一条记录（`usage` 也可以按 `run`、文件和偏移去重）。列出与读取都在 fs_watch 线程上依次进行，读取编号才有全序（几百个分支只需几毫秒的 `fstat` 和 64 字节读取）。
 
 公共目录目标上有某个 reflog 文件的事件时，fs_watch 线程立即读它（不等合并窗口，也不等过滤器）：
 
-1. 取读取编号，记下开始时刻；`fstat` 后从偏移之前 64 字节处读起。文件比偏移短、或副本对不上：`ReflogReset { Rewritten }`，进度移到新的末尾，不交付记录。文件不存在：`Removed`，删掉进度。
+1. 取读取编号，记下开始时刻；`fstat` 后从偏移之前 64 字节处读起。文件比偏移短、或这段字节的长度或哈希与进度里的不同：`ReflogReset { Rewritten }`，进度移到新的末尾，不交付记录。哈希是 64 位 SipHash，密钥每个进程随机生成（`RandomState`）：改写后的字节碰巧得到相同哈希的概率约 2⁻⁶⁴，也无法有意构造。文件不存在：`Removed`，删掉进度。
 2. 从偏移读到最后一个换行，每次最多 1 MiB。每个 `RepoWatch` 订阅的一个批次里 reflog 行合计最多 1 MiB：一次读取达到上限时，这一批立即交付，剩下的部分从保存的进度接着读，进入下一批，依次进行，直到读到末尾（改名后的分支整份重读、大段追加都按这样分批）。最后一个换行之后不完整的部分不消费，等下一次事件（git 用一次 `write` 追加整行，读到半行很少见）。超过 64 KiB 的行跳过、计数，进度越过它。
 3. 读取结束后取结束时刻作为这些记录的 `observed`；`after` 是这个文件上一次读到末尾的那次读取的 `ReadStamp`（分批接着读的部分沿用同一个 `after`，因为这些行在前一批读取时已经存在）。新出现的文件从头读，每一批都是 `origin` 为 `NewFile`、`after` 为 None。每条记录按读到的顺序取 `seq`。
 4. 记录放进每个 `RepoWatch` 订阅的当前批次。
+
+目录上的事件读这个目录下的全部 reflog 文件：已有进度的文件按路径前缀在进度表里做范围查找，一批事件涉及 N 个文件中的 k 个时开销是 O(k log N) 加上命中的文件数；另外列出目录，找出新出现的文件。
+
+`logs/refs/heads/` 下任何一级名字以 `.lock` 结尾的文件和目录不是 reflog：git 不允许引用名的任何一级以 `.lock` 结尾，而 `git reflog expire` 先把新的 reflog 写进 `logs/refs/heads/<分支>.lock`，再改名为原文件。事件路径的最后一级以 `.lock` 结尾时已按「git 元数据」丢弃；列出目录（第 1、2 段和目录上的事件）和路径到 `ReflogFile` 的映射也跳过这些名字，否则列出目录时碰到的锁文件会以 `NewFile` 交付整份改写后的 reflog，引用名是假的，随后又报告 `Removed`。
 
 先后的判断规则（供 `usage`）。记录 A 一定早于记录 B，当且仅当下列之一成立：
 
@@ -724,7 +728,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 |---|---|
 | 冷启动 20 ms（ADR 0017） | 首帧之前不调用；`Watcher::new` 只分配一个 `Arc` |
 | 空闲内存：空窗口 < 60 MB | 没有打开项目时不建线程、不 arm，常驻 < 64 KB |
-| 空闲内存：打开 monorepo < 100 MB | 每个仓库状态 < 256 KB（reflog 进度每个文件约 150 B，1000 个分支约 150 KB；目录缓存 1024 项）；非当前 worktree 不 arm 工作区根，只在公共目录目标里计数。过滤器由 `git` 构造，它的文件列表（与 `project` 的句柄共用的解析后 index）、折叠顺序和忽略规则都是 `git` 的份额（`git/filter_cloudprint_bytes`），不计入本 crate（[ADR 0035](../adr/0035.md)） |
+| 空闲内存：打开 monorepo < 100 MB | 每个仓库状态 < 256 KB（reflog 进度每个文件约 115 B，1000 个分支的仓库状态共约 120 KB，256 KB 内约容纳 2200 个 reflog 文件，实测见「实际验证」；目录缓存 1024 项）；非当前 worktree 不 arm 工作区根，只在公共目录目标里计数。过滤器由 `git` 构造，它的文件列表（与 `project` 的句柄共用的解析后 index）、折叠顺序和忽略规则都是 `git` 的份额（`git/filter_cloudprint_bytes`），不计入本 crate（[ADR 0035](../adr/0035.md)） |
 | 空闲内存：10 万文件的仓库 < 120 MB（ADR 0035） | 本 crate 自己的状态不随跟踪文件数增长，17 个 worktree 时同样 < 1 MB；过滤器 ≤ 16 MB 是 `git` 的份额（`git/filter_100k_bytes`） |
 | 突发时的内存 | 队列最多 16 384 个事件（约 1.6 MB），每个订阅的批次最多 10 000 个路径（约 1 MB），暂存最多 4096 项（超过时合并到上级目录），每个仓库订阅的批次里 reflog 行最多 1 MiB（超过的分到后面的批次）；都有上限，路径超过时改为 `rescan` |
 | 打开项目到项目主页可用 < 100 ms | `watch_*` 只入队；arm 和加载在后台，不在打开路径上 |
@@ -781,7 +785,7 @@ Linux 上没有真实后端：`platform` 在 Linux 上不提供 `backend`，测�
 - 修订号（`revision_*`）：「修订号」每一条、「git 元数据」表每一行一个用例，各自恰好加一；同一原始批次里多个事件只加一；只有被忽略路径、`.lock` 文件、`objects/` 的批次不加一；另一个 worktree 的 HEAD 不让这个 worktree 加一，`refs/` 让全部 worktree 加一；配置清单里的文件、它的符号链接目标变化时加一；重新监听后 `epoch` 不同。
 - flush（`flush_*`）：`FakeBackend::hold` 留住的事件在 `flush_revision` 之后计入；`flush_revision` 不提前交付正在合并的批次；在 `Sink::deliver` 里调用返回 `WouldDeadlock`；状态失败后返回 `NotWatching`；arm 还没完成时等 arm；超时返回 `Timeout`。
 - 合并（`coalesce_*`）：`quiet` 内的事件合成一批；连续事件在 `max_delay` 时交付；两个句柄用不同参数各自交付；路径超过上限改为 `rescan`；`health` 变化立即交付；没有等待中的批次时不设定时器。
-- reflog（`reflog_*`）：追加一行得到一条 `Appended` 记录，`seq`、`observed`、`after` 符合「reflog」的规则；两个文件交替追加时先后规则给出的判断都成立，判断不了的不判断；不完整的行等换行；变短、改写末尾为 `Rewritten`；删除为 `Removed`；新分支和改名后的分支为 `NewFile`、`after` 为 None；`worktrees/<名字>/logs/HEAD` 为 `Head(Linked)`；`logs/refs/stash`；超过 1 MiB 的追加和 3 MiB 的改名分支分到多个批次，每批不超过 1 MiB、`seq` 连续、接着读的部分 `after` 与第一批相同；一批里追加、重置、再追加时按 `seq` 合并 `reflog` 与 `reflog_resets` 得到正确的先后；超过 64 KiB 的行跳过；arm 之前的记录不交付；第 1 段与 arm 之间追加的行由补读交付且只交付一次，`FakeBackend` 在 arm 时注入的同一文件事件不让它重复；两个 `Watcher`（不同 `run`）的记录之间不按读取编号和偏移判断先后：前一个 `Watcher` 关闭后把文件改写成更短的内容、再追加，后一个运行的记录在运行序号下晚于前一个运行的全部记录，偏移更小也不判为更早，`NewFile` 记录不参与跨运行判断；同一运行内 `ReflogReset` 前后的记录不按偏移判断；`reftable/tables.list` 存在时没有记录；公共目录 `RESCAN` 后追加的记录照常交付。
+- reflog（`reflog_*`）：追加一行得到一条 `Appended` 记录，`seq`、`observed`、`after` 符合「reflog」的规则；两个文件交替追加时先后规则给出的判断都成立，判断不了的不判断；不完整的行等换行；变短、改写末尾为 `Rewritten`；删除为 `Removed`；新分支和改名后的分支为 `NewFile`、`after` 为 None；`worktrees/<名字>/logs/HEAD` 为 `Head(Linked)`；`logs/refs/stash`；超过 1 MiB 的追加和 3 MiB 的改名分支分到多个批次，每批不超过 1 MiB、`seq` 连续、接着读的部分 `after` 与第一批相同；一批里追加、重置、再追加时按 `seq` 合并 `reflog` 与 `reflog_resets` 得到正确的先后；超过 64 KiB 的行跳过；arm 之前的记录不交付；第 1 段与 arm 之间追加的行由补读交付且只交付一次，`FakeBackend` 在 arm 时注入的同一文件事件不让它重复；两个 `Watcher`（不同 `run`）的记录之间不按读取编号和偏移判断先后：前一个 `Watcher` 关闭后把文件改写成更短的内容、再追加，后一个运行的记录在运行序号下晚于前一个运行的全部记录，偏移更小也不判为更早，`NewFile` 记录不参与跨运行判断；同一运行内 `ReflogReset` 前后的记录不按偏移判断；`reftable/tables.list` 存在时没有记录；公共目录 `RESCAN` 后追加的记录照常交付；`logs/refs/heads/` 下的锁文件（arm 之前留下的、`reflog expire` 改名之前被列出目录碰到的、名字像锁文件的目录里的）没有记录也没有重置，只有改名后的原文件报告 `Rewritten`；目录上的事件读到这个目录下的全部已知文件，名字以同一前缀开头的兄弟文件（`feature-z`、`featurez` 之于 `feature/`）不读，目录被整个删除后其中每个已知文件报告 `Removed`。`tests/reflog_memory.rs` 用按线程计数的全局分配器测出每个 reflog 文件的进度占用，并确认 1000 个分支的仓库状态 < 256 KB（见「性能」）。
 - 配置清单（`config_*`）：清单里的文件按位置分到公共目录目标、工作区根目标和 `Entries` 目标；同一目录的文件共用一个 `Entries` 目标；不存在的文件监视最近的上级目录，逐级出现后下移；符号链接的每一级和规范路径都被监视；上级目录是链接（`~/.config -> dotfiles/config`）时，换掉这个链接、在链接后面的目录里新建原本不存在的 `git/config` 都让修订号加一并重新展开；超过 40 个链接时按不存在处理；工作区里被忽略的配置文件在过滤之前被识别；清单变化时只 arm 新增、drop 多余的目标；`HEAD` 变化触发重新计算；`config_files` 失败为 `Degraded(Config)`。
 - 目录监听（`dir_*`）：路径为绝对路径、按 250 ms 合并；根不存在时监视上级目录的 `Entries`，根出现后交付 `Appeared` 和 `rescan`；根被删除后交付 `Vanished` 并回到上级目录。
 - 异常（`rescan_*`、`health_*`）：「状态与异常」表的每一行；队列溢出按 `RESCAN` 处理；`Sink` panic 后其他订阅照常。
@@ -864,6 +868,20 @@ macOS CI 要确认的：
 - 自审发现的竞争（「路径分类」末段的「不确定」标记）：只按触发的种类决定 `previous` 时，加载在途时被旧过滤器判为丢弃的新规则文件之后一直不会被读到，直到下一次不是 index 的重新加载；改动之前下一次 index 变化的完整遍历会补上它。现在这三种情形之后的第一次 index 加载完整进行，`filter_reuse_not_after_*` 和 git 的 `watch_source_events_rule_file_missed_during_a_load_is_read_by_the_next_index_load` 在去掉标记时失败。
 - 接口改为 `filter(&FilterRequest, ..)`：`git`、`code_intel` 的 `LazySource`、`FakeSource` 和 bench 的调用一并改了。`git/filter_100k` 的数字见 git 设计「实际验证」。
 
+reflog 进度的压缩、锁文件的过滤和已知文件的前缀查找（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，`Refs #31`），Linux（x86_64 容器，4 核）：
+
+- 内存：`tests/reflog_memory.rs` 用按线程计数的全局分配器（计请求的字节数，不含 malloc 的额外开销），在临时目录里建 `logs/HEAD` 和 1000 个分支 reflog（`logs/refs/heads/feature/review-NNNN`，每个两行），经 `testing::manual` 和 `FakeBackend` 调用 `watch_repo`，第一个批次交付后计仓库状态的常驻字节（`Watcher` 本身不计）。同一个测试在改动前的 `origin/main` 上：没有分支时 6488 B，1000 个分支 263 912 B，每个文件 257 B，超过 256 KB；改动后：6512 B、122 088 B，每个文件 115 B（`Progress` 48 B，键是 `Box<[u8]>`，其余是 `BTreeMap` 节点按填充率分摊的开销）。256 KB 内约容纳 2200 个 reflog 文件。测试断言 1000 个分支的仓库状态 < 256 KB、每个文件 < 150 B。
+- `just test -p lectern-fs-watch`：117 个测试通过。新增 `reflog_lock_files_are_not_reflogs`（arm 之前留下的 `stale.lock`、`reflog expire` 改名之前被目录事件列出的 `topic.lock`、`odd.lock/` 目录里的文件都没有记录和重置，只有改名后的 `topic` 报告 `Rewritten`；改动前的代码会交付 `refs/heads/topic.lock` 的 `NewFile` 和 `Removed`）、`reflog_directory_event_reads_every_known_file_under_it`（`feature/` 上的事件只读 `feature/x`、`feature/y/deep`，不读 `feature-z`、`featurez`；目录整个删除后两者各报告 `Removed`）、模块内的 `keys_within_is_the_path_and_what_is_under_it`、`progress_is_compact` 和上面的内存测试；`reflog_file_locations` 补了锁文件的路径。原有的 `reflog_*` 快照没有变化。
+- `just bench --measure fs_watch/`，各运行一次，改动前是 `origin/main` 的独立 worktree：
+
+  | ID | 改动前 中位数 / p95 | 改动后 中位数 / p95 | 预算 |
+  |---|---|---|---|
+  | `fs_watch/classify_burst` | 16.5 ms / 29.3 ms（48 个样本） | 16.6 ms / 18.0 ms（60 个样本） | < 100 ms |
+  | `fs_watch/reflog_append` | 6.57 µs / 7.49 µs | 6.81 µs / 11.3 µs | < 1 ms |
+
+  `reflog_append` 的中位数多了 0.24 µs，在这台机器两次运行的波动之内（第 1 步记录的四次运行在 6.8–10.9 µs 之间）；每次读取多算两次 64 字节的哈希。两次运行都没有标为 `noisy`。
+- `just check`、`just test`（Linux 上的全部 crate，2158 个测试）、`just doctest`、`just deny` 通过。macOS 上没有运行；本 crate 没有平台相关代码。
+
 ## 与设计的差异
 
 - 「路径分类」第 6 步：上级目录不是子模块且被忽略规则排除时就丢弃，不再要求它不受跟踪。设计原来只丢弃「不受跟踪且被忽略」的上级目录，于是 `build/` 被忽略、`build/keep.txt` 受跟踪时，`build/out.js` 会走到第 8 步，而 `PathFilter::ignored` 只看路径自身（`out.js` 不匹配），结果被当作未跟踪路径交付；git 不重新包含被排除目录之下的路径，`git status` 不会列出它。受跟踪的路径在第 5 步已经交付，所以改动只影响未跟踪的路径。上文第 6 步已改。
@@ -885,3 +903,5 @@ macOS CI 要确认的：
 - 第 3 步：具名条目自己的描述符收到 `NOTE_DELETE`、`NOTE_RENAME`、`NOTE_REVOKE` 时，即使 `fstatat` 得到相同的设备号和 inode 也重新打开（新文件可能拿到相同的 inode 号）；具名条目打开时加 `O_NONBLOCK`；`O_EVTONLY` 在 rustix 里没有名字，按 `sys/fcntl.h` 的值传入。
 - 第 3 步：kqueue 的 `flush` 最多等 2 s（与 fs_watch 默认的 `flush_timeout` 相同），超时或线程已停止时返回 `BackendError::Other`；描述符上限按每个目标的目录加全部 `names`（不论是否存在）在 arm 时预留，drop 时归还，具名条目以后出现时不会超出上限；kqueue 线程在后端 drop 时退出，`kevent` 意外出错退出后，下一次 `Entries` 的 arm 重建 kqueue 和线程。设计没有写这几处。上文已补充。
 - 第 3 步：测试比设计多了 `fsevents_convert_*`（所有平台）、`fsevents_root_renamed_reports_root_changed`、`fsevents_arm_missing_path_is_not_found`、`fsevents_streams_share_one_queue_and_stay_apart`、`fsevents_watcher_dir_appears_changes_and_vanishes`（经真实 `Watcher` 和 `EventSink`，为它在 macOS 上加了 `lectern-kernel` 的 dev 依赖，实现 `Sink` 要用 `BusyGuard`），以及 kqueue 的目录改名、具名条目出现与消失、没有 `names`、不存在的目录、描述符上限、drop、两个目标各一个用例。测试经 `MacBackend::arm_with` 把批次交给一个记录用的闭包，不经 fs_watch 的队列；`Backend::arm` 只是把 `EventSink::send` 包成同样的闭包。
+- reflog 进度（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：偏移之前的 64 字节只存长度和哈希，不存副本；键是 `logs/refs/heads/` 之下的路径（分支）或相对公共目录的路径（`logs/HEAD`、`logs/refs/stash`、linked worktree 的 `HEAD`），分在两张表里；`after` 不存 `run`，读出时取这次运行的 `run`。原来的布局（64 字节的副本、完整相对路径的 `Vec<u8>` 键、`after` 带 `run`）实测每个文件 257 B，1000 个分支的仓库状态约 258 KB，超过「性能」的 256 KB；原来写的「约 150 B」是估算。哈希用每个进程随机密钥的 SipHash，把改写误判为未改写需要 64 位哈希碰撞（「reflog」第 1 步）。上文「reflog」与「性能」已改。
+- `logs/refs/heads/` 下的锁文件：原来只在事件路径上丢弃 `.lock`，列出目录时仍会把 `<分支>.lock` 当作新分支读入，以 `NewFile` 交付后再报告 `Removed`。现在列出目录和路径映射也跳过任何一级名字以 `.lock` 结尾的路径；上文「reflog」已补充。
