@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 5 项（`executor`）已实现（[#186](https://github.com/SoloJiang/lectern-app/pull/186)，见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 7 项（`agents`）已实现（[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见 [agents 设计「日志与诊断」](agents.md#日志与诊断)；命令行与凭据转发端点还没有实现，随 Analyze 接入）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；第 9 项已实现：`fs_watch`（[#191](https://github.com/SoloJiang/lectern-app/pull/191)，见 [fs_watch 设计「日志与诊断」](fs_watch.md#日志与诊断)）、`platform` 的 kqueue 线程（[#192](https://github.com/SoloJiang/lectern-app/pull/192)，见 [platform 设计「日志与诊断」](platform.md#日志与诊断)；只在 macOS 上编译）、`syntax`（[#188](https://github.com/SoloJiang/lectern-app/pull/188)，见 [file_reader 设计「日志与诊断」](file_reader.md#日志与诊断)）、`code_intel`（[#193](https://github.com/SoloJiang/lectern-app/pull/193)，见 [code_intel 设计「日志与诊断」](code_intel.md#日志与诊断)）、`i18n`（[#190](https://github.com/SoloJiang/lectern-app/pull/190)，见 [i18n 设计「日志与诊断」](i18n.md#日志与诊断)），实际的调用处数量见各设计的「与设计的差异」；其余步骤尚未实现（见「验收」）。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 5 项（`executor`）已实现（[#186](https://github.com/SoloJiang/lectern-app/pull/186)，见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 7 项（`agents`）已实现（[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见 [agents 设计「日志与诊断」](agents.md#日志与诊断)；命令行与凭据转发端点还没有实现，随 Analyze 接入）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；第 9 项已实现：`fs_watch`（[#191](https://github.com/SoloJiang/lectern-app/pull/191)，见 [fs_watch 设计「日志与诊断」](fs_watch.md#日志与诊断)）、`platform` 的 kqueue 线程（[#192](https://github.com/SoloJiang/lectern-app/pull/192)，见 [platform 设计「日志与诊断」](platform.md#日志与诊断)；只在 macOS 上编译）、`syntax`（[#188](https://github.com/SoloJiang/lectern-app/pull/188)，见 [file_reader 设计「日志与诊断」](file_reader.md#日志与诊断)）、`code_intel`（[#193](https://github.com/SoloJiang/lectern-app/pull/193)，见 [code_intel 设计「日志与诊断」](code_intel.md#日志与诊断)）、`i18n`（[#190](https://github.com/SoloJiang/lectern-app/pull/190)，见 [i18n 设计「日志与诊断」](i18n.md#日志与诊断)），实际的调用处数量见各设计的「与设计的差异」；第 10 项（非 tool crate 开启 `clippy::print_stderr`、`clippy::print_stdout`）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见「实际验证」）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -430,7 +430,7 @@ level     := off | error | warn | info | debug | trace
 执行方式：
 
 - 类型：宏的消息只接受字面量，字段值必须实现 `Field`；`Value` 没有接受运行时字符串的构造函数。`Value::panic_message` 的调用位置由架构检查限制在 `kernel`、`executor` 和本 crate。
-- lint：`clippy.toml` 用 `disallowed-macros` 禁止 `log::error`、`log::warn`、`log::info`、`log::debug`、`log::trace`、`log::log`，理由指向 ADR 0046；本 crate 的宏展开不经过这些宏，直接构造 `log::Record`。同一个文件用 `disallowed-methods` 禁止 GPUI 的错误日志辅助方法 `gpui_util::ResultExt` 的 `log_err`、`log_err_with_backtrace`、`warn_on_err`、`log_with_level`，`gpui_util::TryFutureExt` 的 `log_err`、`warn_on_err`，以及 `gpui::TaskExt` 的 `detach_and_log_err`、`detach_and_log_err_with_backtrace`：它们把错误格式化成第三方文本，绕过类型化字段。视图层的错误经 `lectern-logging` 的宏记录，`detach` 前自己处理 `Result`。各 crate 接入完成后，非 tool crate 开启 `clippy::print_stderr` 和 `clippy::print_stdout`。
+- lint：`clippy.toml` 用 `disallowed-macros` 禁止 `log::error`、`log::warn`、`log::info`、`log::debug`、`log::trace`、`log::log`，理由指向 ADR 0046；本 crate 的宏展开不经过这些宏，直接构造 `log::Record`。同一个文件用 `disallowed-methods` 禁止 GPUI 的错误日志辅助方法 `gpui_util::ResultExt` 的 `log_err`、`log_err_with_backtrace`、`warn_on_err`、`log_with_level`，`gpui_util::TryFutureExt` 的 `log_err`、`warn_on_err`，以及 `gpui::TaskExt` 的 `detach_and_log_err`、`detach_and_log_err_with_backtrace`：它们把错误格式化成第三方文本，绕过类型化字段。视图层的错误经 `lectern-logging` 的宏记录，`detach` 前自己处理 `Result`。非 tool crate 开启 `clippy::print_stderr` 和 `clippy::print_stdout`，测试代码和构建脚本除外（「对其他 crate 的要求」第 10 项）。
 - 落盘时再检查一次：target 是 Lectern crate、但消息不是字面量的记录（`fmt::Arguments::as_str()` 为 None），按第 3 类处理。
 - `PanicText` 的变体由调用方按 payload 的实际类型构造（kernel 的 `contain`、executor 的 `catch` 和本 crate 的钩子），不由调用方判断内容是否安全。
 - 详细日志只改变过滤和容量，处理规则不变。
@@ -506,7 +506,7 @@ level     := off | error | warn | info | debug | trace
 7. `agents`：会话解析失败（warn，会话 UUID、路径、字节偏移、行长度、错误种类，不记行的内容）；副本写失败退回慢路径（warn）；命令行的启动与退出（程序名、参数个数、pid、退出状态）；Analyze 的凭据转发端点按「隐私」的网络请求规则记录，带 `analysis`、`req`。金丝雀放在会话 JSONL、提示词和占位令牌、真实令牌里。
 8. `review`：标注日志的恢复（warn：截掉的尾部字节数、跳过的坏行数）、写失败与重试（warn）、压缩（info：前后字节数）；作用域带 `review`、`session`。金丝雀放在文件内容和会话内容里。
 9. `fs_watch`（3 处）、`platform`（kqueue 线程 1 处）、`syntax`（12 处）、`code_intel`（26 处）、`i18n`（stderr 一处）：改为宏，按各自现有的「记日志」处记录。
-10. CI：各 crate 接入完成后，在非 tool crate 开启 `clippy::print_stderr`、`clippy::print_stdout`。
+10. CI：在非 tool crate 开启 `clippy::print_stderr`、`clippy::print_stdout`。两条写进 `[workspace.lints.clippy]`，每个 crate 经 `[lints] workspace = true` 继承；`clippy.toml` 的 `allow-print-in-tests = true` 放过 `#[test]` 函数和 `#[cfg(test)]` 里的代码。tool crate 在打印的目标根上 `#![allow]`，构建脚本经 stderr 向 Cargo 报错的地方 `#[allow(clippy::print_stderr)]`（构建脚本的 stdout 是给 Cargo 的指令，clippy 本身不报）。架构检查（[CI「架构规则检查」](ci.md#架构规则检查)第 8 条）确认工作区开着这两条，并且 tool crate 和 crate 根目录的 `build.rs` 之外没有任何源码提到它们。还没接入的 crate 运行时不打印，不需要例外；它们接入时由这条 lint 保证不写 stdout 和 stderr。
 11. `workspace` 与视图层：主线程上执行注册内容的闭包时设 `plugin`、`act` 作用域。
 12. 导出界面：等「未决问题」1、3 答复后，由对应的视图 crate 和 `platform` 实现。
 
@@ -540,7 +540,9 @@ level     := off | error | warn | info | debug | trace
 - 启动后 1 s 内日志目录里出现本次运行的文件，第一行是文件头；正常退出后最后一行是结束记录。
 - `LECTERN_LOG=debug` 和 `--log cache=trace` 启动时文件头的 `filter` 与之相同。
 
-**第 4 步起：** 「对其他 crate 的要求」第 4 到 11 项各一个 PR，每个 PR 的验收是：`rg 'eprintln!|util::log' crates/<crate>/src --glob '!**/tests*'` 没有结果；这个 crate 的金丝雀测试通过；涉及 panic 的（kernel、executor）有测试检查记录里的 `plugin`、`act`、`task`。
+**第 4 步起：** 「对其他 crate 的要求」第 4 到 11 项各一个 PR（第 10 项见下），每个 PR 的验收是：`rg 'eprintln!|util::log' crates/<crate>/src --glob '!**/tests*'` 没有结果；这个 crate 的金丝雀测试通过；涉及 panic 的（kernel、executor）有测试检查记录里的 `plugin`、`act`、`task`。
+
+**第 10 项：** `just check` 在 Linux 和 macOS 上都通过，期间两条 lint 已经打开；在一个非 tool crate 的非测试代码里临时加一行 `eprintln!` 时 clippy 报错，加在它的 `#[cfg(test)]` 模块里时不报；架构检查的新规则有单元测试，删掉工作区里的任一条 lint 或在非 tool crate 里写 `#[allow(clippy::print_stderr)]` 时检查失败。
 
 ## 实际验证
 
@@ -590,6 +592,14 @@ level     := off | error | warn | info | debug | trace
 
   `enabled_call` 另有一对只跑它自己的：改动后 717 ns、改动前 765 ns。这几项经过的代码里，改动只碰到写出记录时的一次 `current()`，微基准里它前后相同；`filtered_call` 不读作用域。两侧都在同一范围里跳动（报告标为 noisy），看不出变慢，也不能说一定没有变慢。
 
+打印 lint（「对其他 crate 的要求」第 10 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），Linux（x86_64，Rust 1.97.0）：
+
+- 改动前的清点：全部 crate 的非测试代码里，`print!`、`println!`、`eprint!`、`eprintln!`、`dbg!` 和直接写 `io::stdout()`、`io::stderr()` 的地方只在 tool crate（`bench` 的库与报告程序 12 处、`benches/` 9 处、`tests/goto_phases.rs` 5 处，`doc_check` 的 `main.rs` 4 处）和 `i18n` 的 `build.rs`（3 处 `cargo::rerun-if-changed`、2 处报错）里。已接入和尚未接入的 crate（`app`、`git`、`project`、`forge`、`terminal`、`usage` 和视图层）运行时都不打印，所以没有给任何非 tool crate 加例外。测试代码里的打印（`platform`、`syntax`、`code_intel` 的 `src/tests/`，`fs_watch` 的 `tests/reflog_memory.rs`）由 `allow-print-in-tests` 放过，clippy 不报。
+- 开启后 clippy 只在上面这些位置报错：`i18n/build.rs` 只报两处 `eprintln!`（clippy 不对构建脚本报 `print_stdout`）。加上 `allow` 后 `just check` 通过。
+- 在 `lectern-services` 的非测试代码里临时加 `eprintln!`、`println!`，clippy 报 `print_stderr`、`print_stdout`；同样的打印放在 `#[cfg(test)]` 模块的辅助函数和 `#[test]` 函数里不报。在同一个 crate 里临时写 `#[allow(clippy::print_stderr)]`，架构检查失败。都没有提交。
+- `python3 scripts/test_check_architecture.py`（21 个测试，新增 `PrintLintRule` 的两个）通过；`just check`、`just test`（2255 个测试）、`just doctest`、`just deny` 通过。
+- **没有在 Linux 上编译的**：`app` 和 `ui`（依赖 GPUI，不在 Linux 的 clippy 范围里）。用 grep 确认它们的源码里没有打印和直接写 stdout、stderr 的代码；它们同样经 `[lints] workspace = true` 继承这两条 lint，由 macOS CI 的 `just check` 验证。
+
 ## 与设计的差异
 
 第 1 步（[#177](https://github.com/SoloJiang/lectern-app/pull/177)）：
@@ -624,3 +634,8 @@ level     := off | error | warn | info | debug | trace
 - **kernel 公开了两个只读方法。** 任务要带「闸门的插件和激活」，`PanicText` 要按 payload 的类型构造，原有的公开接口里取不到这两样：kernel 加上 `SubmitGate::log_ctx` 和 `PanicPayload::text`（[kernel 设计「与设计的差异」](kernel.md#与设计的差异)）。
 - **专用任务也有序号和作用域**，不只是 `spawn` 提交的任务；`util::log` 实际是 12 处调用。其余见 [executor 设计「日志与诊断」](executor.md#日志与诊断)和它的「与设计的差异」。
 - **作用域改为指针栈，新增 `within`。** 原来的线程本地 `Cell<Ctx>` 在设和恢复时要复制几次 120 字节的 `Ctx`，executor 每次 poll 设一次，在 Linux 虚拟机上约 20 ns。现在线程本地保存一个指针栈（「作用域与关联 ID」）：`within` 进入一个已经算好的 `Ctx` 只写指针和深度，约 1 ns；`scope` 仍是覆盖语义、接口不变，合并结果写进本线程的槽位，设和恢复合计约 9 ns。`within` 用闭包而不是 guard：guard 可以被 `mem::forget`，被借用的 `Ctx` 释放后栈里会留下悬空指针。栈最多 32 层，更深的作用域不生效。测试 `src/tests/scopes.rs`。
+
+「对其他 crate 的要求」第 10 项（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+
+- **不等全部 crate 接入就开启。** 原文写「各 crate 接入完成后」，而 `app`（第 3 项）和 `git`、`project`、`forge`、`terminal`、`usage`、视图层还没有接入。清点下来它们运行时都不打印（「实际验证」），现在开启不需要任何例外，还能保证它们接入之前不新增打印。
+- **测试代码、构建脚本和 tool crate 的例外写成了规则。** 原文只说「非 tool crate」。测试代码经 `clippy.toml` 的 `allow-print-in-tests` 放过；构建脚本经 stderr 向 Cargo 报错，`i18n/build.rs` 在 `main` 上 `#[allow(clippy::print_stderr)]`；tool crate 不能在 `Cargo.toml` 里覆盖工作区的 lint（`[lints] workspace = true` 不能和其他 lint 并用），所以在打印的目标根上写 `#![allow]`。架构检查新增一条（[CI「架构规则检查」](ci.md#架构规则检查)第 8 条），防止非 tool crate 用 `allow` 关掉它们。

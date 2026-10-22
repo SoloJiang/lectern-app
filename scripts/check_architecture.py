@@ -25,6 +25,10 @@ Rules checked:
   8. `Value::panic_message` (any use of the name `panic_message` in code)
      appears only in the sources of crates/kernel, crates/executor and
      crates/logging (docs/design/logging.md「隐私」).
+  9. The workspace lints turn on clippy's print_stderr and print_stdout, and
+     only tool crates and build scripts mention them in code (an `allow`
+     or `expect`); every other crate logs through lectern-logging
+     (docs/design/logging.md「对其他 crate 的要求」).
 
 Each error names the rule's source (AGENTS.md or a design doc) in brackets.
 
@@ -321,6 +325,53 @@ def panic_message_errors(crate_dirs):
     return errors
 
 
+PRINT_LINTS = ("print_stderr", "print_stdout")
+_PRINT_LINT = re.compile(r"\bprint_std(?:err|out)\b")
+LINT_LEVELS_ON = ("warn", "deny", "forbid")
+
+
+def workspace_print_lint_errors(manifest_path):
+    """Rule 9, first half: the workspace Cargo.toml sets both print lints
+    in [workspace.lints.clippy] to warn, deny or forbid (a plain level or
+    `{ level = ... }`)."""
+    with open(manifest_path, "rb") as f:
+        clippy = tomllib.load(f).get("workspace", {}).get("lints", {}).get("clippy", {})
+    errors = []
+    for lint in PRINT_LINTS:
+        level = clippy.get(lint)
+        if isinstance(level, dict):
+            level = level.get("level")
+        if level not in LINT_LEVELS_ON:
+            errors.append(f"workspace: set `{lint} = \"warn\"` in [workspace.lints.clippy] [docs/design/logging.md]")
+    return errors
+
+
+def print_lint_allow_errors(crate_dirs, layers):
+    """Rule 9, second half. `crate_dirs` maps a workspace crate's name to its
+    directory, `layers` its layer. In crates outside the tool layer, every
+    `.rs` file except the crate's build.rs that names print_stderr or
+    print_stdout outside comments and strings is an error."""
+    errors = []
+    for name, crate_dir in sorted(crate_dirs.items()):
+        if layers.get(name) == "tool":
+            continue
+        build_rs = os.path.join(crate_dir, "build.rs")
+        for root, dirs, files in os.walk(crate_dir):
+            dirs[:] = sorted(d for d in dirs if d != "target")
+            for file in sorted(files):
+                path = os.path.join(root, file)
+                if not file.endswith(".rs") or path == build_rs:
+                    continue
+                with open(path, encoding="utf-8") as f:
+                    if _PRINT_LINT.search(strip_comments_and_strings(f.read())):
+                        rel = os.path.relpath(path, os.path.dirname(os.path.dirname(crate_dir)))
+                        errors.append(
+                            f"{name}: {rel} allows clippy::print_stderr or print_stdout; log through lectern-logging's macros "
+                            "[docs/design/logging.md]"
+                        )
+    return errors
+
+
 def metadata(platform=None, all_features=True):
     cmd = ["cargo", "metadata", "--format-version", "1", "--locked"] + (["--all-features"] if all_features else [])
     if platform:
@@ -591,7 +642,10 @@ def main():
 
     member_pkgs = [packages[pid] for pid in members]
     errors.extend(sink_feature_errors(member_pkgs, {packages[pid]["name"]: layer[pid] for pid in members}))
-    errors.extend(panic_message_errors({p["name"]: os.path.dirname(p["manifest_path"]) for p in member_pkgs}))
+    member_dirs = {p["name"]: os.path.dirname(p["manifest_path"]) for p in member_pkgs}
+    errors.extend(panic_message_errors(member_dirs))
+    errors.extend(workspace_print_lint_errors(os.path.join(meta["workspace_root"], "Cargo.toml")))
+    errors.extend(print_lint_allow_errors(member_dirs, {packages[pid]["name"]: layer[pid] for pid in members}))
 
     for pid in members:
         if layer[pid] not in GPUI_FREE_LAYERS:
