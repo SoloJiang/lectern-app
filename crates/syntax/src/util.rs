@@ -1,6 +1,5 @@
 //! Small helpers shared by the modules.
 
-use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Locks, going on after a panic elsewhere: every lock here guards state
@@ -29,11 +28,6 @@ pub(crate) fn yield_now() -> impl std::future::Future<Output = ()> {
         }
     }
     Yield(false)
-}
-
-/// One line on stderr with the crate's prefix.
-pub(crate) fn log(args: fmt::Arguments<'_>) {
-    eprintln!("lectern-syntax: {args}");
 }
 
 /// 64-bit FNV-1a over the concatenation of `parts`, the same function as

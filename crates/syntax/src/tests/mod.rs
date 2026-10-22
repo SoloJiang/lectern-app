@@ -10,6 +10,7 @@ mod find;
 mod health;
 mod lang;
 mod lines;
+mod logs;
 mod lru;
 mod object;
 mod prefetch;

@@ -17,12 +17,13 @@ use lectern_fs_watch::{
     WorktreeSpec, WorktreeWatch,
 };
 use lectern_kernel::BusyGuard;
+use lectern_logging::{Value, warn};
 use lectern_platform::{RelPath, SafeError};
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::ProjectKey;
 
+use crate::diag;
 use crate::git_access::Tree;
-use crate::util::log;
 
 use super::content::Content;
 use super::engine::{Doc, EngineInner};
@@ -77,7 +78,13 @@ fn subscribe(engine: &Arc<EngineInner>, doc: &Arc<Doc>, tree: &Tree) {
     let source = match engine.git.watch_source(tree) {
         Ok(source) => source,
         Err(e) => {
-            log(format_args!("no watch for {}: {e}", doc.target.path));
+            let (kind, io) = diag::git_error(&e);
+            warn!(
+                "no watch for the document; it is not refreshed on changes";
+                path = diag::path(&doc.target.path),
+                error = kind,
+                io = io,
+            );
             return;
         }
     };
@@ -184,7 +191,12 @@ pub(crate) fn check(engine: &Arc<EngineInner>, doc: &Arc<Doc>) {
     let stat = match engine.root(&target.project, &doc.root) {
         Ok(safe) => safe.stat(rel),
         Err(e) => {
-            log(format_args!("watch check of {}: {e}", target.path));
+            warn!(
+                "cannot open the root to check a changed document";
+                path = diag::path(&target.path),
+                root = Value::path(&doc.root),
+                io = Value::io(&e),
+            );
             return;
         }
     };

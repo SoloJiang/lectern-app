@@ -1,6 +1,6 @@
 # file_reader 设计
 
-状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；前置条件 E 和第 6–8 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `reader` 模块、`DirTable`、`ActiveTree::dirs`、`DEPENDENCY_EXTENSIONS`，[#148](https://github.com/SoloJiang/lectern-app/pull/148)）、C 与 G（`platform`，[#147](https://github.com/SoloJiang/lectern-app/pull/147)）、D（`git`，[#146](https://github.com/SoloJiang/lectern-app/pull/146)）、F（`code_intel`，[#149](https://github.com/SoloJiang/lectern-app/pull/149)）已实现，见「实际验证」「与设计的差异」；「验收」第 1 步（`syntax` 骨架、语言表与整文件高亮，[#150](https://github.com/SoloJiang/lectern-app/pull/150)）已实现；前置条件 B（`project` 在后台建目录表、单独一代发布，`services` 的 `DirTable::new` 提速，`project/dirs_100k`、`project/dirs_100k_bytes`，见 [project 设计「实际验证」](project.md#实际验证)，[#152](https://github.com/SoloJiang/lectern-app/pull/152)）已实现；第 2 步（首屏窗口、`FullParse`、`ChainWindow` 与降级，[#153](https://github.com/SoloJiang/lectern-app/pull/153)）已实现；第 3 步（文本与行索引、行检查点与 `syntax.lines`、`Engine`、`DocHandle`、`DocSnapshot`、8 MiB LRU、对象库内容的登记、监听与重新打开、查找、依赖文件，[#156](https://github.com/SoloJiang/lectern-app/pull/156)）已实现；第 4 步（预取、档位 B / C 的窗口链与批量窗口、让路，`syntax/prefetch_wait`，[#158](https://github.com/SoloJiang/lectern-app/pull/158)）已实现；第 5 步（编辑的领域部分：`EditSession`、增量高亮、保存、冲突、三方合并，`syntax/edit_tree_bytes`，[#160](https://github.com/SoloJiang/lectern-app/pull/160)）已实现；`syntax` 的运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，[#188](https://github.com/SoloJiang/lectern-app/pull/188)）已实现；前置条件 E 和第 6–8 步尚未实现。
 
 对应 issue [#10](https://github.com/SoloJiang/lectern-app/issues/10)。本 issue 交付两样功能：按需层的 Files（侧栏里按需展开的文件树，文件列表来自 git index），以及收起层的完整文件阅读（⇧⌘O，默认只读）和轻量编辑（Edit… / ⌘E）（[交互规范「三层结构」](interaction.md#三层结构)、[ADR 0012](../adr/0012.md)）。打开任何大小的文件到首屏高亮 < 16 ms、滚动 120 fps 的做法由 [ADR 0034](../adr/0034.md) 规定，本文把它写成接口和数据结构。高亮的计算放在新的领域库 `syntax`（[ADR 0041](../adr/0041.md)），`file_reader` 只做界面。
 
@@ -54,6 +54,7 @@
 | `lectern-executor`、`lectern-kernel` | 任务、`BusyGuard`、`BackgroundGuard`、`PluginHandle` | 后台线程只由 `executor` 管理；守卫由使用方插件的句柄取得 |
 | `lectern-fs-watch` | 打开文档所在 worktree 的 `WorktreeBatch` | 与 `project`、`code_intel` 共用同一份 worktree 状态 |
 | `lectern-services` | `BlobId`、`RelPath`、`TextOrigin`、`DepRoot`、`ReadTarget` | 数据类型 |
+| `lectern-logging` | 运行日志的宏与类型化字段（「日志与诊断」） | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；测试用它的 `test-support` feature 捕获记录 |
 | `memchr`、`unicode-width` 0.2 | 找换行、查找；长行按字符格数折行 | 都已在 Cargo.lock，发布构建不新增 crate；`unicode-width` 是 MIT OR Apache-2.0 |
 | `insta`、`tempfile`（dev） | 区间快照、临时工作区 | 工作区统一依赖 |
 
@@ -931,6 +932,33 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 | Files：文件列表还没就绪、目录表还没建好 | 按 100 ms 规则显示骨架 |
 | Files：index 读不出（`ScanError`） | 一行文字 `file-reader-files-unavailable` |
 
+## 日志与诊断
+
+`syntax` 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `syntax`，字段值的写法集中在 `crates/syntax/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。`file_reader`（视图）的记录随第 6–8 步写进本节。
+
+- 默认记录：
+
+  | 事件 | 级别 | `msg` | 字段 |
+  |---|---|---|---|
+  | 高亮查询编译不了，这种语言本次运行显示纯文本 | warn | `the highlight query does not compile; the language is shown as plain text` | `lang`、`error`（tree-sitter 的 `QueryErrorKind`）、`row`、`column` |
+  | grammar 卡死，这个 grammar 版本本次运行停用（「grammar 的卡死检测」） | warn | `a parse ran past its budget plus the grace; the grammar is disabled for this run` | `lang`、`grammar`（grammar 版本）、`budget_us`（卡住的那次调用登记的预算） |
+  | 引擎启动之前打开文档，文档一直是空的 | error | `open before the engine started; the document stays empty` | `path` |
+  | 引擎启动之前关闭项目 | warn | `close_project before the engine started; nothing to release` | 无 |
+  | 档位 C 的流式扫描读失败，扫描停下 | error | `the scan of a large file stopped` | `path`、`offset`（这次读的起点）、`size`、`io` |
+  | 档位 C 读可见部分的页失败，下次滚动再读 | warn | `cannot read the visible pages` | `path`、`io` |
+  | 订阅时取不到过滤器的来源，文档不随改动刷新 | warn | `no watch for the document; it is not refreshed on changes` | `path`、`error`（`GitError` 的种类）、`io` |
+  | 事件之后的检查打不开根 | warn | `cannot open the root to check a changed document` | `path`、`root`、`io` |
+  | 编辑时，事件之后的检查读不出文件（标记 `unavailable`） | warn | `cannot read the edited file after a change on disk` | `path`、`op`、`error`、`io` |
+  | 编辑时，合并读不出文件（`merged` 为 None） | error | `cannot read the file to merge` | `path`、`op`、`error`、`io` |
+
+  - `path` 是文档相对于根的路径，`root` 是根目录，都经 `Value::path`（主目录写成 `~`）。`lang` 是核心语言的名字（`code_intel` 传入的不是核心语言名时为 null），`grammar` 是 16 位十六进制。
+  - `io` 是 `Value::io`（`io::Error` 的种类和系统错误码），没有 `io::Error` 时为 null。`GitError` 的 `error` 是 `unsupported`、`no_merge_base`、`object_missing`、`too_large`、`too_many_entries`、`corrupt`、`io`、`cancelled`。读编辑的文件时，`op` 是失败的那一步（`root`：打开根，`path`：不是合法的相对路径，`open`、`read`），`error` 是 `not_found`、`path_through_symlink`、`invalid_path` 或 `io`。查询错误的 `error` 是 `syntax`、`node_type`、`field`、`capture`、`predicate`、`structure`、`language`。
+  - 同一个调用点每 10 秒最多写 20 条（[logging 设计「限流」](logging.md#限流)）。
+- 详细级别：不另加 debug、trace 记录。首屏、解析的每一片、高亮查询、`rows` 和查找是热路径，按次记录会占去 8 ms 首屏预算和滚动预算的可观部分；解析和查询的进度由 `test-support` 的 `Trace` 给测试和基准。上表的调用点都在失败路径上，级别关闭时只做一次级别比较，字段不求值、不分配、不格式化。
+- 关联 ID：本 crate 不设作用域。文档的任务经插件句柄的 `own_with` 提交，记录带 executor 的 `task` 和使用方插件（`file-reader`）的 `plugin`、`act`；`health` 的记录带调用它的线程上的作用域（`code_intel` 的任务也调用它）；`open`、`close_project` 在调用方的线程上记录，带调用方的作用域。
+- 不记录：文件内容（工作区文件、对象库的 blob、依赖根里的文件、编辑缓冲区、保存和合并的文本）、高亮区间和捕获到的标识符、查找的查询文字和结果、高亮查询的文字和 tree-sitter 错误的消息（它引用查询原文）、`GitError::Corrupt` 等错误的文字、`io::Error` 的消息。用路径、语言名、grammar 版本、偏移、字节数和错误种类代替。
+- 金丝雀测试：`logs_hold_no_file_contents`（`testing::capture()`，trace 级别）：金丝雀放在 TypeScript 文件的注释、字符串、模板字符串和标识符里，经首屏、完整读取、整文件解析与高亮、查找（查询就是金丝雀）、同一内容的对象库 blob、编辑会话（输入金丝雀、保存、增量解析）；再让文件所在的目录换成符号链接，引出事件后检查和合并的两条记录，并让 git 替身的 `watch_source` 返回含金丝雀的 `Corrupt`、在没启动的引擎上打开文档、编译一个含金丝雀的坏查询、让一次解析在测试时钟上卡住。检查这些记录都写出了、级别和字段正确，之后 `assert_absent`。
+
 ## 测试
 
 `syntax`（不依赖 GPUI，Linux CI 覆盖），测试按前缀分文件：
@@ -951,6 +979,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `object_*`：有 `ObjectShare` 时打开 `Object` 不调 `Repo::blob`（计数的 git 替身）；登记 drop 后登记表不再持有那份内容（计数分配器：调用方也放下后字节被释放），≤ 1 MiB 的在首屏任务里解压；同一 OID 登记两次、drop 一次仍可用；超过 16 MiB 又没有登记的为 `Unreadable`；后退历史里的条目不持有内容。
 - `edit_*`：增量解析的区间与整文件解析相同；`changed` 之后 `spans` 立即返回平移后的区间；CRLF 与 BOM 在保存时恢复。
 - `save_*`、`merge_*`：身份变化时 `Conflict` 且文件内容不变；`save_anyway` 照常写入；合并结果的快照（无冲突、有冲突、两边改同一行）。
+- `logs_*`（用 `lectern-logging` 的 `testing::capture()`）：金丝雀和各条记录的级别与字段，见「日志与诊断」。
 - `rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 没有结果；`rg -n 'thread::spawn' crates/syntax/src` 没有结果。
 
 `file_reader`（依赖 GPUI，只在 macOS 上）：
@@ -1065,6 +1094,12 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
    - `#[gpui::test]` 的编辑场景和 `leave_guard_*`（「测试」列出的每一种触发）通过；`rg -n 'features.*tree-sitter' Cargo.toml crates/file_reader/Cargo.toml` 没有 gpui-component 的 `tree-sitter` feature。
    - `app/enter_edit` ≤ 100 ms、编辑模式的 `app/scroll_frames` 在预算内；超标时按 ADR 0034 降低 `TIER_A_MAX`，在本文「接口」改常量。
 
+`syntax` 的日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `syntax` 部分，`Refs #170`）：
+
+- `rg 'eprintln!|util::log' crates/syntax/src --glob '!**/tests*'` 没有结果。
+- `logs_*` 通过，其余测试照常通过。
+- `just bench --measure syntax/` 与改动前相比不变慢。
+
 ## 已知限制
 
 - 首屏窗口的起点是启发式的，落在多行注释或模板字符串里时首屏高亮可能出错，直到整文件或窗口链的区间到达（ADR 0034）。
@@ -1134,6 +1169,30 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `project/dirs_100k` 中位数 9.45 ms（负载 1.8 时）、9.48 ms（负载约 3），预算 ≤ 20 ms；提速之前 26.5 ms、26.2 ms。`project/dirs_100k_bytes` 1.46 MB（≤ 1.5 MB），提速前后相同。`project/resident_100k_bytes` 14.1 MB（< 16 MB），含目录表。
 - `just test -p lectern-services`：52 个测试通过。新增 `dirs_match_a_naive_construction_on_interleaved_trees`（`a`、`a-b`、`a.c` 与 `a/…` 交错、深链、非 ASCII 名字，与朴素构造逐目录对照，并检查子目录和文件按 `finder_cmp` 排序）、`finder_cmp_ascii_shortcut_matches_the_character_comparison`（38 个含大小写、数字、非 ASCII 字符的词两两组合，原样和拼接后各比一次，与逐字符解码、`to_lowercase` 的比较结果相同）。提速前后在 10 万文件的形状上建出的表逐字段相等（一次性对照，没有留在测试里）。
 - 没有在 macOS 上运行。
+
+`syntax` 的日志接入（logging 设计第 9 项的 `syntax` 部分），在 Linux（x86_64，4 核虚拟机，Rust 1.97.0）上运行：
+
+- `just check`、`just test`（工作区 2229 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`lectern-syntax` 共 169 个测试，新增 `logs_hold_no_file_contents`；它和 `health_*`、`lang_*`、`edit_*`、`save_*`、`merge_*` 在 `cargo test` 的同一进程里一起运行也通过（捕获器共用，记录按消息、相对路径和 grammar 版本筛选）。
+- `rg 'eprintln!|util::log' crates/syntax/src --glob '!**/tests*'` 没有结果。Cargo.lock 只在 `lectern-syntax` 的依赖里多了 `lectern-logging`，没有新的外部 crate。
+- `logs_hold_no_file_contents` 确认了表里 6 种记录的级别和字段：事件后的检查（warn，`op` 为 `open`，`error` 为 `path_through_symlink`）、合并（error，同样的 `error`）、订阅（warn，`error` 为 `corrupt`）、引擎启动之前的打开（error）、坏查询（warn，`lang`、`error` 为 `syntax`、`row`）、卡住的解析（warn，`lang` 为 `yaml`、`grammar`、`budget_us` 为 8000）。其余 4 种（扫描和页的读失败、检查打不开根、启动之前关闭项目）没有测试触发：前三种要让已打开的描述符或根读失败，测试里造不出来，最后一种只有一个字面量消息。
+- `just bench --measure syntax/`：改动前是从本分支建的另一个 worktree（`origin/main` 的 9bb569c，detach），与改动后交替运行三次；`syntax/full_parse_1mib` 另外只跑它自己，交替四次。中位数依次列出（内存的几项三次相同）：
+
+  | 基准 | 改动前 | 改动后 |
+  |---|---|---|
+  | `syntax/first_screen` | 2.52 / 2.54 / 2.57 ms | 2.54 / 2.55 / 2.57 ms |
+  | `syntax/first_screen/minified` | 8.70 / 8.75 / 8.65 ms | 8.76 / 8.74 / 8.78 ms |
+  | `syntax/first_screen/object_shared` | 2.70 / 4.14 / 2.63 ms | 2.71 / 4.14 / 2.86 ms |
+  | `syntax/first_screen/object_1mib` | 3.06 / 3.76 / 2.97 ms | 3.33 / 4.87 / 3.19 ms |
+  | `syntax/first_screen/object_cold` | 4.30 / 4.72 / 4.69 ms | 4.22 / 6.50 / 4.47 ms |
+  | `syntax/full_parse_1mib` | 361 / 360 / 373 ms；单独：338 / 376 / 364 / 373 ms | 427 / 411 / 352 ms；单独：401 / 345 / 366 / 353 ms |
+  | `syntax/chain_16mib` | 5.58 / 5.16 / 4.48 s | 4.58 / 5.29 / 4.83 s |
+  | `syntax/scan_64mib` | 229 / 132 / 165 ms | 155 / 160 / 134 ms |
+  | `syntax/find_16mib` | 2.70 / 1.99 / 2.89 ms | 2.06 / 2.79 / 2.61 ms |
+  | `syntax/prefetch_wait`（p95） | 100 / 78 / 90.5 ms | 85.9 / 76.5 / 84.5 ms |
+  | `syntax/window_peak`、`syntax/lru_bytes`、`syntax/edit_tree_bytes`（最大值） | 6.86 MB、7.64 MB、37.9 MB | 6.86 MB、7.64 MB、37.9 MB |
+
+  测量时这台机器上同时有其他 agent 的构建和测试（负载 4–5），报告把多项标为 noisy。`full_parse_1mib` 七次的中位数改动前 364 ms、改动后 366 ms；它经过的代码里，改动只碰到 `health::enter` 卡死分支里的一条记录（每片调用一次 `enter`，不进这个分支）和查询第一次编译时的失败分支。首屏、解析、查询、`rows` 和查找的路径上没有新加的记录，看不出变慢。
+- 没有验证的：没有在 macOS 上运行；记录写进真实日志文件要等 `app` 接入（logging 设计第 3 步），这里只经 `testing::capture()` 检查编码后的行。
 
 ## 与设计的差异
 
@@ -1242,3 +1301,9 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   - 每个文件的名字在第一遍扫描里取出，目录内的文件已按 `finder_cmp` 有序时不排序；
   - `finder_cmp` 两边都是 ASCII 字节时直接比较小写字节，不解码；结果与逐字符比较相同（`finder_cmp_ascii_shortcut_matches_the_character_comparison`）。
 - 改写后 `project/dirs_100k` 约 9.5 ms，见「实际验证」。
+
+`syntax` 的日志接入（logging 设计第 9 项的 `syntax` 部分）：
+
+- logging 设计第 9 项写的是「12 处」，实际是 `util::log` 里的一个 `eprintln!` 和它的 10 个调用点（`lang.rs`、`health.rs`、`doc/engine.rs` 各 1 处，`doc/load.rs` 3 处，`doc/watch.rs`、`doc/edit.rs` 各 2 处）。`util::log` 删除，10 个调用点改为「日志与诊断」表里的 10 种记录，不新增调用点。本文原来没有写哪些事件记日志、记什么级别，级别按 ADR 0046「默认日志」的定义定：结果被放弃的（文档一直是空的、扫描停下、合并没有结果）记 error，降级之后继续的记 warn。
+- 原来每行带路径和错误的 `Display` 文字。错误文字不再写出：tree-sitter 的查询错误消息引用查询原文，`GitError::Corrupt` 带任意文字，`io::Error` 的消息由系统给出。改为错误的种类、查询错误的行列和 `Value::io`。编辑会话读文件失败的原因（`Unreadable::Failed`）原来是一段文字，改为 `diag::Failure`：失败的那一步、错误的种类和 `io::Error`；`SaveResult::Failed` 给视图的文字不变。
+- `health` 收到的语言名是 `&str`（`code_intel` 也调用它），类型化字段只接受 `&'static str`：按核心语言表换成表里的名字，不是核心语言时写 null。

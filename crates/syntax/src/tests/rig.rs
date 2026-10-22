@@ -30,6 +30,8 @@ pub(crate) struct FakeGit {
     pub blobs: Mutex<HashMap<BlobId, Arc<[u8]>>>,
     pub blob_calls: AtomicUsize,
     pub source: Mutex<Option<Arc<FakeSource>>>,
+    /// Set: `watch_source` fails with `GitError::Corrupt` of this text.
+    pub watch_error: Mutex<Option<String>>,
 }
 
 impl FakeGit {
@@ -61,6 +63,9 @@ impl GitAccess for FakeGit {
     }
 
     fn watch_source(&self, _tree: &Tree) -> Result<Arc<dyn WorktreeSource>, GitError> {
+        if let Some(text) = self.watch_error.lock().unwrap().clone() {
+            return Err(GitError::Corrupt(text));
+        }
         let source = self.source.lock().unwrap().clone();
         Ok(source.unwrap_or_default())
     }

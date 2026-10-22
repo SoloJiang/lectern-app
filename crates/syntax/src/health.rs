@@ -22,10 +22,11 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+use lectern_logging::{Value, warn};
 use lectern_platform::ThreadCpuClock;
 
+use crate::diag;
 use crate::limits::{STUCK_GRACE, STUCK_GRACE_WALL};
-use crate::util::log;
 
 /// The one table of the process. `code_intel` uses it too.
 pub fn global() -> &'static Health {
@@ -123,10 +124,12 @@ impl Health {
             .filter(|r| &*r.lang == lang && r.grammar_version == grammar_version)
             .find(|r| self.is_stuck(r));
         if let Some(stuck) = stuck {
-            log(format_args!(
-                "a {lang} parse has run past its budget of {:?} plus the grace; the grammar is disabled for this run",
-                stuck.budget
-            ));
+            warn!(
+                "a parse ran past its budget plus the grace; the grammar is disabled for this run";
+                lang = diag::lang(lang),
+                grammar = Value::hex(grammar_version),
+                budget_us = stuck.budget,
+            );
             state.disabled.push((lang.into(), grammar_version));
             return None;
         }

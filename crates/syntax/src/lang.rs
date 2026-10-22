@@ -4,10 +4,12 @@
 use std::fmt;
 use std::sync::{Arc, OnceLock};
 
-use tree_sitter::Query;
+use lectern_logging::warn;
+use tree_sitter::{Query, QueryError};
 
+use crate::diag;
 use crate::spans::TokenKind;
-use crate::util::{fnv64, log};
+use crate::util::fnv64;
 
 /// Bumped when the way query captures become tokens changes (the capture
 /// name mapping, the precedence rules, line splitting): every query version
@@ -284,8 +286,8 @@ pub(crate) struct Compiled {
 }
 
 impl Compiled {
-    fn new(spec: &CoreSpec, language: &tree_sitter::Language) -> Result<Compiled, String> {
-        let query = Query::new(language, spec.query).map_err(|e| e.to_string())?;
+    fn new(spec: &CoreSpec, language: &tree_sitter::Language) -> Result<Compiled, QueryError> {
+        let query = Query::new(language, spec.query)?;
         let captures = query
             .capture_names()
             .iter()
@@ -308,7 +310,8 @@ pub struct Lang {
 }
 
 impl Lang {
-    fn core(spec: &'static CoreSpec) -> Lang {
+    /// A core language; the tests build one from a spec of their own.
+    pub(crate) fn core(spec: &'static CoreSpec) -> Lang {
         Lang {
             spec,
             language: (spec.language)(),
@@ -343,7 +346,7 @@ impl Lang {
 
     /// Compiles the highlight query now if it is not yet: once, then it
     /// stays. Blocking; background threads only. False when it does not
-    /// compile (one line on stderr): the language is shown as plain text for
+    /// compile (a warn in the log): the language is shown as plain text for
     /// this run.
     pub fn prepare(&self) -> bool {
         self.compiled().is_some()
@@ -379,11 +382,16 @@ impl Lang {
         self.compiled
             .get_or_init(|| match Compiled::new(self.spec, &self.language) {
                 Ok(compiled) => Some(Arc::new(compiled)),
-                Err(error) => {
-                    log(format_args!(
-                        "the {} highlight query does not compile, the language is shown as plain text: {error}",
-                        self.spec.name
-                    ));
+                Err(e) => {
+                    // The message quotes the query; the kind and position
+                    // find the pattern in the query file.
+                    warn!(
+                        "the highlight query does not compile; the language is shown as plain text";
+                        lang = self.spec.name,
+                        error = diag::query_error(&e.kind),
+                        row = e.row,
+                        column = e.column,
+                    );
                     None
                 }
             })
