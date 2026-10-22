@@ -4214,6 +4214,7 @@ dependencies = [
  "lectern-executor",
  "lectern-fs-watch",
  "lectern-kernel",
+ "lectern-logging",
  "lectern-services",
  "ruzstd",
  "serde",

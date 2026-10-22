@@ -10,6 +10,7 @@
 pub mod claude;
 mod codec;
 pub mod codex;
+mod diag;
 mod filter;
 mod index;
 mod lines;

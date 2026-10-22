@@ -19,6 +19,9 @@ use lectern_services::session::{
     SessionKey, SessionList, SessionSource, SessionSummary, SessionsChanged, SourceId, TurnIndex,
 };
 
+use lectern_logging::Value;
+
+use crate::diag;
 use crate::filter::SessionFilter;
 use crate::index::IndexBuilder;
 use crate::read::Summarized;
@@ -69,6 +72,8 @@ pub(crate) struct Engine<A: Adapter> {
     adapter: A,
     setup: Setup,
     host: OnceLock<PluginHandle>,
+    /// `start` 的时刻：第一次发布的 info 记从这里起的耗时。
+    started: OnceLock<std::time::Instant>,
     list: Mutex<Arc<SessionList>>,
     state: Mutex<State<A::File>>,
     places: Mutex<Places>,
@@ -204,6 +209,7 @@ impl<A: Adapter> Engine<A> {
             adapter: adapter(me),
             setup,
             host: OnceLock::new(),
+            started: OnceLock::new(),
             list: Mutex::new(Arc::new(SessionList::default())),
             state: Mutex::new(State {
                 stopped: false,
@@ -251,6 +257,7 @@ impl<A: Adapter> Engine<A> {
         if let Some(handle) = handle {
             let _ = self.host.set(handle);
         }
+        let _ = self.started.set(std::time::Instant::now());
         if let Some(watcher) = &self.setup.watcher {
             let watches: Vec<DirWatch> = self
                 .setup
@@ -607,10 +614,34 @@ impl<A: Adapter> Engine<A> {
         #[cfg(test)]
         self.full_summaries
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut fresh = if forced {
-            self.adapter.summarize_with_sources(file).ok()?
+        let fresh = if forced {
+            self.adapter.summarize_with_sources(file)
         } else {
-            self.adapter.summarize(file).ok()?
+            self.adapter.summarize(file)
+        };
+        let mut fresh = match fresh {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                let _scope = lectern_logging::scope(diag::session_ctx(&key.id));
+                match e {
+                    // 读不到 cwd：不列出，只计数（「状态与异常」）；文件在这期间被删掉：下一次事件移除它。
+                    SessionError::Unrecognized | SessionError::NotFound => {
+                        lectern_logging::debug!(
+                            "session not listed";
+                            path = Value::path(A::path(file)),
+                            error = diag::session_error(&e),
+                        );
+                    }
+                    SessionError::Io(_) | SessionError::TooLarge(_) => {
+                        lectern_logging::warn!(
+                            "session summary failed; not listed";
+                            path = Value::path(A::path(file)),
+                            error = diag::session_error(&e),
+                        );
+                    }
+                }
+                return None;
+            }
         };
         if let Some(cached) = tail
             && fresh.summary.tail_pending
@@ -749,6 +780,27 @@ impl<A: Adapter> Engine<A> {
         let old_diagnostics = self.sessions().diagnostics.clone();
         if !first && changed.is_empty() && removed.is_empty() && diagnostics == old_diagnostics {
             return;
+        }
+        if first {
+            lectern_logging::info!(
+                "sessions discovered";
+                agent = diag::agent(&self.adapter.agent()),
+                sessions = sessions.len(),
+                bad_lines = diagnostics.bad_lines,
+                oversized_lines = diagnostics.oversized_lines,
+                unknown_kinds = diagnostics.unknown_types.len(),
+                unreadable_dirs = diagnostics.unreadable_dirs.len(),
+                took_us = self.started.get().map(std::time::Instant::elapsed),
+            );
+        } else {
+            lectern_logging::debug!(
+                "sessions published";
+                agent = diag::agent(&self.adapter.agent()),
+                generation = published.generation + 1,
+                sessions = sessions.len(),
+                changed = changed.len(),
+                removed = removed.len(),
+            );
         }
         let removed_ids: Vec<Arc<str>> = removed.iter().map(|k| k.id.clone()).collect();
         published.generation += 1;

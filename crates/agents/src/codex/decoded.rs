@@ -110,12 +110,38 @@ impl Drop for InUse<'_> {
     }
 }
 
-/// 建副本失败（不是压缩文件本身读不到）：调用方退回从头解码。
+/// 没有副本：压缩文件本身读不到，或者调用方退回从头解码。
 pub(crate) enum CopyError {
     /// 压缩文件读不到（不存在、没有权限、解码失败）。
     Source(io::Error),
-    /// 副本写不出来（目录不可写、磁盘满）。本 crate 还没有日志设施，原因不保留（见「与设计的差异」）。
-    Copy,
+    /// 不建副本（`Codex::without_decoded_copies`）。
+    NoDir,
+    /// 副本写不出来（目录不可写、磁盘满）：哪一步和它的错误，调用方记一条 warn。
+    Copy(Step, io::Error),
+}
+
+/// 写副本失败的那一步（日志的 `step` 字段）。
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Step {
+    CreateDir,
+    Create,
+    Write,
+    Flush,
+    Permissions,
+    Rename,
+}
+
+impl lectern_logging::Field for Step {
+    fn value(&self) -> lectern_logging::Value<'_> {
+        lectern_logging::Value::text(match self {
+            Step::CreateDir => "create_dir",
+            Step::Create => "create",
+            Step::Write => "write",
+            Step::Flush => "flush",
+            Step::Permissions => "permissions",
+            Step::Rename => "rename",
+        })
+    }
 }
 
 impl Store {
@@ -159,7 +185,7 @@ impl Store {
         zst: &Path,
     ) -> Result<InUse<'_>, CopyError> {
         let Some(dir) = self.source_dir(source) else {
-            return Err(CopyError::Copy);
+            return Err(CopyError::NoDir);
         };
         let meta = fs::metadata(zst).map_err(CopyError::Source)?;
         let id = Identity::of(&meta);
@@ -174,7 +200,7 @@ impl Store {
             touch(&path);
             return Ok(guard);
         }
-        fs::create_dir_all(&dir).map_err(|_| CopyError::Copy)?;
+        fs::create_dir_all(&dir).map_err(|e| CopyError::Copy(Step::CreateDir, e))?;
         // 身份变了（重新压缩、被替换）：旧副本作废。
         self.remove_matching(&dir, &stem, &path);
         static TMP: AtomicU64 = AtomicU64::new(0);
@@ -188,9 +214,9 @@ impl Store {
             let _ = fs::remove_file(&tmp);
             return Err(e);
         }
-        fs::rename(&tmp, &path).map_err(|_| {
+        fs::rename(&tmp, &path).map_err(|e| {
             let _ = fs::remove_file(&tmp);
-            CopyError::Copy
+            CopyError::Copy(Step::Rename, e)
         })?;
         self.decodes.fetch_add(1, Ordering::Relaxed);
         self.evict(&dir);
@@ -199,7 +225,7 @@ impl Store {
 
     fn write_copy(&self, zst: &Path, tmp: &Path) -> Result<(), CopyError> {
         let mut input = decoder(zst).map_err(CopyError::Source)?;
-        let out = File::create(tmp).map_err(|_| CopyError::Copy)?;
+        let out = File::create(tmp).map_err(|e| CopyError::Copy(Step::Create, e))?;
         let mut out = io::BufWriter::with_capacity(BUFFER, out);
         let mut buf = vec![0; BUFFER];
         loop {
@@ -209,12 +235,19 @@ impl Store {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(CopyError::Source(e)),
             };
-            out.write_all(&buf[..n]).map_err(|_| CopyError::Copy)?;
+            out.write_all(&buf[..n])
+                .map_err(|e| CopyError::Copy(Step::Write, e))?;
         }
-        let out = out.into_inner().map_err(|_| CopyError::Copy)?;
-        let mut perms = out.metadata().map_err(|_| CopyError::Copy)?.permissions();
+        let out = out
+            .into_inner()
+            .map_err(|e| CopyError::Copy(Step::Flush, e.into_error()))?;
+        let mut perms = out
+            .metadata()
+            .map_err(|e| CopyError::Copy(Step::Permissions, e))?
+            .permissions();
         perms.set_readonly(true);
-        out.set_permissions(perms).map_err(|_| CopyError::Copy)?;
+        out.set_permissions(perms)
+            .map_err(|e| CopyError::Copy(Step::Permissions, e))?;
         Ok(())
     }
 

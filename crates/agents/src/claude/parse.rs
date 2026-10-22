@@ -14,6 +14,7 @@ use super::format::{
 };
 use super::tools;
 use crate::codec::{Reader, Writer};
+use crate::diag::{FirstSkip, Skip};
 use crate::index::{IndexBuilder, preview};
 use crate::stats::ParseStats;
 use crate::time;
@@ -283,11 +284,20 @@ pub(super) struct Parse<'s> {
     pub records: Vec<Positioned<Record>>,
     pub index: Option<&'s mut IndexBuilder>,
     pub stats: ParseStats,
+    /// 这一遍里第一条被跳过的行（「日志与诊断」）。
+    pub skip: FirstSkip,
+    /// 正在解析的行：偏移与长度。
+    pub cur: (u64, u64),
 }
 
 impl Parse<'_> {
     fn bad(&mut self) {
+        self.bad_as(Skip::Missing);
+    }
+
+    fn bad_as(&mut self, kind: Skip) {
         self.stats.bad_lines += 1;
+        self.skip.note(Some(self.cur.0), Some(self.cur.1), kind);
     }
 
     fn emit(&mut self, pos: u64, seq: &mut u16, inherited: bool, value: Record) {
@@ -326,8 +336,10 @@ impl Parse<'_> {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return;
         }
-        let Ok(line) = serde_json::from_slice::<Line>(bytes) else {
-            return self.bad();
+        self.cur = (pos, bytes.len() as u64);
+        let line = match serde_json::from_slice::<Line>(bytes) {
+            Ok(line) => line,
+            Err(e) => return self.bad_as(Skip::of_json(&e)),
         };
         let Some(kind) = line.kind.as_deref() else {
             return self.bad();
@@ -339,6 +351,8 @@ impl Parse<'_> {
             _ => {
                 if !is_known_ignored(kind) {
                     self.stats.unknown_type(kind);
+                    self.skip
+                        .note(Some(pos), Some(bytes.len() as u64), Skip::UnknownType);
                 }
                 self.observe(&line, at);
                 return;
@@ -349,7 +363,7 @@ impl Parse<'_> {
         };
         let header = line.session_id.is_some() && line.cwd.is_some();
         if !self.state.header && !header {
-            return self.bad();
+            return self.bad_as(Skip::NoHeader);
         }
         self.observe(&line, Some(at));
         let Some(cwd) = self.state.cwd.clone() else {

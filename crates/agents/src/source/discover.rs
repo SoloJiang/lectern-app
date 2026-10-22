@@ -63,7 +63,12 @@ fn walk_into(dir: &Path, depth: usize, wanted: &dyn Fn(&Path) -> bool, out: &mut
         {
             return;
         }
-        Err(_) => {
+        Err(e) => {
+            lectern_logging::warn!(
+                "session directory unreadable; the others are listed";
+                path = lectern_logging::Value::path(dir),
+                io = lectern_logging::Value::io(&e),
+            );
             out.unreadable.push(dir.into());
             return;
         }

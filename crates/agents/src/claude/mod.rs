@@ -14,8 +14,9 @@ use lectern_services::session::{
 };
 
 use crate::codec;
+use crate::diag::{self, FirstSkip, Skip, Stage};
 use crate::index::IndexBuilder;
-use crate::lines::{HEAD, Lines, Next, PREFIX};
+use crate::lines::{HEAD, Lines, Next, PREFIX, oversized_len};
 use crate::stats::ParseStats;
 
 mod format;
@@ -206,15 +207,30 @@ impl ClaudeCode {
             records: Vec::new(),
             index,
             stats: ParseStats::default(),
+            skip: FirstSkip::default(),
+            cur: (0, 0),
         };
         let mut at_end = true;
         loop {
             match lines.next().map_err(io_error)? {
                 Next::End => break,
-                Next::Oversized(_) => parse.stats.oversized_lines += 1,
+                Next::Oversized(pos) => {
+                    parse.stats.oversized_lines += 1;
+                    parse
+                        .skip
+                        .note(Some(pos), Some(oversized_len(&lines, pos)), Skip::Oversized);
+                }
                 Next::Line(pos) => {
                     if !parse.state.header && pos >= HEAD {
                         // 开头 256 KB 里开始的行里没有会话头：认不出格式，交出空的一批。
+                        diag::parsed(
+                            Stage::Read,
+                            &file.key.id,
+                            &file.path,
+                            offset,
+                            parse.skip,
+                            &parse.stats,
+                        );
                         return Ok(Parsed {
                             batch: Batch {
                                 reset,
@@ -242,6 +258,14 @@ impl ClaudeCode {
         {
             index.mark_partial();
         }
+        diag::parsed(
+            Stage::Read,
+            &file.key.id,
+            &file.path,
+            offset,
+            parse.skip,
+            &parse.stats,
+        );
         let cursor = if end == 0 {
             Cursor::START
         } else {
