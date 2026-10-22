@@ -88,57 +88,156 @@ impl PluginTag {
     }
 }
 
+/// The most scopes in effect at once on one thread. A [`scope`] or
+/// [`within`] beyond it changes nothing (its records carry the outer scope).
+pub(crate) const MAX_DEPTH: usize = 32;
+
+/// The context outside any scope: `frames[0]` of every thread.
+static EMPTY: Ctx = Ctx::EMPTY;
+
+/// The thread's scopes: a stack of pointers to contexts. `depth` is the
+/// number of scopes in effect and `frames[depth]` the current context.
+///
+/// Invariant: for every `i <= depth`, `frames[i]` points at a live `Ctx`:
+/// [`EMPTY`] (`i == 0`, never written), `slots[i - 1]` (memory of this
+/// thread-local, alive for the thread) or the context borrowed by a
+/// [`within`] call still running on this thread.
+/// - The depth grows only by one push at a time, which writes `frames[d + 1]`
+///   before setting the depth to `d + 1`.
+/// - Leaving a scope only ever lowers the depth (below the scope's index),
+///   never raises it. A `within` lowers it before its borrow ends, also when
+///   unwinding and whatever guards inside it were forgotten or dropped out
+///   of order. So once a `within` at index `i` returned, the depth can reach
+///   `i` again only through a new push that overwrites `frames[i]`.
+///
+/// No `Drop`, so the thread-local is never torn down before the thread ends.
+struct Frames {
+    depth: Cell<usize>,
+    frames: [Cell<*const Ctx>; MAX_DEPTH + 1],
+    /// The merged contexts of overlay scopes, `slots[i - 1]` for the one at
+    /// index `i`.
+    slots: [Cell<Ctx>; MAX_DEPTH],
+}
+
 thread_local! {
-    static CURRENT: Cell<Ctx> = const { Cell::new(Ctx::EMPTY) };
-    static DEPTH: Cell<u32> = const { Cell::new(0) };
+    static FRAMES: Frames = const {
+        Frames {
+            depth: Cell::new(0),
+            frames: [const { Cell::new(&raw const EMPTY) }; MAX_DEPTH + 1],
+            slots: [const { Cell::new(Ctx::EMPTY) }; MAX_DEPTH],
+        }
+    };
+}
+
+impl Frames {
+    /// The context in effect.
+    fn top(&self) -> Ctx {
+        // SAFETY: by the invariant on `Frames`, `frames[depth]` is live;
+        // contexts are only written through `Cell::set` on a slot that is not
+        // in effect (and `EMPTY` and borrowed contexts not at all), so
+        // nothing writes it now.
+        unsafe { *self.frames[self.depth.get()].get() }
+    }
+
+    /// Makes `ctx` the current context; returns the new depth, or 0 (and
+    /// changes nothing) at `MAX_DEPTH`.
+    fn push(&self, ctx: *const Ctx) -> usize {
+        let d = self.depth.get() + 1;
+        if d > MAX_DEPTH {
+            return 0;
+        }
+        self.frames[d].set(ctx);
+        self.depth.set(d);
+        d
+    }
+
+    /// Ends the scope pushed at `depth` (0 is a scope that was not pushed).
+    /// Lowers the depth first, then checks the nesting order in debug
+    /// builds.
+    fn leave(&self, depth: usize) {
+        if depth == 0 {
+            return;
+        }
+        let now = self.depth.get();
+        if now >= depth {
+            self.depth.set(depth - 1);
+        }
+        // `cfg!` first: release builds do not even ask whether the thread is
+        // panicking.
+        if cfg!(debug_assertions) && !std::thread::panicking() {
+            assert_eq!(
+                now, depth,
+                "lectern_logging::Scope guards dropped out of order"
+            );
+        }
+    }
 }
 
 /// The current thread's scope; all None outside any [`Scope`].
 pub fn current() -> Ctx {
-    CURRENT.try_with(Cell::get).unwrap_or_default()
+    FRAMES.try_with(Frames::top).unwrap_or_default()
 }
 
 /// Sets every field of `ctx` that is Some on top of the current scope, until
 /// the guard drops. Guards drop in nesting order (checked in debug builds).
+/// The merged context is written once into this thread's slot for the new
+/// depth; dropping the guard only lowers the depth.
 ///
 /// Not held across `.await` (clippy's `await_holding_invalid_type` names
 /// this type): a task's scope is set by the executor around each poll.
 #[must_use = "the scope ends when the guard drops"]
 pub fn scope(ctx: Ctx) -> Scope {
-    let prev = current();
-    let _ = CURRENT.try_with(|c| c.set(prev.overlay(ctx)));
-    let depth = DEPTH.try_with(|d| {
-        let depth = d.get() + 1;
-        d.set(depth);
-        depth
-    });
+    let depth = FRAMES
+        .try_with(|f| {
+            let d = f.depth.get();
+            if d >= MAX_DEPTH {
+                return 0;
+            }
+            // `slots[d]` belongs to index `d + 1`, which is not in effect.
+            let slot = &f.slots[d];
+            slot.set(f.top().overlay(ctx));
+            f.push(slot.as_ptr().cast_const())
+        })
+        .unwrap_or(0);
     Scope {
-        prev,
-        depth: depth.unwrap_or(0),
+        depth,
         _not_send: PhantomData,
     }
+}
+
+/// Runs `f` with `ctx` as this thread's whole scope (it replaces the current
+/// one, it does not overlay it), then restores the previous scope, also when
+/// `f` unwinds. Entering and leaving store a pointer and a depth, nothing is
+/// copied: the executor enters each task's precomputed context around every
+/// poll (docs/design/executor.md「日志与诊断」). [`scope`] inside `f` overlays
+/// `ctx` as usual.
+pub fn within<R>(ctx: &Ctx, f: impl FnOnce() -> R) -> R {
+    /// Leaves on the way out of `within`. Private and never moved out of the
+    /// call, so it cannot be forgotten: the borrow of `ctx` outlives the
+    /// frame that points at it.
+    struct Exit(usize);
+    impl Drop for Exit {
+        fn drop(&mut self) {
+            let _ = FRAMES.try_with(|f| f.leave(self.0));
+        }
+    }
+    let depth = FRAMES
+        .try_with(|frames| frames.push(std::ptr::from_ref(ctx)))
+        .unwrap_or(0);
+    let _exit = Exit(depth);
+    f()
 }
 
 /// Restores the previous scope when dropped. `!Send`.
 #[must_use = "the scope ends when the guard drops"]
 pub struct Scope {
-    prev: Ctx,
-    depth: u32,
+    /// Its depth once pushed, 0 when it was not.
+    depth: usize,
     _not_send: PhantomData<*const ()>,
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
-        let _ = DEPTH.try_with(|d| {
-            if !std::thread::panicking() {
-                debug_assert_eq!(
-                    d.get(),
-                    self.depth,
-                    "lectern_logging::Scope guards dropped out of order"
-                );
-            }
-            d.set(self.depth.saturating_sub(1));
-        });
-        let _ = CURRENT.try_with(|c| c.set(self.prev));
+        let _ = FRAMES.try_with(|f| f.leave(self.depth));
     }
 }

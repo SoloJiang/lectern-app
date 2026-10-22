@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 5 项（`executor`）已实现（[#186](https://github.com/SoloJiang/lectern-app/pull/186)，见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -126,13 +126,20 @@ pub fn current() -> Ctx;
 /// 在当前作用域上覆盖 `ctx` 里非 None 的字段，guard drop 时恢复原值。
 /// `!Send`，按嵌套顺序 drop（调试构建里 `debug_assert` 检查）。
 /// 不得跨 `.await` 持有：clippy 的 `await_holding_invalid_type` 配置了这个类型；
-/// 任务里的作用域由 executor 在每次 poll 外设置。
+/// 任务里的作用域由 executor 在每次 poll 外进入（`within`）。
 #[must_use]
 pub fn scope(ctx: Ctx) -> Scope;
-pub struct Scope { /* 上一个 Ctx */ }
+pub struct Scope { /* 它在栈里的深度 */ }
+
+/// 以 `ctx` 作为当前线程的完整作用域运行 `f`（替换当前作用域，不在它上面覆盖），返回后恢复，`f` 展开时也恢复。
+/// 进入和离开只写一个指针和深度，不复制 `Ctx`。executor 用它在每次 poll 外进入任务提交时算好的作用域。
+pub fn within<R>(ctx: &Ctx, f: impl FnOnce() -> R) -> R;
 ```
 
-作用域是一个线程本地的 `Cell<Ctx>`，`scope` 和 drop 各是一次拷贝，不分配内存。只有写出的记录才读它。
+作用域是一个线程本地的指针栈，最多 32 层：每层指向一个 `Ctx`，当前作用域是栈顶。`within` 把栈顶指向调用方借出的 `Ctx`，只写一个指针和深度；`scope` 把合并后的 `Ctx` 写进本线程这一层的槽位（一次拷贝），再指向它；离开都只降低深度。读（`current()`、写出的记录）经栈顶指针复制一次。全程不分配内存、不加锁。
+
+- 安全性：离开作用域只会降低深度、不会升高，`within` 在借用结束之前（包括展开时）把深度降到它那一层以下；深度只能经一次新的进入回到那一层，而进入先写这一层的指针。所以栈顶以下的指针总是指向活着的 `Ctx`：本线程的槽位，或仍在运行的 `within` 借出的值。`within` 的离开由函数内部的 guard 完成，调用方无法 `mem::forget` 它；`Scope` 被 forget、乱序 drop 或从 `within` 里带出来时，只会让作用域提前结束或保持过深，不会指向已释放的内存，调试构建里报嵌套错误。
+- 超过 32 层的 `scope` 和 `within` 不改变作用域，记录带外层的关联 ID。
 
 ### 落盘（`sink` feature）
 
@@ -381,6 +388,7 @@ level     := off | error | warn | info | debug | trace
 | 4 个线程同时写（核数不够时为可用核数减 1，至少 1 个，给写盘线程留一个核），调用线程上 | p99 ≤ 5 µs，不丢记录（总量小于缓冲） | `log/contended_call` |
 | 被限流的第三方记录，调用线程上 | ≤ 30 ns，不编码 | `log/third_party_limited` |
 | `install_early` | ≤ 20 µs | `log/install_early` |
+| 进入并离开 `within`（executor 每次 poll） | ≤ 3 ns，不复制 `Ctx` | 暂无基准，见「实际验证」 |
 | 写出 1 万条记录、静止 5 s 后的常驻内存增量 | 默认配置 ≤ 512 KiB | `log/idle_memory` |
 
 - 冷启动：首帧前只有 `install_early`，占 20 ms 预算的 0.1%；不打开文件，不建线程。`app/cold_start` 不因接入日志变慢。
@@ -480,6 +488,7 @@ level     := off | error | warn | info | debug | trace
 - 详细日志：`setting_survives_restart_until_it_expires`、`expiry_restores_the_previous_filter`。
 - panic：`panic_hook_records_scope_and_location`、`panic_hook_waits_at_most_100_ms`、`panic_hook_chains_the_previous_hook`。
 - 退出：`shutdown_writes_the_end_record`、`missing_end_record_is_reported_next_run`。
+- 作用域（`src/tests/scopes.rs`）：`overlay_scopes_nest_and_restore`、`within_replaces_the_scope_and_restores_it`、`within_restores_when_unwinding`、`a_forgotten_scope_does_not_outlive_its_within`、`a_scope_escaping_its_within_cannot_bring_back_the_frame`、`scopes_beyond_the_limit_change_nothing`。调试构建和发布构建各运行一次（调试构建里乱序的情况报嵌套错误）。
 - 导出：`export_copies_recent_runs_and_a_manifest`（清单里有格式版本、运行 ID、文件列表和计数）。
 
 全部测试不依赖 GPUI，在 Linux CI 上运行。
@@ -566,6 +575,21 @@ level     := off | error | warn | info | debug | trace
   `log/contended_call` 的尾部来自这几处，依次处理：写盘线程在计时的窗口里每一轮要取三次缓冲锁，现在只在交换时取，其余读锁下同步写入的原子标志；每轮新建线程使第一次调用的冷启动落进样本，现在线程只建一次、先各写一条不计时的记录；调用线程加写盘线程多于核数，现在调用线程取 `min(4, 可用核数 − 1)`；争用时调用线程在内核里阻塞（macOS 上 `std::sync::Mutex` 的争用路径直接进内核），现在先自旋；每轮第一条记录要唤醒空闲的写盘线程（调用线程上的一次系统调用），现在写盘线程写完一批后再等 1 s，这期间到达的记录不唤醒它。第一次在 Linux 上试自旋时没有看出效果，是因为那时尾部主要来自其余几处；上面的对照运行里，只去掉自旋，阻塞从 0 回到 5000 次以上，超过 5 µs 的回到 93–135 次。
 - `log/idle_memory` 是计数分配器看到的活跃字节：运行时的两块缓冲（各 128 KiB）、默认文件的 `BufWriter`（64 KiB）、限流表和日志器的状态；不含写盘线程的栈。详细日志开启后是 1.13 MB（两块 512 KiB 的缓冲、两个 `BufWriter`）。
 
+作用域改为指针栈（「对其他 crate 的要求」第 5 项，[#186](https://github.com/SoloJiang/lectern-app/pull/186)），Linux（x86_64，4 核虚拟机，同时有其他构建）：
+
+- `just test -p lectern-logging` 通过，新增 `src/tests/scopes.rs` 的 6 个测试，发布构建（`cargo test --release`，不做嵌套检查）里也通过。
+- 临时的微基准（没有提交）：`within` 进入并离开 1.1–1.7 ns；`scope` 设并恢复从 20–21 ns 降到 8–9 ns；`current()` 读整个 `Ctx` 改动前后都是约 6.5 ns，只读一个字段都不到 1 ns。
+- `just bench --measure log/`，改动前（`origin/main` 的另一个 worktree）与改动后交替运行四次，中位数依次列出：
+
+  | 基准 | 改动前 | 改动后 |
+  |---|---|---|
+  | `log/disabled_call` | 0 / 0 / 0 / 0 ns | 0 / 0 / 0 / 0 ns |
+  | `log/filtered_call` | 1 / 1 / 2 / 2 ns | 2 / 2 / 2 / 1 ns |
+  | `log/enabled_call` | 470 / 560 / 533 / 697 ns | 514 / 643 / 579 / 689 ns |
+  | `log/contended_call`（超过 5 µs 的次数） | 61 / 48 / 61 / 34 | 53 / 32 / 89 / 44 |
+
+  `enabled_call` 另有一对只跑它自己的：改动后 717 ns、改动前 765 ns。这几项经过的代码里，改动只碰到写出记录时的一次 `current()`，微基准里它前后相同；`filtered_call` 不读作用域。两侧都在同一范围里跳动（报告标为 noisy），看不出变慢，也不能说一定没有变慢。
+
 ## 与设计的差异
 
 第 1 步（[#177](https://github.com/SoloJiang/lectern-app/pull/177)）：
@@ -594,3 +618,9 @@ level     := off | error | warn | info | debug | trace
 「对其他 crate 的要求」第 4 项（`kernel`，[#182](https://github.com/SoloJiang/lectern-app/pull/182)）：
 
 - **`plugin failed` 多了两个阶段。** 第 4 项列出的七个阶段之外，kernel 的边界还包住两段插件代码：`WorkspaceFacts::contains`（阶段 `workspace`）和 `own_with` 的 `start`（阶段 `own_with`，它用保留 payload 的 `catch`，同样记这条）。两者的 panic 都让插件进入 `Failed`，不记就查不到原因。记录的字段和其余规则见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)。
+
+「对其他 crate 的要求」第 5 项（`executor`，[#186](https://github.com/SoloJiang/lectern-app/pull/186)）：
+
+- **kernel 公开了两个只读方法。** 任务要带「闸门的插件和激活」，`PanicText` 要按 payload 的类型构造，原有的公开接口里取不到这两样：kernel 加上 `SubmitGate::log_ctx` 和 `PanicPayload::text`（[kernel 设计「与设计的差异」](kernel.md#与设计的差异)）。
+- **专用任务也有序号和作用域**，不只是 `spawn` 提交的任务；`util::log` 实际是 12 处调用。其余见 [executor 设计「日志与诊断」](executor.md#日志与诊断)和它的「与设计的差异」。
+- **作用域改为指针栈，新增 `within`。** 原来的线程本地 `Cell<Ctx>` 在设和恢复时要复制几次 120 字节的 `Ctx`，executor 每次 poll 设一次，在 Linux 虚拟机上约 20 ns。现在线程本地保存一个指针栈（「作用域与关联 ID」）：`within` 进入一个已经算好的 `Ctx` 只写指针和深度，约 1 ns；`scope` 仍是覆盖语义、接口不变，合并结果写进本线程的槽位，设和恢复合计约 9 ns。`within` 用闭包而不是 guard：guard 可以被 `mem::forget`，被借用的 `Ctx` 释放后栈里会留下悬空指针。栈最多 32 层，更深的作用域不生效。测试 `src/tests/scopes.rs`。

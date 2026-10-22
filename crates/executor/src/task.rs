@@ -7,12 +7,13 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::SeqCst};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 
-use lectern_kernel::{GatePoll, GateSlot, catch, contain};
+use lectern_kernel::{GatePoll, GateSlot, catch};
 
 use crate::Priority;
+use crate::diag::{Phase, TaskScope, contain_task, task_panicked};
 use crate::output::Output;
 use crate::sched::{Inner, Job, TaskId};
-use crate::util::{lock, log};
+use crate::util::lock;
 
 const IDLE: u8 = 0;
 const QUEUED: u8 = 1;
@@ -122,6 +123,7 @@ impl<T> fmt::Debug for Task<T> {
 /// One pool task. Kept alive by the live registry until it is finished, so
 /// its future is only ever dropped by the thread running it.
 pub(crate) struct TaskCell<T> {
+    /// The task number: the registry key and `task` in log records.
     id: TaskId,
     /// `IDLE` / `QUEUED` / `RUNNING` / `RUNNING_WOKEN` / `DONE`.
     state: AtomicU8,
@@ -130,32 +132,34 @@ pub(crate) struct TaskCell<T> {
     future: Mutex<Option<BoxFuture<T>>>,
     /// Only for `spawn_gated`. Dropped after the task is `DONE`.
     slot: Mutex<Option<GateSlot>>,
+    /// The log scope entered around each step and the final drop.
+    scope: TaskScope,
     output: Output<T>,
     exec: Weak<Inner>,
 }
 
 impl<T: Send + 'static> TaskCell<T> {
-    /// A new task in the `QUEUED` state; the caller queues it.
+    /// A new task in the `QUEUED` state; the caller queues it. `id` and
+    /// `scope` come from `diag::next_task` and `TaskScope::new`.
     pub(crate) fn new(
         exec: &Arc<Inner>,
+        id: TaskId,
+        scope: TaskScope,
         priority: Priority,
         future: BoxFuture<T>,
         slot: Option<GateSlot>,
     ) -> Arc<Self> {
         Arc::new(TaskCell {
-            id: exec.next_id(),
+            id,
             state: AtomicU8::new(QUEUED),
             priority,
             cancelled: AtomicBool::new(false),
             future: Mutex::new(Some(future)),
             slot: Mutex::new(slot),
+            scope,
             output: Output::new(),
             exec: Arc::downgrade(exec),
         })
-    }
-
-    pub(crate) fn id(&self) -> TaskId {
-        self.id
     }
 
     /// `IDLE → QUEUED` queues the task; `RUNNING → RUNNING_WOKEN` only sets a
@@ -219,12 +223,13 @@ impl<T: Send + 'static> TaskCell<T> {
                 Some(Ok(value))
             }
             Err(payload) => {
-                // Fixed order: finished, future dropped, payload disposed,
-                // then the gate is told.
+                // Fixed order: finished, future dropped, panic logged (it
+                // reads the payload), payload disposed, then the gate is told.
                 self.state.store(DONE, SeqCst);
                 self.drop_future(future);
+                task_panicked(Phase::Poll, &payload);
                 let message = payload.dispose();
-                self.report(message.clone());
+                self.fail_gate(message.clone());
                 Some(Err(TaskError::Panicked(message)))
             }
         }
@@ -240,17 +245,16 @@ impl<T: Send + 'static> TaskCell<T> {
     }
 
     fn drop_future(&self, future: BoxFuture<T>) {
-        if let Err(message) = contain(move || drop(future)) {
-            self.report(message);
+        if let Err(message) = contain_task(Phase::Drop, move || drop(future)) {
+            self.fail_gate(message);
         }
     }
 
-    /// A panic in a poll or a drop: gated tasks fail their activation,
-    /// others are only logged.
-    fn report(&self, message: String) {
-        match &*lock(&self.slot) {
-            Some(slot) => slot.panicked(message),
-            None => log(format_args!("task panicked: {message}")),
+    /// A panic in a poll or a drop, already logged: a gated task fails its
+    /// activation.
+    fn fail_gate(&self, message: String) {
+        if let Some(slot) = &*lock(&self.slot) {
+            slot.panicked(message);
         }
     }
 
@@ -275,7 +279,10 @@ impl<T: Send + 'static> Job for TaskCell<T> {
         {
             return;
         }
-        match self.step() {
+        // The task's context around the gate check, the poll, the final drop
+        // and handing over the result: a pointer swap, no copy, no
+        // allocation, no lock.
+        self.scope.enter(self.id, || match self.step() {
             Some(result) => self.finish(result),
             None => {
                 if self
@@ -288,7 +295,7 @@ impl<T: Send + 'static> Job for TaskCell<T> {
                     self.enqueue();
                 }
             }
-        }
+        });
     }
 
     fn cancel(self: Arc<Self>) {
@@ -297,8 +304,10 @@ impl<T: Send + 'static> Job for TaskCell<T> {
     }
 
     fn discard(self: Arc<Self>) {
-        self.drop_unfinished();
-        self.finish(Err(TaskError::Cancelled));
+        self.scope.enter(self.id, || {
+            self.drop_unfinished();
+            self.finish(Err(TaskError::Cancelled));
+        });
     }
 }
 
@@ -318,7 +327,8 @@ impl<T: Send + 'static> Handle<T> for TaskCell<T> {
             Priority::Batch => Priority::Batch,
             Priority::Interactive | Priority::Background => Priority::Background,
         };
-        self.output.abandon(&self.exec, priority);
+        self.output
+            .abandon(&self.exec, priority, &self.scope, self.id);
     }
 }
 

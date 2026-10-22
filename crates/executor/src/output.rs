@@ -3,10 +3,9 @@
 use std::sync::{Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
-use lectern_kernel::contain;
-
+use crate::diag::{Phase, TaskScope, contain_task};
 use crate::sched::Inner;
-use crate::util::{lock, log};
+use crate::util::lock;
 use crate::{Priority, TaskError};
 
 pub(crate) struct Output<T> {
@@ -34,7 +33,8 @@ impl<T> Output<T> {
         }
     }
 
-    /// Stores the result and wakes the task awaiting it.
+    /// Stores the result and wakes the task awaiting it. Called under the
+    /// task's scope.
     pub(crate) fn complete(&self, result: Result<T, TaskError>) {
         let (unread, waker) = {
             let mut state = lock(&self.state);
@@ -50,10 +50,8 @@ impl<T> Output<T> {
             };
             (unread, state.waker.take())
         };
-        if let Some(unread) = unread
-            && let Err(message) = contain(move || drop(unread))
-        {
-            log(format_args!("dropping a task result panicked: {message}"));
+        if let Some(unread) = unread {
+            let _ = contain_task(Phase::Result, move || drop(unread));
         }
         if let Some(waker) = waker {
             waker.wake();
@@ -65,9 +63,15 @@ impl<T> Output<T> {
     /// `priority`'s pool (after shutdown, on the reclaim thread) under
     /// `contain`, so the handle's thread never runs its `Drop`. Errors carry
     /// only a message, and values without drop glue run no code, so both are
-    /// dropped here.
-    pub(crate) fn abandon(&self, exec: &Weak<Inner>, priority: Priority)
-    where
+    /// dropped here. `scope` and `task` are the task's log scope and number,
+    /// entered wherever the value is dropped.
+    pub(crate) fn abandon(
+        &self,
+        exec: &Weak<Inner>,
+        priority: Priority,
+        scope: &TaskScope,
+        task: u64,
+    ) where
         T: Send + 'static,
     {
         let (stored, waker) = {
@@ -81,14 +85,12 @@ impl<T> Output<T> {
             return;
         }
         match exec.upgrade() {
-            Some(exec) => exec.drop_later(Box::new(value), priority),
+            Some(exec) => exec.drop_later(Box::new(value), priority, scope.ctx(task)),
             // The executor is gone (a dropped `manual()` executor): nowhere
             // else to drop it.
-            None => {
-                if let Err(message) = contain(move || drop(value)) {
-                    log(format_args!("dropping a task result panicked: {message}"));
-                }
-            }
+            None => scope.enter(task, || {
+                let _ = contain_task(Phase::Result, move || drop(value));
+            }),
         }
     }
 

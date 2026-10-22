@@ -6,9 +6,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, Weak};
 
-use lectern_kernel::contain;
+use lectern_kernel::catch;
+use lectern_logging::{Value, error};
 
-use crate::util::{lock, log};
+use crate::diag::Phase;
+use crate::util::lock;
 
 type Callback = Box<dyn FnOnce() + Send>;
 
@@ -60,21 +62,28 @@ impl ShutdownHooks {
 
     fn unregister(&self, id: u64) {
         let removed = lock(&self.table).callbacks.remove(&id);
-        if let Some(f) = removed
-            && let Err(message) = contain(move || drop(f))
-        {
-            log(format_args!(
-                "dropping an unregistered shutdown hook panicked: {message}"
-            ));
+        if let Some(f) = removed {
+            contain_hook(Phase::Drop, move || drop(f));
         }
     }
 }
 
-/// Runs a callback under `contain`; a panic is logged and does not reach the
+/// Runs a callback under `catch`; a panic is logged and does not reach the
 /// caller.
 fn run(f: Callback) {
-    if let Err(message) = contain(f) {
-        log(format_args!("shutdown hook panicked: {message}"));
+    contain_hook(Phase::Run, f);
+}
+
+/// Runs `f` under `catch`, logging error `shutdown hook panicked` with
+/// `phase` (`run` or `drop`) before the payload is released.
+fn contain_hook(phase: Phase, f: impl FnOnce()) {
+    if let Err(payload) = catch(f) {
+        error!(
+            "shutdown hook panicked";
+            phase = phase,
+            message = Value::panic_message(payload.text()),
+        );
+        payload.dispose();
     }
 }
 

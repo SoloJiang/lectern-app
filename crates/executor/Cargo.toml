@@ -12,10 +12,14 @@ layer = "infra"
 
 [dependencies]
 lectern-kernel = { path = "../kernel" }
+# Logging call sites and the task scope (docs/design/executor.md「依赖」,
+# ADR 0046).
+lectern-logging = { path = "../logging" }
 
 [dev-dependencies]
 # Kernel::barrier, for the tests that drive a real kernel.
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
+lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [features]
 # Executor::manual and run_until_idle, for deterministic tests.

@@ -12,6 +12,7 @@ mod limits;
 mod panics;
 mod privacy;
 mod rotation;
+mod scopes;
 mod verbose;
 
 use std::path::{Path, PathBuf};

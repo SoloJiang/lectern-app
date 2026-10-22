@@ -13,7 +13,7 @@
 //! A message is a string literal and a field value implements [`Field`],
 //! whose values only come from the constructors of [`Value`]: no runtime
 //! string reaches a record. The thread's correlation scope ([`scope`],
-//! [`Ctx`]) is added to every record written on that thread.
+//! [`within`], [`Ctx`]) is added to every record written on that thread.
 //!
 //! The `sink` feature (only `app` and tool crates enable it) installs the
 //! logger: the buffer before the first frame, the `lectern-log` writer
@@ -37,7 +37,7 @@ pub mod testing;
 #[cfg(all(test, feature = "sink"))]
 mod tests;
 
-pub use scope::{Ctx, PluginTag, Scope, current, scope};
+pub use scope::{Ctx, PluginTag, Scope, current, scope, within};
 pub use value::{Field, PanicText, Value};
 
 pub use filter::Filter;

@@ -260,12 +260,17 @@ pub(crate) struct ActInner {
 }
 
 impl ActInner {
-    fn scope(&self) -> Scope {
-        lectern_logging::scope(Ctx {
+    /// This activation's `plugin` and `act`, the other fields None.
+    fn log_ctx(&self) -> Ctx {
+        Ctx {
             plugin: self.tag,
             act: Some(self.number),
             ..Ctx::default()
-        })
+        }
+    }
+
+    fn scope(&self) -> Scope {
+        lectern_logging::scope(self.log_ctx())
     }
 }
 
@@ -316,6 +321,11 @@ impl ActivationToken {
     /// Sets this activation's `plugin` and `act` log scope until dropped.
     pub(crate) fn scope(&self) -> Scope {
         self.0.scope()
+    }
+
+    /// This activation's `plugin` and `act` as a log `Ctx`.
+    pub(crate) fn log_ctx(&self) -> Ctx {
+        self.0.log_ctx()
     }
 
     /// The current state.
