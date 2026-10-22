@@ -534,32 +534,36 @@ level     := off | error | warn | info | debug | trace
 
 第 1 步（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），全部在 Linux（x86_64，4 核虚拟机，Rust 1.97.0）上运行：
 
-- `just check`、`just test`（工作区 2061 个测试）、`just doctest`、`just deny` 通过。`just test -p lectern-logging` 共 59 个测试：`src/tests/` 的 57 个单元测试（「测试」一节列出的全部，另有 `names_round_trip`、`install_twice_returns_already_installed`、`turning_verbose_off_restores_the_default`、`export_without_a_directory`），`tests/compile_fail.rs`（trybuild，6 个编译失败用例），`tests/no_alloc.rs`（写出的调用在调用线程上不分配内存，用按线程计数的全局分配器检查）。nextest 连续运行 8 次、`cargo test` 同一进程运行一次，全部通过。
+- `just check`、`just test`（工作区 2108 个测试，基于合并了 #173、#174 的 main）、`just doctest`、`just deny` 通过。`just test -p lectern-logging` 共 64 个测试：`src/tests/` 的 62 个单元测试（「测试」一节列出的全部，另有 `names_round_trip`、`install_twice_returns_already_installed`、`turning_verbose_off_restores_the_default`、`export_without_a_directory`、`third_party_cached_level_follows_filter_changes`、`third_party_suppressed_counts_reach_the_status`、`registered_plugin_directive_survives_verbose_json`），`tests/compile_fail.rs`（trybuild，6 个编译失败用例），`tests/no_alloc.rs`（写出的调用在调用线程上不分配内存，用按线程计数的全局分配器检查）。nextest 连续运行 8 次、`cargo test` 同一进程运行一次，全部通过。
 - `cargo tree -p lectern-logging -e normal --all-features` 只列出 `log v0.4.34`。`log` 0.4.34 原本就在 Cargo.lock 里（GPUI 依赖它），Cargo.lock 只多了 `lectern-logging` 这一项；`cargo metadata --locked --offline` 通过。
 - `cargo tree --offline --target aarch64-apple-darwin -p lectern-app -e features -i log` 在 Linux 上离线可以运行：`log` 的 feature 是 `alloc`、`default`、`serde`、`serde_core`、`std`，没有 `max_level_` 或 `release_max_level_`。`lectern-app` 到第 3 步才依赖本 crate，那时 `kv` 会出现在这里。
 - `clippy.toml`：在一个临时 crate 里确认 `log::warn!` 报 `disallowed_macros`、跨 `.await` 持有 `lectern_logging::Scope` 报 `await_holding_invalid_type`。工作区里没有直接调用 `log` 宏或 GPUI 错误日志辅助方法的代码，不需要任何 `allow`。GPUI 辅助方法的路径（`gpui_util::ResultExt::log_err`、`gpui::TaskExt::detach_and_log_err` 等）在 Linux 上解析不到（这些 crate 不在 Linux 的构建里），条目带 `allow-invalid = true`；「验收」里在 macOS 上用临时文件确认 clippy 报错的一项**没有验证**，要在 macOS 上补做。
 - 架构检查的两条新规则及其测试：`python3 scripts/test_check_architecture.py`（19 个测试）、`python3 scripts/check_architecture.py`（32 个 crate）通过。
-- `just bench --measure log/`（Linux 只报告、不判定），两次运行：
+- `just bench --measure log/`（Linux 只报告、不判定）。「最初」是第一个实现提交的两次运行，「现在」是按下文几处修改之后的两次运行：
 
-  | 基准 | 实测 | 预算 |
-  |---|---|---|
-  | `log/disabled_call` | < 1 ns | ≤ 2 ns |
-  | `log/filtered_call` | 1 ns | ≤ 5 ns |
-  | `log/enabled_call` | 602、630 ns（noisy） | ≤ 1 µs |
-  | `log/contended_call` | 10 000 次里超过 5 µs 的 330、347 次 | ≤ 100 次（p99 ≤ 5 µs） |
-  | `log/third_party_limited` | 49、47 ns | ≤ 30 ns |
-  | `log/install_early` | 4.06、3.69 µs | ≤ 20 µs |
-  | `log/idle_memory` | 325 KB | ≤ 512 KB |
-  | `log/idle_memory/verbose` | 1.13 MB | 只记录 |
+  | 基准 | 最初 | 现在 | 预算 |
+  |---|---|---|---|
+  | `log/disabled_call` | < 1 ns | < 1 ns | ≤ 2 ns |
+  | `log/filtered_call` | 1 ns | 1 ns | ≤ 5 ns |
+  | `log/enabled_call` | 602、630 ns（noisy） | 539、527 ns | ≤ 1 µs |
+  | `log/contended_call` | 10 000 次里超过 5 µs 的 330、347 次（4 个线程） | 122、107 次（3 个线程；单独运行时有一次 98） | ≤ 100 次（p99 ≤ 5 µs） |
+  | `log/third_party_limited` | 49、47 ns | 31、32 ns | ≤ 30 ns |
+  | `log/install_early` | 4.06、3.69 µs | 4.84、4.53 µs | ≤ 20 µs |
+  | `log/idle_memory` | 325 KB | 327 KB | ≤ 512 KB |
+  | `log/idle_memory/verbose` | 1.13 MB | 1.13 MB | 只记录 |
 
-  两项在这台虚拟机上超出预算，macOS 上的判定**没有验证**：
-  - `log/third_party_limited`：去掉时钟之后单独测过 32 ns，其余是构造 `log::Record`、`Log::log` 的动态调用、过滤和两次原子加。每次读单调时钟时是 68–73 ns，改为线程本地的窗口加 CPU 计数器（「限流」）后是 47–49 ns；这台机器上读一次 TSC 也要十几 ns。
-  - `log/contended_call`：只用一个线程时，2500 次里也有 31 次超过 5 µs，主要是每轮第一条记录唤醒空闲的写盘线程（一次系统调用）和缓冲到 32 KiB 时的唤醒；4 个线程加写盘线程多于 4 个虚拟核，被抢占的调用也落在尾部。改为只在缓冲第一次变为紧急时唤醒、调用线程在锁上先自旋，都没有让这个数稳定下降，自旋已撤回。
+  两项在这台虚拟机上仍略超预算，macOS（CI 的 macos-15 arm64，3 个虚拟核，这时是 2 个调用线程）上的判定**没有验证**：
+  - `log/third_party_limited`：每次读单调时钟时是 68–73 ns（这台机器上读一次时钟约 40 ns）；改为线程本地的窗口加 CPU 计数器后是 47–49 ns；再去掉被限流的调用对进程合计的原子加、由表项缓存过滤给它的 target 的级别（「限流」）后是 31–32 ns。剩下的是构造 `log::Record`、`Log::log` 的动态调用、取 `rdtsc`、哈希和一次原子加。
+  - `log/contended_call`：尾部来自三处。写盘线程在计时的窗口里每一轮要取三次缓冲锁，现在只在交换时取，其余读锁下同步写入的原子标志；每轮新建线程使第一次调用的冷启动落进样本，现在线程只建一次、先各写一条不计时的记录；调用线程加写盘线程多于核数，现在调用线程取 `min(4, 可用核数 − 1)`。剩下的主要是每轮第一条记录唤醒空闲的写盘线程（一次系统调用）和缓冲到一半容量时的那一次唤醒，每轮两次，约占 0.5%。早先试过调用线程在锁上先自旋，没有效果，已撤回。
 - `log/idle_memory` 是计数分配器看到的活跃字节：运行时的两块缓冲（各 128 KiB）、默认文件的 `BufWriter`（64 KiB）、限流表和日志器的状态；不含写盘线程的栈。详细日志开启后是 1.13 MB（两块 512 KiB 的缓冲、两个 `BufWriter`）。
 
 ## 与设计的差异
 
 第 1 步（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+
+- **清理不再跳过本次运行的全部文件。** 原文写「当前运行的文件不删」，一次运行开得很久时 ADR 0046 的上限就都不起作用，与 ADR 冲突。现在只有正在写的那个文件不删，本次运行较早的文件按最后修改时间计保留期限（「文件」已改）。
+- **缓冲到容量的一半才算需要立即写**（默认 64 KiB，原文是 32 KiB），中途唤醒写盘线程的次数减半；写盘线程读原子标志，只在交换缓冲时取锁（「数据流与线程」已改）。
+- **`log/contended_call` 的线程数是 `min(4, 可用核数 − 1)`**，给写盘线程留一个核（「性能」已改）。
 
 - **std 前缀表加了三项。** Rust 1.97 的 std 对字符串切片越界写的是 `start byte index …`、`end byte index …`、`byte range starts at …`，不再以 `byte index` 开头，也不再带原字符串；按原表这些消息只剩长度。这三项加进表里，都带数字（「隐私」已改）。`canary_str_slicing_panic` 检查前缀以 `byte index` 结尾。
 - **限流不每次读时钟。** 读单调时钟比被限流的调用的其余部分还慢，`log/third_party_limited` 达不到预算。改为每个线程缓存窗口，用 CPU 计数器限定缓存的新旧（「限流」已改）。aarch64 读计数器用一行内联汇编（`mrs cntvct_el0`），x86_64 用 `_rdtsc`；这是 CPU 架构的能力，不是 macOS 的系统接口，不经 `platform`。窗口的切换在一个线程上最多晚 44 ms 被看到。
