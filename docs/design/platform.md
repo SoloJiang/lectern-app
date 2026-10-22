@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -17,6 +17,7 @@
   - 原子替换（`SafeRoot::replace_file`）：编辑模式的保存，在同一目录里写临时文件、比较身份后 `renameat` 替换（见「原子替换」）。
   - 线程的 CPU 时钟（`ThreadCpuClock`）：`syntax::health` 判定 grammar 卡死（[ADR 0041](../adr/0041.md)，见「线程的 CPU 时钟」）。
   - 应用数据目录（`dirs::app_data`）：不能重建的用户数据的位置，review 的标注日志用它（[ADR 0044](../adr/0044.md)，见「应用数据目录」）。
+  - 日志目录（`dirs::logs`）与系统版本（`system::os_version`）：`logging` 落盘的位置和文件头里的系统版本（[ADR 0046](../adr/0046.md)，见「日志目录与系统版本」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -34,7 +35,7 @@
 |---|---|---|
 | `rustix` 1.1（`default-features = false`，`std`、`fs`） | `openat2`、`openat`、`fstatat`、`fstat`、`readlinkat`、`read`；`replace_file` 的 `write`、`fchmod`、`fsync`、`renameat`、`unlinkat` | 见下 |
 | `tempfile`（dev） | 测试用的临时目录 | 已在 Cargo.lock（3.27，经 `insta`），MIT OR Apache-2.0 |
-| `libc`（Linux 和 macOS） | `ThreadCpuClock`：Linux 的 `pthread_getcpuclockid`、`clock_gettime`，macOS 的 `pthread_mach_thread_np`、`thread_info`；macOS 上还有 `proc_pid_rusage`（`process::phys_footprint`）和测试里创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190），原来只在 macOS 上依赖，加上 Linux 不改 Cargo.lock；rustix 没有这几个调用（它的 `clock_gettime` 只接受固定的几种时钟） |
+| `libc`（Linux 和 macOS） | `ThreadCpuClock`：Linux 的 `pthread_getcpuclockid`、`clock_gettime`，macOS 的 `pthread_mach_thread_np`、`thread_info`；macOS 上还有 `proc_pid_rusage`（`process::phys_footprint`）、`sysctlbyname`（`system::os_version`）和测试里创建 FIFO（rustix 在 Apple 平台没有 `mkfifoat`） | 已在 Cargo.lock（0.2.190），原来只在 macOS 上依赖，加上 Linux 不改 Cargo.lock；rustix 没有这几个调用（它的 `clock_gettime` 只接受固定的几种时钟） |
 | `lectern-fs-watch` | `fs_events` 实现它的 `Backend`；事件转换是纯函数，在所有平台上编译和测试 | 基础设施层，方向向下（[fs_watch 设计「依赖」](fs_watch.md#依赖)） |
 | `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
 | `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
@@ -367,6 +368,16 @@ pub enum FileKind {
 - macOS 的 `Walk` 和 `NofollowAnyParent` 的父目录用 `O_RDONLY` 打开，需要目录的读权限。只有搜索权限（如 `0711`）的目录下的条目，`NofollowAny` 的 `stat`（一次 `fstatat`）和 `read` 的一步打开只需要搜索权限，能成功；macOS 11、12 上的 `stat`，以及一步调用出错而交给 `Walk` 的（如这种目录下的符号链接、socket）为 `Io(PermissionDenied)`，而 `lstat` 能成功。git 检出的目录不会这样。
 - macOS 11、12 上 `stat` 是 3 次系统调用（`NofollowAnyParent`），bench 只在 CI 的 macOS 版本（13 及以上）上判定预算；11、12 上的比值预计与改为一次 `fstatat` 之前在 macOS CI 上测得的 3.94–4.16 倍相近，高于 3 倍预算，没有测量。
 - 路径超过 `PATH_MAX`（macOS 1024、Linux 4096）时一步打开失败，交给 `Walk` 逐级打开，照常成功；单个名字超过 `NAME_MAX`（255）时为 `Io`。
+
+## 日志与诊断
+
+本节覆盖整个 crate，规则见 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。
+
+- 默认记录：`safe_read`、`dirs`、`system`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。唯一的运行时记录在 `fs_events`：kqueue 线程因 `kevent` 出错而停止时记一条，带系统错误；订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。这一条目前写 stderr；本 crate 不在 logging 设计「对其他 crate 的要求」的接入顺序里，在 `logging` 第 1 步合并之后的下一次改动中接入：改为 error，target `platform`，错误用 `Value::io`（种类和错误码），删掉 `eprintln!`。
+- 详细级别：不多记。
+- 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
+- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。
+- 金丝雀测试：接入 `lectern-logging` 时随那一条记录加上；在此之前本 crate 没有经日志器的记录，`dirs` 和 `system` 也不经日志器输出，不需要。
 
 ## 测试
 
@@ -835,6 +846,55 @@ pub mod dirs {
 - `app_data_does_not_create_the_directory`：`HOME` 和 `XDG_DATA_HOME` 指向临时目录下不存在的路径，三种结果都正确，临时目录之后仍是空的。
 - `app_data_reads_the_process_environment`：只读当前进程的 `HOME`、`XDG_DATA_HOME`，`app_data()` 与对应平台的纯函数的结果相同。
 
+## 日志目录与系统版本
+
+[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 2 项（[#170](https://github.com/SoloJiang/lectern-app/issues/170)，[ADR 0046](../adr/0046.md)「默认日志」）。`app` 在 `main` 的第一行把 `dirs::logs()` 放进 `EarlyConfig::dir`，启动屏障放开后把 `system::os_version()` 放进 `Header::os`。日志目录的布局、权限、滚动与清理归 `logging`（[logging 设计「文件」](logging.md#文件)），本模块只给出路径。
+
+### 接口
+
+```rust
+pub mod dirs {
+    /// 日志目录。macOS 是 `$HOME/Library/Logs/Lectern`；其他平台（Linux，供 CI 测试）是
+    /// `$XDG_STATE_HOME/lectern/logs`，`XDG_STATE_HOME` 未设置、为空或是相对路径时是
+    /// `$HOME/.local/state/lectern/logs`。用到的 `HOME` 未设置、为空或是相对路径时为 None。
+    /// 规则同 `app_data`：只读这两个环境变量，不创建目录，不做其他 IO，首帧前可以调用。
+    pub fn logs() -> Option<PathBuf>;
+}
+
+pub mod system {
+    /// 系统名和版本，如 "macOS 15.1"。macOS 上读 `sysctl kern.osproductversion`。
+    /// 读不到、或读到的不是版本号（只允许 ASCII 数字和点、以数字开头、不超过 32 字节）时为 None；
+    /// 其他平台总是 None。一次系统调用，不读文件，任何线程可调用。
+    pub fn os_version() -> Option<String>;
+}
+```
+
+### 规则
+
+- 日志目录：macOS 用 `~/Library/Logs/` 下的 `Lectern`，这是 Apple 文件系统编程指南给应用日志规定的位置（ADR 0046「来源」）；Linux 按 XDG Base Directory 规范放在 state 目录（规范把日志列为 state 数据），用小写的 `lectern/logs`。日志目录与应用数据目录是两棵不相交的树，`logging` 的清理和导出只处理日志目录。
+- 环境变量的处理与「应用数据目录」相同：`HOME` 只取环境变量，不查询用户数据库；相对路径视为未设置；路径的字节原样保留。拼接是纯函数（`mac_logs`、`xdg_logs`），测试构建在所有平台上都编译；`logs` 按 `cfg(target_os = "macos")` 选其中一个。返回 None 时 `logging` 只留内存缓冲（[logging 设计「状态与异常」](logging.md#状态与异常)）。
+- 系统版本：`sysctlbyname("kern.osproductversion")` 读进栈上 64 字节的缓冲（大于接受的上限，过长的值整个读出后被拒绝，而不是因 `ENOMEM` 失败），去掉末尾的 NUL 后检查字符集，拼成 `macOS <版本>`。检查是纯函数（`mac_os_version`），在所有平台上编译和测试；`unsafe` 只有这一次 FFI 调用。字符集的限制让文件头里只出现版本号，读到意外的值时整个丢掉，不截取。
+- 其他平台返回 None：Linux 上的构建只供 CI，`app` 只在 macOS 上构建，没有调用方需要 Linux 的版本；需要时再加。
+
+### 测试
+
+`logs_*` 写在 `crates/platform/src/dirs/tests.rs`，与 `app_data_*` 覆盖相同的情况，同样不修改进程的环境变量：
+
+- `logs_xdg_state_home_set_is_used`：`XDG_STATE_HOME` 是绝对路径时为它下面的 `lectern/logs`，末尾的 `/` 不产生空的一级；这时不需要 `HOME`。
+- `logs_xdg_state_home_unset_empty_or_relative_falls_back_to_home`：`XDG_STATE_HOME` 未设置、为空、是相对路径（`data/state`、`./state`、`~/state`）时为 `$HOME/.local/state/lectern/logs`。
+- `logs_without_a_usable_home_is_none`：`HOME` 未设置、为空、是相对路径（含 `~`）时，`XDG_STATE_HOME` 不可用的 Linux 规则和 macOS 规则都为 None。
+- `logs_macos_is_under_library_logs`：`/Users/dev` 和 `/Users/dev/` 都为 `/Users/dev/Library/Logs/Lectern`。
+- `logs_keeps_non_utf8_bytes`：`HOME`、`XDG_STATE_HOME` 里非 UTF-8 的字节原样出现在结果里。
+- `logs_does_not_create_the_directory`：`HOME` 和 `XDG_STATE_HOME` 指向临时目录下不存在的路径，三种结果都正确，临时目录之后仍是空的。
+- `logs_reads_the_process_environment`：只读当前进程的 `HOME`、`XDG_STATE_HOME`，`logs()` 与对应平台的纯函数的结果相同。
+
+`os_version_*` 写在 `crates/platform/src/system/tests.rs`：
+
+- `os_version_formats_the_product_version`：`15.1`、`26.0.1`、`14`、`13.7.2`，带一个、多个或不带末尾的 NUL，都拼成 `macOS <版本>`。
+- `os_version_rejects_anything_but_a_version`：空值、只有 NUL、以点开头、带字母、带空格、中间有 NUL、带换行、非 UTF-8 的字节、非 ASCII 的数字都为 None。
+- `os_version_length_is_capped`：32 字节的版本号接受，33 字节的为 None。
+- macOS 上 `os_version_reads_the_running_macos`：读到 `macOS ` 开头的版本，主版本不小于 11；其他平台上 `os_version_is_none_elsewhere`。
+
 ## 未决问题
 
 没有需要产品决定的问题。技术问题都已在上文决定。
@@ -874,6 +934,13 @@ pub mod dirs {
 - `git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果。
 - `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
 - 本文的状态行、「实际验证」，review 设计的状态行写明前置条件 D 的 `platform` 部分已实现。
+
+日志目录与系统版本（logging 第 2 步）一个实现 PR，写 `Refs #170`，在 logging 第 3 步（`app`）之前合并：
+
+- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「日志目录与系统版本」的 `logs_*`、`os_version_*`；原有的测试结果不变。
+- `git diff origin/main -- Cargo.lock` 为空（`sysctlbyname` 来自已有的 `libc`）；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果；`rg -n 'sysctl' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
+- `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
+- 本文的状态行、「实际验证」，logging 设计的状态行写明第 2 步已实现。
 
 ## 实际验证
 
@@ -918,6 +985,10 @@ pub mod dirs {
   - `just test -p lectern-platform` 93 个测试通过，其中新增 7 个 `app_data_*`，macOS 规则的 `app_data_macos_is_under_application_support` 等也在 Linux 上运行；原有的 86 个结果不变。用 `cargo test` 在同一个进程里运行，7 个也都通过（测试不修改环境变量）。
   - `just check`、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：macOS 上 `app_data` 选 `mac_app_data`、非测试构建不编译 `xdg_app_data`，没有未使用的函数；macOS 上的 `app_data_reads_the_process_environment` 由 macOS CI 运行。
   - 验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果。
+- 日志目录与系统版本（logging 第 2 步，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）在 Linux（x86_64 容器）上：
+  - `just test -p lectern-platform` 104 个测试通过，其中新增 11 个：7 个 `logs_*`（macOS 规则的 `logs_macos_is_under_library_logs` 等也在 Linux 上运行）和 4 个 `os_version_*`（`os_version_is_none_elsewhere` 只在其他平台上编译）；原有的 93 个结果不变。
+  - `just check`、`just test`（整个工作区 2013 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`cargo check --target aarch64-apple-darwin -p lectern-platform` 和 `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：macOS 上 `logs` 选 `mac_logs`、非测试构建不编译 `xdg_logs`，`sysctlbyname` 的调用通过了类型检查和 clippy（`undocumented_unsafe_blocks`）。macOS 上 `sysctl` 的读取和 `os_version_reads_the_running_macos` 没有运行过，由 macOS CI 运行。
+  - 验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果；`rg -n 'sysctl' crates --glob '!crates/platform/**' -t rust` 没有结果。
 
 ## 与设计的差异
 
@@ -941,3 +1012,4 @@ pub mod dirs {
   - 「原文件的权限位」定为 `0o777`，setuid、setgid、sticky 不带过；临时名被占用时换名重试，最多 16 个，之后为 `Io(AlreadyExists)`。那里没有写。
   - `ThreadCpuClock::current()` 创建时先读一次，读不到在这里返回 `Unsupported`；macOS 的时钟为线程端口多持有一个用户引用，线程退出后 `cpu_time` 因此可靠地返回错误（「线程的 CPU 时钟」的「实现」）。阻塞线程的测试用 channel 的 `recv`，不用条件变量，两者都让线程睡在内核里。
 - 增加了那里没有列出的测试：`replace_file_temp_name_collision`、`replace_file_parent_outside_the_root`、`fd_replace_file_keeps_no_descriptor`、`replace_error_is_send_sync_and_displays`、`thread_cpu_after_the_thread_exits_is_an_error`、`thread_cpu_clocks_are_released`。`libc` 原来只在 macOS 上依赖，现在 Linux 也依赖（`pthread_getcpuclockid`、`clock_gettime`），Cargo.lock 不变；「依赖」已改。
+- 日志目录与系统版本按 [logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 2 项实现，那里没有写的约束补在「日志目录与系统版本」：系统版本的接口（`system::os_version() -> Option<String>`，值为 `macOS <版本>`，与 logging 设计 `Header::os` 的示例一致）、字符集与长度的检查、其他平台返回 None。第 2 项里的写盘线程 utility QoS 不在这个 PR：logging 设计「验收」的第 2 步只要求 `dirs::logs()` 和系统版本，而 QoS 要沿用的 executor 线程启动钩子在本 crate 还没有对应的接口（「范围」里「本文不覆盖」的线程 QoS），随它的设计一起做；`Config::on_writer_start` 是 `Option`，接口不受影响。

@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：已接受，尚未实现。
+状态：实现中。第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；其余步骤尚未实现。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -151,7 +151,7 @@ pub struct Early { /* … */ }
 pub struct Header {
     pub version: &'static str,
     pub build: &'static str,
-    /// `platform` 读出的系统版本，如 "macOS 15.1"。
+    /// `platform::system::os_version()` 读出的系统版本，如 "macOS 15.1"。
     pub os: String,
     pub arch: &'static str,
 }

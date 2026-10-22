@@ -3,7 +3,8 @@
 //! one atomically ([`safe_read`], docs/design/platform.md),
 //! the physical footprint of a process for lectern-bench ([`process`]),
 //! the CPU time of a thread ([`ThreadCpuClock`]),
-//! the app data directory ([`dirs::app_data`]),
+//! the app data and log directories ([`dirs::app_data`], [`dirs::logs`]),
+//! the OS version for log file headers ([`system::os_version`]),
 //! and, on macOS, the FSEvents and kqueue backend of `lectern-fs-watch`
 //! (`fs_events`, docs/design/fs_watch.md「platform 后端」). `open -a`,
 //! Keychain, Seatbelt and the status line hook follow once their designs are
@@ -13,6 +14,7 @@ pub mod dirs;
 pub mod process;
 #[cfg(unix)]
 pub mod safe_read;
+pub mod system;
 mod thread_clock;
 
 #[cfg(unix)]
