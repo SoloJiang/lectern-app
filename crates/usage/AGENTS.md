@@ -3,9 +3,9 @@
 token 用量去重、按项目和 MR 归属与聚合（入 SQLite）、额度快照，不估算费用（[ADR 0022](../../docs/adr/0022.md)）；Claude Code 额度来自 statusline，Codex 额度来自日志（[ADR 0014](../../docs/adr/0014.md)、[ADR 0020](../../docs/adr/0020.md)）。
 
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
-- 设计文档：`docs/design/usage.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 设计文档：[docs/design/usage.md](../../docs/design/usage.md)
 - issue：[#31](https://github.com/SoloJiang/lectern-app/issues/31)、[#32](https://github.com/SoloJiang/lectern-app/issues/32)
-- ADR：[0014](../../docs/adr/0014.md)、[0019](../../docs/adr/0019.md)、[0020](../../docs/adr/0020.md)、[0022](../../docs/adr/0022.md)
+- ADR：[0014](../../docs/adr/0014.md)、[0019](../../docs/adr/0019.md)、[0020](../../docs/adr/0020.md)、[0022](../../docs/adr/0022.md)、[0027](../../docs/adr/0027.md)、[0044](../../docs/adr/0044.md)、[0047](../../docs/adr/0047.md)
 
 ## 边界
 
@@ -24,4 +24,4 @@ just test -p lectern-usage
 ```
 
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
-- 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。
+- fixtures 放 `tests/fixtures/`，全部是合成数据：按 agents 设计「外部格式」、ADR 0014 和公开文档描述的格式构造，不取自本机的会话日志和 agent 的配置目录；格式随上游版本变化的，每个版本留一份样本。
