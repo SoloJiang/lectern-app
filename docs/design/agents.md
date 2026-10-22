@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现。见「验收」与「实际验证」。
+状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现。见「验收」与「实际验证」。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -1031,7 +1031,7 @@ review 设计的前置条件 G（[#15](https://github.com/SoloJiang/lectern-app/
 
 没有验证到的：macOS 上的 bench 判定；真实的 Codex 日志（fixtures 和 `testing::synthetic_rollouts` 都是按源码构造的合成数据）；`07cc649` 的 `codex-rs/rollout/src/policy.rs` 是否仍把 `function_call_output` 写进两种模式的 rollout（第 3 步按 `3b8f43a` 核对过，这一步没有重新核对）。
 
-review 设计的前置条件 G（`SessionSource::turns_unretained`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），在 Linux 上运行（`agents`、`services` 不依赖 GPUI；没有在 macOS 上实测）：
+review 设计的前置条件 G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)），在 Linux 上运行（`agents`、`services` 不依赖 GPUI；没有在 macOS 上实测）：
 
 - `just check`、`just test`（基于 `3bb7279`，Linux 上不依赖 GPUI 的全部 crate，1854 个测试通过，7 个跳过）、`just doctest`、`just deny` 全部通过。没有新增依赖。`services` 里 `SessionSource` 加了一个必需的方法（没有默认实现：`services` 只放接口），实现它的只有本 crate 的 `Engine` 和 `services` 测试里的空实现，都已更新。
 - `just test -p lectern-agents -p lectern-services`：基于 `5190f4f`，253 个通过（`agents` 183 个、`services` 70 个），1 个跳过（`redact_file_from_env`）。`session_source_is_a_shared_trait_object` 经 `Arc<dyn SessionSource>` 调用了新方法。新增 `turns_unretained_*` 4 个：
