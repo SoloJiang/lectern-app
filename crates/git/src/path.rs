@@ -24,6 +24,13 @@ impl RepoPath {
         &self.0
     }
 
+    /// The `Arc` this path holds: no copy. `LocalChanges` gives it to
+    /// `services::changes::ChangePath` as is (docs/design/review.md
+    /// 「改动来源」).
+    pub fn shared(&self) -> &Arc<[u8]> {
+        &self.0
+    }
+
     /// The same bytes as a platform path. Always succeeds because the
     /// invariants are the same; `None` only if they ever drift apart.
     pub(crate) fn as_rel(&self) -> Option<RelPath<'_>> {

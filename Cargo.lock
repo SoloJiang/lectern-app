@@ -4339,6 +4339,7 @@ dependencies = [
  "lectern-executor",
  "lectern-fs-watch",
  "lectern-platform",
+ "lectern-services",
  "rustix",
  "tempfile",
 ]

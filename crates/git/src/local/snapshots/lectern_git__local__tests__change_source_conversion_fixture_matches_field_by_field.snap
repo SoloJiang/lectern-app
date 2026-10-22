@@ -1,0 +1,58 @@
+---
+source: crates/git/src/local/tests.rs
+expression: out
+---
+# core.autocrlf = false
+base 4b825dc
+A .gitattributes (untracked) - -> f:86a624a text(+8,-0)[0..0@0/0..8@0]
+A a.auto (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.crlf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.lf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.raw (untracked) - -> f:4e349b5 text(+2,-0)[0..0@0/0..2@0]
+A a.text (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A b.crlf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A bin.auto (untracked) - -> f:b45d80b binary(None,Some(11))
+A lf.txt (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A lone-cr.txt (untracked) - -> f:af1ef36 text(+1,-0)[0..0@0/0..1@0]
+A mixed.txt (untracked) - -> f:ad27934 text(+3,-0)[0..0@0/0..3@0]
+A plain.txt (untracked) - -> f:4e349b5 text(+2,-0)[0..0@0/0..2@0]
+A u.u16 (untracked) - -> f:d2c2c27 text(+2,-0)[0..0@0/0..2@0]
+A v.u16bom (untracked) - -> f:45a6154 text(+1,-0)[0..0@0/0..1@0]
+A x.id (untracked) - -> f:3f57745 text(+2,-0)[0..0@0/0..2@0]
+totals files=15 +33 -0 truncated=0 too_large=0 listed=0 not_retained=0 capped=false
+# core.autocrlf = true
+base 4b825dc
+A .gitattributes (untracked) - -> f:86a624a text(+8,-0)[0..0@0/0..8@0]
+A a.auto (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.crlf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.lf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.raw (untracked) - -> f:4e349b5 text(+2,-0)[0..0@0/0..2@0]
+A a.text (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A b.crlf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A bin.auto (untracked) - -> f:b45d80b binary(None,Some(11))
+A lf.txt (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A lone-cr.txt (untracked) - -> f:af1ef36 text(+1,-0)[0..0@0/0..1@0]
+A mixed.txt (untracked) - -> f:4cb29ea text(+3,-0)[0..0@0/0..3@0]
+A plain.txt (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A u.u16 (untracked) - -> f:d2c2c27 text(+2,-0)[0..0@0/0..2@0]
+A v.u16bom (untracked) - -> f:45a6154 text(+1,-0)[0..0@0/0..1@0]
+A x.id (untracked) - -> f:3635645 text(+2,-0)[0..0@0/0..2@0]
+totals files=15 +33 -0 truncated=0 too_large=0 listed=0 not_retained=0 capped=false
+# core.autocrlf = input
+base 4b825dc
+A .gitattributes (untracked) - -> f:86a624a text(+8,-0)[0..0@0/0..8@0]
+A a.auto (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.crlf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.lf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A a.raw (untracked) - -> f:4e349b5 text(+2,-0)[0..0@0/0..2@0]
+A a.text (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A b.crlf (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A bin.auto (untracked) - -> f:b45d80b binary(None,Some(11))
+A lf.txt (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A lone-cr.txt (untracked) - -> f:af1ef36 text(+1,-0)[0..0@0/0..1@0]
+A mixed.txt (untracked) - -> f:4cb29ea text(+3,-0)[0..0@0/0..3@0]
+A plain.txt (untracked) - -> f:814f4a4 text(+2,-0)[0..0@0/0..2@0]
+A u.u16 (untracked) - -> f:d2c2c27 text(+2,-0)[0..0@0/0..2@0]
+A v.u16bom (untracked) - -> f:45a6154 text(+1,-0)[0..0@0/0..1@0]
+A x.id (untracked) - -> f:3635645 text(+2,-0)[0..0@0/0..2@0]
+totals files=15 +33 -0 truncated=0 too_large=0 listed=0 not_retained=0 capped=false
