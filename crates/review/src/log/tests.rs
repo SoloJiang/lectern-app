@@ -373,6 +373,39 @@ fn log_bad_lines_skipped_and_counted() {
     assert_eq!(state_of(&read, &s, b"b.rs", 2), SeenState::Seen);
 }
 
+/// A line that is not UTF-8 as a whole is parsed from its bytes: a known
+/// type with a raw non-UTF-8 string is a bad line, an unknown type is kept
+/// verbatim through compaction, and the lines around them read as usual.
+#[test]
+fn log_lines_not_utf8_are_bad_or_kept() {
+    let fx = Fixture::new();
+    let s = session("a");
+    fx.write(vec![mark(&s, b"a.rs", 2)]);
+    fx.append_raw(
+        b"{\"t\":\"unseen\",\"at\":1,\"target\":{\"outside\":{\"worktree\":\"\"}},\
+          \"file\":{\"old\":null,\"new\":\"b\xff.rs\"}}\n",
+    );
+    let unknown: &[u8] = b"{\"t\":\"note\",\"at\":1,\"text\":\"caf\xe9\"}\n";
+    fx.append_raw(unknown);
+    fx.write(vec![mark(&s, b"b.rs", 2)]);
+
+    let mut f = fx.small(1);
+    let (mut index, report) = f.load(NOW);
+    assert_eq!((report.bad_lines, report.unknown), (1, 1));
+    assert!(report.complete);
+    assert_eq!(index.len(), 3);
+    assert_eq!(state_of(&index, &s, b"a.rs", 2), SeenState::Seen);
+    assert_eq!(state_of(&index, &s, b"b.rs", 2), SeenState::Seen);
+    index.record(mark(&s, b"a.rs", 3));
+    let flushed = flush(&mut f, &mut index, NOW).unwrap();
+    assert!(flushed.compacted, "{flushed:?}");
+    let bytes = fx.bytes();
+    assert!(bytes.windows(unknown.len()).any(|w| w == unknown));
+    let (read, report) = fx.reload();
+    assert_eq!((report.bad_lines, report.unknown), (0, 1));
+    assert_eq!(records_of(&read), records_of(&index));
+}
+
 const NOTE: &[u8] = b"{\"t\":\"note\",\"at\":1760000000000,\
     \"anchor\":{\"side\":\"new\",\"line\":3},\"text\":\"why \\u00e9?\"}\n";
 const NOTES_SENT: &[u8] = b"{\"t\":\"notes_sent\",\"at\":1760000000001,\"to\":[1,2]}\n";
@@ -803,6 +836,31 @@ fn log_read_shares_repeated_strings() {
     assert!(Arc::ptr_eq(&id(&a), &id(&b)));
     let (old, new) = (a.old_path.unwrap(), a.new_path.unwrap());
     assert!(Arc::ptr_eq(&old.0, &new.0));
+}
+
+/// Strings that left the interner's few recent slots are still shared.
+#[test]
+fn log_read_shares_strings_seen_long_before() {
+    let fx = Fixture::new();
+    let ids = ["a", "b", "c", "d", "e", "f", "a"];
+    let records = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| mark(&session(id), format!("{i}.rs").as_bytes(), 2))
+        .collect();
+    fx.write(records);
+    let (read, _) = fx.reload();
+    let id = |i: usize| match read.mark(&session(ids[i]), &path(format!("{i}.rs").as_bytes())) {
+        Some(Record::Seen { key, .. }) => match &key.target {
+            TargetKey::Session { source, id } => (source.clone(), id.clone()),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    let (first, last) = (id(0), id(6));
+    assert!(Arc::ptr_eq(&first.0, &last.0));
+    assert!(Arc::ptr_eq(&first.1, &last.1));
+    assert!(!Arc::ptr_eq(&first.1, &id(1).1));
 }
 
 #[test]

@@ -285,18 +285,31 @@ pub(super) enum Decoded {
 }
 
 /// One copy of each string that repeats across the records of one read.
+/// A session's records mostly follow each other, so the last few strings
+/// handed out are compared before the set is hashed.
 #[derive(Default)]
 pub(super) struct Interner {
     strs: HashSet<Arc<str>>,
+    recent: [Option<Arc<str>>; 4],
+    /// The slot of `recent` the next miss replaces.
+    next: usize,
 }
 
 impl Interner {
     fn str(&mut self, s: &str) -> Arc<str> {
-        if let Some(shared) = self.strs.get(s) {
-            return shared.clone();
+        if let Some(hit) = self.recent.iter().flatten().find(|r| ***r == *s) {
+            return hit.clone();
         }
-        let shared: Arc<str> = Arc::from(s);
-        self.strs.insert(shared.clone());
+        let shared = match self.strs.get(s) {
+            Some(shared) => shared.clone(),
+            None => {
+                let shared: Arc<str> = Arc::from(s);
+                self.strs.insert(shared.clone());
+                shared
+            }
+        };
+        self.recent[self.next] = Some(shared.clone());
+        self.next = (self.next + 1) % self.recent.len();
         shared
     }
 }
@@ -437,7 +450,14 @@ fn side((mode, content): &(FileMode, SideIdentity)) -> Side {
 /// Decodes a record line. Known types are read in one pass; only a line
 /// that fails it is parsed again for its type alone.
 pub(super) fn decode(line: &[u8], strs: &mut Interner) -> Decoded {
-    let l = match serde_json::from_slice::<Line<'_>>(line) {
+    // A line that is UTF-8 as a whole is parsed as a `str`, so serde_json
+    // does not check each of its strings again; it reads to the same value.
+    // Any other line takes the byte path, which tells it apart as before.
+    let parsed = match std::str::from_utf8(line) {
+        Ok(text) => serde_json::from_str::<Line<'_>>(text),
+        Err(_) => serde_json::from_slice::<Line<'_>>(line),
+    };
+    let l = match parsed {
         Ok(l) => l,
         Err(_) => {
             return match serde_json::from_slice::<Tag<'_>>(line) {
