@@ -4404,6 +4404,8 @@ name = "lectern-review"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "lectern-cache",
+ "lectern-git",
  "lectern-services",
  "serde",
  "serde_json",

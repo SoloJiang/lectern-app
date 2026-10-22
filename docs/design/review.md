@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；其余前置条件与第 2–5 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）；其余前置条件与第 3–5 步尚未实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分），审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 只预留数据模型。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)，压缩的条件按 [ADR 0045](../adr/0045.md)）。
 
@@ -1241,6 +1241,16 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - `rg -n 'rusqlite' crates/review/Cargo.toml` 没有结果。
 - 没有验证的：待写队列的 100 ms / 64 条合并、`Background` 任务与 `BusyGuard`、首帧之前不读，属于第 3 步接入审阅引擎时的内容；本步只提供 `LogFile`、`Index` 和 `flush`。
 
+### 第 2 步
+
+在 Linux（x86_64，4 核，与其他编译任务共用机器）上运行。本步是纯计算加缓存值的编解码，不做 IO（测试里的 `cache` 在临时目录），不依赖 GPUI。
+
+- `Cargo.toml` 加 `lectern-git`（`line_diff`、`Oid::for_blob`）和 `lectern-cache`（`review.attribution`），都是「依赖」表里已有的；gix 只经 `git` 使用。
+- `just test -p lectern-review`：79 个测试通过，新增 24 个。按前缀：`chain_*` 14（五种操作；`Replace` 找不到、出现多次时应用不上而后续步照常；`Patch` 在偏移处匹配、上下文不同时应用不上、没有行号的 hunk；`Write` 之后重新对齐；`move_to` 跟到新路径；CRLF 归一化重试；一次调用整体应用、没有完成的调用不应用；超过 200 步、超过 4 MiB、工作区一侧不是文本时为文件级；缓存值截断、多余字节、越界的步骤下标都解码为未命中；存活的三种结果；bench 夹具）、`provenance_*` 2（会话结束后手工加的行、手工删掉的基准行都计入 `drifted`）、`attribute_*` 4（最终 hunk 归到各自的轮次；两个会话先后改同一文件，同一条链在两边的审阅里互为 `others`；叙事步的 `Aligned` / `Partial` / `Unaligned`；文件级归给内容 OID 相同的 `Write`）、`history_digest_*` 4（两个会话改成相同内容时摘要和键都不同；同一会话在两个 worktree 里相同，`Blob` 与 `NotRetained` 的键相同；状态、适配器版本、轮次、调用、位置、重命名链、顺序任一变化时不同；命中时不调用计算链的闭包，文件级的 `Sides` 结果不写缓存）。insta 快照 11 个（链的每一步、叙事步的 hunk 与存活、工作区每行来源、基准每行去向，加上最终 hunk 与文件的归因），逐个看过；每个快照的链同时做一次缓存值的编码往返。
+- `review/chain_3000_lines`（`just bench --measure review/`，采样模式）：中位数 19.8 ms，p95 21.4 ms，51 个样本，只记录。夹具 3000 行（153 780 字节）、40 次 `Replace` 分在 8 轮里，每一步一次 `line_diff` 和一次版本的 SHA-1（`Oid::for_blob`），另有 8 个叙事步的 `line_diff` 和最后与工作区的比较，不含 `load`。同一次运行里 `review/log_load_16k` 中位数 21.9 ms（预算 < 30 ms）。没有在 macOS 上测量，也没有拆分 `line_diff` 与哈希各占多少。
+- `just check`、`just test`（整个工作区 1995 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- 没有验证的：改动步的选取、路径的截止时刻、命令声明和 `review.attribution` 的读写时机属于第 3 步；本步的链只由测试直接构造输入驱动。「性能」表里第一个文件的链 < 3 ms（300 行、5 步）没有单独测量，按 3000 行 40 步的结果推算远在其内。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -1261,3 +1271,19 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **目录 `fsync` 失败后只追加。** 压缩改名之后目录的 `fsync` 失败时，改名不一定持久，本进程把文件当作状态未知，直到下一次完整读取；下一次追加时重试目录的 `fsync`。
 - **`testing` 的日志夹具。** `testing::write_log`、`testing::load_log` 给 `review/log_load_16k` 用；「本 crate 的公开项」里的 `FakeSessions`、`FakeProjects`、`Driven` 随第 3 步加入。
 - **`review/log_load_16k` 的夹具大小。** 一条已看记录约 350 字节（ADR 0044 估计 250 字节），16 000 条是 5.3 MiB，不是 4 MiB；基准按 16 000 条测量，比原来的估计更重，「性能」表已改。
+
+### 第 2 步
+
+- **链与审阅对象无关。** 缓存的值里步骤按它在这个路径的轮次历史里的下标出现，不含轮次和会话；hunk 的归因、文件的归因和叙事步的 `Alignment` 由调用方给出每一步属于本审阅对象的哪一轮、还是哪个其他会话，每次现算（`chain::attribute`）。所以同一路径、同一历史的一条缓存在每个会话的审阅里都能用，键里也不需要审阅对象。
+- **工作区一侧不是文本的文件级结果不缓存。** 键里工作区一侧的 `Blob` 与 `NotRetained` 相同（「归因的缓存」），而 `NotRetained` 时链只能做文件级；这个结果写进缓存，之后内容保留下来时会一直命中文件级。所以因为两侧不是 `SideText::Text` 而只做文件级的结果不写缓存；代价是这类文件每次都要 `load` 改动步来比较 `Write` 的 OID，而会话改二进制文件、或工作区内容超出保留预算的情况都少。超过 200 步、超过 4 MiB 的结果与内容的保留无关，照常缓存。
+- **一次调用是一个整体。** 一次调用对这个路径的几处改动（`MultiEdit`、多文件补丁）按顺序应用，其中一处应用不上，整次调用都不改变版本，与工具本身的行为相同。调用的改动里没有链当前所在路径的（`load` 给出的路径与声明对不上、只改了 `move_to` 之前的旧路径），同样记为应用不上。
+- **状态不是 `Completed` 的调用**留在历史里（进轮次历史的摘要），不应用，也不算 `Alignment::Partial` 的失败调用：它属于简报的 `EditFailed`，不是 Drifted。
+- **应用规则的细节**（「改动链」第 2 步没有写到的）：`Replace` 的 `old` 为空时只在文件不存在或为空时创建它；`Delete` 一个不存在的文件应用不上；`Patch` 作用在不存在的文件上时按空内容处理；没有行号的 hunk（Codex `apply_patch` 的 `@@`、`@@ <上下文>`）取上一个 hunk 之后的第一个匹配，没有行号的纯插入放在文件末尾；hunk 里的空行是一行空的上下文；`\ No newline at end of file` 去掉前一行的换行。`Write` 的 CRLF 在工作区一侧没有 `\r` 时换成 LF（工作区一侧有 `\r` 时说明这个文件就是按 CRLF 保存的，原样比较）。
+- **存活的口径。** 一个叙事步「加入的行」是这一步最后一次调用之后、行来源属于它的行；工作区里还剩的同样按行来源数。没有加入任何行的步（只删除）为 `All`。
+- **叙事步的 hunk 夹着别的会话的改动。** 叙事步的 hunk 是这一轮第一次改动之前与最后一次改动之后两个版本的 `line_diff`（「改动链」第 3 步）。同一轮的两次调用之间有别的会话改了同一文件时，那次改动也在这个 diff 里；这种交错很少见，按设计照算，记为已知限制。
+- **两份 diff 对一行的看法不同时不归因。** 最终 hunk 用 `ChangeList` 的 diff（基准到工作区），行来源来自链上逐步的 diff。两者对同一行的判断不同时（链认为基准里的这一行留着，最终 diff 把它算作删除或新增），这一行既不归到任何一步，也不计入 `drifted`。
+- **hunk 与文件的轮次按步骤的时间顺序。** `HunkAttribution::turns`、`FileAttribution::turns` 按第一次出现的步骤排列；子 agent 的轮次插在父会话哪一轮之后属于叙事，第 3 步组装快照时按叙事顺序重排。`FileAttribution::commands` 由第 3 步的命令声明填写，本步总是空的。
+- **轮次历史的摘要里重命名链上的路径**由调用方给出：选出这些改动步所依据的路径，基准一侧的路径在前。摘要只用轮次索引里的数据（`HistoryStep`），状态取 `ToolCall::finished` 里的状态；没有结果的调用不参与（「改动步与声明」），所以总有状态。
+- **`review.attribution` 的值**（`chain::codec`）：每一步的结果与版本 OID、每个叙事步的成员、增删行数、存活与 hunk，以及行来源（工作区每行来源、基准每行去向的游程编码）或文件级的原因与匹配到的步。解码时检查每个下标和游程长度（合计不超过 4 MiB 能有的行数），末尾有多余字节也算未命中。
+- **测试的替身。** 「测试」里「缓存命中时不调用 `load`（`FakeSessions` 计数）」在本步用计数的闭包代替 `FakeSessions`（第 3 步加入）：`history_digest_cache_hit_does_not_load` 在临时目录的 `cache` 上，命中时不调用计算链的闭包（`load` 只在这里发生）。「只有命令声明的文件为文件级」「命令窗口落在两个会话里时不归」属于声明，随第 3 步的 `claims_*` 一起测。
+- **`testing::chain_fixture`**：`review/chain_3000_lines` 的夹具，「本 crate 的公开项」之外的又一个 bench 夹具，与第 1 步的 `write_log` 相同。

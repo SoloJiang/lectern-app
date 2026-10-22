@@ -1,0 +1,21 @@
+---
+source: crates/review/src/chain/tests.rs
+expression: text
+---
+steps:
+  0 Applied 49b5ea39
+groups:
+  [0] +1 -1 All
+    old 0..1 new 0..1 bytes 0/0
+aligned: false
+worktree:
+  step 0  | fn a() { 1 }
+  base 1  | fn b() {}
+  none    | // by hand
+base:
+  del 0   | fn a() {}
+  kept    | fn b() {}
+
+hunk old 0..1 new 0..1: lines true turns ["0#1"] others [] drifted 0
+hunk old 2..2 new 2..3: lines true turns [] others [] drifted 1
+file: Lines turns ["0#1"] others [] drifted_hunks 1

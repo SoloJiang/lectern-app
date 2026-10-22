@@ -28,5 +28,6 @@ just test -p lectern-review
 
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
 - 标注日志的测试（`src/log/tests.rs`）用 `tempfile` 的临时目录和合成记录。IO 故障经 `LogFile::set_faults` 注入（读取、追加、写压缩的临时文件写到一半、改名之前、改名之后的目录 `fsync`），尺寸上限经 `LogFile::set_limits` 调小；`log_compacts_above_4_mib` 用真实的 4 MiB。日志的行格式有 insta 快照（`log_format`），改格式要同时改设计文档「标注日志」。
-- 性能：`lectern-bench` 的 `review/log_load_16k`（`just bench --measure review/`），夹具是 `testing::write_log`。
+- 改动链的测试（`src/chain/tests.rs`）用合成的基准、工作区内容和改动步，不经会话来源；链、逐行来源和归因渲染成文本做 insta 快照，每个快照的链同时检查 `review.attribution` 的编码往返。缓存命中不 `load` 由 `history_digest_cache_hit_does_not_load` 在临时目录的 `cache` 上检查。
+- 性能：`lectern-bench` 的 `review/log_load_16k`、`review/chain_3000_lines`（`just bench --measure review/`），夹具是 `testing::write_log`、`testing::chain_fixture`。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。

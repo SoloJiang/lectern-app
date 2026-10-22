@@ -1704,6 +1704,9 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // (step 2) One file's change chain: 3000 lines, 40 `Replace` steps,
+    // each with its `line_diff`, no `load`. Recorded.
+    share("review/chain_3000_lines", RECORD, REVIEW, ACTIVE, Time),
     // ---- end review ----
     share("executor/spawn_10k", RECORD, EXECUTOR, ACTIVE, Time),
     share("executor/wake_1000x100", RECORD, EXECUTOR, ACTIVE, Time),

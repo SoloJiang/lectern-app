@@ -125,6 +125,7 @@ const BENCHES: &[Bench] = &[
     project::DIRS_100K,
     project::FACTS_CONTAINS,
     review::LOG_LOAD_16K,
+    review::CHAIN_3000_LINES,
     syntax::FIRST_SCREEN,
     syntax::FULL_PARSE_1MIB,
     syntax::CHAIN_16MIB,
