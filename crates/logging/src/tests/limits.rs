@@ -16,6 +16,66 @@ fn flood() {
 }
 
 #[test]
+fn third_party_cached_level_follows_filter_changes() {
+    let fx = Fixture::new();
+    let logging = fx.start(None);
+    let gpui = |n: u32| {
+        third_party(
+            Level::Warn,
+            "gpui::window",
+            "src/window.rs",
+            7,
+            format_args!("cached {n}"),
+        );
+    };
+    gpui(1);
+    logging.set_verbose(Some(crate::Verbose {
+        filter: crate::Filter::parse("gpui=error").0,
+        lasts: Duration::from_secs(3600),
+    }));
+    gpui(2);
+    logging.set_verbose(None);
+    gpui(3);
+    assert!(logging.flush(Duration::from_secs(5)));
+    let records = records(fx.path());
+    let written: Vec<&str> = records
+        .iter()
+        .filter(|r| r["tg"] == "gpui")
+        .filter_map(|r| r["msg"].as_str())
+        .collect();
+    // The second record came under `gpui=error`: the cached level of the
+    // first did not let it through.
+    assert_eq!(written, ["cached 1", "cached 3"], "{records:?}");
+}
+
+#[test]
+fn third_party_suppressed_counts_reach_the_status() {
+    let fx = Fixture::new();
+    let logging = fx.start(None);
+    for _ in 0..30 {
+        third_party(
+            Level::Error,
+            "gpui::window",
+            "src/window.rs",
+            9,
+            format_args!("counted"),
+        );
+    }
+    // 10 left out, still held by the table entry.
+    assert_eq!(logging.status().suppressed, 10);
+    fx.clock.advance(WINDOW);
+    third_party(
+        Level::Error,
+        "gpui::window",
+        "src/window.rs",
+        9,
+        format_args!("counted"),
+    );
+    // Now joined the process total; not counted twice.
+    assert_eq!(logging.status().suppressed, 10);
+}
+
+#[test]
 fn callsite_limit_counts_suppressed() {
     let fx = Fixture::new();
     let logging = fx.start(None);

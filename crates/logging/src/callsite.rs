@@ -140,7 +140,7 @@ pub(crate) fn take(state: &AtomicU64, window: u64, limit: u32) -> bool {
     }
 }
 
-fn level_filter(v: u8) -> LevelFilter {
+pub(crate) fn level_filter(v: u8) -> LevelFilter {
     match v {
         1 => LevelFilter::Error,
         2 => LevelFilter::Warn,

@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
-use log::{Level, Log, Metadata, Record};
+use log::{Level, LevelFilter, Log, Metadata, Record};
 
 use super::encode::{self, Head, Message};
 use super::limit::{self, Decision, Table};
@@ -97,16 +97,27 @@ fn third_party_target(target: &str) -> (&str, bool) {
     }
 }
 
-fn passes(level: Level, target: &str, lectern: bool) -> bool {
-    let Some(active) = filter::active() else {
-        return false;
-    };
-    let allowed = if lectern {
+/// The active filter's level for a third-party target, and its generation;
+/// None without a filter.
+fn target_level(target: &str, lectern: bool) -> Option<(LevelFilter, u64)> {
+    let active = filter::active()?;
+    let level = if lectern {
         active.filter.lectern(target)
     } else {
         active.filter.third_party(target)
     };
-    level <= allowed || (filter::PLUGINS.load(Ordering::Relaxed) && filter::plugin_allows(level))
+    Some((level, active.generation))
+}
+
+/// The target's level lets `level` through, or an `@plugin` directive does
+/// for the current scope.
+fn allows(level: Level, target_level: LevelFilter) -> bool {
+    level <= target_level
+        || (filter::PLUGINS.load(Ordering::Relaxed) && filter::plugin_allows(level))
+}
+
+fn passes(level: Level, target: &str, lectern: bool) -> bool {
+    target_level(target, lectern).is_some_and(|(allowed, _)| allows(level, allowed))
 }
 
 thread_local! {
@@ -150,6 +161,13 @@ impl Shared {
         self.home.as_deref()
     }
 
+    /// Records left out by rate limits in this process: those already
+    /// counted and those still held by third-party table entries.
+    #[cfg(feature = "sink")]
+    pub(crate) fn suppressed(&self) -> u64 {
+        callsite::SUPPRESSED.load(Ordering::Relaxed) + self.table.pending()
+    }
+
     #[cfg(feature = "sink")]
     pub(crate) fn sink(&self) -> Option<&crate::sink::State> {
         match &self.output {
@@ -188,22 +206,50 @@ impl Shared {
 
     fn third_party(&self, record: &Record<'_>) {
         let level = record.level();
-        let (target, lectern) = third_party_target(record.target());
-        if !passes(level, target, lectern) {
-            return;
-        }
         let n = if level <= Level::Info {
-            match self.table.check(
-                limit::key(record.target(), record.file(), record.line()),
-                level,
-                clock::window(WINDOW_US),
-            ) {
+            // The table entry caches the filter's level for its target: a
+            // limited call reads neither the target's name nor the filter.
+            let key = limit::key(record.target(), record.file(), record.line());
+            let generation = filter::GENERATION.load(Ordering::Acquire);
+            let cached = self
+                .table
+                .find(key)
+                .and_then(|e| Some((e, e.level(generation)?)));
+            let entry = match cached {
+                Some((entry, allowed)) => {
+                    if !allows(level, allowed) {
+                        return;
+                    }
+                    entry
+                }
+                None => {
+                    let (target, lectern) = third_party_target(record.target());
+                    let Some((allowed, generation)) = target_level(target, lectern) else {
+                        return;
+                    };
+                    if !allows(level, allowed) {
+                        return;
+                    }
+                    let (entry, overflow) = self.table.entry(key);
+                    Table::cache_level(entry, overflow, generation, allowed);
+                    entry
+                }
+            };
+            match self
+                .table
+                .check_entry(entry, level, clock::window(WINDOW_US))
+            {
                 Decision::Write { n } => n,
                 Decision::Limited => return,
             }
         } else {
+            let (target, lectern) = third_party_target(record.target());
+            if !passes(level, target, lectern) {
+                return;
+            }
             0
         };
+        let (target, _) = third_party_target(record.target());
         let head = Head {
             t: clock::now(),
             up: clock::up_micros(),

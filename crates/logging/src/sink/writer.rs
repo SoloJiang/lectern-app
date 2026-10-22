@@ -23,7 +23,7 @@ use crate::engine::logger::Shared;
 use crate::filter::{self, Filter};
 use crate::scope::Ctx;
 use crate::value::{Repr, Value};
-use crate::{callsite, clock, hooks};
+use crate::{clock, hooks};
 
 /// Records that are not urgent wait at most this long.
 const BATCH_WAIT: Duration = Duration::from_secs(1);
@@ -702,7 +702,7 @@ impl Writer {
             }
         }
         let dropped = self.shared.dropped.load(Ordering::Relaxed);
-        let suppressed = callsite::SUPPRESSED.load(Ordering::Relaxed);
+        let suppressed = self.shared.suppressed();
         if dropped > self.reported.0 || suppressed > self.reported.1 {
             let fields = [
                 ("dropped", Value(Repr::U64(dropped - self.reported.0))),
@@ -832,7 +832,7 @@ impl Writer {
             self.write_pending();
             if let Some(files) = self.files.as_mut() {
                 let dropped = self.shared.dropped.load(Ordering::Relaxed);
-                let suppressed = callsite::SUPPRESSED.load(Ordering::Relaxed);
+                let suppressed = self.shared.suppressed();
                 files.end(dropped, suppressed);
                 let _ = files.sync();
             }

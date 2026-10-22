@@ -4,12 +4,10 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use super::files::{self, Listed};
 use super::{Logging, fs};
-use crate::callsite;
 use crate::clock;
 use crate::engine::time;
 
@@ -185,7 +183,7 @@ fn manifest(logging: &Logging, runs: &[Option<u64>], files: &[(String, u64)]) ->
         runs.join(","),
         files.join(","),
         status.dropped,
-        callsite::SUPPRESSED.load(Ordering::Relaxed),
+        status.suppressed,
     )
 }
 

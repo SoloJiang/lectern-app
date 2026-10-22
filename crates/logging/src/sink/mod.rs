@@ -21,7 +21,7 @@ use crate::engine::limit::Table;
 use crate::engine::logger::{self, INSTALLED, Output, Shared};
 use crate::engine::{encode, time};
 use crate::filter::{self, Filter};
-use crate::{callsite, clock, hooks};
+use crate::{clock, hooks};
 
 pub(crate) use buffer::{Phase, RUN_CAP, VERBOSE_CAP, frames};
 pub use export::{ExportError, ExportOptions, Exported};
@@ -541,7 +541,7 @@ impl Logging {
             verbose_until: s.until,
             dir: state.dir.clone(),
             dropped: self.shared.dropped.load(Ordering::Relaxed),
-            suppressed: callsite::SUPPRESSED.load(Ordering::Relaxed),
+            suppressed: self.shared.suppressed(),
             disk_bytes: state.disk_bytes.load(Ordering::Relaxed),
         }
     }
