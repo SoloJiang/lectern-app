@@ -1027,7 +1027,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 
 - `rg -n 'pub trait Usage\b|pub trait MrSource' crates/services/src` 各有一处（`usage/mod.rs`、`usage/mr.rs`）。
 - `just test -p lectern-services`：84 个测试通过，新增 15 个，都以 `usage_` 开头。
-  - JSON 往返：`usage_event_round_trips`、`usage_queries_and_commands_round_trip`、`usage_snapshots_round_trip`、`usage_limits_round_trip`、`usage_metering_round_trips`、`usage_mr_types_round_trip`。覆盖每个枚举的每个变体（六种快照、四种 `UsageState`、三种 `UsageDegraded`、四种 `ProjectStatus` 与 `TemporaryReason`、三种 `RowKey`、六个 `MeterState`、四种 `AnalysisTarget`、四种 `LimitKind`），以及 SHA-1 与 SHA-256 的 `BlobId`、`u64::MAX`、负的年份与时间戳、`f32` 的百分比。`usage_enums_are_externally_tagged` 检查枚举是 serde 默认的外部标记。
+  - JSON 往返：`usage_event_round_trips`、`usage_queries_and_commands_round_trip`、`usage_snapshots_round_trip`、`usage_limits_round_trip`、`usage_metering_round_trips`、`usage_mr_types_round_trip`。覆盖每个枚举的每个变体（六种快照、四种 `UsageState`、三种 `UsageDegraded`、四种 `ProjectStatus` 与 `TemporaryReason`、三种 `RowKey`、五种 `MeterState`、三种 `AnalysisTarget`、四种 `LimitKind`），以及 SHA-1 与 SHA-256 的 `BlobId`、`u64::MAX`、负的年份与时间戳、`f32` 的百分比。`usage_enums_are_externally_tagged` 检查枚举是 serde 默认的外部标记。
   - 服务 ID：`usage_service_id_and_multiple` 检查 `ID == "usage"`、`MULTIPLE == false`。
   - 不是服务：`usage_mr_source_is_not_a_service` 检查 `dyn MrSource` 没有实现 `Service`，同一个探针对 `dyn Usage` 给出 true。
   - 注销回调：`usage_interest_releases_once_on_drop`、`usage_mr_source_registration_releases_once_on_drop` 在另一个线程上 drop，回调各调用一次。
