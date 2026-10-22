@@ -330,7 +330,7 @@ level     := off | error | warn | info | debug | trace
 - 规则：同一调用点的 error、warn、info 以 10 秒为一个窗口，每个窗口最多写 20 条；超出的不编码，只计数，这个调用点下一条写出的记录带 `n`（省略的条数）。debug、trace 不按调用点限流，只受缓冲容量限制。
 - Lectern 的调用点：计数在宏展开的 `static Callsite` 里，一个 `AtomicU64` 存窗口编号和条数。
 - 第三方记录：`Log::log` 在编码之前按（target、`file()`、`line()`）的哈希查一张 256 项的固定表，每项存键的哈希和同样的计数，线性探测最多 8 项。没有文件和行的记录按 target 计。探测不到空位时，这条记录计入一个共用的溢出项，溢出项按同样的规则限流。表在 `install_early` 时一次分配（约 4 KiB），之后不增长。
-- 第三方合计：全部第三方记录每个窗口另有合计上限 50 条，超出的同样只计数，所以几个调用点同时刷屏也只占默认文件很小的一部分。
+- 第三方合计：warn、info 的第三方记录每个窗口另有合计上限 50 条，超出的同样只计数，所以几个调用点同时刷屏也只占默认文件很小的一部分。error 级别不受合计上限限制，只受各自调用点每窗口 20 条的限制，刷屏的 warn 不会挤掉 error。
 - 被限流的调用在调用线程上的开销是一次哈希和两三次原子操作，不编码、不复制（`log/third_party_limited`）。
 
 ## 数据流与线程
@@ -403,7 +403,7 @@ level     := off | error | warn | info | debug | trace
 执行方式：
 
 - 类型：宏的消息只接受字面量，字段值必须实现 `Field`；`Value` 没有接受运行时字符串的构造函数。`Value::panic_message` 的调用位置由架构检查限制在 `kernel`、`executor` 和本 crate。
-- lint：`clippy.toml` 用 `disallowed-macros` 禁止 `log::error`、`log::warn`、`log::info`、`log::debug`、`log::trace`、`log::log`，理由指向 ADR 0046；本 crate 的宏展开不经过这些宏，直接构造 `log::Record`。各 crate 接入完成后，非 tool crate 开启 `clippy::print_stderr` 和 `clippy::print_stdout`。
+- lint：`clippy.toml` 用 `disallowed-macros` 禁止 `log::error`、`log::warn`、`log::info`、`log::debug`、`log::trace`、`log::log`，理由指向 ADR 0046；本 crate 的宏展开不经过这些宏，直接构造 `log::Record`。同一个文件用 `disallowed-methods` 禁止 GPUI 的错误日志辅助方法 `gpui_util::ResultExt` 的 `log_err`、`log_err_with_backtrace`、`warn_on_err`、`log_with_level`，`gpui_util::TryFutureExt` 的 `log_err`、`warn_on_err`，以及 `gpui::TaskExt` 的 `detach_and_log_err`、`detach_and_log_err_with_backtrace`：它们把错误格式化成第三方文本，绕过类型化字段。视图层的错误经 `lectern-logging` 的宏记录，`detach` 前自己处理 `Result`。各 crate 接入完成后，非 tool crate 开启 `clippy::print_stderr` 和 `clippy::print_stdout`。
 - 落盘时再检查一次：target 是 Lectern crate、但消息不是字面量的记录（`fmt::Arguments::as_str()` 为 None），按第 3 类处理。
 - `PanicText` 的变体由调用方按 payload 的实际类型构造（kernel 的 `contain`、executor 的 `catch` 和本 crate 的钩子），不由调用方判断内容是否安全。
 - 详细日志只改变过滤和容量，处理规则不变。
@@ -449,7 +449,8 @@ level     := off | error | warn | info | debug | trace
 - 限流：
   - `callsite_limit_counts_suppressed`：一个 Lectern 调用点在一个窗口里写 1 万条，写出 20 条，下一个窗口的第一条带 `n`。
   - `third_party_call_site_stays_bounded`：同一个（target、文件、行）的第三方 warn 按 120 次每秒连续写 60 秒（`ManualClock`），文件里这个调用点不超过 6 个窗口各 20 条，省略的条数合计正确；同时另一个第三方调用点的记录照常写出。
-  - `third_party_total_cap`：100 个不同的第三方调用点在一个窗口里各写 1 条，写出 50 条。
+  - `third_party_total_cap`：100 个不同的第三方调用点在一个窗口里各写 1 条 warn，写出 50 条。
+  - `third_party_errors_bypass_the_total_cap`：合计上限已满的窗口里，另外 30 个调用点各写 1 条 error，全部写出；其中一个调用点再写 30 条 error，只写出 20 条，`n` 记省略的 10 条。
   - `third_party_table_overflow_shares_one_limit`：超过表容量的调用点共用溢出项，写出的条数仍有上限，表不增长。
   - `limited_calls_do_not_encode`：被限流的调用不调用编码器（测试钩子计数为零）。
 - 缓冲：`early_buffer_overflow_drops_newest_and_counts`、`running_buffer_never_blocks_callers`（写盘线程被测试钩子卡住时，调用线程照常返回）、`drops_are_reported_on_the_next_write`。
@@ -498,7 +499,7 @@ level     := off | error | warn | info | debug | trace
 
 - `Cargo.toml` 的 `layer = "kernel"`，依赖只有 `log`（`std`、`kv`）；`cargo tree -p lectern-logging -e normal --all-features` 只列出 `log`。
 - 「测试」一节的全部测试通过：`just test -p lectern-logging`。
-- `clippy.toml` 加上 `disallowed-macros`（`log::*` 的六个宏）和 `await-holding-invalid-types`（`lectern_logging::Scope`）；`just check` 通过。
+- `clippy.toml` 加上 `disallowed-macros`（`log::*` 的六个宏）、`disallowed-methods`（「隐私」列出的 GPUI 错误日志辅助方法）和 `await-holding-invalid-types`（`lectern_logging::Scope`）；`just check` 通过。macOS 上用一个调用 `log_err()` 和 `detach_and_log_err()` 的临时文件确认 clippy 报错，确认路径写对（不提交这个文件）。
 - `scripts/check_architecture.py` 加两条检查及其测试：只有 `app` 和 tool 层启用 `lectern-logging` 的 `sink` feature；`Value::panic_message` 只出现在 `crates/kernel`、`crates/executor`、`crates/logging` 的源码里。
 - `cargo tree --target aarch64-apple-darwin -p lectern-app -e features -i log` 里没有 `max_level_` 或 `release_max_level_` feature。
 - `bench` 加入 `log/disabled_call`、`log/filtered_call`、`log/enabled_call`、`log/contended_call`、`log/third_party_limited`、`log/install_early`、`log/idle_memory`，预算写进 `budgets.rs`，在 Linux 上 `just bench --measure log/` 报告数字。

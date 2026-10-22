@@ -43,4 +43,5 @@ Lectern 的规则优先：
 - 界面结构按[交互规范](../../../docs/design/interaction.md)，新增界面元素先对照三层结构。
 - 界面字符串走 `lectern-i18n`，不写字面量。
 - 视图只读快照、只发命令，不做 IO（AGENTS.md 架构规则 4）。
+- 错误经 `lectern-logging` 的宏记录，不用上游的 `log_err()`、`warn_on_err()`、`detach_and_log_err()`：它们把错误写成不受类型化字段约束的文本，`clippy.toml` 禁止调用（[ADR 0046](../../../docs/adr/0046.md)、[logging 设计「隐私」](../../../docs/design/logging.md#隐私)）。
 - 未经确认不得升级 GPUI 或 gpui-component（AGENTS.md 禁止事项），也不要引入 `gpui-kit`。
