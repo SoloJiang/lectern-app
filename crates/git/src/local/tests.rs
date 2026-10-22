@@ -734,25 +734,31 @@ fn change_source_refresh_with_an_invalid_path_compares_everything() {
 }
 
 /// No handle (a deserialized list) or another source's handle: compared in
-/// full as `fetch`, with this source's base.
+/// full as `fetch`, with this source's base. The other source has another
+/// base: refreshing its `ChangeSet` would keep that base.
 #[test]
 fn change_source_refresh_of_a_foreign_list_fetches() {
     let t = clean_repo(&[("a", b"a\n")]);
     t.write_file("a", b"a1\n");
+    let c1 = t.commit(t.tree(&[("a", b"zero\n"), ("z", b"z\n")]), &[], "c1");
+    let c1 = BlobId::from_bytes(c1.as_bytes()).unwrap();
     let s = source(&t);
-    let other = source(&t);
+    let other = source_with(&t, BaseSpec::Commit(c1), Limits::default());
     let list = checked(&s);
     let bare = Arc::new(ChangeList {
         handle: ListHandle::default(),
         ..(*list).clone()
     });
     let theirs = checked(&other);
-    for prev in [bare, theirs] {
+    assert_ne!(theirs.base, list.base);
+    assert_ne!(theirs.files, list.files);
+    for prev in [theirs, bare] {
         let paths: Arc<[ChangePath]> = Arc::from([]);
         let next = s
             .refresh(&prev, &RefreshHint::Paths(paths), &no_cancel())
             .unwrap();
         assert_same(set_of(&s, &next), &next);
+        assert_eq!(next.base, list.base);
         assert_eq!(next.files, list.files);
         assert!(other.held(&next).is_none());
     }
