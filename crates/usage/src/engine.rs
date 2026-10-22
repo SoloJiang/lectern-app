@@ -23,17 +23,19 @@ use lectern_logging::{Ctx, Value, debug, error, info, warn};
 use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
 use lectern_services::session::{
     Batch, Place as SessionPlace, Record, SessionError, SessionKey, SessionSource, SessionSummary,
-    SessionsChanged,
+    SessionsChanged, SourceId,
 };
 use lectern_services::usage::{
     AnalysisId, AnalysisStart, Limits, LocalDate, MeterEvent, MrSource, MrSourceRegistration,
-    ProjectRef, SnapshotHeader, Usage, UsageCommand, UsageDegraded, UsageError, UsageEvent,
-    UsageInterest, UsageQuery, UsageSnapshot, UsageState,
+    ProjectInfo, ProjectRef, ProjectStatus, SnapshotHeader, Usage, UsageCommand, UsageDegraded,
+    UsageError, UsageEvent, UsageInterest, UsageProjectId, UsageQuery, UsageSnapshot, UsageState,
 };
 
 use crate::LocalZone;
 use crate::snapshot::{self, Owners};
-use crate::store::{Checked, Ingest, Mode, Place, ProjectRow, SessionInfo, Store, StoreError};
+use crate::store::{
+    Checked, FileStamp, Ingest, Mode, Place, ProjectRow, SessionInfo, Store, StoreError, Totals,
+};
 use crate::time::Time;
 use crate::window;
 
@@ -82,13 +84,13 @@ struct Pace {
     handled: Option<u64>,
 }
 
-/// Backfill progress over the sessions known when the database opened.
+/// Backfill progress over the inactive sessions found changed since the
+/// last run (or since the last backfill finished).
 #[derive(Default)]
 struct Backfill {
-    /// Per session: file size at the start, bytes read so far.
+    /// Per session: file size when found changed, bytes read so far.
     sessions: HashMap<SessionKey, (u64, u64)>,
     started: Option<Instant>,
-    logged: bool,
 }
 
 impl Backfill {
@@ -105,6 +107,15 @@ struct State {
     stopped: bool,
     /// Sessions with records not yet read.
     dirty: HashSet<SessionKey>,
+    /// Sessions that may have changed: their log file is compared with the
+    /// one the last read to the end saw before they become dirty.
+    unverified: HashSet<SessionKey>,
+    verifying: bool,
+    /// Unchanged sessions read once anyway, unpaced, one per source and
+    /// run: a read is the only way to learn that the source's adapter
+    /// version changed (it then replays from the start).
+    probe: HashSet<SessionKey>,
+    probed: HashSet<SourceId>,
     reading: bool,
     /// A write failed: no more reading until the next `SessionsChanged`.
     blocked: bool,
@@ -278,7 +289,9 @@ impl Engine {
                 state.recovered = opened.recovered.map(|r| r.at);
                 drop(state);
                 self.register_open_projects(&store);
-                self.start_backfill(&store);
+                let keys: Vec<SessionKey> = self.summaries().into_keys().collect();
+                self.state().unverified.extend(keys);
+                self.verify_now();
             }
             Err(e) => {
                 let reason = e.reason();
@@ -303,36 +316,89 @@ impl Engine {
         self.state().open = keys;
     }
 
-    /// Every session known now is to be read; their sizes make the
-    /// backfill's progress.
-    fn start_backfill(&self, store: &Store) {
-        let offsets = store.offsets().unwrap_or_default();
-        let mut sessions = HashMap::new();
-        let mut keys = Vec::new();
-        for source in self.sources.current() {
-            for s in source.sessions().sessions.iter() {
-                let size = std::fs::metadata(&*s.file).map_or(0, |m| m.len());
-                let read = offsets
-                    .get(&(
-                        s.key.source.0.as_bytes().to_vec(),
-                        s.key.id.as_bytes().to_vec(),
-                    ))
-                    .copied()
-                    .unwrap_or(0);
-                sessions.insert(s.key.clone(), (size, read));
-                keys.push(s.key.clone());
+    /// Starts the task that checks the unverified sessions, unless it runs.
+    fn verify(&self) {
+        if self.store().is_none() {
+            return;
+        }
+        {
+            let mut state = self.state();
+            if state.verifying || state.unverified.is_empty() {
+                return;
             }
+            state.verifying = true;
+        }
+        let started = self.spawn(true, |engine| {
+            engine.verify_now();
+            engine.mark_all_dirty();
+            engine.compute();
+            engine.pump();
+            engine.verify();
+        });
+        if !started {
+            self.state().verifying = false;
+        }
+    }
+
+    /// Moves the unverified sessions whose log file differs from the one
+    /// their last read to the end saw (or that never reached it) to the
+    /// sessions to read; an unchanged file is not read again. Inactive ones
+    /// join the backfill. Blocking (one query, one `stat` per session).
+    fn verify_now(&self) {
+        let keys: Vec<SessionKey> = std::mem::take(&mut self.state().unverified)
+            .into_iter()
+            .collect();
+        let Some(store) = self.store() else {
+            self.state().verifying = false;
+            return;
+        };
+        let saved = store.saved(&keys).unwrap_or_else(|e| {
+            warn!("saved positions could not be read"; sqlite = e.code());
+            HashMap::new()
+        });
+        let summaries = self.summaries();
+        let now = self.deps.time.now_ms();
+        let mut changed = Vec::new();
+        let mut unchanged: HashMap<SourceId, &SessionSummary> = HashMap::new();
+        for key in &keys {
+            let Some(summary) = summaries.get(key) else {
+                continue;
+            };
+            let stamp = FileStamp::of(&summary.file);
+            let saved = saved.get(key);
+            if stamp.is_some() && saved.and_then(|s| s.stamp) == stamp {
+                let newest = unchanged.entry(key.source.clone()).or_insert(summary);
+                if (summary.last_activity, &summary.key) > (newest.last_activity, &newest.key) {
+                    *newest = summary;
+                }
+                continue;
+            }
+            let size = stamp.map_or(0, |s| s.size);
+            let read = saved.map_or(0, |s| s.offset);
+            changed.push((key.clone(), size, read, is_active(summary, now)));
         }
         let mut state = self.state();
-        let (count, bytes) = (sessions.len(), sessions.values().map(|v| v.0).sum::<u64>());
-        state.backfill = Backfill {
-            sessions,
-            started: Some(Instant::now()),
-            logged: false,
-        };
-        state.dirty.extend(keys);
-        drop(state);
-        info!("backfill started"; sessions = count, bytes = bytes);
+        state.verifying = false;
+        let (mut added, mut bytes) = (0usize, 0u64);
+        for (key, size, read, active) in changed {
+            if !active && !state.backfill.sessions.contains_key(&key) {
+                state.backfill.sessions.insert(key.clone(), (size, read));
+                added += 1;
+                bytes += size.saturating_sub(read);
+            }
+            state.dirty.insert(key);
+        }
+        for (source, summary) in unchanged {
+            if state.probed.insert(source) {
+                state.probe.insert(summary.key.clone());
+                state.dirty.insert(summary.key.clone());
+            }
+        }
+        if added > 0 && state.backfill.started.is_none() {
+            state.backfill.started = Some(Instant::now());
+            drop(state);
+            info!("backfill started"; sessions = added, bytes = bytes);
+        }
     }
 
     fn summaries(&self) -> HashMap<SessionKey, SessionSummary> {
@@ -368,12 +434,13 @@ impl Engine {
                 return;
             }
             state.dirty.retain(|k| summaries.contains_key(k));
+            state.probe.retain(|k| summaries.contains_key(k));
             let newest = |active: bool, state: &State| {
                 state
                     .dirty
                     .iter()
                     .filter_map(|k| summaries.get(k))
-                    .filter(|s| is_active(s, now) == active)
+                    .filter(|s| (is_active(s, now) || state.probe.contains(&s.key)) == active)
                     .max_by_key(|s| (s.last_activity, s.key.clone()))
                     .map(|s| s.key.clone())
             };
@@ -410,10 +477,34 @@ impl Engine {
             ..Ctx::default()
         });
         let outcome = self.read_batch(&key);
+        // The source's adapter changed: its unchanged sessions replay too.
+        let mut replays: Vec<SessionKey> = Vec::new();
+        if let Read::Done {
+            adapter_changed: true,
+            ..
+        } = &outcome
+        {
+            info!("session adapter changed; its sessions are read again");
+            replays = self
+                .summaries()
+                .into_keys()
+                .filter(|k| k.source == key.source && *k != key)
+                .collect();
+        }
         let mut state = self.state();
         state.reading = false;
+        state.probe.remove(&key);
+        if !replays.is_empty() {
+            if state.backfill.started.is_none() {
+                state.backfill.started = Some(Instant::now());
+            }
+            for k in replays {
+                state.backfill.sessions.entry(k.clone()).or_insert((0, 0));
+                state.dirty.insert(k);
+            }
+        }
         match outcome {
-            Read::Done { at_end, to } => {
+            Read::Done { at_end, to, .. } => {
                 if let Some(entry) = state.backfill.sessions.get_mut(&key) {
                     entry.1 = if at_end { entry.0.max(to) } else { to };
                 }
@@ -442,25 +533,25 @@ impl Engine {
         self.pump();
     }
 
+    /// Ends the backfill once none of its sessions waits.
     fn log_backfill(&self, state: &mut State) {
-        if state.backfill.logged || state.backfill.started.is_none() {
+        let Some(started) = state.backfill.started else {
             return;
-        }
+        };
         let pending = state
             .backfill
             .sessions
             .keys()
             .any(|k| state.dirty.contains(k));
         if !pending {
-            state.backfill.logged = true;
             let (done, _) = state.backfill.progress();
-            let took = state.backfill.started.map(|s| s.elapsed());
             info!(
                 "backfill finished";
                 sessions = state.backfill.sessions.len(),
                 bytes = done,
-                took_us = took
+                took_us = started.elapsed()
             );
+            state.backfill = Backfill::default();
         }
     }
 
@@ -483,6 +574,8 @@ impl Engine {
             Ok(c) => c,
             Err(e) => return self.store_failed(&store, &e),
         };
+        // Before the read: a later append makes the stamp differ.
+        let stamp = FileStamp::of(&summary.file);
         let batch = match source.read(key, &cursor, READ_BYTES) {
             Ok(b) => b,
             Err(SessionError::NotFound) => return Read::Gone,
@@ -505,11 +598,17 @@ impl Engine {
             },
             batch: &batch,
             places: &places,
+            stamp,
         };
+        let adapter_changed = batch.reset
+            && cursor
+                .adapter_version()
+                .is_some_and(|v| batch.cursor.adapter_version() != Some(v));
         match store.ingest(&input) {
             Ok(out) => Read::Done {
                 at_end: out.at_end,
                 to: out.to,
+                adapter_changed,
             },
             Err(e) => self.store_failed(&store, &e),
         }
@@ -540,6 +639,8 @@ impl Engine {
         match store.repair(now) {
             Ok(Checked::Recovered(r)) => self.recovered(r.at),
             Ok(_) => {}
+            // A newer version's file: left alone, read only.
+            Err(StoreError::ReadOnly) => {}
             Err(e) => {
                 error!("database repair failed"; sqlite = e.code());
                 store.set_unwritable(e.reason());
@@ -670,6 +771,10 @@ impl Engine {
             state.pace.allowed = true;
         }
         self.pump();
+        // A grant the pump could not use now (another batch was running) is
+        // dropped: it must not start a batch later, after busy moments; the
+        // next quiet stretch grants again.
+        self.state().pace.allowed = false;
     }
 
     fn check(&self) {
@@ -697,11 +802,14 @@ impl Engine {
         {
             let mut state = self.state();
             state.blocked = false;
-            state.dirty.extend(event.changed.iter().cloned());
+            state.unverified.extend(event.changed.iter().cloned());
             for key in event.removed.iter() {
                 state.dirty.remove(key);
+                state.unverified.remove(key);
+                state.probe.remove(key);
             }
         }
+        self.verify();
         self.pump();
     }
 
@@ -847,7 +955,6 @@ impl Engine {
     }
 
     fn compute_one(&self, query: &UsageQuery) -> Option<UsageSnapshot> {
-        let store = self.store()?;
         let now = self.deps.time.now_ms();
         let open = self.state().open.clone();
         if matches!(
@@ -857,6 +964,17 @@ impl Engine {
             self.arm_midnight(now);
         }
         let projects = self.projects.get();
+        // `compute` runs while closed only after opening failed.
+        let Some(store) = self.store() else {
+            return unavailable(
+                query,
+                self.usage_state(),
+                now,
+                self.deps.zone.as_ref(),
+                &open,
+                projects.as_deref(),
+            );
+        };
         let context = Context {
             store: &store,
             projects: projects.as_deref(),
@@ -1012,6 +1130,62 @@ pub(crate) fn compute(
     }
 }
 
+/// The snapshot of a window query while the database could not be opened:
+/// no usage, and the header says why (`Degraded(Unwritable)`). The project
+/// of an open reference has no ID yet (all zero).
+fn unavailable(
+    query: &UsageQuery,
+    state: UsageState,
+    now_ms: i64,
+    zone: &dyn LocalZone,
+    open: &[ProjectKey],
+    projects: Option<&dyn Projects>,
+) -> Option<UsageSnapshot> {
+    let header = SnapshotHeader {
+        generation: 0,
+        state,
+        may_include_inherited: false,
+    };
+    let totals = Totals::default();
+    match query {
+        UsageQuery::Project { project, window } => {
+            let days = window::days(*window, now_ms, zone);
+            let info = match project {
+                ProjectRef::Open(key) => ProjectInfo {
+                    id: UsageProjectId([0; 16]),
+                    name: projects
+                        .and_then(|p| p.snapshot(key))
+                        .map(|s| s.name.to_string())
+                        .unwrap_or_default()
+                        .into(),
+                    folder: matches!(key, ProjectKey::Folder { .. }),
+                    key: open.contains(key).then(|| key.clone()),
+                    status: ProjectStatus::Active,
+                },
+                ProjectRef::Id(pid) => ProjectInfo {
+                    id: *pid,
+                    name: "".into(),
+                    folder: false,
+                    key: None,
+                    status: ProjectStatus::Active,
+                },
+            };
+            let p = snapshot::project(header, info, *window, &days, &totals);
+            Some(UsageSnapshot::Project(p))
+        }
+        UsageQuery::AllProjects { window } => {
+            let days = window::days(*window, now_ms, zone);
+            let owners = Owners::new(&[], &[]);
+            let a = snapshot::all(header, *window, &days, &totals, &owners, open);
+            Some(UsageSnapshot::All(a))
+        }
+        UsageQuery::Worktree { .. }
+        | UsageQuery::Session { .. }
+        | UsageQuery::Mr { .. }
+        | UsageQuery::History { .. } => None,
+    }
+}
+
 /// The project row of a reference; an open project the database does not
 /// know yet is recorded first.
 fn project_row(cx: &Context<'_>, project: &ProjectRef) -> Result<Option<ProjectRow>, StoreError> {
@@ -1057,6 +1231,9 @@ enum Read {
     Done {
         at_end: bool,
         to: u64,
+        /// The batch replays from the start because the cursor came from
+        /// another adapter version.
+        adapter_changed: bool,
     },
     /// The session or its source no longer exists.
     Gone,

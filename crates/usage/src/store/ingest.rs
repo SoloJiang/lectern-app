@@ -47,6 +47,53 @@ pub(crate) struct Ingest<'a> {
     pub(crate) batch: &'a Batch,
     /// The place of every cwd of the batch's `Context` records.
     pub(crate) places: &'a HashMap<PathBuf, Place>,
+    /// The log file as it was just before the read; kept when the batch
+    /// reaches the end, so the next run skips an unchanged file.
+    pub(crate) stamp: Option<FileStamp>,
+}
+
+/// A log file's size, modification time and inode: equal stamps mean the
+/// file has not changed since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    pub(crate) size: u64,
+    pub(crate) mtime_ns: i64,
+    pub(crate) inode: u64,
+}
+
+impl FileStamp {
+    /// The stamp of `path` now; None when it cannot be read.
+    pub(crate) fn of(path: &Path) -> Option<FileStamp> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).ok()?;
+        let mtime_ns = m
+            .mtime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(m.mtime_nsec());
+        Some(FileStamp {
+            size: m.len(),
+            mtime_ns,
+            inode: m.ino(),
+        })
+    }
+
+    pub(crate) fn to_bytes(self) -> [u8; 24] {
+        let mut out = [0u8; 24];
+        out[..8].copy_from_slice(&self.size.to_le_bytes());
+        out[8..16].copy_from_slice(&self.mtime_ns.to_le_bytes());
+        out[16..].copy_from_slice(&self.inode.to_le_bytes());
+        out
+    }
+
+    pub(crate) fn from_bytes(bytes: &[u8]) -> Option<FileStamp> {
+        let bytes: &[u8; 24] = bytes.try_into().ok()?;
+        let word = |i: usize| -> [u8; 8] { bytes[i..i + 8].try_into().unwrap_or([0; 8]) };
+        Some(FileStamp {
+            size: u64::from_le_bytes(word(0)),
+            mtime_ns: i64::from_le_bytes(word(8)),
+            inode: u64::from_le_bytes(word(16)),
+        })
+    }
 }
 
 /// What a batch did, for logs and the reading cadence.
@@ -349,8 +396,15 @@ fn ingest(
             None,
         ));
     }
+    // The stamp only stands for a read that reached the end; any other
+    // batch clears it, so the next run reads the session again.
+    let stamp = input
+        .stamp
+        .filter(|_| batch.at_end)
+        .map(|s| s.to_bytes().to_vec());
     tx.prepare_cached(
-        "UPDATE session SET cursor = ?2, gen = ?3, replay = ?4, reached_end = reached_end OR ?5
+        "UPDATE session SET cursor = ?2, gen = ?3, replay = ?4, reached_end = reached_end OR ?5,
+           end_stamp = ?6
          WHERE id = ?1",
     )?
     .execute(params![
@@ -358,7 +412,8 @@ fn ingest(
         batch.cursor.to_bytes(),
         row.generation,
         row.replay,
-        batch.at_end
+        batch.at_end,
+        stamp
     ])?;
 
     out.keys = keys.len();

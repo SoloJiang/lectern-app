@@ -7,11 +7,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use lectern_services::project::ProjectKey;
-use lectern_services::session::Cursor;
+use lectern_services::session::{Cursor, SessionKey};
 use lectern_services::usage::UsageProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::ingest::{Place, location, path_bytes};
+use super::ingest::{FileStamp, Place, location, path_bytes};
 use super::schema::{LOCATION_DIR, LOCATION_GIT, PROJECT_FOLDER};
 use super::{Store, StoreError};
 
@@ -62,8 +62,14 @@ pub(crate) struct Sum {
     pub(crate) micro: [u64; 4],
 }
 
-/// Saved cursor offsets by (source ID, session ID) bytes.
-pub(crate) type Offsets = HashMap<(Vec<u8>, Vec<u8>), u64>;
+/// A session's saved reading position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Saved {
+    pub(crate) offset: u64,
+    /// The log file when the last batch reached its end; None after any
+    /// other batch.
+    pub(crate) stamp: Option<FileStamp>,
+}
 
 /// Sums and the strings their IDs stand for.
 #[derive(Default, Debug)]
@@ -117,19 +123,52 @@ impl Store {
         })
     }
 
-    /// The saved cursor offset of every session, by (source ID, session ID).
-    pub(crate) fn offsets(&self) -> Result<Offsets, StoreError> {
+    /// The saved positions of these sessions (those the database knows).
+    /// Many keys read the whole table once, a few look each one up.
+    pub(crate) fn saved(
+        &self,
+        keys: &[SessionKey],
+    ) -> Result<HashMap<SessionKey, Saved>, StoreError> {
+        fn saved_of(cursor: &[u8], stamp: Option<&[u8]>) -> Saved {
+            Saved {
+                offset: Cursor::from_bytes(cursor).map_or(0, |c| c.offset()),
+                stamp: stamp.and_then(FileStamp::from_bytes),
+            }
+        }
+        const SELECT: &str = "SELECT a.text, b.text, s.cursor, s.end_stamp FROM session s
+             JOIN intern a ON a.id = s.source JOIN intern b ON b.id = s.sid";
         self.read(|conn| {
-            let mut stmt = conn.prepare_cached(
-                "SELECT a.text, b.text, s.cursor FROM session s
-                 JOIN intern a ON a.id = s.source JOIN intern b ON b.id = s.sid",
-            )?;
-            let rows = stmt.query_map([], |r| {
-                let cursor: Vec<u8> = r.get(2)?;
-                let offset = Cursor::from_bytes(&cursor).map_or(0, |c| c.offset());
-                Ok(((r.get(0)?, r.get(1)?), offset))
-            })?;
-            rows.collect()
+            let mut out = HashMap::with_capacity(keys.len());
+            if keys.len() <= 64 {
+                let mut stmt =
+                    conn.prepare_cached(&format!("{SELECT} WHERE a.text = ?1 AND b.text = ?2"))?;
+                for key in keys {
+                    let row: Option<(Vec<u8>, Option<Vec<u8>>)> = stmt
+                        .query_row(params![key.source.0.as_bytes(), key.id.as_bytes()], |r| {
+                            Ok((r.get(2)?, r.get(3)?))
+                        })
+                        .optional()?;
+                    if let Some((cursor, stamp)) = row {
+                        out.insert(key.clone(), saved_of(&cursor, stamp.as_deref()));
+                    }
+                }
+                return Ok(out);
+            }
+            let wanted: HashMap<(&[u8], &[u8]), &SessionKey> = keys
+                .iter()
+                .map(|k| ((k.source.0.as_bytes(), k.id.as_bytes()), k))
+                .collect();
+            let mut stmt = conn.prepare_cached(SELECT)?;
+            let mut rows = stmt.query([])?;
+            while let Some(r) = rows.next()? {
+                let (source, sid): (Vec<u8>, Vec<u8>) = (r.get(0)?, r.get(1)?);
+                if let Some(key) = wanted.get(&(source.as_slice(), sid.as_slice())) {
+                    let cursor: Vec<u8> = r.get(2)?;
+                    let stamp: Option<Vec<u8>> = r.get(3)?;
+                    out.insert((*key).clone(), saved_of(&cursor, stamp.as_deref()));
+                }
+            }
+            Ok(out)
         })
     }
 

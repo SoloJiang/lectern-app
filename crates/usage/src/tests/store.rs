@@ -10,7 +10,7 @@ use rusqlite::Connection;
 
 use super::support::*;
 use crate::store::schema::{CREATE_V1, CURRENT, Migration, Schema};
-use crate::store::{BACKUP_PREFIX, Checked, Mode, StoreError};
+use crate::store::{BACKUP_PREFIX, Checked, Mode, SALVAGE_FILE, Step, StoreError, fail_at};
 use crate::testing::FakeSessions;
 
 /// A source with one session of `n` usage records.
@@ -211,6 +211,9 @@ fn store_newer_version_is_read_only() {
     let refused = h.try_read_once(&more, "t", 1 << 20);
     assert!(matches!(refused, Err(StoreError::ReadOnly)));
     assert_eq!(h.total(), before);
+    // Not even a repair rewrites it.
+    let repaired = h.store().repair(h.now);
+    assert!(matches!(repaired, Err(StoreError::ReadOnly)));
     let version = pragma(&raw(&h.db_path()), "user_version");
     assert_eq!(version, 99, "left as it was");
 }
@@ -313,6 +316,149 @@ fn store_salvage_keeps_every_readable_row() {
     h.read_every(&fake);
     assert_eq!(h.total(), before);
     assert_eq!(count(&raw(&h.db_path()), "usage_source"), 900);
+}
+
+/// Garbage over the first leaf of the sources table (the database is
+/// closed).
+fn damage_sources(path: &Path) {
+    let (size, root) = root_page(path, "usage_source");
+    let leaf = first_child(path, size, root);
+    garbage(path, size, leaf);
+}
+
+fn garbage(path: &Path, size: usize, page: usize) {
+    let mut bytes = std::fs::read(path).unwrap();
+    for b in &mut bytes[(page - 1) * size..page * size] {
+        *b = 0xFF;
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn quick_ok(path: &Path) -> bool {
+    let quick: String = raw(path)
+        .query_row("PRAGMA quick_check", [], |r| r.get(0))
+        .unwrap_or_default();
+    quick == "ok"
+}
+
+#[test]
+fn store_interrupted_salvage_runs_again() {
+    let steps = [
+        Step::Created,
+        Step::Copied,
+        Step::Rebuilt,
+        Step::Synced,
+        Step::Kept,
+        Step::Unjournaled,
+    ];
+    for step in steps {
+        let mut h = Harness::new();
+        let fake = FakeSessions::new("session-claude-code", Agent::ClaudeCode);
+        for id in ["a", "b"] {
+            add(&fake, id, 300);
+        }
+        h.read_every(&fake);
+        let before = h.total();
+        h.close(false);
+        damage_sources(&h.db_path());
+        h.reopen(false);
+        // The process ends in the middle of the salvage.
+        fail_at(step);
+        assert!(h.store().check(h.now).is_err(), "{step:?}");
+        h.close(false);
+        // `usage.db` is still the damaged original, the copy is left over.
+        assert!(!quick_ok(&h.db_path()), "{step:?}: replaced too early");
+        assert!(h.dir.path().join(SALVAGE_FILE).exists(), "{step:?}");
+        // The next open salvages again, from the start.
+        let reopened = h.reopen(false);
+        let r = reopened.recovered.expect("salvaged at open");
+        assert!(r.lost > 0, "{step:?}");
+        assert!(!h.dir.path().join(SALVAGE_FILE).exists(), "{step:?}");
+        assert!(quick_ok(&h.db_path()), "{step:?}");
+        h.read_every(&fake);
+        assert_eq!(h.total(), before, "{step:?}");
+        assert_eq!(count(&raw(&h.db_path()), "usage_source"), 600);
+    }
+}
+
+/// A session per ID, each in its own directory, with one usage record whose
+/// message ID contains the session ID.
+fn many(fake: &FakeSessions, ids: std::ops::Range<usize>) {
+    for i in ids {
+        let id = long_id(i);
+        let cwd = format!("/work/{id}");
+        fake.add(&id, Path::new(&cwd), OCT_20, None);
+        let at = OCT_20 + 10 * HOUR;
+        let message = format!("{id}-m");
+        let records = vec![
+            context(0, at, &cwd),
+            claude(100, at, None, &message, [1, 0, 0, 0]),
+        ];
+        fake.push(&id, records);
+    }
+}
+
+fn long_id(i: usize) -> String {
+    format!("session-with-a-long-name-{i:04}")
+}
+
+/// Usage rows not under the session, directory and model they were
+/// written for: every key and every directory contains its session's ID.
+fn misattributed(path: &Path) -> i64 {
+    raw(path)
+        .query_row(
+            "SELECT count(*) FROM usage_source u
+               LEFT JOIN session s ON s.id = u.session
+               LEFT JOIN intern i ON i.id = s.sid
+               LEFT JOIN location l ON l.id = u.location
+               LEFT JOIN intern m ON m.id = u.model
+             WHERE i.text IS NULL OR l.path IS NULL OR m.text IS NULL
+                OR instr(u.key, i.text) = 0 OR instr(l.path, i.text) = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// The last child of an interior table page.
+fn last_child(path: &Path, page_size: usize, page: usize) -> usize {
+    let bytes = std::fs::read(path).unwrap();
+    let base = (page - 1) * page_size;
+    assert_eq!(bytes[base], 0x05, "an interior table page");
+    let child: [u8; 4] = bytes[base + 8..base + 12].try_into().unwrap();
+    u32::from_be_bytes(child) as usize
+}
+
+#[test]
+fn store_salvage_drops_rows_that_point_at_lost_rows() {
+    for table in ["intern", "session", "location"] {
+        let mut h = Harness::new();
+        let fake = FakeSessions::new("session-claude-code", Agent::ClaudeCode);
+        many(&fake, 0..300);
+        h.read_every(&fake);
+        let before = h.total();
+        h.close(false);
+        // The rows with the largest IDs are lost: new rows will take them.
+        let (size, root) = root_page(&h.db_path(), table);
+        let leaf = last_child(&h.db_path(), size, root);
+        garbage(&h.db_path(), size, leaf);
+        h.reopen(false);
+        let Checked::Recovered(r) = h.store().check(h.now).unwrap() else {
+            panic!("{table}: not salvaged");
+        };
+        assert!(r.lost > 0 && r.dangling > 0, "{table}: {r:?}");
+        assert_eq!(misattributed(&h.db_path()), 0, "{table}: after the salvage");
+        // New sessions first, so they take the lost IDs; then the old ones
+        // read their logs again.
+        many(&fake, 300..400);
+        for i in 300..400 {
+            h.read_all(&fake, &long_id(i));
+        }
+        h.read_every(&fake);
+        assert_eq!(misattributed(&h.db_path()), 0, "{table}: after reading");
+        assert_eq!(h.total().input, before.input + 100, "{table}");
+        assert_eq!(count(&raw(&h.db_path()), "usage_source"), 400, "{table}");
+    }
 }
 
 #[test]

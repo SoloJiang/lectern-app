@@ -95,6 +95,7 @@ CREATE TABLE session (
   cursor              BLOB NOT NULL,
   inheritance_unknown INTEGER NOT NULL DEFAULT 0,
   reached_end         INTEGER NOT NULL DEFAULT 0,
+  end_stamp           BLOB,
   UNIQUE (source, sid)
 );
 

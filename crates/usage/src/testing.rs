@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -57,12 +57,14 @@ impl LocalZone for TableZone {
     }
 }
 
-/// A monotonic clock and a wall clock that only move when told to, in step.
+/// A monotonic clock and a wall clock that only move when told to, in step
+/// unless [`ManualTime::jump_wall`] moves the wall clock alone.
 #[derive(Clone)]
 pub struct ManualTime {
     clock: ManualClock,
     start: Instant,
     wall_start: i64,
+    jumped: Arc<AtomicI64>,
 }
 
 impl ManualTime {
@@ -74,6 +76,7 @@ impl ManualTime {
             clock,
             start,
             wall_start: wall_ms,
+            jumped: Arc::new(AtomicI64::new(0)),
         }
     }
 
@@ -82,9 +85,18 @@ impl ManualTime {
         self.clock.advance(by);
     }
 
+    /// Moves the wall clock only, as a sleep of the Mac does (the monotonic
+    /// clock stops) or setting the clock; no timer is woken.
+    pub fn jump_wall(&self, by_ms: i64) {
+        self.jumped.fetch_add(by_ms, Ordering::Relaxed);
+    }
+
     pub fn now_ms(&self) -> i64 {
         let since = self.clock.now() - self.start;
-        self.wall_start + i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        let ran = i64::try_from(since.as_millis()).unwrap_or(i64::MAX);
+        self.wall_start
+            .saturating_add(ran)
+            .saturating_add(self.jumped.load(Ordering::Relaxed))
     }
 
     /// Timers not yet due.
@@ -163,15 +175,18 @@ struct Inner {
 pub struct FakeSessions {
     source: SourceId,
     agent: Agent,
+    /// Where the stand-in log files go, if anywhere.
+    files: Option<PathBuf>,
     inner: Mutex<Inner>,
 }
 
 impl FakeSessions {
-    /// An empty source.
+    /// An empty source; its sessions' files do not exist.
     pub fn new(source: &str, agent: Agent) -> FakeSessions {
         FakeSessions {
             source: SourceId(source.into()),
             agent,
+            files: None,
             inner: Mutex::new(Inner {
                 adapter: 1,
                 generation: 1,
@@ -179,6 +194,34 @@ impl FakeSessions {
                 reads: HashMap::new(),
             }),
         }
+    }
+
+    /// An empty source whose sessions have files in `dir`: sparse files as
+    /// long as the records say, rewritten with a new modification time on
+    /// every change, so a reader can tell a changed log from an unchanged one.
+    pub fn with_files(source: &str, agent: Agent, dir: &Path) -> FakeSessions {
+        FakeSessions {
+            files: Some(dir.to_owned()),
+            ..FakeSessions::new(source, agent)
+        }
+    }
+
+    /// Changes the adapter version: a read from a cursor of another version
+    /// gives `reset` and starts from the beginning, as `agents` does.
+    pub fn set_adapter(&self, version: u32) {
+        let mut inner = lock(&self.inner);
+        inner.adapter = version;
+        inner.generation += 1;
+    }
+
+    fn write_file(&self, s: &FakeSession, generation: u64) {
+        if self.files.is_none() {
+            return;
+        }
+        let file = std::fs::File::create(&*s.summary.file).expect("fake session file");
+        file.set_len(s.len()).expect("fake session file length");
+        let mtime = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000 + generation);
+        file.set_modified(mtime).expect("fake session file time");
     }
 
     /// A source from a JSON script (see [`Script`]). Panics on a bad script:
@@ -219,7 +262,10 @@ impl FakeSessions {
             key,
             agent: self.agent.clone(),
             parent,
-            file: Arc::from(Path::new(&format!("/fake/{id}.jsonl"))),
+            file: match &self.files {
+                Some(dir) => Arc::from(dir.join(format!("{id}.jsonl"))),
+                None => Arc::from(Path::new(&format!("/fake/{id}.jsonl"))),
+            },
             cwd: Arc::from(cwd),
             place: Place::Pending,
             started_at: Timestamp(started_at),
@@ -233,13 +279,15 @@ impl FakeSessions {
             inheritance_unknown: false,
             format: Format::Known,
         };
-        let mut inner = lock(&self.inner);
-        inner.generation += 1;
-        inner.sessions.push(FakeSession {
+        let session = FakeSession {
             summary,
             records: Vec::new(),
             reset: false,
-        });
+        };
+        let mut inner = lock(&self.inner);
+        inner.generation += 1;
+        self.write_file(&session, inner.generation);
+        inner.sessions.push(session);
     }
 
     /// Changes a session's summary.
@@ -255,6 +303,7 @@ impl FakeSessions {
     pub fn push(&self, id: &str, records: Vec<Positioned<Record>>) {
         let mut inner = lock(&self.inner);
         inner.generation += 1;
+        let generation = inner.generation;
         let s = inner
             .sessions
             .iter_mut()
@@ -264,6 +313,7 @@ impl FakeSessions {
             s.summary.last_activity = Timestamp(s.summary.last_activity.0.max(at));
         }
         s.records.extend(records);
+        self.write_file(s, generation);
     }
 
     /// Replaces a session's records; the next read gives `reset` (the
@@ -271,9 +321,11 @@ impl FakeSessions {
     pub fn replace(&self, id: &str, records: Vec<Positioned<Record>>) {
         let mut inner = lock(&self.inner);
         inner.generation += 1;
+        let generation = inner.generation;
         if let Some(s) = inner.sessions.iter_mut().find(|s| &*s.summary.key.id == id) {
             s.records = records;
             s.reset = true;
+            self.write_file(s, generation);
         }
     }
 
@@ -350,7 +402,8 @@ impl SessionSource for FakeSessions {
             .iter_mut()
             .find(|s| s.summary.key == *key)
             .ok_or(SessionError::NotFound)?;
-        let reset = std::mem::take(&mut s.reset) && !from.is_start();
+        let upgraded = from.adapter_version().is_some_and(|v| v != adapter);
+        let reset = (std::mem::take(&mut s.reset) || upgraded) && !from.is_start();
         let offset = if reset { 0 } else { from.offset() };
         let mut records = Vec::new();
         let mut next = s.len();

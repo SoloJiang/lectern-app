@@ -4,15 +4,23 @@
 //!
 //! A timer is a callback handed to `Clock::wake_at` as a waker: it runs on
 //! the clock's timer thread (`SystemClock` starts one on demand and lets it
-//! exit when idle) without an executor task. A task would take the
-//! activation's admission when polled and so end the quiescence the pacing
-//! timer is waiting out.
+//! exit when idle), so this crate starts no thread of its own, and tests
+//! drive the same code with `ManualClock`. The callback only changes state
+//! or spawns a task.
+//!
+//! The monotonic clock stops while the Mac sleeps and the wall clock can be
+//! set: a wall-clock deadline waits at most [`WALL_CHECK`] at a time and
+//! checks the wall clock when it wakes, so it fires at most that late.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Wake, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lectern_kernel::{Clock, SystemClock};
+
+/// The longest a wall-clock deadline waits before it checks the wall clock
+/// again.
+pub(crate) const WALL_CHECK: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone)]
 pub(crate) struct Time {
@@ -44,11 +52,24 @@ impl Time {
         self.at(at, f);
     }
 
-    /// Runs `f` once the wall clock reaches `at_ms` (measured on the
-    /// monotonic clock from now).
+    /// Runs `f` once the wall clock reaches `at_ms`: waits on the monotonic
+    /// clock for the time left, at most [`WALL_CHECK`], then looks at the
+    /// wall clock again.
     pub(crate) fn at_wall(&self, at_ms: i64, f: impl FnOnce() + Send + 'static) {
-        let wait = u64::try_from(at_ms.saturating_sub(self.now_ms())).unwrap_or(0);
-        self.after(Duration::from_millis(wait), f);
+        self.at_wall_boxed(at_ms, Box::new(f));
+    }
+
+    fn at_wall_boxed(&self, at_ms: i64, f: Box<dyn FnOnce() + Send>) {
+        let left = u64::try_from(at_ms.saturating_sub(self.now_ms())).unwrap_or(0);
+        let wait = Duration::from_millis(left).min(WALL_CHECK);
+        let time = self.clone();
+        self.after(wait, move || {
+            if time.now_ms() >= at_ms {
+                f();
+            } else {
+                time.at_wall_boxed(at_ms, f);
+            }
+        });
     }
 
     fn at(&self, at: Instant, f: impl FnOnce() + Send + 'static) {

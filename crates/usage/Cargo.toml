@@ -22,8 +22,8 @@ test-support = [
 ]
 
 [dependencies]
-# Background tasks (reading, snapshots, the database); timers are futures on
-# the kernel's `Clock`.
+# Background tasks (reading, snapshots, the database). Timers are not tasks:
+# they are waker callbacks on the kernel's `Clock` (see src/time.rs).
 lectern-executor = { path = "../executor" }
 # Plugin, PluginHandle, BusyGuard, Quiescent / Busy, Clock.
 lectern-kernel = { path = "../kernel" }

@@ -18,6 +18,7 @@ use lectern_services::usage::{
 use super::support::*;
 use crate::engine::{Engine, PACE};
 use crate::testing::{FakeProjects, FakeSessions, ManualTime, TableZone};
+use crate::time::WALL_CHECK;
 use crate::{UsageDeps, plugin};
 
 /// The rig's now: 2026-10-22T12:00Z.
@@ -36,12 +37,39 @@ pub(crate) struct Rig {
 impl Rig {
     /// `setup` declares projects before the plugin starts.
     pub(crate) fn new(sessions: FakeSessions, setup: impl FnOnce(&FakeProjects)) -> Rig {
-        let executor = Executor::manual();
-        let time = ManualTime::new(NOW);
-        let dir = tempfile::tempdir().unwrap();
         let projects = Arc::new(FakeProjects::new());
         setup(&projects);
-        let sessions = Arc::new(sessions);
+        Rig::build(
+            Arc::new(sessions),
+            projects,
+            tempfile::tempdir().unwrap(),
+            ManualTime::new(NOW),
+        )
+    }
+
+    /// Stops the plugin, runs `between` (changes while Lectern is not
+    /// running), and starts it again on the same data directory, sessions
+    /// and clocks.
+    pub(crate) fn restart(self, between: impl FnOnce(&FakeSessions)) -> Rig {
+        self.kernel.deactivate();
+        between(&self.sessions);
+        let Rig {
+            dir,
+            sessions,
+            projects,
+            time,
+            ..
+        } = self;
+        Rig::build(sessions, projects, dir, time)
+    }
+
+    fn build(
+        sessions: Arc<FakeSessions>,
+        projects: Arc<FakeProjects>,
+        dir: tempfile::TempDir,
+        time: ManualTime,
+    ) -> Rig {
+        let executor = Executor::manual();
         let (_, usage) = plugin(UsageDeps {
             executor: executor.clone(),
             data_dir: dir.path().join("usage"),
@@ -346,6 +374,140 @@ fn plugin_write_failure_degrades_until_the_next_change() {
     let all = rig.all();
     assert_eq!(all.total.input, 301);
     assert_eq!(all.header.state, UsageState::Ready);
+}
+
+/// Two inactive sessions with files in `logs`, read to their ends.
+fn read_rig(logs: &Path) -> Rig {
+    let fake = FakeSessions::with_files("session-claude-code", Agent::ClaudeCode, logs);
+    session(&fake, "old", 2 * DAY, 4);
+    session(&fake, "older", 3 * DAY, 4);
+    let rig = Rig::new(fake, |_| {});
+    rig.settle();
+    for _ in 0..20 {
+        rig.advance(PACE);
+    }
+    assert_eq!(rig.engine.dirty_sessions(), 0);
+    assert_eq!(rig.all().header.state, UsageState::Ready);
+    rig
+}
+
+#[test]
+fn plugin_restart_reads_only_changed_logs() {
+    let logs = tempfile::tempdir().unwrap();
+    let rig = read_rig(logs.path());
+    let total = rig.all().total;
+    let reads = rig.sessions.total_reads();
+    let old = rig.sessions.reads("old");
+
+    // Nothing changed while stopped: Ready at once, no backfill. Only the
+    // newest session is read once, unpaced (its source's adapter version).
+    let rig = rig.restart(|_| {});
+    let all = rig.all();
+    assert_eq!(all.header.state, UsageState::Ready);
+    assert_eq!(all.total, total);
+    assert_eq!(rig.engine.dirty_sessions(), 0);
+    assert_eq!(rig.sessions.total_reads(), reads + 1);
+    assert_eq!(rig.sessions.reads("old"), old + 1, "the newest, once");
+    // The first discovery announces every session: unchanged files are not
+    // read, not even after quiet stretches.
+    rig.emit_changed(&["old", "older"]);
+    rig.advance(PACE * 3);
+    assert_eq!(rig.sessions.total_reads(), reads + 1);
+
+    // A log that grew while Lectern was not running is backfilled.
+    let rig = rig.restart(|fake| {
+        let at = NOW - 3 * DAY;
+        fake.push("older", vec![tokens_at(13 << 20, at, "older-new", 5)]);
+    });
+    let all = rig.all();
+    assert!(
+        matches!(all.header.state, UsageState::Backfilling { .. }),
+        "{:?}",
+        all.header.state
+    );
+    rig.advance(PACE);
+    let all = rig.all();
+    assert_eq!(all.header.state, UsageState::Ready);
+    assert_eq!(all.total.input, total.input + 5);
+}
+
+#[test]
+fn plugin_adapter_upgrade_replays_unchanged_logs() {
+    let logs = tempfile::tempdir().unwrap();
+    let rig = read_rig(logs.path());
+    let total = rig.all().total;
+    let older = rig.sessions.reads("older");
+    let rig = rig.restart(|fake| fake.set_adapter(2));
+    // The probe of the newest session replays it from the start; the other
+    // session of that source follows, paced.
+    let all = rig.all();
+    assert!(
+        matches!(all.header.state, UsageState::Backfilling { .. }),
+        "{:?}",
+        all.header.state
+    );
+    for _ in 0..20 {
+        rig.advance(PACE);
+    }
+    assert!(rig.sessions.reads("older") > older);
+    let all = rig.all();
+    assert_eq!(all.header.state, UsageState::Ready);
+    assert_eq!(all.total, total, "replayed, not counted twice");
+}
+
+#[test]
+fn plugin_midnight_is_seen_after_a_sleep() {
+    let fake = sources();
+    let start = NOW - 6 * DAY;
+    fake.add("s", Path::new("/work/app"), start, None);
+    // 2026-10-16T23:00Z: inside the window until 2026-10-23.
+    let inside = tokens_at(100, start + 11 * HOUR, "inside", 5);
+    fake.push("s", vec![context(0, start, "/work/app"), inside]);
+    fake.edit("s", |s| s.last_activity = Timestamp(NOW - 60_000));
+    let rig = Rig::new(fake, |_| {});
+    let query = UsageQuery::AllProjects { window: Window::D7 };
+    let _interest = rig.usage().watch(query.clone());
+    rig.settle();
+    let total = |rig: &Rig| match rig.usage().snapshot(&query).as_deref() {
+        Some(UsageSnapshot::All(a)) => a.total.input,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(total(&rig), 5);
+    // The Mac sleeps past midnight: the wall clock moves, the monotonic
+    // clock does not.
+    rig.time.jump_wall(12 * HOUR + 60_000);
+    rig.settle();
+    assert_eq!(total(&rig), 5, "no timer woke yet");
+    // The next wall-clock check notices the day changed.
+    rig.advance(WALL_CHECK);
+    assert_eq!(total(&rig), 0);
+}
+
+#[test]
+fn plugin_unopenable_database_degrades_the_snapshots() {
+    let fake = sources();
+    session(&fake, "live", 60_000, 1);
+    let rig = Rig::new(fake, open_app);
+    // The data directory cannot be created: a file is in its place.
+    std::fs::write(rig.dir.path().join("usage"), b"not a directory").unwrap();
+    let unwritable =
+        |s: &UsageState| matches!(s, UsageState::Degraded(UsageDegraded::Unwritable(_)));
+    let all = rig.all();
+    assert!(unwritable(&all.header.state), "{:?}", all.header.state);
+    assert_eq!(all.total.total(), 0);
+    let query = UsageQuery::Project {
+        project: ProjectRef::Open(app_key()),
+        window: Window::D7,
+    };
+    let _interest = rig.usage().watch(query.clone());
+    rig.settle();
+    match rig.usage().snapshot(&query).as_deref() {
+        Some(UsageSnapshot::Project(p)) => {
+            assert!(unwritable(&p.header.state), "{:?}", p.header.state);
+            assert_eq!(&*p.project.name, "app");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

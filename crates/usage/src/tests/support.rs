@@ -18,7 +18,7 @@ use lectern_services::usage::{
 };
 
 use crate::engine::{Context, READ_BYTES, compute, place_of_key};
-use crate::store::{Ingest, Ingested, Place, SessionInfo, Store};
+use crate::store::{FileStamp, Ingest, Ingested, Place, SessionInfo, Store};
 use crate::testing::{FakeProjects, FakeSessions, TableZone};
 use crate::window;
 
@@ -233,6 +233,7 @@ impl Harness {
             .cloned()
             .expect("session");
         let cursor = self.store().cursor(&key).unwrap();
+        let stamp = FileStamp::of(&summary.file);
         let batch =
             lectern_services::session::SessionSource::read(fake, &key, &cursor, max).unwrap();
         let start = self.place(&summary, &summary.cwd);
@@ -252,6 +253,7 @@ impl Harness {
             },
             batch: &batch,
             places: &places,
+            stamp,
         })
     }
 

@@ -21,9 +21,11 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, TransactionB
 
 #[cfg(test)]
 pub(crate) use ingest::Ingested;
-pub(crate) use ingest::{Ingest, Place, SessionInfo, agent_of, path_bytes};
+pub(crate) use ingest::{FileStamp, Ingest, Place, SessionInfo, agent_of, path_bytes};
 pub(crate) use query::{FolderRoot, ProjectRow, Totals, under};
 pub(crate) use recover::Recovery;
+#[cfg(test)]
+pub(crate) use recover::{SALVAGE_FILE, Step, fail_at};
 
 use schema::{APPLICATION_ID, CURRENT, DERIVED_VERSION, Schema};
 
@@ -195,15 +197,23 @@ impl Store {
     ) -> Result<Opened, OpenFailure> {
         fs::create_dir_all(dir).map_err(OpenFailure::Dir)?;
         let file = dir.join(DB_FILE);
-        let (files, recovered) = match open_files(dir, &file, schema) {
-            Ok(files) => (files, None),
-            Err(e) if is_corrupt(&e) => {
-                error!("database corrupt at open"; path = Value::path(&file), sqlite = code_of(&e));
-                let (files, recovery) =
-                    recover::salvage(dir, schema, now_ms).map_err(OpenFailure::Sqlite)?;
-                (files, Some(recovery))
+        // A salvage was cut short: `usage.db` is still the corrupt original.
+        let interrupted = recover::discard_leftover(dir).map_err(OpenFailure::Dir)?;
+        let salvage = || recover::salvage(dir, schema, now_ms).map_err(OpenFailure::Sqlite);
+        let (files, recovered) = if interrupted && file.exists() {
+            warn!("salvage was interrupted; salvaging again"; path = Value::path(&file));
+            let (files, recovery) = salvage()?;
+            (files, Some(recovery))
+        } else {
+            match open_files(dir, &file, schema) {
+                Ok(files) => (files, None),
+                Err(e) if is_corrupt(&e) => {
+                    error!("database corrupt at open"; path = Value::path(&file), sqlite = code_of(&e));
+                    let (files, recovery) = salvage()?;
+                    (files, Some(recovery))
+                }
+                Err(e) => return Err(OpenFailure::Sqlite(e)),
             }
-            Err(e) => return Err(OpenFailure::Sqlite(e)),
         };
         info!(
             "database opened";
@@ -333,6 +343,10 @@ impl Store {
     /// and when an operation reports corruption.
     pub(crate) fn repair(&self, now_ms: i64) -> Result<Checked, StoreError> {
         self.io.fetch_add(1, Ordering::Relaxed);
+        // A newer version's file is never rewritten, not even to salvage it.
+        if self.mode() == Mode::Newer {
+            return Err(StoreError::ReadOnly);
+        }
         let mut writer = lock(&self.writer);
         let mut reader = lock(&self.reader);
         if let Some(conn) = writer.as_ref()
