@@ -152,14 +152,18 @@ impl Index {
         &self.pending
     }
 
+    /// Keeps `record` as the latest of its file. A `seen` or `unseen` of a
+    /// rename also retires the record under its old path: that change is now
+    /// this rename, so a later file at the old path is not the same change,
+    /// and an `unseen` of the rename is not undone by the old path's `seen`.
+    /// Replaying the file gives the same index, so compaction needs no
+    /// tombstone.
     fn apply(&mut self, record: Record) {
         let seq = self.next;
         self.next += 1;
-        let (target, identity) = match &record {
-            Record::Seen { key, .. } => {
-                (&key.target, key.new_path.as_ref().or(key.old_path.as_ref()))
-            }
-            Record::Unseen { target, file, .. } => (target, crate::seen::identity(file)),
+        let (target, old, new) = match &record {
+            Record::Seen { key, .. } => (&key.target, &key.old_path, &key.new_path),
+            Record::Unseen { target, file, .. } => (target, &file.old, &file.new),
             Record::Base(b) => {
                 self.bases
                     .entry(b.session.clone())
@@ -168,13 +172,18 @@ impl Index {
             }
         };
         // The decoder and `SeenKey` never give a record without a path.
-        let Some(identity) = identity.cloned() else {
+        let Some(identity) = new.as_ref().or(old.as_ref()).cloned() else {
             return;
         };
-        self.marks
-            .entry(target.clone())
-            .or_default()
-            .insert(identity, Entry { seq, record });
+        let retired = match (old, new) {
+            (Some(old), Some(new)) if old != new => Some(old.clone()),
+            _ => None,
+        };
+        let files = self.marks.entry(target.clone()).or_default();
+        if let Some(old) = retired {
+            files.remove(&old);
+        }
+        files.insert(identity, Entry { seq, record });
     }
 
     fn keep_unknown(&mut self, line: &[u8]) {
@@ -251,6 +260,8 @@ pub(crate) enum Op {
     /// Halfway through writing compaction's temporary file.
     CompactWrite,
     CompactRename,
+    /// The directory sync after compaction's rename.
+    CompactSyncDir,
 }
 
 type Faults = Arc<dyn Fn(Op) -> io::Result<()> + Send + Sync>;
@@ -315,6 +326,12 @@ pub(crate) struct LogFile {
     /// The index the caller holds came from a complete read of this file
     /// plus this process's appends since.
     complete: bool,
+    /// The length the last compaction by this process left; 0 before one.
+    /// The next compaction waits until the file is twice that.
+    compacted_len: u64,
+    /// A compaction's rename whose directory sync failed: the next append
+    /// syncs the directory again.
+    dir_unsynced: bool,
 }
 
 /// `SHA-256("repo\0" + common_dir)`, first 16 bytes in hex, plus `.jsonl`:
@@ -346,6 +363,8 @@ impl LogFile {
             faults: None,
             known: Known::Unknown,
             complete: false,
+            compacted_len: 0,
+            dir_unsynced: false,
         }
     }
 
@@ -573,7 +592,9 @@ impl LogFile {
         }
         (&file).write_all(&out)?;
         file.sync_data()?;
-        if created {
+        if self.dir_unsynced {
+            self.dir_unsynced = sync_dir(&self.dir).is_err();
+        } else if created {
             // Best effort: the new entry survives a crash once the
             // directory is synced; until then the marks may be lost, which
             // is all a failure here could do anyway.
@@ -589,11 +610,15 @@ impl LogFile {
     }
 
     /// Whether the next [`LogFile::compact`] would rewrite the file: over
-    /// the size limit, and the compaction precondition holds as far as
-    /// this process knows.
+    /// `max(compact_above, 2 × the length the last compaction left)`, and
+    /// the compaction precondition holds as far as this process knows. The
+    /// doubling keeps a log whose live records alone are over the limit
+    /// from being rewritten on every write: rewrites stay amortized, and the
+    /// file stays under twice its live size plus one batch.
     pub(crate) fn should_compact(&self) -> bool {
-        self.complete
-            && matches!(self.known, Known::File { len, torn_at: None, .. } if len > self.limits.compact_above)
+        let doubled = self.compacted_len.saturating_mul(2);
+        let above = self.limits.compact_above.max(doubled);
+        self.complete && matches!(self.known, Known::File { len, torn_at: None, .. } if len > above)
     }
 
     /// When [`LogFile::should_compact`] and the file on disk still has the
@@ -630,16 +655,25 @@ impl LogFile {
                 return Err(e);
             }
         };
-        // Best effort: without it a crash may bring back the old file,
-        // which is still a complete log.
-        let _ = sync_dir(&self.dir);
-        self.known = Known::File {
-            dev: meta.dev(),
-            ino: meta.ino(),
-            len: bytes.len() as u64,
-            torn_at: None,
-        };
+        self.compacted_len = bytes.len() as u64;
         index.prune(now);
+        let synced = self.fault(Op::CompactSyncDir);
+        if synced.and_then(|()| sync_dir(&self.dir)).is_err() {
+            // The rename may not be durable yet: a crash could bring back
+            // the old file. Treat the file as unknown (append only until the
+            // next complete read) and sync the directory again with the
+            // next append.
+            self.known = Known::Unknown;
+            self.complete = false;
+            self.dir_unsynced = true;
+        } else {
+            self.known = Known::File {
+                dev: meta.dev(),
+                ino: meta.ino(),
+                len: bytes.len() as u64,
+                torn_at: None,
+            };
+        }
         Ok(true)
     }
 

@@ -321,8 +321,11 @@ fn sensitive_paths(paths: &[&str], expected: Option<SensitiveKind>) {
 fn sensitive_agent_instructions() {
     let paths = [
         "CLAUDE.md",
+        "CLAUDE.local.md",
         "AGENTS.md",
         "GEMINI.md",
+        ".gemini/settings.json",
+        "web/CLAUDE.local.md",
         "crates/review/AGENTS.md",
         "web/CLAUDE.md",
         ".mcp.json",

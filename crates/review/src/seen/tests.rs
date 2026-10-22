@@ -215,6 +215,41 @@ fn seen_then_renamed_or_deleted_is_changed() {
 }
 
 #[test]
+fn seen_unseen_of_a_rename_is_unseen() {
+    let s = session("a");
+    let r = renamed("a.rs", "b.rs", 2, 3);
+    let unseen = |index: &mut Index| {
+        let file = SeenKey::new(s.clone(), &r).file();
+        index.record(mark_unseen(s.clone(), file, T2));
+    };
+    // Seen, renamed, seen again, then unseen.
+    let mut index = Index::default();
+    seen(&mut index, &s, &modified("a.rs", 1, 2), T1);
+    let changed = SeenState::ChangedSinceSeen { since: T1 };
+    assert_eq!(of(&index, &s, &r), changed);
+    seen(&mut index, &s, &r, T2);
+    assert_eq!(of(&index, &s, &r), SeenState::Seen);
+    unseen(&mut index);
+    assert_eq!(of(&index, &s, &r), SeenState::Unseen);
+    // Unseen straight from changed since seen.
+    let mut index = Index::default();
+    seen(&mut index, &s, &modified("a.rs", 1, 2), T1);
+    unseen(&mut index);
+    assert_eq!(of(&index, &s, &r), SeenState::Unseen);
+}
+
+#[test]
+fn seen_new_file_at_the_old_path_after_a_seen_rename_is_unseen() {
+    let s = session("a");
+    let mut index = Index::default();
+    seen(&mut index, &s, &modified("a.rs", 1, 2), T1);
+    seen(&mut index, &s, &renamed("a.rs", "b.rs", 2, 3), T2);
+    assert_eq!(of(&index, &s, &added("a.rs", 7)), SeenState::Unseen);
+    let r = renamed("a.rs", "b.rs", 2, 3);
+    assert_eq!(of(&index, &s, &r), SeenState::Seen);
+}
+
+#[test]
 fn seen_most_recent_mark_gives_since() {
     let s = session("a");
     let mut index = Index::default();

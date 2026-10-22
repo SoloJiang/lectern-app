@@ -168,11 +168,11 @@ fn is_config(p: &Parts<'_>) -> bool {
 
 /// Agent instruction files matched by file name at any depth: agents also
 /// load the ones in subdirectories.
-const AGENT_NAMES: &[&[u8]] = &[b"CLAUDE.md", b"AGENTS.md", b"GEMINI.md"];
+const AGENT_NAMES: &[&[u8]] = &[b"CLAUDE.md", b"CLAUDE.local.md", b"AGENTS.md", b"GEMINI.md"];
 /// Matched as the whole path, from the worktree root.
 const AGENT_PATHS: &[&[u8]] = &[b".mcp.json", b".github/copilot-instructions.md"];
 /// Agent configuration directories, at any depth.
-const AGENT_DIRS: &[&[u8]] = &[b".claude", b".codex", b".cursor"];
+const AGENT_DIRS: &[&[u8]] = &[b".claude", b".codex", b".cursor", b".gemini"];
 
 /// Path prefixes and whole paths from the worktree root.
 const CI_PREFIXES: &[&[u8]] = &[b".github/workflows/", b".circleci/"];

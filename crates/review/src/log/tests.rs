@@ -610,10 +610,9 @@ fn log_compaction_needs_the_index_to_be_the_file() {
 
     // A complete read followed by own appends: compacts.
     let fx = Fixture::new();
+    fx.write(vec![mark(&s, b"a.rs", 2)]);
     let mut f = fx.small(1);
     let (mut index, _) = f.load(NOW);
-    index.record(mark(&s, b"a.rs", 2));
-    flush(&mut f, &mut index, NOW).unwrap();
     index.record(mark(&s, b"a.rs", 3));
     assert!(compacted(&mut f, &mut index));
 }
@@ -713,6 +712,77 @@ fn log_first_base_wins() {
     let (read, _) = fx.reload();
     let first = Some(BlobId::Sha1([1; 20]));
     assert_eq!(read.base(&sid("a")).unwrap().commit, first);
+}
+
+#[test]
+fn log_compaction_waits_for_twice_the_live_size() {
+    let fx = Fixture::new();
+    let s = session("a");
+    let name = |k: u32| format!("f{k}.rs");
+    // About 6 KiB of live marks, three times the limit.
+    fx.write((0..20).map(|k| mark(&s, name(k).as_bytes(), 2)).collect());
+    let mut f = fx.small(2 << 10);
+    let (mut index, _) = f.load(NOW);
+    index.record(mark(&s, b"f0.rs", 3));
+    assert!(compacted(&mut f, &mut index));
+    let live = fx.len();
+    assert!(live > 2 << 10, "{live}");
+    // Over the limit, but under twice the live size: append only.
+    let mut n = 4u32;
+    while fx.len() + 400 < 2 * live {
+        index.record(mark(&s, b"f0.rs", n as u8));
+        assert!(!compacted(&mut f, &mut index), "at {}", fx.len());
+        n += 1;
+    }
+    // Past twice the live size: compacts again, back to the live size.
+    while !compacted(&mut f, &mut index) {
+        assert!(fx.len() <= 2 * live, "{}", fx.len());
+        index.record(mark(&s, b"f0.rs", n as u8));
+        n += 1;
+    }
+    assert!(fx.len().abs_diff(live) < 64, "{} vs {live}", fx.len());
+}
+
+#[test]
+fn log_failed_directory_sync_goes_append_only() {
+    let fx = Fixture::new();
+    let s = session("a");
+    fx.write(vec![mark(&s, b"a.rs", 2)]);
+    let mut f = fx.small(1);
+    f.set_faults(fail_on(Op::CompactSyncDir));
+    let (mut index, _) = f.load(NOW);
+    index.record(mark(&s, b"a.rs", 3));
+    // The rename happened; the directory sync did not.
+    assert!(compacted(&mut f, &mut index));
+    f.set_faults(|_| Ok(()));
+    let ino = fx.ino();
+    for n in 4..8 {
+        index.record(mark(&s, b"a.rs", n));
+        assert!(!compacted(&mut f, &mut index));
+    }
+    assert_eq!(fx.ino(), ino);
+    let (read, report) = fx.reload();
+    assert!(report.complete);
+    assert_eq!(state_of(&read, &s, b"a.rs", 7), SeenState::Seen);
+}
+
+#[test]
+fn log_rename_retires_the_old_path_on_replay() {
+    let fx = Fixture::new();
+    let s = session("a");
+    let moved = ChangeStatus::Renamed {
+        from: path(b"a.rs"),
+        similarity: 90,
+    };
+    let side = |n: u8| file_side(FileMode::File, blob(n));
+    let rename = change(moved, b"b.rs", side(2), side(3));
+    let written = fx.write(vec![mark(&s, b"a.rs", 2), seen_at(&s, &rename, NOW)]);
+    assert_eq!(written.len(), 1);
+    let (read, _) = fx.reload();
+    assert_eq!(records_of(&read), records_of(&written));
+    let created = change(ChangeStatus::Added, b"a.rs", None, side(9));
+    let key = SeenKey::new(s.clone(), &created);
+    assert_eq!(state(&read, &key), SeenState::Unseen);
 }
 
 #[test]
