@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#182](https://github.com/SoloJiang/lectern-app/pull/182)）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -30,7 +30,9 @@
 
 | 依赖 | 用途 | 为什么是它 |
 |---|---|---|
-kernel 只用标准库，不引入新的外部依赖：锁用 `std::sync::RwLock` / `Mutex`，错误类型手写 `Display` 和 `Error`。标准库的锁在持有写锁的线程 panic 时会标记 poison；kernel 只在 kernel 线程上短暂持有写锁，并且总在 `catch_unwind` 之外，读到 poison 时用 `into_inner` 取回数据继续运行。以后需要引入外部依赖（如 `parking_lot`）时先写 ADR。
+| `lectern-logging` | 运行日志的宏、类型化字段与 `plugin`、`act` 作用域（见「日志与诊断」） | kernel 层，只依赖 `log`；[ADR 0046](../adr/0046.md) 为 kernel 放开的唯一依赖 |
+
+kernel 只用标准库加 `lectern-logging`，不引入其他外部依赖：锁用 `std::sync::RwLock` / `Mutex`，错误类型手写 `Display` 和 `Error`。标准库的锁在持有写锁的线程 panic 时会标记 poison；kernel 只在 kernel 线程上短暂持有写锁，并且总在 `catch_unwind` 之外，读到 poison 时用 `into_inner` 取回数据继续运行。以后需要引入外部依赖（如 `parking_lot`）时先写 ADR。
 
 kernel 只依赖 kernel 层（架构规则 1），不依赖 `executor`、`platform` 或任何业务 crate。
 
@@ -166,6 +168,10 @@ impl ActivationToken {
     /// 状态只会 `Pending → Live`、`Pending → Dead`、`Live → Dead`：kernel 用 compare-exchange 把 `Pending` 换成 `Live`，
     /// 换失败（其他线程已经写入 `Dead`）就按激活失败处理；`Dead` 不会再变回其他状态。
     pub fn state(&self) -> TokenState;
+
+    /// 这次激活的序号，进程内从 1 递增，每个 token 一个，不随插件或 `Kernel` 重新计数。
+    /// 日志记录的 `act` 就是它（见「日志与诊断」）。
+    pub fn id(&self) -> u64;
 
     /// 取得调用这次激活的代码的准入：先把准入计数加一，再检查状态，是 `Live` 时返回 `Admission`，
     /// 否则减回去并返回 None。加一之前先读一次状态，已经不是 `Live` 时直接返回 None、不碰计数，所以通过旧句柄反复调用不会让全局计数短暂变化；
@@ -771,6 +777,24 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - 常驻内存在同一进程里无法准确地按插件区分。bench 对每个插件启动两次：一次只含它的依赖闭包，一次是依赖闭包加上它，两次静止后的 `phys_footprint` 之差记为这个插件的常驻内存。两次启动都要满足依赖闭包里每个插件（包括目标插件）的激活条件，否则测到的只是没激活的插件对象：命令不会替依赖满足条件，所以 bench 逐个满足：`Workspace` 插件需要一份匹配它们全部 pattern 的 `WorkspaceFacts`：bench 在两次启动里都加入同一个合成的 `bench-facts` 插件（`AfterFirstFrame` 激活，在 `started` 里通过 `control().workspace_changed` 提交这份 facts，由 bench 的探针提供，见 [bench 设计「探针」](bench.md#探针lectern_benchprobeprobe-feature)），两次的差不受它影响；`Command` 插件调用一次对应的命令，`Manual` 插件调用 `activate`；确认闭包里的插件都进入 `Active` 后再等静止、采样。依赖闭包那一次满足同样的条件（目标插件自己的除外），两次的差只来自目标插件。完整 profile 的总内存另外按 ADR 0017 的预算单独检查。这两种组合由 `PluginSet::prepare`、`PreparedSet::dependency_closure` / `retain` / `with` 和 `Kernel::start_prepared` 组装（见「插件集合的闭包与裁剪」）。
 - 服务查找是一次读锁加一次哈希表查找；插件应在 `activate` 里取出需要的 `ServiceRef` / `ServiceSet`，保存在激活内的状态对象里（见「激活的提交」）。`ServiceRef::get()` 的开销是一次准入（两次原子操作）；`ServiceSet::for_each` 每个提供者一次准入、不分配；`ServiceSet::current()` 另外分配一个 `Vec`。两种多实现路径都在 bench 里按 1、4、16 个提供者测量。
 - 普通的事件分发（不在监听里再发事件）不分配内存：监听快照是 `Arc` 克隆，没有监听时只有一次查表。监听里发出的嵌套事件要先保存到分发结束，会装箱后放进本线程的队列，有一次分配；这条路径单独做基准。
+- 日志的作用域（见「日志与诊断」）：设置时读出当前线程的 `Ctx`，写入覆盖了 `plugin`、`act` 的新值，嵌套深度加一；drop 时写回原值，深度减一。只有几次线程本地变量的读写，不分配内存，不加锁。事件分发每调用一个监听设一次，`kernel/` 的基准与接入前相比不变慢（「实际验证」）。
+
+## 日志与诊断
+
+记录经 `lectern-logging` 的宏写出，target 为 `kernel`（[logging 设计](logging.md)、[ADR 0046](../adr/0046.md)）。
+
+- 默认记录：
+  - error `plugin failed`：kernel 的边界捕获到插件代码的 panic。字段 `phase` 是当时运行的那段代码：`manifest`、`activate`、`commit`（`Staged::commit`）、`started`（含 token 变为 `Live` 后执行的暂存事件和 `start`）、`own_with`（`own_with` 的 `start`）、`listener`、`command`（`command` 的 `done`）、`workspace`（`WorkspaceFacts::contains`）、`drop`（kernel 释放的守卫、任务句柄、`Active`、被拒绝或替换的值）；`message` 用 `Value::panic_message`，`PanicText` 按 payload 的类型构造：`&'static str` 为 `Static`，`String` 为 `Formatted`，其他为 `Other`，消息文字按 logging 设计「隐私」处理。这条记录只说明插件代码 panic 过；插件是否因此进入 `Failed` 看下面两条。
+  - error `plugin activation failed`：激活在提交之前失败（`activate` 返回错误或 panic、缺少声明的服务），插件进入 `Failed`。字段 `error` 是 `PluginError` 的种类（`failed`、`panicked`、`missing_service` 等），`service` 是涉及的服务的稳定 ID（只有 `missing_service`、`undeclared_service`、`duplicate_service` 有，其余为 null）。
+  - error `plugin deactivated after a failure`：提交之后的失败（`started` panic、`fail`、监听 panic、守卫的 drop panic、任务 panic）让这次激活被撤销，字段同上。
+  - error `plugin rejected by the dependency graph`：启动时依赖图检查让这个插件进入 `Failed`，`error` 是 `GraphError` 的种类，`service` 是涉及的服务 ID（没有时为 null）。
+  - error `shutdown callback panicked`（`message`，规则同上）、`could not start the kernel thread`（`error` 为 `Value::io`）。
+  - warn：`unknown plugin`（`request` 为 `activate` 或 `set_enabled`，不记请求里的 ID）、`shutdown closed pending() while main-thread work was still queued`、`unwinding while holding a provider's admission`（`provider_act` 是提供者那次激活的序号）、`cannot start the timer thread` 和 `could not spawn a reclaim thread; leaking a panic payload`（`error` 为 `Value::io`）。
+  - info `plugin activated`：token 变为 `Live` 之后，`took_us` 是 `activate`、提交和 `started` 三段之和，`activate_us`、`commit_us`、`started_us` 是各段（与 `status()` 的耗时相同）；info `plugin deactivated`：没有失败的撤销完成时。
+- 详细级别：不另记 debug、trace。准入、服务调用、事件分发是热路径，不在上面记日志。
+- 关联 ID：`plugin` 和 `act`。`act` 是 `ActivationToken::id()`；`plugin` 是插件 ID 的 `PluginTag`：内置插件（`Name` 为 `Cow::Borrowed`）用 `PluginTag::new`，运行时读出的 ID（`Cow::Owned`，进程插件）在加入 kernel 时用 `PluginTag::register` 登记一次，登记不了（字符不在 `[a-z0-9_-]` 里、超过 64 字节或已满 1024 个）时记录不带 `plugin`；这时如果外层还有另一个插件的作用域（另一个插件的 `Emitter` 分发到它的监听），作用域只覆盖非空的字段，记录带的是外层的 `plugin`，`act` 仍是它自己的，按 `act` 对照。作用域由 kernel 设置，包住每一段插件代码：kernel 线程上整个 `activate` 到 `Live` 的过程、整个撤销、读清单（只有 `plugin`）、`WorkspaceFacts::contains`（提交方的激活）、`command` 的 `done`（请求方的激活，`app` 发起的为空）、`shutdown` 时 drop 插件对象（只有 `plugin`）；任意线程上每个监听的调用、带 token 的 `Emitter` 的每次分发、`PluginHandle::own`、`own_with`、`on` 和 `KernelControl` 的拒绝路径、`Admission::own`。插件代码自己写的记录因此也带上这两项。
+- 不记录：插件 ID 只经 `plugin` 出现，请求里不认识的 ID 不记；`PluginError::Failed`、`Panicked`、`InvalidGraph` 和 `GraphError` 里的文字、命令名、`Workspace` 的 pattern、`WorkspaceFacts` 的内容（项目里的文件名）、事件值、服务对象都不记，只记种类和服务的稳定 ID；panic 消息只经 `Value::panic_message`。
+- 金丝雀测试：`crates/kernel/src/tests/logs.rs` 的 `canary_stays_out_of_kernel_logs`：在 trace 级别的 `testing::capture()` 下，金丝雀放进 `activate`、`started`、监听、守卫的 drop 和 `WorkspaceFacts::contains` 的格式化 panic 消息，`PluginError::new` 的文字，不认识的插件 ID、命令名和 `Workspace` pattern，之后 `assert_absent`。
 
 ## 测试
 
@@ -881,6 +905,7 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - 静止：有正在进行的 `emit` 时不静止；静止后又变忙时发出 `Busy`。
 - 按命令激活：停用后重新启用的命令插件，再次触发命令仍能激活。
 - 生命周期的结果（激活顺序、停用顺序、状态）用 insta 快照记录。
+- 日志（`crates/kernel/src/tests/logs.rs`，见「日志与诊断」）：金丝雀测试 `canary_stays_out_of_kernel_logs`；`panic_records_carry_plugin_and_act`：`activate`、`started`、监听、守卫的 drop 各 panic 一次，每条 `plugin failed` 带正确的 `phase`、`plugin` 和等于 `ActivationToken::id()` 的 `act`，消息按 payload 类型写出；`activation_logs_took_us_and_ids_increase`：`plugin activated` 带 `took_us`，激活序号不小于 1 且依次递增；`process_plugin_names_are_registered`：`Cow::Owned` 的 ID 经 `PluginTag::register` 出现在 `plugin` 里，登记不了的 ID 不带 `plugin`；`app_command_callbacks_run_outside_the_failed_plugins_scope`：`app` 发起的命令在目标插件 `started` panic、撤销时收到错误，`done` 里读到的作用域为空，不是失败插件的。
 - 插件集合的闭包（`set_closure_*`）：多层依赖；`MULTIPLE` 服务的多个提供者都进入闭包；缺提供者、提供者的清单 panic、单实现服务有多个提供者、`id` 不在集合里时返回对应的 `GraphError`；对每个插件 `retain` 闭包（加或不加它自己）之后 `validate` 通过；`MULTIPLE` 服务的提供者反过来依赖目标插件时，只留闭包的集合报 `MissingProvider`（已知限制）。
 - 预读清单（`set_prepare_*`）：`prepare`、`dependency_closure`、`retain`、`with`、`validate`、`start_prepared` 走完、kernel 停止之后，每个插件的 `manifest()` 恰好被调用一次（含被 `retain` 去掉的插件）；`status()` 的 `manifest_time` 等于 `prepare` / `with` 记下的耗时；`manifest()` panic 的插件（`prepare` 和 `with` 加入的各一个）进入 `Failed`，状态与 `Kernel::start` 相同；`start_prepared` 的 kernel 照常提供 `lazy_commands` 和 `Manual` 激活。
 
@@ -1003,13 +1028,33 @@ impl Kernel {
 - 发布构建里的热路径：不让路的守卫在开关关着时多一次布尔判断，`poll_proceed` 和 `pause_requested` 仍然只读原子标志、不加锁；让路的守卫在两个开关都关着时多读两个原子量。忙碌守卫、准入、服务调用和事件分发的代码没有改动，`kernel/` 的基准不经过本次改动的代码，本次没有重新测量。
 - 没有验证的：`SystemClock` 的计时线程只有 `the_system_clock_wakes_at_the_instant_and_not_before` 一个测试，1 秒没有计时器后退出没有测试，其余测试全部用 `ManualClock`；`code_intel` 怎样接入（之后的 PR）；`app` 的交互静止判断和 `app/scroll_frames_indexing` 的校准（macOS）。
 
+运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 4 项，[#182](https://github.com/SoloJiang/lectern-app/pull/182)），在 Linux（x86_64，4 核虚拟机）上运行：
+
+- `just test -p lectern-kernel`：109 个测试通过，其中新增 5 个（`crates/kernel/src/tests/logs.rs`，见「测试」的「日志」一条）；`cargo test -p lectern-kernel --all-features --lib` 在同一进程里运行全部 109 个也通过（各测试共用一个捕获器，按插件 ID 和激活序号筛选）；`cargo nextest run -p lectern-kernel --all-features -E 'test(logs)' --stress-count 30` 30 轮全部通过。`just check`、`just test`（工作区 2150 个测试，在加入 `app_command_callbacks_run_outside_the_failed_plugins_scope` 之前运行）、`just doctest`、`just deny` 全部通过。
+- logging 设计「验收」第 4 步起的检查：`rg 'eprintln!|util::log' crates/kernel/src --glob '!**/tests*'` 没有结果，`util::log` 已删除；金丝雀测试通过；`panic_records_carry_plugin_and_act` 检查 panic 记录里的 `plugin`、`act`。
+- `just bench --measure kernel/`（不判定、只记录）：改动前的源码树是 `origin/main`（一次在本分支改动之前运行，三次在 `origin/main` 的另一个 worktree 里），与改动后交替运行；同一台机器上同时有其他构建，波动很大。中位数依次列出（改动后的第三次只跑了 `kernel/emit`）：
+
+  | ID | 改动前 | 改动后 |
+  |---|---|---|
+  | `kernel/service_get` | 268 / 304 / 292 / 344 ns | 310 / 316 / 307 ns |
+  | `kernel/service_for_each/1` | 299 / 326 / 327 / 387 ns | 404 / 331 / 308 ns |
+  | `kernel/service_for_each/4` | 1.22 / 1.23 / 1.21 / 1.22 µs | 1.36 / 1.32 / 1.07 µs |
+  | `kernel/service_for_each/16` | 4.55 / 4.74 / 4.82 / 4.78 µs | 4.87 / 4.84 / 4.19 µs |
+  | `kernel/service_current/1` | 426 / 672 / 451 / 493 ns | 599 / 424 / 369 ns |
+  | `kernel/service_current/4` | 568 / 1330 / 803 / 1180 ns | 1080 / 1120 / 610 ns |
+  | `kernel/service_current/16` | 2.83 / 3.93 / 3.83 / 3.83 µs | 3.74 / 3.84 / 2.56 µs |
+  | `kernel/emit` | 474 / 693 / 648 / 573 ns | 509 / 561 / 471 / 528 ns |
+  | `kernel/emit_nested` | 844 / 1390 / 1490 / 1440 ns | 1670 / 1750 / 888 / 1070 ns |
+
+  服务调用的路径没有改动（准入不设作用域），两侧的差别是噪声。`kernel/emit` 每次多一个监听的作用域，`kernel/emit_nested` 多三个（两个监听、一次带 token 的分发）。两项在两侧都在很宽的范围里跳动（`emit_nested` 两侧都有 0.84–0.89 µs 和 1.4 µs 以上的运行），各次的中位数再取中位数：`kernel/emit` 改动前 610 ns、改动后 518 ns，`kernel/emit_nested` 改动前 1.42 µs、改动后 1.37 µs，没有变慢。
+- 没有验证的：进程插件还没有实现（[#39](https://github.com/SoloJiang/lectern-app/issues/39)），`PluginTag::register` 只用 `Cow::Owned` 的 ID 测试；记录写进文件的路径由 logging 设计第 3 步（`app`）验证，这里只用 `testing::capture()`。
+
 ## 与设计的差异
 
 - 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。barrier 先释放自己的忙计数再唤醒调用方（[#96](https://github.com/SoloJiang/lectern-app/issues/96)），kernel 线程给自己排入的后续请求不在等待范围内，见「实际验证」里的已知限制。
 - `PluginError` 的变体按实现需要列全：`Failed`（插件报告）、`Panicked`、`MissingService`、`UndeclaredService`、`DuplicateService`、`InvalidGraph`、`DependencyUnavailable`、`Disabled`、`ShuttingDown`、`UnknownCommand`。设计里提到的 `Stale` 没有用到（请求方失效时 `done` 不被调用），不提供。
 - `Context::service` / `service_set` 收到不在 `requires` 里的服务时 panic，由 `activate` 的边界捕获、插件进入 `Failed`，错误信息写明原因；设计只写了「必须在 requires 里」。
 - 启动时的依赖图检查只让出错的插件进入 `Failed`；`MissingProvider` 不让依赖者失败（提供者可能只是清单 panic），依赖者停在 `Waiting`。`validate` 仍报告全部错误。依赖环之外、依赖环里插件的依赖者也按环处理（进入 `Failed`），实现更简单，`validate` 的单元测试会先在 CI 里拦下环。判断环时，一个多实现服务的多个提供者互为替代：只要有一个提供者能排在前面就不算环（例如提供者 A 依赖消费者 C、另一个提供者 B 独立时，顺序是 B、C、A）。
-- 日志写到 stderr（kernel 只用标准库，没有日志依赖），由 `app` 重定向到日志文件。
 - `ServiceRemoved` 只为发出过 `ServiceAdded` 的激活发出：`started` 失败的提供者从头到尾不被依赖者看到，与「新提供者」一条一致。
 
 插件集合的闭包与裁剪（接口最初写在 [bench 设计「需要其他 crate 提供的接口」](bench.md#需要其他-crate-提供的接口)）：
@@ -1034,3 +1079,11 @@ impl Kernel {
 - 时段没有单独的句柄：时段在持有者下一次批次边界检查或 drop 时结束，`Grant::Slot` 只带 `deadline`，到期由 `yield_requested()` 报告。
 - 令牌按先来先得发放，被选中的守卫先保留令牌、被唤醒后取得时段，持有者交还后排到队尾：设计只规定同一时刻最多一个持有者，没有规定顺序；全部唤醒再竞争会让几项工作中的一项长期拿不到时段。
 - 不能恢复的抽取放弃这一项、交互静止后重做，由使用方按 `yield_requested()` 和 `pause_requested()` 处理，kernel 不区分抽取能否恢复。
+
+运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 4 项，接口见「日志与诊断」）：
+
+- 公开的 `contain` 和 `catch` 不变，不记日志：`executor`、`fs_watch` 也用它们，各自按自己的设计记录。kernel 内部的边界改用一个记日志的版本（记 `plugin failed` 后再释放 payload），所以记录里的 `PanicText` 取自 payload 本身，不取自 `contain` 返回的字符串。
+- `plugin failed` 的阶段比 logging 设计第 4 项多了 `workspace` 和 `own_with`：`WorkspaceFacts::contains` 和 `own_with` 的 `start` 也是插件代码，panic 同样让插件进入 `Failed`。logging 设计的「与设计的差异」记了同一条。
+- 插件进入 `Failed` 另记一条（`plugin activation failed`、`plugin deactivated after a failure`、`plugin rejected by the dependency graph`），只带错误的种类和服务的稳定 ID。原来 stderr 上写的是 `PluginError` 的 `Display`，其中 `Failed`、`Panicked` 的文字来自插件或 panic 消息，`InvalidGraph` 和 `GraphError` 带插件 ID 和命令名，类型化字段写不出这些运行时字符串，也不应该写。
+- 作用域不只包住 `contain`：带 token 的 `Emitter` 的分发、`PluginHandle` 和 `KernelControl` 的拒绝路径、`Admission::own` 也设了，这些路径上 drop 的值同样是插件的代码，插件自己在这些调用里写的记录也带上 `plugin`、`act`。
+- 新增 info `plugin deactivated`：logging 设计只要求激活记 info，撤销是同一类生命周期事件，没有它就看不出一次激活什么时候结束。

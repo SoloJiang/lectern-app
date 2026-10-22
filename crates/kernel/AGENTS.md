@@ -2,14 +2,15 @@
 
 插件内核：插件装载、服务注册表、事件总线、生命周期（[ADR 0010](../../docs/adr/0010.md)）。插件按服务依赖自动激活与停用；插件注册的内容记入该插件自己的注册表，停用时全部撤销。
 
-- 层：kernel 层。只依赖 kernel 层，不依赖 GPUI；任何层都可以依赖本 crate。
+- 层：kernel 层。只依赖 kernel 层（标准库加 `lectern-logging`），不依赖 GPUI；任何层都可以依赖本 crate。
 - 设计文档：[docs/design/kernel.md](../../docs/design/kernel.md)
 - issue：[#8](https://github.com/SoloJiang/lectern-app/issues/8)、[#7](https://github.com/SoloJiang/lectern-app/issues/7)（bench 用的插件集合闭包与裁剪）、[#39](https://github.com/SoloJiang/lectern-app/issues/39)、[#40](https://github.com/SoloJiang/lectern-app/issues/40)、[#27](https://github.com/SoloJiang/lectern-app/issues/27)
-- ADR：[0010](../../docs/adr/0010.md)、[0018](../../docs/adr/0018.md)、[0029](../../docs/adr/0029.md)（可暂停的后台工作）
+- ADR：[0010](../../docs/adr/0010.md)、[0018](../../docs/adr/0018.md)、[0029](../../docs/adr/0029.md)（可暂停的后台工作）、[0046](../../docs/adr/0046.md)（运行日志）
 
 ## 边界
 
 - 不含任何业务功能。
+- 日志只经 `lectern-logging` 的宏写出，不写 stderr；插件代码外面设 `plugin`、`act` 作用域，插件代码的 panic 记 `plugin failed`（[设计「日志与诊断」](../../docs/design/kernel.md#日志与诊断)）。
 - 进程插件宿主和 grammar 加载器只编排生命周期和协议；Seatbelt、代码签名校验、`dlopen` 由 `platform` 实现 kernel 定义的接口（[ADR 0018](../../docs/adr/0018.md)），kernel 不依赖 `platform`。
 - 插件激活耗时和常驻内存要能被 `bench` 逐个测量。
 
@@ -24,3 +25,4 @@ just test -p lectern-kernel
 
 - 单元测试写在模块旁的 `#[cfg(test)] mod tests`；结构化输出（解析结果、归因、diff）用 insta 快照验收，快照改动要在 PR 里逐个看过。
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。
+- 日志用 `lectern_logging::testing::capture()` 检查（`src/tests/logs.rs`），含金丝雀测试；同一进程里的测试共用一个捕获器，按插件 ID 和激活序号筛选记录。

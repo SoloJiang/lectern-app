@@ -1,17 +1,23 @@
 //! Activation tokens, admissions and the quiescence counters.
 
 use std::fmt;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering::Relaxed, Ordering::SeqCst};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+use lectern_logging::{Ctx, PluginTag, Scope, warn};
+
 use crate::background::BackgroundState;
+use crate::diag::Phase;
 use crate::gate::GateInner;
 use crate::handle::PluginHandle;
 use crate::kernel::Shared;
-use crate::panic::contain;
+use crate::panic::contain_plugin;
 use crate::plugin::{Name, PluginError};
-use crate::util::{lock, log};
+use crate::util::lock;
+
+/// The next activation number (`ActivationToken::id`), process-wide.
+static NEXT_ACTIVATION: AtomicU64 = AtomicU64::new(1);
 
 const PENDING: u8 = 0;
 const LIVE: u8 = 1;
@@ -170,9 +176,7 @@ impl Counters {
             }
             if std::time::Instant::now() >= deadline {
                 self.pending.fetch_or(PENDING_CLOSED, SeqCst);
-                log(format_args!(
-                    "shutdown closed pending() while main-thread work was still queued"
-                ));
+                warn!("shutdown closed pending() while main-thread work was still queued");
                 return;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -243,12 +247,26 @@ pub(crate) struct ActInner {
     pub(crate) counters: Arc<Counters>,
     pub(crate) id: Name,
     pub(crate) generation: u64,
+    /// The activation number, process-wide from 1: `act` in log records.
+    number: u64,
+    /// The plugin's log tag: `plugin` in log records.
+    tag: Option<PluginTag>,
     pub(crate) kernel: Weak<Shared>,
     pub(crate) guards: Mutex<GuardTable>,
     pub(crate) staging: Mutex<Staging>,
     /// The failure that killed this activation, if it failed rather than being
     /// deactivated or losing a dependency.
     pub(crate) failure: Mutex<Option<PluginError>>,
+}
+
+impl ActInner {
+    fn scope(&self) -> Scope {
+        lectern_logging::scope(Ctx {
+            plugin: self.tag,
+            act: Some(self.number),
+            ..Ctx::default()
+        })
+    }
 }
 
 /// The success marker of one activation. Cloneable and usable on any thread.
@@ -263,6 +281,7 @@ impl ActivationToken {
         kernel: Weak<Shared>,
         id: Name,
         generation: u64,
+        tag: Option<PluginTag>,
     ) -> Self {
         ActivationToken(Arc::new(ActInner {
             state: AtomicU8::new(PENDING),
@@ -272,6 +291,8 @@ impl ActivationToken {
             counters,
             id,
             generation,
+            number: NEXT_ACTIVATION.fetch_add(1, Relaxed),
+            tag,
             kernel,
             guards: Mutex::new(GuardTable {
                 closed: false,
@@ -284,6 +305,17 @@ impl ActivationToken {
             }),
             failure: Mutex::new(None),
         }))
+    }
+
+    /// This activation's number, process-wide from 1: one per token, never
+    /// reused. Log records carry it as `act`.
+    pub fn id(&self) -> u64 {
+        self.0.number
+    }
+
+    /// Sets this activation's `plugin` and `act` log scope until dropped.
+    pub(crate) fn scope(&self) -> Scope {
+        self.0.scope()
     }
 
     /// The current state.
@@ -437,11 +469,17 @@ impl Admission {
         let mut table = lock(&self.act.guards);
         if table.closed {
             drop(table);
+            let _scope = self.act.scope();
             drop_rejected(guard);
             return false;
         }
         table.push(Entry::Guard(Box::new(guard)));
         true
+    }
+
+    /// The number of the activation this admission is into.
+    pub(crate) fn act_id(&self) -> u64 {
+        self.act.number
     }
 }
 
@@ -482,11 +520,8 @@ impl Drop for PendingGuard {
     }
 }
 
-/// Drops a value the kernel refused, isolating a panic in its `Drop`.
+/// Drops a value the kernel refused, isolating a panic in its `Drop` (logged
+/// as `plugin failed` in the `drop` phase, under the caller's scope).
 pub(crate) fn drop_rejected<T>(value: T) {
-    if let Err(message) = contain(move || drop(value)) {
-        log(format_args!(
-            "dropping a rejected value panicked: {message}"
-        ));
-    }
+    let _ = contain_plugin(Phase::Drop, move || drop(value));
 }

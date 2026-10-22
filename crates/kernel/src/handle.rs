@@ -5,6 +5,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::background::BackgroundGuard;
+use crate::diag::Phase;
 use crate::event::{Emitter, Event, ServiceAdded, ServiceRemoved, Subscription, dispatch};
 use crate::gate::{GateInner, SubmitGate};
 use crate::kernel::{Request, Shared, WorkspaceFacts, invalidate};
@@ -181,6 +182,7 @@ impl PluginHandle {
     /// Returns false once the activation is deactivated; the guard is then
     /// dropped on this thread, under `contain`.
     pub fn own(&self, guard: impl Send + 'static) -> bool {
+        let _scope = self.act.scope();
         let mut table = lock(&self.act.0.guards);
         if table.closed || self.act.state() == TokenState::Dead {
             drop(table);
@@ -220,6 +222,7 @@ impl PluginHandle {
         &self,
         start: impl FnOnce(SubmitGate) -> G + Send + 'static,
     ) -> bool {
+        let _scope = self.act.scope();
         let Some(admission) = self.act.enter() else {
             drop_rejected(start);
             return false;
@@ -254,6 +257,7 @@ impl PluginHandle {
                 gate.close();
                 let removed = lock(&self.act.0.guards).take(seq);
                 drop_rejected(removed);
+                payload.report(Phase::OwnWith);
                 let message = payload.dispose();
                 invalidate(
                     &self.act,
@@ -300,6 +304,7 @@ impl PluginHandle {
         &self,
         handler: impl Fn(&E, &PluginHandle) + Send + Sync + 'static,
     ) -> Option<Subscription> {
+        let _scope = self.act.scope();
         let f = erase(handler);
         let Some(shared) = self.act.0.kernel.upgrade() else {
             drop_rejected(f);
@@ -428,7 +433,10 @@ impl KernelControl {
                 facts,
                 from: self.act.clone(),
             }),
-            None => drop_rejected(facts),
+            None => {
+                let _scope = self.act.scope();
+                drop_rejected(facts);
+            }
         }
     }
 
@@ -464,7 +472,10 @@ impl KernelControl {
                 done: Box::new(done),
                 requester: Some(self.act.clone()),
             }),
-            None => drop_rejected(done),
+            None => {
+                let _scope = self.act.scope();
+                drop_rejected(done);
+            }
         }
     }
 }

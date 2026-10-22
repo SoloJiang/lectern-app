@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::panic::contain;
+use lectern_logging::PluginTag;
+
+use crate::diag::{Phase, plugin_scope, plugin_tag};
+use crate::panic::contain_plugin;
 use crate::plugin::{Activation, GraphError, Manifest, Name, Plugin, PluginError};
 use crate::service::ServiceKey;
 
@@ -37,7 +40,11 @@ impl PluginSet {
         let manifests: Vec<(Name, Result<Manifest, String>)> = self
             .plugins
             .iter()
-            .map(|(id, plugin)| (id.clone(), contain(|| plugin.manifest())))
+            .map(|(id, plugin)| {
+                let _scope = plugin_scope(plugin_tag(id));
+                let manifest = contain_plugin(Phase::Manifest, || plugin.manifest());
+                (id.clone(), manifest)
+            })
             .collect();
         check(
             manifests
@@ -64,11 +71,16 @@ impl PluginSet {
     }
 }
 
-/// Calls `manifest()` under `contain` and times it. `Kernel::start` and
-/// `PluginSet::prepare` both go through here, so their timings agree.
-pub(crate) fn read_manifest(plugin: &dyn Plugin) -> (Result<Manifest, String>, Duration) {
+/// Calls `manifest()` under `contain` and times it, in the plugin's log
+/// scope. `Kernel::start` and `PluginSet::prepare` both go through here, so
+/// their timings agree.
+pub(crate) fn read_manifest(
+    plugin: &dyn Plugin,
+    tag: Option<PluginTag>,
+) -> (Result<Manifest, String>, Duration) {
+    let _scope = plugin_scope(tag);
     let begin = Instant::now();
-    let result = contain(|| plugin.manifest());
+    let result = contain_plugin(Phase::Manifest, || plugin.manifest());
     (result, begin.elapsed())
 }
 
@@ -89,7 +101,7 @@ pub(crate) struct Prepared {
 
 impl Prepared {
     fn read(id: Name, plugin: Arc<dyn Plugin>) -> Prepared {
-        let (manifest, time) = read_manifest(plugin.as_ref());
+        let (manifest, time) = read_manifest(plugin.as_ref(), plugin_tag(&id));
         Prepared {
             id,
             plugin,

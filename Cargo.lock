@@ -4364,6 +4364,7 @@ name = "lectern-kernel"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "lectern-logging",
 ]
 
 [[package]]

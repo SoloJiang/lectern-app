@@ -10,7 +10,9 @@ use std::task::Waker;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::util::{lock, log};
+use lectern_logging::{Value, warn};
+
+use crate::util::lock;
 
 /// A monotonic clock that can wake a task at a given instant.
 pub trait Clock: Send + Sync {
@@ -74,7 +76,7 @@ impl Clock for SystemClock {
             // off. Waking now would re-arm the timer from inside this call.
             state.running = false;
             state.due.clear();
-            log(format_args!("cannot start the timer thread: {error}"));
+            warn!("cannot start the timer thread"; error = Value::io(&error));
         }
     }
 }

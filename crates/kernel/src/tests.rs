@@ -11,6 +11,7 @@ mod gates;
 mod graph;
 mod handles;
 mod lifecycle;
+mod logs;
 mod quiescence;
 mod services;
 mod set;
