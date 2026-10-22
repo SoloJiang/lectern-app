@@ -28,13 +28,14 @@ layer = "domain"
 
 ## crate 与层
 
-依赖只能从上往下：`app` → `view` → `domain` → `infra`。`kernel` 和 `services` 构成插件机制，任何层都可以依赖。`tool` 只用于调试与测试构建，不进入发布构建。
+依赖只能从上往下：`app` → `view` → `domain` → `infra`。`kernel` 和 `services` 构成插件机制，`logging` 是运行日志的调用接口（[ADR 0046](../adr/0046.md)），三者在 kernel 层，任何层都可以依赖。`tool` 只用于调试与测试构建，不进入发布构建。
 
 | 层 | crate | 职责 |
 |---|---|---|
 | app | `app` | 二进制 `lectern`：启动、按 profile 装配插件、恢复窗口快照 |
 | kernel | `kernel` | 插件装载、服务注册表、事件总线、生命周期（[ADR 0010](../adr/0010.md)） |
 | kernel | `services` | 服务接口：`SessionSource`、`ForgeProvider`、`NavigationProvider`、`ProjectDetector` 等；插件只依赖接口 |
+| kernel | `logging` | 运行日志：调用点的宏、类型化字段与关联作用域；落盘部分（`sink` feature）只由 `app` 和 tool 层启用（[logging 设计](logging.md)，尚未实现） |
 | view | `ui` | 系统色 token、动画原语、通用控件，封装 gpui-component（[ADR 0015](../adr/0015.md)） |
 | view | `workspace` | 窗口骨架：侧栏、工具栏、检查器、浮动面板、底部浮条 |
 | view | `welcome` | 打开项目窗口 |

@@ -926,7 +926,7 @@ meter / begin_analysis ─▶ [调用方的 executor 任务] 一个事务
 
 ## 日志与诊断
 
-日志门面、级别和文件布局按 ADR 0046（应用运行日志，编写中）与 `docs/design/logging.md`（编写中），具体的宏和字段写法以那份设计为准。本 crate 只规定记什么。
+日志门面、级别和文件布局按 [ADR 0046](../adr/0046.md) 与 [logging 设计](logging.md)，具体的宏和字段写法以 logging 设计为准。本 crate 只规定记什么。
 
 - 默认级别（warn、error 和关键的 info）：
   - error：数据库损坏与恢复（改名后的文件名、重读的会话数）、迁移失败、写不进（附原因）、`meter` 在 `Prepared` 时落盘失败。
