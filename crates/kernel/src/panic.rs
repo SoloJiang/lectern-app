@@ -32,7 +32,8 @@ impl PanicPayload {
 
     /// The payload as a log value's input: the variant follows the payload's
     /// type (`&'static str`, `String`, anything else), never its content.
-    pub(crate) fn text(&self) -> PanicText<'_> {
+    /// The executor logs its tasks' panics with it before `dispose`.
+    pub fn text(&self) -> PanicText<'_> {
         let Some(payload) = self.payload.as_deref() else {
             return PanicText::Other;
         };

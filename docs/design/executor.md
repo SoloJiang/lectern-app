@@ -1,6 +1,6 @@
 # executor 设计
 
-状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。关闭回调 `on_shutdown`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）在 [#109](https://github.com/SoloJiang/lectern-app/pull/109) 实现。
+状态：已实现（设计 [#60](https://github.com/SoloJiang/lectern-app/pull/60)、[#104](https://github.com/SoloJiang/lectern-app/pull/104)，实现 [#67](https://github.com/SoloJiang/lectern-app/pull/67)、[#106](https://github.com/SoloJiang/lectern-app/pull/106)）。批量线程组（[ADR 0029](../adr/0029.md)）在 [#106](https://github.com/SoloJiang/lectern-app/pull/106) 实现。关闭回调 `on_shutdown`（[code_intel 设计「对其他 crate 的要求」](code_intel.md#对其他-crate-的要求)）在 [#109](https://github.com/SoloJiang/lectern-app/pull/109) 实现。运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 5 项）在 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 实现。
 
 `executor` 运行 UI 线程之外的 IO、解析和 git 操作（[技术调研「不同步阻塞 UI」](tech-research.md)）。它实现 kernel 对执行器的约定（[kernel 设计](kernel.md)「撤销」里的后台任务、`SubmitGate`、`GateSlot`），让插件提交的任务随激活失效而丢弃、任务 panic 时插件进入 `Failed`。
 
@@ -22,7 +22,7 @@
 
 ## 依赖
 
-只用标准库、`lectern-kernel`（`SubmitGate`、`GateSlot`、`catch`、`contain`）和 `lectern-logging`（运行日志的宏与作用域，[ADR 0046](../adr/0046.md)；接入由 [logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 5 项完成，在此之前日志写 stderr）。任务状态机用 `Arc` 加 `std::task::Wake` 实现，不需要 `unsafe`，也不引入 `async-task`、`tokio` 这类依赖：Lectern 的任务数量在千级，不需要它们的优化，而 kernel 约定里「运行中被唤醒只设标记」「已结束的任务不再 poll」这类规则自己实现更容易对照测试。
+只用标准库、`lectern-kernel`（`SubmitGate`、`GateSlot`、`catch`、`PanicPayload`）和 `lectern-logging`（运行日志的宏与作用域，[ADR 0046](../adr/0046.md)，见「日志与诊断」）。任务状态机用 `Arc` 加 `std::task::Wake` 实现，不需要 `unsafe`，也不引入 `async-task`、`tokio` 这类依赖：Lectern 的任务数量在千级，不需要它们的优化，而 kernel 约定里「运行中被唤醒只设标记」「已结束的任务不再 poll」这类规则自己实现更容易对照测试。
 
 ## 接口
 
@@ -214,14 +214,14 @@ struct TaskCell<T> {
 `spawn_gated` 提交的任务按 [kernel 设计](kernel.md) 处理：
 
 - 每次 poll future 之前调用 `GateSlot::poll(cx)`：`Run` 才 poll；`Wait` 返回 `Pending`（闸门打开时 kernel 唤醒它）；`Drop` 在 `contain` 里丢弃 future，任务结束。
-- poll 用 `kernel::catch` 包住。panic 时顺序固定：先把状态写为 `Done`，再在 `contain` 里 drop future，然后 `PanicPayload::dispose` 取出消息，最后调用 `GateSlot::panicked(message)`。
-- future 的每一次最终 drop（完成、取消、闸门关闭、shutdown 丢弃）都在 `contain` 里进行，panic 时调用 `GateSlot::panicked`；没有闸门的任务只记日志。
+- poll 用 `kernel::catch` 包住。panic 时顺序固定：先把状态写为 `Done`，再在 `contain` 里 drop future，然后记 error `task panicked`（要读 payload，见「日志与诊断」），再 `PanicPayload::dispose` 取出消息，最后调用 `GateSlot::panicked(message)`。
+- future 的每一次最终 drop（完成、取消、闸门关闭、shutdown 丢弃）都在 `contain` 里进行，panic 时记 error 后调用 `GateSlot::panicked`；没有闸门的任务只记 error。
 - 没有闸门的任务 panic 时，`Task` 的结果为 `TaskError::Panicked(message)`，工作线程继续运行。
 
 `run_dedicated_gated` 在专用线程上执行同一套规则，没有 future，闸门检查只在运行闭包之前做一次：
 
 - 专用线程用一个唤醒时 `unpark` 本线程的 waker 调用 `GateSlot::poll`：`Wait` 时 `park`，被唤醒后再检查；`Run` 时运行闭包；`Drop`（闸门关闭、激活失效）或任务被取消（句柄 drop、shutdown）时不运行，在 `contain` 里丢弃闭包，panic 时调用 `GateSlot::panicked`。
-- 闭包在 `kernel::catch` 里运行。panic 时闭包捕获的值在展开时已 drop，然后 `PanicPayload::dispose` 取出消息，接着写为 `Done`（结果 `Panicked(message)` 对句柄可见），最后调用 `GateSlot::panicked(message)`。专用任务没有 waker 会把它重新排队，`Done` 只决定结果何时可见，所以它排在 `dispose` 之后：结果里要带消息。
+- 闭包在 `kernel::catch` 里运行。panic 时闭包捕获的值在展开时已 drop，然后记 error `task panicked`，再 `PanicPayload::dispose` 取出消息，接着写为 `Done`（结果 `Panicked(message)` 对句柄可见），最后调用 `GateSlot::panicked(message)`。专用任务没有 waker 会把它重新排队，`Done` 只决定结果何时可见，所以它排在 `dispose` 之后：结果里要带消息。
 - 闭包开始运行后 executor 不能中断它。闭包要能随激活失效而结束，比如把子进程登记为插件的注册项，激活失效时 kernel 撤销注册项、关闭子进程，闭包里阻塞的读取随之返回。
 - 闭包结束（或被丢弃）后写为 `Done`，再 drop `GateSlot`，线程退出。
 
@@ -238,12 +238,32 @@ struct TaskCell<T> {
 - 空闲时：工作线程阻塞，不占 CPU；每个线程的常驻内存是栈实际用到的部分（虚拟 2 MiB），6 个线程合计不到 1 MB 常驻，计入 60 MB 空闲预算。没有提交过 `Batch` 任务时批量线程不存在，批量线程组只多出空的队列和计数，不分配堆内存；批量线程启动后最多 3 个，同样空闲阻塞。
 - 开销：提交一个任务是一次 `Arc` 分配、一次加锁入队和一次 `Condvar` 通知；`bench` 增加「提交并完成 10 000 个空任务」和「1 000 个任务各唤醒 100 次」两项基准，记录耗时，不设硬预算。这两项随 `bench` crate 的设计一起在 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 加入，见「与设计的差异」。
 - 取消：句柄 drop 只设标记并唤醒，不等任务结束；取消对 UI 线程是 O(1)。
+- 日志的作用域（见「日志与诊断」）：提交时读一次当前线程的 `Ctx`，和任务序号（一次原子加）、闸门的 `plugin`、`act` 一起存进 `TaskCell`，不另分配；每一步在工作线程上设、步末恢复，各是几次线程本地变量的读写，不分配内存，不加锁，在 Linux 虚拟机上合计约 20 ns。`executor/` 的两项基准在接入前后的波动范围内，分辨不出差别（「实际验证」）。
 
 ## 状态与异常
 
 - 任务 panic：不展开到工作线程；有闸门的按上一节交给 kernel，没有闸门的变为 `TaskError::Panicked`。
 - shutdown 之后提交：返回已取消的句柄。future 或闭包交给一个新建的分离线程 `executor-reclaim`，在那里于 `contain` 里 drop，提交调用不等它，所以 UI 线程在退出过程中提交也不会被 future 的 `Drop` 阻塞。shutdown 之后的提交只在退出过程中出现，按次建线程的开销可以接受。
 - 工作线程意外退出（`on_thread_start` 钩子 panic）：钩子在 `contain` 里调用，panic 只记日志，线程照常工作。
+
+## 日志与诊断
+
+记录经 `lectern-logging` 的宏写出，target 为 `executor`（[logging 设计](logging.md)、[ADR 0046](../adr/0046.md)）。本文其余各节的「在 `contain` 里」在实现里是 `kernel::catch`，记下 panic 之后再 `PanicPayload::dispose`：记录要按 payload 的类型选 `PanicText`。
+
+- 默认记录：
+  - error `task panicked`：任务的代码 panic。字段 `phase` 是当时运行的那段代码：`poll`（池任务的一次 poll）、`run`（专用任务的闭包）、`drop`（future 或未运行的闭包的最终 drop，包括闸门封住后在提交线程上丢弃的工作）、`result`（没人读取的结果的 drop）。`message` 用 `Value::panic_message`，`PanicText` 按 payload 的类型构造，与 kernel 相同：`&'static str` 为 `Static`，`String` 为 `Formatted`，其他为 `Other`。有闸门的任务先记这条，再调用 `GateSlot::panicked` 或 `SubmitGate::panicked`；插件因此进入 `Failed` 由 kernel 另记 `plugin deactivated after a failure`（[kernel 设计「日志与诊断」](kernel.md#日志与诊断)）。
+  - error `shutdown hook panicked`：`on_shutdown` 的回调 panic，`phase` 为 `run`（调用时）或 `drop`（注销时丢弃），`message` 规则同上。
+  - error `thread start hook panicked`：`on_thread_start` 的钩子 panic，`kind` 为 `worker`、`batch` 或 `dedicated`，`message` 规则同上。
+  - error `a task step panicked outside its guard`：工作线程最外层的 `catch` 接住了 executor 自身的 panic（任务代码的 panic 都在内层接住），`message` 规则同上。
+  - error `could not start a pool thread`（`pool` 为 `workers` 或 `batch`，`index` 是线程序号，`error` 为 `Value::io`）、`could not start a dedicated thread`（`error`）。
+  - warn `could not spawn a reclaim thread; leaking a task submitted after shutdown`（`error`）、`shutdown timed out`（`busy_workers`，与 `Shutdown::TimedOut` 相同）。
+- 详细级别：不另记 debug、trace。提交、唤醒和 poll 是热路径，不在上面记日志。
+- 关联 ID：
+  - `task` 是任务序号，进程内从 1 递增。池任务、专用任务和替放弃的句柄 drop 结果的任务各取一个，所以日志里的任务序号递增，但不连续。
+  - 提交时取 `logging::current()`；有闸门时把其中的 `plugin`、`act` 换成闸门所属的那次激活的（`SubmitGate::log_ctx`，插件没有 `PluginTag` 时记录不带 `plugin`，不沿用提交方的）；再设 `task`。这个 `Ctx` 存进任务。所以在任务里提交的任务、在某个作用域里提交的任务都带上提交方的关联 ID，序号是自己的。
+  - 设作用域的位置：池任务的每一步（闸门检查、poll、最终 drop、交出结果）外，在运行它的线程上；专用任务在启动钩子之后，包住整个线程体；被丢弃的未运行任务、没人读取的结果在 drop 它们的线程上，用原任务的作用域。作用域不跨 `.await`，每一步结束时恢复，工作线程上不残留。闸门封住后被拒绝的工作没有成为任务，丢弃时只设闸门的 `plugin`、`act`。启动钩子和关闭回调不是任务的代码，不设作用域。
+- 不记录：panic 消息只经 `Value::panic_message`，`TaskError::Panicked` 和交给 kernel 的消息只在内存里传递；任务的 future、闭包和结果的内容不记；专用线程的名字是调用方传入的字符串，建线程失败时不记。线程建起来之后，它的名字作为 `th` 出现在这个线程写出的记录里，调用方只传代码里的字面量（`jdtls-reader` 这类）。
+- 金丝雀测试：`crates/executor/src/tests/logs.rs` 的 `canary_stays_out_of_executor_logs`：在 trace 级别的 `testing::capture()` 下，金丝雀放进格式化的 panic 消息（池任务的 poll、专用任务的闭包、有闸门的任务、启动钩子、关闭回调）和 `Drop` 会 panic 的值（没人读取的结果、被取消的 future、闸门封住后被拒绝的 future、注销的关闭回调），之后 `assert_absent`。
 
 ## 测试
 
@@ -265,6 +285,7 @@ struct TaskCell<T> {
 - 带闸门的专用任务：闸门未打开时闭包不运行；打开后运行；闸门关闭或激活失效时闭包被丢弃、没有运行；闭包 panic 时插件进入 `Failed`；闸门封住后提交返回已取消的句柄，没有新建线程。
 - `manual()`：`run_until_idle` 按入队顺序运行，结果确定。
 - 首帧：`Executor::new` 之后、第一次提交之前，进程里没有 `executor-*` 线程。
+- 日志（见「日志与诊断」）：金丝雀测试；有闸门的任务 panic 时，记录带闸门的 `plugin`、`act` 和这个任务的 `task`，在它里面提交的任务带同样的 `plugin`、`act` 和自己的 `task`；在一个作用域里提交的任务继承这个作用域，作用域不留在运行任务的线程上。
 
 ## 验收
 
@@ -285,6 +306,18 @@ struct TaskCell<T> {
 - `just test -p lectern-executor` 连续运行 40 次、用 `taskset -c 0` 限制在单核上再运行 15 次，全部通过；`cargo test`（所有测试在同一进程的多个线程里）也通过。
 - 批量线程组（[#106](https://github.com/SoloJiang/lectern-app/pull/106)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 61 个测试；同样连续运行 40 次、`taskset -c 0` 单核 15 次，`cargo test` 同一进程，全部通过。`just bench --measure executor/` 改动前后在同一台 4 核 Linux 容器上各跑 3 次，中位数：`executor/spawn_10k` 改动前 21.1、36.3、18.3 ms，改动后 12.5、14.3、17.2 ms（两边都标为 noisy）；`executor/wake_1000x100` 改动前 64.2、69.6、73.9 ms，改动后 64.0、53.1、55.2 ms。差别在同一版本多次运行的波动之内，没有变慢（只记录，不设预算）。两项都只提交 `Background` 任务，不创建批量线程。
 - 关闭回调（[#109](https://github.com/SoloJiang/lectern-app/pull/109)）：`just check`、`just test`、`just doctest`、`just deny` 全部通过，`just test -p lectern-executor` 共 68 个测试；`just test -p lectern-executor hooks` 连续运行 40 次、`taskset -c 0` 单核 15 次，全部通过。只增加登记表和 `shutdown` 开头的一次加锁，没有改提交和调度路径，没有重跑基准。
+- 运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 5 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），在 Linux（x86_64，4 核虚拟机，同时有其他构建）上运行：
+  - `just check`、`just test`（工作区 2156 个测试）、`just doctest`、`just deny` 通过。`just test -p lectern-executor` 共 71 个测试，新增 3 个（`src/tests/logs.rs`）；`cargo test -p lectern-executor --all-features --lib` 在同一进程里运行全部测试也通过（共用一个捕获器，按激活序号和任务序号筛选）；`cargo nextest run -p lectern-executor --all-features -E 'test(logs)' --stress-count 30` 30 轮全部通过。kernel 的 109 个测试照常通过。
+  - logging 设计「验收」第 4 步起的检查：`rg 'eprintln!|util::log' crates/executor/src --glob '!**/tests*'` 没有结果，`util::log` 已删除；金丝雀测试通过；`panic_records_carry_plugin_act_and_task` 检查记录里的 `plugin`、`act`、`task`。
+  - `just bench --measure executor/`（只记录）：改动前是 `origin/main` 的另一个 worktree，与改动后交替运行，每次的中位数依次列出：
+
+    | ID | 改动前 | 改动后 |
+    |---|---|---|
+    | `executor/spawn_10k` | 12.8 / 21.3 / 26.9 / 18.5 / 24.0 / 11.1 / 27.1 / 43.3 / 38.7 ms | 25.3 / 12.6 / 18.3 / 25.2 / 22.2 / 45.6 / 29.0 / 52.0 / 22.8 / 39.5 ms |
+    | `executor/wake_1000x100` | 49.1 / 68.3 / 69.2 / 68.2 / 67.4 / 61.0 / 73.7 / 73.6 / 67.3 ms | 77.8 / 50.5 / 72.3 / 66.8 / 65.6 / 67.9 / 74.3 / 69.3 / 71.1 / 72.1 ms |
+
+    各次中位数再取中位数：`spawn_10k` 改动前 24.0 ms、改动后 25.3 ms，`wake_1000x100` 改动前 68.2 ms、改动后 70.2 ms。两项在两侧都在很宽的范围里跳动（`spawn_10k` 一次运行内的 MAD 达到中位数的一半），差别在同一版本多次运行的波动之内，这两项基准分辨不出变化。
+  - 为了看清线程调度之外的开销，另用 `Executor::manual()` 在一个线程上测了提交加一步（2 万个空任务）和每次 poll（1000 个任务各唤醒 100 次），改动前后交替运行（临时测试，没有提交）：设一次作用域再恢复约 20 ns，提交时取作用域和序号约 13 ns；提交加一步的 p25 从约 710–740 ns 变为约 780–910 ns，每次 poll 的 p25 从约 308–315 ns 变为约 326–339 ns。同一份代码重新编译后这两个数会差 50 ns 左右，测不准到个位，但 poll 多出的 10–30 ns 与作用域的开销一致。`Ctx` 有 120 字节，设和恢复要复制几次；去掉 `current()` 和 `Scope` 里的一次线程本地访问没有变快，开销在复制上。
 - 测试用真实的 `lectern-kernel`（dev-dependency 打开 `test-support`，用 `Kernel::start` 和 `Kernel::barrier`），等待一律用通道或 `block_on`，超时只作为失败保护；只有插件状态、kernel 静止这类没有事件可等的地方按 1 ms 间隔轮询，上限 10 秒。
 
 「测试」一节逐条对应（`crates/executor/src/tests/`）：
@@ -332,7 +365,6 @@ struct TaskCell<T> {
 - `Config::workers` 为 0 时按 1 处理；只有 1 个工作线程时不保留 `Interactive` 线程，否则 `Background` 任务永远没有线程运行。
 - 增加了设计没写的细节：`TaskError` 实现 `Display` 和 `Error`；`Task` 标 `#[must_use]`（drop 即取消）；`Task` 在结果被取走后再次 poll 得到 `Err(Cancelled)`，不 panic；专用线程建不起来时记日志、在调用线程上于 `contain` 里丢弃闭包、句柄为已取消；`executor-reclaim` 线程建不起来时记日志并泄漏这个任务（与 kernel 的 payload 回收相同），不在提交线程上 drop。
 - 「性能」一节的两项基准没有加：`bench` crate 还没有设计文档和基准框架（`crates/bench/AGENTS.md`），随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 一起加入。bench 第 1 步已加入 `executor/spawn_10k`、`executor/wake_1000x100`（只记录），只用公开接口。
-- 日志写到 stderr（`lectern-executor:` 前缀），与 kernel 相同，由 `app` 重定向。
 - 批量线程组（[#106](https://github.com/SoloJiang/lectern-app/pull/106)）：
   - 两组线程各自按需启动：工作线程在第一次提交 `Interactive` / `Background` 时启动，不再是「第一次提交任何任务」。只有 `Batch` 工作时不建工作线程，空闲内存和线程数都更少。启动、退出的记账从 `Sched` 移到每组一个的 `PoolState`，两组的规则相同。
   - `Batch` 任务的句柄放弃时，已存好的结果交给批量线程 drop（设计只写了「交给执行器另排一个 `Background` 任务」）：批量线程组这时一定已经启动，交给 `Background` 会只为 drop 一个结果去启动工作线程。
@@ -343,3 +375,10 @@ struct TaskCell<T> {
 - 关闭回调（[#109](https://github.com/SoloJiang/lectern-app/pull/109)）：
   - 接口按 [code_intel 设计](code_intel.md#对其他-crate-的要求)，参数是 `Box<dyn FnOnce() + Send>`。code_intel 设计没有规定的部分在本文「关闭回调」里补全：`shutdown` 开始之后的登记立即在登记线程上调用（不拒绝），drop 不等已被取走的回调，回调按登记顺序调用。选择立即调用而不拒绝：调用方只需要一条路径，拒绝时它仍要自己调用同一个停止函数。
   - 登记表单独一把锁（`ShutdownHooks`），不放进 `Sched`：回调的登记和注销不与任务调度争用同一把锁。
+- 运行日志（[logging 设计](logging.md)「对其他 crate 的要求」第 5 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，接口见「日志与诊断」）：
+  - kernel 多了两个公开方法：`SubmitGate::log_ctx`（闸门所属激活的 `plugin`、`act`）和 `PanicPayload::text`（按 payload 的类型给出 `PanicText`，原来只在 kernel 内部用）。第 5 项要求任务带「闸门的插件和激活」、`PanicText` 与 kernel 一样按 payload 的类型构造，原有的公开接口里取不到这两样。只读 `logging::current()` 时，`start` 把闸门交给另一个线程再提交的任务就没有 `plugin`、`act`。
+  - 任务序号是进程内的计数，同时作为登记表的键，取代原来每个 `Executor` 各自从 0 开始的编号；专用任务和替放弃的句柄 drop 结果的任务也取序号，后者设原任务的作用域，所以序号递增但不连续。
+  - 专用任务也设作用域（第 5 项只写了 `spawn`）：它的闭包同样是提交方的代码，`run_dedicated_gated` 的闭包 panic 也要带闸门的 `plugin`、`act`。
+  - 原来 drop 时只得到消息的几处（future、未运行的闭包、没人读取的结果、关闭回调、启动钩子、最外层的保护）改用 `catch`：只有 payload 能决定 `PanicText` 的变体。
+  - 新增 warn `shutdown timed out`：原来超时只体现在返回值里，`app` 退出时不一定再记，日志里看不出哪次退出没等到工作线程。
+  - logging 设计第 5 项写的是 13 处 `util::log`，实际是 12 处调用加上函数本身；全部改为宏，`util::log` 已删除。

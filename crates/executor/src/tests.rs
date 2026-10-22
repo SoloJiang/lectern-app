@@ -8,6 +8,7 @@ mod dedicated;
 mod gates;
 mod hooks;
 mod kernel;
+mod logs;
 mod manual;
 mod panics;
 mod scheduling;

@@ -88,7 +88,7 @@ fn suspended_gated_tasks_are_dropped_when_the_activation_dies() {
 
 /// Calls `own_with` with a `start` that hands its gate out and returns, so
 /// the gate is sealed.
-fn sealed_gate(plugin: &TestPlugin) -> SubmitGate {
+pub(super) fn sealed_gate(plugin: &TestPlugin) -> SubmitGate {
     let stash = Arc::new(Mutex::new(None));
     let s = stash.clone();
     assert!(plugin.handle.own_with(move |gate| {

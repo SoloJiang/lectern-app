@@ -5,12 +5,14 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Wake, Waker};
 use std::thread::{self, Thread};
 
-use lectern_kernel::{GatePoll, GateSlot, catch, contain};
+use lectern_kernel::{GatePoll, GateSlot, catch};
+use lectern_logging::Ctx;
 
+use crate::diag::{Phase, contain_task, task_panicked};
 use crate::output::Output;
 use crate::sched::{Inner, Job, TaskId, run_hook};
 use crate::task::Handle;
-use crate::util::{lock, log};
+use crate::util::lock;
 use crate::{Priority, TaskError, ThreadKind};
 
 type BoxFn<T> = Box<dyn FnOnce() -> T + Send>;
@@ -19,6 +21,7 @@ type BoxFn<T> = Box<dyn FnOnce() -> T + Send>;
 type Finished<T> = (Result<T, TaskError>, Option<String>);
 
 pub(crate) struct DedicatedCell<T> {
+    /// The task number: the registry key and `task` in log records.
     id: TaskId,
     cancelled: AtomicBool,
     work: Mutex<Option<BoxFn<T>>>,
@@ -26,25 +29,31 @@ pub(crate) struct DedicatedCell<T> {
     slot: Mutex<Option<GateSlot>>,
     /// The thread running this task, once it has started; `cancel` unparks it.
     thread: Mutex<Option<Thread>>,
+    /// The log scope set around the thread body (after the start hook) and
+    /// the drop of an unrun closure.
+    ctx: Ctx,
     output: Output<T>,
     exec: Weak<Inner>,
 }
 
 impl<T: Send + 'static> DedicatedCell<T> {
-    pub(crate) fn new(exec: &Arc<Inner>, work: BoxFn<T>, slot: Option<GateSlot>) -> Arc<Self> {
+    pub(crate) fn new(
+        exec: &Arc<Inner>,
+        id: TaskId,
+        ctx: Ctx,
+        work: BoxFn<T>,
+        slot: Option<GateSlot>,
+    ) -> Arc<Self> {
         Arc::new(DedicatedCell {
-            id: exec.next_id(),
+            id,
             cancelled: AtomicBool::new(false),
             work: Mutex::new(Some(work)),
             slot: Mutex::new(slot),
             thread: Mutex::new(None),
+            ctx,
             output: Output::new(),
             exec: Arc::downgrade(exec),
         })
-    }
-
-    pub(crate) fn id(&self) -> TaskId {
-        self.id
     }
 
     /// The thread body: wait for the gate, then run the closure once.
@@ -76,28 +85,30 @@ impl<T: Send + 'static> DedicatedCell<T> {
             Ok(value) => (Ok(value), None),
             Err(payload) => {
                 // The closure's captures were dropped while unwinding.
+                task_panicked(Phase::Run, &payload);
                 let message = payload.dispose();
                 (Err(TaskError::Panicked(message.clone())), Some(message))
             }
         }
     }
 
-    /// Drops the closure without running it, under `contain`.
+    /// Drops the closure without running it, under `catch` (a panic is
+    /// logged).
     fn drop_unrun(&self) -> Finished<T> {
         let work = lock(&self.work).take();
-        let panic = contain(move || drop(work)).err();
+        let panic = contain_task(Phase::Drop, move || drop(work)).err();
         (Err(TaskError::Cancelled), panic)
     }
 
-    /// Marks the task done (its result becomes visible), reports a panic to
-    /// the gate, then drops the gate slot and leaves the registry.
+    /// Marks the task done (its result becomes visible), reports a panic
+    /// (already logged) to the gate, then drops the gate slot and leaves the
+    /// registry.
     fn finish(&self, (result, panic): Finished<T>) {
         self.output.complete(result);
-        if let Some(message) = panic {
-            match &*lock(&self.slot) {
-                Some(slot) => slot.panicked(message),
-                None => log(format_args!("dedicated task panicked: {message}")),
-            }
+        if let Some(message) = panic
+            && let Some(slot) = &*lock(&self.slot)
+        {
+            slot.panicked(message);
         }
         let slot = lock(&self.slot).take();
         drop(slot);
@@ -112,6 +123,7 @@ impl<T: Send + 'static> Job for DedicatedCell<T> {
         let hook = self.exec.upgrade().and_then(|exec| exec.hook.clone());
         run_hook(hook.as_ref(), ThreadKind::Dedicated);
         drop(hook);
+        let _scope = lectern_logging::scope(self.ctx);
         let finished = self.body();
         self.finish(finished);
     }
@@ -124,6 +136,7 @@ impl<T: Send + 'static> Job for DedicatedCell<T> {
     }
 
     fn discard(self: Arc<Self>) {
+        let _scope = lectern_logging::scope(self.ctx);
         let finished = self.drop_unrun();
         self.finish(finished);
     }
@@ -139,7 +152,8 @@ impl<T: Send + 'static> Handle<T> for DedicatedCell<T> {
     }
 
     fn abandon(&self) {
-        self.output.abandon(&self.exec, Priority::Background);
+        self.output
+            .abandon(&self.exec, Priority::Background, &self.ctx);
     }
 }
 

@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 5 项（`executor`）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -594,3 +594,8 @@ level     := off | error | warn | info | debug | trace
 「对其他 crate 的要求」第 4 项（`kernel`，[#182](https://github.com/SoloJiang/lectern-app/pull/182)）：
 
 - **`plugin failed` 多了两个阶段。** 第 4 项列出的七个阶段之外，kernel 的边界还包住两段插件代码：`WorkspaceFacts::contains`（阶段 `workspace`）和 `own_with` 的 `start`（阶段 `own_with`，它用保留 payload 的 `catch`，同样记这条）。两者的 panic 都让插件进入 `Failed`，不记就查不到原因。记录的字段和其余规则见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)。
+
+「对其他 crate 的要求」第 5 项（`executor`，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+
+- **kernel 公开了两个只读方法。** 任务要带「闸门的插件和激活」，`PanicText` 要按 payload 的类型构造，原有的公开接口里取不到这两样：kernel 加上 `SubmitGate::log_ctx` 和 `PanicPayload::text`（[kernel 设计「与设计的差异」](kernel.md#与设计的差异)）。
+- **专用任务也有序号和作用域**，不只是 `spawn` 提交的任务；`util::log` 实际是 12 处调用。其余见 [executor 设计「日志与诊断」](executor.md#日志与诊断)和它的「与设计的差异」。

@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Waker};
 
+use lectern_logging::Ctx;
+
 use crate::kernel::{Request, invalidate};
 use crate::plugin::PluginError;
 use crate::token::{ActivationToken, TokenState};
@@ -179,6 +181,13 @@ impl SubmitGate {
             inner: self.inner.clone(),
             index,
         })
+    }
+
+    /// The `plugin` and `act` of the activation this gate submits for (the
+    /// other fields None). The executor puts them in the log scope of every
+    /// task it takes a slot for.
+    pub fn log_ctx(&self) -> Ctx {
+        self.inner.token.log_ctx()
     }
 
     /// A task without a slot panicked while being dropped; same effect as

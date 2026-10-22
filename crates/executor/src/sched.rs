@@ -2,17 +2,20 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use lectern_kernel::contain;
+use lectern_kernel::catch;
+use lectern_logging::{Ctx, Field, Value, error, warn};
 
+use crate::diag::{Phase, contain_task, next_task};
 use crate::hooks::ShutdownHooks;
-use crate::util::{lock, log, wait, wait_timeout};
+use crate::util::{lock, wait, wait_timeout};
 use crate::{Hook, Priority, Shutdown, ThreadKind};
 
+/// A task's number (`diag::next_task`): unique in the process, so it also
+/// keys the registries.
 pub(crate) type TaskId = u64;
 
 #[cfg(test)]
@@ -48,6 +51,15 @@ impl Pool {
             Pool::Workers => format!("executor-{index}"),
             Pool::Batch => format!("executor-batch-{index}"),
         }
+    }
+}
+
+impl Field for Pool {
+    fn value(&self) -> Value<'_> {
+        Value::text(match self {
+            Pool::Workers => "workers",
+            Pool::Batch => "batch",
+        })
     }
 }
 
@@ -136,7 +148,6 @@ pub(crate) struct Inner {
     batch_workers: usize,
     pub(crate) hook: Option<Hook>,
     manual: bool,
-    next_id: AtomicU64,
     /// Callbacks registered with `Executor::on_shutdown`.
     pub(crate) shutdown_hooks: Arc<ShutdownHooks>,
     /// Called before each worker is spawned, outside every lock.
@@ -170,15 +181,10 @@ impl Inner {
             batch_workers: batch_workers.max(1),
             hook,
             manual,
-            next_id: AtomicU64::new(0),
             shutdown_hooks: Arc::default(),
             #[cfg(test)]
             before_spawn: Mutex::new(None),
         })
-    }
-
-    pub(crate) fn next_id(&self) -> TaskId {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Registers and queues a new pool task, starting its pool's threads on
@@ -319,10 +325,12 @@ impl Inner {
                 Err(error) => {
                     sched.pool(pool).alive -= 1;
                     drop(sched);
-                    log(format_args!(
-                        "could not start thread {}: {error}",
-                        pool.thread_name(index)
-                    ));
+                    error!(
+                        "could not start a pool thread";
+                        pool = pool,
+                        index = index,
+                        error = Value::io(&error),
+                    );
                 }
             }
         }
@@ -333,11 +341,13 @@ impl Inner {
     /// Hands a value to a thread of `priority`'s pool to drop under
     /// `contain` (after shutdown, to the reclaim thread), so the calling
     /// thread never runs its `Drop`.
-    pub(crate) fn drop_later(self: &Arc<Self>, value: Box<dyn Send>, priority: Priority) {
-        let id = self.next_id();
+    /// `ctx` is the scope of the task the value came from.
+    pub(crate) fn drop_later(self: &Arc<Self>, value: Box<dyn Send>, priority: Priority, ctx: Ctx) {
+        let id = next_task();
         let job = Arc::new(Unread {
             id,
             value: Mutex::new(Some(value)),
+            ctx,
             exec: Arc::downgrade(self),
         });
         self.submit(id, priority, job);
@@ -388,9 +398,10 @@ impl Inner {
         while sched.running() {
             let now = Instant::now();
             if now >= deadline {
-                return Shutdown::TimedOut {
-                    busy_workers: sched.workers.alive + sched.batch_pool.alive,
-                };
+                let busy_workers = sched.workers.alive + sched.batch_pool.alive;
+                drop(sched);
+                warn!("shutdown timed out"; busy_workers = busy_workers);
+                return Shutdown::TimedOut { busy_workers };
             }
             sched = wait_timeout(&self.exited, sched, deadline - now);
         }
@@ -408,9 +419,14 @@ impl Inner {
 
 pub(crate) fn run_hook(hook: Option<&Hook>, kind: ThreadKind) {
     if let Some(hook) = hook
-        && let Err(message) = contain(|| hook(kind))
+        && let Err(payload) = catch(|| hook(kind))
     {
-        log(format_args!("thread start hook panicked: {message}"));
+        error!(
+            "thread start hook panicked";
+            kind = kind,
+            message = Value::panic_message(payload.text()),
+        );
+        payload.dispose();
     }
 }
 
@@ -462,15 +478,16 @@ fn pool_thread(inner: Arc<Inner>, role: Role) {
 struct Unread {
     id: TaskId,
     value: Mutex<Option<Box<dyn Send>>>,
+    /// The scope of the task the value came from.
+    ctx: Ctx,
     exec: Weak<Inner>,
 }
 
 impl Unread {
     fn release(&self) {
+        let _scope = lectern_logging::scope(self.ctx);
         let value = lock(&self.value).take();
-        if let Err(message) = contain(move || drop(value)) {
-            log(format_args!("dropping a task result panicked: {message}"));
-        }
+        let _ = contain_task(Phase::Result, move || drop(value));
     }
 }
 
@@ -493,10 +510,12 @@ impl Job for Unread {
 /// Every panic inside a step is already caught; this is a last guard so a bug
 /// cannot take a worker down.
 fn run_job(job: Arc<dyn Job>) {
-    if let Err(message) = contain(move || job.run()) {
-        log(format_args!(
-            "a task step panicked outside its guard: {message}"
-        ));
+    if let Err(payload) = catch(move || job.run()) {
+        error!(
+            "a task step panicked outside its guard";
+            message = Value::panic_message(payload.text()),
+        );
+        payload.dispose();
     }
 }
 
@@ -509,9 +528,10 @@ fn reclaim(job: Arc<dyn Job>) {
     let spawned = thread::Builder::new()
         .name("executor-reclaim".to_owned())
         .spawn(move || ManuallyDrop::into_inner(job).discard());
-    if spawned.is_err() {
-        log(format_args!(
-            "could not spawn a reclaim thread; leaking a task submitted after shutdown"
-        ));
+    if let Err(error) = spawned {
+        warn!(
+            "could not spawn a reclaim thread; leaking a task submitted after shutdown";
+            error = Value::io(&error),
+        );
     }
 }

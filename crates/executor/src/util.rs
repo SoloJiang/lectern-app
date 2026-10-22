@@ -1,6 +1,5 @@
-//! Lock helpers and logging.
+//! Lock helpers.
 
-use std::fmt;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -24,10 +23,4 @@ pub(crate) fn wait_timeout<'a, T>(
         Ok((guard, _)) => guard,
         Err(poisoned) => poisoned.into_inner().0,
     }
-}
-
-/// Writes a diagnostic line to stderr. The executor has no logging
-/// dependency; `app` redirects stderr to its log file.
-pub(crate) fn log(args: fmt::Arguments<'_>) {
-    eprintln!("lectern-executor: {args}");
 }

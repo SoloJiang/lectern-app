@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#182](https://github.com/SoloJiang/lectern-app/pull/182)）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#182](https://github.com/SoloJiang/lectern-app/pull/182)；executor 接入（第 5 项）用到的 `SubmitGate::log_ctx`、`PanicPayload::text` 随 [#PR](https://github.com/SoloJiang/lectern-app/pull/PR) 公开）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -210,6 +210,10 @@ impl SubmitGate {
 
     /// 没有申请到槽位的任务在丢弃时 panic，executor 用它报告，效果与 `GateSlot::panicked` 相同。
     pub fn panicked(&self, message: String);
+
+    /// 闸门所属的那次激活的 `plugin`、`act`（其余字段为 None），与 kernel 给这次激活设的作用域相同。
+    /// executor 把它放进经这个闸门提交的任务的作用域（见「日志与诊断」）。
+    pub fn log_ctx(&self) -> lectern_logging::Ctx;
 }
 
 /// 一个任务在闸门上的槽位，存放这个任务最近一次的 waker，drop 时从闸门移除。
@@ -238,7 +242,7 @@ impl GateSlot {
     /// 唤醒一个运行中的任务只设一个「待重新 poll」标记，由正在运行的那次 poll 返回后再调度，唤醒已结束的任务直接忽略，
     /// 所以任何时候一个任务都不会被重入 poll，panic 路径上的任务在标为已结束之后也不会再被 poll。这是 `executor` 对 kernel 的约定，有测试覆盖。
     /// 激活已经失效时只记日志。这个方法只接收消息，不接收 payload，调用它时 payload 已经释放。
-    /// future 的 drop 不需要先做别的事，executor 直接用 `kernel::contain` 包住。
+    /// future 的 drop 不需要先做别的事，executor 用 `kernel::catch` 包住，记下 panic 后直接 `dispose`（见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）。
     pub fn panicked(&self, message: String);
 }
 
@@ -252,6 +256,10 @@ impl PanicPayload {
     /// 第二个 panic 的 payload 用 `mem::forget` 泄漏），executor 的工作线程、kernel 线程、主线程和其他 payload 的释放都不等它。所以调用方拿到消息后
     /// 可以立刻让激活失效、唤醒其他任务，不必安排 payload 和 future 的释放顺序。`PanicPayload` 自己的 `Drop` 做同样的事。
     pub fn dispose(self) -> String;
+
+    /// 记日志用：按 payload 的类型给出 `PanicText`（`&'static str` 为 `Static`，`String` 为 `Formatted`，其他为 `Other`），
+    /// 不看内容。kernel 的 `plugin failed` 和 executor 的 `task panicked` 在 `dispose` 之前用它构造 `Value::panic_message`。
+    pub fn text(&self) -> lectern_logging::PanicText<'_>;
 }
 
 /// 用 `catch_unwind` 运行 `f`，panic 时保留 payload 返回。
@@ -1087,3 +1095,4 @@ impl Kernel {
 - 插件进入 `Failed` 另记一条（`plugin activation failed`、`plugin deactivated after a failure`、`plugin rejected by the dependency graph`），只带错误的种类和服务的稳定 ID。原来 stderr 上写的是 `PluginError` 的 `Display`，其中 `Failed`、`Panicked` 的文字来自插件或 panic 消息，`InvalidGraph` 和 `GraphError` 带插件 ID 和命令名，类型化字段写不出这些运行时字符串，也不应该写。
 - 作用域不只包住 `contain`：带 token 的 `Emitter` 的分发、`PluginHandle` 和 `KernelControl` 的拒绝路径、`Admission::own` 也设了，这些路径上 drop 的值同样是插件的代码，插件自己在这些调用里写的记录也带上 `plugin`、`act`。
 - 新增 info `plugin deactivated`：logging 设计只要求激活记 info，撤销是同一类生命周期事件，没有它就看不出一次激活什么时候结束。
+- executor 接入（logging 设计第 5 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）需要两个公开方法：`SubmitGate::log_ctx`，任务的作用域要带闸门所属激活的 `plugin`、`act`，闸门原来只把 token 留在 kernel 内部；`PanicPayload::text`，executor 记任务的 panic 时按 payload 的类型选 `PanicText`，原来只有 kernel 内部能用。两者都只读，不改变闸门和 payload 的行为。

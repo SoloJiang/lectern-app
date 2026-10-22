@@ -4313,6 +4313,7 @@ name = "lectern-executor"
 version = "0.0.0"
 dependencies = [
  "lectern-kernel",
+ "lectern-logging",
 ]
 
 [[package]]
