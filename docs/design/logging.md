@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；其余步骤尚未实现（见「验收」）。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -532,7 +532,7 @@ level     := off | error | warn | info | debug | trace
 
 ## 实际验证
 
-第 1 步（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），全部在 Linux（x86_64，4 核虚拟机，Rust 1.97.0）上运行：
+第 1 步（[#177](https://github.com/SoloJiang/lectern-app/pull/177)），全部在 Linux（x86_64，4 核虚拟机，Rust 1.97.0）上运行：
 
 - `just check`、`just test`（工作区 2108 个测试，基于合并了 #173、#174 的 main）、`just doctest`、`just deny` 通过。`just test -p lectern-logging` 共 64 个测试：`src/tests/` 的 62 个单元测试（「测试」一节列出的全部，另有 `names_round_trip`、`install_twice_returns_already_installed`、`turning_verbose_off_restores_the_default`、`export_without_a_directory`、`third_party_cached_level_follows_filter_changes`、`third_party_suppressed_counts_reach_the_status`、`registered_plugin_directive_survives_verbose_json`），`tests/compile_fail.rs`（trybuild，6 个编译失败用例），`tests/no_alloc.rs`（写出的调用在调用线程上不分配内存，用按线程计数的全局分配器检查）。nextest 连续运行 8 次、`cargo test` 同一进程运行一次，全部通过。
 - `cargo tree -p lectern-logging -e normal --all-features` 只列出 `log v0.4.34`。`log` 0.4.34 原本就在 Cargo.lock 里（GPUI 依赖它），Cargo.lock 只多了 `lectern-logging` 这一项；`cargo metadata --locked --offline` 通过。
@@ -559,7 +559,7 @@ level     := off | error | warn | info | debug | trace
 
 ## 与设计的差异
 
-第 1 步（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+第 1 步（[#177](https://github.com/SoloJiang/lectern-app/pull/177)）：
 
 - **清理不再跳过本次运行的全部文件。** 原文写「当前运行的文件不删」，一次运行开得很久时 ADR 0046 的上限就都不起作用，与 ADR 冲突。现在只有正在写的那个文件不删，本次运行较早的文件按最后修改时间计保留期限（「文件」已改）。
 - **缓冲到容量的一半才算需要立即写**（默认 64 KiB，原文是 32 KiB），中途唤醒写盘线程的次数减半；写盘线程读原子标志，只在交换缓冲时取锁（「数据流与线程」已改）。
