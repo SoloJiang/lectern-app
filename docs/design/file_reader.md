@@ -974,7 +974,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `doc_*`：用临时目录的真实文件和 `Executor::manual()`：四种 `Anchor`、完整读取的身份与首屏不同时作废首屏、`Byte` 的 OID 与 `expect` 不同时按行号重新定位、档位 C 的页 LRU 上限、`Symlink` / `Unsupported` / `Missing` / `PathThroughSymlink`、依赖根越界（`..`、指向根外的符号链接、不允许的扩展名）、对象库的 blob、fs_watch 的 `FakeBackend` 注入事件后重新打开、文档 drop 后任务取消和 `OpenFile` 关闭（描述符计数）。
 - `lru_*`：8 MiB 上限、预取与批量窗口先淘汰、正在显示的条目不受淘汰影响。
 - `prefetch_*`：至多 4 个、同一时刻至多一个预取任务、让路开关打开时停在分片边界（kernel 的 `set_yield`、`ManualClock`）、结果只进 LRU。
-- `batch_order_*`：用 `Executor` 的真实批量线程（1 个和 3 个）和模拟 `code_intel` 的长期任务（与 `index/batch.rs` 相同：每个批次边界 `yield_now`，批次时长可控）：预取在每个线程的一批加一个窗口任务之内开始；窗口任务一次不超过 50 ms 的解析、与模拟的批次轮流运行；64 MiB 文件的窗口链运行期间模拟任务照常前进。一步的解析用量，以及这里和 `prefetch_*` 里让路开关打开之后一步还走了多久，都按批量线程的 CPU 时间计（与 `health`、`SlowWindows` 同一个时钟），机器忙时线程等 CPU 的时间不算；墙上时间只作宽松的上限。
+- `batch_order_*`：用 `Executor` 的真实批量线程（1 个和 3 个）和模拟 `code_intel` 的长期任务（与 `index/batch.rs` 相同：每个批次边界 `yield_now`，批次时长可控）：预取在每个线程的一批加一个窗口任务之内开始；窗口任务一次不超过 50 ms 的解析、与模拟的批次轮流运行；64 MiB 文件的窗口链运行期间模拟任务照常前进（按轮次计：链的 16 步里每两步之间恰好一个模拟批次，不数一段墙上时间里的个数）。一步的解析用量，以及这里和 `prefetch_*` 里让路开关打开之后一步还走了多久，都按批量线程的 CPU 时间计（与 `health`、`SlowWindows` 同一个时钟），机器忙时线程等 CPU 的时间不算；墙上时间只作宽松的上限。
 - `health_*`：`ThreadCpuClock` 换成测试时钟。在途的一次调用 CPU 时间超过预算加 1 s 之后，同一 grammar 版本的 `enter` 返回 None、`allows` 为 false，其他语言不受影响；`Yielded`、`TimedOut` 之后不在表里的调用，不论墙上时间过了多久都不会触发；线程被挤掉、墙上时间前进而 CPU 时间不变时不触发；续做以剩余预算重新登记。`ParseGuard` 不是 `Send`（编译失败测试）。
 - `object_*`：有 `ObjectShare` 时打开 `Object` 不调 `Repo::blob`（计数的 git 替身）；登记 drop 后登记表不再持有那份内容（计数分配器：调用方也放下后字节被释放），≤ 1 MiB 的在首屏任务里解压；同一 OID 登记两次、drop 一次仍可用；超过 16 MiB 又没有登记的为 `Unreadable`；后退历史里的条目不持有内容。
 - `edit_*`：增量解析的区间与整文件解析相同；`changed` 之后 `spans` 立即返回平移后的区间；CRLF 与 BOM 在保存时恢复。
@@ -1204,6 +1204,15 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
   - `prefetch_larger_files_get_the_first_screens_window` 50 轮里 3 次 LRU 里没有第一屏窗口：预取的窗口一次解析、预算 50 ms 墙上时间，机器忙时超时、按设计不放进 LRU。`Watch` 直接读墙上时钟，测试没有现成的接缝能换掉这个预算，所以测试改为再预取一次（按身份已知 OID，不再读和求 OID，只重新解析窗口），至多 20 次；每次没有留下窗口时都检查这次确实是超时：从 `PrefetchParse` 到任务跑完超过 `BATCH_SEGMENT`、没有 `PrefetchDone`，否则失败。整个测试里只求一次 OID 的检查照旧。临时让探针第一次询问时睡 60 ms，第一次超时、第二次留下窗口，测试通过（同样没有留下）。
 - 改两个预取测试之后在负载下再跑（另外两组全部测试以 16 和 32 个线程反复运行）：上面改过的 4 个测试一起 100 次通过；两个预取测试一起 300 次、150 次通过；它们与 `batch_order_window_tasks_take_turns_with_batches`、`batch_order_batches_go_on_while_a_64mib_chain_runs` 一起 40 次通过；全部测试以 16 个线程 3 轮通过（不含下一条的 64 MiB 测试）。其中 `prefetch_larger_files_get_the_first_screens_window` 两次在第 1 次超时（55.8 ms、50.5 ms）、第 2 次留下窗口；`prefetch_stops_at_a_slice_boundary_when_yielding` 在负载下都是第 9 次询问停下。负载最重的一轮里，`batch_order_window_tasks_take_turns_with_batches` 的一步墙上时间到 200–385 ms，CPU 时间 2–15 ms，按原来的检查会失败，改后通过。
 - 负载最重的一轮里 `batch_order_batches_go_on_while_a_64mib_chain_runs` 失败一次（3 轮全部测试里 1 次）：它数 1.5 s 墙上时间里的批次与窗口任务数，没有改。
+- `just check`、`just test -p lectern-syntax`、`just test`、`just doctest`、`just deny` 通过。
+
+`batch_order_batches_go_on_while_a_64mib_chain_runs` 改按轮次计（只改测试），在 Linux（x86_64，4 核虚拟机）上运行：
+
+- 起因：原来的测试在链开始之后睡 1.5 s，要求这段墙上时间里的模拟批次和窗口步各不少于 8 个（1.5 s 除以一轮的 30 ms 批次、50 ms 预算和 100 ms 余量）。一轮只在线程有 CPU 时才是一批加一步：线程被挤掉时一步越过预算，到下一次检查才停（上一节负载最重的一轮里，一步墙上 200–385 ms、CPU 2–15 ms）；两步之间取窗口、从文件读、落地也要等 CPU。一轮超过 180 ms 时个数就不够。这个计数量的是机器给批量线程多少 CPU，不是批量线程上的先后。生产代码没有改。
+- 改为：等链做完 16 步（每个事件仍用 `wait_for` 的 60 s 上限），检查每两步之间恰好有一个模拟批次。只有一个批量线程，步和批次在它上面先后运行，时刻落在两步之间的批次就是在两步之间运行的；`Batch` 队列先进先出，两个任务做完一批或一步就排到队尾，所以两者交替。原来要求的是两边都不被饿住（每一轮至少一个批次、至少一步）；交替比它更严：一个批次至多等一步，链也至多等一个批次，与机器给多少 CPU 无关。链仍未做完（`!done`）的检查不变。测试打印 16 步的墙上时间、批量线程这段时间的 CPU 时间（`rig::ran`，含模拟批次的自旋）和最慢的一轮。
+- 临时模拟饿住（测试里没有留下）：探针在每一步的第一次询问时睡 200 ms，一轮的墙上时间超过 180 ms，而这段睡眠不是 CPU 时间。原来的检查 1.5 s 里只数到 6 个批次、5 步，失败；新的检查 15 个间隔都是 1 个批次，通过，16 步墙上 3.69 s，批量线程只运行了 305 ms。
+- 负载下的运行（`--retries 0`，nextest 的 `--stress-count`；负载是另外三到四组 `lectern-syntax` 全部测试以 16、32、32、32 个线程反复运行，其中一段同时有 `just check` 的 clippy，平均负载 17–64）：100、100、150 次全部通过（前两轮之后只改了打印，检查不变）。打印的数值里每个间隔都是 1 个批次；16 步墙上 0.85–1.21 s，批量线程运行 0.55–0.77 s，最慢的一轮 67–104 ms。这几组负载没有把一轮拉到 180 ms 以上，改动前的失败没有在这里复现，所以用上一条的临时睡眠代替。
+- 全部测试在同样的负载下以 16 个线程跑 6 轮：5 轮全部通过；1 轮里 `batch_order_window_stops_within_a_slice_when_yielding` 等 `Yielded` 超过 60 s 失败，64 MiB 的测试 6 轮都通过。那次失败没有留下可看的输出，推测：`flip_inside` 要在同一步的第 8 次询问时打开开关，询问来自 tree-sitter 的进度回调，次数随这一步实际得到的 CPU 增长；线程饿住时每一步问不到 8 次就在 50 ms 墙上时间处 `TimedOut`，下一步又从 1 数起，开关一直不开。这是测试的问题，生产代码的让路不依赖第几次询问；这里没有改。
 - `just check`、`just test -p lectern-syntax`、`just test`、`just doctest`、`just deny` 通过。
 
 ## 与设计的差异

@@ -215,34 +215,62 @@ fn batch_order_window_tasks_take_turns_with_batches() {
 }
 
 /// While a 64 MiB file's chain runs on the only batch thread, the
-/// simulated task keeps its pace: a batch at least every batch and window
-/// task.
+/// simulated task keeps its pace and so does the chain: they take turns,
+/// one batch between every two window steps. The pace is counted in turns,
+/// not in wall time: a turn is a 30 ms batch and a 50 ms step only while
+/// the thread has a CPU. On a machine busy with other tests, a step runs on
+/// past its budget to its next check, and the work between steps (taking
+/// the window, reading it from the file, landing its spans) waits for a CPU
+/// too, so a turn can take many times that on the clock.
 #[test]
 fn batch_order_batches_go_on_while_a_64mib_chain_runs() {
+    const STEPS: usize = 16;
     let t = Threaded::new(1);
     t.write("huge.ts", &testing::ts(64 << 20, 0));
     let sim = Sim::start(&t.executor, 1);
     let doc = t.open(t.target("huge.ts", Anchor::Start));
     let (from, _) = t.wait_for(0, |e| matches!(e, Trace::ChainStep { .. }));
-    let begin = Instant::now();
-    let span = Duration::from_millis(1500);
-    std::thread::sleep(span);
-    let end = Instant::now();
-    let batches = sim
-        .batches()
-        .iter()
-        .filter(|(_, s, e)| *s >= begin && *e <= end)
-        .count();
-    let windows = steps(&t.events()[from..])
-        .iter()
-        .filter(|(s, e, ..)| *s >= begin && *e <= end)
-        .count();
-    // One batch and at most one window task each turn.
-    let turn = BATCH + BATCH_SEGMENT + STEP_SLACK;
-    let least = (span.as_millis() / turn.as_millis()) as usize;
-    eprintln!("{batches} batches and {windows} window steps in {span:?}");
-    assert!(batches >= least, "{batches} batches, at least {least}");
-    assert!(windows >= least, "{windows} window steps, at least {least}");
+    let mut to = from;
+    for _ in 0..STEPS {
+        let (end, _) = t.wait_for(to, |e| matches!(e, Trace::ChainStepEnd { .. }));
+        to = end + 1;
+    }
+    let steps = steps(&t.events()[from..to]);
+    assert_eq!(steps.len(), STEPS);
+    // One batch thread: the steps and the batches run one after another on
+    // it, so a batch between two steps' times ran between them. The queue
+    // is first in, first out, and each task goes to its end after a batch
+    // or a step, so the two take turns.
+    let batches = sim.batches();
+    let turns: Vec<usize> = steps
+        .windows(2)
+        .map(|pair| {
+            let (ended, next) = (pair[0].1, pair[1].0);
+            batches
+                .iter()
+                .filter(|(_, s, e)| *s > ended && *e < next)
+                .count()
+        })
+        .collect();
+    // What the turns took on the clock, and how much of it the batch thread
+    // ran (its CPU time, the batches' included): on a busy machine the
+    // first is many times the second.
+    let cpu = &t.cpu()[from..to];
+    let (first, last) = (&steps[0], &steps[STEPS - 1]);
+    let took = last.1.duration_since(first.0);
+    let busy = ran((first.0, cpu[first.4.start]), (last.1, cpu[last.4.end]));
+    let slowest = steps
+        .windows(2)
+        .map(|pair| pair[1].0.duration_since(pair[0].0))
+        .max()
+        .unwrap_or_default();
+    eprintln!(
+        "batches between the {STEPS} window steps: {turns:?}; {took:?} on the \
+         clock, the batch thread ran {busy:?}; the slowest turn {slowest:?}"
+    );
+    for (i, turns) in turns.iter().enumerate() {
+        assert_eq!(*turns, 1, "batches between window steps {i} and {}", i + 1);
+    }
     let (_, done) = doc.chain().unwrap();
     assert!(!done);
 }
