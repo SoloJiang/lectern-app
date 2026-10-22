@@ -53,6 +53,9 @@ const MARKERS: Markers<'static> = Markers {
 /// changed on disk meanwhile.
 pub struct EditSession {
     session: Arc<Session>,
+    /// The buffer's text when this handle was made: the text at entering
+    /// edit for the first, the session's current buffer for another.
+    initial: Arc<str>,
 }
 
 /// What the disk side found, for the view. Each result stays until the
@@ -101,6 +104,7 @@ pub(crate) struct Session {
     root: Arc<Path>,
     path: Arc<str>,
     lang: Option<&'static str>,
+    /// The file's format at entering edit (the reader's spans are of it).
     format: Format,
     initial: Arc<str>,
     /// The root's `SafeRoot` when the session began, if the engine had it:
@@ -109,6 +113,9 @@ pub(crate) struct Session {
     notify: Arc<dyn Fn() + Send + Sync>,
     handles: AtomicUsize,
     closed: AtomicBool,
+    /// The close went through the disk queue: the saves queued before it
+    /// are done and the document has checked the file.
+    finished: AtomicBool,
     cancel: Arc<AtomicBool>,
     st: Mutex<SessionMut>,
     /// Runs once on the parse's thread right after the next round began
@@ -141,6 +148,9 @@ struct SessionMut {
     raw: Option<(Arc<WindowSpans>, Arc<[u8]>)>,
     /// The merge base: the text at entering edit, last saved or merged.
     base: Arc<str>,
+    /// What a save puts back (the BOM, the line endings): the file's at
+    /// entering edit, the disk's after a merge.
+    format: Format,
     /// The file's identity when it was last read, saved or merged.
     identity: Option<FileIdentity>,
     ops: VecDeque<Op>,
@@ -167,16 +177,27 @@ enum Op {
 /// [`DocHandle::edit`](super::DocHandle::edit): a new session, or another
 /// handle to the live one.
 pub(crate) fn begin(engine: &Arc<EngineInner>, doc: &Arc<Doc>) -> Result<EditSession, NotEditable> {
-    let session = {
+    let (session, initial) = {
         let mut st = doc.lock();
         if let Editable::No(why) = st.editable {
             return Err(why);
         }
-        if let Some(live) = st.edit.as_ref().and_then(Weak::upgrade)
-            && !live.is_closed()
-        {
-            live.handles.fetch_add(1, Ordering::SeqCst);
-            return Ok(EditSession { session: live });
+        if let Some(live) = st.edit.as_ref().and_then(Weak::upgrade) {
+            if !live.is_closed() {
+                // Another handle starts from the buffer as it is now: its
+                // `changed` edits are from that text.
+                live.handles.fetch_add(1, Ordering::SeqCst);
+                let initial = live.lock().text.clone();
+                return Ok(EditSession {
+                    session: live,
+                    initial,
+                });
+            }
+            if !live.finished.load(Ordering::SeqCst) {
+                // Its saves are still to be written and the file read
+                // again: a session now would start from the old content.
+                return Err(NotEditable::Reloading);
+            }
         }
         let Content::Text(text) = &st.content else {
             return Err(NotEditable::NotLoaded);
@@ -207,6 +228,7 @@ pub(crate) fn begin(engine: &Arc<EngineInner>, doc: &Arc<Doc>) -> Result<EditSes
             notify: doc.notifier(),
             handles: AtomicUsize::new(1),
             closed: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
             st: Mutex::new(SessionMut {
                 text: initial.clone(),
@@ -217,7 +239,8 @@ pub(crate) fn begin(engine: &Arc<EngineInner>, doc: &Arc<Doc>) -> Result<EditSes
                 parse: None,
                 plain,
                 raw,
-                base: initial,
+                base: initial.clone(),
+                format,
                 identity: st.identity,
                 ops: VecDeque::new(),
                 io_busy: false,
@@ -228,17 +251,18 @@ pub(crate) fn begin(engine: &Arc<EngineInner>, doc: &Arc<Doc>) -> Result<EditSes
             during_round: Mutex::new(None),
         });
         st.edit = Some(Arc::downgrade(&session));
-        session
+        (session, initial)
     };
     session.kick_parse(engine);
-    Ok(EditSession { session })
+    Ok(EditSession { session, initial })
 }
 
 impl EditSession {
-    /// The text at entering edit (no BOM, `\r\n` as `\n`), for
-    /// `InputState::set_value`.
+    /// The buffer's text for `InputState::set_value`: the text at entering
+    /// edit (no BOM, `\r\n` as `\n`), or for another handle to a live
+    /// session the buffer as the session last got it.
     pub fn initial_text(&self) -> Arc<str> {
-        self.session.initial.clone()
+        self.initial.clone()
     }
 
     /// The buffer changed: its new text and the edits from the text of the
@@ -304,6 +328,10 @@ impl EditSession {
 impl Session {
     pub(crate) fn spans(&self) -> Arc<WindowSpans> {
         self.lock().shown.clone()
+    }
+
+    pub(crate) fn state(&self) -> Arc<EditState> {
+        self.lock().state.clone()
     }
 }
 
@@ -394,9 +422,12 @@ impl Session {
             // for them goes on.
             let mut st = self.lock();
             st.io_busy = false;
-            let saves = st
-                .ops
-                .drain(..)
+            let ops: Vec<Op> = st.ops.drain(..).collect();
+            if ops.iter().any(|op| matches!(op, Op::Close)) {
+                self.finished.store(true, Ordering::SeqCst);
+            }
+            let saves = ops
+                .iter()
                 .filter(|op| matches!(op, Op::Save { .. }))
                 .count();
             if saves > 0 {
@@ -411,23 +442,27 @@ impl Session {
     }
 
     /// The last handle dropped (any thread, the UI thread included): the
-    /// parse stops, the tree goes to a task to be dropped, and once the
-    /// disk work in flight ends the document checks the file.
+    /// parse stops, the tree goes to a task to be dropped. The saves already
+    /// queued are still written (merges and checks are dropped); after them
+    /// the document checks the file, and only then may a new session begin.
     fn close(self: &Arc<Self>) {
         self.closed.store(true, Ordering::SeqCst);
         self.cancel.store(true, Ordering::SeqCst);
-        let (tree, saved, start) = {
+        let (tree, writing, start) = {
             let mut st = self.lock();
-            st.ops.clear();
+            st.ops.retain(|op| matches!(op, Op::Save { .. }));
+            // A save done, queued, or perhaps in flight.
+            let writing = st.saved || st.io_busy || !st.ops.is_empty();
             st.ops.push_back(Op::Close);
             (
                 st.parse.take(),
-                st.saved,
+                writing,
                 !std::mem::replace(&mut st.io_busy, true),
             )
         };
-        // The file is read again after a save: not editable until then.
-        if saved && let Some(doc) = self.doc.upgrade() {
+        // The file is likely read again: not editable until the close is
+        // through (the close puts it back when nothing was read again).
+        if writing && let Some(doc) = self.doc.upgrade() {
             let mut st = doc.lock();
             if st.editable == Editable::Yes {
                 st.editable = Editable::No(NotEditable::Reloading);
@@ -572,19 +607,33 @@ fn disk(engine: &Arc<EngineInner>, session: &Arc<Session>) {
             Op::Merge { ours } => merge(engine, session, &ours),
             Op::Check => check(engine, session),
             Op::Close => {
-                // The reading view gets what is on disk now: another
-                // version after a save, or the agent's.
+                // The saves queued before the close are written. The
+                // reading view gets what is on disk now: another version
+                // after a save, or the agent's.
                 if let Some(doc) = session.doc.upgrade() {
+                    let load = doc.lock().load;
                     watch::check(engine, &doc);
+                    let mut st = doc.lock();
+                    // Not read again (no save went through, nothing
+                    // changed): editable as before.
+                    if st.load == load && st.editable == Editable::No(NotEditable::Reloading) {
+                        st.editable = Editable::Yes;
+                        doc.commit(st);
+                    }
                 }
+                session.finished.store(true, Ordering::SeqCst);
             }
         }
     }
 }
 
 fn save(engine: &EngineInner, session: &Session, text: Arc<str>, force: bool) {
-    let bytes = session.format.encode(&text);
-    let expect = if force { None } else { session.lock().identity };
+    let (format, identity) = {
+        let st = session.lock();
+        (st.format, st.identity)
+    };
+    let bytes = format.encode(&text);
+    let expect = if force { None } else { identity };
     let replaced = session.safe_root(engine).and_then(|safe| {
         let rel = session.rel()?;
         Ok(safe.replace_file(rel, &bytes, expect))
@@ -629,12 +678,22 @@ enum Unreadable {
     Failed(Arc<str>),
 }
 
-/// The file on disk as the buffer's text, with the identity it was read
-/// with. Blocking.
-fn read_disk(
-    engine: &EngineInner,
-    session: &Session,
-) -> Result<(Arc<str>, FileIdentity), Unreadable> {
+/// The file as read from disk.
+struct Disk {
+    bytes: Vec<u8>,
+    identity: FileIdentity,
+}
+
+impl Disk {
+    /// As the buffer's text and the format around it; None when the bytes
+    /// are not UTF-8.
+    fn decode(&self) -> Option<(Arc<str>, Format)> {
+        Format::decode(&self.bytes)
+    }
+}
+
+/// The file on disk, with the identity it was read with. Blocking.
+fn read_disk(engine: &EngineInner, session: &Session) -> Result<Disk, Unreadable> {
     let safe = session.safe_root(engine).map_err(Unreadable::Failed)?;
     let rel = session.rel().map_err(Unreadable::Failed)?;
     let file = match safe.open_file(rel) {
@@ -645,21 +704,29 @@ fn read_disk(
         Err(e) => return Err(Unreadable::Failed(e.to_string().into())),
     };
     match file.read_all(TIER_B_MAX) {
-        Ok(FullRead::File { bytes, meta }) => Format::decode(&bytes)
-            .map(|(text, _)| (text, meta.identity()))
-            .ok_or(Unreadable::NotText),
+        Ok(FullRead::File { bytes, meta }) => Ok(Disk {
+            bytes,
+            identity: meta.identity(),
+        }),
         Ok(FullRead::TooLarge { .. }) => Err(Unreadable::NotText),
         Err(e) => Err(Unreadable::Failed(e.to_string().into())),
     }
 }
 
+/// The merge takes the disk's format too: the merged text is saved with
+/// the BOM and line endings the file has now (a `dos2unix` by the agent
+/// stays done).
 fn merge(engine: &EngineInner, session: &Session, ours: &str) {
-    let theirs = read_disk(engine, session);
-    let mut st = session.lock();
+    let theirs = read_disk(engine, session).and_then(|disk| {
+        let (text, format) = disk.decode().ok_or(Unreadable::NotText)?;
+        Ok((text, format, disk.identity))
+    });
+    // Merged outside the lock: the UI thread's calls do not wait for it.
+    let base = session.lock().base.clone();
     let outcome = match theirs {
-        Ok((theirs, identity)) => {
+        Ok((theirs, format, identity)) => {
             let merged = merge3(
-                st.base.as_bytes(),
+                base.as_bytes(),
                 ours.as_bytes(),
                 theirs.as_bytes(),
                 &MARKERS,
@@ -670,12 +737,11 @@ fn merge(engine: &EngineInner, session: &Session, ours: &str) {
                 Ok(text) => text,
                 Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
             };
-            st.base = theirs;
-            st.identity = Some(identity);
-            Some(Arc::new(MergeOutcome {
+            let outcome = MergeOutcome {
                 text: text.into(),
                 conflicts: merged.conflicts.into(),
-            }))
+            };
+            Some((Arc::new(outcome), theirs, format, identity))
         }
         Err(why) => {
             if let Unreadable::Failed(e) = &why {
@@ -684,6 +750,13 @@ fn merge(engine: &EngineInner, session: &Session, ours: &str) {
             None
         }
     };
+    let mut st = session.lock();
+    let outcome = outcome.map(|(outcome, theirs, format, identity)| {
+        st.base = theirs;
+        st.format = format;
+        st.identity = Some(identity);
+        outcome
+    });
     let read = outcome.is_some();
     session.publish(st, |state| {
         state.merges += 1;
@@ -693,10 +766,10 @@ fn merge(engine: &EngineInner, session: &Session, ours: &str) {
     });
 }
 
-/// After an fs_watch event: another identity on disk with other content
-/// than the base makes the file dirty on disk; the same content (a touch,
-/// a rewrite of the same bytes) only takes the new identity, so the next
-/// save does not conflict.
+/// After an fs_watch event: another identity on disk with other bytes than
+/// a save of the base would write (other text, BOM or line endings) makes
+/// the file dirty on disk; the same bytes (a touch, a rewrite) only take
+/// the new identity, so the next save does not conflict.
 fn check(engine: &EngineInner, session: &Session) {
     let identity = session.lock().identity;
     let stat = session
@@ -711,13 +784,20 @@ fn check(engine: &EngineInner, session: &Session) {
         Ok(Err(SafeError::NotFound)) => Err(Unreadable::Gone),
         _ => read_disk(engine, session),
     };
+    // The bytes a save of the base would write: a change of the BOM or of
+    // the line endings alone is a change too.
+    let (base, format) = {
+        let st = session.lock();
+        (st.base.clone(), st.format)
+    };
+    let same = matches!(&read, Ok(disk) if disk.bytes == format.encode(&base));
     let mut st = session.lock();
     let (dirty, unavailable) = match read {
-        Ok((text, identity)) if text == st.base => {
-            st.identity = Some(identity);
+        Ok(disk) if same => {
+            st.identity = Some(disk.identity);
             (st.state.dirty_on_disk, st.state.unavailable)
         }
-        Ok(_) => (true, false),
+        Ok(disk) => (true, disk.decode().is_none()),
         Err(why) => {
             if let Unreadable::Failed(e) = &why {
                 log(format_args!("check of {}: {e}", session.path));

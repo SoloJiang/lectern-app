@@ -441,7 +441,8 @@ impl DocHandle {
     pub fn scrolled(&self, top: RowPos);
     pub fn find(&self, query: FindQuery);
     pub fn clear_find(&self);
-    /// 进入编辑（只对 `editable == Yes`）。返回编辑会话，见「编辑」；已有会话时返回同一个会话的另一个句柄。
+    /// 进入编辑（只对 `editable == Yes`）。返回编辑会话，见「编辑」；已有会话时返回同一个会话的另一个句柄，
+    /// 它的 `initial_text` 是会话当前的缓冲区；刚结束的会话还有保存没写完、文档还没重新读取时为 `Reloading`。
     /// 在调用的线程上把内容复制成缓冲区的文本（去掉 BOM、`\r\n` 换成 `\n`），第一次解析在任务里。
     pub fn edit(&self) -> Result<EditSession, NotEditable>;
 }
@@ -529,23 +530,25 @@ pub struct FindResults { pub ranges: Arc<[Range<u64>]>, pub done: bool, pub capp
 // ---- 编辑（见「编辑」）----
 
 /// 编辑会话。持有进入编辑时的内容（三方合并的基准）和一棵语法树；最后一个句柄 drop 时结束：
-/// 树交给后台任务释放，保存过或磁盘上变过时文档重新读取文件（见「与设计的差异」第 5 步）。
-pub struct EditSession { /* Arc<会话> */ }
+/// 树交给后台任务释放，已排队的保存照常写入，之后文档按磁盘上的内容需要时重新读取（见「与设计的差异」第 5 步）。
+pub struct EditSession { /* Arc<会话>、这个句柄的初始文本 */ }
 
 impl EditSession {
-    /// 进入编辑时的文本（BOM 已去掉，CRLF 已换成 LF），交给 `InputState::set_value`。
+    /// 交给 `InputState::set_value` 的文本：进入编辑时的文本（BOM 已去掉，CRLF 已换成 LF）；
+    /// 会话活着时再次 `edit` 得到的句柄是会话当时的缓冲区。
     pub fn initial_text(&self) -> Arc<str>;
     /// 缓冲区变了：新文本的快照，和从上一次调用（或 `initial_text`）的文本起、依次发生的编辑。
     /// 立即返回；区间当场按编辑平移，增量解析在 `Interactive` 任务里。编辑与两份文本的长度对不上时改用两份文本的差异。
     pub fn changed(&self, text: Arc<str>, edits: &[TextEdit]);
     /// 最新的区间（编辑到达但还没重新解析时，旧区间按编辑平移）。UI 线程上读，不解析。
     pub fn spans(&self) -> Arc<WindowSpans>;
-    /// 保存：恢复 BOM 和原来的换行，经 `SafeRoot::replace_file` 原子替换，期望的身份是上次读取、保存或合并时的。
+    /// 保存：恢复 BOM 和原来的换行（合并之后是磁盘上那份的），经 `SafeRoot::replace_file` 原子替换，期望的身份是上次读取、保存或合并时的。
     /// 磁盘上的文件已被别人改过时不写，返回 `SaveResult::Conflict`。立即返回，结果经 `notify` 交给视图。
     pub fn save(&self, text: Arc<str>);
     /// 用户选了「强制保存」：不比较身份，照常原子替换。
     pub fn save_anyway(&self, text: Arc<str>);
-    /// 三方合并：基准是进入编辑（或上次保存、合并）时的内容，一方是缓冲区，另一方是磁盘上的当前内容；之后磁盘上的这份成为基准。
+    /// 三方合并：基准是进入编辑（或上次保存、合并）时的内容，一方是缓冲区，另一方是磁盘上的当前内容；
+    /// 之后磁盘上的这份成为基准，它的 BOM 和换行成为保存时恢复的格式。
     pub fn merge(&self, ours: Arc<str>);
     pub fn state(&self) -> Arc<EditState>;
 }
@@ -556,7 +559,7 @@ pub struct TextEdit { pub start: usize, pub old_end: usize, pub new_end: usize }
 
 /// 每种结果保留到下一个同类结果，计数让视图分辨新的结果。
 pub struct EditState {
-    pub dirty_on_disk: bool,                      // 收到事件、磁盘内容与基准不同；或保存时身份不同
+    pub dirty_on_disk: bool,                      // 收到事件、磁盘上的字节与保存基准会写出的不同（含只改 BOM 或换行）；或保存时身份不同
     pub unavailable: bool,                        // 磁盘上的文件读不成缓冲区的文本（不存在、不是普通文件、不是 UTF-8）
     pub saves: u64,                               // 完成的保存数（任何结果），`save` 是最后一次的
     pub save: Option<SaveResult>,
@@ -1113,7 +1116,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
 第 5 步（编辑的领域部分），在 Linux（x86_64 容器）上运行：
 
-- `just test -p lectern-syntax -p lectern-bench`：240 个测试通过，其中 `lectern-syntax` 163 个，新增 24 个 `edit_*`、`save_*`、`merge_*`（`src/tests/edit.rs`）。`edit_*`：24 KiB 的合成 TypeScript、Rust、JSON 上各 120 次随机编辑（插入、删除、替换，含不成对的引号、括号、注释开头和多字节字符；每 9 次里有一次不给编辑、一次给错的编辑），每次一轮增量解析，拼出的区间与对增量树整棵查询一次逐行相同，不分片时增量树的 S 表达式与测试里 tree-sitter 自己的增量解析相同，第一轮与整文件解析相同；与整文件的一次解析相同的轮数 TS 119、Rust 120、JSON 120（只计数，见「与设计的差异」第 5 步）。每片预算为 0 的分片轮次下拼出的区间同样是增量树的。保持文本合法的 80 次编辑（整行语句、删行、空行、两行的块注释，三分之一分片）之后每次都与整文件解析逐行相同。`changed` 两次插入之后、任何任务运行之前，编辑之外的行的 token 与新文本的整文件解析相同、插入的行还没有 token，解析之后全部相同；行内插入时这一行编辑前后的 token 都留着。第一轮解析期间到达的编辑（打开一个块注释）在这一轮落地后合成到下一轮，最终与整文件解析相同。进入编辑时 `spans()` 就是阅读视图的整文件区间（同一个 `Arc`），重复进入得到同一个会话；BOM 加 CRLF 的文件在第一轮解析开始时已有挪到缓冲区偏移上的区间，非空白字节的种类与整文件解析相同。完整读取之前、对象库内容、超过 1 MiB 的文件分别是 `NotLoaded`、`ReadOnlySource`、`TooLarge`；没有语言的文件可以编辑、没有区间、照常保存。编辑的合成与差异：300 组随机编辑序列合成后都描述首尾两份文本；BOM 与 CRLF 的往返，缓冲区里已有的 `\r\n` 不会变成 `\r\r\n`。`save_*`：BOM 与 CRLF 在保存时恢复，第二次保存按第一次留下的身份比较、不冲突；外部写入之后保存为 `Conflict`、文件内容不变、`dirty_on_disk`，`save_anyway` 写入；文件被删时保存失败、`unavailable`、不创建文件；编辑期间的事件：同样的字节重写不置 `dirty_on_disk`、之后的保存不冲突，内容不同时置 `dirty_on_disk`，文档不重新打开（快照还是同一个 `Arc`、仍可编辑），删除后 `unavailable`；保存过的会话结束后文档先是 `Reloading`、读取之后是新内容、可编辑，之后的事件照常重新打开，没保存过的会话结束后文档不变；项目关闭后会话仍能保存、文档保留订阅。`merge_*`：没有冲突（两边改不同的行，两边相同的改动只取一次）、有冲突（相邻的两行与一行重叠）、两边改同一行，三份 insta 快照逐个看过；合并之后基准是磁盘上的内容，保存合并结果为 `Saved`、文件就是合并的文本；文件被删时 `merged` 为 None、`unavailable`。
+- `just test -p lectern-syntax -p lectern-bench`：244 个测试通过，其中 `lectern-syntax` 167 个，新增 28 个 `edit_*`、`save_*`、`merge_*`（`src/tests/edit.rs`）。`edit_*`：24 KiB 的合成 TypeScript、Rust、JSON 上各 120 次随机编辑（插入、删除、替换，含不成对的引号、括号、注释开头和多字节字符；每 9 次里有一次不给编辑、一次给错的编辑），每次一轮增量解析，拼出的区间与对增量树整棵查询一次逐行相同，不分片时增量树的 S 表达式与测试里 tree-sitter 自己的增量解析相同，第一轮与整文件解析相同；与整文件的一次解析相同的轮数 TS 119、Rust 120、JSON 120（只计数，见「与设计的差异」第 5 步）。每片预算为 0 的分片轮次下拼出的区间同样是增量树的。保持文本合法的 80 次编辑（整行语句、删行、空行、两行的块注释，三分之一分片）之后每次都与整文件解析逐行相同。`changed` 两次插入之后、任何任务运行之前，编辑之外的行的 token 与新文本的整文件解析相同、插入的行还没有 token，解析之后全部相同；行内插入时这一行编辑前后的 token 都留着。第一轮解析期间到达的编辑（打开一个块注释）在这一轮落地后合成到下一轮，最终与整文件解析相同。进入编辑时 `spans()` 就是阅读视图的整文件区间（同一个 `Arc`），重复进入得到同一个会话；BOM 加 CRLF 的文件在第一轮解析开始时已有挪到缓冲区偏移上的区间，非空白字节的种类与整文件解析相同。完整读取之前、对象库内容、超过 1 MiB 的文件分别是 `NotLoaded`、`ReadOnlySource`、`TooLarge`；没有语言的文件可以编辑、没有区间、照常保存。编辑的合成与差异：300 组随机编辑序列合成后都描述首尾两份文本；BOM 与 CRLF 的往返，缓冲区里已有的 `\r\n` 不会变成 `\r\r\n`。`save_*`：BOM 与 CRLF 在保存时恢复，第二次保存按第一次留下的身份比较、不冲突；外部写入之后保存为 `Conflict`、文件内容不变、`dirty_on_disk`，`save_anyway` 写入；文件被删时保存失败、`unavailable`、不创建文件；编辑期间的事件：同样的字节重写不置 `dirty_on_disk`、之后的保存不冲突，内容不同时置 `dirty_on_disk`，文档不重新打开（快照还是同一个 `Arc`、仍可编辑），删除后 `unavailable`；保存过的会话结束后文档先是 `Reloading`、读取之后是新内容、可编辑，之后的事件照常重新打开，没保存过的会话结束后文档不变；`save` 之后、任何任务运行之前 drop 最后一个句柄：`edit` 返回 `Reloading`，文件照常写入、结果为 `Saved`，文档重新读取后可编辑、新会话从保存后的内容开始；磁盘上只把 CRLF 改成 LF、只去掉 BOM 时都置 `dirty_on_disk`，普通保存为 `Conflict`、文件不变，合并之后保存按磁盘上的 LF 写出；会话活着时再次 `edit`，新句柄的 `initial_text` 是保存过的缓冲区，计数接着累计，它的编辑和保存照常；项目关闭后会话仍能保存、文档保留订阅。`merge_*`：没有冲突（两边改不同的行，两边相同的改动只取一次）、有冲突（相邻的两行与一行重叠）、两边改同一行，三份 insta 快照逐个看过；合并之后基准是磁盘上的内容，保存合并结果为 `Saved`、文件就是合并的文本；文件被删时 `merged` 为 None、`unavailable`。
 - `syntax/edit_tree_bytes`（调试构建、按测量规模运行 `memory` 目标的这一项，字节数与优化级别无关）：1 MiB 减 4 KiB 的 TypeScript 和 Rust 各 3 次，6 个样本中位数 36.8 MiB、最大 37.9 MiB（预算 ≤ 41 MiB）；会话结束后释放的字节都不少于持有的四分之三（基准里检查）。连同缓冲区文本和区间一起计入时最大 40.8 MiB。冒烟规模（128 KiB）5.17 MB。
 - `just check`、`just deny`、`just doctest` 通过；`rg -n 'std::fs::|File::open|mmap' crates/syntax/src --glob '!**/tests*'` 与 `rg -n 'thread::spawn' crates/syntax/src` 没有结果。
 - 没有运行全部 crate 的 `just test`：本步只改 `syntax` 和 `bench`（只有 `bench` 依赖 `syntax`），这台机器的磁盘不够再编译其余 crate 的测试。没有在 macOS 上运行；`changed` 在 UI 线程上的平移没有单独测量，由第 8 步编辑模式的 `app/scroll_frames` 判定。
@@ -1206,11 +1209,11 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `spans()` 的平移在 `changed` 里、调用的线程上做：编辑之前的行原样保留，之后的行按编辑的位移挪动行首（token 是行内偏移，不用改），编辑碰到的行只留完全在编辑之前或之后的 token。工作量与有 token 的行数成正比，复制一份 token 数组（1 MiB 的文件约 1 MiB）；没有在 M 系列上测量，编辑模式的 `app/scroll_frames`（第 8 步）判定。
 - 进入编辑时的区间：文件的字节就是缓冲区的文本（没有 BOM、不是 CRLF）时直接用阅读视图的整文件区间（同一个 `Arc`）；否则第一轮解析之前先把阅读视图的区间挪到缓冲区的偏移上（每行减去它之前丢掉的 `\r` 和 BOM，token 截到这一行的文本为止），发布后再解析。`DocHandle::edit` 在调用的线程上把内容复制成 `Arc<str>`（UTF-8 检查、复制，CRLF 文件另做一次替换），与适配器每帧复制缓冲区同一量级；设计没有写这一步在哪个线程上。
 - 磁盘一侧的操作（保存、合并、fs_watch 事件后的检查、会话结束）在会话里排成一列，同一时刻一个 `Interactive` 任务按顺序做（`platform` 设计要求同一个 `rel` 的两次保存由调用方串行），检查因此不会看到半个保存。这个任务一次 poll 做完队列，没有 `await`，插件停用时要么还没开始，要么已经做完；`replace_file` 本身是原子替换。
-- 编辑期间的 fs_watch 事件不重新打开文档（「数据流与线程」写的「标记 `dirty_on_disk`（编辑）」）：`watch::check` 看到有活着的会话就交给会话检查。会话 `stat` 比较身份，相同时什么都不做；不同时读出文件，内容与基准相同（同样的字节重写、`touch`）只记下新的身份，下一次保存不会冲突；内容不同时 `dirty_on_disk`；读不出（不存在、不是普通文件、不是 UTF-8）时另加 `unavailable`。保存遇到身份不同时同样置 `dirty_on_disk`。
+- 编辑期间的 fs_watch 事件不重新打开文档（「数据流与线程」写的「标记 `dirty_on_disk`（编辑）」）：`watch::check` 看到有活着的会话就交给会话检查。会话 `stat` 比较身份，相同时什么都不做；不同时读出文件，与保存基准会写出的字节（基准文本按会话的 BOM 和换行编码）相同时（同样的字节重写、`touch`）只记下新的身份，下一次保存不会冲突；不同时 `dirty_on_disk`，只改了 BOM 或换行（agent 运行 `dos2unix`）也算，所以之后的普通保存是 `Conflict`，不会把旧格式写回去；读不出（不存在、不是普通文件、不是 UTF-8）时另加 `unavailable`。保存遇到身份不同时同样置 `dirty_on_disk`。
 - `EditState` 增加 `unavailable`、`saves`、`merges`。`unavailable` 对应界面已有的 `file-reader-unavailable-while-editing`：文件被删、合并读不到文件时，视图需要知道只剩复制或放弃。两个计数让视图分辨新结果：两次保存都是 `Saved` 时字段不变，离开守卫要等「这一次」保存的结果；`merged` 也只在计数变了时写回缓冲区。合并读不到文件时 `merged` 为 None、`unavailable` 为 true。已改「接口」。
-- 合并之后的基准是这次读到的磁盘内容，期望的身份是读它时的身份，所以保存合并结果不会冲突；`dirty_on_disk` 清掉。三份文本都已统一成 LF、无 BOM，冲突标记按 LF 写出，保存时与其余行一起恢复原来的换行。
-- 会话的结束与文档：最后一个句柄 drop 时，取消解析，树交给 `Background` 任务释放；保存过时文档的 `editable` 先置为 `Reloading`（下一次进入编辑要等重新读取），磁盘队列做完在途的操作之后，文档按阅读时的规则比较身份、需要时重新打开同一行。「缓冲区没有改动时静默重新载入」「Discard My Changes」由视图按同一条路径做：结束会话，等文档重新读取，再进入编辑（光标按行号保留是视图的事）；领域一侧不判断缓冲区有没有改动。设计没有写「按保存后的内容重新打开」由谁触发。
-- `DocHandle::edit` 在会话还活着时返回同一个会话的另一个句柄，最后一个句柄 drop 时会话才结束。设计没有写重复进入的情况。
+- 合并之后的基准是这次读到的磁盘内容，期望的身份是读它时的身份，所以保存合并结果不会冲突；`dirty_on_disk` 清掉。三份文本都已统一成 LF、无 BOM，冲突标记按 LF 写出。保存时恢复的格式也换成磁盘上那份的 BOM 和换行：合并把磁盘一侧的改动收进来，只改格式的改动（`dos2unix`）同样收进来，否则保存合并结果会把它撤掉。磁盘上混用换行时按「有 `\r\n`」处理，保存后全是 CRLF。`merge3` 在会话的锁之外运行。
+- 会话的结束与文档：最后一个句柄 drop 时，取消解析，树交给 `Background` 任务释放；队列里的合并和检查丢掉，已排队的保存照常写入（同一帧里 ⌘S 之后关闭不丢改动），结果照常发布。有保存做过、在排队或可能在途时，文档的 `editable` 先置为 `Reloading`。磁盘队列做完之前的保存之后，文档按阅读时的规则比较身份、需要时重新打开同一行；没有重新读取时 `editable` 改回 `Yes`。在这之前 `DocHandle::edit` 返回 `Reloading`，新会话不会从保存之前的内容和身份开始。「缓冲区没有改动时静默重新载入」「Discard My Changes」由视图按同一条路径做：结束会话，等文档重新读取，再进入编辑（光标按行号保留是视图的事）；领域一侧不判断缓冲区有没有改动。设计没有写「按保存后的内容重新打开」由谁触发。
+- `DocHandle::edit` 在会话还活着时返回同一个会话的另一个句柄，最后一个句柄 drop 时会话才结束。新句柄的 `initial_text` 是会话最后一次 `changed` 收到的缓冲区（不是进入编辑时的文本），它的 `changed` 从这份文本算起；保存之后再进入编辑时视图因此拿到的是保存过的内容，不会把进入编辑时的文本加上新改动写回去。`state` 是整个会话的，计数跨句柄累计，新句柄拿到时先记下当时的 `saves`、`merges`。设计没有写重复进入的情况。
 - `Engine::close_project` 跳过有活着的会话的文档（保留它的订阅），会话在开始时取下根目录的 `SafeRoot`，项目关闭之后仍能保存。领域一侧不知道缓冲区有没有未保存的改动，所以按「有会话」判断。
 - 退出顺序（kernel 设计「内核」）在领域一侧只需要保存的结果经 `state` 和 `notify` 交给视图：离开守卫选「保存」时等 `saves` 加一、结果是 `Saved` 再通过，之后才 `Kernel::shutdown`。本步没有别的改动。
 - 分片的解析停下再续做时，有语法错误的文本可能得到与不停下时不同的树：同样的随机编辑，每片预算为 0 时得到的树与一次做完的不同，错误恢复的选择随停下的位置变化。高亮是那棵树的；单个按键的增量解析通常在一片之内完成，不停下。见「已知限制」。

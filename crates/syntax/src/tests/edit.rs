@@ -626,6 +626,121 @@ fn edit_ending_after_a_save_reopens_the_document() {
     assert_eq!(doc.snapshot().editable, Editable::Yes);
 }
 
+/// The agent changes only the line endings (`dos2unix`): the file is dirty
+/// on disk, a plain save conflicts, and a merge takes the disk's line
+/// endings.
+#[test]
+fn save_line_endings_changed_on_disk_conflict() {
+    let rig = Rig::new();
+    let (_doc, session) = editing(&rig, "a.ts", b"let a = 1;\r\nlet b = 2;\r\n");
+    std::fs::write(rig.path("a.ts"), b"let a = 1;\nlet b = 2;\n").unwrap();
+    rig.touch("a.ts", modified());
+    assert!(session.state().dirty_on_disk);
+    session.save(Arc::from("let a = 1;\nlet b = 3;\n"));
+    rig.settle();
+    assert_eq!(session.state().save, Some(SaveResult::Conflict));
+    assert_eq!(
+        std::fs::read(rig.path("a.ts")).unwrap(),
+        b"let a = 1;\nlet b = 2;\n"
+    );
+    session.merge(Arc::from("let a = 1;\nlet b = 3;\n"));
+    rig.settle();
+    let merged = session.state().merged.clone().expect("merged");
+    assert_eq!(&*merged.text, "let a = 1;\nlet b = 3;\n");
+    session.save(merged.text.clone());
+    rig.settle();
+    assert_eq!(session.state().save, Some(SaveResult::Saved));
+    assert_eq!(
+        std::fs::read(rig.path("a.ts")).unwrap(),
+        b"let a = 1;\nlet b = 3;\n",
+        "saved with the disk's line endings"
+    );
+}
+
+/// The agent removes only the BOM: dirty on disk, and a plain save
+/// conflicts instead of putting the BOM back.
+#[test]
+fn save_bom_removed_on_disk_conflict() {
+    let rig = Rig::new();
+    let (_doc, session) = editing(&rig, "a.ts", b"\xEF\xBB\xBFlet a = 1;\n");
+    std::fs::write(rig.path("a.ts"), b"let a = 1;\n").unwrap();
+    rig.touch("a.ts", modified());
+    assert!(session.state().dirty_on_disk);
+    assert!(!session.state().unavailable);
+    session.save(Arc::from("let a = 2;\n"));
+    rig.settle();
+    assert_eq!(session.state().save, Some(SaveResult::Conflict));
+    assert_eq!(std::fs::read(rig.path("a.ts")).unwrap(), b"let a = 1;\n");
+}
+
+/// A save and the last handle's drop in the same frame: the save is still
+/// written and its result published, the document reads the file again,
+/// and no session begins over the old content meanwhile.
+#[test]
+fn edit_ending_right_after_a_save_still_writes_it() {
+    let rig = Rig::new();
+    let (doc, session) = editing(&rig, "a.ts", b"let a = 1;\n");
+    let inner = session.session().clone();
+    session.save(Arc::from("let a = 1;\nlet b = 2;\n"));
+    drop(session);
+    assert_eq!(doc.edit().err(), Some(NotEditable::Reloading));
+    rig.settle();
+    assert_eq!(
+        std::fs::read(rig.path("a.ts")).unwrap(),
+        b"let a = 1;\nlet b = 2;\n"
+    );
+    let state = inner.state();
+    assert_eq!(
+        (state.saves, state.save.clone()),
+        (1, Some(SaveResult::Saved))
+    );
+    let snapshot = doc.snapshot();
+    assert_eq!(snapshot.editable, Editable::Yes);
+    assert_eq!(snapshot.size, "let a = 1;\nlet b = 2;\n".len() as u64);
+    let again = doc.edit().unwrap();
+    assert_eq!(&*again.initial_text(), "let a = 1;\nlet b = 2;\n");
+}
+
+/// Another handle to a live session starts from the buffer as the session
+/// has it, not from the text at entering edit; the counters go on.
+#[test]
+fn edit_another_handle_starts_from_the_buffer() {
+    let rig = Rig::new();
+    let (doc, session) = editing(&rig, "a.ts", b"let a = 1;\n");
+    let saved = "let a = 1;\nlet b = 2;\n";
+    session.changed(
+        Arc::from(saved),
+        &[TextEdit {
+            start: 11,
+            old_end: 11,
+            new_end: saved.len(),
+        }],
+    );
+    session.save(Arc::from(saved));
+    rig.settle();
+    let other = doc.edit().unwrap();
+    assert_eq!(&*other.initial_text(), saved);
+    assert_eq!(other.state().saves, 1);
+    let next = format!("{saved}let c = 3;\n");
+    other.changed(
+        Arc::from(next.as_str()),
+        &[TextEdit {
+            start: saved.len(),
+            old_end: saved.len(),
+            new_end: next.len(),
+        }],
+    );
+    other.save(Arc::from(next.as_str()));
+    rig.settle();
+    assert_eq!(other.state().saves, 2);
+    assert_eq!(other.state().save, Some(SaveResult::Saved));
+    assert_eq!(std::fs::read(rig.path("a.ts")).unwrap(), next.as_bytes());
+    assert_eq!(
+        lines(&other.spans()),
+        lines(&full(lang("ts"), next.as_bytes()))
+    );
+}
+
 #[test]
 fn edit_survives_the_project_closing() {
     let rig = Rig::new();
