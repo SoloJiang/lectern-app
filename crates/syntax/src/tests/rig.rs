@@ -15,6 +15,7 @@ use lectern_fs_watch::testing::{Driver, FakeBackend, FakeSource, manual};
 use lectern_fs_watch::{Config as WatchConfig, Flags, Watcher, WorktreeSource};
 use lectern_git::{GitError, HashKind, Oid};
 use lectern_kernel::testing::ManualClock;
+use lectern_platform::ThreadCpuClock;
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{BlobId, ProjectKey, WorktreeKey};
 use lectern_services::reader::{Anchor, ReadTarget};
@@ -212,7 +213,8 @@ impl Rig {
 /// An engine on a real executor with `batch` batch threads, for the order
 /// of the batch work and the yield: files in a temporary folder project (not
 /// watched), the kernel's keepalive slots on a manual clock, and every
-/// [`Trace`] event logged with its time.
+/// [`Trace`] event logged with its time and its thread's CPU time
+/// ([`Threaded::cpu`]).
 pub(crate) struct Threaded {
     pub engine: Engine,
     pub host: TestHost,
@@ -227,7 +229,38 @@ pub(crate) struct Threaded {
 }
 
 /// The events logged, and a signal for each.
-type Events = (Mutex<Vec<(Instant, Trace)>>, Condvar);
+type Events = (Mutex<Log>, Condvar);
+
+/// Each event with its time, and the CPU time its thread had used when it
+/// was logged (None where the thread's CPU clock cannot be read), by the
+/// same index.
+#[derive(Default)]
+struct Log {
+    events: Vec<(Instant, Trace)>,
+    cpu: Vec<Option<Duration>>,
+}
+
+/// The calling thread's CPU time so far (`platform::ThreadCpuClock`, the
+/// clock `health` reads); None where it cannot be read. It does not grow
+/// while the thread waits for a CPU, as a batch thread does on a machine
+/// busy with other tests and builds.
+pub(crate) fn thread_cpu() -> Option<Duration> {
+    thread_local! {
+        static CLOCK: Option<ThreadCpuClock> = ThreadCpuClock::current().ok();
+    }
+    CLOCK.with(|clock| clock.as_ref()?.cpu_time().ok())
+}
+
+/// How long a thread ran from one reading to a later one on the same
+/// thread, each a time and [`thread_cpu`] then: the CPU time between them
+/// (as `health` and `SlowWindows` count a parse); the wall time where the
+/// clock cannot be read.
+pub(crate) fn ran(from: (Instant, Option<Duration>), to: (Instant, Option<Duration>)) -> Duration {
+    match (from.1, to.1) {
+        (Some(from), Some(to)) => to.saturating_sub(from),
+        _ => to.0.duration_since(from.0),
+    }
+}
 
 /// How long a wait for an event may take before the test fails.
 const EVENT_LIMIT: Duration = Duration::from_secs(60);
@@ -262,10 +295,14 @@ impl Threaded {
         host.kernel().set_clock(Arc::new(clock.clone()));
         engine.start(host.handle.clone());
         let events: Arc<Events> = Arc::default();
-        let log = events.clone();
+        let logged = events.clone();
         engine.set_trace(move |event| {
-            log.0.lock().unwrap().push((Instant::now(), event));
-            log.1.notify_all();
+            let cpu = thread_cpu();
+            let mut log = logged.0.lock().unwrap();
+            log.events.push((Instant::now(), event));
+            log.cpu.push(cpu);
+            drop(log);
+            logged.1.notify_all();
         });
         Threaded {
             engine,
@@ -303,7 +340,13 @@ impl Threaded {
 
     /// Every event so far.
     pub(crate) fn events(&self) -> Vec<(Instant, Trace)> {
-        self.events.0.lock().unwrap().clone()
+        self.events.0.lock().unwrap().events.clone()
+    }
+
+    /// The CPU time each event's thread had used when the event was logged
+    /// ([`thread_cpu`]), by the index of [`Threaded::events`].
+    pub(crate) fn cpu(&self) -> Vec<Option<Duration>> {
+        self.events.0.lock().unwrap().cpu.clone()
     }
 
     /// Waits for an event from the `from`th on that `matches`: its index
@@ -315,14 +358,15 @@ impl Threaded {
     ) -> (usize, Instant) {
         let (log, changed) = &*self.events;
         let deadline = Instant::now() + EVENT_LIMIT;
-        let mut events = log.lock().unwrap();
+        let mut log = log.lock().unwrap();
         loop {
+            let events = &log.events;
             if let Some(i) = (from..events.len()).find(|i| matches(&events[*i].1)) {
                 return (i, events[i].0);
             }
             let left = deadline.saturating_duration_since(Instant::now());
             assert!(!left.is_zero(), "no such event within {EVENT_LIMIT:?}");
-            events = changed.wait_timeout(events, left).unwrap().0;
+            log = changed.wait_timeout(log, left).unwrap().0;
         }
     }
 
@@ -358,6 +402,7 @@ impl Threaded {
             if flip.on.is_none() {
                 if asked == nth && ours(&probe) {
                     let switched = Instant::now();
+                    flip.on_cpu = thread_cpu();
                     kernel.set_yield(true);
                     flip.on = Some((probe, switched));
                 }
@@ -384,6 +429,8 @@ pub(crate) const FLIP_AT: u32 = 8;
 pub(crate) struct Flip {
     /// The ask it was turned on at, and the time just before.
     pub on: Option<(Probe, Instant)>,
+    /// The CPU time of the step's thread just before ([`thread_cpu`]).
+    pub on_cpu: Option<Duration>,
     /// The same step's asks after that one: one, the ask that saw the
     /// switch and stopped the step.
     pub after: Vec<Probe>,

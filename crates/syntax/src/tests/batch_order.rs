@@ -6,8 +6,12 @@
 //! each thread's batch and one window task; a window task parses for at most
 //! 50 ms and takes turns with the batches; the batches go on while a 64 MiB
 //! file's chain runs; a window in flight stops within a slice when the yield
-//! switch turns on.
+//! switch turns on. What a step parsed for, and how long a step went on
+//! after the switch, are the batch thread's CPU time (`rig::ran`): a
+//! machine busy with other tests keeps the thread waiting for a CPU, and
+//! that wait is not parsing.
 
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,7 +20,7 @@ use lectern_executor::{Executor, Priority};
 use lectern_kernel::SLOT_INTERVAL;
 use lectern_services::reader::Anchor;
 
-use super::rig::{FLIP_AT, Threaded};
+use super::rig::{FLIP_AT, Threaded, ran};
 use crate::doc::Probe;
 use crate::limits::BATCH_SEGMENT;
 use crate::util::yield_now;
@@ -27,8 +31,12 @@ use crate::{StepEnd, Trace, testing};
 const BATCH: Duration = Duration::from_millis(30);
 
 /// What a window step may take beyond its budget here: one query chunk,
-/// and the scheduling of a test machine running other tests.
+/// the checks between tree-sitter's progress callbacks, and the trace hook.
 const STEP_SLACK: Duration = Duration::from_millis(100);
+
+/// The wall time a window step stays under however busy the machine is:
+/// a step does not wait on anything, so only one that blocks reaches it.
+const STEP_WALL_LIMIT: Duration = Duration::from_secs(2);
 
 /// Simulated code_intel batch tasks: each logs its batches' start and end.
 struct Sim {
@@ -81,16 +89,17 @@ impl Drop for Sim {
     }
 }
 
-/// The window steps of the log: start, end, budget and how it ended.
-fn steps(events: &[(Instant, Trace)]) -> Vec<(Instant, Instant, Duration, StepEnd)> {
+/// The window steps of the log: start, end, budget, how it ended, and the
+/// indices in `events` of its two events.
+fn steps(events: &[(Instant, Trace)]) -> Vec<(Instant, Instant, Duration, StepEnd, Range<usize>)> {
     let mut out = Vec::new();
     let mut open = None;
-    for (at, event) in events {
+    for (i, (at, event)) in events.iter().enumerate() {
         match event {
-            Trace::ChainStep { budget, .. } => open = Some((*at, *budget)),
+            Trace::ChainStep { budget, .. } => open = Some((i, *at, *budget)),
             Trace::ChainStepEnd { end, .. } => {
-                if let Some((began, budget)) = open.take() {
-                    out.push((began, *at, budget, *end));
+                if let Some((first, began, budget)) = open.take() {
+                    out.push((began, *at, budget, *end, first..i));
                 }
             }
             _ => {}
@@ -159,8 +168,9 @@ fn batch_order_prefetch_starts_within_a_batch_and_a_window_on_three_threads() {
     prefetch_starts_within_a_batch_and_a_window(3);
 }
 
-/// On one batch thread a window task parses for at most 50 ms and the
-/// simulated batches run between two window tasks.
+/// On one batch thread a window task parses for at most 50 ms (the batch
+/// thread's CPU time) and the simulated batches run between two window
+/// tasks.
 #[test]
 fn batch_order_window_tasks_take_turns_with_batches() {
     let t = Threaded::new(1);
@@ -174,15 +184,26 @@ fn batch_order_window_tasks_take_turns_with_batches() {
         seen = steps(&t.events()[from..]).len();
     }
     let steps = steps(&t.events()[from..]);
+    let cpu = &t.cpu()[from..];
     let batches = sim.batches();
-    for (i, (began, ended, budget, end)) in steps.iter().enumerate() {
+    for (i, (began, ended, budget, end, at)) in steps.iter().enumerate() {
         assert_eq!(*budget, BATCH_SEGMENT);
-        let took = ended.duration_since(*began);
+        // Over at its budget or at its window's end: nothing else stops it.
+        assert!(
+            matches!(end, StepEnd::TimedOut | StepEnd::Done),
+            "step {i}: {end:?}"
+        );
+        let wall = ended.duration_since(*began);
+        let took = ran((*began, cpu[at.start]), (*ended, cpu[at.end]));
+        eprintln!("step {i}: parsed {took:?}, {wall:?} on the clock ({end:?})");
         assert!(
             took <= BATCH_SEGMENT + STEP_SLACK,
-            "step {i}: {took:?} ({end:?})"
+            "step {i}: {took:?} ({end:?}), {wall:?} on the clock"
         );
+        assert!(wall < STEP_WALL_LIMIT, "step {i}: {wall:?} ({end:?})");
         if let Some((next, ..)) = steps.get(i + 1) {
+            // One batch thread: the steps and the batches run one after
+            // another on it, so their times are in that order.
             let turns = batches
                 .iter()
                 .filter(|(_, s, _)| s > ended && s < next)
@@ -247,7 +268,11 @@ fn batch_order_window_stops_within_a_slice_when_yielding() {
             }
         )
     });
-    let (on, switched) = flip.lock().unwrap().on.expect("turned on inside a step");
+    let (on, switched, on_cpu) = {
+        let flip = flip.lock().unwrap();
+        let (on, switched) = flip.on.expect("turned on inside a step");
+        (on, switched, flip.on_cpu)
+    };
     let Probe::Chain { start, .. } = on else {
         panic!("{on:?}");
     };
@@ -276,9 +301,15 @@ fn batch_order_window_stops_within_a_slice_when_yielding() {
             asked: FLIP_AT + 1
         }]
     );
-    let stop = at.duration_since(switched);
-    eprintln!("stopped {stop:?} after the switch");
-    assert!(stop <= Duration::from_millis(10), "{stop:?}");
+    // The switch and the step's end are both on the batch thread.
+    let wall = at.duration_since(switched);
+    let stop = ran((switched, on_cpu), (at, t.cpu()[ended]));
+    eprintln!("stopped {stop:?} after the switch ({wall:?} on the clock)");
+    assert!(
+        stop <= Duration::from_millis(10),
+        "{stop:?}, {wall:?} on the clock"
+    );
+    assert!(wall < STEP_WALL_LIMIT, "{wall:?}");
     // The manual clock does not move: the window goes on in one keepalive
     // slot, then the task waits for the next one, its timer pending on the
     // clock, and nothing moves.

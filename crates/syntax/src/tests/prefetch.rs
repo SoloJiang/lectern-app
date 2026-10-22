@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use lectern_git::{HashKind, Oid};
 use lectern_services::reader::Anchor;
 
-use super::rig::{FLIP_AT, Rig, Threaded, VIEW};
+use super::rig::{FLIP_AT, Rig, Threaded, VIEW, ran};
 use super::{full, lang};
 use crate::doc::Probe;
 use crate::git_access::blob_id;
@@ -220,7 +220,10 @@ fn prefetch_stops_at_a_slice_boundary_when_yielding() {
     t.engine
         .prefetch(vec![(t.target("one.ts", Anchor::Start), t.root.clone())]);
     let (yielded, at) = t.wait_for(0, |e| matches!(e, Trace::PrefetchYielded { .. }));
-    let (_, switched) = flip.lock().unwrap().on.expect("turned on inside a step");
+    let (switched, on_cpu) = {
+        let flip = flip.lock().unwrap();
+        (flip.on.expect("turned on inside a step").1, flip.on_cpu)
+    };
     let (from, began) = t.wait_for(0, |e| matches!(e, Trace::PrefetchParse { .. }));
     assert!(from < yielded && began <= switched && switched <= at);
     assert!(
@@ -234,9 +237,15 @@ fn prefetch_stops_at_a_slice_boundary_when_yielding() {
         flip.lock().unwrap().after,
         vec![Probe::Prefetch { asked: FLIP_AT + 1 }]
     );
-    let stop = at.duration_since(switched);
-    eprintln!("prefetch stopped {stop:?} after the switch");
-    assert!(stop <= Duration::from_millis(10), "{stop:?}");
+    // The batch thread's CPU time from the switch to the stop, both on that
+    // thread: a busy machine's wait for a CPU is not parsing.
+    let wall = at.duration_since(switched);
+    let stop = ran((switched, on_cpu), (at, t.cpu()[yielded]));
+    eprintln!("prefetch stopped {stop:?} after the switch ({wall:?} on the clock)");
+    assert!(
+        stop <= Duration::from_millis(10),
+        "{stop:?}, {wall:?} on the clock"
+    );
     // A file over 256 KiB waits for the switch to turn off, keeping its
     // state: no keepalive slot (no timer on the clock), no probe asked, no
     // event. That nothing moves is watched for 100 ms (a slow machine

@@ -974,7 +974,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 - `doc_*`：用临时目录的真实文件和 `Executor::manual()`：四种 `Anchor`、完整读取的身份与首屏不同时作废首屏、`Byte` 的 OID 与 `expect` 不同时按行号重新定位、档位 C 的页 LRU 上限、`Symlink` / `Unsupported` / `Missing` / `PathThroughSymlink`、依赖根越界（`..`、指向根外的符号链接、不允许的扩展名）、对象库的 blob、fs_watch 的 `FakeBackend` 注入事件后重新打开、文档 drop 后任务取消和 `OpenFile` 关闭（描述符计数）。
 - `lru_*`：8 MiB 上限、预取与批量窗口先淘汰、正在显示的条目不受淘汰影响。
 - `prefetch_*`：至多 4 个、同一时刻至多一个预取任务、让路开关打开时停在分片边界（kernel 的 `set_yield`、`ManualClock`）、结果只进 LRU。
-- `batch_order_*`：用 `Executor` 的真实批量线程（1 个和 3 个）和模拟 `code_intel` 的长期任务（与 `index/batch.rs` 相同：每个批次边界 `yield_now`，批次时长可控）：预取在每个线程的一批加一个窗口任务之内开始；窗口任务一次不超过 50 ms 的解析、与模拟的批次轮流运行；64 MiB 文件的窗口链运行期间模拟任务照常前进。
+- `batch_order_*`：用 `Executor` 的真实批量线程（1 个和 3 个）和模拟 `code_intel` 的长期任务（与 `index/batch.rs` 相同：每个批次边界 `yield_now`，批次时长可控）：预取在每个线程的一批加一个窗口任务之内开始；窗口任务一次不超过 50 ms 的解析、与模拟的批次轮流运行；64 MiB 文件的窗口链运行期间模拟任务照常前进。一步的解析用量，以及这里和 `prefetch_*` 里让路开关打开之后一步还走了多久，都按批量线程的 CPU 时间计（与 `health`、`SlowWindows` 同一个时钟），机器忙时线程等 CPU 的时间不算；墙上时间只作宽松的上限。
 - `health_*`：`ThreadCpuClock` 换成测试时钟。在途的一次调用 CPU 时间超过预算加 1 s 之后，同一 grammar 版本的 `enter` 返回 None、`allows` 为 false，其他语言不受影响；`Yielded`、`TimedOut` 之后不在表里的调用，不论墙上时间过了多久都不会触发；线程被挤掉、墙上时间前进而 CPU 时间不变时不触发；续做以剩余预算重新登记。`ParseGuard` 不是 `Send`（编译失败测试）。
 - `object_*`：有 `ObjectShare` 时打开 `Object` 不调 `Repo::blob`（计数的 git 替身）；登记 drop 后登记表不再持有那份内容（计数分配器：调用方也放下后字节被释放），≤ 1 MiB 的在首屏任务里解压；同一 OID 登记两次、drop 一次仍可用；超过 16 MiB 又没有登记的为 `Unreadable`；后退历史里的条目不持有内容。
 - `edit_*`：增量解析的区间与整文件解析相同；`changed` 之后 `spans` 立即返回平移后的区间；CRLF 与 BOM 在保存时恢复。
@@ -1193,6 +1193,14 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 
   测量时这台机器上同时有其他 agent 的构建和测试（负载 4–5），报告把多项标为 noisy。`full_parse_1mib` 七次的中位数改动前 364 ms、改动后 366 ms；它经过的代码里，改动只碰到 `health::enter` 卡死分支里的一条记录（每片调用一次 `enter`，不进这个分支）和查询第一次编译时的失败分支。首屏、解析、查询、`rows` 和查找的路径上没有新加的记录，看不出变慢。
 - 没有验证的：没有在 macOS 上运行；记录写进真实日志文件要等 `app` 接入（logging 设计第 3 步），这里只经 `testing::capture()` 检查编码后的行。
+
+`batch_order_*` 的计时改按 CPU 时间（只改测试），在 Linux（x86_64，4 核虚拟机）上运行：
+
+- 起因：`batch_order_window_tasks_take_turns_with_batches` 在四个 agent 同时构建时的 `just test` 里失败两次（一步 168 ms、`TimedOut`；另一次超过 200 ms），单独运行通过。它拿一步前后两个 trace 事件之间的墙上时间当作解析用时，批量线程等 CPU 的时间也算了进去；一步的预算本身按墙上时间，所以线程被挤掉时只解析了约 24 ms 的一步也在 50 ms 处以 `TimedOut` 结束，测到的是它再加上等待。生产代码没有改。
+- `Threaded` 给每个 trace 事件记下这个线程的 CPU 时间（`platform::ThreadCpuClock`，与 `health` 同一个时钟），`flip_inside` 记下打开开关时的 CPU 时间。一步的检查改为批量线程在这一步里的 CPU 时间不超过预算加 100 ms（界限不变），另外检查每一步以 `TimedOut` 或 `Done` 结束；墙上时间只留 2 s 的上限，防一步阻塞。两个窗口任务之间有模拟批次的检查不变：只有一个批量线程，步与批次在它上面先后运行。`batch_order_window_stops_within_a_slice_when_yielding` 和 `prefetch_stops_at_a_slice_boundary_when_yielding` 的「开关打开后 10 ms 内停下」同样改按这个线程的 CPU 时间，开关和停下都在批量线程上；「这一步只再询问一次」的检查不变。
+- 负载下的运行（`--retries 0`，nextest 的 `--stress-count`；负载是另外一到三组 `lectern-syntax` 全部测试以 8–32 个线程反复运行，其中两轮同时有 `just check` 的 clippy 和 `just test` 的整个工作区构建，平均负载 4–35）：改动后 `batch_order_window_tasks_take_turns_with_batches` 150、25、40、40 次全部通过，与 `batch_order_window_stops_within_a_slice_when_yielding` 一起又 200 次通过，与两个让路测试一起 100 次里它和 `batch_order` 的让路测试都通过。打印的数值里一步的墙上时间最多 75 ms，这些步的 CPU 时间 19–39 ms；不少步只解析了约 20 ms 就在 50 ms 的墙上时间处 `TimedOut`。这台机器上没有复现 150 ms 以上的一步：改动前的测试在一组负载下 40 次也都通过。
+- 负载下另有两个不属于这次改动的不稳定，没有修：`prefetch_stops_at_a_slice_boundary_when_yielding` 100 次里 2 次、另一轮全部测试 3 次里 1 次在「这一步只再询问一次」处失败（`after` 为空）：开关在第 8 次询问之后打开，同一次检查里这一片已超过 8 ms 的墙上预算，这一片以 `TimedOut` 结束，下一片的第一次询问才以 `Yielded` 停下，仍在一片之内；`prefetch_larger_files_get_the_first_screens_window` 50 轮里 3 次 LRU 里没有第一屏窗口：预取的窗口一次解析、预算 50 ms 墙上时间，机器忙时超时、不放进 LRU。
+- `just check`、`just test -p lectern-syntax`、`just test`、`just doctest`、`just deny` 通过。
 
 ## 与设计的差异
 
