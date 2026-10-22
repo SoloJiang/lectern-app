@@ -138,6 +138,7 @@ impl Table {
     }
 
     /// Records left out that have not joined [`SUPPRESSED`] yet.
+    #[cfg(feature = "sink")]
     pub(crate) fn pending(&self) -> u64 {
         self.entries
             .iter()
