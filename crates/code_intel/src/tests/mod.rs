@@ -14,6 +14,7 @@ mod grammar_changes;
 mod incremental;
 mod lang;
 mod location_byte;
+mod logs;
 mod map;
 mod names;
 mod overlay;

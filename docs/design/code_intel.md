@@ -1,6 +1,6 @@
 # code_intel 设计
 
-状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#145](https://github.com/SoloJiang/lectern-app/pull/145)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 8 步的窗口抽取与窗口链、`Windowed`（同一 PR 的第二部分）和跳转里的大文件（第三部分）已实现，可见区域的三个窗口和查引用按窗口读没有做（见「与设计的差异」第 8 步）；第 9 步（依赖层，`code_intel.deps` 与 224 MiB 的配额，[#154](https://github.com/SoloJiang/lectern-app/pull/154)）已实现，见「实际验证」「与设计的差异」第 9 步，它的验收项里 `app/index_100k` 的夹具加入达到依赖层上限的 `node_modules` 还没有做（`app` 的基准只在 macOS 上构建），这一项仍未完成；第 5 步尚未实现（见「验收」）。
+状态：实现中（设计 [#107](https://github.com/SoloJiang/lectern-app/pull/107)）。第 1 步（语言注册与抽取，[#113](https://github.com/SoloJiang/lectern-app/pull/113)）、第 2 步（存储，[#115](https://github.com/SoloJiang/lectern-app/pull/115)）、第 3 步（映射、调度与增量更新，[#117](https://github.com/SoloJiang/lectern-app/pull/117)）、第 4 步（查询与插件，[#121](https://github.com/SoloJiang/lectern-app/pull/121)）已实现，第 3 步的电源代码已按 [ADR 0032](../adr/0032.md) 删除；第 7 步（交互让路，第 4、5 层，[#141](https://github.com/SoloJiang/lectern-app/pull/141)）已实现，见「实际验证」「与设计的差异」；第 6 步里的规范内容 OID 的批量核对已实现（「规范内容 OID 的批量核对」，[#143](https://github.com/SoloJiang/lectern-app/pull/143)），存储版本 3 和字节偏移随第 8 步实现（[#145](https://github.com/SoloJiang/lectern-app/pull/145)，配额仍是 256 MiB，224 MiB 随第 9 步，见「与设计的差异」第 8 步）；第 8 步的窗口抽取与窗口链、`Windowed`（同一 PR 的第二部分）和跳转里的大文件（第三部分）已实现，可见区域的三个窗口和查引用按窗口读没有做（见「与设计的差异」第 8 步）；第 9 步（依赖层，`code_intel.deps` 与 224 MiB 的配额，[#154](https://github.com/SoloJiang/lectern-app/pull/154)）已实现，见「实际验证」「与设计的差异」第 9 步，它的验收项里 `app/index_100k` 的夹具加入达到依赖层上限的 `node_modules` 还没有做（`app` 的基准只在 macOS 上构建），这一项仍未完成；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `code_intel` 部分）已实现，见「实际验证」「与设计的差异」；第 5 步尚未实现（见「验收」）。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)。本文覆盖导航的第 1 层「语法索引」：用 tree-sitter tags 按 blob 抽取定义和引用名，存进 `cache` 仓库分库的自定义表，经当前 worktree 的「blob → 路径」映射过滤，随 `fs_watch` 的批次增量更新；索引还不完整时，跳转到定义、查找引用和 ⌘K 的符号查找按固定顺序现场回答（[技术调研「代码导航与编辑」](tech-research.md#代码导航与编辑)、[代码导航调研](../research/code-navigation.md)）。依赖与延迟预算见 [ADR 0030](../adr/0030.md)，后台索引与静止的关系见 [ADR 0029](../adr/0029.md)。
 
@@ -43,6 +43,7 @@
 | `lectern-git` | 当前 worktree 的工作区比较、其他 worktree 的 index、对象库里的 blob | gix 只在 `git` 里使用 |
 | `lectern-fs-watch` | 当前 worktree 的 `WorktreeBatch` | 与 `project` 共用同一份 worktree 监听状态 |
 | `lectern-platform` | `SafeRoot`：读工作区文件 | 工作区文件只经 `SafeRoot` 读取，不用 mmap（[platform 设计「读取上限」](platform.md#读取上限)） |
+| `lectern-logging` | 运行日志的宏与类型化字段（「日志与诊断」） | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；测试用它的 `test-support` feature 捕获记录 |
 | `tree-sitter` `=0.27.1`（不开 `wasm`） | 解析、locals 查询、截止时间的进度回调 | ADR 0030 |
 | `tree-sitter-tags` `=0.27.1` | tags 查询抽取定义和引用 | ADR 0030；只新增 `tree-sitter-language`、`streaming-iterator` 两个传递依赖 |
 | `streaming-iterator` | `ParsedFile` 自己遍历查询匹配（`QueryMatches` 实现的是它的 trait） | tree-sitter-tags 的传递依赖，MIT OR Apache-2.0，不新增 crate |
@@ -1938,12 +1939,48 @@ enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume
 | 二进制、超过 1 MiB、读不出 | 记状态（`Binary`、`TooLarge`），工作区里的修改或未跟踪文件标为 `Unindexable` | 不提供候选；二进制算已入索引，其余计为未搜，结果是 `Partial`（「完整性的核算」） |
 | 符号链接、路径经过符号链接、过滤器的指针文件（LFS）、其他种类的文件 | 标为 `Excluded`，不读、不建索引 | 不提供候选；不是本 crate 索引的源文件，不参与核算 |
 | `cache` 分库不可用、写入被丢弃 | 结果只在内存里用于本次查询，下次重新抽取 | 照常，只是变慢 |
-| grammar 或查询编译失败 | 这种语言在本次运行中停用，向 stderr 写一行（`lectern-code-intel:` 前缀） | `Failed(UnsupportedLanguage)` |
+| grammar 或查询编译失败 | 这种语言在本次运行中停用，记一条 error（「日志与诊断」） | `Failed(UnsupportedLanguage)` |
 | 工作区比较失败（`GitError`）、根目录打不开 | 保留上一份覆盖部分，下一次事件再试；发布的快照标为缺工作区内容 | 未暂存的修改可能暂时按 index 的内容回答；结果不是 `Complete`，直到比较成功 |
 | 当前 worktree 没有，或文件列表 `Unavailable` | 没有可发布的快照 | 查询 `Failed(Unreadable)`，不一直 `Running` |
 | `fs_watch` 的监听失败 | 丢掉订阅，等下一次 `ProjectEvent` | 同上 |
 | 语义导航的提供者失败或停用 | 作废它未回复的请求，按剩下的回复重新合并；都没有时 `semantic` 为 `Failed`，候选不变 | 抽屉保留已有结果 |
 | 插件停用 | kernel 丢弃任务；视图手里的 `QueryResults` 仍有效，只是不再更新 | — |
+
+## 日志与诊断
+
+本 crate 经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 为 `code_intel`，字段值的写法集中在 `crates/code_intel/src/diag.rs`。记录只进 `lectern-logging` 的内存缓冲，调用线程上不做 IO。级别按 ADR 0046「默认日志」：结果被放弃（这种语言本次运行停用、这个文件不抽取、窗口链停下）记 error，降级之后继续（跳过一个文件、整批改为逐个、留给下一次事件、退回 tags 查询）记 warn。
+
+- 默认记录：
+
+  | 事件 | 级别 | `msg` | 字段 |
+  |---|---|---|---|
+  | tags 查询编译不了（`Compiled`），这种语言本次运行停用 | error | `the tags queries do not compile; the language is disabled for this run` | `lang`、`grammar`、`error`、`row`、`column` |
+  | 位置分析的查询编译不了（`SiteQuery`） | error | `the site query does not compile; the language is disabled for this run` | 同上 |
+  | 跳转的查询编译不了（`SiteQuery::jump`） | error | `the jump query does not compile; the language is disabled for this run` | 同上 |
+  | 解析器不接受这个 grammar（`set_language` 失败），这个文件不抽取 | error | `the parser does not take the grammar; the file is not extracted` | `lang`、`grammar`、`bytes` |
+  | 遍历在截止时间和取消之外停下（没有遍历器；`extract` 之前已检查，实际到不了） | error | `the walk stopped without a deadline or a cancel; the file is not extracted` | `lang`、`grammar`、`bytes` |
+  | tree-sitter-tags 抽取出错（取消之外），这个文件不抽取 | error | `tree-sitter-tags failed; the file is not extracted` | `lang`、`grammar`、`bytes`、`error` |
+  | 核心语言的 grammar 缺少遍历器用到的节点种类、token 或字段，这种语言改用 tags 查询 | warn | `the grammar lacks a node the walker names; its files use the tags queries` | `dialect`、`missing`、`name` |
+  | 窗口链里一个窗口抽取不了（`Unsupported`），这条链停下 | error | `a window of a large file could not be extracted; the chain stops` | `path`、`lang`、`start`、`bytes` |
+  | 一个文件转换成规范内容失败，不入索引（重新读、批量层的一批、保活时段里的单个核对） | warn | `cannot convert a file to its canonical form; it is not indexed` | `path`、`bytes`、`error`、`io`，只有一个文件的一批另有 `oids` |
+  | 一批 `canonical_oids` 失败或返回的个数不对，改为逐个转换 | warn | `converting a batch to canonical form failed; converting its files one by one` | `root`、`files`、`error`、`io`、`oids` |
+  | 第 5 层读不出另一个 worktree（根打不开或 index 读不出），跳过它的文件 | warn | `cannot read another worktree; its files are skipped` | `root`、`op`、`error`、`io` |
+  | 核对任务 16 遍之后仍有输入，留给下一次事件 | warn | `the reconcile did not settle; the rest waits for the next event` | `project`、`passes` |
+  | 当前 worktree 的根目录打不开，下一个 `ProjectEvent` 再试 | warn | `cannot open the worktree root; tried again on the next project event` | `root`、`io` |
+  | 文件夹项目的根目录打不开 | warn | `cannot open the folder root; tried again on the next project event` | `root`、`io` |
+  | 读 HEAD 失败 | warn | `cannot read HEAD; tried again on the next event` | `root`、`error`、`io` |
+  | 读 index 校验和失败 | warn | `cannot read the index checksum; tried again on the next event` | `root`、`error`、`io` |
+  | 工作区比较失败，保留上一份覆盖部分 | warn | `the worktree comparison failed; the overlay is kept until the next event` | `root`、`error`、`io` |
+  | 直接依赖超过 512 个，多出的只走按需解析 | warn | `more direct dependencies than the tier takes; the rest only resolve on demand` | `path`、`kept`、`more` |
+
+  - `path` 是相对 worktree 根（依赖的清单是相对 worktree 根的 `package.json`）的路径，`root` 是 worktree 或文件夹的根目录，`project` 是 git 公共目录或文件夹的根，都经 `Value::path`（主目录写成 `~`）。
+  - `lang` 是核心语言的名字（`ts`、`tsx`、`js`、`rust`、`java`、`python`、`go`），语言包为 null：语言包的名字不写，由 `grammar`（grammar 版本，16 位十六进制，语言包是 `artifact_sha256` 的前 8 字节）区分。`dialect` 是遍历器的方言名，`missing` 是 `node_kind`、`token` 或 `field`，`name` 是遍历器源码里写的节点名（字面量，不来自用户代码）。
+  - 查询编译错误的 `error` 是 tree-sitter 的 `QueryErrorKind`（`syntax`、`node_type`、`field`、`capture`、`predicate`、`structure`、`language`，`row`、`column` 是它在查询里的位置），或 tree-sitter-tags 的 `regex`、`invalid_language`、`invalid_capture`，或 `unknown_marker`（不认识的 `reference.lectern.*`）、`syntax_type`（tree-sitter-tags 的种类编号与遍历不同），这几种的 `row`、`column` 为 null。tags 抽取的 `error` 取同一套名字。`GitError` 的 `error` 是 `unsupported`、`no_merge_base`、`object_missing`、`too_large`、`too_many_entries`、`corrupt`、`io`、`cancelled`，批量结果个数不对时是 `count_mismatch`（`oids` 是返回的个数）。`io` 是 `Value::io`（种类和系统错误码），没有 `io::Error` 时为 null。另一个 worktree 的 `op` 是 `root`（打开根）或 `index`（读 index）。
+  - 同一个调用点每 10 秒最多写 20 条（[logging 设计「限流」](logging.md#限流)）：语言停用的三条各只写一次（`OnceLock`），按文件的几条在一种语言或一批文件都出错时受这个上限约束。
+- 详细级别：不另加 debug、trace 记录。抽取（解析、遍历、规则）、批量循环、存在检查、跳转和查引用的每一步都是热路径：`code_intel/extract_throughput` 的 4 MB/s 是每个约 8 KiB 的文件一次抽取，跳转的第一批要在 20 ms 内；按文件或按查询步骤记录会挤占这些预算。进度和分项由 `Stats` 的计数和 `src/phases.rs` 的计时（`test-support`）给测试和基准。上表的调用点都在失败分支上，级别关闭时只做一次级别比较，字段不求值、不分配、不格式化；转换失败原来先把错误格式化成 `String`，现在只在写出时取种类。
+- 关联 ID：本 crate 不设作用域。索引、核对、批量和查询的任务都经插件句柄提交，记录带 executor 的 `task` 和 kernel 的 `plugin`（`code-intel`）、`act`；语言的查询在第一次用到它的任务里编译，记录带那个任务的作用域。
+- 不记录：文件内容（工作区文件、对象库的 blob、依赖里的文件、查询读出的当前文本）、从内容里取出的名字（定义名、引用名、导入的模块名、名字表、依赖的包名）、⌘K 和 `Named` 的查询名字、跳转位置上的标识符、语言包的名字和它的 tags / locals 查询文字、tree-sitter 与 tree-sitter-tags 错误的消息（引用查询原文或捕获名）、`GitError::Corrupt` 等错误的文字、`io::Error` 的消息。用路径、核心语言名、grammar 版本、字节数、计数和错误种类代替。本 crate 不启动外部进程（jdtls、SCIP 是独立的进程插件，经「语义导航的注册」接入，记录归它们）。
+- 金丝雀测试：`logs_hold_no_file_contents`（`testing::capture()`，trace 级别）：金丝雀放在七种核心语言文件的标识符、字符串和注释里，以及未跟踪文件、`Named` 查询的名字、依赖的包名和声明文件、语言包的名字和它的坏查询里；流程经建索引、跳转、查引用、`Named`、名字表、未入索引时的限时搜索、依赖层的读取；再让工作区比较失败、一个 CRLF 文件的转换失败（整批改为逐个）、另一个 worktree 的根被删掉、语言包的 tags 查询编译失败、直接依赖超过 512 个，检查这些记录都写出了、级别和字段正确，之后 `assert_absent`，并确认 `FakeGit` 的错误文字（`conversion failed`）不在记录里。
 
 ## 测试
 
@@ -1993,6 +2030,7 @@ enum ResumeState { Parsing(Parser), Walking { tree: Tree, walk: walk::WalkResume
 - 名字表（`names_*`）：去重、NFC、只含当前 worktree 映射里的 OID（另一个 worktree 独有的名字不在其中）；第一次 `names` 返回 `Building`，`Names` 事件带着表，监听方保存后再调 `names` 返回 `Ready`、是同一个 `Arc`（`names_ready_after_build`）；构建期间重复调用不另起构建；代数落后时重建、期间返回旧表；所有持有者释放后再调用重新构建；表被持有时索引写入新的批次，`ManualClock` 推进过间隔后后台重建并发出带新 `Arc` 的 `Names`，间隔内的多次变化只触发一次重建，持有者释放后不再重建（`names_refresh_while_held`）。
 - 升级（`escalate_*`）：Java 多候选和唯一 `NameOnly` 候选时调用提供者，其他语言不调用；提供者的 token 为 `Dead` 时不调用；结果相同时 `Same`、不同时 `Ready`；`head_only` 的提供者只在 `head_clean` 时被调用，返回的位置里内容与 HEAD 不同的文件被丢掉；只暂存、未提交的文件（工作区等于 index、不等于 HEAD）的 `head_clean` 为 false，提交之后为 true；index 变化之后、新的工作区比较完成之前为 false（`head_dirty_*`）；登记 drop 后不再调用；SCIP 与 jdtls 两个假提供者同时处理 Java 时，按两种回复顺序得到相同的合并结果，HEAD 相同的文件取 SCIP 的位置、有改动的文件取 jdtls 的位置，过时 ID 的回复被丢弃，查询关闭时未回复的请求收到 `cancel`；SCIP 先回复、已知候选都与 HEAD 相同时，jdtls 的请求不被取消，它之后返回的未跟踪文件里的位置进入合并结果（`escalate_arbitration_*`）；提供者接受请求后注销，只有它在请求中的查询 `semantic` 变为 `Failed`、不再停在 `Pending`，另有 SCIP 回复的查询按剩下的回复重新合并，注销之后到达的回复被丢弃（`escalate_unregister_*`）。
 - 插件（`plugin_*`）：用真实的 `Kernel`（kernel 的 `test-support`）和 `Executor::manual()`；`activate` 之后、第一个项目打开之前没有任何 IO（`FakeGit`、缓存目录、`SafeRoot` 都没有被调用）；依赖 `dyn Projects`；`Results` 事件的顺序与 generation；一次查询从提交到最后一批写入之前 kernel 不静止；停用之后语言包的订阅已退订，fs_watch 的订阅都已 drop，项目关闭时未回复的语义请求收到 `cancel`（`plugin_teardown_*`）。
+- 日志（`logs_*`，用 `lectern-logging` 的 `testing::capture()`）：金丝雀和各条记录的级别与字段，见「日志与诊断」。
 
 ## 未决问题
 
@@ -2053,6 +2091,12 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 9. **依赖层**（前置：`services` 的依赖类型、`Coverage::deps`、`CandidateTier::Dependency`；`platform` 的 `SafeRoot::open_dir` 已实现；链接按 [ADR 0040](../adr/0040.md)；按需解析的部分另需 #19 的 TS 解析扩展点）：发现、身份与路径表、`cd_spec`、依赖映射、依赖层、`code_intel.deps`、查询里的依赖层。
    - `deps_*` 测试通过；`rg -n 'open_dir' crates/code_intel/src --glob '!**/tests*'` 只在 `deps` 模块里（读取限制只有一个入口）。
    - `code_intel/deps_identity` ≤ 50 ms、`code_intel/deps_map_bytes` ≤ 1 MB；`code_intel/deps_ts_project` 有结果；`app/index_100k` 的夹具含达到依赖层上限的 `node_modules`（bench 设计）之后，macOS CI 上仍 ≤ 120 s。
+
+运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `code_intel` 部分，`Refs #170`）：
+
+- `rg 'eprintln!|util::log' crates/code_intel/src --glob '!**/tests*'` 没有结果。
+- `logs_*` 通过，其余测试照常通过。
+- `just bench --measure code_intel/` 与改动前相比不变慢（macOS CI 上 `code_intel/extract_throughput` 和 `references_*` 曾经敏感，逐项对照）。
 
 ## 实际验证
 
@@ -2480,6 +2524,39 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - `just check` 通过；`just test -p lectern-code-intel -p lectern-services -p lectern-bench` 528 个测试通过（跳过 6 个）。
 - 基准：`deps_map_bytes` 1000 KB（≤ 1 MB；每个文件多了两字节的表内序号，上限改为 1000 KiB，放进 11 283 个文件）；`deps_identity` 中位数 27.5 ms、重跑 23.4 ms（≤ 50 ms，报告标为 noisy：同时有另一个构建在运行，上一轮是 19.9 ms；身份任务的工作没有增加，映射的建立只是挪到锁外）；`deps_ts_project` 1.94 s（只记录）；`resident_cloudprint` 683 KB（≤ 4 MB）。
 
+运行日志的接入（logging 设计第 9 项的 `code_intel` 部分），基于 main（170bc85），Linux（x86_64，4 核虚拟机，Rust 1.97.0）。
+
+- `just check`、`just test`（工作区 2248 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。新增 `logs_hold_no_file_contents`。
+- `rg 'eprintln!|util::log' crates/code_intel/src --glob '!**/tests*'` 没有结果。Cargo.lock 只在 `lectern-code-intel` 的依赖里多了 `lectern-logging`，没有新的外部 crate。
+- `logs_hold_no_file_contents` 确认了表里 6 种记录的级别和字段：工作区比较失败（warn，`root`、`error` 为 `corrupt`）、整批转换失败（warn，`files` 为 5、`error` 为 `corrupt`）、单个文件转换失败（warn，`path`、`bytes`、`error`）、另一个 worktree 的根打不开（warn，`op` 为 `root`、`error` 为 `io`、`io` 为 `NotFound`）、语言包的 tags 查询编译不了（error，`lang` 为 null、`grammar`、`error` 为 `syntax`、`row`）、直接依赖超过 512 个（warn，`path` 为 `package.json`、`kept` 为 512、`more` 为 8）。变异检查：把依赖的包名（含金丝雀）当作 `path` 写出时测试失败，已还原。其余 12 种没有测试触发：语言停用的另外两种、解析器不接受 grammar、遍历意外停下、tree-sitter-tags 出错、遍历器缺节点只在 grammar 与查询或遍历器不配套时出现，核心语言造不出来；窗口抽取不了同理；核对 16 遍不收敛按设计不应发生；根目录打不开、HEAD 和 index 校验和读不出、保活时段里的单个转换失败要另造 `FakeGit` 的失败开关或时段，这次没有加。
+- `just bench --measure code_intel/`：改动前是从本分支建的另一个 worktree（170bc85，detach，与本分支共用 target 目录），与改动后交替运行三次；`code_intel/extract*` 和 `code_intel/references*` 另外交替三次。前两次运行时这台机器上有其他 agent 的构建（负载约 13），之后约 1。中位数依次列出（内存的几项每次相同）：
+
+  | 基准 | 改动前 | 改动后 |
+  |---|---|---|
+  | `extract_throughput` | 3.80 / 3.41 / 3.79；单独 4.04 / 4.03 / 3.78 MB/s | 3.34（负载 13）/ 3.98 / 4.03；单独 4.26 / 3.66 / 3.42 MB/s |
+  | `extract_1mib`（只记录） | 3.53 / 3.72 / 3.16；单独 3.38 / 3.32 / 3.46 MB/s | 3.21 / 3.41 / 3.22；单独 3.58 / 3.56 / 3.13 MB/s |
+  | `references_100k/all` | 1.08 / 0.997 / 0.954；单独 1.01 / 1.05 / 0.981 s | 1.09 / 1.02 / 0.983；单独 0.989 / 0.975 / 0.996 s |
+  | `references_100k/first` | 10.6 / 10.9 / 11.1；单独 10.9 / 10.7 / 10.9 ms | 11.5 / 11.0 / 10.6；单独 10.6 / 10.8 / 10.2 ms |
+  | `references_full/all` | 1.34 / 1.25 / 1.40；单独 1.26 / 1.31 / 1.30 s | 1.50 / 1.26 / 1.21；单独 1.26 / 1.19 / 1.33 s |
+  | `references_full/first` | 11.3 / 10.6 / 12.7；单独 10.5 / 10.6 / 11.0 ms | 14.6 / 10.8 / 10.6；单独 11.5 / 10.7 / 11.7 ms |
+  | `goto_indexed` | 1.16 / 1.34 / 1.18 ms | 1.21 / 1.29 / 1.46 ms |
+  | `goto_uncached` | 1.97 / 1.90 / 1.49 ms | 1.34 / 1.34 / 1.94 ms |
+  | `goto_popular` | 4.48 / 4.45 / 6.64 ms | 4.69 / 4.97 / 4.61 ms |
+  | `goto_full`（`/done` 最大值） | 1.42 / 1.51 / 1.43 ms（325 / 341 / 295 ms） | 1.36 / 1.45 / 1.42 ms（365 / 343 / 338 ms） |
+  | `goto_cold_parse` | 25.3 / 34.4 / 30.7 ms | 36.2 / 26.3 / 26.5 ms |
+  | `goto_large` | 4.35 / 3.71 / 4.85 ms | 4.13 / 6.15 / 4.10 ms |
+  | `warm_100k` | 94.2 / 119 / 81.4 ms | 106 / 80.7 / 86.0 ms |
+  | `map_100k` | 13.4 / 15.2 / 8.89 ms | 11.9 / 9.70 / 10.2 ms |
+  | `names_100k` | 675 / 797 / 754 ms | 898 / 669 / 670 ms |
+  | `named_50k/done`（只记录） | 689 / 730 / 675 ms | 756 / 669 / 784 ms |
+  | `deps_identity` | 22.8 / 21.6 / 21.2 ms | 34.4 / 21.7 / 20.6 ms |
+  | `window_chain_16mib`（只记录） | 3.87 / 4.41 / 3.91 s | 4.31 / 3.55 / 3.72 s |
+  | `yield_stop`（最大值） | 94.7 / 198 / 116 µs | 2.98 ms / 72 / 58.2 µs |
+  | `batch_peak`、`window_peak`、`parse_cache_bytes`、`map_100k_bytes`、`names_100k_bytes`、`deps_map_bytes` | 33.3 MB、2.46 MB、11.6 MB、2.65 MB、4.66 MB、1000 KB | 相同 |
+
+  `extract_throughput` 在两边都有低于 4 MB/s 的轮次（改动前 6 次里 4 次，改动后 6 次里 4 次，包括负载 13 的那次），六次的中位数改动前 3.80 MB/s、改动后 3.82 MB/s；它经过的代码里，改动只在失败分支上（解析器不接受 grammar、遍历意外停下、tree-sitter-tags 出错），成功路径没有新加的代码。`references_*` 两边在噪声之内。改动后第一轮的 `goto_cold_parse`、`references_full/first`、`deps_identity`、`names_100k` 和 `yield_stop` 偏高发生在负载 13 的那一轮，之后两轮回到改动前的范围。
+- 没有验证的：没有在 macOS 上运行（macOS CI 上 `extract_throughput` 和 `references_*` 曾经敏感，看 CI 的结果）；记录写进真实日志文件要等 `app` 接入（logging 设计第 3 步），这里只经 `testing::capture()` 检查编码后的行。
+
 ## 与设计的差异
 
 前置条件 A（`services::code_intel`，[#108](https://github.com/SoloJiang/lectern-app/pull/108)）。下面只记上文「服务接口」「语义导航的注册」没有定下、实现时定下的形状；`BlobId` 与 `FileList::oid` 的形状记在 [project 设计「与设计的差异」](project.md#与设计的差异)。
@@ -2796,3 +2873,10 @@ ADR 0033、0034 里影响用户看到的内容的几条，产品负责人已交�
 - 存储：`code_intel.deps` 与 `code_intel.tags` 共用一套表结构（`schema_for!`、`sql_for!` 宏按命名空间生成表名不同的 SQL），另加 `cd_spec`、`cd_pkg`、`cd_pkg_file`。两个命名空间合计登记 37 条语句（tags 15 条，deps 22 条），按连接分开：写连接上是 9 条写入语句（tags 3 条，deps 6 条）加 cache 自己的约 22 条，共约 31 条；读连接上是 28 条查询（tags 12 条，deps 16 条）加 cache 自己的 2 条，共约 30 条；都在每个连接 32 条的预编译语句缓存之内（[cache 设计](cache.md)的统计已同步）。没有改 cache 的上限。
 - 测试：限额用 `cfg(test)` 下的线程局部覆盖（`deps::Limits`），不写 4000 个文件或 64 MiB 的夹具。「16 MiB 的 lockfile 的活跃字节峰值 ≤ 2 MiB」按读取的区间检查（每段 ≤ 1 MiB、首尾相接、覆盖整个文件，`deps_lockfile_read_is_streamed`），没有用计数分配器；读取另有一个 64 KiB 的 `BufReader`。
 - 基准：`code_intel/deps_identity` 测的是这次打开里身份任务从开始到结束的时间之和（`Indexer::deps_identity_times`，`test-support`），不含项目本身的打开、工作区比较和第 3、4 层：这台机器上只有一个文件的项目在 `Rig` 上从打开到静止也要约 220 ms，那部分属于其他预算。`code_intel/deps_map_bytes` 的路径表在测量之前建好、不计入，只测映射本身：完整的行只在身份任务、一个包的遍历和读取核对的更新期间读进内存，就绪的路径表只留表头（见下一条），常驻的是映射和表头，后者由 `resident_cloudprint` 一并测量。夹具按上限取：给出 40 个包、每包 500 个文件，包内路径约 48 字节，SHA-256 的 OID，能放进映射的文件数由字节上限决定。
+
+运行日志的接入（logging 设计第 9 项的 `code_intel` 部分）：
+
+- logging 设计第 9 项写的是「26 处」，实际是 `util::log` 里的一个 `eprintln!` 和它的 20 个调用点（`lang.rs` 3 处，`extract.rs` 3 处，`canonical.rs` 3 处，`index/reconcile.rs` 6 处，`index/batch.rs` 2 处，`index/chain.rs`、`deps/identity.rs`、`walk/mod.rs` 各 1 处）。`util::log` 删除，20 个调用点改为「日志与诊断」表里的 18 种记录（「一个文件转换失败」一种消息有三个调用点），不新增调用点。本文原来只有「状态与异常」的 stderr 一行和「增量更新」「依赖层」两处「记日志」，没有写级别；级别按 ADR 0046「默认日志」定。
+- 原来每行带语言名、路径和错误的 `Display` 文字。错误文字不再写出：tree-sitter 的查询错误和 tree-sitter-tags 的 `InvalidCapture` 引用查询原文，`GitError::Corrupt` 带任意文字，`io::Error` 的消息由系统给出，原来「语言包名」和 `ProjectKey` 的 `Debug` 也在行里。改为错误的种类、查询错误的行列、`Value::io`，语言只写核心语言名（语言包写 null，由 `grammar` 区分），项目写成路径。为此 `Compiled::new`、`SiteQuery::new` / `jump` 和 `classify` 返回 `diag::CompileError`（种类和行列），不再是 `String`；遍历器的 `kind`、`anon`、`field` 和各语言的 `new` 返回 `walk::Missing`（缺的是哪一类、遍历器里写的名字，都是字面量）。
+- 转换失败原来在失败分支上先把 `GitError` 格式化成 `String`（`canonical.rs` 的 `check`、第 5 层读另一个 worktree），级别关闭时也分配；现在只在写出时取种类，失败分支上不分配。
+- 「工作区比较失败」的消息文字带 `comparison failed`，金丝雀测试因此不检查 `FakeGit` 的 `Corrupt("comparison failed")` 文字，只检查 `conversion failed`（转换失败的 `Corrupt` 文字）；两者经同一个 `diag::git_error`。

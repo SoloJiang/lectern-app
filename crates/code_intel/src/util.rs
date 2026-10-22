@@ -1,12 +1,5 @@
 //! Small helpers.
 
-use std::fmt;
-
-/// One line on stderr with the crate's prefix.
-pub(crate) fn log(args: fmt::Arguments<'_>) {
-    eprintln!("lectern-code-intel: {args}");
-}
-
 /// 64-bit FNV-1a over the concatenation of `parts`. Stable across builds
 /// and toolchains: grammar and query versions are stored in cache keys.
 pub(crate) fn fnv64(parts: &[&[u8]]) -> u64 {

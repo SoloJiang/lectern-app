@@ -149,7 +149,7 @@ pub(super) struct Ecma {
 }
 
 impl Ecma {
-    pub(super) fn new(language: &Language, dialect: Dialect) -> Result<Ecma, String> {
+    pub(super) fn new(language: &Language, dialect: Dialect) -> Result<Ecma, super::Missing> {
         let ts = matches!(dialect, Dialect::TypeScript | Dialect::Tsx);
         Ok(Ecma {
             k: Ids::new(language)?,

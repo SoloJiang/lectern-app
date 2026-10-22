@@ -62,7 +62,7 @@ ids! {
 pub(super) struct Java(Ids);
 
 impl Java {
-    pub(super) fn new(language: &Language) -> Result<Java, String> {
+    pub(super) fn new(language: &Language) -> Result<Java, super::Missing> {
         Ids::new(language).map(Java)
     }
 }

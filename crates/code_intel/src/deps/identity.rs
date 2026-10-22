@@ -23,13 +23,13 @@ use super::table::{self, PathTable};
 use super::{
     MANIFEST_MAX, MapInput, PkgDir, PkgWork, Roots, Stat, WalkFile, dep_lang, install_map, vouches,
 };
+use crate::diag;
 use crate::extract::{ExtractStatus, LanguageTable};
 use crate::git_access::hash_blob;
 use crate::index::batch::subproject;
 use crate::index::state::{Project, Scope, State};
 use crate::index::{Inner, lock};
 use crate::store::{EXISTS_BATCH, Store, Version};
-use crate::util::log;
 
 /// The lockfiles npm reads, nearest first at each level.
 const LOCKFILES: [&str; 2] = ["npm-shrinkwrap.json", "package-lock.json"];
@@ -304,10 +304,13 @@ fn read_direct(root: &SafeRoot, dir: &str) -> Vec<String> {
     };
     let (names, more) = direct_dependencies(&manifest);
     if more > 0 {
-        log(format_args!(
-            "{path}: {more} direct dependencies past the first {} are only resolved on demand",
-            names.len()
-        ));
+        // Counts only: the dependencies' names come from the manifest.
+        lectern_logging::warn!(
+            "more direct dependencies than the tier takes; the rest only resolve on demand";
+            path = diag::path(&path),
+            kept = names.len(),
+            more = more,
+        );
     }
     names
 }

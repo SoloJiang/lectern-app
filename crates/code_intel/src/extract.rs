@@ -7,11 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use lectern_logging::error;
 use tree_sitter_tags::{Error as TagsError, TagsContext};
 
 use crate::DefKind;
+use crate::diag;
 use crate::rules::{self, RawTag};
-use crate::util::log;
 use crate::walk;
 use crate::watchdog::{PauseProbe, Registration, Trip, Watchdog};
 
@@ -375,7 +376,12 @@ fn extract_walking(
                 _ => None,
             };
             let Some(parser) = walk::parser_for(lang.language(), parser) else {
-                log(format_args!("parsing {} failed", lang.name().0));
+                error!(
+                    "the parser does not take the grammar; the file is not extracted";
+                    lang = diag::lang(lang),
+                    grammar = diag::grammar(lang),
+                    bytes = source.len(),
+                );
                 return Extraction::empty(ExtractStatus::Unsupported);
             };
             match walk::parse(parser, source, flag, &wants_yield) {
@@ -404,7 +410,14 @@ fn extract_walking(
             return interrupted(&registration);
         }
         walk::WalkStep::Stopped => {
-            log(format_args!("parsing {} failed", lang.name().0));
+            // Neither the deadline nor a cancel: the walk had no walker
+            // (`extract` checked it had one; unreachable in practice).
+            error!(
+                "the walk stopped without a deadline or a cancel; the file is not extracted";
+                lang = diag::lang(lang),
+                grammar = diag::grammar(lang),
+                bytes = source.len(),
+            );
             return Extraction::empty(ExtractStatus::Unsupported);
         }
     };
@@ -615,8 +628,14 @@ pub(crate) fn extract_tags(
     let tags = match tags {
         Ok(tags) => tags,
         Err(TagsError::Cancelled) => return interrupted(&registration),
-        Err(error) => {
-            log(format_args!("extracting {} failed: {error}", lang.name().0));
+        Err(e) => {
+            error!(
+                "tree-sitter-tags failed; the file is not extracted";
+                lang = diag::lang(lang),
+                grammar = diag::grammar(lang),
+                bytes = source.len(),
+                error = diag::tags_error(&e),
+            );
             return Extraction::empty(ExtractStatus::Unsupported);
         }
     };

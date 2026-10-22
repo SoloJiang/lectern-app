@@ -28,13 +28,13 @@ use super::batch::{Ctx, Done};
 use super::state::{Item, Project, Source, Tier};
 use super::{Inner, bump, lock};
 use crate::LangName;
+use crate::diag;
 use crate::extract::{
     BACKGROUND_MAX_LEN, CutRule, Deadline, ExtractStatus, Extraction, Lang, Windowed,
     extract_window, is_binary,
 };
 use crate::git_access::{blob_id, hash_blob, hash_kind};
 use crate::store::{Part, UnitMeta, Version, WindowRow};
-use crate::util::log;
 use crate::window::{Base, WIDE_WINDOW, WINDOW, ident_end, parse_len};
 
 /// An opened file over this size is not extracted (ADR 0034).
@@ -420,7 +420,13 @@ impl Inner {
                 return Step::Paused(Some(open));
             }
             Windowed::Stopped(ExtractStatus::Unsupported) => {
-                log(format_args!("windows of {} failed", chain.path));
+                lectern_logging::error!(
+                    "a window of a large file could not be extracted; the chain stops";
+                    path = diag::path(&chain.path),
+                    lang = diag::lang(&chain.lang),
+                    start = s,
+                    bytes = bytes.len(),
+                );
                 return Step::Over;
             }
             Windowed::Stopped(_) | Windowed::NoCut => return Step::Over,

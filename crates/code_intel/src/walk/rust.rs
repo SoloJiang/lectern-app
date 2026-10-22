@@ -69,7 +69,7 @@ ids! {
 pub(super) struct Rust(Ids);
 
 impl Rust {
-    pub(super) fn new(language: &Language) -> Result<Rust, String> {
+    pub(super) fn new(language: &Language) -> Result<Rust, super::Missing> {
         Ids::new(language).map(Rust)
     }
 }

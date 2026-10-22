@@ -32,6 +32,7 @@ use std::time::Duration;
 use lectern_cache::Written;
 use lectern_executor::Priority;
 use lectern_kernel::{BackgroundGuard, Grant, SLOT_MAX_BYTES};
+use lectern_logging::{Value, warn};
 use lectern_platform::{Read, RelPath as SafeRel, SafeRoot};
 use lectern_services::code_intel::TextOrigin;
 use lectern_services::project::{BlobId, ProjectKey};
@@ -43,6 +44,7 @@ use super::state::{
 };
 use super::{Inner, bump, lock};
 use crate::canonical::{Canonical, Pending};
+use crate::diag;
 use crate::extract::{
     BACKGROUND_DEADLINE, BACKGROUND_MAX_LEN, Deadline, ExtractStatus, Extraction, Lang,
     LanguageTable, ResumeSlot,
@@ -50,7 +52,6 @@ use crate::extract::{
 use crate::git_access::{Tree, hash_blob, hash_kind};
 use crate::map::{HintStamp, LangLookup};
 use crate::store::{EXISTS_BATCH, Found, UnitMeta, Version};
-use crate::util::log;
 
 /// A batch ends after this many files…
 pub const BATCH_FILES: usize = 64;
@@ -1123,13 +1124,18 @@ impl Inner {
             };
             if let Some((key, tree)) = next {
                 // Read that worktree's index; it is dropped once walked.
+                // On failure the step that failed, the error's kind and
+                // its `io::Error`.
                 let loaded = SafeRoot::open(&tree.root)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| ("root", "io", Some(Value::io(&e))))
                     .and_then(|root| {
                         self.git
                             .tracked(&tree, &ctx.cancel)
                             .map(|entries| (root, entries))
-                            .map_err(|e| e.to_string())
+                            .map_err(|e| {
+                                let (kind, io) = diag::git_error(&e);
+                                ("index", kind, io)
+                            })
                     });
                 let mut st = lock(&project.state);
                 if !st.live(ctx.session) {
@@ -1147,11 +1153,14 @@ impl Inner {
                             pos: 0,
                         });
                     }
-                    Err(error) => {
-                        log(format_args!(
-                            "reading worktree {}: {error}",
-                            tree.root.display()
-                        ));
+                    Err((op, error, io)) => {
+                        warn!(
+                            "cannot read another worktree; its files are skipped";
+                            root = Value::path(&tree.root),
+                            op = op,
+                            error = error,
+                            io = io,
+                        );
                         st.batch.others.done.insert(key);
                     }
                 }
@@ -1826,8 +1835,15 @@ impl Inner {
                 }
                 Some(tree) => match self.git.canonical_oid(tree, &item.path, &bytes) {
                     Ok(Some(canonical)) if canonical == item.oid => item.oid,
-                    Err(error) if mode == Mode::Batch => {
-                        log(format_args!("converting {} failed: {error}", item.path));
+                    Err(e) if mode == Mode::Batch => {
+                        let (error, io) = diag::git_error(&e);
+                        warn!(
+                            "cannot convert a file to its canonical form; it is not indexed";
+                            path = diag::path(&item.path),
+                            bytes = bytes.len(),
+                            error = error,
+                            io = io,
+                        );
                         return Err(Outcome::Skip);
                     }
                     _ => raw,

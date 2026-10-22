@@ -192,25 +192,43 @@ pub(crate) fn field_of<'t>(node: Node<'t>, field: u16, kind: u16) -> Option<Node
         .filter(|c| c.kind_id() == kind)
 }
 
-pub(crate) fn kind(language: &Language, name: &str) -> Result<u16, String> {
+/// A node kind, token or field a walker names and the grammar lacks: the
+/// walker's own literals, which the log may keep.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Missing {
+    /// `node_kind`, `token` or `field`.
+    pub what: &'static str,
+    pub name: &'static str,
+}
+
+pub(crate) fn kind(language: &Language, name: &'static str) -> Result<u16, Missing> {
     match language.id_for_node_kind(name, true) {
-        0 => Err(format!("no node kind {name}")),
+        0 => Err(Missing {
+            what: "node_kind",
+            name,
+        }),
         id => Ok(id),
     }
 }
 
-pub(crate) fn anon(language: &Language, name: &str) -> Result<u16, String> {
+pub(crate) fn anon(language: &Language, name: &'static str) -> Result<u16, Missing> {
     match language.id_for_node_kind(name, false) {
-        0 => Err(format!("no token {name:?}")),
+        0 => Err(Missing {
+            what: "token",
+            name,
+        }),
         id => Ok(id),
     }
 }
 
-pub(crate) fn field(language: &Language, name: &str) -> Result<u16, String> {
+pub(crate) fn field(language: &Language, name: &'static str) -> Result<u16, Missing> {
     language
         .field_id_for_name(name)
         .map(|f| f.get())
-        .ok_or_else(|| format!("no field {name}"))
+        .ok_or(Missing {
+            what: "field",
+            name,
+        })
 }
 
 /// Declares a struct of node kind, token and field ids, resolved from a
@@ -230,7 +248,7 @@ macro_rules! ids {
         }
 
         impl $name {
-            pub(super) fn new(language: &tree_sitter::Language) -> Result<$name, String> {
+            pub(super) fn new(language: &tree_sitter::Language) -> Result<$name, super::Missing> {
                 Ok($name {
                     $($k: super::kind(language, $ks)?,)*
                     $($t: super::anon(language, $ts)?,)*
@@ -255,13 +273,18 @@ fn walker(dialect: Dialect, language: &Language) -> Option<&'static dyn Walker> 
     static PYTHON: Slot = OnceLock::new();
     static GO: Slot = OnceLock::new();
     fn boxed<W: Walker + 'static>(
-        w: Result<W, String>,
+        w: Result<W, Missing>,
         dialect: Dialect,
     ) -> Option<Box<dyn Walker>> {
         match w {
             Ok(w) => Some(Box::new(w)),
-            Err(error) => {
-                crate::util::log(format_args!("no walker for {dialect:?}: {error}"));
+            Err(missing) => {
+                lectern_logging::warn!(
+                    "the grammar lacks a node the walker names; its files use the tags queries";
+                    dialect = dialect.name(),
+                    missing = missing.what,
+                    name = missing.name,
+                );
                 None
             }
         }

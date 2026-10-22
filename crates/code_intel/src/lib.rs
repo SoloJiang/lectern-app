@@ -12,6 +12,7 @@
 
 mod canonical;
 mod deps;
+mod diag;
 mod forms;
 mod git_access;
 mod grammar;
