@@ -1,6 +1,6 @@
 # review 设计
 
-状态：已接受，尚未实现。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）已实现；其余前置条件与第 1–5 步尚未实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分），审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 只预留数据模型。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)）。
 
@@ -218,6 +218,8 @@ pub struct ChangeList {
     pub handle: ListHandle,
 }
 
+/// `Clone`、`Default`（None，反序列化得到的改动集就是它）。不是改动集的值的一部分：两个句柄比较时总是相等，
+/// `Debug` 不打印内容，所以 `ChangeList` 的比较与 JSON 往返只看其余字段。
 pub struct ListHandle(pub Option<Arc<dyn Any + Send + Sync>>);
 
 /// 相对 worktree 根、`/` 分隔的原始字节（git 允许非 UTF-8 的名字）。不变量与 `git::RepoPath` 相同。
@@ -319,6 +321,8 @@ impl ChangeSource for LocalChanges { /* caps: refresh、fingerprint 都为 true 
 `ChangeList::handle` 持有对应的 `Arc<ChangeSet>`，所以改动集保留的工作区内容随 `ChangeList` 释放；`refresh` 从 `prev.handle` 取上一份 `ChangeSet`，没有句柄时（不是本实现给出的）按 `Full` 重新比较。git 第 4 步的测试：`change_source_*` 对全部工作区夹具检查转换前后逐字段相同（insta）；`refresh` 后没变的 `FileChange` 与上一份共享 `Arc<[DiffHunk]>`；`texts` 的 `Text` 与 `ChangeSet::texts` 给出的 `Text::shared()` 是同一份（`Arc::ptr_eq`）；`fingerprint` 等于 `ChangeSet::fingerprint`；`cargo tree -i lectern-services -e normal` 里有 `lectern-git`。
 
 ### 审阅服务（`lectern-services` 的 `review` 模块）
+
+数据类型与 `changes` 模块相同，都派生 `Clone`、`PartialEq`、`Eq`、`Debug`、`Serialize`、`Deserialize`（外部标记的枚举）；trait 和包着回调的 `BriefReply`、`BriefRulesRegistration`、`OverviewInterest` 除外。
 
 ```rust
 /// 单实现服务，"review" 插件提供。
@@ -1208,3 +1212,27 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 5. **规则简报与项目主页的概览**（前置 G）：简报规则、`register_brief_rules` 与提供者的请求和对账、概览（计数比较、声明、会话外的改动数、进度）。
    - `brief_*`、`overview_*` 测试通过；`overview_capped` 检查 4001 个改动路径时只保留计数。
    - `review/brief_5000`、`review/overview_round_warm`、`review/resident_cloudprint_bytes`、`review/resident_100k_bytes` 在预算内，`review/overview_cloudprint` 有结果。
+
+## 实际验证
+
+前置条件 A（`services` 的 `changes`、`review` 模块），在 Linux（x86_64 容器）上运行：
+
+- `rg -n 'pub trait ChangeSource|pub trait Review\b|pub trait BriefRules' crates/services/src` 各有一处（`changes/mod.rs`、`review/mod.rs`、`review/rules.rs`）。
+- `just test -p lectern-services`：70 个测试通过，新增 17 个。
+  - JSON 往返：`change_list_round_trips`、`source_types_round_trip`、`review_event_round_trips`、`targets_and_commands_round_trip`、`snapshot_round_trips`、`rows_round_trip`、`overview_and_brief_requests_round_trip`。覆盖每个枚举的每个变体，包括非 UTF-8 的 `ChangePath`、SHA-1 与 SHA-256 的 `BlobId`、`u64::MAX` 等边界值。
+  - 服务 ID：`review_service_id_and_multiple` 检查 `ID == "review"`、`MULTIPLE == false`。
+  - 不是服务：`brief_rules_is_not_a_service` 检查 `dyn BriefRules` 没有实现 `Service`，同一个探针对 `dyn Review` 给出 true；`change_source_is_not_a_service` 对 `dyn ChangeSource` 做同样的检查。
+  - 注销回调：`brief_rules_registration_releases_once_on_drop`、`overview_interest_releases_once_on_drop` 在另一个线程上 drop，回调各调用一次。
+  - 其余：`brief_reply_delivers_batches_until_cancelled` 检查分批答复与 `cancelled()`；`list_handle_is_opaque` 检查句柄不进 JSON、反序列化后为 None、比较时忽略；`change_source_is_a_shared_trait_object` 检查 `refresh`、`fingerprint` 的默认实现。
+- `just check`、`just doctest`、`just deny` 通过。全量 `just test`（不依赖 GPUI 的全部 crate）第一次运行时 `lectern-syntax` 的 `object_content_nobody_holds_is_taken_out_on_the_first_screen` 失败一次（断言首屏高亮为 `On`，实际是 `Pending`）。这个 crate 不使用新模块；单独重跑三次都通过，`--no-fail-fast` 重跑全量时 1838 个测试全部通过，判断为并行负载下的时序抖动。
+- 没有在 macOS 上运行：`services` 不依赖 GPUI，Linux 与 macOS 编译的代码相同。本步没有 bench 条目。
+
+## 与设计的差异
+
+前置条件 A：
+
+- `ListHandle` 的比较（「接口」已补上）：`ChangeList` 派生 `PartialEq`、`Eq`、`Debug`，`#[serde(skip)]` 要求 `Default`，所以 `ListHandle` 手写这几项。两个句柄比较时总是相等，`Debug` 不打印内容。句柄只是实现方的缓存，不属于改动集的值；这样 `ChangeList` 的比较与 JSON 往返结果一致，git 第 4 步按字段核对转换结果时也不受句柄影响。
+- `review` 模块的数据类型同样派生 `Clone`、`PartialEq`、`Eq`、`Debug`、`Serialize`、`Deserialize`（「接口」已补上）。设计只对 `changes` 写明了这一点，但 `crates/services/AGENTS.md`「边界」要求类型能经 JSON-RPC 传给进程插件。
+- 设计没有列出的派生：除 `ChangeList`、`ReviewSnapshot` 外的数据类型都派生 `Hash`。`Review::open` 按 `ReviewTarget` 找已打开的审阅，`FileKey`、`RowsKey`、`TextKey`、`StepId` 用作缓存与视图状态的键。不含 `Arc` 的小类型派生 `Copy`。`ChangePath`、`FileKey`、`TurnRef`、`StepId`、`ReviewId` 派生 `Ord`，路径按字节序；`GroupKind`、`NoiseKind` 派生 `Ord`，按声明顺序即显示顺序。`Capabilities`、`ChangeTotals`、`Progress`、`Note` 派生 `Default`。
+- `ChangePath` 用派生的序列化，JSON 里是字节数组。标注日志里「UTF-8 时写成字符串」的规则属于 `review` 自己的日志格式，不在这里实现。
+- `BriefReply::send` 只调用回调，不检查 `cancelled`：丢弃过期答复由 `review` 传入的回调负责。`cancelled()` 以 `Acquire` 读取。`Debug` 输出 `cancelled` 的当前值。
