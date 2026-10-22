@@ -1,0 +1,24 @@
+---
+source: crates/review/src/chain/tests.rs
+expression: text
+---
+steps:
+  0 Applied f21fa3ba
+  1 Applied 4f213f70
+groups:
+  [0] +1 -1 All
+    old 0..1 new 0..1 bytes 0/0
+  [1] +1 -0 All
+    old 2..2 new 2..3 bytes 4/4
+aligned: true
+worktree:
+  step 0  | A
+  base 1  | b
+  step 1  | c
+base:
+  del 0   | a
+  kept    | b
+
+hunk old 0..1 new 0..1: lines true turns ["0#1"] others [] drifted 0
+hunk old 2..2 new 2..3: lines true turns ["0#2"] others [] drifted 0
+file: Lines turns ["0#1", "0#2"] others [] drifted_hunks 0

@@ -1,19 +1,101 @@
 //! Test and benchmark support (the `test-support` feature).
 //!
-//! Step 1 has only the annotation log fixture of `review/log_load_16k`;
+//! The annotation log fixture of `review/log_load_16k` (step 1) and the
+//! change chain fixture of `review/chain_3000_lines` (step 2);
 //! `FakeSessions`, `FakeProjects` and `Driven` come with step 3.
 
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use lectern_git::HashKind;
 use lectern_services::changes::{ChangePath, FileMode, SideIdentity};
 use lectern_services::project::BlobId;
 use lectern_services::review::FileKey;
 use lectern_services::session::Timestamp;
 
+use crate::chain::{self, ChainInput, Detail, Edit, Op, Outcome, Side, StepInput};
 use crate::log::{BaseRecord, LogFile, Record, SessionId};
 use crate::seen::{SeenKey, StatusKind, TargetKey};
+
+/// A file's change chain with its edits already loaded: `lines` lines,
+/// `replaces` `Replace` steps spread over the file, five to a turn, and a
+/// worktree that is the last version.
+pub struct ChainFixture {
+    path: ChangePath,
+    base: Vec<u8>,
+    worktree: Vec<u8>,
+    steps: Vec<StepInput>,
+}
+
+/// What one [`ChainFixture::run`] gave.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ChainRun {
+    pub applied: usize,
+    pub aligned: bool,
+    pub groups: usize,
+}
+
+/// The fixture of `review/chain_3000_lines` with `lines` = 3000 and
+/// `replaces` = 40: each step replaces one line, about 70 lines apart.
+pub fn chain_fixture(lines: usize, replaces: usize) -> ChainFixture {
+    let line = |i: usize| format!("    let value_{i} = compute({i}, \"fixture line\");\n");
+    let mut text: Vec<String> = (0..lines).map(line).collect();
+    let base = text.concat().into_bytes();
+    let path = ChangePath(Arc::from(&b"src/fixture.rs"[..]));
+    let stride = (lines / replaces.max(1)).max(1);
+    let steps = (0..replaces)
+        .map(|k| {
+            let i = (k * stride + stride / 2).min(lines - 1);
+            let new = format!("    let value_{i} = compute_changed({i}, {k});\n");
+            let old = std::mem::replace(&mut text[i], new.clone());
+            StepInput {
+                group: (k / 5) as u32,
+                completed: true,
+                edits: vec![Edit {
+                    path: path.clone(),
+                    op: Op::Replace {
+                        old: old.into(),
+                        new: new.into(),
+                        all: false,
+                    },
+                }]
+                .into(),
+            }
+        })
+        .collect();
+    ChainFixture {
+        path,
+        base,
+        worktree: text.concat().into_bytes(),
+        steps,
+    }
+}
+
+impl ChainFixture {
+    /// Builds the chain: every step applied, each followed by a
+    /// `line_diff` and the version's OID, then the narrative steps' diffs
+    /// and the alignment with the worktree. No load: the edits are here.
+    pub fn run(&self) -> ChainRun {
+        let chain = chain::build(&ChainInput {
+            hash: HashKind::Sha1,
+            start: &self.path,
+            end: &self.path,
+            base: Side::Text(&self.base),
+            worktree: Side::Text(&self.worktree),
+            steps: &self.steps,
+        });
+        ChainRun {
+            applied: chain
+                .steps
+                .iter()
+                .filter(|s| s.outcome == Outcome::Applied)
+                .count(),
+            aligned: matches!(&chain.detail, Detail::Lines(l) if l.aligned),
+            groups: chain.groups.len(),
+        }
+    }
+}
 
 /// What [`load_log`] read.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

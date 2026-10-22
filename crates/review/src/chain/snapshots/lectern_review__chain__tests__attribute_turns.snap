@@ -1,0 +1,37 @@
+---
+source: crates/review/src/chain/tests.rs
+expression: text
+---
+steps:
+  0 Applied d7bb4154
+  1 Applied a9764b00
+groups:
+  [0] +1 -1 All
+    old 0..1 new 0..1 bytes 0/0
+  [1] +1 -1 All
+    old 6..7 new 6..6 bytes 14/14
+    old 8..8 new 7..8 bytes 18/16
+aligned: true
+worktree:
+  step 0  | one
+  base 1  | 2
+  base 2  | 3
+  base 3  | 4
+  base 4  | 5
+  base 5  | 6
+  base 7  | 8
+  step 1  | eight
+base:
+  del 0   | 1
+  kept    | 2
+  kept    | 3
+  kept    | 4
+  kept    | 5
+  kept    | 6
+  del 1   | 7
+  kept    | 8
+
+hunk old 0..1 new 0..1: lines true turns ["0#1"] others [] drifted 0
+hunk old 6..7 new 6..6: lines true turns ["0#2"] others [] drifted 0
+hunk old 8..8 new 7..8: lines true turns ["0#2"] others [] drifted 0
+file: Lines turns ["0#1", "0#2"] others [] drifted_hunks 0

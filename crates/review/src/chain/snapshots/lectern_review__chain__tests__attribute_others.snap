@@ -1,0 +1,13 @@
+---
+source: crates/review/src/chain/tests.rs
+expression: text
+---
+review of a:
+hunk old 0..1 new 0..1: lines true turns [] others ["b"] drifted 0
+hunk old 2..3 new 2..3: lines true turns ["0#1"] others [] drifted 0
+file: Lines turns ["0#1"] others ["b"] drifted_hunks 0
+
+review of b:
+hunk old 0..1 new 0..1: lines true turns ["0#1"] others [] drifted 0
+hunk old 2..3 new 2..3: lines true turns [] others ["a"] drifted 0
+file: Lines turns ["0#1"] others ["a"] drifted_hunks 0

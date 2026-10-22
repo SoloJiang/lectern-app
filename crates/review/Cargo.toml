@@ -11,11 +11,16 @@ publish.workspace = true
 layer = "domain"
 
 [features]
-# `testing`: the annotation log fixture of `review/log_load_16k`, for
-# lectern-bench (docs/design/review.md「测试」).
+# `testing`: the annotation log fixture of `review/log_load_16k` and the
+# change chain fixture of `review/chain_3000_lines`, for lectern-bench
+# (docs/design/review.md「测试」).
 test-support = []
 
 [dependencies]
+# The `review.attribution` namespace (docs/design/review.md「归因的缓存」).
+lectern-cache = { path = "../cache" }
+# `line_diff` and `Oid::for_blob` for the change chains; gix stays in git.
+lectern-git = { path = "../git" }
 lectern-services = { path = "../services" }
 # The annotation log's records (docs/adr/0044.md).
 serde.workspace = true
