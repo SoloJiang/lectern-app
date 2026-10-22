@@ -4257,6 +4257,7 @@ name = "lectern-cache"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "lectern-logging",
  "rusqlite",
  "ruzstd",
  "sha2 0.11.1",

@@ -4,6 +4,7 @@
 mod basics;
 mod evict;
 mod faults;
+mod logs;
 mod open;
 mod partitions;
 mod support;

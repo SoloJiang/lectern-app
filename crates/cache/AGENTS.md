@@ -31,4 +31,5 @@ just test -p lectern-cache
 - `crash_*` 用同一个测试二进制做子进程（`current_exe` 加 `--exact`），子进程的入口没有环境变量时直接返回。
 - 目录清理按 `ManualClock` 的时刻比较文件的修改时间，所以测试的时钟从真实的当前时刻开始（`support::Fixture`）。
 - 结构化输出（键的编码、文件布局、PRAGMA）用 insta 快照验收，快照改动要在 PR 里逐个看过。
+- 日志经 `lectern-logging` 的宏，字段只用 `Value` 的构造函数（路径用 `Value::path`，IO 错误用 `Value::io`，SQLite 错误只记扩展错误码）；键、值、自定义表的参数和错误消息不进日志（设计文档「日志与诊断」）。`logs_*` 测试用 `lectern-logging` 的 `testing::capture()` 检查记录，金丝雀测试确认这些内容不出现。
 - 性能：`lectern-bench` 的 `cache/*` 基准（`just bench cache/`；Linux 上是冒烟运行，`just bench --measure cache/` 采样并打印实测值），夹具用 `testing::Raw`、`testing::Zstd`、`testing::noise`、`testing::text`，自定义表用 `testing::tags`；`cache/memory` 在 bench 的 `memory` 目标里用子进程测常驻增量（SQLite 的内存不经计数分配器）。结果写进设计文档的「实际验证」。

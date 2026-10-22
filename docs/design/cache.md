@@ -1,6 +1,6 @@
 # cache 设计
 
-状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)，第 3 步（自定义表）[#111](https://github.com/SoloJiang/lectern-app/pull/111)（见「验收」）。
+状态：已实现。第 1 步（存储、键值接口与生命周期）[#82](https://github.com/SoloJiang/lectern-app/pull/82)，第 2 步（淘汰、访问时间与分库管理）[#91](https://github.com/SoloJiang/lectern-app/pull/91)，第 3 步（自定义表）[#111](https://github.com/SoloJiang/lectern-app/pull/111)（见「验收」）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 6 项）[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)。
 
 对应 issue [#17](https://github.com/SoloJiang/lectern-app/issues/17)、[#31](https://github.com/SoloJiang/lectern-app/issues/31)（`crates/cache/AGENTS.md` 列出的两个 issue；本 crate 是它们的前置，不单独关闭其中任何一个）。`cache` 是派生数据的本地持久缓存：解析、diff、索引这类可以从 git 对象或会话日志重新算出的结果，以内容的身份为键存进 SQLite，下次启动、切换 worktree 时直接命中（架构规则 5，[技术调研「性能要点」](tech-research.md#性能要点)）。存储选型见 [ADR 0027](../adr/0027.md)。
 
@@ -32,9 +32,10 @@
 | `rusqlite` =0.40.2（`default-features = false`，`bundled`、`cache`） | SQLite 连接、事务、预编译语句缓存 | MIT；静态链接自带的 SQLite 3.53.2，约 2 MB；理由与放弃的方案见 [ADR 0027](../adr/0027.md) |
 | `sha2` 0.11 | 由分库对应的路径算出文件名 | 已在 Cargo.lock（gix-hash 依赖同一版本），不新增 crate |
 | `ruzstd` 0.9 | 命名空间选择压缩时的编码与解码 | 已是工作区依赖（[ADR 0026](../adr/0026.md)），纯 Rust |
+| `lectern-logging` | 运行日志（「日志与诊断」） | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；测试用它的 `test-support` feature 捕获记录 |
 | `tempfile`（dev） | 测试用的缓存目录 | 已在 Cargo.lock |
 
-不依赖 `executor`、`kernel` 和 `platform`：所有接口都是阻塞的普通函数，由调用方放进自己的后台任务；本 crate 不创建线程、不提交任务、没有定时器。应用缓存目录由 `app` 从 `platform` 取得后传入。
+不依赖 `executor`、`kernel` 和 `platform`：所有接口都是阻塞的普通函数，由调用方放进自己的后台任务；本 crate 不创建线程、不提交任务、没有定时器。应用缓存目录由 `app` 从 `platform` 取得后传入。日志经 `lectern-logging` 的宏写进它的内存缓冲，调用线程上不做 IO（[logging 设计「数据流与线程」](logging.md#数据流与线程)）。
 
 ## 接口
 
@@ -361,7 +362,7 @@ pub enum DisableReason {
 - 旧版本命名空间（`retired = 1`）的条目，每个写事务另外删最多 256 条，不论是否超出预算。命名空间升级后不需要一次性清掉旧数据。
 - 空闲页：`freelist_count × page_size` 超过 32 MiB 时，在同一个事务里执行 `PRAGMA incremental_vacuum(512)`，每次最多把 2 MiB 还给文件系统（文件在下一次检查点时变小）。
 - 访问时间：读命中时，若条目的 `atime` 比现在早 60 分钟以上，把它的 `id` 记进这个分库在内存里的待写集合（最多 4096 个，满了不再记；自定义表的 `touch` 满时写回，见「自定义表」）；待写集合在下一个写事务开头写回，`close` 和换出分库时也写回，写回的 `atime` 是写回的时刻：读和写回之间没有别的写入，所以与其他条目的先后不变。写回只更新 `atime` 早于写回时刻 60 分钟以上的条目，读命中记下的条目都满足这一条。所以读命中通常不产生写入，LRU 的精度是 1 小时；进程崩溃、最后一个 `Cache` drop 时丢掉没写回的访问时间，只影响淘汰顺序。
-- 目录清理：每次运行第一次打开任何分库时，在打开它的文件之前，列出 `repo/` 和 `folder/` 下的文件：一个项目分库的修改时间取它三个文件中最新的，早于 90 天的删除；全部分库文件（含 `-wal`、`-shm` 和应用级分库的文件）合计超过 `Budgets::total` 时，按修改时间从旧到新删除项目分库，直到不超过。当前打开或正在打开的分库和应用级分库不删除；同时打开的其他分库等清理完成后再打开文件。不是分库的文件不动；删除失败写一行 stderr，不停用分库。列目录和 `stat` 只涉及几十个文件，在这次调用里完成。
+- 目录清理：每次运行第一次打开任何分库时，在打开它的文件之前，列出 `repo/` 和 `folder/` 下的文件：一个项目分库的修改时间取它三个文件中最新的，早于 90 天的删除；全部分库文件（含 `-wal`、`-shm` 和应用级分库的文件）合计超过 `Budgets::total` 时，按修改时间从旧到新删除项目分库，直到不超过。当前打开或正在打开的分库和应用级分库不删除；同时打开的其他分库等清理完成后再打开文件。不是分库的文件不动；删除失败记一条 warn（「日志与诊断」），不停用分库。列目录和 `stat` 只涉及几十个文件，在这次调用里完成。
 
 ## 自定义表
 
@@ -473,7 +474,7 @@ impl TableWrite {
 
 - `schema` 只建表和建在这些表上的索引：不建触发器和视图，不在本 crate 的表（`meta`、`namespace`、`entry`、`custom`）上建索引。表名带使用方自己的前缀（code_intel 是 `ci_`），不与本 crate 的表和其他登记重复。
 - 每张表有一列声明为 `REFERENCES entry (id) ON DELETE CASCADE`（列名由使用方定，code_intel 是 `unit`），并且这一列上有索引，或者它就是这张表的 `INTEGER PRIMARY KEY`。每个连接都打开外键（`PRAGMA foreign_keys = ON`）：删除 `entry` 的一行时，SQLite 在同一条语句里按这一列找到并删除引用它的行，没有索引就要扫整张表；插入引用不存在的单元的行违反外键，这次写入整个回滚。所以任何一条删除条目的路径（预算淘汰、`retired` 清理、解码失败、`remove`）都不会留下不属于单元的行，也不依赖进程里有没有这组登记。
-- 建表时检查：新建的对象只有表和这些表上的索引；每张表有符合上一条的列（`PRAGMA foreign_key_list`），`SELECT 1 FROM <表> WHERE <列> = ?` 的查询计划不是全表扫描（`EXPLAIN QUERY PLAN`）；`statements` 的每一条都能预编译。任何一项不满足时建表的事务回滚，向 stderr 写一行，这次读返回 None、写返回 `Dropped::Io`；分库照常可用，下一次使用时再检查一遍。
+- 建表时检查：新建的对象只有表和这些表上的索引；每张表有符合上一条的列（`PRAGMA foreign_key_list`），`SELECT 1 FROM <表> WHERE <列> = ?` 的查询计划不是全表扫描（`EXPLAIN QUERY PLAN`）；`statements` 的每一条都能预编译。任何一项不满足时建表的事务回滚，记一条 warn（「日志与诊断」），这次读返回 None、写返回 `Dropped::Io`；分库照常可用，下一次使用时再检查一遍。
 - `query` 只执行只读语句（`sqlite3_stmt_readonly`），写语句在 `query` 里不执行、直接失败：读连接是 `query_only`，在它上面执行写语句会报 `SQLITE_READONLY`，按「状态与异常」会停用分库。
 - 语句是静态文本，参数个数固定。可变长的列表（code_intel 的存在检查 `oid IN (…)`，最多 500 个）写成固定个数的占位符，用不到的绑定 NULL：`IN` 里的 NULL 不匹配任何值。
 - 语句只读写使用方自己的表；`entry` 的行只经本节的接口建立和删除。登记过的命名空间不再用作 `Entry` 的命名空间。
@@ -491,7 +492,7 @@ impl TableWrite {
 
 - `TableWrite::commit` 是一个写事务，依次：写回访问时间、删除解码失败的条目（与「数据流与线程」相同）、按记下的顺序执行 `create`、`execute`、`remove`、删除 `retired` 命名空间的条目、配额淘汰、预算淘汰、归还空闲页、更新 `meta.bytes` 和 `custom.bytes`。全部生效或全部不生效。
 - 单元的字节数由使用方声明（code_intel 按行估算），计入 `entry.size`、`meta.bytes` 和 `custom.bytes`；本 crate 不核对行的实际大小。
-- 失败时的结果与 `Batch::commit` 相同。另外，使用方的语句出错（违反约束、引用不存在的单元、类型不符、参数个数不对、语法错误、表不存在）时整次回滚，返回 `Dropped::Io`，向 stderr 写一行，但不计入「连续 3 次其他 IO 错误」：这类错误来自使用方的代码，不说明文件有问题，不停用分库。
+- 失败时的结果与 `Batch::commit` 相同。另外，使用方的语句出错（违反约束、引用不存在的单元、类型不符、参数个数不对、语法错误、表不存在）时整次回滚，返回 `Dropped::Io`，记一条 warn，但不计入「连续 3 次其他 IO 错误」：这类错误来自使用方的代码，不说明文件有问题，不停用分库。
 - `bytes()` 超过 `MAX_BATCH` 或任何一个键超过 `MAX_KEY` 时整次返回 `TooLarge`，不打开分库；没有记下任何操作的写入直接返回 `Committed`。
 - 配额：提交前，这个命名空间的 `custom.bytes` 加上本事务的变化超过 `quota` 时，按 `atime` 从旧到新删除它自己的单元（经部分索引，连同它们的行），删到配额的 90% 为止；每个事务最多删本事务写入的字节数，但至少 256 KiB、至多 16 MiB。配额淘汰只在这个命名空间自己的写入里进行：只有它自己的写入会让它变大。超出配额时每次写入删掉的不少于它写入的，所以这个命名空间最多短暂超出配额 16 MiB，之后只减不增。下限比预算淘汰的 1 MiB 低：单元带着行，按 1 MiB 的下限，一次只写一个单元的写入要删约 240 个单元、1.5 万行（`testing::tags` 的形状），实测 39 ms（见「与设计的差异」第 3 步）。
 - 预算淘汰的规则不变（「淘汰」）：单元与条目一起按 `atime` 排序。配额淘汰删掉的字节计入同一个事务的预算淘汰上限。配额淘汰先于预算淘汰，`code_intel.tags` 与 `code_intel.deps` 合计不超过 256 MiB（224 + 32，[ADR 0033](../adr/0033.md)），所以只有其他命名空间合计超过「分库预算 − 配额」（512 − 256 = 256 MiB）时才会触发预算淘汰：hunk 缓存在 256 MiB 以内时不会因为符号索引被淘汰。
@@ -535,9 +536,36 @@ impl TableWrite {
 | 解码失败（`Entry::decode` 返回 None） | 记下 `id`，下一个写事务删除 | 未命中 |
 | 在 UI 线程上调用 | debug 构建 panic；release 构建不做 IO | 未命中、`Dropped::WrongThread` |
 
-- 停用的分库不再做任何 IO，读写立即返回；原因记进 `Stats`，向 stderr 写一行（`lectern-cache:` 前缀，与 kernel、executor 相同）。
+- 停用的分库不再做任何 IO，读写立即返回；原因记进 `Stats`，同时记一条 error（「日志与诊断」）。
 - 文件在运行中被删除（用户清理缓存目录、系统清理空间）：已打开的连接继续使用已删除的文件，换出或重启后重新建库。
 - 本 crate 没有界面；缓存不可用时界面只是变慢，不显示错误。
+
+## 日志与诊断
+
+经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 是 `cache`。
+
+- 默认记录：
+
+  | 事件 | 级别 | `msg` | 字段 |
+  |---|---|---|---|
+  | 分库停用（「状态与异常」） | error | `partition disabled` | `reason`（`corrupt`、`not_writable`、`io`）、`op`（停用时在做的事：`mkdir`、`open`、`call`、`delete`）、`sqlite` 或 `io`，加分库字段 |
+  | 版本或身份不符，删除重建 | warn | `partition mismatch; rebuilding` | 分库字段 |
+  | 文件损坏，删除重建（本次运行第一次损坏） | warn | `partition corrupt; rebuilding` | `sqlite`，加分库字段 |
+  | 自定义表的登记违反规则 | warn | `custom tables rejected` | `namespace`、`rule`、`statement`、`sqlite`、`error`，加分库字段 |
+  | 使用方的查询出错 | warn | `custom table query failed` | `namespace`、`sqlite`、`error`，加分库字段 |
+  | 使用方的写入语句出错 | warn | `custom table statement failed` | `namespace`、`sqlite`、`error`，加分库字段 |
+  | 目录清理列不出 `repo/` 或 `folder/` | warn | `cannot list partitions` | `path`（这个目录）、`io` |
+  | 目录清理删除分库失败 | warn | `cannot delete a partition` | `path`（`.sqlite` 文件）、`io` |
+  | 目录清理删除了分库 | info | `partitions swept` | `deleted`（个数）、`bytes` |
+
+  - 分库字段：`kind`（`app`、`repo`、`folder`）、`path`（分库的 `.sqlite` 文件）、`project`（仓库的公共目录或文件夹；应用级分库为 null）。路径都经 `Value::path`，主目录写成 `~`。
+  - `sqlite` 是 SQLite 的扩展错误码（如 `SQLITE_CORRUPT` 为 11，`SQLITE_NOTADB` 为 26，`SQLITE_IOERR_WRITE` 为 778）；错误不是 SQLite 报的时为 null，这时 `error` 是 rusqlite 自己的错误种类（如 `invalid_parameter_count`、`invalid_query`），否则为 null。`io` 是 `Value::io`：`io::Error` 的种类和系统错误码。
+  - `rule` 是登记违反的那一条：`schema_failed`、`statement_does_not_compile`、`no_table`、`forbidden_object`、`no_unit_column`、`unit_column_unindexed`、`check_failed`；`statement` 是出错语句在 `schema` 或 `statements` 里的下标，其他规则为 null。`namespace` 是登记的命名空间名（使用方代码里的 `&'static str`）。
+  - 同一个调用点每 10 秒最多写 20 条（[logging 设计「限流」](logging.md#限流)）：一个分库反复出错时不会刷屏，省略的条数记在下一条的 `n` 里。
+- 详细级别：不另加 debug、trace 记录。读写是热路径（`get` 一条 4 KiB 约 4 µs），按次记录会占去可观的份额；命中、未命中和按原因的丢弃由 `Cache::stats` 计数。
+- 关联 ID：本 crate 不设作用域。记录在调用方的线程上写出，带调用方的作用域（executor 的 `task`，kernel 的 `plugin`、`act`）。
+- 不记录：键、值和它们编码后的字节；自定义表的参数（`Param::Text`、`Param::Bytes` 可能是文件里的名字和内容）和查询出的行；SQLite 和 rusqlite 的错误消息（可能引用 SQL 文本和取值，只记上面的错误码和种类）；从文件里读出的表名、对象名（用 `rule` 和 `statement` 代替）。
+- 金丝雀测试：`logs_hold_no_keys_values_or_parameters`（`testing::capture()` 在 trace 级别）：键、值和自定义表的参数里放金丝雀，读写之后让目录清理列不出目录、文件损坏后重建、使用方的语句出错，确认这几条 warn 都写出了，记录里没有金丝雀。`logs_disabled_partition_is_an_error`：同一次运行里第二次损坏时，记录是 error，带 `reason`、`sqlite` 和分库文件的路径。
 
 ## 性能
 
@@ -585,6 +613,7 @@ impl TableWrite {
   - 淘汰：普通条目的写入引起的预算淘汰删除最旧的单元和它们的行，代数加一；256 KiB 配额的命名空间写入 2 MiB 之后，`custom.bytes` 始终不超过配额，留下的是最新的单元，同一分库里 512 KiB 的条目一条也没有被淘汰；配额降低后，一次小写入删 256 KiB，大写入删它写入的字节数，命名空间不增长，之后回到配额以内。
   - 代数：读、`touch`、只新增单元、`close` 之后再打开不改变代数；文件在关闭期间被删除、`user_version` 不符被重建时加一；同一分库的另一个句柄读到同样的值，下一次运行从 0 开始。
   - 回滚与崩溃：写入中途 `SQLITE_FULL` 时三张表的行数、单元数都不变，没有不属于单元的行；子进程在写事务提交之前 `abort()`，父进程重新打开后只有已提交的单元和行，`PRAGMA integrity_check` 为 `ok`，`custom.bytes`、`meta.bytes` 与条目一致。
+- 日志（`logs_*`，用 `lectern-logging` 的 `testing::capture()`）：金丝雀和停用的 error 记录，见「日志与诊断」。
 
 ## 未决问题
 
@@ -613,6 +642,12 @@ impl TableWrite {
    - `cargo tree -i rusqlite -e normal --depth 1` 仍只列出 `lectern-cache`；没有新增依赖。
    - `rg 'load_extension|thread::spawn' crates/cache/src --glob '!**/tests*'` 没有结果。
    - bench 的 `cache/tables_write`、`cache/tables_read`、`cache/tables_touch`、`cache/tables_evict` 加入预算表并生效，在预算内；第 1、2 步的 `cache/*` 仍在预算内。
+
+日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 6 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，`Refs #170`）：
+
+- `rg 'eprintln!|util::log' crates/cache/src --glob '!**/tests*'` 没有结果。
+- `logs_*` 通过，其余测试照常通过。
+- `just bench --measure cache/` 与改动前相比不变慢。
 
 接入由使用方各自的 PR 完成：`agents` 设计的第 4 步（`index_cache_*`、`complete_*`），`git` 的 hunk 缓存（`hunk_cache_*`）。`bench` 的 `cache/*` 基准随 [#7](https://github.com/SoloJiang/lectern-app/issues/7) 加入。
 
@@ -694,6 +729,34 @@ impl TableWrite {
 - 更大的规模（一次性的测量，没有提交）：5 万个 `testing::tags` 单元，每次 `touch` 500 个、共 100 次。访问时间都已过期（全部要改）时，逐行 154 ms，每组 256 个 138 ms，每组 1024 个 127 ms；访问时间都在一小时以内（一行也不改）时，逐行 179 ms，集合 8.0 ms。用 `json_each` 一次传入全部 ID 时分别是 151 ms 和 13.7 ms，所以选了固定占位符、每组 1024 个。
 - callgrind（`tables_touch`，集合写回）：要改的行占绝大部分开销，几乎都在索引维护上。`sqlite3BtreeInsert` 45%，`sqlite3BtreeIndexMoveto` 44%，页的分裂 `balance` 21%，`sqlite3BtreeDelete` 12%。每改一行，`entry_atime` 和配额淘汰的部分索引 `entry_ns<id>` 都要删掉旧键、插入新键。语句本身的开销（绑定、单步执行、重置）是逐行写回时省下的那部分。
 
+日志接入（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），同一台机器（Rust 1.97.0）。
+
+- `just check`、`just test`（整个工作区 2148 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`just test -p lectern-cache`：91 个测试通过，原有的 89 个照常通过，新增 `logs_hold_no_keys_values_or_parameters`、`logs_disabled_partition_is_an_error`；`cargo test -p lectern-cache --all-features --lib` 在同一个进程里跑全部 91 个也通过（捕获器由各测试共用，`logs_*` 按自己临时目录的路径筛选记录）。
+- `logs_disabled_partition_is_an_error` 确认了两个分支的错误码：随机字节在打开时是 `sqlite` 26（`SQLITE_NOTADB`），记 warn 后重建；中间的页被改写后在读取时是 `SQLITE_CORRUPT`（主码 11），第二次损坏记 error，`reason` 为 `corrupt`，`op` 为 `call`。
+- `rg 'eprintln!|util::log' crates/cache/src --glob '!**/tests*'` 没有结果；Cargo.lock 只在 `lectern-cache` 的依赖里多了 `lectern-logging`，没有新的外部 crate。
+- `just bench --measure cache/` 改动前后各两次，依次是改动前、改动后、改动前（`origin/main` 的同一个提交）、改动后：
+
+  | 基准 | 改动前 | 改动后 |
+  |---|---|---|
+  | `get_4k` | 4.01、3.83 µs | 3.73、3.84 µs |
+  | `get_many_50` | 86.3、82.3 µs | 83.0、82.5 µs |
+  | `get_1m` | 0.997、1.05 ms | 1.08、1.02 ms |
+  | `put_4k` | 53.0、51.1 µs | 52.2、49.2 µs |
+  | `tables_read` | 7.73、7.21 µs | 7.03、7.15 µs |
+  | `zstd_1m/put` | 6.56、5.75 ms | 5.52、5.77 ms |
+  | `zstd_1m/get` | 849、809 µs | 868、881 µs |
+  | `open_existing` | 8.23、8.21 ms | 0.41、0.45 ms |
+  | `open_new` | 37.1、40.2 ms | 3.13、36.3 ms |
+  | `batch_1000` | 15.0、17.8 ms | 5.4、12.3 ms |
+  | `evict` | 12.4、12.0 ms | 6.47、9.56 ms |
+  | `tables_write` | 16.3、12.7 ms | 13.2、11.6 ms |
+  | `tables_touch` | 10.7、10.8 ms | 7.72、7.12 ms |
+  | `tables_evict` | 22.1、21.2 ms | 16.2、19.6 ms |
+  | `memory` | 5.05、5.20 MB | 5.02、4.78 MB |
+
+  不经 fsync 的几项（读、`put_4k`、`tables_read`、`zstd_1m`）前后相差在 5% 以内。要 fsync 的几项（打开、批量写、淘汰）在两边都会大幅波动，`open_new` 改动后的第二次与改动前同样超出预算：测量时这台机器上同时有别的构建在写盘。本次改动只碰失败路径：成功的读写和打开不经过任何新加的代码，目录清理只在删除了分库时多一条 info。改动前的第一次运行时 bench 的度量已经完成，报告合并因为 Cargo.lock 已改而失败，数字取自运行输出。
+- 没有验证的：macOS 上没有运行；记录写进真实日志文件要等 `app` 接入（logging 设计第 3 步），这里只经 `testing::capture()` 检查编码后的行。
+
 ## 与设计的差异
 
 第 1 步：
@@ -739,3 +802,11 @@ impl TableWrite {
 
 - 「访问时间」原来写的是逐个 ID 执行 `… WHERE id = ? AND atime < ?`。现在每 1024 个 ID 执行一条 `UPDATE entry SET atime = ?1 WHERE atime < ?2 AND id IN (…)`（「访问时间」已改）。精度规则不变：一小时以内写入或写回过的条目不改。读命中和 `touch` 的写回都走这条路径，写在自己的事务里或其他写事务的开头，位置不变。这条语句占预编译语句缓存的一条。
 - 要改的行很多时（第二天的热启动，所有单元都过期），收益只有约 15%：开销在两个以 `atime` 为键的索引上（见「实际验证」），只改写回的方式省不掉。要再快，就得减少以 `atime` 为键的索引（比如让配额淘汰改用 `entry_atime` 加 `ns` 过滤），这会改变表结构和 `SCHEMA_VERSION`，不在这次改动里。
+
+日志接入（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）：
+
+- logging 设计第 6 项说的「9 处」是 `util::log` 里的 `eprintln!` 和它的 8 个调用点（`slot.rs` 5 处、`sweep.rs` 3 处）。`util::log` 删除，8 个调用点改为「日志与诊断」表里的 9 种记录：原来的「rebuilding」一条按原因分成版本或身份不符、损坏两条；停用原来只有一个调用点，用格式化的文字区分 7 种情况，现在由 `reason`、`op` 和 `sqlite` / `io` 区分。
+- 原来每行带分库的描述（种类和项目路径）和错误的 `Display` 文字。错误文字不再写出：SQLite 的消息会引用 SQL 文本，登记违规的说明含使用方的 SQL 和从文件里读出的表名。改为扩展错误码、rusqlite 错误的种类和 `Value::io`。
+- 自定义表登记违规的原因（`custom::Attach::Invalid`）原来是一段文字，改为 `custom::Invalid`：规则名、出错语句在登记里的下标和错误码。行为不变：这次读返回 None、写返回 `Dropped::Io`，分库不停用。
+- 第 6 项要求停用记「原因、SQLite 扩展错误码、路径」。目录建不出来、重建时删不掉文件这两种停用来自 `io::Error`，没有 SQLite 错误码，记 `io`，`sqlite` 为 null。另外记 `op`、`kind` 和 `project`：同一种原因的停用可能发生在打开、读写或删除时；分库的文件名是路径的哈希，只看文件名看不出是哪个项目。
+- 第 6 项把目录清理写作「清理时删除失败（warn）」；列不出目录同样记 warn，删除了分库记 info（原来也各写一行 stderr）。

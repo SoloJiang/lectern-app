@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, Weak};
 
+use lectern_logging::{Value, error, warn};
 use rusqlite::{Connection, ErrorCode};
 
 use crate::codec;
@@ -21,7 +22,7 @@ use crate::custom::{self, Attach};
 use crate::db::{self, Check, Found, Identity, Op, TOUCH_AFTER_MIN, Work, WriteParams};
 use crate::stats::{DisableReason, PartitionKind, PartitionState, PartitionStats};
 use crate::tables::{TableOps, TableRead, Tables};
-use crate::util::{lock, log, read, write};
+use crate::util::{SqlError, lock, read, write};
 use crate::{Dropped, Entry, Key, MAX_KEY, Namespace, Shared, Written, clock, sweep};
 
 /// Writes are not tried for this long after `SQLITE_FULL`.
@@ -201,6 +202,37 @@ enum ReadError {
     /// Opening the read connection failed.
     Reader(rusqlite::Error),
     Query(rusqlite::Error),
+}
+
+/// The error that disabled a partition, for the log record.
+#[derive(Clone, Copy)]
+enum Cause<'a> {
+    Sqlite(&'a rusqlite::Error),
+    Io(&'a io::Error),
+}
+
+/// What the partition was doing when it was disabled: the `op` field.
+#[derive(Clone, Copy)]
+enum Doing {
+    /// Creating its directory.
+    Mkdir,
+    /// Opening or checking the file.
+    Open,
+    /// A read or write call on the open file.
+    Call,
+    /// Deleting the files to rebuild them.
+    Delete,
+}
+
+impl Doing {
+    fn name(self) -> &'static str {
+        match self {
+            Doing::Mkdir => "mkdir",
+            Doing::Open => "open",
+            Doing::Call => "call",
+            Doing::Delete => "delete",
+        }
+    }
 }
 
 impl Slot {
@@ -396,7 +428,17 @@ impl Slot {
                 Ok(Some(ns))
             }
             Attach::Invalid(why) => {
-                log(format_args!("custom tables of {}: {why}", self.describe()));
+                warn!(
+                    "custom tables rejected";
+                    namespace = name,
+                    rule = why.rule,
+                    statement = why.statement,
+                    sqlite = why.error.sqlite,
+                    error = why.error.error,
+                    kind = self.kind.name(),
+                    path = Value::path(&self.file),
+                    project = self.project(),
+                );
                 Ok(None)
             }
         }
@@ -447,11 +489,16 @@ impl Slot {
             }
             Err(ReadError::Reader(e) | ReadError::Query(e)) => {
                 if custom::is_statement_error(&e) {
-                    log(format_args!(
-                        "a query of {} in {} failed: {e}",
-                        tables.namespace.name,
-                        self.describe()
-                    ));
+                    let sql = SqlError::of(&e);
+                    warn!(
+                        "custom table query failed";
+                        namespace = tables.namespace.name,
+                        sqlite = sql.sqlite,
+                        error = sql.error,
+                        kind = self.kind.name(),
+                        path = Value::path(&self.file),
+                        project = self.project(),
+                    );
                 } else {
                     self.fail(id, &e);
                 }
@@ -678,11 +725,16 @@ impl Slot {
                 touch(&mut lock(&session.touched), touched);
                 drop(guard);
                 if let Writes::Tables(tables, _) = writes {
-                    log(format_args!(
-                        "a statement of {} in {} failed: {e}",
-                        tables.namespace.name,
-                        self.describe()
-                    ));
+                    let sql = SqlError::of(&e);
+                    warn!(
+                        "custom table statement failed";
+                        namespace = tables.namespace.name,
+                        sqlite = sql.sqlite,
+                        error = sql.error,
+                        kind = self.kind.name(),
+                        path = Value::path(&self.file),
+                        project = self.project(),
+                    );
                 }
                 self.dropped(Dropped::Io)
             }
@@ -810,14 +862,21 @@ impl Slot {
                     });
                 }
                 Err(OpenError::Mismatch) => {
-                    self.rebuild("is from another version or partition")?;
+                    warn!(
+                        "partition mismatch; rebuilding";
+                        kind = self.kind.name(),
+                        path = Value::path(&self.file),
+                        project = self.project(),
+                    );
+                    self.rebuild()?;
                     rebuilt = true;
                     continue;
                 }
                 Err(OpenError::Dir(e)) => {
                     return Err(self.disable(
                         DisableReason::NotWritable,
-                        format_args!("cannot create the directory of {}: {e}", self.describe()),
+                        Doing::Mkdir,
+                        Cause::Io(&e),
                     ));
                 }
                 Err(OpenError::Sqlite(e)) => classify_open(&e, self),
@@ -879,7 +938,7 @@ impl Slot {
                 if guard.as_ref().map(|s| s.id) == Some(id) {
                     *guard = None;
                     lock(&self.state).open = false;
-                    if let Err(reason) = self.corrupt(e) {
+                    if let Err(reason) = self.corrupt(e, Doing::Call) {
                         return reason;
                     }
                 }
@@ -888,19 +947,13 @@ impl Slot {
             Failure::NotWritable => {
                 let mut guard = write(&self.session);
                 *guard = None;
-                self.disable(
-                    DisableReason::NotWritable,
-                    format_args!("{} is not writable: {e}", self.describe()),
-                )
+                self.disable(DisableReason::NotWritable, Doing::Call, Cause::Sqlite(e))
             }
             Failure::Io => {
                 if self.io_errors.fetch_add(1, Ordering::Relaxed) + 1 >= IO_ERRORS_MAX {
                     let mut guard = write(&self.session);
                     *guard = None;
-                    self.disable(
-                        DisableReason::Io,
-                        format_args!("{} failed {IO_ERRORS_MAX} times: {e}", self.describe()),
-                    )
+                    self.disable(DisableReason::Io, Doing::Call, Cause::Sqlite(e))
                 } else {
                     Dropped::Io
                 }
@@ -908,9 +961,9 @@ impl Slot {
         }
     }
 
-    /// Records a corruption with the session closed, deletes the files, and
-    /// disables the partition the second time.
-    fn corrupt(&self, e: &rusqlite::Error) -> Result<(), Dropped> {
+    /// Records a corruption found while `doing` with the session closed,
+    /// deletes the files, and disables the partition the second time.
+    fn corrupt(&self, e: &rusqlite::Error, doing: Doing) -> Result<(), Dropped> {
         let corruptions = {
             let mut st = lock(&self.state);
             st.corruptions += 1;
@@ -918,24 +971,24 @@ impl Slot {
         };
         if corruptions >= CORRUPTIONS_MAX {
             let _ = self.remove_files();
-            return Err(self.disable(
-                DisableReason::Corrupt,
-                format_args!("{} is corrupt again: {e}", self.describe()),
-            ));
+            return Err(self.disable(DisableReason::Corrupt, doing, Cause::Sqlite(e)));
         }
-        self.rebuild(&format!("is corrupt ({e})"))
+        warn!(
+            "partition corrupt; rebuilding";
+            sqlite = SqlError::of(e).sqlite,
+            kind = self.kind.name(),
+            path = Value::path(&self.file),
+            project = self.project(),
+        );
+        self.rebuild()
     }
 
-    /// Deletes the three files with the session closed.
-    fn rebuild(&self, why: &str) -> Result<(), Dropped> {
-        log(format_args!("{} {why}; rebuilding", self.describe()));
+    /// Deletes the three files with the session closed. The caller logs why.
+    fn rebuild(&self) -> Result<(), Dropped> {
         self.shared.counters.rebuilt();
         self.bump_all();
         if let Err(e) = self.remove_files() {
-            return Err(self.disable(
-                DisableReason::NotWritable,
-                format_args!("cannot delete {}: {e}", self.file.display()),
-            ));
+            return Err(self.disable(DisableReason::NotWritable, Doing::Delete, Cause::Io(&e)));
         }
         Ok(())
     }
@@ -952,8 +1005,9 @@ impl Slot {
         st.budget = st.budget.min(st.bytes / 4 * 3);
     }
 
-    /// Disables the partition for this run. The session must be closed.
-    fn disable(&self, reason: DisableReason, why: std::fmt::Arguments<'_>) -> Dropped {
+    /// Disables the partition for this run, after `cause` while `doing`.
+    /// The session must be closed.
+    fn disable(&self, reason: DisableReason, doing: Doing, cause: Cause<'_>) -> Dropped {
         {
             let mut st = lock(&self.state);
             st.open = false;
@@ -962,7 +1016,21 @@ impl Slot {
             }
         }
         self.bump_all();
-        log(format_args!("{why}; disabled for this run"));
+        let (sql, io) = match cause {
+            Cause::Sqlite(e) => (SqlError::of(e), None),
+            Cause::Io(e) => (SqlError::default(), Some(Value::io(e))),
+        };
+        error!(
+            "partition disabled";
+            reason = reason.name(),
+            op = doing.name(),
+            sqlite = sql.sqlite,
+            error = sql.error,
+            io = io,
+            kind = self.kind.name(),
+            path = Value::path(&self.file),
+            project = self.project(),
+        );
         Dropped::Unavailable
     }
 
@@ -981,11 +1049,10 @@ impl Slot {
         }
     }
 
-    fn describe(&self) -> String {
-        match &self.path {
-            Some(path) => format!("{} partition of {}", self.kind.name(), path.display()),
-            None => "app partition".to_owned(),
-        }
+    /// The `project` field: the repository's common directory or the folder;
+    /// null for the app partition.
+    fn project(&self) -> Option<Value<'_>> {
+        self.path.as_deref().map(Value::path)
     }
 }
 
@@ -1021,22 +1088,18 @@ impl Slot {
 /// What a failed open does. `None`: try again (the file was deleted).
 fn classify_open(e: &rusqlite::Error, slot: &Slot) -> Option<Dropped> {
     match classify(e) {
-        Failure::Corrupt => slot.corrupt(e).err(),
+        Failure::Corrupt => slot.corrupt(e, Doing::Open).err(),
         Failure::Full => {
             slot.disk_full();
             Some(Dropped::DiskFull)
         }
         Failure::Busy => Some(Dropped::Busy),
-        Failure::NotWritable => Some(slot.disable(
-            DisableReason::NotWritable,
-            format_args!("cannot open {}: {e}", slot.describe()),
-        )),
+        Failure::NotWritable => {
+            Some(slot.disable(DisableReason::NotWritable, Doing::Open, Cause::Sqlite(e)))
+        }
         Failure::TooBig | Failure::Io => {
             if slot.io_errors.fetch_add(1, Ordering::Relaxed) + 1 >= IO_ERRORS_MAX {
-                Some(slot.disable(
-                    DisableReason::Io,
-                    format_args!("cannot open {}: {e}", slot.describe()),
-                ))
+                Some(slot.disable(DisableReason::Io, Doing::Open, Cause::Sqlite(e)))
             } else {
                 Some(Dropped::Io)
             }
