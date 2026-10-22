@@ -64,10 +64,31 @@ pub(crate) struct Computed {
 const CONTEXT: u32 = 3;
 const NO_NEWLINE: &[u8] = b"\\ No newline at end of file\n";
 
+/// The line diff of two contents, with the algorithm of the hunk cache
+/// (Histogram, hunks slid to git's indent heuristic): the hunks, with the
+/// byte offset of each side's first line, and the counts. Lines end after
+/// `\n`; a last line without one is a line. None when either side is
+/// longer than `max_bytes`. Pure: reads no object database and no cache,
+/// any thread. `review` diffs the versions of its change chains with it
+/// (docs/design/review.md「改动链」), which never are blobs.
+///
+/// ```
+/// let diff = lectern_git::line_diff(b"a\nb\nc\n", b"a\nB\nc\n", 1024).unwrap();
+/// assert_eq!((diff.added, diff.removed), (1, 1));
+/// let hunk = &diff.hunks[0];
+/// assert_eq!((hunk.old.clone(), hunk.new.clone()), (1..2, 1..2));
+/// assert_eq!((hunk.old_byte, hunk.new_byte), (2, 2));
+/// assert!(lectern_git::line_diff(b"a\n", b"b\n", 1).is_none());
+/// ```
+pub fn line_diff(old: &[u8], new: &[u8], max_bytes: u64) -> Option<FileDiff> {
+    let fits = |side: &[u8]| u64::try_from(side.len()).is_ok_and(|len| len <= max_bytes);
+    (fits(old) && fits(new)).then(|| compute(old, new).diff)
+}
+
 /// The Histogram line diff of `old` and `new`, with hunks slid to git's
 /// indent heuristic. Lines end after `\n`; a last line without one is a
 /// line (and differs from the same text with one), as in git.
-pub(crate) fn line_diff(old: &[u8], new: &[u8]) -> Computed {
+pub(crate) fn compute(old: &[u8], new: &[u8]) -> Computed {
     let input = InternedInput::new(byte_lines(old), byte_lines(new));
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
     diff.postprocess_lines(&input);
@@ -418,7 +439,7 @@ mod tests {
     fn hunk_cache_keeps_the_byte_offsets() {
         let mut cache = HunkCache::new(CACHE_BYTES);
         let (a, b) = (oid(HashKind::Sha1, 3), oid(HashKind::Sha1, 4));
-        let value = line_diff(b"a\r\nb\r\nc", b"a\r\nB\r\nc\n");
+        let value = compute(b"a\r\nb\r\nc", b"a\r\nB\r\nc\n");
         cache.insert(HunkKey::lines(a, b), value.clone());
         let hit = cache.get(&HunkKey::lines(a, b)).unwrap();
         assert_eq!(hit, value);
@@ -449,7 +470,7 @@ mod tests {
     #[test]
     fn hunk_offsets_count_every_byte_of_the_lines_before() {
         // CRLF lines count both bytes; a last line without `\n` is a line.
-        let c = line_diff(b"one\r\ntwo\r\nthree", b"one\r\n2\r\nthree\r\nfour");
+        let c = compute(b"one\r\ntwo\r\nthree", b"one\r\n2\r\nthree\r\nfour");
         let got: Vec<_> = c
             .diff
             .hunks
@@ -460,7 +481,7 @@ mod tests {
         // Several hunks: each side's offset of its own first line.
         let old = b"a\nb\nc\nd\ne\nf\ng\nh\n";
         let new = b"a\nBB\nc\nd\ne\nf\ng\nh\nnew\n";
-        let c = line_diff(old, new);
+        let c = compute(old, new);
         let got: Vec<_> = c
             .diff
             .hunks
@@ -472,6 +493,44 @@ mod tests {
         // A whole-file hunk starts at 0 on both sides.
         let w = whole(b"x\n", b"");
         assert_eq!((w.diff.hunks[0].old_byte, w.diff.hunks[0].new_byte), (0, 0));
+    }
+
+    #[test]
+    fn line_diff_size_limit_applies_to_either_side() {
+        let (old, new) = (b"a\nb\n", b"a\nB\nc\n");
+        let expected = compute(old, new).diff;
+        // Exactly the limit is fine; one byte over on either side is None.
+        assert_eq!(line_diff(old, new, 6), Some(expected.clone()));
+        assert_eq!(line_diff(old, new, 5), None);
+        assert_eq!(line_diff(new, old, 5), None);
+        assert_eq!(line_diff(b"", b"", 0), Some(FileDiff::empty()));
+        assert_eq!(line_diff(old, old, u64::MAX), Some(FileDiff::empty()));
+        assert_eq!(line_diff(old, new, u64::MAX), Some(expected));
+    }
+
+    #[test]
+    fn line_diff_hunks_carry_both_sides_byte_offsets() {
+        // CRLF lines, a last line without `\n`, an insertion at the end.
+        let d = line_diff(
+            b"one\r\ntwo\r\nthree",
+            b"one\r\n2\r\nthree\r\nfour",
+            u64::MAX,
+        )
+        .unwrap();
+        let got: Vec<_> = d
+            .hunks
+            .iter()
+            .map(|h| (h.old.clone(), h.new.clone(), h.old_byte, h.new_byte))
+            .collect();
+        assert_eq!(got, [(1..3, 1..4, 5, 5)]);
+        assert_eq!((d.added, d.removed), (3, 2));
+        // From nothing: one hunk of every line, at 0 on both sides.
+        let d = line_diff(b"", b"x\ny\n", u64::MAX).unwrap();
+        assert_eq!(
+            (d.hunks[0].old.clone(), d.hunks[0].new.clone()),
+            (0..0, 0..2)
+        );
+        assert_eq!((d.hunks[0].old_byte, d.hunks[0].new_byte), (0, 0));
     }
 
     #[test]
@@ -531,7 +590,7 @@ mod tests {
         let new = String::from_utf8(old.clone())
             .unwrap()
             .replace("l5\n", "L5\n");
-        let c = line_diff(&old, new.as_bytes());
+        let c = compute(&old, new.as_bytes());
         assert_eq!(c.diff.hunks.len(), 1);
         // "@@ -3,7 +3,7 @@\n" is 16 bytes; 7 old lines and 1 new line of 4 bytes each.
         assert_eq!(c.body_bytes, 16 + 8 * 4);
@@ -546,8 +605,8 @@ mod tests {
         let text = String::from_utf8(old.clone()).unwrap();
         let near = text.replace("l05\n", "x\n").replace("l12\n", "y\n");
         let far = text.replace("l05\n", "x\n").replace("l13\n", "y\n");
-        let near = line_diff(&old, near.as_bytes()).body_bytes;
-        let far = line_diff(&old, far.as_bytes()).body_bytes;
+        let near = compute(&old, near.as_bytes()).body_bytes;
+        let far = compute(&old, far.as_bytes()).body_bytes;
         // Merged: "@@ -3,14 +3,14 @@\n" (18), 14 old lines of 5 bytes, 2 new of 3.
         assert_eq!(near, 18 + 14 * 5 + 2 * 3);
         // Split: "@@ -3,7 +3,7 @@\n" (16) and "@@ -11,7 +11,7 @@\n" (18), 14 old, 2 new.

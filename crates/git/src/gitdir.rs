@@ -1,7 +1,8 @@
 //! Reads of files in git directories (`HEAD`, `commondir`, `gitdir`,
-//! `locked`, `config`, the index trailer). These are git's administrative
-//! files, not worktree content, and are read with the standard library;
-//! worktree files go only through `SafeRoot` (docs/design/git.md「安全读取」).
+//! `locked`, `config`, the index trailer, the end of `logs/HEAD`). These
+//! are git's administrative files, not worktree content, and are read with
+//! the standard library; worktree files go only through `SafeRoot`
+//! (docs/design/git.md「安全读取」).
 //! This module is the only place in the crate that opens files or lists
 //! directories by path (besides `testing`).
 

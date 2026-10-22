@@ -15,7 +15,7 @@ fn numbered(n: u32) -> String {
 /// Diffs two texts and renders their rows as a unified view with both line
 /// numbers (1-based) and each change's pair.
 fn view(old: &str, new: &str, context: u32) -> String {
-    let diff = hunks::line_diff(old.as_bytes(), new.as_bytes()).diff;
+    let diff = hunks::compute(old.as_bytes(), new.as_bytes()).diff;
     let texts = FileTexts {
         old: SideText::Text(text(old)),
         new: SideText::Text(text(new)),
@@ -311,7 +311,7 @@ fn rows_without_hunks_are_one_fold() {
 fn rows_infer_the_length_of_a_side_without_text() {
     let old = numbered(12);
     let new = old.replace("line 2\n", "two\n");
-    let diff = hunks::line_diff(old.as_bytes(), new.as_bytes()).diff;
+    let diff = hunks::compute(old.as_bytes(), new.as_bytes()).diff;
     let texts = FileTexts {
         old: SideText::Text(text(&old)),
         new: SideText::NotRetained,
@@ -358,7 +358,7 @@ fn rows_offsets_with_crlf_and_a_missing_final_newline() {
     let old = "alpha\r\nbeta\r\ngamma\r\ndelta\r\nend";
     let new = "alpha\r\nbeta\r\nGAMMA ray\r\ndelta\r\nend\r\n";
     insta::assert_snapshot!(view(old, new, 1));
-    let diff = hunks::line_diff(old.as_bytes(), new.as_bytes()).diff;
+    let diff = hunks::compute(old.as_bytes(), new.as_bytes()).diff;
     let texts = FileTexts {
         old: SideText::Text(text(old)),
         new: SideText::Text(text(new)),
@@ -379,7 +379,7 @@ fn rows_offsets_of_every_row_start_its_line() {
     ];
     for (i, new) in cases.iter().enumerate() {
         for (a, b) in [(&old, new), (new, &old)] {
-            let diff = hunks::line_diff(a.as_bytes(), b.as_bytes()).diff;
+            let diff = hunks::compute(a.as_bytes(), b.as_bytes()).diff;
             let texts = FileTexts {
                 old: SideText::Text(text(a)),
                 new: SideText::Text(text(b)),

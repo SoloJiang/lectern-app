@@ -1,6 +1,6 @@
 # git 夹具
 
-`numstat_matches_git` 和 `rename_*`、`diff_trees_*` 测试用的对照数据：用真实的 git 构造两棵树，记下 git 对它们的 `--numstat` 和 `--raw` 输出；`worktree_*` 测试用的工作区夹具见下文「工作区夹具」。测试只导入这些文件，不运行 git（[设计文档「测试」](../../../../docs/design/git.md#测试)）。
+`numstat_matches_git` 和 `rename_*`、`diff_trees_*` 测试用的对照数据：用真实的 git 构造两棵树，记下 git 对它们的 `--numstat` 和 `--raw` 输出；`worktree_*` 测试用的工作区夹具见下文「工作区夹具」，`head_reflog_*` 用的见「reflog 夹具」。测试只导入这些文件，不运行 git（[设计文档「测试」](../../../../docs/design/git.md#测试)）。
 
 ## 格式
 
@@ -31,13 +31,23 @@
 
 `<变体>` 是 `autocrlf=<值>`（`git add` 加 `-c core.autocrlf=<值>` 运行；测试在仓库配置里写同样的值）。`TestRepo::import_worktree_fixture` 把 `files/` 写进工作区，并把 `dot-git…` 还原成 `.git…`。
 
+### reflog 夹具
+
+`head_reflog_*` 测试用的夹具保存 git 写出的 HEAD reflog，也没有 `trees` 文件。测试把 `logs/HEAD` 复制进临时仓库的 git 目录，不导入提交和树：
+
+| 文件 | 内容 |
+|---|---|
+| `logs/HEAD` | 脚本里仓库的 `.git/logs/HEAD`，逐字节保存 |
+| `expected/git-version` | 生成输出的 `git --version` |
+| `expected/entries` | `git log -g --date=unix --format='%gd %H %gs' HEAD`，`HEAD@{<秒>}` 换成 `<秒>`：git 自己从新到旧读出的时间、新值和消息 |
+
 ## 生成
 
 ```sh
 bash crates/git/tests/fixtures/scripts/generate-all.sh <临时目录>
 ```
 
-每个夹具一个脚本（`scripts/<名字>.sh`，头部注明 git 版本），共用 `scripts/common.sh`。脚本在 `<临时目录>/<名字>` 里建一个临时仓库，用 `git add` 和 `git write-tree` 写出两棵树，不提交，所以不受提交签名和身份配置影响；影响这两种输出的设置都用 `-c` 显式给出，外部 diff 和 textconv 用 `--no-ext-diff --no-textconv` 关掉，机器上的 git 配置不改变结果。
+每个夹具一个脚本（`scripts/<名字>.sh`，头部注明 git 版本），共用 `scripts/common.sh`。脚本在 `<临时目录>/<名字>` 里建一个临时仓库，用 `git add` 和 `git write-tree` 写出两棵树，不提交，所以不受提交签名和身份配置影响；影响这两种输出的设置都用 `-c` 显式给出，外部 diff 和 textconv 用 `--no-ext-diff --no-textconv` 关掉，机器上的 git 配置不改变结果。`reflog.sh` 要提交：身份和每一步的时间由环境变量固定（`GIT_COMMITTER_DATE` 也是 reflog 记录的时间），`GIT_CONFIG_GLOBAL=/dev/null`、`GIT_CONFIG_NOSYSTEM=1` 不读机器上的配置，所以每次生成的 OID 和时间相同。
 
 | 夹具 | 内容 |
 |---|---|
@@ -46,5 +56,6 @@ bash crates/git/tests/fixtures/scripts/generate-all.sh <临时目录>
 | `rename_many` | 40 个文件换名并小改、5 个精确重命名；变体 `renameLimit=39`（只剩精确重命名）、`renameLimit=40` |
 | `real` | 本仓库历史里 6 个文件各自一次提交前后的版本（文档、Python、YAML、Rust），以及一个同一行重复六十多次的合成文件（histogram 的退化情形） |
 | `worktree_conversions` | 工作区夹具：`text` / `eol` / `text=auto` / `-text`、`ident`、UTF-16LE 与带 BOM 的 UTF-16 `working-tree-encoding`，CRLF、混合换行、单独的 CR、带 NUL 的 `text=auto` 文件；变体 `autocrlf=false`、`true`、`input` |
+| `reflog` | reflog 夹具：初始提交（旧值全 0）、提交、`checkout -b`（旧值等于新值）、切换分支、`reset --hard HEAD~1`、`commit --amend`、merge，共 9 条，时间从 1700000000 起 |
 
 git 升级导致输出变化时新增一份夹具，不覆盖旧的。生成于 git 2.43.0。
