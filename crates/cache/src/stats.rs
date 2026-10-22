@@ -98,6 +98,17 @@ pub enum DisableReason {
     Io,
 }
 
+impl DisableReason {
+    /// The `reason` field of the log record.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            DisableReason::Corrupt => "corrupt",
+            DisableReason::NotWritable => "not_writable",
+            DisableReason::Io => "io",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Counters {
     hits: AtomicU64,

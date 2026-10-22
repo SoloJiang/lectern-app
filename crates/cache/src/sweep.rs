@@ -8,8 +8,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use lectern_logging::{Value, info, warn};
+
 use crate::stats::PartitionKind;
-use crate::util::log;
 
 /// Project partitions whose files are older than this are deleted.
 pub(crate) const MAX_AGE: Duration = Duration::from_secs(90 * 24 * 60 * 60);
@@ -44,7 +45,7 @@ pub(crate) fn sweep(root: &Path, now: SystemTime, total: u64, keep: &[PathBuf]) 
     // Oldest first: the expired ones, then as many as the total needs.
     found.sort_by_key(|p| p.modified);
     let expired = now.checked_sub(MAX_AGE);
-    let (mut deleted, mut freed) = (0, 0);
+    let (mut deleted, mut freed) = (0u32, 0u64);
     for p in found {
         let old = expired.is_some_and(|expired| p.modified < expired);
         if !old && bytes <= total {
@@ -56,13 +57,13 @@ pub(crate) fn sweep(root: &Path, now: SystemTime, total: u64, keep: &[PathBuf]) 
                 deleted += 1;
                 freed += p.bytes;
             }
-            Err(e) => log(format_args!("cannot delete {}: {e}", p.file.display())),
+            Err(e) => {
+                warn!("cannot delete a partition"; path = Value::path(&p.file), io = Value::io(&e));
+            }
         }
     }
     if deleted > 0 {
-        log(format_args!(
-            "deleted {deleted} unused project partitions ({freed} bytes)"
-        ));
+        info!("partitions swept"; deleted = deleted, bytes = freed);
     }
 }
 
@@ -72,7 +73,7 @@ fn list(dir: &Path, out: &mut Vec<Found>) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return,
         Err(e) => {
-            log(format_args!("cannot list {}: {e}", dir.display()));
+            warn!("cannot list partitions"; path = Value::path(dir), io = Value::io(&e));
             return;
         }
     };

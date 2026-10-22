@@ -9,6 +9,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, Statement, TransactionB
 
 use crate::db::{self, ENTRY_OVERHEAD, Tally};
 use crate::tables::{Param, Row, Stored, TableOp, TableOps, Tables};
+use crate::util::SqlError;
 
 /// The result of making sure a registration's tables exist.
 pub(crate) enum Attach {
@@ -16,7 +17,40 @@ pub(crate) enum Attach {
     /// `replaced`: another version's tables were dropped to create them.
     Ready { ns: i64, replaced: bool },
     /// The registration breaks a rule; nothing was created.
-    Invalid(String),
+    Invalid(Invalid),
+}
+
+/// Why a registration was refused, as the log records it
+/// (docs/design/cache.md「日志与诊断」). Names read from the file are not
+/// kept: the failing statement is its index in the registration.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Invalid {
+    /// The rule it breaks: `schema_failed`, `statement_does_not_compile`,
+    /// `no_table`, `forbidden_object`, `no_unit_column`,
+    /// `unit_column_unindexed`, `check_failed`.
+    pub(crate) rule: &'static str,
+    /// The failing statement's index in `schema` or `statements`.
+    pub(crate) statement: Option<usize>,
+    pub(crate) error: SqlError,
+}
+
+impl Invalid {
+    fn rule(rule: &'static str) -> Invalid {
+        Invalid {
+            rule,
+            statement: None,
+            error: SqlError::default(),
+        }
+    }
+
+    /// The check itself failed (`PRAGMA foreign_key_list`, the query plan).
+    fn check_failed(e: &rusqlite::Error) -> Invalid {
+        Invalid {
+            rule: "check_failed",
+            statement: None,
+            error: SqlError::of(e),
+        }
+    }
 }
 
 /// The namespace ID and version of the tables registered under `name`.
@@ -83,12 +117,12 @@ fn drop_tables(conn: &Connection, ns: i64) -> rusqlite::Result<()> {
 
 /// Runs the schema, checks what it created, and records it. `Err(why)` for
 /// a registration that breaks a rule.
-fn create(conn: &Connection, tables: &Tables) -> rusqlite::Result<Result<i64, String>> {
+fn create(conn: &Connection, tables: &Tables) -> rusqlite::Result<Result<i64, Invalid>> {
     let name = tables.namespace.name;
     let before: HashSet<String> = objects(conn)?.into_iter().map(|o| o.name).collect();
-    for sql in tables.schema {
+    for (i, sql) in tables.schema.iter().enumerate() {
         if let Err(e) = conn.execute_batch(sql) {
-            return statement_error(e, || format!("{name}: schema failed: {sql}"));
+            return statement_error(e, "schema_failed", i);
         }
     }
     let created: Vec<Object> = objects(conn)?
@@ -96,7 +130,7 @@ fn create(conn: &Connection, tables: &Tables) -> rusqlite::Result<Result<i64, St
         .filter(|o| !before.contains(&o.name))
         .collect();
     if let Err(why) = check(conn, &created) {
-        return Ok(Err(format!("{name}: {why}")));
+        return Ok(Err(why));
     }
     let table_names: Vec<&str> = created
         .iter()
@@ -131,22 +165,27 @@ fn create(conn: &Connection, tables: &Tables) -> rusqlite::Result<Result<i64, St
             table_names.join("\n")
         ],
     )?;
-    for sql in tables.statements {
+    for (i, sql) in tables.statements.iter().enumerate() {
         if let Err(e) = conn.prepare(sql) {
-            return statement_error(e, || format!("{name}: statement does not compile: {sql}"));
+            return statement_error(e, "statement_does_not_compile", i);
         }
     }
     Ok(Ok(ns))
 }
 
-/// A registration's mistake becomes `Err(why)`; other failures (busy, full,
-/// corrupt) stay errors.
+/// A registration's mistake in statement `index` becomes `Err(why)`; other
+/// failures (busy, full, corrupt) stay errors.
 fn statement_error(
     e: rusqlite::Error,
-    why: impl FnOnce() -> String,
-) -> rusqlite::Result<Result<i64, String>> {
+    rule: &'static str,
+    index: usize,
+) -> rusqlite::Result<Result<i64, Invalid>> {
     if is_statement_error(&e) {
-        Ok(Err(format!("{}: {e}", why())))
+        Ok(Err(Invalid {
+            rule,
+            statement: Some(index),
+            error: SqlError::of(&e),
+        }))
     } else {
         Err(e)
     }
@@ -172,14 +211,14 @@ fn objects(conn: &Connection) -> rusqlite::Result<Vec<Object>> {
 
 /// The rules of a schema: only tables and indexes on them; every table has a
 /// cascading foreign key to `entry`, with an index on its column.
-fn check(conn: &Connection, created: &[Object]) -> Result<(), String> {
+fn check(conn: &Connection, created: &[Object]) -> Result<(), Invalid> {
     let tables: Vec<&str> = created
         .iter()
         .filter(|o| o.kind == "table")
         .map(|o| o.name.as_str())
         .collect();
     if tables.is_empty() {
-        return Err("the schema creates no table".to_owned());
+        return Err(Invalid::rule("no_table"));
     }
     for o in created {
         let allowed = match o.kind.as_str() {
@@ -188,15 +227,13 @@ fn check(conn: &Connection, created: &[Object]) -> Result<(), String> {
             _ => false,
         };
         if !allowed {
-            return Err(format!("the schema may not create {} {}", o.kind, o.name));
+            return Err(Invalid::rule("forbidden_object"));
         }
     }
     for table in tables {
         let column = unit_column(conn, table)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| {
-                format!("{table} has no column REFERENCES entry (id) ON DELETE CASCADE")
-            })?;
+            .map_err(|e| Invalid::check_failed(&e))?
+            .ok_or(Invalid::rule("no_unit_column"))?;
         let plan = plan(
             conn,
             &format!(
@@ -205,9 +242,9 @@ fn check(conn: &Connection, created: &[Object]) -> Result<(), String> {
                 quote(&column)
             ),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Invalid::check_failed(&e))?;
         if plan.iter().any(|step| step.starts_with("SCAN")) {
-            return Err(format!("{table}.{column} has no index"));
+            return Err(Invalid::rule("unit_column_unindexed"));
         }
     }
     Ok(())

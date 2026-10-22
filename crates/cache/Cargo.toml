@@ -17,12 +17,15 @@ layer = "infra"
 test-support = []
 
 [dependencies]
+lectern-logging = { path = "../logging" }
 rusqlite.workspace = true
 ruzstd.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# testing::capture for the logs_* tests (docs/design/cache.md「日志与诊断」).
+lectern-logging = { path = "../logging", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]
