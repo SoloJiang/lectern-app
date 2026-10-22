@@ -30,6 +30,9 @@ lectern-git = { path = "../git" }
 # Runtime logging (docs/design/review.md「日志与诊断」, ADR 0046).
 lectern-logging = { path = "../logging" }
 lectern-services = { path = "../services" }
+# Finds the line ends of the annotation log when it is read whole
+# (`review/log_load_16k`); already a dependency of serde_json.
+memchr.workspace = true
 # The annotation log's records (docs/adr/0044.md).
 serde.workspace = true
 serde_json.workspace = true

@@ -4430,6 +4430,7 @@ dependencies = [
  "lectern-git",
  "lectern-logging",
  "lectern-services",
+ "memchr",
  "serde",
  "serde_json",
  "sha2 0.11.1",

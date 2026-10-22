@@ -843,7 +843,7 @@ fn not_a_file() -> io::Error {
 }
 
 fn newline(bytes: &[u8]) -> Option<usize> {
-    bytes.iter().position(|&b| b == b'\n')
+    memchr::memchr(b'\n', bytes)
 }
 
 /// Up to `len` bytes from `offset`; fewer when the file is shorter.

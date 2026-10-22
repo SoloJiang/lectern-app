@@ -55,10 +55,11 @@
 | `lectern-fs-watch` | 被审阅 worktree 的 `WorktreeBatch`、仓库的 `RepoBatch` | 与 `project` 共用同一份 worktree 状态 |
 | `lectern-logging` | 运行日志（「日志与诊断」）；测试用它的 `test-support` feature 捕获记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)） |
 | `serde`、`serde_json` | 标注日志的记录 | 已是工作区依赖（ADR 0044） |
+| `memchr` | 标注日志整份读入时找行尾 | 已是工作区依赖（`syntax`、`code_intel` 用它找行尾和 `memmem`），也已在本 crate 的依赖树里（`serde_json`、gix 依赖它），不增加 Cargo.lock 的条目 |
 | `sha2` | 轮次历史的摘要、标注日志的文件名 | 已在 Cargo.lock（`cache` 用同一版本） |
 | `insta`、`tempfile`（dev）；`lectern-git` 的 `test-support`（dev） | 快照、临时目录、`TestRepo` | 工作区统一依赖 |
 
-不依赖 `agents`、`project`、`code_intel`（插件之间不得依赖，dev-dependency 也算）：测试用本 crate `testing` 里的假会话来源和假项目服务。不依赖 `platform`：工作区只经 `git` 读取，应用数据目录由 `app` 传入。不新增外部依赖。
+不依赖 `agents`、`project`、`code_intel`（插件之间不得依赖，dev-dependency 也算）：测试用本 crate `testing` 里的假会话来源和假项目服务。不依赖 `platform`：工作区只经 `git` 读取，应用数据目录由 `app` 传入。不新增外部依赖：上表里的外部 crate 都已在 Cargo.lock 里。
 
 `executor`、`cache`、`fs_watch` 由 `app` 创建，构造插件时传入：
 
@@ -1366,6 +1367,25 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `is_ancestor` 失败的 warn 没有测试触发：reflog 里的新提交不在仓库里时，`merge_base` 找不到共同祖先，返回「不是祖先」而不报错（`logs_tree_changes_failure_is_a_warn` 的注释）。改动步加载失败、HEAD reflog 读不出、改动集取不到的记录没有测试触发；压缩失败与目录 `fsync` 失败的路径由 `log_failed_compaction_leaves_the_file`、`log_failed_directory_sync_goes_append_only` 走到，但没有断言记录。这些记录的字段只经 `Value` 的构造函数和 `diag` 的种类，金丝雀测试覆盖了同一套写法。
   - 记录写进真实日志文件要等 `app` 接入（logging 设计第 3 步）；这里只经 `testing::capture()` 检查编码后的行。`task` 要等 executor 的第 5 项。
 
+### 标注日志读取的余量
+
+背景：一个没有改动 review 的 PR 上，macOS CI 的 `Benchmarks (macOS arm64)` 两次报 `review/log_load_16k` 超标（中位数 35.2 ms、32.2 ms，预算 < 30 ms），同一提交重跑通过，当时 runner 有容量告警。在 Linux（x86_64，4 核，与其他 agent 的编译任务共用机器）上运行。
+
+- 指令分布（valgrind callgrind，origin/main 的基准程序，每次读取 238.8 M 条指令）：逐行解析占 75%，其中 `serde_json` 对每个字符串的 UTF-8 检查（`from_utf8`）占读取的 14%，字符串扫描另占 13%；逐字节找换行占 12%；建索引（`Index::apply`）占 11%，其中 SipHash 是大头；共用字符串的哈希集合约 5%；读文件和清零缓冲区约 2%。
+- 改动：按行切分用 `memchr` 找换行；整行是 UTF-8 时按 `str` 解析，`serde_json` 不再逐个字符串检查 UTF-8，不是 UTF-8 的行仍按字节解析，结果与原来相同；共用字符串时先比较最近交出的 4 个，再查哈希集合。格式、坏行与残行的处理、压缩的前提都不变。
+- 改动后每次读取 175.7 M 条指令（−26%）：解析 141.5 M，UTF-8 检查从 33.7 M 降到 4.4 M（整行一次），找换行（`LogFile::load` 自身加 `memchr`）从 28.6 M 降到 2.5 M。剩下的大头是 `serde_json` 本身的解析（字符串扫描、字段名匹配、OID 的十六进制）和建索引的哈希。
+- `review/log_load_16k`（基准程序直接运行 `--bench --measure review/log_load_16k`，origin/main 与本改动的程序交替运行）：
+
+  | 机器负载 | origin/main | 本改动 |
+  |---|---|---|
+  | 约 6 | 27.9、26.7、26.7、27.3、29.0、26.9、26.7、26.5 ms | 22.8、23.5、20.2、35.8、21.3、24.1、20.1、20.6 ms |
+  | 约 60 | 41.5、38.2、40.2 ms | 29.6、34.6、38.9 ms |
+
+  负载约 6 时 origin/main 的中位数约 26.8 ms（预算的 89%），本改动约 22 ms（73%）；35.8 ms 那一次按机器上其他任务的抖动看待：前后相邻的 origin/main 是 27.3、29.0 ms，后者是 origin/main 八次里最高的。墙钟时间降得比指令数少（约 18% 对 26%），去掉的是逐字节比较、短字符串检查这类简单循环，每条指令的耗时低于剩下的解析。负载约 60 时 origin/main 每次都超标，与 macOS CI 的失败一致：预算本身不变，问题是余量太小。夹具 16 000 条记录、5 556 267 字节。
+- `just test -p lectern-review`：124 个测试通过，新增 `log_lines_not_utf8_are_bad_or_kept`（不是 UTF-8 的行：已知类型里有非 UTF-8 字符串的是坏行，未知类型的原样保留、压缩后仍在）和 `log_read_shares_strings_seen_long_before`（离开最近 4 个之后再出现的字符串仍共用一份）。原有的 `log_*` 测试（坏行、残行、认不出的记录、读取失败后只追加）不改动照常通过。
+- `just check`、`just test`（不依赖 GPUI 的全部 crate，2257 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。
+- 没有验证的：没有在 macOS 上测量。指令数的比例在 macOS（arm64）上应当相近，但 CI runner 的抖动可能仍会让个别运行接近预算；进一步的余量要换掉 `serde_json` 的逐行解析或建索引用的哈希（后者是依赖选型），本次没有做。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -1433,3 +1453,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **标注日志的路径在默认级别里。** 计划写「路径只在详细模式里记」。日志文件和目录在应用数据目录下，文件名是仓库的哈希 `h`，不是被审阅仓库里的路径；计划的 warn 一项也要求记「日志文件名」，所以默认级别的标注日志记录带完整路径。工作区里的路径仍只在详细级别。
 - **作用域由 `Engine::submit` 设置。** executor 的第 5 项（任务继承提交时的作用域）还没有合并，本 crate 的每个任务显式带审阅的 `Ctx`。`review` 在一轮解析出仓库之后才有，所以一轮里定位仓库之前的记录只带 `session`。标注日志按仓库共用，读取与追加任务带发起它的审阅的作用域。
 - **`LogFile` 自己记读取与压缩，引擎记追加失败与重试。** 读取报告（`ReadReport`）多了 `torn_bytes`、`partial`、`other_version`；连续失败的次数在引擎的 `LogMem::failures` 里，追加成功时清零。
+
+### 标注日志读取的余量
+
+- **新增依赖 `memchr`**（「依赖」表已补上）。读取时按行切分改用 `memchr::memchr` 找换行，原来逐字节比较。`memchr` 已在 Cargo.lock 和本 crate 的依赖树里，安装包不多带新的 crate。
+- 读取的格式、恢复规则和索引都没有变：整行是 UTF-8 时按 `str` 解析（`serde_json` 不再逐个字符串检查 UTF-8），否则按字节解析，与原来的路径相同；共用字符串时先比较最近交出的 4 个，再查哈希集合。
