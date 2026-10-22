@@ -2,7 +2,7 @@
 
 状态：已接受，尚未实现。
 
-还没有对应的 issue。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
+对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
 ## 范围
 
@@ -46,7 +46,7 @@ lectern_logging::debug!("index batch"; files = n, bytes = total);
 - 五个宏 `error!`、`warn!`、`info!`、`debug!`、`trace!`，任意线程调用，不阻塞，不做 IO。
 - target 固定为调用所在 crate 的短名：取 `module_path!()` 的第一段，去掉 `lectern_` 前缀。不提供自定义 target，按插件过滤用 `plugin` 字段。
 - 字段名是标识符，最多 12 个。保留名（`t`、`up`、`lv`、`tg`、`th`、`at`、`msg`、`n`、`trunc`，以及 `Ctx` 的字段名）在宏里逐个匹配，写了就编译失败。
-- 每个调用点展开出一个 `static Callsite`：缓存按 target 过滤的结果（带过滤的代数，过滤变化后重新计算）和限流计数。
+- 每个调用点展开出一个 `static Callsite`：缓存按 target 过滤的结果（带过滤的代数，过滤变化后重新计算）和限流计数。第三方记录没有这个静态变量，限流见「数据结构」的「限流」。
 
 ```rust
 /// 字段值。实现它的类型只能经 `Value` 的构造函数产出值，构造函数不接受运行时字符串。
@@ -71,9 +71,20 @@ impl<'a> Value<'a> {
     pub const fn hex(v: u64) -> Value<'static>;
     /// 只写 `scheme://host[:port]/path`，去掉 userinfo、查询串和片段；解析不了时写 `"<url>"`。
     pub fn url(s: &'a str) -> Value<'a>;
-    /// panic 消息，写出时按「隐私」的自由文本规则处理。
+    /// panic 消息，写出时按「隐私」的 panic 消息规则处理。
     /// 只有 kernel、executor 和本 crate 调用，由架构检查限制调用位置。
-    pub fn panic_message(s: &'a str) -> Value<'a>;
+    pub fn panic_message(text: PanicText<'a>) -> Value<'a>;
+}
+
+/// panic payload 的类型决定处理规则：调用方从 payload 取消息时按类型构造。
+#[derive(Clone, Copy)]
+pub enum PanicText<'a> {
+    /// payload 是 `&'static str`：`panic!("字面量")`、`Option::unwrap` 等，消息是代码里的文字。
+    Static(&'static str),
+    /// payload 是 `String`：格式化出的消息，可能含运行时的数据。
+    Formatted(&'a str),
+    /// 其他类型（`panic_any`）：只记类型未知。
+    Other,
 }
 ```
 
@@ -314,13 +325,21 @@ level     := off | error | warn | info | debug | trace
 - 编码在调用线程上进行，用线程本地、复用的 4 KiB 缓冲，不分配内存。
 - 丢弃和限流的计数由写盘线程在下一次写入时记成一条 warn（`records dropped`，带 `dropped`、`suppressed`）。
 
+### 限流
+
+- 规则：同一调用点的 error、warn、info 以 10 秒为一个窗口，每个窗口最多写 20 条；超出的不编码，只计数，这个调用点下一条写出的记录带 `n`（省略的条数）。debug、trace 不按调用点限流，只受缓冲容量限制。
+- Lectern 的调用点：计数在宏展开的 `static Callsite` 里，一个 `AtomicU64` 存窗口编号和条数。
+- 第三方记录：`Log::log` 在编码之前按（target、`file()`、`line()`）的哈希查一张 256 项的固定表，每项存键的哈希和同样的计数，线性探测最多 8 项。没有文件和行的记录按 target 计。探测不到空位时，这条记录计入一个共用的溢出项，溢出项按同样的规则限流。表在 `install_early` 时一次分配（约 4 KiB），之后不增长。
+- 第三方合计：全部第三方记录每个窗口另有合计上限 50 条，超出的同样只计数，所以几个调用点同时刷屏也只占默认文件很小的一部分。
+- 被限流的调用在调用线程上的开销是一次哈希和两三次原子操作，不编码、不复制（`log/third_party_limited`）。
+
 ## 数据流与线程
 
 1. 首帧前，主线程：`install_early`。之后任何线程的记录都进首帧前缓冲。
-2. 调用：调用点的级别低于 `log::max_level()` 时返回；否则查调用点的过滤缓存和限流；放行的在调用线程上编码，复制进缓冲；写盘线程在睡眠时 `unpark` 它。调用线程不做 IO，UI 线程上的记录同样如此。
+2. 调用：调用点的级别低于 `log::max_level()` 时返回；否则查过滤（Lectern 调用点的缓存，或第三方记录的 `Log::enabled`）和限流（调用点的计数，或第三方的固定表）；放行的在调用线程上编码，复制进缓冲；写盘线程在睡眠时 `unpark` 它。调用线程不做 IO，UI 线程上的记录同样如此。
 3. 启动屏障放开后，主线程：`Early::start` 建 `lectern-log` 线程后返回。写盘线程依次：调用 `on_writer_start`，建目录，清理，读 `verbose.json`，检查上一次运行，打开文件写文件头，写出首帧前缓冲的内容，然后让调用线程改用运行时缓冲。
 4. 写盘线程的循环：有 error 记录或 panic 钩子在等时立即写；其余记录到达后最多等 1 s 或攒到 32 KiB 再写；写完没有新记录就无限期 `park`。唯一的定时等待是设置开启的详细日志到期，到期时恢复原来的过滤、删除 `verbose.json`、记一条 info。写只到 `write(2)` 为止，不 `fsync`；`shutdown` 和 panic 钩子之后才 `fsync`。
-5. panic 钩子（在 panic 的线程上）：编码一条 error 记录（`msg` 为 `panic`，字段 `message` 用 `Value::panic_message`，带作用域和位置；`RUST_BACKTRACE` 设置了或详细日志开启时附回溯的帧名），放进缓冲，等写盘线程写完这条，最多 100 ms，然后调用原来的钩子。写盘线程还没启动时，钩子在当前线程上打开本次运行的文件，写出首帧前缓冲和这条记录。
+5. panic 钩子（在 panic 的线程上）：编码一条 error 记录（`msg` 为 `panic`，字段 `message` 用 `Value::panic_message`，按 `payload()` 能否转成 `&'static str` 或 `String` 选 `PanicText` 的变体，带作用域和 `location()`；`RUST_BACKTRACE` 设置了或详细日志开启时附回溯的帧名），放进缓冲，等写盘线程写完这条，最多 100 ms，然后调用原来的钩子。写盘线程还没启动时，钩子在当前线程上打开本次运行的文件，写出首帧前缓冲和这条记录。
 6. 退出：`app` 依次关闭 kernel、executor，再调用 `Logging::shutdown`。
 
 写盘线程不经 `executor`：executor 自己的 panic 和关闭过程也要记下来，日志不能依赖它；这个线程不提交 kernel 的任务，不计入静止，也没有周期性唤醒（[ADR 0017](../adr/0017.md)、[ADR 0029](../adr/0029.md)）。
@@ -342,6 +361,7 @@ level     := off | error | warn | info | debug | trace
 | 全局级别放行、按 target 拒绝 | ≤ 5 ns | `log/filtered_call` |
 | 写出的调用（info，4 个字段），调用线程上 | p50 ≤ 1 µs，不分配内存 | `log/enabled_call` |
 | 4 个线程同时写，调用线程上 | p99 ≤ 5 µs，不丢记录（总量小于缓冲） | `log/contended_call` |
+| 被限流的第三方记录，调用线程上 | ≤ 30 ns，不编码 | `log/third_party_limited` |
 | `install_early` | ≤ 20 µs | `log/install_early` |
 | 写出 1 万条记录、静止 5 s 后的常驻内存增量 | 默认配置 ≤ 512 KiB | `log/idle_memory` |
 
@@ -362,21 +382,30 @@ level     := off | error | warn | info | debug | trace
 | 子进程 | 记程序名（不含目录）、参数个数、工作目录路径、pid、退出状态；不记参数和环境变量 |
 | 网络请求（forge、Analyze 的转发、插件市场） | 记方法、`Value::url` 处理后的 URL、状态码、请求与响应的字节数、耗时；不记请求头和请求体、响应体 |
 | 路径 | 可以记录，主目录前缀写成 `~` |
-| 第三方记录、panic 消息 | 自由文本，按下面的规则处理 |
+| 第三方记录、panic 消息 | 自由文本，按下面三类规则处理 |
 
-自由文本的处理规则（第三方 target 的记录、`Value::panic_message`）：
+自由文本分三类，按消息的来源选规则。三类都先做两步：只取第一行；形似凭据的串换成 `<redacted>`（以 `sk-`、`ghp_`、`gho_`、`github_pat_`、`glpat-`、`xox` 开头的词，`Bearer ` 之后的词，以 `eyJ` 开头、含两个 `.` 的词，32 个以上连续的 `[A-Za-z0-9+/=_-]`）。截断都在 UTF-8 字符边界上，主目录前缀都写成 `~`。
 
-1. 只取第一行。
-2. 双引号和单引号括住的片段换成 `"…"` / `'…'`：`Debug` 输出里的字符串总是带引号，这样 `called Result::unwrap() on an Err value: Error { input: "…", line: 3 }` 只留下结构。
-3. 形似凭据的串换成 `<redacted>`：以 `sk-`、`ghp_`、`gho_`、`github_pat_`、`glpat-`、`xox` 开头的词；`Bearer ` 之后的词；以 `eyJ` 开头、含两个 `.` 的词（JWT）；32 个以上连续的 `[A-Za-z0-9+/=_-]`。
-4. 截到 256 字节（在 UTF-8 字符边界上）。
-5. 主目录前缀换成 `~`。
+1. **字面量**：`PanicText::Static`，以及第三方记录里 `fmt::Arguments::as_str()` 为 Some 的消息。它们是编译进二进制的文字，不含运行时数据。规则：截到 256 字节。
+2. **格式化的 panic 消息**：`PanicText::Formatted`。`panic!("{x}")`、`expect(&format!(..))`、`assert!(c, "{s}")`、`Result::expect`（消息是 `{msg}: {err:?}`）以及 std 的运行时检查（字符串切片越界的消息形如 ``byte index 5 is not a char boundary; it is inside 'é' (bytes 4..6) of `…` ``，原文在反引号里）都属于这一类，其中可能含文件、会话或提示词的文字。规则：
+   - 只写 `len`（原消息的字节数）和源码位置，位置来自 `PanicHookInfo::location()`，`contain` 的记录由 kernel 另带阶段。
+   - 消息以固定表里的 std 前缀开头时，写出这个前缀。表：``called `Result::unwrap()` on an `Err` value``、``called `Result::unwrap_err()` on an `Ok` value``、`index out of bounds`、`byte index`、`begin <= end`、`range start index`、`range end index`、`slice index starts at`、``assertion `left == right` failed``、``assertion `left != right` failed``。
+   - 前缀标为「带数字」的（`index out of bounds`、`byte index`、`begin <= end`、`range start index`、`range end index`、`slice index starts at`）：先把双引号、单引号、反引号括住的片段整段去掉（没有配对的引号去掉到行尾），再从剩下的文字里按顺序取最多 6 个十进制整数，写成 `nums`。
+   - ``called `Result::unwrap()` on an `Err` value`` 之后，去掉引号片段，保留 Debug 输出开头的标识符（到第一个 `{`、`(`、空格为止，只含 `[A-Za-z0-9_]`，最多 32 字节），写成 `variant`，如 `Os`。
+   - 其余文字一律不写。不在表里的格式化消息只有位置和长度。
+3. **格式化的第三方记录**：`as_str()` 为 None 的第三方消息，以及 target 是 Lectern crate、但消息不是字面量的记录（不经本 crate 宏写出的，按这一类兜底）。规则：
+   - 双引号、单引号括住的片段换成 `"…"`、`'…'`；反引号括住的片段换成 `` `…` ``，只有 `Option::…()`、`Result::…()` 形式的 std 方法名和 `None`、`Some`、`Ok`、`Err` 保留；没有配对的引号，从它到行尾换成 `…`。
+   - 第一个 `: ` 之后的文字换成 `…`：插值的错误信息和取值多在这一段。
+   - 截到 128 字节。
+
+`Debug` 输出里的字符串总是带引号，所以 ``called `Result::unwrap()` on an `Err` value: Error { input: "…", line: 3 }`` 在第 3 类里只留下结构；在第 2 类里只留下前缀和 `variant = "Error"`。
 
 执行方式：
 
 - 类型：宏的消息只接受字面量，字段值必须实现 `Field`；`Value` 没有接受运行时字符串的构造函数。`Value::panic_message` 的调用位置由架构检查限制在 `kernel`、`executor` 和本 crate。
 - lint：`clippy.toml` 用 `disallowed-macros` 禁止 `log::error`、`log::warn`、`log::info`、`log::debug`、`log::trace`、`log::log`，理由指向 ADR 0046；本 crate 的宏展开不经过这些宏，直接构造 `log::Record`。各 crate 接入完成后，非 tool crate 开启 `clippy::print_stderr` 和 `clippy::print_stdout`。
-- 落盘时再检查一次：target 是 Lectern crate、但消息不是字面量的记录（`fmt::Arguments::as_str()` 为 None），按自由文本处理。
+- 落盘时再检查一次：target 是 Lectern crate、但消息不是字面量的记录（`fmt::Arguments::as_str()` 为 None），按第 3 类处理。
+- `PanicText` 的变体由调用方按 payload 的实际类型构造（kernel 的 `contain`、executor 的 `catch` 和本 crate 的钩子），不由调用方判断内容是否安全。
 - 详细日志只改变过滤和容量，处理规则不变。
 
 ## 状态与异常
@@ -408,10 +437,22 @@ level     := off | error | warn | info | debug | trace
 - 编码：一组记录的编码结果用 insta 快照；每一行都能被 `serde_json` 解析；`trunc` 只在超过 4 KiB 时出现，固定字段和 `msg` 保留。
 - 隐私：
   - `crates/logging/tests/ui/` 的 trybuild 编译失败测试：`string_field_does_not_compile`（`String` 和非 `'static` 的 `&str` 字段）、`format_message_does_not_compile`（`format!` 和带参数的消息）、`reserved_key_does_not_compile`。
-  - `free_text_masks_quoted_segments`、`free_text_keeps_the_first_line`、`free_text_masks_credential_shapes`、`free_text_is_cut_at_256_bytes_on_a_char_boundary`、`url_drops_userinfo_query_and_fragment`、`home_is_written_as_tilde`、`non_literal_lectern_message_is_treated_as_free_text`。
+  - 字面量：`static_panic_text_is_kept_up_to_256_bytes`、`free_text_keeps_the_first_line`、`free_text_masks_credential_shapes`、`free_text_is_cut_on_a_char_boundary`。
+  - 格式化的 panic 消息：`formatted_panic_keeps_only_location_and_length`、`std_prefix_table_keeps_prefix_and_numbers`、`unwrap_err_keeps_only_the_variant`、`unpaired_quote_drops_to_the_end_of_line`。
+  - 格式化的第三方记录：`third_party_masks_quoted_and_backtick_segments`、`third_party_keeps_std_method_names_in_backticks`、`third_party_masks_after_the_first_colon`、`third_party_is_cut_at_128_bytes`、`non_literal_lectern_message_is_treated_as_third_party`。
+  - `url_drops_userinfo_query_and_fragment`、`home_is_written_as_tilde`。
   - `verbose_does_not_change_sanitizing`：同一组输入在默认过滤和 `trace` 下处理结果相同。
-  - `canary_never_reaches_a_file`：带金丝雀字符串的第三方记录和 panic 消息（带引号）经真实写盘线程落盘，目录里任何文件都不含金丝雀。
-- 缓冲：`early_buffer_overflow_drops_newest_and_counts`、`running_buffer_never_blocks_callers`（写盘线程被测试钩子卡住时，调用线程照常返回）、`drops_are_reported_on_the_next_write`、`callsite_limit_counts_suppressed`。
+  - 金丝雀，全部经真实的钩子或 `Log::log` 和写盘线程落盘，之后目录里任何文件都不含金丝雀：
+    - `canary_str_slicing_panic`：在含金丝雀的 `String` 上按非字符边界切片（`&s[..n]`，n 落在一个多字节字符中间）触发 std 的 panic，`catch_unwind` 接住；记录里有 `byte index` 前缀和数字，没有金丝雀。
+    - `canary_formatted_panic`：`panic!("{canary}")`、`Err::<(), _>(canary).expect(&format!("ctx {canary}"))`、`assert!(false, "{canary}")`、`Option::<()>::None.expect(&canary)` 各一次。
+    - `canary_third_party_record`：经 `log::logger()` 直接写入 target 为 `gpui` 的记录，金丝雀分别放在引号里、反引号里、第一个 `: ` 之后。
+- 限流：
+  - `callsite_limit_counts_suppressed`：一个 Lectern 调用点在一个窗口里写 1 万条，写出 20 条，下一个窗口的第一条带 `n`。
+  - `third_party_call_site_stays_bounded`：同一个（target、文件、行）的第三方 warn 按 120 次每秒连续写 60 秒（`ManualClock`），文件里这个调用点不超过 6 个窗口各 20 条，省略的条数合计正确；同时另一个第三方调用点的记录照常写出。
+  - `third_party_total_cap`：100 个不同的第三方调用点在一个窗口里各写 1 条，写出 50 条。
+  - `third_party_table_overflow_shares_one_limit`：超过表容量的调用点共用溢出项，写出的条数仍有上限，表不增长。
+  - `limited_calls_do_not_encode`：被限流的调用不调用编码器（测试钩子计数为零）。
+- 缓冲：`early_buffer_overflow_drops_newest_and_counts`、`running_buffer_never_blocks_callers`（写盘线程被测试钩子卡住时，调用线程照常返回）、`drops_are_reported_on_the_next_write`。
 - 滚动与清理：`rotates_at_the_file_cap_with_a_header`、`total_cap_removes_oldest_first`、`age_cap_removes_old_runs`、`file_count_cap`、`verbose_files_have_their_own_caps`、`current_run_is_never_removed`、`unrelated_files_are_untouched`。
 - 首帧前没有 IO：`install_early_touches_no_files`（目录为空，文件操作钩子记录零次）、`install_early_spawns_no_thread`、`panic_before_start_writes_the_early_buffer`。
 - UI 线程上没有 IO：`file_operations_only_on_the_writer_thread`：测试构建里全部文件操作经一个钩子，记录发起的线程；从多个线程写记录、开关详细日志、滚动、导出之后，除 `export` 的调用线程外只出现 `lectern-log`（首帧前 panic 的路径由 `panic_before_start_writes_the_early_buffer` 单独测试）。
@@ -430,8 +471,8 @@ level     := off | error | warn | info | debug | trace
 1. `logging`：本文的第 1 步。
 2. `platform`：`dirs::logs()`（规则同 `dirs::app_data`：只读环境变量，不建目录；macOS `$HOME/Library/Logs/Lectern`，其他平台 `$XDG_STATE_HOME/lectern/logs`，变量不可用时 `$HOME/.local/state/lectern/logs`）；系统版本字符串（`sysctl kern.osproductversion`）；写盘线程的 utility QoS 沿用 executor 批量线程的接口。导出那一步再加 `dirs::crash_reports()` 和 zip 压缩。
 3. `app`（macOS）：`main` 第一行 `install_early`，解析 `--log`；启动屏障放开后 `start`；退出时 `shutdown(500 ms)`；把 `Logging` 交给设置与导出命令。
-4. `kernel`：`ActivationToken` 带激活序号（`fn id(&self) -> u64`，进程内从 1 递增）；每段 `contain` 包住的插件代码外设 `plugin`、`act` 作用域；`contain` 捕获 panic 后记 error（`plugin failed`，带阶段：`manifest`、`activate`、`commit`、`started`、`listener`、`command`、`drop`，以及 `Value::panic_message`）；插件激活记 info（`took_us`）；进程插件的名字用 `PluginTag::register` 登记；15 处 `util::log` 改为宏；kernel 设计「只用标准库」改为「标准库加 `lectern-logging`」。
-5. `executor`：任务序号；`spawn` 时取 `logging::current()` 并加上任务序号、闸门的插件和激活，每次 poll 和最终 drop 外设这个作用域；`catch` 捕获的 panic 记 error；13 处 `util::log` 改为宏。`executor/` 的基准与改动前相比不变慢。
+4. `kernel`：`ActivationToken` 带激活序号（`fn id(&self) -> u64`，进程内从 1 递增）；每段 `contain` 包住的插件代码外设 `plugin`、`act` 作用域；`contain` 捕获 panic 后记 error（`plugin failed`，带阶段：`manifest`、`activate`、`commit`、`started`、`listener`、`command`、`drop`，以及 `Value::panic_message`，`PanicText` 的变体按 payload 是 `&'static str` 还是 `String` 构造）；插件激活记 info（`took_us`）；进程插件的名字用 `PluginTag::register` 登记；15 处 `util::log` 改为宏；kernel 设计「只用标准库」改为「标准库加 `lectern-logging`」。
+5. `executor`：任务序号；`spawn` 时取 `logging::current()` 并加上任务序号、闸门的插件和激活，每次 poll 和最终 drop 外设这个作用域；`catch` 捕获的 panic 记 error（`PanicText` 同 kernel）；13 处 `util::log` 改为宏；executor 设计「依赖」一节已在 [#170](https://github.com/SoloJiang/lectern-app/issues/170) 的设计 PR 里加上 `lectern-logging`。`executor/` 的基准与改动前相比不变慢。
 6. `cache`：分库停用（error，原因、SQLite 扩展错误码、路径）、版本或身份不符与损坏（warn）、清理时删除失败（warn）；9 处。
 7. `agents`：会话解析失败（warn，会话 UUID、路径、字节偏移、行长度、错误种类，不记行的内容）；副本写失败退回慢路径（warn）；命令行的启动与退出（程序名、参数个数、pid、退出状态）；Analyze 的凭据转发端点按「隐私」的网络请求规则记录，带 `analysis`、`req`。金丝雀放在会话 JSONL、提示词和占位令牌、真实令牌里。
 8. `review`：标注日志的恢复（warn：截掉的尾部字节数、跳过的坏行数）、写失败与重试（warn）、压缩（info：前后字节数）；作用域带 `review`、`session`。金丝雀放在文件内容和会话内容里。
@@ -460,7 +501,7 @@ level     := off | error | warn | info | debug | trace
 - `clippy.toml` 加上 `disallowed-macros`（`log::*` 的六个宏）和 `await-holding-invalid-types`（`lectern_logging::Scope`）；`just check` 通过。
 - `scripts/check_architecture.py` 加两条检查及其测试：只有 `app` 和 tool 层启用 `lectern-logging` 的 `sink` feature；`Value::panic_message` 只出现在 `crates/kernel`、`crates/executor`、`crates/logging` 的源码里。
 - `cargo tree --target aarch64-apple-darwin -p lectern-app -e features -i log` 里没有 `max_level_` 或 `release_max_level_` feature。
-- `bench` 加入 `log/disabled_call`、`log/filtered_call`、`log/enabled_call`、`log/contended_call`、`log/install_early`、`log/idle_memory`，预算写进 `budgets.rs`，在 Linux 上 `just bench --measure log/` 报告数字。
+- `bench` 加入 `log/disabled_call`、`log/filtered_call`、`log/enabled_call`、`log/contended_call`、`log/third_party_limited`、`log/install_early`、`log/idle_memory`，预算写进 `budgets.rs`，在 Linux 上 `just bench --measure log/` 报告数字。
 
 **第 2 步：`platform`。** `dirs::logs()` 和系统版本，测试 `logs_*` 覆盖与 `app_data_*` 相同的情况；`just test -p lectern-platform`。
 

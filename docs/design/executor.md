@@ -22,7 +22,7 @@
 
 ## 依赖
 
-只用标准库和 `lectern-kernel`（`SubmitGate`、`GateSlot`、`catch`、`contain`）。任务状态机用 `Arc` 加 `std::task::Wake` 实现，不需要 `unsafe`，也不引入 `async-task`、`tokio` 这类依赖：Lectern 的任务数量在千级，不需要它们的优化，而 kernel 约定里「运行中被唤醒只设标记」「已结束的任务不再 poll」这类规则自己实现更容易对照测试。
+只用标准库、`lectern-kernel`（`SubmitGate`、`GateSlot`、`catch`、`contain`）和 `lectern-logging`（运行日志的宏与作用域，[ADR 0046](../adr/0046.md)；接入由 [logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 5 项完成，在此之前日志写 stderr）。任务状态机用 `Arc` 加 `std::task::Wake` 实现，不需要 `unsafe`，也不引入 `async-task`、`tokio` 这类依赖：Lectern 的任务数量在千级，不需要它们的优化，而 kernel 约定里「运行中被唤醒只设标记」「已结束的任务不再 poll」这类规则自己实现更容易对照测试。
 
 ## 接口
 
