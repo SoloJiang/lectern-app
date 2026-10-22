@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -41,6 +41,7 @@
 | `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
 | `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
 | `lectern-kernel`（dev，只在 macOS） | 经真实 `Watcher` 驱动后端的测试实现 `Sink` 要用 `BusyGuard` | kernel 层 |
+| `lectern-logging`（只在 macOS） | kqueue 线程停止时的记录（「日志与诊断」）；dev 依赖开启 `test-support`，测试用 `testing::capture()` 检查这条记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；本 crate 只有这一处记录，它只在 macOS 上编译 |
 
 选 `rustix`，不选 `libc`、`nix`、`cap-std`：
 
@@ -374,11 +375,18 @@ pub enum FileKind {
 
 本节覆盖整个 crate，规则见 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。
 
-- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。唯一的运行时记录在 `fs_events`：kqueue 线程因 `kevent` 出错而停止时记一条，带系统错误；订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。这一条目前写 stderr，在 logging 设计「对其他 crate 的要求」第 9 项接入：改为 error，target `platform`，错误用 `Value::io`（种类和错误码），删掉 `eprintln!`。
-- 详细级别：不多记。
+- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。唯一的运行时记录在 `fs_events`，经 `lectern-logging` 的宏写出，target 为 `platform`；订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
+
+  | 事件 | 级别 | `msg` | 字段 |
+  |---|---|---|---|
+  | kqueue 线程因 `kevent` 出错而停止（`Kqueue::fail`），这个 kqueue 上的 `Entries` 订阅不再收到事件，下一次 `Entries` 的 arm 重建 kqueue 和线程 | error | `the kqueue thread stopped on a kevent error; its watches get no more events` | `watches`（这个 kqueue 上的订阅数）、`io`（`Value::io`：`Errno` 的种类和错误码） |
+
+  - 级别按 [ADR 0046](../adr/0046.md)「默认日志」：这些订阅之后的事件被放弃，不是降级后继续，所以是 error。
+  - 这条记录只在 macOS 上编译（kqueue 只在 macOS 上），`lectern-logging` 因此只是 macOS 上的依赖。记录在 `fail` 放开状态锁之后写出，调用线程上不做 IO。
+- 详细级别：不多记。kqueue 线程每次唤醒、FSEvents 的每个回调都是热路径，不加 debug、trace 记录。
 - 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
-- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。
-- 金丝雀测试：接入 `lectern-logging` 时随那一条记录加上；在此之前本 crate 没有经日志器的记录，`dirs` 和 `system` 也不经日志器输出，不需要。
+- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。kqueue 的记录不写监听的目录、具名条目的名字和 `io::Error` 的消息，只写订阅数和 `Value::io`。
+- 金丝雀测试：`kqueue_stop_is_logged_without_paths`（只在 macOS 上编译和运行，在 `fs_events/tests/kqueue.rs`）：在 `testing::capture()` 下，金丝雀放在监听目录的名字、具名条目的名字和它的内容里，kqueue 线程交付这个条目的修改之后，以 `EBADF` 调用 `Kqueue::fail`（`kevent` 无法按需出错，线程的 `run` 在出错时调用的就是它）；检查记录只有一条，级别为 error、target 为 `platform`、`watches` 为 1、`io` 带 `EBADF` 的错误码，线程停止、`flush` 返回错误，之后 `assert_absent`。Linux 上没有 kqueue，这条记录和测试都不编译；`dirs` 和 `system` 不经日志器输出，不需要金丝雀测试。
 
 ## 测试
 
@@ -996,6 +1004,13 @@ pub mod time {
 - `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
 - 本文的状态行、「实际验证」，usage 设计的状态行写明前置条件 B 已实现。
 
+kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分）一个实现 PR，写 `Refs #170`：
+
+- `rg -n 'eprintln!|eprint!|println!|util::log' crates/platform/src --glob '!**/tests*'` 没有结果（测试里打印测量值的 `eprintln!` 和 `time` 子进程的 `println!` 不算）。
+- `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过；`kqueue_stop_is_logged_without_paths` 和原有的 `kqueue_*` 在 macOS CI 上通过。
+- Cargo.lock 只在 `lectern-platform` 的依赖里多了 `lectern-logging`，没有新的外部 crate。
+- 本文的状态行、「实际验证」，logging 设计的状态行写明第 9 项的 `platform` 部分已实现。
+
 ## 实际验证
 
 在 Linux（x86_64，内核 6.18，`openat2` 可用）上运行。macOS 专属的部分（`NofollowAny`、`nofollow_any_*`、macOS 上的 `perf_smoke`）没有在 macOS 上运行过，由 macOS CI 验证：
@@ -1049,6 +1064,11 @@ pub mod time {
   - 开销（release，临时的计时循环，没有提交）：`TZ=UTC` 每次约 34 ns，`TZ=America/New_York` 约 280 ns。
   - `just check`、`just test`（整个工作区 2050 个测试通过，跳过 7 个）、`just doctest`、`just deny` 通过。`cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：macOS 上的 `localtime_r` 调用通过了类型检查和 clippy，没有运行；macOS 上的 `utc_offset_*`（含 Apple Libc 对超出范围的年份返回 null）由 macOS CI 运行。运行中改系统时区之后 macOS 重新读入规则，是按 Apple Libc 的源码写的，没有测试。
   - 验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果；`rg -n 'localtime|tm_gmtoff' crates --glob '!crates/platform/**' -t rust` 没有结果。
+- kqueue 线程的日志接入（logging 设计第 9 项的 `platform` 部分，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)）在 Linux（x86_64 容器）上：
+  - 改动的代码（`Kqueue::fail`）和新测试 `kqueue_stop_is_logged_without_paths` 只在 macOS 上编译，Linux 上没有编译也没有运行。`cargo check -p lectern-platform --target aarch64-apple-darwin` 和 `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过：`error!` 的展开、`Value::io`、macOS 上的 `lectern-logging` 依赖和测试里的 `testing::capture()` 通过了类型检查和 clippy，没有链接、没有运行；这个测试和原有的 `kqueue_*` 由 macOS CI 运行。
+  - `just test -p lectern-platform` 110 个测试通过，与改动前相同（Linux 上的代码没有改）。
+  - `just check`、`just doctest`、`just deny` 通过。`just test`（整个工作区 2251 个测试，跳过 7 个）里 2250 个通过，`lectern-syntax` 的计时测试 `batch_order_window_tasks_take_turns_with_batches` 在四个 agent 同时构建的负载下超时一次（第 4 步 168 ms），单独重跑 `batch_order` 的 5 个测试都通过；它不经过本 crate 改动的代码。
+  - 验收的检查：`rg -n 'eprintln!|eprint!|println!|util::log' crates/platform/src --glob '!**/tests*'` 没有结果；Cargo.lock 只在 `lectern-platform` 的依赖里多了 `lectern-logging`。
 
 ## 与设计的差异
 
@@ -1077,3 +1097,6 @@ pub mod time {
   - B 写的「不做 IO」不成立：第一次调用（以及 macOS 上系统时区改变之后的第一次调用）由 C 库读时区文件。usage 设计 B 与 `LocalZone::offset_at` 的注释同时改为不在 UI 线程上、首帧之前调用。
   - None 多了一种情况：`tm_gmtoff` 超出 TZif 的范围。B 写的「超出 `time_t` 的范围」改为「年份放不进 `tm_year`」：64 位的 `time_t` 能放下任何 `i64`，`localtime_r` 失败只因为年份；usage 设计 B 的注释同时改正。
   - 测试在 B 的表之外加了 Kathmandu 1986 年的切换、两个 POSIX 规则串（不依赖系统的时区文件）、`utc_offset_out_of_range_is_none`、`utc_offset_covers_every_millisecond_timestamp`、`utc_offset_from_many_threads_agrees` 和 `utc_offset_gmtoff_range`。子进程的入口不标 `#[ignore]`，没有标记变量时直接返回，与 `cache` 的 `crash_*` 相同，`just test` 不因此多出跳过的测试。
+- kqueue 线程的日志接入（logging 设计第 9 项的 `platform` 部分）按原来「日志与诊断」写的做：error、target `platform`、`Value::io`，删掉 `eprintln!`（它写的是 `io::Error` 的 `Display` 文字，现在不再写系统给的消息）。与那里的文字不同的有两处：
+  - 多了字段 `watches`（这个 kqueue 上的订阅数）：原来只写了错误。计数说明有多少订阅从此收不到事件，不含路径和名字。
+  - 金丝雀测试不让 `kevent` 真的出错（测试里造不出来），而是在线程运行时直接调用 `run` 出错时调用的 `Kqueue::fail`，为此 `fail` 由私有改为 `pub(super)`。

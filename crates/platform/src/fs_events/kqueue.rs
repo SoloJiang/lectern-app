@@ -26,6 +26,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use lectern_fs_watch::{Armed, BackendError, Flags, RawBatch, RawEvent};
+use lectern_logging::{Value, error};
 use rustix::event::kqueue::{
     Event, EventFilter, EventFlags, UserDefinedFlags, UserFlags, VnodeEvents, kevent, kqueue,
 };
@@ -441,12 +442,21 @@ impl Kqueue {
         }
     }
 
-    fn fail(&self, errno: Errno) {
-        eprintln!(
-            "lectern-platform: the kqueue thread stopped: {}",
-            io::Error::from(errno)
+    /// The thread stops on a `kevent` error: an error record with the
+    /// number of watches that get no more events and the errno's kind and
+    /// code (docs/design/platform.md「日志与诊断」). No path or name is
+    /// written. The next `Entries` arm starts a new kqueue.
+    pub(super) fn fail(&self, errno: Errno) {
+        let watches = {
+            let mut state = lock(&self.state);
+            state.stopped = true;
+            state.watches.len()
+        };
+        error!(
+            "the kqueue thread stopped on a kevent error; its watches get no more events";
+            watches = watches,
+            io = Value::io(&io::Error::from(errno)),
         );
-        lock(&self.state).stopped = true;
         self.flushed.notify_all();
     }
 }
