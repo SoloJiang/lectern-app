@@ -8,6 +8,7 @@ mod filter;
 mod flush;
 mod health;
 mod lifecycle;
+mod logs;
 mod quiescence;
 mod reflog;
 mod revision;

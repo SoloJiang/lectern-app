@@ -3,7 +3,7 @@
 //! 「reflog」).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use lectern_kernel::BusyGuard;
@@ -330,7 +330,7 @@ impl RepoState {
                             for sub in &mut self.subs {
                                 // A batch carries at most READ_LIMIT bytes of lines.
                                 if sub.acc.reflog_bytes + bytes > READ_LIMIT {
-                                    deliver(sub, None);
+                                    deliver(sub, None, &self.common);
                                 }
                                 sub.acc.reflog.extend(records.iter().cloned());
                                 sub.acc.reflog_bytes += bytes;
@@ -343,7 +343,7 @@ impl RepoState {
                         // The read hit the limit: this batch goes now, the
                         // rest is read into the next one.
                         for sub in &mut self.subs {
-                            deliver(sub, None);
+                            deliver(sub, None, &self.common);
                         }
                     }
                 }
@@ -383,10 +383,10 @@ impl RepoState {
         if health != self.told {
             for sub in self.subs.iter_mut().filter(|sub| sub.sub.started()) {
                 if sub.sub.is_open() {
-                    deliver(sub, None);
+                    deliver(sub, None, &self.common);
                 }
                 let batch = RepoAcc::default().take(Some(health.clone()), false);
-                sub.sub.deliver(batch);
+                sub.sub.deliver(batch, &self.common);
             }
             self.told = health;
         }
@@ -398,7 +398,7 @@ impl RepoState {
         let health = self.health();
         for sub in self.subs.iter_mut().filter(|sub| !sub.sub.started()) {
             let batch = sub.acc.take(Some(health.clone()), true);
-            sub.sub.deliver(batch);
+            sub.sub.deliver(batch, &self.common);
         }
     }
 
@@ -407,7 +407,7 @@ impl RepoState {
         let mut delivered = 0;
         for sub in self.subs.iter_mut().filter(|sub| sub.sub.started()) {
             if sub.sub.deadline().is_some_and(|deadline| deadline <= now) {
-                deliver(sub, None);
+                deliver(sub, None, &self.common);
                 delivered += 1;
             }
         }
@@ -434,7 +434,7 @@ impl RepoState {
 
 /// Delivers a subscription's batch; its first batch carries the health and
 /// `rescan`.
-fn deliver(sub: &mut RepoSub, health: Option<Health>) {
+fn deliver(sub: &mut RepoSub, health: Option<Health>, common: &Path) {
     let first = !sub.sub.started();
     let health = if first {
         Some(health.unwrap_or(Health::Live))
@@ -442,5 +442,5 @@ fn deliver(sub: &mut RepoSub, health: Option<Health>) {
         health
     };
     let batch = sub.acc.take(health, first);
-    sub.sub.deliver(batch);
+    sub.sub.deliver(batch, common);
 }

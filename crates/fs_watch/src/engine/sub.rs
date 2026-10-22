@@ -2,13 +2,15 @@
 //! (docs/design/fs_watch.md「合并」).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use lectern_kernel::{BusyGuard, contain};
+use lectern_logging::{Value, error};
 
 use crate::backend::BusyFn;
+use crate::diag::Watched;
 use crate::path::WatchPath;
 use crate::queue::SubId;
 use crate::reflog::{ReflogRecord, ReflogReset};
@@ -17,7 +19,6 @@ use crate::types::{
     Coalesce, DirBatch, Health, MetaChanges, RepoBatch, Revision, RootState, WorktreeBatch,
     WorktreeMeta, WorktreeName,
 };
-use crate::util::log;
 
 struct Window {
     first: Duration,
@@ -101,10 +102,13 @@ impl<B: 'static> Sub<B> {
         let window = self.window.as_ref()?;
         Some((window.last + self.coalesce.quiet).min(window.first + self.coalesce.max_delay))
     }
+}
 
+impl<B: Watched + 'static> Sub<B> {
     /// Delivers `batch` under `contain`, with the window's guard (or the
-    /// initial one for the first batch), and closes the window.
-    pub(crate) fn deliver(&mut self, batch: B) {
+    /// initial one for the first batch), and closes the window. `root` is
+    /// the watch's root, for the record of a panicking sink.
+    pub(crate) fn deliver(&mut self, batch: B, root: &Path) {
         let window = self.window.take();
         if self.dead {
             return;
@@ -118,10 +122,15 @@ impl<B: 'static> Sub<B> {
             Some(None) | None => window_guard,
         };
         let sink = self.sink.clone();
-        if let Err(message) = contain(move || sink.deliver(batch, guard)) {
-            log(format_args!(
-                "a sink panicked and is no longer delivered to: {message}"
-            ));
+        if contain(move || sink.deliver(batch, guard)).is_err() {
+            // The message may quote the batch's paths or the consumer's
+            // data: the panic hook records its location and length, this
+            // record only which watch stops delivering.
+            error!(
+                "a sink panicked; it is no longer delivered to";
+                watch = B::KIND,
+                root = Value::path(root),
+            );
             self.dead = true;
         }
     }

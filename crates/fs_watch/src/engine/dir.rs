@@ -144,7 +144,7 @@ impl DirState {
                 sub.acc.root = Some(RootState::Appeared);
                 sub.acc.set_rescan();
                 sub.sub.touch(now);
-                deliver(sub);
+                deliver(sub, &self.root);
             }
         }
         self.publish_health();
@@ -200,14 +200,14 @@ impl DirState {
             if sub.acc.root.is_none() {
                 sub.acc.root = Some(RootState::Vanished);
             }
-            deliver(sub);
+            deliver(sub, &self.root);
         }
         if self.locate(ctx) {
             for sub in &mut self.subs {
                 sub.acc.root = Some(RootState::Appeared);
                 sub.acc.set_rescan();
                 sub.sub.touch(now);
-                deliver(sub);
+                deliver(sub, &self.root);
             }
         }
         self.publish_health();
@@ -242,16 +242,16 @@ impl DirState {
         if health != self.told {
             for sub in self.subs.iter_mut().filter(|sub| sub.sub.started()) {
                 if sub.sub.is_open() {
-                    deliver(sub);
+                    deliver(sub, &self.root);
                 }
                 let batch = DirAcc::default().take(Some(health.clone()), false);
-                sub.sub.deliver(batch);
+                sub.sub.deliver(batch, &self.root);
             }
             self.told = health.clone();
         }
         for sub in self.subs.iter_mut().filter(|sub| !sub.sub.started()) {
             let batch = sub.acc.take(Some(health.clone()), true);
-            sub.sub.deliver(batch);
+            sub.sub.deliver(batch, &self.root);
         }
     }
 
@@ -260,7 +260,7 @@ impl DirState {
         let mut delivered = 0;
         for sub in self.subs.iter_mut().filter(|sub| sub.sub.started()) {
             if sub.sub.deadline().is_some_and(|deadline| deadline <= now) {
-                deliver(sub);
+                deliver(sub, &self.root);
                 delivered += 1;
             }
         }
@@ -289,11 +289,11 @@ fn is_dir(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
-fn deliver(sub: &mut DirSub) {
+fn deliver(sub: &mut DirSub, root: &Path) {
     let first = !sub.sub.started();
     let health = first.then_some(Health::Live);
     let batch = sub.acc.take(health, first);
-    sub.sub.deliver(batch);
+    sub.sub.deliver(batch, root);
 }
 
 /// The nearest existing ancestor directory of `root` and the name of the
