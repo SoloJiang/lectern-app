@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
+use lectern_services::changes::{
+    BaseSpec, ChangeDetail, ChangePath, ChangeStatus, FileChange, FileMode, FileSide, SideIdentity,
+};
 use lectern_services::project::BlobId;
+use lectern_services::review::{FileKey, Progress, SeenState};
 use lectern_services::session::Timestamp;
 
 use super::{SeenKey, TargetKey, looks_good, mark_seen, mark_unseen, progress, state};
 use crate::log::Index;
-use crate::types::changes::{
-    BaseSpec, ChangePath, ChangeStatus, FileChange, FileMode, FileSide, SideIdentity,
-};
-use crate::types::review::{FileKey, Progress, SeenState};
 
 fn path(p: &str) -> ChangePath {
     ChangePath(Arc::from(p.as_bytes()))
@@ -32,47 +32,42 @@ fn session(id: &str) -> TargetKey {
     }
 }
 
-fn modified(p: &str, old: u8, new: u8) -> FileChange {
+fn change(
+    status: ChangeStatus,
+    p: &str,
+    old: Option<FileSide>,
+    new: Option<FileSide>,
+) -> FileChange {
     FileChange {
-        status: ChangeStatus::Modified,
+        status,
         path: path(p),
-        old: file(old),
-        new: file(new),
+        old,
+        new,
+        detail: ChangeDetail::NoDiff,
         generated: false,
+        untracked: false,
+        staged: None,
     }
+}
+
+fn modified(p: &str, old: u8, new: u8) -> FileChange {
+    change(ChangeStatus::Modified, p, file(old), file(new))
 }
 
 fn added(p: &str, new: u8) -> FileChange {
-    FileChange {
-        status: ChangeStatus::Added,
-        path: path(p),
-        old: None,
-        new: file(new),
-        generated: false,
-    }
+    change(ChangeStatus::Added, p, None, file(new))
 }
 
 fn deleted(p: &str, old: u8) -> FileChange {
-    FileChange {
-        status: ChangeStatus::Deleted,
-        path: path(p),
-        old: file(old),
-        new: None,
-        generated: false,
-    }
+    change(ChangeStatus::Deleted, p, file(old), None)
 }
 
 fn renamed(from: &str, to: &str, old: u8, new: u8) -> FileChange {
-    FileChange {
-        status: ChangeStatus::Renamed {
-            from: path(from),
-            similarity: 90,
-        },
-        path: path(to),
-        old: file(old),
-        new: file(new),
-        generated: false,
-    }
+    let status = ChangeStatus::Renamed {
+        from: path(from),
+        similarity: 90,
+    };
+    change(status, to, file(old), file(new))
 }
 
 const T1: Timestamp = Timestamp(1_760_000_000_000);

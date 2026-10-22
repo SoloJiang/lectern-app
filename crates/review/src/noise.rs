@@ -5,8 +5,8 @@
 //! Paths are `/`-separated raw bytes, compared case-sensitively. The file
 //! name is the last segment; the directory segments are the ones before it.
 
-use crate::types::changes::{FileChange, FileMode, FileSide, SideIdentity};
-use crate::types::review::{GroupKind, NoiseKind, SensitiveKind};
+use lectern_services::changes::{ChangeStatus, FileChange, FileMode, FileSide, SideIdentity};
+use lectern_services::review::{GroupKind, NoiseKind, SensitiveKind};
 
 #[cfg(test)]
 mod tests;
@@ -188,7 +188,7 @@ const GIT_PATHS: &[&[u8]] = &[b".gitmodules"];
 /// well; the mode rules at the two sides.
 pub fn sensitive(change: &FileChange) -> Option<SensitiveKind> {
     let from = match &change.status {
-        crate::types::changes::ChangeStatus::Renamed { from, .. } => Some(&from.0[..]),
+        ChangeStatus::Renamed { from, .. } => Some(&from.0[..]),
         _ => None,
     };
     let paths = std::iter::once(&change.path.0[..]).chain(from);

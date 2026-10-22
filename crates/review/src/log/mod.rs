@@ -28,13 +28,13 @@ use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use lectern_services::changes::ChangePath;
 use lectern_services::project::BlobId;
+use lectern_services::review::FileKey;
 use lectern_services::session::Timestamp;
 use sha2::{Digest, Sha256};
 
 use crate::seen::{SeenKey, TargetKey};
-use crate::types::changes::ChangePath;
-use crate::types::review::FileKey;
 
 /// A file above this is compacted on the next write.
 pub(crate) const COMPACT_ABOVE: u64 = 4 << 20;

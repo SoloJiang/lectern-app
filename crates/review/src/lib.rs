@@ -12,7 +12,6 @@ mod log;
 pub mod noise;
 #[allow(dead_code, reason = "the review engine (step 3) uses seen states")]
 mod seen;
-pub mod types;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;

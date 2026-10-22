@@ -7,13 +7,13 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
+use lectern_services::changes::{ChangePath, FileMode, SideIdentity};
 use lectern_services::project::BlobId;
+use lectern_services::review::FileKey;
 use lectern_services::session::Timestamp;
 
 use crate::log::{BaseRecord, LogFile, Record, SessionId};
 use crate::seen::{SeenKey, StatusKind, TargetKey};
-use crate::types::changes::{ChangePath, FileMode, SideIdentity};
-use crate::types::review::FileKey;
 
 /// What [`load_log`] read.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

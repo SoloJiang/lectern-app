@@ -5,16 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use lectern_services::changes::{
+    BaseSpec, ChangeDetail, ChangePath, ChangeStatus, FileChange, FileMode, FileSide, RawIdentity,
+    SideIdentity, UnavailableKind,
+};
 use lectern_services::project::BlobId;
+use lectern_services::review::{FileKey, SeenState};
 use lectern_services::session::Timestamp;
 
 use super::{BaseRecord, Index, Limits, LogFile, Op, Record, SessionId, file_name, flush};
 use crate::seen::{SeenKey, TargetKey, mark_seen, mark_unseen, state};
-use crate::types::changes::{
-    BaseSpec, ChangePath, ChangeStatus, FileChange, FileMode, FileSide, RawIdentity, SideIdentity,
-    UnavailableKind,
-};
-use crate::types::review::{FileKey, SeenState};
 
 const REPO: &str = "/work/repo/.git";
 const NOW: Timestamp = Timestamp(1_760_000_000_000);
@@ -111,15 +111,29 @@ fn sid(id: &str) -> SessionId {
     }
 }
 
+fn change(
+    status: ChangeStatus,
+    p: &[u8],
+    old: Option<FileSide>,
+    new: Option<FileSide>,
+) -> FileChange {
+    FileChange {
+        status,
+        path: path(p),
+        old,
+        new,
+        detail: ChangeDetail::NoDiff,
+        generated: false,
+        untracked: false,
+        staged: None,
+    }
+}
+
 /// `p` modified from blob 1 to blob `new`.
 fn modified(p: &[u8], new: u8) -> FileChange {
-    FileChange {
-        status: ChangeStatus::Modified,
-        path: path(p),
-        old: file_side(FileMode::File, blob(1)),
-        new: file_side(FileMode::File, blob(new)),
-        generated: false,
-    }
+    let old = file_side(FileMode::File, blob(1));
+    let new = file_side(FileMode::File, blob(new));
+    change(ChangeStatus::Modified, p, old, new)
 }
 
 fn seen_at(target: &TargetKey, change: &FileChange, at: Timestamp) -> Record {
@@ -155,52 +169,39 @@ fn sample_records() -> Vec<Record> {
     let outside = TargetKey::Outside {
         worktree: Arc::from(""),
     };
-    let renamed = FileChange {
-        status: ChangeStatus::Renamed {
-            from: path(b"src/old.rs"),
-            similarity: 92,
-        },
-        path: path(b"src/new.rs"),
-        old: file_side(FileMode::File, blob(1)),
-        new: file_side(
-            FileMode::Executable,
-            SideIdentity::NotRetained(BlobId::Sha256([2; 32])),
-        ),
-        generated: false,
+    let moved = ChangeStatus::Renamed {
+        from: path(b"src/old.rs"),
+        similarity: 92,
     };
+    let not_retained = SideIdentity::NotRetained(BlobId::Sha256([2; 32]));
+    let renamed = change(
+        moved,
+        b"src/new.rs",
+        file_side(FileMode::File, blob(1)),
+        file_side(FileMode::Executable, not_retained),
+    );
     let unhashed = SideIdentity::Unhashed {
         size: 1 << 40,
         mtime_ns: 1_760_000_000_123_456_789,
         inode: 42,
     };
-    let odd = FileChange {
-        status: ChangeStatus::Added,
-        path: path(b"data/\xff\xfe.bin"),
-        old: None,
-        new: file_side(FileMode::File, unhashed),
-        generated: false,
-    };
+    let odd_side = file_side(FileMode::File, unhashed);
+    let odd = change(ChangeStatus::Added, b"data/\xff\xfe.bin", None, odd_side);
     let sha = SideIdentity::Filtered(RawIdentity::Sha256([0xab; 32]));
     let stat = SideIdentity::Filtered(RawIdentity::Stat {
         size: 7,
         mtime_ns: -1,
         inode: 9,
     });
-    let filtered = FileChange {
-        status: ChangeStatus::TypeChanged,
-        path: path(b"assets/logo.png"),
-        old: file_side(FileMode::Symlink, sha),
-        new: file_side(FileMode::Gitlink, stat),
-        generated: false,
-    };
+    let filtered = change(
+        ChangeStatus::TypeChanged,
+        b"assets/logo.png",
+        file_side(FileMode::Symlink, sha),
+        file_side(FileMode::Gitlink, stat),
+    );
     let unsupported = SideIdentity::Unavailable(UnavailableKind::UnsupportedType);
-    let gone = FileChange {
-        status: ChangeStatus::Deleted,
-        path: path(b"vendor/sock"),
-        old: file_side(FileMode::Special, unsupported),
-        new: None,
-        generated: false,
-    };
+    let special = file_side(FileMode::Special, unsupported);
+    let gone = change(ChangeStatus::Deleted, b"vendor/sock", special, None);
     let lib = FileKey {
         old: Some(path(b"src/lib.rs")),
         new: Some(path(b"src/lib.rs")),

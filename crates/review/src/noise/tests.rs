@@ -1,14 +1,14 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use lectern_services::changes::{
+    ChangeDetail, ChangePath, ChangeStatus, FileChange, FileMode, FileSide, SideIdentity,
+};
 use lectern_services::project::BlobId;
+use lectern_services::review::{GroupKind, NoiseKind, SensitiveKind};
 
 use super::{classify, group, sensitive};
 use crate::group::{GroupInput, arrange};
-use crate::types::changes::{
-    ChangePath, ChangeStatus, FileChange, FileMode, FileSide, SideIdentity,
-};
-use crate::types::review::{GroupKind, NoiseKind, SensitiveKind};
 
 fn kind(path: &str) -> Option<NoiseKind> {
     classify(path.as_bytes(), false)
@@ -288,7 +288,10 @@ fn change(
         path: path(p),
         old,
         new,
+        detail: ChangeDetail::NoDiff,
         generated: false,
+        untracked: false,
+        staged: None,
     }
 }
 

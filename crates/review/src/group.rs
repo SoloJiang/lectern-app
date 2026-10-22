@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::types::review::{Group, GroupKind, NoiseKind};
+use lectern_services::review::{Group, GroupKind};
 
 /// One file of the list, as the snapshot's `FileEntry` has it.
 pub(crate) struct GroupInput<'a> {
@@ -15,14 +15,14 @@ pub(crate) struct GroupInput<'a> {
 }
 
 /// The non-empty groups, in `GroupKind` declaration order (code, tests,
-/// config, deps, docs, then each kind of noise); within a group by
-/// subproject (files outside any subproject first), then path. `files` are
-/// indices into `files`.
+/// config, deps, docs, then each kind of noise; its derived `Ord`); within
+/// a group by subproject (files outside any subproject first), then path.
+/// `files` are indices into `files`.
 pub(crate) fn arrange(files: &[GroupInput<'_>]) -> Arc<[Group]> {
     let mut order: Vec<u32> = (0..files.len() as u32).collect();
     order.sort_by(|&a, &b| {
         let (x, y) = (&files[a as usize], &files[b as usize]);
-        (rank(x.kind), x.package, x.path).cmp(&(rank(y.kind), y.package, y.path))
+        (x.kind, x.package, x.path).cmp(&(y.kind, y.package, y.path))
     });
     let mut groups: Vec<Group> = Vec::new();
     let mut start = 0;
@@ -39,18 +39,4 @@ pub(crate) fn arrange(files: &[GroupInput<'_>]) -> Arc<[Group]> {
         start = end;
     }
     groups.into()
-}
-
-/// The display position of a group.
-fn rank(kind: GroupKind) -> u8 {
-    match kind {
-        GroupKind::Code => 0,
-        GroupKind::Tests => 1,
-        GroupKind::Config => 2,
-        GroupKind::Deps => 3,
-        GroupKind::Docs => 4,
-        GroupKind::Noise(NoiseKind::Lockfile) => 5,
-        GroupKind::Noise(NoiseKind::Generated) => 6,
-        GroupKind::Noise(NoiseKind::Snapshot) => 7,
-    }
 }

@@ -1233,10 +1233,11 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 在 Linux（x86_64，4 核，内核 6.18，与其他编译任务共用机器）上运行。本步不依赖 GPUI，也没有 macOS 专属代码。
 
-- `just check`、`just test`（整个工作区 1871 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
+- 用的是前置条件 A（#161）合并进来的 `services::changes`、`services::review` 类型，本 crate 没有自己的替身。
+- `just check`、`just test`（整个工作区 1940 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。
 - `just test -p lectern-review`：50 个测试通过。按前缀：`noise_*` 6、`group_*` 4、`sensitive_*` 8、`seen_*` 12、`log_*` 20（含 `log_no_compaction_after_failed_read`）。insta 快照 4 个（日志的行格式、压缩后保留认不出的记录的文件、噪声与分组的路径表、按子项目排序的分组），逐个看过。
 - `log_no_compaction_after_failed_read`：注入的读取错误之后继续标记，追加到超过压缩上限（测试里调小为 8 KiB，写到 32 KiB），文件的 inode 不变、原有字节仍在开头；之后一次完整读取里原有的 20 个已看标记和基准都在，这次读取之后的写入恢复压缩。`log_compaction_needs_the_index_to_be_the_file` 覆盖另外几种只追加的情况：读取之后有别的写入者追加、本进程追加之后到压缩之前有别的写入者（压缩前的身份核对拦下，没有开始写临时文件）、只读了最后一部分（`READ_MAX` 调小）、文件头的 `v` 为 2。`log_compacts_above_4_mib` 用真实的 4 MiB 上限。
-- `review/log_load_16k`（`cargo bench -p lectern-bench --all-features --bench time -- review/`，采样模式）：中位数 22.8 ms，p95 27.6 ms，42 个样本，预算 < 30 ms。夹具 16 000 条记录、5 556 267 字节。第一版每行解析两遍（先取类型再按类型解析）时中位数是 32.5 ms，改为一遍解析、重复的字符串（来源、会话 ID、worktree）共用一份之后降到上面的数字。没有在 macOS 上测量。
+- `review/log_load_16k`（`cargo bench -p lectern-bench --all-features --bench time -- review/`，采样模式）：中位数 22.8 ms，p95 27.6 ms，42 个样本，预算 < 30 ms；换用 `services` 的类型之后重测，中位数 23.4 ms，p95 26.6 ms（机器负载约 7）。夹具 16 000 条记录、5 556 267 字节。第一版每行解析两遍（先取类型再按类型解析）时中位数是 32.5 ms，改为一遍解析、重复的字符串（来源、会话 ID、worktree）共用一份之后降到上面的数字。没有在 macOS 上测量。
 - `rg -n 'rusqlite' crates/review/Cargo.toml` 没有结果。
 - 没有验证的：待写队列的 100 ms / 64 条合并、`Background` 任务与 `BusyGuard`、首帧之前不读，属于第 3 步接入审阅引擎时的内容；本步只提供 `LogFile`、`Index` 和 `flush`。
 
@@ -1252,7 +1253,6 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 ### 第 1 步
 
-- **前置条件 A 的类型用替身。** 第 1 步不需要前置条件，但 `noise::sensitive` 的 `FileChange`、`SeenKey` 用到的 `ChangePath`、`FileMode`、`SideIdentity`、`BaseSpec` 和 `NoiseKind`、`GroupKind`、`SensitiveKind`、`FileKey`、`SeenState`、`Progress` 都在还没有合并的 `services` 模块里。本步在 `src/types.rs` 里按「接口」的名字和字段写了替身（`FileChange` 只含 `status`、`path`、`old`、`new`、`generated`），第 3 步删掉它，改用 `lectern_services` 的类型。已有的 `BlobId`、`Timestamp` 直接用 `lectern-services` 的。标注日志的编码是本 crate 自己的（`log/wire.rs`），替换类型不改变文件格式。
 - **`NotRetained` 与 `Blob` 是同一个内容。** `SeenKey` 把 `SideIdentity::NotRetained(oid)` 记作 `Blob(oid)`，`Sensitive(Symlink)`、`Sensitive(Submodule)` 比较两侧时也一样：工作区内容是否保留取决于改动集的保留预算，不取决于内容，否则一次刷新就会让已看的文件变成「审过之后又被改过」。
 - **`Sensitive` 的路径匹配范围。** 「简报规则」表写的是「路径是」「在……下」。`CLAUDE.md`、`AGENTS.md`、`GEMINI.md` 和 `.gitattributes` 按文件名在任何目录里匹配（agent 也加载子目录里的指令文件，子目录的 `.gitattributes` 同样生效）；`.claude/`、`.codex/`、`.cursor/` 是任何一级目录；其余（`.mcp.json`、`.github/copilot-instructions.md`、`.github/workflows/`、`.circleci/`、`.gitlab-ci.yml`、`Jenkinsfile`、`azure-pipelines.yml`、`.husky/`、`.githooks/`、`.pre-commit-config.yaml`、`lefthook.yml`、`.gitmodules`）从 worktree 根匹配。路径规则同时看重命名的来源，删除的文件也触发路径规则。
 - **标注日志的细节**（已写进「标注日志」）：`key` 的编码；空树的基准 `commit` 为 `null`；同一会话有多条 `base` 时取最早的一条；不知道文件末尾状态时补换行而不截断；文件头坏了或 `v` 不是 1 时只追加、不压缩。

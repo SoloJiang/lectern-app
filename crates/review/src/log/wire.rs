@@ -21,17 +21,17 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
+use lectern_services::changes::{
+    BaseSpec, ChangePath, FileMode, RawIdentity, SideIdentity, UnavailableKind,
+};
 use lectern_services::project::BlobId;
+use lectern_services::review::FileKey;
 use lectern_services::session::Timestamp;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{BaseRecord, Record, SessionId};
 use crate::seen::{SeenKey, StatusKind, TargetKey};
-use crate::types::changes::{
-    BaseSpec, ChangePath, FileMode, RawIdentity, SideIdentity, UnavailableKind,
-};
-use crate::types::review::FileKey;
 
 pub(super) const MAGIC: &str = "review-log";
 pub(super) const VERSION: u32 = 1;

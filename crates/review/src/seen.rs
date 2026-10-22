@@ -6,13 +6,13 @@
 
 use std::sync::Arc;
 
+use lectern_services::changes::{
+    BaseSpec, ChangePath, ChangeStatus, FileChange, FileMode, FileSide, SideIdentity,
+};
+use lectern_services::review::{FileKey, Progress, SeenState};
 use lectern_services::session::Timestamp;
 
 use crate::log::{Index, Record};
-use crate::types::changes::{
-    BaseSpec, ChangePath, ChangeStatus, FileChange, FileMode, FileSide, SideIdentity,
-};
-use crate::types::review::{FileKey, Progress, SeenState};
 
 #[cfg(test)]
 mod tests;
@@ -58,9 +58,9 @@ impl SeenKey {
         let file = file_key(change);
         let side = |s: &Option<FileSide>| {
             s.as_ref().map(|s| {
-                let content = match &s.content {
-                    SideIdentity::NotRetained(oid) => SideIdentity::Blob(*oid),
-                    other => other.clone(),
+                let content = match s.content {
+                    SideIdentity::NotRetained(oid) => SideIdentity::Blob(oid),
+                    other => other,
                 };
                 (s.mode, content)
             })
