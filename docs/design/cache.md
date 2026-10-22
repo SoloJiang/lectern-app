@@ -219,6 +219,7 @@ impl Key {
 | `syntax.lines` | 仓库、文件夹 | `syntax`（[ADR 0041](../adr/0041.md)，[file_reader 设计「接口」](file_reader.md#接口)） | 内容 OID（原始字节按 git blob 格式） | 每 64 KiB 处的行号（行检查点，[ADR 0034](../adr/0034.md)），加内容长度、行数、是否有长行、最宽行的格数；只为 ≥ 1 MiB 的内容写，64 MiB 的文件约 4 KiB | 不压缩 |
 | `review.attribution` | 仓库 | `review`（[review 设计「归因的缓存」](review.md#归因的缓存)） | 哈希算法、基准一侧的 OID、工作区一侧的 OID、轮次历史的摘要（链的算法和值的格式版本是命名空间版本） | 一个文件的改动链结果：每一步的版本 OID、对齐结果、叙事步的 hunk 与存活，工作区每行来源和基准每行去向的游程编码；通常几 KB | Zstd |
 | `review.tree_changes` | 仓库 | `review`（同上） | 哈希算法、旧提交的 OID（reflog 里全 0 时为空）、新提交的 OID、路径数上限 | 两个提交的树之间改变的路径（排好序），超过上限时为「全部」；只由两个提交 OID 决定 | Zstd |
+| `review.ancestry` | 仓库 | `review`（同上） | 哈希算法、祖先一侧的提交 OID、另一个提交的 OID | 前者是不是后者的祖先（一个字节）；只由两个提交 OID 决定 | 不压缩 |
 | `review.claims` | 应用 | `review`（同上） | 来源 ID、会话 ID（值里带派生时轮次索引的身份：`last_activity` 和索引游标的适配器版本，有效性由 `review` 按身份判断，同 ADR 0026） | 会话派生的声明：每个改动步的路径、时刻、轮次 ID、调用 ID 与状态、输入与结果的 `ContentRef`，命令调用的时间窗口；通常几 KB | 不压缩 |
 
 规则生成的简报不缓存（ADR 0019）。`agents` 的三个命名空间不在 git 里、没有 blob OID，键按 ADR 0026。

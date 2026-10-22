@@ -56,18 +56,22 @@ impl Entry for CachedChain {
 }
 
 /// The key of a file's chain. None when the worktree side has no blob
-/// identity (`Blob` or `NotRetained`): such chains are not cached.
+/// identity (`Blob` or `NotRetained`): such chains are not cached. A
+/// worktree side that is absent (a deletion) is empty, as an absent base.
 pub(crate) fn key(
     hash: HashKind,
     base: Option<BlobId>,
-    worktree: &SideIdentity,
+    worktree: Option<&SideIdentity>,
     digest: &[u8; 32],
 ) -> Option<Key> {
-    let worktree = match worktree {
-        SideIdentity::Blob(oid) | SideIdentity::NotRetained(oid) => oid,
-        SideIdentity::Unhashed { .. }
-        | SideIdentity::Filtered(_)
-        | SideIdentity::Unavailable(_) => {
+    let worktree: &[u8] = match worktree {
+        None => &[],
+        Some(SideIdentity::Blob(oid) | SideIdentity::NotRetained(oid)) => oid.as_bytes(),
+        Some(
+            SideIdentity::Unhashed { .. }
+            | SideIdentity::Filtered(_)
+            | SideIdentity::Unavailable(_),
+        ) => {
             return None;
         }
     };
@@ -79,7 +83,7 @@ pub(crate) fn key(
         Key::new()
             .str(hash)
             .bytes(base.as_ref().map_or(&[][..], BlobId::as_bytes))
-            .bytes(worktree.as_bytes())
+            .bytes(worktree)
             .bytes(digest),
     )
 }
@@ -367,7 +371,9 @@ fn runs<T: Copy>(items: &[T], next: impl Fn(T, T) -> bool) -> Vec<(T, u64)> {
     out
 }
 
-fn uint(out: &mut Vec<u8>, mut v: u64) {
+/// LEB128. The other cache values of this crate (`claims`, `cutoff`) use
+/// the same integers.
+pub(crate) fn uint(out: &mut Vec<u8>, mut v: u64) {
     loop {
         let low = (v & 0x7f) as u8;
         v >>= 7;
@@ -379,7 +385,13 @@ fn uint(out: &mut Vec<u8>, mut v: u64) {
     }
 }
 
-fn oid(out: &mut Vec<u8>, oid: Option<&BlobId>) {
+/// Length-prefixed bytes.
+pub(crate) fn bytes(out: &mut Vec<u8>, b: &[u8]) {
+    uint(out, b.len() as u64);
+    out.extend_from_slice(b);
+}
+
+pub(crate) fn oid(out: &mut Vec<u8>, oid: Option<&BlobId>) {
     match oid {
         None => out.push(0),
         Some(BlobId::Sha1(b)) => {
@@ -393,19 +405,34 @@ fn oid(out: &mut Vec<u8>, oid: Option<&BlobId>) {
     }
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
-impl Reader<'_> {
-    fn byte(&mut self) -> Option<u8> {
+impl<'a> Reader<'a> {
+    pub(crate) fn new(bytes: &'a [u8]) -> Reader<'a> {
+        Reader { bytes, at: 0 }
+    }
+
+    /// Everything was read.
+    pub(crate) fn done(&self) -> bool {
+        self.at == self.bytes.len()
+    }
+
+    /// Length-prefixed bytes (`bytes`).
+    pub(crate) fn bytes(&mut self) -> Option<&'a [u8]> {
+        let n = self.len()?;
+        self.take(n)
+    }
+
+    pub(crate) fn byte(&mut self) -> Option<u8> {
         let b = *self.bytes.get(self.at)?;
         self.at += 1;
         Some(b)
     }
 
-    fn uint(&mut self) -> Option<u64> {
+    pub(crate) fn uint(&mut self) -> Option<u64> {
         let mut v = 0u64;
         for shift in (0..64).step_by(7) {
             let b = self.byte()?;
@@ -417,24 +444,24 @@ impl Reader<'_> {
         None
     }
 
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         u32::try_from(self.uint()?).ok()
     }
 
     /// A count of items still to read: never more than the bytes left, so
     /// a corrupt value cannot make a huge allocation.
-    fn len(&mut self) -> Option<usize> {
+    pub(crate) fn len(&mut self) -> Option<usize> {
         let n = usize::try_from(self.uint()?).ok()?;
         (n <= self.bytes.len() - self.at).then_some(n)
     }
 
-    fn take(&mut self, n: usize) -> Option<&[u8]> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let b = self.bytes.get(self.at..self.at.checked_add(n)?)?;
         self.at += n;
         Some(b)
     }
 
-    fn oid(&mut self) -> Option<Option<BlobId>> {
+    pub(crate) fn oid(&mut self) -> Option<Option<BlobId>> {
         match self.byte()? {
             0 => Some(None),
             1 => Some(Some(BlobId::Sha1(self.take(20)?.try_into().ok()?))),

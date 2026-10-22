@@ -11,15 +11,21 @@ publish.workspace = true
 layer = "domain"
 
 [features]
-# `testing`: the annotation log fixture of `review/log_load_16k` and the
-# change chain fixture of `review/chain_3000_lines`, for lectern-bench
-# (docs/design/review.md「测试」).
-test-support = []
+# `testing`: the annotation log fixture of `review/log_load_16k`, the change
+# chain fixture of `review/chain_3000_lines`, and `FakeSessions`,
+# `FakeProjects` and `Driven` with the review engine's fixtures, for the tests
+# and lectern-bench (docs/design/review.md「测试」). `Driven` runs the engine
+# on `Executor::manual()`, its repositories are `TestRepo`s.
+test-support = ["lectern-executor/test-support", "lectern-git/test-support"]
 
 [dependencies]
-# The `review.attribution` namespace (docs/design/review.md「归因的缓存」).
+# `review.attribution`, `review.tree_changes` and `review.claims`
+# (docs/design/review.md「归因的缓存」).
 lectern-cache = { path = "../cache" }
-# `line_diff` and `Oid::for_blob` for the change chains; gix stays in git.
+# The review engine's tasks: no IO on the calling thread.
+lectern-executor = { path = "../executor" }
+# `line_diff`, `Oid::for_blob`, `LocalChanges`, `head_reflog`,
+# `tree_changes`, `mtimes`, `rows` and `inline_changes`; gix stays in git.
 lectern-git = { path = "../git" }
 lectern-services = { path = "../services" }
 # The annotation log's records (docs/adr/0044.md).
@@ -30,6 +36,8 @@ sha2.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-git = { path = "../git", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

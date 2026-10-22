@@ -834,8 +834,8 @@ fn history_digest_differs_between_sessions_with_the_same_content() {
     assert_ne!(a, b);
     let oid = SideIdentity::Blob(blob_id(HashKind::Sha1, b"same\n"));
     assert_ne!(
-        codec::key(HashKind::Sha1, None, &oid, &a),
-        codec::key(HashKind::Sha1, None, &oid, &b)
+        codec::key(HashKind::Sha1, None, Some(&oid), &a),
+        codec::key(HashKind::Sha1, None, Some(&oid), &b)
     );
 }
 
@@ -892,8 +892,8 @@ fn history_digest_is_the_same_in_two_worktrees() {
     let not_retained = SideIdentity::NotRetained(blob_id(HashKind::Sha1, b"w\n"));
     let base = Some(blob_id(HashKind::Sha1, b"b\n"));
     assert_eq!(
-        codec::key(HashKind::Sha1, base, &w, &one),
-        codec::key(HashKind::Sha1, base, &not_retained, &one),
+        codec::key(HashKind::Sha1, base, Some(&w), &one),
+        codec::key(HashKind::Sha1, base, Some(&not_retained), &one),
         "retention is not part of the content"
     );
     let unhashed = SideIdentity::Unhashed {
@@ -901,7 +901,16 @@ fn history_digest_is_the_same_in_two_worktrees() {
         mtime_ns: 2,
         inode: 3,
     };
-    assert_eq!(codec::key(HashKind::Sha1, base, &unhashed, &one), None);
+    assert_eq!(
+        codec::key(HashKind::Sha1, base, Some(&unhashed), &one),
+        None
+    );
+    // A deletion has no worktree side, and a key of its own.
+    assert!(codec::key(HashKind::Sha1, base, None, &one).is_some());
+    assert_ne!(
+        codec::key(HashKind::Sha1, base, None, &one),
+        codec::key(HashKind::Sha1, base, Some(&w), &one)
+    );
 }
 
 #[test]
@@ -961,7 +970,7 @@ fn history_digest_cache_hit_does_not_load() {
     let key = codec::key(
         HashKind::Sha1,
         base_oid,
-        &w,
+        Some(&w),
         &digest(&[call("a", 1)], &["f.rs"]),
     );
     let first = codec::cached(&partition, key.as_ref(), compute);
@@ -978,7 +987,7 @@ fn history_digest_cache_hit_does_not_load() {
     let key_b = codec::key(
         HashKind::Sha1,
         base_oid,
-        &w,
+        Some(&w),
         &digest(&[call("b", 1)], &["f.rs"]),
     );
     codec::cached(&partition, key_b.as_ref(), compute);
@@ -987,7 +996,7 @@ fn history_digest_cache_hit_does_not_load() {
     let key_c = codec::key(
         HashKind::Sha1,
         base_oid,
-        &w,
+        Some(&w),
         &digest(&[call("c", 1)], &["f.rs"]),
     );
     let opaque = || {

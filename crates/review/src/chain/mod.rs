@@ -466,6 +466,54 @@ pub(crate) fn build(input: &ChainInput<'_>) -> Chain {
     }
 }
 
+/// The version after the first `upto` steps of `input`, as [`build`]
+/// computes it (steps that do not apply or did not complete leave it as it
+/// was): None when the file does not exist then, or when the chain is
+/// file-level (a side that is not text, a limit). For the rows of a
+/// narrative step, whose versions are not in the object database
+/// (「改动链」: replayed, then kept in a memory LRU by OID).
+pub(crate) fn replay(input: &ChainInput<'_>, upto: usize) -> Option<Vec<u8>> {
+    let base = match input.base {
+        Side::Absent => None,
+        Side::Text(text) => Some(text),
+        Side::Opaque(_) => return None,
+    };
+    let worktree_cr = match input.worktree {
+        Side::Absent => false,
+        Side::Text(text) => text.contains(&b'\r'),
+        Side::Opaque(_) => return None,
+    };
+    if input.steps.len() > MAX_STEPS || base.is_some_and(too_large) {
+        return None;
+    }
+    let mut path = input.start.clone();
+    let mut version: Option<Vec<u8>> = base.map(<[u8]>::to_vec);
+    for step in input.steps.iter().take(upto) {
+        if !step.completed {
+            continue;
+        }
+        if let Some((next, next_path)) = apply::step(
+            version.as_deref(),
+            &path,
+            input.rename(),
+            &step.edits,
+            worktree_cr,
+        ) {
+            if next.as_deref().is_some_and(too_large) {
+                return None;
+            }
+            version = next;
+            path = next_path;
+        }
+    }
+    version
+}
+
+/// The OID `build` gives a version (`Oid::for_blob` as a `BlobId`).
+pub(crate) fn version_id(hash: HashKind, content: &[u8]) -> BlobId {
+    blob_id(hash, content)
+}
+
 /// The sources after `diff`, applied by step `step`: unchanged lines keep
 /// theirs, new lines are the step's; base lines it removes are recorded in
 /// `fates`.

@@ -1,0 +1,12 @@
+---
+source: crates/review/src/engine/tests.rs
+expression: text(&rows)
+---
+Removed { old: 0, pair: Some(0), old_byte: Some(0), hunk: 0 }
+Added { new: 0, pair: Some(0), new_byte: Some(0), hunk: 0 }
+Context { old: 1, new: 1, old_byte: Some(2), new_byte: Some(2), hunk: Some(0) }
+Removed { old: 2, pair: Some(2), old_byte: Some(4), hunk: 1 }
+Added { new: 2, pair: Some(2), new_byte: Some(4), hunk: 1 }
+hunk 0..1 0..1 turns [] others 1
+hunk 2..3 2..3 turns [TurnRef { session: 0, ordinal: 1 }] others 0
+inline 2

@@ -1,0 +1,13 @@
+---
+source: crates/review/src/engine/tests.rs
+expression: "render(&d, id)"
+---
+base Reflog 070e48e2
+unclaimed 0 progress Progress { total: 2, seen: 0, changed_since_seen: 0 }
+file f.txt Modified Lines turns [(0, 1)] commands [] others [] drifted_hunks 0 seen Unseen
+  hunk lines true turns [(0, 1)] others [] drifted 0
+file h.txt Modified FileOnly turns [(0, 1)] commands ["fmt"] others [] drifted_hunks 0 seen Unseen
+  hunk lines false turns [] others [] drifted 0
+turn 0:1 t "prompt t" after_last_seen false
+  step f.txt calls ["a1"] +1 -1 Aligned All
+  command fmt files ["h.txt"]

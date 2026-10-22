@@ -1,0 +1,25 @@
+---
+source: crates/review/src/engine/tests.rs
+expression: "render(&d, id)"
+---
+base Reflog 38d14bf1
+unclaimed 0 progress Progress { total: 3, seen: 0, changed_since_seen: 0 }
+file f.txt Modified Lines turns [(0, 1)] commands [] others [] drifted_hunks 0 seen Unseen
+  hunk lines true turns [(0, 1)] others [] drifted 0
+  hunk lines true turns [(0, 1)] others [] drifted 0
+file g.txt Modified Lines turns [(1, 1)] commands [] others [] drifted_hunks 0 seen Unseen
+  hunk lines true turns [(1, 1)] others [] drifted 0
+file n.txt Added Lines turns [(2, 1)] commands [] others [] drifted_hunks 0 seen Unseen
+  hunk lines true turns [(2, 1)] others [] drifted 0
+turn 0:1 t1 "prompt t1" after_last_seen false
+  text
+  step f.txt calls ["e1", "e2"] +2 -2 Aligned All
+  tool r1 Read Some(Completed)
+  subagent p/agent-1 by sp1
+  tool w1 WebFetch Some(Completed)
+turn 1:1 ct "prompt ct" after_last_seen false
+  step g.txt calls ["k1"] +1 -1 Aligned All
+turn 0:2 t2 "prompt t2" after_last_seen false
+  injected
+turn 2:1 lt "prompt lt" after_last_seen false
+  step n.txt calls ["l1"] +1 -0 Aligned All
