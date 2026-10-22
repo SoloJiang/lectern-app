@@ -37,7 +37,7 @@ use lectern_cache::Cache;
 use lectern_executor::{Executor, Priority};
 use lectern_git::{Discovered, GitError};
 use lectern_logging::{Ctx, Value, debug, info, warn};
-use lectern_services::changes::{ChangePath, RefreshHint};
+use lectern_services::changes::{ChangeError, ChangePath, RefreshHint};
 use lectern_services::project::{ProjectKey, Projects, WorktreeKey};
 use lectern_services::review::{
     AnalysisState, Brief, Degraded, FileEntry, FileKey, FileRows, LoadState, Need, Progress,
@@ -444,15 +444,19 @@ impl Engine {
         let work = match prepared {
             Ok(work) => Arc::new(work),
             Err(error) => {
-                info!("review failed";
-                    id = id.0,
-                    round = seq,
-                    kind = diag::kind(&kind),
-                    error = diag::review_error(&error));
                 let mut events = Vec::new();
                 {
                     let mut state = lock(&self.state);
+                    // A round cancelled by `close` or a newer round is not a
+                    // failure: no record, no `Failed` snapshot.
                     if let Some(open) = current(&mut state, id, seq) {
+                        if !matches!(error, ReviewError::Changes(ChangeError::Cancelled)) {
+                            info!("review failed";
+                                id = id.0,
+                                round = seq,
+                                kind = diag::kind(&kind),
+                                error = diag::review_error(&error));
+                        }
                         let snapshot = ReviewSnapshot {
                             generation: open.snapshot.generation + 1,
                             state: LoadState::Failed(error),

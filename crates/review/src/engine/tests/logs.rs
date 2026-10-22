@@ -298,6 +298,43 @@ fn logs_unreadable_turns_are_a_warn() {
 }
 
 #[test]
+fn logs_round_closed_before_it_ran_is_not_a_failure() {
+    let log = testing::capture();
+    let fx = Fx::new();
+    let c1 = fx.commit(&[("a.txt", "one\n")], None, T - 1000);
+    fx.head("refs/heads/main", c1, &[("a.txt", "one\n")]);
+    fx.write("a.txt", "one\ntwo\n");
+    let session_id = "5e55e55e-4444-4444-8444-0000000000d4";
+    let sessions = fx.sessions(vec![session(
+        session_id,
+        &fx.root(),
+        ms(T),
+        vec![turn(
+            "t1",
+            ms(T + 10),
+            vec![edit(
+                "c1",
+                ms(T + 20),
+                vec![replace("a.txt", "one\n", "one\ntwo\n")],
+            )],
+        )],
+    )]);
+    let d = fx.driven(vec![sessions]);
+    // Closed before its round ran: the round is cancelled and no longer
+    // the review's.
+    let id = d.open(target(session_id));
+    d.close(id);
+    d.run();
+    assert!(d.snapshot(id).is_none());
+    assert!(
+        records(log, "review failed", session_id).is_empty(),
+        "{:#?}",
+        log.lines()
+    );
+    assert!(records(log, "review ready", session_id).is_empty());
+}
+
+#[test]
 fn logs_session_tag_is_the_uuid_or_a_hash() {
     assert_eq!(
         crate::diag::session_tag("5e55e55e-1111-4111-8111-0000000000a1"),

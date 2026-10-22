@@ -1084,7 +1084,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 压缩前发现别的写入者改过文件，只追加 | info | `annotation log changed by another writer; append only` | `path`、`expected`、`found`（预期与实际的长度） |
   | 打开审阅到第一份 `Ready` 快照 | info | `review ready` | `id`（`ReviewId`）、`round`、`base`（`BaseHow`：`recorded`、`reflog`、`before_log`、`current_head`、`spec`）、`files`、`took_us`（从 `open` 起），分项 `locate_us`（定位、句柄与 reflog）、`turns_us`、`fetch_us`、`claims_us`、`cutoffs_us`、`first_us`（第一个文件的归因） |
   | 后台完成（全部文件归因完、没有待补齐的部分），每次打开记一次 | info | `review settled` | `id`、`round`、`files`、`reprepared`（因声明或截止时刻补齐而重新准备的轮数）、`took_us`（从 `open` 起） |
-  | 一轮准备失败（快照为 `Failed`） | info | `review failed` | `id`、`round`、`kind`、`error`（`missing`、`not_in_open_project` 或改动集错误的种类） |
+  | 一轮准备失败（快照为 `Failed`；已被 `close` 或更新的一轮取消的不记） | info | `review failed` | `id`、`round`、`kind`、`error`（`missing`、`not_in_open_project` 或改动集错误的种类） |
   | 比较范围没有 merge-base，改为相对 HEAD | info | `no merge base; the range compares with head` | — |
 
   - 会话标识（`from` 和作用域的 `session`）：会话 ID 是 UUID 时取它的 16 个字节，否则（Claude Code 子 agent 的 `<父会话>/agent-<id>`）取 128 位哈希，与 `usage` 的算法相同，两个 crate 对同一会话的记录可以对照。来源 ID 不写出。
@@ -1107,7 +1107,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 - 关联 ID：本 crate 的每个 executor 任务（一轮的准备、后台补齐与归因、`Prepare`、标注日志的读取与追加）都在作用域里运行（`Engine::submit` 设置 `Ctx`）。`session` 是审阅对象会话的标识，从 `open` 起就有；`review` 是审阅对象的 64 位哈希，取 SHA-256（仓库的哈希 `h` 的 16 个字节、标注日志里 `target` 的编码）的前 8 字节，同一审阅对象跨运行相同，在一轮解析出仓库之后加上。标注日志按仓库共用，它的读取和追加任务带发起它的那个审阅的作用域。`task` 由 executor 填（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 5 项）。
 - 不记录：文件内容、diff 的行、改动步的正文（`load` 的结果）、prompt、agent 说明、命令文本、提交说明（reflog 的说明文字）、标注日志的行（坏行、认不出的记录照原样留在文件里，不进日志）；来源 ID，以及不是 UUID 的会话 ID 的原文（只记哈希）；worktree 的名字、分支名、`Prepare` 的键（含路径和会话里的位置）；`ChangeError::Io`、`SessionError::Io`、`GitError::Corrupt` 的消息文字和 `io::Error` 的消息（只记种类和系统错误码）；凭据和 token。工作区里的路径只在详细级别的 `file attributed` 里出现。
-- 金丝雀测试（`src/engine/tests/logs.rs`，`testing::capture()` 在 trace 级别）：`logs_hold_no_contents` 把金丝雀放进基准和工作区的文件内容、提交说明、审阅对象会话的 prompt、agent 说明和改动内容、另一个会话的 prompt 和命令、标注日志的坏行、认不出的记录和末尾不完整的一行，以及注入的追加错误的消息里；打开审阅、`Prepare` 展示行和 prompt 正文、标记已看（截掉残行、压缩）、追加失败、再次标记（重试成功），再打开会话外的改动和比较范围，确认 `annotation log recovered`、`annotation log compacted`、追加失败与重试几条记录的字段，以及它们和 `review ready` 都带 `review`、`session`，任何记录都不含金丝雀。`logs_tree_changes_failure_is_a_warn`：reflog 里一条记录的新提交不在仓库里，`tree_changes` 在交互任务和后台各失败一次，各记一条 warn，带两个 OID 和 `object_missing`。`logs_unreadable_turns_are_a_warn`：认不出格式的会话记一条 warn，`error` 为 `unrecognized`。`logs_session_tag_is_the_uuid_or_a_hash`：UUID 取原字节，子 agent 的 ID 取哈希。
+- 金丝雀测试（`src/engine/tests/logs.rs`，`testing::capture()` 在 trace 级别）：`logs_hold_no_contents` 把金丝雀放进基准和工作区的文件内容、提交说明、审阅对象会话的 prompt、agent 说明和改动内容、另一个会话的 prompt 和命令、标注日志的坏行、认不出的记录和末尾不完整的一行，以及注入的追加错误的消息里；打开审阅、`Prepare` 展示行和 prompt 正文、标记已看（截掉残行、压缩）、追加失败、再次标记（重试成功），再打开会话外的改动和比较范围，确认 `annotation log recovered`、`annotation log compacted`、追加失败与重试几条记录的字段，以及它们和 `review ready` 都带 `review`、`session`，任何记录都不含金丝雀。`logs_tree_changes_failure_is_a_warn`：reflog 里一条记录的新提交不在仓库里，`tree_changes` 在交互任务和后台各失败一次，各记一条 warn，带两个 OID 和 `object_missing`。`logs_unreadable_turns_are_a_warn`：认不出格式的会话记一条 warn，`error` 为 `unrecognized`。`logs_round_closed_before_it_ran_is_not_a_failure`：打开后一轮还没运行就 `close`，这一轮被取消，不记 `review failed`。`logs_session_tag_is_the_uuid_or_a_hash`：UUID 取原字节，子 agent 的 ID 取哈希。
 
 ## 性能
 
@@ -1344,8 +1344,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 在 Linux（x86_64，4 核，与其他 agent 的编译任务共用机器，Rust 1.97.0）上运行，基于合并了 #182、#183、#184 的 main。
 
-- `just check`、`just test`（不依赖 GPUI 的全部 crate，2218 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。`cargo test -p lectern-review --all-features --lib` 在同一个进程里跑全部 121 个测试也通过（捕获器由各测试共用，`logs_*` 按自己的会话 ID 或临时目录筛选记录）。
-- `just test -p lectern-review`：原有的 117 个测试照常通过，新增 `logs_hold_no_contents`、`logs_tree_changes_failure_is_a_warn`、`logs_unreadable_turns_are_a_warn`、`logs_session_tag_is_the_uuid_or_a_hash`。`logs_hold_no_contents` 里 `annotation log recovered` 的 `bad_lines` 为 1、`unknown` 为 1、`torn_bytes` 等于写进去的残行长度；压缩记录的 `after` 小于 `before`；追加失败记 `failures` 1、`records` 1，下一次标记的重试记 `records` 2；这四条和 `review ready` 都带 `review`（与 `diag::review_ctx` 算出的相同）和 `session`（会话的 UUID）。
+- `just check`、`just test`（不依赖 GPUI 的全部 crate，2218 个测试通过，跳过 7 个）、`just doctest`、`just deny`（advisories、bans、licenses、sources 都通过）全部通过。`cargo test -p lectern-review --all-features --lib` 在同一个进程里跑全部 122 个测试也通过（捕获器由各测试共用，`logs_*` 按自己的会话 ID 或临时目录筛选记录）。
+- `just test -p lectern-review`：原有的 117 个测试照常通过，新增 `logs_hold_no_contents`、`logs_tree_changes_failure_is_a_warn`、`logs_unreadable_turns_are_a_warn`、`logs_round_closed_before_it_ran_is_not_a_failure`（第一版在检查这一轮是否仍是当前一轮之前就记 `review failed`，被 `close` 取消的一轮记成 `error` 为 `cancelled` 的失败，自审时改正，这个测试在改正之前失败）、`logs_session_tag_is_the_uuid_or_a_hash`。`logs_hold_no_contents` 里 `annotation log recovered` 的 `bad_lines` 为 1、`unknown` 为 1、`torn_bytes` 等于写进去的残行长度；压缩记录的 `after` 小于 `before`；追加失败记 `failures` 1、`records` 1，下一次标记的重试记 `records` 2；这四条和 `review ready` 都带 `review`（与 `diag::review_ctx` 算出的相同）和 `session`（会话的 UUID）。
 - `rg 'eprintln!|util::log' crates/review/src --glob '!**/tests*'` 没有结果（本 crate 原来就没有 stderr 输出）。Cargo.lock 只在 `lectern-review` 的依赖里多了 `lectern-logging`。
 - `just bench --measure review/`，改动前是 origin/main 的同一个提交（另一个分离的 worktree），依次运行改动前、改动后、改动前、改动后，之后对三项再各补一对：
 
@@ -1421,7 +1421,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **本次运行的声明留在内存里**：审阅对象自己的和后台为其他会话派生的声明按会话键保存在引擎里（`last_activity` 相同才用），`tail_pending` 的会话派生的声明只在内存里用、不写 `review.claims`。截止时刻表按 worktree 保存，记录或改动集的路径变了就从 `review.tree_changes` 重建，不按 `RepoBatch::reflog` 增量更新（随第 4 步的监听）。关闭审阅时释放没有打开的审阅用到的 worktree 的表和 git 句柄、会话的声明，没有打开的审阅时清空版本 LRU 和内存里的祖先判断。
 - **`ReviewError` 的映射**：会话不在列表里、`Place::Missing`、worktree 不在项目快照里或已 prunable、`turns` 返回 `NotFound` 为 `Missing`；未归位或项目没打开为 `NotInOpenProject`；审阅对象自己的 `turns` 返回 `Unrecognized` 或 `Io` 时都按认不出格式处理（`Degraded::UnrecognizedSession`）。
 - **测试支持多于「本 crate 的公开项」**：`testing` 另有 `write_reflog`（写 `logs/HEAD`）、`Driven::with_budget`（把 `Interactive` 上计算 `tree_changes` 的 5 ms 预算设为别的值，测试用 0）、`Driven::touch_cache`、`Driven::attribute_uncached`，以及 bench 的夹具 `SessionFixture`、`MarkSeenFixture`。`FakeSessions` 的脚本在测试里用 `serde_json::json!` 拼出（格式写在 `src/testing/fake.rs`），没有放进 `tests/fixtures/sessions/`：会话的 cwd 是 `TestRepo` 的临时目录，每次不同。
-- **没有日志调用**：ADR 0046 和 logging 设计已经合并，`lectern-logging` crate 还没有，要记的事件和关联 ID 写在「日志与诊断」。日志随后接入，见下一节。
+- **第 3 步没有日志调用**：那时 `lectern-logging` crate 还没有合并，「日志与诊断」只写了接入的计划。日志已经接入，实现与那份计划的差别见下一节「日志接入」。
 
 ### 日志接入
 
