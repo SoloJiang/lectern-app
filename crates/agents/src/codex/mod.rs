@@ -19,9 +19,12 @@ use lectern_services::session::{
 };
 use serde::Deserialize;
 
+use lectern_logging::Value;
+
 use crate::codec;
+use crate::diag::{self, FirstSkip, Skip, Stage};
 use crate::index::IndexBuilder;
-use crate::lines::{HEAD, Lines, Next, PREFIX};
+use crate::lines::{HEAD, Lines, Next, PREFIX, oversized_len};
 use crate::read::{Summarized, io_error};
 use crate::stats::ParseStats;
 
@@ -263,10 +266,25 @@ impl Codex {
                 Ok((Body::File(f, Some(guard)), false))
             }
             Err(CopyError::Source(e)) => Err(io_error(e)),
-            Err(CopyError::Copy) => Ok((
+            Err(CopyError::NoDir) => Ok((
                 Body::Stream(Box::new(decoded::decoder(&file.path).map_err(io_error)?)),
                 true,
             )),
+            Err(CopyError::Copy(step, e)) => {
+                {
+                    let _scope = lectern_logging::scope(diag::session_ctx(&file.key.id));
+                    lectern_logging::warn!(
+                        "decoded copy not written; decoding from the start";
+                        path = Value::path(&file.path),
+                        step = step,
+                        io = Value::io(&e),
+                    );
+                }
+                Ok((
+                    Body::Stream(Box::new(decoded::decoder(&file.path).map_err(io_error)?)),
+                    true,
+                ))
+            }
         }
     }
 
@@ -324,15 +342,30 @@ impl Codex {
             first_prompt: None,
             meta: None,
             any_cwd: None,
+            skip: FirstSkip::default(),
+            cur: (0, 0),
         };
         let mut at_end = true;
         loop {
             match lines.next().map_err(io_error)? {
                 Next::End => break,
-                Next::Oversized(_) => parse.stats.oversized_lines += 1,
+                Next::Oversized(pos) => {
+                    parse.stats.oversized_lines += 1;
+                    parse
+                        .skip
+                        .note(Some(pos), Some(oversized_len(&lines, pos)), Skip::Oversized);
+                }
                 Next::Line(pos) => {
                     if !parse.state.header && pos >= HEAD {
                         // 开头 256 KB 里开始的行里没有会话头：认不出格式，交出空的一批。
+                        diag::parsed(
+                            Stage::Read,
+                            &file.key.id,
+                            &file.path,
+                            offset,
+                            parse.skip,
+                            &parse.stats,
+                        );
                         return Ok(Parsed {
                             batch: Batch {
                                 reset,
@@ -360,6 +393,14 @@ impl Codex {
         {
             index.mark_partial();
         }
+        diag::parsed(
+            Stage::Read,
+            &file.key.id,
+            &file.path,
+            offset,
+            parse.skip,
+            &parse.stats,
+        );
         let cursor = if end == 0 {
             Cursor::START
         } else {

@@ -22,6 +22,8 @@ lectern-services = { path = "../services" }
 lectern-executor = { path = "../executor" }
 lectern-fs-watch = { path = "../fs_watch" }
 lectern-cache = { path = "../cache" }
+# Runtime logging (docs/design/agents.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
 serde.workspace = true
 # `raw_value`: tool inputs are kept as borrowed raw JSON and only parsed for
 # the tools the adapter classifies, and `load` returns them verbatim.
@@ -35,6 +37,8 @@ tempfile.workspace = true
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 lectern-executor = { path = "../executor", features = ["test-support"] }
 lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
+# testing::capture for the logs_* tests (docs/design/agents.md「日志与诊断」).
+lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [lints]
 workspace = true

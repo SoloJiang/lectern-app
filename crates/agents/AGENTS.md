@@ -2,10 +2,10 @@
 
 Claude Code / Codex 会话发现与解析，按 cwd 归位到项目和 worktree；P3 起包含 ACP 客户端。
 
-- 层：领域层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：两个插件 "session-claude-code"、"session-codex"（`plugins`）。只依赖 kernel 层（`kernel`、`services`）和非插件的库 crate（`executor`、`fs_watch`、`cache`）；`project`、`usage`、`review` 是插件，只经 `services` 的接口往来。不得直接或间接依赖 GPUI（架构规则 2）。
+- 层：领域层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：两个插件 "session-claude-code"、"session-codex"（`plugins`）。只依赖 kernel 层（`kernel`、`services`、`logging`）和非插件的库 crate（`executor`、`fs_watch`、`cache`）；`project`、`usage`、`review` 是插件，只经 `services` 的接口往来。不得直接或间接依赖 GPUI（架构规则 2）。
 - 设计文档：[docs/design/agents.md](../../docs/design/agents.md)。P1 范围是会话发现与解析；Analyze 的机制（下面「边界」里的命令行、凭据转发端点、沙箱与监护）另开 issue，设计写进该文档的后续修订。
 - issue：[#13](https://github.com/SoloJiang/lectern-app/issues/13)、[#23](https://github.com/SoloJiang/lectern-app/issues/23)、[#97](https://github.com/SoloJiang/lectern-app/issues/97)（Codex 子 agent 关联派出它的调用，设计见 agents 设计「Codex 子 agent 与派出它的调用」）
-- ADR：[0012](../../docs/adr/0012.md)、[0014](../../docs/adr/0014.md)、[0019](../../docs/adr/0019.md)、[0020](../../docs/adr/0020.md)、[0026](../../docs/adr/0026.md)
+- ADR：[0012](../../docs/adr/0012.md)、[0014](../../docs/adr/0014.md)、[0019](../../docs/adr/0019.md)、[0020](../../docs/adr/0020.md)、[0026](../../docs/adr/0026.md)、[0046](../../docs/adr/0046.md)
 
 ## 边界
 
@@ -19,6 +19,7 @@ Claude Code / Codex 会话发现与解析，按 cwd 归位到项目和 worktree�
 - 下面提到的 macOS 系统调用（`posix_spawn`、`PRIO_DARWIN_BG`、`setrlimit`、`proc_*`、`sandbox_check`、kqueue、内存压力、`hdiutil`）都由 `platform` 实现，本 crate 只调用它暴露的与平台无关的进程监护和磁盘映像接口（架构规则 6，[ADR 0019](../../docs/adr/0019.md)「影响」）。
 - 命令行以后台优先级（`PRIO_DARWIN_BG`）运行，启动时用 `RLIMIT_NPROC` 把进程数上限设为当前用户进程数 + 64（内核在 fork 时拒绝；它按用户总数计，用户其他进程退出会放出余量，是已知限制，超出的成员由统计在 500 ms 内终止，清理不需要新建进程），每个进程用 `setrlimit` 限制 CPU 时间（macOS 没有不需要特权的内存配额，内存靠统计和系统内存压力限制：增长快时改为每 100 ms 统计，内存压力进入警告级别时立即终止全部分析）；全局同时最多 2 次分析，agent 只能写自己的 1 GB 工作映像（写满时 `ENOSPC`），每次开始分析前要求宿主卷剩余空间不少于所有已挂载映像还能增长的量（容量上限减当前实际占用）之和、新工作映像的 1 GB 与 2 GB 相加，不满足就排队，进行中低于 2 GB 全部终止；按沙箱识别这次分析的全部进程（`platform` 用 `sandbox_check` 检查本次临时目录与哨兵路径的权限，换进程组、`setsid` 或 double fork 都改不掉），统计它们的进程数、常驻内存和 CPU 时间合计（只对存活成员求和，每个成员自己的加上已回收子孙的 `ri_child_*_time`，每个进程只计一次），超限、超时、取消或结束时全部终止：先反复扫描并 `SIGSTOP` 直到没有还在运行的成员，再全部 `SIGKILL`。命令行的标准输出和标准错误边读边计数，单条 JSON 行上限 1 MB，合计 64 MB，超过时同样终止。结果显示前比较当前指纹和会话修订号，计算前后各读一次 worktree 修订号（`fs_watch`，先让后端同步 flush），变了就重算，最多 3 次；显示后有新变化同样标为「基于较早的版本」；发布时带上检查时的修订号，在状态更新里比较仍相同才标为当前。启动命令行用 `posix_spawn` 加 `POSIX_SPAWN_CLOEXEC_DEFAULT`，只继承 0、1、2 三条管道；请求模板不含任何在模型服务端执行的工具（网页搜索、网页抓取、代码执行、文件检索、远程 MCP 与连接器），转发端点出现即拒绝；每次分析的合计上限（连接尝试 256 次、请求 64 个、请求字节 64 MB、每秒 4 个新连接）超出即关闭端点并终止分析；取消、超时或 agent 断开时中止上游请求并关闭与模型服务的连接；取密钥的辅助命令经监护进程启动，限时 30 秒、输出各 64 KB、超限终止全部子孙进程；出站请求头只由适配器和模型服务配置生成，认证、`Host`、组织与项目、API 版本和 beta 一类的头由 Lectern 覆盖写入，来访的模板外请求头和 hop-by-hop 头使请求被拒绝，命令行里也显式关闭（Codex 的网页搜索、apps、远程插件，Claude Code 的 WebSearch、WebFetch）。分析结果的缓存键包含分析流程的版本（提示词、校验、纠错、对账、启动参数、上限）。
 - 测试启动命令行的代码时，在 PATH 最前面放一个假命令，记录参数、标准输入和工作目录，按夹具回放 JSON 行输出。
+- 日志经 `lectern-logging` 的宏（[ADR 0046](../../docs/adr/0046.md)），不启用 `sink`；字段值的写法集中在 `src/diag.rs`，错误只记种类，路径只经 `Value::path`。与一个会话有关的记录在 `session` 作用域里写出（会话 ID 是 UUID 时取它的字节，否则取 128 位哈希，与 `usage`、`review` 相同）。会话 JSONL 的行内容、提示词与回复、工具的输入输出、命令文本、记录类型名与工具名、错误消息、令牌与凭据不进日志；解析失败只记偏移、长度、计数和种类。一遍解析只记一条（第一条被跳过的行），不按行记；解析的热路径在日志关闭时不分配内存。命令行的启动与退出、凭据转发端点的请求随 Analyze 实现时接入（设计文档「日志与诊断」）。
 
 ## 测试
 
@@ -33,4 +34,5 @@ just test -p lectern-agents
 - 真实数据放 `tests/fixtures/`，先脱敏；格式随上游版本变化的，每个版本留一份样本。脱敏用 `src/redact.rs` 的字段白名单工具（被忽略的测试 `redact_file_from_env`），生成后逐行看过再提交。
 - 现在的 `tests/fixtures/claude-code/2.1.302/` 和 `tests/fixtures/codex/0.140.0-*/` 都是合成数据（见各自的 `SOURCE.md`），不要从本机的 `~/.claude`、`~/.codex` 等用户目录复制任何内容进仓库。超长行、坏行、没写完的行和 `.jsonl.zst` 在测试的临时目录里生成，不提交大文件。
 - 发现、监听、归位与插件的测试在 `src/source/tests/`（`discover_*`、`watch_*`、`place_*`、`index_cache_*`、`complete_*`、`plugin_*`、`source_*`，不进内存 LRU 的读取 `turns_unretained_*`（review 设计前置条件 G），以及 Codex 子 agent 关联派出它的调用的 `spawn_link_*`：活跃会话的 10 分钟用 `Harness::start_at` / `set_codex_clock` 拨动 Codex 来源的时钟，适配器读正文的次数看 `Engine::calls`），经插件驱动：真实的 `Kernel` 加 `Executor::manual()`、`fs_watch` 的 `testing::FakeBackend` 与手动驱动（`support.rs` 的 `Harness::emit` 注入事件并推进假时钟，不用真实的 FSEvents）、临时目录里的 `cache`、模拟的 `Projects`（`FakeProjects`）。会话目录在临时目录里，不读本机的会话目录。
+- 日志的测试（`src/source/tests/logs.rs`，`logs_*`）用 `lectern-logging` 的 `testing::capture()` 在 trace 级别检查记录；金丝雀放在会话 JSONL 的坏行与记录类型名、提示词、占位令牌和形似真实的令牌里，`assert_absent` 确认它们不进日志。解压副本写失败用一个普通文件占住副本目录（以 root 运行时同样有效）。`cargo test` 在同一进程里共用捕获器，按各自的会话 ID 筛选记录。
 - `test-support` feature 提供 `testing::parse_file`、`testing::source`（不经过插件、同步发现的会话来源）、`testing::source_with_calls`（另交出适配器读正文的调用次数 `AdapterCalls`）和 bench 的合成会话（`synthetic_session`、`append_chunk`、`synthetic_rollout`、`compress_zst`、`synthetic_projects`、`synthetic_long_session`、`synthetic_rollouts`，fixtures 用 `include_bytes!` 嵌入），供 `lectern-bench` 的 `agents/*` 基准使用：`just bench agents/`（Linux 上是冒烟运行，`just bench --measure agents/` 采样并打印实测值）。

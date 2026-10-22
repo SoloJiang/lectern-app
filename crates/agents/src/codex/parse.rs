@@ -17,6 +17,7 @@ use super::format::{
 };
 use super::tools;
 use crate::codec::{Reader, Writer};
+use crate::diag::{FirstSkip, Skip};
 use crate::index::{IndexBuilder, preview};
 use crate::stats::ParseStats;
 use crate::time;
@@ -413,6 +414,10 @@ pub(super) struct Parse<'s> {
     pub first_prompt: Option<Arc<str>>,
     pub meta: Option<Meta>,
     pub any_cwd: Option<Arc<Path>>,
+    /// 这一遍里第一条被跳过的行（「日志与诊断」）。
+    pub skip: FirstSkip,
+    /// 正在解析的行：偏移与长度。
+    pub cur: (u64, u64),
 }
 
 /// 会话头里摘要要用、解析器状态里没有的字段。
@@ -429,7 +434,19 @@ pub(super) struct Meta {
 
 impl Parse<'_> {
     fn bad(&mut self) {
+        self.bad_as(Skip::Missing);
+    }
+
+    fn bad_as(&mut self, kind: Skip) {
         self.stats.bad_lines += 1;
+        self.skip.note(Some(self.cur.0), Some(self.cur.1), kind);
+    }
+
+    /// 不认识的记录类型：计数，记下这一行。
+    fn unknown(&mut self, name: &str) {
+        self.stats.unknown_type(name);
+        self.skip
+            .note(Some(self.cur.0), Some(self.cur.1), Skip::UnknownType);
     }
 
     fn side_turn(&self, inherited: bool) -> Option<TurnId> {
@@ -559,8 +576,10 @@ impl Parse<'_> {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return;
         }
-        let Ok(line) = serde_json::from_slice::<Line>(bytes) else {
-            return self.bad();
+        self.cur = (pos, bytes.len() as u64);
+        let line = match serde_json::from_slice::<Line>(bytes) {
+            Ok(line) => line,
+            Err(e) => return self.bad_as(Skip::of_json(&e)),
         };
         let Some(kind) = line.kind.as_deref() else {
             return self.bad();
@@ -577,7 +596,7 @@ impl Parse<'_> {
         let used = USED.contains(&kind);
         if !used {
             if !is_known_ignored(kind) {
-                self.stats.unknown_type(kind);
+                self.unknown(kind);
             }
             if at.is_some() {
                 self.state.last_at = at;
@@ -595,9 +614,13 @@ impl Parse<'_> {
             }
             return;
         }
-        if matches!(line.payload, Payload::Skipped) || !self.state.header {
-            // 没有 `payload`，或者在会话头之前（没有 cwd 和线程，无法交出）。
+        if matches!(line.payload, Payload::Skipped) {
+            // 没有 `payload`。
             return self.bad();
+        }
+        if !self.state.header {
+            // 在会话头之前：没有 cwd 和线程，无法交出。
+            return self.bad_as(Skip::NoHeader);
         }
         let Some(at) = at else {
             return self.bad();
@@ -745,15 +768,14 @@ impl Parse<'_> {
                 }
                 Item::Other(kind) => {
                     if !KNOWN_ITEMS.contains(&&**kind) {
-                        self.stats
-                            .unknown_type(&format!("event_msg/item_completed/{kind}"));
+                        self.unknown(&format!("event_msg/item_completed/{kind}"));
                     }
                 }
                 Item::Untagged => self.bad(),
             },
             Event::Other(kind) => {
                 if !KNOWN_EVENTS.contains(&&**kind) {
-                    self.stats.unknown_type(&format!("event_msg/{kind}"));
+                    self.unknown(&format!("event_msg/{kind}"));
                 }
             }
             Event::Untagged => self.bad(),
@@ -955,7 +977,7 @@ impl Parse<'_> {
             }
             Response::Other(kind) => {
                 if !KNOWN_RESPONSES.contains(&&**kind) {
-                    self.stats.unknown_type(&format!("response_item/{kind}"));
+                    self.unknown(&format!("response_item/{kind}"));
                 }
             }
             Response::Untagged => self.bad(),

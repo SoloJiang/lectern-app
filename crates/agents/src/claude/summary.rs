@@ -13,8 +13,9 @@ use lectern_services::session::{
 use super::format::{AgentMeta, Line};
 use super::parse::{UserKind, assistant_leaves_open, text_head, user_kind, user_leaves_open};
 use super::{Owner, SessionFile, io_error};
+use crate::diag::{self, FirstSkip, Skip, Stage};
 use crate::index::preview;
-use crate::lines::{HEAD, Lines, Next};
+use crate::lines::{HEAD, Lines, Next, oversized_len};
 use crate::stats::ParseStats;
 use crate::tail::{TailEnd, scan_back};
 use crate::time;
@@ -41,6 +42,7 @@ struct Head {
     any_title: Option<Arc<str>>,
     first_user_seen: bool,
     stats: ParseStats,
+    skip: FirstSkip,
 }
 
 impl Head {
@@ -48,17 +50,21 @@ impl Head {
         self.own.is_some() && self.own_title.is_some()
     }
 
-    fn line(&mut self, owner: &Owner, bytes: &[u8]) {
+    fn bad(&mut self, pos: u64, bytes: &[u8], kind: Skip) {
+        self.stats.bad_lines += 1;
+        self.skip.note(Some(pos), Some(bytes.len() as u64), kind);
+    }
+
+    fn line(&mut self, owner: &Owner, pos: u64, bytes: &[u8]) {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return;
         }
-        let Ok(line) = serde_json::from_slice::<Line>(bytes) else {
-            self.stats.bad_lines += 1;
-            return;
+        let line = match serde_json::from_slice::<Line>(bytes) {
+            Ok(line) => line,
+            Err(e) => return self.bad(pos, bytes, Skip::of_json(&e)),
         };
         let Some(kind) = line.kind.as_deref() else {
-            self.stats.bad_lines += 1;
-            return;
+            return self.bad(pos, bytes, Skip::Missing);
         };
         let at = line.timestamp.as_deref().and_then(time::parse);
         let cwd: Option<Arc<Path>> = line.cwd.as_deref().map(|c| Path::new(c).into());
@@ -89,13 +95,17 @@ impl Head {
             other => {
                 if !super::parse::is_known_ignored(other) {
                     self.stats.unknown_type(other);
+                    self.skip
+                        .note(Some(pos), Some(bytes.len() as u64), Skip::UnknownType);
                 }
                 return;
             }
         }
-        if line.message.is_none() || at.is_none() || self.header.is_none() {
-            self.stats.bad_lines += 1;
-            return;
+        if self.header.is_none() {
+            return self.bad(pos, bytes, Skip::NoHeader);
+        }
+        if line.message.is_none() || at.is_none() {
+            return self.bad(pos, bytes, Skip::Missing);
         }
         let inherited = owner.inherits(line.session_id.as_deref(), line.agent_id.as_deref());
         if !inherited && self.own.is_none() {
@@ -193,8 +203,12 @@ pub(super) fn summarize(file: &SessionFile) -> Result<(SessionSummary, ParseStat
         loop {
             match lines.next().map_err(io_error)? {
                 Next::End => break,
-                Next::Oversized(pos) if pos < HEAD => head.stats.oversized_lines += 1,
-                Next::Line(pos) if pos < HEAD => head.line(&file.owner, lines.line()),
+                Next::Oversized(pos) if pos < HEAD => {
+                    head.stats.oversized_lines += 1;
+                    head.skip
+                        .note(Some(pos), Some(oversized_len(&lines, pos)), Skip::Oversized);
+                }
+                Next::Line(pos) if pos < HEAD => head.line(&file.owner, pos, lines.line()),
                 Next::Oversized(_) | Next::Line(_) => break,
             }
             if head.done() || lines.pos() >= HEAD {
@@ -205,9 +219,12 @@ pub(super) fn summarize(file: &SessionFile) -> Result<(SessionSummary, ParseStat
     f.seek(SeekFrom::Start(0)).map_err(io_error)?;
     let tail = tail(&mut f, len)?;
     let mut stats = head.stats;
+    let mut skip = head.skip;
     if tail.oversized {
         stats.oversized_lines += 1;
+        skip.note(None, None, Skip::Oversized);
     }
+    diag::parsed(Stage::Summary, &file.key.id, &file.path, 0, skip, &stats);
 
     let Some(any_cwd) = head.any_cwd else {
         return Err(SessionError::Unrecognized);

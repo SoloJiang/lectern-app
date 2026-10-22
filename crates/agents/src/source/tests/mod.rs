@@ -8,6 +8,7 @@ use std::path::Path;
 mod complete;
 mod discover;
 mod index_cache;
+mod logs;
 mod place;
 mod plugin;
 mod spawn_link;

@@ -122,6 +122,11 @@ impl<R: Read> Lines<R> {
     }
 }
 
+/// 刚交出的 [`Next::Oversized`]（从 `start` 开始）的长度，不含换行（日志用）。
+pub(crate) fn oversized_len<R>(lines: &Lines<R>, start: u64) -> u64 {
+    lines.pos.saturating_sub(start).saturating_sub(1)
+}
+
 /// 最近消费的最多 [`PREFIX`] 字节。
 #[derive(Default)]
 struct Tail(Vec<u8>);

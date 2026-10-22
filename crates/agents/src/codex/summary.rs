@@ -17,8 +17,9 @@ use lectern_services::session::{
 use super::format::{Event, Line, Payload};
 use super::parse::{Boundary, Parse, State};
 use super::{Codex, SessionFile, decoded};
+use crate::diag::{self, FirstSkip, Skip, Stage};
 use crate::index::IndexBuilder;
-use crate::lines::{HEAD, Lines, Next};
+use crate::lines::{HEAD, Lines, Next, oversized_len};
 use crate::read::Summarized;
 use crate::read::io_error;
 use crate::stats::ParseStats;
@@ -79,15 +80,19 @@ fn tail_back(f: &mut File, len: u64) -> Result<Tail, SessionError> {
 }
 
 /// 压缩文件：整份流式解码，从前往后取最后的时间戳和最后一条决定 `open_turn` 的记录。
-fn tail_forward(reader: impl Read) -> Result<(Tail, u32), SessionError> {
+fn tail_forward(reader: impl Read) -> Result<(Tail, u32, FirstSkip), SessionError> {
     let mut lines = Lines::new(reader, 0, b"");
     let mut last_at = None;
     let mut open = None;
     let mut oversized = 0u32;
+    let mut skip = FirstSkip::default();
     loop {
         match lines.next().map_err(io_error)? {
             Next::End => break,
-            Next::Oversized(_) => oversized += 1,
+            Next::Oversized(pos) => {
+                oversized += 1;
+                skip.note(Some(pos), Some(oversized_len(&lines, pos)), Skip::Oversized);
+            }
             Next::Line(_) => {
                 let (at, decisive) = tail_fields(lines.line());
                 if at.is_some() {
@@ -106,6 +111,7 @@ fn tail_forward(reader: impl Read) -> Result<(Tail, u32), SessionError> {
             oversized: false,
         },
         oversized,
+        skip,
     ))
 }
 
@@ -118,6 +124,7 @@ struct Head {
     meta: Option<super::parse::Meta>,
     any_cwd: Option<Arc<std::path::Path>>,
     first_at: Option<Timestamp>,
+    skip: FirstSkip,
 }
 
 fn head(codex: &Codex, reader: impl Read, scan_sources: bool) -> Result<Head, SessionError> {
@@ -141,13 +148,20 @@ fn head(codex: &Codex, reader: impl Read, scan_sources: bool) -> Result<Head, Se
         first_prompt: None,
         meta: None,
         any_cwd: None,
+        skip: FirstSkip::default(),
+        cur: (0, 0),
     };
     let mut lines = Lines::new(reader, 0, b"");
     let mut first_at = None;
     loop {
         match lines.next().map_err(io_error)? {
             Next::End => break,
-            Next::Oversized(pos) if pos < HEAD => parse.stats.oversized_lines += 1,
+            Next::Oversized(pos) if pos < HEAD => {
+                parse.stats.oversized_lines += 1;
+                parse
+                    .skip
+                    .note(Some(pos), Some(oversized_len(&lines, pos)), Skip::Oversized);
+            }
             Next::Line(pos) if pos < HEAD => {
                 parse.line(pos, lines.line());
                 if first_at.is_none() {
@@ -178,6 +192,7 @@ fn head(codex: &Codex, reader: impl Read, scan_sources: bool) -> Result<Head, Se
         meta: parse.meta,
         any_cwd: parse.any_cwd,
         first_at,
+        skip: parse.skip,
     })
 }
 
@@ -203,9 +218,11 @@ pub(super) fn summarize(
             scan_sources,
         )?;
         if complete {
-            let (tail, oversized) = tail_forward(decoded::decoder(&file.path).map_err(io_error)?)?;
+            let (tail, oversized, skip) =
+                tail_forward(decoded::decoder(&file.path).map_err(io_error)?)?;
             let mut head = head;
             head.stats.oversized_lines += oversized;
+            head.skip = head.skip.or(skip);
             (head, tail, false)
         } else {
             let tail = Tail {
@@ -222,9 +239,17 @@ pub(super) fn summarize(
         (head, tail, false)
     };
     let mut stats = head.stats;
+    let mut skip = head.skip;
     if tail.oversized {
         stats.oversized_lines += 1;
+        skip.note(None, None, Skip::Oversized);
     }
+    let stage = if complete {
+        Stage::Complete
+    } else {
+        Stage::Summary
+    };
+    diag::parsed(stage, &file.key.id, &file.path, 0, skip, &stats);
 
     let Some(any_cwd) = head.meta.as_ref().map(|m| m.cwd.clone()).or(head.any_cwd) else {
         return Err(SessionError::Unrecognized);

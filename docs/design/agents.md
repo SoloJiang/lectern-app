@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现。见「验收」与「实际验证」。
+状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见「日志与诊断」）已实现，命令行与凭据转发端点的记录随 Analyze 实现。见「验收」与「实际验证」。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -37,6 +37,7 @@
 | `lectern-executor` | 后台任务（发现、解析、归位都在 `Background` 优先级） | UI 线程不做 IO |
 | `lectern-fs-watch` | 会话目录的递归监听（不按 git index 过滤，见「对其他 crate 的要求」） | macOS 后端在 `platform` |
 | `lectern-cache` | 轮次索引的持久化（ADR 0026） | 打开大会话时不重新解析 |
+| `lectern-logging` | 运行日志（「日志与诊断」）；测试用它的 `test-support` feature 捕获记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)） |
 | `serde` 1（`derive`）+ `serde_json` 1 | 每行反序列化到只声明用到字段、字符串借用原行的结构 | MIT / Apache-2.0；ADR 0014 规定用 serde 自行解析；不先转成 `serde_json::Value`（ADR 0026） |
 | `ruzstd` | 解压 Codex 的 `.jsonl.zst` | MIT，纯 Rust 流式解码器，不需要 C 工具链（ADR 0026） |
 
@@ -887,6 +888,40 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 文件被截断或改写：游标的前缀副本对不上，`Batch::reset` 为 true，从头读。
 - 文件被删除：从列表移除，`SessionsChanged::removed` 带上它；`read` / `turns` 返回 `NotFound`。
 
+## 日志与诊断
+
+经 `lectern-logging` 的宏记录（[ADR 0046](../adr/0046.md)、[logging 设计](logging.md)），target 是 `agents`，不启用 `sink`。默认过滤记到 info；详细级别是用户开启的 debug。记录在调用线程（executor 的后台任务，或调用 `read` / `turns` / `load` 的线程）上编码进日志的内存缓冲，不做 IO。字段值的写法集中在 `src/diag.rs`：错误只记种类，路径只经 `Value::path`（主目录写成 `~`）。
+
+- 默认记录：
+
+  | 事件 | 级别 | `msg` | 字段 |
+  |---|---|---|---|
+  | 一遍解析里有行被跳过（坏行、不认识的类型、超长行；每遍一条，不是每行一条） | warn | `session lines skipped` | `stage`、`path`（会话文件）、`from`（这一遍开始的字节偏移）、`pos`、`line_len`、`error`、`bad_lines`、`oversized_lines`、`unknown_types`（这一遍里类型不认识的行数）、`unknown_tools`（归入 `Other` 的工具调用次数） |
+  | 压缩会话的解压副本写不出来，退回从头解码（「压缩会话的随机读取」） | warn | `decoded copy not written; decoding from the start` | `path`（`.jsonl.zst`）、`step`（`create_dir`、`create`、`write`、`flush`、`permissions`、`rename`）、`io` |
+  | 会话目录读不了，其余目录照常发现 | warn | `session directory unreadable; the others are listed` | `path`（这个目录）、`io` |
+  | 摘要读失败，这个会话不列出 | warn | `session summary failed; not listed` | `path`、`error`（`SessionError` 的种类：`io`、`too_large`） |
+  | 第一次发布列表 | info | `sessions discovered` | `agent`（`claude_code`、`codex`）、`sessions`、`bad_lines`、`oversized_lines`、`unknown_kinds`（不认识的记录类型的种数）、`unreadable_dirs`、`took_us`（从插件的 `started` 起） |
+
+  - `stage`：`read`（`read`、`turns` 和整份解析，从游标读到末尾或 `max_bytes`）、`summary`（发现阶段读开头 256 KB 与末尾）、`complete`（压缩会话整份流式解码，补齐末尾字段）。
+  - `pos`、`line_len`：这一遍里第一条被跳过的行的字节偏移和长度（不含换行）。摘要从末尾向前扫描时遇到的超长记录没有偏移，两者为 null。
+  - `error`：那一行的原因。`syntax`、`data`、`eof` 是 `serde_json` 的错误类别（不是合法的 JSON、形状不对、在行尾之前结束）；`missing_field`（缺少 `type`、时间戳、消息、`payload` 等必需字段）；`before_header`（在会话头之前，没有 cwd 和会话 ID）；`oversized`（超过 16 MB）；`unknown_type`（不认识的记录类型）。
+  - 同一个调用点每 10 秒最多写 20 条（[logging 设计「限流」](logging.md#限流)）：发现阶段很多会话都有坏行，或者副本目录一直写不了时，省略的条数记在下一条的 `n` 里。
+- 详细级别（debug）：
+
+  | 事件 | `msg` | 字段 |
+  |---|---|---|
+  | 一遍解析没有跳过的行，但有表外的工具名 | `session tools unclassified` | `stage`、`path`、`from`、`tools`（种数）、`calls`（调用次数） |
+  | 第一次之后的每次发布 | `sessions published` | `agent`、`generation`、`sessions`、`changed`、`removed` |
+  | 读不到 cwd，或者文件在这期间被删除，不列出 | `session not listed` | `path`、`error`（`unrecognized`、`not_found`） |
+- 关联 ID：与一个会话有关的记录（解析、副本、摘要三类）在 `session` 作用域里写出：会话 ID 是 UUID 时取它的 16 个字节，否则（Claude Code 子 agent 的 `<父会话>/agent-<id>`）取 128 位哈希，算法与 `usage`、`review` 相同（`diag::session_tag`），三个 crate 对同一会话的记录可以对照。`session` 是作用域的键，不作字段。`plugin`、`act`、`task` 由 kernel 和 executor 在任务外设置，本 crate 不另设。来源 ID 是运行时字符串，不写出，用 `agent` 区分两个来源。
+- 不记录：会话 JSONL 的行内容；提示词、agent 的说明与回复、工具的输入与输出、命令文本、改动内容；从会话文件读出的记录类型名、工具名、模型名、分支名和 cwd；`serde_json` 的错误消息（会引用行里的片段）和 `SessionError::Io` 附带的文字（格式化出的错误消息）。用位置、长度、计数和种类代替。
+- 命令行与凭据转发端点：本 crate 现在不启动外部命令行，也没有凭据转发端点（Analyze 另开 issue，见「范围」）。它们实现时按 logging 设计第 7 项接入，写进本节：
+  - 命令行（Analyze 的 agent、查询登录 shell 的 `PATH`、取密钥的辅助命令）的启动与退出：info，记程序名（不含目录）、参数个数、工作目录、pid、退出状态；不记参数、标准输入输出和环境变量。
+  - 凭据转发端点的每个请求：按 [logging 设计「隐私」](logging.md#隐私)的网络请求规则，记方法、`Value::url` 处理后的 URL、状态码、请求与响应的字节数、耗时；不记请求头、请求体和响应体。作用域带 `analysis`（一次 Analyze 的序号）和 `req`（请求的序号）。占位令牌和真实凭据都不记，也不记长度。
+  - 测试按「测试」末尾的规定，在 PATH 最前面放假命令；金丝雀另放在占位令牌、真实令牌、请求体和命令行参数里。
+- 性能：日志关闭时，解析的热路径不分配内存。每一行只多记下它的偏移和长度（两次整数写）；被跳过的行在一个可复制的小结构 `FirstSkip` 里只记第一条；一遍结束时比较一次计数，有跳过的行才进入作用域、调用宏。`agents/*` 基准与接入之前相比不变慢（「实际验证」）。
+- 金丝雀测试：`logs_hold_no_session_contents`（`src/source/tests/logs.rs`，`testing::capture()` 在 trace 级别）经插件发现、`read`、`turns`、`load` 一个 Claude Code 会话和一个压缩的 Codex 会话（解压副本目录是一个普通文件，副本写不出来）。金丝雀放在会话 JSONL 的坏行、记录类型名和回复里，提示词里，占位令牌和形似真实的令牌里（提示词、命令、工具参数与输出）。测试确认 `session lines skipped` 带正确的 `stage`、`pos`、`line_len`、`error` 和 `session`，`decoded copy not written` 带 `step` 和 `io`，`sessions discovered` 每个来源一条，并且记录里没有任何金丝雀。`logs_clean_sessions_write_no_warnings`：没有坏行的会话不写 warn。`logs_session_tag_matches_usage_and_review`：会话标识与 `usage`、`review` 的算法相同。
+
 ## 测试
 
 全部测试在 Linux 上运行（`just test -p lectern-agents`），不依赖真实的 agent、会话目录、网络和登录状态：
@@ -923,6 +958,7 @@ Codex 把整个冷文件压成一个 zstd 帧（`codex-rs/rollout/src/compressio
 - 轮次索引缓存：命中后只解析追加部分；适配器版本变化后不命中（`index_cache_*`）。
 - 不进 LRU 的读取：`turns_unretained` 前后 LRU 的字节数和条目不变；结果与 `turns`、适配器整份解析相同；索引在返回之前写进 `cache`，之后的 `turns` 从它接着解析；不派生 Codex 子 agent 的关联，之后的 `turns` 照常派生一次（`turns_unretained_*`）。
 - 插件：`TestKernel` 注入模拟的 `Projects`，激活后提供两个 `SessionSource`，首次发现后发出 `SessionsChanged`（`plugin_*`）。
+- 运行日志：`lectern-logging` 的 `testing::capture()` 在 trace 级别检查记录与金丝雀，见「日志与诊断」（`logs_*`）。`cargo test` 在同一进程里共用捕获器，测试按各自的会话 ID 筛选记录，并调高调用点的限流上限（`testing::set_callsite_limit`）。
 
 本 issue 的代码不调用外部命令行。Analyze 的后续 issue 按根目录 AGENTS.md 的规定测试：在 PATH 最前面放一个假命令，记录参数、标准输入和工作目录，按夹具回放 JSON 行输出。
 
@@ -1043,6 +1079,27 @@ review 设计的前置条件 G（`SessionSource::turns_unretained`，[#164](http
 
 没有验证到的：macOS 上的 bench 判定；`review` 的概览还没有实现，`overview_never_calls_turns` 和采样状态里 LRU 不增长由 review 实现第 5 步验收。
 
+日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#189](https://github.com/SoloJiang/lectern-app/pull/189)），在 Linux 上运行（x86_64 虚拟机，同时有其他构建；没有在 macOS 上实测）：
+
+- `just check`、`just test`（基于 `9bb569c`，Linux 上不依赖 GPUI 的全部 crate，2231 个测试通过，7 个跳过）、`just doctest`、`just deny` 全部通过。新增依赖只有工作区内 kernel 层的 `lectern-logging`（Cargo.lock 多一行），架构检查通过。
+- `just test -p lectern-agents`：186 个通过，1 个跳过（`redact_file_from_env`）。新增 `logs_*` 3 个（见「日志与诊断」的金丝雀测试）；其余测试和快照没有变化。`cargo test -p lectern-agents --all-features --lib`（同一进程共用捕获器）里 `logs_*` 也通过。
+- 在 `crates/agents/src` 里搜索 `eprintln!`、`println!`、`util::log`，没有结果（改动之前也没有：本 crate 原来不写 stderr）。
+- `just bench --measure agents/`（Linux 只报告不判定），改动前（`origin/main` 的另一个 worktree）与改动后交替运行，中位数依次列出：
+
+  | 基准 | 改动前 | 改动后 |
+  |---|---|---|
+  | `agents/parse_throughput` | 238 / 259 MB/s | 265 / 262 MB/s |
+  | `agents/append_4k` | 18.8 / 16.8 µs | 16.7 / 16.9 µs |
+  | `agents/discover_1000` | 23.7 / 23.7 / 25 ms | 22.3 / 32.7（noisy）/ 24 ms |
+  | `agents/turns_cached_50mb` | 870 / 976 / 957 / 654 µs | 994 / 1060 / 1010 / 632 µs |
+  | `agents/discover_codex_1000` | 22.2 / 22.9 ms | 22.9 / 23.6 ms |
+  | `agents/zst_throughput` | 144 / 132 MB/s | 148 / 144 MB/s |
+  | `agents/zst_load_decoded` | 10.7 / 19.1 µs | 11.4 / 12.3 µs |
+
+  两侧在同一范围里跳动，都在预算内。`turns_cached_50mb` 前三次改动后略高，第四次低于改动前；计时的部分是从 `cache` 读出索引再解析追加的约 4 KB，改动只在其中多了每行两次整数写和一遍结束时的一次计数比较，看不出变慢。运行期间机器上有其他构建（cargo 等过包缓存的锁），数字有噪声。
+
+没有验证到的：macOS 上的 bench 判定；会话目录读不了的那条 warn 没有测试（测试以 root 运行，权限位挡不住 root 读目录）；超长行的 `pos`、`line_len` 没有专门的测试（`oversized_len` 按 `Lines` 越过的字节数减去换行计算）；命令行的启动与退出、凭据转发端点的记录还没有实现（见「日志与诊断」）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1082,7 +1139,7 @@ review 设计的前置条件 G（`SessionSource::turns_unretained`，[#164](http
 - **fixtures 是合成的。** 与第 2 步相同：`codex/0.140.0-legacy/`、`codex/0.140.0-paginated/` 全部按「外部格式」记下的记录形状和公开的 Codex 源码（提交 `3b8f43a`）里的序列化形状手工构造，没有读取本机的任何会话日志，`SOURCE.md` 写明了这一点；真实样本等人提供后再补。`.jsonl.zst` 不提交，测试在临时目录里用 `ruzstd` 的编码器从合成的 `.jsonl` 生成。`src/redact.rs` 为 Codex 补了白名单：ID（`call_id`、`turn_id`、`thread_id`、`response_id`、`forked_from_id`、`parent_thread_id` 等）、路径（`workdir`、`working_directory`、`move_path`，以及 `changes` 的键）、分支（`git.branch`）、取值为枚举的键（`history_mode`、`cli_version`、`originator`、`plan_type`、`limit_id`），工具名在 `function_call` / `custom_tool_call` 上保留；`arguments` 是装着 JSON 的字符串，按任意内容处理里面的值、键保留；工具输出按任意内容处理，只保留 `Output:` 之前的退出码与 shell 会话 ID 两类元数据行，以及 JSON 文本输出里的数字。KEEP 仍只用于结构字段，不进入工具参数和输出。测试检查脱敏前后的 Codex fixtures 解析出同样的记录形状。
 - **库层，不实现 `SessionSource`；来源会话经 `Lineage` 查找。** 第 3 步交出上文「本 crate 的公开项」里的 `codex::Codex`，形状与 `claude::ClaudeCode` 相同，`Parsed`、`Activity` 两个适配器共用。库层没有 `SessionList`，所以分叉会话的来源经 `Lineage`（线程 ID 到文件）查找，第 4 步按 `SessionList` 实现。来源文件里全部 `task_started` 的 `turn_id` 由扫描来源文件得到（只看这一种记录，不做来源自己的继承判断），按来源文件在内存里缓存（最多 64 个），来源追加后从上次的位置接着扫；「与轮次索引一起缓存」进 `cache` 是第 4 步。
 - **会话 ID 取文件名。** Codex 用 `session_meta.id`（线程 ID）给文件命名（`rollout_file_name.rs`），所以 `session_file` 只看路径：`rollout-<时间>-<线程 ID>[_<rollout ID>].jsonl` 或 `.jsonl.zst`，线程 ID 必须是 UUID 的规范写法，`archived_sessions/` 之下为 `archived`。同一线程有多个 rollout 文件（带 rollout ID）时怎样选，是第 4 步「不变量」里的候选路径规则。用量键里的线程 ID 取 `session_meta.id` 和 `token_usage_record.thread_id`。
-- **解压副本与它的预算在这一步。** 副本放在 `decoded_dir/<来源 ID>/`，文件名带会话 ID 和压缩文件的设备号、inode、大小、修改时间；身份变了就删掉这个会话的旧副本重建。字节 LRU 的「最后访问时间」是副本的修改时间，每次使用时更新（访问时间常被挂载选项关掉）；「正在读取」是本进程登记的正在使用的副本，不知道别的进程。「同时建好轮次索引」随第 4 步的索引缓存一起做。副本写不出来时退回从头解码，但本 crate 还没有日志设施，原因不记录。解码的内存不只是 64 KB 的读缓冲：`ruzstd` 按帧头声明的窗口分配解码窗口（几 MB，上限是它的默认值 128 MB），不随文件大小增长。流里有多个 zstd 帧时依次解码（Codex 只写一个帧）。
+- **解压副本与它的预算在这一步。** 副本放在 `decoded_dir/<来源 ID>/`，文件名带会话 ID 和压缩文件的设备号、inode、大小、修改时间；身份变了就删掉这个会话的旧副本重建。字节 LRU 的「最后访问时间」是副本的修改时间，每次使用时更新（访问时间常被挂载选项关掉）；「正在读取」是本进程登记的正在使用的副本，不知道别的进程。「同时建好轮次索引」随第 4 步的索引缓存一起做。副本写不出来时退回从头解码，但本 crate 还没有日志设施，原因不记录（日志接入之后记一条 warn，带失败的步骤和 `io`，见「日志与诊断」）。解码的内存不只是 64 KB 的读缓冲：`ruzstd` 按帧头声明的窗口分配解码窗口（几 MB，上限是它的默认值 128 MB），不随文件大小增长。流里有多个 zstd 帧时依次解码（Codex 只写一个帧）。
 - **`ContentRef::part` 在 Codex 里的含义** 已写进上文「本 crate 的公开项」之后。`load` 给出补丁输入里的改动时，相对路径要拼上调用时的 cwd，而一行里没有 cwd：向前最多 64 行找最近的 `turn_context`，找不到时取 `session_meta` 的 cwd。cwd 中途变过、调用又离 `turn_context` 超过 64 行时，输入里的相对路径会拼错，是已知限制；`ToolKind::Edit` 的路径在解析时按准确的 cwd 拼接，结果里 `patch_apply_end` / `FileChange` 的路径本来就是绝对路径，`review` 优先用结果。从头解码时（副本写不出来）一路记下 cwd，是准确的。`changes` 按路径排序交出；补丁的 `Update` 交出文件头之后的 hunk 行（去掉 `*** End of File`），`Add` 交出去掉 `+` 的内容。
 - **工具分类的补充。** `shell_command`（`command` 是字符串）归 `Execute`；派出子 agent 的工具是 `spawn_agent`；`shell` 的 `command` 不是 `-c` / `-lc` 脚本的形式时按 POSIX shell 的写法加引号拼接。`local_shell_call` 在日志里没有工具名，`ToolStarted::name` 记为 `local_shell_call`；它没有结果记录，轮次索引里的 `result` 为 None。`write_stdin` 的 `workdir` 取打开这个 shell 会话的 `exec_command` 的工作目录（在它的输出给出会话 ID 时记下），不知道时取当前 cwd。还在等结果的 `exec_command`、已知的 shell 会话、开始了的 `local_shell_call`、先到的补丁结果在游标状态里各最多记 64 个。
 - **结果状态的补充。** 退出码除了 `Exit code: N`，还认 `exec_command` 在 `3b8f43a` 的输出头 `Process exited with code N`，只看 `Output:` 之前的行；JSON 文本的输出取 `exit_code`（旧版本 `shell` 的 `metadata.exit_code`、code mode 的结果）。会话 ID 取 `Process running with session ID N` 或 JSON 的 `session_id`，只放在 `exec_command` 的结束事件上。`3b8f43a` 不再写 `output.success`，失败的补丁的输出也没有退出码，所以 `apply_patch` 的状态取先于输出到达的 `patch_apply_end` / `FileChange` 的 `status`；轮次索引里补丁调用的 `result` 指向这条改动记录。
@@ -1131,3 +1188,11 @@ review 设计的前置条件 G：
 - **内存命中不算一次使用。** 设计写「已在 LRU 里时照样复制 `Arc`」，没写是否更新 LRU 的顺序。概览的读取不改变打开过的会话谁先被淘汰（`Indexes::peek`）。内存里的索引在旧的文件身份上时，从它接着解析，LRU 里那一份不替换。
 - **不派生子 agent 的关联，照样重新生成继承边界未定的摘要。** 前者见「派生的时机」；后者与 `turns` 相同（每个文件身份一次，只改摘要，不留下索引）。已写进上文「服务接口」。
 - **`turns` 与 `turns_unretained` 共用 `Engine::next_index`。** 只差内存里的查找是否算一次使用、结果放不放进内存和派生；`turns` 的行为不变。
+
+日志接入（logging 设计第 7 项）：
+
+- **命令行与凭据转发端点没有接入。** 第 7 项要求记录命令行的启动与退出、凭据转发端点的请求（带 `analysis`、`req`），并用假命令测试启动命令行的代码。本 crate 现在既不启动外部命令行，也没有凭据转发端点（Analyze 另开 issue），所以没有可接的代码，也没有用假命令的测试；接入的规则写进「日志与诊断」，随 Analyze 实现。金丝雀测试里的占位令牌和形似真实的令牌放在会话内容里（提示词、命令、工具参数与输出）。
+- **解析失败每遍一条，不是每行一条。** 第 7 项写「会话解析失败（warn，会话 UUID、路径、字节偏移、行长度、错误种类）」。按行记录时，发现阶段几百个会话的坏行和 `turns` 的整份重读会反复写同样的记录，限流之后留下的也只是开头的 20 条。改为一遍解析（`read`、摘要、补齐）结束时记一条 `session lines skipped`：偏移、长度和种类取这一遍里第一条被跳过的行，另带这一遍的坏行、超长行和不认识类型的行数。不认识的记录类型和超长行也算「解析失败」，一起计入。
+- **会话 UUID 在作用域里，不是字段。** `session` 是 `Ctx` 的字段名，宏不接受它作字段名；记录在 `session` 作用域里写出，与 `review`、`usage` 的做法相同。
+- **多记的几条。** 第 7 项之外，本文原来写「记日志」的两处也接上了：会话目录读不了（warn，「状态与异常」）、表外工具名的计数（「本 crate 的公开项」写它「只进日志」；名字是会话文件里的运行时字符串，只记种数和次数，有跳过的行时并进那条 warn，否则是 debug）。另加摘要读失败、第一次发布（info，带发现耗时）和之后每次发布（debug），读失败的会话原来静默地不列出，查不到原因。
+- **`CopyError` 带上原因。** 原来副本写失败只有 `CopyError::Copy`，原因不保留；现在是 `Copy(Step, io::Error)`。不建副本的适配器（`without_decoded_copies`）原来也走这个变体，改为单独的 `NoDir`，不记 warn。
