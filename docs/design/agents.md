@@ -1,6 +1,6 @@
 # agents 设计
 
-状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)，见「日志与诊断」）已实现，命令行与凭据转发端点的记录随 Analyze 实现。见「验收」与「实际验证」。
+状态：第 1–4 步已实现（第 1 步 `services` 的会话接口 [#71](https://github.com/SoloJiang/lectern-app/pull/71)，第 2 步 Claude Code 适配器与增量读取 [#75](https://github.com/SoloJiang/lectern-app/pull/75)，第 3 步 Codex 适配器 [#78](https://github.com/SoloJiang/lectern-app/pull/78)，第 4 步发现、监听、归位与插件 [#94](https://github.com/SoloJiang/lectern-app/pull/94)）；第 5 步（Codex 子 agent 关联派出它的调用，[#97](https://github.com/SoloJiang/lectern-app/issues/97)，见「Codex 子 agent 与派出它的调用」，[#157](https://github.com/SoloJiang/lectern-app/pull/157)）已实现；[review 设计](review.md#对其他-crate-的要求)的前置条件 G（不进内存 LRU 的 `turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见「日志与诊断」）已实现，命令行与凭据转发端点的记录随 Analyze 实现。见「验收」与「实际验证」。
 
 对应 issue [#13](https://github.com/SoloJiang/lectern-app/issues/13)。agents 发现并解析 Claude Code 与 Codex 写在本机的会话日志，把每个会话按 cwd 归位到项目和 worktree，交出轮次结构、工具调用事件和原始用量记录（[技术调研「Agent 项目发现」](tech-research.md#1-agent-项目发现)、[ADR 0014](../adr/0014.md)、[ADR 0020](../adr/0020.md)）。读取方式与缓存键见 [ADR 0026](../adr/0026.md)。
 
@@ -1079,7 +1079,7 @@ review 设计的前置条件 G（`SessionSource::turns_unretained`，[#164](http
 
 没有验证到的：macOS 上的 bench 判定；`review` 的概览还没有实现，`overview_never_calls_turns` 和采样状态里 LRU 不增长由 review 实现第 5 步验收。
 
-日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#PR](https://github.com/SoloJiang/lectern-app/pull/PR)），在 Linux 上运行（x86_64 虚拟机，同时有其他构建；没有在 macOS 上实测）：
+日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 7 项，[#189](https://github.com/SoloJiang/lectern-app/pull/189)），在 Linux 上运行（x86_64 虚拟机，同时有其他构建；没有在 macOS 上实测）：
 
 - `just check`、`just test`（基于 `9bb569c`，Linux 上不依赖 GPUI 的全部 crate，2231 个测试通过，7 个跳过）、`just doctest`、`just deny` 全部通过。新增依赖只有工作区内 kernel 层的 `lectern-logging`（Cargo.lock 多一行），架构检查通过。
 - `just test -p lectern-agents`：186 个通过，1 个跳过（`redact_file_from_env`）。新增 `logs_*` 3 个（见「日志与诊断」的金丝雀测试）；其余测试和快照没有变化。`cargo test -p lectern-agents --all-features --lib`（同一进程共用捕获器）里 `logs_*` 也通过。
