@@ -11,7 +11,7 @@
 
 - 首帧前只建窗口、画骨架；插件激活、SQLite、文件监听、会话扫描、读窗口快照都放在首帧之后（[ADR 0017](../../docs/adr/0017.md)）。
 - 只做装配：把 `platform` 的实现注入 `fs_watch`、`kernel` 等定义的接口。不写业务逻辑。
-- `ui_probe` 只在 probe profile 和调试构建中装配。
+- `ui_probe` 只在 `ui-probe` feature 下编译（不在 `default` 里，`just` 的入口打开它）；运行时只在 probe profile 里启动（[ui_probe 设计](../../docs/design/ui_probe.md)）。
 
 ## 测试
 

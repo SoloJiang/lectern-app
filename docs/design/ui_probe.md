@@ -26,7 +26,8 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `gpui`（`test-support` feature） | `Window::on_next_frame`、`refresh`、`render_to_image`、`#[gpui::test]` | `render_to_image` 只在 `test-support` 下编译（见「截图的来源」）；本 crate 不进入发布构建，所以这个 feature 不会进入发布构建 |
+| `gpui` | `Window::on_next_frame`、`refresh`、`render_to_image`、`#[gpui::test]` | 已锁定（[ADR 0016](../adr/0016.md)） |
+| `gpui_platform`（`test-support` feature） | 打开 macOS 后端的 `render_to_image` | `Window::render_to_image` 只在 `test-support` 下编译，而 macOS 后端（`gpui_macos`、`gpui_apple`）的实现要经 `gpui-pre-platform` 的 `test-support` 才打开，只开 `gpui/test-support` 会走平台 trait 的默认实现、总是返回错误（见「截图的来源」）；本 crate 不进入发布构建，所以这个 feature 不会进入发布构建 |
 | `lectern-ui` | 语义记录器 `semantic::Recorder` 与节点类型（`Semantic`、`Role`、`State`） | 视图层共用的声明接口只能放在所有视图 crate 都依赖的 crate 里 |
 | `lectern-i18n` | `Key::name`，把标签的 Fluent 键写进 JSON | |
 | `lectern-logging` | 日志宏 | [ADR 0046](../adr/0046.md) |
@@ -34,7 +35,7 @@
 | `image`（`png`） | `render_to_image` 的返回类型 `RgbaImage`，PNG 编码 | GPUI 已依赖它并打开 `png`，不新增 crate |
 | `insta`（dev） | 语义树快照 | 已在工作区 |
 
-不新增外部 crate。`gpui/test-support` 经本 crate 的普通依赖打开：`just check` 与 `just test` 用 `--all-features`，工作区在这两条路径上本来就带着它（`app` 的 dev-dependency）；不带 feature 的 `cargo build -p lectern-app` 不编译本 crate，发布构建的依赖图里没有 `lectern-ui-probe`，也没有 `test-support`（「验收」第 4 步的 `cargo tree` 检查，与 [bench 设计「验收」](bench.md#验收)相同）。
+不新增外部 crate。`gpui_platform/test-support`（它连带打开 `gpui/test-support`）经本 crate 的普通依赖打开：`just check` 与 `just test` 用 `--all-features`，工作区在这两条路径上本来就带着 `gpui/test-support`（`app` 的 dev-dependency），后端那一层是新增的；不带 feature 的 `cargo build -p lectern-app` 不编译本 crate，发布构建的依赖图里没有 `lectern-ui-probe`，也没有 `test-support`（「验收」第 4 步的 `cargo tree` 检查，与 [bench 设计「验收」](bench.md#验收)相同）。
 
 ### 语义树的来源
 
@@ -48,6 +49,11 @@
 ### 截图的来源
 
 `Window::render_to_image` 把上一帧的场景（`rendered_frame.scene`）用窗口自己的 Metal 渲染器画到一个 drawable 上，不显示，等命令缓冲完成后读回 `RgbaImage`（物理像素）。它与 `ui_tree` 读的是同一帧，不需要窗口在前台，也不需要屏幕录制权限。代价是这个调用在主线程上同步等 GPU，并占用一个 drawable；实测耗时写进「实际验证」。
+
+两个编译期条件，实现必须同时满足：
+
+1. feature 要开在 `gpui_platform`（`gpui-pre-platform`）上：`gpui-pre-platform/test-support` 打开 `gpui_macos/test-support`，再打开 `gpui_apple/test-support`，macOS 窗口的 `render_to_image` 才存在；只开 `gpui/test-support` 时 `Window::render_to_image` 能编译，但调到平台 trait 的默认实现，总是返回错误。
+2. 只有调试构建能读回：Metal 层的 `framebufferOnly = false` 在 `test-support` 且 `debug_assertions` 时才设置，release 构建即使带 `ui-probe` feature，读回也失败。所以 `screenshot` 只在调试构建里可用（`just probe` 用 dev profile）；release 构建里的探针照常提供 `ui_tree`，`screenshot` 应答 `render`。
 
 备选：`platform` 用 `CGWindowListCreateImage` 截取本进程的窗口（macOS 专属，架构规则 6）。它截的是真正显示的画面（含系统材质），但要取 `NSWindow` 的编号，而且本进程窗口是否免于 TCC 的屏幕录制授权本文没有验证。只在 `render_to_image` 在实现阶段不可用时改用，改用要更新本节。
 
@@ -346,7 +352,7 @@ ID 的语法：`segment('.' segment)*`，`segment` 是 `name` 或 `name[key]`；
 | 5 | 主线程（帧请求 N+1 的开头） | cb2：`Recorder::finish()` 取出记录；`Tree::from_records`；发回应答通道 |
 | 6 | 连接线程 | `serde_json` 编码，写一行 |
 
-GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回调，再 `draw`（[app 设计「启动屏障」](app.md#启动屏障)用的是同一个顺序），所以 cb1 在画之前、cb2 在画之后。`refresh` 把窗口标为脏，帧 N 一定会画。记录器只在 cb1 与 cb2 之间打开：探针没有请求时，语义包装元素每帧只读一个原子标志，不分配、不记录。前台任务用 `frame_timeout` 等 cb2：超时应答 `timeout`，并丢弃之后迟到的记录。
+GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回调，再 `draw`（[app 设计「启动屏障」](app.md#启动屏障)用的是同一个顺序），所以 cb1 在画之前、cb2 在画之后。`refresh` 把窗口标为脏，帧 N 一定会画。记录器只在 cb1 与 cb2 之间打开：探针没有请求时，语义包装元素每帧只读一个原子标志，不记录。前台任务用 `frame_timeout` 等 cb2：超时应答 `timeout`，并丢弃之后迟到的记录。
 
 ### 一次 `screenshot`
 
@@ -359,7 +365,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 ## 性能
 
 - desktop profile：本 crate 不被编译、不链接；冷启动、空闲内存、安装包体积都不变。检查方式见「验收」第 4 步（`cargo tree`、`just bench` 的 `app/*` 不受影响）。
-- 每个构建都有的成本：`ui` 的语义包装元素在 prepaint 里读一次原子标志（Relaxed）。每元素每帧不到 1 ns，不分配。由 `ui` 的帧基准覆盖（`ui` 的设计文档决定基准名），本 crate 不另设基准。
+- 每个构建都有的成本：`ui` 的语义包装元素在 prepaint 里读一次原子标志（Relaxed），每元素每帧不到 1 ns，包装元素自己不分配。视图构造 `Semantic` 的成本（带业务键的 ID 要拼字符串）在所有构建里都存在，所以 `ui` 的接口要让这份构造可以推迟：记录器关闭时不调用构造闭包（「对其他 crate 的要求」第 1 项）。两者都由 `ui` 的帧基准覆盖（`ui` 的设计文档决定基准名），本 crate 不另设基准。
 - probe profile 空闲：一个阻塞在 `accept` 的线程、一个等待队列的前台任务，没有定时器、没有每帧工作。内存：线程栈加几 KiB。
 - 一次 `ui_tree`：多画一帧；记录器的 `Vec<Record>` 与节点数成正比（每个约 200 B，1000 个节点约 200 KiB），请求结束即释放；`Tree::from_records` 与 JSON 编码是线性的。
 - 一次 `screenshot`：`render_to_image` 在主线程上同步等 GPU 并读回（2× 的 820 × 520 窗口是 1640 × 1040 × 4 ≈ 6.8 MB），预期 10 ms 量级，实测写进「实际验证」；PNG 编码在连接线程上，预期几十毫秒。探针会话不是用户场景，这两项不计入帧预算；但主线程被占期间窗口照常响应，不出现超过 `frame_timeout` 的停顿。
@@ -377,7 +383,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 | 未知方法 | 应答 `unknown-method` |
 | 没有窗口（全部关闭后点 Dock 之前） | 应答 `no-window` |
 | `frame_timeout` 内没画出帧 | 应答 `timeout`；迟到的记录丢弃 |
-| `render_to_image` 失败 | 应答 `render`；`ui_tree` 不受影响 |
+| `render_to_image` 失败（没有 drawable、渲染器不可用、release 构建不能读回） | 应答 `render`；`ui_tree` 不受影响 |
 | `dir` 不是绝对路径或不存在、`name` 不合规、写文件失败 | 应答 `io`，不创建目录，不写任何文件 |
 | 退出已开始 | 之后的请求应答 `quitting`；连接随进程结束 |
 | 客户端中途断开 | 连接线程退出；正在处理的请求照常完成，结果丢弃 |
@@ -394,7 +400,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
   - warn `probe start failed`（由 `app` 在 `Probe::start` 返回 `Err` 时记，target 为 `app`）：`reason`（`dir-not-private`、`bind`、`thread`）、`error`（`Value::io`，有时）。
   - info `probe stopped`：`conns`（本次会话的连接数）、`requests`。
 - 详细级别：debug `probe request`：`req`、`conn`、`method`、`took_us`、`nodes`（节点数）、`bytes`（应答字节数）；`screenshot` 另带 `path`（`Value::path`）、`width`、`height`。trace 不另记。
-- 关联 ID：`req`（`Ctx::req`，进程内从 1 递增）。连接线程解析出请求后 `scope(Ctx { req, .. })`，入队的请求带着序号，主线程处理时 `within` 同一个 `Ctx`。
+- 关联 ID：`req`（`Ctx::req`，进程内从 1 递增）。logging 设计把它定义为一次对外请求的序号；探针请求是进程外发来的一次请求，同样是一次跨进程的往返，借用同一个字段，不新增 `Ctx` 字段。连接线程解析出请求后 `scope(Ctx { req, .. })`，入队的请求带着序号，主线程处理时 `within` 同一个 `Ctx`。
 - 不记录：请求和应答的 JSON；节点的标签文字、业务键和属性值；截图的像素；窗口标题。路径只经 `Value::path` 记录（探针目录、截图路径）。
 - 金丝雀测试：`canary_stays_out_of_probe_logs`：`testing::capture()` 在 trace 级别下，用一个标签文字、一个业务键和一个属性值都含金丝雀串的视图跑 `tree::snapshot`，再把树经 `annotate` 和 `write_png` 写到临时目录，并让 `server` 的请求处理函数处理一条 `method` 为金丝雀串的请求（应答 `unknown-method`），`assert_absent(金丝雀)`。
 
@@ -422,16 +428,15 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 
 1. **`ui`：语义记录器与语义包装元素**（模块 `lectern_ui::semantic`）。`ui` 的设计文档正在编写，它决定具体的元素写法；本 crate 需要的最小形状：
    - 「数据结构」里的 `Semantic`、`Label`、`State`、`Role`、`Record`。
-   - 一个包装元素：`semantic(spec: Semantic, child: impl IntoElement) -> impl IntoElement`（或等价的 builder）。它在 prepaint 里拿到自己的范围；记录器打开时推一条 `Record`（`bounds` 来自 `Window::layout_bounds`，`visible` 按 `Window::content_mask` 判断，`parent` 是当前栈顶），并在子元素 prepaint 期间把自己压进线程本地的父节点栈；关闭时只读一次原子标志就返回。构造函数带 `#[track_caller]`，记下 `declared_at`。
+   - 一个包装元素：`semantic(spec: impl FnOnce() -> Semantic, child: impl IntoElement) -> impl IntoElement`（或等价的 builder）。`spec` 是闭包：记录器关闭时不调用它，视图不为探针拼 ID 字符串；`ui` 也可以另给一个按值接收的简写。它在 prepaint 里拿到自己的范围；记录器打开时推一条 `Record`（`bounds` 来自 `Window::layout_bounds`，`visible` 按 `Window::content_mask` 判断，`parent` 是当前栈顶），并在子元素 prepaint 期间把自己压进线程本地的父节点栈；关闭时只读一次原子标志就返回。构造函数带 `#[track_caller]`，记下 `declared_at`。
    - 同一份 `spec` 同时写进 GPUI 的无障碍属性（子元素是带 `id` 的 div 时）：`accessibility_id(id)`、`role(映射后的 accesskit::Role)`、`aria_label(label.text)`、`aria_selected`、`aria_expanded`、`aria_toggled`。角色映射由 `ui` 给出（如 `ListItem → ListItem`、`DiffHunk → Group`）。
    - 记录器：`Recorder::begin(window: WindowId)`、`Recorder::finish() -> Vec<Record>`、`Recorder::is_armed() -> bool`（一个 `AtomicBool`），进程里一个，主线程使用；`begin` 时丢弃上一次没取走的记录。
    - 每个视图 crate 的设计文档「界面」一节列出它的语义节点（角色与 ID），这是[模板](TEMPLATE.md)已有的要求；不可交互的纯装饰元素不声明。
-2. **`i18n`**：`Key::name(&self) -> &'static str` 与 `FmtKey::name(&self) -> &'static str`，返回 Fluent 的消息 ID（如 `review-looks-good`）；常数时间，读编译进二进制的名字表。
+2. **`i18n`**：`Key::name(&self) -> &'static str` 与 `FmtKey::name(&self) -> &'static str`，返回 Fluent 的消息 ID（如 `review-looks-good`）；常数时间，读 `table::NAMES`。这张名字表已经编译进每个构建（`Strings::format` 的报告用它），不增加体积。
 3. **`app`**：
-   - Cargo feature `ui-probe`（不在 `default` 里），打开可选依赖 `lectern-ui-probe`（架构规则 2 允许的形式）。`just check`、`just test` 用 `--all-features`，所以它们编译并检查这条路径；不带 feature 的 `cargo build -p lectern-app` 不含探针。`crates/app/AGENTS.md` 里「只在 probe profile 和调试构建中装配」改为「只在 `ui-probe` feature 下编译，`just` 的入口打开这个 feature；运行时只在 probe profile 里启动」。
+   - Cargo feature `ui-probe`（不在 `default` 里），打开可选依赖 `lectern-ui-probe`（架构规则 2 允许的形式）。`just check`、`just test` 用 `--all-features`，所以它们编译并检查这条路径；不带 feature 的 `cargo build -p lectern-app` 不含探针。`crates/app/AGENTS.md` 的措辞已随本文改为「只在 `ui-probe` feature 下编译，`just` 的入口打开这个 feature；运行时只在 probe profile 里启动」。
    - `Profile::Probe`（`#[cfg(feature = "ui-probe")]`）：插件集合与 desktop 相同，启动屏障与 desktop 相同，多一个探针。`run` 在首帧之前只读环境变量 `LECTERN_UI_PROBE_DIR`（与 bench 的 `LECTERN_BENCH_SOCKET` 做法相同，不读文件）：设置了就是 `Probe`，否则是 `Desktop`。`startup::release` 的末尾、`Kernel::start` 之后调用 `Probe::start`；失败记 warn `probe start failed`。`Started` 持有 `Option<Probe>`。
    - 退出顺序：`lectern-quit` 线程先 `Probe::shutdown`，再 `Kernel::shutdown`。`quit` 请求经 `Quit` Action，与 ⌘Q 相同。
-   - [app 设计「范围」](app.md#范围)里「headless 与 probe profile……随 bench 设计第 5 步」改为：headless 随 bench 第 5 步；probe profile 按本文。
    - 集成测试 `crates/app/tests/probe.rs`（`#[cfg(feature = "ui-probe")]`，与 `tests/startup.rs` 同一套启动方式）：新建临时目录，`home/` 作 `HOME`、`probe/`（0700）作 `LECTERN_UI_PROBE_DIR`，去掉 `CLAUDE_CONFIG_DIR` 与 `CODEX_HOME`，启动 `CARGO_BIN_EXE_lectern`；用 `client::Client` 轮询连接（最多 10 s）；`hello` 的 `windows` 有一个；`ui_tree` 的根节点角色是 `window`（骨架没有语义节点，`nodes` 长度为 1）；`screenshot` 的文件存在、能解码、尺寸等于 `size × scale`；`quit` 后进程在 30 s 内退出，日志里有 `probe listening`、`probe stopped`，没有临时目录的路径以外的内容字符串（金丝雀放在 `name`）。
    - `justfile` 加 `probe` 配方：`cargo build --locked -p lectern-app --features ui-probe`，`mktemp -d` 建会话目录，按上面的环境变量在后台启动 `lectern`，打印 `export LECTERN_UI_PROBE_DIR=…` 和 pid。agent 之后用 `cargo run -p lectern-ui-probe --bin lectern-probe -- ui_tree` 等命令读取，最后 `lectern-probe quit`。配方不读真实的 `HOME`。
 4. **CI**：无新任务。macOS 任务的 `just test` 已带 `--all-features`，会跑 `tests/probe.rs`；它需要图形会话，与 `tests/startup.rs` 相同。
@@ -458,6 +463,5 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
    - `just test -p lectern-app` 里 `tests/probe.rs` 通过（macOS）。
    - `cargo build --locked -p lectern-app` 成功；`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-ui-probe`，也没有 `"test-support"`。
    - `cargo build --locked -p lectern-app --features ui-probe` 成功。
-   - `just probe` 启动一个会话并打印探针目录；在同一台机器上 `cargo run -p lectern-ui-probe --bin lectern-probe -- screenshot` 返回一个存在的 PNG 路径，`lectern-probe quit` 后进程退出。
+   - `just probe` 启动一个会话并打印探针目录；在同一台机器上 `cargo run -p lectern-ui-probe --bin lectern-probe -- screenshot` 返回一个存在的 PNG 路径，解码后不是单一颜色（读回真的发生了），`lectern-probe quit` 后进程退出。`tests/probe.rs` 对 PNG 做同一个检查。
    - `just bench app/` 的 `app/cold_start`、`app/idle_empty` 结果与改动前相比不变（探针不在测量构建里）。
-   - `docs/design/app.md` 的「范围」和 `crates/app/AGENTS.md` 的措辞已按「对其他 crate 的要求」第 3 项更新。
