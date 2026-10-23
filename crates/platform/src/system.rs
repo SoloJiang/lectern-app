@@ -37,7 +37,8 @@ const MAX_LANGUAGES: usize = 16;
 /// as `zh-Hans-CN`: `CFLocaleCopyPreferredLanguages` on macOS.
 ///
 /// Tags that are not ASCII letters, digits and hyphens, start with a
-/// hyphen or are longer than 35 bytes are left out; at most 16 are kept.
+/// hyphen or are longer than 35 bytes are left out; only the first 16
+/// entries are looked at.
 /// Empty when nothing can be read, and on every other platform (`app`, the
 /// only caller, is macOS only). The system preferences are in memory: no
 /// file of Lectern's is read, so `app` calls it before the first frame
@@ -90,6 +91,7 @@ mod imp {
     use super::{MAX_LANGUAGES, MAX_TAG_LEN, MAX_VERSION_LEN, language_tag, mac_os_version};
 
     type CFIndex = isize;
+    type CFTypeID = usize;
     type CFTypeRef = *const c_void;
     type CFArrayRef = *const c_void;
     type CFStringRef = *const c_void;
@@ -108,6 +110,8 @@ mod imp {
             size: CFIndex,
             encoding: u32,
         ) -> u8;
+        fn CFGetTypeID(cf: CFTypeRef) -> CFTypeID;
+        fn CFStringGetTypeID() -> CFTypeID;
         fn CFRelease(cf: CFTypeRef);
     }
 
@@ -121,19 +125,22 @@ mod imp {
         let mut tags = Vec::new();
         // SAFETY: `array` is a valid CFArray until the `CFRelease` below.
         let count = unsafe { CFArrayGetCount(array) };
-        for i in 0..count {
-            if tags.len() == MAX_LANGUAGES {
-                break;
-            }
-            // SAFETY: `i` is within `0..count`; the value is a CFString the
-            // array owns (Get rule: not released here).
+        // Only the first entries can matter to `Locale::negotiate`: bound the
+        // walk, not just the result.
+        for i in 0..count.min(MAX_LANGUAGES as CFIndex) {
+            // SAFETY: `i` is within `0..count`; the value belongs to the
+            // array (Get rule: not released here).
             let string = unsafe { CFArrayGetValueAtIndex(array, i) };
+            // SAFETY: `string` is non-null and a CF object owned by the
+            // array; both calls only read its type.
+            if string.is_null() || unsafe { CFGetTypeID(string) != CFStringGetTypeID() } {
+                continue;
+            }
             // Room for a longer value than any accepted one plus the NUL, so
             // that a too-long tag fails here or in `language_tag`.
             let mut buf = [0u8; MAX_TAG_LEN + 2];
-            // SAFETY: `string` is a CFString (or null, which CF rejects by
-            // returning false); `buf` is valid for writes of its length,
-            // which is passed as `size`.
+            // SAFETY: `string` is a CFString (checked above); `buf` is valid
+            // for writes of its length, which is passed as `size`.
             let ok = unsafe {
                 CFStringGetCString(
                     string,

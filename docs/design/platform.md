@@ -961,7 +961,7 @@ pub mod time {
 pub mod system {
     /// 本进程生效的首选语言，最优先的在前，BCP 47 标签，如 "zh-Hans-CN"。macOS 上用
     /// `CFLocaleCopyPreferredLanguages`，结果包含应用域里 `AppleLanguages` 的覆盖。
-    /// 不是 ASCII 字母、数字和连字符的、以连字符开头的、超过 35 字节的标签跳过；最多 16 个。
+    /// 只看前 16 项；不是 ASCII 字母、数字和连字符的、以连字符开头的、超过 35 字节的标签跳过。
     /// 读不到时为空；其他平台总是空。系统偏好在内存里，不读 Lectern 自己的文件，首帧前可以调用；任何线程可调用。
     pub fn preferred_languages() -> Vec<String>;
 }
@@ -969,9 +969,9 @@ pub mod system {
 
 ### 规则
 
-- CoreFoundation 的五个函数（`CFLocaleCopyPreferredLanguages`、`CFArrayGetCount`、`CFArrayGetValueAtIndex`、`CFStringGetCString`、`CFRelease`）手写在 `system.rs` 的 macOS 实现里，不引入绑定 crate；CoreFoundation 已由 AppKit 链接。数组按 Copy 规则在返回前释放，数组里的字符串按 Get 规则不释放。
+- CoreFoundation 的七个函数（`CFLocaleCopyPreferredLanguages`、`CFArrayGetCount`、`CFArrayGetValueAtIndex`、`CFGetTypeID`、`CFStringGetTypeID`、`CFStringGetCString`、`CFRelease`）手写在 `system.rs` 的 macOS 实现里，不引入绑定 crate；CoreFoundation 已由 AppKit 链接。数组按 Copy 规则在返回前释放，数组里的元素按 Get 规则不释放。只看数组的前 16 项；空的或不是 CFString 的元素跳过。
 - 每个标签用 `CFStringGetCString` 以 UTF-8 写进栈上 37 字节的缓冲（比接受的上限多出一个字节和 NUL）：写不下时 CoreFoundation 返回失败，这个标签跳过。字符集检查是纯函数（`language_tag`），在所有平台上编译和测试；读到意外的值时整个丢掉，不截取。
-- 16 个的上限：`Locale::negotiate` 只要第一个能对应上的标签，用户实际设置的首选语言很少超过几个。
+- 16 项的上限：`Locale::negotiate` 只要第一个能对应上的标签，用户实际设置的首选语言很少超过几个。
 - 不记日志：读不到时返回空列表，`Locale::negotiate` 退回英文。
 
 ### 测试
