@@ -3,13 +3,16 @@
 打开项目窗口：最近项目、Open Folder / Clone、语言选择，以及从 Claude Code 与 Codex 历史里发现、尚未打开过的文件夹。
 
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：`docs/design/welcome.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 设计文档：[docs/design/welcome.md](../../docs/design/welcome.md)（已接受，尚未实现）。实现以它为准。
 - issue：[#29](https://github.com/SoloJiang/lectern-app/issues/29)
 - ADR：[0012](../../docs/adr/0012.md)、[0013](../../docs/adr/0013.md)
 
 ## 边界
 
 - 会话历史的扫描在 `agents` 里、首帧之后进行，本视图只读结果快照。
+- 打开项目经 `workspace` 的 `WorkspaceCommand`（`OpenProject`、`PromptOpenProject`），本 crate 不调 `Projects::open`。
+- 最近项目列表存在 `platform::dirs::app_data()` 下的 `welcome/recent.json`，读写只在 executor 的 `Background` 任务里（`src/recent/store.rs`）。
+- 本 crate 是插件 crate（[ADR 0025](../../docs/adr/0025.md)），含两个插件：`welcome`（屏幕与最近项目，依赖 `dyn Contributions`、`dyn Projects`）和 `welcome-discovery`（发现列表，依赖 `dyn SessionSource`；kernel 没有可选依赖，所以分开）。只依赖 kernel 层和非插件的库 crate。
 
 ## 测试
 
