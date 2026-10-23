@@ -54,7 +54,8 @@ pub fn init(cx: &mut App, strings: Strings);
 
 /// 启动屏障放开后（首帧之后），`app` 在 `startup::release` 里调用一次：运行 `gpui_component::init`
 ///（它在运行时解析内嵌的主题 JSON，所以不放在首帧前），把 gpui-component 的主题改成跟随 `Palette`，
-/// 并按当前窗口外观设置它的浅色 / 深色。主线程，预算 ≤ 3 ms（`ui/ready`）。
+/// 并按当前窗口外观设置它的浅色 / 深色。「跟随」是一次投影：把 `Palette` 的颜色写进 gpui-component 的 `Theme`；
+/// 之后每次换 `Palette`（外观变化、强调色变化）都在 `is_ready` 时重做这次投影，所以包装的控件不会留着旧的强调色。主线程，预算 ≤ 3 ms（`ui/ready`）。
 pub fn ready(cx: &mut App);
 
 /// `ready` 是否已经运行。视图在它为 false 时不挂载（首帧是 `app` 的中性骨架，不含任何 `ui` 控件）。
@@ -122,7 +123,7 @@ pub fn palette(appearance: Appearance, cx: &App) -> &Palette;
 pub fn accent_follows_system(cx: &App) -> bool;
 ```
 
-视图不订阅颜色变化：每个窗口打开后，打开它的 crate 调用一次 `ui::attach(window, cx)`，`attach` 登记 `Window::observe_window_appearance`；外观变化时 `ui` 换一套 `Palette`、调用 `cx.refresh_windows()`，并且只在 `is_ready(cx)` 时才同步 gpui-component 的浅色 / 深色（GPUI 在 `open_window` 返回后就延后触发一次 `appearance_changed`，这一次发生在 `ready` 之前，那时 gpui-component 的全局还不存在；`ready` 自己做第一次同步）。第一个窗口是 `app` 的骨架窗口（Welcome 和 Overview 只替换它的根视图，窗口不换），所以 `app` 在 `open_window` 的回调里调用 `attach`；以后的窗口由 `workspace` 调用（「对其他 crate 的要求」）。`platform` 的强调色变化通知到达时重新读两套系统色，同样刷新；通知的回调不带 GPUI 的上下文，`init` 把 `cx.to_async()` 交给回调，回调经它把更新排到主线程的下一次运行（与 GPUI 自己处理外观回调的做法相同），不在回调里直接借用 `App`。两次刷新之间 `Palette` 不变，返回的引用在一帧之内有效。
+视图不订阅颜色变化：每个窗口打开后，打开它的 crate 调用一次 `ui::attach(window, cx)`，`attach` 登记 `Window::observe_window_appearance`；外观变化时 `ui` 换一套 `Palette`、调用 `cx.refresh_windows()`，并且只在 `is_ready(cx)` 时才同步 gpui-component 的浅色 / 深色（GPUI 在 `open_window` 返回后就延后触发一次 `appearance_changed`，这一次发生在 `ready` 之前，那时 gpui-component 的全局还不存在；`ready` 自己做第一次同步）。第一个窗口是 `app` 的骨架窗口（Welcome 和 Overview 只替换它的根视图，窗口不换），所以 `app` 在 `open_window` 的回调里调用 `attach`；以后的窗口由 `workspace` 调用（「对其他 crate 的要求」）。`platform` 的强调色变化通知到达时重新读两套系统色、同样重做投影（`is_ready` 时）并刷新；通知的回调不带 GPUI 的上下文，`init` 把 `cx.to_async()` 交给回调，回调经它把更新排到主线程的下一次运行（与 GPUI 自己处理外观回调的做法相同），不在回调里直接借用 `App`。两次刷新之间 `Palette` 不变，返回的引用在一帧之内有效。
 
 ```rust
 /// 窗口打开后调用一次（`app` 对骨架窗口，`workspace` 对以后的窗口）：登记外观观察者，使 `colors(window, cx)` 在这个窗口的外观变化时更新。
@@ -530,9 +531,9 @@ pub mod semantic {
     #[track_caller]
     pub fn semantic(spec: Semantic, child: impl IntoElement) -> SemanticElement;
     /// 同上，另外把同一份声明写进子元素的 GPUI 无障碍属性：`accessibility_id`、映射的 `accesskit::Role`、`aria_label`、
-    /// `aria_selected`、`aria_expanded`、`aria_toggled`。子元素要是 `InteractiveElement`（带 id 的 div 等），所以是单独的入口；角色映射表在本模块。
+    /// `aria_selected`、`aria_expanded`、`aria_toggled`。子元素要是 `StatefulInteractiveElement`（带 id 的 div 等，GPUI 的无障碍属性只在它上面），所以是单独的入口；角色映射表在本模块。
     #[track_caller]
-    pub fn semantic_interactive<E: InteractiveElement + IntoElement>(spec: Semantic, child: E) -> SemanticElement;
+    pub fn semantic_interactive<E: StatefulInteractiveElement + IntoElement>(spec: Semantic, child: E) -> SemanticElement;
     pub struct SemanticElement { /* spec, child, declared_at */ }
 
     /// 进程一个，只在主线程上用。`ui_probe` 和 `#[gpui::test]` 在一帧之前 `begin`，帧画完 `finish` 取走这一帧的记录。
@@ -546,7 +547,7 @@ pub mod semantic {
 }
 ```
 
-本 crate 的控件自带角色、`Label`（来自它们的 `Text`）和状态，视图只给 `NodeId`；视图自己的容器与自绘元素用 `semantic(...)` 包装。每个视图 crate 的设计文档「界面」一节列出自己的节点（角色与 ID）；纯装饰元素不声明。窗口根节点由探针合成，视图不声明。
+本 crate 的控件自带角色、`Label`（来自它们的 `Text`）和状态，视图只给 `NodeId`；视图自己的容器与自绘元素用 `semantic(...)` 包装。`Semantic` 是现成构造、不是闭包：包装元素自己的代价只有关闭时的一次原子读，构造 `Semantic` 的代价（`NodeId` 的字符串、`Label` 的 `SharedString` 克隆、`attrs` 默认空 `Vec` 不分配）归视图，由帧基准覆盖；行数多的视图把 `NodeId` 放在自己的状态里（随快照建一次），每帧只克隆。每个视图 crate 的设计文档「界面」一节列出自己的节点（角色与 ID）；纯装饰元素不声明。窗口根节点由探针合成，视图不声明。
 
 ## 数据结构
 
@@ -712,7 +713,7 @@ pub mod semantic {
 
 - `init`、`ready`、`is_ready`、`init_fixed`、`attach`、`Palette`、`colors`、`palette`、`Text`、`strings`、`set_locale`、`TextRole`、`MonoMetrics`、`mono_metrics`、`code_style`、`code_styles` 与「数据结构」的内置表。
 - 「测试」里 `palette_builtin_*`、`code_colors_*`、`text_*`、`appearance_change_swaps_palette`、`set_locale_refreshes_windows`、`ready_runs_component_init_once`、`mono_metrics_is_cached`、`logs_hold_no_text` 通过；`just doctest` 里两个 `compile_fail` 通过。
-- `app` 接入 `with_assets(IconAssets)`、`init`、骨架窗口的 `attach` 与 `ready`（可以在同一个 PR 或紧接的 `app` PR）：`just test -p lectern-app` 通过，其中 `#[gpui::test]` `appearance_change_refreshes_the_skeleton_window`（模拟外观变化后窗口刷新一次）和 `appearance_change_before_ready_does_not_touch_the_theme`（`init` 之后、`ready` 之前触发一次外观变化：不 panic、`Palette` 已换、gpui-component 的主题没有被读写）；`just bench ui/`（`ui/init`、`ui/ready`、`ui/palette_resolve`、`ui/mono_metrics_first`、`ui/idle_memory`）在预算内；`app/cold_start` 不变慢。
+- `app` 接入 `with_assets(IconAssets)`、`init`、骨架窗口的 `attach` 与 `ready`（可以在同一个 PR 或紧接的 `app` PR）：`just test -p lectern-app` 通过，其中 `#[gpui::test]` `appearance_change_refreshes_the_skeleton_window`（模拟外观变化后窗口刷新一次）和 `appearance_change_before_ready_does_not_touch_the_theme`（直接调 `init`、`open_window`、`attach`，不经 `init_fixed` 和 `startup::release`；`ready` 之前触发一次外观变化：不 panic、`Palette` 已换、gpui-component 的主题没有被读写）；`just bench ui/`（`ui/init`、`ui/ready`、`ui/palette_resolve`、`ui/mono_metrics_first`、`ui/idle_memory`）在预算内；`app/cold_start` 不变慢。
 - 手动（macOS，发布构建）：系统设置里切换强调色，窗口里 `accent` 随之变化、不重启；切换浅色 / 深色同样；日志里 `ui initialised` 的 `accent` 为 `system`、`mono_metrics().family` 为 `.AppleSystemUIFontMonospaced`（经 `--log ui=debug` 的调试输出或探针读出）。
 - `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}' crates/ui/src --glob '!**/builtin.rs' --glob '!**/tests*'` 没有结果（颜色值只在内置表和 agent 色常量里，后者放在 `builtin.rs`）。
 
