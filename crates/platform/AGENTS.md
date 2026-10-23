@@ -13,7 +13,7 @@ macOS 专属能力：FSEvents、`open -a`、钥匙串、Seatbelt、代码签名�
 - 范围读取（`safe_read/range.rs`）：`open_file` 与 `read` 共用打开、`fstat` 和 `Walk` 后备，普通文件的描述符转交给 `OpenFile`，在它 drop 时关闭；`OpenFile` 上的读取只用 `pread`，不用文件偏移，不另开描述符，每次读完 `fstat` 一次，返回的 `Meta::identity()` 供调用方核对版本。一次 `read_ranges` 最多 `MAX_RANGES` 段、`MAX_RANGE_BYTES` 字节。不做内存映射，不建行索引（行检查点由 `file_reader` 按 blob OID 缓存）。
 - 原子替换（`safe_read/replace.rs`）：`replace_file` 是 `safe_read` 里唯一的写。父目录用 `list` 与 `open_dir` 的目录打开函数打开，之后只在这个目录描述符上做单级名字的 `*at` 调用；临时文件 `O_CREAT | O_EXCL | O_NOFOLLOW`，比较身份之后 `renameat`，任何出错路径都删除临时文件。不创建原来不存在的文件。
 - 线程的 CPU 时钟（`thread_clock.rs`）：Linux 用 `pthread_getcpuclockid` 加 `clock_gettime`，macOS 用 `thread_info(THREAD_BASIC_INFO)`，端口名来自 `pthread_mach_thread_np`，时钟自己持有一个用户引用、drop 时释放；读不到时为 `ErrorKind::Unsupported`，墙上时间的回退由调用方做。
-- 应用数据目录与日志目录（`dirs.rs`）：`app_data` 只读 `HOME`、`XDG_DATA_HOME`，`logs` 只读 `HOME`、`XDG_STATE_HOME`，拼出路径，不创建目录，不做其他 IO，首帧前可以调用；两个平台的拼接是纯函数，测试直接传值，不修改进程的环境变量。日志目录的布局、权限和清理归 `logging`。
+- 应用数据目录、日志目录与应用缓存目录（`dirs.rs`）：`app_data` 只读 `HOME`、`XDG_DATA_HOME`，`logs` 只读 `HOME`、`XDG_STATE_HOME`，`app_cache` 只读 `HOME`、`XDG_CACHE_HOME`，拼出路径，不创建目录，不做其他 IO，首帧前可以调用；两个平台的拼接是纯函数，测试直接传值，不修改进程的环境变量。日志目录的布局、权限和清理归 `logging`。
 - 系统版本与首选语言（`system.rs`）：`os_version` 在 macOS 上一次 `sysctlbyname("kern.osproductversion")`，只接受 ASCII 数字和点，拼成 `macOS <版本>`；其他平台为 None。`preferred_languages` 在 macOS 上用 `CFLocaleCopyPreferredLanguages`，只接受 ASCII 字母、数字和连字符的标签，最多 16 个；其他平台为空。两者的字符集检查都是纯函数，在所有平台上测试。
 - 本地时区的偏移（`time.rs`）：`utc_offset` 在 macOS 和 Linux 上都是一次 `localtime_r`，取 `tm_gmtoff`，按给定的时刻求（含夏令时）；不读 `TZ`、不调用 `tzset`、自己不缓存，时区状态归 C 库；`localtime_r` 失败或偏移超出 TZif 的范围时为 None，其他平台为 None。范围检查是纯函数，在所有平台上测试。
 - 实现其他 crate 定义的接口（`fs_watch`、`kernel` 的插件宿主等），由 `app` 注入；不依赖这些 crate 的实现。

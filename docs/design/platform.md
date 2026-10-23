@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -19,6 +19,7 @@
   - 应用数据目录（`dirs::app_data`）：不能重建的用户数据的位置，review 的标注日志用它（[ADR 0044](../adr/0044.md)，见「应用数据目录」）。
   - 日志目录（`dirs::logs`）与系统版本（`system::os_version`）：`logging` 落盘的位置和文件头里的系统版本（[ADR 0046](../adr/0046.md)，见「日志目录与系统版本」）。
   - 本地时区的偏移（`time::utc_offset`）：`usage` 的 `LocalZone` 按它把时间窗口分成本地自然日（[ADR 0020](../adr/0020.md)，见「本地时区的偏移」）。
+  - 应用缓存目录（`dirs::app_cache`）：可以重建的派生数据的位置，`cache` 的分库和 `agents` 的解压副本用它（见「应用缓存目录」）。
   - 系统首选语言（`system::preferred_languages`）：`app` 在首帧之前用它选界面语言（[ADR 0013](../adr/0013.md)，见「系统首选语言」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
@@ -905,6 +906,33 @@ pub mod system {
 - `os_version_length_is_capped`：32 字节的版本号接受，33 字节的为 None。
 - macOS 上 `os_version_reads_the_running_macos`：读到 `macOS ` 开头的版本，主版本不小于 11；其他平台上 `os_version_is_none_elsewhere`。
 
+## 应用缓存目录
+
+[#205](https://github.com/SoloJiang/lectern-app/issues/205)（`app` 装配插件）的第一个 PR。应用缓存目录存放可以随时删除、重新生成的派生数据：`app` 取其中的 `cache/` 作为 `cache::Config::root`（[cache 设计「接口」](cache.md#接口)），取 `agents/decoded/` 作为 `AgentsDeps::decoded_dir`（[agents 设计](agents.md)「压缩会话的随机读取」）。不能重建的用户数据归「应用数据目录」，日志归「日志目录与系统版本」，三棵树互不相交。
+
+### 接口
+
+```rust
+pub mod dirs {
+    /// 应用缓存目录。macOS 是 `$HOME/Library/Caches/Lectern`；其他平台（Linux，供 CI 测试）是
+    /// `$XDG_CACHE_HOME/lectern`，`XDG_CACHE_HOME` 未设置、为空或是相对路径时是 `$HOME/.cache/lectern`。
+    /// 用到的 `HOME` 未设置、为空或是相对路径时为 None。
+    /// 规则同 `app_data`：只读这两个环境变量，不创建目录，不做其他 IO，任何线程可调用。
+    pub fn app_cache() -> Option<PathBuf>;
+}
+```
+
+### 规则
+
+- 目录：macOS 用 `~/Library/Caches/` 下的 `Lectern`，这是 Apple 文件系统编程指南给可重建数据规定的位置，系统在磁盘空间不足时可以清理它，Time Machine 不备份它；目录名与应用数据目录、日志目录一样用 `Lectern`。Linux 按 XDG Base Directory 规范放在 cache 目录，用小写的 `lectern`。
+- 环境变量的处理与「应用数据目录」相同：`HOME` 只取环境变量，不查询用户数据库；相对路径视为未设置；路径的字节原样保留。拼接是纯函数（`mac_app_cache`、`xdg_app_cache`），测试构建在所有平台上都编译；`app_cache` 按 `cfg(target_os = "macos")` 选其中一个。没有 `unsafe`，不新增依赖。
+- 返回 None 时的处理由 `app` 规定（#205 的 app 设计）。
+- 不记日志：只拼路径，没有会失败的 IO。
+
+### 测试
+
+`app_cache_*` 写在 `crates/platform/src/dirs/tests.rs`，与 `app_data_*`、`logs_*` 覆盖相同的情况，同样不修改进程的环境变量：`app_cache_xdg_cache_home_set_is_used`、`app_cache_xdg_cache_home_unset_empty_or_relative_falls_back_to_home`、`app_cache_without_a_usable_home_is_none`、`app_cache_macos_is_under_library_caches`、`app_cache_keeps_non_utf8_bytes`、`app_cache_does_not_create_the_directory`、`app_cache_reads_the_process_environment`。
+
 ## 本地时区的偏移
 
 [usage 设计「对其他 crate 的要求」](usage.md#对其他-crate-的要求)的 B（[#31](https://github.com/SoloJiang/lectern-app/issues/31)）。`app` 用它实现 `usage::LocalZone`（usage 的前置条件 C），`usage` 的 `window::days` 按它把时间窗口分成本地自然日（[ADR 0020](../adr/0020.md)）。这不是 macOS 专属能力：两个平台都用 POSIX 的 `localtime_r`，与 `ThreadCpuClock` 一样放在本 crate，在 Linux CI 上也能测试。
@@ -1050,6 +1078,12 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
 - Cargo.lock 只在 `lectern-platform` 的依赖里多了 `lectern-logging`，没有新的外部 crate。
 - 本文的状态行、「实际验证」，logging 设计的状态行写明第 9 项的 `platform` 部分已实现。
 
+应用缓存目录（[#205](https://github.com/SoloJiang/lectern-app/issues/205) 的第一个 PR）一个实现 PR，写 `Refs #205`，在 `app` 的装配之前合并：
+
+- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「应用缓存目录」的 `app_cache_*`；原有的测试结果不变。
+- `git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果。
+- 本文的状态行、「实际验证」写明应用缓存目录已实现。
+
 ## 实际验证
 
 在 Linux（x86_64，内核 6.18，`openat2` 可用）上运行。macOS 专属的部分（`NofollowAny`、`nofollow_any_*`、macOS 上的 `perf_smoke`）没有在 macOS 上运行过，由 macOS CI 验证：
@@ -1113,6 +1147,11 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
   - `just test -p lectern-platform` 137 个测试通过，其中新增 4 个 `preferred_languages_*`（`preferred_languages_reads_the_running_macos` 读到本机的首选语言列表，每一项通过字符集检查）；原有的测试结果不变。
   - `cargo clippy -p lectern-platform --all-targets --all-features -- -D warnings` 通过。验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -n 'CFLocale' crates --glob '!crates/platform/**' -t rust` 没有结果。
   - 没有在 Linux 上运行：`preferred_languages_is_empty_elsewhere` 和纯函数的测试由 Linux CI 运行。
+
+- 应用缓存目录（[#205](https://github.com/SoloJiang/lectern-app/issues/205) 的第一个 PR）在 macOS（Apple 芯片，macOS 27.0.1）上：
+  - `cargo nextest run -p lectern-platform --all-features`：144 个测试通过，其中新增 7 个 `app_cache_*`。
+  - `cargo clippy -p lectern-platform --all-targets --all-features -- -D warnings` 通过。`git diff origin/main -- Cargo.lock` 为空；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果。
+  - 没有在 Linux 上运行（本机没有 Linux 目标）：Linux 规则的纯函数与 `app_cache_reads_the_process_environment` 由 Linux CI 运行。
 
 ## 与设计的差异
 
