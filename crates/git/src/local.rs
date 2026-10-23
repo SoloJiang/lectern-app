@@ -206,6 +206,14 @@ fn unchanged_detail(change: &Change, list: &ChangeList, prev: &ChangeSet) -> Opt
         .flatten()
 }
 
+/// `change` as the `services` type, its detail from the change itself (a
+/// comparison with zero `total_patch_bytes` lists every file). For a
+/// caller that keys files by status, path, sides and mode without building
+/// a `ChangeList` (review's overview, review design「概览」). No IO.
+pub fn file_change_of(change: &Change) -> FileChange {
+    file_change(change, None)
+}
+
 /// `detail`, when given, is the previous list's for an equal change.
 fn file_change(change: &Change, detail: Option<ChangeDetail>) -> FileChange {
     FileChange {

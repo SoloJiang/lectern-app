@@ -523,6 +523,10 @@ impl LocalChanges {
     pub fn new(repo: Repo, worktree: Worktree, project: ProjectKey, key: WorktreeKey, base: BaseSpec, limits: Limits) -> LocalChanges;
 }
 impl ChangeSource for LocalChanges { /* caps: refresh、fingerprint 都为 true */ }
+
+/// 一个 `Change` 转成 `services` 的 `FileChange`，detail 取改动自己的；不做 IO。给不建
+/// `ChangeList` 而要按状态、路径、两侧 OID 与模式识别文件的调用方（review 的概览）。
+pub fn file_change_of(change: &Change) -> FileChange;
 ```
 
 - 句柄：`ChangeList::handle` 放一个私有的 `Held { source, set: Arc<ChangeSet> }`。`source` 是构造时从进程内计数器取得的编号，`refresh`、`texts`、`fingerprint` 只用本实例放进去的句柄。

@@ -874,3 +874,33 @@ fn change_source_list_owns_its_change_set() {
     assert!(weak.upgrade().is_none());
     assert!(weak_bytes.upgrade().is_none());
 }
+
+/// `file_change_of` gives what the list gives for the same change, the
+/// detail aside (the change's own: `Listed` under zero patch bytes).
+#[test]
+fn file_change_of_matches_the_list_but_for_the_detail() {
+    let t = clean_repo(&[("a.txt", b"one\n"), ("b.txt", b"bee\n")]);
+    t.write_file("a.txt", b"one\ntwo\n");
+    std::fs::remove_file(t.root().join("b.txt")).unwrap();
+    t.write_file("c.txt", b"new\n");
+    let limits = Limits {
+        retained_bytes: 0,
+        total_patch_bytes: 0,
+        ..Limits::default()
+    };
+    let source = source_with(&t, BaseSpec::Head, limits.clone());
+    let list = fetch(&source);
+    let set = set_of(&source, &list);
+    assert_eq!(set.files().len(), 3);
+    for (change, file) in set.files().iter().zip(list.files.iter()) {
+        let of = file_change_of(change);
+        assert_eq!(of.status, file.status, "{:?}", change.path);
+        assert_eq!(of.path, file.path);
+        assert_eq!(of.old, file.old);
+        assert_eq!(of.new, file.new);
+        assert_eq!(of.untracked, file.untracked);
+        assert_eq!(of.generated, file.generated);
+        assert_eq!(of.staged, file.staged);
+        assert_eq!(of.detail, ChangeDetail::Listed, "{:?}", change.path);
+    }
+}
