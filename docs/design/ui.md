@@ -10,7 +10,7 @@
   - 系统语义色与强调色：从 macOS 读取（经 `platform`），按窗口外观（浅色 / 深色）解析成 `Palette`；外观或强调色变化时重新读取并刷新窗口。
   - 字体：系统 UI 字体与系统等宽字体的家族常量、字号层级（`TextRole`），以及 `file_reader` 和 diff 行需要的等宽字体度量（`MonoMetrics`，[file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)前置条件 E）。
   - 代码配色：`lectern_syntax::TokenKind` 到系统色与字重的映射，浅色 / 深色各一组。
-  - 动效原语：[交互规范「动效」](interaction.md#动效)表里的时长与曲线作为具名常量；可打断的过渡（`Transition`）、弹簧（`Spring`）、三次贝塞尔求值；减弱动态效果的替代方案。
+  - 动效原语：[交互规范「动效」](interaction.md#动效)表里的时长与曲线作为具名常量；可打断的过渡（`Transition`，含弹簧）、三次贝塞尔求值；减弱动态效果的替代方案。
   - 界面文本的类型 `Text`：控件只接受来自 `lectern-i18n` 的文本或明确标为原样显示的文本（[i18n 设计](i18n.md)「本 issue 之外」留给本 crate 的两件事之一）；`Strings` 的 GPUI 全局与切换语言后的刷新（另一件）。
   - 共用的小控件：只做 Welcome、项目主页、审阅视图需要、而 gpui-component 没有或与 macOS 不一致的几个（见「控件」），加上 `workspace` 的一次性提示 `Hint`。
   - 贡献载荷的类型（`contrib` 模块）：`workspace` 的注册表里类型擦除的 `Payload` 装的具体类型（屏幕、侧栏面板与条目、检查器页、面板、覆盖层、快捷键）。形状由 [workspace 设计](workspace.md)「`ui::contrib` 的载荷类型」规定，放在本 crate 是因为 `services` 不能依赖 GPUI 和 `lectern-i18n`。
@@ -363,7 +363,8 @@ pub mod motion {
 
     /// 进行中的 `Transition` 个数（含弹簧）。`workspace` 的帧记录用它判断动画都已停下（`RecordStop::AnimationsSettled`）。
     /// 只数 `Transition`；`Motion::animation` 建的一次性 GPUI 动画（勾选、悬停、到达）不计，它们最长 240 ms，
-    /// 调用方在计数归零后再等 `ARRIVE.duration` 即可。
+    /// 调用方在计数归零后再等 `ARRIVE.duration` 即可。计数在 `tick` 里减，所以持有者在过渡结束前就不再渲染（也不 drop）时，
+    /// 这个过渡一直计着；bench 的场景持续渲染到停止条件满足，不会碰到（已知限制）。
     pub fn active_transitions(cx: &App) -> usize;
 }
 ```
@@ -506,7 +507,7 @@ pub mod contrib {
 ```
 
 - 本 crate 不调用这些闭包，不登记、不注销：只是类型。`Text`、`Key`、`Icon` 是本 crate 的类型，所以 `label` 不能是字面量。
-- `SidebarItem` 原名 `SidebarEntry`，与 `services::workspace::SidebarEntry`（注册表的条目）重名，改为 `SidebarItem`；workspace 设计同步改名。
+- `SidebarItem` 原名 `SidebarEntry`，与 `services::workspace::SidebarEntry`（注册表的条目）重名，改为 `SidebarItem`；workspace 设计的改名和 `icon` 类型的对应修改由 `workspace` 的下一个文档 PR 做。
 
 ### 探针
 
@@ -598,7 +599,7 @@ pub mod semantic {
 - `Palette`：每个外观一份，`init` 时建两份，`platform` 通知时整份替换，每份 27 个 `Hsla`（432 字节），放在一个 GPUI 全局 `UiState` 里，连同 `Strings`、减弱动态效果标志、`accent_follows_system`、`MonoMetrics` 的缓存（≤ 4 项）和 `platform::appearance::Watch`。`UiState` 固定大小，不随运行增长。
 - 内置的系统色表：`src/palette/builtin.rs`，两个外观各 27 项，值取自 Apple HIG「Color」页面发布的 macOS 系统色（sRGB），文件头写明来源与查阅日期。用途：`platform` 返回 None 时（Linux 的 `cargo check`、headless、测试、系统接口失败），以及测试的参照。`init_fixed` 只用这张表。`diff_added_background` / `diff_removed_background`：`system(Green)` / `system(Red)` 在浅色下 12% 透明度、深色下 18% 透明度叠在 `control_background` 上，预先算好。
 - agent 标识色：浅 `#D9790A` / 深 `#C77A1A`（Claude Code），浅 `#5856D6` / 深 `#6260D8`（Codex），来自交互规范「视觉」；不从系统读。
-- `Transition`：`from`、`to`、`start`、`motion`、`reduced` 快照（开始时的值，过渡中途不换），共 40 字节，由视图持有。
+- `Transition`：`from`、`to`、`start`、`motion`、当前值、弹簧的速度、`reduced` 快照（开始时的值，过渡中途不换）、是否计入计数，共 56 字节，由视图持有，不可 `Clone`（drop 时要减计数）。
 - 贝塞尔求值：`Easing::eval` 对 `CubicBezier` 用牛顿迭代求 x(t)=进度 的 t，再取 y(t)；不建查表，每次调用常数时间（≤ 8 次迭代）。
 - 记录器（`semantic::Recorder`）：进程一个，一个 `AtomicBool` 开关加一个 `Vec<Record>` 和线程本地的父节点栈。关闭时 `Vec` 为空、不分配；`begin` 到 `finish` 之间按这一帧的节点数增长，`finish` 把它整个取走。发布构建里编译，但开关永远不打开（只有 `ui_probe` 和测试调用 `begin`），每个包装元素每帧的代价是一次原子读。
 
@@ -751,7 +752,7 @@ pub mod semantic {
 
 ## 验收
 
-分四步，每步一个 PR；前置条件 A 在 `platform` 单独一个 PR。每步都要在 macOS 上 `just check`、`just test -p lectern-ui`、`just doctest`、`just deny` 通过，并且 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 没有结果。
+分四步，每步一个 PR；前置条件 A 在 `platform` 单独一个 PR；第 1 步的 `contrib` 还要 `services` 的 `workspace` 模块（[workspace 设计](workspace.md)「对其他 crate 的要求」A，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）先合并。每步都要在 macOS 上 `just check`、`just test -p lectern-ui`、`just doctest`、`just deny` 通过，并且 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 没有结果。
 
 **前置条件 A（`platform`，`Refs #214`）**：`platform::appearance` 的三个函数与 `Watch`；[platform 设计](platform.md)增加「系统外观」一节。`just test -p lectern-platform` 里 `appearance_*` 通过：两个外观各读到一份 `SystemColors`、`label` 的明度在浅色下低于 0.5、深色下高于 0.5；`reduce_motion` 返回 Some；`watch` 在 drop 后不再回调（测试里经 `NSNotificationCenter` 手动投递一次通知）。
 
