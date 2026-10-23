@@ -24,6 +24,7 @@ use lectern_services::session::{SessionKey, SourceId, Timestamp};
 use crate::log::{LogFile, SessionId};
 use crate::testing::{Driven, FakeProjects, FakeSessions, ReflogLine, write_reflog};
 
+mod brief;
 mod logs;
 
 pub(crate) const SOURCE: &str = "session-claude-code";

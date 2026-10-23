@@ -8,10 +8,12 @@
 mod driven;
 mod fake;
 mod fixture;
+mod host;
 
 pub use driven::{Driven, ReflogLine, write_reflog};
 pub use fake::{Calls, FakeProjects, FakeSessions};
-pub use fixture::{CutoffRun, MarkSeenFixture, SessionFixture};
+pub use fixture::{BriefFixture, CutoffRun, MarkSeenFixture, SessionFixture};
+pub use host::{TestHost, host};
 
 use std::io;
 use std::path::Path;

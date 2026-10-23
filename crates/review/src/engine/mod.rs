@@ -27,6 +27,7 @@
 //!   state lock is released.
 
 pub(crate) mod attribute;
+mod brief;
 mod narrative;
 pub(crate) mod round;
 mod rows;
@@ -157,6 +158,8 @@ pub(crate) struct Engine {
     versions: Mutex<Versions>,
     /// (ancestor, commit) → is it its ancestor; `review.ancestry` behind it.
     ancestry: Mutex<HashMap<(lectern_git::Oid, lectern_git::Oid), bool>>,
+    /// The `BriefRules` providers registered (「简报规则的扩展点」).
+    providers: Mutex<brief::Providers>,
     /// IO faults and size limits for the logs opened from now on.
     #[cfg(test)]
     log_test: Mutex<LogTest>,
@@ -224,6 +227,8 @@ struct Open {
     prepare: u64,
     rows: HashMap<RowsKey, Arc<FileRows>>,
     texts: HashMap<TextKey, Arc<str>>,
+    /// The providers' request for the current work and their replies.
+    brief: brief::BriefState,
 }
 
 impl Open {
@@ -282,6 +287,7 @@ impl Engine {
             adapters: Mutex::new(HashMap::new()),
             versions: Mutex::new(Versions::default()),
             ancestry: Mutex::new(HashMap::new()),
+            providers: Mutex::new(brief::Providers::default()),
             #[cfg(test)]
             log_test: Mutex::new(LogTest::default()),
         })
@@ -325,9 +331,18 @@ impl Engine {
         }
     }
 
+    /// Emits the events; after a `Changed`, asks the brief providers about
+    /// a work they have not seen (`engine::brief`).
     fn emit(&self, events: Vec<ReviewEvent>) {
         for e in events {
+            let changed = match &e {
+                ReviewEvent::Changed { id, .. } => Some(*id),
+                _ => None,
+            };
             (self.cfg.emit)(e);
+            if let Some(id) = changed {
+                self.ask_providers(id);
+            }
         }
     }
 
@@ -370,6 +385,7 @@ impl Engine {
                 prepare: 0,
                 rows: HashMap::new(),
                 texts: HashMap::new(),
+                brief: brief::BriefState::default(),
             },
         );
         self.start_round(&mut state, id, Kind::Fetch, Priority::Interactive);
@@ -452,6 +468,7 @@ impl Engine {
     fn release(&self, mut state: MutexGuard<'_, State>, id: ReviewId) -> Option<Open> {
         let open = state.reviews.remove(&id)?;
         open.cancel.store(true, Ordering::Release);
+        open.brief.cancel();
         state.targets.remove(&open.target);
         let used: HashSet<WorktreeKey> = state
             .reviews
@@ -485,8 +502,10 @@ impl Engine {
         };
         for open in reviews.values() {
             open.cancel.store(true, Ordering::Release);
+            open.brief.cancel();
         }
         drop(reviews);
+        lock(&self.providers).clear();
         lock(&self.gits).clear();
         lock(&self.tables).clear();
         lock(&self.claims).clear();
@@ -856,6 +875,7 @@ impl Engine {
             .collect();
         let last_seen = index.and_then(|i| i.last_seen(&work.target_key));
         let turns = self.turns(work, &results, last_seen);
+        let brief = self.brief(open, work, &results, &seen);
         ReviewSnapshot {
             id: open.snapshot.id,
             target: work.target.clone(),
@@ -869,7 +889,7 @@ impl Engine {
             seen,
             turns,
             groups: Arc::clone(&work.groups),
-            brief: empty_brief(),
+            brief,
             focus_review: Arc::clone(&work.focus_review),
             focus_touched: Arc::clone(&work.focus_touched),
             totals: work.list.totals.clone(),

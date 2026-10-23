@@ -2,25 +2,30 @@
 //! (docs/design/review.md「本 crate 的公开项」). Tasks run only inside
 //! [`Driven::run`], on the calling thread, `Interactive` before
 //! `Background`; the events are kept with the instant they were emitted.
+//! [`Driven::with_timers`] adds a manual `Host`: what the engine asks for
+//! `later` (the retention, the brief providers' timeout) runs when the
+//! test advances the host's clock.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use lectern_cache::{Budgets, Cache, Config as CacheConfig};
-use lectern_executor::Executor;
+use lectern_executor::{Executor, Priority};
 use lectern_git::{HashKind, Oid};
+use lectern_kernel::{ActivationToken, BusyGuard};
 use lectern_services::changes::{BaseSpec, ChangePath, RefreshHint};
 use lectern_services::project::Projects;
 use lectern_services::review::{
-    FileRows, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
+    BriefRules, BriefRulesRegistration, FileRows, ReviewCommand, ReviewEvent, ReviewId,
+    ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
 };
 use lectern_services::session::{SessionKey, SessionSource, SourceId, Timestamp};
 
 use super::fake::{FakeProjects, FakeSessions};
 use crate::engine::round::Kind;
-use crate::engine::{Config, Engine, Held, attribute};
+use crate::engine::{Config, Engine, Held, Host, attribute};
 
 /// The engine with its fakes, a cache and a log directory under `dir`.
 pub struct Driven {
@@ -34,6 +39,61 @@ pub struct Driven {
     now: Arc<AtomicI64>,
     projects: Arc<FakeProjects>,
     cache: Cache,
+    host: Option<Arc<ManualHost>>,
+}
+
+/// The engine's `Host` with a manual clock: tasks run on the manual
+/// executor as without a host, `later` queues until [`Driven::advance`].
+struct ManualHost {
+    executor: Executor,
+    now: Mutex<Duration>,
+    timers: Mutex<Vec<Timer>>,
+}
+
+/// What runs when the clock reaches the instant.
+type Timer = (Duration, Box<dyn FnOnce() + Send>);
+
+impl ManualHost {
+    /// Moves the clock and runs what came due, in order.
+    fn advance(&self, by: Duration) {
+        let now = {
+            let mut now = self.now.lock().unwrap_or_else(PoisonError::into_inner);
+            *now += by;
+            *now
+        };
+        loop {
+            let due = {
+                let mut timers = self.timers.lock().unwrap_or_else(PoisonError::into_inner);
+                let i = (0..timers.len()).min_by_key(|&i| timers[i].0);
+                match i {
+                    Some(i) if timers[i].0 <= now => Some(timers.remove(i).1),
+                    _ => None,
+                }
+            };
+            match due {
+                Some(work) => work(),
+                None => break,
+            }
+        }
+    }
+}
+
+impl Host for ManualHost {
+    fn spawn(&self, priority: Priority, work: Box<dyn FnOnce() + Send>) {
+        self.executor.run(priority, work).detach();
+    }
+
+    fn later(&self, delay: Duration, work: Box<dyn FnOnce() + Send>) {
+        let at = *self.now.lock().unwrap_or_else(PoisonError::into_inner) + delay;
+        self.timers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((at, work));
+    }
+
+    fn busy(&self) -> Option<BusyGuard> {
+        None
+    }
 }
 
 impl Driven {
@@ -62,7 +122,37 @@ impl Driven {
         sessions: Vec<Arc<FakeSessions>>,
         dir: &Path,
         now: Timestamp,
-        interactive_budget: std::time::Duration,
+        interactive_budget: Duration,
+    ) -> Driven {
+        Driven::build(projects, sessions, dir, now, interactive_budget, false)
+    }
+
+    /// [`Driven::new`] with a manual `Host`: `close` keeps the review until
+    /// [`Driven::advance`] passes the retention, and the brief providers'
+    /// timeout fires the same way.
+    pub fn with_timers(
+        projects: Arc<FakeProjects>,
+        sessions: Vec<Arc<FakeSessions>>,
+        dir: &Path,
+        now: Timestamp,
+    ) -> Driven {
+        Driven::build(
+            projects,
+            sessions,
+            dir,
+            now,
+            crate::cutoff::INTERACTIVE_BUDGET,
+            true,
+        )
+    }
+
+    fn build(
+        projects: Arc<FakeProjects>,
+        sessions: Vec<Arc<FakeSessions>>,
+        dir: &Path,
+        now: Timestamp,
+        interactive_budget: Duration,
+        timers: bool,
     ) -> Driven {
         for s in &sessions {
             s.locate(&*projects);
@@ -90,6 +180,13 @@ impl Driven {
             .map(|s| s as Arc<dyn SessionSource>)
             .collect();
         let held_projects = Arc::clone(&projects);
+        let host = timers.then(|| {
+            Arc::new(ManualHost {
+                executor: executor.clone(),
+                now: Mutex::new(Duration::ZERO),
+                timers: Mutex::new(Vec::new()),
+            })
+        });
         let engine = Engine::new(Config {
             executor: executor.clone(),
             cache: cache.clone(),
@@ -99,7 +196,7 @@ impl Driven {
                 Some(Held::new(Arc::clone(&held_projects) as Arc<dyn Projects>))
             }),
             sources: Arc::new(move || sources.iter().map(|s| Held::new(Arc::clone(s))).collect()),
-            host: None,
+            host: host.clone().map(|h| h as Arc<dyn Host>),
             watcher: None,
             emit: Arc::new(move |e| {
                 let at = Instant::now();
@@ -132,7 +229,26 @@ impl Driven {
             now: clock,
             projects,
             cache,
+            host,
         }
+    }
+
+    /// Moves the manual host's clock by `by` and runs what came due (the
+    /// tasks they submit run in the next [`Driven::run`]). Nothing without
+    /// [`Driven::with_timers`].
+    pub fn advance(&self, by: Duration) {
+        if let Some(host) = &self.host {
+            host.advance(by);
+        }
+    }
+
+    /// `Review::register_brief_rules`.
+    pub fn register_brief_rules(
+        &self,
+        provider: Arc<dyn BriefRules>,
+        token: ActivationToken,
+    ) -> BriefRulesRegistration {
+        self.engine.register_brief_rules(provider, token)
     }
 
     /// From now on, keep the snapshot each `Changed` published, for

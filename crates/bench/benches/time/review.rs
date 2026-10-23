@@ -22,8 +22,8 @@ use lectern_fs_watch::testing::{FakeBackend, manual};
 use lectern_kernel::testing::TestKernel;
 use lectern_review::ReviewDeps;
 use lectern_review::testing::{
-    ChainRun, CutoffRun, Driven, FakeProjects, FakeSessions, LogLoad, MarkSeenFixture,
-    SessionFixture, chain_fixture, load_log, write_log,
+    BriefFixture, ChainRun, CutoffRun, Driven, FakeProjects, FakeSessions, LogLoad,
+    MarkSeenFixture, SessionFixture, chain_fixture, load_log, write_log,
 };
 use lectern_services::project::Projects;
 use lectern_services::review::{
@@ -84,6 +84,13 @@ pub const ROWS_FIRST: Bench = Bench {
 pub const MARK_SEEN_5000: Bench = Bench {
     id: "review/mark_seen_5000",
     run: mark_seen_5000,
+};
+
+/// (step 5) The rule brief of 5000 files, every rule represented, no
+/// providers: the rules alone, as a snapshot's assembly runs them.
+pub const BRIEF_5000: Bench = Bench {
+    id: "review/brief_5000",
+    run: brief_5000,
 };
 
 /// The agent adds a turn and a line to a file of the open review: from the
@@ -363,6 +370,28 @@ fn mark_seen_5000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     Ok(vec![
         Measured::new("review/mark_seen_5000", Value::Time(time))
             .with_note(Some(format!("{files} files, the seen array replaced"))),
+    ])
+}
+
+fn brief_5000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let files = ctx.scale(5000, 500);
+    let fixture = BriefFixture::new(files);
+    let brief = fixture.brief();
+    if brief.items.len() != 12 || brief.omitted == 0 {
+        return Err(BenchError::debug(
+            "brief",
+            (brief.items.len(), brief.omitted),
+        ));
+    }
+    let time = ctx.time(|| {
+        std::hint::black_box(fixture.brief());
+    });
+    Ok(vec![
+        Measured::new("review/brief_5000", Value::Time(time)).with_note(Some(format!(
+            "{files} files, {} items kept, {} omitted",
+            brief.items.len(),
+            brief.omitted
+        ))),
     ])
 }
 

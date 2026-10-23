@@ -13,6 +13,7 @@
 //! what a record keeps of this crate's values (docs/design/review.md
 //! 「日志与诊断」).
 
+mod brief;
 mod chain;
 mod claims;
 mod cutoff;
