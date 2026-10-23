@@ -12,7 +12,8 @@
   - 代码配色：`lectern_syntax::TokenKind` 到系统色与字重的映射，浅色 / 深色各一组。
   - 动效原语：[交互规范「动效」](interaction.md#动效)表里的时长与曲线作为具名常量；可打断的过渡（`Transition`）、弹簧（`Spring`）、三次贝塞尔求值；减弱动态效果的替代方案。
   - 界面文本的类型 `Text`：控件只接受来自 `lectern-i18n` 的文本或明确标为原样显示的文本（[i18n 设计](i18n.md)「本 issue 之外」留给本 crate 的两件事之一）；`Strings` 的 GPUI 全局与切换语言后的刷新（另一件）。
-  - 共用的小控件：只做 Welcome、项目主页、审阅视图需要、而 gpui-component 没有或与 macOS 不一致的几个（见「控件」）。
+  - 共用的小控件：只做 Welcome、项目主页、审阅视图需要、而 gpui-component 没有或与 macOS 不一致的几个（见「控件」），加上 `workspace` 的一次性提示 `Hint`。
+  - 贡献载荷的类型（`contrib` 模块）：`workspace` 的注册表里类型擦除的 `Payload` 装的具体类型（屏幕、侧栏面板与条目、检查器页、面板、覆盖层、快捷键）。形状由 [workspace 设计](workspace.md)「`ui::contrib` 的载荷类型」规定，放在本 crate 是因为 `services` 不能依赖 GPUI 和 `lectern-i18n`。
   - UI 探针的语义节点（`semantic` 模块）：节点的类型（角色、稳定 ID、文字、状态、屏幕范围）、给元素附上节点的包装元素，以及探针开关时收集记录的 `Recorder`。`ui_probe`（tool 层）读它，视图 crate 只依赖本 crate（[技术调研「UI 结构探针」](tech-research.md#6-ui-结构探针)、[#6](https://github.com/SoloJiang/lectern-app/issues/6)；形状与 `ui_probe` 的设计一致）。
 - 不做：
   - 读 AppKit：`NSColor`、`NSWorkspace` 的减弱动态效果、系统通知，归 `platform`（架构规则 6，见「对其他 crate 的要求」）。本 crate 只经 GPUI 和 `platform` 的接口。
@@ -20,6 +21,7 @@
   - 各屏幕的内容、Fluent 文案和 Action：归 `welcome`、`project_home`、`review_view`、`file_reader`。本 crate 没有自己的界面字符串。
   - 探针的导出、截图、Action 触发：归 `ui_probe`。
   - 读写语言设置：`app` 经 `platform` 读系统语言、选出 `Locale` 后传进来（[app 设计](app.md)）。
+  - 贡献的注册、注销、导航状态机和把 `Payload` 还原成 `contrib` 类型：归 `workspace`；本 crate 只定义类型和 `into_payload`。
 - 本 issue 之外：
   - 开关（Toggle）：第一批屏幕没有开关，只定义它的动效常量 `SWITCH`；控件随设置页一起做。
   - SF Symbols：GPUI 不能直接画 `NSImage`，第一批屏幕的图标用 gpui-component 自带的 Lucide 图标（见「未决问题」1）。
@@ -34,6 +36,7 @@
 | `gpui-kit-assets`（`=0.7.3`，gpui-component 的依赖） | `icon_assets!` 宏生成 `IconAssets`：只嵌入 10 个图标 | 已在 Cargo.lock，与 gpui-component 同版本、一起升级；直接依赖只为用它的宏 |
 | `lectern-i18n` | `Strings`、`Key`、`FmtKey`、`Args`、`Locale`：`Text` 的构造 | 界面字符串不硬编码（[ADR 0013](../adr/0013.md)） |
 | `lectern-platform` | `appearance::{system_colors, reduce_motion, watch}`（前置条件 A） | macOS 专属能力只在 `platform`（架构规则 6）；视图层可以依赖基础设施层 |
+| `lectern-services` | `workspace::Payload`：`contrib` 类型的 `into_payload`；`WorkspaceCommand`（`SidebarItem::on_select`） | kernel 层，任何层都可以依赖 |
 | `lectern-syntax` | `TokenKind`（[file_reader 设计](file_reader.md)「`syntax` 的公开项」） | 映射的键就是它的枚举，不另抄一份；它是非插件的领域库，视图层可以依赖 |
 | `lectern-logging` | 「日志与诊断」的记录；测试用 `test-support` 的 `testing::capture()` | [ADR 0046](../adr/0046.md) |
 | `insta`（dev） | 语义树和配色表的快照 | 已在工作区 |
@@ -274,10 +277,13 @@ pub mod motion {
         /// 交互规范里写作 ease-out 的项
         EaseOut,
         Linear,
+        /// 弹簧（进入会话）。`Transition` 对它用 GPUI 的 `SpringConfig::step` 逐帧推进、保留速度，
+        /// 重新设目标时不重开；`Motion::duration` 是 `settle_time`，只用来判断结束和减弱动态效果时的淡入淡出时长。
+        Spring(SpringConfig),
     }
 
     impl Easing {
-        /// 进度 0..=1 → 值；贝塞尔允许越过 1（开关的回弹）。
+        /// 进度 0..=1 → 值；贝塞尔允许越过 1（开关的回弹）。`Spring` 用 GPUI 的 `sampled_easing`（从静止起步的采样）。
         pub fn eval(self, t: f32) -> f32;
         /// 转成 `gpui::Animation::with_easing` 接受的闭包。
         pub fn into_gpui(self) -> impl Fn(f32) -> f32 + 'static;
@@ -312,7 +318,8 @@ pub mod motion {
 
     /// 进入会话：spring · response 0.35 · damping 0.86。换算（质量 1）：
     /// stiffness = (2π / 0.35)² ≈ 322.3，damping = 2 × 0.86 × √stiffness ≈ 30.9。
-    pub const ENTER_SESSION: SpringConfig;
+    pub const ENTER_SESSION_SPRING: SpringConfig;
+    pub const ENTER_SESSION: Motion;  // Easing::Spring(ENTER_SESSION_SPRING) · moves · duration = settle_time（≈ 0.6 s）
 
     /// 系统的减弱动态效果是否开启（`platform::appearance::reduce_motion`，变化时由通知更新）。
     pub fn reduced(cx: &App) -> bool;
@@ -332,11 +339,12 @@ pub mod motion {
         Fade(Motion),
     }
 
-    /// 可打断的标量过渡：面板偏移、进度、展开高度。视图把它放在自己的状态里。
-    /// 重新设目标时从当前值和当前进度继续（交互规范「随时可打断」），不排队、不跳回起点。
-    #[derive(Clone, Debug)]
+    /// 可打断的标量过渡：面板偏移、进度、展开高度、进入会话的标题位移。视图把它放在自己的状态里。
+    /// 重新设目标时从当前值和当前进度继续（交互规范「随时可打断」），不排队、不跳回起点；弹簧还保留速度。
+    /// 进行中的个数记在一个进程级计数里（`go` 开始时加一，`tick` 到达、`set` 和 drop 时减一），供 `active_transitions`。
+    #[derive(Debug)]
     pub struct Transition {
-        /* from, to, start: Instant, motion: Motion, 当前值 */
+        /* from, to, start: Instant, motion: Motion, 当前值, 弹簧的速度, 是否计入计数 */
     }
 
     impl Transition {
@@ -353,12 +361,10 @@ pub mod motion {
         pub fn is_running(&self, now: Instant) -> bool;
     }
 
-    /// 弹簧过渡：进入会话时列表行标题的位移与缩放。包装 GPUI 的 `SpringAnimation`：
-    /// 重新设目标时保留速度（`SpringConfig::step`），本身就可打断。减弱动态效果时退化为 `Fade`。
-    pub struct Spring;
-    impl Spring {
-        pub fn enter_session(cx: &App) -> SpringAnimation<f32>;
-    }
+    /// 进行中的 `Transition` 个数（含弹簧）。`workspace` 的帧记录用它判断动画都已停下（`RecordStop::AnimationsSettled`）。
+    /// 只数 `Transition`；`Motion::animation` 建的一次性 GPUI 动画（勾选、悬停、到达）不计，它们最长 240 ms，
+    /// 调用方在计数归零后再等 `ARRIVE.duration` 即可。
+    pub fn active_transitions(cx: &App) -> usize;
 }
 ```
 
@@ -462,7 +468,45 @@ impl Expander {
 }
 ```
 
+```rust
+/// 一次性提示（`workspace` 的 `workspace-command-failed` 等）：内容区顶部居中的一行次要文字，`control_background` 底、圆角、阴影，
+/// 用 `ARRIVE` 从上方 8pt 淡入，`duration` 后用 `HOVER_OUT` 淡出并由调用方 drop；再次触发时替换文字、重新计时。不可交互，不加遮罩，不排队。
+pub struct Hint { /* id, text, shown_at: Instant, duration */ }
+impl Hint {
+    /// `duration` 默认 2.5 s。
+    pub fn new(id: NodeId, text: Text, shown_at: Instant) -> Hint;
+    pub fn duration(self, duration: Duration) -> Hint;
+    /// 调用方每帧问一次：到期后返回 true，调用方把它从状态里去掉。
+    pub fn is_expired(&self, now: Instant) -> bool;
+}
+```
+
 面板的滑入（`PANEL_OPEN` / `PANEL_CLOSE`）没有控件：`workspace` 的面板容器持有一个 `Transition`（0 = 收起，1 = 展开），把 `(1 - value) × 面板宽度` 用作 `translate_x`；减弱动态效果时 `Effective::Fade`，偏移为 0、透明度取 value。
+
+### 贡献载荷（`contrib`）
+
+`workspace` 的注册表（`services::workspace`）在 kernel 层，装不下 GPUI 的类型和 Fluent 键，所以每种贡献的具体载荷放在本 crate 的 `contrib` 模块，`workspace` 从 `Payload` 里 `downcast` 回来。字段、调用线程和生命周期以 [workspace 设计](workspace.md)「`ui::contrib` 的载荷类型」为准，本文只列名字和本 crate 决定的两点：
+
+```rust
+pub mod contrib {
+    pub type ViewFactory<Arg> = Arc<dyn Fn(&Arg, &mut Window, &mut App) -> AnyView + Send + Sync>;
+    pub struct Screen { pub build: ViewFactory<Target>, pub toolbar: Arc<dyn Fn(&mut App) -> ToolbarItems + Send + Sync> }
+    pub struct ToolbarItems { pub title: Text, pub subtitle: Option<Text>, pub controls: Vec<AnyElement> /* ≤ 3 */ }
+    pub struct SidebarPanel { pub build: ViewFactory<()> }
+    /// 侧栏的一个条目（`services::workspace::SidebarEntry` 的载荷）。图标用本 crate 的 `Icon`（见「未决问题」1），不是 SF Symbols 的名字。
+    pub struct SidebarItem { pub label: Key, pub icon: Option<Icon>, pub on_select: WorkspaceCommand }
+    pub struct InspectorTab { pub label: Key, pub build: ViewFactory<()> }
+    pub struct Panel { pub build: ViewFactory<()> }
+    pub struct Overlay { pub build: ViewFactory<()> }
+    pub struct KeyBindings(pub Vec<(&'static str, Box<dyn gpui::Action>, Option<&'static str>)>);
+
+    /// 每个类型都有：装进 `services::workspace::Payload`。`workspace` 用 `Payload::downcast::<Screen>()` 一类取回。
+    impl Screen { pub fn into_payload(self) -> Payload; }
+}
+```
+
+- 本 crate 不调用这些闭包，不登记、不注销：只是类型。`Text`、`Key`、`Icon` 是本 crate 的类型，所以 `label` 不能是字面量。
+- `SidebarItem` 原名 `SidebarEntry`，与 `services::workspace::SidebarEntry`（注册表的条目）重名，改为 `SidebarItem`；workspace 设计同步改名。
 
 ### 探针
 
@@ -587,7 +631,7 @@ pub mod semantic {
 
 - 用到的控件与动效原语见「接口」；本 crate 自己不定义任何颜色值、字体名和时长之外的东西：颜色来自 `platform` 或内置表，时长来自交互规范的表。
 - Fluent 键：没有。本 crate 不显示自己的文字；`Text` 只是容器。
-- 探针节点：控件自带角色（`Button` → `Role::Button`，`CircleCheck` → `Role::Toggle`（`checked`），`Progress` → `Role::Progress`（`attrs` 里 `fraction`），`Segmented` → `Role::TabBar` 与每项 `Role::Tab`（`selected`），`GroupedList` → `Role::List`，`Row` → `Role::ListItem`（`selected`），`AgentDot` → `Role::Badge`（`attrs` 里 `agent`），`Expander` → `Role::Group`（`expanded`）），`Label` 来自它们的 `Text`，`disabled` 来自 `Button::disabled`；ID 由视图给。
+- 探针节点：控件自带角色（`Button` → `Role::Button`，`CircleCheck` → `Role::Toggle`（`checked`），`Progress` → `Role::Progress`（`attrs` 里 `fraction`），`Segmented` → `Role::TabBar` 与每项 `Role::Tab`（`selected`），`GroupedList` → `Role::List`，`Row` → `Role::ListItem`（`selected`），`AgentDot` → `Role::Badge`（`attrs` 里 `agent`），`Expander` → `Role::Group`（`expanded`），`Hint` → `Role::Text`），`Label` 来自它们的 `Text`，`disabled` 来自 `Button::disabled`；ID 由视图给。
 - Action 与快捷键：没有。控件只回调，Action 在视图里定义（技术调研：探针只经 Action 操作）。
 
 ## 状态与异常
@@ -629,9 +673,11 @@ pub mod semantic {
 
 - 单元测试（不需要窗口）：
   - `bezier_*`：`Easing::eval` 对 `STANDARD` 和 `SWITCH` 的曲线与 CSS 参考值（WebKit 的 `UnitBezier`，预先算好 11 个采样点放在测试里）误差 ≤ 1e-3；`t=0` 为 0、`t=1` 为 1；`SWITCH` 在 0.6 附近越过 1。
-  - `spring_*`：`ENTER_SESSION` 的 `canonical()` 给出阻尼比 0.86 ± 0.005、自然频率 2π/0.35 ± 0.01。
+  - `spring_*`：`ENTER_SESSION_SPRING` 的 `canonical()` 给出阻尼比 0.86 ± 0.005、自然频率 2π/0.35 ± 0.01；`Transition` 用 `ENTER_SESSION` 从 0 到 1，在 100 ms 时 `go(0, …)`，紧接的一帧里值仍朝 1 走（速度保留）然后折返，没有跳变。
   - `transition_*`：从 0 到 1 的 380 ms 过渡，在 190 ms 时 `go(0, …)`，之后的值从当时的值单调回到 0，没有跳变；`go` 到相同目标不重新计时；`set` 立即到位；减弱动态效果下 `moves` 的过渡时长减半且 `effective` 为 `Fade`。
   - `loading_phase_*`：99 ms → `Nothing`，100 ms → `Skeleton`，1 s → `Progress`。
+  - `active_transitions_*`：两个 `Transition` 开始后为 2，一个到达后为 1，另一个 drop 后为 0；`set` 中断进行中的过渡也减一。
+  - `hint_*`：`is_expired` 在 `duration` 到期后为 true；再次 `new` 同一个 ID 从新的 `shown_at` 计时。
   - `node_id_*`：格式、转义、`child`；调试构建下非法的 `view` panic。
   - `code_colors_*`：对内置表的两个外观，五种颜色两两之间在正常、红色盲（protanopia）、绿色盲（deuteranopia）三种模拟（Viénot 1999 的 3×3 矩阵，在测试里写出）下的 ΔE（CIE76）≥ 12；每种与 `control_background` 的对比度（WCAG 2 的公式）≥ 3:1。`code_styles` 的两个外观各一份 insta 快照。
   - `palette_builtin_*`：内置表每个颜色的透明度在 0..=1、`diff_*_background` 的叠加结果与手算一致；两个外观的 `label` 与 `window_background` 对比度 ≥ 7:1。
@@ -690,7 +736,7 @@ pub mod semantic {
   - `run` 里在开窗口之前调用 `lectern_ui::init(cx, strings)`（在 `set_menus` 之前，菜单文字可以继续直接用传入的 `Strings`）。
   - `open_window` 的回调里对骨架窗口调用 `lectern_ui::attach(window, cx)`，`Subscription` 放在 `app` 的根视图里。
   - `startup::release` 在 `Kernel::start` 之前调用 `lectern_ui::ready(cx)`；test profile 用 `init_fixed`。`app/cold_start` 的预算不变。
-- `workspace`：每个窗口打开后调用 `lectern_ui::attach`；面板容器用 `Transition` 和 `PANEL_OPEN` / `PANEL_CLOSE`；侧栏、工具栏、检查器、面板、浮条各声明一个节点（`workspace.sidebar` 等），Action 名稳定、可枚举。
+- `workspace`：每个窗口打开后调用 `lectern_ui::attach`；面板容器用 `Transition` 和 `PANEL_OPEN` / `PANEL_CLOSE`；贡献的载荷用 `contrib` 的类型，`RecordStop::AnimationsSettled` 用 `motion::active_transitions`，一次性提示用 `Hint`（[workspace 设计](workspace.md)「对其他 crate 的要求」B 项的四样）；SF Symbols 不提供，图标用 `Icon`（「未决问题」1）；侧栏、工具栏、检查器、面板、浮条各声明一个节点（`workspace.sidebar` 等），Action 名稳定、可枚举。
 - `welcome`、`project_home`、`review_view`、`file_reader`：颜色、字体、动效、控件只从本 crate 取（「验收」里的 `rg` 检查）；可交互元素都经 `NodeId` 命名，容器和自绘元素用 `semantic(...)` 包装，各自的设计文档「界面」列出节点。
 - `ui_probe`：依赖 `lectern-ui` 的 `semantic` 模块，按帧 `Recorder::begin` / `finish` 取记录，自己合成窗口根节点（`window[<id>]`）；按 Action 名触发操作。它的设计与本节的形状一致（[#6](https://github.com/SoloJiang/lectern-app/issues/6)），两边改动时一起改；两份设计里形状不同的地方以本文为准（`Semantic::id` 是 `NodeId`，`label` 是 `Option<Label>`：纯容器没有文字）。
 - `i18n`：`Key::name(&self) -> &'static str`、`FmtKey::name(&self) -> &'static str`，返回 Fluent 消息 ID（`Text::message_id` 与 `Label::key` 用），随第 1 步在 `i18n` 里加上。
@@ -711,7 +757,7 @@ pub mod semantic {
 
 **第 1 步：初始化、颜色、文本、字体与代码配色（`Refs #214`）。**
 
-- `init`、`ready`、`is_ready`、`init_fixed`、`attach`、`Palette`、`colors`、`palette`、`Text`、`strings`、`set_locale`、`TextRole`、`MonoMetrics`、`mono_metrics`、`code_style`、`code_styles` 与「数据结构」的内置表。
+- `init`、`ready`、`is_ready`、`init_fixed`、`attach`、`Palette`、`colors`、`palette`、`Text`、`strings`、`set_locale`、`TextRole`、`MonoMetrics`、`mono_metrics`、`code_style`、`code_styles` 与「数据结构」的内置表；`contrib` 模块（`workspace` 的实现要用，所以放在第 1 步；`Icon` 枚举随它一起定义，图标资源在第 3 步）。
 - 「测试」里 `palette_builtin_*`、`code_colors_*`、`text_*`、`appearance_change_swaps_palette`、`set_locale_refreshes_windows`、`ready_runs_component_init_once`、`mono_metrics_is_cached`、`logs_hold_no_text` 通过；`just doctest` 里两个 `compile_fail` 通过。
 - `app` 接入 `with_assets(IconAssets)`、`init`、骨架窗口的 `attach` 与 `ready`（可以在同一个 PR 或紧接的 `app` PR）：`just test -p lectern-app` 通过，其中 `#[gpui::test]` `appearance_change_refreshes_the_skeleton_window`（模拟外观变化后窗口刷新一次）和 `appearance_change_before_ready_does_not_touch_the_theme`（直接调 `init`、`open_window`、`attach`，不经 `init_fixed` 和 `startup::release`；`ready` 之前触发一次外观变化：不 panic、`Palette` 已换、gpui-component 的主题没有被读写）；`just bench ui/`（`ui/init`、`ui/ready`、`ui/palette_resolve`、`ui/mono_metrics_first`、`ui/idle_memory`）在预算内；`app/cold_start` 不变慢。
 - 手动（macOS，发布构建）：系统设置里切换强调色，窗口里 `accent` 随之变化、不重启；切换浅色 / 深色同样；日志里 `ui initialised` 的 `accent` 为 `system`、`mono_metrics().family` 为 `.AppleSystemUIFontMonospaced`（经 `--log ui=debug` 的调试输出或探针读出）。
@@ -719,14 +765,14 @@ pub mod semantic {
 
 **第 2 步：动效原语（`Refs #214`）。**
 
-- `motion` 模块的全部常量与类型。
-- `bezier_*`、`spring_*`、`transition_*`、`reduced_motion_has_no_displacement` 通过；`just bench ui/`（`ui/transition_tick`、`ui/bezier_eval`）在预算内。
+- `motion` 模块的全部常量与类型，含 `active_transitions`。
+- `bezier_*`、`spring_*`、`transition_*`、`active_transitions_*`、`reduced_motion_has_no_displacement` 通过；`just bench ui/`（`ui/transition_tick`、`ui/bezier_eval`）在预算内。
 - `rg 'set_reduce_motion' crates/ui/src crates/app/src` 没有结果。
 
 **第 3 步：控件（`Refs #214`）。**
 
-- `Button`、`Icon`、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList`、`Row`、`loading_phase`、`Skeleton`、`Expander`。
-- `loading_phase_*`、`circle_check_toggles_from_key_and_click`、`segmented_slider_continues_from_current_position`、每个控件的语义节点快照通过；`icon_assets_hold_every_icon`：`IconAssets` 对 `Icon` 的每个成员都能给出非空的 SVG。
+- `Button`、`IconAssets`、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList`、`Row`、`loading_phase`、`Skeleton`、`Expander`、`Hint`。
+- `loading_phase_*`、`hint_*`、`circle_check_toggles_from_key_and_click`、`segmented_slider_continues_from_current_position`、每个控件的语义节点快照通过；`icon_assets_hold_every_icon`：`IconAssets` 对 `Icon` 的每个成员都能给出非空的 SVG。
 - `rg 'Duration::from_millis|Duration::from_secs' crates/ui/src --glob '!**/motion*' --glob '!**/tests*'` 没有结果（时长只在 `motion` 里定义）。
 
 **第 4 步：探针节点（`Refs #214`；[#6](https://github.com/SoloJiang/lectern-app/issues/6) 的 `ui_probe` 设计合并后；最后完成的那个 PR 写 `Closes #214`）。**
