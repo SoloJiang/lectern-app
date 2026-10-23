@@ -203,7 +203,7 @@ Quit（主线程）
 ## 界面
 
 - 窗口：没有打开项目时的独立窗口，820 × 520 pt，居中（[交互规范「窗口结构」](interaction.md#窗口结构)的 Welcome 宽度）。标题栏透明，窗口背景用 `WindowBackgroundAppearance::Blurred`（系统的毛玻璃材质，自动适配浅色和深色模式，不需要自定义颜色），根视图不画任何内容，这就是 ADR 0017 的中性骨架。`ui` 提供骨架控件以后，由 Welcome 和 Overview 的视图替换这个根视图。
-- 关闭窗口不退出应用（见「未决问题」1）。点 Dock 图标（`cx.on_reopen`）而且没有窗口时，重新打开骨架窗口。
+- 关闭窗口不退出应用（见「未决问题」1）。点 Dock 图标而且没有窗口时，重新打开骨架窗口（`Application::on_reopen`，在 `run` 之前登记）。
 - 应用菜单，Fluent 键在 `crates/i18n/locales/{en,zh-CN}/app.ftl`（前置条件 A）：
 
   | 菜单项 | 键 | en | zh-CN | 快捷键 | 动作 |
@@ -243,7 +243,7 @@ Quit（主线程）
   - warn `kernel shutdown timed out`：`waited_us`。
   - warn `executor shutdown timed out`：`busy_workers`。
   - warn `could not start the quit thread`：`error` 为 `Value::io`。
-- 详细级别：debug `quit finished`：`kernel_us`、`executor_us`（各步实际用时）。
+- 详细级别：debug `quit finished`：`kernel_us`、`executor_us`（各步实际用时）。`quit::run` 在调用 `Logging::shutdown` 之前记这一条，之后的记录只计数。
 - 关联 ID：没有。`app` 的代码不在任何插件的作用域里。
 - 不记录：命令行参数的内容（认不出的参数只记下标；参数里可能有路径和令牌）；`--log` 的过滤字符串只由 logging 写进文件头；环境变量的值；系统首选语言列表。
 - 金丝雀测试：`canary_stays_out_of_app_logs`（`src/tests/logs.rs`）：用 `testing::capture()`，把金丝雀放进一个认不出的参数和 `--log` 的值，经 `parse` 和记录 warn 的同一个函数，再跑一遍退出顺序，`assert_absent(金丝雀)`。
@@ -270,7 +270,7 @@ Quit（主线程）
 每一项是一个 PR，在 `app` 的实现 PR 之前合并：
 
 - **A. `i18n`**：新增 `locales/en/app.ftl`、`locales/zh-CN/app.ftl`，内容是「界面」一节的四个菜单键。
-- **B. `platform`**：`system::preferred_languages() -> Vec<String>`：macOS 上用 `CFLocaleCopyPreferredLanguages`（内存里的系统偏好，不读 Lectern 自己的文件），返回 BCP 47 标签，按系统的顺序；其他平台返回空列表。测试：macOS 上返回的列表不为空、每一项都能被 `Locale::negotiate` 接受；其他平台为空。在 platform 设计里加一节，写「日志与诊断」（读不到时返回空列表，不记日志）。
+- **B. `platform`**：[i18n 设计「数据流与线程」](i18n.md#数据流与线程)里启动时用的 `preferred_languages()`，放在 `system` 模块：`system::preferred_languages() -> Vec<String>`。macOS 上用 `CFLocaleCopyPreferredLanguages`（本进程生效的首选语言，包含应用域里 `AppleLanguages` 的覆盖；内存里的系统偏好，不读 Lectern 自己的文件），返回 BCP 47 标签，按系统的顺序；其他平台返回空列表。i18n 设计里的 `system_languages()` 和 `language_override()` 只供设置页使用，随语言设置实现，不在本 issue。测试：macOS 上返回的列表不为空、每一项都能被 `Locale::negotiate` 接受；其他平台为空。在 platform 设计里加一节，写「日志与诊断」（读不到时返回空列表，不记日志）。
 
 ## 未决问题
 
@@ -279,6 +279,7 @@ Quit（主线程）
 ## 已知限制
 
 - 屏障放开之前（首帧之后约 2 个刷新周期内）退出时，首帧前缓冲里的记录丢失，下一次运行也不会报告上一次异常结束：这时还没有创建本次运行的日志文件。
+- 窗口被完全遮挡、收不到帧请求时，屏障不放开，后台初始化一直推迟到窗口重新可见；这期间 ⌘Q 按「屏障放开之前」处理。
 - 由系统发起的退出不经 `Quit`：kernel 和 executor 不按顺序关闭（kernel 设计「已知限制」），只有日志的结束记录在 `on_app_quit` 的 200 ms 里写出。
 - 屏障比首帧的实际显示最多晚约 2 个刷新周期，直到 `platform::frame::on_first_presented` 实现（「启动屏障」）。
 
