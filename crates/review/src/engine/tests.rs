@@ -26,23 +26,23 @@ use crate::testing::{Driven, FakeProjects, FakeSessions, ReflogLine, write_reflo
 
 mod logs;
 
-const SOURCE: &str = "session-claude-code";
+pub(crate) const SOURCE: &str = "session-claude-code";
 /// Unix seconds around which the scenarios happen.
-const T: i64 = 1_760_000_000;
-const NOW: Timestamp = Timestamp((T + 3600) * 1000);
+pub(crate) const T: i64 = 1_760_000_000;
+pub(crate) const NOW: Timestamp = Timestamp((T + 3600) * 1000);
 
-fn ms(s: i64) -> i64 {
+pub(crate) fn ms(s: i64) -> i64 {
     s * 1000
 }
 
-struct Fx {
-    repo: TestRepo,
-    projects: Arc<FakeProjects>,
-    dir: tempfile::TempDir,
+pub(crate) struct Fx {
+    pub(crate) repo: TestRepo,
+    pub(crate) projects: Arc<FakeProjects>,
+    pub(crate) dir: tempfile::TempDir,
 }
 
 impl Fx {
-    fn new() -> Fx {
+    pub(crate) fn new() -> Fx {
         let repo = TestRepo::new();
         let projects = Arc::new(FakeProjects::new(repo.common_dir(), repo.root()));
         Fx {
@@ -52,11 +52,11 @@ impl Fx {
         }
     }
 
-    fn root(&self) -> String {
+    pub(crate) fn root(&self) -> String {
         self.repo.root().to_string_lossy().into_owned()
     }
 
-    fn commit(&self, files: &[(&str, &str)], parent: Option<Oid>, at: i64) -> Oid {
+    pub(crate) fn commit(&self, files: &[(&str, &str)], parent: Option<Oid>, at: i64) -> Oid {
         let files: Vec<(&str, &[u8])> = files.iter().map(|(p, c)| (*p, c.as_bytes())).collect();
         let tree = self.repo.tree(&files);
         let parents: Vec<Oid> = parent.into_iter().collect();
@@ -64,7 +64,7 @@ impl Fx {
     }
 
     /// HEAD on `branch` at `commit`; the index has `files` as committed.
-    fn head(&self, branch: &str, commit: Oid, files: &[(&str, &str)]) {
+    pub(crate) fn head(&self, branch: &str, commit: Oid, files: &[(&str, &str)]) {
         self.repo.set_ref(branch, commit);
         self.repo.set_head(TestHead::Branch(branch));
         let entries: Vec<IndexEntry> = files
@@ -74,7 +74,7 @@ impl Fx {
         self.repo.write_index(self.repo.common_dir(), &entries);
     }
 
-    fn reflog(&self, lines: &[(Option<Oid>, Oid, i64, &str)]) {
+    pub(crate) fn reflog(&self, lines: &[(Option<Oid>, Oid, i64, &str)]) {
         let lines: Vec<ReflogLine<'_>> = lines
             .iter()
             .map(|(old, new, time, message)| ReflogLine {
@@ -87,16 +87,16 @@ impl Fx {
         write_reflog(self.repo.common_dir(), self.repo.hash(), &lines);
     }
 
-    fn write(&self, path: &str, content: &str) {
+    pub(crate) fn write(&self, path: &str, content: &str) {
         self.repo.write_file(path, content.as_bytes());
     }
 
-    fn mtime(&self, path: &str, at_ms: i64) {
+    pub(crate) fn mtime(&self, path: &str, at_ms: i64) {
         self.repo
             .set_mtime(path, UNIX_EPOCH + Duration::from_millis(at_ms as u64));
     }
 
-    fn sessions(&self, sessions: Vec<Value>) -> Arc<FakeSessions> {
+    pub(crate) fn sessions(&self, sessions: Vec<Value>) -> Arc<FakeSessions> {
         Arc::new(FakeSessions::from_script(
             SOURCE,
             &json!({ "sessions": sessions }).to_string(),
@@ -112,19 +112,19 @@ impl Fx {
     }
 }
 
-fn session(id: &str, cwd: &str, start: i64, turns: Vec<Value>) -> Value {
+pub(crate) fn session(id: &str, cwd: &str, start: i64, turns: Vec<Value>) -> Value {
     json!({ "id": id, "cwd": cwd, "started_at": start, "turns": turns })
 }
 
-fn turn(id: &str, at: i64, items: Vec<Value>) -> Value {
+pub(crate) fn turn(id: &str, at: i64, items: Vec<Value>) -> Value {
     json!({ "id": id, "at": at, "prompt": format!("prompt {id}"), "items": items })
 }
 
-fn edit(call: &str, at: i64, changes: Vec<Value>) -> Value {
+pub(crate) fn edit(call: &str, at: i64, changes: Vec<Value>) -> Value {
     json!({ "edit": call, "at": at, "done": at + 500, "changes": changes })
 }
 
-fn replace(path: &str, old: &str, new: &str) -> Value {
+pub(crate) fn replace(path: &str, old: &str, new: &str) -> Value {
     json!({ "path": path, "replace": [old, new] })
 }
 
@@ -132,26 +132,26 @@ fn write(path: &str, content: &str) -> Value {
     json!({ "path": path, "write": content })
 }
 
-fn run(call: &str, at: i64, done: i64) -> Value {
+pub(crate) fn run(call: &str, at: i64, done: i64) -> Value {
     json!({ "run": call, "command": "cargo fmt", "at": at, "done": done })
 }
 
-fn key(id: &str) -> SessionKey {
+pub(crate) fn key(id: &str) -> SessionKey {
     SessionKey {
         source: SourceId(SOURCE.into()),
         id: id.into(),
     }
 }
 
-fn target(id: &str) -> ReviewTarget {
+pub(crate) fn target(id: &str) -> ReviewTarget {
     ReviewTarget::Session(key(id))
 }
 
-fn path(p: &str) -> ChangePath {
+pub(crate) fn path(p: &str) -> ChangePath {
     ChangePath(Arc::from(p.as_bytes()))
 }
 
-fn modified(p: &str) -> FileKey {
+pub(crate) fn modified(p: &str) -> FileKey {
     FileKey {
         old: Some(path(p)),
         new: Some(path(p)),

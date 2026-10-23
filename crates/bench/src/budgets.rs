@@ -1750,6 +1750,24 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // (step 4) The agent's next turn and one file's change, from the batch
+    // and the source's event to the first snapshot that shows both.
+    share(
+        "review/refresh_one",
+        &[median(Limit::TimeBelow(ms(20)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
+    // In process until the process-level plugin benchmarks (step 5): the
+    // kernel's four timings under a `TestKernel`.
+    share(
+        "plugin/review/activate",
+        &[median(Limit::TimeBelow(ms(1)))],
+        KERNEL,
+        ACTIVE,
+        Time,
+    ),
     // ---- end review ----
     // ---- usage (usage design, step 1) ----
     // `testing::Scenario` on `testing::heavy_days` (30 heavy days, 20

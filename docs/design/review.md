@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；其余前置条件与第 4、5 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）与第 5 步尚未实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的领域部分），审阅意见 [#22](https://github.com/SoloJiang/lectern-app/issues/22) 只预留数据模型。`review` 把一个审阅对象（会话、会话外的改动、worktree 相对某个基准的比较）整理成审阅视图读取的不可变快照：哪些文件改了、每一处改动来自哪个会话的哪一轮、按轮次的改动叙事、已看进度、Drifted 标记和规则生成的会话简报（[交互规范「核心闭环」](interaction.md#核心闭环)、[ADR 0012](../adr/0012.md)、[ADR 0019](../adr/0019.md)）。用户的已看标记写进按仓库分开的标注日志（[ADR 0044](../adr/0044.md)，压缩的条件按 [ADR 0045](../adr/0045.md)）。
 
@@ -47,7 +47,7 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `lectern-kernel` | `Plugin`、事件、`PluginHandle`、`BusyGuard` | 插件机制 |
+| `lectern-kernel` | `Plugin`、事件、`PluginHandle`、`BusyGuard`、`Clock`（保留 30 秒的计时） | 插件机制 |
 | `lectern-services` | 使用 `Projects`、`SessionSource`；提供 `Review`（含 `BriefRules` 提供者的登记）；`ChangeSource` 与数据类型 | 插件之间只经 `services`（架构规则 7） |
 | `lectern-git` | `Repo`、`Worktree`、`LocalChanges`（`ChangeSource` 的本地实现）、`line_diff`、`rows`、`inline_changes`、`head_reflog`、`tree_changes`、`mtimes`、`Repo::is_ancestor`、`Oid::for_blob` | gix 只在 `git` 里使用 |
 | `lectern-cache` | `review.attribution` 命名空间 | 派生数据以 blob OID 加轮次历史的摘要为键（架构规则 5） |
@@ -1102,7 +1102,9 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 后台补齐截止时刻表 | `cutoff table completed` | `records`、`unknown`（仍未知的）、`took_us` |
   | 一个文件的归因 | `file attributed` | `file`（快照里的下标）、`path`（工作区里的路径）、`cached`（`review.attribution` 命中）、`steps`、`hunks`、`drifted_hunks` |
   | `Prepare` 完成 | `prepared` | `id`、`request`（请求的序号）、`needs`、`rows`、`texts`、`row_bytes`、`text_bytes`、`versions_bytes`（中间版本 LRU）、`took_us` |
-  | 标注日志读完 | `annotation log read` | `path`、`records`、`unknown`、`complete`（索引是不是整个文件，决定能否压缩）、`took_us` |
+  | 监听或事件要求一轮（fs_watch 的批次、`SessionsChanged`） | `refresh requested` | `id`、`how`（`paths`、`full`、`sessions`、`fetch`）、`paths`（路径批次的路径数，其余为 0）；在审阅的作用域里写出 |
+| 关闭 30 秒后释放 | `review released` | `id` |
+| 标注日志读完 | `annotation log read` | `path`、`records`、`unknown`、`complete`（索引是不是整个文件，决定能否压缩）、`took_us` |
   | 追加之前截掉末尾不完整的一行 | `annotation log tail cut` | `path`、`bytes` |
   | 文件状态未知、不以换行结尾，追加之前补一个换行 | `annotation log of unknown state; newline added before the records` | `path` |
 
@@ -1142,7 +1144,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 一次链的计算：每步一次 `line_diff`（300 行的文件 < 0.1 ms）加一次 `load`（< 1 ms），一个文件 5 步约 3 ms，其中 `load` 占大头。所以缓存键只用轮次索引，命中时不 `load`。
 
-`bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增，夹具由 `TestRepo` 和 `testing::FakeSessions` 生成，`Driven` 驱动；进程级的 `plugin/review/*` 随 bench 第 5 步：
+`bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增，夹具由 `TestRepo` 和 `testing::FakeSessions` 生成，`Driven` 驱动；`plugin/review/activate` 在进程级插件基准（bench 第 5 步）之前在进程内由 `TestKernel` 测量，之后改为 `Process`：
 
 | ID | 统计量与预算 |
 |---|---|
@@ -1153,7 +1155,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | `review/overview_round_warm` | 中位数 < 20 ms（同一夹具，第二轮概览：声明和截止时刻都来自缓存，不调用 `turns_unretained` 和 `tree_changes`；后台） |
 | `review/attribute_session_50` | 只记录（其余 49 个文件的归因合计） |
 | `review/rows_first` | 中位数 < 3 ms（第一个文件的 `Prepare` 到 `Prepared`，hunk 缓存已热） |
-| `review/refresh_one` | 中位数 < 20 ms |
+| `review/refresh_one` | 中位数 < 20 ms（`Driven` 上 agent 追加一轮并改写第一个改动文件：路径批次和 `SessionsChanged` 到第一份同时显示新一轮和新内容的快照；不含 fs_watch 的合并窗口） |
+| `plugin/review/activate` | 中位数 < 1 ms（`TestKernel` 下 kernel 记下的四段耗时之和，激活没有任务也没有文件） |
 | `review/mark_seen_5000` | 中位数 < 0.2 ms |
 | `review/chain_3000_lines` | 只记录（3000 行的文件、40 次 `Replace`，含 `line_diff`，不含 `load`） |
 | `review/log_load_16k` | 中位数 < 30 ms（16 000 条记录、约 5.3 MiB 的日志整份读入并建索引，后台） |
@@ -1212,7 +1215,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `rows_*`：最终改动与叙事步的展示行，偏移与 git 的规则一致；中间版本回放后 OID 与缓存的版本 OID 相同；LRU 不超过 8 MiB。
   - `brief_*`：每条规则一个用例；排序与 12 条上限；`BriefRules` 的假提供者经 `register_brief_rules` 登记：分批答复、10 秒超时、登记 drop 或 token 失效后不再调用它且丢弃在途的答复、条目对账（不在快照里的文件丢弃、行不在显示范围内降为文件备注）。
   - `overview_*`：计数比较用 `retained_bytes = 0`、`total_patch_bytes = 0`；4001 个改动路径时只保留计数；会话外的改动数；基准不同的会话每轮最多算 8 个；放下关注后释放。`overview_never_calls_turns`：一轮概览（20 个会话）之后，`FakeSessions` 记下的 `turns` 调用数为 0，只有 `turns_unretained`；本 crate 只保留派生的声明（`review/resident_*_bytes` 覆盖它的大小）。
-  - `plugin_*`：`TestKernel` 激活后提供 `dyn Review`；`open` 立即返回，快照经 `Loading` 到 `Ready`；fs_watch 批次和 `SessionsChanged` 触发刷新；kernel 在结果发布后静止；关闭 30 秒后释放；`command` 在 UI 线程上调用时不做 IO（`cache` 的 `ui_thread` 检查和 `data_dir` 的访问计数都为 0）。
+  - `plugin_*`（`src/plugin/tests.rs`，另有 `src/engine/watch.rs` 里批次到请求的映射和请求合并的单元测试）：`TestKernel` 激活后提供 `dyn Review`、清单符合「依赖」，激活不提交任务、不监听、不写文件（`plugin_provides_review_and_activation_does_nothing`）；`open` 立即返回，快照经 `Loading` 到 `Ready`，同一对象同一个 ID（`plugin_open_returns_at_once_…`）；fs_watch 的路径批次、`rescan` 和 `SessionsChanged` 触发刷新，批次的路径进 `RefreshHint::Paths`、`rescan` 为 `Full`（`plugin_a_watch_batch_…`、`plugin_a_path_batch_…`、`plugin_sessions_changed_…`）；运行期间来的请求合成一轮，路径取并集（`plugin_requests_during_a_round_…`、`plugin_merge_…`、`plugin_worktree_batches_…`）；kernel 在结果发布后静止，轮次排队时不静止（`plugin_kernel_is_quiescent_…`）；关闭后保留 30 秒、期间重新打开得到同一个审阅且不重算、第一次关闭的定时器不释放第二次关闭之后的审阅、到期后释放快照、监听和版本 LRU（`plugin_close_keeps_…`、`plugin_a_kept_review_…`）；停用后监听和审阅都释放（`plugin_deactivation_…`）；`command` 在 UI 线程上调用时不做 IO（`plugin_commands_on_the_ui_thread_do_no_io`：`cache` 的 `ui_thread` 设为测试线程，任何落在这个线程上的缓存调用在调试构建里 panic，任务都放到另一个线程上运行；标注日志的目录在后台任务运行之前不存在）；概览和简报规则的登记在第 5 步之前是空操作（`plugin_overview_…`）。测试不用墙上时钟：30 秒是 kernel 的 `ManualClock`，合并窗口是 fs_watch 的假时钟，任务在测试运行 executor 时才执行。
   - `logs_*`（`src/engine/tests/logs.rs`，用 `lectern-logging` 的 `testing::capture()`）：金丝雀与 warn 路径的记录，见「日志与诊断」。标注日志的 IO 故障和尺寸上限经 `Engine::set_log_test`（`cfg(test)`）作用在引擎之后打开的日志上。
   - `services` 的 `changes`、`review` 模块（前置条件 A）：类型的 JSON 往返；`dyn Review` 的 `ID == "review"`、`MULTIPLE == false`；`BriefRules` 没有实现 `Service`；`BriefRulesRegistration`、`OverviewInterest` drop 时各调用一次注销回调。
 - 结构化输出（链、归因、叙事、简报、分组）都用 insta 快照验收。
@@ -1244,7 +1247,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - A. `services`：`changes`、`review` 模块；`rg -n 'pub trait ChangeSource|pub trait Review\b|pub trait BriefRules' crates/services/src` 各有一处；JSON 往返和服务 ID 的测试通过；`crates/services/AGENTS.md` 列出两个模块。
 - B. `git`：`line_diff`、`Worktree::head_reflog`、`Worktree::mtimes`、`Repo::tree_changes`；`line_diff_*`、`head_reflog_*`、`mtimes_*`、`tree_changes_*` 测试通过。
 - C. `git` 第 4 步：`LocalChanges` 实现 `ChangeSource`；`change_source_*` 测试通过（见「改动来源」的对照表之后一段）。
-- D. `platform` 与 `app`：应用数据目录；`app` 构造 `ReviewDeps` 并把插件放进 `PluginSet`（第 4 步之前）。
+- D. `platform` 与 `app`：应用数据目录（`platform` 部分已实现）；`app` 构造 `ReviewDeps` 并把插件放进 `PluginSet`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）。`ReviewDeps` 和 `plugin()` 由第 4 步定义，第 4 步的测试用 `TestKernel`，所以顺序是第 4 步、`app` 装配、第 5 步：`app` 装配在第 4 步之后、第 5 步之前。
 - E. `cache`：命名空间表的 `review.attribution` 一行（本 PR 已加）。
 - F. `code_intel`：实现 `BriefRules`，由 requires `dyn Review` 的另一个小插件登记（后续，不阻塞下面任何一步）。
 - G. `agents` 与 `services`：`SessionSource::turns_unretained`；`turns_unretained_*` 测试通过（第 5 步之前）。
@@ -1262,9 +1265,10 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
    - `base_*`、`claims_*`、`files_*`、`narrative_*`、`rows_*` 测试通过，其中有 `claims_survive_unrelated_commit`、`claims_survive_checkout_b`。
    - `review/open_session_50`、`review/open_session_50_warm`、`review/rows_first`、`review/mark_seen_5000` 在预算内（夹具有 2000 个提交、300 条 reflog 记录、50 个会话），`review/attribute_session_50`、`review/open_session_settled`、`review/cutoffs_cold` 有结果；[cache 设计「命名空间」](cache.md#命名空间)的 `review.attribution`、`review.tree_changes`、`review.claims` 三行与实现一致。
    - `rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 没有结果：本 crate 只在标注日志里直接访问文件系统，工作区经 `git` 读取。
-4. **插件、监听与刷新**（前置 D）：`plugin = true`、`ReviewPlugin`、`dyn Review`、fs_watch 与 `SessionsChanged` 的刷新、关闭后释放。
+4. **插件、监听与刷新**（前置 A、B、C 与第 3 步；不依赖 `app`）：`plugin = true`、`ReviewPlugin`、`dyn Review`、fs_watch 与 `SessionsChanged` 的刷新、关闭后释放。
    - `plugin_*` 测试通过；`python3 scripts/check_architecture.py` 通过：本 crate 不依赖其他插件 crate、不依赖 GPUI，只有 `app` 和 tool 层依赖它。
-   - `review/refresh_one` 在预算内；`plugin/review/activate` < 1 ms。
+   - `review/refresh_one` 在预算内；`plugin/review/activate` < 1 ms（进程内由 `TestKernel` 测量，进程级的测量随 bench 第 5 步）。
+   - `rg 'eprintln!|util::log' crates/review/src --glob '!**/tests*'` 和 `rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 仍没有结果。
 5. **规则简报与项目主页的概览**（前置 G）：简报规则、`register_brief_rules` 与提供者的请求和对账、概览（计数比较、声明、会话外的改动数、进度）。
    - `brief_*`、`overview_*` 测试通过；`overview_capped` 检查 4001 个改动路径时只保留计数。
    - `review/brief_5000`、`review/overview_round_warm`、`review/resident_cloudprint_bytes`、`review/resident_100k_bytes` 在预算内，`review/overview_cloudprint` 有结果。
@@ -1340,6 +1344,22 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `review/attribute_session_50` 不含 `review.attribution` 的读写；`review/cutoffs_cold` 含新缓存目录的建库。
   - 30 秒的保留、fs_watch 与 `SessionsChanged` 的刷新、`BusyGuard` 与插件的静止属于第 4 步；简报规则与概览属于第 5 步。文件夹项目的会话没有测试（`FakeProjects` 只有仓库项目）。
   - 没有在 macOS 上运行和测量。
+
+### 第 4 步
+
+在 macOS（Darwin，本机，与其他任务共用）上运行，没有在 Linux 上运行。`Cargo.toml` 加 `lectern-kernel`、`lectern-fs-watch`（「依赖」表里已有）并设 `plugin = true`，dev-dependencies 加两者的 `test-support`；`Cargo.lock` 只多了 `lectern-review` 到这两个 crate 的边，没有新的外部 crate。
+
+- `just check`（格式、架构规则、文档链接、clippy 警告即失败）、`python3 scripts/check_architecture.py`（32 个 crate）、`just deny`（advisories、bans、licenses、sources 都通过）通过。
+- `just test -p lectern-review`：138 个测试通过，新增 14 个：`plugin_*` 12 个（`src/plugin/tests.rs`：提供服务与激活不做事、`open` 立即返回与 `Loading` 到 `Ready`、路径批次刷新、批次的种类（路径 1 个、`rescan` 为 `full`）、`SessionsChanged` 刷新、运行期间的请求合成一轮、kernel 静止、关闭保留 30 秒与释放、保留期间监听仍刷新、UI 线程上的命令不做 IO、停用释放监听、概览与简报规则的空操作）和 `src/engine/watch.rs` 里 2 个（请求合并的规则、批次到 `RefreshHint` 的映射）。原有的 124 个照常通过。
+- `rg 'eprintln!|util::log' crates/review/src --glob '!**/tests*'` 和 `rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 都没有结果。
+- 基准（`just bench --measure review/refresh_one`，采样模式，运行七次）：`review/refresh_one` 中位数 2.62 到 3.18 ms（预算 < 20 ms）；夹具是第 3 步的 2000 个提交、300 条 reflog 记录、50 个会话，审阅已完成，agent 追加一轮并改写 `src/m00/f0.rs`（300 行）。`plugin/review/activate`（`TestKernel` 下 kernel 的四段耗时之和）中位数 1.6 到 1.7 µs（预算 < 1 ms，标为 noisy），激活之后 executor 里没有任务、数据目录不存在。同一次运行里第 3 步的基准：`open_session_50` 15.8 ms、`open_session_50_warm` 5.9 ms、`rows_first` 228 µs、`mark_seen_5000` 15.9 µs、`log_load_16k` 10.2 ms，都在预算内（本机比第 3 步的 Linux 机器快，数字不可比）。
+- 没有验证的：
+  - 真实的 FSEvents 和多线程 executor：测试全部用 `Executor::manual()`、`FakeBackend` 和 fs_watch 的假时钟。fs_watch 的过滤器是 `git` 对 `TestRepo` 的真实实现，不是 `FakeSource`。
+  - 30 秒的定时器在测试里是 `ManualClock`；kernel 的 `SystemClock`（定时线程）只在 `plugin()` 里装配，没有测试走到。
+  - `review/refresh_one` 不含 fs_watch 的合并窗口（50 ms 静默、500 ms 上限），也不含批次经 `FakeBackend` 到引擎的路径：基准把批次和事件直接交给 `Driven`。
+  - 第一个监听批次（`rescan`）造成的那一次 `Full` 刷新的耗时没有单独测量。
+  - kernel 静止的测试用 `barrier` 加最多 2 秒的轮询（同 `agents` 的 `plugin_*`），断言的是「排队的轮次存在时不静止、结果发布并且批次交付后静止」，不是耗时。
+  - 与 `app` 的装配没有测试（`app` 部分是 [#205](https://github.com/SoloJiang/lectern-app/issues/205)）。
 
 ### 日志接入
 
@@ -1442,6 +1462,24 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **`ReviewError` 的映射**：会话不在列表里、`Place::Missing`、worktree 不在项目快照里或已 prunable、`turns` 返回 `NotFound` 为 `Missing`；未归位或项目没打开为 `NotInOpenProject`；审阅对象自己的 `turns` 返回 `Unrecognized` 或 `Io` 时都按认不出格式处理（`Degraded::UnrecognizedSession`）。
 - **测试支持多于「本 crate 的公开项」**：`testing` 另有 `write_reflog`（写 `logs/HEAD`）、`Driven::with_budget`（把 `Interactive` 上计算 `tree_changes` 的 5 ms 预算设为别的值，测试用 0）、`Driven::touch_cache`、`Driven::attribute_uncached`，以及 bench 的夹具 `SessionFixture`、`MarkSeenFixture`。`FakeSessions` 的脚本在测试里用 `serde_json::json!` 拼出（格式写在 `src/testing/fake.rs`），没有放进 `tests/fixtures/sessions/`：会话的 cwd 是 `TestRepo` 的临时目录，每次不同。
 - **第 3 步没有日志调用**：那时 `lectern-logging` crate 还没有合并，「日志与诊断」只写了接入的计划。日志已经接入，实现与那份计划的差别见下一节「日志接入」。
+
+### 第 4 步
+
+- **验收的顺序改了**（上文「验收」已改）。原文写前置条件 D（`app` 构造 `ReviewDeps`）在「第 4 步之前」，但 `ReviewDeps` 和 `plugin()` 由第 4 步定义，第 4 步的测试用 `TestKernel`，不需要 `app`。实际顺序是第 4 步、`app` 装配（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）、第 5 步；第 4 步的验收也不再依赖 D。
+- **引擎经 `Host` 提交任务，服务经函数取。** `Engine::submit` 原来直接调 `Executor::run`。插件里要持有 `BusyGuard`、经 `PluginHandle::own_with` 提交，而 `PluginHandle` 到 `started` 才有：`engine::Host`（`spawn`、`later`、`busy`）由插件的 `KernelHost` 实现，`started` 之前要求的任务排队、`started` 时提交；`Driven` 没有 `Host`，仍直接用 executor。`Config.projects` 和 `Config.sources` 由持有的服务（`Held`，插件里是 `Admitted`）的函数代替 `Arc`：`SessionSource` 是多提供者的服务，来源会随插件的激活与停用变化，`Admitted` 在每次调用期间持有提供者的准入。
+- **30 秒的计时用 kernel 的 `Clock`，不用 executor。** executor 没有定时器，`Background` 任务里睡眠会占住线程。`KernelHost::later` 把一个 `Waker` 交给 `Clock::wake_at`（生产是 `SystemClock` 的定时线程，第一次用时才启动、空闲 1 秒后退出，不是常驻线程；测试是 `ManualClock`），到时唤醒只提交一个 `Background` 的释放任务。等待的 30 秒不持有 `BusyGuard`，kernel 在这期间可以静止。`ReviewPlugin::with_clock` 只在 `test-support` 和测试里存在。定时线程停了之后（空闲超过 1 秒）的第一次 `close` 在调用线程上付一次线程创建；这是 kernel 自己的定时器，审阅在首帧之后才会打开，不影响 ADR 0017 的首帧预算。
+- **保留期间的行为**（设计只写「保留 30 秒」）：最后一次 `close` 之后 `snapshot`、`rows`、`text` 对这个 ID 返回 None、`command` 被忽略（与 `Review` 的文档「已关闭的 ID 返回 None」一致），但状态和监听都留着，监听的批次照常刷新它；30 秒内同一对象 `open` 得到同一个 ID，快照原样回到调用方，不重算、不发 `Changed`；每次关闭和重新打开让 `Open::idle` 加一，定时器到期时 `idle` 变了就什么也不做，所以第一次关闭的定时器不会释放第二次关闭之后的审阅。释放时 `Open`（含两个监听）在锁外 drop。
+- **监听在第一份快照之后建立。** 一轮准备成功并装上快照之后，`ensure_watch` 为这个审阅订阅仓库和被审阅的 worktree（`Worktree::watch_source()`，`Coalesce::REPO` 与 `Coalesce::WORKTREE`）；arm 由 fs_watch 的线程做，调用不阻塞。fs_watch 的第一个批次是 `rescan`，所以每次 `open` 之后有一次 `Full` 刷新，用来补上准备与 arm 之间的变化（`project` 同样依赖这一点）。仓库订阅的第一个批次被忽略，免得两个订阅各造一次 `Full`。准备失败的审阅没有监听。
+- **批次到请求。** worktree 批次：`rescan`、`meta` 的任一标志（`head`、`index`、`refs`、`config`、`rules`）或 `Health::Failed` 为 `Full`，否则有路径时为 `Paths`（`WatchPath` 的字节原样成 `ChangePath`）；只带健康状态的批次不请求。仓库批次：有 reflog 行、`reflog_resets`、`rescan` 或 `Failed` 时为 `Full`（提交与分支切换改变截止时刻与会话外的基准；设计只写了 worktree 批次）。`meta.head` 为 `Full`，会话外的改动在这一轮重新确定基准，会话的基准不变（第 3 步的 `Recorded`、`Reflog` 规则）。
+- **合并规则补全。** 第 3 步的 `start_round` 在运行期间只保留最后一个请求（两个 `Paths` 丢掉前一个）。改为：两个路径集取并集（排序去重）、路径集优先于 `Reuse`、`Full` 优先于路径、`Fetch` 优先于一切（`engine::watch::merge_hints`）。
+- **`SessionsChanged` 对所有审阅请求 `Kind::Reuse`。** 事件的 `changed` 和 `removed` 都为空时忽略；否则不看哪个来源、哪个会话，对每个审阅（含保留期间的）请求一轮 `Reuse`：同一 worktree 里任何会话的声明都可能改变归因，而每一轮都会重新读审阅对象的 `turns`。改动集不重新比较（文件的变化由 fs_watch 的批次带来）。
+- **sink 里的 `BusyGuard`。** fs_watch 交给 `deliver` 的守卫在请求提交之后立即 drop：请求若启动了一轮，这个任务在 `Engine::submit` 里自己取了守卫；若并入了运行中的一轮，那一轮在结束前提交下一轮，守卫链不断。`Sink::busy` 只返回 `PluginHandle::busy()`，不取引擎的锁；它读 `KernelHost` 里存句柄的互斥锁，这把锁只在 `started` 前后和停用时写，临界区里没有 IO，也没有别的锁。
+- **第 3 步遗漏的一个 bug：** 文件夹项目的会话在 `folder_round` 结束时丢掉了 `again`；现在照常开始下一轮。
+- **概览与简报规则（第 5 步）。** `overview` 返回 None，`watch_overview` 返回一个什么也不做的 `OverviewInterest`，`register_brief_rules` 返回一个什么也不做的登记，提供者不保存也不调用。
+- **日志多了两条 debug 记录**（上文「日志与诊断」已加）：`refresh requested`（在审阅的作用域里写出，sink 在 fs_watch 的线程上，本来没有作用域）和 `review released`。没有新的 info 以上的记录，也没有新的字段携带内容或路径。
+- **测试用的设施。** `ReviewPlugin::with_wall_clock`（引擎的时刻，14 天窗口按它算；测试的会话是固定日期的）、`with_repository_config_only`（同 `project`）；`engine::tests` 的夹具函数（`Fx`、`session`、`turn`…）改为 `pub(crate)`，`plugin_*` 复用；`Driven::refresh`、`Driven::sessions_changed` 与 `SessionFixture::agent_step` 给 `review/refresh_one`。「`data_dir` 的访问计数」没有做成计数：标注日志的目录在第一次写入才创建，所以测试检查它在后台任务运行之前不存在。「`cache` 的 `ui_thread` 检查」用 `Config::ui_thread` 设为测试线程，任务放到另一个线程运行。
+- **`plugin/review/activate` 在进程内测量。** 进程级的 `plugin/*/activate` 要 `app` 装配，还没有；与 `plugin/usage/activate` 相同，`TestKernel` 下取 kernel 的四段耗时，bench 的目标规则（`budgets_belong_to_the_documented_targets`、bench 设计「基准目标」）为它加了例外，随第 5 步改为 `Process`。`review/refresh_one` 在 `budgets.rs` 里是生效的，`Time` 目标。
+- 去掉了 `lib.rs` 里为「没有插件时没人调用引擎」加的 `allow(dead_code)`；`ReadReport::error` 只有测试读，字段上加了带理由的 `allow`。
 
 ### 日志接入
 

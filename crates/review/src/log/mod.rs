@@ -323,6 +323,13 @@ pub(crate) struct ReadReport {
     /// appended to.
     pub other_version: bool,
     /// The read failed; the index is empty.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the failure is logged where it happens; tests read it"
+        )
+    )]
     pub error: Option<io::Error>,
     /// The file had another repository's header and was renamed here.
     pub foreign: Option<PathBuf>,

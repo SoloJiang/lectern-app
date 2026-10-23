@@ -7,31 +7,25 @@
 //! digest and the `review.attribution` cache value (`chain`). Step 3: the
 //! review engine (`engine`) with its claims (`claims`), path cutoffs
 //! (`cutoff`), snapshots, commands, rows and the version LRU (`lru`),
-//! driven without the plugin by `testing::Driven`. The plugin comes with
-//! step 4. Runtime logging goes through `lectern-logging`; `diag` holds
+//! driven without the plugin by `testing::Driven`. Step 4: the "review"
+//! plugin (`plugin`), the watches that refresh open reviews and the
+//! 30-second retention after the last `close`. Runtime logging goes through `lectern-logging`; `diag` holds
 //! what a record keeps of this crate's values (docs/design/review.md
 //! 「日志与诊断」).
 
-// Without `test-support` nothing calls the engine until the plugin (step 4).
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod chain;
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod claims;
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod cutoff;
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod diag;
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod engine;
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod group;
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod log;
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
 mod lru;
 pub mod noise;
-#[cfg_attr(not(feature = "test-support"), allow(dead_code))]
+mod plugin;
 mod seen;
+
+pub use plugin::{PLUGIN_ID, ReviewDeps, ReviewPlugin, plugin};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
