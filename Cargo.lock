@@ -4495,6 +4495,7 @@ dependencies = [
  "lectern-kernel",
  "lectern-logging",
  "libc",
+ "raw-window-handle",
  "rustix",
  "tempfile",
 ]
