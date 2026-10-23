@@ -40,7 +40,8 @@ test *args:
             break
         fi
     done
-    cargo nextest run --locked "${selection[@]}" --all-features --no-tests=pass "$@"
+    # bash 3.2 (macOS /bin/bash) treats an empty "${selection[@]}" as unbound under `set -u`.
+    cargo nextest run --locked ${selection[@]+"${selection[@]}"} --all-features --no-tests=pass "$@"
 
 # Doctests (nextest does not run them).
 doctest:
