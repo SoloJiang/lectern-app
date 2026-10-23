@@ -1514,8 +1514,9 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **没有当前 worktree 时发布空概览。** 文件夹项目、项目快照还没有 `active`、或 worktree 句柄取不到时，概览的 `sessions` 为空、`outside` 为 `Pending`（设计没有写这种情况）。
 - **超过 4000 个改动路径时 `sessions` 为空。** 只保留计数（`Capped`），不保留改动集，会话的文件集合无从求交；下一个事件触发全量比较。
 - **基准不是当前 HEAD 的会话，文件集合取它自己基准比较里被它声明的文件**（与审阅快照的 `files` 同一定义），不是计数改动集与声明的交集：会话提交过自己改的文件时，这些文件不在相对 HEAD 的计数改动集里。每轮最多 8 个这样的会话，其余 `progress` 为 None。
-- **触发与合并。** 当前 worktree 的 fs_watch 批次（路径 → `paths`，`rescan`、`meta` → `full`；订阅时的第一个 `rescan` 不算，订阅它的那一轮已经比较过）、仓库批次的 reflog 行（`full`）、`SessionsChanged`（`reuse`：改动集不变，声明重取）、标注日志读完或写入（`reuse`：进度变了）、`ProjectEvent::Changed` 的 `active`（`resolve`：重新找当前 worktree）；`ProjectEvent::Closed` 释放状态，不等关注放下。合并窗口 2 秒用 kernel 的 `Clock`（`Host::later`），一轮运行期间来的触发在它结束后再等一个窗口；第一次关注立即一轮，不等窗口；没有 `Host`（`Driven`）时立即。
+- **触发与合并。** 当前 worktree 的 fs_watch 批次（路径 → `paths`，`rescan`、`meta` → `full`；订阅后的第一个 `rescan` 也算一轮，补上订阅的那一轮比较之后、arm 之前的变化）、仓库批次的 reflog 行（`full`）、`SessionsChanged`（`reuse`：改动集不变，声明重取）、标注日志读完或写入（`reuse`：进度变了）、`ProjectEvent::Changed` 的 `active`（`resolve`：重新找当前 worktree）；`ProjectEvent::Closed` 释放状态，不等关注放下。合并窗口 2 秒用 kernel 的 `Clock`（`Host::later`），一轮运行期间来的触发在它结束后再等一个窗口；第一次关注立即一轮，不等窗口；没有 `Host`（`Driven`）时立即。
 - **第一次关注之后通常两轮。** 标注日志第一次读完会再触发一轮（进度要它）；测试按事件数断言。
+- **一轮里的 IO 不持有标注日志的锁。** 基准不是 HEAD 的会话的比较和归因缓存的读取先做，之后短暂持有日志索引的锁读已看状态（`command` 在 UI 线程上取这把锁）。
 - **释放在 `Background` 任务里 drop。** 最后一个关注放下时状态从表里取出，交给任务 drop：计数改动集、声明和 fs_watch 的订阅不在调用方（可能是 UI）线程上释放。`overview` 在取出之后立即返回 None。
 - **声明和截止时刻留在引擎的表里。** `release` 保留的 worktree 与会话集合并上概览持有的；概览自己只留 `(SessionKey, started_at, Arc<Claims>)`，不留 `SessionSummary`。
 - **`drifted` 的摘要**按审阅的顺序排步（这个会话最前，其余按最后活动从新到旧），与审阅的 `who.order` 一致；同一时间戳的步在别的审阅对象下顺序可能不同，那时未命中、为 None（允许）。文件级的链（`FileOnly`）不算 Drifted。

@@ -118,6 +118,7 @@ pub(super) fn compute(input: &Input<'_>) -> (Vec<SessionOverview>, OutsideCount)
             claimed: Vec::new(),
             edits: 0,
         };
+        let mut seen_files: HashSet<usize> = HashSet::new();
         for call in k.claims.calls.iter() {
             let ClaimKind::Edit { paths, at, .. } = &call.kind else {
                 continue;
@@ -130,7 +131,7 @@ pub(super) fn compute(input: &Input<'_>) -> (Vec<SessionOverview>, OutsideCount)
                     continue;
                 }
                 for &i in indices {
-                    if !p.claimed.contains(&i) {
+                    if seen_files.insert(i) {
                         p.claimed.push(i);
                     }
                 }
@@ -150,17 +151,14 @@ pub(super) fn compute(input: &Input<'_>) -> (Vec<SessionOverview>, OutsideCount)
         .collect();
     if !bare_paths.is_empty() {
         let times = git.worktree.mtimes(&bare_paths).unwrap_or_default();
-        let mtimes: HashMap<&ChangePath, i64> = bare_paths
+        let with_path: Vec<usize> = bare
             .iter()
-            .zip(times)
-            .filter_map(|(p, t)| {
-                let path = by_path.keys().find(|k| &k.0[..] == p.as_bytes())?;
-                Some((path, t?.div_euclid(1_000_000)))
-            })
+            .copied()
+            .filter(|&i| RepoPath::new(&files[i].path.0).is_some())
             .collect();
-        for &i in &bare {
+        for (&i, time) in with_path.iter().zip(times) {
             let f = &files[i];
-            let Some(&mtime) = mtimes.get(&f.path) else {
+            let Some(mtime) = time.map(|t| t.div_euclid(1_000_000)) else {
                 continue;
             };
             let hits: Vec<usize> = input
@@ -189,56 +187,79 @@ pub(super) fn compute(input: &Input<'_>) -> (Vec<SessionOverview>, OutsideCount)
         .filter(|&s| !per[s].claimed.is_empty())
         .take(MAX_SHOWN)
         .collect();
-    let log = engine.loaded_log(git.common_dir(), diag::overview_ctx(git.common_dir()));
-    let index = log.as_ref().map(|l| lock(&l.mem));
-    let drifted = drifted_of(input, &per, &order, &files, &table);
+    // The IO first, with no lock held: the other-base comparisons (at
+    // most `MAX_OTHER_BASES`, newest first) and the attribution cache.
     let mut other_bases = 0;
-    let mut shown = Vec::with_capacity(order.len());
-    for (n, &s) in order.iter().enumerate() {
-        let k = &input.sessions[s];
-        let p = &per[s];
-        let target_key = target_key(&ReviewTarget::Session(k.key.clone()), git);
-        let own: Vec<&FileChange> = p.claimed.iter().map(|&i| &files[i]).collect();
-        let progress = if p.head_base {
-            index
-                .as_ref()
-                .map(|mem| progress_of(&mem.index, &target_key, own.iter().copied()))
-        } else if other_bases < MAX_OTHER_BASES {
+    let own_sets: Vec<Option<Vec<FileChange>>> = order
+        .iter()
+        .map(|&s| {
+            let (k, p) = (&input.sessions[s], &per[s]);
+            if p.head_base || other_bases >= MAX_OTHER_BASES {
+                return None;
+            }
+            other_bases += 1;
             // Its files are those of its own base comparison that its
             // edits claim (the review's file set), not the count set's.
-            other_bases += 1;
-            p.base_oid.and_then(|base| {
-                let set = git
-                    .worktree
-                    .changes(Base::Commit(base), &count_limits(), input.cancel)
-                    .ok()?;
-                let mem = index.as_ref()?;
-                let files: Vec<FileChange> = set
-                    .files()
+            let base = p.base_oid?;
+            let set = git
+                .worktree
+                .changes(Base::Commit(base), &count_limits(), input.cancel)
+                .ok()?;
+            Some(
+                set.files()
                     .iter()
                     .map(file_change_of)
                     .filter(|f| p.claims_file(k, &table, input.window_ms, f))
-                    .collect();
-                Some(progress_of(&mem.index, &target_key, files.iter()))
-            })
-        } else {
-            None
-        };
-        let critical = own
+                    .collect(),
+            )
+        })
+        .collect();
+    let drifted = drifted_of(input, &per, &order, &files, &table);
+    // The seen states, under the log's lock only for as long as they are
+    // read: no IO here (`command` takes this lock on the UI thread).
+    let log = engine.loaded_log(git.common_dir(), diag::overview_ctx(git.common_dir()));
+    let progress: Vec<Option<Progress>> = match log.as_ref().map(|l| lock(&l.mem)) {
+        None => vec![None; order.len()],
+        Some(mem) => order
             .iter()
-            .filter(|f| noise::classify(&f.path.0, f.generated).is_none())
-            .fold((0u32, false), |(n, deleted), f| {
-                let critical = noise::sensitive(f).is_some_and(sensitive_is_critical);
-                let gone = matches!(f.status, ChangeStatus::Deleted) && !f.untracked;
-                (n + u32::from(critical), deleted || gone)
-            });
-        shown.push(SessionOverview {
-            session: k.key.clone(),
-            progress,
-            drifted: drifted[n],
-            critical: critical.0 + u32::from(critical.1),
-        });
-    }
+            .zip(&own_sets)
+            .map(|(&s, own_set)| {
+                let (k, p) = (&input.sessions[s], &per[s]);
+                let target_key = target_key(&ReviewTarget::Session(k.key.clone()), git);
+                if p.head_base {
+                    let own = p.claimed.iter().map(|&i| &files[i]);
+                    Some(progress_of(&mem.index, &target_key, own))
+                } else {
+                    own_set
+                        .as_ref()
+                        .map(|set| progress_of(&mem.index, &target_key, set.iter()))
+                }
+            })
+            .collect(),
+    };
+    let shown = order
+        .iter()
+        .enumerate()
+        .map(|(n, &s)| {
+            let (k, p) = (&input.sessions[s], &per[s]);
+            let critical = p
+                .claimed
+                .iter()
+                .map(|&i| &files[i])
+                .filter(|f| noise::classify(&f.path.0, f.generated).is_none())
+                .fold((0u32, false), |(n, deleted), f| {
+                    let critical = noise::sensitive(f).is_some_and(sensitive_is_critical);
+                    let gone = matches!(f.status, ChangeStatus::Deleted) && !f.untracked;
+                    (n + u32::from(critical), deleted || gone)
+                });
+            SessionOverview {
+                session: k.key.clone(),
+                progress: progress[n],
+                drifted: drifted[n],
+                critical: critical.0 + u32::from(critical.1),
+            }
+        })
+        .collect();
     (shown, outside)
 }
 

@@ -34,9 +34,7 @@ pub(super) fn start(
         Arc::new(OverviewSink {
             engine: engine.clone(),
             project: project.clone(),
-            // The worktree's first batch is a rescan: a full round, which
-            // the round that armed it already was.
-            first: AtomicBool::new(true),
+            first: AtomicBool::new(false),
         }),
     );
     Watching {
@@ -65,11 +63,9 @@ impl OverviewSink {
 
 impl Sink<WorktreeBatch> for OverviewSink {
     fn deliver(&self, batch: WorktreeBatch, busy: Option<BusyGuard>) {
-        let first = self.first.swap(false, Ordering::AcqRel);
+        // The first batch is a rescan: one full round, which also covers a
+        // change between the subscribing round's comparison and the arming.
         match worktree_hint(&batch) {
-            // The arming's rescan: the round that subscribed compared
-            // everything already.
-            Some(RefreshHint::Full) if first && batch.rescan => {}
             Some(RefreshHint::Full) => self.ask(Trigger::full()),
             Some(RefreshHint::Paths(paths)) => self.ask(Trigger {
                 paths: paths.to_vec(),

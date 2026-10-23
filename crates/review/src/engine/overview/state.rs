@@ -62,6 +62,9 @@ impl Trigger {
 #[derive(Default)]
 pub(crate) struct Overviews {
     pub(super) projects: HashMap<ProjectKey, OverviewState>,
+    /// Round numbers across every state: a round queued for a state that
+    /// was released and watched again does not match the new state.
+    rounds: u64,
 }
 
 /// One project's overview and what the next round reuses.
@@ -287,11 +290,16 @@ impl Engine {
     pub(super) fn start_overview_round(&self, project: &ProjectKey, trigger: Trigger) {
         let (seq, ctx) = {
             let mut overviews = lock(&self.overviews);
+            if !overviews.projects.contains_key(project) {
+                return;
+            }
+            overviews.rounds += 1;
+            let round = overviews.rounds;
             let Some(state) = overviews.projects.get_mut(project) else {
                 return;
             };
             state.running = true;
-            state.round += 1;
+            state.round = round;
             state.cancel.store(true, Ordering::Release);
             state.cancel = Arc::new(AtomicBool::new(false));
             (state.round, state.ctx)
