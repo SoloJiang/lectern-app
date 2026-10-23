@@ -12,3 +12,13 @@ failure-output = "immediate-final"
 [profile.ci.junit]
 # Read by scripts/ci_annotate_failures.py when the tests fail in CI.
 path = "junit.xml"
+
+# The app's startup tests launch the real `lectern`. Windows that open at the
+# same place cover each other; macOS draws no frame for a covered window, so
+# its startup barrier never opens and the run hangs. One at a time.
+[test-groups]
+app-startup = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(lectern-app) & binary(startup)'
+test-group = 'app-startup'

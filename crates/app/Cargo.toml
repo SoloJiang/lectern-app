@@ -20,16 +20,24 @@ layer = "app"
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+# The plugin crates and the resources they share (docs/design/app.md「装配」).
+lectern-agents = { path = "../agents" }
+lectern-cache = { path = "../cache" }
 lectern-executor = { path = "../executor" }
+lectern-fs-watch = { path = "../fs_watch" }
 lectern-i18n = { path = "../i18n" }
 lectern-kernel = { path = "../kernel" }
 # The on-disk sink: install_early, the writer thread, shutdown
 # (docs/design/app.md「启动顺序」). Only app and tool crates enable `sink`.
 lectern-logging = { path = "../logging", features = ["sink"] }
 lectern-platform = { path = "../platform" }
+lectern-project = { path = "../project" }
+lectern-review = { path = "../review" }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+# `testing::FakeBackend` for the profile graph test.
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 # testing::capture() for the canary test.
 lectern-logging = { path = "../logging", features = ["sink", "test-support"] }
 # The startup tests read the log file's JSON lines under a temporary HOME.
