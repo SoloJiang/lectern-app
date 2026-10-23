@@ -54,7 +54,9 @@ pub(crate) fn build(
     let mut push = |critical: bool, position: usize, item: BriefItem| {
         items.push((critical, rank(&item.rule), position, item));
     };
+    // Per command call: the first file it claimed and how many.
     let mut commands: Vec<((u32, u32), usize, u32)> = Vec::new();
+    let mut command_index: HashMap<(u32, u32), usize> = HashMap::new();
     let mut deleted = 0u32;
     let mut incomplete: [u32; 7] = [0; 7];
     let mut noise: [u32; 3] = [0; 3];
@@ -85,9 +87,12 @@ pub(crate) fn build(
             );
         }
         for &call in f.command_only {
-            match commands.iter_mut().find(|(c, _, _)| *c == call) {
-                Some((_, _, count)) => *count += 1,
-                None => commands.push((call, position, 1)),
+            match command_index.get(&call) {
+                Some(&n) => commands[n].2 += 1,
+                None => {
+                    command_index.insert(call, commands.len());
+                    commands.push((call, position, 1));
+                }
             }
         }
         if let Some(kind) = crate::noise::sensitive(f.change) {

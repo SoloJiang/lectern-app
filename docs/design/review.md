@@ -1216,7 +1216,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `files_*`：会话审阅的文件集合。共用的主 worktree 里两个会话和一个手工改动的文件：每个会话的 `files` 只含它声明的文件，`unclaimed` 等于其余的数量；`LooksGood` 只标记这些文件；`Sensitive`、`Deleted` 规则不对没有声明的文件触发；概览里这个会话的 `progress.total` 等于它的审阅快照的 `files` 数；认不出格式的会话按修改时间声明。
   - `narrative_*`：同一轮多次调用合成一步；子 agent 的轮次跟在派出它的那一轮之后，`tool_call` 为 None 时按时间插入；`after_last_seen`；认不出格式时 `turns` 为 None。insta 快照。
   - `rows_*`：最终改动与叙事步的展示行，偏移与 git 的规则一致；中间版本回放后 OID 与缓存的版本 OID 相同；LRU 不超过 8 MiB。
-  - `brief_*`：规则是纯函数 `brief::build`，每条规则一个用例、排序与 12 条上限、提供者条目的对账在 `src/brief/tests.rs`（手工构造的 `FileChange`，不经仓库）；引擎侧（`src/engine/tests/brief.rs`）：规则的输入来自审阅（CI 文件与 lockfile、失败的改动调用、命令声明），`BriefRules` 的假提供者经 `register_brief_rules` 登记：一轮只请求一次、分批答复、10 秒超时（`Driven::with_timers` 的手动 `Host`）、登记 drop 或 token 失效后不再调用它且丢弃在途的答复、条目对账（不在快照里的文件丢弃、行不在显示范围内降为文件备注）、晚登记的提供者对已打开的审阅补问。提供者的 `ActivationToken` 来自 `testing::host()`（一个只交出 `PluginHandle` 的 kernel）。
+  - `brief_*`：规则是纯函数 `brief::build`，每条规则一个用例、排序与 12 条上限、提供者条目的对账在 `src/brief/tests.rs`（手工构造的 `FileChange`，不经仓库）；引擎侧（`src/engine/tests/brief.rs`）：规则的输入来自审阅（CI 文件与 lockfile、失败的改动调用、命令声明），`BriefRules` 的假提供者经 `register_brief_rules` 登记：一轮只请求一次、分批答复、10 秒超时（`Driven::with_timers` 的手动 `Host`）、登记 drop 或 token 失效后不再调用它且丢弃在途的答复、条目对账（不在快照里的文件丢弃、行不在显示范围内降为文件备注）、晚登记的提供者对已打开的审阅补问、从 `started` 里登记（token 还是 `Pending`）的提供者在 50 ms 的重试后被问到。提供者的 `ActivationToken` 来自 `testing::host()`（一个只交出 `PluginHandle` 的 kernel），`Pending` 的情形用一个在 `started` 里登记的测试插件。
   - `overview_*`：计数比较用 `retained_bytes = 0`、`total_patch_bytes = 0`；4001 个改动路径时只保留计数；会话外的改动数；基准不同的会话每轮最多算 8 个；放下关注后释放。`overview_never_calls_turns`：一轮概览（20 个会话）之后，`FakeSessions` 记下的 `turns` 调用数为 0，只有 `turns_unretained`；本 crate 只保留派生的声明（`review/resident_*_bytes` 覆盖它的大小）。
   - `plugin_*`（`src/plugin/tests.rs`，另有 `src/engine/watch.rs` 里批次到请求的映射和请求合并的单元测试）：`TestKernel` 激活后提供 `dyn Review`、清单符合「依赖」，激活不提交任务、不监听、不写文件（`plugin_provides_review_and_activation_does_nothing`）；`open` 立即返回，快照经 `Loading` 到 `Ready`，同一对象同一个 ID（`plugin_open_returns_at_once_…`）；fs_watch 的路径批次、`rescan` 和 `SessionsChanged` 触发刷新，批次的路径进 `RefreshHint::Paths`、`rescan` 为 `Full`（`plugin_a_watch_batch_…`、`plugin_a_path_batch_…`、`plugin_sessions_changed_…`）；运行期间来的请求合成一轮，路径取并集（`plugin_requests_during_a_round_…`、`plugin_merge_…`、`plugin_worktree_batches_…`）；kernel 在结果发布后静止，轮次排队时不静止（`plugin_kernel_is_quiescent_…`）；关闭后保留 30 秒、期间重新打开得到同一个审阅且不重算、第一次关闭的定时器不释放第二次关闭之后的审阅、到期后释放快照、监听和版本 LRU（`plugin_close_keeps_…`、`plugin_a_kept_review_…`）；停用后监听和审阅都释放（`plugin_deactivation_…`）；`command` 在 UI 线程上调用时不做 IO（`plugin_commands_on_the_ui_thread_do_no_io`：`cache` 的 `ui_thread` 设为测试线程，任何落在这个线程上的缓存调用在调试构建里 panic，任务都放到另一个线程上运行；标注日志的目录在后台任务运行之前不存在）；概览和简报规则的登记在第 5 步之前是空操作（`plugin_overview_…`）。测试不用墙上时钟：30 秒是 kernel 的 `ManualClock`，合并窗口是 fs_watch 的假时钟，任务在测试运行 executor 时才执行。
   - `logs_*`（`src/engine/tests/logs.rs`，用 `lectern-logging` 的 `testing::capture()`）：金丝雀与 warn 路径的记录，见「日志与诊断」。标注日志的 IO 故障和尺寸上限经 `Engine::set_log_test`（`cfg(test)`）作用在引擎之后打开的日志上。
@@ -1369,7 +1369,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 在 macOS（Darwin，本机）上运行。
 
 - `just check`（含 clippy 警告即失败、架构规则、文档链接）通过。
-- `just test -p lectern-review`：159 个测试通过，新增 21 个：`src/brief/tests.rs` 14 个（每条规则一个、关键在前与表的顺序、12 条上限、提供者条目的对账与每提供者 8 条）、`src/engine/tests/brief.rs` 7 个（规则来自审阅、失败的改动调用、命令声明、提供者一轮一次请求与分批答复与新一轮的取消、10 秒超时、登记 drop、token 失效、晚登记补问）。`lectern-bench` 的 77 个测试照常通过（预算表与文档一致）。
+- `just test -p lectern-review`：160 个测试通过，新增 22 个：`src/brief/tests.rs` 14 个（每条规则一个、关键在前与表的顺序、12 条上限、提供者条目的对账与每提供者 8 条）、`src/engine/tests/brief.rs` 8 个（规则来自审阅、失败的改动调用、命令声明、提供者一轮一次请求与分批答复与新一轮的取消、10 秒超时、登记 drop、token 失效、晚登记补问、从 `started` 里登记的 `Pending` token）。`lectern-bench` 的 77 个测试照常通过（预算表与文档一致）。
 - 基准：`just bench --measure review/brief_5000` 中位数 270 µs（预算 < 5 ms）；夹具 5000 个文件，每条规则都有命中，保留 12 条、其余计入 `omitted`。
 - 没有验证的：真实的提供者（code_intel 的前置条件 F 还没有实现）；提供者在 UI 线程上同步答复的情形（设计要求 `evaluate` 立即返回，答复在 executor 任务里重新装配快照）。
 
@@ -1499,6 +1499,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **提供者一轮只请求一次。** 设计写「同一审阅的简报重算时丢弃上一次的 `BriefReply`」。归因进行中每 8 个文件或 50 ms 就换一次快照、重算一次简报；每次都重新请求会让提供者反复算同一份改动。实现按工作（`Work`，每一轮一份）判断：`Changed` 事件之后，当前工作还没有问过提供者时发出请求、取消上一次；同一轮里之后的快照只重新对账已收到的条目。新登记的提供者对已打开的审阅补问一次（这一次对其他提供者也是新请求）。
 - **规则只看快照的 `files`**（「简报规则」已写明）：`EditFailed` 只对快照里的文件给条目，失败的改动调用若没有改到任何文件，没有条目；`CommandOnly` 每个命令调用一条，`file` 是它声明的第一个文件（进度顺序），`count` 是文件数。噪声文件只计入 `Noise` 条目，不触发其他规则。
 - **`Drifted` 的行备注**是第一个有无来源行的 hunk 的第一行（新一侧；hunk 在新一侧为空时取旧一侧），行号与 `DiffHunk` 相同从 0 起；步没有对齐（`Partial`、`Unaligned`，或链里没有它的 diff）也算 Drifted。失败的改动调用不进链，所以不因此算 Drifted。
+- **从 `started` 里登记的提供者稍后再问。** 提供者的插件在 `started` 里登记时它的 token 还是 `Pending`，`enter()` 不放行（kernel 设计「激活的提交」）。请求遇到 `Pending` 的 token 时不按失效处理：50 ms 后（`PENDING_RETRY`，kernel 的 `Clock`）对这次请求里还没问到的提供者再试，直到放行或这次请求超时；`Dead` 的按完成处理。没有 `Host`（`Driven` 不带手动 `Host`）时没有定时器，按完成处理。
+- **新一轮的第一份快照不显示上一轮的提供者条目。** 一轮的结果装上快照时请求还没发出（请求在 `Changed` 事件之后），这份快照里提供者的条目为空、`pending_providers` 是已登记的提供者数；请求发出后的快照按答复显示。
 - **登记 drop 时已交回的条目也丢弃**（设计只写丢弃在途的答复）：提供者停用后它的条目不再有人维护，留着会过期。受影响的审阅在后台任务里重新装配快照。
 - **日志里用登记序号指代提供者。** `Value::text` 只接受 `'static str`，插件 ID 是运行时的文本，按日志规则不写出；`brief requested`、`brief reply`、`brief provider timed out` 用 `registration`（上文「日志与诊断」已加）。
 - **提供者的答复在 `Background` 任务里重新装配快照**，不在 `send` 的调用线程上：`send` 立即返回，与 `BriefReply` 的文档一致。

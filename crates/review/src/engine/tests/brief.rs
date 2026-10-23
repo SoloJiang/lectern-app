@@ -9,13 +9,17 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use lectern_kernel::{
+    Activation, Active, Context, Kernel, Manifest, Plugin, PluginError, PluginHandle, PluginSet,
+};
 use lectern_services::review::{
-    BriefItem, BriefReply, BriefRequest, BriefRule, BriefRules, DiffSide, LineAnchor, NoiseKind,
-    ProvidedItem, SensitiveKind,
+    BriefItem, BriefReply, BriefRequest, BriefRule, BriefRules, BriefRulesRegistration, DiffSide,
+    LineAnchor, NoiseKind, ProvidedItem, SensitiveKind,
 };
 
 use super::*;
-use crate::engine::brief::PROVIDER_TIMEOUT;
+use crate::engine::Engine;
+use crate::engine::brief::{PENDING_RETRY, PROVIDER_TIMEOUT};
 
 /// A provider that records what it was asked and replies when the test
 /// says.
@@ -367,4 +371,81 @@ fn brief_a_provider_registered_later_is_asked_about_open_reviews() {
     p.send(0, vec![item("public-api", Some("a.txt"), None)], true);
     d.run();
     assert_eq!(provided(&d.snapshot(id).unwrap()).len(), 1);
+}
+
+/// A plugin that registers `provider` from its `started`, as a real
+/// provider's plugin does (「简报规则的扩展点」): its token is still
+/// `Pending` then.
+struct Registrar {
+    engine: Arc<Engine>,
+    provider: Arc<FakeRules>,
+    /// The registration, kept for the plugin's life; and how many requests
+    /// the provider had received when `started` returned.
+    seen: Arc<Mutex<(Option<BriefRulesRegistration>, usize)>>,
+}
+
+impl Plugin for Registrar {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            provides: Vec::new(),
+            requires: Vec::new(),
+            activation: vec![Activation::AfterFirstFrame],
+        }
+    }
+
+    fn activate(&self, _: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        Ok(Box::new(Registrar {
+            engine: self.engine.clone(),
+            provider: self.provider.clone(),
+            seen: self.seen.clone(),
+        }))
+    }
+}
+
+impl Active for Registrar {
+    fn started(&mut self, handle: PluginHandle) {
+        let reg = self
+            .engine
+            .register_brief_rules(self.provider.clone(), handle.token());
+        *self.seen.lock().unwrap() = (Some(reg), self.provider.requests());
+    }
+}
+
+#[test]
+fn brief_a_provider_registered_from_started_is_asked_once_its_token_is_live() {
+    let (fx, sessions) = fixture("s");
+    let d = timed(&fx, sessions);
+    let (id, s) = open(&d, target("s"));
+    assert_eq!(s.brief.pending_providers, 0);
+    let p = FakeRules::new("code-intel");
+    let seen = Arc::new(Mutex::new((None, 0)));
+    let kernel = Kernel::start(PluginSet::new().with(
+        "registrar",
+        Registrar {
+            engine: d.engine.clone(),
+            provider: p.clone(),
+            seen: seen.clone(),
+        },
+    ));
+    kernel.barrier();
+    // Inside `started` the token admitted nothing: not asked yet, but
+    // counted as pending.
+    assert_eq!(seen.lock().unwrap().1, 0);
+    d.run();
+    assert_eq!(p.requests(), 0);
+    assert_eq!(d.snapshot(id).unwrap().brief.pending_providers, 1);
+    // The retry finds the token `Live`.
+    d.advance(PENDING_RETRY);
+    d.run();
+    assert_eq!(p.requests(), 1);
+    p.send(0, vec![item("public-api", Some("a.txt"), None)], true);
+    d.run();
+    let s = d.snapshot(id).unwrap();
+    assert_eq!(provided(&s).len(), 1);
+    assert_eq!(s.brief.pending_providers, 0);
+    let (done, wait) = std::sync::mpsc::channel();
+    kernel.shutdown(move || {
+        let _ = done.send(());
+    });
+    wait.recv_timeout(Duration::from_secs(10)).unwrap();
 }

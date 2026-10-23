@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use lectern_executor::Priority;
-use lectern_kernel::ActivationToken;
+use lectern_kernel::{ActivationToken, TokenState};
 use lectern_logging::{debug, info};
 use lectern_services::changes::ChangeDetail;
 use lectern_services::project::RelPath;
@@ -27,6 +27,10 @@ use crate::claims::ClaimKind;
 
 /// A provider that has not sent `done` by then counts as done.
 pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(10);
+/// A provider registered from its `started` has a `Pending` token, which
+/// admits nothing until `started` returns: asked again after this long,
+/// until it is `Live` or the request times out.
+pub(crate) const PENDING_RETRY: Duration = Duration::from_millis(50);
 
 /// The registered providers, in registration order.
 #[derive(Default)]
@@ -63,6 +67,8 @@ struct Reply {
     registration: u64,
     id: Arc<str>,
     items: Vec<ProvidedItem>,
+    /// `evaluate` was called (or the provider was given up on).
+    asked: bool,
     done: bool,
 }
 
@@ -103,20 +109,23 @@ impl Engine {
             seq
         };
         // The reviews already open are asked again, this provider among
-        // the others.
-        let ids: Vec<ReviewId> = {
+        // the others; their snapshots then show the request pending.
+        let open_reviews: Vec<(ReviewId, u64, lectern_logging::Ctx)> = {
             let mut state = lock(&self.state);
             let mut ids = Vec::new();
             for (id, open) in state.reviews.iter_mut() {
                 if open.brief.asked.is_some() {
                     open.brief.asked = None;
-                    ids.push(*id);
+                    ids.push((*id, open.round, open.ctx));
                 }
             }
             ids
         };
-        for id in ids {
+        for (id, round, ctx) in open_reviews {
             self.ask_providers(id);
+            self.submit(Priority::Background, ctx, move |engine| {
+                engine.republish(id, round)
+            });
         }
         let me = self.me.clone();
         BriefRulesRegistration::new(move || {
@@ -218,18 +227,52 @@ impl Engine {
                         registration: *seq,
                         id: pid.clone(),
                         items: Vec::new(),
+                        asked: false,
                         done: false,
                     })
                     .collect();
             }
         }
-        let mut skipped: Vec<u64> = Vec::new();
-        for (seq, _, provider, token) in &providers {
+        self.evaluate_all(id, request, ctx, &cancel, &request_data, &providers);
+        if let Some(host) = self.cfg.host.clone() {
+            let me = self.me.clone();
+            host.later(
+                PROVIDER_TIMEOUT,
+                Box::new(move || {
+                    let Some(engine) = me.upgrade() else { return };
+                    engine.submit(Priority::Background, ctx, move |engine| {
+                        engine.providers_timed_out(id, request);
+                    });
+                }),
+            );
+        }
+    }
+
+    /// Calls `evaluate` on each provider whose token admits it. A dead
+    /// token counts as done; a `Pending` one (the provider registered from
+    /// its `started`) is asked again after `PENDING_RETRY`.
+    fn evaluate_all(
+        &self,
+        id: ReviewId,
+        request: u64,
+        ctx: lectern_logging::Ctx,
+        cancel: &Arc<AtomicBool>,
+        request_data: &BriefRequest,
+        providers: &[Asked],
+    ) {
+        let mut asked: Vec<u64> = Vec::new();
+        let mut dead: Vec<u64> = Vec::new();
+        let mut pending = false;
+        for (seq, _, provider, token) in providers {
             // Held while the provider runs: it is not deactivated under us.
             let Some(_admission) = token.enter() else {
-                skipped.push(*seq);
+                match token.state() {
+                    TokenState::Pending => pending = true,
+                    TokenState::Live | TokenState::Dead => dead.push(*seq),
+                }
                 continue;
             };
+            asked.push(*seq);
             let me = self.me.clone();
             let flag = cancel.clone();
             let registration = *seq;
@@ -243,21 +286,84 @@ impl Engine {
             );
             provider.evaluate(request_data.clone(), reply);
         }
-        if !skipped.is_empty() {
-            self.provider_finished(id, request, |r| skipped.contains(&r.registration));
+        {
+            let mut state = lock(&self.state);
+            if let Some(open) = state.reviews.get_mut(&id)
+                && open.brief.request == request
+            {
+                for reply in &mut open.brief.replies {
+                    if asked.contains(&reply.registration) {
+                        reply.asked = true;
+                    }
+                }
+            }
         }
-        if let Some(host) = self.cfg.host.clone() {
-            let me = self.me.clone();
-            host.later(
-                PROVIDER_TIMEOUT,
-                Box::new(move || {
-                    let Some(engine) = me.upgrade() else { return };
-                    engine.submit(Priority::Background, ctx, move |engine| {
-                        engine.providers_timed_out(id, request);
-                    });
-                }),
-            );
+        if !dead.is_empty() {
+            self.provider_finished(id, request, |r| dead.contains(&r.registration));
         }
+        if !pending {
+            return;
+        }
+        match self.cfg.host.clone() {
+            Some(host) => {
+                let me = self.me.clone();
+                host.later(
+                    PENDING_RETRY,
+                    Box::new(move || {
+                        let Some(engine) = me.upgrade() else { return };
+                        engine.submit(Priority::Background, ctx, move |engine| {
+                            engine.ask_pending(id, request);
+                        });
+                    }),
+                );
+            }
+            // No timer to come back on: given up, as a dead token.
+            None => {
+                self.provider_finished(id, request, |r| !r.asked);
+            }
+        }
+    }
+
+    /// `PENDING_RETRY` after a request met a `Pending` token: asks the
+    /// providers of this request not asked yet.
+    fn ask_pending(&self, id: ReviewId, request: u64) {
+        let (waiting, cancel, ctx, work) = {
+            let state = lock(&self.state);
+            let Some(open) = state.reviews.get(&id) else {
+                return;
+            };
+            if open.brief.request != request {
+                return;
+            }
+            let waiting: Vec<u64> = open
+                .brief
+                .replies
+                .iter()
+                .filter(|r| !r.asked && !r.done)
+                .map(|r| r.registration)
+                .collect();
+            let Some(work) = open.work.clone() else {
+                return;
+            };
+            (waiting, open.brief.cancel.clone(), open.ctx, work)
+        };
+        if waiting.is_empty() {
+            return;
+        }
+        let providers: Vec<Asked> = lock(&self.providers)
+            .entries
+            .iter()
+            .filter(|r| waiting.contains(&r.seq))
+            .map(|r| (r.seq, r.id.clone(), r.provider.clone(), r.token.clone()))
+            .collect();
+        // Registrations dropped meanwhile: `unregister` removed their
+        // replies, nothing to do for them.
+        let request_data = BriefRequest {
+            project: work.git.project.clone(),
+            worktree: Some(work.git.key.clone()),
+            files: brief_files(&work),
+        };
+        self.evaluate_all(id, request, ctx, &cancel, &request_data, &providers);
     }
 
     /// A provider's batch for request `request` of review `id`. Stale
@@ -414,16 +520,29 @@ impl Engine {
                 }
             })
             .collect();
-        let provided: Vec<Provided<'_>> = open
+        // The replies belong to the work they were asked about. A new
+        // work's first snapshot is assembled before `emit` asks about it:
+        // then nothing is shown and every registered provider is pending.
+        let current = open
             .brief
-            .replies
-            .iter()
-            .map(|r| Provided {
-                provider: &r.id,
-                items: &r.items,
-            })
-            .collect();
-        let pending = open.brief.replies.iter().filter(|r| !r.done).count() as u32;
+            .asked
+            .as_ref()
+            .is_some_and(|asked| std::ptr::eq(Weak::as_ptr(asked), work));
+        let (provided, pending): (Vec<Provided<'_>>, u32) = if current {
+            (
+                open.brief
+                    .replies
+                    .iter()
+                    .map(|r| Provided {
+                        provider: &r.id,
+                        items: &r.items,
+                    })
+                    .collect(),
+                open.brief.replies.iter().filter(|r| !r.done).count() as u32,
+            )
+        } else {
+            (Vec::new(), lock(&self.providers).entries.len() as u32)
+        };
         Arc::new(brief::build(
             &inputs,
             &provided,

@@ -355,7 +355,6 @@ fn sorted(turns: &[TurnRef], rank: &HashMap<TurnRef, usize>) -> Arc<[TurnRef]> {
     out.into()
 }
 
-/// The narrative step of `file` in turn `ordinal` of session `s`.
 /// Whether a step of the file did not align (`Partial` or `Unaligned`),
 /// or did not apply at all (「简报规则」's `Drifted`).
 pub(crate) fn misaligned(work: &Work, f: &FileWork, chain: &Chain) -> bool {
@@ -373,6 +372,7 @@ pub(crate) fn misaligned(work: &Work, f: &FileWork, chain: &Chain) -> bool {
     })
 }
 
+/// The narrative step of `file` in turn `ordinal` of session `s`.
 pub(crate) fn step_entry(
     work: &Work,
     results: &[Option<Arc<FileResult>>],
