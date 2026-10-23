@@ -12,7 +12,7 @@
 - 会话历史的扫描在 `agents` 里、首帧之后进行，本视图只读结果快照。
 - 打开项目经 `workspace` 的 `WorkspaceCommand`（`OpenProject`、`PromptOpenProject`），本 crate 不调 `Projects::open`。
 - 最近项目列表存在 `platform::dirs::app_data()` 下的 `welcome/recent.json`，读写只在 executor 的 `Background` 任务里（`src/recent/store.rs`）。
-- 本 crate 是插件 crate（插件 `welcome`，[ADR 0025](../../docs/adr/0025.md)）：只依赖 kernel 层和非插件的库 crate。
+- 本 crate 是插件 crate（[ADR 0025](../../docs/adr/0025.md)），含两个插件：`welcome`（屏幕与最近项目，依赖 `dyn Contributions`、`dyn Projects`）和 `welcome-discovery`（发现列表，依赖 `dyn SessionSource`；kernel 没有可选依赖，所以分开）。只依赖 kernel 层和非插件的库 crate。
 
 ## 测试
 
