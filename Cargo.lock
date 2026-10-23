@@ -4318,11 +4318,16 @@ version = "0.0.0"
 dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
+ "lectern-agents",
+ "lectern-cache",
  "lectern-executor",
+ "lectern-fs-watch",
  "lectern-i18n",
  "lectern-kernel",
  "lectern-logging",
  "lectern-platform",
+ "lectern-project",
+ "lectern-review",
  "serde_json",
  "tempfile",
 ]

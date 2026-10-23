@@ -2,7 +2,7 @@
 //! and on the timeouts passed, never on how long a step took.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lectern_executor::Shutdown;
 use lectern_logging::Flushed;
@@ -13,7 +13,9 @@ use crate::quit::{QuitSteps, Timeouts, run};
 enum Event {
     Kernel,
     KernelDone,
+    Watcher,
     Executor(Duration),
+    Cache,
     Logging(Duration),
 }
 
@@ -24,12 +26,30 @@ struct Fake {
     hang_kernel: bool,
     /// The kernel drops `done` without calling it.
     drop_done: bool,
+    /// `watcher` never returns.
+    hang_watcher: bool,
     busy_workers: Option<usize>,
 }
 
 impl Fake {
     fn events(&self) -> Vec<Event> {
         std::mem::take(&mut *self.events.lock().unwrap())
+    }
+
+    /// The events, once `event` has arrived. It is recorded on a step
+    /// thread, so it may come after `run` returns when `run` stopped
+    /// waiting for that step. The timeout only ends a hang.
+    fn events_with(&self, event: Event) -> Vec<Event> {
+        let start = Instant::now();
+        while !self.events.lock().unwrap().contains(&event) {
+            assert!(start.elapsed() < Duration::from_secs(10), "no {event:?}");
+            std::thread::yield_now();
+        }
+        self.events()
+    }
+
+    fn run(&self, timeouts: &Timeouts) -> crate::quit::Outcome {
+        run(Arc::new(self.clone()), timeouts)
     }
 }
 
@@ -50,12 +70,25 @@ impl QuitSteps for Fake {
         }
     }
 
+    fn watcher(&self) {
+        self.events.lock().unwrap().push(Event::Watcher);
+        if self.hang_watcher {
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+
     fn executor(&self, timeout: Duration) -> Shutdown {
         self.events.lock().unwrap().push(Event::Executor(timeout));
         match self.busy_workers {
             Some(busy_workers) => Shutdown::TimedOut { busy_workers },
             None => Shutdown::Clean,
         }
+    }
+
+    fn cache(&self) {
+        self.events.lock().unwrap().push(Event::Cache);
     }
 
     fn logging(&self, timeout: Duration) -> Flushed {
@@ -72,16 +105,20 @@ const LONG: Timeouts = Timeouts {
 #[test]
 fn steps_run_in_order() {
     let fake = Fake::default();
-    let outcome = run(&fake, &LONG);
+    let outcome = fake.run(&LONG);
     assert!(!outcome.kernel_timed_out);
+    assert!(!outcome.watcher_timed_out);
     assert!(matches!(outcome.executor, Shutdown::Clean));
+    assert!(!outcome.cache_timed_out);
     assert!(matches!(outcome.logging, Flushed::Clean));
     let events = fake.events();
-    assert_eq!(events.len(), 4, "{events:?}");
+    assert_eq!(events.len(), 6, "{events:?}");
     assert_eq!(events[0], Event::Kernel);
     assert_eq!(events[1], Event::KernelDone);
-    assert!(matches!(events[2], Event::Executor(_)), "{events:?}");
-    assert_eq!(events[3], Event::Logging(Duration::from_millis(500)));
+    assert_eq!(events[2], Event::Watcher);
+    assert!(matches!(events[3], Event::Executor(_)), "{events:?}");
+    assert_eq!(events[4], Event::Cache);
+    assert_eq!(events[5], Event::Logging(Duration::from_millis(500)));
 }
 
 #[test]
@@ -94,11 +131,16 @@ fn a_hung_kernel_does_not_block_quit() {
         services: Duration::from_millis(20),
         logging: Duration::from_millis(500),
     };
-    let outcome = run(&fake, &timeouts);
+    let outcome = fake.run(&timeouts);
     assert!(outcome.kernel_timed_out);
-    // The whole budget went to the kernel: the executor only cancels.
+    assert!(!outcome.cache_timed_out);
+    // The whole budget went to the kernel: the watcher is still asked to
+    // stop (without a wait), the executor only cancels, the cache is not
+    // closed.
+    let mut events = fake.events_with(Event::Watcher);
+    events.retain(|e| *e != Event::Watcher);
     assert_eq!(
-        fake.events(),
+        events,
         [
             Event::Kernel,
             Event::Executor(Duration::ZERO),
@@ -108,19 +150,56 @@ fn a_hung_kernel_does_not_block_quit() {
 }
 
 #[test]
+fn a_hung_watcher_does_not_block_quit() {
+    let capture = lectern_logging::testing::capture();
+    capture.clear();
+    let fake = Fake {
+        hang_watcher: true,
+        ..Fake::default()
+    };
+    let timeouts = Timeouts {
+        services: Duration::from_millis(20),
+        logging: Duration::from_millis(500),
+    };
+    let outcome = fake.run(&timeouts);
+    assert!(!outcome.kernel_timed_out);
+    assert!(outcome.watcher_timed_out);
+    assert!(!outcome.cache_timed_out);
+    // The watcher had the rest of the budget: the executor only cancels and
+    // the cache is not closed.
+    let mut events = fake.events_with(Event::Watcher);
+    events.retain(|e| *e != Event::Watcher);
+    assert_eq!(
+        events,
+        [
+            Event::Kernel,
+            Event::KernelDone,
+            Event::Executor(Duration::ZERO),
+            Event::Logging(Duration::from_millis(500)),
+        ]
+    );
+    let lines = capture.lines();
+    let watcher = lines
+        .iter()
+        .find(|l| l.contains("\"msg\":\"watcher shutdown timed out\""))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    assert!(watcher.contains("\"timeout_us\":"), "{watcher}");
+}
+
+#[test]
 fn a_dropped_done_is_not_a_timeout() {
     let fake = Fake {
         drop_done: true,
         ..Fake::default()
     };
-    let outcome = run(&fake, &LONG);
+    let outcome = fake.run(&LONG);
     assert!(!outcome.kernel_timed_out);
 }
 
 #[test]
 fn executor_gets_the_remaining_time() {
     let fake = Fake::default();
-    run(&fake, &LONG);
+    fake.run(&LONG);
     let executor = fake
         .events()
         .into_iter()
@@ -148,7 +227,7 @@ fn timeouts_are_logged() {
         services: Duration::from_millis(20),
         logging: Duration::from_millis(500),
     };
-    let outcome = run(&fake, &timeouts);
+    let outcome = fake.run(&timeouts);
     assert!(matches!(
         outcome.executor,
         Shutdown::TimedOut { busy_workers: 2 }

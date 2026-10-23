@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已接受，尚未实现。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -312,7 +312,7 @@ Logging::shutdown(500 ms)
 
 - `every_profile_graph_validates`：用临时目录建 `Resources`（`Cache::new` 指向临时目录，`Watcher` 用 `fs_watch::testing::FakeBackend`），对每个 profile 调用 `plugins(&resources).validate()`；之后临时目录仍是空的（构造不做 IO）。
 - `quit`：`steps_run_in_order` 的顺序改为 kernel、kernel 完成、watcher、executor、cache、logging；`a_hung_kernel_does_not_block_quit` 里 watcher 照常调用、cache 因剩余时间为零跳过；`a_hung_watcher_does_not_block_quit`（`watcher` 不返回时，到截止时间后照常关闭 executor 和日志，`watcher_timed_out` 为 true，cache 跳过）。
-- `tests/startup.rs`：
+- `tests/startup.rs`（这个测试二进制的测试一次只运行一个，见「与设计的差异」第 2 步）：
   - `startup_writes_a_header_and_an_end_record` 加检查：`plugins assembled` 在 `first frame drawn` 之后、`plugins` 为 4。
   - `quit_shuts_the_services_down_in_time`：`--quit-after-start` 时日志里没有 `kernel shutdown timed out`、`executor shutdown timed out`。
   - `home_path_stays_out_of_the_log`（上一节）。
@@ -439,6 +439,15 @@ Logging::shutdown(500 ms)
 - 手动运行发布构建（临时 `HOME`）：菜单是 Hide Lectern、Hide Others、Show All、Quit Lectern（经 System Events 读出）；按 ⌘Q 后进程在 1 s 内以退出码 0 退出。日志文件依次是文件头、`first frame drawn`、`startup barrier released`（`profile` 为 `desktop`）、`quit requested`（`path` 为 `action`）、`run end`。文件头的 `up` 是 257 ms，即启动后 1 s 内出现本次运行的文件（logging 设计第 3 步）。
 - 同一构建连续 3 次（从终端启动，窗口不在前台）：`first frame drawn` 的 `up` 是 120、141、137 ms，`startup barrier released` 比它晚 88、100、89 ms。`up` 从 `install_early` 算起，`first frame drawn` 是首帧画出的时刻，不是显示时刻，这些数字不是 ADR 0017 定义的冷启动；冷启动由 bench 第 4 步（空 GPUI 窗口的基线）和第 5 步（`app/cold_start`）测量。屏障晚于首帧的时间见「已知限制」。
 
+第 2 步（装配），同一台机器：
+
+- `cargo clippy --locked -p lectern-app --all-targets --all-features -- -D warnings`、`cargo fmt --check` 通过；`python3 scripts/check_architecture.py` 通过（32 个 crate）；`rg 'eprintln!|println!|log::' crates/app/src` 没有结果。
+- `cargo nextest run -p lectern-app`：22 个测试通过（单元测试 15 个，启动测试 7 个），连续 11 次。新增或改过的：`every_profile_graph_validates`（desktop 4 个插件、test 0 个，临时目录之后仍是空的）、`steps_run_in_order`（6 步的顺序）、`a_hung_kernel_does_not_block_quit`、`a_hung_watcher_does_not_block_quit`、`startup_writes_a_header_and_an_end_record`（`plugins assembled` 在首帧之后、屏障之前，`plugins` 为 4）、`quit_shuts_the_services_down_in_time`、`home_path_stays_out_of_the_log`（`HOME` 的目录名含金丝雀，trace 级别）。
+- 手动运行发布构建，临时 `HOME`，去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`，没有会话，不打开项目：
+  - 空闲内存：启动 10 s 后 `footprint -p` 的 `phys_footprint` 3 次都是 40 MB（ADR 0017：60 MB）。
+  - 日志依次是 `first frame drawn`、`plugins assembled`（`plugins` 为 4）、`startup barrier released`、4 条 `plugin activated`、2 条 `sessions discovered`。
+  - 按 ⌘Q 后 0.08 s 退出，退出码 0，没有 warn。详细日志（`verbose/`）的 `quit finished`：`kernel_us` 157、`watcher_us` 149、`executor_us` 189、`cache_us` 62。
+
 ## 与设计的差异
 
 - **库与二进制分开。** 原文写 `app` 是二进制 crate。记录的 target 取 `module_path!` 的第一段：二进制名为 `lectern` 时 target 是 `lectern`，不是 logging 设计规定的 `app`。现在逻辑在库 `lectern_app` 里，二进制只调用 `lectern_app::run()`，target 是 `app`（「接口」已改）。
@@ -446,3 +455,10 @@ Logging::shutdown(500 ms)
 - **`--quit-after-start` 等日志文件出现。** 屏障放开后写盘线程异步建文件；立即退出时测试与建文件竞争。现在调试入口在后台任务里查到 `lectern-*.log` 之后才退出（「测试」已改）。
 - **测试名与超时。** `quit_before_release_quits_at_once` 改为 `quit_before_release_starts_nothing`：TestPlatform 的 `quit()` 不做任何事，测试只能检查没有启动任何东西。新增 `a_dropped_done_is_not_a_timeout`。启动测试的超时从 10 s 改为 30 s：调试构建在 CI 上第一次启动较慢，超时只防卡住（「测试」已改）。
 - **窗口不在前台时屏障更晚。** 原文按 60 Hz 估计屏障最多晚 33 ms；GPUI 对非前台窗口按 30 fps 请求帧，实测晚约 90–100 ms（「已知限制」已改）。只推迟后台初始化，不影响首帧。
+
+第 2 步：
+
+- **`Profile::plugins` 同时返回插件个数。** 原文返回 `PluginSet`。`PluginSet` 不公开个数，`plugins assembled` 的 `plugins` 字段要它，所以改为返回 `(PluginSet, usize)`，不为此改 kernel（「接口的变化」的签名照此理解）。
+- **test profile 在 `startup` 里直接跳过装配。** `startup::assemble` 对 test profile 不建 `Resources`、不读环境变量，返回空集合；`Profile::Test.plugins` 只在 `every_profile_graph_validates` 里调用。
+- **`QuitSteps` 要 `Sync`，`quit::run` 接收 `Arc<dyn QuitSteps>`。** 短命线程 `lectern-quit-step` 要持有这些步骤。线程建不起来时记 warn `could not start a quit step` 并跳过这一步：watcher 的线程和缓存的连接随进程退出结束，只丢访问时间。
+- **启动测试一次只运行一个。** 7 个启动测试并行时，本机 10 次里有 2 次有测试 30 s 没有退出。main 上的二进制在同样的并行启动下也会卡住（混合启动 120 次，两种二进制各 3 次），所以不是装配引起的：窗口都开在屏幕中央同一位置，被完全遮住的窗口 macOS 不给它画帧，首帧画不出，启动屏障不放开。测试从 5 个增加到 7 个之后更容易出现。`.config/nextest.toml` 把 `package(lectern-app) & binary(startup)` 放进 `max-threads = 1` 的测试组，之后连续 11 次通过，耗时约 2.6 s。
