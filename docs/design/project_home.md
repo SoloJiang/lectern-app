@@ -146,27 +146,27 @@ pub struct SidebarModel {
     /// 按 `ProjectSnapshot::worktrees` 的顺序（主 worktree 在前）；文件夹项目只有一组、`worktree` 为 None；
     /// 归位到不在列表里的 worktree（已 prunable）的会话在最后一组 `Other`。没有会话的 worktree 不出现。
     pub groups: Arc<[WorktreeGroup]>,
-    /// 侧栏里会话行的总数（虚拟列表的长度用）。
+    /// 侧栏里会话行的总数（探针属性与日志用）。
     pub session_rows: u32,
     pub packages: Arc<[PackageRow]>,
     /// 今天的改动数是否可用：`Overview.packages` 为 None（概览未就绪、`Capped`、或 review 还没有实现这一项）时为 false，只显示名字。
     pub package_counts: bool,
-    /// 侧栏滚动区的全部行，拍平、等高（24pt）：`Project` 区的条目、Sessions 标题、worktree 小标题、会话行、Packages 标题、
-    /// 子项目行、`Views` 区的条目，按显示顺序。整个滚动区是一个 `uniform_list`，每帧只建可见的行（「界面」「性能」）。
-    /// `Views` 区的条目来自 `sidebar_entries()`，由视图在渲染时追加（`ContributionsChanged` 时视图重取），不在快照里。
+    /// 侧栏滚动区里来自快照的行，拍平、等高（24pt）：Sessions 标题、worktree 小标题、会话行、Packages 标题、子项目行，
+    /// 按显示顺序。贡献的条目（`Project` 区在前、`Views` 区在后）不在快照里：视图从 `sidebar_entries()` 取，
+    /// 在渲染时拼成完整的行表（`Project` 条目 + `rows` + `Views` 条目），`ContributionsChanged` 时重取。
+    /// 整个滚动区是一个 `uniform_list`，长度是三段之和，每帧只建可见的行（「界面」「性能」）。
     pub rows: Arc<[SidebarRow]>,
 }
 
-/// 侧栏滚动区的一行；下标指向 `groups` / `packages`。
+/// 侧栏滚动区里来自快照的一行；下标指向 `groups` / `packages`。
 pub enum SidebarRow {
-    Entry(Name),                        // `Project` 区的条目（`overview` 和其他 crate 登记的）
     SessionsHeader,
     WorktreeHeader(u32),                // `groups` 的下标
     Session { group: u32, index: u32 },
     SessionsEmpty,
     PackagesHeader,
     Package(u32),                       // `packages` 的下标
-    PackagesSkeleton,
+    PackagesSkeleton,                   // 子项目 `Pending` 时的一行骨架
 }
 
 pub struct WorktreeGroup {
@@ -270,7 +270,7 @@ pub struct TightestLimit { pub agent: Agent, pub used_percent: u8, pub resets_at
 
 - `Home`（插件状态，`Mutex`）：当前项目的 `ProjectKey`、`OverviewInterest`、`Option<Arc<HomeSnapshot>>`、合成任务的标记（`dirty`、`building`）、已请求 `complete` 的会话键集合（随项目关闭清空）、视图的唤醒发送端列表 `Vec<mpsc::UnboundedSender<Arc<HomeSnapshot>>>`、已报告里程碑的 `OpenRequest`。
 - `HomeScreen`（GPUI `Entity`，主区）：`Arc<HomeSnapshot>`、选中项（`Selection { list: NeedsReview | Outside | Done, index }`）、`FocusHandle`、每张卡片进度环的 `motion::Transition`（按 `SessionKey` 保存，快照换代时按键沿用，让进度环从旧值过渡到新值）。
-- `HomeSidebar`（GPUI `Entity`，侧栏面板）：`Arc<HomeSnapshot>`、滚动区的 `UniformListScrollHandle`、最近一次 `sidebar_entries()` 的 `Arc`（`ContributionsChanged` 时重取）、展开状态不保存（分组总是展开）。
+- `HomeSidebar`（GPUI `Entity`，侧栏面板）：`Arc<HomeSnapshot>`、滚动区的 `UniformListScrollHandle`、最近一次 `sidebar_entries()` 的 `Arc`（`ContributionsChanged` 时重取，视图订阅这个事件；贡献条目的行由视图从它拼出，不经合成任务）、展开状态不保存（分组总是展开）。
 - 两个视图在 `workspace` 的工厂里建：建好时从 `Home` 读当前快照并登记自己的发送端；视图 drop 时发送端随之失效，插件在下一次发送出错时清掉它。侧栏面板被 Files 替换再切回时重新建一个视图，所以它必须从 `Home` 读到最新快照，不能等下一次事件。
 - 快照不序列化、不落盘；本 crate 没有派生数据，也没有以 blob OID 为键的缓存（架构规则 5 不涉及）。
 
@@ -326,10 +326,10 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 ## 界面
 
 - 屏幕与层：[交互规范「屏幕」](interaction.md#屏幕)的 02 Overview；项目侧栏与项目主页都在常驻层（[「三层结构」](interaction.md#三层结构)）。`ScreenLayout { sidebar: Shown, back_button: false, reading_column: true, inspector: false, floating_bar: false }`。工具栏：标题是 `HomeSnapshot::name`（原样），副标题是 `project-home-subtitle`（待审数量），右侧没有控件。
-- 侧栏面板（248pt，容器由 `workspace` 画）：第 1 到第 4 节在一个 `uniform_list` 里（`SidebarModel::rows` 加上 `Views` 区的条目，行高都是 24pt，小标题与条目同高），整个滚动区一起滚动，每帧只建可见的行；第 5 节固定在面板底部，不随滚动。从上到下：
+- 侧栏面板（248pt，容器由 `workspace` 画）：第 1 到第 4 节在一个 `uniform_list` 里（`Project` 区的条目 + `SidebarModel::rows` + `Views` 区的条目；条目来自 `sidebar_entries()`，由视图拼入；行高都是 24pt，小标题与条目同高），整个滚动区一起滚动，每帧只建可见的行；第 5 节固定在面板底部，不随滚动。从上到下：
   1. `Project` 区：`overview` 条目（本 crate 登记的 `SidebarEntry`，`on_select: PopToBase`，当前屏幕是主页时选中）。`workspace` 设计的调用方一节把 Sessions、Packages 也写成 `SidebarEntry`；本文只登记 `overview`：Sessions 与 Packages 是带行的分组，`SidebarEntry` 只有一个标签，放不下行。`Project` 区里其他 crate 登记的条目画成普通行，排在 `overview` 之后。
   2. Sessions：标题行 `project-home-sessions`；每个 worktree 一个小标题（分支短名；当前 worktree 加 `project-home-current-worktree` 的次要文字；文件夹项目不显示小标题；`Other` 组用 `project-home-other-worktrees`），下面每行：8pt agent 圆点（`AgentDot`，运行中时 `blink` 一次：新一轮到达 = `running` 从 false 变 true，或 `last_activity` 变化；`Agent::Other(name)` 的会话没有圆点，`name` 原样显示在次要文字的开头）、标题一行（超出截断）、次要文字（相对时间；运行中时为 `project-home-running`）。14 天内没有会话时显示一行 `project-home-sessions-empty`。
-  3. Packages：标题行 `project-home-packages`；每行子项目名，行尾次要文字是今天的改动数（`project-home-changed-today`，0 时不显示；`package_counts` 为 false 时整列不显示）；嵌套的子项目按 `depth` 缩进。子项目 `Pending` 时显示两行 `Skeleton`，`Unavailable` 或没有子项目时不显示这一节。行不可点击（「本 issue 之外」）。子项目可以有几千个（10 万文件的形状是 2000 个），它们和会话行一样在同一个 `uniform_list` 里，不单独封顶。
+  3. Packages：标题行 `project-home-packages`；每行子项目名，行尾次要文字是今天的改动数（`project-home-changed-today`，0 时不显示；`package_counts` 为 false 时整列不显示）；嵌套的子项目按 `depth` 缩进。子项目 `Pending` 时显示一行 `Skeleton`（`PackagesSkeleton`），`Unavailable` 或没有子项目时不显示这一节。行不可点击（「本 issue 之外」）。子项目可以有几千个（10 万文件的形状是 2000 个），它们和会话行一样在同一个 `uniform_list` 里，不单独封顶。
   4. `Views` 区：`sidebar_entries()` 里 `section == Views` 的条目，按 `workspace` 给的顺序；每行标签（`Text::key(item.label)`）和条目给出的图标（`ui::contrib::SidebarItem::icon: Option<ui::Icon>`，有时画），点击 `dispatch(item.on_select)`。没有条目时整节不显示。
   5. `Bottom` 区：`usage` 条目（`usage_view` 登记的 `SidebarEntry`，`on_select: Push(USAGE)`）由本 crate 画成两行：第一行标签 + `count_compact(tokens_7d)`（`project-home-usage-7d`），第二行最紧张的额度条（`Progress::Bar`，`used_percent / 100`）加次要文字（`project-home-limit`：agent 名与百分比）。`UsageModel` 为 None（`usage` 插件不在）时只画标签；`tokens_7d` 为 None 时数字处是 `Skeleton`；`tightest` 为 None 时没有第二行。`Bottom` 区的其他条目画成普通行。
 - 主区（居中 760pt 阅读栏）从上到下：大标题（`TextRole::LargeTitle`，`project-home-title`，数字是 `needs_review.len()`）；三个 `GroupedList`，标题分别是 `project-home-needs-review`、`project-home-outside`、`project-home-done`。卡片一行：agent 圆点、标题、两行次要文字（第一行：相对时间，运行中时 `project-home-running`；第二行：信号，用 ` · ` 连接）、行尾进度环（`Progress::Ring`，`seen / total`；`progress` 为 None 时不画）。Outside 行：标题 `project-home-outside-files`，`Capped` 时用 `project-home-outside-capped`，`Pending` 时数字处是 `Skeleton`。Recently Done 为空时不显示这一组；Needs Review 为空而概览已就绪时显示 `project-home-all-reviewed`。
@@ -386,7 +386,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
   | `project-home.sidebar` | `Group` | `worktrees`（组数）、`sessions`（行数） |
   | `project-home.sidebar.overview` | `ListItem` | `selected` |
   | `project-home.sidebar.list` | `List` | `rows`（滚动区的总行数）、`visible`（这一帧建出的行数）；下面的节点都是它这一帧可见的行，层级来自元素嵌套，ID 只按区命名 |
-  | `project-home.sidebar.sessions` | `Text` | Sessions 标题行；`counts` 无 |
+  | `project-home.sidebar.sessions` | `Text` | Sessions 标题行 |
   | `project-home.sidebar.sessions.worktree[<WorktreeKey>]` | `Text` | worktree 小标题；`branch`、`active` |
   | `project-home.sidebar.sessions.item[<会话 ID>]` | `ListItem` | `selected`；`agent`、`running`、`pending`（`tail_pending`） |
   | `project-home.sidebar.packages` | `Text` | Packages 标题行；`counts`（是否有今天的改动数） |
@@ -456,9 +456,9 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 
 依赖 GPUI，只在 macOS 上编译和测试：`just test -p lectern-project-home`。会话、项目、概览、用量、贡献都用 `services` trait 的假实现，放在本 crate 的 `testing` 模块（`FakeSessions`、`FakeProjects`、`FakeReview`、`FakeUsage`、`FakeContributions`）：直接构造 `SessionList`、`ProjectSnapshot`、`Overview`、`UsageSnapshot` / `Limits` 交出去，记下收到的 `complete`、`watch_overview`、`watch`、`dispatch`，不解析脚本；`read` / `turns` / `load` / `resolve` 一律 `unreachable!`（本 crate 不得调用它们）。不用真实的 git、会话扫描和文件 IO，也不依赖 `review` 等插件 crate 的 `test-support`。
 
-- `snapshot::build`（`#[test]`，不开窗口）：`build_groups_sessions_by_worktree`（主 worktree 在前、`Resolved` 与 `Located` 都归位、prunable 的进 `Other`、子 agent 不成行、14 天之外的不出现）；`build_splits_needs_review_and_done`（`progress` None / 部分 / 全部 / `changed_since_seen` 四种）；`build_drops_overview_sessions_missing_from_list`；`build_marks_running_within_ten_minutes`；`build_counts_packages_today`（有 `Overview.packages` 与没有、`Capped`）；`build_folder_project_hides_outside`；`build_without_usage`；`build_flattens_sidebar_rows`（`rows` 的顺序与下标，2000 个子项目时长度正确）；每个用例的 `HomeSnapshot` 渲染成文本做 insta 快照（`snapshot_*`）；`project_home/build_1000` 的夹具也在这里构造。
+- `snapshot::build`（`#[test]`，不开窗口）：`build_groups_sessions_by_worktree`（主 worktree 在前、`Resolved` 与 `Located` 都归位、prunable 的进 `Other`、子 agent 不成行、14 天之外的不出现）；`build_splits_needs_review_and_done`（`progress` None / 部分 / 全部 / `changed_since_seen` 四种）；`build_drops_overview_sessions_missing_from_list`；`build_marks_running_within_ten_minutes`；`build_counts_packages_today`（有 `Overview.packages` 与没有、`Capped`）；`build_folder_project_hides_outside`；`build_without_usage`；`build_flattens_sidebar_rows`（`rows` 的顺序与下标，2000 个子项目时长度正确；不含贡献条目）；每个用例的 `HomeSnapshot` 渲染成文本做 insta 快照（`snapshot_*`）；`project_home/build_1000` 的夹具也在这里构造。
 - 插件（`#[test]`，`TestKernel`）：`activate_registers_contributions_only`（登记了 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings`，没有任务）；`opened_takes_the_overview_interest_and_closed_drops_it`；`events_coalesce_into_one_build`（跑着的时候来 5 个事件，结束后只再跑一轮）；`complete_is_requested_once_per_pending_session`；`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`usage_activating_after_opened_takes_the_watch`（`Opened` 先到、usage 插件后 `started`：`started` 返回时 `FakeUsage` 还没有收到 `watch`，token 变为 `Live`、对账任务跑过之后收到一次，快照重建一次并带 `UsageModel`）、`opened_after_usage_takes_the_watch`（相反的顺序，结果相同）；`started_handles_an_already_open_project`；`changed_for_an_unknown_project_counts_as_opened`。
-- `#[gpui::test]`（`TestAppContext`，`init_fixed`）：`sidebar_lists_sessions_under_worktrees`；`sidebar_builds_only_visible_rows`（2000 个子项目、1000 个会话时一帧里建出的行数不超过可见行数加一屏）；`home_shows_cards_outside_and_done`；`arrow_keys_move_across_groups`（↓ 从最后一张卡片到 Outside 再到 Done，↑ 反向，到头不回绕）；`enter_pushes_the_review_route`（`FakeContributions` 收到 `Push(REVIEW, Session(key))`）；`outside_opens_the_outside_review`；`clicking_a_sidebar_session_pushes_review`；`views_entries_dispatch_their_command`；`usage_row_shows_tokens_and_the_tightest_limit`；`new_sidebar_view_reads_the_current_snapshot`（面板视图 drop 再建，不等事件就有内容）；`progress_ring_transitions_between_snapshots`（`Transition` 从旧值出发）；`milestone_is_reported_on_the_first_settled_frame`（`files` 为 `Pending` 的快照不报告，`Ready` 的那一帧报告一次，之后不再报告）；`skeleton_appears_after_100ms_only`；`closed_project_clears_the_views`。
+- `#[gpui::test]`（`TestAppContext`，`init_fixed`）：`sidebar_lists_sessions_under_worktrees`；`sidebar_builds_only_visible_rows`（2000 个子项目、1000 个会话时一帧里建出的行数不超过可见行数加一屏）；`home_shows_cards_outside_and_done`；`arrow_keys_move_across_groups`（↓ 从最后一张卡片到 Outside 再到 Done，↑ 反向，到头不回绕）；`enter_pushes_the_review_route`（`FakeContributions` 收到 `Push(REVIEW, Session(key))`）；`outside_opens_the_outside_review`；`clicking_a_sidebar_session_pushes_review`；`views_entries_dispatch_their_command`；`late_entries_appear_without_a_new_snapshot`（`FakeContributions` 在快照建好之后加一个 `Project` 区和一个 `Views` 区的条目并发 `ContributionsChanged`，下一帧两行都出现）；`usage_row_shows_tokens_and_the_tightest_limit`；`new_sidebar_view_reads_the_current_snapshot`（面板视图 drop 再建，不等事件就有内容）；`progress_ring_transitions_between_snapshots`（`Transition` 从旧值出发）；`milestone_is_reported_on_the_first_settled_frame`（`files` 为 `Pending` 的快照不报告，`Ready` 的那一帧报告一次，之后不再报告）；`skeleton_appears_after_100ms_only`；`closed_project_clears_the_views`。
 - 语义树：`home_tree_with_cards`、`home_tree_empty`、`sidebar_tree_with_views_and_usage` 的 insta 快照（UI 探针完成后接入；之前用 `ui::semantic::Recorder` 的记录去掉 `bounds` 和 `declared_at`）。
 - 日志：`canary_stays_out_of_home_logs`。
 - fixtures：没有外部格式；测试数据是源码里构造的快照。
