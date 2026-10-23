@@ -257,15 +257,16 @@ impl KernelHost {
     }
 
     fn attach(&self, handle: PluginHandle) {
-        let queued =
-            match std::mem::replace(&mut *self.state(), HostState::Attached(handle.clone())) {
-                HostState::Waiting(queued) => queued,
-                // Never attached twice; keep what was.
-                other => {
-                    *self.state() = other;
-                    return;
-                }
-            };
+        // One statement, so the guard is gone before the match below.
+        let previous = std::mem::replace(&mut *self.state(), HostState::Attached(handle.clone()));
+        let queued = match previous {
+            HostState::Waiting(queued) => queued,
+            // Never attached twice; keep what was.
+            other => {
+                *self.state() = other;
+                return;
+            }
+        };
         for (priority, work) in queued {
             self.run(&handle, priority, work);
         }
