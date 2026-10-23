@@ -122,7 +122,7 @@ pub fn palette(appearance: Appearance, cx: &App) -> &Palette;
 pub fn accent_follows_system(cx: &App) -> bool;
 ```
 
-视图不订阅颜色变化：每个窗口打开后，打开它的 crate 调用一次 `ui::attach(window, cx)`，`attach` 登记 `Window::observe_window_appearance`；外观变化时 `ui` 换一套 `Palette`、同步 gpui-component 的浅色 / 深色、调用 `cx.refresh_windows()`。第一个窗口是 `app` 的骨架窗口（Welcome 和 Overview 只替换它的根视图，窗口不换），所以 `app` 在 `open_window` 的回调里调用 `attach`；以后的窗口由 `workspace` 调用（「对其他 crate 的要求」）。`platform` 的强调色变化通知到达时重新读两套系统色，同样刷新；通知的回调不带 GPUI 的上下文，`init` 把 `cx.to_async()` 交给回调，回调经它把更新排到主线程的下一次运行（与 GPUI 自己处理外观回调的做法相同），不在回调里直接借用 `App`。两次刷新之间 `Palette` 不变，返回的引用在一帧之内有效。
+视图不订阅颜色变化：每个窗口打开后，打开它的 crate 调用一次 `ui::attach(window, cx)`，`attach` 登记 `Window::observe_window_appearance`；外观变化时 `ui` 换一套 `Palette`、调用 `cx.refresh_windows()`，并且只在 `is_ready(cx)` 时才同步 gpui-component 的浅色 / 深色（GPUI 在 `open_window` 返回后就延后触发一次 `appearance_changed`，这一次发生在 `ready` 之前，那时 gpui-component 的全局还不存在；`ready` 自己做第一次同步）。第一个窗口是 `app` 的骨架窗口（Welcome 和 Overview 只替换它的根视图，窗口不换），所以 `app` 在 `open_window` 的回调里调用 `attach`；以后的窗口由 `workspace` 调用（「对其他 crate 的要求」）。`platform` 的强调色变化通知到达时重新读两套系统色，同样刷新；通知的回调不带 GPUI 的上下文，`init` 把 `cx.to_async()` 交给回调，回调经它把更新排到主线程的下一次运行（与 GPUI 自己处理外观回调的做法相同），不在回调里直接借用 `App`。两次刷新之间 `Palette` 不变，返回的引用在一帧之内有效。
 
 ```rust
 /// 窗口打开后调用一次（`app` 对骨架窗口，`workspace` 对以后的窗口）：登记外观观察者，使 `colors(window, cx)` 在这个窗口的外观变化时更新。
@@ -527,10 +527,12 @@ pub mod semantic {
     /// 包装元素：给任何元素附上语义节点。`#[track_caller]`，所以 `declared_at` 是视图里的调用处（技术调研：只记录业务视图层）。
     /// prepaint 里取子元素的 `bounds`，按 `Window::content_mask` 算 `visible`；记录器打开时推一条 `Record`，并在子元素 prepaint 期间
     /// 把自己压进线程本地的父节点栈。记录器关闭时只读一次 `AtomicBool`（Relaxed）就返回，不分配、不记录。
-    /// 同一份声明同时写进子元素的 GPUI 无障碍属性（子元素是带 id 的 div 时）：`accessibility_id`、映射的 `accesskit::Role`、
-    /// `aria_label`、`aria_selected`、`aria_expanded`、`aria_toggled`；角色映射表在本模块。
     #[track_caller]
     pub fn semantic(spec: Semantic, child: impl IntoElement) -> SemanticElement;
+    /// 同上，另外把同一份声明写进子元素的 GPUI 无障碍属性：`accessibility_id`、映射的 `accesskit::Role`、`aria_label`、
+    /// `aria_selected`、`aria_expanded`、`aria_toggled`。子元素要是 `InteractiveElement`（带 id 的 div 等），所以是单独的入口；角色映射表在本模块。
+    #[track_caller]
+    pub fn semantic_interactive<E: InteractiveElement + IntoElement>(spec: Semantic, child: E) -> SemanticElement;
     pub struct SemanticElement { /* spec, child, declared_at */ }
 
     /// 进程一个，只在主线程上用。`ui_probe` 和 `#[gpui::test]` 在一帧之前 `begin`，帧画完 `finish` 取走这一帧的记录。
@@ -568,7 +570,7 @@ pub mod semantic {
 
 | 项 | 影响 | 约束 |
 |---|---|---|
-| 冷启动到首帧 < 20 ms | `init` 在首帧前运行 | ≤ 300 µs：约 50 次 `NSColor` 读取与换算、一次 `NSWorkspace` 读取、设全局、登记通知、骨架窗口的 `attach`。不建线程、不读文件、不解析任何东西。`gpui_component::init`（运行时解析两份内嵌 JSON）放在 `ready`，首帧之后 |
+| 冷启动到首帧 < 20 ms | `init` 在首帧前运行 | ≤ 300 µs：约 50 次 `NSColor` 读取与换算、一次 `NSWorkspace` 读取、设全局、登记通知。骨架窗口的 `attach` 在 `open_window` 的回调里，只登记一个观察者，不在这项基准里。不建线程、不读文件、不解析任何东西。`gpui_component::init`（运行时解析两份内嵌 JSON）放在 `ready`，首帧之后 |
 | 空闲内存（空窗口）< 60 MB | `UiState` | < 8 KiB；`gpui_component::init` 建的主题全局与图标资源按 `ui/idle_memory` 实测，预期 < 1 MB，作为 `ui` 的份额写进 bench 的预算表 |
 | 滚动与输入 120 fps | 每帧的查找与动画 | `colors`、`code_style`、`Transition::tick` 都是 O(1)、不分配；动画只改位移、透明度、裁剪（ADR 0015）。动画期间帧的工作时间 ≤ 8.3 ms 由 `bench` 的 `app/animation_frames` 在 `workspace` 接入后判定（[bench 设计](bench.md)的 `frames` 应答） |
 | 滚动与输入 120 fps（探针关闭时） | 每个 `semantic` 包装元素的 prepaint | 一次 `AtomicBool` 的 Relaxed 读，≤ 2 ns（`ui/semantic_disarmed`）；不分配 |
@@ -685,11 +687,11 @@ pub mod semantic {
 - `app`：
   - `Application` 建好后、`run` 之前 `with_assets(lectern_ui::IconAssets)`：GPUI 的资源来源只能在这里装（`Application::with_assets`），`gpui_component::init` 不装；没有它，所有 `Icon` 画成空白。`IconAssets` 由本 crate 用 gpui-kit-assets 的 `icon_assets!` 宏只嵌入「控件」里列的 10 个图标（每个 SVG 不到 1 KiB），不嵌入整套 Lucide（ADR 0018）。
   - `run` 里在开窗口之前调用 `lectern_ui::init(cx, strings)`（在 `set_menus` 之前，菜单文字可以继续直接用传入的 `Strings`）。
-  - `open_window` 的回调里对骨架窗口调用 `lectern_ui::attach(window, cx)`，`Subscription` 放在 `Skeleton` 里。
+  - `open_window` 的回调里对骨架窗口调用 `lectern_ui::attach(window, cx)`，`Subscription` 放在 `app` 的根视图里。
   - `startup::release` 在 `Kernel::start` 之前调用 `lectern_ui::ready(cx)`；test profile 用 `init_fixed`。`app/cold_start` 的预算不变。
 - `workspace`：每个窗口打开后调用 `lectern_ui::attach`；面板容器用 `Transition` 和 `PANEL_OPEN` / `PANEL_CLOSE`；侧栏、工具栏、检查器、面板、浮条各声明一个节点（`workspace.sidebar` 等），Action 名稳定、可枚举。
 - `welcome`、`project_home`、`review_view`、`file_reader`：颜色、字体、动效、控件只从本 crate 取（「验收」里的 `rg` 检查）；可交互元素都经 `NodeId` 命名，容器和自绘元素用 `semantic(...)` 包装，各自的设计文档「界面」列出节点。
-- `ui_probe`：依赖 `lectern-ui` 的 `semantic` 模块，按帧 `Recorder::begin` / `finish` 取记录，自己合成窗口根节点（`window[<id>]`）；按 Action 名触发操作。它的设计与本节的形状一致（[#6](https://github.com/SoloJiang/lectern-app/issues/6)），两边改动时一起改。
+- `ui_probe`：依赖 `lectern-ui` 的 `semantic` 模块，按帧 `Recorder::begin` / `finish` 取记录，自己合成窗口根节点（`window[<id>]`）；按 Action 名触发操作。它的设计与本节的形状一致（[#6](https://github.com/SoloJiang/lectern-app/issues/6)），两边改动时一起改；两份设计里形状不同的地方以本文为准（`Semantic::id` 是 `NodeId`，`label` 是 `Option<Label>`：纯容器没有文字）。
 - `i18n`：`Key::name(&self) -> &'static str`、`FmtKey::name(&self) -> &'static str`，返回 Fluent 消息 ID（`Text::message_id` 与 `Label::key` 用），随第 1 步在 `i18n` 里加上。
 - `bench`：「性能」里的 `ui/*` 基准；`app/animation_frames` 随 `workspace` 的里程碑一起加入。
 
@@ -710,7 +712,7 @@ pub mod semantic {
 
 - `init`、`ready`、`is_ready`、`init_fixed`、`attach`、`Palette`、`colors`、`palette`、`Text`、`strings`、`set_locale`、`TextRole`、`MonoMetrics`、`mono_metrics`、`code_style`、`code_styles` 与「数据结构」的内置表。
 - 「测试」里 `palette_builtin_*`、`code_colors_*`、`text_*`、`appearance_change_swaps_palette`、`set_locale_refreshes_windows`、`ready_runs_component_init_once`、`mono_metrics_is_cached`、`logs_hold_no_text` 通过；`just doctest` 里两个 `compile_fail` 通过。
-- `app` 接入 `with_assets(IconAssets)`、`init`、骨架窗口的 `attach` 与 `ready`（可以在同一个 PR 或紧接的 `app` PR）：`just test -p lectern-app` 通过，其中 `#[gpui::test]` `appearance_change_refreshes_the_skeleton_window`（模拟外观变化后窗口刷新一次）；`just bench ui/`（`ui/init`、`ui/ready`、`ui/palette_resolve`、`ui/mono_metrics_first`、`ui/idle_memory`）在预算内；`app/cold_start` 不变慢。
+- `app` 接入 `with_assets(IconAssets)`、`init`、骨架窗口的 `attach` 与 `ready`（可以在同一个 PR 或紧接的 `app` PR）：`just test -p lectern-app` 通过，其中 `#[gpui::test]` `appearance_change_refreshes_the_skeleton_window`（模拟外观变化后窗口刷新一次）和 `appearance_change_before_ready_does_not_touch_the_theme`（`init` 之后、`ready` 之前触发一次外观变化：不 panic、`Palette` 已换、gpui-component 的主题没有被读写）；`just bench ui/`（`ui/init`、`ui/ready`、`ui/palette_resolve`、`ui/mono_metrics_first`、`ui/idle_memory`）在预算内；`app/cold_start` 不变慢。
 - 手动（macOS，发布构建）：系统设置里切换强调色，窗口里 `accent` 随之变化、不重启；切换浅色 / 深色同样；日志里 `ui initialised` 的 `accent` 为 `system`、`mono_metrics().family` 为 `.AppleSystemUIFontMonospaced`（经 `--log ui=debug` 的调试输出或探针读出）。
 - `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}' crates/ui/src --glob '!**/builtin.rs' --glob '!**/tests*'` 没有结果（颜色值只在内置表和 agent 色常量里，后者放在 `builtin.rs`）。
 
