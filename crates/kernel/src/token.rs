@@ -11,7 +11,7 @@ use crate::background::BackgroundState;
 use crate::diag::Phase;
 use crate::gate::GateInner;
 use crate::handle::PluginHandle;
-use crate::kernel::Shared;
+use crate::kernel::{Shared, invalidate};
 use crate::panic::contain_plugin;
 use crate::plugin::{Name, PluginError};
 use crate::util::lock;
@@ -350,6 +350,24 @@ impl ActivationToken {
     /// `None` only after `shutdown` has closed it.
     pub fn pending(&self) -> Option<PendingGuard> {
         self.0.counters.pending()
+    }
+
+    /// Fails this activation from any thread: the caller that ran this
+    /// activation's code under an [`Admission`] (a leave guard, a view factory,
+    /// a contribution's drop) caught a panic or an error in it and reports it
+    /// here. Same path as a listener panicking: before returning, this
+    /// activation and every activation that loses its last live provider are
+    /// marked `Dead` on the calling thread (nothing waits, so calling it while
+    /// holding an `Admission` is fine); the deactivation then runs on the
+    /// kernel thread, which logs `plugin deactivated after a failure` with the
+    /// kind of `error`. This method logs nothing itself: the caller logs what
+    /// it caught, under its own scope.
+    ///
+    /// `Pending`: the activation fails as if `started` had failed. Already
+    /// `Dead`: nothing happens, the first failure is kept. After `shutdown`:
+    /// only the state is written.
+    pub fn fail(&self, error: PluginError) {
+        invalidate(self, Some(error));
     }
 
     /// Like `enter`, but also accepts `Pending` (used by `busy()` inside
