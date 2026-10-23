@@ -249,7 +249,7 @@ pub struct Screen {
 }
 pub struct ToolbarItems { pub title: Text, pub subtitle: Option<Text>, pub controls: Vec<AnyElement> /* ≤ 3 */ }
 pub struct SidebarPanel { pub build: ViewFactory<()> };
-pub struct SidebarItem { pub label: i18n::Key, pub icon: Option<ui::Symbol>, pub on_select: WorkspaceCommand };
+pub struct SidebarItem { pub label: i18n::Key, pub icon: Option<ui::Icon>, pub on_select: WorkspaceCommand };
 pub struct InspectorTab { pub label: i18n::Key, pub build: ViewFactory<()> };
 pub struct Panel { pub build: ViewFactory<()> };
 pub struct Overlay { pub build: ViewFactory<()> };
@@ -548,7 +548,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 每一项是一个 PR，写 `Refs #215`，在「验收」里列为前置条件。
 
 - **A. `services`**：`workspace` 模块（「服务接口」）。`Registration`、`Payload`、`LeaveGuard` 的回调由本 crate 定义内容；`ReviewTarget`、`ReadTarget`、`ProjectKey`、`WorktreeKey` 复用已有的模块。
-- **B. `ui`**（[#214](https://github.com/SoloJiang/lectern-app/issues/214) 的设计，另一个会话并行编写）：本 crate 用到而 `ui` 设计还没有列出的只有 `ui::contrib` 的载荷类型与 `into_payload`（「`ui::contrib` 的载荷类型」）、一次性提示控件、SF Symbols 图标的取用，以及 `motion::active_transitions(cx) -> usize`（进行中的 `Transition` 与 `Spring` 的个数，`RecordStop::AnimationsSettled` 用）；`strings(cx)`、`colors(cx)`、`Text`、`Segmented`、`Button`、`motion::*`、`Transition`、`semantic` 模块已在它的设计里。`lectern_ui::ready(cx)` 之后视图才能挂载，所以 `app` 先调它、再调 `workspace::install`。
+- **B. `ui`**（[#214](https://github.com/SoloJiang/lectern-app/issues/214) 的设计，另一个会话并行编写）：`ui::contrib` 的载荷类型与 `into_payload`（「`ui::contrib` 的载荷类型」，`SidebarItem.icon` 是 `Option<ui::Icon>`，`ui` 内嵌的 Lucide 图标）已在它的设计（[#218](https://github.com/SoloJiang/lectern-app/pull/218)）里；本 crate 用到而 `ui` 设计还没有列出的只有一次性提示控件，以及 `motion::active_transitions(cx) -> usize`（进行中的 `Transition` 与 `Spring` 的个数，`RecordStop::AnimationsSettled` 用）；`strings(cx)`、`colors(cx)`、`Text`、`Segmented`、`Button`、`motion::*`、`Transition`、`semantic` 模块已在它的设计里。`lectern_ui::ready(cx)` 之后视图才能挂载，所以 `app` 先调它、再调 `workspace::install`。
 - **C. `i18n`**：`locales/{en,zh-CN}/workspace.ftl`，内容是「界面」的四个键。
 - **D. `platform`**：窗口 frame 的 autosave（ADR 0017：「窗口位置与大小用 AppKit 的 frame autosave」）。锁定的 GPUI 不暴露这个设置，`gpui-pre-macos` 实现了 `raw_window_handle`：
 
@@ -630,7 +630,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 ### 前置条件 A
 
 - **`SidebarEntry` 与 `SharedPayload`**（「服务接口」已补上）：设计原来只写了 `sidebar_entries() -> Arc<[SidebarEntry]>`，没有定义 `services` 里的 `SidebarEntry`；`ui::contrib` 的条目载荷在视图层，`services` 不能引用。现在 `services` 定义 `SidebarEntry { id, section, order, payload: SharedPayload }`，`SharedPayload` 是 `Arc<dyn Any + Send + Sync>`：`Arc<[SidebarEntry]>` 要跨线程共享，元素必须 `Send + Sync`，而 `Payload` 的 `Box<dyn Any + Send>` 不是 `Sync`，所以本 crate 应用登记时把 `ui::contrib::SidebarItem` 换成 `Arc` 放进条目，`project_home` 用 `Arc::downcast` 取回。
-- `ui::contrib` 的条目载荷由 `SidebarEntry` 改名为 `SidebarItem`（「`ui::contrib` 的载荷类型」已改）：`services` 的 `SidebarEntry` 用了这个名字，`project_home` 两个都要引用；`ui` 设计（#218）没有 `contrib` 模块，这些载荷类型只在本文里定义。
+- `ui::contrib` 的条目载荷由 `SidebarEntry` 改名为 `SidebarItem`（「`ui::contrib` 的载荷类型」已改）：`services` 的 `SidebarEntry` 用了这个名字，`project_home` 两个都要引用。`ui` 设计（#218）定义 `contrib` 的载荷类型，`SidebarItem.icon` 是 `Option<ui::Icon>`（`ui` 内嵌的 Lucide 图标），不是 `ui::Symbol`；「`ui::contrib` 的载荷类型」与「对其他 crate 的要求」B 已照改。
 - 设计没有列出的派生（「服务接口」已补上）：数据类型都派生 `Hash`、`Serialize`、`Deserialize`，与 `services` 的其他模块相同（进程插件不贡献界面，序列化只为与其他模块一致和测试往返）；不含 `Arc` 的小类型派生 `Copy`；`SidebarSection` 派生 `Ord`，顺序即侧栏从上到下的顺序；`WindowId` 派生 `Ord`。`Contribution` 含 `Payload`，只实现 `Debug`（不打印载荷）。
 - `Registration` 的两个回调都是 `FnOnce + Send`（不要求 `Sync`，`Staged` 只要求 `Send`）；没有提交就 drop 时只调用 `release`，本 crate 的注销回调要能处理「从未应用」的登记。
 - `WorkspaceEvent::ScreenChanged` 按值带两个 `Route`（约 400 字节），clippy 的 `large_enum_variant` 用 `#[allow]` 并写明理由：每次导航一个事件、每个监听克隆一次，装箱只会让每个监听多一次间接访问。
