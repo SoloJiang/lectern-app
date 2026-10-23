@@ -44,7 +44,7 @@
 1. GPUI 只在平台适配器收到辅助技术的激活回调时才构造这棵树（`Window::is_a11y_active`），没有公开的开关；`#[gpui::test]` 的测试平台没有适配器，永远不激活。探针要在测试里和应用里跑同一套函数（本 crate 的 AGENTS.md「测试」），只能自己记录。
 2. 探针需要 Fluent 键、`视图.区域.条目[业务键]` 形式的 ID 和视图自定义的属性（已看、偏离），AccessKit 节点没有对应字段。
 
-记录器与 AccessKit 不冲突：`ui` 的语义包装元素用同一份声明同时设置 GPUI 的 `accessibility_id`、`role`、`aria_label` 等（见「对其他 crate 的要求」），读屏软件和通用的 computer-use 工具看到的 ID 与探针相同（macOS 的 `AXIdentifier`）。GPUI 以后提供激活开关时，可以改读它的树，不改协议。
+记录器与 AccessKit 不冲突：`ui` 的 `semantic_interactive` 用同一份声明同时设置 GPUI 的 `accessibility_id`、`role`、`aria_label` 等（见「对其他 crate 的要求」），读屏软件和通用的 computer-use 工具看到的 ID 与探针相同（macOS 的 `AXIdentifier`）。GPUI 以后提供激活开关时，可以改读它的树，不改协议。
 
 ### 截图的来源
 
@@ -435,7 +435,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 1. **`ui`：语义记录器与语义包装元素**（模块 `lectern_ui::semantic`，[#214](https://github.com/SoloJiang/lectern-app/issues/214) 的 `ui` 设计文档已按本节写入，形状以它为准）。本 crate 需要的最小形状：
    - 「数据结构」里的 `Semantic`（`id: NodeId`、`label: Option<Label>`）、`Label`、`State`、`Role`、`Record`。
    - 包装元素 `semantic(spec, child: impl IntoElement)`，以及给带交互的子元素用的 `semantic_interactive<E: InteractiveElement + IntoElement>(spec, child)`（`semantic` 擦掉了子元素类型，写不了无障碍属性）。构造 `Semantic` 的成本（带业务键的 ID 要拼字符串）在所有构建里都存在，由 `ui` 的帧基准覆盖；`ui` 可以提供延迟构造的形式，本 crate 不要求。它在 prepaint 里拿到自己的范围；记录器打开时推一条 `Record`（`bounds` 来自 `Window::layout_bounds`，`visible` 按 `Window::content_mask` 判断，`parent` 是当前栈顶），并在子元素 prepaint 期间把自己压进线程本地的父节点栈；关闭时只读一次原子标志就返回。构造函数带 `#[track_caller]`，记下 `declared_at`。
-   - `semantic_interactive` 把同一份 `spec` 写进 GPUI 的无障碍属性：`accessibility_id(id)`、`role(映射后的 accesskit::Role)`、`aria_label(label.text)`、`aria_selected`、`aria_expanded`、`aria_toggled`。角色映射由 `ui` 给出（如 `ListItem → ListItem`、`DiffHunk → Group`）。`ui` 的控件自带角色、标签（来自 `ui::Text`）和状态，视图只给 `NodeId`。
+   - `semantic_interactive` 把同一份 `spec` 写进 GPUI 的无障碍属性：`accessibility_id(id)`、`role(映射后的 accesskit::Role)`、`aria_label(label.text)`（`label` 为 None 时不设）、`aria_selected`、`aria_expanded`、`aria_toggled`。角色映射由 `ui` 给出（如 `ListItem → ListItem`、`DiffHunk → Group`）。`ui` 的控件自带角色、标签（来自 `ui::Text`）和状态，视图只给 `NodeId`。
    - 记录器：`Recorder::begin(window: WindowId)`、`Recorder::finish() -> Vec<Record>`、`Recorder::is_armed() -> bool`（一个 `AtomicBool`），进程里一个，主线程使用；`begin` 时丢弃上一次没取走的记录。
    - 每个视图 crate 的设计文档「界面」一节列出它的语义节点（角色与 ID），这是[模板](TEMPLATE.md)已有的要求；不可交互的纯装饰元素不声明。
 2. **`i18n`**：`Key::name(&self) -> &'static str` 与 `FmtKey::name(&self) -> &'static str`，返回 Fluent 的消息 ID（如 `review-looks-good`）；常数时间，读 `table::NAMES`。这张名字表已经编译进每个构建（`Strings::format` 的报告用它），不增加体积。
