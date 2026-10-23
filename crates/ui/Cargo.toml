@@ -13,6 +13,27 @@ layer = "view"
 [dependencies]
 gpui.workspace = true
 gpui-component.workspace = true
+# `Strings`, `Key`, `FmtKey`, `Args`, `Locale`: the construction of `Text` (ADR 0013).
+lectern-i18n = { path = "../i18n" }
+# `appearance::{system_colors, reduce_motion, watch}`: the system colours and
+# the reduce-motion setting (architecture rule 6, docs/design/ui.md「依赖」).
+lectern-platform = { path = "../platform" }
+# `workspace::Payload` and `WorkspaceCommand` for the `contrib` types.
+lectern-services = { path = "../services" }
+# `TokenKind`: the key of the code colouring table.
+lectern-syntax = { path = "../syntax" }
+# The runtime log's macros (ADR 0046).
+lectern-logging = { path = "../logging" }
+
+[features]
+# `testing::simulate_appearance_change` for the `app` tests (docs/design/ui.md「测试」).
+test-support = []
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+# testing::capture() for the canary test (docs/design/ui.md「日志与诊断」).
+lectern-logging = { path = "../logging", features = ["test-support"] }
+insta.workspace = true
 
 [lints]
 workspace = true

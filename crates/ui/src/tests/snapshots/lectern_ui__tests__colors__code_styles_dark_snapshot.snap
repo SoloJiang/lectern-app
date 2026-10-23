@@ -1,0 +1,294 @@
+---
+source: crates/ui/src/tests/colors.rs
+expression: "code_styles(&Palette::builtin(Appearance::Dark))"
+---
+[
+    (
+        Keyword,
+        CodeStyle {
+            color: Hsla {
+                h: 0.8131571,
+                s: 0.8795892,
+                l: 0.57645,
+                a: 1.0,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        String,
+        CodeStyle {
+            color: Hsla {
+                h: 0.99734664,
+                s: 1.0,
+                l: 0.6294,
+                a: 1.0,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Number,
+        CodeStyle {
+            color: Hsla {
+                h: 0.5719,
+                s: 1.0,
+                l: 0.5,
+                a: 1.0,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Comment,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.549,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Function,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Type,
+        CodeStyle {
+            color: Hsla {
+                h: 0.9666794,
+                s: 1.0,
+                l: 0.60785,
+                a: 1.0,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Constant,
+        CodeStyle {
+            color: Hsla {
+                h: 0.5719,
+                s: 1.0,
+                l: 0.5,
+                a: 1.0,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Property,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Variable,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Operator,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Punctuation,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Tag,
+        CodeStyle {
+            color: Hsla {
+                h: 0.8131571,
+                s: 0.8795892,
+                l: 0.57645,
+                a: 1.0,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Attribute,
+        CodeStyle {
+            color: Hsla {
+                h: 0.9666794,
+                s: 1.0,
+                l: 0.60785,
+                a: 1.0,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Escape,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Heading,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                600.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+    (
+        Link,
+        CodeStyle {
+            color: Hsla {
+                h: 0.5719,
+                s: 1.0,
+                l: 0.5,
+                a: 1.0,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: true,
+        },
+    ),
+    (
+        Emphasis,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: true,
+            underline: false,
+        },
+    ),
+    (
+        Other,
+        CodeStyle {
+            color: Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 0.8471,
+            },
+            weight: FontWeight(
+                400.0,
+            ),
+            italic: false,
+            underline: false,
+        },
+    ),
+]
