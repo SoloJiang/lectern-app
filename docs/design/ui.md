@@ -13,7 +13,7 @@
   - 动效原语：[交互规范「动效」](interaction.md#动效)表里的时长与曲线作为具名常量；可打断的过渡（`Transition`）、弹簧（`Spring`）、三次贝塞尔求值；减弱动态效果的替代方案。
   - 界面文本的类型 `Text`：控件只接受来自 `lectern-i18n` 的文本或明确标为原样显示的文本（[i18n 设计](i18n.md)「本 issue 之外」留给本 crate 的两件事之一）；`Strings` 的 GPUI 全局与切换语言后的刷新（另一件）。
   - 共用的小控件：只做 Welcome、项目主页、审阅视图需要、而 gpui-component 没有或与 macOS 不一致的几个（见「控件」）。
-  - UI 探针的语义节点类型（角色、稳定 ID、状态、屏幕范围）和 `Inspect` trait：视图实现它，`ui_probe` 读它（[技术调研「UI 结构探针」](tech-research.md#6-ui-结构探针)、[#6](https://github.com/SoloJiang/lectern-app/issues/6)）。
+  - UI 探针的语义节点（`semantic` 模块）：节点的类型（角色、稳定 ID、文字、状态、屏幕范围）、给元素附上节点的包装元素，以及探针开关时收集记录的 `Recorder`。`ui_probe`（tool 层）读它，视图 crate 只依赖本 crate（[技术调研「UI 结构探针」](tech-research.md#6-ui-结构探针)、[#6](https://github.com/SoloJiang/lectern-app/issues/6)；形状与 `ui_probe` 的设计一致）。
 - 不做：
   - 读 AppKit：`NSColor`、`NSWorkspace` 的减弱动态效果、系统通知，归 `platform`（架构规则 6，见「对其他 crate 的要求」）。本 crate 只经 GPUI 和 `platform` 的接口。
   - 窗口结构：侧栏、工具栏、检查器、面板容器、底部浮条，归 `workspace`（[#30](https://github.com/SoloJiang/lectern-app/issues/30)）。本 crate 给面板滑入的偏移量和透明度，不给容器。
@@ -132,8 +132,10 @@ pub fn attach(window: &mut Window, cx: &mut App) -> Subscription;
 
 ```rust
 /// 控件接受的文本。没有 `From<&str>`、`From<SharedString>`：字面量传不进控件。
+/// 带着来源：`key` 是 Fluent 消息 ID（`Key::name()`，见「对其他 crate 的要求」的 `i18n`），原样显示的文本为 None；
+/// 探针把它记进节点的 `Label`。
 #[derive(Clone, Debug)]
-pub struct Text(SharedString);
+pub struct Text { text: SharedString, key: Option<&'static str> }
 
 impl Text {
     /// 来自资源文件的消息（`Strings::get`）。
@@ -146,6 +148,7 @@ impl Text {
     pub fn verbatim(content: impl Into<Verbatim>) -> Text;
     pub fn as_str(&self) -> &str;
     pub fn shared(&self) -> SharedString;
+    pub fn message_id(&self) -> Option<&'static str>;
 }
 
 /// `From<Arc<str>>`、`From<String>`，没有 `From<&str>`。
@@ -364,7 +367,7 @@ pub mod motion {
 
 ### 控件
 
-只列第一批屏幕需要、而 gpui-component 没有或与 macOS 不一致的。每个控件都是 `RenderOnce` 元素（按 [gpui 技能](../../.claude/skills/gpui/SKILL.md)的指南选择），接受 `Text`，不接受 `&str`；都带探针角色（见「探针」），视图给 `NodeId`。
+只列第一批屏幕需要、而 gpui-component 没有或与 macOS 不一致的。每个控件都是 `RenderOnce` 元素（按 [gpui 技能](../../.claude/skills/gpui/SKILL.md)的指南选择），接受 `Text`，不接受 `&str`；都自带探针的角色、文字和状态（见「探针」），视图只给 `NodeId`。
 
 ```rust
 /// 按钮：macOS 的推按钮高度 24pt（`Small`）/ 30pt（`Regular`），主按钮用 `accent`。包装 gpui-component 的 `Button`，
@@ -455,72 +458,86 @@ impl Expander {
 
 ### 探针
 
-语义节点的类型在本 crate，`ui_probe`（tool 层）依赖本 crate 读它们；本 crate 不依赖 `ui_probe`。
+语义节点的类型在本 crate 的 `semantic` 模块，`ui_probe`（tool 层）依赖本 crate 读它们；本 crate 不依赖 `ui_probe`。形状按 `ui_probe` 设计的契约（[#6](https://github.com/SoloJiang/lectern-app/issues/6)）：探针不读 GPUI 的 AccessKit 树（锁定的 gpui-pre 0.3.9 只在辅助技术激活时构造它，`#[gpui::test]` 拿不到），所以本 crate 自己记录。
 
 ```rust
-pub mod probe {
-    /// 稳定 ID：`视图.区域.条目[业务键]`（技术调研「UI 结构探针」）。业务键是路径、会话 ID、文件名，不是下标。
+pub mod semantic {
+    /// 稳定 ID 的构造：`segment('.' segment)*`，segment 是 `name` 或 `name[key]`，name 是 `[a-z0-9-]+`，
+    /// key 是任意 UTF-8（不含换行、不含 `].`）。`NodeId::new("review", "files", Some("src/main.rs"))` →
+    /// `review.files.item[src/main.rs]`（技术调研「UI 结构探针」）。业务键是路径、会话 ID，不是下标；同一帧内唯一。
+    /// 调试构建里校验格式，发布构建不校验。
     #[derive(Clone, PartialEq, Eq, Hash, Debug)]
     pub struct NodeId(SharedString);
     impl NodeId {
-        /// `NodeId::new("review", "files", Some("apps/App.tsx"))` → `review.files.item[apps/App.tsx]`。
-        /// `view` 与 `area` 只接受 `'static` 的小写标识符；`key` 里的 `]` 写成 `\]`。调试构建里校验格式，发布构建不校验。
         pub fn new(view: &'static str, area: &'static str, key: Option<&str>) -> NodeId;
-        /// 子节点：`parent.child("edit")` → `….edit`。
+        /// 子节点：`parent.child("edit")` → `….edit`；`parent.item(key)` → `….item[key]`。
         pub fn child(&self, name: &'static str) -> NodeId;
+        pub fn item(&self, key: &str) -> NodeId;
         pub fn as_str(&self) -> &str;
     }
 
-    /// 角色：探针和快照里的类型名。控件自带自己的角色，视图给容器和自绘元素的角色。
+    /// 角色：探针和快照里的类型名，与 `ui_probe` 设计的表一致。
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Role {
-        Button, Check, Progress, Segmented, Segment, List, Row, Dot, Label, Document, CodeLine,
-        Panel, Toolbar, Sidebar, Inspector, FloatingBar, Field, Banner, Dialog, Group,
+        Window, Sidebar, Toolbar, Panel, Group, List, ListItem, Tree, TreeItem, TabBar, Tab, Button, Toggle,
+        Text, TextField, SearchField, Link, Menu, MenuItem, Dialog, Diff, DiffHunk, DiffLine, Comment, Badge, Progress,
     }
 
-    /// 节点的状态：只放探针要看的事实，不放样式。
+    /// 节点显示的文字和它的来源：`key` 是 Fluent 消息 ID（来自 `Text::message_id`），原样显示的文本为 None。
+    #[derive(Clone, PartialEq, Debug)]
+    pub struct Label { pub key: Option<&'static str>, pub text: SharedString }
+
+    /// 探针要看的事实，不放样式。
     #[derive(Clone, Default, PartialEq, Debug)]
     pub struct State {
-        pub selected: Option<bool>,
-        pub checked: Option<bool>,
+        pub selected: bool,
+        pub focused: bool,
+        pub disabled: bool,
         pub expanded: Option<bool>,
-        pub disabled: Option<bool>,
-        pub fraction: Option<f32>,
-        /// 视图自己的键值（如 `tier=B`、`rows=120`），键是 `'static`，值是短字符串；每个节点最多 8 个。
-        pub facts: SmallVec<[(&'static str, SharedString); 4]>,
+        pub checked: Option<bool>,
     }
 
+    /// 一个节点的声明。`attrs` 是视图自己的键值（如 `("tier", "B")`、`("rows", "120")`），每个节点最多 8 个。
     #[derive(Clone, PartialEq, Debug)]
-    pub struct Node {
+    pub struct Semantic {
         pub id: NodeId,
         pub role: Role,
-        /// 显示的文字（`Text` 的内容），没有文字的节点为 None。
-        pub text: Option<SharedString>,
+        pub label: Option<Label>,
         pub state: State,
-        /// 上一帧画出的屏幕范围；`probe` feature 关闭时、或这一帧没画出时为 None。
-        pub bounds: Option<Bounds<Pixels>>,
-        pub children: Vec<Node>,
+        pub attrs: Vec<(&'static str, SharedString)>,
     }
 
-    /// 视图实现：导出自己这一棵语义子树。`ui_probe` 从 `workspace` 的根开始调用。
-    pub trait Inspect {
-        fn inspect(&self, window: &Window, cx: &App) -> Node;
+    /// 记录器收到的一条：声明、这一帧的屏幕范围、是否在内容遮罩内可见、父节点在同一帧记录里的下标、声明处的源码位置。
+    #[derive(Clone, Debug)]
+    pub struct Record {
+        pub semantic: Semantic,
+        pub bounds: Bounds<Pixels>,
+        pub visible: bool,
+        pub parent: Option<usize>,
+        pub declared_at: &'static core::panic::Location<'static>,
     }
 
-    /// 给任何元素附上语义节点。`probe` feature 下在 paint 时把 `bounds` 记进窗口的登记表
-    ///（一张按 `NodeId` 的表，每帧重建，容量等于这一帧的节点数，不跨帧增长）；关闭时什么也不做、不占空间。
-    pub trait SemanticExt: Sized {
-        fn semantic(self, id: NodeId, role: Role) -> Self;
-        fn semantic_state(self, state: State) -> Self;
-    }
+    /// 包装元素：给任何元素附上语义节点。`#[track_caller]`，所以 `declared_at` 是视图里的调用处（技术调研：只记录业务视图层）。
+    /// prepaint 里取子元素的 `bounds`，按 `Window::content_mask` 算 `visible`；记录器打开时推一条 `Record`，并在子元素 prepaint 期间
+    /// 把自己压进线程本地的父节点栈。记录器关闭时只读一次 `AtomicBool`（Relaxed）就返回，不分配、不记录。
+    /// 同一份声明同时写进子元素的 GPUI 无障碍属性（子元素是带 id 的 div 时）：`accessibility_id`、映射的 `accesskit::Role`、
+    /// `aria_label`、`aria_selected`、`aria_expanded`、`aria_toggled`；角色映射表在本模块。
+    #[track_caller]
+    pub fn semantic(spec: Semantic, child: impl IntoElement) -> SemanticElement;
+    pub struct SemanticElement { /* spec, child, declared_at */ }
 
-    /// `probe` feature：查上一帧登记的范围。`ui_probe` 和 `#[gpui::test]` 用。
-    #[cfg(feature = "probe")]
-    pub fn bounds_of(id: &NodeId, window: &Window) -> Option<Bounds<Pixels>>;
+    /// 进程一个，只在主线程上用。`ui_probe` 和 `#[gpui::test]` 在一帧之前 `begin`，帧画完 `finish` 取走这一帧的记录。
+    /// 记录按声明顺序，`parent` 指向同一个 `Vec` 里的下标。
+    pub struct Recorder;
+    impl Recorder {
+        pub fn begin(window: WindowId);
+        pub fn finish() -> Vec<Record>;
+        pub fn is_armed() -> bool;
+    }
 }
 ```
 
-`#[track_caller]` 的源码定位只记在视图层的构造函数上（技术调研：只记录业务视图层），本 crate 的控件不记。
+本 crate 的控件自带角色、`Label`（来自它们的 `Text`）和状态，视图只给 `NodeId`；视图自己的容器与自绘元素用 `semantic(...)` 包装。每个视图 crate 的设计文档「界面」一节列出自己的节点（角色与 ID）；纯装饰元素不声明。窗口根节点由探针合成，视图不声明。
 
 ## 数据结构
 
@@ -529,7 +546,7 @@ pub mod probe {
 - agent 标识色：浅 `#D9790A` / 深 `#C77A1A`（Claude Code），浅 `#5856D6` / 深 `#6260D8`（Codex），来自交互规范「视觉」；不从系统读。
 - `Transition`：`from`、`to`、`start`、`motion`、`reduced` 快照（开始时的值，过渡中途不换），共 40 字节，由视图持有。
 - 贝塞尔求值：`Easing::eval` 对 `CubicBezier` 用牛顿迭代求 x(t)=进度 的 t，再取 y(t)；不建查表，每次调用常数时间（≤ 8 次迭代）。
-- 节点登记表（`probe` feature）：`Window` 上的一个 `HashMap<NodeId, Bounds<Pixels>>`，`SemanticExt` 的元素在 paint 时写入，每帧开始清空；发布构建不编译。
+- 记录器（`semantic::Recorder`）：进程一个，一个 `AtomicBool` 开关加一个 `Vec<Record>` 和线程本地的父节点栈。关闭时 `Vec` 为空、不分配；`begin` 到 `finish` 之间按这一帧的节点数增长，`finish` 把它整个取走。发布构建里编译，但开关永远不打开（只有 `ui_probe` 和测试调用 `begin`），每个包装元素每帧的代价是一次原子读。
 
 ## 数据流与线程
 
@@ -547,11 +564,12 @@ pub mod probe {
 | 冷启动到首帧 < 20 ms | `init` 在首帧前运行 | ≤ 300 µs：约 50 次 `NSColor` 读取与换算、一次 `NSWorkspace` 读取、设全局、登记通知。不建线程、不读文件、不解析任何东西。`gpui_component::init`（运行时解析两份内嵌 JSON）放在 `ready`，首帧之后 |
 | 空闲内存（空窗口）< 60 MB | `UiState` | < 8 KiB；`gpui_component::init` 建的主题全局与图标资源按 `ui/idle_memory` 实测，预期 < 1 MB，作为 `ui` 的份额写进 bench 的预算表 |
 | 滚动与输入 120 fps | 每帧的查找与动画 | `colors`、`code_style`、`Transition::tick` 都是 O(1)、不分配；动画只改位移、透明度、裁剪（ADR 0015）。动画期间帧的工作时间 ≤ 8.3 ms 由 `bench` 的 `app/animation_frames` 在 `workspace` 接入后判定（[bench 设计](bench.md)的 `frames` 应答） |
+| 滚动与输入 120 fps（探针关闭时） | 每个 `semantic` 包装元素的 prepaint | 一次 `AtomicBool` 的 Relaxed 读，≤ 2 ns（`ui/semantic_disarmed`）；不分配 |
 | 打开文件到首屏高亮 < 16 ms | `mono_metrics` 的第一次计算 | 第一次调用 ≤ 200 µs（一次字体解析、三次度量），之后是缓存；`file_reader` 可以在首屏之前的任一帧先调一次 |
 
 首帧之前做的事：`init`（上表）。其余都在 `ready` 之后。
 
-新增基准（`bench`，macOS 判定，Linux 不编译）：`ui/init`（≤ 300 µs）、`ui/ready`（≤ 3 ms）、`ui/palette_resolve`（通知到达到新 `Palette` 就位 ≤ 300 µs）、`ui/transition_tick`（≤ 100 ns）、`ui/bezier_eval`（≤ 50 ns）、`ui/mono_metrics_first`（≤ 200 µs）、`ui/idle_memory`（`ready` 之后 `UiState` 加 gpui-component 全局 < 1 MB）。
+新增基准（`bench`，macOS 判定，Linux 不编译）：`ui/init`（≤ 300 µs）、`ui/ready`（≤ 3 ms）、`ui/palette_resolve`（通知到达到新 `Palette` 就位 ≤ 300 µs）、`ui/transition_tick`（≤ 100 ns）、`ui/bezier_eval`（≤ 50 ns）、`ui/mono_metrics_first`（≤ 200 µs）、`ui/semantic_disarmed`（≤ 2 ns）、`ui/idle_memory`（`ready` 之后 `UiState` 加 gpui-component 全局 < 1 MB）。
 
 ## 界面
 
@@ -559,7 +577,7 @@ pub mod probe {
 
 - 用到的控件与动效原语见「接口」；本 crate 自己不定义任何颜色值、字体名和时长之外的东西：颜色来自 `platform` 或内置表，时长来自交互规范的表。
 - Fluent 键：没有。本 crate 不显示自己的文字；`Text` 只是容器。
-- 探针节点：控件自带角色（`Button` → `Role::Button`，`CircleCheck` → `Role::Check`，`Progress` → `Role::Progress`，`Segmented` → `Role::Segmented` 与每项 `Role::Segment`，`GroupedList` → `Role::List`，`Row` → `Role::Row`，`AgentDot` → `Role::Dot`，`Expander` → `Role::Group`），状态里带 `checked`、`selected`、`fraction`、`disabled`、`expanded`；ID 由视图给。
+- 探针节点：控件自带角色（`Button` → `Role::Button`，`CircleCheck` → `Role::Toggle`（`checked`），`Progress` → `Role::Progress`（`attrs` 里 `fraction`），`Segmented` → `Role::TabBar` 与每项 `Role::Tab`（`selected`），`GroupedList` → `Role::List`，`Row` → `Role::ListItem`（`selected`），`AgentDot` → `Role::Badge`（`attrs` 里 `agent`），`Expander` → `Role::Group`（`expanded`）），`Label` 来自它们的 `Text`，`disabled` 来自 `Button::disabled`；ID 由视图给。
 - Action 与快捷键：没有。控件只回调，Action 在视图里定义（技术调研：探针只经 Action 操作）。
 
 ## 状态与异常
@@ -592,8 +610,8 @@ pub mod probe {
   本次运行里每种 warn 只记一次（`AtomicBool`）。
 - 详细级别（debug）：外观变化（`appearance`）、强调色变化（`accent`）、减弱动态效果变化（`reduce_motion`）、语言切换（`locale` 为 `Locale::tag()`）。每次事件一条，事件本身由用户或系统触发，频率低。不在 `colors`、`code_style`、`Transition::tick`、`mono_metrics` 的热路径上加记录。
 - 关联 ID：本 crate 不设作用域（logging 设计「对其他 crate 的要求」第 11 项：主线程上的作用域由 `workspace` 和视图层设置），记录带调用线程上已有的作用域。
-- 不记录：`Text` 的内容（界面文案、路径、会话标题、prompt 都经它显示）、`NodeId` 的业务键（路径、会话 ID）、`State::facts` 的值、颜色的数值、字体的实际 PostScript 名（只记上面三个 `'static` 家族常量的其中一个）、窗口标题。用事件名、外观、`'static` 的家族常量和计数代替。
-- 金丝雀测试：`tests::logs_hold_no_text`（`lectern_logging::testing::capture()`，trace 级别，`init_fixed`）：用含金丝雀的 `Text::verbatim` 渲染 `Button`、`Row`、`GroupedList`，用含金丝雀的业务键建 `NodeId`，用含金丝雀的 `facts` 调 `semantic_state`，再切一次语言、触发一次模拟的外观变化；`assert_absent` 确认金丝雀不进日志，并检查记录只有 `ui initialised` 和两条 debug。
+- 不记录：`Text` 的内容（界面文案、路径、会话标题、prompt 都经它显示）、`NodeId` 的业务键（路径、会话 ID）、`Semantic::attrs` 的值、`Label` 的文字、颜色的数值、字体的实际 PostScript 名（只记上面三个 `'static` 家族常量的其中一个）、窗口标题。用事件名、外观、`'static` 的家族常量和计数代替。
+- 金丝雀测试：`tests::logs_hold_no_text`（`lectern_logging::testing::capture()`，trace 级别，`init_fixed`）：用含金丝雀的 `Text::verbatim` 渲染 `Button`、`Row`、`GroupedList`，用含金丝雀的业务键建 `NodeId`，用含金丝雀的 `attrs` 和 `Label` 调 `semantic(...)`，`Recorder::begin` 后渲染一帧，再切一次语言、触发一次模拟的外观变化；`assert_absent` 确认金丝雀不进日志，并检查记录只有 `ui initialised` 和两条 debug。
 
 ## 测试
 
@@ -616,8 +634,8 @@ pub mod probe {
   - `circle_check_toggles_from_key_and_click`：按键和点击都触发 `on_change`，都启动同一个动画元素。
   - `segmented_slider_continues_from_current_position`：切换中途再切回，滑块的 `Transition` 从当前位置返回。
   - `reduced_motion_has_no_displacement`：`init_fixed(…, reduced_motion: true)` 下，`Expander`、`Segmented` 的滑块和面板偏移（用 `Transition` + `Effective::Fade` 的示例）在整个过渡里位移为 0，只有透明度变化。ADR 0015「影响」里「开启减弱动态效果时没有位移动画」的检查项。
-  - `semantic_bounds_are_recorded`（`probe` feature）：渲染带 `semantic` 的元素一帧后 `bounds_of` 返回它的范围，下一帧没有渲染时为 None。
-  - 每个控件的语义节点各一份 insta 快照（`Inspect` 的输出，JSON）。
+  - `semantic_records_bounds_and_parents`：`Recorder::begin` 后渲染一个 `GroupedList` 里两个 `Row` 的帧，`finish` 给出 3 条记录，`Row` 的 `parent` 指向 `GroupedList`，`bounds` 与元素一致，滚出内容遮罩的行 `visible` 为 false；没有 `begin` 时渲染不产生记录，`is_armed` 为 false。
+  - 每个控件的语义节点各一份 insta 快照（`Recorder::finish` 的记录去掉 `bounds` 和 `declared_at` 后的 JSON）。
 - fixtures：没有外部格式。内置系统色表是源码里的常量，不是夹具。
 - 只能在 macOS 上跑的部分：全部（依赖 GPUI）。`platform::appearance` 的真实读取在 `platform` 的测试里验证；本 crate 的测试全用 `init_fixed`。另有一个手动检查在「验收」里：发布构建下 `mono_metrics().family` 为 `MONO_FAMILY`。
 
@@ -658,9 +676,10 @@ pub mod probe {
 
   浅色 / 深色本身不经 `platform`：GPUI 已经给出窗口外观和变化通知。
 - `app`：`run` 里在开窗口之前调用 `lectern_ui::init(cx, strings)`（在 `set_menus` 之前，菜单文字可以继续直接用传入的 `Strings`）；`startup::release` 在 `Kernel::start` 之前调用 `lectern_ui::ready(cx)`；test profile 用 `init_fixed`。`app/cold_start` 的预算不变。
-- `workspace`：每个窗口打开后调用 `lectern_ui::attach`；面板容器用 `Transition` 和 `PANEL_OPEN` / `PANEL_CLOSE`；根视图实现 `Inspect`，`ui_probe` 从它开始。
-- `welcome`、`project_home`、`review_view`、`file_reader`：颜色、字体、动效、控件只从本 crate 取（「验收」里的 `rg` 检查）；可交互元素都经 `NodeId` 命名并实现 `Inspect`。
-- `ui_probe`：依赖 `lectern-ui` 并开它的 `probe` feature；`app` 只在自己的 `ui-probe` feature（不在 `default`）下依赖 `ui_probe`，发布构建里没有这个 feature（`cargo tree` 检查写进 `ui_probe` 的设计）。
+- `workspace`：每个窗口打开后调用 `lectern_ui::attach`；面板容器用 `Transition` 和 `PANEL_OPEN` / `PANEL_CLOSE`；侧栏、工具栏、检查器、面板、浮条各声明一个节点（`workspace.sidebar` 等），Action 名稳定、可枚举。
+- `welcome`、`project_home`、`review_view`、`file_reader`：颜色、字体、动效、控件只从本 crate 取（「验收」里的 `rg` 检查）；可交互元素都经 `NodeId` 命名，容器和自绘元素用 `semantic(...)` 包装，各自的设计文档「界面」列出节点。
+- `ui_probe`：依赖 `lectern-ui` 的 `semantic` 模块，按帧 `Recorder::begin` / `finish` 取记录，自己合成窗口根节点（`window[<id>]`）；按 Action 名触发操作。它的设计与本节的形状一致（[#6](https://github.com/SoloJiang/lectern-app/issues/6)），两边改动时一起改。
+- `i18n`：`Key::name(&self) -> &'static str`、`FmtKey::name(&self) -> &'static str`，返回 Fluent 消息 ID（`Text::message_id` 与 `Label::key` 用），随第 1 步在 `i18n` 里加上。
 - `bench`：「性能」里的 `ui/*` 基准；`app/animation_frames` 随 `workspace` 的里程碑一起加入。
 
 ## 未决问题
@@ -696,10 +715,10 @@ pub mod probe {
 - `loading_phase_*`、`circle_check_toggles_from_key_and_click`、`segmented_slider_continues_from_current_position`、每个控件的语义节点快照通过。
 - `rg 'Duration::from_millis|Duration::from_secs' crates/ui/src --glob '!**/motion*' --glob '!**/tests*'` 没有结果（时长只在 `motion` 里定义）。
 
-**第 4 步：探针节点（`Refs #214`，与 [#6](https://github.com/SoloJiang/lectern-app/issues/6) 的 `ui_probe` 设计对齐后，`probe` feature；最后完成的那个 PR 写 `Closes #214`）。**
+**第 4 步：探针节点（`Refs #214`；[#6](https://github.com/SoloJiang/lectern-app/issues/6) 的 `ui_probe` 设计合并后；最后完成的那个 PR 写 `Closes #214`）。**
 
-- `probe` 模块、`SemanticExt`、`bounds_of`、控件的角色与状态。
-- `node_id_*`、`semantic_bounds_are_recorded` 通过。
-- `cargo tree --locked -p lectern-app -e features --target aarch64-apple-darwin` 的输出里没有 `lectern-ui feature "probe"`；`cargo tree --locked -p lectern-ui-probe -e features` 里有。
+- `semantic` 模块：`NodeId`、`Role`、`Label`、`State`、`Semantic`、`Record`、`semantic(...)`、`Recorder`、无障碍属性的映射；控件的角色、`Label` 与状态。
+- `node_id_*`、`semantic_records_bounds_and_parents`、控件的语义节点快照通过；`just bench ui/` 的 `ui/semantic_disarmed` 在预算内。
+- `rg 'Recorder::begin' crates --glob '!crates/ui_probe/**' --glob '!**/tests*' --glob '!**/benches/**'` 没有结果（只有探针和测试打开记录器）。
 
 **视图 crate 接入后的持续检查**（写进各视图设计的验收，这里列出口径）：`rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|\.font_family\(|gpui_component::Button' crates/{workspace,welcome,project_home,review_view,file_reader}/src` 没有结果。
