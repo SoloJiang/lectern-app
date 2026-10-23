@@ -2,15 +2,16 @@
 
 窗口骨架：侧栏、工具栏、检查器、浮动面板、底部浮条，以及按需呼出与收起的层级切换。
 
-- 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：`docs/design/workspace.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
-- issue：[#30](https://github.com/SoloJiang/lectern-app/issues/30)
-- ADR：[0012](../../docs/adr/0012.md)、[0015](../../docs/adr/0015.md)
+- 层：视图层，插件 crate（实现插件的那一步加 `plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：插件 "workspace"，提供 `dyn Contributions`，依赖 `dyn Projects`。只依赖 kernel 层和非插件的库 crate（`ui`、`i18n`），不依赖贡献方（`project_home`、`review_view`、`file_reader` 等）；只有 `app` 和 tool 层依赖本 crate。
+- 设计文档：[docs/design/workspace.md](../../docs/design/workspace.md)
+- issue：[#215](https://github.com/SoloJiang/lectern-app/issues/215)
+- ADR：[0012](../../docs/adr/0012.md)、[0015](../../docs/adr/0015.md)、[0017](../../docs/adr/0017.md)、[0025](../../docs/adr/0025.md)
 
 ## 边界
 
 - 新增界面元素前对照[交互规范「三层结构」](../../docs/design/interaction.md#三层结构)和 [ADR 0012](../../docs/adr/0012.md)：不做活动栏、文件标签页、常驻文件树、状态栏、底部终端停靠。
-- 只提供容器与布局，具体内容由各视图 crate 填入。
+- 只提供容器与布局，具体内容由各视图 crate 经 `dyn Contributions` 填入（设计文档「接口」）。
+- 不做 IO：窗口状态文件由 `app` 读写，本 crate 只给出 `WindowState` 和变化回调；首帧之前没有本 crate 的代码运行（[ADR 0017](../../docs/adr/0017.md)）。
 
 ## 测试
 
