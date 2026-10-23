@@ -256,7 +256,7 @@ impl Screen { pub fn into_payload(self) -> Payload; }   // 其余类型相同
 pub fn install(window: AnyWindowHandle, deps: WorkspaceDeps, cx: &mut App) -> WorkspaceHost;
 
 pub struct WorkspaceDeps {
-    /// 窗口状态变化时调用（去抖由 `app` 做）。任何线程。`app` 同时在这里切换 frame autosave 名
+    /// 窗口状态变化时调用（去抖由 `app` 做）。在主线程上调用（状态机在主线程上），`app` 可以直接在这里切换 frame autosave 名
     /// （`project` 有值时 `"project"`，否则 `"welcome"`，见「对其他 crate 的要求」D）。
     pub on_state_changed: Arc<dyn Fn(WindowState) + Send + Sync>,
     /// 里程碑画出后调用，`presented` 是下一帧回调的时刻（见「已知限制」）。任何线程。
@@ -289,7 +289,7 @@ impl WorkspaceHost {
 pub enum RecordStop {
     /// 固定时长之后。
     After(Duration),
-    /// 当前进行中的动画全部结束（`ui` 的动效原语报告）之后。
+    /// 当前进行中的动画全部结束之后：`ui` 的 `Transition` / `Spring` 有一个「还有进行中的过渡」的计数（「对其他 crate 的要求」B）。
     AnimationsSettled,
     /// 调用方再次调用 `stop_recording` 时。
     Manual,
@@ -526,7 +526,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 - 状态机（纯函数，`#[test]`，不依赖 GPUI）：`nav::*`：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`。
 - 注册表（`#[test]`，用 `TestKernel` 的 token）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`removal_drops_the_shown_screen`、`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）、`screens_can_be_pushed_twice`（同一个 `Screen` 工厂被调用两次）、`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）。
-- `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`。
+- `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`，`platform::frame::record` 用 `test-support` 的假记录器）。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
 - 不用真实的 git、会话扫描和文件 IO；`Projects` 用 `services` 的 trait 对象的假实现，只发事件、返回构造好的快照。
@@ -536,7 +536,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 每一项是一个 PR，写 `Refs #215`，在「验收」里列为前置条件。
 
 - **A. `services`**：`workspace` 模块（「服务接口」）。`Registration`、`Payload`、`LeaveGuard` 的回调由本 crate 定义内容；`ReviewTarget`、`ReadTarget`、`ProjectKey`、`WorktreeKey` 复用已有的模块。
-- **B. `ui`**（[#214](https://github.com/SoloJiang/lectern-app/issues/214) 的设计，另一个会话并行编写）：本 crate 用到而 `ui` 设计还没有列出的只有 `ui::contrib` 的载荷类型与 `into_payload`（「`ui::contrib` 的载荷类型」）、一次性提示控件和 SF Symbols 图标的取用；`strings(cx)`、`colors(cx)`、`Text`、`Segmented`、`Button`、`motion::*`、`Transition`、`semantic` 模块已在它的设计里。`lectern_ui::ready(cx)` 之后视图才能挂载，所以 `app` 先调它、再调 `workspace::install`。
+- **B. `ui`**（[#214](https://github.com/SoloJiang/lectern-app/issues/214) 的设计，另一个会话并行编写）：本 crate 用到而 `ui` 设计还没有列出的只有 `ui::contrib` 的载荷类型与 `into_payload`（「`ui::contrib` 的载荷类型」）、一次性提示控件、SF Symbols 图标的取用，以及 `motion::active_transitions(cx) -> usize`（进行中的 `Transition` 与 `Spring` 的个数，`RecordStop::AnimationsSettled` 用）；`strings(cx)`、`colors(cx)`、`Text`、`Segmented`、`Button`、`motion::*`、`Transition`、`semantic` 模块已在它的设计里。`lectern_ui::ready(cx)` 之后视图才能挂载，所以 `app` 先调它、再调 `workspace::install`。
 - **C. `i18n`**：`locales/{en,zh-CN}/workspace.ftl`，内容是「界面」的四个键。
 - **D. `platform`**：窗口 frame 的 autosave（ADR 0017：「窗口位置与大小用 AppKit 的 frame autosave」）。锁定的 GPUI 不暴露这个设置，`gpui-pre-macos` 实现了 `raw_window_handle`：
 
