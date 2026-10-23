@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：已接受，尚未实现。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#PRNUM](https://github.com/SoloJiang/lectern-app/pull/PRNUM)）已实现，见「实际验证」「与设计的差异」；其余前置条件与「验收」的三步尚未实现。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -45,7 +45,7 @@
 
 ### 服务接口（`lectern-services` 的 `workspace` 模块）
 
-`services` 在 kernel 层，不能依赖 `gpui` 和 `lectern-i18n`，所以这里只有稳定 ID、顺序和布局这类 GPUI 无关的数据；视图工厂、`Action`、Fluent 键放在类型擦除的 `Payload` 里，具体类型由 `ui::contrib` 定义（「`ui::contrib` 的载荷类型」），本 crate 用 `downcast` 取回。数据类型派生 `Clone`、`PartialEq`、`Eq`、`Debug`，`Payload`、trait 和包着回调的类型除外。
+`services` 在 kernel 层，不能依赖 `gpui` 和 `lectern-i18n`，所以这里只有稳定 ID、顺序和布局这类 GPUI 无关的数据；视图工厂、`Action`、Fluent 键放在类型擦除的 `Payload` 里，具体类型由 `ui::contrib` 定义（「`ui::contrib` 的载荷类型」），本 crate 用 `downcast` 取回。数据类型派生 `Clone`、`PartialEq`、`Eq`、`Hash`、`Debug`、`Serialize`、`Deserialize`（与 `services` 的其他模块相同），`Payload`、trait 和包着回调的类型除外；含载荷的 `Contribution` 只实现 `Debug`，`SidebarEntry` 只派生 `Clone`、`Debug`。
 
 ```rust
 /// 单实现服务，`workspace` 插件提供。
@@ -124,6 +124,13 @@ pub enum SidebarSection { Project, Views, Bottom }
 /// 类型擦除的载荷。`ui::contrib` 的类型实现 `into_payload`，本 crate `downcast`；
 /// 类型不对时拒绝登记（warn）。进程插件不能跨进程传它。
 pub struct Payload(pub Box<dyn Any + Send>);
+
+/// 已应用的、可以被多个视图共享的载荷：本 crate 应用 `SidebarEntry` 登记时把 `Payload` 里的
+/// `ui::contrib::SidebarEntry` 换成 `Arc`，`project_home` 用 `Arc::downcast` 取回。
+pub struct SharedPayload(pub Arc<dyn Any + Send + Sync>);
+
+/// 一条已登记的侧栏条目（`sidebar_entries` 的元素）。
+pub struct SidebarEntry { pub id: Name, pub section: SidebarSection, pub order: u16, pub payload: SharedPayload }
 
 /// 登记的守卫。drop 时注销；实现 `kernel::Staged`，`activate` 里经 `ctx.own_staged` 交出。
 pub struct Registration { /* 实现方传入的 commit 与注销回调 */ }
@@ -601,3 +608,28 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 手动在 macOS 上运行发布构建（临时 `HOME`）：首次启动显示 Welcome（820 × 520）；没有任何 `workspace` 的记录早于 `first frame drawn`；移动窗口后重启，位置保留；打开一个文件夹后重启，直接回到它的项目主页，`screen changed` 的 `to` 为 `project-home`。
 - `app/cold_start` 与改动前相比不变慢（bench 第 5 步实现之后判定；之前用启动测试确认首帧之前没有本 crate 的记录）。
 - 空闲内存：空窗口的 `phys_footprint` 与 app 设计「实际验证」的 40 MB 相比增加不超过 1 MB。
+
+## 实际验证
+
+### 前置条件 A
+
+`services` 的 `workspace` 模块，在 macOS（arm64）上运行：
+
+- `rg -n 'pub trait Contributions\b|pub trait LeaveGuard' crates/services/src` 各有一处（`workspace/mod.rs`）；`rg 'gpui' crates/services/src` 没有结果。
+- `cargo check -p lectern-services`、`just check`、`just deny` 通过。
+- `just test -p lectern-services`：99 个测试通过，新增 15 个，都以 `workspace_` 开头。
+  - JSON 往返：`workspace_contribution_kinds_round_trip`（七种 `ContributionKind`、两种 `Visibility`、三种 `SidebarSection`）、`workspace_routes_and_targets_round_trip`（四种 `Target`，`Route` 的 `Name` 反序列化后是 `Owned`）、`workspace_commands_round_trip`（十七种 `WorkspaceCommand`，含 `ShowSidebarPanel(None)`）、`workspace_events_round_trip`（四种 `WorkspaceEvent`、四种 `Layer`）、`workspace_scopes_and_milestones_round_trip`（五种 `LeaveScope`、四种 `Milestone`、`WindowId`，并检查枚举是 serde 默认的外部标记）、`workspace_command_handler_receives_the_call`（`CommandCall`）。
+  - 服务 ID：`workspace_contributions_service_id_and_multiple` 检查 `ID == "contributions"`、`MULTIPLE == false`。
+  - 不是服务：`workspace_leave_guard_is_not_a_service` 检查 `dyn LeaveGuard` 没有实现 `Service`，同一个探针对 `dyn Contributions` 给出 true。
+  - 守卫：`workspace_staged_registration_commits_with_the_activation_token` 用 `TestKernel` 跑一次真实激活：`activate` 里 `ctx.own_staged(Registration)`，`commit` 在提交时收到 token 一次（那一刻 `Pending`，激活完成后 `Live`），`release` 在停用时调用一次（token 已 `Dead`）；`workspace_registration_releases_once_on_drop` 没有提交就在另一个线程上 drop，只调用 `release`。
+  - 载荷与条目：`workspace_payload_downcasts_to_its_type`（`Payload` 的 `downcast`、`SharedPayload` 的 `Arc::downcast` 与共享）、`workspace_sidebar_sections_order_top_to_bottom`、`workspace_screen_ids_are_valid_names`（六个屏幕 ID 都符合 `[a-z0-9_-]`、1 到 64 字节）。
+  - trait 对象：`workspace_contributions_is_a_shared_trait_object`（`Arc<dyn Contributions>` 调用每个方法；`Send` / `Sync` 的静态检查）、`workspace_leave_guard_answers_through_done`。
+
+## 与设计的差异
+
+### 前置条件 A
+
+- **`SidebarEntry` 与 `SharedPayload`**（「服务接口」已补上）：设计原来只写了 `sidebar_entries() -> Arc<[SidebarEntry]>`，没有定义 `services` 里的 `SidebarEntry`；`ui::contrib::SidebarEntry` 在视图层，`services` 不能引用。现在 `services` 定义 `SidebarEntry { id, section, order, payload: SharedPayload }`，`SharedPayload` 是 `Arc<dyn Any + Send + Sync>`：`Arc<[SidebarEntry]>` 要跨线程共享，元素必须 `Send + Sync`，而 `Payload` 的 `Box<dyn Any + Send>` 不是 `Sync`，所以本 crate 应用登记时把 `ui::contrib::SidebarEntry` 换成 `Arc` 放进条目，`project_home` 用 `Arc::downcast` 取回。
+- 设计没有列出的派生（「服务接口」已补上）：数据类型都派生 `Hash`、`Serialize`、`Deserialize`，与 `services` 的其他模块相同（进程插件不贡献界面，序列化只为与其他模块一致和测试往返）；不含 `Arc` 的小类型派生 `Copy`；`SidebarSection` 派生 `Ord`，顺序即侧栏从上到下的顺序；`WindowId` 派生 `Ord`。`Contribution` 含 `Payload`，只实现 `Debug`（不打印载荷）。
+- `Registration` 的两个回调都是 `FnOnce + Send`（不要求 `Sync`，`Staged` 只要求 `Send`）；没有提交就 drop 时只调用 `release`，本 crate 的注销回调要能处理「从未应用」的登记。
+- `WorkspaceEvent::ScreenChanged` 按值带两个 `Route`（约 400 字节），clippy 的 `large_enum_variant` 用 `#[allow]` 并写明理由：每次导航一个事件、每个监听克隆一次，装箱只会让每个监听多一次间接访问。
