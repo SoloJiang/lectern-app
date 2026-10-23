@@ -279,28 +279,31 @@ pub struct Started {
 `lectern-quit` 线程依次：
 
 ```
-Kernel::shutdown(done) ── 按依赖的相反顺序停用插件（review → agents → project），插件 drop 自己的监听
-Watcher::shutdown()    ── 停 fs_watch 线程，drop 后端的监视
+Kernel::shutdown(done) ── 等 done，最多到 services 截止时间；按依赖的相反顺序停用插件（review → agents → project），插件 drop 自己的监听
+Watcher::shutdown()    ── 停 fs_watch 线程，drop 后端的监视；最多等到 services 截止时间
 Executor::shutdown(剩余时间)
-Cache::close()         ── 写回访问时间、关闭连接；剩余时间为零时跳过（drop 同样安全，只丢访问时间）
+Cache::close()         ── 写回访问时间、关闭连接；最多等到 services 截止时间，剩余时间为零时不调用（drop 同样安全，只丢访问时间）
 Logging::shutdown(500 ms)
 ```
 
-- kernel、watcher、executor、cache 共用 2 s 的截止时间（`Timeouts::services`）。`Watcher::shutdown` 不等线程退出，立即返回。
-- `QuitSteps` 加两个方法：`fn watcher(&self)`、`fn cache(&self)`；没有装配时什么也不做。
+- kernel、watcher、executor、cache 共用 2 s 的截止时间（`Timeouts::services`），所以按 ⌘Q 到进程退出仍最多约 2.5 s（「退出顺序」）。
+- `Watcher::shutdown` 是阻塞的：fs_watch 线程正在处理一项（sink 的投递、reflog 的读取）时，它最多等 `fs_watch::Config::flush_timeout`（默认 2 s），见 [fs_watch 设计](fs_watch.md)。`flush_timeout` 同时限制 `flush_revision`，不为退出缩短它。`quit::run` 在短命线程 `lectern-quit-step` 上调用 `QuitSteps::watcher`，最多等到截止时间；到时记 warn `watcher shutdown timed out`，继续下一步，短命线程留到进程退出。插件停用之后它们的 sink 已经释放，正常情况下几毫秒内返回。
+- `Cache::close` 也是阻塞的：它可能等一个超时的 executor 任务持有的分库锁。`quit::run` 用同样的方式调用 `QuitSteps::cache`，到截止时间记 warn `cache close timed out`。没有关闭只丢访问时间。
+- `QuitSteps` 加两个方法：`fn watcher(&self)`、`fn cache(&self)`，都阻塞；没有装配时立即返回。等待与超时在 `quit::run` 里，所以假的 `QuitSteps` 能测超时。`Outcome` 加 `watcher_timed_out`、`cache_timed_out`。
 - 由系统发起的退出不经这条路径：只有 `on_app_quit` 里的 `Logging::shutdown(150 ms)`（已有）。缓存没有关闭不会丢失已提交的事务（[cache 设计「生命周期」](cache.md#生命周期)第 4 步）。
 
 ### 性能
 
 - 冷启动：首帧之前没有新增的工作。
 - 首帧之后：四个插件激活。`project`、`review` 的 `activate` 只建空表；`agents` 在 `started` 里提交发现任务（`Background`），枚举会话目录（[agents 设计「数据流与线程」](agents.md#数据流与线程)第 1、2 步）。
-- 空闲内存（ADR 0017：60 MB）：在 `app/idle_empty`（bench 第 5 步）实现之前手动测量：临时 `HOME`、没有会话、不打开项目，启动 10 s 后读 `phys_footprint`，写进「实际验证」。超出 60 MB 时交给产品负责人决定（ADR 0017），不放宽。有真实会话时的内存由 agents 的预算覆盖，不在这里测量。
-- 退出：`Kernel::shutdown` 要在 2 s 内完成。超时会记 warn；不加长截止时间，先找慢的原因。
+- 空闲内存（ADR 0017：60 MB）：在 `app/idle_empty`（bench 第 5 步）实现之前手动测量：临时 `HOME`、去掉 `CLAUDE_CONFIG_DIR` 和 `CODEX_HOME`、没有会话、不打开项目，启动 10 s 后读 `phys_footprint`，写进「实际验证」。超出 60 MB 时交给产品负责人决定（ADR 0017），不放宽。有真实会话时的内存由 agents 的预算覆盖，不在这里测量。
+- 退出：kernel、watcher、executor、cache 合计要在 2 s 内完成。超时会记 warn；不加长截止时间，先找慢的原因。
 
 ### 日志与诊断
 
 - info `plugins assembled`：`profile`、`plugins`（插件个数）。在 `startup barrier released` 之前。
-- warn `plugins not assembled`：`missing`（`home`、`app_cache` 或 `app_data`）。不记路径。
+- warn `plugins not assembled`：`missing`（`home`、`app_cache` 或 `app_data`）。不记路径。test profile 不装配插件，不检查目录，不记这条 warn。
+- warn `watcher shutdown timed out`、`cache close timed out`：`timeout_us`（「退出顺序的变化」）。
 - debug `quit finished` 加 `watcher_us`、`cache_us`。
 - 插件激活、失败和 kernel 的静止由 kernel 自己记录（[kernel 设计「日志与诊断」](kernel.md#日志与诊断)）。
 - 金丝雀：`HOME` 设为含金丝雀字符串的临时目录启动，日志里没有这个字符串（`tests/startup.rs` 的 `home_path_stays_out_of_the_log`）。
@@ -308,12 +311,12 @@ Logging::shutdown(500 ms)
 ### 测试
 
 - `every_profile_graph_validates`：用临时目录建 `Resources`（`Cache::new` 指向临时目录，`Watcher` 用 `fs_watch::testing::FakeBackend`），对每个 profile 调用 `plugins(&resources).validate()`；之后临时目录仍是空的（构造不做 IO）。
-- `quit`：`steps_run_in_order` 的顺序改为 kernel、kernel 完成、watcher、executor、cache、logging；`a_hung_kernel_does_not_block_quit` 里 watcher 照常调用、cache 因剩余时间为零跳过。
+- `quit`：`steps_run_in_order` 的顺序改为 kernel、kernel 完成、watcher、executor、cache、logging；`a_hung_kernel_does_not_block_quit` 里 watcher 照常调用、cache 因剩余时间为零跳过；`a_hung_watcher_does_not_block_quit`（`watcher` 不返回时，到截止时间后照常关闭 executor 和日志，`watcher_timed_out` 为 true，cache 跳过）。
 - `tests/startup.rs`：
   - `startup_writes_a_header_and_an_end_record` 加检查：`plugins assembled` 在 `first frame drawn` 之后、`plugins` 为 4。
   - `quit_shuts_the_services_down_in_time`：`--quit-after-start` 时日志里没有 `kernel shutdown timed out`、`executor shutdown timed out`。
   - `home_path_stays_out_of_the_log`（上一节）。
-  - 每个启动测试的 `HOME` 都是临时目录，不读本机的 `~/.claude`、`~/.codex`。
+  - 每个启动测试的 `HOME` 都是临时目录，并去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`（`AgentRoots::from_env` 优先读它们），不读本机的会话目录。
 - 手动：空闲内存（「性能」）。
 
 ## 性能
@@ -350,6 +353,7 @@ Logging::shutdown(500 ms)
 | 屏障放开之前按 ⌘Q | 直接 `cx.quit()`。写盘线程没有启动，首帧前缓冲里的记录丢失（见「已知限制」） |
 | 退出过程中再按 ⌘Q | 忽略 |
 | kernel 在 2 s 内没有关闭完 | 记 warn，继续关闭 executor 和日志 |
+| fs_watch 线程或缓存的关闭到截止时间还没返回 | 记 warn，继续下一步（「装配」「退出顺序的变化」） |
 | `lectern-quit` 线程建不起来 | 主线程直接 `cx.quit()`，`on_app_quit` 写结束记录 |
 | 主线程 panic | logging 的 panic 钩子写记录（写盘线程还没启动时由钩子自己打开文件），然后调用原来的钩子 |
 
