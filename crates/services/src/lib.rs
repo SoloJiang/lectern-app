@@ -21,6 +21,9 @@
 //! - [`usage`]: token usage and rate limit snapshots, project merge commands
 //!   and Analyze metering (`dyn Usage`) and MR sources (`MrSource`, not a
 //!   kernel service), designed in `docs/design/usage.md`.
+//! - [`workspace`]: window contributions, navigation commands and events
+//!   (`dyn Contributions`) and leave guards (`LeaveGuard`, not a kernel
+//!   service), designed in `docs/design/workspace.md`.
 
 pub mod changes;
 pub mod code_intel;
@@ -29,3 +32,4 @@ pub mod reader;
 pub mod review;
 pub mod session;
 pub mod usage;
+pub mod workspace;
