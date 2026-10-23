@@ -20,7 +20,7 @@
 - 本 issue 之外：
   - 按 profile 装配具体的插件，创建 `Cache` 和 `fs_watch` 并传给插件：第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，「装配」）。`usage`、`code_intel` 等其余插件在各自的前置条件完成后加入。
   - 窗口快照的读取与恢复、窗口位置的 frame autosave：随 [#30](https://github.com/SoloJiang/lectern-app/issues/30)。
-  - headless 与 probe profile、`bench-probe` feature、`Driver`、把应用数据目录指到临时目录：随 [bench 设计](bench.md)第 5 步（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）。
+  - headless profile、`bench-probe` feature、`Driver`、把应用数据目录指到临时目录：随 [bench 设计](bench.md)第 5 步（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）。probe profile（`ui-probe` feature，UI 探针）：随 [ui_probe 设计「对其他 crate 的要求」](ui_probe.md#对其他-crate-的要求)第 3 项（[#6](https://github.com/SoloJiang/lectern-app/issues/6)）。
   - 写盘线程和批量线程的 utility QoS：`platform` 提供设置 QoS 的接口之后，`app` 经 `Config::on_writer_start` 和 `executor::Config::on_thread_start` 传入。在此之前两者都是 `None`，线程用默认 QoS（logging 设计已允许）。
   - 详细日志的开关和导出界面：logging 第 12 项。
   - 离开守卫（有未保存的编辑时先询问）：随 [file_reader 设计「编辑」](file_reader.md#编辑)接入。本 issue 的 `Quit` 不询问。
