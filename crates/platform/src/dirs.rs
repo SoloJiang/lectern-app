@@ -1,5 +1,5 @@
-//! Where Lectern keeps its own files (「应用数据目录」 and 「日志目录与系统版本」
-//! in docs/design/platform.md). Only paths: nothing here touches the file
+//! Where Lectern keeps its own files (「应用数据目录」, 「日志目录与系统版本」
+//! and 「应用缓存目录」 in docs/design/platform.md). Only paths: nothing here touches the file
 //! system.
 
 use std::ffi::OsStr;
@@ -92,6 +92,50 @@ fn xdg_logs(home: Option<&OsStr>, state_home: Option<&OsStr>) -> Option<PathBuf>
         None => absolute(home)?.join(".local/state"),
     };
     Some(base.join("lectern/logs"))
+}
+
+/// The application cache directory: derived data that can be deleted at any
+/// time and rebuilt, such as `cache`'s partitions (`cache/`) and `agents`'
+/// decoded copies of compressed sessions (`agents/decoded/`).
+///
+/// - macOS: `$HOME/Library/Caches/Lectern`.
+/// - Elsewhere (Linux, for CI): `$XDG_CACHE_HOME/lectern`, or
+///   `$HOME/.cache/lectern` when `XDG_CACHE_HOME` is unset, empty or
+///   relative.
+///
+/// None when the `HOME` it needs is unset, empty or relative. The same rules
+/// as [`app_data`]: reads only these environment variables, creates nothing
+/// and does no other IO, so any thread may call it.
+pub fn app_cache() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME");
+    #[cfg(target_os = "macos")]
+    {
+        mac_app_cache(home.as_deref())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        xdg_app_cache(
+            home.as_deref(),
+            std::env::var_os("XDG_CACHE_HOME").as_deref(),
+        )
+    }
+}
+
+/// [`app_cache`] on macOS, from the value of `HOME`. Also compiled for tests
+/// elsewhere: it only joins paths.
+#[cfg(any(target_os = "macos", test))]
+fn mac_app_cache(home: Option<&OsStr>) -> Option<PathBuf> {
+    Some(absolute(home)?.join("Library/Caches/Lectern"))
+}
+
+/// [`app_cache`] off macOS, from the values of `HOME` and `XDG_CACHE_HOME`.
+#[cfg(any(not(target_os = "macos"), test))]
+fn xdg_app_cache(home: Option<&OsStr>, cache_home: Option<&OsStr>) -> Option<PathBuf> {
+    let base = match absolute(cache_home) {
+        Some(dir) => dir.to_path_buf(),
+        None => absolute(home)?.join(".cache"),
+    };
+    Some(base.join("lectern"))
 }
 
 /// The variable's value as a path when it is an absolute one; unset, empty

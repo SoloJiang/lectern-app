@@ -1,4 +1,4 @@
-//! Tests of the app data and log directories. They call the per-platform
+//! Tests of the app data, log and app cache directories. They call the per-platform
 //! functions with explicit values and never set process environment
 //! variables.
 
@@ -6,7 +6,10 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use super::{app_data, logs, mac_app_data, mac_logs, xdg_app_data, xdg_logs};
+use super::{
+    app_cache, app_data, logs, mac_app_cache, mac_app_data, mac_logs, xdg_app_cache, xdg_app_data,
+    xdg_logs,
+};
 
 fn os(s: &str) -> Option<&OsStr> {
     Some(OsStr::new(s))
@@ -206,4 +209,104 @@ fn logs_reads_the_process_environment() {
         std::env::var_os("XDG_STATE_HOME").as_deref(),
     );
     assert_eq!(logs(), expected);
+}
+
+#[test]
+fn app_cache_xdg_cache_home_set_is_used() {
+    assert_eq!(
+        xdg_app_cache(os("/home/dev"), os("/data/cache")),
+        Some(PathBuf::from("/data/cache/lectern"))
+    );
+    // A trailing slash adds no empty component.
+    assert_eq!(
+        xdg_app_cache(os("/home/dev"), os("/data/cache/")),
+        Some(PathBuf::from("/data/cache/lectern"))
+    );
+    // HOME is not needed then.
+    assert_eq!(
+        xdg_app_cache(None, os("/data/cache")),
+        Some(PathBuf::from("/data/cache/lectern"))
+    );
+}
+
+#[test]
+fn app_cache_xdg_cache_home_unset_empty_or_relative_falls_back_to_home() {
+    let fallback = Some(PathBuf::from("/home/dev/.cache/lectern"));
+    assert_eq!(xdg_app_cache(os("/home/dev"), None), fallback);
+    assert_eq!(xdg_app_cache(os("/home/dev"), os("")), fallback);
+    assert_eq!(xdg_app_cache(os("/home/dev"), os("data/cache")), fallback);
+    assert_eq!(xdg_app_cache(os("/home/dev"), os("./cache")), fallback);
+    assert_eq!(xdg_app_cache(os("/home/dev"), os("~/cache")), fallback);
+}
+
+#[test]
+fn app_cache_without_a_usable_home_is_none() {
+    for home in [None, os(""), os("home/dev"), os("~")] {
+        assert_eq!(xdg_app_cache(home, None), None, "{home:?}");
+        assert_eq!(xdg_app_cache(home, os("")), None, "{home:?}");
+        assert_eq!(xdg_app_cache(home, os("cache")), None, "{home:?}");
+        assert_eq!(mac_app_cache(home), None, "{home:?}");
+    }
+}
+
+#[test]
+fn app_cache_macos_is_under_library_caches() {
+    let expected = Some(PathBuf::from("/Users/dev/Library/Caches/Lectern"));
+    assert_eq!(mac_app_cache(os("/Users/dev")), expected);
+    assert_eq!(mac_app_cache(os("/Users/dev/")), expected);
+}
+
+#[test]
+fn app_cache_keeps_non_utf8_bytes() {
+    let home = OsStr::from_bytes(b"/home/d\xffv");
+    assert_eq!(
+        xdg_app_cache(Some(home), None)
+            .unwrap()
+            .as_os_str()
+            .as_bytes(),
+        b"/home/d\xffv/.cache/lectern"
+    );
+    assert_eq!(
+        mac_app_cache(Some(home)).unwrap().as_os_str().as_bytes(),
+        b"/home/d\xffv/Library/Caches/Lectern"
+    );
+    let cache = OsStr::from_bytes(b"/c\xfe");
+    assert_eq!(
+        xdg_app_cache(None, Some(cache))
+            .unwrap()
+            .as_os_str()
+            .as_bytes(),
+        b"/c\xfe/lectern"
+    );
+}
+
+#[test]
+fn app_cache_does_not_create_the_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let cache = tmp.path().join("cache");
+    let xdg = xdg_app_cache(Some(home.as_os_str()), None).unwrap();
+    let xdg_set = xdg_app_cache(Some(home.as_os_str()), Some(cache.as_os_str())).unwrap();
+    let mac = mac_app_cache(Some(home.as_os_str())).unwrap();
+    assert_eq!(xdg, home.join(".cache/lectern"));
+    assert_eq!(xdg_set, cache.join("lectern"));
+    assert_eq!(mac, home.join("Library/Caches/Lectern"));
+    assert!(!home.exists());
+    assert!(!cache.exists());
+    assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+/// `app_cache` reads the process environment as it is; this test only reads
+/// it too, so it runs safely next to the others.
+#[test]
+fn app_cache_reads_the_process_environment() {
+    let home = std::env::var_os("HOME");
+    #[cfg(target_os = "macos")]
+    let expected = mac_app_cache(home.as_deref());
+    #[cfg(not(target_os = "macos"))]
+    let expected = xdg_app_cache(
+        home.as_deref(),
+        std::env::var_os("XDG_CACHE_HOME").as_deref(),
+    );
+    assert_eq!(app_cache(), expected);
 }
