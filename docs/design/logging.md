@@ -536,8 +536,8 @@ level     := off | error | warn | info | debug | trace
 
 **第 3 步：`app`（macOS）。**
 
-- 冷启动基准 `app/cold_start` 不变慢；启动基准在 `presentedTime` 回调里记下 `Early::start` 尚未调用，首帧之后在后台检查本次运行的文件的创建时间晚于首帧显示的时间。
-- 启动后 1 s 内日志目录里出现本次运行的文件，第一行是文件头；正常退出后最后一行是结束记录。
+- 冷启动基准 `app/cold_start` 不变慢（随 [bench 设计](bench.md)第 5 步的进程级基准验证）；本次运行的文件在首帧之后才创建，由 [app 设计「测试」](app.md#测试)的 `log_file_is_created_after_the_first_frame` 检查（`platform::frame::on_first_presented` 实现之前以首帧画出的时刻为准，见 [app 设计「启动屏障」](app.md#启动屏障)）。
+- 启动后 1 s 内日志目录里出现本次运行的文件，第一行是文件头；正常退出后最后一行是结束记录（`startup_writes_a_header_and_an_end_record`；1 s 的时限在 macOS 上手动确认，测试不以墙钟时间判定）。
 - `LECTERN_LOG=debug` 和 `--log cache=trace` 启动时文件头的 `filter` 与之相同。
 
 **第 4 步起：** 「对其他 crate 的要求」第 4 到 11 项各一个 PR（第 10 项见下），每个 PR 的验收是：`rg 'eprintln!|util::log' crates/<crate>/src --glob '!**/tests*'` 没有结果；这个 crate 的金丝雀测试通过；涉及 panic 的（kernel、executor）有测试检查记录里的 `plugin`、`act`、`task`。
