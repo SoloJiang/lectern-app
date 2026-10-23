@@ -9,6 +9,7 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "domain"
+plugin = true
 
 [features]
 # `testing`: the annotation log fixture of `review/log_load_16k`, the change
@@ -24,9 +25,13 @@ test-support = ["lectern-executor/test-support", "lectern-git/test-support"]
 lectern-cache = { path = "../cache" }
 # The review engine's tasks: no IO on the calling thread.
 lectern-executor = { path = "../executor" }
+# The review's repository and worktree watches (docs/design/review.md「依赖」).
+lectern-fs-watch = { path = "../fs_watch" }
 # `line_diff`, `Oid::for_blob`, `LocalChanges`, `head_reflog`,
 # `tree_changes`, `mtimes`, `rows` and `inline_changes`; gix stays in git.
 lectern-git = { path = "../git" }
+# The plugin: `Plugin`, `PluginHandle::own_with`, `BusyGuard`, `Clock`.
+lectern-kernel = { path = "../kernel" }
 # Runtime logging (docs/design/review.md「日志与诊断」, ADR 0046).
 lectern-logging = { path = "../logging" }
 lectern-services = { path = "../services" }
@@ -42,7 +47,9 @@ sha2.workspace = true
 [dev-dependencies]
 insta.workspace = true
 lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 lectern-git = { path = "../git", features = ["test-support"] }
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
 # testing::capture for the logs_* tests (docs/design/review.md「日志与诊断」).
 lectern-logging = { path = "../logging", features = ["test-support"] }
 tempfile.workspace = true

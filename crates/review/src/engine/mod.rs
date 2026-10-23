@@ -1,8 +1,8 @@
 //! The review engine (docs/design/review.md「数据流与线程」): open reviews,
 //! their immutable snapshots, the commands, `Prepare` with its rows and
-//! texts, and the annotation log of each repository. Step 4 wraps it in the
-//! "review" plugin; the tests and benches drive it through
-//! `testing::Driven`.
+//! texts, and the annotation log of each repository. `plugin` wraps it in
+//! the "review" plugin (step 4); the engine tests and benches drive it
+//! without the plugin through `testing::Driven`.
 //!
 //! - `open`, `snapshot`, `command`, `rows`, `text` and `close` return at
 //!   once and do no IO on the calling thread: everything that reads git,
@@ -15,6 +15,13 @@
 //!   pending (claims not cached, cutoffs not computed in time) and the
 //!   other files' attribution follow on `Background`, each batch published
 //!   as a new snapshot. Requests during a round wait for its end.
+//! - Refresh (`watch`): each open review watches its repository and its
+//!   worktree through fs_watch; a batch becomes a `RefreshHint`, a
+//!   `SessionsChanged` becomes `Kind::Reuse`. A request during a round is
+//!   merged into the next one (the path union, `Full` over the rest).
+//! - Release: the last `close` keeps the review for `RETAIN` (the host's
+//!   timer); `open` in that time revives it, the timer's task releases it.
+//!   Without a host (`testing::Driven`) `close` releases at once.
 //! - Locks: `state`, then a repository log's `mem`; the other mutexes are
 //!   leaves. No lock is held across IO, and events are emitted after the
 //!   state lock is released.
@@ -23,11 +30,13 @@ pub(crate) mod attribute;
 mod narrative;
 pub(crate) mod round;
 mod rows;
+mod watch;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -35,7 +44,9 @@ use std::time::{Duration, Instant};
 
 use lectern_cache::Cache;
 use lectern_executor::{Executor, Priority};
+use lectern_fs_watch::Watcher;
 use lectern_git::{Discovered, GitError};
+use lectern_kernel::BusyGuard;
 use lectern_logging::{Ctx, Value, debug, info, warn};
 use lectern_services::changes::{ChangeError, ChangePath, RefreshHint};
 use lectern_services::project::{ProjectKey, Projects, WorktreeKey};
@@ -58,6 +69,8 @@ use crate::seen;
 use self::attribute::FileResult;
 use self::narrative::Own;
 use self::round::{Git, Kind, StepIds, Work};
+use self::watch::Watching;
+use self::watch::merge_hints;
 
 /// Finds a repository from a worktree root (`git::Repo::discover`; the
 /// tests read only the repository's own configuration).
@@ -68,9 +81,48 @@ pub(crate) type Discover =
 const BATCH_FILES: usize = 8;
 /// …or this long, whichever comes first.
 const BATCH_TIME: Duration = Duration::from_millis(50);
+/// How long a review nobody holds is kept, for a return to the project
+/// home (docs/design/review.md「数据流与线程」).
+pub(crate) const RETAIN: Duration = Duration::from_secs(30);
 /// Prepared rows kept per review, and prepared texts.
 const MAX_ROWS_BYTES: usize = 8 << 20;
 const MAX_TEXT_BYTES: usize = 2 << 20;
+
+/// A service used for one call: the plugin's `Admitted` (the provider is
+/// deactivated only when no call is in it), or a plain `Arc` in the tests.
+pub(crate) struct Held<S: ?Sized + 'static>(Box<dyn Deref<Target = S> + Send>);
+
+impl<S: ?Sized + 'static> Held<S> {
+    pub(crate) fn new(service: impl Deref<Target = S> + Send + 'static) -> Held<S> {
+        Held(Box::new(service))
+    }
+}
+
+impl<S: ?Sized + 'static> Deref for Held<S> {
+    type Target = S;
+
+    fn deref(&self) -> &S {
+        &self.0
+    }
+}
+
+/// The live session sources, each held for the caller's use.
+pub(crate) type SourcesFn = Arc<dyn Fn() -> Vec<Held<dyn SessionSource>> + Send + Sync>;
+/// The project service, None once its provider is gone.
+pub(crate) type ProjectsFn = Arc<dyn Fn() -> Option<Held<dyn Projects>> + Send + Sync>;
+
+/// What the plugin gives the engine in place of the bare executor
+/// (docs/design/review.md「数据流与线程」): tasks go through the kernel's
+/// `own_with` holding a `BusyGuard` until their results are published, and
+/// the 30-second retention has a timer.
+pub(crate) trait Host: Send + Sync {
+    /// Runs `work` on the executor. Dropped when the plugin is gone.
+    fn spawn(&self, priority: Priority, work: Box<dyn FnOnce() + Send>);
+    /// Calls `work` once `delay` has passed, on any thread; it only submits.
+    fn later(&self, delay: Duration, work: Box<dyn FnOnce() + Send>);
+    /// A guard for work that is not yet a task (the sinks of fs_watch).
+    fn busy(&self) -> Option<BusyGuard>;
+}
 
 pub(crate) struct Config {
     pub executor: Executor,
@@ -78,8 +130,12 @@ pub(crate) struct Config {
     /// The annotation logs' directory (ADR 0044).
     pub data_dir: PathBuf,
     pub git_ceilings: Arc<[PathBuf]>,
-    pub projects: Arc<dyn Projects>,
-    pub sources: Arc<[Arc<dyn SessionSource>]>,
+    pub projects: ProjectsFn,
+    pub sources: SourcesFn,
+    /// Some in the plugin; the tests of the engine have neither.
+    pub host: Option<Arc<dyn Host>>,
+    /// Some in the plugin: the review's repository and worktree watches.
+    pub watcher: Option<Watcher>,
     /// Called on an executor thread (or the calling thread of a seen
     /// command) after a snapshot was replaced, with no lock held.
     pub emit: Arc<dyn Fn(ReviewEvent) + Send + Sync>,
@@ -150,7 +206,13 @@ struct Open {
     /// Rounds prepared again since the open because claims or cutoffs
     /// became known.
     reprepared: u32,
+    /// Zero while the review is kept for `RETAIN` after its last `close`.
     refs: u32,
+    /// Counts the closes to zero and the opens that revive: the release
+    /// timer of an earlier close finds another number and does nothing.
+    idle: u64,
+    /// The repository and worktree watches, once a round resolved them.
+    watch: Option<Watching>,
     snapshot: Arc<ReviewSnapshot>,
     work: Option<Arc<Work>>,
     round: u64,
@@ -162,6 +224,12 @@ struct Open {
     prepare: u64,
     rows: HashMap<RowsKey, Arc<FileRows>>,
     texts: HashMap<TextKey, Arc<str>>,
+}
+
+impl Open {
+    fn held(&self) -> bool {
+        self.refs > 0
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -234,6 +302,10 @@ impl Engine {
 
     /// Runs `job` on an executor task, inside the log scope `ctx` (the
     /// review's `review` and `session`, docs/design/review.md「日志与诊断」).
+    /// In the plugin the task holds a `BusyGuard` until `job` returns, so
+    /// that the kernel is not quiescent before the results are published;
+    /// the guard is taken here, before the task exists, and a job that
+    /// submits the next one does so before it returns.
     fn submit(
         &self,
         priority: Priority,
@@ -241,15 +313,16 @@ impl Engine {
         job: impl FnOnce(&Arc<Engine>) + Send + 'static,
     ) {
         let me = self.me.clone();
-        self.cfg
-            .executor
-            .run(priority, move || {
-                let _scope = lectern_logging::scope(ctx);
-                if let Some(engine) = me.upgrade() {
-                    job(&engine);
-                }
-            })
-            .detach();
+        let work = move || {
+            let _scope = lectern_logging::scope(ctx);
+            if let Some(engine) = me.upgrade() {
+                job(&engine);
+            }
+        };
+        match &self.cfg.host {
+            Some(host) => host.spawn(priority, Box::new(work)),
+            None => self.cfg.executor.run(priority, work).detach(),
+        }
     }
 
     fn emit(&self, events: Vec<ReviewEvent>) {
@@ -264,7 +337,10 @@ impl Engine {
         let mut state = lock(&self.state);
         if let Some(&id) = state.targets.get(&target) {
             if let Some(open) = state.reviews.get_mut(&id) {
+                // A kept review is revived as it is: its watches kept it
+                // current, nothing is computed again.
                 open.refs += 1;
+                open.idle += 1;
             }
             return id;
         }
@@ -281,6 +357,8 @@ impl Engine {
                 settled: false,
                 reprepared: 0,
                 refs: 1,
+                idle: 0,
+                watch: None,
                 snapshot: Arc::new(loading(id, target)),
                 work: None,
                 round: 0,
@@ -302,33 +380,79 @@ impl Engine {
         lock(&self.state)
             .reviews
             .get(&id)
+            .filter(|o| o.held())
             .map(|o| Arc::clone(&o.snapshot))
     }
 
     pub(crate) fn rows(&self, id: ReviewId, key: &RowsKey) -> Option<Arc<FileRows>> {
-        lock(&self.state).reviews.get(&id)?.rows.get(key).cloned()
+        let state = lock(&self.state);
+        let open = state.reviews.get(&id).filter(|o| o.held())?;
+        open.rows.get(key).cloned()
     }
 
     pub(crate) fn text(&self, id: ReviewId, key: &TextKey) -> Option<Arc<str>> {
-        lock(&self.state).reviews.get(&id)?.texts.get(key).cloned()
+        let state = lock(&self.state);
+        let open = state.reviews.get(&id).filter(|o| o.held())?;
+        open.texts.get(key).cloned()
     }
 
-    /// Drops the review when its last reference goes (the 30-second grace
-    /// comes with the plugin, step 4), and the worktree state no open
-    /// review uses.
+    /// Drops a reference. With the last one the review is kept for
+    /// `RETAIN` (the host's timer), then released; without a host it is
+    /// released at once.
     pub(crate) fn close(&self, id: ReviewId) {
         let mut state = lock(&self.state);
         let Some(open) = state.reviews.get_mut(&id) else {
             return;
         };
-        open.refs = open.refs.saturating_sub(1);
+        if open.refs == 0 {
+            return;
+        }
+        open.refs -= 1;
         if open.refs > 0 {
             return;
         }
+        let Some(host) = self.cfg.host.clone() else {
+            let released = self.release(state, id);
+            drop(released);
+            return;
+        };
+        open.idle += 1;
+        let (ctx, idle) = (open.ctx, open.idle);
+        drop(state);
+        let me = self.me.clone();
+        host.later(
+            RETAIN,
+            Box::new(move || {
+                let Some(engine) = me.upgrade() else { return };
+                engine.submit(Priority::Background, ctx, move |engine| {
+                    engine.expire(id, idle)
+                });
+            }),
+        );
+    }
+
+    /// The retention of close number `idle` ended (`Background`): releases
+    /// the review unless it was opened again, or closed again, since.
+    fn expire(&self, id: ReviewId, idle: u64) {
+        let state = lock(&self.state);
+        let due = state
+            .reviews
+            .get(&id)
+            .is_some_and(|o| o.refs == 0 && o.idle == idle);
+        if due {
+            let released = self.release(state, id);
+            debug!("review released"; id = id.0);
+            drop(released);
+        }
+    }
+
+    /// Removes the review and the worktree state no remaining review uses.
+    /// The review is returned, to be dropped with no lock held: its watches
+    /// unsubscribe from fs_watch.
+    fn release(&self, mut state: MutexGuard<'_, State>, id: ReviewId) -> Option<Open> {
+        let open = state.reviews.remove(&id)?;
         open.cancel.store(true, Ordering::Release);
-        let target = open.target.clone();
-        state.reviews.remove(&id);
-        state.targets.remove(&target);
+        state.targets.remove(&open.target);
         let used: HashSet<WorktreeKey> = state
             .reviews
             .values()
@@ -349,13 +473,32 @@ impl Engine {
             lock(&self.versions).clear();
             lock(&self.ancestry).clear();
         }
+        Some(open)
+    }
+
+    /// The plugin is deactivated: every review goes, with its watches.
+    pub(crate) fn shutdown(&self) {
+        let reviews = {
+            let mut state = lock(&self.state);
+            state.targets.clear();
+            std::mem::take(&mut state.reviews)
+        };
+        for open in reviews.values() {
+            open.cancel.store(true, Ordering::Release);
+        }
+        drop(reviews);
+        lock(&self.gits).clear();
+        lock(&self.tables).clear();
+        lock(&self.claims).clear();
+        lock(&self.versions).clear();
+        lock(&self.ancestry).clear();
     }
 
     pub(crate) fn command(&self, id: ReviewId, command: ReviewCommand) {
         let mut events = Vec::new();
         {
             let mut state = lock(&self.state);
-            if !state.reviews.contains_key(&id) {
+            if !state.reviews.get(&id).is_some_and(Open::held) {
                 return;
             }
             match command {
@@ -385,13 +528,9 @@ impl Engine {
             return;
         };
         if open.running {
-            // After the current round; a full refresh wins over the rest.
-            open.again = Some(match (open.again.take(), kind) {
-                (Some(Kind::Refresh(RefreshHint::Full)), _)
-                | (_, Kind::Refresh(RefreshHint::Full)) => Kind::Refresh(RefreshHint::Full),
-                (Some(Kind::Fetch), _) | (_, Kind::Fetch) => Kind::Fetch,
-                (_, kind) => kind,
-            });
+            // After the current round, as one: the path sets are joined, a
+            // full refresh wins over the rest.
+            open.again = Some(merge_hints(open.again.take(), kind));
             return;
         }
         open.running = true;
@@ -533,6 +672,9 @@ impl Engine {
         }
         self.emit(events);
         let ctx = work.ctx;
+        // After the first snapshot: arming is queued for fs_watch's thread,
+        // and its first batch (a rescan) refreshes once more.
+        self.ensure_watch(id, &work.git);
         self.submit(Priority::Background, ctx, move |engine| {
             engine.settle(id, seq, work, cancel)
         });
@@ -678,6 +820,9 @@ impl Engine {
             };
             events.push(changed(open, snapshot));
             open.running = false;
+            if let Some(kind) = open.again.take() {
+                self.start_round(&mut state, id, kind, Priority::Background);
+            }
         }
         self.emit(events);
     }
@@ -1145,9 +1290,8 @@ impl Engine {
         if let Some(git) = lock(&self.gits).get(key) {
             return Ok(Arc::clone(git));
         }
-        let snapshot = self
-            .cfg
-            .projects
+        let projects = (self.cfg.projects)().ok_or(ReviewError::NotInOpenProject)?;
+        let snapshot = projects
             .snapshot(project)
             .ok_or(ReviewError::NotInOpenProject)?;
         let worktree = snapshot
@@ -1305,6 +1449,12 @@ impl Engine {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn version_bytes(&self) -> usize {
         lock(&self.versions).bytes()
+    }
+
+    /// The reviews kept, open or waiting out their retention.
+    #[cfg(test)]
+    pub(crate) fn kept(&self) -> usize {
+        lock(&self.state).reviews.len()
     }
 
     #[cfg(any(test, feature = "test-support"))]
