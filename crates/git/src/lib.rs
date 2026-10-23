@@ -51,7 +51,7 @@ pub use compare::{Base, Refresh};
 pub use content::{Content, RawIdentity, Unavailable};
 pub use error::{GitError, UnsupportedRepo};
 pub use hunks::{FileDiff, Hunk, line_diff};
-pub use local::LocalChanges;
+pub use local::{LocalChanges, file_change_of};
 pub use merge3::{Markers, Merge3, merge3};
 pub use oid::{BlobHasher, HashKind, Oid};
 pub use patch_id::PatchId;
