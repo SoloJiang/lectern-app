@@ -40,6 +40,12 @@ mod project;
 mod project_repo;
 #[path = "time/review.rs"]
 mod review;
+#[allow(
+    dead_code,
+    reason = "the repository handle is for the memory target's count set"
+)]
+#[path = "fixtures/review_repo.rs"]
+mod review_repo;
 #[path = "time/syntax.rs"]
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
@@ -151,6 +157,8 @@ const BENCHES: &[Bench] = &[
     review::ATTRIBUTE_SESSION_50,
     review::REFRESH_ONE,
     review::PLUGIN_ACTIVATE,
+    review::OVERVIEW_ROUND_WARM,
+    review::OVERVIEW_CLOUDPRINT,
     syntax::FIRST_SCREEN,
     syntax::FULL_PARSE_1MIB,
     syntax::CHAIN_16MIB,

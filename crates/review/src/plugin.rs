@@ -14,7 +14,7 @@ use lectern_kernel::{
     Activation, ActivationToken, Active, BusyGuard, Clock, Context, Manifest, Name, Plugin,
     PluginError, PluginHandle, SystemClock, service,
 };
-use lectern_services::project::{ProjectKey, Projects};
+use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
 use lectern_services::review::{
     BriefRules, BriefRulesRegistration, FileRows, Overview, OverviewInterest, Review,
     ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
@@ -144,6 +144,14 @@ impl Plugin for ReviewPlugin {
         ctx.provide::<dyn Review>(review)?;
         let listener = engine.clone();
         ctx.on::<SessionsChanged>(move |event, _| listener.sessions_changed(event));
+        let listener = engine.clone();
+        ctx.on::<ProjectEvent>(move |event, _| match event {
+            ProjectEvent::Changed { project, parts, .. } => {
+                listener.project_changed(project, parts.active);
+            }
+            ProjectEvent::Closed { project } => listener.project_closed(project),
+            ProjectEvent::Opened { .. } => {}
+        });
         Ok(Box::new(ReviewActive { engine, host }))
     }
 }
@@ -205,14 +213,12 @@ impl Review for Service {
         self.engine.close(id)
     }
 
-    /// The overview comes with step 5: no project has one.
-    fn overview(&self, _: &ProjectKey) -> Option<Arc<Overview>> {
-        None
+    fn overview(&self, project: &ProjectKey) -> Option<Arc<Overview>> {
+        self.engine.overview(project)
     }
 
-    /// Step 5: nothing is computed for the interest, so nothing to release.
-    fn watch_overview(&self, _: &ProjectKey) -> OverviewInterest {
-        OverviewInterest::new(|| {})
+    fn watch_overview(&self, project: &ProjectKey) -> OverviewInterest {
+        self.engine.watch_overview(project)
     }
 
     fn register_brief_rules(
