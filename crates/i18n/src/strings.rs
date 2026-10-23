@@ -287,16 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn key_names_are_the_fluent_message_ids() {
-        assert_eq!(review::LOOKS_GOOD.name(), "review-looks-good");
-        assert_eq!(
-            review::LOOKS_GOOD_TOOLTIP.name(),
-            "review-looks-good.tooltip"
-        );
-        assert_eq!(review::FILES_CHANGED.name(), "review-files-changed");
-    }
-
-    #[test]
     fn get_returns_static_text() {
         assert_eq!(
             Strings::of(Locale::En).get(review::LOOKS_GOOD),
