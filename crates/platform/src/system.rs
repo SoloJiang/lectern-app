@@ -1,6 +1,7 @@
-//! Facts about the running system (「日志目录与系统版本」 in
-//! docs/design/platform.md). Only the OS version so far, for the header line
-//! of every log file (docs/design/logging.md「文件」).
+//! Facts about the running system: the OS version for the header line of
+//! every log file (「日志目录与系统版本」 in docs/design/platform.md,
+//! docs/design/logging.md「文件」) and the user's preferred languages for the
+//! interface language (「系统首选语言」, docs/design/app.md).
 
 #[cfg(test)]
 mod tests;
@@ -20,6 +21,48 @@ const MAX_VERSION_LEN: usize = 32;
 /// allocation besides the returned string; any thread may call it.
 pub fn os_version() -> Option<String> {
     imp::os_version()
+}
+
+/// The longest language tag accepted, in bytes. Real ones are like `en-US`
+/// or `zh-Hans-CN`.
+#[cfg(any(target_os = "macos", test))]
+const MAX_TAG_LEN: usize = 35;
+
+/// At most this many preferred languages are returned; `Locale::negotiate`
+/// only needs the first one it supports.
+#[cfg(target_os = "macos")]
+const MAX_LANGUAGES: usize = 16;
+
+/// The user's preferred languages, most preferred first, as BCP 47 tags such
+/// as `zh-Hans-CN`: `CFLocaleCopyPreferredLanguages` on macOS.
+///
+/// Tags that are not ASCII letters, digits and hyphens, start with a
+/// hyphen or are longer than 35 bytes are left out; only the first 16
+/// entries are looked at.
+/// Empty when nothing can be read, and on every other platform (`app`, the
+/// only caller, is macOS only). The system preferences are in memory: no
+/// file of Lectern's is read, so `app` calls it before the first frame
+/// (docs/design/app.md「启动顺序」). Any thread may call it.
+pub fn preferred_languages() -> Vec<String> {
+    imp::preferred_languages()
+}
+
+/// One tag as CoreFoundation writes it into a buffer (up to the first NUL)
+/// turned into a `String`; None for anything that is not a tag. Compiled
+/// for tests everywhere: it only checks bytes.
+#[cfg(any(target_os = "macos", test))]
+fn language_tag(raw: &[u8]) -> Option<String> {
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let tag = &raw[..end];
+    let valid = !tag.is_empty()
+        && tag.len() <= MAX_TAG_LEN
+        && tag[0].is_ascii_alphanumeric()
+        && tag.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'-');
+    if !valid {
+        return None;
+    }
+    // Only ASCII letters, digits and hyphens are left.
+    Some(std::str::from_utf8(tag).ok()?.to_owned())
 }
 
 /// The product version as `sysctl` returns it (with or without its
@@ -42,9 +85,80 @@ fn mac_os_version(raw: &[u8]) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use std::ffi::{c_char, c_void};
     use std::ptr;
 
-    use super::{MAX_VERSION_LEN, mac_os_version};
+    use super::{MAX_LANGUAGES, MAX_TAG_LEN, MAX_VERSION_LEN, language_tag, mac_os_version};
+
+    type CFIndex = isize;
+    type CFTypeID = usize;
+    type CFTypeRef = *const c_void;
+    type CFArrayRef = *const c_void;
+    type CFStringRef = *const c_void;
+    /// `kCFStringEncodingUTF8`.
+    const UTF8: u32 = 0x0800_0100;
+
+    // Already linked by AppKit (and by `fs_events`).
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFLocaleCopyPreferredLanguages() -> CFArrayRef;
+        fn CFArrayGetCount(array: CFArrayRef) -> CFIndex;
+        fn CFArrayGetValueAtIndex(array: CFArrayRef, index: CFIndex) -> *const c_void;
+        fn CFStringGetCString(
+            string: CFStringRef,
+            buffer: *mut c_char,
+            size: CFIndex,
+            encoding: u32,
+        ) -> u8;
+        fn CFGetTypeID(cf: CFTypeRef) -> CFTypeID;
+        fn CFStringGetTypeID() -> CFTypeID;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    pub(super) fn preferred_languages() -> Vec<String> {
+        // SAFETY: takes no arguments; returns a +1 CFArray of CFStrings or
+        // null.
+        let array = unsafe { CFLocaleCopyPreferredLanguages() };
+        if array.is_null() {
+            return Vec::new();
+        }
+        let mut tags = Vec::new();
+        // SAFETY: `array` is a valid CFArray until the `CFRelease` below.
+        let count = unsafe { CFArrayGetCount(array) };
+        // Only the first entries can matter to `Locale::negotiate`: bound the
+        // walk, not just the result.
+        for i in 0..count.min(MAX_LANGUAGES as CFIndex) {
+            // SAFETY: `i` is within `0..count`; the value belongs to the
+            // array (Get rule: not released here).
+            let string = unsafe { CFArrayGetValueAtIndex(array, i) };
+            // SAFETY: `string` is non-null and a CF object owned by the
+            // array; both calls only read its type.
+            if string.is_null() || unsafe { CFGetTypeID(string) != CFStringGetTypeID() } {
+                continue;
+            }
+            // Room for a longer value than any accepted one plus the NUL, so
+            // that a too-long tag fails here or in `language_tag`.
+            let mut buf = [0u8; MAX_TAG_LEN + 2];
+            // SAFETY: `string` is a CFString (checked above); `buf` is valid
+            // for writes of its length, which is passed as `size`.
+            let ok = unsafe {
+                CFStringGetCString(
+                    string,
+                    buf.as_mut_ptr().cast::<c_char>(),
+                    buf.len() as CFIndex,
+                    UTF8,
+                )
+            };
+            if ok != 0
+                && let Some(tag) = language_tag(&buf)
+            {
+                tags.push(tag);
+            }
+        }
+        // SAFETY: balances the Copy rule of `CFLocaleCopyPreferredLanguages`.
+        unsafe { CFRelease(array) };
+        tags
+    }
 
     pub(super) fn os_version() -> Option<String> {
         // Room for a longer value than any accepted one, so that an
@@ -77,5 +191,9 @@ mod imp {
 mod imp {
     pub(super) fn os_version() -> Option<String> {
         None
+    }
+
+    pub(super) fn preferred_languages() -> Vec<String> {
+        Vec::new()
     }
 }
