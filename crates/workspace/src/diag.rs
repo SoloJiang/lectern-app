@@ -5,21 +5,17 @@ use std::borrow::Cow;
 use std::sync::Mutex;
 
 use lectern_kernel::Name;
-use lectern_logging::PluginTag;
 use lectern_services::project::OpenError;
 use lectern_services::workspace::WorkspaceCommand;
 
 /// A contribution ID, screen ID or command name as a log field. A built-in
-/// one is a `&'static str`; one built at runtime is registered under the same
-/// rule as a plugin tag (`[a-z0-9_-]`, 1 to 64 bytes) or, with a dot, interned
-/// here; `"?"` only when a table is full.
+/// one is a `&'static str`; one built at runtime is interned here (not in
+/// the plugin tag table, whose slots belong to process plugins); `"?"` when
+/// it is not a valid ID or the table is full.
 pub(crate) fn id_text(id: &Name) -> &'static str {
     match id {
         Cow::Borrowed(id) => id,
-        Cow::Owned(id) => PluginTag::register(id)
-            .map(PluginTag::as_str)
-            .or_else(|| intern(id))
-            .unwrap_or("?"),
+        Cow::Owned(id) => intern(id).unwrap_or("?"),
     }
 }
 
@@ -32,13 +28,12 @@ pub(crate) fn is_valid_command_name(name: &str) -> bool {
         })
 }
 
-/// The most command names interned for the process; beyond it a name logs
-/// as `"?"`.
+/// The most IDs interned for the process; beyond it an ID logs as `"?"`.
 const MAX_INTERNED: usize = 1024;
 static INTERNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
-/// A command name (which a plugin tag refuses because of the dot) as a
-/// `&'static str` for log fields, interned once per name.
+/// A runtime-built ID or command name as a `&'static str` for log fields,
+/// interned once per name.
 fn intern(name: &str) -> Option<&'static str> {
     if !is_valid_command_name(name) {
         return None;

@@ -229,6 +229,16 @@ impl Registry {
         self.sidebar.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Swaps in a new sidebar snapshot; the old one (whose last reference
+    /// may run contributor `Drop` code) is dropped after the lock, under
+    /// `contain`.
+    fn replace_sidebar(&self, entries: Arc<[SidebarEntry]>) {
+        let old = std::mem::replace(&mut *self.lock_sidebar(), entries);
+        if contain(move || drop(old)).is_err() {
+            lectern_logging::error!("contribution drop panicked"; kind = Kind::SidebarEntry);
+        }
+    }
+
     /// A guard that does nothing: the registration was rejected.
     fn rejected(kind: Kind, id: &Name, reason: Reason) -> Registration {
         warn!("contribution rejected"; kind = kind, id = id_text(id), reason = reason);
@@ -303,6 +313,11 @@ impl Registry {
         // After the commit (in `started`, a listener or a task of the same
         // activation) the token is known: apply now, no commit follows. A
         // pending token (inside `started`) defers at apply time.
+        // Inside `activate` the token is not known yet (nothing committed):
+        // the entry stays staged for the commit. An activation that commits
+        // nothing and registers later gets the same treatment, and the
+        // entry is reported when it is released without ever being
+        // committed (docs/design/workspace.md「与设计的差异」第 1 步).
         if let Some(act) = ctx.act
             && let Some(token) = tables.known.get(&act).cloned()
             && token.state() != TokenState::Dead
@@ -385,6 +400,16 @@ impl Registry {
                 let entry = tables.entries.remove(&serial);
                 drop(tables);
                 if let Some(entry) = entry {
+                    // Never committed: a failed activation (the kernel logged
+                    // it), or a registration made after `started` by an
+                    // activation that committed nothing, which nobody could
+                    // apply (docs/design/workspace.md「与设计的差异」第 1 步).
+                    warn!(
+                        "contribution released without a commit";
+                        kind = entry.kind,
+                        id = id_text(&entry.id),
+                        activation = entry.ctx.act
+                    );
                     drop_content(entry);
                 }
             }
@@ -481,7 +506,7 @@ impl Registry {
         if kind == Kind::SidebarEntry {
             let entries = sidebar_entries(&tables);
             drop(tables);
-            *self.lock_sidebar() = entries;
+            self.replace_sidebar(entries);
         } else {
             drop(tables);
         }
@@ -512,7 +537,7 @@ impl Registry {
         if applied && kind == Kind::SidebarEntry {
             let entries = sidebar_entries(&tables);
             drop(tables);
-            *self.lock_sidebar() = entries;
+            self.replace_sidebar(entries);
         } else {
             drop(tables);
         }

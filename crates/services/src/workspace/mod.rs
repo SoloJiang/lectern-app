@@ -28,9 +28,12 @@ mod tests;
 pub trait Contributions: Send + Sync {
     /// 登记一项贡献。立即返回，任何线程可调用。`activate` 里调用时把返回的守卫交给
     /// `ctx.own_staged`，提交时才生效；`started` 之后调用时按 kernel 设计「撤销」排到
-    /// 主线程应用。同一个 `(kind, id)` 已有登记时后来的被拒绝（记 warn），守卫 drop 时
-    /// 什么也不做。守卫 drop 时注销，注销排到主线程，带所属激活的 `token.pending()`
-    /// 守卫。
+    /// 主线程应用——条件是这次激活在 `activate` 里至少登记过一项（`workspace` 从它的
+    /// 提交认出这次激活的 token）；一次 commit 都没有的激活，之后的登记要自己
+    /// `Staged::commit(&mut registration, handle.token())`，否则不显示（workspace
+    /// 设计「与设计的差异」第 1 步）。同一个 `(kind, id)` 已有登记时后来的被拒绝（记
+    /// warn），守卫 drop 时什么也不做。守卫 drop 时注销，注销排到主线程，带所属激活的
+    /// `token.pending()` 守卫。
     fn register(&self, contribution: Contribution) -> Registration;
 
     /// 登记一个由 `Command` 激活的命令的处理函数（kernel 设计「按命令激活」第 1 步）。

@@ -215,24 +215,22 @@ impl Driver {
     fn ask_guard(&mut self, ask: AskId, guard: GuardId, scope: LeaveScope, out: &mut Vec<Effect>) {
         let asked = self.registry.guard(Serial(guard.0)).and_then(|entry| {
             let admission = entry.token.enter()?;
-            let sender = self.sender.clone();
-            let pending = entry.token.pending();
-            let done: Box<dyn FnOnce(bool) + Send> = Box::new(move |allowed| {
-                sender(Queued {
-                    item: Item::GuardAnswer { ask, allowed },
-                    guard: pending,
-                });
-            });
+            let answer = Answer {
+                sender: self.sender.clone(),
+                ask,
+                pending: entry.token.pending(),
+                answered: false,
+            };
+            let done: Box<dyn FnOnce(bool) + Send> = Box::new(move |allowed| answer.send(allowed));
             let _scope = lectern_logging::scope(entry.ctx);
             let asked = contain(|| entry.guard.ask(scope, done));
             drop(admission);
-            match asked {
-                Ok(()) => Some(()),
-                Err(_) => {
-                    error!("leave guard panicked"; activation = entry.token.id());
-                    None
-                }
+            if asked.is_err() {
+                // `done` answered already, or its drop during the unwind
+                // answered for it: nothing more to do here.
+                error!("leave guard panicked"; activation = entry.token.id());
             }
+            Some(())
         });
         if asked.is_none() {
             debug!("leave guard skipped"; guard = guard.0);
@@ -241,6 +239,45 @@ impl Driver {
                 projects: self.projects.as_ref(),
             };
             self.nav.guard_answered(ask, true, &env, out);
+        }
+    }
+}
+
+/// A guard's `done`: sends the answer into the queue, once. A guard that
+/// drops it without answering (its plugin deactivated while a dialog was
+/// open, or a panic before `done`) counts as allowing, so the round ends
+/// and the queued inputs run.
+struct Answer {
+    sender: Sender,
+    ask: AskId,
+    pending: Option<lectern_kernel::PendingGuard>,
+    answered: bool,
+}
+
+impl Answer {
+    fn send(mut self, allowed: bool) {
+        self.answered = true;
+        (self.sender)(Queued {
+            item: Item::GuardAnswer {
+                ask: self.ask,
+                allowed,
+            },
+            guard: self.pending.take(),
+        });
+    }
+}
+
+impl Drop for Answer {
+    fn drop(&mut self) {
+        if !self.answered {
+            debug!("leave guard dropped its answer"; ask = self.ask.0);
+            (self.sender)(Queued {
+                item: Item::GuardAnswer {
+                    ask: self.ask,
+                    allowed: true,
+                },
+                guard: self.pending.take(),
+            });
         }
     }
 }

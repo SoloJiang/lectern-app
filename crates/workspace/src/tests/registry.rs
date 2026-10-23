@@ -521,3 +521,53 @@ fn dispatch_after_shutdown_is_dropped() {
     hub.dispatch(WorkspaceCommand::Escape);
     assert_eq!(queue.len(), 0);
 }
+
+/// A guard that drops `done` without answering.
+struct Silent;
+
+impl lectern_services::workspace::LeaveGuard for Silent {
+    fn ask(&self, _scope: LeaveScope, done: Box<dyn FnOnce(bool) + Send>) {
+        drop(done);
+    }
+}
+
+#[test]
+fn a_guard_that_drops_its_answer_allows() {
+    let mut rig = Rig::new();
+    let mut plugin = screens_plugin();
+    Arc::get_mut(&mut plugin.staged)
+        .unwrap()
+        .push(Box::new(|c| c.register_leave_guard(Arc::new(Silent))));
+    let kernel = contributor(&rig.hub, plugin);
+    kernel.activate().unwrap();
+    rig.drain();
+    rig.open("/repos/a", &project_key("/repos/a"));
+    rig.dispatch(WorkspaceCommand::Push(review_route()));
+    rig.dispatch(WorkspaceCommand::Pop);
+    assert_eq!(rig.driver.nav().nav().depth(), 0, "the round ended");
+    assert!(!rig.driver.nav().asking());
+}
+
+#[test]
+fn a_late_registration_without_any_commit_is_reported_on_release() {
+    let mut rig = Rig::new();
+    let kernel = contributor(
+        &rig.hub,
+        Contributor {
+            staged: Arc::new(Vec::new()),
+            late: Arc::new(vec![Box::new(|c| {
+                c.register(screen(screens::REVIEW, review_layout(), "Review"))
+            })]),
+            on_started: None,
+        },
+    );
+    kernel.activate().unwrap();
+    rig.drain();
+    assert!(
+        !rig.hub.registry().has(Kind::Screen, screens::REVIEW),
+        "no commit ever identified the activation"
+    );
+    kernel.deactivate();
+    rig.drain();
+    assert_eq!(rig.queue.len(), 0);
+}
