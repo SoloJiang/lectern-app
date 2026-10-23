@@ -1,3 +1,5 @@
-//! Lectern app entry: startup, plugin assembly per profile, window snapshot restore.
+//! The `lectern` binary: everything is in the library (src/lib.rs).
 
-fn main() {}
+fn main() {
+    lectern_app::run();
+}

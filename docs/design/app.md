@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已接受，尚未实现。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。本文只写最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -42,7 +42,7 @@
 
 ## 接口
 
-`app` 是二进制 crate，没有对外的接口。下面是模块之间的接口，测试经它们验证启动和退出的顺序。
+`app` 分成库 `lectern_app`（`src/lib.rs`，`pub fn run()`）和二进制 `lectern`（`src/main.rs` 只调用 `lectern_app::run()`），不供其他 crate 依赖。下面是模块之间的接口，测试经它们验证启动和退出的顺序。
 
 ```rust
 // src/args.rs
@@ -102,14 +102,18 @@ pub struct Started {
 }
 
 impl Startup {
-    /// 主线程，在 `main` 里 `install_early` 之后调用。
+    /// 主线程，在 `run` 里 `install_early` 之后调用；结果设为 GPUI 全局对象。
     pub fn new(early: Early, profile: Profile) -> Startup;
-
-    /// 放开启动屏障。主线程，不阻塞。第一次调用依次：`Early::start`（建写盘线程后返回）、
-    /// `Executor::new`（不建线程）、`Kernel::start(profile.plugins())`（建 kernel 线程后返回），
-    /// 记一条 info，把 `Started` 设为全局对象。之后的调用什么也不做。
-    pub fn release(&mut self, cx: &mut App);
+    pub fn profile(&self) -> Profile;
 }
+
+/// 放开启动屏障。主线程，不阻塞。第一次调用从全局的 `Startup` 里取出 `Early`，依次：
+/// `Early::start`（建写盘线程后返回）、`Executor::new`（不建线程）、`Kernel::start(profile.plugins())`
+/// （建 kernel 线程后返回），记一条 info，把 `Started` 设为全局对象。之后的调用、以及退出开始后的调用什么也不做。
+pub fn release(cx: &mut App);
+
+/// desktop：根视图第一次 `render` 时调用，登记「启动屏障」一节的两次帧回调。
+pub fn arm(window: &mut Window);
 ```
 
 ```rust
@@ -141,7 +145,7 @@ pub struct Outcome {
 }
 ```
 
-`Quit` Action 的处理函数在主线程上：
+`quit::init(cx)` 在 `run` 里登记 `Quit` 的处理函数和 `on_app_quit` 回调；`quit::quit(cx)` 是处理函数本身，`quit::is_quitting(cx)` 读退出是否已经开始。`Quit` Action 的处理函数在主线程上：
 
 1. 已经在退出中时直接返回。
 2. 屏障还没有放开（没有 `Started`）时直接 `cx.quit()`。
@@ -161,7 +165,7 @@ pub struct Outcome {
 | 4 | 主线程 | `Locale::negotiate(platform::system::preferred_languages())`、`Strings::of` | 否：系统偏好在内存里，资源已编译进二进制（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)） |
 | 5 | 主线程 | `Application::new().run(…)`：设置应用菜单、绑定 ⌘Q、建骨架窗口 | GPUI 和 AppKit 自己的初始化 |
 | 6 | 主线程 | 首帧画出；根视图第一次 `render` 时登记启动屏障（下节） | 否 |
-| 7 | 主线程 | `Startup::release`：`Early::start`、`Executor::new`、`Kernel::start` | 建 `lectern-log` 线程和 kernel 线程，立即返回 |
+| 7 | 主线程 | `startup::release`：`Early::start`、`Executor::new`、`Kernel::start` | 建 `lectern-log` 线程和 kernel 线程，立即返回 |
 | 8 | `lectern-log` | 建日志目录、清理、写文件头和首帧前缓冲 | 是 |
 | 9 | kernel 线程 | 读清单、激活 `AfterFirstFrame` 插件（本 issue 里没有插件） | 由插件决定 |
 
@@ -171,11 +175,11 @@ pub struct Outcome {
 
 kernel 设计规定 desktop profile 在第一帧真正显示时放开屏障（[kernel 设计「启动」](kernel.md#启动)）。精确的显示时刻要在 Metal drawable 上登记 `addPresentedHandler`，锁定的 GPUI 不暴露 drawable，`platform::frame::on_first_presented` 还没有实现（[bench 设计「需要其他 crate 提供的接口」](bench.md#需要其他-crate-提供的接口)）。`app` 因此用 GPUI 的帧回调：
 
-- desktop：根视图第一次 `render` 时调用 `window.on_next_frame`，回调里再调用一次 `window.on_next_frame`，第二个回调里调用 `Startup::release`。GPUI 在一次帧请求（display link 的回调）的开头执行上一帧登记的回调，所以屏障在首帧画出之后的第二次帧请求时放开。首帧的命令缓冲在第一次帧请求的末尾提交，在下一个垂直同步显示；第二次帧请求时它已经显示。比精确的显示时刻最多晚约 2 个刷新周期（60 Hz 下约 33 ms），只推迟后台初始化，不计入冷启动（冷启动的终点是首帧的显示时刻，由 bench 单独测量）。
+- desktop：根视图第一次 `render` 时调用 `window.on_next_frame`，回调里再调用一次 `window.on_next_frame`，第二个回调里调用 `startup::release`。GPUI 在一次帧请求（display link 的回调）的开头执行上一帧登记的回调，所以屏障在首帧画出之后的第二次帧请求时放开。首帧的命令缓冲在第一次帧请求的末尾提交，在下一个垂直同步显示；第二次帧请求时它已经显示。比精确的显示时刻最多晚约 2 个刷新周期（60 Hz 下约 33 ms；窗口不在前台时 GPUI 按 30 fps 请求帧，更晚，见「已知限制」），只推迟后台初始化，不计入冷启动（冷启动的终点是首帧的显示时刻，由 bench 单独测量）。
 - test：窗口建好后立即放开。
 - `platform::frame::on_first_presented` 实现以后，desktop 改为在它的回调里放开（回调在任意线程上，转到主线程后调用 `release`），并删掉本节的帧回调。
 
-`Startup::release` 只生效一次。窗口关闭后重新打开（见「界面」）时根视图再次登记，不会再次启动。
+`startup::release` 只生效一次。窗口关闭后重新打开（见「界面」）时根视图再次登记，不会再次启动。
 
 ### 退出顺序
 
@@ -203,7 +207,7 @@ Quit（主线程）
 ## 界面
 
 - 窗口：没有打开项目时的独立窗口，820 × 520 pt，居中（[交互规范「窗口结构」](interaction.md#窗口结构)的 Welcome 宽度）。标题栏透明，窗口背景用 `WindowBackgroundAppearance::Blurred`（系统的毛玻璃材质，自动适配浅色和深色模式，不需要自定义颜色），根视图不画任何内容，这就是 ADR 0017 的中性骨架。`ui` 提供骨架控件以后，由 Welcome 和 Overview 的视图替换这个根视图。
-- 关闭窗口不退出应用（见「未决问题」1）。点 Dock 图标而且没有窗口时，重新打开骨架窗口（`Application::on_reopen`，在 `run` 之前登记）。
+- 关闭窗口不退出应用（产品负责人 2026-10-23 决定，见「未决问题」）。点 Dock 图标而且没有窗口时，重新打开骨架窗口（`Application::on_reopen`，在 `run` 之前登记）。
 - 应用菜单，Fluent 键在 `crates/i18n/locales/{en,zh-CN}/app.ftl`（前置条件 A）：
 
   | 菜单项 | 键 | en | zh-CN | 快捷键 | 动作 |
@@ -255,10 +259,10 @@ Quit（主线程）
 - 单元测试（`src/tests/`）：
   - `args`：`log_value_forms`（`--log x`、`--log=x`、多次出现取最后一次）、`log_without_a_value_is_unknown`、`non_utf8_log_is_ignored`、`unknown_arguments_keep_only_indexes`、`quit_after_start_only_in_debug_builds`。
   - `profile`：`every_profile_graph_validates`（对每个 `Profile` 调用 `plugins().validate()`，kernel 设计要求的 profile 测试）。
-  - `quit`（用假的 `QuitSteps`、毫秒级的 `Timeouts`）：`steps_run_in_order`（kernel 的 `done` 之后才关 executor，executor 之后才关日志）、`a_hung_kernel_does_not_block_quit`（`done` 从不调用时，到截止时间后照常关闭 executor 和日志，`kernel_timed_out` 为 true）、`executor_gets_the_remaining_time`、`timeouts_are_logged`。
+  - `quit`（用假的 `QuitSteps`、毫秒级的 `Timeouts`）：`steps_run_in_order`（kernel 的 `done` 之后才关 executor，executor 之后才关日志）、`a_hung_kernel_does_not_block_quit`（`done` 从不调用时，到截止时间后照常关闭 executor 和日志，`kernel_timed_out` 为 true）、`a_dropped_done_is_not_a_timeout`（kernel 线程没有调用 `done` 就退出时，不记为超时）、`executor_gets_the_remaining_time`、`timeouts_are_logged`。
   - `logs`：`canary_stays_out_of_app_logs`。
-  - `#[gpui::test]`：`test_profile_releases_once`（窗口建好后 `Started` 已设为全局对象；再次调用 `release` 不再启动 kernel）、`quit_before_release_quits_at_once`。
-- 启动测试（`tests/startup.rs`，启动真实的 `lectern` 进程，需要 macOS 的图形会话；macOS CI 任务满足）：每个测试用新的临时目录作 `HOME`，日志落在 `$HOME/Library/Logs/Lectern/`，带调试构建才有的 `--quit-after-start`，等进程退出（10 s 超时）。
+  - `#[gpui::test]`：`test_profile_releases_once`（窗口建好后 `Started` 已设为全局对象；再次调用 `release` 不再启动 kernel）、`quit_before_release_starts_nothing`（屏障放开之前退出：不设 `Started`，之后的 `release` 也不启动任何东西）。
+- 启动测试（`tests/startup.rs`，启动真实的 `lectern` 进程，需要 macOS 的图形会话；macOS CI 任务满足）：每个测试用新的临时目录作 `HOME`，日志落在 `$HOME/Library/Logs/Lectern/`，带调试构建才有的 `--quit-after-start`，等进程退出（30 s 后结束进程并判为失败，只防卡住，不判定耗时）。`--quit-after-start` 等屏障放开、本次运行的日志文件出现之后才退出。
   - `startup_writes_a_header_and_an_end_record`：只有一个 `lectern-*.log`；第一行是文件头（`msg` 为 `file`）；含 `first frame drawn` 和 `startup barrier released`，前者在先；最后一行是 `run end`。
   - `log_file_is_created_after_the_first_frame`：日志文件的创建时间（`Metadata::created`）不早于 `first frame drawn` 的 `t`（毫秒精度）。
   - `cli_and_env_filters_reach_the_header`：`LECTERN_LOG=debug` 启动时文件头的 `filter` 是 `debug`；`--log cache=trace` 启动时是 `cache=trace`（同时设了 `LECTERN_LOG` 时仍是 `cache=trace`）。
@@ -274,14 +278,14 @@ Quit（主线程）
 
 ## 未决问题
 
-1. **关闭最后一个窗口时是否退出应用。** 选项：(a) 不退出，点 Dock 图标重新打开窗口（Xcode 欢迎窗口和大多数文档类 macOS 应用的做法）；(b) 退出，等同于 ⌘Q。默认 (a)。
+没有。原来的问题 1（关闭最后一个窗口时是否退出应用）已由产品负责人在 2026-10-23 决定：选 (a)，不退出，点 Dock 图标重新打开窗口（Xcode 欢迎窗口和大多数文档类 macOS 应用的做法）；不选 (b)（退出，等同于 ⌘Q）。
 
 ## 已知限制
 
 - 屏障放开之前（首帧之后约 2 个刷新周期内）退出时，首帧前缓冲里的记录丢失，下一次运行也不会报告上一次异常结束：这时还没有创建本次运行的日志文件。
 - 窗口被完全遮挡、收不到帧请求时，屏障不放开，后台初始化一直推迟到窗口重新可见；这期间 ⌘Q 按「屏障放开之前」处理。
 - 由系统发起的退出不经 `Quit`：kernel 和 executor 不按顺序关闭（kernel 设计「已知限制」），只有日志的结束记录在 `on_app_quit` 的 200 ms 里写出。
-- 屏障比首帧的实际显示最多晚约 2 个刷新周期，直到 `platform::frame::on_first_presented` 实现（「启动屏障」）。
+- 屏障比首帧的实际显示最多晚约 2 个刷新周期，直到 `platform::frame::on_first_presented` 实现（「启动屏障」）。窗口不是前台窗口时 GPUI 按 30 fps 请求帧（`inactive_frame_interval` 33 ms），间隔按 33 ms 计；从终端启动时实测首帧画出到屏障放开约 90–100 ms（「实际验证」）。
 
 ## 验收
 
@@ -296,3 +300,20 @@ Quit（主线程）
 - `cargo tree -p lectern-app -e features -i lectern-logging` 里有 `sink`。
 - 手动在 macOS 上运行 `cargo run -p lectern-app`：窗口出现，按 ⌘Q 后进程在 3 s 内退出，`~/Library/Logs/Lectern/` 里本次运行的文件最后一行是 `run end`。
 - logging 设计的状态行和「实际验证」写明第 3 项已实现，第 3 步验收里依赖进程级基准的一条（`app/cold_start` 不变慢）随 bench 第 5 步验证。
+
+## 实际验证
+
+第 1 步，macOS 27.0.1（Apple M5 Pro，15 核，Rust 1.97.0）：
+
+- `just check`、`just deny` 通过。`just test -p lectern-app` 在系统自带的 bash 3.2 上因空数组报 `selection[@]: unbound variable` 而没有运行，改为直接运行它展开后的命令 `cargo nextest run --locked -p lectern-app --all-features --no-tests=pass`：19 个测试通过（`src/tests/` 的单元测试 14 个，`tests/startup.rs` 的启动测试 5 个）。
+- `rg 'eprintln!|println!|log::' crates/app/src` 没有结果；`cargo tree -p lectern-app -e features -i lectern-logging` 里有 `lectern-logging feature "sink"`。
+- 手动运行发布构建（临时 `HOME`）：菜单是 Hide Lectern、Hide Others、Show All、Quit Lectern（经 System Events 读出）；按 ⌘Q 后进程在 1 s 内以退出码 0 退出。日志文件依次是文件头、`first frame drawn`、`startup barrier released`（`profile` 为 `desktop`）、`quit requested`（`path` 为 `action`）、`run end`。文件头的 `up` 是 257 ms，即启动后 1 s 内出现本次运行的文件（logging 设计第 3 步）。
+- 同一构建连续 3 次（从终端启动，窗口不在前台）：`first frame drawn` 的 `up` 是 120、141、137 ms，`startup barrier released` 比它晚 88、100、89 ms。`up` 从 `install_early` 算起，`first frame drawn` 是首帧画出的时刻，不是显示时刻，这些数字不是 ADR 0017 定义的冷启动；冷启动由 bench 第 4 步（空 GPUI 窗口的基线）和第 5 步（`app/cold_start`）测量。屏障晚于首帧的时间见「已知限制」。
+
+## 与设计的差异
+
+- **库与二进制分开。** 原文写 `app` 是二进制 crate。记录的 target 取 `module_path!` 的第一段：二进制名为 `lectern` 时 target 是 `lectern`，不是 logging 设计规定的 `app`。现在逻辑在库 `lectern_app` 里，二进制只调用 `lectern_app::run()`，target 是 `app`（「接口」已改）。
+- **`release` 是自由函数。** 原文是 `Startup::release(&mut self, cx)`。`Startup` 是 GPUI 全局对象，帧回调里只有 `cx`，在借用全局对象时不能再设 `Started`，所以改为 `startup::release(cx)` 从全局对象里取出 `Early`。退出开始之后它什么也不做：屏障在 ⌘Q 之后才到时不再启动 kernel（「接口」已改）。
+- **`--quit-after-start` 等日志文件出现。** 屏障放开后写盘线程异步建文件；立即退出时测试与建文件竞争。现在调试入口在后台任务里查到 `lectern-*.log` 之后才退出（「测试」已改）。
+- **测试名与超时。** `quit_before_release_quits_at_once` 改为 `quit_before_release_starts_nothing`：TestPlatform 的 `quit()` 不做任何事，测试只能检查没有启动任何东西。新增 `a_dropped_done_is_not_a_timeout`。启动测试的超时从 10 s 改为 30 s：调试构建在 CI 上第一次启动较慢，超时只防卡住（「测试」已改）。
+- **窗口不在前台时屏障更晚。** 原文按 60 Hz 估计屏障最多晚 33 ms；GPUI 对非前台窗口按 30 fps 请求帧，实测晚约 90–100 ms（「已知限制」已改）。只推迟后台初始化，不影响首帧。
