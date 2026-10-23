@@ -47,7 +47,7 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `lectern-kernel` | `Plugin`、事件、`PluginHandle`、`BusyGuard` | 插件机制 |
+| `lectern-kernel` | `Plugin`、事件、`PluginHandle`、`BusyGuard`、`Clock`（保留 30 秒的计时） | 插件机制 |
 | `lectern-services` | 使用 `Projects`、`SessionSource`；提供 `Review`（含 `BriefRules` 提供者的登记）；`ChangeSource` 与数据类型 | 插件之间只经 `services`（架构规则 7） |
 | `lectern-git` | `Repo`、`Worktree`、`LocalChanges`（`ChangeSource` 的本地实现）、`line_diff`、`rows`、`inline_changes`、`head_reflog`、`tree_changes`、`mtimes`、`Repo::is_ancestor`、`Oid::for_blob` | gix 只在 `git` 里使用 |
 | `lectern-cache` | `review.attribution` 命名空间 | 派生数据以 blob OID 加轮次历史的摘要为键（架构规则 5） |
@@ -1467,13 +1467,13 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 - **验收的顺序改了**（上文「验收」已改）。原文写前置条件 D（`app` 构造 `ReviewDeps`）在「第 4 步之前」，但 `ReviewDeps` 和 `plugin()` 由第 4 步定义，第 4 步的测试用 `TestKernel`，不需要 `app`。实际顺序是第 4 步、`app` 装配（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）、第 5 步；第 4 步的验收也不再依赖 D。
 - **引擎经 `Host` 提交任务，服务经函数取。** `Engine::submit` 原来直接调 `Executor::run`。插件里要持有 `BusyGuard`、经 `PluginHandle::own_with` 提交，而 `PluginHandle` 到 `started` 才有：`engine::Host`（`spawn`、`later`、`busy`）由插件的 `KernelHost` 实现，`started` 之前要求的任务排队、`started` 时提交；`Driven` 没有 `Host`，仍直接用 executor。`Config.projects` 和 `Config.sources` 由持有的服务（`Held`，插件里是 `Admitted`）的函数代替 `Arc`：`SessionSource` 是多提供者的服务，来源会随插件的激活与停用变化，`Admitted` 在每次调用期间持有提供者的准入。
-- **30 秒的计时用 kernel 的 `Clock`，不用 executor。** executor 没有定时器，`Background` 任务里睡眠会占住线程。`KernelHost::later` 把一个 `Waker` 交给 `Clock::wake_at`（生产是 `SystemClock` 的定时线程，第一次用时才启动、空闲 1 秒后退出，不是常驻线程；测试是 `ManualClock`），到时唤醒只提交一个 `Background` 的释放任务。等待的 30 秒不持有 `BusyGuard`，kernel 在这期间可以静止。`ReviewPlugin::with_clock` 只在 `test-support` 和测试里存在。
+- **30 秒的计时用 kernel 的 `Clock`，不用 executor。** executor 没有定时器，`Background` 任务里睡眠会占住线程。`KernelHost::later` 把一个 `Waker` 交给 `Clock::wake_at`（生产是 `SystemClock` 的定时线程，第一次用时才启动、空闲 1 秒后退出，不是常驻线程；测试是 `ManualClock`），到时唤醒只提交一个 `Background` 的释放任务。等待的 30 秒不持有 `BusyGuard`，kernel 在这期间可以静止。`ReviewPlugin::with_clock` 只在 `test-support` 和测试里存在。定时线程停了之后（空闲超过 1 秒）的第一次 `close` 在调用线程上付一次线程创建；这是 kernel 自己的定时器，审阅在首帧之后才会打开，不影响 ADR 0017 的首帧预算。
 - **保留期间的行为**（设计只写「保留 30 秒」）：最后一次 `close` 之后 `snapshot`、`rows`、`text` 对这个 ID 返回 None、`command` 被忽略（与 `Review` 的文档「已关闭的 ID 返回 None」一致），但状态和监听都留着，监听的批次照常刷新它；30 秒内同一对象 `open` 得到同一个 ID，快照原样回到调用方，不重算、不发 `Changed`；每次关闭和重新打开让 `Open::idle` 加一，定时器到期时 `idle` 变了就什么也不做，所以第一次关闭的定时器不会释放第二次关闭之后的审阅。释放时 `Open`（含两个监听）在锁外 drop。
 - **监听在第一份快照之后建立。** 一轮准备成功并装上快照之后，`ensure_watch` 为这个审阅订阅仓库和被审阅的 worktree（`Worktree::watch_source()`，`Coalesce::REPO` 与 `Coalesce::WORKTREE`）；arm 由 fs_watch 的线程做，调用不阻塞。fs_watch 的第一个批次是 `rescan`，所以每次 `open` 之后有一次 `Full` 刷新，用来补上准备与 arm 之间的变化（`project` 同样依赖这一点）。仓库订阅的第一个批次被忽略，免得两个订阅各造一次 `Full`。准备失败的审阅没有监听。
 - **批次到请求。** worktree 批次：`rescan`、`meta` 的任一标志（`head`、`index`、`refs`、`config`、`rules`）或 `Health::Failed` 为 `Full`，否则有路径时为 `Paths`（`WatchPath` 的字节原样成 `ChangePath`）；只带健康状态的批次不请求。仓库批次：有 reflog 行、`reflog_resets`、`rescan` 或 `Failed` 时为 `Full`（提交与分支切换改变截止时刻与会话外的基准；设计只写了 worktree 批次）。`meta.head` 为 `Full`，会话外的改动在这一轮重新确定基准，会话的基准不变（第 3 步的 `Recorded`、`Reflog` 规则）。
 - **合并规则补全。** 第 3 步的 `start_round` 在运行期间只保留最后一个请求（两个 `Paths` 丢掉前一个）。改为：两个路径集取并集（排序去重）、路径集优先于 `Reuse`、`Full` 优先于路径、`Fetch` 优先于一切（`engine::watch::merge_hints`）。
 - **`SessionsChanged` 对所有审阅请求 `Kind::Reuse`。** 事件的 `changed` 和 `removed` 都为空时忽略；否则不看哪个来源、哪个会话，对每个审阅（含保留期间的）请求一轮 `Reuse`：同一 worktree 里任何会话的声明都可能改变归因，而每一轮都会重新读审阅对象的 `turns`。改动集不重新比较（文件的变化由 fs_watch 的批次带来）。
-- **sink 里的 `BusyGuard`。** fs_watch 交给 `deliver` 的守卫在请求提交之后立即 drop：请求若启动了一轮，这个任务在 `Engine::submit` 里自己取了守卫；若并入了运行中的一轮，那一轮在结束前提交下一轮，守卫链不断。`Sink::busy` 只返回 `PluginHandle::busy()`，不取引擎的锁。
+- **sink 里的 `BusyGuard`。** fs_watch 交给 `deliver` 的守卫在请求提交之后立即 drop：请求若启动了一轮，这个任务在 `Engine::submit` 里自己取了守卫；若并入了运行中的一轮，那一轮在结束前提交下一轮，守卫链不断。`Sink::busy` 只返回 `PluginHandle::busy()`，不取引擎的锁；它读 `KernelHost` 里存句柄的互斥锁，这把锁只在 `started` 前后和停用时写，临界区里没有 IO，也没有别的锁。
 - **第 3 步遗漏的一个 bug：** 文件夹项目的会话在 `folder_round` 结束时丢掉了 `again`；现在照常开始下一轮。
 - **概览与简报规则（第 5 步）。** `overview` 返回 None，`watch_overview` 返回一个什么也不做的 `OverviewInterest`，`register_brief_rules` 返回一个什么也不做的登记，提供者不保存也不调用。
 - **日志多了两条 debug 记录**（上文「日志与诊断」已加）：`refresh requested`（在审阅的作用域里写出，sink 在 fs_watch 的线程上，本来没有作用域）和 `review released`。没有新的 info 以上的记录，也没有新的字段携带内容或路径。
