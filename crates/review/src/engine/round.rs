@@ -217,7 +217,7 @@ impl Pending {
 }
 
 /// How the base was found, for the cutoffs.
-enum CutoffMode {
+pub(crate) enum CutoffMode {
     /// The window's records from this entry back (`cutoff::window`; the
     /// number of entries when there is no base entry: the reflog starts
     /// after the base, or the recorded base has no record).
@@ -296,11 +296,11 @@ pub(crate) fn folder_session(engine: &Engine, key: &SessionKey) -> Option<Sessio
     }
 }
 
-fn in_worktree(s: &SessionSummary, worktree: &WorktreeKey) -> bool {
+pub(crate) fn in_worktree(s: &SessionSummary, worktree: &WorktreeKey) -> bool {
     matches!(&s.place, Place::Located(l) if l.worktree.as_ref() == Some(worktree))
 }
 
-fn relative(git: &Git, s: &SessionSummary) -> Relative {
+pub(crate) fn relative(git: &Git, s: &SessionSummary) -> Relative {
     let rel = match &s.place {
         Place::Located(l) => l.rel.clone(),
         _ => Arc::from(""),
@@ -308,7 +308,7 @@ fn relative(git: &Git, s: &SessionSummary) -> Relative {
     Relative::new(&git.root, &s.cwd, &rel)
 }
 
-fn head_commit(worktree: &Worktree) -> Option<Oid> {
+pub(crate) fn head_commit(worktree: &Worktree) -> Option<Oid> {
     match worktree.head().ok()? {
         HeadState::Branch { commit, .. } => commit,
         HeadState::Detached { commit } => Some(commit),
@@ -319,7 +319,7 @@ pub(crate) fn blob_id(oid: Oid) -> BlobId {
     BlobId::from_bytes(oid.as_bytes()).unwrap_or(BlobId::Sha1([0; 20]))
 }
 
-fn oid_of(hash: HashKind, id: &BlobId) -> Option<Oid> {
+pub(crate) fn oid_of(hash: HashKind, id: &BlobId) -> Option<Oid> {
     let hex: String = id.as_bytes().iter().map(|b| format!("{b:02x}")).collect();
     Oid::from_hex(hash, &hex)
 }
@@ -327,7 +327,7 @@ fn oid_of(hash: HashKind, id: &BlobId) -> Option<Oid> {
 /// The session's base (「审阅对象与基准」): the recorded one, else the
 /// reflog's last record not after the session started, else the oldest
 /// record's old value, else the current HEAD.
-fn session_base(
+pub(crate) fn session_base(
     recorded: Option<&crate::log::BaseRecord>,
     reflog: &HeadReflog,
     started_s: i64,
@@ -1133,7 +1133,7 @@ fn merge_base(repo: &Repo, head: Option<Oid>, name: &str, cancel: &AtomicBool) -
 
 /// The log's review target: a worktree as its git directory relative to
 /// the common directory.
-fn target_key(target: &ReviewTarget, git: &Git) -> TargetKey {
+pub(crate) fn target_key(target: &ReviewTarget, git: &Git) -> TargetKey {
     match target {
         ReviewTarget::Session(key) => TargetKey::Session {
             source: key.source.0.clone(),
@@ -1151,7 +1151,7 @@ fn target_key(target: &ReviewTarget, git: &Git) -> TargetKey {
 
 /// The other sessions whose claims take part: located in this worktree,
 /// active within the window, not the target's, at most 100 newest first.
-fn other_sessions(
+pub(crate) fn other_sessions(
     engine: &Engine,
     worktree: &WorktreeKey,
     own: &[Own],

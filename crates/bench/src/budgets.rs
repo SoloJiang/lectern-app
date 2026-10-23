@@ -1767,6 +1767,32 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // (step 5) The second round of the overview: claims and cutoffs from
+    // memory and the cache. The cloudprint round is recorded only.
+    share(
+        "review/overview_round_warm",
+        &[median(Limit::TimeBelow(ms(20)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
+    share("review/overview_cloudprint", RECORD, REVIEW, ACTIVE, Time),
+    // (step 5) This crate's resident bytes with an overview ready, the
+    // count set not counted (docs/design/review.md「性能」).
+    share(
+        "review/resident_cloudprint_bytes",
+        &[median(Limit::BytesBelow(MB))],
+        REVIEW,
+        ACTIVE,
+        Memory,
+    ),
+    share(
+        "review/resident_100k_bytes",
+        &[median(Limit::BytesBelow(MB))],
+        REVIEW,
+        ACTIVE,
+        Memory,
+    ),
     // In process until the process-level plugin benchmarks (step 5): the
     // kernel's four timings under a `TestKernel`.
     share(

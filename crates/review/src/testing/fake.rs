@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde::Deserialize;
 
 use lectern_services::project::{
-    Head, Location, OpenError, OpenRequest, PackageMatch, ProjectKey, ProjectSnapshot, Projects,
-    RelPath, ResolveError, Resolved, ScanError, Worktree, WorktreeKey,
+    ActiveTree, Head, Location, OpenError, OpenRequest, PackageMatch, ProjectKey, ProjectSnapshot,
+    Projects, RelPath, ResolveError, Resolved, Scan, ScanError, Worktree, WorktreeKey,
 };
 use lectern_services::session::{
     Agent, Batch, Content, ContentRef, Cursor, Diagnostics, EditOp, FileEdit, Format, Parent,
@@ -580,6 +580,9 @@ pub struct FakeProjects {
     key: ProjectKey,
     worktrees: Mutex<Vec<Worktree>>,
     packages: Vec<RelPath>,
+    /// The active worktree of the snapshot (the overview's); the main one
+    /// until [`FakeProjects::set_active`].
+    active: Mutex<Option<WorktreeKey>>,
 }
 
 impl FakeProjects {
@@ -599,7 +602,14 @@ impl FakeProjects {
                 prunable: false,
             }]),
             packages: Vec::new(),
+            active: Mutex::new(Some(WorktreeKey(Arc::from(common_dir)))),
         }
+    }
+
+    /// Makes `key` the active worktree of the snapshot (None: a project
+    /// without one, as a folder project).
+    pub fn set_active(&self, key: Option<WorktreeKey>) {
+        *self.active.lock().unwrap_or_else(PoisonError::into_inner) = key;
     }
 
     /// Sub-project directories `locate` matches, deepest first.
@@ -650,20 +660,41 @@ impl Projects for FakeProjects {
     fn set_active_worktree(&self, _: &ProjectKey, _: &WorktreeKey) {}
 
     fn snapshot(&self, project: &ProjectKey) -> Option<Arc<ProjectSnapshot>> {
-        (*project == self.key).then(|| {
-            Arc::new(ProjectSnapshot {
-                key: self.key.clone(),
-                generation: 1,
-                name: "fixture".into(),
-                worktrees: self
-                    .worktrees
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone()
-                    .into(),
-                active: None,
-            })
-        })
+        if *project != self.key {
+            return None;
+        }
+        let worktrees: Vec<Worktree> = self
+            .worktrees
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .map(|key| {
+                let root = worktrees
+                    .iter()
+                    .find(|w| w.key == key)
+                    .map(|w| w.root.clone())
+                    .expect("an added worktree");
+                ActiveTree {
+                    root,
+                    worktree: Some(key),
+                    opened_at: RelPath::from(""),
+                    files: Scan::Pending,
+                    packages: Scan::Pending,
+                    dirs: Scan::Pending,
+                }
+            });
+        Some(Arc::new(ProjectSnapshot {
+            key: self.key.clone(),
+            generation: 1,
+            name: "fixture".into(),
+            worktrees: worktrees.into(),
+            active,
+        }))
     }
 
     fn open_projects(&self) -> Vec<ProjectKey> {

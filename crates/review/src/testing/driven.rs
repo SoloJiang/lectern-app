@@ -16,10 +16,10 @@ use lectern_executor::{Executor, Priority};
 use lectern_git::{HashKind, Oid};
 use lectern_kernel::{ActivationToken, BusyGuard};
 use lectern_services::changes::{BaseSpec, ChangePath, RefreshHint};
-use lectern_services::project::Projects;
+use lectern_services::project::{ProjectKey, Projects, WorktreeKey};
 use lectern_services::review::{
-    BriefRules, BriefRulesRegistration, FileRows, ReviewCommand, ReviewEvent, ReviewId,
-    ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
+    BriefRules, BriefRulesRegistration, FileRows, Overview, OverviewInterest, ReviewCommand,
+    ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
 };
 use lectern_services::session::{SessionKey, SessionSource, SourceId, Timestamp};
 
@@ -240,6 +240,43 @@ impl Driven {
         if let Some(host) = &self.host {
             host.advance(by);
         }
+    }
+
+    pub fn project(&self) -> ProjectKey {
+        self.projects.key().clone()
+    }
+
+    /// The main worktree's key.
+    pub fn main_worktree(&self) -> WorktreeKey {
+        self.projects.main()
+    }
+
+    /// `Review::watch_overview`.
+    pub fn watch_overview(&self, project: &ProjectKey) -> OverviewInterest {
+        self.engine.watch_overview(project)
+    }
+
+    /// `Review::overview`.
+    pub fn overview(&self, project: &ProjectKey) -> Option<Arc<Overview>> {
+        self.engine.overview(project)
+    }
+
+    /// A full trigger, as a worktree batch with git metadata asks for
+    /// (`review/overview_round_warm`).
+    pub fn overview_refresh(&self, project: &ProjectKey) {
+        self.engine
+            .overview_request(project, crate::engine::overview::Trigger::full());
+    }
+
+    /// The count change set the overview holds (None before a round, when
+    /// capped, or once released).
+    pub fn overview_count(&self, project: &ProjectKey) -> Option<Arc<lectern_git::ChangeSet>> {
+        self.engine.overview_count(project)
+    }
+
+    /// Whether the engine still holds any overview state for the project.
+    pub fn has_overview_state(&self, project: &ProjectKey) -> bool {
+        self.engine.has_overview_state(project)
     }
 
     /// `Review::register_brief_rules`.

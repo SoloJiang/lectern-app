@@ -29,6 +29,7 @@
 pub(crate) mod attribute;
 mod brief;
 mod narrative;
+pub(crate) mod overview;
 pub(crate) mod round;
 mod rows;
 mod watch;
@@ -160,6 +161,8 @@ pub(crate) struct Engine {
     ancestry: Mutex<HashMap<(lectern_git::Oid, lectern_git::Oid), bool>>,
     /// The `BriefRules` providers registered (「简报规则的扩展点」).
     providers: Mutex<brief::Providers>,
+    /// The project overviews with an interest (「概览」). A leaf lock.
+    overviews: Mutex<overview::Overviews>,
     /// IO faults and size limits for the logs opened from now on.
     #[cfg(test)]
     log_test: Mutex<LogTest>,
@@ -288,6 +291,7 @@ impl Engine {
             versions: Mutex::new(Versions::default()),
             ancestry: Mutex::new(HashMap::new()),
             providers: Mutex::new(brief::Providers::default()),
+            overviews: Mutex::new(overview::Overviews::default()),
             #[cfg(test)]
             log_test: Mutex::new(LogTest::default()),
         })
@@ -470,12 +474,12 @@ impl Engine {
         open.cancel.store(true, Ordering::Release);
         open.brief.cancel();
         state.targets.remove(&open.target);
-        let used: HashSet<WorktreeKey> = state
+        let mut used: HashSet<WorktreeKey> = state
             .reviews
             .values()
             .filter_map(|o| o.work.as_ref().map(|w| w.git.key.clone()))
             .collect();
-        let sessions: HashSet<SessionKey> = state
+        let mut sessions: HashSet<SessionKey> = state
             .reviews
             .values()
             .filter_map(|o| o.work.as_ref())
@@ -483,6 +487,10 @@ impl Engine {
             .collect();
         let empty = state.reviews.is_empty();
         drop(state);
+        // The overviews hold worktrees and sessions too.
+        let (worktrees, held) = self.overview_retain();
+        used.extend(worktrees);
+        sessions.extend(held);
         lock(&self.gits).retain(|k, _| used.contains(k));
         lock(&self.tables).retain(|k, _| used.contains(k));
         lock(&self.claims).retain(|k, _| sessions.contains(k));
@@ -506,6 +514,7 @@ impl Engine {
         }
         drop(reviews);
         lock(&self.providers).clear();
+        self.overviews_clear();
         lock(&self.gits).clear();
         lock(&self.tables).clear();
         lock(&self.claims).clear();
@@ -525,6 +534,18 @@ impl Engine {
                 | ReviewCommand::MarkUnseen(_)
                 | ReviewCommand::LooksGood => {
                     self.seen_command(&mut state, id, command, &mut events);
+                    // The progress of the overview's sessions changed.
+                    if let Some(dir) = state
+                        .reviews
+                        .get(&id)
+                        .and_then(|o| o.work.as_ref())
+                        .map(|w| w.git.common_dir().to_path_buf())
+                    {
+                        drop(state);
+                        self.overviews_for_repo(&dir, overview::Trigger::default());
+                        self.emit(events);
+                        return;
+                    }
                 }
                 ReviewCommand::Prepare(needs) => self.prepare(&mut state, id, needs),
                 ReviewCommand::Refresh => self.start_round(
@@ -1033,6 +1054,17 @@ impl Engine {
     /// The repository's log; the first call reads it on a `Background`
     /// task, in the scope `ctx` of the review that asked (a log is per
     /// repository: its records carry that review's IDs).
+    /// A repository's log once it is read (starting the read when it has
+    /// not begun); None until then.
+    fn loaded_log(&self, common_dir: &Path, ctx: Ctx) -> Option<Arc<RepoLog>> {
+        let log = {
+            let mut state = lock(&self.state);
+            self.log_for(&mut state, common_dir, ctx)
+        };
+        let loaded = lock(&log.mem).loaded;
+        loaded.then_some(log)
+    }
+
     fn log_for(&self, state: &mut State, common_dir: &Path, ctx: Ctx) -> Arc<RepoLog> {
         if let Some(log) = state.logs.get(common_dir) {
             return Arc::clone(log);
@@ -1127,6 +1159,8 @@ impl Engine {
             }
         }
         self.emit(events);
+        // The overviews' progress reads this index.
+        self.overviews_for_repo(common_dir, overview::Trigger::default());
         if pending {
             self.flush(log);
         }

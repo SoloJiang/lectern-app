@@ -29,6 +29,11 @@ mod project;
 )]
 #[path = "fixtures/project_repo.rs"]
 mod project_repo;
+#[path = "memory/review.rs"]
+mod review;
+#[allow(dead_code, reason = "the edited paths are for the time target's note")]
+#[path = "fixtures/review_repo.rs"]
+mod review_repo;
 #[path = "memory/syntax.rs"]
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
@@ -290,6 +295,8 @@ const BENCHES: &[Bench] = &[
     project::RESIDENT_CLOUDPRINT,
     project::RESIDENT_100K,
     project::DIRS_100K_BYTES,
+    review::RESIDENT_CLOUDPRINT,
+    review::RESIDENT_100K,
     syntax::WINDOW_PEAK,
     syntax::LRU_BYTES,
     syntax::EDIT_TREE_BYTES,

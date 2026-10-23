@@ -20,15 +20,19 @@ use lectern_executor::Executor;
 use lectern_fs_watch::Config as WatchConfig;
 use lectern_fs_watch::testing::{FakeBackend, manual};
 use lectern_kernel::testing::TestKernel;
+use lectern_project::testing::Shape;
 use lectern_review::ReviewDeps;
 use lectern_review::testing::{
     BriefFixture, ChainRun, CutoffRun, Driven, FakeProjects, FakeSessions, LogLoad,
     MarkSeenFixture, SessionFixture, chain_fixture, load_log, write_log,
 };
+use lectern_services::project::ProjectKey;
 use lectern_services::project::Projects;
 use lectern_services::review::{
     AttributionState, LoadState, Need, ReviewCommand, ReviewEvent, ReviewId, RowsKey,
 };
+
+use crate::review_repo;
 use lectern_services::session::SessionSource;
 
 /// Reading a 16 000-record log (about 5.3 MiB) whole and building its
@@ -114,6 +118,89 @@ pub const ATTRIBUTE_SESSION_50: Bench = Bench {
     id: "review/attribute_session_50",
     run: attribute_session_50,
 };
+
+/// (step 5) The second round of a project's overview on the 50-session
+/// fixture: the claims and the cutoffs from memory and the cache, no
+/// `turns_unretained`, no `tree_changes`; from a full trigger to the
+/// `Overview` event.
+pub const OVERVIEW_ROUND_WARM: Bench = Bench {
+    id: "review/overview_round_warm",
+    run: overview_round_warm,
+};
+
+/// (step 5) The same round on the cloudprint shape (728 files, 20
+/// sessions, every path in the worktree), after the first round's count
+/// comparison. Record only.
+pub const OVERVIEW_CLOUDPRINT: Bench = Bench {
+    id: "review/overview_cloudprint",
+    run: overview_cloudprint,
+};
+
+/// The second round of a project's overview (a full trigger, as a batch
+/// with git metadata gives) to its `Overview` event, on `driven`.
+fn overview_round(
+    ctx: &Ctx,
+    driven: &Driven,
+    project: &ProjectKey,
+) -> Result<(Samples, usize), BenchError> {
+    let time = sample(ctx, |_| {
+        driven.take_events();
+        let started = Instant::now();
+        driven.overview_refresh(project);
+        driven.run();
+        driven
+            .take_events()
+            .into_iter()
+            .find(|(e, _)| matches!(e, ReviewEvent::Overview { .. }))
+            .map(|(_, at)| at.duration_since(started))
+            .ok_or_else(|| BenchError::new("no overview event"))
+    })?;
+    let shown = driven.overview(project).map_or(0, |o| o.sessions.len());
+    Ok((time, shown))
+}
+
+fn overview_round_warm(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let f = fixture(ctx)?;
+    let driven = f.driven(&ctx.scratch().join("overview"));
+    let project = driven.project();
+    let _interest = driven.watch_overview(&project);
+    driven.run();
+    if driven.overview(&project).is_none() {
+        return Err(BenchError::new("no overview after the first round"));
+    }
+    let (time, shown) = overview_round(ctx, &driven, &project)?;
+    Ok(vec![
+        Measured::new("review/overview_round_warm", Value::Time(time))
+            .with_note(Some(format!("{shown} sessions shown"))),
+    ])
+}
+
+fn overview_cloudprint(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let sessions = ctx.scale(20, 4);
+    let repo = review_repo::build(&Shape::cloudprint(), true, sessions)?;
+    let driven = Driven::new(
+        Arc::clone(&repo.projects),
+        vec![Arc::clone(&repo.sessions)],
+        &ctx.scratch().join("cloudprint"),
+        repo.now,
+    );
+    let project = driven.project();
+    let _interest = driven.watch_overview(&project);
+    driven.run();
+    let first = driven
+        .overview(&project)
+        .ok_or_else(|| BenchError::new("no overview after the first round"))?;
+    if first.sessions.len() != sessions {
+        return Err(BenchError::debug("sessions", first.sessions.len()));
+    }
+    let (time, shown) = overview_round(ctx, &driven, &project)?;
+    Ok(vec![
+        Measured::new("review/overview_cloudprint", Value::Time(time)).with_note(Some(format!(
+            "{} files, {shown} sessions shown",
+            repo.edited.len()
+        ))),
+    ])
+}
 
 fn log_load_16k(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let dir = ctx.scratch().join("review");
