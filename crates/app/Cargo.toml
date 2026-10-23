@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "lectern"
 path = "src/main.rs"
@@ -17,6 +20,21 @@ layer = "app"
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+lectern-executor = { path = "../executor" }
+lectern-i18n = { path = "../i18n" }
+lectern-kernel = { path = "../kernel" }
+# The on-disk sink: install_early, the writer thread, shutdown
+# (docs/design/app.md「启动顺序」). Only app and tool crates enable `sink`.
+lectern-logging = { path = "../logging", features = ["sink"] }
+lectern-platform = { path = "../platform" }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+# testing::capture() for the canary test.
+lectern-logging = { path = "../logging", features = ["sink", "test-support"] }
+# The startup tests read the log file's JSON lines under a temporary HOME.
+serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
