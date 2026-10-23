@@ -441,7 +441,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 ## 界面
 
 - 屏幕与层：见「区域与三层」。本 crate 画的只有区域的容器、工具栏的返回按钮、检查器的分段控件和一次性提示；其余都是贡献的视图。
-- `ui` 控件与动效原语（名字以 `ui` 设计为准）：侧栏容器（vibrancy）、工具栏容器、检查器容器与分段控件（滑块 260 ms）、面板容器（滑入 380 ms / 滑出 280 ms，`cubic-bezier(0.32, 0.72, 0, 1)`）、覆盖层容器、浮条容器、一次性提示；减弱动态效果时位移改为淡入淡出、时长减半。本 crate 不写任何颜色值、字体和动画参数。
+- `ui` 的控件与动效原语（名字以 `ui` 设计为准，[#214](https://github.com/SoloJiang/lectern-app/issues/214)）：颜色经 `lectern_ui::colors(cx)`，文字经 `Text` 与 `TextRole`，分段控件 `Segmented`，按钮 `Button`；动效用 `motion::{PANEL_OPEN, PANEL_CLOSE, SEGMENT, HOVER_IN, HOVER_OUT}` 和可打断的 `Transition`（面板偏移、透明度），减弱动态效果由 `motion::reduced(cx)` 给出淡入淡出、时长减半的版本。侧栏、工具栏、检查器、面板、覆盖层、浮条的容器本身由本 crate 画（`ui` 只给数值和控件）：侧栏用窗口的 `Blurred` 材质（app 设计「界面」），不自定义材质。本 crate 不写任何颜色值、字体和动画参数（验收用 `rg` 检查）。
 - Fluent 键（`crates/i18n/locales/{en,zh-CN}/workspace.ftl`）：
 
   | 键 | en | zh-CN | 用途 |
@@ -453,25 +453,25 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
   工具栏标题、副标题、侧栏条目的文字都来自贡献方的 Fluent 键，本 crate 不翻译、不拼接。
 
-- UI 探针的语义节点（角色与稳定 ID）：
+- UI 探针的语义节点（[#6](https://github.com/SoloJiang/lectern-app/issues/6) 的契约：`lectern_ui::semantic` 的 `semantic(spec, child)` 包装元素，角色取它的 `Role`，ID 是 `segment('.' segment)*`，`name[key]` 的 key 用业务键；窗口根节点 `window[<id>]` 由探针合成，本 crate 不声明）：
 
-  | ID | 角色 | 状态 |
+  | ID | `Role` | `attrs` |
   |---|---|---|
-  | `workspace.window` | 窗口 | 基底（`welcome` / `project`）、当前屏幕 ID、栈深度 |
-  | `workspace.sidebar` | 侧栏 | 显示 / 隐藏、当前面板 ID |
-  | `workspace.sidebar.panel[<id>]` | 侧栏面板 | — |
-  | `workspace.toolbar` | 工具栏 | 标题、副标题（文字由屏幕提供） |
-  | `workspace.toolbar.back` | 按钮 | 可见 |
-  | `workspace.toolbar.inspector` | 按钮 | 可见、选中 |
-  | `workspace.content` | 内容区 | 阅读栏 / 整区 |
-  | `workspace.content.screen[<id>]` | 屏幕 | 栈里的位置 |
-  | `workspace.inspector` | 检查器 | 显示 / 隐藏、当前页 |
-  | `workspace.inspector.tab[<id>]` | 分段控件的一项 | 选中 |
-  | `workspace.panel[<id>]`、`workspace.overlay[<id>]` | 面板、覆盖层 | 打开 |
-  | `workspace.bar` | 浮条区域 | 可见 |
-  | `workspace.notice` | 一次性提示 | 消息键 |
+  | `workspace.sidebar` | `Sidebar` | `panel`（当前面板 ID）；隐藏时不出现 |
+  | `workspace.sidebar.panel[<id>]` | `Group` | — |
+  | `workspace.toolbar` | `Toolbar` | `screen`（当前屏幕 ID）、`depth`（栈深度） |
+  | `workspace.toolbar.back` | `Button` | — |
+  | `workspace.toolbar.inspector` | `Toggle` | `State::checked` = 检查器是否显示 |
+  | `workspace.content` | `Group` | `base`（`welcome` / `project`）、`column`（`reading` / `full`） |
+  | `workspace.content.screen[<id>]` | `Group` | `index`（栈里的位置，基底为 0） |
+  | `workspace.inspector` | `Panel` | `tab`（当前页 ID）；隐藏时不出现 |
+  | `workspace.inspector.tabs` | `TabBar` | — |
+  | `workspace.inspector.tab[<id>]` | `Tab` | `State::selected` |
+  | `workspace.panel[<id>]`、`workspace.overlay[<id>]` | `Panel` | 关闭时不出现 |
+  | `workspace.bar` | `Group` | 只在审阅出现 |
+  | `workspace.notice` | `Text` | `Label::key` 是消息键 |
 
-  贡献的视图在各自的节点下导出自己的子树（`project_home.*`、`review.*`、`file_reader.*`）。
+  贡献的视图在各自的节点下导出自己的子树（`project_home.*`、`review.*`、`file_reader.*`）。本 crate 的 Action 名稳定、可枚举（探针按名字触发）。
 
 - Action 与快捷键（本 crate 的；都能被探针触发）：
 
@@ -536,7 +536,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 每一项是一个 PR，写 `Refs #215`，在「验收」里列为前置条件。
 
 - **A. `services`**：`workspace` 模块（「服务接口」）。`Registration`、`Payload`、`LeaveGuard` 的回调由本 crate 定义内容；`ReviewTarget`、`ReadTarget`、`ProjectKey`、`WorktreeKey` 复用已有的模块。
-- **B. `ui`**（[#6](https://github.com/SoloJiang/lectern-app/issues/6) 的设计，另一个会话并行编写；需要的内容已写进共享笔记）：`ui::contrib` 的载荷类型与 `into_payload`；`ui::strings(cx)`；侧栏、工具栏、检查器、面板、覆盖层、浮条的容器；分段控件；滑入 / 滑出、分段滑块、悬停的动效原语；一次性提示；SF Symbols 图标。
+- **B. `ui`**（[#214](https://github.com/SoloJiang/lectern-app/issues/214) 的设计，另一个会话并行编写）：本 crate 用到而 `ui` 设计还没有列出的只有 `ui::contrib` 的载荷类型与 `into_payload`（「`ui::contrib` 的载荷类型」）、一次性提示控件和 SF Symbols 图标的取用；`strings(cx)`、`colors(cx)`、`Text`、`Segmented`、`Button`、`motion::*`、`Transition`、`semantic` 模块已在它的设计里。`lectern_ui::ready(cx)` 之后视图才能挂载，所以 `app` 先调它、再调 `workspace::install`。
 - **C. `i18n`**：`locales/{en,zh-CN}/workspace.ftl`，内容是「界面」的四个键。
 - **D. `platform`**：窗口 frame 的 autosave（ADR 0017：「窗口位置与大小用 AppKit 的 frame autosave」）。锁定的 GPUI 不暴露这个设置，`gpui-pre-macos` 实现了 `raw_window_handle`：
 
@@ -549,7 +549,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
   `app` 在 `open_window` 之后、首帧之前对 Welcome 窗口设 `"welcome"`；之后在 `on_state_changed` 里按 `WindowState::project` 是否有值设 `"project"` 或 `"welcome"`（主线程）。`"project"` 第一次使用、还没有保存过 frame 时，`app` 先把窗口设为 1180 × 760 pt 居中。这是 ADR 0017 允许的首帧前唯一的偏好读取。`frame::record` 与 `FrameTimes` 是 bench 设计「需要其他 crate 提供的接口」已经列出的要求，本 crate 只调用。
 - **E. `app`**：
-  - `startup::release` 里 `Kernel::start` 之前：`workspace::install(window, deps, cx)`，`WorkspacePlugin::new(host)` 放进 `PluginSet`（`Profile::Desktop` 的表加一行；test profile 不装）。
+  - `startup::release` 里 `lectern_ui::ready(cx)` 之后、`Kernel::start` 之前：`workspace::install(window, deps, cx)`，`WorkspacePlugin::new(host)` 放进 `PluginSet`（`Profile::Desktop` 的表加一行；test profile 不装）。
   - `on_reopen` 开好骨架窗口后调 `host.attach`。
   - 屏障放开后在 executor 的 `Background` 任务里读 `app_data()/workspace/window.json`，解析成 `WindowState`（认不出或没有文件时为默认值），调 `host.restore`；`app_data()` 为 None 时不读不写。`on_state_changed` 去抖 500 ms 后在 `Background` 任务里写同一个文件（写临时文件再 `rename`，不建目录以外的任何东西）。读写失败只记 warn（不记路径）。
   - `Quit` 的第 1 步：`host.ask_leave(LeaveScope::App, done)`，`done(false)` 时什么也不做。
