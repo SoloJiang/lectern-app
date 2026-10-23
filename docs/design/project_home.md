@@ -40,9 +40,9 @@
 | `lectern-executor` | 合成快照的 `Background` 任务 | 后台任务只经 executor |
 | `lectern-logging` | 日志宏、`Value::uuid` | [ADR 0046](../adr/0046.md) |
 | `futures`（`channel` feature） | 视图的唤醒通道 `mpsc::unbounded` | 已在工作区依赖里（workspace 设计同样用它） |
-| `lectern-kernel`（`test-support`，dev）、`lectern-review`（`test-support`，dev）、`insta`（dev） | `TestKernel`、`FakeSessions` / `FakeProjects` 的脚本、语义树与快照的 insta | |
+| `lectern-kernel`（`test-support`，dev）、`insta`（dev） | `TestKernel`、语义树与快照的 insta | |
 
-本 crate 是插件 crate（`[package.metadata.lectern] plugin = true`），含两个插件（见「本 crate 的公开项」）：`project-home`（requires `dyn Projects`、`dyn SessionSource`、`dyn Review`、`dyn Contributions`）和 `project-home-usage`（requires `dyn Usage`）。它不依赖 `project`、`agents`、`review`、`usage`、`workspace` 这些插件 crate，只依赖 kernel 层和非插件的库 crate；只有 `app` 依赖它。所在层与依赖方向见 [crates/project_home/AGENTS.md](../../crates/project_home/AGENTS.md)。
+本 crate 是插件 crate（`[package.metadata.lectern] plugin = true`），含两个插件（见「本 crate 的公开项」）：`project-home`（requires `dyn Projects`、`dyn SessionSource`、`dyn Review`、`dyn Contributions`）和 `project-home-usage`（requires `dyn Usage`）。它不依赖 `project`、`agents`、`review`、`usage`、`workspace` 这些插件 crate（dev-dependency 也不行，`scripts/check_architecture.py` 第 6 条），只依赖 kernel 层和非插件的库 crate；只有 `app` 依赖它。测试用的假服务都在本 crate 自己的 `testing` 模块里（「测试」），不借用 `review` 的 `test-support`。所在层与依赖方向见 [crates/project_home/AGENTS.md](../../crates/project_home/AGENTS.md)。
 
 ## 接口
 
@@ -71,8 +71,10 @@ impl ProjectHomePlugin {
 //   `Screen(PROJECT_HOME)`、`SidebarPanel("project")`、`SidebarEntry("overview")`、`KeyBindings`，
 //   守卫交给 `ctx.own_staged`；`ctx.on::<ProjectEvent>`、`ctx.on::<SessionsChanged>`、`ctx.on::<ReviewEvent>`。
 //   不做 IO，不提交任务。
-// started：保存 `PluginHandle`；读一次 `Projects::open_projects()`，已有打开的项目时按 `Opened` 处理（监听在
-//   token 变为 `Live` 之前收不到事件，kernel 设计「激活时的上下文」）。
+// started：保存 `PluginHandle`；把「标记 dirty 并安排合成」的回调写进 `UsageSlot::on_change`；读一次
+//   `Projects::open_projects()`，已有打开的项目时按 `Opened` 处理（监听在 token 变为 `Live` 之前收不到事件，
+//   kernel 设计「激活时的上下文」）。`started` 与 token 变为 `Live` 之间到达的 `Opened` 仍可能漏掉，所以监听里
+//   收到不认识的项目的 `ProjectEvent::Changed` 时同样按 `Opened` 处理（project 设计：成功的 `Opened` 之后至少还有一次 `Changed`）。
 
 /// `app` 装配时构造，放进 `PluginSet`（id "project-home-usage"）。只负责把 `dyn Usage` 放进共用的一格：
 /// `usage` 插件失败或停用时项目主页照常显示，只是没有 Usage 行（kernel 没有可选依赖，
@@ -81,14 +83,30 @@ pub struct ProjectHomeUsagePlugin { /* usage slot */ }
 impl ProjectHomeUsagePlugin { pub fn new(slot: UsageSlot) -> Self; }
 
 // Manifest { provides: [], requires: [service::<dyn Usage>()], activation: [AfterFirstFrame] }
-// activate：把 `ServiceRef<dyn Usage>` 和本次激活的 `ActivationToken` 写进 `UsageSlot`；`ctx.on::<UsageEvent>`。
-// 停用：`Active` drop 时清空 `UsageSlot`，并让主插件重建一次快照（Usage 行消失）。
+// activate：取 `ServiceRef<dyn Usage>`，`ctx.on::<UsageEvent>`（监听调 `UsageSlot::changed`）。不写槽位：`activate` 不得有副作用。
+// started：`UsageSlot::set_usage(service, token)`（见下，它可能在这里就取 `Usage::watch`）。
+// 停用：`Active` drop 时 `UsageSlot::clear_usage()`，放下关注并让主插件重建一次快照（Usage 行消失）。
 
-/// 两个插件共用的一格：`Arc<Mutex<Option<(ServiceRef<dyn Usage>, ActivationToken, UsageInterest)>>>`。
+/// 两个插件共用的一格。两个插件都是 `AfterFirstFrame`、彼此独立，激活先后不定；`Opened` 也可能早于 usage 插件的
+/// `started`。所以关注由槽位在每次写入后对账（`reconcile`），谁后到谁触发，不依赖顺序：
+/// `usage` 与 `project` 都有、还没有关注 → `token.enter()` 内调 `Usage::watch(Project { Open(project), D7 })`；
+/// 任一缺失 → drop 关注；之后调 `on_change`（主插件 `started` 里登记的回调：标记 dirty、安排合成）。
 /// 主插件每次调用 `dyn Usage` 之前 `token.enter()`，取不到就当作没有 usage。
 #[derive(Clone, Default)]
-pub struct UsageSlot { /* … */ }
+pub struct UsageSlot { /* Arc<Mutex<{ usage: Option<(ServiceRef<dyn Usage>, ActivationToken)>, project: Option<ProjectKey>,
+                            interest: Option<UsageInterest>, on_change: Option<Arc<dyn Fn() + Send + Sync>> }>> */ }
+impl UsageSlot {
+    pub fn set_usage(&self, usage: ServiceRef<dyn Usage>, token: ActivationToken); // usage 插件 started；之后 reconcile
+    pub fn clear_usage(&self);                                                      // usage 插件停用；之后 reconcile
+    pub fn set_project(&self, project: Option<ProjectKey>);                         // 主插件 Opened / Closed；之后 reconcile
+    pub fn set_on_change(&self, f: Arc<dyn Fn() + Send + Sync>);                    // 主插件 started
+    pub fn changed(&self);                                                          // `UsageEvent` 的监听：只调 on_change
+    /// 合成任务用：`token.enter()` 成功时返回服务引用与准入，否则 None。
+    pub fn usage(&self) -> Option<(ServiceRef<dyn Usage>, Admission)>;
+}
 ```
+
+`reconcile` 在槽位的锁外调用 `Usage::watch` 和 drop 旧关注（两者都立即返回、不阻塞）；`on_change` 在任何线程上调用，只改标记。
 
 - `activate`：kernel 线程，只登记；`started`：kernel 线程，不阻塞。
 - 事件监听：executor 线程，只改标记、安排一次合成任务（「数据流与线程」）。
@@ -98,8 +116,8 @@ pub struct UsageSlot { /* … */ }
 
 ```rust
 /// 不可变，整体替换。由 `project-home` 插件在 executor 的 `Background` 任务里合成（「数据流与线程」），
-/// 视图只持有 `Arc`。不含 GPUI 类型，不含格式化好的文字：文字在渲染时由 `strings(cx)` 生成。
-/// `NodeId` 随快照建一次，每帧只克隆（ui 设计「探针」）。
+/// 视图只持有 `Arc`。不含 GPUI 的元素、视图和上下文，不含格式化好的文字：文字在渲染时由 `strings(cx)` 生成；
+/// `NodeId`（`ui::semantic` 的字符串新类型，`Send + Sync`）随快照建一次，每帧只克隆（ui 设计「探针」）。
 pub struct HomeSnapshot {
     pub project: ProjectKey,
     /// 合成时各来源的代数，用来丢弃过时的任务结果。
@@ -144,7 +162,8 @@ pub struct SessionRow {
     /// None 时显示 `project-home-untitled-session`。
     pub title: Option<Arc<str>>,
     pub last_activity: Timestamp,
-    /// `open_turn && last_activity` 在合成时刻的 10 分钟之内（agents 设计对活跃会话的定义）。
+    /// `open_turn && last_activity` 在合成时刻的 10 分钟之内。比 agents 设计的「活跃」（两者满足其一）更严：
+    /// 最后一轮没有结束、但几天没有动静的会话是中断的会话，不是运行中。
     pub running: bool,
     pub tail_pending: bool,
     pub node: NodeId,
@@ -153,6 +172,8 @@ pub struct SessionRow {
 pub struct PackageRow {
     pub dir: RelPath,
     pub name: Arc<str>,
+    /// 嵌套层数（沿 `Package::parent` 数到根），侧栏按它缩进。
+    pub depth: u8,
     /// 今天改动的文件数；`package_counts` 为 false 时为 0。
     pub changed_today: u32,
     pub node: NodeId,
@@ -237,21 +258,24 @@ pub struct TightestLimit { pub agent: Agent, pub used_percent: u8, pub resets_at
 ```
 kernel 线程：activate（登记贡献、订阅）─▶ started（已打开的项目按 Opened 处理）
 executor：ProjectEvent::Opened { Ok(key) }（新基底）─▶ 监听 ─▶ Home：project = key，watch_overview(key)，
-          usage 格里有 usage 时 Usage::watch(Project { Open(key), D7 })，dirty ─▶ 安排合成
-executor：ProjectEvent::Changed / SessionsChanged / ReviewEvent::Overview { project } / UsageEvent ─▶ 监听：dirty ─▶ 安排合成
+          UsageSlot::set_project(Some(key))（有 usage 时在槽位里取 Usage::watch），dirty ─▶ 安排合成
+kernel 线程：project-home-usage 的 started ─▶ UsageSlot::set_usage ─▶ 已有项目时取 Usage::watch ─▶ on_change ─▶ 安排合成
+executor：ProjectEvent::Changed / SessionsChanged / ReviewEvent::Overview { project } ─▶ 监听：dirty ─▶ 安排合成
+executor：UsageEvent ─▶ usage 插件的监听 ─▶ UsageSlot::changed ─▶ on_change ─▶ 安排合成
 executor [Background + BusyGuard]：合成任务 ─▶ Projects::snapshot、每个 SessionSource::sessions()、Review::overview、
           Usage::snapshot / limits（都是取锁复制 Arc）─▶ snapshot::build ─▶ Arc<HomeSnapshot> ─▶ 写进 Home ─▶
           发给每个视图的发送端 ─▶ 需要 complete 的会话键 ─▶ SessionSource::complete
 主线程：视图的前台任务收到快照 ─▶ 换 Arc、cx.notify() ─▶ 下一帧画出 ─▶ 第一次 files_settled 为 true 的帧：report_milestone(ProjectHome)
 主线程：按键 / 点击 ─▶ on_action ─▶ Contributions::dispatch(WorkspaceCommand)
-executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest 与 UsageInterest，清空快照与标记，发一份空快照让视图清空
+executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，UsageSlot::set_project(None)（放下 UsageInterest），
+          清空快照与标记，发一份空快照让视图清空
 ```
 
 - 监听（executor 线程）只改 `Home` 的标记并安排合成任务，不读服务的快照、不做 IO（[kernel 设计「事件分发」](kernel.md#事件分发)）。合成任务经 `PluginHandle::own_with` 提交，`Background` 优先级，持有 `BusyGuard` 到快照发布为止，所以 bench 的静止采样看得到它。
 - 合并：同一时刻最多一个合成任务在跑；跑的期间来的事件只把 `dirty` 置位，任务结束时发现 `dirty` 就再跑一轮。没有周期性任务、没有定时器：相对时间（「3 min ago」）只在下一次快照时刷新（「已知限制」）。
 - `OverviewInterest` 的持有：从这个项目成为基底（`Opened`）到它关闭（`Closed`），不随屏幕切换放下。[review 设计「接口」](review.md#接口)写的是「显示主页时持有」；本 crate 持有得更久，原因：`watch_overview` 没有 `Review::close` 那样的 30 秒保留，进入审阅时放下、返回时再取就要重做一次计数比较（10 万文件约 1 s，在后台）和一轮概览；计数改动集本来就在 [ADR 0035](../adr/0035.md) 的采样状态里（≤ 4 MB 的余量），一直持有不增加采样状态的内存。换项目时先放下旧项目的关注再取新的。
-- `UsageInterest`（`Usage::watch(UsageQuery::Project { project: ProjectRef::Open(key), window: Window::D7 })`）同样随项目持有，放在 `UsageSlot` 里；`usage` 插件停用时随槽位清空。
-- 合成任务读 `dyn Usage` 之前 `token.enter()`（槽位里的 token），取不到就按没有 usage 合成。
+- `UsageInterest`（`Usage::watch(UsageQuery::Project { project: ProjectRef::Open(key), window: Window::D7 })`）同样随项目持有，放在 `UsageSlot` 里，由槽位的 `reconcile` 取和放（「本 crate 的公开项」）：主插件的 `Opened` 在 usage 插件 `started` 之前到达时，`started` 里的 `set_usage` 补取；反过来 `Opened` 补取；`usage` 插件停用时随 `clear_usage` 放下。
+- 合成任务经 `UsageSlot::usage()` 取服务（里面 `token.enter()`），取不到就按没有 usage 合成。
 - 主线程上只做：读 `Home` 里的快照（取锁复制 `Arc`）、`Contributions::dispatch`、`sidebar_entries()`（取锁复制 `Arc`）、`report_milestone`。不调用任何阻塞的服务方法（`SessionSource::read` / `turns` / `load`、`Projects::resolve` 都不碰）。
 - 首帧之前什么都不做：两个插件都是 `AfterFirstFrame`，`activate` 只登记，第一次合成在 `Opened` 之后。
 
@@ -282,9 +306,9 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest �
 - 屏幕与层：[交互规范「屏幕」](interaction.md#屏幕)的 02 Overview；项目侧栏与项目主页都在常驻层（[「三层结构」](interaction.md#三层结构)）。`ScreenLayout { sidebar: Shown, back_button: false, reading_column: true, inspector: false, floating_bar: false }`。工具栏：标题是 `HomeSnapshot::name`（原样），副标题是 `project-home-subtitle`（待审数量），右侧没有控件。
 - 侧栏面板（248pt，容器由 `workspace` 画）从上到下：
   1. `Project` 区：`overview` 条目（本 crate 登记的 `SidebarEntry`，`on_select: PopToBase`，当前屏幕是主页时选中）。`workspace` 设计的调用方一节把 Sessions、Packages 也写成 `SidebarEntry`；本文只登记 `overview`：Sessions 与 Packages 是带行的分组，`SidebarEntry` 只有一个标签，放不下行。`Project` 区里其他 crate 登记的条目画成普通行，排在 `overview` 之后。
-  2. Sessions：标题行 `project-home-sessions`；每个 worktree 一个小标题（分支短名；当前 worktree 加 `project-home-current-worktree` 的次要文字；文件夹项目不显示小标题；`Other` 组用 `project-home-other-worktrees`），下面每行：8pt agent 圆点（`AgentDot`，运行中时 `blink` 一次：新一轮到达 = `running` 从 false 变 true，或 `last_activity` 变化）、标题一行（超出截断）、次要文字（相对时间；运行中时为 `project-home-running`）。整个 Sessions 区是一个 `uniform_list`，小标题与会话行等高（24pt）。14 天内没有会话时显示一行 `project-home-sessions-empty`。
+  2. Sessions：标题行 `project-home-sessions`；每个 worktree 一个小标题（分支短名；当前 worktree 加 `project-home-current-worktree` 的次要文字；文件夹项目不显示小标题；`Other` 组用 `project-home-other-worktrees`），下面每行：8pt agent 圆点（`AgentDot`，运行中时 `blink` 一次：新一轮到达 = `running` 从 false 变 true，或 `last_activity` 变化；`Agent::Other(name)` 的会话没有圆点，`name` 原样显示在次要文字的开头）、标题一行（超出截断）、次要文字（相对时间；运行中时为 `project-home-running`）。整个 Sessions 区是一个 `uniform_list`，小标题与会话行等高（24pt）。14 天内没有会话时显示一行 `project-home-sessions-empty`。
   3. Packages：标题行 `project-home-packages`；每行子项目名，行尾次要文字是今天的改动数（`project-home-changed-today`，0 时不显示；`package_counts` 为 false 时整列不显示）；嵌套的子项目按 `parent` 缩进一级。子项目 `Pending` 时显示两行 `Skeleton`，`Unavailable` 或没有子项目时不显示这一节。行不可点击（「本 issue 之外」）。
-  4. `Views` 区：`sidebar_entries()` 里 `section == Views` 的条目，按 `workspace` 给的顺序；每行图标 + 标签（`Text::key(entry.label)`），点击 `dispatch(entry.on_select)`。没有条目时整节不显示。
+  4. `Views` 区：`sidebar_entries()` 里 `section == Views` 的条目，按 `workspace` 给的顺序；每行标签（`Text::key(entry.label)`）和条目给出的图标（有 `icon` 时；类型由 workspace 设计前置条件 B 的 `ui::contrib::SidebarEntry` 决定），点击 `dispatch(entry.on_select)`。没有条目时整节不显示。
   5. `Bottom` 区：`usage` 条目（`usage_view` 登记的 `SidebarEntry`，`on_select: Push(USAGE)`）由本 crate 画成两行：第一行标签 + `count_compact(tokens_7d)`（`project-home-usage-7d`），第二行最紧张的额度条（`Progress::Bar`，`used_percent / 100`）加次要文字（`project-home-limit`：agent 名与百分比）。`UsageModel` 为 None（`usage` 插件不在）时只画标签；`tokens_7d` 为 None 时数字处是 `Skeleton`；`tightest` 为 None 时没有第二行。`Bottom` 区的其他条目画成普通行。
 - 主区（居中 760pt 阅读栏）从上到下：大标题（`TextRole::LargeTitle`，`project-home-title`，数字是 `needs_review.len()`）；三个 `GroupedList`，标题分别是 `project-home-needs-review`、`project-home-outside`、`project-home-done`。卡片一行：agent 圆点、标题、两行次要文字（第一行：相对时间，运行中时 `project-home-running`；第二行：信号，用 ` · ` 连接）、行尾进度环（`Progress::Ring`，`seen / total`；`progress` 为 None 时不画）。Outside 行：标题 `project-home-outside-files`，`Capped` 时用 `project-home-outside-capped`，`Pending` 时数字处是 `Skeleton`。Recently Done 为空时不显示这一组；Needs Review 为空而概览已就绪时显示 `project-home-all-reviewed`。
 - 信号（第二行灰字；只显示成立的项，都不成立时第二行省略）：
@@ -407,14 +431,14 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest �
 
 ## 测试
 
-依赖 GPUI，只在 macOS 上编译和测试：`just test -p lectern-project-home`。会话、项目、概览、用量都用 `services` trait 的假实现（`lectern-review` 的 `testing::FakeSessions` / `FakeProjects`，本 crate `testing` 里的 `FakeReview`、`FakeUsage`、`FakeContributions`：只返回构造好的快照、记下收到的命令），不用真实的 git、会话扫描和文件 IO。
+依赖 GPUI，只在 macOS 上编译和测试：`just test -p lectern-project-home`。会话、项目、概览、用量、贡献都用 `services` trait 的假实现，放在本 crate 的 `testing` 模块（`FakeSessions`、`FakeProjects`、`FakeReview`、`FakeUsage`、`FakeContributions`）：直接构造 `SessionList`、`ProjectSnapshot`、`Overview`、`UsageSnapshot` / `Limits` 交出去，记下收到的 `complete`、`watch_overview`、`watch`、`dispatch`，不解析脚本；`read` / `turns` / `load` / `resolve` 一律 `unreachable!`（本 crate 不得调用它们）。不用真实的 git、会话扫描和文件 IO，也不依赖 `review` 等插件 crate 的 `test-support`。
 
 - `snapshot::build`（`#[test]`，不开窗口）：`build_groups_sessions_by_worktree`（主 worktree 在前、`Resolved` 与 `Located` 都归位、prunable 的进 `Other`、子 agent 不成行、14 天之外的不出现）；`build_splits_needs_review_and_done`（`progress` None / 部分 / 全部 / `changed_since_seen` 四种）；`build_drops_overview_sessions_missing_from_list`；`build_marks_running_within_ten_minutes`；`build_counts_packages_today`（有 `Overview.packages` 与没有、`Capped`）；`build_folder_project_hides_outside`；`build_without_usage`；每个用例的 `HomeSnapshot` 渲染成文本做 insta 快照（`snapshot_*`）；`project_home/build_1000` 的夹具也在这里构造。
-- 插件（`#[test]`，`TestKernel`）：`activate_registers_contributions_only`（登记了 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings`，没有任务）；`opened_takes_the_overview_interest_and_closed_drops_it`；`events_coalesce_into_one_build`（跑着的时候来 5 个事件，结束后只再跑一轮）；`complete_is_requested_once_per_pending_session`；`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`；`started_handles_an_already_open_project`。
+- 插件（`#[test]`，`TestKernel`）：`activate_registers_contributions_only`（登记了 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings`，没有任务）；`opened_takes_the_overview_interest_and_closed_drops_it`；`events_coalesce_into_one_build`（跑着的时候来 5 个事件，结束后只再跑一轮）；`complete_is_requested_once_per_pending_session`；`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`usage_activating_after_opened_takes_the_watch`（`Opened` 先到、usage 插件后 `started`：`FakeUsage` 收到一次 `watch`，快照重建一次并带 `UsageModel`）、`opened_after_usage_takes_the_watch`（相反的顺序，结果相同）；`started_handles_an_already_open_project`；`changed_for_an_unknown_project_counts_as_opened`。
 - `#[gpui::test]`（`TestAppContext`，`init_fixed`）：`sidebar_lists_sessions_under_worktrees`；`home_shows_cards_outside_and_done`；`arrow_keys_move_across_groups`（↓ 从最后一张卡片到 Outside 再到 Done，↑ 反向，到头不回绕）；`enter_pushes_the_review_route`（`FakeContributions` 收到 `Push(REVIEW, Session(key))`）；`outside_opens_the_outside_review`；`clicking_a_sidebar_session_pushes_review`；`views_entries_dispatch_their_command`；`usage_row_shows_tokens_and_the_tightest_limit`；`new_sidebar_view_reads_the_current_snapshot`（面板视图 drop 再建，不等事件就有内容）；`progress_ring_transitions_between_snapshots`（`Transition` 从旧值出发）；`milestone_is_reported_on_the_first_settled_frame`（`files` 为 `Pending` 的快照不报告，`Ready` 的那一帧报告一次，之后不再报告）；`skeleton_appears_after_100ms_only`；`closed_project_clears_the_views`。
 - 语义树：`home_tree_with_cards`、`home_tree_empty`、`sidebar_tree_with_views_and_usage` 的 insta 快照（UI 探针完成后接入；之前用 `ui::semantic::Recorder` 的记录去掉 `bounds` 和 `declared_at`）。
 - 日志：`canary_stays_out_of_home_logs`。
-- fixtures：没有外部格式；会话脚本用 `FakeSessions::from_script` 的格式（[review 设计「测试」](review.md#测试)）。
+- fixtures：没有外部格式；测试数据是源码里构造的快照。
 - 只能在 macOS 上跑的部分：全部。
 
 ## 对其他 crate 的要求
@@ -436,7 +460,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest �
 
   「今天」因此是：worktree 相对 HEAD 的改动文件里，最后修改时间在今天的那些；已提交的改动不算，昨天改、今天还没提交的也不算。计数随 `review` 的下一轮概览刷新（fs_watch 批次、`SessionsChanged` 等触发，合并 2 秒），不在午夜自动归零：日界之后第一次变化才更新。这一项合并之前，侧栏的 Packages 只显示名字（`package_counts` 为 false）。
 - **B. `i18n`：`locales/{en,zh-CN}/project-home.ftl`**，内容是「界面」的键表。
-- **C. `services`、`ui`、`workspace`**：本 crate 用到的都已在各自的设计里（`services::workspace` 模块是 workspace 设计的前置条件 A；`ui::contrib` 的载荷类型、`GroupedList`、`Row`、`AgentDot`、`Progress`、`Skeleton`、`semantic` 在 `ui` 设计里；`sidebar_entries()`、`report_milestone`、`dispatch` 在 workspace 设计里）。不新增要求。`usage_view` 登记 `SidebarEntry("usage")`（`section: Bottom`、`on_select: Push(USAGE)`）时，本 crate 为它画 token 与额度条；它的设计文档写明这一点。
+- **C. `services`、`ui`、`workspace`**：本 crate 用到的都已是 workspace 设计或 `ui` 设计的内容，不新增要求，但其中两项还没有设计稿，是 workspace 设计的前置条件：`services::workspace` 模块（前置条件 A）和 `ui::contrib` 的载荷类型与 `into_payload`、侧栏条目图标的取用（前置条件 B；`ui` 设计 [#218](https://github.com/SoloJiang/lectern-app/pull/218) 现在没有列出它们）。本 crate 的 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings` 登记和 `Views` 区的图标都靠它们，所以它们在「验收」里列为前置条件。`GroupedList`、`Row`、`AgentDot`、`Progress`、`Skeleton`、`semantic` 在 `ui` 设计的第 3、4 步；`sidebar_entries()`、`report_milestone`、`dispatch` 在 workspace 设计里。`usage_view` 登记 `SidebarEntry("usage")`（`section: Bottom`、`on_select: Push(USAGE)`）时，本 crate 为它画 token 与额度条；它的设计文档写明这一点。
 - **D. `app`**：装配时构造 `UsageSlot`，分别交给 `ProjectHomePlugin::new` 和 `ProjectHomeUsagePlugin::new`，两个插件都放进 `Profile::Desktop` 的 `PluginSet`；bench 的 `Driver` 加 `home` 场景（`app/home_frames`）。
 - **E. `bench`**：预算表加 `project_home/build_1000`、`project_home/resident_bytes`、`app/home_frames`；`app/open_project`、`app/idle_monorepo`、`app/idle_100k` 随本 crate 的最后一步改为生效。
 
@@ -448,14 +472,14 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest �
 
 ## 验收
 
-分三步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-project-home`、`just deny` 通过。前置条件 B 先合并；A 可以在第 3 步之前任何时候合并；C 里 workspace 的第 2 步和 `ui` 的第 3 步在本 crate 第 2 步之前。
+分三步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-project-home`、`just deny` 通过。前置条件的顺序：B（`project-home.ftl`）和 workspace 设计的前置条件 A（`services::workspace`）在第 1 步之前；workspace 设计的前置条件 B（`ui::contrib` 的载荷类型、侧栏图标）、`ui` 设计的第 3、4 步（控件、探针节点）和 workspace 的第 2 步（根视图）在第 2 步之前；本文的 A（`Overview.packages`）、D、E 随第 3 步（A 可以更早）。
 
 **第 1 步：快照与插件（不开窗口的部分）。**
 
 - `snapshot::build` 与「测试」里 `build_*`、`snapshot_*` 的 insta 快照通过。
 - 插件的 `#[test]` 通过：`activate_registers_contributions_only`、`opened_takes_the_overview_interest_and_closed_drops_it`、`events_coalesce_into_one_build`、`complete_is_requested_once_per_pending_session`、`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`started_handles_an_already_open_project`。
 - `python3 scripts/check_architecture.py` 通过：`lectern-project-home` 带 `plugin = true`，不依赖其他插件 crate；只有 `app` 依赖它。
-- `rg 'std::fs|std::process|git2|gix|std::thread::spawn' crates/project_home/src` 没有结果。
+- `rg 'std::fs|std::process|git2|gix|std::thread::spawn' crates/project_home/src` 没有结果；`rg 'lectern-review|lectern-project|lectern-agents|lectern-usage|lectern-workspace' crates/project_home/Cargo.toml` 没有结果（不依赖插件 crate，dev-dependency 也不行）。
 - `canary_stays_out_of_home_logs` 通过（合成与插件部分）；`rg 'eprintln!|println!|log::' crates/project_home/src` 没有结果。
 
 **第 2 步：视图（`#[gpui::test]`）。**
