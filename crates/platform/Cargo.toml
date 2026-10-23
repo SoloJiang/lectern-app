@@ -1,6 +1,6 @@
 [package]
 name = "lectern-platform"
-description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data and log directories, the OS version, the local UTC offset, the system appearance's colours; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
+description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data and log directories, the OS version, the local UTC offset, the window frame autosave name, the system appearance's colours; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,22 +16,27 @@ rustix.workspace = true
 # Linux: the FSEvents event conversion is a pure function whose unit tests run
 # on every platform.
 lectern-fs-watch = { path = "../fs_watch" }
+# `window::set_frame_autosave_name` takes an `impl HasWindowHandle` on every
+# platform (the bound is in its signature); GPUI's `Window` implements it.
+raw-window-handle.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # `ThreadCpuClock`: `pthread_getcpuclockid` and `clock_gettime` on Linux,
 # `pthread_mach_thread_np` and `thread_info` on macOS, which rustix lacks.
 # On both also `localtime_r` (`time::utc_offset`).
-# On macOS also `proc_pid_rusage` (`process::phys_footprint`) and
-# `sysctlbyname` (`system::os_version`); the macOS tests create a FIFO with
+# On macOS also `proc_pid_rusage` (`process::phys_footprint`),
+# `sysctlbyname` (`system::os_version`) and `pthread_main_np`
+# (`window::set_frame_autosave_name`); the macOS tests create a FIFO with
 # it.
 libc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The kqueue thread runs through `Executor::run_dedicated`.
 lectern-executor = { path = "../executor" }
-# The kqueue thread's stop record and the appearance watch's contained
-# panic record (docs/design/platform.md「日志与诊断」, ADR 0046); nothing
-# else in this crate logs.
+# The kqueue thread's stop record, the frame autosave name's failure
+# record and the appearance watch's contained panic record
+# (docs/design/platform.md「日志与诊断」, ADR 0046); nothing else in this
+# crate logs.
 lectern-logging = { path = "../logging" }
 # kqueue for `Scope::Entries` targets.
 rustix = { workspace = true, features = ["event"] }
@@ -43,8 +48,8 @@ tempfile.workspace = true
 # `BusyGuard`, to implement `lectern_fs_watch::Sink` in the test that drives
 # the backend through a real `Watcher`.
 lectern-kernel = { path = "../kernel" }
-# testing::capture for kqueue_stop_is_logged_without_paths and the
-# appearance watch's panic record.
+# testing::capture for kqueue_stop_is_logged_without_paths, the window
+# tests' log records and the appearance watch's panic record.
 lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [lints]
