@@ -1062,7 +1062,7 @@ pub mod window {
 
 ### 已知限制
 
-- 同名窗口：Apple 文档说名字已被另一个窗口使用时返回 NO。本机实测（macOS 27.0.1）两个未显示过的 `NSWindow` 设同一个名字时都返回 YES，第二个窗口也拿到这个名字；`NameInUse` 只在 AppKit 确实返回 NO 时出现。`app` 只有一个窗口，`welcome` 与 `project` 不会同时在两个窗口上，不受影响。
+- 同名窗口：`setFrameAutosaveName:` 返回 NO 表示没有设上名字（AppKit 把它留给名字已被另一个窗口使用的情况）。本机实测（macOS 27.0.1）两个未显示过的 `NSWindow` 设同一个名字时都返回 YES，第二个窗口也拿到这个名字；`NameInUse` 只在 AppKit 确实返回 NO 时出现，本 crate 不自己查重。`app` 只有一个窗口，`welcome` 与 `project` 不会同时在两个窗口上，不受影响。
 - 第一次用 `"project"`、还没有保存过 frame 时 AppKit 不改 frame；`app` 先把窗口设为 1180 × 760 pt 居中（workspace 设计的 D），本 crate 不做。
 - 本函数不读 `frameAutosaveName`、不调 `saveFrameUsingName:`；保存的时机（移动、缩放、关闭）由 AppKit 决定。
 
