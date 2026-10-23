@@ -14,8 +14,13 @@ use serde_json::{Value, json};
 use lectern_cache::{Budgets, Cache, Config as CacheConfig};
 use lectern_git::testing::{IndexEntry, TestHead, TestRepo};
 use lectern_git::{Mode, Oid};
-use lectern_services::changes::ChangePath;
-use lectern_services::review::ReviewTarget;
+use lectern_services::changes::{
+    ChangeDetail, ChangePath, ChangeStatus, DiffHunk, FileChange, FileMode, FileSide, SideIdentity,
+};
+use lectern_services::project::BlobId;
+use lectern_services::review::{
+    Brief, DiffSide, FileKey, LineAnchor, NoiseKind, ReviewTarget, SeenState,
+};
 use lectern_services::session::{SessionKey, SourceId, Timestamp};
 
 use super::driven::{Driven, ReflogLine, write_reflog};
@@ -371,6 +376,126 @@ impl MarkSeenFixture {
             vec![sessions],
             dir,
             Timestamp(1_760_000_000_000),
+        )
+    }
+}
+
+/// The inputs of a rule brief over `files` files, every rule represented
+/// (`review/brief_5000`): no repository, no engine, the rules alone.
+pub struct BriefFixture {
+    files: Vec<BriefInput>,
+}
+
+struct BriefInput {
+    key: FileKey,
+    change: FileChange,
+    noise: Option<NoiseKind>,
+    seen: SeenState,
+    drifted: bool,
+    edit_failed: bool,
+    command: Vec<(u32, u32)>,
+}
+
+impl BriefFixture {
+    pub fn new(files: usize) -> BriefFixture {
+        let blob = |n: usize| FileSide {
+            mode: FileMode::File,
+            content: SideIdentity::Blob(
+                BlobId::from_bytes(&(n as u64).to_le_bytes().repeat(3)[..20]).unwrap(),
+            ),
+        };
+        let files = (0..files)
+            .map(|i| {
+                let path = match i % 19 {
+                    0 if i % 13 == 0 => format!("gen/x{i}.lock"),
+                    _ if i % 13 == 0 => format!(".github/workflows/w{i}.yml"),
+                    _ => format!("src/m{:02}/f{i}.rs", i % 50),
+                };
+                let deleted = i % 17 == 0;
+                let detail = if deleted {
+                    ChangeDetail::NoDiff
+                } else if i % 23 == 0 {
+                    ChangeDetail::Truncated {
+                        added: 30_000,
+                        removed: 1,
+                    }
+                } else {
+                    ChangeDetail::Text {
+                        hunks: Arc::from(vec![DiffHunk {
+                            old: 0..1,
+                            new: 0..2,
+                            old_byte: 0,
+                            new_byte: 0,
+                        }]),
+                        added: 1,
+                        removed: 0,
+                    }
+                };
+                let change = FileChange {
+                    status: if deleted {
+                        ChangeStatus::Deleted
+                    } else {
+                        ChangeStatus::Modified
+                    },
+                    path: ChangePath(Arc::from(path.as_bytes())),
+                    old: Some(blob(i)),
+                    new: (!deleted).then(|| blob(i + 1)),
+                    detail,
+                    generated: false,
+                    untracked: false,
+                    staged: None,
+                };
+                BriefInput {
+                    key: FileKey {
+                        old: Some(change.path.clone()),
+                        new: change.new.as_ref().map(|_| change.path.clone()),
+                    },
+                    noise: path.ends_with(".lock").then_some(NoiseKind::Lockfile),
+                    seen: if i % 7 == 0 {
+                        SeenState::ChangedSinceSeen {
+                            since: Timestamp(1),
+                        }
+                    } else {
+                        SeenState::Unseen
+                    },
+                    drifted: i % 11 == 0,
+                    edit_failed: i % 29 == 0,
+                    command: if i % 31 == 0 {
+                        vec![(0, (i % 5) as u32)]
+                    } else {
+                        Vec::new()
+                    },
+                    change,
+                }
+            })
+            .collect();
+        BriefFixture { files }
+    }
+
+    /// The brief of the files (「简报规则」), no providers.
+    pub fn brief(&self) -> Brief {
+        let inputs: Vec<crate::brief::FileInput<'_>> = self
+            .files
+            .iter()
+            .map(|f| crate::brief::FileInput {
+                key: &f.key,
+                change: &f.change,
+                noise: f.noise,
+                seen: f.seen,
+                drifted: f.drifted,
+                drifted_at: f.drifted.then_some(LineAnchor {
+                    side: DiffSide::New,
+                    line: 0,
+                }),
+                edit_failed: f.edit_failed,
+                command_only: &f.command,
+            })
+            .collect();
+        crate::brief::build(
+            &inputs,
+            &[],
+            0,
+            lectern_services::review::AnalysisState::Unavailable(Arc::from("unavailable")),
         )
     }
 }

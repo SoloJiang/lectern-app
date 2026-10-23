@@ -1750,6 +1750,14 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Time,
     ),
+    // (step 5) The rule brief of 5000 files.
+    share(
+        "review/brief_5000",
+        &[median(Limit::TimeBelow(ms(5)))],
+        REVIEW,
+        ACTIVE,
+        Time,
+    ),
     // (step 4) The agent's next turn and one file's change, from the batch
     // and the source's event to the first snapshot that shows both.
     share(

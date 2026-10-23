@@ -355,6 +355,23 @@ fn sorted(turns: &[TurnRef], rank: &HashMap<TurnRef, usize>) -> Arc<[TurnRef]> {
     out.into()
 }
 
+/// Whether a step of the file did not align (`Partial` or `Unaligned`),
+/// or did not apply at all (「简报规则」's `Drifted`).
+pub(crate) fn misaligned(work: &Work, f: &FileWork, chain: &Chain) -> bool {
+    let all_calls: Vec<ToolCallId> = f
+        .history
+        .iter()
+        .map(|h| {
+            work.whos[h.who as usize].claims.calls[h.call as usize]
+                .call
+                .clone()
+        })
+        .collect();
+    chain.groups.iter().enumerate().any(|(g, group)| {
+        group.diff.is_none() || !matches!(attr::alignment(chain, g, &all_calls), Alignment::Aligned)
+    })
+}
+
 /// The narrative step of `file` in turn `ordinal` of session `s`.
 pub(crate) fn step_entry(
     work: &Work,

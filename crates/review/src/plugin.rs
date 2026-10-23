@@ -215,13 +215,12 @@ impl Review for Service {
         OverviewInterest::new(|| {})
     }
 
-    /// Step 5: the provider is not kept and never called.
     fn register_brief_rules(
         &self,
-        _: Arc<dyn BriefRules>,
-        _: ActivationToken,
+        provider: Arc<dyn BriefRules>,
+        token: ActivationToken,
     ) -> BriefRulesRegistration {
-        BriefRulesRegistration::new(|| {})
+        self.engine.register_brief_rules(provider, token)
     }
 }
 
