@@ -244,7 +244,18 @@ fn logs_tree_changes_failure_is_a_warn() {
             )],
         )],
     )]);
-    let d = fx.driven(vec![sessions]);
+    // A budget no machine runs out of: both records are computed on the
+    // interactive task, so the background completes only the failed one and
+    // finds nothing new. With the 5 ms default, a slow machine leaves the
+    // second record to the background, whose success starts another round
+    // and a third failure.
+    let d = Driven::with_budget(
+        Arc::clone(&fx.projects),
+        vec![sessions],
+        fx.dir.path(),
+        NOW,
+        Duration::from_secs(3600),
+    );
     let _ = open(&d, target(session_id));
 
     let gone_hex = format!("\"{}\"", gone.to_hex());
