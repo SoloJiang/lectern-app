@@ -44,8 +44,9 @@ fn canary_stays_out_of_app_logs() {
     run(&Noop, &Timeouts::RELEASE);
     let lines = capture.lines();
     assert!(
-        lines.iter().any(|l| l.contains("\"msg\":\"unrecognized argument\"")
-            && l.contains("\"index\":1")),
+        lines
+            .iter()
+            .any(|l| l.contains("\"msg\":\"unrecognized argument\"") && l.contains("\"index\":1")),
         "{lines:#?}"
     );
     capture.assert_absent(canary);

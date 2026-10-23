@@ -129,7 +129,10 @@ fn executor_gets_the_remaining_time() {
             _ => None,
         })
         .unwrap();
-    assert!(executor > Duration::ZERO && executor <= LONG.services, "{executor:?}");
+    assert!(
+        executor > Duration::ZERO && executor <= LONG.services,
+        "{executor:?}"
+    );
 }
 
 #[test]
@@ -146,7 +149,10 @@ fn timeouts_are_logged() {
         logging: Duration::from_millis(500),
     };
     let outcome = run(&fake, &timeouts);
-    assert!(matches!(outcome.executor, Shutdown::TimedOut { busy_workers: 2 }));
+    assert!(matches!(
+        outcome.executor,
+        Shutdown::TimedOut { busy_workers: 2 }
+    ));
     let lines = capture.lines();
     let kernel = lines
         .iter()
@@ -154,13 +160,17 @@ fn timeouts_are_logged() {
         .unwrap_or_else(|| panic!("{lines:#?}"));
     assert!(kernel.contains("\"waited_us\":"), "{kernel}");
     assert!(
-        lines.iter().any(|l| l.contains("\"msg\":\"executor shutdown timed out\"")
-            && l.contains("\"busy_workers\":2")),
+        lines
+            .iter()
+            .any(|l| l.contains("\"msg\":\"executor shutdown timed out\"")
+                && l.contains("\"busy_workers\":2")),
         "{lines:#?}"
     );
     // Written before logging shuts down.
     assert!(
-        lines.iter().any(|l| l.contains("\"msg\":\"quit finished\"")),
+        lines
+            .iter()
+            .any(|l| l.contains("\"msg\":\"quit finished\"")),
         "{lines:#?}"
     );
 }

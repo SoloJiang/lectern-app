@@ -1,6 +1,6 @@
 # logging 设计
 
-状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 5 项（`executor`）已实现（[#186](https://github.com/SoloJiang/lectern-app/pull/186)，见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 7 项（`agents`）已实现（[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见 [agents 设计「日志与诊断」](agents.md#日志与诊断)；命令行与凭据转发端点还没有实现，随 Analyze 接入）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；第 9 项已实现：`fs_watch`（[#191](https://github.com/SoloJiang/lectern-app/pull/191)，见 [fs_watch 设计「日志与诊断」](fs_watch.md#日志与诊断)）、`platform` 的 kqueue 线程（[#192](https://github.com/SoloJiang/lectern-app/pull/192)，见 [platform 设计「日志与诊断」](platform.md#日志与诊断)；只在 macOS 上编译）、`syntax`（[#188](https://github.com/SoloJiang/lectern-app/pull/188)，见 [file_reader 设计「日志与诊断」](file_reader.md#日志与诊断)）、`code_intel`（[#193](https://github.com/SoloJiang/lectern-app/pull/193)，见 [code_intel 设计「日志与诊断」](code_intel.md#日志与诊断)）、`i18n`（[#190](https://github.com/SoloJiang/lectern-app/pull/190)，见 [i18n 设计「日志与诊断」](i18n.md#日志与诊断)），实际的调用处数量见各设计的「与设计的差异」；第 10 项（非 tool crate 开启 `clippy::print_stderr`、`clippy::print_stdout`）已实现（[#195](https://github.com/SoloJiang/lectern-app/pull/195)，见「实际验证」）；其余步骤尚未实现（见「验收」）。
+状态：实现中。第 1 步（`logging` crate、`clippy.toml`、架构检查、`log/` 基准，[#177](https://github.com/SoloJiang/lectern-app/pull/177)）已实现；第 2 步（`platform` 的 `dirs::logs`、`system::os_version`）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)，见 [platform 设计「日志目录与系统版本」](platform.md#日志目录与系统版本)）；第 3 步（「对其他 crate 的要求」第 3 项，`app`）已实现（[#203](https://github.com/SoloJiang/lectern-app/pull/203)，见 [app 设计](app.md)；`app/cold_start` 随 [bench 设计](bench.md)第 5 步验证）；「对其他 crate 的要求」第 4 项（`kernel`）已实现（[#182](https://github.com/SoloJiang/lectern-app/pull/182)，见 [kernel 设计「日志与诊断」](kernel.md#日志与诊断)）；第 5 项（`executor`）已实现（[#186](https://github.com/SoloJiang/lectern-app/pull/186)，见 [executor 设计「日志与诊断」](executor.md#日志与诊断)）；第 6 项（`cache`）已实现（[#181](https://github.com/SoloJiang/lectern-app/pull/181)，见 [cache 设计「日志与诊断」](cache.md#日志与诊断)）；第 7 项（`agents`）已实现（[#189](https://github.com/SoloJiang/lectern-app/pull/189)，见 [agents 设计「日志与诊断」](agents.md#日志与诊断)；命令行与凭据转发端点还没有实现，随 Analyze 接入）；第 8 项（`review`）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见 [review 设计「日志与诊断」](review.md#日志与诊断)）；第 9 项已实现：`fs_watch`（[#191](https://github.com/SoloJiang/lectern-app/pull/191)，见 [fs_watch 设计「日志与诊断」](fs_watch.md#日志与诊断)）、`platform` 的 kqueue 线程（[#192](https://github.com/SoloJiang/lectern-app/pull/192)，见 [platform 设计「日志与诊断」](platform.md#日志与诊断)；只在 macOS 上编译）、`syntax`（[#188](https://github.com/SoloJiang/lectern-app/pull/188)，见 [file_reader 设计「日志与诊断」](file_reader.md#日志与诊断)）、`code_intel`（[#193](https://github.com/SoloJiang/lectern-app/pull/193)，见 [code_intel 设计「日志与诊断」](code_intel.md#日志与诊断)）、`i18n`（[#190](https://github.com/SoloJiang/lectern-app/pull/190)，见 [i18n 设计「日志与诊断」](i18n.md#日志与诊断)），实际的调用处数量见各设计的「与设计的差异」；第 10 项（非 tool crate 开启 `clippy::print_stderr`、`clippy::print_stdout`）已实现（[#195](https://github.com/SoloJiang/lectern-app/pull/195)，见「实际验证」）；其余步骤尚未实现（见「验收」）。
 
 对应 issue [#170](https://github.com/SoloJiang/lectern-app/issues/170)。需求来自用户 2026-10-22 的要求：运行日志可追溯，用户可以主动开启更详细的日志落盘。决策和关键约束见 [ADR 0046](../adr/0046.md)，本文写接口、记录格式、缓冲、滚动、过滤、隐私处理和测试。`logging` 在 kernel 层，任何 crate 都可以依赖它（[工作区与 crate 划分](cargo-workspace.md)）。
 
@@ -600,6 +600,12 @@ level     := off | error | warn | info | debug | trace
 - `python3 scripts/test_check_architecture.py`（21 个测试，新增 `PrintLintRule` 的两个）通过；`just check`、`just test`（2255 个测试）、`just doctest`、`just deny` 通过。
 - **没有在 Linux 上编译的**：`app` 和 `ui`（依赖 GPUI，不在 Linux 的 clippy 范围里）。用 grep 确认它们的源码里没有打印和直接写 stdout、stderr 的代码；它们同样经 `[lints] workspace = true` 继承这两条 lint，由 macOS CI 的 `just check` 验证。
 
+第 3 步（「对其他 crate 的要求」第 3 项，`app`，[#203](https://github.com/SoloJiang/lectern-app/pull/203)），macOS 27.0.1（Apple M5 Pro，Rust 1.97.0）：
+
+- `startup_writes_a_header_and_an_end_record`、`log_file_is_created_after_the_first_frame`、`cli_and_env_filters_reach_the_header`、`system_quit_writes_the_end_record`、`second_run_sees_a_clean_previous_run` 通过（[app 设计「测试」](app.md#测试)）。
+- 1 s 的时限手动确认：发布构建从终端启动，文件头的 `up` 是 257 ms；按 ⌘Q 后最后一行是 `run end`。详见 [app 设计「实际验证」](app.md#实际验证)。
+- 冷启动基准 `app/cold_start` 还没有实现，这一条随 bench 第 5 步验证。
+
 ## 与设计的差异
 
 第 1 步（[#177](https://github.com/SoloJiang/lectern-app/pull/177)）：
@@ -639,3 +645,8 @@ level     := off | error | warn | info | debug | trace
 
 - **不等全部 crate 接入就开启。** 原文写「各 crate 接入完成后」，而 `app`（第 3 项）和 `git`、`project`、`forge`、`terminal`、`usage`、视图层还没有接入。清点下来它们运行时都不打印（「实际验证」），现在开启不需要任何例外，还能保证它们接入之前不新增打印。
 - **测试代码、构建脚本和 tool crate 的例外写成了规则。** 原文只说「非 tool crate」。测试代码经 `clippy.toml` 的 `allow-print-in-tests` 放过；构建脚本经 stderr 向 Cargo 报错，`i18n/build.rs` 在 `main` 上 `#[allow(clippy::print_stderr)]`；tool crate 不能在 `Cargo.toml` 里覆盖工作区的 lint（`[lints] workspace = true` 不能和其他 lint 并用），所以在打印的目标根上写 `#![allow]`。架构检查新增一条（[CI「架构规则检查」](ci.md#架构规则检查)第 8 条），防止非 tool crate 用 `allow` 关掉它们。
+
+「对其他 crate 的要求」第 3 项（`app`，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）：
+
+- **参数解析在 `install_early` 之前。** 原文写 `main` 第一行 `install_early`。`--log` 的值是 `install_early` 的输入，所以先做纯内存的参数解析，再 `install_early`；两者之间不记录、不做 IO（[app 设计「启动顺序」](app.md#启动顺序)）。
+- **`Logging` 作为 GPUI 全局对象 `Started` 的一个字段保存**，设置与导出命令实现时从那里取；本步没有设置与导出界面。

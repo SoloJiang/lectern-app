@@ -14,7 +14,10 @@ fn run(args: &[&str]) -> Args {
 #[test]
 fn log_value_forms() {
     assert_eq!(run(&["--log", "debug"]).log.as_deref(), Some("debug"));
-    assert_eq!(run(&["--log=cache=trace"]).log.as_deref(), Some("cache=trace"));
+    assert_eq!(
+        run(&["--log=cache=trace"]).log.as_deref(),
+        Some("cache=trace")
+    );
     // The last one wins.
     assert_eq!(
         run(&["--log", "debug", "--log=warn"]).log.as_deref(),

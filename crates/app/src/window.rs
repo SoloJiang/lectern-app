@@ -1,9 +1,8 @@
 //! The skeleton window and the app menu (docs/design/app.md「界面」).
 
 use gpui::{
-    App, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render, TitlebarOptions,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div, prelude::*, px,
-    size,
+    App, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render, TitlebarOptions, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
 };
 use lectern_i18n::{Strings, keys};
 
