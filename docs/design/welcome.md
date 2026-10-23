@@ -97,6 +97,10 @@ pub enum Notice {
     LanguageNotSaved,
 }
 
+/// `OpenError` 去掉附加文字后的种类，对应五个 `welcome-open-failed-*` 键。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpenFailure { NotFound, NotADirectory, PermissionDenied, RepoUnreadable, Io }
+
 pub enum RecentState {
     /// 文件还没有读完（`started` 到第 1 步结束之间）。
     Loading,
@@ -105,7 +109,8 @@ pub enum RecentState {
 }
 
 pub enum DiscoveredState {
-    /// `welcome-discovery` 没有激活（会话来源的插件没有装、失败或已停用）：显示空状态，不显示骨架。模型的初始值。
+    /// `welcome-discovery` 没有激活：模型的初始值，也是它停用（会话来源的最后一个提供者失败或停用）后的值。显示空状态，不显示骨架。
+    /// 没有会话来源的 profile 必须同时不装 `welcome-discovery`（`PluginSet::validate` 拒绝没有提供者的 `requires`）。
     Unavailable,
     /// `welcome-discovery` 已激活、第一次重算还没完成。
     Pending,
@@ -189,6 +194,12 @@ pub struct RecentEntry {
     /// 行上显示 `welcome-recent-missing`，再次打开成功后清除。
     #[serde(skip)]
     pub missing: bool,
+    /// 行上显示的会话数和运行中数：`discover::build` 按 `key` 算出（「发现的文件夹」），随第 3 步换进快照；
+    /// 只在内存里，不写进文件；`welcome-discovery` 没有激活时为 0。
+    #[serde(skip)]
+    pub sessions: u32,
+    #[serde(skip)]
+    pub running: u32,
 }
 ```
 
@@ -246,13 +257,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 主线程：⌫ ─▶ WelcomeModel::remove_recent(path) ─▶ 立即换快照 ─▶ 安排写文件
 ```
 
-1. 读最近项目（`welcome` 的 `started` 提交，`Background`，持有 `busy()` 守卫）：读 `data_dir/recent.json`；文件不存在时 `Ready(空)`，不记日志；解析失败或版本不认识时记 warn、`Ready(空)`。文件通常只有几 KB，读与解析 < 1 ms。
+1. 读最近项目（`welcome` 的 `started` 提交，`Background`，持有 `busy()` 守卫）：读 `data_dir/recent.json`；文件不存在时 `Ready(空)`，不记日志；解析失败或版本不认识时记 warn、`Ready(空)`。文件通常只有几 KB，读与解析 < 1 ms。读完后对 `Projects::open_projects()` 里的每个项目按第 2 步记录一次：`restore` 的 `OpenProject` 可能在本插件的 token 变为 `Live` 之前就发出了 `Opened`（[kernel 设计「激活时的上下文」](kernel.md#激活时的上下文)：这段时间的事件收不到，「需要初始状态的插件在 `started` 里主动读取」），不补这一步，恢复的项目就不进最近项目。最后置第 3 步的脏标记：`welcome-discovery` 的第一次重算可能先于本步完成，那时最近项目会短暂出现在发现列表里，脏标记让它再算一次。`started` 同时把 `PluginHandle` 存进模型，供第 6 步提交写文件的任务。
 2. 记录打开成功（`welcome` 对 `ProjectEvent::Opened { Ok(key) }` 的监听安排，`Background`）：`Projects::snapshot(key)` 在 `Opened` 时已有第 1 代（[project 设计「事件」](project.md#事件)），从它取 `path`、`key`、`name`；清掉 `opening`，更新内存里的 `RecentList`，先换快照、再写文件：在 `data_dir` 下写 `recent.json.tmp`，`rename` 成 `recent.json`；`data_dir` 不存在时先 `create_dir_all`（只建这一级）。写失败记 warn，内存里的列表照常使用。这一步与 `Opened` 来自 `restore`、⌘O 还是本屏幕无关：任何成功打开的项目都进入最近项目，所以恢复上次项目时它也在列表最前。最后置第 3 步的脏标记（`welcome-discovery` 没有激活时标记无人消费，无害）。
 3. 重算发现列表（`welcome-discovery`，`Background`，持有 `busy()`）：对 `ServiceSet<dyn SessionSource>::for_each` 的每个来源取 `sessions()`（取锁复制 `Arc`），取 `open_projects()` 和模型里当前的 `RecentList`，调 `discover::build`，把发现列表和最近项目行的计数一起换进快照。触发：`started`、每次 `SessionsChanged`、`ProjectEvent::Opened` / `Closed`、最近项目变化（第 2、6 步置的脏标记）。合并：模型里有一个「排队中」标记，已经排了一个任务时后续触发只置脏标记，任务结束时发现脏标记就再跑一次，所以发现阶段的连续事件不会堆积任务。
 4. 唤醒视图：`WelcomeModel` 持有 `futures::channel::mpsc::unbounded` 的发送端（`subscribe` 登记）；视图建立时 `cx.spawn` 一个前台任务循环 `await` 接收端，每收到一项就 `this.update(cx, |_, cx| cx.notify())`。发送端的 `wake` 经 GPUI 的平台分发器唤醒主线程（与 [workspace 设计「数据流与线程」](workspace.md#数据流与线程)的主线程队列同一机制），任何线程都能发，不轮询。视图 drop 时守卫注销，之后的 `wake` 不做任何事。
 5. 打开：最近项目和发现的文件夹：视图在主线程上先 `model.begin_open(path, source)`（清 `notice`、记 `opening`），再 `dispatch(WorkspaceCommand::OpenProject(path))`；`opening` 有值期间，视图对同一路径的再次 ↵ 或点击不发出命令，对其他路径照常（`workspace` 自己排队）。Open Folder 按钮：`model.clear_notice()` 后 `dispatch(PromptOpenProject)`（⌘O 是 `workspace` 的全局绑定，不经本视图，只有 `workspace` 的流程）。`workspace` 问守卫、调 `Projects::open`，`Opened { Ok }` 到达后换基底屏幕、drop 本视图，本 crate 的监听同时清 `opening`（第 2 步）。`Opened { Err(e) }` 时 `workspace` 停在 Welcome 并记 warn，本 crate 的监听把 `Notice::OpenFailed(e 的种类)` 放进快照、清 `opening`；`opening` 有值并且 `e` 是 `NotFound` / `NotADirectory` 时，`path` 等于 `opening.path` 的最近项目标 `missing`。`Opened` 不带路径（[project 设计「事件」](project.md#事件)只有 `OpenRequest`），所以本屏幕发起的打开同一时刻只能有一个在进行，`opening` 就是那一个；不是本屏幕发起的失败（`restore` 的路径已不存在、⌘O 选的目录不可读）只显示提示，不标 `missing`。
-6. 移除最近项目：视图调 `model.remove_recent(path)`：在调用线程（主线程）上只改内存里的列表并换快照（常数时间，不做 IO），然后排一个 `Background` 任务写文件（同第 2 步），再置第 3 步的脏标记（被遮住的发现项可能重新出现）。
-7. 语言选择：视图在主线程上调 `lectern_ui::set_locale(locale, cx)`（立即换全局 `Strings`、刷新窗口），再调 `platform::system::set_language_override(tag, done)`（立即返回，写入在 `platform` 的串行队列里，[i18n 设计「数据流与线程」](i18n.md#数据流与线程)）；`done` 收到 `Err` 时调 `model.language_not_saved()`，视图显示 `welcome-language-not-saved`（i18n 设计「状态与异常」要求的一次提示）。选「跟随系统」时 `locale = Locale::negotiate(platform::system::system_languages())`，`tag` 为 None。分段控件的初始选项来自 `platform::system::language_override()`（一次内存里的偏好读取，主线程，视图建立时读一次），有值时用 `Locale::negotiate([tag])` 转成 `Locale`。
+6. 移除最近项目：视图调 `model.remove_recent(path)`：在调用线程（主线程）上只改内存里的列表并换快照（常数时间，不做 IO），然后用 `started` 存下的 `PluginHandle::own_with` 排一个 `Background` 任务写文件（同第 2 步；`welcome` 已停用时 `own_with` 返回 false，不写，视图这时也已经被 `workspace` 撤下），再置第 3 步的脏标记（被遮住的发现项可能重新出现）。
+7. 语言选择：视图在主线程上调 `lectern_ui::set_locale(locale, cx)`（立即换全局 `Strings`、刷新窗口），再调 `platform::system::set_language_override(tag, done)`（立即返回，写入在 `platform` 的串行队列里，[i18n 设计「数据流与线程」](i18n.md#数据流与线程)）；`done` 收到 `Err(WriteFailed)` 时调 `model.language_not_saved()`（`Superseded` 是被更新的选择顶掉，不提示），视图显示 `welcome-language-not-saved`（i18n 设计「状态与异常」要求的一次提示）。选「跟随系统」时 `locale = Locale::negotiate(platform::system::system_languages())`，`tag` 为 None。分段控件的初始选项来自 `platform::system::language_override()`（一次内存里的偏好读取，主线程，视图建立时读一次），有值时用 `Locale::negotiate([tag])` 转成 `Locale`。
 8. UI 线程上不做 IO、解析和 git 操作：视图只调 `snapshot()`（取锁复制）、`dispatch`、`begin_open` / `clear_notice` / `remove_recent`（改内存）、`set_locale`、`language_override`（内存里的偏好）。所有 `std::fs` 调用都在 `src/recent/store.rs`，只从 `Background` 任务调用（验收用 `rg` 检查）。
 9. 派生数据：没有以内容为键的派生数据（架构规则 5 不适用）。发现列表以会话列表的代数为准：任务开始时记下每个来源的 `generation`，结束时有更新的来源就按第 3 步的脏标记再跑一次。
 10. `welcome-discovery` 停用（会话来源的最后一个提供者停用、本插件失败）：kernel 先撤销监听、关闭闸门（排队中的重算丢弃），最后 drop `Active`，它把 `discovered` 置为 `Unavailable`、换快照并唤醒；列表显示空状态。重新激活时回到 `Pending`。
@@ -341,7 +352,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 | 最近项目文件解析失败或版本不认识 | 记 warn，`Ready(空)`；下一次打开项目时覆盖写入 |
 | 写文件失败（目录不可写、磁盘满） | 记 warn，内存里的列表照常用；下一次变化再试 |
 | 列表还没到达（`Loading` / `Pending`，< 100 ms） | 只显示标题行；≥ 100 ms 显示骨架（2 行）；不显示进度（读文件和发现都不可取消，且远小于 1 s） |
-| 会话来源的插件没有装、失败或停用（`welcome-discovery` 没有激活，`Unavailable`） | 显示 `welcome-discovered-empty`，不显示骨架；最近项目行不显示会话数 |
+| `welcome-discovery` 没有激活（profile 里没有装它，或会话来源的提供者失败、停用后它被停用；`Unavailable`） | 显示 `welcome-discovered-empty`，不显示骨架；最近项目行不显示会话数 |
 | 会话目录为空、所有会话都在已打开或最近项目里 | `Ready(空)`，显示 `welcome-discovered-empty` |
 | 会话的 `Place::Pending`、`Missing`、`Unresolvable` | 跳过；归位完成后随下一次 `SessionsChanged` 出现 |
 | 打开失败（`Opened { Err }`） | 停在 Welcome（`workspace`），显示一行 `welcome-open-failed-*`，清 `opening`（同一行可以再试）；本屏幕发起、且是 `NotFound` / `NotADirectory` 时对应的最近项目标 `missing`，行上显示 `welcome-recent-missing`，可以移除；下一次 `begin_open` / `clear_notice` 时清空提示 |
@@ -378,7 +389,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - 纯函数（`#[test]`，不依赖 GPUI）：
   - `recent::push_front_dedupes_by_path_and_caps_at_10`、`recent::remove_keeps_order`、`recent::decode_rejects_unknown_version`、`recent::decode_ignores_unknown_fields`、`recent::encode_roundtrips`（用 `fixtures/recent_v1.json`）、`recent::entry_from_snapshot_joins_root_and_opened_at`（子目录打开、linked worktree、裸仓库三种）。
   - `discover::groups_by_project_and_takes_the_newest_root`、`discover::root_strips_rel_from_cwd`、`discover::skips_open_projects_and_recent_keys`（同一仓库的其他 worktree 里的会话不再出现）、`discover::skips_pending_missing_and_unresolvable`、`discover::running_needs_open_turn_within_10_min`、`discover::subagents_count_as_sessions_not_running`、`discover::caps_at_50`、`discover::recent_rows_get_counts_by_key_from_located_and_resolved`。
-- 模型（`#[test]`，`TestKernel` 注入假的 `dyn Projects`、`dyn SessionSource`、`dyn Contributions`，executor 用测试队列）：`welcome_started_loads_the_file`、`discovery_started_builds_the_list`、`welcome_activates_without_any_session_source`（只装 `welcome`：屏幕已注册，`discovered` 是 `Unavailable`）、`discovery_drop_sets_unavailable`、`opened_records_a_recent_entry_with_its_key_and_writes_the_file`、`opened_without_a_snapshot_records_nothing`、`sessions_changed_rebuilds_once_when_events_pile_up`（三次事件只跑两次）、`remove_recent_updates_the_snapshot_before_writing`、`begin_open_then_error_marks_the_entry_missing_and_clears_opening`、`error_without_opening_only_shows_the_notice`、`wake_is_called_once_per_snapshot`。
+- 模型（`#[test]`，`TestKernel` 注入假的 `dyn Projects`、`dyn SessionSource`、`dyn Contributions`，executor 用测试队列）：`welcome_started_loads_the_file`、`welcome_started_records_projects_opened_before_it`（假 `Projects` 在 `started` 之前已有一个打开的项目，`Opened` 没有送达，列表最前仍是它）、`discovery_started_builds_the_list`、`recent_loaded_after_discovery_triggers_a_rebuild`（先发现后读文件，最近项目不留在发现列表里）、`welcome_activates_without_any_session_source`（只装 `welcome`：屏幕已注册，`discovered` 是 `Unavailable`）、`discovery_drop_sets_unavailable`、`opened_records_a_recent_entry_with_its_key_and_writes_the_file`、`opened_without_a_snapshot_records_nothing`、`sessions_changed_rebuilds_once_when_events_pile_up`（三次事件只跑两次）、`remove_recent_updates_the_snapshot_before_writing`、`begin_open_then_error_marks_the_entry_missing_and_clears_opening`、`error_without_opening_only_shows_the_notice`、`wake_is_called_once_per_snapshot`。
 - `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`）：`first_render_shows_title_and_open_folder_before_any_snapshot`（模型还是 `Loading` / `Pending` 时的语义树只有标题、按钮、分段控件和两个列表标题）、`skeleton_appears_after_100ms_and_rows_replace_it`、`click_and_enter_dispatch_open_project_once`（`opening` 期间对同一行再按 ↵ 不重复，失败后可以再试）、`open_folder_dispatches_prompt`、`arrows_move_selection_across_both_lists`、`backspace_removes_the_selected_recent_and_moves_selection`、`open_error_shows_a_notice_and_clears_on_the_next_open`、`discovered_rows_update_on_wake`、`unavailable_discovery_shows_the_empty_state_without_a_skeleton`、`language_picker_switches_strings_and_calls_platform`（假的 `platform` 写入函数经 `test-support` 注入；失败时显示 `welcome-language-not-saved`）、`actions_are_triggerable_by_name`（探针契约）。
 - 语义树：`welcome_tree_empty`、`welcome_tree_with_lists`、`welcome_tree_with_error` 的 insta 快照（UI 探针完成后接入；之前用 `semantic::Recorder` 的记录序列化）。
 - 日志：`canary_stays_out_of_welcome_logs`。
