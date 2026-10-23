@@ -148,6 +148,8 @@ const BENCHES: &[Bench] = &[
     review::ROWS_FIRST,
     review::MARK_SEEN_5000,
     review::ATTRIBUTE_SESSION_50,
+    review::REFRESH_ONE,
+    review::PLUGIN_ACTIVATE,
     syntax::FIRST_SCREEN,
     syntax::FULL_PARSE_1MIB,
     syntax::CHAIN_16MIB,

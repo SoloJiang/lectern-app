@@ -31,8 +31,8 @@ use lectern_services::session::{
     ToolKind, TurnItem,
 };
 
-use super::Engine;
 use super::narrative::{self, Own, Placement};
+use super::{Engine, Held};
 use crate::chain::attribute::Owner;
 use crate::claims::{self, CachedClaims, ClaimKind, Claims, Relative};
 use crate::cutoff::{self, Record, Table};
@@ -233,11 +233,10 @@ struct Resolved {
     own: Vec<SessionSummary>,
 }
 
-pub(crate) fn source_of<'a>(
-    engine: &'a Engine,
-    key: &SessionKey,
-) -> Option<&'a Arc<dyn SessionSource>> {
-    engine.cfg.sources.iter().find(|s| s.id() == key.source)
+pub(crate) fn source_of(engine: &Engine, key: &SessionKey) -> Option<Held<dyn SessionSource>> {
+    (engine.cfg.sources)()
+        .into_iter()
+        .find(|s| s.id() == key.source)
 }
 
 fn resolve(engine: &Engine, target: &ReviewTarget) -> Result<Resolved, ReviewError> {
@@ -837,13 +836,15 @@ pub(crate) fn prepare(
         })
         .collect();
 
+    // Held for the whole loop: one admission, not one per file.
+    let projects = (engine.cfg.projects)();
     let mut files: Vec<FileWork> = chosen
         .iter()
         .map(|&i| {
             let f = &list.files[i];
             let path = &f.path.0;
             let package = std::str::from_utf8(path).ok().and_then(|p| {
-                match engine.cfg.projects.locate(&git.root.join(p))?.package {
+                match projects.as_ref()?.locate(&git.root.join(p))?.package {
                     PackageMatch::Found(dir) => Some(dir),
                     PackageMatch::None | PackageMatch::NotLoaded => None,
                 }
@@ -1157,7 +1158,7 @@ fn other_sessions(
     window_ms: i64,
 ) -> Vec<SessionSummary> {
     let mut out: Vec<SessionSummary> = Vec::new();
-    for source in engine.cfg.sources.iter() {
+    for source in (engine.cfg.sources)() {
         let list = source.sessions();
         out.extend(
             list.sessions

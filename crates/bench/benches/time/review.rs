@@ -5,20 +5,31 @@
 //! session's review on the fixture of「每天的仓库规模」(2000 commits, 300
 //! reflog records, 50 sessions), cold and warm, until it settles; the
 //! cutoff table from scratch; the first file's rows; a seen mark on 5000
-//! files; the other files' attribution.
+//! files; the other files' attribution. Step 4: the refresh after the
+//! agent's next turn and file change, and the plugin's activation.
 
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use std::sync::Arc;
+
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
+use lectern_cache::{Budgets, Cache, Config as CacheConfig};
+use lectern_executor::Executor;
+use lectern_fs_watch::Config as WatchConfig;
+use lectern_fs_watch::testing::{FakeBackend, manual};
+use lectern_kernel::testing::TestKernel;
+use lectern_review::ReviewDeps;
 use lectern_review::testing::{
-    ChainRun, CutoffRun, Driven, LogLoad, MarkSeenFixture, SessionFixture, chain_fixture, load_log,
-    write_log,
+    ChainRun, CutoffRun, Driven, FakeProjects, FakeSessions, LogLoad, MarkSeenFixture,
+    SessionFixture, chain_fixture, load_log, write_log,
 };
+use lectern_services::project::Projects;
 use lectern_services::review::{
     AttributionState, LoadState, Need, ReviewCommand, ReviewEvent, ReviewId, RowsKey,
 };
+use lectern_services::session::SessionSource;
 
 /// Reading a 16 000-record log (about 5.3 MiB) whole and building its
 /// index, as opening a project does in the background.
@@ -73,6 +84,21 @@ pub const ROWS_FIRST: Bench = Bench {
 pub const MARK_SEEN_5000: Bench = Bench {
     id: "review/mark_seen_5000",
     run: mark_seen_5000,
+};
+
+/// The agent adds a turn and a line to a file of the open review: from the
+/// fs_watch batch and the `SessionsChanged` to the first snapshot that shows
+/// both (the engine without the watches, `testing::Driven`).
+pub const REFRESH_ONE: Bench = Bench {
+    id: "review/refresh_one",
+    run: refresh_one,
+};
+
+/// The kernel's four timings of the plugin's activation, in process under a
+/// `TestKernel` with mock services (until the process-level benchmarks).
+pub const PLUGIN_ACTIVATE: Bench = Bench {
+    id: "plugin/review/activate",
+    run: plugin_activate,
 };
 
 /// The chains of the other 49 files built and attributed, every step's
@@ -366,4 +392,124 @@ fn attribute_session_50(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     Ok(vec![
         Measured::new("review/attribute_session_50", Value::Time(time)).with_note(Some(note(ctx))),
     ])
+}
+
+fn refresh_one(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let f = fixture(ctx)?;
+    let driven = f.driven(&ctx.scratch().join("refresh"));
+    let (_, _, id) = open_once(&driven, &f)?;
+    driven.capture_snapshots();
+    let turns = |driven: &Driven| {
+        driven
+            .snapshot(id)
+            .map_or(0, |s| s.turns.as_ref().map_or(0, |t| t.len()))
+    };
+    let mut want = turns(&driven);
+    // The file's worktree side: the snapshot must show the new content too.
+    let side = |driven: &Driven, path: &str| {
+        driven.snapshot(id).and_then(|s| {
+            s.files
+                .iter()
+                .find(|f| f.change.path.0.as_ref() == path.as_bytes())
+                .map(|f| f.change.new)
+        })
+    };
+    let mut before = side(&driven, &f.agent_path());
+    let mut n = 0;
+    let time = sample(ctx, |_| {
+        let (path, event) = f.agent_step(n);
+        n += 1;
+        want += 1;
+        driven.take_events();
+        driven.take_snapshots();
+        let started = Instant::now();
+        // The batch of the worktree's watch, then the source's event: the
+        // first request starts the round, the second is merged after it.
+        driven.refresh(id, Some(&[path.as_str()]));
+        driven.sessions_changed(&event);
+        driven.run();
+        let snapshots = driven.take_snapshots();
+        let events = driven.take_events();
+        let first = events
+            .iter()
+            .zip(snapshots.iter())
+            .find(|(_, s)| {
+                s.turns.as_ref().is_some_and(|t| t.len() == want)
+                    && s.files
+                        .iter()
+                        .find(|f| f.change.path.0.as_ref() == path.as_bytes())
+                        .is_some_and(|f| Some(&f.change.new) != before.as_ref())
+            })
+            .map(|((_, at), _)| *at)
+            .ok_or_else(|| BenchError::new("no snapshot with the new turn and content"))?;
+        before = side(&driven, &path);
+        Ok(first.saturating_duration_since(started))
+    })?;
+    Ok(vec![
+        Measured::new("review/refresh_one", Value::Time(time)).with_note(Some(format!(
+            "{}; one turn and one file of 300 lines",
+            note(ctx)
+        ))),
+    ])
+}
+
+fn plugin_activate(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let rounds = ctx.scale(30, 1);
+    let mut samples = Vec::new();
+    for round in 0..=rounds {
+        let executor = Executor::manual();
+        let (watcher, _driver) =
+            manual(FakeBackend::new(), executor.clone(), WatchConfig::default());
+        let dir = ctx.scratch().join(format!("activate-{round}"));
+        let (_, review) = lectern_review::plugin(ReviewDeps {
+            executor: executor.clone(),
+            cache: Cache::new(CacheConfig {
+                root: dir.join("cache"),
+                budgets: Budgets::default(),
+                ui_thread: None,
+            }),
+            watcher,
+            data_dir: dir.join("review"),
+            git_ceilings: Arc::from(Vec::new()),
+        });
+        let kernel = TestKernel::new(review)
+            .mock::<dyn Projects>(Arc::new(FakeProjects::new(
+                &dir.join("none.git"),
+                &dir.join("none"),
+            )))
+            .mock::<dyn SessionSource>(Arc::new(FakeSessions::from_script(
+                "session-claude-code",
+                r#"{"sessions": []}"#,
+            )));
+        kernel
+            .activate()
+            .map_err(|e| BenchError::debug("activate", e))?;
+        // `TestKernel`'s name for the plugin under test.
+        let status = kernel
+            .inner()
+            .and_then(|k| k.status().into_iter().find(|s| s.id == "plugin-under-test"))
+            .ok_or_else(|| BenchError::new("no activation timings"))?;
+        let took = [
+            status.manifest_time,
+            status.activate_time,
+            status.commit_time,
+            status.started_time,
+        ]
+        .into_iter()
+        .flatten()
+        .sum::<Duration>();
+        // Round 0 warms up process-wide lazy state.
+        if round > 0 {
+            samples.push(took);
+        }
+        if executor.run_until_idle() != 0 || dir.join("review").exists() {
+            return Err(BenchError::new(
+                "activation submitted a task or wrote a file",
+            ));
+        }
+    }
+    Ok(vec![Measured::new(
+        "plugin/review/activate",
+        Value::Time(Samples(samples)),
+    )])
 }

@@ -428,7 +428,7 @@ crates/bench/
   tests/fixtures/     本 crate 自己的小样本（目前没有）
 ```
 
-三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)），`log/idle_memory` 及其场景也是；`app/bundle_size`、`app/dmg_size` 属于 `Package`；`plugin/usage/activate` 在进程级插件基准实现之前属于 `Time`（`TestKernel` 下进程内取 kernel 的四段耗时）；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
+三个基准目标都是 `harness = false`，入口都是 `lectern_bench::main`，各自把自己是哪个 `Target` 传给它。`time` 与 `memory` 分开，是为了计时不经过计数分配器。预算表里的 `Budget::target` 规定每条预算由哪个目标产出：`*_bytes`、`*/resident`（及其场景，如 `fs_watch/resident_100k`）、`*_peak` 这类进程内的字节数属于 `Memory`，`plugin/code-intel/resident_*` 也是（进程级基准实现之前，`code_intel` 的常驻份额在进程内用计数分配器测量，见 [code_intel 设计「与设计的差异」](code_intel.md#与设计的差异)），`log/idle_memory` 及其场景也是；`app/bundle_size`、`app/dmg_size` 属于 `Package`；`plugin/usage/activate`、`plugin/review/activate` 在进程级插件基准实现之前属于 `Time`（`TestKernel` 下进程内取 kernel 的四段耗时）；其余的 `app/*` 和 `plugin/*`、`lsp/*`、`baseline/*` 属于 `Process`；剩下的属于 `Time`。
 
 另有一个 `src/bin/lectern-bench-report.rs`，有两个子命令：`merge` 合并各目标的报告，`package --app <.app> --dmg <.dmg>` 测量安装包、写 `report-package.json`（见「报告」）。它只用本 crate 的普通依赖。
 
@@ -657,6 +657,8 @@ crates/bench/
 | `review/open_session_50`、`review/open_session_50_warm` | 中位数 < 35 ms / < 20 ms（`testing::Driven` 驱动审阅引擎，不经插件；夹具 `testing::SessionFixture`：2000 个提交、300 条 HEAD reflog 记录（10 次分支切换）、50 个会话，审阅对象的会话 20 轮、120 次改动调用，50 个 300 行的改动文件。从 `open` 到第一份 `Ready` 快照：新的缓存目录、`review.*` 全空 / 同一缓存目录上的新引擎、`review.*` 都已命中；缓存的数据库文件在计时前已打开） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/open_session_settled`、`review/cutoffs_cold`、`review/attribute_session_50` | 只记录（同一夹具：缓存全空时从 `open` 到最后一份快照；300 条记录的 `tree_changes` 全部未命中时建出截止时刻表；其余 49 个文件的改动链与归因，每一步都 `load`，不含缓存的读写） | [review](review.md#性能) | `review` 第 3 步 |
 | `review/rows_first`、`review/mark_seen_5000` | 中位数 < 3 ms / < 0.2 ms（同一夹具、审阅已完成时第一个文件的 `Prepare` 到 `Prepared`；`testing::MarkSeenFixture` 的 5000 个文件的会话外改动上 `command(MarkSeen)` 到快照替换） | [review](review.md#性能) | `review` 第 3 步 |
+| `review/refresh_one` | 中位数 < 20 ms（同一夹具、审阅已完成时，agent 追加一轮并改写第一个改动文件：从 worktree 的路径批次和来源的 `SessionsChanged` 到第一份同时显示新一轮和新内容的快照；`testing::Driven` 不经插件和 fs_watch，批次与事件直接交给引擎） | [review](review.md#性能) | `review` 第 4 步 |
+| `plugin/review/activate` | 中位数 < 1 ms（kernel 记下的四段耗时之和，`TestKernel` 下进程内测量；激活没有提交任务也没有写文件；第 5 步的进程级插件基准实现后改为 `Process`） | [review](review.md#性能) | `review` 第 4 步 |
 | `usage/ingest_append_4k`、`usage/backfill_batch` | 中位数 < 5 ms / < 150 ms（`lectern_usage::testing::Scenario` 不经插件驱动存储；夹具 `testing::heavy_days`：30 个重度日、20 个仓库、约 18 万条事实行。活跃会话追加约 4 KiB（一个轮次开始、两条用量记录）从读取到游标提交；一批 8 MiB 的合成会话（约 390 轮、1170 条用量记录）的读取与入库） | [usage](usage.md#性能) | `usage` 第 1 步 |
 | `usage/backfill_large_session` | 每批最大值 < 300 ms、中位数 < 150 ms（同一夹具上一个 200 MB 的合成会话按 8 MiB 分批补读，每批一个样本；来源交出的字节合计超过日志的 1.2 倍时基准出错。定稿在 `usage` 第 4 步加入） | [usage](usage.md#性能) | `usage` 第 1 步 |
 | `usage/project_30d`、`usage/all_projects_30d` | 中位数 < 50 ms / < 80 ms（同一夹具：一个项目 / 所有项目的 30 天快照从事实行整体计算，即快照任务的工作） | [usage](usage.md#性能) | `usage` 第 1 步 |

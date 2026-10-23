@@ -266,6 +266,32 @@ impl SessionFixture {
         })
     }
 
+    /// The file [`SessionFixture::agent_step`] changes.
+    pub fn agent_path(&self) -> String {
+        self.src[0].clone()
+    }
+
+    /// The agent's next step on the target session (`review/refresh_one`):
+    /// a turn whose edit rewrites the first changed file with one more
+    /// line, and the same content written to the worktree. Returns the
+    /// file's path and the `SessionsChanged` the source recorded. `n`
+    /// counts the steps, from 0.
+    pub fn agent_step(&self, n: usize) -> (String, lectern_services::session::SessionsChanged) {
+        let path = self.agent_path();
+        let file = self.repo.root().join(&path);
+        let mut text = String::from_utf8(std::fs::read(&file).unwrap()).unwrap();
+        text.push_str(&format!("// agent step {n}\n"));
+        let at = (self.now.0 - 3 * 3600 * 1000) + (21 * 60_000) + n as i64 * 10_000;
+        let turn = json!({ "id": format!("n{n}"), "at": at, "prompt": "one more", "items": [
+            { "edit": format!("n{n}-e"), "at": at + 1000, "done": at + 1500,
+              "changes": [{ "path": path, "write": text }] },
+        ]});
+        self.repo.write_file(&path, text.as_bytes());
+        self.sessions.append("s00", &turn.to_string());
+        let event = self.sessions.take_events().pop().expect("an event");
+        (path, event)
+    }
+
     /// An engine on this fixture with its cache and logs under `dir`.
     pub fn driven(&self, dir: &Path) -> Driven {
         Driven::new(

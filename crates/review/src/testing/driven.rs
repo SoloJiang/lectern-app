@@ -11,14 +11,16 @@ use std::time::Instant;
 use lectern_cache::{Budgets, Cache, Config as CacheConfig};
 use lectern_executor::Executor;
 use lectern_git::{HashKind, Oid};
-use lectern_services::changes::BaseSpec;
+use lectern_services::changes::{BaseSpec, ChangePath, RefreshHint};
+use lectern_services::project::Projects;
 use lectern_services::review::{
     FileRows, ReviewCommand, ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
 };
 use lectern_services::session::{SessionKey, SessionSource, SourceId, Timestamp};
 
 use super::fake::{FakeProjects, FakeSessions};
-use crate::engine::{Config, Engine, attribute};
+use crate::engine::round::Kind;
+use crate::engine::{Config, Engine, Held, attribute};
 
 /// The engine with its fakes, a cache and a log directory under `dir`.
 pub struct Driven {
@@ -87,13 +89,18 @@ impl Driven {
             .into_iter()
             .map(|s| s as Arc<dyn SessionSource>)
             .collect();
+        let held_projects = Arc::clone(&projects);
         let engine = Engine::new(Config {
             executor: executor.clone(),
             cache: cache.clone(),
             data_dir: dir.join("review"),
             git_ceilings: Arc::from(Vec::<PathBuf>::new()),
-            projects: Arc::clone(&projects) as _,
-            sources: sources.into(),
+            projects: Arc::new(move || {
+                Some(Held::new(Arc::clone(&held_projects) as Arc<dyn Projects>))
+            }),
+            sources: Arc::new(move || sources.iter().map(|s| Held::new(Arc::clone(s))).collect()),
+            host: None,
+            watcher: None,
             emit: Arc::new(move |e| {
                 let at = Instant::now();
                 if let ReviewEvent::Changed { id, .. } = &e
@@ -176,6 +183,27 @@ impl Driven {
 
     pub fn close(&self, id: ReviewId) {
         self.engine.close(id)
+    }
+
+    /// What a worktree batch with these changed paths asks for
+    /// (`RefreshHint::Paths`); `None` is a full refresh. For
+    /// `review/refresh_one`.
+    pub fn refresh(&self, id: ReviewId, paths: Option<&[&str]>) {
+        let hint = match paths {
+            Some(paths) => RefreshHint::Paths(
+                paths
+                    .iter()
+                    .map(|p| ChangePath(Arc::from(p.as_bytes())))
+                    .collect(),
+            ),
+            None => RefreshHint::Full,
+        };
+        self.engine.request(id, Kind::Refresh(hint));
+    }
+
+    /// A `SessionsChanged` from the sources, as the plugin hears it.
+    pub fn sessions_changed(&self, event: &lectern_services::session::SessionsChanged) {
+        self.engine.sessions_changed(event);
     }
 
     /// The events so far, with when each was emitted; the list is emptied.
