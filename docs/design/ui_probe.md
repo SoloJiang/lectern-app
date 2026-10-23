@@ -248,10 +248,12 @@ P0 只读。原因：issue #6 的范围是 `ui_tree` 与 `screenshot`，G1 关�
 ```rust
 // crates/ui/src/semantic.rs（`ui` 实现；这里是本 crate 读取的最小形状）
 pub struct Semantic {
-    /// `视图.区域.条目[业务键]`，见下文「ID 的语法」。
-    pub id: SharedString,
+    /// `视图.区域.条目[业务键]`，见下文「ID 的语法」。`NodeId` 是 `ui` 定义的 `SharedString` 新类型，
+    /// 用 `NodeId::new(view, area, key)`、`.child(name)`、`.item(key)` 构造，调试构建里校验语法。
+    pub id: NodeId,
     pub role: Role,
-    pub label: Label,
+    /// 纯容器（列表、面板、分组）没有文字，为 None。
+    pub label: Option<Label>,
     pub state: State,
     /// 视图自定义的属性，键是静态标识符，如 ("seen", "true")、("drifted", "true")。
     pub attrs: Vec<(&'static str, SharedString)>,
@@ -299,7 +301,7 @@ pub struct Record {
 }
 ```
 
-ID 的语法：`segment('.' segment)*`，`segment` 是 `name` 或 `name[key]`；`name` 匹配 `[a-z0-9-]+`；`key` 是业务键（路径、会话 ID、轮次号），任意 UTF-8，不含换行，不含「`]` 紧跟 `.`」的序列（它是段的分隔）。列表条目用业务键，不用下标。同一帧里 ID 必须唯一；本 crate 检查语法和唯一性，不合规的节点照常输出，并写进 `warnings`。
+ID 的语法：`segment('.' segment)*`，`segment` 是 `name` 或 `name[key]`；`name` 匹配 `[a-z0-9-]+`；`key` 是业务键（路径、会话 ID、轮次号），任意 UTF-8，不含换行，不含「`]` 紧跟 `.`」的序列（它是段的分隔）。列表条目用业务键，不用下标。`NodeId` 的构造函数在调试构建里校验这条语法；本 crate 在每一帧再检查一次语法和唯一性（`NodeId` 也能从任意 `SharedString` 构造），不合规的节点照常输出，并写进 `warnings`。
 
 ### `ui-tree/1`
 
@@ -312,17 +314,21 @@ ID 的语法：`segment('.' segment)*`，`segment` 是 `name` 或 `name[key]`；
       "bounds": { "x": 0, "y": 0, "w": 820, "h": 520 }, "visible": true,
       "state": { "selected": false, "focused": false, "disabled": false, "expanded": null, "checked": null },
       "attrs": {}, "parent": null, "children": [1] },
-    { "n": 1, "id": "review.files.item[src/main.rs]", "role": "list-item",
+    { "n": 1, "id": "review.files", "role": "list", "label": null,
+      "bounds": { "x": 12, "y": 40, "w": 240, "h": 400 }, "visible": true,
+      "state": { "selected": false, "focused": false, "disabled": false, "expanded": null, "checked": null },
+      "attrs": {}, "parent": 0, "children": [2] },
+    { "n": 2, "id": "review.files.item[src/main.rs]", "role": "list-item",
       "label": { "key": null, "text": "src/main.rs" },
       "bounds": { "x": 12, "y": 48, "w": 240, "h": 22 }, "visible": true,
       "state": { "selected": true, "focused": false, "disabled": false, "expanded": null, "checked": null },
-      "attrs": { "seen": "true" }, "parent": 0, "children": [] }
+      "attrs": { "seen": "true" }, "parent": 1, "children": [] }
   ],
   "warnings": [ { "kind": "duplicate-id", "id": "…" }, { "kind": "bad-id", "id": "…" } ]
 }
 ```
 
-- `nodes` 是先序深度优先的平铺列表，`n` 是下标，根节点 `n = 0` 是记录器合成的窗口节点（标题来自 `Window::window_title`，范围是视口）。
+- `nodes` 是先序深度优先的平铺列表，`n` 是下标，根节点 `n = 0` 是记录器合成的窗口节点（标题来自 `Window::window_title`，范围是视口）。`label` 为 `null` 的是纯容器。
 - 范围是逻辑像素（pt），窗口坐标；`scale` 是 `Window::scale_factor`。截图是物理像素，客户端用 `scale` 换算。
 - 兼容策略：新增角色、新增可选字段、新增 `warnings` 种类不改版本；改名、删字段、改坐标单位时版本加一，`hello` 的 `schemas` 列出支持的版本。
 - 快照：`#[gpui::test]` 把 `Tree::to_json()` 存成 insta 快照（`crates/ui_probe/src/snapshots/`），视图 crate 的测试同样存自己的树。
@@ -365,7 +371,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 ## 性能
 
 - desktop profile：本 crate 不被编译、不链接；冷启动、空闲内存、安装包体积都不变。检查方式见「验收」第 4 步（`cargo tree`、`just bench` 的 `app/*` 不受影响）。
-- 每个构建都有的成本：`ui` 的语义包装元素在 prepaint 里读一次原子标志（Relaxed），每元素每帧不到 1 ns，包装元素自己不分配。视图构造 `Semantic` 的成本（带业务键的 ID 要拼字符串）在所有构建里都存在，所以 `ui` 的接口要让这份构造可以推迟：记录器关闭时不调用构造闭包（「对其他 crate 的要求」第 1 项）。两者都由 `ui` 的帧基准覆盖（`ui` 的设计文档决定基准名），本 crate 不另设基准。
+- 每个构建都有的成本：`ui` 的语义包装元素在 prepaint 里读一次原子标志（Relaxed），每元素每帧不到 1 ns，包装元素自己不分配。视图构造 `Semantic` 的成本（带业务键的 ID 要拼字符串）在所有构建里都存在（「对其他 crate 的要求」第 1 项）。两者都由 `ui` 的帧基准覆盖（`ui` 的设计文档决定基准名），本 crate 不另设基准。
 - probe profile 空闲：一个阻塞在 `accept` 的线程、一个等待队列的前台任务，没有定时器、没有每帧工作。内存：线程栈加几 KiB。
 - 一次 `ui_tree`：多画一帧；记录器的 `Vec<Record>` 与节点数成正比（每个约 200 B，1000 个节点约 200 KiB），请求结束即释放；`Tree::from_records` 与 JSON 编码是线性的。
 - 一次 `screenshot`：`render_to_image` 在主线程上同步等 GPU 并读回（2× 的 820 × 520 窗口是 1640 × 1040 × 4 ≈ 6.8 MB），预期 10 ms 量级，实测写进「实际验证」；PNG 编码在连接线程上，预期几十毫秒。探针会话不是用户场景，这两项不计入帧预算；但主线程被占期间窗口照常响应，不出现超过 `frame_timeout` 的停顿。
@@ -426,10 +432,10 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 
 每一项在对应 crate 的设计文档里写入，各自一个 PR，在本 crate 的实现 PR 之前合并（第 4 项除外）。
 
-1. **`ui`：语义记录器与语义包装元素**（模块 `lectern_ui::semantic`）。`ui` 的设计文档正在编写，它决定具体的元素写法；本 crate 需要的最小形状：
-   - 「数据结构」里的 `Semantic`、`Label`、`State`、`Role`、`Record`。
-   - 一个包装元素：`semantic(spec: impl FnOnce() -> Semantic, child: impl IntoElement) -> impl IntoElement`（或等价的 builder）。`spec` 是闭包：记录器关闭时不调用它，视图不为探针拼 ID 字符串；`ui` 也可以另给一个按值接收的简写。它在 prepaint 里拿到自己的范围；记录器打开时推一条 `Record`（`bounds` 来自 `Window::layout_bounds`，`visible` 按 `Window::content_mask` 判断，`parent` 是当前栈顶），并在子元素 prepaint 期间把自己压进线程本地的父节点栈；关闭时只读一次原子标志就返回。构造函数带 `#[track_caller]`，记下 `declared_at`。
-   - 同一份 `spec` 同时写进 GPUI 的无障碍属性（子元素是带 `id` 的 div 时）：`accessibility_id(id)`、`role(映射后的 accesskit::Role)`、`aria_label(label.text)`、`aria_selected`、`aria_expanded`、`aria_toggled`。角色映射由 `ui` 给出（如 `ListItem → ListItem`、`DiffHunk → Group`）。
+1. **`ui`：语义记录器与语义包装元素**（模块 `lectern_ui::semantic`，[#214](https://github.com/SoloJiang/lectern-app/issues/214) 的 `ui` 设计文档已按本节写入，形状以它为准）。本 crate 需要的最小形状：
+   - 「数据结构」里的 `Semantic`（`id: NodeId`、`label: Option<Label>`）、`Label`、`State`、`Role`、`Record`。
+   - 包装元素 `semantic(spec, child: impl IntoElement)`，以及给带交互的子元素用的 `semantic_interactive<E: InteractiveElement + IntoElement>(spec, child)`（`semantic` 擦掉了子元素类型，写不了无障碍属性）。构造 `Semantic` 的成本（带业务键的 ID 要拼字符串）在所有构建里都存在，由 `ui` 的帧基准覆盖；`ui` 可以提供延迟构造的形式，本 crate 不要求。它在 prepaint 里拿到自己的范围；记录器打开时推一条 `Record`（`bounds` 来自 `Window::layout_bounds`，`visible` 按 `Window::content_mask` 判断，`parent` 是当前栈顶），并在子元素 prepaint 期间把自己压进线程本地的父节点栈；关闭时只读一次原子标志就返回。构造函数带 `#[track_caller]`，记下 `declared_at`。
+   - `semantic_interactive` 把同一份 `spec` 写进 GPUI 的无障碍属性：`accessibility_id(id)`、`role(映射后的 accesskit::Role)`、`aria_label(label.text)`、`aria_selected`、`aria_expanded`、`aria_toggled`。角色映射由 `ui` 给出（如 `ListItem → ListItem`、`DiffHunk → Group`）。`ui` 的控件自带角色、标签（来自 `ui::Text`）和状态，视图只给 `NodeId`。
    - 记录器：`Recorder::begin(window: WindowId)`、`Recorder::finish() -> Vec<Record>`、`Recorder::is_armed() -> bool`（一个 `AtomicBool`），进程里一个，主线程使用；`begin` 时丢弃上一次没取走的记录。
    - 每个视图 crate 的设计文档「界面」一节列出它的语义节点（角色与 ID），这是[模板](TEMPLATE.md)已有的要求；不可交互的纯装饰元素不声明。
 2. **`i18n`**：`Key::name(&self) -> &'static str` 与 `FmtKey::name(&self) -> &'static str`，返回 Fluent 的消息 ID（如 `review-looks-good`）；常数时间，读 `table::NAMES`。这张名字表已经编译进每个构建（`Strings::format` 的报告用它），不增加体积。
