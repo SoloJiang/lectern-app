@@ -364,8 +364,9 @@ impl ActivationToken {
     /// it caught, under its own scope.
     ///
     /// `Pending`: the activation fails as if `started` had failed. Already
-    /// `Dead`: nothing happens, the first failure is kept. After `shutdown`:
-    /// only the state is written.
+    /// `Dead`: no new deactivation is queued and the first recorded failure
+    /// is kept (one reported before the revocation reads it still marks the
+    /// plugin `Failed`). After `shutdown`: only the state is written.
     pub fn fail(&self, error: PluginError) {
         invalidate(self, Some(error));
     }
