@@ -30,7 +30,7 @@
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
 | `gpui` | 根视图、`replace_root`、`on_window_should_close`、`bind_keys`、`on_next_frame`、`prompt_for_paths` | 已锁定（[ADR 0016](../adr/0016.md)） |
-| `lectern-ui` | 布局容器、动效原语、贡献载荷的类型（`ui::contrib`）、当前语言的 `Strings` | 视图层的公共库，非插件 |
+| `lectern-ui` | 控件、颜色、动效原语、贡献载荷的类型（`ui::contrib`）、当前语言的 `Strings`；容器由本 crate 画 | 视图层的公共库，非插件 |
 | `lectern-i18n` | 本 crate 自己的几条字符串（`workspace.ftl`） | [ADR 0013](../adr/0013.md) |
 | `lectern-kernel`、`lectern-services` | `Plugin`、`Staged`、`ActivationToken`、`KernelControl`；提供 `dyn Contributions`，依赖 `dyn Projects` | 架构规则 7（[ADR 0025](../adr/0025.md)） |
 | `lectern-logging` | 日志宏、`current()` / `scope()`（主线程上恢复贡献方的作用域） | [ADR 0046](../adr/0046.md) |
@@ -235,7 +235,12 @@ pub enum Milestone { ProjectHome, FileHighlighted, DiffShown, WorktreeSwitched }
 /// 视图工厂：每次需要这个视图时调用一次（同一个屏幕可以被压栈多次、面板可以反复打开），所以是 `Fn`，
 /// 可以克隆、在任何线程持有，只在主线程调用。
 pub type ViewFactory<Arg> = Arc<dyn Fn(&Arg, &mut Window, &mut App) -> AnyView + Send + Sync>;
-pub struct Screen { pub build: ViewFactory<Target> };
+pub struct Screen {
+    pub build: ViewFactory<Target>,
+    /// 工具栏的标题、副标题和右侧至多 3 个控件；每帧由本 crate 在主线程调用，返回当前值。
+    pub toolbar: Arc<dyn Fn(&mut App) -> ToolbarItems + Send + Sync>,
+}
+pub struct ToolbarItems { pub title: Text, pub subtitle: Option<Text>, pub controls: Vec<AnyElement> /* ≤ 3 */ }
 pub struct SidebarPanel { pub build: ViewFactory<()> };
 pub struct SidebarEntry { pub label: i18n::Key, pub icon: Option<ui::Symbol>, pub on_select: WorkspaceCommand };
 pub struct InspectorTab { pub label: i18n::Key, pub build: ViewFactory<()> };
@@ -336,7 +341,7 @@ pub struct WindowState {
 | 区域 | 规格（[交互规范「窗口结构」](interaction.md#窗口结构)） | 层 | 内容来源 |
 |---|---|---|---|
 | Sidebar | 248pt，vibrancy；当前侧栏面板 | 常驻（项目侧栏）/ 按需（Files 等替换面板） | `SidebarPanel` 贡献；项目侧栏里的条目来自 `SidebarEntry` 贡献 |
-| Toolbar | 52pt；标题 + 副标题；左侧返回按钮（有 `back_button` 的屏幕）；右侧至多 3 个控件 | 常驻 | 标题、副标题、控件由当前屏幕的视图经 `ui` 的工具栏容器提供 |
+| Toolbar | 52pt；标题 + 副标题；左侧返回按钮（有 `back_button` 的屏幕）；右侧至多 3 个控件 | 常驻 | 本 crate 画容器和返回按钮；标题、副标题、右侧控件由当前屏幕经 `ui::contrib::Screen::toolbar` 提供（下节） |
 | Content | 居中 760pt 阅读栏（`reading_column`）或整个内容区 | 常驻 / 收起（阅读视图） | 栈顶 `Screen` |
 | Inspector | 300pt；分段控件切换页 | 按需（⌥⌘I） | `InspectorTab` 贡献 |
 | Panel | 浮在检查器上方，圆角 14pt，阴影，不加遮罩 | 按需（Space 打开，Esc 关闭） | `Panel` 贡献 |
