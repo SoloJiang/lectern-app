@@ -67,6 +67,25 @@ impl Key {
     pub(crate) const fn new(index: u16) -> Key {
         Key { index }
     }
+
+    /// The Fluent message ID this key was generated from, e.g.
+    /// `review-looks-good`; for an attribute, the message ID and the
+    /// attribute name joined by a dot, e.g. `review-looks-good.tooltip`.
+    ///
+    /// Constant time: an index into the name table that every build already
+    /// holds (`Strings::format` reports argument errors with it). Does not
+    /// allocate. For the UI probe, which writes a label's key into its
+    /// semantic tree (docs/design/ui_probe.md「对其他 crate 的要求」第 2 项).
+    ///
+    /// ```
+    /// use lectern_i18n::keys;
+    ///
+    /// assert_eq!(keys::review::LOOKS_GOOD.name(), "review-looks-good");
+    /// assert_eq!(keys::review::LOOKS_GOOD_TOOLTIP.name(), "review-looks-good.tooltip");
+    /// ```
+    pub fn name(&self) -> &'static str {
+        table::NAMES[usize::from(self.index)]
+    }
 }
 
 /// A message or attribute with variables. A different type from [`Key`]:
@@ -84,5 +103,125 @@ pub struct FmtKey {
 impl FmtKey {
     pub(crate) const fn new(index: u16) -> FmtKey {
         FmtKey { index }
+    }
+
+    /// The Fluent message ID this key was generated from, e.g.
+    /// `review-files-changed`; for an attribute, `message.attribute`. The
+    /// same as [`Key::name`]: constant time, no allocation.
+    ///
+    /// ```
+    /// use lectern_i18n::keys;
+    ///
+    /// assert_eq!(keys::review::FILES_CHANGED.name(), "review-files-changed");
+    /// ```
+    pub fn name(&self) -> &'static str {
+        table::NAMES[usize::from(self.index)]
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    //! `Key::name` / `FmtKey::name` against the en resources themselves:
+    //! every slot's name is a message ID or `message.attribute` that exists
+    //! in `locales/en/*.ftl`, and the resources have exactly as many as there
+    //! are slots (docs/design/i18n.md「测试」).
+
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::Path;
+
+    use fluent_syntax::ast;
+
+    use crate::table::{LEN, NAMES, VARS};
+    use crate::{FmtKey, Key, Locale, keys};
+
+    /// Every name a slot can have, read from the en resources with
+    /// fluent-syntax: a message with a value, plus each of its attributes.
+    /// The same rule as build/compile.rs, without its code.
+    fn en_names() -> BTreeSet<String> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("locales/en");
+        let mut names = BTreeSet::new();
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "ftl") {
+                continue;
+            }
+            let text = fs::read_to_string(&path).unwrap();
+            let resource = fluent_syntax::parser::parse(text.as_str())
+                .unwrap_or_else(|(_, e)| panic!("{}: {e:?}", path.display()));
+            for entry in &resource.body {
+                let ast::Entry::Message(message) = entry else {
+                    continue;
+                };
+                if message.value.is_some() {
+                    assert!(names.insert(message.id.name.to_owned()));
+                }
+                for attr in &message.attributes {
+                    assert!(names.insert(format!("{}.{}", message.id.name, attr.id.name)));
+                }
+            }
+        }
+        names
+    }
+
+    /// The names of every slot, through the key type the slot generates
+    /// (`Key` without variables, `FmtKey` with).
+    fn slot_names() -> (Vec<&'static str>, Vec<&'static str>) {
+        let mut plain = Vec::new();
+        let mut fmt = Vec::new();
+        for (index, vars) in VARS.iter().enumerate() {
+            let i = u16::try_from(index).unwrap();
+            if vars.is_empty() {
+                plain.push(Key::new(i).name());
+            } else {
+                fmt.push(FmtKey::new(i).name());
+            }
+        }
+        (plain, fmt)
+    }
+
+    #[test]
+    fn key_name_is_the_message_id() {
+        assert_eq!(keys::review::LOOKS_GOOD.name(), "review-looks-good");
+        assert_eq!(
+            keys::review::LOOKS_GOOD_TOOLTIP.name(),
+            "review-looks-good.tooltip"
+        );
+        assert_eq!(keys::common::RESTART.name(), "common-restart");
+        assert_eq!(Locale::ZhCn.name_key().name(), "common-language-zh-cn");
+        assert_eq!(keys::workspace::BACK.name(), "workspace-back");
+
+        // Every generated `Key` names an en message or attribute, and every
+        // en message or attribute without variables is a generated `Key`.
+        let en = en_names();
+        let (plain, fmt) = slot_names();
+        let all: BTreeSet<&str> = plain.iter().chain(&fmt).copied().collect();
+        assert_eq!(all.len(), LEN, "slot names are distinct");
+        assert_eq!(all, en.iter().map(String::as_str).collect::<BTreeSet<_>>());
+        assert!(!plain.is_empty());
+    }
+
+    #[test]
+    fn fmt_key_name_is_the_message_id() {
+        assert_eq!(keys::review::FILES_CHANGED.name(), "review-files-changed");
+        assert_eq!(keys::review::PROGRESS.name(), "review-progress");
+        assert_eq!(keys::common::TIME_DAYS_AGO.name(), "common-time-days-ago");
+
+        let en = en_names();
+        let (_, fmt) = slot_names();
+        assert!(!fmt.is_empty());
+        for name in &fmt {
+            assert!(en.contains(*name), "{name}");
+        }
+    }
+
+    /// No allocation: the returned `&'static str` is the table's own entry.
+    #[test]
+    fn name_is_the_table_entry() {
+        for (index, &entry) in NAMES.iter().enumerate() {
+            let i = u16::try_from(index).unwrap();
+            assert!(std::ptr::eq(Key::new(i).name(), entry));
+            assert!(std::ptr::eq(FmtKey::new(i).name(), entry));
+        }
     }
 }
