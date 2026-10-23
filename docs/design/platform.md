@@ -1120,12 +1120,13 @@ release 构建，Apple 芯片，macOS 27.0.1：
 | 调用 | 耗时 |
 |---|---|
 | `system_colors`，本进程之前已经读过 | 15–25 µs（约 70 次 ObjC 消息） |
-| `system_colors`，本进程第一次，`NSApplication` 和一个 `NSWindow` 已存在（应用里 `ui::init` 的情形：GPUI 的 `Application::new` 已建 `NSApplication`） | 约 1.4 ms；紧接的另一个外观约 55 µs |
-| `system_colors`，本进程第一次，AppKit 之前完全没有用过（本 crate 的测试） | 16–27 ms：`appearanceNamed:` 约 12 ms、第一次 `performAsCurrentDrawingAppearance:` 约 11 ms，是 AppKit 加载系统外观的资源；`NSApplication` 存在时这些已经发生 |
+| `system_colors`，本进程第一次，`NSApplication` 已建并 `finishLaunching`、还没有窗口（应用里 `ui::init` 的情形：GPUI 的 `Application::new` 已建 `NSApplication`，`open_window` 在后） | 约 2.0–2.1 ms；紧接的另一个外观约 65 µs |
+| `system_colors`，本进程第一次，`NSApplication` 和一个 `NSWindow` 已存在（显示过与否相同） | 约 1.3–1.4 ms；紧接的另一个外观约 50 µs |
+| `system_colors`，本进程第一次，AppKit 之前完全没有用过（本 crate 的测试） | 13–27 ms：`appearanceNamed:` 约 12 ms、第一次 `performAsCurrentDrawingAppearance:` 约 11 ms，是 AppKit 加载系统外观的资源；`NSApplication` 存在时这些已经发生 |
 | `reduce_motion` | 约 3 µs |
 | `watch` / drop | 约 30 µs / 8 µs |
 
-对 ui 设计的影响：`ui/init ≤ 300 µs` 的预算对热的读取成立，但应用里的第一次读取（`ui::init` 在首帧之前）约 1.5 ms（两个外观），是 AppKit 第一次解析自己的动态颜色；第一个窗口绘制之前 AppKit 多半也要做这件事，所以总的冷启动未必变慢，但 `ui/init` 单独计时会超过 300 µs。由 ui 设计决定：把基准放在 `NSApplication` 已存在、第一次读取已发生之后计时，或者把预算改成 2 ms，或者把系统色的读取推迟到首帧之后、首帧用内置表。本模块不缓存：缓存归 `ui` 的 `Palette`。
+对 ui 设计的影响：`ui/init ≤ 300 µs` 的预算对热的读取成立，但应用里的第一次读取（`ui::init` 在首帧之前、`open_window` 之前）约 2.1 ms（两个外观），是 AppKit 第一次解析自己的动态颜色；第一个窗口建好之后再读也要约 1.4 ms，所以这约 1.4 ms 并不是窗口本来就会付的代价，没有测量过 AppKit 在第一帧之前是否自己做同样的解析。`ui/init` 单独计时会超过 300 µs，冷启动 20 ms（ADR 0017）里要留出约 2 ms。由 ui 设计决定：把预算改成 2.5 ms 并在冷启动基准里核对，或者把系统色的读取推迟到首帧之后、首帧用内置表（`init` 只登记通知，`ready` 再读）。本模块不缓存：缓存归 `ui` 的 `Palette`。
 
 ### 已知限制
 
@@ -1142,7 +1143,7 @@ release 构建，Apple 芯片，macOS 27.0.1：
 - 所有平台：`appearance_lightness_is_the_hsl_lightness`（测试用的明度函数）；`appearance_names_are_distinct_static_names`。
 - 只在 macOS 上（ui 设计「验收」前置条件 A 的检查）：`appearance_system_colors_resolve_for_both_appearances`（两个外观各读到一份 `SystemColors`；`label` 的明度在浅色下低于 0.5、深色下高于 0.5；`window_background` 浅色比深色亮；全部分量在 0..=1；`accent_available` 为 true；表面和系统色的透明度为 1、`label` 的大于 0；两个外观的表不同，同一外观再读一次相同；`systemRed` 的红分量最大；打印两次读取的耗时）；`appearance_reduce_motion_is_some`；`appearance_watch_delivers_a_change`（经 `NSNotificationCenter` 手动投递两种通知，回调各收到一次，顺序一致）；`appearance_watch_stops_after_drop`（drop 后再投递，回调不再被调用，回调已被释放）；`appearance_watch_is_not_reentered`（回调里再投递不重入）；`appearance_watch_dropped_inside_its_callback_is_fine`（回调里 drop `Watch`，不崩溃、之后不再回调）；`appearance_watch_contains_a_panicking_callback_and_logs_no_payload`（见「日志与诊断」的金丝雀测试）。投递的测试经一把锁串行，`cargo test` 在同一个进程里运行时互不干扰。
 - 其他平台：`appearance_is_none_elsewhere`、`appearance_watch_is_inert_elsewhere`。
-- 第一次读取的耗时在 `crates/platform/examples/appearance_first_read.rs`：手工运行 `cargo run --release -p lectern-platform --example appearance_first_read`（`cargo clippy --all-targets` 编译它，CI 不运行）。它以自己为子进程分三个阶段各运行一次：什么都不做、先建 `NSApplication` 和一个不显示的 `NSWindow`、再把窗口显示一次（这一阶段需要窗口服务器会话），每个阶段打印第一次浅色、第一次深色和一次热读取的微秒数；`NSApplication` 和窗口只能在主线程上建，Rust 的测试线程不是主线程，所以是 example 不是测试。全部读取都返回表时退出码为 0。
+- 第一次读取的耗时在 `crates/platform/examples/appearance_first_read.rs`：手工运行 `cargo run --release -p lectern-platform --example appearance_first_read`（`cargo clippy --all-targets` 编译它，CI 不运行）。它以自己为子进程分四个阶段各运行一次：什么都不做、先建 `NSApplication` 并 `finishLaunching`（`ui::init` 的情形）、再建一个不显示的 `NSWindow`、再把窗口显示一次（这一阶段需要窗口服务器会话），每个阶段打印第一次浅色、第一次深色和一次热读取的微秒数；`NSApplication` 和窗口只能在主线程上建，Rust 的测试线程不是主线程，所以是 example 不是测试。全部读取都返回表时退出码为 0。
 
 ## 未决问题
 
@@ -1221,7 +1222,7 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
 
 - `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「系统外观」的 `appearance_*`：macOS 上两个外观各读到一份 `SystemColors`、`label` 的明度在浅色下低于 0.5、深色下高于 0.5、`reduce_motion` 返回 Some、`watch` 收到手动投递的通知且 drop 后不再回调；原有的测试结果不变。
 - `git diff origin/main -- Cargo.lock` 为空（ObjC 运行时和 AppKit 的符号手写声明）；`rg -n 'NSColor|NSAppearance|NSSystemColorsDidChange|objc_msgSend' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
-- `cargo run --release -p lectern-platform --example appearance_first_read` 在 macOS 上退出码为 0，三个阶段的耗时写进「性能」和「实际验证」。
+- `cargo run --release -p lectern-platform --example appearance_first_read` 在 macOS 上退出码为 0，四个阶段的耗时写进「性能」和「实际验证」。
 - 本文的状态行、「实际验证」写明已实现；「性能」里对 ui 设计的影响告知 ui 设计（#218）。
 
 ## 实际验证
@@ -1295,7 +1296,7 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
 
 - 系统外观（ui 设计的前置条件 A）在 macOS（Apple 芯片，macOS 27.0.1）上：
   - `just test -p lectern-platform`：153 个测试通过，其中新增 9 个 `appearance_*`（「系统外观」的「测试」里 macOS 上编译的全部），都在测试线程上、没有窗口和 `NSApplication`；原有的 144 个结果不变。用 `cargo test` 在同一个进程里运行 9 个也都通过，连续运行 20 次都通过。
-  - `cargo run --release -p lectern-platform --example appearance_first_read` 退出码为 0，三次运行：什么都不做的阶段第一次浅色 15.7–27.4 ms、第一次深色 78–112 µs、热读取 19–24 µs；`NSApplication` 和窗口已建的阶段 1.41–1.44 ms、53–64 µs、16–17 µs；窗口显示过的阶段 1.25–1.45 ms、44–47 µs、14–16 µs。另在测试里分步计时（临时代码，没有提交）：什么都不做的进程里 `appearanceNamed:` 11.9 ms、第一次 `performAsCurrentDrawingAppearance:` 10.6 ms、第一次解析 23 个颜色 2.9 ms；`reduce_motion` 3.4 µs；`watch` 29 µs、drop 8 µs。
+  - `cargo run --release -p lectern-platform --example appearance_first_read` 退出码为 0，三次运行（第一次浅色、第一次深色、热读取）：什么都不做的阶段 12.8–16.5 ms、65–71 µs、15–16 µs（更早的三次运行里 15.7–27.4 ms）；`NSApplication` 已 `finishLaunching`、没有窗口的阶段 2.01–2.08 ms、64–65 µs、15–16 µs；再建一个窗口的阶段 1.31–1.43 ms、50–51 µs、14 µs；窗口显示过的阶段 1.35–1.41 ms、46–47 µs、14–15 µs。另在测试里分步计时（临时代码，没有提交）：什么都不做的进程里 `appearanceNamed:` 11.9 ms、第一次 `performAsCurrentDrawingAppearance:` 10.6 ms、第一次解析 23 个颜色 2.9 ms；`reduce_motion` 3.4 µs；`watch` 29 µs、drop 8 µs。
   - `just check`、`just deny` 通过；`cargo clippy -p lectern-platform --all-targets --all-features -- -D warnings` 通过。`git diff origin/main -- Cargo.lock` 为空；`rg -n 'NSColor|NSAppearance|NSSystemColorsDidChange|objc_msgSend' crates --glob '!crates/platform/**' -t rust` 没有结果。
   - 没有验证的：本机没有 Linux 目标，其他平台的分支（`appearance_is_none_elsewhere`、`appearance_watch_is_inert_elsewhere`、空的 `main`）只由 Linux CI 编译和运行。没有在真实的系统设置变化下运行过：测试经 `NSNotificationCenter` 手动投递通知，系统设置里切换强调色、减弱动态效果时 AppKit 是否投递这两个通知、是否在主线程上，按 Apple 文档写，由 ui 设计「验收」的手动检查（切换强调色后窗口里的 `accent` 随之变化）验证。macOS 11、12 上的分支（`systemMintColor` 缺失时为 None）没有运行过。
 

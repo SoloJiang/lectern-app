@@ -10,12 +10,14 @@
 //! cargo run --release -p lectern-platform --example appearance_first_read
 //! ```
 //!
-//! Without an argument it runs itself three times, one process per stage,
+//! Without an argument it runs itself four times, one process per stage,
 //! and prints the time of the first light read, the first dark read and a
 //! warm read after each stage: `bare` (nothing of AppKit used before),
-//! `app` (`[NSApplication sharedApplication]` and an `NSWindow` created,
-//! not shown) and `shown` (the window ordered front and displayed once,
-//! which needs a window server session). Exits 0 when every read returns a
+//! `app` (`[NSApplication sharedApplication]` and `finishLaunching`, the
+//! state `ui::init` runs in: GPUI's `Application::new` made the
+//! application, no window yet), `window` (plus an `NSWindow` created, not
+//! shown) and `shown` (the window ordered front and displayed once, which
+//! needs a window server session). Exits 0 when every read returns a
 //! table. The table goes to stdout through `io::Write`: the workspace's
 //! print lints cover examples too (they keep runtime output in the log),
 //! and this is a hand-run measurement, not runtime output.
@@ -95,18 +97,23 @@ mod real {
         class
     }
 
-    /// `[NSApplication sharedApplication]` and `[[NSWindow alloc] init]`;
-    /// the window is returned, shown when asked.
+    /// What the stage uses of AppKit before the reads: the application,
+    /// then a window (returned), then the window shown.
     fn prepare(stage: &str) -> Option<Id> {
         if stage == "bare" {
             return None;
         }
         // SAFETY: the classes are loaded; `sharedApplication`, `alloc`
-        // and `init` return objects; `orderFront:` takes a sender and
+        // and `init` return objects; `finishLaunching` takes nothing and
+        // returns nothing; `orderFront:` takes a sender and
         // `displayIfNeeded` nothing.
         unsafe {
             let app = send0(class(c"NSApplication"), sel(c"sharedApplication"));
             assert!(!app.is_null(), "NSApplication");
+            send0(app, sel(c"finishLaunching"));
+            if stage == "app" {
+                return None;
+            }
             let window = send0(send0(class(c"NSWindow"), sel(c"alloc")), sel(c"init"));
             assert!(!window.is_null(), "NSWindow");
             if stage == "shown" {
@@ -143,7 +150,7 @@ mod real {
         }
         let mut stdout = io::stdout();
         writeln!(stdout, "stage first_light_us first_dark_us warm_us").expect("stdout");
-        for stage_name in ["bare", "app", "shown"] {
+        for stage_name in ["bare", "app", "window", "shown"] {
             let exe = std::env::current_exe().expect("current_exe");
             let output = Command::new(exe)
                 .arg(stage_name)
