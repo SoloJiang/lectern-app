@@ -16,7 +16,7 @@ pub fn table_rs(compiled: &Compiled) -> String {
     );
     writeln!(out, "pub(crate) const LEN: usize = {len};\n").unwrap();
 
-    out.push_str("/// Message ID and attribute of every slot, for diagnostics.\n");
+    out.push_str("/// Message ID and attribute of every slot: `Key::name`, `FmtKey::name` and diagnostics.\n");
     out.push_str("pub(crate) static NAMES: [&str; LEN] = [\n");
     for entry in &compiled.entries {
         writeln!(out, "    {:?},", entry.name()).unwrap();

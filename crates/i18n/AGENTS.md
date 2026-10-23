@@ -20,7 +20,7 @@ Fluent 资源与语言切换：en 与 zh-CN，默认跟随系统语言（[ADR 00
 
 - `locales/<语言>/<文件>.ftl`：en 与 zh-CN 同名同键；键以文件名加 `-` 开头。新增界面文案时两种语言同时加。
 - `build.rs`、`build/compile.rs`（解析与全部编译期校验）、`build/codegen.rs`（生成 Rust 代码）。
-- `src/`：`Locale`、`Strings`、`Args`、`count_compact` 和手写的复数规则；`src/reference_tests.rs` 与 fluent-bundle 对照；`src/testing.rs`（`test-support`）的 `frame_strings` 供 `lectern-bench` 的 `i18n/frame_strings`。
+- `src/`：`Locale`、`Strings`、`Args`、`Key::name` / `FmtKey::name`（键的 Fluent 消息 ID，给 UI 探针）、`count_compact` 和手写的复数规则；`src/reference_tests.rs` 与 fluent-bundle 对照；`src/testing.rs`（`test-support`）的 `frame_strings` 供 `lectern-bench` 的 `i18n/frame_strings`。
 
 ## 测试
 
