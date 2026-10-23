@@ -30,7 +30,7 @@ const MAX_TAG_LEN: usize = 35;
 
 /// At most this many preferred languages are returned; `Locale::negotiate`
 /// only needs the first one it supports.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 const MAX_LANGUAGES: usize = 16;
 
 /// The user's preferred languages, most preferred first, as BCP 47 tags such
