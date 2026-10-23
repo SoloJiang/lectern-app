@@ -6,11 +6,14 @@
 //! the app data and log directories ([`dirs::app_data`], [`dirs::logs`]),
 //! the OS version for log file headers ([`system::os_version`]),
 //! the local time zone's offset from UTC ([`time::utc_offset`]),
-//! and, on macOS, the FSEvents and kqueue backend of `lectern-fs-watch`
-//! (`fs_events`, docs/design/fs_watch.md「platform 后端」). `open -a`,
+//! the system appearance's colours, reduce-motion setting and their changes
+//! ([`appearance`]), and, on macOS, the FSEvents and kqueue backend of
+//! `lectern-fs-watch` (`fs_events`, docs/design/fs_watch.md「platform 后端」).
+//! `open -a`,
 //! Keychain, Seatbelt and the status line hook follow once their designs are
 //! merged.
 
+pub mod appearance;
 pub mod dirs;
 pub mod process;
 #[cfg(unix)]
