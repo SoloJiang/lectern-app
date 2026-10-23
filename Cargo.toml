@@ -89,6 +89,10 @@ glob = "0.3"
 # fstatat, fstat, readlinkat and read through a safe interface. Already in the
 # release build with the same features, through GPUI's async-io / polling.
 rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+# lectern-platform's `window::set_frame_autosave_name` takes any window that
+# implements `HasWindowHandle`; GPUI's `Window` does (docs/design/platform.md
+# 「窗口 frame 的 autosave」). Already in the release build through GPUI.
+raw-window-handle = "0.6"
 # Repository reading, used only by lectern-git (docs/adr/0024.md). Exact pin;
 # upgrade in its own PR. `parallel` stays off: no `max-performance-safe`
 # (it turns on `parallel` through `max-control`), only its two pack caches.
