@@ -1,8 +1,8 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已接受，尚未实现。实现与原设计的差别见「与设计的差异」。
 
-对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。本文只写最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
+对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
 ## 范围
 
@@ -18,7 +18,7 @@
   - 控件、颜色和动效原语：归 `ui`。
   - 读取系统首选语言、线程 QoS：macOS 专属，归 `platform`（架构规则 6）。
 - 本 issue 之外：
-  - 按 profile 装配具体的插件，创建 `Cache` 和 `fs_watch` 并传给插件：接入第一个插件时另开 issue。在此之前 desktop profile 的插件集合是空的。
+  - 按 profile 装配具体的插件，创建 `Cache` 和 `fs_watch` 并传给插件：第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，「装配」）。`usage`、`code_intel` 等其余插件在各自的前置条件完成后加入。
   - 窗口快照的读取与恢复、窗口位置的 frame autosave：随 [#30](https://github.com/SoloJiang/lectern-app/issues/30)。
   - headless 与 probe profile、`bench-probe` feature、`Driver`、把应用数据目录指到临时目录：随 [bench 设计](bench.md)第 5 步（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）。
   - 写盘线程和批量线程的 utility QoS：`platform` 提供设置 QoS 的接口之后，`app` 经 `Config::on_writer_start` 和 `executor::Config::on_thread_start` 传入。在此之前两者都是 `None`，线程用默认 QoS（logging 设计已允许）。
@@ -35,6 +35,9 @@
 | `lectern-i18n` | `Locale::negotiate`、`Strings::of`、菜单文字 | 界面字符串不硬编码 |
 | `lectern-kernel` | `PluginSet`、`Kernel::start`、`Kernel::shutdown` | |
 | `lectern-executor` | `Executor::new`、`Executor::shutdown` | |
+| `lectern-cache`、`lectern-fs-watch` | 第 2 步：`Cache::new`、`Cache::close`、`Watcher::new`、`Watcher::shutdown` | 进程级资源由 `app` 创建一次（ADR 0025） |
+| `lectern-project`、`lectern-agents`、`lectern-review` | 第 2 步：构造插件 | 只有 `app` 和 tool 层依赖插件 crate（架构规则 7） |
+| `lectern-fs-watch`（`test-support`，dev） | 第 2 步：profile 测试的 `FakeBackend` | |
 | `lectern-logging`（`test-support`，dev） | 金丝雀测试的 `testing::capture()` | |
 | `tempfile`（dev） | 启动测试的临时 `HOME` | 已在工作区里 |
 
@@ -198,6 +201,121 @@ Quit（主线程）
 - `Logging::shutdown` 之后的记录只计数，所以 `Outcome` 里的日志结果不再记日志。
 - 按 ⌘Q 到进程退出最多约 2.5 s，之后 GPUI 再给 `on_app_quit` 200 ms。等待期间窗口照常显示，主线程照常处理事件。
 
+## 装配
+
+[#205](https://github.com/SoloJiang/lectern-app/issues/205)。desktop profile 在启动屏障放开后创建进程级资源，装配已经实现的插件。test profile 仍是空集合，`#[gpui::test]` 不受影响。
+
+### 插件与资源
+
+| 插件 ID | 构造 | 提供 | 依赖 |
+|---|---|---|---|
+| `project` | `ProjectPlugin::new(ProjectDeps { executor, watcher, home })` | `dyn Projects` | 无 |
+| `session-claude-code`、`session-codex` | `lectern_agents::plugins(AgentsDeps { executor, cache, watch: watcher, decoded_dir, roots: AgentRoots::from_env(&home), filter: SessionFilter::new() })` | `dyn SessionSource` | `dyn Projects` |
+| `review` | `lectern_review::plugin(ReviewDeps { executor, cache, watcher, data_dir, git_ceilings })` | `dyn Review` | `dyn Projects`、`dyn SessionSource` |
+
+`usage`、`code_intel` 不在本 issue：它们的前置条件（usage 前置条件 C、code_intel 第 5 步）完成后各自加进这张表。
+
+目录与环境：
+
+- `home`：环境变量 `HOME`，必须是绝对路径。
+- `cache::Config::root`：`platform::dirs::app_cache()` 下的 `cache/`；`ui_thread` 为主线程的 `ThreadId`；`budgets` 取默认值。
+- `AgentsDeps::decoded_dir`：`platform::dirs::app_cache()` 下的 `agents/decoded/`。
+- `ReviewDeps::data_dir`：`platform::dirs::app_data()` 下的 `review/`。
+- `ReviewDeps::git_ceilings`：`GIT_CEILING_DIRECTORIES` 用 `std::env::split_paths` 分开，只保留绝对路径，读一次（与 `project` 的 `LecternGit::from_env` 相同）。
+- 三个目录都只拼路径；不存在时由使用它的 crate 在第一次写入时创建。
+
+`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件：kernel 以空集合启动，记一条 warn（见「日志与诊断」）。窗口照常显示，只是没有项目和会话。
+
+### 创建顺序
+
+全部在 `startup::release` 里、主线程上，紧接 `Early::start` 之后：
+
+1. `Executor::new(Config::default())`（已有）。
+2. `Cache::new(…)`。
+3. `Watcher::new(platform::fs_events::backend(executor.clone()), executor.clone(), fs_watch::Config::default())`。
+4. 按上表构造插件，放进 `PluginSet`。
+5. `Kernel::start(set)`。
+
+这几步都不做 IO、不建线程，只分配内存，所以 `release` 仍不阻塞：
+
+- `Cache::new` 只建内存里的表；分库文件在第一次读写时才打开（[cache 设计「生命周期」](cache.md#生命周期)）。
+- `Watcher::new` 不启动 fs_watch 线程（第一次 `watch_*` 时才启动）；`fs_events::backend` 在第一次 arm 时才建 dispatch queue 和 kqueue 线程。
+- `ProjectPlugin::new` 只读 `GIT_CEILING_DIRECTORIES`；`AgentRoots::from_env` 只读环境变量；`agents::plugins`、`review::plugin` 只保存依赖。
+- `Kernel::start` 建 kernel 线程后返回（已有）。插件都是 `AfterFirstFrame`，在 kernel 线程上激活。
+
+### 接口的变化
+
+```rust
+// src/profile.rs
+/// `release` 里创建、交给 profile 的资源。
+pub struct Resources {
+    pub executor: Executor,
+    pub cache: Cache,
+    pub watcher: Watcher,
+    pub home: PathBuf,
+    pub app_cache: PathBuf,
+    pub app_data: PathBuf,
+    pub git_ceilings: Arc<[PathBuf]>,
+}
+
+impl Profile {
+    /// desktop：上表的四个插件；test：空集合。不做 IO。
+    pub fn plugins(self, resources: &Resources) -> PluginSet;
+}
+
+// src/startup.rs
+pub struct Started {
+    pub logging: Logging,
+    pub executor: Executor,
+    pub kernel: Arc<Kernel>,
+    /// 目录缺失、没有装配插件时为 None。
+    pub cache: Option<Cache>,
+    pub watcher: Option<Watcher>,
+}
+```
+
+### 退出顺序的变化
+
+`lectern-quit` 线程依次：
+
+```
+Kernel::shutdown(done) ── 按依赖的相反顺序停用插件（review → agents → project），插件 drop 自己的监听
+Watcher::shutdown()    ── 停 fs_watch 线程，drop 后端的监视
+Executor::shutdown(剩余时间)
+Cache::close()         ── 写回访问时间、关闭连接；剩余时间为零时跳过（drop 同样安全，只丢访问时间）
+Logging::shutdown(500 ms)
+```
+
+- kernel、watcher、executor、cache 共用 2 s 的截止时间（`Timeouts::services`）。`Watcher::shutdown` 不等线程退出，立即返回。
+- `QuitSteps` 加两个方法：`fn watcher(&self)`、`fn cache(&self)`；没有装配时什么也不做。
+- 由系统发起的退出不经这条路径：只有 `on_app_quit` 里的 `Logging::shutdown(150 ms)`（已有）。缓存没有关闭不会丢失已提交的事务（[cache 设计「生命周期」](cache.md#生命周期)第 4 步）。
+
+### 性能
+
+- 冷启动：首帧之前没有新增的工作。
+- 首帧之后：四个插件激活。`project`、`review` 的 `activate` 只建空表；`agents` 在 `started` 里提交发现任务（`Background`），枚举会话目录（[agents 设计「数据流与线程」](agents.md#数据流与线程)第 1、2 步）。
+- 空闲内存（ADR 0017：60 MB）：在 `app/idle_empty`（bench 第 5 步）实现之前手动测量：临时 `HOME`、没有会话、不打开项目，启动 10 s 后读 `phys_footprint`，写进「实际验证」。超出 60 MB 时交给产品负责人决定（ADR 0017），不放宽。有真实会话时的内存由 agents 的预算覆盖，不在这里测量。
+- 退出：`Kernel::shutdown` 要在 2 s 内完成。超时会记 warn；不加长截止时间，先找慢的原因。
+
+### 日志与诊断
+
+- info `plugins assembled`：`profile`、`plugins`（插件个数）。在 `startup barrier released` 之前。
+- warn `plugins not assembled`：`missing`（`home`、`app_cache` 或 `app_data`）。不记路径。
+- debug `quit finished` 加 `watcher_us`、`cache_us`。
+- 插件激活、失败和 kernel 的静止由 kernel 自己记录（[kernel 设计「日志与诊断」](kernel.md#日志与诊断)）。
+- 金丝雀：`HOME` 设为含金丝雀字符串的临时目录启动，日志里没有这个字符串（`tests/startup.rs` 的 `home_path_stays_out_of_the_log`）。
+
+### 测试
+
+- `every_profile_graph_validates`：用临时目录建 `Resources`（`Cache::new` 指向临时目录，`Watcher` 用 `fs_watch::testing::FakeBackend`），对每个 profile 调用 `plugins(&resources).validate()`；之后临时目录仍是空的（构造不做 IO）。
+- `quit`：`steps_run_in_order` 的顺序改为 kernel、kernel 完成、watcher、executor、cache、logging；`a_hung_kernel_does_not_block_quit` 里 watcher 照常调用、cache 因剩余时间为零跳过。
+- `tests/startup.rs`：
+  - `startup_writes_a_header_and_an_end_record` 加检查：`plugins assembled` 在 `first frame drawn` 之后、`plugins` 为 4。
+  - `quit_shuts_the_services_down_in_time`：`--quit-after-start` 时日志里没有 `kernel shutdown timed out`、`executor shutdown timed out`。
+  - `home_path_stays_out_of_the_log`（上一节）。
+  - 每个启动测试的 `HOME` 都是临时目录，不读本机的 `~/.claude`、`~/.codex`。
+- 手动：空闲内存（「性能」）。
+
 ## 性能
 
 - 冷启动：首帧之前只有「启动顺序」的第 1–6 步。新增的工作是参数解析（几个字符串比较）、`install_early`（预算 ≤ 20 µs，`log/install_early`）和语言协商（常数级的内存操作），合计远小于 20 ms 预算的 1%。首帧之前不建线程、不读写 Lectern 自己的文件、不调用 kernel 和 executor（ADR 0017）。
@@ -300,6 +418,13 @@ Quit（主线程）
 - `cargo tree -p lectern-app -e features -i lectern-logging` 里有 `sink`。
 - 手动在 macOS 上运行 `cargo run -p lectern-app`：窗口出现，按 ⌘Q 后进程在 3 s 内退出，`~/Library/Logs/Lectern/` 里本次运行的文件最后一行是 `run end`。
 - logging 设计的状态行和「实际验证」写明第 3 项已实现，第 3 步验收里依赖进程级基准的一条（`app/cold_start` 不变慢）随 bench 第 5 步验证。
+
+**第 2 步：装配（[#205](https://github.com/SoloJiang/lectern-app/issues/205) 的实现 PR，`Closes #205`）。** 在 `platform` 的 `dirs::app_cache`（[#206](https://github.com/SoloJiang/lectern-app/pull/206)）和 review 第 4 步（插件）合并之后。
+
+- 「装配」一节「测试」里的单元测试和启动测试通过：`just test -p lectern-app`。
+- `python3 scripts/check_architecture.py` 通过：`app` 是唯一依赖插件 crate 的非 tool crate。
+- 手动：临时 `HOME` 启动发布构建，日志里有 `plugins assembled`（`plugins` 为 4）；按 ⌘Q 后 3 s 内退出，没有 `shutdown timed out` 的 warn；空闲内存的实测值写进「实际验证」。
+- review 设计的状态行写明前置条件 D 的 `app` 部分已实现；fs_watch 设计的状态行写明第 4 步的装配部分已实现（实测部分另列）。
 
 ## 实际验证
 
