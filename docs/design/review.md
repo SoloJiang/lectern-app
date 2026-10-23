@@ -1,6 +1,6 @@
 # review 设计
 
-状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)），概览部分尚未实现。
+状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）；第 5 步的简报部分（规则简报、`BriefRules` 提供者的登记、请求与对账，`review/brief_5000`）已实现（[#211](https://github.com/SoloJiang/lectern-app/pull/211)）；概览部分（`watch_overview`、`overview`、`review/overview_round_warm`、`review/overview_cloudprint`、`review/resident_*_bytes`）已实现（[#213](https://github.com/SoloJiang/lectern-app/pull/213)）。第 5 步至此完成。
 ||||||| 7439af3
 状态：实现中。前置条件 A（`services` 的 `changes`、`review` 模块，[#161](https://github.com/SoloJiang/lectern-app/pull/161)）、B（`git` 的 `line_diff`、`head_reflog`、`mtimes`、`tree_changes`，[#162](https://github.com/SoloJiang/lectern-app/pull/162)）、C（`git` 的 `LocalChanges`，[#165](https://github.com/SoloJiang/lectern-app/pull/165)）、G（`SessionSource::turns_unretained`，[#164](https://github.com/SoloJiang/lectern-app/pull/164)）已实现；D 的 `platform` 部分（应用数据目录 `dirs::app_data`，[#166](https://github.com/SoloJiang/lectern-app/pull/166)）已实现；第 1 步（噪声列表、规则分组、标注日志与已看状态）已实现（[#167](https://github.com/SoloJiang/lectern-app/pull/167)）；第 2 步（改动链、逐行来源与归因）已实现（[#169](https://github.com/SoloJiang/lectern-app/pull/169)）；第 3 步（审阅引擎与快照，`testing::Driven` 驱动，不经插件）已实现（[#174](https://github.com/SoloJiang/lectern-app/pull/174)）；日志接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 8 项）已实现（[#185](https://github.com/SoloJiang/lectern-app/pull/185)，见「日志与诊断」）；第 4 步（插件、监听与刷新，`TestKernel` 与 fs_watch 的假后端测试）已实现（[#207](https://github.com/SoloJiang/lectern-app/pull/207)）；`app` 装配（前置条件 D 的 `app` 部分，[#205](https://github.com/SoloJiang/lectern-app/issues/205)）与第 5 步尚未实现。
 
@@ -1089,6 +1089,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   | 后台完成（全部文件归因完、没有待补齐的部分），每次打开记一次 | info | `review settled` | `id`、`round`、`files`、`reprepared`（因声明或截止时刻补齐而重新准备的轮数）、`took_us`（从 `open` 起） |
   | 一轮准备失败（快照为 `Failed`；已被 `close` 或更新的一轮取消的不记） | info | `review failed` | `id`、`round`、`kind`、`error`（`missing`、`not_in_open_project` 或改动集错误的种类） |
   | 比较范围没有 merge-base，改为相对 HEAD | info | `no merge base; the range compares with head` | — |
+  | 概览的计数比较失败（取消不记），这一轮发布空概览（`Pending`） | warn | `overview comparison failed` | `error`（`GitError` 的种类）、`io` |
   | 简报规则的提供者 10 秒没有答复 `done`，按完成处理 | info | `brief provider timed out` | `id`、`request`（这个审阅的第几次请求）、`registration`（提供者的登记序号；插件 ID 是文本，不进日志） |
 
   - 会话标识（`from` 和作用域的 `session`）：会话 ID 是 UUID 时取它的 16 个字节，否则（Claude Code 子 agent 的 `<父会话>/agent-<id>`）取 128 位哈希，与 `usage` 的算法相同，两个 crate 对同一会话的记录可以对照。来源 ID 不写出。
@@ -1109,6 +1110,9 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | 关闭 30 秒后释放 | `review released` | `id` |
   | 向简报规则的提供者发出请求（每一轮的工作一次） | `brief requested` | `id`、`request`、`providers`（登记的提供者数）、`files`（请求里的文件数） |
   | 提供者交回一批条目 | `brief reply` | `id`、`request`、`registration`、`items`（这个提供者累计保留的条目数）、`done` |
+  | 概览的一轮结束 | `overview round` | `sessions`（窗口内有声明数据的会话数）、`shown`（列出的会话数）、`outside`、`capped`、`took_us`；作用域的 `review` 是 SHA-256(仓库哈希, "overview") 的前 8 字节 |
+  | 概览的触发 | `overview requested` | `how`（`resolve`、`full`、`paths`、`reuse`） |
+  | 最后一个关注放下，状态释放 | `overview released` | — |
 | 标注日志读完 | `annotation log read` | `path`、`records`、`unknown`、`complete`（索引是不是整个文件，决定能否压缩）、`took_us` |
   | 追加之前截掉末尾不完整的一行 | `annotation log tail cut` | `path`、`bytes` |
   | 文件状态未知、不以换行结尾，追加之前补一个换行 | `annotation log of unknown state; newline added before the records` | `path` |
@@ -1219,8 +1223,8 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - `narrative_*`：同一轮多次调用合成一步；子 agent 的轮次跟在派出它的那一轮之后，`tool_call` 为 None 时按时间插入；`after_last_seen`；认不出格式时 `turns` 为 None。insta 快照。
   - `rows_*`：最终改动与叙事步的展示行，偏移与 git 的规则一致；中间版本回放后 OID 与缓存的版本 OID 相同；LRU 不超过 8 MiB。
   - `brief_*`：规则是纯函数 `brief::build`，每条规则一个用例、排序与 12 条上限、提供者条目的对账在 `src/brief/tests.rs`（手工构造的 `FileChange`，不经仓库）；引擎侧（`src/engine/tests/brief.rs`）：规则的输入来自审阅（CI 文件与 lockfile、失败的改动调用、命令声明），`BriefRules` 的假提供者经 `register_brief_rules` 登记：一轮只请求一次、分批答复、10 秒超时（`Driven::with_timers` 的手动 `Host`）、登记 drop 或 token 失效后不再调用它且丢弃在途的答复、条目对账（不在快照里的文件丢弃、行不在显示范围内降为文件备注）、晚登记的提供者对已打开的审阅补问、从 `started` 里登记（token 还是 `Pending`）的提供者在 50 ms 的重试后被问到。提供者的 `ActivationToken` 来自 `testing::host()`（一个只交出 `PluginHandle` 的 kernel），`Pending` 的情形用一个在 `started` 里登记的测试插件。
-  - `overview_*`：计数比较用 `retained_bytes = 0`、`total_patch_bytes = 0`；4001 个改动路径时只保留计数；会话外的改动数；基准不同的会话每轮最多算 8 个；放下关注后释放。`overview_never_calls_turns`：一轮概览（20 个会话）之后，`FakeSessions` 记下的 `turns` 调用数为 0，只有 `turns_unretained`；本 crate 只保留派生的声明（`review/resident_*_bytes` 覆盖它的大小）。
-  - `plugin_*`（`src/plugin/tests.rs`，另有 `src/engine/watch.rs` 里批次到请求的映射和请求合并的单元测试）：`TestKernel` 激活后提供 `dyn Review`、清单符合「依赖」，激活不提交任务、不监听、不写文件（`plugin_provides_review_and_activation_does_nothing`）；`open` 立即返回，快照经 `Loading` 到 `Ready`，同一对象同一个 ID（`plugin_open_returns_at_once_…`）；fs_watch 的路径批次、`rescan` 和 `SessionsChanged` 触发刷新，批次的路径进 `RefreshHint::Paths`、`rescan` 为 `Full`（`plugin_a_watch_batch_…`、`plugin_a_path_batch_…`、`plugin_sessions_changed_…`）；运行期间来的请求合成一轮，路径取并集（`plugin_requests_during_a_round_…`、`plugin_merge_…`、`plugin_worktree_batches_…`）；kernel 在结果发布后静止，轮次排队时不静止（`plugin_kernel_is_quiescent_…`）；关闭后保留 30 秒、期间重新打开得到同一个审阅且不重算、第一次关闭的定时器不释放第二次关闭之后的审阅、到期后释放快照、监听和版本 LRU（`plugin_close_keeps_…`、`plugin_a_kept_review_…`）；停用后监听和审阅都释放（`plugin_deactivation_…`）；`command` 在 UI 线程上调用时不做 IO（`plugin_commands_on_the_ui_thread_do_no_io`：`cache` 的 `ui_thread` 设为测试线程，任何落在这个线程上的缓存调用在调试构建里 panic，任务都放到另一个线程上运行；标注日志的目录在后台任务运行之前不存在）；概览和简报规则的登记在第 5 步之前是空操作（`plugin_overview_…`）。测试不用墙上时钟：30 秒是 kernel 的 `ManualClock`，合并窗口是 fs_watch 的假时钟，任务在测试运行 executor 时才执行。
+  - `overview_*`（`src/engine/tests/overview.rs`）：`overview_lists_the_sessions_with_claims_and_counts_the_outside`（会话、进度、会话外的改动数；审阅算过归因之后 `drifted` 来自缓存）、`overview_uses_zero_retention_limits`（计数改动集的每个文件都是 `Listed`）、`overview_capped`（4001 个改动路径时只有计数、不保留改动集）、`overview_never_calls_turns`（20 个会话一轮之后 `FakeSessions::calls` 的 `turns` 为 0、`turns_unretained` 为 1；第二轮从内存取声明，不再读索引）、`overview_compares_at_most_eight_other_bases_per_round`、`overview_progress_matches_review_after_agent_commit`、`overview_is_released_with_the_last_interest`、`overview_triggers_merge_within_two_seconds`（`Driven::with_timers`，三个触发合成一轮）、`overview_mark_seen_updates_the_progress`、`overview_without_an_active_worktree_is_pending`；`plugin_overview_follows_the_interest`（插件经 `TestKernel`）。
+  - `plugin_*`（`src/plugin/tests.rs`，另有 `src/engine/watch.rs` 里批次到请求的映射和请求合并的单元测试）：`TestKernel` 激活后提供 `dyn Review`、清单符合「依赖」，激活不提交任务、不监听、不写文件（`plugin_provides_review_and_activation_does_nothing`）；`open` 立即返回，快照经 `Loading` 到 `Ready`，同一对象同一个 ID（`plugin_open_returns_at_once_…`）；fs_watch 的路径批次、`rescan` 和 `SessionsChanged` 触发刷新，批次的路径进 `RefreshHint::Paths`、`rescan` 为 `Full`（`plugin_a_watch_batch_…`、`plugin_a_path_batch_…`、`plugin_sessions_changed_…`）；运行期间来的请求合成一轮，路径取并集（`plugin_requests_during_a_round_…`、`plugin_merge_…`、`plugin_worktree_batches_…`）；kernel 在结果发布后静止，轮次排队时不静止（`plugin_kernel_is_quiescent_…`）；关闭后保留 30 秒、期间重新打开得到同一个审阅且不重算、第一次关闭的定时器不释放第二次关闭之后的审阅、到期后释放快照、监听和版本 LRU（`plugin_close_keeps_…`、`plugin_a_kept_review_…`）；停用后监听和审阅都释放（`plugin_deactivation_…`）；`command` 在 UI 线程上调用时不做 IO（`plugin_commands_on_the_ui_thread_do_no_io`：`cache` 的 `ui_thread` 设为测试线程，任何落在这个线程上的缓存调用在调试构建里 panic，任务都放到另一个线程上运行；标注日志的目录在后台任务运行之前不存在）；概览随第一个关注计算、随最后一个关注放下而消失（`plugin_overview_follows_the_interest`，第 5 步）。测试不用墙上时钟：30 秒是 kernel 的 `ManualClock`，合并窗口是 fs_watch 的假时钟，任务在测试运行 executor 时才执行。
   - `logs_*`（`src/engine/tests/logs.rs`，用 `lectern-logging` 的 `testing::capture()`）：金丝雀与 warn 路径的记录，见「日志与诊断」。标注日志的 IO 故障和尺寸上限经 `Engine::set_log_test`（`cfg(test)`）作用在引擎之后打开的日志上。
   - `services` 的 `changes`、`review` 模块（前置条件 A）：类型的 JSON 往返；`dyn Review` 的 `ID == "review"`、`MULTIPLE == false`；`BriefRules` 没有实现 `Service`；`BriefRulesRegistration`、`OverviewInterest` drop 时各调用一次注销回调。
 - 结构化输出（链、归因、叙事、简报、分组）都用 insta 快照验收。
@@ -1366,6 +1370,15 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
   - kernel 静止的测试用 `barrier` 加最多 2 秒的轮询（同 `agents` 的 `plugin_*`），断言的是「排队的轮次存在时不静止、结果发布并且批次交付后静止」，不是耗时。
   - 与 `app` 的装配没有测试（`app` 部分是 [#205](https://github.com/SoloJiang/lectern-app/issues/205)）。
 
+### 第 5 步（概览）
+
+在 macOS（Darwin，本机）上运行。
+
+- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过。
+- `just test -p lectern-review`：170 个测试通过，新增 10 个 `overview_*`（`src/engine/tests/overview.rs`，名字见「测试」）；`plugin_overview_and_brief_rules_are_empty_until_step_5` 改为 `plugin_overview_follows_the_interest`。`lectern-bench` 的 77 个测试照常通过（预算表与文档一致，`review/resident_*_bytes` 归 `Memory`）。
+- 基准（`just bench --measure review/overview`、`just bench --measure review/resident`）：`review/overview_round_warm` 中位数 7.11 ms（预算 < 20 ms；第 3 步的夹具，50 个会话，第二轮，`full` 触发到 `Overview` 事件）；`review/overview_cloudprint` 中位数 38.1 ms（只记录；cloudprint 形状 728 个文件整个写出，20 个会话各改一个文件，第二轮）；`review/resident_cloudprint_bytes` 中位数 20.2 KB、`review/resident_100k_bytes` 中位数 3.45 KB（预算各 < 1 MB；扣掉 `Driven` 空闲的字节和计数改动集自己的字节）。
+- 没有验证的：真实的 fs_watch 批次和 `ProjectEvent`（测试直接调用触发；插件里的订阅与 `ctx.on::<ProjectEvent>` 只有编译检查）；`project_home` 的使用（[#30](https://github.com/SoloJiang/lectern-app/issues/30)）；多个 worktree 之间切换 `active`（`FakeProjects` 只有主 worktree 的测试）。
+
 ### 第 5 步（简报）
 
 在 macOS（Darwin，本机）上运行。
@@ -1494,6 +1507,24 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **测试用的设施。** `ReviewPlugin::with_wall_clock`（引擎的时刻，14 天窗口按它算；测试的会话是固定日期的）、`with_repository_config_only`（同 `project`）；`engine::tests` 的夹具函数（`Fx`、`session`、`turn`…）改为 `pub(crate)`，`plugin_*` 复用；`Driven::refresh`、`Driven::sessions_changed` 与 `SessionFixture::agent_step` 给 `review/refresh_one`。「`data_dir` 的访问计数」没有做成计数：标注日志的目录在第一次写入才创建，所以测试检查它在后台任务运行之前不存在。「`cache` 的 `ui_thread` 检查」用 `Config::ui_thread` 设为测试线程，任务放到另一个线程运行。
 - **`plugin/review/activate` 在进程内测量。** 进程级的 `plugin/*/activate` 要 `app` 装配，还没有；与 `plugin/usage/activate` 相同，`TestKernel` 下取 kernel 的四段耗时，bench 的目标规则（`budgets_belong_to_the_documented_targets`、bench 设计「基准目标」）为它加了例外，随第 5 步改为 `Process`。`review/refresh_one` 在 `budgets.rs` 里是生效的，`Time` 目标。
 - 去掉了 `lib.rs` 里为「没有插件时没人调用引擎」加的 `allow(dead_code)`；`ReadReport::error` 只有测试读，字段上加了带理由的 `allow`。
+
+### 第 5 步（概览）
+
+- **第 5 步分两个 PR** 的后半：概览。`Review::watch_overview`、`overview` 由 `engine::overview` 实现（`state`：关注与触发；`round`：一轮；`session`：会话对计数改动集；`sink`：fs_watch 的接收器）。
+- **没有当前 worktree 时发布空概览。** 文件夹项目、项目快照还没有 `active`、或 worktree 句柄取不到时，概览的 `sessions` 为空、`outside` 为 `Pending`（设计没有写这种情况）。
+- **超过 4000 个改动路径时 `sessions` 为空。** 只保留计数（`Capped`），不保留改动集，会话的文件集合无从求交；下一个事件触发全量比较。
+- **基准不是当前 HEAD 的会话，文件集合取它自己基准比较里被它声明的文件**（与审阅快照的 `files` 同一定义），不是计数改动集与声明的交集：会话提交过自己改的文件时，这些文件不在相对 HEAD 的计数改动集里。每轮最多 8 个这样的会话，其余 `progress` 为 None。
+- **触发与合并。** 当前 worktree 的 fs_watch 批次（路径 → `paths`，`rescan`、`meta` → `full`；订阅后的第一个 `rescan` 也算一轮，补上订阅的那一轮比较之后、arm 之前的变化）、仓库批次的 reflog 行（`full`）、`SessionsChanged`（`reuse`：改动集不变，声明重取）、标注日志读完或写入（`reuse`：进度变了）、`ProjectEvent::Changed` 的 `active`（`resolve`：重新找当前 worktree）；`ProjectEvent::Closed` 释放状态，不等关注放下。合并窗口 2 秒用 kernel 的 `Clock`（`Host::later`），一轮运行期间来的触发在它结束后再等一个窗口；第一次关注立即一轮，不等窗口；没有 `Host`（`Driven`）时立即。
+- **第一次关注之后通常两轮。** 标注日志第一次读完会再触发一轮（进度要它）；测试按事件数断言。
+- **一轮里的 IO 不持有标注日志的锁。** 基准不是 HEAD 的会话的比较和归因缓存的读取先做，之后短暂持有日志索引的锁读已看状态（`command` 在 UI 线程上取这把锁）。
+- **释放在 `Background` 任务里 drop。** 最后一个关注放下时状态从表里取出，交给任务 drop：计数改动集、声明和 fs_watch 的订阅不在调用方（可能是 UI）线程上释放。`overview` 在取出之后立即返回 None。
+- **声明和截止时刻留在引擎的表里。** `release` 保留的 worktree 与会话集合并上概览持有的；概览自己只留 `(SessionKey, started_at, Arc<Claims>)`，不留 `SessionSummary`。
+- **`drifted` 的摘要**按审阅的顺序排步（这个会话最前，其余按最后活动从新到旧），与审阅的 `who.order` 一致；同一时间戳的步在别的审阅对象下顺序可能不同，那时未命中、为 None（允许）。文件级的链（`FileOnly`）不算 Drifted。
+- **每轮把 `Change` 转成 `FileChange`（`lectern_git::file_change_of`，[#212](https://github.com/SoloJiang/lectern-app/pull/212)），不保留 `ChangeList`**：`SeenKey`、噪声和敏感规则要 `services` 的类型；转换只在一轮里，不进常驻。
+- **`critical`** 只算不需要逐行来源的规则：`Sensitive` 的关键种类，加上有删除时的一条 `Deleted`；噪声文件不计。
+- **`plugin/review/activate` 仍在进程内测量**（bench 第 5 步未实现）。
+- **`review/resident_100k_bytes` 的形状是 index-only 的**（与 `project/resident_100k_bytes` 相同，不写 10 万个文件）：计数比较列出全部路径为缺失、超过 4000，概览被 cap；测的是 cap 之后的常驻。cloudprint 形状整个写出，20 个会话各改一个文件。基准扣掉 `Driven` 空闲时的字节和同一比较在引擎外再做一次的字节。
+- **测试设施。** `Driven::watch_overview`、`overview`、`overview_refresh`（一个 `full` 触发）、`overview_count`、`has_overview_state`、`project`、`main_worktree`；`FakeProjects::set_active`（快照的 `active`，默认主 worktree）；bench 的 `fixtures/review_repo.rs`。
 
 ### 第 5 步（简报）
 

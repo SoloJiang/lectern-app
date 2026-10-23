@@ -77,6 +77,22 @@ pub(crate) fn review_ctx(target: &ReviewTarget, common_dir: &Path, key: &TargetK
     }
 }
 
+/// The scope of a project's overview: `review` is the first 8 bytes of
+/// SHA-256(the repository's hash, "overview"), so the records of one
+/// repository's overview can be told from its reviews'.
+pub(crate) fn overview_ctx(common_dir: &Path) -> Ctx {
+    let mut hasher = Sha256::new();
+    hasher.update(crate::log::repo_hash(common_dir));
+    hasher.update(b"overview");
+    let digest = hasher.finalize();
+    let mut first = [0u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    Ctx {
+        review: Some(u64::from_be_bytes(first)),
+        ..Ctx::default()
+    }
+}
+
 /// A change path as a path field (bytes that are not UTF-8 are replaced
 /// when written).
 pub(crate) fn path(p: &ChangePath) -> Value<'_> {

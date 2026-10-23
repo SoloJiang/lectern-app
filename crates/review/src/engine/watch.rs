@@ -143,7 +143,7 @@ pub(super) fn worktree_hint(batch: &WorktreeBatch) -> Option<RefreshHint> {
 
 /// Whether a repository batch can change the cutoffs or the base: new reflog
 /// lines (a commit, a branch switch), a rewritten reflog, lost events.
-fn repo_changed(batch: &RepoBatch) -> bool {
+pub(super) fn repo_changed(batch: &RepoBatch) -> bool {
     !batch.reflog.is_empty()
         || !batch.reflog_resets.is_empty()
         || batch.rescan
@@ -206,16 +206,20 @@ impl Engine {
         if event.changed.is_empty() && event.removed.is_empty() {
             return;
         }
-        let mut state = super::lock(&self.state);
-        let ids: Vec<ReviewId> = state.reviews.keys().copied().collect();
-        for id in ids {
-            self.start_round(
-                &mut state,
-                id,
-                Kind::Reuse,
-                lectern_executor::Priority::Interactive,
-            );
+        {
+            let mut state = super::lock(&self.state);
+            let ids: Vec<ReviewId> = state.reviews.keys().copied().collect();
+            for id in ids {
+                self.start_round(
+                    &mut state,
+                    id,
+                    Kind::Reuse,
+                    lectern_executor::Priority::Interactive,
+                );
+            }
         }
+        // The overviews' claims and sessions change too.
+        self.overviews_request_all(super::overview::Trigger::default());
     }
 
     /// Subscribes the review to its repository and worktree, once.

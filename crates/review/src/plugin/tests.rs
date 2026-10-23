@@ -568,10 +568,22 @@ fn plugin_deactivation_drops_the_reviews_and_their_watches() {
 }
 
 #[test]
-fn plugin_overview_and_brief_rules_are_empty_until_step_5() {
+fn plugin_overview_follows_the_interest() {
     let rig = Rig::new();
     let project = rig.fx.projects.key().clone();
     assert!(rig.review.overview(&project).is_none());
-    drop(rig.review.watch_overview(&project));
-    assert_eq!(rig.executor.run_until_idle(), 0, "no task for it");
+    let interest = rig.review.watch_overview(&project);
+    // The first interest starts a round; its result arrives as an event.
+    assert!(rig.executor.run_until_idle() > 0);
+    let overview = rig.review.overview(&project).expect("computed");
+    assert_eq!(overview.sessions.len(), 1);
+    assert!(
+        rig.kernel
+            .emitted::<ReviewEvent>()
+            .iter()
+            .any(|e| matches!(e, ReviewEvent::Overview { .. }))
+    );
+    drop(interest);
+    assert!(rig.review.overview(&project).is_none());
+    rig.executor.run_until_idle();
 }
