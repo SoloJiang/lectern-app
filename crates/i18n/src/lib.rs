@@ -67,6 +67,13 @@ impl Key {
     pub(crate) const fn new(index: u16) -> Key {
         Key { index }
     }
+
+    /// The Fluent message ID: `review-looks-good`, or `review-looks-good.tooltip`
+    /// for an attribute. `ui::Text` carries it so that the UI probe can name
+    /// the message a label came from (docs/design/ui.md「文本」).
+    pub fn name(&self) -> &'static str {
+        table::NAMES[usize::from(self.index)]
+    }
 }
 
 /// A message or attribute with variables. A different type from [`Key`]:
@@ -84,5 +91,10 @@ pub struct FmtKey {
 impl FmtKey {
     pub(crate) const fn new(index: u16) -> FmtKey {
         FmtKey { index }
+    }
+
+    /// The Fluent message ID, as [`Key::name`].
+    pub fn name(&self) -> &'static str {
+        table::NAMES[usize::from(self.index)]
     }
 }
