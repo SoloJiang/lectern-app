@@ -1376,7 +1376,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过。
 - `just test -p lectern-review`：170 个测试通过，新增 10 个 `overview_*`（`src/engine/tests/overview.rs`，名字见「测试」）；`plugin_overview_and_brief_rules_are_empty_until_step_5` 改为 `plugin_overview_follows_the_interest`。`lectern-bench` 的 77 个测试照常通过（预算表与文档一致，`review/resident_*_bytes` 归 `Memory`）。
-- 基准（`just bench --measure review/overview`、`just bench --measure review/resident`）：`review/overview_round_warm` 中位数 7.82 ms（预算 < 20 ms；第 3 步的夹具，50 个会话，第二轮，`full` 触发到 `Overview` 事件）；`review/overview_cloudprint` 中位数 40.4 ms（只记录；cloudprint 形状 728 个文件整个写出，20 个会话各改一个文件，第二轮）；`review/resident_cloudprint_bytes` 中位数 20.2 KB、`review/resident_100k_bytes` 中位数 3.45 KB（预算各 < 1 MB；扣掉 `Driven` 空闲的字节和计数改动集自己的字节）。
+- 基准（`just bench --measure review/overview`、`just bench --measure review/resident`）：`review/overview_round_warm` 中位数 7.11 ms（预算 < 20 ms；第 3 步的夹具，50 个会话，第二轮，`full` 触发到 `Overview` 事件）；`review/overview_cloudprint` 中位数 38.1 ms（只记录；cloudprint 形状 728 个文件整个写出，20 个会话各改一个文件，第二轮）；`review/resident_cloudprint_bytes` 中位数 20.2 KB、`review/resident_100k_bytes` 中位数 3.45 KB（预算各 < 1 MB；扣掉 `Driven` 空闲的字节和计数改动集自己的字节）。
 - 没有验证的：真实的 fs_watch 批次和 `ProjectEvent`（测试直接调用触发；插件里的订阅与 `ctx.on::<ProjectEvent>` 只有编译检查）；`project_home` 的使用（[#30](https://github.com/SoloJiang/lectern-app/issues/30)）；多个 worktree 之间切换 `active`（`FakeProjects` 只有主 worktree 的测试）。
 
 ### 第 5 步（简报）
