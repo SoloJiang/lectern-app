@@ -1,7 +1,8 @@
-//! The quit order (docs/design/app.md「退出顺序」): kernel, then executor,
-//! then logging, on a `lectern-quit` thread while the main thread keeps
-//! running; then `cx.quit()`.
+//! The quit order (docs/design/app.md「退出顺序」「退出顺序的变化」): kernel,
+//! watcher, executor, cache, then logging, on a `lectern-quit` thread while
+//! the main thread keeps running; then `cx.quit()`.
 
+use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -14,8 +15,8 @@ use crate::startup::Started;
 
 actions!(lectern, [Quit]);
 
-/// Kernel and executor together, counted from the start of the quit
-/// (docs/design/kernel.md `Kernel::shutdown`).
+/// Kernel, watcher, executor and cache together, counted from the start of
+/// the quit (docs/design/kernel.md `Kernel::shutdown`).
 const SERVICES: Duration = Duration::from_secs(2);
 /// `Logging::shutdown` after both (docs/design/logging.md).
 const LOGGING: Duration = Duration::from_millis(500);
@@ -25,12 +26,17 @@ const LOGGING_ON_TERMINATE: Duration = Duration::from_millis(150);
 /// How often the main thread looks at the quit thread while it waits.
 const POLL: Duration = Duration::from_millis(10);
 
-/// The three steps. The release build implements them with `Started`;
-/// tests use fakes that record the order and can hang.
-pub trait QuitSteps: Send + 'static {
+/// The steps. The release build implements them with `Started`; tests use
+/// fakes that record the order and can hang.
+pub trait QuitSteps: Send + Sync + 'static {
     /// `Kernel::shutdown`; `done` runs once the kernel thread has finished.
     fn kernel(&self, done: Box<dyn FnOnce() + Send>);
+    /// `Watcher::shutdown`. Blocks up to the watcher's `flush_timeout`;
+    /// [`run`] waits for it only until the deadline.
+    fn watcher(&self);
     fn executor(&self, timeout: Duration) -> Shutdown;
+    /// `Cache::close`. Blocks; [`run`] waits for it only until the deadline.
+    fn cache(&self);
     fn logging(&self, timeout: Duration) -> Flushed;
 }
 
@@ -52,13 +58,16 @@ impl Timeouts {
 #[cfg_attr(not(test), expect(dead_code, reason = "only the tests read it"))]
 pub struct Outcome {
     pub kernel_timed_out: bool,
+    pub watcher_timed_out: bool,
     pub executor: Shutdown,
+    /// False also when there was no time left to start it.
+    pub cache_timed_out: bool,
     pub logging: Flushed,
 }
 
-/// Runs the three steps in order and returns once each has finished or
-/// timed out. Blocks: never on the main thread.
-pub fn run(steps: &dyn QuitSteps, timeouts: &Timeouts) -> Outcome {
+/// Runs the steps in order and returns once each has finished or timed
+/// out. Blocks: never on the main thread.
+pub fn run(steps: Arc<dyn QuitSteps>, timeouts: &Timeouts) -> Outcome {
     let start = Instant::now();
     let deadline = start + timeouts.services;
     let (tx, rx) = mpsc::channel();
@@ -74,19 +83,69 @@ pub fn run(steps: &dyn QuitSteps, timeouts: &Timeouts) -> Outcome {
     if kernel_timed_out {
         warn!("kernel shutdown timed out"; waited_us = kernel_took);
     }
+    let watcher_start = Instant::now();
+    let watcher_timed_out = bounded(deadline, {
+        let steps = steps.clone();
+        move || steps.watcher()
+    });
+    let watcher_took = watcher_start.elapsed();
+    if watcher_timed_out {
+        warn!("watcher shutdown timed out"; timeout_us = watcher_took);
+    }
     let executor_start = Instant::now();
     let executor = steps.executor(deadline.saturating_duration_since(Instant::now()));
+    let executor_took = executor_start.elapsed();
     if let Shutdown::TimedOut { busy_workers } = executor {
         warn!("executor shutdown timed out"; busy_workers = busy_workers);
     }
+    let cache_start = Instant::now();
+    // No time left: dropping the cache is as safe and only loses the access
+    // times (docs/design/cache.md「生命周期」).
+    let cache_timed_out = !deadline.saturating_duration_since(cache_start).is_zero()
+        && bounded(deadline, {
+            let steps = steps.clone();
+            move || steps.cache()
+        });
+    let cache_took = cache_start.elapsed();
+    if cache_timed_out {
+        warn!("cache close timed out"; timeout_us = cache_took);
+    }
     // Records after `Logging::shutdown` are only counted.
-    debug!("quit finished"; kernel_us = kernel_took, executor_us = executor_start.elapsed());
+    debug!("quit finished";
+        kernel_us = kernel_took,
+        watcher_us = watcher_took,
+        executor_us = executor_took,
+        cache_us = cache_took);
     let logging = steps.logging(timeouts.logging);
     Outcome {
         kernel_timed_out,
+        watcher_timed_out,
         executor,
+        cache_timed_out,
         logging,
     }
+}
+
+/// Runs `step` on a short-lived `lectern-quit-step` thread and waits for it
+/// until `deadline`. True when it timed out: the thread is left to finish or
+/// to end with the process. A thread that can't be created skips the step,
+/// which only leaves its work to the process exit.
+fn bounded(deadline: Instant, step: impl FnOnce() + Send + 'static) -> bool {
+    let (tx, rx) = mpsc::channel();
+    let spawned = thread::Builder::new()
+        .name("lectern-quit-step".into())
+        .spawn(move || {
+            step();
+            let _ = tx.send(());
+        });
+    if let Err(e) = spawned {
+        warn!("could not start a quit step"; error = Value::io(&e));
+        return false;
+    }
+    matches!(
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+        Err(RecvTimeoutError::Timeout)
+    )
 }
 
 impl QuitSteps for Started {
@@ -94,8 +153,20 @@ impl QuitSteps for Started {
         self.kernel.shutdown(done);
     }
 
+    fn watcher(&self) {
+        if let Some(watcher) = &self.watcher {
+            watcher.shutdown();
+        }
+    }
+
     fn executor(&self, timeout: Duration) -> Shutdown {
         self.executor.shutdown(timeout)
+    }
+
+    fn cache(&self) {
+        if let Some(cache) = &self.cache {
+            cache.close();
+        }
     }
 
     fn logging(&self, timeout: Duration) -> Flushed {
@@ -159,10 +230,10 @@ pub fn quit(cx: &mut App) {
         return;
     };
     info!("quit requested"; path = QuitSource::Action);
-    let steps = started.clone();
+    let steps: Arc<dyn QuitSteps> = Arc::new(started.clone());
     let spawned = thread::Builder::new()
         .name("lectern-quit".into())
-        .spawn(move || run(&steps, &Timeouts::RELEASE));
+        .spawn(move || run(steps, &Timeouts::RELEASE));
     let handle = match spawned {
         Ok(handle) => handle,
         Err(e) => {

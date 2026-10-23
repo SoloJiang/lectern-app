@@ -1,6 +1,8 @@
 //! Startup tests (docs/design/app.md「测试」): launch the real `lectern`
 //! with a temporary `HOME` and the debug-only `--quit-after-start`, then
-//! read the log file it wrote. Needs a macOS graphical session, which the
+//! read the log file it wrote. `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are
+//! removed, so the session sources look only under the temporary `HOME`,
+//! never at this machine's sessions. Needs a macOS graphical session, which the
 //! macOS CI job has. Checks are on the file's contents and the order of
 //! records, never on wall-clock durations; the timeout only ends a hang.
 
@@ -19,8 +21,13 @@ struct Run {
 
 impl Run {
     fn new() -> Run {
+        Run::with_prefix(".tmp")
+    }
+
+    /// A `HOME` whose name starts with `prefix`.
+    fn with_prefix(prefix: &str) -> Run {
         Run {
-            home: tempfile::tempdir().unwrap(),
+            home: tempfile::Builder::new().prefix(prefix).tempdir().unwrap(),
         }
     }
 
@@ -31,7 +38,11 @@ impl Run {
     /// Launches `lectern` and waits for it to exit.
     fn launch(&self, args: &[&str], lectern_log: Option<&str>) -> ExitStatus {
         let mut command = Command::new(env!("CARGO_BIN_EXE_lectern"));
-        command.args(args).env("HOME", self.home.path());
+        command
+            .args(args)
+            .env("HOME", self.home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME");
         match lectern_log {
             Some(filter) => command.env("LECTERN_LOG", filter),
             None => command.env_remove("LECTERN_LOG"),
@@ -115,8 +126,10 @@ fn startup_writes_a_header_and_an_end_record() {
     let records = records(&runs[0]);
     assert_eq!(msg(&records[0]), "file", "{records:#?}");
     let drawn = position(&records, "first frame drawn");
+    let assembled = position(&records, "plugins assembled");
     let released = position(&records, "startup barrier released");
-    assert!(drawn < released, "{records:#?}");
+    assert!(drawn < assembled && assembled < released, "{records:#?}");
+    assert_eq!(records[assembled]["plugins"], 4);
     assert_eq!(records[released]["profile"], "desktop");
     let quit = position(&records, "quit requested");
     assert_eq!(records[quit]["path"], "action");
@@ -184,4 +197,36 @@ fn second_run_sees_a_clean_previous_run() {
             .all(|r| msg(r) != "previous run ended unexpectedly"),
         "{records:#?}"
     );
+}
+
+#[test]
+fn quit_shuts_the_services_down_in_time() {
+    let run = Run::new();
+    assert!(run.launch(&["--quit-after-start"], None).success());
+    let records = records(&run.runs()[0]);
+    for timed_out in [
+        "kernel shutdown timed out",
+        "watcher shutdown timed out",
+        "executor shutdown timed out",
+        "cache close timed out",
+    ] {
+        assert!(
+            records.iter().all(|r| msg(r) != timed_out),
+            "{timed_out}: {records:#?}"
+        );
+    }
+    assert_eq!(msg(records.last().unwrap()), "run end", "{records:#?}");
+}
+
+#[test]
+fn home_path_stays_out_of_the_log() {
+    let canary = "canary-5d1b8e27";
+    let run = Run::with_prefix(canary);
+    assert!(run.launch(&["--quit-after-start"], Some("trace")).success());
+    let files = run.runs();
+    assert!(!files.is_empty());
+    for path in files {
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(canary), "{}: {text}", path.display());
+    }
 }

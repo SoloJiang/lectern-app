@@ -2,6 +2,7 @@
 //! never reach the log.
 
 use std::ffi::OsString;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lectern_executor::Shutdown;
@@ -17,9 +18,13 @@ impl QuitSteps for Noop {
         done();
     }
 
+    fn watcher(&self) {}
+
     fn executor(&self, _: Duration) -> Shutdown {
         Shutdown::Clean
     }
+
+    fn cache(&self) {}
 
     fn logging(&self, _: Duration) -> Flushed {
         Flushed::Clean
@@ -41,7 +46,7 @@ fn canary_stays_out_of_app_logs() {
         .into_iter(),
     );
     args::log_unknown(&parsed);
-    run(&Noop, &Timeouts::RELEASE);
+    run(Arc::new(Noop), &Timeouts::RELEASE);
     let lines = capture.lines();
     assert!(
         lines
