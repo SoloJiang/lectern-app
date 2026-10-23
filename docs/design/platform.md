@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -19,6 +19,7 @@
   - 应用数据目录（`dirs::app_data`）：不能重建的用户数据的位置，review 的标注日志用它（[ADR 0044](../adr/0044.md)，见「应用数据目录」）。
   - 日志目录（`dirs::logs`）与系统版本（`system::os_version`）：`logging` 落盘的位置和文件头里的系统版本（[ADR 0046](../adr/0046.md)，见「日志目录与系统版本」）。
   - 本地时区的偏移（`time::utc_offset`）：`usage` 的 `LocalZone` 按它把时间窗口分成本地自然日（[ADR 0020](../adr/0020.md)，见「本地时区的偏移」）。
+  - 系统首选语言（`system::preferred_languages`）：`app` 在首帧之前用它选界面语言（[ADR 0013](../adr/0013.md)，见「系统首选语言」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -950,6 +951,38 @@ pub mod time {
 - `utc_offset_gmtoff_range`：`offset_from_gmtoff` 接受范围的两端和不是整分钟的偏移，拒绝范围之外和 `i64` 的两端。
 - 其他平台上 `utc_offset_is_none_elsewhere`。
 
+## 系统首选语言
+
+[app 设计「对其他 crate 的要求」](app.md#对其他-crate-的要求)的 B（[#199](https://github.com/SoloJiang/lectern-app/issues/199)）。`app` 在首帧之前把它的结果交给 `i18n::Locale::negotiate`，选出界面语言（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)里启动时用的 `preferred_languages()`）。i18n 设计里设置页用的 `system_languages()`、`language_override()` 随语言设置实现，不在这里。
+
+### 接口
+
+```rust
+pub mod system {
+    /// 本进程生效的首选语言，最优先的在前，BCP 47 标签，如 "zh-Hans-CN"。macOS 上用
+    /// `CFLocaleCopyPreferredLanguages`，结果包含应用域里 `AppleLanguages` 的覆盖。
+    /// 不是 ASCII 字母、数字和连字符的、以连字符开头的、超过 35 字节的标签跳过；最多 16 个。
+    /// 读不到时为空；其他平台总是空。系统偏好在内存里，不读 Lectern 自己的文件，首帧前可以调用；任何线程可调用。
+    pub fn preferred_languages() -> Vec<String>;
+}
+```
+
+### 规则
+
+- CoreFoundation 的五个函数（`CFLocaleCopyPreferredLanguages`、`CFArrayGetCount`、`CFArrayGetValueAtIndex`、`CFStringGetCString`、`CFRelease`）手写在 `system.rs` 的 macOS 实现里，不引入绑定 crate；CoreFoundation 已由 AppKit 链接。数组按 Copy 规则在返回前释放，数组里的字符串按 Get 规则不释放。
+- 每个标签用 `CFStringGetCString` 以 UTF-8 写进栈上 37 字节的缓冲（比接受的上限多出一个字节和 NUL）：写不下时 CoreFoundation 返回失败，这个标签跳过。字符集检查是纯函数（`language_tag`），在所有平台上编译和测试；读到意外的值时整个丢掉，不截取。
+- 16 个的上限：`Locale::negotiate` 只要第一个能对应上的标签，用户实际设置的首选语言很少超过几个。
+- 不记日志：读不到时返回空列表，`Locale::negotiate` 退回英文。
+
+### 测试
+
+`preferred_languages_*` 写在 `crates/platform/src/system/tests.rs`：
+
+- `preferred_languages_keeps_language_tags`：`en`、`en-US`、`zh-Hans-CN`、`es-419`，不带 NUL 的和 NUL 之后还有字节的都按 NUL 之前的部分接受。
+- `preferred_languages_rejects_anything_but_a_tag`：空值、只有 NUL、以连字符开头、带下划线、带空格、带换行、非 ASCII 的字节都为 None。
+- `preferred_languages_tag_length_is_capped`：35 字节的标签接受，36 字节的为 None。
+- macOS 上 `preferred_languages_reads_the_running_macos`：结果不为空、不超过 16 个、每一项都能通过字符集检查；其他平台上 `preferred_languages_is_empty_elsewhere`。
+
 ## 未决问题
 
 没有需要产品决定的问题。技术问题都已在上文决定。
@@ -996,6 +1029,12 @@ pub mod time {
 - `git diff origin/main -- Cargo.lock` 为空（`sysctlbyname` 来自已有的 `libc`）；`rg -n 'set_var|remove_var' crates/platform/src` 没有结果；`rg -n 'sysctl' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
 - `cargo clippy -p lectern-platform --target aarch64-apple-darwin --all-features --all-targets -- -D warnings` 在 Linux 上交叉检查通过。
 - 本文的状态行、「实际验证」，logging 设计的状态行写明第 2 步已实现。
+
+系统首选语言（app 的前置条件 B）一个实现 PR，写 `Refs #199`，在 app 第 1 步之前合并：
+
+- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「系统首选语言」的 `preferred_languages_*`；原有的测试结果不变。
+- `git diff origin/main -- Cargo.lock` 为空；`rg -n 'CFLocale' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
+- 本文的状态行和「实际验证」写明已实现。
 
 本地时区的偏移（usage 的前置条件 B）一个实现 PR，写 `Refs #31`，在 usage 第 1 步之前合并：
 
@@ -1069,6 +1108,11 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
   - `just test -p lectern-platform` 110 个测试通过，与改动前相同（Linux 上的代码没有改）。
   - `just check`、`just doctest`、`just deny` 通过。`just test`（整个工作区 2251 个测试，跳过 7 个）里 2250 个通过，`lectern-syntax` 的计时测试 `batch_order_window_tasks_take_turns_with_batches` 在四个 agent 同时构建的负载下超时一次（第 4 步 168 ms），单独重跑 `batch_order` 的 5 个测试都通过；它不经过本 crate 改动的代码。
   - 验收的检查：`rg -n 'eprintln!|eprint!|println!|util::log' crates/platform/src --glob '!**/tests*'` 没有结果；Cargo.lock 只在 `lectern-platform` 的依赖里多了 `lectern-logging`。
+
+- 系统首选语言（app 的前置条件 B）在 macOS（Apple 芯片，macOS 27.0）上：
+  - `just test -p lectern-platform` 137 个测试通过，其中新增 4 个 `preferred_languages_*`（`preferred_languages_reads_the_running_macos` 读到本机的首选语言列表，每一项通过字符集检查）；原有的测试结果不变。
+  - `cargo clippy -p lectern-platform --all-targets --all-features -- -D warnings` 通过。验收的检查：`git diff origin/main -- Cargo.lock` 为空；`rg -n 'CFLocale' crates --glob '!crates/platform/**' -t rust` 没有结果。
+  - 没有在 Linux 上运行：`preferred_languages_is_empty_elsewhere` 和纯函数的测试由 Linux CI 运行。
 
 ## 与设计的差异
 
