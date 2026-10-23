@@ -53,7 +53,7 @@
 两个编译期条件，实现必须同时满足：
 
 1. feature 要开在 `gpui_platform`（`gpui-pre-platform`）上：`gpui-pre-platform/test-support` 打开 `gpui_macos/test-support`，再打开 `gpui_apple/test-support`，macOS 窗口的 `render_to_image` 才存在；只开 `gpui/test-support` 时 `Window::render_to_image` 能编译，但调到平台 trait 的默认实现，总是返回错误。
-2. 只有调试构建能读回：Metal 层的 `framebufferOnly = false` 在 `test-support` 且 `debug_assertions` 时才设置，release 构建即使带 `ui-probe` feature，读回也失败。所以 `screenshot` 只在调试构建里可用（`just probe` 用 dev profile）；release 构建里的探针照常提供 `ui_tree`，`screenshot` 应答 `render`。
+2. 只有调试构建能读回：Metal 层的 `framebufferOnly = false` 在 `test-support` 且 `debug_assertions` 时才设置，release 构建即使带 `ui-probe` feature，读回也失败。所以 `screenshot` 只在调试构建里可用（`just probe` 用 dev profile）；release 构建里的探针照常提供 `ui_tree`，`screenshot` 不调用 `render_to_image`（对 framebuffer-only 纹理读回可能是 Metal 的断言而不是 `Err`），按 `cfg!(debug_assertions)` 直接应答 `render`。
 
 备选：`platform` 用 `CGWindowListCreateImage` 截取本进程的窗口（macOS 专属，架构规则 6）。它截的是真正显示的画面（含系统材质），但要取 `NSWindow` 的编号，而且本进程窗口是否免于 TCC 的屏幕录制授权本文没有验证。只在 `render_to_image` 在实现阶段不可用时改用，改用要更新本节。
 
@@ -383,7 +383,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 | 未知方法 | 应答 `unknown-method` |
 | 没有窗口（全部关闭后点 Dock 之前） | 应答 `no-window` |
 | `frame_timeout` 内没画出帧 | 应答 `timeout`；迟到的记录丢弃 |
-| `render_to_image` 失败（没有 drawable、渲染器不可用、release 构建不能读回） | 应答 `render`；`ui_tree` 不受影响 |
+| `render_to_image` 失败（没有 drawable、渲染器不可用），或 release 构建（不调用它） | 应答 `render`；`ui_tree` 不受影响 |
 | `dir` 不是绝对路径或不存在、`name` 不合规、写文件失败 | 应答 `io`，不创建目录，不写任何文件 |
 | 退出已开始 | 之后的请求应答 `quitting`；连接随进程结束 |
 | 客户端中途断开 | 连接线程退出；正在处理的请求照常完成，结果丢弃 |
