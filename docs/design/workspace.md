@@ -91,7 +91,7 @@ pub enum ContributionKind {
     Screen(ScreenLayout),
     /// 替换侧栏内容的面板（项目侧栏本身、Files）。`payload` 是 `ui::contrib::SidebarPanel`。
     SidebarPanel,
-    /// 项目侧栏里的一个条目（Overview、Sessions、Worktrees、Files、Usage……）。`payload` 是 `ui::contrib::SidebarEntry`。
+    /// 项目侧栏里的一个条目（Overview、Sessions、Worktrees、Files、Usage……）。`payload` 是 `ui::contrib::SidebarItem`。
     SidebarEntry { section: SidebarSection },
     /// 检查器的一页（Files、Conversation）。`payload` 是 `ui::contrib::InspectorTab`。
     InspectorTab,
@@ -126,7 +126,7 @@ pub enum SidebarSection { Project, Views, Bottom }
 pub struct Payload(pub Box<dyn Any + Send>);
 
 /// 已应用的、可以被多个视图共享的载荷：本 crate 应用 `SidebarEntry` 登记时把 `Payload` 里的
-/// `ui::contrib::SidebarEntry` 换成 `Arc`，`project_home` 用 `Arc::downcast` 取回。
+/// `ui::contrib::SidebarItem` 换成 `Arc`，`project_home` 用 `Arc::downcast` 取回。
 pub struct SharedPayload(pub Arc<dyn Any + Send + Sync>);
 
 /// 一条已登记的侧栏条目（`sidebar_entries` 的元素）。
@@ -249,7 +249,7 @@ pub struct Screen {
 }
 pub struct ToolbarItems { pub title: Text, pub subtitle: Option<Text>, pub controls: Vec<AnyElement> /* ≤ 3 */ }
 pub struct SidebarPanel { pub build: ViewFactory<()> };
-pub struct SidebarEntry { pub label: i18n::Key, pub icon: Option<ui::Symbol>, pub on_select: WorkspaceCommand };
+pub struct SidebarItem { pub label: i18n::Key, pub icon: Option<ui::Symbol>, pub on_select: WorkspaceCommand };
 pub struct InspectorTab { pub label: i18n::Key, pub build: ViewFactory<()> };
 pub struct Panel { pub build: ViewFactory<()> };
 pub struct Overlay { pub build: ViewFactory<()> };
@@ -629,7 +629,8 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ### 前置条件 A
 
-- **`SidebarEntry` 与 `SharedPayload`**（「服务接口」已补上）：设计原来只写了 `sidebar_entries() -> Arc<[SidebarEntry]>`，没有定义 `services` 里的 `SidebarEntry`；`ui::contrib::SidebarEntry` 在视图层，`services` 不能引用。现在 `services` 定义 `SidebarEntry { id, section, order, payload: SharedPayload }`，`SharedPayload` 是 `Arc<dyn Any + Send + Sync>`：`Arc<[SidebarEntry]>` 要跨线程共享，元素必须 `Send + Sync`，而 `Payload` 的 `Box<dyn Any + Send>` 不是 `Sync`，所以本 crate 应用登记时把 `ui::contrib::SidebarEntry` 换成 `Arc` 放进条目，`project_home` 用 `Arc::downcast` 取回。
+- **`SidebarEntry` 与 `SharedPayload`**（「服务接口」已补上）：设计原来只写了 `sidebar_entries() -> Arc<[SidebarEntry]>`，没有定义 `services` 里的 `SidebarEntry`；`ui::contrib` 的条目载荷在视图层，`services` 不能引用。现在 `services` 定义 `SidebarEntry { id, section, order, payload: SharedPayload }`，`SharedPayload` 是 `Arc<dyn Any + Send + Sync>`：`Arc<[SidebarEntry]>` 要跨线程共享，元素必须 `Send + Sync`，而 `Payload` 的 `Box<dyn Any + Send>` 不是 `Sync`，所以本 crate 应用登记时把 `ui::contrib::SidebarItem` 换成 `Arc` 放进条目，`project_home` 用 `Arc::downcast` 取回。
+- `ui::contrib` 的条目载荷由 `SidebarEntry` 改名为 `SidebarItem`（「`ui::contrib` 的载荷类型」已改）：`services` 的 `SidebarEntry` 用了这个名字，`project_home` 两个都要引用；`ui` 设计（#218）没有 `contrib` 模块，这些载荷类型只在本文里定义。
 - 设计没有列出的派生（「服务接口」已补上）：数据类型都派生 `Hash`、`Serialize`、`Deserialize`，与 `services` 的其他模块相同（进程插件不贡献界面，序列化只为与其他模块一致和测试往返）；不含 `Arc` 的小类型派生 `Copy`；`SidebarSection` 派生 `Ord`，顺序即侧栏从上到下的顺序；`WindowId` 派生 `Ord`。`Contribution` 含 `Payload`，只实现 `Debug`（不打印载荷）。
 - `Registration` 的两个回调都是 `FnOnce + Send`（不要求 `Sync`，`Staged` 只要求 `Send`）；没有提交就 drop 时只调用 `release`，本 crate 的注销回调要能处理「从未应用」的登记。
 - `WorkspaceEvent::ScreenChanged` 按值带两个 `Route`（约 400 字节），clippy 的 `large_enum_variant` 用 `#[allow]` 并写明理由：每次导航一个事件、每个监听克隆一次，装箱只会让每个监听多一次间接访问。

@@ -87,7 +87,7 @@ pub enum ContributionKind {
     /// 替换侧栏内容的面板（项目侧栏本身、Files）。`payload` 是 `ui::contrib::SidebarPanel`。
     SidebarPanel,
     /// 项目侧栏里的一个条目（Overview、Sessions、Worktrees、Files、Usage……）。
-    /// `payload` 是 `ui::contrib::SidebarEntry`。
+    /// `payload` 是 `ui::contrib::SidebarItem`。
     SidebarEntry { section: SidebarSection },
     /// 检查器的一页（Files、Conversation）。`payload` 是 `ui::contrib::InspectorTab`。
     InspectorTab,
@@ -129,7 +129,7 @@ pub enum SidebarSection {
 }
 
 /// 一条已登记的侧栏条目（`Contributions::sidebar_entries`）。`payload` 是登记时的
-/// `ui::contrib::SidebarEntry`，`workspace` 应用登记时从 [`Payload`] 里取出、换成
+/// `ui::contrib::SidebarItem`，`workspace` 应用登记时从 [`Payload`] 里取出、换成
 /// 共享的 `Arc`，`project_home` 用 `Arc::downcast` 取回。
 #[derive(Clone, Debug)]
 pub struct SidebarEntry {
