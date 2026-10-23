@@ -39,7 +39,7 @@ pub fn run() {
 
     let app = gpui_platform::application();
     // Closing the last window does not quit; the Dock icon reopens it
-    // (docs/design/app.md「未决问题」1).
+    // (docs/design/app.md「界面」; decided by the product owner).
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
             window::open(cx);
