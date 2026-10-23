@@ -34,6 +34,8 @@
 | `lectern-i18n` | 本 crate 自己的几条字符串（`workspace.ftl`） | [ADR 0013](../adr/0013.md) |
 | `lectern-kernel`、`lectern-services` | `Plugin`、`Staged`、`ActivationToken`、`KernelControl`；提供 `dyn Contributions`，依赖 `dyn Projects` | 架构规则 7（[ADR 0025](../adr/0025.md)） |
 | `lectern-logging` | 日志宏、`current()` / `scope()`（主线程上恢复贡献方的作用域） | [ADR 0046](../adr/0046.md) |
+| `lectern-platform` | `frame::record`、`frame::FrameTimes`（帧记录；实现之前只有类型） | 架构规则 6：帧时刻只能在 `platform` 取 |
+| `serde` | `WindowState` 的序列化 | 已在工作区依赖里 |
 | `futures`（`channel` feature） | 主线程队列的 `mpsc::unbounded`：发送方在任何线程，接收方是 GPUI 的前台任务 | 已在 Cargo.lock（GPUI 依赖它），不新增 crate；加进 `[workspace.dependencies]`，`just deny` 通过 |
 | `lectern-kernel`（`test-support`，dev）、`insta`（dev） | `TestKernel`、语义树快照 | |
 
@@ -182,6 +184,7 @@ pub enum WorkspaceCommand {
     /// 侧栏换成某个面板（Files）；`None` 回到项目侧栏。
     ShowSidebarPanel(Option<Name>),
     /// 显示或隐藏检查器（⌥⌘I）；`SelectInspectorTab` 顺带显示（⌘\ 切到 Conversation）。
+    /// 当前屏幕的 `layout.inspector` 为 false（Welcome、项目主页）时两者都忽略，记 debug。
     SetInspector(bool),
     SelectInspectorTab(Name),
     /// 打开或关闭浮动面板（Space 打开上下文面板，Esc 关闭）。
@@ -229,18 +232,21 @@ pub enum Milestone { ProjectHome, FileHighlighted, DiffShown, WorktreeSwitched }
 定义在 `ui`（「对其他 crate 的要求」），这里只列本 crate 依赖的形状；名字以 `ui` 设计为准。闭包都在主线程上调用，本 crate 调用前先 `token.enter()`、恢复贡献方的日志作用域，并用 `kernel::contain` 包住。
 
 ```rust
-pub struct Screen { pub build: Box<dyn FnOnce(&Target, &mut Window, &mut App) -> AnyView + Send> };
-pub struct SidebarPanel { pub build: Box<dyn FnOnce(&mut Window, &mut App) -> AnyView + Send> };
+/// 视图工厂：每次需要这个视图时调用一次（同一个屏幕可以被压栈多次、面板可以反复打开），所以是 `Fn`，
+/// 可以克隆、在任何线程持有，只在主线程调用。
+pub type ViewFactory<Arg> = Arc<dyn Fn(&Arg, &mut Window, &mut App) -> AnyView + Send + Sync>;
+pub struct Screen { pub build: ViewFactory<Target> };
+pub struct SidebarPanel { pub build: ViewFactory<()> };
 pub struct SidebarEntry { pub label: i18n::Key, pub icon: Option<ui::Symbol>, pub on_select: WorkspaceCommand };
-pub struct InspectorTab { pub label: i18n::Key, pub build: Box<dyn FnOnce(&mut Window, &mut App) -> AnyView + Send> };
-pub struct Panel { pub build: Box<dyn FnOnce(&mut Window, &mut App) -> AnyView + Send> };
-pub struct Overlay { pub build: Box<dyn FnOnce(&mut Window, &mut App) -> AnyView + Send> };
+pub struct InspectorTab { pub label: i18n::Key, pub build: ViewFactory<()> };
+pub struct Panel { pub build: ViewFactory<()> };
+pub struct Overlay { pub build: ViewFactory<()> };
 /// 每条：按键、Action、可选的 KeyContext 谓词（「Action 与快捷键」的上下文名）。
 pub struct KeyBindings(pub Vec<(&'static str, Box<dyn gpui::Action>, Option<&'static str>)>);
 impl Screen { pub fn into_payload(self) -> Payload; }   // 其余类型相同
 ```
 
-每个 `build` 只调用一次：视图在第一次需要时建，之后保留在本 crate 的区域里（屏幕随栈弹出而 drop；检查器页、面板、覆盖层在关闭时 drop，再次打开时重新 `build`——所以 `build` 是 `FnOnce` 加一个重建用的工厂，具体由 `ui` 设计定；本文按「每次打开重新建」写）。Action 的处理函数不经本 crate：贡献方在自己建的视图上 `on_action`（GPUI 的全局 `on_action` 没有注销，不用）。
+视图在需要时建、不需要时 drop：屏幕在压栈时 `build`、弹出时 drop；检查器页在选中时 `build`、检查器隐藏或换页时 drop；面板和覆盖层在打开时 `build`、关闭时 drop；侧栏面板在显示时 `build`、换走时 drop。工厂本身留在注册表里直到注销。Action 的处理函数不经本 crate：贡献方在自己建的视图上 `on_action`（GPUI 的全局 `on_action` 没有注销，不用）。
 
 ### 本 crate 的公开项
 
@@ -250,11 +256,17 @@ impl Screen { pub fn into_payload(self) -> Payload; }   // 其余类型相同
 pub fn install(window: AnyWindowHandle, deps: WorkspaceDeps, cx: &mut App) -> WorkspaceHost;
 
 pub struct WorkspaceDeps {
-    /// 窗口状态变化时调用（去抖由 `app` 做）。任何线程。
+    /// 窗口状态变化时调用（去抖由 `app` 做）。任何线程。`app` 同时在这里切换 frame autosave 名
+    /// （`project` 有值时 `"project"`，否则 `"welcome"`，见「对其他 crate 的要求」D）。
     pub on_state_changed: Arc<dyn Fn(WindowState) + Send + Sync>,
     /// 里程碑画出后调用，`presented` 是下一帧回调的时刻（见「已知限制」）。任何线程。
     pub on_milestone: Arc<dyn Fn(Milestone, SystemTime) + Send + Sync>,
+    /// 一段帧记录结束后调用（bench 设计「需要其他 crate 提供的接口」：滚动、动画、输入的逐帧时刻）。任何线程。
+    pub on_frames: Arc<dyn Fn(FrameRecord) + Send + Sync>,
 }
+
+/// 一段记录的逐帧时刻，`frames` 是 `platform::frame::FrameRecorder::stop` 的结果；`app` 转成 bench 的 `FrameStats`。
+pub struct FrameRecord { pub scenario: Name, pub frames: Vec<lectern_platform::frame::FrameTimes> }
 
 /// `Send + Sync`。`app` 持有一份，`WorkspacePlugin` 持有一份。
 #[derive(Clone)]
@@ -266,7 +278,24 @@ impl WorkspaceHost {
     pub fn attach(&self, window: AnyWindowHandle, cx: &mut App);
 
     /// `app` 读到窗口状态文件后调用：有项目路径时 `dispatch(OpenProject)`，检查器按 `inspector` 恢复。任何线程。
+    /// `WorkspacePlugin::started` 还没有拿到 `dyn Projects` 时（读文件比激活快），命令留在主线程队列里，`started` 之后执行。
     pub fn restore(&self, state: WindowState);
+
+    /// 开始记录当前窗口的逐帧时刻（`platform::frame::record`），期间每帧都请求下一帧，
+    /// 到 `stop` 的条件满足时结束，经 `on_frames` 交回。bench 的 `Driver`（`app` 实现）在滚动、动画和输入场景里调用。任何线程。
+    pub fn record_frames(&self, scenario: Name, stop: RecordStop);
+}
+
+pub enum RecordStop {
+    /// 固定时长之后。
+    After(Duration),
+    /// 当前进行中的动画全部结束（`ui` 的动效原语报告）之后。
+    AnimationsSettled,
+    /// 调用方再次调用 `stop_recording` 时。
+    Manual,
+}
+impl WorkspaceHost {
+    pub fn stop_recording(&self);
 
     /// `app` 的 `Quit` 在 `Kernel::shutdown` 之前问 `LeaveScope::App` 的守卫（file_reader 设计「编辑」退出的第 1 步）。
     /// 任何线程；`done(true)` 表示全部通过。没有窗口或还没有守卫时立即 `done(true)`。
@@ -336,10 +365,12 @@ struct Nav {
 
 | 当前状态 | 输入 | 守卫 | 结果 |
 |---|---|---|---|
-| 任意 | `ProjectEvent::Opened { Ok(key) }` | — | `base = Project(key)`，`stack` 清空（先问 `View` 守卫，被拒时不换，见「状态与异常」），`sidebar_panel = None`；`ScreenChanged` |
-| `Project(k)` | `ProjectEvent::Closed { k }` | — | `base = Welcome`，`stack` 清空，面板、覆盖层、检查器关闭；`ScreenChanged` |
+| 任意 | `ProjectEvent::Opened { Ok(key) }`，`key` 不是当前基底 | — | `base = Project(key)`，`stack` 清空（先问 `View` 守卫，被拒时不换，见「状态与异常」），`sidebar_panel = None`；`ScreenChanged`；`on_state_changed`。原来的基底是 `Project(old)` 时随后调 `Projects::close(old)`：一个窗口同一时刻只显示一个项目，`Projects` 自己不限制同时打开的数目，不关的话旧项目的监听、任务和快照一直留着 |
+| `Project(k)` | `ProjectEvent::Opened { Ok(k) }`（同一个项目再次打开：切换 worktree 或刷新） | — | 不换基底、不清栈 |
+| `Project(k)` | `ProjectEvent::Closed { k }` | — | `base = Welcome`，`stack` 清空，面板、覆盖层、检查器关闭；`ScreenChanged`；`on_state_changed` |
+| 任意 | `ProjectEvent::Closed { other }`（不是当前基底，如上一行关掉的旧项目） | — | 忽略 |
 | `Welcome` | `OpenProject(p)` / `PromptOpenProject` | — | `Projects::open(p)`；等 `Opened` |
-| `Project(k)` | `OpenProject(p)` | `Project(k)` | 通过后 `Projects::open(p)`（第一版在同一个窗口里换项目，见「未决问题」1） |
+| `Project(k)` | `OpenProject(p)` | `Project(k)` | 通过后 `Projects::open(p)`（第一版在同一个窗口里换项目，见「未决问题」1）；`p` 属于 `k` 时 `Opened` 带同一个 key，按上面的「同一个项目再次打开」处理，否则 `Opened` 换基底并关闭 `k` |
 | `Project(k)` | `CloseProject` | `Project(k)` | 通过后 `Projects::close(k)` |
 | `Project(k)` | `SetActiveWorktree(w)` | `Worktree(k)` | 通过后 `Projects::set_active_worktree(k, w)` |
 | `Project` | `Push(r)` | — | `r` 的屏幕已注册：压栈，`panel`、`overlay` 关闭；没注册：记 warn，不变 |
@@ -352,7 +383,7 @@ struct Nav {
 | 任意 | `CloseWindow` | `Window` | 通过后 `remove_window`，`WindowClosed` |
 | `Welcome` | `Pop`、`PopToBase`、`Push` | — | 忽略，记 debug |
 
-`Escape` 的顺序：覆盖层 → 面板 → 替换侧栏的面板（回到项目侧栏）→ 栈顶屏幕（`Pop`，经 `View` 守卫）→ 都没有时不做任何事。当前屏幕的视图先收到 Esc（它可能关闭自己的查找栏），没有处理时才冒泡到本 crate。⌘[ 同样先给当前屏幕（阅读视图的后退），没有处理时是 `PopToBase`（「Esc · ⌘[：关闭面板 · 返回 Overview」）。
+`Escape` 的顺序：覆盖层 → 面板 → 替换侧栏的面板（回到项目侧栏）→ 栈顶屏幕（`Pop`，经 `View` 守卫）→ 都没有时不做任何事。当前屏幕的视图先收到 Esc（它可能关闭自己的查找栏），没有处理时才冒泡到本 crate。⌘[ 同样先给当前屏幕，没有处理时是 `PopToBase`（「Esc · ⌘[：关闭面板 · 返回 Overview」）。阅读视图是例外：它自己处理 ⌘[（后退），退到历史起点之后 `dispatch(Pop)` 回到打开它的那个屏幕（审阅或项目主页，[file_reader 设计「Action 与快捷键」](file_reader.md#action-与快捷键)），不是 `PopToBase`。
 
 守卫的询问：对一次命令，按登记顺序逐个 `ask(scope, done)`，前一个 `done(true)` 之后才问下一个；任一个 `done(false)` 就作废这次命令。询问期间到达的同范围命令排队，不并发询问。守卫的 `ask` 在它的激活准入内调用；`enter()` 失败的守卫跳过。
 
@@ -363,16 +394,16 @@ struct Nav {
 ```rust
 struct Registry {
     entries: Mutex<HashMap<(ContributionKind 的判别, Name), Entry>>,
-    sidebar_entries: ArcSwap<[SidebarEntry]>,   // `sidebar_entries()` 直接返回
+    sidebar_entries: Mutex<Arc<[SidebarEntry]>>, // `sidebar_entries()` 取锁复制 Arc，与 `Projects::snapshot` 相同
     commands: Mutex<HashMap<Name, CommandEntry>>,
     leave_guards: Mutex<Vec<GuardEntry>>,
     key_bindings: Mutex<Vec<(ActivationToken, Vec<Binding>)>>,
 }
-struct Entry { token: ActivationToken, ctx: lectern_logging::Ctx, payload: Option<Payload> /* 建视图时取走 */, order: u16, … }
+struct Entry { token: ActivationToken, ctx: lectern_logging::Ctx, payload: Payload /* 应用时 downcast 成 ui::contrib 的类型 */, order: u16, … }
 ```
 
 - 登记（任何线程）：写进表、生成一个序号，返回 `Registration`。`activate` 期间的登记只进表、不发事件；`commit(token)` 把 token 填进条目并排一次「应用」到主线程（`token.pending()` 守卫随队列项，取不到就丢弃）。`started` 之后的登记直接排「应用」。
-- 应用（主线程）：检查 `token.state() == Live`（否则丢弃）；按 kind 把条目加进相应的集合：`SidebarEntry` 重建 `sidebar_entries` 快照并发 `ContributionsChanged`；`KeyBindings` 重建整个 keymap（GPUI 只有 `bind_keys` 和 `clear_key_bindings`，没有单条删除：本 crate 保存全部有效绑定，每次增减都 `clear_key_bindings` 再 `bind_keys`，本 crate 自己的绑定也在这份表里）；`Screen` 等只登记工厂，视图在需要时才建。应用完给这次激活的「已应用」标记置位（「按命令激活」第 3 步）。
+- 应用（主线程）：检查 `token.state() == Live`（否则丢弃）；按 kind 把条目加进相应的集合：`SidebarEntry` 重建 `sidebar_entries` 快照并发 `ContributionsChanged`；`KeyBindings` 用 `bind_keys` 追加到 keymap，注销时不删：GPUI 只有 `bind_keys` 和 `clear_key_bindings`，后者会清掉 `app` 的 ⌘Q、gpui-component 输入框的绑定等不归本 crate 的绑定，所以不用。GPUI 分发一次按键时按优先级逐个尝试匹配的绑定，一个 Action 没有被处理就继续下一个（gpui-pre 0.3.9 `window.rs` 的 `dispatch_key_event`）；贡献方停用后它的处理函数随视图一起 drop，留下的绑定落空、不挡住其他绑定（「已知限制」）。`key_bindings` 表只记下哪些绑定属于哪次激活，供探针和调试。`Screen` 等只登记工厂，视图在需要时才建。应用完给这次激活的「已应用」标记置位（「按命令激活」第 3 步）。
 - 注销（`Registration` drop，任何线程）：取 `token.pending()`，排「移除」到主线程；主线程上从集合移除、drop 工厂和已建的视图（正在显示的屏幕被移除时按 `Pop` 处理，不问守卫；基底屏幕被移除时内容区显示空白并记 warn），每项在 `contain` 里做；守卫 drop 后 kernel 才能报告静止。
 - 调用贡献方的闭包（视图工厂、命令处理函数、守卫的 `ask`）：`token.enter()` 取准入，`logging::scope(entry.ctx)`，`contain` 包住；panic 时 `fail` 这次激活（kernel 设计「撤销」）。`ctx` 是登记时在调用线程上取的 `lectern_logging::current()`，`activate` 里登记的因此带 kernel 设的 `plugin`、`act`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 11 项）。
 
@@ -494,7 +525,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 依赖 GPUI，只在 macOS 上编译和测试：`just test -p lectern-workspace`。
 
 - 状态机（纯函数，`#[test]`，不依赖 GPUI）：`nav::*`：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`。
-- 注册表（`#[test]`，用 `TestKernel` 的 token）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`removal_drops_the_shown_screen`、`keymap_is_rebuilt_on_change`（全部绑定在表里，减少一个插件的绑定后其余仍在）。
+- 注册表（`#[test]`，用 `TestKernel` 的 token）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`removal_drops_the_shown_screen`、`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）、`screens_can_be_pushed_twice`（同一个 `Screen` 工厂被调用两次）、`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）。
 - `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
@@ -516,13 +547,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   pub fn set_frame_autosave_name(window: &impl raw_window_handle::HasWindowHandle, name: &str) -> Result<(), WindowError>;
   ```
 
-  `app` 在 `open_window` 之后、首帧之前对 Welcome 窗口设 `"welcome"`；切到项目时设 `"project"`，回到 Welcome 时设回。这是 ADR 0017 允许的首帧前唯一的偏好读取。
+  `app` 在 `open_window` 之后、首帧之前对 Welcome 窗口设 `"welcome"`；之后在 `on_state_changed` 里按 `WindowState::project` 是否有值设 `"project"` 或 `"welcome"`（主线程）。`"project"` 第一次使用、还没有保存过 frame 时，`app` 先把窗口设为 1180 × 760 pt 居中。这是 ADR 0017 允许的首帧前唯一的偏好读取。`frame::record` 与 `FrameTimes` 是 bench 设计「需要其他 crate 提供的接口」已经列出的要求，本 crate 只调用。
 - **E. `app`**：
   - `startup::release` 里 `Kernel::start` 之前：`workspace::install(window, deps, cx)`，`WorkspacePlugin::new(host)` 放进 `PluginSet`（`Profile::Desktop` 的表加一行；test profile 不装）。
   - `on_reopen` 开好骨架窗口后调 `host.attach`。
   - 屏障放开后在 executor 的 `Background` 任务里读 `app_data()/workspace/window.json`，解析成 `WindowState`（认不出或没有文件时为默认值），调 `host.restore`；`app_data()` 为 None 时不读不写。`on_state_changed` 去抖 500 ms 后在 `Background` 任务里写同一个文件（写临时文件再 `rename`，不建目录以外的任何东西）。读写失败只记 warn（不记路径）。
   - `Quit` 的第 1 步：`host.ask_leave(LeaveScope::App, done)`，`done(false)` 时什么也不做。
-  - 把 `Milestone` 转给 bench 的探针（`bench-probe` feature）。
+  - 把 `Milestone` 转给探针的 `milestone`，把 `FrameRecord` 转成 `FrameStats` 交给 `frames`（`bench-probe` feature）；`Driver` 的滚动、动画和输入场景调 `host.record_frames(scenario, stop)`，输入场景用 `RecordStop::Manual`，注入结束后 `stop_recording`。
 - **F. `bench`**：`Milestone` 的来源改为 `workspace::Milestone` 的映射（bench 设计「需要其他 crate 提供的接口」已写明由 `workspace` 报告）。
 
 ## 未决问题
@@ -537,7 +568,8 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 注册表不按窗口分：所有窗口共享同一套贡献（多窗口时也应如此，视图实例按窗口建）。
 - 由系统发起的退出不问离开守卫（app 设计「已知限制」）。
 - 进程插件不能贡献界面（「范围」）。
-- GPUI 没有单条删除键绑定的接口，每次增减重建整个 keymap；绑定数在几十条以内，没有可感知的开销。
+- GPUI 没有单条删除键绑定的接口，贡献方停用后它的绑定留在 keymap 里直到进程退出（落空，不影响其他绑定）；同一个插件停用又启用时绑定重复追加，只在用户反复切换设置时发生，几十条以内没有可感知的开销。
+- `platform::frame::record` 实现之前，`record_frames` 交回的记录为空，帧时间的基准报告 `skipped`。
 
 ## 验收
 
