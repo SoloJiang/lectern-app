@@ -9,6 +9,26 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "view"
+# The "workspace" plugin: provides `dyn Contributions`, requires `dyn Projects`
+# (docs/design/workspace.md「依赖」, ADR 0025).
+plugin = true
+
+[dependencies]
+# `Plugin`, `Staged`, `ActivationToken`, `PendingGuard`, `contain`.
+lectern-kernel = { path = "../kernel" }
+# Runtime logging (docs/design/workspace.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
+# `dyn Contributions` and its data types, `dyn Projects` and `ProjectEvent`.
+lectern-services = { path = "../services" }
+# `WindowState`'s serialization.
+serde.workspace = true
+
+[dev-dependencies]
+# `TestKernel`: the registry tests run real activations.
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `testing::capture` for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

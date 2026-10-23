@@ -4631,6 +4631,13 @@ version = "0.0.0"
 [[package]]
 name = "lectern-workspace"
 version = "0.0.0"
+dependencies = [
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "lectern-worktrees"

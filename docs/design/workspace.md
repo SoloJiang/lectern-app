@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）已实现，见「实际验证」「与设计的差异」；其余前置条件与「验收」的三步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）与「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#222](https://github.com/SoloJiang/lectern-app/pull/222)）已实现，见「实际验证」「与设计的差异」；其余前置条件与第 2、3 步尚未实现。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -527,7 +527,8 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   - warn `command without handler`：`command`。error `command activation failed`：`command`、`error`（`PluginError` 的种类）。
   - warn `project opened while a view refused to leave`、warn `project open failed`：`error`（`OpenError` 的种类）。
   - warn `job dropped after shutdown`：`jobs`（计数，队列关闭后累计一次）。
-- 详细级别：debug `command`（`WorkspaceCommand` 的判别名、是否经过守卫、结果 `done` / `refused` / `ignored`）；debug `layer changed`（层、开关）；debug `milestone`（名字、`presented` 的微秒数）；trace `job`（队列项的来源插件与耗时）。
+  - error `leave guard panicked`：`activation`（守卫所属的激活序号）；error `contribution drop panicked`：`kind`、`id`、`activation`。两者都在 `contain` 捕获之后记录，不展开到主线程。
+- 详细级别：debug `command`（`WorkspaceCommand` 的判别名、是否经过守卫、结果 `done` / `refused` / `ignored`）；debug `layer changed`（层、开关）；debug `milestone`（名字、`presented` 的微秒数）；debug `leave guard skipped`（守卫已注销或激活不再 `Live`，按通过处理）；debug `stale guard answer`（答复属于已结束的一轮询问）；debug `contribution dropped before it applied`；trace `job`（队列项的来源插件与耗时）。
 - 关联 ID：调用贡献方闭包时恢复登记时取的 `Ctx`（`plugin`、`act`），所以贡献方的记录和本 crate 在那段代码里的记录都带它们；本 crate 自己的状态机代码在 kernel 为 `workspace` 设的作用域之外运行（主线程），记录带 `window`，不带 `plugin`。
 - 不记录：项目路径（`OpenProject` 的参数、窗口状态里的路径）、`prompt_for_paths` 返回的路径、工具栏的标题与副标题、侧栏条目的文字、提示的文字、`Target` 里的会话标识之外的内容（`ReviewTarget`、`ReadTarget` 只记判别名）。用屏幕 ID、贡献 ID、计数和错误种类代替。
 - 金丝雀测试：`canary_stays_out_of_workspace_logs`（`src/tests/logs.rs`）：用 `lectern_logging::testing::capture()`，在 trace 级别 `dispatch(OpenProject(含金丝雀的路径))`、注册一个标题含金丝雀的屏幕并切换到它、`restore(WindowState { project: 含金丝雀 })`，`assert_absent(金丝雀)`。
@@ -536,8 +537,8 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 依赖 GPUI，只在 macOS 上编译和测试：`just test -p lectern-workspace`。
 
-- 状态机（纯函数，`#[test]`，不依赖 GPUI）：`nav::*`：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`。
-- 注册表（`#[test]`，用 `TestKernel` 的 token）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`removal_drops_the_shown_screen`、`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）、`screens_can_be_pushed_twice`（同一个 `Screen` 工厂被调用两次）、`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）。
+- 状态机（纯函数，`#[test]`，不依赖 GPUI；`src/tests/nav.rs`，用假的 `nav::Env`）：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`；`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）；`opened_with_a_refusing_view_keeps_the_screen`；`window_state_follows_the_open_path`。
+- 注册表（`#[test]`，`src/tests/registry.rs`，用 `TestKernel` 跑真实激活取 token，`driver::Driver` 代替主线程）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`invalid_ids_are_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`pending_token_is_deferred`（`started` 还没返回时 token 是 `Pending`，应用推迟到下一个 `Tick`）、`late_registration_applies_without_a_commit`、`removal_drops_the_shown_screen`、`release_frees_the_id_before_the_main_thread_removes_it`、`screens_can_be_pushed_twice`（第 1 步只检查注册表那一半：同一个屏幕压栈两次、载荷取两次；工厂真的被调用两次在第 2 步）、`sidebar_entries_are_sorted_and_shared`、`command_handlers_guards_and_key_bindings_apply`、`leave_guards_are_asked_through_the_queue`、`commands_wait_for_projects`、`project_events_reach_the_state_machine`、`dispatch_after_shutdown_is_dropped`、`plugin_manifest_matches_the_design`。`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）要 GPUI 的 keymap，归第 2 步。
 - `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`，`platform::frame::record` 用 `test-support` 的假记录器）。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
@@ -589,11 +590,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 分三步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-workspace`、`just deny` 通过。前置条件 A、C 各自的 PR 先合并；B（`ui` 设计与实现）在第 2 步之前；D、E、F 随第 3 步。
 
-**第 1 步：`services::workspace` 与状态机、注册表（不依赖 GPUI 的部分）。**
+**第 1 步：`services::workspace` 与状态机、注册表（不依赖 GPUI 的部分）。** 两个 PR：前置条件 A（`services`），然后本 crate。
 
 - `cargo check -p lectern-services`、`just test -p lectern-services` 通过；`services` 的 AGENTS.md 加上 `workspace` 模块一行。
-- 「测试」里 `nav::*` 和注册表的测试通过。
 - `rg 'gpui' crates/services/src` 没有结果。
+- `cargo check -p lectern-workspace`、`just test -p lectern-workspace` 通过：「测试」里状态机、注册表的测试和 `canary_stays_out_of_workspace_logs` 通过。
+- `rg 'gpui' crates/workspace/src` 没有结果：这一步不加 `gpui`、`lectern-ui`、`lectern-i18n`、`lectern-platform` 依赖。`rg 'eprintln!|println!|log::' crates/workspace/src` 没有结果。
+- `python3 scripts/check_architecture.py` 通过：`workspace` 带 `plugin = true`，只依赖 kernel 层（`lectern-kernel`、`lectern-services`、`lectern-logging`）和 `serde`。
 
 **第 2 步：根视图、区域、代理 Action、离开守卫（`#[gpui::test]`）。**
 
@@ -627,6 +630,18 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   - 载荷与条目：`workspace_payload_downcasts_to_its_type`（`Payload` 的 `downcast`、`SharedPayload` 的 `Arc::downcast` 与共享）、`workspace_sidebar_sections_order_top_to_bottom`、`workspace_screen_ids_are_valid_names`（六个屏幕 ID 都符合 `[a-z0-9_-]`、1 到 64 字节）。
   - trait 对象：`workspace_contributions_is_a_shared_trait_object`（`Arc<dyn Contributions>` 调用每个方法；`Send` / `Sync` 的静态检查）、`workspace_leave_guard_answers_through_done`。
 
+### 第 1 步
+
+本 crate 不依赖 GPUI 的部分（[#222](https://github.com/SoloJiang/lectern-app/pull/222)），在 macOS（arm64，Rust 1.97.0）上运行：
+
+- `cargo check -p lectern-workspace`、`just check`（含 `cargo clippy --workspace --all-targets -- -D warnings` 和架构检查：32 个 crate，`workspace` 带 `plugin = true`）、`just deny` 通过。
+- `just test -p lectern-workspace`：46 个测试通过，都是普通 `#[test]`。
+  - `src/tests/nav.rs`（26 个）：「导航状态机」表的每一行一个（`opened_switches_the_base_and_closes_the_old_project`、`reopening_the_same_project_keeps_the_stack`、`closed_returns_to_welcome`、`closed_for_another_project_is_ignored`、`open_project_from_welcome_needs_no_guard`、`open_project_with_a_project_asks_the_project_guard`、`close_project_asks_the_project_guard`、`set_active_worktree_asks_the_worktree_guard`、`push_needs_a_registered_screen`、`pop_asks_the_view_guard`、`pop_to_base_asks_once_per_level`、`escape_closes_the_topmost_layer`、`show_sidebar_panel_needs_a_registered_panel`、`inspector_commands_follow_the_layout`、`panel_and_overlay_replace_each_other`、`close_window_asks_the_window_guard`、`welcome_ignores_stack_commands`），守卫（`guards_are_asked_in_order_and_a_refusal_stops`、`commands_during_a_pending_ask_queue_up`、`pop_to_base_stops_at_a_refusal`、`stale_guard_answers_are_ignored`），状态与异常（`switching_projects_closes_the_old_one`、`opened_with_a_refusing_view_keeps_the_screen`、`open_error_leaves_the_screen`、`screen_removed_pops_without_a_guard`），窗口状态（`window_state_follows_the_open_path`、`restore_sets_the_inspector_without_an_event`、`window_state_round_trips_as_json`）。
+  - `src/tests/registry.rs`（19 个）：「测试」列出的注册表测试，经 `TestKernel` 的真实激活（`activate` 里 `own_staged`，`started` 里的晚登记，停用后的注销）和 `driver::Driver` 应用。
+  - `src/tests/logs.rs`：`canary_stays_out_of_workspace_logs`：金丝雀放在项目路径（`OpenProject`、`Opened` 的 key、第二次 `OpenProject`）、屏幕载荷的标题和侧栏条目的文字里，trace 级别跑完打开、压栈、检查器、弹出、未注册屏幕、关闭项目、插件停用；没有记录含金丝雀，`screen changed` 的 `to` 是 `review`，`contribution applied` 的 `id` 是 `overview`。
+- `rg 'gpui' crates/workspace/src`、`rg 'eprintln!|println!|log::' crates/workspace/src` 都没有结果。
+- 没有验证：`stale_bindings_fall_through` 和「`Screen` 工厂被调用两次」要 GPUI，随第 2 步；`restore`、代理 Action、离开守卫与窗口关闭的联动也在第 2 步。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -636,3 +651,20 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 设计没有列出的派生（「服务接口」已补上）：数据类型都派生 `Hash`、`Serialize`、`Deserialize`，与 `services` 的其他模块相同（进程插件不贡献界面，序列化只为与其他模块一致和测试往返）；不含 `Arc` 的小类型派生 `Copy`；`SidebarSection` 派生 `Ord`，顺序即侧栏从上到下的顺序；`WindowId` 派生 `Ord`。`Contribution` 含 `Payload`，只实现 `Debug`（不打印载荷）。
 - `Registration` 的两个回调都是 `FnOnce + Send`（不要求 `Sync`，`Staged` 只要求 `Send`）；没有提交就 drop 时只调用 `release`，本 crate 的注销回调要能处理「从未应用」的登记。
 - `WorkspaceEvent::ScreenChanged` 按值带两个 `Route`（约 400 字节），clippy 的 `large_enum_variant` 用 `#[allow]` 并写明理由：每次导航一个事件、每个监听克隆一次，装箱只会让每个监听多一次间接访问。
+
+### 第 1 步
+
+- **模块划分**：设计把状态机、注册表和主线程队列都写在根视图旁边；第 1 步把不依赖 GPUI 的部分拆成四个模块，第 2 步的根视图只包一层。`nav::Navigator` 是状态机加守卫轮询，输入是 `WorkspaceCommand`、`ProjectEvent` 和守卫答复，环境（已注册的屏幕与面板、守卫列表、`Projects` 的三个调用）经 `nav::Env` 注入，输出是 `Effect` 列表（`Ask`、`Event`、`StateChanged`、`PromptOpenProject`、`CloseWindow`、`Notice`、`BindKeys`、`Milestone`）；`registry::Registry` 是注册表；`driver::Driver` 是主线程循环：取队列项（`hub::Item`：`Apply`、`Remove`、`Command`、`GuardAnswer`、`Project`、`Milestone`、`Projects`、`Tick`），调注册表和状态机，自己解决 `Ask`（取守卫的准入和日志作用域、`contain` 包住 `ask`，`done` 只把答复排回队列）；`hub::Hub` 是 `WorkspaceHost` 里不依赖 GPUI 的那份（注册表、队列发送端、本插件的 token），实现 `dyn Contributions`，`WorkspacePlugin::new(Arc<Hub>)`。第 2 步的 `WorkspaceHost` 持有 `Hub` 加窗口句柄，`install` 建 `Driver` 并把 `Effect` 变成视图、`bind_keys`、事件和回调。
+- **队列的传输**：第 1 步没有加 `futures` 依赖，发送端是 `Sender = Arc<dyn Fn(Queued) + Send + Sync>`；第 2 步决定接收端用 `futures::channel::mpsc` 还是 GPUI 自己的通道，发送端照旧。队列项带 `Option<PendingGuard>`；`Hub::dispatch`、`report_milestone` 用本插件 `started` 时记下的 token 取守卫，`started` 之前的项没有守卫（还没有激活可守），`shutdown` 之后取不到就丢弃并记 debug。
+- **`started` 之后的登记没有 token**：`Contributions::register` 不带 `ActivationToken`，而 `started` 之后没有人再调用 `Staged::commit`。注册表的做法：登记时读 `lectern_logging::current().act`（kernel 在 `started`、监听、任务外设的激活序号）；这个序号的 token 已经在某次 `commit` 里见过且不是 `Dead` 时，直接排「应用」，不等 commit；否则暂存，等 `commit`。所以一个激活只要在 `activate` 里登记过至少一项，它之后在 `started`、监听或任务里的登记都自动应用；完全没有在 `activate` 里登记的激活，之后的登记留在暂存态、永远不显示——调用方可以自己 `Staged::commit(&mut registration, handle.token())`，或者第 2 步给接口加 token。在 `activate` 里的登记永远走暂存：那时 token 还没有 commit 过，查不到。
+- **token 为 `Pending` 时推迟，不丢弃**：kernel 在 `started` 之前调用 `commit`，队列项到主线程时 token 可能还是 `Pending`；设计写「检查 `token.state() == Live`（否则丢弃）」会把这类登记丢掉。注册表的 `apply` 对 `Pending` 返回 `Deferred`，`Driver` 把项留到下一个 `Tick`（第 2 步每帧发一个，直到没有推迟的项）；`Dead` 才丢弃并记 `token-dead`。「已应用」标记按激活计数：这次激活排进队列的应用全部应用或丢弃后 `activation_applied(act)` 为 true。
+- **注销先释放 ID**：守卫 drop 时在调用线程上立即从索引里去掉 `(kind, id)`，同一个 ID 可以马上再登记（插件停用后重新启用不必等主线程），载荷仍排到主线程在 `contain` 里 drop；没有 commit 过的登记没有主线程工作，直接在调用线程上 drop。
+- **守卫 panic**：kernel 没有公开用 `ActivationToken` 让别人的激活失效的接口（`PluginHandle::fail` 只对自己的激活），所以 `ask` panic 时只记 error `leave guard panicked`，这个守卫按通过处理，不让用户困在当前视图；视图工厂和命令处理函数的 panic 同样。第 2 步前要在 kernel 加这个接口，kernel 设计「撤销」要求 panic 让贡献方的激活失效。
+- **命令名允许点**：kernel 的 `Activation::Command` 用 `terminal.open` 这样的名字，`handle_command` 的名字按 `[a-z0-9_.-]`、1 到 64 字节检查，不是贡献 ID 的 `[a-z0-9_-]`；日志里的命令名经本 crate 的一张固定上限（1024）的驻留表变成 `&'static str`，贡献 ID 照旧经 `PluginTag::register`。`register_leave_guard` 没有 ID，条目用序号作 ID，不查重。
+- **`Opened` 时的 `View` 守卫只问一轮**：栈非空时按登记顺序问一轮 `View` 守卫，通过后整栈清空；`PopToBase` 仍是每层一轮。
+- **询问期间所有输入都排队**：设计写「同范围命令排队」；实现里一轮询问期间到达的全部命令和项目事件都排在后面，按顺序执行，简单且不会交错两个守卫范围。
+- **`restore` 的检查器**：`Navigator::restore_inspector(bool)` 直接设 `nav.inspector`，不查当前屏幕的 `layout.inspector`、不发事件：恢复发生在 Welcome 上，那里按命令处理会被忽略；之后第一个带检查器的屏幕按这个值显示。
+- **`ScreenChanged.from`**：状态机总是知道上一个屏幕，事件的 `from` 总是 `Some`；第一次显示（`None`）由根视图在第 2 步发。
+- **依赖**：第 1 步只加 `lectern-kernel`、`lectern-services`、`lectern-logging`、`serde`（dev：两者的 `test-support`、`serde_json`）。`gpui`、`lectern-ui`、`lectern-i18n`、`lectern-platform`、`futures`、`insta` 随第 2、3 步。因此本 crate 目前在 Linux 上也编译和测试（`just test` 的默认包集按依赖图算），第 2 步加 `gpui` 后自动退出 Linux 的集合。
+- **载荷类型的检查**：`ui::contrib` 还不存在（`ui` 设计 #218 在写），注册表经构造时注入的 `registry::Payloads`（`accepts(kind, &Payload)`、`share(Payload) -> Option<SharedPayload>`）检查载荷类型并把侧栏条目的载荷换成 `Arc`；第 2 步用 `ui::contrib` 的类型实现它，测试用假类型。
+- **`WorkspaceCommand::SelectInspectorTab` 不查页是否已注册**：页可以晚于命令注册（Conversation 按命令激活），检查器显示空页直到它到达；`ShowSidebarPanel`、`OpenPanel`、`OpenOverlay` 仍要求已注册。
