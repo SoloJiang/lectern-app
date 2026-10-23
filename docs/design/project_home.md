@@ -84,23 +84,28 @@ impl ProjectHomeUsagePlugin { pub fn new(slot: UsageSlot) -> Self; }
 
 // Manifest { provides: [], requires: [service::<dyn Usage>()], activation: [AfterFirstFrame] }
 // activate：取 `ServiceRef<dyn Usage>`，`ctx.on::<UsageEvent>`（监听调 `UsageSlot::changed`）。不写槽位：`activate` 不得有副作用。
-// started：`UsageSlot::set_usage(service, token)`（见下，它可能在这里就取 `Usage::watch`）。
+// started：`UsageSlot::set_usage(service, token)` 只记下服务与 token（`started` 里 token 还是 `Pending`，`enter()` 取不到准入；
+//   `started` 也不得直接改外部状态），然后经 `handle.own_with` 提交一个只调 `UsageSlot::reconcile()` 的任务：闸门在
+//   token 变为 `Live` 之后才放行，所以对账在 `Live` 之后进行（kernel 设计「激活时的上下文」的 `SubmitGate`）。
 // 停用：`Active` drop 时 `UsageSlot::clear_usage()`，放下关注并让主插件重建一次快照（Usage 行消失）。
 
 /// 两个插件共用的一格。两个插件都是 `AfterFirstFrame`、彼此独立，激活先后不定；`Opened` 也可能早于 usage 插件的
-/// `started`。所以关注由槽位在每次写入后对账（`reconcile`），谁后到谁触发，不依赖顺序：
+/// `started`。所以关注由槽位对账（`reconcile`），谁后到谁触发，不依赖顺序：
 /// `usage` 与 `project` 都有、还没有关注 → `token.enter()` 内调 `Usage::watch(Project { Open(project), D7 })`；
-/// 任一缺失 → drop 关注；之后调 `on_change`（主插件 `started` 里登记的回调：标记 dirty、安排合成）。
+/// 任一缺失（或 `enter()` 取不到准入）→ drop 关注；之后调 `on_change`（主插件 `started` 里登记的回调：标记 dirty、安排合成）。
+/// `reconcile` 由 `set_project`、`clear_usage` 直接调用（都在 `Live` 的插件代码里），由 `set_usage` 之后的任务调用（见上）。
 /// 主插件每次调用 `dyn Usage` 之前 `token.enter()`，取不到就当作没有 usage。
 #[derive(Clone, Default)]
 pub struct UsageSlot { /* Arc<Mutex<{ usage: Option<(ServiceRef<dyn Usage>, ActivationToken)>, project: Option<ProjectKey>,
                             interest: Option<UsageInterest>, on_change: Option<Arc<dyn Fn() + Send + Sync>> }>> */ }
 impl UsageSlot {
-    pub fn set_usage(&self, usage: ServiceRef<dyn Usage>, token: ActivationToken); // usage 插件 started；之后 reconcile
+    pub fn set_usage(&self, usage: ServiceRef<dyn Usage>, token: ActivationToken); // usage 插件 started：只记录
     pub fn clear_usage(&self);                                                      // usage 插件停用；之后 reconcile
     pub fn set_project(&self, project: Option<ProjectKey>);                         // 主插件 Opened / Closed；之后 reconcile
     pub fn set_on_change(&self, f: Arc<dyn Fn() + Send + Sync>);                    // 主插件 started
     pub fn changed(&self);                                                          // `UsageEvent` 的监听：只调 on_change
+    /// 对账（见上）。任何线程，不阻塞；usage 插件 `started` 之后的任务、`set_project`、`clear_usage` 调用。
+    pub fn reconcile(&self);
     /// 合成任务用：`token.enter()` 成功时返回服务引用与准入，否则 None。
     pub fn usage(&self) -> Option<(ServiceRef<dyn Usage>, Admission)>;
 }
@@ -259,7 +264,8 @@ pub struct TightestLimit { pub agent: Agent, pub used_percent: u8, pub resets_at
 kernel 线程：activate（登记贡献、订阅）─▶ started（已打开的项目按 Opened 处理）
 executor：ProjectEvent::Opened { Ok(key) }（新基底）─▶ 监听 ─▶ Home：project = key，watch_overview(key)，
           UsageSlot::set_project(Some(key))（有 usage 时在槽位里取 Usage::watch），dirty ─▶ 安排合成
-kernel 线程：project-home-usage 的 started ─▶ UsageSlot::set_usage ─▶ 已有项目时取 Usage::watch ─▶ on_change ─▶ 安排合成
+kernel 线程：project-home-usage 的 started ─▶ UsageSlot::set_usage（只记录）─▶ own_with 提交对账任务
+executor [Background，token 已 Live]：UsageSlot::reconcile ─▶ 已有项目时取 Usage::watch ─▶ on_change ─▶ 安排合成
 executor：ProjectEvent::Changed / SessionsChanged / ReviewEvent::Overview { project } ─▶ 监听：dirty ─▶ 安排合成
 executor：UsageEvent ─▶ usage 插件的监听 ─▶ UsageSlot::changed ─▶ on_change ─▶ 安排合成
 executor [Background + BusyGuard]：合成任务 ─▶ Projects::snapshot、每个 SessionSource::sessions()、Review::overview、
@@ -274,7 +280,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - 监听（executor 线程）只改 `Home` 的标记并安排合成任务，不读服务的快照、不做 IO（[kernel 设计「事件分发」](kernel.md#事件分发)）。合成任务经 `PluginHandle::own_with` 提交，`Background` 优先级，持有 `BusyGuard` 到快照发布为止，所以 bench 的静止采样看得到它。
 - 合并：同一时刻最多一个合成任务在跑；跑的期间来的事件只把 `dirty` 置位，任务结束时发现 `dirty` 就再跑一轮。没有周期性任务、没有定时器：相对时间（「3 min ago」）只在下一次快照时刷新（「已知限制」）。
 - `OverviewInterest` 的持有：从这个项目成为基底（`Opened`）到它关闭（`Closed`），不随屏幕切换放下。[review 设计「接口」](review.md#接口)写的是「显示主页时持有」；本 crate 持有得更久，原因：`watch_overview` 没有 `Review::close` 那样的 30 秒保留，进入审阅时放下、返回时再取就要重做一次计数比较（10 万文件约 1 s，在后台）和一轮概览；计数改动集本来就在 [ADR 0035](../adr/0035.md) 的采样状态里（≤ 4 MB 的余量），一直持有不增加采样状态的内存。换项目时先放下旧项目的关注再取新的。
-- `UsageInterest`（`Usage::watch(UsageQuery::Project { project: ProjectRef::Open(key), window: Window::D7 })`）同样随项目持有，放在 `UsageSlot` 里，由槽位的 `reconcile` 取和放（「本 crate 的公开项」）：主插件的 `Opened` 在 usage 插件 `started` 之前到达时，`started` 里的 `set_usage` 补取；反过来 `Opened` 补取；`usage` 插件停用时随 `clear_usage` 放下。
+- `UsageInterest`（`Usage::watch(UsageQuery::Project { project: ProjectRef::Open(key), window: Window::D7 })`）同样随项目持有，放在 `UsageSlot` 里，由槽位的 `reconcile` 取和放（「本 crate 的公开项」）：主插件的 `Opened` 在 usage 插件 `started` 之前到达时，`started` 之后的对账任务（token 已 `Live`）补取；反过来 `Opened` 补取；`usage` 插件停用时随 `clear_usage` 放下。
 - 合成任务经 `UsageSlot::usage()` 取服务（里面 `token.enter()`），取不到就按没有 usage 合成。
 - 主线程上只做：读 `Home` 里的快照（取锁复制 `Arc`）、`Contributions::dispatch`、`sidebar_entries()`（取锁复制 `Arc`）、`report_milestone`。不调用任何阻塞的服务方法（`SessionSource::read` / `turns` / `load`、`Projects::resolve` 都不碰）。
 - 首帧之前什么都不做：两个插件都是 `AfterFirstFrame`，`activate` 只登记，第一次合成在 `Opened` 之后。
@@ -434,7 +440,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 依赖 GPUI，只在 macOS 上编译和测试：`just test -p lectern-project-home`。会话、项目、概览、用量、贡献都用 `services` trait 的假实现，放在本 crate 的 `testing` 模块（`FakeSessions`、`FakeProjects`、`FakeReview`、`FakeUsage`、`FakeContributions`）：直接构造 `SessionList`、`ProjectSnapshot`、`Overview`、`UsageSnapshot` / `Limits` 交出去，记下收到的 `complete`、`watch_overview`、`watch`、`dispatch`，不解析脚本；`read` / `turns` / `load` / `resolve` 一律 `unreachable!`（本 crate 不得调用它们）。不用真实的 git、会话扫描和文件 IO，也不依赖 `review` 等插件 crate 的 `test-support`。
 
 - `snapshot::build`（`#[test]`，不开窗口）：`build_groups_sessions_by_worktree`（主 worktree 在前、`Resolved` 与 `Located` 都归位、prunable 的进 `Other`、子 agent 不成行、14 天之外的不出现）；`build_splits_needs_review_and_done`（`progress` None / 部分 / 全部 / `changed_since_seen` 四种）；`build_drops_overview_sessions_missing_from_list`；`build_marks_running_within_ten_minutes`；`build_counts_packages_today`（有 `Overview.packages` 与没有、`Capped`）；`build_folder_project_hides_outside`；`build_without_usage`；每个用例的 `HomeSnapshot` 渲染成文本做 insta 快照（`snapshot_*`）；`project_home/build_1000` 的夹具也在这里构造。
-- 插件（`#[test]`，`TestKernel`）：`activate_registers_contributions_only`（登记了 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings`，没有任务）；`opened_takes_the_overview_interest_and_closed_drops_it`；`events_coalesce_into_one_build`（跑着的时候来 5 个事件，结束后只再跑一轮）；`complete_is_requested_once_per_pending_session`；`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`usage_activating_after_opened_takes_the_watch`（`Opened` 先到、usage 插件后 `started`：`FakeUsage` 收到一次 `watch`，快照重建一次并带 `UsageModel`）、`opened_after_usage_takes_the_watch`（相反的顺序，结果相同）；`started_handles_an_already_open_project`；`changed_for_an_unknown_project_counts_as_opened`。
+- 插件（`#[test]`，`TestKernel`）：`activate_registers_contributions_only`（登记了 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings`，没有任务）；`opened_takes_the_overview_interest_and_closed_drops_it`；`events_coalesce_into_one_build`（跑着的时候来 5 个事件，结束后只再跑一轮）；`complete_is_requested_once_per_pending_session`；`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`usage_activating_after_opened_takes_the_watch`（`Opened` 先到、usage 插件后 `started`：`started` 返回时 `FakeUsage` 还没有收到 `watch`，token 变为 `Live`、对账任务跑过之后收到一次，快照重建一次并带 `UsageModel`）、`opened_after_usage_takes_the_watch`（相反的顺序，结果相同）；`started_handles_an_already_open_project`；`changed_for_an_unknown_project_counts_as_opened`。
 - `#[gpui::test]`（`TestAppContext`，`init_fixed`）：`sidebar_lists_sessions_under_worktrees`；`home_shows_cards_outside_and_done`；`arrow_keys_move_across_groups`（↓ 从最后一张卡片到 Outside 再到 Done，↑ 反向，到头不回绕）；`enter_pushes_the_review_route`（`FakeContributions` 收到 `Push(REVIEW, Session(key))`）；`outside_opens_the_outside_review`；`clicking_a_sidebar_session_pushes_review`；`views_entries_dispatch_their_command`；`usage_row_shows_tokens_and_the_tightest_limit`；`new_sidebar_view_reads_the_current_snapshot`（面板视图 drop 再建，不等事件就有内容）；`progress_ring_transitions_between_snapshots`（`Transition` 从旧值出发）；`milestone_is_reported_on_the_first_settled_frame`（`files` 为 `Pending` 的快照不报告，`Ready` 的那一帧报告一次，之后不再报告）；`skeleton_appears_after_100ms_only`；`closed_project_clears_the_views`。
 - 语义树：`home_tree_with_cards`、`home_tree_empty`、`sidebar_tree_with_views_and_usage` 的 insta 快照（UI 探针完成后接入；之前用 `ui::semantic::Recorder` 的记录去掉 `bounds` 和 `declared_at`）。
 - 日志：`canary_stays_out_of_home_logs`。
@@ -479,7 +485,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - `snapshot::build` 与「测试」里 `build_*`、`snapshot_*` 的 insta 快照通过。
 - 插件的 `#[test]` 通过：`activate_registers_contributions_only`、`opened_takes_the_overview_interest_and_closed_drops_it`、`events_coalesce_into_one_build`、`complete_is_requested_once_per_pending_session`、`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`started_handles_an_already_open_project`。
 - `python3 scripts/check_architecture.py` 通过：`lectern-project-home` 带 `plugin = true`，不依赖其他插件 crate；只有 `app` 依赖它。
-- `rg 'std::fs|std::process|git2|gix|std::thread::spawn' crates/project_home/src` 没有结果；`rg 'lectern-review|lectern-project|lectern-agents|lectern-usage|lectern-workspace' crates/project_home/Cargo.toml` 没有结果（不依赖插件 crate，dev-dependency 也不行）。
+- `rg 'std::fs|std::process|git2|gix|std::thread::spawn' crates/project_home/src` 没有结果；`rg '^lectern-(review|project|agents|usage|workspace)(\s|\.|=)' crates/project_home/Cargo.toml` 没有结果（不依赖插件 crate，dev-dependency 也不行；行首锚定，所以不会匹配到本 crate 的 `name = "lectern-project-home"`）。
 - `canary_stays_out_of_home_logs` 通过（合成与插件部分）；`rg 'eprintln!|println!|log::' crates/project_home/src` 没有结果。
 
 **第 2 步：视图（`#[gpui::test]`）。**
