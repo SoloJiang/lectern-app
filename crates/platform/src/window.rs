@@ -166,7 +166,8 @@ mod imp {
         if ns_window.is_null() {
             return fail(WindowError::NoWindow);
         }
-        // SAFETY: `name` is valid UTF-8 (ASCII, checked by the caller) of
+        // SAFETY: `name` is valid UTF-8 (ASCII, checked by `valid_name` in
+        // `set_frame_autosave_name`) of
         // `len` bytes; a null allocator is the default one.
         let string = unsafe {
             CFStringCreateWithBytes(
