@@ -1,6 +1,6 @@
 [package]
 name = "lectern-platform"
-description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data and log directories, the OS version, the local UTC offset, the window frame autosave name; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
+description = "Safe reads and atomic replacement beneath a directory root, thread CPU clocks, the app data and log directories, the OS version, the local UTC offset, the window frame autosave name, the system appearance's colours; macOS-only capabilities: FSEvents, open -a, Keychain, Seatbelt, status line hook."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -33,9 +33,10 @@ libc.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 # The kqueue thread runs through `Executor::run_dedicated`.
 lectern-executor = { path = "../executor" }
-# The kqueue thread's stop record and the frame autosave name's failure
-# record (docs/design/platform.md「日志与诊断」, ADR 0046); nothing else in
-# this crate logs.
+# The kqueue thread's stop record, the frame autosave name's failure
+# record and the appearance watch's contained panic record
+# (docs/design/platform.md「日志与诊断」, ADR 0046); nothing else in this
+# crate logs.
 lectern-logging = { path = "../logging" }
 # kqueue for `Scope::Entries` targets.
 rustix = { workspace = true, features = ["event"] }
@@ -47,8 +48,8 @@ tempfile.workspace = true
 # `BusyGuard`, to implement `lectern_fs_watch::Sink` in the test that drives
 # the backend through a real `Watcher`.
 lectern-kernel = { path = "../kernel" }
-# testing::capture for kqueue_stop_is_logged_without_paths and the
-# window tests' log records.
+# testing::capture for kqueue_stop_is_logged_without_paths, the window
+# tests' log records and the appearance watch's panic record.
 lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [lints]

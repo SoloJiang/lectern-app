@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -22,6 +22,7 @@
   - 应用缓存目录（`dirs::app_cache`）：可以重建的派生数据的位置，`cache` 的分库和 `agents` 的解压副本用它（见「应用缓存目录」）。
   - 系统首选语言（`system::preferred_languages`）：`app` 在首帧之前用它选界面语言（[ADR 0013](../adr/0013.md)，见「系统首选语言」）。
   - 窗口 frame 的 autosave（`window::set_frame_autosave_name`）：窗口位置与大小由 AppKit 的 frame autosave 保存和恢复（[ADR 0017](../adr/0017.md)），`app` 按 [workspace 设计「对其他 crate 的要求」](workspace.md#对其他-crate-的要求)的 D 调用（见「窗口 frame 的 autosave」）。
+  - 系统外观（`appearance`）：在浅色、深色两个外观下解析 AppKit 的语义色，读减弱动态效果，登记强调色与辅助功能设置的变化通知；`ui` 的 `Palette` 从它取系统色（[ADR 0015](../adr/0015.md)，见「系统外观」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -44,7 +45,7 @@
 | `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
 | `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
 | `lectern-kernel`（dev，只在 macOS） | 经真实 `Watcher` 驱动后端的测试实现 `Sink` 要用 `BusyGuard` | kernel 层 |
-| `lectern-logging`（只在 macOS） | kqueue 线程停止时的记录和 frame autosave 名设置失败的记录（「日志与诊断」）；dev 依赖开启 `test-support`，测试用 `testing::capture()` 检查这些记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；本 crate 只有这两处记录，都只在 macOS 上编译 |
+| `lectern-logging`（只在 macOS） | kqueue 线程停止、frame autosave 名设置失败和外观回调 panic 的记录（「日志与诊断」）；dev 依赖开启 `test-support`，测试用 `testing::capture()` 检查这些记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；本 crate 只有这三处记录，都只在 macOS 上编译 |
 | `raw-window-handle` 0.6 | `window::set_frame_autosave_name` 的参数是 `impl HasWindowHandle`，GPUI 的 `Window` 实现它（`gpui-pre-macos` 给出 `AppKitWindowHandle`，里面是 `NSView` 指针） | 已在 Cargo.lock（0.6.2，经 GPUI），发布构建不新增 crate；许可证 `MIT OR Apache-2.0 OR Zlib`，在允许列表里。与 rustix 不同，它进入本 crate 的公开接口：这个签名由已合并的 [workspace 设计](workspace.md)的前置条件 D 规定，依赖方向不变（它不依赖任何东西），所以不写 ADR。所有平台都依赖（签名在所有平台上相同） |
 
 选 `rustix`，不选 `libc`、`nix`、`cap-std`：
@@ -379,19 +380,20 @@ pub enum FileKind {
 
 本节覆盖整个 crate，规则见 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。
 
-- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。运行时记录只有两处：`fs_events` 的 kqueue 线程停止和 `window` 的 frame autosave 名设置失败，都经 `lectern-logging` 的宏写出，target 为 `platform`；订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
+- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。运行时记录只有三处：`fs_events` 的 kqueue 线程停止、`window` 的 frame autosave 名设置失败和 `appearance` 的变化回调 panic，都经 `lectern-logging` 的宏写出，target 为 `platform`；`fs_events` 订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
 
   | 事件 | 级别 | `msg` | 字段 |
   |---|---|---|---|
   | kqueue 线程因 `kevent` 出错而停止（`Kqueue::fail`），这个 kqueue 上的 `Entries` 订阅不再收到事件，下一次 `Entries` 的 arm 重建 kqueue 和线程 | error | `the kqueue thread stopped on a kevent error; its watches get no more events` | `watches`（这个 kqueue 上的订阅数）、`io`（`Value::io`：`Errno` 的种类和错误码） |
   | `set_frame_autosave_name` 失败（「窗口 frame 的 autosave」）：窗口照常工作，只是位置与大小不再恢复和保存 | warn | `the window frame autosave name was not set; the frame is not restored or saved` | `kind`（`WindowError::as_str()`：`invalid_name`、`no_window`、`not_main_thread`、`name_in_use` 之一，`&'static str`） |
+  | `appearance::watch` 的回调 panic（在 AppKit 的边界上 `catch_unwind` 截住，回调被丢弃，之后的变化不再送达，「系统外观」） | error | `the appearance change callback panicked; later changes are not delivered` | `change`（`Change::as_str()`：`system_colors` 或 `reduce_motion`，`&'static str`） |
 
-  - 级别按 [ADR 0046](../adr/0046.md)「默认日志」：kqueue 的订阅之后的事件被放弃，不是降级后继续，所以是 error；frame autosave 名没有设上时窗口继续用当前的 frame，是降级后继续，所以是 warn。
-  - 这两条记录只在 macOS 上编译（kqueue 只在 macOS 上；其他平台的 `set_frame_autosave_name` 不做事，也不记录），`lectern-logging` 因此只是 macOS 上的依赖。kqueue 的记录在 `fail` 放开状态锁之后写出，调用线程上不做 IO。frame autosave 的记录由函数自己写出，调用方（`app`）不再记一次；它在首帧之前可能发生，宏只编码记录，落盘由 `logging` 在首帧之后做（ADR 0046）。
+  - 级别按 [ADR 0046](../adr/0046.md)「默认日志」：kqueue 的订阅之后的事件被放弃，外观回调之后的变化不再送达，都不是降级后继续，所以是 error；frame autosave 名没有设上时窗口继续用当前的 frame，是降级后继续，所以是 warn。外观回调 panic 本身的位置由 `logging` 的 panic 钩子记录，这条记录只说明结果。
+  - 这三条记录只在 macOS 上编译（kqueue 和 AppKit 只在 macOS 上；其他平台的 `set_frame_autosave_name` 不做事，也不记录），`lectern-logging` 因此只是 macOS 上的依赖。kqueue 的记录在 `fail` 放开状态锁之后写出，调用线程上不做 IO。frame autosave 的记录由函数自己写出，调用方（`app`）不再记一次；它在首帧之前可能发生，宏只编码记录，落盘由 `logging` 在首帧之后做（ADR 0046）。外观回调的记录在投递通知的线程（应用里是主线程）上写出，宏只编码记录，不做 IO。
 - 详细级别：不多记。kqueue 线程每次唤醒、FSEvents 的每个回调都是热路径，不加 debug、trace 记录。
 - 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
-- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。kqueue 的记录不写监听的目录、具名条目的名字和 `io::Error` 的消息，只写订阅数和 `Value::io`。frame autosave 的记录不写传入的名字和窗口的任何信息，只写错误的种类。
-- 金丝雀测试：`kqueue_stop_is_logged_without_paths`（只在 macOS 上编译和运行，在 `fs_events/tests/kqueue.rs`）：在 `testing::capture()` 下，金丝雀放在监听目录的名字、具名条目的名字和它的内容里，kqueue 线程交付这个条目的修改之后，以 `EBADF` 调用 `Kqueue::fail`（`kevent` 无法按需出错，线程的 `run` 在出错时调用的就是它）；检查记录只有一条，级别为 error、target 为 `platform`、`watches` 为 1、`io` 带 `EBADF` 的错误码，线程停止、`flush` 返回错误，之后 `assert_absent`。`set_frame_autosave_name_off_the_main_thread_is_an_error_and_logs_the_kind_only`（只在 macOS 上，在 `window/tests.rs`）：金丝雀作为名字传入，检查记录只有一条，级别为 warn、target 为 `platform`、`kind` 为 `not_main_thread`，之后 `assert_absent`。Linux 上没有 kqueue，也不记录 frame autosave 的失败，这些记录和测试都不编译；`dirs` 和 `system` 不经日志器输出，不需要金丝雀测试。
+- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。kqueue 的记录不写监听的目录、具名条目的名字和 `io::Error` 的消息，只写订阅数和 `Value::io`。frame autosave 的记录不写传入的名字和窗口的任何信息，只写错误的种类。`appearance` 不记颜色的数值、减弱动态效果的值和 panic 的 payload，回调 panic 的记录只写 `change`。
+- 金丝雀测试：`kqueue_stop_is_logged_without_paths`（只在 macOS 上编译和运行，在 `fs_events/tests/kqueue.rs`）：在 `testing::capture()` 下，金丝雀放在监听目录的名字、具名条目的名字和它的内容里，kqueue 线程交付这个条目的修改之后，以 `EBADF` 调用 `Kqueue::fail`（`kevent` 无法按需出错，线程的 `run` 在出错时调用的就是它）；检查记录只有一条，级别为 error、target 为 `platform`、`watches` 为 1、`io` 带 `EBADF` 的错误码，线程停止、`flush` 返回错误，之后 `assert_absent`。`set_frame_autosave_name_off_the_main_thread_is_an_error_and_logs_the_kind_only`（只在 macOS 上，在 `window/tests.rs`）：金丝雀作为名字传入，检查记录只有一条，级别为 warn、target 为 `platform`、`kind` 为 `not_main_thread`，之后 `assert_absent`。`appearance_watch_contains_a_panicking_callback_and_logs_no_payload`（只在 macOS 上，在 `appearance/tests.rs`）：回调以金丝雀为消息 panic，检查记录只有一条，级别为 error、target 为 `platform`、`change` 为 `system_colors`，之后的通知不再送达，`assert_absent` 确认金丝雀不在记录里。Linux 上没有 kqueue，不记录 frame autosave 的失败，也不登记 AppKit 的通知，这些记录和测试都不编译；`dirs` 和 `system` 不经日志器输出，不需要金丝雀测试。
 
 ## 测试
 
@@ -1075,6 +1077,138 @@ pub mod window {
 - 其他平台：`set_frame_autosave_name_does_nothing_elsewhere`（句柄被查询即 panic 的窗口也返回 `Ok(())`）。
 - 真实窗口的检查是 `crates/platform/examples/frame_autosave.rs`，手工运行 `cargo run -p lectern-platform --example frame_autosave`（需要窗口服务器会话，CI 不运行；`cargo clippy --all-targets` 编译它）：在主线程上建两个不显示的 `NSWindow`，给第一个设名后 `frameAutosaveName` 读回相同的名字；第二个设同一个名字时结果是 `Ok` 或 `NameInUse`（「已知限制」）；换名成功；从另一个线程调用为 `NotMainThread` 且名字不变。全部断言成立时退出码为 0。
 
+## 系统外观
+
+[ui 设计「对其他 crate 的要求」](ui.md#对其他-crate-的要求)的前置条件 A（[#214](https://github.com/SoloJiang/lectern-app/issues/214)）。[ADR 0015](../adr/0015.md)：界面用系统语义色，强调色跟随系统设置，浅色 / 深色跟随系统。`ui::init` 在首帧之前经本模块读浅色、深色两套系统色和减弱动态效果，建两份 `Palette`，登记变化通知；通知到达时重新读、换 `Palette`。浅色 / 深色本身不经本模块：GPUI 给出每个窗口的外观和它的变化。
+
+首帧之前做的事（ADR 0017「新增功能必须说明」）：`ui::init` 调 `reduce_motion` 一次、`watch` 一次，都是内存操作，不读 Lectern 自己的文件，不建线程。`system_colors` 不在首帧之前调用：本进程第一次读让 AppKit 第一次解析它的动态颜色，约 2 ms（「性能」），所以 `ui` 的实现把系统色的读取推迟到首帧之后（`init` 用内置表，`ready` 再读）。
+
+### 接口
+
+模块 `lectern_platform::appearance`（`appearance.rs`）。
+
+```rust
+pub mod appearance {
+    /// macOS 的两个外观。GPUI 的 `WindowAppearance::{Light, VibrantLight}` 对应 `Light`，`{Dark, VibrantDark}` 对应 `Dark`。
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub enum Appearance { Light, Dark }
+
+    impl Appearance {
+        /// 日志字段用的名字：`light`、`dark`。
+        pub fn as_str(self) -> &'static str;
+    }
+
+    /// sRGB 分量 0..=1 加透明度。不依赖 GPUI，`ui` 换算成 `Hsla`。
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub struct Srgba { pub r: f32, pub g: f32, pub b: f32, pub a: f32 }
+
+    /// `system` 的长度：`systemRedColor` … `systemGrayColor`，按 `ui::SystemColor` 的顺序。
+    pub const SYSTEM_COLOR_COUNT: usize = 13;
+
+    /// `ui::Palette` 里来自系统的那些颜色，字段名与之一一对应（不含 diff 底色和 agent 色），都在同一个外观下解析。
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub struct SystemColors {
+        pub label: Srgba,                                     // labelColor
+        pub secondary_label: Srgba,                           // secondaryLabelColor
+        pub tertiary_label: Srgba,                            // tertiaryLabelColor
+        pub separator: Srgba,                                 // separatorColor
+        pub window_background: Srgba,                         // windowBackgroundColor
+        pub control_background: Srgba,                        // controlBackgroundColor
+        pub under_page_background: Srgba,                     // underPageBackgroundColor
+        pub accent: Srgba,                                    // controlAccentColor；读不到时是 systemBlueColor
+        pub selected_content_background: Srgba,               // selectedContentBackgroundColor
+        pub unemphasized_selected_content_background: Srgba,  // unemphasizedSelectedContentBackgroundColor
+        /// systemRed、Orange、Yellow、Green、Mint、Teal、Cyan、Blue、Indigo、Purple、Pink、Brown、Gray。
+        pub system: [Srgba; SYSTEM_COLOR_COUNT],
+        /// `accent` 是否读自 `controlAccentColor`（macOS 10.14 起都有；`ui::accent_follows_system` 报告它）。
+        pub accent_available: bool,
+    }
+
+    /// 在给定外观下解析 `NSColor` 的语义色：`NSAppearance` 的 `performAsCurrentDrawingAppearance:`，
+    /// 块里把每个颜色转到 sRGB 色彩空间（`colorUsingColorSpace:`）再读分量。只在内存里，不阻塞，不做 IO；
+    /// 一次调用约 70 次 ObjC 消息，在一个 autorelease pool 里，热的时候 15–25 µs（「性能」）。任何线程可调用。
+    /// 非 macOS，以及 AppKit 解析不出任一颜色（这个 macOS 没有的选择器：`systemMintColor`、`systemCyanColor`
+    /// 要 macOS 12；转换不出的颜色）时为 None，`ui` 用内置表并记 warn。
+    pub fn system_colors(appearance: Appearance) -> Option<SystemColors>;
+
+    /// `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`。只在内存里，任何线程可调用。非 macOS 为 None。
+    pub fn reduce_motion() -> Option<bool>;
+
+    /// 回调收到的变化。
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub enum Change {
+        /// `NSSystemColorsDidChangeNotification`：强调色、提高对比度等。调用方对两个外观重新读 `system_colors`。
+        SystemColors,
+        /// `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`：辅助功能的显示设置，含减弱动态效果。调用方重新读 `reduce_motion`。
+        ReduceMotion,
+    }
+
+    impl Change {
+        /// 日志字段用的名字：`system_colors`、`reduce_motion`。
+        pub fn as_str(self) -> &'static str;
+    }
+
+    /// 在默认通知中心登记 `NSSystemColorsDidChangeNotification`，在 `NSWorkspace` 的通知中心登记
+    /// `NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification`。回调在投递通知的线程上同步运行：
+    /// AppKit 在主线程上投递这两个通知，所以应用里回调在主线程上到达，不带 GPUI 的上下文。
+    /// 第一次变化之前没有任何回调；返回的 `Watch` drop 之后没有新的回调。回调里再投递的通知不再送达给它（不重入）。
+    /// 回调 panic 时在 AppKit 的边界上截住：回调被丢弃，之后的变化不再送达，记一条 error（「日志与诊断」）。
+    /// 非 macOS 返回一个持有回调、从不调用它的 `Watch`；macOS 上 AppKit 没有加载时也是（应用和测试里不会）。
+    pub fn watch(on_change: Box<dyn FnMut(Change)>) -> Watch;
+
+    /// `watch` 做的登记：两个观察者 token。drop 时注销；不是 `Send`，在创建它的线程（应用里是主线程）上 drop。
+    pub struct Watch { /* … */ }
+
+    impl Watch {
+        /// 观察者是否登记上了（非 macOS 和 AppKit 没有加载时为 false）。
+        pub fn is_live(&self) -> bool;
+    }
+    // 另实现 Debug（只打印 live）。
+}
+```
+
+### 规则
+
+- 线程：`system_colors` 与 `reduce_motion` 任何线程可调用（当前绘制外观是每个线程各自的；`NSWorkspace` 的这个属性任何线程可读）。`watch` 任何线程可调用；回调在投递通知的线程上运行；`Watch` 在创建它的线程上 drop。`ui` 全部在主线程上做（[ui 设计「数据流与线程」](ui.md#数据流与线程)）。
+- 解析颜色：`+[NSAppearance appearanceNamed:]`（`NSAppearanceNameAqua` / `NSAppearanceNameDarkAqua`，AppKit 导出的常量）得到外观，`performAsCurrentDrawingAppearance:`（macOS 11 起）让它在块运行期间成为本线程的当前绘制外观；块里对每个颜色依次：`respondsToSelector:` 确认类方法存在、调类方法、`colorUsingColorSpace:`（`+[NSColorSpace sRGBColorSpace]`）、`getRed:green:blue:alpha:`（四个 `CGFloat`，转成 `f32`）。任一步失败（选择器不存在、转换返回 nil、块没有运行）整个结果为 None，不截取、不混用内置值：颜色值只在 `ui` 的内置表里（ADR 0015）。`controlAccentColor` 单独处理：读不到时 `accent` 用 `systemBlueColor`、`accent_available` 为 false。整次调用在一个 autorelease pool 里（`objc_autoreleasePoolPush` / `Pop`）：转换返回的是 autorelease 的对象，测试线程上没有外层的 pool。
+- 块：`performAsCurrentDrawingAppearance:` 和 `addObserverForName:object:queue:usingBlock:` 都只收块，所以块的 ABI（`Block_literal_1`：`isa` 为 `_NSConcreteStackBlock`，`flags` 0，`invoke`，描述符 `{reserved, size}`，然后是捕获的值）手写在模块里。`flags` 不带 copy / dispose 帮助函数和签名：捕获的都是 `Copy` 的值（一个裸指针加一个枚举），通知中心复制块时就是一次 memcpy。不引入 `block2`、`objc2`（它们经 gpui-component 在 Cargo.lock 里，但本 crate 与 `system`、`fs_events`、`window` 一样手写绑定）。
+- `watch`：两个观察者各用 `addObserverForName:object:nil queue:nil usingBlock:`（`queue` 为 nil 即在投递线程上同步运行），返回的 token `retain` 后持有；drop 时先对各自的通知中心 `removeObserver:`、`release` token，最后释放回调。回调放在 `Rc<RefCell<Option<Box<dyn FnMut(Change)>>>>` 里，两个块各捕获裸指针；每次投递先把计数加一再调用，所以回调里 drop `Watch` 是安全的；`RefCell` 已被借用（回调里再投递）时跳过。panic 用 `catch_unwind` 截住（panic 不能穿过 ObjC 的栈帧），截住后回调置空、记一条 error。
+- AppKit 的链接：导出的常量所在的 `extern` 块带 `#[link(name = "AppKit", kind = "framework")]`，所以本 crate 的测试二进制（没有 GPUI）也加载 AppKit；应用里 AppKit 本来就由 GPUI 链接。测试不需要 `NSApplication` 和窗口：`NSColor`、`NSAppearance`、通知中心在普通进程、普通线程上都能用。
+- 其他平台：`system_colors`、`reduce_motion` 为 None，`watch` 返回持有回调的空 `Watch`。只为 Linux CI 编译。
+- 不新增依赖 crate：ObjC 运行时和 AppKit 的符号都手写声明。
+
+### 性能
+
+release 构建，Apple 芯片，macOS 27.0.1：
+
+| 调用 | 耗时 |
+|---|---|
+| `system_colors`，本进程之前已经读过 | 15–25 µs（约 70 次 ObjC 消息） |
+| `system_colors`，本进程第一次，`NSApplication` 已建并 `finishLaunching`、还没有窗口（应用里 `ui::init` 的情形：GPUI 的 `Application::new` 已建 `NSApplication`，`open_window` 在后） | 约 2.0–2.1 ms；紧接的另一个外观约 65 µs |
+| `system_colors`，本进程第一次，`NSApplication` 和一个 `NSWindow` 已存在（显示过与否相同） | 约 1.3–1.4 ms；紧接的另一个外观约 50 µs |
+| `system_colors`，本进程第一次，AppKit 之前完全没有用过（本 crate 的测试） | 13–27 ms：`appearanceNamed:` 约 12 ms、第一次 `performAsCurrentDrawingAppearance:` 约 11 ms，是 AppKit 加载系统外观的资源；`NSApplication` 存在时这些已经发生 |
+| `reduce_motion` | 约 3 µs |
+| `watch` / drop | 约 30 µs / 8 µs |
+
+对 ui 设计的影响：`ui/init ≤ 300 µs` 的预算对热的读取成立，但应用里首帧之前的第一次读取（`open_window` 之前）约 2.1 ms（两个外观），是 AppKit 第一次解析自己的动态颜色；第一个窗口建好之后再读也要约 1.4 ms，所以这约 1.4 ms 并不是窗口本来就会付的代价，没有测量过 AppKit 在第一帧之前是否自己做同样的解析。两个选项是把 `ui/init` 的预算改成 2.5 ms，或者把系统色的读取推迟到首帧之后。**已决定（ui 的实现）：推迟到首帧之后**：`init` 只登记 `watch`、读 `reduce_motion`，`Palette` 先用内置表；`ready`（首帧之后）再对两个外观调 `system_colors`、换 `Palette`。首帧于是只付 `watch` 与 `reduce_motion` 的几十微秒，`system_colors` 的约 2 ms 落在首帧之后。本模块不缓存：缓存归 `ui` 的 `Palette`。
+
+### 已知限制
+
+- `Watch` drop 时另一个线程上正在进行的投递：`removeObserver:` 之后通知中心不再开始新的投递，但不等待其他线程上已经开始的那一次，那一次会在回调已经释放之后访问它。AppKit 只在主线程上投递这两个通知，`ui` 也在主线程上 drop，应用里不会发生；测试里投递的测试互相串行（`posting()` 的锁）。
+- macOS 11：`systemMintColor`、`systemCyanColor` 不存在，`system_colors` 为 None，`ui` 用内置表。Lectern 支持的最低版本是 11（安全读取的 `O_NOFOLLOW_ANY`）。
+- 回调在投递线程上运行，本模块不把它转到主线程的队列：转到主线程由 `ui` 经 `AsyncApp` 做（[ui 设计「颜色」](ui.md#颜色)）。
+- `NSSystemColorsDidChangeNotification` 覆盖强调色和提高对比度；浅色 / 深色的切换不经它，由 GPUI 的窗口外观观察者给出。
+- 第一次读取的耗时见「性能」。
+
+### 测试
+
+`crates/platform/src/appearance/tests.rs`。不需要窗口、`NSApplication` 和主线程：颜色在块让当前的外观生效的那个线程上解析，测试线程上投递的通知也在测试线程上送达。
+
+- 所有平台：`appearance_lightness_is_the_hsl_lightness`（测试用的明度函数）；`appearance_names_are_distinct_static_names`。
+- 只在 macOS 上（[ui 设计「验收」](ui.md#验收)前置条件 A 的检查）：`appearance_system_colors_resolve_for_both_appearances`（两个外观各读到一份 `SystemColors`；`label` 的明度在浅色下低于 0.5、深色下高于 0.5；`window_background` 浅色比深色亮；全部分量在 0..=1；`accent_available` 为 true；表面和系统色的透明度为 1、`label` 的大于 0；两个外观的表不同，同一外观再读一次相同；`systemRed` 的红分量最大；打印两次读取的耗时）；`appearance_reduce_motion_is_some`；`appearance_watch_delivers_a_change`（经 `NSNotificationCenter` 手动投递两种通知，回调各收到一次，顺序一致）；`appearance_watch_stops_after_drop`（drop 后再投递，回调不再被调用，回调已被释放）；`appearance_watch_is_not_reentered`（回调里再投递不重入）；`appearance_watch_dropped_inside_its_callback_is_fine`（回调里 drop `Watch`，不崩溃、之后不再回调）；`appearance_watch_contains_a_panicking_callback_and_logs_no_payload`（见「日志与诊断」的金丝雀测试）。投递的测试经一把锁串行，`cargo test` 在同一个进程里运行时互不干扰。
+- 其他平台：`appearance_is_none_elsewhere`、`appearance_watch_is_inert_elsewhere`。
+- 第一次读取的耗时在 `crates/platform/examples/appearance_first_read.rs`：手工运行 `cargo run --release -p lectern-platform --example appearance_first_read`（`cargo clippy --all-targets` 编译它，CI 不运行）。它以自己为子进程分四个阶段各运行一次：什么都不做、先建 `NSApplication` 并 `finishLaunching`（`ui::init` 的情形）、再建一个不显示的 `NSWindow`、再把窗口显示一次（这一阶段需要窗口服务器会话），每个阶段打印第一次浅色、第一次深色和一次热读取的微秒数；`NSApplication` 和窗口只能在主线程上建，Rust 的测试线程不是主线程，所以是 example 不是测试。全部读取都返回表时退出码为 0。
+
 ## 未决问题
 
 没有需要产品决定的问题。技术问题都已在上文决定。
@@ -1155,6 +1289,13 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
 - `cargo run -p lectern-platform --example frame_autosave` 在 macOS 上退出码为 0。
 - 本文的状态行、「实际验证」写明已实现。
 
+系统外观（ui 设计的前置条件 A）一个实现 PR，写 `Refs #214`，在 ui 第 1 步之前合并：
+
+- `just test -p lectern-platform` 在 Linux CI 和 macOS CI 上都通过，其中有「系统外观」的 `appearance_*`：macOS 上两个外观各读到一份 `SystemColors`、`label` 的明度在浅色下低于 0.5、深色下高于 0.5、`reduce_motion` 返回 Some、`watch` 收到手动投递的通知且 drop 后不再回调；原有的测试结果不变。
+- `git diff origin/main -- Cargo.lock` 为空（ObjC 运行时和 AppKit 的符号手写声明）；`rg -n 'NSColor|NSAppearance|NSSystemColorsDidChange|objc_msgSend' crates --glob '!crates/platform/**' -t rust` 没有结果（架构规则 6）。
+- `cargo run --release -p lectern-platform --example appearance_first_read` 在 macOS 上退出码为 0，四个阶段的耗时写进「性能」和「实际验证」。
+- 本文的状态行、「实际验证」写明已实现；「性能」写明 ui 对第一次读取的耗时的决定。
+
 ## 实际验证
 
 在 Linux（x86_64，内核 6.18，`openat2` 可用）上运行。macOS 专属的部分（`NofollowAny`、`nofollow_any_*`、macOS 上的 `perf_smoke`）没有在 macOS 上运行过，由 macOS CI 验证：
@@ -1229,6 +1370,12 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
   - `cargo run -p lectern-platform --example frame_autosave` 退出码为 0：第一个窗口读回设上的名字；第二个未显示的窗口设同一个名字时 AppKit 返回 YES（记入「已知限制」）；换名成功；另一个线程上为 `NotMainThread`。运行后 `~/Library/Preferences` 里没有出现这个进程的 plist（窗口没有移动或缩放，AppKit 没有保存 frame）。
   - `cargo clippy -p lectern-platform --all-targets --all-features -- -D warnings` 通过。`git diff origin/main -- Cargo.lock` 只在 `lectern-platform` 的依赖里多了 `raw-window-handle`。
   - 没有在 Linux 上运行，本机也没有 Linux 目标做交叉检查：其他平台的分支（`set_frame_autosave_name_does_nothing_elsewhere`、名字检查的纯函数、空的 `main`）由 Linux CI 编译和运行。没有在真实的 GPUI 窗口上运行过：`app` 接入时（workspace 设计的 E）再验证 GPUI 的 `Window` 句柄经这个函数设名后，重启时窗口回到原来的位置与大小。
+
+- 系统外观（ui 设计的前置条件 A）在 macOS（Apple 芯片，macOS 27.0.1）上：
+  - `just test -p lectern-platform`：161 个测试通过，其中新增 9 个 `appearance_*`（「系统外观」的「测试」里 macOS 上编译的全部），都在测试线程上、没有窗口和 `NSApplication`；原有的 152 个结果不变。用 `cargo test` 在同一个进程里运行 9 个也都通过，连续运行 20 次都通过。
+  - `cargo run --release -p lectern-platform --example appearance_first_read` 退出码为 0，三次运行（第一次浅色、第一次深色、热读取）：什么都不做的阶段 12.8–16.5 ms、65–71 µs、15–16 µs（更早的三次运行里 15.7–27.4 ms）；`NSApplication` 已 `finishLaunching`、没有窗口的阶段 2.01–2.08 ms、64–65 µs、15–16 µs；再建一个窗口的阶段 1.31–1.43 ms、50–51 µs、14 µs；窗口显示过的阶段 1.35–1.41 ms、46–47 µs、14–15 µs。另在测试里分步计时（临时代码，没有提交）：什么都不做的进程里 `appearanceNamed:` 11.9 ms、第一次 `performAsCurrentDrawingAppearance:` 10.6 ms、第一次解析 23 个颜色 2.9 ms；`reduce_motion` 3.4 µs；`watch` 29 µs、drop 8 µs。
+  - `just check`、`just deny` 通过；`cargo clippy -p lectern-platform --all-targets --all-features -- -D warnings` 通过。`git diff origin/main -- Cargo.lock` 为空；`rg -n 'NSColor|NSAppearance|NSSystemColorsDidChange|objc_msgSend' crates --glob '!crates/platform/**' -t rust` 没有结果。
+  - 没有验证的：本机没有 Linux 目标（rustup 的镜像没有这个 target），其他平台的分支（`appearance_is_none_elsewhere`、`appearance_watch_is_inert_elsewhere`、空的 `main`）只由 Linux CI 编译和运行。没有在真实的系统设置变化下运行过：测试经 `NSNotificationCenter` 手动投递通知，系统设置里切换强调色、减弱动态效果时 AppKit 是否投递这两个通知、是否在主线程上，按 Apple 文档写，由 ui 设计「验收」的手动检查（切换强调色后窗口里的 `accent` 随之变化）验证。macOS 11、12 上的分支（`systemMintColor` 缺失时为 None）没有运行过。第一次读取的耗时是用手建的 `NSApplication` / `NSWindow` 测的，没有在真实的 GPUI 进程里测过。
 
 ## 与设计的差异
 
