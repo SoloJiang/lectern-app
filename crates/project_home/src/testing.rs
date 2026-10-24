@@ -390,6 +390,7 @@ pub(crate) fn overview(
         generation: 7,
         sessions: Arc::from(sessions),
         outside,
+        packages: None,
     }
 }
 

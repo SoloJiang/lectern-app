@@ -337,8 +337,7 @@ impl Home {
             project: &snapshot,
             sessions: &lists,
             overview: overview.as_deref(),
-            // `Overview.packages` is not there yet (project_home.md 前置条件 A).
-            changed_today: None,
+            changed_today: overview.as_deref().and_then(|o| o.packages.as_deref()),
             usage: usage.as_ref(),
             now: (self.wall)(),
         }))

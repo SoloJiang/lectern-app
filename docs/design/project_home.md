@@ -561,7 +561,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - **`ProjectHomeUsagePlugin::new(executor, slot)`**：设计写 `new(slot)`，但 `started` 里那个对账任务要经 `Executor::run_gated` 提交，需要 executor（「本 crate 的公开项」已改，「对其他 crate 的要求」D 随之改）。
 - **`Changed` 当作 `Opened` 要求项目还开着**：设计写「收到不认识的项目的 `Changed` 时按 `Opened` 处理」；`Closed` 之后到达的 `Changed` 会让一个已经关闭的项目重新成为基底并取一次概览关注。现在只在 `Projects::snapshot` 里还有这个项目时才这样处理，已关闭的忽略（`opened_takes_the_overview_interest_and_closed_drops_it` 检查）。
 - **日志字段 `sid`**：`overview session not in list` 的字段不能叫 `session`（`lectern-logging` 把它保留为作用域的键，宏会编译失败），改叫 `sid`，值仍是 `Value::uuid(会话 ID 的 UUID 或 128 位哈希)`，推导与 `review`、`usage` 相同。
-- **`Overview.packages` 还没有**（前置条件 A 在另一个分支实现）：`snapshot::Inputs::changed_today: Option<&[(RelPath, u32)]>` 代替它，`Home` 总是传 None，所以 `package_counts` 为 false、`changed_today` 为 0，侧栏只显示名字；A 合并后第 3 步把 `Overview.packages` 接到这个入口。`OutsideCount::Capped` 时 `build` 无论入口给什么都当作没有计数。
+- **`Overview.packages` 经 `snapshot::Inputs::changed_today: Option<&[(RelPath, u32)]>` 进入 `build`**：`Home` 传 `Overview.packages`（[#239](https://github.com/SoloJiang/lectern-app/pull/239)，在本 PR 之前合并）；它为 None 时 `package_counts` 为 false、`changed_today` 为 0，侧栏只显示名字。`OutsideCount::Capped` 时 `build` 无论入口给什么都当作没有计数。
 - **`build` 的签名**：设计只写「`snapshot::build` 的纯函数」。现在是 `build(&Inputs) -> Built`，`Inputs` 有项目快照、各来源的会话列表、概览、今天的改动数、`usage`（`UsageInputs`）和合成时刻；`Built` 除快照外还给出不在会话列表里的概览会话（插件据此记 warn）和需要 `complete` 的会话键（按显示顺序、去重）。
 - **`SourceGenerations::usage`**：用量快照的代数；还没有用量快照时取额度的代数（设计没有规定）。
 - **一个未规定的情形**：概览里 `progress` 为 `Some` 但 `total == 0` 的会话（没有文件）不进 Needs Review，也不进 Recently Done（设计的两个条件都不满足），`build_splits_needs_review_and_done` 的 `empty` 一条检查这一点。`archived` 的会话没有特别处理，照常列出。
