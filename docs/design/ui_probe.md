@@ -532,4 +532,5 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 - **`Profile::has_real_window`。** probe profile 与 desktop 一样有真实窗口，要挂启动屏障、设 frame autosave 名；`window.rs` 里原来写死 `Profile::Desktop` 的两处改成问这个方法。`Profile::ALL`（测试用）成了切片，带 feature 时多一项 `Probe`。
 - **环境变量由 `Startup::probe` 带进来。** `run` 在首帧之前只读 `LECTERN_UI_PROBE_DIR`（空值当作没有设置），`Startup` 把目录存下，`release_in` 取用；不是绝对路径或不是私有目录时 `Probe::start` 返回 `DirNotPrivate`，记 `probe start failed`（`reason`，有 IO 错误时带 `error`，没有路径）。
 - **`tests/probe.rs` 不断言 `nodes` 的长度。** 设计写骨架没有语义节点、`nodes` 长度为 1；`welcome` 装配之后，屏障放开后窗口里会出现 Welcome 的节点，长度取决于探针连上的时刻。测试只断言根节点是 `window`，并重复截图直到 PNG 不是单一颜色（最多 10 s）。
+- **`tests/probe.rs` 不断言 `probe stopped`。** 设计写日志里有 `probe listening`、`probe stopped`；后者由 `shutdown` 唤醒的监听线程写，这个线程不被 join，退出线程的日志刷出可能先于它，断言会偶发失败。测试只要求 `probe listening` 在、`name` 的金丝雀不在。
 - **`just probe` 的目标目录来自 `cargo metadata`**，不假设 `target/`；进程用 `nohup` 起、标准输出写到探针目录里的 `lectern.out`，另外去掉 `LECTERN_LOG`。
