@@ -46,6 +46,9 @@ mod review;
 )]
 #[path = "fixtures/review_repo.rs"]
 mod review_repo;
+#[cfg(target_os = "macos")]
+#[path = "time/review_view.rs"]
+mod review_view;
 #[path = "time/syntax.rs"]
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
@@ -181,11 +184,13 @@ const BENCHES: &[Bench] = &[
 ];
 
 fn main() -> ExitCode {
-    // `ui/*` needs GPUI, which only builds on macOS in this workspace.
+    // `ui/*` and `review_view/*` need GPUI, which only builds on macOS in
+    // this workspace.
     #[cfg(target_os = "macos")]
     let benches: Vec<Bench> = {
         let mut all = BENCHES.to_vec();
         all.extend_from_slice(ui::BENCHES);
+        all.extend_from_slice(review_view::BENCHES);
         all
     };
     #[cfg(not(target_os = "macos"))]

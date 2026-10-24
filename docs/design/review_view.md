@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：已接受，尚未实现。
+状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）已实现；第 2、3 步尚未实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、检查器里的 Progress 列表、底部浮条，以及 J / K / V 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -638,3 +638,46 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - `just bench review_view/scroll_5000`：每帧 ≤ 8.3 ms（p95）。
 - 手动在 macOS 上运行发布构建：打开一个有 Claude Code 会话的仓库，项目主页 ↵ 进入审阅：简报、轮次、diff 行显示；V 勾选并滚到下一个文件；⌥⌘I 打开 Progress；⇧⌘O 打开完整文件；⌘[ 返回；切换双栏时内容区变宽。
 - `app/cold_start`、`app/idle_empty` 与改动前相比不变。
+
+## 实际验证
+
+### 第 1 步
+
+插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点，用到 `ui` 第 4 步（[#242](https://github.com/SoloJiang/lectern-app/pull/242)，`semantic`、`Recorder`），在 macOS（arm64，Rust 1.97.0）上运行。屏幕锁定，没有运行应用：下面全部是无窗口的 `#[gpui::test]` 和 `just` 入口。
+
+- `just check`（含 `cargo clippy --workspace --all-targets --all-features -- -D warnings`、文档链接和架构检查：32 个 crate，`review_view` 带 `plugin = true`，依赖 `gpui`、`futures`、`lectern-i18n`、`lectern-kernel`、`lectern-logging`、`lectern-services`、`lectern-ui`，都不是插件 crate）、`just deny` 通过。`git diff -- Cargo.lock` 只有 `lectern-review-view` 的依赖行和 `lectern-bench` 的一行，没有新的外部 crate。
+- 「验收」的五条 `rg` 检查都没有结果：`std::fs|std::process|std::thread::spawn|gix|git2`；`hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|Duration::from_secs|\.font_family\(|gpui_component::Button`（测试里要用时长的地方用 `Duration::from_micros`、`Duration::new` 或 `ui::motion` 的常量）；界面字符串字面量；`eprintln!|println!|log::`；`highlight::|Languages`。
+- `just test -p lectern-review-view`：77 个测试通过，都由 nextest 一个测试一个进程地跑。
+  - 纯函数（`#[test]`）：`items_*`（13 个：会话审阅的顺序、规则分组的顺序、`Placeholder` 的估计与记下的高度、`context` 改 `RowsKey`、噪声折叠与展开、提示行在简报之后、早先轮次的折叠规则、无完整 diff 的提示、键唯一且能找回、`items_snapshot` 的 insta 快照）、`anchor_*`（5 个）、`needs_*`（6 个）、`brief_*`（5 个：每条规则的键与参数、`Provided` 的回退、zh-CN）、`labels_*`（7 个：归因标签表的每一行）、`visible_range_follows_a_splice`。
+  - `#[gpui::test]`（真实的 kernel 加 `FakeReview`）：设计「验收」第 1 步点名的测试都在：`screen_opens_the_review_and_shows_loading_phases`（工厂不发命令、100 ms 与 1 s 两个阶段）、`changed_event_reaches_the_main_thread_and_keeps_the_scroll`、`prepared_replaces_placeholders_without_flicker`、`prepare_follows_the_visible_range`、`v_marks_seen_and_scrolls_to_the_next_unseen`（减弱动态效果下落在下一个未看的步；全部已看后停住）、`v_works_without_the_inspector_and_glides_when_motion_is_on`（`tick_glide` 用测试给的时刻走完）、`j_k_walk_the_hunks_across_files`、`looks_good_sends_the_command`、`toggle_seen_sends_mark_unseen`、`progress_tab_lists_the_files_and_jumps` 对应 `the_progress_tab_lists_the_files_and_jumps`（含点击、↓ 与 ↵）、`brief_item_jumps_to_the_line`、`noise_is_folded_by_default`、`failed_snapshot_shows_the_reason`（三种错误和返回按钮）、`unrecognized_session_uses_groups`、`folder_project_has_no_progress`、`drop_closes_the_review_and_cancels_analysis`（`CancelAnalyze` 在 `close` 之前）、`stale_generation_is_dropped`、`milestone_is_reported_once`、`plugins_register_and_deactivate_cleanly`、`escape_goes_to_the_panel_first`（用 `Content` 区域上的探针 Action 看 Esc 有没有冒泡）；另外 `a_jump_into_a_folded_turn_unfolds_it`（Progress 与简报的跳转遇到折叠的早先轮次时先展开）、`events_of_a_burst_are_applied_once`、`anchor_*`（选中项找回与随项消失、`Prepared` 的 `splice` 在段内与段前）、`a_subagent_line_goes_to_its_turn`、`two_screens_of_one_review_each_keep_their_channel`、`earlier_turns_fold_and_unfold`、`the_analysis_row_shows_each_state`、`the_check_of_a_step_toggles_when_clicked`、`a_target_that_is_not_a_review_shows_the_missing_message`。
+  - 语义树：`review_tree_session`、`review_tree_groups`、`review_tree_progress`、`review_tree_failed` 四份 insta 快照（`src/tests/snapshots/`），不含 bounds。
+  - `logs_hold_no_contents`：金丝雀放在会话标题、路径、prompt 与说明的正文、工具名、diff 的行、`Provided` 的规则与参数、`Analyze` 的原因和改动集错误的原因里，trace 级别跑完打开、`Prepare`、`Prepared`、J、V、Esc、Looks good、新一代快照、失败态和屏幕 drop；没有记录含金丝雀，`review screen opened`、`diff shown`、`review screen closed`（`marked`、`looks_good`）与 `review failed shown`（`error`）的字段按「日志与诊断」。
+- `just bench review_view/`：`review_view/items_5000` 中位数 18 µs（两次运行 18–24 µs）（预算 < 4 ms）。
+- `just test -p lectern-bench`：78 个测试通过（预算表的一致性检查含新条目）。
+- 没有验证：真实的帧。`#[gpui::test]` 不画真实的帧，勾选、`ARRIVE`、进度条的 `Transition` 随真实时间走，测试里只验证终态（`tick_glide` 由测试给时刻）；`Content > review` 的谓词只对测试台里复刻 `workspace` 的 `Content` 上下文验证过，没有对真实的 `workspace` 验证；滚动 5000 行的帧时间（`review_view/scroll_5000`）和 `app/open_diff` 随第 3 步。真实窗口里的外观、行高与横向裁剪、减弱动态效果下的滚动，随第 3 步在 macOS 上手动运行发布构建时检查。
+
+## 与设计的差异
+
+### 第 1 步
+
+- **只有一个插件**：设计的 `plugins()` 返回 `(ReviewViewPlugin, HandoffPlugin)`。交接插件在第 2 步，所以第 1 步导出 `plugin() -> ReviewViewPlugin`，`Shared` 没有 `handoff`、`handle` 两项；第 2 步改成 `plugins()`，`app` 装配随第 3 步，现在没有调用方。
+- **`testing::harness` 在测试里**：`testing`（`test-support`）有 `FakeReview`（加 `set_emitter`、`set_auto_prepare`、`announce`、`emit_event`、`last_needs`、`prepares`、`closed`、`rows_calls` 等供测试读的方法，第一个审阅的 ID 是 `FIRST_ID`）、`snapshot_fixture` 与带标记的 `snapshot_fixture_tagged`（金丝雀测试用）；窗口、假的 `dyn Contributions` 和 `dyn SessionSource` 在 `src/tests/support.rs` 的 `Rig`：基准只要纯函数，不该带上这些。`snapshot_fixture` 返回每一步和每个文件的展示行（`Step` 与 `Final` 两种键）。
+- **项的形状**：`Item` 带它在快照里的位置（`Pos { turn, item }`、`ix`），渲染时不查表；`Prompt` 的键是 `TurnRef`（`prompt` 可以为 `None`，这时只有预览）；新增 `Item::Incomplete`（无完整 diff 的文件的提示行，设计只写在「状态与异常」里）。`index: HashMap<ItemKey, u32>` 没有做：找键只发生在刷新、跳转和 J / K 时，`anchor::find` 线性扫描。`NodeId` 不存在项里，渲染时按业务键现建（每帧只建可见项的，约 60 个）。
+- **`display_rows`、`DisplayRow`、`DiffMode`、`SetReadingColumn`、统一 / 双栏的 `Segmented` 随第 2 步**：第 1 步只有统一视图，行直接按 `DiffRow` 画；工具栏右侧只有 Refresh。`Fold` 是一行说明，点不开；`context` 表（`BuildOptions::context`）已经决定 `RowsKey`，第 2 步的展开只要写它。
+- **`ListState` 在 `ReviewModel` 里**，不在 `ReviewScreen`：Progress 页的跳转和刷新后的找回都在模型里做，`ListState` 是 `Rc` 的句柄，屏幕从模型取。屏幕保留焦点、进度条的 `Transition` 和里程碑标记。
+- **可见范围由屏幕每次 render 从列表量**：`ListState::set_scroll_handler` 只在用户滚动（滚轮、滚动条）时触发，首次布局、`scroll_to` 和 `splice` 都不触发。`ReviewModel::measure_visible` 用 `logical_scroll_top`、`viewport_bounds` 和 `bounds_for_item` 算出可见的项：遇到还没布局的项就返回 None、留到下一帧，已知视口被填满后的未布局项不算；首次重建时先假定可见 40 项，使第一屏的 `Prepare` 不必等第一帧。`splice` 之后可见范围按「碰到那一段就整段算可见」调整（`shift_visible`），下一帧再量真实的范围；否则刚展开的行会被当成不在范围内、立刻放回占位。
+- **早先轮次的折叠规则**（「未决问题」3 的默认 (a) 的细化）：折叠的是开头那一串 `after_last_seen == false` 的轮次，且只在至少有一轮更新的时候折叠；没有已看记录（全是 true）或没有新轮次（全是 false）时不折叠。这样「之前的 n 轮」总是后面跟着新内容。
+- **规则分组视图的组标题**：「界面」的键表里没有 Code / Tests / Config / Deps / Docs 的名字，所以组之间只有一条分隔线，第一个组上方是 `review-files-changed`（总文件数）。要显示组名需要新的 Fluent 键，不在本 PR 范围。
+- **多轮归因的连接**：设计写「多轮用顿号连接」；`i18n` 没有连接词的消息，所以每一轮一个标签（`review-hunk-turn`），并排显示。`FileOnly` 的文件把轮次标签放在步标题 / 文件标题下，与表一致。
+- **探针节点的 ID 按 `ui::semantic::NodeId` 的形式**：带业务键的节点写成 `视图.区域.item[键]`，设计表里的 `review.step[<id>]` 是 `review.step.item[<id>]`，`.check`、`.prompt`、`.hunk.item[…]`、`.row.item[…]`、`.fold.item[…]`、`.placeholder` 是子节点；文本项是 `review.turn.item[<会话>:<序号>].text.item[<位置>]`。Progress 行的节点由 `ui::Row` 声明（`review.progress.item[<路径>]`，`ListItem`、`selected`），它不接受属性，所以 `seen`、`group`、`noise` 放在外面一层的 `review.progress-file.item[<路径>]`（`Group`）上。`Role::DiffHunk` 的节点带 `selected`；`DiffLine` 的 `selected` 同。`review.diff[…]`（`Role::Diff`，`prepared`、`highlighted` 属性）随第 2 步，第 1 步没有。
+- **Analyze 行只显示状态**：`Unavailable` / `Idle` 是置灰的 Analyze 按钮，`Running`、`Done`、`Failed` 是说明文字；触发、取消、重新分析的按钮随第 2 步（「验收」把 Analyze 命令放在第 2 步），所以没有 `review::Analyze` / `CancelAnalyze` 两个 Action。`Unavailable` 的原因（设计：悬停显示）不显示：`ui` 没有提示气泡的原语（`Hint` 是短暂的提示），原因只在 `Analyze` 的探针节点之外不可见；`.tooltip` 属性的几条键（Looks good、Refresh、勾选）同理不用。
+- **简报条目的 `line`**：设计写「滚到 `Final` 行里 `(side, line)` 对应的 `Row`」，而会话审阅的叙事只显示每一步的行（「叙事列表的项」），`Final` 的行只在规则分组视图里出现。所以规则分组视图里滚到那一行并选中（行还没准备好时等 `Prepared`），会话审阅里落在这个文件的第一步；`line` 在会话审阅里只决定不了行，条目的 `line` 属性仍在探针节点上。
+- **折叠的早先轮次里的文件**：Progress 的行、简报条目和子 agent 行跳向折叠的早先轮次里的内容时，先展开（`review::ToggleEarlierTurns` 的效果）再跳，与噪声文件一样。
+- **`review.narrative` 节点**：`Role::List`，属性 `items`（项数）、`visible`（可见范围，`起..止`）、`mode`（第 1 步总是 `unified`）；它包着整个列表，所以叙事里的节点在语义树里是它的子节点。
+- **V 之后的滚动**：`SCROLL_NEXT` 用 `Transition` 逐帧给出位移，经 `ListState::scroll_by` 滚动，最后用 `scroll_to` 落在目标项上。目标项还没有布局过（离得远）或系统开了减弱动态效果时直接 `scroll_to`。下一个未看的文件只向后找，不绕回开头（设计「没有时停在原处」）。Progress 里点噪声文件时，噪声先展开再跳转。
+- **`Current`**：屏幕建好时设成 GPUI 全局 `Current` 的是它的 `WeakEntity<ReviewModel>`，工具栏和 Progress 页读它；屏幕 drop 后弱引用升级失败，页面显示空状态。同时有两个审阅屏幕时（不应发生）后建的赢。
+- **`ReviewModel::missing`**：工厂收到不是 `Target::Review` 的目标时，建一个不打开任何审阅、直接是 `Failed(Missing)` 的模型，显示 `review-failed-missing` 加返回按钮。
+- **日志**：`snapshot inconsistent` 只检查 `turn_ref`（轮次的 `session` 超出 `sessions`），`step`、`file_index` 两种不查：文件夹项目里叙事的文件本来可以不在 `files` 里。
+- **`Screen::toolbar` 的 `Refresh` 没有提示文字**（见 Analyze 一条）。Progress 页的标题用 `review-progress`（已看 n/m），`review-progress-title` 只作检查器页的标签。
+- **基准**：`review_view/items_5000` 加进预算表（`share_macos`，中位数 < 4 ms）和 bench 的 `time` 目标，`lectern-bench` 在 macOS 上加 dev 依赖 `lectern-review-view`（`test-support`）；设计把预算表与 `scroll_5000` 放在前置条件 D（第 3 步），这里只加第 1 步要判定的这一条，`scroll_5000` 与 `app/open_diff` 仍是 `Planned`。基准夹具是纯函数，不开窗口。
+- **默认的产品问题**（「未决问题」）：1 统一视图是默认（双栏随第 2 步，所以现在没有切换）；2 Looks good 之后留在审阅页，浮条显示 `review-all-reviewed`；3 折叠早先轮次（见上）；4 agent 说明按纯文本、保留换行，行内代码块不识别。

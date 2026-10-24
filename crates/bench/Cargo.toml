@@ -54,6 +54,10 @@ tempfile.workspace = true
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 lectern-ui = { path = "../ui", features = ["test-support"] }
+# The `review_view/*` benchmarks (docs/design/review_view.md「性能」): the
+# item list is pure, but the crate depends on GPUI. A plugin crate: a tool
+# crate may depend on one (ADR 0025).
+lectern-review-view = { path = "../review_view", features = ["test-support"] }
 
 # In-process timing; the counting allocator stays out of it.
 [[bench]]

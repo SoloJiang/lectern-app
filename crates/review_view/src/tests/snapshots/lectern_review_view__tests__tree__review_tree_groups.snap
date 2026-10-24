@@ -1,0 +1,32 @@
+---
+source: crates/review_view/src/tests/tree.rs
+expression: render_tree(& records)
+---
+review.narrative List items=17 visible=0..17 mode=unified
+  review.brief Group items=2 omitted=0 pending=0 analysis=unavailable
+    review.brief.item[sensitive-ci:src/file_000.rs] ListItem <review-brief-sensitive-ci> "\u{2068}src/file_000.rs\u{2069} runs in CI" critical=true
+    review.brief.item[edit-failed:src/file_001.rs] ListItem <review-brief-edit-failed> "An edit to \u{2068}src/file_001.rs\u{2069} failed; the agent may think it applied" critical=false
+    review.brief.analyze Button <review-analyze> "Analyze" [disabled]
+  review.notice.item[unrecognized] Text <review-notice-unrecognized> "Lectern can't read this session's log; changes are shown by file."
+  review.group.item[2] Group
+  review.file.item[src/file_000.rs] Group "src/file_000.rs" seen=unseen attribution=lines drifted_hunks=0
+    review.file.item[src/file_000.rs].check Toggle [checked=false]
+  review.diff.item[final:src/file_000.rs].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
+  review.diff.item[final:src/file_000.rs].row.item[0:0] DiffLine kind=context drifted=false
+  review.diff.item[final:src/file_000.rs].row.item[1:-] DiffLine kind=removed drifted=false
+  review.diff.item[final:src/file_000.rs].row.item[-:1] DiffLine kind=added drifted=false
+  review.diff.item[final:src/file_000.rs].row.item[-:2] DiffLine kind=added drifted=false
+  review.diff.item[final:src/file_000.rs].row.item[2:3] DiffLine kind=context drifted=false
+  review.file.item[src/file_001.rs] Group "src/file_001.rs" seen=unseen attribution=lines drifted_hunks=0
+    review.file.item[src/file_001.rs].check Toggle [checked=false]
+  review.diff.item[final:src/file_001.rs].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
+  review.diff.item[final:src/file_001.rs].row.item[0:0] DiffLine kind=context drifted=false
+  review.diff.item[final:src/file_001.rs].row.item[1:-] DiffLine kind=removed drifted=false
+  review.diff.item[final:src/file_001.rs].row.item[-:1] DiffLine kind=added drifted=false
+  review.diff.item[final:src/file_001.rs].row.item[-:2] DiffLine kind=added drifted=false
+  review.diff.item[final:src/file_001.rs].row.item[2:3] DiffLine kind=context drifted=false
+review.bar Group
+  review.bar.progress Progress fraction=0.000
+  review.bar.comments Text <review-comments> "No comments"
+  review.bar.send Button <review-send> "Send" [disabled]
+  review.bar.looks-good Button <review-looks-good> "Looks good"
