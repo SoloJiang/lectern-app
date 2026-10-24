@@ -160,6 +160,14 @@ pub const HOVER_IN: Motion = motion(120, Easing::Linear, false);
 /// Hover: the background fades out, a little slower.
 pub const HOVER_OUT: Motion = motion(200, Easing::Linear, false);
 
+/// The loading state's phases (interaction spec「状态与异常」, `loading_phase`):
+/// nothing is drawn before this much has elapsed …
+pub const LOADING_SKELETON_AT: Duration = ms(100);
+/// … a skeleton until this much, a progress indicator after it.
+pub const LOADING_PROGRESS_AT: Duration = Duration::from_secs(1);
+/// How long a `Hint` stays before it fades out (`HOVER_OUT`).
+pub const HINT_DURATION: Duration = ms(2500);
+
 /// Entering a session: spring, response 0.35 s, damping 0.86. With mass 1:
 /// stiffness = (2π / 0.35)² ≈ 322.27, damping = 2 × 0.86 × √stiffness
 /// ≈ 30.877.
@@ -215,7 +223,8 @@ impl Motion {
         self.effective_when(reduced(cx))
     }
 
-    fn effective_when(self, reduced: bool) -> Effective {
+    /// `effective` for a given setting (pure; the controls' frame functions).
+    pub(crate) fn effective_when(self, reduced: bool) -> Effective {
         if !reduced {
             return Effective::Move(self);
         }
@@ -365,8 +374,17 @@ impl Transition {
     /// requests the next animation frame. Its own work is a constant-time
     /// computation without allocation (the frame request is GPUI's).
     pub fn tick(&mut self, now: Instant, window: &mut Window) -> f32 {
+        if self.step(now) {
+            window.request_animation_frame();
+        }
+        self.value
+    }
+
+    /// `tick` without the frame request: commits the value at `now` and
+    /// returns whether the transition is still in progress.
+    pub(crate) fn step(&mut self, now: Instant) -> bool {
         if !self.running {
-            return self.value;
+            return false;
         }
         let (value, velocity, done) = self.sample(now);
         self.at = now;
@@ -378,9 +396,8 @@ impl Transition {
         } else {
             self.value = value;
             self.velocity = velocity;
-            window.request_animation_frame();
         }
-        self.value
+        !done
     }
 
     /// The value of the last `tick` (or `set`, or `new`).

@@ -52,6 +52,7 @@ pub fn plugin(deps: ReviewDeps) -> (Name, ReviewPlugin) {
             deps,
             clock: Arc::new(SystemClock),
             wall: Arc::new(wall_clock),
+            zone: Arc::new(local_offset),
             discover: Arc::new(lectern_git::Repo::discover),
             #[cfg(test)]
             provided: Arc::default(),
@@ -65,6 +66,8 @@ pub struct ReviewPlugin {
     clock: Arc<dyn Clock>,
     /// The time of day the 14-day window of the sessions counts from.
     wall: Arc<dyn Fn() -> Timestamp + Send + Sync>,
+    /// The local time zone's offset at a Unix time in milliseconds.
+    zone: Arc<dyn Fn(i64) -> i32 + Send + Sync>,
     discover: Discover,
     /// The engine and the service of the latest activation, for the tests.
     #[cfg(test)]
@@ -90,6 +93,17 @@ impl ReviewPlugin {
         wall: impl Fn() -> Timestamp + Send + Sync + 'static,
     ) -> ReviewPlugin {
         self.wall = Arc::new(wall);
+        self
+    }
+
+    /// Replaces the local time zone (tests and benchmarks with a fixed
+    /// zone): the offset from UTC in seconds, east positive, at a Unix time
+    /// in milliseconds.
+    pub fn with_utc_offset(
+        mut self,
+        zone: impl Fn(i64) -> i32 + Send + Sync + 'static,
+    ) -> ReviewPlugin {
+        self.zone = Arc::new(zone);
         self
     }
 
@@ -131,6 +145,7 @@ impl Plugin for ReviewPlugin {
             watcher: Some(self.deps.watcher.clone()),
             emit: Arc::new(move |event| emitter.emit(event)),
             clock: self.wall.clone(),
+            utc_offset: self.zone.clone(),
             discover: self.discover.clone(),
             interactive_budget: INTERACTIVE_BUDGET,
         });
@@ -147,7 +162,7 @@ impl Plugin for ReviewPlugin {
         let listener = engine.clone();
         ctx.on::<ProjectEvent>(move |event, _| match event {
             ProjectEvent::Changed { project, parts, .. } => {
-                listener.project_changed(project, parts.active);
+                listener.project_changed(project, *parts);
             }
             ProjectEvent::Closed { project } => listener.project_closed(project),
             ProjectEvent::Opened { .. } => {}
@@ -161,6 +176,12 @@ fn wall_clock() -> Timestamp {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     Timestamp(i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// The system zone's offset at `unix_ms` (`platform::time::utc_offset`;
+/// UTC when the platform has none).
+fn local_offset(unix_ms: i64) -> i32 {
+    lectern_platform::time::utc_offset(unix_ms.div_euclid(1000)).unwrap_or(0)
 }
 
 struct ReviewActive {

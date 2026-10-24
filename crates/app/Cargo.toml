@@ -33,6 +33,9 @@ lectern-logging = { path = "../logging", features = ["sink"] }
 lectern-platform = { path = "../platform" }
 lectern-project = { path = "../project" }
 lectern-review = { path = "../review" }
+# `init` before the window, `attach` on the skeleton window, `ready` behind
+# the barrier (docs/design/ui.md「对其他 crate 的要求」).
+lectern-ui = { path = "../ui" }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
@@ -40,6 +43,10 @@ gpui = { workspace = true, features = ["test-support"] }
 lectern-fs-watch = { path = "../fs_watch", features = ["test-support"] }
 # testing::capture() for the canary test.
 lectern-logging = { path = "../logging", features = ["sink", "test-support"] }
+# `testing::simulate_appearance_change` for the skeleton window tests.
+lectern-ui = { path = "../ui", features = ["test-support"] }
+# `Theme`: the before-ready test checks that no theme global exists.
+gpui-component.workspace = true
 # The startup tests read the log file's JSON lines under a temporary HOME.
 serde_json.workspace = true
 tempfile.workspace = true

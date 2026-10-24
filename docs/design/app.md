@@ -166,9 +166,9 @@ pub struct Outcome {
 | 2 | 主线程 | `install_early(EarlyConfig { dir: platform::dirs::logs(), cli_filter: args.log })` | 否：只读环境变量，分配首帧前缓冲，装 panic 钩子 |
 | 3 | 主线程 | 认不出的参数各记一条 warn（进首帧前缓冲） | 否 |
 | 4 | 主线程 | `Locale::negotiate(platform::system::preferred_languages())`、`Strings::of` | 否：系统偏好在内存里，资源已编译进二进制（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)） |
-| 5 | 主线程 | `Application::new().run(…)`：设置应用菜单、绑定 ⌘Q、建骨架窗口 | GPUI 和 AppKit 自己的初始化 |
+| 5 | 主线程 | `Application::new().run(…)`：`lectern_ui::init(cx, strings)`（在 `set_menus` 之前：内置的两份 `Palette`、减弱动态效果、登记 `platform` 的变化通知，不读系统色，[ui 设计「初始化」](ui.md#初始化)）、设置应用菜单、绑定 ⌘Q、建骨架窗口（`open_window` 的回调里 `lectern_ui::attach(window, cx)`，`Subscription` 放在根视图 `Skeleton` 里） | GPUI 和 AppKit 自己的初始化；`init` 只做内存操作 |
 | 6 | 主线程 | 首帧画出；根视图第一次 `render` 时登记启动屏障（下节） | 否 |
-| 7 | 主线程 | `startup::release`：`Early::start`、`Executor::new`、`Kernel::start` | 建 `lectern-log` 线程和 kernel 线程，立即返回 |
+| 7 | 主线程 | `startup::release`：`Early::start`、`lectern_ui::ready`（`gpui_component::init`、读两套系统色、投影到 gpui-component 的主题；在 `Kernel::start` 之前，插件挂载视图时 `ui` 已就绪）、`Executor::new`、`Kernel::start` | 建 `lectern-log` 线程和 kernel 线程，立即返回；`ready` 约 2–3 ms 的主线程内存操作，不做 IO |
 | 8 | `lectern-log` | 建日志目录、清理、写文件头和首帧前缓冲 | 是 |
 | 9 | kernel 线程 | 读清单、激活 `AfterFirstFrame` 插件（本 issue 里没有插件） | 由插件决定 |
 
@@ -321,8 +321,8 @@ Logging::shutdown(500 ms)
 
 ## 性能
 
-- 冷启动：首帧之前只有「启动顺序」的第 1–6 步。新增的工作是参数解析（几个字符串比较）、`install_early`（预算 ≤ 20 µs，`log/install_early`）和语言协商（常数级的内存操作），合计远小于 20 ms 预算的 1%。首帧之前不建线程、不读写 Lectern 自己的文件、不调用 kernel 和 executor（ADR 0017）。
-- 空闲内存：首帧之后多出日志的缓冲（logging 设计「性能」：≤ 512 KiB）、kernel 线程和它的栈。executor 在第一次提交任务之前不建线程。空集合的 kernel 静止后不再唤醒。
+- 冷启动：首帧之前只有「启动顺序」的第 1–6 步。新增的工作是参数解析（几个字符串比较）、`install_early`（预算 ≤ 20 µs，`log/install_early`）、语言协商（常数级的内存操作）和 `lectern_ui::init`（预算 ≤ 300 µs，`ui/init`：一次减弱动态效果的读取、两份内置表、登记通知；不读系统色，[ui 设计「性能」](ui.md#性能)），加上骨架窗口的 `lectern_ui::attach`（登记一个外观观察者），合计远小于 20 ms 预算的 1%。首帧之前不建线程、不读写 Lectern 自己的文件、不调用 kernel 和 executor、不运行 `gpui_component::init`（ADR 0017）。
+- 空闲内存：首帧之后多出日志的缓冲（logging 设计「性能」：≤ 512 KiB）、kernel 线程和它的栈，以及 `ui` 的 `UiState`（< 8 KiB）和 `gpui_component::init` 建的主题全局（预期 < 1 MB，`ui/idle_memory` 实测，[ui 设计「性能」](ui.md#性能)）。executor 在第一次提交任务之前不建线程。空集合的 kernel 静止后不再唤醒。
 - 基准：`app/cold_start`、`app/idle_empty` 已在预算表里，由 bench 第 5 步的进程级基准测量；本 issue 不新增基准。在那之前用「测试」里的 `startup_*` 测试验证顺序：首帧之前没有日志文件。
 
 ## 界面
@@ -364,6 +364,7 @@ Logging::shutdown(500 ms)
 - 默认记录：
   - info `startup barrier released`：`profile`（`desktop` 或 `test`）。记录自带的 `up` 是从 `install_early` 起的微秒数，用来对照启动耗时。
   - info `first frame drawn`：根视图第一次 `render` 之后的那次帧回调里记，同样只靠 `up` 和 `t`。启动测试用它的 `t` 检查日志文件在首帧之后才创建。
+  - `ui` 自己记（target 为 `ui`，[ui 设计「日志与诊断」](ui.md#日志与诊断)）：info `ui initialised`（`accent` 总是 `builtin`）在 `first frame drawn` 之前，进首帧前缓冲；info `ui ready`（`accent` 为 `system` 或 `builtin`）在 `first frame drawn` 之后、`plugins assembled` 和 `startup barrier released` 之前。启动测试检查这个顺序。
   - info `quit requested`：`path` 为 `action`（`Quit` Action）或 `system`（不经 `Quit`，只在 `on_app_quit` 里看到日志还没关闭时记）。
   - warn `unrecognized argument`：`index`（从 1 起）。
   - warn `kernel shutdown timed out`：`waited_us`。
@@ -383,9 +384,10 @@ Logging::shutdown(500 ms)
   - `profile`：`every_profile_graph_validates`（对每个 `Profile` 调用 `plugins().validate()`，kernel 设计要求的 profile 测试）。
   - `quit`（用假的 `QuitSteps`、毫秒级的 `Timeouts`）：`steps_run_in_order`（kernel 的 `done` 之后才关 executor，executor 之后才关日志）、`a_hung_kernel_does_not_block_quit`（`done` 从不调用时，到截止时间后照常关闭 executor 和日志，`kernel_timed_out` 为 true）、`a_dropped_done_is_not_a_timeout`（kernel 线程没有调用 `done` 就退出时，不记为超时）、`executor_gets_the_remaining_time`、`timeouts_are_logged`。
   - `logs`：`canary_stays_out_of_app_logs`。
-  - `#[gpui::test]`：`test_profile_releases_once`（窗口建好后 `Started` 已设为全局对象；再次调用 `release` 不再启动 kernel）、`quit_before_release_starts_nothing`（屏障放开之前退出：不设 `Started`，之后的 `release` 也不启动任何东西）。
+  - `#[gpui::test]`：`test_profile_releases_once`（窗口建好后 `Started` 已设为全局对象；再次调用 `release` 不再启动 kernel）、`quit_before_release_starts_nothing`（屏障放开之前退出：不设 `Started`，之后的 `release` 也不启动任何东西）。test profile 在开窗口之前先 `lectern_ui::init_fixed`（骨架窗口的 `attach` 要 `ui` 的全局；`release` 里的 `ready` 随后是空操作）。
+  - `#[gpui::test]`，`ui` 的接入（`src/tests/ui.rs`，[ui 设计「验收」](ui.md#验收)第 1 步的 `app` 项；外观变化经 `lectern_ui::testing::simulate_appearance_change`，GPUI 的测试平台不能改窗口外观）：`appearance_change_refreshes_the_skeleton_window`（test profile：`init_fixed`、`window::open`（含 `attach` 与 `release`）之后模拟外观变深，骨架窗口重画一次，`colors` 给出深色的 `Palette`）、`appearance_change_before_ready_does_not_touch_the_theme`（直接 `lectern_ui::init`、`window::open`，不设 `Startup` 全局，所以不 `release`；`ready` 之前模拟一次外观变化：不 panic、窗口重画一次、`is_ready` 仍为 false、gpui-component 的 `Theme` 全局不存在，即没有被读写）。
 - 启动测试（`tests/startup.rs`，启动真实的 `lectern` 进程，需要 macOS 的图形会话；macOS CI 任务满足）：每个测试用新的临时目录作 `HOME`，日志落在 `$HOME/Library/Logs/Lectern/`，带调试构建才有的 `--quit-after-start`，等进程退出（30 s 后结束进程并判为失败，只防卡住，不判定耗时）。`--quit-after-start` 等屏障放开、本次运行的日志文件出现之后才退出。
-  - `startup_writes_a_header_and_an_end_record`：只有一个 `lectern-*.log`；第一行是文件头（`msg` 为 `file`）；含 `first frame drawn` 和 `startup barrier released`，前者在先；最后一行是 `run end`。
+  - `startup_writes_a_header_and_an_end_record`：只有一个 `lectern-*.log`；第一行是文件头（`msg` 为 `file`）；`ui initialised`、`first frame drawn`、`ui ready`、`plugins assembled`、`startup barrier released` 依次出现；`ui initialised` 的 `accent` 为 `builtin`，`ui ready` 的为 `system`（真实的 macOS 图形会话）；最后一行是 `run end`。
   - `log_file_is_created_after_the_first_frame`：日志文件的创建时间（`Metadata::created`）不早于 `first frame drawn` 的 `t`（毫秒精度）。
   - `cli_and_env_filters_reach_the_header`：`LECTERN_LOG=debug` 启动时文件头的 `filter` 是 `debug`；`--log cache=trace` 启动时是 `cache=trace`（同时设了 `LECTERN_LOG` 时仍是 `cache=trace`）。
   - `system_quit_writes_the_end_record`：`--quit-after-start=system`，最后一行是 `run end`，文件里有 `quit requested`、`path` 为 `system`。
@@ -405,7 +407,7 @@ Logging::shutdown(500 ms)
 ## 已知限制
 
 - 屏障放开之前（首帧之后约 2 个刷新周期内）退出时，首帧前缓冲里的记录丢失，下一次运行也不会报告上一次异常结束：这时还没有创建本次运行的日志文件。
-- 窗口被完全遮挡、收不到帧请求时，屏障不放开，后台初始化一直推迟到窗口重新可见；这期间 ⌘Q 按「屏障放开之前」处理。
+- 窗口被完全遮挡、收不到帧请求时，屏障不放开，后台初始化一直推迟到窗口重新可见；这期间 ⌘Q 按「屏障放开之前」处理。屏幕锁定的图形会话（`CGSessionCopyCurrentDictionary` 的 `CGSSessionScreenIsLocked` 为 1）同样：首帧画出，之后不再有帧请求，屏障不放开；启动测试在锁屏期间全部 30 s 后判为失败（`ui` 接入时实测；接入前一天的本机调试构建同样如此），解锁后再跑。
 - 由系统发起的退出不经 `Quit`：kernel 和 executor 不按顺序关闭（kernel 设计「已知限制」），只有日志的结束记录在 `on_app_quit` 的 200 ms 里写出。
 - 屏障比首帧的实际显示最多晚约 2 个刷新周期，直到 `platform::frame::on_first_presented` 实现（「启动屏障」）。窗口不是前台窗口时 GPUI 按 30 fps 请求帧（`inactive_frame_interval` 33 ms），间隔按 33 ms 计；从终端启动时实测首帧画出到屏障放开约 90–100 ms（「实际验证」）。
 
@@ -448,6 +450,12 @@ Logging::shutdown(500 ms)
   - 日志依次是 `first frame drawn`、`plugins assembled`（`plugins` 为 4）、`startup barrier released`、4 条 `plugin activated`、2 条 `sessions discovered`。
   - 按 ⌘Q 后 0.08 s 退出，退出码 0，没有 warn。详细日志（`verbose/`）的 `quit finished`：`kernel_us` 157、`watcher_us` 149、`executor_us` 189、`cache_us` 62。
 
+`ui` 接入（[#234](https://github.com/SoloJiang/lectern-app/pull/234)，同一台机器，[ui 设计「验收」](ui.md#验收)第 1 步的 `app` 项）：
+
+- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（32 个 crate）；`rg 'eprintln!|println!|log::' crates/app/src` 没有结果。
+- `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：17 个单元测试通过（原有 15 个加新增的 `appearance_change_refreshes_the_skeleton_window`、`appearance_change_before_ready_does_not_touch_the_theme`）。`tests/startup.rs` 的 7 个启动测试本机没有通过：图形会话处于锁屏（`CGSSessionScreenIsLocked` 为 1，用户不在），窗口画出首帧后收不到帧请求，屏障不放开，7 个都在 30 s 后判为失败；接入前一天的本机调试构建同样卡住（「已知限制」）。它们由 macOS CI 运行；`startup_writes_a_header_and_an_end_record` 多检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序和两条记录的 `accent`，结果以 CI 为准。
+- 发布构建（`cargo build --release --locked -p lectern-app`）成功；临时 `HOME` 下的手动运行（空闲内存、`ui initialised` / `ui ready` 的字段与耗时）因为同一个锁屏原因没有做：屏障不放开，日志文件不出现，内存读数没有意义。解锁后按「装配」「性能」的方法补测，写进这里。
+
 ## 与设计的差异
 
 - **库与二进制分开。** 原文写 `app` 是二进制 crate。记录的 target 取 `module_path!` 的第一段：二进制名为 `lectern` 时 target 是 `lectern`，不是 logging 设计规定的 `app`。现在逻辑在库 `lectern_app` 里，二进制只调用 `lectern_app::run()`，target 是 `app`（「接口」已改）。
@@ -462,3 +470,8 @@ Logging::shutdown(500 ms)
 - **test profile 在 `startup` 里直接跳过装配。** `startup::assemble` 对 test profile 不建 `Resources`、不读环境变量，返回空集合；`Profile::Test.plugins` 只在 `every_profile_graph_validates` 里调用。
 - **`QuitSteps` 要 `Sync`，`quit::run` 接收 `Arc<dyn QuitSteps>`。** 短命线程 `lectern-quit-step` 要持有这些步骤。线程建不起来时记 warn `could not start a quit step` 并跳过这一步：watcher 的线程和缓存的连接随进程退出结束，只丢访问时间。
 - **启动测试一次只运行一个。** 7 个启动测试并行时，本机 10 次里有 2 次有测试 30 s 没有退出。main 上的二进制在同样的并行启动下也会卡住（混合启动 120 次，两种二进制各 3 次），所以不是装配引起的：窗口都开在屏幕中央同一位置，被完全遮住的窗口 macOS 不给它画帧，首帧画不出，启动屏障不放开。测试从 5 个增加到 7 个之后更容易出现。`.config/nextest.toml` 把 `package(lectern-app) & binary(startup)` 放进 `max-threads = 1` 的测试组，之后连续 11 次通过，耗时约 2.6 s。
+
+`ui` 接入：
+
+- **test profile 的 `ui` 用 `init_fixed`，由测试自己调用。** `run` 只有 desktop profile，`lectern_ui::init` 在它里面；test profile 没有入口函数，`#[gpui::test]` 在 `window::open` 之前调用 `init_fixed`（ui 设计「对其他 crate 的要求」：test profile 用 `init_fixed`），`release` 里的 `ready` 随后是空操作。
+- **`appearance_change_before_ready_does_not_touch_the_theme` 不检查 `Palette` 的切换**，原因见 [ui 设计「与设计的差异」](ui.md#与设计的差异)。

@@ -50,6 +50,10 @@ pub fn run() {
         quit::init(cx);
         #[cfg(debug_assertions)]
         debug_quit::init(cx, args.quit_after_start);
+        // Memory only: the built-in palettes, the reduce-motion flag and
+        // `platform`'s change notifications. The system colours are read
+        // behind the barrier (docs/design/ui.md「初始化」).
+        lectern_ui::init(cx, strings);
         window::set_menus(cx, strings);
         window::open(cx);
         cx.activate(true);

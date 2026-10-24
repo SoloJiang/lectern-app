@@ -8,7 +8,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Context, IntoElement, Render, TestAppContext, VisualTestContext, Window, WindowHandle, div, px,
+    Context, IntoElement, ParentElement, Render, TestAppContext, VisualTestContext, Window,
+    WindowHandle, div, px,
 };
 use gpui_component::{Theme, ThemeMode};
 use lectern_i18n::{Locale, Strings, keys};
@@ -16,10 +17,11 @@ use lectern_platform::appearance::Change;
 use lectern_services::workspace::WorkspaceCommand;
 
 use crate::contrib::{KeyBindings, Overlay, SidebarItem};
+use crate::semantic::NodeId;
 use crate::testing::{simulate_appearance_change, simulate_platform_change};
 use crate::{
-    Appearance, Icon, Text, accent_follows_system, attach, colors, init, init_fixed, is_ready,
-    palette, ready, set_locale, strings,
+    Appearance, Button, GroupedList, Icon, Row, Text, accent_follows_system, attach, colors, init,
+    init_fixed, is_ready, palette, ready, set_locale, strings,
 };
 
 /// A root view that counts its renders.
@@ -190,14 +192,37 @@ fn contrib_payloads_round_trip_and_are_send() {
     );
 }
 
-/// The canary (docs/design/ui.md「日志与诊断」): text, keys and appearance
-/// changes leave only the event names in the log.
+/// A root view that renders the step-3 controls with the canary as their
+/// text and as a business key.
+struct CanaryControls(&'static str);
+
+impl Render for CanaryControls {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let canary = self.0;
+        let text = || Text::verbatim(Arc::<str>::from(canary));
+        let list = NodeId::new("canary", "list", None);
+        div()
+            .child(Button::new(list.child("button"), text()))
+            .child(
+                GroupedList::new(list.clone()).header(text()).row(
+                    Row::new(list.item(canary))
+                        .selected(true)
+                        .child(text().shared()),
+                ),
+            )
+    }
+}
+
+/// The canary (docs/design/ui.md「日志与诊断」): text, keys, controls and
+/// appearance changes leave only the event names in the log.
 #[gpui::test]
 fn logs_hold_no_text(cx: &mut TestAppContext) {
     let canary = "canary-5b1d9e7f";
     let capture = lectern_logging::testing::capture();
     capture.clear();
     fixed(cx, Appearance::Light);
+    let _controls = cx.add_window(|_, _| CanaryControls(canary));
+    cx.run_until_parked();
     let (window, _) = counted_window(cx);
     let mut cx = VisualTestContext::from_window(window.into(), cx);
     cx.update(|window, cx| {

@@ -7,7 +7,7 @@
 //! test advances the host's clock.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,7 @@ use lectern_executor::{Executor, Priority};
 use lectern_git::{HashKind, Oid};
 use lectern_kernel::{ActivationToken, BusyGuard};
 use lectern_services::changes::{BaseSpec, ChangePath, RefreshHint};
-use lectern_services::project::{ProjectKey, Projects, WorktreeKey};
+use lectern_services::project::{ChangedParts, ProjectKey, Projects, WorktreeKey};
 use lectern_services::review::{
     BriefRules, BriefRulesRegistration, FileRows, Overview, OverviewInterest, ReviewCommand,
     ReviewEvent, ReviewId, ReviewSnapshot, ReviewTarget, RowsKey, TextKey,
@@ -37,6 +37,8 @@ pub struct Driven {
     /// thousands of snapshots would keep them all).
     capture: Arc<AtomicBool>,
     now: Arc<AtomicI64>,
+    /// The local zone's offset in seconds (UTC by default).
+    utc_offset: Arc<AtomicI32>,
     projects: Arc<FakeProjects>,
     cache: Cache,
     host: Option<Arc<ManualHost>>,
@@ -175,6 +177,8 @@ impl Driven {
         let get = Arc::clone(&me);
         let clock = Arc::new(AtomicI64::new(now.0));
         let read = Arc::clone(&clock);
+        let offset = Arc::new(AtomicI32::new(0));
+        let read_offset = Arc::clone(&offset);
         let sources: Vec<Arc<dyn SessionSource>> = sessions
             .into_iter()
             .map(|s| s as Arc<dyn SessionSource>)
@@ -216,6 +220,7 @@ impl Driven {
                     .push((e, at))
             }),
             clock: Arc::new(move || Timestamp(read.load(Ordering::Relaxed))),
+            utc_offset: Arc::new(move |_| read_offset.load(Ordering::Relaxed)),
             discover: Arc::new(lectern_git::testing::discover),
             interactive_budget,
         });
@@ -227,6 +232,7 @@ impl Driven {
             snapshots,
             capture,
             now: clock,
+            utc_offset: offset,
             projects,
             cache,
             host,
@@ -268,6 +274,11 @@ impl Driven {
             .overview_request(project, crate::engine::overview::Trigger::full());
     }
 
+    /// A `ProjectEvent::Changed` of the project with these parts.
+    pub fn project_changed(&self, project: &ProjectKey, parts: ChangedParts) {
+        self.engine.project_changed(project, parts);
+    }
+
     /// The count change set the overview holds (None before a round, when
     /// capped, or once released).
     pub fn overview_count(&self, project: &ProjectKey) -> Option<Arc<lectern_git::ChangeSet>> {
@@ -307,6 +318,13 @@ impl Driven {
 
     pub fn set_now(&self, now: Timestamp) {
         self.now.store(now.0, Ordering::Relaxed);
+    }
+
+    /// Sets the local time zone to a fixed offset from UTC (seconds, east
+    /// positive; UTC by default): the day boundary of the overview's
+    /// per-package counts.
+    pub fn set_utc_offset(&self, seconds: i32) {
+        self.utc_offset.store(seconds, Ordering::Relaxed);
     }
 
     /// Runs the queued tasks until none is left; returns how many steps.

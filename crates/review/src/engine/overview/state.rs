@@ -193,11 +193,14 @@ impl Engine {
     }
 
     /// `ProjectEvent::Changed`: with another active worktree the current
-    /// one is found again; other changes ask for nothing (the watches
-    /// see the files).
-    pub(crate) fn project_changed(&self, project: &ProjectKey, active: bool) {
-        if active {
+    /// one is found again; with new sub-projects the counts per
+    /// sub-project are made again from the count set; other changes ask
+    /// for nothing (the watches see the files).
+    pub(crate) fn project_changed(&self, project: &ProjectKey, parts: ChangedParts) {
+        if parts.active {
             self.overview_request(project, Trigger::resolve());
+        } else if parts.packages {
+            self.overview_request(project, Trigger::default());
         }
     }
 

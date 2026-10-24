@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入与第 1 步的 `ui/*` 基准在下一个 PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3、4 步尚未实现。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 与第 1 步的 `ui/*` 基准在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步尚未实现。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -32,7 +32,7 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `gpui`、`gpui-component` | 元素、窗口外观、文字系统、动画元素；gpui-component 的 `Button`、`Skeleton`、`ProgressCircle`、`Icon` 作为底层 | 已锁定（[ADR 0016](../adr/0016.md)） |
+| `gpui`、`gpui-component` | 元素、窗口外观、文字系统、动画元素；gpui-component 的 `Button`、`Icon` 作为底层（`Skeleton`、`ProgressCircle` 自带不可关的动画，不用，见「与设计的差异」第 3 步） | 已锁定（[ADR 0016](../adr/0016.md)） |
 | `gpui-kit-assets`（`=0.7.3`，gpui-component 的依赖） | `icon_assets!` 宏生成 `IconAssets`：只嵌入 10 个图标 | 已在 Cargo.lock，与 gpui-component 同版本、一起升级；直接依赖只为用它的宏 |
 | `lectern-i18n` | `Strings`、`Key`、`FmtKey`、`Args`、`Locale`：`Text` 的构造 | 界面字符串不硬编码（[ADR 0013](../adr/0013.md)） |
 | `lectern-platform` | `appearance::{system_colors, reduce_motion, watch}`（前置条件 A） | macOS 专属能力只在 `platform`（架构规则 6）；视图层可以依赖基础设施层 |
@@ -405,11 +405,13 @@ pub enum Icon { Folder, Clone, ChevronRight, ChevronDown, Check, Close, Search, 
 pub struct IconAssets;
 
 /// agent 标识：8pt 圆点。`blink()` 让它轻闪一次（`ARRIVE` 的时长，透明度 1 → 0.3 → 1）。
-pub struct AgentDot { /* agent, blink: Option<ElementId> */ }
+/// 给了 `node` 才声明 `Badge` 节点；没给的是装饰（行里紧挨着标题的圆点）。
+pub struct AgentDot { /* agent, blink: Option<ElementId>, node: Option<NodeId> */ }
 pub enum Agent { ClaudeCode, Codex }
 impl AgentDot {
     pub fn new(agent: Agent) -> AgentDot;
     pub fn blink(self, id: ElementId) -> AgentDot;
+    pub fn node(self, id: NodeId) -> AgentDot;
 }
 
 /// 圆形勾选（文件头的「已看」）：圆圈填色 `CHECK_FILL`，对勾描出 `CHECK_STROKE`。
@@ -436,6 +438,9 @@ impl Segmented {
     /// 滑块的当前位置（0..items.len()-1 之间的小数），由调用方的 `Transition::tick` 给出。
     pub fn slider(self, position: f32) -> Segmented;
     pub fn on_select(self, f: impl Fn(usize, &mut Window, &mut App) + 'static) -> Segmented;
+    /// 调用方把滑块的 `Transition` 交给它：`SEGMENT` 从当前位置过渡；减弱动态效果时 `set` 直接到位，
+    /// 控件在新选项上把滑块淡入（`SEGMENT` 的减半时长），没有位移。
+    pub fn select(slider: &mut Transition, index: usize, now: Instant, cx: &App);
 }
 
 /// 分组列表：圆角 12pt，`control_background` 底，行间 0.5pt `separator`（交互规范「视觉」的「分组」）。
@@ -460,14 +465,19 @@ impl Row {
 pub enum LoadingPhase { Nothing, Skeleton, Progress }
 pub fn loading_phase(elapsed: Duration) -> LoadingPhase;   // < 100 ms → Nothing，< 1 s → Skeleton，否则 Progress
 
-/// 骨架块：包装 gpui-component 的 `Skeleton`，颜色换成 `tertiary_label` 的淡版，无闪烁动画（减弱动态效果时也一样）。
+/// 骨架块：`tertiary_label` 的淡版，圆角，无闪烁动画（减弱动态效果时也一样）。自己画，不包装 gpui-component 的
+/// `Skeleton`（它的脉动关不掉，见「与设计的差异」第 3 步）。装饰元素，不声明节点。
 pub struct Skeleton { /* width, height */ }
+impl Skeleton { pub fn new(width: Pixels, height: Pixels) -> Skeleton; }
 
 /// 展开原语（file_reader 前置条件 E 的「展开原语」；评论框、查找栏）：在原处撑开，`EXPAND_HEIGHT` 的高度 + `EXPAND_FADE` 的透明度，
 /// 下方内容随高度平滑下移。高度和透明度各是调用方状态里的一个 `Transition`；减弱动态效果时只有透明度变化、高度直接到位。
 pub struct Expander { /* id, height: f32, opacity: f32, child */ }
 impl Expander {
     pub fn new(id: NodeId, height: Pixels, opacity: f32, child: impl IntoElement) -> Expander;
+    /// 调用方把两个 `Transition` 交给它：高度走 `EXPAND_HEIGHT`、透明度走 `EXPAND_FADE`（`target` 为 0 时收起）；
+    /// 减弱动态效果时高度 `set` 直接到位，只剩透明度的过渡。
+    pub fn go(height: &mut Transition, opacity: &mut Transition, target: Pixels, now: Instant, cx: &App);
 }
 ```
 
@@ -476,11 +486,13 @@ impl Expander {
 /// 用 `ARRIVE` 从上方 8pt 淡入，`duration` 后用 `HOVER_OUT` 淡出并由调用方 drop；再次触发时替换文字、重新计时。不可交互，不加遮罩，不排队。
 pub struct Hint { /* id, text, shown_at: Instant, duration */ }
 impl Hint {
-    /// `duration` 默认 2.5 s。
+    /// `duration` 默认 `motion::HINT_DURATION`（2.5 s）。
     pub fn new(id: NodeId, text: Text, shown_at: Instant) -> Hint;
     pub fn duration(self, duration: Duration) -> Hint;
-    /// 调用方每帧问一次：到期后返回 true，调用方把它从状态里去掉。
+    /// 调用方每帧问一次：`duration` 过后再过 `HOVER_OUT` 的淡出，返回 true，调用方把它从状态里去掉。
     pub fn is_expired(&self, now: Instant) -> bool;
+    /// 某一刻的偏移与透明度（到达、停留、淡出三段），到期为 None。纯函数，`reduced` 为减弱动态效果。
+    pub fn frame_when(&self, now: Instant, reduced: bool) -> Option<HintFrame>;
 }
 ```
 
@@ -626,7 +638,7 @@ pub mod semantic {
 
 首帧之前做的事：`init`（上表）。其余都在 `ready` 之后。
 
-新增基准（`bench`，macOS 判定，Linux 不编译）：`ui/init`（≤ 300 µs）、`ui/ready`（≤ 3 ms）、`ui/palette_resolve`（通知到达到新 `Palette` 就位 ≤ 300 µs）、`ui/transition_tick`（≤ 100 ns）、`ui/bezier_eval`（≤ 50 ns）、`ui/mono_metrics_first`（≤ 200 µs）、`ui/semantic_disarmed`（≤ 2 ns）、`ui/idle_memory`（`ready` 之后 `UiState` 加 gpui-component 全局 < 1 MB）。
+新增基准（`bench`，macOS 判定，Linux 不编译）：`ui/init`（≤ 300 µs）、`ui/ready`（≤ 3 ms）、`ui/palette_resolve`（通知到达到新 `Palette` 就位 ≤ 300 µs）、`ui/transition_tick`（`Transition` 自己的一步，不含 GPUI 的帧请求，≤ 100 ns）、`ui/transition_tick_frame`（含帧请求的 `tick`，只记录：代价在 GPUI，随机器变化；帧的预算由 `app/animation_frames` 判定）、`ui/bezier_eval`（≤ 50 ns）、`ui/mono_metrics_first`（≤ 200 µs）、`ui/semantic_disarmed`（≤ 2 ns）、`ui/idle_memory`（`ready` 之后 `UiState` 加 gpui-component 全局 < 1 MB）。
 
 ## 界面
 
@@ -680,7 +692,7 @@ pub mod semantic {
   - `transition_*`：从 0 到 1 的 380 ms 过渡，在 190 ms 时 `go(0, …)`，之后的值从当时的值单调回到 0，没有跳变；`go` 到相同目标不重新计时；`set` 立即到位；减弱动态效果下 `moves` 的过渡时长减半且 `effective` 为 `Fade`。
   - `loading_phase_*`：99 ms → `Nothing`，100 ms → `Skeleton`，1 s → `Progress`。
   - `active_transitions_*`：两个 `Transition` 开始后为 2，一个到达后为 1，另一个 drop 后为 0；`set` 中断进行中的过渡也减一。
-  - `hint_*`：`is_expired` 在 `duration` 到期后为 true；再次 `new` 同一个 ID 从新的 `shown_at` 计时。
+  - `hint_*`：`is_expired` 在 `duration` 加 `HOVER_OUT` 的淡出过后为 true（见「与设计的差异」第 3 步）；再次 `new` 同一个 ID 从新的 `shown_at` 计时；`frame_when` 的到达、停留、淡出三段与减弱动态效果下的零位移。
   - `node_id_*`：格式、转义、`child`；调试构建下非法的 `view` panic。
   - `code_colors_*`：对内置表的两个外观，五种颜色两两之间在正常、红色盲（protanopia）、绿色盲（deuteranopia）三种模拟（Viénot 1999 的 3×3 矩阵，在测试里写出）下的 ΔE（CIE76）≥ 12；每种与 `control_background` 的对比度（WCAG 2 的公式）≥ 3:1。`code_styles` 的两个外观各一份 insta 快照。
   - `palette_builtin_*`：内置表每个颜色的透明度在 0..=1、`diff_*_background` 的叠加结果与手算一致；两个外观的 `label` 与 `window_background` 对比度 ≥ 7:1。
@@ -795,16 +807,32 @@ pub mod semantic {
 - `just doctest`：`lectern-ui` 的 3 个 `compile_fail` 通过。
 - `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}' crates/ui/src --glob '!**/builtin.rs' --glob '!**/tests*'` 和 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 都没有结果。
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
-- 没有做：`app` 的接入（`with_assets`、`init`、`attach`、`ready` 和两个 `#[gpui::test]`）、`ui/*` 基准、手动的强调色与外观切换检查，都在下一个 PR；`mono_metrics().family` 在发布构建下的手动检查随 `app` 接入一起做。
+- 没有做（[#230](https://github.com/SoloJiang/lectern-app/pull/230) 时）：`app` 的接入、`ui/*` 基准、手动的强调色与外观切换检查、`mono_metrics().family` 的手动检查。
+
+`app` 的接入（[#234](https://github.com/SoloJiang/lectern-app/pull/234)，同一台机器，[app 设计「实际验证」](app.md#实际验证)的「`ui` 接入」有完整数据）：
+
+- `init` 在 `run` 里开窗口之前（`set_menus` 之前），`attach` 在骨架窗口 `open_window` 的回调里（`Subscription` 放在根视图 `Skeleton`），`ready` 在 `startup::release` 里 `Early::start` 之后、`Kernel::start` 之前；test profile 用 `init_fixed`。`with_assets(IconAssets)` 没有加：`IconAssets` 随第 3 步的控件才存在。
+- `lectern-app` 的 17 个单元测试通过，其中 `appearance_change_refreshes_the_skeleton_window` 与 `appearance_change_before_ready_does_not_touch_the_theme`（经 `testing::simulate_appearance_change`）。`tests/startup.rs` 的 `startup_writes_a_header_and_an_end_record` 新增检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序、`ui initialised` 的 `accent` 为 `builtin`、`ui ready` 的 `accent` 为 `system`；本机图形会话锁屏，启动测试收不到帧（app 设计「已知限制」），结果以 macOS CI 为准。
+- 发布构建成功；临时 `HOME` 下的手动运行（`ui ready` 的 `accent`、两条记录的 `elapsed_us`、空闲内存）因同一个锁屏原因没有做，解锁后补测。
+- 没有做：系统设置里切换强调色和浅色 / 深色的手动检查（agent 不改用户的系统设置；代码路径由 `appearance_change_*` 两个测试和 `ui` 的 `init_then_ready_reads_the_system` 覆盖）；`mono_metrics().family` 的手动检查（骨架窗口没有视图调用 `mono_metrics`，`font.rs` 只在后备和失败时记日志，等第一个用它的视图接入）；`ui/*` 基准（下一个 PR）。
 
 第 2 步（macOS，Apple 芯片，macOS 27.0.1）：
 
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`bench` 对 `lectern-ui` 和 `gpui` 的依赖只在 macOS 声明，见「与设计的差异」）。
 - `just test -p lectern-ui`：38 个测试通过，其中本步新增 15 个：`bezier_matches_the_css_reference`、`bezier_ends_at_0_and_1`、`bezier_switch_overshoots_near_0_6`、`spring_constants_match_the_spec`、`spring_keeps_its_velocity_when_retargeted`、`spec_constants_hold_the_table`、`transition_continues_from_the_current_value`、`transition_same_target_does_not_restart`、`transition_set_arrives_at_once`、`transition_delay_holds_the_start_value`、`transition_reduced_motion_halves_and_fades`、`transition_not_reduced_moves`、`active_transitions_counts_the_ones_in_progress`、`reduced_motion_has_no_displacement`、`panel_moves_when_motion_is_not_reduced`。`cargo nextest run -p lectern-bench`：78 个通过（新增 `runner_macos_only_budgets_are_skipped_off_macos`）。
 - `just doctest`：`lectern-ui` 的 3 个 `compile_fail` 仍通过。
-- `just bench --measure ui/`：`ui/transition_tick` 中位数 43 ns（预算 ≤ 100 ns；`ENTER_SESSION` 弹簧的 tick 40 ns，记在结果的 note 里），`ui/bezier_eval` 中位数 8 ns（预算 ≤ 50 ns）。
+- `just bench --measure ui/`：`ui/transition_tick` 中位数 43 ns（当时含帧请求，预算 ≤ 100 ns；`ENTER_SESSION` 弹簧的 tick 40 ns，记在结果的 note 里），`ui/bezier_eval` 中位数 8 ns（预算 ≤ 50 ns）。
+- 预算分项之后（`ui/transition_tick` 只测 `step`，见「与设计的差异」第 2 步）：`just bench ui/` 本机 `ui/transition_tick` 中位数 14 ns（预算 ≤ 100 ns），`ui/transition_tick_frame` 43 ns（只记录），`ui/bezier_eval` 8 ns。
 - `rg 'set_reduce_motion' crates/ui/src crates/app/src`、`rg 'Duration::from_millis|Duration::from_secs' crates/ui/src --glob '!**/motion*' --glob '!**/tests*'`、`rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 都没有结果。
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
+
+第 3 步（macOS，Apple 芯片，macOS 27.0.1）：
+
+- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`ui` 新增直接依赖 `gpui-kit-assets =0.7.3`，GPUI 系的 crate，已在 Cargo.lock）。
+- `just test -p lectern-ui`：54 个测试通过，其中本步新增 16 个：`loading_phase_follows_the_thresholds`、`circle_check_animates_only_a_change_to_checked`、`segmented_fades_only_a_changed_selection`、`hint_expires_after_its_duration_and_the_fade`、`hint_shown_again_counts_from_the_new_instant`、`hint_frames_arrive_hold_and_fade`、`icon_assets_hold_every_icon`、`circle_check_toggles_from_key_and_click`（`v` 键经视图的 Action 与点击 16pt 元素中心都触发 `on_change`，填色动画的元素 ID 只由 `NodeId` 决定）、`segmented_slider_continues_from_current_position`、`every_control_renders_after_ready`（每个控件各渲染一次并推进三帧）、`control_before_ready_panics`、`node_id_formats_view_area_and_key`、两个调试构建下 `NodeId` 的 `should_panic`、`semantic_builder_takes_label_state_and_attrs`、`semantic_label_of_a_key_names_the_message`；`reduced_motion_has_no_displacement` 按第 2 步的说明扩到 `Expander` 的高度与 `Segmented` 的滑块；`logs_hold_no_text` 多渲染一个带金丝雀的 `Button`、`GroupedList`、`Row`（文本与业务键），断言的事件列表不变。
+- `just doctest`：`lectern-ui` 的 4 个 `compile_fail` 通过（新增 `Button::new(id, "literal")`）。
+- 验收的三条 `rg`（时长、颜色、IO）与 `rg 'set_reduce_motion'` 都没有结果；`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果。
+- 没有做：每个控件的语义节点快照（要 `Recorder`，随第 4 步）；`app` 的 `with_assets(IconAssets)` 在 `app` 的接入 PR；「性能」没有列控件的基准，本步不加。手动的视觉检查（按钮高度、分组列表、分段控件的滑块）随第一个使用这些控件的屏幕一起做。
 
 ## 与设计的差异
 
@@ -819,6 +847,8 @@ pub mod semantic {
 - `attach` 的「重复调用只登记一次」按 `AnyWindowHandle` 记在 `UiState` 里，每次 `attach` 先去掉已关闭的窗口；重复调用返回一个空的 `Subscription`。
 - gpui-component 主题的投影只写 `Palette` 有直接来源的字段（背景、前景、边框、主色、次要色、列表与选中、侧栏、弹层、链接、骨架、滚动条、danger / success / warning / info 等 40 个）；强调色上的文字用 `builtin.rs` 里的 `on_accent()`（AppKit 的 `alternateSelectedControlTextColor`，两个外观都是白色），不是 `Palette` 的字段。其余字段保持 gpui-component 注册主题的值，第 3 步包装控件时再补。
 - `i18n` 的 `Key::name` / `FmtKey::name`（`Text::message_id` 用）由 [#227](https://github.com/SoloJiang/lectern-app/pull/227) 提供，不在本 PR 里。
+- `app` 的 `appearance_change_before_ready_does_not_touch_the_theme` 不检查「`Palette` 已换」：它按原文直接用 `init`（不是 `init_fixed`），这时 `colors(window, cx)` 跟随窗口自己的外观，而测试平台改不了窗口外观，`simulate_appearance_change` 只触发处理函数。测试改为检查不 panic、窗口重画一次、`is_ready` 仍为 false、gpui-component 的 `Theme` 全局不存在；`Palette` 的切换由 `appearance_change_refreshes_the_skeleton_window`（`init_fixed`，固定外观跟着变）和本 crate 的 `appearance_change_swaps_palette` 检查。
+- `app` 不加 `with_assets(IconAssets)`：`IconAssets` 随第 3 步的控件才定义，第 1 步的接入里没有它（「对其他 crate 的要求」的 `app` 项第 1 条随第 3 步做）。
 
 第 2 步：
 
@@ -827,9 +857,21 @@ pub mod semantic {
 - `Easing::EaseOut` 取 CSS 的 `ease-out`，即 `cubic-bezier(0, 0, 0.58, 1)`；原文只写「ease-out」。
 - `Motion::effective` 在减弱动态效果下只把 `duration` 减半，`delay` 不变（原文没有写 `delay`）。`Fade` 里的 `Motion` 的 `moves` 为 false。
 - GPUI 的 `Animation` 没有延迟，`Motion::animation` 把延迟折进去：动画总长 `delay + duration`，曲线在延迟结束前保持 0。
-- `Transition::tick` 自己的工作是常数时间、不分配；它调用的 `Window::request_animation_frame` 在 GPUI 里装箱一个回调（一次分配），这是 GPUI 的代价，不在本 crate 控制内。`ui/transition_tick` 测的是含这次请求的 `tick`：`tick` 只能在视图的 render 里调用（GPUI 只允许正在渲染的视图请求下一帧），所以基准用 GPUI 的测试平台开一个窗口，取「一次 render 里 4096 次 tick」与「不 tick 的 render」之差除以 4096 作为一个样本，用 `Ctx::compare` 交替采样。
+- `Transition::tick` 自己的工作是常数时间、不分配；它调用的 `Window::request_animation_frame` 在 GPUI 里装箱一个回调（一次分配），这是 GPUI 的代价，不在本 crate 控制内。`tick` 拆成 crate 内部的 `step`（提交 `now` 时的值，返回是否仍在进行）加帧请求；`testing::step_transition`（`test-support`）只调 `step`。`ui/transition_tick` 用它在普通循环里计时，测的是「性能」约束的那部分。含帧请求的 `tick` 改名 `ui/transition_tick_frame`，只记录：`tick` 只能在视图的 render 里调用（GPUI 只允许正在渲染的视图请求下一帧），所以它用 GPUI 的测试平台开一个窗口，取「一次 render 里 4096 次 tick」与「不 tick 的 render」之差除以 4096 作为一个样本，用 `Ctx::compare` 交替采样。原来 `ui/transition_tick` 测的就是这个含帧请求的量：本机 41–43 ns，macOS CI 上 100–152 ns（#234、#235、#240 的基准任务因此超过 100 ns），超出的部分是 GPUI 的分配、唤醒平台和 `notify`，`ui/bezier_eval` 在 CI 上同样慢约 2.5 倍（8 → 20 ns）。预算数字没有变。
 - `Transition` 按字段算约 112 字节，不是 56：它存了两个 `Instant`（当前段的起点和上次采样的时刻，弹簧按后者逐步推进）和整份 `Motion`（56 字节）。由视图持有，个数以个位数计，不影响内存预算。
 - 进行中的计数是进程级的 `AtomicUsize`；nextest 一个测试一个进程，`active_transitions_*` 以测试开始时的值为基准断言差值。
 - `reduced_motion_has_no_displacement` 本步只覆盖设计里的面板偏移示例（`Transition` + `Effective::Fade`），`Expander` 和 `Segmented` 的滑块随第 3 步加入；另加 `panel_moves_when_motion_is_not_reduced` 作为对照。
 - `bench` 对 `lectern-ui` 和 `gpui`（`test-support`）的 dev 依赖只在 macOS 声明（`[target.'cfg(target_os = "macos")'.dev-dependencies]`），Linux 上 `bench` 仍不依赖 GPUI、仍在 `just check` / `just test` 的范围内。为此 `scripts/check_architecture.py` 第 4 条改为：Apple 专属的 target 谓词只对外部的、非 GPUI 的依赖算作 macOS 绑定（工作区成员由它自己的清单检查，GPUI 只在 macOS 上编译是构建约束，不是绑定）。预算表加 `Budget::macos_only`：Linux 上 `just bench` 把这些条目记为 `skipped`（只在 macOS 运行），不算缺基准（[bench 设计「预算表」](bench.md#预算表)已补）。
 
+
+第 3 步：
+
+- `semantic` 的数据类型提前到本步：控件的构造函数接受 `NodeId`，所以 `NodeId`、`Role`、`Label`、`State`、`Semantic` 与 `node_id_*` 测试随控件一起实现；`semantic(...)`、`semantic_interactive(...)`、`SemanticElement`、`Record`、`Recorder`、无障碍属性映射和每个控件的语义节点快照仍在第 4 步。控件经一个 crate 内的接缝 `semantic::declare(spec, element)` 声明节点，本步它是恒等函数；第 4 步把它换成记录的包装元素，控件不用改。`Semantic` 多了构造用的 `new` / `label` / `state` / `attr`，`Label::of(&Text)` 从 `Text` 取键与文字。
+- 不包装 gpui-component 的 `Skeleton`、`Progress`、`ProgressCircle`：`Skeleton` 带一个关不掉的 2 s 脉动，`Progress` / `ProgressCircle` 对传入的值再做一次自己的过渡（gpui-component 的 motion token，不是 `PROGRESS`）并读 GPUI 的 `reduce_motion` 标志，都与「动效」规则相抵。骨架块用 `div` 画（`tertiary_label` 35% 透明度、4pt 圆角）；进度条用两层 `div`（轨道 `separator`、填充 `accent`，宽度 `relative(fraction)`）；进度环与勾选的对勾用 `canvas` + `PathBuilder::stroke` 自绘（环 16pt、2pt 描边，`arc_to`；对勾按长度比例描到 `fraction`）。「依赖」表已照改。
+- `Button` 的文字不走 gpui-component 的 `label`：它把字号定成 14px / 16px，外面改不了；文字作为子元素按 `TextRole::Body`（13pt）排，`accessibility_label` 另外设成同一段文字。颜色用 `ButtonVariant::Custom`，但它把普通态的填色稀释到 20% 透明度，所以普通态的填色在实例样式上另设一次（只在未禁用时，实例样式会在禁用态重放）。悬停 / 按下的填色是强调色的明度偏移（−0.04 / −0.10）与 `label` 的 6% / 12% 淡色，没有新的颜色值。`Regular` 高度 30pt 由实例样式覆盖 gpui-component 的 32pt，圆角 6pt（`Small` 5pt）。
+- `CircleCheck` 只在它看到 `checked` 从 false 变成 true 时播放填色与对勾的动画：已勾选状态下挂载（打开已看过一半的会话、虚拟列表里的行滚回来）直接画终态，否则每次挂载都会把已看的文件重新「勾一遍」。上一帧的 `checked` 记在 GPUI 的 keyed element state（`id.part("mark")`）里，与动画元素同生命周期；减弱动态效果下 `Segmented` 滑块的淡入按同一规则（`id.part("selection")`）。自审发现的 P1。
+- `AgentDot` 多一个 `node(NodeId)`：设计的签名没有 ID，而 `Badge` 节点需要；不给时是装饰元素，不声明节点。
+- `Segmented::select` 与 `Expander::go` 是新加的关联函数：减弱动态效果下「高度直接到位」「滑块位移为 0」要有人在 `Transition` 上调 `set` 而不是 `go`，放在控件里让所有调用方一致，`reduced_motion_has_no_displacement` 也经它们断言。减弱动态效果下 `Segmented` 忽略 `slider`，把滑块放在 `selected` 上并以 `SEGMENT` 的减半时长淡入（按 `selected` 换动画元素的键）。
+- `Row` 的悬停过渡放在 GPUI 的 keyed element state（`window.use_keyed_state`）里，与 gpui-component 的 `Button` 放焦点句柄的做法相同：`RenderOnce` 元素每帧重建，状态要跨帧。`on_hover` 的回调对 `Transition` 调 `go`（`HOVER_IN` / `HOVER_OUT`）再 `window.refresh()`；render 里 `tick`，背景是 `label` 的 6% × 当前值。选中行文字用 `on_accent()`（`selected_content_background` 上的白字）。
+- `Hint` 的到期是 `duration` 加 `HOVER_OUT` 的淡出：原文「`duration` 后用 `HOVER_OUT` 淡出并由调用方 drop」，`is_expired` 在淡出结束后才为 true，否则调用方在淡出开始时就会 drop 它。位移用绝对定位的 `top`（`TOP + offset`），GPUI 的 `div` 没有 translate；绝对定位只动它自己，不触发兄弟重排。显示期间每帧 `request_animation_frame`：调用方本来就每帧问 `is_expired`，不另加帧；停留段也在请求帧，记为已知限制（一次提示 ≈ 2.7 s，少见）。时长常量 `HINT_DURATION`、`LOADING_SKELETON_AT`、`LOADING_PROGRESS_AT` 放在 `motion`，验收的 `rg` 才能不放过控件文件。
+- 图标名的对应：`Clone` → Lucide `copy`，`Back` / `Forward` → `arrow-left` / `arrow-right`，`Close` 与 `Inspector` 是 gpui-kit-assets 自带的 `close.svg`、`inspector.svg`，其余同名。`Icon` 实现 gpui-component 的 `IconNamed`，所以 `Button::icon(Icon)` 走它的 `Icon` 元素，`IconName` 不暴露。`icon_assets!` 的结构体不能带文档注释，文档在 `lib.rs` 的再导出上。
