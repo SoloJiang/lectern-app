@@ -861,7 +861,6 @@ pub mod semantic {
 - `reduced_motion_has_no_displacement` 本步只覆盖设计里的面板偏移示例（`Transition` + `Effective::Fade`），`Expander` 和 `Segmented` 的滑块随第 3 步加入；另加 `panel_moves_when_motion_is_not_reduced` 作为对照。
 - `bench` 对 `lectern-ui` 和 `gpui`（`test-support`）的 dev 依赖只在 macOS 声明（`[target.'cfg(target_os = "macos")'.dev-dependencies]`），Linux 上 `bench` 仍不依赖 GPUI、仍在 `just check` / `just test` 的范围内。为此 `scripts/check_architecture.py` 第 4 条改为：Apple 专属的 target 谓词只对外部的、非 GPUI 的依赖算作 macOS 绑定（工作区成员由它自己的清单检查，GPUI 只在 macOS 上编译是构建约束，不是绑定）。预算表加 `Budget::macos_only`：Linux 上 `just bench` 把这些条目记为 `skipped`（只在 macOS 运行），不算缺基准（[bench 设计「预算表」](bench.md#预算表)已补）。
 
-
 第 3 步：
 
 - `semantic` 的数据类型提前到本步：控件的构造函数接受 `NodeId`，所以 `NodeId`、`Role`、`Label`、`State`、`Semantic` 与 `node_id_*` 测试随控件一起实现；`semantic(...)`、`semantic_interactive(...)`、`SemanticElement`、`Record`、`Recorder`、无障碍属性映射和每个控件的语义节点快照仍在第 4 步。控件经一个 crate 内的接缝 `semantic::declare(spec, element)` 声明节点，本步它是恒等函数；第 4 步把它换成记录的包装元素，控件不用改。`Semantic` 多了构造用的 `new` / `label` / `state` / `attr`，`Label::of(&Text)` 从 `Text` 取键与文字。
