@@ -125,18 +125,34 @@ pub fn install(window: AnyWindowHandle, deps: WorkspaceDeps, cx: &mut App) -> Wo
 }
 
 /// Puts the workspace in `window`: `lectern_ui::attach`, the root view, the
-/// close interception and the focus.
+/// close interception and the focus. `app` calls `install` from
+/// `startup::release`, which runs in the skeleton window's frame callback
+/// with that window leased by GPUI; a nested lease is refused, so the mount
+/// is then deferred to the end of the current update (`App::defer` runs
+/// before the next draw). A window that is closed by then is left alone.
 fn mount(window: AnyWindowHandle, workspace: &Entity<Workspace>, cx: &mut App) {
+    if try_mount(window, workspace, cx).is_err() {
+        let shell = workspace.clone();
+        cx.defer(move |cx| {
+            let _ = try_mount(window, &shell, cx);
+        });
+    }
+}
+
+fn try_mount(
+    window: AnyWindowHandle,
+    workspace: &Entity<Workspace>,
+    cx: &mut App,
+) -> gpui::Result<()> {
     let shell = workspace.clone();
-    // Fails only for a closed window; there is nothing to mount in then.
-    let _ = window.update(cx, |_, window, cx| {
+    window.update(cx, |_, window, cx| {
         let appearance = lectern_ui::attach(window, cx);
         window.replace_root(cx, |_, _| WindowRoot {
             workspace: shell.clone(),
             _appearance: appearance,
         });
         shell.update(cx, |workspace, cx| workspace.bind_window(window, cx));
-    });
+    })
 }
 
 impl WorkspaceHost {

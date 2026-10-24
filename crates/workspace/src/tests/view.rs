@@ -65,6 +65,49 @@ fn install_replaces_the_root_and_shows_nothing_before_a_screen_registers(cx: &mu
     assert_eq!(built.load(Ordering::SeqCst), 1, "the factory ran once");
 }
 
+/// `app::startup::release` runs in the skeleton window's frame callback,
+/// with that window leased: `install` must still end with the workspace as
+/// the root.
+#[gpui::test]
+fn install_inside_the_windows_update_mounts_after_it(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    cx.update(|cx| {
+        lectern_ui::init_fixed(
+            cx,
+            lectern_i18n::Strings::of(lectern_i18n::Locale::En),
+            lectern_ui::Appearance::Light,
+            false,
+        );
+    });
+    struct Placeholder;
+    impl Render for Placeholder {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+    let window: gpui::AnyWindowHandle = cx.add_window(|_, _| Placeholder).into();
+    let received = Arc::new(Received::default());
+    let deps = received.deps();
+    let host = cx
+        .update_window(window, |_, window, cx| {
+            crate::install(window.window_handle(), deps, cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let replaced = window
+        .update(cx, |root, _, _| root.downcast::<WindowRoot>().is_ok())
+        .unwrap();
+    assert!(replaced, "the deferred mount replaced the root");
+    assert_eq!(host.window(), Some(window));
+    let tree = cx.update(|cx| {
+        let workspace = crate::host::workspace(cx).expect("installed");
+        workspace.read_with(cx, |workspace, cx| {
+            crate::semantic::render(&workspace.inspect(cx))
+        })
+    });
+    assert!(tree.contains("workspace.content [Group] base=welcome"));
+}
+
 #[gpui::test]
 fn project_home_shows_after_opened(cx: &mut TestAppContext) {
     let rig = UiRig::new(cx);
