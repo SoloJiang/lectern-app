@@ -78,6 +78,33 @@ impl Segmented {
     }
 }
 
+/// What the control remembers between frames: the last selection drawn and
+/// whether the slider's current place was reached by a change it saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Selection {
+    selected: usize,
+    animate: bool,
+}
+
+impl Selection {
+    pub(crate) fn new(selected: usize) -> Selection {
+        Selection {
+            selected,
+            animate: false,
+        }
+    }
+
+    /// Records this frame's selection; true once a change has been seen
+    /// (the fade's element then keeps its own state until it ends).
+    pub(crate) fn update(&mut self, selected: usize) -> bool {
+        if selected != self.selected {
+            self.animate = true;
+        }
+        self.selected = selected;
+        self.animate
+    }
+}
+
 impl RenderOnce for Segmented {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         require_ready(cx);
@@ -104,7 +131,14 @@ impl RenderOnce for Segmented {
             .rounded(SLIDER_RADIUS)
             .bg(palette.control_background)
             .shadow_sm();
-        let slider = if reduced {
+        // Under reduced motion the slider fades in on a newly selected
+        // item, not on a mount that is already there (keyed element state
+        // remembers the last selection).
+        let last = window.use_keyed_state(self.id.part("selection"), cx, |_, _| {
+            Selection::new(self.selected)
+        });
+        let fade = reduced && last.update(cx, |last, _| last.update(self.selected));
+        let slider = if fade {
             slider
                 .with_animation(
                     self.id.part_indexed("slider", self.selected),

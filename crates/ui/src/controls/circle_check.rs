@@ -61,6 +61,37 @@ impl CircleCheck {
     }
 }
 
+/// What the control remembers between frames (GPUI keyed element state):
+/// the last `checked` it drew, and whether the current checked run began
+/// with a change it saw. A control mounted already checked draws the end
+/// state at once; only a change from unchecked to checked animates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Mark {
+    checked: bool,
+    animate: bool,
+}
+
+impl Mark {
+    pub(crate) fn new(checked: bool) -> Mark {
+        Mark {
+            checked,
+            animate: false,
+        }
+    }
+
+    /// Records this frame's `checked`; true when the fill and the tick are
+    /// to be drawn through their animations.
+    pub(crate) fn update(&mut self, checked: bool) -> bool {
+        if checked && !self.checked {
+            self.animate = true;
+        } else if !checked {
+            self.animate = false;
+        }
+        self.checked = checked;
+        self.animate
+    }
+}
+
 impl RenderOnce for CircleCheck {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         require_ready(cx);
@@ -70,6 +101,8 @@ impl RenderOnce for CircleCheck {
             ..State::default()
         });
         let checked = self.checked;
+        let mark = window.use_keyed_state(self.id.part("mark"), cx, |_, _| Mark::new(checked));
+        let animate = mark.update(cx, |mark, _| mark.update(checked));
         let mut circle = div()
             .id(self.id.element_id())
             .relative()
@@ -78,29 +111,29 @@ impl RenderOnce for CircleCheck {
             .rounded_full()
             .cursor_default();
         if checked {
-            let fill = div()
-                .absolute()
-                .inset_0()
-                .rounded_full()
-                .bg(palette.accent)
-                .with_animation(
+            let fill = div().absolute().inset_0().rounded_full().bg(palette.accent);
+            let tick = Tick {
+                fraction: 1.0,
+                color: on_accent(),
+            };
+            if animate {
+                let fill = fill.with_animation(
                     CircleCheck::fill_animation_id(&self.id),
                     CHECK_FILL.animation(cx),
                     |fill, t| fill.opacity(t),
                 );
-            let tick = Tick {
-                fraction: 0.0,
-                color: on_accent(),
+                let tick = tick.with_animation(
+                    CircleCheck::stroke_animation_id(&self.id),
+                    CHECK_STROKE.animation(cx),
+                    |tick, t| Tick {
+                        fraction: t,
+                        ..tick
+                    },
+                );
+                circle = circle.child(fill).child(tick);
+            } else {
+                circle = circle.child(fill).child(tick);
             }
-            .with_animation(
-                CircleCheck::stroke_animation_id(&self.id),
-                CHECK_STROKE.animation(cx),
-                |tick, t| Tick {
-                    fraction: t,
-                    ..tick
-                },
-            );
-            circle = circle.child(fill).child(tick);
         } else {
             circle = circle
                 .border(RING_WIDTH)

@@ -21,12 +21,16 @@ mod segmented;
 pub use agent_dot::{Agent, AgentDot};
 pub use button::{Button, ButtonKind, ButtonSize};
 pub use circle_check::CircleCheck;
+#[cfg(test)]
+pub(crate) use circle_check::Mark;
 pub use expander::Expander;
 pub use grouped_list::{GroupedList, Row};
 pub use hint::{Hint, HintFrame};
 pub use loading::{LoadingPhase, Skeleton, loading_phase};
 pub use progress::{Progress, ProgressShape};
 pub use segmented::Segmented;
+#[cfg(test)]
+pub(crate) use segmented::Selection;
 
 use gpui::App;
 

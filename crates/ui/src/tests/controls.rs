@@ -253,6 +253,36 @@ fn circle_check_toggles_from_key_and_click(cx: &mut TestAppContext) {
     );
 }
 
+/// A control mounted already checked draws the end state; only a change
+/// from unchecked to checked animates, and a later check animates again.
+#[test]
+fn circle_check_animates_only_a_change_to_checked() {
+    let mut mounted_checked = crate::controls::Mark::new(true);
+    assert!(!mounted_checked.update(true), "mount: end state at once");
+    assert!(!mounted_checked.update(true), "still no animation");
+    assert!(!mounted_checked.update(false));
+    assert!(mounted_checked.update(true), "a change animates");
+    assert!(
+        mounted_checked.update(true),
+        "and keeps its element while it plays"
+    );
+
+    let mut mounted_unchecked = crate::controls::Mark::new(false);
+    assert!(!mounted_unchecked.update(false));
+    assert!(mounted_unchecked.update(true));
+    assert!(!mounted_unchecked.update(false));
+}
+
+/// The reduced-motion fade of the segmented slider follows the same rule.
+#[test]
+fn segmented_fades_only_a_changed_selection() {
+    let mut selection = crate::controls::Selection::new(1);
+    assert!(!selection.update(1), "mount: no fade");
+    assert!(selection.update(2), "a change fades");
+    assert!(selection.update(2), "and keeps its element while it plays");
+    assert!(selection.update(0));
+}
+
 #[gpui::test]
 fn segmented_slider_continues_from_current_position(cx: &mut TestAppContext) {
     in_render(cx, false, |window, cx| {
