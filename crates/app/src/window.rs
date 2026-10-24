@@ -1,8 +1,9 @@
 //! The skeleton window and the app menu (docs/design/app.md「界面」).
 
 use gpui::{
-    App, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render, TitlebarOptions, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
+    App, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render, Subscription,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div,
+    prelude::*, px, size,
 };
 use lectern_i18n::{Strings, keys};
 
@@ -19,12 +20,23 @@ const HEIGHT: f32 = 520.0;
 
 /// The neutral skeleton of ADR 0017: draws nothing over the system's
 /// window material. Welcome and Overview replace it.
-struct Skeleton {
+pub(crate) struct Skeleton {
     armed: bool,
+    /// `lectern_ui::attach`'s observer: `colors(window, cx)` follows this
+    /// window's appearance for as long as the root view lives.
+    _appearance: Subscription,
+    /// How many frames this view has rendered; the skeleton window tests
+    /// count refreshes with it.
+    #[cfg(test)]
+    pub(crate) renders: usize,
 }
 
 impl Render for Skeleton {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(test)]
+        {
+            self.renders += 1;
+        }
         if !self.armed {
             self.armed = true;
             if cx.try_global::<Startup>().map(Startup::profile) == Some(Profile::Desktop) {
@@ -49,7 +61,17 @@ pub fn open(cx: &mut App) {
         ..Default::default()
     };
     // Opening fails only without a display; there is nothing to fall back to.
-    let _ = cx.open_window(options, |_, cx| cx.new(|_| Skeleton { armed: false }));
+    let _ = cx.open_window(options, |window, cx| {
+        // One observer; `lectern_ui::init` ran before this window
+        // (docs/design/ui.md「对其他 crate 的要求」).
+        let appearance = lectern_ui::attach(window, cx);
+        cx.new(|_| Skeleton {
+            armed: false,
+            _appearance: appearance,
+            #[cfg(test)]
+            renders: 0,
+        })
+    });
     // The test profile has no real frames: release once the window exists.
     if cx.try_global::<Startup>().map(Startup::profile) == Some(Profile::Test) {
         startup::release(cx);

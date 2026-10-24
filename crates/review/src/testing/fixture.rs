@@ -253,7 +253,12 @@ impl SessionFixture {
         }
         repo.write_index(repo.common_dir(), &index);
 
-        let projects = Arc::new(FakeProjects::new(repo.common_dir(), repo.root()));
+        // Ten sub-projects hold the changed files (the overview's
+        // per-package counts of today's changes).
+        let dirs: Vec<String> = (0..10).map(|m| format!("src/m{m:02}")).collect();
+        let dirs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let projects =
+            Arc::new(FakeProjects::new(repo.common_dir(), repo.root()).with_packages(&dirs));
         SessionFixture {
             repo,
             projects,

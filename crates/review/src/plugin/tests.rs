@@ -138,6 +138,7 @@ impl Rig {
         let review = review
             .with_clock(Arc::new(clock.clone()))
             .with_wall_clock(|| NOW)
+            .with_utc_offset(|_| 0)
             .with_repository_config_only();
         let provided = review.provided.clone();
         let kernel = TestKernel::new(review)

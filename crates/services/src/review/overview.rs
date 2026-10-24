@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::Progress;
-use crate::project::ProjectKey;
+use crate::project::{ProjectKey, RelPath};
 use crate::session::SessionKey;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -17,6 +17,13 @@ pub struct Overview {
     pub sessions: Arc<[SessionOverview]>,
     /// 当前 worktree 不属于任何会话的改动。
     pub outside: OutsideCount,
+    /// 当前 worktree 里今天改动的文件按子项目的计数：计数改动集（ADR 0035）里工作区一侧
+    /// stat 的 mtime 落在本地自然日（含今天，与 usage 设计「取整与时间窗口」的日界相同）内的
+    /// 路径，按 `ProjectSnapshot::active.packages` 的 `dir` 最长前缀归到一个子项目，不在任何
+    /// 子项目里的不计。`OutsideCount::Capped` 时为 None（没有改动集）；`packages` 还是
+    /// `Pending`（或 `Unavailable`）时为 None。只列计数不为 0 的子项目，按 `dir` 排序；
+    /// 没有列出的子项目计 0。
+    pub packages: Option<Arc<[(RelPath, u32)]>>,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]

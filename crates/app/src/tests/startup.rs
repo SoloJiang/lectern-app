@@ -5,7 +5,9 @@
 use std::sync::Arc;
 
 use gpui::TestAppContext;
+use lectern_i18n::{Locale, Strings};
 use lectern_logging::EarlyConfig;
+use lectern_ui::Appearance;
 
 use crate::profile::Profile;
 use crate::startup::{self, Started, Startup};
@@ -26,6 +28,10 @@ fn test_profile_releases_once(cx: &mut TestAppContext) {
     let startup = startup(&dir);
     cx.update(|cx| {
         cx.set_global(startup);
+        // The test profile's `ui` (docs/design/ui.md「对其他 crate 的要求」):
+        // the skeleton window's `attach` needs it, `release`'s `ready` is
+        // then a no-op.
+        lectern_ui::init_fixed(cx, Strings::of(Locale::En), Appearance::Light, false);
         window::open(cx);
         let kernel = Arc::as_ptr(&cx.global::<Started>().kernel);
         startup::release(cx);

@@ -1,6 +1,6 @@
 [package]
 name = "lectern-welcome"
-description = "The open-a-project window."
+description = "The open-a-project screen: recent projects and folders discovered from agent sessions."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,30 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "view"
+# The "welcome" and "welcome-discovery" plugins (docs/design/welcome.md「依赖」,
+# ADR 0025).
+plugin = true
+
+[dependencies]
+# Reads and writes `recent.json` and runs the rebuild off the UI thread.
+lectern-executor = { path = "../executor" }
+# `Plugin`, `PluginHandle`, `ServiceRef`, `ServiceSet`, `Staged`.
+lectern-kernel = { path = "../kernel" }
+# Runtime logging (docs/design/welcome.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
+# `dyn Contributions`, `dyn Projects`, `dyn SessionSource` and their data types.
+lectern-services = { path = "../services" }
+# `recent.json`.
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+insta.workspace = true
+lectern-executor = { path = "../executor", features = ["test-support"] }
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `testing::capture` for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
+tempfile.workspace = true
 
 [lints]
 workspace = true
