@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）与「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）已实现，见「实际验证」「与设计的差异」；其余前置条件与第 2、3 步尚未实现。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」；前置条件 D、E、F 与第 3 步（`app` 装配）尚未实现。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -497,11 +497,11 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   | `workspace::CloseWindow` | ⌘W | 全局 | `CloseWindow` |
   | `workspace::Back` | ⌘[ | `Workspace`（屏幕没处理时冒泡到这里） | `PopToBase` |
   | `workspace::Escape` | Esc | `Workspace` | `Escape` |
-  | `workspace::ToggleInspector` | ⌥⌘I | `Workspace > project` | `SetInspector(!inspector)` |
-  | `workspace::ShowConversation` | ⌘\ | `Workspace > project` | `SelectInspectorTab("conversation")` |
+  | `workspace::ToggleInspector` | ⌥⌘I | 全局（原定 `Workspace > project`，见「与设计的差异」第 2 步） | `SetInspector(!inspector)`；没有检查器的屏幕上状态机忽略 |
+  | `workspace::ShowConversation` | ⌘\ | 全局（同上） | `SelectInspectorTab("conversation")`；同上 |
   | `workspace::Command { name }` | 由贡献的 `KeyBindings` 绑定 | 任意 | 代理（「数据流与线程」） |
 
-  KeyContext 的名字：根视图 `Workspace`，有项目时加 `project`；侧栏 `Sidebar`，内容区 `Content`，检查器 `Inspector`，面板 `Panel`，覆盖层 `Overlay`。贡献的屏幕在自己的根元素上设自己的上下文（如 `reader`、`review`），`KeyBindings` 的谓词写成 `Content > reader` 这类；⌘K 等由 `Command` 激活的命令只经 `workspace::Command` 绑定。⌘[ 在编辑时归 `InputState`（file_reader 设计「编辑」），它在 `Content > reader > editing` 上先处理，不会冒泡到这里。
+  KeyContext 的名字：根视图 `Workspace`，有项目时同一个节点上加 `project`；侧栏 `Sidebar`，内容区 `Content`，检查器 `Inspector`，面板 `Panel`，覆盖层 `Overlay`。贡献的屏幕在自己的根元素上设自己的上下文（如 `reader`、`review`），`KeyBindings` 的谓词写成 `Content > reader` 这类；⌘K 等由 `Command` 激活的命令只经 `workspace::Command` 绑定。⌘[ 在编辑时归 `InputState`（file_reader 设计「编辑」），它在 `Content > reader > editing` 上先处理，不会冒泡到这里。
 
 ## 状态与异常
 
@@ -531,7 +531,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   - warn `command without handler`：`command`。error `command activation failed`：`command`、`error`（`PluginError` 的种类）。
   - warn `project opened while a view refused to leave`、warn `project open failed`：`error`（`OpenError` 的种类）。
   - warn `job dropped after shutdown`：`jobs`（计数，队列关闭后累计一次）。
-  - error `leave guard panicked`：`activation`（守卫所属的激活序号）；error `contribution drop panicked`：`kind`、`id`、`activation`。两者都在 `contain` 捕获之后记录，不展开到主线程。 warn `contribution released without a commit`：`kind`、`id`、`activation`（没有 commit 就释放的登记：激活在提交前失败（kernel 已记录），或在 `activate` 之外传了 `None` 登记的，没有人提交它）。
+  - error `leave guard panicked`：`activation`（守卫所属的激活序号）；error `contribution drop panicked`：`kind`、`id`、`activation`；error `contribution closure panicked`（视图工厂、工具栏闭包）：`kind`、`id`、`activation`；error `command handler panicked`：`command`、`activation`。四者都在 `contain` 捕获之后记录，随后用贡献方的 token 调 `ActivationToken::fail`，不展开到主线程。warn `key binding rejected`：`reason`（`context` 或 `keystrokes`：贡献的 `KeyBindings` 里解析不了的一条，其余照常绑定）。 warn `contribution released without a commit`：`kind`、`id`、`activation`（没有 commit 就释放的登记：激活在提交前失败（kernel 已记录），或在 `activate` 之外传了 `None` 登记的，没有人提交它）。
 - 详细级别：debug `command`（`WorkspaceCommand` 的判别名、是否经过守卫、结果 `done` / `refused` / `ignored`）；debug `layer changed`（层、开关）；debug `milestone`（名字、`presented` 的微秒数）；debug `leave guard skipped`（守卫已注销或激活不再 `Live`，按通过处理）；debug `stale guard answer`（答复属于已结束的一轮询问）；debug `leave guard dropped its answer`（守卫没有调用 `done` 就把它 drop，按通过处理）；debug `contribution dropped before it applied`；trace `job`（队列项的来源插件与耗时）。
 - 关联 ID：调用贡献方闭包时恢复登记时取的 `Ctx`（`plugin`、`act`），所以贡献方的记录和本 crate 在那段代码里的记录都带它们；本 crate 自己的状态机代码在 kernel 为 `workspace` 设的作用域之外运行（主线程），记录带 `window`，不带 `plugin`。
 - 不记录：项目路径（`OpenProject` 的参数、窗口状态里的路径）、`prompt_for_paths` 返回的路径、工具栏的标题与副标题、侧栏条目的文字、提示的文字、`Target` 里的会话标识之外的内容（`ReviewTarget`、`ReadTarget` 只记判别名）。用屏幕 ID、贡献 ID、计数和错误种类代替。
@@ -566,7 +566,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
   `app` 在 `open_window` 之后、首帧之前对 Welcome 窗口设 `"welcome"`；之后在 `on_state_changed` 里按 `WindowState::project` 是否有值设 `"project"` 或 `"welcome"`（主线程）。`"project"` 第一次使用、还没有保存过 frame 时，`app` 先把窗口设为 1180 × 760 pt 居中。这是 ADR 0017 允许的首帧前唯一的偏好读取。`frame::record` 与 `FrameTimes` 是 bench 设计「需要其他 crate 提供的接口」已经列出的要求，本 crate 只调用。
 - **E. `app`**：
-  - `startup::release` 里 `lectern_ui::ready(cx)` 之后、`Kernel::start` 之前：`workspace::install(window, deps, cx)`，`WorkspacePlugin::new(host)` 放进 `PluginSet`（`Profile::Desktop` 的表加一行；test profile 不装）。
+  - `startup::release` 里 `lectern_ui::ready(cx)` 之后、`Kernel::start` 之前：`workspace::install(window, deps, cx)`，`WorkspacePlugin::new(host)` 放进 `PluginSet`（`Profile::Desktop` 的表加一行；test profile 不装）。`release` 在骨架窗口的帧回调里运行、窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做（「与设计的差异」第 2 步），`app` 不必换调用位置。
   - `on_reopen` 开好骨架窗口后调 `host.attach`。
   - 屏障放开后在 executor 的 `Background` 任务里读 `app_data()/workspace/window.json`，解析成 `WindowState`（认不出或没有文件时为默认值），调 `host.restore`；`app_data()` 为 None 时不读不写。`on_state_changed` 去抖 500 ms 后在 `Background` 任务里写同一个文件（写临时文件再 `rename`，不建目录以外的任何东西）。读写失败只记 warn（不记路径）。
   - `Quit` 的第 1 步：`host.ask_leave(LeaveScope::App, done)`，`done(false)` 时什么也不做。
@@ -653,6 +653,18 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - `cargo check -p lectern-services -p lectern-workspace`、`just check`、`just deny`、`python3 scripts/check_architecture.py` 通过。
 - `just test -p lectern-services -p lectern-workspace`：150 个测试通过（`services` 99 个不变；`workspace` 51 个，新增 3 个）。`src/tests/registry.rs` 现在 22 个：`late_registration_applies_without_a_commit` 改为 `late_registration_applies_with_its_token`（`started` 里带 token 登记，与 `activate` 里的登记一起应用；`activate` 之外传 `None` 的登记不显示）；`a_late_registration_without_any_commit_is_reported_on_release` 改为 `a_registration_without_a_token_outside_activate_is_reported_on_release`（释放时记 warn）；新增 `late_registration_needs_no_earlier_commit`、`late_registration_inside_started_is_deferred_until_live`（`started` 里登记后阻塞，主线程看到的 token 还是 `Pending`，推迟到 `Tick`）、`late_registration_with_a_dead_token_is_rejected`。
 
+### 第 2 步
+
+根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`（[#235](https://github.com/SoloJiang/lectern-app/pull/235)），在 macOS（arm64，Rust 1.97.0）上运行，叠在 [#232](https://github.com/SoloJiang/lectern-app/pull/232) 与 `ui` 第 2 步（[#233](https://github.com/SoloJiang/lectern-app/pull/233)，`ui::motion`）之上：
+
+- `just check`（含 clippy 与架构检查：32 个 crate，`workspace` 带 `plugin = true`，新增依赖 `gpui`、`futures`、`lectern-i18n`、`lectern-ui`，都不是插件 crate）、`just deny`、`python3 scripts/check_architecture.py` 通过。`git diff origin/main -- Cargo.lock` 只给 `lectern-workspace` 加依赖行，没有新的外部 crate（`futures` 0.3.34 已在锁文件里）。
+- `just test -p lectern-workspace`：72 个测试通过（第 1 步的 51 个不变，新增 21 个）。
+  - `src/tests/view.rs`（18 个 `#[gpui::test]`）：「测试」列出的 `install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`install_inside_the_windows_update_mounts_after_it`（从窗口的更新内部调 `install`，根视图在更新结束后被替换：`app` 的 `release` 正是这样调用的）、`project_home_shows_after_opened`、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`（Esc、`Back` Action、⌘[ 三种触发）、`inspector_toggles_with_alt_cmd_i`（⌥⌘I 两次、⌘\ 切到 conversation）、`inspector_commands_are_ignored_without_an_inspector`、`close_window_asks_the_guard_first`（`simulate_close` 返回 false，拒绝的守卫留住窗口，停用它后 ⌘W 关掉窗口）、`proxy_action_activates_the_command_plugin_and_replays_once`（真实 `Kernel::start`，一个 `Activation::Command` 插件：第一次触发激活并执行一次，第二次直接执行；未知命令和漏了 `handle_command` 的插件各提示一次并记 `command activation failed` / `command without handler`）、`contribution_closures_run_in_the_plugins_scope`（工厂里的记录带 `plugin`、`act`）、`restore_opens_the_last_project`（`started` 之前的 `restore` 等到 `dyn Projects` 到达才 `open`；认不出的 `version` 被忽略）、`state_changes_are_reported`、`record_frames_reports_once_per_scenario`（`After`、`Manual`，第二次 `stop_recording` 不重复报告）、`stale_bindings_fall_through`（第 1 步欠下的：停用的插件绑定的键落到另一个插件在同一个键上的处理函数，测试里全局绑定的 ⌘Q 仍然有效）、`screens_can_be_pushed_twice`（第 1 步欠下的另一半：同一个屏幕压栈两次，工厂被调用两次，弹出一个后不重建），另有 `open_folder_prompts_and_opens_the_chosen_path`（⌘O 打开系统面板，选中的路径变成 `OpenProject`）、`attach_moves_the_workspace_to_a_new_window`（第二个窗口的根视图被替换，导航状态保留）、`ask_leave_answers_through_the_guards`（没有守卫立即 `done(true)`，拒绝的守卫给 `done(false)`）。
+  - `src/tests/semantic.rs`：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 三份 insta 快照（`src/tests/snapshots/`），节点 ID 与角色按「UI 探针的语义节点」表。
+  - `src/tests/logs.rs`：`canary_stays_out_of_workspace_logs` 加上 `restore(WindowState { project: 含金丝雀 })`。
+- 「验收」第 2 步的 `rg` 检查都没有结果：`std::fs|std::process|git2|gix`、`rgb\(|hsla\(|Duration::from_millis`、界面字符串字面量（`'"[A-Z][a-z]+ [a-z]'`，`--glob '!tests*'`）、`eprintln!|println!|log::`；`ui` 设计「视图 crate 接入后的持续检查」的 `rg`（含 `\.font_family\(`、`gpui_component::Button`）也没有结果。
+- 没有验证（`#[gpui::test]` 不画真实的帧：`TestWindow` 的帧请求回调只能从 GPUI 内部触发）：`on_next_frame` 驱动的每帧 `Tick`（测试直接发 `Item::Tick`）、里程碑的 `presented` 时刻、`RecordStop::AnimationsSettled`、面板滑入的视觉效果（`Transition` 的值在测试里不随帧推进）；窗口关闭后点 Dock 图标重开的真实流程（`attach` 只在测试窗口上验证）。这些随第 3 步在 macOS 上手动运行发布构建时检查。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -679,3 +691,20 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - **依赖**：第 1 步只加 `lectern-kernel`、`lectern-services`、`lectern-logging`、`serde`（dev：两者的 `test-support`、`serde_json`）。`gpui`、`lectern-ui`、`lectern-i18n`、`lectern-platform`、`futures`、`insta` 随第 2、3 步。因此本 crate 目前在 Linux 上也编译和测试（`just test` 的默认包集按依赖图算），第 2 步加 `gpui` 后自动退出 Linux 的集合。
 - **载荷类型的检查**：`ui::contrib` 还不存在（`ui` 设计 #218 在写），注册表经构造时注入的 `registry::Payloads`（`accepts(kind, &Payload)`、`share(Payload) -> Option<SharedPayload>`）检查载荷类型并把侧栏条目的载荷换成 `Arc`；第 2 步用 `ui::contrib` 的类型实现它，测试用假类型。
 - **`WorkspaceCommand::SelectInspectorTab` 不查页是否已注册**：页可以晚于命令注册（Conversation 按命令激活），检查器显示空页直到它到达；`ShowSidebarPanel`、`OpenPanel`、`OpenOverlay` 仍要求已注册。
+
+### 第 2 步
+
+- **⌥⌘I、⌘\ 的绑定不带 KeyContext**（「Action 与快捷键」表已改）：设计写 `Workspace > project`。锁定的 GPUI 里 `A > B` 要求 `B` 出现在分发路径最深的那个 KeyContext 上（`KeyBindingContextPredicate::eval_inner` 对右侧只看 `contexts.last()`），而最深的是内容区（`Content`）或屏幕自己的上下文，所以这个谓词在根视图之下永远不成立；而且 GPUI 按谓词匹配到的深度选绑定，没有上下文的绑定按最深算，gpui-component 的调试 inspector（`debug_assertions` 下自动开启）正是这样绑定的 ⌥⌘I，带 `Workspace` 上下文的绑定会被它盖住。两条都改为不带上下文（同为无上下文时后绑定的优先，所以本 crate 的赢）；在 Welcome 和项目主页上状态机本来就忽略这两个命令（`inspector_commands_are_ignored_without_an_inspector`）。根视图的 KeyContext 仍是 `Workspace`，有项目时同一个节点加 `project`，供贡献方的谓词用。
+- **`WorkspaceHost::ask_leave` 经状态机的一轮询问**：`Navigator::ask_leave(scope, done)` 开一轮只报告结果的询问（`Then::Report`），通过时 `done(true)`，任一守卫拒绝时 `done(false)`，没有守卫时立即 `done(true)`；询问期间到达的输入与其他命令一样排队。`Input::AskLeave` 加进状态机的输入。
+- **队列项的新增**（`hub::Item`）：`Started { control, token }`（`started` 把 `KernelControl` 与本插件的 token 交给驱动，驱动用前者激活命令插件、用后者的 `pending()` 守住 `done` 的回复）、`Proxy(name)`（代理 Action 触发）、`Replay { name, token }`（激活成功后的重放，等 `activation_applied` 为 true，token 已 `Dead` 时提示）、`CommandFailed { name, error }`（激活失败的回复）、`AskLeave`、`Restore(WindowState)`（驱动直接设 `restore_inspector`，有路径时按 `OpenProject` 处理，`dyn Projects` 未到时推迟）、`RecordFrames`、`StopRecording`（根视图处理，不进驱动）。`RecordStop` 定义在 `hub` 里，不依赖 GPUI。
+- **`activation_applied` 对没有排过任何登记的激活为 true**：第 1 步写「没有排队的激活为 false」，这会让漏了 `handle_command` 的插件（激活成功、什么也没登记）的重放永远推迟，与「按命令激活」第 4 步「提示一次、不一直等待」冲突。一次激活的 `commit` 都在 `started` 返回之前排队，`done` 在 `started` 返回之后才调用，所以 token 为 `Live` 时 `outstanding` 里没有它的条目就是「全部应用完」。
+- **贡献方闭包 panic 时调 `ActivationToken::fail`**（kernel [#231](https://github.com/SoloJiang/lectern-app/pull/231) 提供）：守卫的 `ask`、命令处理函数、视图工厂与工具栏闭包、载荷的 `Drop` 四处都在 `contain` 捕获后、仍持有准入时调用 `token.fail(PluginError::Panicked(…))`，第 1 步「只记日志、按通过处理」的写法去掉；守卫仍按通过处理（不让用户困在当前视图）。
+- **提示的键**：`Notice::ProjectOpenedWhileAViewRefusedToLeave` 用 `workspace-command-failed` 显示（「界面」只定义了四个键，打开项目也是一个命令）；代理失败的三种情况（激活失败、没有处理函数、重放时 token 已 `Dead`）用同一个键。一次性提示没有计时：`ui` 的 `Hint` 控件在 `ui` 第 3 步，现在提示留到下一个命令或屏幕切换时清掉。
+- **语义节点是数据，不是元素**：`ui::semantic`（`ui` 第 4 步）还没有，本 crate 的 `semantic` 模块按 `ui` 设计的名字和形状定义 `NodeId`、`Role`、`Label`、`State`、`Semantic`，另加 `NodeId::keyed(name, key)`（`workspace.content.screen[review]` 这种形状）和 `Tree` / `Node` / `render`；`Workspace::inspect(cx)` 从导航状态和注册表算出这一帧的节点表（「UI 探针的语义节点」的表），快照测试用它。`ui::semantic` 到位后换成它的类型并用 `semantic(spec, child)` 包住各区域的元素，`inspect` 保留给测试。
+- **帧记录**：`platform::frame` 还没有，`FrameTimes` 暂定义在本 crate（`host` 模块，只有 `presented`），`FrameRecord::frames` 总是空（「已知限制」）。`RecordStop::After` 用 GPUI 的 `background_executor().timer`，`Manual` 等 `stop_recording`，`AnimationsSettled` 每帧看 `motion::active_transitions`。新的记录开始前先把进行中的那次报告出去。本 crate 因此没有加 `lectern-platform` 依赖。
+- **根视图在一个 GPUI 全局里**：`install` 建 `Entity<Workspace>` 放进全局 `Shell`，窗口的根是只渲染它的 `WindowRoot`；`attach` 在新窗口上重做 `replace_root`、`lectern_ui::attach`、`on_window_should_close` 和焦点，已建的贡献视图丢弃、按需重建，注册表与导航状态不动。`WorkspaceHost` 只持有 `Arc<Hub>` 和窗口句柄（`Entity` 不是 `Send`）。`app` 的 `startup::release` 在骨架窗口的下一帧回调里运行，那时 GPUI 正借着这个窗口，`install` 里的 `replace_root` 拿不到第二次借用；所以 `install`、`attach` 先试一次，拿不到就经 `App::defer` 推到这次更新结束时再做（在下一次绘制之前），第 3 步按设计原样在 `release` 里调用即可（`install_inside_the_windows_update_mounts_after_it`）。
+- **`workspace.content.missing` 节点**：基底屏幕没有注册时内容区的那行次要文字（`workspace-screen-missing`）也有一个 `Text` 节点，`Label::key` 是消息键；「UI 探针的语义节点」表没有列它，探针按 `workspace.notice` 的方式读。
+- **队列的传输**：`futures::channel::mpsc::unbounded`，接收端是 `install` 里 `cx.spawn` 的前台任务，设计原文如此；`futures` 加进 `[workspace.dependencies]`（`default-features = false, features = ["std"]`）。`#[gpui::test]` 里 kernel 线程唤醒前台任务，测试调度器只在 `allow_parking` 后接受别的线程的唤醒，所以 `UiRig` 先调 `cx.executor().allow_parking()`。
+- **每帧的 `Tick`**：有推迟的项时根视图用 `window.on_next_frame` 排一个 `Tick`（`request_animation_frame` 只能在绘制阶段调用，不用它；`on_next_frame` 本身就让 GPUI 安排下一帧）。
+- **工具栏的返回按钮和检查器开关**：`ui` 的 `Button`、`Icon` 资源在 `ui` 第 3 步，现在是两个带 `workspace-back` / `workspace-inspector-toggle` 文字的可点击元素；第 3 步后换成 `Button` 加 `Icon::Back` / `Icon::Inspector`。检查器的分段控件同理，现在是一排可点击的页名。
+- **`WorkspacePlugin::new(host: WorkspaceHost)`**：按设计；第 1 步的 `new(Arc<Hub>)` 改为 `cfg(test)` 的 `from_hub`，只给不依赖 GPUI 的测试用。

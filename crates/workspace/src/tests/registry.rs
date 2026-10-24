@@ -38,7 +38,7 @@ fn screens_plugin() -> Contributor {
 #[test]
 fn plugin_manifest_matches_the_design() {
     let rig = Rig::prepared();
-    let manifest = WorkspacePlugin::new(rig.hub.clone()).manifest();
+    let manifest = WorkspacePlugin::from_hub(rig.hub.clone()).manifest();
     assert_eq!(manifest.provides, vec![service::<dyn Contributions>()]);
     assert_eq!(manifest.requires, vec![service::<dyn Projects>()]);
     assert_eq!(manifest.activation, vec![Activation::AfterFirstFrame]);

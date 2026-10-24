@@ -159,6 +159,11 @@ tree-sitter-md = { version = "=0.5.3", default-features = false }
 # GPUI. Only lectern-logging depends on it directly; every other crate logs
 # through lectern-logging's macros. No `max_level_*` feature anywhere.
 log = { version = "0.4.34", default-features = false, features = ["std", "kv"] }
+# lectern-workspace's main-thread queue (docs/design/workspace.md「数据流与线程」):
+# `channel::mpsc::unbounded`, sent from any thread and received by a GPUI
+# foreground task. Already in the release build through GPUI; `std` brings
+# the channel and `StreamExt`, nothing else.
+futures = { version = "0.3", default-features = false, features = ["std"] }
 # Snapshot tests for domain logic (AGENTS.md). Test-only.
 insta = "1.49"
 # Test-only: temporary directories for lectern-platform's tests, and mkfifo in

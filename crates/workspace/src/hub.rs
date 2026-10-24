@@ -1,19 +1,35 @@
 //! The `dyn Contributions` implementation and the main-thread queue's
 //! sending side (docs/design/workspace.md「数据流与线程」). The GPUI-free
-//! part of `WorkspaceHost`: the root view (step 2) wraps it with the window.
+//! part of `WorkspaceHost`: the root view wraps it with the window.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use lectern_kernel::{ActivationToken, Name, PendingGuard, PluginHandle, ServiceRef};
+use lectern_kernel::{
+    ActivationToken, Emitter, KernelControl, Name, PendingGuard, PluginHandle, ServiceRef,
+};
 use lectern_logging::debug;
 use lectern_services::project::{ProjectEvent, Projects};
 use lectern_services::workspace::{
-    CommandHandler, Contribution, Contributions, LeaveGuard, Milestone, Registration, SidebarEntry,
-    WorkspaceCommand,
+    CommandHandler, Contribution, Contributions, LeaveGuard, LeaveScope, Milestone, Registration,
+    SidebarEntry, WorkspaceCommand, WorkspaceEvent,
 };
 
-use crate::nav::AskId;
+use crate::nav::{AskId, Report};
 use crate::registry::{Payloads, Registry, Serial};
+use crate::state::WindowState;
+
+/// When a frame recording ends (`WorkspaceHost::record_frames`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordStop {
+    /// After a fixed time.
+    After(Duration),
+    /// Once every transition in progress has ended
+    /// (`lectern_ui::motion::active_transitions`).
+    AnimationsSettled,
+    /// When the caller calls `stop_recording`.
+    Manual,
+}
 
 /// An item of the main-thread queue.
 pub enum Item {
@@ -32,9 +48,30 @@ pub enum Item {
     /// `dyn Projects`, from `WorkspacePlugin::started`; the commands that
     /// waited for it run then.
     Projects(ServiceRef<dyn Projects>),
+    /// `WorkspacePlugin::started`: the kernel control for the proxied
+    /// commands and the workspace's own token.
+    Started {
+        control: KernelControl,
+        token: ActivationToken,
+    },
+    /// A proxied command's action fired (`workspace::Command { name }`).
+    Proxy(Name),
+    /// `KernelControl::command` activated the plugin declaring `name`:
+    /// replay once its registrations have applied.
+    Replay { name: Name, token: ActivationToken },
+    /// `KernelControl::command` failed; `error` is the error's kind.
+    CommandFailed { name: Name, error: &'static str },
+    /// `WorkspaceHost::ask_leave`.
+    AskLeave { scope: LeaveScope, done: Report },
+    /// `WorkspaceHost::restore`.
+    Restore(WindowState),
+    /// `WorkspaceHost::record_frames`; the root view handles it.
+    RecordFrames { scenario: Name, stop: RecordStop },
+    /// `WorkspaceHost::stop_recording`; the root view handles it.
+    StopRecording,
     /// Nothing to do: retry what was deferred (a pending token, a command
-    /// waiting for `dyn Projects`). The root view sends one per frame while
-    /// something is deferred.
+    /// waiting for `dyn Projects`, a replay waiting for its registrations).
+    /// The root view sends one per frame while something is deferred.
     Tick,
 }
 
@@ -52,6 +89,22 @@ impl std::fmt::Debug for Item {
             Item::Project(event) => f.debug_tuple("Project").field(event).finish(),
             Item::Milestone(milestone) => f.debug_tuple("Milestone").field(milestone).finish(),
             Item::Projects(_) => f.write_str("Projects"),
+            Item::Started { .. } => f.write_str("Started"),
+            Item::Proxy(name) => f.debug_tuple("Proxy").field(name).finish(),
+            Item::Replay { name, .. } => f.debug_tuple("Replay").field(name).finish(),
+            Item::CommandFailed { name, error } => f
+                .debug_struct("CommandFailed")
+                .field("name", name)
+                .field("error", error)
+                .finish(),
+            Item::AskLeave { scope, .. } => f.debug_tuple("AskLeave").field(scope).finish(),
+            Item::Restore(state) => f.debug_tuple("Restore").field(state).finish(),
+            Item::RecordFrames { scenario, stop } => f
+                .debug_struct("RecordFrames")
+                .field("scenario", scenario)
+                .field("stop", stop)
+                .finish(),
+            Item::StopRecording => f.write_str("StopRecording"),
             Item::Tick => f.write_str("Tick"),
         }
     }
@@ -73,18 +126,26 @@ impl std::fmt::Debug for Queued {
     }
 }
 
-/// The queue's sending side: wakes the main thread (step 2: a
+/// The queue's sending side: wakes the main thread (`install` makes it a
 /// `futures::channel::mpsc` sender whose receiver is a GPUI foreground task).
 pub type Sender = Arc<dyn Fn(Queued) + Send + Sync>;
+
+/// What `WorkspacePlugin::started` leaves with the hub.
+#[derive(Default)]
+struct Plugin {
+    /// The workspace plugin's own activation token: its `pending()` guards
+    /// commands and milestones in the queue.
+    token: Option<ActivationToken>,
+    /// Emits `WorkspaceEvent`s.
+    emitter: Option<Emitter>,
+}
 
 /// The process-wide, thread-safe part of the workspace: the registry and the
 /// queue. `WorkspacePlugin` provides it as `dyn Contributions`.
 pub struct Hub {
     registry: Arc<Registry>,
     sender: Sender,
-    /// The workspace plugin's own activation token, from `started`: its
-    /// `pending()` guards commands and milestones in the queue.
-    own: Mutex<Option<ActivationToken>>,
+    plugin: Mutex<Plugin>,
 }
 
 impl Hub {
@@ -92,7 +153,7 @@ impl Hub {
         Arc::new(Hub {
             registry: Registry::new(payloads, sender.clone()),
             sender,
-            own: Mutex::new(None),
+            plugin: Mutex::new(Plugin::default()),
         })
     }
 
@@ -104,17 +165,48 @@ impl Hub {
         &self.sender
     }
 
-    /// `WorkspacePlugin::started`: keeps the activation's token.
+    /// `WorkspacePlugin::started`: keeps the activation's token and emitter
+    /// and sends the kernel control to the main thread.
     pub(crate) fn started(&self, handle: &PluginHandle) {
-        *self.own.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle.token());
+        {
+            let mut plugin = self.plugin.lock().unwrap_or_else(|e| e.into_inner());
+            plugin.token = Some(handle.token());
+            plugin.emitter = Some(handle.emitter());
+        }
+        self.enqueue(Item::Started {
+            control: handle.control(),
+            token: handle.token(),
+        });
+    }
+
+    /// The workspace plugin's own token, from `started`.
+    pub fn token(&self) -> Option<ActivationToken> {
+        self.plugin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .token
+            .clone()
+    }
+
+    /// Emits a `WorkspaceEvent` through the plugin's emitter; nothing before
+    /// `started` (no listener can exist yet).
+    pub fn emit(&self, event: WorkspaceEvent) {
+        let emitter = self
+            .plugin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .emitter
+            .clone();
+        if let Some(emitter) = emitter {
+            emitter.emit(event);
+        }
     }
 
     /// The workspace's own pending guard, or None before `started` (nothing to
     /// guard with yet) or after `shutdown` (the queue no longer runs: the
     /// item is dropped).
     fn pending(&self) -> Result<Option<PendingGuard>, ()> {
-        let own = self.own.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        match own {
+        match self.token() {
             None => Ok(None),
             Some(token) => token.pending().map(Some).ok_or(()),
         }

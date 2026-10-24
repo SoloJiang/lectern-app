@@ -8,7 +8,7 @@
 //! that a command ends in. The results come back as [`Effect`]s; the driver
 //! runs them on the main thread, the tests read them.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use lectern_kernel::Name;
@@ -140,7 +140,16 @@ pub struct AskId(pub u64);
 pub enum Input {
     Command(WorkspaceCommand),
     Project(ProjectEvent),
+    /// `WorkspaceHost::ask_leave`: a round whose only outcome is the answer
+    /// to the report numbered `report`.
+    AskLeave {
+        scope: LeaveScope,
+        report: u64,
+    },
 }
+
+/// `WorkspaceHost::ask_leave`'s `done`.
+pub type Report = Box<dyn FnOnce(bool) + Send>;
 
 /// What runs once every guard of a round allowed it.
 #[derive(Debug)]
@@ -155,6 +164,8 @@ enum Then {
         key: ProjectKey,
         path: Option<PathBuf>,
     },
+    /// Answer the report (`ask_leave`); nothing else changes.
+    Report(u64),
 }
 
 impl Then {
@@ -167,6 +178,7 @@ impl Then {
             Then::PopToBase => "pop_to_base",
             Then::CloseWindow => "close_window",
             Then::SwitchProject { .. } => "switch_project",
+            Then::Report(_) => "ask_leave",
         }
     }
 }
@@ -196,6 +208,9 @@ pub struct Navigator {
     /// Inputs that arrived during a guard round, run in order after it.
     queued: VecDeque<Input>,
     next_ask: u64,
+    /// The `done`s of `ask_leave` rounds not yet answered, by report number.
+    reports: HashMap<u64, Report>,
+    next_report: u64,
 }
 
 impl Navigator {
@@ -208,6 +223,8 @@ impl Navigator {
             asking: None,
             queued: VecDeque::new(),
             next_ask: 1,
+            reports: HashMap::new(),
+            next_report: 1,
         }
     }
 
@@ -264,6 +281,22 @@ impl Navigator {
         self.input(Input::Project(event.clone()), env, out);
     }
 
+    /// `WorkspaceHost::ask_leave`: asks the guards for `scope` and answers
+    /// `done` with the verdict; `done(true)` at once when there is no guard.
+    /// Queues behind a round in progress like any other input.
+    pub fn ask_leave(
+        &mut self,
+        scope: LeaveScope,
+        done: Report,
+        env: &dyn Env,
+        out: &mut Vec<Effect>,
+    ) {
+        let report = self.next_report;
+        self.next_report += 1;
+        self.reports.insert(report, done);
+        self.input(Input::AskLeave { scope, report }, env, out);
+    }
+
     fn input(&mut self, input: Input, env: &dyn Env, out: &mut Vec<Effect>) {
         if self.asking.is_some() {
             self.queued.push_back(input);
@@ -276,6 +309,7 @@ impl Navigator {
         match input {
             Input::Command(command) => self.command(command, env, out),
             Input::Project(event) => self.project(&event, env, out),
+            Input::AskLeave { scope, report } => self.ask(scope, Then::Report(report), env, out),
         }
     }
 
@@ -309,11 +343,15 @@ impl Navigator {
         if !allowed {
             let asking = self.asking.take().expect("a round is in progress");
             debug!("command"; name = asking.then.name(), guarded = true, result = "refused");
-            if let Then::SwitchProject { .. } = asking.then {
-                warn!("project opened while a view refused to leave"; window = self.window.0);
-                out.push(Effect::Notice(
-                    Notice::ProjectOpenedWhileAViewRefusedToLeave,
-                ));
+            match asking.then {
+                Then::SwitchProject { .. } => {
+                    warn!("project opened while a view refused to leave"; window = self.window.0);
+                    out.push(Effect::Notice(
+                        Notice::ProjectOpenedWhileAViewRefusedToLeave,
+                    ));
+                }
+                Then::Report(report) => self.report(report, false),
+                _ => {}
             }
             self.drain(env, out);
             return;
@@ -385,6 +423,15 @@ impl Navigator {
                 }));
             }
             Then::SwitchProject { key, path } => self.switch_project(key, path, env, out),
+            Then::Report(report) => self.report(report, true),
+        }
+    }
+
+    /// Answers an `ask_leave` round. The `done` is `app`'s, not a
+    /// contributor's, so it runs as it is.
+    fn report(&mut self, report: u64, allowed: bool) {
+        if let Some(done) = self.reports.remove(&report) {
+            done(allowed);
         }
     }
 

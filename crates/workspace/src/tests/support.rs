@@ -474,7 +474,7 @@ impl Rig {
         let driver = Driver::new(WINDOW, hub.registry().clone(), queue.sender());
         let projects = Arc::new(FakeProjects::default());
         let projects_service: Arc<dyn Projects> = projects.clone();
-        let kernel = TestKernel::new(WorkspacePlugin::new(hub.clone()))
+        let kernel = TestKernel::new(WorkspacePlugin::from_hub(hub.clone()))
             .mock::<dyn Projects>(projects_service);
         Rig {
             queue,

@@ -11,6 +11,7 @@ use lectern_logging::debug;
 use lectern_services::project::{ProjectEvent, Projects};
 use lectern_services::workspace::Contributions;
 
+use crate::host::WorkspaceHost;
 use crate::hub::{Hub, Item, Queued};
 
 /// Built by `app` and put in the `PluginSet` as "workspace".
@@ -19,8 +20,16 @@ pub struct WorkspacePlugin {
 }
 
 impl WorkspacePlugin {
-    /// Does no IO.
-    pub fn new(hub: Arc<Hub>) -> WorkspacePlugin {
+    /// Does no IO. `host` is what `install` returned.
+    pub fn new(host: WorkspaceHost) -> WorkspacePlugin {
+        WorkspacePlugin {
+            hub: host.hub().clone(),
+        }
+    }
+
+    /// The GPUI-free tests: a plugin over a hub without a window.
+    #[cfg(test)]
+    pub(crate) fn from_hub(hub: Arc<Hub>) -> WorkspacePlugin {
         WorkspacePlugin { hub }
     }
 }

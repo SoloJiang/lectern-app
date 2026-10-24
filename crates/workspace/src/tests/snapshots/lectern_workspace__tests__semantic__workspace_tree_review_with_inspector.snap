@@ -1,0 +1,15 @@
+---
+source: crates/workspace/src/tests/semantic.rs
+expression: rig.tree(cx)
+---
+workspace.toolbar [Toolbar] screen=review depth=1
+  workspace.toolbar.back [Button] label=workspace-back
+  workspace.toolbar.inspector [Toggle] label=workspace-inspector-toggle checked=true
+workspace.content [Group] base=project column=reading
+  workspace.content.screen[project-home] [Group] index=0
+  workspace.content.screen[review] [Group] index=1
+workspace.inspector [Panel] tab=files
+  workspace.inspector.tabs [TabBar]
+    workspace.inspector.tab[files] [Tab] label=workspace-inspector-toggle selected
+    workspace.inspector.tab[conversation] [Tab] label=workspace-inspector-toggle
+workspace.bar [Group]

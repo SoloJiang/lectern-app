@@ -1,0 +1,9 @@
+---
+source: crates/workspace/src/tests/semantic.rs
+expression: rig.tree(cx)
+---
+workspace.sidebar [Sidebar] panel=project
+  workspace.sidebar.panel[project] [Group]
+workspace.toolbar [Toolbar] screen=project-home depth=0
+workspace.content [Group] base=project column=reading
+  workspace.content.screen[project-home] [Group] index=0
