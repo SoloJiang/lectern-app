@@ -195,8 +195,11 @@ impl Workspace {
         self.apply(effects, Some(window), cx);
     }
 
-    /// `Item::Tick`: retries the deferred items.
-    fn tick(&mut self, cx: &mut Context<Self>) {
+    /// `Item::Tick` from the next-frame callback: retries the deferred
+    /// items. The callback's window is passed on: GPUI runs the callback
+    /// with the window leased, so reaching it through its handle would fail
+    /// and the next tick would never be armed.
+    fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.tick_scheduled = false;
         let mut effects = Vec::new();
         self.driver.handle(
@@ -206,7 +209,7 @@ impl Workspace {
             },
             &mut effects,
         );
-        self.apply(effects, None, cx);
+        self.apply(effects, Some(window), cx);
     }
 
     /// Runs the driver's effects; `window` is the current window when the
@@ -259,11 +262,12 @@ impl Workspace {
             }
         }
         if self.driver.deferred() > 0 && !self.tick_scheduled {
-            self.tick_scheduled = true;
             let this = cx.weak_entity();
-            self.with_window(window, cx, move |window, _| {
-                window.on_next_frame(move |_, cx| {
-                    let _ = this.update(cx, |workspace, cx| workspace.tick(cx));
+            // Armed only when the frame callback was registered; otherwise a
+            // later `apply` tries again.
+            self.tick_scheduled = self.with_window(window, cx, move |window, _| {
+                window.on_next_frame(move |window, cx| {
+                    let _ = this.update(cx, |workspace, cx| workspace.tick(window, cx));
                 });
             });
         }
@@ -271,21 +275,23 @@ impl Workspace {
     }
 
     /// Runs `f` on the current window, or on the bound window through its
-    /// handle. Nothing happens without a window.
+    /// handle. Returns whether `f` ran: not without a window, nor while the
+    /// bound window is leased elsewhere (GPUI refuses a nested lease).
     fn with_window(
         &self,
         window: Option<&mut Window>,
         cx: &mut Context<Self>,
         f: impl FnOnce(&mut Window, &mut App),
-    ) {
+    ) -> bool {
         match window {
-            Some(window) => f(window, cx),
-            None => {
-                if let Some(handle) = self.window {
-                    // A closed window has nothing to do.
-                    let _ = handle.update(cx, |_, window, cx| f(window, cx));
-                }
+            Some(window) => {
+                f(window, cx);
+                true
             }
+            None => match self.window {
+                Some(handle) => handle.update(cx, |_, window, cx| f(window, cx)).is_ok(),
+                None => false,
+            },
         }
     }
 
