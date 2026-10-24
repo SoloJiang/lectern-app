@@ -136,6 +136,14 @@ fn all_colors(palette: &Palette) -> Vec<(&'static str, Hsla)> {
         ),
         ("diff_added_background", palette.diff_added_background),
         ("diff_removed_background", palette.diff_removed_background),
+        (
+            "diff_added_inline_background",
+            palette.diff_added_inline_background,
+        ),
+        (
+            "diff_removed_inline_background",
+            palette.diff_removed_inline_background,
+        ),
         ("agent_claude", palette.agent_claude),
         ("agent_codex", palette.agent_codex),
     ];
@@ -146,12 +154,12 @@ fn all_colors(palette: &Palette) -> Vec<(&'static str, Hsla)> {
 }
 
 #[test]
-fn palette_builtin_has_27_colors_with_alpha_in_range() {
+fn palette_builtin_has_29_colors_with_alpha_in_range() {
     for appearance in Appearance::ALL {
         let palette = Palette::builtin(appearance);
         assert_eq!(palette.appearance, appearance);
         let colors = all_colors(&palette);
-        assert_eq!(colors.len(), 27);
+        assert_eq!(colors.len(), 29);
         for (name, color) in colors {
             assert!(
                 (0.0..=1.0).contains(&color.a) && (0.0..=1.0).contains(&color.l),
@@ -167,18 +175,36 @@ fn palette_builtin_has_27_colors_with_alpha_in_range() {
 
 #[test]
 fn palette_builtin_diff_backgrounds_match_the_hand_composite() {
-    for (appearance, opacity) in [(Appearance::Light, 0.12), (Appearance::Dark, 0.18)] {
+    // (appearance, line opacity, word-level opacity): review_view.md F.
+    for (appearance, opacity, inline_opacity) in [
+        (Appearance::Light, 0.12, 0.28),
+        (Appearance::Dark, 0.18, 0.36),
+    ] {
         let palette = Palette::builtin(appearance);
-        for (name, actual, source) in [
+        for (name, actual, source, opacity) in [
             (
                 "added",
                 palette.diff_added_background,
                 palette.system(SystemColor::Green),
+                opacity,
             ),
             (
                 "removed",
                 palette.diff_removed_background,
                 palette.system(SystemColor::Red),
+                opacity,
+            ),
+            (
+                "added inline",
+                palette.diff_added_inline_background,
+                palette.system(SystemColor::Green),
+                inline_opacity,
+            ),
+            (
+                "removed inline",
+                palette.diff_removed_inline_background,
+                palette.system(SystemColor::Red),
+                inline_opacity,
             ),
         ] {
             let expected = composite(palette.control_background, source.alpha(opacity));
@@ -192,6 +218,118 @@ fn palette_builtin_diff_backgrounds_match_the_hand_composite() {
             assert_eq!(
                 actual,
                 rgb(over(palette.control_background, source, opacity))
+            );
+        }
+    }
+}
+
+#[test]
+fn palette_builtin_diff_inline_is_one_notch_deeper() {
+    // The word-level colour is farther from `control_background` than the
+    // line colour of the same side, so it shows on top of it.
+    for appearance in Appearance::ALL {
+        let palette = Palette::builtin(appearance);
+        let base = rgb(palette.control_background);
+        for (name, line, inline) in [
+            (
+                "added",
+                palette.diff_added_background,
+                palette.diff_added_inline_background,
+            ),
+            (
+                "removed",
+                palette.diff_removed_background,
+                palette.diff_removed_inline_background,
+            ),
+        ] {
+            assert_eq!(inline.a, 1.0, "{appearance:?} {name}: opaque");
+            let (line_distance, inline_distance) =
+                (delta_e(base, rgb(line)), delta_e(base, rgb(inline)));
+            assert!(
+                inline_distance > line_distance * 1.5,
+                "{appearance:?} {name}: ΔE {inline_distance} vs {line_distance}"
+            );
+        }
+    }
+}
+
+#[test]
+fn palette_builtin_label_contrast_on_diff_backgrounds_is_at_least_4_5() {
+    // `label` is the colour of every diff line without a token colour, also
+    // under the word-level highlight; WCAG 2 AA for body text. The darkest
+    // case, the dark inline green, is 6.0.
+    for appearance in Appearance::ALL {
+        let palette = Palette::builtin(appearance);
+        for (name, background) in [
+            ("added", palette.diff_added_background),
+            ("removed", palette.diff_removed_background),
+            ("added inline", palette.diff_added_inline_background),
+            ("removed inline", palette.diff_removed_inline_background),
+        ] {
+            let label = composite(background, palette.label);
+            let ratio = contrast(label, rgb(background));
+            assert!(ratio >= 4.5, "{appearance:?} {name}: {ratio}");
+        }
+    }
+}
+
+/// The system-colour path (`ready`, a change notification) derives the four
+/// diff backgrounds from the colours it was given, with the same opacities
+/// as the built-in table.
+#[test]
+fn palette_from_system_derives_the_diff_backgrounds() {
+    use lectern_platform::appearance::{SYSTEM_COLOR_COUNT, Srgba, SystemColors};
+    let channel = |r, g, b| Srgba { r, g, b, a: 1.0 };
+    let grey = channel(0.5, 0.5, 0.5);
+    let mut system = [grey; SYSTEM_COLOR_COUNT];
+    system[SystemColor::Green as usize] = channel(0.0, 1.0, 0.0);
+    system[SystemColor::Red as usize] = channel(1.0, 0.0, 0.0);
+    let colors = SystemColors {
+        label: grey,
+        secondary_label: grey,
+        tertiary_label: grey,
+        separator: grey,
+        window_background: grey,
+        control_background: grey,
+        under_page_background: grey,
+        accent: grey,
+        selected_content_background: grey,
+        unemphasized_selected_content_background: grey,
+        system,
+        accent_available: true,
+    };
+    for (appearance, opacity, inline_opacity) in [
+        (Appearance::Light, 0.12, 0.28),
+        (Appearance::Dark, 0.18, 0.36),
+    ] {
+        let palette = Palette::from_system(appearance, &colors);
+        // Over mid grey the source's channel gains, the other two fade.
+        for (name, actual, opacity, hot, cold) in [
+            ("added", palette.diff_added_background, opacity, 1, 0),
+            ("removed", palette.diff_removed_background, opacity, 0, 1),
+            (
+                "added inline",
+                palette.diff_added_inline_background,
+                inline_opacity,
+                1,
+                0,
+            ),
+            (
+                "removed inline",
+                palette.diff_removed_inline_background,
+                inline_opacity,
+                0,
+                1,
+            ),
+        ] {
+            let actual = rgb(actual);
+            assert!(
+                (actual[hot] - (0.5 * (1.0 - opacity) + opacity)).abs() < 1e-3,
+                "{appearance:?} {name}: {actual:?}"
+            );
+            assert!(
+                (actual[cold] - 0.5 * (1.0 - opacity)).abs() < 1e-3,
+                "{appearance:?} {name}: {actual:?}"
             );
         }
     }

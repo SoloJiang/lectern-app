@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 与第 1 步的 `ui/*` 基准在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步尚未实现。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 与第 1 步的 `ui/*` 基准在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步尚未实现。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -103,6 +103,9 @@ pub struct Palette {
     // 派生：系统绿 / 红按本外观的透明度叠出的 diff 底色（交互规范「视觉」的「淡底色」）
     pub diff_added_background: Hsla,
     pub diff_removed_background: Hsla,
+    // 派生：同样的两个来源再深一档，供行内的词级差异叠在上面（`review_view` 前置条件 F）
+    pub diff_added_inline_background: Hsla,
+    pub diff_removed_inline_background: Hsla,
     // 唯一的自定义颜色（ADR 0015）：agent 标识
     pub agent_claude: Hsla,
     pub agent_codex: Hsla,
@@ -610,8 +613,8 @@ pub mod semantic {
 
 ## 数据结构
 
-- `Palette`：每个外观一份，`init` 时建两份，`platform` 通知时整份替换，每份 27 个 `Hsla`（432 字节），放在一个 GPUI 全局 `UiState` 里，连同 `Strings`、减弱动态效果标志、`accent_follows_system`、`MonoMetrics` 的缓存（≤ 4 项）和 `platform::appearance::Watch`。`UiState` 固定大小，不随运行增长。
-- 内置的系统色表：`src/palette/builtin.rs`，两个外观各 27 项，值是 `platform::appearance::system_colors` 在 macOS 27.0.1 上读到的 sRGB 分量（HIG「Color」页面只发布 13 个系统色、没有语义色，见「与设计的差异」），文件头写明来源与读取日期。用途：`platform` 返回 None 时（Linux 的 `cargo check`、headless、测试、系统接口失败），以及测试的参照。`init_fixed` 只用这张表。`diff_added_background` / `diff_removed_background`：`system(Green)` / `system(Red)` 在浅色下 12% 透明度、深色下 18% 透明度叠在 `control_background` 上，预先算好。
+- `Palette`：每个外观一份，`init` 时建两份，`platform` 通知时整份替换，每份 29 个 `Hsla`（464 字节），放在一个 GPUI 全局 `UiState` 里，连同 `Strings`、减弱动态效果标志、`accent_follows_system`、`MonoMetrics` 的缓存（≤ 4 项）和 `platform::appearance::Watch`。`UiState` 固定大小，不随运行增长。
+- 内置的系统色表：`src/palette/builtin.rs`，两个外观各 29 项（含派生的 diff 底色与 agent 色，内置表本身只存系统读数的分量），值是 `platform::appearance::system_colors` 在 macOS 27.0.1 上读到的 sRGB 分量（HIG「Color」页面只发布 13 个系统色、没有语义色，见「与设计的差异」），文件头写明来源与读取日期。用途：`platform` 返回 None 时（Linux 的 `cargo check`、headless、测试、系统接口失败），以及测试的参照。`init_fixed` 只用这张表。`diff_added_background` / `diff_removed_background`：`system(Green)` / `system(Red)` 在浅色下 12% 透明度、深色下 18% 透明度叠在 `control_background` 上，预先算好。`diff_added_inline_background` / `diff_removed_inline_background`：同样的两个来源在浅色下 28%、深色下 36% 透明度叠在 `control_background` 上，比行底色深一档；内置表与系统色两条路径都经同一个 `Palette::from_system` 给出，所以读到系统色之后它们随 `system(Green)` / `system(Red)` 一起更新。
 - agent 标识色：浅 `#D9790A` / 深 `#C77A1A`（Claude Code），浅 `#5856D6` / 深 `#6260D8`（Codex），来自交互规范「视觉」；不从系统读。
 - `Transition`：`from`、`to`、`start`、`motion`、当前值、弹簧的速度、`reduced` 快照（开始时的值，过渡中途不换）、是否计入计数，共 56 字节，由视图持有，不可 `Clone`（drop 时要减计数）。
 - 贝塞尔求值：`Easing::eval` 对 `CubicBezier` 用牛顿迭代求 x(t)=进度 的 t，再取 y(t)；不建查表，每次调用常数时间（≤ 8 次迭代）。
@@ -630,7 +633,7 @@ pub mod semantic {
 
 | 项 | 影响 | 约束 |
 |---|---|---|
-| 冷启动到首帧 < 20 ms | `init` 在首帧前运行 | ≤ 300 µs：一次 `NSWorkspace` 读取、两份内置表的换算（54 个颜色）、设全局、登记通知。系统色的读取（约 70 次 `NSColor` 读取与换算，本进程第一次约 2 ms）在 `ready`，首帧之后。骨架窗口的 `attach` 在 `open_window` 的回调里，只登记一个观察者，不在这项基准里。不建线程、不读文件、不解析任何东西。`gpui_component::init`（运行时解析两份内嵌 JSON）放在 `ready`，首帧之后 |
+| 冷启动到首帧 < 20 ms | `init` 在首帧前运行 | ≤ 300 µs：一次 `NSWorkspace` 读取、两份内置表的换算（58 个颜色）、设全局、登记通知。系统色的读取（约 70 次 `NSColor` 读取与换算，本进程第一次约 2 ms）在 `ready`，首帧之后。骨架窗口的 `attach` 在 `open_window` 的回调里，只登记一个观察者，不在这项基准里。不建线程、不读文件、不解析任何东西。`gpui_component::init`（运行时解析两份内嵌 JSON）放在 `ready`，首帧之后 |
 | 空闲内存（空窗口）< 60 MB | `UiState` | < 8 KiB；`gpui_component::init` 建的主题全局与图标资源按 `ui/idle_memory` 实测，预期 < 1 MB，作为 `ui` 的份额写进 bench 的预算表 |
 | 滚动与输入 120 fps | 每帧的查找与动画 | `colors`、`code_style`、`Transition::tick` 都是 O(1)、不分配；动画只改位移、透明度、裁剪（ADR 0015）。动画期间帧的工作时间 ≤ 8.3 ms 由 `bench` 的 `app/animation_frames` 在 `workspace` 接入后判定（[bench 设计](bench.md)的 `frames` 应答） |
 | 滚动与输入 120 fps（探针关闭时） | 每个 `semantic` 包装元素的 prepaint | 一次 `AtomicBool` 的 Relaxed 读，≤ 2 ns（`ui/semantic_disarmed`）；不分配 |
@@ -695,7 +698,7 @@ pub mod semantic {
   - `hint_*`：`is_expired` 在 `duration` 加 `HOVER_OUT` 的淡出过后为 true（见「与设计的差异」第 3 步）；再次 `new` 同一个 ID 从新的 `shown_at` 计时；`frame_when` 的到达、停留、淡出三段与减弱动态效果下的零位移。
   - `node_id_*`：格式、转义、`child`；调试构建下非法的 `view` panic。
   - `code_colors_*`：对内置表的两个外观，五种颜色两两之间在正常、红色盲（protanopia）、绿色盲（deuteranopia）三种模拟（Viénot 1999 的 3×3 矩阵，在测试里写出）下的 ΔE（CIE76）≥ 12；每种与 `control_background` 的对比度（WCAG 2 的公式）≥ 3:1。`code_styles` 的两个外观各一份 insta 快照。
-  - `palette_builtin_*`：内置表每个颜色的透明度在 0..=1、`diff_*_background` 的叠加结果与手算一致；两个外观的 `label` 与 `window_background` 对比度 ≥ 7:1。
+  - `palette_builtin_*`：内置表每个颜色的透明度在 0..=1、四个 `diff_*_background` 的叠加结果与手算一致；词级差异底色比同侧的行底色离 `control_background` 更远（ΔE 至少 1.5 倍）；两个外观的 `label` 与 `window_background` 对比度 ≥ 7:1；`label` 在四个 diff 底色上的对比度 ≥ 4.5:1（WCAG 2 AA，最小值是深色下的词级绿色 6.0）。
   - `text_*`：`Text::verbatim` 接受 `Arc<str>` 和 `String`；`compile_fail` 文档测试确认 `Text::verbatim("literal")`、`Text::key(&strings, "literal")` 和 `contrib::ToolbarItems { title: "literal", … }` 不编译（`just doctest`）；`Button::new(id, "literal")` 的那条随第 3 步的 `Button` 加入。
 - `#[gpui::test]`（`TestAppContext`，`init_fixed`）：
   - `appearance_change_swaps_palette`：模拟窗口外观从浅到深（经 `testing::simulate_appearance_change`，见「与设计的差异」），`colors` 返回另一套，gpui-component 的主题跟着切到深色，窗口被刷新一次。
@@ -834,6 +837,11 @@ pub mod semantic {
 - 验收的三条 `rg`（时长、颜色、IO）与 `rg 'set_reduce_motion'` 都没有结果；`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果。
 - 没有做：每个控件的语义节点快照（要 `Recorder`，随第 4 步）；`app` 的 `with_assets(IconAssets)` 在 `app` 的接入 PR；「性能」没有列控件的基准，本步不加。手动的视觉检查（按钮高度、分组列表、分段控件的滑块）随第一个使用这些控件的屏幕一起做。
 
+`Palette` 的词级差异底色（`ui/palette-diff-inline`，`review_view` 前置条件 F，macOS，Apple 芯片）：
+
+- `just test -p lectern-ui`：57 个测试通过，新增 `palette_from_system_derives_the_diff_backgrounds`（系统色路径）、`palette_builtin_diff_inline_is_one_notch_deeper`、`palette_builtin_label_contrast_on_diff_backgrounds_is_at_least_4_5`，`palette_builtin_diff_backgrounds_match_the_hand_composite` 与 `palette_builtin_has_29_colors_with_alpha_in_range` 扩到四个 diff 底色。
+- `just check`、`just deny`、`just doctest`（`lectern-ui` 的 4 个 `compile_fail` 仍通过）通过；`just bench ui/`：`ui/transition_tick` 中位数 55 ns（预算 ≤ 100 ns，noisy）、`ui/bezier_eval` 11 ns（≤ 50 ns），本 PR 不影响它们。
+
 ## 与设计的差异
 
 第 1 步：
@@ -875,3 +883,8 @@ pub mod semantic {
 - `Row` 的悬停过渡放在 GPUI 的 keyed element state（`window.use_keyed_state`）里，与 gpui-component 的 `Button` 放焦点句柄的做法相同：`RenderOnce` 元素每帧重建，状态要跨帧。`on_hover` 的回调对 `Transition` 调 `go`（`HOVER_IN` / `HOVER_OUT`）再 `window.refresh()`；render 里 `tick`，背景是 `label` 的 6% × 当前值。选中行文字用 `on_accent()`（`selected_content_background` 上的白字）。
 - `Hint` 的到期是 `duration` 加 `HOVER_OUT` 的淡出：原文「`duration` 后用 `HOVER_OUT` 淡出并由调用方 drop」，`is_expired` 在淡出结束后才为 true，否则调用方在淡出开始时就会 drop 它。位移用绝对定位的 `top`（`TOP + offset`），GPUI 的 `div` 没有 translate；绝对定位只动它自己，不触发兄弟重排。显示期间每帧 `request_animation_frame`：调用方本来就每帧问 `is_expired`，不另加帧；停留段也在请求帧，记为已知限制（一次提示 ≈ 2.7 s，少见）。时长常量 `HINT_DURATION`、`LOADING_SKELETON_AT`、`LOADING_PROGRESS_AT` 放在 `motion`，验收的 `rg` 才能不放过控件文件。
 - 图标名的对应：`Clone` → Lucide `copy`，`Back` / `Forward` → `arrow-left` / `arrow-right`，`Close` 与 `Inspector` 是 gpui-kit-assets 自带的 `close.svg`、`inspector.svg`，其余同名。`Icon` 实现 gpui-component 的 `IconNamed`，所以 `Button::icon(Icon)` 走它的 `Icon` 元素，`IconName` 不暴露。`icon_assets!` 的结构体不能带文档注释，文档在 `lib.rs` 的再导出上。
+
+词级差异底色（`review_view` 前置条件 F，[#238](https://github.com/SoloJiang/lectern-app/pull/238)）：
+
+- `Palette` 多两个字段 `diff_added_inline_background`、`diff_removed_inline_background`，规格按 [review_view 设计「对其他 crate 的要求」F](review_view.md#对其他-crate-的要求)：`system(Green)` / `system(Red)` 在浅色 28%、深色 36% 透明度下叠在 `control_background` 上。内置表（`builtin.rs`）只存系统色的分量，没有存派生色，所以「内置表与系统色两条路径」落在同一个 `Palette::from_system`：`Palette::builtin` 是它对内置分量的调用，`ready` 与外观通知对系统读数的调用，两条路径不会不一致。`builtin.rs` 因此没有改动。
+- `label` 在四个 diff 底色上的对比度检查取 4.5:1（WCAG 2 AA 的正文标准），不是 `label` 与 `window_background` 的 7:1：深色下 36% 的绿色底上 `label` 是 6.0:1，达不到 7:1，而 diff 行里文字本来就多由代码配色着色。词级差异底色上叠加的代码配色（`Red` 的字符串在 `Red` 的底色上）不在 `palette_builtin_*` 检查的范围内，随 `review_view` 的视觉验收。
