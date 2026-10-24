@@ -353,6 +353,79 @@ fn pop_asks_the_view_guard() {
 }
 
 #[test]
+fn set_reading_column_overrides_the_top_screen_until_it_pops() {
+    let env = FakeEnv::standard();
+    let mut nav = on_project(&env);
+    let mut out = Vec::new();
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    assert!(nav.layout(&env).reading_column);
+
+    out.clear();
+    nav.dispatch(WorkspaceCommand::SetReadingColumn(false), &env, &mut out);
+    assert!(!nav.layout(&env).reading_column);
+    assert!(nav.layout(&env).inspector, "only the column changes");
+    assert!(out.is_empty(), "no event: the root view redraws on its own");
+
+    // Another screen above the review has its own layout; the override
+    // resumes when it pops.
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    assert!(
+        nav.layout(&env).reading_column,
+        "the screen above is not overridden"
+    );
+    nav.dispatch(WorkspaceCommand::SetReadingColumn(false), &env, &mut out);
+    nav.dispatch(WorkspaceCommand::Pop, &env, &mut out);
+    assert!(
+        !nav.layout(&env).reading_column,
+        "the lower override came back"
+    );
+
+    nav.dispatch(WorkspaceCommand::SetReadingColumn(true), &env, &mut out);
+    assert!(nav.layout(&env).reading_column);
+    nav.dispatch(WorkspaceCommand::SetReadingColumn(false), &env, &mut out);
+    nav.dispatch(WorkspaceCommand::Pop, &env, &mut out);
+    assert!(nav.nav().reading_column.is_empty(), "popping drops it");
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    assert!(
+        nav.layout(&env).reading_column,
+        "a new screen starts from its layout"
+    );
+}
+
+#[test]
+fn set_reading_column_is_ignored_without_a_project_and_cleared_with_it() {
+    let env = FakeEnv::standard();
+    let mut nav = Navigator::new(WINDOW);
+    let mut out = Vec::new();
+    nav.dispatch(WorkspaceCommand::SetReadingColumn(true), &env, &mut out);
+    assert!(nav.nav().reading_column.is_empty(), "Welcome ignores it");
+
+    let mut nav = on_project(&env);
+    nav.dispatch(WorkspaceCommand::SetReadingColumn(false), &env, &mut out);
+    assert!(
+        !nav.layout(&env).reading_column,
+        "the base screen takes it too"
+    );
+    nav.project_event(&closed(&project_key("/repos/a")), &env, &mut out);
+    assert!(
+        nav.nav().reading_column.is_empty(),
+        "closing the project clears it"
+    );
+}
+
+#[test]
+fn set_reading_column_is_cleared_when_the_screen_is_removed() {
+    let mut env = FakeEnv::standard();
+    let mut nav = on_project(&env);
+    let mut out = Vec::new();
+    nav.dispatch(WorkspaceCommand::Push(review()), &env, &mut out);
+    nav.dispatch(WorkspaceCommand::SetReadingColumn(false), &env, &mut out);
+    env.screens.remove(screens::REVIEW);
+    nav.screen_removed(screens::REVIEW, &env, &mut out);
+    assert!(nav.nav().reading_column.is_empty());
+}
+
+#[test]
 fn pop_to_base_asks_once_per_level() {
     let mut env = FakeEnv::standard();
     env.screens

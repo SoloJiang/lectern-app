@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、「项目」窗口第一次使用时的 1180 × 760 居中、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、「项目」窗口第一次使用时的 1180 × 760 居中、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。另有 `WorkspaceCommand::SetReadingColumn`（review_view 设计的前置条件 A，`Refs #15`）已实现，见「实际验证」「与设计的差异」。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -191,6 +191,10 @@ pub enum WorkspaceCommand {
     Pop,
     /// 回到基底屏幕（项目主页）：逐个弹出，每个都问 `LeaveScope::View`。
     PopToBase,
+    /// 当前屏幕（栈顶；栈空时是基底屏幕）的内容是否限制在阅读栏里，覆盖它 `ScreenLayout::reading_column`
+    /// 的值；这个屏幕被弹出时恢复。审阅的双栏视图要整个内容区时用它（[review_view 设计](review_view.md)「对其他 crate 的要求」A）。
+    /// 立即返回，主线程应用，不发事件（根视图自己重画）。没有项目时忽略。
+    SetReadingColumn(bool),
     /// 侧栏换成某个面板（Files）；`None` 回到项目侧栏。
     ShowSidebarPanel(Option<Name>),
     /// 显示或隐藏检查器（⌥⌘I）；`SelectInspectorTab` 顺带显示（⌘\ 切到 Conversation）。
@@ -373,10 +377,11 @@ struct Nav {
     inspector_tab: Option<Name>,
     panel: Option<Name>,
     overlay: Option<Name>,
+    reading_column: Vec<(usize, bool)>, // `SetReadingColumn` 的覆盖：(栈深度, 值)，深度 0 是基底屏幕
 }
 ```
 
-当前屏幕是栈顶，栈空时是基底（`Welcome` → `screens::WELCOME`，`Project` → `screens::PROJECT_HOME`）。各区域的显示由当前屏幕的 `ScreenLayout` 和 `Nav` 决定：侧栏 = `layout.sidebar == Shown`；检查器 = `layout.inspector && nav.inspector`；面板、覆盖层只看 `nav`；浮条 = `layout.floating_bar`。
+当前屏幕是栈顶，栈空时是基底（`Welcome` → `screens::WELCOME`，`Project` → `screens::PROJECT_HOME`）。各区域的显示由当前屏幕的 `ScreenLayout` 和 `Nav` 决定：侧栏 = `layout.sidebar == Shown`；检查器 = `layout.inspector && nav.inspector`；面板、覆盖层只看 `nav`；浮条 = `layout.floating_bar`。内容区是否限制在阅读栏里 = 当前屏幕在 `nav.reading_column` 里的值，没有时是 `layout.reading_column`。
 
 | 当前状态 | 输入 | 守卫 | 结果 |
 |---|---|---|---|
@@ -394,6 +399,7 @@ struct Nav {
 | 任意 | `Escape` | 见下 | 关闭最上面的一层 |
 | 任意 | `ShowSidebarPanel(p)` | — | 面板已注册才换 |
 | `layout.inspector` | `SetInspector` / `SelectInspectorTab` | — | 改 `inspector`、`inspector_tab`；`LayerChanged`；`on_state_changed` |
+| `Project` | `SetReadingColumn(v)` | — | 当前屏幕（栈深度）的覆盖设为 `v`；屏幕被弹出、项目关闭或切换、屏幕的贡献被撤销时清掉 |
 | 任意 | `OpenPanel` / `OpenOverlay` | — | 已注册才开；同一时刻各至多一个，新的替换旧的 |
 | 任意 | `CloseWindow` | `Window` | 通过后 `remove_window`，`WindowClosed` |
 | `Welcome` | `Pop`、`PopToBase`、`Push` | — | 忽略，记 debug |
@@ -620,6 +626,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ## 实际验证
 
+### `SetReadingColumn`（review_view 前置条件 A）
+
+`services` 加 `WorkspaceCommand::SetReadingColumn(bool)`，`workspace` 的状态机、日志的命令名与根视图的 `layout` 跟着它，在 macOS（arm64）上运行：
+
+- `just test -p lectern-workspace -p lectern-services`：175 个测试通过（`services` 99 个，`workspace` 76 个，新增 4 个）。`workspace_commands_round_trip` 加 `SetReadingColumn(true / false)`；`nav.rs` 的 `set_reading_column_overrides_the_top_screen_until_it_pops`（覆盖只对当前深度生效，上面压了屏幕时不继承、弹回后恢复，弹出时清掉）、`set_reading_column_is_ignored_without_a_project_and_cleared_with_it`、`set_reading_column_is_cleared_when_the_screen_is_removed`；`view.rs` 的 `#[gpui::test]` `set_reading_column_widens_the_content`（语义树的 `column=reading` → `column=full` → 弹出后回到 `reading`）。
+- 没有验证：真实窗口里内容区变宽的外观与动画（`#[gpui::test]` 不画真实的帧），随 review_view 第 3 步手动检查。
+
 ### 前置条件 A
 
 `services` 的 `workspace` 模块，在 macOS（arm64）上运行：
@@ -676,6 +689,11 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 没有做（「验收」第 3 步的手动项）：发布构建（临时 `HOME`）首次启动是 820 × 520 的 Welcome、没有 `workspace` 的记录早于 `first frame drawn`、移动窗口后重启位置保留、打开文件夹后重启回到项目主页（`screen changed` 的 `to` 为 `project-home`）；这一条还要 `welcome` 和 `project_home` 的屏幕装配（见「与设计的差异」第 3 步）。`app/cold_start`（bench 第 5 步之后判定）和空闲内存（与 40 MB 比较增加不超过 1 MB）也没有测。第 2 步留下的 `on_next_frame` 驱动的 `Tick`、里程碑的 `presented`、`RecordStop::AnimationsSettled`、面板滑入、窗口关闭后点 Dock 图标重开，同样要在真实窗口里手动检查。
 
 ## 与设计的差异
+
+### `SetReadingColumn`（review_view 前置条件 A）
+
+- **覆盖按栈深度记，不是一个 `Option<bool>`**：review_view 设计写 `Nav` 加一个 `reading_column: Option<bool>`、`Pop` 时清掉。审阅屏幕在双栏时会在它之上压入阅读视图（⇧⌘O），一个全局的 `Option` 会让阅读视图继承审阅的「整个内容区」，弹回审阅时又丢掉。所以覆盖是 `Vec<(usize, bool)>`（深度，值），只对深度等于当前栈深度的屏幕生效；弹出时去掉深于新栈的项，项目关闭或切换、屏幕的贡献被撤销（栈被改写）时全部清掉。
+- **没有项目时忽略**：与 `Push`、`Pop` 一致；基底屏幕（项目主页）有项目时可以被覆盖，用不到但不特殊处理。
 
 ### 前置条件 A
 
