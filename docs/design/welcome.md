@@ -477,7 +477,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 ### 第 2 步
 
-视图、Action、语言选择、语义树（`Closes #29`），在 macOS（arm64，Rust 1.97.0）上运行。基于 `ui` 第 4 步（[#242](https://github.com/SoloJiang/lectern-app/pull/242)，`semantic(...)`、`Recorder`）：本 PR 的 base 是 `ui/step-4`，它合并后改为 `main`。`app` 没有装配本 crate（另一个 PR 在做），所以没有运行过应用，下面都是 `#[gpui::test]` 与普通测试：
+视图、Action、语言选择、语义树（`Closes #29`），在 macOS（arm64，Rust 1.97.0）上运行。基于 `ui` 第 4 步（[#242](https://github.com/SoloJiang/lectern-app/pull/242)，`semantic(...)`、`Recorder`）（已合并）。`app` 没有装配本 crate（另一个 PR 在做），所以没有运行过应用，下面都是 `#[gpui::test]` 与普通测试：
 
 - `just check`（格式、架构规则、文档链接、`cargo clippy --workspace --all-targets -- -D warnings`）、`just deny` 通过；`cargo check -p lectern-welcome`（不带 `--tests`，发布构建能编译的那一份依赖特性）通过。`Cargo.lock` 只多了 `lectern-welcome` 的依赖行，没有新 crate。
 - `just test -p lectern-welcome`：76 个测试通过（第 1 步的 47 个不变，新增 29 个），连续 12 次运行结果相同；`cargo test --doc -p lectern-welcome` 没有文档测试。
