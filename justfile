@@ -66,6 +66,28 @@ bench *args:
     # The merged report decides the result: a target that failed to build or crashed leaves no report.
     cargo run -q --locked -p lectern-bench --bin lectern-bench-report -- merge target/lectern-bench
 
+# A UI probe session runs in the background (docs/design/ui_probe.md): a debug
+# build with the `ui-probe` feature, a temporary HOME and a private probe
+# directory, so the real HOME and the agents' session directories are not
+# read. Read the window with
+# `cargo run -p lectern-ui-probe --bin lectern-probe -- ui_tree`, and end the
+# session with `lectern-probe quit`.
+
+# Start a UI probe session; prints the export line and the pid.
+probe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --locked -p lectern-app --features ui-probe
+    bin="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')/debug/lectern"
+    # mktemp -d makes a directory only this user can use (mode 0700).
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/lectern-probe.XXXXXX")"
+    mkdir "$dir/home"
+    HOME="$dir/home" LECTERN_UI_PROBE_DIR="$dir" \
+        nohup env -u CLAUDE_CONFIG_DIR -u CODEX_HOME -u LECTERN_LOG "$bin" \
+        >"$dir/lectern.out" 2>&1 </dev/null &
+    echo "export LECTERN_UI_PROBE_DIR=$dir"
+    echo "pid $!"
+
 # Licenses, sources and advisories.
 deny:
     cargo deny --locked check

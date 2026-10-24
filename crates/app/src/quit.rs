@@ -152,6 +152,12 @@ fn bounded(deadline: Instant, step: impl FnOnce() + Send + 'static) -> bool {
 
 impl QuitSteps for Started {
     fn kernel(&self, done: Box<dyn FnOnce() + Send>) {
+        // The probe session first (it does not block): its `quit` request has
+        // been answered, and nothing should be asked of a stopping app.
+        #[cfg(feature = "ui-probe")]
+        if let Some(probe) = &self.probe {
+            probe.shutdown();
+        }
         self.kernel.shutdown(done);
     }
 

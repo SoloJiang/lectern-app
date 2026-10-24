@@ -7,6 +7,8 @@
 mod args;
 #[cfg(debug_assertions)]
 mod debug_quit;
+#[cfg(feature = "ui-probe")]
+mod probe;
 mod profile;
 mod quit;
 mod startup;
@@ -49,7 +51,11 @@ pub fn run() {
         }
     });
     app.run(move |cx| {
-        cx.set_global(Startup::new(early, Profile::Desktop));
+        let startup = Startup::new(early, Profile::Desktop);
+        // `LECTERN_UI_PROBE_DIR` set: the probe profile.
+        #[cfg(feature = "ui-probe")]
+        let startup = probe::select(startup);
+        cx.set_global(startup);
         quit::init(cx);
         #[cfg(debug_assertions)]
         debug_quit::init(cx, args.quit_after_start);

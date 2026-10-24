@@ -17,6 +17,12 @@ path = "src/main.rs"
 [package.metadata.lectern]
 layer = "app"
 
+[features]
+# The UI probe (docs/design/ui_probe.md「对其他 crate 的要求」): not in
+# `default`, so a plain `cargo build` has no `lectern-ui-probe`. `just check`
+# and `just test` use `--all-features`; `just probe` builds with it.
+ui-probe = ["dep:lectern-ui-probe"]
+
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
@@ -42,6 +48,9 @@ lectern-review = { path = "../review" }
 # The "welcome" and "welcome-discovery" plugins and `WelcomeDeps`
 # (docs/design/welcome.md「对其他 crate 的要求」C).
 lectern-welcome = { path = "../welcome" }
+# The probe session of the probe profile (optional: a tool crate, the only
+# form architecture rule 2 allows).
+lectern-ui-probe = { path = "../ui_probe", optional = true }
 # `LeaveScope`, for the leave guards `Quit` asks.
 lectern-services = { path = "../services" }
 # The "usage" plugin, `UsageDeps` and `LocalZone`
@@ -69,6 +78,8 @@ gpui-component.workspace = true
 # `Executor::manual`: the window state tests run the write when they say so.
 lectern-executor = { path = "../executor", features = ["test-support"] }
 tempfile.workspace = true
+# `tests/probe.rs` decodes the screenshot's PNG.
+image.workspace = true
 
 [lints]
 workspace = true
