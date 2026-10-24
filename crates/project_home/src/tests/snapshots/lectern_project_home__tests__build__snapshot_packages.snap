@@ -1,0 +1,24 @@
+---
+source: crates/project_home/src/tests/build.rs
+expression: render(&with.snapshot)
+---
+project "app" branch=main settled=true
+sources project=1 sessions=[] overview=None usage=None
+sidebar groups=0 session_rows=0 packages=5 counts=true
+  package "" name=root depth=0 today=0
+  package "api" name=api depth=1 today=1
+  package "web" name=web depth=1 today=0
+  package "web/ui" name=ui depth=2 today=4
+  package "web-extra" name=web-extra depth=1 today=0
+rows
+  sessions-header
+  sessions-empty
+  packages-header
+  package 0
+  package 1
+  package 2
+  package 3
+  package 4
+main overview_ready=false needs_review=0 done=0
+  outside pending
+usage none

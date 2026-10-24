@@ -4,9 +4,9 @@
 use std::borrow::Cow;
 use std::sync::Mutex;
 
-use lectern_kernel::Name;
+use lectern_kernel::{Name, PluginError};
 use lectern_services::project::OpenError;
-use lectern_services::workspace::WorkspaceCommand;
+use lectern_services::workspace::{Milestone, WorkspaceCommand};
 
 /// A contribution ID, screen ID or command name as a log field. A built-in
 /// one is a `&'static str`; one built at runtime is interned here (not in
@@ -77,6 +77,34 @@ pub(crate) fn command_name(command: &WorkspaceCommand) -> &'static str {
         WorkspaceCommand::CloseOverlay => "close_overlay",
         WorkspaceCommand::Escape => "escape",
         WorkspaceCommand::CloseWindow => "close_window",
+    }
+}
+
+/// A `PluginError`'s variant name (the kernel's own `kind` is private);
+/// the text some variants carry is not logged.
+pub(crate) fn plugin_error_kind(error: &PluginError) -> &'static str {
+    match error {
+        PluginError::Failed(_) => "failed",
+        PluginError::Panicked(_) => "panicked",
+        PluginError::MissingService(_) => "missing_service",
+        PluginError::UndeclaredService(_) => "undeclared_service",
+        PluginError::DuplicateService(_) => "duplicate_service",
+        PluginError::InvalidGraph(_) => "invalid_graph",
+        PluginError::DependencyUnavailable => "dependency_unavailable",
+        PluginError::Disabled => "disabled",
+        PluginError::ShuttingDown => "shutting_down",
+        PluginError::UnknownCommand(_) => "unknown_command",
+        _ => "other",
+    }
+}
+
+/// The milestone's variant name.
+pub(crate) fn milestone_name(milestone: &Milestone) -> &'static str {
+    match milestone {
+        Milestone::ProjectHome => "project_home",
+        Milestone::FileHighlighted => "file_highlighted",
+        Milestone::DiffShown => "diff_shown",
+        Milestone::WorktreeSwitched => "worktree_switched",
     }
 }
 
