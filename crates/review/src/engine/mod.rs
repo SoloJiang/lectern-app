@@ -142,6 +142,10 @@ pub(crate) struct Config {
     /// command) after a snapshot was replaced, with no lock held.
     pub emit: Arc<dyn Fn(ReviewEvent) + Send + Sync>,
     pub clock: Arc<dyn Fn() -> Timestamp + Send + Sync>,
+    /// The local time zone's offset from UTC (seconds, east positive) at a
+    /// Unix time in milliseconds: the day boundary of the overview's
+    /// per-package counts. May read the zone file: only on `Background`.
+    pub utc_offset: Arc<dyn Fn(i64) -> i32 + Send + Sync>,
     pub discover: Discover,
     /// How long an interactive round computes cutoff misses
     /// (`cutoff::INTERACTIVE_BUDGET`; the tests set 0).
