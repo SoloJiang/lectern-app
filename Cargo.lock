@@ -3263,6 +3263,7 @@ dependencies = [
  "gpui-pre-linux",
  "gpui-pre-macos",
  "gpui-pre-web",
+ "gpui-pre-wgpu",
  "gpui-pre-windows",
 ]
 
@@ -3419,6 +3420,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-collections",
  "gpui-pre-util",
+ "image",
  "itertools 0.14.0",
  "log",
  "parking_lot",
@@ -4358,6 +4360,7 @@ dependencies = [
  "lectern-platform",
  "lectern-project",
  "lectern-review",
+ "lectern-review-view",
  "lectern-services",
  "lectern-syntax",
  "lectern-ui",
@@ -4533,11 +4536,15 @@ dependencies = [
 name = "lectern-project-home"
 version = "0.0.0"
 dependencies = [
+ "futures",
+ "gpui-pre",
  "insta",
  "lectern-executor",
+ "lectern-i18n",
  "lectern-kernel",
  "lectern-logging",
  "lectern-services",
+ "lectern-ui",
 ]
 
 [[package]]
@@ -4563,6 +4570,16 @@ dependencies = [
 [[package]]
 name = "lectern-review-view"
 version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui-pre",
+ "insta",
+ "lectern-i18n",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "lectern-ui",
+]
 
 [[package]]
 name = "lectern-services"
@@ -4628,6 +4645,20 @@ dependencies = [
 [[package]]
 name = "lectern-ui-probe"
 version = "0.0.0"
+dependencies = [
+ "futures",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "image",
+ "insta",
+ "lectern-i18n",
+ "lectern-logging",
+ "lectern-ui",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-usage"
