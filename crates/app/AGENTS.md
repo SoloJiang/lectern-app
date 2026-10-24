@@ -14,7 +14,7 @@
 - `workspace`：`startup::release` 里在 `lectern_ui::ready` 之后、`Kernel::start` 之前 `install`，窗口状态文件（`app_data()/workspace/window.json`）和 frame autosave 名在 `src/window_state.rs`。读写都在 executor 的 `Background` 任务里，路径不进日志；首帧之前只对骨架窗口设 `"welcome"` 这个 frame autosave 名（AppKit 内存里的偏好，不读文件）。`welcome` 的两个插件见下一条（[设计「workspace 的装配」](../../docs/design/app.md#workspace-的装配)）。
 - `usage`、`project_home`：与 `project`、`review` 一起在 `profile::desktop` 里装配，`UsageDeps::data_dir` 是 `app_data()/usage/`，本地时区是 `profile.rs` 的 `SystemZone`（`platform::time::utc_offset`，向下取整到秒，None 时为 UTC），`UsageSlot` 由 `desktop` 建一个交给 `project_home` 的两个插件。数据库在 `usage` 的后台任务里打开，`app` 不碰（[设计「usage 与 project_home 的装配」](../../docs/design/app.md#usage-与-project_home-的装配)）。
 - `welcome`：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data()/welcome })` 的两个插件（`welcome`、`welcome-discovery`）在 `profile::desktop` 里 `workspace` 之后逐个放进 `PluginSet`。`plugins` 只建空的模型，不做 IO；`recent.json` 在 `welcome` 的后台任务里读写，`app` 不碰，路径不进日志（[设计「welcome 的装配」](../../docs/design/app.md#welcome-的装配)）。
-- `ui_probe` 只在 `ui-probe` feature 下编译（不在 `default` 里，`just` 的入口打开它）；运行时只在 probe profile 里启动（[ui_probe 设计](../../docs/design/ui_probe.md)）。
+- `ui_probe` 只在 `ui-probe` feature 下编译（不在 `default` 里，`just` 的入口打开它）；运行时只在 probe profile 里启动（[ui_probe 设计](../../docs/design/ui_probe.md)）。`run` 在首帧之前只读环境变量 `LECTERN_UI_PROBE_DIR`（`src/probe.rs`），设置了就是 `Profile::Probe`（插件与 desktop 相同）；`Probe::start` 在 `startup::release` 的末尾，`Quit` 的退出线程在 `Kernel::shutdown` 之前 `shutdown` 它。`quit` 请求靠名字 `lectern::Quit` 分发 `quit.rs` 里的 `Quit` Action，不要改这个名字。端到端测试 `tests/probe.rs` 和 `tests/startup.rs` 一样需要图形会话。发布构建不含探针：`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 里没有 `lectern-ui-probe`。
 
 ## 测试
 

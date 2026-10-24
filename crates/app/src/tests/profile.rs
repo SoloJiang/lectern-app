@@ -61,7 +61,7 @@ fn every_profile_graph_validates(cx: &mut TestAppContext) {
         app_data: dir.path().join("app_data"),
         git_ceilings: Arc::from([]),
     };
-    for profile in Profile::ALL {
+    for &profile in Profile::ALL {
         let (set, count) = profile.plugins(&resources);
         if let Err(errors) = set.validate() {
             panic!("{profile:?}: {errors:?}");
@@ -70,6 +70,9 @@ fn every_profile_graph_validates(cx: &mut TestAppContext) {
             // project, two session sources, review, usage, workspace,
             // welcome, welcome-discovery, project-home, project-home-usage.
             Profile::Desktop => 10,
+            // The probe is not a plugin: the same set as desktop.
+            #[cfg(feature = "ui-probe")]
+            Profile::Probe => 10,
             Profile::Test => 0,
         };
         assert_eq!(count, expected, "{profile:?}");
