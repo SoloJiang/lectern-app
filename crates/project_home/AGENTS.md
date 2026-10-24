@@ -6,7 +6,7 @@
 - 设计文档：[docs/design/project_home.md](../../docs/design/project_home.md)
 - issue：[#30](https://github.com/SoloJiang/lectern-app/issues/30)
 - ADR：[0012](../../docs/adr/0012.md)、[0022](../../docs/adr/0022.md)、[0025](../../docs/adr/0025.md)、[0046](../../docs/adr/0046.md)
-- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`snapshot`（`HomeSnapshot` 与纯函数 `snapshot::build`）、`Home`（插件状态与合成任务）、`ProjectHomePlugin`、`ProjectHomeUsagePlugin`、`UsageSlot`。第 2 步（视图、贡献登记、Action、语义树）和第 3 步（`app` 装配、里程碑、基准）尚未实现。
+- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`snapshot`（`HomeSnapshot` 与纯函数 `snapshot::build`）、`Home`（插件状态与合成任务）、`ProjectHomePlugin`、`ProjectHomeUsagePlugin`、`UsageSlot`。`app` 已装配两个插件（[#246](https://github.com/SoloJiang/lectern-app/pull/246)）。第 2 步（视图、贡献登记、Action、语义树）和第 3 步（里程碑、基准）尚未实现。
 
 ## 边界
 

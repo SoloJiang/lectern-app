@@ -1,6 +1,6 @@
 # project_home 设计
 
-状态：实现中。前置条件 B（`project-home.ftl`，[#237](https://github.com/SoloJiang/lectern-app/pull/237)）与「验收」第 1 步（不开窗口的部分：`snapshot::build`、两个插件、`UsageSlot`，[#241](https://github.com/SoloJiang/lectern-app/pull/241)）已实现，见「实际验证」「与设计的差异」；其余前置条件与第 2、3 步尚未实现。
+状态：实现中。前置条件 B（`project-home.ftl`，[#237](https://github.com/SoloJiang/lectern-app/pull/237)）与「验收」第 1 步（不开窗口的部分：`snapshot::build`、两个插件、`UsageSlot`，[#241](https://github.com/SoloJiang/lectern-app/pull/241)）已实现，见「实际验证」「与设计的差异」；`app` 的装配（前置条件 D 的装配部分，[#246](https://github.com/SoloJiang/lectern-app/pull/246)）已实现；其余前置条件与第 2、3 步尚未实现。
 
 对应 issue [#30](https://github.com/SoloJiang/lectern-app/issues/30)。`project_home` 是打开项目后首先看到的屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 02 画板，[ADR 0012](../adr/0012.md)）：项目侧栏（Overview、按 worktree 分组的 Sessions、带今天改动数的 Packages、其他 crate 贡献的 Worktrees / Files / MR 入口、底部的 Usage 行）和主区（Needs Review 的会话卡片、Outside Any Session、Recently Done）。它只显示领域层算好的快照（`project`、`agents`、`review`、`usage`），自己不做归位、比较和统计；它由 [workspace 设计](workspace.md)的根视图承载，作为 `Screen(PROJECT_HOME)` 和 `SidebarPanel("project")` 贡献进去。
 
@@ -488,7 +488,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
   「今天」因此是：worktree 相对 HEAD 的改动文件里，最后修改时间在今天的那些；已提交的改动不算，昨天改、今天还没提交的也不算。计数随 `review` 的下一轮概览刷新（fs_watch 批次、`SessionsChanged` 等触发，合并 2 秒），不在午夜自动归零：日界之后第一次变化才更新。这一项合并之前，侧栏的 Packages 只显示名字（`package_counts` 为 false）。已实现：[#239](https://github.com/SoloJiang/lectern-app/pull/239)；只列计数不为 0 的子项目，`Unavailable` 时也是 None（review 设计「与设计的差异」）。
 - **B. `i18n`：`locales/{en,zh-CN}/project-home.ftl`**（[#237](https://github.com/SoloJiang/lectern-app/pull/237)），内容是「界面」的键表。
 - **C. `services`、`ui`、`workspace`**：本 crate 用到的都已是 workspace 设计或 `ui` 设计的内容，不新增要求。其中两项由 workspace 设计的前置条件定义、还没有实现：`services::workspace` 模块（前置条件 A，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）和 `ui::contrib` 的载荷类型与 `into_payload`（前置条件 B，[workspace 设计「`ui::contrib` 的载荷类型」](workspace.md#uicontrib-的载荷类型)；`ui` 设计 [#218](https://github.com/SoloJiang/lectern-app/pull/218) 的 `contrib` 模块也列出了它们，侧栏条目的类型叫 `SidebarItem`，带 `icon: Option<ui::Icon>`）。本 crate 的 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings` 登记和 `Views` 区的图标都靠它们，所以它们在「验收」里列为前置条件。`GroupedList`、`Row`、`AgentDot`、`Progress`、`Skeleton`、`semantic` 在 `ui` 设计的第 3、4 步；`sidebar_entries()`、`report_milestone`、`dispatch` 在 workspace 设计里。`usage_view` 登记 `SidebarEntry("usage")`（`section: Bottom`、`on_select: Push(USAGE)`）时，本 crate 为它画 token 与额度条；它的设计文档写明这一点。
-- **D. `app`**：装配时构造 `UsageSlot`，分别交给 `ProjectHomePlugin::new(ProjectHomeDeps { executor, usage })` 和 `ProjectHomeUsagePlugin::new(executor, slot)`，两个插件都放进 `Profile::Desktop` 的 `PluginSet`；bench 的 `Driver` 加 `home` 场景（`app/home_frames`）。
+- **D. `app`**：装配的部分已实现（[#246](https://github.com/SoloJiang/lectern-app/pull/246)，早于第 3 步，见「与设计的差异」）；`Driver` 的 `home` 场景随探针。装配时构造 `UsageSlot`，分别交给 `ProjectHomePlugin::new(ProjectHomeDeps { executor, usage })` 和 `ProjectHomeUsagePlugin::new(executor, slot)`，两个插件都放进 `Profile::Desktop` 的 `PluginSet`；bench 的 `Driver` 加 `home` 场景（`app/home_frames`）。
 - **E. `bench`**：预算表加 `project_home/build_1000`、`project_home/resident_bytes`、`app/home_frames`；`app/open_project`、`app/idle_monorepo`、`app/idle_100k` 随本 crate 的最后一步改为生效。
 
 ## 未决问题
@@ -566,3 +566,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 - **`SourceGenerations::usage`**：用量快照的代数；还没有用量快照时取额度的代数（设计没有规定）。
 - **一个未规定的情形**：概览里 `progress` 为 `Some` 但 `total == 0` 的会话（没有文件）不进 Needs Review，也不进 Recently Done（设计的两个条件都不满足），`build_splits_needs_review_and_done` 的 `empty` 一条检查这一点。`archived` 的会话没有特别处理，照常列出。
 - **`Home` 公开**：`pub struct Home`（`snapshot()`）从 lib 导出，第 2 步的视图工厂持有它的 `Arc`；`ProjectHomePlugin` 只在测试里暴露它。`attach` 在 `started` 里对 `Projects::open_projects()` 取最后一个（最近打开的）作为基底。
+
+### `app` 的装配（D）
+
+- **装配早于第 3 步**（[#246](https://github.com/SoloJiang/lectern-app/pull/246)）：`dyn Usage` 有了提供者（`usage` 插件），`project-home` 不登记贡献，所以 `app` 的 `Profile::Desktop` 现在装配 `project-home` 与 `project-home-usage`（共用一个 `UsageSlot`），desktop 的插件数为 8。视图合并之前，打开或恢复一个项目时插件会取关注、合成快照而没有视图读它（[app 设计「已知限制」](app.md#已知限制)）。`app/home_frames`、里程碑与基准仍随第 3 步。

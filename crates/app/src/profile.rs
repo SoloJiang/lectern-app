@@ -137,6 +137,15 @@ fn offset_at(unix_ms: i64, utc_offset: impl FnOnce(i64) -> Option<i32>) -> i32 {
     utc_offset(unix_ms.div_euclid(1000)).unwrap_or(0)
 }
 
+impl Field for Profile {
+    fn value(&self) -> Value<'_> {
+        Value::text(match self {
+            Profile::Desktop => "desktop",
+            Profile::Test => "test",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::offset_at;
@@ -154,14 +163,5 @@ mod tests {
     #[test]
     fn zone_without_an_offset_is_utc() {
         assert_eq!(offset_at(0, |_| None), 0);
-    }
-}
-
-impl Field for Profile {
-    fn value(&self) -> Value<'_> {
-        Value::text(match self {
-            Profile::Desktop => "desktop",
-            Profile::Test => "test",
-        })
     }
 }

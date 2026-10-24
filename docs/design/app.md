@@ -514,6 +514,7 @@ target 为 `app`。
 - `window.json` 去抖 500 ms：最后一次变化之后 500 ms 内退出，这次变化不会写出，下次启动回到上一次写出的状态（多半是上一个项目）。系统发起的退出同样。
 - 第一次使用 `"project"`、还没有保存过 frame 时，设计要求先把窗口设为 1180 × 760 pt 居中（workspace 设计「对其他 crate 的要求」D）。GPUI 的窗口没有移动接口，`resize` 只改内容尺寸并保持左上角，在 Welcome 居中的窗口上放大到 1180 × 760 会越出屏幕；居中要调 AppKit，属于 `platform`（架构规则 6）。所以现在窗口沿用 Welcome 的大小，用户拖一次，AppKit 就保存在 `"project"` 下。`platform` 补上居中并设尺寸的接口后，`app` 在改名为 `"project"` 之前调用（「与设计的差异」）。
 - 屏障比首帧的实际显示最多晚约 2 个刷新周期，直到 `platform::frame::on_first_presented` 实现（「启动屏障」）。窗口不是前台窗口时 GPUI 按 30 fps 请求帧（`inactive_frame_interval` 33 ms），间隔按 33 ms 计；从终端启动时实测首帧画出到屏障放开约 90–100 ms（「实际验证」）。
+- `project_home` 的视图合并之前，装配了的 `project-home` 在项目打开（或从 `window.json` 恢复）时会取概览与用量的关注、在后台合成快照，没有视图读它们。没有项目打开时它什么也不做。随 project_home 第 2 步消失。
 
 ## 验收
 
@@ -566,6 +567,12 @@ target 为 `app`。
 - `just test -p lectern-app -E 'not binary(startup)'`：31 个测试通过（原有 17 个，新增 14 个：`window_state` 9 个，`leave` 5 个；`every_profile_graph_validates` 改成 `#[gpui::test]`，desktop 的插件数为 5）。
 - `tests/startup.rs` 的 8 个启动测试本机没有运行（图形会话锁屏，屏障不放开，「已知限制」），结果以 macOS CI 为准。发布构建（临时 `HOME`）的手动运行、冷启动、空闲内存都没有做；解锁后按「装配」「性能」的方法补测，写进这里。
 
+`usage` 与 `project_home` 的装配（[#246](https://github.com/SoloJiang/lectern-app/pull/246)，同一台机器）：
+
+- `just check`、`just deny`、`python3 scripts/check_architecture.py` 通过；`rg 'eprintln!|println!|log::|log_err|warn_on_err' crates/app/src crates/app/tests` 没有结果。
+- `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：33 个测试通过（新增 `zone_rounds_milliseconds_down_to_seconds`、`zone_without_an_offset_is_utc`；`every_profile_graph_validates` 的 desktop 插件数为 8，图校验通过，临时目录之后仍是空的）。
+- `tests/startup.rs` 没有在本机运行（图形会话锁屏，屏障不放开，「已知限制」）；它的 `plugins` 改为 8，结果以 macOS CI 为准。发布构建（临时 `HOME`）的手动运行、冷启动、空闲内存都没有做，解锁后按「装配」「性能」的方法补测，写进这里。
+
 ## 与设计的差异
 
 - **库与二进制分开。** 原文写 `app` 是二进制 crate。记录的 target 取 `module_path!` 的第一段：二进制名为 `lectern` 时 target 是 `lectern`，不是 logging 设计规定的 `app`。现在逻辑在库 `lectern_app` 里，二进制只调用 `lectern_app::run()`，target 是 `app`（「接口」已改）。
@@ -595,3 +602,10 @@ target 为 `app`。
 - **`quit` 拆成 `quit`、`ask_then`、`shut_down`。** `ask_then` 取 `Arc<dyn LeaveAsk>`，测试用假的实现；原来的线程与等待逻辑原样搬进 `shut_down`。
 - **`serde_json` 与 `futures` 成了普通依赖。** `window.json` 与通道、`oneshot` 要用；`lectern-executor` 的 `test-support` 进了 dev 依赖（`Executor::manual`）。
 - **`with_assets(IconAssets)` 已加**（[ui 设计「对其他 crate 的要求」](ui.md#对其他-crate-的要求)的 `app` 项）：`gpui_platform::application().with_assets(lectern_ui::IconAssets)`，`run` 之前。
+
+`usage` 与 `project_home` 的装配：
+
+- **`UsageDeps` 只有三个字段。** usage 设计「依赖」写 `watcher`、`git_ceilings` 要在 `app` 构造插件前补齐；第 1 步的代码没有这两项（它们要到第 2、5 步才用到），`app` 按现有的三个字段构造，不添加没有用处的字段。加字段的 PR 同时改 `profile.rs`，传 `r.watcher.clone()` 和 `r.git_ceilings.clone()`（usage 设计「与设计的差异」前置条件 C）。
+- **`project_home` 提前装配。** project_home 设计把 D 放在第 3 步（视图之后）；它的第 1 步已有两个插件和 `UsageSlot`，`dyn Usage` 现在有了提供者，`project-home` 又不登记贡献，所以图校验通过、空 `Workspace` 的启动不受影响。代价是「已知限制」里的过渡状态。bench 的 `Driver` 的 `home` 场景（D 的另一半）仍随探针。
+- **`welcome` 仍不装配**：屏幕载荷是占位类型，`UiPayloads` 会拒绝，等它的视图。
+- **`LocalZone` 的 None 按 UTC。** platform 设计把 None 的处理交给 `app`；毫秒时间戳总有偏移，取 0 不记日志。
