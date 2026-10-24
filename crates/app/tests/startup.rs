@@ -139,8 +139,9 @@ fn startup_writes_a_header_and_an_end_record() {
     // The system colours are read only in `ready`.
     assert_eq!(records[initialised]["accent"], "builtin", "{records:#?}");
     assert_eq!(records[ready]["accent"], "system", "{records:#?}");
-    // project, two session sources, review, workspace.
-    assert_eq!(records[assembled]["plugins"], 5);
+    // project, two session sources, review, usage, workspace, project-home,
+    // project-home-usage.
+    assert_eq!(records[assembled]["plugins"], 8);
     assert_eq!(records[released]["profile"], "desktop");
     let quit = position(&records, "quit requested");
     assert_eq!(records[quit]["path"], "action");

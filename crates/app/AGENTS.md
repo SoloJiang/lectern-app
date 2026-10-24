@@ -11,7 +11,8 @@
 
 - 首帧前只建窗口、画骨架，外加 `lectern_ui::init`（内存操作：内置的 `Palette`、减弱动态效果、登记 `platform` 的通知；不读系统色）和骨架窗口的 `lectern_ui::attach`；`lectern_ui::ready`（`gpui_component::init`、系统色）在 `startup::release` 里、`Kernel::start` 之前。插件激活、SQLite、文件监听、会话扫描、读窗口快照都放在首帧之后（[ADR 0017](../../docs/adr/0017.md)、[ui 设计「对其他 crate 的要求」](../../docs/design/ui.md#对其他-crate-的要求)）。
 - 只做装配：把 `platform` 的实现注入 `fs_watch`、`kernel` 等定义的接口。不写业务逻辑。
-- `workspace`：`startup::release` 里在 `lectern_ui::ready` 之后、`Kernel::start` 之前 `install`，窗口状态文件（`app_data()/workspace/window.json`）和 frame autosave 名在 `src/window_state.rs`。读写都在 executor 的 `Background` 任务里，路径不进日志；首帧之前只对骨架窗口设 `"welcome"` 这个 frame autosave 名（AppKit 内存里的偏好，不读文件）。`welcome`、`project_home` 的视图合并之前不装配（[设计「workspace 的装配」](../../docs/design/app.md#workspace-的装配)）。
+- `workspace`：`startup::release` 里在 `lectern_ui::ready` 之后、`Kernel::start` 之前 `install`，窗口状态文件（`app_data()/workspace/window.json`）和 frame autosave 名在 `src/window_state.rs`。读写都在 executor 的 `Background` 任务里，路径不进日志；首帧之前只对骨架窗口设 `"welcome"` 这个 frame autosave 名（AppKit 内存里的偏好，不读文件）。`welcome` 的视图合并之前不装配（[设计「workspace 的装配」](../../docs/design/app.md#workspace-的装配)）。
+- `usage`、`project_home`：与 `project`、`review` 一起在 `profile::desktop` 里装配，`UsageDeps::data_dir` 是 `app_data()/usage/`，本地时区是 `profile.rs` 的 `SystemZone`（`platform::time::utc_offset`，向下取整到秒，None 时为 UTC），`UsageSlot` 由 `desktop` 建一个交给 `project_home` 的两个插件。数据库在 `usage` 的后台任务里打开，`app` 不碰（[设计「usage 与 project_home 的装配」](../../docs/design/app.md#usage-与-project_home-的装配)）。
 - `ui_probe` 只在 `ui-probe` feature 下编译（不在 `default` 里，`just` 的入口打开它）；运行时只在 probe profile 里启动（[ui_probe 设计](../../docs/design/ui_probe.md)）。
 
 ## 测试
