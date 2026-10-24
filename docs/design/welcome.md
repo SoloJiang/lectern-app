@@ -1,6 +1,6 @@
 # welcome 设计
 
-状态：已接受，尚未实现。
+状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）已实现，见「实际验证」「与设计的差异」；前置条件 A、B、C 与第 2 步尚未实现。
 
 对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
 
@@ -67,9 +67,8 @@ pub struct WelcomePlugin { /* 角色（Screen / Discovery）, deps, model: Arc<W
 //     `Contributions::register(Screen(WELCOME), None)`、`register(KeyBindings, None)`（`activate` 里没有 token）的守卫交给 `ctx.own_staged`。不做 IO。
 //   started（kernel 线程）：`own_with` 提交读 `recent.json` 的 Background 任务（「数据流与线程」第 1 步）。
 // "welcome-discovery"：Manifest { provides: [], requires: [service::<dyn Projects>(), service::<dyn SessionSource>()], activation: [AfterFirstFrame] }
-//   activate：取 ServiceRef<dyn Projects>、ServiceSet<dyn SessionSource>；`ctx.on::<SessionsChanged>`、`ctx.on::<ProjectEvent>`；
-//     把模型的 `discovered` 置为 `Pending`。不做 IO。
-//   started：`own_with` 提交第一次重算（第 3 步）。
+//   activate：取 ServiceRef<dyn Projects>、ServiceSet<dyn SessionSource>；`ctx.on::<SessionsChanged>`、`ctx.on::<ProjectEvent>`。不做 IO，不改模型。
+//   started：把模型的 `discovered` 置为 `Pending`（激活失败时模型不留下 `Pending`），`own_with` 提交第一次重算（第 3 步）。
 //   `Active` drop（停用：会话来源的最后一个提供者停用、本插件失败）：`discovered` 置为 `Unavailable`，换快照并唤醒。
 
 /// 视图读取的不可变快照。每次变化整体替换为新的 `Arc`。
@@ -231,7 +230,7 @@ pub struct DiscoveredFolder {
 }
 ```
 
-归并规则（`discover::build(sessions, open_projects, recent, now)`，纯函数）：
+归并规则（`discover::build(lists, open_projects, recent_keys, now) -> Built`，纯函数；`lists` 是每个来源的 `Arc<SessionList>`，`recent_keys` 是最近项目的 `ProjectKey`，`Built` 带发现列表、按 `key` 的会话计数、归并前的会话总数和跳过的数量）：
 
 - 只看 `Place::Resolved`（项目没有打开）；`Located`（已打开）、`Pending`、`Missing`、`Unresolvable` 跳过。
 - 按 `Resolved::project` 分组：`ProjectKey` 在 `Projects::open_projects()` 里的不列（正在打开中）；`ProjectKey` 等于某条最近项目的 `key` 的不列（「尚未打开过」；任何 worktree 里的会话都按仓库算）。
@@ -259,8 +258,8 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 ```
 
 1. 读最近项目（`welcome` 的 `started` 提交，`Background`，持有 `busy()` 守卫）：读 `data_dir/recent.json`；文件不存在时 `Ready(空)`，不记日志；解析失败或版本不认识时记 warn、`Ready(空)`。文件通常只有几 KB，读与解析 < 1 ms。读完后置 `loaded`，应用读取期间排队的变更（「最近项目」的单一写入者规则），再对 `Projects::open_projects()` 里的每个项目按第 2 步记录一次：`restore` 的 `OpenProject` 可能在本插件的 token 变为 `Live` 之前就发出了 `Opened`（[kernel 设计「激活时的上下文」](kernel.md#激活时的上下文)：这段时间的事件收不到，「需要初始状态的插件在 `started` 里主动读取」），不补这一步，恢复的项目就不进最近项目。最后置第 3 步的脏标记：`welcome-discovery` 的第一次重算可能先于本步完成，那时最近项目会短暂出现在发现列表里，脏标记让它再算一次。`started` 同时把 `PluginHandle` 存进模型，供第 6 步提交写文件的任务。
-2. 记录打开成功（`welcome` 对 `ProjectEvent::Opened { Ok(key) }` 的监听安排，`Background`）：`Projects::snapshot(key)` 在 `Opened` 时已有第 1 代（[project 设计「事件」](project.md#事件)），从它取 `path`、`key`、`name`；清掉 `opening`，更新内存里的 `RecentList`（`loaded` 还没置位时只进变更队列），先换快照、再置写入的脏标记：写任务（同一时刻最多一个）在 `data_dir` 下写 `recent.json.tmp`，`rename` 成 `recent.json`；`data_dir` 不存在时先 `create_dir_all`（只建这一级）。写失败记 warn，内存里的列表照常使用。这一步与 `Opened` 来自 `restore`、⌘O 还是本屏幕无关：任何成功打开的项目都进入最近项目，所以恢复上次项目时它也在列表最前。最后置第 3 步的脏标记（`welcome-discovery` 没有激活时标记无人消费，无害）。
-3. 重算发现列表（`welcome-discovery`，`Background`，持有 `busy()`）：对 `ServiceSet<dyn SessionSource>::for_each` 的每个来源取 `sessions()`（取锁复制 `Arc`），取 `open_projects()` 和模型里当前的 `RecentList`，调 `discover::build`，把发现列表换进快照，并把算出的计数按 `key` 并进模型里当时的 `RecentList`（不用任务开始时的那份副本替换列表，否则刚移除的条目会短暂回来）。触发：`started`、每次 `SessionsChanged`、`ProjectEvent::Opened` / `Closed`、最近项目变化（第 2、6 步置的脏标记）。合并：模型里有一个「排队中」标记，已经排了一个任务时后续触发只置脏标记，任务结束时发现脏标记就再跑一次，所以发现阶段的连续事件不会堆积任务。
+2. 记录打开成功（`welcome` 对 `ProjectEvent::Opened { Ok(key) }` 的监听安排，`Background`）：`Projects::snapshot(key)` 在 `Opened` 时已有第 1 代（[project 设计「事件」](project.md#事件)），从它取 `path`、`key`、`name`；清掉 `opening`，更新内存里的 `RecentList`（`loaded` 还没置位时只进变更队列），先换快照、再置写入的脏标记：写任务（同一时刻最多一个）在 `data_dir` 下写 `recent.json.tmp`，`rename` 成 `recent.json`；`data_dir` 不存在时先 `create_dir_all`。写失败记 warn，内存里的列表照常使用。这一步与 `Opened` 来自 `restore`、⌘O 还是本屏幕无关：任何成功打开的项目都进入最近项目，所以恢复上次项目时它也在列表最前。最后置第 3 步的脏标记（`welcome-discovery` 没有激活时标记无人消费，无害）。
+3. 重算发现列表（`welcome-discovery`，`Background`，持有 `busy()`）：对 `ServiceSet<dyn SessionSource>::for_each` 的每个来源取 `sessions()`（取锁复制 `Arc`），取 `open_projects()` 和模型里当前的 `RecentList`，调 `discover::build`，把发现列表换进快照，并把算出的计数按 `key` 并进模型里当时的 `RecentList`（不用任务开始时的那份副本替换列表，否则刚移除的条目会短暂回来）。触发：`started`、每次 `SessionsChanged`、`ProjectEvent::Opened` / `Closed`、最近项目变化（第 2、6 步置的脏标记）。合并：模型里有一个「排队中」标记，已经排了一个任务时后续触发只置脏标记；任务每一轮在取输入时清掉脏标记，结束时发现脏标记（说明取输入之后又有触发）就再跑一轮，所以任务开始之前到达的连续事件只跑一轮，运行中到达的再多跑一轮，事件不会堆积任务。
 4. 唤醒视图：`WelcomeModel` 持有 `futures::channel::mpsc::unbounded` 的发送端（`subscribe` 登记）；视图建立时 `cx.spawn` 一个前台任务循环 `await` 接收端，每收到一项就 `this.update(cx, |_, cx| cx.notify())`。发送端的 `wake` 经 GPUI 的平台分发器唤醒主线程（与 [workspace 设计「数据流与线程」](workspace.md#数据流与线程)的主线程队列同一机制），任何线程都能发，不轮询。视图 drop 时守卫注销，之后的 `wake` 不做任何事。
 5. 打开：最近项目和发现的文件夹：视图在主线程上先 `model.begin_open(path, source)`（清 `notice`、记 `opening`），再 `dispatch(WorkspaceCommand::OpenProject(path))`；`opening` 有值期间，视图对同一路径的再次 ↵ 或点击不发出命令，对其他路径照常（`workspace` 自己排队）。Open Folder 按钮：`model.clear_notice()` 后 `dispatch(PromptOpenProject)`（⌘O 是 `workspace` 的全局绑定，不经本视图，只有 `workspace` 的流程）。`workspace` 问守卫、调 `Projects::open`，`Opened { Ok }` 到达后换基底屏幕、drop 本视图，本 crate 的监听同时清 `opening`（第 2 步）。`Opened { Err(e) }` 时 `workspace` 停在 Welcome 并记 warn，本 crate 的监听把 `Notice::OpenFailed(e 的种类)` 放进快照、清 `opening`；`opening` 有值并且 `e` 是 `NotFound` / `NotADirectory` 时，`path` 等于 `opening.path` 的最近项目标 `missing`。`Opened` 不带路径（[project 设计「事件」](project.md#事件)只有 `OpenRequest`），所以本屏幕发起的打开同一时刻只能有一个在进行，`opening` 就是那一个；不是本屏幕发起的失败（`restore` 的路径已不存在、⌘O 选的目录不可读）只显示提示，不标 `missing`。
 6. 移除最近项目：视图调 `model.remove_recent(path)`：在调用线程（主线程）上只改内存里的列表并换快照（常数时间，不做 IO；`loaded` 还没置位时只进变更队列），然后置写入的脏标记：没有写任务在排队时用 `started` 存下的 `PluginHandle::own_with` 排一个 `Background` 写任务（同第 2 步；`welcome` 已停用时 `own_with` 返回 false，不写，视图这时也已经被 `workspace` 撤下），再置第 3 步的脏标记（被遮住的发现项可能重新出现）。
@@ -390,7 +389,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - 纯函数（`#[test]`，不依赖 GPUI）：
   - `recent::push_front_dedupes_by_path_and_caps_at_10`、`recent::remove_keeps_order`、`recent::decode_rejects_unknown_version`、`recent::decode_ignores_unknown_fields`、`recent::encode_roundtrips`（用 `fixtures/recent_v1.json`）、`recent::entry_from_snapshot_joins_root_and_opened_at`（子目录打开、linked worktree、裸仓库三种）。
   - `discover::groups_by_project_and_takes_the_newest_root`、`discover::root_strips_rel_from_cwd`、`discover::skips_open_projects_and_recent_keys`（同一仓库的其他 worktree 里的会话不再出现）、`discover::skips_pending_missing_and_unresolvable`、`discover::running_needs_open_turn_within_10_min`、`discover::subagents_count_as_sessions_not_running`、`discover::caps_at_50`、`discover::recent_rows_get_counts_by_key_from_located_and_resolved`。
-- 模型（`#[test]`，`TestKernel` 注入假的 `dyn Projects`、`dyn SessionSource`、`dyn Contributions`，executor 用测试队列）：`welcome_started_loads_the_file`、`welcome_started_records_projects_opened_before_it`（假 `Projects` 在 `started` 之前已有一个打开的项目，`Opened` 没有送达，列表最前仍是它）、`discovery_started_builds_the_list`、`recent_loaded_after_discovery_triggers_a_rebuild`（先发现后读文件，最近项目不留在发现列表里）、`welcome_activates_without_any_session_source`（只装 `welcome`：屏幕已注册，`discovered` 是 `Unavailable`）、`discovery_drop_sets_unavailable`、`opened_records_a_recent_entry_with_its_key_and_writes_the_file`、`opened_without_a_snapshot_records_nothing`、`opened_before_the_file_is_loaded_does_not_overwrite_it`（先 `Opened` 后读完文件：文件里原有的条目都还在，新条目在最前）、`writes_are_serialized_and_coalesced`（三次连续变化只写两次，最后一次写出的是最新列表）、`sessions_changed_rebuilds_once_when_events_pile_up`（三次事件只跑两次）、`remove_recent_updates_the_snapshot_before_writing`、`rebuild_merges_counts_without_restoring_a_removed_entry`、`begin_open_then_error_marks_the_entry_missing_and_clears_opening`、`error_without_opening_only_shows_the_notice`、`wake_is_called_once_per_snapshot`。
+- 模型（`#[test]`，`TestKernel` 注入假的 `dyn Projects`、`dyn SessionSource`、`dyn Contributions`，executor 用测试队列）：`welcome_started_loads_the_file`、`welcome_started_records_projects_opened_before_it`（假 `Projects` 在 `started` 之前已有一个打开的项目，`Opened` 没有送达，列表最前仍是它）、`discovery_started_builds_the_list`、`recent_loaded_after_discovery_triggers_a_rebuild`（先发现后读文件，最近项目不留在发现列表里）、`welcome_activates_without_any_session_source`（只装 `welcome`：屏幕已注册，`discovered` 是 `Unavailable`）、`discovery_drop_sets_unavailable`、`opened_records_a_recent_entry_with_its_key_and_writes_the_file`、`opened_without_a_snapshot_records_nothing`、`opened_before_the_file_is_loaded_does_not_overwrite_it`（先 `Opened` 后读完文件：文件里原有的条目都还在，新条目在最前）、`writes_are_serialized_and_coalesced`（写任务开始之前的两次变化只写一次；写的过程中又来一次变化，再写一次，最后写出的是最新列表）、`sessions_changed_rebuilds_once_when_events_pile_up`（任务开始之前的三次事件只跑一轮；运行中到达的再多跑一轮）、`remove_recent_updates_the_snapshot_before_writing`、`rebuild_merges_counts_without_restoring_a_removed_entry`、`begin_open_then_error_marks_the_entry_missing_and_clears_opening`、`error_without_opening_only_shows_the_notice`、`wake_is_called_once_per_snapshot`。
 - `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`）：`first_render_shows_title_and_open_folder_before_any_snapshot`（模型还是 `Loading` / `Pending` 时的语义树只有标题、按钮、分段控件和两个列表标题）、`skeleton_appears_after_100ms_and_rows_replace_it`、`click_and_enter_dispatch_open_project_once`（`opening` 期间对同一行再按 ↵ 不重复，失败后可以再试）、`open_folder_dispatches_prompt`、`arrows_move_selection_across_both_lists`、`backspace_removes_the_selected_recent_and_moves_selection`、`open_error_shows_a_notice_and_clears_on_the_next_open`、`discovered_rows_update_on_wake`、`unavailable_discovery_shows_the_empty_state_without_a_skeleton`、`language_picker_switches_strings_and_calls_platform`（假的 `platform` 写入函数经 `test-support` 注入；失败时显示 `welcome-language-not-saved`）、`actions_are_triggerable_by_name`（探针契约）。
 - 语义树：`welcome_tree_empty`、`welcome_tree_with_lists`、`welcome_tree_with_error` 的 insta 快照（UI 探针完成后接入；之前用 `semantic::Recorder` 的记录序列化）。
 - 日志：`canary_stays_out_of_welcome_logs`。
@@ -440,7 +439,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 分两步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-welcome`、`just deny` 通过。前置条件 A、B 各自的 PR 先合并；C 随第 2 步；`workspace` 的第 2 步（根视图与贡献应用）和 `ui` 的实现在第 2 步之前。
 
-**第 1 步：插件、模型、最近项目的存储、发现列表的归并（不依赖 GPUI 的部分，`Refs #29`）。**
+**第 1 步：插件、模型、最近项目的存储、发现列表的归并（不依赖 GPUI 的部分，`Refs #29`，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）。**
 
 - `cargo check -p lectern-welcome` 通过；`Cargo.toml` 带 `plugin = true`，`python3 scripts/check_architecture.py` 通过：`welcome` 不依赖其他插件 crate，只有 `app` 依赖它。
 - `welcome_activates_without_any_session_source` 通过：没有 `dyn SessionSource` 的提供者时 `welcome` 照常激活并注册屏幕。
@@ -457,3 +456,33 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - `just test -p lectern-app`：`every_profile_graph_validates` 里 desktop 的插件数加二。
 - 手动在 macOS 上运行发布构建（临时 `HOME`）：首次启动显示 Welcome，两个列表为空状态；打开一个文件夹再重启后回到项目主页，⌘W 关闭、点 Dock 重开后 Welcome 的最近项目里有它；移除它后 `~/Library/Application Support/Lectern/welcome/recent.json` 里没有它；日志里没有这个文件夹的路径；在临时 `HOME` 下放一个 Claude Code 会话目录（`projects/<编码的 cwd>/<uuid>.jsonl`，cwd 指向一个未打开的仓库），启动后它出现在发现列表里，↓ ↵ 打开它。
 - 空闲内存：Welcome 静止后的 `phys_footprint` 与 `workspace` 第 3 步「验收」的数值相比增加不超过 1 MB。
+
+## 实际验证
+
+### 第 1 步
+
+本 crate 不依赖 GPUI 的部分（[#240](https://github.com/SoloJiang/lectern-app/pull/240)），在 macOS（arm64，Rust 1.97.0）上运行；本 crate 没有 GPUI 依赖，所以也在 Linux CI 的 GPUI-free 任务里运行（`check_architecture.py --gpui-free-packages` 列出 `-p lectern-welcome`）：
+
+- `cargo check -p lectern-welcome`、`just check`（含 `cargo clippy --workspace --all-targets -- -D warnings` 和架构检查：32 个 crate，`welcome` 带 `plugin = true`，没有依赖其他插件 crate）、`just deny` 通过。
+- `just test -p lectern-welcome`：47 个测试通过，都是普通 `#[test]`，连续 15 次运行结果相同。
+  - `src/tests/recent.rs`（13 个）：`push_front_dedupes_by_path_and_caps_at_10`、`push_front_keeps_one_entry_per_path_not_per_key`、`remove_keeps_order`、`decode_rejects_unknown_version`、`decode_ignores_unknown_fields`、`decode_dedupes_and_caps_a_hand_edited_file`、`encode_roundtrips`（用 `fixtures/recent_v1.json`，并有 insta 快照）、`encode_leaves_out_memory_only_fields`、`encode_skips_entries_whose_path_is_not_utf8`（Unix）、`entry_from_snapshot_joins_root_and_opened_at`（根、子目录、linked worktree、裸仓库、文件夹项目）、`store_reads_what_it_wrote`、`store_reports_unreadable_files_by_reason`、`store_write_names_the_failed_step`。
+  - `src/tests/discover.rs`（10 个）：「测试」列出的 8 个 `discover::*`，加 `at_most_four_agents_in_order_of_first_appearance`、`sources_are_merged_newest_first`；`groups_by_project_and_takes_the_newest_root` 带 insta 快照。
+  - `src/tests/model.rs`（23 个）：「测试」列出的模型测试（`welcome_activates_without_any_session_source` 断言 `Screen(WELCOME)` 带「接口」的 `ScreenLayout` 登记一次、没有 token），加 `opening_a_listed_project_moves_its_entry_to_the_front`、`an_unreadable_file_gives_an_empty_list_that_the_next_open_replaces`（坏版本和坏 JSON 两种文件）、`a_failed_write_keeps_the_list_in_memory`、`project_events_other_than_changed_rebuild`、`an_open_project_leaves_the_discovered_list`、`remove_recent_of_an_unknown_path_is_ignored`、`language_not_saved_sets_the_notice`。
+  - `src/tests/logs.rs`：`canary_stays_out_of_welcome_logs`：金丝雀放在最近项目文件的路径与项目名、会话的 cwd 与 `rel` 与 ID、打开的项目的路径与名字、`OpenError` 的附带文字里，另有一个写不出的数据目录和一个坏文件；trace 级别跑完加载、打开、重算、移除、失败、停用；没有记录含金丝雀，且 `recent list loaded`、`recent list unreadable`、`recent list not written`、`project opened from welcome`、`project open failed`、`language override not saved`、`discovery unavailable` 都出现过。
+  - 夹具：假的 `dyn Projects`（记录收到的 open 请求，所有测试断言它为空）、`dyn SessionSource`（两个来源）、`dyn Contributions` 都写在 `src/tests/support.rs`，会话是合成的 `SessionSummary`，路径都是虚构的；没有测试读取这台机器上的会话目录或任何用户目录，写文件的测试用临时目录。
+- `rg 'std::fs' crates/welcome/src --glob '!src/recent/store.rs'`、`rg 'Projects::open\b|\.open\(' crates/welcome/src`、`rg 'eprintln!|println!|log::' crates/welcome/src` 都没有结果；`std::fs` 的调用在 `store.rs` 里：`read`、`write` 只从 `Background` 任务调用（`load`、`write_task`），其余是 `#[cfg(test)]` 的 `store::testing`。
+- 没有验证的：`Screen(WELCOME)` 的载荷是占位类型，`workspace` 的真实应用（对 `ui::contrib::Screen` 的 `downcast`）和 `app` 装配要等第 2 步；`plugin/welcome/*` 的激活耗时和空闲内存没有测（`app` 还没有装配这两个插件，bench 的插件基准不覆盖它们）。
+
+## 与设计的差异
+
+### 第 1 步
+
+- **屏幕的载荷是占位类型。** `ui::contrib::Screen` 里是 GPUI 的视图工厂，第 1 步没有 GPUI。`welcome` 在 `activate` 里照常经 `dyn Contributions` 登记 `Screen(WELCOME)`（`ScreenLayout` 按「界面」），载荷是本 crate 的空类型 `ScreenPlaceholder`，第 2 步换成 `ui::contrib::Screen`；在那之前 `app` 不装配这两个插件（前置条件 C 在第 2 步）。`KeyBindings` 的载荷是 GPUI 的 `Action`，第 1 步不登记。
+- **`welcome-discovery` 在 `started` 里置 `Pending`，不在 `activate` 里。** `activate` 不改模型，激活失败时模型不会留下一个永远不结束的 `Pending`；`activate` 到 `started` 之间的几毫秒仍是 `Unavailable`。
+- **合并的计数。** 「排队中 + 脏标记」每一轮在取输入时清掉脏标记，所以任务开始之前到达的三次事件只跑一轮，运行中到达的再多跑一轮（设计原来写「三次事件只跑两次」）。写文件同理。两者的保证不变：任一时刻最多一个任务，取输入之后到达的变化一定有下一轮。「数据流与线程」第 3 步和「测试」已改。
+- **`discover::build` 的参数。** 取 `&[Arc<SessionList>]`（每个来源一个）、`&[ProjectKey]`（已打开）、`&[ProjectKey]`（最近项目的 key）和 `Timestamp`，返回 `Built`（发现列表、按 `key` 的计数、会话总数、跳过数）；设计写的是 `(sessions, open_projects, recent, now)`。多个来源的会话先按 `last_activity` 从新到旧稳定排序再分组。
+- **`create_dir_all`。** 写文件前建 `data_dir` 用 `create_dir_all`，不是只建一级：`app` 传入的是 `app_data()` 下的 `welcome/`，`app_data()` 本身可能还不存在。
+- **不依赖 `futures`、`lectern-ui`、`lectern-i18n`、`lectern-platform`、`gpui`。** 模型的 `subscribe` 收一个回调，不需要 channel（第 2 步的视图自己把回调接到 `mpsc`）；其余几个 crate 的用处都在视图和语言选择里，随第 2 步加入。`Cargo.toml` 的 `description` 随之改成不提窗口。
+- **`recent entry skipped` 每个跳过的条目记一条**（设计只写了字段 `reason`），每次写文件重复记，由日志的限流兜住。
+- `RecentList` 在设计里既是文件内容又是模型里的列表；实现里文件内容是私有的 `RecentFile { version, entries }`，模型里是 `Vec<RecentEntry>` 加 `loaded` 标记和变更队列。
+- 测试用的钩子：`Stats` 的 `during_write`、`during_rebuild` 只在 `#[cfg(test)]` 下编译，让测试在任务进行到一半时插入一次变更。
