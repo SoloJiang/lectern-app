@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use gpui::AppContext;
 use lectern_executor::Executor;
 use lectern_kernel::{
     Activation, Active, Context, Manifest, Name, Plugin, PluginError, PluginHandle, ServiceRef,
@@ -15,10 +16,15 @@ use lectern_kernel::{
 use lectern_services::project::{ProjectEvent, Projects};
 use lectern_services::session::{SessionSource, SessionsChanged};
 use lectern_services::workspace::{
-    Contribution, ContributionKind, Contributions, Payload, ScreenLayout, Visibility, screens,
+    Contribution, ContributionKind, Contributions, ScreenLayout, Visibility, screens,
 };
+use lectern_ui::Text;
+use lectern_ui::contrib::{Screen, ToolbarItems};
 
+use crate::actions;
 use crate::model::WelcomeModel;
+use crate::prefs::{LanguagePrefs, PlatformPrefs};
+use crate::view::{ViewDeps, WelcomeView};
 
 /// The ID of the plugin with the screen and the recent projects.
 pub const WELCOME_ID: &str = "welcome";
@@ -39,16 +45,22 @@ pub struct WelcomeDeps {
 /// one by one. Builds an empty model; no IO.
 pub fn plugins(deps: WelcomeDeps) -> [(Name, WelcomePlugin); 2] {
     let model = WelcomeModel::new(deps.executor, deps.data_dir);
-    from_model(model)
+    from_model(model, Arc::new(PlatformPrefs), home_dir())
 }
 
-pub(crate) fn from_model(model: Arc<WelcomeModel>) -> [(Name, WelcomePlugin); 2] {
+pub(crate) fn from_model(
+    model: Arc<WelcomeModel>,
+    prefs: Arc<dyn LanguagePrefs>,
+    home: Option<PathBuf>,
+) -> [(Name, WelcomePlugin); 2] {
     [
         (
             Name::Borrowed(WELCOME_ID),
             WelcomePlugin {
                 role: Role::Screen,
                 model: model.clone(),
+                prefs: prefs.clone(),
+                home: home.clone(),
             },
         ),
         (
@@ -56,6 +68,8 @@ pub(crate) fn from_model(model: Arc<WelcomeModel>) -> [(Name, WelcomePlugin); 2]
             WelcomePlugin {
                 role: Role::Discovery,
                 model,
+                prefs,
+                home,
             },
         ),
     ]
@@ -70,6 +84,10 @@ enum Role {
 pub struct WelcomePlugin {
     role: Role,
     model: Arc<WelcomeModel>,
+    /// The language preference the screen's view reads and writes.
+    prefs: Arc<dyn LanguagePrefs>,
+    /// The home directory, shown as `~` in the paths.
+    home: Option<PathBuf>,
 }
 
 impl WelcomePlugin {
@@ -89,10 +107,11 @@ pub(crate) const LAYOUT: ScreenLayout = ScreenLayout {
     floating_bar: false,
 };
 
-/// The payload of the screen until the view exists. `ui::contrib::Screen`
-/// holds a GPUI view factory, which this step does not have; step 2 replaces
-/// this with it. `app` does not assemble the plugins before then.
-pub(crate) struct ScreenPlaceholder;
+/// The home directory the paths are shortened with; an environment read,
+/// not file IO.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
 
 impl Plugin for WelcomePlugin {
     fn manifest(&self) -> Manifest {
@@ -120,25 +139,64 @@ impl WelcomePlugin {
     fn activate_screen(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
         let contributions = ctx.service::<dyn Contributions>();
         let projects = ctx.service::<dyn Projects>();
-        let registration = contributions
+        let screen = self.screen(contributions.clone());
+        let registry = contributions
             .get()
-            .ok_or(PluginError::DependencyUnavailable)?
-            .register(
-                Contribution {
-                    kind: ContributionKind::Screen(LAYOUT),
-                    id: Name::Borrowed(screens::WELCOME),
-                    order: 0,
-                    payload: Payload(Box::new(ScreenPlaceholder)),
-                },
-                None,
-            );
+            .ok_or(PluginError::DependencyUnavailable)?;
+        let registration = registry.register(
+            Contribution {
+                kind: ContributionKind::Screen(LAYOUT),
+                id: Name::Borrowed(screens::WELCOME),
+                order: 0,
+                payload: screen.into_payload(),
+            },
+            None,
+        );
         ctx.own_staged(registration);
+        let bindings = registry.register(
+            Contribution {
+                kind: ContributionKind::KeyBindings,
+                id: Name::Borrowed(screens::WELCOME),
+                order: 0,
+                payload: actions::key_bindings().into_payload(),
+            },
+            None,
+        );
+        ctx.own_staged(bindings);
         let model = self.model.clone();
         ctx.on::<ProjectEvent>(move |event, handle| model.welcome_project_event(event, handle));
         Ok(Box::new(ScreenActive {
             model: self.model.clone(),
             projects: Some(projects),
         }))
+    }
+
+    /// The screen's payload: a factory that builds the view each time
+    /// `workspace` needs the screen, and an empty toolbar (the layout has
+    /// none). The factory runs on the main thread.
+    fn screen(&self, contributions: ServiceRef<dyn Contributions>) -> Screen {
+        let model = self.model.clone();
+        let prefs = self.prefs.clone();
+        let home = self.home.clone();
+        Screen {
+            build: Arc::new(move |_, window, cx| {
+                let deps = ViewDeps {
+                    model: model.clone(),
+                    contributions: contributions.clone(),
+                    prefs: prefs.clone(),
+                    home: home.clone(),
+                };
+                let view = cx.new(|cx| WelcomeView::new(deps, cx));
+                let focus = view.read(cx).focus_handle().clone();
+                window.focus(&focus, cx);
+                view.into()
+            }),
+            toolbar: Arc::new(|_| ToolbarItems {
+                title: Text::verbatim(String::new()),
+                subtitle: None,
+                controls: Vec::new(),
+            }),
+        }
     }
 
     fn activate_discovery(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {

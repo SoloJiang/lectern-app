@@ -4647,11 +4647,16 @@ version = "0.0.0"
 name = "lectern-welcome"
 version = "0.0.0"
 dependencies = [
+ "futures",
+ "gpui-pre",
  "insta",
  "lectern-executor",
+ "lectern-i18n",
  "lectern-kernel",
  "lectern-logging",
+ "lectern-platform",
  "lectern-services",
+ "lectern-ui",
  "serde",
  "serde_json",
  "tempfile",

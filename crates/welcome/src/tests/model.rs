@@ -82,15 +82,21 @@ fn welcome_activates_without_any_session_source() {
     rig.start_screen();
     assert_eq!(
         *rig.contributions.registered.lock().unwrap(),
-        [(
-            ContributionKind::Screen(LAYOUT),
-            lectern_kernel::Name::Borrowed(screens::WELCOME)
-        )],
-        "the screen is registered"
+        [
+            (
+                ContributionKind::Screen(LAYOUT),
+                lectern_kernel::Name::Borrowed(screens::WELCOME)
+            ),
+            (
+                ContributionKind::KeyBindings,
+                lectern_kernel::Name::Borrowed(screens::WELCOME)
+            )
+        ],
+        "the screen and its key bindings are registered"
     );
     assert_eq!(
         *rig.contributions.tokens.lock().unwrap(),
-        [false],
+        [false, false],
         "activate has no token: the guard goes to the kernel for the commit"
     );
     rig.settle();

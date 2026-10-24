@@ -20,12 +20,14 @@ use lectern_services::session::{
     SessionKey, SessionList, SessionSource, SessionSummary, SourceId, Timestamp, TurnIndex,
 };
 use lectern_services::workspace::{
-    CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone,
+    CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone, Payload,
     Registration, SidebarEntry, WorkspaceCommand,
 };
+use lectern_ui::contrib::{KeyBindings, Screen};
 
 use crate::model::WelcomeModel;
 use crate::plugin::{WelcomePlugin, from_model};
+use crate::prefs::{Done, LanguagePrefs};
 use crate::recent::store::testing as files;
 use lectern_kernel::Name;
 
@@ -312,11 +314,81 @@ pub(crate) fn located(key: &ProjectKey, rel: &str) -> Place {
     })
 }
 
-/// A `dyn Contributions` that only remembers what was registered.
+/// A `dyn Contributions` that remembers what was registered (the payloads
+/// too, so a test can build the screen) and the commands it was sent.
 #[derive(Default)]
 pub(crate) struct FakeContributions {
     pub(crate) registered: Mutex<Vec<(ContributionKind, Name)>>,
     pub(crate) tokens: Mutex<Vec<bool>>,
+    payloads: Mutex<Vec<Payload>>,
+    pub(crate) dispatched: Mutex<Vec<WorkspaceCommand>>,
+}
+
+impl FakeContributions {
+    /// The screen's payload, as `workspace` would take it back.
+    pub(crate) fn screen(&self) -> Screen {
+        self.payloads
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|payload| {
+                let any: &(dyn std::any::Any + Send) = &*payload.0;
+                any.downcast_ref::<Screen>().cloned()
+            })
+            .expect("the screen is registered")
+    }
+
+    /// The key bindings, as `(keystrokes, action name, predicate)`.
+    pub(crate) fn bindings(&self) -> Vec<(&'static str, String, Option<&'static str>)> {
+        self.payloads
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|payload| {
+                let any: &(dyn std::any::Any + Send) = &*payload.0;
+                any.downcast_ref::<KeyBindings>().map(|bindings| {
+                    bindings
+                        .0
+                        .iter()
+                        .map(|(keys, action, context)| (*keys, action.name().to_owned(), *context))
+                        .collect()
+                })
+            })
+            .expect("the key bindings are registered")
+    }
+
+    /// The key bindings as GPUI loads them.
+    pub(crate) fn key_bindings(&self, cx: &gpui::App) -> Vec<gpui::KeyBinding> {
+        let payloads = self.payloads.lock().unwrap();
+        let bindings = payloads
+            .iter()
+            .find_map(|payload| {
+                let any: &(dyn std::any::Any + Send) = &*payload.0;
+                any.downcast_ref::<KeyBindings>()
+            })
+            .expect("the key bindings are registered");
+        bindings
+            .0
+            .iter()
+            .map(|(keys, action, context)| {
+                let predicate = context.map(|context| {
+                    std::rc::Rc::new(
+                        gpui::KeyBindingContextPredicate::parse(context)
+                            .expect("the predicate parses"),
+                    )
+                });
+                gpui::KeyBinding::load(
+                    keys,
+                    action.boxed_clone(),
+                    predicate,
+                    false,
+                    None,
+                    cx.keyboard_mapper().as_ref(),
+                )
+                .expect("the keystrokes parse")
+            })
+            .collect()
+    }
 }
 
 impl Contributions for FakeContributions {
@@ -326,6 +398,7 @@ impl Contributions for FakeContributions {
             .lock()
             .unwrap()
             .push((contribution.kind, contribution.id));
+        self.payloads.lock().unwrap().push(contribution.payload);
         Registration::new(|_| {}, || {})
     }
 
@@ -346,13 +419,45 @@ impl Contributions for FakeContributions {
         Registration::new(|_| {}, || {})
     }
 
-    fn dispatch(&self, _: WorkspaceCommand) {}
+    fn dispatch(&self, command: WorkspaceCommand) {
+        self.dispatched.lock().unwrap().push(command);
+    }
 
     fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
         Arc::from(Vec::new())
     }
 
     fn report_milestone(&self, _: Milestone) {}
+}
+
+/// A language preference in memory: what the system prefers, the saved
+/// override, and every write it was asked for. The tests never touch the
+/// real user defaults.
+#[derive(Default)]
+pub(crate) struct FakePrefs {
+    pub(crate) system: Mutex<Vec<String>>,
+    pub(crate) saved: Mutex<Option<String>>,
+    /// Every `set_language_override` call, in order: the tag.
+    pub(crate) writes: Mutex<Vec<Option<String>>>,
+    /// The result handed to `done` (default: `Ok`).
+    pub(crate) outcome: Mutex<Option<Result<(), lectern_platform::system::PrefError>>>,
+}
+
+impl LanguagePrefs for FakePrefs {
+    fn system_languages(&self) -> Vec<String> {
+        self.system.lock().unwrap().clone()
+    }
+
+    fn language_override(&self) -> Option<String> {
+        self.saved.lock().unwrap().clone()
+    }
+
+    fn set_language_override(&self, tag: Option<&str>, done: Done) {
+        self.writes.lock().unwrap().push(tag.map(str::to_owned));
+        *self.saved.lock().unwrap() = tag.map(str::to_owned);
+        let outcome = self.outcome.lock().unwrap().unwrap_or(Ok(()));
+        done(outcome);
+    }
 }
 
 /// The two plugins on two test kernels, one manual executor, one clock and
@@ -362,6 +467,7 @@ pub(crate) struct Rig {
     pub(crate) executor: Executor,
     pub(crate) projects: Arc<FakeProjects>,
     pub(crate) contributions: Arc<FakeContributions>,
+    pub(crate) prefs: Arc<FakePrefs>,
     pub(crate) claude: Arc<FakeSource>,
     pub(crate) codex: Arc<FakeSource>,
     pub(crate) dir: tempfile::TempDir,
@@ -386,7 +492,12 @@ impl Rig {
         let contributions = Arc::new(FakeContributions::default());
         let claude = FakeSource::new("session-claude-code", Agent::ClaudeCode);
         let codex = FakeSource::new("session-codex", Agent::Codex);
-        let [(_, screen), (_, discovery)] = from_model(model.clone());
+        let prefs = Arc::new(FakePrefs::default());
+        let [(_, screen), (_, discovery)] = from_model(
+            model.clone(),
+            prefs.clone(),
+            Some(PathBuf::from("/Users/example")),
+        );
         let screen = TestKernel::new(screen)
             .mock::<dyn Contributions>(contributions.clone())
             .mock::<dyn Projects>(projects.clone());
@@ -395,6 +506,7 @@ impl Rig {
             executor,
             projects,
             contributions,
+            prefs,
             claude,
             codex,
             dir,

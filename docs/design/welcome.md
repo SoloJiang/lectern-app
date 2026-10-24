@@ -1,6 +1,6 @@
 # welcome 设计
 
-状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）已实现，见「实际验证」「与设计的差异」；前置条件 A、B、C 与第 2 步尚未实现。
+状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配）在 `app` 的 PR。
 
 对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
 
@@ -314,31 +314,33 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
   | ID | `Role` | `Label` / `attrs` |
   |---|---|---|
-  | `welcome` | `Group` | `recent`（`loading` / `ready`）、`discovered`（`unavailable` / `pending` / `ready`）、`opening`（`true` 时才有） |
+  | `welcome.root` | `Group` | `recent`（`loading` / `ready`）、`discovered`（`unavailable` / `pending` / `ready`）、`opening`（`true` 时才有） |
   | `welcome.title` | `Text` | `Label::key = welcome-title` |
   | `welcome.open-folder` | `Button` | `Label::key = welcome-open-folder` |
-  | `welcome.language` | `TabBar` | `Label::key = welcome-language` |
+  | `welcome.language` | `TabBar` | —（`ui::Segmented` 不声明 `Label`，见「与设计的差异」第 2 步） |
   | `welcome.language.item[system]`、`[en]`、`[zh-CN]` | `Tab` | `State::selected`；`Label::key` 是对应的 `common-language-*` |
   | `welcome.notice` | `Text` | `Label::key` 是 `welcome-open-failed-*` 或 `welcome-language-not-saved`；没有提示时不出现 |
   | `welcome.recent` | `List` | — |
   | `welcome.recent.empty` | `Text` | `Label::key = welcome-recent-empty`；列表非空时不出现 |
-  | `welcome.recent.item[<path>]` | `ListItem` | `Label` 是 `name`（`key` None）；`State::selected`；`attrs`：`kind`（`git` / `folder`，取自 `key` 的变体）、`sessions`、`running`、`missing`（`true` 时才有） |
+  | `welcome.recent.item[<path>]` | `ListItem` | `State::selected`（`ui::Row` 声明，没有 `Label` 和 `attrs`） |
+  | `welcome.recent.item[<path>].name` | `Text` | `Label` 是 `name`（`key` None）；`attrs`：`kind`（`git` / `folder`，取自 `key` 的变体）、`sessions`、`running`、`missing`（`true` 时才有） |
   | `welcome.recent.item[<path>].remove` | `Button` | `Label::key = welcome-recent-remove` |
   | `welcome.discovered` | `List` | — |
   | `welcome.discovered.empty` | `Text` | `Label::key = welcome-discovered-empty` |
-  | `welcome.discovered.item[<path>]` | `ListItem` | `Label` 是 `name`；`State::selected`；`attrs`：`agents`（`claude-code,codex`）、`sessions`、`running` |
+  | `welcome.discovered.item[<path>]` | `ListItem` | `State::selected` |
+  | `welcome.discovered.item[<path>].name` | `Text` | `Label` 是 `name`；`attrs`：`agents`（按首次出现的顺序，如 `codex,claude-code`）、`sessions`、`running` |
 
-  `<path>` 是条目的 `path`（业务键，不是下标）。骨架块不声明节点。
+  `<path>` 是条目的 `path`（业务键，不是下标；含换行或 `].` 的路径把这两处换成空格和 `]·`，`NodeId` 不接受它们）。骨架块不声明节点。
 
 - Action 与快捷键（都能被探针按名字触发；经 `KeyBindings` 贡献登记，谓词 `Content > welcome`，视图的根元素设 KeyContext `welcome` 并持有焦点）：
 
   | Action | 键 | 处理 |
   |---|---|---|
   | `welcome::SelectNext` | ↓ | 选择线性序列里的下一项；没有选中时选第一项；已是最后一项时不动 |
-  | `welcome::SelectPrevious` | ↑ | 上一项；在第一项时不动 |
+  | `welcome::SelectPrevious` | ↑ | 上一项；在第一项时不动；没有选中时选最后一项 |
   | `welcome::OpenSelected` | ↵ | 对选中项 `begin_open` 后 `dispatch(OpenProject(path))`；没有选中、或 `opening.path` 就是它时不做任何事 |
   | `welcome::RemoveSelected` | ⌫ | 选中的是最近项目时 `remove_recent(path)`，选择移到同位置的下一项（没有则上一项）；选中的是发现项时不做任何事 |
-  | `welcome::SelectLanguage { locale: Option<Locale> }` | — | 分段控件的点击；探针用它切换语言 |
+  | `welcome::SelectLanguage { locale: Option<Locale> }` | — | 分段控件的点击；探针用它切换语言，构造时的 JSON 是 `{"locale": "en"}`、`{"locale": "zh-CN"}`、`{"locale": null}`（`Locale` 没有 serde，所以这个 `Action` 手写 `build`，见「与设计的差异」第 2 步） |
 
   ⌘O 不在这里绑定：它是 `workspace::OpenFolder` 的全局绑定，Open Folder 按钮和它都走 `PromptOpenProject`。Esc、⌘[ 在 Welcome 上由 `workspace` 忽略（[workspace 设计「导航状态机」](workspace.md#导航状态机)）。鼠标点击一行同时把选择移到这一行，键盘和鼠标触发同一个 `Row` 的选中样式。
 
@@ -390,8 +392,8 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   - `recent::push_front_dedupes_by_path_and_caps_at_10`、`recent::remove_keeps_order`、`recent::decode_rejects_unknown_version`、`recent::decode_ignores_unknown_fields`、`recent::encode_roundtrips`（用 `fixtures/recent_v1.json`）、`recent::entry_from_snapshot_joins_root_and_opened_at`（子目录打开、linked worktree、裸仓库三种）。
   - `discover::groups_by_project_and_takes_the_newest_root`、`discover::root_strips_rel_from_cwd`、`discover::skips_open_projects_and_recent_keys`（同一仓库的其他 worktree 里的会话不再出现）、`discover::skips_pending_missing_and_unresolvable`、`discover::running_needs_open_turn_within_10_min`、`discover::subagents_count_as_sessions_not_running`、`discover::caps_at_50`、`discover::recent_rows_get_counts_by_key_from_located_and_resolved`。
 - 模型（`#[test]`，`TestKernel` 注入假的 `dyn Projects`、`dyn SessionSource`、`dyn Contributions`，executor 用测试队列）：`welcome_started_loads_the_file`、`welcome_started_records_projects_opened_before_it`（假 `Projects` 在 `started` 之前已有一个打开的项目，`Opened` 没有送达，列表最前仍是它）、`discovery_started_builds_the_list`、`recent_loaded_after_discovery_triggers_a_rebuild`（先发现后读文件，最近项目不留在发现列表里）、`welcome_activates_without_any_session_source`（只装 `welcome`：屏幕已注册，`discovered` 是 `Unavailable`）、`discovery_drop_sets_unavailable`、`opened_records_a_recent_entry_with_its_key_and_writes_the_file`、`opened_without_a_snapshot_records_nothing`、`opened_before_the_file_is_loaded_does_not_overwrite_it`（先 `Opened` 后读完文件：文件里原有的条目都还在，新条目在最前）、`writes_are_serialized_and_coalesced`（写任务开始之前的两次变化只写一次；写的过程中又来一次变化，再写一次，最后写出的是最新列表）、`sessions_changed_rebuilds_once_when_events_pile_up`（任务开始之前的三次事件只跑一轮；运行中到达的再多跑一轮）、`remove_recent_updates_the_snapshot_before_writing`、`rebuild_merges_counts_without_restoring_a_removed_entry`、`begin_open_then_error_marks_the_entry_missing_and_clears_opening`、`error_without_opening_only_shows_the_notice`、`wake_is_called_once_per_snapshot`。
-- `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`）：`first_render_shows_title_and_open_folder_before_any_snapshot`（模型还是 `Loading` / `Pending` 时的语义树只有标题、按钮、分段控件和两个列表标题）、`skeleton_appears_after_100ms_and_rows_replace_it`、`click_and_enter_dispatch_open_project_once`（`opening` 期间对同一行再按 ↵ 不重复，失败后可以再试）、`open_folder_dispatches_prompt`、`arrows_move_selection_across_both_lists`、`backspace_removes_the_selected_recent_and_moves_selection`、`open_error_shows_a_notice_and_clears_on_the_next_open`、`discovered_rows_update_on_wake`、`unavailable_discovery_shows_the_empty_state_without_a_skeleton`、`language_picker_switches_strings_and_calls_platform`（假的 `platform` 写入函数经 `test-support` 注入；失败时显示 `welcome-language-not-saved`）、`actions_are_triggerable_by_name`（探针契约）。
-- 语义树：`welcome_tree_empty`、`welcome_tree_with_lists`、`welcome_tree_with_error` 的 insta 快照（UI 探针完成后接入；之前用 `semantic::Recorder` 的记录序列化）。
+- `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`）：`first_render_shows_title_and_open_folder_before_any_snapshot`（模型还是 `Loading` / `Pending` 时的语义树只有标题、按钮、分段控件和两个列表标题）、`skeleton_appears_after_100ms_and_rows_replace_it`、`click_and_enter_dispatch_open_project_once`（`opening` 期间对同一行再按 ↵ 不重复，失败后可以再试）、`open_folder_dispatches_prompt`、`arrows_move_selection_across_both_lists`、`backspace_removes_the_selected_recent_and_moves_selection`、`open_error_shows_a_notice_and_clears_on_the_next_open`、`discovered_rows_update_on_wake`、`unavailable_discovery_shows_the_empty_state_without_a_skeleton`、`language_picker_switches_strings_and_calls_platform`（假的 `platform` 写入函数经 `test-support` 注入；失败时显示 `welcome-language-not-saved`）、`actions_are_triggerable_by_name`（探针契约：五个 `Action` 都经 `App::build_action` 按名字构造，`SelectLanguage` 从 JSON 构造）。实现里另加：`enter_opens_a_discovered_folder`、`up_without_a_selection_selects_the_last_item`、`the_remove_button_removes_its_row_and_does_not_open_it`、`a_click_on_a_row_that_is_gone_does_nothing`、`the_selection_stays_in_place_when_the_lists_change`、`the_picker_starts_on_the_saved_choice`、`a_failed_language_write_shows_the_notice_once`、`the_selected_row_is_scrolled_into_view`、`the_bindings_are_the_designs_and_below_content`（普通 `#[test]`）。视图的测试窗口 820 × 520，外面套一个 `Content` 区域的 `KeyContext`（`workspace` 的做法），按键走真实的 `KeyBindings` 载荷；屏幕由登记到假 `dyn Contributions` 里的 `ui::contrib::Screen` 载荷的工厂建出。语言偏好经 `prefs::LanguagePrefs`（`src/prefs.rs`）的假实现，测试从不碰真实的用户默认值。纯函数：`src/tests/selection.rs`（`Selection::next` / `previous` / `clamped`、`display_path`、`node_key`）。
+- 语义树：`welcome_tree_empty`、`welcome_tree_with_lists`、`welcome_tree_with_error`、`welcome_tree_loading` 的 insta 快照（`semantic::Recorder` 的记录去掉 `bounds` 和 `declared_at` 之后的文本，`src/tests/snapshots/`）。
 - 日志：`canary_stays_out_of_welcome_logs`。
 - fixtures（`crates/welcome/tests/fixtures/`）：`recent_v1.json`（3 条）、`recent_bad_version.json`、`recent_garbage.json`；会话列表在测试里直接构造 `SessionSummary`，不用真实的会话文件、git 和文件 IO（写文件的测试用临时目录）。
 
@@ -461,7 +463,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 ### 第 1 步
 
-本 crate 不依赖 GPUI 的部分（[#240](https://github.com/SoloJiang/lectern-app/pull/240)），在 macOS（arm64，Rust 1.97.0）上运行；本 crate 没有 GPUI 依赖，所以也在 Linux CI 的 GPUI-free 任务里运行（`check_architecture.py --gpui-free-packages` 列出 `-p lectern-welcome`）：
+本 crate 不依赖 GPUI 的部分（[#240](https://github.com/SoloJiang/lectern-app/pull/240)），在 macOS（arm64，Rust 1.97.0）上运行；当时本 crate 没有 GPUI 依赖，所以也在 Linux CI 的 GPUI-free 任务里运行（第 2 步加了 `gpui` 之后不再，见第 2 步）：
 
 - `cargo check -p lectern-welcome`、`just check`（含 `cargo clippy --workspace --all-targets -- -D warnings` 和架构检查：32 个 crate，`welcome` 带 `plugin = true`，没有依赖其他插件 crate）、`just deny` 通过。
 - `just test -p lectern-welcome`：47 个测试通过，都是普通 `#[test]`，连续 15 次运行结果相同。
@@ -472,6 +474,26 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   - 夹具：假的 `dyn Projects`（记录收到的 open 请求，所有测试断言它为空）、`dyn SessionSource`（两个来源）、`dyn Contributions` 都写在 `src/tests/support.rs`，会话是合成的 `SessionSummary`，路径都是虚构的；没有测试读取这台机器上的会话目录或任何用户目录，写文件的测试用临时目录。
 - `rg 'std::fs' crates/welcome/src --glob '!src/recent/store.rs'`、`rg 'Projects::open\b|\.open\(' crates/welcome/src`、`rg 'eprintln!|println!|log::' crates/welcome/src` 都没有结果；`std::fs` 的调用在 `store.rs` 里：`read`、`write` 只从 `Background` 任务调用（`load`、`write_task`），其余是 `#[cfg(test)]` 的 `store::testing`。
 - 没有验证的：`Screen(WELCOME)` 的载荷是占位类型，`workspace` 的真实应用（对 `ui::contrib::Screen` 的 `downcast`）和 `app` 装配要等第 2 步；`plugin/welcome/*` 的激活耗时和空闲内存没有测（`app` 还没有装配这两个插件，bench 的插件基准不覆盖它们）。
+
+### 第 2 步
+
+视图、Action、语言选择、语义树（`Closes #29`），在 macOS（arm64，Rust 1.97.0）上运行。基于 `ui` 第 4 步（[#242](https://github.com/SoloJiang/lectern-app/pull/242)，`semantic(...)`、`Recorder`）：本 PR 的 base 是 `ui/step-4`，它合并后改为 `main`。`app` 没有装配本 crate（另一个 PR 在做），所以没有运行过应用，下面都是 `#[gpui::test]` 与普通测试：
+
+- `just check`（格式、架构规则、文档链接、`cargo clippy --workspace --all-targets -- -D warnings`）、`just deny` 通过；`cargo check -p lectern-welcome`（不带 `--tests`，发布构建能编译的那一份依赖特性）通过。`Cargo.lock` 只多了 `lectern-welcome` 的依赖行，没有新 crate。
+- `just test -p lectern-welcome`：76 个测试通过（第 1 步的 47 个不变，新增 29 个），连续 12 次运行结果相同；`cargo test --doc -p lectern-welcome` 没有文档测试。
+  - `src/tests/view.rs`（23 个，除 `the_bindings_are_the_designs_and_below_content` 外都是 `#[gpui::test]`）：「测试」列出的 `first_render_shows_title_and_open_folder_before_any_snapshot`、`skeleton_appears_after_100ms_and_rows_replace_it`（骨架不声明节点，用它们加在发现列表之上的高度判断，时间用 GPUI 测试时钟的 `advance_clock`）、`click_and_enter_dispatch_open_project_once`、`open_folder_dispatches_prompt`、`arrows_move_selection_across_both_lists`、`backspace_removes_the_selected_recent_and_moves_selection`、`open_error_shows_a_notice_and_clears_on_the_next_open`、`discovered_rows_update_on_wake`、`unavailable_discovery_shows_the_empty_state_without_a_skeleton`、`language_picker_switches_strings_and_calls_platform`、`actions_are_triggerable_by_name`，加「测试」里写的另外 9 个，以及四个语义树快照（`welcome_tree_empty`、`welcome_tree_with_lists`、`welcome_tree_with_error`，`welcome_tree_loading` 在第一个测试里）。
+  - `src/tests/selection.rs`（6 个）：`Selection` 的移动与夹紧、`display_path`、`node_key`。
+  - 夹具：`src/tests/support.rs` 的 `FakeContributions` 多保存了登记的载荷并记录 `dispatch` 收到的命令，`FakePrefs` 是内存里的语言偏好。路径都是虚构的，没有测试读取用户目录、真实的会话目录或用户默认值。
+- 「验收」第 2 步的 `rg`：`rg 'rgb\(|hsla\(|Duration::from_millis|from_secs_f32' crates/welcome/src`、`rg '"[A-Z][a-z]+ [a-z]' crates/welcome/src --glob '!tests*'`、`rg 'Text::verbatim\(Arc::from\("' crates/welcome/src`、第 1 步的 `std::fs` / `Projects::open` / `eprintln!` 三条、`rg 'Recorder::begin' crates/welcome`（只有 `src/tests/view.rs`）都没有结果；`ui` 设计里的 `rg '\.font_family\(|gpui_component::Button'` 也没有。
+- 手动检查 820 × 520 下节点的边界（临时输出，没有入库）：左栏 300 pt 加 24 pt 内边距，右栏的列表 472 pt 宽，行高 46 pt，语言分段控件在左栏底部，移除按钮在选中行的行尾。
+
+没有验证的：
+
+- 在 macOS 上运行发布构建（首次启动、打开文件夹、重启、⌘W、移除、发现会话、↓ ↵）、视觉效果（`headless` 的 `#[gpui::test]` 不画像素）、空闲内存 `phys_footprint`，因为 `app` 还没有装配本 crate，也不能运行应用。
+- `just test -p lectern-app` 里 `every_profile_graph_validates` 的插件数加二：前置条件 C，在 `app` 的 PR。
+- 用屏幕阅读器读 `semantic_interactive` 写进去的无障碍属性（`#[gpui::test]` 拿不到 AccessKit 树）。
+- 真实的 `platform::system::set_language_override`：测试只用假实现（它在 `platform` 里有自己的测试）。
+- Linux CI 的 GPUI-free 任务不再覆盖本 crate（有了 `gpui` 依赖），结果以 macOS CI 为准。
 
 ## 与设计的差异
 
@@ -486,3 +508,22 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 - **`recent entry skipped` 每个跳过的条目记一条**（设计只写了字段 `reason`），每次写文件重复记，由日志的限流兜住。
 - `RecentList` 在设计里既是文件内容又是模型里的列表；实现里文件内容是私有的 `RecentFile { version, entries }`，模型里是 `Vec<RecentEntry>` 加 `loaded` 标记和变更队列。
 - 测试用的钩子：`Stats` 的 `during_write`、`during_rebuild` 只在 `#[cfg(test)]` 下编译，让测试在任务进行到一半时插入一次变更。
+
+### 第 2 步
+
+- **根节点是 `welcome.root`，不是 `welcome`。** `ui::semantic::NodeId::new(view, area, key)` 总是产生 `view.area`，没有只有一段的构造函数；不为此改 `ui`。
+- **行的名字和计数放在子节点 `….name`（`Role::Text`）上。** `ui::Row` 自己声明一个只有 `selected` 的 `ListItem`，没有 `Label` 和 `attrs` 的接口，同一个 ID 不能声明两次，所以 `Label` 和 `kind` / `sessions` / `running` / `missing` / `agents` 在行里的名字文字上。「界面」的节点表已按这个写。若 `ui` 以后给 `Row` 加上 `label` / `attr`，这两个子节点可以并回去。
+- **`welcome.language` 没有 `Label`。** `ui::Segmented` 声明的 `TabBar` 不带 `Label`，视图没有地方加；`welcome-language` 这个键因此没有用在界面上（保留给以后）。
+- **`SelectLanguage` 手写 `Action` 的 `build`。** `#[derive(Action)]` 给带数据的 `Action` 从 `Deserialize` 和 `JsonSchema` 构造，`Locale` 两个都没有（`no_json` 的话 `App::build_action` 返回错误，探针按名字触发不了它），`schemars` 也不是工作区依赖。所以手写 `Action` 的实现并 `register_action!`，`build` 认 `{"locale": "en" | "zh-CN" | null}`（缺省或 `null` 是跟随系统）。若以后 `Locale` 有了 serde，可以换回 derive。
+- **`↑` 没有选中时选最后一项**（设计只写了 `↓` 的情形）。产品上没有别的要求，是默认值。
+- **移除按钮带文字。** `ui::Button` 总是画它的 `Text`，没有只有图标的形态，所以移除按钮是 `Plain`、`Small`、`Icon::Close` 加 `welcome-recent-remove` 的文字；它在未选中的行上用样式的 `visibility: hidden` 隐藏，行被悬停时显示（`group_hover`，组是行内容的元素，不含 `Row` 的内边距），选中的行一直显示。隐藏的按钮不画、不接收点击，但节点每一行都声明（探针看得到）。Open Folder 的 `.tooltip` 键没有用：`Button` 没有提示的接口。
+- **点击和移除按钮按路径找回行，不按下标。** 行里的闭包带着 `path`，点击时在当前快照里重新查找：在画出这一帧之后、点击之前行已经被移除或被遮住时，什么也不打开（`a_click_on_a_row_that_is_gone_does_nothing`）。移除按钮的点击先 `stop_propagation`，不触发行的点击。
+- **选中的行滚动到可见。** 设计没有写：键盘移动选择后，选中行的元素里放一个 `canvas`，在 prepaint 里把右栏的 `ScrollHandle` 滚到这一行可见（留 12 pt），只在移动选择或移除之后做一次。
+- **空状态和骨架画在列表标题的下面，不在卡片里。** `GroupedList` 没有行时是一个高度为零的卡片；空状态文字和骨架放在它下面，与标题的间距是 `GroupedList` 自己的 6 pt。
+- **`LanguagePrefs`（`src/prefs.rs`）代替 `platform` 的 `test-support`。** 设计写「假的 `platform` 写入函数经 `test-support` 注入」，`platform` 没有这样的接口（也不应为此加）；视图经一个 crate 内的 trait 调 `platform::system`，`plugins()` 用真实的实现，测试用内存里的假实现。
+- **「现在」与主目录经模型和插件传入。** 发现行的「几分钟前」用 `WelcomeModel::now_millis`（模型的时钟，测试里固定），主目录（路径里的 `~`）由 `plugins()` 读一次环境变量 `HOME`，测试传固定值；视图本身不读系统时间和环境。
+- **加载阈值用执行器的时钟。** 视图建立时记 `cx.background_executor().now()`，并 `spawn` 一个 `timer(LOADING_SKELETON_AT)` 的任务到点重绘；`ui::loading_phase` 判断阶段，`Skeleton` 与 `Progress` 阶段都显示骨架（设计不显示进度）。
+- **`KeyBindings` 贡献的 ID 是 `welcome`**（与 `Screen` 的 ID 相同，种类不同，不冲突）；谓词 `Content > welcome`，视图根元素的 `KeyContext` 是 `welcome`，渲染时只在整个窗口没有焦点时取回焦点（有别的层在上面时不抢）。
+- **`futures` 用了**（第 1 步的差异说不依赖它）：视图把模型的唤醒回调接到 `mpsc::unbounded`，前台任务 `await` 接收端。
+- **`app` 的装配不在本 PR。** 前置条件 C（`Profile::Desktop` 加这两个插件、`every_profile_graph_validates` 的插件数加二）由另一个 PR 做，见 PR 描述。
+- **给 `ui` 的建议**（不在本 PR 做）：`Row` 的 `label` / `attr`、`Segmented` 的 `Label`、`Button` 的只有图标形态与提示、只有一段的 `NodeId`。
