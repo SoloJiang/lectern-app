@@ -290,6 +290,9 @@ pub enum WorkspaceCommand {
     Pop,
     /// 回到基底屏幕（项目主页）：逐个弹出，每个都问 `LeaveScope::View`。
     PopToBase,
+    /// 栈顶屏幕（栈空时是基底屏幕）的内容是否限制在阅读栏里，覆盖它 `ScreenLayout::reading_column`
+    /// 的值；这个屏幕被弹出时恢复。审阅的双栏视图要整个内容区时用它。立即返回，主线程应用。
+    SetReadingColumn(bool),
     /// 侧栏换成某个面板（Files）；`None` 回到项目侧栏。
     ShowSidebarPanel(Option<Name>),
     /// 显示或隐藏检查器（⌥⌘I）；`SelectInspectorTab` 顺带显示（⌘\ 切到 Conversation）。

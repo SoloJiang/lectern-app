@@ -163,6 +163,32 @@ fn review_hides_the_sidebar_and_shows_the_bar(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn set_reading_column_widens_the_content(cx: &mut TestAppContext) {
+    let rig = UiRig::new(cx);
+    let _plugins = rig.contribute(Contributor::staged(standard_screens()), cx);
+    rig.open(project_path(), &project(), cx);
+    rig.push(screens::REVIEW, cx);
+    assert!(
+        rig.tree(cx)
+            .contains("workspace.content [Group] base=project column=reading")
+    );
+
+    rig.dispatch(WorkspaceCommand::SetReadingColumn(false), cx);
+    rig.settle(cx);
+    assert!(
+        rig.tree(cx)
+            .contains("workspace.content [Group] base=project column=full")
+    );
+
+    rig.dispatch(WorkspaceCommand::Pop, cx);
+    rig.settle(cx);
+    assert!(
+        rig.tree(cx).contains("column=reading"),
+        "the home is back in the column"
+    );
+}
+
+#[gpui::test]
 fn escape_and_back_return_to_the_home(cx: &mut TestAppContext) {
     let rig = UiRig::new(cx);
     let _plugins = rig.contribute(Contributor::staged(standard_screens()), cx);
