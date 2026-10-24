@@ -408,7 +408,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
   - warn `probe start failed`（由 `app` 在 `Probe::start` 返回 `Err` 时记，target 为 `app`）：`reason`（`dir-not-private`、`bind`、`thread`）、`error`（`Value::io`，有时）。
   - info `probe stopped`：`conns`（本次会话的连接数）、`requests`。
 - 详细级别：debug `probe request`：`req`、`conn`、`method`、`took_us`、`nodes`（节点数）、`bytes`（应答字节数）；`screenshot` 另带 `path`（`Value::path`）、`width`、`height`。trace 不另记。
-- 关联 ID：`req`（`Ctx::req`，进程内从 1 递增）。logging 设计把它定义为一次对外请求的序号；探针请求是进程外发来的一次请求，同样是一次跨进程的往返，借用同一个字段，不新增 `Ctx` 字段。连接线程解析出请求后 `scope(Ctx { req, .. })`，入队的请求带着序号，主线程处理时 `within` 同一个 `Ctx`。
+- 关联 ID：`req`（`Ctx::req`，进程内从 1 递增）。logging 设计把它定义为一次对外请求的序号；探针请求是进程外发来的一次请求，同样是一次跨进程的往返，借用同一个字段，不新增 `Ctx` 字段。连接线程解析出请求后 `scope(Ctx { req, .. })`，所有探针记录都由连接线程写出（主线程的前台任务不写日志），所以只在这个线程上设作用域，请求不带 `Ctx` 过队列。
 - 不记录：请求和应答的 JSON；节点的标签文字、业务键和属性值；截图的像素；窗口标题。路径只经 `Value::path` 记录（探针目录、截图路径）。
 - 金丝雀测试：`canary_stays_out_of_probe_logs`：`testing::capture()` 在 trace 级别下，用一个标签文字、一个业务键和一个属性值都含金丝雀串的视图跑 `tree::snapshot`，再把树经 `annotate` 和 `write_png` 写到临时目录，并让 `server` 的请求处理函数处理一条 `method` 为金丝雀串的请求（应答 `unknown-method`），`assert_absent(金丝雀)`。
 
@@ -479,7 +479,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 第 3 步（macOS 27.0.1，Apple 芯片，本机屏幕锁定，没有图形会话）：
 
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`ui_probe` 在 tool 层，依赖 `ui`、`logging` 和 GPUI；没有 crate 依赖它）。
-- `just test -p lectern-ui-probe`：67 个测试通过，连跑 5 次没有失败。含「测试」列出的单元测试和 `#[gpui::test]`：`tree_*`（9 个，含 `tree_basic`、`tree_warnings` 两份快照）、`check_id_*`、`warnings_*`、`annotate_*`（含 `write_png_*`）、`request_*` 与 `response_lines` 快照、`name_*`、`dir_*`、`server` 的请求处理（`hello`、`ui_tree`、未知方法、`quit` 之后的 `quitting`、`screenshot` 的检查与写文件、行长度上限、连接的顺序与 `shutdown` 结束连接）、`client` 的假探针、`snapshot_of_nested_semantics`（快照）、`records_only_while_armed`、`capture_uses_two_frames`、被取消的捕获、`handle_*`（超时、无窗口、两帧）、`quit_dispatches_the_applications_quit_action_by_name`、`probe_can_be_shut_down_from_another_thread`（`Probe` 是 `Send + Sync`，`app` 的 `lectern-quit` 线程可以调 `shutdown`），以及 `canary_stays_out_of_probe_logs`。
+- `just test -p lectern-ui-probe`：68 个测试通过，连跑 5 次没有失败。含「测试」列出的单元测试和 `#[gpui::test]`：`tree_*`（9 个，含 `tree_basic`、`tree_warnings` 两份快照）、`check_id_*`、`warnings_*`、`annotate_*`（含 `write_png_*`）、`request_*` 与 `response_lines` 快照、`name_*`、`dir_*`、`server` 的请求处理（`hello`、`ui_tree`、未知方法、`quit` 之后的 `quitting`、`screenshot` 的检查与写文件、行长度上限、连接的顺序与 `shutdown` 结束连接）、`client` 的假探针、`snapshot_of_nested_semantics`（快照）、`records_only_while_armed`、`capture_uses_two_frames`、被取消的捕获、`handle_*`（超时、无窗口、两帧）、`quit_dispatches_the_applications_quit_action_by_name`、`dropping_the_request_while_recording_disarms_the_recorder`、`probe_can_be_shut_down_from_another_thread`（`Probe` 是 `Send + Sync`，`app` 的 `lectern-quit` 线程可以调 `shutdown`），以及 `canary_stays_out_of_probe_logs`。
 - `a_session_answers_hello_ui_tree_screenshot_and_quit`：在 GPUI 测试平台上真的起一个 `Probe`（真实的 Unix socket，0600，探针目录 0700），另一个线程里的 `client::Client` 依次发 `hello`、`ui_tree`、非法 `name` 的 `screenshot`、`screenshot`、未知方法、`quit`、再一个 `hello`；`ui_tree` 返回 6 个节点（窗口根加 5 个）、标签的 Fluent 键 `common-ok`；`quit` 分发了测试注册的 `lectern::Quit` 一次，之后的请求是 `quitting`；`drop(probe)` 后 `probe.sock` 被删除、不能再连接。测试平台没有渲染器，所以这里的 `screenshot` 应答 `render`。
 - `cargo run -p lectern-ui-probe --bin lectern-probe -- --help` 列出 `hello`、`ui_tree`、`screenshot`、`quit`、`raw`；没有探针目录时退出码 64。
 - `rg 'println!|eprintln!' crates/ui_probe/src --glob '!**/bin/*'` 没有结果（验收里原来的 `'!bin/*'` 在 `rg` 里不排除 `src/bin/`，已改成 `'!**/bin/*'`）。
@@ -497,7 +497,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 第 3 步：
 
 - 窗口 ID 是 GPUI 的 `WindowId::as_u64()`（`hello` 的 `windows[].id`、`ui_tree` 的 `window.id` 和 `window` 参数相同，例如 `4294967297`），不是示例里的 1；根节点的 ID 是 `window[<这个值>]`。理由：它在窗口的生命周期里稳定，不需要另维护一张表；示例里的 1 只是形状。`window` 参数指定的窗口不存在时应答 `no-window`。`hello` 的窗口条目多一个 `key`（是否为活动窗口）。
-- `capture` 没有 `cx` 参数（`Window::on_next_frame` 只要 `&self`），返回 `Cancel`。设计里「迟到的记录丢弃」落在这里：`frame_timeout` 到时，主线程调 `Cancel::cancel`，两个回调之后什么也不做、已打开的记录器被关闭；原先设想的「超时后记录器一直开着，直到第二个回调才关」因此不存在。
+- `capture` 没有 `cx` 参数（`Window::on_next_frame` 只要 `&self`），返回 `Cancel`。设计里「迟到的记录丢弃」落在这里：`frame_timeout` 到时、窗口在两帧之间关闭、或前台任务被丢弃时（`server::frame` 里的一个 drop 守卫），主线程调 `Cancel::cancel`，两个回调之后什么也不做、已打开的记录器被关闭；原先设想的「超时后记录器一直开着，直到第二个回调才关」因此不存在。
 - 不依赖 `lectern-i18n`（只作 dev 依赖）：`lectern_ui::semantic::Label::key` 已经是 Fluent 消息 ID，`ui` 在构造 `Label` 时调过 `Key::name`，本 crate 直接写出。
 - 请求队列用 `futures::channel::mpsc::unbounded`，应答用标准库的 `mpsc::channel`，没有引入 `async_channel`（只为一个队列把它列为工作区依赖不值得；`workspace` 已经是这个形式）。工作区新增的声明只有 `image`（见「依赖」）。
 - `client::Client::call` 返回的是 `client::Reply`（`Deserialize`），不是 `protocol::Response`：后者的 `error.message` 是 `&'static str`，只能序列化。`Client::raw` 另给命令行的 `raw` 命令用。

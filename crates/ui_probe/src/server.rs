@@ -34,7 +34,7 @@ use crate::protocol::{
     ErrorKind, MAX_LINE, PROTOCOL, Request, Response, ScreenshotParams, TREE_SCHEMA, TreeParams,
     check_dir, check_name, parse_request,
 };
-use crate::tree::{Capture, CaptureError, Tree, WindowInfo, capture};
+use crate::tree::{Cancel, Capture, CaptureError, Tree, WindowInfo, capture};
 
 /// The socket's file name inside the probe directory.
 pub const SOCKET: &str = "probe.sock";
@@ -731,6 +731,14 @@ fn pick_window(cx: &App, id: Option<u64>) -> Option<AnyWindowHandle> {
     }
 }
 
+struct DisarmOnDrop(Cancel);
+
+impl Drop for DisarmOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// One captured frame of the window, or why there is none. After
 /// `frame_timeout` the capture is cancelled, so a frame that comes late
 /// finds the recorder disarmed.
@@ -754,6 +762,10 @@ async fn frame(
                 .ok()
         })
         .ok_or(ErrorKind::NoWindow)?;
+    // Every exit that is not a finished capture (a timeout, a window that
+    // closed between the two frames, this task being dropped) disarms the
+    // recorder; after a finished capture the cancel does nothing.
+    let _disarm = DisarmOnDrop(cancel);
     match frame
         .with_timeout(main.frame_timeout, cx.background_executor())
         .await
@@ -762,9 +774,6 @@ async fn frame(
         Ok(Ok(Err(CaptureError::Render))) => Err(ErrorKind::Render),
         // The capture was dropped without finishing: the window closed.
         Ok(Err(_)) => Err(ErrorKind::NoWindow),
-        Err(_) => {
-            cancel.cancel();
-            Err(ErrorKind::Timeout)
-        }
+        Err(_) => Err(ErrorKind::Timeout),
     }
 }

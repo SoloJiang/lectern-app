@@ -292,6 +292,24 @@ fn handle_times_out_and_disarms_a_recording_that_never_finished(cx: &mut TestApp
 }
 
 #[gpui::test]
+fn dropping_the_request_while_recording_disarms_the_recorder(cx: &mut TestAppContext) {
+    let cx = scene(cx, nested);
+    let tmp = tempfile::tempdir().unwrap();
+    let main = main_of(tmp.path(), Duration::from_secs(5));
+    let (slot, task) = run_handle(cx, &main, Call::Tree { window: None });
+    next_frame(cx);
+    assert!(Recorder::is_armed());
+    // The task ends between the two frames (the probe is dropped, the window
+    // closes): nothing may leave the recorder armed.
+    drop(task);
+    cx.run_until_parked();
+    assert!(!Recorder::is_armed());
+    next_frame(cx);
+    assert!(slot.borrow().is_none());
+    assert!(!Recorder::is_armed());
+}
+
+#[gpui::test]
 fn handle_times_out_before_the_first_frame(cx: &mut TestAppContext) {
     let cx = scene(cx, nested);
     let tmp = tempfile::tempdir().unwrap();
