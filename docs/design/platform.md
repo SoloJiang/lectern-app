@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -21,6 +21,7 @@
   - 本地时区的偏移（`time::utc_offset`）：`usage` 的 `LocalZone` 按它把时间窗口分成本地自然日（[ADR 0020](../adr/0020.md)，见「本地时区的偏移」）。
   - 应用缓存目录（`dirs::app_cache`）：可以重建的派生数据的位置，`cache` 的分库和 `agents` 的解压副本用它（见「应用缓存目录」）。
   - 系统首选语言（`system::preferred_languages`）：`app` 在首帧之前用它选界面语言（[ADR 0013](../adr/0013.md)，见「系统首选语言」）。
+  - 语言偏好（`system::{system_languages, language_override, set_language_override}`）：`welcome` 的语言选择读写应用域里的 `AppleLanguages`（[ADR 0013](../adr/0013.md)、[i18n 设计「数据流与线程」](i18n.md#数据流与线程)，见「系统首选语言」的「语言偏好」），首帧之前不调用。
   - 窗口 frame 的 autosave（`window::set_frame_autosave_name`）：窗口位置与大小由 AppKit 的 frame autosave 保存和恢复（[ADR 0017](../adr/0017.md)），`app` 按 [workspace 设计「对其他 crate 的要求」](workspace.md#对其他-crate-的要求)的 D 调用（见「窗口 frame 的 autosave」）。
   - 系统外观（`appearance`）：在浅色、深色两个外观下解析 AppKit 的语义色，读减弱动态效果，登记强调色与辅助功能设置的变化通知；`ui` 的 `Palette` 从它取系统色（[ADR 0015](../adr/0015.md)，见「系统外观」）。
 - 不做：
@@ -45,7 +46,7 @@
 | `lectern-executor`（只在 macOS） | kqueue 线程经 `run_dedicated` 启动 | 后台线程只由 `executor` 管理（ADR 0024） |
 | `rustix` 的 `event` feature（只在 macOS） | `fs_events` 的 kqueue | 同一个 crate 的另一个 feature，不新增 crate |
 | `lectern-kernel`（dev，只在 macOS） | 经真实 `Watcher` 驱动后端的测试实现 `Sink` 要用 `BusyGuard` | kernel 层 |
-| `lectern-logging`（只在 macOS） | kqueue 线程停止、frame autosave 名设置失败和外观回调 panic 的记录（「日志与诊断」）；dev 依赖开启 `test-support`，测试用 `testing::capture()` 检查这些记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；本 crate 只有这三处记录，都只在 macOS 上编译 |
+| `lectern-logging`（只在 macOS） | kqueue 线程停止、frame autosave 名设置失败、外观回调 panic 和语言偏好写入失败的记录（「日志与诊断」）；dev 依赖开启 `test-support`，测试用 `testing::capture()` 检查这些记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；本 crate 只有这四处记录，都只在 macOS 上编译 |
 | `raw-window-handle` 0.6 | `window::set_frame_autosave_name` 的参数是 `impl HasWindowHandle`，GPUI 的 `Window` 实现它（`gpui-pre-macos` 给出 `AppKitWindowHandle`，里面是 `NSView` 指针） | 已在 Cargo.lock（0.6.2，经 GPUI），发布构建不新增 crate；许可证 `MIT OR Apache-2.0 OR Zlib`，在允许列表里。与 rustix 不同，它进入本 crate 的公开接口：这个签名由已合并的 [workspace 设计](workspace.md)的前置条件 D 规定，依赖方向不变（它不依赖任何东西），所以不写 ADR。所有平台都依赖（签名在所有平台上相同） |
 
 选 `rustix`，不选 `libc`、`nix`、`cap-std`：
@@ -380,20 +381,21 @@ pub enum FileKind {
 
 本节覆盖整个 crate，规则见 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。
 
-- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。运行时记录只有三处：`fs_events` 的 kqueue 线程停止、`window` 的 frame autosave 名设置失败和 `appearance` 的变化回调 panic，都经 `lectern-logging` 的宏写出，target 为 `platform`；`fs_events` 订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
+- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。运行时记录只有四处：`fs_events` 的 kqueue 线程停止、`window` 的 frame autosave 名设置失败、`appearance` 的变化回调 panic 和 `system` 的语言偏好写入失败，都经 `lectern-logging` 的宏写出，target 为 `platform`；`fs_events` 订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
 
   | 事件 | 级别 | `msg` | 字段 |
   |---|---|---|---|
   | kqueue 线程因 `kevent` 出错而停止（`Kqueue::fail`），这个 kqueue 上的 `Entries` 订阅不再收到事件，下一次 `Entries` 的 arm 重建 kqueue 和线程 | error | `the kqueue thread stopped on a kevent error; its watches get no more events` | `watches`（这个 kqueue 上的订阅数）、`io`（`Value::io`：`Errno` 的种类和错误码） |
   | `set_frame_autosave_name` 失败（「窗口 frame 的 autosave」）：窗口照常工作，只是位置与大小不再恢复和保存 | warn | `the window frame autosave name was not set; the frame is not restored or saved` | `kind`（`WindowError::as_str()`：`invalid_name`、`no_window`、`not_main_thread`、`name_in_use` 之一，`&'static str`） |
   | `appearance::watch` 的回调 panic（在 AppKit 的边界上 `catch_unwind` 截住，回调被丢弃，之后的变化不再送达，「系统外观」） | error | `the appearance change callback panicked; later changes are not delivered` | `change`（`Change::as_str()`：`system_colors` 或 `reduce_motion`，`&'static str`） |
+  | `set_language_override` 的写入失败（`WriteFailed`，「系统首选语言」的「语言偏好」）：界面已按新语言显示，只是下次启动不会保持；`Superseded` 不是失败，不记 | warn | `the language preference was not saved; the interface language applies to this run only` | `kind`（`PrefError::as_str()`，`&'static str`） |
 
   - 级别按 [ADR 0046](../adr/0046.md)「默认日志」：kqueue 的订阅之后的事件被放弃，外观回调之后的变化不再送达，都不是降级后继续，所以是 error；frame autosave 名没有设上时窗口继续用当前的 frame，是降级后继续，所以是 warn。外观回调 panic 本身的位置由 `logging` 的 panic 钩子记录，这条记录只说明结果。
-  - 这三条记录只在 macOS 上编译（kqueue 和 AppKit 只在 macOS 上；其他平台的 `set_frame_autosave_name` 不做事，也不记录），`lectern-logging` 因此只是 macOS 上的依赖。kqueue 的记录在 `fail` 放开状态锁之后写出，调用线程上不做 IO。frame autosave 的记录由函数自己写出，调用方（`app`）不再记一次；它在首帧之前可能发生，宏只编码记录，落盘由 `logging` 在首帧之后做（ADR 0046）。外观回调的记录在投递通知的线程（应用里是主线程）上写出，宏只编码记录，不做 IO。
+  - 这四条记录只在 macOS 上编译（kqueue 和 AppKit 只在 macOS 上；其他平台的 `set_frame_autosave_name` 不做事，也不记录），`lectern-logging` 因此只是 macOS 上的依赖。kqueue 的记录在 `fail` 放开状态锁之后写出，调用线程上不做 IO。frame autosave 的记录由函数自己写出，调用方（`app`）不再记一次；它在首帧之前可能发生，宏只编码记录，落盘由 `logging` 在首帧之后做（ADR 0046）。外观回调的记录在投递通知的线程（应用里是主线程）上写出，宏只编码记录，不做 IO。
 - 详细级别：不多记。kqueue 线程每次唤醒、FSEvents 的每个回调都是热路径，不加 debug、trace 记录。
 - 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
-- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。kqueue 的记录不写监听的目录、具名条目的名字和 `io::Error` 的消息，只写订阅数和 `Value::io`。frame autosave 的记录不写传入的名字和窗口的任何信息，只写错误的种类。`appearance` 不记颜色的数值、减弱动态效果的值和 panic 的 payload，回调 panic 的记录只写 `change`。
-- 金丝雀测试：`kqueue_stop_is_logged_without_paths`（只在 macOS 上编译和运行，在 `fs_events/tests/kqueue.rs`）：在 `testing::capture()` 下，金丝雀放在监听目录的名字、具名条目的名字和它的内容里，kqueue 线程交付这个条目的修改之后，以 `EBADF` 调用 `Kqueue::fail`（`kevent` 无法按需出错，线程的 `run` 在出错时调用的就是它）；检查记录只有一条，级别为 error、target 为 `platform`、`watches` 为 1、`io` 带 `EBADF` 的错误码，线程停止、`flush` 返回错误，之后 `assert_absent`。`set_frame_autosave_name_off_the_main_thread_is_an_error_and_logs_the_kind_only`（只在 macOS 上，在 `window/tests.rs`）：金丝雀作为名字传入，检查记录只有一条，级别为 warn、target 为 `platform`、`kind` 为 `not_main_thread`，之后 `assert_absent`。`appearance_watch_contains_a_panicking_callback_and_logs_no_payload`（只在 macOS 上，在 `appearance/tests.rs`）：回调以金丝雀为消息 panic，检查记录只有一条，级别为 error、target 为 `platform`、`change` 为 `system_colors`，之后的通知不再送达，`assert_absent` 确认金丝雀不在记录里。Linux 上没有 kqueue，不记录 frame autosave 的失败，也不登记 AppKit 的通知，这些记录和测试都不编译；`dirs` 和 `system` 不经日志器输出，不需要金丝雀测试。
+- 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。kqueue 的记录不写监听的目录、具名条目的名字和 `io::Error` 的消息，只写订阅数和 `Value::io`。frame autosave 的记录不写传入的名字和窗口的任何信息，只写错误的种类。语言偏好的记录不写语言标签，只写错误的种类。`appearance` 不记颜色的数值、减弱动态效果的值和 panic 的 payload，回调 panic 的记录只写 `change`。
+- 金丝雀测试：`kqueue_stop_is_logged_without_paths`（只在 macOS 上编译和运行，在 `fs_events/tests/kqueue.rs`）：在 `testing::capture()` 下，金丝雀放在监听目录的名字、具名条目的名字和它的内容里，kqueue 线程交付这个条目的修改之后，以 `EBADF` 调用 `Kqueue::fail`（`kevent` 无法按需出错，线程的 `run` 在出错时调用的就是它）；检查记录只有一条，级别为 error、target 为 `platform`、`watches` 为 1、`io` 带 `EBADF` 的错误码，线程停止、`flush` 返回错误，之后 `assert_absent`。`set_frame_autosave_name_off_the_main_thread_is_an_error_and_logs_the_kind_only`（只在 macOS 上，在 `window/tests.rs`）：金丝雀作为名字传入，检查记录只有一条，级别为 warn、target 为 `platform`、`kind` 为 `not_main_thread`，之后 `assert_absent`。`appearance_watch_contains_a_panicking_callback_and_logs_no_payload`（只在 macOS 上，在 `appearance/tests.rs`）：回调以金丝雀为消息 panic，检查记录只有一条，级别为 error、target 为 `platform`、`change` 为 `system_colors`，之后的通知不再送达，`assert_absent` 确认金丝雀不在记录里。`set_language_override_reports_a_bad_tag_and_logs_the_kind_only`（只在 macOS 上，在 `system/language/tests.rs`）：含金丝雀的非法标签传入，`done` 收到 `Err(WriteFailed)`（在碰任何偏好之前被拒绝），检查记录只有一条，级别为 warn、target 为 `platform`、`kind` 为 `write_failed`，之后 `assert_absent`。Linux 上没有 kqueue，不记录 frame autosave 的失败，也不登记 AppKit 的通知，这些记录和测试都不编译；`dirs` 和 `system` 不经日志器输出，不需要金丝雀测试。
 
 ## 测试
 
@@ -986,7 +988,7 @@ pub mod time {
 
 ## 系统首选语言
 
-[app 设计「对其他 crate 的要求」](app.md#对其他-crate-的要求)的 B（[#199](https://github.com/SoloJiang/lectern-app/issues/199)）。`app` 在首帧之前把它的结果交给 `i18n::Locale::negotiate`，选出界面语言（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)里启动时用的 `preferred_languages()`）。i18n 设计里设置页用的 `system_languages()`、`language_override()` 随语言设置实现，不在这里。
+[app 设计「对其他 crate 的要求」](app.md#对其他-crate-的要求)的 B（[#199](https://github.com/SoloJiang/lectern-app/issues/199)）。`app` 在首帧之前把它的结果交给 `i18n::Locale::negotiate`，选出界面语言（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)里启动时用的 `preferred_languages()`）。i18n 设计里语言选择用的 `system_languages()`、`language_override()` 和写入函数在本节末尾的「语言偏好」。
 
 ### 接口
 
@@ -1015,6 +1017,61 @@ pub mod system {
 - `preferred_languages_rejects_anything_but_a_tag`：空值、只有 NUL、以连字符开头、带下划线、带空格、带换行、非 ASCII 的字节都为 None。
 - `preferred_languages_tag_length_is_capped`：35 字节的标签接受，36 字节的为 None。
 - macOS 上 `preferred_languages_reads_the_running_macos`：结果不为空、不超过 16 个、每一项都能通过字符集检查；其他平台上 `preferred_languages_is_empty_elsewhere`。
+
+### 语言偏好
+
+[welcome 设计「对其他 crate 的要求」](welcome.md#对其他-crate-的要求)的 B（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，[#243](https://github.com/SoloJiang/lectern-app/pull/243)），[i18n 设计「数据流与线程」](i18n.md#数据流与线程)已写明这三个函数由 `platform` 提供，`welcome` 的语言选择是第一个调用方。选择保存在应用域的 `AppleLanguages` 里，与「系统设置 › 通用 › 语言与地区 › 应用」是同一个设置。
+
+首帧之前做的事（ADR 0017「新增功能必须说明」）：什么都不做。三个函数都由视图在首帧之后调用（`welcome` 的视图建立时读 `language_override`，用户点选时调 `system_languages` 和 `set_language_override`）；启动时选语言仍只用 `preferred_languages`。写入线程在第一次写入时才建，空闲时不存在。
+
+```rust
+pub mod system {
+    /// 全局域（`NSGlobalDomain`）里的系统首选语言，最优先的在前，BCP 47 标签；不含应用自己的覆盖。
+    /// 过滤规则同 `preferred_languages`（前 16 项，字符集与 35 字节的上限）。读不到时为空；其他平台总是空。
+    /// 内存里的偏好，不读 Lectern 自己的文件。任何线程。
+    pub fn system_languages() -> Vec<String>;
+
+    /// 应用域里 `AppleLanguages` 覆盖的第一个标签；没有覆盖（键不存在，或不是标签的数组）时 None；其他平台总是 None。
+    /// 不回落到全局域，所以能区分「跟随系统」与恰好等于系统列表的覆盖。内存里的偏好，不读文件。任何线程。
+    pub fn language_override() -> Option<String>;
+
+    /// 写应用域的 `AppleLanguages`：`Some(tag)` 写成单元素数组，None 删除这个键。立即返回，写入在 `platform` 的串行队列里：
+    /// 按调用的先后执行；新请求到达时，还没有开始的旧请求被丢弃，它们的 `done` 收到 `Err(Superseded)`（在队列线程上，
+    /// 排在正在执行的那一次的 `done` 之后），所以最后一次选择总是最后写入。写入并 `CFPreferencesSynchronize` 之后在队列线程上调一次
+    /// `done`；失败为 `Err(WriteFailed)`，另记 warn。`done` 里不要阻塞；它 panic 时被截住。
+    /// `tag` 不是标签（字符集与长度同上）为 `Err(WriteFailed)`，不写。其他平台什么都不写，在调用线程上立即 `done(Ok(()))`。
+    pub fn set_language_override(tag: Option<&str>, done: Box<dyn FnOnce(Result<(), PrefError>) + Send>);
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+    pub enum PrefError {
+        /// 被更新的请求顶掉，没有写。不是失败。
+        Superseded,
+        /// 写入或同步失败，或 `tag` 不是标签。
+        WriteFailed,
+    }
+    impl PrefError {
+        /// 日志字段 `kind` 用的名字：`superseded`、`write_failed`。
+        pub fn as_str(self) -> &'static str;
+    }
+    // 另实现 Display 和 std::error::Error。
+}
+```
+
+规则：
+
+- 读：`CFPreferencesCopyValue(AppleLanguages, 域, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)`，全局域用 `kCFPreferencesAnyApplication`，应用域用 `kCFPreferencesCurrentApplication`。不用 `CFPreferencesCopyAppValue`：它在应用域没有这个键时回落到全局域，`language_override` 就分不出「没有覆盖」。值不是数组时当作没有；数组的读取与过滤和 `preferred_languages` 共用同一个函数。
+- 写：`CFPreferencesSetValue`（值为一个 CFString 的 `CFArray`，None 时为空值，即删除）加 `CFPreferencesSynchronize`，后者返回 NO 为 `WriteFailed`。用户域加任意主机，与 `defaults write <应用> AppleLanguages` 写的是同一个位置。
+- 队列：一个全局的串行队列，最多一个请求在等、一个线程在执行；线程在队列空时结束（空闲进程里没有这个线程），下一次提交再建。线程建不出来时，排着的请求以 `WriteFailed` 完成。队列本身（`system/language/queue.rs`）是纯逻辑，写入函数可替换，所以在所有平台上用假的写入函数测试。
+- CoreFoundation 的函数手写在 `system/language.rs` 的 macOS 实现里，不引入绑定 crate；`CFArrayCreate` 与 `kCFTypeArrayCallBacks` 的声明和 `fs_events` 的一致。
+- 运行中的进程里，写入不改变 `preferred_languages()` 的结果，直到下次启动。AppKit 提供的界面按启动时的语言显示（i18n 设计）。「重新启动」前等队列清空并确认同步是设置页的事，不在这里。
+
+日志：写入失败记一条 warn（「日志与诊断」）；读取不记日志，读不到就是空列表或 None。
+
+测试（`crates/platform/src/system/language/tests.rs`；macOS 上的测试把偏好写进临时目录里的一个 plist，用绝对路径作为应用 ID，不写用户的任何偏好）：
+
+- 所有平台，假的写入函数：`queue_writes_in_the_order_of_the_calls`；`queue_drops_replaced_requests_and_writes_the_last_one_last`（第一次写入卡在闸门上时来了两个请求，中间那个收到 `Superseded`，最后写的是最后一个）；`queue_reports_a_failed_write_and_goes_on`；`queue_contains_a_panicking_done_and_a_panicking_writer`（线程仍然存活）；`queue_thread_ends_when_empty_and_starts_again`；`pref_error_kinds_are_distinct_static_names`。
+- 只在 macOS 上：`system_languages_reads_the_global_domain`；`language_override_does_not_fall_back_to_the_global_domain`（本进程没有覆盖、全局域有语言，结果为 None）；`an_override_is_written_read_replaced_and_removed`；`an_override_is_a_one_element_list_of_the_tag`（`plutil` 转成 JSON 后是 `{"AppleLanguages":["zh-Hans-CN"]}`）；`a_tag_that_is_not_a_tag_is_not_written`；`a_value_that_is_not_a_list_of_tags_is_no_override`；`set_language_override_reports_a_bad_tag_and_logs_the_kind_only`（金丝雀）。
+- 其他平台：`language_preference_does_nothing_elsewhere`。
 
 ## 窗口 frame 的 autosave
 
@@ -1377,6 +1434,12 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
   - `just check`、`just deny` 通过；`cargo clippy -p lectern-platform --all-targets --all-features -- -D warnings` 通过。`git diff origin/main -- Cargo.lock` 为空；`rg -n 'NSColor|NSAppearance|NSSystemColorsDidChange|objc_msgSend' crates --glob '!crates/platform/**' -t rust` 没有结果。
   - 没有验证的：本机没有 Linux 目标（rustup 的镜像没有这个 target），其他平台的分支（`appearance_is_none_elsewhere`、`appearance_watch_is_inert_elsewhere`、空的 `main`）只由 Linux CI 编译和运行。没有在真实的系统设置变化下运行过：测试经 `NSNotificationCenter` 手动投递通知，系统设置里切换强调色、减弱动态效果时 AppKit 是否投递这两个通知、是否在主线程上，按 Apple 文档写，由 ui 设计「验收」的手动检查（切换强调色后窗口里的 `accent` 随之变化）验证。macOS 11、12 上的分支（`systemMintColor` 缺失时为 None）没有运行过。第一次读取的耗时是用手建的 `NSApplication` / `NSWindow` 测的，没有在真实的 GPUI 进程里测过。
 
+- 语言偏好（welcome 的前置条件 B，[#243](https://github.com/SoloJiang/lectern-app/pull/243)）在 macOS（Apple 芯片，macOS 27.0.1）上：
+  - `just test -p lectern-platform`：174 个测试通过，其中新增 13 个（「语言偏好」的「测试」里 6 个所有平台的加 7 个 macOS 的）；原有的 161 个结果不变。174 个测试连续 5 次运行结果相同。
+  - 偏好的读写测试经临时目录里的 plist 完成（绝对路径作应用 ID），写入后 `plutil -convert json` 读到 `{"AppleLanguages":["zh-Hans-CN"]}`；运行后 `~/Library/Preferences` 里没有新文件。
+  - `just check`、`just deny` 通过；`git diff origin/main -- Cargo.lock` 为空；`rg -n 'CFPreferences|AppleLanguages' crates --glob '!crates/platform/**' -t rust` 没有结果。
+  - 没有验证的：对本进程真正的应用域（`kCFPreferencesCurrentApplication`）的写入不在测试里做，以免改用户的偏好；它与测试用的路径域走同一段代码，只有 `application` 参数不同，也没有在打包的 `.app` 里确认「系统设置 › 应用」里的同一设置会随之改变。`language_override` 在应用域没有键时返回 None 的测试用的是测试进程自己的域。没有在 Linux 上运行，本机没有 Linux 目标：其他平台的分支（`language_preference_does_nothing_elsewhere`）和队列的纯逻辑测试由 Linux CI 编译和运行。
+
 ## 与设计的差异
 
 - `Walk` 在 `fstatat` 的结果与之前那次打开的错误矛盾时重做这一级，最多 8 次（见「Walk」）。设计写的是直接返回 `Io(原来的错误)`：目录与符号链接来回交换时，这种做法偶尔会让 `race_swap_never_escapes` 得到 `Io`，而这个测试只允许三种结果。重做不改变「不读到根目录之外」，只让并发替换时的结果与某一时刻的状态一致。
@@ -1407,3 +1470,7 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
 - kqueue 线程的日志接入（logging 设计第 9 项的 `platform` 部分）按原来「日志与诊断」写的做：error、target `platform`、`Value::io`，删掉 `eprintln!`（它写的是 `io::Error` 的 `Display` 文字，现在不再写系统给的消息）。与那里的文字不同的有两处：
   - 多了字段 `watches`（这个 kqueue 上的订阅数）：原来只写了错误。计数说明有多少订阅从此收不到事件，不含路径和名字。
   - 金丝雀测试不让 `kevent` 真的出错（测试里造不出来），而是在线程运行时直接调用 `run` 出错时调用的 `Kqueue::fail`，为此 `fail` 由私有改为 `pub(super)`。
+- 语言偏好（welcome 的前置条件 B）按 [welcome 设计「对其他 crate 的要求」](welcome.md#对其他-crate-的要求)的接口实现，签名没有改；那里没有写的约束补在「语言偏好」，有三处补充：
+  - `PrefError` 多了 `as_str()`（日志字段 `kind`）、`Display` 和 `Error`；`tag` 不是标签（字符集、长度）时返回 `Err(WriteFailed)`，不碰偏好。
+  - `done` 的时机：被顶掉的请求的 `done`（`Superseded`）和写入的 `done` 一样在队列线程上调用，排在正在执行的那一次的 `done` 之后；设计只写了「在队列线程上调一次」。线程在队列空时结束，不常驻。
+  - 测试里的偏好写进临时目录里的 plist（绝对路径作应用 ID），不用 `kCFPreferencesCurrentApplication` 写：测试进程写自己的域会在用户的 `~/Library/Preferences` 里留下文件。

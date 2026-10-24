@@ -47,6 +47,9 @@ pub fn preferred_languages() -> Vec<String> {
     imp::preferred_languages()
 }
 
+mod language;
+pub use language::{PrefError, language_override, set_language_override, system_languages};
+
 /// One tag as CoreFoundation writes it into a buffer (up to the first NUL)
 /// turned into a `String`; None for anything that is not a tag. Compiled
 /// for tests everywhere: it only checks bytes.
@@ -93,7 +96,7 @@ mod imp {
     type CFIndex = isize;
     type CFTypeID = usize;
     type CFTypeRef = *const c_void;
-    type CFArrayRef = *const c_void;
+    pub(super) type CFArrayRef = *const c_void;
     type CFStringRef = *const c_void;
     /// `kCFStringEncodingUTF8`.
     const UTF8: u32 = 0x0800_0100;
@@ -122,8 +125,24 @@ mod imp {
         if array.is_null() {
             return Vec::new();
         }
-        let mut tags = Vec::new();
         // SAFETY: `array` is a valid CFArray until the `CFRelease` below.
+        let tags = unsafe { tags(array) };
+        // SAFETY: balances the Copy rule of `CFLocaleCopyPreferredLanguages`.
+        unsafe { CFRelease(array) };
+        tags
+    }
+
+    /// The accepted tags among the first `MAX_LANGUAGES` entries of `array`;
+    /// entries that are not CFStrings are skipped, and so is anything
+    /// `language_tag` rejects. Shared with `language`, which reads the same
+    /// kind of array from the preferences.
+    ///
+    /// # Safety
+    ///
+    /// `array` is a valid CFArray (any element types) for the call.
+    pub(super) unsafe fn tags(array: CFArrayRef) -> Vec<String> {
+        let mut tags = Vec::new();
+        // SAFETY: the caller guarantees `array` is valid.
         let count = unsafe { CFArrayGetCount(array) };
         // Only the first entries can matter to `Locale::negotiate`: bound the
         // walk, not just the result.
@@ -155,8 +174,6 @@ mod imp {
                 tags.push(tag);
             }
         }
-        // SAFETY: balances the Copy rule of `CFLocaleCopyPreferredLanguages`.
-        unsafe { CFRelease(array) };
         tags
     }
 
