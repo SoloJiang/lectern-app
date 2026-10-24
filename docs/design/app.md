@@ -330,7 +330,7 @@ Logging::shutdown(500 ms)
 | `workspace` | `WorkspacePlugin::new(host)`，`host` 是 `workspace::install(window, deps, cx)` 的返回值（`Resources::workspace`） | `dyn Contributions` | `dyn Projects` |
 
 - `welcome`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })`）和 `project_home`（`ProjectHomePlugin::new` 与 `ProjectHomeUsagePlugin::new` 共用一个 `UsageSlot`）现在不装配：两个设计都规定装配在它们视图之后的步骤里，现在登记的屏幕载荷还是占位类型（`welcome` 的 `ScreenPlaceholder`，`UiPayloads` 会以 `wrong-payload` 拒绝，窗口没有 Welcome 屏幕），`project-home-usage` 要 `dyn Usage`，现在没有插件提供它（图校验会失败）。它们的视图合并后，各自在 `Profile::Desktop` 的表里加一行。
-- `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架，不显示 `workspace-screen-missing`。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
+- `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架。正常启动时 `install` 总会运行，`welcome`、`project_home` 装配之前没有任何屏幕注册，窗口显示空的 `Workspace`（内容区是 `workspace-screen-missing` 的文字），这是过渡状态（workspace 设计「与设计的差异」第 3 步）。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
 - `startup::arm` 的第二个帧回调把窗口句柄交给 `release_in(Some(window), cx)`；`release(cx)` 是 `release_in(None, cx)`，test profile 用它。没有窗口句柄的 desktop 屏障不装配（记 warn `plugins not assembled`，`missing` 为 `window`），只在直接调用 `release` 时出现。
 - `Started::shell`（`Option<Shell>`）：`Shell { host, window_state }`，`Quit` 用 `host` 问离开守卫，Dock 重开用两者。
 
