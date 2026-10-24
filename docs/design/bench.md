@@ -33,7 +33,8 @@
 | `lectern-kernel`（可选，`probe` feature） | 探针插件、裁剪插件集合 | kernel 层 |
 | `lectern-platform`（可选，`probe` feature） | 注册首帧回调 | 基础设施层 |
 | dev：`lectern-agents`、`lectern-cache`、`lectern-git`、`lectern-kernel`、`lectern-i18n`、`lectern-project`（各自打开 `test-support`），`lectern-platform`、`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`tempfile`、`insta` | 进程内基准的被测代码与夹具；单元测试的临时目录与快照 | 只编译进基准目标和测试 |
-| dev（只在 macOS）：`gpui`、`gpui_platform` | `empty_window` 示例程序 | 只在 macOS 声明，Linux 上本 crate 仍不依赖 GPUI |
+| dev（只在 macOS）：`gpui`（`test-support`）、`lectern-ui` | `ui/*` 基准（[ui 设计「性能」](ui.md#性能)）：`Transition::tick` 要在一个视图的 render 里跑，所以用 GPUI 的测试平台开一个窗口 | 只在 macOS 声明，Linux 上本 crate 仍不依赖 GPUI（架构检查第 4 条只把外部的、非 GPUI 的 Apple 专属依赖算作绑定）；对应的预算标 `macos_only`，Linux 上记为 `skipped` |
+| 以后的 dev（只在 macOS）：`gpui_platform` | `empty_window` 示例程序 | 同上 |
 | 以后的 dev：其他插件 crate | 随这些 crate 的实现加入；`lectern-project` 随它的第 5 步加入 | tool 层可以依赖任何层，包括插件 crate（[ADR 0025](../adr/0025.md)） |
 
 本 crate 不新增任何外部 crate，`just deny` 与 `Cargo.lock` 的外部部分不变。
@@ -160,6 +161,9 @@ pub struct Budget {
     pub state: State,
     /// 产出这条预算的基准目标。每条预算只属于一个目标。
     pub target: Target,
+    /// 基准只在 macOS 上编译（要 GPUI）：其他平台上这一条记为 `skipped`（只在 macOS 运行），
+    /// 不算「预算没有对应的基准」。
+    pub macos_only: bool,
 }
 
 /// `Package` 不是基准目标：由打包流程调用 `lectern-bench-report package` 产出，`just bench` 不产出它（见「报告」）。

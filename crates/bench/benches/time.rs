@@ -50,6 +50,9 @@ mod review_repo;
 mod syntax;
 #[path = "fixtures/syntax_engine.rs"]
 mod syntax_engine;
+#[cfg(target_os = "macos")]
+#[path = "time/ui.rs"]
+mod ui;
 #[path = "time/usage.rs"]
 mod usage;
 
@@ -178,5 +181,9 @@ const BENCHES: &[Bench] = &[
 ];
 
 fn main() -> ExitCode {
-    lectern_bench::main(Target::Time, env!("CARGO_TARGET_TMPDIR"), BENCHES)
+    let mut benches = BENCHES.to_vec();
+    // `ui/*` needs GPUI, which only builds on macOS in this workspace.
+    #[cfg(target_os = "macos")]
+    benches.extend_from_slice(ui::BENCHES);
+    lectern_bench::main(Target::Time, env!("CARGO_TARGET_TMPDIR"), &benches)
 }

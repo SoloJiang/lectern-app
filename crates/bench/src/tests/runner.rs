@@ -492,6 +492,45 @@ fn runner_process_target_is_skipped_off_macos() {
     assert_eq!(status(&run, "app/later").status, Status::Planned);
 }
 
+#[test]
+fn runner_macos_only_budgets_are_skipped_off_macos() {
+    static TABLE: &[Budget] = &[
+        budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
+        Budget {
+            macos_only: true,
+            ..budget("fake/gpui", UNDER_1_MS, State::Active, Target::Time)
+        },
+    ];
+    fn a(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        Ok(vec![Measured::new("fake/a", time(0))])
+    }
+    // Off macOS the benchmark is not even compiled: only `fake/a` exists.
+    let benches = [Bench {
+        id: "fake/a",
+        run: a,
+    }];
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = options(TABLE, Target::Time, &[], dir.path());
+    options.macos = false;
+    let linux = run(&options, &benches);
+    assert_eq!(
+        linux.exit,
+        0,
+        "{:?}",
+        linux.report.as_ref().map(|r| &r.errors)
+    );
+    assert_eq!(status(&linux, "fake/a").status, Status::Smoke);
+    let gpui = status(&linux, "fake/gpui");
+    assert_eq!(gpui.status, Status::Skipped);
+    assert_eq!(gpui.reason.as_deref(), Some("只在 macOS 运行"));
+
+    // On macOS it is missing like any other active budget.
+    options.macos = true;
+    let macos = run(&options, &benches);
+    assert_eq!(macos.exit, 2);
+    assert_eq!(status(&macos, "fake/gpui").status, Status::Error);
+}
+
 static TWO: &[Budget] = &[
     budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
     budget("fake/b", UNDER_1_MS, State::Active, Target::Time),
