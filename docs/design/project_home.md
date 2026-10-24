@@ -504,14 +504,14 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 **第 1 步：快照与插件（不开窗口的部分，PR_STEP1）。**
 
 - `snapshot::build` 与「测试」里 `build_*`、`snapshot_*` 的 insta 快照通过。
-- 插件的 `#[test]` 通过：`activate_registers_contributions_only`、`opened_takes_the_overview_interest_and_closed_drops_it`、`events_coalesce_into_one_build`、`complete_is_requested_once_per_pending_session`、`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`started_handles_an_already_open_project`。
+- 插件的 `#[test]` 通过（`activate_registers_contributions_only` 随第 2 步，见「与设计的差异」）：`opened_takes_the_overview_interest_and_closed_drops_it`、`events_coalesce_into_one_build`、`complete_is_requested_once_per_pending_session`、`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`started_handles_an_already_open_project`。
 - `python3 scripts/check_architecture.py` 通过：`lectern-project-home` 带 `plugin = true`，不依赖其他插件 crate；只有 `app` 依赖它。
 - `rg 'std::fs|std::process|git2|gix|std::thread::spawn' crates/project_home/src` 没有结果；`rg '^lectern-(review|project|agents|usage|workspace)(\s|\.|=)' crates/project_home/Cargo.toml` 没有结果（不依赖插件 crate，dev-dependency 也不行；行首锚定，所以不会匹配到本 crate 的 `name = "lectern-project-home"`）。
 - `canary_stays_out_of_home_logs` 通过（合成与插件部分）；`rg 'eprintln!|println!|log::' crates/project_home/src` 没有结果。
 
 **第 2 步：视图（`#[gpui::test]`）。**
 
-- 「测试」里的 `#[gpui::test]` 和语义树快照通过。
+- 「测试」里的 `#[gpui::test]` 和语义树快照通过；`activate` 登记 `Screen`、`SidebarPanel`、`SidebarEntry`、`KeyBindings`，`activate_registers_contributions_only` 通过（第 1 步推迟到这里）。
 - `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|\.font_family\(|gpui_component::Button' crates/project_home/src` 没有结果（`ui` 设计的持续检查）。
 - `rg '"[A-Z][a-z]+ [a-z]' crates/project_home/src --glob '!tests*'` 没有界面字符串字面量（都走 `keys::project_home::*`）。
 - `rg 'NodeId::new\("project-home"' crates/project_home/src` 有结果，且 `rg 'NodeId::new\("project_home"' crates/project_home/src` 没有结果（探针 ID 的名字段只用 `[a-z0-9-]`）。
