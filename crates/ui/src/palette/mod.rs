@@ -178,6 +178,16 @@ impl Palette {
     }
 }
 
+/// `color` with its lightness moved by `delta` (clamped to `0..=1`): the
+/// hovered and pressed fills of the controls. Not a colour value: a shade
+/// of one the palette already holds.
+pub(crate) fn shade(color: Hsla, delta: f32) -> Hsla {
+    Hsla {
+        l: (color.l + delta).clamp(0.0, 1.0),
+        ..color
+    }
+}
+
 /// `top` at `opacity` composited over `base` (source-over); opaque result.
 pub(crate) fn over(base: Hsla, top: Hsla, opacity: f32) -> Hsla {
     base.blend(top.alpha(opacity))
