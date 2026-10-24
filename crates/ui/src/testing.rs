@@ -4,9 +4,12 @@
 //! crate-private in gpui-pre 0.3.9), so the handlers behind `attach`'s
 //! observer and `init`'s watch callback are called directly here.
 
+use std::time::Instant;
+
 use gpui::App;
 use lectern_platform::appearance::Change;
 
+use crate::motion::Transition;
 use crate::palette::Appearance;
 use crate::state::UiState;
 
@@ -24,4 +27,11 @@ pub fn simulate_platform_change(change: Change, cx: &mut App) {
 /// How many times `mono_metrics` resolved a font in this app.
 pub fn mono_resolutions(cx: &App) -> u32 {
     cx.global::<UiState>().mono_resolutions
+}
+
+/// `Transition::tick` without GPUI's frame request, for the
+/// `ui/transition_tick` benchmark: the transition's own work alone.
+pub fn step_transition(transition: &mut Transition, now: Instant) -> f32 {
+    transition.step(now);
+    transition.value()
 }

@@ -638,7 +638,7 @@ pub mod semantic {
 
 首帧之前做的事：`init`（上表）。其余都在 `ready` 之后。
 
-新增基准（`bench`，macOS 判定，Linux 不编译）：`ui/init`（≤ 300 µs）、`ui/ready`（≤ 3 ms）、`ui/palette_resolve`（通知到达到新 `Palette` 就位 ≤ 300 µs）、`ui/transition_tick`（≤ 100 ns）、`ui/bezier_eval`（≤ 50 ns）、`ui/mono_metrics_first`（≤ 200 µs）、`ui/semantic_disarmed`（≤ 2 ns）、`ui/idle_memory`（`ready` 之后 `UiState` 加 gpui-component 全局 < 1 MB）。
+新增基准（`bench`，macOS 判定，Linux 不编译）：`ui/init`（≤ 300 µs）、`ui/ready`（≤ 3 ms）、`ui/palette_resolve`（通知到达到新 `Palette` 就位 ≤ 300 µs）、`ui/transition_tick`（`Transition` 自己的一步，不含 GPUI 的帧请求，≤ 100 ns）、`ui/transition_tick_frame`（含帧请求的 `tick`，只记录：代价在 GPUI，随机器变化；帧的预算由 `app/animation_frames` 判定）、`ui/bezier_eval`（≤ 50 ns）、`ui/mono_metrics_first`（≤ 200 µs）、`ui/semantic_disarmed`（≤ 2 ns）、`ui/idle_memory`（`ready` 之后 `UiState` 加 gpui-component 全局 < 1 MB）。
 
 ## 界面
 
@@ -814,7 +814,8 @@ pub mod semantic {
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`bench` 对 `lectern-ui` 和 `gpui` 的依赖只在 macOS 声明，见「与设计的差异」）。
 - `just test -p lectern-ui`：38 个测试通过，其中本步新增 15 个：`bezier_matches_the_css_reference`、`bezier_ends_at_0_and_1`、`bezier_switch_overshoots_near_0_6`、`spring_constants_match_the_spec`、`spring_keeps_its_velocity_when_retargeted`、`spec_constants_hold_the_table`、`transition_continues_from_the_current_value`、`transition_same_target_does_not_restart`、`transition_set_arrives_at_once`、`transition_delay_holds_the_start_value`、`transition_reduced_motion_halves_and_fades`、`transition_not_reduced_moves`、`active_transitions_counts_the_ones_in_progress`、`reduced_motion_has_no_displacement`、`panel_moves_when_motion_is_not_reduced`。`cargo nextest run -p lectern-bench`：78 个通过（新增 `runner_macos_only_budgets_are_skipped_off_macos`）。
 - `just doctest`：`lectern-ui` 的 3 个 `compile_fail` 仍通过。
-- `just bench --measure ui/`：`ui/transition_tick` 中位数 43 ns（预算 ≤ 100 ns；`ENTER_SESSION` 弹簧的 tick 40 ns，记在结果的 note 里），`ui/bezier_eval` 中位数 8 ns（预算 ≤ 50 ns）。
+- `just bench --measure ui/`：`ui/transition_tick` 中位数 43 ns（当时含帧请求，预算 ≤ 100 ns；`ENTER_SESSION` 弹簧的 tick 40 ns，记在结果的 note 里），`ui/bezier_eval` 中位数 8 ns（预算 ≤ 50 ns）。
+- 预算分项之后（`ui/transition_tick` 只测 `step`，见「与设计的差异」第 2 步）：`just bench ui/` 本机 `ui/transition_tick` 中位数 14 ns（预算 ≤ 100 ns），`ui/transition_tick_frame` 43 ns（只记录），`ui/bezier_eval` 8 ns。
 - `rg 'set_reduce_motion' crates/ui/src crates/app/src`、`rg 'Duration::from_millis|Duration::from_secs' crates/ui/src --glob '!**/motion*' --glob '!**/tests*'`、`rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 都没有结果。
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
 
@@ -847,7 +848,7 @@ pub mod semantic {
 - `Easing::EaseOut` 取 CSS 的 `ease-out`，即 `cubic-bezier(0, 0, 0.58, 1)`；原文只写「ease-out」。
 - `Motion::effective` 在减弱动态效果下只把 `duration` 减半，`delay` 不变（原文没有写 `delay`）。`Fade` 里的 `Motion` 的 `moves` 为 false。
 - GPUI 的 `Animation` 没有延迟，`Motion::animation` 把延迟折进去：动画总长 `delay + duration`，曲线在延迟结束前保持 0。
-- `Transition::tick` 自己的工作是常数时间、不分配；它调用的 `Window::request_animation_frame` 在 GPUI 里装箱一个回调（一次分配），这是 GPUI 的代价，不在本 crate 控制内。`ui/transition_tick` 测的是含这次请求的 `tick`：`tick` 只能在视图的 render 里调用（GPUI 只允许正在渲染的视图请求下一帧），所以基准用 GPUI 的测试平台开一个窗口，取「一次 render 里 4096 次 tick」与「不 tick 的 render」之差除以 4096 作为一个样本，用 `Ctx::compare` 交替采样。
+- `Transition::tick` 自己的工作是常数时间、不分配；它调用的 `Window::request_animation_frame` 在 GPUI 里装箱一个回调（一次分配），这是 GPUI 的代价，不在本 crate 控制内。`tick` 拆成 crate 内部的 `step`（提交 `now` 时的值，返回是否仍在进行）加帧请求；`testing::step_transition`（`test-support`）只调 `step`。`ui/transition_tick` 用它在普通循环里计时，测的是「性能」约束的那部分。含帧请求的 `tick` 改名 `ui/transition_tick_frame`，只记录：`tick` 只能在视图的 render 里调用（GPUI 只允许正在渲染的视图请求下一帧），所以它用 GPUI 的测试平台开一个窗口，取「一次 render 里 4096 次 tick」与「不 tick 的 render」之差除以 4096 作为一个样本，用 `Ctx::compare` 交替采样。原来 `ui/transition_tick` 测的就是这个含帧请求的量：本机 41–43 ns，macOS CI 上 100–152 ns（#234、#235、#240 的基准任务因此超过 100 ns），超出的部分是 GPUI 的分配、唤醒平台和 `notify`，`ui/bezier_eval` 在 CI 上同样慢约 2.5 倍（8 → 20 ns）。预算数字没有变。
 - `Transition` 按字段算约 112 字节，不是 56：它存了两个 `Instant`（当前段的起点和上次采样的时刻，弹簧按后者逐步推进）和整份 `Motion`（56 字节）。由视图持有，个数以个位数计，不影响内存预算。
 - 进行中的计数是进程级的 `AtomicUsize`；nextest 一个测试一个进程，`active_transitions_*` 以测试开始时的值为基准断言差值。
 - `reduced_motion_has_no_displacement` 本步只覆盖设计里的面板偏移示例（`Transition` + `Effective::Fade`），`Expander` 和 `Segmented` 的滑块随第 3 步加入；另加 `panel_moves_when_motion_is_not_reduced` 作为对照。
