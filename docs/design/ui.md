@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（含 `with_assets(IconAssets)`）与第 1 步的 `ui/*` 基准在 `app` 的 PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步尚未实现。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[PR_PALETTE_LINK]）。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（含 `with_assets(IconAssets)`）与第 1 步的 `ui/*` 基准在 `app` 的 PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步尚未实现。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -874,7 +874,7 @@ pub mod semantic {
 - `Hint` 的到期是 `duration` 加 `HOVER_OUT` 的淡出：原文「`duration` 后用 `HOVER_OUT` 淡出并由调用方 drop」，`is_expired` 在淡出结束后才为 true，否则调用方在淡出开始时就会 drop 它。位移用绝对定位的 `top`（`TOP + offset`），GPUI 的 `div` 没有 translate；绝对定位只动它自己，不触发兄弟重排。显示期间每帧 `request_animation_frame`：调用方本来就每帧问 `is_expired`，不另加帧；停留段也在请求帧，记为已知限制（一次提示 ≈ 2.7 s，少见）。时长常量 `HINT_DURATION`、`LOADING_SKELETON_AT`、`LOADING_PROGRESS_AT` 放在 `motion`，验收的 `rg` 才能不放过控件文件。
 - 图标名的对应：`Clone` → Lucide `copy`，`Back` / `Forward` → `arrow-left` / `arrow-right`，`Close` 与 `Inspector` 是 gpui-kit-assets 自带的 `close.svg`、`inspector.svg`，其余同名。`Icon` 实现 gpui-component 的 `IconNamed`，所以 `Button::icon(Icon)` 走它的 `Icon` 元素，`IconName` 不暴露。`icon_assets!` 的结构体不能带文档注释，文档在 `lib.rs` 的再导出上。
 
-词级差异底色（`review_view` 前置条件 F，[PR_PALETTE_LINK]）：
+词级差异底色（`review_view` 前置条件 F，[#238](https://github.com/SoloJiang/lectern-app/pull/238)）：
 
 - `Palette` 多两个字段 `diff_added_inline_background`、`diff_removed_inline_background`，规格按 [review_view 设计「对其他 crate 的要求」F](review_view.md#对其他-crate-的要求)：`system(Green)` / `system(Red)` 在浅色 28%、深色 36% 透明度下叠在 `control_background` 上。内置表（`builtin.rs`）只存系统色的分量，没有存派生色，所以「内置表与系统色两条路径」落在同一个 `Palette::from_system`：`Palette::builtin` 是它对内置分量的调用，`ready` 与外观通知对系统读数的调用，两条路径不会不一致。`builtin.rs` 因此没有改动。
 - `label` 在四个 diff 底色上的对比度检查取 4.5:1（WCAG 2 AA 的正文标准），不是 `label` 与 `window_background` 的 7:1：深色下 36% 的绿色底上 `label` 是 6.0:1，达不到 7:1，而 diff 行里文字本来就多由代码配色着色。词级差异底色上叠加的代码配色（`Red` 的字符串在 `Red` 的底色上）不在 `palette_builtin_*` 检查的范围内，随 `review_view` 的视觉验收。
