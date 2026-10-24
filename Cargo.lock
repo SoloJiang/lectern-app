@@ -4336,6 +4336,7 @@ dependencies = [
  "lectern-services",
  "lectern-ui",
  "lectern-usage",
+ "lectern-welcome",
  "lectern-workspace",
  "serde_json",
  "tempfile",

@@ -6,7 +6,7 @@
 - 设计文档：[docs/design/welcome.md](../../docs/design/welcome.md)（实现中，进度见文档开头的状态行）。实现以它为准。
 - issue：[#29](https://github.com/SoloJiang/lectern-app/issues/29)
 - ADR：[0012](../../docs/adr/0012.md)、[0013](../../docs/adr/0013.md)
-- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`recent`（最近项目的数据与 `recent.json`）、`discover`（发现列表的归并，纯函数）、`WelcomeModel`（快照与任务）、两个插件。第 2 步已实现：`view`（`WelcomeView`、渲染、选择与点击、语言选择）、`actions`（五个 `Action` 和 `KeyBindings` 载荷）、`prefs`（语言偏好的 trait 与 `platform` 实现）、`ui::contrib::Screen` 载荷。`app` 的装配（前置条件 C）在 `app` 的 PR，在它合并之前 `app` 不装配这两个插件。
+- 进度（设计文档「验收」）：第 1 步已实现，不依赖 GPUI：`recent`（最近项目的数据与 `recent.json`）、`discover`（发现列表的归并，纯函数）、`WelcomeModel`（快照与任务）、两个插件。第 2 步已实现：`view`（`WelcomeView`、渲染、选择与点击、语言选择）、`actions`（五个 `Action` 和 `KeyBindings` 载荷）、`prefs`（语言偏好的 trait 与 `platform` 实现）、`ui::contrib::Screen` 载荷。`app` 的装配（前置条件 C）已实现，两个插件在 `profile::desktop` 里 `workspace` 之后（[app 设计「welcome 的装配」](../../docs/design/app.md#welcome-的装配)）。
 
 ## 边界
 
