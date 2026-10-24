@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#NNN](https://github.com/SoloJiang/lectern-app/pull/NNN)）已实现，见「实际验证」「与设计的差异」；前置条件 D 与第 3 步（`app` 装配）尚未实现。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」；前置条件 D 与第 3 步（`app` 装配）尚未实现。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -655,7 +655,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ### 第 2 步
 
-根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`（[#NNN](https://github.com/SoloJiang/lectern-app/pull/NNN)），在 macOS（arm64，Rust 1.97.0）上运行，叠在 [#232](https://github.com/SoloJiang/lectern-app/pull/232) 与 `ui` 第 2 步（[#233](https://github.com/SoloJiang/lectern-app/pull/233)，`ui::motion`）之上：
+根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`（[#235](https://github.com/SoloJiang/lectern-app/pull/235)），在 macOS（arm64，Rust 1.97.0）上运行，叠在 [#232](https://github.com/SoloJiang/lectern-app/pull/232) 与 `ui` 第 2 步（[#233](https://github.com/SoloJiang/lectern-app/pull/233)，`ui::motion`）之上：
 
 - `just check`（含 clippy 与架构检查：32 个 crate，`workspace` 带 `plugin = true`，新增依赖 `gpui`、`futures`、`lectern-i18n`、`lectern-ui`，都不是插件 crate）、`just deny`、`python3 scripts/check_architecture.py` 通过。`git diff origin/main -- Cargo.lock` 只给 `lectern-workspace` 加依赖行，没有新的外部 crate（`futures` 0.3.34 已在锁文件里）。
 - `just test -p lectern-workspace`：71 个测试通过（第 1 步的 51 个不变，新增 20 个）。
