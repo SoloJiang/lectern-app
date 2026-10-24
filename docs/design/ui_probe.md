@@ -1,6 +1,6 @@
 # ui_probe 设计
 
-状态：已接受，尚未实现。
+状态：实现中。第 3 步（`ui_probe` crate：协议、`tree`、`annotate`、`server`、`client`、`lectern-probe`）已实现（[#249](https://github.com/SoloJiang/lectern-app/pull/249)）；第 4 步（`app` 的 probe profile、`justfile` 的 `probe` 配方、端到端测试）尚未实现。
 
 对应 issue [#6](https://github.com/SoloJiang/lectern-app/issues/6)。`ui_probe` 是 agent 读取运行中的 Lectern 的入口：把窗口里的语义树导出成 JSON（`ui_tree`），把窗口画成带节点编号的 PNG（`screenshot`），让 agent 不必从像素推断界面结构（[技术调研「UI 结构探针」](tech-research.md#6-ui-结构探针)）。它是 tool 层 crate，只在 probe profile 里运行，不进入发布构建（[cargo-workspace 设计](cargo-workspace.md)、[CI「架构规则检查」](ci.md#架构规则检查)第 2 条）。
 
@@ -29,11 +29,12 @@
 | `gpui` | `Window::on_next_frame`、`refresh`、`render_to_image`、`#[gpui::test]` | 已锁定（[ADR 0016](../adr/0016.md)） |
 | `gpui_platform`（`test-support` feature） | 打开 macOS 后端的 `render_to_image` | `Window::render_to_image` 只在 `test-support` 下编译，而 macOS 后端（`gpui_macos`、`gpui_apple`）的实现要经 `gpui-pre-platform` 的 `test-support` 才打开，只开 `gpui/test-support` 会走平台 trait 的默认实现、总是返回错误（见「截图的来源」）；本 crate 不进入发布构建，所以这个 feature 不会进入发布构建 |
 | `lectern-ui` | 语义记录器 `semantic::Recorder` 与节点类型（`Semantic`、`Role`、`State`） | 视图层共用的声明接口只能放在所有视图 crate 都依赖的 crate 里 |
-| `lectern-i18n` | `Key::name`，把标签的 Fluent 键写进 JSON | |
+| `futures`（`std`） | 连接线程到主线程的请求队列：`channel::mpsc::unbounded` 与 `channel::oneshot` | 已在工作区（`workspace` 用同一个队列形式）；不另引入 `async-channel` |
+| `rustix`（`process`） | 探针目录属于当前用户的检查（`geteuid`） | 已在工作区；`process` 不带新的依赖 |
 | `lectern-logging` | 日志宏 | [ADR 0046](../adr/0046.md) |
 | `serde`、`serde_json` | 协议与 `ui-tree/1` 的编码 | 已在工作区 |
-| `image`（`png`） | `render_to_image` 的返回类型 `RgbaImage`，PNG 编码 | GPUI 已依赖它并打开 `png`，不新增 crate |
-| `insta`（dev） | 语义树快照 | 已在工作区 |
+| `image`（`png`） | `render_to_image` 的返回类型 `RgbaImage`，PNG 编码 | GPUI 已依赖它并打开 `png`；工作区多一条声明（`default-features = false`，只开 `png`），Cargo.lock 没有新的 package |
+| `insta`、`tempfile`、`lectern-i18n`（dev） | 快照；临时目录；测试场景里带 Fluent 键的标签 | 已在工作区 |
 
 不新增外部 crate。`gpui_platform/test-support`（它连带打开 `gpui/test-support`）经本 crate 的普通依赖打开：`just check` 与 `just test` 用 `--all-features`，工作区在这两条路径上本来就带着 `gpui/test-support`（`app` 的 dev-dependency），后端那一层是新增的；不带 feature 的 `cargo build -p lectern-app` 不编译本 crate，发布构建的依赖图里没有 `lectern-ui-probe`，也没有 `test-support`（「验收」第 4 步的 `cargo tree` 检查，与 [bench 设计「验收」](bench.md#验收)相同）。
 
@@ -109,15 +110,16 @@ impl Probe {
 
 ```rust
 /// 主线程。让 `window` 多画一帧并在这一帧里打开记录器，帧画完后把记录整理成 `Tree` 交给 `done`。
-/// 用两次 `Window::on_next_frame`：第一个回调（下一次帧请求开头，画之前）打开记录器并登记第二个回调；
+/// 用两次 `Window::on_next_frame`：第一个回调（下一次帧请求开头，画之前）`refresh`、打开记录器并登记第二个回调；
 /// 第二个回调（再下一次帧请求开头，画之后）关闭记录器、读出记录、构造 `Tree`。不阻塞。
 /// `with_image` 为 true 时在第二个回调里调用 `Window::render_to_image`，渲染和读回在主线程上同步进行。
+/// 返回的 `Cancel` 让等待超时的一方停掉这次捕获：之后两个回调什么也不做，记录器若已为它打开则关闭，
+/// 所以迟到的帧不会读到别人的记录。
 pub fn capture(
     window: &mut Window,
-    cx: &mut App,
     with_image: bool,
     done: impl FnOnce(Result<Capture, CaptureError>) + 'static,
-);
+) -> Cancel;
 
 /// 测试用：同一个记录器，但不走帧循环：打开记录器，`Window::draw`，关闭并构造 `Tree`。
 /// 主线程（测试里是 `VisualTestContext::update`），阻塞到画完。
@@ -343,22 +345,22 @@ ID 的语法：`segment('.' segment)*`，`segment` 是 `name` 或 `name[key]`；
 
 1. `app` 在首帧之后、`startup::release` 的末尾调用 `Probe::start`（只在 `ui-probe` feature 且 `LECTERN_UI_PROBE_DIR` 已设置时，见「对其他 crate 的要求」）。首帧之前不读目录、不建线程、不 bind（[ADR 0017](../adr/0017.md)）。
 2. `start` 在主线程上：`metadata(dir)` 检查目录（存在、是目录、`uid` 等于当前用户、权限 `0700`）；删除残留的 `probe.sock`；`UnixListener::bind`；`set_permissions(0o600)`；建监听线程；`cx.spawn` 一个前台任务，等待请求队列。
-3. 监听线程循环 `accept`；每个连接一个短命线程 `lectern-ui-probe-conn`，按行读请求，解析成 `Request`，连同一个应答通道放进队列（`async_channel`，GPUI 已依赖），阻塞等应答，再写回一行。连接线程之间没有共享状态。
+3. 监听线程循环 `accept`；每个连接一个短命线程 `lectern-ui-probe-conn`，按行读请求，解析成 `Request`，连同一个应答通道放进队列（`futures::channel::mpsc::unbounded`；应答通道是标准库的 `mpsc::channel`），阻塞等应答，再写回一行。连接线程之间只共享停止标志、计数和一张连接表（供 `shutdown` 结束它们）。
 4. 前台任务在主线程上逐条取请求、处理（下文）、把结果发回应答通道。
-5. `shutdown`：置停止标志，关闭监听 socket（`accept` 返回错误）；监听线程删除 `probe.sock` 后退出；连接线程在客户端断开或当前请求应答后退出。`app` 的退出顺序在关闭 kernel 之前先 `shutdown` 探针。
+5. `shutdown`：置停止标志，对每个打开的连接 `shutdown(Both)`（阻塞在读上的连接线程读到结束后退出），再自己连一次监听 socket 唤醒 `accept`（`UnixListener` 不能从别的线程关闭）；监听线程看到停止标志，删除 `probe.sock` 后退出（`shutdown` 也删一次，所以返回时文件已不在）。`app` 的退出顺序在关闭 kernel 之前先 `shutdown` 探针。
 
 ### 一次 `ui_tree`
 
 | 步骤 | 线程 | 做什么 |
 |---|---|---|
 | 1 | 连接线程 | 读一行，解析；进入 `req` 作用域（下文「日志与诊断」）；入队 |
-| 2 | 主线程（前台任务） | 选窗口；`window.refresh()`；`on_next_frame(cb1)` |
-| 3 | 主线程（帧请求 N 的开头） | cb1：`Recorder::begin(window_id)`；`on_next_frame(cb2)` |
+| 2 | 主线程（前台任务） | 选窗口；`on_next_frame(cb1)`；等 cb2，最多 `frame_timeout` |
+| 3 | 主线程（帧请求 N 的开头） | cb1：`window.refresh()`；`Recorder::begin(window_id)`；`on_next_frame(cb2)` |
 | 4 | 主线程（帧 N 的 draw） | 每个语义包装元素在 prepaint 里把 `Record` 推进记录器；元素嵌套决定 `parent` |
 | 5 | 主线程（帧请求 N+1 的开头） | cb2：`Recorder::finish()` 取出记录；`Tree::from_records`；发回应答通道 |
 | 6 | 连接线程 | `serde_json` 编码，写一行 |
 
-GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回调，再 `draw`（[app 设计「启动屏障」](app.md#启动屏障)用的是同一个顺序），所以 cb1 在画之前、cb2 在画之后。`refresh` 把窗口标为脏，帧 N 一定会画。记录器只在 cb1 与 cb2 之间打开：探针没有请求时，语义包装元素每帧只读一个原子标志，不记录。前台任务用 `frame_timeout` 等 cb2：超时应答 `timeout`，并丢弃之后迟到的记录。
+GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回调，再 `draw`（[app 设计「启动屏障」](app.md#启动屏障)用的是同一个顺序），所以 cb1 在画之前、cb2 在画之后。`refresh` 在 cb1 里调用（而不是登记 cb1 时）：cb1 在同一次帧请求里先于「是否要画」的判断，所以窗口此刻一定是脏的，帧 N 一定会画，而且绕过视图缓存，每个包装元素都会 prepaint。记录器只在 cb1 与 cb2 之间打开：探针没有请求时，语义包装元素每帧只读一个原子标志，不记录。前台任务用 `frame_timeout` 等 cb2：超时应答 `timeout`，并丢弃之后迟到的记录。
 
 ### 一次 `screenshot`
 
@@ -406,7 +408,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
   - warn `probe start failed`（由 `app` 在 `Probe::start` 返回 `Err` 时记，target 为 `app`）：`reason`（`dir-not-private`、`bind`、`thread`）、`error`（`Value::io`，有时）。
   - info `probe stopped`：`conns`（本次会话的连接数）、`requests`。
 - 详细级别：debug `probe request`：`req`、`conn`、`method`、`took_us`、`nodes`（节点数）、`bytes`（应答字节数）；`screenshot` 另带 `path`（`Value::path`）、`width`、`height`。trace 不另记。
-- 关联 ID：`req`（`Ctx::req`，进程内从 1 递增）。logging 设计把它定义为一次对外请求的序号；探针请求是进程外发来的一次请求，同样是一次跨进程的往返，借用同一个字段，不新增 `Ctx` 字段。连接线程解析出请求后 `scope(Ctx { req, .. })`，入队的请求带着序号，主线程处理时 `within` 同一个 `Ctx`。
+- 关联 ID：`req`（`Ctx::req`，进程内从 1 递增）。logging 设计把它定义为一次对外请求的序号；探针请求是进程外发来的一次请求，同样是一次跨进程的往返，借用同一个字段，不新增 `Ctx` 字段。连接线程解析出请求后 `scope(Ctx { req, .. })`，所有探针记录都由连接线程写出（主线程的前台任务不写日志），所以只在这个线程上设作用域，请求不带 `Ctx` 过队列。
 - 不记录：请求和应答的 JSON；节点的标签文字、业务键和属性值；截图的像素；窗口标题。路径只经 `Value::path` 记录（探针目录、截图路径）。
 - 金丝雀测试：`canary_stays_out_of_probe_logs`：`testing::capture()` 在 trace 级别下，用一个标签文字、一个业务键和一个属性值都含金丝雀串的视图跑 `tree::snapshot`，再把树经 `annotate` 和 `write_png` 写到临时目录，并让 `server` 的请求处理函数处理一条 `method` 为金丝雀串的请求（应答 `unknown-method`），`assert_absent(金丝雀)`。
 
@@ -463,7 +465,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 3. **`ui_probe`**（`Refs #6`）
    - `just test -p lectern-ui-probe` 全部通过，含「测试」列出的 insta 快照和 `canary_stays_out_of_probe_logs`。
    - `cargo run -p lectern-ui-probe --bin lectern-probe -- --help` 列出 `hello`、`ui_tree`、`screenshot`、`quit`、`raw`。
-   - `rg 'println!|eprintln!' crates/ui_probe/src --glob '!bin/*'` 没有结果（库部分只经日志宏）。
+   - `rg 'println!|eprintln!' crates/ui_probe/src --glob '!**/bin/*'` 没有结果（库部分只经日志宏）。
    - `crates/ui_probe/AGENTS.md` 的设计文档行指向本文。
 4. **`app`：probe profile 与端到端**（`Closes #6`）
    - `just test -p lectern-app` 里 `tests/probe.rs` 通过（macOS）。
@@ -471,3 +473,40 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
    - `cargo build --locked -p lectern-app --features ui-probe` 成功。
    - `just probe` 启动一个会话并打印探针目录；在同一台机器上 `cargo run -p lectern-ui-probe --bin lectern-probe -- screenshot` 返回一个存在的 PNG 路径，解码后不是单一颜色（读回真的发生了），`lectern-probe quit` 后进程退出。`tests/probe.rs` 对 PNG 做同一个检查。
    - `just bench app/` 的 `app/cold_start`、`app/idle_empty` 结果与改动前相比不变（探针不在测量构建里）。
+
+## 实际验证
+
+第 3 步（macOS 27.0.1，Apple 芯片，本机屏幕锁定，没有图形会话）：
+
+- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`ui_probe` 在 tool 层，依赖 `ui`、`logging` 和 GPUI；没有 crate 依赖它）。
+- `just test -p lectern-ui-probe`：68 个测试通过，连跑 5 次没有失败。含「测试」列出的单元测试和 `#[gpui::test]`：`tree_*`（9 个，含 `tree_basic`、`tree_warnings` 两份快照）、`check_id_*`、`warnings_*`、`annotate_*`（含 `write_png_*`）、`request_*` 与 `response_lines` 快照、`name_*`、`dir_*`、`server` 的请求处理（`hello`、`ui_tree`、未知方法、`quit` 之后的 `quitting`、`screenshot` 的检查与写文件、行长度上限、连接的顺序与 `shutdown` 结束连接）、`client` 的假探针、`snapshot_of_nested_semantics`（快照）、`records_only_while_armed`、`capture_uses_two_frames`、被取消的捕获、`handle_*`（超时、无窗口、两帧）、`quit_dispatches_the_applications_quit_action_by_name`、`dropping_the_request_while_recording_disarms_the_recorder`、`probe_can_be_shut_down_from_another_thread`（`Probe` 是 `Send + Sync`，`app` 的 `lectern-quit` 线程可以调 `shutdown`），以及 `canary_stays_out_of_probe_logs`。
+- `a_session_answers_hello_ui_tree_screenshot_and_quit`：在 GPUI 测试平台上真的起一个 `Probe`（真实的 Unix socket，0600，探针目录 0700），另一个线程里的 `client::Client` 依次发 `hello`、`ui_tree`、非法 `name` 的 `screenshot`、`screenshot`、未知方法、`quit`、再一个 `hello`；`ui_tree` 返回 6 个节点（窗口根加 5 个）、标签的 Fluent 键 `common-ok`；`quit` 分发了测试注册的 `lectern::Quit` 一次，之后的请求是 `quitting`；`drop(probe)` 后 `probe.sock` 被删除、不能再连接。测试平台没有渲染器，所以这里的 `screenshot` 应答 `render`。
+- `cargo run -p lectern-ui-probe --bin lectern-probe -- --help` 列出 `hello`、`ui_tree`、`screenshot`、`quit`、`raw`；没有探针目录时退出码 64。
+- `rg 'println!|eprintln!' crates/ui_probe/src --glob '!**/bin/*'` 没有结果（验收里原来的 `'!bin/*'` 在 `rg` 里不排除 `src/bin/`，已改成 `'!**/bin/*'`）。
+- `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的 package。`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-ui-probe`，也没有 `"test-support"`（现在还没有 crate 依赖本 crate；第 4 步再检查一次）。
+
+没有验证（本机锁屏，或属于第 4 步）：
+
+- 真实窗口上的 `render_to_image`：Metal 读回、PNG 不是单一颜色、`framebufferOnly` 在 debug 构建里的行为、耗时（设计估计 10 ms 量级）、release 构建里 `screenshot` 应答 `render`。
+- 真实帧循环里两个 `on_next_frame` 回调与 `draw` 的先后（只在测试平台的 `simulate_next_frame` 里验证）；窗口不在前台或被遮挡时的帧率与 `frame_timeout`。
+- `quit` 经 `app` 真实的 `Quit` Action 退出整个进程；`Quit` 的名字 `lectern::Quit` 只对照了 `app/src/quit.rs` 的 `actions!(lectern, [Quit])`，没有在 `app` 里跑过。
+- `LECTERN_UI_PROBE_DIR`、`Profile::Probe`、`justfile` 的 `probe` 配方、`tests/probe.rs`、`just bench app/` 不变：第 4 步。
+
+## 与设计的差异
+
+第 3 步：
+
+- 窗口 ID 是 GPUI 的 `WindowId::as_u64()`（`hello` 的 `windows[].id`、`ui_tree` 的 `window.id` 和 `window` 参数相同，例如 `4294967297`），不是示例里的 1；根节点的 ID 是 `window[<这个值>]`。理由：它在窗口的生命周期里稳定，不需要另维护一张表；示例里的 1 只是形状。`window` 参数指定的窗口不存在时应答 `no-window`。`hello` 的窗口条目多一个 `key`（是否为活动窗口）。
+- `capture` 没有 `cx` 参数（`Window::on_next_frame` 只要 `&self`），返回 `Cancel`。设计里「迟到的记录丢弃」落在这里：`frame_timeout` 到时、窗口在两帧之间关闭、或前台任务被丢弃时（`server::frame` 里的一个 drop 守卫），主线程调 `Cancel::cancel`，两个回调之后什么也不做、已打开的记录器被关闭；原先设想的「超时后记录器一直开着，直到第二个回调才关」因此不存在。
+- 不依赖 `lectern-i18n`（只作 dev 依赖）：`lectern_ui::semantic::Label::key` 已经是 Fluent 消息 ID，`ui` 在构造 `Label` 时调过 `Key::name`，本 crate 直接写出。
+- 请求队列用 `futures::channel::mpsc::unbounded`，应答用标准库的 `mpsc::channel`，没有引入 `async_channel`（只为一个队列把它列为工作区依赖不值得；`workspace` 已经是这个形式）。工作区新增的声明只有 `image`（见「依赖」）。
+- `client::Client::call` 返回的是 `client::Reply`（`Deserialize`），不是 `protocol::Response`：后者的 `error.message` 是 `&'static str`，只能序列化。`Client::raw` 另给命令行的 `raw` 命令用。
+- `quit` 不经主线程取应答：连接线程自己应答 `{}`，写出后再往队列放一个 `Quit` 任务，主线程在前台任务里按名字 `lectern::Quit`（常量 `server::QUIT_ACTION`，对应 `app` 的 `actions!(lectern, [Quit])`）`build_action` 并 `dispatch_action`。`app` 改了 Action 的名字，`quit` 就退不出去：记 warn `probe quit failed`。收到 `quit` 之后到来的所有请求（包括未知方法）都应答 `quitting`。
+- 多出两条日志：warn `probe client rejected`（连接线程建不起来，字段 `conn`、`io`）、warn `probe quit failed`（上一条）。`probe request failed` 的 `io` 字段只在写文件失败时有值，`req` 由作用域给出，不作字段。
+- `shutdown` 不靠连接线程的读超时观察停止标志（那样空闲连接每 500 ms 醒一次，与「没有定时器」相抵）：它对每个打开的连接 `shutdown(Both)`，阻塞在读上的线程立刻读到结束。
+- `tree::warnings` 是单独的纯函数：`NodeId` 在调试构建里拒绝不合语法的 ID，测试里造不出 `bad-id` 的记录，所以语法与重复检查拆出来直接测。`bad-id` 对同一个 ID 只报一次。
+- `Tree::to_json` 是缩进的（快照和阅读用），线上用 `serde_json::to_value`（紧凑）。长度保留两位小数（`f32` 直接转 `f64` 会写成 `0.30000001192`）。
+- 快照放在 `src/tests/snapshots/`（测试在 `src/tests/`），不是设计里写的 `src/snapshots/`。
+- `#[gpui::test]` 里 GPUI 的测试上下文在一次 `update` 结束时会画脏窗口，所以 `capture` 第一个回调（`refresh`）之后不需要、也不能再手动 `draw`（那样记录会出现两遍）；整条会话的测试要 `cx.executor().allow_parking()`，因为连接线程从自己的线程唤醒前台任务。
+
+`app` 的接入（第 4 步，本 PR 不含）：`Cargo.toml` 的可选依赖与 `ui-probe` feature、`Profile::Probe`、`startup::release` 末尾的 `Probe::start(cx, Config::new(dir))`（失败记 warn `probe start failed`，`reason` 取 `StartError::reason()`，`error` 取 `StartError::io()`）、`quit` 线程里先 `Probe::shutdown`、`tests/probe.rs`、`justfile` 的 `probe` 配方，见「对其他 crate 的要求」第 3 项。

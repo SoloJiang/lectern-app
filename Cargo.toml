@@ -164,6 +164,10 @@ log = { version = "0.4.34", default-features = false, features = ["std", "kv"] }
 # foreground task. Already in the release build through GPUI; `std` brings
 # the channel and `StreamExt`, nothing else.
 futures = { version = "0.3", default-features = false, features = ["std"] }
+# lectern-ui-probe's PNG encoding and the `RgbaImage` that
+# `Window::render_to_image` returns (docs/design/ui_probe.md「依赖」). Already
+# in Cargo.lock with `png` on, through GPUI; default features off, `png` only.
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Snapshot tests for domain logic (AGENTS.md). Test-only.
 insta = "1.49"
 # Test-only: temporary directories for lectern-platform's tests, and mkfifo in

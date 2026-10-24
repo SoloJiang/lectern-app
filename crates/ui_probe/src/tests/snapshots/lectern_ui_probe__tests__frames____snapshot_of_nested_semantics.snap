@@ -1,0 +1,180 @@
+---
+source: crates/ui_probe/src/tests/frames.rs
+expression: tree.to_json()
+---
+{
+  "schema": "ui-tree/1",
+  "window": {
+    "id": 4294967297,
+    "title": "",
+    "size": {
+      "w": 1920.0,
+      "h": 1080.0
+    },
+    "scale": 2.0,
+    "key": false
+  },
+  "nodes": [
+    {
+      "n": 0,
+      "id": "window[4294967297]",
+      "role": "window",
+      "label": {
+        "key": null,
+        "text": ""
+      },
+      "bounds": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 1920.0,
+        "h": 1080.0
+      },
+      "visible": true,
+      "state": {
+        "selected": false,
+        "focused": false,
+        "disabled": false,
+        "expanded": null,
+        "checked": null
+      },
+      "attrs": {},
+      "parent": null,
+      "children": [
+        1
+      ]
+    },
+    {
+      "n": 1,
+      "id": "probe.outer",
+      "role": "panel",
+      "label": null,
+      "bounds": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 300.0,
+        "h": 200.0
+      },
+      "visible": true,
+      "state": {
+        "selected": false,
+        "focused": false,
+        "disabled": false,
+        "expanded": null,
+        "checked": null
+      },
+      "attrs": {},
+      "parent": 0,
+      "children": [
+        2,
+        5
+      ]
+    },
+    {
+      "n": 2,
+      "id": "probe.outer.list",
+      "role": "list",
+      "label": null,
+      "bounds": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100.0,
+        "h": 60.0
+      },
+      "visible": true,
+      "state": {
+        "selected": false,
+        "focused": false,
+        "disabled": false,
+        "expanded": null,
+        "checked": null
+      },
+      "attrs": {},
+      "parent": 1,
+      "children": [
+        3,
+        4
+      ]
+    },
+    {
+      "n": 3,
+      "id": "probe.outer.list.item[a]",
+      "role": "list-item",
+      "label": {
+        "key": null,
+        "text": "Alpha"
+      },
+      "bounds": {
+        "x": 0.0,
+        "y": 0.0,
+        "w": 100.0,
+        "h": 20.0
+      },
+      "visible": true,
+      "state": {
+        "selected": true,
+        "focused": false,
+        "disabled": false,
+        "expanded": null,
+        "checked": null
+      },
+      "attrs": {
+        "seen": "true"
+      },
+      "parent": 2,
+      "children": []
+    },
+    {
+      "n": 4,
+      "id": "probe.outer.list.item[b]",
+      "role": "list-item",
+      "label": {
+        "key": null,
+        "text": "Beta"
+      },
+      "bounds": {
+        "x": 0.0,
+        "y": 20.0,
+        "w": 100.0,
+        "h": 20.0
+      },
+      "visible": true,
+      "state": {
+        "selected": false,
+        "focused": false,
+        "disabled": false,
+        "expanded": null,
+        "checked": null
+      },
+      "attrs": {},
+      "parent": 2,
+      "children": []
+    },
+    {
+      "n": 5,
+      "id": "probe.outer.ok",
+      "role": "button",
+      "label": {
+        "key": "common-ok",
+        "text": "OK"
+      },
+      "bounds": {
+        "x": 0.0,
+        "y": 60.0,
+        "w": 40.0,
+        "h": 20.0
+      },
+      "visible": true,
+      "state": {
+        "selected": false,
+        "focused": false,
+        "disabled": false,
+        "expanded": null,
+        "checked": null
+      },
+      "attrs": {},
+      "parent": 1,
+      "children": []
+    }
+  ],
+  "warnings": []
+}
