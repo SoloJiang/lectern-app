@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Context, IntoElement, ParentElement, Render, TestAppContext, VisualTestContext, Window,
+    Context, IntoElement, ParentElement, Render, Styled, TestAppContext, VisualTestContext, Window,
     WindowHandle, div, px,
 };
 use gpui_component::{Theme, ThemeMode};
@@ -17,7 +17,7 @@ use lectern_platform::appearance::Change;
 use lectern_services::workspace::WorkspaceCommand;
 
 use crate::contrib::{KeyBindings, Overlay, SidebarItem};
-use crate::semantic::NodeId;
+use crate::semantic::{NodeId, Recorder, Role, Semantic, semantic};
 use crate::testing::{simulate_appearance_change, simulate_platform_change};
 use crate::{
     Appearance, Button, GroupedList, Icon, Row, Text, accent_follows_system, attach, colors, init,
@@ -203,6 +203,14 @@ impl Render for CanaryControls {
         let list = NodeId::new("canary", "list", None);
         div()
             .child(Button::new(list.child("button"), text()))
+            // A node of a view's own: the canary as a business key, in the
+            // label and in an attribute.
+            .child(semantic(
+                Semantic::new(list.item(canary), Role::Group)
+                    .label(&text())
+                    .attr("note", canary),
+                div().size(px(4.0)),
+            ))
             .child(
                 GroupedList::new(list.clone()).header(text()).row(
                     Row::new(list.item(canary))
@@ -221,8 +229,22 @@ fn logs_hold_no_text(cx: &mut TestAppContext) {
     let capture = lectern_logging::testing::capture();
     capture.clear();
     fixed(cx, Appearance::Light);
-    let _controls = cx.add_window(|_, _| CanaryControls(canary));
+    let controls = cx.add_window(|_, _| CanaryControls(canary));
     cx.run_until_parked();
+    // One frame with the recorder armed: the canary reaches the records,
+    // not the log.
+    {
+        let mut visual = VisualTestContext::from_window(controls.into(), cx);
+        Recorder::begin(controls.window_id());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let records = Recorder::finish();
+        assert!(
+            records
+                .iter()
+                .any(|record| record.semantic.id.as_str().contains(canary)),
+            "the canary node was recorded"
+        );
+    }
     let (window, _) = counted_window(cx);
     let mut cx = VisualTestContext::from_window(window.into(), cx);
     cx.update(|window, cx| {

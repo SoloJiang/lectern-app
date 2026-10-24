@@ -1986,11 +1986,12 @@ pub static BUDGETS: &[Budget] = &[
     // formatted with sample arguments.
     share("i18n/frame_strings", RECORD, I18N, ACTIVE, Time),
     // `ui/*` (docs/design/ui.md「性能」): GPUI, so macOS alone. Step 2's
-    // two; `ui/init`, `ui/ready`, `ui/palette_resolve`,
-    // `ui/mono_metrics_first`, `ui/idle_memory` come with the `app` PR of
-    // step 1, `ui/semantic_disarmed` with step 4. `ui/transition_tick` is the
-    // transition's own step; `ui/transition_tick_frame` adds GPUI's frame
-    // request and is recorded only (docs/design/ui.md「性能」).
+    // two and step 4's `ui/semantic_disarmed`; `ui/init`, `ui/ready`,
+    // `ui/palette_resolve`, `ui/mono_metrics_first`, `ui/idle_memory` come
+    // with the `app` PR of step 1.
+    // `ui/transition_tick` is the transition's own step;
+    // `ui/transition_tick_frame` adds GPUI's frame request and is recorded
+    // only (docs/design/ui.md「性能」).
     share_macos(
         "ui/transition_tick",
         &[median(Limit::TimeAtMost(ns(100)))],
@@ -2002,6 +2003,13 @@ pub static BUDGETS: &[Budget] = &[
     share_macos(
         "ui/bezier_eval",
         &[median(Limit::TimeAtMost(ns(50)))],
+        UI,
+        ACTIVE,
+        Time,
+    ),
+    share_macos(
+        "ui/semantic_disarmed",
+        &[median(Limit::TimeAtMost(ns(2)))],
         UI,
         ACTIVE,
         Time,

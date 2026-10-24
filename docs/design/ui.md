@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 与第 1 步的 `ui/*` 基准在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步尚未实现。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 与第 1 步的 `ui/*` 基准在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步（探针的记录器与包装元素、控件的语义节点快照，基准 `ui/semantic_disarmed`）已实现（[#242](https://github.com/SoloJiang/lectern-app/pull/242)）。`Palette` 的词级差异底色（`review_view` 前置条件 F）已实现（[#238](https://github.com/SoloJiang/lectern-app/pull/238)）。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -842,6 +842,14 @@ pub mod semantic {
 - `just test -p lectern-ui`：57 个测试通过，新增 `palette_from_system_derives_the_diff_backgrounds`（系统色路径）、`palette_builtin_diff_inline_is_one_notch_deeper`、`palette_builtin_label_contrast_on_diff_backgrounds_is_at_least_4_5`，`palette_builtin_diff_backgrounds_match_the_hand_composite` 与 `palette_builtin_has_29_colors_with_alpha_in_range` 扩到四个 diff 底色。
 - `just check`、`just deny`、`just doctest`（`lectern-ui` 的 4 个 `compile_fail` 仍通过）通过；`just bench ui/`：`ui/transition_tick` 中位数 55 ns（预算 ≤ 100 ns，noisy）、`ui/bezier_eval` 11 ns（≤ 50 ns），本 PR 不影响它们。
 
+第 4 步（macOS，Apple 芯片，macOS 27.0.1）：
+
+- `just check`、`just deny`、`just doctest`（`lectern-ui` 的 4 个 `compile_fail` 仍通过）通过。
+- `just test -p lectern-ui`：73 个测试通过，其中本步新增 16 个：`semantic_records_bounds_and_parents`、`semantic_records_nothing_when_disarmed`、`semantic_nests_three_levels_and_records_the_call_site`、`semantic_declared_at_is_the_line_of_the_call`、`semantic_begin_drops_unclaimed_records_and_other_windows`（第二次 `begin` 丢掉没取走的记录；为另一个窗口打开时本窗口不记录）、`semantic_roles_map_to_accessibility_roles`、`semantic_access_writes_the_declaration`、`semantic_interactive_declares_like_semantic`，以及 `Button`、`AgentDot`、`CircleCheck`、`Progress`、`Segmented`、`GroupedList`（含两个 `Row`）、`Expander`、`Hint` 各一份 insta 快照（`semantic_snapshot_*`，在 `tests/probe.rs`）；`logs_hold_no_text` 多渲染一个带金丝雀的 `semantic(...)`（金丝雀在 `NodeId`、`Label`、`attrs` 里），并在记录器打开时画一帧，断言记录里有金丝雀而日志里没有。
+- `just bench ui/`：`ui/semantic_disarmed` 中位数 0 ns（预算 ≤ 2 ns；单次读取低于基准框架整纳秒的分辨率，所以显示为 0，不是没测），`ui/transition_tick` 41 ns（≤ 100 ns）、`ui/bezier_eval` 8 ns（≤ 50 ns）。
+- `rg 'Recorder::begin' crates --glob '!crates/ui_probe/**' --glob '!**/tests*' --glob '!**/benches/**'` 没有结果；三条 `rg`（时长、颜色、IO）与 `rg 'set_reduce_motion'` 都没有结果；`git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果。
+- 没有做：`ui_probe` 读记录器的部分（`ui_probe` 自己的 PR）；用屏幕阅读器读控件的无障碍树（`#[gpui::test]` 拿不到 AccessKit 树，映射由 `semantic_access_writes_the_declaration` 在纯函数上验证）；手动的视觉检查。
+
 ## 与设计的差异
 
 第 1 步：
@@ -871,7 +879,6 @@ pub mod semantic {
 - `reduced_motion_has_no_displacement` 本步只覆盖设计里的面板偏移示例（`Transition` + `Effective::Fade`），`Expander` 和 `Segmented` 的滑块随第 3 步加入；另加 `panel_moves_when_motion_is_not_reduced` 作为对照。
 - `bench` 对 `lectern-ui` 和 `gpui`（`test-support`）的 dev 依赖只在 macOS 声明（`[target.'cfg(target_os = "macos")'.dev-dependencies]`），Linux 上 `bench` 仍不依赖 GPUI、仍在 `just check` / `just test` 的范围内。为此 `scripts/check_architecture.py` 第 4 条改为：Apple 专属的 target 谓词只对外部的、非 GPUI 的依赖算作 macOS 绑定（工作区成员由它自己的清单检查，GPUI 只在 macOS 上编译是构建约束，不是绑定）。预算表加 `Budget::macos_only`：Linux 上 `just bench` 把这些条目记为 `skipped`（只在 macOS 运行），不算缺基准（[bench 设计「预算表」](bench.md#预算表)已补）。
 
-
 第 3 步：
 
 - `semantic` 的数据类型提前到本步：控件的构造函数接受 `NodeId`，所以 `NodeId`、`Role`、`Label`、`State`、`Semantic` 与 `node_id_*` 测试随控件一起实现；`semantic(...)`、`semantic_interactive(...)`、`SemanticElement`、`Record`、`Recorder`、无障碍属性映射和每个控件的语义节点快照仍在第 4 步。控件经一个 crate 内的接缝 `semantic::declare(spec, element)` 声明节点，本步它是恒等函数；第 4 步把它换成记录的包装元素，控件不用改。`Semantic` 多了构造用的 `new` / `label` / `state` / `attr`，`Label::of(&Text)` 从 `Text` 取键与文字。
@@ -888,3 +895,13 @@ pub mod semantic {
 
 - `Palette` 多两个字段 `diff_added_inline_background`、`diff_removed_inline_background`，规格按 [review_view 设计「对其他 crate 的要求」F](review_view.md#对其他-crate-的要求)：`system(Green)` / `system(Red)` 在浅色 28%、深色 36% 透明度下叠在 `control_background` 上。内置表（`builtin.rs`）只存系统色的分量，没有存派生色，所以「内置表与系统色两条路径」落在同一个 `Palette::from_system`：`Palette::builtin` 是它对内置分量的调用，`ready` 与外观通知对系统读数的调用，两条路径不会不一致。`builtin.rs` 因此没有改动。
 - `label` 在四个 diff 底色上的对比度检查取 4.5:1（WCAG 2 AA 的正文标准），不是 `label` 与 `window_background` 的 7:1：深色下 36% 的绿色底上 `label` 是 6.0:1，达不到 7:1，而 diff 行里文字本来就多由代码配色着色。词级差异底色上叠加的代码配色（`Red` 的字符串在 `Red` 的底色上）不在 `palette_builtin_*` 检查的范围内，随 `review_view` 的视觉验收。
+
+第 4 步：
+
+- `declare` 的返回类型从 `E` 改为 `AnyElement`（`#[track_caller]`），控件的代码没有改：它们本来就在 `render` 里把各自的元素传进去，`AnyElement` 也让一个 `match` 的两个分支（声明节点 / 装饰元素）有同一种类型。因为是 GPUI 调控件的 `render`，不是视图，控件自己节点的 `declared_at` 是控件的 `render` 所在行（`controls/*.rs`），不是视图里的构造处；视图自己用 `semantic(...)` 声明的节点才指向视图的调用处。「只记录业务视图层」由 `ui_probe` 按 `declared_at` 的文件路径过滤。
+- 记录器的 `Vec<Record>` 和父节点栈都在线程本地（`thread_local!` 的 `RefCell`），只有开关 `ARMED` 是进程级的 `AtomicBool`；设计原文是一个进程级的 `Vec`。理由：记录器只在主线程上用，线程本地省掉一把锁，关闭时的路径仍然只有一次原子读。限制：两个线程不能同时记录（nextest 一个测试一个进程；`ui_probe` 只在主线程上调用）。`begin(window)` 记下窗口，包装元素只在自己的窗口等于它时记录，所以另一个窗口的帧不会混进来。
+- `Record::bounds` 是包装元素在 prepaint 里拿到的范围，也就是子元素的范围（`SemanticElement::request_layout` 返回子元素的布局），不是 `Window::layout_bounds`；`visible` 是这个范围与 prepaint 时的内容遮罩相交。`ui_probe` 设计里写的 `Window::layout_bounds` 在这里得到同一个值，探针按本文为准（两边已一致的形状见「对其他 crate 的要求」）。
+- `semantic_interactive` 的约束是 `StatefulInteractiveElement + IntoElement`，不是 `ui_probe` 设计里写的 `InteractiveElement`：GPUI 的 `accessibility_id`、`role`、`aria_*` 只在带 ID 的元素上。映射 `accesskit_role` 里没有任何角色映射到 `GenericContainer`（GPUI 把它从无障碍树里去掉，而且对它断言）：`Sidebar` → `Complementary`、`Panel` → `Pane`、`Toggle` → `CheckBox`、`TabBar` → `TabList`、`Text` 与 `Badge` → `Label`、`Diff` 与 `DiffHunk` → `Group`、`DiffLine` → `ListItem`。`aria_selected` 对 `ListItem`、`TreeItem`、`Tab`、`MenuItem` 总是写（「未选中」也是事实），其他角色只在选中时写。
+- 控件仍经 `declare`，即 `semantic(...)`，不写 `semantic_interactive` 的无障碍属性：控件的无障碍属性（`Button` 的 `accessibility_label`、gpui-component 自己设的）第 3 步已经有，本步不改控件。`semantic_interactive` 给视图自己的带 ID 容器用。
+- `ui/semantic_disarmed` 测的是 `Recorder::is_armed()`，即包装元素在关闭时自己读的那一次原子加载；包装元素把 `request_layout`、`prepaint`、`paint` 转给子元素的 `AnyElement` 调用是 GPUI 的元素管道，不在这条预算里，也无法在一帧的噪声里分辨 2 ns。预算表登记为 `share_macos`，与第 2 步的两条相同。
+- 每个控件的快照放在 `tests/probe.rs`（和记录器的测试一起），`tests/semantic.rs` 仍是 `NodeId` 与构造器的测试；快照去掉 `bounds` 和 `declared_at`，保留 `visible` 与 `parent`。
