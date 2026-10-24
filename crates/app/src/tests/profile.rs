@@ -67,8 +67,9 @@ fn every_profile_graph_validates(cx: &mut TestAppContext) {
             panic!("{profile:?}: {errors:?}");
         }
         let expected = match profile {
-            // project, two session sources, review, workspace.
-            Profile::Desktop => 5,
+            // project, two session sources, review, usage, workspace,
+            // project-home, project-home-usage.
+            Profile::Desktop => 8,
             Profile::Test => 0,
         };
         assert_eq!(count, expected, "{profile:?}");

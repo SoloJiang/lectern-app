@@ -11,7 +11,12 @@ use lectern_fs_watch::Watcher;
 use lectern_kernel::PluginSet;
 use lectern_logging::{Field, Value};
 use lectern_project::{ProjectDeps, ProjectPlugin};
+use lectern_project_home::{
+    PLUGIN_ID as PROJECT_HOME_ID, ProjectHomeDeps, ProjectHomePlugin, ProjectHomeUsagePlugin,
+    USAGE_PLUGIN_ID as PROJECT_HOME_USAGE_ID, UsageSlot,
+};
 use lectern_review::ReviewDeps;
+use lectern_usage::{LocalZone, UsageDeps};
 use lectern_workspace::{WorkspaceHost, WorkspacePlugin};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,7 +50,8 @@ impl Profile {
     #[cfg(test)]
     pub const ALL: [Profile; 2] = [Profile::Desktop, Profile::Test];
 
-    /// Desktop: `project`, the two session sources, `review` and `workspace`
+    /// Desktop: `project`, the two session sources, `review`, `usage`,
+    /// `workspace`, `project-home` and `project-home-usage`
     /// (docs/design/app.md「插件与资源」). Test: none. With the number of
     /// plugins, for the log (`PluginSet` does not expose it). No IO.
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
@@ -84,12 +90,51 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
         data_dir: r.app_data.join("review"),
         git_ceilings: r.git_ceilings.clone(),
     });
-    // The window skeleton. Its screens come from `welcome` and
-    // `project_home`, which join when their views are merged.
+    let (usage_id, usage) = lectern_usage::plugin(UsageDeps {
+        executor: r.executor.clone(),
+        data_dir: r.app_data.join("usage"),
+        zone: Arc::new(SystemZone),
+    });
+    // One cell for the two project-home plugins: `dyn Usage` may be absent,
+    // so the interest in the project's usage is reconciled in it.
+    let slot = UsageSlot::default();
+    // The window skeleton. Its screens come from `welcome`, which joins when
+    // its view is merged; `project-home` registers none until its views are.
     let set = set
         .with(id, review)
-        .with("workspace", WorkspacePlugin::new(r.workspace.clone()));
-    (set, count + 2)
+        .with(usage_id, usage)
+        .with("workspace", WorkspacePlugin::new(r.workspace.clone()))
+        .with(
+            PROJECT_HOME_ID,
+            ProjectHomePlugin::new(ProjectHomeDeps {
+                executor: r.executor.clone(),
+                usage: slot.clone(),
+            }),
+        )
+        .with(
+            PROJECT_HOME_USAGE_ID,
+            ProjectHomeUsagePlugin::new(r.executor.clone(), slot),
+        );
+    (set, count + 5)
+}
+
+/// `usage`'s local time zone: `platform::time::utc_offset`
+/// (docs/design/usage.md「对其他 crate 的要求」B, C).
+struct SystemZone;
+
+impl LocalZone for SystemZone {
+    fn offset_at(&self, unix_ms: i64) -> i32 {
+        offset_at(unix_ms, lectern_platform::time::utc_offset)
+    }
+}
+
+/// `unix_ms` in seconds, rounded down (a truncating division would put the
+/// last second before a switch of the offset after the switch), and the
+/// offset `utc_offset` gives for it. None is not expected for a millisecond
+/// timestamp (docs/design/platform.md「本地时区的偏移」「范围」); it counts as
+/// UTC.
+fn offset_at(unix_ms: i64, utc_offset: impl FnOnce(i64) -> Option<i32>) -> i32 {
+    utc_offset(unix_ms.div_euclid(1000)).unwrap_or(0)
 }
 
 impl Field for Profile {
@@ -98,5 +143,25 @@ impl Field for Profile {
             Profile::Desktop => "desktop",
             Profile::Test => "test",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offset_at;
+
+    #[test]
+    fn zone_rounds_milliseconds_down_to_seconds() {
+        let seen = |ms| offset_at(ms, |secs| i32::try_from(secs).ok());
+        assert_eq!(seen(1_999), 1);
+        assert_eq!(seen(2_000), 2);
+        assert_eq!(seen(-1), -1);
+        assert_eq!(seen(-1_000), -1);
+        assert_eq!(seen(-1_001), -2);
+    }
+
+    #[test]
+    fn zone_without_an_offset_is_utc() {
+        assert_eq!(offset_at(0, |_| None), 0);
     }
 }

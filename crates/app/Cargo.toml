@@ -35,9 +35,15 @@ lectern-kernel = { path = "../kernel" }
 lectern-logging = { path = "../logging", features = ["sink"] }
 lectern-platform = { path = "../platform" }
 lectern-project = { path = "../project" }
+# The "project-home" and "project-home-usage" plugins and their shared
+# `UsageSlot` (docs/design/project_home.md「对其他 crate 的要求」D).
+lectern-project-home = { path = "../project_home" }
 lectern-review = { path = "../review" }
 # `LeaveScope`, for the leave guards `Quit` asks.
 lectern-services = { path = "../services" }
+# The "usage" plugin, `UsageDeps` and `LocalZone`
+# (docs/design/usage.md「对其他 crate 的要求」C).
+lectern-usage = { path = "../usage" }
 # `init` before the window, `attach` on the skeleton window, `ready` behind
 # the barrier (docs/design/ui.md「对其他 crate 的要求」).
 lectern-ui = { path = "../ui" }
