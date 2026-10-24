@@ -1,6 +1,6 @@
 # project_home 设计
 
-状态：实现中。前置条件 B（`project-home.ftl`，[#237](https://github.com/SoloJiang/lectern-app/pull/237)）与「验收」第 1 步（不开窗口的部分：`snapshot::build`、两个插件、`UsageSlot`，PR_STEP1）已实现，见「实际验证」「与设计的差异」；其余前置条件与第 2、3 步尚未实现。
+状态：实现中。前置条件 B（`project-home.ftl`，[#237](https://github.com/SoloJiang/lectern-app/pull/237)）与「验收」第 1 步（不开窗口的部分：`snapshot::build`、两个插件、`UsageSlot`，[#241](https://github.com/SoloJiang/lectern-app/pull/241)）已实现，见「实际验证」「与设计的差异」；其余前置条件与第 2、3 步尚未实现。
 
 对应 issue [#30](https://github.com/SoloJiang/lectern-app/issues/30)。`project_home` 是打开项目后首先看到的屏幕（[交互规范「屏幕」](interaction.md#屏幕)的 02 画板，[ADR 0012](../adr/0012.md)）：项目侧栏（Overview、按 worktree 分组的 Sessions、带今天改动数的 Packages、其他 crate 贡献的 Worktrees / Files / MR 入口、底部的 Usage 行）和主区（Needs Review 的会话卡片、Outside Any Session、Recently Done）。它只显示领域层算好的快照（`project`、`agents`、`review`、`usage`），自己不做归位、比较和统计；它由 [workspace 设计](workspace.md)的根视图承载，作为 `Screen(PROJECT_HOME)` 和 `SidebarPanel("project")` 贡献进去。
 
@@ -501,7 +501,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 
 分三步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-project-home`、`just deny` 通过。前置条件的顺序：B（`project-home.ftl`）和 workspace 设计的前置条件 A（`services::workspace`）在第 1 步之前；workspace 设计的前置条件 B（`ui::contrib` 的载荷类型、侧栏图标）、`ui` 设计的第 3、4 步（控件、探针节点）和 workspace 的第 2 步（根视图）在第 2 步之前；本文的 A（`Overview.packages`）、D、E 随第 3 步（A 可以更早）。
 
-**第 1 步：快照与插件（不开窗口的部分，PR_STEP1）。**
+**第 1 步：快照与插件（不开窗口的部分，[#241](https://github.com/SoloJiang/lectern-app/pull/241)）。**
 
 - `snapshot::build` 与「测试」里 `build_*`、`snapshot_*` 的 insta 快照通过。
 - 插件的 `#[test]` 通过（`activate_registers_contributions_only` 随第 2 步，见「与设计的差异」）：`opened_takes_the_overview_interest_and_closed_drops_it`、`events_coalesce_into_one_build`、`complete_is_requested_once_per_pending_session`、`usage_slot_empty_builds_without_usage`、`usage_plugin_deactivation_rebuilds`、`started_handles_an_already_open_project`。
@@ -540,7 +540,7 @@ executor：ProjectEvent::Closed { key } ─▶ 监听：drop OverviewInterest，
 
 ### 第 1 步
 
-本 crate 不开窗口、不依赖 GPUI 的部分（PR_STEP1），在 macOS（arm64，Rust 1.97.0）上运行：
+本 crate 不开窗口、不依赖 GPUI 的部分（[#241](https://github.com/SoloJiang/lectern-app/pull/241)），在 macOS（arm64，Rust 1.97.0）上运行：
 
 - `cargo check -p lectern-project-home`、`just check`（含 `cargo clippy --workspace --all-targets -- -D warnings` 和架构检查：32 个 crate，`lectern-project-home` 带 `plugin = true`）、`just deny` 通过。`python3 scripts/check_architecture.py --gpui-free-packages` 现在包含本 crate，Linux CI 也会跑它。
 - `just test -p lectern-project-home`：31 个测试通过，都是普通 `#[test]`，连续跑 8 次稳定；`cargo test -p lectern-project-home`（同一进程）也通过。
