@@ -3,7 +3,7 @@
 系统色 token、动画原语和通用控件，封装 gpui-component。视图里的颜色、字体、动画都从这里取（[ADR 0015](../../docs/adr/0015.md)）。
 
 - 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：[docs/design/ui.md](../../docs/design/ui.md)（已接受）。实现按它的「验收」分四步：第 1 步（初始化、颜色、文本、字体与代码配色、`contrib`）已实现；第 2 步动效、第 3 步控件、第 4 步探针节点尚未实现。前置条件 A 在 `platform`（已实现）。
+- 设计文档：[docs/design/ui.md](../../docs/design/ui.md)（已接受）。实现按它的「验收」分四步：第 1 步（初始化、颜色、文本、字体与代码配色、`contrib`）和第 2 步（动效原语 `motion`）已实现；第 3 步控件、第 4 步探针节点尚未实现。前置条件 A 在 `platform`（已实现）。
 - issue：[#214](https://github.com/SoloJiang/lectern-app/issues/214)；探针节点与 [#6](https://github.com/SoloJiang/lectern-app/issues/6) 对齐
 - ADR：[0013](../../docs/adr/0013.md)、[0015](../../docs/adr/0015.md)、[0016](../../docs/adr/0016.md)、[0017](../../docs/adr/0017.md)、[0046](../../docs/adr/0046.md)
 
@@ -12,7 +12,9 @@
 - 只用系统字体、系统语义色和系统控件；浅色与深色由系统外观决定。
 - 颜色值只出现在 `src/palette/builtin.rs`（内置表、agent 标识色、强调色上的文字色）。其他文件不写 `hsla(`、`rgb(`、`rgba(` 和十六进制颜色，验收用 `rg` 检查（设计文档「验收」）。
 - 首帧之前只有 `init`：读减弱动态效果、登记 `platform` 的通知、用内置表建 `Palette`；系统色在 `ready`（首帧之后）才读（[platform 设计「系统外观」](../../docs/design/platform.md#系统外观)）。不做 IO、不建线程。
-- 动画时长与曲线见[交互规范「动效」](../../docs/design/interaction.md#动效)，在这里定义一次，视图不自定义。
+- 动画时长与曲线见[交互规范「动效」](../../docs/design/interaction.md#动效)，在 `motion.rs` 里定义一次，视图不自定义；本 crate 其他文件也不写 `Duration::from_millis`（验收用 `rg` 检查）。
+- 减弱动态效果由 `motion::reduced` 和 `Motion::effective` 处理（位移改为淡入淡出、时长减半）；不设置 GPUI 自己的 `App::reduce_motion` 标志，它会让 `with_animation` 直接画终态。
+- `Transition::tick` 只在视图的 render 里调用：它请求下一帧，GPUI 只允许正在渲染的视图这样做。
 - gpui-component 的 API 只在本 crate 和视图层使用；升级要和 GPUI 一起，先确认（[ADR 0016](../../docs/adr/0016.md)）。
 - 日志只经 `lectern-logging` 的宏，字段是事件名、外观、`'static` 的字体家族常量和计数；不记 `Text` 的内容、颜色数值、字体的实际名字。
 
@@ -21,6 +23,7 @@
 | 文件 | 内容 |
 |---|---|
 | `init.rs` | `init`、`ready`、`is_ready`、`init_fixed`、`attach`，外观 / 强调色 / 减弱动态效果变化的处理，`Palette` 到 gpui-component `Theme` 的投影 |
+| `motion.rs` | `Easing`、`Motion` 与交互规范「动效」表的全部常量、`reduced`、`Effective`、`Motion::animation`、可打断的 `Transition`（含弹簧）、`active_transitions` |
 | `palette/` | `Appearance`、`SystemColor`、`Palette`、`colors`、`palette`、`accent_follows_system`；`builtin.rs` 是内置表 |
 | `text.rs` | `Text`、`Verbatim`、`strings`、`set_locale` |
 | `font.rs` | 字体家族常量、`TextRole`、`TextRoleExt`、`MonoMetrics`、`mono_metrics` |
@@ -40,6 +43,7 @@ just doctest                  # compile_fail：字面量传不进 Text 和控件
 ```
 
 - 测试在 `src/tests/`，全用 `init_fixed`；只有 `init_then_ready_reads_the_system` 读真实的 AppKit。
+- `Transition` 的测试把测试体放进一个探针视图的 render 里跑（`tests/motion.rs` 的 `in_render`），时间由测试构造的 `Instant` 给出。基准 `ui/transition_tick`、`ui/bezier_eval` 在 `bench`（`just bench ui/`，只在 macOS）。
 - 交互行为用 `#[gpui::test]` 配合 `TestAppContext` 模拟按键、Action 和状态变化。测试平台不能从 GPUI 之外改窗口外观，外观变化经 `testing::simulate_appearance_change`。
 - 视图只读领域层提供的快照。测试里直接构造快照，不使用真实的 git、会话扫描或文件 IO。
 - 配色表用 insta 快照（`src/tests/snapshots/`）；颜色的色觉辨识检查在 `tests/colors.rs`，换一行颜色先让它通过。

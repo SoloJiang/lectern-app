@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入与 `ui/*` 基准在下一个 PR；第 2 到 4 步尚未实现。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入与第 1 步的 `ui/*` 基准在下一个 PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3、4 步尚未实现。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -797,6 +797,15 @@ pub mod semantic {
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
 - 没有做：`app` 的接入（`with_assets`、`init`、`attach`、`ready` 和两个 `#[gpui::test]`）、`ui/*` 基准、手动的强调色与外观切换检查，都在下一个 PR；`mono_metrics().family` 在发布构建下的手动检查随 `app` 接入一起做。
 
+第 2 步（macOS，Apple 芯片，macOS 27.0.1）：
+
+- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`bench` 对 `lectern-ui` 和 `gpui` 的依赖只在 macOS 声明，见「与设计的差异」）。
+- `just test -p lectern-ui`：38 个测试通过，其中本步新增 15 个：`bezier_matches_the_css_reference`、`bezier_ends_at_0_and_1`、`bezier_switch_overshoots_near_0_6`、`spring_constants_match_the_spec`、`spring_keeps_its_velocity_when_retargeted`、`spec_constants_hold_the_table`、`transition_continues_from_the_current_value`、`transition_same_target_does_not_restart`、`transition_set_arrives_at_once`、`transition_delay_holds_the_start_value`、`transition_reduced_motion_halves_and_fades`、`transition_not_reduced_moves`、`active_transitions_counts_the_ones_in_progress`、`reduced_motion_has_no_displacement`、`panel_moves_when_motion_is_not_reduced`。`cargo nextest run -p lectern-bench`：78 个通过（新增 `runner_macos_only_budgets_are_skipped_off_macos`）。
+- `just doctest`：`lectern-ui` 的 3 个 `compile_fail` 仍通过。
+- `just bench --measure ui/`：`ui/transition_tick` 中位数 43 ns（预算 ≤ 100 ns；`ENTER_SESSION` 弹簧的 tick 40 ns，记在结果的 note 里），`ui/bezier_eval` 中位数 8 ns（预算 ≤ 50 ns）。
+- `rg 'set_reduce_motion' crates/ui/src crates/app/src`、`rg 'Duration::from_millis|Duration::from_secs' crates/ui/src --glob '!**/motion*' --glob '!**/tests*'`、`rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 都没有结果。
+- `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
+
 ## 与设计的差异
 
 第 1 步：
@@ -810,4 +819,17 @@ pub mod semantic {
 - `attach` 的「重复调用只登记一次」按 `AnyWindowHandle` 记在 `UiState` 里，每次 `attach` 先去掉已关闭的窗口；重复调用返回一个空的 `Subscription`。
 - gpui-component 主题的投影只写 `Palette` 有直接来源的字段（背景、前景、边框、主色、次要色、列表与选中、侧栏、弹层、链接、骨架、滚动条、danger / success / warning / info 等 40 个）；强调色上的文字用 `builtin.rs` 里的 `on_accent()`（AppKit 的 `alternateSelectedControlTextColor`，两个外观都是白色），不是 `Palette` 的字段。其余字段保持 gpui-component 注册主题的值，第 3 步包装控件时再补。
 - `i18n` 的 `Key::name` / `FmtKey::name`（`Text::message_id` 用）由 [#227](https://github.com/SoloJiang/lectern-app/pull/227) 提供，不在本 PR 里。
+
+第 2 步：
+
+- `ENTER_SESSION.duration` 是 `ENTER_SESSION_SPRING` 从静止起步、`SPRING_EPSILON`（0.001，GPUI 的默认值，它没有公开）下的 `settle_time`，实测 491 ms，不是原文估的 0.6 s。`settle_time` 不是 const fn，所以常量写死，`spring_constants_match_the_spec` 核对两者相差 ≤ 1 ms。
+- 弹簧的结束由 `SpringConfig::is_settled` 判断；`duration` 的两倍是中途改目标后仍未静止时的后备上限。减弱动态效果下弹簧按定时的淡入淡出播放：时长减半、曲线用 `sampled_easing`。
+- `Easing::EaseOut` 取 CSS 的 `ease-out`，即 `cubic-bezier(0, 0, 0.58, 1)`；原文只写「ease-out」。
+- `Motion::effective` 在减弱动态效果下只把 `duration` 减半，`delay` 不变（原文没有写 `delay`）。`Fade` 里的 `Motion` 的 `moves` 为 false。
+- GPUI 的 `Animation` 没有延迟，`Motion::animation` 把延迟折进去：动画总长 `delay + duration`，曲线在延迟结束前保持 0。
+- `Transition::tick` 自己的工作是常数时间、不分配；它调用的 `Window::request_animation_frame` 在 GPUI 里装箱一个回调（一次分配），这是 GPUI 的代价，不在本 crate 控制内。`ui/transition_tick` 测的是含这次请求的 `tick`：`tick` 只能在视图的 render 里调用（GPUI 只允许正在渲染的视图请求下一帧），所以基准用 GPUI 的测试平台开一个窗口，取「一次 render 里 4096 次 tick」与「不 tick 的 render」之差除以 4096 作为一个样本，用 `Ctx::compare` 交替采样。
+- `Transition` 按字段算约 112 字节，不是 56：它存了两个 `Instant`（当前段的起点和上次采样的时刻，弹簧按后者逐步推进）和整份 `Motion`（56 字节）。由视图持有，个数以个位数计，不影响内存预算。
+- 进行中的计数是进程级的 `AtomicUsize`；nextest 一个测试一个进程，`active_transitions_*` 以测试开始时的值为基准断言差值。
+- `reduced_motion_has_no_displacement` 本步只覆盖设计里的面板偏移示例（`Transition` + `Effective::Fade`），`Expander` 和 `Segmented` 的滑块随第 3 步加入；另加 `panel_moves_when_motion_is_not_reduced` 作为对照。
+- `bench` 对 `lectern-ui` 和 `gpui`（`test-support`）的 dev 依赖只在 macOS 声明（`[target.'cfg(target_os = "macos")'.dev-dependencies]`），Linux 上 `bench` 仍不依赖 GPUI、仍在 `just check` / `just test` 的范围内。为此 `scripts/check_architecture.py` 第 4 条改为：Apple 专属的 target 谓词只对外部的、非 GPUI 的依赖算作 macOS 绑定（工作区成员由它自己的清单检查，GPUI 只在 macOS 上编译是构建约束，不是绑定）。预算表加 `Budget::macos_only`：Linux 上 `just bench` 把这些条目记为 `skipped`（只在 macOS 运行），不算缺基准（[bench 设计「预算表」](bench.md#预算表)已补）。
 

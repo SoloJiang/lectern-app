@@ -22,6 +22,10 @@ pub struct Budget {
     /// The benchmark target producing this budget. Each budget belongs to
     /// exactly one target.
     pub target: Target,
+    /// The benchmark only builds on macOS (it needs GPUI, which this
+    /// workspace builds there alone): off macOS the entry is `skipped`
+    /// (「只在 macOS 运行」), not an error for a missing benchmark.
+    pub macos_only: bool,
 }
 
 /// Where a budget's result comes from. `Package` is not a benchmark target:
@@ -172,6 +176,7 @@ const FILE_READER: &str = "docs/design/file_reader.md#性能";
 const REVIEW: &str = "docs/design/review.md#性能";
 const LOGGING: &str = "docs/design/logging.md#性能";
 const USAGE: &str = "docs/design/usage.md#性能";
+const UI: &str = "docs/design/ui.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -194,6 +199,7 @@ const fn top(
         source,
         state,
         target,
+        macos_only: false,
     }
 }
 
@@ -211,6 +217,21 @@ const fn share(
         source,
         state,
         target,
+        macos_only: false,
+    }
+}
+
+/// A `Share` budget whose benchmark needs GPUI, so builds on macOS alone.
+const fn share_macos(
+    id: &'static str,
+    checks: &'static [Check],
+    source: &'static str,
+    state: State,
+    target: Target,
+) -> Budget {
+    Budget {
+        macos_only: true,
+        ..share(id, checks, source, state, target)
     }
 }
 
@@ -1964,6 +1985,24 @@ pub static BUDGETS: &[Budget] = &[
     // Every message of the en resources once; those with variables
     // formatted with sample arguments.
     share("i18n/frame_strings", RECORD, I18N, ACTIVE, Time),
+    // `ui/*` (docs/design/ui.md「性能」): GPUI, so macOS alone. Step 2's
+    // two; `ui/init`, `ui/ready`, `ui/palette_resolve`,
+    // `ui/mono_metrics_first`, `ui/idle_memory` come with the `app` PR of
+    // step 1, `ui/semantic_disarmed` with step 4.
+    share_macos(
+        "ui/transition_tick",
+        &[median(Limit::TimeAtMost(ns(100)))],
+        UI,
+        ACTIVE,
+        Time,
+    ),
+    share_macos(
+        "ui/bezier_eval",
+        &[median(Limit::TimeAtMost(ns(50)))],
+        UI,
+        ACTIVE,
+        Time,
+    ),
 ];
 
 /// The budget for a result ID: the entry with the same ID, otherwise the
