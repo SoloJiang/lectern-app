@@ -1,6 +1,6 @@
 # ui_probe 设计
 
-状态：实现中。第 3 步（`ui_probe` crate：协议、`tree`、`annotate`、`server`、`client`、`lectern-probe`）已实现（[#249](https://github.com/SoloJiang/lectern-app/pull/249)）；第 4 步（`app` 的 probe profile、`justfile` 的 `probe` 配方、端到端测试）已实现（`Refs #6`，PR 号待填，叠在 [#251](https://github.com/SoloJiang/lectern-app/pull/251) 之上）；真实窗口里的验收项（`tests/probe.rs`、`just probe` 的截图、`just bench app/`）本机锁屏没有做，在 macOS CI 与解锁后验证，之后 #6 才能关闭，见「实际验证」「与设计的差异」。
+状态：实现中。第 3 步（`ui_probe` crate：协议、`tree`、`annotate`、`server`、`client`、`lectern-probe`）已实现（[#249](https://github.com/SoloJiang/lectern-app/pull/249)）；第 4 步（`app` 的 probe profile、`justfile` 的 `probe` 配方、端到端测试）已实现（`Refs #6`，[#252](https://github.com/SoloJiang/lectern-app/pull/252)，叠在 [#251](https://github.com/SoloJiang/lectern-app/pull/251) 之上）；真实窗口里的验收项（`tests/probe.rs`、`just probe` 的截图、`just bench app/`）本机锁屏没有做，在 macOS CI 与解锁后验证，之后 #6 才能关闭，见「实际验证」「与设计的差异」。
 
 对应 issue [#6](https://github.com/SoloJiang/lectern-app/issues/6)。`ui_probe` 是 agent 读取运行中的 Lectern 的入口：把窗口里的语义树导出成 JSON（`ui_tree`），把窗口画成带节点编号的 PNG（`screenshot`），让 agent 不必从像素推断界面结构（[技术调研「UI 结构探针」](tech-research.md#6-ui-结构探针)）。它是 tool 层 crate，只在 probe profile 里运行，不进入发布构建（[cargo-workspace 设计](cargo-workspace.md)、[CI「架构规则检查」](ci.md#架构规则检查)第 2 条）。
 
