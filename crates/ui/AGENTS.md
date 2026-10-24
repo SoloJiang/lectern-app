@@ -47,7 +47,7 @@ just doctest                  # compile_fail：字面量传不进 Text 和控件
 ```
 
 - 测试在 `src/tests/`，全用 `init_fixed`；只有 `init_then_ready_reads_the_system` 读真实的 AppKit。
-- `Transition` 的测试把测试体放进一个探针视图的 render 里跑（`tests/motion.rs` 的 `in_render`），时间由测试构造的 `Instant` 给出。基准 `ui/transition_tick`、`ui/bezier_eval` 在 `bench`（`just bench ui/`，只在 macOS）。
+- `Transition` 的测试把测试体放进一个探针视图的 render 里跑（`tests/motion.rs` 的 `in_render`），时间由测试构造的 `Instant` 给出。基准 `ui/transition_tick`（`testing::step_transition`，不含帧请求）、`ui/transition_tick_frame`（含帧请求，只记录）、`ui/bezier_eval` 在 `bench`（`just bench ui/`，只在 macOS）。
 - 交互行为用 `#[gpui::test]` 配合 `TestAppContext` 模拟按键、Action 和状态变化（`tests/controls.rs` 的 `circle_check_toggles_from_key_and_click`：`cx.bind_keys` + `simulate_keystrokes` 走视图的 Action，`simulate_click` 点元素中心；`every_control_renders_after_ready` 每个控件各渲染一次）。测试平台不能从 GPUI 之外改窗口外观，外观变化经 `testing::simulate_appearance_change`。
 - 视图只读领域层提供的快照。测试里直接构造快照，不使用真实的 git、会话扫描或文件 IO。
 - 配色表用 insta 快照（`src/tests/snapshots/`）；颜色的色觉辨识检查在 `tests/colors.rs`，换一行颜色先让它通过。
