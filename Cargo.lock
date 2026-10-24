@@ -4640,9 +4640,14 @@ version = "0.0.0"
 name = "lectern-workspace"
 version = "0.0.0"
 dependencies = [
+ "futures",
+ "gpui-pre",
+ "insta",
+ "lectern-i18n",
  "lectern-kernel",
  "lectern-logging",
  "lectern-services",
+ "lectern-ui",
  "serde",
  "serde_json",
 ]

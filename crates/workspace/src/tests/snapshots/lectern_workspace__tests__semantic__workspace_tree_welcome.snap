@@ -1,0 +1,6 @@
+---
+source: crates/workspace/src/tests/semantic.rs
+expression: rig.tree(cx)
+---
+workspace.content [Group] base=welcome column=full
+  workspace.content.screen[welcome] [Group] index=0

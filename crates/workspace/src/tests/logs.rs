@@ -72,6 +72,13 @@ fn canary_stays_out_of_workspace_logs() {
         "/elsewhere/{CANARY}"
     ))));
     rig.emit(closed(&project_key(&path)));
+    // `WorkspaceHost::restore` with the canary in the saved path.
+    rig.hub.enqueue(crate::Item::Restore(crate::WindowState {
+        version: crate::WindowState::VERSION,
+        project: Some(PathBuf::from(format!("/restored/{CANARY}"))),
+        inspector: true,
+    }));
+    rig.drain();
     kernel.deactivate();
     rig.drain();
     assert_eq!(rig.driver.nav().state().project, None);

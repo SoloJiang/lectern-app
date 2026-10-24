@@ -14,16 +14,29 @@ layer = "view"
 plugin = true
 
 [dependencies]
+# The root view, `replace_root`, `bind_keys`, `on_window_should_close`,
+# `prompt_for_paths`, `on_next_frame` (docs/design/workspace.md「依赖」).
+gpui.workspace = true
+# The main-thread queue's transport: `channel::mpsc::unbounded`.
+futures.workspace = true
+# This crate's own strings, `keys::workspace::*` (ADR 0013).
+lectern-i18n = { path = "../i18n" }
 # `Plugin`, `Staged`, `ActivationToken`, `PendingGuard`, `contain`.
 lectern-kernel = { path = "../kernel" }
 # Runtime logging (docs/design/workspace.md「日志与诊断」, ADR 0046).
 lectern-logging = { path = "../logging" }
 # `dyn Contributions` and its data types, `dyn Projects` and `ProjectEvent`.
 lectern-services = { path = "../services" }
+# Colours, text, `TextRole`, motion and the `contrib` payload types
+# (ADR 0015). A library crate of the view layer, not a plugin.
+lectern-ui = { path = "../ui" }
 # `WindowState`'s serialization.
 serde.workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+# The semantic-tree snapshots (docs/design/workspace.md「测试」).
+insta.workspace = true
 # `TestKernel`: the registry tests run real activations.
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 # `testing::capture` for the canary test.

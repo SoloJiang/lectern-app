@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use lectern_kernel::{ActivationToken, Name, TokenState, contain};
+use lectern_kernel::{ActivationToken, Name, PluginError, TokenState, contain};
 use lectern_logging::{Ctx, Field, Value, debug, info, warn};
 use lectern_services::workspace::{
     CommandCall, CommandHandler, Contribution, ContributionKind, LeaveGuard, Payload, Registration,
@@ -579,10 +579,13 @@ impl Registry {
     }
 
     /// Whether every apply queued for the activation has been applied or
-    /// dropped (「按命令激活」step 3). False for an activation that queued
-    /// nothing.
+    /// dropped (「按命令激活」step 3). True for an activation that queued
+    /// nothing: a plugin that forgot `handle_command` is reported, not
+    /// waited for. Its commits are all queued before `started` returns, so
+    /// nothing of it is still to come once its token is live.
     pub fn activation_applied(&self, act: u64) -> bool {
-        self.lock().applied.contains(&act)
+        let tables = self.lock();
+        tables.applied.contains(&act) || !tables.outstanding.contains_key(&act)
     }
 
     /// `Contributions::sidebar_entries`.
@@ -698,6 +701,25 @@ impl Registry {
         }
     }
 
+    /// The applied contributions of one kind, by `(order, id)`: the
+    /// inspector's tabs, for instance.
+    pub fn applied_of(&self, kind: Kind) -> Vec<Name> {
+        let tables = self.lock();
+        let mut entries: Vec<(u16, Name)> = tables
+            .entries
+            .values()
+            .filter(|e| e.kind == kind && e.state == State::Applied)
+            .filter_map(|e| match &e.content {
+                Content::Contribution { order, .. } | Content::Shared { order, .. } => {
+                    Some((*order, e.id.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        entries.sort();
+        entries.into_iter().map(|(_, id)| id).collect()
+    }
+
     /// The applied entries, for the probe and the tests: `(kind, id)` in
     /// serial order.
     pub fn applied(&self) -> Vec<(Kind, Name)> {
@@ -753,12 +775,17 @@ fn sidebar_entries(tables: &Tables) -> Arc<[SidebarEntry]> {
 }
 
 /// Drops an entry's content under `contain`: a payload's `Drop` is the
-/// contributor's code.
+/// contributor's code, and a panic in it fails the activation (kernel
+/// design「撤销」; nothing happens on a token already dead).
 fn drop_content(entry: Entry) {
     let kind = entry.kind;
     let id = entry.id.clone();
-    let act = entry.token.as_ref().map(ActivationToken::id);
-    if contain(move || drop(entry)).is_err() {
+    let token = entry.token.clone();
+    if let Err(message) = contain(move || drop(entry)) {
+        let act = token.as_ref().map(ActivationToken::id);
         lectern_logging::error!("contribution drop panicked"; kind = kind, id = id_text(&id), activation = act);
+        if let Some(token) = token {
+            token.fail(PluginError::Panicked(message));
+        }
     }
 }

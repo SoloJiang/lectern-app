@@ -12,9 +12,9 @@ use crate::state::WindowState;
 #[derive(Debug, PartialEq, Eq)]
 #[allow(
     clippy::large_enum_variant,
-    reason = "Event carries a WorkspaceEvent by value (about 400 bytes for ScreenChanged): a \
-              handful of effects per command, each consumed at once; boxing would only add an \
-              indirection for the root view and the tests"
+    reason = "the Event variant carries a WorkspaceEvent by value (about 400 bytes for \
+              ScreenChanged): a handful of effects per command, each consumed at once; boxing \
+              would only add an indirection for the root view and the tests"
 )]
 pub enum Effect {
     /// Ask the leave guard `guard` for `scope`; its answer comes back as
@@ -49,4 +49,8 @@ pub enum Notice {
     /// `Opened` arrived while a view refused to leave: the project is open,
     /// the window did not switch.
     ProjectOpenedWhileAViewRefusedToLeave,
+    /// A proxied command could not run: its plugin failed to activate, has
+    /// no handler, or lost its handler before the replay
+    /// (`workspace-command-failed`).
+    CommandFailed,
 }
