@@ -4601,6 +4601,7 @@ name = "lectern-ui"
 version = "0.0.0"
 dependencies = [
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "insta",
  "lectern-i18n",

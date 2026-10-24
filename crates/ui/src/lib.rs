@@ -11,16 +11,21 @@
 //! (`Text`, `strings`, `set_locale`), fonts (`TextRole`, `MonoMetrics`,
 //! `mono_metrics`), code colouring (`code_style`, `code_styles`) and the
 //! `contrib` payload types. Step 2: the `motion` module (durations, curves,
-//! `Transition`, reduced motion). Controls and the probe nodes follow in
-//! steps 3 and 4.
+//! `Transition`, reduced motion). Step 3: the shared controls (`Button`,
+//! `IconAssets`, `AgentDot`, `CircleCheck`, `Progress`, `Segmented`,
+//! `GroupedList`, `Row`, `loading_phase`, `Skeleton`, `Expander`, `Hint`)
+//! and the `semantic` node types they declare. Step 4 adds the probe's
+//! recording to `semantic`.
 
 mod code;
 pub mod contrib;
+mod controls;
 mod font;
 mod icon;
 mod init;
 pub mod motion;
 mod palette;
+pub mod semantic;
 mod state;
 mod text;
 
@@ -31,10 +36,19 @@ pub mod testing;
 mod tests;
 
 pub use code::{CodeStyle, code_style, code_styles};
+pub use controls::{
+    Agent, AgentDot, Button, ButtonKind, ButtonSize, CircleCheck, Expander, GroupedList, Hint,
+    HintFrame, LoadingPhase, Progress, ProgressShape, Row, Segmented, Skeleton, loading_phase,
+};
 pub use font::{
     MONO_FALLBACK_FAMILY, MONO_FAMILY, MonoMetrics, TextRole, TextRoleExt, UI_FAMILY, mono_metrics,
 };
 pub use icon::Icon;
+/// The SVG source of the ten icons of `Icon`, and only those; every other
+/// path answers `Ok(None)`. `app` passes it to `Application::with_assets`
+/// before `run`, the one place GPUI takes an asset source; without it every
+/// icon paints blank.
+pub use icon::IconAssets;
 pub use init::{attach, init, init_fixed, is_ready, ready};
 pub use palette::{Appearance, Palette, SystemColor, accent_follows_system, colors, palette};
 pub use text::{Text, Verbatim, set_locale, strings};
