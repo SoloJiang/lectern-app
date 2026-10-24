@@ -7,7 +7,7 @@ use std::f32::consts::PI;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, Context, IntoElement, Render, SpringState, TestAppContext, Window, div};
+use gpui::{App, Context, IntoElement, Render, SpringState, TestAppContext, Window, div, px};
 use lectern_i18n::{Locale, Strings};
 
 use crate::motion::{
@@ -15,7 +15,7 @@ use crate::motion::{
     Effective, Motion, PANEL_CLOSE, PANEL_OPEN, SPRING_EPSILON, STANDARD, SWITCH, Transition,
     active_transitions, reduced,
 };
-use crate::{Appearance, init_fixed};
+use crate::{Appearance, Expander, Segmented, init_fixed};
 
 /// The reference values of `y` at `x = 0, 0.1, …, 1` of the two bezier
 /// curves of the spec and CSS `ease-out`, from a bisection on the unit
@@ -124,7 +124,7 @@ impl Render for Probe {
 }
 
 /// `init_fixed` with `reduced_motion`, then `body` inside a render.
-fn in_render(
+pub(super) fn in_render(
     cx: &mut TestAppContext,
     reduced_motion: bool,
     body: impl FnOnce(&mut Window, &App) + 'static,
@@ -151,7 +151,7 @@ fn in_render(
     assert!(ran.get(), "the body ran in a render");
 }
 
-fn at(start: Instant, ms: u64) -> Instant {
+pub(super) fn at(start: Instant, ms: u64) -> Instant {
     start + Duration::from_millis(ms)
 }
 
@@ -459,6 +459,34 @@ fn reduced_motion_has_no_displacement(cx: &mut TestAppContext) {
     assert_eq!(*opacities.last().unwrap(), 1.0);
     // Half the duration: 190 ms, so the last frame is at or before 208 ms.
     assert!(frames.len() <= 13, "{}", frames.len());
+
+    // Step 3: the `Expander`'s height and the `Segmented` slider arrive at
+    // once; only the expander's opacity transitions.
+    in_render(cx, true, |window, cx| {
+        let start = Instant::now();
+        let mut height = Transition::new(0.0);
+        let mut opacity = Transition::new(0.0);
+        Expander::go(&mut height, &mut opacity, px(120.0), start, cx);
+        assert_eq!(height.value(), 120.0);
+        assert!(!height.is_running(start));
+        assert!(opacity.is_running(start));
+        for ms in (0..=120).step_by(8) {
+            assert_eq!(height.tick(at(start, ms), window), 120.0, "{ms} ms");
+        }
+        let mid = opacity.tick(at(start, 50), window);
+        assert!(mid > 0.0 && mid < 1.0, "{mid}");
+        // EXPAND_FADE halves to 100 ms under reduced motion.
+        assert_eq!(opacity.tick(at(start, 100), window), 1.0);
+        Expander::go(&mut height, &mut opacity, px(0.0), at(start, 200), cx);
+        assert_eq!(height.value(), 0.0);
+        assert!(!height.is_running(at(start, 200)));
+
+        let mut slider = Transition::new(0.0);
+        Segmented::select(&mut slider, 2, start, cx);
+        assert_eq!(slider.value(), 2.0);
+        assert!(!slider.is_running(start));
+        assert_eq!(slider.tick(at(start, 8), window), 2.0);
+    });
 }
 
 #[gpui::test]
