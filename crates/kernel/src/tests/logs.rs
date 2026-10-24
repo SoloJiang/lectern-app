@@ -234,6 +234,44 @@ fn panic_records_carry_plugin_and_act() {
 }
 
 #[test]
+fn token_fail_logs_one_deactivation_in_the_failed_activations_scope() {
+    let capture = capture();
+    let slot = HandleSlot::default();
+    let kernel =
+        start(PluginSet::new().with("token-fail", handle_plugin(&slot, after_first_frame())));
+    let token = slot.get().token();
+    let act = token.id();
+    // No admission, another thread, called twice: one record, kind only.
+    let t = token.clone();
+    std::thread::spawn(move || {
+        t.fail(PluginError::Panicked(canary("leave guard")));
+        t.fail(PluginError::Panicked(canary("again")));
+    })
+    .join()
+    .unwrap();
+    kernel.barrier();
+    shutdown(&kernel);
+
+    let deactivated: Vec<String> = records(capture, "plugin deactivated after a failure")
+        .into_iter()
+        .filter(|line| line.contains(&scoped("token-fail", act)))
+        .collect();
+    assert_eq!(deactivated.len(), 1, "{deactivated:#?}");
+    assert!(
+        deactivated[0].contains("\"error\":\"panicked\""),
+        "{}",
+        deactivated[0]
+    );
+    assert!(
+        !records(capture, "plugin failed")
+            .iter()
+            .any(|line| line.contains(&scoped("token-fail", act))),
+        "`fail` itself logs no `plugin failed`"
+    );
+    capture.assert_absent(CANARY);
+}
+
+#[test]
 fn app_command_callbacks_run_outside_the_failed_plugins_scope() {
     // `started` panics: the activation is revoked and the waiting `done` gets
     // the error from the revocation, which runs in the plugin's scope.
