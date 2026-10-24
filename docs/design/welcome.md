@@ -401,7 +401,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 每一项是一个 PR，写 `Refs #29`，在「验收」里列为前置条件。
 
 - **A. `i18n`**：`locales/{en,zh-CN}/welcome.ftl` 加上「界面」表里新增的 14 个键（`welcome-subtitle`、`welcome-recent-missing`、`welcome-recent-remove`（含 `.tooltip`）、`welcome-discovered-empty`、`welcome-row-sessions`、`welcome-row-running`、`welcome-language`、`welcome-language-not-saved`、5 个 `welcome-open-failed-*`）。编译期校验保证两种语言一致。
-- **B. `platform`**：语言偏好（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)已写明由 `platform` 读写，这里是它的第一个调用方；已实现，[#PR2](https://github.com/SoloJiang/lectern-app/pull/PR2)，签名与下面一致，实现的补充见 platform 设计「系统首选语言」的「语言偏好」）：
+- **B. `platform`**：语言偏好（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)已写明由 `platform` 读写，这里是它的第一个调用方；已实现，[#243](https://github.com/SoloJiang/lectern-app/pull/243)，签名与下面一致，实现的补充见 platform 设计「系统首选语言」的「语言偏好」）：
 
   ```rust
   pub mod system {
