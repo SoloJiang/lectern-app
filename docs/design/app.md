@@ -407,7 +407,7 @@ Logging::shutdown(500 ms)
 ## 已知限制
 
 - 屏障放开之前（首帧之后约 2 个刷新周期内）退出时，首帧前缓冲里的记录丢失，下一次运行也不会报告上一次异常结束：这时还没有创建本次运行的日志文件。
-- 窗口被完全遮挡、收不到帧请求时，屏障不放开，后台初始化一直推迟到窗口重新可见；这期间 ⌘Q 按「屏障放开之前」处理。屏幕锁定的图形会话（`CGSessionCopyCurrentDictionary` 的 `CGSSessionScreenIsLocked` 为 1）同样：首帧画出，之后不再有帧请求，屏障不放开；启动测试在锁屏期间全部 30 s 后判为失败（`ui` 接入时实测，接入前的二进制同样如此），解锁后再跑。
+- 窗口被完全遮挡、收不到帧请求时，屏障不放开，后台初始化一直推迟到窗口重新可见；这期间 ⌘Q 按「屏障放开之前」处理。屏幕锁定的图形会话（`CGSessionCopyCurrentDictionary` 的 `CGSSessionScreenIsLocked` 为 1）同样：首帧画出，之后不再有帧请求，屏障不放开；启动测试在锁屏期间全部 30 s 后判为失败（`ui` 接入时实测；接入前一天的本机调试构建同样如此），解锁后再跑。
 - 由系统发起的退出不经 `Quit`：kernel 和 executor 不按顺序关闭（kernel 设计「已知限制」），只有日志的结束记录在 `on_app_quit` 的 200 ms 里写出。
 - 屏障比首帧的实际显示最多晚约 2 个刷新周期，直到 `platform::frame::on_first_presented` 实现（「启动屏障」）。窗口不是前台窗口时 GPUI 按 30 fps 请求帧（`inactive_frame_interval` 33 ms），间隔按 33 ms 计；从终端启动时实测首帧画出到屏障放开约 90–100 ms（「实际验证」）。
 
@@ -453,8 +453,8 @@ Logging::shutdown(500 ms)
 `ui` 接入（PR_NUMBER_PLACEHOLDER，同一台机器，[ui 设计「验收」](ui.md#验收)第 1 步的 `app` 项）：
 
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（32 个 crate）；`rg 'eprintln!|println!|log::' crates/app/src` 没有结果。
-- `just test -p lectern-app`：APP_TEST_COUNT_PLACEHOLDER。新增 `appearance_change_refreshes_the_skeleton_window`、`appearance_change_before_ready_does_not_touch_the_theme`；`startup_writes_a_header_and_an_end_record` 多检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序和两条记录的 `accent`。
-- RELEASE_RUN_PLACEHOLDER
+- `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：17 个单元测试通过（原有 15 个加新增的 `appearance_change_refreshes_the_skeleton_window`、`appearance_change_before_ready_does_not_touch_the_theme`）。`tests/startup.rs` 的 7 个启动测试本机没有通过：图形会话处于锁屏（`CGSSessionScreenIsLocked` 为 1，用户不在），窗口画出首帧后收不到帧请求，屏障不放开，7 个都在 30 s 后判为失败；接入前一天的本机调试构建同样卡住（「已知限制」）。它们由 macOS CI 运行；`startup_writes_a_header_and_an_end_record` 多检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序和两条记录的 `accent`，结果以 CI 为准。
+- 发布构建（`cargo build --release --locked -p lectern-app`）成功；临时 `HOME` 下的手动运行（空闲内存、`ui initialised` / `ui ready` 的字段与耗时）因为同一个锁屏原因没有做：屏障不放开，日志文件不出现，内存读数没有意义。解锁后按「装配」「性能」的方法补测，写进这里。
 
 ## 与设计的差异
 

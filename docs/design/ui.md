@@ -800,8 +800,8 @@ pub mod semantic {
 `app` 的接入（PR_NUMBER_PLACEHOLDER，同一台机器，[app 设计「实际验证」](app.md#实际验证)的「`ui` 接入」有完整数据）：
 
 - `init` 在 `run` 里开窗口之前（`set_menus` 之前），`attach` 在骨架窗口 `open_window` 的回调里（`Subscription` 放在根视图 `Skeleton`），`ready` 在 `startup::release` 里 `Early::start` 之后、`Kernel::start` 之前；test profile 用 `init_fixed`。`with_assets(IconAssets)` 没有加：`IconAssets` 随第 3 步的控件才存在。
-- `just test -p lectern-app`：APP_TEST_COUNT_PLACEHOLDER。`appearance_change_refreshes_the_skeleton_window` 与 `appearance_change_before_ready_does_not_touch_the_theme` 通过（经 `testing::simulate_appearance_change`）；`tests/startup.rs` 的 `startup_writes_a_header_and_an_end_record` 新增检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序、`ui initialised` 的 `accent` 为 `builtin`、`ui ready` 的 `accent` 为 `system`。
-- 发布构建、临时 `HOME`：RELEASE_RUN_PLACEHOLDER
+- `lectern-app` 的 17 个单元测试通过，其中 `appearance_change_refreshes_the_skeleton_window` 与 `appearance_change_before_ready_does_not_touch_the_theme`（经 `testing::simulate_appearance_change`）。`tests/startup.rs` 的 `startup_writes_a_header_and_an_end_record` 新增检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序、`ui initialised` 的 `accent` 为 `builtin`、`ui ready` 的 `accent` 为 `system`；本机图形会话锁屏，启动测试收不到帧（app 设计「已知限制」），结果以 macOS CI 为准。
+- 发布构建成功；临时 `HOME` 下的手动运行（`ui ready` 的 `accent`、两条记录的 `elapsed_us`、空闲内存）因同一个锁屏原因没有做，解锁后补测。
 - 没有做：系统设置里切换强调色和浅色 / 深色的手动检查（agent 不改用户的系统设置；代码路径由 `appearance_change_*` 两个测试和 `ui` 的 `init_then_ready_reads_the_system` 覆盖）；`mono_metrics().family` 的手动检查（骨架窗口没有视图调用 `mono_metrics`，`font.rs` 只在后备和失败时记日志，等第一个用它的视图接入）；`ui/*` 基准（下一个 PR）。
 
 ## 与设计的差异
