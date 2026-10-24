@@ -692,7 +692,7 @@ pub mod semantic {
   - `transition_*`：从 0 到 1 的 380 ms 过渡，在 190 ms 时 `go(0, …)`，之后的值从当时的值单调回到 0，没有跳变；`go` 到相同目标不重新计时；`set` 立即到位；减弱动态效果下 `moves` 的过渡时长减半且 `effective` 为 `Fade`。
   - `loading_phase_*`：99 ms → `Nothing`，100 ms → `Skeleton`，1 s → `Progress`。
   - `active_transitions_*`：两个 `Transition` 开始后为 2，一个到达后为 1，另一个 drop 后为 0；`set` 中断进行中的过渡也减一。
-  - `hint_*`：`is_expired` 在 `duration` 到期后为 true；再次 `new` 同一个 ID 从新的 `shown_at` 计时。
+  - `hint_*`：`is_expired` 在 `duration` 加 `HOVER_OUT` 的淡出过后为 true（见「与设计的差异」第 3 步）；再次 `new` 同一个 ID 从新的 `shown_at` 计时；`frame_when` 的到达、停留、淡出三段与减弱动态效果下的零位移。
   - `node_id_*`：格式、转义、`child`；调试构建下非法的 `view` panic。
   - `code_colors_*`：对内置表的两个外观，五种颜色两两之间在正常、红色盲（protanopia）、绿色盲（deuteranopia）三种模拟（Viénot 1999 的 3×3 矩阵，在测试里写出）下的 ΔE（CIE76）≥ 12；每种与 `control_background` 的对比度（WCAG 2 的公式）≥ 3:1。`code_styles` 的两个外观各一份 insta 快照。
   - `palette_builtin_*`：内置表每个颜色的透明度在 0..=1、`diff_*_background` 的叠加结果与手算一致；两个外观的 `label` 与 `window_background` 对比度 ≥ 7:1。
