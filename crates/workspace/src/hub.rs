@@ -132,16 +132,25 @@ impl Hub {
 }
 
 impl Contributions for Hub {
-    fn register(&self, contribution: Contribution) -> Registration {
-        self.registry.register(contribution)
+    fn register(&self, contribution: Contribution, token: Option<ActivationToken>) -> Registration {
+        self.registry.register(contribution, token)
     }
 
-    fn handle_command(&self, name: Name, handler: CommandHandler) -> Registration {
-        self.registry.handle_command(name, handler)
+    fn handle_command(
+        &self,
+        name: Name,
+        handler: CommandHandler,
+        token: Option<ActivationToken>,
+    ) -> Registration {
+        self.registry.handle_command(name, handler, token)
     }
 
-    fn register_leave_guard(&self, guard: Arc<dyn LeaveGuard>) -> Registration {
-        self.registry.register_leave_guard(guard)
+    fn register_leave_guard(
+        &self,
+        guard: Arc<dyn LeaveGuard>,
+        token: Option<ActivationToken>,
+    ) -> Registration {
+        self.registry.register_leave_guard(guard, token)
     }
 
     fn dispatch(&self, command: WorkspaceCommand) {

@@ -11,8 +11,10 @@ Rules checked:
      directly or transitively.
   4. macOS system bindings are direct dependencies of `platform` only. A
      binding is a crate whose name matches MACOS_ONLY_PREFIXES or contains a
-     MACOS_NAME_TOKENS token, or any dependency whose
-     target predicates can only hold on Apple platforms (apple_only_cfg).
+     MACOS_NAME_TOKENS token, or any external, non-GPUI dependency whose
+     target predicates can only hold on Apple platforms (apple_only_cfg);
+     a workspace member or a GPUI crate declared for macOS alone is not a
+     binding (GPUI only builds on macOS in this workspace).
   5. Every workspace crate inherits the workspace lints
      (`[lints] workspace = true`).
   6. Plugin crates (`[package.metadata.lectern] plugin = true`) never depend
@@ -628,7 +630,12 @@ def main():
                     errors.append(f"{name} (kernel) -> {dep_name} ({theirs}): kernel crates depend only on kernel crates [docs/design/cargo-workspace.md]")
             # Workspace crates too: native code moved into another member must
             # not bypass platform isolation.
-            if name != PLATFORM_CRATE and dep_name != PLATFORM_CRATE and (is_macos_binding_name(dep_name) or apple_only(pid, dep)):
+            # An Apple-only target predicate marks a binding only on an external
+            # crate: a workspace member is checked on its own manifest, and GPUI
+            # is declared for macOS alone because it only builds there
+            # (docs/design/cargo-workspace.md), not because it binds the OS.
+            binding_by_target = dep not in members and not dep_name.startswith(GPUI_PREFIXES) and apple_only(pid, dep)
+            if name != PLATFORM_CRATE and dep_name != PLATFORM_CRATE and (is_macos_binding_name(dep_name) or binding_by_target):
                 errors.append(f"{name} -> {dep_name}: macOS bindings belong in {PLATFORM_CRATE} [AGENTS.md architecture rule 6]")
 
     errors.extend(

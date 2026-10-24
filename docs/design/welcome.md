@@ -64,7 +64,7 @@ pub struct WelcomePlugin { /* 角色（Screen / Discovery）, deps, model: Arc<W
 
 // "welcome"：Manifest { provides: [], requires: [service::<dyn Contributions>(), service::<dyn Projects>()], activation: [AfterFirstFrame] }
 //   activate（kernel 线程）：取 ServiceRef<dyn Contributions>、ServiceRef<dyn Projects>；`ctx.on::<ProjectEvent>`；
-//     `Contributions::register(Screen(WELCOME))`、`register(KeyBindings)` 的守卫交给 `ctx.own_staged`。不做 IO。
+//     `Contributions::register(Screen(WELCOME), None)`、`register(KeyBindings, None)`（`activate` 里没有 token）的守卫交给 `ctx.own_staged`。不做 IO。
 //   started（kernel 线程）：`own_with` 提交读 `recent.json` 的 Background 任务（「数据流与线程」第 1 步）。
 // "welcome-discovery"：Manifest { provides: [], requires: [service::<dyn Projects>(), service::<dyn SessionSource>()], activation: [AfterFirstFrame] }
 //   activate：取 ServiceRef<dyn Projects>、ServiceSet<dyn SessionSource>；`ctx.on::<SessionsChanged>`、`ctx.on::<ProjectEvent>`；
