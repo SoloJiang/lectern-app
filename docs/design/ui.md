@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（含 `with_assets(IconAssets)`）与第 1 步的 `ui/*` 基准在 `app` 的 PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步尚未实现。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)），`with_assets(IconAssets)` 与第 1 步的 `ui/*` 基准在下一个 `app` PR；第 2 步（动效原语 `motion`，基准 `ui/transition_tick`、`ui/bezier_eval`）已实现（[#233](https://github.com/SoloJiang/lectern-app/pull/233)）；第 3 步（控件与 `semantic` 的节点类型）已实现（[#236](https://github.com/SoloJiang/lectern-app/pull/236)）；第 4 步尚未实现。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -807,7 +807,14 @@ pub mod semantic {
 - `just doctest`：`lectern-ui` 的 3 个 `compile_fail` 通过。
 - `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}' crates/ui/src --glob '!**/builtin.rs' --glob '!**/tests*'` 和 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 都没有结果。
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
-- 没有做：`app` 的接入（`with_assets`、`init`、`attach`、`ready` 和两个 `#[gpui::test]`）、`ui/*` 基准、手动的强调色与外观切换检查，都在下一个 PR；`mono_metrics().family` 在发布构建下的手动检查随 `app` 接入一起做。
+- 没有做（[#230](https://github.com/SoloJiang/lectern-app/pull/230) 时）：`app` 的接入、`ui/*` 基准、手动的强调色与外观切换检查、`mono_metrics().family` 的手动检查。
+
+`app` 的接入（[#234](https://github.com/SoloJiang/lectern-app/pull/234)，同一台机器，[app 设计「实际验证」](app.md#实际验证)的「`ui` 接入」有完整数据）：
+
+- `init` 在 `run` 里开窗口之前（`set_menus` 之前），`attach` 在骨架窗口 `open_window` 的回调里（`Subscription` 放在根视图 `Skeleton`），`ready` 在 `startup::release` 里 `Early::start` 之后、`Kernel::start` 之前；test profile 用 `init_fixed`。`with_assets(IconAssets)` 没有加：`IconAssets` 随第 3 步的控件才存在。
+- `lectern-app` 的 17 个单元测试通过，其中 `appearance_change_refreshes_the_skeleton_window` 与 `appearance_change_before_ready_does_not_touch_the_theme`（经 `testing::simulate_appearance_change`）。`tests/startup.rs` 的 `startup_writes_a_header_and_an_end_record` 新增检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序、`ui initialised` 的 `accent` 为 `builtin`、`ui ready` 的 `accent` 为 `system`；本机图形会话锁屏，启动测试收不到帧（app 设计「已知限制」），结果以 macOS CI 为准。
+- 发布构建成功；临时 `HOME` 下的手动运行（`ui ready` 的 `accent`、两条记录的 `elapsed_us`、空闲内存）因同一个锁屏原因没有做，解锁后补测。
+- 没有做：系统设置里切换强调色和浅色 / 深色的手动检查（agent 不改用户的系统设置；代码路径由 `appearance_change_*` 两个测试和 `ui` 的 `init_then_ready_reads_the_system` 覆盖）；`mono_metrics().family` 的手动检查（骨架窗口没有视图调用 `mono_metrics`，`font.rs` 只在后备和失败时记日志，等第一个用它的视图接入）；`ui/*` 基准（下一个 PR）。
 
 第 2 步（macOS，Apple 芯片，macOS 27.0.1）：
 
@@ -840,6 +847,8 @@ pub mod semantic {
 - `attach` 的「重复调用只登记一次」按 `AnyWindowHandle` 记在 `UiState` 里，每次 `attach` 先去掉已关闭的窗口；重复调用返回一个空的 `Subscription`。
 - gpui-component 主题的投影只写 `Palette` 有直接来源的字段（背景、前景、边框、主色、次要色、列表与选中、侧栏、弹层、链接、骨架、滚动条、danger / success / warning / info 等 40 个）；强调色上的文字用 `builtin.rs` 里的 `on_accent()`（AppKit 的 `alternateSelectedControlTextColor`，两个外观都是白色），不是 `Palette` 的字段。其余字段保持 gpui-component 注册主题的值，第 3 步包装控件时再补。
 - `i18n` 的 `Key::name` / `FmtKey::name`（`Text::message_id` 用）由 [#227](https://github.com/SoloJiang/lectern-app/pull/227) 提供，不在本 PR 里。
+- `app` 的 `appearance_change_before_ready_does_not_touch_the_theme` 不检查「`Palette` 已换」：它按原文直接用 `init`（不是 `init_fixed`），这时 `colors(window, cx)` 跟随窗口自己的外观，而测试平台改不了窗口外观，`simulate_appearance_change` 只触发处理函数。测试改为检查不 panic、窗口重画一次、`is_ready` 仍为 false、gpui-component 的 `Theme` 全局不存在；`Palette` 的切换由 `appearance_change_refreshes_the_skeleton_window`（`init_fixed`，固定外观跟着变）和本 crate 的 `appearance_change_swaps_palette` 检查。
+- `app` 不加 `with_assets(IconAssets)`：`IconAssets` 随第 3 步的控件才定义，第 1 步的接入里没有它（「对其他 crate 的要求」的 `app` 项第 1 条随第 3 步做）。
 
 第 2 步：
 

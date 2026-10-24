@@ -6,3 +6,4 @@ mod logs;
 mod profile;
 mod quit;
 mod startup;
+mod ui;
