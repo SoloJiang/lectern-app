@@ -648,7 +648,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ### 第 2 步前置：登记接口带 token
 
-`Contributions::register`、`handle_command`、`register_leave_guard` 加 `token: Option<ActivationToken>` 参数（PR_PLACEHOLDER），在 macOS（arm64）上运行：
+`Contributions::register`、`handle_command`、`register_leave_guard` 加 `token: Option<ActivationToken>` 参数（[#232](https://github.com/SoloJiang/lectern-app/pull/232)），在 macOS（arm64）上运行：
 
 - `cargo check -p lectern-services -p lectern-workspace`、`just check`、`just deny`、`python3 scripts/check_architecture.py` 通过。
 - `just test -p lectern-services -p lectern-workspace`：150 个测试通过（`services` 99 个不变；`workspace` 51 个，新增 3 个）。`src/tests/registry.rs` 现在 22 个：`late_registration_applies_without_a_commit` 改为 `late_registration_applies_with_its_token`（`started` 里带 token 登记，与 `activate` 里的登记一起应用；`activate` 之外传 `None` 的登记不显示）；`a_late_registration_without_any_commit_is_reported_on_release` 改为 `a_registration_without_a_token_outside_activate_is_reported_on_release`（释放时记 warn）；新增 `late_registration_needs_no_earlier_commit`、`late_registration_inside_started_is_deferred_until_live`（`started` 里登记后阻塞，主线程看到的 token 还是 `Pending`，推迟到 `Tick`）、`late_registration_with_a_dead_token_is_rejected`。
