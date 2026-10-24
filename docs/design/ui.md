@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（PR_NUMBER_PLACEHOLDER）；`with_assets(IconAssets)` 随第 3 步，`ui/*` 基准在下一个 PR；第 2 到 4 步尚未实现。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入（`init`、骨架窗口的 `attach`、`ready`）已实现（[#234](https://github.com/SoloJiang/lectern-app/pull/234)）；`with_assets(IconAssets)` 随第 3 步，`ui/*` 基准在下一个 PR；第 2 到 4 步尚未实现。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -797,7 +797,7 @@ pub mod semantic {
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
 - 没有做（[#230](https://github.com/SoloJiang/lectern-app/pull/230) 时）：`app` 的接入、`ui/*` 基准、手动的强调色与外观切换检查、`mono_metrics().family` 的手动检查。
 
-`app` 的接入（PR_NUMBER_PLACEHOLDER，同一台机器，[app 设计「实际验证」](app.md#实际验证)的「`ui` 接入」有完整数据）：
+`app` 的接入（[#234](https://github.com/SoloJiang/lectern-app/pull/234)，同一台机器，[app 设计「实际验证」](app.md#实际验证)的「`ui` 接入」有完整数据）：
 
 - `init` 在 `run` 里开窗口之前（`set_menus` 之前），`attach` 在骨架窗口 `open_window` 的回调里（`Subscription` 放在根视图 `Skeleton`），`ready` 在 `startup::release` 里 `Early::start` 之后、`Kernel::start` 之前；test profile 用 `init_fixed`。`with_assets(IconAssets)` 没有加：`IconAssets` 随第 3 步的控件才存在。
 - `lectern-app` 的 17 个单元测试通过，其中 `appearance_change_refreshes_the_skeleton_window` 与 `appearance_change_before_ready_does_not_touch_the_theme`（经 `testing::simulate_appearance_change`）。`tests/startup.rs` 的 `startup_writes_a_header_and_an_end_record` 新增检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序、`ui initialised` 的 `accent` 为 `builtin`、`ui ready` 的 `accent` 为 `system`；本机图形会话锁屏，启动测试收不到帧（app 设计「已知限制」），结果以 macOS CI 为准。

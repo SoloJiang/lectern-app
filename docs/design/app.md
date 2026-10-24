@@ -450,7 +450,7 @@ Logging::shutdown(500 ms)
   - 日志依次是 `first frame drawn`、`plugins assembled`（`plugins` 为 4）、`startup barrier released`、4 条 `plugin activated`、2 条 `sessions discovered`。
   - 按 ⌘Q 后 0.08 s 退出，退出码 0，没有 warn。详细日志（`verbose/`）的 `quit finished`：`kernel_us` 157、`watcher_us` 149、`executor_us` 189、`cache_us` 62。
 
-`ui` 接入（PR_NUMBER_PLACEHOLDER，同一台机器，[ui 设计「验收」](ui.md#验收)第 1 步的 `app` 项）：
+`ui` 接入（[#234](https://github.com/SoloJiang/lectern-app/pull/234)，同一台机器，[ui 设计「验收」](ui.md#验收)第 1 步的 `app` 项）：
 
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（32 个 crate）；`rg 'eprintln!|println!|log::' crates/app/src` 没有结果。
 - `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：17 个单元测试通过（原有 15 个加新增的 `appearance_change_refreshes_the_skeleton_window`、`appearance_change_before_ready_does_not_touch_the_theme`）。`tests/startup.rs` 的 7 个启动测试本机没有通过：图形会话处于锁屏（`CGSSessionScreenIsLocked` 为 1，用户不在），窗口画出首帧后收不到帧请求，屏障不放开，7 个都在 30 s 后判为失败；接入前一天的本机调试构建同样卡住（「已知限制」）。它们由 macOS CI 运行；`startup_writes_a_header_and_an_end_record` 多检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序和两条记录的 `accent`，结果以 CI 为准。
