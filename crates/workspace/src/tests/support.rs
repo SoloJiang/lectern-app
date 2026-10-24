@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use lectern_kernel::testing::TestKernel;
 use lectern_kernel::{
-    Activation, Active, Context, Manifest, Name, Plugin, PluginError, PluginHandle, service,
+    Activation, ActivationToken, Active, Context, Manifest, Name, Plugin, PluginError,
+    PluginHandle, service,
 };
 use lectern_services::project::{
     Location, OpenError, OpenRequest, PackageMatch, ProjectEvent, ProjectKey, ProjectSnapshot,
@@ -379,16 +380,19 @@ impl LeaveGuard for FixedGuard {
     }
 }
 
-/// What a [`Contributor`] registers: closures over `dyn Contributions`.
-/// One registration through `dyn Contributions`.
-pub type Register = Box<dyn Fn(&dyn Contributions) -> Registration + Send + Sync>;
+/// One registration through `dyn Contributions`, with the token the
+/// [`Contributor`] has at that point: `None` in `activate`, the handle's
+/// token in `started`.
+pub type Register =
+    Box<dyn Fn(&dyn Contributions, Option<ActivationToken>) -> Registration + Send + Sync>;
 /// Called in `started` with the activation's handle.
 pub type OnStarted = Arc<dyn Fn(&PluginHandle) + Send + Sync>;
 pub type Registrations = Arc<Vec<Register>>;
 
 /// A plugin that registers through `dyn Contributions`, the way `welcome`
-/// or `project_home` do: `staged` in `activate` (through `own_staged`),
-/// `late` in `started` (after the commit, kept in the `Active`).
+/// or `project_home` do: `staged` in `activate` (no token, through
+/// `own_staged`), `late` in `started` (with `handle.token()`, kept in the
+/// `Active`).
 pub struct Contributor {
     pub staged: Registrations,
     pub late: Registrations,
@@ -419,7 +423,7 @@ impl Plugin for Contributor {
         let contributions = ctx.service::<dyn Contributions>();
         let service = contributions.get().expect("the hub is live");
         for register in self.staged.iter() {
-            ctx.own_staged(register(&*service));
+            ctx.own_staged(register(&*service, None));
         }
         drop(service);
         Ok(Box::new(ContributorActive {
@@ -447,7 +451,7 @@ impl Active for ContributorActive {
             return;
         };
         for register in self.late.iter() {
-            self.guards.push(register(&*service));
+            self.guards.push(register(&*service, Some(handle.token())));
         }
     }
 }

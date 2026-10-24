@@ -68,8 +68,8 @@ impl ProjectHomePlugin {
 //                       service::<dyn Contributions>()],
 //            activation: [AfterFirstFrame] }
 // activate：取服务引用（`service`、`service_set`），建空的 `Home` 状态；经 `dyn Contributions` 登记
-//   `Screen(PROJECT_HOME)`、`SidebarPanel("project")`、`SidebarEntry("overview")`、`KeyBindings`，
-//   守卫交给 `ctx.own_staged`；`ctx.on::<ProjectEvent>`、`ctx.on::<SessionsChanged>`、`ctx.on::<ReviewEvent>`。
+//   `Screen(PROJECT_HOME)`、`SidebarPanel("project")`、`SidebarEntry("overview")`、`KeyBindings`（`register(…, None)`，
+//   `activate` 里没有 token），守卫交给 `ctx.own_staged`；`ctx.on::<ProjectEvent>`、`ctx.on::<SessionsChanged>`、`ctx.on::<ReviewEvent>`。
 //   不做 IO，不提交任务。
 // started：保存 `PluginHandle`；把「标记 dirty 并安排合成」的回调写进 `UsageSlot::on_change`；读一次
 //   `Projects::open_projects()`，已有打开的项目时按 `Opened` 处理（监听在 token 变为 `Live` 之前收不到事件，

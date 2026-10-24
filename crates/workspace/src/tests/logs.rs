@@ -19,29 +19,38 @@ fn canary_stays_out_of_workspace_logs() {
     let kernel = contributor(
         &rig.hub,
         Contributor::staged(vec![
-            Box::new(|c| {
-                c.register(screen(
-                    screens::PROJECT_HOME,
-                    home_layout(),
-                    &format!("Home {CANARY}"),
-                ))
+            Box::new(|c, t| {
+                c.register(
+                    screen(
+                        screens::PROJECT_HOME,
+                        home_layout(),
+                        &format!("Home {CANARY}"),
+                    ),
+                    t,
+                )
             }),
-            Box::new(|c| {
-                c.register(screen(
-                    screens::REVIEW,
-                    review_layout(),
-                    &format!("Review {CANARY}"),
-                ))
+            Box::new(|c, t| {
+                c.register(
+                    screen(
+                        screens::REVIEW,
+                        review_layout(),
+                        &format!("Review {CANARY}"),
+                    ),
+                    t,
+                )
             }),
-            Box::new(|c| {
-                c.register(item(
-                    "overview",
-                    SidebarSection::Project,
-                    0,
-                    &format!("Overview {CANARY}"),
-                ))
+            Box::new(|c, t| {
+                c.register(
+                    item(
+                        "overview",
+                        SidebarSection::Project,
+                        0,
+                        &format!("Overview {CANARY}"),
+                    ),
+                    t,
+                )
             }),
-            Box::new(|c| c.register_leave_guard(FixedGuard::new(true))),
+            Box::new(|c, t| c.register_leave_guard(FixedGuard::new(true), t)),
         ]),
     );
     kernel.activate().unwrap();

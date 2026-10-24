@@ -2,13 +2,15 @@
 //! `dyn Contributions` writes from any thread, and what the main thread
 //! applies, removes and reads.
 //!
-//! An entry's life: `register` (any thread) stages it under its `(kind, id)`
-//! and returns the `Registration` guard; `commit(token)` (the kernel thread,
-//! at the activation's commit) records the token and queues an *apply*;
-//! the main thread applies it when the token is live, defers it while the
-//! token is still pending, drops it when the token is dead; the guard's drop
-//! (any thread) frees the `(kind, id)` at once and queues a *remove* that
-//! drops the payload on the main thread.
+//! An entry's life: `register` (any thread) takes the `(kind, id)` and
+//! returns the `Registration` guard. Registered without a token (inside
+//! `activate`) it stays staged until `commit(token)` (the kernel thread, at
+//! the activation's commit) records the token and queues an *apply*;
+//! registered with its activation's token (after `started`) the apply is
+//! queued at once. The main thread applies it when the token is live,
+//! defers it while the token is still pending, drops it when the token is
+//! dead; the guard's drop (any thread) frees the `(kind, id)` at once and
+//! queues a *remove* that drops the payload on the main thread.
 //!
 //! The payload types live in `ui::contrib`, which this step does not depend
 //! on: the registry checks and shares payloads through a [`Payloads`] it is
@@ -157,9 +159,6 @@ struct Tables {
     entries: HashMap<Serial, Entry>,
     /// The live `(kind, id)`s: staged, queued or applied, not yet released.
     index: HashMap<(Kind, Name), Serial>,
-    /// Tokens seen at commit, by activation number: a registration after
-    /// `started` from the same activation applies without a commit.
-    known: HashMap<u64, ActivationToken>,
     /// Queued applies not yet applied or dropped, per activation.
     outstanding: HashMap<u64, usize>,
     /// Activations whose queued applies have all been applied or dropped.
@@ -246,7 +245,11 @@ impl Registry {
     }
 
     /// `Contributions::register`.
-    pub fn register(self: &Arc<Self>, contribution: Contribution) -> Registration {
+    pub fn register(
+        self: &Arc<Self>,
+        contribution: Contribution,
+        token: Option<ActivationToken>,
+    ) -> Registration {
         let Contribution {
             kind,
             id,
@@ -270,27 +273,57 @@ impl Registry {
                 order,
                 payload,
             },
+            token,
         )
     }
 
     /// `Contributions::handle_command`.
-    pub fn handle_command(self: &Arc<Self>, name: Name, handler: CommandHandler) -> Registration {
+    pub fn handle_command(
+        self: &Arc<Self>,
+        name: Name,
+        handler: CommandHandler,
+        token: Option<ActivationToken>,
+    ) -> Registration {
         if !is_valid_command_name(&name) {
             warn!("contribution rejected"; kind = Kind::Command, reason = Reason::InvalidId);
             return Registration::new(|_| {}, || {});
         }
-        self.insert(Kind::Command, name, Content::Command(Arc::from(handler)))
+        self.insert(
+            Kind::Command,
+            name,
+            Content::Command(Arc::from(handler)),
+            token,
+        )
     }
 
     /// `Contributions::register_leave_guard`. Guards have no ID of their
     /// own: the serial is the ID, so there are no duplicates.
-    pub fn register_leave_guard(self: &Arc<Self>, guard: Arc<dyn LeaveGuard>) -> Registration {
+    pub fn register_leave_guard(
+        self: &Arc<Self>,
+        guard: Arc<dyn LeaveGuard>,
+        token: Option<ActivationToken>,
+    ) -> Registration {
         let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
         let id = Name::Owned(format!("guard-{serial}"));
-        self.insert(Kind::LeaveGuard, id, Content::Guard(guard))
+        self.insert(Kind::LeaveGuard, id, Content::Guard(guard), token)
     }
 
-    fn insert(self: &Arc<Self>, kind: Kind, id: Name, content: Content) -> Registration {
+    /// Takes the slot and, with a token, queues the apply; without one
+    /// (inside `activate`) the entry waits for its commit.
+    fn insert(
+        self: &Arc<Self>,
+        kind: Kind,
+        id: Name,
+        content: Content,
+        token: Option<ActivationToken>,
+    ) -> Registration {
+        if let Some(token) = &token
+            && token.state() == TokenState::Dead
+        {
+            // The activation is over: the slot is not taken, nothing is
+            // queued, and the payload drops here (the caller's thread).
+            return Registry::rejected(kind, &id, Reason::TokenDead);
+        }
         let serial = Serial(self.next_serial.fetch_add(1, Ordering::Relaxed));
         let ctx = lectern_logging::current();
         let mut tables = self.lock();
@@ -310,25 +343,19 @@ impl Registry {
                 content,
             },
         );
-        // After the commit (in `started`, a listener or a task of the same
-        // activation) the token is known: apply now, no commit follows. A
-        // pending token (inside `started`) defers at apply time.
-        // Inside `activate` the token is not known yet (nothing committed):
-        // the entry stays staged for the commit. An activation that commits
-        // nothing and registers later gets the same treatment, and the
-        // entry is reported when it is released without ever being
-        // committed (docs/design/workspace.md「与设计的差异」第 1 步).
-        if let Some(act) = ctx.act
-            && let Some(token) = tables.known.get(&act).cloned()
-            && token.state() != TokenState::Dead
-        {
-            let dropped = self.queue_apply(&mut tables, serial, token);
-            drop(tables);
-            if let Some(entry) = dropped {
-                drop_content(entry);
+        match token {
+            // After `started`: apply now, no commit follows. A token still
+            // pending (inside `started`) defers at apply time; one that
+            // died since the check above is dropped there (`token-dead`).
+            Some(token) => {
+                let dropped = self.queue_apply(&mut tables, serial, token);
+                drop(tables);
+                if let Some(entry) = dropped {
+                    drop_content(entry);
+                }
             }
-        } else {
-            drop(tables);
+            // Inside `activate`: the entry stays staged for the commit.
+            None => drop(tables),
         }
         let registry = self.clone();
         let committing = self.clone();
@@ -338,10 +365,10 @@ impl Registry {
         )
     }
 
-    /// `Staged::commit`: records the token and queues the apply.
+    /// `Staged::commit`: queues the apply of a staged entry. Nothing to do
+    /// for an entry registered with its token (queued already).
     fn commit(&self, serial: Serial, token: ActivationToken) {
         let mut tables = self.lock();
-        tables.known.insert(token.id(), token.clone());
         let Some(entry) = tables.entries.get(&serial) else {
             return;
         };
@@ -401,9 +428,8 @@ impl Registry {
                 drop(tables);
                 if let Some(entry) = entry {
                     // Never committed: a failed activation (the kernel logged
-                    // it), or a registration made after `started` by an
-                    // activation that committed nothing, which nobody could
-                    // apply (docs/design/workspace.md「与设计的差异」第 1 步).
+                    // it), or a registration made without a token outside
+                    // `activate`, which nobody commits.
                     warn!(
                         "contribution released without a commit";
                         kind = entry.kind,

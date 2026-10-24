@@ -64,7 +64,7 @@ pub struct ReviewViewPlugin { /* Arc<Shared> */ }
 pub struct HandoffPlugin { /* Arc<Shared> */ }
 ```
 
-- `ReviewViewPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service::<dyn Review>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`；`Contributions::register` 三项贡献（「界面」的「向 `workspace` 登记的贡献」），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<ReviewEvent>` 与 `ctx.on::<WorkspaceEvent>`（只用 `LayerChanged`）订阅。不提交任务。`started`：保存 `PluginHandle`（高亮任务用 `own_with`）。停用：`Active` drop 时清空 `Shared` 里的引用，正在显示的屏幕由 `workspace` 按 `Pop` 处理。
+- `ReviewViewPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service::<dyn Review>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`；`Contributions::register(…, None)` 三项贡献（「界面」的「向 `workspace` 登记的贡献」；`activate` 里没有 token），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<ReviewEvent>` 与 `ctx.on::<WorkspaceEvent>`（只用 `LayerChanged`）订阅。不提交任务。`started`：保存 `PluginHandle`（高亮任务用 `own_with`）。停用：`Active` drop 时清空 `Shared` 里的引用，正在显示的屏幕由 `workspace` 按 `Pop` 处理。
 - `HandoffPlugin::activate`：取三个 `ServiceRef`，`started` 时放进 `Shared::handoff`；`Active` drop 时取出。屏幕每次要交接时从 `Shared::handoff` 取一份（取锁复制），`ServiceRef::get()` 为 None（提供者已停用）时按没有处理。
 - 两个插件共用一个 `Arc<Shared>`（`plugins()` 建），与 `workspace` 的 `WorkspaceHost` 由 `app` 和插件共用是同一种做法。
 
