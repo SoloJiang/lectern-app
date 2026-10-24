@@ -80,6 +80,7 @@ pub enum Profile {
     Desktop,
     /// `#[gpui::test]` 用：没有真实的帧，屏障在窗口建好后立即放开。
     Test,
+    // `Probe`（`#[cfg(feature = "ui-probe")]`）：插件与 `Desktop` 相同，多一个 UI 探针，见「ui_probe 的装配」。
 }
 
 impl Profile {
