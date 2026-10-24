@@ -4316,6 +4316,7 @@ dependencies = [
 name = "lectern-app"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
@@ -4329,7 +4330,9 @@ dependencies = [
  "lectern-platform",
  "lectern-project",
  "lectern-review",
+ "lectern-services",
  "lectern-ui",
+ "lectern-workspace",
  "serde_json",
  "tempfile",
 ]

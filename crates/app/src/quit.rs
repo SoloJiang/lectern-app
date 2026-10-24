@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 use gpui::{App, Global, actions};
 use lectern_executor::Shutdown;
 use lectern_logging::{Field, Flushed, Value, debug, info, warn};
+use lectern_services::workspace::LeaveScope;
+use lectern_workspace::WorkspaceHost;
 
 use crate::startup::Started;
 
@@ -218,7 +220,23 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-/// The `Quit` action. Main thread, does not block.
+/// Who is asked before the quit order starts: the leave guards of the
+/// workspace (docs/design/workspace.md「本 crate 的公开项」`ask_leave`). A
+/// trait so that the tests answer in their own way.
+pub trait LeaveAsk: Send + Sync + 'static {
+    /// `done(true)` when every guard allowed. Any thread.
+    fn ask(&self, done: Box<dyn FnOnce(bool) + Send>);
+}
+
+impl LeaveAsk for WorkspaceHost {
+    fn ask(&self, done: Box<dyn FnOnce(bool) + Send>) {
+        self.ask_leave(LeaveScope::App, done);
+    }
+}
+
+/// The `Quit` action. Main thread, does not block. With the workspace
+/// installed, its leave guards are asked first; a refusal ends the quit and
+/// the app goes on.
 pub fn quit(cx: &mut App) {
     if is_quitting(cx) {
         return;
@@ -230,6 +248,47 @@ pub fn quit(cx: &mut App) {
         return;
     };
     info!("quit requested"; path = QuitSource::Action);
+    match started.shell.as_ref().map(|shell| shell.host.clone()) {
+        Some(host) => ask_then(cx, Arc::new(host), shut_down),
+        None => shut_down(cx),
+    }
+}
+
+/// Asks `ask`, then runs `proceed` on the main thread if it allowed. A
+/// refusal removes the quit marker, so ⌘Q works again. A dropped answer
+/// allows, as a guard that drops its answer does (docs/design/workspace.md
+/// 「服务接口」), so the app cannot be left unquittable.
+pub(crate) fn ask_then(
+    cx: &mut App,
+    ask: Arc<dyn LeaveAsk>,
+    proceed: impl FnOnce(&mut App) + 'static,
+) {
+    // `quit` set it already; the tests start here.
+    cx.set_global(Quitting);
+    let (tx, rx) = futures::channel::oneshot::channel();
+    ask.ask(Box::new(move |allowed| {
+        let _ = tx.send(allowed);
+    }));
+    cx.spawn(async move |cx| {
+        let allowed = rx.await.unwrap_or(true);
+        cx.update(|cx| {
+            if allowed {
+                proceed(cx);
+            } else {
+                info!("quit refused by a leave guard");
+                cx.remove_global::<Quitting>();
+            }
+        });
+    })
+    .detach();
+}
+
+/// The quit order on its thread; then `cx.quit()`.
+fn shut_down(cx: &mut App) {
+    let Some(started) = cx.try_global::<Started>() else {
+        cx.quit();
+        return;
+    };
     let steps: Arc<dyn QuitSteps> = Arc::new(started.clone());
     let spawned = thread::Builder::new()
         .name("lectern-quit".into())

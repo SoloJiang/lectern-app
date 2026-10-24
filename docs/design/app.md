@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`welcome`、`project_home` 的装配随它们的视图合并后加入。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -166,9 +166,9 @@ pub struct Outcome {
 | 2 | 主线程 | `install_early(EarlyConfig { dir: platform::dirs::logs(), cli_filter: args.log })` | 否：只读环境变量，分配首帧前缓冲，装 panic 钩子 |
 | 3 | 主线程 | 认不出的参数各记一条 warn（进首帧前缓冲） | 否 |
 | 4 | 主线程 | `Locale::negotiate(platform::system::preferred_languages())`、`Strings::of` | 否：系统偏好在内存里，资源已编译进二进制（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)） |
-| 5 | 主线程 | `Application::new().run(…)`：`lectern_ui::init(cx, strings)`（在 `set_menus` 之前：内置的两份 `Palette`、减弱动态效果、登记 `platform` 的变化通知，不读系统色，[ui 设计「初始化」](ui.md#初始化)）、设置应用菜单、绑定 ⌘Q、建骨架窗口（`open_window` 的回调里 `lectern_ui::attach(window, cx)`，`Subscription` 放在根视图 `Skeleton` 里） | GPUI 和 AppKit 自己的初始化；`init` 只做内存操作 |
+| 5 | 主线程 | `Application::new().run(…)`：`lectern_ui::init(cx, strings)`（在 `set_menus` 之前：内置的两份 `Palette`、减弱动态效果、登记 `platform` 的变化通知，不读系统色，[ui 设计「初始化」](ui.md#初始化)）、设置应用菜单、绑定 ⌘Q、建骨架窗口（`open_window` 的回调里 `lectern_ui::attach(window, cx)`，`Subscription` 放在根视图 `Skeleton` 里；desktop 再对窗口设 frame autosave 名 `"welcome"`，见「workspace 的装配」）；`Application::with_assets(lectern_ui::IconAssets)` 在 `run` 之前，GPUI 的资源来源只能在这里装 | GPUI 和 AppKit 自己的初始化；`init` 只做内存操作；frame autosave 名是 AppKit 内存里 user defaults 的一次读取，不读 Lectern 的文件 |
 | 6 | 主线程 | 首帧画出；根视图第一次 `render` 时登记启动屏障（下节） | 否 |
-| 7 | 主线程 | `startup::release`：`Early::start`、`lectern_ui::ready`（`gpui_component::init`、读两套系统色、投影到 gpui-component 的主题；在 `Kernel::start` 之前，插件挂载视图时 `ui` 已就绪）、`Executor::new`、`Kernel::start` | 建 `lectern-log` 线程和 kernel 线程，立即返回；`ready` 约 2–3 ms 的主线程内存操作，不做 IO |
+| 7 | 主线程 | `startup::release`：`Early::start`、`lectern_ui::ready`（`gpui_component::init`、读两套系统色、投影到 gpui-component 的主题；在 `Kernel::start` 之前，插件挂载视图时 `ui` 已就绪）、`Executor::new`、`Cache`、`Watcher`、`workspace::install`（把骨架窗口的根视图换成 `Workspace`，启动主线程队列）、`Kernel::start`；最后在 executor 上提交读 `window.json` 的任务（「workspace 的装配」） | 建 `lectern-log` 线程和 kernel 线程，立即返回；`ready` 约 2–3 ms 的主线程内存操作，不做 IO；读文件在 `Background` 任务里 |
 | 8 | `lectern-log` | 建日志目录、清理、写文件头和首帧前缓冲 | 是 |
 | 9 | kernel 线程 | 读清单、激活 `AfterFirstFrame` 插件（本 issue 里没有插件） | 由插件决定 |
 
@@ -259,7 +259,7 @@ pub struct Resources {
 }
 
 impl Profile {
-    /// desktop：上表的四个插件；test：空集合。不做 IO。
+    /// desktop：上表的四个插件，`workspace` 加入后是五个（「workspace 的装配」）；test：空集合。不做 IO。
     pub fn plugins(self, resources: &Resources) -> PluginSet;
 }
 
@@ -313,11 +313,75 @@ Logging::shutdown(500 ms)
 - `every_profile_graph_validates`：用临时目录建 `Resources`（`Cache::new` 指向临时目录，`Watcher` 用 `fs_watch::testing::FakeBackend`），对每个 profile 调用 `plugins(&resources).validate()`；之后临时目录仍是空的（构造不做 IO）。
 - `quit`：`steps_run_in_order` 的顺序改为 kernel、kernel 完成、watcher、executor、cache、logging；`a_hung_kernel_does_not_block_quit` 里 watcher 照常调用、cache 因剩余时间为零跳过；`a_hung_watcher_does_not_block_quit`（`watcher` 不返回时，到截止时间后照常关闭 executor 和日志，`watcher_timed_out` 为 true，cache 跳过）。
 - `tests/startup.rs`（这个测试二进制的测试一次只运行一个，见「与设计的差异」第 2 步）：
-  - `startup_writes_a_header_and_an_end_record` 加检查：`plugins assembled` 在 `first frame drawn` 之后、`plugins` 为 4。
+  - `startup_writes_a_header_and_an_end_record` 加检查：`plugins assembled` 在 `first frame drawn` 之后、`plugins` 为 4（`workspace` 加入后为 5，见「workspace 的装配」）。
   - `quit_shuts_the_services_down_in_time`：`--quit-after-start` 时日志里没有 `kernel shutdown timed out`、`executor shutdown timed out`。
   - `home_path_stays_out_of_the_log`（上一节）。
   - 每个启动测试的 `HOME` 都是临时目录，并去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`（`AgentRoots::from_env` 优先读它们），不读本机的会话目录。
 - 手动：空闲内存（「性能」）。
+
+## workspace 的装配
+
+[#215](https://github.com/SoloJiang/lectern-app/issues/215)，[workspace 设计「对其他 crate 的要求」](workspace.md#对其他-crate-的要求)的 E。`workspace` 是 desktop profile 的第 5 个插件；它的根视图在启动屏障放开时替换骨架窗口的根视图，窗口状态文件和 frame autosave 名由 `app` 管。test profile 不装，也不调用 `install`。
+
+### 插件与资源
+
+| 插件 ID | 构造 | 提供 | 依赖 |
+|---|---|---|---|
+| `workspace` | `WorkspacePlugin::new(host)`，`host` 是 `workspace::install(window, deps, cx)` 的返回值（`Resources::workspace`） | `dyn Contributions` | `dyn Projects` |
+
+- `welcome`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })`）和 `project_home`（`ProjectHomePlugin::new` 与 `ProjectHomeUsagePlugin::new` 共用一个 `UsageSlot`）现在不装配：两个设计都规定装配在它们视图之后的步骤里，现在登记的屏幕载荷还是占位类型（`welcome` 的 `ScreenPlaceholder`，`UiPayloads` 会以 `wrong-payload` 拒绝，窗口没有 Welcome 屏幕），`project-home-usage` 要 `dyn Usage`，现在没有插件提供它（图校验会失败）。它们的视图合并后，各自在 `Profile::Desktop` 的表里加一行。
+- `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架，不显示 `workspace-screen-missing`。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
+- `startup::arm` 的第二个帧回调把窗口句柄交给 `release_in(Some(window), cx)`；`release(cx)` 是 `release_in(None, cx)`，test profile 用它。没有窗口句柄的 desktop 屏障不装配（记 warn `plugins not assembled`，`missing` 为 `window`），只在直接调用 `release` 时出现。
+- `Started::shell`（`Option<Shell>`）：`Shell { host, window_state }`，`Quit` 用 `host` 问离开守卫，Dock 重开用两者。
+
+### 窗口状态与 frame autosave 名
+
+`src/window_state.rs`。`workspace` 在主线程上、没有 `cx` 的回调里报告 `WindowState` 的变化，所以回调只往一个通道发消息，由 `WindowStateLink::start` 在主线程上开的前台任务处理：
+
+- frame autosave 名：`open_window` 的回调里（首帧之前）对 desktop 的骨架窗口设 `"welcome"`（`platform::window::set_frame_autosave_name`，AppKit 内存里的 user defaults，不读 Lectern 的文件，ADR 0017 允许的首帧前唯一的偏好读取；失败时 `platform` 记 warn，窗口沿用打开时的 frame）。任务收到 `WindowState` 后，`project` 有值而当前名是 `"welcome"` 时改设 `"project"`，反过来亦然；窗口已经关闭时什么也不做。test profile 不设名（GPUI 的测试窗口没有 `NSWindow`）。
+- 写：任务在收到最后一次变化 500 ms 之后，把状态序列化成 JSON，在 executor 的 `Background` 任务里写 `app_data()/workspace/window.json`（只建 `workspace/` 这一级目录，写同目录的 `window.json.tmp` 再 `rename`）。两次写不重叠（任务等上一次完成）。写失败只记 warn（`step`、`io` 的种类，不记路径）。退出前 500 ms 内的最后一次变化不会写出（「已知限制」）。
+- 读：屏障放开、`Kernel::start` 之后，executor 的 `Background` 任务读同一个文件，解析成 `WindowState`，`version` 认得时调 `host.restore(state)`（任何线程）。没有文件：什么也不做。读不出或不是 JSON、`version` 不认得：记 warn 后忽略，下一次变化覆盖它。
+- Dock 重开：`window::reopen` 按 `Shell` 里最后一次报告的状态选名字（有项目 `"project"`，否则 `"welcome"`）开骨架窗口，通知任务换窗口，再 `host.attach(window, cx)`。屏障放开之前重开：没有 `Shell`，与第一个窗口一样等屏障。
+
+### 里程碑与帧记录
+
+`WorkspaceDeps::on_milestone` 和 `on_frames` 现在是空函数：bench 的探针（`bench-probe` feature、`Milestone`、`FrameStats`、`Driver`，[bench 设计](bench.md)第 5 步）还没有实现，没有可转交的对象。`platform::frame` 也还没有，`FrameRecord::frames` 总是空（workspace 设计「已知限制」）。探针实现时，`app` 在 `startup::assemble` 这一处把 `workspace::Milestone`（`services::workspace::Milestone`）映射成 bench 的 `Milestone` 交给探针的 `milestone`，把 `FrameRecord` 转成 `FrameStats` 交给 `frames`，并让 `Driver` 的滚动、动画、输入场景调 `host.record_frames`。
+
+### 退出顺序的变化
+
+`Quit` 在 `lectern-quit` 线程启动之前，有 `Shell` 时先 `host.ask_leave(LeaveScope::App, done)`：
+
+```
+Quit（主线程）
+  ├─ 设退出标记，记 quit requested
+  ├─ host.ask_leave(App, done) ── 主线程的前台任务等答复（不阻塞）
+  │     done(true)：继续下面的顺序
+  │     done(false)：记 info `quit refused by a leave guard`，去掉退出标记；什么也不做，⌘Q 可以再按
+  └─ lectern-quit 线程：Kernel::shutdown → … → Logging::shutdown（「退出顺序的变化」）
+```
+
+- 询问期间退出标记已设，再按 ⌘Q 被忽略（守卫自己弹出了确认）。
+- `done` 在没有回答就被丢弃时（队列已关闭、守卫丢掉了答复）按通过处理：不能让应用退不出去。
+- 没有 `Shell`（test profile、没有装配插件）和屏障放开之前：与之前相同，不问。由系统发起的退出不经 `Quit`，也不问（「已知限制」）。
+
+### 日志与诊断
+
+target 为 `app`。
+
+- info `quit refused by a leave guard`（无字段）。
+- warn `window state not written`：`step`（`encode`、`create_dir`、`create`、`write`、`rename`），`io`（`Value::io`，除 `encode` 外）。
+- warn `window state unreadable`：`reason`（`io` 或 `json`），`io`（`reason` 为 `io` 时）。warn `window state ignored`：`reason` 为 `version`。
+- warn `plugins not assembled` 的 `missing` 多一个值 `window`。
+- `platform` 自己记 frame autosave 名没有设上的 warn（`kind`）；`workspace` 的记录见 [workspace 设计「日志与诊断」](workspace.md#日志与诊断)。
+- 不记录：`window.json` 的路径、项目路径、窗口标题。金丝雀：`tests/startup.rs` 的 `window_state_stays_out_of_the_log`（含金丝雀的项目路径写在 `window.json` 里，`version` 为 1 和 2 各启动一次，trace 级别，日志里没有金丝雀，也没有 `window.json`）和 `home_path_stays_out_of_the_log`（同样检查 `window.json`）；`src/tests/window_state.rs` 的 `a_failed_write_is_logged_without_the_path`、`restore_ignores_what_it_cannot_use`。
+
+### 测试
+
+- `profile`：`every_profile_graph_validates` 成了 `#[gpui::test]`：`WorkspaceHost` 只能由 `install` 在窗口里建，测试用 `init_fixed` 和一个空的测试窗口装它；desktop 的插件数为 5，临时目录之后仍是空的。
+- `window_state`（`src/tests/window_state.rs`）：文件函数（`a_written_state_reads_back`、`a_second_write_replaces_the_first`、`a_file_that_is_not_a_state_is_unreadable`：目录里只有 `window.json`，没有临时文件，根目录下没有别的东西）；`#[gpui::test]` `changes_are_written_once_after_500_ms_of_stillness`（测试调度器的时钟，手动的 `Executor`：400 ms 后再来一次变化，再过 400 ms 还没有文件，再过 200 ms 写出最后一个状态）、`the_name_for_a_new_window_follows_the_last_state`、`a_failed_write_is_logged_without_the_path`、`restore_ignores_what_it_cannot_use`（`version` 不认得、不是 JSON、认得、没有文件四种情况的记录）。
+- `leave`（`src/tests/leave.rs`，假的 `LeaveAsk`）：`every_guard_allowing_goes_on`、`a_refusal_ends_the_quit_and_the_next_one_asks_again`、`an_answer_from_another_thread_is_waited_for`、`a_dropped_answer_allows`、`the_quit_waits_while_a_guard_has_not_answered`。
+- `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 5；`window_state_stays_out_of_the_log`；`home_path_stays_out_of_the_log` 加检查 `window.json`。
+- 手动（「验收」，workspace 设计第 3 步）：见「实际验证」。
 
 ## 性能
 
@@ -328,7 +392,7 @@ Logging::shutdown(500 ms)
 ## 界面
 
 - 窗口：没有打开项目时的独立窗口，820 × 520 pt，居中（[交互规范「窗口结构」](interaction.md#窗口结构)的 Welcome 宽度）。标题栏透明，窗口背景用 `WindowBackgroundAppearance::Blurred`（系统的毛玻璃材质，自动适配浅色和深色模式，不需要自定义颜色），根视图不画任何内容，这就是 ADR 0017 的中性骨架。`ui` 提供骨架控件以后，由 Welcome 和 Overview 的视图替换这个根视图。
-- 关闭窗口不退出应用（产品负责人 2026-10-23 决定，见「未决问题」）。点 Dock 图标而且没有窗口时，重新打开骨架窗口（`Application::on_reopen`，在 `run` 之前登记）。
+- 关闭窗口不退出应用（产品负责人 2026-10-23 决定，见「未决问题」）。点 Dock 图标而且没有窗口时，重新打开骨架窗口（`Application::on_reopen`，在 `run` 之前登记）；`workspace` 装好之后，新窗口按当前状态取 frame autosave 名，`WorkspaceHost::attach` 把根视图换成 `Workspace`（「workspace 的装配」）。
 - 应用菜单，Fluent 键在 `crates/i18n/locales/{en,zh-CN}/app.ftl`（前置条件 A）：
 
   | 菜单项 | 键 | en | zh-CN | 快捷键 | 动作 |
@@ -352,6 +416,9 @@ Logging::shutdown(500 ms)
 | 系统首选语言里没有支持的语言 | `Locale::negotiate` 返回 `En` |
 | 屏障放开之前按 ⌘Q | 直接 `cx.quit()`。写盘线程没有启动，首帧前缓冲里的记录丢失（见「已知限制」） |
 | 退出过程中再按 ⌘Q | 忽略 |
+| 离开守卫拒绝 `Quit` | 不退出，去掉退出标记，记 info `quit refused by a leave guard`；守卫自己弹出确认 |
+| `window.json` 读不出、不是 JSON 或 `version` 不认得 | 记 warn，按没有文件处理；下一次状态变化覆盖它 |
+| `window.json` 写失败 | 记 warn，放弃这次写；下一次变化再写 |
 | kernel 在 2 s 内没有关闭完 | 记 warn，继续关闭 executor 和日志 |
 | fs_watch 线程或缓存的关闭到截止时间还没返回 | 记 warn，继续下一步（「装配」「退出顺序的变化」） |
 | `lectern-quit` 线程建不起来 | 主线程直接 `cx.quit()`，`on_app_quit` 写结束记录 |
@@ -408,7 +475,9 @@ Logging::shutdown(500 ms)
 
 - 屏障放开之前（首帧之后约 2 个刷新周期内）退出时，首帧前缓冲里的记录丢失，下一次运行也不会报告上一次异常结束：这时还没有创建本次运行的日志文件。
 - 窗口被完全遮挡、收不到帧请求时，屏障不放开，后台初始化一直推迟到窗口重新可见；这期间 ⌘Q 按「屏障放开之前」处理。屏幕锁定的图形会话（`CGSessionCopyCurrentDictionary` 的 `CGSSessionScreenIsLocked` 为 1）同样：首帧画出，之后不再有帧请求，屏障不放开；启动测试在锁屏期间全部 30 s 后判为失败（`ui` 接入时实测；接入前一天的本机调试构建同样如此），解锁后再跑。
-- 由系统发起的退出不经 `Quit`：kernel 和 executor 不按顺序关闭（kernel 设计「已知限制」），只有日志的结束记录在 `on_app_quit` 的 200 ms 里写出。
+- 由系统发起的退出不经 `Quit`：kernel 和 executor 不按顺序关闭（kernel 设计「已知限制」），只有日志的结束记录在 `on_app_quit` 的 200 ms 里写出。系统发起的退出也不问离开守卫。
+- `window.json` 去抖 500 ms：最后一次变化之后 500 ms 内退出，这次变化不会写出，下次启动回到上一次写出的状态（多半是上一个项目）。系统发起的退出同样。
+- 第一次使用 `"project"`、还没有保存过 frame 时，设计要求先把窗口设为 1180 × 760 pt 居中（workspace 设计「对其他 crate 的要求」D）。GPUI 的窗口没有移动接口，`resize` 只改内容尺寸并保持左上角，在 Welcome 居中的窗口上放大到 1180 × 760 会越出屏幕；居中要调 AppKit，属于 `platform`（架构规则 6）。所以现在窗口沿用 Welcome 的大小，用户拖一次，AppKit 就保存在 `"project"` 下。`platform` 补上居中并设尺寸的接口后，`app` 在改名为 `"project"` 之前调用（「与设计的差异」）。
 - 屏障比首帧的实际显示最多晚约 2 个刷新周期，直到 `platform::frame::on_first_presented` 实现（「启动屏障」）。窗口不是前台窗口时 GPUI 按 30 fps 请求帧（`inactive_frame_interval` 33 ms），间隔按 33 ms 计；从终端启动时实测首帧画出到屏障放开约 90–100 ms（「实际验证」）。
 
 ## 验收
@@ -456,6 +525,12 @@ Logging::shutdown(500 ms)
 - `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：17 个单元测试通过（原有 15 个加新增的 `appearance_change_refreshes_the_skeleton_window`、`appearance_change_before_ready_does_not_touch_the_theme`）。`tests/startup.rs` 的 7 个启动测试本机没有通过：图形会话处于锁屏（`CGSSessionScreenIsLocked` 为 1，用户不在），窗口画出首帧后收不到帧请求，屏障不放开，7 个都在 30 s 后判为失败；接入前一天的本机调试构建同样卡住（「已知限制」）。它们由 macOS CI 运行；`startup_writes_a_header_and_an_end_record` 多检查 `ui initialised` → `first frame drawn` → `ui ready` → `plugins assembled` → `startup barrier released` 的顺序和两条记录的 `accent`，结果以 CI 为准。
 - 发布构建（`cargo build --release --locked -p lectern-app`）成功；临时 `HOME` 下的手动运行（空闲内存、`ui initialised` / `ui ready` 的字段与耗时）因为同一个锁屏原因没有做：屏障不放开，日志文件不出现，内存读数没有意义。解锁后按「装配」「性能」的方法补测，写进这里。
 
+`workspace` 的装配（[workspace 设计](workspace.md)第 3 步，同一台机器；完整的数字和没有做的项在 [workspace 设计「实际验证」](workspace.md#实际验证)第 3 步）：
+
+- `just check`、`just deny`、`python3 scripts/check_architecture.py` 通过；`rg 'eprintln!|println!|log::|log_err|warn_on_err' crates/app/src crates/app/tests` 没有结果。
+- `just test -p lectern-app -E 'not binary(startup)'`：31 个测试通过（原有 17 个，新增 14 个：`window_state` 9 个，`leave` 5 个；`every_profile_graph_validates` 改成 `#[gpui::test]`，desktop 的插件数为 5）。
+- `tests/startup.rs` 的 8 个启动测试本机没有运行（图形会话锁屏，屏障不放开，「已知限制」），结果以 macOS CI 为准。发布构建（临时 `HOME`）的手动运行、冷启动、空闲内存都没有做；解锁后按「装配」「性能」的方法补测，写进这里。
+
 ## 与设计的差异
 
 - **库与二进制分开。** 原文写 `app` 是二进制 crate。记录的 target 取 `module_path!` 的第一段：二进制名为 `lectern` 时 target 是 `lectern`，不是 logging 设计规定的 `app`。现在逻辑在库 `lectern_app` 里，二进制只调用 `lectern_app::run()`，target 是 `app`（「接口」已改）。
@@ -475,3 +550,13 @@ Logging::shutdown(500 ms)
 
 - **test profile 的 `ui` 用 `init_fixed`，由测试自己调用。** `run` 只有 desktop profile，`lectern_ui::init` 在它里面；test profile 没有入口函数，`#[gpui::test]` 在 `window::open` 之前调用 `init_fixed`（ui 设计「对其他 crate 的要求」：test profile 用 `init_fixed`），`release` 里的 `ready` 随后是空操作。
 - **`appearance_change_before_ready_does_not_touch_the_theme` 不检查 `Palette` 的切换**，原因见 [ui 设计「与设计的差异」](ui.md#与设计的差异)。
+
+`workspace` 的装配（详见 [workspace 设计「与设计的差异」](workspace.md#与设计的差异)第 3 步）：
+
+- **`release_in(window, cx)`。** `release(cx)` 没有窗口句柄；desktop 的屏障在第二个帧回调里取 `window.window_handle()` 调 `release_in`，`release(cx)` 是 `release_in(None, cx)`（test profile 和直接调用的测试）。
+- **`resources` 接收一个闭包。** `workspace::install` 要 `cx` 和 `app_data()`，`Resources` 要它的返回值：`resources(executor, install)` 在目录都齐、`Cache`、`Watcher` 建好之后调用闭包，所以目录缺失时不装 `workspace`。
+- **`Shell` 在 `Started` 里。** `Quit` 和 Dock 重开要 `WorkspaceHost`、`WindowStateLink`，两者经 `Started::shell` 取（`Started` 仍是 `Clone`）。
+- **`window::open` 拆成 `open_named` 和 `reopen`。** `open(cx)` 是 `open_named(cx, "welcome")`；`reopen` 是 `on_reopen` 的处理函数，按最后一次报告的状态取名字。
+- **`quit` 拆成 `quit`、`ask_then`、`shut_down`。** `ask_then` 取 `Arc<dyn LeaveAsk>`，测试用假的实现；原来的线程与等待逻辑原样搬进 `shut_down`。
+- **`serde_json` 与 `futures` 成了普通依赖。** `window.json` 与通道、`oneshot` 要用；`lectern-executor` 的 `test-support` 进了 dev 依赖（`Executor::manual`）。
+- **`with_assets(IconAssets)` 已加**（[ui 设计「对其他 crate 的要求」](ui.md#对其他-crate-的要求)的 `app` 项）：`gpui_platform::application().with_assets(lectern_ui::IconAssets)`，`run` 之前。

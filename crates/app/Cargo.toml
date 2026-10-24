@@ -20,6 +20,9 @@ layer = "app"
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+# The channels of the window state task and of `Quit`'s leave question: the
+# callbacks of `workspace` run on any thread and have no `cx`.
+futures.workspace = true
 # The plugin crates and the resources they share (docs/design/app.md「装配」).
 lectern-agents = { path = "../agents" }
 lectern-cache = { path = "../cache" }
@@ -33,9 +36,16 @@ lectern-logging = { path = "../logging", features = ["sink"] }
 lectern-platform = { path = "../platform" }
 lectern-project = { path = "../project" }
 lectern-review = { path = "../review" }
+# `LeaveScope`, for the leave guards `Quit` asks.
+lectern-services = { path = "../services" }
 # `init` before the window, `attach` on the skeleton window, `ready` behind
 # the barrier (docs/design/ui.md「对其他 crate 的要求」).
 lectern-ui = { path = "../ui" }
+# The "workspace" plugin, `install` and `WindowState`
+# (docs/design/workspace.md「对其他 crate 的要求」E).
+lectern-workspace = { path = "../workspace" }
+# `window.json`, and the startup tests read the log file's JSON lines.
+serde_json.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
@@ -47,8 +57,8 @@ lectern-logging = { path = "../logging", features = ["sink", "test-support"] }
 lectern-ui = { path = "../ui", features = ["test-support"] }
 # `Theme`: the before-ready test checks that no theme global exists.
 gpui-component.workspace = true
-# The startup tests read the log file's JSON lines under a temporary HOME.
-serde_json.workspace = true
+# `Executor::manual`: the window state tests run the write when they say so.
+lectern-executor = { path = "../executor", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

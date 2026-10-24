@@ -1,6 +1,6 @@
 # workspace 设计
 
-状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」；前置条件 D、E、F 与第 3 步（`app` 装配）尚未实现。
+状态：实现中。前置条件 A（`services` 的 `workspace` 模块，[#221](https://github.com/SoloJiang/lectern-app/pull/221)）、「验收」第 1 步（本 crate 不依赖 GPUI 的部分：导航状态机、贡献注册表、窗口状态、插件骨架，[#229](https://github.com/SoloJiang/lectern-app/pull/229)）、登记接口带 token（[#232](https://github.com/SoloJiang/lectern-app/pull/232)）与第 2 步（根视图、区域、代理 Action、离开守卫与窗口的联动、`WorkspaceHost`，[#235](https://github.com/SoloJiang/lectern-app/pull/235)）已实现，见「实际验证」「与设计的差异」。前置条件 D（`platform` 的 frame autosave）已实现（见 [platform 设计](platform.md#窗口-frame-的-autosave)）。第 3 步的代码（前置条件 E：`app` 装配、窗口状态文件、frame autosave 名、`Quit` 问离开守卫）已实现；这一步的手动验收（发布构建的运行、冷启动、空闲内存）、「项目」窗口第一次使用时的 1180 × 760 居中、里程碑与帧记录转交给 bench 的探针（前置条件 F）还没有做，原因见「与设计的差异」第 3 步，所以 issue 仍是 `Refs #215`。
 
 对应 issue [#215](https://github.com/SoloJiang/lectern-app/issues/215)。`workspace` 是窗口的骨架：它把[交互规范「窗口结构」](interaction.md#窗口结构)的六个区域（侧栏、工具栏、内容区、检查器、浮动面板、底部浮条）画成一个根视图，按 [ADR 0012](../adr/0012.md) 的三层结构决定每个区域什么时候出现，维护屏幕之间的导航状态机，并通过 `services` 里的 `dyn Contributions` 接收其他视图 crate 和插件贡献的侧栏条目、屏幕、检查器页、面板、快捷键和离开守卫（[kernel 设计「撤销」「按命令激活」](kernel.md#撤销)）。它不含任何一个屏幕的内容：Welcome 归 [#29](https://github.com/SoloJiang/lectern-app/issues/29)，项目主页与项目侧栏归 [#30](https://github.com/SoloJiang/lectern-app/issues/30)，审阅视图归 [#15](https://github.com/SoloJiang/lectern-app/issues/15)，完整文件阅读与 Files 归 [file_reader 设计](file_reader.md)。
 
@@ -665,6 +665,16 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 「验收」第 2 步的 `rg` 检查都没有结果：`std::fs|std::process|git2|gix`、`rgb\(|hsla\(|Duration::from_millis`、界面字符串字面量（`'"[A-Z][a-z]+ [a-z]'`，`--glob '!tests*'`）、`eprintln!|println!|log::`；`ui` 设计「视图 crate 接入后的持续检查」的 `rg`（含 `\.font_family\(`、`gpui_component::Button`）也没有结果。
 - 没有验证（`#[gpui::test]` 不画真实的帧：`TestWindow` 的帧请求回调只能从 GPUI 内部触发）：`on_next_frame` 驱动的每帧 `Tick`（测试直接发 `Item::Tick`）、里程碑的 `presented` 时刻、`RecordStop::AnimationsSettled`、面板滑入的视觉效果（`Transition` 的值在测试里不随帧推进）；窗口关闭后点 Dock 图标重开的真实流程（`attach` 只在测试窗口上验证）。这些随第 3 步在 macOS 上手动运行发布构建时检查。
 
+### 第 3 步
+
+`app` 的装配（前置条件 E）：`startup::release` 里 `install`、`WorkspacePlugin` 进 desktop 的 `PluginSet`、窗口状态文件、frame autosave 名、Dock 重开的 `attach`、`Quit` 问离开守卫、`Application::with_assets(IconAssets)`，在 macOS（arm64，Rust 1.97.0）上运行，叠在 `main`（含 `welcome` 第 1 步 #240、`project_home` 第 1 步 #241）之上。本机图形会话锁屏，下面标明的没有做。
+
+- `just check`（含 clippy 与架构检查：32 个 crate）、`just deny`、`python3 scripts/check_architecture.py` 通过。`git diff origin/main -- Cargo.lock` 只给 `lectern-app` 加依赖行（`futures`、`lectern-services`、`lectern-workspace`），没有新的外部 crate。`rg 'eprintln!|println!|log::|log_err|warn_on_err' crates/app/src crates/app/tests` 没有结果。
+- `just test -p lectern-app -E 'not binary(startup)'`：31 个测试通过（原有 17 个，新增 14 个）。新增：`src/tests/window_state.rs` 9 个（文件函数 5 个；`#[gpui::test]` 4 个：`changes_are_written_once_after_500_ms_of_stillness`、`the_name_for_a_new_window_follows_the_last_state`、`a_failed_write_is_logged_without_the_path`、`restore_ignores_what_it_cannot_use`）、`src/tests/leave.rs` 5 个（`Quit` 问离开守卫：通过、拒绝后再按一次再问、别的线程上的答复、丢掉答复、守卫还没回答）；`every_profile_graph_validates` 改成 `#[gpui::test]`，desktop 的插件数为 5。
+- `just test -p lectern-workspace`：72 个测试通过，与第 2 步相同（本步没有改这个 crate 的代码）。
+- 没有运行：`tests/startup.rs`（8 个，其中新增 `window_state_stays_out_of_the_log`，`startup_writes_a_header_and_an_end_record` 的 `plugins` 改为 5，`home_path_stays_out_of_the_log` 加检查 `window.json`）：锁屏时屏障不放开，全部 30 s 超时（[app 设计「已知限制」](app.md#已知限制)），结果以 macOS CI 为准。
+- 没有做（「验收」第 3 步的手动项）：发布构建（临时 `HOME`）首次启动是 820 × 520 的 Welcome、没有 `workspace` 的记录早于 `first frame drawn`、移动窗口后重启位置保留、打开文件夹后重启回到项目主页（`screen changed` 的 `to` 为 `project-home`）；这一条还要 `welcome` 和 `project_home` 的屏幕装配（见「与设计的差异」第 3 步）。`app/cold_start`（bench 第 5 步之后判定）和空闲内存（与 40 MB 比较增加不超过 1 MB）也没有测。第 2 步留下的 `on_next_frame` 驱动的 `Tick`、里程碑的 `presented`、`RecordStop::AnimationsSettled`、面板滑入、窗口关闭后点 Dock 图标重开，同样要在真实窗口里手动检查。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -708,3 +718,15 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - **每帧的 `Tick`**：有推迟的项时根视图用 `window.on_next_frame` 排一个 `Tick`（`request_animation_frame` 只能在绘制阶段调用，不用它；`on_next_frame` 本身就让 GPUI 安排下一帧）。
 - **工具栏的返回按钮和检查器开关**：`ui` 的 `Button`、`Icon` 资源在 `ui` 第 3 步，现在是两个带 `workspace-back` / `workspace-inspector-toggle` 文字的可点击元素；第 3 步后换成 `Button` 加 `Icon::Back` / `Icon::Inspector`。检查器的分段控件同理，现在是一排可点击的页名。
 - **`WorkspacePlugin::new(host: WorkspaceHost)`**：按设计；第 1 步的 `new(Arc<Hub>)` 改为 `cfg(test)` 的 `from_hub`，只给不依赖 GPUI 的测试用。
+
+### 第 3 步
+
+- **`on_state_changed` 经通道到前台任务**：回调是 `Fn(WindowState) + Send + Sync`，没有 `cx` 和窗口，而 `set_frame_autosave_name` 要 `&Window`。所以回调（`WindowStateLink::state_changed`）只往 `futures` 的通道发消息，`app` 在主线程上开的前台任务收到后换 frame autosave 名（`window.update`）、去抖和提交写文件的任务。名字的切换因此晚一个调度周期，不在 `Workspace` 的更新里；窗口已关闭时什么也不做。「窗口状态」写的「`app` 可以直接在这里切换」在这个意义上成立（主线程，同一次事件循环里）。
+- **没有文件时不调 `host.restore`**：设计写「认不出或没有文件时为默认值」再调 `restore`。默认值（Welcome、检查器隐藏）恢复不出任何东西，却会在用户已经打开项目时把检查器重置；`version` 不认得、读不出、不是 JSON 的文件同样不调，记 warn（`window state ignored` / `window state unreadable`）后由下一次状态变化覆盖。
+- **`install` 只在目录都齐时调用**：`home`、`app_cache()`、`app_data()` 任一个为 None 时 `app` 不装配任何插件，这时也不调 `install`，窗口保持中性的骨架，而不是一个显示 `workspace-screen-missing` 的 `Workspace`（没有 `workspace` 插件，什么屏幕都不会注册）。`install` 在 `Cache`、`Watcher` 建好之后、构造插件之前，仍然在 `ready` 之后、`Kernel::start` 之前。窗口句柄由启动屏障的第二个帧回调传入（`startup::release_in`）。
+- **Dock 重开按当前状态取 frame autosave 名**：重开的窗口一开始就带 `"project"`（有项目）或 `"welcome"`，不是先 `"welcome"` 再换，避免窗口先以 Welcome 的大小出现再跳。
+- **`Quit` 先设退出标记再问守卫**：询问期间再按 ⌘Q 被忽略，守卫拒绝时去掉标记。`done` 被丢弃（没有回答）按通过处理，不让应用退不出去；设计只写了 `done(false)` 时什么也不做。
+- **「项目」窗口第一次使用时的 1180 × 760 pt 居中没有做**：GPUI 的 `Window` 没有移动接口，`resize` 只改内容尺寸并保持左上角，Welcome 居中的窗口放大到 1180 × 760 在常见屏幕上会越出右边和下边；居中要调 AppKit，按架构规则 6 属于 `platform`。设计把这件事放在 `app`，但 `app` 做不到。现在项目窗口沿用 Welcome 的大小，用户调整一次，AppKit 就把它保存在 `"project"` 名下。后续：`platform` 设计加一个「设内容尺寸并居中」的接口，`app` 在第一次改名 `"project"` 之前、`bounds()` 在设名前后不变时调用（设名会同步套用保存的 frame，没有保存过时窗口不变）。
+- **里程碑与帧记录转交没有接**：`bench-probe` feature、`lectern-bench` 的探针（`Milestone`、`FrameStats`、`Driver`）是 bench 第 5 步，现在不存在，所以 `on_milestone`、`on_frames` 是空函数（`startup::assemble`），前置条件 F 随探针做。`platform::frame` 也没有，`FrameRecord::frames` 照旧总是空。
+- **`welcome`、`project_home` 不装配**：两个设计都规定装配在它们的视图之后，`welcome` 现在登记的 `Screen` 载荷是占位类型，`UiPayloads` 会拒绝它（窗口没有 Welcome 屏幕）；`project-home-usage` 要 `dyn Usage`，没有插件提供，图校验失败。所以「首次启动显示 Welcome（820 × 520）」「打开文件夹后重启回到项目主页」要等这两个视图合并后才能验收。
+- **500 ms 去抖不在退出时落盘**：最后一次变化之后 500 ms 内退出，这次变化不写出（`app` 设计「已知限制」）。设计的「`Quit` 的第 1 步」没有要求落盘；要做就得在 `lectern-quit` 线程里同步写，另议。

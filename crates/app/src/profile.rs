@@ -12,6 +12,7 @@ use lectern_kernel::PluginSet;
 use lectern_logging::{Field, Value};
 use lectern_project::{ProjectDeps, ProjectPlugin};
 use lectern_review::ReviewDeps;
+use lectern_workspace::{WorkspaceHost, WorkspacePlugin};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Profile {
@@ -28,6 +29,8 @@ pub struct Resources {
     pub executor: Executor,
     pub cache: Cache,
     pub watcher: Watcher,
+    /// What `workspace::install` returned, for the "workspace" plugin.
+    pub workspace: WorkspaceHost,
     /// `HOME`, absolute.
     pub home: PathBuf,
     /// `platform::dirs::app_cache()`.
@@ -42,7 +45,7 @@ impl Profile {
     #[cfg(test)]
     pub const ALL: [Profile; 2] = [Profile::Desktop, Profile::Test];
 
-    /// Desktop: `project`, the two session sources and `review`
+    /// Desktop: `project`, the two session sources, `review` and `workspace`
     /// (docs/design/app.md「插件与资源」). Test: none. With the number of
     /// plugins, for the log (`PluginSet` does not expose it). No IO.
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
@@ -81,7 +84,12 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
         data_dir: r.app_data.join("review"),
         git_ceilings: r.git_ceilings.clone(),
     });
-    (set.with(id, review), count + 1)
+    // The window skeleton. Its screens come from `welcome` and
+    // `project_home`, which join when their views are merged.
+    let set = set
+        .with(id, review)
+        .with("workspace", WorkspacePlugin::new(r.workspace.clone()));
+    (set, count + 2)
 }
 
 impl Field for Profile {

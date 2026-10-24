@@ -11,6 +11,7 @@ mod profile;
 mod quit;
 mod startup;
 mod window;
+mod window_state;
 
 #[cfg(test)]
 mod tests;
@@ -37,12 +38,14 @@ pub fn run() {
     let languages = lectern_platform::system::preferred_languages();
     let strings = Strings::of(Locale::negotiate(languages.iter().map(String::as_str)));
 
-    let app = gpui_platform::application();
+    // The only place GPUI takes an asset source; without it every `Icon`
+    // draws blank (docs/design/ui.md「对其他 crate 的要求」).
+    let app = gpui_platform::application().with_assets(lectern_ui::IconAssets);
     // Closing the last window does not quit; the Dock icon reopens it
     // (docs/design/app.md「界面」; decided by the product owner).
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
-            window::open(cx);
+            window::reopen(cx);
         }
     });
     app.run(move |cx| {

@@ -139,7 +139,8 @@ fn startup_writes_a_header_and_an_end_record() {
     // The system colours are read only in `ready`.
     assert_eq!(records[initialised]["accent"], "builtin", "{records:#?}");
     assert_eq!(records[ready]["accent"], "system", "{records:#?}");
-    assert_eq!(records[assembled]["plugins"], 4);
+    // project, two session sources, review, workspace.
+    assert_eq!(records[assembled]["plugins"], 5);
     assert_eq!(records[released]["profile"], "desktop");
     let quit = position(&records, "quit requested");
     assert_eq!(records[quit]["path"], "action");
@@ -238,5 +239,34 @@ fn home_path_stays_out_of_the_log() {
     for path in files {
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains(canary), "{}: {text}", path.display());
+        // The window state file is never named in the log either.
+        assert!(!text.contains("window.json"), "{}: {text}", path.display());
+    }
+}
+
+/// A `window.json` left by an earlier run: the project path in it and the
+/// path of the file stay out of the log, whatever the state restore does
+/// with them (docs/design/workspace.md「验收」第 3 步).
+#[test]
+fn window_state_stays_out_of_the_log() {
+    let canary = "canary-c41e7a09";
+    for version in [1, 2] {
+        let run = Run::new();
+        let dir = run
+            .home
+            .path()
+            .join("Library/Application Support/Lectern/workspace");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("window.json"),
+            format!("{{\"version\":{version},\"project\":\"/{canary}\",\"inspector\":true}}"),
+        )
+        .unwrap();
+        assert!(run.launch(&["--quit-after-start"], Some("trace")).success());
+        for path in run.runs() {
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(!text.contains(canary), "{}: {text}", path.display());
+            assert!(!text.contains("window.json"), "{}: {text}", path.display());
+        }
     }
 }
