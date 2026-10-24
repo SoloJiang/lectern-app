@@ -37,6 +37,7 @@ pub use ctx::{Ctx, SampleConfig};
 /// One benchmark. `run` is called on the benchmark process's main thread
 /// and may block. It can measure several scenarios and return one result
 /// for each; every result ID must be in the budget table.
+#[derive(Clone, Copy)]
 pub struct Bench {
     /// The prefix of its result IDs, for filtering, such as
     /// "agents/parse_throughput" or "kernel/service_for_each".

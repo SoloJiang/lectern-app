@@ -47,6 +47,14 @@ lectern-syntax = { path = "../syntax", features = ["test-support"] }
 lectern-usage = { path = "../usage", features = ["test-support"] }
 tempfile.workspace = true
 
+# The `ui/*` benchmarks (docs/design/ui.md「性能」) need GPUI, which only
+# builds on macOS in this workspace (docs/design/cargo-workspace.md); on
+# Linux the crate stays GPUI-free and the budgets are skipped
+# (docs/design/bench.md「预算表」).
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+lectern-ui = { path = "../ui" }
+
 # In-process timing; the counting allocator stays out of it.
 [[bench]]
 name = "time"

@@ -117,7 +117,21 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         }
     }
 
-    let (missing, problems) = correspondence(&own, benches);
+    // Budgets whose benchmark only builds on macOS: skipped elsewhere.
+    if !options.macos {
+        let (skipped, rest): (Vec<&Budget>, Vec<&Budget>) =
+            pending.into_iter().partition(|b| b.macos_only);
+        for budget in skipped {
+            report.entries.push(Entry::new(
+                budget,
+                Status::Skipped,
+                Some("只在 macOS 运行".into()),
+            ));
+        }
+        pending = rest;
+    }
+
+    let (missing, problems) = correspondence(&own, benches, options.macos);
     if !missing.is_empty() || !problems.is_empty() {
         for budget in pending {
             let entry = if missing.contains(budget.id) {
@@ -192,12 +206,17 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
     finish(options, report)
 }
 
-/// Active budgets of this target without a benchmark, and benchmarks that
-/// match no budget of this target (or only planned ones).
-fn correspondence(own: &[&Budget], benches: &[Bench]) -> (BTreeSet<&'static str>, Vec<String>) {
+/// Active budgets of this target without a benchmark (off macOS, the
+/// macOS-only ones are not expected to have one), and benchmarks that match
+/// no budget of this target (or only planned ones).
+fn correspondence(
+    own: &[&Budget],
+    benches: &[Bench],
+    macos: bool,
+) -> (BTreeSet<&'static str>, Vec<String>) {
     let missing = own
         .iter()
-        .filter(|b| b.state == State::Active)
+        .filter(|b| b.state == State::Active && (macos || !b.macos_only))
         .filter(|b| !benches.iter().any(|bench| is_prefix(bench.id, b.id)))
         .map(|b| b.id)
         .collect();

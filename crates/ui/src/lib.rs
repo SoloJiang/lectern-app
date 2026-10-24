@@ -10,14 +10,16 @@
 //! `init_fixed`, `attach`), colours (`Palette`, `colors`, `palette`), text
 //! (`Text`, `strings`, `set_locale`), fonts (`TextRole`, `MonoMetrics`,
 //! `mono_metrics`), code colouring (`code_style`, `code_styles`) and the
-//! `contrib` payload types. Motion, controls and the probe nodes follow in
-//! steps 2 to 4.
+//! `contrib` payload types. Step 2: the `motion` module (durations, curves,
+//! `Transition`, reduced motion). Controls and the probe nodes follow in
+//! steps 3 and 4.
 
 mod code;
 pub mod contrib;
 mod font;
 mod icon;
 mod init;
+pub mod motion;
 mod palette;
 mod state;
 mod text;
