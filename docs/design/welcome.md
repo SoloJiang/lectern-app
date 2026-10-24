@@ -401,7 +401,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 每一项是一个 PR，写 `Refs #29`，在「验收」里列为前置条件。
 
 - **A. `i18n`**：`locales/{en,zh-CN}/welcome.ftl` 加上「界面」表里新增的 14 个键（`welcome-subtitle`、`welcome-recent-missing`、`welcome-recent-remove`（含 `.tooltip`）、`welcome-discovered-empty`、`welcome-row-sessions`、`welcome-row-running`、`welcome-language`、`welcome-language-not-saved`、5 个 `welcome-open-failed-*`）。编译期校验保证两种语言一致。
-- **B. `platform`**：语言偏好（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)已写明由 `platform` 读写，这里是它的第一个调用方）：
+- **B. `platform`**：语言偏好（[i18n 设计「数据流与线程」](i18n.md#数据流与线程)已写明由 `platform` 读写，这里是它的第一个调用方；已实现，[#PR2](https://github.com/SoloJiang/lectern-app/pull/PR2)，签名与下面一致，实现的补充见 platform 设计「系统首选语言」的「语言偏好」）：
 
   ```rust
   pub mod system {
@@ -417,7 +417,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   }
   ```
 
-  在 [platform 设计](platform.md)「系统首选语言」一节下补上这三个函数。与 [i18n 设计「数据流与线程」](i18n.md#数据流与线程)的差异：那里写 `language_override() -> Option<Locale>`；`platform` 在基础设施层、不依赖 `i18n`，所以返回 BCP 47 标签，调用方用 `Locale::negotiate([tag])` 转换。前置条件 B 的 PR 同时把 i18n 设计里的那一行改成标签。
+  在 [platform 设计](platform.md)「系统首选语言」一节下补上这三个函数。与 [i18n 设计「数据流与线程」](i18n.md#数据流与线程)的差异：那里写 `language_override() -> Option<Locale>`；`platform` 在基础设施层、不依赖 `i18n`，所以返回 BCP 47 标签，调用方用 `Locale::negotiate([tag])` 转换。前置条件 B 的 PR 同时把 i18n 设计里的那一行改成了标签。
 - **C. `app`**：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
 - **D. `ui`**：本 crate 只用 `ui` 设计已列出的控件和 `ui::contrib` 的载荷类型，没有新增要求。`Segmented` 的探针角色按 `ui` 的实现（本文按 `TabBar` / `Tab` 写，以 `ui` 为准）。
 
