@@ -4316,6 +4316,7 @@ dependencies = [
 name = "lectern-app"
 version = "0.0.0"
 dependencies = [
+ "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
  "lectern-agents",
@@ -4328,6 +4329,7 @@ dependencies = [
  "lectern-platform",
  "lectern-project",
  "lectern-review",
+ "lectern-ui",
  "serde_json",
  "tempfile",
 ]
@@ -4543,6 +4545,7 @@ dependencies = [
  "lectern-git",
  "lectern-kernel",
  "lectern-logging",
+ "lectern-platform",
  "lectern-services",
  "memchr",
  "serde",
@@ -4643,6 +4646,16 @@ version = "0.0.0"
 [[package]]
 name = "lectern-welcome"
 version = "0.0.0"
+dependencies = [
+ "insta",
+ "lectern-executor",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-workspace"

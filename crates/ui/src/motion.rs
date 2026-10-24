@@ -374,8 +374,17 @@ impl Transition {
     /// requests the next animation frame. Its own work is a constant-time
     /// computation without allocation (the frame request is GPUI's).
     pub fn tick(&mut self, now: Instant, window: &mut Window) -> f32 {
+        if self.step(now) {
+            window.request_animation_frame();
+        }
+        self.value
+    }
+
+    /// `tick` without the frame request: commits the value at `now` and
+    /// returns whether the transition is still in progress.
+    pub(crate) fn step(&mut self, now: Instant) -> bool {
         if !self.running {
-            return self.value;
+            return false;
         }
         let (value, velocity, done) = self.sample(now);
         self.at = now;
@@ -387,9 +396,8 @@ impl Transition {
         } else {
             self.value = value;
             self.velocity = velocity;
-            window.request_animation_frame();
         }
-        self.value
+        !done
     }
 
     /// The value of the last `tick` (or `set`, or `new`).

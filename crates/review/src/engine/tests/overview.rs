@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+use lectern_services::project::ChangedParts;
 use lectern_services::review::{OutsideCount, Overview, OverviewInterest, Progress, ReviewEvent};
 
 use super::*;
@@ -331,4 +332,200 @@ fn overview_without_an_active_worktree_is_pending() {
     let (_interest, o) = watch(&d);
     assert_eq!(o.outside, OutsideCount::Pending);
     assert!(o.sessions.is_empty());
+}
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// `committed` at HEAD, then each of `changed` rewritten in the worktree
+/// (a change against HEAD) with the modification time given in
+/// milliseconds; `deleted` removed. No session.
+fn packages_fixture(committed: &[&str], changed: &[(&str, i64)], deleted: &[&str]) -> Fx {
+    let fx = Fx::new();
+    let files: Vec<(&str, &str)> = committed.iter().map(|p| (*p, "old\n")).collect();
+    let c1 = fx.commit(&files, None, T - 1000);
+    fx.head("refs/heads/main", c1, &files);
+    fx.reflog(&[(None, c1, T - 1000, "commit (initial): old")]);
+    for (path, _) in &files {
+        fx.write(path, "old\n");
+    }
+    for (path, at) in changed {
+        fx.write(path, "newer content\n");
+        fx.mtime(path, *at);
+    }
+    for path in deleted {
+        std::fs::remove_file(fx.repo.root().join(path)).unwrap();
+    }
+    fx
+}
+
+fn packages_of(o: &Overview) -> Vec<(&str, u32)> {
+    o.packages
+        .as_deref()
+        .expect("per-package counts")
+        .iter()
+        .map(|(dir, n)| (&**dir, *n))
+        .collect()
+}
+
+#[test]
+fn overview_packages_assign_by_longest_prefix() {
+    let now = NOW.0;
+    let fx = packages_fixture(
+        &[
+            "crates/a/x.txt",
+            "crates/a/y.txt",
+            "crates/a/sub/z.txt",
+            "crates/b/w.txt",
+            "crates/ab/v.txt",
+            "crates/c/gone.txt",
+            "docs/n.txt",
+            "top.txt",
+        ],
+        &[
+            ("crates/a/x.txt", now - 1000),
+            ("crates/a/y.txt", now - 2000),
+            ("crates/a/sub/z.txt", now - 3000),
+            ("crates/b/w.txt", now - 4000),
+            ("crates/ab/v.txt", now - 5000),
+            ("docs/n.txt", now - 6000),
+            ("top.txt", now - 7000),
+        ],
+        &["crates/c/gone.txt"],
+    );
+    fx.projects
+        .set_packages(Some(&["crates/a", "crates/a/sub", "crates/b", "crates/c"]));
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    let (_interest, o) = watch(&d);
+    // The nested package takes its file from the outer one; `crates/ab`
+    // is not under `crates/a`; a deleted file has no time; the files in
+    // no package are not counted; the packages without a file are not
+    // listed, sorted by `dir`.
+    assert_eq!(
+        packages_of(&o),
+        [("crates/a", 2), ("crates/a/sub", 1), ("crates/b", 1)],
+        "{o:#?}"
+    );
+    assert_eq!(o.outside, OutsideCount::Files(8));
+}
+
+#[test]
+fn overview_packages_the_root_package_holds_the_rest() {
+    let now = NOW.0;
+    let fx = packages_fixture(
+        &["crates/a/x.txt", "docs/n.txt", "top.txt"],
+        &[
+            ("crates/a/x.txt", now - 1000),
+            ("docs/n.txt", now - 2000),
+            ("top.txt", now - 3000),
+        ],
+        &[],
+    );
+    fx.projects.set_packages(Some(&["", "crates/a"]));
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    let (_interest, o) = watch(&d);
+    assert_eq!(packages_of(&o), [("", 2), ("crates/a", 1)], "{o:#?}");
+}
+
+#[test]
+fn overview_packages_count_only_the_local_day_of_the_modification_time() {
+    // UTC+8: the local day of `NOW` began 16:00 UTC the day before.
+    let offset = 8 * 3600;
+    let midnight = (NOW.0 + offset * 1000).div_euclid(DAY_MS) * DAY_MS - offset * 1000;
+    let fx = packages_fixture(
+        &["p/a.txt", "p/b.txt", "p/c.txt", "p/d.txt", "p/e.txt"],
+        &[
+            ("p/a.txt", midnight - 1),
+            ("p/b.txt", midnight),
+            ("p/c.txt", NOW.0),
+            ("p/d.txt", midnight + DAY_MS - 1),
+            ("p/e.txt", midnight + DAY_MS),
+        ],
+        &[],
+    );
+    fx.projects.set_packages(Some(&["p"]));
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    d.set_utc_offset(offset as i32);
+    let (_interest, o) = watch(&d);
+    // The last millisecond of yesterday and the first of tomorrow are out.
+    assert_eq!(packages_of(&o), [("p", 3)], "{o:#?}");
+
+    // The same boundary in UTC: the day began at 00:00 UTC.
+    let utc_midnight = NOW.0.div_euclid(DAY_MS) * DAY_MS;
+    let fx = packages_fixture(
+        &["p/a.txt", "p/b.txt"],
+        &[("p/a.txt", utc_midnight - 1), ("p/b.txt", utc_midnight)],
+        &[],
+    );
+    fx.projects.set_packages(Some(&["p"]));
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    let (_interest, o) = watch(&d);
+    assert_eq!(packages_of(&o), [("p", 1)], "{o:#?}");
+}
+
+#[test]
+fn overview_packages_is_empty_when_nothing_changed_today() {
+    let fx = packages_fixture(&["p/a.txt"], &[("p/a.txt", NOW.0 - 2 * DAY_MS)], &[]);
+    fx.projects.set_packages(Some(&["p"]));
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    let (_interest, o) = watch(&d);
+    assert_eq!(o.packages.as_deref(), Some(&[][..]), "{o:#?}");
+    assert_eq!(o.outside, OutsideCount::Files(1));
+}
+
+#[test]
+fn overview_packages_none_when_capped() {
+    let fx = Fx::new();
+    for i in 0..4001 {
+        fx.write(&format!("gen/d{:03}/f{i}.txt", i % 100), &format!("{i}\n"));
+    }
+    fx.projects.set_packages(Some(&["gen"]));
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    let (_interest, o) = watch(&d);
+    assert_eq!(o.outside, OutsideCount::Capped(4001));
+    assert_eq!(o.packages, None);
+}
+
+#[test]
+fn overview_packages_none_while_packages_are_pending() {
+    let fx = packages_fixture(&["p/a.txt"], &[("p/a.txt", NOW.0)], &[]);
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    let (_interest, o) = watch(&d);
+    assert_eq!(o.outside, OutsideCount::Files(1));
+    assert_eq!(o.packages, None);
+}
+
+#[test]
+fn overview_packages_follow_the_projects_packages() {
+    let fx = packages_fixture(&["p/a.txt"], &[("p/a.txt", NOW.0)], &[]);
+    let d = fx.driven(vec![fx.sessions(Vec::new())]);
+    let (_interest, first) = watch(&d);
+    assert_eq!(first.packages, None);
+
+    // The scan finishes: a `Changed` with only `packages` makes a round
+    // that reuses the count set.
+    fx.projects.set_packages(Some(&["p"]));
+    let project = d.project();
+    d.project_changed(
+        &project,
+        ChangedParts {
+            packages: true,
+            ..ChangedParts::default()
+        },
+    );
+    d.run();
+    let o = d.overview(&project).unwrap();
+    assert_eq!(packages_of(&o), [("p", 1)], "{o:#?}");
+    assert!(o.generation > first.generation);
+
+    // Other parts ask for nothing.
+    overview_events(&d);
+    d.project_changed(
+        &project,
+        ChangedParts {
+            files: true,
+            ..ChangedParts::default()
+        },
+    );
+    d.run();
+    assert_eq!(overview_events(&d), 0);
 }

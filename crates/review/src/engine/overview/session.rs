@@ -14,6 +14,9 @@ pub(super) struct Input<'a> {
     pub engine: &'a Engine,
     pub git: &'a Git,
     pub count: &'a Arc<ChangeSet>,
+    /// The workspace-side modification time (nanoseconds) of each of the
+    /// count set's files, in its order.
+    pub mtimes: &'a [Option<i64>],
     pub reflog: &'a HeadReflog,
     pub sessions: &'a [Known],
     pub window_ms: i64,
@@ -145,37 +148,31 @@ pub(super) fn compute(input: &Input<'_>) -> (Vec<SessionOverview>, OutsideCount)
     // command ran when the file changed (as a review decides it).
     let edited: HashSet<usize> = per.iter().flat_map(|p| p.claimed.iter().copied()).collect();
     let bare: Vec<usize> = (0..files.len()).filter(|i| !edited.contains(i)).collect();
-    let bare_paths: Vec<RepoPath> = bare
-        .iter()
-        .filter_map(|&i| RepoPath::new(&files[i].path.0))
-        .collect();
-    if !bare_paths.is_empty() {
-        let times = git.worktree.mtimes(&bare_paths).unwrap_or_default();
-        let with_path: Vec<usize> = bare
-            .iter()
+    for &i in &bare {
+        let f = &files[i];
+        let Some(mtime) = input
+            .mtimes
+            .get(i)
             .copied()
-            .filter(|&i| RepoPath::new(&files[i].path.0).is_some())
+            .flatten()
+            .map(|t| t.div_euclid(1_000_000))
+        else {
+            continue;
+        };
+        let hits: Vec<usize> = input
+            .sessions
+            .iter()
+            .enumerate()
+            .filter(|(s, k)| {
+                mtime >= per[*s].cutoff_ms(&table, input.window_ms, &f.path)
+                    && k.claims.calls.iter().any(|c| {
+                        matches!(c.kind, ClaimKind::Command { from, to } if from.0 <= mtime && mtime <= to.0)
+                    })
+            })
+            .map(|(s, _)| s)
             .collect();
-        for (&i, time) in with_path.iter().zip(times) {
-            let f = &files[i];
-            let Some(mtime) = time.map(|t| t.div_euclid(1_000_000)) else {
-                continue;
-            };
-            let hits: Vec<usize> = input
-                .sessions
-                .iter()
-                .enumerate()
-                .filter(|(s, k)| {
-                    mtime >= per[*s].cutoff_ms(&table, input.window_ms, &f.path)
-                        && k.claims.calls.iter().any(|c| {
-                            matches!(c.kind, ClaimKind::Command { from, to } if from.0 <= mtime && mtime <= to.0)
-                        })
-                })
-                .map(|(s, _)| s)
-                .collect();
-            if let [s] = hits[..] {
-                per[s].claimed.push(i);
-            }
+        if let [s] = hits[..] {
+            per[s].claimed.push(i);
         }
     }
 
