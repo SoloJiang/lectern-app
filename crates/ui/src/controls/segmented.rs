@@ -137,7 +137,10 @@ impl RenderOnce for Segmented {
         let last = window.use_keyed_state(self.id.part("selection"), cx, |_, _| {
             Selection::new(self.selected)
         });
-        let fade = reduced && last.update(cx, |last, _| last.update(self.selected));
+        // Tracked whatever the setting, so a setting switched on while the
+        // control is up does not meet a stale selection.
+        let changed = last.update(cx, |last, _| last.update(self.selected));
+        let fade = reduced && changed;
         let slider = if fade {
             slider
                 .with_animation(
