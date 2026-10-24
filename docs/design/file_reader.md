@@ -781,7 +781,7 @@ WorktreeBatch（这个路径）─▶ [Background + BusyGuard] stat 比较身份
 | 关闭窗口、退出应用（⌘W、⌘Q 和应用菜单的 Quit） | `workspace`、`app` | 见下；系统发起的退出拦不住 |
 
 - 守卫的结果：没有未保存的改动时立即通过。有时弹出系统的确认（`file-reader-unsaved-*`：保存 / 不保存 / 取消）：保存 → `EditSession::save`，`Saved` 才通过，`Conflict` 或 `Failed` 时不通过（显示提示行，留在编辑里）；不保存 → 通过，drop `EditSession`；取消 → 不通过。
-- 接口：`dyn Contributions` 提供 `register_leave_guard(guard: Arc<dyn LeaveGuard>) -> 守卫`（`workspace` #30 的设计，见「对其他 crate 的要求」）。`LeaveGuard::ask(scope: LeaveScope, done: Box<dyn FnOnce(bool)>)` 在主线程上调用，不阻塞，结果经 `done` 交回；`LeaveScope` 是 `View`（关闭或离开阅读视图）、`Project(ProjectKey)`、`Worktree(ProjectKey)`、`Window`、`App`。`workspace` 对一个操作按登记顺序逐个问，都通过才执行；本 crate 只对与这个范围相交、而且有未保存改动的文档回答「问用户」。
+- 接口：`dyn Contributions` 提供 `register_leave_guard(guard: Arc<dyn LeaveGuard>, token: Option<ActivationToken>) -> 守卫`（`activate` 里传 `None` 并交给 `ctx.own_staged`，之后传 `Some(handle.token())`；[workspace 设计「服务接口」](workspace.md#服务接口lectern-services-的-workspace-模块)）。`LeaveGuard::ask(scope: LeaveScope, done: Box<dyn FnOnce(bool)>)` 在主线程上调用，不阻塞，结果经 `done` 交回；`LeaveScope` 是 `View`（关闭或离开阅读视图）、`Project(ProjectKey)`、`Worktree(ProjectKey)`、`Window`、`App`。`workspace` 对一个操作按登记顺序逐个问，都通过才执行；本 crate 只对与这个范围相交、而且有未保存改动的文档回答「问用户」。
 - 关闭窗口：`workspace` 在 GPUI 的窗口关闭回调里先返回「不关闭」、问守卫、通过后再关闭。
 - 退出：锁定的 gpui-pre-macos 0.3.9 的应用代理只实现了 `applicationWillTerminate:`，`on_quit` 的返回值被忽略，退出一旦开始就不能取消；改 GPUI 要人确认（[ADR 0016](../adr/0016.md)）。所以 `app` 自己定义 `Quit` Action（纯 GPUI 代码，不碰 AppKit），⌘Q 和应用菜单的 Quit 都绑定到它。退出只有这一个顺序：
   1. 经 `workspace` 问 `LeaveScope::App` 的离开守卫；取消时什么都不做，到此为止。
