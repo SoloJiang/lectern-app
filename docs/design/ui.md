@@ -1,6 +1,6 @@
 # ui 设计
 
-状态：已接受，尚未实现。
+状态：已接受。第 1 步（初始化、颜色、文本、字体与代码配色，`contrib`）已实现（[#230](https://github.com/SoloJiang/lectern-app/pull/230)），`app` 的接入与 `ui/*` 基准在下一个 PR；第 2 到 4 步尚未实现。
 
 对应 issue [#214](https://github.com/SoloJiang/lectern-app/issues/214)。`ui` 是每个视图 crate 从中取颜色、字体、动效、共用控件和探针节点的地方，而且只从这里取：视图里不出现颜色值、字体名、动画时长（[ADR 0015](../adr/0015.md)、[交互规范「视觉」](interaction.md#视觉)、[「动效」](interaction.md#动效)）。它封装 gpui-component（[ADR 0016](../adr/0016.md)），把 macOS 的系统语义色、系统字体和「减弱动态效果」的设置接进 GPUI。它不做 IO，不建线程，首帧之前只做一次内存里的读取（[ADR 0017](../adr/0017.md)）。
 
@@ -50,13 +50,15 @@
 ### 初始化
 
 ```rust
-/// 首帧之前，`app` 在开窗口之前调用一次。只做内存操作：经 `platform::appearance` 读两套系统色
-///（读不到时用内置的表，见「数据结构」）和减弱动态效果，把 `Strings` 设为 GPUI 全局，登记 `platform` 的变化通知。
-/// 预算 ≤ 300 µs（`ui/init`）。不建线程、不读文件、不调用 `gpui_component::init`。
+/// 首帧之前，`app` 在开窗口之前调用一次。只做内存操作：经 `platform::appearance` 读减弱动态效果，
+/// 用内置的表（见「数据结构」）建两份 `Palette`，把 `Strings` 设为 GPUI 全局，登记 `platform` 的变化通知。
+/// 不读系统色：AppKit 第一次解析自己的动态颜色约 2 ms（[platform 设计「系统外观」](platform.md#系统外观)的「性能」），
+/// 放在 `ready`。预算 ≤ 300 µs（`ui/init`）。不建线程、不读文件、不调用 `gpui_component::init`。
 pub fn init(cx: &mut App, strings: Strings);
 
 /// 启动屏障放开后（首帧之后），`app` 在 `startup::release` 里调用一次：运行 `gpui_component::init`
-///（它在运行时解析内嵌的主题 JSON，所以不放在首帧前），把 gpui-component 的主题改成跟随 `Palette`，
+///（它在运行时解析内嵌的主题 JSON，所以不放在首帧前），经 `platform::appearance::system_colors` 读两套系统色
+///（读不到时留着内置的表，记一条 warn）并换掉 `Palette`，把 gpui-component 的主题改成跟随 `Palette`，
 /// 并按当前窗口外观设置它的浅色 / 深色。「跟随」是一次投影：把 `Palette` 的颜色写进 gpui-component 的 `Theme`；
 /// 之后每次换 `Palette`（外观变化、强调色变化）都在 `is_ready` 时重做这次投影，所以包装的控件不会留着旧的强调色。主线程，预算 ≤ 3 ms（`ui/ready`）。
 pub fn ready(cx: &mut App);
@@ -256,7 +258,7 @@ pub fn code_styles(palette: &Palette) -> [(TokenKind, CodeStyle); 18];
 | `Keyword`、`Tag` | `system(Purple)` | — |
 | `String` | `system(Red)` | — |
 | `Number`、`Constant` | `system(Blue)` | — |
-| `Type`、`Attribute` | `system(Indigo)` | — |
+| `Type`、`Attribute` | `system(Pink)`（原定 `system(Indigo)`，见「与设计的差异」） | — |
 | `Comment` | `secondary_label` | — |
 | `Link` | `system(Blue)` | 下划线 |
 | `Heading` | `label` | 半粗（`FontWeight::SEMIBOLD`） |
@@ -597,7 +599,7 @@ pub mod semantic {
 ## 数据结构
 
 - `Palette`：每个外观一份，`init` 时建两份，`platform` 通知时整份替换，每份 27 个 `Hsla`（432 字节），放在一个 GPUI 全局 `UiState` 里，连同 `Strings`、减弱动态效果标志、`accent_follows_system`、`MonoMetrics` 的缓存（≤ 4 项）和 `platform::appearance::Watch`。`UiState` 固定大小，不随运行增长。
-- 内置的系统色表：`src/palette/builtin.rs`，两个外观各 27 项，值取自 Apple HIG「Color」页面发布的 macOS 系统色（sRGB），文件头写明来源与查阅日期。用途：`platform` 返回 None 时（Linux 的 `cargo check`、headless、测试、系统接口失败），以及测试的参照。`init_fixed` 只用这张表。`diff_added_background` / `diff_removed_background`：`system(Green)` / `system(Red)` 在浅色下 12% 透明度、深色下 18% 透明度叠在 `control_background` 上，预先算好。
+- 内置的系统色表：`src/palette/builtin.rs`，两个外观各 27 项，值是 `platform::appearance::system_colors` 在 macOS 27.0.1 上读到的 sRGB 分量（HIG「Color」页面只发布 13 个系统色、没有语义色，见「与设计的差异」），文件头写明来源与读取日期。用途：`platform` 返回 None 时（Linux 的 `cargo check`、headless、测试、系统接口失败），以及测试的参照。`init_fixed` 只用这张表。`diff_added_background` / `diff_removed_background`：`system(Green)` / `system(Red)` 在浅色下 12% 透明度、深色下 18% 透明度叠在 `control_background` 上，预先算好。
 - agent 标识色：浅 `#D9790A` / 深 `#C77A1A`（Claude Code），浅 `#5856D6` / 深 `#6260D8`（Codex），来自交互规范「视觉」；不从系统读。
 - `Transition`：`from`、`to`、`start`、`motion`、当前值、弹簧的速度、`reduced` 快照（开始时的值，过渡中途不换）、是否计入计数，共 56 字节，由视图持有，不可 `Clone`（drop 时要减计数）。
 - 贝塞尔求值：`Easing::eval` 对 `CubicBezier` 用牛顿迭代求 x(t)=进度 的 t，再取 y(t)；不建查表，每次调用常数时间（≤ 8 次迭代）。
@@ -605,7 +607,7 @@ pub mod semantic {
 
 ## 数据流与线程
 
-- 系统 → `ui`：`init` 在主线程上经 `platform::appearance::system_colors(Light)`、`system_colors(Dark)`、`reduce_motion()` 读一次；`platform::appearance::watch` 的回调在主线程上到达（AppKit 的通知中心在主线程投递），回调里重新读、换 `Palette`、`cx.refresh_windows()`。外观（浅 / 深）变化经 GPUI 的 `observe_window_appearance`，同样在主线程。
+- 系统 → `ui`：`init` 在主线程上经 `platform::appearance::reduce_motion()` 读一次、`watch` 登记一次，`Palette` 先用内置的表；`ready`（首帧之后）在主线程上经 `system_colors(Light)`、`system_colors(Dark)` 读一次，换 `Palette`。`watch` 的回调在主线程上到达（AppKit 的通知中心在主线程投递），不带 GPUI 的上下文，经 `init` 交给它的 `AsyncApp` 把更新排到主线程的下一次运行；更新里重新读两套系统色、换 `Palette`、`cx.refresh_windows()`。外观（浅 / 深）变化经 GPUI 的 `observe_window_appearance`，同样在主线程。
 - `ui` → 视图：视图在 `render` 里读 `colors`、`strings`、`mono_metrics`、`code_style`、`motion` 的常量，只读不写（架构规则 4）。视图持有自己的 `Transition`，每帧 `tick`。
 - 所有公开项都在主线程上，没有后台任务、没有 executor 的工作、没有 IO。`platform::appearance` 的三个函数同样是主线程上的内存操作。
 - 派生数据只有 `MonoMetrics`（按字号缓存）和两份 `Palette`；没有以 blob OID 为键的东西（架构规则 5 不涉及）。
@@ -616,7 +618,7 @@ pub mod semantic {
 
 | 项 | 影响 | 约束 |
 |---|---|---|
-| 冷启动到首帧 < 20 ms | `init` 在首帧前运行 | ≤ 300 µs：约 50 次 `NSColor` 读取与换算、一次 `NSWorkspace` 读取、设全局、登记通知。骨架窗口的 `attach` 在 `open_window` 的回调里，只登记一个观察者，不在这项基准里。不建线程、不读文件、不解析任何东西。`gpui_component::init`（运行时解析两份内嵌 JSON）放在 `ready`，首帧之后 |
+| 冷启动到首帧 < 20 ms | `init` 在首帧前运行 | ≤ 300 µs：一次 `NSWorkspace` 读取、两份内置表的换算（54 个颜色）、设全局、登记通知。系统色的读取（约 70 次 `NSColor` 读取与换算，本进程第一次约 2 ms）在 `ready`，首帧之后。骨架窗口的 `attach` 在 `open_window` 的回调里，只登记一个观察者，不在这项基准里。不建线程、不读文件、不解析任何东西。`gpui_component::init`（运行时解析两份内嵌 JSON）放在 `ready`，首帧之后 |
 | 空闲内存（空窗口）< 60 MB | `UiState` | < 8 KiB；`gpui_component::init` 建的主题全局与图标资源按 `ui/idle_memory` 实测，预期 < 1 MB，作为 `ui` 的份额写进 bench 的预算表 |
 | 滚动与输入 120 fps | 每帧的查找与动画 | `colors`、`code_style`、`Transition::tick` 都是 O(1)、不分配；动画只改位移、透明度、裁剪（ADR 0015）。动画期间帧的工作时间 ≤ 8.3 ms 由 `bench` 的 `app/animation_frames` 在 `workspace` 接入后判定（[bench 设计](bench.md)的 `frames` 应答） |
 | 滚动与输入 120 fps（探针关闭时） | 每个 `semantic` 包装元素的 prepaint | 一次 `AtomicBool` 的 Relaxed 读，≤ 2 ns（`ui/semantic_disarmed`）；不分配 |
@@ -656,17 +658,17 @@ pub mod semantic {
 
   | 事件 | 级别 | `msg` | 字段 |
   |---|---|---|---|
-  | `init` 完成 | info | `ui initialised` | `appearance`（`light` / `dark`）、`accent`（`system` / `builtin`）、`reduce_motion`（bool）、`elapsed_us` |
-  | 系统色读不到，用内置表 | warn | `system colours are unavailable; the built-in table is used` | `appearance`、`error`（`platform` 给出的种类，`&'static str`） |
+  | `init` 完成 | info | `ui initialised` | `appearance`（`light` / `dark`）、`accent`（总是 `builtin`：系统色在 `ready` 才读）、`reduce_motion`（bool）、`elapsed_us` |
+  | 系统色读不到，用内置表 | warn | `system colours are unavailable; the built-in table is used` | `appearance`（`platform` 的 `system_colors` 返回 `Option`，没有错误种类可记） |
   | 系统等宽字体解析失败 | warn | `the system monospaced font is unavailable; the fallback family is used` | `family`（`MONO_FALLBACK_FAMILY` 或 `UI_FAMILY`，都是 `'static`） |
   | 等宽字体与后备都失败 | error | `no monospaced font resolved; the UI font is used for code` | — |
-  | `ready` 完成 | info | `ui ready` | `elapsed_us` |
+  | `ready` 完成 | info | `ui ready` | `accent`（`system` / `builtin`）、`elapsed_us` |
 
   本次运行里每种 warn 只记一次（`AtomicBool`）。
 - 详细级别（debug）：外观变化（`appearance`）、强调色变化（`accent`）、减弱动态效果变化（`reduce_motion`）、语言切换（`locale` 为 `Locale::tag()`）。每次事件一条，事件本身由用户或系统触发，频率低。不在 `colors`、`code_style`、`Transition::tick`、`mono_metrics` 的热路径上加记录。
 - 关联 ID：本 crate 不设作用域（logging 设计「对其他 crate 的要求」第 11 项：主线程上的作用域由 `workspace` 和视图层设置），记录带调用线程上已有的作用域。
 - 不记录：`Text` 的内容（界面文案、路径、会话标题、prompt 都经它显示）、`NodeId` 的业务键（路径、会话 ID）、`Semantic::attrs` 的值、`Label` 的文字、颜色的数值、字体的实际 PostScript 名（只记上面三个 `'static` 家族常量的其中一个）、窗口标题。用事件名、外观、`'static` 的家族常量和计数代替。
-- 金丝雀测试：`tests::logs_hold_no_text`（`lectern_logging::testing::capture()`，trace 级别，`init_fixed`）：用含金丝雀的 `Text::verbatim` 渲染 `Button`、`Row`、`GroupedList`，用含金丝雀的业务键建 `NodeId`，用含金丝雀的 `attrs` 和 `Label` 调 `semantic(...)`，`Recorder::begin` 后渲染一帧，再切一次语言、触发一次模拟的外观变化；`assert_absent` 确认金丝雀不进日志，并检查记录只有 `ui initialised` 和两条 debug。
+- 金丝雀测试：`tests::logs_hold_no_text`（`lectern_logging::testing::capture()`，trace 级别，`init_fixed`）：用含金丝雀的 `Text::verbatim` 渲染 `Button`、`Row`、`GroupedList`，用含金丝雀的业务键建 `NodeId`，用含金丝雀的 `attrs` 和 `Label` 调 `semantic(...)`，`Recorder::begin` 后渲染一帧，再切一次语言、触发一次模拟的外观变化；`assert_absent` 确认金丝雀不进日志，并检查记录只有 `ui initialised`、`ui ready`（`init_fixed` 也运行 `ready`）和两条 debug。
 
 ## 测试
 
@@ -682,11 +684,11 @@ pub mod semantic {
   - `node_id_*`：格式、转义、`child`；调试构建下非法的 `view` panic。
   - `code_colors_*`：对内置表的两个外观，五种颜色两两之间在正常、红色盲（protanopia）、绿色盲（deuteranopia）三种模拟（Viénot 1999 的 3×3 矩阵，在测试里写出）下的 ΔE（CIE76）≥ 12；每种与 `control_background` 的对比度（WCAG 2 的公式）≥ 3:1。`code_styles` 的两个外观各一份 insta 快照。
   - `palette_builtin_*`：内置表每个颜色的透明度在 0..=1、`diff_*_background` 的叠加结果与手算一致；两个外观的 `label` 与 `window_background` 对比度 ≥ 7:1。
-  - `text_*`：`Text::verbatim` 接受 `Arc<str>` 和 `String`；`compile_fail` 文档测试确认 `Text::verbatim("literal")` 和 `Button::new(id, "literal")` 不编译（`just doctest`）。
+  - `text_*`：`Text::verbatim` 接受 `Arc<str>` 和 `String`；`compile_fail` 文档测试确认 `Text::verbatim("literal")`、`Text::key(&strings, "literal")` 和 `contrib::ToolbarItems { title: "literal", … }` 不编译（`just doctest`）；`Button::new(id, "literal")` 的那条随第 3 步的 `Button` 加入。
 - `#[gpui::test]`（`TestAppContext`，`init_fixed`）：
-  - `appearance_change_swaps_palette`：模拟窗口外观从浅到深，`colors` 返回另一套，窗口被刷新一次。
+  - `appearance_change_swaps_palette`：模拟窗口外观从浅到深（经 `testing::simulate_appearance_change`，见「与设计的差异」），`colors` 返回另一套，gpui-component 的主题跟着切到深色，窗口被刷新一次。
   - `set_locale_refreshes_windows`：切到 zh-CN 后 `strings(cx).locale()` 为 `ZhCn`，所有窗口刷新。
-  - `ready_runs_component_init_once`：`ready` 两次只初始化一次；`is_ready` 之前控件在调试构建下 panic。
+  - `ready_runs_component_init_once`：`ready` 两次只初始化一次（第二次不重置 gpui-component 的主题）；`is_ready` 之前控件在调试构建下 panic（控件的这部分随第 3 步）。
   - `mono_metrics_is_cached`：两次调用返回同一份值，第二次不再解析字体（计数的测试钩子）。
   - `circle_check_toggles_from_key_and_click`：按键和点击都触发 `on_change`，都启动同一个动画元素。
   - `segmented_slider_continues_from_current_position`：切换中途再切回，滑块的 `Transition` 从当前位置返回。
@@ -761,7 +763,7 @@ pub mod semantic {
 - `init`、`ready`、`is_ready`、`init_fixed`、`attach`、`Palette`、`colors`、`palette`、`Text`、`strings`、`set_locale`、`TextRole`、`MonoMetrics`、`mono_metrics`、`code_style`、`code_styles` 与「数据结构」的内置表；`contrib` 模块（`workspace` 的实现要用，所以放在第 1 步；`Icon` 枚举随它一起定义，图标资源在第 3 步）。
 - 「测试」里 `palette_builtin_*`、`code_colors_*`、`text_*`、`appearance_change_swaps_palette`、`set_locale_refreshes_windows`、`ready_runs_component_init_once`、`mono_metrics_is_cached`、`logs_hold_no_text` 通过；`just doctest` 里两个 `compile_fail` 通过。
 - `app` 接入 `with_assets(IconAssets)`、`init`、骨架窗口的 `attach` 与 `ready`（可以在同一个 PR 或紧接的 `app` PR）：`just test -p lectern-app` 通过，其中 `#[gpui::test]` `appearance_change_refreshes_the_skeleton_window`（模拟外观变化后窗口刷新一次）和 `appearance_change_before_ready_does_not_touch_the_theme`（直接调 `init`、`open_window`、`attach`，不经 `init_fixed` 和 `startup::release`；`ready` 之前触发一次外观变化：不 panic、`Palette` 已换、gpui-component 的主题没有被读写）；`just bench ui/`（`ui/init`、`ui/ready`、`ui/palette_resolve`、`ui/mono_metrics_first`、`ui/idle_memory`）在预算内；`app/cold_start` 不变慢。
-- 手动（macOS，发布构建）：系统设置里切换强调色，窗口里 `accent` 随之变化、不重启；切换浅色 / 深色同样；日志里 `ui initialised` 的 `accent` 为 `system`、`mono_metrics().family` 为 `.AppleSystemUIFontMonospaced`（经 `--log ui=debug` 的调试输出或探针读出）。
+- 手动（macOS，发布构建）：系统设置里切换强调色，窗口里 `accent` 随之变化、不重启；切换浅色 / 深色同样；日志里 `ui ready` 的 `accent` 为 `system`（`ui initialised` 的总是 `builtin`，见「与设计的差异」）、`mono_metrics().family` 为 `.AppleSystemUIFontMonospaced`（经 `--log ui=debug` 的调试输出或探针读出）。
 - `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}' crates/ui/src --glob '!**/builtin.rs' --glob '!**/tests*'` 没有结果（颜色值只在内置表和 agent 色常量里，后者放在 `builtin.rs`）。
 
 **第 2 步：动效原语（`Refs #214`）。**
@@ -783,3 +785,29 @@ pub mod semantic {
 - `rg 'Recorder::begin' crates --glob '!crates/ui_probe/**' --glob '!**/tests*' --glob '!**/benches/**'` 没有结果（只有探针和测试打开记录器）。
 
 **视图 crate 接入后的持续检查**（写进各视图设计的验收，这里列出口径）：`rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|\.font_family\(|gpui_component::Button' crates/{workspace,welcome,project_home,review_view,file_reader}/src` 没有结果。
+
+## 实际验证
+
+第 1 步（macOS，Apple 芯片，macOS 27.0.1）：
+
+- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`ui` 在视图层，依赖 `i18n`、`platform`、`services`、`syntax`、`logging`）。
+- `just test -p lectern-ui`：23 个测试通过，其中「测试」里第 1 步的 `palette_builtin_*`（4 个）、`code_colors_*`（3 个）、`code_styles_*` 的两份 insta 快照、`text_*`（2 个）、`appearance_change_swaps_palette`、`set_locale_refreshes_windows`、`ready_runs_component_init_once`、`mono_metrics_is_cached`、`logs_hold_no_text`；另有 `attach_registers_once_per_window`、`init_then_ready_reads_the_system`（唯一读真实 AppKit 的测试：`init` 后 `is_ready` 为 false，`ready` 后为 true 且 `accent_follows_system` 为 true）、字体解析三种结果的 `mono_*`、`text_roles_have_the_spec_sizes`、`contrib_payloads_round_trip_and_are_send`。`just test -p lectern-i18n` 的 32 个通过，新增 `key_names_are_the_fluent_message_ids`。
+- `just doctest`：`lectern-ui` 的 3 个 `compile_fail` 通过。
+- `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}' crates/ui/src --glob '!**/builtin.rs' --glob '!**/tests*'` 和 `rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 都没有结果。
+- `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
+- 没有做：`app` 的接入（`with_assets`、`init`、`attach`、`ready` 和两个 `#[gpui::test]`）、`ui/*` 基准、手动的强调色与外观切换检查，都在下一个 PR；`mono_metrics().family` 在发布构建下的手动检查随 `app` 接入一起做。
+
+## 与设计的差异
+
+第 1 步：
+
+- `init` 不读系统色。[platform 设计「系统外观」](platform.md#系统外观)实测本进程第一次 `system_colors` 约 2 ms（AppKit 第一次解析自己的动态颜色），超出 `ui/init` 的 300 µs；已决定推迟到首帧之后：`init` 只读 `reduce_motion`、登记 `watch`，`Palette` 从内置表建；`ready` 对两个外观各读一次并换掉 `Palette`。「初始化」「数据流与线程」「性能」「日志与诊断」已照改：`ui initialised` 的 `accent` 总是 `builtin`，`ui ready` 多一个 `accent` 字段，验收的手动检查看 `ui ready`。
+- 内置表的值取自本机 `platform::appearance::system_colors` 在 macOS 27.0.1 上的读数（`builtin.rs` 文件头写明日期），不是 HIG「Color」页面的值：HIG 只发布 13 个系统色，没有 `labelColor` 等语义色的数值，而且它列的是较早 macOS 的值，与当前系统差几个单位；取同一来源，内置表与实时读数一致。
+- `Type`、`Attribute` 改用 `system(Pink)`：按「代码配色」的检查，`Indigo` 与 `Blue` 在深色下的绿色盲模拟里 ΔE 只有 2.7，浅色下与 `Purple` 在红色盲模拟里 11.1；13 个系统色里只有 `Pink` 让五种颜色在两个外观、三种模拟下两两 ΔE ≥ 12（最小的一对是浅色红色盲模拟下的 `Pink` 与 `secondary_label`，14.3）且对比度 ≥ 3:1。`Red` 与 `Pink` 的 ΔE 在 15 到 17 之间，刚过门槛，视觉验收时如果字符串与类型分不开，再考虑把 `Number` 的颜色让出来。
+- `init_fixed` 的 `appearance` 是固定外观：`colors(window, cx)` 用它而不是窗口的外观。gpui-pre 0.3.9 的测试平台不能从 GPUI 之外改窗口的外观（`TestAppContext::test_window` 是 `pub(crate)`），所以外观变化的测试经 `testing::simulate_appearance_change(appearance, cx)`（`test-support` feature）直接调 `attach` 的观察者所调的那个处理函数，它在固定模式下同时改固定外观；`testing::simulate_platform_change(change, cx)` 同样直接调 `watch` 回调所排的处理函数。`app` 的 `appearance_change_refreshes_the_skeleton_window` 和 `appearance_change_before_ready_does_not_touch_the_theme` 也要走这两个钩子。
+- `MonoMetrics::line_height` 是 `ascent + descent` 向上取到 0.5pt，不含 `line_gap`：GPUI 的 `TextSystem` 不按 `FontId` 公开 `line_gap`（只在私有的 `FontMetrics` 上），SF Mono 的 `line_gap` 为 0。`descent` 字段取绝对值（GPUI 照字体给出负值）。
+- 「解析失败」的判断按原文（目标家族的 `FontId` 与 GPUI 内置后备的相同），后备的 `FontId` 用一个不存在的家族名探出；如果探针家族与 `UI_FAMILY` 的 `FontId` 也相同（GPUI 的测试文字系统给所有家族同一个 id），视为无法探测、按 `MONO_FAMILY` 解析成功，不记 warn。
+- `attach` 的「重复调用只登记一次」按 `AnyWindowHandle` 记在 `UiState` 里，每次 `attach` 先去掉已关闭的窗口；重复调用返回一个空的 `Subscription`。
+- gpui-component 主题的投影只写 `Palette` 有直接来源的字段（背景、前景、边框、主色、次要色、列表与选中、侧栏、弹层、链接、骨架、滚动条、danger / success / warning / info 等 40 个）；强调色上的文字用 `builtin.rs` 里的 `on_accent()`（AppKit 的 `alternateSelectedControlTextColor`，两个外观都是白色），不是 `Palette` 的字段。其余字段保持 gpui-component 注册主题的值，第 3 步包装控件时再补。
+- `i18n` 的 `Key::name` / `FmtKey::name`（`Text::message_id` 用）由 [#227](https://github.com/SoloJiang/lectern-app/pull/227) 提供，不在本 PR 里。
+

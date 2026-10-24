@@ -4598,6 +4598,12 @@ version = "0.0.0"
 dependencies = [
  "gpui-component",
  "gpui-pre",
+ "insta",
+ "lectern-i18n",
+ "lectern-logging",
+ "lectern-platform",
+ "lectern-services",
+ "lectern-syntax",
 ]
 
 [[package]]
