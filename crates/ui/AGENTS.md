@@ -26,7 +26,7 @@
 |---|---|
 | `init.rs` | `init`、`ready`、`is_ready`、`init_fixed`、`attach`，外观 / 强调色 / 减弱动态效果变化的处理，`Palette` 到 gpui-component `Theme` 的投影 |
 | `motion.rs` | `Easing`、`Motion` 与交互规范「动效」表的全部常量、`reduced`、`Effective`、`Motion::animation`、可打断的 `Transition`（含弹簧）、`active_transitions` |
-| `palette/` | `Appearance`、`SystemColor`、`Palette`、`colors`、`palette`、`accent_follows_system`；`builtin.rs` 是内置表 |
+| `palette/` | `Appearance`、`SystemColor`、`Palette`、`colors`、`palette`、`accent_follows_system`、`on_accent`（强调色上的字色）；`builtin.rs` 是内置表 |
 | `text.rs` | `Text`、`Verbatim`、`strings`、`set_locale` |
 | `font.rs` | 字体家族常量、`TextRole`、`TextRoleExt`、`MonoMetrics`、`mono_metrics` |
 | `code.rs` | `CodeStyle`、`code_style`、`code_styles` |

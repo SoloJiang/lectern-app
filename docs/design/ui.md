@@ -905,3 +905,7 @@ pub mod semantic {
 - 控件仍经 `declare`，即 `semantic(...)`，不写 `semantic_interactive` 的无障碍属性：控件的无障碍属性（`Button` 的 `accessibility_label`、gpui-component 自己设的）第 3 步已经有，本步不改控件。`semantic_interactive` 给视图自己的带 ID 容器用。
 - `ui/semantic_disarmed` 测的是 `Recorder::is_armed()`，即包装元素在关闭时自己读的那一次原子加载；包装元素把 `request_layout`、`prepaint`、`paint` 转给子元素的 `AnyElement` 调用是 GPUI 的元素管道，不在这条预算里，也无法在一帧的噪声里分辨 2 ns。预算表登记为 `share_macos`，与第 2 步的两条相同。
 - 每个控件的快照放在 `tests/probe.rs`（和记录器的测试一起），`tests/semantic.rs` 仍是 `NodeId` 与构造器的测试；快照去掉 `bounds` 和 `declared_at`，保留 `visible` 与 `parent`。
+
+### project_home 第 2 步
+
+- `on_accent()` 公开（`lectern_ui::on_accent`）：视图在选中的 `Row` 里放自己的文字时，次要文字要用强调色上的字色（`TextRole::Secondary` 的灰色在强调色上看不清）。仍然不是 `Palette` 的字段，值仍只在 `palette/builtin.rs`。

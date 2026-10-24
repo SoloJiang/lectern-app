@@ -9,6 +9,7 @@ use std::sync::Arc;
 use lectern_services::project::{ProjectKey, RelPath, WorktreeKey};
 use lectern_services::review::Progress;
 use lectern_services::session::{Agent, SessionKey, SourceId, Timestamp};
+use lectern_ui::semantic::NodeId;
 
 mod compose;
 #[cfg(test)]
@@ -19,9 +20,8 @@ pub use compose::{Built, Inputs, UsageInputs, build};
 /// Immutable; replaced as a whole. Composed by the "project-home" plugin in a
 /// `Background` task; the views hold the `Arc`.
 ///
-/// The design's `NodeId` of the probe's semantic tree (`ui::semantic`) is not
-/// in the model yet: that module does not exist before `ui` step 3, and the
-/// views of step 2 add the IDs (「与设计的差异」).
+/// The `NodeId`s of the probe's semantic tree are built once here (`build`) and
+/// only cloned by the views (`ui::semantic`, ui.md「探针」).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct HomeSnapshot {
     pub project: ProjectKey,
@@ -29,6 +29,11 @@ pub struct HomeSnapshot {
     pub sources: SourceGenerations,
     /// `ProjectSnapshot::name`, the toolbar title, shown as written.
     pub name: Arc<str>,
+    /// The time of day this was composed at. The views count the relative
+    /// times ("3 min ago") back from it, so a frame is a function of the
+    /// snapshot and the time shown only moves with the next snapshot
+    /// (「已知限制」).
+    pub now: Timestamp,
     /// The short name of the current worktree's HEAD (`refs/heads/main` →
     /// `main`; a detached HEAD is the first 8 characters of the OID); None
     /// for a folder project.
@@ -93,6 +98,7 @@ pub struct WorktreeGroup {
     pub worktree: Option<WorktreeKey>,
     pub kind: GroupKind,
     pub sessions: Arc<[SessionRow]>,
+    pub node: NodeId,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -110,6 +116,9 @@ pub struct SessionRow {
     /// None shows `project-home-untitled-session`.
     pub title: Option<Arc<str>>,
     pub last_activity: Timestamp,
+    /// The probe node of the row where it is shown: a sidebar row's, or the
+    /// card's in Needs Review or Recently Done.
+    pub node: NodeId,
     /// `open_turn` and `last_activity` within 10 minutes of the composing
     /// time: stricter than `agents`' "active", so that a session whose last
     /// turn never ended but that has been silent for days (an interrupted
@@ -127,6 +136,7 @@ pub struct PackageRow {
     pub depth: u8,
     /// Files changed today; 0 when `package_counts` is false.
     pub changed_today: u32,
+    pub node: NodeId,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

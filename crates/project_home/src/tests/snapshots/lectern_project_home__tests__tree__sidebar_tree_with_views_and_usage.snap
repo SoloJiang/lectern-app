@@ -1,0 +1,24 @@
+---
+source: crates/project_home/src/tests/tree.rs
+expression: "tree(vcx, sidebar_part)"
+---
+project-home.sidebar Group worktrees=2 sessions=6
+  project-home.sidebar.list List rows=16 visible=16
+    project-home.sidebar.overview ListItem label=[project-home-overview] selected
+    project-home.sidebar.sessions Text label=[project-home-sessions]
+    project-home.sidebar.sessions.worktree.item[/fixture/app/.git] Text label="main" branch=main active=true
+    project-home.sidebar.sessions.item[s1] ListItem label="Fix the login redirect" agent=claude-code running=true pending=false
+    project-home.sidebar.sessions.item[s2] ListItem label="Add the search index" agent=codex running=false pending=false
+    project-home.sidebar.sessions.item[s4] ListItem label="Rename the config keys" agent=claude-code running=false pending=false
+    project-home.sidebar.sessions.item[s6] ListItem label="Tidy the error messages" agent=claude-code running=false pending=false
+    project-home.sidebar.sessions.item[s5] ListItem label=[project-home-untitled-session] agent=other running=false pending=false
+    project-home.sidebar.sessions.worktree.item[/fixture/app/.git/worktrees/feature] Text label="feature/search" branch=feature/search active=false
+    project-home.sidebar.sessions.item[s3] ListItem label="Try a new layout" agent=claude-code running=false pending=false
+    project-home.sidebar.packages Text label=[project-home-packages] counts=true
+    project-home.sidebar.packages.item[api] ListItem changed=0 depth=0
+    project-home.sidebar.packages.item[web] ListItem changed=3 depth=0
+    project-home.sidebar.packages.item[web/ui] ListItem changed=0 depth=1
+    project-home.sidebar.views.item[worktrees] ListItem label=[workspace-back]
+    project-home.sidebar.views.item[files] ListItem label=[workspace-inspector-toggle]
+  project-home.sidebar.usage ListItem tokens=12345 percent=61
+    project-home.sidebar.usage.limit Progress fraction=0.610

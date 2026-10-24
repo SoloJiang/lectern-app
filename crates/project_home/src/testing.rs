@@ -39,9 +39,10 @@ use lectern_services::usage::{
     UsageCommand, UsageError, UsageInterest, UsageQuery, UsageSnapshot, UsageState, Window,
 };
 use lectern_services::workspace::{
-    CommandHandler, Contribution, Contributions, LeaveGuard, Milestone, Registration, SidebarEntry,
-    WorkspaceCommand,
+    CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone, Payload,
+    Registration, SharedPayload, SidebarEntry, SidebarSection, WorkspaceCommand,
 };
+use lectern_ui::contrib::SidebarItem;
 
 use crate::home::Home;
 use crate::plugin::{
@@ -690,21 +691,119 @@ impl Usage for FakeUsage {
     }
 }
 
-/// Counts what is registered: step 1 registers nothing.
+/// The window's side of `dyn Contributions`: keeps what was registered (the
+/// payloads the views are built from), lists the sidebar entries the way
+/// `workspace` does (an entry is applied when registered), and records the
+/// commands and the milestones the views send.
 #[derive(Default)]
 pub(crate) struct FakeContributions {
     registered: AtomicUsize,
+    contributions: Mutex<Vec<(ContributionKind, String, Payload)>>,
+    entries: Mutex<Vec<SidebarEntry>>,
+    listed: Mutex<Option<Arc<[SidebarEntry]>>>,
+    commands: Mutex<Vec<WorkspaceCommand>>,
+    milestones: Mutex<Vec<Milestone>>,
 }
 
 impl FakeContributions {
+    /// How many registrations of any kind were made.
     pub fn registered(&self) -> usize {
         self.registered.load(Ordering::SeqCst)
+    }
+
+    /// The kinds and IDs of the contributions, in registration order.
+    pub fn kinds(&self) -> Vec<(ContributionKind, String)> {
+        lock(&self.contributions)
+            .iter()
+            .map(|(kind, id, _)| (*kind, id.clone()))
+            .collect()
+    }
+
+    /// A clone of the payload registered under `id`, as its `ui::contrib` type.
+    pub fn payload<T: Clone + 'static>(&self, id: &str) -> Option<T> {
+        lock(&self.contributions)
+            .iter()
+            .filter(|(_, registered, _)| registered == id)
+            .find_map(|(_, _, payload)| {
+                let any: &(dyn std::any::Any + Send) = &*payload.0;
+                any.downcast_ref::<T>().cloned()
+            })
+    }
+
+    /// The key bindings registered, loaded the way `workspace` loads them.
+    pub fn key_bindings(&self, cx: &gpui::App) -> Vec<gpui::KeyBinding> {
+        lock(&self.contributions)
+            .iter()
+            .filter(|(kind, _, _)| matches!(kind, ContributionKind::KeyBindings))
+            .flat_map(|(_, _, payload)| {
+                let any: &(dyn std::any::Any + Send) = &*payload.0;
+                let bindings = any.downcast_ref::<lectern_ui::contrib::KeyBindings>();
+                bindings
+                    .into_iter()
+                    .flat_map(|bindings| bindings.0.iter())
+                    .map(|(keys, action, context)| {
+                        let predicate = context.map(|context| {
+                            std::rc::Rc::new(
+                                gpui::KeyBindingContextPredicate::parse(context)
+                                    .expect("the binding's context parses"),
+                            )
+                        });
+                        gpui::KeyBinding::load(
+                            keys,
+                            action.boxed_clone(),
+                            predicate,
+                            false,
+                            None,
+                            cx.keyboard_mapper().as_ref(),
+                        )
+                        .expect("the binding's keystrokes parse")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// Adds an entry the way another crate's registration would be applied,
+    /// and lists a new `Arc` (the registry's list is replaced, not edited).
+    pub fn add_entry(&self, section: SidebarSection, id: &str, order: u16, item: SidebarItem) {
+        let mut entries = lock(&self.entries);
+        entries.push(SidebarEntry {
+            id: Name::Owned(id.to_owned()),
+            section,
+            order,
+            payload: SharedPayload(Arc::new(item)),
+        });
+        entries.sort_by(|a, b| (a.section, a.order, &a.id).cmp(&(b.section, b.order, &b.id)));
+        *lock(&self.listed) = Some(Arc::from(entries.clone()));
+    }
+
+    /// The commands the views dispatched, in order.
+    pub fn commands(&self) -> Vec<WorkspaceCommand> {
+        lock(&self.commands).clone()
+    }
+
+    /// The milestones the views reported.
+    pub fn milestones(&self) -> Vec<Milestone> {
+        lock(&self.milestones).clone()
     }
 }
 
 impl Contributions for FakeContributions {
-    fn register(&self, _: Contribution, _: Option<ActivationToken>) -> Registration {
+    fn register(&self, contribution: Contribution, _: Option<ActivationToken>) -> Registration {
         self.registered.fetch_add(1, Ordering::SeqCst);
+        let Contribution {
+            kind,
+            id,
+            order,
+            payload,
+        } = contribution;
+        if let ContributionKind::SidebarEntry { section } = kind {
+            let any: &(dyn std::any::Any + Send) = &*payload.0;
+            if let Some(item) = any.downcast_ref::<SidebarItem>() {
+                self.add_entry(section, &id, order, item.clone());
+            }
+        }
+        lock(&self.contributions).push((kind, id.to_string(), payload));
         Registration::new(|_| {}, || {})
     }
     fn handle_command(
@@ -724,11 +823,17 @@ impl Contributions for FakeContributions {
         self.registered.fetch_add(1, Ordering::SeqCst);
         Registration::new(|_| {}, || {})
     }
-    fn dispatch(&self, _: WorkspaceCommand) {}
-    fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
-        Arc::from(Vec::new())
+    fn dispatch(&self, command: WorkspaceCommand) {
+        lock(&self.commands).push(command);
     }
-    fn report_milestone(&self, _: Milestone) {}
+    fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
+        lock(&self.listed)
+            .get_or_insert_with(|| Arc::from(Vec::new()))
+            .clone()
+    }
+    fn report_milestone(&self, milestone: Milestone) {
+        lock(&self.milestones).push(milestone);
+    }
 }
 
 /// A `SessionsChanged` of the fake source.
@@ -895,6 +1000,11 @@ impl Rig {
 
     pub fn sessions_changed(&self) {
         self.kernel.emitter().emit(sessions_event());
+    }
+
+    /// An event of the window, as `workspace` emits it.
+    pub fn workspace_event(&self, event: lectern_services::workspace::WorkspaceEvent) {
+        self.kernel.emitter().emit(event);
     }
 
     pub fn overview_changed(&self, key: &ProjectKey) {
