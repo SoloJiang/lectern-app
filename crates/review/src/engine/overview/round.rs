@@ -21,6 +21,24 @@ struct Found {
     sessions: Vec<Known>,
     shown: Vec<SessionOverview>,
     outside: OutsideCount,
+    /// Today's changed files by sub-project (`Overview::packages`).
+    packages: Option<Arc<[(RelPath, u32)]>>,
+}
+
+/// The modification time (nanoseconds) of every file of the count set in
+/// the worktree, in the set's order: None for a deleted or unreadable
+/// file. One stat per file, no content (`Worktree::mtimes`).
+fn file_mtimes(git: &Git, count: &ChangeSet) -> Vec<Option<i64>> {
+    let paths: Vec<RepoPath> = count.files().iter().map(|c| c.path.clone()).collect();
+    match git.worktree.mtimes(&paths) {
+        Ok(times) if times.len() == paths.len() => times,
+        Ok(_) => vec![None; paths.len()],
+        Err(e) => {
+            let (error, io) = diag::git_error(&e);
+            warn!("modification times unreadable"; error = error, io = io);
+            vec![None; paths.len()]
+        }
+    }
 }
 
 impl Engine {
@@ -36,10 +54,18 @@ impl Engine {
         }) else {
             return;
         };
-        // 1. The current worktree.
-        let active = (self.cfg.projects)()
-            .and_then(|p| p.snapshot(project))
+        // 1. The current worktree, and its sub-projects when scanned.
+        let snapshot = (self.cfg.projects)().and_then(|p| p.snapshot(project));
+        let active = snapshot
+            .as_ref()
             .and_then(|s| s.active.as_ref().and_then(|a| a.worktree.clone()));
+        let packages = snapshot.as_ref().and_then(|s| match s.active.as_ref() {
+            Some(ActiveTree {
+                packages: Scan::Ready(packages),
+                ..
+            }) => Some(Arc::clone(packages)),
+            _ => None,
+        });
         let Some(worktree) = active else {
             // A folder project, or no worktree yet: nothing to compare.
             self.publish_overview(project, seq, None, started);
@@ -91,6 +117,7 @@ impl Engine {
                 sessions: Vec::new(),
                 shown: Vec::new(),
                 outside: OutsideCount::Capped(count.files().len() as u32),
+                packages: None,
             };
             self.publish_overview(project, seq, Some(found), started);
             return;
@@ -118,11 +145,15 @@ impl Engine {
             return;
         }
 
-        // 4. Each session against the count set.
+        // 4. Each session against the count set. The files' workspace-side
+        // modification times are read once: the command claims and the
+        // per-package counts of today's changes both use them.
+        let mtimes = file_mtimes(&git, &count);
         let input = session::Input {
             engine: self,
             git: &git,
             count: &count,
+            mtimes: &mtimes,
             reflog: &reflog,
             sessions: &sessions,
             window_ms,
@@ -130,12 +161,17 @@ impl Engine {
             cancel: &cancel,
         };
         let (shown, outside) = session::compute(&input);
+        let today = packages.map(|packages| {
+            let zone = &*self.cfg.utc_offset;
+            packages::today(&packages, &count, &mtimes, now.0, zone)
+        });
         let found = Found {
             git,
             count: Some(count),
             sessions,
             shown,
             outside,
+            packages: today,
         };
         self.publish_overview(project, seq, Some(found), started);
     }
@@ -254,18 +290,18 @@ impl Engine {
                 return;
             }
             state.generation += 1;
-            let (sessions, outside) = match found {
+            let (sessions, outside, packages) = match found {
                 Some(found) => {
                     state.git = Some(found.git);
                     state.count = found.count;
                     state.sessions = found.sessions;
-                    (found.shown, found.outside)
+                    (found.shown, found.outside, found.packages)
                 }
                 None => {
                     state.git = None;
                     state.count = None;
                     state.sessions = Vec::new();
-                    (Vec::new(), OutsideCount::Pending)
+                    (Vec::new(), OutsideCount::Pending, None)
                 }
             };
             debug!("overview round";
@@ -276,12 +312,14 @@ impl Engine {
                     OutsideCount::Files(n) | OutsideCount::Capped(n) => n,
                 },
                 capped = matches!(outside, OutsideCount::Capped(_)),
+                packages = packages.as_ref().map(|p| p.len()),
                 took_us = started.elapsed());
             state.snapshot = Some(Arc::new(Overview {
                 project: project.clone(),
                 generation: state.generation,
                 sessions: sessions.into(),
                 outside,
+                packages,
             }));
             ReviewEvent::Overview {
                 project: project.clone(),

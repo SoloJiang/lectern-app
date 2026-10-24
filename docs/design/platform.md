@@ -940,7 +940,7 @@ pub mod dirs {
 
 ## 本地时区的偏移
 
-[usage 设计「对其他 crate 的要求」](usage.md#对其他-crate-的要求)的 B（[#31](https://github.com/SoloJiang/lectern-app/issues/31)）。`app` 用它实现 `usage::LocalZone`（usage 的前置条件 C），`usage` 的 `window::days` 按它把时间窗口分成本地自然日（[ADR 0020](../adr/0020.md)）。这不是 macOS 专属能力：两个平台都用 POSIX 的 `localtime_r`，与 `ThreadCpuClock` 一样放在本 crate，在 Linux CI 上也能测试。
+[usage 设计「对其他 crate 的要求」](usage.md#对其他-crate-的要求)的 B（[#31](https://github.com/SoloJiang/lectern-app/issues/31)）。`app` 用它实现 `usage::LocalZone`（usage 的前置条件 C），`usage` 的 `window::days` 按它把时间窗口分成本地自然日（[ADR 0020](../adr/0020.md)）。这不是 macOS 专属能力：两个平台都用 POSIX 的 `localtime_r`，与 `ThreadCpuClock` 一样放在本 crate，在 Linux CI 上也能测试。`review` 的概览按同一个日界统计今天改动的文件（[review 设计「概览」](review.md#概览)第 6 项），直接调用它，不经 `usage`。
 
 ### 接口
 
