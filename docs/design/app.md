@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#246](https://github.com/SoloJiang/lectern-app/pull/246)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配随它的视图合并后加入。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配随它的视图合并后加入。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -404,7 +404,7 @@ target 为 `app`。
 ### 性能
 
 - 冷启动：首帧之前没有新增的工作。`lectern_usage::plugin`、`ProjectHomePlugin::new`、`ProjectHomeUsagePlugin::new`、`UsageSlot::default()` 只保存依赖、分配内存，在 `release` 里、`Kernel::start` 之前运行，不做 IO、不建线程；三个插件都是 `AfterFirstFrame`。
-- 首帧之后：`usage` 的 `activate` 只建空表、提供服务（< 1 ms），`started` 里在 `Background` 任务打开数据库（< 10 ms）并订阅会话与项目事件。读取、补读的节奏由 usage 设计规定（批与批之间不持有守卫）。
+- 首帧之后：`usage` 的 `activate` 只建空表、提供服务（< 1 ms），`started` 里提交 `Background` 任务打开数据库（< 10 ms）。读取、补读的节奏由 usage 设计规定（批与批之间不持有守卫）。
 - 空闲内存（ADR 0017：60 MB）：usage 设计给出的份额是两个 SQLite 连接的页缓存 ≤ 2 MiB 加常驻 ≤ 2 MB。本机的 `phys_footprint` 没有测（「实际验证」）。
 
 ### 日志与诊断
@@ -567,7 +567,7 @@ target 为 `app`。
 - `just test -p lectern-app -E 'not binary(startup)'`：31 个测试通过（原有 17 个，新增 14 个：`window_state` 9 个，`leave` 5 个；`every_profile_graph_validates` 改成 `#[gpui::test]`，desktop 的插件数为 5）。
 - `tests/startup.rs` 的 8 个启动测试本机没有运行（图形会话锁屏，屏障不放开，「已知限制」），结果以 macOS CI 为准。发布构建（临时 `HOME`）的手动运行、冷启动、空闲内存都没有做；解锁后按「装配」「性能」的方法补测，写进这里。
 
-`usage` 与 `project_home` 的装配（[#246](https://github.com/SoloJiang/lectern-app/pull/246)，同一台机器）：
+`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，同一台机器）：
 
 - `just check`、`just deny`、`python3 scripts/check_architecture.py` 通过；`rg 'eprintln!|println!|log::|log_err|warn_on_err' crates/app/src crates/app/tests` 没有结果。
 - `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：33 个测试通过（新增 `zone_rounds_milliseconds_down_to_seconds`、`zone_without_an_offset_is_utc`；`every_profile_graph_validates` 的 desktop 插件数为 8，图校验通过，临时目录之后仍是空的）。
