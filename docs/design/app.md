@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`welcome`、`project_home` 的装配随它们的视图合并后加入。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#246](https://github.com/SoloJiang/lectern-app/pull/246)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配随它的视图合并后加入。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -213,7 +213,7 @@ Quit（主线程）
 | `session-claude-code`、`session-codex` | `lectern_agents::plugins(AgentsDeps { executor, cache, watch: watcher, decoded_dir, roots: AgentRoots::from_env(&home), filter: SessionFilter::new() })` | `dyn SessionSource` | `dyn Projects` |
 | `review` | `lectern_review::plugin(ReviewDeps { executor, cache, watcher, data_dir, git_ceilings })` | `dyn Review` | `dyn Projects`、`dyn SessionSource` |
 
-`usage`、`code_intel` 不在本 issue：它们的前置条件（usage 前置条件 C、code_intel 第 5 步）完成后各自加进这张表。
+`usage` 与 `project_home` 随后加入（「usage 与 project_home 的装配」）；`code_intel` 不在本 issue，它的前置条件（第 5 步）完成后加进这张表。
 
 目录与环境：
 
@@ -259,7 +259,7 @@ pub struct Resources {
 }
 
 impl Profile {
-    /// desktop：上表的四个插件，`workspace` 加入后是五个（「workspace 的装配」）；test：空集合。不做 IO。
+    /// desktop：上表的四个插件，`workspace` 加入后是五个（「workspace 的装配」），`usage`、`project-home`、`project-home-usage` 加入后是八个（「usage 与 project_home 的装配」）；test：空集合。不做 IO。
     pub fn plugins(self, resources: &Resources) -> PluginSet;
 }
 
@@ -313,7 +313,7 @@ Logging::shutdown(500 ms)
 - `every_profile_graph_validates`：用临时目录建 `Resources`（`Cache::new` 指向临时目录，`Watcher` 用 `fs_watch::testing::FakeBackend`），对每个 profile 调用 `plugins(&resources).validate()`；之后临时目录仍是空的（构造不做 IO）。
 - `quit`：`steps_run_in_order` 的顺序改为 kernel、kernel 完成、watcher、executor、cache、logging；`a_hung_kernel_does_not_block_quit` 里 watcher 照常调用、cache 因剩余时间为零跳过；`a_hung_watcher_does_not_block_quit`（`watcher` 不返回时，到截止时间后照常关闭 executor 和日志，`watcher_timed_out` 为 true，cache 跳过）。
 - `tests/startup.rs`（这个测试二进制的测试一次只运行一个，见「与设计的差异」第 2 步）：
-  - `startup_writes_a_header_and_an_end_record` 加检查：`plugins assembled` 在 `first frame drawn` 之后、`plugins` 为 4（`workspace` 加入后为 5，见「workspace 的装配」）。
+  - `startup_writes_a_header_and_an_end_record` 加检查：`plugins assembled` 在 `first frame drawn` 之后、`plugins` 为 4（`workspace` 加入后为 5，`usage`、`project_home` 加入后为 8，见「usage 与 project_home 的装配」）。
   - `quit_shuts_the_services_down_in_time`：`--quit-after-start` 时日志里没有 `kernel shutdown timed out`、`executor shutdown timed out`。
   - `home_path_stays_out_of_the_log`（上一节）。
   - 每个启动测试的 `HOME` 都是临时目录，并去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`（`AgentRoots::from_env` 优先读它们），不读本机的会话目录。
@@ -329,8 +329,8 @@ Logging::shutdown(500 ms)
 |---|---|---|---|
 | `workspace` | `WorkspacePlugin::new(host)`，`host` 是 `workspace::install(window, deps, cx)` 的返回值（`Resources::workspace`） | `dyn Contributions` | `dyn Projects` |
 
-- `welcome`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })`）和 `project_home`（`ProjectHomePlugin::new` 与 `ProjectHomeUsagePlugin::new` 共用一个 `UsageSlot`）现在不装配：两个设计都规定装配在它们视图之后的步骤里，现在登记的屏幕载荷还是占位类型（`welcome` 的 `ScreenPlaceholder`，`UiPayloads` 会以 `wrong-payload` 拒绝，窗口没有 Welcome 屏幕），`project-home-usage` 要 `dyn Usage`，现在没有插件提供它（图校验会失败）。它们的视图合并后，各自在 `Profile::Desktop` 的表里加一行。
-- `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架。正常启动时 `install` 总会运行，`welcome`、`project_home` 装配之前没有任何屏幕注册，窗口显示空的 `Workspace`（内容区是 `workspace-screen-missing` 的文字），这是过渡状态（workspace 设计「与设计的差异」第 3 步）。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
+- `welcome`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })`）现在不装配：设计规定装配在它的视图之后的步骤里，现在登记的屏幕载荷还是占位类型（`ScreenPlaceholder`，`UiPayloads` 会以 `wrong-payload` 拒绝，窗口没有 Welcome 屏幕）。它的视图合并后，在 `Profile::Desktop` 的表里加一行。`project_home` 和 `usage` 已装配（「usage 与 project_home 的装配」）。
+- `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架。正常启动时 `install` 总会运行，`welcome` 装配、`project_home` 的视图合并之前没有任何屏幕注册，窗口显示空的 `Workspace`（内容区是 `workspace-screen-missing` 的文字），这是过渡状态（workspace 设计「与设计的差异」第 3 步）。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
 - `startup::arm` 的第二个帧回调把窗口句柄交给 `release_in(Some(window), cx)`；`release(cx)` 是 `release_in(None, cx)`，test profile 用它。没有窗口句柄的 desktop 屏障不装配（记 warn `plugins not assembled`，`missing` 为 `window`），只在直接调用 `release` 时出现。
 - `Started::shell`（`Option<Shell>`）：`Shell { host, window_state }`，`Quit` 用 `host` 问离开守卫，Dock 重开用两者。
 
@@ -382,6 +382,41 @@ target 为 `app`。
 - `leave`（`src/tests/leave.rs`，假的 `LeaveAsk`）：`every_guard_allowing_goes_on`、`a_refusal_ends_the_quit_and_the_next_one_asks_again`、`an_answer_from_another_thread_is_waited_for`、`a_dropped_answer_allows`、`the_quit_waits_while_a_guard_has_not_answered`。
 - `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 5；`window_state_stays_out_of_the_log`；`home_path_stays_out_of_the_log` 加检查 `window.json`。
 - 手动（「验收」，workspace 设计第 3 步）：见「实际验证」。
+
+## usage 与 project_home 的装配
+
+[#32](https://github.com/SoloJiang/lectern-app/issues/32)、[#30](https://github.com/SoloJiang/lectern-app/issues/30)，[usage 设计「对其他 crate 的要求」](usage.md#对其他-crate-的要求)的 C 与 [project_home 设计「对其他 crate 的要求」](project_home.md#对其他-crate-的要求)的 D。desktop profile 多三个插件，共八个；test profile 不变。
+
+### 插件与资源
+
+| 插件 ID | 构造 | 提供 | 依赖 |
+|---|---|---|---|
+| `usage` | `lectern_usage::plugin(UsageDeps { executor, data_dir: app_data.join("usage"), zone })` | `dyn Usage` | `dyn Projects`、`dyn SessionSource` |
+| `project-home` | `ProjectHomePlugin::new(ProjectHomeDeps { executor, usage: slot.clone() })` | 无 | `dyn Projects`、`dyn SessionSource`、`dyn Review`、`dyn Contributions` |
+| `project-home-usage` | `ProjectHomeUsagePlugin::new(executor, slot)` | 无 | `dyn Usage` |
+
+- `slot` 是 `UsageSlot::default()`，`profile::desktop` 里建一个，克隆给两个 `project_home` 插件。
+- `zone` 是 `profile.rs` 里的 `SystemZone`：`LocalZone::offset_at(unix_ms)` 取 `platform::time::utc_offset(unix_ms.div_euclid(1000))`（向下取整，不用截断除法，见 [platform 设计「本地时区的偏移」](platform.md#本地时区的偏移)的「规则」）。`utc_offset` 返回 None 时按 UTC（0）处理：毫秒时间戳除以 1000 后总有偏移，这一支不会走到，所以不记日志。构造 `SystemZone` 不做 IO；第一次 `localtime_r`（读时区文件）发生在 `usage` 的后台任务里，不在 UI 线程、不在首帧之前。
+- `UsageDeps::data_dir` 只拼路径，不创建；`usage.db` 由 `usage` 在 `started` 提交的后台任务里打开，目录在第一次打开时创建（[usage 设计「数据流与线程」](usage.md#数据流与线程)）。
+- 现在的 `UsageDeps` 只有 `executor`、`data_dir`、`zone`。usage 设计「依赖」里的 `watcher`、`git_ceilings` 要到 usage 的第 2、5 步才加；`Resources::git_ceilings` 已在，加字段时 `app` 照 `review` 的做法传入（「与设计的差异」）。
+- `project-home` 现在不登记任何贡献（它的视图随 project_home 的第 2 步）。装配之后，打开（或从 `window.json` 恢复）一个项目时它会取概览的关注、取用量的关注，并在后台合成快照，而窗口里没有视图读这些快照：这是过渡状态，视图合并后消失（「已知限制」）。没有项目打开时（首次启动）这两个插件什么也不做。
+
+### 性能
+
+- 冷启动：首帧之前没有新增的工作。`lectern_usage::plugin`、`ProjectHomePlugin::new`、`ProjectHomeUsagePlugin::new`、`UsageSlot::default()` 只保存依赖、分配内存，在 `release` 里、`Kernel::start` 之前运行，不做 IO、不建线程；三个插件都是 `AfterFirstFrame`。
+- 首帧之后：`usage` 的 `activate` 只建空表、提供服务（< 1 ms），`started` 里在 `Background` 任务打开数据库（< 10 ms）并订阅会话与项目事件。读取、补读的节奏由 usage 设计规定（批与批之间不持有守卫）。
+- 空闲内存（ADR 0017：60 MB）：usage 设计给出的份额是两个 SQLite 连接的页缓存 ≤ 2 MiB 加常驻 ≤ 2 MB。本机的 `phys_footprint` 没有测（「实际验证」）。
+
+### 日志与诊断
+
+- `plugins assembled` 的 `plugins` 为 8。
+- 其余记录由 `usage`、`project_home` 自己写（target 为 `usage`、`project_home`），见各自设计的「日志与诊断」。`SystemZone` 不写日志。
+
+### 测试
+
+- `every_profile_graph_validates`：desktop 的插件数为 8，图校验通过（`usage` 提供的 `dyn Usage` 满足 `project-home-usage`，`workspace` 提供的 `dyn Contributions` 满足 `project-home`）；临时目录之后仍是空的。
+- `zone_rounds_milliseconds_down_to_seconds`、`zone_without_an_offset_is_utc`（`src/profile.rs`）：毫秒到秒的向下取整（负数也是）和 None 时为 0；偏移本身由 `platform` 的 `utc_offset_*` 测试覆盖。
+- `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 8。
 
 ## 性能
 
