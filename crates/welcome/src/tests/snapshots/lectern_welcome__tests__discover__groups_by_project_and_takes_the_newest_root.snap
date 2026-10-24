@@ -1,0 +1,37 @@
+---
+source: crates/welcome/src/tests/discover.rs
+expression: built.folders
+---
+[
+    DiscoveredFolder {
+        path: "/repos/app-feature",
+        name: "app-feature",
+        key: Git {
+            common_dir: "/repos/app/.git",
+        },
+        agents: [
+            ClaudeCode,
+            Codex,
+        ],
+        sessions: 2,
+        running: 0,
+        newest_activity: Timestamp(
+            1779999700000,
+        ),
+    },
+    DiscoveredFolder {
+        path: "/notes",
+        name: "notes",
+        key: Folder {
+            root: "/notes",
+        },
+        agents: [
+            ClaudeCode,
+        ],
+        sessions: 1,
+        running: 0,
+        newest_activity: Timestamp(
+            1779998200000,
+        ),
+    },
+]

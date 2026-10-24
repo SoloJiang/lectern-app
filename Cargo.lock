@@ -4635,6 +4635,16 @@ version = "0.0.0"
 [[package]]
 name = "lectern-welcome"
 version = "0.0.0"
+dependencies = [
+ "insta",
+ "lectern-executor",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
 
 [[package]]
 name = "lectern-workspace"

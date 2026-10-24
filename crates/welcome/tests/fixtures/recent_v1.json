@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "written_by": "a later build may add fields; they are ignored",
+  "entries": [
+    {
+      "path": "/Users/example/work/lectern",
+      "key": { "Git": { "common_dir": "/Users/example/work/lectern/.git" } },
+      "name": "lectern",
+      "last_opened": 1780000000000
+    },
+    {
+      "path": "/Users/example/notes",
+      "key": { "Folder": { "root": "/Users/example/notes" } },
+      "name": "notes",
+      "last_opened": 1779990000000,
+      "pinned": false
+    },
+    {
+      "path": "/Users/example/work/api/services/billing",
+      "key": { "Git": { "common_dir": "/Users/example/work/api/.git" } },
+      "name": "api",
+      "last_opened": 1779900000000
+    }
+  ]
+}
