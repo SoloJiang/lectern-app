@@ -1,28 +1,31 @@
 //! The canary test (docs/design/project_home.md「日志与诊断」): a session
 //! title, a project name, a branch name, sub-project names and a worktree
-//! root with the canary go through the whole flow at trace level, and no
-//! record carries it. This is the part of the design's test that opens no
-//! window (composition and the plugins); the rendering and key presses join
-//! it with step 2.
+//! root with the canary go through the whole flow at trace level (the
+//! composition, the plugins, a frame of both views, ↓ and ↵, and the project
+//! closing with the views on screen), and no record carries it.
 
+use gpui::TestAppContext;
 use lectern_logging::testing;
 use lectern_services::project::Scan;
 use lectern_services::review::OutsideCount;
 use lectern_services::usage::UsageState;
 
 use crate::testing::{
-    MINUTE, ProjectFx, Rig, branch, entry, overview, package, progress, project_usage, sess,
+    MINUTE, ProjectFx, branch, entry, overview, package, progress, project_usage, sess,
     usage_limits,
 };
 use lectern_services::session::Agent;
+use lectern_services::workspace::WorkspaceCommand;
+
+use super::stage::{frame, rig, window};
 
 const CANARY: &str = "home-canary-5d90b3e1";
 
-#[test]
-fn canary_stays_out_of_home_logs() {
+#[gpui::test]
+fn canary_stays_out_of_home_logs(cx: &mut TestAppContext) {
     let capture = testing::capture();
     testing::set_callsite_limit(1_000_000);
-    let rig = Rig::new();
+    let rig = rig(cx);
     rig.activate_home();
     rig.activate_usage();
 
@@ -69,14 +72,27 @@ fn canary_stays_out_of_home_logs() {
 
     rig.opened(&key);
     rig.run();
+    let (_host, vcx) = window(cx, &rig);
+    // The first card is the session with the canary in its title.
+    vcx.simulate_keystrokes("down enter");
+    assert!(
+        matches!(
+            rig.contributions.commands().as_slice(),
+            [WorkspaceCommand::Push(_)]
+        ),
+        "↵ opened the review of the picked session"
+    );
     rig.sessions_changed();
     rig.changed(&key);
     rig.overview_changed(&key);
     rig.run();
+    frame(vcx);
     rig.deactivate_usage();
     rig.run();
+    frame(vcx);
     rig.closed(&key);
     rig.run();
+    frame(vcx);
 
     capture.assert_absent(CANARY);
     capture.assert_absent("fixture");
@@ -90,6 +106,18 @@ fn canary_stays_out_of_home_logs() {
         built.iter().any(|line| line.contains("\"cards\":1")),
         "counts are written instead of names: {built:#?}"
     );
+    for message in [
+        "home command",
+        "home milestone reported",
+        "home view attached",
+    ] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("\"msg\":\"{message}\""))),
+            "`{message}` is written: {lines:#?}"
+        );
+    }
     assert!(
         lines
             .iter()

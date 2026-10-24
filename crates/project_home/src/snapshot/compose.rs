@@ -15,6 +15,8 @@ use lectern_services::session::{
 use lectern_services::usage::{Limits, UsageSnapshot, UsageState};
 
 use crate::diag::count;
+use crate::nodes;
+use lectern_ui::semantic::NodeId;
 
 use super::{
     Card, GroupKind, HomeSnapshot, MainModel, OutsideRow, PackageRow, SessionRow, SidebarModel,
@@ -149,6 +151,7 @@ pub fn build(inputs: &Inputs<'_>) -> Built {
             }),
         },
         name: project.name.clone(),
+        now: inputs.now,
         branch,
         active_worktree,
         files_settled: active.is_some_and(|tree| !matches!(tree.files, Scan::Pending)),
@@ -182,12 +185,13 @@ fn short_head(head: &Head) -> Arc<str> {
     }
 }
 
-fn row(summary: &SessionSummary, now: Timestamp) -> SessionRow {
+fn row(summary: &SessionSummary, now: Timestamp, node: NodeId) -> SessionRow {
     SessionRow {
         key: summary.key.clone(),
         agent: summary.agent.clone(),
         title: summary.title.clone(),
         last_activity: summary.last_activity,
+        node,
         running: summary.open_turn && now.0.saturating_sub(summary.last_activity.0) <= RUNNING_MS,
         tail_pending: summary.tail_pending,
     }
@@ -231,7 +235,10 @@ fn groups(inputs: &Inputs<'_>, folder: bool, active: Option<&WorktreeKey>) -> Ve
                 .cmp(&a.last_activity)
                 .then_with(|| a.key.cmp(&b.key))
         });
-        bucket.into_iter().map(|s| row(s, inputs.now)).collect()
+        bucket
+            .into_iter()
+            .map(|s| row(s, inputs.now, nodes::sidebar_session(&s.key.id)))
+            .collect()
     };
     let mut groups = Vec::new();
     for (worktree, bucket) in listed.iter().zip(buckets) {
@@ -245,6 +252,7 @@ fn groups(inputs: &Inputs<'_>, folder: bool, active: Option<&WorktreeKey>) -> Ve
                 is_active: active == Some(&worktree.key),
             },
             sessions: to_rows(bucket),
+            node: nodes::sidebar_worktree(&worktree.key.0.to_string_lossy()),
         });
     }
     if !loose.is_empty() {
@@ -256,6 +264,7 @@ fn groups(inputs: &Inputs<'_>, folder: bool, active: Option<&WorktreeKey>) -> Ve
                 GroupKind::Other
             },
             sessions: to_rows(loose),
+            node: nodes::sidebar_worktree(if folder { "folder" } else { "other" }),
         });
     }
     groups
@@ -278,6 +287,7 @@ fn package_rows(list: &[Package], counts: Option<&[(RelPath, u32)]>) -> Vec<Pack
             name: list[i].name.clone(),
             depth: depth(list, i),
             changed_today: today.get(&*list[i].dir).copied().unwrap_or(0),
+            node: nodes::sidebar_package(&list[i].dir),
         })
         .collect()
 }
@@ -311,11 +321,12 @@ fn main_model(inputs: &Inputs<'_>, folder: bool) -> (MainModel, Vec<SessionKey>)
             missing.push(entry.session.clone());
             continue;
         };
-        let card = card(summary, entry, inputs.now);
         match entry.progress {
-            None => needs_review.push(card),
-            Some(p) if p.seen < p.total || p.changed_since_seen > 0 => needs_review.push(card),
-            Some(p) if p.total > 0 => done.push(card),
+            None => needs_review.push(card(summary, entry, inputs.now, true)),
+            Some(p) if p.seen < p.total || p.changed_since_seen > 0 => {
+                needs_review.push(card(summary, entry, inputs.now, true));
+            }
+            Some(p) if p.total > 0 => done.push(card(summary, entry, inputs.now, false)),
             // No files at all: nothing to review and nothing done.
             Some(_) => {}
         }
@@ -338,9 +349,19 @@ fn main_model(inputs: &Inputs<'_>, folder: bool) -> (MainModel, Vec<SessionKey>)
     (main, missing)
 }
 
-fn card(summary: &SessionSummary, entry: &SessionOverview, now: Timestamp) -> Card {
+fn card(
+    summary: &SessionSummary,
+    entry: &SessionOverview,
+    now: Timestamp,
+    needs_review: bool,
+) -> Card {
+    let node = if needs_review {
+        nodes::needs_review_card(&summary.key.id)
+    } else {
+        nodes::done_card(&summary.key.id)
+    };
     Card {
-        session: row(summary, now),
+        session: row(summary, now, node),
         progress: entry.progress,
         signals: Signals {
             drifted: entry.drifted == Some(true),

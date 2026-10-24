@@ -1,0 +1,14 @@
+---
+source: crates/review_view/src/tests/tree.rs
+expression: text
+---
+review.progress List total=3 seen=1 changed=1
+  review.progress-file.item[src/file_000.rs] Group seen=seen group=code noise=false
+    review.progress.item[src/file_000.rs] ListItem
+      review.progress.item[src/file_000.rs].check Toggle [checked=true]
+  review.progress-file.item[src/file_001.rs] Group seen=changed group=code noise=false
+    review.progress.item[src/file_001.rs] ListItem
+      review.progress.item[src/file_001.rs].check Toggle [checked=false]
+  review.progress-file.item[src/file_002.rs] Group seen=unseen group=code noise=false
+    review.progress.item[src/file_002.rs] ListItem
+      review.progress.item[src/file_002.rs].check Toggle [checked=false]

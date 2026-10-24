@@ -1,0 +1,25 @@
+---
+source: crates/review_view/src/tests/items.rs
+expression: "kept.join(\"\\n\")"
+---
+brief
+turn 0:1 (#0)
+prompt 0:1
+text @0
+step 0 src/file_000.rs
+  hunk step:0/3 #0 0:0
+    row step:0/3 #0 Some(0):Some(0)
+    row step:0/3 #19 None:Some(14)
+step 2 src/file_002.rs
+  hunk step:2/3 #0 0:0
+    row step:2/3 #0 Some(0):Some(0)
+    row step:2/3 #19 None:Some(14)
+tool tool-0
+turn 0:2 (#1)
+prompt 0:2
+text @0
+step 1 src/file_001.rs
+  hunk step:1/3 #0 0:0
+    row step:1/3 #0 Some(0):Some(0)
+    row step:1/3 #19 None:Some(14)
+tool tool-1

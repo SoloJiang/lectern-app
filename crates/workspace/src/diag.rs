@@ -68,6 +68,7 @@ pub(crate) fn command_name(command: &WorkspaceCommand) -> &'static str {
         WorkspaceCommand::Push(_) => "push",
         WorkspaceCommand::Pop => "pop",
         WorkspaceCommand::PopToBase => "pop_to_base",
+        WorkspaceCommand::SetReadingColumn(_) => "set_reading_column",
         WorkspaceCommand::ShowSidebarPanel(_) => "show_sidebar_panel",
         WorkspaceCommand::SetInspector(_) => "set_inspector",
         WorkspaceCommand::SelectInspectorTab(_) => "select_inspector_tab",
