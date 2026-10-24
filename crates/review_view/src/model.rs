@@ -453,7 +453,8 @@ impl ReviewModel {
                     language,
                     bytes,
                     took_us,
-                } => self.on_spans_unavailable(key, unavailable, &language, bytes, took_us),
+                    task,
+                } => self.on_spans_unavailable(key, unavailable, &language, bytes, took_us, &task),
             }
         }
         if handoff {
@@ -586,7 +587,11 @@ impl ReviewModel {
         // The selection follows its item, which may have changed shape (a
         // removed row beside its partner after the mode changed).
         if let Some(selected) = &self.selection {
+            let before = self.selection.clone();
             self.selection = anchor::find(&self.items, selected).map(|ix| self.items[ix].key());
+            if self.selection != before {
+                self.sync_current();
+            }
         }
         self.visible = target.item_ix
             ..target

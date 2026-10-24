@@ -1021,6 +1021,68 @@ fn fold_expands_by_preparing_more_context(cx: &mut TestAppContext) {
     );
 }
 
+#[test]
+fn fold_expands_and_keeps_the_place() {
+    // The items of a diff under context 3 and, after the fold was expanded,
+    // the placeholder of the same diff under context 43: a position inside
+    // the old rows is found in the new placeholder, not past it.
+    let mut old = vec![Item::Brief];
+    crate::items::rows_items(
+        &mut old,
+        &step_key(),
+        &folded_rows(step_key()),
+        DiffMode::Unified,
+    );
+    old.push(Item::Notice(crate::items::Notice::Folder));
+    let bigger = RowsKey::Step {
+        step: StepId(0),
+        context: 43,
+    };
+    let new = vec![
+        Item::Brief,
+        Item::Placeholder {
+            rows: bigger,
+            lines: 9,
+        },
+        Item::Notice(crate::items::Notice::Folder),
+    ];
+    let row = old
+        .iter()
+        .position(|item| matches!(item, Item::Row { .. }))
+        .expect("a row");
+    let at = gpui::ListOffset {
+        item_ix: row + 1,
+        offset_in_item: gpui::px(0.0),
+    };
+    let restored = crate::anchor::restore(&old, at, &new);
+    assert_eq!(restored.item_ix, 1, "the diff's placeholder");
+    // A selected row of the old diff is found there too.
+    let key = old[row].key();
+    assert_eq!(crate::anchor::find(&new, &key), Some(1));
+}
+
+#[gpui::test]
+fn highlight_answer_of_a_cancelled_task_does_not_end_its_replacement(cx: &mut TestAppContext) {
+    let rig = Rig::new(cx);
+    let opened = open_sample(cx, &rig);
+    // The rows leave before their tasks ran (cancelled), then come back:
+    // new tasks for the same windows.
+    opened.update(cx, |model, _| {
+        model.rows.remove(&step_key());
+        model.drop_rows(&step_key());
+        let rows = Arc::new(sample_rows(step_key()));
+        model.store_rows(&step_key(), rows);
+    });
+    assert!(rig.run_tasks(cx) > 0);
+    let state = opened.read(cx, |model| {
+        (
+            model.highlighted[&step_key()].state(Half::New),
+            model.plain.len(),
+        )
+    });
+    assert_eq!(state, ("spans", 0), "the replacement's spans are used");
+}
+
 #[gpui::test]
 fn fold_expands_from_a_hunk_above_it(cx: &mut TestAppContext) {
     let rig = Rig::new(cx);

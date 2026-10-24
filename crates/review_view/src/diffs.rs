@@ -196,11 +196,19 @@ impl ReviewModel {
         language: &str,
         bytes: u64,
         took_us: u64,
+        task: &Arc<AtomicBool>,
     ) {
         let want = (key.oid, key.window);
-        if self.inflight.remove(&want).is_none() {
+        // Only the answer of the task now waited for counts: a task that was
+        // cancelled and replaced may answer after its replacement started.
+        if !self
+            .inflight
+            .get(&want)
+            .is_some_and(|inflight| Arc::ptr_eq(&inflight.cancel, task))
+        {
             return;
         }
+        self.inflight.remove(&want);
         self.plain.insert(want);
         debug!(
             "highlight";

@@ -82,6 +82,9 @@ pub(crate) enum Job {
         language: Arc<str>,
         bytes: u64,
         took_us: u64,
+        /// The task's cancel flag: names the task, so that the answer of a
+        /// task that was cancelled does not end a newer one for the window.
+        task: Arc<std::sync::atomic::AtomicBool>,
     },
 }
 

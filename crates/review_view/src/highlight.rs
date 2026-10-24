@@ -177,6 +177,7 @@ pub(crate) fn run(work: Work) -> Job {
         language: language.clone(),
         bytes,
         took_us: elapsed_us(started),
+        task: cancel.clone(),
     };
     let languages = Languages::core();
     let Some(lang) = languages.for_path(&path) else {

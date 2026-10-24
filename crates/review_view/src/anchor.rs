@@ -8,31 +8,63 @@
 use std::collections::HashMap;
 
 use gpui::{ListOffset, Pixels, px};
+use lectern_services::review::RowsKey;
 
 use crate::items::{Item, ItemKey};
 
-/// The index of the item with `key`, if there is one. A diff row whose two
-/// line numbers changed shape (the same removed line, now beside its partner
-/// or alone, after the diff mode changed) is found by the line it has on a
-/// side that is still there.
+/// The index of the item with `key`, if there is one. A diff item is also
+/// found when its diff asks for another context (a fold was expanded): the
+/// same row of the same step or file, else that diff's placeholder. A row
+/// whose two line numbers changed shape (the same removed line, now beside
+/// its partner or alone, after the diff mode changed) is found by the line it
+/// has on a side that is still there.
 pub fn find(items: &[Item], key: &ItemKey) -> Option<usize> {
     if let Some(ix) = items.iter().position(|item| item.key() == *key) {
         return Some(ix);
     }
-    let ItemKey::Row { rows, old, new } = key else {
-        return None;
+    let diff = diff_of(key)?;
+    let row = match key {
+        ItemKey::Row { old, new, .. } => items.iter().position(|item| match item {
+            Item::Row {
+                rows: at,
+                old: item_old,
+                new: item_new,
+                ..
+            } => {
+                same_diff(at, diff)
+                    && ((old.is_some() && item_old == old) || (new.is_some() && item_new == new))
+            }
+            _ => false,
+        }),
+        _ => None,
     };
-    items.iter().position(|item| match item {
-        Item::Row {
-            rows: at,
-            old: item_old,
-            new: item_new,
-            ..
-        } => {
-            at == rows && ((old.is_some() && item_old == old) || (new.is_some() && item_new == new))
-        }
-        _ => false,
+    row.or_else(|| {
+        items.iter().position(
+            |item| matches!(item, Item::Placeholder { rows: at, .. } if same_diff(at, diff)),
+        )
     })
+}
+
+/// The diff an item key belongs to, if it belongs to one.
+fn diff_of(key: &ItemKey) -> Option<&RowsKey> {
+    match key {
+        ItemKey::Hunk { rows, .. }
+        | ItemKey::Row { rows, .. }
+        | ItemKey::Fold { rows, .. }
+        | ItemKey::Placeholder(rows)
+        | ItemKey::Incomplete(rows) => Some(rows),
+        _ => None,
+    }
+}
+
+/// Whether two keys are the diff of the same step or file, whatever the
+/// context they ask for.
+fn same_diff(a: &RowsKey, b: &RowsKey) -> bool {
+    match (a, b) {
+        (RowsKey::Final { file: a, .. }, RowsKey::Final { file: b, .. }) => a == b,
+        (RowsKey::Step { step: a, .. }, RowsKey::Step { step: b, .. }) => a == b,
+        _ => false,
+    }
 }
 
 /// Where the list scrolls to once `new` replaces `old` and was at `at`.
