@@ -143,8 +143,8 @@ impl Change {
     }
 }
 
-/// "One task at a time" for a kind of work: the flags are read and set under
-/// the model's lock.
+/// The state of a kind of work that runs as one task at a time: the flags are
+/// read and set under the model's lock.
 #[derive(Default)]
 struct Pump {
     /// A task is submitted or running.
@@ -298,6 +298,12 @@ impl WelcomeModel {
                 stats: Stats::default(),
             }
         })
+    }
+
+    /// UTC milliseconds by the model's clock: the view's "now" for the
+    /// relative times, so that a test fixes it with the clock.
+    pub(crate) fn now_millis(&self) -> i64 {
+        (self.clock)()
     }
 
     /// The current snapshot: copies an `Arc` under the lock.
