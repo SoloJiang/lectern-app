@@ -4524,6 +4524,13 @@ dependencies = [
 [[package]]
 name = "lectern-project-home"
 version = "0.0.0"
+dependencies = [
+ "insta",
+ "lectern-executor",
+ "lectern-kernel",
+ "lectern-logging",
+ "lectern-services",
+]
 
 [[package]]
 name = "lectern-review"
