@@ -16,22 +16,37 @@ plugin = true
 [dependencies]
 # Reads and writes `recent.json` and runs the rebuild off the UI thread.
 lectern-executor = { path = "../executor" }
+# The view, `FocusHandle`, actions, `cx.spawn` (docs/design/welcome.md「依赖」).
+gpui.workspace = true
+# The wake-up channel from the model to the view: `channel::mpsc::unbounded`.
+futures.workspace = true
+# `keys::welcome::*`, `keys::common::*`, `Locale`, `Args` (ADR 0013).
+lectern-i18n = { path = "../i18n" }
 # `Plugin`, `PluginHandle`, `ServiceRef`, `ServiceSet`, `Staged`.
 lectern-kernel = { path = "../kernel" }
 # Runtime logging (docs/design/welcome.md「日志与诊断」, ADR 0046).
 lectern-logging = { path = "../logging" }
+# `system::{system_languages, language_override, set_language_override}`
+# (architecture rule 6: macOS-only capabilities stay in `platform`).
+lectern-platform = { path = "../platform" }
 # `dyn Contributions`, `dyn Projects`, `dyn SessionSource` and their data types.
 lectern-services = { path = "../services" }
+# Colours, text, controls, motion, the probe's `semantic(...)` and the
+# `contrib` payload types (ADR 0015). A library crate, not a plugin.
+lectern-ui = { path = "../ui" }
 # `recent.json`.
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 insta.workspace = true
 lectern-executor = { path = "../executor", features = ["test-support"] }
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 # `testing::capture` for the canary test.
 lectern-logging = { path = "../logging", features = ["test-support"] }
+# `init_fixed`: the views' tests set the UI up without AppKit.
+lectern-ui = { path = "../ui", features = ["test-support"] }
 tempfile.workspace = true
 
 [lints]

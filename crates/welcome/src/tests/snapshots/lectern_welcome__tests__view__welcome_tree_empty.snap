@@ -1,0 +1,15 @@
+---
+source: crates/welcome/src/tests/view.rs
+expression: tree(cx)
+---
+welcome.root Group recent=ready discovered=unavailable
+  welcome.title Text [welcome-title] "Welcome to Lectern"
+  welcome.open-folder Button [welcome-open-folder] "Open Folder…"
+  welcome.language TabBar
+    welcome.language.item[system] Tab [common-language-system] "Match System" selected
+    welcome.language.item[en] Tab [common-language-en] "English"
+    welcome.language.item[zh-CN] Tab [common-language-zh-cn] "简体中文"
+  welcome.recent List [welcome-recent] "Recent Projects"
+  welcome.recent.empty Text [welcome-recent-empty] "No recent projects"
+  welcome.discovered List [welcome-discovered] "From Claude Code and Codex"
+  welcome.discovered.empty Text [welcome-discovered-empty] "No agent sessions found yet"
