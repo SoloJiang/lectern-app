@@ -51,10 +51,10 @@ impl Startup {
 }
 
 /// Releases the barrier. Main thread, does not block: `Early::start` and
-/// `Kernel::start` spawn their threads and return; `Executor::new`, the
-/// cache, the watcher and the plugins spawn none and do no IO
-/// (docs/design/app.md「创建顺序」). Only the first call does anything, and
-/// nothing once quitting.
+/// `Kernel::start` spawn their threads and return; `lectern_ui::ready`,
+/// `Executor::new`, the cache, the watcher and the plugins spawn none and do
+/// no IO (docs/design/app.md「创建顺序」). Only the first call does anything,
+/// and nothing once quitting.
 pub fn release(cx: &mut App) {
     if crate::quit::is_quitting(cx) {
         return;
@@ -71,6 +71,10 @@ pub fn release(cx: &mut App) {
         // No QoS interface in `platform` yet (docs/design/app.md「范围」).
         on_writer_start: None,
     });
+    // gpui-component's init and the system colours, before any plugin can
+    // mount a view (docs/design/ui.md「对其他 crate 的要求」). Main thread,
+    // about 2–3 ms, no IO. A no-op after `init_fixed` (the test profile).
+    lectern_ui::ready(cx);
     let executor = Executor::new(lectern_executor::Config::default());
     let (set, cache, watcher) = assemble(profile, &executor);
     let kernel = Kernel::start(set);

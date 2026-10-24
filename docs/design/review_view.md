@@ -582,7 +582,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   ```
 
   本 crate 切到双栏时 `dispatch(SetReadingColumn(false))`，切回统一时 `dispatch(SetReadingColumn(true))`。`workspace` 设计「数据结构」的 `Nav` 加一个 `reading_column: Option<bool>`，`Pop` 时清掉。
-- **B. `i18n`**：`locales/{en,zh-CN}/review.ftl` 加上「界面」表里的键（已有的 5 个不改）。
+- **B. `i18n`**（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）：`locales/{en,zh-CN}/review.ftl` 加上「界面」表里的键（已有的 5 个不改）。
 - **C. `app`**：`plugins()` 的两个插件放进 `PluginSet`（`Profile::Desktop` 的表加两行；test profile 不装）；bench 的 `Driver::open(OpenTarget::Session { … })` 经 `Contributions::dispatch(Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Session(key)) }))`；`Milestone::DiffShown` 经 `workspace` 转给探针。
 - **D. `bench`**：预算表加 `review_view/items_5000`、`review_view/scroll_5000`；`app/open_diff` 的夹具与场景按「性能」。
 - **E. `code_intel`**（随 review 设计的前置条件 F，不阻塞）：两条 `BriefRules` 规则的 `rule` 名与 `args` 的参数名定下后，本 crate 的静态表加两行、`review.ftl` 加两个键。

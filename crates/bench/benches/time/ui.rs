@@ -6,14 +6,15 @@ use std::cell::RefCell;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use gpui::{Context, IntoElement, Render, TestAppContext, Window, WindowHandle, div};
+use gpui::{App, Context, IntoElement, Render, TestAppContext, Window, WindowHandle, div};
 use lectern_bench::budgets::fmt_duration;
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Samples, Value};
 use lectern_i18n::{Locale, Strings};
 use lectern_ui::motion::{ENTER_SESSION, Motion, PANEL_OPEN, STANDARD, Transition};
+use lectern_ui::testing::step_transition;
 use lectern_ui::{Appearance, init_fixed};
 
-pub const BENCHES: &[Bench] = &[TRANSITION_TICK, BEZIER_EVAL];
+pub const BENCHES: &[Bench] = &[TRANSITION_TICK, TRANSITION_TICK_FRAME, BEZIER_EVAL];
 
 /// `Easing::eval` of `STANDARD` over 1000 points of the curve.
 pub const BEZIER_EVAL: Bench = Bench {
@@ -79,21 +80,61 @@ impl Render for Ticker {
     }
 }
 
-/// `Transition::tick` of a running `PANEL_OPEN` (bezier) transition, the
-/// frame request included; the note carries the `ENTER_SESSION` spring.
+/// `Transition::tick` of a running `PANEL_OPEN` (bezier) transition without
+/// GPUI's frame request: the transition's own work, which ui.md「性能」
+/// constrains. The note carries the `ENTER_SESSION` spring.
 pub const TRANSITION_TICK: Bench = Bench {
     id: "ui/transition_tick",
     run: transition_tick,
 };
 
 fn transition_tick(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let cx = TestAppContext::single();
+    cx.update(|cx| init_fixed(cx, Strings::of(Locale::En), Appearance::Light, false));
+    let (bezier, spring) =
+        cx.update(|cx| (steps(ctx, cx, PANEL_OPEN), steps(ctx, cx, ENTER_SESSION)));
+    let mut measured = Measured::new("ui/transition_tick", Value::Time(bezier));
+    measured.note = Some(format!(
+        "ENTER_SESSION spring: median {}",
+        fmt_duration(median(&spring))
+    ));
+    Ok(vec![measured])
+}
+
+/// One step per call, re-aimed at the other end every `LEG` as `Ticker` does.
+fn steps(ctx: &mut Ctx, cx: &App, motion: Motion) -> Samples {
+    let mut transition = Transition::new(0.0);
+    let mut now = Instant::now();
+    let mut leg_start = now - LEG;
+    let mut target = 0.0;
+    ctx.time(|| {
+        now += STEP;
+        if now.duration_since(leg_start) >= LEG {
+            leg_start = now;
+            target = 1.0 - target;
+            transition.go(target, motion, now, cx);
+        }
+        step_transition(&mut transition, black_box(now))
+    })
+}
+
+/// `Transition::tick` with GPUI's frame request (a boxed next-frame
+/// callback, the platform wake-up and the `notify` it runs), recorded only:
+/// the cost is GPUI's and varies with the runner; the frame budget itself is
+/// `app/animation_frames`.
+pub const TRANSITION_TICK_FRAME: Bench = Bench {
+    id: "ui/transition_tick_frame",
+    run: transition_tick_frame,
+};
+
+fn transition_tick_frame(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let mut cx = TestAppContext::single();
     cx.update(|cx| init_fixed(cx, Strings::of(Locale::En), Appearance::Light, false));
     let window = cx.add_window(|_, _| Ticker::new(PANEL_OPEN));
     cx.run_until_parked();
     let bezier = ticks(ctx, &mut cx, &window, PANEL_OPEN)?;
     let spring = ticks(ctx, &mut cx, &window, ENTER_SESSION)?;
-    let mut measured = Measured::new("ui/transition_tick", Value::Time(bezier));
+    let mut measured = Measured::new("ui/transition_tick_frame", Value::Time(bezier));
     measured.note = Some(format!(
         "ENTER_SESSION spring: median {}",
         fmt_duration(median(&spring))

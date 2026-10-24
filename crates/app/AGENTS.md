@@ -9,7 +9,7 @@
 
 ## 边界
 
-- 首帧前只建窗口、画骨架；插件激活、SQLite、文件监听、会话扫描、读窗口快照都放在首帧之后（[ADR 0017](../../docs/adr/0017.md)）。
+- 首帧前只建窗口、画骨架，外加 `lectern_ui::init`（内存操作：内置的 `Palette`、减弱动态效果、登记 `platform` 的通知；不读系统色）和骨架窗口的 `lectern_ui::attach`；`lectern_ui::ready`（`gpui_component::init`、系统色）在 `startup::release` 里、`Kernel::start` 之前。插件激活、SQLite、文件监听、会话扫描、读窗口快照都放在首帧之后（[ADR 0017](../../docs/adr/0017.md)、[ui 设计「对其他 crate 的要求」](../../docs/design/ui.md#对其他-crate-的要求)）。
 - 只做装配：把 `platform` 的实现注入 `fs_watch`、`kernel` 等定义的接口。不写业务逻辑。
 - `ui_probe` 只在 `ui-probe` feature 下编译（不在 `default` 里，`just` 的入口打开它）；运行时只在 probe profile 里启动（[ui_probe 设计](../../docs/design/ui_probe.md)）。
 

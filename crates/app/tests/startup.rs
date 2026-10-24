@@ -125,10 +125,20 @@ fn startup_writes_a_header_and_an_end_record() {
     assert_eq!(runs.len(), 1, "{runs:?}");
     let records = records(&runs[0]);
     assert_eq!(msg(&records[0]), "file", "{records:#?}");
+    let initialised = position(&records, "ui initialised");
     let drawn = position(&records, "first frame drawn");
+    let ready = position(&records, "ui ready");
     let assembled = position(&records, "plugins assembled");
     let released = position(&records, "startup barrier released");
-    assert!(drawn < assembled && assembled < released, "{records:#?}");
+    // `ui::init` before the first frame, `ui::ready` behind the barrier
+    // (docs/design/ui.md「对其他 crate 的要求」, ADR 0017).
+    assert!(
+        initialised < drawn && drawn < ready && ready < assembled && assembled < released,
+        "{records:#?}"
+    );
+    // The system colours are read only in `ready`.
+    assert_eq!(records[initialised]["accent"], "builtin", "{records:#?}");
+    assert_eq!(records[ready]["accent"], "system", "{records:#?}");
     assert_eq!(records[assembled]["plugins"], 4);
     assert_eq!(records[released]["profile"], "desktop");
     let quit = position(&records, "quit requested");

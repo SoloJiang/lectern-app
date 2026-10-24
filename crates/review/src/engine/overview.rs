@@ -20,7 +20,7 @@ use lectern_git::{Base, ChangeSet, GitError, HeadReflog, Limits, Refresh, RepoPa
 use lectern_kernel::BusyGuard;
 use lectern_logging::{Ctx, debug, warn};
 use lectern_services::changes::{ChangePath, ChangeStatus, FileChange, RefreshHint};
-use lectern_services::project::{ProjectKey, WorktreeKey};
+use lectern_services::project::{ActiveTree, ChangedParts, ProjectKey, RelPath, Scan, WorktreeKey};
 use lectern_services::review::{
     OutsideCount, Overview, OverviewInterest, Progress, ReviewEvent, ReviewTarget, SessionOverview,
 };
@@ -54,6 +54,7 @@ pub(crate) const MAX_OTHER_BASES: usize = 8;
 /// HEAD reflog records read at most (as a review reads them).
 const MAX_REFLOG: usize = 4096;
 
+mod packages;
 mod round;
 mod session;
 mod sink;

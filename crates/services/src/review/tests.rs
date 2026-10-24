@@ -10,7 +10,7 @@ use crate::changes::{
     ChangeDetail, ChangeError, ChangePath, ChangeStatus, ChangeTotals, DiffHunk, FileChange,
     FileMode, FileSide, SideIdentity, SideText,
 };
-use crate::project::BlobId;
+use crate::project::{BlobId, RelPath};
 use crate::session::{Agent, ContentRef, SourceId, Timestamp, ToolCallId, ToolStatus, TurnId};
 
 /// `Probe::<T>::IS_SERVICE` is true exactly when `T: Service`: the inherent
@@ -801,6 +801,14 @@ fn overview_and_brief_requests_round_trip() {
         OutsideCount::Capped(4001),
     ]
     .map(|outside| Overview {
+        packages: match outside {
+            OutsideCount::Pending => None,
+            OutsideCount::Files(_) => Some(Arc::from(vec![
+                (RelPath::from("crates/a"), 3),
+                (RelPath::from(""), 1),
+            ])),
+            OutsideCount::Capped(_) => None,
+        },
         project: project(),
         generation: 4,
         sessions: Arc::from(vec![

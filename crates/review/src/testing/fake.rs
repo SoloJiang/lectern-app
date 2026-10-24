@@ -11,8 +11,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde::Deserialize;
 
 use lectern_services::project::{
-    ActiveTree, Head, Location, OpenError, OpenRequest, PackageMatch, ProjectKey, ProjectSnapshot,
-    Projects, RelPath, ResolveError, Resolved, Scan, ScanError, Worktree, WorktreeKey,
+    ActiveTree, Head, Location, OpenError, OpenRequest, Package, PackageMatch, ProjectKey,
+    ProjectSnapshot, Projects, RelPath, ResolveError, Resolved, Scan, ScanError, Worktree,
+    WorktreeKey,
 };
 use lectern_services::session::{
     Agent, Batch, Content, ContentRef, Cursor, Diagnostics, EditOp, FileEdit, Format, Parent,
@@ -579,7 +580,8 @@ impl SessionSource for FakeSessions {
 pub struct FakeProjects {
     key: ProjectKey,
     worktrees: Mutex<Vec<Worktree>>,
-    packages: Vec<RelPath>,
+    /// None: the snapshot's `active.packages` is `Pending`.
+    packages: Mutex<Option<Vec<RelPath>>>,
     /// The active worktree of the snapshot (the overview's); the main one
     /// until [`FakeProjects::set_active`].
     active: Mutex<Option<WorktreeKey>>,
@@ -601,7 +603,7 @@ impl FakeProjects {
                 locked: false,
                 prunable: false,
             }]),
-            packages: Vec::new(),
+            packages: Mutex::new(None),
             active: Mutex::new(Some(WorktreeKey(Arc::from(common_dir)))),
         }
     }
@@ -612,11 +614,22 @@ impl FakeProjects {
         *self.active.lock().unwrap_or_else(PoisonError::into_inner) = key;
     }
 
-    /// Sub-project directories `locate` matches, deepest first.
-    pub fn with_packages(mut self, dirs: &[&str]) -> FakeProjects {
-        self.packages = dirs.iter().map(|d| RelPath::from(*d)).collect();
-        self.packages.sort_by_key(|d| std::cmp::Reverse(d.len()));
+    /// [`FakeProjects::set_packages`] with `dirs`.
+    pub fn with_packages(self, dirs: &[&str]) -> FakeProjects {
+        self.set_packages(Some(dirs));
         self
+    }
+
+    /// The sub-projects of the active worktree from now on: the
+    /// directories `locate` matches (deepest first) and the snapshot's
+    /// `active.packages`, `Ready` with them (the root is ""). None:
+    /// `Pending`, as before the first scan.
+    pub fn set_packages(&self, dirs: Option<&[&str]>) {
+        *self.packages.lock().unwrap_or_else(PoisonError::into_inner) = dirs.map(|dirs| {
+            let mut dirs: Vec<RelPath> = dirs.iter().map(|d| RelPath::from(*d)).collect();
+            dirs.sort_by_key(|d| std::cmp::Reverse(d.len()));
+            dirs
+        });
     }
 
     /// A linked worktree: its git directory and root.
@@ -650,6 +663,19 @@ impl FakeProjects {
     }
 }
 
+/// A sub-project at `dir` with no manifest.
+fn synthetic_package(dir: &RelPath) -> Package {
+    Package {
+        dir: dir.clone(),
+        name: dir.rsplit('/').next().unwrap_or("").into(),
+        manifests: Arc::from(Vec::new()),
+        declared: false,
+        workspace_root: false,
+        parent: None,
+        files: 0,
+    }
+}
+
 impl Projects for FakeProjects {
     fn open(&self, _: &Path) -> OpenRequest {
         OpenRequest(0)
@@ -679,12 +705,17 @@ impl Projects for FakeProjects {
                     .find(|w| w.key == key)
                     .map(|w| w.root.clone())
                     .expect("an added worktree");
+                let packages = match &*self.packages.lock().unwrap_or_else(PoisonError::into_inner)
+                {
+                    Some(dirs) => Scan::Ready(dirs.iter().map(synthetic_package).collect()),
+                    None => Scan::Pending,
+                };
                 ActiveTree {
                     root,
                     worktree: Some(key),
                     opened_at: RelPath::from(""),
                     files: Scan::Pending,
-                    packages: Scan::Pending,
+                    packages,
                     dirs: Scan::Pending,
                 }
             });
@@ -714,7 +745,10 @@ impl Projects for FakeProjects {
         let rel: RelPath = rel.to_string_lossy().replace('\\', "/").into();
         let package = self
             .packages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
             .iter()
+            .flatten()
             .find(|d| rel.starts_with(&format!("{d}/")) || rel == **d)
             .map_or(PackageMatch::None, |d| PackageMatch::Found(d.clone()));
         Some(Location {
