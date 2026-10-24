@@ -1,4 +1,5 @@
-//! `ui/*` (docs/design/ui.md「性能」): the motion primitives of step 2.
+//! `ui/*` (docs/design/ui.md「性能」): the motion primitives of step 2 and
+//! the disarmed semantic wrapper of step 4.
 //! GPUI only builds on macOS in this workspace, so this module is compiled
 //! there alone; the budgets are `macos_only` and skipped elsewhere.
 
@@ -11,9 +12,10 @@ use lectern_bench::budgets::fmt_duration;
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Samples, Value};
 use lectern_i18n::{Locale, Strings};
 use lectern_ui::motion::{ENTER_SESSION, Motion, PANEL_OPEN, STANDARD, Transition};
+use lectern_ui::semantic::Recorder;
 use lectern_ui::{Appearance, init_fixed};
 
-pub const BENCHES: &[Bench] = &[TRANSITION_TICK, BEZIER_EVAL];
+pub const BENCHES: &[Bench] = &[TRANSITION_TICK, BEZIER_EVAL, SEMANTIC_DISARMED];
 
 /// `Easing::eval` of `STANDARD` over 1000 points of the curve.
 pub const BEZIER_EVAL: Bench = Bench {
@@ -28,6 +30,25 @@ fn bezier_eval(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
         STANDARD.eval(black_box(i as f32 / 1000.0))
     });
     Ok(vec![Measured::new("ui/bezier_eval", Value::Time(time))])
+}
+
+/// What every `semantic(...)` wrapper reads in `prepaint` while the probe
+/// is off: `Recorder::is_armed()`, one relaxed atomic load, before it hands
+/// the child over. This is the wrapper's own cost; the dispatch to the
+/// child (an `AnyElement` call each for layout, prepaint and paint) is GPUI
+/// element plumbing that the budget does not cover, and a per-frame
+/// difference could not resolve 2 ns against a frame's noise.
+pub const SEMANTIC_DISARMED: Bench = Bench {
+    id: "ui/semantic_disarmed",
+    run: semantic_disarmed,
+};
+
+fn semantic_disarmed(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    let time = ctx.time(|| black_box(Recorder::is_armed()));
+    Ok(vec![Measured::new(
+        "ui/semantic_disarmed",
+        Value::Time(time),
+    )])
 }
 
 /// The simulated time between two ticks, and how often the transition is
