@@ -9,6 +9,30 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "view"
+# The "project-home" and "project-home-usage" plugins (docs/design/project_home.md
+# 「依赖」, ADR 0025): they require services only and are depended on by `app`.
+plugin = true
+
+[dependencies]
+# The `Background` task that composes the snapshot.
+lectern-executor = { path = "../executor" }
+# `Plugin`, `Context`, `PluginHandle`, `ServiceRef`, `ServiceSet`, `ActivationToken`.
+lectern-kernel = { path = "../kernel" }
+# Runtime logging (docs/design/project_home.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
+# `dyn Projects`, `dyn SessionSource`, `dyn Review`, `dyn Usage`, `dyn Contributions`
+# and their data types and events.
+lectern-services = { path = "../services" }
+
+[dev-dependencies]
+# Snapshot tests of `snapshot::build` (AGENTS.md).
+insta.workspace = true
+# `Executor::manual`: the composing task runs when a test says so.
+lectern-executor = { path = "../executor", features = ["test-support"] }
+# `Kernel::barrier`, `ManualClock`: the plugins run in a real kernel.
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `testing::capture` for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
 
 [lints]
 workspace = true

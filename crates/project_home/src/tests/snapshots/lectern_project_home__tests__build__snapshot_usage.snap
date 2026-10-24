@@ -1,0 +1,13 @@
+---
+source: crates/project_home/src/tests/build.rs
+expression: render(&built.snapshot)
+---
+project "app" branch=main settled=true
+sources project=1 sessions=[] overview=None usage=Some(9)
+sidebar groups=0 session_rows=0 packages=0 counts=false
+rows
+  sessions-header
+  sessions-empty
+main overview_ready=false needs_review=0 done=0
+  outside pending
+usage tokens_7d=Some(12345) tightest=Some(("codex", 34, Some(1800003600000)))

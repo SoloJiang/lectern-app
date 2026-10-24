@@ -1,0 +1,28 @@
+---
+source: crates/project_home/src/tests/build.rs
+expression: render(&built.snapshot)
+---
+project "app" branch=main settled=true
+sources project=1 sessions=["a@3", "b@3"] overview=None usage=None
+sidebar groups=3 session_rows=5 packages=0 counts=false
+  group worktree main active=true
+    s1 "title of s1" agent=claude-code ago=5m running=false pending=false
+    s2 "<untitled>" agent=codex ago=20m running=false pending=false
+  group worktree feat/x active=false
+    s3 "title of s3" agent=other:other-agent ago=60m running=false pending=false
+  group other
+    s4 "title of s4" agent=claude-code ago=2m running=false pending=false
+    s8 "title of s8" agent=claude-code ago=3m running=false pending=false
+rows
+  sessions-header
+  worktree-header 0
+  session 0.0
+  session 0.1
+  worktree-header 1
+  session 1.0
+  worktree-header 2
+  session 2.0
+  session 2.1
+main overview_ready=false needs_review=0 done=0
+  outside pending
+usage none
