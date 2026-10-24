@@ -849,7 +849,7 @@ CI：
 1. **运行器、预算表与迁移**（`bench`，同时删除 `agents`、`platform` 里的 `perf_smoke`）
    - `just test -p lectern-bench` 里 `stats_*`、`budgets_*`、`runner_*`、`report_*`、`report_merge_*`、`alloc_*` 通过。
    - `just bench` 之后 `target/lectern-bench/` 下有 `report-time.json`、`report-memory.json`、`report-process.json` 和合并后的 `report.json`，`app/bundle_size`、`app/dmg_size` 的状态是 `skipped`（未打包），退出码不因它们非 0；`lectern-bench-report merge --require package` 在没有 `report-package.json` 时退出码 2；删掉 `budgets.rs` 里任意一条 `Active` 预算对应的基准时，`just bench` 退出码 2。
-   - Linux 上 `just bench` 退出码 0：`time` 与 `memory` 目标的生效条目状态都是 `smoke`，`process` 目标的生效条目都是 `skipped`（只在 macOS 运行），其余是 `planned`；`just bench agents/` 只运行 `agents/*`，其余条目为 `filtered`。
+   - Linux 上 `just bench` 退出码 0：`time` 与 `memory` 目标的生效条目状态都是 `smoke`（`macos_only` 的条目是 `skipped`），`process` 目标的生效条目都是 `skipped`（只在 macOS 运行），其余是 `planned`；`just bench agents/` 只运行 `agents/*`，其余条目为 `filtered`。
    - macOS CI 的 `just bench` 判定 `agents/parse_throughput`、`agents/append_4k`、`agents/zst_throughput`、`agents/zst_load_decoded`、`git/open`、`git/open_handle`、`git/diff_50_cold`、`git/diff_50_warm`、`cache/*` 的 7 项读写与打开、`platform/safe_stat`、`platform/safe_read_4k`，记录 `cache/zstd_1m/*`、`executor/*`、`kernel/*`、`i18n/*`，上传 `report.json`。
    - Linux CI 任务有 `just bench` 一步；`just ci` 在 Linux 上运行它。
    - `rg -l perf_smoke crates` 没有结果（含 `crates/git/src/worktree/tests.rs`）；`rg -n 'perf_smoke' crates/agents/Cargo.toml` 没有结果。

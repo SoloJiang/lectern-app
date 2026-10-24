@@ -56,7 +56,8 @@ impl Ticker {
             transition: Transition::new(0.0),
             motion,
             now,
-            leg_start: now,
+            // Before the first leg, so that the first tick re-aims at 1.
+            leg_start: now - LEG,
             target: 0.0,
             ticks: 0,
         }
@@ -67,9 +68,7 @@ impl Render for Ticker {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         for _ in 0..self.ticks {
             self.now += STEP;
-            if self.now.duration_since(self.leg_start) >= LEG
-                || !self.transition.is_running(self.now)
-            {
+            if self.now.duration_since(self.leg_start) >= LEG {
                 self.leg_start = self.now;
                 self.target = 1.0 - self.target;
                 self.transition.go(self.target, self.motion, self.now, cx);
@@ -118,6 +117,7 @@ fn ticks(
             ticker.motion = motion;
             ticker.transition.set(0.0);
             ticker.target = 0.0;
+            ticker.leg_start = ticker.now - LEG;
         })
         .map_err(|e| BenchError::debug("window", e))?;
     let cx = RefCell::new(cx);

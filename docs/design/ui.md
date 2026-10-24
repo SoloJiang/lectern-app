@@ -802,7 +802,7 @@ pub mod semantic {
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`bench` 对 `lectern-ui` 和 `gpui` 的依赖只在 macOS 声明，见「与设计的差异」）。
 - `just test -p lectern-ui`：38 个测试通过，其中本步新增 15 个：`bezier_matches_the_css_reference`、`bezier_ends_at_0_and_1`、`bezier_switch_overshoots_near_0_6`、`spring_constants_match_the_spec`、`spring_keeps_its_velocity_when_retargeted`、`spec_constants_hold_the_table`、`transition_continues_from_the_current_value`、`transition_same_target_does_not_restart`、`transition_set_arrives_at_once`、`transition_delay_holds_the_start_value`、`transition_reduced_motion_halves_and_fades`、`transition_not_reduced_moves`、`active_transitions_counts_the_ones_in_progress`、`reduced_motion_has_no_displacement`、`panel_moves_when_motion_is_not_reduced`。`cargo nextest run -p lectern-bench`：78 个通过（新增 `runner_macos_only_budgets_are_skipped_off_macos`）。
 - `just doctest`：`lectern-ui` 的 3 个 `compile_fail` 仍通过。
-- `just bench --measure ui/`：`ui/transition_tick` 中位数 48 ns（预算 ≤ 100 ns；`ENTER_SESSION` 弹簧的 tick 49 ns，记在结果的 note 里），`ui/bezier_eval` 中位数 9 ns（预算 ≤ 50 ns）。
+- `just bench --measure ui/`：`ui/transition_tick` 中位数 43 ns（预算 ≤ 100 ns；`ENTER_SESSION` 弹簧的 tick 40 ns，记在结果的 note 里），`ui/bezier_eval` 中位数 8 ns（预算 ≤ 50 ns）。
 - `rg 'set_reduce_motion' crates/ui/src crates/app/src`、`rg 'Duration::from_millis|Duration::from_secs' crates/ui/src --glob '!**/motion*' --glob '!**/tests*'`、`rg 'std::fs|std::thread::spawn|std::net' crates/ui/src` 都没有结果。
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的外部 crate。
 
