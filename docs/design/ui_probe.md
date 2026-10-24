@@ -354,13 +354,13 @@ ID 的语法：`segment('.' segment)*`，`segment` 是 `name` 或 `name[key]`；
 | 步骤 | 线程 | 做什么 |
 |---|---|---|
 | 1 | 连接线程 | 读一行，解析；进入 `req` 作用域（下文「日志与诊断」）；入队 |
-| 2 | 主线程（前台任务） | 选窗口；`window.refresh()`；`on_next_frame(cb1)` |
-| 3 | 主线程（帧请求 N 的开头） | cb1：`Recorder::begin(window_id)`；`on_next_frame(cb2)` |
+| 2 | 主线程（前台任务） | 选窗口；`on_next_frame(cb1)`；等 cb2，最多 `frame_timeout` |
+| 3 | 主线程（帧请求 N 的开头） | cb1：`window.refresh()`；`Recorder::begin(window_id)`；`on_next_frame(cb2)` |
 | 4 | 主线程（帧 N 的 draw） | 每个语义包装元素在 prepaint 里把 `Record` 推进记录器；元素嵌套决定 `parent` |
 | 5 | 主线程（帧请求 N+1 的开头） | cb2：`Recorder::finish()` 取出记录；`Tree::from_records`；发回应答通道 |
 | 6 | 连接线程 | `serde_json` 编码，写一行 |
 
-GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回调，再 `draw`（[app 设计「启动屏障」](app.md#启动屏障)用的是同一个顺序），所以 cb1 在画之前、cb2 在画之后。`refresh` 把窗口标为脏，帧 N 一定会画。记录器只在 cb1 与 cb2 之间打开：探针没有请求时，语义包装元素每帧只读一个原子标志，不记录。前台任务用 `frame_timeout` 等 cb2：超时应答 `timeout`，并丢弃之后迟到的记录。
+GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回调，再 `draw`（[app 设计「启动屏障」](app.md#启动屏障)用的是同一个顺序），所以 cb1 在画之前、cb2 在画之后。`refresh` 在 cb1 里调用（而不是登记 cb1 时）：cb1 在同一次帧请求里先于「是否要画」的判断，所以窗口此刻一定是脏的，帧 N 一定会画，而且绕过视图缓存，每个包装元素都会 prepaint。记录器只在 cb1 与 cb2 之间打开：探针没有请求时，语义包装元素每帧只读一个原子标志，不记录。前台任务用 `frame_timeout` 等 cb2：超时应答 `timeout`，并丢弃之后迟到的记录。
 
 ### 一次 `screenshot`
 
@@ -465,7 +465,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 3. **`ui_probe`**（`Refs #6`）
    - `just test -p lectern-ui-probe` 全部通过，含「测试」列出的 insta 快照和 `canary_stays_out_of_probe_logs`。
    - `cargo run -p lectern-ui-probe --bin lectern-probe -- --help` 列出 `hello`、`ui_tree`、`screenshot`、`quit`、`raw`。
-   - `rg 'println!|eprintln!' crates/ui_probe/src --glob '!bin/*'` 没有结果（库部分只经日志宏）。
+   - `rg 'println!|eprintln!' crates/ui_probe/src --glob '!**/bin/*'` 没有结果（库部分只经日志宏）。
    - `crates/ui_probe/AGENTS.md` 的设计文档行指向本文。
 4. **`app`：probe profile 与端到端**（`Closes #6`）
    - `just test -p lectern-app` 里 `tests/probe.rs` 通过（macOS）。
@@ -479,10 +479,10 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 第 3 步（macOS 27.0.1，Apple 芯片，本机屏幕锁定，没有图形会话）：
 
 - `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`ui_probe` 在 tool 层，依赖 `ui`、`logging` 和 GPUI；没有 crate 依赖它）。
-- `just test -p lectern-ui-probe`：66 个测试通过，连跑 5 次没有失败。含「测试」列出的单元测试和 `#[gpui::test]`：`tree_*`（9 个，含 `tree_basic`、`tree_warnings` 两份快照）、`check_id_*`、`warnings_*`、`annotate_*`（含 `write_png_*`）、`request_*` 与 `response_lines` 快照、`name_*`、`dir_*`、`server` 的请求处理（`hello`、`ui_tree`、未知方法、`quit` 之后的 `quitting`、`screenshot` 的检查与写文件、行长度上限、连接的顺序与 `shutdown` 结束连接）、`client` 的假探针、`snapshot_of_nested_semantics`（快照）、`records_only_while_armed`、`capture_uses_two_frames`、被取消的捕获、`handle_*`（超时、无窗口、两帧）、`quit_dispatches_the_applications_quit_action_by_name`，以及 `canary_stays_out_of_probe_logs`。
+- `just test -p lectern-ui-probe`：67 个测试通过，连跑 5 次没有失败。含「测试」列出的单元测试和 `#[gpui::test]`：`tree_*`（9 个，含 `tree_basic`、`tree_warnings` 两份快照）、`check_id_*`、`warnings_*`、`annotate_*`（含 `write_png_*`）、`request_*` 与 `response_lines` 快照、`name_*`、`dir_*`、`server` 的请求处理（`hello`、`ui_tree`、未知方法、`quit` 之后的 `quitting`、`screenshot` 的检查与写文件、行长度上限、连接的顺序与 `shutdown` 结束连接）、`client` 的假探针、`snapshot_of_nested_semantics`（快照）、`records_only_while_armed`、`capture_uses_two_frames`、被取消的捕获、`handle_*`（超时、无窗口、两帧）、`quit_dispatches_the_applications_quit_action_by_name`、`probe_can_be_shut_down_from_another_thread`（`Probe` 是 `Send + Sync`，`app` 的 `lectern-quit` 线程可以调 `shutdown`），以及 `canary_stays_out_of_probe_logs`。
 - `a_session_answers_hello_ui_tree_screenshot_and_quit`：在 GPUI 测试平台上真的起一个 `Probe`（真实的 Unix socket，0600，探针目录 0700），另一个线程里的 `client::Client` 依次发 `hello`、`ui_tree`、非法 `name` 的 `screenshot`、`screenshot`、未知方法、`quit`、再一个 `hello`；`ui_tree` 返回 6 个节点（窗口根加 5 个）、标签的 Fluent 键 `common-ok`；`quit` 分发了测试注册的 `lectern::Quit` 一次，之后的请求是 `quitting`；`drop(probe)` 后 `probe.sock` 被删除、不能再连接。测试平台没有渲染器，所以这里的 `screenshot` 应答 `render`。
 - `cargo run -p lectern-ui-probe --bin lectern-probe -- --help` 列出 `hello`、`ui_tree`、`screenshot`、`quit`、`raw`；没有探针目录时退出码 64。
-- `rg 'println!|eprintln!' crates/ui_probe/src --glob '!**/bin/*'` 没有结果（验收里的 `'!bin/*'` 在 `rg` 里不排除 `src/bin/`，改用 `'!**/bin/*'`）。
+- `rg 'println!|eprintln!' crates/ui_probe/src --glob '!**/bin/*'` 没有结果（验收里原来的 `'!bin/*'` 在 `rg` 里不排除 `src/bin/`，已改成 `'!**/bin/*'`）。
 - `git diff origin/main -- Cargo.lock | rg '^\+name = '` 没有结果：没有新的 package。`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-ui-probe`，也没有 `"test-support"`（现在还没有 crate 依赖本 crate；第 4 步再检查一次）。
 
 没有验证（本机锁屏，或属于第 4 步）：

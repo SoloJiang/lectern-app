@@ -460,3 +460,11 @@ fn a_session_answers_hello_ui_tree_screenshot_and_quit(cx: &mut TestAppContext) 
     }
     assert!(Client::connect(tmp.path(), Duration::from_secs(1)).is_err());
 }
+
+/// `app`'s quit thread calls `Probe::shutdown` while the main thread holds
+/// the `Probe` (docs/design/ui_probe.md「对其他 crate 的要求」第 3 项).
+#[test]
+fn probe_can_be_shut_down_from_another_thread() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Probe>();
+}
