@@ -1,7 +1,6 @@
 //! Project overview and project sidebar (docs/design/project_home.md).
 //!
-//! This is the part of the crate that opens no window and does not depend on
-//! GPUI (「验收」step 1):
+//! Step 1 (no window): the snapshot and the plugins.
 //!
 //! - [`snapshot`]: the immutable [`HomeSnapshot`] the views read, and
 //!   [`snapshot::build`], the pure function that composes it from the
@@ -13,11 +12,22 @@
 //! - [`ProjectHomeUsagePlugin`] ("project-home-usage") and [`UsageSlot`]: the
 //!   optional `dyn Usage`, so that the screen works without the `usage` plugin.
 //!
-//! No code here runs before the first frame, does IO, or touches a window.
+//! Step 2 (the views): [`HomeScreen`] (the main area) and [`HomeSidebar`] (the
+//! sidebar panel), the actions and key bindings, and the contributions the
+//! plugin registers with `dyn Contributions`.
+//!
+//! No code here runs before the first frame or does IO; the views read the
+//! snapshot and send `WorkspaceCommand`s.
 
+mod actions;
+mod contribute;
 mod diag;
 mod home;
+mod nodes;
 mod plugin;
+mod present;
+mod screen;
+mod sidebar;
 pub mod snapshot;
 mod usage_slot;
 
@@ -26,9 +36,14 @@ mod testing;
 #[cfg(test)]
 mod tests;
 
+pub use actions::{
+    Open, OpenOutside, OpenSession, SelectFirst, SelectLast, SelectNext, SelectPrevious,
+};
 pub use home::Home;
 pub use plugin::{
     PLUGIN_ID, ProjectHomeDeps, ProjectHomePlugin, ProjectHomeUsagePlugin, USAGE_PLUGIN_ID,
 };
+pub use screen::HomeScreen;
+pub use sidebar::HomeSidebar;
 pub use snapshot::HomeSnapshot;
 pub use usage_slot::UsageSlot;

@@ -1,7 +1,8 @@
 //! The two plugins (docs/design/project_home.md「本 crate 的公开项」):
 //! "project-home" and "project-home-usage", both `AfterFirstFrame`. `activate`
-//! only takes the services and subscribes; nothing is read, submitted or
-//! registered before `started`.
+//! takes the services, registers the contributions (`ctx.own_staged`: they
+//! take effect at the commit) and subscribes; nothing is read or submitted
+//! before `started`.
 
 use std::sync::Arc;
 #[cfg(test)]
@@ -16,8 +17,9 @@ use lectern_services::project::{ProjectEvent, Projects};
 use lectern_services::review::{Review, ReviewEvent};
 use lectern_services::session::{SessionSource, SessionsChanged, Timestamp};
 use lectern_services::usage::{Usage, UsageEvent};
-use lectern_services::workspace::Contributions;
+use lectern_services::workspace::{Contributions, WorkspaceEvent};
 
+use crate::contribute;
 use crate::home::{Home, Parts, Wall};
 use crate::usage_slot::UsageSlot;
 
@@ -75,10 +77,8 @@ fn wall_clock() -> Timestamp {
 }
 
 impl Plugin for ProjectHomePlugin {
-    /// `dyn Contributions` is required although step 1 registers nothing: the
-    /// screen, the sidebar panel, the entries and the key bindings are views
-    /// (`ui::contrib` payloads) and come with step 2. Declaring it now keeps
-    /// the activation order of the finished plugin.
+    /// `dyn Contributions` takes the screen, the sidebar panel, the Overview
+    /// entry and the key bindings, and the views' commands.
     fn manifest(&self) -> Manifest {
         Manifest {
             provides: Vec::new(),
@@ -92,17 +92,29 @@ impl Plugin for ProjectHomePlugin {
         }
     }
 
-    /// Takes the service references, builds the empty state and subscribes:
-    /// no IO, no task.
+    /// Takes the service references, builds the empty state, registers the
+    /// contributions and subscribes: no IO, no task. The registrations go to
+    /// `ctx.own_staged` (there is no token yet); the views are built later,
+    /// by `workspace`, on the main thread.
     fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        let contributions = ctx.service::<dyn Contributions>();
         let home = Home::new(Parts {
             executor: self.deps.executor.clone(),
             projects: ctx.service::<dyn Projects>(),
             sessions: ctx.service_set::<dyn SessionSource>(),
             review: ctx.service::<dyn Review>(),
+            contributions: contributions.clone(),
             usage: self.deps.usage.clone(),
             wall: self.wall.clone(),
         });
+        {
+            let registry = contributions
+                .get()
+                .ok_or(PluginError::DependencyUnavailable)?;
+            for registration in contribute::register(&*registry, &home) {
+                ctx.own_staged(registration);
+            }
+        }
         #[cfg(test)]
         {
             *self.home.lock().unwrap() = Some(home.clone());
@@ -113,6 +125,8 @@ impl Plugin for ProjectHomePlugin {
         ctx.on::<SessionsChanged>(move |event, handle| listener.on_sessions(event, handle));
         let listener = home.clone();
         ctx.on::<ReviewEvent>(move |event, handle| listener.on_review(event, handle));
+        let listener = home.clone();
+        ctx.on::<WorkspaceEvent>(move |event, _| listener.on_workspace(event));
         Ok(Box::new(HomeActive { home }))
     }
 }

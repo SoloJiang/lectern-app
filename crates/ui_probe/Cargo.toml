@@ -10,5 +10,38 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "tool"
 
+[[bin]]
+name = "lectern-probe"
+path = "src/bin/lectern-probe.rs"
+
+[dependencies]
+gpui.workspace = true
+# `test-support` opens the macOS backend's `render_to_image`: only `gpui_macos`
+# and `gpui_apple` implement it behind their own `test-support`, which
+# `gpui/test-support` alone does not reach (docs/design/ui_probe.md
+# 「截图的来源」). This crate stays out of the release build.
+gpui_platform = { workspace = true, features = ["test-support"] }
+# The semantic recorder and the node types (docs/design/ui.md「探针」).
+lectern-ui = { path = "../ui" }
+# The runtime log's macros (ADR 0046).
+lectern-logging = { path = "../logging" }
+# The request queue to the main thread: `channel::mpsc::unbounded`, sent from
+# the connection threads and received by a GPUI foreground task.
+futures.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# The 0700 check of the probe directory compares the owner with this uid.
+rustix = { workspace = true, features = ["process"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+# testing::capture() for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
+insta.workspace = true
+tempfile.workspace = true
+# `Strings` and `keys` for the labels the scenes show.
+lectern-i18n = { path = "../i18n" }
+
 [lints]
 workspace = true

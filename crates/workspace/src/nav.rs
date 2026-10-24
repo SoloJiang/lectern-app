@@ -42,6 +42,11 @@ pub struct Nav {
     pub inspector_tab: Option<Name>,
     pub panel: Option<Name>,
     pub overlay: Option<Name>,
+    /// `SetReadingColumn` overrides, as (stack depth, value); depth 0 is the
+    /// base screen. An override belongs to the screen that set it: it is
+    /// inert while another screen is above, and dropped when its screen
+    /// leaves.
+    pub reading_column: Vec<(usize, bool)>,
 }
 
 impl Nav {
@@ -55,7 +60,17 @@ impl Nav {
             inspector_tab: None,
             panel: None,
             overlay: None,
+            reading_column: Vec::new(),
         }
+    }
+
+    /// The `SetReadingColumn` value of the current screen, if it set one.
+    pub fn reading_column_override(&self) -> Option<bool> {
+        let depth = self.stack.len();
+        self.reading_column
+            .iter()
+            .find(|(at, _)| *at == depth)
+            .map(|(_, value)| *value)
     }
 
     /// The route of the base screen.
@@ -261,11 +276,16 @@ impl Navigator {
         self.nav.inspector = shown;
     }
 
-    /// The layout of the current screen; [`MISSING_LAYOUT`] when it is not
-    /// registered.
+    /// The layout of the current screen, with its `SetReadingColumn`
+    /// override applied; [`MISSING_LAYOUT`] when it is not registered.
     pub fn layout(&self, env: &dyn Env) -> ScreenLayout {
-        env.screen_layout(&self.nav.current().screen)
-            .unwrap_or(MISSING_LAYOUT)
+        let mut layout = env
+            .screen_layout(&self.nav.current().screen)
+            .unwrap_or(MISSING_LAYOUT);
+        if let Some(reading_column) = self.nav.reading_column_override() {
+            layout.reading_column = reading_column;
+        }
+        layout
     }
 
     /// A command from `Contributions::dispatch` or the window's actions.
@@ -505,6 +525,16 @@ impl Navigator {
                 }
                 self.ask(LeaveScope::View, Then::PopToBase, env, out);
             }
+            WorkspaceCommand::SetReadingColumn(reading_column) => {
+                if self.nav.project().is_none() {
+                    self.ignored(name);
+                    return;
+                }
+                self.done(name);
+                let depth = self.nav.stack.len();
+                self.nav.reading_column.retain(|(at, _)| *at != depth);
+                self.nav.reading_column.push((depth, reading_column));
+            }
             WorkspaceCommand::ShowSidebarPanel(panel) => {
                 if let Some(id) = &panel
                     && !env.has_sidebar_panel(id)
@@ -627,6 +657,7 @@ impl Navigator {
                 let from = self.nav.current();
                 self.nav.base = Base::Welcome;
                 self.nav.stack.clear();
+                self.nav.reading_column.clear();
                 self.project_path = None;
                 self.close_overlay(out);
                 self.close_panel(out);
@@ -646,6 +677,7 @@ impl Navigator {
         let before = self.nav.stack.len();
         self.nav.stack.retain(|route| route.screen != id);
         if self.nav.stack.len() != before {
+            self.nav.reading_column.clear();
             self.close_panel(out);
             self.close_overlay(out);
             self.screen_changed(from, env, out);
@@ -683,6 +715,7 @@ impl Navigator {
         let from = self.nav.current();
         let old = std::mem::replace(&mut self.nav.base, Base::Project(key));
         self.nav.stack.clear();
+        self.nav.reading_column.clear();
         self.project_path = path;
         self.close_overlay(out);
         self.close_panel(out);
@@ -701,6 +734,8 @@ impl Navigator {
         if self.nav.stack.pop().is_none() {
             return;
         }
+        let depth = self.nav.stack.len();
+        self.nav.reading_column.retain(|(at, _)| *at <= depth);
         self.close_panel(out);
         self.close_overlay(out);
         self.screen_changed(from, env, out);

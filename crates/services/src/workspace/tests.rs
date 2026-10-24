@@ -447,6 +447,8 @@ fn workspace_commands_round_trip() {
         WorkspaceCommand::Push(route(screens::READER, Target::Read(read_target()))),
         WorkspaceCommand::Pop,
         WorkspaceCommand::PopToBase,
+        WorkspaceCommand::SetReadingColumn(true),
+        WorkspaceCommand::SetReadingColumn(false),
         WorkspaceCommand::ShowSidebarPanel(Some(name("files"))),
         WorkspaceCommand::ShowSidebarPanel(None),
         WorkspaceCommand::SetInspector(true),
