@@ -119,6 +119,12 @@ pub struct Palette {
     /// this appearance's opacity (the「淡底色」of the interaction spec).
     pub diff_added_background: Hsla,
     pub diff_removed_background: Hsla,
+    /// Derived: the word-level changes inside a changed line
+    /// (`FileRows::inline`): the same two sources one notch deeper, light
+    /// 28 % / dark 36 %, so they show on top of `diff_*_background`
+    /// (docs/design/review_view.md「对其他 crate 的要求」F).
+    pub diff_added_inline_background: Hsla,
+    pub diff_removed_inline_background: Hsla,
     /// The one custom colour (ADR 0015): agent identification.
     pub agent_claude: Hsla,
     pub agent_codex: Hsla,
@@ -127,6 +133,10 @@ pub struct Palette {
 /// The opacity of the diff backgrounds: light 12 %, dark 18 %
 /// (docs/design/ui.md「数据结构」).
 const DIFF_OPACITY: [f32; 2] = [0.12, 0.18];
+
+/// The opacity of the word-level (inline) diff backgrounds: light 28 %,
+/// dark 36 %, one notch deeper than `DIFF_OPACITY`.
+const DIFF_INLINE_OPACITY: [f32; 2] = [0.28, 0.36];
 
 impl Palette {
     pub fn system(&self, color: SystemColor) -> Hsla {
@@ -142,6 +152,7 @@ impl Palette {
         }
         let control_background = builtin::convert(colors.control_background);
         let opacity = DIFF_OPACITY[appearance.index()];
+        let inline_opacity = DIFF_INLINE_OPACITY[appearance.index()];
         Palette {
             appearance,
             label: builtin::convert(colors.label),
@@ -166,6 +177,16 @@ impl Palette {
                 control_background,
                 system[SystemColor::Red as usize],
                 opacity,
+            ),
+            diff_added_inline_background: over(
+                control_background,
+                system[SystemColor::Green as usize],
+                inline_opacity,
+            ),
+            diff_removed_inline_background: over(
+                control_background,
+                system[SystemColor::Red as usize],
+                inline_opacity,
             ),
             agent_claude: builtin::agent_claude(appearance),
             agent_codex: builtin::agent_codex(appearance),
