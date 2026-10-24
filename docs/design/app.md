@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配随它的视图合并后加入。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）已实现。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -329,8 +329,8 @@ Logging::shutdown(500 ms)
 |---|---|---|---|
 | `workspace` | `WorkspacePlugin::new(host)`，`host` 是 `workspace::install(window, deps, cx)` 的返回值（`Resources::workspace`） | `dyn Contributions` | `dyn Projects` |
 
-- `welcome`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })`）现在不装配：设计规定装配在它的视图之后的步骤里，现在登记的屏幕载荷还是占位类型（`ScreenPlaceholder`，`UiPayloads` 会以 `wrong-payload` 拒绝，窗口没有 Welcome 屏幕）。它的视图合并后，在 `Profile::Desktop` 的表里加一行。`project_home` 和 `usage` 已装配（「usage 与 project_home 的装配」）。
-- `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架。正常启动时 `install` 总会运行，`welcome` 装配、`project_home` 的视图合并之前没有任何屏幕注册，窗口显示空的 `Workspace`（内容区是 `workspace-screen-missing` 的文字），这是过渡状态（workspace 设计「与设计的差异」第 3 步）。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
+- `welcome`、`welcome-discovery`（`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 返回的两个插件，逐个放进 `PluginSet::with`）在 `workspace` 之后装配，见「welcome 的装配」。`project_home` 和 `usage` 的装配见「usage 与 project_home 的装配」。
+- `install` 的位置：`startup::release` 里，`lectern_ui::ready(cx)` 之后、`Kernel::start` 之前，在 `Cache`、`Watcher` 建好之后、构造插件之前（`resources` 检查完 `HOME`、`app_cache()`、`app_data()` 才调用它）。`home`、`app_cache()`、`app_data()` 任一个为 None 时不装配插件，也不调用 `install`：窗口保持中性的骨架。正常启动时 `install` 总会运行，`welcome` 已装配，首次启动和没有项目时显示 Welcome；`project_home` 的视图合并之前，恢复出来的项目没有基底屏幕，窗口显示空的 `Workspace`（内容区是 `workspace-screen-missing` 的文字），这是过渡状态（workspace 设计「与设计的差异」第 3 步）。`release` 在骨架窗口的帧回调里运行，窗口正被 GPUI 借着，`install` 自己把 `replace_root` 推到这次更新结束时做。
 - `startup::arm` 的第二个帧回调把窗口句柄交给 `release_in(Some(window), cx)`；`release(cx)` 是 `release_in(None, cx)`，test profile 用它。没有窗口句柄的 desktop 屏障不装配（记 warn `plugins not assembled`，`missing` 为 `window`），只在直接调用 `release` 时出现。
 - `Started::shell`（`Option<Shell>`）：`Shell { host, window_state }`，`Quit` 用 `host` 问离开守卫，Dock 重开用两者。
 
@@ -409,14 +409,45 @@ target 为 `app`。
 
 ### 日志与诊断
 
-- `plugins assembled` 的 `plugins` 为 8。
+- `plugins assembled` 的 `plugins` 为 8（`welcome` 装配之后为 10，见「welcome 的装配」）。
 - 其余记录由 `usage`、`project_home` 自己写（target 为 `usage`、`project_home`），见各自设计的「日志与诊断」。`SystemZone` 不写日志。
 
 ### 测试
 
-- `every_profile_graph_validates`：desktop 的插件数为 8，图校验通过（`usage` 提供的 `dyn Usage` 满足 `project-home-usage`，`workspace` 提供的 `dyn Contributions` 满足 `project-home`）；临时目录之后仍是空的。
+- `every_profile_graph_validates`：desktop 的插件数为 8（现为 10，见「welcome 的装配」），图校验通过（`usage` 提供的 `dyn Usage` 满足 `project-home-usage`，`workspace` 提供的 `dyn Contributions` 满足 `project-home`）；临时目录之后仍是空的。
 - `zone_rounds_milliseconds_down_to_seconds`、`zone_without_an_offset_is_utc`（`src/profile.rs`）：毫秒到秒的向下取整（负数也是）和 None 时为 0；偏移本身由 `platform` 的 `utc_offset_*` 测试覆盖。
-- `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 8。
+- `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 8（现为 10）。
+
+## welcome 的装配
+
+[#29](https://github.com/SoloJiang/lectern-app/issues/29)，[welcome 设计「对其他 crate 的要求」](welcome.md#对其他-crate-的要求)的 C。`welcome` 的视图（第 2 步）已合并，屏幕载荷是 `ui::contrib::Screen`，`UiPayloads` 接受它。
+
+### 插件与资源
+
+| 插件 ID | 构造 | 提供 | 依赖 |
+|---|---|---|---|
+| `welcome` | `lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的第一个 | 无 | `dyn Contributions`、`dyn Projects` |
+| `welcome-discovery` | 同一次 `plugins` 调用的第二个 | 无 | `dyn Projects`、`dyn SessionSource` |
+
+- 两个插件在 `workspace` 之后逐个放进 `PluginSet::with`，共用 `plugins` 建的一个 `WelcomeModel`。`WelcomeDeps::data_dir` 只拼路径，不创建；`recent.json` 由 `welcome` 在 `started` 提交的后台任务里读，第一次写时才建 `welcome/` 目录（`create_dir_all`）。
+- 会话来源（`agents` 的两个插件）在同一张表里，`welcome-discovery` 的 `requires` 有提供者。没有会话来源的 profile 必须同时不装 `welcome-discovery`；`Profile::Test` 什么也不装。
+- `Resources::app_data` 非可选；`app_data()` 为 None 时 `app` 不装配任何插件（「workspace 的装配」），所以这里不处理没有目录的情况。
+
+### 性能
+
+- 冷启动：首帧之前没有新增的工作。`lectern_welcome::plugins` 只建空的 `WelcomeModel`（保存依赖，不做 IO），在 `release` 里、屏障放开之后运行。`welcome` 的 `activate` 登记 `Screen` 和 `KeyBindings`，< 1 ms；`recent.json` 在后台任务里读。
+- 空闲内存（ADR 0017：60 MB）：Welcome 屏幕的视图和两个列表的份额见 [welcome 设计「性能」](welcome.md#性能)。本机的 `phys_footprint` 没有测（「实际验证」）。
+
+### 日志与诊断
+
+- `plugins assembled` 的 `plugins` 为 10。
+- 其余记录由 `welcome` 自己写（target 为 `welcome`），见 welcome 设计的「日志与诊断」。装配不写日志，也不记路径。
+
+### 测试
+
+- `every_profile_graph_validates`：desktop 的插件数为 10，图校验通过（`workspace` 提供的 `dyn Contributions` 满足 `welcome`，`agents` 的会话来源满足 `welcome-discovery`）；临时目录之后仍是空的（`plugins` 不建 `welcome/`）。
+- `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 10。
+- 手动（welcome 设计「验收」第 2 步）：首次启动显示 Welcome，见「实际验证」。
 
 ## 性能
 
@@ -573,6 +604,12 @@ target 为 `app`。
 - `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：33 个测试通过（新增 `zone_rounds_milliseconds_down_to_seconds`、`zone_without_an_offset_is_utc`；`every_profile_graph_validates` 的 desktop 插件数为 8，图校验通过，临时目录之后仍是空的）。
 - `tests/startup.rs` 没有在本机运行（图形会话锁屏，屏障不放开，「已知限制」）；它的 `plugins` 改为 8，结果以 macOS CI 为准。发布构建（临时 `HOME`）的手动运行、冷启动、空闲内存都没有做，解锁后按「装配」「性能」的方法补测，写进这里。
 
+`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，叠在 [#247](https://github.com/SoloJiang/lectern-app/pull/247) 之上，同一台机器）：
+
+- `just check`、`just deny` 通过；`rg 'eprintln!|println!|log::|log_err|warn_on_err' crates/app/src crates/app/tests` 没有结果。
+- `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：`every_profile_graph_validates` 的 desktop 插件数为 10，图校验通过，临时目录之后仍是空的。
+- `tests/startup.rs` 没有在本机运行（图形会话锁屏，屏障不放开，「已知限制」）；它的 `plugins` 改为 10，结果以 macOS CI 为准。发布构建（临时 `HOME`）的手动运行（首次启动显示 Welcome）、冷启动、空闲内存都没有做，解锁后按「装配」「性能」的方法补测，写进这里。
+
 ## 与设计的差异
 
 - **库与二进制分开。** 原文写 `app` 是二进制 crate。记录的 target 取 `module_path!` 的第一段：二进制名为 `lectern` 时 target 是 `lectern`，不是 logging 设计规定的 `app`。现在逻辑在库 `lectern_app` 里，二进制只调用 `lectern_app::run()`，target 是 `app`（「接口」已改）。
@@ -607,5 +644,5 @@ target 为 `app`。
 
 - **`UsageDeps` 只有三个字段。** usage 设计「依赖」写 `watcher`、`git_ceilings` 要在 `app` 构造插件前补齐；第 1 步的代码没有这两项（它们要到第 2、5 步才用到），`app` 按现有的三个字段构造，不添加没有用处的字段。加字段的 PR 同时改 `profile.rs`，传 `r.watcher.clone()` 和 `r.git_ceilings.clone()`（usage 设计「与设计的差异」前置条件 C）。
 - **`project_home` 提前装配。** project_home 设计把 D 放在第 3 步（视图之后）；它的第 1 步已有两个插件和 `UsageSlot`，`dyn Usage` 现在有了提供者，`project-home` 又不登记贡献，所以图校验通过、空 `Workspace` 的启动不受影响。代价是「已知限制」里的过渡状态。bench 的 `Driver` 的 `home` 场景（D 的另一半）仍随探针。
-- **`welcome` 仍不装配**：屏幕载荷是占位类型，`UiPayloads` 会拒绝，等它的视图。
+- **`welcome` 随它的视图装配**（见「welcome 的装配」）。
 - **`LocalZone` 的 None 按 UTC。** platform 设计把 None 的处理交给 `app`；毫秒时间戳总有偏移，取 0 不记日志。

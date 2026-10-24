@@ -17,6 +17,7 @@ use lectern_project_home::{
 };
 use lectern_review::ReviewDeps;
 use lectern_usage::{LocalZone, UsageDeps};
+use lectern_welcome::WelcomeDeps;
 use lectern_workspace::{WorkspaceHost, WorkspacePlugin};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,7 +52,8 @@ impl Profile {
     pub const ALL: [Profile; 2] = [Profile::Desktop, Profile::Test];
 
     /// Desktop: `project`, the two session sources, `review`, `usage`,
-    /// `workspace`, `project-home` and `project-home-usage`
+    /// `workspace`, `welcome`, `welcome-discovery`, `project-home` and
+    /// `project-home-usage`
     /// (docs/design/app.md「插件与资源」). Test: none. With the number of
     /// plugins, for the log (`PluginSet` does not expose it). No IO.
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
@@ -98,12 +100,22 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
     // One cell for the two project-home plugins: `dyn Usage` may be absent,
     // so the interest in the project's usage is reconciled in it.
     let slot = UsageSlot::default();
-    // The window skeleton. Its screens come from `welcome`, which joins when
-    // its view is merged; `project-home` registers none until its views are.
-    let set = set
+    // The window skeleton. Its Welcome screen comes from `welcome`;
+    // `project-home` registers no screen until its views are merged.
+    let mut set = set
         .with(id, review)
         .with(usage_id, usage)
-        .with("workspace", WorkspacePlugin::new(r.workspace.clone()))
+        .with("workspace", WorkspacePlugin::new(r.workspace.clone()));
+    // `welcome` and `welcome-discovery` share one model; `plugins` builds it
+    // empty and does no IO (docs/design/welcome.md「对其他 crate 的要求」C).
+    for (id, plugin) in lectern_welcome::plugins(WelcomeDeps {
+        executor: r.executor.clone(),
+        data_dir: r.app_data.join("welcome"),
+    }) {
+        set = set.with(id, plugin);
+        count += 1;
+    }
+    let set = set
         .with(
             PROJECT_HOME_ID,
             ProjectHomePlugin::new(ProjectHomeDeps {
