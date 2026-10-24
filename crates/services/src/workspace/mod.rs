@@ -26,22 +26,31 @@ mod tests;
 
 /// 单实现服务，`workspace` 插件提供。
 pub trait Contributions: Send + Sync {
-    /// 登记一项贡献。立即返回，任何线程可调用。`activate` 里调用时把返回的守卫交给
-    /// `ctx.own_staged`，提交时才生效；`started` 之后调用时按 kernel 设计「撤销」排到
-    /// 主线程应用——条件是这次激活在 `activate` 里至少登记过一项（`workspace` 从它的
-    /// 提交认出这次激活的 token）；一次 commit 都没有的激活，之后的登记要自己
-    /// `Staged::commit(&mut registration, handle.token())`，否则不显示（workspace
-    /// 设计「与设计的差异」第 1 步）。同一个 `(kind, id)` 已有登记时后来的被拒绝（记
-    /// warn），守卫 drop 时什么也不做。守卫 drop 时注销，注销排到主线程，带所属激活的
-    /// `token.pending()` 守卫。
-    fn register(&self, contribution: Contribution) -> Registration;
+    /// 登记一项贡献。立即返回，任何线程可调用。`token` 是登记方这次激活的 token：
+    /// `activate` 里还没有 token，传 `None` 并把返回的守卫交给 `ctx.own_staged`，提交
+    /// 时才生效；`started` 之后（`started`、监听、任务里）传 `Some(handle.token())`，
+    /// 登记立即按 kernel 设计「撤销」排到主线程应用——token 还是 `Pending` 时留到
+    /// 变为 `Live` 再应用，已是 `Dead` 时拒绝（记 warn `token-dead`）。`activate` 之外
+    /// 传 `None` 的登记没有人提交，永远不显示。同一个 `(kind, id)` 已有登记时后来的
+    /// 被拒绝（记 warn），守卫 drop 时什么也不做。守卫 drop 时注销，注销排到主线程，
+    /// 带所属激活的 `token.pending()` 守卫。
+    fn register(&self, contribution: Contribution, token: Option<ActivationToken>) -> Registration;
 
     /// 登记一个由 `Command` 激活的命令的处理函数（kernel 设计「按命令激活」第 1 步）。
     /// 规则同 `register`。
-    fn handle_command(&self, name: Name, handler: CommandHandler) -> Registration;
+    fn handle_command(
+        &self,
+        name: Name,
+        handler: CommandHandler,
+        token: Option<ActivationToken>,
+    ) -> Registration;
 
     /// 登记离开守卫（file_reader 设计「编辑」）。按登记顺序询问。规则同 `register`。
-    fn register_leave_guard(&self, guard: Arc<dyn LeaveGuard>) -> Registration;
+    fn register_leave_guard(
+        &self,
+        guard: Arc<dyn LeaveGuard>,
+        token: Option<ActivationToken>,
+    ) -> Registration;
 
     /// 向窗口发一个导航或布局命令。立即返回，任何线程可调用；排到主线程执行，需要
     /// 离开守卫的命令先问守卫（workspace 设计「数据结构」的状态机）。
@@ -162,10 +171,11 @@ impl fmt::Debug for SharedPayload {
     }
 }
 
-/// 登记的守卫。drop 时注销；实现 [`Staged`]，`activate` 里经 `ctx.own_staged` 交出。
-/// `workspace` 用 `new` 构造：`commit` 在提交时收到这次激活的 token，把登记排到主线程
-/// 应用；`release` 在 drop 时把注销排到主线程。两个回调各最多调用一次，不得 panic；
-/// 没有提交就 drop（激活失败）时只调用 `release`。不序列化。
+/// 登记的守卫。drop 时注销；实现 [`Staged`]，`activate` 里（登记时 `token` 为 `None`）
+/// 经 `ctx.own_staged` 交出。`workspace` 用 `new` 构造：`commit` 在提交时收到这次激活
+/// 的 token，把登记排到主线程应用；登记时已经带 token 的守卫，`commit` 什么也不做。
+/// `release` 在 drop 时把注销排到主线程。两个回调各最多调用一次，不得 panic；没有
+/// 提交就 drop（激活失败）时只调用 `release`。不序列化。
 pub struct Registration {
     commit: Option<Box<dyn FnOnce(ActivationToken) + Send>>,
     release: Option<Box<dyn FnOnce() + Send>>,

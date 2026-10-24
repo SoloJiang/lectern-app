@@ -34,13 +34,26 @@ impl<T: ?Sized + Service> Probe<T> {
 struct Empty;
 
 impl Contributions for Empty {
-    fn register(&self, _contribution: Contribution) -> Registration {
+    fn register(
+        &self,
+        _contribution: Contribution,
+        _token: Option<ActivationToken>,
+    ) -> Registration {
         Registration::new(|_| {}, || {})
     }
-    fn handle_command(&self, _name: Name, _handler: CommandHandler) -> Registration {
+    fn handle_command(
+        &self,
+        _name: Name,
+        _handler: CommandHandler,
+        _token: Option<ActivationToken>,
+    ) -> Registration {
         Registration::new(|_| {}, || {})
     }
-    fn register_leave_guard(&self, _guard: Arc<dyn LeaveGuard>) -> Registration {
+    fn register_leave_guard(
+        &self,
+        _guard: Arc<dyn LeaveGuard>,
+        _token: Option<ActivationToken>,
+    ) -> Registration {
         Registration::new(|_| {}, || {})
     }
     fn dispatch(&self, _command: WorkspaceCommand) {}
@@ -193,12 +206,16 @@ fn workspace_leave_guard_is_not_a_service() {
 #[test]
 fn workspace_contributions_is_a_shared_trait_object() {
     let contributions: Arc<dyn Contributions> = Arc::new(Empty);
-    let registration = contributions.register(Contribution {
-        kind: ContributionKind::Screen(layout()),
-        id: Name::Borrowed(screens::REVIEW),
-        order: 0,
-        payload: Payload(Box::new(42u8)),
-    });
+    // Inside `activate` there is no token yet: `None`, then `own_staged`.
+    let registration = contributions.register(
+        Contribution {
+            kind: ContributionKind::Screen(layout()),
+            id: Name::Borrowed(screens::REVIEW),
+            order: 0,
+            payload: Payload(Box::new(42u8)),
+        },
+        None,
+    );
     assert_eq!(
         format!("{registration:?}"),
         "Registration { committed: false, .. }"
@@ -212,8 +229,9 @@ fn workspace_contributions_is_a_shared_trait_object() {
             assert_eq!(call.window, WindowId(0));
             c.fetch_add(1, Ordering::SeqCst);
         }),
+        None,
     ));
-    drop(contributions.register_leave_guard(Arc::new(Permissive)));
+    drop(contributions.register_leave_guard(Arc::new(Permissive), None));
     contributions.dispatch(WorkspaceCommand::Escape);
     assert!(contributions.sidebar_entries().is_empty());
     contributions.report_milestone(Milestone::ProjectHome);

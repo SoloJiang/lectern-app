@@ -30,8 +30,8 @@ fn review_route() -> Route {
 /// review screen.
 fn screens_plugin() -> Contributor {
     Contributor::staged(vec![
-        Box::new(|c| c.register(screen(screens::PROJECT_HOME, home_layout(), "Home"))),
-        Box::new(|c| c.register(screen(screens::REVIEW, review_layout(), "Review"))),
+        Box::new(|c, t| c.register(screen(screens::PROJECT_HOME, home_layout(), "Home"), t)),
+        Box::new(|c, t| c.register(screen(screens::REVIEW, review_layout(), "Review"), t)),
     ])
 }
 
@@ -49,16 +49,16 @@ fn duplicate_ids_are_rejected() {
     let rig = Rig::prepared();
     let first = rig
         .hub
-        .register(screen(screens::REVIEW, review_layout(), "a"));
+        .register(screen(screens::REVIEW, review_layout(), "a"), None);
     let duplicate = rig
         .hub
-        .register(screen(screens::REVIEW, review_layout(), "b"));
+        .register(screen(screens::REVIEW, review_layout(), "b"), None);
     assert_eq!(rig.queue.len(), 0, "nothing is queued before a commit");
     // The rejected guard does nothing: the slot is still held by `first`.
     drop(duplicate);
     let again = rig
         .hub
-        .register(screen(screens::REVIEW, review_layout(), "c"));
+        .register(screen(screens::REVIEW, review_layout(), "c"), None);
     assert_eq!(rig.queue.len(), 0);
     drop(again);
     // Releasing the holder frees the ID.
@@ -66,10 +66,10 @@ fn duplicate_ids_are_rejected() {
     assert_eq!(rig.queue.len(), 0, "a staged entry is dropped in place");
     let _third = rig
         .hub
-        .register(screen(screens::REVIEW, review_layout(), "d"));
+        .register(screen(screens::REVIEW, review_layout(), "d"), None);
     let contested = rig
         .hub
-        .register(screen(screens::REVIEW, review_layout(), "e"));
+        .register(screen(screens::REVIEW, review_layout(), "e"), None);
     drop(contested);
     assert!(rig.hub.registry().applied().is_empty());
 }
@@ -77,27 +77,33 @@ fn duplicate_ids_are_rejected() {
 #[test]
 fn wrong_payload_is_rejected() {
     let rig = Rig::prepared();
-    let wrong = rig.hub.register(Contribution {
-        kind: ContributionKind::Screen(review_layout()),
-        id: name(screens::REVIEW),
-        order: 0,
-        payload: Payload(Box::new(Marker)),
-    });
-    let wrong_item = rig.hub.register(Contribution {
-        kind: ContributionKind::SidebarEntry {
-            section: SidebarSection::Views,
+    let wrong = rig.hub.register(
+        Contribution {
+            kind: ContributionKind::Screen(review_layout()),
+            id: name(screens::REVIEW),
+            order: 0,
+            payload: Payload(Box::new(Marker)),
         },
-        id: name("files"),
-        order: 0,
-        payload: Payload(Box::new(ScreenPayload("x".to_owned()))),
-    });
+        None,
+    );
+    let wrong_item = rig.hub.register(
+        Contribution {
+            kind: ContributionKind::SidebarEntry {
+                section: SidebarSection::Views,
+            },
+            id: name("files"),
+            order: 0,
+            payload: Payload(Box::new(ScreenPayload("x".to_owned()))),
+        },
+        None,
+    );
     // Rejected registrations hold no slot.
     let _right = rig
         .hub
-        .register(screen(screens::REVIEW, review_layout(), "a"));
+        .register(screen(screens::REVIEW, review_layout(), "a"), None);
     let _right_item = rig
         .hub
-        .register(item("files", SidebarSection::Views, 0, "Files"));
+        .register(item("files", SidebarSection::Views, 0, "Files"), None);
     drop(wrong);
     drop(wrong_item);
     assert_eq!(rig.queue.len(), 0);
@@ -107,20 +113,23 @@ fn wrong_payload_is_rejected() {
 fn invalid_ids_are_rejected() {
     let rig = Rig::prepared();
     for id in ["", "Bad Id", "with/slash", &"x".repeat(65)] {
-        let _rejected = rig.hub.register(Contribution {
-            kind: ContributionKind::Panel,
-            id: name(id),
-            order: 0,
-            payload: Payload(Box::new(Marker)),
-        });
-        let _rejected_command = rig.hub.handle_command(name(id), Box::new(|_| {}));
+        let _rejected = rig.hub.register(
+            Contribution {
+                kind: ContributionKind::Panel,
+                id: name(id),
+                order: 0,
+                payload: Payload(Box::new(Marker)),
+            },
+            None,
+        );
+        let _rejected_command = rig.hub.handle_command(name(id), Box::new(|_| {}), None);
     }
     let _ok = rig
         .hub
-        .register(plain(ContributionKind::Panel, &"x".repeat(64)));
+        .register(plain(ContributionKind::Panel, &"x".repeat(64)), None);
     let _ok_command = rig
         .hub
-        .handle_command(name("finder-open_2"), Box::new(|_| {}));
+        .handle_command(name("finder-open_2"), Box::new(|_| {}), None);
     assert_eq!(rig.queue.len(), 0);
 }
 
@@ -194,18 +203,18 @@ fn pending_token_is_deferred() {
 }
 
 #[test]
-fn late_registration_applies_without_a_commit() {
+fn late_registration_applies_with_its_token() {
     let mut rig = Rig::new();
     let act = Arc::new(Mutex::new(None));
     let seen = act.clone();
     let kernel = contributor(
         &rig.hub,
         Contributor {
-            staged: Arc::new(vec![Box::new(|c| {
-                c.register(screen(screens::PROJECT_HOME, home_layout(), "Home"))
+            staged: Arc::new(vec![Box::new(|c, t| {
+                c.register(screen(screens::PROJECT_HOME, home_layout(), "Home"), t)
             })]),
-            late: Arc::new(vec![Box::new(|c| {
-                c.register(item("overview", SidebarSection::Project, 0, "Overview"))
+            late: Arc::new(vec![Box::new(|c, t| {
+                c.register(item("overview", SidebarSection::Project, 0, "Overview"), t)
             })]),
             on_started: Some(Arc::new(move |handle| {
                 *seen.lock().unwrap() = Some(handle.token().id());
@@ -213,6 +222,7 @@ fn late_registration_applies_without_a_commit() {
         },
     );
     kernel.activate().unwrap();
+    assert_eq!(rig.queue.len(), 2, "the staged commit and the late apply");
     let act = act.lock().unwrap().expect("started ran");
     assert!(!rig.hub.registry().activation_applied(act));
     rig.drain();
@@ -224,11 +234,126 @@ fn late_registration_applies_without_a_commit() {
             (Kind::SidebarEntry, name("overview")),
         ]
     );
-    // A registration outside any activation's scope has no token and waits
-    // for a commit that never comes: it is never shown.
-    let _orphan = rig.hub.register(plain(ContributionKind::Panel, "context"));
+    // A registration without a token outside `activate` waits for a commit
+    // that never comes: it is never shown.
+    let _orphan = rig
+        .hub
+        .register(plain(ContributionKind::Panel, "context"), None);
     assert_eq!(rig.queue.len(), 0);
     assert!(!rig.hub.registry().has(Kind::Panel, "context"));
+}
+
+#[test]
+fn late_registration_needs_no_earlier_commit() {
+    let mut rig = Rig::new();
+    let kernel = contributor(
+        &rig.hub,
+        Contributor {
+            staged: Arc::new(Vec::new()),
+            late: Arc::new(vec![
+                Box::new(|c, t| c.register(screen(screens::REVIEW, review_layout(), "Review"), t)),
+                Box::new(|c, t| c.register_leave_guard(FixedGuard::new(true), t)),
+                Box::new(|c, t| c.handle_command(name("finder.open"), Box::new(|_| {}), t)),
+            ]),
+            on_started: None,
+        },
+    );
+    kernel.activate().unwrap();
+    assert_eq!(rig.queue.len(), 3, "one apply per late registration");
+    rig.drain();
+    assert!(rig.hub.registry().has(Kind::Screen, screens::REVIEW));
+    assert_eq!(rig.hub.registry().guards().len(), 1);
+    assert!(rig.hub.registry().handler("finder.open").is_some());
+    kernel.deactivate();
+    rig.drain();
+    assert!(rig.hub.registry().applied().is_empty());
+    assert_eq!(rig.queue.len(), 0);
+}
+
+#[test]
+fn late_registration_inside_started_is_deferred_until_live() {
+    let mut rig = Rig::new();
+    let (registered, wait_registered) = mpsc::channel();
+    let (go, wait_go) = mpsc::channel::<()>();
+    let wait_go = Mutex::new(wait_go);
+    let plugin = Contributor {
+        staged: Arc::new(Vec::new()),
+        late: Arc::new(vec![Box::new(move |c, t| {
+            let registration = c.register(screen(screens::REVIEW, review_layout(), "Review"), t);
+            // Holds `started` here: the token stays pending while the main
+            // thread handles the apply.
+            registered.send(()).unwrap();
+            wait_go.lock().unwrap().recv().unwrap();
+            registration
+        })]),
+        on_started: None,
+    };
+    let kernel = Arc::new(contributor(&rig.hub, plugin));
+    let activating = {
+        let kernel = kernel.clone();
+        std::thread::spawn(move || kernel.activate())
+    };
+    wait_registered.recv().unwrap();
+    assert_eq!(rig.queue.len(), 1, "the apply is queued at once");
+    let effects = rig.drain();
+    assert!(effects.is_empty());
+    assert_eq!(rig.driver.deferred(), 1);
+    assert!(!rig.hub.registry().has(Kind::Screen, screens::REVIEW));
+    go.send(()).unwrap();
+    activating.join().unwrap().unwrap();
+    rig.hub.enqueue(crate::Item::Tick);
+    rig.drain();
+    assert_eq!(rig.driver.deferred(), 0);
+    assert!(rig.hub.registry().has(Kind::Screen, screens::REVIEW));
+}
+
+#[test]
+fn late_registration_with_a_dead_token_is_rejected() {
+    let capture = lectern_logging::testing::capture();
+    let mut rig = Rig::new();
+    let token = Arc::new(Mutex::new(None));
+    let seen = token.clone();
+    let kernel = contributor(
+        &rig.hub,
+        Contributor {
+            staged: Arc::new(Vec::new()),
+            late: Arc::new(Vec::new()),
+            on_started: Some(Arc::new(move |handle| {
+                *seen.lock().unwrap() = Some(handle.token());
+            })),
+        },
+    );
+    kernel.activate().unwrap();
+    let token = token.lock().unwrap().clone().expect("started ran");
+    kernel.deactivate();
+    rig.drain();
+    // A task of the deactivated plugin registers: nothing is queued, the
+    // slot stays free, the payload drops on this thread.
+    let late = rig.hub.register(
+        screen(screens::REVIEW, review_layout(), "Review"),
+        Some(token.clone()),
+    );
+    let late_guard = rig
+        .hub
+        .register_leave_guard(FixedGuard::new(true), Some(token));
+    assert_eq!(rig.queue.len(), 0);
+    assert!(!rig.hub.registry().has(Kind::Screen, screens::REVIEW));
+    assert!(rig.hub.registry().guards().is_empty());
+    drop(late);
+    drop(late_guard);
+    assert_eq!(rig.queue.len(), 0);
+    let _free = rig
+        .hub
+        .register(screen(screens::REVIEW, review_layout(), "Review"), None);
+    assert_eq!(
+        capture
+            .lines()
+            .iter()
+            .filter(|l| l.contains("\"msg\":\"contribution rejected\"")
+                && l.contains("\"reason\":\"token-dead\""))
+            .count(),
+        2
+    );
 }
 
 #[test]
@@ -239,7 +364,9 @@ fn removal_drops_the_shown_screen() {
     let mut plugin = screens_plugin();
     Arc::get_mut(&mut plugin.staged)
         .unwrap()
-        .push(Box::new(move |c| c.register_leave_guard(guard.clone())));
+        .push(Box::new(move |c, t| {
+            c.register_leave_guard(guard.clone(), t)
+        }));
     let kernel = contributor(&rig.hub, plugin);
     kernel.activate().unwrap();
     rig.drain();
@@ -294,8 +421,8 @@ fn release_frees_the_id_before_the_main_thread_removes_it() {
 
     let second = contributor(
         &rig.hub,
-        Contributor::staged(vec![Box::new(|c| {
-            c.register(screen(screens::REVIEW, review_layout(), "Review 2"))
+        Contributor::staged(vec![Box::new(|c, t| {
+            c.register(screen(screens::REVIEW, review_layout(), "Review 2"), t)
         })]),
     );
     second.activate().unwrap();
@@ -319,11 +446,17 @@ fn sidebar_entries_are_sorted_and_shared() {
     let kernel = contributor(
         &rig.hub,
         Contributor::staged(vec![
-            Box::new(|c| c.register(item("usage", SidebarSection::Bottom, 0, "Usage"))),
-            Box::new(|c| c.register(item("sessions", SidebarSection::Project, 1, "Sessions"))),
-            Box::new(|c| c.register(item("overview", SidebarSection::Project, 0, "Overview"))),
-            Box::new(|c| c.register(item("files", SidebarSection::Views, 0, "Files"))),
-            Box::new(|c| c.register(item("worktrees", SidebarSection::Views, 0, "Worktrees"))),
+            Box::new(|c, t| c.register(item("usage", SidebarSection::Bottom, 0, "Usage"), t)),
+            Box::new(|c, t| {
+                c.register(item("sessions", SidebarSection::Project, 1, "Sessions"), t)
+            }),
+            Box::new(|c, t| {
+                c.register(item("overview", SidebarSection::Project, 0, "Overview"), t)
+            }),
+            Box::new(|c, t| c.register(item("files", SidebarSection::Views, 0, "Files"), t)),
+            Box::new(|c, t| {
+                c.register(item("worktrees", SidebarSection::Views, 0, "Worktrees"), t)
+            }),
         ]),
     );
     assert!(rig.hub.sidebar_entries().is_empty());
@@ -364,15 +497,16 @@ fn command_handlers_guards_and_key_bindings_apply() {
     let kernel = contributor(
         &rig.hub,
         Contributor::staged(vec![
-            Box::new(move |c| {
+            Box::new(move |c, t| {
                 let seen = seen.clone();
                 c.handle_command(
                     name("finder.open"),
                     Box::new(move |call| seen.lock().unwrap().push(call.clone())),
+                    t,
                 )
             }),
-            Box::new(move |c| c.register_leave_guard(registered.clone())),
-            Box::new(|c| c.register(plain(ContributionKind::KeyBindings, "review-keys"))),
+            Box::new(move |c, t| c.register_leave_guard(registered.clone(), t)),
+            Box::new(|c, t| c.register(plain(ContributionKind::KeyBindings, "review-keys"), t)),
         ]),
     );
     kernel.activate().unwrap();
@@ -416,7 +550,9 @@ fn leave_guards_are_asked_through_the_queue() {
     let guard = allowing.clone();
     Arc::get_mut(&mut plugin.staged)
         .unwrap()
-        .push(Box::new(move |c| c.register_leave_guard(guard.clone())));
+        .push(Box::new(move |c, t| {
+            c.register_leave_guard(guard.clone(), t)
+        }));
     let screens = contributor(&rig.hub, plugin);
     screens.activate().unwrap();
     rig.drain();
@@ -441,8 +577,8 @@ fn leave_guards_are_asked_through_the_queue() {
     let guard = refusing.clone();
     let editor = contributor(
         &rig.hub,
-        Contributor::staged(vec![Box::new(move |c| {
-            c.register_leave_guard(guard.clone())
+        Contributor::staged(vec![Box::new(move |c, t| {
+            c.register_leave_guard(guard.clone(), t)
         })]),
     );
     editor.activate().unwrap();
@@ -537,7 +673,7 @@ fn a_guard_that_drops_its_answer_allows() {
     let mut plugin = screens_plugin();
     Arc::get_mut(&mut plugin.staged)
         .unwrap()
-        .push(Box::new(|c| c.register_leave_guard(Arc::new(Silent))));
+        .push(Box::new(|c, t| c.register_leave_guard(Arc::new(Silent), t)));
     let kernel = contributor(&rig.hub, plugin);
     kernel.activate().unwrap();
     rig.drain();
@@ -549,25 +685,17 @@ fn a_guard_that_drops_its_answer_allows() {
 }
 
 #[test]
-fn a_late_registration_without_any_commit_is_reported_on_release() {
-    let mut rig = Rig::new();
-    let kernel = contributor(
-        &rig.hub,
-        Contributor {
-            staged: Arc::new(Vec::new()),
-            late: Arc::new(vec![Box::new(|c| {
-                c.register(screen(screens::REVIEW, review_layout(), "Review"))
-            })]),
-            on_started: None,
-        },
-    );
-    kernel.activate().unwrap();
-    rig.drain();
-    assert!(
-        !rig.hub.registry().has(Kind::Screen, screens::REVIEW),
-        "no commit ever identified the activation"
-    );
-    kernel.deactivate();
-    rig.drain();
+fn a_registration_without_a_token_outside_activate_is_reported_on_release() {
+    let capture = lectern_logging::testing::capture();
+    let rig = Rig::new();
+    let orphan = rig
+        .hub
+        .register(plain(ContributionKind::Panel, "context"), None);
     assert_eq!(rig.queue.len(), 0);
+    drop(orphan);
+    assert_eq!(rig.queue.len(), 0, "dropped on the caller's thread");
+    assert!(capture.lines().iter().any(|l| {
+        l.contains("\"msg\":\"contribution released without a commit\"")
+            && l.contains("\"id\":\"context\"")
+    }));
 }

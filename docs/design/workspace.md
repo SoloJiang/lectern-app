@@ -51,19 +51,20 @@
 /// 单实现服务，`workspace` 插件提供。
 /// impl Service for dyn Contributions { const ID = "contributions"; const MULTIPLE = false; }
 pub trait Contributions: Send + Sync {
-    /// 登记一项贡献。立即返回，任何线程可调用。`activate` 里调用时把返回的守卫交给 `ctx.own_staged`，
-    /// 提交时才生效；`started` 之后调用时按 [kernel 设计「撤销」](kernel.md#撤销)排到主线程应用——条件是
-    /// 这次激活在 `activate` 里至少登记过一项；一次 commit 都没有的激活，之后的登记要自己
-    /// `Staged::commit(&mut registration, handle.token())`，否则不显示（「与设计的差异」第 1 步）。
+    /// 登记一项贡献。立即返回，任何线程可调用。`token` 是登记方这次激活的 token：`activate` 里还没有 token，
+    /// 传 `None` 并把返回的守卫交给 `ctx.own_staged`，提交时才生效；`started` 之后（`started`、监听、任务里）
+    /// 传 `Some(handle.token())`，登记立即按 [kernel 设计「撤销」](kernel.md#撤销)排到主线程应用——token 还是
+    /// `Pending` 时留到变为 `Live` 再应用，已是 `Dead` 时拒绝（记 warn `token-dead`）。`activate` 之外传 `None`
+    /// 的登记没有人提交，永远不显示（「与设计的差异」第 1 步）。
     /// 同一个 `(kind, id)` 已有登记时后来的被拒绝（记 warn，见「日志与诊断」），守卫 drop 时什么也不做。
     /// 守卫 drop 时注销，注销排到主线程，带所属激活的 `token.pending()` 守卫。
-    fn register(&self, contribution: Contribution) -> Registration;
+    fn register(&self, contribution: Contribution, token: Option<ActivationToken>) -> Registration;
 
     /// 登记一个由 `Command` 激活的命令的处理函数（kernel 设计「按命令激活」第 1 步）。规则同 `register`。
-    fn handle_command(&self, name: Name, handler: CommandHandler) -> Registration;
+    fn handle_command(&self, name: Name, handler: CommandHandler, token: Option<ActivationToken>) -> Registration;
 
     /// 登记离开守卫（[file_reader 设计「编辑」](file_reader.md#编辑)）。按登记顺序询问。规则同 `register`。
-    fn register_leave_guard(&self, guard: Arc<dyn LeaveGuard>) -> Registration;
+    fn register_leave_guard(&self, guard: Arc<dyn LeaveGuard>, token: Option<ActivationToken>) -> Registration;
 
     /// 向窗口发一个导航或布局命令。立即返回，任何线程可调用；排到主线程执行，
     /// 需要离开守卫的命令先问守卫（见「数据结构」的状态机）。
@@ -416,7 +417,7 @@ struct Registry {
 struct Entry { token: ActivationToken, ctx: lectern_logging::Ctx, payload: Payload /* 应用时 downcast 成 ui::contrib 的类型 */, order: u16, … }
 ```
 
-- 登记（任何线程）：写进表、生成一个序号，返回 `Registration`。`activate` 期间的登记只进表、不发事件；`commit(token)` 把 token 填进条目并排一次「应用」到主线程（`token.pending()` 守卫随队列项，取不到就丢弃）。`started` 之后的登记直接排「应用」。
+- 登记（任何线程）：写进表、生成一个序号，返回 `Registration`。`activate` 期间的登记（`token` 为 `None`）只进表、不发事件；`commit(token)` 把 token 填进条目并排一次「应用」到主线程（`token.pending()` 守卫随队列项，取不到就丢弃）。`started` 之后的登记带 `Some(token)`，直接排「应用」；token 已经 `Dead` 的在登记时拒绝（warn `token-dead`），不进表。
 - 应用（主线程）：检查 `token.state() == Live`（否则丢弃）；按 kind 把条目加进相应的集合：`SidebarEntry` 重建 `sidebar_entries` 快照并发 `ContributionsChanged`；`KeyBindings` 用 `bind_keys` 追加到 keymap，注销时不删：GPUI 只有 `bind_keys` 和 `clear_key_bindings`，后者会清掉 `app` 的 ⌘Q、gpui-component 输入框的绑定等不归本 crate 的绑定，所以不用。GPUI 分发一次按键时按优先级逐个尝试匹配的绑定，一个 Action 没有被处理就继续下一个（gpui-pre 0.3.9 `window.rs` 的 `dispatch_key_event`）；贡献方停用后它的处理函数随视图一起 drop，留下的绑定落空、不挡住其他绑定（「已知限制」）。`key_bindings` 表只记下哪些绑定属于哪次激活，供探针和调试。`Screen` 等只登记工厂，视图在需要时才建。应用完给这次激活的「已应用」标记置位（「按命令激活」第 3 步）。
 - 注销（`Registration` drop，任何线程）：取 `token.pending()`，排「移除」到主线程；主线程上从集合移除、drop 工厂和已建的视图（正在显示的屏幕被移除时按 `Pop` 处理，不问守卫；基底屏幕被移除时内容区显示空白并记 warn），每项在 `contain` 里做；守卫 drop 后 kernel 才能报告静止。
 - 调用贡献方的闭包（视图工厂、命令处理函数、守卫的 `ask`）：`token.enter()` 取准入，`logging::scope(entry.ctx)`，`contain` 包住；panic 时 `fail` 这次激活（kernel 设计「撤销」）。`ctx` 是登记时在调用线程上取的 `lectern_logging::current()`，`activate` 里登记的因此带 kernel 设的 `plugin`、`act`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 11 项）。
@@ -433,7 +434,8 @@ struct Entry { token: ActivationToken, ctx: lectern_logging::Ctx, payload: Paylo
    ├─ PluginSet 加 WorkspacePlugin ─▶ Kernel::start
    └─ app 在 executor 上读 window.json ─▶ WorkspaceHost::restore ─▶ dispatch(OpenProject)
 kernel 线程：workspace.activate（provide）─▶ started：lazy_commands → 代理；订阅 ProjectEvent
-kernel 线程：welcome / project_home / … 的 activate：Contributions::register ─▶ ctx.own_staged ─▶ commit(token) ─▶ [主线程] 应用 ─▶ 重绘
+kernel 线程：welcome / project_home / … 的 activate：Contributions::register(…, None) ─▶ ctx.own_staged ─▶ commit(token) ─▶ [主线程] 应用 ─▶ 重绘
+kernel / executor 线程：started、监听、任务里：Contributions::register(…, Some(handle.token())) ─▶ [主线程] 应用（token 还是 Pending 时等到 Live）─▶ 重绘
 executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主线程，pending + BusyGuard] 状态机 ─▶ ScreenChanged、重绘、on_state_changed
 主线程：按键 / 点击 ─▶ 当前视图的 on_action ─▶ 没处理的冒泡到 Workspace 的 Action ─▶ 状态机
 ```
@@ -529,7 +531,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   - warn `command without handler`：`command`。error `command activation failed`：`command`、`error`（`PluginError` 的种类）。
   - warn `project opened while a view refused to leave`、warn `project open failed`：`error`（`OpenError` 的种类）。
   - warn `job dropped after shutdown`：`jobs`（计数，队列关闭后累计一次）。
-  - error `leave guard panicked`：`activation`（守卫所属的激活序号）；error `contribution drop panicked`：`kind`、`id`、`activation`。两者都在 `contain` 捕获之后记录，不展开到主线程。 warn `contribution released without a commit`：`kind`、`id`、`activation`（没有 commit 就释放的登记：激活失败，或 `started` 之后由一个什么也没有 commit 过的激活登记的，见「与设计的差异」第 1 步）。
+  - error `leave guard panicked`：`activation`（守卫所属的激活序号）；error `contribution drop panicked`：`kind`、`id`、`activation`。两者都在 `contain` 捕获之后记录，不展开到主线程。 warn `contribution released without a commit`：`kind`、`id`、`activation`（没有 commit 就释放的登记：激活在提交前失败（kernel 已记录），或在 `activate` 之外传了 `None` 登记的，没有人提交它）。
 - 详细级别：debug `command`（`WorkspaceCommand` 的判别名、是否经过守卫、结果 `done` / `refused` / `ignored`）；debug `layer changed`（层、开关）；debug `milestone`（名字、`presented` 的微秒数）；debug `leave guard skipped`（守卫已注销或激活不再 `Live`，按通过处理）；debug `stale guard answer`（答复属于已结束的一轮询问）；debug `leave guard dropped its answer`（守卫没有调用 `done` 就把它 drop，按通过处理）；debug `contribution dropped before it applied`；trace `job`（队列项的来源插件与耗时）。
 - 关联 ID：调用贡献方闭包时恢复登记时取的 `Ctx`（`plugin`、`act`），所以贡献方的记录和本 crate 在那段代码里的记录都带它们；本 crate 自己的状态机代码在 kernel 为 `workspace` 设的作用域之外运行（主线程），记录带 `window`，不带 `plugin`。
 - 不记录：项目路径（`OpenProject` 的参数、窗口状态里的路径）、`prompt_for_paths` 返回的路径、工具栏的标题与副标题、侧栏条目的文字、提示的文字、`Target` 里的会话标识之外的内容（`ReviewTarget`、`ReadTarget` 只记判别名）。用屏幕 ID、贡献 ID、计数和错误种类代替。
@@ -540,7 +542,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 第 2 步起依赖 GPUI，只在 macOS 上编译和测试（第 1 步不依赖 GPUI，Linux 上也跑）：`just test -p lectern-workspace`。
 
 - 状态机（纯函数，`#[test]`，不依赖 GPUI；`src/tests/nav.rs`，用假的 `nav::Env`）：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`；`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）；`opened_with_a_refusing_view_keeps_the_screen`；`window_state_follows_the_open_path`。
-- 注册表（`#[test]`，`src/tests/registry.rs`，用 `TestKernel` 跑真实激活取 token，`driver::Driver` 代替主线程）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`invalid_ids_are_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`pending_token_is_deferred`（`started` 还没返回时 token 是 `Pending`，应用推迟到下一个 `Tick`）、`late_registration_applies_without_a_commit`、`removal_drops_the_shown_screen`、`release_frees_the_id_before_the_main_thread_removes_it`、`screens_can_be_pushed_twice`（第 1 步只检查注册表那一半：同一个屏幕压栈两次、载荷取两次；工厂真的被调用两次在第 2 步）、`a_guard_that_drops_its_answer_allows`、`a_late_registration_without_any_commit_is_reported_on_release`、`sidebar_entries_are_sorted_and_shared`、`command_handlers_guards_and_key_bindings_apply`、`leave_guards_are_asked_through_the_queue`、`commands_wait_for_projects`、`project_events_reach_the_state_machine`、`dispatch_after_shutdown_is_dropped`、`plugin_manifest_matches_the_design`。`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）要 GPUI 的 keymap，归第 2 步。
+- 注册表（`#[test]`，`src/tests/registry.rs`，用 `TestKernel` 跑真实激活取 token，`driver::Driver` 代替主线程）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`invalid_ids_are_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`pending_token_is_deferred`（`started` 还没返回时 token 是 `Pending`，应用推迟到下一个 `Tick`）、`late_registration_applies_with_its_token`、`late_registration_needs_no_earlier_commit`（`activate` 里什么也没登记的激活在 `started` 里带 token 登记屏幕、守卫和命令处理函数，都应用）、`late_registration_inside_started_is_deferred_until_live`、`late_registration_with_a_dead_token_is_rejected`（停用后用旧 token 登记：不排队、不占 ID，记 `token-dead`）、`removal_drops_the_shown_screen`、`release_frees_the_id_before_the_main_thread_removes_it`、`screens_can_be_pushed_twice`（第 1 步只检查注册表那一半：同一个屏幕压栈两次、载荷取两次；工厂真的被调用两次在第 2 步）、`a_guard_that_drops_its_answer_allows`、`a_registration_without_a_token_outside_activate_is_reported_on_release`、`sidebar_entries_are_sorted_and_shared`、`command_handlers_guards_and_key_bindings_apply`、`leave_guards_are_asked_through_the_queue`、`commands_wait_for_projects`、`project_events_reach_the_state_machine`、`dispatch_after_shutdown_is_dropped`、`plugin_manifest_matches_the_design`。`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）要 GPUI 的 keymap，归第 2 步。
 - `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`，`platform::frame::record` 用 `test-support` 的假记录器）。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
@@ -644,6 +646,13 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - `rg 'gpui' crates/workspace/src`、`rg 'eprintln!|println!|log::' crates/workspace/src` 都没有结果。
 - 没有验证：`stale_bindings_fall_through` 和「`Screen` 工厂被调用两次」要 GPUI，随第 2 步；`restore`、代理 Action、离开守卫与窗口关闭的联动也在第 2 步。
 
+### 第 2 步前置：登记接口带 token
+
+`Contributions::register`、`handle_command`、`register_leave_guard` 加 `token: Option<ActivationToken>` 参数（PR_PLACEHOLDER），在 macOS（arm64）上运行：
+
+- `cargo check -p lectern-services -p lectern-workspace`、`just check`、`just deny`、`python3 scripts/check_architecture.py` 通过。
+- `just test -p lectern-services -p lectern-workspace`：150 个测试通过（`services` 99 个不变；`workspace` 51 个，新增 3 个）。`src/tests/registry.rs` 现在 22 个：`late_registration_applies_without_a_commit` 改为 `late_registration_applies_with_its_token`（`started` 里带 token 登记，与 `activate` 里的登记一起应用；`activate` 之外传 `None` 的登记不显示）；`a_late_registration_without_any_commit_is_reported_on_release` 改为 `a_registration_without_a_token_outside_activate_is_reported_on_release`（释放时记 warn）；新增 `late_registration_needs_no_earlier_commit`、`late_registration_inside_started_is_deferred_until_live`（`started` 里登记后阻塞，主线程看到的 token 还是 `Pending`，推迟到 `Tick`）、`late_registration_with_a_dead_token_is_rejected`。
+
 ## 与设计的差异
 
 ### 前置条件 A
@@ -658,7 +667,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 - **模块划分**：设计把状态机、注册表和主线程队列都写在根视图旁边；第 1 步把不依赖 GPUI 的部分拆成四个模块，第 2 步的根视图只包一层。`nav::Navigator` 是状态机加守卫轮询，输入是 `WorkspaceCommand`、`ProjectEvent` 和守卫答复，环境（已注册的屏幕与面板、守卫列表、`Projects` 的三个调用）经 `nav::Env` 注入，输出是 `Effect` 列表（`Ask`、`Event`、`StateChanged`、`PromptOpenProject`、`CloseWindow`、`Notice`、`BindKeys`、`Milestone`）；`registry::Registry` 是注册表；`driver::Driver` 是主线程循环：取队列项（`hub::Item`：`Apply`、`Remove`、`Command`、`GuardAnswer`、`Project`、`Milestone`、`Projects`、`Tick`），调注册表和状态机，自己解决 `Ask`（取守卫的准入和日志作用域、`contain` 包住 `ask`，`done` 只把答复排回队列）；`hub::Hub` 是 `WorkspaceHost` 里不依赖 GPUI 的那份（注册表、队列发送端、本插件的 token），实现 `dyn Contributions`，`WorkspacePlugin::new(Arc<Hub>)`。第 2 步的 `WorkspaceHost` 持有 `Hub` 加窗口句柄，`install` 建 `Driver` 并把 `Effect` 变成视图、`bind_keys`、事件和回调。
 - **队列的传输**：第 1 步没有加 `futures` 依赖，发送端是 `Sender = Arc<dyn Fn(Queued) + Send + Sync>`；第 2 步决定接收端用 `futures::channel::mpsc` 还是 GPUI 自己的通道，发送端照旧。队列项带 `Option<PendingGuard>`；`Hub::dispatch`、`report_milestone` 用本插件 `started` 时记下的 token 取守卫，`started` 之前的项没有守卫（还没有激活可守），`shutdown` 之后取不到就丢弃并记 debug。
-- **`started` 之后的登记没有 token**：`Contributions::register` 不带 `ActivationToken`，而 `started` 之后没有人再调用 `Staged::commit`。注册表的做法：登记时读 `lectern_logging::current().act`（kernel 在 `started`、监听、任务外设的激活序号）；这个序号的 token 已经在某次 `commit` 里见过且不是 `Dead` 时，直接排「应用」，不等 commit；否则暂存，等 `commit`。所以一个激活只要在 `activate` 里登记过至少一项，它之后在 `started`、监听或任务里的登记都自动应用；完全没有在 `activate` 里登记的激活，之后的登记留在暂存态、不显示，守卫 drop 时记 warn `contribution released without a commit`；这样的调用方要自己 `Staged::commit(&mut registration, handle.token())`（`PluginHandle::token` 给出同一个 token），「服务接口」的 `register` 注释和 `services` 的文档注释写明了这个条件；第 2 步前可以给接口加 token 去掉它。在 `activate` 里的登记永远走暂存：那时 token 还没有 commit 过，查不到。
+- **登记接口带 token**（「服务接口」已改）：`started` 之后没有人再调用 `Staged::commit`，所以 `register`、`handle_command`、`register_leave_guard` 都加一个 `token: Option<ActivationToken>` 参数，三个方法规则相同。`activate` 里没有 token（`Context` 不给出，kernel 设计「激活时的上下文」里这正是 `Staged` 存在的原因），传 `None`，守卫经 `ctx.own_staged` 交出，`commit(token)` 时排「应用」；`started`、监听、任务里传 `Some(handle.token())`，登记时就排「应用」，`Pending` 的 token 由主线程推迟到 `Live`（见下一条），`Dead` 的在登记时拒绝（warn `token-dead`，不占 ID、不排队）。所以 `Option` 而不是像 `Review::register_brief_rules(provider, token)` 那样必带 token：那个接口只在 `started` 之后调用。第 1 步曾用 `lectern_logging::current().act` 认出已经 commit 过的激活，要求一个激活在 `activate` 里至少登记过一项，否则之后的登记要调用方自己 `commit`；这个条件和注册表里的 token 表已经去掉。在 `activate` 之外传 `None` 的登记没有人提交，留在暂存态、不显示，守卫 drop 时记 warn `contribution released without a commit`（激活在提交前失败时同样记，kernel 也记了）。
 - **token 为 `Pending` 时推迟，不丢弃**：kernel 在 `started` 之前调用 `commit`，队列项到主线程时 token 可能还是 `Pending`；设计写「检查 `token.state() == Live`（否则丢弃）」会把这类登记丢掉。注册表的 `apply` 对 `Pending` 返回 `Deferred`，`Driver` 把项留到下一个 `Tick`（第 2 步每帧发一个，直到没有推迟的项）；`Dead` 才丢弃并记 `token-dead`。「已应用」标记按激活计数：这次激活排进队列的应用全部应用或丢弃后 `activation_applied(act)` 为 true。
 - **注销先释放 ID**：守卫 drop 时在调用线程上立即从索引里去掉 `(kind, id)`，同一个 ID 可以马上再登记（插件停用后重新启用不必等主线程），载荷仍排到主线程在 `contain` 里 drop；没有 commit 过的登记没有主线程工作，直接在调用线程上 drop。
 - **守卫 panic**：kernel 没有公开用 `ActivationToken` 让别人的激活失效的接口（`PluginHandle::fail` 只对自己的激活），所以 `ask` panic 时只记 error `leave guard panicked`，这个守卫按通过处理，不让用户困在当前视图；视图工厂和命令处理函数的 panic 同样。第 2 步前要在 kernel 加这个接口，kernel 设计「撤销」要求 panic 让贡献方的激活失效。
