@@ -11,6 +11,7 @@ use crate::testing::{
 };
 use lectern_services::review::OutsideCount;
 use lectern_services::session::Agent;
+use lectern_services::workspace::{ContributionKind, SidebarSection};
 
 /// A project with two sessions in its main worktree, set in the fake `Projects`
 /// but not yet announced.
@@ -30,7 +31,7 @@ fn project(rig: &Rig, name: &str) -> (ProjectFx, ProjectKey) {
 }
 
 #[test]
-fn activate_does_no_work() {
+fn activate_registers_contributions_only() {
     let rig = Rig::new();
     let (_, key) = project(&rig, "app");
     // Nothing is open yet: the project is only in the fake's table.
@@ -41,10 +42,25 @@ fn activate_does_no_work() {
     assert!(rig.review.watched().is_empty());
     assert!(rig.usage.watched().is_empty());
     assert_eq!(
-        rig.contributions.registered(),
-        0,
-        "step 1 registers no contribution: they are views"
+        rig.contributions.kinds(),
+        [
+            (
+                ContributionKind::Screen(crate::contribute::LAYOUT),
+                "project-home".to_owned()
+            ),
+            (ContributionKind::SidebarPanel, "project".to_owned()),
+            (
+                ContributionKind::SidebarEntry {
+                    section: SidebarSection::Project
+                },
+                "overview".to_owned()
+            ),
+            (ContributionKind::KeyBindings, "project-home".to_owned()),
+        ],
+        "the screen, the sidebar panel, the Overview entry and the key bindings"
     );
+    assert_eq!(rig.contributions.registered(), 4, "and nothing else");
+    assert!(rig.contributions.commands().is_empty());
     assert!(rig.snapshot().is_none());
 }
 

@@ -50,5 +50,7 @@ pub use icon::Icon;
 /// icon paints blank.
 pub use icon::IconAssets;
 pub use init::{attach, init, init_fixed, is_ready, ready};
-pub use palette::{Appearance, Palette, SystemColor, accent_follows_system, colors, palette};
+pub use palette::{
+    Appearance, Palette, SystemColor, accent_follows_system, colors, on_accent, palette,
+};
 pub use text::{Text, Verbatim, set_locale, strings};

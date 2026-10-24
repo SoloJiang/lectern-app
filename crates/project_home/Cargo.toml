@@ -14,6 +14,14 @@ layer = "view"
 plugin = true
 
 [dependencies]
+# Views, `uniform_list`, Action (docs/design/project_home.md「依赖」). The views
+# make this crate macOS-only (「测试」).
+gpui.workspace = true
+# The views' wake channel: `channel::mpsc::unbounded`, sent from the executor
+# threads and received by a GPUI foreground task, as in `lectern-workspace`.
+futures.workspace = true
+# `keys::project_home::*`, `Args`, `count_compact`, `Strings::relative_time` (ADR 0013).
+lectern-i18n = { path = "../i18n" }
 # The `Background` task that composes the snapshot.
 lectern-executor = { path = "../executor" }
 # `Plugin`, `Context`, `PluginHandle`, `ServiceRef`, `ServiceSet`, `ActivationToken`.
@@ -23,9 +31,15 @@ lectern-logging = { path = "../logging" }
 # `dyn Projects`, `dyn SessionSource`, `dyn Review`, `dyn Usage`, `dyn Contributions`
 # and their data types and events.
 lectern-services = { path = "../services" }
+# `GroupedList`, `Row`, `AgentDot`, `Progress`, `Skeleton`, `Text`, `TextRole`,
+# colours, motion, `semantic` and the `contrib` payload types (ADR 0015). A
+# library crate of the view layer, not a plugin.
+lectern-ui = { path = "../ui" }
 
 [dev-dependencies]
-# Snapshot tests of `snapshot::build` (AGENTS.md).
+# `TestAppContext`, `VisualTestContext`, `#[gpui::test]`.
+gpui = { workspace = true, features = ["test-support"] }
+# Snapshot tests of `snapshot::build` and of the semantic trees (AGENTS.md).
 insta.workspace = true
 # `Executor::manual`: the composing task runs when a test says so.
 lectern-executor = { path = "../executor", features = ["test-support"] }

@@ -113,8 +113,10 @@ pub(super) fn agent_codex(appearance: Appearance) -> Hsla {
 
 /// Text on the accent colour: AppKit's `alternateSelectedControlTextColor`,
 /// white in both appearances. Used only for gpui-component's
-/// `primary_foreground` (`init::project`); not a `Palette` field.
-pub(crate) fn on_accent() -> Hsla {
+/// `primary_foreground` (`init::project`) and by the views that put text of
+/// their own inside a selected `Row` (`lectern_ui::on_accent`); not a
+/// `Palette` field.
+pub fn on_accent() -> Hsla {
     hex(0xFFFFFF)
 }
 
