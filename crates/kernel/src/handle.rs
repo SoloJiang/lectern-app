@@ -394,11 +394,12 @@ impl PluginHandle {
         self.act.clone()
     }
 
-    /// Reports that this activation failed in the background. Before returning,
+    /// Reports that this activation failed in the background. Same as
+    /// [`ActivationToken::fail`] on this activation's token: before returning,
     /// this activation and the plugins that lose their last provider are marked
     /// dead on this thread; the deactivation is queued.
     pub fn fail(&self, error: PluginError) {
-        invalidate(&self.act, Some(error));
+        self.act.fail(error);
     }
 
     /// A restricted kernel control handle bound to this activation.

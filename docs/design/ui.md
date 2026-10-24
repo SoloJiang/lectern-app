@@ -818,7 +818,7 @@ pub mod semantic {
 - 「解析失败」的判断按原文（目标家族的 `FontId` 与 GPUI 内置后备的相同），后备的 `FontId` 用一个不存在的家族名探出；如果探针家族与 `UI_FAMILY` 的 `FontId` 也相同（GPUI 的测试文字系统给所有家族同一个 id），视为无法探测、按 `MONO_FAMILY` 解析成功，不记 warn。
 - `attach` 的「重复调用只登记一次」按 `AnyWindowHandle` 记在 `UiState` 里，每次 `attach` 先去掉已关闭的窗口；重复调用返回一个空的 `Subscription`。
 - gpui-component 主题的投影只写 `Palette` 有直接来源的字段（背景、前景、边框、主色、次要色、列表与选中、侧栏、弹层、链接、骨架、滚动条、danger / success / warning / info 等 40 个）；强调色上的文字用 `builtin.rs` 里的 `on_accent()`（AppKit 的 `alternateSelectedControlTextColor`，两个外观都是白色），不是 `Palette` 的字段。其余字段保持 gpui-component 注册主题的值，第 3 步包装控件时再补。
-- `i18n` 的 `Key::name` / `FmtKey::name` 随本步加入（[i18n 设计](i18n.md)「接口」已补）。
+- `i18n` 的 `Key::name` / `FmtKey::name`（`Text::message_id` 用）由 [#227](https://github.com/SoloJiang/lectern-app/pull/227) 提供，不在本 PR 里。
 
 第 2 步：
 

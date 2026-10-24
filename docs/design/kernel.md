@@ -1,6 +1,6 @@
 # kernel 设计
 
-状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#182](https://github.com/SoloJiang/lectern-app/pull/182)；executor 接入（第 5 项）用到的 `SubmitGate::log_ctx`、`PanicPayload::text` 随 [#186](https://github.com/SoloJiang/lectern-app/pull/186) 公开）。
+状态：已实现（[#58](https://github.com/SoloJiang/lectern-app/pull/58)；插件集合的闭包与裁剪随 [bench](bench.md) 第 3 步加入，[#98](https://github.com/SoloJiang/lectern-app/pull/98)；「静止」里的可暂停后台工作（[ADR 0029](../adr/0029.md)）随 [#105](https://github.com/SoloJiang/lectern-app/pull/105) 加入；`barrier` 先释放自己的忙计数再返回，修正 [#96](https://github.com/SoloJiang/lectern-app/issues/96)，[#118](https://github.com/SoloJiang/lectern-app/pull/118)；「静止」里的交互让路（[ADR 0033](../adr/0033.md)）随 [#123](https://github.com/SoloJiang/lectern-app/pull/123) 加入，`code_intel` 在之后的 PR 里接入；运行日志接入 `lectern-logging`（「日志与诊断」，[logging 设计](logging.md)「对其他 crate 的要求」第 4 项），[#182](https://github.com/SoloJiang/lectern-app/pull/182)；executor 接入（第 5 项）用到的 `SubmitGate::log_ctx`、`PanicPayload::text` 随 [#186](https://github.com/SoloJiang/lectern-app/pull/186) 公开；`ActivationToken::fail`（别的插件在准入内运行这次激活的代码、捕获到 panic 时让它失效，[workspace](workspace.md) 第 2 步的前置条件）随 [#215](https://github.com/SoloJiang/lectern-app/issues/215) 的 kernel PR 公开）。
 
 对应 issue [#8](https://github.com/SoloJiang/lectern-app/issues/8)。kernel 负责插件装载、服务注册表、事件总线和生命周期，本身不含任何业务功能（[ADR 0010](../adr/0010.md)、[技术调研「插件架构」](tech-research.md#插件架构)）。具体的服务接口（如 `SessionSource`）放在 `services` crate，由 `services` 为它们实现 kernel 的 `Service` trait。
 
@@ -187,6 +187,18 @@ impl ActivationToken {
     /// 用同一个原子操作关闭准入（计数和「已关闭」位在同一个原子字里），之后返回 None，调用方直接丢弃要排队的工作；
     /// `shutdown` 自己撤销插件时取的守卫在关闭之前取得，不受影响。
     pub fn pending(&self) -> Option<PendingGuard>;
+
+    /// 让这次激活失效。调用方是在准入内运行这次激活的代码的另一个插件（`workspace` 调用离开守卫的 `ask`、视图工厂、
+    /// 命令处理函数，或 drop 贡献的载荷），在 `contain` 里捕获到 panic 后调用；`PluginHandle::fail` 等于在自己的 token 上调用它。
+    /// 走监听 panic 的同一条路径（见「事件分发」）：返回之前在调用线程上把这次激活和因它失去最后一个存活提供者的激活都写为 `Dead`，
+    /// 停用请求放进 kernel 线程的队列，撤销按「撤销」一节执行。不等待准入归零，所以持有这次激活的 `Admission` 时也可以调用，
+    /// 调用方的准入照常在它自己的代码返回后释放；任何线程都可以调用。
+    /// 幂等：已经是 `Dead` 时不排新的停用请求，已记下的错误保留第一个（撤销还没读到错误时，这次报告的错误仍会让插件进入 `Failed`）。token 还是 `Pending`（`started` 还没返回）时，
+    /// 换成 `Live` 的 compare-exchange 失败，按激活失败撤销，与 `started` 里调用 `PluginHandle::fail` 相同。
+    /// `shutdown` 之后 kernel 线程已经退出：只写状态，不排请求。
+    /// 本方法不记日志：捕获到 panic 的调用方在自己的作用域里记录捕获到的内容；kernel 线程撤销时记
+    /// `plugin deactivated after a failure`，`error` 是 `error` 的种类（调用方用 `PluginError::Panicked` 报告 panic，记为 `panicked`）。
+    pub fn fail(&self, error: PluginError);
 }
 
 pub enum TokenState { Pending, Live, Dead }
@@ -347,7 +359,7 @@ impl PluginHandle {
 
     /// 报告这次激活在后台初始化时失败（如打开 SQLite 失败）：插件进入 `Failed`，按「失败」一节停用。
     /// 与监听 panic 相同，返回之前先在调用线程上让这次激活和连带停用的插件失效（见「事件分发」）。
-    /// 这次激活已停用时不做任何事。
+    /// 这次激活已停用时不做任何事。等于 `self.token().fail(error)`。
     pub fn fail(&self, error: PluginError);
 
     /// 受限的 kernel 控制句柄，供需要驱动激活的插件使用（`project` 调 `workspace_changed`，
@@ -650,7 +662,7 @@ impl Emitter {
 - 返回错误或 panic 时，暂存的内容直接丢弃（守卫按相反顺序 drop），已在运行的插件从头到尾看不到这次激活注册的任何东西。
 - `activate` 本身不产生副作用：任务、事件、文件读写都从 `started` 开始，激活失败时这些都不会发生。
 - 激活期间的状态（`ServiceRef`、`ServiceSet`、插件自己的数据）放在 `activate` 返回的 `Active` 对象里；监听闭包和任务需要时持有它的 `Arc` 克隆。停用时 kernel 先撤销监听和守卫，最后 drop `Active`，状态随之释放。`Active` 的 drop 同样用 `catch_unwind` 包住，panic 时记录错误、插件标为 `Failed`，撤销照常完成。`Plugin` 对象本身不保存激活期间的状态，否则停用后提供者和它的内存仍被持有。
-- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：`commit` 只把注册连同 `ActivationToken` 排到主线程；主线程每帧检查 `token.state()`：`Pending` 时留到下一帧再看；否则用 `token.enter()` 取准入，取到就在持有准入期间应用注册并把注销守卫交给 kernel：交接用持有的这个准入登记守卫（`Admission::own`），只看守卫表是否已关闭，不看 token 是否已经变成 `Dead`。这个准入没释放时撤销停在第 3 步，表不会关闭，所以即使应用期间另一线程让激活失效，注销守卫也一定进入表里，随撤销第 4 步在 `Active` 之前 drop，不会走 `own` 被拒绝后排到 kernel 线程、晚于 `Active` 才 drop 的路径；取不到（`Dead`）就丢弃；丢弃同样在 `contain` 里进行，注册捕获的插件值的 `Drop` panic 不会展开到主线程。应用一次注册是一个整体，也在 `contain` 里执行：`dyn Contributions` 先调用注册里由插件提供的代码（构造菜单项、快捷键表等），全部成功后才一次性插入自己的表；插件代码 panic 时什么都不插入，按 `fail` 让这次激活失效，panic 不会展开到主线程，也不会留下只应用了一半的注册。界面回调之后的调用照常按下文的规则取准入、`contain`。应用与撤销因此不会交错：撤销第 3 步等准入归零，之后才 drop 守卫和 `Active`。所以注册只在所有 `commit` 和 `started` 都成功之后应用，也不会因为主线程比激活先跑到而丢失。激活在任何一步失败（`activate`、某个 `commit` panic、`started` panic 或调用 `fail`），token 都不会变为有效，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`commit` 在排队之前用 `token.pending()` 取一个守卫（`shutdown` 之后返回 None，注册直接丢弃），随注册一起排到主线程，注册应用或丢弃之后才 drop。所以从排队到主线程收到注册之间，kernel 也不会报告静止，界面注册生效之前不静止。
+- 在 `activate` 里交给 `ctx.own` 的守卫，创建时也不得产生可见的副作用。`dyn Contributions` 的注册通过 `ctx.own_staged` 交出：`commit` 只把注册连同 `ActivationToken` 排到主线程；主线程每帧检查 `token.state()`：`Pending` 时留到下一帧再看；否则用 `token.enter()` 取准入，取到就在持有准入期间应用注册并把注销守卫交给 kernel：交接用持有的这个准入登记守卫（`Admission::own`），只看守卫表是否已关闭，不看 token 是否已经变成 `Dead`。这个准入没释放时撤销停在第 3 步，表不会关闭，所以即使应用期间另一线程让激活失效，注销守卫也一定进入表里，随撤销第 4 步在 `Active` 之前 drop，不会走 `own` 被拒绝后排到 kernel 线程、晚于 `Active` 才 drop 的路径；取不到（`Dead`）就丢弃；丢弃同样在 `contain` 里进行，注册捕获的插件值的 `Drop` panic 不会展开到主线程。应用一次注册是一个整体，也在 `contain` 里执行：`dyn Contributions` 先调用注册里由插件提供的代码（构造菜单项、快捷键表等），全部成功后才一次性插入自己的表；插件代码 panic 时什么都不插入，用注册带的 token 调用 `ActivationToken::fail` 让这次激活失效，panic 不会展开到主线程，也不会留下只应用了一半的注册。界面回调之后的调用照常按下文的规则取准入、`contain`。应用与撤销因此不会交错：撤销第 3 步等准入归零，之后才 drop 守卫和 `Active`。所以注册只在所有 `commit` 和 `started` 都成功之后应用，也不会因为主线程比激活先跑到而丢失。激活在任何一步失败（`activate`、某个 `commit` panic、`started` panic 或调用 `fail`），token 都不会变为有效，失败的注册不会出现在界面上，与 `activate` 运行多久、跨了几帧无关。`commit` 在排队之前用 `token.pending()` 取一个守卫（`shutdown` 之后返回 None，注册直接丢弃），随注册一起排到主线程，注册应用或丢弃之后才 drop。所以从排队到主线程收到注册之间，kernel 也不会报告静止，界面注册生效之前不静止。
 
 ### 撤销
 
@@ -667,8 +679,8 @@ impl Emitter {
 
 界面注册的守卫在 kernel 线程上 drop 时，只是把注销排到主线程，kernel 可能先完成撤销并 drop `Active`。这段时间里界面不能调用到已停用的激活，也不能让 kernel 先报告静止：
 
-- 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）时先 `token.enter()`，取不到就不调用，取到的准入持有到回调返回。回调在准入范围内用 `catch_unwind` 包住：panic 时先按 `fail` 的方式让这次激活同步失效（插件进入 `Failed`，连带停用的插件一起失效），展开结束后才释放准入，panic 不会展开到主线程，插件也不会在失效后继续被调用。停用的第一步就把 token 置为 `Dead`，第 3 步等准入归零，所以回调不会与守卫和 `Active` 的 drop 同时进行。
-- `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程上的注销（从注册表移除 Action、命令处理函数、视图工厂，并 drop 最后一份闭包）在 `contain` 里执行，一个守卫对应多项注册时每一项单独包住，闭包捕获的值的 `Drop` panic 时只记日志、让所属激活按 `fail` 失效（已经失效的只记日志），不展开到主线程，其余项照常移除；主线程的队列被丢弃时守卫随之 drop。`shutdown` 关闭准入之后取不到守卫，说明主线程的队列已经不再处理，注销请求直接丢弃。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
+- 每个界面注册都带着所属激活的 `ActivationToken`（`started` 之后的注册取 `PluginHandle` 的 token）。主线程调用注册里的回调（Action、命令处理、视图工厂）时先 `token.enter()`，取不到就不调用，取到的准入持有到回调返回。回调在准入范围内用 `catch_unwind` 包住：panic 时先用这个 token 调用 `ActivationToken::fail` 让这次激活同步失效（插件进入 `Failed`，连带停用的插件一起失效；`fail` 不等准入归零，所以持有准入时调用不会自己等自己），展开结束后才释放准入，panic 不会展开到主线程，插件也不会在失效后继续被调用。停用的第一步就把 token 置为 `Dead`，第 3 步等准入归零，所以回调不会与守卫和 `Active` 的 drop 同时进行。
+- `dyn Contributions` 的守卫在 drop 时用所属激活的 `ActivationToken::pending()` 取一个守卫，随注销请求一起交给主线程，注销完成后 drop；主线程上的注销（从注册表移除 Action、命令处理函数、视图工厂，并 drop 最后一份闭包）在 `contain` 里执行，一个守卫对应多项注册时每一项单独包住，闭包捕获的值的 `Drop` panic 时只记日志、用所属激活的 token 调用 `ActivationToken::fail` 让它失效（已经失效的 token 上 `fail` 什么也不做，只剩日志），不展开到主线程，其余项照常移除；主线程的队列被丢弃时守卫随之 drop。`shutdown` 关闭准入之后取不到守卫，说明主线程的队列已经不再处理，注销请求直接丢弃。这个守卫由 kernel 直接计数，不依赖 `workspace` 的激活，所以 `workspace` 自己失败、连带撤销其他插件的界面注册时同样有效。所以注销完成之前 kernel 不报告静止，内存探针在静止后采样时，界面已经不再持有这次激活的状态。
 
 后台任务也走守卫：`executor` 的任务句柄 drop 时取消任务。插件在 `started` 或之后用 `PluginHandle::own_with` 提交任务：激活已经失效时任务根本不会被提交。`executor` 的提交接口带上 `own_with` 给的 `SubmitGate`：闸门打开之前任务不会被 poll，`own_with` 在 `start` 正常返回、句柄登记完之后才打开它，所以 `start` 在提交之后、返回句柄之前 panic 时任务一次也没运行，闸门关闭后直接丢弃。任务每次被 poll 之前调用 `GateSlot::poll`：它在闸门的锁内登记 waker 并检查闸门和 token，关闭或为 `Dead` 时丢弃 future（等同取消）。token 变为 `Dead` 时 kernel 唤醒全部槽位，所以停在 `Pending` 上的任务也会被调度一次并丢弃，不会一直持有 `BusyGuard` 和状态、挡住静止。任务的 future 在某次 poll 里 panic 时，executor 捕获这个 panic、调用 `GateSlot::panicked`，这次激活按 `fail` 失效，插件进入 `Failed`；所以初始化任务中途 panic 不会让插件留在 `Active` 并被报告为静止。`executor` 的测试覆盖这两点：闸门在检查和登记之间打开时任务仍被调度；future panic 时插件进入 `Failed`、工作线程继续运行。
 
@@ -703,7 +715,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
   - 取不到准入（token 是 `Pending` 或 `Dead`）就跳过这个监听；取到就调用，调用期间一直持有准入；
   - 停用时第 1 步把 token 置为 `Dead`，第 3 步等准入计数归零，因此会等这个插件正在执行的监听返回，此后快照里它的监听都会被跳过；
   - 取准入不阻塞，只有停用的第 3 步等待。监听里请求的生命周期操作（包括停用自己所属的插件）排队到当前分发结束后执行，kernel 线程不会在自己持有准入时执行第 3 步；
-  - 监听 panic 或调用 `PluginHandle::fail` 时，立即在当前线程上把这个插件以及会因它停用而连带停用的插件（依赖它所提供服务的插件，递归）的 token 都置为 `Dead`（原子写，不等待准入），再把停用请求放进 kernel 线程的队列。「这个服务还有没有存活的提供者」要跨多个 token 判断，单个 token 的原子写不够：两个线程同时让一个 `MULTIPLE` 服务的最后两个提供者失效时，各自都可能看到对方还活着，依赖者就会留在 `Live`。所以所有失效（`fail`、监听 panic、`contain` 捕获的 panic、撤销第 1 步）都在 kernel 的一把失效锁内完成：在锁内写 `Dead`、按当时的 token 状态挑出失去最后一个提供者的依赖者并递归写 `Dead`，然后才释放锁，后一个失效一定看到前一个的结果。这把锁内不等待准入、不调用插件代码，也不唤醒闸门：锁内只写状态、收集受影响的激活，释放锁之后才逐个取这些激活的闸门锁、克隆 waker、释放闸门锁再 `wake`。`wake` 按 `executor` 的约定只入队，丢弃 future 发生在 executor 的工作线程上，future 的 drop 可以调用 `fail`、再取这把失效锁，所以锁内不唤醒。所以持有准入的线程取它也不会死锁。在监听里调用 `fail` 时，这个监听自己的准入不提前释放，监听返回时由分发方 drop；`fail` 本身不等待，所以不会自己等自己。主线程在这之后取不到这些插件的准入，不会再调用它们的界面回调；同一次分发里这些插件后面的监听、其他线程上的分发也都会跳过它们。
+  - 监听 panic 或调用 `PluginHandle::fail` / `ActivationToken::fail` 时，立即在当前线程上把这个插件以及会因它停用而连带停用的插件（依赖它所提供服务的插件，递归）的 token 都置为 `Dead`（原子写，不等待准入），再把停用请求放进 kernel 线程的队列。「这个服务还有没有存活的提供者」要跨多个 token 判断，单个 token 的原子写不够：两个线程同时让一个 `MULTIPLE` 服务的最后两个提供者失效时，各自都可能看到对方还活着，依赖者就会留在 `Live`。所以所有失效（`fail`、监听 panic、`contain` 捕获的 panic、撤销第 1 步）都在 kernel 的一把失效锁内完成：在锁内写 `Dead`、按当时的 token 状态挑出失去最后一个提供者的依赖者并递归写 `Dead`，然后才释放锁，后一个失效一定看到前一个的结果。这把锁内不等待准入、不调用插件代码，也不唤醒闸门：锁内只写状态、收集受影响的激活，释放锁之后才逐个取这些激活的闸门锁、克隆 waker、释放闸门锁再 `wake`。`wake` 按 `executor` 的约定只入队，丢弃 future 发生在 executor 的工作线程上，future 的 drop 可以调用 `fail`、再取这把失效锁，所以锁内不唤醒。所以持有准入的线程取它也不会死锁。在监听里调用 `fail` 时，这个监听自己的准入不提前释放，监听返回时由分发方 drop；`fail` 本身不等待，所以不会自己等自己。主线程在这之后取不到这些插件的准入，不会再调用它们的界面回调；同一次分发里这些插件后面的监听、其他线程上的分发也都会跳过它们。
   - 置为 `Dead` 之前已经在其他线程上取得准入的调用照常执行完。停用第 3 步会等它们返回，之后才 drop 守卫和 `Active`，所以它们执行期间插件的状态仍然有效。插件的监听因此要能在插件已标为 `Failed` 时运行完毕，与停用过程中的服务调用要求相同（见「撤销」第 2 步）。
 - 监听必须快速返回：只更新状态或把工作交给 executor。事件总线用于插件之间的通知，如会话新增一轮、项目模型变化；视图内部的状态变化用 GPUI 自身的订阅。
 - 没有监听的事件直接丢弃，不缓存。
@@ -794,7 +806,7 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - 默认记录：
   - error `plugin failed`：kernel 的边界捕获到插件代码的 panic。字段 `phase` 是当时运行的那段代码：`manifest`、`activate`、`commit`（`Staged::commit`）、`started`（含 token 变为 `Live` 后执行的暂存事件和 `start`）、`own_with`（`own_with` 的 `start`）、`listener`、`command`（`command` 的 `done`）、`workspace`（`WorkspaceFacts::contains`）、`drop`（kernel 释放的守卫、任务句柄、`Active`、被拒绝或替换的值）；`message` 用 `Value::panic_message`，`PanicText` 按 payload 的类型构造：`&'static str` 为 `Static`，`String` 为 `Formatted`，其他为 `Other`，消息文字按 logging 设计「隐私」处理。这条记录只说明插件代码 panic 过；插件是否因此进入 `Failed` 看下面两条。
   - error `plugin activation failed`：激活在提交之前失败（`activate` 返回错误或 panic、缺少声明的服务），插件进入 `Failed`。字段 `error` 是 `PluginError` 的种类（`failed`、`panicked`、`missing_service` 等），`service` 是涉及的服务的稳定 ID（只有 `missing_service`、`undeclared_service`、`duplicate_service` 有，其余为 null）。
-  - error `plugin deactivated after a failure`：提交之后的失败（`started` panic、`fail`、监听 panic、守卫的 drop panic、任务 panic）让这次激活被撤销，字段同上。
+  - error `plugin deactivated after a failure`：提交之后的失败（`started` panic、`PluginHandle::fail`、另一个插件调用 `ActivationToken::fail`、监听 panic、守卫的 drop panic、任务 panic）让这次激活被撤销，字段同上。`ActivationToken::fail` 本身不记录：它收到的是 `PluginError`，不是 panic 的 payload，没有 `phase`；捕获到 panic 的调用方（如 `workspace` 的 `leave guard panicked`）在自己的作用域里记录，kernel 这条记录带失效激活的 `plugin`、`act`，`error` 为 `panicked`。
   - error `plugin rejected by the dependency graph`：启动时依赖图检查让这个插件进入 `Failed`，`error` 是 `GraphError` 的种类，`service` 是涉及的服务 ID（没有时为 null）。
   - error `shutdown callback panicked`（`message`，规则同上）、`could not start the kernel thread`（`error` 为 `Value::io`）。
   - warn：`unknown plugin`（`request` 为 `activate` 或 `set_enabled`，不记请求里的 ID）、`shutdown closed pending() while main-thread work was still queued`、`unwinding while holding a provider's admission`（`provider_act` 是提供者那次激活的序号）、`cannot start the timer thread` 和 `could not spawn a reclaim thread; leaking a panic payload`（`error` 为 `Value::io`）。
@@ -877,7 +889,8 @@ bench 为单个插件测常驻内存和激活耗时时，要从完整的 profile
 - token 状态：`started` 期间另一个线程调用 `fail` 时，`started` 返回后 token 仍为 `Dead`，激活按失败处理，`done` 收到那个错误。
 - 新提供者：`MULTIPLE` 服务的第二个提供者在 `started` 成功之前不出现在已激活依赖者的 `ServiceSet::current()` 里，`ServiceAdded` 在它变为 `Live` 之后才发出；`started` 失败时依赖者从头到尾看不到它。
 - `shutdown` 之后：`pending()` 返回 None，`shutdown` 返回后不再有新的主线程工作排队。
-- 失败：监听 panic 后，同一次分发里它所属插件后面的监听不再被调用；`PluginHandle::fail` 让插件进入 `Failed` 并停用，在其他线程上调用时，返回后它和单一提供者的依赖者的 token 已为 `Dead`；监听先发事件再 panic 时，排队的事件不再分发；`Active` 的 drop panic 时撤销照常完成。
+- 失败：监听 panic 后，同一次分发里它所属插件后面的监听不再被调用；`PluginHandle::fail` 让插件进入 `Failed` 并停用，在其他线程上调用时，返回后它和单一提供者的依赖者的 token 已为 `Dead`；
+- `ActivationToken::fail`（`crates/kernel/src/tests/failure.rs` 的 `token_fail_*`，日志在 `logs.rs`）：另一个线程在调用方持有准入时对 `Live` 的 token 调用，返回后 token 为 `Dead`、`enter()` 返回 None，准入释放后撤销按依赖者先、提供者后的顺序完成，提供者进入 `Failed(Panicked)`、依赖者回到 `Waiting`，kernel 静止；连续调用两次只保留第一个错误、只记一条 `plugin deactivated after a failure`；`started` 里另一个线程对 `Pending` 的 token 调用时激活按失败撤销、依赖者不激活；对已停用的 token 调用什么也不做（插件保持 `Disabled`，重新启用后的新激活不受影响）；`shutdown` 之后调用只写状态、不挂起；`fail` 本身不记 `plugin failed`。监听先发事件再 panic 时，排队的事件不再分发；`Active` 的 drop panic 时撤销照常完成。
 - 提交门：`own_staged` 的守卫只在提交时 `commit`，激活失败时不 `commit`。
 - 重新启用：项目没变时，停用后重新启用的 `Workspace` 插件按保存的 `WorkspaceFacts` 重新激活。
 - 命令：激活成功但没有登记处理函数时，`workspace` 报错，代理不会一直等待。
@@ -1057,8 +1070,15 @@ impl Kernel {
   服务调用的路径没有改动（准入不设作用域），两侧的差别是噪声。`kernel/emit` 每次多一个监听的作用域，`kernel/emit_nested` 多三个（两个监听、一次带 token 的分发）。两项在两侧都在很宽的范围里跳动（`emit_nested` 两侧都有 0.84–0.89 µs 和 1.4 µs 以上的运行），各次的中位数再取中位数：`kernel/emit` 改动前 610 ns、改动后 518 ns，`kernel/emit_nested` 改动前 1.42 µs、改动后 1.37 µs，没有变慢。
 - 没有验证的：进程插件还没有实现（[#39](https://github.com/SoloJiang/lectern-app/issues/39)），`PluginTag::register` 只用 `Cow::Owned` 的 ID 测试；记录写进文件的路径由 logging 设计第 3 步（`app`）验证，这里只用 `testing::capture()`。
 
+`ActivationToken::fail`（[#215](https://github.com/SoloJiang/lectern-app/issues/215)，workspace 第 2 步的前置条件），在 macOS（Apple Silicon）上运行：
+
+- `just test -p lectern-kernel`：114 个测试通过，其中新增 5 个（`crates/kernel/src/tests/failure.rs` 的 `token_fail_*` 4 个、`logs.rs` 的 `token_fail_logs_one_deactivation_in_the_failed_activations_scope`）；`cargo nextest run -p lectern-kernel --all-features -E 'test(token_fail)' --stress-count 300` 300 轮全部通过（两个测试里 kernel 线程给自己排入的请求不在 `barrier` 的等待范围内，见上文 barrier 的已知限制，用 `wait_until` 等状态）。`just check`、`just deny`、`python3 scripts/check_architecture.py` 通过。
+- 发布构建里的路径没有变化：`PluginHandle::fail` 改为调用 `self.act.fail(error)`，两者都是原来的 `invalidate`。
+- 没有验证的：`workspace` 在离开守卫、视图工厂、命令处理函数 panic 和贡献载荷 drop panic 时怎样调用它（workspace 第 2 步的 PR）。
+
 ## 与设计的差异
 
+- `ActivationToken::fail(&self, error: PluginError)`（[#215](https://github.com/SoloJiang/lectern-app/issues/215)）：设计在「激活的提交」和「撤销」里要求另一个插件（`workspace`）在准入内运行这次激活的代码、捕获到 panic 时「按 `fail` 让这次激活失效」，但公开接口里只有 `PluginHandle::fail`，它只对自己的激活；`workspace` 第 1 步因此只记日志、不让激活失效。现在把 kernel 内部监听 panic 和 `PluginHandle::fail` 共用的失效路径以 `ActivationToken::fail` 公开，`PluginHandle::fail` 改为它的包装，不加第二套机制。接口和调用规则见「接口」，日志见「日志与诊断」。
 - 新增 `Kernel::barrier` 和 `TestKernel::inner`（只在 `test-support` 下）：测试需要等 kernel 线程处理完已排队的请求，否则只能轮询状态。不影响发布版本的接口。barrier 先释放自己的忙计数再唤醒调用方（[#96](https://github.com/SoloJiang/lectern-app/issues/96)），kernel 线程给自己排入的后续请求不在等待范围内，见「实际验证」里的已知限制。
 - `PluginError` 的变体按实现需要列全：`Failed`（插件报告）、`Panicked`、`MissingService`、`UndeclaredService`、`DuplicateService`、`InvalidGraph`、`DependencyUnavailable`、`Disabled`、`ShuttingDown`、`UnknownCommand`。设计里提到的 `Stale` 没有用到（请求方失效时 `done` 不被调用），不提供。
 - `Context::service` / `service_set` 收到不在 `requires` 里的服务时 panic，由 `activate` 的边界捕获、插件进入 `Failed`，错误信息写明原因；设计只写了「必须在 requires 里」。
