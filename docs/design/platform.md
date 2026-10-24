@@ -1426,7 +1426,7 @@ kqueue 线程的日志接入（[logging 设计「对其他 crate 的要求」](l
   - `just test -p lectern-platform`：152 个测试通过，其中新增 8 个（「窗口 frame 的 autosave」的「测试」里 macOS 上编译的全部）；原有的 144 个结果不变。
   - `cargo run -p lectern-platform --example frame_autosave` 退出码为 0：第一个窗口读回设上的名字；第二个未显示的窗口设同一个名字时 AppKit 返回 YES（记入「已知限制」）；换名成功；另一个线程上为 `NotMainThread`。运行后 `~/Library/Preferences` 里没有出现这个进程的 plist（窗口没有移动或缩放，AppKit 没有保存 frame）。
   - `cargo clippy -p lectern-platform --all-targets --all-features -- -D warnings` 通过。`git diff origin/main -- Cargo.lock` 只在 `lectern-platform` 的依赖里多了 `raw-window-handle`。
-  - 没有在 Linux 上运行，本机也没有 Linux 目标做交叉检查：其他平台的分支（`set_frame_autosave_name_does_nothing_elsewhere`、名字检查的纯函数、空的 `main`）由 Linux CI 编译和运行。没有在真实的 GPUI 窗口上运行过：`app` 接入时（workspace 设计的 E）再验证 GPUI 的 `Window` 句柄经这个函数设名后，重启时窗口回到原来的位置与大小。
+  - 没有在 Linux 上运行，本机也没有 Linux 目标做交叉检查：其他平台的分支（`set_frame_autosave_name_does_nothing_elsewhere`、名字检查的纯函数、空的 `main`）由 Linux CI 编译和运行。没有在真实的 GPUI 窗口上运行过：`app` 接入时（workspace 设计的 E）再验证 GPUI 的 `Window` 句柄经这个函数设名后，重启时窗口回到原来的位置与大小。`app` 已接入（[workspace 设计](workspace.md)第 3 步）：骨架窗口在 `open_window` 的回调里设 `"welcome"`，之后随 `WindowState::project` 改名；真实窗口上的检查（移动窗口后重启位置保留）因本机锁屏还没有做，随 workspace 第 3 步的手动验收。第一次使用 `"project"` 时的「先设 1180 × 760 居中」`app` 做不到（GPUI 没有移动窗口的接口），需要本 crate 加一个设内容尺寸并居中的接口，见 workspace 设计「与设计的差异」第 3 步。
 
 - 系统外观（ui 设计的前置条件 A）在 macOS（Apple 芯片，macOS 27.0.1）上：
   - `just test -p lectern-platform`：161 个测试通过，其中新增 9 个 `appearance_*`（「系统外观」的「测试」里 macOS 上编译的全部），都在测试线程上、没有窗口和 `NSApplication`；原有的 152 个结果不变。用 `cargo test` 在同一个进程里运行 9 个也都通过，连续运行 20 次都通过。

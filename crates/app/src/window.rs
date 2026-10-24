@@ -1,15 +1,16 @@
 //! The skeleton window and the app menu (docs/design/app.md「界面」).
 
 use gpui::{
-    App, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render, Subscription,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, div,
-    prelude::*, px, size,
+    AnyWindowHandle, App, Bounds, Context, IntoElement, KeyBinding, Menu, MenuItem, Render,
+    Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, size,
 };
 use lectern_i18n::{Strings, keys};
 
 use crate::profile::Profile;
 use crate::quit::Quit;
-use crate::startup::{self, Startup};
+use crate::startup::{self, Started, Startup};
+use crate::window_state::WELCOME;
 
 actions!(lectern, [Hide, HideOthers, ShowAll]);
 
@@ -47,8 +48,18 @@ impl Render for Skeleton {
     }
 }
 
-/// Opens the skeleton window. Main thread.
+/// Opens the skeleton window with the Welcome frame. Main thread.
 pub fn open(cx: &mut App) {
+    open_named(cx, WELCOME);
+}
+
+/// Opens the skeleton window and, in the desktop profile, gives it the
+/// frame autosave name `frame`: AppKit applies the frame saved under it
+/// before the first frame is drawn (docs/design/workspace.md「对其他 crate
+/// 的要求」D). A Dock reopen with a project open passes `project`. Main
+/// thread. None when the window could not be opened.
+pub fn open_named(cx: &mut App, frame: &'static str) -> Option<AnyWindowHandle> {
+    let desktop = cx.try_global::<Startup>().map(Startup::profile) == Some(Profile::Desktop);
     let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -61,10 +72,16 @@ pub fn open(cx: &mut App) {
         ..Default::default()
     };
     // Opening fails only without a display; there is nothing to fall back to.
-    let _ = cx.open_window(options, |window, cx| {
+    let opened = cx.open_window(options, |window, cx| {
         // One observer; `lectern_ui::init` ran before this window
         // (docs/design/ui.md「对其他 crate 的要求」).
         let appearance = lectern_ui::attach(window, cx);
+        if desktop {
+            // The one preference read before the first frame: AppKit's
+            // in-memory user defaults, no file of ours (ADR 0017). `platform`
+            // logs a failure; the window keeps the frame it was opened with.
+            let _ = lectern_platform::window::set_frame_autosave_name(&*window, frame);
+        }
         cx.new(|_| Skeleton {
             armed: false,
             _appearance: appearance,
@@ -75,6 +92,26 @@ pub fn open(cx: &mut App) {
     // The test profile has no real frames: release once the window exists.
     if cx.try_global::<Startup>().map(Startup::profile) == Some(Profile::Test) {
         startup::release(cx);
+    }
+    opened.ok().map(Into::into)
+}
+
+/// A Dock click with no window open: a new skeleton window, named for the
+/// state the workspace is in, and the workspace moves into it, keeping its
+/// registry and navigation state (docs/design/workspace.md「本 crate 的公开
+/// 项」`attach`). Before the barrier the new window only waits for it, as the
+/// first one does. Main thread.
+pub fn reopen(cx: &mut App) {
+    let shell = cx.try_global::<Started>().and_then(|s| s.shell.clone());
+    let frame = shell
+        .as_ref()
+        .map_or(WELCOME, |shell| shell.window_state.frame_name());
+    let Some(window) = open_named(cx, frame) else {
+        return;
+    };
+    if let Some(shell) = shell {
+        shell.window_state.window_changed(window, frame);
+        shell.host.attach(window, cx);
     }
 }
 

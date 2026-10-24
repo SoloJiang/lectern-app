@@ -1,17 +1,19 @@
 //! The startup barrier and what is started behind it (docs/design/app.md
 //! 「启动顺序」「启动屏障」).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::{App, Global, Window};
+use gpui::{AnyWindowHandle, App, Global, Window};
 use lectern_cache::Cache;
 use lectern_executor::Executor;
 use lectern_fs_watch::Watcher;
 use lectern_kernel::{Kernel, PluginSet};
 use lectern_logging::{Config, Early, Header, Logging, Value, info, warn};
+use lectern_workspace::{WorkspaceDeps, WorkspaceHost};
 
 use crate::profile::{Profile, Resources};
+use crate::window_state::{self, WindowStateLink};
 
 /// Before the barrier: what `main` set up before the first frame. A GPUI
 /// global, taken by the first `release`.
@@ -33,9 +35,19 @@ pub struct Started {
     /// test profile).
     pub cache: Option<Cache>,
     pub watcher: Option<Watcher>,
+    /// The workspace in the window; None when no plugins were assembled.
+    pub shell: Option<Shell>,
 }
 
 impl Global for Started {}
+
+/// The workspace in the window: `Quit` asks its leave guards, a Dock reopen
+/// attaches it to the new window and names that window's frame.
+#[derive(Clone)]
+pub struct Shell {
+    pub host: WorkspaceHost,
+    pub window_state: WindowStateLink,
+}
 
 impl Startup {
     pub fn new(early: Early, profile: Profile) -> Startup {
@@ -52,10 +64,18 @@ impl Startup {
 
 /// Releases the barrier. Main thread, does not block: `Early::start` and
 /// `Kernel::start` spawn their threads and return; `lectern_ui::ready`,
-/// `Executor::new`, the cache, the watcher and the plugins spawn none and do
-/// no IO (docs/design/app.md「创建顺序」). Only the first call does anything,
-/// and nothing once quitting.
+/// `workspace::install`, `Executor::new`, the cache, the watcher and the
+/// plugins spawn none and do no IO (docs/design/app.md「创建顺序」). Only the
+/// first call does anything, and nothing once quitting. The test profile has
+/// no window to give `workspace` and installs none; the desktop barrier calls
+/// [`release_in`].
 pub fn release(cx: &mut App) {
+    release_in(None, cx);
+}
+
+/// [`release`] with the window the barrier fired in: `workspace` takes over
+/// its root view.
+pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
     if crate::quit::is_quitting(cx) {
         return;
     }
@@ -76,33 +96,103 @@ pub fn release(cx: &mut App) {
     // about 2–3 ms, no IO. A no-op after `init_fixed` (the test profile).
     lectern_ui::ready(cx);
     let executor = Executor::new(lectern_executor::Config::default());
-    let (set, cache, watcher) = assemble(profile, &executor);
-    let kernel = Kernel::start(set);
+    // `workspace::install` is in here: after `ready`, before the kernel.
+    let assembled = assemble(profile, &executor, window, cx);
+    let kernel = Kernel::start(assembled.set);
+    // The window state file is read behind the barrier, in an executor task
+    // (docs/design/workspace.md「对其他 crate 的要求」E).
+    if let (Some(shell), Some(dir)) = (&assembled.shell, assembled.state_dir) {
+        window_state::restore(dir, &executor, shell.host.clone());
+    }
     info!("startup barrier released"; profile = profile);
     cx.set_global(Started {
         logging,
         executor,
         kernel,
-        cache,
-        watcher,
+        cache: assembled.cache,
+        watcher: assembled.watcher,
+        shell: assembled.shell,
     });
 }
 
-/// The profile's plugins and the resources they share. The test profile
-/// assembles none and looks at no directory.
-fn assemble(profile: Profile, executor: &Executor) -> (PluginSet, Option<Cache>, Option<Watcher>) {
-    if profile == Profile::Test {
-        return (PluginSet::new(), None, None);
+/// What `assemble` made.
+struct Assembled {
+    set: PluginSet,
+    cache: Option<Cache>,
+    watcher: Option<Watcher>,
+    shell: Option<Shell>,
+    /// Where `window.json` is, when the workspace was installed.
+    state_dir: Option<PathBuf>,
+}
+
+impl Assembled {
+    fn none() -> Assembled {
+        Assembled {
+            set: PluginSet::new(),
+            cache: None,
+            watcher: None,
+            shell: None,
+            state_dir: None,
+        }
     }
-    match resources(executor) {
+}
+
+/// The profile's plugins and the resources they share. The test profile
+/// assembles none and looks at no directory. The desktop profile installs
+/// `workspace` in `window` once its directories are known, so a run without
+/// plugins keeps the neutral skeleton.
+fn assemble(
+    profile: Profile,
+    executor: &Executor,
+    window: Option<AnyWindowHandle>,
+    cx: &mut App,
+) -> Assembled {
+    if profile == Profile::Test {
+        return Assembled::none();
+    }
+    let Some(window) = window else {
+        warn!("plugins not assembled"; missing = "window");
+        return Assembled::none();
+    };
+    let mut shell = None;
+    let mut state_dir = None;
+    let resources = resources(executor, |app_data| {
+        let dir = window_state::dir(app_data);
+        let link = WindowStateLink::start(window, dir.clone(), executor.clone(), cx);
+        let changed = link.clone();
+        let host = lectern_workspace::install(
+            window,
+            WorkspaceDeps {
+                on_state_changed: Arc::new(move |state| changed.state_changed(state)),
+                // The bench probe (docs/design/bench.md) is not there yet:
+                // it takes the milestones and the frame records here.
+                on_milestone: Arc::new(|_, _| {}),
+                on_frames: Arc::new(|_| {}),
+            },
+            cx,
+        );
+        state_dir = Some(dir);
+        shell = Some(Shell {
+            host: host.clone(),
+            window_state: link,
+        });
+        host
+    });
+    match resources {
         Ok(resources) => {
             let (set, count) = profile.plugins(&resources);
             info!("plugins assembled"; profile = profile, plugins = count);
-            (set, Some(resources.cache), Some(resources.watcher))
+            Assembled {
+                set,
+                cache: Some(resources.cache),
+                watcher: Some(resources.watcher),
+                shell,
+                state_dir,
+            }
         }
         Err(missing) => {
             warn!("plugins not assembled"; missing = Value::text(missing));
-            (PluginSet::new(), None, None)
+            Assembled::none()
         }
     }
 }
@@ -110,8 +200,13 @@ fn assemble(profile: Profile, executor: &Executor) -> (PluginSet, Option<Cache>,
 /// The resources from the environment, or the name of the first one
 /// missing. Reads environment variables only: the cache opens its files on
 /// first use, the watcher starts its thread on the first watch, the
-/// FSEvents backend arms nothing until then.
-fn resources(executor: &Executor) -> Result<Resources, &'static str> {
+/// FSEvents backend arms nothing until then. `workspace` runs once the
+/// directories are there, with the application data directory, and gives
+/// the handle the "workspace" plugin takes.
+fn resources(
+    executor: &Executor,
+    workspace: impl FnOnce(&Path) -> WorkspaceHost,
+) -> Result<Resources, &'static str> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|home| home.is_absolute())
@@ -137,10 +232,12 @@ fn resources(executor: &Executor) -> Result<Resources, &'static str> {
         executor.clone(),
         lectern_fs_watch::Config::default(),
     );
+    let workspace = workspace(&app_data);
     Ok(Resources {
         executor: executor.clone(),
         cache,
         watcher,
+        workspace,
         home,
         app_cache,
         app_data,
@@ -154,7 +251,7 @@ fn resources(executor: &Executor) -> Result<Resources, &'static str> {
 pub fn arm(window: &mut Window) {
     window.on_next_frame(|window, _| {
         info!("first frame drawn");
-        window.on_next_frame(|_, cx| release(cx));
+        window.on_next_frame(|window, cx| release_in(Some(window.window_handle()), cx));
     });
 }
 
