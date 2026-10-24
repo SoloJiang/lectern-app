@@ -1,6 +1,6 @@
 # welcome 设计
 
-状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#PR1](https://github.com/SoloJiang/lectern-app/pull/PR1)）已实现，见「实际验证」「与设计的差异」；前置条件 A、B、C 与第 2 步尚未实现。
+状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）已实现，见「实际验证」「与设计的差异」；前置条件 A、B、C 与第 2 步尚未实现。
 
 对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
 
@@ -439,7 +439,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 分两步，每步一个 PR，都要在 macOS 上 `just check`、`just test -p lectern-welcome`、`just deny` 通过。前置条件 A、B 各自的 PR 先合并；C 随第 2 步；`workspace` 的第 2 步（根视图与贡献应用）和 `ui` 的实现在第 2 步之前。
 
-**第 1 步：插件、模型、最近项目的存储、发现列表的归并（不依赖 GPUI 的部分，`Refs #29`，[#PR1](https://github.com/SoloJiang/lectern-app/pull/PR1)）。**
+**第 1 步：插件、模型、最近项目的存储、发现列表的归并（不依赖 GPUI 的部分，`Refs #29`，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）。**
 
 - `cargo check -p lectern-welcome` 通过；`Cargo.toml` 带 `plugin = true`，`python3 scripts/check_architecture.py` 通过：`welcome` 不依赖其他插件 crate，只有 `app` 依赖它。
 - `welcome_activates_without_any_session_source` 通过：没有 `dyn SessionSource` 的提供者时 `welcome` 照常激活并注册屏幕。
@@ -461,7 +461,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 ### 第 1 步
 
-本 crate 不依赖 GPUI 的部分（[#PR1](https://github.com/SoloJiang/lectern-app/pull/PR1)），在 macOS（arm64，Rust 1.97.0）上运行；本 crate 没有 GPUI 依赖，所以也在 Linux CI 的 GPUI-free 任务里运行（`check_architecture.py --gpui-free-packages` 列出 `-p lectern-welcome`）：
+本 crate 不依赖 GPUI 的部分（[#240](https://github.com/SoloJiang/lectern-app/pull/240)），在 macOS（arm64，Rust 1.97.0）上运行；本 crate 没有 GPUI 依赖，所以也在 Linux CI 的 GPUI-free 任务里运行（`check_architecture.py --gpui-free-packages` 列出 `-p lectern-welcome`）：
 
 - `cargo check -p lectern-welcome`、`just check`（含 `cargo clippy --workspace --all-targets -- -D warnings` 和架构检查：32 个 crate，`welcome` 带 `plugin = true`，没有依赖其他插件 crate）、`just deny` 通过。
 - `just test -p lectern-welcome`：47 个测试通过，都是普通 `#[test]`，连续 15 次运行结果相同。
