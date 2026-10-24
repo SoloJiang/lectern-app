@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Value};
-use lectern_review_view::items::{self, BuildOptions};
+use lectern_review_view::items::{self, BuildOptions, DiffMode};
 use lectern_review_view::testing::snapshot_fixture;
 
 pub const BENCHES: &[Bench] = &[ITEMS_5000];
@@ -30,6 +30,7 @@ fn items_5000(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let context = HashMap::new();
     let known_lines = HashMap::new();
     let options = BuildOptions {
+        mode: DiffMode::Unified,
         earlier_collapsed: true,
         noise_expanded: false,
         context: &context,

@@ -5,8 +5,7 @@
 //! of the Progress page `review-progress`; the predicates name the region
 //! above them (`Content`, `Inspector`).
 //!
-//! C (a review comment) and ⌘↩ (send) come with #22; ⇧⌘O, ⌘E, Space, the
-//! diff mode, folds and Analyze with step 2.
+//! C (a review comment) and ⌘↩ (send) come with #22.
 
 use gpui::{Action, actions};
 
@@ -29,6 +28,20 @@ actions!(
         ToggleEarlierTurns,
         /// Compare the working tree again.
         Refresh,
+        /// ⇧⌘O: the selected row in the full file.
+        OpenFile,
+        /// ⌘E: the same (editing starts in the reader).
+        Edit,
+        /// Space: the selected row in the context panel.
+        OpenContext,
+        /// Switch between the unified and the side-by-side diff.
+        ToggleDiffMode,
+        /// ↵ on a fold (or on a hunk or row above one): show the folded lines.
+        ExpandFold,
+        /// Start an analysis of the review.
+        Analyze,
+        /// Stop the analysis that is running.
+        CancelAnalyze,
         /// Esc: the panel first, then the selection, then back.
         Escape,
         /// ↓ in the Progress list.
@@ -64,6 +77,10 @@ pub fn key_bindings() -> Vec<(&'static str, Box<dyn Action>, Option<&'static str
         ("k", Box::new(PreviousHunk), Some(IN_REVIEW)),
         ("v", Box::new(MarkSeenAndNext), Some(IN_REVIEW)),
         ("v", Box::new(MarkSeenAndNext), Some(IN_PROGRESS)),
+        ("cmd-shift-o", Box::new(OpenFile), Some(IN_REVIEW)),
+        ("cmd-e", Box::new(Edit), Some(IN_REVIEW)),
+        ("space", Box::new(OpenContext), Some(IN_REVIEW)),
+        ("enter", Box::new(ExpandFold), Some(IN_REVIEW)),
         ("escape", Box::new(Escape), Some(IN_REVIEW)),
         ("down", Box::new(SelectNext), Some(IN_PROGRESS)),
         ("up", Box::new(SelectPrevious), Some(IN_PROGRESS)),

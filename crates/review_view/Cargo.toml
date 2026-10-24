@@ -21,12 +21,18 @@ gpui.workspace = true
 futures.workspace = true
 # `keys::review::*`, `Args`, `relative_time`.
 lectern-i18n = { path = "../i18n" }
+# The highlight tasks' `Executor` and `Priority` (the tasks go through the
+# plugin's `own_with`).
+lectern-executor = { path = "../executor" }
 # `Plugin`, `Active`, `Context`, `PluginHandle`, `ServiceRef`, `ServiceSet`.
 lectern-kernel = { path = "../kernel" }
 # Runtime logging (docs/design/review_view.md「日志与诊断」, ADR 0046).
 lectern-logging = { path = "../logging" }
 # `dyn Review`, `dyn SessionSource`, `dyn Contributions` and their data types.
 lectern-services = { path = "../services" }
+# `Languages`, `highlight::window`, `WindowSpans` and `Token`: the diff's
+# highlighting is `syntax`'s, not a second one (docs/design/review_view.md「依赖」).
+lectern-syntax = { path = "../syntax" }
 # Colours, text, controls, motion and the probe's semantic nodes (ADR 0015).
 lectern-ui = { path = "../ui" }
 
@@ -39,6 +45,8 @@ test-support = []
 gpui = { workspace = true, features = ["test-support"] }
 # The semantic-tree snapshots.
 insta.workspace = true
+# `Executor::manual`: the highlight tasks run when the test says so.
+lectern-executor = { path = "../executor", features = ["test-support"] }
 # `TestKernel`: the plugin runs in a real kernel.
 lectern-kernel = { path = "../kernel", features = ["test-support"] }
 # `testing::capture` for the canary test.

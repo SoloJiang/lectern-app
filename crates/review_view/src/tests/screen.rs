@@ -129,7 +129,7 @@ fn the_toolbar_names_the_session(cx: &mut TestAppContext) {
     // The toolbar closure reads the same model.
     let items = cx.update(crate::screen::toolbar);
     assert_eq!(items.title.as_str(), "Fix the parser");
-    assert_eq!(items.controls.len(), 1);
+    assert_eq!(items.controls.len(), 2, "the mode switch and Refresh");
 }
 
 #[gpui::test]
@@ -804,8 +804,11 @@ fn the_analysis_row_shows_each_state(cx: &mut TestAppContext) {
         assert_eq!(attr(brief, "analysis").as_deref(), Some(name));
         let analyze = must(&records, "review.brief.analyze");
         match analysis {
-            AnalysisState::Unavailable(_) | AnalysisState::Idle => {
-                assert!(analyze.semantic.state.disabled, "no trigger before step 2");
+            AnalysisState::Unavailable(_) => {
+                assert!(analyze.semantic.state.disabled, "nothing can run");
+            }
+            AnalysisState::Idle => {
+                assert!(!analyze.semantic.state.disabled, "Analyze can start");
             }
             AnalysisState::Failed(_) => {
                 assert_eq!(attr(analyze, "state").as_deref(), Some("failed"));

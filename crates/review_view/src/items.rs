@@ -7,6 +7,7 @@
 //! is linear in `files + turns + items + prepared rows`.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use lectern_services::changes::{ChangeDetail, SideText};
@@ -263,8 +264,236 @@ impl Item {
     }
 }
 
+/// How a diff's rows are laid out.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum DiffMode {
+    /// One column: a removed line above the added line.
+    #[default]
+    Unified,
+    /// Two columns: the removed line beside the added line it is paired with.
+    SideBySide,
+}
+
+impl DiffMode {
+    /// The name in the probe's nodes.
+    pub fn name(self) -> &'static str {
+        match self {
+            DiffMode::Unified => "unified",
+            DiffMode::SideBySide => "side-by-side",
+        }
+    }
+}
+
+/// What a line of a display row is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum RowKind {
+    Context,
+    Removed,
+    Added,
+}
+
+/// One side of a display row: the line, where it starts in that side's text
+/// (None when the side has no text to point into) and what it is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Side {
+    pub line: u32,
+    pub byte: Option<u64>,
+    pub kind: RowKind,
+}
+
+/// A row as it is shown. Unified: one per `DiffRow`; a removed line has only
+/// `left` (the old side), an added line only `right`, a context line both
+/// (the same text; the new side is shown). Side by side: a removed line and
+/// the added line it is paired with share one row; a line without a partner
+/// has one side only. A folded run has neither side and `fold`, its old lines.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DisplayRow {
+    pub left: Option<Side>,
+    pub right: Option<Side>,
+    /// The hunk this row belongs to (`FileRows::hunks`).
+    pub hunk: Option<u32>,
+    /// The word-level changes of this row, an index into `FileRows::inline`
+    /// (which is keyed by the removed row; the added line paired with it
+    /// shares the entry).
+    pub inline: Option<u32>,
+    /// A folded run of unchanged lines: the old side's line numbers.
+    pub fold: Option<Range<u32>>,
+}
+
+/// The display rows of a diff in `mode`. Linear in the rows; reads no side
+/// text.
+pub fn display_rows(rows: &FileRows, mode: DiffMode) -> Vec<DisplayRow> {
+    // `FileRows::inline` is keyed by the removed row's index; its added
+    // partner is found by the line the removed row names in `pair`.
+    let mut inline_of_new: HashMap<u32, u32> = HashMap::new();
+    let mut inline_of_row: HashMap<u32, u32> = HashMap::new();
+    if !rows.inline.is_empty() {
+        for (entry, (row, _)) in rows.inline.iter().enumerate() {
+            inline_of_row.insert(*row, entry as u32);
+        }
+        for (ix, row) in rows.rows.iter().enumerate() {
+            if let DiffRow::Removed {
+                pair: Some(new), ..
+            } = row
+                && let Some(entry) = inline_of_row.get(&(ix as u32))
+            {
+                inline_of_new.insert(*new, *entry);
+            }
+        }
+    }
+    let removed = |ix: usize, row: &DiffRow| -> Option<(Side, u32, Option<u32>)> {
+        match row {
+            DiffRow::Removed {
+                old,
+                old_byte,
+                hunk,
+                ..
+            } => Some((
+                Side {
+                    line: *old,
+                    byte: *old_byte,
+                    kind: RowKind::Removed,
+                },
+                *hunk,
+                inline_of_row.get(&(ix as u32)).copied(),
+            )),
+            _ => None,
+        }
+    };
+    let added = |row: &DiffRow| -> Option<(Side, u32, Option<u32>)> {
+        match row {
+            DiffRow::Added {
+                new,
+                new_byte,
+                hunk,
+                ..
+            } => Some((
+                Side {
+                    line: *new,
+                    byte: *new_byte,
+                    kind: RowKind::Added,
+                },
+                *hunk,
+                inline_of_new.get(new).copied(),
+            )),
+            _ => None,
+        }
+    };
+    let context = |row: &DiffRow| -> Option<DisplayRow> {
+        match row {
+            DiffRow::Context {
+                old,
+                new,
+                old_byte,
+                new_byte,
+                hunk,
+            } => Some(DisplayRow {
+                left: Some(Side {
+                    line: *old,
+                    byte: *old_byte,
+                    kind: RowKind::Context,
+                }),
+                right: Some(Side {
+                    line: *new,
+                    byte: *new_byte,
+                    kind: RowKind::Context,
+                }),
+                hunk: *hunk,
+                inline: None,
+                fold: None,
+            }),
+            DiffRow::Folded { old, .. } => Some(DisplayRow {
+                left: None,
+                right: None,
+                hunk: None,
+                inline: None,
+                fold: Some(old.clone()),
+            }),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity(rows.rows.len());
+    match mode {
+        DiffMode::Unified => {
+            for (ix, row) in rows.rows.iter().enumerate() {
+                if let Some(display) = context(row) {
+                    out.push(display);
+                } else if let Some((side, hunk, inline)) = removed(ix, row) {
+                    out.push(DisplayRow {
+                        left: Some(side),
+                        right: None,
+                        hunk: Some(hunk),
+                        inline,
+                        fold: None,
+                    });
+                } else if let Some((side, hunk, inline)) = added(row) {
+                    out.push(DisplayRow {
+                        left: None,
+                        right: Some(side),
+                        hunk: Some(hunk),
+                        inline,
+                        fold: None,
+                    });
+                }
+            }
+        }
+        DiffMode::SideBySide => {
+            // The added rows by line, to find a removed row's partner, and
+            // the ones already shown beside a removed row.
+            let mut added_at: HashMap<u32, usize> = HashMap::new();
+            for (ix, row) in rows.rows.iter().enumerate() {
+                if let DiffRow::Added { new, .. } = row {
+                    added_at.insert(*new, ix);
+                }
+            }
+            let mut paired = vec![false; rows.rows.len()];
+            for (ix, row) in rows.rows.iter().enumerate() {
+                if let Some(display) = context(row) {
+                    out.push(display);
+                } else if let Some((left, hunk, inline)) = removed(ix, row) {
+                    let partner = match row {
+                        DiffRow::Removed {
+                            pair: Some(new), ..
+                        } => added_at
+                            .get(new)
+                            .copied()
+                            .filter(|at| !paired[*at])
+                            .and_then(|at| added(&rows.rows[at]).map(|found| (at, found))),
+                        _ => None,
+                    };
+                    let right = partner.map(|(at, (side, _, _))| {
+                        paired[at] = true;
+                        side
+                    });
+                    out.push(DisplayRow {
+                        left: Some(left),
+                        right,
+                        hunk: Some(hunk),
+                        inline,
+                        fold: None,
+                    });
+                } else if let Some((side, hunk, inline)) = added(row) {
+                    if paired[ix] {
+                        continue;
+                    }
+                    out.push(DisplayRow {
+                        left: None,
+                        right: Some(side),
+                        hunk: Some(hunk),
+                        inline,
+                        fold: None,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 /// What `build` needs besides the snapshot and the rows.
 pub struct BuildOptions<'a> {
+    /// How the diffs' rows are laid out.
+    pub mode: DiffMode,
     /// The turns before the latest seen one fold into one line (default
     /// (a) of 「未决问题」3); false after the user expanded them.
     pub earlier_collapsed: bool,
@@ -543,7 +772,7 @@ fn push_rows(
         return;
     }
     match rows.get(key) {
-        Some(rows) => rows_items(out, key, rows),
+        Some(rows) => rows_items(out, key, rows, opts.mode),
         None => out.push(Item::Placeholder {
             rows: key.clone(),
             lines: opts
@@ -557,9 +786,19 @@ fn push_rows(
 }
 
 /// The items of prepared rows: a hunk's title before its first row, one item
-/// per diff row, a fold for folded lines, or a note when there is nothing to
-/// show because a side is not text.
-pub fn rows_items(out: &mut Vec<Item>, key: &RowsKey, rows: &FileRows) {
+/// per display row, a fold for folded lines, or a note when there is nothing
+/// to show because a side is not text.
+pub fn rows_items(out: &mut Vec<Item>, key: &RowsKey, rows: &FileRows, mode: DiffMode) {
+    if rows.rows.is_empty() {
+        rows_items_of(out, key, rows, &[]);
+        return;
+    }
+    let display = display_rows(rows, mode);
+    rows_items_of(out, key, rows, &display);
+}
+
+/// [`rows_items`] over display rows that were built already.
+pub fn rows_items_of(out: &mut Vec<Item>, key: &RowsKey, rows: &FileRows, display: &[DisplayRow]) {
     if rows.rows.is_empty() {
         if let Some(kind) = incomplete_of_rows(rows) {
             out.push(Item::Incomplete {
@@ -570,22 +809,17 @@ pub fn rows_items(out: &mut Vec<Item>, key: &RowsKey, rows: &FileRows) {
         return;
     }
     let mut hunk: Option<u32> = None;
-    for (ix, row) in rows.rows.iter().enumerate() {
+    for (ix, row) in display.iter().enumerate() {
         let ix = ix as u32;
-        let (old, new, row_hunk) = match row {
-            DiffRow::Context { old, new, hunk, .. } => (Some(*old), Some(*new), *hunk),
-            DiffRow::Removed { old, hunk, .. } => (Some(*old), None, Some(*hunk)),
-            DiffRow::Added { new, hunk, .. } => (None, Some(*new), Some(*hunk)),
-            DiffRow::Folded { old, .. } => {
-                out.push(Item::Fold {
-                    rows: key.clone(),
-                    ix,
-                    old: old.start,
-                });
-                continue;
-            }
-        };
-        if let Some(h) = row_hunk
+        if let Some(old) = &row.fold {
+            out.push(Item::Fold {
+                rows: key.clone(),
+                ix,
+                old: old.start,
+            });
+            continue;
+        }
+        if let Some(h) = row.hunk
             && hunk != Some(h)
         {
             hunk = Some(h);
@@ -601,17 +835,17 @@ pub fn rows_items(out: &mut Vec<Item>, key: &RowsKey, rows: &FileRows) {
         out.push(Item::Row {
             rows: key.clone(),
             ix,
-            old,
-            new,
+            old: row.left.map(|side| side.line),
+            new: row.right.map(|side| side.line),
         });
     }
 }
 
 /// How many items `rows_items` yields for these rows: what a placeholder is
 /// as tall as after the rows were dropped again.
-pub fn rows_lines(key: &RowsKey, rows: &FileRows) -> u32 {
+pub fn rows_lines(key: &RowsKey, rows: &FileRows, mode: DiffMode) -> u32 {
     let mut scratch = Vec::new();
-    rows_items(&mut scratch, key, rows);
+    rows_items(&mut scratch, key, rows, mode);
     scratch.len() as u32
 }
 
