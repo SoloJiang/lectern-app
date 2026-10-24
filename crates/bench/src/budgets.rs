@@ -177,6 +177,7 @@ const REVIEW: &str = "docs/design/review.md#性能";
 const LOGGING: &str = "docs/design/logging.md#性能";
 const USAGE: &str = "docs/design/usage.md#性能";
 const UI: &str = "docs/design/ui.md#性能";
+const REVIEW_VIEW: &str = "docs/design/review_view.md#性能";
 
 /// Every frame's work (`completed - requested`) at most 8.3 ms, and every
 /// interval between two frames' `started` at most 1.5 refresh periods.
@@ -2011,6 +2012,16 @@ pub static BUDGETS: &[Budget] = &[
         "ui/semantic_disarmed",
         &[median(Limit::TimeAtMost(ns(2)))],
         UI,
+        ACTIVE,
+        Time,
+    ),
+    // `review_view/*` (docs/design/review_view.md「性能」): GPUI, so macOS
+    // alone. Step 1's `items_5000`; `scroll_5000` and `app/open_diff` come
+    // with the `app` step.
+    share_macos(
+        "review_view/items_5000",
+        &[median(Limit::TimeBelow(ms(4)))],
+        REVIEW_VIEW,
         ACTIVE,
         Time,
     ),

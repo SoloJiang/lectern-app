@@ -1,0 +1,49 @@
+---
+source: crates/review_view/src/tests/tree.rs
+expression: render_tree(& records)
+---
+review.narrative List items=33 visible=0..33 mode=unified
+  review.brief Group items=2 omitted=0 pending=0 analysis=unavailable
+    review.brief.item[sensitive-ci:src/file_000.rs] ListItem <review-brief-sensitive-ci> "\u{2068}src/file_000.rs\u{2069} runs in CI" critical=true
+    review.brief.item[edit-failed:src/file_001.rs] ListItem <review-brief-edit-failed> "An edit to \u{2068}src/file_001.rs\u{2069} failed; the agent may think it applied" critical=false
+    review.brief.analyze Button <review-analyze> "Analyze" [disabled]
+  review.turn.item[0:1] Group <review-turn> "Turn 1" after_last_seen=true running=false
+  review.turn.item[0:1].prompt Text "Make the change."
+  review.turn.item[0:1].text.item[0] Text "Done: the files are changed."
+  review.step.item[0] Group "src/file_000.rs" added=3 removed=1 alignment=aligned survival=all seen=unseen
+    review.step.item[0].check Toggle [checked=false]
+  review.diff.item[step:0].hunk.item[0:0] DiffHunk [selected] turns=1 others=0 drifted=0
+  review.diff.item[step:0].row.item[0:0] DiffLine kind=context drifted=false
+  review.diff.item[step:0].row.item[1:-] DiffLine kind=removed drifted=false
+  review.diff.item[step:0].row.item[-:1] DiffLine kind=added drifted=false
+  review.diff.item[step:0].row.item[-:2] DiffLine kind=added drifted=false
+  review.diff.item[step:0].row.item[2:3] DiffLine kind=context drifted=false
+  review.diff.item[step:0].row.item[3:-] DiffLine kind=removed drifted=false
+  review.step.item[2] Group "src/file_002.rs" added=3 removed=1 alignment=aligned survival=all seen=changed
+    review.step.item[2].check Toggle [checked=false]
+  review.diff.item[step:2].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
+  review.diff.item[step:2].row.item[0:0] DiffLine kind=context drifted=false
+  review.diff.item[step:2].row.item[1:-] DiffLine kind=removed drifted=false
+  review.diff.item[step:2].row.item[-:1] DiffLine kind=added drifted=false
+  review.diff.item[step:2].row.item[-:2] DiffLine kind=added drifted=false
+  review.diff.item[step:2].row.item[2:3] DiffLine kind=context drifted=false
+  review.diff.item[step:2].row.item[3:-] DiffLine kind=removed drifted=false
+  review.call.item[tool-0] Text <review-tool> "\u{2068}Read\u{2069}" kind=tool status=completed
+  review.turn.item[0:2] Group <review-turn> "Turn 2" after_last_seen=true running=false
+  review.turn.item[0:2].prompt Text "Make the change."
+  review.turn.item[0:2].text.item[0] Text "Done: the files are changed."
+  review.step.item[1] Group "src/file_001.rs" added=3 removed=1 alignment=aligned survival=all seen=seen
+    review.step.item[1].check Toggle [checked=true]
+  review.diff.item[step:1].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
+  review.diff.item[step:1].row.item[0:0] DiffLine kind=context drifted=false
+  review.diff.item[step:1].row.item[1:-] DiffLine kind=removed drifted=false
+  review.diff.item[step:1].row.item[-:1] DiffLine kind=added drifted=false
+  review.diff.item[step:1].row.item[-:2] DiffLine kind=added drifted=false
+  review.diff.item[step:1].row.item[2:3] DiffLine kind=context drifted=false
+  review.diff.item[step:1].row.item[3:-] DiffLine kind=removed drifted=false
+  review.call.item[tool-1] Text <review-tool> "\u{2068}Read\u{2069}" kind=tool status=completed
+review.bar Group
+  review.bar.progress Progress fraction=0.333
+  review.bar.comments Text <review-comments> "No comments"
+  review.bar.send Button <review-send> "Send" [disabled]
+  review.bar.looks-good Button <review-looks-good> "Looks good"

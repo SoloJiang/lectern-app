@@ -1,0 +1,6 @@
+---
+source: crates/review_view/src/tests/tree.rs
+expression: render_tree(& records)
+---
+review.failed Text <review-failed-not-in-project> "This session doesn't belong to an open project."
+  review.failed.back Button <review-back> "Back"

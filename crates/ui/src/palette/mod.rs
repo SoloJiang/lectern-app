@@ -8,7 +8,7 @@ use lectern_platform::appearance::{self as platform, SYSTEM_COLOR_COUNT, SystemC
 
 use crate::state::UiState;
 
-pub(crate) use builtin::on_accent;
+pub use builtin::on_accent;
 
 /// A window's appearance, light or dark.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

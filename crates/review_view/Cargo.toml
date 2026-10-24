@@ -9,6 +9,41 @@ publish.workspace = true
 
 [package.metadata.lectern]
 layer = "view"
+# The "review-view" plugin (docs/design/review_view.md「依赖」, ADR 0025): it
+# requires services only and is depended on by `app` (and the bench).
+plugin = true
+
+[dependencies]
+# Views, `list` and `ListState`, actions, the foreground task of the event
+# channel (docs/design/review_view.md「依赖」).
+gpui.workspace = true
+# The event channel to the main thread: `channel::mpsc::unbounded`.
+futures.workspace = true
+# `keys::review::*`, `Args`, `relative_time`.
+lectern-i18n = { path = "../i18n" }
+# `Plugin`, `Active`, `Context`, `PluginHandle`, `ServiceRef`, `ServiceSet`.
+lectern-kernel = { path = "../kernel" }
+# Runtime logging (docs/design/review_view.md「日志与诊断」, ADR 0046).
+lectern-logging = { path = "../logging" }
+# `dyn Review`, `dyn SessionSource`, `dyn Contributions` and their data types.
+lectern-services = { path = "../services" }
+# Colours, text, controls, motion and the probe's semantic nodes (ADR 0015).
+lectern-ui = { path = "../ui" }
+
+[features]
+# `testing`: the fake review service, the snapshot fixture and the harness
+# (the bench and this crate's tests; docs/design/review_view.md「接口」).
+test-support = []
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+# The semantic-tree snapshots.
+insta.workspace = true
+# `TestKernel`: the plugin runs in a real kernel.
+lectern-kernel = { path = "../kernel", features = ["test-support"] }
+# `testing::capture` for the canary test.
+lectern-logging = { path = "../logging", features = ["test-support"] }
+lectern-ui = { path = "../ui", features = ["test-support"] }
 
 [lints]
 workspace = true

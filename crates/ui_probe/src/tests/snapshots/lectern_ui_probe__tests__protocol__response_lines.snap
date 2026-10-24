@@ -1,0 +1,6 @@
+---
+source: crates/ui_probe/src/tests/protocol.rs
+expression: "format!(\"{}{}\", String::from_utf8(ok).unwrap(),\nString::from_utf8(err).unwrap())"
+---
+{"v":1,"id":3,"ok":true,"result":{"pid":1}}
+{"v":1,"id":4,"ok":false,"error":{"kind":"no-window","message":"the application has no window"}}

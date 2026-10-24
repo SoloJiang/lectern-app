@@ -11,15 +11,19 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
+use futures::channel::mpsc;
 use lectern_executor::{Executor, Priority};
 use lectern_kernel::{PluginHandle, ServiceRef, ServiceSet};
 use lectern_logging::{debug, info, trace, warn};
-use lectern_services::project::{ProjectEvent, ProjectKey, Projects};
+use lectern_services::project::{OpenRequest, ProjectEvent, ProjectKey, Projects};
 use lectern_services::review::{OverviewInterest, Review, ReviewEvent};
 use lectern_services::session::{
     SessionKey, SessionList, SessionSource, SessionsChanged, SourceId, Timestamp,
 };
 use lectern_services::usage::{ProjectRef, UsageQuery, Window};
+use lectern_services::workspace::{
+    Contributions, Milestone, SidebarEntry, WorkspaceCommand, WorkspaceEvent, screens,
+};
 
 use crate::diag::{count, session};
 use crate::snapshot::{self, HomeSnapshot, Inputs, UsageInputs};
@@ -34,6 +38,7 @@ pub(crate) struct Parts {
     pub projects: ServiceRef<dyn Projects>,
     pub sessions: ServiceSet<dyn SessionSource>,
     pub review: ServiceRef<dyn Review>,
+    pub contributions: ServiceRef<dyn Contributions>,
     pub usage: UsageSlot,
     pub wall: Wall,
 }
@@ -45,9 +50,14 @@ pub struct Home {
     projects: ServiceRef<dyn Projects>,
     sessions: ServiceSet<dyn SessionSource>,
     review: ServiceRef<dyn Review>,
+    contributions: ServiceRef<dyn Contributions>,
     usage: UsageSlot,
     wall: Wall,
     state: Mutex<State>,
+    /// The wake-up channels of the views that are built (「数据结构」). A
+    /// view reads what changed from this state; the message carries nothing,
+    /// so several wake-ups are one.
+    views: Mutex<Vec<mpsc::UnboundedSender<()>>>,
 }
 
 #[derive(Default)]
@@ -74,6 +84,21 @@ struct State {
     warned: HashSet<SessionKey>,
     /// From `started`; the callback of the usage slot schedules through it.
     handle: Option<PluginHandle>,
+    /// When the base project was opened and by which request: the milestone's
+    /// log fields.
+    opened: Option<Opened>,
+    /// The milestone was reported for the base project.
+    reported: bool,
+    /// The window shows another screen than the project home (the sidebar's
+    /// Overview entry is not selected then). The sidebar only exists in a
+    /// project, whose base screen is the home, so a view built before any
+    /// navigation event is on the home.
+    elsewhere: bool,
+}
+
+struct Opened {
+    at: Instant,
+    request: Option<OpenRequest>,
 }
 
 impl Home {
@@ -83,9 +108,11 @@ impl Home {
             projects: parts.projects,
             sessions: parts.sessions,
             review: parts.review,
+            contributions: parts.contributions,
             usage: parts.usage,
             wall: parts.wall,
             state: Mutex::new(State::default()),
+            views: Mutex::new(Vec::new()),
         })
     }
 
@@ -97,6 +124,116 @@ impl Home {
     /// composed and after the project closed. Copies an `Arc` under a lock.
     pub fn snapshot(&self) -> Option<Arc<HomeSnapshot>> {
         self.lock().snapshot.clone()
+    }
+
+    /// A view that was just built (`view` is `screen` or `sidebar`) registers
+    /// for wake-ups. Main thread.
+    ///
+    /// The sender is registered here and the caller reads `snapshot()` and the
+    /// other state afterwards, so what changes in between wakes the view
+    /// again and nothing is missed. The channel ends when the activation is
+    /// gone (`detach`).
+    pub fn attach_view(&self, view: &'static str) -> mpsc::UnboundedReceiver<()> {
+        let (sender, receiver) = mpsc::unbounded();
+        self.views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(sender);
+        debug!("home view attached"; view = view);
+        receiver
+    }
+
+    /// Wakes every view; the ones whose receiver is gone (the view was
+    /// dropped) are forgotten. Any thread, does not block.
+    fn wake(&self) {
+        self.views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|sender| sender.unbounded_send(()).is_ok());
+    }
+
+    /// How many views are registered for wake-ups (tests).
+    #[cfg(test)]
+    pub(crate) fn view_count(&self) -> usize {
+        self.views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// Whether the window shows the project home (the Overview entry of the
+    /// sidebar is selected).
+    pub fn on_home_screen(&self) -> bool {
+        !self.lock().elsewhere
+    }
+
+    /// `Contributions::dispatch`, logged. The command goes to the window's
+    /// queue; nothing waits for it. Main thread.
+    pub(crate) fn dispatch(&self, command: WorkspaceCommand, target: &'static str) {
+        debug!("home command"; command = command_name(&command), target = target);
+        if let Some(contributions) = self.contributions.get() {
+            contributions.dispatch(command);
+        }
+    }
+
+    /// The entries other crates (and this one) contributed to the sidebar.
+    /// Copies an `Arc` under a lock. Main thread.
+    pub fn sidebar_entries(&self) -> Arc<[SidebarEntry]> {
+        match self.contributions.get() {
+            Some(contributions) => contributions.sidebar_entries(),
+            None => Arc::from(Vec::new()),
+        }
+    }
+
+    /// The home screen drew a frame with `snapshot`: the first one whose files
+    /// are settled is the milestone (「性能」). Reported once per opened
+    /// project. Main thread.
+    pub(crate) fn frame_drawn(&self, snapshot: &HomeSnapshot) {
+        if !snapshot.files_settled {
+            return;
+        }
+        let since = {
+            let mut state = self.lock();
+            if state.reported || state.project.as_ref() != Some(&snapshot.project) {
+                return;
+            }
+            state.reported = true;
+            state
+                .opened
+                .as_ref()
+                .map(|opened| (opened.request, opened.at.elapsed()))
+        };
+        if let Some(contributions) = self.contributions.get() {
+            contributions.report_milestone(Milestone::ProjectHome);
+        }
+        let (request, since_opened) = since.unwrap_or((None, std::time::Duration::ZERO));
+        info!(
+            "home milestone reported";
+            request = request.map_or(0, |request| request.0), since_opened_us = since_opened,
+        );
+    }
+
+    /// `WorkspaceEvent` (executor thread): the sidebar's entries or the
+    /// current screen changed. Only wakes the views.
+    pub(crate) fn on_workspace(&self, event: &WorkspaceEvent) {
+        match event {
+            WorkspaceEvent::ContributionsChanged => {
+                trace!("home event"; event = "contributions-changed");
+                self.wake();
+            }
+            WorkspaceEvent::ScreenChanged { to, .. } => {
+                trace!("home event"; event = "screen-changed");
+                let elsewhere = to.screen != screens::PROJECT_HOME;
+                let changed = {
+                    let mut state = self.lock();
+                    std::mem::replace(&mut state.elsewhere, elsewhere) != elsewhere
+                };
+                if changed {
+                    self.wake();
+                }
+            }
+            WorkspaceEvent::LayerChanged { .. } | WorkspaceEvent::WindowClosed { .. } => {}
+        }
     }
 
     /// `started`: keeps the handle, lets the usage slot schedule, and takes up
@@ -115,7 +252,7 @@ impl Home {
             .get()
             .and_then(|projects| projects.open_projects().pop());
         if let Some(key) = open {
-            self.open(&key, &handle);
+            self.open(&key, None, &handle);
         }
     }
 
@@ -131,15 +268,21 @@ impl Home {
         };
         drop(interest);
         self.usage.set_project(None);
+        // The views' channels end; the views keep what they show.
+        self.views
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     pub(crate) fn on_project(self: &Arc<Self>, event: &ProjectEvent, handle: &PluginHandle) {
         match event {
             ProjectEvent::Opened {
-                result: Ok(key), ..
+                request,
+                result: Ok(key),
             } => {
                 trace!("home event"; event = "project-opened");
-                self.open(key, handle);
+                self.open(key, Some(*request), handle);
             }
             ProjectEvent::Opened { .. } => {}
             ProjectEvent::Changed {
@@ -155,7 +298,7 @@ impl Home {
                     // going live (project design: a successful `Opened` is
                     // followed by at least one `Changed`). A `Changed` that
                     // outlives its `Closed` finds no snapshot and is ignored.
-                    None if self.is_open(project) => self.open(project, handle),
+                    None if self.is_open(project) => self.open(project, None, handle),
                     None => {}
                     Some(_) => {}
                 }
@@ -194,7 +337,12 @@ impl Home {
 
     /// A project became the base: takes the overview interest (dropping the
     /// old project's first) and the usage interest, and composes.
-    fn open(self: &Arc<Self>, key: &ProjectKey, handle: &PluginHandle) {
+    fn open(
+        self: &Arc<Self>,
+        key: &ProjectKey,
+        request: Option<OpenRequest>,
+        handle: &PluginHandle,
+    ) {
         let (previous, epoch) = {
             let mut state = self.lock();
             if state.project.as_ref() == Some(key) {
@@ -209,9 +357,16 @@ impl Home {
             state.built_once = false;
             state.completed.clear();
             state.warned.clear();
+            state.opened = Some(Opened {
+                at: Instant::now(),
+                request,
+            });
+            state.reported = false;
             (previous, state.epoch)
         };
         drop(previous);
+        // The views drop the old project's snapshot until the new one is composed.
+        self.wake();
         let interest = self.review.get().map(|review| review.watch_overview(key));
         let surplus = {
             let mut state = self.lock();
@@ -241,10 +396,13 @@ impl Home {
             state.built_once = false;
             state.completed.clear();
             state.warned.clear();
+            state.opened = None;
             state.interest.take()
         };
         drop(interest);
         self.usage.set_project(None);
+        // The views clear: they find no snapshot.
+        self.wake();
     }
 
     /// The usage slot's callback: through the handle `started` kept.
@@ -372,6 +530,7 @@ impl Home {
             (first, to_complete, to_warn)
         };
 
+        self.wake();
         for key in &to_warn {
             warn!("overview session not in list"; sid = session(key));
         }
@@ -416,5 +575,17 @@ impl Home {
             }
         }
         debug!("home complete requested"; sessions = count(keys.len()));
+    }
+}
+
+/// The kind of a command, for the log (never the route's target).
+fn command_name(command: &WorkspaceCommand) -> &'static str {
+    match command {
+        WorkspaceCommand::Push(_) => "push",
+        WorkspaceCommand::PopToBase => "pop-to-base",
+        WorkspaceCommand::ShowSidebarPanel(_) => "show-sidebar-panel",
+        WorkspaceCommand::Pop => "pop",
+        WorkspaceCommand::Escape => "escape",
+        _ => "other",
     }
 }
