@@ -1,0 +1,45 @@
+---
+source: crates/ui/src/tests/probe.rs
+---
+[
+    Node {
+        id: "snap.root.bar",
+        role: Progress,
+        label: None,
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [
+            (
+                "fraction",
+                "0.400",
+            ),
+        ],
+        visible: true,
+        parent: None,
+    },
+    Node {
+        id: "snap.root.ring",
+        role: Progress,
+        label: None,
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [
+            (
+                "fraction",
+                "1.000",
+            ),
+        ],
+        visible: true,
+        parent: None,
+    },
+]

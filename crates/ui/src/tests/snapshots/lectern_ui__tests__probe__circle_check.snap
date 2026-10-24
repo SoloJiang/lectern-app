@@ -1,0 +1,39 @@
+---
+source: crates/ui/src/tests/probe.rs
+---
+[
+    Node {
+        id: "snap.root.seen",
+        role: Toggle,
+        label: None,
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: Some(
+                true,
+            ),
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+    Node {
+        id: "snap.root.unseen",
+        role: Toggle,
+        label: None,
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: Some(
+                false,
+            ),
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+]

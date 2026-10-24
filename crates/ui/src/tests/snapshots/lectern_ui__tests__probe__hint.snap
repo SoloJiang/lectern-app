@@ -1,0 +1,45 @@
+---
+source: crates/ui/src/tests/probe.rs
+---
+[
+    Node {
+        id: "snap.root.hint",
+        role: Text,
+        label: Some(
+            Label {
+                key: None,
+                text: "saved",
+            },
+        ),
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: true,
+        parent: None,
+    },
+    Node {
+        id: "snap.root.gone",
+        role: Text,
+        label: Some(
+            Label {
+                key: None,
+                text: "old",
+            },
+        ),
+        state: State {
+            selected: false,
+            focused: false,
+            disabled: false,
+            expanded: None,
+            checked: None,
+        },
+        attrs: [],
+        visible: false,
+        parent: None,
+    },
+]
