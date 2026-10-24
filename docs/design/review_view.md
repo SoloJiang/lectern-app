@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）已实现；第 2、3 步尚未实现。
+状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步（`app` 装配、`app/open_diff`、帧基准）尚未实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、检查器里的 Progress 列表、底部浮条，以及 J / K / V 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -57,8 +57,9 @@ kernel 没有可选依赖：`requires` 里的每个服务都要有活着的提�
 | `review-view-handoff` | — | `dyn Reader`、`dyn CodeIntel`、`dyn Usage` | `AfterFirstFrame` | 把三个服务的引用放进共享状态；在时交接生效，不在时屏幕照常、只少交接 |
 
 ```rust
-/// `app` 装配时调用一次，两个插件都放进 `PluginSet`（id 见上表）。不做 IO。
-pub fn plugins() -> (ReviewViewPlugin, HandoffPlugin);
+/// `app` 装配时调用一次，两个插件都放进 `PluginSet`（id 见上表）。`executor` 是进程的执行器，高亮任务经它提交
+/// （`PluginHandle::own_with` 只给 `SubmitGate`，`spawn_gated` 要执行器本身，与 `review` 插件的构造相同）。不做 IO。
+pub fn plugins(executor: lectern_executor::Executor) -> (ReviewViewPlugin, HandoffPlugin);
 
 pub struct ReviewViewPlugin { /* Arc<Shared> */ }
 pub struct HandoffPlugin { /* Arc<Shared> */ }
@@ -581,7 +582,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   }
   ```
 
-  本 crate 切到双栏时 `dispatch(SetReadingColumn(false))`，切回统一时 `dispatch(SetReadingColumn(true))`。`workspace` 设计「数据结构」的 `Nav` 加一个 `reading_column: Option<bool>`，`Pop` 时清掉。
+  本 crate 切到双栏时 `dispatch(SetReadingColumn(false))`，切回统一时 `dispatch(SetReadingColumn(true))`。`workspace` 设计「数据结构」的 `Nav` 加一个 `reading_column: Option<bool>`，`Pop` 时清掉。已实现：[#253](https://github.com/SoloJiang/lectern-app/pull/253)（覆盖按栈深度记，见 [workspace 设计「与设计的差异」](workspace.md#与设计的差异)）。
 - **B. `i18n`**（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）：`locales/{en,zh-CN}/review.ftl` 加上「界面」表里的键（已有的 5 个不改）。
 - **C. `app`**：`plugins()` 的两个插件放进 `PluginSet`（`Profile::Desktop` 的表加两行；test profile 不装）；bench 的 `Driver::open(OpenTarget::Session { … })` 经 `Contributions::dispatch(Push(Route { screen: REVIEW, target: Target::Review(ReviewTarget::Session(key)) }))`；`Milestone::DiffShown` 经 `workspace` 转给探针。
 - **D. `bench`**：预算表加 `review_view/items_5000`、`review_view/scroll_5000`；`app/open_diff` 的夹具与场景按「性能」。
@@ -656,7 +657,38 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - `just test -p lectern-bench`：78 个测试通过（预算表的一致性检查含新条目）。
 - 没有验证：真实的帧。`#[gpui::test]` 不画真实的帧，勾选、`ARRIVE`、进度条的 `Transition` 随真实时间走，测试里只验证终态（`tick_glide` 由测试给时刻）；`Content > review` 的谓词只对测试台里复刻 `workspace` 的 `Content` 上下文验证过，没有对真实的 `workspace` 验证；滚动 5000 行的帧时间（`review_view/scroll_5000`）和 `app/open_diff` 随第 3 步。真实窗口里的外观、行高与横向裁剪、减弱动态效果下的滚动，随第 3 步在 macOS 上手动运行发布构建时检查。
 
+### 第 2 步
+
+高亮、交接插件、双栏、折叠展开、Analyze 命令（叠在前置条件 A 的 [#253](https://github.com/SoloJiang/lectern-app/pull/253) 上），在 macOS（arm64，Rust 1.97.0）上运行。屏幕锁定，没有运行应用：下面全部是无窗口的 `#[gpui::test]`、纯函数测试和 `just` 入口。
+
+- `just check`（含 clippy `-D warnings`、文档链接和架构检查：32 个 crate，`review_view` 仍带 `plugin = true`，新增依赖 `lectern-executor`、`lectern-syntax`，都不是插件 crate）、`just deny` 通过。`git diff origin/main -- Cargo.lock` 只有 `lectern-review-view` 的两行依赖，没有新的外部 crate。
+- 「验收」的检查：第 1 步的五条 `rg` 都没有结果（测试里的 Rust 示例源码不含 `println!`）；`rg 'highlight::window' crates/review_view/src` 只出现在 `src/highlight.rs`（`highlight::window` 的调用和两处说明），`crates/review_view/src/view` 不存在；`rg 'SetReadingColumn' crates/review_view/src` 有结果（`src/diffs.rs`）。
+- `just test -p lectern-review-view`：115 个测试通过（第 1 步的 77 个，新增 38 个；一个测试一个进程）。
+  - 纯函数（`src/tests/highlight.rs`、`brief.rs`、`step2.rs`）：`highlight_window_*`（窗口取行的 `*_byte` 的范围到最后一行的行尾、超过 256 KiB 在行上拆开、没有文本或 OID 的一侧没有窗口、JSON 整份一个窗口或没有）、`highlight_cache_*`（按最久未用淘汰、键含 OID、查询版本和窗口）、`highlight_side_spans_*`、`lines_*`（行文本按字节或行号取、tab 展开后 token 与词级差异的区间平移、长行截断、不是 UTF-8 的行没有着色）、`items_display_rows_*`（统一一行一个 `DiffRow`；双栏的配对、没有配对的行单侧）、`brief_usage_*`（当前 worktree 的行排第一、累计与占比的整数百分比、MR 按标题、`shared` 的数量、zh-CN）、`brief_turn_tokens_*`。
+  - `#[gpui::test]`（真实的 kernel、假的 `Review`、`Reader`、`CodeIntel`、`Usage`，`Executor::manual()`）：`highlight_runs_on_the_executor_and_colours_after_the_fact`（任务运行前 `highlighted=old=plain,new=plain`，`run_tasks` 之后两侧都有 `Token`，`let` 是 `Keyword`）、`highlight_cache_is_shared_by_oid`（步骤与最终改动的同一个 blob 只提交 2 个任务）、`highlight_leaves_a_file_without_a_language_plain`、`highlight_results_of_rows_that_left_are_dropped`、`open_file_hands_off_to_the_reader`（删除行取旧侧 `Object`、新增行取新侧、`Anchor::Byte`、`expect`）、`open_file_in_a_final_diff_reads_the_working_tree`、`open_file_without_the_handoff_is_disabled_and_logged`、`share_object_follows_the_rows`（两侧各登记一次，行离开范围或屏幕 drop 时 `ObjectShare` drop）、`focus_is_set_from_the_snapshot`（`Review`、`Touched` 各一次，列表变了再发，选中行时 `Current`，清空选中不发，屏幕 drop 发一次 `Current(None)`）、`space_opens_the_context_panel_on_the_selected_row`、`usage_rows_and_turn_tokens`（用量行、轮次 token、`UsageEvent` 之后更新、`UsageInterest` 随屏幕 drop）、`without_the_handoff_there_is_no_usage`、`handoff_plugin_deactivates_on_its_own`（单独停用后屏幕照常、按钮置灰、用量行消失，重新激活后恢复）、`side_by_side_pairs_removed_and_added`（模式切换后一对行是一项，选中项与滚动位置按删除行的行号找回，`SetReadingColumn` 随模式发出，切回后选中项回到删除行）、`side_by_side_keeps_the_rows_and_asks_for_nothing_new`（不重发 `Prepare`，不再调 `rows()`）、`side_by_side_is_remembered_by_the_next_screen`、`side_by_side_sideways_scroll_is_shared_by_the_diff`、`fold_expands_by_preparing_more_context`（`Prepare` 里这个文件的 `context` 变大，折叠消失）、`fold_expands_from_a_hunk_above_it`（↵）、`analyze_commands_follow_the_state`（`Idle` 的按钮发 `Analyze`，`Running` 有取消按钮并发 `CancelAnalyze`，`Done`、`Failed` 有「再分析」，`Unavailable` 不发命令）。
+  - 语义树：`review_tree_session`、`review_tree_groups` 的 insta 快照加了每个步骤、文件的 `open` 按钮和 `review.diff.item[…]`（`Role::Diff`）节点；`review_tree_progress`、`review_tree_failed` 不变。
+  - `logs_hold_no_contents`：第 2 步的流程加进来（句柄、用量的分支名、会话标题、高亮、⇧⌘O、Space、模式切换、↵、Analyze、`UsageEvent`），trace 级别没有记录含金丝雀；`highlight`、`focus set`、`usage applied` 三条 debug 记录出现。
+- `just bench review_view/`：`review_view/items_5000` 中位数 27 µs（两次运行 27 µs，第 1 步 18 µs；多了每份行的 `display_rows`，预算 < 4 ms）。`just test -p lectern-bench` 78 个通过。本步没有新的基准条目：设计的 `review_view/scroll_5000` 与 `app/open_diff` 在第 3 步。
+- 没有验证：真实窗口里双栏的版面（每半宽的裁剪、分隔线、行号栏）、负的 `margin-left` 做的横向偏移在真实字体下的外观、触控板横向抖动、`on_scroll_wheel` 与列表自己的纵向滚动同时存在时的手感；高亮 8 ms 的预算在真实文件上够不够（`#[gpui::test]` 的示例只有 4 行）；`Segmented` 滑块的动画（测试只验证终态）；折叠展开的 `Expander` 动画没有做。以上随第 3 步在 macOS 上手动运行发布构建时检查。
+
 ## 与设计的差异
+
+### 第 2 步
+
+- **`plugins(executor)`**：设计的 `plugins()` 没有参数，但高亮任务要 `Executor`（`own_with` 只给 `SubmitGate`，`spawn_gated` 要执行器本身；`review` 的插件同样在构造时拿执行器）。`app` 装配随第 3 步：`plugins(executor.clone())` 返回的两个插件放进 `PluginSet`（`Profile::Desktop` 加两行）。`Shared` 另有 `executor`、`handoff`（`Handoff { reader, code_intel, usage }`）、`handle`、`mode`、`warned`（`highlight unavailable` 每种语言一次）。
+- **`mode` 与 `mode_slider` 在 `ReviewModel` 里**，不在 `ReviewScreen`：`Screen::toolbar` 只有 `&mut App`，没有视图状态，分段控件在工具栏里画，它读 `Current` 的模型。选择的模式记在 `Shared::mode`，之后打开的屏幕从它开始（「未决问题」1 的默认：本次运行记住）；开屏时是双栏就 `dispatch(SetReadingColumn(false))`。
+- **模式不进 `RowsKey`**：切换只重建显示行和项（`rebuild_in_place`），不重新 `Prepare`。`Item::Row` 的 `ix` 是显示行的下标，`displays: HashMap<RowsKey, Arc<[DisplayRow]>>` 随 `rows` 存取。`DisplayRow` 多一个 `fold: Option<Range<u32>>`（折叠的一段旧侧行号），`Folded` 不是两侧相同的 `Side`。统一视图里删除行只有 `left`，新增行只有 `right`，上下文行两侧都有。
+- **`anchor::find` 对 `Row` 键放宽**：先按整个键找，找不到时按任一侧仍有的行号找。配对行在统一视图里是 `(Some(old), None)`、双栏里是 `(Some(old), Some(new))`，不放宽的话切换模式会让锚点和选中项落到下一行；找到后选中项换成新项的键。
+- **词级差异的归属**：`FileRows::inline` 以删除行的下标为键，新增行只有 `pair`（旧侧行号）而没有指回的下标，所以 `display_rows` 先从删除行建「新行号 → 条目」的表，新增行用它找到同一个条目。
+- **`review.diff[…]` 是标题后的零高度兄弟节点**，不是包住 hunk 和行的节点（叙事是平铺的 `list`，行是各自的项）：它在步骤或文件标题的下面，属性 `rows`（`DiffRow` 数）、`context`、`prepared`、`highlighted`（`old=spans|plain,new=…`）。配对行的 `kind` 是 `changed`。步骤标题与文件标题多一个 `open` 按钮（`review-open-file`，没有交接时置灰，用文字作标签：`ui` 没有「打开文件」的图标，也没有提示气泡）。
+- **高亮窗口按行拆，不按 hunk**：从行的 `*_byte` 最小值到最大值所在行的行尾，超过 256 KiB 时在加入下一行会超限的地方切开。`JsonPad::default()`（设计写的 `::empty()` 在 `syntax` 里叫这个）。任务的预算是 `syntax::limits::FIRST_WINDOW_DEADLINE`（8 ms），窗口上限是 `limits::WINDOW_MAX`，本 crate 不写时长常量。缓存键在主线程上查语言（`Languages::core().for_path`：`syntax` 保证只查表、不编译、不做 IO）取 `query_version`，同一个 `(OID, 窗口)` 同时只有一个任务，等它的行是 `owners`；窗口超时、`Unavailable`、被取消的这一侧本次保持纯文本，不重试。`highlight` 的 debug 记录的 `outcome` 另有 `unavailable`。
+- **折叠展开 = 当前 context 加折叠段的行数**，不是「刚好盖住这一段」：这个文件的 `context` 表加上这段的长度，该文件的所有 `RowsKey` 都换成新的 `context`；点 `Fold` 先选中它，再展开；↵ 在选中 `Fold` 时展开它，选中 hunk 或行时展开同一份 diff 里它下面第一个折叠（`Fold` 本身不在 J / K 的停靠点里）。新键的占位按旧行数加折叠行数估高，列表不跳。`Expander` 的展开动画没有做。
+- **横向偏移**：每份 diff 一个 `hscroll`，`on_scroll_wheel` 的横向增量移动（两种模式都有），范围是画出过的最宽一行减 8 格，所以只滚到已经画过的最长一行；真实的触控板手感未验证。
+- **Space** 不检查「选中行有符号」（符号如何交给面板由 #20 的设计定）：选中行的 `Current(TextRef)` 发给 `code_intel`，再 `OpenPanel("context")`；没有交接时什么都不做（记 `handoff unavailable`）。选中 hunk 等于它的第一行。
+- **Analyze**：只发命令：按钮按 `brief.analysis` 显示，`Idle` 的「分析」发 `Analyze`；`Running` 显示 `review-analyze-running` 和「取消」发 `CancelAnalyze`；`Done`、`Failed` 的「Retry」用 `review-analyze-again`（设计的「Retry」没有单独的键）；`Unavailable` 是置灰的按钮（原因不显示，第 1 步的差异）。`Analyze` / `CancelAnalyze` 两个 Action 按状态忽略不适用的命令。本 crate 不接触被分析的内容、提示词，也不发任何网络请求。
+- **交接插件到达或离开时屏幕重做相关的事**（设计没写）：`Job::Handoff` 让每个屏幕重发 `Review`/`Touched`/`Current`、重新登记 `share_object`、重新 `watch` 用量；离开时放掉 `UsageInterest` 和登记。`Current(None)` 只在这个屏幕发出过 `Current(Some)` 时才在 drop 时发。`UsageEvent::Changed` 由 handoff 插件转给所有屏幕，屏幕按自己的 `UsageQuery` 过滤。日志 `handoff unavailable` 每个屏幕每种 `what` 只记一次。
+- **测试台**：`Rig` 有两个 `TestKernel`（`TestKernel` 只放一个插件），共用一个 `Shared`；`FakeReader`、`FakeCodeIntel`、`FakeUsage` 在 `src/tests/fakes.rs`，不在 `testing`（基准用不到）。`bench` 的 `review_view/items_5000` 只在 `BuildOptions` 加了 `mode: Unified`，预算表没有改。
+- **默认的产品问题**（「未决问题」）：1 本次运行记住所选模式（上面）；2、3、4 同第 1 步。
 
 ### 第 1 步
 

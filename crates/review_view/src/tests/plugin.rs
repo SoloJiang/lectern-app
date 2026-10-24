@@ -46,7 +46,9 @@ fn plugins_register_and_deactivate_cleanly(cx: &mut TestAppContext) {
 fn the_plugin_requires_the_three_services(cx: &mut TestAppContext) {
     use lectern_kernel::Plugin;
     let _ = cx;
-    let manifest = crate::plugin().manifest();
+    let manifest = crate::plugins(lectern_executor::Executor::manual())
+        .0
+        .manifest();
     let ids: Vec<&str> = manifest.requires.iter().map(|key| key.id()).collect();
     assert_eq!(ids, ["contributions", "review", "session-source"]);
     assert!(manifest.provides.is_empty());

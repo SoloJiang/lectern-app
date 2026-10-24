@@ -27,17 +27,19 @@ use lectern_ui::{
 };
 
 use crate::brief::{self, BriefLine};
+
+/// What an Analyze button asks for.
+#[derive(Clone, Copy)]
+enum Analyze {
+    Start,
+    Cancel,
+}
 use crate::items::{self, Item, ItemKey, Notice, Pos};
 use crate::model::ReviewModel;
 use crate::nodes;
 
 /// The side margin of every item.
 const GUTTER: gpui::Pixels = px(16.0);
-
-/// The cells of a line-number column, and how long a displayed code line
-/// may be (bytes): a longer line is cut where it is drawn.
-const NUMBER_CELLS: f32 = 5.0;
-const MAX_LINE_BYTES: usize = 4096;
 
 fn verbatim(text: impl Into<Verbatim>) -> Text {
     Text::verbatim(text)
@@ -94,9 +96,7 @@ impl ReviewModel {
                 old,
                 new,
             } => self.render_hunk(rows, hunk, old, new, &palette, &strings, window, cx),
-            Item::Row { rows, ix, old, new } => {
-                self.render_row(rows, ix, old, new, &palette, window, cx)
-            }
+            Item::Row { rows, ix, .. } => self.render_row(rows, ix, &palette, window, cx),
             Item::Fold { rows, ix, old } => {
                 self.render_fold(rows, ix, old, &palette, &strings, window, cx)
             }
@@ -231,12 +231,39 @@ impl ReviewModel {
                 ),
             );
         }
+        let usage_lines = self.usage_lines(strings);
+        for line in usage_lines {
+            let node = root.child("usage").item(&line.id);
+            let mut spec = Semantic::new(node, Role::ListItem)
+                .label(&line.text)
+                .attr("tokens", line.tokens.to_string())
+                .attr("percent", line.percent.to_string())
+                .attr("shared", line.shared.is_some().to_string());
+            if let Some(shared) = &line.shared {
+                spec = spec.attr("shared_text", shared.as_str().to_owned());
+            }
+            let mut column = div()
+                .flex()
+                .flex_col()
+                .text_role(TextRole::Secondary, window, cx)
+                .child(line.text.shared());
+            if let Some(shared) = line.shared {
+                column = column.child(
+                    div()
+                        .text_role(TextRole::Caption, window, cx)
+                        .child(shared.shared()),
+                );
+            }
+            card = card.child(semantic(spec, column));
+        }
         card = card.child(self.render_analysis(&brief.analysis, palette, strings, window, cx));
         semantic(spec, card).into_any_element()
     }
 
-    /// The Analyze row. The trigger and the cancel button are step 2; until
-    /// then the row shows the state (docs/design/review_view.md「验收」).
+    /// The Analyze row: the button that starts it, its state while it runs
+    /// with the one that cancels it, and what a finished or a failed run
+    /// shows. The view sends `Analyze` and `CancelAnalyze` and reads
+    /// `Brief::analysis`; the analysis itself is the domain's.
     fn render_analysis(
         &self,
         analysis: &AnalysisState,
@@ -252,8 +279,21 @@ impl ReviewModel {
                 .child(text.shared())
                 .into_any_element()
         };
+        let weak = cx.weak_entity();
+        let button = |id: lectern_ui::semantic::NodeId, text: Text, run: Analyze| {
+            let weak = weak.clone();
+            Button::new(id, text)
+                .size(ButtonSize::Small)
+                .kind(ButtonKind::Secondary)
+                .on_click(move |_, cx| {
+                    let _ = weak.update(cx, |model, _| match run {
+                        Analyze::Start => model.analyze(),
+                        Analyze::Cancel => model.cancel_analyze(),
+                    });
+                })
+        };
         match analysis {
-            AnalysisState::Unavailable(_) | AnalysisState::Idle => div()
+            AnalysisState::Unavailable(_) => div()
                 .flex()
                 .flex_row()
                 .child(
@@ -263,17 +303,36 @@ impl ReviewModel {
                         .disabled(true),
                 )
                 .into_any_element(),
+            AnalysisState::Idle => div()
+                .flex()
+                .flex_row()
+                .child(button(
+                    id,
+                    Text::key(strings, keys::review::ANALYZE),
+                    Analyze::Start,
+                ))
+                .into_any_element(),
             AnalysisState::Running { .. } => semantic(
-                Semantic::new(id, Role::Text).attr("state", "running"),
-                caption(
-                    Text::key(strings, keys::review::ANALYZE_RUNNING),
-                    window,
-                    cx,
-                ),
+                Semantic::new(id.clone(), Role::Group).attr("state", "running"),
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(caption(
+                        Text::key(strings, keys::review::ANALYZE_RUNNING),
+                        window,
+                        cx,
+                    ))
+                    .child(button(
+                        id.child("cancel"),
+                        Text::key(strings, keys::review::CANCEL),
+                        Analyze::Cancel,
+                    )),
             )
             .into_any_element(),
             AnalysisState::Done { stale, partial } => {
-                let mut column = div().flex().flex_col();
+                let mut column = div().flex().flex_col().gap(px(4.0));
                 if *stale {
                     column = column.child(caption(
                         Text::key(strings, keys::review::ANALYZE_STALE),
@@ -288,22 +347,38 @@ impl ReviewModel {
                         cx,
                     ));
                 }
+                column = column.child(div().flex().flex_row().child(button(
+                    id.child("again"),
+                    Text::key(strings, keys::review::ANALYZE_AGAIN),
+                    Analyze::Start,
+                )));
                 semantic(Semantic::new(id, Role::Group).attr("state", "done"), column)
                     .into_any_element()
             }
             AnalysisState::Failed(reason) => semantic(
-                Semantic::new(id, Role::Text).attr("state", "failed"),
+                Semantic::new(id.clone(), Role::Group).attr("state", "failed"),
                 div()
-                    .text_role(TextRole::Caption, window, cx)
-                    .text_color(palette.secondary_label)
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
                     .child(
-                        Text::fmt(
-                            strings,
-                            keys::review::ANALYZE_FAILED,
-                            &Args::new().str("reason", reason),
-                        )
-                        .shared(),
-                    ),
+                        div()
+                            .text_role(TextRole::Caption, window, cx)
+                            .text_color(palette.secondary_label)
+                            .child(
+                                Text::fmt(
+                                    strings,
+                                    keys::review::ANALYZE_FAILED,
+                                    &Args::new().str("reason", reason),
+                                )
+                                .shared(),
+                            ),
+                    )
+                    .child(div().flex().flex_row().child(button(
+                        id.child("again"),
+                        Text::key(strings, keys::review::ANALYZE_AGAIN),
+                        Analyze::Start,
+                    ))),
             )
             .into_any_element(),
         }
@@ -418,10 +493,14 @@ impl ReviewModel {
         } else {
             verbatim(relative(strings, turn.started_at))
         };
-        let spec = Semantic::new(node.clone(), Role::Group)
+        let tokens = self.turn_tokens(turn);
+        let mut spec = Semantic::new(node.clone(), Role::Group)
             .label(&title)
             .attr("after_last_seen", turn.after_last_seen.to_string())
             .attr("running", turn.ended_at.is_none().to_string());
+        if let Some(tokens) = tokens {
+            spec = spec.attr("tokens", tokens.to_string());
+        }
         let mut row = div()
             .w_full()
             .flex()
@@ -447,6 +526,15 @@ impl ReviewModel {
                     .text_color(palette.secondary_label)
                     .child(when.shared()),
             );
+        let row = match tokens {
+            Some(tokens) => row.child(
+                div()
+                    .text_role(TextRole::Caption, window, cx)
+                    .text_color(palette.secondary_label)
+                    .child(brief::turn_tokens_text(strings, tokens).shared()),
+            ),
+            None => row,
+        };
         let element = semantic(spec, row).into_any_element();
         if self.arriving.contains(&at) {
             let moves = matches!(ARRIVE.effective(cx), Effective::Move(_));
@@ -651,15 +739,18 @@ impl ReviewModel {
                     .flex_shrink_0()
                     .text_role(TextRole::Caption, window, cx)
                     .child(counts.shared()),
-            );
+            )
+            .child(self.open_button(&node, &file, key.clone(), strings, cx));
         head = head.on_click(cx.listener(move |this, _, _, cx| {
             this.select(Some(key.clone()), cx);
         }));
+        let rows_key = items::step_rows_key(step.step, &file, &self.context);
         let mut column = div()
             .w_full()
             .flex()
             .flex_col()
-            .child(semantic_interactive(spec, head));
+            .child(semantic_interactive(spec, head))
+            .child(self.diff_node(&rows_key));
         for note in notes {
             column = column.child(
                 div()
@@ -734,14 +825,17 @@ impl ReviewModel {
                     .text_role(TextRole::Caption, window, cx)
                     .child(counts.shared()),
             )
+            .child(self.open_button(&node, &key, item_key.clone(), strings, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select(Some(item_key.clone()), cx);
             }));
+        let rows_key = items::final_rows_key(&key, &self.context);
         let mut column = div()
             .w_full()
             .flex()
             .flex_col()
-            .child(semantic_interactive(spec, head));
+            .child(semantic_interactive(spec, head))
+            .child(self.diff_node(&rows_key));
         let mut notes: Vec<Text> = self.seen_note(seen, strings).into_iter().collect();
         notes.extend(self.file_only_turns(&key, strings));
         for note in notes {
@@ -781,6 +875,43 @@ impl ReviewModel {
                 )
             })
             .collect()
+    }
+
+    /// The button of a step's or a file's title that opens the file in the
+    /// reader (⇧⌘O): disabled when the reader is not there.
+    fn open_button(
+        &self,
+        node: &lectern_ui::semantic::NodeId,
+        file: &lectern_services::review::FileKey,
+        select: ItemKey,
+        strings: &Strings,
+        cx: &mut Context<ReviewModel>,
+    ) -> Button {
+        let weak = cx.weak_entity();
+        let file = file.clone();
+        Button::new(
+            node.child("open"),
+            Text::key(strings, keys::review::OPEN_FILE),
+        )
+        .kind(ButtonKind::Plain)
+        .size(ButtonSize::Small)
+        .disabled(!self.can_hand_off())
+        .on_click(move |_, cx| {
+            let file = file.clone();
+            let select = select.clone();
+            let _ = weak.update(cx, |model, cx| {
+                model.select(Some(select), cx);
+                model.open_file_of(&file);
+            });
+        })
+    }
+
+    /// The usage rows of the brief, when the session's usage is there.
+    fn usage_lines(&self, strings: &Strings) -> Vec<brief::UsageLine> {
+        let Some(usage) = self.session_usage() else {
+            return Vec::new();
+        };
+        brief::usage_lines(usage, self.focus_worktree().as_ref(), strings)
     }
 
     /// The circular check of a file: a click toggles it.
@@ -971,173 +1102,6 @@ impl ReviewModel {
         semantic_interactive(spec, line).into_any_element()
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "an item renderer: the pieces are the item's and the frame's"
-    )]
-    fn render_row(
-        &self,
-        rows_key: RowsKey,
-        ix: u32,
-        old: Option<u32>,
-        new: Option<u32>,
-        palette: &Palette,
-        window: &mut Window,
-        cx: &mut Context<ReviewModel>,
-    ) -> AnyElement {
-        let Some(rows) = self.rows.get(&rows_key) else {
-            return div().h(self.line_height).into_any_element();
-        };
-        let Some(row) = rows.rows.get(ix as usize) else {
-            return div().h(self.line_height).into_any_element();
-        };
-        use lectern_services::review::DiffRow;
-        let (kind, hunk, text) = match row {
-            DiffRow::Context {
-                new,
-                new_byte,
-                hunk,
-                ..
-            } => ("context", *hunk, line_text(&rows.new, *new_byte, *new)),
-            DiffRow::Removed {
-                old,
-                old_byte,
-                hunk,
-                ..
-            } => (
-                "removed",
-                Some(*hunk),
-                line_text(&rows.old, *old_byte, *old),
-            ),
-            DiffRow::Added {
-                new,
-                new_byte,
-                hunk,
-                ..
-            } => ("added", Some(*hunk), line_text(&rows.new, *new_byte, *new)),
-            DiffRow::Folded { .. } => return div().h(self.line_height).into_any_element(),
-        };
-        let drifted = hunk
-            .and_then(|h| rows.hunks.get(h as usize))
-            .is_some_and(|info| info.attribution.drifted > 0)
-            || matches!(&rows_key, RowsKey::Step { step, .. } if items::step_unaligned(&self.snapshot, *step));
-        let key = ItemKey::Row {
-            rows: rows_key.clone(),
-            old,
-            new,
-        };
-        let selected = self.selection.as_ref() == Some(&key);
-        let node = nodes::keyed("diff", &nodes::rows_key_text(&rows_key))
-            .child("row")
-            .item(&nodes::lines_key(old, new));
-        let spec = Semantic::new(node.clone(), Role::DiffLine)
-            .state(State {
-                selected,
-                ..State::default()
-            })
-            .attr("kind", kind)
-            .attr("drifted", drifted.to_string());
-        let mono = lectern_ui::mono_metrics(window, cx);
-        let number = |line: Option<u32>| {
-            div()
-                .w(mono.cell_width * NUMBER_CELLS)
-                .flex_shrink_0()
-                .text_color(palette.secondary_label)
-                .child(SharedString::from(
-                    line.map_or_else(String::new, |line| (line + 1).to_string()),
-                ))
-        };
-        let sign = match kind {
-            "added" => "+",
-            "removed" => "\u{2212}",
-            _ => " ",
-        };
-        let background = match kind {
-            "added" => Some(palette.diff_added_background),
-            "removed" => Some(palette.diff_removed_background),
-            _ => None,
-        };
-        let mut line = div()
-            .id(&node)
-            .w_full()
-            .h(self.line_height)
-            .flex()
-            .flex_row()
-            .items_center()
-            .overflow_hidden()
-            .text_role(TextRole::Code, window, cx)
-            .line_height(self.line_height)
-            .whitespace_nowrap()
-            .child(
-                div()
-                    .w(px(2.0))
-                    .h_full()
-                    .flex_shrink_0()
-                    .when_drifted(drifted, palette),
-            )
-            .child(number(old))
-            .child(number(new))
-            .child(div().w(mono.cell_width).flex_shrink_0().child(sign))
-            .child(div().flex_1().min_w_0().overflow_hidden().child(text));
-        if let Some(background) = background {
-            line = line.bg(background);
-        }
-        if selected {
-            line = line.bg(palette.unemphasized_selected_content_background);
-        }
-        let click_key = key;
-        line = line.on_click(cx.listener(move |this, _, _, cx| {
-            this.select(Some(click_key.clone()), cx);
-        }));
-        semantic_interactive(spec, line).into_any_element()
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "an item renderer: the pieces are the item's and the frame's"
-    )]
-    fn render_fold(
-        &self,
-        rows_key: RowsKey,
-        ix: u32,
-        old: u32,
-        palette: &Palette,
-        strings: &Strings,
-        window: &mut Window,
-        cx: &mut Context<ReviewModel>,
-    ) -> AnyElement {
-        let count = self
-            .rows
-            .get(&rows_key)
-            .and_then(|rows| rows.rows.get(ix as usize))
-            .map_or(0, |row| match row {
-                lectern_services::review::DiffRow::Folded { old, .. } => old.end - old.start,
-                _ => 0,
-            });
-        let text = Text::fmt(
-            strings,
-            keys::review::FOLD,
-            &Args::new().num("count", count),
-        );
-        let node = nodes::keyed("diff", &nodes::rows_key_text(&rows_key))
-            .child("fold")
-            .item(&old.to_string());
-        let spec = Semantic::new(node, Role::Button).label(&text);
-        semantic(
-            spec,
-            div()
-                .w_full()
-                .h(self.line_height)
-                .px(GUTTER)
-                .flex()
-                .items_center()
-                .text_role(TextRole::Caption, window, cx)
-                .text_color(palette.secondary_label)
-                .child(text.shared()),
-        )
-        .into_any_element()
-    }
-
     // ----- calls -------------------------------------------------------------
 
     fn render_command(
@@ -1297,16 +1261,6 @@ trait Shade: Styled + Sized {
             self
         }
     }
-
-    /// The thin line at the left edge of a row whose lines Lectern cannot
-    /// attribute.
-    fn when_drifted(self, drifted: bool, palette: &Palette) -> Self {
-        if drifted {
-            self.bg(palette.tertiary_label)
-        } else {
-            self
-        }
-    }
 }
 
 impl<T: Styled + Sized> Shade for T {}
@@ -1378,49 +1332,6 @@ pub(crate) fn hunk_labels(
         }
     }
     labels
-}
-
-/// The text of one line of a diff side: from `byte` when it is known,
-/// otherwise by counting lines; tabs become four spaces; a line longer than
-/// `MAX_LINE_BYTES` is cut.
-fn line_text(
-    side: &lectern_services::review::RowsSide,
-    byte: Option<u64>,
-    line: u32,
-) -> SharedString {
-    use lectern_services::changes::SideText;
-    let SideText::Text(bytes) = &side.text else {
-        return SharedString::default();
-    };
-    let start = match byte {
-        Some(byte) if (byte as usize) <= bytes.len() => byte as usize,
-        _ => nth_line_start(bytes, line),
-    };
-    let rest = &bytes[start.min(bytes.len())..];
-    let end = rest.iter().position(|b| *b == b'\n').unwrap_or(rest.len());
-    let mut line = &rest[..end];
-    if line.last() == Some(&b'\r') {
-        line = &line[..line.len() - 1];
-    }
-    let cut = line.len().min(MAX_LINE_BYTES);
-    let text = String::from_utf8_lossy(&line[..cut]);
-    SharedString::from(if text.contains('\t') {
-        text.replace('\t', "    ")
-    } else {
-        text.into_owned()
-    })
-}
-
-/// The offset of line `n` (counted from 0) of `bytes`.
-fn nth_line_start(bytes: &[u8], n: u32) -> usize {
-    let mut start = 0;
-    for _ in 0..n {
-        match bytes[start..].iter().position(|b| *b == b'\n') {
-            Some(at) => start += at + 1,
-            None => return bytes.len(),
-        }
-    }
-    start
 }
 
 /// A time as the interface says it: "3 min ago" and the like.

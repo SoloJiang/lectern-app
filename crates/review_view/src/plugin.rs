@@ -3,31 +3,42 @@
 //! services, registers the three contributions and subscribes; nothing is
 //! read, submitted or drawn before a screen is pushed (ADR 0017).
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::channel::mpsc;
 use gpui::{App, AppContext, Window};
+use lectern_executor::{Executor, Priority};
 use lectern_kernel::{
     Activation, Active, Context, Manifest, Name, Plugin, PluginError, PluginHandle, ServiceRef,
     ServiceSet, service,
 };
 use lectern_logging::{debug, warn};
+use lectern_services::code_intel::CodeIntel;
+use lectern_services::reader::Reader;
 use lectern_services::review::{Review, ReviewEvent, ReviewId};
-use lectern_services::session::{SessionKey, SessionSource};
+use lectern_services::session::{SessionKey, SessionSource, SessionSummary};
+use lectern_services::usage::{Usage, UsageEvent, UsageQuery};
 use lectern_services::workspace::{
     Contribution, ContributionKind, Contributions, Layer, Milestone, ScreenLayout, Target,
     Visibility, WorkspaceEvent, screens,
 };
+use lectern_syntax::WindowSpans;
 use lectern_ui::contrib::{InspectorTab, KeyBindings, Screen};
 
 use crate::actions;
 use crate::diag;
+use crate::highlight::SpanKey;
+use crate::items::DiffMode;
 use crate::progress_tab::ProgressTab;
 use crate::screen;
 
 /// The ID of "review-view" in the `PluginSet`.
 pub const PLUGIN_ID: &str = "review-view";
+
+/// The ID of "review-view-handoff" in the `PluginSet`.
+pub const HANDOFF_ID: &str = "review-view-handoff";
 
 /// The ID of the inspector page of the Progress list.
 pub const FILES_TAB: &str = "files";
@@ -49,18 +60,61 @@ pub(crate) enum Job {
     Layer {
         open: bool,
     },
+    /// `UsageEvent::Changed` of a query: the screen that watches it reads the
+    /// snapshot again.
+    Usage {
+        query: UsageQuery,
+    },
+    /// The handoff services arrived or left.
+    Handoff,
+    /// A highlight task finished: the spans of a window.
+    Spans {
+        key: SpanKey,
+        spans: Arc<WindowSpans>,
+        took_us: u64,
+    },
+    /// A highlight task gave no spans: the window stays plain text.
+    SpansUnavailable {
+        key: SpanKey,
+        /// The language's grammar or query is unusable (as opposed to a
+        /// timeout or a cancel).
+        unavailable: bool,
+        language: Arc<str>,
+        bytes: u64,
+        took_us: u64,
+    },
 }
 
 pub(crate) type JobSender = mpsc::UnboundedSender<Job>;
 pub(crate) type JobReceiver = mpsc::UnboundedReceiver<Job>;
 
-/// Shared by the plugin and every screen. `Mutex`es of options: the plugin
-/// fills them when it activates and empties them when it is deactivated.
-#[derive(Default)]
+/// The three services of "review-view-handoff". Taken from `Shared` by copy
+/// (a clone of the references); `ServiceRef::get` is None once a provider is
+/// deactivated.
+#[derive(Clone)]
+pub(crate) struct Handoff {
+    pub reader: ServiceRef<dyn Reader>,
+    pub code_intel: ServiceRef<dyn CodeIntel>,
+    pub usage: ServiceRef<dyn Usage>,
+}
+
+/// Shared by the plugins and every screen. `Mutex`es of options: the plugins
+/// fill them when they activate and empty them when they are deactivated.
 pub(crate) struct Shared {
     contributions: Mutex<Option<ServiceRef<dyn Contributions>>>,
     review: Mutex<Option<ServiceRef<dyn Review>>>,
     sessions: Mutex<Option<ServiceSet<dyn SessionSource>>>,
+    /// Filled by "review-view-handoff"; the screens work without it.
+    handoff: Mutex<Option<Handoff>>,
+    /// The handle of this activation of "review-view": the highlight tasks
+    /// are submitted through it.
+    handle: Mutex<Option<PluginHandle>>,
+    executor: Executor,
+    /// The languages whose unavailability was logged already (once per run).
+    warned: Mutex<HashSet<String>>,
+    /// The diff mode the user chose: the screens opened later start in it
+    /// (not kept across runs, docs/design/review_view.md「未决问题」1).
+    mode: Mutex<DiffMode>,
     /// The living screens' channels; the listeners deliver by `ReviewId`.
     screens: Mutex<Vec<(ReviewId, u64, JobSender)>>,
     /// The next registration's token.
@@ -72,6 +126,91 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
+    fn new(executor: Executor) -> Shared {
+        Shared {
+            contributions: Mutex::new(None),
+            review: Mutex::new(None),
+            sessions: Mutex::new(None),
+            handoff: Mutex::new(None),
+            handle: Mutex::new(None),
+            executor,
+            warned: Mutex::new(HashSet::new()),
+            mode: Mutex::new(DiffMode::Unified),
+            screens: Mutex::new(Vec::new()),
+            next_token: AtomicU64::new(0),
+        }
+    }
+
+    /// Whether the handoff services are there (their plugin is active).
+    pub(crate) fn has_handoff(&self) -> bool {
+        lock(&self.handoff).is_some()
+    }
+
+    pub(crate) fn with_reader<R>(&self, f: impl FnOnce(&dyn Reader) -> R) -> Option<R> {
+        let reader = lock(&self.handoff).as_ref()?.reader.clone();
+        let admitted = reader.get()?;
+        Some(f(&*admitted))
+    }
+
+    pub(crate) fn with_code_intel<R>(&self, f: impl FnOnce(&dyn CodeIntel) -> R) -> Option<R> {
+        let code_intel = lock(&self.handoff).as_ref()?.code_intel.clone();
+        let admitted = code_intel.get()?;
+        Some(f(&*admitted))
+    }
+
+    pub(crate) fn with_usage<R>(&self, f: impl FnOnce(&dyn Usage) -> R) -> Option<R> {
+        let usage = lock(&self.handoff).as_ref()?.usage.clone();
+        let admitted = usage.get()?;
+        Some(f(&*admitted))
+    }
+
+    /// Runs a highlight task on the executor, as `Priority::Interactive`,
+    /// holding a `BusyGuard` until it is done. False when the plugin is not
+    /// started or is gone: nothing runs.
+    pub(crate) fn submit(&self, work: impl FnOnce() + Send + 'static) -> bool {
+        let Some(handle) = lock(&self.handle).clone() else {
+            return false;
+        };
+        let Some(guard) = handle.busy() else {
+            return false;
+        };
+        let executor = self.executor.clone();
+        handle.own_with(move |gate| {
+            executor.run_gated(&gate, Priority::Interactive, move || {
+                let _guard = guard;
+                work();
+            })
+        })
+    }
+
+    pub(crate) fn mode(&self) -> DiffMode {
+        *lock(&self.mode)
+    }
+
+    pub(crate) fn set_mode(&self, mode: DiffMode) {
+        *lock(&self.mode) = mode;
+    }
+
+    /// True the first time it is asked about `language` in this run.
+    pub(crate) fn first_warning(&self, language: &str) -> bool {
+        lock(&self.warned).insert(language.to_owned())
+    }
+
+    /// The summary of a session in the sessions list, None if no source
+    /// knows it.
+    pub(crate) fn session_summary(&self, key: &SessionKey) -> Option<SessionSummary> {
+        let sessions = lock(&self.sessions).clone()?;
+        let mut found = None;
+        sessions.for_each(|source| {
+            if found.is_none()
+                && let Some(summary) = source.sessions().get(key)
+            {
+                found = Some(summary.clone());
+            }
+        });
+        found
+    }
+
     pub(crate) fn with_review<R>(&self, f: impl FnOnce(&dyn Review) -> R) -> Option<R> {
         let review = lock(&self.review).clone()?;
         let admitted = review.get()?;
@@ -89,16 +228,7 @@ impl Shared {
 
     /// The title of a session in the sessions list, None if no source knows it.
     pub(crate) fn session_title(&self, key: &SessionKey) -> Option<Arc<str>> {
-        let sessions = lock(&self.sessions).clone()?;
-        let mut title = None;
-        sessions.for_each(|source| {
-            if title.is_none()
-                && let Some(summary) = source.sessions().get(key)
-            {
-                title = summary.title.clone();
-            }
-        });
-        title
+        self.session_summary(key)?.title
     }
 
     pub(crate) fn report_milestone(&self, milestone: Milestone) {
@@ -112,11 +242,11 @@ impl Shared {
     /// Registers a screen's channel. Called before the screen reads its first
     /// snapshot, so an event sent before the read is not lost: the snapshot
     /// read afterwards is at least that generation.
-    pub(crate) fn register_screen(&self, id: ReviewId) -> (u64, JobReceiver) {
+    pub(crate) fn register_screen(&self, id: ReviewId) -> (u64, JobSender, JobReceiver) {
         let (tx, rx) = mpsc::unbounded();
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        lock(&self.screens).push((id, token, tx));
-        (token, rx)
+        lock(&self.screens).push((id, token, tx.clone()));
+        (token, tx, rx)
     }
 
     /// Two screens may show the same review (`open` gives the same ID): the
@@ -159,10 +289,32 @@ impl Shared {
         }
     }
 
+    /// Runs on the thread that emitted the event: only forwards. Every
+    /// screen gets it; the one that watches the query reads the snapshot.
+    fn on_usage(&self, event: &UsageEvent) {
+        let UsageEvent::Changed { query, .. } = event else {
+            return;
+        };
+        let screens = lock(&self.screens);
+        for (_, _, tx) in screens.iter() {
+            let _ = tx.unbounded_send(Job::Usage {
+                query: query.clone(),
+            });
+        }
+    }
+
+    fn handoff_changed(&self) {
+        let screens = lock(&self.screens);
+        for (_, _, tx) in screens.iter() {
+            let _ = tx.unbounded_send(Job::Handoff);
+        }
+    }
+
     fn clear(&self) {
         *lock(&self.contributions) = None;
         *lock(&self.review) = None;
         *lock(&self.sessions) = None;
+        *lock(&self.handle) = None;
     }
 }
 
@@ -173,12 +325,17 @@ pub struct ReviewViewPlugin {
     shared: Arc<Shared>,
 }
 
-/// Does no IO. (The design's `plugins()` returns this and the handoff
-/// plugin; the second one arrives with step 2.)
-pub fn plugin() -> ReviewViewPlugin {
-    ReviewViewPlugin {
-        shared: Arc::new(Shared::default()),
-    }
+/// The two plugins, to be put in the `PluginSet` by `app`: "review-view" and
+/// "review-view-handoff". They share one [`Shared`]. `executor` is the
+/// process's, for the highlight tasks. Does no IO.
+pub fn plugins(executor: Executor) -> (ReviewViewPlugin, HandoffPlugin) {
+    let shared = Arc::new(Shared::new(executor));
+    (
+        ReviewViewPlugin {
+            shared: shared.clone(),
+        },
+        HandoffPlugin { shared },
+    )
 }
 
 impl Plugin for ReviewViewPlugin {
@@ -261,7 +418,7 @@ struct ReviewViewActive {
 
 impl Active for ReviewViewActive {
     fn started(&mut self, handle: PluginHandle) {
-        let _ = handle;
+        *lock(&self.shared.handle) = Some(handle);
         debug!("review view started"; screens = 0u32);
     }
 }
@@ -275,5 +432,64 @@ impl Drop for ReviewViewActive {
             warn!("review view deactivated with screens open"; screens = diag::count(open));
         }
         self.shared.clear();
+    }
+}
+
+/// The plugin "review-view-handoff": requires `dyn Reader`, `dyn CodeIntel`
+/// and `dyn Usage`, activates after the first frame. The review screens work
+/// without it; with it they hand off to the reader and the code navigation
+/// and show the session's usage (docs/design/review_view.md「接口」「插件」).
+pub struct HandoffPlugin {
+    shared: Arc<Shared>,
+}
+
+impl Plugin for HandoffPlugin {
+    fn manifest(&self) -> Manifest {
+        Manifest {
+            provides: Vec::new(),
+            requires: vec![
+                service::<dyn Reader>(),
+                service::<dyn CodeIntel>(),
+                service::<dyn Usage>(),
+            ],
+            activation: vec![Activation::AfterFirstFrame],
+        }
+    }
+
+    fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError> {
+        let handoff = Handoff {
+            reader: ctx.service::<dyn Reader>(),
+            code_intel: ctx.service::<dyn CodeIntel>(),
+            usage: ctx.service::<dyn Usage>(),
+        };
+        let shared = self.shared.clone();
+        ctx.on::<UsageEvent>(move |event, _| shared.on_usage(event));
+        Ok(Box::new(HandoffActive {
+            shared: self.shared.clone(),
+            handoff: Some(handoff),
+        }))
+    }
+}
+
+struct HandoffActive {
+    shared: Arc<Shared>,
+    handoff: Option<Handoff>,
+}
+
+impl Active for HandoffActive {
+    fn started(&mut self, _: PluginHandle) {
+        if let Some(handoff) = self.handoff.take() {
+            *lock(&self.shared.handoff) = Some(handoff);
+            self.shared.handoff_changed();
+        }
+    }
+}
+
+impl Drop for HandoffActive {
+    fn drop(&mut self) {
+        let had = lock(&self.shared.handoff).take().is_some();
+        if had {
+            self.shared.handoff_changed();
+        }
     }
 }

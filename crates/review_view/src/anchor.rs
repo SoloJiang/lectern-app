@@ -11,9 +11,28 @@ use gpui::{ListOffset, Pixels, px};
 
 use crate::items::{Item, ItemKey};
 
-/// The index of the item with `key`, if there is one.
+/// The index of the item with `key`, if there is one. A diff row whose two
+/// line numbers changed shape (the same removed line, now beside its partner
+/// or alone, after the diff mode changed) is found by the line it has on a
+/// side that is still there.
 pub fn find(items: &[Item], key: &ItemKey) -> Option<usize> {
-    items.iter().position(|item| item.key() == *key)
+    if let Some(ix) = items.iter().position(|item| item.key() == *key) {
+        return Some(ix);
+    }
+    let ItemKey::Row { rows, old, new } = key else {
+        return None;
+    };
+    items.iter().position(|item| match item {
+        Item::Row {
+            rows: at,
+            old: item_old,
+            new: item_new,
+            ..
+        } => {
+            at == rows && ((old.is_some() && item_old == old) || (new.is_some() && item_new == new))
+        }
+        _ => false,
+    })
 }
 
 /// Where the list scrolls to once `new` replaces `old` and was at `at`.

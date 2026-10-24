@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use futures::StreamExt;
@@ -15,18 +16,23 @@ use gpui::{
 };
 use lectern_logging::{debug, info, warn};
 use lectern_services::changes::ChangeTotals;
+use lectern_services::code_intel::TextRef;
+use lectern_services::project::{BlobId, RelPath};
+use lectern_services::reader::ObjectShare;
 use lectern_services::review::{
     AnalysisState, Brief, FileKey, FileRows, LoadState, Need, Progress, ReviewCommand, ReviewId,
     ReviewSnapshot, ReviewTarget, RowsKey, SeenState, TextKey, TurnRef,
 };
+use lectern_services::usage::{UsageInterest, UsageQuery, UsageSnapshot};
 use lectern_services::workspace::WorkspaceCommand;
 use lectern_ui::motion::{self, Transition};
 
 use crate::anchor;
 use crate::diag;
-use crate::items::{self, BuildOptions, Item, ItemKey};
+use crate::highlight::{Half, SideSpans, SpansCache};
+use crate::items::{self, BuildOptions, DiffMode, DisplayRow, Item, ItemKey};
 use crate::needs;
-use crate::plugin::{Job, JobReceiver, Shared};
+use crate::plugin::{Job, JobReceiver, JobSender, Shared};
 
 /// The items assumed visible before the list has been laid out once.
 const INITIAL_VISIBLE: usize = 40;
@@ -66,10 +72,76 @@ struct Glide {
     target: ItemKey,
 }
 
+/// A highlight task in the air: who wants its spans, and the flag that
+/// cancels it once nobody does.
+pub(crate) struct Inflight {
+    pub(crate) cancel: Arc<AtomicBool>,
+    pub(crate) owners: Vec<(RowsKey, Half)>,
+}
+
+/// What was handed to `code_intel` and `usage` already, so that only what
+/// changed is sent again.
+#[derive(Default)]
+pub(crate) struct HandedOff {
+    pub(crate) review: Option<Arc<[RelPath]>>,
+    pub(crate) touched: Option<Arc<[RelPath]>>,
+    pub(crate) current: Option<TextRef>,
+    /// Whether `Current(Some(..))` has gone out at all: `Current(None)` is
+    /// sent when the screen closes only if it did.
+    pub(crate) current_sent: bool,
+    /// The `what`s of `handoff unavailable` already logged for this screen.
+    pub(crate) missing_logged: u8,
+}
+
+/// The `what` of `handoff unavailable`.
+#[derive(Clone, Copy)]
+pub(crate) enum Missing {
+    OpenFile = 1,
+    Focus = 2,
+    Share = 4,
+    Usage = 8,
+}
+
+impl Missing {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Missing::OpenFile => "open_file",
+            Missing::Focus => "focus",
+            Missing::Share => "share",
+            Missing::Usage => "usage",
+        }
+    }
+}
+
 pub struct ReviewModel {
     pub(crate) shared: Arc<Shared>,
+    /// The sender of this screen's channel: the highlight tasks deliver
+    /// through it.
+    pub(crate) tx: Option<JobSender>,
+    pub(crate) mode: DiffMode,
+    /// The slider of the unified / side-by-side control.
+    pub(crate) mode_slider: Transition,
+    /// The display rows of every diff held in `rows`, in `mode`.
+    pub(crate) displays: HashMap<RowsKey, Arc<[DisplayRow]>>,
+    pub(crate) spans: SpansCache,
+    /// The spans that arrived for each diff held in `rows`.
+    pub(crate) highlighted: HashMap<RowsKey, SideSpans>,
+    pub(crate) inflight: HashMap<(BlobId, Range<u64>), Inflight>,
+    /// Windows that gave no spans this time: plain text, not tried again.
+    pub(crate) plain: HashSet<(BlobId, Range<u64>)>,
+    /// `Reader::share_object` registrations, with the rows they belong to.
+    pub(crate) shares: HashMap<RowsKey, [Option<ObjectShare>; 2]>,
+    pub(crate) usage_query: Option<UsageQuery>,
+    pub(crate) usage_interest: Option<UsageInterest>,
+    pub(crate) usage: Option<Arc<UsageSnapshot>>,
+    pub(crate) handed_off: HandedOff,
+    /// The shared horizontal offset of each diff's lines (side by side).
+    pub(crate) hscroll: HashMap<RowsKey, Pixels>,
+    /// The widest line drawn so far in each diff (cells): where a sideways
+    /// scroll ends.
+    pub(crate) widest: HashMap<RowsKey, u32>,
     /// Whether `Review::open` was called: the service was there.
-    opened: bool,
+    pub(crate) opened: bool,
     /// The registration of this screen's event channel.
     token: u64,
     pub(crate) id: ReviewId,
@@ -82,9 +154,9 @@ pub struct ReviewModel {
     pub(crate) items: Vec<Item>,
     pub(crate) list: ListState,
     pub(crate) rows: HashMap<RowsKey, Arc<FileRows>>,
-    known_lines: HashMap<RowsKey, u32>,
+    pub(crate) known_lines: HashMap<RowsKey, u32>,
     pub(crate) texts: HashMap<TextKey, Arc<str>>,
-    context: HashMap<FileKey, u32>,
+    pub(crate) context: HashMap<FileKey, u32>,
     earlier_collapsed: bool,
     pub(crate) noise_expanded: bool,
     pub(crate) selection: Option<ItemKey>,
@@ -120,9 +192,9 @@ impl ReviewModel {
         let started = Instant::now();
         let id = shared.with_review(|review| review.open(target.clone()));
         let registration = id.map(|id| shared.register_screen(id));
-        let (token, receiver) = match registration {
-            Some((token, receiver)) => (token, Some(receiver)),
-            None => (0, None),
+        let (token, tx, receiver) = match registration {
+            Some((token, tx, receiver)) => (token, Some(tx), Some(receiver)),
+            None => (0, None, None),
         };
         let first = id.and_then(|id| shared.with_review(|review| review.snapshot(id)).flatten());
         let state = if id.is_some() {
@@ -137,8 +209,34 @@ impl ReviewModel {
             _ => None,
         };
         info!("review screen opened"; id = id.0, target = diag::target_kind(&target));
+        if shared.mode() == DiffMode::SideBySide {
+            // The screen needs the whole width from its first frame; the
+            // command queues behind the `Push` that built it.
+            shared.dispatch(WorkspaceCommand::SetReadingColumn(false));
+        }
+        // The mode the user chose on an earlier screen of this run.
+        let mode = shared.mode();
         let mut model = ReviewModel {
             shared,
+            tx,
+            mode,
+            mode_slider: Transition::new(if mode == DiffMode::SideBySide {
+                1.0
+            } else {
+                0.0
+            }),
+            displays: HashMap::new(),
+            spans: SpansCache::new(),
+            highlighted: HashMap::new(),
+            inflight: HashMap::new(),
+            plain: HashSet::new(),
+            shares: HashMap::new(),
+            usage_query: None,
+            usage_interest: None,
+            usage: None,
+            handed_off: HandedOff::default(),
+            hscroll: HashMap::new(),
+            widest: HashMap::new(),
             opened: receiver.is_some(),
             token,
             id,
@@ -179,8 +277,10 @@ impl ReviewModel {
         if matches!(snapshot.state, LoadState::Loading) {
             model.timers = Some(Self::loading_timers(cx));
         }
+        model.attach_usage();
         if matches!(snapshot.state, LoadState::Ready) {
             model.rebuild(&[], ListOffset::default(), cx);
+            model.sync_focus();
         } else if let LoadState::Failed(error) = &snapshot.state {
             warn!("review failed shown"; id = id.0, error = diag::error_kind(error));
         }
@@ -203,6 +303,21 @@ impl ReviewModel {
         ));
         ReviewModel {
             shared,
+            tx: None,
+            mode: DiffMode::Unified,
+            mode_slider: Transition::new(0.0),
+            displays: HashMap::new(),
+            spans: SpansCache::new(),
+            highlighted: HashMap::new(),
+            inflight: HashMap::new(),
+            plain: HashSet::new(),
+            shares: HashMap::new(),
+            usage_query: None,
+            usage_interest: None,
+            usage: None,
+            handed_off: HandedOff::default(),
+            hscroll: HashMap::new(),
+            widest: HashMap::new(),
             opened: false,
             token: 0,
             id: ReviewId(0),
@@ -313,6 +428,8 @@ impl ReviewModel {
         let mut changed: Option<u64> = None;
         let mut prepared = false;
         let mut layer = None;
+        let mut usage = false;
+        let mut handoff = false;
         for job in jobs {
             match job {
                 Job::Review(lectern_services::review::ReviewEvent::Changed {
@@ -323,7 +440,27 @@ impl ReviewModel {
                 }
                 Job::Review(_) => {}
                 Job::Layer { open } => layer = Some(open),
+                Job::Usage { query } => usage |= self.usage_query.as_ref() == Some(&query),
+                Job::Handoff => handoff = true,
+                Job::Spans {
+                    key,
+                    spans,
+                    took_us,
+                } => self.on_spans(key, spans, took_us, cx),
+                Job::SpansUnavailable {
+                    key,
+                    unavailable,
+                    language,
+                    bytes,
+                    took_us,
+                } => self.on_spans_unavailable(key, unavailable, &language, bytes, took_us),
             }
+        }
+        if handoff {
+            self.handoff_changed(cx);
+        }
+        if usage {
+            self.read_usage(cx);
         }
         if let Some(open) = layer {
             self.layer_open = open;
@@ -388,6 +525,7 @@ impl ReviewModel {
                 anchor_found = true,
                 took_us = started.elapsed()
             );
+            self.sync_focus();
             cx.notify();
             return;
         }
@@ -399,6 +537,7 @@ impl ReviewModel {
         let old_items = std::mem::take(&mut self.items);
         self.check_consistent();
         let found = self.rebuild(&old_items, top, cx);
+        self.sync_focus();
         debug!(
             "snapshot applied";
             id = self.id.0,
@@ -416,6 +555,7 @@ impl ReviewModel {
     /// items were: returns whether the anchor's own key was found.
     fn rebuild(&mut self, old: &[Item], top: ListOffset, cx: &mut Context<ReviewModel>) -> bool {
         let options = BuildOptions {
+            mode: self.mode,
             earlier_collapsed: self.earlier_collapsed,
             noise_expanded: self.noise_expanded,
             context: &self.context,
@@ -443,10 +583,10 @@ impl ReviewModel {
         if target.item_ix > 0 || target.offset_in_item > Pixels::ZERO {
             self.list.scroll_to(target);
         }
-        if let Some(selected) = &self.selection
-            && anchor::find(&self.items, selected).is_none()
-        {
-            self.selection = None;
+        // The selection follows its item, which may have changed shape (a
+        // removed row beside its partner after the mode changed).
+        if let Some(selected) = &self.selection {
+            self.selection = anchor::find(&self.items, selected).map(|ix| self.items[ix].key());
         }
         self.visible = target.item_ix
             ..target
@@ -574,6 +714,7 @@ impl ReviewModel {
             .collect();
         for key in dropped {
             self.rows.remove(&key);
+            self.drop_rows(&key);
             let lines = self.known_lines.get(&key).copied().unwrap_or(1);
             self.replace_segment(
                 &key,
@@ -667,12 +808,15 @@ impl ReviewModel {
         {
             return false;
         }
+        let display: Arc<[DisplayRow]> = items::display_rows(&rows, self.mode).into();
         let mut fresh = Vec::new();
-        items::rows_items(&mut fresh, key, &rows);
+        items::rows_items_of(&mut fresh, key, &rows, &display);
         self.known_lines
             .insert(key.clone(), diag::count(fresh.len()).max(1));
-        self.rows.insert(key.clone(), rows);
+        self.displays.insert(key.clone(), display);
+        self.rows.insert(key.clone(), rows.clone());
         self.replace_segment(key, fresh);
+        self.after_rows(key, &rows);
         true
     }
 
@@ -734,6 +878,7 @@ impl ReviewModel {
         self.pending_row = None;
         if self.selection != key {
             self.selection = key;
+            self.sync_current();
             cx.notify();
         }
     }
@@ -744,6 +889,7 @@ impl ReviewModel {
             return;
         };
         self.selection = Some(item.key());
+        self.sync_current();
         self.list.scroll_to_reveal_item(ix);
         cx.notify();
     }
@@ -1084,6 +1230,25 @@ impl ReviewModel {
         self.command(ReviewCommand::Refresh);
     }
 
+    /// Analyze, Analyze again and Retry: starts an analysis unless one runs
+    /// or none can run. The view sends the command; the analysis, its
+    /// sandbox and what it may reach are the domain's (ADR 0019).
+    pub(crate) fn analyze(&mut self) {
+        if matches!(
+            self.snapshot.brief.analysis,
+            AnalysisState::Idle | AnalysisState::Done { .. } | AnalysisState::Failed(_)
+        ) {
+            self.command(ReviewCommand::Analyze);
+        }
+    }
+
+    /// Cancel while an analysis runs.
+    pub(crate) fn cancel_analyze(&mut self) {
+        if matches!(self.snapshot.brief.analysis, AnalysisState::Running { .. }) {
+            self.command(ReviewCommand::CancelAnalyze);
+        }
+    }
+
     // ----- folds ----------------------------------------------------------
 
     pub(crate) fn toggle_noise(&mut self, cx: &mut Context<ReviewModel>) {
@@ -1097,7 +1262,7 @@ impl ReviewModel {
     }
 
     /// Rebuilds the items of the same snapshot after a fold changed.
-    fn rebuild_in_place(&mut self, cx: &mut Context<ReviewModel>) {
+    pub(crate) fn rebuild_in_place(&mut self, cx: &mut Context<ReviewModel>) {
         if !matches!(self.snapshot.state, LoadState::Ready) {
             return;
         }
@@ -1173,6 +1338,10 @@ impl ReviewModel {
 
 impl Drop for ReviewModel {
     fn drop(&mut self) {
+        for (_, inflight) in self.inflight.drain() {
+            inflight.cancel.store(true, Ordering::Relaxed);
+        }
+        self.clear_current();
         if !self.opened {
             return;
         }

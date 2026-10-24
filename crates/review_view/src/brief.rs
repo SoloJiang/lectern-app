@@ -3,9 +3,11 @@
 //! brief; the view only draws what comes out.
 
 use lectern_i18n::{Args, FmtKey, Strings, keys};
+use lectern_services::project::WorktreeKey;
 use lectern_services::review::{
     Brief, BriefItem, BriefRule, FileKey, IncompleteKind, LineAnchor, NoiseKind, SensitiveKind,
 };
+use lectern_services::usage::{RowKey, SessionRow, SessionUsage};
 use lectern_ui::Text;
 
 /// One entry of the brief, ready to draw.
@@ -184,4 +186,97 @@ pub fn rule_name(rule: &BriefRule) -> String {
         ),
         BriefRule::Provided { provider, rule, .. } => format!("{provider}-{rule}"),
     }
+}
+
+/// One branch (or MR) of the session's usage, ready to draw
+/// (docs/design/review_view.md「简报」).
+#[derive(Clone, Debug)]
+pub struct UsageLine {
+    /// The branch or MR title: the key of the entry's probe node.
+    pub id: String,
+    /// `{branch} · {tokens} tokens · {percent}% this session`.
+    pub text: Text,
+    /// `shared with n other MR(s)`, when the row is shared.
+    pub shared: Option<Text>,
+    /// The cumulative tokens of the branch.
+    pub tokens: u64,
+    /// The session's share of them, in whole percent.
+    pub percent: u32,
+}
+
+/// The usage rows of a session: one per branch (per MR), the rows of
+/// `worktree` (the one under review) first, the others in the order
+/// `usage` gave them.
+pub fn usage_lines(
+    usage: &SessionUsage,
+    worktree: Option<&WorktreeKey>,
+    strings: &Strings,
+) -> Vec<UsageLine> {
+    let (mut own, mut other): (Vec<&SessionRow>, Vec<&SessionRow>) = usage
+        .rows
+        .iter()
+        .partition(|row| worktree.is_some() && row.worktree.as_ref() == worktree);
+    own.append(&mut other);
+    own.into_iter()
+        .map(|row| usage_line(row, strings))
+        .collect()
+}
+
+fn usage_line(row: &SessionRow, strings: &Strings) -> UsageLine {
+    let name: String = match &row.key {
+        RowKey::Branch { branch, .. } => branch_name(&branch.name),
+        RowKey::Mrs { mrs, branch } => mrs
+            .first()
+            .map_or_else(|| branch_name(&branch.name), |mr| mr.title.to_string()),
+        RowKey::Unassigned { .. } => strings.get(keys::review::BRIEF_USAGE_UNASSIGNED).to_owned(),
+    };
+    let total = row.cumulative.total();
+    let percent = if total == 0 {
+        0
+    } else {
+        u32::try_from(u128::from(row.session_part.total()) * 100 / u128::from(total))
+            .unwrap_or(100)
+            .min(100)
+    };
+    let compact = lectern_i18n::count_compact(total);
+    let text = Text::fmt(
+        strings,
+        keys::review::BRIEF_USAGE_ROW,
+        &Args::new()
+            .str("branch", &name)
+            .str("tokens", &compact)
+            .num("percent", percent),
+    );
+    let shared = row.shared.then(|| {
+        let others = match &row.key {
+            RowKey::Mrs { mrs, .. } => mrs.len().saturating_sub(1).max(1),
+            _ => 1,
+        };
+        Text::fmt(
+            strings,
+            keys::review::BRIEF_USAGE_SHARED,
+            &Args::new().num("count", u32::try_from(others).unwrap_or(u32::MAX)),
+        )
+    });
+    UsageLine {
+        id: name,
+        text,
+        shared,
+        tokens: total,
+        percent,
+    }
+}
+
+/// A branch as the interface names it: without `refs/heads/`.
+fn branch_name(name: &str) -> String {
+    name.strip_prefix("refs/heads/").unwrap_or(name).to_owned()
+}
+
+/// The tokens of a turn as the title says them (`12.3K tokens`).
+pub fn turn_tokens_text(strings: &Strings, tokens: u64) -> Text {
+    Text::fmt(
+        strings,
+        keys::review::TURN_TOKENS,
+        &Args::new().str("tokens", &lectern_i18n::count_compact(tokens)),
+    )
 }
