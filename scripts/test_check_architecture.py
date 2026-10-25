@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 import check_architecture
-from check_architecture import has_impl_plugin, implements_plugin, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
+from check_architecture import has_impl_plugin, implements_plugin, missing_plugin_mark, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 from check_architecture import enables_sink, panic_message_errors, sink_feature_errors, uses_panic_message
 from check_architecture import print_lint_allow_errors, workspace_print_lint_errors
 from check_architecture import hooks_enablers, hooks_feature_errors
@@ -129,6 +129,19 @@ fn f<'a>(c: char) -> bool { c == '"' }
             with open(os.path.join(d, "real.rs"), "w") as f:
                 f.write('const S: &str = "x";\nimpl Plugin for Real {}\n')
             self.assertTrue(implements_plugin(d))
+
+    def test_tool_crates_need_no_plugin_mark(self):
+        # ADR 0051: a tool crate's plugin (bench's `bench-probe`) does not
+        # make it a plugin crate; any other layer still needs the mark.
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "probe.rs"), "w") as f:
+                f.write("impl Plugin for ProbePlugin {}\n")
+            self.assertTrue(missing_plugin_mark("lectern-review", "domain", d))
+            self.assertTrue(missing_plugin_mark("lectern-app", "app", d))
+            self.assertFalse(missing_plugin_mark("lectern-bench", "tool", d))
+            self.assertFalse(missing_plugin_mark("lectern-kernel", "kernel", d))
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(missing_plugin_mark("lectern-review", "domain", d))
 
     def test_impl_plugin_pattern(self):
         for src in ("impl Plugin for Projects {", "impl kernel::Plugin for X", "impl<T: Send> lectern_kernel::Plugin for Source<T>",

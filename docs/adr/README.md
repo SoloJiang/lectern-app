@@ -28,7 +28,7 @@
 | [0022](0022.md) | 用量只统计 token 与额度，不估算费用 | 已接受 |
 | [0023](0023.md) | 清单解析用 serde_json、toml、quick-xml、glob，YAML 与 Gradle 只解析需要的子集 | 已接受 |
 | [0024](0024.md) | 仓库读取用 gix 0.88，行 diff 用 gix 维护的 imara-diff 副本 | 已被 0028、0038 修订 |
-| [0025](0025.md) | 插件 crate 用 `plugin = true` 标记，只与 kernel 层和非插件的库 crate 相连 | 已接受 |
+| [0025](0025.md) | 插件 crate 用 `plugin = true` 标记，只与 kernel 层和非插件的库 crate 相连 | 已接受（标记的检查范围被 0051 修订） |
 | [0026](0026.md) | 会话日志按追加前缀增量解析，解析结果以会话和已解析前缀为键缓存 | 已接受 |
 | [0027](0027.md) | 本地数据库用 rusqlite 0.40，静态链接自带的 SQLite | 已接受 |
 | [0028](0028.md) | 工作区的目录遍历和忽略规则也只经 SafeRoot | 已接受 |
@@ -54,5 +54,6 @@
 | [0048](0048.md) | 测量构建用 Objective-C 运行时的方法替换取得帧的时刻，只在 `platform` 的 `bench-hooks` feature 里，发布构建不含 | 已接受，部分已被 0049 修订 |
 | [0049](0049.md) | 发布构建不带 Metal binary archive，管线依靠系统的着色器缓存；不做严格 archive 模式 | 已接受 |
 | [0050](0050.md) | ACP agent 由用户安装，在插件沙箱之外以用户身份按需启动；Lectern 不声明客户端能力，不代为批准权限 | 已接受 |
+| [0051](0051.md) | tool 层 crate 实现 `Plugin` 不算插件 crate，不加 `plugin = true` | 已接受 |
 
 新 ADR 用下一个编号，格式参照现有文件：标题、状态、日期、背景、决策、影响、（已知限制）、来源。ADR 只记录决策、理由和关键约束，一般不超过 3000 字；实现算法和边界情况的处理写进对应 crate 的设计文档（见 [adr 技能](../../.claude/skills/adr/SKILL.md)「ADR 写什么」）。
