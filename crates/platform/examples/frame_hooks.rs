@@ -295,7 +295,7 @@ mod real {
         // 2. A window and frames.
         // SAFETY: the main thread; the classes are loaded; the selectors
         // are those of AppKit and Metal with the signatures cast here.
-        let (layer, queue, window) = unsafe {
+        let (layer, queue) = unsafe {
             let app = send0(class(c"NSApplication"), sel(c"sharedApplication"));
             assert!(!app.is_null(), "NSApplication");
             let set_policy: unsafe extern "C" fn(Id, Sel, i64) -> u8 =
@@ -319,32 +319,10 @@ mod real {
             );
             let queue = send0(device, sel(c"newCommandQueue"));
             assert!(!queue.is_null(), "newCommandQueue");
-            let window = show_window(layer);
+            let _window = show_window(layer);
             send_bool(app, sel(c"activateIgnoringOtherApps:"), true);
-            (layer, queue, window)
+            (layer, queue)
         };
-        // TEMPORARY CI diagnostics (bench step 4).
-        let diag = |label: &str, drawn: u32| {
-            // SAFETY: the main thread; `window` is live; `occlusionState`
-            // returns an NSUInteger and `isKeyWindow` a BOOL.
-            let (occlusion, key) = unsafe {
-                let occlusion: unsafe extern "C" fn(Id, Sel) -> u64 =
-                    mem::transmute(objc_msgSend as unsafe extern "C" fn());
-                let key: unsafe extern "C" fn(Id, Sel) -> u8 =
-                    mem::transmute(objc_msgSend as unsafe extern "C" fn());
-                (
-                    occlusion(window, sel(c"occlusionState")),
-                    key(window, sel(c"isKeyWindow")),
-                )
-            };
-            let [next, null, handlers, zero, last] = lectern_platform::frame::diag_counts();
-            say(&format!(
-                "diag {label}: drawn {drawn} next {next} null {null} handlers {handlers} \
-                 zero {zero} last_presented {} occlusion {occlusion:#x} key {key}",
-                f64::from_bits(last)
-            ));
-        };
-        diag("start", 0);
 
         // 3. Draw until the callback arrives.
         let mut presented = None;
@@ -362,11 +340,7 @@ mod real {
                 presented = Some(time);
                 break;
             }
-            if drawn.is_multiple_of(60) {
-                diag("frames", drawn);
-            }
         }
-        diag("end", drawn);
         let Some(presented) = presented else {
             panic!(
                 "no first-frame callback after {FRAMES} frames ({drawn} drawables); \

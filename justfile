@@ -58,16 +58,6 @@ bench *args:
         if [[ "${1-}" == --measure ]]; then shift; fi
         # The empty GPUI window of the baseline/* benchmarks.
         cargo build --release --locked -p lectern-bench --all-features --example empty_window
-        # TEMPORARY CI diagnostics (bench step 4): can this runner show a frame?
-        echo "::group::diag frame_hooks"
-        cargo run --release --locked -p lectern-platform --features bench-hooks --example frame_hooks || true
-        echo "::endgroup::"
-        echo "::group::diag empty_window natural"
-        LECTERN_BENCH_DIAG=natural target/release/examples/empty_window || true
-        echo "::endgroup::"
-        echo "::group::diag empty_window continuous"
-        LECTERN_BENCH_DIAG=continuous target/release/examples/empty_window || true
-        echo "::endgroup::"
         export LECTERN_BENCH_BASELINE="$PWD/target/release/examples/empty_window"
         cargo bench --locked --no-fail-fast -p lectern-bench --all-features -- "$@" || true
     elif [[ "${1-}" == --measure ]]; then

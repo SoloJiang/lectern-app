@@ -66,8 +66,6 @@ libc.workspace = true
 # not declared for macOS alone (an Apple-only external dependency counts as
 # a binding, AGENTS.md rule 6).
 futures.workspace = true
-# TEMPORARY CI diagnostics of the `empty_window` example (bench step 4).
-log.workspace = true
 
 # The `ui/*` benchmarks (docs/design/ui.md「性能」) need GPUI, which only
 # builds on macOS in this workspace (docs/design/cargo-workspace.md); on

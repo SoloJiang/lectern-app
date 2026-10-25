@@ -4371,7 +4371,6 @@ dependencies = [
  "lectern-ui",
  "lectern-usage",
  "libc",
- "log",
  "serde_json",
  "tempfile",
 ]
