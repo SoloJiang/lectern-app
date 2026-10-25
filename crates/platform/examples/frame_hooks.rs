@@ -2,8 +2,9 @@
 //! (docs/design/platform.md「帧的时刻」「测试」). AppKit windows live on the
 //! main thread and Rust's test harness never runs a test there, so the check
 //! is an example whose `main` is the main thread. It needs a window server
-//! session (a locked screen shows nothing, so no drawable gets a
-//! `presentedTime`) and runs by hand only:
+//! session and runs by hand only. Where no drawable gets a `presentedTime`
+//! (a locked screen, the hosted CI runner), the callback still comes, with
+//! the time its handler ran and the source `handler` (ADR 0052):
 //!
 //! ```sh
 //! cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks
@@ -22,7 +23,7 @@
 //!    the order GPUI's display link path uses (`nextDrawable`,
 //!    `presentDrawable:`, `commit`) while it runs the main run loop;
 //! 3. waits for the callback and checks its time is after this process
-//!    started and not after now.
+//!    started and not after now; it prints the time's source.
 //!
 //! It exits 0 when every check holds and panics otherwise. The numbers go to
 //! stdout through `io::Write`: the workspace's print lints cover examples
@@ -47,7 +48,7 @@ mod real {
     use std::time::{Duration, Instant, SystemTime};
 
     use lectern_platform::HookError;
-    use lectern_platform::frame::on_first_presented;
+    use lectern_platform::frame::{PresentedAt, on_first_presented};
     use lectern_platform::process::start_time;
 
     type Id = *mut c_void;
@@ -271,7 +272,7 @@ mod real {
         // faults; one outlier is not the cost), then done here for the
         // window below.
         let costs = install_costs();
-        let (sender, receiver) = mpsc::channel::<SystemTime>();
+        let (sender, receiver) = mpsc::channel::<PresentedAt>();
         on_first_presented(move |time| {
             // The receiver outlives the wait; if it is gone nothing reads.
             let _ = sender.send(time);
@@ -341,10 +342,14 @@ mod real {
                 break;
             }
         }
-        let Some(presented) = presented else {
+        let Some(PresentedAt {
+            time: presented,
+            source,
+        }) = presented
+        else {
             panic!(
                 "no first-frame callback after {FRAMES} frames ({drawn} drawables); \
-                 is the screen locked or the display asleep?"
+                 did the window open?"
             );
         };
 
@@ -363,6 +368,7 @@ mod real {
             "first_presented_after_start_ms {:.1}",
             after_start.as_secs_f64() * 1e3
         ));
+        say(&format!("first_presented_source {}", source.as_str()));
         say(&format!("drawables {drawn}"));
     }
 }

@@ -425,19 +425,20 @@ pub mod thread {
 
 /// 以下只在 `bench-hooks` feature 里有效（`probe` 打开它）；没有时返回 `HookError::Unsupported`。
 pub mod frame {
-    /// 第一个真正显示的 drawable 的 `presentedTime`，换算到系统时钟。回调在任意线程上调用一次。
+    /// 首帧的时刻，换算到系统时钟，带来源（ADR 0052）：最先运行的显示回调读到的 `presentedTime` 大于 0 时是它（`TimeSource::Presented`），
+    /// 否则是这个回调运行的时刻（`TimeSource::Handler`）。回调在任意线程上调用一次。
     /// 首帧之前、创建窗口之前调用；注册本身不做 IO、不建线程。
-    pub fn on_first_presented(f: impl FnOnce(SystemTime) + Send + 'static) -> Result<(), HookError>;
+    pub fn on_first_presented(f: impl FnOnce(PresentedAt) + Send + 'static) -> Result<(), HookError>;
 
     /// 开始记录 `window` 的逐帧时刻。主线程，首帧之后。`workspace` 调用它，并在每一帧开头调用 `FrameRecorder::frame_started`；
     /// `stop` 之后在后台线程上 `PendingFrames::wait` 得到 `FrameRecording { refresh, frames, problems }`。
     /// `FrameTimes` 的四个时刻：`requested`（这一次刷新的垂直同步，即帧源要求这一帧的时刻）、`started`（主线程开始处理、布局之前）、
-    /// `completed`（命令缓冲的 `GPUEndTime`）、`presented`（`presentedTime`，只报告）。`app` 把它转换成 `wire::FrameTimes`。
+    /// `completed`（命令缓冲的 `GPUEndTime`）、`presented`（`PresentedAt`，规则与首帧相同，只报告）。`app` 把它转换成 `wire::FrameTimes`。
     pub fn record(window: &impl HasWindowHandle) -> Result<FrameRecorder, HookError>;
 }
 ```
 
-与原来的形状相比：`host::describe`、`thread::set_user_interactive` 返回 `io::Result`；`frame` 的函数返回 `Result<_, HookError>`；`record` 要窗口句柄，刷新周期放进 `FrameRecording::refresh`，不再单独提供 `refresh_period()`；`FrameTimes::presented` 是 `Option`；没有 `metal` 模块（ADR 0049）。
+与原来的形状相比：`host::describe`、`thread::set_user_interactive` 返回 `io::Result`；`frame` 的函数返回 `Result<_, HookError>`；`record` 要窗口句柄，刷新周期放进 `FrameRecording::refresh`，不再单独提供 `refresh_period()`；`FrameTimes::presented` 是 `Option`；首帧和 `presented` 的时刻带来源（`PresentedAt`，ADR 0052）；没有 `metal` 模块（ADR 0049）。
 
 其中 `process::phys_footprint` 已随 `cache` 第 2 步加入（`cache/memory` 用它，见「进程内基准」，[platform 设计「进程」](platform.md#进程)）。`process` 的另两个、`host`、`thread` 随第 2 步，已实现；`frame::on_first_presented` 在第 4 步之前，`frame::record` 在第一个生效的帧时间预算之前（platform 设计「验收」的 B1、B2）。
 
