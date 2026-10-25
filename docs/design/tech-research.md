@@ -373,7 +373,7 @@ P0 只需做 `ui_tree` 与带标注的 `screenshot` 两个工具，验证 agent 
 - 视图只排版可见的显示行（虚拟滚动）；首屏窗口先出高亮，整个文件按窗口在后台计算，高亮结果按行缓存，语法树不常驻；跳转、hunk 带字节偏移，打开到文件中部不从开头扫描（[ADR 0034](../adr/0034.md)）。例外：跳转用的当前文本在 128 KiB 以内时，code_intel 保留它的解析（最多 2 份、合计 ≤ 12 MiB，是当前文本期间一直保留，之后 60 s 不用即释放，[ADR 0037](../adr/0037.md)）。
 - Diff 数据流：`gix` 取 HEAD / 工作区 / 指定 commit 的 blob → `imara-diff` 出 hunk → 生成「展示行」模型（上下文折叠、增删配对）→ 统一视图与双栏视图共用同一模型。
 - 「AI 改了什么」是核心场景：默认展示工作区相对 HEAD 的变更，并支持按会话开始时间对比，这能把会话和 Diff 关联起来。
-- MR 视图：MVP 用 `gh pr diff` / `glab mr diff` 拿补丁，后续再接 API 支持评论。GitLab 自部署实例的 API 版本参差不齐，只依赖 v4 中长期稳定的接口（MR 列表、changes、notes），并在 MR 视图里把 CI 流水线状态一并展示。
+- MR 视图：经 `gh api` / `glab api` 读 MR 的元数据、文件列表、评论和 CI 状态；补丁里没有两侧的 blob OID，所以 diff 在本地由 `git` 计算，提交不在本地时只显示文件列表（[forge 设计「访问方式的选择」](forge.md#访问方式的选择)）。GitLab 自部署实例的 API 版本参差不齐，只依赖 v4 中长期稳定的接口（MR 列表、changes / diffs、notes），并在 MR 视图里把 CI 流水线状态一并展示。
 
 ### 4. Agent 原生面板（第二阶段）
 
