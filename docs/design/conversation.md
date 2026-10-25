@@ -221,7 +221,7 @@ pub struct ConversationSnapshot {
     pub agent: Agent,
     pub load: Load,
     pub link: Link,
-    /// 回复框能不能发送；`Err` 时界面显示原因（「状态与异常」）。不含「Terminal 页在恢复这个会话」，那一条由本 crate 判断。
+    /// 回复框能不能发送；`Err` 时界面显示原因（「状态与异常」）。不含「终端在驱动这个会话」，那一条由本 crate 判断（「一处驱动」）。
     pub can_prompt: Result<(), Unavailable>,
     /// 上下文窗口的占用：只取自 ACP 的 `usage_update`（`used`、`size`），没有连接或 agent 不发时为 None。不估算。
     pub context: Option<ContextUsage>,
@@ -427,14 +427,14 @@ pub(crate) enum Item {
 
 ### 一处驱动
 
-本 crate 在主线程上检查，两个服务的状态都在调用返回前更新（`Conversations::command` 换出快照；`Terminals::resume` 在返回前登记），所以同一帧里的两次检查看到一致的状态：
+「终端在驱动这个会话」指 `Terminals::for_session` 有值，并且这个终端的 `status` 是启动中或运行中；进程已退出或启动失败、页上还留着最后画面的终端不算（没有 `dyn Terminals` 时视为不在驱动）。本 crate 在主线程上检查，两个服务的状态都在调用返回前更新（`Conversations::command` 换出快照；`Terminals::resume` 在返回前登记），所以同一帧里的两次检查看到一致的状态：
 
 | 动作 | 允许的条件 | 不允许时 |
 |---|---|---|
-| 回复框发送 | `can_prompt` 为 `Ok`，并且 `Terminals::for_session` 为 None（没有 `dyn Terminals` 时视为 None） | 回复框换成 `conversation-in-terminal` 和「显示终端」按钮；`can_prompt` 的原因见「状态与异常」 |
+| 回复框发送 | `can_prompt` 为 `Ok`，并且没有终端在驱动这个会话 | 回复框换成 `conversation-in-terminal` 和「显示终端」按钮；`can_prompt` 的原因见「状态与异常」 |
 | Terminal 页恢复 | `link` 是 `None`（没有 `dyn Conversations` 时视为 `None`） | `Idle`、`Failed`（`Failed` 时连接可能仍在）：按钮改为「断开并恢复」，先 `Disconnect` 再恢复；`Connecting`、`Working`、`Stopping`：按钮不可用，显示 `conversation-terminal-linked` |
 
-「可能还在别处运行」只是提示，不阻止：会话的 `SessionSummary::open_turn` 为 true、`last_activity` 在 2 分钟之内、`link` 为 `None`、Lectern 里也没有终端在恢复它时，回复框上方和恢复按钮上方各显示一行 `conversation-elsewhere`（「未决问题」4）。
+「可能还在别处运行」只是提示，不阻止：会话的 `SessionSummary::open_turn` 为 true、`last_activity` 在 2 分钟之内、`link` 为 `None`、也没有终端在驱动它时，回复框上方和恢复按钮上方各显示一行 `conversation-elsewhere`（「未决问题」4）。
 
 ### 草稿
 
@@ -642,7 +642,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 | `Load::Failed(Unrecognized)` | 只显示 `conversation-unrecognized`（不弹错误，与「会话格式无法识别」一致）；回复框按 `can_prompt` |
 | 历史为空、也没有实时的项 | `conversation-empty-turns` |
 | `can_prompt` 为 `Err(…)` | 回复框不可用，下面一行写对应的 `conversation-unavailable-*`；`Busy` 不写原因（状态行已说明），只是 Send 不可用 |
-| Terminal 页在恢复这个会话 | 回复框换成 `conversation-in-terminal` 和「显示终端」 |
+| 终端在驱动这个会话（启动中或运行中） | 回复框换成 `conversation-in-terminal` 和「显示终端」；状态行「在终端中运行」；终端退出后（`TerminalEvent::Status`）回复框恢复 |
 | 会话可能还在别处运行 | 回复框与恢复按钮上方的 `conversation-elsewhere`（只是提示） |
 | `Link::Connecting` | 状态行「正在连接…」；回复框里刚发出的 prompt 已在列表末尾 |
 | `Link::Failed(e)` | 状态行「已断开」；列表末尾一行对应的 `conversation-error-*` 和「关闭」；`PromptFailed` 另起一行原样显示 agent 的错误文字（`TextRole::Secondary`） |
@@ -687,7 +687,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 - 纯函数（`#[test]`）：
   - `items_*`：项的顺序；连续工具调用合成一行、至多 4 项加「另有 n 项」；`ReviewNotes` 成为 `Notes`；`earlier > 0` 时 `Earlier` 在最前；新旧快照的键比较只报变化的项（流式更新只有最后一项）。
   - `options_*`：按钮按 `OptionKind` 排序；只画给出的种类；文字来自 Fluent 键，不来自 `OptionId`。
-  - `drive_*`：「一处驱动」表的每一行（`can_prompt`、`for_session`、`link` 的组合）。
+  - `drive_*`：「一处驱动」表的每一行（`can_prompt`、`for_session` 与终端的 `status`、`link` 的组合）；进程已退出的终端不阻止回复框发送。
   - `elsewhere_*`：`open_turn`、`last_activity` 的 2 分钟边界、`link`、终端四个条件。
   - `memory_*`：草稿的保存、放回、16 个的淘汰、256 KiB 的上限。
 - `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`，`testing::harness`）：
@@ -698,7 +698,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   - `streaming_relayouts_only_the_last_item`：200 次流式更新里只有最后一项被 `splice`。
   - `send_with_cmd_enter_sends_a_prompt`：⌘↩ 发 `Prompt { origin: User }`，快照变为 `Connecting` 后清空回复框；空白文字不可发送；提供者拒绝时文字保留。
   - `composer_shows_why_it_cannot_send`：`can_prompt` 的每个 `Err` 对应一行原因。
-  - `composer_is_replaced_while_the_terminal_drives`：假 `Terminals::for_session` 有值时显示 `conversation-in-terminal`，「显示终端」切页。
+  - `composer_is_replaced_while_the_terminal_drives`：假 `Terminals` 的终端在运行时显示 `conversation-in-terminal`，「显示终端」切页；终端退出后回复框恢复可用。
   - `stop_sends_cancel`。
   - `permission_card_uses_kind_labels`：`OptionId` 里放金丝雀，界面和语义树里都没有它；按钮顺序固定；↵ 不触发选项。
   - `permission_command_and_edits_are_shown`：`Command` 的文字与 `workdir`；`Edits` 的路径、增删数、行与 `omitted`；`None` 时 `conversation-permission-no-detail`。
@@ -745,9 +745,10 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   /// impl Service for dyn Terminals { const ID = "terminals"; const MULTIPLE = false; }
   pub trait Terminals: Send + Sync {
       /// 在一个新终端里恢复会话：按 agents 设计对 `ResumeCommand` 的规则映射命令、检查来源、会话 ID 和 cwd。
+      /// 这个会话已有进程已退出或启动失败的终端时，先关闭它再换成新的；只有启动中或运行中的终端才返回 `AlreadyRunning`。
       /// 立即返回，返回前已登记（`for_session` 查得到），进程在后台启动。不阻塞，主线程可调用。
       fn resume(&self, session: &SessionKey, size: GridSize) -> Result<TerminalId, ResumeRefused>;
-      /// 正在恢复这个会话、还没有关闭的终端（包括进程已退出的）。不阻塞。
+      /// 这个会话的、还没有关闭的终端（包括进程已退出的，Terminal 页显示它的最后画面）。是否在驱动会话看 `status`。不阻塞。
       fn for_session(&self, session: &SessionKey) -> Option<TerminalId>;
       fn status(&self, id: TerminalId) -> Option<TerminalStatus>;   // 启动中 / 运行中 / 已退出（退出码）/ 启动失败
       /// 结束进程组并释放终端。立即返回。
@@ -801,7 +802,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   输入法、撤销重做、↵ 换行由 `Input` 自带。语义节点不记录输入的文字。
 - **G. `i18n`**：`locales/{en,zh-CN}/conversation.ftl` 加上「界面」表里的键，`keys::conversation::*`。
 - **H. `project_home`**：会话行的等待标记（[project_home 设计「范围」](project_home.md#范围)里留给 Conversation 的一项）。按 `project-home-usage` 的做法加一个插件（requires `dyn Conversations`），渲染时读 `waiting()`，收到 `WaitingChanged` 后重画；`waiting()` 里的会话在行上显示等待的圆点和一行次要文字，语义节点加 `attrs`：`waiting`。键与文字写在 project_home 自己的 ftl 里。
-- **I. `review_view` / `review`（#22）**：审阅屏幕打开期间 `watch` 这个会话（读 `can_prompt`）。⌘↩ 发回审阅意见时，`Terminals::for_session` 有值就经 `Terminals::paste` 粘贴进终端（用户在终端里按 ↵ 确认），否则发 `Conversations::command(Prompt { origin: ReviewNotes { … } })`；然后 `dispatch(SelectInspectorTab("conversation"))`。Conversation 页按本 crate 记下的上一次所在的页打开：用户在 Terminal 页恢复过这个会话、之后没有切走时就是 Terminal 页，否则 Messages 页上有「显示终端」。`can_prompt` 为 `Err` 且没有终端时，发送不可用并说明原因。
+- **I. `review_view` / `review`（#22）**：审阅屏幕打开期间 `watch` 这个会话（读 `can_prompt`）。⌘↩ 发回审阅意见时，有终端在驱动这个会话（`for_session` 有值且 `status` 是启动中或运行中，与本文「一处驱动」相同）就经 `Terminals::paste` 粘贴进终端（用户在终端里按 ↵ 确认），否则发 `Conversations::command(Prompt { origin: ReviewNotes { … } })`；然后 `dispatch(SelectInspectorTab("conversation"))`。Conversation 页按本 crate 记下的上一次所在的页打开：用户在 Terminal 页恢复过这个会话、之后没有切走时就是 Terminal 页，否则 Messages 页上有「显示终端」。`can_prompt` 为 `Err` 且没有终端在驱动时，发送不可用并说明原因。
 - **J. `app`**：`plugins()` 的三个插件和 `agents` 的 "conversations" 插件放进 `PluginSet`（`Profile::Desktop`；test profile 不装）。
 - **K. `bench`**：预算表加 `conversation/stream_apply`（「性能」）。
 
