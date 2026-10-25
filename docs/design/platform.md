@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature 里的 `frame`（见「测量构建的方法替换」「帧的时刻」）已接受，尚未实现；`metal` 的严格模式（见「Metal binary archive 的严格模式」）等「未决问题」第 1 条。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature 里的 `frame`（见「测量构建的方法替换」「帧的时刻」）已接受，尚未实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -26,7 +26,6 @@
   - 系统外观（`appearance`）：在浅色、深色两个外观下解析 AppKit 的语义色，读减弱动态效果，登记强调色与辅助功能设置的变化通知；`ui` 的 `Palette` 从它取系统色（[ADR 0015](../adr/0015.md)，见「系统外观」）。
   - 主机信息（`host::describe`）与线程 QoS（`thread::set_user_interactive`）：bench 报告里的机器信息和基准线程的 QoS（见「主机信息与线程 QoS」）。
   - 帧的时刻（`frame`）：测量构建用 Objective-C 运行时的方法替换取得首帧的显示时刻和逐帧的四个时刻，只在 `bench-hooks` feature 里，发布构建不含（[ADR 0048](../adr/0048.md)，见「测量构建的方法替换」「帧的时刻」）。
-  - Metal binary archive 的严格模式（`metal`）：测量构建里管线只从 archive 取，缺 slice 即失败；是否实现等「未决问题」第 1 条（见「Metal binary archive 的严格模式」）。
 - 不做：
   - 递归遍历、忽略规则和未跟踪文件的判定：`git` 在 `list` 之上实现（ADR 0028）；本模块只列一层目录。
   - 路径的大小写折叠与 Unicode 规范化：`git` 按 `core.ignoreCase`、`core.precomposeUnicode` 处理；本模块把字节原样交给文件系统。
@@ -51,7 +50,7 @@
 | `lectern-kernel`（dev，只在 macOS） | 经真实 `Watcher` 驱动后端的测试实现 `Sink` 要用 `BusyGuard` | kernel 层 |
 | `lectern-logging`（只在 macOS） | kqueue 线程停止、frame autosave 名设置失败、外观回调 panic 和语言偏好写入失败的记录（「日志与诊断」）；dev 依赖开启 `test-support`，测试用 `testing::capture()` 检查这些记录 | kernel 层，只依赖 `log`（[ADR 0046](../adr/0046.md)）；本 crate 只有这四处记录，都只在 macOS 上编译 |
 | `raw-window-handle` 0.6 | `window::set_frame_autosave_name` 的参数是 `impl HasWindowHandle`，GPUI 的 `Window` 实现它（`gpui-pre-macos` 给出 `AppKitWindowHandle`，里面是 `NSView` 指针） | 已在 Cargo.lock（0.6.2，经 GPUI），发布构建不新增 crate；许可证 `MIT OR Apache-2.0 OR Zlib`，在允许列表里。与 rustix 不同，它进入本 crate 的公开接口：这个签名由已合并的 [workspace 设计](workspace.md)的前置条件 D 规定，依赖方向不变（它不依赖任何东西），所以不写 ADR。所有平台都依赖（签名在所有平台上相同）。`frame::record` 的参数同样用它 |
-| 系统框架 Metal、QuartzCore、CoreVideo 和 Objective-C 运行时（只在 macOS 加 `bench-hooks`） | `frame`、`metal` 的方法替换：`CAMetalLayer`、`MTLDrawable`、`MTLCommandBuffer`、`MTLDevice`、`MTLBinaryArchive` 的方法，CVDisplayLink | 符号手写声明，与 `window`、`appearance` 相同，不引入 `objc2`、`block2`、`metal`（它们经 GPUI 在 Cargo.lock 里）；这几个框架 GPUI 本来就链接。没有 `bench-hooks` 时不编译。见「测量构建的方法替换」 |
+| 系统框架 Metal、QuartzCore、CoreVideo 和 Objective-C 运行时（只在 macOS 加 `bench-hooks`） | `frame` 的方法替换：`CAMetalLayer`、`MTLDrawable`、`MTLCommandBuffer` 的方法，CVDisplayLink | 符号手写声明，与 `window`、`appearance` 相同，不引入 `objc2`、`block2`、`metal`（它们经 GPUI 在 Cargo.lock 里）；这几个框架 GPUI 本来就链接。没有 `bench-hooks` 时不编译。见「测量构建的方法替换」 |
 
 选 `rustix`，不选 `libc`、`nix`、`cap-std`：
 
@@ -385,7 +384,7 @@ pub enum FileKind {
 
 本节覆盖整个 crate，规则见 [ADR 0046](../adr/0046.md) 和 [logging 设计](logging.md)。
 
-- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`host`、`thread`、`frame`、`metal`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。运行时记录只有四处：`fs_events` 的 kqueue 线程停止、`window` 的 frame autosave 名设置失败、`appearance` 的变化回调 panic 和 `system` 的语言偏好写入失败，都经 `lectern-logging` 的宏写出，target 为 `platform`；`fs_events` 订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
+- 默认记录：`safe_read`、`dirs`、`system`、`time`、`process`、`host`、`thread`、`frame`、`ThreadCpuClock` 不记日志，结果和错误都返回给调用方，由调用方按各自设计文档的「日志与诊断」记录（如 `git` 读工作区出错、`file_reader` 保存失败）。运行时记录只有四处：`fs_events` 的 kqueue 线程停止、`window` 的 frame autosave 名设置失败、`appearance` 的变化回调 panic 和 `system` 的语言偏好写入失败，都经 `lectern-logging` 的宏写出，target 为 `platform`；`fs_events` 订阅回调里的 panic 由 `fs_watch` 处理和记录（[fs_watch 设计](fs_watch.md)）。
 
   | 事件 | 级别 | `msg` | 字段 |
   |---|---|---|---|
@@ -396,7 +395,7 @@ pub enum FileKind {
 
   - 级别按 [ADR 0046](../adr/0046.md)「默认日志」：kqueue 的订阅之后的事件被放弃，外观回调之后的变化不再送达，都不是降级后继续，所以是 error；frame autosave 名没有设上时窗口继续用当前的 frame，是降级后继续，所以是 warn。外观回调 panic 本身的位置由 `logging` 的 panic 钩子记录，这条记录只说明结果。
   - 这四条记录只在 macOS 上编译（kqueue 和 AppKit 只在 macOS 上；其他平台的 `set_frame_autosave_name` 不做事，也不记录），`lectern-logging` 因此只是 macOS 上的依赖。kqueue 的记录在 `fail` 放开状态锁之后写出，调用线程上不做 IO。frame autosave 的记录由函数自己写出，调用方（`app`）不再记一次；它在首帧之前可能发生，宏只编码记录，落盘由 `logging` 在首帧之后做（ADR 0046）。外观回调的记录在投递通知的线程（应用里是主线程）上写出，宏只编码记录，不做 IO。
-  - `frame`、`metal` 的替换实现和 block 在 Metal、Core Animation、CoreVideo 的线程上运行，不分配、不加锁，所以也不记日志：安装的错误作为 `HookError` 返回（探针报告给运行器后退出），记录中的问题经 `FrameProblems` 交回（「测量构建的方法替换」）。它们只在测量构建里有。
+  - `frame` 的替换实现和 block 在 Metal、Core Animation、CoreVideo 的线程上运行，不分配、不加锁，所以也不记日志：安装的错误作为 `HookError` 返回（探针报告给运行器后退出），记录中的问题经 `FrameProblems` 交回（「测量构建的方法替换」）。它们只在测量构建里有。
 - 详细级别：不多记。kqueue 线程每次唤醒、FSEvents 的每个回调都是热路径，不加 debug、trace 记录。
 - 关联 ID：本 crate 不设作用域。kqueue 线程经 `executor.run_dedicated` 启动，作用域由 `executor` 决定。
 - 不记录：`safe_read` 读到的文件内容和符号链接目标；`HOME`、`XDG_DATA_HOME`、`XDG_STATE_HOME` 的值（`dirs` 只返回路径，写进日志时由 `logging` 把主目录写成 `~`）。系统版本只进日志文件头，由 `logging` 写出，本 crate 只返回字符串，字符集限于 ASCII 数字和点。`time` 不读也不返回时区名和 `TZ` 的值，只返回偏移的秒数。kqueue 的记录不写监听的目录、具名条目的名字和 `io::Error` 的消息，只写订阅数和 `Value::io`。frame autosave 的记录不写传入的名字和窗口的任何信息，只写错误的种类。语言偏好的记录不写语言标签，只写错误的种类。`appearance` 不记颜色的数值、减弱动态效果的值和 panic 的 payload，回调 panic 的记录只写 `change`。`host` 的机器信息只返回给 bench，写进它的报告，不进日志。`HookError::Mismatch` 的 `what` 只有类名和选择器。
@@ -1335,27 +1334,27 @@ pub mod thread {
 
 ## 测量构建的方法替换
 
-[ADR 0048](../adr/0048.md)。锁定的 GPUI 不暴露 drawable、命令缓冲和管线描述符（[ADR 0016](../adr/0016.md)），所以 `frame` 和 `metal` 用 Objective-C 运行时的方法替换取得它们。本节是两个模块共用的规则。
+[ADR 0048](../adr/0048.md)。锁定的 GPUI 不暴露 drawable、命令缓冲和管线描述符（[ADR 0016](../adr/0016.md)），所以 `frame` 用 Objective-C 运行时的方法替换取得它们（发布构建不带 binary archive，不替换管线的创建，[ADR 0049](../adr/0049.md)）。
 
 ### feature
 
 - `crates/platform/Cargo.toml` 增加 `bench-hooks` feature，不在 `default` 里。方法替换、block、CVDisplayLink，以及 Metal、QuartzCore、CoreVideo 的 `extern` 块，都在 `#[cfg(all(target_os = "macos", feature = "bench-hooks"))]` 后面。
 - 只有 `lectern-bench` 打开它：`probe = ["dep:lectern-kernel", "dep:lectern-platform", "lectern-platform/bench-hooks"]`。`app` 的 `bench-probe` 打开 `lectern-bench/probe`，所以测量用的 `lectern` 和 `empty_window` 有钩子，发布构建没有。
-- 没有这个 feature 时（以及在其他平台上），`frame`、`metal` 的公开项照样编译，函数返回 `HookError::Unsupported`，不调用 Objective-C 运行时的任何函数。`workspace` 在所有构建里都有调用 `frame::record` 的代码（只有测量构建里 bench 的 `Driver` 会触发它），所以接口不能只在 feature 打开时存在。
+- 没有这个 feature 时（以及在其他平台上），`frame` 的公开项照样编译，函数返回 `HookError::Unsupported`，不调用 Objective-C 运行时的任何函数。`workspace` 在所有构建里都有调用 `frame::record` 的代码（只有测量构建里 bench 的 `Driver` 会触发它），所以接口不能只在 feature 打开时存在。
 - 检查：`scripts/check_architecture.py` 增加一条规则，写法与 `lectern-logging` 的 `sink` 那条相同：只有 `lectern-bench` 打开 `lectern-platform` 的 `bench-hooks`，而且只经它自己的 `probe` feature；在依赖的 `features` 里打开、经别的 feature 打开、别的 crate 打开，都报错。这条规则和已有的「bench 不进入发布构建」规则是 CI 每次都运行的检查（`just check`）。[bench 设计「验收」](bench.md#验收)第 5 步的 `cargo tree -e features` 是那一步的验收检查：发布构建的依赖树里没有 `"bench-hooks"`。
 - `just check`、`just test` 带 `--all-features`，所以 CI 里 macOS 上编译和运行钩子的代码，Linux 上运行 `Unsupported` 的分支。macOS 上不带 feature 的分支在实现 PR 里手工运行一次（「验收」）。
 
 ### 错误
 
-`HookError` 在 crate 根（`lectern_platform::HookError`），`frame`、`metal` 共用；在所有平台、有没有 `bench-hooks` 都编译。
+`HookError` 在 crate 根（`lectern_platform::HookError`），`frame` 用它；在所有平台、有没有 `bench-hooks` 都编译。
 
 ```rust
-/// `frame`、`metal` 的错误。
+/// `frame` 的错误。
 #[derive(Debug)]
 pub enum HookError {
     /// 没有 `bench-hooks` feature，或不是 macOS。
     Unsupported,
-    /// 已经登记过（`on_first_presented`、`set_strict_archive` 都只能调用一次），或者已经有一个 `FrameRecorder` 在记录。
+    /// 已经登记过（`on_first_presented` 只能调用一次），或者已经有一个 `FrameRecorder` 在记录。
     AlreadyActive,
     /// 要求在主线程上调用，但调用线程不是主线程。什么都没做。
     NotMainThread,
@@ -1363,7 +1362,7 @@ pub enum HookError {
     NoMetalLayer,
     /// 要替换的方法不存在，或类型编码与预期不同：锁定的 GPUI 或系统框架变了。`what` 是「类名 选择器」。
     Mismatch { what: String },
-    /// 系统调用失败：建 CVDisplayLink、打开 archive 等。
+    /// 系统调用失败：建 CVDisplayLink 等。
     Os(io::Error),
 }
 
@@ -1555,53 +1554,13 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 - 真实窗口：`crates/platform/examples/frame_hooks.rs`（`Cargo.toml` 里 `required-features = ["bench-hooks"]`），手工运行 `cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks`（要窗口服务器会话；`just check` 的 clippy 带 `--all-features`，所以编译它，CI 不运行）。它在主线程上建 `NSApplication` 和一个以 `CAMetalLayer` 为 backing layer 的窗口，先调用 `on_first_presented`，再由 CVDisplayLink 驱动 120 帧，按 GPUI 的顺序画，每帧先调用 `frame_started`。检查：首帧回调到达，时刻晚于 `process::start_time(本进程)`；`problems` 干净；相邻 `started` 的间隔的中位数与 `refresh` 相差不超过 10%。它打印 `on_first_presented` 的耗时和每帧的开销。全部成立时退出码为 0。
 - 经真实 GPUI 的检查在 bench 里：第 4 步的空窗口基线（B1），以及帧时间的预算改为生效时的帧基准（B2）。
 
-## Metal binary archive 的严格模式
+## Metal binary archive
 
-bench 的冷启动基准要求「缺 slice 即失败」（[ADR 0017](../adr/0017.md)「为首帧做的具体约束」、[bench 设计「进程级基准」](bench.md#进程级基准)）。**本节等「未决问题」第 1 条的决定**：按默认选项 A，发布构建不带 archive，本节和 `metal` 模块都不实现；选 C 时按本节实现；选 B 时改为调用 GPUI 补丁提供的接口，本节的方法替换不再需要。
-
-### 接口
-
-```rust
-pub mod metal {
-    /// 测量构建用（ADR 0017、ADR 0048）。之后创建的每个渲染管线都只从 `archive` 取：描述符的 `binaryArchives` 设为这个 archive，
-    /// 创建时带 `MTLPipelineOptionFailOnBinaryArchiveMiss`。未命中时不编译，不写任何缓存，调用 `on_miss(管线的 label)`；
-    /// `on_miss` 返回之后，这次创建返回 nil 和错误，GPUI 随即 panic（它对管线的创建用 `expect`）。
-    /// 探针的 `on_miss` 不返回：发出 `Error` 之后以退出码 3 退出。
-    /// 首帧之前、创建窗口之前调用，只能调用一次。`archive` 由调用方给出：它放在哪里取决于「未决问题」第 1 条。
-    /// 打开 archive 是 ADR 0017「为首帧做的具体约束」要求的读取。
-    pub fn set_strict_archive(archive: &Path, on_miss: impl Fn(&str) + Send + Sync + 'static) -> Result<(), HookError>;
-}
-```
-
-### 规则
-
-- 替换的方法：设备的具体类的 `-newRenderPipelineStateWithDescriptor:error:`。GPUI 经 `metal` crate 的 `new_render_pipeline_state` 调用它，8 个管线都在 `MetalRenderer::new` 里创建，即创建窗口时。具体类是私有的，只能从实例取得：对 `MTLCopyAllDevices` 的每个设备取 `object_getClass`，按类去重后各替换一次。这是首帧之前唯一的 Metal 工作。GPUI 随后自己调用 `MTLCopyAllDevices`，预计拿到同一组设备对象，Metal 的初始化只是提前，不重复；实现 PR 用测试确认两次调用返回同一个对象。
-- 每个设备用 `newBinaryArchiveWithDescriptor:error:`（描述符的 `url` 是 `archive` 的文件 URL）打开一次 archive。打不开为 `Os`。
-- 性能：取设备只是把 GPUI 本来要做的 Metal 初始化提前；多出的是打开 archive 和每个管线多一次挂 archive。实现 PR 测出这部分在首帧之前的耗时，写进「实际验证」。它只在 `app/*` 的测量里，`baseline/*` 不调用。
-- 替换后的实现：把描述符的 `binaryArchives` 设为这个设备的 archive，调用 `newRenderPipelineStateWithDescriptor:options:reflection:error:`，选项是 `MTLPipelineOptionFailOnBinaryArchiveMiss`。成功时返回管线；失败时调用 `on_miss(label)`。不回退到运行时编译。
-- harvest 模式（生成 archive 用，见下）：同一个替换，不设 archive，改为把描述符加进一个新的 `MTLBinaryArchive`（`addRenderPipelineFunctionsWithDescriptor:error:`），然后照常创建管线；另替换 `-newLibraryWithData:error:`，把 GPUI 内嵌的 metallib 原样写出。全部管线创建之后序列化（`serializeToURL:error:`）。
-
-### archive 的生成
-
-- 工具是 Xcode 的 Metal 工具链里的 `metal-tt`。输入是 GPUI 内嵌的 metallib 和一份管线脚本（`.mtlp-json`，描述 8 个管线的描述符）；输出是覆盖每个支持的 Apple GPU 家族的 archive，每个家族一个 `-arch`。
-- metallib 和管线脚本都来自 harvest：测量构建的 `lectern` 以 harvest 模式运行一次，写出 GPUI 的 metallib 和本机 GPU 的 archive，管线脚本从后者用 `metal-source -flatbuffers=json` 取出。所以输入与被测的二进制完全一致，不必按 cargo 的构建目录去找 GPUI 的 `OUT_DIR`。
-- 管线脚本提交进仓库，只在 GPUI 升级时重新生成。archive 是构建产物，不提交。
-- 由 bench 第 5 步（和 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 的打包）实现。archive 放在哪里（`.app` 的 `Contents/Resources/`，或者只在测量构建里）取决于「未决问题」第 1 条。
-- 安全网：严格模式下的任何不匹配（脚本与 GPUI 的描述符不同、缺某个 GPU 家族的 slice）都让第一次预热启动失败，bench 记为 `error`。
-
-### 测试
-
-- macOS 加 `bench-hooks`：`metal_strict_*`。测试用自己的着色器和描述符：先 harvest 出一个 archive，再用它进入严格模式，同一个描述符创建成功；改动一个描述符的混合因子之后为未命中，`on_miss` 收到它的 label。替换在测试进程里一直有效，所以这些测试放在单独的测试二进制里。
-- 所有平台：`metal_is_unsupported_without_bench_hooks`。
+不做（[ADR 0049](../adr/0049.md)，产品负责人在 2026-10-25 选了原「未决问题」第 1 条的选项 A）。锁定的 GPUI 在 `MetalRenderer::new` 里自己创建 8 个管线，描述符不带 `binaryArchives`，也没有传入 archive 的接口；不改 GPUI、不在发布构建里替换方法，就挂不上 archive。所以发布构建不带 archive，管线由 Metal 从 GPUI 内嵌的 metallib 编译，结果进系统的着色器缓存。本 crate 没有 `metal` 模块，也不替换 `-newRenderPipelineStateWithDescriptor:error:`。
 
 ## 未决问题
 
-1. **发布构建的 binary archive 怎样做（ADR 0017），需要人决定。** ADR 0017「为首帧做的具体约束」要求发布构建的渲染管线来自构建期 `metal-tt` 生成的 binary archive，启动基准用严格模式检查缺 slice。在锁定的 gpui-pre 0.3.9（[ADR 0016](../adr/0016.md)）上，不改 GPUI 做不到这一点：GPUI 在 `MetalRenderer::new` 里自己创建 8 个管线，描述符不带 `binaryArchives`，也没有让外部传入 archive 的接口；Metal 没有进程级的默认 archive。所以要给发布构建的管线挂上 archive，只能改 GPUI，或者在发布构建里替换 `newRenderPipelineStateWithDescriptor:error:`。前者要人同意（ADR 0016），后者违反 [ADR 0048](../adr/0048.md)「发布构建不含任何方法替换」。选项：
-   - **A（默认）**：发布构建不带 archive，管线由 Metal 在运行时编译，结果进系统的着色器缓存。ADR 0017 的冷启动先启动 2 次预热，再测 20 次，测量的启动命中这个缓存；没有 archive 时多出管线编译的只有安装后的第一次启动和系统更新后的第一次启动。严格模式、`metal` 模块和 `LECTERN_BENCH_ARCHIVE` 都不做，另写一条 ADR 修订 ADR 0017 的这一条约束，不改任何预算。依据：bench 第 4 步的 `baseline/empty_window_cold_start` 本来就不用 archive；它在 20 ms 之内时，archive 不是达到预算的条件。
-   - B：给 GPUI 打补丁或 fork，加一个给 `MetalRenderer` 传入 archive 的接口（要人同意，ADR 0016）。严格模式改为经这个接口，「Metal binary archive 的严格模式」里的方法替换不再需要。
-   - C：只为挂 archive，在发布构建里也替换 `newRenderPipelineStateWithDescriptor:error:`（不带 `FailOnBinaryArchiveMiss`，未命中时照常编译），测量构建另加严格模式。要修订 ADR 0048，发布构建因此依赖 GPUI 的内部调用顺序。
-
-   决定之前：「Metal binary archive 的严格模式」和「验收」的 C 部分不实现；[bench 设计「验收」](bench.md#验收)第 5 步里与 archive 有关的两项（前提里的「内嵌 binary archive、`set_strict_archive` 已实现」和「去掉一个 slice」的检查）也等这个决定。「验收」的 A、B1、B2 部分不受影响。
+没有。原第 1 条（发布构建的 binary archive）已决定为选项 A，见「Metal binary archive」和 [ADR 0049](../adr/0049.md)。
 
 ## 验收
 
@@ -1713,7 +1672,7 @@ B2. 逐帧记录（在第一个把帧时间预算改为 `Active` 的 PR 之前�
 - `workspace` 在 `on_next_frame` 的回调里调用 `frame_started`，是 `workspace` 自己的 PR（[workspace 设计「本 crate 的公开项」](workspace.md#本-crate-的公开项)）。
 - 本文的状态行、「实际验证」写明 B2 已实现。
 
-C. Metal binary archive 的严格模式：等「未决问题」第 1 条。选 C 时按「Metal binary archive 的严格模式」实现，`metal_strict_*` 在 macOS CI 上通过，`metal_is_unsupported_without_bench_hooks` 在 Linux CI 上通过；管线脚本和生成 archive 的步骤随 bench 第 5 步。选 A 时删掉「Metal binary archive 的严格模式」一节和 `metal` 模块的接口；选 B 时按 GPUI 补丁的接口改写这一节。
+C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。
 
 ## 实际验证
 
