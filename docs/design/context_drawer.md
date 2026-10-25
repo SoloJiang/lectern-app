@@ -297,6 +297,7 @@ pub(crate) struct CallerRow {
 - `QueryResults` 的 `candidates`、`callers`、`same_name` 只追加（code_intel 设计「服务接口」）。控制器记下每个列表已应用的长度，新到的一批是 `results.callers[applied..]`，追加成一块。行的顺序就是 `code_intel` 给出的顺序：本 crate 不按状态、路径或层重排，用户正在看的行不会移动（[代码导航调研「索引不完整时」](../research/code-navigation.md#索引不完整时)的呈现规则）。
 - 行的下标在一个主题内不变。视图的选中项按下标记，主题不变时不需要找回。
 - 每次发起查询（含重新发起）的顺序固定：`query()` 返回 id → 写进 `Watch::queries` → 立即调一次 `results(id)` 并应用。这一次读取不能省：项目没有打开时 `query` 直接把结果置为 `Failed(NotOpen)`，不发事件；查询在另一个线程上可能在 id 写进 `Watch` 之前就发布了第一批（预取过的查询只要几微秒），那次事件会被监听当作别人的查询丢掉。结果是累积的，写进 `Watch` 之后的这次读取包含此前发布的全部内容，之后的事件都能通过过滤，所以不会丢批。
+- 收下请求时对审阅和项目用同一条顺序：先把请求的项目和审阅写进 `Watch::project`、`Watch::review`，再读 `Projects::snapshot`、`Review::snapshot`。快照是完整的当前状态，写进 `Watch` 之前到达而被丢掉的 `Changed` 不会丢内容；之后的 `Changed` 都能通过过滤。
 - `CodeIntelEvent::Results` 的 `generation` 只用来丢弃过时的唤醒：`id` 不是当前的查找或引用查询（旧请求、旧主题）时丢弃；`generation` 不高于已应用的时丢弃。
 - `results(id)` 返回 None（查询被挤出）时重新发起同一个查询一次，已有的行保留，新结果从已应用的长度之后接上；第二次仍是 None 时记 warn、停在已有的行上。
 - 例外：调用方的状态、测试文件的存在、History 依赖审阅快照和文件列表，它们变化时原地改写（行的位置不变），这是「结果与之前不同时才原地更新」的情况。
