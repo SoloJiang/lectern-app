@@ -4,6 +4,8 @@
 
 mod anchors;
 mod brief;
+mod fakes;
+mod highlight;
 mod items;
 mod labels;
 mod logs;
@@ -11,5 +13,6 @@ mod needs;
 mod plugin;
 mod screen;
 mod scroll;
+mod step2;
 mod support;
 mod tree;

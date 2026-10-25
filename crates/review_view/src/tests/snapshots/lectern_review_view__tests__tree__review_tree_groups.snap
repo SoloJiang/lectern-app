@@ -11,6 +11,8 @@ review.narrative List items=17 visible=0..17 mode=unified
   review.group.item[2] Group
   review.file.item[src/file_000.rs] Group "src/file_000.rs" seen=unseen attribution=lines drifted_hunks=0
     review.file.item[src/file_000.rs].check Toggle [checked=false]
+    review.file.item[src/file_000.rs].open Button <review-open-file> "Open file (⇧⌘O)" [disabled]
+  review.diff.item[final:src/file_000.rs] Diff rows=5 context=3 prepared=true highlighted=old=plain,new=plain
   review.diff.item[final:src/file_000.rs].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
   review.diff.item[final:src/file_000.rs].row.item[0:0] DiffLine kind=context drifted=false
   review.diff.item[final:src/file_000.rs].row.item[1:-] DiffLine kind=removed drifted=false
@@ -19,6 +21,8 @@ review.narrative List items=17 visible=0..17 mode=unified
   review.diff.item[final:src/file_000.rs].row.item[2:3] DiffLine kind=context drifted=false
   review.file.item[src/file_001.rs] Group "src/file_001.rs" seen=unseen attribution=lines drifted_hunks=0
     review.file.item[src/file_001.rs].check Toggle [checked=false]
+    review.file.item[src/file_001.rs].open Button <review-open-file> "Open file (⇧⌘O)" [disabled]
+  review.diff.item[final:src/file_001.rs] Diff rows=5 context=3 prepared=true highlighted=old=plain,new=plain
   review.diff.item[final:src/file_001.rs].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
   review.diff.item[final:src/file_001.rs].row.item[0:0] DiffLine kind=context drifted=false
   review.diff.item[final:src/file_001.rs].row.item[1:-] DiffLine kind=removed drifted=false

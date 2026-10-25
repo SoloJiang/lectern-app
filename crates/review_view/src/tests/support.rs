@@ -14,14 +14,18 @@ use gpui::{
     KeyBindingContextPredicate, ParentElement, Render, Styled, TestAppContext, VisualTestContext,
     Window, WindowHandle, actions, div,
 };
+use lectern_executor::Executor;
 use lectern_i18n::{Locale, Strings};
 use lectern_kernel::testing::TestKernel;
 use lectern_kernel::{ActivationToken, Name};
+use lectern_services::code_intel::CodeIntel;
+use lectern_services::reader::Reader;
 use lectern_services::review::{Review, ReviewSnapshot, ReviewTarget, RowsKey};
 use lectern_services::session::{
     Batch, Content, ContentRef, Cursor, ResumeCommand, SessionError, SessionKey, SessionList,
     SessionSource, SessionSummary, SourceId, TurnIndex,
 };
+use lectern_services::usage::Usage;
 use lectern_services::workspace::{
     CommandHandler, Contribution, ContributionKind, Contributions, LeaveGuard, Milestone,
     Registration, SidebarEntry, Target, WorkspaceCommand,
@@ -31,7 +35,8 @@ use lectern_ui::semantic::{Record, Recorder};
 use lectern_ui::{Appearance, init_fixed};
 
 use crate::testing::{self, FIRST_ID, FakeReview};
-use crate::{ReviewModel, ReviewScreen, plugin};
+use crate::tests::fakes::{FakeCodeIntel, FakeReader, FakeUsage};
+use crate::{ReviewModel, ReviewScreen, plugins};
 
 /// `dyn Contributions` that remembers what it was given.
 #[derive(Default)]
@@ -73,6 +78,10 @@ impl FakeContributions {
 
     pub fn dispatched(&self) -> Vec<WorkspaceCommand> {
         self.dispatched.lock().unwrap().clone()
+    }
+
+    pub fn clear_dispatched(&self) {
+        self.dispatched.lock().unwrap().clear();
     }
 
     pub fn milestones(&self) -> Vec<Milestone> {
@@ -322,10 +331,19 @@ impl Render for Host {
 }
 
 pub struct Rig {
+    /// "review-view".
     pub kernel: TestKernel,
+    /// "review-view-handoff", a kernel of its own (a `TestKernel` holds one
+    /// plugin); not active until `enable_handoff`.
+    pub handoff: TestKernel,
+    /// The highlight tasks run when the test says so (`run_tasks`).
+    pub executor: Executor,
     pub review: Arc<FakeReview>,
     pub contributions: Arc<FakeContributions>,
     pub sessions: Arc<FakeSessions>,
+    pub reader: Arc<FakeReader>,
+    pub code_intel: Arc<FakeCodeIntel>,
+    pub usage: Arc<FakeUsage>,
 }
 
 /// A screen in a test window.
@@ -364,16 +382,49 @@ impl Rig {
         let review_service: Arc<dyn Review> = review.clone();
         let contributions_service: Arc<dyn Contributions> = contributions.clone();
         let sessions_service: Arc<dyn SessionSource> = sessions.clone();
-        let kernel = TestKernel::new(plugin())
+        let executor = Executor::manual();
+        let (review_view, handoff_plugin) = plugins(executor.clone());
+        let kernel = TestKernel::new(review_view)
             .mock::<dyn Contributions>(contributions_service)
             .mock::<dyn Review>(review_service)
             .mock::<dyn SessionSource>(sessions_service);
+        let reader = Arc::new(FakeReader::default());
+        let code_intel = Arc::new(FakeCodeIntel::default());
+        let usage = Arc::new(FakeUsage::default());
+        let reader_service: Arc<dyn Reader> = reader.clone();
+        let code_intel_service: Arc<dyn CodeIntel> = code_intel.clone();
+        let usage_service: Arc<dyn Usage> = usage.clone();
+        let handoff = TestKernel::new(handoff_plugin)
+            .mock::<dyn Reader>(reader_service)
+            .mock::<dyn CodeIntel>(code_intel_service)
+            .mock::<dyn Usage>(usage_service);
         Rig {
             kernel,
+            handoff,
+            executor,
             review,
             contributions,
             sessions,
+            reader,
+            code_intel,
+            usage,
         }
+    }
+
+    /// Activates "review-view-handoff".
+    pub fn enable_handoff(&self, cx: &mut TestAppContext) {
+        self.handoff
+            .activate()
+            .expect("the handoff plugin activates");
+        self.settle(cx);
+    }
+
+    /// Runs the highlight tasks that were submitted and delivers their
+    /// results to the screens.
+    pub fn run_tasks(&self, cx: &mut TestAppContext) -> usize {
+        let steps = self.executor.run_until_idle();
+        self.settle(cx);
+        steps
     }
 
     /// Hands the kernel's emitter to the fake review service, so that its
@@ -386,6 +437,9 @@ impl Rig {
     /// Lets the kernel thread and the main-thread tasks finish.
     pub fn settle(&self, cx: &mut TestAppContext) {
         if let Some(kernel) = self.kernel.inner() {
+            kernel.barrier();
+        }
+        if let Some(kernel) = self.handoff.inner() {
             kernel.barrier();
         }
         cx.run_until_parked();

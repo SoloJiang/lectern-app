@@ -12,6 +12,8 @@ review.narrative List items=33 visible=0..33 mode=unified
   review.turn.item[0:1].text.item[0] Text "Done: the files are changed."
   review.step.item[0] Group "src/file_000.rs" added=3 removed=1 alignment=aligned survival=all seen=unseen
     review.step.item[0].check Toggle [checked=false]
+    review.step.item[0].open Button <review-open-file> "Open file (⇧⌘O)" [disabled]
+  review.diff.item[step:0] Diff rows=6 context=3 prepared=true highlighted=old=plain,new=plain
   review.diff.item[step:0].hunk.item[0:0] DiffHunk [selected] turns=1 others=0 drifted=0
   review.diff.item[step:0].row.item[0:0] DiffLine kind=context drifted=false
   review.diff.item[step:0].row.item[1:-] DiffLine kind=removed drifted=false
@@ -21,6 +23,8 @@ review.narrative List items=33 visible=0..33 mode=unified
   review.diff.item[step:0].row.item[3:-] DiffLine kind=removed drifted=false
   review.step.item[2] Group "src/file_002.rs" added=3 removed=1 alignment=aligned survival=all seen=changed
     review.step.item[2].check Toggle [checked=false]
+    review.step.item[2].open Button <review-open-file> "Open file (⇧⌘O)" [disabled]
+  review.diff.item[step:2] Diff rows=6 context=3 prepared=true highlighted=old=plain,new=plain
   review.diff.item[step:2].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
   review.diff.item[step:2].row.item[0:0] DiffLine kind=context drifted=false
   review.diff.item[step:2].row.item[1:-] DiffLine kind=removed drifted=false
@@ -34,6 +38,8 @@ review.narrative List items=33 visible=0..33 mode=unified
   review.turn.item[0:2].text.item[0] Text "Done: the files are changed."
   review.step.item[1] Group "src/file_001.rs" added=3 removed=1 alignment=aligned survival=all seen=seen
     review.step.item[1].check Toggle [checked=true]
+    review.step.item[1].open Button <review-open-file> "Open file (⇧⌘O)" [disabled]
+  review.diff.item[step:1] Diff rows=6 context=3 prepared=true highlighted=old=plain,new=plain
   review.diff.item[step:1].hunk.item[0:0] DiffHunk turns=1 others=0 drifted=0
   review.diff.item[step:1].row.item[0:0] DiffLine kind=context drifted=false
   review.diff.item[step:1].row.item[1:-] DiffLine kind=removed drifted=false
