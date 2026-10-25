@@ -25,6 +25,7 @@ mod report;
 pub mod rounds;
 mod runner;
 mod stats;
+pub mod wire;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
