@@ -136,6 +136,8 @@ pub trait Terminals: Send + Sync {
     /// `Paste`、`Focus`，以及会编码给程序的鼠标和滚轮）丢弃；作用于视口和选区的输入
     /// （`Scroll`、`ScrollTo`、选区用的 `Mouse`、`SelectAll`、`ClearSelection`、
     /// `ClearScrollback`、`Resize`、`SetTheme`）照常处理到 `close`，所以退出后仍能滚动、选择、复制。
+    /// `Starting` 期间发给程序的输入不排队、直接丢弃：要送给程序的内容（如 #22 发回的审阅意见）
+    /// 由调用方等到 `RunState::Running`（随 `Listed` 送达）再发。
     fn input(&self, id: TerminalId, input: Input);
 
     /// 取当前选区的纯文本（复制用）。立即返回。终端线程在 `token.enter()` 取得的准入内
@@ -750,7 +752,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
    - `resume(session, size)` 是 `open(OpenSpec { launch: Launch::Resume(key), size: Some(size), theme })`：多了 `theme`（第一帧就要有颜色，由 `terminal_view` 给出）。`AlreadyRunning`、替换已退出或失败的终端、返回前已登记，与 D 相同。
    - `ResumeRefused::NotResumable` / `OutsideProject` / `AlreadyRunning` 对应 `LaunchError` 的同名变体（`LaunchError` 另有 `UnknownSession`、`UntrustedSource`、`InvalidSessionId`、`TooMany`，界面可以都显示为「不能恢复」）。`NotInstalled` 不在 `open` 里同步返回：查 `PATH` 是 IO，不在调用线程上做，它随 `Listed` 以 `RunState::Failed(NotInstalled(agent))` 送达，界面用 `AgentCommand::program` 显示程序名。
    - `status(id)` 是 `info(id)` 的 `state`；「是否在驱动会话」按 D 的规则看 `Starting` / `Running`。
-   - `paste(id, text)` 是 `input(id, Input::Paste(text))`，去掉控制字符、bracketed paste、不追加回车的规则与 D 相同。
+   - `paste(id, text)` 是 `input(id, Input::Paste(text))`，去掉控制字符、bracketed paste、不追加回车的规则与 D 相同。`Starting` 期间的粘贴被丢弃（`input`），调用方等到 `Running` 再发。
    - `TerminalEvent::Output { id }` 是 `TerminalEvent::Frame { id, .. }`（只在有 `FrameInterest` 时发出）；`Status { id }` 是 `Listed`（读 `list()` 或 `info(id)`）。另有 `Bell`。
    - 服务 ID 是 "terminal"（与插件 ID 相同，同 "review"），不是 D 里写的 "terminals"。
    - Terminal 页的插件在 `requires` 里依赖 `dyn Terminals`，与不依赖它的部分分成两个插件；页可见时持有 `FrameInterest`，隐藏时 drop；关闭按钮调用 `close`。
@@ -759,7 +761,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 5. `terminal_view`：非插件的视图库。把 GPUI 的按键、IME 文字、粘贴、鼠标、滚动、焦点、尺寸转成 `Input`；从 `ui` 的 `Palette` 推出 `Theme`，外观变化时发 `SetTheme`；按 `Frame` 绘制；拥有 `app/input_frames`（另写设计文档，按 conversation 设计「对其他 crate 的要求」E）。
 6. `app`：装配 `TerminalPlugin::new(TerminalDeps { executor })`，排在 `project` 与 `agents` 之后（第 4 步）；`app/bundle_size` 记录静态库的增量。
 7. `bench`：预算表加入「性能」里的条目。`app/input_frames` 在 Conversation 的 Terminal 页里恢复夹具会话（`Launch::Resume`），所以它的 profile 用 `with_login_env` 给出一个 `PATH`，其中的 `claude`、`codex` 是回显程序（本 crate 的假程序，或 bench 自带的同类程序，由 bench 的实现决定）；不运行用户的 shell 和它的配置，也不运行真实的 agent。
-8. `review_view` / `conversation`（#22 发回会话）：有终端在驱动会话时经 `Input::Paste` 写入，不追加回车，用户在终端里按 ↵ 提交（conversation 设计「对其他 crate 的要求」I）。
+8. `review_view` / `conversation`（#22 发回会话）：驱动会话的终端是 `Running` 时经 `Input::Paste` 写入，不追加回车，用户在终端里按 ↵ 提交（conversation 设计「对其他 crate 的要求」I）。终端还是 `Starting` 时不发送：这期间的输入和粘贴被丢弃（`input`），所以调用方等 `Listed` 报告 `Running` 之后再发，或提示用户稍后再发。
 9. `project_home`：空状态的 New session 调用 `Launch::NewSession`（本 issue 之外）。
 
 ## 未决问题
