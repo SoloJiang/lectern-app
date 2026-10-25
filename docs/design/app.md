@@ -177,11 +177,11 @@ pub struct Outcome {
 
 ### 启动屏障
 
-kernel 设计规定 desktop profile 在第一帧真正显示时放开屏障（[kernel 设计「启动」](kernel.md#启动)）。精确的显示时刻要在 Metal drawable 上登记 `addPresentedHandler`，锁定的 GPUI 不暴露 drawable，`platform::frame::on_first_presented` 还没有实现（[bench 设计「需要其他 crate 提供的接口」](bench.md#需要其他-crate-提供的接口)）。`app` 因此用 GPUI 的帧回调：
+kernel 设计规定 desktop profile 在第一帧显示之后放开屏障（[kernel 设计「启动」](kernel.md#启动)）。精确的显示时刻要在 Metal drawable 上登记 `addPresentedHandler`，锁定的 GPUI 不暴露 drawable；`platform::frame::on_first_presented` 用方法替换取得它，只在测量构建里有（[ADR 0048](../adr/0048.md)）。`app` 因此在所有构建里都用 GPUI 的帧回调：
 
 - desktop：根视图第一次 `render` 时调用 `window.on_next_frame`，回调里再调用一次 `window.on_next_frame`，第二个回调里调用 `startup::release`。GPUI 在一次帧请求（display link 的回调）的开头执行上一帧登记的回调，所以屏障在首帧画出之后的第二次帧请求时放开。首帧的命令缓冲在第一次帧请求的末尾提交，在下一个垂直同步显示；第二次帧请求时它已经显示。比精确的显示时刻最多晚约 2 个刷新周期（60 Hz 下约 33 ms；窗口不在前台时 GPUI 按 30 fps 请求帧，更晚，见「已知限制」），只推迟后台初始化，不计入冷启动（冷启动的终点是首帧的显示时刻，由 bench 单独测量）。
 - test：窗口建好后立即放开。
-- `platform::frame::on_first_presented` 实现以后，desktop 改为在它的回调里放开（回调在任意线程上，转到主线程后调用 `release`），并删掉本节的帧回调。
+- 测量构建（`bench-probe`）同样用帧回调放开。探针只用 `on_first_presented` 向运行器报告首帧的显示时刻（[bench 设计「需要其他 crate 提供的接口」](bench.md#需要其他-crate-提供的接口)），所以测量构建与发布构建的启动顺序相同。
 
 `startup::release` 只生效一次。窗口关闭后重新打开（见「界面」）时根视图再次登记，不会再次启动。
 
@@ -557,7 +557,7 @@ target 为 `app`。
 - 由系统发起的退出不经 `Quit`：kernel 和 executor 不按顺序关闭（kernel 设计「已知限制」），只有日志的结束记录在 `on_app_quit` 的 200 ms 里写出。系统发起的退出也不问离开守卫。
 - `window.json` 去抖 500 ms：最后一次变化之后 500 ms 内退出，这次变化不会写出，下次启动回到上一次写出的状态（多半是上一个项目）。系统发起的退出同样。
 - 第一次使用 `"project"`、还没有保存过 frame 时，设计要求先把窗口设为 1180 × 760 pt 居中（workspace 设计「对其他 crate 的要求」D）。GPUI 的窗口没有移动接口，`resize` 只改内容尺寸并保持左上角，在 Welcome 居中的窗口上放大到 1180 × 760 会越出屏幕；居中要调 AppKit，属于 `platform`（架构规则 6）。所以现在窗口沿用 Welcome 的大小，用户拖一次，AppKit 就保存在 `"project"` 下。`platform` 补上居中并设尺寸的接口后，`app` 在改名为 `"project"` 之前调用（「与设计的差异」）。
-- 屏障比首帧的实际显示最多晚约 2 个刷新周期，直到 `platform::frame::on_first_presented` 实现（「启动屏障」）。窗口不是前台窗口时 GPUI 按 30 fps 请求帧（`inactive_frame_interval` 33 ms），间隔按 33 ms 计；从终端启动时实测首帧画出到屏障放开约 90–100 ms（「实际验证」）。
+- 屏障比首帧的实际显示最多晚约 2 个刷新周期：精确的显示时刻只在测量构建里有（ADR 0048，「启动屏障」）。窗口不是前台窗口时 GPUI 按 30 fps 请求帧（`inactive_frame_interval` 33 ms），间隔按 33 ms 计；从终端启动时实测首帧画出到屏障放开约 90–100 ms（「实际验证」）。
 - `project_home` 的视图合并之前，装配了的 `project-home` 在项目打开（或从 `window.json` 恢复）时会取概览与用量的关注、在后台合成快照，没有视图读它们。没有项目打开时它什么也不做。随 project_home 第 2 步消失。
 
 ## 验收
