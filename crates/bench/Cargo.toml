@@ -61,6 +61,11 @@ lectern-syntax = { path = "../syntax", features = ["test-support"] }
 lectern-usage = { path = "../usage", features = ["test-support"] }
 # `kill` of a launched process group in benches/process.rs.
 libc.workspace = true
+# The `empty_window` example (macOS only in effect): the channel by which
+# the probe thread asks the main thread to quit. Platform-neutral, so it is
+# not declared for macOS alone (an Apple-only external dependency counts as
+# a binding, AGENTS.md rule 6).
+futures.workspace = true
 
 # The `ui/*` benchmarks (docs/design/ui.md「性能」) need GPUI, which only
 # builds on macOS in this workspace (docs/design/cargo-workspace.md); on
@@ -73,10 +78,8 @@ lectern-ui = { path = "../ui", features = ["test-support"] }
 # item list is pure, but the crate depends on GPUI. A plugin crate: a tool
 # crate may depend on one (ADR 0025).
 lectern-review-view = { path = "../review_view", features = ["test-support"] }
-# The `empty_window` example: the GPUI platform, and the channel by which
-# the probe thread asks the main thread to quit.
+# The `empty_window` example: the GPUI platform.
 gpui_platform.workspace = true
-futures.workspace = true
 
 # In-process timing; the counting allocator stays out of it.
 [[bench]]

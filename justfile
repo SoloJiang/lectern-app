@@ -56,6 +56,9 @@ bench *args:
     rm -f target/lectern-bench/report-*.json target/lectern-bench/report.json
     if [[ "$(uname -s)" == Darwin ]]; then
         if [[ "${1-}" == --measure ]]; then shift; fi
+        # The empty GPUI window of the baseline/* benchmarks.
+        cargo build --release --locked -p lectern-bench --all-features --example empty_window
+        export LECTERN_BENCH_BASELINE="$PWD/target/release/examples/empty_window"
         cargo bench --locked --no-fail-fast -p lectern-bench --all-features -- "$@" || true
     elif [[ "${1-}" == --measure ]]; then
         shift

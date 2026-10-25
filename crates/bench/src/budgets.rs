@@ -237,7 +237,6 @@ const fn share_macos(
 }
 
 const ACTIVE: State = State::Active;
-const STEP_4: State = State::Planned("bench 第 4 步");
 const STEP_5: State = State::Planned("bench 第 5 步");
 
 use Target::{Memory, Package, Process, Time};
@@ -513,14 +512,14 @@ pub static BUDGETS: &[Budget] = &[
         "baseline/empty_window_cold_start",
         RECORD,
         ADR_0017_IMPACT,
-        STEP_4,
+        ACTIVE,
         Process,
     ),
     top(
         "baseline/empty_window_idle",
         RECORD,
         ADR_0017_IMPACT,
-        STEP_4,
+        ACTIVE,
         Process,
     ),
     // ---- shares (Tier::Share) --------------------------------------------
