@@ -404,7 +404,8 @@ pub struct Partial {
     pub listed_only: bool,
     /// 代码平台报告改动、但 `files` 里没有的文件数（列表被截断）。
     pub missing_files: u32,
-    /// 取数期间 MR 的 head、base 或元数据变了，重取 2 次仍不一致（「MR 的改动集」第 6 步）。
+    /// 取数期间 MR 的 head、base 或元数据变了，重取 2 次仍不一致（「MR 的改动集」第 6 步），
+    /// 或到了等待上限、没能核对（「数据流与线程」）。
     pub possibly_stale: bool,
 }
 
@@ -760,7 +761,8 @@ watch / watch_mr┘                                              │
 - 每个子进程由 `run_dedicated_gated` 的专用线程启动和读管道，进程结束后线程退出；空闲时没有常驻线程和子进程。请求进行期间持有 `BusyGuard`，所以 kernel 不报告静止；轮询的等待不持有。
 - 定时用 kernel 的 `Clock::wake_at`：回调只改内存里的状态、提交任务，自己不做 IO。
 - 阻塞的接口（`MrSource` 的三个方法、`ChangeSource::fetch`、`shared_analyses`）把请求放进队列，在调用线程上等结果，每 50 ms 检查一次取消标志；调用方按前置条件 D、F 用专用线程调用。
-  - `MrSource` 的方法和 `fetch` 一次最多等 30 秒（`WAIT_BUDGET`），超时时有缓存返回缓存，否则 `MrSource` 返回 `Offline`、`fetch` 返回 `ChangeError::Io("timeout")`。
+  - `MrSource` 的方法一次最多等 30 秒（`WAIT_BUDGET`），超时时有缓存返回缓存，否则返回 `Offline`。这次调用已排队的请求不随超时取消，照常在后台完成并写进缓存，所以 `usage` 之后再调用时从缓存继续，不从头再等。
+  - `fetch` 的本地路径通常只有一次详情的条件请求；超过 `WAIT_BUDGET` 时有缓存返回缓存，否则返回 `ChangeError::Io("timeout")`。降级路径（「MR 的改动集」第 5、6 步）的文件列表按页码拼出，同一主机同时请求 2 页（交互优先级），30 页约 15 秒；到 `WAIT_BUDGET` 时不返回错误，而是用本次已读完的页组成降级的改动集，没读到的文件计入 `missing_files`，`possibly_stale` 为 true，不写缓存。剩余时间少于第一轮读取所用的时间时不再开始一致性重读，直接按第 6 步「仍不一致」返回。
   - `shared_analyses` 最多要几十个请求（「共享分析评论」），一次最多等 180 秒（`SHARED_WAIT_BUDGET`）。到时返回已经读到的条目，`scan` 为 `MayHaveMissed`，不返回错误。
 - 首屏先显示缓存：`watch` 开始时在后台读 `forge.http` 里这个项目各端点的摘要，先换出一份 `Cached` 快照，再发条件请求。
 - 渐进加载：MR 详情先取详情（GitHub 另取 check run 与 commit status），共享分析在详情显示之后才开始读，它的几十个请求不挡住详情和 diff。
@@ -838,7 +840,7 @@ watch / watch_mr┘                                              │
   - `rate_*`：剩余次数的阈值、`Retry-After`、翻倍与上限、304 清零。
   - `github_*`、`gitlab_*`：列表、按分支、fork 上游、详情、合并基点、降级的文件列表（含 3000 个文件的截断、GitLab 的 `overflow` 与 `changes_count` 为 "1000+"）、时间线、合并前的目标分支、CI 的状态映射与摘要（表的每一行一个用例）。
   - `cache_*`：账号隔离、`updated_after` 在同一天里不变、304 用摘要、不变的结果不过期。
-  - `changes_*`：本地路径（`git::testing::TestRepo` 建两个提交）与 `change_list_of` 的结果相同；提交不在本地、哈希算法不同时走降级路径；`consistency_*`：元数据在文件列表之后变了时重取，两次都变时 `possibly_stale` 且不写缓存；`fingerprint_*`：各项变化都改变指纹。
+  - `changes_*`：本地路径（`git::testing::TestRepo` 建两个提交）与 `change_list_of` 的结果相同；提交不在本地、哈希算法不同时走降级路径；降级路径到 `WAIT_BUDGET` 时返回已读的页、`missing_files` 与 `possibly_stale`（假时钟），不返回错误；`mr_source_budget_*`：超时返回 `Offline` 后后台请求照常写缓存，下一次调用不启动新的子进程；`consistency_*`：元数据在文件列表之后变了时重取，两次都变时 `possibly_stale` 且不写缓存；`fingerprint_*`：各项变化都改变指纹。
   - `shared_*`：标记行、JSON 代码块、lz-string、解压超过 2 MiB 丢弃、单条超过 2 MiB 跳过、1000 条与 32 MiB 停止、按更新时间的 5000 条与 64 MiB、按 ID 重读、每个作者一条、`Outdated` 与 `MaybeStale`、到 `SHARED_WAIT_BUDGET` 时返回已读到的条目和 `MayHaveMissed`（假时钟）、10 分钟内再次调用不启动子进程；`trust_*`：机器人按 ID 不按用户名、`admin` / `write` / `read`、`user.id` 不一致、GitLab 29 与 30、否定缓存 24 小时、肯定结果对之后更新的评论无效、每次最多新查 20 个、403 为 `LookupFailed`。
   - `lz_*`：参考向量逐个相同；截断的输入、非法字符返回错误。
   - `mr_source_*`：三个方法的缓存、错误的对照表、`MrInfo` 各字段。
