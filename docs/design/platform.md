@@ -1341,7 +1341,7 @@ pub mod thread {
 - `crates/platform/Cargo.toml` 增加 `bench-hooks` feature，不在 `default` 里。方法替换、block、CVDisplayLink，以及 Metal、QuartzCore、CoreVideo 的 `extern` 块，都在 `#[cfg(all(target_os = "macos", feature = "bench-hooks"))]` 后面。
 - 只有 `lectern-bench` 打开它：`probe = ["dep:lectern-kernel", "dep:lectern-platform", "lectern-platform/bench-hooks"]`。`app` 的 `bench-probe` 打开 `lectern-bench/probe`，所以测量用的 `lectern` 和 `empty_window` 有钩子，发布构建没有。
 - 没有这个 feature 时（以及在其他平台上），`frame`、`metal` 的公开项照样编译，函数返回 `HookError::Unsupported`，不调用 Objective-C 运行时的任何函数。`workspace` 在所有构建里都有调用 `frame::record` 的代码（只有测量构建里 bench 的 `Driver` 会触发它），所以接口不能只在 feature 打开时存在。
-- 检查：`scripts/check_architecture.py` 增加一条规则，写法与 `lectern-logging` 的 `sink` 那条相同：只有 `lectern-bench` 打开 `lectern-platform` 的 `bench-hooks`，而且只经它自己的 `probe` feature；在依赖的 `features` 里打开、经别的 feature 打开、别的 crate 打开，都报错。[bench 设计「验收」](bench.md#验收)第 5 步的 `cargo tree -e features` 检查发布构建里没有 `"bench-hooks"`。
+- 检查：`scripts/check_architecture.py` 增加一条规则，写法与 `lectern-logging` 的 `sink` 那条相同：只有 `lectern-bench` 打开 `lectern-platform` 的 `bench-hooks`，而且只经它自己的 `probe` feature；在依赖的 `features` 里打开、经别的 feature 打开、别的 crate 打开，都报错。这条规则和已有的「bench 不进入发布构建」规则是 CI 每次都运行的检查（`just check`）。[bench 设计「验收」](bench.md#验收)第 5 步的 `cargo tree -e features` 是那一步的验收检查：发布构建的依赖树里没有 `"bench-hooks"`。
 - `just check`、`just test` 带 `--all-features`，所以 CI 里 macOS 上编译和运行钩子的代码，Linux 上运行 `Unsupported` 的分支。macOS 上不带 feature 的分支在实现 PR 里手工运行一次（「验收」）。
 
 ### 错误
@@ -1533,6 +1533,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 - ProMotion（可变刷新率）的显示器：`refresh` 是标称周期（120 Hz 下 8.33 ms）。系统降低刷新率时 tick 的间隔变长，按标称周期判定相邻 `started` 的间隔会偏严。CI 的虚拟显示器是固定的 60 Hz。
 - 一个进程里只记录一个窗口。多个窗口同时画时，配对规则按主线程上的顺序，结果不可信。`app` 只有一个窗口。
 - 记录期间窗口移到另一个显示器：tick 和 `refresh` 仍来自原来的显示器。基准运行时窗口不移动。
+- 窗口不是前台窗口时，GPUI 按约 30 fps 请求帧（`inactive_frame_interval`），相邻 `started` 的间隔约 33 ms，帧基准必然超标。帧基准的场景开始之前，`app` 的 `Driver` 先让窗口成为前台窗口。
 - 系统有多块 GPU（Intel Mac）时，`commit` 的类取自窗口的 `CAMetalLayer` 的设备，就是 GPUI 选的那块。bench 在 Intel Mac 上只报告，不判定。
 - `presentedTime` 为 0 的帧没有显示时刻（`presented` 为 None）。首帧回调跳过这些 drawable，等第一个真正显示的。
 - 只给首帧的显示时刻。`workspace` 的里程碑要的是之后某一帧的显示时刻，`on_first_presented` 给不出，要用 `record` 记下画出里程碑的那一帧（[workspace 设计「已知限制」](workspace.md#已知限制)）。
@@ -1547,7 +1548,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 - 没有 `bench-hooks`，或不在 macOS 上：`frame_is_unsupported_without_bench_hooks`（`on_first_presented`、`record` 都为 `Unsupported`，回调从不被调用）。
 - macOS 加 `bench-hooks`（`cargo test -p lectern-platform --features bench-hooks`）：
   - `frame_first_presented_installs_once`：第二次调用为 `AlreadyActive`。
-  - `frame_hooks_on_an_offscreen_layer`：测试线程上建一个不在窗口里的 `CAMetalLayer`（自己的设备和命令队列，64 × 64），经 crate 内部的入口开始记录（不要窗口句柄），按 GPUI 的两种顺序各画若干帧（`presentDrawable:` 加 `commit`；`commit`、`waitUntilScheduled` 加 `present`），每帧之前调用 `frame_started`。每帧都有 `started` 和 `completed`，`problems` 干净；去掉 `frame_started` 时为 `unmatched`。离屏的 layer 不显示，测试不检查 `presented`。实现 PR 先确认离屏的 layer 上连续取 drawable 不阻塞（`nextDrawable` 要等已提交的 drawable 回收）；会阻塞时，这项检查移到 example。
+  - `frame_hooks_on_an_offscreen_layer`：测试线程上建一个不在窗口里的 `CAMetalLayer`（自己的设备和命令队列，64 × 64），经 crate 内部的入口开始记录（不要窗口句柄），按 GPUI 的两种顺序各画若干帧（`presentDrawable:` 加 `commit`；`commit`、`waitUntilScheduled` 加 `present`），每帧之前调用 `frame_started`。每帧都有 `started` 和 `completed`，`problems` 干净；去掉 `frame_started` 时为 `unmatched`。离屏的 layer 不显示，测试不检查 `presented`。实现 PR 先确认离屏的 layer 上连续取 drawable 不阻塞（`nextDrawable` 要等已提交的 drawable 回收），并且 CI 的虚拟机（`VirtualMac2,1`）上有 Metal 设备、`GPUEndTime` 不为 0；任何一项不成立时，这项检查移到 example，不在 CI 上跳过了事。
   - 替换在进程内一直有效。nextest 让每个测试在自己的进程里运行；用 `cargo test` 在同一个进程里运行时，测试也不依赖彼此的顺序。
   - `frame_record_off_the_main_thread_is_an_error`：测试线程不是主线程，`record` 为 `NotMainThread`。
 - 真实窗口：`crates/platform/examples/frame_hooks.rs`（`Cargo.toml` 里 `required-features = ["bench-hooks"]`），手工运行 `cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks`（要窗口服务器会话；`just check` 的 clippy 带 `--all-features`，所以编译它，CI 不运行）。它在主线程上建 `NSApplication` 和一个以 `CAMetalLayer` 为 backing layer 的窗口，先调用 `on_first_presented`，再由 CVDisplayLink 驱动 120 帧，按 GPUI 的顺序画，每帧先调用 `frame_started`。检查：首帧回调到达，时刻晚于 `process::start_time(本进程)`；`problems` 干净；相邻 `started` 的间隔的中位数与 `refresh` 相差不超过 10%。它打印 `on_first_presented` 的耗时和每帧的开销。全部成立时退出码为 0。
