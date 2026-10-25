@@ -9,7 +9,7 @@
 - 做：
   - 检查器页 `InspectorTab("conversation")`：页内的分段控件切换 Messages 与 Terminal；页跟随当前审阅屏幕的会话（`Target::Review(ReviewTarget::Session(key))`）。
   - Messages 页：状态行（agent、连接状态、上下文窗口占用）、对话列表（prompt、agent 说明、连续的工具调用合成一行、发回的审阅意见、异常结束的说明）、更早的轮次按需加载、agent 的计划、权限请求卡片、回复框（⌘↩ 发送，进行中可以停止）。
-  - 权限请求：按选项的种类给出按钮，执行命令的请求显示命令文本，改文件的请求显示改动预览；回答经 `Conversations` 发出；当前审阅的会话有新请求而检查器没有显示 Conversation 时，切到这一页（「未决问题」3 的默认选项）。
+  - 权限请求：按选项的种类给出按钮，执行命令的请求显示命令文本，改文件的请求显示改动预览；回答经 `Conversations` 发出；当前审阅的会话有新请求而检查器没有显示 Conversation 时，切到这一页（「未决问题」3 的决定）。
   - Terminal 页：恢复按钮、拒绝原因、「可能还在别处运行」的提示；恢复后嵌入 `terminal_view` 的终端视图；结束终端；还有运行中的终端时，关闭项目或退出之前确认（离开守卫）。
   - 一个会话只由 Lectern 里的一处驱动（[ADR 0050](../adr/0050.md)）：Terminal 页在恢复这个会话时不经 ACP 发送，有 ACP 连接时不在 Terminal 页恢复。
   - 全部界面字符串的 Fluent 键、UI 探针的语义节点、具名 Action 与快捷键、向 `workspace` 登记的贡献。
@@ -431,7 +431,7 @@ pub(crate) enum Item {
 - 按钮由 `options` 生成，顺序与文字按 `OptionKind`（「界面」的 Fluent 键），不用 agent 给选项写的名字（ADR 0050）。没有给出的种类不画按钮。`AllowOnce` 是主按钮（`ButtonKind::Primary`），其余是次按钮；没有默认按钮，↵ 不触发任何选项，焦点不自动移到卡片上。
 - 内容：`Command` 用等宽字体显示命令文本（至多 12 行，超出的可以在卡片里滚动），`workdir` 与会话 cwd 不同时另起一行显示；`Edits` 每个文件一个标题（相对路径、`+added −removed`）和 `rows`，增删行按 diff 的配色与 `+` / `−` 符号；`None` 只显示 `title` 和 `conversation-permission-no-detail`。
 - 回答：点按钮发 `Answer { request, option }`。卡片立即从快照里消失（`command` 在返回前换出快照）。
-- 切到这一页：`conversation-live` 的 `WaitingChanged` 监听比较新旧集合；新进入等待的会话等于 `Shared::current` 的会话时，`Contributions::dispatch(SelectInspectorTab("conversation"))`（检查器隐藏时这条命令同时显示它）。不移动焦点。这是「未决问题」3 的默认选项。
+- 切到这一页：`conversation-live` 的 `WaitingChanged` 监听比较新旧集合；新进入等待的会话等于 `Shared::current` 的会话时，`Contributions::dispatch(SelectInspectorTab("conversation"))`（检查器隐藏时这条命令同时显示它）。不移动焦点。这是「未决问题」3 的决定。
 
 ### 一处驱动
 
@@ -446,7 +446,7 @@ pub(crate) enum Item {
 
 ### 离开守卫
 
-terminal 设计「未决问题」1 的默认选项 (a)：还有运行中的终端时，关闭项目或退出 Lectern 之前先确认。守卫用 `workspace` 已有的接口（[workspace 设计「服务接口」](workspace.md#服务接口lectern-services-的-workspace-模块)的 `register_leave_guard`、`LeaveGuard::ask`）：
+terminal 设计「未决问题」1 的决定 (a)：还有运行中的终端时，关闭项目或退出 Lectern 之前先确认。守卫用 `workspace` 已有的接口（[workspace 设计「服务接口」](workspace.md#服务接口lectern-services-的-workspace-模块)的 `register_leave_guard`、`LeaveGuard::ask`）：
 
 - `conversation-terminal` 插件在 `activate` 里登记（「插件」）。`ask(scope, done)` 在主线程上调用：用本插件的 `ServiceRef<dyn Terminals>` 取 `list()`，数 `state` 是 `Starting` 或 `Running` 的终端。`Project(key)` 只数 `project == key` 的；`App` 数全部；`View`、`Window`、`Worktree` 立即 `done(true)`，因为终端不随离开视图、关闭窗口、切换 worktree 结束（terminal 设计「数据流与线程」只在项目关闭和插件停用时关闭终端）。`get()` 为 None（提供者已停用）或数目为 0 时立即 `done(true)`。
 - 数目大于 0 时弹出系统的确认（`conversation-leave-*`）：「结束终端」→ `done(true)`，终端由 `terminal` 在项目关闭或停用时结束；「取消」→ `done(false)`。
@@ -834,13 +834,13 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 
 ## 未决问题
 
-需要产品决定：
+没有需要产品决定的问题。下面五条已于 2026-10-25 决定，人确认按默认选项：
 
-1. **第一次经 Conversation 发送时，是否先确认会启动 ACP agent。** 选项：(a) 直接发送，状态行显示「正在连接…」；(b) 每个会话第一次发送前弹出说明（会以你的身份运行哪个程序），确认后再发送。默认 (a)：发送本身是明确的操作，agent 使用工具前仍要经过权限请求。
-2. **是否显示「总是允许」「总是拒绝」。** 这两种选项让 agent 记住规则，以后不再询问（规则由 agent 自己保存）。选项：(a) agent 给出就显示；(b) 只显示「允许」「拒绝」，长期规则在 agent 自己的设置里配置。默认 (a)，与 agent 命令行里的选项一致。
-3. **当前审阅的会话有新的权限请求、检查器没有显示 Conversation 时怎么办。** 审阅时项目侧栏是隐藏的，交互规范里的侧栏等待标记看不到。选项：(a) 自动切到 Conversation 页（不移动焦点）；(b) 只在工具栏的检查器按钮上加圆点；(c) 只有侧栏标记。默认 (a)。窗口不在前台时的系统通知不在本 issue，另行决定。
-4. **会话可能还在别处运行时，是否允许在 Lectern 里继续。** 选项：(a) 允许，只显示提示；(b) 不允许，直到日志 2 分钟没有活动。默认 (a)：判断只靠日志活动，可能误判。
-5. **Terminal 页的宽度。** 检查器 300pt 宽，终端约 40 列，agent 的命令行界面会很挤。选项：(a) 保持 300pt；(b) 切到 Terminal 页时检查器变宽（如 480pt，需要 `workspace` 加一条命令）；(c) 终端改为浮动面板。默认 (a)，先按原型实现，实测后再定。
+1. **第一次经 Conversation 发送时，是否先确认会启动 ACP agent。** 已决定：选 (a)，直接发送，状态行显示「正在连接…」。发送本身是明确的操作，agent 使用工具前仍要经过权限请求。不选：(b) 每个会话第一次发送前弹出说明。
+2. **是否显示「总是允许」「总是拒绝」。** 已决定：选 (a)，agent 给出就显示，与 agent 命令行里的选项一致。这两种选项让 agent 记住规则，以后不再询问（规则由 agent 自己保存）。不选：(b) 只显示「允许」「拒绝」。
+3. **当前审阅的会话有新的权限请求、检查器没有显示 Conversation 时怎么办。** 已决定：选 (a)，自动切到 Conversation 页（不移动焦点）。审阅时项目侧栏是隐藏的，交互规范里的侧栏等待标记看不到。窗口不在前台时的系统通知不在本 issue，另行决定。不选：(b) 只在工具栏的检查器按钮上加圆点；(c) 只有侧栏标记。
+4. **会话可能还在别处运行时，是否允许在 Lectern 里继续。** 已决定：选 (a)，允许，只显示提示。判断只靠日志活动，可能误判。不选：(b) 不允许，直到日志 2 分钟没有活动。
+5. **Terminal 页的宽度。** 已决定：选 (a)，保持 300pt，先按原型实现，实测后再定。检查器 300pt 宽，终端约 40 列，agent 的命令行界面会很挤。不选：(b) 切到 Terminal 页时检查器变宽；(c) 终端改为浮动面板。
 
 技术问题都已在上文决定。
 
