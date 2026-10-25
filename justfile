@@ -59,6 +59,9 @@ bench *args:
         # The empty GPUI window of the baseline/* benchmarks.
         cargo build --release --locked -p lectern-bench --all-features --example empty_window
         # TEMPORARY CI diagnostics (bench step 4): can this runner show a frame?
+        echo "::group::diag present_check (no method replacement)"
+        cargo run --release --locked -p lectern-platform --example present_check || true
+        echo "::endgroup::"
         echo "::group::diag frame_hooks"
         cargo run --release --locked -p lectern-platform --features bench-hooks --example frame_hooks || true
         echo "::endgroup::"
