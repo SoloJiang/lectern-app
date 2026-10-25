@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::SystemTime;
 
+use lectern_platform::frame::PresentedAt;
+
 use lectern_kernel::{
     Activation, Active, Busy, Context, Kernel, KernelControl, Manifest, Plugin, PluginError,
     PluginHandle, PluginSet, PluginState, PluginStatus, PreparedSet, Quiescent, WorkspaceFacts,
@@ -137,7 +139,7 @@ impl Probe {
     /// Called before the first frame, before the window is created:
     /// registers the first-frame callback with
     /// `platform::frame::on_first_presented`. The callback only notes the
-    /// time and starts the probe thread. If the registration fails
+    /// time and its source (ADR 0052) and starts the probe thread. If the registration fails
     /// (`HookError`, such as after a GPUI upgrade changed the method's type
     /// encoding), connects to the socket at once, sends
     /// `Error { message: "hook <kind>" }` and exits with code 3: the runner
@@ -145,19 +147,19 @@ impl Probe {
     /// (ADR 0048).
     pub fn watch_first_frame(&self) {
         let shared = Arc::clone(&self.shared);
-        let registered = lectern_platform::frame::on_first_presented(move |presented| {
-            start_thread(shared, presented);
+        let registered = lectern_platform::frame::on_first_presented(move |at| {
+            start_thread(shared, at);
         });
         if let Err(error) = registered {
             fail(&self.shared.socket, &format!("hook {}", error.as_str()));
         }
     }
 
-    /// The first frame was shown at `presented`: starts the probe thread.
-    /// What the first-frame callback does; the tests call it directly.
+    /// The first frame's time is `at`: starts the probe thread. What the
+    /// first-frame callback does; the tests call it directly.
     #[cfg(test)]
-    pub(crate) fn first_frame(&self, presented: SystemTime) {
-        start_thread(Arc::clone(&self.shared), presented);
+    pub(crate) fn first_frame(&self, at: PresentedAt) {
+        start_thread(Arc::clone(&self.shared), at);
     }
 
     /// After the first frame, in place of `Kernel::start`: adds the
@@ -451,10 +453,10 @@ impl Active for ProbeActive {
 /// Starts the probe thread (once). Runs in the first-frame callback, on a
 /// Core Animation thread: it must not block or panic, so a thread that
 /// cannot start leaves the runner to its deadline.
-fn start_thread(shared: Arc<Shared>, presented: SystemTime) {
+fn start_thread(shared: Arc<Shared>, at: PresentedAt) {
     let _ = thread::Builder::new()
         .name("bench-probe".into())
-        .spawn(move || serve(&shared, presented));
+        .spawn(move || serve(&shared, at));
 }
 
 /// Registration failed: one `Error` on a new connection, then exit 3.
@@ -471,7 +473,7 @@ fn fail(socket: &std::path::Path, message: &str) -> ! {
 
 /// The probe thread: connects, sends `FirstFrame`, then sends every report
 /// and answers every request until the runner closes the connection.
-fn serve(shared: &Shared, presented: SystemTime) {
+fn serve(shared: &Shared, at: PresentedAt) {
     let Some(receiver) = shared
         .receiver
         .lock()
@@ -503,7 +505,8 @@ fn serve(shared: &Shared, presented: SystemTime) {
     };
     let first = Report::FirstFrame {
         pid: std::process::id(),
-        presented,
+        presented: at.time,
+        source: at.source,
     };
     if state.write(&first).is_err() || reader.is_err() {
         return;

@@ -17,6 +17,12 @@ fn reports() -> Vec<Report> {
         Report::FirstFrame {
             pid: 812,
             presented: at(1_729_000_000_123_456_789),
+            source: TimeSource::Presented,
+        },
+        Report::FirstFrame {
+            pid: 813,
+            presented: at(1_729_000_000_123_456_790),
+            source: TimeSource::Handler,
         },
         Report::Busy { epoch: 3 },
         Report::Quiescent { epoch: 4 },
@@ -164,11 +170,12 @@ fn wire_lines_are_a_name_and_escaped_pairs() {
     let line = Report::FirstFrame {
         pid: 812,
         presented: at(1_729_000_000_000_000_000),
+        source: TimeSource::Handler,
     }
     .encode();
     assert_eq!(
         line,
-        "first-frame pid=812 presented_unix_ns=1729000000000000000"
+        "first-frame pid=812 presented_unix_ns=1729000000000000000 source=handler"
     );
     let line = Report::Error {
         message: "a b%c\nd".into(),
@@ -182,8 +189,9 @@ fn wire_lines_are_a_name_and_escaped_pairs() {
 #[test]
 fn wire_missing_fields_are_errors() {
     for line in [
-        "first-frame pid=1",
-        "first-frame presented_unix_ns=5",
+        "first-frame pid=1 source=presented",
+        "first-frame presented_unix_ns=5 source=presented",
+        "first-frame pid=1 presented_unix_ns=5",
         "busy",
         "plugin id=a state=Active",
         "plugin-failed id=a",
@@ -209,6 +217,8 @@ fn wire_unknown_names_keys_and_values_are_errors() {
         "busy epoch",
         "busy epoch=x",
         "milestone kind=elsewhere presented_unix_ns=1",
+        "first-frame pid=1 presented_unix_ns=5 source=display",
+        "first-frame pid=1 presented_unix_ns=5 source=Presented",
         "child pid=1 kind=daemon id=a",
         "plugin id=a state=Active activation=sometimes",
         "frames scenario=s refresh_ns=1 without_tick=0 times=1,2,3",

@@ -12,7 +12,15 @@ use std::time::{Duration, Instant};
 use lectern_kernel::{Service, service};
 
 use super::*;
-use crate::wire::{ChildKind, Milestone};
+use crate::wire::{ChildKind, Milestone, TimeSource};
+
+/// A first-frame time from the presented handler, now.
+fn handler_now() -> PresentedAt {
+    PresentedAt {
+        time: SystemTime::now(),
+        source: TimeSource::Handler,
+    }
+}
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -297,7 +305,7 @@ struct Session {
 fn session(selection: Option<&str>, with_bad: bool) -> Session {
     let runner = Runner::new();
     let probe = Probe::with_vars(runner.socket.clone(), selection.map(OsStr::new));
-    probe.first_frame(SystemTime::now());
+    probe.first_frame(handler_now());
     let mut conn = runner.accept();
     assert!(matches!(conn.next(), Report::FirstFrame { .. }));
     let Profile { set, calls } = profile(with_bad);
@@ -589,7 +597,7 @@ fn probe_keeps_the_kernel_quiescent() {
 fn probe_queues_requests_until_drive() {
     let runner = Runner::new();
     let probe = Probe::with_vars(runner.socket.clone(), None);
-    probe.first_frame(SystemTime::now());
+    probe.first_frame(handler_now());
     let mut conn = runner.accept();
     assert!(matches!(conn.next(), Report::FirstFrame { .. }));
     for request in [
@@ -620,13 +628,17 @@ fn probe_sends_first_frame_then_earlier_reports_in_order() {
     let shown = SystemTime::UNIX_EPOCH + Duration::from_secs(5);
     probe.milestone(Milestone::ProjectHome, shown);
     let presented = SystemTime::UNIX_EPOCH + Duration::from_secs(4);
-    probe.first_frame(presented);
+    probe.first_frame(PresentedAt {
+        time: presented,
+        source: TimeSource::Presented,
+    });
     let mut conn = runner.accept();
     assert_eq!(
         conn.next(),
         Report::FirstFrame {
             pid: std::process::id(),
             presented,
+            source: TimeSource::Presented,
         }
     );
     assert_eq!(
@@ -656,7 +668,7 @@ fn probe_sends_first_frame_then_earlier_reports_in_order() {
 fn probe_reports_a_bad_request_line() {
     let runner = Runner::new();
     let probe = Probe::with_vars(runner.socket.clone(), None);
-    probe.first_frame(SystemTime::now());
+    probe.first_frame(handler_now());
     let mut conn = runner.accept();
     assert!(matches!(conn.next(), Report::FirstFrame { .. }));
     conn.raw("hello");

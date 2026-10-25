@@ -3,7 +3,7 @@
 //!
 //! One message per line over a Unix domain socket, UTF-8: the first word is
 //! the message name, the rest are `key=value` pairs, such as
-//! `first-frame pid=812 presented_unix_ns=1729000000000000000`. A value is
+//! `first-frame pid=812 presented_unix_ns=1729000000000000000 source=presented`. A value is
 //! percent-encoded: every byte outside printable ASCII (`!` to `~`) and `%`
 //! itself becomes `%XX`, so spaces, newlines and the bytes of a path that is
 //! not UTF-8 never break a line. Times are nanoseconds since the Unix epoch,
@@ -16,6 +16,8 @@ use std::fmt;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub use lectern_platform::frame::TimeSource;
 
 #[cfg(test)]
 mod tests;
@@ -30,10 +32,13 @@ pub const PLUGINS_VAR: &str = "LECTERN_BENCH_PLUGINS";
 /// Probe → runner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Report {
-    /// The first frame was shown at `presented` (its `presentedTime`).
+    /// The first frame's time: its `presentedTime`, or the moment its
+    /// presented handler ran where the machine gives none; `source` says
+    /// which (ADR 0052).
     FirstFrame {
         pid: u32,
         presented: SystemTime,
+        source: TimeSource,
     },
     /// The kernel became busy; `epoch` is the event's `seq`.
     Busy {
@@ -57,6 +62,9 @@ pub enum Report {
         id: String,
         message: String,
     },
+    /// The frame that drew `milestone` was shown at `presented`. It has no
+    /// time source yet: it gets one with its users, `frame::record` (B2) and
+    /// bench step 5 (ADR 0052).
     Milestone {
         milestone: Milestone,
         presented: SystemTime,
@@ -146,7 +154,9 @@ pub struct FrameStats {
     pub without_tick: u32,
 }
 
-/// `presented` is None when the frame was not shown (`presentedTime` 0).
+/// `presented` is None when the frame has no presented time. It has no time
+/// source yet: like `platform`'s `FrameTimes::presented`, it gets one with
+/// its users, `frame::record` (B2) and bench step 5 (ADR 0052).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameTimes {
     pub requested: SystemTime,
@@ -189,9 +199,14 @@ impl Report {
     pub fn encode(&self) -> String {
         let mut line = Line::new(self.name());
         match self {
-            Report::FirstFrame { pid, presented } => {
+            Report::FirstFrame {
+                pid,
+                presented,
+                source,
+            } => {
                 line.number("pid", *pid);
                 line.time("presented_unix_ns", *presented);
+                line.text("source", source.as_str());
             }
             Report::Busy { epoch } | Report::Quiescent { epoch } => line.number("epoch", *epoch),
             Report::Ready | Report::PluginsEnd => {}
@@ -250,6 +265,7 @@ impl Report {
             "first-frame" => Report::FirstFrame {
                 pid: fields.number("pid")?,
                 presented: fields.time("presented_unix_ns")?,
+                source: time_source(&fields.text("source")?)?,
             },
             "busy" => Report::Busy {
                 epoch: fields.number("epoch")?,
@@ -382,6 +398,14 @@ impl Request {
         fields.finish()?;
         Ok(request)
     }
+}
+
+/// `presented` or `handler` ([`TimeSource::as_str`]).
+fn time_source(name: &str) -> Result<TimeSource, WireError> {
+    [TimeSource::Presented, TimeSource::Handler]
+        .into_iter()
+        .find(|s| s.as_str() == name)
+        .ok_or_else(|| WireError::new(format!("unknown time source `{name}`")))
 }
 
 impl ActivationKind {

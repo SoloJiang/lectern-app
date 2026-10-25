@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::wire::{
     ChildKind, FrameStats, Milestone, OpenTarget, PLUGINS_VAR, PluginReport, Report, Request,
-    SOCKET_VAR,
+    SOCKET_VAR, TimeSource,
 };
 use crate::{BenchError, Samples};
 
@@ -200,15 +200,17 @@ impl<'a> Scheduler<'a> {
 
     /// Cold start (「进程级基准」): `warmups` launches not counted, then
     /// `samples` launches, one at a time. Each sample is the first frame's
-    /// `presented` minus the process's `start_time`; each launch is quit
-    /// and must exit. Stops at the first failure.
+    /// `presented` minus the process's `start_time`, with the source of
+    /// that time (ADR 0052); each launch is quit and must exit. Stops at the
+    /// first failure.
     pub fn cold_start(
         &self,
         program: &Path,
         warmups: usize,
         samples: usize,
-    ) -> Result<Samples, BenchError> {
+    ) -> Result<ColdStart, BenchError> {
         let mut times = Vec::with_capacity(samples);
+        let mut sources = Vec::with_capacity(samples);
         for launch in 0..warmups + samples {
             let session = self.session(program, None)?;
             let started = self.info.start_time(session.pid()).map_err(|e| {
@@ -217,12 +219,17 @@ impl<'a> Scheduler<'a> {
             let time = session.presented().duration_since(started).map_err(|_| {
                 BenchError::new(format!("进程 {} 的首帧早于它的创建时间", session.pid()))
             })?;
+            let source = session.source();
             session.quit()?;
             if launch >= warmups {
                 times.push(time);
+                sources.push(source);
             }
         }
-        Ok(Samples(times))
+        Ok(ColdStart {
+            samples: Samples(times),
+            sources,
+        })
     }
 
     /// `launches` runs of `run`, at most [`MEMORY_PARALLEL`] at once; the
@@ -389,11 +396,20 @@ enum Activity {
     Quiescent,
 }
 
+/// The cold-start samples and, in the same order, the source of each
+/// sample's first-frame time (ADR 0052).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColdStart {
+    pub samples: Samples,
+    pub sources: Vec<TimeSource>,
+}
+
 /// One launch, from its `FirstFrame` to its exit.
 pub struct Session<'a> {
     limits: Limits,
     pid: u32,
     presented: SystemTime,
+    source: TimeSource,
     /// When `FirstFrame` arrived: the first `Quiescent` is due
     /// [`Limits::first_quiescent`] after it.
     first_frame_at: Instant,
@@ -474,6 +490,7 @@ impl<'a> Session<'a> {
             limits,
             pid,
             presented: SystemTime::UNIX_EPOCH,
+            source: TimeSource::Presented,
             first_frame_at: Instant::now(),
             writer,
             events,
@@ -485,9 +502,13 @@ impl<'a> Session<'a> {
             _dir: dir,
         };
         let first = limits.first_frame;
-        let (from, presented) =
+        let (from, presented, source) =
             session.wait_for("FirstFrame", deadline, first, |report| match report {
-                Report::FirstFrame { pid, presented } => Some((*pid, *presented)),
+                Report::FirstFrame {
+                    pid,
+                    presented,
+                    source,
+                } => Some((*pid, *presented, *source)),
                 _ => None,
             })?;
         if from != pid {
@@ -496,6 +517,7 @@ impl<'a> Session<'a> {
             )));
         }
         session.presented = presented;
+        session.source = source;
         session.first_frame_at = Instant::now();
         Ok(session)
     }
@@ -504,9 +526,15 @@ impl<'a> Session<'a> {
         self.pid
     }
 
-    /// When the first frame was shown (its `presentedTime`).
+    /// The first frame's time: its `presentedTime`, or the moment its
+    /// presented handler ran ([`Session::source`]).
     pub fn presented(&self) -> SystemTime {
         self.presented
+    }
+
+    /// Where [`Session::presented`] came from (ADR 0052).
+    pub fn source(&self) -> TimeSource {
+        self.source
     }
 
     /// The process groups the probe reported so far.
@@ -523,7 +551,7 @@ impl<'a> Session<'a> {
     }
 
     /// For a program without a kernel (`baseline/empty_window_idle`):
-    /// returns [`Limits::settle`] after the first frame was shown.
+    /// returns [`Limits::settle`] after the first frame's time.
     pub fn settle_after_first_frame(&mut self) -> Result<(), BenchError> {
         let left = (self.presented + self.limits.settle)
             .duration_since(SystemTime::now())

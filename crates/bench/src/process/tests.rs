@@ -215,11 +215,20 @@ impl Probe {
         }
     }
 
-    /// Connects and sends `FirstFrame`.
+    /// Connects and sends `FirstFrame` with a `presentedTime`.
     fn first_frame(&mut self, presented: SystemTime) {
+        self.first_frame_from(presented, TimeSource::Presented);
+    }
+
+    /// Connects and sends `FirstFrame` with a time from `source`.
+    fn first_frame_from(&mut self, presented: SystemTime, source: TimeSource) {
         self.connect();
         let pid = self.pid;
-        self.send(&Report::FirstFrame { pid, presented });
+        self.send(&Report::FirstFrame {
+            pid,
+            presented,
+            source,
+        });
     }
 
     /// The next request; None once the runner closed the connection.
@@ -311,17 +320,28 @@ fn process_launches_with_a_fresh_socket_and_home() {
 
 #[test]
 fn process_cold_start_skips_two_warmups_and_takes_twenty() {
-    // Launch n shows its first frame 10 + n ms after the process started.
-    let fake = Fake::new(|p| {
-        p.first_frame(start() + ms(10 + p.index as u64));
+    // Launch n shows its first frame 10 + n ms after the process started;
+    // every third time comes from the presented handler.
+    let source = |index: usize| {
+        if index.is_multiple_of(3) {
+            TimeSource::Handler
+        } else {
+            TimeSource::Presented
+        }
+    };
+    let fake = Fake::new(move |p| {
+        p.first_frame_from(start() + ms(10 + p.index as u64), source(p.index));
         p.obey(None)
     });
-    let samples = fake
+    let cold = fake
         .scheduler(quick())
         .cold_start(&program(), 2, 20)
         .unwrap();
     let expected: Vec<Duration> = (12..32).map(ms).collect();
-    assert_eq!(samples.0, expected);
+    assert_eq!(cold.samples.0, expected);
+    // Each sample keeps its own launch's source.
+    let sources: Vec<TimeSource> = (2..22).map(source).collect();
+    assert_eq!(cold.sources, sources);
     assert_eq!(fake.launches().len(), 22);
     // Timing launches run one at a time; every one exited on `Quit`.
     assert_eq!(fake.max_live(), 1);
@@ -414,6 +434,7 @@ fn process_first_frame_from_another_pid_is_an_error() {
         p.send(&Report::FirstFrame {
             pid: 7,
             presented: start(),
+            source: TimeSource::Presented,
         });
         p.ignore()
     });
@@ -427,7 +448,7 @@ fn process_first_frame_from_another_pid_is_an_error() {
 #[test]
 fn process_baseline_waits_after_the_first_frame() {
     let fake = Fake::new(|p| {
-        p.first_frame(SystemTime::now());
+        p.first_frame_from(SystemTime::now(), TimeSource::Handler);
         p.obey(None)
     });
     let limits = Limits {
@@ -436,6 +457,7 @@ fn process_baseline_waits_after_the_first_frame() {
     };
     let scheduler = fake.scheduler(limits);
     let mut session = scheduler.session(&program(), None).unwrap();
+    assert_eq!(session.source(), TimeSource::Handler);
     session.settle_after_first_frame().unwrap();
     let waited = SystemTime::now()
         .duration_since(session.presented())

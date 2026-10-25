@@ -11,8 +11,10 @@ use std::path::PathBuf;
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, SystemTime};
 
-use lectern_bench::process::{Exit, Launch, Launched, Launcher, ProcessInfo, Scheduler};
-use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Samples, Target, Value};
+use lectern_bench::budgets::fmt_bytes;
+use lectern_bench::process::{ColdStart, Exit, Launch, Launched, Launcher, ProcessInfo, Scheduler};
+use lectern_bench::wire::TimeSource;
+use lectern_bench::{Bench, BenchError, Ctx, Measured, Mode, Target, Value};
 
 const BENCHES: &[Bench] = &[
     Bench {
@@ -43,52 +45,82 @@ fn baseline(ctx: &Ctx) -> Result<PathBuf, BenchError> {
 }
 
 /// `baseline/empty_window_cold_start`: 2 warm-up launches, then 20, each
-/// from the process's creation to the first frame's `presentedTime`. The
-/// note gives what ADR 0017's rule for `app/cold_start` would see.
+/// from the process's creation to the first frame's time: its
+/// `presentedTime`, or the moment its presented handler ran where the
+/// machine gives none (ADR 0052). The note gives what ADR 0017's rule for
+/// `app/cold_start` would see, the sources and every sample.
 fn baseline_cold_start(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let program = baseline(ctx)?;
     let scheduler = Scheduler::new(&SystemLauncher, &PlatformInfo);
-    let samples = scheduler.cold_start(&program, ctx.scale(2, 0), ctx.scale(20, 1))?;
-    let note = cold_start_note(&samples);
+    let cold = scheduler.cold_start(&program, ctx.scale(2, 0), ctx.scale(20, 1))?;
+    let note = cold_start_note(&cold);
     Ok(vec![
-        Measured::new("baseline/empty_window_cold_start", Value::Time(samples))
-            .with_note(Some(note)),
+        Measured::new(
+            "baseline/empty_window_cold_start",
+            Value::Time(cold.samples),
+        )
+        .with_note(Some(note)),
     ])
 }
 
 /// How many samples are over 20 ms, and the largest (ADR 0017: at most one
-/// of 20 over 20 ms, none over 30 ms).
-fn cold_start_note(samples: &Samples) -> String {
+/// of 20 over 20 ms, none over 30 ms); how many first-frame times came from
+/// each source; every sample in launch order, in ms.
+fn cold_start_note(cold: &ColdStart) -> String {
+    let samples = &cold.samples.0;
     let over = samples
-        .0
         .iter()
         .filter(|&&t| t > Duration::from_millis(20))
         .count();
-    let max = samples.0.iter().max().copied().unwrap_or_default();
+    let max = samples.iter().max().copied().unwrap_or_default();
+    let each: Vec<String> = samples
+        .iter()
+        .map(|t| format!("{:.2}", t.as_secs_f64() * 1e3))
+        .collect();
     format!(
-        "{over} of {} over 20 ms, the longest {:.2} ms",
-        samples.0.len(),
-        max.as_secs_f64() * 1e3
+        "{over} of {} over 20 ms, the longest {:.2} ms; {}; samples ms {}",
+        samples.len(),
+        max.as_secs_f64() * 1e3,
+        source_counts(&cold.sources),
+        each.join(", ")
+    )
+}
+
+/// "source presented 18, handler 2" (ADR 0052).
+fn source_counts(sources: &[TimeSource]) -> String {
+    let count = |source| sources.iter().filter(|&&s| s == source).count();
+    format!(
+        "source presented {}, handler {}",
+        count(TimeSource::Presented),
+        count(TimeSource::Handler)
     )
 }
 
 /// `baseline/empty_window_idle`: 3 launches (at most 3 at once), each the
-/// main process's `phys_footprint` 5 s after the first frame was shown.
-/// There is no kernel, so no quiescence to wait for (「进程级基准」).
+/// main process's `phys_footprint` 5 s after the first frame's time.
+/// There is no kernel, so no quiescence to wait for (「进程级基准」). The
+/// note gives the first frames' sources (ADR 0052) and every value.
 fn baseline_idle(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let program = baseline(ctx)?;
     let scheduler = Scheduler::new(&SystemLauncher, &PlatformInfo);
-    let bytes = scheduler.memory(ctx.scale(3, 1), |scheduler| {
+    let runs = scheduler.memory(ctx.scale(3, 1), |scheduler| {
         let mut session = scheduler.session(&program, None)?;
         session.settle_after_first_frame()?;
         let bytes = session.footprint()?;
+        let source = session.source();
         session.quit()?;
-        Ok(bytes)
+        Ok((bytes, source))
     })?;
-    Ok(vec![Measured::new(
-        "baseline/empty_window_idle",
-        Value::Bytes(bytes),
-    )])
+    let (bytes, sources): (Vec<u64>, Vec<TimeSource>) = runs.into_iter().unzip();
+    let each: Vec<String> = bytes.iter().map(|&b| fmt_bytes(b)).collect();
+    let note = format!(
+        "first frame {}; values {}",
+        source_counts(&sources),
+        each.join(", ")
+    );
+    Ok(vec![
+        Measured::new("baseline/empty_window_idle", Value::Bytes(bytes)).with_note(Some(note)),
+    ])
 }
 
 /// `std::process`: each program the leader of a new process group, with
