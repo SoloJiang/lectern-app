@@ -40,6 +40,7 @@
 6. 只有 `app` 和 tool 层启用 `lectern-logging` 的 `sink` feature：依赖声明里的 feature 和 crate 自己的 feature 表（`lectern-logging/sink`、`lectern-logging?/sink`，含改名的依赖）都算（[logging 设计](logging.md)）。
 7. `Value::panic_message` 只出现在 `crates/kernel`、`crates/executor`、`crates/logging` 的源码里：其他 crate 目录下任何 `.rs` 文件（去掉注释和字符串后）出现 `panic_message` 这个名字即报错（[logging 设计「隐私」](logging.md#隐私)）。
 8. 工作区的 `[workspace.lints.clippy]` 把 `print_stderr`、`print_stdout` 设为 `warn`（或 `deny`、`forbid`）；tool 层之外的 crate 目录下，除 crate 根目录的 `build.rs` 外，任何 `.rs` 文件（去掉注释和字符串后）出现这两个名字即报错，即不能用 `allow`、`expect` 关掉它们（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 10 项）。
+9. 只有 `lectern-bench` 启用 `lectern-platform` 的 `bench-hooks` feature，而且只经它自己的 `probe` feature（`lectern-platform/bench-hooks`、`lectern-platform?/bench-hooks`，含改名的依赖）：在依赖声明的 feature 里打开、经别的 feature 打开、别的 crate 打开都报错；`lectern-platform` 自己的 `default` 里有它也报错（[platform 设计「测量构建的方法替换」](platform.md#测量构建的方法替换)）。
 
 每条报错末尾的方括号写明规则出处（AGENTS.md 的规则编号或设计文档），agent 可以直接找到规则原文。
 
