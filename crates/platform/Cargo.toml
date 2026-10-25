@@ -10,6 +10,14 @@ publish.workspace = true
 [package.metadata.lectern]
 layer = "infra"
 
+[features]
+# The measurement build's method replacements (`frame`, ADR 0048,
+# docs/design/platform.md「测量构建的方法替换」). Not in `default`; only
+# `lectern-bench`'s `probe` feature turns it on (scripts/check_architecture.py).
+# Without it, and off macOS, `frame` compiles and returns
+# `HookError::Unsupported`.
+bench-hooks = []
+
 [dependencies]
 rustix.workspace = true
 # Implements its `Backend` (docs/design/fs_watch.md「platform 后端」). Also on
@@ -54,6 +62,13 @@ lectern-kernel = { path = "../kernel" }
 # testing::capture for kqueue_stop_is_logged_without_paths, the window
 # tests' log records and the appearance watch's panic record.
 lectern-logging = { path = "../logging", features = ["test-support"] }
+
+# The real-window check of `frame::on_first_presented`; run by hand
+# (docs/design/platform.md「帧的时刻」「测试」), compiled by clippy
+# `--all-features`.
+[[example]]
+name = "frame_hooks"
+required-features = ["bench-hooks"]
 
 [lints]
 workspace = true

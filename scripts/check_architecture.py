@@ -31,6 +31,10 @@ Rules checked:
      only tool crates and build scripts mention them in code (an `allow`
      or `expect`); every other crate logs through lectern-logging
      (docs/design/logging.md「对其他 crate 的要求」).
+ 10. Only lectern-bench enables lectern-platform's `bench-hooks` feature, and
+     only through its own `probe` feature (not in a dependency's features,
+     not through another feature); lectern-platform does not have it in
+     `default` (docs/design/platform.md「测量构建的方法替换」).
 
 Each error names the rule's source (AGENTS.md or a design doc) in brackets.
 
@@ -296,6 +300,51 @@ def sink_feature_errors(packages, layers):
         for pkg in packages
         if pkg["name"] != LOGGING_CRATE and layers.get(pkg["name"]) not in ("app", "tool") and enables_sink(pkg)
     ]
+
+
+BENCH_CRATE = "lectern-bench"
+HOOKS_FEATURE = "bench-hooks"
+PROBE_FEATURE = "probe"
+
+
+def hooks_enablers(pkg):
+    """Where a package (an entry of `cargo metadata`'s packages) turns on
+    lectern-platform's `bench-hooks` feature, as a sorted list: "dependency"
+    when it is in the features of its dependency (any kind), and the name of
+    each of its own features that lists `lectern-platform/bench-hooks`,
+    `lectern-platform?/bench-hooks`, or the same under a renamed
+    dependency."""
+    deps = [d for d in pkg.get("dependencies", []) if d["name"] == PLATFORM_CRATE]
+    places = set()
+    if any(HOOKS_FEATURE in d.get("features", []) for d in deps):
+        places.add("dependency")
+    keys = {d.get("rename") or d["name"] for d in deps}
+    wanted = {f"{k}/{HOOKS_FEATURE}" for k in keys} | {f"{k}?/{HOOKS_FEATURE}" for k in keys}
+    for feature, values in pkg.get("features", {}).items():
+        if any(v in wanted for v in values):
+            places.add(f"feature `{feature}`")
+    return sorted(places)
+
+
+def hooks_feature_errors(packages):
+    """Rule 10. `packages` are workspace members' metadata entries. Only
+    lectern-bench enables lectern-platform's `bench-hooks`, and only through
+    its own `probe` feature; lectern-platform itself never has it in
+    `default`."""
+    source = "[docs/design/platform.md「测量构建的方法替换」]"
+    errors = []
+    for pkg in packages:
+        name = pkg["name"]
+        if name == PLATFORM_CRATE:
+            if HOOKS_FEATURE in pkg.get("features", {}).get("default", []):
+                errors.append(f"{name}: `bench-hooks` is in its `default` features; it must stay off {source}")
+            continue
+        for place in hooks_enablers(pkg):
+            if name == BENCH_CRATE and place == f"feature `{PROBE_FEATURE}`":
+                continue
+            rule = "it may do so only through its `probe` feature" if name == BENCH_CRATE else "only lectern-bench's `probe` feature may"
+            errors.append(f"{name}: {place} enables lectern-platform's `bench-hooks` feature; {rule} {source}")
+    return errors
 
 
 def uses_panic_message(src):
@@ -649,6 +698,7 @@ def main():
 
     member_pkgs = [packages[pid] for pid in members]
     errors.extend(sink_feature_errors(member_pkgs, {packages[pid]["name"]: layer[pid] for pid in members}))
+    errors.extend(hooks_feature_errors(member_pkgs))
     member_dirs = {p["name"]: os.path.dirname(p["manifest_path"]) for p in member_pkgs}
     errors.extend(panic_message_errors(member_dirs))
     errors.extend(workspace_print_lint_errors(os.path.join(meta["workspace_root"], "Cargo.toml")))

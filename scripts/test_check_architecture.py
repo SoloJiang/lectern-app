@@ -9,6 +9,7 @@ import check_architecture
 from check_architecture import has_impl_plugin, implements_plugin, apple_only_cfg, strip_cfg_test, strip_comments_and_strings, test_only_cfg, inherits_workspace_lints, is_macos_binding_name, plugin_errors
 from check_architecture import enables_sink, panic_message_errors, sink_feature_errors, uses_panic_message
 from check_architecture import print_lint_allow_errors, workspace_print_lint_errors
+from check_architecture import hooks_enablers, hooks_feature_errors
 
 FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
 _saved = {}
@@ -267,6 +268,76 @@ class LoggingSinkRule(unittest.TestCase):
                 "lectern-review-view (view): enables lectern-logging's `sink` feature; only the app and tool crates may [docs/design/logging.md]",
             ],
         )
+
+
+class BenchHooksRule(unittest.TestCase):
+    SOURCE = "[docs/design/platform.md「测量构建的方法替换」]"
+    OTHER = "only lectern-bench's `probe` feature may"
+    BENCH = "it may do so only through its `probe` feature"
+
+    def test_hooks_enablers(self):
+        platform = "lectern-platform"
+        self.assertEqual(hooks_enablers(package("a", [(platform, ["bench-hooks"], None)])), ["dependency"])
+        self.assertEqual(hooks_enablers(package("a", [(platform, [], None)], {"x": [f"{platform}/bench-hooks"]})), ["feature `x`"])
+        self.assertEqual(hooks_enablers(package("a", [(platform, [], None)], {"x": [f"{platform}?/bench-hooks"]})), ["feature `x`"])
+        self.assertEqual(hooks_enablers(package("a", [(platform, [], "plat")], {"x": ["plat/bench-hooks"]})), ["feature `x`"])
+        self.assertEqual(
+            hooks_enablers(package("a", [(platform, ["bench-hooks"], None)], {"y": [f"{platform}/bench-hooks"], "x": [f"{platform}/bench-hooks"]})),
+            ["dependency", "feature `x`", "feature `y`"],
+        )
+        self.assertEqual(hooks_enablers(package("a", [(platform, ["other"], None)], {"x": [f"{platform}/other"]})), [])
+        self.assertEqual(hooks_enablers(package("a", [("other", ["bench-hooks"], None)], {"x": ["other/bench-hooks"]})), [])
+        # A name in the package's own feature list does not count, and a
+        # package without the dependency never enables the feature.
+        self.assertEqual(hooks_enablers(package("a", [], {"x": ["lectern-platform/bench-hooks"]})), [])
+        self.assertEqual(hooks_enablers(package("a")), [])
+
+    def test_probe_of_bench_is_the_one_way(self):
+        packages = [
+            package(
+                "lectern-bench",
+                [("lectern-platform", [], None), ("lectern-kernel", [], None)],
+                {"probe": ["dep:lectern-kernel", "dep:lectern-platform", "lectern-platform/bench-hooks"], "other": []},
+            ),
+            package("lectern-platform", features={"bench-hooks": [], "default": []}),
+            package("lectern-app", [("lectern-platform", ["test-support"], None)], {"bench-probe": ["lectern-bench/probe"]}),
+        ]
+        self.assertEqual(hooks_feature_errors(packages), [])
+        # The optional form of the same.
+        packages[0]["features"]["probe"] = ["lectern-platform?/bench-hooks"]
+        self.assertEqual(hooks_feature_errors(packages), [])
+
+    def test_every_other_way_is_an_error(self):
+        platform = "lectern-platform"
+        packages = [
+            # Another crate: in the dependency's features, and through a feature.
+            package("lectern-app", [(platform, ["bench-hooks"], None)]),
+            package("lectern-review-view", [(platform, [], None)], {"disk": [f"{platform}/bench-hooks"]}),
+            # lectern-bench: in the dependency's features, and through a
+            # feature that is not `probe` (alone, and next to `probe`).
+            package("lectern-bench", [(platform, ["bench-hooks"], None)], {"probe": [f"{platform}/bench-hooks"], "all": [f"{platform}?/bench-hooks"]}),
+            # lectern-platform: in `default`.
+            package("lectern-platform", features={"bench-hooks": [], "default": ["bench-hooks"]}),
+        ]
+        self.assertEqual(
+            hooks_feature_errors(packages),
+            [
+                f"lectern-app: dependency enables lectern-platform's `bench-hooks` feature; {self.OTHER} {self.SOURCE}",
+                f"lectern-review-view: feature `disk` enables lectern-platform's `bench-hooks` feature; {self.OTHER} {self.SOURCE}",
+                f"lectern-bench: dependency enables lectern-platform's `bench-hooks` feature; {self.BENCH} {self.SOURCE}",
+                f"lectern-bench: feature `all` enables lectern-platform's `bench-hooks` feature; {self.BENCH} {self.SOURCE}",
+                f"lectern-platform: `bench-hooks` is in its `default` features; it must stay off {self.SOURCE}",
+            ],
+        )
+
+    def test_a_workspace_without_the_probe_yet_passes(self):
+        # Before bench's step 4, lectern-bench has no `probe` feature and
+        # lectern-platform's `bench-hooks` is enabled by nobody.
+        packages = [
+            package("lectern-bench", [("lectern-platform", [], None)], {}),
+            package("lectern-platform", features={"bench-hooks": []}),
+        ]
+        self.assertEqual(hooks_feature_errors(packages), [])
 
 
 class PanicMessageRule(unittest.TestCase):
