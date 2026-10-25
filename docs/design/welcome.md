@@ -1,6 +1,6 @@
 # welcome 设计
 
-状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配）在 `app` 的 PR。
+状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。
 
 对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
 
@@ -419,7 +419,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
   ```
 
   在 [platform 设计](platform.md)「系统首选语言」一节下补上这三个函数。与 [i18n 设计「数据流与线程」](i18n.md#数据流与线程)的差异：那里写 `language_override() -> Option<Locale>`；`platform` 在基础设施层、不依赖 `i18n`，所以返回 BCP 47 标签，调用方用 `Locale::negotiate([tag])` 转换。前置条件 B 的 PR 同时把 i18n 设计里的那一行改成了标签。
-- **C. `app`**：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
+- **C. `app`**（已实现，见 [app 设计「welcome 的装配」](app.md#welcome-的装配)）：`Profile::Desktop` 的表加两行：`lectern_welcome::plugins(WelcomeDeps { executor, data_dir: app_data.join("welcome") })` 的两个插件，在 `workspace` 之后逐个放进 `PluginSet::with`。`Resources::app_data` 已是非可选的 `PathBuf`（[app 设计「装配」](app.md#装配)：`app_data()` 为 None 时 `app` 不装配任何插件），本 crate 不处理没有目录的情况。
 - **D. `ui`**：本 crate 只用 `ui` 设计已列出的控件和 `ui::contrib` 的载荷类型，没有新增要求。`Segmented` 的探针角色按 `ui` 的实现（本文按 `TabBar` / `Tab` 写，以 `ui` 为准）。
 
 ## 未决问题
@@ -499,7 +499,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（welcome）─▶ Ok：安
 
 ### 第 1 步
 
-- **屏幕的载荷是占位类型。** `ui::contrib::Screen` 里是 GPUI 的视图工厂，第 1 步没有 GPUI。`welcome` 在 `activate` 里照常经 `dyn Contributions` 登记 `Screen(WELCOME)`（`ScreenLayout` 按「界面」），载荷是本 crate 的空类型 `ScreenPlaceholder`，第 2 步换成 `ui::contrib::Screen`；在那之前 `app` 不装配这两个插件（前置条件 C 在第 2 步）。`KeyBindings` 的载荷是 GPUI 的 `Action`，第 1 步不登记。
+- **屏幕的载荷是占位类型。** `ui::contrib::Screen` 里是 GPUI 的视图工厂，第 1 步没有 GPUI。`welcome` 在 `activate` 里照常经 `dyn Contributions` 登记 `Screen(WELCOME)`（`ScreenLayout` 按「界面」），载荷是本 crate 的空类型 `ScreenPlaceholder`，第 2 步换成 `ui::contrib::Screen`；在那之前 `app` 不装配这两个插件；第 2 步已换成 `ui::contrib::Screen`，`app` 随后装配（前置条件 C）。`KeyBindings` 的载荷是 GPUI 的 `Action`，第 1 步不登记。
 - **`welcome-discovery` 在 `started` 里置 `Pending`，不在 `activate` 里。** `activate` 不改模型，激活失败时模型不会留下一个永远不结束的 `Pending`；`activate` 到 `started` 之间的几毫秒仍是 `Unavailable`。
 - **合并的计数。** 「排队中 + 脏标记」每一轮在取输入时清掉脏标记，所以任务开始之前到达的三次事件只跑一轮，运行中到达的再多跑一轮（设计原来写「三次事件只跑两次」）。写文件同理。两者的保证不变：任一时刻最多一个任务，取输入之后到达的变化一定有下一轮。「数据流与线程」第 3 步和「测试」已改。
 - **`discover::build` 的参数。** 取 `&[Arc<SessionList>]`（每个来源一个）、`&[ProjectKey]`（已打开）、`&[ProjectKey]`（最近项目的 key）和 `Timestamp`，返回 `Built`（发现列表、按 `key` 的计数、会话总数、跳过数）；设计写的是 `(sessions, open_projects, recent, now)`。多个来源的会话先按 `last_activity` 从新到旧稳定排序再分组。
