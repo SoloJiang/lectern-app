@@ -21,14 +21,16 @@ use lectern_ui::contrib::ToolbarItems;
 use lectern_ui::motion::{self, Transition};
 use lectern_ui::semantic::{Role, Semantic, semantic};
 use lectern_ui::{
-    Button, ButtonKind, ButtonSize, LoadingPhase, Progress, ProgressShape, Skeleton, Text,
-    TextRole, TextRoleExt, colors, loading_phase, mono_metrics,
+    Button, ButtonKind, ButtonSize, LoadingPhase, Progress, ProgressShape, Segmented, Skeleton,
+    Text, TextRole, TextRoleExt, colors, loading_phase, mono_metrics,
 };
 
 use crate::actions::{
-    self, Back, Escape, LooksGood, MarkSeenAndNext, NextHunk, PreviousHunk, Refresh,
-    ToggleEarlierTurns, ToggleNoise, ToggleSeen,
+    self, Analyze, Back, CancelAnalyze, Edit, Escape, ExpandFold, LooksGood, MarkSeenAndNext,
+    NextHunk, OpenContext, OpenFile, PreviousHunk, Refresh, ToggleDiffMode, ToggleEarlierTurns,
+    ToggleNoise, ToggleSeen,
 };
+use crate::items::DiffMode;
 use crate::model::{self, Direction, ReviewModel};
 use crate::nodes;
 use crate::plugin::Shared;
@@ -127,6 +129,7 @@ impl Render for ReviewScreen {
                 model.list.remeasure();
             }
             model.tick_glide(window, Instant::now());
+            model.mode_slider.tick(Instant::now(), window);
             model.sync_layout(cx);
         });
         let (state, shows_rows, fraction, ready, degraded_folder) = {
@@ -161,14 +164,14 @@ impl Render for ReviewScreen {
             LoadState::Ready => {
                 let list_state = model.read(cx).list.clone();
                 let items = model.clone();
-                let (count, visible) = {
+                let (count, visible, mode) = {
                     let model = model.read(cx);
-                    (model.items.len(), model.visible.clone())
+                    (model.items.len(), model.visible.clone(), model.mode)
                 };
                 let spec = Semantic::new(nodes::plain("narrative"), Role::List)
                     .attr("items", count.to_string())
                     .attr("visible", format!("{}..{}", visible.start, visible.end))
-                    .attr("mode", "unified");
+                    .attr("mode", mode.name());
                 semantic(
                     spec,
                     list(list_state, move |ix, window, cx| {
@@ -217,6 +220,33 @@ impl Render for ReviewScreen {
             }))
             .on_action(cx.listener(|this, _: &Refresh, _, cx| {
                 this.model.update(cx, |model, _| model.refresh());
+            }))
+            .on_action(cx.listener(|this, _: &OpenFile, _, cx| {
+                this.model.update(cx, |model, _| model.open_file());
+            }))
+            .on_action(cx.listener(|this, _: &Edit, _, cx| {
+                this.model.update(cx, |model, _| model.open_file());
+            }))
+            .on_action(cx.listener(|this, _: &OpenContext, _, cx| {
+                this.model.update(cx, |model, _| model.open_context());
+            }))
+            .on_action(cx.listener(|this, _: &ToggleDiffMode, _, cx| {
+                this.model.update(cx, |model, cx| model.toggle_mode(cx));
+            }))
+            .on_action(cx.listener(|this, _: &ExpandFold, _, cx| {
+                // Not on a fold, or above one: the key goes on.
+                if !this
+                    .model
+                    .update(cx, |model, cx| model.expand_selected_fold(cx))
+                {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Analyze, _, cx| {
+                this.model.update(cx, |model, _| model.analyze());
+            }))
+            .on_action(cx.listener(|this, _: &CancelAnalyze, _, cx| {
+                this.model.update(cx, |model, _| model.cancel_analyze());
             }))
             .on_action(cx.listener(|this, _: &Back, _, cx| {
                 this.model.read(cx).back();
@@ -460,6 +490,35 @@ pub(crate) fn toolbar(cx: &mut App) -> ToolbarItems {
             model.toolbar_subtitle(&strings),
         )
     };
+    let (mode, slider) = {
+        let model = model.read(cx);
+        (model.mode, model.mode_slider.value())
+    };
+    let tab = nodes::plain("mode").child("tab");
+    let switch_weak = model.downgrade();
+    let modes = Segmented::new(
+        nodes::plain("mode"),
+        vec![
+            (
+                tab.item(DiffMode::Unified.name()),
+                Text::key(&strings, keys::review::MODE_UNIFIED),
+            ),
+            (
+                tab.item(DiffMode::SideBySide.name()),
+                Text::key(&strings, keys::review::MODE_SIDE_BY_SIDE),
+            ),
+        ],
+        usize::from(mode == DiffMode::SideBySide),
+    )
+    .slider(slider)
+    .on_select(move |index, _, cx| {
+        let mode = if index == 1 {
+            DiffMode::SideBySide
+        } else {
+            DiffMode::Unified
+        };
+        let _ = switch_weak.update(cx, |model, cx| model.set_mode(mode, cx));
+    });
     let weak = model.downgrade();
     let refresh = Button::new(
         nodes::plain("toolbar").child("refresh"),
@@ -473,7 +532,7 @@ pub(crate) fn toolbar(cx: &mut App) -> ToolbarItems {
     ToolbarItems {
         title,
         subtitle,
-        controls: vec![refresh.into_any_element()],
+        controls: vec![modes.into_any_element(), refresh.into_any_element()],
     }
 }
 

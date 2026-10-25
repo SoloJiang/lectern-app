@@ -11,7 +11,7 @@ use lectern_services::review::{
 };
 
 use crate::brief::file_text;
-use crate::items::{self, BuildOptions, DEFAULT_CONTEXT, Item, ItemKey, Notice};
+use crate::items::{self, BuildOptions, DEFAULT_CONTEXT, DiffMode, Item, ItemKey, Notice};
 use crate::testing::{file_key, snapshot_fixture};
 
 pub fn rows_map(rows: Vec<(RowsKey, FileRows)>) -> HashMap<RowsKey, Arc<FileRows>> {
@@ -30,6 +30,7 @@ pub fn build(
         snapshot,
         rows,
         &BuildOptions {
+            mode: DiffMode::Unified,
             earlier_collapsed: collapsed,
             noise_expanded: noise,
             context: &context,
@@ -166,6 +167,7 @@ fn items_unprepared_rows_are_placeholders_with_an_estimate() {
         &snapshot,
         &HashMap::new(),
         &BuildOptions {
+            mode: DiffMode::Unified,
             earlier_collapsed: true,
             noise_expanded: false,
             context: &context,
@@ -189,6 +191,7 @@ fn items_context_changes_the_rows_key() {
         &snapshot,
         &HashMap::new(),
         &BuildOptions {
+            mode: DiffMode::Unified,
             earlier_collapsed: true,
             noise_expanded: false,
             context: &context,
