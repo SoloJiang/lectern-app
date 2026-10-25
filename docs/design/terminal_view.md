@@ -120,7 +120,7 @@ pub struct TerminalPane {
     state: Option<RunState>,            // 来自 `info(id)`，语义节点用
     focus: FocusHandle,
     sent_size: Option<GridSize>,        // 上一次发出的 `Resize`
-    sent_theme: Option<Theme>,          // 上一次发出的 `SetTheme`（或 `open` 时给的）
+    sent_theme: Option<Theme>,          // 上一次发出的 `SetTheme`；`new` 时取当前外观的 `theme`，与宿主 `open` 时给的相同
     rows: RowCache,
     marked: Option<Marked>,             // 输入法正在组字的文字
     scroll_rest: f32,                   // 滚轮不足一行的余量（行）
