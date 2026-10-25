@@ -24,7 +24,7 @@ lectern-app/
 layer = "domain"
 ```
 
-实现 `kernel::Plugin` 的 crate 另加 `plugin = true`。插件 crate 只依赖 kernel 层和非插件的库 crate，插件 crate 之间不相互依赖，只有 `app` 和 tool 层依赖插件 crate（[ADR 0025](../adr/0025.md)）。
+实现 `kernel::Plugin` 的 crate 另加 `plugin = true`；tool 层 crate 除外，它里面的 `Plugin` 实现只用于测量和测试，不提供也不要求服务（[ADR 0051](../adr/0051.md)）。插件 crate 只依赖 kernel 层和非插件的库 crate，插件 crate 之间不相互依赖，只有 `app` 和 tool 层依赖插件 crate（[ADR 0025](../adr/0025.md)）。
 
 ## crate 与层
 

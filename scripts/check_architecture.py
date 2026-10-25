@@ -272,6 +272,15 @@ def implements_plugin(src_dir):
     return False
 
 
+def missing_plugin_mark(name, layer, src_dir):
+    """Whether a crate without `plugin = true` must have it: it implements
+    `kernel::Plugin` outside its tests (ADR 0025). `lectern-kernel` (its own
+    test doubles) and tool-layer crates are exempt: a tool crate's plugin is
+    for measurement or tests only, provides and requires no service, and
+    never reaches a release build (ADR 0051)."""
+    return name != "lectern-kernel" and layer != "tool" and implements_plugin(src_dir)
+
+
 LOGGING_CRATE = "lectern-logging"
 # Crate directories under crates/ whose sources may call Value::panic_message.
 PANIC_MESSAGE_DIRS = ("kernel", "executor", "logging")
@@ -616,7 +625,7 @@ def main():
         plugin[pid] = lectern.get("plugin", False)
         if not isinstance(plugin[pid], bool):
             errors.append(f"{pkg['name']}: `plugin` must be true or false [docs/adr/0025.md]")
-        elif plugin[pid] is False and pkg["name"] != "lectern-kernel" and implements_plugin(os.path.join(os.path.dirname(pkg["manifest_path"]), "src")):
+        elif plugin[pid] is False and missing_plugin_mark(pkg["name"], value, os.path.join(os.path.dirname(pkg["manifest_path"]), "src")):
             errors.append(f"{pkg['name']}: implements Plugin; add `plugin = true` to [package.metadata.lectern] [docs/adr/0025.md]")
         if not inherits_workspace_lints(pkg["manifest_path"]):
             errors.append(f"{pkg['name']}: add `[lints] workspace = true` to its Cargo.toml [docs/design/ci.md]")
