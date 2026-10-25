@@ -624,8 +624,8 @@ Action 与快捷键（探针可按名字触发）：
 
   约束：
   1. 只改 `statusLine`：其余键、值和顺序不变；原 `statusLine` 对象里 `command` 以外的字段保留。文件不是 JSON 对象时不写（`NotJson`），`statusLine` 不是命令类型时不写（`UnknownShape`）。
-  2. 不丢失别人的写入：写同目录的临时文件后 `rename`，保留原文件的权限；`rename` 之前核对原文件自读取之后没有变，变了就重读重算（有次数上限，超过时返回错误、不写）。
-  3. 原 `statusLine` 的值存进 `own` 下的安装记录，`disable` 原样写回。目录存在而设置文件不存在时，`enable` 新建只含 `statusLine` 的文件；`disable` 时这个文件除了 `statusLine` 没有别的内容就删掉它，有别的内容就只删这个键。不复制设置文件的其他内容（其中可能有环境变量和凭据）。`own` 目录 0700，安装记录与 `sample` 0600。
+  2. 不丢失别人的写入：写同目录的临时文件后 `rename`，保留原文件的权限；设置文件是符号链接时写到它最终指向的文件所在的目录，链接本身不变；`rename` 之前核对原文件自读取之后没有变，变了就重读重算（有次数上限，超过时返回错误、不写）。
+  3. 原 `statusLine` 的值存进 `own` 下的安装记录，`disable` 原样写回。目录存在而设置文件不存在时，`enable` 新建只含 `statusLine` 的文件；`disable` 时这个文件除了 `statusLine` 没有别的内容就删掉它，有别的内容就只删这个键。不复制设置文件的其他内容（其中可能有环境变量和凭据）。`Replaced` 时安装记录里的原值已经过时：`enable` 先把设置文件里现在的 `statusLine`（用户或别的程序改成的值）存为新的原值，替换旧记录，再接入它；`disable` 不改设置文件，只删掉过时的记录和脚本。所以「原值」总是 Lectern 写入之前设置文件里的那个值，不会把用户后来改的值丢掉，也不会恢复一个用户已经换掉的值。`own` 目录 0700，安装记录与 `sample` 0600。
   4. 写进配置的命令在 Lectern 的脚本不存在时（Lectern 被删除）照常运行原命令，没有原命令时什么也不输出，所以删掉 Lectern 不会弄坏用户的 statusline。命令和脚本不依赖 Lectern 进程在运行，只用 `/bin/sh`，不引入 Node 等运行时（架构规则 3）。
   5. 脚本：把 stdin 原样写到 `sample`（同目录临时文件后 `rename`，超过 1 MiB 不写，usage 设计前置条件 C）；有原命令时把同样的字节交给它，原样传出它的 stdout 和退出码；没有原命令时输出为空。写 `sample` 失败不影响原命令的输出。不联网、不等待别的进程。
   6. 测试在临时目录里用假的设置文件，不读真实的 `~/.claude`；脚本的测试用 `/bin/sh` 运行，原命令是放在 PATH 最前面的假命令，记录收到的 stdin。
@@ -690,7 +690,7 @@ Action 与快捷键（探针可按名字触发）：
    - `present_*`、`plugin_*`、`view_window_switch_rewatches`、`view_scope_switch_and_drill`、`view_loading_phases`、`view_refreshes_every_minute`、`semantic_tree_*`、`canary_stays_out_of_usage_view_logs` 通过，快照已逐个看过。
    - `usage_view/present_heavy` 在预算内；`plugin/usage-view/activate`、`plugin/usage-view-data/activate` < 1 ms。
    - `python3 scripts/check_architecture.py` 通过：本 crate 不依赖其他插件 crate。
-   - `rg 'std::fs|std::process|std::thread::spawn' crates/usage_view/src --glob '!src/statusline/policy.rs'` 没有结果。
+   - `rg 'std::fs|std::process|std::thread::spawn' crates/usage_view/src --glob '!**/statusline/policy.rs'` 没有结果。
    - `rg 'hsla\(|rgb\(|rgba\(|#[0-9a-fA-F]{6}|Duration::from_millis|\.font_family\(|gpui_component::' crates/usage_view/src` 没有结果；`rg 'Duration::from_secs' crates/usage_view/src` 只有每分钟重算的一处（`src/page.rs`）。
    - `rg '"[A-Z][a-z]+ [a-z]' crates/usage_view/src --glob '!**/tests*' --glob '!**/testing*'` 没有界面字符串字面量；`rg 'eprintln!|println!|log::' crates/usage_view/src` 没有结果。
 2. **项目操作**（前置 A 的 1、2，C 的 2）：「合并到…」的按钮与右键菜单、确认框、「是同一个项目」「是新项目」、撤销、`Pending`、已合并组。
