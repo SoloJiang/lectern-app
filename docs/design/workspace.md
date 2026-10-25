@@ -34,7 +34,7 @@
 | `lectern-i18n` | 本 crate 自己的几条字符串（`workspace.ftl`） | [ADR 0013](../adr/0013.md) |
 | `lectern-kernel`、`lectern-services` | `Plugin`、`Staged`、`ActivationToken`、`KernelControl`；提供 `dyn Contributions`，依赖 `dyn Projects` | 架构规则 7（[ADR 0025](../adr/0025.md)） |
 | `lectern-logging` | 日志宏、`current()` / `scope()`（主线程上恢复贡献方的作用域） | [ADR 0046](../adr/0046.md) |
-| `lectern-platform` | `frame::record`、`frame::FrameTimes`（帧记录；实现之前只有类型） | 架构规则 6：帧时刻只能在 `platform` 取 |
+| `lectern-platform` | `frame::record`、`frame::FrameRecording`、`HookError`（帧记录，[platform 设计「帧的时刻」](platform.md#帧的时刻)；只在测量构建里有结果，其他构建返回 `Unsupported`） | 架构规则 6：帧时刻只能在 `platform` 取 |
 | `serde` | `WindowState` 的序列化 | 已在工作区依赖里 |
 | `futures`（`channel` feature） | 主线程队列的 `mpsc::unbounded`：发送方在任何线程，接收方是 GPUI 的前台任务 | 已在 Cargo.lock（GPUI 依赖它），不新增 crate；加进 `[workspace.dependencies]`，`just deny` 通过 |
 | `lectern-kernel`（`test-support`，dev）、`insta`（dev） | `TestKernel`、语义树快照 | |
@@ -284,8 +284,12 @@ pub struct WorkspaceDeps {
     pub on_frames: Arc<dyn Fn(FrameRecord) + Send + Sync>,
 }
 
-/// 一段记录的逐帧时刻，`frames` 是 `platform::frame::FrameRecorder::stop` 的结果；`app` 转成 bench 的 `FrameStats`。
-pub struct FrameRecord { pub scenario: Name, pub frames: Vec<lectern_platform::frame::FrameTimes> }
+/// 一段记录的逐帧时刻。`result` 是 `platform::frame::record` 的错误，或 `PendingFrames::wait` 的结果；
+/// `app` 把成功且 `problems.is_clean()` 的记录转成 bench 的 `FrameStats`，其余报告为错误（bench 设计 `Probe::frames`）。
+pub struct FrameRecord {
+    pub scenario: Name,
+    pub result: Result<lectern_platform::frame::FrameRecording, lectern_platform::HookError>,
+}
 
 /// `Send + Sync`。`app` 持有一份，`WorkspacePlugin` 持有一份。
 #[derive(Clone)]
@@ -300,8 +304,10 @@ impl WorkspaceHost {
     /// `WorkspacePlugin::started` 还没有拿到 `dyn Projects` 时（读文件比激活快），命令留在主线程队列里，`started` 之后执行。
     pub fn restore(&self, state: WindowState);
 
-    /// 开始记录当前窗口的逐帧时刻（`platform::frame::record`），期间每帧都请求下一帧，
-    /// 到 `stop` 的条件满足时结束，经 `on_frames` 交回。bench 的 `Driver`（`app` 实现）在滚动、动画和输入场景里调用。任何线程。
+    /// 开始记录当前窗口的逐帧时刻（`platform::frame::record`，在主线程上），期间每帧都请求下一帧，
+    /// 每一次 `on_next_frame` 的回调先调用 `FrameRecorder::frame_started`（platform 设计「帧的时刻」）。
+    /// 到 `stop` 的条件满足时在主线程上 `FrameRecorder::stop`，在后台执行器上 `PendingFrames::wait(250 ms)`，经 `on_frames` 交回。
+    /// `record` 出错时照常按 `stop` 的条件结束，交回这个错误。bench 的 `Driver`（`app` 实现）在滚动、动画和输入场景里调用。任何线程。
     pub fn record_frames(&self, scenario: Name, stop: RecordStop);
 }
 
@@ -549,7 +555,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 - 状态机（纯函数，`#[test]`，不依赖 GPUI；`src/tests/nav.rs`，用假的 `nav::Env`）：「导航状态机」表的每一行一个测试；`escape_closes_the_topmost_layer`（覆盖层 → 面板 → 侧栏面板 → 栈顶）；`guards_are_asked_in_order_and_a_refusal_stops`；`commands_during_a_pending_ask_queue_up`；`pop_to_base_stops_at_a_refusal`；`switching_projects_closes_the_old_one`（`Opened` 带新 key 后假 `Projects` 收到旧 key 的 `close`）；`opened_with_a_refusing_view_keeps_the_screen`；`window_state_follows_the_open_path`。
 - 注册表（`#[test]`，`src/tests/registry.rs`，用 `TestKernel` 跑真实激活取 token，`driver::Driver` 代替主线程）：`duplicate_ids_are_rejected`、`wrong_payload_is_rejected`、`invalid_ids_are_rejected`、`staged_registration_applies_on_commit_only`、`dead_token_is_not_applied`、`pending_token_is_deferred`（`started` 还没返回时 token 是 `Pending`，应用推迟到下一个 `Tick`）、`late_registration_applies_with_its_token`、`late_registration_needs_no_earlier_commit`（`activate` 里什么也没登记的激活在 `started` 里带 token 登记屏幕、守卫和命令处理函数，都应用）、`late_registration_inside_started_is_deferred_until_live`、`late_registration_with_a_dead_token_is_rejected`（停用后用旧 token 登记：不排队、不占 ID，记 `token-dead`）、`removal_drops_the_shown_screen`、`release_frees_the_id_before_the_main_thread_removes_it`、`screens_can_be_pushed_twice`（第 1 步只检查注册表那一半：同一个屏幕压栈两次、载荷取两次；工厂真的被调用两次在第 2 步）、`a_guard_that_drops_its_answer_allows`、`a_registration_without_a_token_outside_activate_is_reported_on_release`、`sidebar_entries_are_sorted_and_shared`、`command_handlers_guards_and_key_bindings_apply`、`leave_guards_are_asked_through_the_queue`、`commands_wait_for_projects`、`project_events_reach_the_state_machine`、`dispatch_after_shutdown_is_dropped`、`plugin_manifest_matches_the_design`。`stale_bindings_fall_through`（一个插件停用后，它绑定的键落到另一个插件在同一个键上的处理函数；`app` 的 ⌘Q 仍然有效）要 GPUI 的 keymap，归第 2 步。
-- `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`，`platform::frame::record` 用 `test-support` 的假记录器）。
+- `#[gpui::test]`（`TestAppContext`，`TestKernel` 注入假的 `dyn Projects`）：`install_replaces_the_root_and_shows_nothing_before_a_screen_registers`、`project_home_shows_after_opened`（假 `Projects` 发 `Opened`，侧栏与内容区出现）、`review_hides_the_sidebar_and_shows_the_bar`、`escape_and_back_return_to_the_home`、`inspector_toggles_with_alt_cmd_i`、`close_window_asks_the_guard_first`、`proxy_action_activates_the_command_plugin_and_replays_once`（`Command` 激活的假插件：第一次触发激活并执行一次，失败时提示一次）、`contribution_closures_run_in_the_plugins_scope`（`logging::testing::capture()` 里看 `plugin`、`act`）、`restore_opens_the_last_project`、`state_changes_are_reported`、`inspector_commands_are_ignored_without_an_inspector`（项目主页上 ⌥⌘I、⌘\ 不改状态）、`record_frames_reports_once_per_scenario`（`After`、`Manual` 两种停止方式各一次 `on_frames`；测试平台的窗口没有 `CAMetalLayer`，`platform::frame::record` 返回错误，交回的 `result` 是这个错误）。
 - 语义树：`workspace_tree_welcome`、`workspace_tree_project_home`、`workspace_tree_review_with_inspector` 的 insta 快照（UI 探针完成后接入；之前用本 crate 自己的 `Inspect` 输出）。
 - 日志：`canary_stays_out_of_workspace_logs`。
 - 不用真实的 git、会话扫描和文件 IO；`Projects` 用 `services` 的 trait 对象的假实现，只发事件、返回构造好的快照。
@@ -589,12 +595,12 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ## 已知限制
 
-- 里程碑的 `presented` 用下一帧回调的时刻，不是 `MTLDrawable.presentedTime`：与 app 设计「启动屏障」相同，`platform::frame::on_first_presented` 实现后改用它。
+- 里程碑的 `presented` 用下一帧回调的时刻，不是 `MTLDrawable.presentedTime`：`platform::frame::on_first_presented` 只给首帧，而且只在测量构建里有。要更精确时，用 `frame::record` 记下画出里程碑的那一帧（[platform 设计「帧的时刻」](platform.md#帧的时刻)的「已知限制」）。
 - 注册表不按窗口分：所有窗口共享同一套贡献（多窗口时也应如此，视图实例按窗口建）。
 - 由系统发起的退出不问离开守卫（app 设计「已知限制」）。
 - 进程插件不能贡献界面（「范围」）。
 - GPUI 没有单条删除键绑定的接口，贡献方停用后它的绑定留在 keymap 里直到进程退出（落空，不影响其他绑定）；同一个插件停用又启用时绑定重复追加，只在用户反复切换设置时发生，几十条以内没有可感知的开销。
-- `platform::frame::record` 实现之前，`record_frames` 交回的记录为空，帧时间的基准报告 `skipped`。
+- `platform::frame::record` 实现之前（platform 设计「验收」的 B2），以及不是测量构建时，`record_frames` 交回 `Err(HookError::Unsupported)`；帧时间的预算在 B2 之前都是「计划中」。
 
 ## 验收
 

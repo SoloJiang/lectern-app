@@ -536,7 +536,7 @@ level     := off | error | warn | info | debug | trace
 
 **第 3 步：`app`（macOS）。**
 
-- 冷启动基准 `app/cold_start` 不变慢（随 [bench 设计](bench.md)第 5 步的进程级基准验证）；本次运行的文件在首帧之后才创建，由 [app 设计「测试」](app.md#测试)的 `log_file_is_created_after_the_first_frame` 检查（`platform::frame::on_first_presented` 实现之前以首帧画出的时刻为准，见 [app 设计「启动屏障」](app.md#启动屏障)）。
+- 冷启动基准 `app/cold_start` 不变慢（随 [bench 设计](bench.md)第 5 步的进程级基准验证）；本次运行的文件在首帧之后才创建，由 [app 设计「测试」](app.md#测试)的 `log_file_is_created_after_the_first_frame` 检查（以首帧画出的时刻为准：`platform::frame::on_first_presented` 只在测量构建里有，[ADR 0048](../adr/0048.md)，见 [app 设计「启动屏障」](app.md#启动屏障)）。
 - 启动后 1 s 内日志目录里出现本次运行的文件，第一行是文件头；正常退出后最后一行是结束记录（`startup_writes_a_header_and_an_end_record`；1 s 的时限在 macOS 上手动确认，测试不以墙钟时间判定）。
 - `LECTERN_LOG=debug` 和 `--log cache=trace` 启动时文件头的 `filter` 与之相同。
 

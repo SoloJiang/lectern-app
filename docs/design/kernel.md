@@ -730,7 +730,7 @@ kernel 线程上调用的每一段插件代码都单独用 `catch_unwind` 包住
 ### 启动
 
 - 首帧之前不调用 kernel 的任何函数（ADR 0017）。`app` 在启动屏障放开后调用 `Kernel::start`：
-  - desktop、probe：第一帧真正显示（`presentedTime` 回调）时放开；`platform::frame::on_first_presented` 实现之前，在首帧画出后的第二次帧请求时放开（[app 设计「启动屏障」](app.md#启动屏障)）；
+  - desktop、probe：在首帧画出后的第二次帧请求时放开，这时首帧已经显示（[app 设计「启动屏障」](app.md#启动屏障)）。精确的显示时刻（`presentedTime` 回调）只在测量构建里有，探针只用它报告首帧（[ADR 0048](../adr/0048.md)）；
   - headless（命令行与基准）、test：没有窗口，立即放开。
 - 屏障由 `app` 按 profile 实现，kernel 不区分 profile。
 
