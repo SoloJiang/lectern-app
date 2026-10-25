@@ -296,6 +296,7 @@ pub(crate) struct CallerRow {
 
 - `QueryResults` 的 `candidates`、`callers`、`same_name` 只追加（code_intel 设计「服务接口」）。控制器记下每个列表已应用的长度，新到的一批是 `results.callers[applied..]`，追加成一块。行的顺序就是 `code_intel` 给出的顺序：本 crate 不按状态、路径或层重排，用户正在看的行不会移动（[代码导航调研「索引不完整时」](../research/code-navigation.md#索引不完整时)的呈现规则）。
 - 行的下标在一个主题内不变。视图的选中项按下标记，主题不变时不需要找回。
+- 每次发起查询（含重新发起）的顺序固定：`query()` 返回 id → 写进 `Watch::queries` → 立即调一次 `results(id)` 并应用。这一次读取不能省：项目没有打开时 `query` 直接把结果置为 `Failed(NotOpen)`，不发事件；查询在另一个线程上可能在 id 写进 `Watch` 之前就发布了第一批（预取过的查询只要几微秒），那次事件会被监听当作别人的查询丢掉。结果是累积的，写进 `Watch` 之后的这次读取包含此前发布的全部内容，之后的事件都能通过过滤，所以不会丢批。
 - `CodeIntelEvent::Results` 的 `generation` 只用来丢弃过时的唤醒：`id` 不是当前的查找或引用查询（旧请求、旧主题）时丢弃；`generation` 不高于已应用的时丢弃。
 - `results(id)` 返回 None（查询被挤出）时重新发起同一个查询一次，已有的行保留，新结果从已应用的长度之后接上；第二次仍是 None 时记 warn、停在已有的行上。
 - 例外：调用方的状态、测试文件的存在、History 依赖审阅快照和文件列表，它们变化时原地改写（行的位置不变），这是「结果与之前不同时才原地更新」的情况。
@@ -422,6 +423,8 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 | 跳转的候选列表 ≤ 50 ms（`app/goto_candidates`） | 本 crate ≤ 18 ms：从收到第一批的事件到候选列表画出，一帧 16 ms 加 2 ms 送到 UI 线程（[ADR 0037](../adr/0037.md)）。2 ms 里包括：监听放入输入 < 0.05 ms，步进任务排到 executor 并运行 < 1 ms（`results` 复制一个 `Arc`，追加一块行，发 `OpenPanel`），面板通道送到主线程 < 0.5 ms。⌘ 点击时面板视图在 `OpenPanel` 之后才建，建视图读模型 < 0.5 ms，也在这 2 ms 里 |
 | 查找引用第一批 ≤ 200 ms（`app/references_first`） | 同样 ≤ 18 ms：事件到第一批调用方画出。起点是 `Show`，终点是 `Milestone::ContextCallers`；中间的 `Enclosing` / `Definition` 查询和 `References` 查询归 `code_intel`（它的 `code_intel/references_100k/first` 实测约 11 ms） |
 | 10 万文件的全部引用 ≤ 2 s（`app/references_100k`） | 每一批 ≤ 18 ms；终点是 `Milestone::ContextCallersDone`（`References` 的状态为 `Done` 的那一帧画出） |
+| 唯一候选的目标首屏高亮 ≤ 100 ms（`app/goto_single`） | 本 crate ≤ 2 ms：从收到带 `jump` 的第一批的事件到调用 `Reader::open`（监听、步进、`results`、组 `ReadTarget`）；不画面板。之后的读取与高亮归 `file_reader`，终点是它的 `Milestone::FileHighlighted` |
+| 未索引时跳转的第一批 ≤ 300 ms、限时搜索结束 ≤ 1.1 s（`app/goto_unindexed`、`app/goto_unindexed_done`） | 每一批 ≤ 18 ms（同 `app/goto_candidates`）。终点分别是 `Milestone::ContextCandidates` 和 `Milestone::ContextCandidatesDone`（查找查询结束（`Done`，含 `Partial`）后的那一帧画出） |
 | 滚动与输入 120 fps | 列表用 `uniform_list`（行高固定），只构造可见的约 20 行；每行的元素是常数：`NodeId` 克隆、两段文字、一个状态。↑↓ ←→ 只改视图状态，不经步进 |
 | 冷启动 20 ms | 首帧之前没有代码运行；`plugin/context-drawer/activate`、`plugin/context-drawer-reader/activate` 各 < 1 ms（只登记） |
 | 空闲内存（没有请求） | < 16 KiB（`Shared`、登记的工厂和快捷键） |
@@ -436,6 +439,8 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 | ID | 统计量与预算 |
 |---|---|
 | `app/goto_candidates` | 中位数 ≤ 50 ms（bench 设计已列出）：驱动发 `Show { intent: GoTo }`，位置上的符号有 ≥ 2 个只按名字找到的候选，终点 `Milestone::ContextCandidates` |
+| `app/goto_single` | 中位数 ≤ 100 ms（bench 设计已列出，归 `code_intel`）：驱动发 `Show { intent: GoTo }`，位置上的符号有唯一的有绑定依据的候选，终点 `Milestone::FileHighlighted`（`file_reader`）；需要 `context-drawer-reader` 和 `file-reader` 都已激活 |
+| `app/goto_unindexed`、`app/goto_unindexed_done` | 中位数 ≤ 300 ms / 最大值 ≤ 1.1 s（bench 设计已列出，归 `code_intel`）：驱动发 `Show { intent: GoTo }`，定义只在未入索引的文件里、只按名字找到，夹具里未索引的文件多到 1 s 内搜不完；终点 `Milestone::ContextCandidates` / `Milestone::ContextCandidatesDone` |
 | `app/references_first` | 中位数 ≤ 200 ms（bench 设计已列出，归本 crate）：驱动发 `Show { intent: Inspect, point: Position }`，位置在一个定义的名字上，终点 `Milestone::ContextCallers` |
 | `app/references_100k` | 中位数 ≤ 2 s（同上）：10 万文件的夹具，终点 `Milestone::ContextCallersDone` |
 | `context_drawer/apply_batch`（新） | 中位数 ≤ 2 ms：已有 1 万个调用方、审阅有 200 个文件时，步进应用一批 500 个调用方（取结果、追加、算状态、发布模型）；进程内，不依赖窗口 |
@@ -461,7 +466,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 
   | kind | id | order | payload |
   |---|---|---|---|
-  | `Panel` | `context`（`services::context::PANEL`） | 0 | `ui::contrib::Panel { build }`：建 `ContextPanel`，读当前模型、登记主线程通道、取得焦点 |
+  | `Panel` | `context`（`services::context::PANEL`） | 0 | `ui::contrib::Panel { build }`：建 `ContextPanel`，先登记主线程通道、再读当前模型（顺序反过来会漏掉两步之间发布的模型），然后取得焦点 |
   | `KeyBindings` | `context` | 0 | 下面 Action 表里的绑定，谓词 `Panel > context` |
 
 - Fluent 键（`crates/i18n/locales/{en,zh-CN}/context.ftl`，「对其他 crate 的要求」D）。带 `$count` 的键都有复数形式（en 的 `[one]` / `*[other]`，zh-CN 只有 `*[other]`），表里写 other：
@@ -623,6 +628,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
   - `panel_close_*`：`LayerChanged(Panel(PANEL), false)` 关闭两个查询、`set_focus(Drawer([]))`、模型回到 `Idle`；别的面板的 `LayerChanged` 不影响。
   - `focus_drawer_*`：Definition 页前 8 行的文件加主题的文件，去重；面板关闭时为空。
   - `prefetch_*`：每个主题只预取一次、只给一个目标；没有 `Reader` 时不预取。
+  - `initial_read_*`：假 `CodeIntel` 对没有打开的项目只返回 `Failed(NotOpen)`、不发事件时，面板显示 `context-failed-not-open`；假 `CodeIntel` 在 `query()` 返回之前（id 写进 `Watch` 之前）就发布第一批并发出事件时，这一批不丢、⌘ 点击照常决定。
   - `listener_*`：监听里不调用任何服务（假 `CodeIntel` 的标志）；同一时刻只有一个步进任务；步进持有 `controller` 时 `query` 同步发出事件不死锁。
 - `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`，`testing::harness`）：
   - `panel_shows_loading_phases`：100 ms 内空白，之后骨架，1 s 后 `context-loading`，结果到达后换成列表。
@@ -630,7 +636,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
   - `enter_opens_the_selected_row`、`space_on_a_definition_changes_the_subject`。
   - `panel_takes_focus_when_built`：工厂建视图后焦点在面板的根元素上。
   - `new_seq_resets_tab_and_selection`：`Inspect` 的初始页是 Callers，`GoTo` 是 Definition；同一个 `seq` 的新批次不改选中项。
-  - `milestones_are_reported_once_per_seq`：第一批候选、第一批调用方、调用方 `Done` 各报一次。
+  - `milestones_are_reported_once_per_seq`：第一批候选、候选 `Done`、第一批调用方、调用方 `Done` 各报一次。
   - `close_button_dispatches_close_panel`。
   - `plugins_register_and_deactivate_cleanly`：假 `Contributions` 收到 `Panel`、`KeyBindings` 两项；停用后登记 drop。`reader_plugin_deactivates_on_its_own`：`context-drawer-reader` 单独停用后面板照常、打开按钮不可用。
 - 语义树：`context_tree_callers`、`context_tree_goto`、`context_tree_history`、`context_tree_failed`、`context_tree_other_worktree` 的 insta 快照（`ui_probe` 的 `tree::snapshot`，[#6](https://github.com/SoloJiang/lectern-app/issues/6) 合并后接入；之前用 `Recorder::finish` 的记录去掉 `bounds` 后快照）。
@@ -644,7 +650,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 - **A. `services`**：
   - 新模块 `services::context`，内容见「接口」。
   - `services::project` 加两个纯函数（不做 IO，任何线程）：`is_test_path(path: &str) -> bool`，规则与 `review` 的 `noise.rs` 第 2 条（Tests 分组）相同；`paired_tests(path: &str) -> Vec<String>`，按「数据结构」的「测试」一节的首发规则给出候选路径（不检查存在）。⌘K（#102）的配对加分用同一个函数。
-  - `services::workspace::Milestone` 加三项：`ContextCandidates`（一个请求的第一批候选画出）、`ContextCallers`（第一批调用方画出）、`ContextCallersDone`（`References` 结束后的那一帧画出）。`code_intel` 设计「验收」第 5 步（端到端基准）等这三项。
+  - `services::workspace::Milestone` 加四项：`ContextCandidates`（一个请求的第一批候选画出）、`ContextCandidatesDone`（查找查询结束后的那一帧画出）、`ContextCallers`（第一批调用方画出）、`ContextCallersDone`（`References` 结束后的那一帧画出）。`code_intel` 设计「验收」第 5 步（端到端基准：`app/goto_candidates`、`app/goto_single`、`app/goto_unindexed`、`app/goto_unindexed_done`）等这四项、本 crate 的第 3 步和 `file_reader` 的 `FileHighlighted`。
 - **B. `code_intel`**：`QueryKind` 加一项，`services` 里的类型和本 crate 的实现在同一个 PR：
 
   ```rust
@@ -667,8 +673,8 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
   - `Selected::line` 从 0 起，与 `Position::line` 相同（若实现里不是，在发出时换算）。
   - 以后在 Diff 里点符号（原型里可点的符号）时发 `point: Position(行, 列)`；本 issue 不要求。
 - **F. `file_reader`**：Space 发 `Show { point: Position(光标), intent: Inspect, review: None }`；⌘ 点击发 `Show { point: Position(点击处), intent: GoTo, review: None }`；`at` 是当前文档的 `TextRef`（`Worktree` / `Object` / `Dependency`）。随 `file_reader` 的实现进行，不阻塞本 crate。
-- **G. `app`**：`plugins()` 的两个插件放进 `PluginSet`（`Profile::Desktop` 的表加两行；test profile 不装），与 `code-intel` 的装配同一个 PR 或在它之后：`code-intel` 不在 desktop profile 里时 `context-drawer` 不能激活，现在的 Space 什么也不做。bench 的驱动经 `Kernel::emitter()` 发 `ContextEvent::Show`；三个新的 `Milestone` 经 `workspace` 转给探针。
-- **H. `bench`**：预算表加 `context_drawer/apply_batch`；`app/goto_candidates`、`app/references_first`、`app/references_100k` 的场景与终点按「性能」；bench 的 `Milestone` 加 A 的三项。
+- **G. `app`**：`plugins()` 的两个插件放进 `PluginSet`（`Profile::Desktop` 的表加两行；test profile 不装），与 `code-intel` 的装配同一个 PR 或在它之后：`code-intel` 不在 desktop profile 里时 `context-drawer` 不能激活，现在的 Space 什么也不做。bench 的驱动经 `Kernel::emitter()` 发 `ContextEvent::Show`；四个新的 `Milestone` 经 `workspace` 转给探针。
+- **H. `bench`**：预算表加 `context_drawer/apply_batch`；`app/goto_candidates`、`app/goto_single`、`app/goto_unindexed`、`app/goto_unindexed_done`、`app/references_first`、`app/references_100k` 的场景、驱动（发 `ContextEvent::Show`）与终点按「性能」的基准表；bench 的 `Milestone` 加 A 的四项。前四项仍归 `code_intel` 的第 5 步改为生效，后两项随本 crate 的第 3 步。
 - **I. `review`**：`noise.rs` 第 2 条改为调用 `services::project::is_test_path`，让 Progress 的 Tests 分组与面板的 Tests 页是同一条规则。不阻塞本 crate。
 - **J. `review`（另开 issue）**：每个文件新一侧改动的行范围和它们的轮次，从快照或一个不经过 `Prepare` 的查询读出（形如 `Arc<[(Range<u32>, Arc<[TurnRef]>)]>`）。有了它，调用方的状态和 History 改为行级。
 - **K. #22（审阅意见）**：在面板的调用方行上加意见（`context::AddNote`）。锚点可能在审阅的 diff 之外（没有跟着改的调用方所在的文件不在改动集里），#22 的锚点模型要能表示「文件、行、OID」。
@@ -711,7 +717,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 
 **第 1 步：插件、控制器、Definition 与 Callers、文件级状态、打开与跳转、快捷键、探针节点（`Refs #20`）。**
 
-- 「测试」里的 `request_*`、`goto_*`、`old_side_*`、`subject_*`、`append_*`、`status_*`、`worktree_*`、`panel_close_*`、`focus_drawer_*`、`prefetch_*`、`listener_*`，以及 `#[gpui::test]` 的全部用例和 `context_tree_callers`、`context_tree_goto`、`context_tree_failed`、`context_tree_other_worktree` 通过；`logs_hold_no_contents` 覆盖第 1 步的流程并通过。
+- 「测试」里的 `request_*`、`goto_*`、`old_side_*`、`subject_*`、`append_*`、`status_*`、`worktree_*`、`panel_close_*`、`focus_drawer_*`、`prefetch_*`、`initial_read_*`、`listener_*`，以及 `#[gpui::test]` 的全部用例和 `context_tree_callers`、`context_tree_goto`、`context_tree_failed`、`context_tree_other_worktree` 通过；`logs_hold_no_contents` 覆盖第 1 步的流程并通过。
 - `context_drawer/apply_batch` 在预算内。
 - `crates/context_drawer/AGENTS.md` 的设计文档行指向本文（本 PR 已改）。
 
