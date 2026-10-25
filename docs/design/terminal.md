@@ -738,6 +738,8 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
    ```
 
    日志：失败记 warn（`LoginEnvError` 的种类、`Value::io`），成功记 debug（变量个数、耗时）；不记 shell 的路径、变量的名字和值、shell 的输出。测试用假 shell，不运行用户的 shell。
+
+   [agents 设计「未决问题」](agents.md#未决问题)1 的 (a) 说以后「经监护进程查询一次登录 shell 环境」来找只在 shell 里设置的会话目录；有了这个模块，会话发现是否直接用它，由 `agents` 的设计决定。
 3. 工具链与 CI（`ci.md`、`justfile`、根 AGENTS.md「命令」、`cargo-workspace.md`）：
    - Linux 与 macOS 的 CI 任务在构建之前安装 Zig 0.15.2（官方发布包，校验 SHA-256），`git` 已有。`OUT_DIR` 在 `target/` 里，随现有的 `Swatinem/rust-cache` 缓存；缓存未命中时多出克隆 Ghostty 和 Zig 构建的时间（未测，预计 1–3 分钟），实现 PR 把实测写进 ci 设计的「实际验证」，并核对 Linux 任务约 2 分钟、macOS 任务 15 分钟的目标是否仍满足。
    - `justfile`：`check`、`test`、`bench` 之前检查 `zig version` 是 0.15.2，不是时报错并给出安装方式。
@@ -756,7 +758,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
    - `LaunchError`、`FailReason` 的提示文字（Fluent 键，en 与 zh-CN）。
 5. `terminal_view`：非插件的视图库。把 GPUI 的按键、IME 文字、粘贴、鼠标、滚动、焦点、尺寸转成 `Input`；从 `ui` 的 `Palette` 推出 `Theme`，外观变化时发 `SetTheme`；按 `Frame` 绘制；拥有 `app/input_frames`（另写设计文档，按 conversation 设计「对其他 crate 的要求」E）。
 6. `app`：装配 `TerminalPlugin::new(TerminalDeps { executor })`，排在 `project` 与 `agents` 之后（第 4 步）；`app/bundle_size` 记录静态库的增量。
-7. `bench`：预算表加入「性能」里的条目；`app/input_frames` 的 profile 用 `with_shell` 指向一个回显程序（本 crate 的假程序，或 bench 自带的同类程序，由 bench 的实现决定），不运行用户的 shell 和它的配置。
+7. `bench`：预算表加入「性能」里的条目。`app/input_frames` 在 Conversation 的 Terminal 页里恢复夹具会话（`Launch::Resume`），所以它的 profile 用 `with_login_env` 给出一个 `PATH`，其中的 `claude`、`codex` 是回显程序（本 crate 的假程序，或 bench 自带的同类程序，由 bench 的实现决定）；不运行用户的 shell 和它的配置，也不运行真实的 agent。
 8. `review_view` / `conversation`（#22 发回会话）：有终端在驱动会话时经 `Input::Paste` 写入，不追加回车，用户在终端里按 ↵ 提交（conversation 设计「对其他 crate 的要求」I）。
 9. `project_home`：空状态的 New session 调用 `Launch::NewSession`（本 issue 之外）。
 
