@@ -8,7 +8,7 @@
 
 - 做：
   - 插件 "terminal"：提供单实现服务 `dyn Terminals`（接口和数据类型放在 `services::terminal`，本文定义）。
-  - 启动：恢复会话（`Launch::Resume`）、在某个目录里开始新的 agent 会话（`Launch::NewSession`）、登录 shell（`Launch::Shell`）。恢复命令按 [agents 设计](agents.md)「服务接口」里 `ResumeCommand` 的安全规则执行（见「安全边界」）。
+  - 启动：恢复会话（`Launch::Resume`）、在某个目录里开始新的 agent 会话（`Launch::NewSession`）、登录 shell（`Launch::Shell`）。恢复命令按 [agents 设计](agents.md)「服务接口」里 `ResumeCommand` 的安全规则执行（见「安全边界」）。agent 用登录 shell 的环境启动（`platform::login_env`，与 `agents` 的 ACP 客户端共用）。
   - PTY：经 portable-pty 打开、设置尺寸、读写；子进程的等待、挂断与强制结束。
   - 终端状态：libghostty-vt 的 `Terminal`，滚动缓冲上限 10,000 行；按键、粘贴、鼠标、焦点按程序开启的模式编码（`key::Encoder`、`mouse::Encoder`、`paste`、`focus`）；选区与复制的纯文本。
   - 帧：视口的行、样式段、光标、选区、滚动位置、模式与运行状态，作为不可变快照（`Arc<Frame>`）交给视图；内容没变的行在相邻两帧之间共用。
@@ -16,9 +16,10 @@
   - 生命周期：项目关闭时关闭它的终端；插件停用时关闭全部终端。
 - 不做：
   - 网格的绘制、字形缓存、IME、快捷键、右键菜单：`terminal_view`。
-  - Terminal 页、Resume 按钮、「在别处运行」的提示、退出前的确认：`conversation`。
+  - Terminal 页、Resume 按钮、「在别处运行」的提示、退出前的确认、「哪一处在驱动会话」的判断：`conversation`。
   - 剪贴板的读写：视图经 GPUI 读写，本 crate 只给出选区的文字、只接收要粘贴的文字。
   - 会话发现与恢复命令的来源：`agents`（`SessionSource::resume`）。
+  - 登录 shell 环境的获取与缓存：`platform`（「对其他 crate 的要求」第 2 项）。
   - 项目空状态里的 New session 入口：`project_home`（[project_home 设计](project_home.md)「范围」），它调用本 crate 的 `Launch::NewSession`。
 - 本 issue 之外：
   - 超链接（OSC 8）与 URL 识别、滚动缓冲里的搜索：libghostty-vt 0.2.2 没有搜索接口，另开 issue。
@@ -33,28 +34,29 @@
 
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
-| `lectern-kernel` | `Plugin`、`PluginHandle::own_with`、`BusyGuard`、事件 | 插件机制 |
-| `lectern-services` | `Terminals` 接口与数据类型（本文定义）；调用 `Projects::locate`、`SessionSource::sessions` / `resume` | 消费方只依赖接口（架构规则 7） |
+| `lectern-kernel` | `Plugin`、`PluginHandle::own_with`、`BusyGuard`、事件、`catch` | 插件机制 |
+| `lectern-services` | `Terminals` 接口与数据类型（本文定义）；调用 `Projects::locate` / `open_projects`、`SessionSource::sessions` / `resume` | 消费方只依赖接口（架构规则 7） |
 | `lectern-executor` | 每个终端的两个专属线程（`run_dedicated_gated`） | 阻塞的 `poll` 与 `wait` 不占工作线程 |
+| `lectern-platform` | `login_env`：用户的登录 shell、登录 shell 的环境、在 `PATH` 里找程序 | 与 `agents` 共用一份实现和缓存；非插件的基础设施库 |
 | `lectern-logging` | 运行日志（「日志与诊断」）；测试用 `test-support` 捕获记录 | [ADR 0046](../adr/0046.md) |
-| `libghostty-vt = "=0.2.2"`，`default-features = false` | 终端状态机（ADR 0002） | 见下文「libghostty-vt」 |
+| `libghostty-vt = "=0.2.2"`，`default-features = false`；`libghostty-vt-sys = "=0.2.2"` | 终端状态机（ADR 0002） | 见下文「libghostty-vt」 |
 | `portable-pty = "=0.9.0"` | 打开 PTY、启动子进程、设置尺寸、挂断 | 技术调研选定；MIT |
 | `rustix`（工作区已有，加 `event`、`process` feature） | 主端 fd 的非阻塞读写与 `poll`；向进程组发 `SIGKILL` | 已在工作区，不引入新 crate |
-| `libc`（工作区已有） | `getpwuid_r` 取登录 shell | 只在 `$SHELL` 不可用时 |
 
 ### libghostty-vt
 
-- 版本锁 `=0.2.2`（crates.io，MIT OR Apache-2.0，`rust-version` 1.90，工具链 1.97 满足）。它依赖 `libghostty-vt-sys =0.2.2`、`bitflags`、`int-enum`。`libghostty-vt-sys` 的构建脚本固定 Ghostty 的提交 `a887df42c56f6de86c0fe6da9c4eeca37931e083`（1.3.2-dev），就是 ADR 0002 说的「libghostty-rs 的 vendored 构建」：首次构建时把这个提交克隆进 `OUT_DIR`，用 Zig 编出 `libghostty-vt.a` 并静态链接。升级 libghostty-vt 就是换这个提交，按 AGENTS.md 先确认。
+- 版本锁 `=0.2.2`（crates.io，MIT OR Apache-2.0，`rust-version` 1.90，工具链 1.97 满足）。它依赖 `libghostty-vt-sys`（写的是 `0.2.2`，即 `^0.2.2`）、`bitflags`、`int-enum`。`libghostty-vt-sys` 0.2.2 的构建脚本固定 Ghostty 的提交 `a887df42c56f6de86c0fe6da9c4eeca37931e083`，就是 ADR 0002 说的「libghostty-rs 的 vendored 构建」：首次构建时把这个提交克隆进 `OUT_DIR`，用 Zig 编出 `libghostty-vt.a` 并静态链接。
+- Ghostty 的源码由 `libghostty-vt-sys` 的版本决定，所以本 crate 直接依赖 `libghostty-vt-sys = "=0.2.2"`（不调用它，只为锁版本）：否则一次 `cargo update` 就能把它升到 0.2.x，换掉 Ghostty 的提交，绕过 AGENTS.md 的「升级先确认」。升级 libghostty 就是同时改这两个版本号。
 - 关掉默认 feature：不要 `kitty-graphics`（图片不在 P1）、`log` 与 `tracing`（libghostty 的日志不经 `lectern-logging` 的宏，ADR 0046），也不调用 `set_logger`，libghostty 的日志被丢弃。不开 `link-dynamic`，安装包里不多一个 dylib。
-- 构建链需要 Zig 0.15.2（Ghostty 的 `build.zig.zon` 要求的最低版本；Zig 的主版本之间不兼容，固定这一个版本）和 `git`。首次构建要访问 `github.com`（克隆 Ghostty）和 `deps.files.ghostty.org`（Zig 依赖，`build.zig.zon` 按哈希固定），之后按 `OUT_DIR` 复用。`Cargo.lock` 与 `--locked` 不覆盖构建脚本取的源码；源码由上面的提交号和哈希固定，所以构建结果仍然确定。需要离线或共用一份源码时，可设 `GHOSTTY_SOURCE_DIR` 指向同一提交的检出、`GHOSTTY_ZIG_SYSTEM_DIR` 指向预取的 Zig 依赖（libghostty-vt-sys 支持的两个变量），只影响构建速度，不改结果。
+- 构建链需要 Zig 0.15.2 和 `git`。Zig 版本取自那个 Ghostty 提交的 `build.zig.zon`（`minimum_zig_version`）；Zig 的次版本之间不兼容，固定这一个版本，实现 PR 用这个版本实际构建一次确认。首次构建要访问 `github.com`（克隆 Ghostty）和 `deps.files.ghostty.org`（Zig 依赖，`build.zig.zon` 按哈希固定），之后按 `OUT_DIR` 复用。`Cargo.lock` 与 `--locked` 不覆盖构建脚本取的源码；源码由上面的提交号和哈希固定，所以构建结果仍然确定。需要离线或共用一份源码时，可设 `GHOSTTY_SOURCE_DIR` 指向同一提交的检出、`GHOSTTY_ZIG_SYSTEM_DIR` 指向预取的 Zig 依赖（libghostty-vt-sys 支持的两个变量），只影响构建速度，不改结果。
 - `cargo-deny` 只检查 Rust crate。Ghostty 编进静态库的 C / C++ 依赖（如 simdutf、highway）不在它的范围内：实现 PR 从 `build.zig.zon` 列出它们和许可证，写进本文「实际验证」，确认都在 `deny.toml` 的许可证白名单里。
-- 本 crate 不依赖 GPUI，Linux 上的 `--gpui-free-packages` 会包含它，所以 Linux 与 macOS 的 CI 任务、每台开发机都要装 Zig 0.15.2（「对其他 crate 的要求」第 2 项）。
+- 本 crate 不依赖 GPUI，Linux 上的 `--gpui-free-packages` 会包含它，所以 Linux 与 macOS 的 CI 任务、每台开发机都要装 Zig 0.15.2（「对其他 crate 的要求」第 3 项）。
 - libghostty-vt 的类型都是 `!Send + !Sync`，只在终端自己的线程上创建和使用（「数据流与线程」）。
 
 ### portable-pty
 
 - 版本锁 `=0.9.0`。新引入的传递依赖：`nix` 0.28、`filedescriptor` 0.8、`serial2`、`shell-words`、`downcast-rs`、`log`（`anyhow`、`libc` 已在 `Cargo.lock`）。都是宽松许可，`just deny` 在实现 PR 里检查。
-- 只用 `native_pty_system().openpty`、`SlavePty::spawn_command`、`MasterPty::{resize, as_raw_fd, process_group_leader}`、`Child::{wait, process_id, clone_killer}`。不用 `try_clone_reader` / `take_writer`：它们给的是阻塞的 fd 副本，读线程在 `read` 里无法被打断，终端关闭时线程会留下。本 crate 把主端 fd 设为非阻塞，在自己的线程上 `poll`。
+- 只用 `native_pty_system().openpty`、`SlavePty::spawn_command`、`MasterPty::{resize, as_raw_fd, process_group_leader}`、`Child::{wait, process_id, clone_killer}`。不用 `try_clone_reader` / `take_writer`：它们给的是阻塞的 fd 副本，读线程在 `read` 里无法被打断，终端关闭时线程会留下。本 crate 把主端 fd 设为非阻塞，在自己的线程上 `poll`。也不用 `Child::kill`（它先睡眠再发 `SIGKILL`），挂断用 `clone_killer` 给出的 `ChildKiller`（只发 `SIGHUP`）。
 - 子进程由 `std::process::Command` 加 `pre_exec` 启动（重置信号、`setsid`、`TIOCSCTTY`，关闭多余的 fd）。fork 之后它用 `read_dir` 枚举 fd，会分配内存；macOS 的 libmalloc 有 fork 处理，实践中可用，记为风险，由「测试」里的并发启动测试覆盖。
 
 ## 接口
@@ -72,11 +74,12 @@ pub struct TerminalPlugin { /* deps，shell 与环境的覆盖 */ }
 impl TerminalPlugin {
     pub fn new(deps: TerminalDeps) -> TerminalPlugin;
 
-    /// 测试与基准：固定用这个程序作为 shell，按 `kind` 拼参数，不读 `$SHELL` 和用户数据库。
-    pub fn with_shell(self, program: impl Into<PathBuf>, kind: ShellKind) -> TerminalPlugin;
+    /// 测试与基准：`Launch::Shell` 固定启动这个程序，不经 `platform::login_env::user_shell`。
+    pub fn with_shell(self, program: impl Into<PathBuf>) -> TerminalPlugin;
 
-    /// 测试：子进程环境的来源。默认是启动时的 `std::env::vars_os()`。
-    pub fn with_env(self, env: Vec<(OsString, OsString)>) -> TerminalPlugin;
+    /// 测试与基准：agent 启动用这份环境，不经 `platform::login_env::login_env`（不运行用户的 shell）。
+    /// `Launch::Shell` 的环境也从这里继承。
+    pub fn with_login_env(self, vars: Vec<(OsString, OsString)>) -> TerminalPlugin;
 }
 
 impl Plugin for TerminalPlugin {
@@ -85,16 +88,12 @@ impl Plugin for TerminalPlugin {
     /// activation: [AfterFirstFrame]
     fn manifest(&self) -> Manifest;
 
-    /// 只建空的终端表、取服务引用：不建线程、不做 IO、不打开 PTY（< 1 ms）。
+    /// 只建空的终端表、取服务引用：不建线程、不做 IO、不打开 PTY、不取登录环境（< 1 ms）。
     fn activate(&self, ctx: &mut Context<'_>) -> Result<Box<dyn Active>, PluginError>;
 }
-
-/// 支持的 shell。决定恢复和新会话的参数写法（「数据结构」的启动命令表）。
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ShellKind { Zsh, Bash, Fish, Ksh, Sh, Dash }
 ```
 
-插件 ID 是 "terminal"。激活条件用 `AfterFirstFrame`，不用 kernel 示例里的 `Command("terminal.open")`：`conversation` 的终端插件在 `requires` 里依赖 `dyn Terminals`，而命令不会替依赖去满足激活条件（[kernel 设计「依赖与自动启停」](kernel.md#依赖与自动启停)），按命令激活的提供者会让依赖者一直等待。`activate` 只建内存里的空表，代价与按命令激活相同；线程和 PTY 都在第一次 `open` 时才有。
+插件 ID 是 "terminal"。激活条件用 `AfterFirstFrame`，不用 kernel 示例里的 `Command("terminal.open")`：`conversation` 的终端插件在 `requires` 里依赖 `dyn Terminals`，而命令不会替依赖去满足激活条件（[kernel 设计「依赖与自动启停」](kernel.md#依赖与自动启停)），按命令激活的提供者会让依赖者一直等待。`activate` 只建内存里的空表，代价与按命令激活相同；线程、PTY 和登录环境都在第一次 `open` 时才有，第一次 `open` 之前本插件什么也不做。
 
 依赖 `dyn SessionSource` 的后果：两个内置会话来源都不可用时，本插件不激活，登录 shell 也打不开。这是已知限制（「已知限制」第 1 条）。
 
@@ -104,16 +103,22 @@ pub enum ShellKind { Zsh, Bash, Fish, Ksh, Sh, Dash }
 /// 单实现服务，"terminal" 插件提供。不暴露给进程插件（暴露要另写 ADR）。
 pub trait Terminals: Send + Sync {
     /// 打开一个终端。任何线程可调用；不阻塞、不做 IO，只读内存里的会话列表和项目快照
-    /// （校验见「安全边界」）。PTY 和子进程在终端自己的线程上启动，启动结果随
-    /// `TerminalEvent::Listed` 送达（`RunState::Running` 或 `Failed`）。
-    /// 同一会话已有 `Starting` / `Running` 的终端时返回它的 ID，不启动第二个进程；
-    /// 已有的终端已退出时先关闭它，再开新的，所以每个会话最多一个终端。
+    /// （校验见「安全边界」）。返回之前终端已登记（`for_session`、`info` 查得到，状态 `Starting`）；
+    /// 登录环境、PTY 和子进程在终端自己的线程上准备，结果随 `TerminalEvent::Listed` 送达
+    /// （`RunState::Running` 或 `Failed`）。
+    /// 恢复时：这个会话已有 `Starting` / `Running` 的终端时返回 `Err(AlreadyRunning(id))`，
+    /// 不启动第二个进程；已有的终端是 `Exited` / `Failed` 时先关闭它（`reason = replaced`），
+    /// 再开新的。所以每个会话最多一个终端。
     fn open(&self, spec: OpenSpec) -> Result<TerminalId, LaunchError>;
 
     /// 全部终端，按打开的先后。取锁复制一个 `Arc`，不阻塞，UI 线程可调用。
     fn list(&self) -> Arc<TerminalList>;
 
-    /// 这个会话的终端（任何状态）。不阻塞。
+    /// 一个终端的当前信息（含 `RunState`）。不阻塞；已关闭的 ID 返回 None。
+    fn info(&self, id: TerminalId) -> Option<TerminalInfo>;
+
+    /// 这个会话还没有关闭的终端，任何状态都算（已退出的终端保留最后的画面）。
+    /// 它是否在驱动会话由调用方看 `RunState`：只有 `Starting` / `Running` 算。不阻塞。
     fn for_session(&self, session: &SessionKey) -> Option<TerminalId>;
 
     /// 最新的一帧。不阻塞，复制一个 `Arc`。没有关注者期间不更新（见 `watch`）；
@@ -126,7 +131,11 @@ pub trait Terminals: Send + Sync {
     fn watch(&self, id: TerminalId) -> Option<FrameInterest>;
 
     /// 发一个输入。立即返回，任何线程可调用，不阻塞（放进队列，向终端线程的唤醒 socket
-    /// 写一个字节）。同一终端的输入按调用顺序处理；已关闭或已退出的终端忽略。
+    /// 写一个字节）。同一终端的输入按调用顺序处理；已关闭的 ID 忽略。
+    /// 进程不在运行（`Starting`、`Exited`、`Failed`）时，发给程序的输入（`Key`、`Text`、
+    /// `Paste`、`Focus`，以及会编码给程序的鼠标和滚轮）丢弃；作用于视口和选区的输入
+    /// （`Scroll`、`ScrollTo`、选区用的 `Mouse`、`SelectAll`、`ClearSelection`、
+    /// `ClearScrollback`、`Resize`、`SetTheme`）照常处理到 `close`，所以退出后仍能滚动、选择、复制。
     fn input(&self, id: TerminalId, input: Input);
 
     /// 取当前选区的纯文本（复制用）。立即返回。终端线程在 `token.enter()` 取得的准入内
@@ -173,16 +182,23 @@ pub enum Launch {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum AgentCommand { ClaudeCode, Codex }
 
+impl AgentCommand {
+    /// 程序名（"claude"、"codex"），界面显示用。
+    pub fn program(self) -> &'static str;
+}
+
 /// `open` 在调用线程上能判断的错误。调用方按种类显示一行提示，不重试。
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum LaunchError {
+    /// 这个会话已有启动中或运行中的终端，附它的 ID；调用方切到它。
+    AlreadyRunning(TerminalId),
     /// 会话不在来源的列表里，或这个来源当前没有提供者。
     UnknownSession,
     /// 来源不是内置的（进程插件的代理）：不接受它的恢复命令。
     UntrustedSource,
     /// 来源对这个会话不给恢复命令（子 agent 会话、认不出格式的会话）。
     NotResumable,
-    /// 会话 ID 不是 UUID 的规范写法。
+    /// 会话 ID 不是 UUID 的规范写法，或与恢复命令对不上。
     InvalidSessionId,
     /// 工作目录不在已打开项目的 worktree 根或文件夹项目根之内。
     OutsideProject,
@@ -223,26 +239,31 @@ pub enum LaunchKind {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RunState {
-    /// 终端线程还在校验目录、启动进程。
+    /// 终端线程还在校验目录、准备环境、启动进程。
     Starting,
-    /// `pid` 是 shell 的进程号，也是它的进程组号（`setsid`）。
+    /// `pid` 是子进程的进程号，也是它的进程组号（`setsid`）。
     Running { pid: u32 },
     /// 进程已退出；最后的画面和滚动缓冲保留到 `close`，可以滚动、选择、复制。
-    /// `signaled` 为 true 时 `code` 无意义。shell 找不到程序时 `code` 是 127。
+    /// `signaled` 为 true 时 `code` 无意义。
     Exited { code: u32, signaled: bool },
-    Failed(StartError),
+    /// 没有启动起来，或终端线程出了内部错误。画面保留到 `close`。
+    Failed(FailReason),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum StartError {
+pub enum FailReason {
     /// 工作目录已不存在或不是目录。
     CwdMissing,
     /// 规范化之后的工作目录不在同一个已打开的项目里（符号链接指向项目之外，或项目已关闭）。
     OutsideProject,
-    /// 找不到可执行的 shell（`$SHELL` 与用户数据库都不可用，`/bin/zsh` 也不存在）。
+    /// 登录环境的 `PATH` 里没有这个 agent 的程序；界面用 `AgentCommand::program` 提示安装。
+    NotInstalled(AgentCommand),
+    /// 找不到可执行的 shell（只在 `Launch::Shell`）。
     NoShell,
     /// 打开 PTY 或启动进程失败，附系统错误码。
     Spawn { errno: Option<i32> },
+    /// 终端线程 panic（「数据流与线程」）。只影响这一个终端。
+    Internal,
 }
 
 /// `watch` 的关注，drop 时注销（任何线程，不阻塞）。写法同 `OverviewInterest`：
@@ -282,9 +303,11 @@ pub enum Input {
     Key(KeyInput),
     /// 输入法提交的文字、或不经按键编码的文字。原样以 UTF-8 写入。
     Text(Arc<str>),
-    /// 粘贴。程序开了 bracketed paste 时包上 `ESC[200~` / `ESC[201~`，否则原样写入。
-    /// 是否需要用户确认（多行、未开 bracketed paste）由视图按 `Frame::modes` 决定，
-    /// 本 crate 收到就写。审阅意见发回会话（#22）用 `Paste` 加一次 `Key(Enter)`。
+    /// 粘贴（⌘V，以及审阅意见发回会话 #22）。终端线程先去掉 C0 控制字符（保留 `\t`、`\n`；
+    /// ESC 也在其中）和 C1 控制字符（U+0080–U+009F），再交给 libghostty-vt 的 `paste::encode`：
+    /// 程序开了 bracketed paste（mode 2004，`claude`、`codex` 都开）时包上 `ESC[200~` / `ESC[201~`，
+    /// 没开时把 `\n` 换成 `\r`。不追加回车：是否提交由用户在终端里按 ↵ 决定。
+    /// 是否需要用户确认（多行、未开 bracketed paste）由视图按 `Frame::modes` 决定，本 crate 收到就写。
     Paste(Arc<str>),
     /// 鼠标。程序开了鼠标跟踪、且没按 Shift 时编码给程序；否则用于选区
     /// （`clicks` 为 2 选词、3 选行）。
@@ -293,8 +316,8 @@ pub enum Input {
     /// 换成上下方向键（alternate scroll）；否则滚动视口。
     Scroll(ScrollInput),
     ScrollTo(ScrollTarget),
-    /// 视口的格子数与单元的像素尺寸。连续的多个只处理最后一个；同时调整 PTY 的窗口大小
-    /// （子进程收到 `SIGWINCH`），libghostty-vt 按新宽度重排滚动缓冲。
+    /// 视口的格子数与单元的像素尺寸。连续的多个只处理最后一个；进程在运行时同时调整
+    /// PTY 的窗口大小（子进程收到 `SIGWINCH`），libghostty-vt 按新宽度重排滚动缓冲。
     Resize(GridSize),
     /// 视图获得或失去焦点。程序开了焦点事件（mode 1004）时写入 `ESC[I` / `ESC[O`。
     Focus(bool),
@@ -496,33 +519,31 @@ pub struct Modes {
 
 ### 终端表
 
-- 终端表在一把 `Mutex` 里：`TerminalId` 到条目（`TerminalInfo`、最新的 `Arc<Frame>`、关注数、命令队列的发送端、唤醒 socket 的写端）。`list()`、`frame()`、`input()` 都只持锁复制一个 `Arc` 或放进队列，不在锁内做别的工作。
+- 终端表在一把 `Mutex` 里：`TerminalId` 到条目（`TerminalInfo`、最新的 `Arc<Frame>`、关注数、命令队列的发送端、唤醒 socket 的写端）。`list()`、`info()`、`frame()`、`input()` 都只持锁复制一个 `Arc` 或放进队列，不在锁内做别的工作。
 - `TerminalId` 进程内从 1 递增，不复用。
 - 终端最多 8 个，含已退出、启动失败的；`close` 之后不再计入。同一会话最多一个终端（`open` 的规则）。
 - 列表的替换与 `Listed` 事件一一对应，`generation` 单调递增。
 
-### 启动命令表
+### 启动命令
 
-shell 的选择：`$SHELL`（必须是绝对路径、可执行）；不可用时取用户数据库（`getpwuid_r`）的登录 shell；按文件名对应 `ShellKind`；不在表里或都不可用时用 `/bin/zsh`，`/bin/zsh` 也不存在时 `StartError::NoShell`。`with_shell` 覆盖这一步。
+agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv，会话 ID 是独立的一项，不经任何解析。
 
-恢复和新会话经登录 shell 启动，让用户在 `.zprofile`、`.zshrc` 里设置的 `PATH` 生效（从 Finder 启动的应用只有最小的 `PATH`，`claude`、`codex` 常装在 Homebrew、nvm 一类的目录里）。程序名和参数作为独立的 argv 传给 shell，不拼进命令字符串，所以会话 ID 不经 shell 解析：
+| 启动 | 程序 | argv |
+|---|---|---|
+| `Resume`，`ResumeCommand::ClaudeCode` | 在登录环境的 `PATH` 里找到的 `claude` | `claude --resume <uuid>` |
+| `Resume`，`ResumeCommand::Codex` | 同上，`codex` | `codex resume <uuid>` |
+| `NewSession` | `claude` 或 `codex` | 只有程序名 |
+| `Shell` | 用户的登录 shell（`with_shell` 覆盖） | argv[0] 是 `-<文件名>`（以 `-` 开头即登录 shell），不带参数 |
 
-| 启动 | argv（`<shell>` 是 shell 的路径，argv[0] 是它的文件名） |
-|---|---|
-| `Shell`（各 shell） | `-<文件名>`（argv[0] 以 `-` 开头即登录 shell），不带参数 |
-| `Resume`，`ClaudeCode`（zsh、bash、ksh、sh、dash） | `<shell> -i -l -c 'exec "$0" "$@"' claude --resume <uuid>` |
-| `Resume`，`Codex`（同上） | `<shell> -i -l -c 'exec "$0" "$@"' codex resume <uuid>` |
-| `NewSession`（同上） | `<shell> -i -l -c 'exec "$0" "$@"' claude`（或 `codex`） |
-| fish 的三种 agent 启动 | `<shell> -i -l -c 'exec $argv' claude --resume <uuid>`（其余同理） |
-
-- `-c` 之后的字符串是常量，只有上表两种；`claude`、`codex`、`--resume`、`resume` 是常量；`<uuid>` 是通过「安全边界」检查的会话 ID。
-- `exec` 让 agent 取代 shell，agent 退出即终端退出，`RunState::Exited` 的 `code` 就是 agent 的退出码；shell 找不到程序时是 127。
-- fish 的 `-c` 之后的参数进入 `$argv`：实现时用 fish 3.x 验证（「验收」第 3 步的 `launch_argv_*` 用假 shell 校验 argv，`launch_fish_*` 在装了 fish 的机器上手动跑一次，结果写进「实际验证」）。
+- 程序的查找：`platform::login_env::find_program(name, PATH)`，`PATH` 取自登录环境。找不到时 `FailReason::NotInstalled`。
+- 登录环境：`platform::login_env::login_env()`，用户登录 shell（`.zprofile`、`.zshrc` 等）设置之后的全部环境变量。从 Finder 启动的应用只有 launchd 给的最小环境，`claude`、`codex` 常装在 Homebrew、nvm 一类的目录里，代理和 API key 也常在这些文件里设置。第一次需要时在终端线程上取（阻塞，最多 5 秒），整个进程只取一次，与 `agents` 的 ACP 客户端共用，所以 Terminal 页和 Conversation 页里同一个 agent 的环境相同。取不到时退回 Lectern 自己的环境，warn 日志。
+- 用户的登录 shell：`platform::login_env::user_shell()`（`$SHELL`，否则用户数据库，否则 `/bin/zsh`）。都不可用时 `FailReason::NoShell`。
+- agent 退出即终端退出，`RunState::Exited` 的 `code` 就是 agent 的退出码。
 
 ### 子进程的环境
 
-- 继承启动 Lectern 时的环境，去掉 `LECTERN_` 开头的变量。
-- 设置 `TERM=xterm-256color`（Ghostty 的 terminfo 多数机器上没有装）、`COLORTERM=truecolor`、`TERM_PROGRAM=Lectern`、`TERM_PROGRAM_VERSION=<应用版本>`；`PWD` 设为工作目录（shell 保留日志里的写法，不换成规范路径）。
+- agent 启动：登录环境；`Shell` 启动：Lectern 自己的环境（登录 shell 自己会读配置）。两者都去掉 `LECTERN_` 开头的变量。
+- 设置 `TERM=xterm-256color`（Ghostty 的 terminfo 多数机器上没有装）、`COLORTERM=truecolor`、`TERM_PROGRAM=Lectern`、`TERM_PROGRAM_VERSION=<应用版本>`；`PWD` 设为工作目录（保留日志里的写法，不换成规范路径）。
 - `LANG`、`LC_ALL`、`LC_CTYPE` 都没有设置时（从 Finder 启动的常见情况），设 `LC_CTYPE=UTF-8`，让程序按 UTF-8 输出。
 - 来源和调用方都不能指定环境变量。
 
@@ -550,20 +571,21 @@ shell 的选择：`$SHELL`（必须是绝对路径、可执行）；不可用时
 ```
 
 - 每个终端两个专属线程，都经插件的 `own_with` 拿到的闸门用 `executor.run_dedicated_gated` 启动（与 `review` 的后台任务相同的写法，句柄由 kernel 保管，停用时随之取消）：
-  - 终端线程 `terminal-<id>`：持有 libghostty-vt 的 `Terminal`、`RenderState`、两个编码器和 `MasterPty`。`poll` 两个 fd：主端（可读；有待写数据时也等可写）和唤醒 socket（`UnixStream::pair`，非阻塞）。没有工作时无限期阻塞在 `poll` 上，不定时唤醒。
+  - 终端线程 `terminal-<id>`：持有 libghostty-vt 的 `Terminal`、`RenderState`、两个编码器和 `MasterPty`。`poll` 两个 fd：主端（可读；有待写数据时也等可写）和唤醒 socket（`UnixStream::pair`，非阻塞）。只有在等帧的节奏、同步输出、空闲压缩或关闭的计时时才带超时，其余时候无限期阻塞在 `poll` 上，不定时唤醒。
   - 等待线程 `terminal-<id>-wait`：阻塞在 `Child::wait`，返回后把退出状态放进命令队列、写唤醒字节，线程结束。
-- 进程退出之后，终端线程留下，只 `poll` 唤醒 socket，保留最后的画面和滚动缓冲供滚动、选择、复制，`close` 之后结束。
-- 线程数：没有终端时为 0；每个运行中的终端 2 个，已退出的 1 个。
-- 启动（终端线程上，IO 都在这里）：规范化工作目录、检查是目录、`Projects::locate` 的项目与 `open` 时相同；选 shell；`openpty`、`spawn_command`，随后 drop `SlavePty`（父进程不留从端，否则读不到挂断）；把主端设为非阻塞；状态改为 `Running`。任一步失败时状态改为 `Failed`，线程留下（同已退出）。
+- panic：两个线程的主体都包在 `lectern_kernel::catch` 里，panic 不交给 executor。executor 会把专属任务的 panic 报给闸门，使整个插件进入 `Failed`、关闭全部终端并停用依赖它的插件（[kernel 设计「失败」](kernel.md#失败)）；一个终端出错不应影响其他终端。捕获后先 drop libghostty-vt 的状态，再丢弃 payload（不记它的消息，`Value::panic_message` 只有 kernel、executor 和 logging 能用），结束这个终端的进程（同「关闭」），状态改为 `Failed(Internal)`，记 error（只带 `term`）。libghostty-vt 内部（Zig 代码）的错误不会展开到 Rust，发布构建里 Zig 的安全检查关闭；Zig 自己的 panic 会结束整个进程（「已知限制」第 4 条）。
+- 进程退出或启动失败之后，终端线程留下，只 `poll` 唤醒 socket，保留最后的画面和滚动缓冲供滚动、选择、复制，`close` 之后结束。
+- 线程数：没有终端时为 0；每个运行中的终端 2 个，已退出或失败的 1 个。
+- 启动（终端线程上，IO 都在这里）：规范化工作目录、检查是目录、`Projects::locate` 的项目与 `open` 时相同；agent 启动时取登录环境、在它的 `PATH` 里找程序；`openpty`、`spawn_command`，随后 drop `SlavePty`（父进程不留从端，否则读不到挂断）；把主端设为非阻塞；状态改为 `Running`。任一步失败时状态改为 `Failed`，线程留下（同已退出）。
 - 读：每次 `read` 最多 64 KiB，读到 `EAGAIN` 或本轮累计 1 MiB。读到 0 或 `EIO`（从端都已关闭）后不再 `poll` 主端；状态等等待线程的结果再改。
 - 写：输入编码后追加到待写缓冲（上限 4 MiB，超出的输入整条丢弃并计入 `dropped_inputs`），主端可写时非阻塞写出。程序不读输入时缓冲停在上限，不阻塞任何线程。
 - 帧：有关注者且有变化时，`RenderState::update` 之后只为脏行重建 `GridRow`，其余行沿用上一帧的 `Arc`；新帧放进终端表，再发 `TerminalEvent::Frame`。没有关注者时只解析，不建帧。
 - 空闲压缩：输出停止 2 秒、`compression_activity` 没变时，在 `poll` 的间隙调用 `compress(Incremental)`，每次一步，直到不再 `Pending`；期间有输入或输出就停下。
-- 静止（[kernel「静止」](kernel.md#静止)）：终端线程每一轮实际工作（处理输入、读输出、生成帧、压缩一步）开始时取一个 `BusyGuard`，这一轮结束（帧已发布）时放下。视图在主线程上画这一帧不计入：程序可以一直输出，如果要等视图画完才放下，隐藏的 Terminal 页会让应用永远不静止。终端在运行、但没有输出时不持有守卫，不妨碍静止。
-- 关闭（`close`、项目关闭、插件停用）：在调用线程上从终端表去掉条目、向终端线程发关闭命令；终端线程收到后发 `Listed`，进程还在运行时先 `ChildKiller::kill`（向 shell 发 `SIGHUP`），再 drop `MasterPty`（关闭主端，前台进程组收到挂断）；2 秒内等待线程没有报告退出时，向进程组发 `SIGKILL`，再等 1 秒；然后释放 `Terminal` 和滚动缓冲，线程结束。等待线程在进程退出时结束。
+- 静止（[kernel「静止」](kernel.md#静止)）：终端线程每一轮实际工作（处理输入、读输出、生成帧、压缩一步）开始时取一个 `BusyGuard`，这一轮结束（帧已发布）时放下。视图在主线程上画这一帧不计入：程序可以一直输出，如果要等视图画完才放下，隐藏的 Terminal 页会让应用永远不静止。终端在运行、但没有输出时不持有守卫，不妨碍静止。登录环境的获取（最多 5 秒）在这一轮里，持有守卫。
+- 关闭（`close`、项目关闭、插件停用、`open` 替换已退出的终端）：在调用线程上从终端表去掉条目、向终端线程发关闭命令；终端线程收到后发 `Listed`，进程还在运行时先 `ChildKiller::kill`（向进程发 `SIGHUP`），再 drop `MasterPty`（关闭主端，前台进程组收到挂断）；2 秒内等待线程没有报告退出时，向进程组发 `SIGKILL`，再等 1 秒；然后释放 `Terminal` 和滚动缓冲，线程结束。等待线程在进程退出时结束。
 - 项目关闭：监听 `ProjectEvent::Closed`，关闭 `project` 相同的终端。之前是否询问用户由 `conversation` 的离开守卫决定（「未决问题」1）。
 - 插件停用：`Active` 的 drop 关闭全部终端（非阻塞，只发关闭命令）。应用退出时进程随后结束，主端随之关闭，子进程收到挂断。
-- 主线程上只有 `open` 的校验（读会话列表、`Projects::locate`，无 IO）、`input` 的入队、`frame` / `list` 的 `Arc` 复制和 `watch` / `close` 的表操作，都不阻塞（AGENTS.md「禁止事项」：UI 线程上不做 IO）。
+- 主线程上只有 `open` 的校验（读会话列表、项目列表，无 IO）、`input` 的入队、`frame` / `list` / `info` 的复制和 `watch` / `close` 的表操作，都不阻塞（AGENTS.md「禁止事项」：UI 线程上不做 IO）。
 - 帧是 libghostty-vt 的实时状态，不是从 git 对象派生的数据，不按 blob OID 缓存（架构规则 5 不适用）；行之间的复用见「帧」。
 - 终端线程的 QoS 沿用 executor 对专属线程的设置（`on_thread_start(ThreadKind::Dedicated)`，`app` 经 `platform` 设置），本 crate 不另设。
 
@@ -576,12 +598,13 @@ shell 的选择：`$SHELL`（必须是绝对路径、可执行）；不可用时
 3. 它的 `resume(key)` 为 None 时 `NotResumable`。
 4. `ResumeCommand` 的变体与来源一致（"session-claude-code" 只给 `ClaudeCode`，"session-codex" 只给 `Codex`），`session_id` 等于 `key.id`（两个内置来源都这样给出），且是 UUID 的规范写法（36 个字符，8-4-4-4-12，小写十六进制），否则 `InvalidSessionId`。
 5. 会话摘要的 `place` 是 `Place::Located(l)`，且 `l.project` 仍在 `Projects::open_projects()` 里，否则 `OutsideProject`。`Located` 是 `agents` 用规范化之后的 cwd 经 `locate` 得到的，所以调用线程上不再规范化（那是 IO）。工作目录用摘要里的 `cwd` 原样（agent 按 cwd 找会话），不取自来源的其他字段。
-6. 终端线程启动进程之前规范化 `cwd`、确认是目录，再 `Projects::locate`：结果的项目必须与第 5 条相同，否则 `StartError::OutsideProject` 或 `CwdMissing`（会话扫描到启动之间目录被删除、被换成指向项目之外的符号链接，或项目已关闭）。
+6. 终端线程启动进程之前规范化 `cwd`、确认是目录，再 `Projects::locate`：结果的项目必须与第 5 条相同，否则 `FailReason::OutsideProject` 或 `CwdMissing`（会话扫描到启动之间目录被删除、被换成指向项目之外的符号链接，或项目已关闭）。
 
 其余启动的规则：
 
 - `NewSession` 与 `Shell` 的 `cwd` 必须是规范路径，由调用方从项目快照取得（worktree 根、文件夹项目根）；调用线程上 `Projects::locate(cwd)` 为 None 时 `OutsideProject`，终端线程上同样做第 6 条检查。
-- 程序名和固定参数只来自「启动命令表」；来源只给出会话 ID，调用方只给出枚举，都不能给出程序、参数或环境变量。
+- 程序名和固定参数只来自「启动命令」一节的表；来源只给出会话 ID，调用方只给出枚举，都不能给出程序、参数或环境变量。agent 不经 shell 启动，argv 不经任何解析。
+- 粘贴先去掉控制字符（`Input::Paste`），被粘贴的文字不能借 `ESC[201~` 提前结束 bracketed paste、再注入按键。
 - 程序输出能触发的动作：
   - 剪贴板：不注册 `on_clipboard_write`，OSC 52 写剪贴板被忽略；读剪贴板 libghostty-vt 一律忽略。
   - 回显：ENQ 的应答为空；不注册任何把程序可控的文字写回输入的应答（标题报告等），实现时用测试确认（`no_echo_of_program_text`）。设备属性、XTVERSION（应答 `Lectern <版本>`）、尺寸、颜色与明暗的查询只应答固定信息和 `Theme` 的颜色。
@@ -597,11 +620,11 @@ shell 的选择：`$SHELL`（必须是绝对路径、可执行）；不可用时
 | 预算 | 本 crate 的影响 | 怎样满足 |
 |---|---|---|
 | 冷启动 20 ms（ADR 0017） | 首帧之前不做任何事 | `AfterFirstFrame` 激活；`activate` 只建空表，< 1 ms（kernel「性能」的 `plugin/*/activate`）。静态库只增加二进制的代码段，不在启动时做初始化 |
-| 空闲内存 60 MB（空窗口）、100 MB（monorepo） | 没有终端时不建线程、不打开 PTY | `plugin/terminal/resident` < 1 MB。空闲预算的采样里没有打开的终端 |
+| 空闲内存 60 MB（空窗口）、100 MB（monorepo） | 没有终端时不建线程、不打开 PTY、不取登录环境 | `plugin/terminal/resident` < 1 MB。空闲预算的采样里没有打开的终端 |
 | 滚动与输入 120 fps | 回显与输出不占主线程 | 解析、编码、建帧都在终端线程；主线程上的 `input` ≤ 2 µs、`frame` 只复制 `Arc`。整条路径由 `app/input_frames` 判定（负责的 crate 是 `terminal_view`） |
 | 安装包 ≤ 80 MB（ADR 0018） | 静态链接的 `libghostty-vt.a` | 实现 PR 记录 `app/bundle_size` 的增量（预计几 MB），写进「实际验证」 |
 
-打开的终端不属于任何空闲预算，它的内存是新的份额（下表）。8 个终端都写满滚动缓冲时约 8 × 24 MB，与 Terminal.app 一类终端相当；份额以单个终端计，便于发现回退。
+打开的终端不属于任何空闲预算，它的内存是新的份额（下表）。8 个终端都写满滚动缓冲时约 8 × 24 MB，与 Terminal.app 一类终端相当；份额以单个终端计，便于发现回退。第一次启动 agent 时取登录环境要运行一次用户的 shell（通常几百毫秒，上限 5 秒），只在用户点了恢复之后、在终端线程上，期间 Terminal 页显示 `Starting`。
 
 新增基准（`bench` 的预算表，实现 PR 加入；`Time` 目标在 release 构建里测，footprint 用 [bench 设计「进程内基准」](bench.md#进程内基准)里子进程测常驻增量的方式，因为 libghostty-vt 的页面不经 Rust 的分配器）：
 
@@ -626,76 +649,116 @@ shell 的选择：`$SHELL`（必须是绝对路径、可执行）；不可用时
 | 情况 | 表现 |
 |---|---|
 | 会话不能恢复（`LaunchError` 的各种） | `open` 返回错误，不创建终端；调用方显示一行提示（`conversation` 的 Fluent 键） |
+| 会话已有启动中或运行中的终端 | `LaunchError::AlreadyRunning(id)`；调用方切到那个终端 |
 | 已有 8 个终端 | `LaunchError::TooMany`；调用方提示先关闭一个 |
 | 工作目录已不存在 / 指向项目之外 | `RunState::Failed(CwdMissing / OutsideProject)`，帧为空白，视图显示原因 |
+| `claude` / `codex` 不在登录环境的 `PATH` 上 | `Failed(NotInstalled(agent))`，视图提示安装 `AgentCommand::program` |
+| 取不到登录环境（shell 超时、失败） | 退回 Lectern 自己的环境继续启动，warn 日志；程序找不到时同上 |
 | 找不到 shell / PTY 打开失败 | `Failed(NoShell / Spawn)`，warn 日志带错误码 |
-| `claude` / `codex` 不在 `PATH` 上 | shell 输出「command not found」，`Exited { code: 127 }`；视图对 agent 启动的 127 显示一行提示 |
 | 程序退出 | `Exited`，最后的画面和滚动缓冲保留，可以滚动、选择、复制；同一会话再次 `open` 时关闭它、开新的 |
 | 程序不读输入、输入堆积 | 待写缓冲满 4 MiB 后丢弃新的输入，`dropped_inputs` 加一，warn 日志（每个终端只记第一次） |
 | 程序忽略 `SIGHUP` | 关闭后 2 秒 `SIGKILL` 进程组 |
 | 应用退出时程序仍在运行 | 插件停用时发 `SIGHUP`、关闭主端；忽略挂断的后台进程会留下（「已知限制」第 3 条） |
 | 大量输出 | 每 8 ms 最多一帧，解析不落后于读；程序在 PTY 缓冲满时自然阻塞 |
 | 读写主端出错 | warn 日志（`Value::io`），停止读写，状态等等待线程的结果 |
-| 终端线程 panic | executor 捕获并记录；本终端的状态改为 `Failed(Spawn { errno: None })`，其他终端不受影响 |
+| 终端线程 panic | 本终端 `Failed(Internal)`、进程被结束，error 日志；插件和其他终端不受影响 |
 
 ## 日志与诊断
 
-规则见 [ADR 0046](../adr/0046.md) 与 [logging 设计「隐私」](logging.md#隐私)。字段值的写法集中在 `src/diag.rs`；`LaunchKind`、`AgentCommand`、`ShellKind`、`LaunchError`、`StartError` 各自实现 `Field`（写成固定的小写名）。
+规则见 [ADR 0046](../adr/0046.md) 与 [logging 设计「隐私」](logging.md#隐私)。字段值的写法集中在 `src/diag.rs`；`LaunchKind`、`AgentCommand`、`LaunchError`、`FailReason` 和程序种类各自实现 `Field`（写成固定的小写名）。
 
 - 默认记录：
-  - info `terminal started`：`term`（`TerminalId`）、`launch`（`resume` / `new_session` / `shell`）、`agent`（`claude_code` / `codex`，只在 agent 启动时）、`shell`（`ShellKind`）、`argc`（argv 的个数）、`cwd`（`Value::path`）、`pid`、`cols`、`rows`。这就是 logging「隐私」对子进程要求的程序名（不含目录）、参数个数、工作目录、pid。
+  - info `terminal started`：`term`（`TerminalId`）、`launch`（`resume` / `new_session` / `shell`）、`program`（不含目录的程序名，取自固定表：agent 启动为 `claude` / `codex`；`Shell` 启动按 shell 的文件名记 `zsh`、`bash`、`fish`、`ksh`、`sh`、`dash`，表外的记 `other`）、`argc`（argv 的个数）、`cwd`（`Value::path`）、`pid`、`cols`、`rows`、`login_env`（`captured` / `fallback` / `not_needed`）。这就是 logging「隐私」对子进程要求的程序名（不含目录）、参数个数、工作目录、pid；程序的完整路径（来自 `$SHELL` 或 `PATH` 的值）不记。
   - info `terminal exited`：`term`、`pid`、`code`、`signaled`、`ran_ms`。
   - info `terminal closed`：`term`、`reason`（`user` / `project_closed` / `deactivated` / `replaced`）、`killed`（是否用了 `SIGKILL`）。
-  - warn `terminal launch refused`：`reason`（`LaunchError`）、`launch`。
-  - warn `terminal start failed`：`term`、`reason`（`StartError`）、`error`（`Value::io`，只在 `Spawn`）。
-  - warn `shell not supported, using /bin/zsh`：`shell`（`Value::path`，shell 的路径）。
+  - warn `terminal launch refused`：`reason`（`LaunchError`，`AlreadyRunning` 不记）、`launch`。
+  - warn `terminal start failed`：`term`、`reason`（`FailReason`）、`error`（`Value::io`，只在 `Spawn`）。
+  - warn `login environment unavailable`：`term`；原因由 `platform` 自己记。
   - warn `pty read failed` / `pty write failed`：`term`、`error`（`Value::io`）。
   - warn `terminal input dropped`：`term`、`bytes`（这次丢弃的字节数）；每个终端只记第一次。
+  - error `terminal thread panicked`：`term`、`thread`（`engine` / `wait`）。
 - 详细级别：
   - debug `terminal throughput`：每个终端每秒最多一条，`term`、`read_bytes`、`frames`、`max_frame_us`、`dirty_rows`。
   - debug `terminal resized`：`term`、`cols`、`rows`。
   - debug `terminal compressed`：`term`、`steps`。
   - trace `terminal input`：`term`、`kind`（输入的变体名）、`bytes`（编码后的字节数）。
 - 关联 ID：终端线程和等待线程上的记录由 executor 带上 `plugin`、`act`、`task`；恢复的终端在线程开始时用 `scope` 设 `session`（会话 UUID 的字节，与 `agents`、`review` 相同）。会话 ID 只作为关联 ID 出现，不作为参数记录。
-- 不记录：终端输出的任何字节、标题、OSC 7 的目录、选区与复制的文字、粘贴与输入的文字（包括按键产生的字符）、argv 的内容（命令字符串、程序名之后的参数）、环境变量的名字和值、`Theme` 的颜色值。只记长度、计数和种类。
-- 金丝雀测试 `logs_hold_no_terminal_content`：`testing::capture()` 在 trace 级别下，假程序输出含金丝雀的文字、OSC 0 标题、OSC 7 目录；测试粘贴、输入、复制含金丝雀的文字；子进程环境里有一个值为金丝雀的变量；然后 `assert_absent`。
+- 不记录：终端输出的任何字节、标题、OSC 7 的目录、选区与复制的文字、粘贴与输入的文字（包括按键产生的字符）、argv 的内容（程序名之后的参数）、环境变量的名字和值（包括 `$SHELL`、`PATH`，以及由它们得到的程序路径）、`Theme` 的颜色值。只记长度、计数和种类。
+- 金丝雀测试 `logs_hold_no_terminal_content`：`testing::capture()` 在 trace 级别下，假程序输出含金丝雀的文字、OSC 0 标题、OSC 7 目录；测试粘贴、输入、复制含金丝雀的文字；登录环境里有一个值为金丝雀的变量，`PATH` 和 `with_shell` 的路径里也有金丝雀；然后 `assert_absent`。
 
 ## 测试
 
 - 用假程序，不用真实的 `claude`、`codex`，不依赖网络和登录状态。假程序是本 crate 的一个 bin 目标 `lectern-terminal-fake`（`required-features = ["test-support"]`），集成测试从 `CARGO_BIN_EXE_lectern-terminal-fake` 取路径。它有三种用法：
-  - 作为 shell（`with_shell(fake, ShellKind::Zsh)` 等）：把收到的 argv、工作目录和环境变量的名字写进测试给的记录文件，再按夹具回放输出。用来逐项核对启动命令表。
-  - 作为 agent：测试建一个临时目录，放名为 `claude`、`codex` 的符号链接指向它，放在 `PATH` 最前面；记录 argv 并回放夹具。
+  - 作为 agent：测试建一个临时目录，放名为 `claude`、`codex` 的符号链接指向它，用 `with_login_env` 给出以这个目录开头的 `PATH`；它把收到的 argv、工作目录和环境变量的名字写进测试给的记录文件，再按夹具回放输出。用来逐项核对启动命令表和环境。
+  - 作为 shell（`with_shell(fake)`）：核对 `Shell` 启动的 argv[0] 与环境。
   - 回显模式：把输入原样写回输出（`terminal/echo_latency` 和输入测试）。
-- 端到端的一条：`with_shell("/bin/sh", ShellKind::Sh)`、`HOME` 设为临时目录（不读用户的配置）、`PATH` 以假 `claude` 的目录开头，确认 `exec "$0" "$@"` 这条链路把 argv 原样传到 agent。
+- 测试都用 `with_login_env`，不运行用户的 shell；登录环境本身的获取在 `platform` 测试。
 - 夹具是手写的字节序列（`tests/fixtures/*.vt`），不取自真实会话或真实程序的输出：ANSI 16 色、256 色、24 位色、粗体斜体下划线（含波浪线与颜色）、反显、CJK 宽字符、组合字符、ZWJ 表情、制表符、软换行、备用屏幕、光标移动与形状、清屏、OSC 0 / 2 / 7 / 10 / 11、mode 2026。
 - 帧的 insta 快照（`frame_*`）：每份夹具一份，写成每行的文字、列位置与样式段，逐个看过。
 - 帧的复用（`row_reuse_*`）：只改一行时其余行的 `Arc` 与上一帧相同（`Arc::ptr_eq`），`key` 不变；选区变化不改变任何行的 `key`。
-- 输入编码（`input_*`）：方向键在普通模式与 DECCKM 下的序列；kitty 键盘协议开启后的编码；bracketed paste 开与不开；鼠标跟踪开启时编码、按 Shift 时改为选区；备用屏幕下滚轮换成方向键；焦点事件只在 mode 1004 开启时写出。
+- 输入编码（`input_*`）：方向键在普通模式与 DECCKM 下的序列；kitty 键盘协议开启后的编码；鼠标跟踪开启时编码、按 Shift 时改为选区；备用屏幕下滚轮换成方向键；焦点事件只在 mode 1004 开启时写出；进程退出后滚动、选区、全选照常，按键与粘贴被丢弃。
+- 粘贴（`paste_*`）：开了 bracketed paste 时包上首尾序列；没开时 `\n` 换成 `\r`；C0（`\t`、`\n` 除外）、ESC、C1 都被去掉，含 `ESC[201~` 的文字不能提前结束粘贴；末尾不追加回车。
+- 复制（`copy_*`）：单行、跨软换行（不插入换行）、跨硬换行、含宽字符的选区的纯文本；没有选区时 `reply` 收到 None；调用方的 token 已失效时 `reply` 不被调用。
 - 颜色（`theme_*`）：OSC 10 / 11 / 4 的查询应答取 `Theme`；mode 2031 的明暗报告；`SetTheme` 之后全部行的颜色更新。
 - 帧的节奏（`pacing_*`）：持续输出时相邻帧间隔 ≥ 8 ms；空闲后的第一次输出立即发布；mode 2026 期间不发布、200 ms 后发布。
-- 安全（`resume_refuses_*`）：非 UUID、大写 UUID、带空格的 ID、ID 与 `key.id` 不同、来源 ID 为 `ext.x.y`、来源不在集合里、`resume` 为 None、`Place` 不是 `Located`、`cwd` 是指向项目之外的符号链接（第 6 条），各返回对应的错误或 `Failed`，假程序都没有被启动（记录文件不存在）；`no_echo_of_program_text`：程序请求标题报告等查询后，输入端没有出现程序可控的文字。
-- 生命周期：`no_threads_until_open`（激活后没有 `terminal-*` 线程）；`resume_reuses_running_terminal`；`exited_terminal_is_replaced`；`close_*`（`SIGHUP` 后退出；忽略 `SIGHUP` 的假程序 2 秒后被 `SIGKILL`；两个线程都结束）；`project_closed_closes_its_terminals`；`deactivate_closes_all`；`exit_codes_*`（正常退出、127、被信号结束）；`input_overflow_*`；`quiescent_after_output_stops`（输出停止后 kernel 报告静止）；`concurrent_spawn`（8 个终端在其他线程大量分配内存时同时启动，都能运行）。
+- 启动（`launch_*`）：启动命令表的每一行（argv 与程序路径）；环境里有 `TERM`、`COLORTERM`、`TERM_PROGRAM`，没有 `LECTERN_` 开头的变量；`PATH` 里没有 `claude` 时 `Failed(NotInstalled(ClaudeCode))`，假程序没有被启动。
+- 安全（`resume_refuses_*`）：非 UUID、大写 UUID、带空格的 ID、ID 与 `key.id` 不同、变体与来源不一致、来源 ID 为 `ext.x.y`、来源不在集合里、`resume` 为 None、`Place` 不是 `Located`、`cwd` 是指向项目之外的符号链接（第 6 条），各返回对应的错误或 `Failed`，假程序都没有被启动（记录文件不存在）；`no_echo_of_program_text`：程序请求标题报告等查询后，输入端没有出现程序可控的文字。
+- 生命周期：`no_threads_until_open`（激活后没有 `terminal-*` 线程，也没有取登录环境）；`resume_refuses_while_running`（`AlreadyRunning` 带已有的 ID）；`exited_terminal_is_replaced`、`failed_terminal_is_replaced`；`close_*`（`SIGHUP` 后退出；忽略 `SIGHUP` 的假程序 2 秒后被 `SIGKILL`；两个线程都结束）；`project_closed_closes_its_terminals`；`deactivate_closes_all`；`exit_codes_*`（正常退出、非零退出、被信号结束）；`input_overflow_*`；`panic_fails_only_that_terminal`（测试钩子让一个终端线程 panic：它变为 `Failed(Internal)`，另一个终端照常运行，插件仍是 `Active`）；`quiescent_after_output_stops`（输出停止后 kernel 报告静止）；`concurrent_spawn`（8 个终端在其他线程大量分配内存时同时启动，都能运行）。
 - PTY 与真实进程的测试在 Linux 与 macOS 都跑（本 crate 不依赖 GPUI）；`terminal/echo_latency` 只在 macOS 判定。
 
 ## 对其他 crate 的要求
 
 1. `services`：新增 `terminal` 模块，内容是「接口」的服务、事件、输入、帧几节（本文的第 1 步）。只用标准库和 serde，不加依赖。
-2. 工具链与 CI（`ci.md`、`justfile`、根 AGENTS.md「命令」、`cargo-workspace.md`）：
+2. `platform`：新增 `login_env` 模块（[conversation 设计](https://github.com/SoloJiang/lectern-app/pull/262)「对其他 crate 的要求」C 说的、与 `agents` 共用的登录 shell 环境）。它不依赖 GPUI，非插件，`agents` 和本 crate 都能依赖；在 platform 的设计文档里加一节（`Refs #12`），本文第 3 步之前实现：
+
+   ```rust
+   // lectern_platform::login_env
+   /// 用户的登录 shell：`$SHELL`（绝对路径、可执行）；否则用户数据库（`getpwuid_r`）里的登录 shell；
+   /// 否则 `/bin/zsh`；都不可用时 None。读环境变量、用户数据库和 stat，阻塞很短；不在 UI 线程上调用。
+   pub fn user_shell() -> Option<PathBuf>;
+
+   /// 登录 shell 设置之后的环境变量。第一次调用时运行一次 `<user_shell> -l -i -c <打印环境的命令>`
+   /// （stdin 为 /dev/null，没有控制终端，自己的进程组），用标记把环境和配置文件的其他输出分开，
+   /// 值里的换行不被误拆；最多等 5 秒，超时向进程组发 SIGKILL。结果（成功或失败）在进程内缓存，
+   /// 之后的调用直接返回；并发的第一次调用只运行一次 shell。阻塞，只在 executor 或专属线程上调用，
+   /// 首帧之前不调用。
+   pub fn login_env() -> Result<Arc<LoginEnv>, LoginEnvError>;
+
+   pub struct LoginEnv { pub vars: Box<[(OsString, OsString)]> }
+   impl LoginEnv {
+       pub fn get(&self, name: &str) -> Option<&OsStr>;
+   }
+
+   /// 在 `path`（冒号分隔）的各个目录里找名为 `name`（不含 `/`）的可执行普通文件，返回第一个的绝对路径。
+   /// 阻塞（stat）。
+   pub fn find_program(name: &str, path: &OsStr) -> Option<PathBuf>;
+
+   #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+   pub enum LoginEnvError { NoShell, Spawn, Timeout, Unparsable }
+   ```
+
+   日志：失败记 warn（`LoginEnvError` 的种类、`Value::io`），成功记 debug（变量个数、耗时）；不记 shell 的路径、变量的名字和值、shell 的输出。测试用假 shell，不运行用户的 shell。
+3. 工具链与 CI（`ci.md`、`justfile`、根 AGENTS.md「命令」、`cargo-workspace.md`）：
    - Linux 与 macOS 的 CI 任务在构建之前安装 Zig 0.15.2（官方发布包，校验 SHA-256），`git` 已有。`OUT_DIR` 在 `target/` 里，随现有的 `Swatinem/rust-cache` 缓存；缓存未命中时多出克隆 Ghostty 和 Zig 构建的时间（未测，预计 1–3 分钟），实现 PR 把实测写进 ci 设计的「实际验证」，并核对 Linux 任务约 2 分钟、macOS 任务 15 分钟的目标是否仍满足。
    - `justfile`：`check`、`test`、`bench` 之前检查 `zig version` 是 0.15.2，不是时报错并给出安装方式。
    - 根 AGENTS.md「命令」一节的所需工具加上 Zig 0.15.2。
-   - `cargo-workspace.md` 里 libghostty-vt 那一行改为本文的版本与 Ghostty 提交。
+   - `cargo-workspace.md` 里 libghostty-vt 那一行改为本文的两个版本号与 Ghostty 提交。
    - `just deny` 通过；Ghostty 编进静态库的 C / C++ 依赖的许可证由实现 PR 人工核对（「依赖」）。
-3. `conversation`：
-   - Terminal 页的插件在 `requires` 里依赖 `dyn Terminals`，与不依赖它的部分分成两个插件，终端不可用时 Conversation 的其他页照常可用。
-   - 用 `Launch::Resume(key)` 恢复会话；页可见时持有 `FrameInterest`，隐藏时 drop；监听 `TerminalEvent`，转到主线程后让视图重绘；关闭按钮调用 `close`。
+4. `conversation`（[conversation 设计](https://github.com/SoloJiang/lectern-app/pull/262)「对其他 crate 的要求」D）。那一节写明接口的名字以本文为准，对应关系如下：
+   - `resume(session, size)` 是 `open(OpenSpec { launch: Launch::Resume(key), size: Some(size), theme })`：多了 `theme`（第一帧就要有颜色，由 `terminal_view` 给出）。`AlreadyRunning`、替换已退出或失败的终端、返回前已登记，与 D 相同。
+   - `ResumeRefused::NotResumable` / `OutsideProject` / `AlreadyRunning` 对应 `LaunchError` 的同名变体（`LaunchError` 另有 `UnknownSession`、`UntrustedSource`、`InvalidSessionId`、`TooMany`，界面可以都显示为「不能恢复」）。`NotInstalled` 不在 `open` 里同步返回：查 `PATH` 是 IO，不在调用线程上做，它随 `Listed` 以 `RunState::Failed(NotInstalled(agent))` 送达，界面用 `AgentCommand::program` 显示程序名。
+   - `status(id)` 是 `info(id)` 的 `state`；「是否在驱动会话」按 D 的规则看 `Starting` / `Running`。
+   - `paste(id, text)` 是 `input(id, Input::Paste(text))`，去掉控制字符、bracketed paste、不追加回车的规则与 D 相同。
+   - `TerminalEvent::Output { id }` 是 `TerminalEvent::Frame { id, .. }`（只在有 `FrameInterest` 时发出）；`Status { id }` 是 `Listed`（读 `list()` 或 `info(id)`）。另有 `Bell`。
+   - 服务 ID 是 "terminal"（与插件 ID 相同，同 "review"），不是 D 里写的 "terminals"。
+   - Terminal 页的插件在 `requires` 里依赖 `dyn Terminals`，与不依赖它的部分分成两个插件；页可见时持有 `FrameInterest`，隐藏时 drop；关闭按钮调用 `close`。
    - 运行中的终端在离开时是否确认，按「未决问题」1 注册离开守卫（`LeaveScope::Project`、`Worktree`、`App`）。
-   - `LaunchError`、`StartError` 与 127 退出码的提示文字（Fluent 键，en 与 zh-CN）。
-4. `terminal_view`：把 GPUI 的按键、IME 文字、粘贴、鼠标、滚动、焦点、尺寸转成 `Input`；从 `ui` 的 `Palette` 推出 `Theme`，外观变化时发 `SetTheme`；按 `Frame` 绘制；拥有 `app/input_frames`（另写设计文档）。
-5. `app`：装配 `TerminalPlugin::new(TerminalDeps { executor })`，排在 `project` 与 `agents` 之后（第 4 步）；`app/bundle_size` 记录静态库的增量。
-6. `bench`：预算表加入「性能」里的条目；`app/input_frames` 的 profile 用 `with_shell` 指向一个回显程序（本 crate 的假程序，或 bench 自带的同类程序，由 bench 的实现决定），不运行用户的 shell 和它的配置。
-7. `review_view` / `conversation`（#22 发回会话）：经 `Input::Paste` 加 `Input::Key(Enter)` 写入恢复的会话。
-8. `project_home`：空状态的 New session 调用 `Launch::NewSession`（本 issue 之外）。
+   - `LaunchError`、`FailReason` 的提示文字（Fluent 键，en 与 zh-CN）。
+5. `terminal_view`：非插件的视图库。把 GPUI 的按键、IME 文字、粘贴、鼠标、滚动、焦点、尺寸转成 `Input`；从 `ui` 的 `Palette` 推出 `Theme`，外观变化时发 `SetTheme`；按 `Frame` 绘制；拥有 `app/input_frames`（另写设计文档，按 conversation 设计「对其他 crate 的要求」E）。
+6. `app`：装配 `TerminalPlugin::new(TerminalDeps { executor })`，排在 `project` 与 `agents` 之后（第 4 步）；`app/bundle_size` 记录静态库的增量。
+7. `bench`：预算表加入「性能」里的条目；`app/input_frames` 的 profile 用 `with_shell` 指向一个回显程序（本 crate 的假程序，或 bench 自带的同类程序，由 bench 的实现决定），不运行用户的 shell 和它的配置。
+8. `review_view` / `conversation`（#22 发回会话）：有终端在驱动会话时经 `Input::Paste` 写入，不追加回车，用户在终端里按 ↵ 提交（conversation 设计「对其他 crate 的要求」I）。
+9. `project_home`：空状态的 New session 调用 `Launch::NewSession`（本 issue 之外）。
 
 ## 未决问题
 
@@ -706,10 +769,11 @@ shell 的选择：`$SHELL`（必须是绝对路径、可执行）；不可用时
 ## 已知限制
 
 1. 本插件依赖 `dyn SessionSource`：两个内置会话来源都不可用（被用户停用）时，终端插件不激活，登录 shell 也打不开。kernel 没有可选依赖；要解除，需把登录 shell 拆成不依赖会话来源的第二个插件，等有这个需求时再做。
-2. 不在启动命令表里的 shell（如 nushell、xonsh）退回 `/bin/zsh`，这些用户的 `PATH` 设置不生效，`claude` 可能找不到（127）。
+2. 登录环境在一次运行里只取一次：用户改了 `.zshrc`（如新装了 `claude`）之后，要重启 Lectern 才生效。
 3. 应用退出时忽略 `SIGHUP`、又不在前台进程组的后台进程会留下，与关闭 Terminal.app 窗口的行为相同。
-4. 闪烁文字按普通文字显示；kitty 图形协议、Sixel 不支持。
-5. 视图在主线程上画帧不计入静止（「数据流与线程」）：UI 探针在静止之后读语义树时，终端的最后一帧可能还没画出，探针要另等一帧。
+4. libghostty-vt 内部（Zig 代码）的 panic 会结束整个 Lectern 进程，不能按终端隔离；发布构建（ReleaseFast）里 Zig 的运行时安全检查关闭，出现的可能很小。
+5. 闪烁文字按普通文字显示；kitty 图形协议、Sixel 不支持。
+6. 视图在主线程上画帧不计入静止（「数据流与线程」）：UI 探针在静止之后读语义树时，终端的最后一帧可能还没画出，探针要另等一帧。
 
 ## 验收
 
@@ -721,19 +785,18 @@ shell 的选择：`$SHELL`（必须是绝对路径、可执行）；不可用时
 
 **第 2 步：libghostty-vt 接入与网格快照（本 crate 的 PR，`Refs #5`）。**
 
-- 工作区依赖加上 `libghostty-vt = { version = "=0.2.2", default-features = false }`；`cargo tree -p lectern-terminal -e features` 里没有 `kitty-graphics`、`log`、`tracing`、`link-dynamic`。
+- 工作区依赖加上 `libghostty-vt = { version = "=0.2.2", default-features = false }` 与 `libghostty-vt-sys = "=0.2.2"`，本 crate 两个都直接依赖；`cargo tree -p lectern-terminal -e features` 里没有 `kitty-graphics`、`log`、`tracing`、`link-dynamic`；`cargo tree -i libghostty-vt-sys` 只有 0.2.2。
 - `rg 'set_logger' crates/terminal/src` 没有结果。
-- 「对其他 crate 的要求」第 2 项的 CI、`justfile`、AGENTS.md 与 `cargo-workspace.md` 改动在同一个 PR 里；Linux 与 macOS 的 CI 任务通过；`just deny` 通过。
-- 不经 PTY 的引擎（`test-support` 的 `testing::Engine`：喂字节、发输入、取帧）完成；`just test -p lectern-terminal` 里 `frame_*`（快照逐个看过）、`row_reuse_*`、`input_*`、`theme_*`、`pacing_*`、`copy_*` 通过。
+- 「对其他 crate 的要求」第 3 项的 CI、`justfile`、AGENTS.md 与 `cargo-workspace.md` 改动在同一个 PR 里；Linux 与 macOS 的 CI 任务通过；`just deny` 通过。
+- 不经 PTY 的引擎（`test-support` 的 `testing::Engine`：喂字节、发输入、取帧）完成；`just test -p lectern-terminal` 里 `frame_*`（快照逐个看过）、`row_reuse_*`、`input_*`（不含进程退出的部分）、`paste_*`、`theme_*`、`pacing_*`、`copy_*` 通过。
 - `just bench terminal/` 里 `terminal/parse_plain`、`terminal/parse_sgr`、`terminal/frame_full`、`terminal/frame_echo`、`terminal/idle_footprint`、`terminal/scrollback_footprint` 在预算内。
 
-**第 3 步：PTY、启动、插件与服务（本 crate 的 PR，`Refs #12`）。**
+**第 3 步：PTY、启动、插件与服务（本 crate 的 PR，`Refs #12`；前置：第 2 项 `platform::login_env`）。**
 
 - `Cargo.toml` 加 `plugin = true`，`python3 scripts/check_architecture.py` 通过；`portable-pty = "=0.9.0"` 与 rustix 的 `event`、`process` feature 加入工作区依赖，`just deny` 通过。
-- `just test -p lectern-terminal` 里 `launch_argv_*`（启动命令表的每一行、每种 shell）、`launch_env_*`（有 `TERM`、`COLORTERM`、`TERM_PROGRAM`，没有 `LECTERN_` 开头的变量）、`resume_runs_through_posix_sh`、`resume_refuses_*`、`no_echo_of_program_text`、`no_threads_until_open`、`resume_reuses_running_terminal`、`exited_terminal_is_replaced`、`close_*`、`project_closed_closes_its_terminals`、`deactivate_closes_all`、`exit_codes_*`、`input_overflow_*`、`quiescent_after_output_stops`、`concurrent_spawn`、`logs_hold_no_terminal_content` 通过。
-- `rg 'try_clone_reader|take_writer' crates/terminal/src` 没有结果。
+- `just test -p lectern-terminal` 里 `launch_*`、`resume_refuses_*`、`no_echo_of_program_text`、`no_threads_until_open`、`resume_refuses_while_running`、`exited_terminal_is_replaced`、`failed_terminal_is_replaced`、`close_*`、`project_closed_closes_its_terminals`、`deactivate_closes_all`、`exit_codes_*`、`input_*`（进程退出的部分）、`input_overflow_*`、`panic_fails_only_that_terminal`、`quiescent_after_output_stops`、`concurrent_spawn`、`logs_hold_no_terminal_content` 通过。
+- `rg 'try_clone_reader|take_writer|\.kill\(\)' crates/terminal/src` 只有 `ChildKiller` 的 `kill`；`rg 'Command::new|"sh"|"-c"' crates/terminal/src --glob '!**/tests*' --glob '!**/testing*'` 没有结果（agent 不经 shell 启动）。
 - `just bench terminal/` 里 `terminal/open`、`terminal/input`、`terminal/echo_latency`（macOS）、`plugin/terminal/activate` 在预算内。
-- 装了 fish 的机器上手动跑一次 `launch_fish_*`，结果写进「实际验证」。
 
 **第 4 步：`app` 装配（`app` 的 PR，`Refs #12`）。**
 
