@@ -90,9 +90,10 @@ pub struct ForgeDeps {
     pub data_dir: PathBuf,
     /// `app` 取 `platform::dirs::app_cache()` 下的 `forge/`。其中的空目录 `cwd/` 是子进程的工作目录。
     pub scratch_dir: PathBuf,
-    /// 子进程能拿到的环境变量（「命令行的调用」）。`app` 在首帧之后从进程环境读一次，
-    /// 进程环境里没有代理变量时补上前置条件 E 读出的系统代理。
-    pub env: ChildEnv,
+    /// 子进程能拿到的环境变量（「命令行的调用」）。本 crate 在第一次启动子进程之前、在后台线程上
+    /// 调用它一次，结果在这次运行里不变，所以首帧之前不读环境变量和系统代理。`app` 传入的闭包读
+    /// `std::env::vars_os()`，进程环境里没有代理变量时补上前置条件 E 读出的系统代理，再交给 `ChildEnv::from_vars`。
+    pub env: Box<dyn Fn() -> ChildEnv + Send + Sync>,
     /// `GIT_CEILING_DIRECTORIES`，`app` 从进程环境读一次（与 `project`、`review` 相同）。
     pub git_ceilings: Arc<[PathBuf]>,
 }
@@ -138,12 +139,12 @@ kernel 没有可选依赖，所以 `forge` 不 requires `dyn Usage`、`dyn Revie
   }
   pub struct SystemProxies { pub http: Option<(String, u16)>, pub https: Option<(String, u16)>, pub socks: Option<(String, u16)>, pub exceptions: Vec<String>, pub pac_only: bool }
   ```
-  `app` 把它换成 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`（`socks5://`）、`NO_PROXY` 放进 `ChildEnv`。第 2 步之前完成；没完成时只用进程环境里的代理。
+  `app` 在 `ForgeDeps::env` 的闭包里调用它（首帧之后、forge 第一次启动子进程之前，在后台线程上），把结果换成 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`（`socks5://`）、`NO_PROXY` 放进 `ChildEnv`。第 2 步之前完成；没完成时只用进程环境里的代理。
 - **F. `usage`**：
   - `MrSource` 的三个方法可能等子进程最多 30 秒（「数据流与线程」）。`usage` 用 `Executor::run_dedicated` 调用它们，或保证同一时刻最多一个调用在等，不占满工作线程。
   - 错误的含义按本文「MR 来源」：不是代码平台的地址返回 `Ok(None)`；命令行缺失、没登录、离线、被限流且没有缓存、用户关闭了连接，都返回 `Offline`。
   - `ForgeRepo::host` 是命令行主机名（「主机与允许表」），不是远端地址里的主机。
-- **G. `app`**：装配三个插件，传入 `ForgeDeps`；`ChildEnv` 按前置条件 E 补上系统代理。
+- **G. `app`**：装配三个插件，传入 `ForgeDeps`；`env` 是一个闭包，不在装配时读环境，`ChildEnv` 按前置条件 E 补上系统代理。
 - **H. `forge_view`**（新的视图 crate，#25）：先写自己的设计文档和 `crates/forge_view/AGENTS.md`，再实现。要满足：
   - 侧栏 `Views` 区贡献 Merge Requests 条目；MR 屏幕读 `Forge::snapshot` 和 `Forge::mr`，持有 `watch` / `watch_mr` 期间可见。
   - 远端主机不认识时（`HostState::UnknownHost`）显示主机名，让用户选 GitHub 或 GitLab、确认命令行主机名，确认后发 `ForgeCommand::AddHost`。确认之前不发任何请求。
@@ -384,7 +385,8 @@ pub enum SourceKind {
 pub struct Capabilities {
     pub refresh: bool,
     pub fingerprint: bool,
-    /// `fetch`、`shared_analyses` 可能等子进程或网络，最多 30 秒；调用方用 `Executor::run_dedicated`。
+    /// `fetch`、`shared_analyses` 可能等子进程或网络（`fetch` 最多 30 秒，`shared_analyses` 最多 180 秒）；
+    /// 调用方用 `Executor::run_dedicated`。
     pub remote: bool,
     /// 实现了 `shared_analyses`。
     pub shared_analysis: bool,
@@ -478,8 +480,8 @@ impl MrChangesRegistration { pub fn new(release: impl FnOnce() + Send + Sync + '
 | 方法 | 做什么 | 错误 |
 |---|---|---|
 | `repo(remote_url)` | 解析地址（「远端地址」），查允许表，查缓存，没有或过期（24 小时）时请求仓库接口 | 不是代码平台的地址、不在允许表：`Ok(None)`；仓库 404：`NotFound`；命令行缺失、没登录、离线、被限流且没有缓存、总开关关闭：`Offline` |
-| `mrs_for_branch(repo, branch)` | 先查本项目「MR 列表」的结果，再查按分支的缓存（10 分钟），都没有时按分支请求；对 fork 也查它的上游仓库（「MR 列表」） | 同上；有缓存时失败也返回缓存 |
-| `mrs_containing(repo, commit)` | GitHub `commits/{sha}/pulls`，GitLab `repository/commits/{sha}/merge_requests`；缓存 10 分钟 | 同上 |
+| `mrs_for_branch(repo, branch)` | 按 `repo.host` 查允许表（「主机与允许表」）；先查本项目「MR 列表」的结果，再查按分支的缓存（10 分钟），都没有时按分支请求；对 fork 也查它的上游仓库（「MR 列表」） | `repo.host` 不在允许表、总开关关闭：`Offline`，不启动子进程；其余同上一行；有缓存时请求失败也返回缓存 |
+| `mrs_containing(repo, commit)` | 同样先查允许表；GitHub `commits/{sha}/pulls`，GitLab `repository/commits/{sha}/merge_requests`；缓存 10 分钟 | 同上 |
 
 `MrInfo` 的字段：
 
@@ -488,7 +490,7 @@ impl MrChangesRegistration { pub fn new(release: impl FnOnce() + Send + Sync + '
 - `head`：GitHub `head.sha`，GitLab `sha`。
 - `bases`：GitHub 只有当前的 `base.sha`（平台不记录历史）；GitLab 是 `versions` 接口里每个版本的 `base_commit_sha`，去重后按版本顺序。
 - `merged_target`：已合并的 MR 才有。合并提交（GitHub `merge_commit_sha`，GitLab `merge_commit_sha` 或 `squash_commit_sha`）的第一个父提交；GitLab 快进合并没有这两个字段时取 `diff_refs.start_sha`；都取不到为 None。合并提交的父提交按提交 ID 缓存，不再变。GitHub 的 rebase 合并见「已知限制」。
-- `timeline`：创建时刻记为 `Opened`。GitHub 读 `issues/{n}/events` 里的 `closed`、`reopened`、`merged`；GitLab 读 `resource_state_events` 里的 `closed`、`reopened`、`merged`，没有记录时用 MR 的 `closed_at`、`merged_at` 补上。每个 MR 最多读 10 页；缓存按 MR 的 `updated_at` 失效，`updated_at` 不变时不重取。
+- `timeline`：创建时刻记为 `Opened`。GitHub 读 `issues/{n}/events` 里的 `closed`、`reopened`、`merged`；GitLab 读 `resource_state_events` 里的 `closed`、`reopened`、`merged`，没有记录时用 MR 的 `closed_at`、`merged_at` 补上。GitHub 合并时同时记 `closed` 和 `merged`，与 `merged` 同一时刻的 `closed` 去掉。每个 MR 最多读 10 页；缓存按 MR 的 `updated_at` 失效，`updated_at` 不变时不重取。
 
 ### 本 crate 的公开项
 
@@ -496,7 +498,7 @@ impl MrChangesRegistration { pub fn new(release: impl FnOnce() + Send + Sync + '
 pub fn plugins(deps: ForgeDeps) -> [(Name, Box<dyn Plugin>); 3];
 pub struct ForgeDeps { /* 见「依赖」 */ }
 
-/// 子进程的环境：白名单变量的值，`app` 读一次后传入（「命令行的调用」）。
+/// 子进程的环境：白名单变量的值，由 `ForgeDeps::env` 的闭包构造（「命令行的调用」）。
 pub struct ChildEnv { /* 私有字段 */ }
 impl ChildEnv {
     /// 从一组（名字，值）里只保留白名单里的变量。`app` 传 `std::env::vars_os()` 加系统代理。
@@ -528,6 +530,9 @@ pub mod testing {
 - 只有允许表里的远端主机会收到请求。不在表里的主机（自部署实例、GitHub Enterprise Cloud 的 `*.ghe.com`、`~/.ssh/config` 里的别名）在用户确认之前不启动任何子进程。
 - 比较前主机名转成小写，去掉末尾的 `.`；带非默认端口时端口是主机的一部分。不做后缀匹配：`github.com.example.com` 不是 GitHub。
 - 允许表只在本 crate 的一个模块里查询。调用命令行的函数只接收 `AllowedHost` 类型的参数，这个类型只能由允许表构造，所以没有经过允许表的主机名到不了命令行（「验收」第 1 步的 `rg` 检查；测试 `unknown_host_spawns_nothing` 与 `FakeCli::assert_safe`）。
+- 允许表有两个查询，都读当前的设置：按远端主机查（识别远端地址时），按命令行主机名查（`MrSource` 的 `mrs_for_branch` / `mrs_containing`、`watch_mr`、`MrChanges::source` 收到的 `ForgeRepo::host`、`MrRef::repo.host`，它们可能来自 `usage` 或 `review` 存下的数据）。后一个查询只在这个命令行主机名是内置映射或某条用户映射的 `cli_host` 时成功，平台取那条映射的。同一个命令行主机名只能属于一个平台：`AddHost` 与已有映射的平台冲突时被忽略，记 warn。总开关关闭时两个查询都失败。
+- `AllowedHost` 不保存、不跨请求复用：请求队列里只放命令行主机名，执行器在启动每个子进程之前重新查询一次允许表，查不到就丢弃这个请求，结果为 `Disabled` 或 `UnknownHost`。所以 `RemoveHost`、`SetEnabled(false)` 之后已经排队的请求也不会发出（测试 `removed_host_spawns_nothing`）。
+- 查询失败时：`MrSource` 的两个方法返回 `Offline`（不启动子进程）；`MrChanges::source` 返回 None；`watch_mr` 只登记关注，`mr()` 一直是 None。
 - 命令行主机名只决定 gh / glab 用哪个已登录的主机。gh / glab 再把它解析成 API 地址（github.com 是 `api.github.com`，GitHub Enterprise Server 是 `<主机>/api/v3`，GitLab 是 `<主机>/api/v4` 或 glab 配置里的 `api_host`），这一步属于用户自己的命令行配置。
 - 响应里的任何 URL（`Link` 头、`url`、`html_url`、`web_url`、头像、附件、检查的详情链接）都不被本 crate 请求。翻页由本 crate 用页码重新拼端点（「翻页」）。
 - 令牌只由 gh / glab 发往用户用 `auth login` 登录过的主机：子进程拿不到令牌类的环境变量（「命令行的调用」），所以即使用户确认了一个陌生主机，没有登录过它时请求也不带凭据，结果是 `NotLoggedIn`。
@@ -564,7 +569,7 @@ pub mod testing {
 - 工作目录是 `scratch_dir/cwd/`：一个空目录，不在任何 git 仓库里（`GIT_CEILING_DIRECTORIES` 挡住上层），所以 glab 不会从当前目录推断主机。
 - 标准输入为 `/dev/null`。标准输出、标准错误为管道。
 - 参数固定为：`api --hostname <命令行主机名> -i -X GET [-H <头>]… -- <端点>`。头只有 `Accept`（GitHub `application/vnd.github+json`）、`X-GitHub-Api-Version: 2022-11-28`（GitHub）和 `If-None-Match: <ETag>`。不用 `-f` / `-F` / `--input`（只发 GET）、`--paginate`（翻页自己做，才能在上限处停）、`--cache`、`--jq`、`--template`、`--verbose`、`--silent`。Lectern 不调用 `api` 以外的子命令，例外是查找时的 `--version`。
-- 端点只由本 crate 拼出：数字、OID 的十六进制、校验过的仓库路径段、按 RFC 3986 转义的分支名和时间。以 `-` 开头的值到不了参数（端点前有 `--`，且端点总以字母开头）。
+- 端点只由本 crate 拼出：数字、OID 的十六进制、校验过的仓库路径段、按 RFC 3986 转义的分支名和时间。查询串里的值除 RFC 3986 的非保留字符外全部转义，`:`、`{`、`}` 也转义：gh 会把端点里的 `:owner`、`{repo}` 这类占位符换成当前目录仓库的值。以 `-` 开头的值到不了参数（端点前有 `--`，且端点总以字母开头）。
 - 每个子进程最长 20 秒（`REQUEST_TIMEOUT`）。超时、取消或输出超限时 `SIGKILL` 并回收。
 - 标准输出最多读 8 MiB（`MAX_RESPONSE`，含响应头），超出时终止，结果为 `OutputTooLarge`。标准错误最多读 4 KiB，只用来区分「没有状态行」时的原因，不写进日志、快照和界面。
 - 并发：每个命令行主机同时最多 2 个子进程，其中后台请求（`usage` 的对应、轮询、预取）最多 1 个；全局最多 4 个。等待的请求按优先级排队：用户正在看的（`watch_mr` 的详情、`ChangeSource::fetch`）在前。
@@ -618,7 +623,9 @@ GitHub REST，版本 `2022-11-28`（设计时 github.com 的 `X-Github-Api-Versi
 ### 缓存
 
 - 命名空间 `forge.http`（应用分库，前置条件 C）。键：命令行主机名、当前账号的不变 ID、规范化的端点（查询参数按名字排序）。GitLab 列表的 `updated_after` 取 30 天前那一天的 UTC 零点，同一天里查询串不变，ETag 才能命中；GitHub 评论的 `since` 是 MR 的创建时刻，本来就不变。值：`ETag`、取得时刻、摘要的格式版本、摘要（serde 序列化的、表里那些字段）。不存原始响应体和响应头。
-- 账号不同的条目互不可见：换了 gh 登录的账号时，旧账号的缓存不会显示给新账号。账号 ID 每次运行第一次用到这个主机时请求 `user` 取得，401 后重取。
+- 账号不同的条目互不可见：换了 gh 登录的账号时，旧账号的缓存不会显示给新账号。
+- 当前账号：每个命令行主机的「上次的账号 ID」也存在 `forge.http` 里（键是命令行主机名加固定的 `account`）。先显示缓存、离线时返回缓存，都用这个 ID 组成键，不等网络。每次运行第一次向这个主机发请求时先请求 `user`（条件请求），401 后重取；取到的 ID 与上次不同时，丢弃按旧 ID 显示的快照和内存里的结果，按新 ID 重建，并更新这一条。从来没有取到过账号 ID 的主机没有缓存可显示。
+- 键编码后超过 cache 的 `MAX_KEY`（512 字节）时，端点部分换成它的 SHA-256（cache 设计「命名空间」的键规则）。
 - 摘要里的文字（标题、描述、评论里取出的 `result`）会落在缓存目录里，与 gh 自己的缓存一样属于本机数据。评论只缓存 pulls.review 评论的摘要（ID、作者、`updated_at`、`headSha`、`result` 原文），其他评论只缓存 ID 和 `updated_at`，不缓存正文。
 - 不会再变的结果没有 ETag 也不过期：提交的父提交、`compare` 的合并基点（按两端提交 ID 为键）。
 - `cache` 不可用（磁盘满、分库损坏）时只用内存里的结果，不影响请求（cache 设计「生命周期」）。
@@ -661,8 +668,8 @@ GitHub REST，版本 `2022-11-28`（设计时 github.com 的 `X-Github-Api-Versi
 1. 取 MR 详情。`watch_mr` 的详情在 30 秒内取到过时直接用；否则发一次条件请求。
 2. 合并基点：GitLab 用 `diff_refs.base_sha`。GitHub 的 `base.sha` 和 `head.sha` 都在项目的对象库里时用 `Repo::merge_base`，否则请求 `compare`，结果按（base，head）缓存。
 3. 提交是否在本地：对项目的仓库（`ProjectKey::Git` 的公共目录）调用 `Repo::commit(head)` 和 `Repo::commit(合并基点)`；两个都成功，且 OID 长度与仓库的哈希算法相同时，走本地路径，否则走降级路径。
-4. 本地路径：`Repo::diff_trees(合并基点, head, limits)`，`git::change_list_of`（前置条件 B）转成 `ChangeList`，`partial` 为 None。`limits` 与本地审阅相同（[git 设计「上限与截断」](git.md#上限与截断)）。diff 只取决于这两个提交 ID，而两个 ID 来自第 1 步的同一个响应，所以本地路径不做第 6 步的一致性检查。
-5. 降级路径：请求代码平台的文件列表（GitHub 最多 30 页、3000 个文件；GitLab 的 `diffs` 最多 30 页，`changes` 一次）。每个文件一条 `FileChange`：状态按平台的字段映射（`added` / `new_file` 为 `Added`，`removed` / `deleted_file` 为 `Deleted`，`renamed` / `renamed_file` 为 `Renamed`（相似度记 0），其余为 `Modified`）；GitHub 给了 `sha` 时新一侧为 `Blob(sha)`，其余一侧为 `Unavailable(Missing)`；`detail` 为 `NoDiff`；按路径的字节序排序。`partial` 为 `listed_only: true`，`missing_files` = 详情里的改动文件数减去列表里的文件数（GitLab 的 `overflow` 为 true、或 `changes_count` 为 "1000+" 时至少为 1）。路径不满足 `ChangePath` 不变量的记进 `totals.invalid_paths`。
+4. 本地路径：`Repo::diff_trees(合并基点, head, limits, cancel)`，`git::change_list_of`（前置条件 B）转成 `ChangeList`，`partial` 为 None。`limits` 与本地审阅相同（[git 设计「上限与截断」](git.md#上限与截断)）。diff 只取决于这两个提交 ID，而两个 ID 来自第 1 步的同一个响应，所以本地路径不做第 6 步的一致性检查。
+5. 降级路径：请求代码平台的文件列表（GitHub 最多 30 页、3000 个文件；GitLab 的 `diffs` 最多 30 页，`changes` 一次）。每个文件一条 `FileChange`：状态按平台的字段映射（`added` / `new_file` 为 `Added`，`removed` / `deleted_file` 为 `Deleted`，`renamed` / `renamed_file` 为 `Renamed`（相似度记 0），其余为 `Modified`）；GitHub 给了 `sha` 时新一侧为 `Blob(sha)`，其余一侧为 `Unavailable(Missing)`；`detail` 为 `NoDiff`；按路径的字节序排序。`partial` 为 `listed_only: true`，`missing_files` = 详情里的改动文件数减去列表里的文件数（GitLab 的 `overflow` 为 true、或 `changes_count` 为 "1000+" 时至少为 1）。路径不满足 `ChangePath` 不变量的记进 `totals.invalid_paths`。这两个接口的每页带补丁文字，某一页超过 `MAX_RESPONSE` 时停止翻页，已读的页照常使用，没读到的文件计入 `missing_files`。
 6. 降级路径要先后读两次元数据：开始前记下（head，合并基点，标题与描述的哈希），文件列表读完后再取一次（条件请求，通常是 304）。不一致时从第 1 步重来，最多 2 次（`MAX_CONSISTENCY_RETRIES`）；仍不一致时返回最后一次的结果，`partial.possibly_stale` 为 true，这份结果不写缓存。不把不同版本的数据拼在一起。
 7. `generation` 在同一个来源上递增。`cancel` 置位时在子进程之间检查，正在运行的子进程被终止，返回 `Cancelled`。
 
@@ -717,6 +724,8 @@ GitHub：check run（最多 3 页）和 commit status（1 页，最多 100 条�
 8. `head` 与改动集的 head 不同为 `Outdated`，相同也为 `MaybeStale`。
 9. 与「MR 的改动集」第 6 步相同，读评论前后各读一次元数据；不一致时重来，最多 2 次，仍不一致时这次结果不缓存。
 
+耗时：最坏是按更新时间的 50 页、按创建顺序的 10 页和 20 次权限查询，约 80 个请求。这些请求按后台优先级排队（每个主机同时 1 个，「命令行的调用」），按设计时的实测约 80 秒，在 `SHARED_WAIT_BUDGET` 之内；到时仍没读完的，按「数据流与线程」返回已读到的条目和 `MayHaveMissed`。完整读完的结果按（MR，head）在内存里保留 10 分钟，这期间再次调用直接返回，不重新校验各页；所以审阅刷新、重新打开同一个 MR 不会再等一遍。
+
 评论正文、`result` 原文都是不受信任的外部输入：本 crate 只做有上限的取出，不执行、不跟随其中的任何链接，也不把它们当作指令。
 
 ### 设置
@@ -750,7 +759,9 @@ watch / watch_mr┘                                              │
 - 读仓库（`git`）、读缓存、解析 JSON 在 `Background` 优先级的 executor 任务里；用户正在看的详情和 `ChangeSource::fetch` 用 `Interactive`。
 - 每个子进程由 `run_dedicated_gated` 的专用线程启动和读管道，进程结束后线程退出；空闲时没有常驻线程和子进程。请求进行期间持有 `BusyGuard`，所以 kernel 不报告静止；轮询的等待不持有。
 - 定时用 kernel 的 `Clock::wake_at`：回调只改内存里的状态、提交任务，自己不做 IO。
-- 阻塞的接口（`MrSource` 的三个方法、`ChangeSource::fetch`、`shared_analyses`）把请求放进队列，在调用线程上等结果，每 50 ms 检查一次取消标志；一次调用最多等 30 秒（`WAIT_BUDGET`），超时时有缓存返回缓存，否则 `MrSource` 返回 `Offline`、`ChangeSource` 返回 `ChangeError::Io("timeout")`。调用方按前置条件 D、F 用专用线程调用。
+- 阻塞的接口（`MrSource` 的三个方法、`ChangeSource::fetch`、`shared_analyses`）把请求放进队列，在调用线程上等结果，每 50 ms 检查一次取消标志；调用方按前置条件 D、F 用专用线程调用。
+  - `MrSource` 的方法和 `fetch` 一次最多等 30 秒（`WAIT_BUDGET`），超时时有缓存返回缓存，否则 `MrSource` 返回 `Offline`、`fetch` 返回 `ChangeError::Io("timeout")`。
+  - `shared_analyses` 最多要几十个请求（「共享分析评论」），一次最多等 180 秒（`SHARED_WAIT_BUDGET`）。到时返回已经读到的条目，`scan` 为 `MayHaveMissed`，不返回错误。
 - 首屏先显示缓存：`watch` 开始时在后台读 `forge.http` 里这个项目各端点的摘要，先换出一份 `Cached` 快照，再发条件请求。
 - 渐进加载：MR 详情先取详情（GitHub 另取 check run 与 commit status），共享分析在详情显示之后才开始读，它的几十个请求不挡住详情和 diff。
 - 派生数据：MR 的 diff 由 `git` 按两端 blob OID 缓存 hunk（架构规则 5），与本地审阅共用。forge 自己的缓存是远端数据的摘要，按端点和账号为键，不是派生数据。
@@ -758,8 +769,8 @@ watch / watch_mr┘                                              │
 
 ## 性能
 
-- 首帧之前不做任何事。三个插件的激活条件都是 `AfterFirstFrame`，`activate` 只登记；`started` 只提交一个读设置文件的后台任务，不启动子进程。三个插件的激活四段之和合计 < 0.3 ms，计入 `plugin/after_first_frame` 的 5 ms（[bench 设计](bench.md)）。
-- 空闲内存：没有关注者时，内存里只有每个打开项目的远端识别结果和最近一份 MR 列表（≤ 300 行，约 100 KB）。MR 详情和共享分析的 `result` 在最后一个关注者离开 60 秒后释放；详情最多保留 16 个，`result` 合计最多 8 MiB。新增 `plugin/forge/resident` < 1 MB（打开一个有 GitHub 远端的项目、没有关注者时，假命令回放）。
+- 首帧之前不做任何事。三个插件的激活条件都是 `AfterFirstFrame`，`activate` 只登记；`started` 只提交一个读设置文件的后台任务，不启动子进程；`ForgeDeps::env` 的闭包（读环境变量和系统代理）在第一次启动子进程之前才调用。三个插件的激活四段之和合计 < 0.3 ms，计入 `plugin/after_first_frame` 的 5 ms（[bench 设计](bench.md)）。
+- 空闲内存：没有关注者时，内存里只有每个打开项目的远端识别结果和最近一份 MR 列表（≤ 300 行，约 100 KB）。MR 详情在最后一个关注者离开 60 秒后释放，最多保留 16 个；读完的共享分析在 10 分钟后释放，`result` 合计最多 8 MiB，超出时先释放最早读完的。新增 `plugin/forge/resident` < 1 MB（打开一个有 GitHub 远端的项目、没有关注者时，假命令回放）。
 - 子进程：空闲时为 0。每个子进程是 gh / glab 自己的内存，存在时间以秒计，不计入空闲内存。
 - 交互路径：MR 详情在 30 秒内取到过、提交在本地时，`ChangeSource::fetch` 不访问网络，forge 在 `diff_trees` 之外的开销 < 1 ms，打开 MR 的 diff 与 `app/open_diff`（< 50 ms）走同一条本地路径。网络请求的耗时取决于网络（「访问方式的选择」的实测），不设预算；首屏靠缓存。
 - 新增进程内基准（`bench` 的 `time` 目标，只在本 crate 的 fixtures 上）：
@@ -801,6 +812,7 @@ watch / watch_mr┘                                              │
   - warn `forge request failed`：`kind`（`RequestErrorKind`）、`status`（有状态行时）、`exit`（退出码）、`url`、`took_us`、`req`。
   - warn `forge rate limited`：`host`、`retry_after_s`。
   - warn `forge inconsistent read`：重取 2 次仍不一致，`what`（`changes` / `shared`）。
+  - warn `forge host conflict`：`AddHost` 的命令行主机名已属于另一个平台，`platform`、`host`。
   - warn `forge settings unreadable`：`reason`（`parse` / `version` / `io`），带 `io` 时用 `Value::io`。
   - warn `forge shared scan capped`：`which`（`created` / `updated`）、`comments`、`bytes`。
 - 详细级别：
@@ -820,14 +832,14 @@ watch / watch_mr┘                                              │
 - 夹具（`crates/forge/tests/fixtures/`）：按「用到的接口」手写的合成 JSON，`github/` 与 `gitlab/` 各一套，响应头按设计时核对过的格式写（「访问方式的选择」）。`README.md` 写明每个文件对应的文档版本。lz-string 的测试向量由 lz-string 1.5.0 的参考实现生成一次（`pnpm dlx`，生成脚本在 `fixtures/scripts/`），输入是合成文字。不含任何真实仓库、账号和会话日志的数据。
 - 单元测试（`#[cfg(test)] mod tests`，结构化结果用 insta 快照）：
   - `remote_url_*`：各种地址形式、`.git` 与 `/`、端口、别名、非法路径段。
-  - `allowlist_*`：内置映射、用户映射、后缀不匹配、大小写和末尾的点；`unknown_host_spawns_nothing`：远端是 `git.example.test`、没有映射时假命令没有任何调用。
+  - `allowlist_*`：内置映射、用户映射、后缀不匹配、大小写和末尾的点、按命令行主机名的查询；`unknown_host_spawns_nothing`：远端是 `git.example.test`、没有映射时假命令没有任何调用；`removed_host_spawns_nothing`：确认 `git.example.test` 后排队若干请求，再 `RemoveHost`（另一个用例是 `SetEnabled(false)`），之后用存下的 `ForgeRepo` 调用 `mrs_for_branch`、`mrs_containing`、`MrChanges::source`、`watch_mr`，假命令在移除之后没有任何调用，返回值按「主机与允许表」。
   - `runner_*`：`-i` 输出的切分、304 与 404 的退出码 1、没有状态行时退出码 4 与其他、20 秒超时被终止（假命令 `sleep`）、8 MiB 截止、取消时终止、并发上限。`AllowedHost` 只能由允许表构造，这一点由「验收」第 1 步的 `rg` 检查保证。
   - `env_*`：白名单、固定值、令牌变量不传、代理变量的大小写。
   - `rate_*`：剩余次数的阈值、`Retry-After`、翻倍与上限、304 清零。
   - `github_*`、`gitlab_*`：列表、按分支、fork 上游、详情、合并基点、降级的文件列表（含 3000 个文件的截断、GitLab 的 `overflow` 与 `changes_count` 为 "1000+"）、时间线、合并前的目标分支、CI 的状态映射与摘要（表的每一行一个用例）。
   - `cache_*`：账号隔离、`updated_after` 在同一天里不变、304 用摘要、不变的结果不过期。
   - `changes_*`：本地路径（`git::testing::TestRepo` 建两个提交）与 `change_list_of` 的结果相同；提交不在本地、哈希算法不同时走降级路径；`consistency_*`：元数据在文件列表之后变了时重取，两次都变时 `possibly_stale` 且不写缓存；`fingerprint_*`：各项变化都改变指纹。
-  - `shared_*`：标记行、JSON 代码块、lz-string、解压超过 2 MiB 丢弃、单条超过 2 MiB 跳过、1000 条与 32 MiB 停止、按更新时间的 5000 条与 64 MiB、按 ID 重读、每个作者一条、`Outdated` 与 `MaybeStale`；`trust_*`：机器人按 ID 不按用户名、`admin` / `write` / `read`、`user.id` 不一致、GitLab 29 与 30、否定缓存 24 小时、肯定结果对之后更新的评论无效、每次最多新查 20 个、403 为 `LookupFailed`。
+  - `shared_*`：标记行、JSON 代码块、lz-string、解压超过 2 MiB 丢弃、单条超过 2 MiB 跳过、1000 条与 32 MiB 停止、按更新时间的 5000 条与 64 MiB、按 ID 重读、每个作者一条、`Outdated` 与 `MaybeStale`、到 `SHARED_WAIT_BUDGET` 时返回已读到的条目和 `MayHaveMissed`（假时钟）、10 分钟内再次调用不启动子进程；`trust_*`：机器人按 ID 不按用户名、`admin` / `write` / `read`、`user.id` 不一致、GitLab 29 与 30、否定缓存 24 小时、肯定结果对之后更新的评论无效、每次最多新查 20 个、403 为 `LookupFailed`。
   - `lz_*`：参考向量逐个相同；截断的输入、非法字符返回错误。
   - `mr_source_*`：三个方法的缓存、错误的对照表、`MrInfo` 各字段。
   - `settings_*`：默认值、损坏不覆盖、命令后写盘。
@@ -882,9 +894,9 @@ watch / watch_mr┘                                              │
 步骤：
 
 1. **主机、命令行与请求**：远端地址、允许表、设置文件、查找命令行、启动规则与环境变量、`-i` 输出的解析、超时与输出上限、并发、限流与退避、`FakeCli`、运行日志。不依赖 `services` 的新类型。
-   - `remote_url_*`、`allowlist_*`、`unknown_host_spawns_nothing`、`runner_*`、`env_*`、`rate_*`、`settings_*`、`logs_*` 通过。
+   - `remote_url_*`、`allowlist_*`、`unknown_host_spawns_nothing`、`removed_host_spawns_nothing`（第 1 步用执行器的请求入口；第 3、4 步接上 `MrSource`、`MrChanges` 后扩充）、`runner_*`、`env_*`、`rate_*`、`settings_*`、`logs_*` 通过。
    - `rg -n 'std::process::Command' crates/forge/src` 只在 `src/runner/spawn.rs`。
-   - `AllowedHost`（字段私有）和允许表的查询在同一个文件 `src/hosts/allowed.rs` 里，没有其他构造方法：`rg -n 'AllowedHost \{' crates/forge/src` 只在这个文件里，`rg -n 'fn .*-> AllowedHost' crates/forge/src` 只有允许表的查询函数。
+   - `AllowedHost`（字段私有）和允许表的两个查询在同一个文件 `src/hosts/allowed.rs` 里，没有其他构造方法：`rg -n 'AllowedHost \{' crates/forge/src` 只在这个文件里，`rg -n 'fn .*-> .*AllowedHost' crates/forge/src` 只有这两个查询函数；`rg -n 'AllowedHost' crates/forge/src/runner` 只出现在启动子进程的函数参数里，队列的类型里没有它。
    - `rg -n '"auth"|"--verbose"|"--paginate"|"--cache"' crates/forge/src` 只在 `FakeCli::assert_safe` 的禁用列表里。
 2. **MR 列表、详情与 CI**：两个平台的仓库、账号、列表、按分支、详情、CI；`forge.http` 缓存；`dyn Forge` 与 "forge" 插件；`Cargo.toml` 加 `plugin = true`。
    - `github_*`、`gitlab_*`（时间线、文件列表除外）、`cache_*`、`plugin_*`（`forge` 部分）、金丝雀测试通过。
