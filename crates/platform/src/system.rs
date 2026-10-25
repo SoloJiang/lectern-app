@@ -73,6 +73,15 @@ fn language_tag(raw: &[u8]) -> Option<String> {
 /// Compiled for tests everywhere: it only checks bytes.
 #[cfg(any(target_os = "macos", test))]
 fn mac_os_version(raw: &[u8]) -> Option<String> {
+    Some(format!("macOS {}", product_version(raw)?))
+}
+
+/// The product version as `sysctl` returns it (with or without its
+/// trailing NULs) when it is one: at most 32 bytes, ASCII digits and dots,
+/// starting with a digit; None for anything else. Shared with
+/// `host::describe`, which reports the version without the `macOS ` prefix.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn product_version(raw: &[u8]) -> Option<&str> {
     let end = raw.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     let version = &raw[..end];
     let valid = version.len() <= MAX_VERSION_LEN
@@ -82,8 +91,7 @@ fn mac_os_version(raw: &[u8]) -> Option<String> {
         return None;
     }
     // Only ASCII digits and dots are left.
-    let version = std::str::from_utf8(version).ok()?;
-    Some(format!("macOS {version}"))
+    std::str::from_utf8(version).ok()
 }
 
 #[cfg(target_os = "macos")]

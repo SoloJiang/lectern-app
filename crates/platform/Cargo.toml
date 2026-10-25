@@ -25,7 +25,10 @@ raw-window-handle.workspace = true
 # `pthread_mach_thread_np` and `thread_info` on macOS, which rustix lacks.
 # On both also `localtime_r` (`time::utc_offset`).
 # On macOS also `proc_pid_rusage` (`process::phys_footprint`),
-# `sysctlbyname` (`system::os_version`) and `pthread_main_np`
+# `proc_pidinfo` and `proc_listchildpids` (`process::start_time`,
+# `process::children`), `sysctlbyname` (`system::os_version`,
+# `host::describe`), `pthread_set_qos_class_self_np`
+# (`thread::set_user_interactive`) and `pthread_main_np`
 # (`window::set_frame_autosave_name`); the macOS tests create a FIFO with
 # it.
 libc.workspace = true

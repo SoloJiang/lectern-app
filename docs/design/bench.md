@@ -1,6 +1,6 @@
 # bench 设计
 
-状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2、4、5 步尚未实现（见「验收」）；第 2 步和第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。
+状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4、5 步尚未实现（见「验收」）；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。
 
 对应 issue [#7](https://github.com/SoloJiang/lectern-app/issues/7)；安装包体积检查 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 复用本 crate 的运行器和预算表。`bench` 测量[性能预算](tech-research.md#性能预算)、[ADR 0017](../adr/0017.md)、[ADR 0018](../adr/0018.md) 和各 crate 设计文档「性能」一节里的每一项，打印实测值与预算，在 Apple 芯片的 macOS 上超标即以非 0 退出码让 CI 失败。
 
@@ -379,7 +379,7 @@ pub mod metal {
 
 与原来的形状相比：`host::describe`、`thread::set_user_interactive` 返回 `io::Result`；`frame`、`metal` 的函数返回 `Result<_, HookError>`；`record` 要窗口句柄，刷新周期放进 `FrameRecording::refresh`，不再单独提供 `refresh_period()`；`FrameTimes::presented` 是 `Option`；`set_strict_archive` 要 archive 的路径。
 
-其中 `process::phys_footprint` 已随 `cache` 第 2 步加入（`cache/memory` 用它，见「进程内基准」，[platform 设计「进程」](platform.md#进程)）。`process` 的另两个、`host`、`thread` 随第 2 步；`frame::on_first_presented` 在第 4 步之前，`frame::record` 在第一个生效的帧时间预算之前（platform 设计「验收」的 B1、B2）。
+其中 `process::phys_footprint` 已随 `cache` 第 2 步加入（`cache/memory` 用它，见「进程内基准」，[platform 设计「进程」](platform.md#进程)）。`process` 的另两个、`host`、`thread` 随第 2 步，已实现；`frame::on_first_presented` 在第 4 步之前，`frame::record` 在第一个生效的帧时间预算之前（platform 设计「验收」的 B1、B2）。
 
 `kernel`（普通的公开接口，不放在 `test-support` 下：发布构建里没有调用方，测量用的构建因此不需要打开 kernel 的 `test-support`；已随第 3 步实现，细节以 [kernel 设计「插件集合的闭包与裁剪」](kernel.md#插件集合的闭包与裁剪)为准）：
 
