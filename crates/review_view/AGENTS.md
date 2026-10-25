@@ -3,7 +3,7 @@
 审阅视图：会话简报、按轮次的改动叙事、文件已看进度、Drifted 提示、行内审阅意见与底部发送栏。
 
 - 层：视图层，插件 crate（`plugin = true`，[ADR 0025](../../docs/adr/0025.md)）：两个插件，都是 `AfterFirstFrame`："review-view" 依赖 `dyn Contributions`、`dyn Review`、`dyn SessionSource`；"review-view-handoff" 依赖 `dyn Reader`、`dyn CodeIntel`、`dyn Usage`（交接：⇧⌘O、焦点、`share_object`、用量；不在时屏幕照常，只少交接）。`plugins(executor)` 一次建出两个，共用一个 `Shared`。可以依赖视图、领域、基础设施和 kernel 层的非插件 crate；不得依赖其他插件 crate（`lectern-review`、`lectern-file-reader`、`lectern-workspace` 等，dev-dependency 也不行）和 `app`、tool 层；只有 `app` 和 tool 层依赖本 crate。
-- 设计文档：[docs/design/review_view.md](../../docs/design/review_view.md)（已接受）。实现按它的「验收」分三步：第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步（`app` 装配、`app/open_diff`、帧基准）尚未实现。
+- 设计文档：[docs/design/review_view.md](../../docs/design/review_view.md)（已接受）。实现按它的「验收」分三步：第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配只装了 "review-view"（"review-view-handoff" 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装），`app/open_diff`、帧基准尚未实现。
 - issue：[#15](https://github.com/SoloJiang/lectern-app/issues/15)、[#22](https://github.com/SoloJiang/lectern-app/issues/22)
 - ADR：[0012](../../docs/adr/0012.md)、[0019](../../docs/adr/0019.md)
 
