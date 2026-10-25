@@ -5,24 +5,27 @@
 - 层：tool 层，只用于调试与测试构建，可以依赖任何层。只有 `app` 可以依赖本 crate（`bench-probe` feature，不在 `default` 里），本 crate 不进入发布构建。
 - 设计文档：[docs/design/bench.md](../../docs/design/bench.md)
 - issue：[#7](https://github.com/SoloJiang/lectern-app/issues/7)、[#38](https://github.com/SoloJiang/lectern-app/issues/38)
-- ADR：[0017](../../docs/adr/0017.md)、[0018](../../docs/adr/0018.md)
+- ADR：[0017](../../docs/adr/0017.md)、[0018](../../docs/adr/0018.md)、[0048](../../docs/adr/0048.md)、[0051](../../docs/adr/0051.md)
 
 ## 边界
 
 - 预算表只有一张（`src/budgets.rs`），每条写明出处。顶层预算以[技术调研「性能预算」](../../docs/design/tech-research.md#性能预算)和 ADR 为准，改动要写 ADR；各 crate 设计文档里的分项预算随那份设计文档修改（[设计文档「预算表」](../../docs/design/bench.md#预算表)）。
 - 不进入发布构建。
 - 只调用被测 crate 的公开接口和 `test-support` 下的 `testing` 模块，不复制它们的内部逻辑。
-- macOS 专属的测量（进程创建时间、`phys_footprint`、首帧时刻）经 `platform`，本 crate 不直接调用系统接口。
+- macOS 专属的测量（进程创建时间、`phys_footprint`、首帧时刻）经 `platform`，本 crate 不直接调用系统接口。`benches/process.rs` 结束进程组用 POSIX 的 `kill`（`libc`），它不是 macOS 专属。
+- `probe` feature（探针，只在测量构建里）是唯一打开 `lectern-platform/bench-hooks` 的地方（[ADR 0048](../../docs/adr/0048.md)）。探针的 `bench-probe` 插件实现了 `Plugin`，本 crate 仍不是插件 crate（[ADR 0051](../../docs/adr/0051.md)）：它不提供、也不要求服务。
+- 进程级基准启动的每个程序都有自己的临时 `HOME` 和 socket（`src/process.rs`），不读写用户的数据。
 
 ## 测试
 
 ```sh
-just test -p lectern-bench   # 运行器、预算表、报告协议、进程调度的单元测试
+just test -p lectern-bench   # 运行器、预算表、报告协议（wire_*）、探针（probe_*）、进程调度（process_*）、purge
 just bench                   # macOS（Apple 芯片）上判定预算；其他平台是冒烟运行
 just bench agents/           # 只运行 ID 含 agents/ 的基准
 just bench --measure git/    # Linux 上也按规则采样，只报告、不判定
 ```
 
-- 基准目标：`benches/time.rs`（按被测 crate 分模块，在 `benches/time/` 下）、`benches/memory.rs`（注册 `CountingAlloc`）、`benches/process.rs`。新增基准时在预算表里把对应条目改为 `Active`，否则运行器在开始前以 2 退出。
+- 基准目标：`benches/time.rs`（按被测 crate 分模块，在 `benches/time/` 下）、`benches/memory.rs`（注册 `CountingAlloc`）、`benches/process.rs`（只在 macOS 运行；`baseline/*` 启动 `examples/empty_window.rs`，`just bench` 构建它并设置 `LECTERN_BENCH_BASELINE`）。新增基准时在预算表里把对应条目改为 `Active`，否则运行器在开始前以 2 退出。
 - 每个目标写自己的 `target/lectern-bench/report-<target>.json`，`lectern-bench-report merge` 合并成 `report.json` 并决定 `just bench` 的退出码。报告列出每项的实测值、预算和出处；CI 的 macOS 任务判定预算，Linux 任务只做冒烟。
+- 进程调度（`src/process.rs`）的测试用脚本化的假 `Launcher` / `ProcessInfo` 和假探针，不启动真实程序；`tests/purge.rs` 把假的 `sudo` 放在这条命令的 `PATH` 最前面。探针（`src/probe.rs`）的测试用真实的 `Kernel` 和测试插件。
 - 夹具由被测 crate 的 `testing` 在运行时生成（如 `cloudprint` 形状的合成仓库），不提交大型样例项目；`tests/fixtures/` 只放本 crate 自己的小样本。

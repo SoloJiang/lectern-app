@@ -1,6 +1,6 @@
 # bench 设计
 
-状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4、5 步尚未实现（见「验收」）；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。
+状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4 步（探针、进程调度与空窗口基线）已实现，依赖 [ADR 0051](../adr/0051.md)，空窗口基线的实测值由 macOS CI 给出（见「实际验证」）；第 5 步尚未实现（见「验收」）；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。
 
 对应 issue [#7](https://github.com/SoloJiang/lectern-app/issues/7)；安装包体积检查 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 复用本 crate 的运行器和预算表。`bench` 测量[性能预算](tech-research.md#性能预算)、[ADR 0017](../adr/0017.md)、[ADR 0018](../adr/0018.md) 和各 crate 设计文档「性能」一节里的每一项，打印实测值与预算，在 Apple 芯片的 macOS 上超标即以非 0 退出码让 CI 失败。
 
@@ -31,10 +31,11 @@
 | 标准库 | 计时（`Instant`）、计数分配器、子进程、Unix 域 socket | 运行器自己写，见下表 |
 | `serde_json`（工作区已有） | 写 JSON 报告 | 已在依赖图里，不新增包 |
 | `lectern-kernel`（可选，`probe` feature） | 探针插件、裁剪插件集合 | kernel 层 |
-| `lectern-platform`（可选，`probe` feature，同时打开它的 `bench-hooks`） | 注册首帧回调。`bench-hooks` 是 `platform` 里方法替换的 feature，只有 `probe` 打开它，所以只在测量构建里（[ADR 0048](../adr/0048.md)） | 基础设施层 |
-| dev：`lectern-agents`、`lectern-cache`、`lectern-git`、`lectern-kernel`、`lectern-i18n`、`lectern-project`（各自打开 `test-support`），`lectern-platform`、`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`tempfile`、`insta` | 进程内基准的被测代码与夹具；单元测试的临时目录与快照 | 只编译进基准目标和测试 |
+| `lectern-platform`（`probe` feature 同时打开它的 `bench-hooks`） | `main` 设置基准线程的 QoS，报告的 `host`，进程级基准读进程的创建时间、`phys_footprint` 和子进程；`probe` 注册首帧回调。`bench-hooks` 是 `platform` 里方法替换的 feature，只有 `probe` 打开它，所以只在测量构建里（[ADR 0048](../adr/0048.md)） | 基础设施层 |
+| `tempfile`（工作区已有） | 进程级基准每次启动的临时目录：socket 和临时 `HOME` | 在系统临时目录下，socket 路径不超过 macOS `sun_path` 的 104 字节 |
+| dev：`lectern-agents`、`lectern-cache`、`lectern-git`、`lectern-kernel`、`lectern-i18n`、`lectern-project`（各自打开 `test-support`），`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`insta`；`libc`、`futures`（工作区已有） | 进程内基准的被测代码与夹具；单元测试的快照；`benches/process.rs` 向进程组发 `SIGKILL`（POSIX 的 `kill`，不是 macOS 专属）；`empty_window` 示例里探针线程请主线程退出的通道 | 只编译进基准目标、示例和测试；`futures` 不只为 macOS 声明，因为只为 Apple 平台声明的外部依赖算作系统绑定（架构规则 6） |
 | dev（只在 macOS）：`gpui`（`test-support`）、`lectern-ui` | `ui/*` 基准（[ui 设计「性能」](ui.md#性能)）：`Transition::tick` 要在一个视图的 render 里跑，所以用 GPUI 的测试平台开一个窗口 | 只在 macOS 声明，Linux 上本 crate 仍不依赖 GPUI（架构检查第 4 条只把外部的、非 GPUI 的 Apple 专属依赖算作绑定）；对应的预算标 `macos_only`，Linux 上记为 `skipped` |
-| 以后的 dev（只在 macOS）：`gpui_platform` | `empty_window` 示例程序 | 同上 |
+| dev（只在 macOS）：`gpui_platform` | `empty_window` 示例程序 | 同上 |
 | 以后的 dev：其他插件 crate | 随这些 crate 的实现加入；`lectern-project` 随它的第 5 步加入 | tool 层可以依赖任何层，包括插件 crate（[ADR 0025](../adr/0025.md)） |
 
 本 crate 不新增任何外部 crate，`just deny` 与 `Cargo.lock` 的外部部分不变。
@@ -292,10 +293,11 @@ impl Probe {
     pub fn watch_first_frame(&self);
 
     /// 首帧之后，代替 `Kernel::start` 调用：加入 `bench-probe` 插件并启动 kernel。
-    /// 没有设置 `LECTERN_BENCH_PLUGINS` 时就是 `Kernel::start(set.with("bench-probe", ..))`，与发布构建走同一条路径。
-    /// 设置了时按它裁剪：`closure:<id>` 只留 `<id>` 的依赖闭包，`closure+self:<id>` 留依赖闭包加 `<id>`。
-    /// 裁剪用 `PluginSet::prepare` 取得的清单：每个插件的 `manifest()` 在整个启动里只调用一次，就是那次被计时的第一次调用，
+    /// 总是先 `PluginSet::prepare` 取得清单：每个插件的 `manifest()` 在整个启动里只调用一次，就是那次被计时的第一次调用，
     /// 之后 `Kernel::start_prepared` 直接用这些清单和耗时，不再调用 `manifest()`，`plugin/*/activate` 里的 manifest 一段因此与发布构建相同。
+    /// 没有设置 `LECTERN_BENCH_PLUGINS` 时不裁剪：`Plugins` 的应答和 `ActivateAll` 要用清单里的激活条件，`PluginStatus` 不带它们
+    /// （见「与设计的差异」第 4 步）。设置了时按它裁剪：`closure:<id>` 只留 `<id>` 的依赖闭包，`closure+self:<id>` 留依赖闭包加 `<id>`。
+    /// 变量的值无效或裁剪不了时发出 `Error`，整个集合照常启动。
     pub fn start_kernel(&self, set: PluginSet) -> Arc<Kernel>;
 
     /// `start_kernel` 之后调用。裁剪过插件集合时，逐个满足所选插件的激活条件：
@@ -303,6 +305,11 @@ impl Probe {
     /// `Workspace` 由 `bench-probe` 插件在 `started` 里提交一份对任何 pattern 都返回 true 的 `WorkspaceFacts`；
     /// 全部进入 Active 后发出 `Ready`。
     pub fn attach(&self, kernel: Arc<Kernel>, driver: Arc<dyn Driver>);
+
+    /// 没有 kernel 的程序（`empty_window`）代替 `attach` 调用，只交出 `Driver`：
+    /// `Epoch` 应答 None，`Plugins` 只应答 `PluginsEnd`，`ActivateAll` 应答 `Ready`。
+    /// `attach` 或 `drive` 之前到达的请求排队，之后按顺序处理。
+    pub fn drive(&self, driver: Arc<dyn Driver>);
 
     /// `app` 把 `workspace` 报告的里程碑转给探针，`presented` 是画出这一状态的帧显示的时刻。任意线程。
     pub fn milestone(&self, milestone: Milestone, presented: SystemTime);
@@ -328,6 +335,66 @@ pub trait Driver: Send + Sync {
 ```
 
 `bench-probe` 插件（`AfterFirstFrame`）监听 `Busy` / `Quiescent`，按 [kernel「静止」](kernel.md#静止)的规则丢弃序号过时的事件，记下序号转发给运行器，监听里不做别的工作，所以不会让 kernel 重新变忙。只在裁剪过插件集合时，它在 `started` 里提交那份 facts；整个 profile 的启动（`app/idle_empty`）不提交，`Workspace` 插件保持未激活，与用户打开空窗口时一致。kernel 设计里的合成 `bench-facts` 插件就是这一部分：只用 kernel 的公开接口（`PluginHandle::control().workspace_changed`），放在本 crate，kernel 不需要另外提供。
+
+### 进程调度（`lectern_bench::process`，默认编译）
+
+`benches/process.rs` 用 `std::process`（每个程序是新进程组的组长，`process_group(0)`）和 `platform::process` 实现两个 trait，`process_*` 用脚本化的假实现。
+
+```rust
+pub trait Launcher: Sync {
+    /// 以新进程组的组长启动 `launch.program`（组 ID 等于 pid），环境在运行器的之上按 `launch.env` 设置或删除。
+    fn launch(&self, launch: &Launch) -> io::Result<Box<dyn Launched>>;
+}
+pub trait Launched: Send {
+    fn pid(&self) -> u32;
+    fn try_wait(&mut self) -> io::Result<Option<Exit>>;
+    fn kill_group(&mut self);        // 向整个进程组发 SIGKILL
+    fn kill(&mut self, pid: u32);    // 离开了进程组的后代
+}
+pub trait ProcessInfo: Sync {
+    fn start_time(&self, pid: u32) -> io::Result<SystemTime>;
+    fn phys_footprint(&self, pid: u32) -> io::Result<u64>;
+    fn children(&self, pid: u32) -> io::Result<Vec<u32>>;
+}
+pub struct Launch { pub program: PathBuf, pub env: Vec<(OsString, Option<OsString>)> }
+pub struct Exit { pub code: Option<i32> }   // None：被信号结束
+/// 「进程级基准」表里的期限和静止后的等待；默认值就是那张表（10 s、30 s、30 s、10 s、10 s、5 s），测试里缩短。
+pub struct Limits { pub first_frame, pub first_quiescent, pub again, pub reply, pub quit, pub settle, pub poll: Duration }
+
+pub struct Scheduler<'a> { /* Launcher、ProcessInfo、Limits */ }
+impl Scheduler<'_> {
+    /// 一次启动：新的 socket 和临时 `HOME`（都在一个临时目录里，会话结束后删除），设置 `LECTERN_BENCH_SOCKET`、
+    /// 可选的 `LECTERN_BENCH_PLUGINS`，删除 `LECTERN_LOG`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`；等到 `FirstFrame`，pid 必须是启动的那个。
+    pub fn session(&self, program: &Path, plugins: Option<&str>) -> Result<Session<'_>, BenchError>;
+    /// 冷启动：`warmups` 次不计入，再 `samples` 次，逐个启动；样本是 `presented - start_time(pid)`，每次都发 `Quit` 并等它退出。
+    pub fn cold_start(&self, program: &Path, warmups: usize, samples: usize) -> Result<Samples, BenchError>;
+    /// 内存类：最多 `MEMORY_PARALLEL`（3）个同时运行；第一个出错的结果返回，之后不再开始新的。
+    pub fn memory<T: Send>(&self, launches: usize, run: impl Fn(&Scheduler) -> Result<T, BenchError> + Sync) -> Result<Vec<T>, BenchError>;
+}
+impl Session<'_> {
+    pub fn pid(&self) -> u32;
+    pub fn presented(&self) -> SystemTime;
+    pub fn children(&self) -> &[Spawned];       // 探针报告的 `Child`
+    pub fn footprint(&self) -> Result<u64, BenchError>;   // 主进程的 phys_footprint
+    pub fn settle_after_first_frame(&mut self) -> Result<(), BenchError>;   // 没有 kernel：首帧后 `settle`
+    /// kernel「静止」的采样规则；首帧后 `first_quiescent` 内没有 `Quiescent` 时返回 `Idle::NotQuiescent`。
+    pub fn idle<T>(&mut self, sample: impl FnMut(&mut Session) -> Result<T, BenchError>) -> Result<Idle<T>, BenchError>;
+    pub fn epoch(&mut self) -> Result<Option<u64>, BenchError>;
+    pub fn plugins(&mut self) -> Result<Vec<PluginReport>, BenchError>;
+    pub fn ready(&mut self) -> Result<(), BenchError>;
+    pub fn activate_all(&mut self) -> Result<(), BenchError>;
+    pub fn open(&mut self, target: OpenTarget, milestone: Milestone, limit: Duration) -> Result<Duration, BenchError>;
+    pub fn frames(&mut self, target: OpenTarget, limit: Duration) -> Result<FrameStats, BenchError>;
+    pub fn quit(self) -> Result<(), BenchError>;   // 退出码不是 0 也是错误
+}
+pub enum Idle<T> { Sample(T), NotQuiescent }
+/// 根进程及其全部后代：广度优先、按 pid 去重，展开期间已经退出的进程跳过。
+pub fn expand(info: &dyn ProcessInfo, roots: &[u32]) -> Vec<u32>;
+/// `sudo -n purge`；sudo 不存在、要密码或 purge 失败时为 false（`skipped`）。`path` 只替换这条命令的 `PATH`。
+pub fn purge(path: Option<&OsStr>) -> io::Result<bool>;
+```
+
+会话的每个等待都经过同一个循环：收到探针的 `Error`、`PluginFailed` 或无效的行，或者进程退出，立即出错；到期时出错，原因写明等的消息。出错时（会话被丢弃时进程还在运行）先读出进程树，再向整个进程组发 `SIGKILL`，然后结束离开了进程组的后代（含探针报告的 `Child` 根进程），最后才关闭 socket。进程退出时，它在退出前写下的报告仍然先读完，所以探针的 `hook <名字>` 是原因，而不只是「退出码 3」。
 
 ### 需要其他 crate 提供的接口
 
@@ -980,6 +1047,17 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - 同样的命令，4 个忙循环：第一次没有轮次被截断（`/all` 1.55 s、`/first` 12.4 ms）；第二次 5 轮被截断，不报错，作为 3.85 s 左右的样本计入（样本最大值 3.85 s），中位数 `/all` 1.93 s、`/first` 24.3 ms，仍在预算内；`partial_rounds` 5、`outside` 33 179。`GITHUB_ACTIONS=true` 合并时 `code_intel record` 的 notice 带上说明：「5 rounds cut by the time box, the last with 33179 outside; done after 1.942528946s of a 1.9s time box; Some(90301) units stored, Some(0) evictions」。
 - 没有验证的：macOS 上截断的频率，由之后的 CI 运行的 notice 给出。
 
+第 4 步（探针、进程调度与空窗口基线，[ADR 0051](../adr/0051.md)），在 macOS 上运行：Apple M5 Pro（Mac17,9，15 核），macOS 27.0.1。这台机器的屏幕处于锁定状态（`IOConsoleLocked = Yes`），窗口不显示任何帧，所以空窗口基线的实测值和 ADR 0017 要的基线由 macOS CI 给出，本节在 CI 运行之后补上。
+
+- `just test -p lectern-bench`：129 个测试通过，跳过 6 个。本步新增 `wire_*` 6 个、`probe_*` 15 个、`process_*` 26 个、`purge` 集成测试 3 个（`tests/purge.rs`）和 `runner_skipping_benchmark_is_skipped_not_an_error`。`just test -p lectern-platform`：196 个通过。
+- `probe_*` 用真实的 `Kernel` 和计数的测试插件，运行器一侧是临时目录里的 Unix 域 socket：两种裁剪（`closure:`、`closure+self:`）之后每个插件的 `manifest()` 在整个启动里只调用一次；`attach` 满足 `Command`、`Manual`、`Workspace` 三种激活条件后发出 `Ready`，空闭包立即 `Ready`；`bench-probe` 丢弃序号过时的 `Busy` / `Quiescent`，kernel 保持静止；所选插件进入 `Failed` 时发出 `PluginFailed`，`ActivateAll` 报告失败的插件；`FirstFrame` 先发出，之前积压的报告随后按顺序发出；`drive` 之前到达的请求排队，之后按顺序应答；无效的请求行、无效的 `LECTERN_BENCH_PLUGINS` 和裁剪不了的选择发出 `Error`。
+- `process_*` 用脚本化的 `Launcher` / `ProcessInfo` 和假探针（一个线程按脚本连接 socket、发报告、应答请求），期限缩短到几十到几百毫秒：冷启动 2 次预热、20 个样本，同一时间只有 1 个进程；探针报告 `hook <名字>`、预热以 3 退出都是出错；不连 socket、等待期间退出、`Quit` 之后不退出或退出码不是 0、`FirstFrame` 的 pid 不是启动的那个，都是出错；基线在首帧后等 `settle`；`Busy` 让等待重新开始；采样前后代数不同时重采，连续 3 次无效出错；首帧后不静止返回 `Idle::NotQuiescent`；`process_deadline_*` 对 `Epoch`、`Plugins`、`Ready`、`Milestone`、`Frames` 各一个，原因写明等的消息；`PluginFailed` 和 `frames <…>` 立即出错；进程组展开到孙进程、按 pid 去重、跳过已退出的；结束会话时向进程组和探针报告的 `Child` 根进程发 `SIGKILL`；内存类最多 3 个同时运行，第一个出错之后不再开始新的启动。`process_*` 连续运行 25 次都通过，同时运行 16 个 `yes` 忙循环时 10 次都通过。
+- `purge`：假的 `sudo` 只放在这条命令的 `PATH` 最前面，记录参数 `-n purge`；回放成功时为 true，失败和没有 `sudo` 时为 false。
+- `just check` 通过（含 ADR 0051 修改后的架构检查和文档链接）；`python3 scripts/test_check_architecture.py` 26 个测试通过；`python3 scripts/check_architecture.py --gpui-free-packages` 的输出仍包含 `lectern-bench`。`Cargo.lock` 只在 `lectern-bench` 的依赖列表里多了 `futures`、`gpui-pre-platform` 和 `libc`，没有新的包；`cargo metadata --format-version 1 --locked --all-features` 在不加和加 `--filter-platform x86_64-unknown-linux-gnu` 时都通过。
+- `just bench baseline/`（这台机器，屏幕锁定）：退出码 2，两条都是 `error`，原因「10s 内没有等到 FirstFrame」，各用 10.0 s。原因是锁屏，不是探针：同样条件下 `platform` 的 `frame_hooks` 示例注册首帧回调用了 13.2–45.2 µs（11 个冷启动的进程，中位数 15.0 µs），之后 300 帧都没有首帧回调，示例报告屏幕锁定或显示器休眠，以 101 退出。到期之后运行器结束了进程组：没有留下 `empty_window` 进程，系统临时目录下没有留下 `lectern-bench-*` 目录。
+- 冒烟模式（`cargo test --benches`，没有设置 `LECTERN_BENCH_BASELINE`）：两条基线都是 `skipped`，原因「没有设置 LECTERN_BENCH_BASELINE」。
+- 没有验证的：空窗口基线的实测值（20 个冷启动样本和 3 次空闲内存）和真实的首帧回调路径，由 macOS CI 的 `Benchmarks (macOS arm64)` 给出，之后写进本节和 ADR 0017（「验收」第 4 步第 3 条）；注册首帧回调出错的真实路径（只由 `process_cold_start_stops_at_a_hook_error` 用假探针覆盖）；Linux 上的编译和测试（这台机器只装了 `aarch64-apple-darwin` 目标，由 Linux CI 给出）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1004,3 +1082,22 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - `PreparedSet::manifests` 返回 `impl Iterator<Item = (&Name, &Manifest)>`，不是切片：集合里每一项还带插件对象、耗时和 panic 消息，返回切片要另存一份清单。探针只遍历它。「需要其他 crate 提供的接口」已改。
 - 新增 `PreparedSet::validate`：第 3 步的验收要求 `retain` 之后 `validate` 通过，而 `PluginSet::validate` 会再调用一次 `manifest()`。新增 `GraphError::UnknownPlugin`，`dependency_closure` 收到集合里没有的 ID 时返回它。
 - 只留闭包（`closure:<id>`）的集合在一种情况下不能激活：`MULTIPLE` 服务的某个提供者反过来依赖 `<id>`。这时闭包里有这个提供者，却没有它依赖的 `<id>`，探针等不到 `Ready`、基准记为出错。记为已知限制（[kernel 设计「插件集合的闭包与裁剪」](kernel.md#插件集合的闭包与裁剪)第 3 条）。
+
+第 4 步：
+
+- 探针插件 `bench-probe` 放在本 crate（「探针」），而 ADR 0025 的架构检查要求实现了 `Plugin` 的 crate 都标 `plugin = true`；本 crate 以 dev-dependency 依赖插件 crate，不能是插件 crate。[ADR 0051](../adr/0051.md) 让架构检查在这一条里跳过 tool 层 crate，并限定 tool 层的 `Plugin` 实现只用于测量和测试、不提供也不要求服务。
+- `Probe::start_kernel` 不裁剪时也先 `PluginSet::prepare`，再 `Kernel::start_prepared`，不调用 `Kernel::start`：`Plugins` 的应答要带每个插件清单里的激活条件（`plugin/after_first_frame` 按它选插件），`ActivateAll` 要按激活条件逐个满足，而 `PluginStatus` 不带激活条件，`Kernel::start` 又消耗了插件集合。两条路径进入同一个 kernel 线程函数，`start_prepared` 用 `prepare` 记下的清单和耗时，每个 `manifest()` 仍只调用一次，`plugin/*/activate` 的四段耗时口径不变。区别是测量构建里清单在调用 `start_kernel` 的线程上读取（`app` 里是首帧之后的主线程），不在 kernel 线程上；第 3 步测得 20 个插件的 `Kernel::start` 共 80–100 µs，清单只是其中一部分。
+- 新增 `Probe::drive`：`empty_window` 没有 kernel，设计只有 `attach(kernel, driver)`。`drive` 只交出 `Driver`：`Epoch` 应答 None，`Plugins` 只应答 `PluginsEnd`，`ActivateAll` 立即应答 `Ready`。`attach` 或 `drive` 之前到达的请求排队。
+- `LECTERN_BENCH_PLUGINS` 的值无效或裁剪不了（ID 不在集合里、闭包出错）时，探针发出 `Error`，整个集合照常启动：运行器立即把这个基准记为 `error`，不等 `Ready` 的期限。设计没有规定这种情况。
+- 环境变量名 `LECTERN_BENCH_SOCKET`、`LECTERN_BENCH_PLUGINS` 是 `wire` 的常量 `SOCKET_VAR`、`PLUGINS_VAR`，`probe` 重新导出：运行器默认编译，不能用只在 `probe` feature 下才有的模块。
+- 依赖：`lectern-platform` 从 dev 和可选依赖改为普通依赖，`main` 用它设置基准线程的 QoS（「数据流与线程」第 2 条，本步补上），报告的 `host` 用 `platform::host::describe` 填上第 1 步暂为 null 的三项，进程级基准用 `platform::process`；`probe` 只另外打开它的 `bench-hooks`。`tempfile` 从 dev 改为普通依赖：进程调度在默认编译的 `lectern_bench::process` 里，每次启动的临时目录由它建。新增 dev 依赖 `libc`（`benches/process.rs` 向进程组发 `SIGKILL`）和 `futures`（`empty_window` 的通道），都已在工作区的依赖图里，「不新增外部 crate」仍成立。「依赖」表已改。
+- 新增 `BenchError::skip`：「状态与异常」要求冒烟模式下缺少被测程序、`sudo -n purge` 不可用时记为 `skipped`，第 1 步的 `BenchError` 只能表示 `error`。基准返回 `BenchError::skip(原因)` 时，它的条目记为 `skipped` 并带上原因，不影响退出码。
+- 进程调度的接口写进了新的「进程调度」一节，设计原来只写了两个 trait 的职责：`Launcher` 拆成 `Launcher`（启动）和 `Launched`（一个已启动的进程：pid、`try_wait`、`kill_group`、`kill`），`Limits` 让测试缩短期限，`Session` 的方法供第 5 步的基准使用。
+- 结束进程的顺序：设计写的是先向进程组发 `SIGKILL`，再按展开规则结束仍然存活的后代。实现先展开进程树（从主进程和探针报告的 `Child` 根进程开始），再向进程组发 `SIGKILL`，最后结束展开得到的后代：主进程被结束后，它的子进程改由 launchd 收养，`children(pid)` 就找不到它们了。之后才关闭 socket，假探针因此不会在被结束之前自己正常退出。
+- 每次启动的环境除了两个 `LECTERN_BENCH_*` 变量，还把 `HOME` 设为这次启动的临时目录，删除 `LECTERN_LOG`、`CLAUDE_CONFIG_DIR` 和 `CODEX_HOME`：被测程序不读写用户的数据、日志设置和 agent 会话。设计只写了「临时数据目录」。socket 和 `HOME` 在系统临时目录下同一个 `lectern-bench-*` 目录里，socket 路径短于 macOS `sun_path` 的 104 字节（`CARGO_TARGET_TMPDIR` 下可能更长）。
+- `purge` 多了 `path` 参数：测试把假的 `sudo` 只放在这一条命令的 `PATH` 最前面，不改测试进程自己的环境（`std::env::set_var` 在多线程的进程里不安全）。基准传 None。
+- `process_*` 只覆盖本步的调度。插件两次启动的差值与激活耗时、`plugin/after_first_frame`、`plugin/process_total` 和 `lsp/*` 的取法属于第 5 步的基准，测试随第 5 步加入；帧判定是 `stats_frames_*`，`time_with_setup` 是 `runner_*`（第 1 步「与设计的差异」）。首帧后 30 秒内不静止时会话返回 `Idle::NotQuiescent`，由第 5 步的 `app/idle_*` 记为 `over`。
+- `baseline/empty_window_cold_start` 的结果带一条说明：20 个样本里超过 20 ms 的个数和最大值，即 `app/cold_start` 按 ADR 0017 判定时会看到的数，供「未决问题」里重新选择 A、B 时用。条目仍然只记录。
+- 预算表里两条 `baseline/*` 从「计划中」改为生效，仍然只记录、没有上限：`budgets.rs` 只改了状态，没有改任何上限。
+- `empty_window` 的窗口与 `app` 的 Welcome 窗口一样大（820 × 520），画的像素与 `app/cold_start` 相同；设计没有规定大小。它的 `Driver` 把 `Quit` 经通道转到主线程调用 `cx.quit()`，`Open` 什么也不做。
+- 「验收」第 4 步第 3 条（实测值写进 ADR 0017）等 macOS CI 的数字，这台机器的屏幕锁定，测不出首帧（「实际验证」）。
