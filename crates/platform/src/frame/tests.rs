@@ -297,27 +297,31 @@ mod hooked {
         }
     }
 
+    /// A slot holding a callback that sends what it gets.
+    fn slot() -> (
+        std::sync::atomic::AtomicPtr<super::super::imp::FirstPresented>,
+        std::sync::mpsc::Receiver<super::super::PresentedAt>,
+    ) {
+        use super::super::imp::FirstPresented;
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let callback: FirstPresented = Box::new(move |at| sender.send(at).unwrap());
+        (
+            std::sync::atomic::AtomicPtr::new(Box::into_raw(Box::new(callback))),
+            receiver,
+        )
+    }
+
     #[test]
-    fn hook_deliver_calls_the_callback_once_for_a_shown_drawable() {
+    fn hook_deliver_gives_a_shown_drawable_its_presented_time_once() {
         use std::ptr;
-        use std::sync::atomic::{AtomicPtr, Ordering};
-        use std::sync::mpsc;
+        use std::sync::atomic::Ordering;
         use std::time::{Duration, SystemTime};
 
-        use super::super::imp::{CACurrentMediaTime, FirstPresented, deliver};
+        use super::super::TimeSource;
+        use super::super::imp::{CACurrentMediaTime, deliver};
 
-        let (sender, receiver) = mpsc::channel();
-        let callback: FirstPresented = Box::new(move |time| sender.send(time).unwrap());
-        let slot: AtomicPtr<FirstPresented> = AtomicPtr::new(Box::into_raw(Box::new(callback)));
-
-        // A drawable that was not shown, and values that are no time at
-        // all: the callback keeps waiting.
-        for not_shown in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
-            deliver(&slot, not_shown);
-            assert!(receiver.try_recv().is_err(), "{not_shown}");
-            assert!(!slot.load(Ordering::Acquire).is_null(), "{not_shown}");
-        }
-
+        let (slot, receiver) = slot();
         // A drawable shown 0.5 s ago: the callback gets the system time of
         // that moment, within the time the two clock readings are apart.
         let before = SystemTime::now();
@@ -325,8 +329,10 @@ mod hooked {
         let shown = unsafe { CACurrentMediaTime() } - 0.5;
         deliver(&slot, shown);
         let after = SystemTime::now();
-        let time = receiver.try_recv().unwrap();
+        let at = receiver.try_recv().unwrap();
+        assert_eq!(at.source, TimeSource::Presented);
         let slack = Duration::from_millis(100);
+        let time = at.time;
         assert!(
             time + Duration::from_millis(500) + slack >= before,
             "{time:?}"
@@ -336,14 +342,44 @@ mod hooked {
             "{time:?}"
         );
 
-        // Once: the slot is empty, a later shown drawable does nothing.
+        // Once: the slot is empty, a later drawable does nothing, shown or not.
         assert!(slot.load(Ordering::Acquire).is_null());
         // SAFETY: no arguments.
         deliver(&slot, unsafe { CACurrentMediaTime() });
+        deliver(&slot, 0.0);
         assert!(receiver.try_recv().is_err());
         assert_eq!(
             slot.swap(ptr::null_mut(), Ordering::AcqRel),
             ptr::null_mut()
         );
+    }
+
+    #[test]
+    fn hook_deliver_without_a_presented_time_gives_the_handler_time_once() {
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, SystemTime};
+
+        use super::super::TimeSource;
+        use super::super::imp::{CACurrentMediaTime, deliver};
+
+        // 0 (no time from the machine, or a drawable not shown), and values
+        // that are no time at all: the moment of the handler, on the
+        // system clock.
+        for not_shown in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
+            let (slot, receiver) = slot();
+            let before = SystemTime::now();
+            deliver(&slot, not_shown);
+            let after = SystemTime::now();
+            let at = receiver.try_recv().unwrap();
+            assert_eq!(at.source, TimeSource::Handler, "{not_shown}");
+            let slack = Duration::from_millis(100);
+            assert!(at.time + slack >= before, "{not_shown}: {at:?}");
+            assert!(at.time <= after + slack, "{not_shown}: {at:?}");
+            // Once.
+            assert!(slot.load(Ordering::Acquire).is_null(), "{not_shown}");
+            // SAFETY: no arguments.
+            deliver(&slot, unsafe { CACurrentMediaTime() });
+            assert!(receiver.try_recv().is_err(), "{not_shown}");
+        }
     }
 }
