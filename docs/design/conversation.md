@@ -10,13 +10,13 @@
   - 检查器页 `InspectorTab("conversation")`：页内的分段控件切换 Messages 与 Terminal；页跟随当前审阅屏幕的会话（`Target::Review(ReviewTarget::Session(key))`）。
   - Messages 页：状态行（agent、连接状态、上下文窗口占用）、对话列表（prompt、agent 说明、连续的工具调用合成一行、发回的审阅意见、异常结束的说明）、更早的轮次按需加载、agent 的计划、权限请求卡片、回复框（⌘↩ 发送，进行中可以停止）。
   - 权限请求：按选项的种类给出按钮，执行命令的请求显示命令文本，改文件的请求显示改动预览；回答经 `Conversations` 发出；当前审阅的会话有新请求而检查器没有显示 Conversation 时，切到这一页（「未决问题」3 的默认选项）。
-  - Terminal 页：恢复按钮、拒绝原因、「可能还在别处运行」的提示；恢复后嵌入 `terminal_view` 的终端视图；结束终端。
+  - Terminal 页：恢复按钮、拒绝原因、「可能还在别处运行」的提示；恢复后嵌入 `terminal_view` 的终端视图；结束终端；还有运行中的终端时，关闭项目或退出之前确认（离开守卫）。
   - 一个会话只由 Lectern 里的一处驱动（[ADR 0050](../adr/0050.md)）：Terminal 页在恢复这个会话时不经 ACP 发送，有 ACP 连接时不在 Terminal 页恢复。
   - 全部界面字符串的 Fluent 键、UI 探针的语义节点、具名 Action 与快捷键、向 `workspace` 登记的贡献。
   - 本文定义 `services::conversation` 模块（「接口」），由 `services` 采纳、`agents` 实现（「对其他 crate 的要求」B、C）。
 - 不做：
   - ACP 客户端、agent 进程的启动与空闲退出、历史窗口的读取、实时更新与历史的合并、改动预览的计算：`agents`（「对其他 crate 的要求」C）。本 crate 不启动进程、不读会话日志、不做 IO。
-  - PTY、终端状态机、恢复命令的映射与检查：`terminal`；终端网格的绘制、选区和键盘输入：`terminal_view`（「对其他 crate 的要求」D、E）。
+  - PTY、终端状态机、恢复命令的映射与检查、登录 shell 的环境：`terminal`（[terminal 设计](https://github.com/SoloJiang/lectern-app/pull/265)）与 `platform`；终端网格的绘制、选区和键盘输入：`terminal_view`（「对其他 crate 的要求」D、E）。
   - 检查器容器和它的分段控件（Files / Conversation）、导航：`workspace`。
   - 项目侧栏里会话行的等待标记：`project_home`（「对其他 crate 的要求」H）。
   - 审阅意见的编写、攒批和 ⌘↩ 发回：[#22](https://github.com/SoloJiang/lectern-app/issues/22)（`review_view` 与 `review`）。本文只规定发回的路线（「对其他 crate 的要求」I）和发回后在对话里怎样显示。
@@ -35,7 +35,7 @@
 | `lectern-ui` | 颜色、`TextRole`、`motion`、`Transition`、控件（`Segmented`、`Button`、`AgentDot`、`Expander`、`Skeleton`、`loading_phase`，以及新增的 `TextArea`）、`Text`、`semantic`、`contrib` 的载荷类型 | 视图层的公共库（[ADR 0015](../adr/0015.md)） |
 | `lectern-i18n` | `keys::conversation::*`、`Args`、`relative_time` | [ADR 0013](../adr/0013.md) |
 | `lectern-kernel`、`lectern-services` | `Plugin`、`PluginHandle`、`ServiceRef`；使用 `dyn Contributions`、`dyn SessionSource`、`dyn Conversations`、`dyn Terminals` 和它们的数据类型 | 架构规则 7（[ADR 0025](../adr/0025.md)）：插件之间只经 `services` |
-| `lectern-terminal-view` | Terminal 页里的终端视图 `TerminalPane` | 非插件的视图库（「对其他 crate 的要求」E），插件 crate 可以依赖 |
+| `lectern-terminal-view` | Terminal 页里的终端视图 `TerminalPane`；从 `ui` 的颜色推出终端的 `Theme`、按区域大小算 `GridSize` 的两个函数 | 非插件的视图库（「对其他 crate 的要求」E），插件 crate 可以依赖 |
 | `lectern-logging` | 日志宏；测试用 `test-support` 的 `testing::capture()` | [ADR 0046](../adr/0046.md) |
 | `futures`（`channel` feature） | 事件到主线程的 `mpsc::unbounded` | 已在工作区依赖（`review_view` 同样用它） |
 | `lectern-kernel`（`test-support`，dev）、`insta`（dev） | `TestKernel`、语义树快照 | 工作区统一依赖 |
@@ -50,22 +50,22 @@ kernel 没有可选依赖：`requires` 里的服务都要有活着的提供者�
 
 | 插件 ID | provides | requires | 激活 | 内容 |
 |---|---|---|---|---|
-| `conversation` | — | `dyn Contributions`、`dyn SessionSource` | `AfterFirstFrame` | 检查器页与快捷键的登记；`WorkspaceEvent` 的监听（当前会话）；页本身 |
+| `conversation` | — | `dyn Contributions`、`dyn SessionSource` | `AfterFirstFrame` | 检查器页、快捷键与离开守卫的登记；`WorkspaceEvent` 的监听（当前会话）；页本身 |
 | `conversation-live` | — | `dyn Conversations` | `AfterFirstFrame` | 把 `dyn Conversations` 放进共享状态；`ConversationEvent` 的监听；不在时 Messages 页显示不可用，Terminal 页照常 |
-| `conversation-terminal` | — | `dyn Terminals` | `AfterFirstFrame` | 把 `dyn Terminals` 放进共享状态；`TerminalEvent` 的监听；不在时 Terminal 页显示不可用，Messages 页照常 |
+| `conversation-terminal` | — | `dyn Terminals` | `AfterFirstFrame` | 把 `dyn Terminals` 放进共享状态；`TerminalEvent` 的监听（`Listed`、`Frame`）；不在时 Terminal 页显示不可用，Messages 页照常 |
 
 ```rust
 /// `app` 装配时调用一次，三个插件都放进 `PluginSet`（ID 见上表）。不做 IO。
-pub fn plugins() -> (ConversationPlugin, LivePlugin, TerminalPlugin);
+pub fn plugins() -> (ConversationPlugin, LivePlugin, TerminalPagePlugin);
 
 pub struct ConversationPlugin { /* Arc<Shared> */ }
 pub struct LivePlugin { /* Arc<Shared> */ }
-pub struct TerminalPlugin { /* Arc<Shared> */ }
+pub struct TerminalPagePlugin { /* Arc<Shared> */ }
 ```
 
-- `ConversationPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`（会话列表用于 agent 圆点和「可能还在别处运行」的判断，按 `SessionKey::source` 找提供者，与 review_view 相同）；`Contributions::register(…, None)` 两项贡献（「界面」的「向 `workspace` 登记的贡献」），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<WorkspaceEvent>`（`ScreenChanged`、`WindowClosed`）订阅。不提交任务。`started`：保存 `PluginHandle`；调 `Contributions::current_route(WindowId(0))`（「对其他 crate 的要求」A）补上激活之前的屏幕，因为 `Live` 之前发出的 `ScreenChanged` 收不到（kernel 设计「激活时的上下文」）。停用：`Active` drop 时清空 `Shared` 里的引用。
+- `ConversationPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`（会话列表用于 agent 圆点和「可能还在别处运行」的判断，按 `SessionKey::source` 找提供者，与 review_view 相同）；`Contributions::register(…, None)` 两项贡献（「界面」的「向 `workspace` 登记的贡献」）和 `register_leave_guard(…, None)` 一个离开守卫（「数据结构」的「离开守卫」），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<WorkspaceEvent>`（`ScreenChanged`、`WindowClosed`）订阅。不提交任务。`started`：保存 `PluginHandle`；调 `Contributions::current_route(WindowId(0))`（「对其他 crate 的要求」A）补上激活之前的屏幕，因为 `Live` 之前发出的 `ScreenChanged` 收不到（kernel 设计「激活时的上下文」）。停用：`Active` drop 时清空 `Shared` 里的引用。
 - `LivePlugin::activate`：取 `ServiceRef<dyn Conversations>`，订阅 `ConversationEvent`；`started` 时放进 `Shared::conversations`，并读一次 `waiting()` 记进 `Shared::waiting`；`Active` drop 时取出。
-- `TerminalPlugin::activate`：取 `ServiceRef<dyn Terminals>`，订阅 `TerminalEvent`；`started` 时放进 `Shared::terminals`；`Active` drop 时取出。
+- `TerminalPagePlugin::activate`：取 `ServiceRef<dyn Terminals>`，订阅 `TerminalEvent`；`started` 时放进 `Shared::terminals`；`Active` drop 时取出。
 - 三个插件共用一个 `Arc<Shared>`（`plugins()` 建）。页每次用到服务时从 `Shared` 取一份（取锁复制），`ServiceRef::get()` 为 None（提供者已停用）时按没有处理。`conversation-live` 或 `conversation-terminal` 启动或停用时向活着的页投递 `Job::Services`，页重画。
 
 ```rust
@@ -137,8 +137,14 @@ pub struct MessagesModel {
 pub struct TerminalPage {
     session: SessionKey,
     terminal: Option<TerminalId>,
+    /// `Terminals::info(terminal)` 上一次的 `state`；`TerminalEvent::Listed` 之后重读。
+    state: Option<RunState>,
     pane: Option<Entity<lectern_terminal_view::TerminalPane>>,
-    refused: Option<ResumeRefused>,           // 上一次恢复被拒绝的原因
+    /// `Terminals::watch(terminal)` 的关注：只在 Terminal 页正在显示时持有（「数据流与线程」）。
+    frames: Option<FrameInterest>,
+    /// 页上终端区域上一次绘制的大小（`canvas` 的 prepaint 记下），恢复时换算 `GridSize`。
+    area: Option<Size<Pixels>>,
+    refused: Option<LaunchError>,             // 上一次 `open` 被拒绝的原因
 }
 
 /// 执行器线程、kernel 线程、主线程上产生，排到主线程的工作。
@@ -262,7 +268,7 @@ pub enum Link {
 }
 
 pub enum LinkError {
-    /// 程序启动失败（PATH 里有，但执行失败）。
+    /// 程序启动失败：执行失败，或发送时程序的查找还没完成、完成后没有找到。
     Spawn,
     /// 协商的协议版本不是 1，或 agent 不支持恢复这个会话。
     Unsupported,
@@ -283,7 +289,7 @@ pub enum Unavailable {
     NotResumable,
     /// 会话的 `cwd` 不在已打开项目的 worktree 根或文件夹项目根之内。
     OutsideProject,
-    /// PATH 里找不到这个 agent 的 ACP 程序。
+    /// 登录 shell 环境的 PATH 里找不到这个 agent 的 ACP 程序（「对其他 crate 的要求」C 的查找）。
     NotInstalled(AcpProgram),
     /// 这个 agent 的适配器没有通过「对其他 crate 的要求」C 的核对，或上一次协商的协议版本不是 1。
     Unsupported,
@@ -427,7 +433,7 @@ pub(crate) enum Item {
 
 ### 一处驱动
 
-「终端在驱动这个会话」指 `Terminals::for_session` 有值，并且这个终端的 `status` 是启动中或运行中；进程已退出或启动失败、页上还留着最后画面的终端不算（没有 `dyn Terminals` 时视为不在驱动）。本 crate 在主线程上检查，两个服务的状态都在调用返回前更新（`Conversations::command` 换出快照；`Terminals::resume` 在返回前登记），所以同一帧里的两次检查看到一致的状态：
+「终端在驱动这个会话」指 `Terminals::for_session` 有值，并且 `info(id)` 的 `state` 是 `RunState::Starting` 或 `Running { .. }`；`Exited`、`Failed`、页上还留着最后画面的终端不算（没有 `dyn Terminals` 时视为不在驱动）。本 crate 在主线程上检查，两个服务的状态都在调用返回前更新（`Conversations::command` 换出快照；`Terminals::open` 在返回前登记，状态 `Starting`），所以同一帧里的两次检查看到一致的状态：
 
 | 动作 | 允许的条件 | 不允许时 |
 |---|---|---|
@@ -435,6 +441,14 @@ pub(crate) enum Item {
 | Terminal 页恢复 | `link` 是 `None`（没有 `dyn Conversations` 时视为 `None`） | `Idle`、`Failed`（`Failed` 时连接可能仍在）：按钮改为「断开并恢复」，先 `Disconnect` 再恢复；`Connecting`、`Working`、`Stopping`：按钮不可用，显示 `conversation-terminal-linked` |
 
 「可能还在别处运行」只是提示，不阻止：会话的 `SessionSummary::open_turn` 为 true、`last_activity` 在 2 分钟之内、`link` 为 `None`、也没有终端在驱动它时，回复框上方和恢复按钮上方各显示一行 `conversation-elsewhere`（「未决问题」4）。
+
+### 离开守卫
+
+terminal 设计「未决问题」1 的默认选项 (a)：还有运行中的终端时，关闭项目或退出 Lectern 之前先确认。守卫用 `workspace` 已有的接口（[workspace 设计「服务接口」](workspace.md#服务接口lectern-services-的-workspace-模块)的 `register_leave_guard`、`LeaveGuard::ask`）：
+
+- `conversation` 插件在 `activate` 里登记（「插件」）。`ask(scope, done)` 在主线程上调用：从 `Shared::terminals` 取 `list()`，数 `state` 是 `Starting` 或 `Running` 的终端。`Project(key)` 只数 `project == key` 的；`App` 数全部；`View`、`Window`、`Worktree` 立即 `done(true)`，因为终端不随离开视图、关闭窗口、切换 worktree 结束（terminal 设计「数据流与线程」只在项目关闭和插件停用时关闭终端）。没有 `dyn Terminals` 或数目为 0 时立即 `done(true)`。
+- 数目大于 0 时弹出系统的确认（`conversation-leave-*`）：「结束终端」→ `done(true)`，终端由 `terminal` 在项目关闭或停用时结束；「取消」→ `done(false)`。
+- 只管终端。ACP 连接在项目关闭和退出时按 ADR 0050 关闭，不询问。
 
 ### 草稿
 
@@ -451,13 +465,16 @@ conversation 的 started ─▶ Contributions::current_route(WindowId(0)) ─▶
 ⌘↩ ─▶ Conversations::command(Prompt)（返回前换出 Connecting 的快照）─▶ agents 启动 ACP agent，专用线程读它的输出 ─▶ session/update 合并（≤ 20 次/秒）─▶ Changed ─▶ …
 session/request_permission ─▶ 快照的 permissions、WaitingChanged ─▶ [监听] 当前会话新进入等待时 dispatch(SelectInspectorTab) ；project_home 重画等待标记
 Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回复 JSON-RPC ─▶ Changed
-恢复 ─▶ Terminals::resume(session, size)（返回前已登记）─▶ TerminalPane::new ─▶ TerminalEvent ─▶ [监听] Job::Terminal ─▶ [主线程] TerminalPane::refresh / 页的状态
+恢复 ─▶ Terminals::open(OpenSpec { launch: Launch::Resume(key), size, theme })（返回前已登记，Starting）─▶ TerminalPane::new + watch(id) ─▶ TerminalEvent::Frame / Listed ─▶ [监听] Job::Terminal ─▶ [主线程] TerminalPane::refresh / 重读 info(id)
 ```
+
+- 恢复的参数：`size` 是 `area` 经 E 的 `grid_size` 换算的网格（还没有记下 `area` 时为 None，`terminal` 用 80×24，`TerminalPane` 第一次布局后发 `Input::Resize`）；`theme` 取 E 的 `theme(cx)`。
+- `FrameInterest` 只在 Terminal 页正在显示时持有：切到 Terminal 页、页上有终端时 `watch(id)`；切到 Messages 页、换会话、检查器隐藏（`ConversationTab` drop）时 drop。没有关注时 `terminal` 只解析输出、不生成帧（terminal 设计「接口」的 `watch`），所以隐藏的 Terminal 页不占主线程。新关注出现时 `terminal` 立即生成一帧完整的，页再次显示时画面是最新的。
 
 - 主线程上只有：读快照（复制 `Arc`）、`items::build`、键的比较与锚点、发命令、渲染。没有 IO、解析和进程操作（架构规则 4）。
 - 本 crate 不提交 executor 任务。读历史、ACP 的收发、终端的读写都在 `agents`、`terminal` 里。
 - 事件的监听在发出事件的线程上运行，只做转发：取 `Shared::tabs` 的锁、`unbounded_send`。`WaitingChanged` 的监听另外比较集合、按上一节发一条 `dispatch`，不做别的。
-- 合并：前台任务每次醒来把通道里的项全部取出：同一个会话的 `Conversation` 只应用最高的 `generation`；`Terminal` 的输出通知合成一次 `refresh`；应用之后 `cx.notify()` 一次。
+- 合并：前台任务每次醒来把通道里的项全部取出：同一个会话的 `Conversation` 只应用最高的 `generation`；同一个终端的 `TerminalEvent::Frame` 合成一次 `refresh`（`id` 不是页上的终端时丢弃）；`Listed` 合成一次重读 `info(id)`；`Bell` 不处理；应用之后 `cx.notify()` 一次。
 - 派生数据：没有需要缓存的派生数据。改动预览的行由 `agents` 计算，按两侧内容的 git blob OID 缓存（架构规则 5，「对其他 crate 的要求」C）。
 - 首帧之前什么都不做：三个插件 `AfterFirstFrame` 激活，`activate` 只登记（[ADR 0017](../adr/0017.md)）。不打开 Conversation 页时，本 crate 没有通道、没有关注，`Shared` 只有几个空的 `Mutex`。
 
@@ -488,9 +505,9 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
      - 回复框：`ui::TextArea`（2 到 6 行，随内容增高），占位文字是 `conversation-reply-placeholder`（如「Reply to Claude Code」）；右下角是 Send（`Working` 时换成 Stop）。不能发送时回复框不可用，下面一行写原因，有对应操作时带一个按钮（「显示终端」「关闭」）。
   3. Terminal 页：
      - 没有终端时：一行说明（`conversation-terminal-explain`，命令文本 `claude --resume` / `codex resume` 不翻译）、恢复按钮、拒绝原因或「可能还在别处运行」的提示。
-     - 有终端时：一行状态（启动中、运行中、已退出（退出码））和「关闭」按钮，下面是 `TerminalPane`，占满页剩下的部分（检查器 300pt 宽时约 40 列，「未决问题」5）。终端退出后保留最后的画面，恢复按钮重新出现。
+     - 有终端时：一行状态（启动中、运行中、已退出（退出码，或被信号结束）、启动失败（原因））和「关闭」按钮，下面是 `TerminalPane`，占满页剩下的部分（检查器 300pt 宽时约 40 列，「未决问题」5）。终端退出或启动失败后保留最后的画面，恢复按钮重新出现。
 - 用到的 `ui` 控件与动效原语：`Segmented`、`Button`、`AgentDot`（新的请求或新一轮到达时 `blink`）、`Expander`、`Skeleton`、`loading_phase`、`TextArea`（新增）、`Icon::Check`；新项与新卡片用 `ARRIVE`（从下方 8pt 淡入），悬停由控件自带。减弱动态效果由 `ui` 处理。本 crate 不写颜色值、字体名和时长。
-- Fluent 键（`crates/i18n/locales/{en,zh-CN}/conversation.ftl`，「对其他 crate 的要求」G）。`$agent` 是「Claude Code」或「Codex」，`$program` 是 `AcpProgram::name()`，`$command` 是恢复命令，三者都不翻译：
+- Fluent 键（`crates/i18n/locales/{en,zh-CN}/conversation.ftl`，「对其他 crate 的要求」G）。`$agent` 是「Claude Code」或「Codex」，`$program` 是 `AcpProgram::name()`（Messages 页）或 `AgentCommand::program()`（Terminal 页），`$command` 是恢复命令，三者都不翻译：
 
   | 键 | en | zh-CN |
   |---|---|---|
@@ -571,12 +588,19 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   | `conversation-terminal-starting` | Starting… | 正在启动… |
   | `conversation-terminal-running` | Running | 运行中 |
   | `conversation-terminal-exited` | Exited ({ $code }) | 已退出（{ $code }） |
+  | `conversation-terminal-signaled` | Ended by a signal | 被信号结束 |
   | `conversation-terminal-close` | Close | 关闭 |
   | `conversation-terminal-not-resumable` | This session can't be resumed. | 这个会话不能恢复。 |
   | `conversation-terminal-outside-project` | The session's folder isn't in an open project. | 会话的文件夹不在已打开的项目里。 |
+  | `conversation-terminal-cwd-missing` | The session's folder no longer exists. | 会话的文件夹已不存在。 |
+  | `conversation-terminal-too-many` | Too many terminals are open. Close one, then try again. | 打开的终端太多。先关闭一个，再重试。 |
   | `conversation-terminal-not-installed` | Install { $program } to resume this session. | 安装 { $program } 后才能恢复这个会话。 |
   | `conversation-terminal-failed` | Couldn't start the terminal. | 无法启动终端。 |
   | `conversation-terminal-unavailable` | The terminal isn't available. | 终端不可用。 |
+  | `conversation-leave-title` | { $count } terminal(s) still running（复数形式） | 还有 { $count } 个终端在运行 |
+  | `conversation-leave-detail` | Their sessions stop when the terminals close. | 终端关闭后，其中的会话也会停止。 |
+  | `conversation-leave-end` | End Terminals | 结束终端 |
+  | `conversation-leave-cancel` | Cancel | 取消 |
 
 - UI 探针的语义节点（`ui::semantic`；`NodeId` 随项建一次放在项里，每帧只克隆）：
 
@@ -599,7 +623,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   | `conversation.notice` | `Text` | `Label::key` 是原因的键 |
   | `conversation.notice.action` | `Button` | 「显示终端」「关闭」等 |
   | `conversation.empty` | `Text` | `Label::key` 是空状态的键 |
-  | `conversation.terminal` | `Group` | `attrs`：`state`（`none` / `starting` / `running` / `exited`） |
+  | `conversation.terminal` | `Group` | `attrs`：`state`（`none` / `starting` / `running` / `exited` / `failed`） |
   | `conversation.terminal.resume` | `Button` | `State::disabled`；`Label::key` 是按钮的键 |
   | `conversation.terminal.warning` | `Text` | `Label::key` |
   | `conversation.terminal.close` | `Button` | |
@@ -642,7 +666,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 | `Load::Failed(Unrecognized)` | 只显示 `conversation-unrecognized`（不弹错误，与「会话格式无法识别」一致）；回复框按 `can_prompt` |
 | 历史为空、也没有实时的项 | `conversation-empty-turns` |
 | `can_prompt` 为 `Err(…)` | 回复框不可用，下面一行写对应的 `conversation-unavailable-*`；`Busy` 不写原因（状态行已说明），只是 Send 不可用 |
-| 终端在驱动这个会话（启动中或运行中） | 回复框换成 `conversation-in-terminal` 和「显示终端」；状态行「在终端中运行」；终端退出后（`TerminalEvent::Status`）回复框恢复 |
+| 终端在驱动这个会话（`Starting` 或 `Running`） | 回复框换成 `conversation-in-terminal` 和「显示终端」；状态行「在终端中运行」；`TerminalEvent::Listed` 之后重读的 `state` 不再是这两种时，回复框恢复 |
 | 会话可能还在别处运行 | 回复框与恢复按钮上方的 `conversation-elsewhere`（只是提示） |
 | `Link::Connecting` | 状态行「正在连接…」；回复框里刚发出的 prompt 已在列表末尾 |
 | `Link::Failed(e)` | 状态行「已断开」；列表末尾一行对应的 `conversation-error-*` 和「关闭」；`PromptFailed` 另起一行原样显示 agent 的错误文字（`TextRole::Secondary`） |
@@ -650,9 +674,10 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 | 请求被 agent 撤回、已被回答、连接关闭 | 卡片随快照消失 |
 | 回答的请求已不在（快照过时） | 提供者忽略；卡片随下一个快照消失 |
 | 正文超过 64 KiB | 截断，末尾 `conversation-truncated` |
-| 恢复被拒绝（`ResumeRefused`） | 恢复按钮不可用，下面一行写对应的 `conversation-terminal-*` |
-| 终端启动失败 | `conversation-terminal-failed`，恢复按钮可以再试 |
-| 终端退出 | 状态「已退出（退出码）」，保留最后的画面，恢复按钮重新出现 |
+| 恢复被拒绝（`open` 返回 `Err(LaunchError)`） | `AlreadyRunning(id)`：页改用这个终端，不显示原因。其余在恢复按钮下面写一行原因：`NotResumable`、`UnknownSession`、`UntrustedSource`、`InvalidSessionId` 写 `conversation-terminal-not-resumable`，`OutsideProject` 写 `conversation-terminal-outside-project`，`TooMany` 写 `conversation-terminal-too-many`。`TooMany` 时按钮仍可用（关闭一个终端后再试），其余时不可用 |
+| 终端启动失败（`RunState::Failed(reason)`，`open` 成功之后随 `Listed` 到达） | 状态行写原因：`NotInstalled(agent)` 写 `conversation-terminal-not-installed`（`$program` 是 `agent.program()`），`CwdMissing` 写 `conversation-terminal-cwd-missing`，`OutsideProject` 写 `conversation-terminal-outside-project`，`NoShell`、`Spawn`、`Internal` 写 `conversation-terminal-failed`。恢复按钮可以再试（`open` 关闭这个终端，换成新的） |
+| 终端退出（`RunState::Exited`） | 状态「已退出（退出码）」，`signaled` 时「被信号结束」；保留最后的画面，恢复按钮重新出现 |
+| 关闭项目或退出时还有运行中的终端 | 离开守卫弹出确认（「数据结构」的「离开守卫」）；取消时留在原处 |
 | 插件停用时页正在显示 | `conversation` 停用：`workspace` 注销检查器页，页 drop，关注释放；`conversation-live` / `conversation-terminal` 停用：按上面「没有 …」两行 |
 | 事件的 `generation` 低于已应用的 | 丢弃 |
 | 快照不一致（`streaming` 的项不在末尾、键重复，不应发生） | 重复的键只取第一项，记 warn，不 panic |
@@ -670,8 +695,9 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   | 停止 | info | `stop requested` | — |
   | 回答权限请求 | info | `permission answered` | `option`（`allow_once` / `allow_always` / `reject_once` / `reject_always`）、`kind`（`CallKind` 的判别名）、`waited_ms`（从 `asked_at` 起） |
   | 因新请求切到这一页 | info | `conversation tab selected for a request` | `pending` |
-  | 恢复终端 | info | `terminal resume requested` | `outcome`（`started` / `ResumeRefused` 的判别名）、`disconnected`（bool：先断开了 ACP 连接） |
-  | 关闭终端 | info | `terminal closed` | `state`（`running` / `exited`） |
+  | 恢复终端 | info | `terminal resume requested` | `outcome`（`started` / `LaunchError` 的判别名）、`disconnected`（bool：先断开了 ACP 连接） |
+  | 关闭终端 | info | `terminal closed` | `state`（`starting` / `running` / `exited` / `failed`） |
+  | 离开守卫弹出确认后得到回答 | info | `terminal leave answered` | `scope`（`project` / `app`）、`running`（运行中的终端数）、`answer`（`end` / `cancel`） |
   | 显示 `Link::Failed` | warn | `conversation failed shown` | `error`（`LinkError` 的判别名） |
   | 快照不一致 | warn | `snapshot inconsistent` | `generation`、`kind`（`duplicate_key` / `streaming_not_last`） |
   | `started` 时读不到当前屏幕 | warn | `route unavailable` | — |
@@ -682,12 +708,12 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 
 ## 测试
 
-依赖 GPUI，只在 macOS 上编译和测试：`just test -p lectern-conversation`。不用真实的会话日志、ACP agent、PTY 和文件 IO；`dyn Contributions`、`dyn SessionSource`、`dyn Conversations`、`dyn Terminals` 用本 crate 的假实现（记录调用、按测试的需要换出快照、从任意线程发事件），装在 `TestKernel` 上（`testing::harness`）。本 crate 不能依赖 `agents`、`terminal` 的 `testing`（架构规则 7）。
+依赖 GPUI，只在 macOS 上编译和测试：`just test -p lectern-conversation`。不用真实的会话日志、ACP agent、PTY 和文件 IO；`dyn Contributions`、`dyn SessionSource`、`dyn Conversations`、`dyn Terminals` 用本 crate 的假实现（记录调用、按测试的需要换出快照和 `RunState`、记录活着的 `FrameInterest` 数、从任意线程发事件），装在 `TestKernel` 上（`testing::harness`）。本 crate 不能依赖 `agents`、`terminal` 的 `testing`（架构规则 7）。
 
 - 纯函数（`#[test]`）：
   - `items_*`：项的顺序；连续工具调用合成一行、至多 4 项加「另有 n 项」；`ReviewNotes` 成为 `Notes`；`earlier > 0` 时 `Earlier` 在最前；新旧快照的键比较只报变化的项（流式更新只有最后一项）。
   - `options_*`：按钮按 `OptionKind` 排序；只画给出的种类；文字来自 Fluent 键，不来自 `OptionId`。
-  - `drive_*`：「一处驱动」表的每一行（`can_prompt`、`for_session` 与终端的 `status`、`link` 的组合）；进程已退出的终端不阻止回复框发送。
+  - `drive_*`：「一处驱动」表的每一行（`can_prompt`、`for_session` 与终端的 `RunState`、`link` 的组合）；`Exited`、`Failed` 的终端不阻止回复框发送。
   - `elsewhere_*`：`open_turn`、`last_activity` 的 2 分钟边界、`link`、终端四个条件。
   - `memory_*`：草稿的保存、放回、16 个的淘汰、256 KiB 的上限。
 - `#[gpui::test]`（`TestAppContext`，`lectern_ui::init_fixed`，`testing::harness`）：
@@ -698,7 +724,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   - `streaming_relayouts_only_the_last_item`：200 次流式更新里只有最后一项被 `splice`。
   - `send_with_cmd_enter_sends_a_prompt`：⌘↩ 发 `Prompt { origin: User }`，快照变为 `Connecting` 后清空回复框；空白文字不可发送；提供者拒绝时文字保留。
   - `composer_shows_why_it_cannot_send`：`can_prompt` 的每个 `Err` 对应一行原因。
-  - `composer_is_replaced_while_the_terminal_drives`：假 `Terminals` 的终端在运行时显示 `conversation-in-terminal`，「显示终端」切页；终端退出后回复框恢复可用。
+  - `composer_is_replaced_while_the_terminal_drives`：假 `Terminals` 的终端是 `Starting`、`Running` 时显示 `conversation-in-terminal`，「显示终端」切页；换成 `Exited` 并发 `Listed` 后回复框恢复可用。
   - `stop_sends_cancel`。
   - `permission_card_uses_kind_labels`：`OptionId` 里放金丝雀，界面和语义树里都没有它；按钮顺序固定；↵ 不触发选项。
   - `permission_command_and_edits_are_shown`：`Command` 的文字与 `workdir`；`Edits` 的路径、增删数、行与 `omitted`；`None` 时 `conversation-permission-no-detail`。
@@ -707,7 +733,10 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   - `context_is_shown_only_when_given`。
   - `failed_link_shows_the_reason_and_dismisses`：每种 `LinkError` 一行；`PromptFailed` 的文字原样显示；「关闭」发 `Dismiss`。
   - `drafts_survive_hiding_the_inspector`：写字、隐藏检查器、再显示，文字还在；换会话后各自的草稿。
-  - `terminal_page_resumes_and_embeds_the_pane`：恢复调 `Terminals::resume(session, size)`；每种 `ResumeRefused` 一行原因；退出后恢复按钮重新出现；关闭调 `close`。
+  - `terminal_page_resumes_and_embeds_the_pane`：恢复调 `Terminals::open`，`launch` 是 `Launch::Resume(key)`，`size` 由 `area` 换算，`theme` 来自 `theme(cx)`；每种 `LaunchError` 对应「状态与异常」里的一行原因，`AlreadyRunning(id)` 时页改用那个终端；`Exited`（含 `signaled`）后恢复按钮重新出现；关闭调 `close`。
+  - `terminal_failure_arrives_after_open`：`open` 返回 `Ok` 后假 `Terminals` 把状态换成 `Failed(NotInstalled(ClaudeCode))` 并发 `Listed`：状态行显示安装 `claude` 的提示，恢复按钮可用；`CwdMissing`、`Spawn` 同样各一行。
+  - `terminal_frames_only_while_visible`：Terminal 页显示时有一个 `FrameInterest`；切到 Messages 页、换会话、检查器隐藏后为 0；再切回时重新 `watch`。`Frame` 事件只让页上那个终端的 `TerminalPane` 刷新一次（同一批里的多个合成一次）。
+  - `leave_guard_*`：`Project(key)` 只数这个项目里 `Starting` / `Running` 的终端，`App` 数全部；数目为 0、没有 `dyn Terminals`，或范围是 `View`、`Window`、`Worktree` 时立即 `done(true)`，不弹出确认；有运行中的终端时弹出确认，「结束终端」给 `done(true)`，「取消」给 `done(false)`。
   - `terminal_resume_respects_the_link`：`Idle`、`Failed` 时先 `Disconnect` 再恢复；`Connecting`、`Working`、`Stopping` 时不可用。
   - `plugins_register_and_deactivate_cleanly`：激活后假 `Contributions` 收到 `InspectorTab`、`KeyBindings`；`conversation` 停用后登记 drop。`live_plugin_deactivates_on_its_own`、`terminal_plugin_deactivates_on_its_own`：单独停用后另一页照常。
   - `stale_generation_is_dropped`。
@@ -730,7 +759,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 - **B. `services`**：采纳本文「服务接口」一节的 `conversation` 模块（类型、`dyn Conversations` 的服务 ID、`ConversationEvent`、`ConversationInterest`）；`crates/services/AGENTS.md` 的模块列表加上它。测试：类型的 JSON 往返；`ID == "conversations"`、`MULTIPLE == false`；`ConversationInterest` drop 时调用一次回调。
 - **C. `agents`**：按 [ADR 0050](../adr/0050.md) 实现 ACP 客户端，新增插件 "conversations"（provides `dyn Conversations`，requires `dyn SessionSource`、`dyn Projects`，`AfterFirstFrame`，`activate` 只登记，没有发送之前不启动进程）。设计文档的修订写明：
   - 核对（先于实现）：按两个适配器的公开源码确认程序名、能否用上游会话 ID 恢复会话（`session/resume` 或 `session/load`）、ACP 的会话 ID 是否就是上游会话 ID、经 ACP 进行的轮次是否写进 CLI 同一份本机日志（审阅的新一轮来自这份日志）、是否发出 `usage_update`、执行命令的原始输入里命令在哪个字段。哪一项不成立，这个 agent 的 `can_prompt` 就是 `Unavailable::Unsupported`，只有历史与 Terminal 页。来源提交写进「外部格式」。
-  - 启动：只对 `SessionSource::resume` 给出 `ResumeCommand` 的会话（内置来源，会话 ID 是 UUID 的规范写法），程序按 `AcpProgram` 固定映射，没有参数；工作目录与 `cwd` 的检查同 [agents 设计「服务接口」](agents.md#服务接口lectern-services-的-session-模块)对恢复命令的规则；环境与 Terminal 页相同（登录 shell 的 PATH 补全放在一个非插件的库里，`agents` 与 `terminal` 共用，由两份设计商定位置）；`initialize` 声明 `protocolVersion: 1`，不声明 `fs`、`terminal`；`mcpServers` 为空；agent 支持 `session/resume` 时用它，否则用 `session/load` 并丢弃回放的更新（不建项，只计数）。`initialize` 与恢复各有 30 s 的超时，超时为 `Failed(Protocol)`。程序在 PATH 里的查找在 executor 上做（`can_prompt` 的 `NotInstalled` 由它得出），结果在本次运行里缓存，`Spawn` 失败或 `NotInstalled` 之后的下一次 `watch` 重新查找；UI 线程上不查找。
+  - 启动：只对 `SessionSource::resume` 给出 `ResumeCommand` 的会话（内置来源，会话 ID 是 UUID 的规范写法），程序按 `AcpProgram` 固定映射，没有参数；工作目录与 `cwd` 的检查同 [agents 设计「服务接口」](agents.md#服务接口lectern-services-的-session-模块)对恢复命令的规则；环境与 Terminal 页启动 agent 时相同：`lectern_platform::login_env::login_env()` 给出的登录 shell 环境（取不到时退回 Lectern 自己的环境），去掉 `LECTERN_` 开头的变量，程序用 `find_program(name, 登录环境的 PATH)` 查找（[terminal 设计](https://github.com/SoloJiang/lectern-app/pull/265)「启动命令」「子进程的环境」与「对其他 crate 的要求」第 2 项；`lectern-platform` 是非插件的库，`agents` 可以依赖）；`initialize` 声明 `protocolVersion: 1`，不声明 `fs`、`terminal`；`mcpServers` 为空；agent 支持 `session/resume` 时用它，否则用 `session/load` 并丢弃回放的更新（不建项，只计数）。`initialize` 与恢复各有 30 s 的超时，超时为 `Failed(Protocol)`。程序的查找在 executor 的后台任务里做，UI 线程上不查找：第一次 `watch` 一个有 ACP 程序的会话时查找，得出 `can_prompt` 的 `NotInstalled`。`login_env()` 在本次运行里第一次调用时运行一次用户的登录 shell（阻塞，至多 5 s），结果与 `terminal` 共用；这是取环境，不是启动 agent（ADR 0050）。查找完成之前 `can_prompt` 不因安装与否为 `Err`；这时发出的 prompt 等查找完成，找不到程序时 `link` 为 `Failed(Spawn)`。查找结果在本次运行里缓存，`Spawn` 失败或 `NotInstalled` 之后的下一次 `watch` 重新查找（登录环境不重取，只重新 `find_program`）。
   - 运行：每个连接一个读 agent 输出的专用线程（`Executor::run_dedicated_gated`），不启动异步运行时；一行至多 16 MiB，超过时关闭连接（`Protocol`）；不认识的 `session/update` 种类跳过并计数；`session/update` 合并后至多每 50 ms 换一次快照；stderr 只计字节数，不保留内容。
   - 关闭：空闲（`Idle` 且没有待确认的请求）10 分钟（`ManualClock` 可测）、`Disconnect`、项目关闭、插件停用时关闭 stdin、向进程组发 SIGTERM，2 s 后 SIGKILL；Lectern 退出时等待至多 500 ms。至多 3 个连接（ADR 0050）。
   - 快照：本文「服务接口」的不变量；历史窗口先读最近 20 轮，`LoadEarlier` 每次 20 轮，至多 200 轮；正文按 `ContentRef` 读，每段至多 64 KiB，合计至多 1 MiB；读取在 executor 上（`Interactive` 优先级，持有 `BusyGuard`）。工具行的 `CallKind` 从 `ToolKind`（历史）或 ACP 的 tool call kind（实时）映射。
@@ -738,44 +767,31 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   - 日志：进程的启动与退出按 [logging 设计「隐私」](logging.md#隐私)的子进程规则（程序名不含目录、参数个数、工作目录、pid、退出状态）；JSON-RPC 只记方法名（固定表里的字面量，表外记 `other`）、`req`、字节数、耗时；不记参数与结果的内容、原始输入、标题、环境变量、stderr。金丝雀测试同本文。
   - 测试：假的 ACP agent 放在 PATH 最前面（AGENTS.md「工作方式」）：它记录收到的参数、工作目录、环境变量和每条消息，按合成的脚本回放（`crates/agents/tests/fixtures/acp/`，不用真实会话）。覆盖：`initialize` 没有 `fs`、`terminal`；权限请求在没有 `Answer` 时一直等待；`Cancel` 回答 `cancelled`；空闲 10 分钟退出；第 4 个连接；拒绝的情况（第三方来源、非 UUID、`cwd` 在项目之外）；超长行；停用时进程组被终止。
   - 修改 agents 设计「范围」里「ACP 会话作为另一个 `SessionSource` 实现接入」一句：ACP 不是会话来源，经 ACP 的轮次从本机日志读到；ACP 对话由 `dyn Conversations` 提供。
-- **D. `terminal`**（接口的名字以 terminal 设计为准，本 crate 需要以下能力）：`terminal` 是提供服务的插件，`AfterFirstFrame` 激活，激活时不启动线程和进程。
-
-  ```rust
-  // lectern-services 的 terminal 模块
-  /// impl Service for dyn Terminals { const ID = "terminals"; const MULTIPLE = false; }
-  pub trait Terminals: Send + Sync {
-      /// 在一个新终端里恢复会话：按 agents 设计对 `ResumeCommand` 的规则映射命令、检查来源、会话 ID 和 cwd。
-      /// 这个会话已有进程已退出或启动失败的终端时，先关闭它再换成新的；只有启动中或运行中的终端才返回 `AlreadyRunning`。
-      /// 立即返回，返回前已登记（`for_session` 查得到），进程在后台启动。不阻塞，主线程可调用。
-      fn resume(&self, session: &SessionKey, size: GridSize) -> Result<TerminalId, ResumeRefused>;
-      /// 这个会话的、还没有关闭的终端（包括进程已退出的，Terminal 页显示它的最后画面）。是否在驱动会话看 `status`。不阻塞。
-      fn for_session(&self, session: &SessionKey) -> Option<TerminalId>;
-      fn status(&self, id: TerminalId) -> Option<TerminalStatus>;   // 启动中 / 运行中 / 已退出（退出码）/ 启动失败
-      /// 结束进程组并释放终端。立即返回。
-      fn close(&self, id: TerminalId);
-      /// 粘贴（I 用）：括号粘贴模式包住；去掉 C0 控制字符（保留 `\t`、`\n`）、ESC 和 C1 控制字符；不追加回车。立即返回。
-      fn paste(&self, id: TerminalId, text: &str);
-      // 网格快照、键盘输入、尺寸变化：由 terminal 与 terminal_view 的设计定。
-  }
-  /// `program` 是恢复命令的程序名（`claude`、`codex`），界面显示用。
-  pub enum ResumeRefused { NotResumable, OutsideProject, NotInstalled { program: Arc<str> }, AlreadyRunning(TerminalId) }
-  /// 在 terminal 的线程上发出。
-  pub enum TerminalEvent { Output { id: TerminalId }, Status { id: TerminalId } }
-  ```
-
-  另外：终端在项目关闭和 Lectern 退出时关闭；终端的输入、输出和粘贴的文字不进日志。
-- **E. `terminal_view`**：是非插件的视图库（插件 crate 才能依赖它），提供：
+- **D. `terminal`**：接口由 [terminal 设计](https://github.com/SoloJiang/lectern-app/pull/265)定义（`services::terminal` 模块，单实现服务 `dyn Terminals`，服务 ID 与插件 ID 都是 "terminal"），名字以它为准。terminal 设计「对其他 crate 的要求」第 4 项列出了它对本文的要求，本文已按它改写。本 crate 只用下面这些：
+  - `open(OpenSpec { launch: Launch::Resume(key), size, theme })`：在调用线程上按 agents 设计对 `ResumeCommand` 的规则检查来源、会话 ID 和 cwd，不阻塞、不做 IO。返回之前终端已登记（`for_session`、`info` 查得到，状态 `Starting`）。这个会话已有 `Starting` / `Running` 的终端时返回 `Err(LaunchError::AlreadyRunning(id))`；已有 `Exited` / `Failed` 的终端时先关闭它、换成新的。`NotInstalled` 不由 `open` 返回：查 `PATH` 是 IO，结果随 `Listed` 以 `RunState::Failed(FailReason::NotInstalled(agent))` 到达。`LaunchError` 的其余变体见「状态与异常」。
+  - `for_session(key)`；`info(id)` 的 `state`（是否在驱动会话只看 `Starting`、`Running`）；`list()` 的 `project` 与 `state`（离开守卫）。
+  - `watch(id)` 返回的 `FrameInterest`：页显示时持有（「数据流与线程」）。`frame(id)` 由 `TerminalPane` 读。
+  - `input(id, Input::Paste(text))`（I 用）：去掉 C0（保留 `\t`、`\n`）、ESC 和 C1 控制字符，程序开了 bracketed paste 时包上首尾序列，不追加回车。
+  - `close(id)`。
+  - 事件：`TerminalEvent::Listed { generation }`（重读 `info`）；`Frame { id, generation }`（只在有 `FrameInterest` 时发出，交给 `TerminalPane::refresh`）；`Bell` 不处理。事件只在终端线程上发出。
+  - `terminal` 是 `AfterFirstFrame` 激活的插件，第一次 `open` 之前不建线程、不取登录环境；终端在项目关闭和插件停用时关闭；终端的输入、输出和粘贴的文字不进日志。
+- **E. `terminal_view`**：是非插件的视图库（插件 crate 才能依赖它；terminal 设计「对其他 crate 的要求」第 5 项）。名字以 terminal_view 的设计为准，本 crate 需要：
 
   ```rust
   impl TerminalPane {
+      /// 显示一个终端。不调用 `watch`：`FrameInterest` 由宿主持有（本 crate 的 `TerminalPage::frames`），页隐藏时宿主 drop 它。
       pub fn new(terminals: ServiceRef<dyn Terminals>, id: TerminalId, window: &mut Window, cx: &mut Context<Self>) -> Self;
-      /// 收到 `TerminalEvent::Output` 后由宿主调用：取新的网格快照、安排重绘。
+      /// 收到 `TerminalEvent::Frame` 后由宿主调用：读 `frame(id)`、安排重绘。
       pub fn refresh(&mut self, cx: &mut Context<Self>);
       pub fn focus_handle(&self) -> FocusHandle;
   }
+  /// 从 `ui` 的 `Palette`（系统语义色）推出终端颜色，用于 `OpenSpec::theme`。外观变化之后由 `TerminalPane` 自己发 `Input::SetTheme`。
+  pub fn theme(cx: &App) -> Theme;
+  /// 按区域的大小和终端字体的单元尺寸算网格，用于 `OpenSpec::size`；至少 20 列。
+  pub fn grid_size(area: Size<Pixels>, window: &Window, cx: &App) -> GridSize;
   ```
 
-  约束：网格尺寸随所在区域变化（最少 20 列），变化时通知 `terminal`；获得焦点时不带 ⌘ 的键（包括 Esc）交给终端，⌘C / ⌘V 复制粘贴，其余带 ⌘ 的组合键冒泡；声明自己的语义节点（只有尺寸、状态，不含屏幕内容）。
+  约束：网格尺寸随所在区域变化（最少 20 列），变化时发 `Input::Resize`；获得焦点时不带 ⌘ 的键（包括 Esc）交给终端，⌘C / ⌘V 复制粘贴，其余带 ⌘ 的组合键冒泡；声明自己的语义节点（只有尺寸、状态，不含屏幕内容）。
 - **F. `ui`**：新增多行文本框（#22 的意见框也要用）：
 
   ```rust
@@ -802,7 +818,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   输入法、撤销重做、↵ 换行由 `Input` 自带。语义节点不记录输入的文字。
 - **G. `i18n`**：`locales/{en,zh-CN}/conversation.ftl` 加上「界面」表里的键，`keys::conversation::*`。
 - **H. `project_home`**：会话行的等待标记（[project_home 设计「范围」](project_home.md#范围)里留给 Conversation 的一项）。按 `project-home-usage` 的做法加一个插件（requires `dyn Conversations`），渲染时读 `waiting()`，收到 `WaitingChanged` 后重画；`waiting()` 里的会话在行上显示等待的圆点和一行次要文字，语义节点加 `attrs`：`waiting`。键与文字写在 project_home 自己的 ftl 里。
-- **I. `review_view` / `review`（#22）**：审阅屏幕打开期间 `watch` 这个会话（读 `can_prompt`）。⌘↩ 发回审阅意见时，有终端在驱动这个会话（`for_session` 有值且 `status` 是启动中或运行中，与本文「一处驱动」相同）就经 `Terminals::paste` 粘贴进终端（用户在终端里按 ↵ 确认），否则发 `Conversations::command(Prompt { origin: ReviewNotes { … } })`；然后 `dispatch(SelectInspectorTab("conversation"))`。Conversation 页按本 crate 记下的上一次所在的页打开：用户在 Terminal 页恢复过这个会话、之后没有切走时就是 Terminal 页，否则 Messages 页上有「显示终端」。`can_prompt` 为 `Err` 且没有终端在驱动时，发送不可用并说明原因。
+- **I. `review_view` / `review`（#22）**：审阅屏幕打开期间 `watch` 这个会话（读 `can_prompt`）。⌘↩ 发回审阅意见时，有终端在驱动这个会话（`for_session` 有值且 `info(id).state` 是 `Starting` 或 `Running`，与本文「一处驱动」相同）就不经 ACP：`Running` 时经 `Terminals::input(id, Input::Paste(text))` 写进终端（不追加回车，用户在终端里按 ↵ 提交）；`Starting` 时发送暂不可用并说明终端正在启动（进程运行之前 `terminal` 丢弃发给程序的输入，terminal 设计「接口」的 `input`），状态变为 `Running` 后再可用。没有终端在驱动时发 `Conversations::command(Prompt { origin: ReviewNotes { … } })`；然后 `dispatch(SelectInspectorTab("conversation"))`。Conversation 页按本 crate 记下的上一次所在的页打开：用户在 Terminal 页恢复过这个会话、之后没有切走时就是 Terminal 页，否则 Messages 页上有「显示终端」。`can_prompt` 为 `Err` 且没有终端在驱动时，发送不可用并说明原因。
 - **J. `app`**：`plugins()` 的三个插件和 `agents` 的 "conversations" 插件放进 `PluginSet`（`Profile::Desktop`；test profile 不装）。
 - **K. `bench`**：预算表加 `conversation/stream_apply`（「性能」）。
 
@@ -827,6 +843,8 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 - agent 说明按纯文本显示（「范围」）。
 - 实时的项换成历史的项时，如果用户不在底部，列表位置可能跳到底部。
 - 权限请求的 `title` 是 agent 写的；执行命令以外的请求，界面只能显示 agent 给出的内容。
+- 登录 shell 的环境在一次运行里只取一次（terminal 设计「已知限制」2）：用户装了适配器、而它的目录是新加进 shell 配置的 PATH 时，要重启 Lectern 才找得到。
+- 离开守卫只在关闭项目和退出时询问；关闭窗口、切换 worktree 不结束终端，不询问。
 
 ## 验收
 
@@ -852,7 +870,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 
 **第 3 步：Terminal 页（`Refs #23`、`Refs #12`；前置 D、E）。**
 
-- `drive_*`（恢复一侧）、`terminal_page_resumes_*`、`terminal_resume_respects_the_link`、`terminal_plugin_deactivates_*` 通过；`logs_hold_no_contents` 加上终端的流程后仍通过；语义树快照 `conversation_tree_terminal` 通过。
+- `drive_*`（恢复一侧）、`terminal_page_resumes_*`、`terminal_failure_arrives_after_open`、`terminal_frames_only_while_visible`、`leave_guard_*`、`terminal_resume_respects_the_link`、`terminal_plugin_deactivates_*` 通过；`logs_hold_no_contents` 加上终端的流程后仍通过；语义树快照 `conversation_tree_terminal` 通过。
 - `rg 'TerminalPane::new' crates/conversation/src` 只在 Terminal 页里（`src/view/terminal.rs`）。
 
 **第 4 步：`app` 装配、基准、真机验证（`Closes #23`、`Closes #24`；`terminal`、`terminal_view` 的 PR 都已合并时写 `Closes #12`，否则 `Refs #12`；前置 C、H、J、K）。**
