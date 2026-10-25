@@ -360,8 +360,10 @@ GPUI 先匹配快捷键，再调用元素的 `on_key_down`（gpui-pre 0.3.9 `win
 
 ## 未决问题
 
-1. **Option 键是否作为 Meta。** 选项：(a) Option 按 macOS 的习惯输入特殊字符（⌥e e → é，德语等键盘布局用 Option 输入 `@`、`[`、`]`），⌥ 加方向键、退格等非字符键仍带 `option` 交给终端编码（默认，与 Terminal.app 的默认设置相同）；(b) Option 作为 Meta：⌥ 加字符键发 `Key` 带 `option`、`text` 为 None，由终端编码成 Esc 前缀，readline 的 ⌥B、⌥F 可用，但这些键盘布局上无法输入那几个字符；(c) 以后在设置里提供开关，P1 先用 (a)。默认 (a)。
-2. **程序没开 bracketed paste 时，多行粘贴是否先确认。** 选项：(a) 不确认（默认）：Terminal 页只运行 agent，`claude`、`codex` 都开 bracketed paste，粘贴的换行不会直接执行；(b) 确认，弹出一次对话框。选 (b) 需要 `ui` 的对话框和本 crate 的 Fluent 键。
+没有需要产品决定的问题。下面两条已于 2026-10-25 决定，人确认按默认选项：
+
+1. **Option 键是否作为 Meta。** 已决定：选 (a)，Option 按 macOS 的习惯输入特殊字符（⌥e e → é，德语等键盘布局用 Option 输入 `@`、`[`、`]`），⌥ 加方向键、退格等非字符键仍带 `option` 交给终端编码，与 Terminal.app 的默认设置相同。不选：(b) Option 作为 Meta；(c) 以后在设置里提供开关，P1 先用 (a)。
+2. **程序没开 bracketed paste 时，多行粘贴是否先确认。** 已决定：选 (a)，不确认。Terminal 页只运行 agent，`claude`、`codex` 都开 bracketed paste，粘贴的换行不会直接执行。不选：(b) 确认，弹出一次对话框。
 
 ## 已知限制
 
