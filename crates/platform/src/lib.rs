@@ -1,7 +1,9 @@
 //! OS-specific capabilities. Today: reading files beneath a directory root
 //! without following symbolic links, in full or by byte range, and replacing
 //! one atomically ([`safe_read`], docs/design/platform.md),
-//! the physical footprint of a process for lectern-bench ([`process`]),
+//! the physical footprint, creation time and children of a process, the
+//! machine description and the thread QoS for lectern-bench ([`process`],
+//! [`host`], [`thread`]),
 //! the CPU time of a thread ([`ThreadCpuClock`]),
 //! the app data and log directories ([`dirs::app_data`], [`dirs::logs`]),
 //! the OS version for log file headers ([`system::os_version`]),
@@ -17,10 +19,12 @@
 
 pub mod appearance;
 pub mod dirs;
+pub mod host;
 pub mod process;
 #[cfg(unix)]
 pub mod safe_read;
 pub mod system;
+pub mod thread;
 mod thread_clock;
 pub mod time;
 pub mod window;
