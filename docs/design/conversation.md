@@ -50,9 +50,9 @@ kernel 没有可选依赖：`requires` 里的服务都要有活着的提供者�
 
 | 插件 ID | provides | requires | 激活 | 内容 |
 |---|---|---|---|---|
-| `conversation` | — | `dyn Contributions`、`dyn SessionSource` | `AfterFirstFrame` | 检查器页、快捷键与离开守卫的登记；`WorkspaceEvent` 的监听（当前会话）；页本身 |
+| `conversation` | — | `dyn Contributions`、`dyn SessionSource` | `AfterFirstFrame` | 检查器页与快捷键的登记；`WorkspaceEvent` 的监听（当前会话）；页本身 |
 | `conversation-live` | — | `dyn Conversations` | `AfterFirstFrame` | 把 `dyn Conversations` 放进共享状态；`ConversationEvent` 的监听；不在时 Messages 页显示不可用，Terminal 页照常 |
-| `conversation-terminal` | — | `dyn Terminals` | `AfterFirstFrame` | 把 `dyn Terminals` 放进共享状态；`TerminalEvent` 的监听（`Listed`、`Frame`）；不在时 Terminal 页显示不可用，Messages 页照常 |
+| `conversation-terminal` | — | `dyn Terminals`、`dyn Contributions` | `AfterFirstFrame` | 把 `dyn Terminals` 和这次激活的 `PluginHandle` 放进共享状态；终端快捷键（`terminal_view::key_bindings()`）与离开守卫的登记；`TerminalEvent` 的监听（`Listed`、`Frame`）；不在时 Terminal 页显示不可用，Messages 页照常 |
 
 ```rust
 /// `app` 装配时调用一次，三个插件都放进 `PluginSet`（ID 见上表）。不做 IO。
@@ -63,9 +63,9 @@ pub struct LivePlugin { /* Arc<Shared> */ }
 pub struct TerminalPagePlugin { /* Arc<Shared> */ }
 ```
 
-- `ConversationPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`（会话列表用于 agent 圆点和「可能还在别处运行」的判断，按 `SessionKey::source` 找提供者，与 review_view 相同）；`Contributions::register(…, None)` 两项贡献（「界面」的「向 `workspace` 登记的贡献」）和 `register_leave_guard(…, None)` 一个离开守卫（「数据结构」的「离开守卫」），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<WorkspaceEvent>`（`ScreenChanged`、`WindowClosed`）订阅。不提交任务。`started`：保存 `PluginHandle`；调 `Contributions::current_route(WindowId(0))`（「对其他 crate 的要求」A）补上激活之前的屏幕，因为 `Live` 之前发出的 `ScreenChanged` 收不到（kernel 设计「激活时的上下文」）。停用：`Active` drop 时清空 `Shared` 里的引用。
+- `ConversationPlugin::activate`（kernel 线程）：取 `ctx.service::<dyn Contributions>()`、`service_set::<dyn SessionSource>()` 存进 `Shared`（会话列表用于 agent 圆点和「可能还在别处运行」的判断，按 `SessionKey::source` 找提供者，与 review_view 相同）；`Contributions::register(…, None)` 两项贡献（「界面」的「向 `workspace` 登记的贡献」），返回的 `Registration` 经 `ctx.own_staged` 交出；`ctx.on::<WorkspaceEvent>`（`ScreenChanged`、`WindowClosed`）订阅。不提交任务。`started`：保存 `PluginHandle`；调 `Contributions::current_route(WindowId(0))`（「对其他 crate 的要求」A）补上激活之前的屏幕，因为 `Live` 之前发出的 `ScreenChanged` 收不到（kernel 设计「激活时的上下文」）。停用：`Active` drop 时清空 `Shared` 里的引用。
 - `LivePlugin::activate`：取 `ServiceRef<dyn Conversations>`，订阅 `ConversationEvent`；`started` 时放进 `Shared::conversations`，并读一次 `waiting()` 记进 `Shared::waiting`；`Active` drop 时取出。
-- `TerminalPagePlugin::activate`：取 `ServiceRef<dyn Terminals>`，订阅 `TerminalEvent`；`started` 时放进 `Shared::terminals`；`Active` drop 时取出。
+- `TerminalPagePlugin::activate`：取 `ServiceRef<dyn Terminals>` 和 `ctx.service::<dyn Contributions>()`，订阅 `TerminalEvent`；`Contributions::register(…, None)` 一项 `KeyBindings`（`id` 是 `conversation-terminal`，内容是 `terminal_view::key_bindings()`）和 `register_leave_guard(…, None)` 一个离开守卫（「数据结构」的「离开守卫」），返回的 `Registration` 经 `ctx.own_staged` 交出。`started` 时把服务引用和这次激活的 `PluginHandle` 放进 `Shared::terminals`、`Shared::terminal_handle`；`Active` drop 时取出。这两项和终端一起出现、一起消失：没有 `dyn Terminals` 时不绑定终端的键，也不询问。
 - 三个插件共用一个 `Arc<Shared>`（`plugins()` 建）。页每次用到服务时从 `Shared` 取一份（取锁复制），`ServiceRef::get()` 为 None（提供者已停用）时按没有处理。`conversation-live` 或 `conversation-terminal` 启动或停用时向活着的页投递 `Job::Services`，页重画。
 
 ```rust
@@ -76,6 +76,8 @@ pub(crate) struct Shared {
     terminals: Mutex<Option<ServiceRef<dyn Terminals>>>,
     /// `conversation` 这次激活的句柄。
     handle: Mutex<Option<PluginHandle>>,
+    /// `conversation-terminal` 这次激活的句柄：`TerminalPane::new` 要它的 `token()`（复制时交给 `Terminals::copy_selection`）。
+    terminal_handle: Mutex<Option<PluginHandle>>,
     /// 当前屏幕上的审阅对象（「当前会话」）。
     current: Mutex<Current>,
     /// `waiting()` 上一次的集合，用来找出新进入等待的会话（「权限请求」）。
@@ -446,7 +448,7 @@ pub(crate) enum Item {
 
 terminal 设计「未决问题」1 的默认选项 (a)：还有运行中的终端时，关闭项目或退出 Lectern 之前先确认。守卫用 `workspace` 已有的接口（[workspace 设计「服务接口」](workspace.md#服务接口lectern-services-的-workspace-模块)的 `register_leave_guard`、`LeaveGuard::ask`）：
 
-- `conversation` 插件在 `activate` 里登记（「插件」）。`ask(scope, done)` 在主线程上调用：从 `Shared::terminals` 取 `list()`，数 `state` 是 `Starting` 或 `Running` 的终端。`Project(key)` 只数 `project == key` 的；`App` 数全部；`View`、`Window`、`Worktree` 立即 `done(true)`，因为终端不随离开视图、关闭窗口、切换 worktree 结束（terminal 设计「数据流与线程」只在项目关闭和插件停用时关闭终端）。没有 `dyn Terminals` 或数目为 0 时立即 `done(true)`。
+- `conversation-terminal` 插件在 `activate` 里登记（「插件」）。`ask(scope, done)` 在主线程上调用：用本插件的 `ServiceRef<dyn Terminals>` 取 `list()`，数 `state` 是 `Starting` 或 `Running` 的终端。`Project(key)` 只数 `project == key` 的；`App` 数全部；`View`、`Window`、`Worktree` 立即 `done(true)`，因为终端不随离开视图、关闭窗口、切换 worktree 结束（terminal 设计「数据流与线程」只在项目关闭和插件停用时关闭终端）。`get()` 为 None（提供者已停用）或数目为 0 时立即 `done(true)`。
 - 数目大于 0 时弹出系统的确认（`conversation-leave-*`）：「结束终端」→ `done(true)`，终端由 `terminal` 在项目关闭或停用时结束；「取消」→ `done(false)`。
 - 只管终端。ACP 连接在项目关闭和退出时按 ADR 0050 关闭，不询问。
 
@@ -465,16 +467,16 @@ conversation 的 started ─▶ Contributions::current_route(WindowId(0)) ─▶
 ⌘↩ ─▶ Conversations::command(Prompt)（返回前换出 Connecting 的快照）─▶ agents 启动 ACP agent，专用线程读它的输出 ─▶ session/update 合并（≤ 20 次/秒）─▶ Changed ─▶ …
 session/request_permission ─▶ 快照的 permissions、WaitingChanged ─▶ [监听] 当前会话新进入等待时 dispatch(SelectInspectorTab) ；project_home 重画等待标记
 Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回复 JSON-RPC ─▶ Changed
-恢复 ─▶ Terminals::open(OpenSpec { launch: Launch::Resume(key), size, theme })（返回前已登记，Starting）─▶ TerminalPane::new + watch(id) ─▶ TerminalEvent::Frame / Listed ─▶ [监听] Job::Terminal ─▶ [主线程] TerminalPane::refresh / 重读 info(id)
+恢复 ─▶ Terminals::open(OpenSpec { launch: Launch::Resume(key), size, theme })（返回前已登记，Starting）─▶ watch(id) + TerminalPane::new(terminals, token, id) ─▶ TerminalEvent::Frame / Listed ─▶ [监听] Job::Terminal ─▶ [主线程] TerminalPane::refresh、重读 info(id)
 ```
 
-- 恢复的参数：`size` 是 `area` 经 E 的 `grid_size` 换算的网格（还没有记下 `area` 时为 None，`terminal` 用 80×24，`TerminalPane` 第一次布局后发 `Input::Resize`）；`theme` 取 E 的 `theme(cx)`。
+- 恢复的参数：`size` 是 `area` 经 E 的 `grid_size(area, window, cx)` 换算的网格（还没有记下 `area` 时为 None，`terminal` 用 80×24，`TerminalPane` 第一次布局后发 `Input::Resize`）；`theme` 取 E 的 `theme(window, cx)`（外观按窗口取）。`TerminalPane::new` 的 `token` 是 `Shared::terminal_handle` 的 `token()`；没有这个句柄时（`conversation-terminal` 不是 `Live`）不恢复，按「没有 `dyn Terminals`」处理。建好之后把焦点交给 `focus_handle()`。
 - `FrameInterest` 只在 Terminal 页正在显示时持有：切到 Terminal 页、页上有终端时 `watch(id)`；切到 Messages 页、换会话、检查器隐藏（`ConversationTab` drop）时 drop。没有关注时 `terminal` 只解析输出、不生成帧（terminal 设计「接口」的 `watch`），所以隐藏的 Terminal 页不占主线程。新关注出现时 `terminal` 立即生成一帧完整的，页再次显示时画面是最新的。
 
 - 主线程上只有：读快照（复制 `Arc`）、`items::build`、键的比较与锚点、发命令、渲染。没有 IO、解析和进程操作（架构规则 4）。
 - 本 crate 不提交 executor 任务。读历史、ACP 的收发、终端的读写都在 `agents`、`terminal` 里。
 - 事件的监听在发出事件的线程上运行，只做转发：取 `Shared::tabs` 的锁、`unbounded_send`。`WaitingChanged` 的监听另外比较集合、按上一节发一条 `dispatch`，不做别的。
-- 合并：前台任务每次醒来把通道里的项全部取出：同一个会话的 `Conversation` 只应用最高的 `generation`；同一个终端的 `TerminalEvent::Frame` 合成一次 `refresh`（`id` 不是页上的终端时丢弃）；`Listed` 合成一次重读 `info(id)`；`Bell` 不处理；应用之后 `cx.notify()` 一次。
+- 合并：前台任务每次醒来把通道里的项全部取出：同一个会话的 `Conversation` 只应用最高的 `generation`；页上那个终端的 `TerminalEvent::Frame` 和任何 `Listed` 合成一次 `TerminalPane::refresh`（别的终端的 `Frame` 丢弃）；有 `Listed` 时另外重读 `info(id)`，更新页的 `state`；`Bell` 不处理；应用之后 `cx.notify()` 一次。
 - 派生数据：没有需要缓存的派生数据。改动预览的行由 `agents` 计算，按两侧内容的 git blob OID 缓存（架构规则 5，「对其他 crate 的要求」C）。
 - 首帧之前什么都不做：三个插件 `AfterFirstFrame` 激活，`activate` 只登记（[ADR 0017](../adr/0017.md)）。不打开 Conversation 页时，本 crate 没有通道、没有关注，`Shared` 只有几个空的 `Mutex`。
 
@@ -644,13 +646,16 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   | `conversation::ResumeInTerminal` | — | `conversation-terminal` | 按「一处驱动」恢复（`Idle`、`Failed` 时先 `Disconnect`） |
   | `conversation::CloseTerminal` | — | `conversation-terminal` | `Terminals::close` |
 
-  权限选项没有默认快捷键（「数据结构」的「权限请求」）。⌘\、⌥⌘I、Esc 由 `workspace` 处理；Terminal 页里终端获得焦点时，不带 ⌘ 的键（包括 Esc）交给终端，带 ⌘ 的组合键照常冒泡（「对其他 crate 的要求」E）。全部 Action 名稳定、可枚举（探针按名字触发）。
+  权限选项没有默认快捷键（「数据结构」的「权限请求」）。⌘\、⌥⌘I、Esc 由 `workspace` 处理；Terminal 页里终端获得焦点时，不带 ⌘ 的键（包括 Esc）交给终端；⌘C、⌘V、⌘A 是 `terminal_view` 的 Action（上下文 `terminal`，由 `conversation-terminal` 登记，见下表）；其余带 ⌘ 的组合键照常冒泡（「对其他 crate 的要求」E）。全部 Action 名稳定、可枚举（探针按名字触发）。
 - 向 `workspace` 登记的贡献（[workspace 设计「接口」](workspace.md#接口)）：
 
   | `Contribution` | `id` | `order` | 载荷 |
   |---|---|---|---|
   | `InspectorTab` | `conversation` | 10 | `ui::contrib::InspectorTab { label: conversation-tab, build }`：建 `ConversationTab`（Files 页的 `order` 是 0，所以排在第二） |
   | `KeyBindings` | `conversation` | 0 | 上表里有键、不经 `TextArea` 的 Action（⌘.） |
+  | `KeyBindings` | `conversation-terminal` | 0 | `terminal_view::key_bindings()`：⌘C、⌘V、⌘A，以及 Esc 的 `NoAction`（挡住祖先上下文 `Workspace` 的 Esc，让它到达终端），上下文都是 `terminal`。由 `conversation-terminal` 登记 |
+
+  `conversation-terminal` 另外登记一个离开守卫（`register_leave_guard`，「数据结构」的「离开守卫」）。
 
 ## 状态与异常
 
@@ -733,12 +738,12 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   - `context_is_shown_only_when_given`。
   - `failed_link_shows_the_reason_and_dismisses`：每种 `LinkError` 一行；`PromptFailed` 的文字原样显示；「关闭」发 `Dismiss`。
   - `drafts_survive_hiding_the_inspector`：写字、隐藏检查器、再显示，文字还在；换会话后各自的草稿。
-  - `terminal_page_resumes_and_embeds_the_pane`：恢复调 `Terminals::open`，`launch` 是 `Launch::Resume(key)`，`size` 由 `area` 换算，`theme` 来自 `theme(cx)`；每种 `LaunchError` 对应「状态与异常」里的一行原因，`AlreadyRunning(id)` 时页改用那个终端；`Exited`（含 `signaled`）后恢复按钮重新出现；关闭调 `close`。
+  - `terminal_page_resumes_and_embeds_the_pane`：恢复调 `Terminals::open`，`launch` 是 `Launch::Resume(key)`，`size` 由 `area` 换算，`theme` 来自 `theme(window, cx)`；`TerminalPane::new` 收到 `conversation-terminal` 这次激活的 token，焦点移到它的 `focus_handle()`；每种 `LaunchError` 对应「状态与异常」里的一行原因，`AlreadyRunning(id)` 时页改用那个终端；`Exited`（含 `signaled`）后恢复按钮重新出现；关闭调 `close`。
   - `terminal_failure_arrives_after_open`：`open` 返回 `Ok` 后假 `Terminals` 把状态换成 `Failed(NotInstalled(ClaudeCode))` 并发 `Listed`：状态行显示安装 `claude` 的提示，恢复按钮可用；`CwdMissing`、`Spawn` 同样各一行。
-  - `terminal_frames_only_while_visible`：Terminal 页显示时有一个 `FrameInterest`；切到 Messages 页、换会话、检查器隐藏后为 0；再切回时重新 `watch`。`Frame` 事件只让页上那个终端的 `TerminalPane` 刷新一次（同一批里的多个合成一次）。
-  - `leave_guard_*`：`Project(key)` 只数这个项目里 `Starting` / `Running` 的终端，`App` 数全部；数目为 0、没有 `dyn Terminals`，或范围是 `View`、`Window`、`Worktree` 时立即 `done(true)`，不弹出确认；有运行中的终端时弹出确认，「结束终端」给 `done(true)`，「取消」给 `done(false)`。
+  - `terminal_frames_only_while_visible`：Terminal 页显示时有一个 `FrameInterest`；切到 Messages 页、换会话、检查器隐藏后为 0；再切回时重新 `watch`。页上那个终端的 `Frame` 和任何 `Listed` 让 `TerminalPane` 刷新一次（同一批里的多个合成一次），别的终端的 `Frame` 不刷新。
+  - `leave_guard_*`：`Project(key)` 只数这个项目里 `Starting` / `Running` 的终端，`App` 数全部；数目为 0、`ServiceRef::get()` 为 None，或范围是 `View`、`Window`、`Worktree` 时立即 `done(true)`，不弹出确认；有运行中的终端时弹出确认，「结束终端」给 `done(true)`，「取消」给 `done(false)`。
   - `terminal_resume_respects_the_link`：`Idle`、`Failed` 时先 `Disconnect` 再恢复；`Connecting`、`Working`、`Stopping` 时不可用。
-  - `plugins_register_and_deactivate_cleanly`：激活后假 `Contributions` 收到 `InspectorTab`、`KeyBindings`；`conversation` 停用后登记 drop。`live_plugin_deactivates_on_its_own`、`terminal_plugin_deactivates_on_its_own`：单独停用后另一页照常。
+  - `plugins_register_and_deactivate_cleanly`：激活后假 `Contributions` 收到 `conversation` 的 `InspectorTab`、`KeyBindings`，以及 `conversation-terminal` 的 `KeyBindings`（与 `terminal_view::key_bindings()` 相同）和离开守卫；各插件停用后它的登记 drop。`live_plugin_deactivates_on_its_own`、`terminal_plugin_deactivates_on_its_own`：单独停用后另一页照常，终端的快捷键和离开守卫随 `conversation-terminal` 注销。
   - `stale_generation_is_dropped`。
 - 语义树：`conversation_tree_history`、`conversation_tree_live_with_permission`、`conversation_tree_terminal`、`conversation_tree_not_session` 的 insta 快照（`ui_probe` 的 `tree::snapshot`）。
 - 日志：`logs_hold_no_contents`。
@@ -775,23 +780,28 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
   - `close(id)`。
   - 事件：`TerminalEvent::Listed { generation }`（重读 `info`）；`Frame { id, generation }`（只在有 `FrameInterest` 时发出，交给 `TerminalPane::refresh`）；`Bell` 不处理。事件只在终端线程上发出。
   - `terminal` 是 `AfterFirstFrame` 激活的插件，第一次 `open` 之前不建线程、不取登录环境；终端在项目关闭和插件停用时关闭；终端的输入、输出和粘贴的文字不进日志。
-- **E. `terminal_view`**：是非插件的视图库（插件 crate 才能依赖它；terminal 设计「对其他 crate 的要求」第 5 项）。名字以 terminal_view 的设计为准，本 crate 需要：
+- **E. `terminal_view`**：是非插件的视图库（插件 crate 才能依赖它；terminal 设计「对其他 crate 的要求」第 5 项）。terminal_view 的设计已采纳下面的名字与签名，以它为准；本 crate 用到：
 
   ```rust
   impl TerminalPane {
-      /// 显示一个终端。不调用 `watch`：`FrameInterest` 由宿主持有（本 crate 的 `TerminalPage::frames`），页隐藏时宿主 drop 它。
-      pub fn new(terminals: ServiceRef<dyn Terminals>, id: TerminalId, window: &mut Window, cx: &mut Context<Self>) -> Self;
-      /// 收到 `TerminalEvent::Frame` 后由宿主调用：读 `frame(id)`、安排重绘。
+      /// 显示一个终端。`token` 是宿主插件这次激活的 token（本 crate 传 `conversation-terminal` 的
+      /// `PluginHandle::token()`），复制时交给 `Terminals::copy_selection`。
+      /// 不调用 `watch`：`FrameInterest` 由宿主持有（本 crate 的 `TerminalPage::frames`），页隐藏时宿主 drop 它。
+      pub fn new(terminals: ServiceRef<dyn Terminals>, token: ActivationToken, id: TerminalId, window: &mut Window, cx: &mut Context<Self>) -> Self;
+      /// 宿主在收到这个终端的 `TerminalEvent::Frame`、或任何 `TerminalEvent::Listed` 时调用：读 `frame(id)` 与 `info(id)`，变了才重画。
       pub fn refresh(&mut self, cx: &mut Context<Self>);
       pub fn focus_handle(&self) -> FocusHandle;
   }
-  /// 从 `ui` 的 `Palette`（系统语义色）推出终端颜色，用于 `OpenSpec::theme`。外观变化之后由 `TerminalPane` 自己发 `Input::SetTheme`。
-  pub fn theme(cx: &App) -> Theme;
-  /// 按区域的大小和终端字体的单元尺寸算网格，用于 `OpenSpec::size`；至少 20 列。
-  pub fn grid_size(area: Size<Pixels>, window: &Window, cx: &App) -> GridSize;
+  /// 这个窗口当前外观的终端颜色（来自 `ui` 的系统语义色），用于 `OpenSpec::theme`。外观按窗口取，所以要 `window`。
+  /// 外观变化之后由 `TerminalPane` 自己发 `Input::SetTheme`。
+  pub fn theme(window: &Window, cx: &App) -> Theme;
+  /// 按区域的大小和终端字体的单元尺寸算网格，用于 `OpenSpec::size`；至少 20 列。第一次调用时量字体并缓存，所以要 `&mut App`。
+  pub fn grid_size(area: Size<Pixels>, window: &Window, cx: &mut App) -> GridSize;
+  /// 宿主插件放进自己的 `KeyBindings` 贡献：⌘C、⌘V、⌘A 与 Esc 的 `NoAction`，上下文 `terminal`（`TerminalPane` 根元素的 KeyContext）。
+  pub fn key_bindings() -> Vec<(&'static str, Box<dyn Action>, Option<&'static str>)>;
   ```
 
-  约束：网格尺寸随所在区域变化（最少 20 列），变化时发 `Input::Resize`；获得焦点时不带 ⌘ 的键（包括 Esc）交给终端，⌘C / ⌘V 复制粘贴，其余带 ⌘ 的组合键冒泡；声明自己的语义节点（只有尺寸、状态，不含屏幕内容）。
+  约束：网格尺寸随所在区域变化（最少 20 列），变化时发 `Input::Resize`；获得焦点时不带 ⌘ 的键（包括 Esc）交给终端，⌘C / ⌘V / ⌘A 是复制、粘贴、全选，其余带 ⌘ 的组合键冒泡；声明自己的语义节点（只有尺寸、状态，不含屏幕内容），挂在 `conversation.terminal` 之下。
 - **F. `ui`**：新增多行文本框（#22 的意见框也要用）：
 
   ```rust
@@ -860,7 +870,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 
 **第 1 步：插件、检查器页、Messages 页的显示、探针节点（`Refs #23`）。**
 
-- 「测试」里的 `items_*`、`tab_follows_*`、`history_renders_*`、`earlier_turns_*`、`streaming_*`、`context_is_shown_*`、`failed_link_*`、`stale_generation_*`、`plugins_register_*`、`live_plugin_deactivates_*`、`logs_hold_no_contents`（第 1 步的流程）通过；语义树快照 `conversation_tree_history`、`conversation_tree_not_session` 通过。
+- 「测试」里的 `items_*`、`tab_follows_*`、`history_renders_*`、`earlier_turns_*`、`streaming_*`、`context_is_shown_*`、`failed_link_*`、`stale_generation_*`、`plugins_register_*`（`conversation`、`conversation-live` 两个插件）、`live_plugin_deactivates_*`、`logs_hold_no_contents`（第 1 步的流程）通过；语义树快照 `conversation_tree_history`、`conversation_tree_not_session` 通过。
 - `rg 'TextArea|ConversationCommand::Answer' crates/conversation/src/view` 没有结果（回复框与权限在第 2 步）。
 - `crates/conversation/AGENTS.md` 的设计文档行指向本文（本 PR 已改）。
 
@@ -870,7 +880,7 @@ Allow ─▶ command(Answer)（返回前去掉这个请求）─▶ agents 回�
 
 **第 3 步：Terminal 页（`Refs #23`、`Refs #12`；前置 D、E）。**
 
-- `drive_*`（恢复一侧）、`terminal_page_resumes_*`、`terminal_failure_arrives_after_open`、`terminal_frames_only_while_visible`、`leave_guard_*`、`terminal_resume_respects_the_link`、`terminal_plugin_deactivates_*` 通过；`logs_hold_no_contents` 加上终端的流程后仍通过；语义树快照 `conversation_tree_terminal` 通过。
+- `drive_*`（恢复一侧）、`terminal_page_resumes_*`、`terminal_failure_arrives_after_open`、`terminal_frames_only_while_visible`、`leave_guard_*`、`terminal_resume_respects_the_link`、`terminal_plugin_deactivates_*`、`plugins_register_*`（加上 `conversation-terminal` 的快捷键与离开守卫）通过；`logs_hold_no_contents` 加上终端的流程后仍通过；语义树快照 `conversation_tree_terminal` 通过。
 - `rg 'TerminalPane::new' crates/conversation/src` 只在 Terminal 页里（`src/view/terminal.rs`）。
 
 **第 4 步：`app` 装配、基准、真机验证（`Closes #23`、`Closes #24`；`terminal`、`terminal_view` 的 PR 都已合并时写 `Closes #12`，否则 `Refs #12`；前置 C、H、J、K）。**
