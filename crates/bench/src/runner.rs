@@ -253,11 +253,16 @@ fn run_bench<'a>(
 ) -> u32 {
     let first = match attempt(options, args.mode, bench, fixtures) {
         Ok(results) => results,
-        Err(message) => {
+        Err(failure) => {
+            let status = if failure.skip {
+                Status::Skipped
+            } else {
+                Status::Error
+            };
             for budget in wanted {
                 report
                     .entries
-                    .push(Entry::new(budget, Status::Error, Some(message.clone())));
+                    .push(Entry::new(budget, status, Some(failure.message.clone())));
             }
             return 1;
         }
@@ -288,10 +293,10 @@ fn run_bench<'a>(
                     }
                 }
             }
-            Err(message) => {
+            Err(failure) => {
                 for entry in entries.iter_mut().filter(|e| e.status == Status::Over) {
                     entry.status = Status::Error;
-                    entry.reason = Some(format!("重跑出错：{message}"));
+                    entry.reason = Some(format!("重跑出错：{}", failure.message));
                 }
             }
         }
@@ -408,6 +413,22 @@ fn judge(entry: &mut Entry<'_>, mode: Mode) {
     };
 }
 
+/// Why an attempt produced no results.
+struct Failure {
+    message: String,
+    /// [`BenchError::skip`](crate::BenchError::skip): `skipped`, not `error`.
+    skip: bool,
+}
+
+impl Failure {
+    fn error(message: String) -> Failure {
+        Failure {
+            message,
+            skip: false,
+        }
+    }
+}
+
 /// One run of `bench` in a fresh scratch directory (shared fixtures are
 /// reused). A returned error or a panic is `Err`.
 fn attempt(
@@ -415,11 +436,11 @@ fn attempt(
     mode: Mode,
     bench: &Bench,
     fixtures: &Fixtures,
-) -> Result<Vec<Measured>, String> {
+) -> Result<Vec<Measured>, Failure> {
     let scratch = options.scratch_root.join(bench.id);
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)
-        .map_err(|e| format!("建不了临时目录 {}：{e}", scratch.display()))?;
+        .map_err(|e| Failure::error(format!("建不了临时目录 {}：{e}", scratch.display())))?;
     let mut ctx = Ctx::new(
         mode,
         options.config,
@@ -431,14 +452,17 @@ fn attempt(
     let _ = std::fs::remove_dir_all(&scratch);
     match outcome {
         Ok(Ok(results)) => Ok(results),
-        Ok(Err(error)) => Err(error.message().to_owned()),
+        Ok(Err(error)) => Err(Failure {
+            message: error.message().to_owned(),
+            skip: error.is_skip(),
+        }),
         Err(payload) => {
             let message = payload
                 .downcast_ref::<&str>()
                 .map(|s| (*s).to_owned())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panic".to_owned());
-            Err(format!("panic：{message}"))
+            Err(Failure::error(format!("panic：{message}")))
         }
     }
 }

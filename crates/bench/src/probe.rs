@@ -35,12 +35,8 @@ use crate::wire::{
 #[cfg(test)]
 mod tests;
 
-/// The runner's socket. Without it the probe is off and the app runs as
-/// usual.
-pub const SOCKET_VAR: &str = "LECTERN_BENCH_SOCKET";
-/// `closure:<id>` or `closure+self:<id>`: the plugin set is trimmed to the
-/// dependency closure of `<id>`, without or with `<id>`.
-pub const PLUGINS_VAR: &str = "LECTERN_BENCH_PLUGINS";
+pub use crate::wire::{PLUGINS_VAR, SOCKET_VAR};
+
 /// The ID of the probe's own plugin, left out of the `Plugins` answer.
 pub const PLUGIN_ID: &str = "bench-probe";
 /// The exit code after the first-frame callback could not be registered:

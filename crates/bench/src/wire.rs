@@ -20,6 +20,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 mod tests;
 
+/// The runner's socket, set for every launch. Without it the probe is off
+/// and the program runs as usual.
+pub const SOCKET_VAR: &str = "LECTERN_BENCH_SOCKET";
+/// `closure:<id>` or `closure+self:<id>`: the plugin set is trimmed to the
+/// dependency closure of `<id>`, without or with `<id>`.
+pub const PLUGINS_VAR: &str = "LECTERN_BENCH_PLUGINS";
+
 /// Probe → runner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Report {

@@ -80,12 +80,23 @@ pub(crate) struct Host {
 }
 
 impl Host {
+    /// `platform::host::describe`; where it fails (and off macOS) the
+    /// model, chip and system version are null and `cpus` is the available
+    /// parallelism.
     pub(crate) fn current() -> Host {
-        Host {
-            model: None,
-            chip: None,
-            os_version: None,
-            cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+        match lectern_platform::host::describe() {
+            Ok(info) => Host {
+                model: Some(info.model),
+                chip: Some(info.chip),
+                os_version: Some(info.os_version),
+                cpus: info.cpus,
+            },
+            Err(_) => Host {
+                model: None,
+                chip: None,
+                os_version: None,
+                cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+            },
         }
     }
 

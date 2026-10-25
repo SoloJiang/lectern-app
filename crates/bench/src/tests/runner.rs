@@ -165,6 +165,25 @@ fn runner_errors_and_panics_exit_2_in_every_mode() {
 }
 
 #[test]
+fn runner_skipping_benchmark_is_skipped_not_an_error() {
+    fn skips(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        Err(BenchError::skip("没有设置 LECTERN_BENCH_BASELINE"))
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/a",
+        run: skips,
+    }];
+    for args in [&[][..], &["--bench"][..]] {
+        let run = run(&options(ONE, Target::Time, args, dir.path()), &benches);
+        assert_eq!(run.exit, 0, "{args:?}");
+        let a = status(&run, "fake/a");
+        assert_eq!(a.status, Status::Skipped);
+        assert_eq!(a.reason.as_deref(), Some("没有设置 LECTERN_BENCH_BASELINE"));
+    }
+}
+
+#[test]
 fn runner_missing_budget_benchmark_stops_before_running() {
     static CALLS: AtomicUsize = AtomicUsize::new(0);
     fn counted(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
