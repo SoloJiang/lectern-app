@@ -2,14 +2,15 @@
 
 上下文面板：点符号后滑出，显示调用方、相关测试、改动历史（影响面）。属于按需呼出层，Esc 回到原处。
 
-- 层：视图层。可以依赖视图、领域、基础设施和 kernel 层；不得依赖 `app` 和 tool 层。
-- 设计文档：`docs/design/context_drawer.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 层：视图层，插件 crate（实现时 `Cargo.toml` 加 `plugin = true`）。只依赖 kernel 层和非插件的库 crate；不得依赖其他插件 crate、`app` 和 tool 层。
+- 设计文档：[docs/design/context_drawer.md](../../docs/design/context_drawer.md)
 - issue：[#20](https://github.com/SoloJiang/lectern-app/issues/20)
 - ADR：[0012](../../docs/adr/0012.md)
 
 ## 边界
 
-- 符号查询由 `code_intel` 提供，历史由 `git` 提供；本视图不做索引和查询。
+- 符号查询由 `code_intel` 提供（经 `dyn CodeIntel`），调用方的状态和 History 来自 `review` 的快照（经 `dyn Review`）；本视图不做索引和查询，不读文件，不调用 `lectern-git`。
+- 调用方经 `services::context::ContextEvent::Show` 请求面板，不依赖本 crate。
 
 ## 测试
 
