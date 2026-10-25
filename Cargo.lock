@@ -4349,7 +4349,9 @@ dependencies = [
 name = "lectern-bench"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "gpui-pre",
+ "gpui-pre-platform",
  "insta",
  "lectern-agents",
  "lectern-cache",
@@ -4368,6 +4370,7 @@ dependencies = [
  "lectern-syntax",
  "lectern-ui",
  "lectern-usage",
+ "libc",
  "serde_json",
  "tempfile",
 ]

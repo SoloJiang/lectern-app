@@ -24,11 +24,18 @@ mod tests;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Report {
     /// The first frame was shown at `presented` (its `presentedTime`).
-    FirstFrame { pid: u32, presented: SystemTime },
+    FirstFrame {
+        pid: u32,
+        presented: SystemTime,
+    },
     /// The kernel became busy; `epoch` is the event's `seq`.
-    Busy { epoch: u64 },
+    Busy {
+        epoch: u64,
+    },
     /// The kernel became quiescent; `epoch` is the event's `seq`.
-    Quiescent { epoch: u64 },
+    Quiescent {
+        epoch: u64,
+    },
     /// Every selected plugin is `Active` (after trimming the plugin set, or
     /// in answer to `Request::ActivateAll`).
     Ready,
@@ -39,7 +46,10 @@ pub enum Report {
     Plugin(PluginReport),
     PluginsEnd,
     /// A selected plugin entered `Failed`.
-    PluginFailed { id: String, message: String },
+    PluginFailed {
+        id: String,
+        message: String,
+    },
     Milestone {
         milestone: Milestone,
         presented: SystemTime,
@@ -47,8 +57,14 @@ pub enum Report {
     Frames(FrameStats),
     /// A process Lectern started: the root of a plugin's or a language
     /// server's process group (ADR 0018).
-    Child { pid: u32, kind: ChildKind, id: String },
-    Error { message: String },
+    Child {
+        pid: u32,
+        kind: ChildKind,
+        id: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Runner → probe.

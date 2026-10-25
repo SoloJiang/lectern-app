@@ -19,9 +19,24 @@ bench = false
 name = "lectern-bench-report"
 bench = false
 
+[features]
+# The probe of the measurement builds (docs/design/bench.md「探针」): `app`'s
+# `bench-probe` feature and the `empty_window` example turn it on. Only this
+# feature may turn on lectern-platform's method replacements (ADR 0048,
+# scripts/check_architecture.py), so release builds have none.
+probe = ["dep:lectern-kernel", "lectern-platform/bench-hooks"]
+
 [dependencies]
 # The JSON reports (docs/design/bench.md「依赖」).
 serde_json.workspace = true
+# The machine in the reports and the benchmark thread's QoS (`main`); with
+# `probe`, the first-frame callback.
+lectern-platform = { path = "../platform" }
+# The probe's `bench-probe` plugin and the trimmed plugin sets.
+lectern-kernel = { path = "../kernel", optional = true }
+# The process benchmarks' launch directories: under the system temporary
+# directory, so that the socket path fits `sun_path` (104 bytes on macOS).
+tempfile.workspace = true
 
 # The crates under test, with their `testing` modules
 # (docs/design/bench.md「夹具与 test-support」). Only compiled into the
@@ -39,13 +54,13 @@ lectern-kernel = { path = "../kernel", features = ["test-support"] }
 # `sink`: the benchmarks install the real logger (tool crates may,
 # docs/design/logging.md).
 lectern-logging = { path = "../logging", features = ["sink", "test-support"] }
-lectern-platform = { path = "../platform" }
 lectern-project = { path = "../project", features = ["test-support"] }
 lectern-review = { path = "../review", features = ["test-support"] }
 lectern-services = { path = "../services" }
 lectern-syntax = { path = "../syntax", features = ["test-support"] }
 lectern-usage = { path = "../usage", features = ["test-support"] }
-tempfile.workspace = true
+# `kill` of a launched process group in benches/process.rs.
+libc.workspace = true
 
 # The `ui/*` benchmarks (docs/design/ui.md「性能」) need GPUI, which only
 # builds on macOS in this workspace (docs/design/cargo-workspace.md); on
@@ -58,6 +73,10 @@ lectern-ui = { path = "../ui", features = ["test-support"] }
 # item list is pure, but the crate depends on GPUI. A plugin crate: a tool
 # crate may depend on one (ADR 0025).
 lectern-review-view = { path = "../review_view", features = ["test-support"] }
+# The `empty_window` example: the GPUI platform, and the channel by which
+# the probe thread asks the main thread to quit.
+gpui_platform.workspace = true
+futures.workspace = true
 
 # In-process timing; the counting allocator stays out of it.
 [[bench]]
@@ -73,6 +92,12 @@ harness = false
 [[bench]]
 name = "process"
 harness = false
+
+# The empty GPUI window of the `baseline/*` benchmarks
+# (docs/design/bench.md「进程级基准」); `just bench` builds it on macOS.
+[[example]]
+name = "empty_window"
+required-features = ["probe"]
 
 [lints]
 workspace = true

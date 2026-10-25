@@ -166,7 +166,10 @@ fn wire_lines_are_a_name_and_escaped_pairs() {
         presented: at(1_729_000_000_000_000_000),
     }
     .encode();
-    assert_eq!(line, "first-frame pid=812 presented_unix_ns=1729000000000000000");
+    assert_eq!(
+        line,
+        "first-frame pid=812 presented_unix_ns=1729000000000000000"
+    );
     let line = Report::Error {
         message: "a b%c\nd".into(),
     }
