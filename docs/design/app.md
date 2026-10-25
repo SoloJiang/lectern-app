@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -462,6 +462,20 @@ target 为 `app`。
 - **日志。** `probe start failed`（target `app`）；`probe listening`、`probe stopped` 等由 `ui_probe` 写（target `ui_probe`）。`plugins assembled` 的 `profile` 字段在 probe profile 里是 `probe`。
 - **测试。** `src/tests/probe.rs`（`#[gpui::test]`）：`probe::start` 对没有目录、不存在的目录（记 `dir-not-private`，路径不在日志里）、私有目录（`probe.sock` 存在，`shutdown` 后消失）；`every_profile_graph_validates` 对 `Profile::Probe`；`tests/probe.rs`（真实进程，需要图形会话，与 `tests/startup.rs` 相同）。
 
+## review_view 的装配
+
+[#15](https://github.com/SoloJiang/lectern-app/issues/15)，[review_view 设计「对其他 crate 的要求」](review_view.md#对其他-crate-的要求)的 C（插件部分；bench 的 `Driver::open(OpenTarget::Session)` 与 `Milestone::DiffShown` 随 review_view 第 3 步的基准）。desktop 与 probe profile 多一个插件，共 11 个；test profile 不变。
+
+| 插件 ID | 构造 | 提供 | 依赖 |
+|---|---|---|---|
+| `review-view` | `lectern_review_view::plugins(executor)` 的第一个 | 无 | `dyn Contributions`、`dyn Review`、`dyn SessionSource` |
+
+- `plugins(executor)` 同时返回 `review-view-handoff`。它依赖 `dyn Reader`、`dyn CodeIntel`、`dyn Usage`；现在的 desktop 表里没有插件提供前两项，放进 `PluginSet` 会让图校验报 `MissingProvider`，所以 `profile::desktop` 丢掉它。审阅屏幕不依赖它：交接按钮置灰，不显示会话的用量行（review_view 设计「状态与异常」）。`file_reader` 与 `code_intel` 装配之后，同一处把它放进表里。
+- 依赖都在表里：`workspace` 提供 `dyn Contributions`，`review` 提供 `dyn Review`，`agents` 的两个插件提供 `dyn SessionSource`。
+- 冷启动：`plugins` 只建空的共享状态，不做 IO，在 `release` 里、屏障放开之后运行；`activate` 在首帧之后，只登记屏幕、检查器页和快捷键。
+- 日志：`plugins assembled` 的 `plugins` 为 11。其余记录由 `review_view` 写（target `review_view`）。
+- 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 11；`tests/startup.rs` 的 `plugins` 为 11，并检查 `first frame drawn` 之前没有 target 为 `review_view` 的记录。
+
 ## 性能
 
 - 冷启动：首帧之前只有「启动顺序」的第 1–6 步。新增的工作是参数解析（几个字符串比较）、`install_early`（预算 ≤ 20 µs，`log/install_early`）、语言协商（常数级的内存操作）和 `lectern_ui::init`（预算 ≤ 300 µs，`ui/init`：一次减弱动态效果的读取、两份内置表、登记通知；不读系统色，[ui 设计「性能」](ui.md#性能)），加上骨架窗口的 `lectern_ui::attach`（登记一个外观观察者），合计远小于 20 ms 预算的 1%。首帧之前不建线程、不读写 Lectern 自己的文件、不调用 kernel 和 executor、不运行 `gpui_component::init`（ADR 0017）。
@@ -629,6 +643,12 @@ target 为 `app`。
 - `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup) and not binary(probe)'` 通过（含 `Profile::Probe` 的图校验和 `src/tests/probe.rs`）；`cargo tree` 的发布构建检查没有 `lectern-ui-probe`。
 - `tests/probe.rs` 和 `tests/startup.rs` 没有在本机运行（图形会话锁屏，屏障不放开，「已知限制」），结果以 macOS CI 为准。`just probe` 起得来，锁屏下探针目录里没有 `probe.sock`（屏障未放开，探针没有启动）。
 
+`review_view` 的装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，同一台机器）：
+
+- `just check`、`just deny` 通过。
+- `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup) and not binary(probe)'` 通过：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 11，图校验通过，临时目录之后仍是空的。
+- `tests/startup.rs` 和 `tests/probe.rs` 没有在本机运行（图形会话锁屏，屏障不放开，「已知限制」），结果以 macOS CI 为准。发布构建的手动运行（从项目主页打开一个会话的 Diff）没有做。
+
 ## 与设计的差异
 
 - **库与二进制分开。** 原文写 `app` 是二进制 crate。记录的 target 取 `module_path!` 的第一段：二进制名为 `lectern` 时 target 是 `lectern`，不是 logging 设计规定的 `app`。现在逻辑在库 `lectern_app` 里，二进制只调用 `lectern_app::run()`，target 是 `app`（「接口」已改）。
@@ -665,3 +685,7 @@ target 为 `app`。
 - **`project_home` 提前装配。** project_home 设计把 D 放在第 3 步（视图之后）；它的第 1 步已有两个插件和 `UsageSlot`，`dyn Usage` 现在有了提供者，`project-home` 又不登记贡献，所以图校验通过、空 `Workspace` 的启动不受影响。代价是「已知限制」里的过渡状态。bench 的 `Driver` 的 `home` 场景（D 的另一半）仍随探针。
 - **`welcome` 随它的视图装配**（见「welcome 的装配」）。
 - **`LocalZone` 的 None 按 UTC。** platform 设计把 None 的处理交给 `app`；毫秒时间戳总有偏移，取 0 不记日志。
+
+`review_view` 的装配：
+
+- **只装 `review-view`。** review_view 设计的 C 要求两个插件都放进 `PluginSet`；`dyn Reader`、`dyn CodeIntel` 还没有提供者，`review-view-handoff` 放进去图校验就失败，所以先丢掉它（「review_view 的装配」）。

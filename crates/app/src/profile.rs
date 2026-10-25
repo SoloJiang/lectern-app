@@ -16,6 +16,7 @@ use lectern_project_home::{
     USAGE_PLUGIN_ID as PROJECT_HOME_USAGE_ID, UsageSlot,
 };
 use lectern_review::ReviewDeps;
+use lectern_review_view::PLUGIN_ID as REVIEW_VIEW_ID;
 use lectern_usage::{LocalZone, UsageDeps};
 use lectern_welcome::WelcomeDeps;
 use lectern_workspace::{WorkspaceHost, WorkspacePlugin};
@@ -73,8 +74,8 @@ impl Profile {
     }
 
     /// Desktop: `project`, the two session sources, `review`, `usage`,
-    /// `workspace`, `welcome`, `welcome-discovery`, `project-home` and
-    /// `project-home-usage`
+    /// `workspace`, `welcome`, `welcome-discovery`, `project-home`,
+    /// `project-home-usage` and `review-view`
     /// (docs/design/app.md「插件与资源」). Test: none. With the number of
     /// plugins, for the log (`PluginSet` does not expose it). No IO.
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
@@ -150,7 +151,13 @@ fn desktop(r: &Resources) -> (PluginSet, usize) {
             PROJECT_HOME_USAGE_ID,
             ProjectHomeUsagePlugin::new(r.executor.clone(), slot),
         );
-    (set, count + 5)
+    // The review screen. Its second plugin, "review-view-handoff", requires
+    // `dyn Reader` and `dyn CodeIntel`, which no assembled plugin provides
+    // yet, so it is dropped: the screen works without it and its handoff
+    // buttons stay disabled (docs/design/app.md「review_view 的装配」).
+    let (review_view, _handoff) = lectern_review_view::plugins(r.executor.clone());
+    let set = set.with(REVIEW_VIEW_ID, review_view);
+    (set, count + 6)
 }
 
 /// `usage`'s local time zone: `platform::time::utc_offset`

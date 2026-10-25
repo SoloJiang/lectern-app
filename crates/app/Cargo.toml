@@ -45,6 +45,9 @@ lectern-project = { path = "../project" }
 # `UsageSlot` (docs/design/project_home.md「对其他 crate 的要求」D).
 lectern-project-home = { path = "../project_home" }
 lectern-review = { path = "../review" }
+# The "review-view" plugin (docs/design/review_view.md「对其他 crate 的要求」C).
+# Its "review-view-handoff" is not assembled: no plugin provides `dyn Reader`.
+lectern-review-view = { path = "../review_view" }
 # The "welcome" and "welcome-discovery" plugins and `WelcomeDeps`
 # (docs/design/welcome.md「对其他 crate 的要求」C).
 lectern-welcome = { path = "../welcome" }
