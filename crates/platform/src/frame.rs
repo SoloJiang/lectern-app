@@ -38,6 +38,30 @@ pub fn on_first_presented(f: impl FnOnce(SystemTime) + Send + 'static) -> Result
     imp::on_first_presented(Box::new(f))
 }
 
+/// TEMPORARY CI diagnostics (bench step 4; removed before the review):
+/// calls of the `nextDrawable` replacement, the null drawables among them,
+/// presented-handler calls, the calls among them with `presentedTime` not
+/// above 0, and the last `presentedTime` (bits of an `f64`). Zeros without
+/// `bench-hooks`.
+#[doc(hidden)]
+pub fn diag_counts() -> [u64; 5] {
+    #[cfg(all(target_os = "macos", feature = "bench-hooks"))]
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        [
+            imp::DIAG_NEXT.load(Relaxed),
+            imp::DIAG_NULL.load(Relaxed),
+            imp::DIAG_HANDLERS.load(Relaxed),
+            imp::DIAG_ZERO.load(Relaxed),
+            imp::DIAG_LAST.load(Relaxed),
+        ]
+    }
+    #[cfg(not(all(target_os = "macos", feature = "bench-hooks")))]
+    {
+        [0; 5]
+    }
+}
+
 /// The system time of a moment given on the media clock (`CACurrentMediaTime`
 /// and `presentedTime`: seconds on the `mach_absolute_time` clock, which does
 /// not run while the machine sleeps). `media_now` and `now` are read back to
@@ -65,10 +89,17 @@ mod imp {
     use std::ffi::{CStr, c_char, c_int, c_ulong, c_void};
     use std::mem;
     use std::ptr;
-    use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
     use std::time::SystemTime;
 
     use super::system_time_of;
+
+    // TEMPORARY CI diagnostics (`super::diag_counts`).
+    pub(super) static DIAG_NEXT: AtomicU64 = AtomicU64::new(0);
+    pub(super) static DIAG_NULL: AtomicU64 = AtomicU64::new(0);
+    pub(super) static DIAG_HANDLERS: AtomicU64 = AtomicU64::new(0);
+    pub(super) static DIAG_ZERO: AtomicU64 = AtomicU64::new(0);
+    pub(super) static DIAG_LAST: AtomicU64 = AtomicU64::new(0);
     use crate::HookError;
     use crate::hook::check_type_encoding;
 
@@ -202,6 +233,11 @@ mod imp {
                 mem::transmute(objc_msgSend as unsafe extern "C" fn());
             send(drawable, selector)
         };
+        DIAG_HANDLERS.fetch_add(1, Ordering::Relaxed);
+        if presented.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            DIAG_ZERO.fetch_add(1, Ordering::Relaxed);
+        }
+        DIAG_LAST.store(presented.to_bits(), Ordering::Relaxed);
         deliver(&CALLBACK, presented);
     }
 
@@ -251,6 +287,10 @@ mod imp {
             let original: unsafe extern "C" fn(Id, Sel) -> Id = mem::transmute(original);
             original(this, selector)
         };
+        DIAG_NEXT.fetch_add(1, Ordering::Relaxed);
+        if drawable.is_null() {
+            DIAG_NULL.fetch_add(1, Ordering::Relaxed);
+        }
         if !drawable.is_null() && !CALLBACK.load(Ordering::Acquire).is_null() {
             let add = ADD_PRESENTED_HANDLER.load(Ordering::Acquire);
             let block = Block::new(
