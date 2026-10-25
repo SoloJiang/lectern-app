@@ -7,7 +7,7 @@
 ## 范围
 
 - 做：
-  - `TerminalPane`：一个终端的视图实体。持有这个终端的 `FrameInterest`，读最新的 `Arc<Frame>`，按帧绘制。
+  - `TerminalPane`：一个终端的视图实体。读最新的 `Arc<Frame>`，按帧绘制。`FrameInterest` 由宿主持有（页可见时），视图不调用 `watch`。
   - 自绘元素：行的字形按网格列放置；单元底色、选区、下划线与删除线、光标；方框绘制字符和块元素按几何图形画，不用字体（「数据结构」的「方框与块元素」）。
   - 输入：按键（含 Esc、Tab、Enter、方向键、⌃ 组合键）、输入法（中文拼音等）、粘贴、复制、全选；鼠标点击、拖动选择、滚轮；焦点进出；网格尺寸随所在区域变化。
   - 颜色：从 `ui` 的终端配色得出 `Theme`，外观变化时发 `Input::SetTheme`。
@@ -44,15 +44,14 @@
 ## 接口
 
 ```rust
-/// 一个终端的视图。`Entity<TerminalPane>` 由宿主（`conversation` 的 Terminal 页）在页显示时建、
-/// 页隐藏时 drop。主线程；不做 IO。
+/// 一个终端的视图。`Entity<TerminalPane>` 由宿主（`conversation` 的 Terminal 页）建和 drop。主线程；不做 IO。
 pub struct TerminalPane { /* 见「数据结构」 */ }
 
 impl TerminalPane {
     /// `terminals` 是宿主插件取得的服务引用；`token` 是宿主插件这次激活的 token
     /// （`PluginHandle::token()`），复制时交给 `Terminals::copy_selection`。
-    /// 构造时调用一次 `Terminals::watch(id)`，持有返回的 `FrameInterest` 到自己 drop：
-    /// 视图存在期间 `terminal` 才生成帧。不阻塞。
+    /// 不调用 `watch`：宿主在页可见时持有 `FrameInterest`（terminal 设计「对其他 crate 的要求」第 4 项），
+    /// 页不可见时没有新帧，视图也不重画。不阻塞。
     pub fn new(
         terminals: ServiceRef<dyn Terminals>,
         token: ActivationToken,
@@ -77,14 +76,15 @@ impl Focusable for TerminalPane {}
 /// 输入法（「数据流与线程」的「输入法」）。
 impl EntityInputHandler for TerminalPane {}
 
-/// 当前外观的终端颜色，换算成 `Theme`。纯函数；宿主在 `Terminals::open` 之前调用
-/// （`ui::colors(window, cx)` 取 `palette`），本视图每次渲染也用它比较是否要发 `SetTheme`。
-pub fn theme(palette: &Palette) -> Theme;
+/// 这个窗口当前外观的终端颜色（`ui::colors(window, cx)`，含 `ui` 的固定外观），换算成 `Theme`。
+/// 宿主在 `Terminals::open` 之前调用；本视图每次渲染也调用，结果变了就自己发 `SetTheme`。
+/// 要 `window`：外观按窗口取，`App` 上没有。主线程，不阻塞。
+pub fn theme(window: &Window, cx: &App) -> Theme;
 
-/// 把一块区域换算成网格：`area` 是视图可用的逻辑尺寸，`metrics` 是 `ui::mono_metrics`，
-/// `scale` 是 `window.scale_factor()`。纯函数。列数至少 20、行数至少 1；
-/// 区域不够 20 列时视图按 20 列绘制并裁掉右侧。
-pub fn grid_size(area: Size<Pixels>, metrics: &MonoMetrics, scale: f32) -> GridSize;
+/// 把一块区域换算成网格：`area` 是视图可用的逻辑尺寸；字体度量取 `ui::mono_metrics(window, cx)`
+/// （第一次调用时量一次字体，之后读缓存，所以要 `&mut App`），设备像素取 `window.scale_factor()`。
+/// 列数至少 20、行数至少 1；区域不够 20 列时视图按 20 列绘制并裁掉右侧。主线程，不阻塞。
+pub fn grid_size(area: Size<Pixels>, window: &Window, cx: &mut App) -> GridSize;
 
 /// 宿主插件把它放进自己的 `KeyBindings` 贡献（「界面」的「Action 与快捷键」）。
 pub fn key_bindings() -> Vec<(&'static str, Box<dyn Action>, Option<&'static str>)>;
@@ -98,10 +98,10 @@ actions!(terminal_view, [Copy, Paste, SelectAll, ClearScrollback]);
 宿主的用法（`conversation`）：
 
 ```rust
-let palette = ui::colors(window, cx);
-let size = terminal_view::grid_size(page_area, &ui::mono_metrics(window, cx), window.scale_factor());
-let spec = OpenSpec { launch: Launch::Resume(key), size: Some(size), theme: terminal_view::theme(palette) };
+let size = terminal_view::grid_size(page_area, window, cx);
+let spec = OpenSpec { launch: Launch::Resume(key), size: Some(size), theme: terminal_view::theme(window, cx) };
 let id = terminals.get()?.open(spec)?;
+let interest = terminals.get()?.watch(id);      // 页可见期间持有，隐藏时 drop
 let pane = cx.new(|cx| TerminalPane::new(terminals.clone(), token.clone(), id, window, cx));
 pane.read(cx).focus_handle().focus(window);
 ```
@@ -115,7 +115,6 @@ pub struct TerminalPane {
     terminals: ServiceRef<dyn Terminals>,
     token: ActivationToken,
     id: TerminalId,
-    interest: Option<FrameInterest>,
     frame: Option<Arc<Frame>>,          // None：还没有第一帧，或终端已关闭
     state: Option<RunState>,            // 来自 `info(id)`，语义节点用
     focus: FocusHandle,
@@ -165,8 +164,9 @@ agent 的命令行界面用方框绘制字符画输入框（`╭─╮│╰─�
 
 ### 颜色
 
-- `theme(palette)`：取 `ui` 的终端配色（「对其他 crate 的要求」第 1 项），把每个颜色叠在终端底色上换成不透明的 `Rgb`（系统的文字色带透明度）。`scheme` 取 `palette.appearance`。
-- 渲染时比较 `theme(colors(window, cx))` 与 `sent_theme`，不同才发 `Input::SetTheme`。外观变化时 `ui` 刷新窗口，所以不需要另外订阅。
+- `theme(window, cx)`：取 `ui` 的终端配色（「对其他 crate 的要求」第 1 项），把每个颜色叠在终端底色上换成不透明的 `Rgb`（系统的文字色带透明度）。`scheme` 取 `palette.appearance`。换算本身是不读窗口的纯函数 `theme_of(&Palette)`，测试直接调用。
+- 渲染时比较 `theme(window, cx)` 与 `sent_theme`，不同才发 `Input::SetTheme`。外观变化时 `ui` 刷新窗口，所以不需要另外订阅。
+- `grid_size` 的换算同样是纯函数 `cells(area, &MonoMetrics, scale)`，测试直接调用。
 - 选区色、空心光标的描边直接从 `Palette` 取，不经 `terminal`。
 
 ## 数据流与线程
@@ -283,7 +283,7 @@ GPUI 先匹配快捷键，再调用元素的 `on_key_down`（gpui-pre 0.3.9 `win
 
 | 情况 | 表现 |
 |---|---|
-| 还没有第一帧 | 只画 `Theme::background`；`watch` 之后 `terminal` 立即生成一帧完整的，通常在下一帧到达 |
+| 还没有第一帧 | 只画 `Theme::background`；宿主 `watch` 之后 `terminal` 立即生成一帧完整的，通常在下一帧到达 |
 | 进程启动中 / 启动失败 | 画 `terminal` 给的帧（启动失败时为空白）；原因由宿主的状态行显示 |
 | 进程已退出 | 最后的画面保留，可以滚动、选择、复制；按键与粘贴被 `terminal` 丢弃 |
 | 终端已关闭（`frame(id)` 为 None） | 只画底色；宿主随后 drop 视图 |
@@ -306,13 +306,13 @@ GPUI 先匹配快捷键，再调用元素的 `on_key_down`（gpui-pre 0.3.9 `win
 
 ## 测试
 
-- 视图测试用 `#[gpui::test]`。服务用假的 `dyn Terminals`（`testing::FakeTerminals`：记录每次 `input`、`watch`、`copy_selection`，按测试给的 `Frame` 应答），经 `kernel::testing::TestKernel::mock` 提供，测试插件取得 `ServiceRef` 和 token。不依赖 `lectern-terminal`，不启动进程。帧用 `testing::frame(...)` 按行的文字和样式构造。
+- 视图测试用 `#[gpui::test]`。服务用假的 `dyn Terminals`（`testing::FakeTerminals`：记录每次 `input`、`watch`、`copy_selection`，按测试给的 `Frame` 应答；断言视图从不调用 `watch`），经 `kernel::testing::TestKernel::mock` 提供，测试插件取得 `ServiceRef` 和 token。不依赖 `lectern-terminal`，不启动进程。帧用 `testing::frame(...)` 按行的文字和样式构造。
 - 按键（`keys_*`）：「键盘」表里的每一行，发出的 `Input::Key` 的 `Key`、修饰键和 `KeyAction`；⇧PageUp 等发 `ScrollTo`；⌃C 发 `Key(Char('c'))` 带 control；可打印字符不发 `Key`。
 - 快捷键的优先级：`escape_reaches_the_terminal`（外层有 KeyContext `Workspace` 和绑定在它上面的 `escape`，与 workspace 相同；Esc 只发出 `Key(Escape)`，外层的 Action 没有被调用）；`cmd_keys_bubble`（⌘W 到达外层的处理函数，终端没有收到输入）。
 - 输入法（`ime_*`）：`simulate_input` 发 `Text`；组字期间不发输入、组字的文字画在光标格子；提交后发一次 `Text`；`bounds_for_range` 是光标格子。
 - 复制与粘贴（`copy_*`、`paste_*`）：有选区时调用 `copy_selection` 并写剪贴板；没有选区时不调用；⌘V 发 `Paste`；视口不在底部时先发 `ScrollTo(Bottom)`。
-- 尺寸（`grid_size_*`、`resize_*`）：纯函数的取整、四边留白、最少 20 列；同一尺寸只发一次 `Resize`。
-- 颜色（`theme_*`）：两种外观下 `theme` 的 insta 快照；切换外观（`ui` 的固定外观）后只发一次 `SetTheme`。
+- 尺寸（`grid_size_*`、`resize_*`）：`cells` 的取整、四边留白、最少 20 列；同一尺寸只发一次 `Resize`。
+- 颜色（`theme_*`）：两种外观下 `theme_of` 的 insta 快照；切换外观（`ui` 的固定外观）后只发一次 `SetTheme`。
 - 鼠标与滚轮（`mouse_*`、`wheel_*`）：像素到格子的换算；双击、三击的 `clicks`；不开鼠标跟踪时不发 `Move`；拖出网格时自动滚动、松开即停；像素滚动累计成整行，方向固定。
 - 焦点（`focus_*`）：取得与失去焦点各发一次 `Focus`；失去焦点后光标为空心方框（检查绘制列表）。
 - 字形放置（`snap_*`，纯函数，用合成的 `LineLayout`）：ASCII、CJK 宽字符居中于两列、组合符号跟随基字、表情、ZWJ 序列、行尾空格。
@@ -345,10 +345,11 @@ GPUI 先匹配快捷键，再调用元素的 `on_key_down`（gpui-pre 0.3.9 `win
    | 15 亮白 | 同 7 | 同 7 |
 
    派生规则：1–6 叠在 `background` 上对比度不足 3:1 时（浅色外观的绿、黄、青），向 `label` 每次混合 5%，直到不低于 3:1；与 diff 底色一样是按规则派生，不写死颜色值。检查：`terminal_colors_contrast`（两种外观下 1–6 对 `background` 不低于 3:1）、`terminal_colors_distinct`（1–6 两两之间 ΔE（CIE76）不小于 12）。某一行过不了检查时换一种系统色，写进 ui 设计的「与设计的差异」。
-2. `conversation`（[conversation 设计](https://github.com/SoloJiang/lectern-app/pull/262)「对其他 crate 的要求」E）。与 E 的对应和差异：
+2. `conversation`（[conversation 设计](https://github.com/SoloJiang/lectern-app/pull/262)「对其他 crate 的要求」E）。E 的名字照用（`TerminalPane::new`、`refresh`、`focus_handle`、`theme`、`grid_size`），差异如下：
    - `TerminalPane::new` 多一个参数 `token: ActivationToken`（终端插件这次激活的 token）：`Terminals::copy_selection` 要调用方的 token，而 `ServiceRef` 里的是提供方的 token，不对外。
+   - `theme` 和 `grid_size` 多一个 `window` 参数：外观按窗口取（`ui::colors(window, cx)`），字体度量与设备像素也按窗口取（`ui::mono_metrics(window, cx)`、`scale_factor`）；`grid_size` 要 `&mut App`，因为 `mono_metrics` 第一次调用时写缓存。
    - `refresh` 在收到这个终端的 `TerminalEvent::Frame`（E 写的 `Output`）和任何 `TerminalEvent::Listed` 时调用。
-   - `TerminalPane` 只在 Terminal 页显示时存在：切到 Messages 页、检查器隐藏时 drop，再显示时用同一个 `TerminalId` 新建。视图持有 `FrameInterest`，所以页不可见时 `terminal` 不建帧、主线程不重画（terminal 设计「对其他 crate 的要求」第 4 项）。
+   - `FrameInterest` 由宿主在 Terminal 页可见时持有、隐藏时 drop（terminal 设计「对其他 crate 的要求」第 4 项），视图不调用 `watch`。所以页不可见时 `terminal` 不建帧，主线程也不重画；`TerminalPane` 可以跨页隐藏保留（行缓存随之保留），也可以 drop 后用同一个 `TerminalId` 新建。
    - 恢复之前用 `terminal_view::theme` 和 `terminal_view::grid_size` 构造 `OpenSpec`（「接口」的宿主用法）；恢复之后把焦点交给 `focus_handle()`。
    - 终端插件的 `KeyBindings` 贡献里加上 `terminal_view::key_bindings()`。
    - 「获得焦点时不带 ⌘ 的键（包括 Esc）交给终端」按「键盘」一节实现；⌘C、⌘V 之外另有 ⌘A（全选，macOS 终端的习惯），其余带 ⌘ 的组合键冒泡。
