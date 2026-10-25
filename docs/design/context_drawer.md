@@ -130,6 +130,9 @@ pub(crate) struct Shared {
     services: Mutex<Option<Services>>,          // contributions、code_intel、review、projects
     reader: Mutex<Option<ServiceRef<dyn Reader>>>,
     handle: Mutex<Option<PluginHandle>>,        // context-drawer 这次激活的句柄
+    /// 监听用来过滤的当前值：请求的项目与审阅、查找和引用查询的 `QueryId`。步进写，监听读。
+    /// 监听先取它、放开，再取 `inbox`，两把锁不嵌套。
+    watch: Mutex<Watch>,
     /// 监听和视图只碰这一把锁：放进输入，没有排着的步进时提交一个。
     inbox: Mutex<Inbox>,
     /// 只有步进任务取。持有它时可以取 `inbox`、`model`、`view`，反过来不行。
@@ -138,6 +141,12 @@ pub(crate) struct Shared {
     model: Mutex<Arc<DrawerModel>>,
     /// 面板视图活着时的主线程通道。
     view: Mutex<Option<futures::channel::mpsc::UnboundedSender<Job>>>,
+}
+
+pub(crate) struct Watch {
+    project: Option<ProjectKey>,
+    review: Option<ReviewId>,
+    queries: [Option<QueryId>; 2],
 }
 
 pub(crate) struct Inbox { items: Vec<Input>, scheduled: bool }
@@ -244,7 +253,9 @@ pub(crate) enum Phase {
 - `jump` 为 Some 且有 `Reader`：`Reader::open` 那个候选，不打开面板，关闭查找查询，回到 `Idle`。
 - 其他情况：`dispatch(OpenPanel(PANEL))`，初始页是 Definition。之后到达的批次即使带了 `jump` 也不自动跳转：用户已经在看列表。
 
-`Inspect` 在收下请求时就 `dispatch(OpenPanel(PANEL))`，初始页是 Callers。
+`Inspect` 在收下请求时就 `dispatch(OpenPanel(PANEL))`，初始页是 Callers。请求的 worktree 不是当前 worktree 时（`Phase::OtherWorktree`），两种意图都不查询，都在收下请求时打开面板显示提示。
+
+Diff 的旧一侧（删除的行，`TextOrigin::Object`）：`Enclosing` 读对象库里的旧 blob，主题的 `Location::origin` 是 `Object`。`References` 按 code_intel 设计「查找引用与调用方」第 1 步处理：旧 blob 里的引用是调用方（`origin` 也是 `Object`），其余候选文件来自当前 worktree 的映射。当前内容里已经没有这个定义时，别的文件里的同名用处解析不回它，进同名引用组。所以主题来自旧一侧时：标题加一行 `context-old-side`，同名引用组默认展开，组标题换成 `context-same-name-current`（这些多半就是没有跟着改的用处）；它们仍不计入摘要和「未跟着改」（「已知限制」）。
 
 ### 行与只追加
 
@@ -377,7 +388,7 @@ pub(crate) enum Tab { Definition, Callers, Tests, History }
 
 ```
 审阅视图 Space ─▶ [主线程] emit(ContextEvent::Show) ─▶ 监听：inbox 放入 Show，排一个步进
-步进（executor，Interactive）─▶ 关闭旧查询；当前 worktree？否 → OtherWorktree；是 → query(Enclosing / Definition)
+步进（executor，Interactive）─▶ 关闭旧查询；当前 worktree？否 → OtherWorktree + dispatch(OpenPanel(PANEL))；是 → query(Enclosing / Definition)
                              └─ Inspect：dispatch(OpenPanel(PANEL)) ─▶ workspace 建面板视图（主线程）
 code_intel ─▶ CodeIntelEvent::Results（executor，code_intel 的 publishing 锁内）─▶ 监听：只放入 Wake，排一个步进
 步进 ─▶ results(id) ─▶ 追加行、定主题、query(References)、set_focus(Drawer)、prefetch
@@ -385,15 +396,15 @@ code_intel ─▶ CodeIntelEvent::Results（executor，code_intel 的 publishing
      ─▶ 发布 Arc<DrawerModel> ─▶ 面板通道 Job::Model
 [主线程] 面板的前台任务 ─▶ 读 Shared::model ─▶ cx.notify() ─▶ 下一帧画出 ─▶ report_milestone（每个 seq 每种一次）
 用户 ↑↓ ←→ ─▶ 视图自己的状态，立即重画；↵ / Space / 切换 ─▶ inbox 放入 Command，排一个步进
-review ─▶ ReviewEvent::Changed（id 是请求的审阅）─▶ ReviewChanged ─▶ 步进：状态、摘要、History 原地改写
-project ─▶ ProjectEvent::Changed（请求的项目）─▶ ProjectChanged ─▶ 步进：当前 worktree 与测试文件重新判断
+review ─▶ ReviewEvent::Changed（监听按 Watch 过滤：id 是请求的审阅）─▶ ReviewChanged ─▶ 步进：状态、摘要、History 原地改写
+project ─▶ ProjectEvent::Changed（监听按 Watch 过滤：请求的项目）─▶ ProjectChanged ─▶ 步进：当前 worktree 与测试文件重新判断
 workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ 关闭时：close 两个查询、set_focus(Drawer([]))、回到 Idle
 ```
 
 - 控制器只在步进任务里运行，同一时刻只有一个（`Inbox::scheduled`）。步进先取出 `inbox` 里的全部输入，再取 `controller` 的锁按顺序应用；应用完再看一次 `inbox`，空了才把 `scheduled` 置回 false。
 - 为什么在 executor 上而不在主线程上：⌘ 点击要在面板视图存在之前决定跳转还是打开面板，而插件在没有视图时没有主线程的入口；`CodeIntelEvent` 的监听又运行在 `code_intel` 持有 `publishing` 锁的时候（`publish_ordered`），在监听里调 `results`、`query`、`close` 有重入的风险。所以监听只转发，服务调用都在步进里。步进只做内存计算和立即返回的服务调用，没有 IO、解析和 git 操作，单次 < 1 ms（「性能」）。
-- 监听只取 `inbox` 的锁，取不到别的锁，不调用任何服务。步进持有 `controller` 时调 `code_intel.query` 若同步发出事件，监听取的是 `inbox`，不会死锁。锁的顺序：`controller` → `inbox` / `model` / `view`，不能反过来。
-- 步进任务经 `PluginHandle::own_with` 和 `Executor::spawn_gated(Priority::Interactive)` 提交，插件停用时随守卫取消。
+- 监听只取 `watch` 和 `inbox` 两把短锁（先后取，不嵌套），不取 `controller`，不调用任何服务。`CodeIntelEvent` 的监听按 `Watch::queries` 过滤，别人的查询（⌘K、阅读视图的预取）不排步进；`ReviewEvent`、`ProjectEvent` 按 `Watch` 的审阅和项目过滤；`ContextEvent` 和 `WorkspaceEvent::LayerChanged(Panel(PANEL))` 不过滤。过滤只是为了少排步进，步进仍按「行与只追加」的规则再判断一次。步进持有 `controller` 时调 `code_intel.query` 若同步发出事件，监听取的是 `watch` 和 `inbox`，不会死锁。锁的顺序：`controller` → `watch` / `inbox` / `model` / `view`，不能反过来。
+- 步进任务经 `PluginHandle::own_with` 和 `Executor::spawn_gated(Priority::Interactive)` 提交，插件停用时随守卫取消。任务结束后 kernel 收回它在激活守卫表里的登记（`SubmitGate` 的 reclaim），所以登记不随步进的次数累积。`own_with` 返回 false（激活已停用）时把 `scheduled` 置回 false、丢弃 `inbox` 里的输入，之后的输入也不再排步进。
 - 主线程上只有：面板视图读模型、渲染、响应按键和点击、放入命令。没有 IO、解析和 git 操作（架构规则 4）。
 - 服务调用的线程：`CodeIntel::query` / `results` / `close` / `set_focus`、`Reader::open` / `prefetch`、`Contributions::dispatch` / `report_milestone`、`Review::snapshot`、`Projects::snapshot` 都是立即返回、任何线程可调用的。
 - `Focus::Drawer`：主题变化或 Definition 页的行增加时，发 Definition 页前 8 行的文件加上主题的文件（去重）；面板关闭时发空列表。焦点的 worktree 是请求的 worktree。
@@ -415,6 +426,8 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 | 冷启动 20 ms | 首帧之前没有代码运行；`plugin/context-drawer/activate`、`plugin/context-drawer-reader/activate` 各 < 1 ms（只登记） |
 | 空闲内存（没有请求） | < 16 KiB（`Shared`、登记的工厂和快捷键） |
 | 面板打开时的内存 | 行持有 `QueryResults` 里 `Arc` 的克隆（路径、名字共享）；1 万个调用方约 1 万 × 120 B ≈ 1.2 MiB；「路径 → 文件下标」表按审阅的文件数，200 个文件 < 32 KiB。面板关闭时全部释放 |
+
+`app/references_first` 的 200 ms 是三段之和：查找查询（`Enclosing` / `Definition`，`code_intel` 的份额 32 ms）、`References` 的第一批、本 crate 的 18 ms。所以端到端只在前两段合计 ≤ 182 ms 时成立；`code_intel` 自己的基准 `code_intel/references_100k/first` 判定 ≤ 200 ms，比这宽，实测约 11 ms，余量足够。本文不改任何预算，只分配份额，不需要新 ADR；端到端超标时以 `app/references_first` 为准查原因。
 
 步进的计算量：追加一批是 O(这一批的行数)；审阅快照换代时重建路径表 O(文件数)、重算状态 O(已有的行数)。1 万行时重算 < 2 ms，在 executor 上进行，不占主线程。
 
@@ -438,7 +451,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
   - 分段控件 `Segmented`：Definition / Callers N / Tests N / History。数字在对应查询有结果之后才显示。
   - 摘要行（Callers 页，有审阅时）：`context-summary-*`，`secondary_label`。
   - 列表：`GroupedList` 与 `Row` 的样式，`uniform_list` 承载。每行两段：主文字是文件名:行号（`TextRole::Body`），次要文字是目录（`secondary_label`，从开头省略，保留靠近文件名的部分）和「位于 定义名」；状态在行的右侧，一行次要文字，`NotUpdated` 前加一个 `Palette::system(SystemColor::Orange)` 的 6pt 圆点（状态用圆点或一行次要文字，不用彩色标签块：[交互规范「视觉」](interaction.md#视觉)）。300pt 宽度下路径不完整显示，完整路径在探针节点和悬停提示里。
-  - Callers 页末尾：同名引用组（默认折叠，`Expander` 展开），标题 `context-same-name`。
+  - Callers 页末尾：同名引用组（默认折叠，`Expander` 展开），标题 `context-same-name`；主题来自 Diff 的旧一侧时默认展开，标题 `context-same-name-current`。
   - Tests 页两组：`context-tests-calls`、`context-tests-files`。History 页一组 `context-history-review`。
   - 底部：打开按钮（`Button`，`context-open`），没有 `Reader` 或没有选中行时不可用。
 - 加载：`ui::loading_phase(now - since)`：`Nothing` 时只有标题行的位置（没有名字时空白）；`Skeleton` 时列表位置三块 `Skeleton`；`Progress` 时一行 `context-loading`。查找查询的第一批到达后标题出现；`References` 还在进行时 Callers 页显示已到的行，不显示加载态。
@@ -475,6 +488,8 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
   | `context-summary-outside` | { $outside } of { $total } callers found are in files this review did not change | 找到的 { $total } 个调用方里，{ $outside } 个所在的文件本次审阅没有改动 | 摘要行 |
   | `context-summary-inside` | All { $total } callers found are in files this review changed | 找到的 { $total } 个调用方所在的文件本次审阅都改过 | 摘要行 |
   | `context-same-name` | Same name, not resolved to this definition ({ $count }) | 同名、未解析到这个定义（{ $count }） | 同名引用组 |
+  | `context-same-name-current` | Uses of this name in the current files ({ $count }) | 当前文件里这个名字的用处（{ $count }） | 同名引用组，主题来自旧一侧 |
+  | `context-old-side` | Old version: this review removed or changed it | 旧版本：本次审阅删除或改动了它 | 标题下一行，主题来自旧一侧 |
   | `context-tests-calls` | Called from tests | 测试里的调用 | Tests 页分组 |
   | `context-tests-files` | Test files by name | 按命名对应的测试文件 | Tests 页分组 |
   | `context-history-review` | This review | 本次审阅 | History 页分组 |
@@ -507,7 +522,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
   | 节点 | 角色 | 内容 |
   |---|---|---|
   | `context.panel` | `Panel` | `Label::key` = `context-title`；`attrs`：`phase`（`idle` / `waiting` / `ready` / `other_worktree` / `failed`）、`intent`、`seq` |
-  | `context.header` | `Text` | `Label::text` 是主题的名字；`attrs`：`kind`、`line`、`dependency`（bool）、`source`（`SubjectSource` 的名字） |
+  | `context.header` | `Text` | `Label::text` 是主题的名字；`attrs`：`kind`、`line`、`dependency`（bool）、`old_side`（bool）、`source`（`SubjectSource` 的名字） |
   | `context.close` | `Button` | |
   | `context.tabs` / `context.tab[definition]`、`[callers]`、`[tests]`、`[history]` | `TabBar` / `Tab` | `selected`；`attrs`：`count` |
   | `context.summary` | `Text` | `Label::key`；`attrs`：`total`、`outside` |
@@ -558,9 +573,10 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 | `Failed(Stale)`（请求的文本已经变了） | `context-failed-stale`。不自动重查：调用方刷新后会给出新的 OID，用户再按一次 Space |
 | `References` 失败（主题所在的文件变了：`Stale`） | Definition 页照常；Callers、Tests 显示 `context-failed-stale` |
 | 没有候选 | Definition 页 `context-definition-none`；其余页空状态 |
+| 主题来自 Diff 的旧一侧（`Object`） | 标题下 `context-old-side`；同名引用组默认展开，标题 `context-same-name-current`；摘要只按 `callers` 算 |
 | 没有调用方 / 没有相关测试 | `context-callers-none` / `context-tests-none`（查询结束之后才显示；进行中保持空列表） |
 | 结果不完整（`Done(Partial)`） | 不提示（调研「决定」第 4 条）；摘要说「找到的」 |
-| 请求的 worktree 不是当前 worktree | 不查询；`context-other-worktree` 与切换按钮。切换后 `ProjectChanged` 让步进重新判断，当前 worktree 等于请求的 worktree 时自动开始查询 |
+| 请求的 worktree 不是当前 worktree | 不查询；`Inspect` 和 `GoTo` 都打开面板，显示 `context-other-worktree` 与切换按钮。切换后 `ProjectChanged` 让步进重新判断，当前 worktree 等于请求的 worktree 时自动开始查询 |
 | 没有 `Reader`（`context-drawer-reader` 没装、失败或停用） | 打开按钮与 ↵ 不可用；⌘ 点击的 `jump` 不能直接打开，改为打开面板列出那一个候选；不预取 |
 | 请求没有审阅 | 调用方没有状态、没有摘要行；History `context-history-no-review` |
 | 审阅快照取不到（审阅已关闭）或 `Loading` | 同上；之后的 `ReviewChanged` 到达时补上 |
@@ -597,12 +613,13 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 - 控制器（`#[test]`，不建窗口）：
   - `request_*`：`Show` 关闭上一个请求的两个查询；相同的请求在面板开着时不重查、关着时重新打开；`Inspect` 发一次 `OpenPanel(PANEL)`，`GoTo` 在决定之前不发；`Line` 发 `Enclosing`，`Position` 发 `Definition`。
   - `goto_*`：第一批带 `jump` 时 `Reader::open` 的 `ReadTarget`（`origin`、`expect: Some(oid)`、`Anchor::Byte`；`byte` 为 None 时 `Anchor::Line`）正确、没有 `OpenPanel`、查找查询已关闭；没有 `jump` 时 `OpenPanel` 且初始页是 Definition；查询结束没有候选时 `OpenPanel` 并显示 `context-definition-none`；没有 `Reader` 时改为打开面板；决定之后再来的 `jump` 不跳转。
+  - `old_side_*`：`at.origin` 为 `Object` 的 `Line` 请求发 `Enclosing`，主题的 `origin` 是 `Object`；同名引用组默认展开、换标题；打开旧 blob 里的调用方时 `ReadTarget::origin` 为 `Object`、`expect` 为它的 OID。
   - `subject_*`：`defines`、`jump`、结束时只有一个、多个时的 `preselect` 四种来源；`UseSubject` 关闭旧的 `References` 并发新的，行清空后重新累积；`Enclosing` 的 `NoSymbol` 显示行版本的文案。
   - `append_*`：三批结果依次追加，已有行的下标不变；`generation` 不高的唤醒和旧查询的唤醒被丢弃；`results` 为 None 时重查一次、行保留，第二次记 warn。
   - `status_*`：文件在审阅里且有轮次 → `FileChanged { turn }`；没有轮次 → `FileChanged { turn: None }`；不在审阅里 → `NotUpdated`；没有审阅 → `Unknown` 且没有摘要；`ReviewChanged` 后原地改写、行的位置不变；同名引用不计入摘要；删除的文件按 `FileKey::old` 匹配。
   - `tests_tab_*`：测试路径里的调用方进 `test_calls`；对应的测试文件只列 `FileList` 里存在的；文件列表 `Pending` 时为空、`ProjectChanged` 后补上；依赖里的主题不找测试文件。
   - `history_*`：轮次按叙事顺序、命令数、其他会话数；没有审阅、不在审阅里、`Pending` 三种空状态；找不到的 `TurnRef` 跳过并记 warn。
-  - `worktree_*`：请求的 worktree 不是当前的 → 不查询、显示提示；`SwitchWorktree` 发 `SetActiveWorktree`；`ProjectChanged` 之后自动开始查询。
+  - `worktree_*`：请求的 worktree 不是当前的 → 不查询、`Inspect` 和 `GoTo` 都发 `OpenPanel`、显示提示；`SwitchWorktree` 发 `SetActiveWorktree`；`ProjectChanged` 之后自动开始查询。
   - `panel_close_*`：`LayerChanged(Panel(PANEL), false)` 关闭两个查询、`set_focus(Drawer([]))`、模型回到 `Idle`；别的面板的 `LayerChanged` 不影响。
   - `focus_drawer_*`：Definition 页前 8 行的文件加主题的文件，去重；面板关闭时为空。
   - `prefetch_*`：每个主题只预取一次、只给一个目标；没有 `Reader` 时不预取。
@@ -671,6 +688,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 
 - 调用方的状态是文件级的：与定义在同一个文件里、或在其他被改过的文件里而这一行没有改的调用方，显示「所在文件改过」，不标为未跟着改。行级判断等要求 J。
 - History 是文件级的，列出改过这个文件的全部轮次，不区分是否改到了主题的行；行不可点击。
+- 主题是被删除的定义（Diff 的旧一侧）时，当前文件里还在用它的地方解析不回旧版本的定义，只出现在同名引用组里（默认展开），不计入「未跟着改」。把它们算作没有跟着改的调用方，要 `code_intel` 能对旧版本的定义解析当前文件里的引用，另开 issue。
 - Rust 同文件的 `mod tests` 里的调用不进 Tests 页（按路径识别不了），它们仍在 Callers 页。
 - 结果不完整时不提示（调研「决定」第 4 条）；摘要的措辞只说「找到的」。
 - 从 Files 打开的文件发起的请求没有审阅：没有状态、没有 History。
@@ -693,7 +711,7 @@ workspace ─▶ LayerChanged(Panel(PANEL), open) ─▶ Panel { open } ─▶ �
 
 **第 1 步：插件、控制器、Definition 与 Callers、文件级状态、打开与跳转、快捷键、探针节点（`Refs #20`）。**
 
-- 「测试」里的 `request_*`、`goto_*`、`subject_*`、`append_*`、`status_*`、`worktree_*`、`panel_close_*`、`focus_drawer_*`、`prefetch_*`、`listener_*`，以及 `#[gpui::test]` 的全部用例和 `context_tree_callers`、`context_tree_goto`、`context_tree_failed`、`context_tree_other_worktree` 通过；`logs_hold_no_contents` 覆盖第 1 步的流程并通过。
+- 「测试」里的 `request_*`、`goto_*`、`old_side_*`、`subject_*`、`append_*`、`status_*`、`worktree_*`、`panel_close_*`、`focus_drawer_*`、`prefetch_*`、`listener_*`，以及 `#[gpui::test]` 的全部用例和 `context_tree_callers`、`context_tree_goto`、`context_tree_failed`、`context_tree_other_worktree` 通过；`logs_hold_no_contents` 覆盖第 1 步的流程并通过。
 - `context_drawer/apply_batch` 在预算内。
 - `crates/context_drawer/AGENTS.md` 的设计文档行指向本文（本 PR 已改）。
 
