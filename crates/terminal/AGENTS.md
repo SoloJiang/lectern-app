@@ -3,7 +3,7 @@
 portable-pty + libghostty-vt 的终端状态，运行在独占线程上；会话 resume。
 
 - 层：领域层。可以依赖领域、基础设施和 kernel 层；不得直接或间接依赖 GPUI（架构规则 2）。
-- 设计文档：`docs/design/terminal.md`，尚未编写。先按[模板](../../docs/design/TEMPLATE.md)编写，设计文档 PR 合并后再写代码。
+- 设计文档：[docs/design/terminal.md](../../docs/design/terminal.md)（已接受，尚未实现）。实现按它的「验收」分四步：`services::terminal`、libghostty-vt 接入与网格快照、PTY 与插件（前置：`platform::login_env`）、`app` 装配。构建需要 Zig 0.15.2（设计文档「依赖」）。
 - issue：[#5](https://github.com/SoloJiang/lectern-app/issues/5)、[#12](https://github.com/SoloJiang/lectern-app/issues/12)
 - ADR：[0002](../../docs/adr/0002.md)
 
