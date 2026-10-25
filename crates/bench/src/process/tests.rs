@@ -478,6 +478,60 @@ fn process_busy_restarts_the_settle() {
 }
 
 #[test]
+fn process_busy_before_the_first_epoch_answer_restarts_the_settle() {
+    // The kernel is busy once more after the settle time, and the probe
+    // reports it just before its first `Epoch` answer: the sample still
+    // comes a full settle time after the last `Quiescent`.
+    let last: Arc<Mutex<Option<Instant>>> = Arc::default();
+    let seen = Arc::clone(&last);
+    let fake = Fake::new(move |p| {
+        p.first_frame(start());
+        p.send(&Report::Quiescent { epoch: 2 });
+        let mut epochs = 0;
+        while let Some(request) = p.request() {
+            match request {
+                Request::Epoch => {
+                    epochs += 1;
+                    if epochs == 1 {
+                        p.send(&Report::Busy { epoch: 3 });
+                        *seen.lock().unwrap() = Some(Instant::now());
+                        p.send(&Report::Quiescent { epoch: 4 });
+                    }
+                    p.send(&Report::Epoch(Some(4)));
+                }
+                Request::Quit => return 0,
+                _ => {}
+            }
+        }
+        0
+    });
+    let limits = Limits {
+        settle: ms(100),
+        ..quick()
+    };
+    let scheduler = fake.scheduler(limits);
+    let mut session = scheduler.session(&program(), None).unwrap();
+    let mut samples = 0;
+    let idle = session
+        .idle(|_| {
+            samples += 1;
+            Ok(Instant::now())
+        })
+        .unwrap();
+    let Idle::Sample(sampled) = idle else {
+        panic!("not quiescent");
+    };
+    let last = last.lock().unwrap().unwrap();
+    assert!(
+        sampled.duration_since(last) >= ms(100),
+        "{:?}",
+        sampled.duration_since(last)
+    );
+    assert_eq!(samples, 1);
+    session.quit().unwrap();
+}
+
+#[test]
 fn process_changed_epoch_takes_the_sample_again() {
     // The second `Epoch` comes after the kernel was busy once more.
     let fake = Fake::new(|p| {

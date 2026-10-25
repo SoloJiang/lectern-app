@@ -534,8 +534,9 @@ impl<'a> Session<'a> {
     }
 
     /// An idle sample by the rules of kernel「静止」: after a `Quiescent`,
-    /// [`Limits::settle`] without `Busy` (a `Busy` starts the wait again),
-    /// then `Epoch`, `sample`, `Epoch`. Valid when both answers are the
+    /// [`Limits::settle`] without `Busy` (a `Busy` starts the wait again,
+    /// also one that comes before the first `Epoch` answer), then `Epoch`,
+    /// `sample`, `Epoch`. Valid when both answers are the
     /// same `Some(n)`; otherwise the wait starts again, and the third
     /// invalid sample in a row is an error. No `Quiescent` within
     /// [`Limits::first_quiescent`] of the first frame is
@@ -567,7 +568,13 @@ impl<'a> Session<'a> {
             if !self.calm()? {
                 continue;
             }
+            // A `Busy` while waiting for the first answer means the settle
+            // time no longer holds: wait for it again.
+            let busy = self.busy_count;
             let before = self.epoch()?;
+            if self.busy_count != busy {
+                continue;
+            }
             let value = sample(self)?;
             let after = self.epoch()?;
             if before.is_some() && before == after {
