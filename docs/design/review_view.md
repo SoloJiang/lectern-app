@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步（`app` 装配、`app/open_diff`、帧基准）尚未实现。
+状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配已实现一半：`review-view` 已装配，`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装（[app 设计「review_view 的装配」](app.md#review_view-的装配)）；`app/open_diff`、帧基准尚未实现。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、检查器里的 Progress 列表、底部浮条，以及 J / K / V 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 
@@ -672,6 +672,10 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - 没有验证：真实窗口里双栏的版面（每半宽的裁剪、分隔线、行号栏）、负的 `margin-left` 做的横向偏移在真实字体下的外观、触控板横向抖动、`on_scroll_wheel` 与列表自己的纵向滚动同时存在时的手感；高亮 8 ms 的预算在真实文件上够不够（`#[gpui::test]` 的示例只有 4 行）；`Segmented` 滑块的动画（测试只验证终态）；折叠展开的 `Expander` 动画没有做。以上随第 3 步在 macOS 上手动运行发布构建时检查。
 
 ## 与设计的差异
+
+### 第 3 步
+
+- **`app` 只装 `review-view`。** 前置条件 C 要求两个插件都装；没有插件提供 `dyn Reader`、`dyn CodeIntel`（`file_reader` 还没有插件，`code_intel` 没有装配），`review-view-handoff` 装进去图校验报 `MissingProvider`，所以 `app` 丢掉它。屏幕照常，交接按钮置灰、没有用量行，与它单独停用时相同（`handoff_plugin_deactivates_on_its_own`）。
 
 ### 第 2 步
 

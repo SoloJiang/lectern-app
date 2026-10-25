@@ -140,8 +140,14 @@ fn startup_writes_a_header_and_an_end_record() {
     assert_eq!(records[initialised]["accent"], "builtin", "{records:#?}");
     assert_eq!(records[ready]["accent"], "system", "{records:#?}");
     // project, two session sources, review, usage, workspace, welcome,
-    // welcome-discovery, project-home, project-home-usage.
-    assert_eq!(records[assembled]["plugins"], 10);
+    // welcome-discovery, project-home, project-home-usage, review-view.
+    assert_eq!(records[assembled]["plugins"], 11);
+    // Nothing of the review screen runs before the first frame
+    // (docs/design/review_view.md「验收」第 3 步).
+    assert!(
+        records[..drawn].iter().all(|r| r["tg"] != "review_view"),
+        "{records:#?}"
+    );
     assert_eq!(records[released]["profile"], "desktop");
     let quit = position(&records, "quit requested");
     assert_eq!(records[quit]["path"], "action");

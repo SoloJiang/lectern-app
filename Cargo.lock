@@ -4334,6 +4334,7 @@ dependencies = [
  "lectern-project",
  "lectern-project-home",
  "lectern-review",
+ "lectern-review-view",
  "lectern-services",
  "lectern-ui",
  "lectern-ui-probe",
