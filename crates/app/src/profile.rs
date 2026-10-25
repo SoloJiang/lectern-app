@@ -27,6 +27,11 @@ pub enum Profile {
     /// `#[gpui::test]`: no real frames, so the barrier is released as soon as
     /// the window exists.
     Test,
+    /// What `desktop` runs, plus the UI probe after the barrier: chosen by
+    /// `run` when `LECTERN_UI_PROBE_DIR` is set
+    /// (docs/design/ui_probe.md「对其他 crate 的要求」).
+    #[cfg(feature = "ui-probe")]
+    Probe,
 }
 
 /// The process-wide resources `release` creates and hands to the profile
@@ -49,7 +54,23 @@ pub struct Resources {
 
 impl Profile {
     #[cfg(test)]
-    pub const ALL: [Profile; 2] = [Profile::Desktop, Profile::Test];
+    pub const ALL: &[Profile] = &[
+        Profile::Desktop,
+        Profile::Test,
+        #[cfg(feature = "ui-probe")]
+        Profile::Probe,
+    ];
+
+    /// Whether the run has a real window with real frames: the barrier is
+    /// armed on its first render and the window gets a frame autosave name.
+    pub fn has_real_window(self) -> bool {
+        match self {
+            Profile::Desktop => true,
+            Profile::Test => false,
+            #[cfg(feature = "ui-probe")]
+            Profile::Probe => true,
+        }
+    }
 
     /// Desktop: `project`, the two session sources, `review`, `usage`,
     /// `workspace`, `welcome`, `welcome-discovery`, `project-home` and
@@ -59,6 +80,8 @@ impl Profile {
     pub fn plugins(self, resources: &Resources) -> (PluginSet, usize) {
         match self {
             Profile::Desktop => desktop(resources),
+            #[cfg(feature = "ui-probe")]
+            Profile::Probe => desktop(resources),
             Profile::Test => (PluginSet::new(), 0),
         }
     }
@@ -154,6 +177,8 @@ impl Field for Profile {
         Value::text(match self {
             Profile::Desktop => "desktop",
             Profile::Test => "test",
+            #[cfg(feature = "ui-probe")]
+            Profile::Probe => "probe",
         })
     }
 }

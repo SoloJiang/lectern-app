@@ -4,6 +4,8 @@
 mod args;
 mod leave;
 mod logs;
+#[cfg(feature = "ui-probe")]
+mod probe;
 mod profile;
 mod quit;
 mod startup;

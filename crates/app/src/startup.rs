@@ -20,6 +20,9 @@ use crate::window_state::{self, WindowStateLink};
 pub struct Startup {
     early: Option<Early>,
     profile: Profile,
+    /// The probe directory, set with `Profile::Probe`.
+    #[cfg(feature = "ui-probe")]
+    probe_dir: Option<PathBuf>,
 }
 
 impl Global for Startup {}
@@ -37,6 +40,10 @@ pub struct Started {
     pub watcher: Option<Watcher>,
     /// The workspace in the window; None when no plugins were assembled.
     pub shell: Option<Shell>,
+    /// The probe session of the probe profile; None when it did not start.
+    /// `Quit` shuts it down before the kernel.
+    #[cfg(feature = "ui-probe")]
+    pub probe: Option<Arc<lectern_ui_probe::server::Probe>>,
 }
 
 impl Global for Started {}
@@ -54,7 +61,17 @@ impl Startup {
         Startup {
             early: Some(early),
             profile,
+            #[cfg(feature = "ui-probe")]
+            probe_dir: None,
         }
+    }
+
+    /// The probe profile with the session in `dir`.
+    #[cfg(feature = "ui-probe")]
+    pub fn probe(mut self, dir: PathBuf) -> Startup {
+        self.profile = Profile::Probe;
+        self.probe_dir = Some(dir);
+        self
     }
 
     pub fn profile(&self) -> Profile {
@@ -83,6 +100,8 @@ pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
         return;
     };
     let profile = startup.profile;
+    #[cfg(feature = "ui-probe")]
+    let probe_dir = startup.probe_dir.clone();
     let Some(early) = cx.global_mut::<Startup>().early.take() else {
         return;
     };
@@ -105,6 +124,10 @@ pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
         window_state::restore(dir, &executor, shell.host.clone());
     }
     info!("startup barrier released"; profile = profile);
+    // The end of the barrier, behind the kernel: nothing of the session ran
+    // before the first frame.
+    #[cfg(feature = "ui-probe")]
+    let probe = crate::probe::start(probe_dir, cx);
     cx.set_global(Started {
         logging,
         executor,
@@ -112,6 +135,8 @@ pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
         cache: assembled.cache,
         watcher: assembled.watcher,
         shell: assembled.shell,
+        #[cfg(feature = "ui-probe")]
+        probe,
     });
 }
 

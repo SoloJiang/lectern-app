@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）已实现。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -20,7 +20,7 @@
 - 本 issue 之外：
   - 按 profile 装配具体的插件，创建 `Cache` 和 `fs_watch` 并传给插件：第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，「装配」）。`usage`、`code_intel` 等其余插件在各自的前置条件完成后加入。
   - 窗口快照的读取与恢复、窗口位置的 frame autosave：随 [#30](https://github.com/SoloJiang/lectern-app/issues/30)。
-  - headless profile、`bench-probe` feature、`Driver`、把应用数据目录指到临时目录：随 [bench 设计](bench.md)第 5 步（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）。probe profile（`ui-probe` feature，UI 探针）：随 [ui_probe 设计「对其他 crate 的要求」](ui_probe.md#对其他-crate-的要求)第 3 项（[#6](https://github.com/SoloJiang/lectern-app/issues/6)）。
+  - headless profile、`bench-probe` feature、`Driver`、把应用数据目录指到临时目录：随 [bench 设计](bench.md)第 5 步（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）。probe profile（`ui-probe` feature，UI 探针）：见「ui_probe 的装配」（[ui_probe 设计「对其他 crate 的要求」](ui_probe.md#对其他-crate-的要求)第 3 项，[#6](https://github.com/SoloJiang/lectern-app/issues/6)）。
   - 写盘线程和批量线程的 utility QoS：`platform` 提供设置 QoS 的接口之后，`app` 经 `Config::on_writer_start` 和 `executor::Config::on_thread_start` 传入。在此之前两者都是 `None`，线程用默认 QoS（logging 设计已允许）。
   - 详细日志的开关和导出界面：logging 第 12 项。
   - 离开守卫（有未保存的编辑时先询问）：随 [file_reader 设计「编辑」](file_reader.md#编辑)接入。本 issue 的 `Quit` 不询问。
@@ -80,6 +80,7 @@ pub enum Profile {
     Desktop,
     /// `#[gpui::test]` 用：没有真实的帧，屏障在窗口建好后立即放开。
     Test,
+    // `Probe`（`#[cfg(feature = "ui-probe")]`）：插件与 `Desktop` 相同，多一个 UI 探针，见「ui_probe 的装配」。
 }
 
 impl Profile {
@@ -449,6 +450,18 @@ target 为 `app`。
 - `tests/startup.rs`：`startup_writes_a_header_and_an_end_record` 的 `plugins` 为 10。
 - 手动（welcome 设计「验收」第 2 步）：首次启动显示 Welcome，见「实际验证」。
 
+## ui_probe 的装配
+
+[#6](https://github.com/SoloJiang/lectern-app/issues/6)，[ui_probe 设计「对其他 crate 的要求」](ui_probe.md#对其他-crate-的要求)第 3 项。只在 `ui-probe` feature 下编译。
+
+- **feature。** `ui-probe`（不在 `default` 里）打开可选依赖 `lectern-ui-probe`。`just check`、`just test` 带 `--all-features`，所以会编译和检查这条路径；不带 feature 的 `cargo build -p lectern-app` 不含探针（`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 里没有 `lectern-ui-probe`，也没有 `"test-support"`）。
+- **`Profile::Probe`。** 插件集合与 desktop 相同（10 个），启动屏障、frame autosave 名也相同（`Profile::has_real_window`）。`run` 在首帧之前只读环境变量 `LECTERN_UI_PROBE_DIR`（`std::env::var_os`，内存操作，不读文件；空值当作没有设置）：设置了就是 `Probe`，`Startup::probe(dir)` 存下目录；否则是 `Desktop`。
+- **启动。** `startup::release_in` 在 `Kernel::start` 之后、`Started` 设好之前调用 `Probe::start(cx, Config::new(dir))`（主线程，不阻塞）；失败时记 warn `probe start failed`（`reason`：`dir-not-private`、`bind`、`thread`；`error` 有 IO 错误时带，没有路径），应用照常运行。首帧之前没有探针的代码运行：不检查目录、不建线程、不 bind。
+- **退出。** `Started::probe: Option<Arc<Probe>>`。`lectern-quit` 线程的第一步（`QuitSteps::kernel` 的实现）先 `Probe::shutdown`（不阻塞，删除 `probe.sock`），再 `Kernel::shutdown`；`quit` 请求靠名字 `lectern::Quit` 分发 `quit.rs` 里的 `Quit` Action，与 ⌘Q 同一条路径。
+- **`just probe`。** 构建带 `ui-probe` 的调试版，`mktemp -d` 建探针目录（0700），临时 `HOME` 在其下的 `home/`，去掉 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、`LECTERN_LOG`，后台启动并打印 `export LECTERN_UI_PROBE_DIR=…` 与 pid；不读真实的 `HOME`。
+- **日志。** `probe start failed`（target `app`）；`probe listening`、`probe stopped` 等由 `ui_probe` 写（target `ui_probe`）。`plugins assembled` 的 `profile` 字段在 probe profile 里是 `probe`。
+- **测试。** `src/tests/probe.rs`（`#[gpui::test]`）：`probe::start` 对没有目录、不存在的目录（记 `dir-not-private`，路径不在日志里）、私有目录（`probe.sock` 存在，`shutdown` 后消失）；`every_profile_graph_validates` 对 `Profile::Probe`；`tests/probe.rs`（真实进程，需要图形会话，与 `tests/startup.rs` 相同）。
+
 ## 性能
 
 - 冷启动：首帧之前只有「启动顺序」的第 1–6 步。新增的工作是参数解析（几个字符串比较）、`install_early`（预算 ≤ 20 µs，`log/install_early`）、语言协商（常数级的内存操作）和 `lectern_ui::init`（预算 ≤ 300 µs，`ui/init`：一次减弱动态效果的读取、两份内置表、登记通知；不读系统色，[ui 设计「性能」](ui.md#性能)），加上骨架窗口的 `lectern_ui::attach`（登记一个外观观察者），合计远小于 20 ms 预算的 1%。首帧之前不建线程、不读写 Lectern 自己的文件、不调用 kernel 和 executor、不运行 `gpui_component::init`（ADR 0017）。
@@ -609,6 +622,12 @@ target 为 `app`。
 - `just check`、`just deny` 通过；`rg 'eprintln!|println!|log::|log_err|warn_on_err' crates/app/src crates/app/tests` 没有结果。
 - `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup)'`：`every_profile_graph_validates` 的 desktop 插件数为 10，图校验通过，临时目录之后仍是空的。
 - `tests/startup.rs` 没有在本机运行（图形会话锁屏，屏障不放开，「已知限制」）；它的 `plugins` 改为 10，结果以 macOS CI 为准。发布构建（临时 `HOME`）的手动运行（首次启动显示 Welcome）、冷启动、空闲内存都没有做，解锁后按「装配」「性能」的方法补测，写进这里。
+
+`ui_probe` 的装配（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，叠在 `welcome` 的装配之上，同一台机器；完整的数字和没有做的项在 [ui_probe 设计「实际验证」](ui_probe.md#实际验证)第 4 步）：
+
+- `just check`、`just deny` 通过；`rg 'eprintln!|println!|log::|log_err|warn_on_err' crates/app/src crates/app/tests` 没有结果。
+- `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup) and not binary(probe)'` 通过（含 `Profile::Probe` 的图校验和 `src/tests/probe.rs`）；`cargo tree` 的发布构建检查没有 `lectern-ui-probe`。
+- `tests/probe.rs` 和 `tests/startup.rs` 没有在本机运行（图形会话锁屏，屏障不放开，「已知限制」），结果以 macOS CI 为准。`just probe` 起得来，锁屏下探针目录里没有 `probe.sock`（屏障未放开，探针没有启动）。
 
 ## 与设计的差异
 

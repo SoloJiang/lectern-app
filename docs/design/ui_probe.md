@@ -1,6 +1,6 @@
 # ui_probe 设计
 
-状态：实现中。第 3 步（`ui_probe` crate：协议、`tree`、`annotate`、`server`、`client`、`lectern-probe`）已实现（[#249](https://github.com/SoloJiang/lectern-app/pull/249)）；第 4 步（`app` 的 probe profile、`justfile` 的 `probe` 配方、端到端测试）尚未实现。
+状态：实现中。第 3 步（`ui_probe` crate：协议、`tree`、`annotate`、`server`、`client`、`lectern-probe`）已实现（[#249](https://github.com/SoloJiang/lectern-app/pull/249)）；第 4 步（`app` 的 probe profile、`justfile` 的 `probe` 配方、端到端测试）已实现（`Refs #6`，[#252](https://github.com/SoloJiang/lectern-app/pull/252)，叠在 [#251](https://github.com/SoloJiang/lectern-app/pull/251) 之上）；真实窗口里的验收项（`tests/probe.rs`、`just probe` 的截图、`just bench app/`）本机锁屏没有做，在 macOS CI 与解锁后验证，之后 #6 才能关闭，见「实际验证」「与设计的差异」。
 
 对应 issue [#6](https://github.com/SoloJiang/lectern-app/issues/6)。`ui_probe` 是 agent 读取运行中的 Lectern 的入口：把窗口里的语义树导出成 JSON（`ui_tree`），把窗口画成带节点编号的 PNG（`screenshot`），让 agent 不必从像素推断界面结构（[技术调研「UI 结构探针」](tech-research.md#6-ui-结构探针)）。它是 tool 层 crate，只在 probe profile 里运行，不进入发布构建（[cargo-workspace 设计](cargo-workspace.md)、[CI「架构规则检查」](ci.md#架构规则检查)第 2 条）。
 
@@ -445,7 +445,7 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
    - Cargo feature `ui-probe`（不在 `default` 里），打开可选依赖 `lectern-ui-probe`（架构规则 2 允许的形式）。`just check`、`just test` 用 `--all-features`，所以它们编译并检查这条路径；不带 feature 的 `cargo build -p lectern-app` 不含探针。`crates/app/AGENTS.md` 的措辞已随本文改为「只在 `ui-probe` feature 下编译，`just` 的入口打开这个 feature；运行时只在 probe profile 里启动」。
    - `Profile::Probe`（`#[cfg(feature = "ui-probe")]`）：插件集合与 desktop 相同，启动屏障与 desktop 相同，多一个探针。`run` 在首帧之前只读环境变量 `LECTERN_UI_PROBE_DIR`（与 bench 的 `LECTERN_BENCH_SOCKET` 做法相同，不读文件）：设置了就是 `Probe`，否则是 `Desktop`。`startup::release` 的末尾、`Kernel::start` 之后调用 `Probe::start`；失败记 warn `probe start failed`。`Started` 持有 `Option<Probe>`。
    - 退出顺序：`lectern-quit` 线程先 `Probe::shutdown`，再 `Kernel::shutdown`。`quit` 请求经 `Quit` Action，与 ⌘Q 相同。
-   - 集成测试 `crates/app/tests/probe.rs`（`#[cfg(feature = "ui-probe")]`，与 `tests/startup.rs` 同一套启动方式）：新建临时目录，`home/` 作 `HOME`、`probe/`（0700）作 `LECTERN_UI_PROBE_DIR`，去掉 `CLAUDE_CONFIG_DIR` 与 `CODEX_HOME`，启动 `CARGO_BIN_EXE_lectern`；用 `client::Client` 轮询连接（最多 10 s）；`hello` 的 `windows` 有一个；`ui_tree` 的根节点角色是 `window`（骨架没有语义节点，`nodes` 长度为 1）；`screenshot` 的文件存在、能解码、尺寸等于 `size × scale`；`quit` 后进程在 30 s 内退出，日志里有 `probe listening`、`probe stopped`，没有临时目录的路径以外的内容字符串（金丝雀放在 `name`）。
+   - 集成测试 `crates/app/tests/probe.rs`（`#[cfg(feature = "ui-probe")]`，与 `tests/startup.rs` 同一套启动方式）：新建临时目录，`home/` 作 `HOME`、`probe/`（0700）作 `LECTERN_UI_PROBE_DIR`，去掉 `CLAUDE_CONFIG_DIR` 与 `CODEX_HOME`，启动 `CARGO_BIN_EXE_lectern`；用 `client::Client` 轮询连接（最多 10 s）；`hello` 的 `windows` 有一个；`ui_tree` 的根节点角色是 `window`（`welcome` 装配之后窗口里不止骨架，`nodes` 的长度不断言，见「与设计的差异」第 4 步）；`screenshot` 的文件存在、能解码、尺寸等于 `size × scale`；`quit` 后进程在 30 s 内退出，日志里有 `probe listening`、`probe stopped`，没有临时目录的路径以外的内容字符串（金丝雀放在 `name`）。
    - `justfile` 加 `probe` 配方：`cargo build --locked -p lectern-app --features ui-probe`，`mktemp -d` 建会话目录，按上面的环境变量在后台启动 `lectern`，打印 `export LECTERN_UI_PROBE_DIR=…` 和 pid。agent 之后用 `cargo run -p lectern-ui-probe --bin lectern-probe -- ui_tree` 等命令读取，最后 `lectern-probe quit`。配方不读真实的 `HOME`。
 4. **CI**：无新任务。macOS 任务的 `just test` 已带 `--all-features`，会跑 `tests/probe.rs`；它需要图形会话，与 `tests/startup.rs` 相同。
 
@@ -492,6 +492,19 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 - `quit` 经 `app` 真实的 `Quit` Action 退出整个进程；`Quit` 的名字 `lectern::Quit` 只对照了 `app/src/quit.rs` 的 `actions!(lectern, [Quit])`，没有在 `app` 里跑过。
 - `LECTERN_UI_PROBE_DIR`、`Profile::Probe`、`justfile` 的 `probe` 配方、`tests/probe.rs`、`just bench app/` 不变：第 4 步。
 
+第 4 步（`app`，叠在 `app: assemble welcome` 之上，同一台机器，本机屏幕锁定）：
+
+- `just check`、`just deny` 通过；`python3 scripts/check_architecture.py` 通过（`lectern-app` 通过可选依赖 `ui-probe` 依赖本 crate）；`rg 'eprintln!|println!|log::|log_err|warn_on_err' crates/app/src crates/app/tests` 没有结果。
+- `cargo nextest run --locked -p lectern-app --all-features -E 'not binary(startup) and not binary(probe)'`：`src/tests/probe.rs` 的 3 个测试（没有目录不启动；不存在的目录记 `probe start failed`，`reason` 为 `dir-not-private`，路径不在日志里；私有目录下 `probe.sock` 存在，`shutdown` 之后立即消失）和 `src/probe.rs` 的 `the_variable_names_the_probe_directory` 通过；`every_profile_graph_validates` 对 `Profile::Probe` 同样得到 10 个插件，图校验通过。
+- `cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-ui-probe`，也没有 `"test-support"`；`cargo tree --locked -p lectern-app --features ui-probe --edges normal` 里有 `lectern-ui-probe`。`cargo build --locked -p lectern-app` 与 `cargo build --locked -p lectern-app --features ui-probe` 都成功。`git diff -- Cargo.lock` 只加了 `lectern-app` 的两条依赖边（`image`（dev）、`lectern-ui-probe`），没有新的 package。
+- `just probe`：构建成功，打印 `export LECTERN_UI_PROBE_DIR=…` 和 pid，进程存活；因为屏幕锁定，屏障不放开，等了 3 s 探针目录里仍只有 `home/` 和 `lectern.out`（没有 `probe.sock`，临时 `HOME` 下没有日志文件）：首帧之前探针什么也没有做。结束后杀掉进程、删除目录。
+
+没有验证（本机锁屏）：
+
+- `tests/probe.rs`（`hello` → `ui_tree` → `screenshot` → `quit`，真实进程、真实窗口）没有运行，结果以 macOS CI 为准；`startup` 的测试同样。
+- `just probe` 之后的 `lectern-probe screenshot` 返回的 PNG 不是单一颜色、`quit` 后进程退出、`just bench app/` 的 `app/cold_start`、`app/idle_empty` 与改动前相比不变：没有做。第 3 步没有验证的部分（真实窗口的 `render_to_image`、真实帧循环里两个 `on_next_frame` 的先后、`lectern::Quit` 经 `app` 退出）也都在这几项里，解锁后补测。
+- 系统发起的退出不经 `Quit`，不会 `shutdown` 探针：`probe.sock` 留在探针目录里，下一次 `start` 先删除再 bind。
+
 ## 与设计的差异
 
 第 3 步：
@@ -510,3 +523,14 @@ GPUI 在每次帧请求的开头先执行上一帧登记的 `on_next_frame` 回�
 - `#[gpui::test]` 里 GPUI 的测试上下文在一次 `update` 结束时会画脏窗口，所以 `capture` 第一个回调（`refresh`）之后不需要、也不能再手动 `draw`（那样记录会出现两遍）；整条会话的测试要 `cx.executor().allow_parking()`，因为连接线程从自己的线程唤醒前台任务。
 
 `app` 的接入（第 4 步，本 PR 不含）：`Cargo.toml` 的可选依赖与 `ui-probe` feature、`Profile::Probe`、`startup::release` 末尾的 `Probe::start(cx, Config::new(dir))`（失败记 warn `probe start failed`，`reason` 取 `StartError::reason()`，`error` 取 `StartError::io()`）、`quit` 线程里先 `Probe::shutdown`、`tests/probe.rs`、`justfile` 的 `probe` 配方，见「对其他 crate 的要求」第 3 项。
+
+第 4 步：
+
+- **探针的启动位置。** 设计写「`startup::release` 的末尾、`Kernel::start` 之后」：实现里在 `info!("startup barrier released")` 之后、`Started` 全局设好之前调用 `Probe::start`，因为 `Started::probe` 要放进同一个全局对象。顺序上仍在 `Kernel::start` 之后、首帧之后。
+- **`Started::probe` 是 `Option<Arc<Probe>>`。** `Started` 是 `Clone`（退出线程拿一份副本），`Probe` 不是。
+- **退出顺序里的 `shutdown` 在 `QuitSteps::kernel` 里。** 设计写 `lectern-quit` 线程「先 `Probe::shutdown`，再 `Kernel::shutdown`」；`run` 的步骤没有为它多开一步，`Started` 的 `kernel` 实现先调 `Probe::shutdown`（不阻塞）再 `Kernel::shutdown`，`QuitSteps` 的假实现和 `run` 的顺序测试不变。
+- **`Profile::has_real_window`。** probe profile 与 desktop 一样有真实窗口，要挂启动屏障、设 frame autosave 名；`window.rs` 里原来写死 `Profile::Desktop` 的两处改成问这个方法。`Profile::ALL`（测试用）成了切片，带 feature 时多一项 `Probe`。
+- **环境变量由 `Startup::probe` 带进来。** `run` 在首帧之前只读 `LECTERN_UI_PROBE_DIR`（空值当作没有设置），`Startup` 把目录存下，`release_in` 取用；不是绝对路径或不是私有目录时 `Probe::start` 返回 `DirNotPrivate`，记 `probe start failed`（`reason`，有 IO 错误时带 `error`，没有路径）。
+- **`tests/probe.rs` 不断言 `nodes` 的长度。** 设计写骨架没有语义节点、`nodes` 长度为 1；`welcome` 装配之后，屏障放开后窗口里会出现 Welcome 的节点，长度取决于探针连上的时刻。测试只断言根节点是 `window`，并重复截图直到 PNG 不是单一颜色（最多 10 s）。
+- **`tests/probe.rs` 不断言 `probe stopped`。** 设计写日志里有 `probe listening`、`probe stopped`；后者由 `shutdown` 唤醒的监听线程写，这个线程不被 join，退出线程的日志刷出可能先于它，断言会偶发失败。测试只要求 `probe listening` 在、`name` 的金丝雀不在。
+- **`just probe` 的目标目录来自 `cargo metadata`**，不假设 `target/`；进程用 `nohup` 起、标准输出写到探针目录里的 `lectern.out`，另外去掉 `LECTERN_LOG`。

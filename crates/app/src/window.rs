@@ -40,7 +40,10 @@ impl Render for Skeleton {
         }
         if !self.armed {
             self.armed = true;
-            if cx.try_global::<Startup>().map(Startup::profile) == Some(Profile::Desktop) {
+            if cx
+                .try_global::<Startup>()
+                .is_some_and(|s| s.profile().has_real_window())
+            {
                 startup::arm(window);
             }
         }
@@ -59,7 +62,9 @@ pub fn open(cx: &mut App) {
 /// 的要求」D). A Dock reopen with a project open passes `project`. Main
 /// thread. None when the window could not be opened.
 pub fn open_named(cx: &mut App, frame: &'static str) -> Option<AnyWindowHandle> {
-    let desktop = cx.try_global::<Startup>().map(Startup::profile) == Some(Profile::Desktop);
+    let desktop = cx
+        .try_global::<Startup>()
+        .is_some_and(|s| s.profile().has_real_window());
     let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
