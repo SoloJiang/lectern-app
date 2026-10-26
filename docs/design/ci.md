@@ -29,7 +29,9 @@
 - `runs-on: [self-hosted, macOS, ARM64, lectern-judge]`，`timeout-minutes: 60`。
 - `permissions: contents: read`，不引用 secret。action 固定到提交的 SHA，行尾注释写版本（`actions/checkout` v4.4.0、`actions/upload-artifact` v4.6.2）；升级时 SHA 和注释一起改。
 - 不下载工具：`RUSTUP_HOME=/opt/lectern-judge/rustup`、`RUSTUP_AUTO_INSTALL=0`，`PATH` 前面加 `/opt/lectern-judge/cargo/bin`，这些目录专用用户只能读（下面第 6 步）。第一步把 `HOME`、`CARGO_HOME`、`TMPDIR` 设到 `RUNNER_TEMP` 下，GitHub 在每个任务开始和结束时清空它。检查工具的一步只运行 `rustc`、`just`、`xcrun metal` 的 `--version`，缺了就失败。依赖的 crate 按 `Cargo.lock` 下载到这个任务的 `CARGO_HOME`。
-- checkout 带 `persist-credentials: false` 和 `clean: true`（开始时 `git clean -ffdx`）。最后一步（`if: always()`）结束命令行以本任务 `target/` 开头的进程，再清一次工作区：bench 自己会结束测量的进程组，这一步处理被取消的运行留下的进程。没有 `rust-cache`，构建产物不跨任务保留，每次从头构建 release。
+- checkout 带 `persist-credentials: false` 和 `clean: true`（开始时 `git clean -ffdx`）。没有 `rust-cache`，构建产物不跨任务保留，每次从头构建 release。
+- 任务启动的进程按进程 ID 结束，不按名字或路径：第一步在任务启动任何进程之前，把专用用户的全部 PID 写进 `RUNNER_TEMP/pids-at-start`。最后一步（`if: always()`）列出专用用户现在的进程，结束不在那份列表里的每一个（`kill -9`），只留下这一步的 shell、它的祖先（runner 自己）和它的子进程（列进程用的命令）；最多 5 轮，每轮之间等 1 秒，结束期间又 fork 出来的进程在下一轮结束。改了名字、换了路径、离开了进程组或会话、被 launchd 收养的进程都在其中。然后再清一次工作区。bench 自己会结束测量的进程组，这一步处理被取消的运行和别的原因留下的进程。
+- 这一步也会结束任务期间按需启动的、属于专用用户的系统代理（如图形会话的 XPC 服务）。launchd 在需要时重新启动它们，判定不受影响。任务开始之前已经在运行的进程不在它的范围里：清理没有运行过的任务（runner 进程被结束、机器断电，或者误批的、没有这一步的工作流）留下的进程，要靠第 11 步的定期重建和重启机器结束（ADR 0052「已知限制」）。
 - 环境变量 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`（过滤按子串匹配，后者也选中 `app/cold_start_purged`），上传 `report.json`（`lectern-bench-judge-report`）。
 
 准备机器（产品负责人或仓库管理员，按顺序；第 8 步的第二条命令要等 bench 第 4 步合并）：
@@ -64,7 +66,7 @@
 
 9. 设置仓库变量：`gh variable set LECTERN_JUDGE_RUNNER --body true --repo SoloJiang/lectern-app`（或 Settings → Secrets and variables → Actions → Variables）。之后每次 push 到 `main` 都运行判定任务。
 10. 手动判定一个分支：有写权限的人读过它的 diff 之后，运行 `gh workflow run ci.yml --ref <分支> --repo SoloJiang/lectern-app`（整个 CI 在这个分支上运行一次）。只用于本仓库的分支。改动首帧之前的代码的 PR，合并之前做一次。
-11. 定期重建：每月一次，或某次运行可疑时，在 Runners 页上删除这台 runner，在系统设置 → 用户与群组里删除专用用户和它的主目录，再按第 3–8 步重建。专用用户的主目录不跨任务信任：任务能按绝对路径写它。
+11. 定期重建：每月一次，或某次运行可疑时，在 Runners 页上删除这台 runner，在系统设置 → 用户与群组里删除专用用户和它的主目录，重启机器，再按第 3–8 步重建。专用用户的主目录不跨任务信任：任务能按绝对路径写它，也能留下在任务开始之前就在运行、因而不被清理的进程。
 
 运行中：判定任务失败时（在 `main` 上），修复或回退那次合并。机器离线时 `main` 上的判定任务排队，不阻止合并；把变量改为 `false` 停止排队，这期间冷启动没有判定。
 
@@ -150,7 +152,10 @@ macOS 基准拆成单独的任务（[ADR 0036](../adr/0036.md)，`Refs #7`）：
 - `ruby -ryaml` 读 `ci.yml` 通过，`judge` 任务的 `if`、`runs-on`、`permissions`、`env` 和步骤顺序与「判定机器」一致。本机没有 actionlint，`ci.yml` 的其余检查由 GitHub 在推送时做。
 - 两个 action 的 SHA 由 `gh api repos/<action>/commits/<标签>` 取得：`actions/checkout` v4.4.0（2026-07-20 发布）是 `11d5960a326750d5838078e36cf38b85af677262`，`actions/upload-artifact` v4.6.2 是 `ea165f8d65b6e75b540449e92b4886f43607fa02`。
 - 本机（Apple M5 Pro，macOS 27.0.1）上，`HOME`、`TMPDIR` 换成空的临时目录之后，`xcrun metal --version` 和编译一个 `.metal` 文件都成功，两个目录里没有留下文件：Metal 工具链在系统的 cryptex 里（`/var/run/com.apple.security.cryptexd/mnt/…/Metal.xctoolchain`），不在用户的主目录下。
-- 没有验证的：任务本身没有运行过，runner 注册之后第一次运行才知道；仓库变量设为 `true` 之前任务跳过。工具链在只读的 `RUSTUP_HOME` 下、`CARGO_HOME` 在每个任务的目录里时能否构建，由第 8 步的检查在那台机器上确认。fork PR 的批准设置、协作者和机器的准备由产品负责人或仓库管理员做（「判定机器」）。
+- 结束进程的一步，在本机上：
+  - 它的 awk 程序（从 `ci.yml` 里取出，与测试的那份逐行相同）用合成的进程表检查：runner 的祖先、任务开始之前的进程、这一步的子进程和孙进程都留下；被 launchd 收养的、它的子进程、任务开始之前就有的进程新启动的子进程、`ppid` 指向自己和互相指向的进程都列出；任务开始时的列表为空时也成立。
+  - 用真实的进程：先运行第一步里写 PID 列表的那一行，再启动 4 个测试进程（改名为 `Dock` 并被 launchd 收养的、另一个进程组里的父子两个、`setsid` 进入新会话的），然后运行 `ci.yml` 里的最后一步，`kill`、`git`、`sleep` 换成只打印的函数。4 个都在第一轮列出；这一步的 shell 和它的祖先都不在列表里。第一轮另列出 18 个这期间本机别的程序（同时运行的其他构建和会话）启动的进程，在专用用户的任务里这类进程也会被结束。没有第一步的列表时，这一步打印警告、不结束进程，照常清理工作区。
+- 没有验证的：任务本身没有运行过，runner 注册之后第一次运行才知道；仓库变量设为 `true` 之前任务跳过。工具链在只读的 `RUSTUP_HOME` 下、`CARGO_HOME` 在每个任务的目录里时能否构建，由第 8 步的检查在那台机器上确认。结束进程的一步在判定机器的图形会话里结束系统代理的实际影响，由第一次运行确认。fork PR 的批准设置、协作者和机器的准备由产品负责人或仓库管理员做（「判定机器」）。
 
 ## 与设计的差异
 

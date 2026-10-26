@@ -123,8 +123,8 @@ jobs:
   # variable says the runner is registered. It fetches no tools (the
   # toolchain and just are installed read-only on the machine), keeps its
   # homes and temporary files under RUNNER_TEMP, has a read-only token and
-  # no secrets, pins its actions to commits, and cleans the workspace
-  # before and after.
+  # no secrets, pins its actions to commits, cleans the workspace before
+  # and after, and at the end ends every process it started.
   judge:
     name: Judge (physical Mac)
     if: >-
@@ -138,9 +138,11 @@ jobs:
       RUSTUP_HOME: /opt/lectern-judge/rustup
       RUSTUP_AUTO_INSTALL: '0'
     steps:
-      # RUNNER_TEMP is emptied at the start and end of each job.
+      # RUNNER_TEMP is emptied at the start and end of each job. The list of
+      # this user's processes before the job starts any is for the last step.
       - name: Use per-job homes and the read-only tools
         run: |
+          ps -U "$(id -u)" -o pid= > "$RUNNER_TEMP/pids-at-start"
           mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/cargo" "$RUNNER_TEMP/tmp"
           {
             echo "HOME=$RUNNER_TEMP/home"
@@ -169,11 +171,40 @@ jobs:
           name: lectern-bench-judge-report
           path: target/lectern-bench/report.json
           if-no-files-found: warn
-      # The bench ends each measured process group itself; this also ends
-      # one that a cancelled run left behind. It matches only programs
-      # started from this job's build output.
-      - name: Clean the workspace
+      # Ends every process of this user that the job started and that still
+      # runs, chosen by process ID, not by name or path: each one that is not
+      # in the first step's list, except this step's shell, its ancestors
+      # (the runner) and its children. A process that already ran before the
+      # job is out of reach (ADR 0052, known limitations). More rounds catch
+      # one that forks while the others are ended.
+      - name: End the job's processes and clean the workspace
         if: always()
         run: |
-          pkill -U "$(id -u)" -f "^$GITHUB_WORKSPACE/target/" || true
+          start="$RUNNER_TEMP/pids-at-start"
+          now="$RUNNER_TEMP/pids-now"
+          if [ ! -f "$start" ]; then
+            echo "::warning::No list of processes from the first step: none ended"
+          else
+            for round in 1 2 3 4 5; do
+              ps -U "$(id -u)" -o pid=,ppid= > "$now"
+              left=$(awk -v me=$$ '
+                FILENAME == ARGV[1] { before[$1]; next }
+                { parent[$1] = $2; pids[++n] = $1 }
+                END {
+                  for (q = me; (q in parent) && h++ < 64; q = parent[q]) keep[q]
+                  for (i = 1; i <= n; i++) {
+                    p = pids[i]
+                    if ((p in before) || (p in keep)) continue
+                    mine = 0; h = 0
+                    for (q = parent[p]; (q in parent) && h++ < 64; q = parent[q])
+                      if (q == me) { mine = 1; break }
+                    if (!mine) print p
+                  }
+                }' "$start" "$now")
+              if [ -z "$left" ]; then break; fi
+              echo "Round $round ends:" $left
+              kill -9 $left 2>/dev/null || true
+              sleep 1
+            done
+          fi
           git clean -ffdx && git reset --hard
