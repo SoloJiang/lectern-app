@@ -30,8 +30,8 @@
 - `permissions: contents: read`，不引用 secret。action 固定到提交的 SHA，行尾注释写版本（`actions/checkout` v4.4.0、`actions/upload-artifact` v4.6.2）；升级时 SHA 和注释一起改。
 - 不下载工具：`RUSTUP_HOME=/opt/lectern-judge/rustup`、`RUSTUP_AUTO_INSTALL=0`，`PATH` 前面加 `/opt/lectern-judge/cargo/bin`，这些目录专用用户只能读（下面第 6 步）。第一步把 `HOME`、`CARGO_HOME`、`TMPDIR` 设到 `RUNNER_TEMP` 下，GitHub 在每个任务开始和结束时清空它。检查工具的一步只运行 `rustc`、`just`、`xcrun metal` 的 `--version`，缺了就失败。依赖的 crate 按 `Cargo.lock` 下载到这个任务的 `CARGO_HOME`。
 - checkout 带 `persist-credentials: false` 和 `clean: true`（开始时 `git clean -ffdx`）。没有 `rust-cache`，构建产物不跨任务保留，每次从头构建 release。
-- 任务启动的进程按进程 ID 结束，不按名字或路径：第一步在任务启动任何进程之前，把专用用户的全部 PID 写进 `RUNNER_TEMP/pids-at-start`。最后一步（`if: always()`）列出专用用户现在的进程，结束不在那份列表里的每一个（`kill -9`），只留下这一步的 shell、它的祖先（runner 自己）和它的子进程（列进程用的命令）；最多 5 轮，每轮之间等 1 秒，结束期间又 fork 出来的进程在下一轮结束。改了名字、换了路径、离开了进程组或会话、被 launchd 收养的进程都在其中。然后再清一次工作区。bench 自己会结束测量的进程组，这一步处理被取消的运行和别的原因留下的进程。
-- 这一步也会结束任务期间按需启动的、属于专用用户的系统代理（如图形会话的 XPC 服务）。launchd 在需要时重新启动它们，判定不受影响。任务开始之前已经在运行的进程不在它的范围里：清理没有运行过的任务（runner 进程被结束、机器断电，或者误批的、没有这一步的工作流）留下的进程，要靠第 11 步的定期重建和重启机器结束（ADR 0052「已知限制」）。
+- 任务启动的进程由 runner 的 job-completed 钩子结束，不由工作流结束：[`scripts/judge-runner/job-completed.sh`](../../scripts/judge-runner/job-completed.sh)，管理员把它装成 root 所有的 `/opt/lectern-judge/hooks/job-completed.sh`，runner 的 `.env` 用 `ACTIONS_RUNNER_HOOK_JOB_COMPLETED` 指向它（下面第 7 步）。runner 在每个任务的最后一步之后运行它，失败或取消的任务也一样，工作流改不掉。它按内核记录的启动时刻（`ps` 的 `etime`）挑选：专用用户在这个任务的 `Runner.Worker` 之后启动的每个进程都结束（`kill -9`），只留下钩子自己的祖先（runner）和子进程；不按名字、路径或任务能改的列表。改了名字、换了路径、离开了进程组或会话、被 launchd 收养的进程都在其中。最多 5 轮，每轮之间等 1 秒，结束期间又 fork 出来的进程在下一轮结束。失败时关闭：在祖先里找不到 `Runner.Worker`、读不到它的启动时刻或列不出进程时，结束专用用户在 runner 之外的全部进程（登录会话也随之结束），退出码 1，任务失败；5 轮之后还有进程时也是 1。工作流的最后一步（`if: always()`）只再清一次工作区。bench 自己会结束测量的进程组，钩子处理被取消的运行和别的原因留下的进程。
+- 钩子也会结束任务期间按需启动的、属于专用用户的系统代理（如图形会话的 XPC 服务）。launchd 在需要时重新启动它们，判定不受影响。任务开始之前已经在运行的进程不在它的范围里：清理没有运行过钩子的任务（runner 进程被结束、机器断电）留下的进程，要靠第 11 步的定期重建和重启机器结束（ADR 0052「已知限制」）。
 - 环境变量 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`（过滤按子串匹配，后者也选中 `app/cold_start_purged`），上传 `report.json`（`lectern-bench-judge-report`）。
 
 准备机器（产品负责人或仓库管理员，按顺序；第 8 步的第二条命令要等 bench 第 4 步合并）：
@@ -55,7 +55,7 @@
    sudo chmod -R go-w /opt/lectern-judge
    ```
 
-7. 注册 runner：以专用用户在它的图形会话里打开终端，按 Settings → Actions → Runners → New self-hosted runner（macOS、ARM64）页面的命令下载、校验 runner，解压到一个短路径，例如 `~/runner`（`RUNNER_TEMP` 在它下面，测量用的 socket 路径要短于 104 字节）。然后运行 `./config.sh --url https://github.com/SoloJiang/lectern-app --token <页面上的令牌> --labels lectern-judge --unattended`、`./svc.sh install`、`./svc.sh start`。`svc.sh` 装的是专用用户的 LaunchAgent，随这个用户登录启动；不改成 LaunchDaemon，它没有图形会话，窗口不显示。Runners 页上的标签应是 `self-hosted`、`macOS`、`ARM64`、`lectern-judge`（前三个是默认标签）。能在专用用户之外（另一个账户或另一台机器）为每个任务生成新的注册令牌或 JIT 配置时，`config.sh` 加 `--ephemeral`（或改用 JIT 配置），每个任务之后重新注册；做不到时用普通注册，靠第 11 步定期重建。
+7. 注册 runner：以专用用户在它的图形会话里打开终端，按 Settings → Actions → Runners → New self-hosted runner（macOS、ARM64）页面的命令下载、校验 runner，解压到一个短路径，例如 `~/runner`（`RUNNER_TEMP` 在它下面，测量用的 socket 路径要短于 104 字节）。然后运行 `./config.sh --url https://github.com/SoloJiang/lectern-app --token <页面上的令牌> --labels lectern-judge --unattended`。以管理员安装钩子：`sudo install -d -o root -g wheel -m 755 /opt/lectern-judge/hooks`，`sudo install -o root -g wheel -m 755 scripts/judge-runner/job-completed.sh /opt/lectern-judge/hooks/job-completed.sh`（脚本取自本仓库 `main`）。在 `~/runner/.env` 末尾加一行 `ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/lectern-judge/hooks/job-completed.sh`。再以专用用户运行 `./svc.sh install`、`./svc.sh start`。第一次运行之后，在任务日志的末尾确认有这个钩子的输出。`svc.sh` 装的是专用用户的 LaunchAgent，随这个用户登录启动；不改成 LaunchDaemon，它没有图形会话，窗口不显示。Runners 页上的标签应是 `self-hosted`、`macOS`、`ARM64`、`lectern-judge`（前三个是默认标签）。能在专用用户之外（另一个账户或另一台机器）为每个任务生成新的注册令牌或 JIT 配置时，`config.sh` 加 `--ephemeral`（或改用 JIT 配置），每个任务之后重新注册；做不到时用普通注册，靠第 11 步定期重建。
 8. 检查：以专用用户，在它的图形会话里，在本仓库 `main` 的一份检出里运行下面的命令，环境与任务相同。第一条退出码 0，输出里有 `first_presented_source presented`；第二条退出码 0，冷启动的说明里是 `source presented 20, handler 0`。任何一项是 `handler` 时不做第 9 步，交给产品负责人决定（ADR 0052「已知限制」）。
 
    ```sh
@@ -66,7 +66,7 @@
 
 9. 设置仓库变量：`gh variable set LECTERN_JUDGE_RUNNER --body true --repo SoloJiang/lectern-app`（或 Settings → Secrets and variables → Actions → Variables）。之后每次 push 到 `main` 都运行判定任务。
 10. 手动判定一个分支：有写权限的人读过它的 diff 之后，运行 `gh workflow run ci.yml --ref <分支> --repo SoloJiang/lectern-app`（整个 CI 在这个分支上运行一次）。只用于本仓库的分支。改动首帧之前的代码的 PR，合并之前做一次。
-11. 定期重建：每月一次，或某次运行可疑时，在 Runners 页上删除这台 runner，在系统设置 → 用户与群组里删除专用用户和它的主目录，重启机器，再按第 3–8 步重建。专用用户的主目录不跨任务信任：任务能按绝对路径写它，也能留下在任务开始之前就在运行、因而不被清理的进程。
+11. 定期重建：每月一次，或某次运行可疑时，在 Runners 页上删除这台 runner，在系统设置 → 用户与群组里删除专用用户和它的主目录，重启机器，再按第 3–8 步重建。专用用户的主目录不跨任务信任：任务能按绝对路径写它（包括 `~/runner/.env`，改了它，runner 下次启动时就不再运行钩子），也能留下在任务开始之前就在运行、因而不被清理的进程。
 
 运行中：判定任务失败时（在 `main` 上），修复或回退那次合并。机器离线时 `main` 上的判定任务排队，不阻止合并；把变量改为 `false` 停止排队，这期间冷启动没有判定。
 
