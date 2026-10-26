@@ -5,6 +5,8 @@
 //! (the crate name minus `lectern_`), not the binary's name.
 
 mod args;
+#[cfg(feature = "bench-probe")]
+mod bench;
 #[cfg(debug_assertions)]
 mod debug_quit;
 #[cfg(feature = "ui-probe")]
@@ -36,6 +38,11 @@ pub fn run() {
         // Only one install per process, and this is the first.
         return;
     };
+    // `LECTERN_BENCH_SOCKET` set: the measurement build's probe. Two
+    // environment variables and one method replacement, no IO and no thread
+    // (docs/design/app.md「测量构建的装配」).
+    #[cfg(feature = "bench-probe")]
+    let bench = bench::from_env();
     args::log_unknown(&args);
     let languages = lectern_platform::system::preferred_languages();
     let strings = Strings::of(Locale::negotiate(languages.iter().map(String::as_str)));
@@ -52,6 +59,11 @@ pub fn run() {
     });
     app.run(move |cx| {
         let startup = Startup::new(early, Profile::Desktop);
+        #[cfg(feature = "bench-probe")]
+        let startup = match bench {
+            Some(probe) => startup.bench(probe),
+            None => startup,
+        };
         // `LECTERN_UI_PROBE_DIR` set: the probe profile.
         #[cfg(feature = "ui-probe")]
         let startup = probe::select(startup);

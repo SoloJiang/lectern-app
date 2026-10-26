@@ -4324,6 +4324,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "lectern-agents",
+ "lectern-bench",
  "lectern-cache",
  "lectern-executor",
  "lectern-fs-watch",

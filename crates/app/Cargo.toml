@@ -22,6 +22,11 @@ layer = "app"
 # `default`, so a plain `cargo build` has no `lectern-ui-probe`. `just check`
 # and `just test` use `--all-features`; `just probe` builds with it.
 ui-probe = ["dep:lectern-ui-probe"]
+# The measurement build (docs/design/app.md「测量构建的装配」): not in
+# `default`, so a plain `cargo build` has no `lectern-bench` and no method
+# replacements in `lectern-platform` (ADR 0048). `lectern-bench/probe` turns
+# on `lectern-platform/bench-hooks`. `just bench` builds with it.
+bench-probe = ["dep:lectern-bench", "lectern-bench/probe"]
 
 [dependencies]
 gpui.workspace = true
@@ -51,6 +56,9 @@ lectern-review-view = { path = "../review_view" }
 # The "welcome" and "welcome-discovery" plugins and `WelcomeDeps`
 # (docs/design/welcome.md「对其他 crate 的要求」C).
 lectern-welcome = { path = "../welcome" }
+# The probe of the measurement build (optional: a tool crate, the only form
+# architecture rule 2 allows).
+lectern-bench = { path = "../bench", optional = true }
 # The probe session of the probe profile (optional: a tool crate, the only
 # form architecture rule 2 allows).
 lectern-ui-probe = { path = "../ui_probe", optional = true }
