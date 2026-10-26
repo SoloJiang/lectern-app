@@ -1,6 +1,6 @@
 # CI 与约束检查
 
-状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。macOS 的基准拆成单独的任务（[ADR 0036](../adr/0036.md)），见「任务」「实际验证」。打印 lint 与架构规则检查第 8 条由 [#195](https://github.com/SoloJiang/lectern-app/pull/195) 加入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 10 项，验证见 [logging 设计「实际验证」](logging.md#实际验证)）。
+状态：已实现（[#34](https://github.com/SoloJiang/lectern-app/pull/34)、[#36](https://github.com/SoloJiang/lectern-app/pull/36)、[#50](https://github.com/SoloJiang/lectern-app/pull/50)）。macOS 的基准拆成单独的任务（[ADR 0036](../adr/0036.md)），见「任务」「实际验证」。打印 lint 与架构规则检查第 8 条由 [#195](https://github.com/SoloJiang/lectern-app/pull/195) 加入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 10 项，验证见 [logging 设计「实际验证」](logging.md#实际验证)）。判定任务 `Judge (physical Mac)` 和它的自托管 runner 由 [ADR 0052](../adr/0052.md) 加入，见「判定机器」；runner 还没有注册，任务现在跳过。
 
 对应 issue [#4](https://github.com/SoloJiang/lectern-app/issues/4)。规则以脚本执行，违反时构建立即失败（[技术调研](tech-research.md)「约束检查」）。
 
@@ -10,15 +10,40 @@
 |---|---|---|---|
 | `Checks (Linux, GPUI-free crates)` | `ubuntu-latest` | 格式、架构规则、cargo-deny、不依赖 GPUI 的 crate 的 clippy 与测试、基准的冒烟运行 | 不编译 GPUI，约 2 分钟出结果；agent 改领域逻辑时先看这个任务 |
 | `Build and test (macOS arm64)` | `macos-15`（Apple Silicon） | 整个工作区的 clippy、测试、doctest、构建 `lectern` | GPUI 与视图层只能在 macOS 编译 |
-| `Benchmarks (macOS arm64)` | `macos-15`（Apple Silicon） | `just bench`：判定性能预算，上传 `report.json` | 与上一个任务并行；基准用 release 构建，与测试的 debug 构建不共用产物（[ADR 0036](../adr/0036.md)） |
+| `Benchmarks (macOS arm64)` | `macos-15`（Apple Silicon） | `just bench`：判定性能预算，上传 `report.json`；测量的时间止于首帧的条目只记录 | 与上一个任务并行；基准用 release 构建，与测试的 debug 构建不共用产物（[ADR 0036](../adr/0036.md)） |
+| `Judge (physical Mac)` | `[self-hosted, macOS, ARM64, lectern-judge]`（自托管的实体 M 系列 Mac） | `LECTERN_BENCH_JUDGE=1 just bench baseline/ app/cold_start`：判定测量的时间止于首帧的预算，上传 `report.json` | 托管 runner 不给 `presentedTime`（[ADR 0052](../adr/0052.md)）；只在仓库变量 `LECTERN_JUDGE_RUNNER` 为 `true` 时运行，见「判定机器」 |
 
-三个任务都是必需检查，步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`、`just doctest`、`just bench`），本地和 CI 跑的是同一套命令。`just bench` 在 Linux 上是冒烟运行，在 macOS 上判定预算，之后上传 `target/lectern-bench/report.json`（[bench 设计「`just bench` 与 CI」](bench.md#just-bench-与-ci)）。
+前三个任务是必需检查，`Judge (physical Mac)` 在 runner 注册、第一次运行通过之后加入（「判定机器」）。步骤都调用 `just`（`just check`、`just deny`、`just test --profile ci`、`just doctest`、`just bench`），本地和 CI 跑的是同一套命令。`just bench` 在 Linux 上是冒烟运行，在 macOS 上判定预算，之后上传 `target/lectern-bench/report.json`（[bench 设计「`just bench` 与 CI」](bench.md#just-bench-与-ci)）。
 
 两个 macOS 任务各用一个 `Swatinem/rust-cache` 的缓存键（`test`、`bench`）：缓存按任务和键区分，debug 与 release 的产物不互相挤占。基准原来是 macOS 任务的最后一步，任务的墙钟时间是测试与基准之和（#129 之后约 13 分钟，其中 setup、check、测试和 doctest 约 4 分钟）；拆开之后取两者中较长的一个。目标：典型 PR 的 macOS 墙钟时间 ≤ 15 分钟，基准任务 ≤ 12 分钟。
 
 `Benchmarks (macOS arm64)` 另用 `actions/cache` 保存和还原 `target/lectern-bench/fixtures`（跨运行保留的基准夹具，现在是 `code_intel` 的 10 万文件虚拟仓库，约 330 MB）。键是生成它的源码的哈希（`crates/code_intel/src`、`crates/cache/src`、`crates/bench/benches/fixtures` 和 `Cargo.lock`）；这个键只决定命中率。正确性靠夹具自己：还原的夹具在使用前对照当前的写入逻辑核对单元数和抽样单元，不符就重写（[ADR 0039](../adr/0039.md)，[bench 设计「夹具与 `test-support`」](bench.md#夹具与-test-support)）。源码哈希是另一层防护：`code_intel` 的源码一改就不命中，连核对看不出的、只影响样本之外文件的改动也会重写。键没变时还原约十几秒，代替约一分钟的写入。每个基准的耗时写进 `report.json`，最慢的 10 个是 check run 的一条 notice（[bench 设计「报告」](bench.md#报告)），超过目标时据此定位。
 
 检查名就是 GitHub 分支保护里必需检查的名字，改名要同时改分支保护。`Benchmarks (macOS arm64)` 由 ADR 0036 加入，要由仓库管理员加进必需检查；在那之前，基准超标只让这个任务失败，不阻止合并。`RUSTFLAGS=-D warnings`，clippy 警告即失败。clippy 与测试都带 `--all-features`，可选 feature 后的代码也参与编译和测试。
+
+## 判定机器
+
+[ADR 0052](../adr/0052.md) 决策第 3 条的判定机器：一台实体 M 系列 Mac，注册为本仓库的自托管 runner。`Judge (physical Mac)` 只在它上面运行，判定测量的时间止于首帧的预算（[bench 设计「平台与噪声」](bench.md#平台与噪声)）。仓库是公开的，任务按 ADR 0052 决策第 4 条写，`ci.yml` 里逐条对应：
+
+- 条件：仓库变量 `LECTERN_JUDGE_RUNNER` 为 `true`，并且是 push 到 `main`，或 `head.repo.full_name` 等于 `github.repository` 的 `pull_request`。没有 `pull_request_target`。
+- `runs-on: [self-hosted, macOS, ARM64, lectern-judge]`，`timeout-minutes: 60`。
+- `permissions: contents: read`，不引用 secret；checkout 带 `persist-credentials: false` 和 `clean: true`（开始时 `git clean -ffdx`）；最后一步（`if: always()`）结束遗留的 `empty_window`、`lectern` 进程，再清一次工作区。没有 `rust-cache`，构建产物不跨任务保留，每次从头构建 release。
+- 环境变量 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`（过滤按子串匹配，后者也选中 `app/cold_start_purged`），上传 `report.json`（`lectern-bench-judge-report`）。
+
+准备机器（产品负责人或仓库管理员，按顺序；bench 第 4 步合并之后才做第 8 步）：
+
+1. 仓库 Settings → Actions → General，「Approval for running fork pull request workflows from contributors」选「Require approval for all external contributors」，保存。之后批准 fork PR 的运行之前先看它的 diff，改了 `.github/` 的不批准。
+2. 机器：实体 M 系列 Mac，接显示器或 HDMI 假负载。最好接在不能访问其他内网主机的网络里。
+3. 新建一个专用的标准用户（不是管理员），不登录 Apple ID，不放 SSH 密钥、git 凭据和别的凭据。
+4. 电源（管理员终端）：`sudo pmset -a sleep 0 displaysleep 0 disksleep 0`。系统设置 → 锁定屏幕：「不活跃时启动屏幕保护程序」和「屏幕保护程序启动或显示器关闭后需要密码」都选「永不」（以专用用户设置）。
+5. 登录：先在系统设置 → 隐私与安全性里关闭 FileVault，再在系统设置 → 用户与群组里把「自动以此身份登录」设为专用用户。不关 FileVault 时，开机后手动登录专用用户，一直保持登录。
+6. 工具：安装 Xcode，运行一次 `xcodebuild -downloadComponent MetalToolchain`（可能要管理员）；以专用用户按 rustup.rs 安装 rustup。`just` 和仓库要的工具链由任务安装。
+7. 注册 runner：以专用用户在它的图形会话里打开终端，按仓库 Settings → Actions → Runners → New self-hosted runner（macOS、ARM64）页面下载并解压 runner；运行 `./config.sh --url https://github.com/SoloJiang/lectern-app --token <页面上的令牌> --labels lectern-judge --unattended`，再运行 `./svc.sh install` 和 `./svc.sh start`。`svc.sh` 装的是专用用户的 LaunchAgent，随这个用户登录启动；不改成 LaunchDaemon（没有图形会话，窗口不显示）。Runners 页上这台 runner 的标签应是 `self-hosted`、`macOS`、`ARM64`、`lectern-judge`（前三个是默认标签）。
+8. 检查（以专用用户，在它的图形会话里，在本仓库 `main` 的一份检出里）：`cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks` 退出码 0，输出里有 `first_presented_source presented`；`LECTERN_BENCH_JUDGE=1 just bench baseline/` 退出码 0，冷启动的说明里是 `source presented 20, handler 0`。任何一项是 `handler` 时不做下一步，交给产品负责人决定（ADR 0052「已知限制」）。
+9. 设置仓库变量：`gh variable set LECTERN_JUDGE_RUNNER --body true --repo SoloJiang/lectern-app`（或 Settings → Secrets and variables → Actions → Variables）。
+10. 第一次 `Judge (physical Mac)` 通过之后，在分支保护里把它加进必需检查。
+
+运行中：机器离线时任务排队，加进必需检查之后 PR 不能合并；把变量改为 `false` 后任务跳过，GitHub 把跳过的任务算作成功，这期间冷启动没有判定。fork 的 PR 总是跳过这个任务，合并之后由 `main` 上的 push 判定。
 
 ## 构建配置
 
@@ -96,6 +121,11 @@ macOS 基准拆成单独的任务（[ADR 0036](../adr/0036.md)，`Refs #7`）：
 - 依据（jobs 接口，最近 30 次运行）：macOS 任务里 setup、check、测试和 doctest 约 4 分钟，基准一步在 #129 之前 5–6 分钟、之后约 13 分钟，`docs/budget-100k` 分支 13–16 分钟，`impl/code-intel-query` 分支 23–39 分钟；Linux 任务约 2 分钟。
 - `ci.yml` 的语法和两个 macOS 任务的拆分只能由 CI 运行验证，本机没有运行 GitHub Actions。基准一步缩短多少见 [bench 设计「实际验证」](bench.md#实际验证)；拆开之后 macOS 的墙钟时间是两个任务中较长的一个。
 - 没有验证的：分支保护的必需检查要由仓库管理员加上 `Benchmarks (macOS arm64)`。
+
+判定任务（[ADR 0052](../adr/0052.md)，`Refs #7`）：
+
+- `ruby -ryaml` 读 `ci.yml` 通过，`judge` 任务的 `if`、`runs-on`、`permissions` 和步骤顺序与「判定机器」一致。本机没有 actionlint，`ci.yml` 的其余检查由 GitHub 在推送时做。
+- 没有验证的：任务本身没有运行过，runner 注册之后第一次运行才知道；仓库变量设为 `true` 之前任务跳过。fork PR 的批准设置、分支保护和机器的准备由产品负责人或仓库管理员做（「判定机器」）。
 
 ## 与设计的差异
 

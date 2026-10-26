@@ -75,7 +75,9 @@ jobs:
         run: cargo build --locked -p lectern-app
 
   # The performance budgets, judged on Apple Silicon, in parallel with the
-  # job above (docs/design/ci.md「任务」).
+  # job above (docs/design/ci.md「任务」). This runner never gives a
+  # presentedTime, so the budgets that end at the first frame are only
+  # recorded here; the judge job below judges them (ADR 0052).
   macos-bench:
     name: Benchmarks (macOS arm64)
     runs-on: macos-15
@@ -110,3 +112,51 @@ jobs:
           name: lectern-bench-report
           path: target/lectern-bench/report.json
           if-no-files-found: warn
+
+  # The budgets that end at the first frame, judged on the self-hosted
+  # physical Mac (ADR 0052, docs/design/ci.md「判定机器」). The repository is
+  # public, so: the job runs only once the repository variable says the
+  # runner is registered, never for a fork's pull request, with no secrets,
+  # a read-only token and a workspace cleaned before and after.
+  judge:
+    name: Judge (physical Mac)
+    if: >-
+      vars.LECTERN_JUDGE_RUNNER == 'true' &&
+      (github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, macOS, ARM64, lectern-judge]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          clean: true
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Metal toolchain
+        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+      # No build cache: nothing a job builds is kept for the next one.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Judge the budgets that end at the first frame
+        env:
+          LECTERN_BENCH_JUDGE: '1'
+        run: just bench baseline/ app/cold_start
+      - name: Upload the judging report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lectern-bench-judge-report
+          path: target/lectern-bench/report.json
+          if-no-files-found: warn
+      # Also ends a measured process that a cancelled run left behind; this
+      # user runs nothing else under these names.
+      - name: Clean the workspace
+        if: always()
+        run: |
+          pkill -x empty_window || true
+          pkill -x lectern || true
+          git clean -ffdx && git reset --hard
