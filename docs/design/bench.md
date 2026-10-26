@@ -723,7 +723,7 @@ crates/bench/
 - 确定性：夹具由固定种子生成，不取时钟和随机数；基准按 ID 顺序运行；运行器在 macOS 上把基准线程设为 user-interactive QoS。
 - 页缓存：进程内基准测的是热缓存（预热之后）；冷文件缓存只在 `app/cold_start_purged` 里测量。
 
-判定用的机器（[ADR 0052](../adr/0052.md)，「未决问题」第 1 条的选项 B）：测量的时间止于首帧的预算（`app/cold_start`、`app/cold_start_purged` 和空窗口的两条基线 `baseline/*`）由一台自托管的实体 M 系列 Mac 判定，即 CI 的 `Judge (physical Mac)`（[CI 设计「判定机器」](ci.md#判定机器)）。GitHub 托管的 `macos-15` runner（Apple M1 虚拟机）不给 `presentedTime`，这些条目在那里只记录。其余预算由托管 runner 上的 `Benchmarks (macOS arm64)` 判定。
+判定用的机器（[ADR 0052](../adr/0052.md)，「未决问题」第 1 条的选项 B）：测量的时间止于首帧的条目在一台自托管的实体 M 系列 Mac 上运行，即 CI 的 `Judge (physical Mac)`（[CI 设计「判定机器」](ci.md#判定机器)）：它判定 `app/cold_start`，记录 `app/cold_start_purged` 和空窗口的两条基线 `baseline/*`（这三条在预算表里本来就只记录），这两条基线以它的结果为 ADR 0017 的基线。GitHub 托管的 `macos-15` runner（Apple M1 虚拟机）不给 `presentedTime`，这些条目在那里都只记录。其余预算由托管 runner 上的 `Benchmarks (macOS arm64)` 判定。
 
 ### 时间盒截断的轮次
 
@@ -840,7 +840,7 @@ CI：
 
 没有需要产品决定的问题。下面一条已经决定：
 
-1. **判定用哪台机器。** 已决定为选项 B（产品负责人 2026-10-26，[ADR 0052](../adr/0052.md)）：一台自托管的实体 M 系列 Mac 判定测量的时间止于首帧的预算，托管 runner 上这些条目只记录；其余预算仍由托管 runner 判定（「平台与噪声」）。
+1. **判定用哪台机器。** 已决定为选项 B（产品负责人 2026-10-26，[ADR 0052](../adr/0052.md)）：一台自托管的实体 M 系列 Mac 判定 `app/cold_start`，并记录 `app/cold_start_purged` 和 `baseline/*`，托管 runner 上这些条目只记录；其余预算仍由托管 runner 判定（「平台与噪声」）。
    - 2026-10-18 按默认值选了选项 A：用 GitHub 托管的 `macos-15` 判定，不额外花钱。`macos-15` runner 是 3 核的 Apple M1 虚拟机，与用户的实体机不同，也有邻居干扰。当时不采用 B 的理由是硬件和维护成本，以及要隔离在它上面运行的 PR 代码。
    - 第 4 步发现托管 runner 不给 drawable 的 `presentedTime`（ADR 0052「背景」）。按 ADR 0052 的回退，那里空窗口的 20 次冷启动是 111–225 ms，中位数 157 ms，20 个都超过 20 ms，来源都是 `handler`。托管 runner 不能判定冷启动，按 ADR 0017 也不能为此放宽预算，产品负责人因此改选 B。PR 代码的隔离见 ADR 0052 决策第 4 条和 [CI 设计「判定机器」](ci.md#判定机器)。
 
