@@ -203,7 +203,7 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         let wanted: Vec<&'a Budget> = pending
             .iter()
             .copied()
-            .filter(|b| is_prefix(bench.id, b.id))
+            .filter(|b| owns(benches, bench, b.id))
             .collect();
         if wanted.is_empty() {
             continue;
@@ -225,6 +225,7 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         });
     }
     drop(fixtures);
+    expand_filtered(options.budgets, &mut report);
     // Keep the table's order.
     let position = |id: &str| {
         own.iter()
@@ -236,6 +237,47 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
     };
     report.entries.sort_by_key(|e| position(&e.id));
     finish(options, report)
+}
+
+/// With a plugin list (set by the benchmark that produced some of the
+/// `plugin/<id>/…` results), a `plugin/*/…` budget that the filter left out
+/// is `filtered` once per plugin, as the merge expects every expanded ID to
+/// appear (docs/design/bench.md「报告」). A plugin that has its own budget
+/// is left out, as in the merge.
+fn expand_filtered<'a>(budgets: &'a [Budget], report: &mut Report<'a>) {
+    if report.plugins.is_empty() {
+        return;
+    }
+    let mut entries = Vec::with_capacity(report.entries.len());
+    for entry in std::mem::take(&mut report.entries) {
+        let wildcard = entry.budget.is_wildcard() && entry.budget.id.starts_with("plugin/");
+        if !(wildcard && entry.status == Status::Filtered) {
+            entries.push(entry);
+            continue;
+        }
+        for plugin in &report.plugins {
+            let id = entry.budget.id.replacen('*', plugin, 1);
+            if budgets.iter().any(|b| b.id == id) {
+                continue;
+            }
+            entries.push(Entry {
+                id,
+                ..entry.clone()
+            });
+        }
+    }
+    report.entries = entries;
+}
+
+/// Whether `bench` produces the budget `id`: its ID is a prefix of `id`, and
+/// no other benchmark of the target has a longer ID that is one too (the
+/// benchmark `plugin` produces `plugin/*/activate`, the benchmark
+/// `plugin/after_first_frame` its own budget).
+fn owns(benches: &[Bench], bench: &Bench, id: &str) -> bool {
+    is_prefix(bench.id, id)
+        && !benches
+            .iter()
+            .any(|other| other.id.len() > bench.id.len() && is_prefix(other.id, id))
 }
 
 /// Active budgets of this target without a benchmark (off macOS, the
@@ -284,7 +326,12 @@ fn run_bench<'a>(
     report: &mut Report<'a>,
 ) -> u32 {
     let first = match attempt(options, args.mode, bench, fixtures) {
-        Ok(results) => results,
+        Ok(attempt) => {
+            if let Some(plugins) = attempt.plugins {
+                report.plugins = plugins;
+            }
+            attempt.results
+        }
         Err(failure) => {
             let status = if failure.skip {
                 Status::Skipped
@@ -306,7 +353,7 @@ fn run_bench<'a>(
     let retry = gated && entries.iter().any(|e| e.status == Status::Over);
     if retry {
         match attempt(options, args.mode, bench, fixtures) {
-            Ok(results) => {
+            Ok(Attempt { results, .. }) => {
                 let mut again: BTreeMap<String, (Value, Option<String>)> = results
                     .into_iter()
                     .map(|m| (m.id, (m.value, m.note)))
@@ -466,6 +513,13 @@ impl Failure {
     }
 }
 
+/// What one run of a benchmark gave.
+struct Attempt {
+    results: Vec<Measured>,
+    /// [`Ctx::report_plugins`](crate::Ctx::report_plugins).
+    plugins: Option<Vec<String>>,
+}
+
 /// One run of `bench` in a fresh scratch directory (shared fixtures are
 /// reused). A returned error or a panic is `Err`.
 fn attempt(
@@ -473,7 +527,7 @@ fn attempt(
     mode: Mode,
     bench: &Bench,
     fixtures: &Fixtures,
-) -> Result<Vec<Measured>, Failure> {
+) -> Result<Attempt, Failure> {
     let scratch = options.scratch_root.join(bench.id);
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)
@@ -489,7 +543,10 @@ fn attempt(
     let outcome = catch_unwind(AssertUnwindSafe(|| (bench.run)(&mut ctx)));
     let _ = std::fs::remove_dir_all(&scratch);
     match outcome {
-        Ok(Ok(results)) => Ok(results),
+        Ok(Ok(results)) => Ok(Attempt {
+            results,
+            plugins: ctx.take_plugins(),
+        }),
         Ok(Err(error)) => Err(Failure {
             message: error.message().to_owned(),
             skip: error.is_skip(),

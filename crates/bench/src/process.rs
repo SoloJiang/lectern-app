@@ -23,8 +23,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::wire::{
-    ChildKind, FrameStats, Milestone, OpenTarget, PLUGINS_VAR, PluginReport, Report, Request,
-    SOCKET_VAR, TimeSource,
+    ActivationKind, ChildKind, FrameStats, Milestone, OpenTarget, PLUGINS_VAR, PluginReport,
+    Report, Request, SOCKET_VAR, TimeSource,
 };
 use crate::{BenchError, Samples};
 
@@ -39,6 +39,11 @@ pub const MEMORY_PARALLEL: usize = 3;
 /// developer's log filter and the agents' configuration directories (the
 /// program reads its data under the temporary `HOME` only).
 const REMOVED: &[&str] = &["LECTERN_LOG", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+
+/// The footprint a launch is given when it did not become quiescent within
+/// [`Limits::first_quiescent`] of its first frame: over every byte budget
+/// (ADR 0017: no quiescence is a failure). The report shows it as such.
+pub const NEVER_QUIESCENT: u64 = u64::MAX;
 
 /// How long `Drop` waits for a killed process to be reaped.
 const REAP: Duration = Duration::from_secs(2);
@@ -246,6 +251,140 @@ impl<'a> Scheduler<'a> {
         })
     }
 
+    /// `app/idle_empty` (「进程级基准」): `launches` launches of the whole
+    /// profile, one at a time, each the main process's `phys_footprint` at a
+    /// valid idle sample. A launch that was not quiescent within
+    /// [`Limits::first_quiescent`] is [`Idle::NotQuiescent`] (`over`, not an
+    /// error).
+    ///
+    /// Not [`Scheduler::memory`]'s three at once: with three launches
+    /// together (their windows cover each other) the `Quit` of one
+    /// `lectern` took more than 10 s in about a third of the launches.
+    /// A sample of a hung process shows its quit thread done (the kernel,
+    /// executor and log threads gone) and the main thread idle in the run
+    /// loop, before the 10 ms timer loop of `quit.rs` that ends in
+    /// `cx.quit()`; some exited by themselves after 9 to 11 s. One launch at
+    /// a time never hung (bench design「与设计的差异」, step 5).
+    pub fn idle_footprints(
+        &self,
+        program: &Path,
+        launches: usize,
+    ) -> Result<Vec<Idle<u64>>, BenchError> {
+        let mut runs = Vec::with_capacity(launches);
+        for _ in 0..launches {
+            let mut session = self.session(program, None)?;
+            let idle = session.idle(|s| s.footprint())?;
+            session.quit()?;
+            runs.push(idle);
+        }
+        Ok(runs)
+    }
+
+    /// `app/unclassified_children`: one launch of the whole profile; at a
+    /// valid idle sample, the descendants of the main process that belong
+    /// to no reported process-plugin or language-server group.
+    pub fn unclassified_children(&self, program: &Path) -> Result<Unclassified, BenchError> {
+        let mut session = self.session(program, None)?;
+        let idle = session.idle(|s| s.unclassified())?;
+        let Idle::Sample(found) = idle else {
+            return Err(not_quiescent("app/unclassified_children", self.limits));
+        };
+        session.quit()?;
+        Ok(found)
+    }
+
+    /// `plugin/after_first_frame`: `launches` launches of the whole
+    /// profile, one at a time (the sum is a timing); each the activation
+    /// times of the plugins with an `AfterFirstFrame` condition, added up,
+    /// read from the `Plugins` reply at a valid idle sample.
+    pub fn after_first_frame(
+        &self,
+        program: &Path,
+        launches: usize,
+    ) -> Result<Samples, BenchError> {
+        let mut sums = Vec::with_capacity(launches);
+        for _ in 0..launches {
+            let mut session = self.session(program, None)?;
+            let idle = session.idle(|s| s.plugins())?;
+            let Idle::Sample(plugins) = idle else {
+                return Err(not_quiescent("plugin/after_first_frame", self.limits));
+            };
+            sums.push(after_first_frame_time(&plugins)?);
+            session.quit()?;
+        }
+        Ok(Samples(sums))
+    }
+
+    /// The plugins of the whole profile: the `Plugins` reply of one launch
+    /// at a valid idle sample (before the kernel starts, the reply is
+    /// empty), in the kernel's order (`bench-probe` is not in it).
+    pub fn plugin_list(&self, program: &Path) -> Result<Vec<PluginReport>, BenchError> {
+        let mut session = self.session(program, None)?;
+        let idle = session.idle(|s| s.plugins())?;
+        let Idle::Sample(plugins) = idle else {
+            return Err(not_quiescent("plugin_list", self.limits));
+        };
+        session.quit()?;
+        Ok(plugins)
+    }
+
+    /// One launch of a trimmed plugin set (`selection` is the value of
+    /// `LECTERN_BENCH_PLUGINS`): waits for `Ready` and a valid idle sample,
+    /// whose value is the main process's `phys_footprint` plus those of the
+    /// process-plugin groups; then asks for the `Plugins` reply.
+    pub fn plugin_launch(
+        &self,
+        program: &Path,
+        selection: &str,
+    ) -> Result<PluginLaunch, BenchError> {
+        let mut session = self.session(program, Some(selection))?;
+        session.ready()?;
+        let idle = session.idle(|s| s.footprint_with_plugins())?;
+        let Idle::Sample(footprint) = idle else {
+            return Err(not_quiescent(selection, self.limits));
+        };
+        let plugins = session.plugins()?;
+        session.quit()?;
+        Ok(PluginLaunch { footprint, plugins })
+    }
+
+    /// One pair of launches for plugin `id` (「进程级基准」每个插件):
+    /// `closure:<id>`, then `closure+self:<id>`. The pair's activation time
+    /// is the plugin's four durations in the second launch.
+    pub fn plugin_pair(&self, program: &Path, id: &str) -> Result<PluginPair, BenchError> {
+        let without = self.plugin_launch(program, &format!("closure:{id}"))?;
+        let with = self.plugin_launch(program, &format!("closure+self:{id}"))?;
+        let activate = with
+            .plugins
+            .iter()
+            .find(|plugin| plugin.id == id)
+            .ok_or_else(|| BenchError::new(format!("Plugins 的应答里没有插件 {id}")))
+            .and_then(activation_time)?;
+        Ok(PluginPair {
+            without: without.footprint,
+            with: with.footprint,
+            activate,
+        })
+    }
+
+    /// The pairs of plugin `id`: one, and two more when the first pair's
+    /// activation time is over its budget (`over`), as「进程级基准」
+    /// says; the statistic is then taken over the three.
+    pub fn plugin(
+        &self,
+        program: &Path,
+        id: &str,
+        over: impl Fn(Duration) -> bool,
+    ) -> Result<Vec<PluginPair>, BenchError> {
+        let mut pairs = vec![self.plugin_pair(program, id)?];
+        if over(pairs[0].activate) {
+            for _ in 0..2 {
+                pairs.push(self.plugin_pair(program, id)?);
+            }
+        }
+        Ok(pairs)
+    }
+
     /// `launches` runs of `run`, at most [`MEMORY_PARALLEL`] at once (one at
     /// a time on the judging machine: windows opened together cover each
     /// other, and a covered window never shows a drawable, so its first
@@ -293,6 +432,94 @@ impl<'a> Scheduler<'a> {
         }
         Ok(values)
     }
+}
+
+/// What [`Scheduler::unclassified_children`] found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Unclassified {
+    /// How many descendants of the main process belong to no reported
+    /// group (those of a [`ChildKind::Other`] root included).
+    pub processes: usize,
+    /// Their `phys_footprint` added up.
+    pub bytes: u64,
+}
+
+/// One launch of a trimmed plugin set ([`Scheduler::plugin_launch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginLaunch {
+    /// The main process plus the process-plugin groups.
+    pub footprint: u64,
+    pub plugins: Vec<PluginReport>,
+}
+
+/// The two launches of plugin `id`: its dependency closure without it, and
+/// with it ([`Scheduler::plugin_pair`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PluginPair {
+    pub without: u64,
+    pub with: u64,
+    /// The plugin's manifest, activate, commit and started durations in the
+    /// launch with it, added up (kernel「性能」).
+    pub activate: Duration,
+}
+
+impl PluginPair {
+    /// `plugin/<id>/resident`: the footprint the plugin adds. Zero when the
+    /// launch with it measured less than the one without (noise larger
+    /// than the plugin); [`PluginPair::difference`] keeps the sign.
+    pub fn resident(&self) -> u64 {
+        self.with.saturating_sub(self.without)
+    }
+
+    pub fn difference(&self) -> i128 {
+        i128::from(self.with) - i128::from(self.without)
+    }
+}
+
+/// The four durations of a plugin's activation added up. The plugin must be
+/// `Active` and have all four: a plugin that did not activate has no
+/// activation time to report.
+pub fn activation_time(plugin: &PluginReport) -> Result<Duration, BenchError> {
+    if plugin.state != "Active" {
+        return Err(BenchError::new(format!(
+            "插件 {} 的状态是 {}，不是 Active",
+            plugin.id, plugin.state
+        )));
+    }
+    match (
+        plugin.manifest,
+        plugin.activate,
+        plugin.commit,
+        plugin.started,
+    ) {
+        (Some(manifest), Some(activate), Some(commit), Some(started)) => {
+            Ok(manifest + activate + commit + started)
+        }
+        _ => Err(BenchError::new(format!(
+            "插件 {} 的四段耗时不全",
+            plugin.id
+        ))),
+    }
+}
+
+/// `plugin/after_first_frame` of one launch: the activation times of the
+/// plugins whose manifest has an `AfterFirstFrame` condition (any other
+/// condition besides it too), added up.
+pub fn after_first_frame_time(plugins: &[PluginReport]) -> Result<Duration, BenchError> {
+    let mut sum = Duration::ZERO;
+    for plugin in plugins {
+        if plugin.activation.contains(&ActivationKind::AfterFirstFrame) {
+            sum += activation_time(plugin)?;
+        }
+    }
+    Ok(sum)
+}
+
+fn not_quiescent(what: &str, limits: Limits) -> BenchError {
+    BenchError::new(format!(
+        "{what}：首帧后 {:?} 内没有静止（ADR 0017）",
+        limits.first_quiescent
+    ))
 }
 
 /// The root processes and all their descendants, breadth first, each pid
@@ -490,6 +717,13 @@ impl<'a> Session<'a> {
                 Ok((stream, _)) => break stream,
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     if let Some(exit) = process.poll()? {
+                        // It may have connected, written its last words (the
+                        // probe's `Error` before exit code 3) and exited
+                        // since the `accept` above: the connection is still
+                        // there, and what it wrote is the reason.
+                        if let Ok((stream, _)) = listener.accept() {
+                            break stream;
+                        }
                         return Err(BenchError::new(format!(
                             "进程在连上 socket 之前退出（{}）",
                             exit.describe()
@@ -569,6 +803,54 @@ impl<'a> Session<'a> {
             .info
             .phys_footprint(self.pid)
             .map_err(|e| BenchError::new(format!("读不到进程 {} 的 phys_footprint：{e}", self.pid)))
+    }
+
+    /// The main process's `phys_footprint` plus those of the reported
+    /// process-plugin groups (the root and all its descendants each, ADR
+    /// 0018). Language-server groups are not in it: they are reported on
+    /// their own.
+    pub fn footprint_with_plugins(&self) -> Result<u64, BenchError> {
+        let roots = self.roots(|kind| kind == ChildKind::ProcessPlugin);
+        let mut total = self.footprint()?;
+        for pid in expand(self.process.info, &roots) {
+            // Exited since it was listed (as in `expand`): not counted.
+            if let Ok(bytes) = self.process.info.phys_footprint(pid) {
+                total += bytes;
+            }
+        }
+        Ok(total)
+    }
+
+    /// The descendants of the main process that are in no group a `Child`
+    /// report named a process plugin or a language server: the processes
+    /// nobody reported, and those of a [`ChildKind::Other`] root. A process
+    /// that exited while the walk was reading it is left out.
+    pub fn unclassified(&self) -> Result<Unclassified, BenchError> {
+        let reported = expand(
+            self.process.info,
+            &self.roots(|kind| kind != ChildKind::Other),
+        );
+        let mut found = Unclassified::default();
+        for pid in expand(self.process.info, &[self.pid]) {
+            if pid == self.pid || reported.contains(&pid) {
+                continue;
+            }
+            // Exited since it was listed: not a child to report.
+            if let Ok(bytes) = self.process.info.phys_footprint(pid) {
+                found.processes += 1;
+                found.bytes += bytes;
+            }
+        }
+        Ok(found)
+    }
+
+    /// The roots of the groups whose kind `wanted` accepts.
+    fn roots(&self, wanted: impl Fn(ChildKind) -> bool) -> Vec<u32> {
+        self.children
+            .iter()
+            .filter(|child| wanted(child.kind))
+            .map(|child| child.pid)
+            .collect()
     }
 
     /// For a program without a kernel (`baseline/empty_window_idle`):

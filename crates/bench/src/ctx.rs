@@ -75,6 +75,7 @@ pub struct Ctx {
     fixtures: Fixtures,
     persistent: PathBuf,
     judge: bool,
+    plugins: Option<Vec<String>>,
 }
 
 impl Ctx {
@@ -93,7 +94,22 @@ impl Ctx {
             fixtures,
             persistent,
             judge,
+            plugins: None,
         }
+    }
+
+    /// For the `process` target: the plugins of this run (the `Plugins`
+    /// reply of a launch of the whole profile, without `bench-probe`). The
+    /// report lists them, and the merge expands `plugin/*` over them
+    /// (docs/design/bench.md「报告」). Only the benchmark that produces the
+    /// `plugin/<id>/…` results sets it.
+    pub fn report_plugins(&mut self, plugins: Vec<String>) {
+        self.plugins = Some(plugins);
+    }
+
+    /// What [`Ctx::report_plugins`] was given.
+    pub(crate) fn take_plugins(&mut self) -> Option<Vec<String>> {
+        self.plugins.take()
     }
 
     /// The run is on the judging machine (`LECTERN_BENCH_JUDGE=1`, ADR

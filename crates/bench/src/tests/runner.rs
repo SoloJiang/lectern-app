@@ -761,3 +761,137 @@ fn runner_ctx_knows_the_judging_machine() {
     run(&options, &benches);
     assert_eq!(*SEEN.lock().unwrap(), [false, true]);
 }
+
+static PLUGIN_BUDGETS: &[Budget] = &[
+    budget(
+        "plugin/*/activate",
+        UNDER_1_MS,
+        State::Active,
+        Target::Process,
+    ),
+    budget("plugin/*/resident", &[], State::Active, Target::Process),
+    budget(
+        "plugin/after_first_frame",
+        UNDER_1_MS,
+        State::Active,
+        Target::Process,
+    ),
+    // A plugin with a budget of its own is left out of the expansion.
+    budget(
+        "plugin/special/activate",
+        UNDER_1_MS,
+        State::Active,
+        Target::Process,
+    ),
+];
+
+/// The benchmark `plugin` produces every `plugin/…` budget except the one a
+/// benchmark with a longer ID owns; the plugins it names reach the report.
+fn plugins(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    ctx.report_plugins(vec!["a".into(), "special".into(), "b".into()]);
+    let mut results = Vec::new();
+    for id in ["a", "special", "b"] {
+        results.push(Measured::new(format!("plugin/{id}/activate"), time(0)));
+        results.push(Measured::new(
+            format!("plugin/{id}/resident"),
+            Value::Bytes(vec![1; 3]),
+        ));
+    }
+    Ok(results)
+}
+
+fn after_first_frame(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    Ok(vec![Measured::new("plugin/after_first_frame", time(0))])
+}
+
+const PLUGIN_BENCHES: [Bench; 2] = [
+    Bench {
+        id: "plugin",
+        run: plugins,
+    },
+    Bench {
+        id: "plugin/after_first_frame",
+        run: after_first_frame,
+    },
+];
+
+#[test]
+fn runner_the_longest_prefix_owns_a_budget_and_the_plugin_list_reaches_the_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run(
+        &options(PLUGIN_BUDGETS, Target::Process, &["--bench"], dir.path()),
+        &PLUGIN_BENCHES,
+    );
+    assert_eq!(run.exit, 0, "{}", run.text);
+    let report = run.report.as_ref().unwrap();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    for id in [
+        "plugin/a/activate",
+        "plugin/special/activate",
+        "plugin/b/activate",
+        "plugin/after_first_frame",
+    ] {
+        assert_eq!(status(&run, id).status, Status::Ok, "{id}");
+    }
+    assert_eq!(status(&run, "plugin/b/resident").status, Status::Record);
+    assert_eq!(report.plugins, ["a", "special", "b"]);
+    let json = report.to_json();
+    assert_eq!(json["plugins"], serde_json::json!(["a", "special", "b"]));
+}
+
+/// With the plugin list set, a `plugin/*/…` budget the filter left out is
+/// `filtered` once per plugin (the merge expects every expanded ID), and a
+/// plugin with its own budget is not expanded.
+#[test]
+fn runner_filtered_plugin_budgets_expand_over_the_plugin_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run(
+        &options(
+            PLUGIN_BUDGETS,
+            Target::Process,
+            &["--bench", "resident"],
+            dir.path(),
+        ),
+        &PLUGIN_BENCHES,
+    );
+    assert_eq!(run.exit, 0, "{}", run.text);
+    let report = run.report.as_ref().unwrap();
+    let ids: Vec<(&str, Status)> = report
+        .entries
+        .iter()
+        .map(|e| (e.id.as_str(), e.status))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            ("plugin/a/activate", Status::Filtered),
+            ("plugin/b/activate", Status::Filtered),
+            ("plugin/a/resident", Status::Record),
+            ("plugin/special/resident", Status::Record),
+            ("plugin/b/resident", Status::Record),
+            ("plugin/after_first_frame", Status::Filtered),
+            ("plugin/special/activate", Status::Filtered),
+        ]
+    );
+}
+
+/// A filter that leaves the whole `plugin` benchmark out leaves no plugin
+/// list, and the wildcard budgets stay one `filtered` entry each.
+#[test]
+fn runner_without_a_plugin_list_wildcard_budgets_stay_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = run(
+        &options(
+            PLUGIN_BUDGETS,
+            Target::Process,
+            &["--bench", "after_first"],
+            dir.path(),
+        ),
+        &PLUGIN_BENCHES,
+    );
+    assert_eq!(run.exit, 0, "{}", run.text);
+    let report = run.report.as_ref().unwrap();
+    assert!(report.plugins.is_empty());
+    assert_eq!(status(&run, "plugin/*/activate").status, Status::Filtered);
+    assert_eq!(status(&run, "plugin/after_first_frame").status, Status::Ok);
+}

@@ -162,7 +162,6 @@ const BENCHES: &[Bench] = &[
     review::BRIEF_5000,
     review::ATTRIBUTE_SESSION_50,
     review::REFRESH_ONE,
-    review::PLUGIN_ACTIVATE,
     review::OVERVIEW_ROUND_WARM,
     review::OVERVIEW_CLOUDPRINT,
     syntax::FIRST_SCREEN,
@@ -180,7 +179,6 @@ const BENCHES: &[Bench] = &[
     usage::ARCHIVE_MONTH,
     usage::COLD_READ_MONTH,
     usage::DISK_DAY_HEAVY,
-    usage::PLUGIN_ACTIVATE,
 ];
 
 fn main() -> ExitCode {

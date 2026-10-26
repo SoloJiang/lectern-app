@@ -1,32 +1,26 @@
 //! `usage/*` (docs/design/usage.md「性能」), step 1: the store driven by
 //! `lectern_usage::testing::Scenario` (no plugin, no executor) on the
 //! `heavy_days` fixture (30 heavy days ending yesterday, 20 repositories:
-//! about 180 000 fact rows), and `plugin/usage/activate` in process.
+//! about 180 000 fact rows).
 //!
 //! The fixture is written once per target process; a benchmark that writes
 //! (ingest, archive) copies the closed database into its scratch directory.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use std::cell::RefCell;
 
 use lectern_bench::{Bench, BenchError, Ctx, Measured, Samples, Value};
-use lectern_executor::Executor;
-use lectern_kernel::testing::TestKernel;
-use lectern_services::project::{ProjectKey, Projects};
+use lectern_services::project::ProjectKey;
 use lectern_services::session::{
-    Agent, Positioned, RawTokens, Record, SessionSource, Timestamp, TurnId, UsageKey, UsageOrigin,
-    UsageRecord,
+    Agent, Positioned, RawTokens, Record, Timestamp, TurnId, UsageKey, UsageOrigin, UsageRecord,
 };
 use lectern_services::usage::{LocalDate, ProjectRef, UsageQuery, UsageSnapshot, Window};
 use lectern_usage::testing::{
-    FakeProjects, FakeSessions, HEAVY_NOW, ManualTime, Scenario, TURN_BYTES, TableZone, heavy_days,
-    heavy_open, heavy_roots, synthetic_turns,
+    HEAVY_NOW, Scenario, TURN_BYTES, heavy_days, heavy_open, heavy_roots, synthetic_turns,
 };
-use lectern_usage::{UsageDeps, plugin};
 
 const DAY: i64 = 24 * 3_600_000;
 
@@ -491,60 +485,4 @@ fn disk_day_heavy(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
             (day * 396) >> 20
         ))),
     ])
-}
-
-/// `plugin/usage/activate`: the kernel's four timings of the plugin's
-/// activation (manifest, activate, commit, started; kernel「性能」), in
-/// process under a `TestKernel` with mock services. Measured here until
-/// the process-level plugin benchmarks (bench step 5) take over.
-pub const PLUGIN_ACTIVATE: Bench = Bench {
-    id: "plugin/usage/activate",
-    run: plugin_activate,
-};
-
-fn plugin_activate(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
-    let rounds = ctx.scale(30, 1);
-    let mut samples = Vec::new();
-    for round in 0..=rounds {
-        let time = ManualTime::new(HEAVY_NOW);
-        let (_, usage) = plugin(UsageDeps {
-            executor: Executor::manual(),
-            data_dir: ctx.scratch().join(format!("data-{round}")),
-            zone: Arc::new(TableZone::fixed(0)),
-        });
-        let kernel = TestKernel::new(usage.with_time(&time))
-            .mock::<dyn Projects>(Arc::new(FakeProjects::new()))
-            .mock::<dyn SessionSource>(Arc::new(FakeSessions::new(
-                "session-claude-code",
-                Agent::ClaudeCode,
-            )));
-        kernel
-            .activate()
-            .map_err(|e| BenchError::debug("activate", e))?;
-        // `TestKernel`'s name for the plugin under test.
-        let status = kernel
-            .inner()
-            .and_then(|k| k.status().into_iter().find(|s| s.id == "plugin-under-test"))
-            .ok_or_else(|| BenchError::new("no activation timings"))?;
-        let took = [
-            status.manifest_time,
-            status.activate_time,
-            status.commit_time,
-            status.started_time,
-        ]
-        .into_iter()
-        .flatten()
-        .sum::<Duration>();
-        // Round 0 warms up process-wide lazy state.
-        if round > 0 {
-            samples.push(took);
-        }
-        if ctx.scratch().join(format!("data-{round}")).exists() {
-            return Err(BenchError::new("the database was opened during activation"));
-        }
-    }
-    Ok(vec![Measured::new(
-        "plugin/usage/activate",
-        Value::Time(Samples(samples)),
-    )])
 }

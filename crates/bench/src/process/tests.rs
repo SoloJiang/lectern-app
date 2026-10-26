@@ -13,7 +13,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::*;
-use crate::wire::{ChildKind, FrameStats, Milestone, OpenTarget, Report, Request};
+use crate::wire::{ActivationKind, ChildKind, FrameStats, Milestone, OpenTarget, Report, Request};
 
 fn start() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_000_000)
@@ -130,11 +130,15 @@ impl Launcher for Fake {
             killed: AtomicBool::new(false),
         });
         let socket = PathBuf::from(launch.var(SOCKET_VAR).expect("the socket variable"));
+        let selection = launch
+            .var(PLUGINS_VAR)
+            .map(|value| value.to_string_lossy().into_owned());
         let (thread_inner, thread_state) = (Arc::clone(&inner), Arc::clone(&state));
         thread::spawn(move || {
             let mut probe = Probe {
                 pid,
                 index,
+                selection,
                 socket,
                 state: Arc::clone(&thread_state),
                 conn: None,
@@ -197,6 +201,8 @@ struct Probe {
     pid: u32,
     /// The launch's index, from 0.
     index: usize,
+    /// `LECTERN_BENCH_PLUGINS` of the launch.
+    selection: Option<String>,
     socket: PathBuf,
     state: Arc<State>,
     conn: Option<(BufReader<UnixStream>, UnixStream)>,
@@ -361,6 +367,63 @@ fn process_cold_start_stops_at_a_hook_error() {
     let error = message(fake.scheduler(quick()).cold_start(&program(), 2, 20));
     assert!(error.contains("hook missing_method"), "{error}");
     assert_eq!(fake.launches().len(), 1);
+}
+
+/// A launcher whose children answer `try_wait` only once they have exited:
+/// the runner's first look at the process comes after the whole life of a
+/// probe that connects late, writes and exits.
+struct Settled<'a>(&'a Fake);
+
+struct SettledChild(Box<dyn Launched>);
+
+impl Launcher for Settled<'_> {
+    fn launch(&self, launch: &Launch) -> io::Result<Box<dyn Launched>> {
+        Ok(Box::new(SettledChild(self.0.launch(launch)?)))
+    }
+}
+
+impl Launched for SettledChild {
+    fn pid(&self) -> u32 {
+        self.0.pid()
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<Exit>> {
+        let end = Instant::now() + Duration::from_secs(2);
+        loop {
+            let exit = self.0.try_wait()?;
+            if exit.is_some() || Instant::now() >= end {
+                return Ok(exit);
+            }
+            thread::sleep(ms(1));
+        }
+    }
+
+    fn kill_group(&mut self) {
+        self.0.kill_group();
+    }
+
+    fn kill(&mut self, pid: u32) {
+        self.0.kill(pid);
+    }
+}
+
+/// The runner looks at the socket (nothing there yet), then at the process,
+/// which by then has connected, written its `Error` and exited: the
+/// connection is still there to be taken, and what it wrote is the reason.
+#[test]
+fn process_a_probe_that_exits_at_once_is_still_heard() {
+    let fake = Fake::new(|p| {
+        thread::sleep(ms(50));
+        p.connect();
+        p.send(&Report::Error {
+            message: "hook missing_method".into(),
+        });
+        3
+    });
+    let launcher = Settled(&fake);
+    let scheduler = Scheduler::new(&launcher, &fake).with_limits(quick());
+    let error = message(scheduler.session(&program(), None));
+    assert!(error.contains("hook missing_method"), "{error}");
 }
 
 #[test]
@@ -944,4 +1007,362 @@ fn process_memory_stops_at_the_first_error() {
     assert!(error.contains("退出码 1"), "{error}");
     // The runs in flight may start one more each; not all nine.
     assert!(fake.launches().len() < 9, "{}", fake.launches().len());
+}
+
+// --- app/idle_empty, app/unclassified_children, plugin/* -------------------
+
+fn plugin_report(id: &str, state: &str, kinds: &[ActivationKind], us: [u64; 4]) -> PluginReport {
+    let micros = |n: u64| Some(Duration::from_micros(n));
+    PluginReport {
+        id: id.to_owned(),
+        state: state.to_owned(),
+        activation: kinds.to_vec(),
+        manifest: micros(us[0]),
+        activate: micros(us[1]),
+        commit: micros(us[2]),
+        started: micros(us[3]),
+    }
+}
+
+/// The probe of a program at rest: a quiescent kernel, `Ready` when the
+/// plugin set is trimmed, and the same `plugins` as the answer to every
+/// `Plugins`.
+fn serve(p: &mut Probe, plugins: &[PluginReport]) -> i32 {
+    p.first_frame(start());
+    p.send(&Report::Quiescent { epoch: 2 });
+    if p.selection.is_some() {
+        p.send(&Report::Ready);
+    }
+    while let Some(request) = p.request() {
+        match request {
+            Request::Epoch => p.send(&Report::Epoch(Some(2))),
+            Request::Plugins => {
+                for plugin in plugins {
+                    p.send(&Report::Plugin(plugin.clone()));
+                }
+                p.send(&Report::PluginsEnd);
+            }
+            Request::Quit => return 0,
+            _ => {}
+        }
+    }
+    0
+}
+
+fn git_plugin() -> PluginReport {
+    plugin_report(
+        "git",
+        "Active",
+        &[ActivationKind::AfterFirstFrame],
+        [1, 20, 3, 40],
+    )
+}
+
+fn selections(fake: &Fake) -> Vec<String> {
+    fake.launches()
+        .iter()
+        .map(|launch| {
+            launch
+                .var(PLUGINS_VAR)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+#[test]
+fn process_idle_footprints_take_each_launch_at_its_idle_sample() {
+    let fake = Fake::new(|p| serve(p, &[]));
+    let scheduler = fake.scheduler(quick());
+    let runs = scheduler.idle_footprints(&program(), 3).unwrap();
+    let mut bytes: Vec<u64> = runs
+        .into_iter()
+        .map(|run| match run {
+            Idle::Sample(bytes) => bytes,
+            Idle::NotQuiescent => panic!("not quiescent"),
+        })
+        .collect();
+    // The fake's footprint is 1000 bytes per pid; launches are 100, 101, 102.
+    bytes.sort_unstable();
+    assert_eq!(bytes, [100_000, 101_000, 102_000]);
+    // One at a time (the windows of launches at once cover each other).
+    assert_eq!(fake.max_live(), 1);
+}
+
+#[test]
+fn process_idle_footprints_report_a_launch_that_never_quiesces() {
+    let fake = Fake::new(|p| {
+        p.first_frame(start());
+        p.obey(None)
+    });
+    let limits = Limits {
+        first_quiescent: ms(100),
+        ..quick()
+    };
+    let runs = fake
+        .scheduler(limits)
+        .idle_footprints(&program(), 2)
+        .unwrap();
+    assert_eq!(runs, [Idle::NotQuiescent, Idle::NotQuiescent]);
+}
+
+#[test]
+fn process_plugin_pair_is_the_difference_of_two_launches() {
+    let fake = Fake::new(|p| serve(p, &[git_plugin()]));
+    let scheduler = fake.scheduler(quick());
+    let pair = scheduler.plugin_pair(&program(), "git").unwrap();
+    assert_eq!(selections(&fake), ["closure:git", "closure+self:git"]);
+    // Launches 100 (without) and 101 (with), 1000 bytes per pid.
+    assert_eq!((pair.without, pair.with), (100_000, 101_000));
+    assert_eq!(pair.resident(), 1_000);
+    assert_eq!(pair.difference(), 1_000);
+    // The four durations of the plugin in the launch with it.
+    assert_eq!(pair.activate, Duration::from_micros(1 + 20 + 3 + 40));
+}
+
+#[test]
+fn process_plugin_resident_is_zero_when_the_launch_with_it_is_smaller() {
+    let pair = PluginPair {
+        without: 5_000_000,
+        with: 4_900_000,
+        activate: ms(0),
+    };
+    assert_eq!(pair.resident(), 0);
+    assert_eq!(pair.difference(), -100_000);
+}
+
+#[test]
+fn process_plugin_counts_the_process_plugin_groups() {
+    // The launch with the plugin starts a process plugin (500, with a
+    // child 501), a language server (600) and an unnamed kind (700); only
+    // the process-plugin group is counted in the footprint.
+    let tree = HashMap::from([
+        (101, vec![]),
+        (500, vec![501]),
+        (501, vec![]),
+        (600, vec![]),
+        (700, vec![]),
+    ]);
+    let fake = Fake::with_tree(tree, |p| {
+        p.first_frame(start());
+        if p.selection.as_deref() == Some("closure+self:git") {
+            for (pid, kind) in [
+                (500, ChildKind::ProcessPlugin),
+                (600, ChildKind::LanguageServer),
+                (700, ChildKind::Other),
+            ] {
+                p.send(&Report::Child {
+                    pid,
+                    kind,
+                    id: format!("child {pid}"),
+                });
+            }
+        }
+        p.send(&Report::Quiescent { epoch: 2 });
+        p.send(&Report::Ready);
+        while let Some(request) = p.request() {
+            match request {
+                Request::Epoch => p.send(&Report::Epoch(Some(2))),
+                Request::Plugins => {
+                    p.send(&Report::Plugin(git_plugin()));
+                    p.send(&Report::PluginsEnd);
+                }
+                Request::Quit => return 0,
+                _ => {}
+            }
+        }
+        0
+    });
+    let scheduler = fake.scheduler(quick());
+    let pair = scheduler.plugin_pair(&program(), "git").unwrap();
+    assert_eq!(pair.without, 100_000);
+    assert_eq!(pair.with, (101 + 500 + 501) * 1_000);
+    assert_eq!(pair.resident(), (1 + 500 + 501) * 1_000);
+}
+
+#[test]
+fn process_plugin_measures_two_more_pairs_when_the_first_is_over() {
+    let fake = Fake::new(|p| serve(p, &[git_plugin()]));
+    let scheduler = fake.scheduler(quick());
+    let pairs = scheduler.plugin(&program(), "git", |_| false).unwrap();
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(fake.launches().len(), 2);
+    let pairs = scheduler.plugin(&program(), "git", |_| true).unwrap();
+    assert_eq!(pairs.len(), 3);
+    assert_eq!(fake.launches().len(), 2 + 6);
+    // One at a time: the activation times are timings.
+    assert_eq!(fake.max_live(), 1);
+}
+
+#[test]
+fn process_plugin_that_did_not_activate_has_no_activation_time() {
+    let failed = plugin_report(
+        "git",
+        "Failed",
+        &[ActivationKind::AfterFirstFrame],
+        [1, 1, 1, 1],
+    );
+    let fake = Fake::new(move |p| serve(p, std::slice::from_ref(&failed)));
+    let error = message(fake.scheduler(quick()).plugin_pair(&program(), "git"));
+    assert!(error.contains("Failed"), "{error}");
+
+    let mut partial = git_plugin();
+    partial.started = None;
+    let fake = Fake::new(move |p| serve(p, &[partial.clone()]));
+    let error = message(fake.scheduler(quick()).plugin_pair(&program(), "git"));
+    assert!(error.contains("四段耗时不全"), "{error}");
+
+    let other = plugin_report("other", "Active", &[], [1, 1, 1, 1]);
+    let fake = Fake::new(move |p| serve(p, std::slice::from_ref(&other)));
+    let error = message(fake.scheduler(quick()).plugin_pair(&program(), "git"));
+    assert!(error.contains("没有插件 git"), "{error}");
+}
+
+#[test]
+fn process_plugin_that_is_not_quiescent_is_an_error() {
+    let fake = Fake::new(|p| {
+        p.first_frame(start());
+        p.send(&Report::Ready);
+        p.obey(None)
+    });
+    let limits = Limits {
+        first_quiescent: ms(100),
+        ..quick()
+    };
+    let error = message(fake.scheduler(limits).plugin_pair(&program(), "git"));
+    assert!(error.contains("没有静止"), "{error}");
+}
+
+#[test]
+fn process_plugin_that_fails_to_start_is_an_error_at_once() {
+    let fake = Fake::new(|p| {
+        p.first_frame(start());
+        p.send(&Report::PluginFailed {
+            id: "git".into(),
+            message: "boom".into(),
+        });
+        p.ignore()
+    });
+    let started = Instant::now();
+    let error = message(fake.scheduler(quick()).plugin_pair(&program(), "git"));
+    assert!(error.contains("git") && error.contains("boom"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn process_after_first_frame_adds_up_the_plugins_that_activate_after_it() {
+    let plugins = [
+        plugin_report(
+            "a",
+            "Active",
+            &[ActivationKind::AfterFirstFrame],
+            [1, 2, 3, 4],
+        ),
+        // Another condition besides `AfterFirstFrame`, in any position.
+        plugin_report(
+            "b",
+            "Active",
+            &[ActivationKind::Workspace, ActivationKind::AfterFirstFrame],
+            [10, 20, 30, 40],
+        ),
+        // Not activated after the first frame: not counted, not checked.
+        plugin_report("c", "Inactive", &[ActivationKind::Command], [100, 0, 0, 0]),
+        plugin_report("d", "Active", &[ActivationKind::Manual], [1_000, 0, 0, 0]),
+    ];
+    assert_eq!(
+        after_first_frame_time(&plugins).unwrap(),
+        Duration::from_micros(10 + 100)
+    );
+    let mut broken = plugins.to_vec();
+    broken[0].state = "Failed".into();
+    assert!(after_first_frame_time(&broken).is_err());
+    assert_eq!(after_first_frame_time(&[]).unwrap(), Duration::ZERO);
+}
+
+#[test]
+fn process_after_first_frame_launches_one_at_a_time() {
+    let plugins = [
+        plugin_report(
+            "a",
+            "Active",
+            &[ActivationKind::AfterFirstFrame],
+            [1, 2, 3, 4],
+        ),
+        plugin_report("c", "Inactive", &[ActivationKind::Command], [0, 0, 0, 0]),
+    ];
+    let fake = Fake::new(move |p| serve(p, &plugins));
+    let sums = fake
+        .scheduler(quick())
+        .after_first_frame(&program(), 3)
+        .unwrap();
+    assert_eq!(sums, Samples(vec![Duration::from_micros(10); 3]));
+    assert_eq!(fake.launches().len(), 3);
+    assert_eq!(fake.max_live(), 1);
+}
+
+#[test]
+fn process_plugin_list_comes_from_an_idle_launch() {
+    let plugins = [
+        git_plugin(),
+        plugin_report("b", "Active", &[], [0, 0, 0, 0]),
+    ];
+    let answer = plugins.clone();
+    let fake = Fake::new(move |p| serve(p, &answer));
+    let list = fake.scheduler(quick()).plugin_list(&program()).unwrap();
+    assert_eq!(list, plugins);
+    assert_eq!(selections(&fake), [""], "the whole profile: no selection");
+}
+
+#[test]
+fn process_unclassified_children_leave_out_the_reported_groups() {
+    // The main process (100) has a process plugin (200, child 201), an
+    // unnamed child (300) that a `Child` report calls `Other`, and one
+    // nobody reported (400, child 401). A language server (500) is
+    // reported and also counted nowhere; it is not unclassified.
+    let tree = HashMap::from([
+        (100, vec![200, 300, 400, 500]),
+        (200, vec![201]),
+        (201, vec![]),
+        (300, vec![]),
+        (400, vec![401]),
+        (401, vec![]),
+        (500, vec![]),
+    ]);
+    let fake = Fake::with_tree(tree, |p| {
+        p.first_frame(start());
+        for (pid, kind) in [
+            (200, ChildKind::ProcessPlugin),
+            (300, ChildKind::Other),
+            (500, ChildKind::LanguageServer),
+        ] {
+            p.send(&Report::Child {
+                pid,
+                kind,
+                id: format!("child {pid}"),
+            });
+        }
+        p.send(&Report::Quiescent { epoch: 2 });
+        p.obey(Some(2))
+    });
+    let found = fake
+        .scheduler(quick())
+        .unclassified_children(&program())
+        .unwrap();
+    assert_eq!(
+        found,
+        Unclassified {
+            processes: 3,
+            bytes: (300 + 400 + 401) * 1_000,
+        }
+    );
+}
+
+#[test]
+fn process_unclassified_children_of_a_program_without_children_are_zero() {
+    let fake = Fake::new(|p| serve(p, &[]));
+    let found = fake
+        .scheduler(quick())
+        .unclassified_children(&program())
+        .unwrap();
+    assert_eq!(found, Unclassified::default());
 }

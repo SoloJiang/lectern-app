@@ -58,7 +58,11 @@ bench *args:
         if [[ "${1-}" == --measure ]]; then shift; fi
         # The empty GPUI window of the baseline/* benchmarks.
         cargo build --release --locked -p lectern-bench --all-features --example empty_window
+        # The measurement build of lectern (the release build plus the probe)
+        # of the app/* and plugin/* benchmarks.
+        cargo build --release --locked -p lectern-app --features bench-probe
         export LECTERN_BENCH_BASELINE="$PWD/target/release/examples/empty_window"
+        export LECTERN_BENCH_APP="$PWD/target/release/lectern"
         cargo bench --locked --no-fail-fast -p lectern-bench --all-features -- "$@" || true
     elif [[ "${1-}" == --measure ]]; then
         shift
