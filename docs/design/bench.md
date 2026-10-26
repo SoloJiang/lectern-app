@@ -239,7 +239,7 @@ pub enum Report {
     PluginsEnd,
     /// 所选插件之一进入 `Failed`（`attach` 等待 `Ready` 期间和之后都检查），立即发出。
     PluginFailed { id: String, message: String },
-    /// 还不带来源：随它的使用方（`frame::record`，即 platform 的 B2，和第 5 步）一起加上（ADR 0052）。
+    /// 还不带来源：随第一个把里程碑预算改为生效的 PR 加上（ADR 0052）。第 5 步的预算不用里程碑（[app 设计「测量构建的装配」](app.md#测量构建的装配)）。
     Milestone { milestone: Milestone, presented: SystemTime },
     Frames(FrameStats),
     /// Lectern 启动的子进程，内存基准按类别分别统计（ADR 0018）。
@@ -275,7 +275,7 @@ pub enum OpenTarget {
 /// 一段滚动或动画的逐帧时刻，按帧顺序。只有 `platform` 的 `FrameProblems` 干净的记录才会发出（见 `Probe::frames`）；
 /// `without_tick` 是不是 display link 发起的帧数（`requested` 取 `started`），只报告。
 pub struct FrameStats { pub scenario: String, pub refresh: Duration, pub frames: Vec<FrameTimes>, pub without_tick: u32 }
-/// `presented` 为 None：这一帧没有显示时刻。来源与 `Milestone` 一样，随 B2 和第 5 步加上（ADR 0052）。只报告，不判定。
+/// `presented` 为 None：这一帧没有显示时刻。来源随第一个把帧时间预算改为生效的 PR 加上（ADR 0052；`platform` 的 B2 已给出 `PresentedAt`）。只报告，不判定。
 pub struct FrameTimes { pub requested: SystemTime, pub started: SystemTime, pub completed: SystemTime, pub presented: Option<SystemTime> }
 pub enum ChildKind { ProcessPlugin, LanguageServer, Other }
 
@@ -950,7 +950,7 @@ CI：
 
 ## 验收
 
-分五步，每步一个 PR。前四步写 `Refs #7`，第 5 步写 `Closes #7`。之后各 crate 的基准由实现它们的 PR 加入（见「预算表」），[#38](https://github.com/SoloJiang/lectern-app/issues/38) 另行关闭：它的 PR 加入打包任务，在任务里运行 `lectern-bench-report package` 和 `merge --require package`，把 `app/bundle_size`、`app/dmg_size` 改为 `Active`；普通的 `just bench` 里它们仍是 `skipped`。
+分五步。前四步每步一个 PR，写 `Refs #7`；第 5 步按 crate 分两个 PR（AGENTS.md「工作方式」）：5a 是 `app` 的测量构建，写 `Refs #7`；5b 是 `bench` 的 `app/*`、`plugin/*` 进程级目标和 `just bench` 的改动，写 `Closes #7`。之后各 crate 的基准由实现它们的 PR 加入（见「预算表」），[#38](https://github.com/SoloJiang/lectern-app/issues/38) 另行关闭：它的 PR 加入打包任务，在任务里运行 `lectern-bench-report package` 和 `merge --require package`，把 `app/bundle_size`、`app/dmg_size` 改为 `Active`；普通的 `just bench` 里它们仍是 `skipped`。
 
 1. **运行器、预算表与迁移**（`bench`，同时删除 `agents`、`platform` 里的 `perf_smoke`）
    - `just test -p lectern-bench` 里 `stats_*`、`budgets_*`、`runner_*`、`report_*`、`report_merge_*`、`alloc_*` 通过。
@@ -973,7 +973,9 @@ CI：
    - macOS CI 上 `just bench baseline/` 报告 `baseline/empty_window_cold_start` 的 20 个样本和 `baseline/empty_window_idle`。
    - 托管 runner 和判定机器的实测值、机器信息写进 ADR 0017（ADR 0017「影响」要求的基线，以判定机器的为准，ADR 0052）；判定机器上不满足 `app/cold_start` 的判定规则（20 次里超过 20 ms 的多于 1 次，或有一次超过 30 ms）时告诉产品负责人，按 ADR 0017「影响」由产品负责人决定。托管 runner 的部分已完成；判定机器的部分等 runner 注册之后完成（「实际验证」第 4 步）。
    - 运行器读 `LECTERN_BENCH_JUDGE`：没有设置时判定机器的条目只记录并写明原因；设为 `1` 时照常判定，首帧的来源为 `handler` 是错误；其他值、设为 `1` 而运行不判定、或设为 `1` 而判定机器的条目一条都没有运行时退出码 2（ADR 0052，「平台与噪声」）。
-5. **`app` 的测量构建与应用级基准**（`app`，`Closes #7`；先合并 `app` 的设计文档。发布构建不带 binary archive，见 [ADR 0049](../adr/0049.md)）
+5. **`app` 的测量构建与应用级基准**（先合并 `app` 的设计文档「测量构建的装配」。发布构建不带 binary archive，见 [ADR 0049](../adr/0049.md)）
+   - 5a（`app`，`Refs #7`）：按 [app 设计「验收」](app.md#验收)的「测量构建」一步。
+   - 5b（`bench`，`Closes #7`，在 5a 之后）：`benches/process.rs` 加上 `app/cold_start`、`app/cold_start_purged`、`app/idle_empty`、`plugin/*` 的目标（`plugin/project/resident_*` 先 `Open(Project(<夹具>))`），`justfile` 的 `bench` 构建测量用的 `lectern` 并设 `LECTERN_BENCH_APP`。
    - `cargo build --release --locked -p lectern-app --features bench-probe` 成功；`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-bench`，也没有 `"test-support"` 和 `"bench-hooks"`（发布构建不含方法替换，ADR 0048）。
    - 判定机器（`Judge (physical Mac)`）判定 `app/cold_start`、记录 `app/cold_start_purged`，托管 runner 上两者只记录（ADR 0052）；macOS CI 的 `Benchmarks (macOS arm64)` 判定 `app/idle_empty`、`plugin/*/activate`、`plugin/after_first_frame`，记录 `plugin/*/resident`。
    - 本文状态行改为「已实现」并列出五个 PR，填写「实际验证」。
@@ -1164,3 +1166,4 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
   - 判定机器之外，判定机器的条目在测量运行里是 `record`，检查照常运行但不决定状态，所以不会是 `over`，也不重跑；值的类型与检查不符仍是 `error`，坏掉的基准在托管 runner 上也看得到。
 - 首帧的时刻按 [ADR 0052](../adr/0052.md)：托管 runner 从不给 `presentedTime`，原设计的首帧回调在那里永远不到。`FirstFrame` 多了 `source`（`presented` 或 `handler`，缺少或不认识时整行无效），`Scheduler::cold_start` 返回 `ColdStart`（样本和每个样本的来源），`Session` 多了 `source()`。`wire::Milestone` 和 `wire::FrameTimes` 的形状不变，来源随它们的使用方（B2 和第 5 步）加上。「报告协议」「探针」「进程调度」「进程级基准」已改。
 - 静止后的等待覆盖到第一次 `Epoch` 的应答：应答之前收到的 `Busy` 也让等待重新开始，不计为无效样本。原来的文字只说 5 秒内收到 `Busy` 就重新等，`Busy` 和新的 `Quiescent` 恰好在 5 秒之后、第一次应答之前到达时，两次应答是同一个新的代数，样本会在新的静止之后不到 5 秒取得。「进程级基准」已改。
+- 第 5 步（设计阶段的修改）：按 crate 分成 5a（`app`，`Refs #7`）和 5b（`bench`，`Closes #7`），原来写的是一个 `app` 的 PR 写 `Closes #7`，与 AGENTS.md「工作方式」的「各 crate 分别提 PR」不一致。报告协议里 `Milestone`、`FrameTimes` 的来源原来写随 B2 和第 5 步加上，改为随第一个把里程碑或帧时间预算改为生效的 PR：第 5 步生效的预算（`app/cold_start`、`app/idle_empty`、`plugin/*`）都不用它们，提前加上没有使用方，也没法验证（[app 设计「测量构建的装配」](app.md#测量构建的装配)「里程碑与帧」）。
