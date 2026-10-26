@@ -1,7 +1,8 @@
-//! The error of the measurement build's method replacements, shared by
-//! [`crate::frame`] (and `metal`, if it is ever built): 「测量构建的方法替换」
-//! in docs/design/platform.md, ADR 0048. It compiles on every platform and
-//! with or without the `bench-hooks` feature, so that callers need no `cfg`.
+//! The error of the measurement build's method replacements, used by
+//! [`crate::frame`]: 「测量构建的方法替换」 in docs/design/platform.md,
+//! ADR 0048 (there is no `metal` module, ADR 0049). It compiles on every
+//! platform and with or without the `bench-hooks` feature, so that callers
+//! need no `cfg`.
 
 use std::fmt;
 use std::io;
@@ -27,7 +28,7 @@ pub enum HookError {
     /// expected one: the locked GPUI or the system framework changed. `what`
     /// is "class selector".
     Mismatch { what: String },
-    /// A system call failed: creating a CVDisplayLink, opening an archive.
+    /// A system call failed, such as creating a CVDisplayLink.
     Os(io::Error),
 }
 

@@ -26,6 +26,11 @@ pub struct Budget {
     /// workspace builds there alone): off macOS the entry is `skipped`
     /// (「只在 macOS 运行」), not an error for a missing benchmark.
     pub macos_only: bool,
+    /// Judged, and for ADR 0017's baselines recorded, on the judging
+    /// machine only (ADR 0052): the measured time ends at the first frame,
+    /// which the hosted runner never shows. A measure run elsewhere (no
+    /// `LECTERN_BENCH_JUDGE=1`) records the entry and says why.
+    pub judging_machine: bool,
 }
 
 /// Where a budget's result comes from. `Package` is not a benchmark target:
@@ -201,6 +206,7 @@ const fn top(
         state,
         target,
         macos_only: false,
+        judging_machine: false,
     }
 }
 
@@ -219,6 +225,7 @@ const fn share(
         state,
         target,
         macos_only: false,
+        judging_machine: false,
     }
 }
 
@@ -236,8 +243,15 @@ const fn share_macos(
     }
 }
 
+/// A budget for the judging machine ([`Budget::judging_machine`]).
+const fn on_judging_machine(budget: Budget) -> Budget {
+    Budget {
+        judging_machine: true,
+        ..budget
+    }
+}
+
 const ACTIVE: State = State::Active;
-const STEP_4: State = State::Planned("bench 第 4 步");
 const STEP_5: State = State::Planned("bench 第 5 步");
 
 use Target::{Memory, Package, Process, Time};
@@ -245,7 +259,7 @@ use Target::{Memory, Package, Process, Time};
 /// The budget table (docs/design/bench.md「预算表」).
 pub static BUDGETS: &[Budget] = &[
     // ---- top level (Tier::Top) -------------------------------------------
-    top(
+    on_judging_machine(top(
         "app/cold_start",
         &[
             Check {
@@ -257,14 +271,14 @@ pub static BUDGETS: &[Budget] = &[
         ADR_0017_DECISION,
         STEP_5,
         Process,
-    ),
-    top(
+    )),
+    on_judging_machine(top(
         "app/cold_start_purged",
         RECORD,
         ADR_0017_IMPACT,
         STEP_5,
         Process,
-    ),
+    )),
     top(
         "app/idle_empty",
         &[median(Limit::BytesBelow(60 * MB))],
@@ -509,20 +523,20 @@ pub static BUDGETS: &[Budget] = &[
         STEP_5,
         Process,
     ),
-    top(
+    on_judging_machine(top(
         "baseline/empty_window_cold_start",
         RECORD,
         ADR_0017_IMPACT,
-        STEP_4,
+        ACTIVE,
         Process,
-    ),
-    top(
+    )),
+    on_judging_machine(top(
         "baseline/empty_window_idle",
         RECORD,
         ADR_0017_IMPACT,
-        STEP_4,
+        ACTIVE,
         Process,
-    ),
+    )),
     // ---- shares (Tier::Share) --------------------------------------------
     share(
         "plugin/*/activate",

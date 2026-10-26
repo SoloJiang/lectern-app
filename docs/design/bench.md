@@ -1,6 +1,6 @@
 # bench 设计
 
-状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4、5 步尚未实现（见「验收」）；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。
+状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4 步（探针、进程调度与空窗口基线）已实现，依赖 [ADR 0051](../adr/0051.md)，首帧的时刻和判定的机器按 [ADR 0052](../adr/0052.md)（drawable 没有 `presentedTime` 时取显示回调运行的时刻，结果注明来源；首帧要真正显示的条目只在判定机器上判定，见「平台与噪声」），托管 runner 上空窗口基线的记录已写进「实际验证」和 ADR 0017，判定机器的基线在 runner 注册之后补上；第 5 步尚未实现（见「验收」）；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。
 
 对应 issue [#7](https://github.com/SoloJiang/lectern-app/issues/7)；安装包体积检查 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 复用本 crate 的运行器和预算表。`bench` 测量[性能预算](tech-research.md#性能预算)、[ADR 0017](../adr/0017.md)、[ADR 0018](../adr/0018.md) 和各 crate 设计文档「性能」一节里的每一项，打印实测值与预算，在 Apple 芯片的 macOS 上超标即以非 0 退出码让 CI 失败。
 
@@ -31,10 +31,11 @@
 | 标准库 | 计时（`Instant`）、计数分配器、子进程、Unix 域 socket | 运行器自己写，见下表 |
 | `serde_json`（工作区已有） | 写 JSON 报告 | 已在依赖图里，不新增包 |
 | `lectern-kernel`（可选，`probe` feature） | 探针插件、裁剪插件集合 | kernel 层 |
-| `lectern-platform`（可选，`probe` feature，同时打开它的 `bench-hooks`） | 注册首帧回调。`bench-hooks` 是 `platform` 里方法替换的 feature，只有 `probe` 打开它，所以只在测量构建里（[ADR 0048](../adr/0048.md)） | 基础设施层 |
-| dev：`lectern-agents`、`lectern-cache`、`lectern-git`、`lectern-kernel`、`lectern-i18n`、`lectern-project`（各自打开 `test-support`），`lectern-platform`、`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`tempfile`、`insta` | 进程内基准的被测代码与夹具；单元测试的临时目录与快照 | 只编译进基准目标和测试 |
+| `lectern-platform`（`probe` feature 同时打开它的 `bench-hooks`） | `main` 设置基准线程的 QoS，报告的 `host`，进程级基准读进程的创建时间、`phys_footprint` 和子进程；`probe` 注册首帧回调。`bench-hooks` 是 `platform` 里方法替换的 feature，只有 `probe` 打开它，所以只在测量构建里（[ADR 0048](../adr/0048.md)） | 基础设施层 |
+| `tempfile`（工作区已有） | 进程级基准每次启动的临时目录：socket 和临时 `HOME` | 在系统临时目录下，socket 路径不超过 macOS `sun_path` 的 104 字节 |
+| dev：`lectern-agents`、`lectern-cache`、`lectern-git`、`lectern-kernel`、`lectern-i18n`、`lectern-project`（各自打开 `test-support`），`lectern-executor`、`lectern-services`（只用公开接口，不需要 `test-support`），`insta`；`libc`、`futures`（工作区已有） | 进程内基准的被测代码与夹具；单元测试的快照；`benches/process.rs` 向进程组发 `SIGKILL`（POSIX 的 `kill`，不是 macOS 专属）；`empty_window` 示例里探针线程请主线程退出的通道 | 只编译进基准目标、示例和测试；`futures` 不只为 macOS 声明，因为只为 Apple 平台声明的外部依赖算作系统绑定（架构规则 6） |
 | dev（只在 macOS）：`gpui`（`test-support`）、`lectern-ui` | `ui/*` 基准（[ui 设计「性能」](ui.md#性能)）：`Transition::tick` 要在一个视图的 render 里跑，所以用 GPUI 的测试平台开一个窗口 | 只在 macOS 声明，Linux 上本 crate 仍不依赖 GPUI（架构检查第 4 条只把外部的、非 GPUI 的 Apple 专属依赖算作绑定）；对应的预算标 `macos_only`，Linux 上记为 `skipped` |
-| 以后的 dev（只在 macOS）：`gpui_platform` | `empty_window` 示例程序 | 同上 |
+| dev（只在 macOS）：`gpui_platform` | `empty_window` 示例程序 | 同上 |
 | 以后的 dev：其他插件 crate | 随这些 crate 的实现加入；`lectern-project` 随它的第 5 步加入 | tool 层可以依赖任何层，包括插件 crate（[ADR 0025](../adr/0025.md)） |
 
 本 crate 不新增任何外部 crate，`just deny` 与 `Cargo.lock` 的外部部分不变。
@@ -115,6 +116,9 @@ impl Ctx {
     pub fn once<R>(&mut self, f: impl FnMut() -> R) -> Samples;
     /// 本目标进程里按 `key` 共享的只读夹具：第一次调用 `build`，之后的基准和重跑拿到同一份（见「夹具与 `test-support`」）。
     pub fn shared<T: 'static>(&self, key: &str, build: impl FnOnce() -> Result<T, BenchError>) -> Result<Rc<T>, BenchError>;
+    /// 这次运行在判定机器上（`LECTERN_BENCH_JUDGE=1`，ADR 0052，见「平台与噪声」）。
+    /// 产出判定机器条目的进程级基准把它交给 `Scheduler::judging`。
+    pub fn judge(&self) -> bool;
 }
 
 /// `memory` 基准目标的全局分配器：包装 `System`，用两个 `AtomicUsize` 记录存活字节与峰值。
@@ -130,6 +134,7 @@ impl CountingAlloc {
 /// `--list` 只列出 ID 与预算），检查与预算表的对应，按 ID 顺序运行，写报告，返回退出码。
 /// `tmp_dir` 是基准目标的 `env!("CARGO_TARGET_TMPDIR")`（库代码编译时没有这个变量）：
 /// `scratch()` 在它下面，报告写在它的上一级（target 目录）的 `lectern-bench/` 里。
+/// 运行之前读环境变量 `LECTERN_BENCH_JUDGE`：`1` 是判定机器，没有设置或为空不是，其他值以 2 退出、不写报告（ADR 0052）。
 pub fn main(target: Target, tmp_dir: &str, benches: &[Bench]) -> ExitCode;
 
 /// 基准出错（夹具生成失败、被测操作返回错误）。实现了 `std::error::Error` 的错误可以直接用 `?`；
@@ -164,6 +169,9 @@ pub struct Budget {
     /// 基准只在 macOS 上编译（要 GPUI）：其他平台上这一条记为 `skipped`（只在 macOS 运行），
     /// 不算「预算没有对应的基准」。
     pub macos_only: bool,
+    /// 判定机器的条目（ADR 0052）：测量的时间止于首帧，或是以判定机器的结果为 ADR 0017 基线的条目。
+    /// 只在判定机器上判定；别处的测量运行把它记为 `record`，原因写明这里不是判定机器（见「平台与噪声」）。
+    pub judging_machine: bool,
 }
 
 /// `Package` 不是基准目标：由打包流程调用 `lectern-bench-report package` 产出，`just bench` 不产出它（见「报告」）。
@@ -212,12 +220,14 @@ pub enum State {
 
 ### 报告协议（`lectern_bench::wire`，默认编译）
 
-运行器和探针之间用一条 Unix 域 socket 通信，一行一条消息，UTF-8，形如 `first-frame pid=812 presented_unix_ns=…`：第一个词是消息名，其余是 `key=value`，值用百分号编码（空格、`%`、换行和非 UTF-8 字节）。
+运行器和探针之间用一条 Unix 域 socket 通信，一行一条消息，UTF-8，形如 `first-frame pid=812 presented_unix_ns=… source=presented`：第一个词是消息名，其余是 `key=value`，值用百分号编码（空格、`%`、换行和非 UTF-8 字节）。
 
 ```rust
 /// 探针 → 运行器。
 pub enum Report {
-    FirstFrame { pid: u32, presented: SystemTime },
+    /// 首帧的时刻和来源（ADR 0052）：`source` 为 `presented`（`presentedTime`）或 `handler`（显示回调运行的时刻），
+    /// 缺少或不认识时整行无效。`TimeSource` 就是 `platform::frame::TimeSource`，`wire` 重新导出。
+    FirstFrame { pid: u32, presented: SystemTime, source: TimeSource },
     Busy { epoch: u64 },
     Quiescent { epoch: u64 },
     /// 所选插件都已进入 Active（裁剪了插件集合时，或应答 `Request::ActivateAll` 时发出）。
@@ -229,6 +239,7 @@ pub enum Report {
     PluginsEnd,
     /// 所选插件之一进入 `Failed`（`attach` 等待 `Ready` 期间和之后都检查），立即发出。
     PluginFailed { id: String, message: String },
+    /// 还不带来源：随它的使用方（`frame::record`，即 platform 的 B2，和第 5 步）一起加上（ADR 0052）。
     Milestone { milestone: Milestone, presented: SystemTime },
     Frames(FrameStats),
     /// Lectern 启动的子进程，内存基准按类别分别统计（ADR 0018）。
@@ -264,7 +275,7 @@ pub enum OpenTarget {
 /// 一段滚动或动画的逐帧时刻，按帧顺序。只有 `platform` 的 `FrameProblems` 干净的记录才会发出（见 `Probe::frames`）；
 /// `without_tick` 是不是 display link 发起的帧数（`requested` 取 `started`），只报告。
 pub struct FrameStats { pub scenario: String, pub refresh: Duration, pub frames: Vec<FrameTimes>, pub without_tick: u32 }
-/// `presented` 为 None：这一帧没有显示（`presentedTime` 为 0）。只报告，不判定。
+/// `presented` 为 None：这一帧没有显示时刻。来源与 `Milestone` 一样，随 B2 和第 5 步加上（ADR 0052）。只报告，不判定。
 pub struct FrameTimes { pub requested: SystemTime, pub started: SystemTime, pub completed: SystemTime, pub presented: Option<SystemTime> }
 pub enum ChildKind { ProcessPlugin, LanguageServer, Other }
 
@@ -286,16 +297,17 @@ impl Probe {
     pub fn from_env() -> Option<Probe>;
 
     /// 首帧之前、创建窗口之前调用：通过 `platform::frame::on_first_presented` 注册回调。
-    /// 回调只记下时刻，然后在一个新线程上连接 socket、发出 `FirstFrame`，之后由这个线程应答请求。
+    /// 回调只记下时刻和来源（`PresentedAt`，ADR 0052），然后在一个新线程上连接 socket、发出 `FirstFrame`，之后由这个线程应答请求。
     /// 注册出错（`HookError`，如 GPUI 升级后方法的类型编码变了）时立即连接 socket，发出 `Error { message: "hook <HookError::as_str()>" }`，
     /// 然后以退出码 3 退出：不能让运行器等到期限，也不能测出错的数字（ADR 0048）。
     pub fn watch_first_frame(&self);
 
     /// 首帧之后，代替 `Kernel::start` 调用：加入 `bench-probe` 插件并启动 kernel。
-    /// 没有设置 `LECTERN_BENCH_PLUGINS` 时就是 `Kernel::start(set.with("bench-probe", ..))`，与发布构建走同一条路径。
-    /// 设置了时按它裁剪：`closure:<id>` 只留 `<id>` 的依赖闭包，`closure+self:<id>` 留依赖闭包加 `<id>`。
-    /// 裁剪用 `PluginSet::prepare` 取得的清单：每个插件的 `manifest()` 在整个启动里只调用一次，就是那次被计时的第一次调用，
+    /// 总是先 `PluginSet::prepare` 取得清单：每个插件的 `manifest()` 在整个启动里只调用一次，就是那次被计时的第一次调用，
     /// 之后 `Kernel::start_prepared` 直接用这些清单和耗时，不再调用 `manifest()`，`plugin/*/activate` 里的 manifest 一段因此与发布构建相同。
+    /// 没有设置 `LECTERN_BENCH_PLUGINS` 时不裁剪：`Plugins` 的应答和 `ActivateAll` 要用清单里的激活条件，`PluginStatus` 不带它们
+    /// （见「与设计的差异」第 4 步）。设置了时按它裁剪：`closure:<id>` 只留 `<id>` 的依赖闭包，`closure+self:<id>` 留依赖闭包加 `<id>`。
+    /// 变量的值无效或裁剪不了时发出 `Error`，整个集合照常启动。
     pub fn start_kernel(&self, set: PluginSet) -> Arc<Kernel>;
 
     /// `start_kernel` 之后调用。裁剪过插件集合时，逐个满足所选插件的激活条件：
@@ -303,6 +315,11 @@ impl Probe {
     /// `Workspace` 由 `bench-probe` 插件在 `started` 里提交一份对任何 pattern 都返回 true 的 `WorkspaceFacts`；
     /// 全部进入 Active 后发出 `Ready`。
     pub fn attach(&self, kernel: Arc<Kernel>, driver: Arc<dyn Driver>);
+
+    /// 没有 kernel 的程序（`empty_window`）代替 `attach` 调用，只交出 `Driver`：
+    /// `Epoch` 应答 None，`Plugins` 只应答 `PluginsEnd`，`ActivateAll` 应答 `Ready`。
+    /// `attach` 或 `drive` 之前到达的请求排队，之后按顺序处理。
+    pub fn drive(&self, driver: Arc<dyn Driver>);
 
     /// `app` 把 `workspace` 报告的里程碑转给探针，`presented` 是画出这一状态的帧显示的时刻。任意线程。
     pub fn milestone(&self, milestone: Milestone, presented: SystemTime);
@@ -328,6 +345,74 @@ pub trait Driver: Send + Sync {
 ```
 
 `bench-probe` 插件（`AfterFirstFrame`）监听 `Busy` / `Quiescent`，按 [kernel「静止」](kernel.md#静止)的规则丢弃序号过时的事件，记下序号转发给运行器，监听里不做别的工作，所以不会让 kernel 重新变忙。只在裁剪过插件集合时，它在 `started` 里提交那份 facts；整个 profile 的启动（`app/idle_empty`）不提交，`Workspace` 插件保持未激活，与用户打开空窗口时一致。kernel 设计里的合成 `bench-facts` 插件就是这一部分：只用 kernel 的公开接口（`PluginHandle::control().workspace_changed`），放在本 crate，kernel 不需要另外提供。
+
+### 进程调度（`lectern_bench::process`，默认编译）
+
+`benches/process.rs` 用 `std::process`（每个程序是新进程组的组长，`process_group(0)`）和 `platform::process` 实现两个 trait，`process_*` 用脚本化的假实现。
+
+```rust
+pub trait Launcher: Sync {
+    /// 以新进程组的组长启动 `launch.program`（组 ID 等于 pid），环境在运行器的之上按 `launch.env` 设置或删除。
+    fn launch(&self, launch: &Launch) -> io::Result<Box<dyn Launched>>;
+}
+pub trait Launched: Send {
+    fn pid(&self) -> u32;
+    fn try_wait(&mut self) -> io::Result<Option<Exit>>;
+    fn kill_group(&mut self);        // 向整个进程组发 SIGKILL
+    fn kill(&mut self, pid: u32);    // 离开了进程组的后代
+}
+pub trait ProcessInfo: Sync {
+    fn start_time(&self, pid: u32) -> io::Result<SystemTime>;
+    fn phys_footprint(&self, pid: u32) -> io::Result<u64>;
+    fn children(&self, pid: u32) -> io::Result<Vec<u32>>;
+}
+pub struct Launch { pub program: PathBuf, pub env: Vec<(OsString, Option<OsString>)> }
+pub struct Exit { pub code: Option<i32> }   // None：被信号结束
+/// 「进程级基准」表里的期限和静止后的等待；默认值就是那张表（10 s、30 s、30 s、10 s、10 s、5 s），测试里缩短。
+pub struct Limits { pub first_frame, pub first_quiescent, pub again, pub reply, pub quit, pub settle, pub poll: Duration }
+
+pub struct Scheduler<'a> { /* Launcher、ProcessInfo、Limits */ }
+impl Scheduler<'_> {
+    /// 判定机器上（`Ctx::judge` 为 true）每个首帧都要有 `presentedTime`：来源为 `handler` 的 `FirstFrame` 让会话出错，
+    /// 进程组被结束，基准记为 `error`（ADR 0052）。产出判定机器条目的基准都这样设置；默认为 false。
+    pub fn judging(self, judging: bool) -> Self;
+    /// 一次启动：新的 socket 和临时 `HOME`（都在一个临时目录里，会话结束后删除），设置 `LECTERN_BENCH_SOCKET`、
+    /// 可选的 `LECTERN_BENCH_PLUGINS`，删除 `LECTERN_LOG`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`；等到 `FirstFrame`，pid 必须是启动的那个。
+    pub fn session(&self, program: &Path, plugins: Option<&str>) -> Result<Session<'_>, BenchError>;
+    /// 冷启动：`warmups` 次不计入，再 `samples` 次，逐个启动；样本是 `presented - start_time(pid)`，同时记下每个样本的来源；
+    /// 每次都发 `Quit` 并等它退出。
+    pub fn cold_start(&self, program: &Path, warmups: usize, samples: usize) -> Result<ColdStart, BenchError>;
+    /// 内存类：最多 `MEMORY_PARALLEL`（3）个同时运行，判定机器上一次一个（同时打开的窗口互相遮住，被遮住的窗口不显示 drawable，
+    /// 首帧不到，ADR 0052）；第一个出错的结果返回，之后不再开始新的。
+    pub fn memory<T: Send>(&self, launches: usize, run: impl Fn(&Scheduler) -> Result<T, BenchError> + Sync) -> Result<Vec<T>, BenchError>;
+}
+/// 冷启动的样本，和按同样顺序的每个样本的首帧来源（ADR 0052）。
+pub struct ColdStart { pub samples: Samples, pub sources: Vec<TimeSource> }
+impl Session<'_> {
+    pub fn pid(&self) -> u32;
+    pub fn presented(&self) -> SystemTime;
+    pub fn source(&self) -> TimeSource;          // `presented` 的来源（ADR 0052）
+    pub fn children(&self) -> &[Spawned];       // 探针报告的 `Child`
+    pub fn footprint(&self) -> Result<u64, BenchError>;   // 主进程的 phys_footprint
+    pub fn settle_after_first_frame(&mut self) -> Result<(), BenchError>;   // 没有 kernel：首帧后 `settle`
+    /// kernel「静止」的采样规则；首帧后 `first_quiescent` 内没有 `Quiescent` 时返回 `Idle::NotQuiescent`。
+    pub fn idle<T>(&mut self, sample: impl FnMut(&mut Session) -> Result<T, BenchError>) -> Result<Idle<T>, BenchError>;
+    pub fn epoch(&mut self) -> Result<Option<u64>, BenchError>;
+    pub fn plugins(&mut self) -> Result<Vec<PluginReport>, BenchError>;
+    pub fn ready(&mut self) -> Result<(), BenchError>;
+    pub fn activate_all(&mut self) -> Result<(), BenchError>;
+    pub fn open(&mut self, target: OpenTarget, milestone: Milestone, limit: Duration) -> Result<Duration, BenchError>;
+    pub fn frames(&mut self, target: OpenTarget, limit: Duration) -> Result<FrameStats, BenchError>;
+    pub fn quit(self) -> Result<(), BenchError>;   // 退出码不是 0 也是错误
+}
+pub enum Idle<T> { Sample(T), NotQuiescent }
+/// 根进程及其全部后代：广度优先、按 pid 去重，展开期间已经退出的进程跳过。
+pub fn expand(info: &dyn ProcessInfo, roots: &[u32]) -> Vec<u32>;
+/// `sudo -n purge`；sudo 不存在、要密码或 purge 失败时为 false（`skipped`）。`path` 只替换这条命令的 `PATH`。
+pub fn purge(path: Option<&OsStr>) -> io::Result<bool>;
+```
+
+会话的每个等待都经过同一个循环：收到探针的 `Error`、`PluginFailed` 或无效的行，或者进程退出，立即出错；到期时出错，原因写明等的消息。出错时（会话被丢弃时进程还在运行）先读出进程树，再向整个进程组发 `SIGKILL`，然后结束离开了进程组的后代（含探针报告的 `Child` 根进程），最后才关闭 socket。进程退出时，它在退出前写下的报告仍然先读完，所以探针的 `hook <名字>` 是原因，而不只是「退出码 3」。
 
 ### 需要其他 crate 提供的接口
 
@@ -458,6 +543,7 @@ crates/bench/
   "version": 1,
   "mode": "measure",
   "gated": true,
+  "judge": false,
   "host": { "model": "Mac14,2", "chip": "Apple M2", "os_version": "15.6", "cpus": 8 },
   "commit": "<GITHUB_SHA，没有时为 null>",
   "results": [
@@ -474,6 +560,8 @@ crates/bench/
 ```
 
 结果的 `note`（`Measured::note`，最后一次尝试的）存在时写在结果对象里，没有时省略。
+
+`judge` 为 true 表示这次运行在判定机器上（ADR 0052），文本表和摘要的标题这时以「judging machine」结尾，如 `lectern-bench report: measure, gated, judging machine`。各份报告的 `mode`、`gated` 和 `judge` 必须相同，不同时合并按出错处理；没有 `judge` 的报告按 false 算。
 
 状态取以下之一：`ok`、`over`、`record`（只记录）、`planned`、`filtered`、`smoke`、`skipped`（附原因，如「只在 macOS 运行」「sudo 不可用」）、`error`（附原因）。
 
@@ -493,9 +581,9 @@ crates/bench/
 
 运行器从环境变量 `LECTERN_BENCH_APP`（`lectern` 的路径）和 `LECTERN_BENCH_BASELINE`（`empty_window` 的路径）取得被测程序，由 `just bench` 设置。每次启动：建一个新的 socket 和临时数据目录，带上 `LECTERN_BENCH_SOCKET` 等环境变量启动子进程，等它连上来。
 
-- 冷启动（`app/cold_start`、`baseline/empty_window_cold_start`）：先启动 2 次不计入（预热系统文件缓存），再启动 20 次。发布构建不带 binary archive（[ADR 0049](../adr/0049.md)），2 次预热同时填满系统的着色器缓存，测量的启动不含管线编译。探针注册首帧回调出错时发出 `Error { message: "hook <名字>" }` 并以退出码 3 退出，同样记为 `error`。每次收到 `FirstFrame` 后取 `presented - platform::process::start_time(pid)`，发 `Quit`，等进程退出（10 秒不退出就结束它并记为出错）。
+- 冷启动（`app/cold_start`、`baseline/empty_window_cold_start`）：先启动 2 次不计入（预热系统文件缓存），再启动 20 次。发布构建不带 binary archive（[ADR 0049](../adr/0049.md)），2 次预热同时填满系统的着色器缓存，测量的启动不含管线编译。探针注册首帧回调出错时发出 `Error { message: "hook <名字>" }` 并以退出码 3 退出，同样记为 `error`。每次收到 `FirstFrame` 后取 `presented - platform::process::start_time(pid)`，发 `Quit`，等进程退出（10 秒不退出就结束它并记为出错）。`presented` 是首帧的 `presentedTime`；机器不给时（托管 runner、锁屏），是显示回调运行的时刻（[ADR 0052](../adr/0052.md)）。这两条是判定机器的条目（「平台与噪声」）：判定机器上来源为 `handler` 的首帧让这次启动出错，基准记为 `error`，不取样本；别处的测量运行里两种来源的样本都只记录。结果的 `note` 写明超过 20 ms 的个数、最大值、两种来源各多少个，以及按启动顺序的每个样本（毫秒）。
 - 冷文件缓存（`app/cold_start_purged`）：`sudo -n purge` 之后启动 1 次，只记录（ADR 0017）。`sudo -n` 失败时记为 `skipped`。
-- 空闲内存（`app/idle_empty`）：启动 3 次，每次按 [kernel「静止」](kernel.md#静止)采样：收到 `Quiescent` 后等 5 秒，期间收到 `Busy` 就重新等；然后发 `Epoch`、读 `phys_footprint(pid)`、再发 `Epoch`，两次都是同一个 `Some(n)` 时样本有效，否则重新等静止，连续 3 次无效记为出错。首帧后 30 秒内没有静止记为 `over`（ADR 0017）。取 3 次的中位数。可暂停的后台工作（[ADR 0029](../adr/0029.md)，打开项目后的建索引）：运行器在静止后一律请求暂停，不看当时有没有后台工作，等 kernel 报告后台工作为「没有」或「全部已暂停」再开始 5 秒的等待，暂停一直保持到采样结束；`app/idle_monorepo` 因此测的是后台索引暂停时的内存。`Epoch` 的应答同时带上 kernel 的后台代数和后台工作状态：5 秒等待开始时和采样之后各取一次，两次的 `quiescent_epoch()` 和后台代数都相同、后台工作一直是「没有」或「全部已暂停」时样本才有效，否则按上面的规则重新等待。暂停请求和后台工作的字段随第 5 步加入报告协议。`app/idle_empty` 只计主进程。子进程按 ADR 0018 以进程组为单位统计：对 `Child` 报告的每个根进程，运行器用 `ProcessInfo::children` 逐层展开，得到根进程及其全部后代（广度优先，按 pid 去重；展开期间已经退出的进程跳过），这一组的 `phys_footprint` 之和是这个插件的内存。`app/idle_empty` 不计算 `plugin/process_total`：空窗口里按 `Workspace` / `Command` / `Manual` 激活的进程插件都没有启动。主进程的后代中不属于任何已报告进程组的（含 `ChildKind::Other`），合计记为 `app/unclassified_children`（只记录），用来发现没有报告的子进程。展开与读取在同一次采样里进行，前后两次 `Epoch` 检查同样覆盖它们。同一次启动里发 `Plugins`，激活条件里含 `AfterFirstFrame` 的插件（不论它排在第几项、是否还有别的条件）四段耗时之和给出 `plugin/after_first_frame`。`baseline/empty_window_idle` 没有 kernel，在首帧后 5 秒采样。
+- 空闲内存（`app/idle_empty`）：启动 3 次，每次按 [kernel「静止」](kernel.md#静止)采样：收到 `Quiescent` 后等 5 秒，期间收到 `Busy` 就重新等，第一次 `Epoch` 的应答到达之前收到的 `Busy` 也算在这段等待里；然后发 `Epoch`、读 `phys_footprint(pid)`、再发 `Epoch`，两次都是同一个 `Some(n)` 时样本有效，否则重新等静止，连续 3 次无效记为出错。首帧后 30 秒内没有静止记为 `over`（ADR 0017）。取 3 次的中位数。可暂停的后台工作（[ADR 0029](../adr/0029.md)，打开项目后的建索引）：运行器在静止后一律请求暂停，不看当时有没有后台工作，等 kernel 报告后台工作为「没有」或「全部已暂停」再开始 5 秒的等待，暂停一直保持到采样结束；`app/idle_monorepo` 因此测的是后台索引暂停时的内存。`Epoch` 的应答同时带上 kernel 的后台代数和后台工作状态：5 秒等待开始时和采样之后各取一次，两次的 `quiescent_epoch()` 和后台代数都相同、后台工作一直是「没有」或「全部已暂停」时样本才有效，否则按上面的规则重新等待。暂停请求和后台工作的字段随第 5 步加入报告协议。`app/idle_empty` 只计主进程。子进程按 ADR 0018 以进程组为单位统计：对 `Child` 报告的每个根进程，运行器用 `ProcessInfo::children` 逐层展开，得到根进程及其全部后代（广度优先，按 pid 去重；展开期间已经退出的进程跳过），这一组的 `phys_footprint` 之和是这个插件的内存。`app/idle_empty` 不计算 `plugin/process_total`：空窗口里按 `Workspace` / `Command` / `Manual` 激活的进程插件都没有启动。主进程的后代中不属于任何已报告进程组的（含 `ChildKind::Other`），合计记为 `app/unclassified_children`（只记录），用来发现没有报告的子进程。展开与读取在同一次采样里进行，前后两次 `Epoch` 检查同样覆盖它们。同一次启动里发 `Plugins`，激活条件里含 `AfterFirstFrame` 的插件（不论它排在第几项、是否还有别的条件）四段耗时之和给出 `plugin/after_first_frame`。`baseline/empty_window_idle` 没有 kernel，在首帧的时刻之后 5 秒采样，结果的 `note` 写明首帧的来源和 3 个值；它也是判定机器的条目，判定机器上来源为 `handler` 时同样出错。
 - 后台工作完成后的内存（`app/idle_monorepo_indexed`，ADR 0029）：打开 cloudprint 形状的夹具，不暂停后台工作，等 kernel 报告后台工作计数归零并静止后，按上面的方式等 5 秒、采样；5 秒等待开始时和采样之后的两次 `Epoch` 应答里，`quiescent_epoch()` 和后台代数都相同、后台工作计数都为零时样本才有效，否则重新等待，连续 3 次无效记为出错。取 3 次启动的中位数。
 - 进程插件合计（`plugin/process_total`）与语言服务器（`lsp/*`）：单独启动一次完整的 profile（进程插件宿主从安装目录加载的插件都在内；macOS CI 在这一步之前安装索引里的全部官方进程插件，方式由进程插件宿主的实现决定），先 `Open(Project(<cloudprint 夹具>))` 并等静止，再发 `ActivateAll`，等到 `Ready`（30 秒）和有效的静止样本后采样。所有 `ProcessPlugin` 进程组之和是 `plugin/process_total`，这是 ADR 0018 要求的「多个插件同时运行时的合计」。这次启动里报告过的每个 `LanguageServer` 组记为 `lsp/<id>/resident`，合计记为 `lsp/total`，只记录；没有语言服务器运行时 `lsp/total` 为 0。
 - 每个插件（`plugin/<id>/*`）：插件列表取自 `app/idle_empty` 的 `Plugins` 应答（不含 `bench-probe`）。对每个插件启动两次，`LECTERN_BENCH_PLUGINS` 分别为 `closure:<id>` 和 `closure+self:<id>`，都等到 `Ready` 和有效的静止样本。每次启动的内存是主进程的 `phys_footprint` 加上这次启动里所有 `ProcessPlugin` 进程组（按上面的展开规则取根进程及其全部后代）的合计，语言服务器组不计入、单独报告；两次之差是 `plugin/<id>/resident`，所以进程插件自己的进程组（闭包那一次不存在，记为 0）计入它的常驻内存。第二次里这个插件的四段耗时之和是 `plugin/<id>/activate`（[kernel「性能」](kernel.md#性能)）。超标时再测两对，取三对的中位数。预算按项目形状给出的插件（如 `project`），两次启动都先 `Open(Project(<夹具>))`。
@@ -536,8 +624,8 @@ crates/bench/
 
 | ID | 统计量与预算 | 出处 | 加入 |
 |---|---|---|---|
-| `app/cold_start` | 20 次里 > 20 ms 的不超过 1 次，且最大值 ≤ 30 ms | [ADR 0017](../adr/0017.md#决策) | 第 5 步 |
-| `app/cold_start_purged` | 只记录 | [ADR 0017](../adr/0017.md#影响) | 第 5 步 |
+| `app/cold_start` | 20 次里 > 20 ms 的不超过 1 次，且最大值 ≤ 30 ms；判定机器的条目 | [ADR 0017](../adr/0017.md#决策) | 第 5 步 |
+| `app/cold_start_purged` | 只记录；判定机器的条目 | [ADR 0017](../adr/0017.md#影响) | 第 5 步 |
 | `app/idle_empty` | 中位数 < 60 MB；首帧后 30 秒内静止 | [ADR 0017](../adr/0017.md#决策) | 第 5 步 |
 | `app/idle_monorepo` | 中位数 < 100 MB（后台工作已暂停，[ADR 0029](../adr/0029.md)） | [ADR 0017](../adr/0017.md#决策) | `project_home` |
 | `app/idle_monorepo_indexed` | 中位数 < 100 MB（后台工作全部完成后） | [ADR 0029](../adr/0029.md#决策) | `code_intel`（[#17](https://github.com/SoloJiang/lectern-app/issues/17)） |
@@ -566,8 +654,10 @@ crates/bench/
 | `plugin/process_total` | 全部进程插件同时激活时，各进程组（根进程及其全部后代）合计 ≤ 50 MB | [ADR 0018](../adr/0018.md#影响) | `kernel` 的进程插件宿主 |
 | `lsp/*/resident`、`lsp/total` | 只记录（ADR 0018：语言服务器不计入总预算，单独报告） | [ADR 0018](../adr/0018.md#影响) | `code_intel` |
 | `app/unclassified_children` | 只记录 | [ADR 0018](../adr/0018.md#影响) | 第 5 步 |
-| `baseline/empty_window_cold_start` | 只记录 | [ADR 0017](../adr/0017.md#影响) | 第 4 步 |
-| `baseline/empty_window_idle` | 只记录 | [ADR 0017](../adr/0017.md#影响) | 第 4 步 |
+| `baseline/empty_window_cold_start` | 只记录；判定机器的条目 | [ADR 0017](../adr/0017.md#影响) | 第 4 步 |
+| `baseline/empty_window_idle` | 只记录；判定机器的条目 | [ADR 0017](../adr/0017.md#影响) | 第 4 步 |
+
+标为「判定机器的条目」的四条，`budgets.rs` 里 `judging_machine` 为 true（[ADR 0052](../adr/0052.md) 决策第 3 条）：`app/cold_start` 只在判定机器上判定，另外三条以判定机器的记录为 ADR 0017 的基线；别处的测量运行把四条都记为 `record`，见「平台与噪声」。
 
 分项预算（`Tier::Share`，随出处的设计文档修改）：
 
@@ -696,7 +786,8 @@ crates/bench/
 
 | 平台 | `just bench` 做什么 | 是否判定 |
 |---|---|---|
-| macOS | 构建测量用的 `lectern` 和 `empty_window`，`cargo bench`：全部基准按下面的规则采样 | 只在 Apple 芯片（`aarch64-apple-darwin`）上判定，超标即失败；Intel Mac 只报告 |
+| macOS | 构建测量用的 `lectern` 和 `empty_window`，`cargo bench`：全部基准按下面的规则采样 | 只在 Apple 芯片（`aarch64-apple-darwin`）上判定，超标即失败；Intel Mac 只报告；判定机器的条目只记录 |
+| macOS，判定机器（`LECTERN_BENCH_JUDGE=1`） | 同上；CI 只运行 `baseline/` 和 `app/cold_start` | 判定机器的条目也判定；首帧的来源为 `handler` 是错误 |
 | Linux | `cargo test --benches`：冒烟，每个进程内基准用小规模输入跑一次，进程级基准记为 `skipped` | 不判定，只在出错时失败 |
 | Linux，`just bench --measure` | `cargo bench`，进程内基准照常采样 | 不判定，只报告（供 Linux 上的实际验证记录数字） |
 
@@ -724,6 +815,15 @@ crates/bench/
 - 页缓存：进程内基准测的是热缓存（预热之后）；冷文件缓存只在 `app/cold_start_purged` 里测量。
 
 判定用的机器（[ADR 0052](../adr/0052.md)，「未决问题」第 1 条的选项 B）：测量的时间止于首帧的条目在一台自托管的实体 M 系列 Mac 上运行，即 CI 的 `Judge (physical Mac)`（[CI 设计「判定机器」](ci.md#判定机器)）：它判定 `app/cold_start`，记录 `app/cold_start_purged` 和空窗口的两条基线 `baseline/*`（这三条在预算表里本来就只记录），这两条基线以它的结果为 ADR 0017 的基线。GitHub 托管的 `macos-15` runner（Apple M1 虚拟机）不给 `presentedTime`，这些条目在那里都只记录。其余预算由托管 runner 上的 `Benchmarks (macOS arm64)` 判定。
+
+运行器靠环境变量 `LECTERN_BENCH_JUDGE` 区分判定机器，规则如下：
+
+- 值为 `1`：判定机器。判定机器的条目（`Budget::judging_machine`）与其他条目一样判定，超标照常重跑一次。进程调度把来源为 `handler` 的首帧当作错误（`Scheduler::judging`）：结束这次启动的进程组，基准记为 `error`，原因写明 drawable 没有给出 `presentedTime`（屏幕锁定、显示器关闭或没有接）。
+- 值为 `1`，而这次运行不判定（冒烟模式，或不是 Apple 芯片）：报告级错误，退出码 2。值为 `1`，而合并后判定机器的条目一条都没有运行（都是 `filtered`、`planned` 或 `skipped`，如过滤条件写错）：合并的报告级错误，退出码 2。判定任务因此不会在没有判定时通过。
+- 没有设置或为空：测量运行把判定机器的条目记为 `record`，不重跑，原因是「只记录：这里不是判定机器（没有 LECTERN_BENCH_JUDGE=1），首帧的时刻可能不是显示时刻（ADR 0052）」。它们的检查仍然运行，值的类型与检查不符时仍是 `error`。冒烟模式的状态仍是 `smoke`。
+- 其他值（`0`、`true`、带空格的 `1` 等）：每个目标在运行之前以 2 退出，不写报告，合并因为缺报告而出错。写错的值不会让判定变成记录。
+
+报告的 `judge` 写明这次运行是不是判定机器（「报告」）。
 
 ### 时间盒截断的轮次
 
@@ -772,7 +872,8 @@ bench *args:
 CI：
 
 - Linux 任务在 Doctests 之后增加一步 `just bench`。目标耗时 2 分钟以内（大部分编译产物与测试步骤共用）。
-- macOS 上 `just bench` 在单独的 `Benchmarks (macOS arm64)` 任务里运行，与 `Build and test (macOS arm64)` 并行（[ADR 0036](../adr/0036.md)，[CI 设计「任务」](ci.md#任务)），之后用 `actions/upload-artifact` 上传 `target/lectern-bench/report.json`（`if: always()`，超标时也能看到数据）。报告表同时写进任务摘要，最慢的 10 个基准是一条 notice。目标耗时 15 分钟以内，其中运行约 8 分钟；超过时先把端到端基准和 `app/idle_empty` 的启动次数降到 3 次和 1 次，不减少 ADR 规定的次数和时长（冷启动 20 次、静止后等 5 秒）。
+- macOS 上 `just bench` 在单独的 `Benchmarks (macOS arm64)` 任务里运行，与 `Build and test (macOS arm64)` 并行（[ADR 0036](../adr/0036.md)，[CI 设计「任务」](ci.md#任务)），之后用 `actions/upload-artifact` 上传 `target/lectern-bench/report.json`（`if: always()`，超标时也能看到数据）。报告表同时写进任务摘要，最慢的 10 个基准是一条 notice。目标耗时 15 分钟以内，其中运行约 8 分钟；超过时先把端到端基准和 `app/idle_empty` 的启动次数降到 3 次和 1 次，不减少 ADR 规定的次数和时长（冷启动 20 次、静止后等 5 秒）。这个任务不设 `LECTERN_BENCH_JUDGE`，判定机器的条目在这里只记录。
+- 判定机器上的 `Judge (physical Mac)` 设置 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`（过滤按子串匹配，后者也选中 `app/cold_start_purged`），上传 `report.json`。它只在 push 到 `main` 和手动触发时运行，不是 PR 的必需检查；runner 注册之前跳过（[CI 设计「判定机器」](ci.md#判定机器)，ADR 0052）。
 
 ## 夹具与 `test-support`
 
@@ -818,19 +919,22 @@ CI：
 - 判定平台上缺少 `LECTERN_BENCH_APP` 或 `LECTERN_BENCH_BASELINE`：对应的生效条目记为 `error`；冒烟模式下记为 `skipped`。
 - `sudo -n purge` 不可用：`app/cold_start_purged` 记为 `skipped`。
 - 基准与预算表对不上：开始运行前以 2 退出，列出多出和缺少的 ID。
+- 判定机器上（`LECTERN_BENCH_JUDGE=1`）首帧的来源是 `handler`：结束子进程的整个进程组，记为 `error`，原因写明 drawable 没有给出 `presentedTime`（ADR 0052）。
+- `LECTERN_BENCH_JUDGE` 的值不是 `1`，也不是没有设置或为空：每个目标在运行之前以 2 退出。值为 `1` 而这次运行不判定，或者判定机器的条目一条都没有运行：报告级错误，退出码 2。
+- 不是判定机器的测量运行：判定机器的条目记为 `record`，原因写明这里不是判定机器，退出码不因它们非 0。
 
 ## 测试
 
 `just test -p lectern-bench`（Linux 和 macOS 都运行，不需要 GPUI）：
 
 - 统计：`stats_*` 用固定的样本验证中位数、p95、最大值、中位数绝对偏差、批量换算；冷启动规则的边界：20 个样本里 1 个 25 ms 通过、2 个超过 20 ms 失败、1 个 31 ms 失败、恰好 30 ms 通过。
-- 预算表：`budgets_*` 检查 ID 不重复；带 `*` 的条目与具体条目的优先级；每条 `Check` 的统计量与上限能用于它的 `Value` 类型；`Tier::Top` 的出处都在 `docs/design/tech-research.md` 或 `docs/adr/` 下；每个出处文件存在、锚点对应文件里的一个标题。
-- 运行器：`runner_*` 用假基准验证：超标时重跑一次，第二次通过记为 `ok` 且两次都写进报告；两次都超标退出码 1；冒烟模式和非判定平台从不因预算失败；基准出错退出码 2；缺少或多出预算时开始前退出；`--bench` 决定模式；ID 过滤；`--list`。
+- 预算表：`budgets_*` 检查 ID 不重复；带 `*` 的条目与具体条目的优先级；每条 `Check` 的统计量与上限能用于它的 `Value` 类型；`Tier::Top` 的出处都在 `docs/design/tech-research.md` 或 `docs/adr/` 下；每个出处文件存在、锚点对应文件里的一个标题；判定机器的条目正是 `app/cold_start`、`app/cold_start_purged` 和两条 `baseline/*`，都属于 `Process`。
+- 运行器：`runner_*` 用假基准验证：超标时重跑一次，第二次通过记为 `ok` 且两次都写进报告；两次都超标退出码 1；冒烟模式和非判定平台从不因预算失败；基准出错退出码 2；缺少或多出预算时开始前退出；`--bench` 决定模式；ID 过滤；`--list`。判定机器的条目（ADR 0052）：没有 `LECTERN_BENCH_JUDGE=1` 时超标也记为 `record`、带原因、不重跑，冒烟模式仍是 `smoke`；值的类型与检查不符时仍是 `error`；设为 `1` 时照常判定、超标重跑，标题带「judging machine」；设为 `1` 而运行不判定（冒烟、不是 Apple 芯片）时退出码 2；环境变量只接受 `1`、空和没有设置；`Ctx::judge` 与选项一致。
 - 报告：`report_*` 用 insta 快照固定一组假结果的文本表、JSON 和 Markdown 摘要；每个目标只写自己的 `report-<target>.json`。
-- 合并：`report_merge_*` 验证三份报告（有 `report-package.json` 时四份）合并后每条预算恰好一次；没有 `report-package.json` 时 `Package` 的条目记为 `skipped`，带 `--require package` 时退出码 2；`lsp/*/resident` 按语言服务器列表展开；带 `*` 的条目按插件列表展开，列表为空时条目本身出现一次，不为空时某个插件缺少展开项即出错；缺一份报告、某条预算缺失、重复或出现在错误的目标里时退出码 2；合并后的退出码取超标与出错的最严重者；被过滤的条目记为 `filtered` 不算缺失；`::error` 注释最多 10 条；`record` 结果按组输出 `::notice`，`smoke`、`planned`、`ok` 不输出，组数超过 10 时第 10 条合并剩下的组、不丢结果。
+- 合并：`report_merge_*` 验证三份报告（有 `report-package.json` 时四份）合并后每条预算恰好一次；没有 `report-package.json` 时 `Package` 的条目记为 `skipped`，带 `--require package` 时退出码 2；`lsp/*/resident` 按语言服务器列表展开；带 `*` 的条目按插件列表展开，列表为空时条目本身出现一次，不为空时某个插件缺少展开项即出错；缺一份报告、某条预算缺失、重复或出现在错误的目标里时退出码 2；合并后的退出码取超标与出错的最严重者；被过滤的条目记为 `filtered` 不算缺失；`::error` 注释最多 10 条；`record` 结果按组输出 `::notice`，`smoke`、`planned`、`ok` 不输出，组数超过 10 时第 10 条合并剩下的组、不丢结果；判定机器的报告合并后保留 `judge` 和标题，一份报告的 `judge` 与其他的不同时退出码 2，没有 `judge` 的报告按 false 算；`judge` 为 true 而判定机器的条目都是 `filtered`、`planned` 或 `skipped` 时退出码 2，有一条是 `ok` 或 `record` 时通过，`judge` 为 false 时不检查。
 - 计数分配器：`alloc_*` 分配并保留 1 MiB 后 `live` 增加 1 MiB，释放后回到原值，`peak` 记录峰值（在单独的测试二进制里注册分配器）。
 - 报告协议：`wire_*` 对每种消息编码后解码相等，含带空格、`%`、换行和非 UTF-8 字节的路径；缺字段、未知消息名、坏的百分号编码返回错误。
-- 进程调度：`process_*` 用脚本化的 `Launcher` / `ProcessInfo`：冷启动 2 次预热不计入、20 次样本；`Busy` 让 5 秒等待重新开始；采样前后代数不同时重采；30 秒不静止记为 `over`；不连 socket、提前退出、不响应 `Quit` 记为出错；`process_deadline_*`：假探针对 `Open` 不回 `Milestone`、对 `Scroll` 不回 `Frames`、不发 `Ready`、不应答 `Epoch` 时，运行器在各自的期限（测试里缩短）后结束进程组并记为 `error`，原因写明等的消息；插件基准里假探针发 `PluginFailed` 时立即记为 `error`、不等期限；插件两次启动的差值与激活耗时的取法（进程插件的进程组计入差值）；激活条件为 `[Workspace(..), AfterFirstFrame]` 的插件计入 `plugin/after_first_frame`；预热启动以 3 退出时记为出错；探针报告 `hook <名字>`、`frames <…>` 时记为出错；`time_with_setup` 每个样本调用一次 `setup`；进程组展开到孙进程、中途退出的后代被跳过、同一 pid 不重复计入、`plugin/process_total` 取自 `ActivateAll` 那次启动、是全部进程插件组之和（`Command` / `Manual` / `Workspace` 激活的进程插件都计入），`app/idle_empty` 不产出它；语言服务器组记为 `lsp/<id>/resident` 并计入 `lsp/total`，没有语言服务器时 `lsp/*/resident` 为 `skipped`、`lsp/total` 为 0；帧判定：60 Hz 下间隔 16.7 ms、工作时间 5 ms 时通过；一帧工作时间 9 ms 时超标；`requested` 之后主线程阻塞 20 ms、`started` 间隔达到两个周期时超标；120 Hz 下与「最大间隔 ≤ 8.3 ms」的结论一致；内存类并发不超过 3、计时类不并发。
+- 进程调度：`process_*` 用脚本化的 `Launcher` / `ProcessInfo`：冷启动 2 次预热不计入、20 次样本；`Busy` 让 5 秒等待重新开始；采样前后代数不同时重采；30 秒不静止记为 `over`；不连 socket、提前退出、不响应 `Quit` 记为出错；`process_deadline_*`：假探针对 `Open` 不回 `Milestone`、对 `Scroll` 不回 `Frames`、不发 `Ready`、不应答 `Epoch` 时，运行器在各自的期限（测试里缩短）后结束进程组并记为 `error`，原因写明等的消息；插件基准里假探针发 `PluginFailed` 时立即记为 `error`、不等期限；插件两次启动的差值与激活耗时的取法（进程插件的进程组计入差值）；激活条件为 `[Workspace(..), AfterFirstFrame]` 的插件计入 `plugin/after_first_frame`；预热启动以 3 退出时记为出错；探针报告 `hook <名字>`、`frames <…>` 时记为出错；`time_with_setup` 每个样本调用一次 `setup`；进程组展开到孙进程、中途退出的后代被跳过、同一 pid 不重复计入、`plugin/process_total` 取自 `ActivateAll` 那次启动、是全部进程插件组之和（`Command` / `Manual` / `Workspace` 激活的进程插件都计入），`app/idle_empty` 不产出它；语言服务器组记为 `lsp/<id>/resident` 并计入 `lsp/total`，没有语言服务器时 `lsp/*/resident` 为 `skipped`、`lsp/total` 为 0；帧判定：60 Hz 下间隔 16.7 ms、工作时间 5 ms 时通过；一帧工作时间 9 ms 时超标；`requested` 之后主线程阻塞 20 ms、`started` 间隔达到两个周期时超标；120 Hz 下与「最大间隔 ≤ 8.3 ms」的结论一致；内存类并发不超过 3、计时类不并发；判定机器上（`Scheduler::judging`）来源为 `handler` 的首帧让会话出错、向进程组发 `SIGKILL`，冷启动在第一次启动后停止，来源为 `presented` 时照常取样。
 - `purge`：集成测试把一个假的 `sudo` 放在 PATH 最前面，记录参数，按夹具回放成功与失败（AGENTS.md「工作方式」）。
 - 探针：`probe_*` 在 Linux 上用真实的 `Kernel` 和测试插件验证 `start_kernel` 的两种裁剪（用计数的测试插件确认每个插件的 `manifest()` 在整个启动里只被调用一次）、`attach` 满足 `Command` / `Manual` / `Workspace` 三种激活条件后发出 `Ready`、`bench-probe` 插件丢弃过时的 `Busy` 且不让 kernel 重新变忙。首帧回调只能在 macOS 上验证，由第 4 步的基线运行覆盖。
 
@@ -867,7 +971,8 @@ CI：
 4. **探针、进程调度与空窗口基线**（`bench`；前提是 platform 设计「验收」的 B1 已合并。`probe` 加上 `lectern-platform/bench-hooks`）
    - `just test -p lectern-bench` 的 `wire_*`、`process_*`、`probe_*` 和 `purge` 集成测试通过。
    - macOS CI 上 `just bench baseline/` 报告 `baseline/empty_window_cold_start` 的 20 个样本和 `baseline/empty_window_idle`。
-   - 托管 runner 和判定机器的实测值、机器信息写进 ADR 0017（ADR 0017「影响」要求的基线，以判定机器的为准，ADR 0052）；判定机器上不满足 `app/cold_start` 的判定规则（20 次里超过 20 ms 的多于 1 次，或有一次超过 30 ms）时告诉产品负责人，按 ADR 0017「影响」由产品负责人决定。
+   - 托管 runner 和判定机器的实测值、机器信息写进 ADR 0017（ADR 0017「影响」要求的基线，以判定机器的为准，ADR 0052）；判定机器上不满足 `app/cold_start` 的判定规则（20 次里超过 20 ms 的多于 1 次，或有一次超过 30 ms）时告诉产品负责人，按 ADR 0017「影响」由产品负责人决定。托管 runner 的部分已完成；判定机器的部分等 runner 注册之后完成（「实际验证」第 4 步）。
+   - 运行器读 `LECTERN_BENCH_JUDGE`：没有设置时判定机器的条目只记录并写明原因；设为 `1` 时照常判定，首帧的来源为 `handler` 是错误；其他值、设为 `1` 而运行不判定、或设为 `1` 而判定机器的条目一条都没有运行时退出码 2（ADR 0052，「平台与噪声」）。
 5. **`app` 的测量构建与应用级基准**（`app`，`Closes #7`；先合并 `app` 的设计文档。发布构建不带 binary archive，见 [ADR 0049](../adr/0049.md)）
    - `cargo build --release --locked -p lectern-app --features bench-probe` 成功；`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-bench`，也没有 `"test-support"` 和 `"bench-hooks"`（发布构建不含方法替换，ADR 0048）。
    - 判定机器（`Judge (physical Mac)`）判定 `app/cold_start`、记录 `app/cold_start_purged`，托管 runner 上两者只记录（ADR 0052）；macOS CI 的 `Benchmarks (macOS arm64)` 判定 `app/idle_empty`、`plugin/*/activate`、`plugin/after_first_frame`，记录 `plugin/*/resident`。
@@ -981,6 +1086,35 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - 同样的命令，4 个忙循环：第一次没有轮次被截断（`/all` 1.55 s、`/first` 12.4 ms）；第二次 5 轮被截断，不报错，作为 3.85 s 左右的样本计入（样本最大值 3.85 s），中位数 `/all` 1.93 s、`/first` 24.3 ms，仍在预算内；`partial_rounds` 5、`outside` 33 179。`GITHUB_ACTIONS=true` 合并时 `code_intel record` 的 notice 带上说明：「5 rounds cut by the time box, the last with 33179 outside; done after 1.942528946s of a 1.9s time box; Some(90301) units stored, Some(0) evictions」。
 - 没有验证的：macOS 上截断的频率，由之后的 CI 运行的 notice 给出。
 
+第 4 步（探针、进程调度与空窗口基线，[ADR 0051](../adr/0051.md)），在 macOS 上运行：Apple M5 Pro（Mac17,9，15 核），macOS 27.0.1。这台机器的屏幕处于锁定状态（`IOConsoleLocked = Yes`，`CGSSessionScreenIsLocked` 为 1），每个 drawable 的 `presentedTime` 都是 0，首帧的来源都是 `handler`（[ADR 0052](../adr/0052.md)），所以本机的数字不是 ADR 0017 要的基线。托管 runner 上的记录在下面「托管 runner 的记录」一条；判定机器的基线在 runner 注册之后补上。
+
+- `just test -p lectern-bench`：加入判定机器的模式之前 130 个测试通过，跳过 6 个。本步新增 `wire_*` 6 个、`probe_*` 15 个、`process_*` 27 个、`purge` 集成测试 3 个（`tests/purge.rs`）和 `runner_skipping_benchmark_is_skipped_not_an_error`。加入之后 141 个通过，跳过 6 个：另有 `runner_*` 6 个、`process_*` 2 个、`report_merge_*` 2 个（`report_merge_keeps_the_judging_machine`、`report_merge_judging_run_needs_a_judging_machine_entry`）和 `budgets_judging_machine_entries_end_at_the_first_frame`（「测试」）。`just test -p lectern-platform`：197 个通过（合并 ADR 0052 的 `platform` 改动之后）。`wire_*`、`probe_*`、`process_*` 覆盖首帧的来源：`first-frame` 两种来源的往返、缺少 `source` 和不认识的来源都是错误；探针把 `PresentedAt` 的来源原样发出；冷启动的每个样本带自己那次启动的来源，会话的 `source()` 是 `FirstFrame` 里的来源。
+- `probe_*` 用真实的 `Kernel` 和计数的测试插件，运行器一侧是临时目录里的 Unix 域 socket：两种裁剪（`closure:`、`closure+self:`）之后每个插件的 `manifest()` 在整个启动里只调用一次；`attach` 满足 `Command`、`Manual`、`Workspace` 三种激活条件后发出 `Ready`，空闭包立即 `Ready`；`bench-probe` 丢弃序号过时的 `Busy` / `Quiescent`，kernel 保持静止；所选插件进入 `Failed` 时发出 `PluginFailed`，`ActivateAll` 报告失败的插件；`FirstFrame` 先发出，之前积压的报告随后按顺序发出；`drive` 之前到达的请求排队，之后按顺序应答；无效的请求行、无效的 `LECTERN_BENCH_PLUGINS` 和裁剪不了的选择发出 `Error`。
+- `process_*` 用脚本化的 `Launcher` / `ProcessInfo` 和假探针（一个线程按脚本连接 socket、发报告、应答请求），期限缩短到几十到几百毫秒：冷启动 2 次预热、20 个样本，同一时间只有 1 个进程；探针报告 `hook <名字>`、预热以 3 退出都是出错；不连 socket、等待期间退出、`Quit` 之后不退出或退出码不是 0、`FirstFrame` 的 pid 不是启动的那个，都是出错；基线在首帧后等 `settle`；`Busy` 让等待重新开始，在第一次 `Epoch` 的应答之前到达的 `Busy` 也是；采样前后代数不同时重采，连续 3 次无效出错；首帧后不静止返回 `Idle::NotQuiescent`；`process_deadline_*` 对 `Epoch`、`Plugins`、`Ready`、`Milestone`、`Frames` 各一个，原因写明等的消息；`PluginFailed` 和 `frames <…>` 立即出错；进程组展开到孙进程、按 pid 去重、跳过已退出的；结束会话时向进程组和探针报告的 `Child` 根进程发 `SIGKILL`；内存类最多 3 个同时运行，第一个出错之后不再开始新的启动。`process_*` 连续运行 25 次都通过，同时运行 16 个 `yes` 忙循环时 20 次、45 个时 15 次都通过。
+- macOS CI 的 `Build and test (macOS arm64)` 上 `process_busy_restarts_the_settle` 失败过一次：负载高时假探针在 `Quiescent` 之后的 30 ms 睡眠超过了 100 ms 的等待，`Busy` 和下一个 `Quiescent` 在等第一次 `Epoch` 的应答时才到，样本离最后一个 `Quiescent` 不到一个等待时长。这是 `Session::idle` 的缺陷，不只是测试的问题：现在第一次应答之前收到 `Busy` 时重新等待。新的 `process_busy_before_the_first_epoch_answer_restarts_the_settle` 确定地复现这种顺序（假探针收到第一个 `Epoch` 时才发 `Busy` 和 `Quiescent`，然后应答），修复之前失败（样本在最后一个 `Quiescent` 之后 40 µs），修复之后通过。
+- `purge`：假的 `sudo` 只放在这条命令的 `PATH` 最前面，记录参数 `-n purge`；回放成功时为 true，失败和没有 `sudo` 时为 false。
+- `just check` 通过（含 ADR 0051 修改后的架构检查和文档链接）；`python3 scripts/test_check_architecture.py` 26 个测试通过；`python3 scripts/check_architecture.py --gpui-free-packages` 的输出仍包含 `lectern-bench`。`Cargo.lock` 只在 `lectern-bench` 的依赖列表里多了 `futures`、`gpui-pre-platform` 和 `libc`，没有新的包；`cargo metadata --format-version 1 --locked --all-features` 在不加和加 `--filter-platform x86_64-unknown-linux-gnu` 时都通过。
+- `just bench baseline/`（这台机器，屏幕锁定），ADR 0052 之前：退出码 2，两条都是 `error`，原因「10s 内没有等到 FirstFrame」，各用 10.0 s。同样条件下 `platform` 的 `frame_hooks` 示例注册首帧回调用了 13.2–45.2 µs（11 个冷启动的进程，中位数 15.0 µs），之后 300 帧都没有首帧回调，以 101 退出。到期之后运行器结束了进程组：没有留下 `empty_window` 进程，系统临时目录下没有留下 `lectern-bench-*` 目录。
+- `just bench baseline/`（同一台机器，屏幕锁定），ADR 0052 之后：退出码 0，两条都是 `record`。冷启动的 20 个样本 78.38–86.36 ms，中位数 82.1 ms，20 个都超过 20 ms，来源都是 `handler`；空闲内存 23.8、23.4、23.5 MB，中位数 23.5 MB，3 次的首帧来源都是 `handler`。屏幕锁定，来源 `handler`，不是 ADR 0017 要的基线。
+- 第一次 CI 运行（[run 40204026597](https://github.com/SoloJiang/lectern-app/actions/runs/40204026597/job/121201015126)）的两条基线也都是 `error`「10s 内没有等到 FirstFrame」。之后两个临时的诊断提交（54b48d0、40c5468）只写探针的 stderr 和一个不经方法替换的示例，测出托管 runner 从不给 `presentedTime`，这台机器的屏幕也没有锁定（ADR 0052「背景」）。两个诊断提交已由 revert 提交去掉（af784a3、29e7931），本 PR 相对 `main` 的 diff 里没有它们。
+- 冒烟模式（`cargo test --benches`，没有设置 `LECTERN_BENCH_BASELINE`）：两条基线都是 `skipped`，原因「没有设置 LECTERN_BENCH_BASELINE」。
+- 托管 runner 的记录（「验收」第 4 步第 2 条和第 3 条的托管 runner 部分）：[run 40244345679](https://github.com/SoloJiang/lectern-app/actions/runs/40244345679/job/121322644049)，提交 63e68c7，2026-10-25，`Benchmarks (macOS arm64)`，GitHub 托管的 `macos-15` runner（镜像 `macos-15-arm64` 20260907.0337.1，Apple M1 虚拟机，Metal 设备是 "Apple Paravirtual device"，见 ADR 0052「背景」）。两条基线都是 `record`：
+  - 冷启动的 20 个样本，按启动顺序（ms）：167.68、177.08、132.34、147.29、136.44、111.27、131.54、145.41、128.75、145.43、140.51、224.56、199.82、207.47、205.74、190.16、140.80、195.39、211.84、190.12。范围 111.27–224.56 ms，中位数 157 ms，20 个都超过 20 ms，来源都是 `handler`。
+  - 空闲内存 14.4、13.6、16.3 MB，中位数 14.4 MB，3 次的首帧来源都是 `handler`。
+  - 这些数字不是基线：托管 runner 不给 `presentedTime`，显示回调落后于显示（ADR 0052「背景」）。它们是「未决问题」第 1 条改选 B 的依据，已写进 ADR 0017「影响」。
+  - 这次运行的任务失败在 `code_intel/extract_throughput`：两次的中位数是 3.98 和 3.79 MB/s，预算 ≥ 4 MB/s。本步没有改它测的代码。
+- 判定机器的模式，在本机（同上，屏幕锁定，`IOConsoleLocked = Yes`）上运行：
+  - `just bench baseline/`（没有设置 `LECTERN_BENCH_JUDGE`）：退出码 0，两条基线都是 `record`，原因是「只记录：这里不是判定机器（没有 LECTERN_BENCH_JUDGE=1），首帧的时刻可能不是显示时刻（ADR 0052）」。冷启动中位数 82 ms，空闲内存中位数 23.5 MB。
+  - `LECTERN_BENCH_JUDGE=1 just bench baseline/`：退出码 2，标题是 `lectern-bench report: measure, gated, judging machine`。两条基线都是 `error`，原因是「首帧的来源是 handler：判定机器上 drawable 没有给出 presentedTime（屏幕锁定、显示器关闭或没有接？ADR 0052）」。两个基准在第一次（预热的）启动就停下，各用 0.3 s 和 0.1 s。之后没有留下 `empty_window` 进程，系统临时目录下没有留下 `lectern-bench-*` 目录。这是真实的首帧回调路径上「判定机器上 `handler` 是错误」这条规则。
+  - `LECTERN_BENCH_JUDGE=yes just bench baseline/`：三个目标都在运行之前以 2 退出，打印 `LECTERN_BENCH_JUDGE must be 1 or unset, not "yes"`；合并因为缺报告，退出码 2。
+  - `LECTERN_BENCH_JUDGE=1 just bench no-such-id/`（全部条目被过滤）：退出码 2，合并的错误是「LECTERN_BENCH_JUDGE=1 的运行里，判定机器的条目一条都没有运行（都被过滤、都是计划中或都跳过）：这次运行不判定」。
+  - `LECTERN_BENCH_JUDGE=1 cargo test --locked -p lectern-bench --all-features --bench process`（冒烟）：报告级错误「LECTERN_BENCH_JUDGE=1 只用于 Apple 芯片上的测量运行（cargo bench）：这次运行不判定」，目标以 2 退出。
+- 判定机器的路径在一台没有锁屏的实体 Mac 上（Apple M5 Pro，macOS 27.0.1，内置 Retina 显示器，2026-10-26；不是判定机器：在开发者的图形会话里运行，有别的应用在运行，没有按 CI 设计「判定机器」准备）：
+  - 改之前，`LECTERN_BENCH_JUDGE=1` 时 platform 的首帧钩子取第一个显示回调。GPUI 的第一个 drawable 在窗口显示之前画出，带 0，结果为 `handler`，判定机器上每次都会是错误。#270 加了 `Fallback::Wait`，探针在 `LECTERN_BENCH_JUDGE=1` 时用它（[platform 设计「实际验证」](platform.md#实际验证)）。
+  - 之后 `baseline/empty_window_idle` 仍然 10 s 内没有首帧（连续 3 次）：3 个窗口同时在同一位置打开，被遮住的 2 个不显示 drawable。`Scheduler::memory` 在判定机器上改为一次一个（`process_memory_runs_one_at_a_time_on_the_judging_machine`）。
+  - 然后 `LECTERN_BENCH_JUDGE=1 just bench baseline/` 退出码 0：冷启动 20 个样本，按启动顺序（ms）184.30、187.80、185.87、180.83、183.76、192.34、217.09、199.77、175.21、184.34、204.42、200.27、187.25、184.19、180.92、202.27、191.60、200.08、177.43、175.94，中位数 187 ms，20 个都超过 20 ms，来源都是 `presented`；空闲内存 40.7、40.4、40.5 MB，中位数 40.5 MB，来源都是 `presented`。这一组数字只是参考，不是 ADR 0017 的基线：基线由判定机器给出。空窗口本身就远超 20 ms，按 ADR 0017「影响」交给产品负责人决定。
+- 没有验证的：判定机器上的运行。还没有判定机器；本机屏幕锁定，只验证了 `handler` 是错误的路径。实体机给出 `presentedTime` 时的冷启动和空闲内存、来源为 `presented` 的真实路径和判定任务 `Judge (physical Mac)` 本身，等 runner 注册之后由它的第一次运行给出，再写进本节和 ADR 0017（「验收」第 4 步第 3 条的判定机器部分）。注册首帧回调出错的真实路径（只由 `process_cold_start_stops_at_a_hook_error` 用假探针覆盖）。Linux 上的编译和测试（这台机器只装了 `aarch64-apple-darwin` 目标，由 Linux CI 给出）。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1005,3 +1139,28 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - `PreparedSet::manifests` 返回 `impl Iterator<Item = (&Name, &Manifest)>`，不是切片：集合里每一项还带插件对象、耗时和 panic 消息，返回切片要另存一份清单。探针只遍历它。「需要其他 crate 提供的接口」已改。
 - 新增 `PreparedSet::validate`：第 3 步的验收要求 `retain` 之后 `validate` 通过，而 `PluginSet::validate` 会再调用一次 `manifest()`。新增 `GraphError::UnknownPlugin`，`dependency_closure` 收到集合里没有的 ID 时返回它。
 - 只留闭包（`closure:<id>`）的集合在一种情况下不能激活：`MULTIPLE` 服务的某个提供者反过来依赖 `<id>`。这时闭包里有这个提供者，却没有它依赖的 `<id>`，探针等不到 `Ready`、基准记为出错。记为已知限制（[kernel 设计「插件集合的闭包与裁剪」](kernel.md#插件集合的闭包与裁剪)第 3 条）。
+
+第 4 步：
+
+- 探针插件 `bench-probe` 放在本 crate（「探针」），而 ADR 0025 的架构检查要求实现了 `Plugin` 的 crate 都标 `plugin = true`；本 crate 以 dev-dependency 依赖插件 crate，不能是插件 crate。[ADR 0051](../adr/0051.md) 让架构检查在这一条里跳过 tool 层 crate，并限定 tool 层的 `Plugin` 实现只用于测量和测试、不提供也不要求服务。
+- `Probe::start_kernel` 不裁剪时也先 `PluginSet::prepare`，再 `Kernel::start_prepared`，不调用 `Kernel::start`：`Plugins` 的应答要带每个插件清单里的激活条件（`plugin/after_first_frame` 按它选插件），`ActivateAll` 要按激活条件逐个满足，而 `PluginStatus` 不带激活条件，`Kernel::start` 又消耗了插件集合。两条路径进入同一个 kernel 线程函数，`start_prepared` 用 `prepare` 记下的清单和耗时，每个 `manifest()` 仍只调用一次，`plugin/*/activate` 的四段耗时口径不变。区别是测量构建里清单在调用 `start_kernel` 的线程上读取（`app` 里是首帧之后的主线程），不在 kernel 线程上；第 3 步测得 20 个插件的 `Kernel::start` 共 80–100 µs，清单只是其中一部分。
+- 新增 `Probe::drive`：`empty_window` 没有 kernel，设计只有 `attach(kernel, driver)`。`drive` 只交出 `Driver`：`Epoch` 应答 None，`Plugins` 只应答 `PluginsEnd`，`ActivateAll` 立即应答 `Ready`。`attach` 或 `drive` 之前到达的请求排队。
+- `LECTERN_BENCH_PLUGINS` 的值无效或裁剪不了（ID 不在集合里、闭包出错）时，探针发出 `Error`，整个集合照常启动：运行器立即把这个基准记为 `error`，不等 `Ready` 的期限。设计没有规定这种情况。
+- 环境变量名 `LECTERN_BENCH_SOCKET`、`LECTERN_BENCH_PLUGINS` 是 `wire` 的常量 `SOCKET_VAR`、`PLUGINS_VAR`，`probe` 重新导出：运行器默认编译，不能用只在 `probe` feature 下才有的模块。
+- 依赖：`lectern-platform` 从 dev 和可选依赖改为普通依赖，`main` 用它设置基准线程的 QoS（「数据流与线程」第 2 条，本步补上），报告的 `host` 用 `platform::host::describe` 填上第 1 步暂为 null 的三项，进程级基准用 `platform::process`；`probe` 只另外打开它的 `bench-hooks`。`tempfile` 从 dev 改为普通依赖：进程调度在默认编译的 `lectern_bench::process` 里，每次启动的临时目录由它建。新增 dev 依赖 `libc`（`benches/process.rs` 向进程组发 `SIGKILL`）和 `futures`（`empty_window` 的通道），都已在工作区的依赖图里，「不新增外部 crate」仍成立。「依赖」表已改。
+- 新增 `BenchError::skip`：「状态与异常」要求冒烟模式下缺少被测程序、`sudo -n purge` 不可用时记为 `skipped`，第 1 步的 `BenchError` 只能表示 `error`。基准返回 `BenchError::skip(原因)` 时，它的条目记为 `skipped` 并带上原因，不影响退出码。
+- 进程调度的接口写进了新的「进程调度」一节，设计原来只写了两个 trait 的职责：`Launcher` 拆成 `Launcher`（启动）和 `Launched`（一个已启动的进程：pid、`try_wait`、`kill_group`、`kill`），`Limits` 让测试缩短期限，`Session` 的方法供第 5 步的基准使用。
+- 结束进程的顺序：设计写的是先向进程组发 `SIGKILL`，再按展开规则结束仍然存活的后代。实现先展开进程树（从主进程和探针报告的 `Child` 根进程开始），再向进程组发 `SIGKILL`，最后结束展开得到的后代：主进程被结束后，它的子进程改由 launchd 收养，`children(pid)` 就找不到它们了。之后才关闭 socket，假探针因此不会在被结束之前自己正常退出。
+- 每次启动的环境除了两个 `LECTERN_BENCH_*` 变量，还把 `HOME` 设为这次启动的临时目录，删除 `LECTERN_LOG`、`CLAUDE_CONFIG_DIR` 和 `CODEX_HOME`：被测程序不读写用户的数据、日志设置和 agent 会话。设计只写了「临时数据目录」。socket 和 `HOME` 在系统临时目录下同一个 `lectern-bench-*` 目录里，socket 路径短于 macOS `sun_path` 的 104 字节（`CARGO_TARGET_TMPDIR` 下可能更长）。
+- `purge` 多了 `path` 参数：测试把假的 `sudo` 只放在这一条命令的 `PATH` 最前面，不改测试进程自己的环境（`std::env::set_var` 在多线程的进程里不安全）。基准传 None。
+- `process_*` 只覆盖本步的调度。插件两次启动的差值与激活耗时、`plugin/after_first_frame`、`plugin/process_total` 和 `lsp/*` 的取法属于第 5 步的基准，测试随第 5 步加入；帧判定是 `stats_frames_*`，`time_with_setup` 是 `runner_*`（第 1 步「与设计的差异」）。首帧后 30 秒内不静止时会话返回 `Idle::NotQuiescent`，由第 5 步的 `app/idle_*` 记为 `over`。
+- `baseline/empty_window_cold_start` 的结果带一条说明：20 个样本里超过 20 ms 的个数和最大值，即 `app/cold_start` 按 ADR 0017 判定时会看到的数，供「未决问题」第 1 条选择 A、B 时用（已选 B）；还有两种首帧来源各多少个和按启动顺序的每个样本（ADR 0052，报告的统计量里没有单个样本，ADR 0017 要记下它们）。`baseline/empty_window_idle` 的说明是 3 次的首帧来源和 3 个值。条目仍然只记录。
+- 预算表里两条 `baseline/*` 从「计划中」改为生效，仍然只记录、没有上限：`budgets.rs` 只改了状态，没有改任何上限。
+- `empty_window` 的窗口与 `app` 的 Welcome 窗口一样大（820 × 520），画的像素与 `app/cold_start` 相同；设计没有规定大小。它的 `Driver` 把 `Quit` 经通道转到主线程调用 `cx.quit()`，`Open` 什么也不做。
+- 「验收」第 4 步第 3 条（实测值写进 ADR 0017）：托管 runner 的记录已写进 ADR 0017；判定机器的基线等 runner 注册之后补上。本机屏幕锁定，首帧的来源是 `handler`，不是基线（「实际验证」）。
+- 判定机器的模式（[ADR 0052](../adr/0052.md) 决策第 3 条）：第 4 步开始时判定用的是选项 A（「未决问题」第 1 条），设计里两种来源的样本都照常判定。产品负责人改选 B 之后，本步加上：`Budget::judging_machine`（`budgets.rs` 里用 `on_judging_machine` 标出四条）、`Ctx::judge`、`Scheduler::judging`、报告的 `judge` 和标题、合并对 `judge` 的两项检查（各份报告相同；判定运行里至少一条判定机器的条目运行过），以及 `LECTERN_BENCH_JUDGE` 的取值规则。「接口」「报告」「进程级基准」「预算表」「平台与噪声」「`just bench` 与 CI」「状态与异常」「测试」「验收」已改。
+  - `baseline/empty_window_idle` 也是判定机器的条目：它不以首帧为终点，但在首帧的时刻之后 5 秒采样，又是以判定机器的结果为准的 ADR 0017 基线（ADR 0052 决策第 3 条「范围」）。
+  - `LECTERN_BENCH_JUDGE` 的值无效时，`main` 在运行之前以 2 退出、不写报告，不是写一份带报告级错误的报告：这时连这次运行是不是判定机器都不知道，按哪一种写报告都可能把判定写成记录。缺少报告让合并出错，判定任务失败。
+  - 判定机器之外，判定机器的条目在测量运行里是 `record`，检查照常运行但不决定状态，所以不会是 `over`，也不重跑；值的类型与检查不符仍是 `error`，坏掉的基准在托管 runner 上也看得到。
+- 首帧的时刻按 [ADR 0052](../adr/0052.md)：托管 runner 从不给 `presentedTime`，原设计的首帧回调在那里永远不到。`FirstFrame` 多了 `source`（`presented` 或 `handler`，缺少或不认识时整行无效），`Scheduler::cold_start` 返回 `ColdStart`（样本和每个样本的来源），`Session` 多了 `source()`。`wire::Milestone` 和 `wire::FrameTimes` 的形状不变，来源随它们的使用方（B2 和第 5 步）加上。「报告协议」「探针」「进程调度」「进程级基准」已改。
+- 静止后的等待覆盖到第一次 `Epoch` 的应答：应答之前收到的 `Busy` 也让等待重新开始，不计为无效样本。原来的文字只说 5 秒内收到 `Busy` 就重新等，`Busy` 和新的 `Quiescent` 恰好在 5 秒之后、第一次应答之前到达时，两次应答是同一个新的代数，样本会在新的静止之后不到 5 秒取得。「进程级基准」已改。

@@ -14,6 +14,10 @@ use crate::report::{self, VERSION};
 
 const USAGE: &str = "usage: lectern-bench-report merge [--require package] <dir>";
 
+/// The error for a judging run in which none of the judging machine's
+/// entries ran (ADR 0052).
+pub(crate) const NOTHING_JUDGED: &str = "LECTERN_BENCH_JUDGE=1 的运行里，判定机器的条目一条都没有运行（都被过滤、都是计划中或都跳过）：这次运行不判定";
+
 /// The binary's entry point; `args` without the program name.
 pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.into_iter().collect();
@@ -371,10 +375,16 @@ pub(crate) fn merge(
         .first()
         .and_then(|r| r.json["gated"].as_bool())
         .unwrap_or(false);
+    // A report without `judge` is not from the judging machine (ADR 0052).
+    let judged = |r: &Read| r.json["judge"].as_bool().unwrap_or(false);
+    let judge = benchmarked.first().is_some_and(|r| judged(r));
     for r in &benchmarked {
-        if r.json["mode"].as_str() != Some(&mode) || r.json["gated"].as_bool() != Some(gated) {
+        if r.json["mode"].as_str() != Some(&mode)
+            || r.json["gated"].as_bool() != Some(gated)
+            || judged(r) != judge
+        {
             errors.push(format!(
-                "{} 的 mode 或 gated 与其他报告不同",
+                "{} 的 mode、gated 或 judge 与其他报告不同",
                 report::file_name(r.target)
             ));
         }
@@ -404,8 +414,21 @@ pub(crate) fn merge(
     }
 
     let mut results = Vec::new();
+    // On the judging machine at least one of its entries must have run: a
+    // filter or plan that leaves none judges nothing (ADR 0052).
+    let mut judged_here = false;
     for (id, budget) in expected(budgets, &plugins, &language_servers) {
         let occurrences = found.remove(&id).unwrap_or_default();
+        if budget.judging_machine
+            && occurrences.iter().any(|(_, result)| {
+                matches!(
+                    result["status"].as_str(),
+                    Some("ok" | "over" | "record" | "error")
+                )
+            })
+        {
+            judged_here = true;
+        }
         match occurrences.as_slice() {
             [] if budget.target == Target::Package && !has_package => {
                 results.push(placeholder(&id, budget, "skipped", "未打包"));
@@ -441,6 +464,9 @@ pub(crate) fn merge(
             ));
         }
     }
+    if judge && !judged_here {
+        errors.push(NOTHING_JUDGED.to_owned());
+    }
 
     let exit = if !errors.is_empty() || results.iter().any(|r| r["status"] == "error") {
         2
@@ -461,7 +487,7 @@ pub(crate) fn merge(
     let seconds = |b: &Json| b["seconds"].as_f64().unwrap_or(0.0);
     benches.sort_by(|a, b| seconds(b).total_cmp(&seconds(a)));
 
-    let title = report::title("report", &mode, gated);
+    let title = report::title("report", &mode, gated, judge);
     let mut text = report::text_table(&title, &results, &errors);
     let mut markdown = report::markdown(&title, &results, &errors);
     if let Some(lines) = slowest(&json!({ "benches": benches })) {
@@ -477,6 +503,7 @@ pub(crate) fn merge(
     out.insert("version".into(), json!(VERSION));
     out.insert("mode".into(), json!(mode));
     out.insert("gated".into(), json!(gated));
+    out.insert("judge".into(), json!(judge));
     out.insert("host".into(), host);
     out.insert("commit".into(), json!(commit));
     out.insert("results".into(), Json::Array(results));

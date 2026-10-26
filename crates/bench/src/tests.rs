@@ -31,6 +31,7 @@ const fn budget(
         state,
         target,
         macos_only: false,
+        judging_machine: false,
     }
 }
 
@@ -75,5 +76,6 @@ fn options<'a>(budgets: &'a [Budget], target: Target, args: &[&str], dir: &Path)
         config: FAST,
         host: host(),
         commit: None,
+        judge: false,
     }
 }

@@ -31,6 +31,30 @@ pub(crate) struct Options<'a> {
     pub config: SampleConfig,
     pub host: Host,
     pub commit: Option<String>,
+    /// The judging machine ([`judge_from_env`], ADR 0052): the budgets for
+    /// it are judged; elsewhere a measure run records them.
+    pub judge: bool,
+}
+
+/// The environment variable that names the judging machine (ADR 0052).
+pub(crate) const JUDGE_VAR: &str = "LECTERN_BENCH_JUDGE";
+
+/// Why an entry for the judging machine is only recorded here.
+pub(crate) const NOT_THE_JUDGE: &str = "只记录：这里不是判定机器（没有 LECTERN_BENCH_JUDGE=1），首帧的时刻可能不是显示时刻（ADR 0052）";
+
+/// [`JUDGE_VAR`]'s value: unset or empty is not the judging machine, `1`
+/// is. Anything else is an error, so a mistyped value on the judging
+/// machine does not turn its judgments into records.
+pub(crate) fn judge_from_env(value: Option<&std::ffi::OsStr>) -> Result<bool, String> {
+    match value {
+        None => Ok(false),
+        Some(v) if v.is_empty() => Ok(false),
+        Some(v) if v == "1" => Ok(true),
+        Some(v) => Err(format!(
+            "{JUDGE_VAR} must be 1 or unset, not {:?}",
+            v.to_string_lossy()
+        )),
+    }
 }
 
 pub(crate) struct Run<'a> {
@@ -90,6 +114,7 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         target: options.target,
         mode: args.mode,
         gated,
+        judge: options.judge,
         host: options.host.clone(),
         commit: options.commit.clone(),
         entries: Vec::new(),
@@ -98,6 +123,13 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         language_servers: Vec::new(),
         benches: Vec::new(),
     };
+    // The judging machine judges: a run that judges nothing must not pass
+    // for one (ADR 0052).
+    if options.judge && !gated {
+        report.errors.push(format!(
+            "{JUDGE_VAR}=1 只用于 Apple 芯片上的测量运行（cargo bench）：这次运行不判定"
+        ));
+    }
 
     // Entries that need no run: filtered, then planned.
     let mut pending: Vec<&'a Budget> = Vec::new();
@@ -253,18 +285,23 @@ fn run_bench<'a>(
 ) -> u32 {
     let first = match attempt(options, args.mode, bench, fixtures) {
         Ok(results) => results,
-        Err(message) => {
+        Err(failure) => {
+            let status = if failure.skip {
+                Status::Skipped
+            } else {
+                Status::Error
+            };
             for budget in wanted {
                 report
                     .entries
-                    .push(Entry::new(budget, Status::Error, Some(message.clone())));
+                    .push(Entry::new(budget, status, Some(failure.message.clone())));
             }
             return 1;
         }
     };
     let mut entries = collect(options, args, bench, wanted, first, report);
     for entry in &mut entries {
-        judge(entry, args.mode);
+        judge(entry, args.mode, options.judge);
     }
     let retry = gated && entries.iter().any(|e| e.status == Status::Over);
     if retry {
@@ -279,7 +316,7 @@ fn run_bench<'a>(
                         Some((value, note)) => {
                             entry.attempts.push(value);
                             entry.note = note;
-                            judge(entry, args.mode);
+                            judge(entry, args.mode, options.judge);
                         }
                         None => {
                             entry.status = Status::Error;
@@ -288,10 +325,10 @@ fn run_bench<'a>(
                     }
                 }
             }
-            Err(message) => {
+            Err(failure) => {
                 for entry in entries.iter_mut().filter(|e| e.status == Status::Over) {
                     entry.status = Status::Error;
-                    entry.reason = Some(format!("重跑出错：{message}"));
+                    entry.reason = Some(format!("重跑出错：{}", failure.message));
                 }
             }
         }
@@ -380,8 +417,12 @@ fn collect<'a>(
     entries
 }
 
-/// Sets the status from the last attempt.
-fn judge(entry: &mut Entry<'_>, mode: Mode) {
+/// Sets the status from the last attempt. Off the judging machine
+/// (`judging` false), an entry for it is `record` with
+/// [`NOT_THE_JUDGE`] in measure mode: its checks still run, so a value
+/// they cannot judge is still an error, but it is never `over` and never
+/// retried (ADR 0052).
+fn judge(entry: &mut Entry<'_>, mode: Mode, judging: bool) {
     let Some(value) = entry.attempts.last() else {
         return;
     };
@@ -396,16 +437,33 @@ fn judge(entry: &mut Entry<'_>, mode: Mode) {
             }
         }
     }
-    entry.reason = None;
+    let elsewhere = entry.budget.judging_machine && !judging && mode == Mode::Measure;
+    entry.reason = elsewhere.then(|| NOT_THE_JUDGE.to_owned());
     entry.status = if mode == Mode::Smoke {
         Status::Smoke
-    } else if entry.budget.checks.is_empty() {
+    } else if entry.budget.checks.is_empty() || elsewhere {
         Status::Record
     } else if pass {
         Status::Ok
     } else {
         Status::Over
     };
+}
+
+/// Why an attempt produced no results.
+struct Failure {
+    message: String,
+    /// [`BenchError::skip`](crate::BenchError::skip): `skipped`, not `error`.
+    skip: bool,
+}
+
+impl Failure {
+    fn error(message: String) -> Failure {
+        Failure {
+            message,
+            skip: false,
+        }
+    }
 }
 
 /// One run of `bench` in a fresh scratch directory (shared fixtures are
@@ -415,30 +473,34 @@ fn attempt(
     mode: Mode,
     bench: &Bench,
     fixtures: &Fixtures,
-) -> Result<Vec<Measured>, String> {
+) -> Result<Vec<Measured>, Failure> {
     let scratch = options.scratch_root.join(bench.id);
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch)
-        .map_err(|e| format!("建不了临时目录 {}：{e}", scratch.display()))?;
+        .map_err(|e| Failure::error(format!("建不了临时目录 {}：{e}", scratch.display())))?;
     let mut ctx = Ctx::new(
         mode,
         options.config,
         scratch.clone(),
         fixtures.clone(),
         options.fixtures_dir.clone(),
+        options.judge,
     );
     let outcome = catch_unwind(AssertUnwindSafe(|| (bench.run)(&mut ctx)));
     let _ = std::fs::remove_dir_all(&scratch);
     match outcome {
         Ok(Ok(results)) => Ok(results),
-        Ok(Err(error)) => Err(error.message().to_owned()),
+        Ok(Err(error)) => Err(Failure {
+            message: error.message().to_owned(),
+            skip: error.is_skip(),
+        }),
         Err(payload) => {
             let message = payload
                 .downcast_ref::<&str>()
                 .map(|s| (*s).to_owned())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panic".to_owned());
-            Err(format!("panic：{message}"))
+            Err(Failure::error(format!("panic：{message}")))
         }
     }
 }
@@ -448,7 +510,12 @@ fn finish<'a>(options: &Options<'a>, report: Report<'a>) -> Run<'a> {
     let json = report.to_json();
     let results = json["results"].as_array().cloned().unwrap_or_default();
     let text = report::text_table(
-        &report::title(options.target.name(), report.mode.name(), report.gated),
+        &report::title(
+            options.target.name(),
+            report.mode.name(),
+            report.gated,
+            report.judge,
+        ),
         &results,
         &report.errors,
     );

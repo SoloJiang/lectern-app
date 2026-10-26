@@ -240,3 +240,27 @@ fn budgets_describe_their_checks() {
     assert_eq!(describe("executor/spawn_10k"), "record");
     assert_eq!(describe("project/facts_contains/name"), "median < 1 µs");
 }
+
+/// The judging machine's entries are the budgets whose measured time ends
+/// at the first frame, and the empty window's baselines (ADR 0052
+/// decision 3); nothing else is taken from the hosted runner's judgment.
+#[test]
+fn budgets_judging_machine_entries_end_at_the_first_frame() {
+    let marked: Vec<&str> = BUDGETS
+        .iter()
+        .filter(|b| b.judging_machine)
+        .map(|b| b.id)
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            "app/cold_start",
+            "app/cold_start_purged",
+            "baseline/empty_window_cold_start",
+            "baseline/empty_window_idle",
+        ]
+    );
+    for budget in BUDGETS.iter().filter(|b| b.judging_machine) {
+        assert_eq!(budget.target, Target::Process, "{}", budget.id);
+    }
+}

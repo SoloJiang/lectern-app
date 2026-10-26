@@ -80,12 +80,23 @@ pub(crate) struct Host {
 }
 
 impl Host {
+    /// `platform::host::describe`; where it fails (and off macOS) the
+    /// model, chip and system version are null and `cpus` is the available
+    /// parallelism.
     pub(crate) fn current() -> Host {
-        Host {
-            model: None,
-            chip: None,
-            os_version: None,
-            cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+        match lectern_platform::host::describe() {
+            Ok(info) => Host {
+                model: Some(info.model),
+                chip: Some(info.chip),
+                os_version: Some(info.os_version),
+                cpus: info.cpus,
+            },
+            Err(_) => Host {
+                model: None,
+                chip: None,
+                os_version: None,
+                cpus: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
+            },
         }
     }
 
@@ -105,6 +116,8 @@ pub(crate) struct Report<'a> {
     pub target: Target,
     pub mode: Mode,
     pub gated: bool,
+    /// Run on the judging machine (`LECTERN_BENCH_JUDGE=1`, ADR 0052).
+    pub judge: bool,
     pub host: Host,
     pub commit: Option<String>,
     pub entries: Vec<Entry<'a>>,
@@ -135,6 +148,7 @@ impl Report<'_> {
         out.insert("target".into(), json!(self.target.name()));
         out.insert("mode".into(), json!(self.mode.name()));
         out.insert("gated".into(), json!(self.gated));
+        out.insert("judge".into(), json!(self.judge));
         out.insert("host".into(), self.host.to_json());
         out.insert("commit".into(), json!(self.commit));
         if self.target == Target::Process {
@@ -365,10 +379,12 @@ pub(crate) fn markdown(title: &str, results: &[Json], errors: &[String]) -> Stri
     out
 }
 
-/// The title line: "lectern-bench time: smoke, not gated".
-pub(crate) fn title(what: &str, mode: &str, gated: bool) -> String {
+/// The title line: "lectern-bench time: smoke, not gated", with ", judging
+/// machine" on the judging machine (ADR 0052).
+pub(crate) fn title(what: &str, mode: &str, gated: bool, judge: bool) -> String {
     format!(
-        "lectern-bench {what}: {mode}, {}",
-        if gated { "gated" } else { "not gated" }
+        "lectern-bench {what}: {mode}, {}{}",
+        if gated { "gated" } else { "not gated" },
+        if judge { ", judging machine" } else { "" }
     )
 }

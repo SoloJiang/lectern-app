@@ -74,6 +74,7 @@ pub struct Ctx {
     scratch: PathBuf,
     fixtures: Fixtures,
     persistent: PathBuf,
+    judge: bool,
 }
 
 impl Ctx {
@@ -83,6 +84,7 @@ impl Ctx {
         scratch: PathBuf,
         fixtures: Fixtures,
         persistent: PathBuf,
+        judge: bool,
     ) -> Ctx {
         Ctx {
             mode,
@@ -90,7 +92,16 @@ impl Ctx {
             scratch,
             fixtures,
             persistent,
+            judge,
         }
+    }
+
+    /// The run is on the judging machine (`LECTERN_BENCH_JUDGE=1`, ADR
+    /// 0052): a process benchmark gives it to
+    /// [`Scheduler::judging`](crate::process::Scheduler::judging), so a
+    /// first frame without a `presentedTime` is an error there.
+    pub fn judge(&self) -> bool {
+        self.judge
     }
 
     /// A directory kept between benchmark runs and shared by the targets of
