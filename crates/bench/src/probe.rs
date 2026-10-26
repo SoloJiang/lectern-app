@@ -139,7 +139,11 @@ impl Probe {
     /// Called before the first frame, before the window is created:
     /// registers the first-frame callback with
     /// `platform::frame::on_first_presented`. The callback only notes the
-    /// time and its source (ADR 0052) and starts the probe thread. If the registration fails
+    /// time and its source (ADR 0052) and starts the probe thread. On the
+    /// judging machine (`LECTERN_BENCH_JUDGE=1`, inherited from the runner)
+    /// it waits for a drawable with a `presentedTime` (`Fallback::Wait`);
+    /// elsewhere a drawable without one gives the handler's time
+    /// (`Fallback::HandlerTime`). If the registration fails
     /// (`HookError`, such as after a GPUI upgrade changed the method's type
     /// encoding), connects to the socket at once, sends
     /// `Error { message: "hook <kind>" }` and exits with code 3: the runner
@@ -147,7 +151,12 @@ impl Probe {
     /// (ADR 0048).
     pub fn watch_first_frame(&self) {
         let shared = Arc::clone(&self.shared);
-        let registered = lectern_platform::frame::on_first_presented(move |at| {
+        let fallback = if std::env::var_os(crate::runner::JUDGE_VAR).is_some_and(|v| v == "1") {
+            lectern_platform::frame::Fallback::Wait
+        } else {
+            lectern_platform::frame::Fallback::HandlerTime
+        };
+        let registered = lectern_platform::frame::on_first_presented(fallback, move |at| {
             start_thread(shared, at);
         });
         if let Err(error) = registered {

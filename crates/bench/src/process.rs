@@ -246,7 +246,10 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    /// `launches` runs of `run`, at most [`MEMORY_PARALLEL`] at once; the
+    /// `launches` runs of `run`, at most [`MEMORY_PARALLEL`] at once (one at
+    /// a time on the judging machine: windows opened together cover each
+    /// other, and a covered window never shows a drawable, so its first
+    /// frame would never come, ADR 0052); the
     /// values in the order the runs were started. The first error (by that
     /// order) is returned; once a run has failed, the runs not yet started
     /// are not started.
@@ -259,7 +262,8 @@ impl<'a> Scheduler<'a> {
         let results: Mutex<Vec<Option<Result<T, BenchError>>>> =
             Mutex::new((0..launches).map(|_| None).collect());
         thread::scope(|scope| {
-            for _ in 0..MEMORY_PARALLEL.min(launches) {
+            let parallel = if self.judging { 1 } else { MEMORY_PARALLEL };
+            for _ in 0..parallel.min(launches) {
                 scope.spawn(|| {
                     loop {
                         let index = next.fetch_add(1, Ordering::SeqCst);

@@ -382,7 +382,8 @@ impl Scheduler<'_> {
     /// 冷启动：`warmups` 次不计入，再 `samples` 次，逐个启动；样本是 `presented - start_time(pid)`，同时记下每个样本的来源；
     /// 每次都发 `Quit` 并等它退出。
     pub fn cold_start(&self, program: &Path, warmups: usize, samples: usize) -> Result<ColdStart, BenchError>;
-    /// 内存类：最多 `MEMORY_PARALLEL`（3）个同时运行；第一个出错的结果返回，之后不再开始新的。
+    /// 内存类：最多 `MEMORY_PARALLEL`（3）个同时运行，判定机器上一次一个（同时打开的窗口互相遮住，被遮住的窗口不显示 drawable，
+    /// 首帧不到，ADR 0052）；第一个出错的结果返回，之后不再开始新的。
     pub fn memory<T: Send>(&self, launches: usize, run: impl Fn(&Scheduler) -> Result<T, BenchError> + Sync) -> Result<Vec<T>, BenchError>;
 }
 /// 冷启动的样本，和按同样顺序的每个样本的首帧来源（ADR 0052）。
@@ -1108,6 +1109,10 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
   - `LECTERN_BENCH_JUDGE=yes just bench baseline/`：三个目标都在运行之前以 2 退出，打印 `LECTERN_BENCH_JUDGE must be 1 or unset, not "yes"`；合并因为缺报告，退出码 2。
   - `LECTERN_BENCH_JUDGE=1 just bench no-such-id/`（全部条目被过滤）：退出码 2，合并的错误是「LECTERN_BENCH_JUDGE=1 的运行里，判定机器的条目一条都没有运行（都被过滤、都是计划中或都跳过）：这次运行不判定」。
   - `LECTERN_BENCH_JUDGE=1 cargo test --locked -p lectern-bench --all-features --bench process`（冒烟）：报告级错误「LECTERN_BENCH_JUDGE=1 只用于 Apple 芯片上的测量运行（cargo bench）：这次运行不判定」，目标以 2 退出。
+- 判定机器的路径在一台没有锁屏的实体 Mac 上（Apple M5 Pro，macOS 27.0.1，内置 Retina 显示器，2026-10-26；不是判定机器：在开发者的图形会话里运行，有别的应用在运行，没有按 CI 设计「判定机器」准备）：
+  - 改之前，`LECTERN_BENCH_JUDGE=1` 时 platform 的首帧钩子取第一个显示回调。GPUI 的第一个 drawable 在窗口显示之前画出，带 0，结果为 `handler`，判定机器上每次都会是错误。#270 加了 `Fallback::Wait`，探针在 `LECTERN_BENCH_JUDGE=1` 时用它（[platform 设计「实际验证」](platform.md#实际验证)）。
+  - 之后 `baseline/empty_window_idle` 仍然 10 s 内没有首帧（连续 3 次）：3 个窗口同时在同一位置打开，被遮住的 2 个不显示 drawable。`Scheduler::memory` 在判定机器上改为一次一个（`process_memory_runs_one_at_a_time_on_the_judging_machine`）。
+  - 然后 `LECTERN_BENCH_JUDGE=1 just bench baseline/` 退出码 0：冷启动 20 个样本，按启动顺序（ms）184.30、187.80、185.87、180.83、183.76、192.34、217.09、199.77、175.21、184.34、204.42、200.27、187.25、184.19、180.92、202.27、191.60、200.08、177.43、175.94，中位数 187 ms，20 个都超过 20 ms，来源都是 `presented`；空闲内存 40.7、40.4、40.5 MB，中位数 40.5 MB，来源都是 `presented`。这一组数字只是参考，不是 ADR 0017 的基线：基线由判定机器给出。空窗口本身就远超 20 ms，按 ADR 0017「影响」交给产品负责人决定。
 - 没有验证的：判定机器上的运行。还没有判定机器；本机屏幕锁定，只验证了 `handler` 是错误的路径。实体机给出 `presentedTime` 时的冷启动和空闲内存、来源为 `presented` 的真实路径和判定任务 `Judge (physical Mac)` 本身，等 runner 注册之后由它的第一次运行给出，再写进本节和 ADR 0017（「验收」第 4 步第 3 条的判定机器部分）。注册首帧回调出错的真实路径（只由 `process_cold_start_stops_at_a_hook_error` 用假探针覆盖）。Linux 上的编译和测试（这台机器只装了 `aarch64-apple-darwin` 目标，由 Linux CI 给出）。
 
 ## 与设计的差异

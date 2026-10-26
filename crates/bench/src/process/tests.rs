@@ -915,6 +915,28 @@ fn process_memory_runs_at_most_three_at_once() {
 }
 
 #[test]
+fn process_memory_runs_one_at_a_time_on_the_judging_machine() {
+    // Windows opened together cover each other, and a covered window shows
+    // no drawable (ADR 0052).
+    let fake = Fake::new(|p| {
+        p.first_frame(start());
+        p.obey(None)
+    });
+    let scheduler = fake.scheduler(quick()).judging(true);
+    let bytes = scheduler
+        .memory(4, |s| {
+            let session = s.session(&program(), None)?;
+            thread::sleep(ms(20));
+            let bytes = session.footprint()?;
+            session.quit()?;
+            Ok(bytes)
+        })
+        .unwrap();
+    assert_eq!(bytes.len(), 4);
+    assert_eq!(fake.max_live(), 1);
+}
+
+#[test]
 fn process_memory_stops_at_the_first_error() {
     let fake = Fake::new(|_| 1);
     let scheduler = fake.scheduler(quick());
