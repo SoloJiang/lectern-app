@@ -1410,17 +1410,26 @@ pub mod frame {
         pub fn as_str(self) -> &'static str;
     }
 
+    /// `presentedTime` 为 0 的显示回调怎么办（ADR 0052）。GPUI 的第一个 drawable 在窗口显示之前画出，实体机上也为 0。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Fallback {
+        /// 交出回调运行的时刻（`Handler`）。给不出 `presentedTime` 的机器（托管 runner）。
+        HandlerTime,
+        /// 不交出，等一个有 `presentedTime` 的 drawable。判定机器（`LECTERN_BENCH_JUDGE=1`）。
+        Wait,
+    }
+
     /// 换算到系统时钟的时刻和它的来源。
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct PresentedAt { pub time: SystemTime, pub source: TimeSource }
 
-    /// 登记首帧回调。之后最先运行的那个 drawable 的显示回调给出首帧的时刻：`presentedTime` 大于 0 时是它（`Presented`），
-    /// 否则是这个回调运行的时刻（`Handler`），换算成系统时钟交给 `f`。
+    /// 登记首帧回调。第一个 `presentedTime` 大于 0 的显示回调给出它（`Presented`）；不大于 0 的回调在 `Fallback::HandlerTime` 时
+    /// 给出这个回调运行的时刻（`Handler`），在 `Fallback::Wait` 时什么都不给。时刻换算成系统时钟交给 `f`，之后的回调不再交付。
     /// `f` 在 Core Animation 调用显示回调的线程上调用一次，不应阻塞。
     /// 必须在创建窗口之前调用（探针在 `main` 的开头调用）。任何线程。
     /// 只替换 `-[CAMetalLayer nextDrawable]`：不做 IO，不建线程，不建 Metal 对象，耗时 ≤ 100 µs。
     /// 第二次调用为 `AlreadyActive`；替换不了为 `Mismatch`；没有 feature 或不是 macOS 为 `Unsupported`。
-    pub fn on_first_presented(f: impl FnOnce(PresentedAt) + Send + 'static) -> Result<(), HookError>;
+    pub fn on_first_presented(fallback: Fallback, f: impl FnOnce(PresentedAt) + Send + 'static) -> Result<(), HookError>;
 
     /// 开始记录 `window` 的逐帧时刻。首帧之后、在主线程上调用。同一时刻最多一个记录器。
     /// 第一次调用时替换命令缓冲的 `commit`（`nextDrawable` 还没有替换时一并替换），为窗口所在的显示器建 CVDisplayLink（之后复用）；
@@ -1499,7 +1508,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 
 1. `on_first_presented` 把 `f` 放进一个静态的槽（`AtomicPtr` 指向泄漏的 `Box`），然后替换 `-[CAMetalLayer nextDrawable]`。`CAMetalLayer` 是公开的类（`objc_getClass`）；GPUI 用的就是这个类本身，不是它的子类。
 2. 替换后的 `nextDrawable` 先调用原来的实现。返回的 drawable 不为 nil、槽里还有回调时，在它上面登记 `addPresentedHandler:`。GPUI 的两条显示路径都在 `nextDrawable` 之后才提交或显示，所以登记总在显示之前。首帧多半经 `displayLayer:` 的路径（`commit`、`waitUntilScheduled`、`[drawable present]`），这条路径不经过 `presentDrawable:`，所以登记不放在提交的地方。
-3. 显示回调读 `presentedTime`，然后用原子交换取出槽里的回调（只有一个线程取得到）。`presentedTime` 大于 0 时，把它换算成系统时钟，来源为 `Presented`。不大于 0 时（0、负数、NaN：机器不给，或这个 drawable 没有显示），读这个时刻的 `CACurrentMediaTime()` 换算，来源为 `Handler`（[ADR 0052](../adr/0052.md)）。然后调用回调。之后的 drawable 不再登记首帧的回调。回调只能在 drawable 交给 Core Animation 之后运行，所以 `Handler` 的时刻不早于 `present`，但它不是显示时刻。
+3. 显示回调读 `presentedTime`。大于 0 时，用原子交换取出槽里的回调（只有一个线程取得到），把时刻换算成系统时钟，来源为 `Presented`。不大于 0 时（0、负数、NaN：机器不给，或这个 drawable 没有显示），`Fallback::HandlerTime` 下同样取出回调，读这个时刻的 `CACurrentMediaTime()` 换算，来源为 `Handler`；`Fallback::Wait` 下不取，回调留在槽里，等下一个 drawable（[ADR 0052](../adr/0052.md)）。然后调用回调。之后的 drawable 不再登记首帧的回调。回调只能在 drawable 交给 Core Animation 之后运行，所以 `Handler` 的时刻不早于 `present`，但它不是显示时刻。
 4. 它只在测量构建里有（ADR 0048）。桌面版的启动屏障不用它，保持帧回调（[app 设计「启动屏障」](app.md#启动屏障)）。
 
 ### 逐帧记录
@@ -1556,7 +1565,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 - 记录期间窗口移到另一个显示器：tick 和 `refresh` 仍来自原来的显示器。基准运行时窗口不移动。
 - 窗口不是前台窗口时，GPUI 按约 30 fps 请求帧（`inactive_frame_interval`），相邻 `started` 的间隔约 33 ms，帧基准必然超标。帧基准的场景开始之前，`app` 的 `Driver` 先让窗口成为前台窗口。
 - 系统有多块 GPU（Intel Mac）时，`commit` 的类取自窗口的 `CAMetalLayer` 的设备，就是 GPUI 选的那块。bench 在 Intel Mac 上只报告，不判定。
-- `presentedTime` 不大于 0 的 drawable 没有显示时刻，首帧和 `presented` 取显示回调运行的时刻，来源为 `Handler`（ADR 0052）。托管的 CI runner 和锁屏的机器上每个 drawable 都是这样。这个时刻与真正显示的先后不确定：GPUI 的第一个 drawable 在窗口显示之前画出，在给 `presentedTime` 的机器上，它的回调也可能带 0 先到，结果为 `Handler`。来源写在结果里。
+- `presentedTime` 不大于 0 的 drawable 没有显示时刻，在 `Fallback::HandlerTime` 下首帧和 `presented` 取显示回调运行的时刻，来源为 `Handler`（ADR 0052）。托管的 CI runner 和锁屏的机器上每个 drawable 都是这样。这个时刻与真正显示的先后不确定。GPUI 的第一个 drawable 在窗口显示之前画出，在给 `presentedTime` 的实体机上它也为 0，所以判定机器用 `Fallback::Wait`，跳过它，等窗口显示后的 drawable。来源写在结果里。
 - 只给首帧的显示时刻。`workspace` 的里程碑要的是之后某一帧的显示时刻，`on_first_presented` 给不出，要用 `record` 记下画出里程碑的那一帧（[workspace 设计「已知限制」](workspace.md#已知限制)）。
 - CVDisplayLink 从 macOS 15 起标为弃用（ADR 0048）。
 
@@ -1801,6 +1810,10 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - `cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks` 连续三次退出码都为 0（B1 时这一步在本机以 panic 退出）：`on_first_presented` 的耗时（11 个冷进程的最小值、中位数、最大值）依次为 10.8、13.2、29.1 µs，10.5、11.5、16.7 µs，10.4、11.6、16.7 µs；首帧回调在进程启动后 394.4、85.3、84.2 ms 到达（第一次的文件缓存是冷的），来源都是 `handler`，都在第一个 drawable 上。「到达的时刻晚于进程的启动时刻、不晚于现在」这次在真实窗口上成立。
   - `just check`、`just deny` 通过；`git diff origin/main -- Cargo.lock` 为空。
   - 没有验证的：没有在不锁屏、给 `presentedTime` 的实体 Mac 上运行，`Presented` 的来源只由 `hook_deliver_*` 覆盖，实体 Mac 上的结果由判定机器注册之后的检查给出（[ADR 0052](../adr/0052.md)，[CI 设计「判定机器」](ci.md#判定机器)）；托管 runner 上的结果随 bench 第 4 步（#269）的 CI 运行得到。
+- `Fallback`（[ADR 0052](../adr/0052.md) 决策 1 的修订），同一台 Mac，2026-10-26，屏幕没有锁定、窗口可见：
+  - 改之前：`frame_hooks` 的首帧来源为 `handler`，只画了 1 个 drawable（窗口被全屏的应用挡住时）。窗口可见时，诊断版的空窗口（40c5468 的 `LECTERN_BENCH_DIAG=natural`）画了 3 个 drawable，显示回调 2 个，其中 1 个为 0（窗口显示之前那个），另一个有时刻，距进程启动约 410 ms；不经方法替换的 `present_check` 的 `Buffer` 路径 120 帧里 119 帧有时刻，只有第一帧为 0。所以取第一个回调的规则在判定机器上每次都得到 `handler`。
+  - 改之后：`LECTERN_BENCH_JUDGE=1` 下（`Fallback::Wait`）`frame_hooks` 的来源为 `presented`，在第 4 个 drawable 上；不设时（`Fallback::HandlerTime`）为 `handler`，与改之前相同。`cargo nextest run -p lectern-platform --all-features -E 'test(/frame|hook/)'` 17 个通过，新增 `hook_deliver_waits_for_a_shown_drawable_without_the_handler_time`。
+  - 没有验证的：`presentsWithTransaction` 路径（GPUI 的 `displayLayer`、窗口变为 key 时用它）在窗口可见时是否给时刻；那次 `present_check` 窗口不可见，120 帧都是 0。判定机器的第一次检查（CI 设计「判定机器」第 8 步）会看到。
 
 ## 与设计的差异
 
@@ -1847,4 +1860,4 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - 首帧回调 panic 会终止进程（系统回调的 `extern "C"` 边界）。回调不应 panic，函数文档写了这一点。
   - 增加了设计没有列出的测试：`hook_mismatch_installs_nothing`（类、选择器、类型编码各错一次，安装前后的状态相同）、`hook_deliver_calls_the_callback_once_for_a_shown_drawable`（把「读到 `presentedTime` 之后」的部分抽成 `deliver`，用本地的槽测）、`frame_hook_passes_drawables_through_on_an_offscreen_layer`（替换装上之后，离屏的层连续取 8 个 drawable，说明不阻塞、不丢）。这些测试共用进程里的登记，经一把锁轮流运行，`cargo test` 与 nextest 的结果相同。设计「测试」里的 `frame_hooks_on_an_offscreen_layer` 和 `frame_record_off_the_main_thread_is_an_error` 随 `record`（B2）加入。
   - `examples/frame_hooks.rs` 是 B1 的范围：测安装耗时、首帧回调（窗口里用 `CAMetalLayer`，`presentDrawable:` 加 `commit` 画帧，主 run loop 里等回调），没有 CVDisplayLink 和 120 帧的检查（B2）。安装耗时在 11 个冷子进程里测，按中位数判定 100 µs，不按单次：单个冷进程的第一次调用偶尔因页错误明显更慢。
-- 首帧回调改为 `FnOnce(PresentedAt)`，新增 `TimeSource`，`presentedTime` 不大于 0 时取显示回调运行的时刻（[ADR 0052](../adr/0052.md)）。原设计跳过这些 drawable，等第一个大于 0 的；托管的 CI runner 从不给 `presentedTime`（ADR 0052「背景」），bench 第 4 步的基线因此没有样本。「接口」「首帧」「性能」「已知限制」「测试」已改，`FrameTimes::presented`（B2，尚未实现）按同一规则改为 `Option<PresentedAt>`。B1 的 `hook_deliver_calls_the_callback_once_for_a_shown_drawable` 拆成两个 `hook_deliver_*`，见「测试」。
+- 首帧回调改为 `FnOnce(PresentedAt)`，新增 `TimeSource`，`presentedTime` 不大于 0 时取显示回调运行的时刻（[ADR 0052](../adr/0052.md)）。之后加入 `Fallback`：这条回退只在 `Fallback::HandlerTime` 下（托管 runner），判定机器用 `Fallback::Wait`，等第一个大于 0 的时刻，因为 GPUI 的第一个 drawable 在实体机上也为 0（「实际验证」）。原设计跳过这些 drawable，等第一个大于 0 的；托管的 CI runner 从不给 `presentedTime`（ADR 0052「背景」），bench 第 4 步的基线因此没有样本。「接口」「首帧」「性能」「已知限制」「测试」已改，`FrameTimes::presented`（B2，尚未实现）按同一规则改为 `Option<PresentedAt>`。B1 的 `hook_deliver_calls_the_callback_once_for_a_shown_drawable` 拆成两个 `hook_deliver_*`，见「测试」。
