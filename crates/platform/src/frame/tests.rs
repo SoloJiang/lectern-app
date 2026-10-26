@@ -78,16 +78,36 @@ fn frame_is_unsupported_without_bench_hooks() {
     assert!(!called.load(Ordering::SeqCst));
     // The callback was dropped, not kept: the test holds the only handle.
     assert_eq!(Arc::strong_count(&called), 1);
+    // `record` too, before it looks at the handle.
+    let recorder = super::record(&NoHandle);
+    assert!(
+        matches!(recorder, Err(HookError::Unsupported)),
+        "{:?}",
+        recorder.err()
+    );
+}
+
+/// A handle that gives no window (GPUI's test platform).
+#[cfg(not(all(target_os = "macos", feature = "bench-hooks")))]
+struct NoHandle;
+
+#[cfg(not(all(target_os = "macos", feature = "bench-hooks")))]
+impl raw_window_handle::HasWindowHandle for NoHandle {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        Err(raw_window_handle::HandleError::NotSupported)
+    }
 }
 
 #[cfg(all(target_os = "macos", feature = "bench-hooks"))]
 mod hooked {
     use std::ffi::CStr;
     use std::sync::{Mutex, MutexGuard, PoisonError};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
-    use super::super::imp::{find_method, state};
-    use super::super::{Fallback, on_first_presented};
+    use super::super::imp::{find_method, record_layer, state};
+    use super::super::{Fallback, FrameRecorder, on_first_presented, record};
     use crate::HookError;
 
     /// The tests that read or change the registration take turns: under
@@ -255,6 +275,32 @@ mod hooked {
                 }
             }
 
+            /// The `CAMetalLayer`.
+            pub fn id(&self) -> Id {
+                self.layer
+            }
+
+            /// One frame in the order of `displayLayer:`: `nextDrawable`,
+            /// `commit`, `waitUntilScheduled`, then `[drawable present]`,
+            /// then waits until the GPU is done. Whether a drawable came.
+            pub fn draw_scheduled(&self) -> bool {
+                // SAFETY: as `draw`.
+                unsafe {
+                    let pool = objc_autoreleasePoolPush();
+                    let drawable = send0(self.layer, c"nextDrawable");
+                    let drawn = !drawable.is_null();
+                    if drawn {
+                        let buffer = send0(self.queue, c"commandBuffer");
+                        send0(buffer, c"commit");
+                        send0(buffer, c"waitUntilScheduled");
+                        send0(drawable, c"present");
+                        send0(buffer, c"waitUntilCompleted");
+                    }
+                    objc_autoreleasePoolPop(pool);
+                    drawn
+                }
+            }
+
             /// One frame in the order of the display link path:
             /// `nextDrawable`, `presentDrawable:`, `commit`, then waits
             /// until the GPU is done. Whether a drawable came.
@@ -297,6 +343,88 @@ mod hooked {
         for frame in 0..8 {
             assert!(layer.draw(), "frame {frame}");
         }
+    }
+
+    /// How long the offscreen recordings wait: an offscreen drawable may
+    /// never get a presented handler, so the wait runs to its end.
+    const WAIT: Duration = Duration::from_millis(300);
+
+    #[test]
+    fn frame_hooks_on_an_offscreen_layer() {
+        let _turn = take_turn();
+        // The CI machine has a Metal device (docs/design/platform.md
+        // 「测试」); without one this check moves to the example.
+        let layer = offscreen::Layer::new().expect("a Metal device");
+        // SAFETY: `layer` is a live `CAMetalLayer` for the test.
+        let recorder = FrameRecorder::new(unsafe { record_layer(layer.id()) }.unwrap());
+        assert_eq!(recorder.refresh(), Duration::ZERO);
+        // A second recorder while this one records.
+        // SAFETY: as above.
+        let second = unsafe { record_layer(layer.id()) };
+        assert!(
+            matches!(second, Err(HookError::AlreadyActive)),
+            "{:?}",
+            second.err()
+        );
+        for frame in 0..4 {
+            recorder.frame_started();
+            assert!(layer.draw(), "presentDrawable frame {frame}");
+        }
+        for frame in 0..4 {
+            recorder.frame_started();
+            assert!(layer.draw_scheduled(), "present frame {frame}");
+        }
+        let recording = recorder.stop().wait(WAIT);
+        assert!(recording.problems.is_clean(), "{recording:?}");
+        // No display link: every frame is one it did not ask for.
+        assert_eq!(recording.problems.without_tick, 8, "{recording:?}");
+        assert_eq!(recording.frames.len(), 8, "{recording:?}");
+        for frame in &recording.frames {
+            assert_eq!(frame.requested, frame.started, "{frame:?}");
+            assert!(frame.completed >= frame.started, "{frame:?}");
+        }
+
+        // Without `frame_started` the drawables pair with nothing.
+        // SAFETY: as above.
+        let recorder = FrameRecorder::new(unsafe { record_layer(layer.id()) }.unwrap());
+        assert!(layer.draw());
+        let recording = recorder.stop().wait(WAIT);
+        assert_eq!(recording.problems.unmatched, 1, "{recording:?}");
+        assert!(recording.frames.is_empty(), "{recording:?}");
+
+        // Outside a recording the hooks pass frames through.
+        assert!(layer.draw());
+    }
+
+    #[test]
+    fn frame_record_off_the_main_thread_is_an_error() {
+        use std::ptr::NonNull;
+
+        use raw_window_handle::{
+            AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
+        };
+
+        /// An AppKit handle whose view pointer must never be read: the
+        /// thread check comes first.
+        struct Dangling;
+
+        impl HasWindowHandle for Dangling {
+            fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+                let raw = RawWindowHandle::AppKit(AppKitWindowHandle::new(NonNull::dangling()));
+                // SAFETY: off the main thread `record` returns before it
+                // reads the view.
+                Ok(unsafe { WindowHandle::borrow_raw(raw) })
+            }
+        }
+
+        // SAFETY: no arguments; reads a flag of the calling thread.
+        assert_eq!(unsafe { libc::pthread_main_np() }, 0, "a test thread");
+        let result = record(&Dangling);
+        assert!(
+            matches!(result, Err(HookError::NotMainThread)),
+            "{:?}",
+            result.err()
+        );
     }
 
     /// A slot holding a callback that sends what it gets.
