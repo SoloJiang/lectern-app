@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # By hand, for the judge job on a chosen branch (docs/design/ci.md「判定机器」).
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -115,48 +117,63 @@ jobs:
 
   # The budgets that end at the first frame, judged on the self-hosted
   # physical Mac (ADR 0052, docs/design/ci.md「判定机器」). The repository is
-  # public, so: the job runs only once the repository variable says the
-  # runner is registered, never for a fork's pull request, with no secrets,
-  # a read-only token and a workspace cleaned before and after.
+  # public, so the runner runs only code on main, or a branch of this
+  # repository that a person with write access chose (workflow_dispatch),
+  # never a pull request's code by itself. The job runs only once the repository
+  # variable says the runner is registered. It fetches no tools (the
+  # toolchain and just are installed read-only on the machine), keeps its
+  # homes and temporary files under RUNNER_TEMP, has a read-only token and
+  # no secrets, pins its actions to commits, and cleans the workspace
+  # before and after.
   judge:
     name: Judge (physical Mac)
     if: >-
       vars.LECTERN_JUDGE_RUNNER == 'true' &&
-      (github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, macOS, ARM64, lectern-judge]
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      RUSTUP_HOME: /opt/lectern-judge/rustup
+      RUSTUP_AUTO_INSTALL: '0'
     steps:
-      - uses: actions/checkout@v4
+      # RUNNER_TEMP is emptied at the start and end of each job.
+      - name: Use per-job homes and the read-only tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/cargo" "$RUNNER_TEMP/tmp"
+          {
+            echo "HOME=$RUNNER_TEMP/home"
+            echo "CARGO_HOME=$RUNNER_TEMP/cargo"
+            echo "TMPDIR=$RUNNER_TEMP/tmp"
+          } >> "$GITHUB_ENV"
+          echo /opt/lectern-judge/cargo/bin >> "$GITHUB_PATH"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
           clean: true
-      - name: Install toolchain from rust-toolchain.toml
-        run: rustup show active-toolchain || rustup toolchain install
-      - name: Metal toolchain
-        run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
-      # No build cache: nothing a job builds is kept for the next one.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
+      # Fails instead of installing: a missing tool is the machine's setup.
+      - name: Check the pre-installed tools
+        run: |
+          rustc --version
+          just --version
+          xcrun metal --version
       - name: Judge the budgets that end at the first frame
         env:
           LECTERN_BENCH_JUDGE: '1'
         run: just bench baseline/ app/cold_start
       - name: Upload the judging report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lectern-bench-judge-report
           path: target/lectern-bench/report.json
           if-no-files-found: warn
-      # Also ends a measured process that a cancelled run left behind; this
-      # user runs nothing else under these names.
+      # The bench ends each measured process group itself; this also ends
+      # one that a cancelled run left behind. It matches only programs
+      # started from this job's build output.
       - name: Clean the workspace
         if: always()
         run: |
-          pkill -x empty_window || true
-          pkill -x lectern || true
+          pkill -U "$(id -u)" -f "^$GITHUB_WORKSPACE/target/" || true
           git clean -ffdx && git reset --hard
