@@ -48,7 +48,7 @@ mod real {
     use std::time::{Duration, Instant, SystemTime};
 
     use lectern_platform::HookError;
-    use lectern_platform::frame::{PresentedAt, on_first_presented};
+    use lectern_platform::frame::{Fallback, PresentedAt, on_first_presented};
     use lectern_platform::process::start_time;
 
     type Id = *mut c_void;
@@ -236,7 +236,7 @@ mod real {
     /// The child mode: one cold install, its time in nanoseconds on stdout.
     fn install_once() {
         let started = Instant::now();
-        on_first_presented(|_| {}).expect("on_first_presented");
+        on_first_presented(Fallback::HandlerTime, |_| {}).expect("on_first_presented");
         let elapsed = started.elapsed();
         say(&elapsed.as_nanos().to_string());
     }
@@ -273,12 +273,19 @@ mod real {
         // window below.
         let costs = install_costs();
         let (sender, receiver) = mpsc::channel::<PresentedAt>();
-        on_first_presented(move |time| {
+        // As the probe: the judging machine waits for a shown drawable
+        // (ADR 0052).
+        let fallback = if std::env::var_os("LECTERN_BENCH_JUDGE").is_some_and(|v| v == "1") {
+            Fallback::Wait
+        } else {
+            Fallback::HandlerTime
+        };
+        on_first_presented(fallback, move |time| {
             // The receiver outlives the wait; if it is gone nothing reads.
             let _ = sender.send(time);
         })
         .expect("on_first_presented");
-        let again = on_first_presented(|_| {});
+        let again = on_first_presented(Fallback::HandlerTime, |_| {});
         assert!(matches!(again, Err(HookError::AlreadyActive)), "{again:?}");
         let median = costs[costs.len() / 2];
         say(&format!(

@@ -68,10 +68,12 @@ fn frame_is_unsupported_without_bench_hooks() {
 
     let called = Arc::new(AtomicBool::new(false));
     let seen = Arc::clone(&called);
-    let result = super::on_first_presented(move |_| seen.store(true, Ordering::SeqCst));
+    let result = super::on_first_presented(super::Fallback::HandlerTime, move |_| {
+        seen.store(true, Ordering::SeqCst)
+    });
     assert!(matches!(result, Err(HookError::Unsupported)), "{result:?}");
     // A second call gives the same answer: nothing was registered.
-    let again = super::on_first_presented(|_| {});
+    let again = super::on_first_presented(super::Fallback::Wait, |_| {});
     assert!(matches!(again, Err(HookError::Unsupported)), "{again:?}");
     assert!(!called.load(Ordering::SeqCst));
     // The callback was dropped, not kept: the test holds the only handle.
@@ -85,7 +87,7 @@ mod hooked {
     use std::time::Instant;
 
     use super::super::imp::{find_method, state};
-    use super::super::on_first_presented;
+    use super::super::{Fallback, on_first_presented};
     use crate::HookError;
 
     /// The tests that read or change the registration take turns: under
@@ -101,7 +103,7 @@ mod hooked {
         let _turn = take_turn();
         let (registered_before, _) = state();
         let started = Instant::now();
-        let first = on_first_presented(|_| {});
+        let first = on_first_presented(Fallback::HandlerTime, |_| {});
         let elapsed = started.elapsed();
         if registered_before {
             // Another test in this process got there first.
@@ -114,7 +116,7 @@ mod hooked {
         }
         assert!(state().0);
         for _ in 0..2 {
-            let again = on_first_presented(|_| {});
+            let again = on_first_presented(Fallback::HandlerTime, |_| {});
             assert!(matches!(again, Err(HookError::AlreadyActive)), "{again:?}");
         }
     }
@@ -280,7 +282,7 @@ mod hooked {
     fn frame_hook_passes_drawables_through_on_an_offscreen_layer() {
         let _turn = take_turn();
         // The registration of this process, if no other test made it.
-        match on_first_presented(|_| {}) {
+        match on_first_presented(Fallback::HandlerTime, |_| {}) {
             Ok(()) | Err(HookError::AlreadyActive) => {}
             Err(other) => panic!("{other:?}"),
         }
@@ -327,7 +329,7 @@ mod hooked {
         let before = SystemTime::now();
         // SAFETY: no arguments.
         let shown = unsafe { CACurrentMediaTime() } - 0.5;
-        deliver(&slot, shown);
+        deliver(&slot, shown, true);
         let after = SystemTime::now();
         let at = receiver.try_recv().unwrap();
         assert_eq!(at.source, TimeSource::Presented);
@@ -345,8 +347,8 @@ mod hooked {
         // Once: the slot is empty, a later drawable does nothing, shown or not.
         assert!(slot.load(Ordering::Acquire).is_null());
         // SAFETY: no arguments.
-        deliver(&slot, unsafe { CACurrentMediaTime() });
-        deliver(&slot, 0.0);
+        deliver(&slot, unsafe { CACurrentMediaTime() }, true);
+        deliver(&slot, 0.0, true);
         assert!(receiver.try_recv().is_err());
         assert_eq!(
             slot.swap(ptr::null_mut(), Ordering::AcqRel),
@@ -368,7 +370,7 @@ mod hooked {
         for not_shown in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
             let (slot, receiver) = slot();
             let before = SystemTime::now();
-            deliver(&slot, not_shown);
+            deliver(&slot, not_shown, true);
             let after = SystemTime::now();
             let at = receiver.try_recv().unwrap();
             assert_eq!(at.source, TimeSource::Handler, "{not_shown}");
@@ -378,8 +380,30 @@ mod hooked {
             // Once.
             assert!(slot.load(Ordering::Acquire).is_null(), "{not_shown}");
             // SAFETY: no arguments.
-            deliver(&slot, unsafe { CACurrentMediaTime() });
+            deliver(&slot, unsafe { CACurrentMediaTime() }, true);
             assert!(receiver.try_recv().is_err(), "{not_shown}");
         }
+    }
+
+    #[test]
+    fn hook_deliver_waits_for_a_shown_drawable_without_the_handler_time() {
+        use std::sync::atomic::Ordering;
+
+        use super::super::TimeSource;
+        use super::super::imp::{CACurrentMediaTime, deliver};
+
+        // `Fallback::Wait`: drawables without a time (the hidden first one)
+        // leave the callback in the slot; the first shown one gets it.
+        let (slot, receiver) = slot();
+        for not_shown in [0.0, -1.0, f64::NAN] {
+            deliver(&slot, not_shown, false);
+            assert!(receiver.try_recv().is_err(), "{not_shown}");
+            assert!(!slot.load(Ordering::Acquire).is_null(), "{not_shown}");
+        }
+        // SAFETY: no arguments.
+        deliver(&slot, unsafe { CACurrentMediaTime() } - 0.1, false);
+        let at = receiver.try_recv().unwrap();
+        assert_eq!(at.source, TimeSource::Presented);
+        assert!(slot.load(Ordering::Acquire).is_null());
     }
 }
