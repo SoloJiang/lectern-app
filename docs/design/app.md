@@ -1,6 +1,6 @@
 # app 设计
 
-状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。实现与原设计的差别见「与设计的差异」。
+状态：已实现（第 1 步，[#203](https://github.com/SoloJiang/lectern-app/pull/203)）。前置条件 A（[#201](https://github.com/SoloJiang/lectern-app/pull/201)）、B（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）已实现。第 2 步（插件装配，[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「装配」）已实现（[#210](https://github.com/SoloJiang/lectern-app/pull/210)）。`workspace` 的装配（[workspace 设计](workspace.md)「验收」第 3 步，见「workspace 的装配」）已实现，`usage` 与 `project_home` 的装配（[#247](https://github.com/SoloJiang/lectern-app/pull/247)，见「usage 与 project_home 的装配」）已实现，`welcome` 的装配（[#29](https://github.com/SoloJiang/lectern-app/issues/29)，见「welcome 的装配」）和 UI 探针的 probe profile（[#6](https://github.com/SoloJiang/lectern-app/issues/6)，见「ui_probe 的装配」）已实现；`review_view` 的 `review-view` 插件已装配（[#15](https://github.com/SoloJiang/lectern-app/issues/15)，见「review_view 的装配」），`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装。测量构建（`bench-probe`，[bench 设计](bench.md)第 5 步，见「测量构建的装配」）已接受，尚未实现。实现与原设计的差别见「与设计的差异」。
 
 对应 issue [#199](https://github.com/SoloJiang/lectern-app/issues/199)。`app` 是二进制 `lectern`：它决定进程启动时先做什么、后做什么，在首帧之后创建进程级的共享资源（[ADR 0025](../adr/0025.md)「进程级的共享资源」），并按固定的顺序退出。第 1 步是最小的启动外壳：启动顺序、启动屏障、退出顺序和运行日志的接入（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 3 项）。第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)）在首帧之后创建 `Cache`、`fs_watch` 并装配已经实现的插件（「装配」）。首帧的规则见 [ADR 0017](../adr/0017.md)，profile 的概念见[技术调研「插件架构」](tech-research.md#插件架构)。
 
@@ -20,7 +20,7 @@
 - 本 issue 之外：
   - 按 profile 装配具体的插件，创建 `Cache` 和 `fs_watch` 并传给插件：第 2 步（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，「装配」）。`usage`、`code_intel` 等其余插件在各自的前置条件完成后加入。
   - 窗口快照的读取与恢复、窗口位置的 frame autosave：随 [#30](https://github.com/SoloJiang/lectern-app/issues/30)。
-  - headless profile、`bench-probe` feature、`Driver`、把应用数据目录指到临时目录：随 [bench 设计](bench.md)第 5 步（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）。probe profile（`ui-probe` feature，UI 探针）：见「ui_probe 的装配」（[ui_probe 设计「对其他 crate 的要求」](ui_probe.md#对其他-crate-的要求)第 3 项，[#6](https://github.com/SoloJiang/lectern-app/issues/6)）。
+  - `bench-probe` feature、`Driver`、测量构建的数据目录：见「测量构建的装配」（[bench 设计](bench.md)第 5 步，[#7](https://github.com/SoloJiang/lectern-app/issues/7)）。headless profile（命令行，没有窗口）不在 bench 第 5 步：进程级基准测的都是有窗口的 `lectern`，headless 随第一个命令行入口加入。probe profile（`ui-probe` feature，UI 探针）：见「ui_probe 的装配」（[ui_probe 设计「对其他 crate 的要求」](ui_probe.md#对其他-crate-的要求)第 3 项，[#6](https://github.com/SoloJiang/lectern-app/issues/6)）。
   - 写盘线程和批量线程的 utility QoS：`platform` 提供设置 QoS 的接口之后，`app` 经 `Config::on_writer_start` 和 `executor::Config::on_thread_start` 传入。在此之前两者都是 `None`，线程用默认 QoS（logging 设计已允许）。
   - 详细日志的开关和导出界面：logging 第 12 项。
   - 离开守卫（有未保存的编辑时先询问）：随 [file_reader 设计「编辑」](file_reader.md#编辑)接入。本 issue 的 `Quit` 不询问。
@@ -476,6 +476,86 @@ target 为 `app`。
 - 日志：`plugins assembled` 的 `plugins` 为 11。其余记录由 `review_view` 写（target `review_view`）。
 - 测试：`every_profile_graph_validates` 的 desktop 与 probe 插件数为 11；`tests/startup.rs` 的 `plugins` 为 11，并检查 `first frame drawn` 之前没有 target 为 `review_view` 的记录。
 
+## 测量构建的装配
+
+[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[bench 设计](bench.md)第 5 步与「需要其他 crate 提供的接口」的 `app` 一项。只在 `bench-probe` feature 下编译。目的：`lectern-bench` 的进程级基准（`app/cold_start`、`app/cold_start_purged`、`app/idle_empty`、`plugin/*`）测的是与发布构建同一条启动路径的 `lectern`，差别只有探针。
+
+### feature 与依赖
+
+- `bench-probe = ["dep:lectern-bench", "lectern-bench/probe"]`，不在 `default` 里。`lectern-bench` 是 tool crate，`app` 只能以不在 `default` 里的可选依赖引用它（架构规则检查第 2 条），与 `lectern-ui-probe` 相同。`lectern-bench/probe` 打开 `lectern-platform/bench-hooks`，所以方法替换只在这个构建里有（[ADR 0048](../adr/0048.md)，检查第 10 条）。
+- `just bench` 在 macOS 上构建 `cargo build --release --locked -p lectern-app --features bench-probe`，`LECTERN_BENCH_APP` 指向它（[bench 设计「`just bench` 与 CI」](bench.md#just-bench-与-ci)）。`just check`、`just test` 带 `--all-features`，编译这条路径。
+- 不带 feature 的构建里没有 `lectern-bench`：`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-bench`、`"bench-hooks"` 和 `"test-support"`。
+
+### 选择与启动
+
+不新增 profile：插件集合、启动屏障、退出顺序都与 desktop 相同，探针是附加在 desktop 上的。
+
+| 位置 | 线程 | 做什么 | 首帧之前的代价 |
+|---|---|---|---|
+| `run`，`install_early` 之后、`application()` 之前 | 主线程 | `Probe::from_env()`：只读 `LECTERN_BENCH_SOCKET`、`LECTERN_BENCH_PLUGINS`。为 Some 时 `watch_first_frame()`（一次方法替换，≤ 100 µs，[platform 设计「帧的时刻」](platform.md#帧的时刻)） | 两次环境变量读取；有 socket 时一次方法替换。不做 IO，不建线程 |
+| `app.run` 的回调里 | 主线程 | `Startup::bench(Arc<Probe>)` 存下探针 | 内存 |
+| `open_window` 的回调里 | 主线程 | 有探针时不设 frame autosave 名（下一节） | 少一次 user defaults 读取 |
+| `startup::release_in`，代替 `Kernel::start(set)` | 主线程 | `probe.start_kernel(set)`：加入 `bench-probe` 插件，按 `LECTERN_BENCH_PLUGINS` 裁剪，启动 kernel | 首帧之后 |
+| 同上，紧接其后 | 主线程 | `probe.attach(kernel.clone(), Arc::new(BenchDriver { … }))` | 首帧之后 |
+
+- 没有设置 `LECTERN_BENCH_SOCKET` 时 `from_env` 为 None，测量构建与发布构建走完全相同的路径（「启动屏障」已写明测量构建同样用帧回调放开屏障）。
+- 注册首帧回调出错时探针自己连 socket、发 `Error { message: "hook <名字>" }`，以退出码 3 退出（bench 设计「探针」）；`app` 不处理。
+- `bench-probe` 插件不计入 `plugins assembled` 的 `plugins`：那个计数在 `start_kernel` 之前记。
+
+```rust
+// src/bench.rs（#[cfg(feature = "bench-probe")]）
+/// 运行器的请求到主线程的通道。`Driver` 的两个方法在探针线程上调用，只发消息，不阻塞。
+pub struct BenchDriver { requests: futures::channel::mpsc::UnboundedSender<BenchRequest>, probe: Arc<Probe> }
+
+enum BenchRequest { Quit }
+
+impl Driver for BenchDriver {
+    /// 第 5 步没有 `OpenTarget` 的使用方：发 `probe.error("open <种类> unsupported")`，运行器把这个基准记为 `error`。
+    /// 各端到端基准（`app/open_project` 等）随自己的 PR 在这里加上对应的种类。
+    fn open(&self, target: OpenTarget);
+    /// 发 `BenchRequest::Quit`；主线程的前台任务收到后调用 `quit::quit(cx)`，与 ⌘Q 同一条退出路径。
+    fn quit(&self);
+}
+
+/// `release_in` 里调用：开收请求的前台任务，`attach`。主线程，不阻塞。
+pub fn attach(probe: &Arc<Probe>, kernel: Arc<Kernel>, cx: &mut App);
+```
+
+- `Startup` 多一个 `#[cfg(feature = "bench-probe")] bench: Option<Arc<Probe>>`，`Started` 不需要它：探针线程自己持有它要的东西，退出时随进程结束（运行器在 `Quit` 之后等进程退出）。
+- `Quit` 走 `quit::quit`：离开守卫、kernel、watcher、executor、cache、日志依次关闭，最后 `cx.quit()`，退出码 0。运行器把非 0 的退出码记为错误，所以退出顺序的回归在基准里也会出现。
+- `ui-probe` 与 `bench-probe` 可以同时打开（`--all-features`）：两个探针互不相干，各看各的环境变量。
+
+### 数据目录
+
+- 运行器每次启动都给一个新的临时 `HOME`，并删除 `LECTERN_LOG`、`CLAUDE_CONFIG_DIR`、`CODEX_HOME`（bench 设计「进程调度」的 `session`）。`platform::dirs::app_data`、`app_cache`、`logs` 只读 `HOME`（和 `XDG_*`），所以缓存、`window.json`、日志、各插件的数据都落在这个临时目录里，会话结束后删除。`app` 不需要另外的开关，也不新增环境变量。
+- frame autosave 名是例外：它存在 AppKit 的 user defaults 里，cfprefsd 按登录用户的真实主目录读写，不看 `HOME`。有探针时 `app` 不对窗口设 frame autosave 名，窗口总是 820 × 520 pt 居中：基准不读也不改用户的窗口位置，每次启动画的像素也相同。`window_state` 的任务在有探针时同样不改名。
+- 系统首选语言（`platform::system::preferred_languages`）只读，照常读取。
+
+### 里程碑与帧
+
+第 5 步的基准不用里程碑和逐帧记录，`WorkspaceDeps::on_milestone`、`on_frames` 仍是空函数。转交它们要报告协议的 `Milestone`、`FrameTimes` 带上时刻的来源（[ADR 0052](../adr/0052.md)，bench 设计「报告协议」写明随它们的使用方加入），所以随第一个把里程碑或帧时间预算改为生效的 PR 一起做：那时 `app` 在 `startup::assemble` 里把 `workspace::Milestone` 映射成 `wire::Milestone` 交给 `probe.milestone`，把 `FrameRecord` 里的 `FrameRecording`（`problems.is_clean()` 时）转成 `FrameStats` 交给 `probe.frames`，否则交 `probe.error`（消息格式见 bench 设计「探针」），`Driver::open` 加上 `Scroll`、`Animate`、`Input`。
+
+### 性能
+
+- 发布构建：0，没有这些代码。
+- 测量构建、没有 socket：首帧之前多两次环境变量读取。
+- 测量构建、有 socket：首帧之前多一次方法替换（≤ 100 µs，计入 `app/cold_start` 的样本，与 `baseline/empty_window_cold_start` 相同），少一次 frame autosave 的读取。首帧之后多一个探针线程和 `bench-probe` 插件；探针线程的内存计入 `app/idle_empty`，与空窗口基线一样。
+
+### 日志与诊断
+
+- 探针本身不写日志：它的错误经 socket 交给运行器（bench 设计「状态与异常」）。
+- `app` 新增 info `bench probe attached`（target `app`，无字段），在 `startup barrier released` 之前。
+- 不记录：socket 路径、`LECTERN_BENCH_PLUGINS` 的值、临时 `HOME`。金丝雀：`tests/bench_probe.rs` 的 `bench_socket_stays_out_of_the_log`（socket 所在目录名含金丝雀，运行一次完整的会话，日志里没有它）。
+
+### 测试
+
+- `src/tests/bench.rs`（`bench-probe`）：`no_frame_autosave_name_with_the_bench_probe`（选名字的纯函数：有探针时骨架窗口和 `window_state` 都得到 None，没有时与 desktop 相同）；`#[gpui::test]` `a_quit_request_takes_the_quit_path`（`BenchDriver::quit` 之后主线程调用 `quit::quit`：用假的 `QuitSteps` 看到 kernel、executor、日志的顺序）；`open_is_reported_as_unsupported`（`open` 发出 `Error`，消息以 `open ` 开头）。
+- `tests/bench_probe.rs`（真实进程，需要图形会话，与 `tests/startup.rs` 相同；测试自己扮演运行器：在临时目录里 bind 一个 Unix 域 socket，临时 `HOME`，带 `LECTERN_BENCH_SOCKET` 启动 `--features bench-probe` 的调试构建）：
+  - `first_frame_plugins_and_quit`：收到 `FirstFrame`，`pid` 是启动的进程，`source` 是 `presented` 或 `handler`；发 `Plugins`，应答是 desktop 的插件（不含 `bench-probe`），以 `PluginsEnd` 结束；发 `Epoch`，应答 `Epoch(..)`；发 `Quit`，进程 10 s 内以 0 退出。
+  - `a_trimmed_set_becomes_ready`：`LECTERN_BENCH_PLUGINS=closure+self:project`，收到 `Ready`。
+  - `bench_socket_stays_out_of_the_log`（上一节）。
+- 不带 feature：`cargo tree` 的检查（「验收」）。
+
 ## 性能
 
 - 冷启动：首帧之前只有「启动顺序」的第 1–6 步。新增的工作是参数解析（几个字符串比较）、`install_early`（预算 ≤ 20 µs，`log/install_early`）、语言协商（常数级的内存操作）和 `lectern_ui::init`（预算 ≤ 300 µs，`ui/init`：一次减弱动态效果的读取、两份内置表、登记通知；不读系统色，[ui 设计「性能」](ui.md#性能)），加上骨架窗口的 `lectern_ui::attach`（登记一个外观观察者），合计远小于 20 ms 预算的 1%。首帧之前不建线程、不读写 Lectern 自己的文件、不调用 kernel 和 executor、不运行 `gpui_component::init`（ADR 0017）。
@@ -587,6 +667,15 @@ target 为 `app`。
 - `cargo tree -p lectern-app -e features -i lectern-logging` 里有 `sink`。
 - 手动在 macOS 上运行 `cargo run -p lectern-app`：窗口出现，按 ⌘Q 后进程在 3 s 内退出，`~/Library/Logs/Lectern/` 里本次运行的文件最后一行是 `run end`。
 - logging 设计的状态行和「实际验证」写明第 3 项已实现，第 3 步验收里依赖进程级基准的一条（`app/cold_start` 不变慢）随 bench 第 5 步验证。
+
+**测量构建（bench 第 5 步，[#7](https://github.com/SoloJiang/lectern-app/issues/7)）。** 在 [platform 设计](platform.md)「验收」的 B2（`frame::record`）之后。分两个 PR：本 crate 的 PR 写 `Refs #7`；之后 `lectern-bench` 加上 `app/*`、`plugin/*` 的进程级目标、把这些预算改为生效的 PR 写 `Closes #7`（一个 issue 涉及多个 crate 时各自提 PR）。
+
+- 「测量构建的装配」「测试」里的测试通过：`just test -p lectern-app`（`--all-features`）。
+- `cargo build --release --locked -p lectern-app --features bench-probe` 成功。
+- `cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-bench`、`"bench-hooks"`、`"test-support"`。
+- `python3 scripts/check_architecture.py` 通过（`lectern-bench` 是 `app` 不在 `default` 里的可选依赖）。
+- 手动：用测量构建和一个临时 `HOME`、不设 `LECTERN_BENCH_SOCKET` 启动，日志与发布构建相同（有 frame autosave、没有 `bench probe attached`）。
+- 本文状态行写明测量构建已实现，填写「实际验证」。
 
 **第 2 步：装配（[#205](https://github.com/SoloJiang/lectern-app/issues/205) 的实现 PR，`Closes #205`）。** 在 `platform` 的 `dirs::app_cache`（[#206](https://github.com/SoloJiang/lectern-app/pull/206)）和 review 第 4 步（插件）合并之后。
 
