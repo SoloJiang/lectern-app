@@ -14,6 +14,10 @@ use crate::report::{self, VERSION};
 
 const USAGE: &str = "usage: lectern-bench-report merge [--require package] <dir>";
 
+/// The error for a judging run in which none of the judging machine's
+/// entries ran (ADR 0052).
+pub(crate) const NOTHING_JUDGED: &str = "LECTERN_BENCH_JUDGE=1 的运行里，判定机器的条目一条都没有运行（都被过滤、都是计划中或都跳过）：这次运行不判定";
+
 /// The binary's entry point; `args` without the program name.
 pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.into_iter().collect();
@@ -410,8 +414,21 @@ pub(crate) fn merge(
     }
 
     let mut results = Vec::new();
+    // On the judging machine at least one of its entries must have run: a
+    // filter or plan that leaves none judges nothing (ADR 0052).
+    let mut judged_here = false;
     for (id, budget) in expected(budgets, &plugins, &language_servers) {
         let occurrences = found.remove(&id).unwrap_or_default();
+        if budget.judging_machine
+            && occurrences.iter().any(|(_, result)| {
+                matches!(
+                    result["status"].as_str(),
+                    Some("ok" | "over" | "record" | "error")
+                )
+            })
+        {
+            judged_here = true;
+        }
         match occurrences.as_slice() {
             [] if budget.target == Target::Package && !has_package => {
                 results.push(placeholder(&id, budget, "skipped", "未打包"));
@@ -446,6 +463,9 @@ pub(crate) fn merge(
                 report::file_name(target)
             ));
         }
+    }
+    if judge && !judged_here {
+        errors.push(NOTHING_JUDGED.to_owned());
     }
 
     let exit = if !errors.is_empty() || results.iter().any(|r| r["status"] == "error") {

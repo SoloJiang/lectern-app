@@ -818,7 +818,7 @@ crates/bench/
 运行器靠环境变量 `LECTERN_BENCH_JUDGE` 区分判定机器，规则如下：
 
 - 值为 `1`：判定机器。判定机器的条目（`Budget::judging_machine`）与其他条目一样判定，超标照常重跑一次。进程调度把来源为 `handler` 的首帧当作错误（`Scheduler::judging`）：结束这次启动的进程组，基准记为 `error`，原因写明 drawable 没有给出 `presentedTime`（屏幕锁定、显示器关闭或没有接）。
-- 值为 `1`，而这次运行不判定（冒烟模式，或不是 Apple 芯片）：报告级错误，退出码 2。判定任务因此不会在没有判定时通过。
+- 值为 `1`，而这次运行不判定（冒烟模式，或不是 Apple 芯片）：报告级错误，退出码 2。值为 `1`，而合并后判定机器的条目一条都没有运行（都是 `filtered`、`planned` 或 `skipped`，如过滤条件写错）：合并的报告级错误，退出码 2。判定任务因此不会在没有判定时通过。
 - 没有设置或为空：测量运行把判定机器的条目记为 `record`，不重跑，原因是「只记录：这里不是判定机器（没有 LECTERN_BENCH_JUDGE=1），首帧的时刻可能不是显示时刻（ADR 0052）」。它们的检查仍然运行，值的类型与检查不符时仍是 `error`。冒烟模式的状态仍是 `smoke`。
 - 其他值（`0`、`true`、带空格的 `1` 等）：每个目标在运行之前以 2 退出，不写报告，合并因为缺报告而出错。写错的值不会让判定变成记录。
 
@@ -919,7 +919,7 @@ CI：
 - `sudo -n purge` 不可用：`app/cold_start_purged` 记为 `skipped`。
 - 基准与预算表对不上：开始运行前以 2 退出，列出多出和缺少的 ID。
 - 判定机器上（`LECTERN_BENCH_JUDGE=1`）首帧的来源是 `handler`：结束子进程的整个进程组，记为 `error`，原因写明 drawable 没有给出 `presentedTime`（ADR 0052）。
-- `LECTERN_BENCH_JUDGE` 的值不是 `1`，也不是没有设置或为空：每个目标在运行之前以 2 退出。值为 `1` 而这次运行不判定：报告级错误，退出码 2。
+- `LECTERN_BENCH_JUDGE` 的值不是 `1`，也不是没有设置或为空：每个目标在运行之前以 2 退出。值为 `1` 而这次运行不判定，或者判定机器的条目一条都没有运行：报告级错误，退出码 2。
 - 不是判定机器的测量运行：判定机器的条目记为 `record`，原因写明这里不是判定机器，退出码不因它们非 0。
 
 ## 测试
@@ -930,7 +930,7 @@ CI：
 - 预算表：`budgets_*` 检查 ID 不重复；带 `*` 的条目与具体条目的优先级；每条 `Check` 的统计量与上限能用于它的 `Value` 类型；`Tier::Top` 的出处都在 `docs/design/tech-research.md` 或 `docs/adr/` 下；每个出处文件存在、锚点对应文件里的一个标题；判定机器的条目正是 `app/cold_start`、`app/cold_start_purged` 和两条 `baseline/*`，都属于 `Process`。
 - 运行器：`runner_*` 用假基准验证：超标时重跑一次，第二次通过记为 `ok` 且两次都写进报告；两次都超标退出码 1；冒烟模式和非判定平台从不因预算失败；基准出错退出码 2；缺少或多出预算时开始前退出；`--bench` 决定模式；ID 过滤；`--list`。判定机器的条目（ADR 0052）：没有 `LECTERN_BENCH_JUDGE=1` 时超标也记为 `record`、带原因、不重跑，冒烟模式仍是 `smoke`；值的类型与检查不符时仍是 `error`；设为 `1` 时照常判定、超标重跑，标题带「judging machine」；设为 `1` 而运行不判定（冒烟、不是 Apple 芯片）时退出码 2；环境变量只接受 `1`、空和没有设置；`Ctx::judge` 与选项一致。
 - 报告：`report_*` 用 insta 快照固定一组假结果的文本表、JSON 和 Markdown 摘要；每个目标只写自己的 `report-<target>.json`。
-- 合并：`report_merge_*` 验证三份报告（有 `report-package.json` 时四份）合并后每条预算恰好一次；没有 `report-package.json` 时 `Package` 的条目记为 `skipped`，带 `--require package` 时退出码 2；`lsp/*/resident` 按语言服务器列表展开；带 `*` 的条目按插件列表展开，列表为空时条目本身出现一次，不为空时某个插件缺少展开项即出错；缺一份报告、某条预算缺失、重复或出现在错误的目标里时退出码 2；合并后的退出码取超标与出错的最严重者；被过滤的条目记为 `filtered` 不算缺失；`::error` 注释最多 10 条；`record` 结果按组输出 `::notice`，`smoke`、`planned`、`ok` 不输出，组数超过 10 时第 10 条合并剩下的组、不丢结果；判定机器的报告合并后保留 `judge` 和标题，一份报告的 `judge` 与其他的不同时退出码 2，没有 `judge` 的报告按 false 算。
+- 合并：`report_merge_*` 验证三份报告（有 `report-package.json` 时四份）合并后每条预算恰好一次；没有 `report-package.json` 时 `Package` 的条目记为 `skipped`，带 `--require package` 时退出码 2；`lsp/*/resident` 按语言服务器列表展开；带 `*` 的条目按插件列表展开，列表为空时条目本身出现一次，不为空时某个插件缺少展开项即出错；缺一份报告、某条预算缺失、重复或出现在错误的目标里时退出码 2；合并后的退出码取超标与出错的最严重者；被过滤的条目记为 `filtered` 不算缺失；`::error` 注释最多 10 条；`record` 结果按组输出 `::notice`，`smoke`、`planned`、`ok` 不输出，组数超过 10 时第 10 条合并剩下的组、不丢结果；判定机器的报告合并后保留 `judge` 和标题，一份报告的 `judge` 与其他的不同时退出码 2，没有 `judge` 的报告按 false 算；`judge` 为 true 而判定机器的条目都是 `filtered`、`planned` 或 `skipped` 时退出码 2，有一条是 `ok` 或 `record` 时通过，`judge` 为 false 时不检查。
 - 计数分配器：`alloc_*` 分配并保留 1 MiB 后 `live` 增加 1 MiB，释放后回到原值，`peak` 记录峰值（在单独的测试二进制里注册分配器）。
 - 报告协议：`wire_*` 对每种消息编码后解码相等，含带空格、`%`、换行和非 UTF-8 字节的路径；缺字段、未知消息名、坏的百分号编码返回错误。
 - 进程调度：`process_*` 用脚本化的 `Launcher` / `ProcessInfo`：冷启动 2 次预热不计入、20 次样本；`Busy` 让 5 秒等待重新开始；采样前后代数不同时重采；30 秒不静止记为 `over`；不连 socket、提前退出、不响应 `Quit` 记为出错；`process_deadline_*`：假探针对 `Open` 不回 `Milestone`、对 `Scroll` 不回 `Frames`、不发 `Ready`、不应答 `Epoch` 时，运行器在各自的期限（测试里缩短）后结束进程组并记为 `error`，原因写明等的消息；插件基准里假探针发 `PluginFailed` 时立即记为 `error`、不等期限；插件两次启动的差值与激活耗时的取法（进程插件的进程组计入差值）；激活条件为 `[Workspace(..), AfterFirstFrame]` 的插件计入 `plugin/after_first_frame`；预热启动以 3 退出时记为出错；探针报告 `hook <名字>`、`frames <…>` 时记为出错；`time_with_setup` 每个样本调用一次 `setup`；进程组展开到孙进程、中途退出的后代被跳过、同一 pid 不重复计入、`plugin/process_total` 取自 `ActivateAll` 那次启动、是全部进程插件组之和（`Command` / `Manual` / `Workspace` 激活的进程插件都计入），`app/idle_empty` 不产出它；语言服务器组记为 `lsp/<id>/resident` 并计入 `lsp/total`，没有语言服务器时 `lsp/*/resident` 为 `skipped`、`lsp/total` 为 0；帧判定：60 Hz 下间隔 16.7 ms、工作时间 5 ms 时通过；一帧工作时间 9 ms 时超标；`requested` 之后主线程阻塞 20 ms、`started` 间隔达到两个周期时超标；120 Hz 下与「最大间隔 ≤ 8.3 ms」的结论一致；内存类并发不超过 3、计时类不并发；判定机器上（`Scheduler::judging`）来源为 `handler` 的首帧让会话出错、向进程组发 `SIGKILL`，冷启动在第一次启动后停止，来源为 `presented` 时照常取样。
@@ -971,7 +971,7 @@ CI：
    - `just test -p lectern-bench` 的 `wire_*`、`process_*`、`probe_*` 和 `purge` 集成测试通过。
    - macOS CI 上 `just bench baseline/` 报告 `baseline/empty_window_cold_start` 的 20 个样本和 `baseline/empty_window_idle`。
    - 托管 runner 和判定机器的实测值、机器信息写进 ADR 0017（ADR 0017「影响」要求的基线，以判定机器的为准，ADR 0052）；判定机器上不满足 `app/cold_start` 的判定规则（20 次里超过 20 ms 的多于 1 次，或有一次超过 30 ms）时告诉产品负责人，按 ADR 0017「影响」由产品负责人决定。托管 runner 的部分已完成；判定机器的部分等 runner 注册之后完成（「实际验证」第 4 步）。
-   - 运行器读 `LECTERN_BENCH_JUDGE`：没有设置时判定机器的条目只记录并写明原因；设为 `1` 时照常判定，首帧的来源为 `handler` 是错误；其他值、或设为 `1` 而运行不判定时退出码 2（ADR 0052，「平台与噪声」）。
+   - 运行器读 `LECTERN_BENCH_JUDGE`：没有设置时判定机器的条目只记录并写明原因；设为 `1` 时照常判定，首帧的来源为 `handler` 是错误；其他值、设为 `1` 而运行不判定、或设为 `1` 而判定机器的条目一条都没有运行时退出码 2（ADR 0052，「平台与噪声」）。
 5. **`app` 的测量构建与应用级基准**（`app`，`Closes #7`；先合并 `app` 的设计文档。发布构建不带 binary archive，见 [ADR 0049](../adr/0049.md)）
    - `cargo build --release --locked -p lectern-app --features bench-probe` 成功；`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-bench`，也没有 `"test-support"` 和 `"bench-hooks"`（发布构建不含方法替换，ADR 0048）。
    - 判定机器（`Judge (physical Mac)`）判定 `app/cold_start`、记录 `app/cold_start_purged`，托管 runner 上两者只记录（ADR 0052）；macOS CI 的 `Benchmarks (macOS arm64)` 判定 `app/idle_empty`、`plugin/*/activate`、`plugin/after_first_frame`，记录 `plugin/*/resident`。
@@ -1087,7 +1087,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 
 第 4 步（探针、进程调度与空窗口基线，[ADR 0051](../adr/0051.md)），在 macOS 上运行：Apple M5 Pro（Mac17,9，15 核），macOS 27.0.1。这台机器的屏幕处于锁定状态（`IOConsoleLocked = Yes`，`CGSSessionScreenIsLocked` 为 1），每个 drawable 的 `presentedTime` 都是 0，首帧的来源都是 `handler`（[ADR 0052](../adr/0052.md)），所以本机的数字不是 ADR 0017 要的基线。托管 runner 上的记录在下面「托管 runner 的记录」一条；判定机器的基线在 runner 注册之后补上。
 
-- `just test -p lectern-bench`：加入判定机器的模式之前 130 个测试通过，跳过 6 个。本步新增 `wire_*` 6 个、`probe_*` 15 个、`process_*` 27 个、`purge` 集成测试 3 个（`tests/purge.rs`）和 `runner_skipping_benchmark_is_skipped_not_an_error`。加入之后 140 个通过，跳过 6 个：另有 `runner_*` 6 个、`process_*` 2 个、`report_merge_keeps_the_judging_machine` 和 `budgets_judging_machine_entries_end_at_the_first_frame`（「测试」）。`just test -p lectern-platform`：197 个通过（合并 ADR 0052 的 `platform` 改动之后）。`wire_*`、`probe_*`、`process_*` 覆盖首帧的来源：`first-frame` 两种来源的往返、缺少 `source` 和不认识的来源都是错误；探针把 `PresentedAt` 的来源原样发出；冷启动的每个样本带自己那次启动的来源，会话的 `source()` 是 `FirstFrame` 里的来源。
+- `just test -p lectern-bench`：加入判定机器的模式之前 130 个测试通过，跳过 6 个。本步新增 `wire_*` 6 个、`probe_*` 15 个、`process_*` 27 个、`purge` 集成测试 3 个（`tests/purge.rs`）和 `runner_skipping_benchmark_is_skipped_not_an_error`。加入之后 141 个通过，跳过 6 个：另有 `runner_*` 6 个、`process_*` 2 个、`report_merge_*` 2 个（`report_merge_keeps_the_judging_machine`、`report_merge_judging_run_needs_a_judging_machine_entry`）和 `budgets_judging_machine_entries_end_at_the_first_frame`（「测试」）。`just test -p lectern-platform`：197 个通过（合并 ADR 0052 的 `platform` 改动之后）。`wire_*`、`probe_*`、`process_*` 覆盖首帧的来源：`first-frame` 两种来源的往返、缺少 `source` 和不认识的来源都是错误；探针把 `PresentedAt` 的来源原样发出；冷启动的每个样本带自己那次启动的来源，会话的 `source()` 是 `FirstFrame` 里的来源。
 - `probe_*` 用真实的 `Kernel` 和计数的测试插件，运行器一侧是临时目录里的 Unix 域 socket：两种裁剪（`closure:`、`closure+self:`）之后每个插件的 `manifest()` 在整个启动里只调用一次；`attach` 满足 `Command`、`Manual`、`Workspace` 三种激活条件后发出 `Ready`，空闭包立即 `Ready`；`bench-probe` 丢弃序号过时的 `Busy` / `Quiescent`，kernel 保持静止；所选插件进入 `Failed` 时发出 `PluginFailed`，`ActivateAll` 报告失败的插件；`FirstFrame` 先发出，之前积压的报告随后按顺序发出；`drive` 之前到达的请求排队，之后按顺序应答；无效的请求行、无效的 `LECTERN_BENCH_PLUGINS` 和裁剪不了的选择发出 `Error`。
 - `process_*` 用脚本化的 `Launcher` / `ProcessInfo` 和假探针（一个线程按脚本连接 socket、发报告、应答请求），期限缩短到几十到几百毫秒：冷启动 2 次预热、20 个样本，同一时间只有 1 个进程；探针报告 `hook <名字>`、预热以 3 退出都是出错；不连 socket、等待期间退出、`Quit` 之后不退出或退出码不是 0、`FirstFrame` 的 pid 不是启动的那个，都是出错；基线在首帧后等 `settle`；`Busy` 让等待重新开始，在第一次 `Epoch` 的应答之前到达的 `Busy` 也是；采样前后代数不同时重采，连续 3 次无效出错；首帧后不静止返回 `Idle::NotQuiescent`；`process_deadline_*` 对 `Epoch`、`Plugins`、`Ready`、`Milestone`、`Frames` 各一个，原因写明等的消息；`PluginFailed` 和 `frames <…>` 立即出错；进程组展开到孙进程、按 pid 去重、跳过已退出的；结束会话时向进程组和探针报告的 `Child` 根进程发 `SIGKILL`；内存类最多 3 个同时运行，第一个出错之后不再开始新的启动。`process_*` 连续运行 25 次都通过，同时运行 16 个 `yes` 忙循环时 20 次、45 个时 15 次都通过。
 - macOS CI 的 `Build and test (macOS arm64)` 上 `process_busy_restarts_the_settle` 失败过一次：负载高时假探针在 `Quiescent` 之后的 30 ms 睡眠超过了 100 ms 的等待，`Busy` 和下一个 `Quiescent` 在等第一次 `Epoch` 的应答时才到，样本离最后一个 `Quiescent` 不到一个等待时长。这是 `Session::idle` 的缺陷，不只是测试的问题：现在第一次应答之前收到 `Busy` 时重新等待。新的 `process_busy_before_the_first_epoch_answer_restarts_the_settle` 确定地复现这种顺序（假探针收到第一个 `Epoch` 时才发 `Busy` 和 `Quiescent`，然后应答），修复之前失败（样本在最后一个 `Quiescent` 之后 40 µs），修复之后通过。
@@ -1106,6 +1106,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
   - `just bench baseline/`（没有设置 `LECTERN_BENCH_JUDGE`）：退出码 0，两条基线都是 `record`，原因是「只记录：这里不是判定机器（没有 LECTERN_BENCH_JUDGE=1），首帧的时刻可能不是显示时刻（ADR 0052）」。冷启动中位数 82 ms，空闲内存中位数 23.5 MB。
   - `LECTERN_BENCH_JUDGE=1 just bench baseline/`：退出码 2，标题是 `lectern-bench report: measure, gated, judging machine`。两条基线都是 `error`，原因是「首帧的来源是 handler：判定机器上 drawable 没有给出 presentedTime（屏幕锁定、显示器关闭或没有接？ADR 0052）」。两个基准在第一次（预热的）启动就停下，各用 0.3 s 和 0.1 s。之后没有留下 `empty_window` 进程，系统临时目录下没有留下 `lectern-bench-*` 目录。这是真实的首帧回调路径上「判定机器上 `handler` 是错误」这条规则。
   - `LECTERN_BENCH_JUDGE=yes just bench baseline/`：三个目标都在运行之前以 2 退出，打印 `LECTERN_BENCH_JUDGE must be 1 or unset, not "yes"`；合并因为缺报告，退出码 2。
+  - `LECTERN_BENCH_JUDGE=1 just bench no-such-id/`（全部条目被过滤）：退出码 2，合并的错误是「LECTERN_BENCH_JUDGE=1 的运行里，判定机器的条目一条都没有运行（都被过滤、都是计划中或都跳过）：这次运行不判定」。
   - `LECTERN_BENCH_JUDGE=1 cargo test --locked -p lectern-bench --all-features --bench process`（冒烟）：报告级错误「LECTERN_BENCH_JUDGE=1 只用于 Apple 芯片上的测量运行（cargo bench）：这次运行不判定」，目标以 2 退出。
 - 没有验证的：判定机器上的运行。还没有判定机器；本机屏幕锁定，只验证了 `handler` 是错误的路径。实体机给出 `presentedTime` 时的冷启动和空闲内存、来源为 `presented` 的真实路径和判定任务 `Judge (physical Mac)` 本身，等 runner 注册之后由它的第一次运行给出，再写进本节和 ADR 0017（「验收」第 4 步第 3 条的判定机器部分）。注册首帧回调出错的真实路径（只由 `process_cold_start_stops_at_a_hook_error` 用假探针覆盖）。Linux 上的编译和测试（这台机器只装了 `aarch64-apple-darwin` 目标，由 Linux CI 给出）。
 
@@ -1152,7 +1153,7 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - 预算表里两条 `baseline/*` 从「计划中」改为生效，仍然只记录、没有上限：`budgets.rs` 只改了状态，没有改任何上限。
 - `empty_window` 的窗口与 `app` 的 Welcome 窗口一样大（820 × 520），画的像素与 `app/cold_start` 相同；设计没有规定大小。它的 `Driver` 把 `Quit` 经通道转到主线程调用 `cx.quit()`，`Open` 什么也不做。
 - 「验收」第 4 步第 3 条（实测值写进 ADR 0017）：托管 runner 的记录已写进 ADR 0017；判定机器的基线等 runner 注册之后补上。本机屏幕锁定，首帧的来源是 `handler`，不是基线（「实际验证」）。
-- 判定机器的模式（[ADR 0052](../adr/0052.md) 决策第 3 条）：第 4 步开始时判定用的是选项 A（「未决问题」第 1 条），设计里两种来源的样本都照常判定。产品负责人改选 B 之后，本步加上：`Budget::judging_machine`（`budgets.rs` 里用 `on_judging_machine` 标出四条）、`Ctx::judge`、`Scheduler::judging`、报告的 `judge` 和标题、合并对 `judge` 的检查，以及 `LECTERN_BENCH_JUDGE` 的取值规则。「接口」「报告」「进程级基准」「预算表」「平台与噪声」「`just bench` 与 CI」「状态与异常」「测试」「验收」已改。
+- 判定机器的模式（[ADR 0052](../adr/0052.md) 决策第 3 条）：第 4 步开始时判定用的是选项 A（「未决问题」第 1 条），设计里两种来源的样本都照常判定。产品负责人改选 B 之后，本步加上：`Budget::judging_machine`（`budgets.rs` 里用 `on_judging_machine` 标出四条）、`Ctx::judge`、`Scheduler::judging`、报告的 `judge` 和标题、合并对 `judge` 的两项检查（各份报告相同；判定运行里至少一条判定机器的条目运行过），以及 `LECTERN_BENCH_JUDGE` 的取值规则。「接口」「报告」「进程级基准」「预算表」「平台与噪声」「`just bench` 与 CI」「状态与异常」「测试」「验收」已改。
   - `baseline/empty_window_idle` 也是判定机器的条目：它不以首帧为终点，但在首帧的时刻之后 5 秒采样，又是以判定机器的结果为准的 ADR 0017 基线（ADR 0052 决策第 3 条「范围」）。
   - `LECTERN_BENCH_JUDGE` 的值无效时，`main` 在运行之前以 2 退出、不写报告，不是写一份带报告级错误的报告：这时连这次运行是不是判定机器都不知道，按哪一种写报告都可能把判定写成记录。缺少报告让合并出错，判定任务失败。
   - 判定机器之外，判定机器的条目在测量运行里是 `record`，检查照常运行但不决定状态，所以不会是 `over`，也不重跑；值的类型与检查不符仍是 `error`，坏掉的基准在托管 runner 上也看得到。
