@@ -371,10 +371,16 @@ pub(crate) fn merge(
         .first()
         .and_then(|r| r.json["gated"].as_bool())
         .unwrap_or(false);
+    // A report without `judge` is not from the judging machine (ADR 0052).
+    let judged = |r: &Read| r.json["judge"].as_bool().unwrap_or(false);
+    let judge = benchmarked.first().is_some_and(|r| judged(r));
     for r in &benchmarked {
-        if r.json["mode"].as_str() != Some(&mode) || r.json["gated"].as_bool() != Some(gated) {
+        if r.json["mode"].as_str() != Some(&mode)
+            || r.json["gated"].as_bool() != Some(gated)
+            || judged(r) != judge
+        {
             errors.push(format!(
-                "{} 的 mode 或 gated 与其他报告不同",
+                "{} 的 mode、gated 或 judge 与其他报告不同",
                 report::file_name(r.target)
             ));
         }
@@ -461,7 +467,7 @@ pub(crate) fn merge(
     let seconds = |b: &Json| b["seconds"].as_f64().unwrap_or(0.0);
     benches.sort_by(|a, b| seconds(b).total_cmp(&seconds(a)));
 
-    let title = report::title("report", &mode, gated);
+    let title = report::title("report", &mode, gated, judge);
     let mut text = report::text_table(&title, &results, &errors);
     let mut markdown = report::markdown(&title, &results, &errors);
     if let Some(lines) = slowest(&json!({ "benches": benches })) {
@@ -477,6 +483,7 @@ pub(crate) fn merge(
     out.insert("version".into(), json!(VERSION));
     out.insert("mode".into(), json!(mode));
     out.insert("gated".into(), json!(gated));
+    out.insert("judge".into(), json!(judge));
     out.insert("host".into(), host);
     out.insert("commit".into(), json!(commit));
     out.insert("results".into(), Json::Array(results));

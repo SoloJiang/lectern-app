@@ -495,3 +495,56 @@ fn report_merge_notices_leave_room_for_the_slowest() {
         "::notice title=g08 g09 g10 g11 record::g08/x: m%0Ag09/x: m%0Ag10/x: m%0Ag11/x: m"
     );
 }
+
+/// The judging machine's reports say so in the merged report and its
+/// title; a report that does not (or has no `judge`) is an error there
+/// (ADR 0052).
+#[test]
+fn report_merge_keeps_the_judging_machine() {
+    let dir = tempfile::tempdir().unwrap();
+    let reports = Reports {
+        dir: dir.path(),
+        gated: true,
+    };
+    let judge = json!({ "judge": true });
+    reports.write(
+        Target::Time,
+        &[("t/a", "ok"), ("t/later", "planned")],
+        judge.clone(),
+    );
+    reports.write(Target::Memory, &[("m/a", "planned")], judge.clone());
+    reports.write(
+        Target::Process,
+        &[
+            ("p/a", "ok"),
+            ("plugin/special/activate", "ok"),
+            ("plugin/*/activate", "skipped"),
+            ("lsp/*/resident", "skipped"),
+        ],
+        json!({ "plugins": [], "language_servers": [], "judge": true }),
+    );
+    let merged = run(dir.path(), false);
+    assert_eq!(merged.exit, 0, "{}", merged.text);
+    assert_eq!(merged.report["judge"], true);
+    assert!(
+        merged.text.contains("measure, gated, judging machine"),
+        "{}",
+        merged.text
+    );
+
+    reports.write(
+        Target::Memory,
+        &[("m/a", "planned")],
+        json!({ "judge": false }),
+    );
+    let merged = run(dir.path(), false);
+    assert_eq!(merged.exit, 2);
+    let errors = merged.report["errors"].to_string();
+    assert!(errors.contains("judge"), "{errors}");
+
+    // Without `judge` (an older report) is not the judging machine.
+    reports.complete();
+    let merged = run(dir.path(), false);
+    assert_eq!(merged.exit, 0, "{}", merged.text);
+    assert_eq!(merged.report["judge"], false);
+}

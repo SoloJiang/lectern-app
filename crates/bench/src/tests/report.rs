@@ -91,6 +91,7 @@ fn fake_report() -> Report<'static> {
         target: Target::Time,
         mode: Mode::Measure,
         gated: true,
+        judge: false,
         host: host(),
         commit: Some("0123abc".into()),
         entries: vec![
@@ -177,7 +178,7 @@ fn report_json() {
 fn report_text_table() {
     let report = fake_report();
     let text = report::text_table(
-        &report::title("time", "measure", true),
+        &report::title("time", "measure", true, false),
         &results(&report),
         &report.errors,
     );
@@ -188,7 +189,7 @@ fn report_text_table() {
 fn report_markdown_summary() {
     let report = fake_report();
     let markdown = report::markdown(
-        &report::title("report", "measure", true),
+        &report::title("report", "measure", true, false),
         &results(&report),
         &report.errors,
     );

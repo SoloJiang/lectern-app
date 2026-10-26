@@ -186,6 +186,9 @@ impl<E: std::error::Error> From<E> for BenchError {
 /// substring filter on IDs. Checks the benchmarks against the budget table,
 /// runs them in ID order, prints the table, writes the report and returns
 /// the exit code.
+///
+/// `LECTERN_BENCH_JUDGE=1` marks the judging machine (ADR 0052); any value
+/// other than `1` or unset exits with 2.
 pub fn main(target: Target, tmp_dir: &str, benches: &[Bench]) -> ExitCode {
     // The benchmark thread on the performance cores; without it the numbers
     // cannot be trusted (「数据流与线程」).
@@ -194,6 +197,15 @@ pub fn main(target: Target, tmp_dir: &str, benches: &[Bench]) -> ExitCode {
         eprintln!("lectern-bench: could not set the user-interactive QoS: {error}");
         return ExitCode::from(2);
     }
+    // A value that is neither `1` nor unset fails the run without a report,
+    // so the merge fails too (ADR 0052).
+    let judge = match runner::judge_from_env(std::env::var_os(runner::JUDGE_VAR).as_deref()) {
+        Ok(judge) => judge,
+        Err(message) => {
+            eprintln!("lectern-bench: {message}");
+            return ExitCode::from(2);
+        }
+    };
     let tmp = PathBuf::from(tmp_dir);
     let report_dir = tmp
         .parent()
@@ -210,6 +222,7 @@ pub fn main(target: Target, tmp_dir: &str, benches: &[Bench]) -> ExitCode {
         config: SampleConfig::default(),
         host: report::Host::current(),
         commit: std::env::var("GITHUB_SHA").ok(),
+        judge,
     };
     let run = runner::run(&options, benches);
     print!("{}", run.text);

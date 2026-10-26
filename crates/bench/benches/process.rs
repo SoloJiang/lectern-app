@@ -47,11 +47,12 @@ fn baseline(ctx: &Ctx) -> Result<PathBuf, BenchError> {
 /// `baseline/empty_window_cold_start`: 2 warm-up launches, then 20, each
 /// from the process's creation to the first frame's time: its
 /// `presentedTime`, or the moment its presented handler ran where the
-/// machine gives none (ADR 0052). The note gives what ADR 0017's rule for
-/// `app/cold_start` would see, the sources and every sample.
+/// machine gives none (ADR 0052); on the judging machine such a launch is
+/// an error. The note gives what ADR 0017's rule for `app/cold_start`
+/// would see, the sources and every sample.
 fn baseline_cold_start(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let program = baseline(ctx)?;
-    let scheduler = Scheduler::new(&SystemLauncher, &PlatformInfo);
+    let scheduler = Scheduler::new(&SystemLauncher, &PlatformInfo).judging(ctx.judge());
     let cold = scheduler.cold_start(&program, ctx.scale(2, 0), ctx.scale(20, 1))?;
     let note = cold_start_note(&cold);
     Ok(vec![
@@ -102,7 +103,7 @@ fn source_counts(sources: &[TimeSource]) -> String {
 /// note gives the first frames' sources (ADR 0052) and every value.
 fn baseline_idle(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
     let program = baseline(ctx)?;
-    let scheduler = Scheduler::new(&SystemLauncher, &PlatformInfo);
+    let scheduler = Scheduler::new(&SystemLauncher, &PlatformInfo).judging(ctx.judge());
     let runs = scheduler.memory(ctx.scale(3, 1), |scheduler| {
         let mut session = scheduler.session(&program, None)?;
         session.settle_after_first_frame()?;

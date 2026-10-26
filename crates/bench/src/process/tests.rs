@@ -443,6 +443,61 @@ fn process_first_frame_from_another_pid_is_an_error() {
     assert_eq!(fake.kills(), [Kill::Group(100)]);
 }
 
+/// On the judging machine a first frame without a `presentedTime` is an
+/// error that ends the process group, for a session and for a cold start
+/// (ADR 0052).
+#[test]
+fn process_judging_a_handler_first_frame_is_an_error() {
+    let fake = Fake::new(|p| {
+        p.first_frame_from(start(), TimeSource::Handler);
+        p.obey(None)
+    });
+    let error = message(
+        fake.scheduler(quick())
+            .judging(true)
+            .session(&program(), None),
+    );
+    assert_eq!(error, HANDLER_ON_THE_JUDGE);
+    assert!(error.contains("handler"), "{error}");
+    assert_eq!(fake.kills(), [Kill::Group(100)]);
+
+    let error = message(
+        fake.scheduler(quick())
+            .judging(true)
+            .cold_start(&program(), 2, 20),
+    );
+    assert_eq!(error, HANDLER_ON_THE_JUDGE);
+    assert_eq!(fake.launches().len(), 2, "stops at the first launch");
+}
+
+/// Judging takes a presented first frame; not judging takes a handler one.
+#[test]
+fn process_judging_takes_a_presented_first_frame() {
+    let fake = Fake::new(|p| {
+        p.first_frame(start());
+        p.obey(None)
+    });
+    let session = fake
+        .scheduler(quick())
+        .judging(true)
+        .session(&program(), None)
+        .unwrap();
+    assert_eq!(session.source(), TimeSource::Presented);
+    session.quit().unwrap();
+
+    let fake = Fake::new(|p| {
+        p.first_frame_from(start(), TimeSource::Handler);
+        p.obey(None)
+    });
+    let session = fake
+        .scheduler(quick())
+        .judging(false)
+        .session(&program(), None)
+        .unwrap();
+    assert_eq!(session.source(), TimeSource::Handler);
+    session.quit().unwrap();
+}
+
 // --- idle samples ----------------------------------------------------------
 
 #[test]

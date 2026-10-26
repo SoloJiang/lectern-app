@@ -46,6 +46,9 @@ const REAP: Duration = Duration::from_secs(2);
 /// probe's `Error` before exit code 3).
 const LAST_WORDS: Duration = Duration::from_millis(300);
 
+/// The error for a `handler` first frame on the judging machine (ADR 0052).
+pub const HANDLER_ON_THE_JUDGE: &str = "首帧的来源是 handler：判定机器上 drawable 没有给出 presentedTime（屏幕锁定、显示器关闭或没有接？ADR 0052）";
+
 /// Starts the program under test.
 pub trait Launcher: Sync {
     /// Starts `launch.program` as the leader of a new process group (its
@@ -166,6 +169,7 @@ pub struct Scheduler<'a> {
     launcher: &'a dyn Launcher,
     info: &'a dyn ProcessInfo,
     limits: Limits,
+    judging: bool,
 }
 
 impl<'a> Scheduler<'a> {
@@ -174,11 +178,21 @@ impl<'a> Scheduler<'a> {
             launcher,
             info,
             limits: Limits::default(),
+            judging: false,
         }
     }
 
     pub fn with_limits(mut self, limits: Limits) -> Scheduler<'a> {
         self.limits = limits;
+        self
+    }
+
+    /// On the judging machine ([`Ctx::judge`](crate::Ctx::judge), ADR
+    /// 0052) every first frame must come with its `presentedTime`: a
+    /// `FirstFrame` whose source is `handler` ends the session with an
+    /// error, so the benchmark is `error`, not a sample.
+    pub fn judging(mut self, judging: bool) -> Scheduler<'a> {
+        self.judging = judging;
         self
     }
 
@@ -515,6 +529,9 @@ impl<'a> Session<'a> {
             return Err(BenchError::new(format!(
                 "FirstFrame 来自进程 {from}，启动的是 {pid}"
             )));
+        }
+        if scheduler.judging && source == TimeSource::Handler {
+            return Err(BenchError::new(HANDLER_ON_THE_JUDGE));
         }
         session.presented = presented;
         session.source = source;

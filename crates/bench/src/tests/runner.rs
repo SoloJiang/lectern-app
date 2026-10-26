@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::report::Status;
-use crate::runner::{Run, run};
+use crate::runner::{NOT_THE_JUDGE, Run, judge_from_env, run};
 use crate::{Bench, BenchError, Ctx, Measured, Mode, Samples, Value};
 
 fn time(ms: u64) -> Value {
@@ -612,4 +612,152 @@ fn runner_shares_fixtures_across_benches_and_retries() {
     let json = report.to_json();
     assert_eq!(json["benches"][0]["id"], "fake/a");
     assert_eq!(json["benches"][0]["attempts"], 2);
+}
+
+// --- the judging machine (ADR 0052) ----------------------------------------
+
+/// An entry for the judging machine, over its budget at 2 ms.
+static FRAME: &[Budget] = &[Budget {
+    judging_machine: true,
+    ..budget("fake/frame", UNDER_1_MS, State::Active, Target::Time)
+}];
+
+#[test]
+fn runner_judging_machine_entries_are_recorded_elsewhere() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn over(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("fake/frame", time(2))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/frame",
+        run: over,
+    }];
+    let measured = run(
+        &options(FRAME, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    assert_eq!(measured.exit, 0, "{}", measured.text);
+    let entry = status(&measured, "fake/frame");
+    assert_eq!(entry.status, Status::Record);
+    assert_eq!(entry.reason.as_deref(), Some(NOT_THE_JUDGE));
+    assert_eq!(entry.attempts.len(), 1, "a record is not retried");
+    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    let json = measured.report.as_ref().unwrap().to_json();
+    assert_eq!(json["judge"], false);
+    assert_eq!(json["results"][0]["reason"], NOT_THE_JUDGE);
+
+    // Smoke mode stays smoke, without the reason.
+    let smoke = run(&options(FRAME, Target::Time, &[], dir.path()), &benches);
+    let entry = status(&smoke, "fake/frame");
+    assert_eq!(entry.status, Status::Smoke);
+    assert_eq!(entry.reason, None);
+}
+
+#[test]
+fn runner_judging_machine_entries_still_fail_on_a_value_they_cannot_judge() {
+    fn bytes(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        Ok(vec![Measured::new("fake/frame", Value::Bytes(vec![1; 5]))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/frame",
+        run: bytes,
+    }];
+    let run = run(
+        &options(FRAME, Target::Time, &["--bench"], dir.path()),
+        &benches,
+    );
+    assert_eq!(run.exit, 2, "{}", run.text);
+    assert_eq!(status(&run, "fake/frame").status, Status::Error);
+}
+
+#[test]
+fn runner_judging_machine_entries_are_judged_with_lectern_bench_judge() {
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn over(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![Measured::new("fake/frame", time(2))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/frame",
+        run: over,
+    }];
+    let mut options = options(FRAME, Target::Time, &["--bench"], dir.path());
+    options.judge = true;
+    let run = run(&options, &benches);
+    assert_eq!(run.exit, 1, "{}", run.text);
+    let entry = status(&run, "fake/frame");
+    assert_eq!(entry.status, Status::Over);
+    assert_eq!(entry.reason, None);
+    assert_eq!(entry.attempts.len(), 2, "over is retried once");
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+    assert!(
+        run.text.contains("measure, gated, judging machine"),
+        "{}",
+        run.text
+    );
+    assert_eq!(run.report.as_ref().unwrap().to_json()["judge"], true);
+}
+
+/// `LECTERN_BENCH_JUDGE=1` on a run that judges nothing (smoke mode, or not
+/// Apple silicon) is an error, so the judging job cannot pass without
+/// judging.
+#[test]
+fn runner_judge_needs_a_gated_run() {
+    fn within(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        Ok(vec![Measured::new("fake/frame", time(0))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/frame",
+        run: within,
+    }];
+    let mut smoke = options(FRAME, Target::Time, &[], dir.path());
+    smoke.judge = true;
+    let mut elsewhere = options(FRAME, Target::Time, &["--bench"], dir.path());
+    elsewhere.judge = true;
+    elsewhere.apple_silicon = false;
+    for options in [smoke, elsewhere] {
+        let run = run(&options, &benches);
+        assert_eq!(run.exit, 2, "{}", run.text);
+        let errors = &run.report.as_ref().unwrap().errors;
+        assert!(
+            errors.iter().any(|e| e.contains("LECTERN_BENCH_JUDGE=1")),
+            "{errors:?}"
+        );
+    }
+}
+
+#[test]
+fn runner_judge_env_is_1_or_unset() {
+    use std::ffi::OsStr;
+    assert_eq!(judge_from_env(None), Ok(false));
+    assert_eq!(judge_from_env(Some(OsStr::new(""))), Ok(false));
+    assert_eq!(judge_from_env(Some(OsStr::new("1"))), Ok(true));
+    for value in ["0", "true", "yes", " 1", "1 "] {
+        let error = judge_from_env(Some(OsStr::new(value))).unwrap_err();
+        assert!(error.contains("LECTERN_BENCH_JUDGE"), "{error}");
+    }
+}
+
+#[test]
+fn runner_ctx_knows_the_judging_machine() {
+    static SEEN: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+    fn look(ctx: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+        SEEN.lock().unwrap().push(ctx.judge());
+        Ok(vec![Measured::new("fake/frame", time(0))])
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let benches = [Bench {
+        id: "fake/frame",
+        run: look,
+    }];
+    let mut options = options(FRAME, Target::Time, &["--bench"], dir.path());
+    run(&options, &benches);
+    options.judge = true;
+    run(&options, &benches);
+    assert_eq!(*SEEN.lock().unwrap(), [false, true]);
 }

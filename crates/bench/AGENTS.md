@@ -23,7 +23,10 @@ just test -p lectern-bench   # 运行器、预算表、报告协议（wire_*）�
 just bench                   # macOS（Apple 芯片）上判定预算；其他平台是冒烟运行
 just bench agents/           # 只运行 ID 含 agents/ 的基准
 just bench --measure git/    # Linux 上也按规则采样，只报告、不判定
+LECTERN_BENCH_JUDGE=1 just bench baseline/   # 只在判定机器上：首帧要真正显示的条目也判定（ADR 0052）
 ```
+
+- 判定机器的条目（`Budget::judging_machine`：`app/cold_start`、`app/cold_start_purged`、`baseline/*`）在没有 `LECTERN_BENCH_JUDGE=1` 的测量运行里只记录。本机屏幕锁定时首帧的来源是 `handler`，设了这个变量就是错误，不是判定结果（[bench 设计「平台与噪声」](../../docs/design/bench.md#平台与噪声)）。
 
 - 基准目标：`benches/time.rs`（按被测 crate 分模块，在 `benches/time/` 下）、`benches/memory.rs`（注册 `CountingAlloc`）、`benches/process.rs`（只在 macOS 运行；`baseline/*` 启动 `examples/empty_window.rs`，`just bench` 构建它并设置 `LECTERN_BENCH_BASELINE`）。新增基准时在预算表里把对应条目改为 `Active`，否则运行器在开始前以 2 退出。
 - 每个目标写自己的 `target/lectern-bench/report-<target>.json`，`lectern-bench-report merge` 合并成 `report.json` 并决定 `just bench` 的退出码。报告列出每项的实测值、预算和出处；CI 的 macOS 任务判定预算，Linux 任务只做冒烟。
