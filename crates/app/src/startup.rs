@@ -23,6 +23,9 @@ pub struct Startup {
     /// The probe directory, set with `Profile::Probe`.
     #[cfg(feature = "ui-probe")]
     probe_dir: Option<PathBuf>,
+    /// The measurement build's probe, when `LECTERN_BENCH_SOCKET` is set.
+    #[cfg(feature = "bench-probe")]
+    bench: Option<Arc<lectern_bench::probe::Probe>>,
 }
 
 impl Global for Startup {}
@@ -63,6 +66,29 @@ impl Startup {
             profile,
             #[cfg(feature = "ui-probe")]
             probe_dir: None,
+            #[cfg(feature = "bench-probe")]
+            bench: None,
+        }
+    }
+
+    /// The measurement build with `probe`: it starts the kernel behind the
+    /// barrier and the windows get no frame autosave name.
+    #[cfg(feature = "bench-probe")]
+    pub fn bench(mut self, probe: Arc<lectern_bench::probe::Probe>) -> Startup {
+        self.bench = Some(probe);
+        self
+    }
+
+    /// Whether the measurement build's probe is there. Always false without
+    /// the `bench-probe` feature.
+    pub fn bench_probe(&self) -> bool {
+        #[cfg(feature = "bench-probe")]
+        {
+            self.bench.is_some()
+        }
+        #[cfg(not(feature = "bench-probe"))]
+        {
+            false
         }
     }
 
@@ -102,6 +128,8 @@ pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
     let profile = startup.profile;
     #[cfg(feature = "ui-probe")]
     let probe_dir = startup.probe_dir.clone();
+    #[cfg(feature = "bench-probe")]
+    let bench = startup.bench.clone();
     let Some(early) = cx.global_mut::<Startup>().early.take() else {
         return;
     };
@@ -117,6 +145,19 @@ pub fn release_in(window: Option<AnyWindowHandle>, cx: &mut App) {
     let executor = Executor::new(lectern_executor::Config::default());
     // `workspace::install` is in here: after `ready`, before the kernel.
     let assembled = assemble(profile, &executor, window, cx);
+    // The measurement build's probe starts the kernel in its place, with its
+    // own plugin, and takes the runner's requests (docs/design/app.md「测量
+    // 构建的装配」). The rest of the barrier is the same.
+    #[cfg(feature = "bench-probe")]
+    let kernel = match &bench {
+        Some(probe) => {
+            let kernel = probe.start_kernel(assembled.set);
+            crate::bench::attach(probe, kernel.clone(), cx);
+            kernel
+        }
+        None => Kernel::start(assembled.set),
+    };
+    #[cfg(not(feature = "bench-probe"))]
     let kernel = Kernel::start(assembled.set);
     // The window state file is read behind the barrier, in an executor task
     // (docs/design/workspace.md「对其他 crate 的要求」E).
@@ -189,8 +230,9 @@ fn assemble(
             window,
             WorkspaceDeps {
                 on_state_changed: Arc::new(move |state| changed.state_changed(state)),
-                // The bench probe (docs/design/bench.md) is not there yet:
-                // it takes the milestones and the frame records here.
+                // The bench probe (docs/design/bench.md) takes the milestones
+                // and the frame records here once a benchmark uses them
+                // (docs/design/app.md「里程碑与帧」).
                 on_milestone: Arc::new(|_, _| {}),
                 on_frames: Arc::new(|_| {}),
             },

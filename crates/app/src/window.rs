@@ -10,7 +10,7 @@ use lectern_i18n::{Strings, keys};
 use crate::profile::Profile;
 use crate::quit::Quit;
 use crate::startup::{self, Started, Startup};
-use crate::window_state::WELCOME;
+use crate::window_state::{WELCOME, autosave_name};
 
 actions!(lectern, [Hide, HideOthers, ShowAll]);
 
@@ -65,6 +65,10 @@ pub fn open_named(cx: &mut App, frame: &'static str) -> Option<AnyWindowHandle> 
     let desktop = cx
         .try_global::<Startup>()
         .is_some_and(|s| s.profile().has_real_window());
+    // The measurement build's probe: no saved frame, so that every start draws
+    // the same pixels and the user's window position stays alone
+    // (docs/design/app.md「数据目录」).
+    let bench = cx.try_global::<Startup>().is_some_and(|s| s.bench_probe());
     let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -81,11 +85,11 @@ pub fn open_named(cx: &mut App, frame: &'static str) -> Option<AnyWindowHandle> 
         // One observer; `lectern_ui::init` ran before this window
         // (docs/design/ui.md「对其他 crate 的要求」).
         let appearance = lectern_ui::attach(window, cx);
-        if desktop {
+        if let Some(name) = autosave_name(desktop, bench, frame) {
             // The one preference read before the first frame: AppKit's
             // in-memory user defaults, no file of ours (ADR 0017). `platform`
             // logs a failure; the window keeps the frame it was opened with.
-            let _ = lectern_platform::window::set_frame_autosave_name(&*window, frame);
+            let _ = lectern_platform::window::set_frame_autosave_name(&*window, name);
         }
         cx.new(|_| Skeleton {
             armed: false,

@@ -23,6 +23,8 @@ use lectern_executor::{Executor, Priority};
 use lectern_logging::{Value, warn};
 use lectern_workspace::{WindowState, WorkspaceHost};
 
+use crate::startup::Startup;
+
 /// How long the state must be still before it is written.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
@@ -39,6 +41,15 @@ const TEMP: &str = "window.json.tmp";
 /// The directory of `window.json` under the application data directory.
 pub fn dir(app_data: &Path) -> PathBuf {
     app_data.join(DIR)
+}
+
+/// The frame autosave name a window gets, or None for no name. Only the
+/// desktop profile names its windows, and not with the measurement build's
+/// probe: the name lives in AppKit's user defaults, which cfprefsd keeps
+/// under the real home directory whatever `HOME` says, so a benchmark would
+/// read and move the user's window position (docs/design/app.md「数据目录」).
+pub fn autosave_name(desktop: bool, bench_probe: bool, name: &'static str) -> Option<&'static str> {
+    (desktop && !bench_probe).then_some(name)
 }
 
 /// The frame autosave name for a state.
@@ -79,7 +90,8 @@ impl WindowStateLink {
         cx: &mut App,
     ) -> WindowStateLink {
         let (tx, rx) = unbounded();
-        cx.spawn(async move |cx| run(rx, window, dir, executor, cx).await)
+        let bench = cx.try_global::<Startup>().is_some_and(|s| s.bench_probe());
+        cx.spawn(async move |cx| run(rx, window, dir, executor, bench, cx).await)
             .detach();
         WindowStateLink {
             tx,
@@ -117,6 +129,7 @@ async fn run(
     mut window: AnyWindowHandle,
     dir: PathBuf,
     executor: Executor,
+    bench: bool,
     cx: &mut gpui::AsyncApp,
 ) {
     // The name the window has now.
@@ -141,7 +154,7 @@ async fn run(
         };
         match msg {
             Some(Msg::State(state)) => {
-                rename(cx, window, &mut named, frame_name(&state));
+                rename(cx, window, &mut named, frame_name(&state), bench);
                 latest = Some(state);
             }
             Some(Msg::Window(next, name)) => {
@@ -161,15 +174,20 @@ fn rename(
     window: AnyWindowHandle,
     named: &mut &'static str,
     wanted: &'static str,
+    bench: bool,
 ) {
     if *named == wanted {
         return;
     }
     *named = wanted;
+    // The measurement build's windows have no name (`autosave_name`).
+    let Some(name) = autosave_name(true, bench, wanted) else {
+        return;
+    };
     cx.update(|cx| {
         // A window that is gone has nothing to name.
         let _ = window.update(cx, |_, window, _| {
-            let _ = lectern_platform::window::set_frame_autosave_name(&*window, wanted);
+            let _ = lectern_platform::window::set_frame_autosave_name(&*window, name);
         });
     });
 }

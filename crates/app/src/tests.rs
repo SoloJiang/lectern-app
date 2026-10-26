@@ -2,6 +2,8 @@
 //! real binary are in `tests/startup.rs`.
 
 mod args;
+#[cfg(feature = "bench-probe")]
+mod bench;
 mod leave;
 mod logs;
 #[cfg(feature = "ui-probe")]
