@@ -358,19 +358,20 @@ pub mod thread {
 
 /// 以下只在 `bench-hooks` feature 里有效（`probe` 打开它）；没有时返回 `HookError::Unsupported`。
 pub mod frame {
-    /// 第一个真正显示的 drawable 的 `presentedTime`，换算到系统时钟。回调在任意线程上调用一次。
+    /// 首帧的时刻，换算到系统时钟，带来源（ADR 0052）：最先运行的显示回调读到的 `presentedTime` 大于 0 时是它（`TimeSource::Presented`），
+    /// 否则是这个回调运行的时刻（`TimeSource::Handler`）。回调在任意线程上调用一次。
     /// 首帧之前、创建窗口之前调用；注册本身不做 IO、不建线程。
-    pub fn on_first_presented(f: impl FnOnce(SystemTime) + Send + 'static) -> Result<(), HookError>;
+    pub fn on_first_presented(f: impl FnOnce(PresentedAt) + Send + 'static) -> Result<(), HookError>;
 
     /// 开始记录 `window` 的逐帧时刻。主线程，首帧之后。`workspace` 调用它，并在每一帧开头调用 `FrameRecorder::frame_started`；
     /// `stop` 之后在后台线程上 `PendingFrames::wait` 得到 `FrameRecording { refresh, frames, problems }`。
     /// `FrameTimes` 的四个时刻：`requested`（这一次刷新的垂直同步，即帧源要求这一帧的时刻）、`started`（主线程开始处理、布局之前）、
-    /// `completed`（命令缓冲的 `GPUEndTime`）、`presented`（`presentedTime`，只报告）。`app` 把它转换成 `wire::FrameTimes`。
+    /// `completed`（命令缓冲的 `GPUEndTime`）、`presented`（`PresentedAt`，规则与首帧相同，只报告）。`app` 把它转换成 `wire::FrameTimes`。
     pub fn record(window: &impl HasWindowHandle) -> Result<FrameRecorder, HookError>;
 }
 ```
 
-与原来的形状相比：`host::describe`、`thread::set_user_interactive` 返回 `io::Result`；`frame` 的函数返回 `Result<_, HookError>`；`record` 要窗口句柄，刷新周期放进 `FrameRecording::refresh`，不再单独提供 `refresh_period()`；`FrameTimes::presented` 是 `Option`；没有 `metal` 模块（ADR 0049）。
+与原来的形状相比：`host::describe`、`thread::set_user_interactive` 返回 `io::Result`；`frame` 的函数返回 `Result<_, HookError>`；`record` 要窗口句柄，刷新周期放进 `FrameRecording::refresh`，不再单独提供 `refresh_period()`；`FrameTimes::presented` 是 `Option`；首帧和 `presented` 的时刻带来源（`PresentedAt`，ADR 0052）；没有 `metal` 模块（ADR 0049）。
 
 其中 `process::phys_footprint` 已随 `cache` 第 2 步加入（`cache/memory` 用它，见「进程内基准」，[platform 设计「进程」](platform.md#进程)）。`process` 的另两个、`host`、`thread` 随第 2 步，已实现；`frame::on_first_presented` 在第 4 步之前，`frame::record` 在第一个生效的帧时间预算之前（platform 设计「验收」的 B1、B2）。
 
@@ -722,7 +723,7 @@ crates/bench/
 - 确定性：夹具由固定种子生成，不取时钟和随机数；基准按 ID 顺序运行；运行器在 macOS 上把基准线程设为 user-interactive QoS。
 - 页缓存：进程内基准测的是热缓存（预热之后）；冷文件缓存只在 `app/cold_start_purged` 里测量。
 
-判定用的机器是 CI 的 `macos-15` runner（Apple M1 虚拟机）。它与实体 M 系列 Mac 的差距由第 4 步的基线测出，见「未决问题」。
+判定用的机器（[ADR 0052](../adr/0052.md)，「未决问题」第 1 条的选项 B）：测量的时间止于首帧的条目在一台自托管的实体 M 系列 Mac 上运行，即 CI 的 `Judge (physical Mac)`（[CI 设计「判定机器」](ci.md#判定机器)）：它判定 `app/cold_start`，记录 `app/cold_start_purged` 和空窗口的两条基线 `baseline/*`（这三条在预算表里本来就只记录），这两条基线以它的结果为 ADR 0017 的基线。GitHub 托管的 `macos-15` runner（Apple M1 虚拟机）不给 `presentedTime`，这些条目在那里都只记录。其余预算由托管 runner 上的 `Benchmarks (macOS arm64)` 判定。
 
 ### 时间盒截断的轮次
 
@@ -837,11 +838,11 @@ CI：
 
 ## 未决问题
 
-没有需要产品决定的问题。下面一条已于 2026-10-18 决定，产品负责人交给负责推进的 agent，按默认值：
+没有需要产品决定的问题。下面一条已经决定：
 
-1. **判定用哪台机器。** 选项 A：用 GitHub 托管的 `macos-15` 判定，不额外花钱。预算定义在 M 系列 Mac 上，`macos-15` runner 是 3 核的 Apple M1 虚拟机，与用户的实体机不同，也有邻居干扰。
-   - 不采用选项 B：增加一台自托管的实体 M 系列 Mac 作为判定机器，托管 runner 只做冒烟。要付硬件和维护成本，并且要隔离在它上面运行的 PR 代码。
-   - 第 4 步测出空 GPUI 窗口在托管 runner 上的基线后，如果冷启动在实体机上低于 20 ms、在托管 runner 上不低于 20 ms，需要产品负责人在 A、B 之间重新选择；按 ADR 0017，不能为此放宽预算。
+1. **判定用哪台机器。** 已决定为选项 B（产品负责人 2026-10-26，[ADR 0052](../adr/0052.md)）：一台自托管的实体 M 系列 Mac 判定 `app/cold_start`，并记录 `app/cold_start_purged` 和 `baseline/*`，托管 runner 上这些条目只记录；其余预算仍由托管 runner 判定（「平台与噪声」）。
+   - 2026-10-18 按默认值选了选项 A：用 GitHub 托管的 `macos-15` 判定，不额外花钱。`macos-15` runner 是 3 核的 Apple M1 虚拟机，与用户的实体机不同，也有邻居干扰。当时不采用 B 的理由是硬件和维护成本，以及要隔离在它上面运行的 PR 代码。
+   - 第 4 步发现托管 runner 不给 drawable 的 `presentedTime`（ADR 0052「背景」）。按 ADR 0052 的回退，那里空窗口的 20 次冷启动是 111–225 ms，中位数 157 ms，20 个都超过 20 ms，来源都是 `handler`。托管 runner 不能判定冷启动，按 ADR 0017 也不能为此放宽预算，产品负责人因此改选 B。PR 代码的隔离见 ADR 0052 决策第 4 条和 [CI 设计「判定机器」](ci.md#判定机器)。
 
 ## 验收
 
@@ -866,10 +867,10 @@ CI：
 4. **探针、进程调度与空窗口基线**（`bench`；前提是 platform 设计「验收」的 B1 已合并。`probe` 加上 `lectern-platform/bench-hooks`）
    - `just test -p lectern-bench` 的 `wire_*`、`process_*`、`probe_*` 和 `purge` 集成测试通过。
    - macOS CI 上 `just bench baseline/` 报告 `baseline/empty_window_cold_start` 的 20 个样本和 `baseline/empty_window_idle`。
-   - 实测值和机器信息写进 ADR 0017（ADR 0017「影响」要求的基线）；不满足 `app/cold_start` 的判定规则（20 次里超过 20 ms 的多于 1 次，或有一次超过 30 ms）时告诉产品负责人，并按「未决问题」处理。
+   - 托管 runner 和判定机器的实测值、机器信息写进 ADR 0017（ADR 0017「影响」要求的基线，以判定机器的为准，ADR 0052）；判定机器上不满足 `app/cold_start` 的判定规则（20 次里超过 20 ms 的多于 1 次，或有一次超过 30 ms）时告诉产品负责人，按 ADR 0017「影响」由产品负责人决定。
 5. **`app` 的测量构建与应用级基准**（`app`，`Closes #7`；先合并 `app` 的设计文档。发布构建不带 binary archive，见 [ADR 0049](../adr/0049.md)）
    - `cargo build --release --locked -p lectern-app --features bench-probe` 成功；`cargo tree --locked -p lectern-app -e normal,build,features --target aarch64-apple-darwin` 的输出里没有 `lectern-bench`，也没有 `"test-support"` 和 `"bench-hooks"`（发布构建不含方法替换，ADR 0048）。
-   - macOS CI 的 `just bench` 判定 `app/cold_start`、`app/idle_empty`、`plugin/*/activate`、`plugin/after_first_frame`，记录 `app/cold_start_purged` 和 `plugin/*/resident`。
+   - 判定机器（`Judge (physical Mac)`）判定 `app/cold_start`、记录 `app/cold_start_purged`，托管 runner 上两者只记录（ADR 0052）；macOS CI 的 `Benchmarks (macOS arm64)` 判定 `app/idle_empty`、`plugin/*/activate`、`plugin/after_first_frame`，记录 `plugin/*/resident`。
    - 本文状态行改为「已实现」并列出五个 PR，填写「实际验证」。
 
 ## 实际验证

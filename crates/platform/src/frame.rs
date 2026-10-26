@@ -4,8 +4,12 @@
 //! Locked GPUI shows no drawable, so the one method the first frame passes
 //! through, `-[CAMetalLayer nextDrawable]`, is replaced with the Objective-C
 //! runtime's `method_setImplementation`, and the drawable it returns gets an
-//! `addPresentedHandler:` block that reads `presentedTime`. All of that is
-//! behind the `bench-hooks` feature on macOS; everywhere else the function
+//! `addPresentedHandler:` block that reads `presentedTime`. A drawable that
+//! was not shown has 0. With [`Fallback::HandlerTime`] (machines that give
+//! no `presentedTime`, as the hosted CI runner) the time is then the moment
+//! the handler runs, and the result says so; with [`Fallback::Wait`] (the
+//! judging machine) the next drawable is waited for (ADR 0052). All of
+//! that is behind the `bench-hooks` feature on macOS; everywhere else the function
 //! compiles and returns `HookError::Unsupported`, and no Objective-C runtime
 //! function is called. This step has `on_first_presented` only; the
 //! per-frame recording (`record`) follows in its own step.
@@ -17,9 +21,56 @@ use crate::HookError;
 #[cfg(test)]
 mod tests;
 
-/// Registers the first-frame callback. The first drawable that is really
-/// shown (`presentedTime` greater than 0) has its `presentedTime` converted
-/// to the system clock and given to `f`.
+/// Where a frame's time came from (ADR 0052).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeSource {
+    /// The drawable's `presentedTime`: when it was shown on the display.
+    Presented,
+    /// The drawable's `presentedTime` was not above 0: the machine gives none
+    /// (the hosted CI runner, a locked screen) or the drawable was not shown.
+    /// The time is the moment the presented handler ran, which is after the
+    /// drawable was handed to Core Animation. It is not a display time.
+    Handler,
+}
+
+impl TimeSource {
+    /// "presented" or "handler", for reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TimeSource::Presented => "presented",
+            TimeSource::Handler => "handler",
+        }
+    }
+}
+
+/// What a presented handler with `presentedTime` 0 does (ADR 0052). The first
+/// drawable GPUI draws comes before the window is on screen and always has 0,
+/// also on a physical Mac; the drawable drawn when the window is shown has
+/// its real time there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// Give the moment the handler runs ([`TimeSource::Handler`]). For a
+    /// machine that gives no `presentedTime` at all.
+    HandlerTime,
+    /// Give nothing and wait for a drawable with a `presentedTime`. For the
+    /// judging machine.
+    Wait,
+}
+
+/// A frame's time on the system clock, and its source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PresentedAt {
+    pub time: SystemTime,
+    pub source: TimeSource,
+}
+
+/// Registers the first-frame callback. The first presented handler whose
+/// drawable has a `presentedTime` greater than 0 gives `f` that time,
+/// converted to the system clock ([`TimeSource::Presented`]). A handler with
+/// 0 (or any value not greater than 0) gives the moment it runs
+/// ([`TimeSource::Handler`]) when `fallback` is [`Fallback::HandlerTime`],
+/// and nothing when it is [`Fallback::Wait`]. After `f` has run, handlers
+/// give nothing.
 ///
 /// `f` runs once, on the thread Core Animation calls the presented handler
 /// on; it should not block, and it must not panic (a panic in a callback
@@ -34,8 +85,11 @@ mod tests;
 /// A second call is `AlreadyActive`; a method that cannot be replaced is
 /// `Mismatch`; without the `bench-hooks` feature, or not on macOS,
 /// `Unsupported` (and `f` is dropped, never called).
-pub fn on_first_presented(f: impl FnOnce(SystemTime) + Send + 'static) -> Result<(), HookError> {
-    imp::on_first_presented(Box::new(f))
+pub fn on_first_presented(
+    fallback: Fallback,
+    f: impl FnOnce(PresentedAt) + Send + 'static,
+) -> Result<(), HookError> {
+    imp::on_first_presented(fallback, Box::new(f))
 }
 
 /// The system time of a moment given on the media clock (`CACurrentMediaTime`
@@ -68,7 +122,7 @@ mod imp {
     use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
     use std::time::SystemTime;
 
-    use super::system_time_of;
+    use super::{Fallback, PresentedAt, TimeSource, system_time_of};
     use crate::HookError;
     use crate::hook::check_type_encoding;
 
@@ -78,7 +132,7 @@ mod imp {
     /// A `Method` of the runtime.
     type Method = *mut c_void;
     /// The callback of `on_first_presented`.
-    pub(super) type FirstPresented = Box<dyn FnOnce(SystemTime) + Send>;
+    pub(super) type FirstPresented = Box<dyn FnOnce(PresentedAt) + Send>;
 
     /// The class and selector replaced, and the type encoding the method
     /// must have: returns an object, takes `self` and `_cmd`.
@@ -169,6 +223,8 @@ mod imp {
     /// taken (by the one handler that sees a shown drawable) or before the
     /// registration. The replacement and the block only load or swap it.
     static CALLBACK: AtomicPtr<FirstPresented> = AtomicPtr::new(ptr::null_mut());
+    /// `Fallback::HandlerTime` as true, set once before `CALLBACK`.
+    static HANDLER_TIME: AtomicBool = AtomicBool::new(false);
     /// The implementation `nextDrawable` had before the replacement.
     static ORIGINAL: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
     /// The selectors the replacement and the block send, registered at
@@ -202,18 +258,21 @@ mod imp {
                 mem::transmute(objc_msgSend as unsafe extern "C" fn());
             send(drawable, selector)
         };
-        deliver(&CALLBACK, presented);
+        deliver(&CALLBACK, presented, HANDLER_TIME.load(Ordering::Acquire));
     }
 
     /// What the presented handler does with the `presentedTime` it read:
-    /// nothing for 0 (this drawable was never shown, replaced by a later
-    /// one; the callback waits for the next) or any value that is not
-    /// greater than 0 (false for NaN); otherwise takes the callback out of
-    /// `slot` (an atomic swap: only one thread gets it) and calls it with the
-    /// time on the system clock. Takes no lock, allocates nothing, does not
-    /// panic, up to the callback.
-    pub(super) fn deliver(slot: &AtomicPtr<FirstPresented>, presented: f64) {
-        if presented.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+    /// takes the callback out of `slot` (an atomic swap: only one thread
+    /// gets it) and calls it with the time on the system clock. A
+    /// `presentedTime` greater than 0 is that time ([`TimeSource::Presented`]).
+    /// 0 or any value that is not greater than 0 (false for NaN) gives the
+    /// moment of this call ([`TimeSource::Handler`]) when `handler_time`,
+    /// and otherwise leaves the callback in `slot` for a later drawable
+    /// (ADR 0052). Takes no lock, allocates nothing, does not panic, up to
+    /// the callback.
+    pub(super) fn deliver(slot: &AtomicPtr<FirstPresented>, presented: f64, handler_time: bool) {
+        let shown = presented.partial_cmp(&0.0) == Some(std::cmp::Ordering::Greater);
+        if !shown && !handler_time {
             return;
         }
         let callback = slot.swap(ptr::null_mut(), Ordering::AcqRel);
@@ -225,12 +284,20 @@ mod imp {
         // SAFETY: no arguments.
         let media_now = unsafe { CACurrentMediaTime() };
         let now = SystemTime::now();
+        let (moment, source) = if shown {
+            (presented, TimeSource::Presented)
+        } else {
+            (media_now, TimeSource::Handler)
+        };
         // SAFETY: `callback` came from `Box::into_raw` in
         // `on_first_presented`, and the swap gave it to this call alone.
         // Running the callback consumes the box: the free is the callback's
         // own, part of the one exception to "does not allocate" (「安装的规则」).
         let callback = unsafe { Box::from_raw(callback) };
-        callback(system_time_of(presented, media_now, now));
+        callback(PresentedAt {
+            time: system_time_of(moment, media_now, now),
+            source,
+        });
     }
 
     /// The replacement of `-[CAMetalLayer nextDrawable]`: calls the original,
@@ -324,7 +391,8 @@ mod imp {
     }
 
     pub(super) fn on_first_presented(
-        callback: Box<dyn FnOnce(SystemTime) + Send>,
+        fallback: Fallback,
+        callback: FirstPresented,
     ) -> Result<(), HookError> {
         if REGISTERED.load(Ordering::Acquire) {
             return Err(HookError::AlreadyActive);
@@ -347,6 +415,7 @@ mod imp {
                 Ordering::Release,
             );
         }
+        HANDLER_TIME.store(fallback == Fallback::HandlerTime, Ordering::Release);
         CALLBACK.store(Box::into_raw(Box::new(callback)), Ordering::Release);
 
         let ours = next_drawable as unsafe extern "C" fn(Id, Sel) -> Id as *const c_void;
@@ -367,13 +436,13 @@ mod imp {
 
 #[cfg(not(all(target_os = "macos", feature = "bench-hooks")))]
 mod imp {
-    use std::time::SystemTime;
-
+    use super::{Fallback, PresentedAt};
     use crate::HookError;
 
     /// Nothing is replaced and the callback is dropped unused.
     pub(super) fn on_first_presented(
-        _callback: Box<dyn FnOnce(SystemTime) + Send>,
+        _fallback: Fallback,
+        _callback: Box<dyn FnOnce(PresentedAt) + Send>,
     ) -> Result<(), HookError> {
         Err(HookError::Unsupported)
     }

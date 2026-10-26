@@ -1,6 +1,6 @@
 # platform 设计
 
-状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature、`HookError` 和 `frame::on_first_presented`（见「测量构建的方法替换」「帧的时刻」）已实现（「验收」的 B1 部分）；`frame::record` 及其类型（B2）已接受，尚未实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。
+状态：安全读取已实现（设计 [#73](https://github.com/SoloJiang/lectern-app/pull/73)，实现 [#74](https://github.com/SoloJiang/lectern-app/pull/74)，macOS 13+ 的 `stat` 改为一次系统调用 [#88](https://github.com/SoloJiang/lectern-app/pull/88)）。FSEvents 与 kqueue 后端（模块 `fs_events`，设计在 [fs_watch 设计「platform 后端」](fs_watch.md#platform-后端)）已实现（[#90](https://github.com/SoloJiang/lectern-app/pull/90)），实测结果见 fs_watch 设计的「实际验证」。进程的 `phys_footprint` 已实现（[#91](https://github.com/SoloJiang/lectern-app/pull/91)，见「进程」）。列目录（`SafeRoot::list`，[ADR 0028](../adr/0028.md)）随 [#87](https://github.com/SoloJiang/lectern-app/pull/87) 加入。`SafeRoot::open_dir`（[ADR 0033](../adr/0033.md)）已实现（[#124](https://github.com/SoloJiang/lectern-app/pull/124)）。范围读取（`SafeRoot::open_file`、`OpenFile`，[#103](https://github.com/SoloJiang/lectern-app/issues/103)，见「范围读取」）已实现（设计 [#125](https://github.com/SoloJiang/lectern-app/pull/125)，实现 [#126](https://github.com/SoloJiang/lectern-app/pull/126)）。`file_reader`（[#10](https://github.com/SoloJiang/lectern-app/issues/10)）的两个前置条件已实现（[#147](https://github.com/SoloJiang/lectern-app/pull/147)）：原子替换 `SafeRoot::replace_file`（前置条件 C，见「原子替换」）和线程的 CPU 时钟 `ThreadCpuClock`（前置条件 G，见「线程的 CPU 时钟」），接口按 [file_reader 设计「对其他 crate 的要求」](file_reader.md#对其他-crate-的要求)。应用数据目录 `dirs::app_data`（review 前置条件 D 的 `platform` 部分，见「应用数据目录」）已实现（[#166](https://github.com/SoloJiang/lectern-app/pull/166)）。日志目录 `dirs::logs` 与系统版本 `system::os_version`（[logging 设计](logging.md)第 2 步，见「日志目录与系统版本」）已实现（[#173](https://github.com/SoloJiang/lectern-app/pull/173)）。本地时区的偏移 `time::utc_offset`（[usage 设计](usage.md)的前置条件 B，见「本地时区的偏移」）已实现（[#176](https://github.com/SoloJiang/lectern-app/pull/176)）。系统首选语言 `system::preferred_languages`（[app 设计](app.md)的前置条件 B，见「系统首选语言」）已实现（[#202](https://github.com/SoloJiang/lectern-app/pull/202)）。应用缓存目录 `dirs::app_cache`（[#205](https://github.com/SoloJiang/lectern-app/issues/205)，见「应用缓存目录」）已实现。窗口 frame 的 autosave `window::set_frame_autosave_name`（[workspace 设计](workspace.md)的前置条件 D，[#215](https://github.com/SoloJiang/lectern-app/issues/215)，见「窗口 frame 的 autosave」）已实现。系统外观 `appearance::{system_colors, reduce_motion, watch}`（[ui 设计](ui.md)的前置条件 A，[#214](https://github.com/SoloJiang/lectern-app/issues/214)，见「系统外观」）已实现。kqueue 线程停止时的记录接入 `lectern-logging`（[logging 设计「对其他 crate 的要求」](logging.md#对其他-crate-的要求)第 9 项的 `platform` 部分，见「日志与诊断」）已实现（[#192](https://github.com/SoloJiang/lectern-app/pull/192)）。语言偏好 `system::{system_languages, language_override, set_language_override}`（[welcome 设计](welcome.md)的前置条件 B，见「系统首选语言」的「语言偏好」）已实现（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）。bench 第 2 步要的接口（[#7](https://github.com/SoloJiang/lectern-app/issues/7)，[ADR 0048](../adr/0048.md)）：进程的 `start_time`、`children`（见「进程」），`host::describe`、`thread::set_user_interactive`（见「主机信息与线程 QoS」）已实现（「验收」的 A 部分）；`bench-hooks` feature、`HookError` 和 `frame::on_first_presented`（见「测量构建的方法替换」「帧的时刻」）已实现（「验收」的 B1 部分）；drawable 没有 `presentedTime` 时首帧取显示回调运行的时刻、结果注明来源（`PresentedAt`、`TimeSource`，[ADR 0052](../adr/0052.md)）已实现；`frame::record` 及其类型（B2）已接受，尚未实现；Metal binary archive 的严格模式不做（[ADR 0049](../adr/0049.md)，见「Metal binary archive」）。
 
 对应 issue [#14](https://github.com/SoloJiang/lectern-app/issues/14)。`platform` 收纳只能按操作系统实现的能力（架构规则 6）。本文目前只覆盖其中的安全读取：从一个目录根出发，按相对路径读取文件的元数据和内容，路径的任何一级都不跟随符号链接，也不越出根目录。`git` 读工作区文件只经这个接口（[git 设计「安全读取」](git.md#安全读取)、[ADR 0024](../adr/0024.md)），它也是 Analyze 快照「写出时不跟随符号链接，不读到 worktree 之外的文件」的基础（[ADR 0019](../adr/0019.md) 约束 2）。
 
@@ -1396,12 +1396,40 @@ bench 的冷启动终点、空窗口基线和帧时间基准都用它（[bench �
 
 ```rust
 pub mod frame {
-    /// 登记首帧回调。之后第一个真正显示的 drawable（`presentedTime` 大于 0），把它的 `presentedTime` 换算成系统时钟交给 `f`。
+    /// 时刻的来源（ADR 0052）。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum TimeSource {
+        /// drawable 的 `presentedTime`：显示在屏幕上的时刻。
+        Presented,
+        /// `presentedTime` 不大于 0（机器不给，例如托管 runner、锁屏；或这个 drawable 没有显示）：显示回调运行的时刻。不是显示时刻。
+        Handler,
+    }
+
+    impl TimeSource {
+        /// "presented" 或 "handler"，供报告使用。
+        pub fn as_str(self) -> &'static str;
+    }
+
+    /// `presentedTime` 为 0 的显示回调怎么办（ADR 0052）。GPUI 的第一个 drawable 在窗口显示之前画出，实体机上也为 0。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Fallback {
+        /// 交出回调运行的时刻（`Handler`）。给不出 `presentedTime` 的机器（托管 runner）。
+        HandlerTime,
+        /// 不交出，等一个有 `presentedTime` 的 drawable。判定机器（`LECTERN_BENCH_JUDGE=1`）。
+        Wait,
+    }
+
+    /// 换算到系统时钟的时刻和它的来源。
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct PresentedAt { pub time: SystemTime, pub source: TimeSource }
+
+    /// 登记首帧回调。第一个 `presentedTime` 大于 0 的显示回调给出它（`Presented`）；不大于 0 的回调在 `Fallback::HandlerTime` 时
+    /// 给出这个回调运行的时刻（`Handler`），在 `Fallback::Wait` 时什么都不给。时刻换算成系统时钟交给 `f`，之后的回调不再交付。
     /// `f` 在 Core Animation 调用显示回调的线程上调用一次，不应阻塞。
     /// 必须在创建窗口之前调用（探针在 `main` 的开头调用）。任何线程。
     /// 只替换 `-[CAMetalLayer nextDrawable]`：不做 IO，不建线程，不建 Metal 对象，耗时 ≤ 100 µs。
     /// 第二次调用为 `AlreadyActive`；替换不了为 `Mismatch`；没有 feature 或不是 macOS 为 `Unsupported`。
-    pub fn on_first_presented(f: impl FnOnce(SystemTime) + Send + 'static) -> Result<(), HookError>;
+    pub fn on_first_presented(fallback: Fallback, f: impl FnOnce(PresentedAt) + Send + 'static) -> Result<(), HookError>;
 
     /// 开始记录 `window` 的逐帧时刻。首帧之后、在主线程上调用。同一时刻最多一个记录器。
     /// 第一次调用时替换命令缓冲的 `commit`（`nextDrawable` 还没有替换时一并替换），为窗口所在的显示器建 CVDisplayLink（之后复用）；
@@ -1448,8 +1476,10 @@ pub mod frame {
         pub started: SystemTime,
         /// 这一帧的命令缓冲的 `GPUEndTime`。
         pub completed: SystemTime,
-        /// drawable 的 `presentedTime`。为 0 时（没有显示，例如被后一帧替换）为 None。只报告，不判定。
-        pub presented: Option<SystemTime>,
+        /// 这个 drawable 的显示回调给出的时刻，规则与首帧相同（ADR 0052）：`presentedTime` 大于 0 时是它（`Presented`）；
+        /// 不大于 0 时（没有显示，例如被后一帧替换；或机器不给）是回调运行的时刻（`Handler`）。
+        /// 到 `wait` 的期限显示回调还没有运行时为 None。只报告，不判定。
+        pub presented: Option<PresentedAt>,
     }
 
     /// 对不上的帧的计数。前三项任何一项不为 0，这次记录就不可信，bench 记为 `error`。
@@ -1478,7 +1508,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 
 1. `on_first_presented` 把 `f` 放进一个静态的槽（`AtomicPtr` 指向泄漏的 `Box`），然后替换 `-[CAMetalLayer nextDrawable]`。`CAMetalLayer` 是公开的类（`objc_getClass`）；GPUI 用的就是这个类本身，不是它的子类。
 2. 替换后的 `nextDrawable` 先调用原来的实现。返回的 drawable 不为 nil、槽里还有回调时，在它上面登记 `addPresentedHandler:`。GPUI 的两条显示路径都在 `nextDrawable` 之后才提交或显示，所以登记总在显示之前。首帧多半经 `displayLayer:` 的路径（`commit`、`waitUntilScheduled`、`[drawable present]`），这条路径不经过 `presentDrawable:`，所以登记不放在提交的地方。
-3. 显示回调读 `presentedTime`。为 0 时这个 drawable 没有显示，什么都不做，等下一个。大于 0 时用原子交换取出槽里的回调（只有一个线程取得到），换算成系统时钟后调用它。之后的 drawable 不再登记首帧的回调。
+3. 显示回调读 `presentedTime`。大于 0 时，用原子交换取出槽里的回调（只有一个线程取得到），把时刻换算成系统时钟，来源为 `Presented`。不大于 0 时（0、负数、NaN：机器不给，或这个 drawable 没有显示），`Fallback::HandlerTime` 下同样取出回调，读这个时刻的 `CACurrentMediaTime()` 换算，来源为 `Handler`；`Fallback::Wait` 下不取，回调留在槽里，等下一个 drawable（[ADR 0052](../adr/0052.md)）。然后调用回调。之后的 drawable 不再登记首帧的回调。回调只能在 drawable 交给 Core Animation 之后运行，所以 `Handler` 的时刻不早于 `present`，但它不是显示时刻。
 4. 它只在测量构建里有（ADR 0048）。桌面版的启动屏障不用它，保持帧回调（[app 设计「启动屏障」](app.md#启动屏障)）。
 
 ### 逐帧记录
@@ -1521,7 +1551,7 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 |---|---|---|
 | 发布构建 | 0 | 没有 `bench-hooks`，函数直接返回 `Unsupported` |
 | `on_first_presented` | ≤ 100 µs，首帧之前 | 一次 `objc_getClass`、`class_getInstanceMethod`、`method_getTypeEncoding`、`method_setImplementation`。计入冷启动，由 `baseline/empty_window_cold_start` 一起测出 |
-| 首帧显示之前的每次 `nextDrawable` | 一次 block 登记，几微秒 | 首帧显示之后、不在记录期间时，只读一个原子标志 |
+| 首帧回调交付之前的每次 `nextDrawable` | 一次 block 登记，几微秒 | 首帧回调交付之后、不在记录期间时，只读一个原子标志 |
 | 第一次 `record` | < 1 ms，首帧之后 | 临时的命令队列和命令缓冲、CVDisplayLink 的建立、0.5 MiB 的分配 |
 | 记录期间每帧 | 两次 block 登记（显示、完成）加 `frame_started` 的一次 `mach_absolute_time`，几微秒 | 计入被测帧的工作时间，是测量的误差，相对 8.3 ms 的预算很小 |
 
@@ -1535,23 +1565,24 @@ bench 设计原来列出的 `refresh_period()` 不单独提供：刷新周期属
 - 记录期间窗口移到另一个显示器：tick 和 `refresh` 仍来自原来的显示器。基准运行时窗口不移动。
 - 窗口不是前台窗口时，GPUI 按约 30 fps 请求帧（`inactive_frame_interval`），相邻 `started` 的间隔约 33 ms，帧基准必然超标。帧基准的场景开始之前，`app` 的 `Driver` 先让窗口成为前台窗口。
 - 系统有多块 GPU（Intel Mac）时，`commit` 的类取自窗口的 `CAMetalLayer` 的设备，就是 GPUI 选的那块。bench 在 Intel Mac 上只报告，不判定。
-- `presentedTime` 为 0 的帧没有显示时刻（`presented` 为 None）。首帧回调跳过这些 drawable，等第一个真正显示的。
+- `presentedTime` 不大于 0 的 drawable 没有显示时刻，在 `Fallback::HandlerTime` 下首帧和 `presented` 取显示回调运行的时刻，来源为 `Handler`（ADR 0052）。托管的 CI runner 和锁屏的机器上每个 drawable 都是这样。这个时刻与真正显示的先后不确定。GPUI 的第一个 drawable 在窗口显示之前画出，在给 `presentedTime` 的实体机上它也为 0，所以判定机器用 `Fallback::Wait`，跳过它，等窗口显示后的 drawable。来源写在结果里。
 - 只给首帧的显示时刻。`workspace` 的里程碑要的是之后某一帧的显示时刻，`on_first_presented` 给不出，要用 `record` 记下画出里程碑的那一帧（[workspace 设计「已知限制」](workspace.md#已知限制)）。
 - CVDisplayLink 从 macOS 15 起标为弃用（ADR 0048）。
 
 ### 测试
 
 - 所有平台：
-  - `frame_pairing_*`：配对是纯函数（输入开始时刻、drawable、提交、tick 和回调的序列，输出 `FrameTimes` 和 `FrameProblems`）。场景：连续的帧（每个 tick 一帧，`requested` 是 tick，`started` 在它之后）；主线程跨两个 tick 阻塞（`requested` 是阻塞之前的那个 tick，工作时间包含阻塞）；两帧之间有一次没有画的帧处理（下一帧的 `requested` 在它之后）；没有 tick 的帧（`requested` 等于 `started`，`without_tick` 加一）；没有开始时刻的 drawable 和同一次帧处理里的第二个 drawable（`unmatched`）；到期限没有完成时刻（`incomplete`，不在 `frames` 里）；超出容量（`overflowed`）；`presentedTime` 为 0（`presented` 为 None）；代数过时的回调不写。
+  - `frame_pairing_*`：配对是纯函数（输入开始时刻、drawable、提交、tick 和回调的序列，输出 `FrameTimes` 和 `FrameProblems`）。场景：连续的帧（每个 tick 一帧，`requested` 是 tick，`started` 在它之后）；主线程跨两个 tick 阻塞（`requested` 是阻塞之前的那个 tick，工作时间包含阻塞）；两帧之间有一次没有画的帧处理（下一帧的 `requested` 在它之后）；没有 tick 的帧（`requested` 等于 `started`，`without_tick` 加一）；没有开始时刻的 drawable 和同一次帧处理里的第二个 drawable（`unmatched`）；到期限没有完成时刻（`incomplete`，不在 `frames` 里）；超出容量（`overflowed`）；`presentedTime` 为 0（`presented` 的来源为 `Handler`）；到期限还没有显示回调（`presented` 为 None）；代数过时的回调不写。
   - `frame_clock_*`：刻度到纳秒的换算（`mach_timebase_info` 为 1/1 和 125/3）和到 `SystemTime` 的换算。
   - `hook_error_kinds_are_distinct_static_names`；`hook_type_encoding_check`（核对是纯函数：相同时通过；不同、为空时为 `Mismatch`）。
 - 没有 `bench-hooks`，或不在 macOS 上：`frame_is_unsupported_without_bench_hooks`（`on_first_presented`、`record` 都为 `Unsupported`，回调从不被调用）。
 - macOS 加 `bench-hooks`（`cargo test -p lectern-platform --features bench-hooks`）：
   - `frame_first_presented_installs_once`：第二次调用为 `AlreadyActive`。
+  - `hook_deliver_*`：把显示回调读到 `presentedTime` 之后的部分（`deliver`）用本地的槽测。大于 0 时来源为 `Presented`，时刻是换算后的 `presentedTime`；0、负数、NaN、负无穷时来源为 `Handler`，时刻在调用前后的两次读数之间；回调只调用一次，之后的显示回调什么都不做。
   - `frame_hooks_on_an_offscreen_layer`：测试线程上建一个不在窗口里的 `CAMetalLayer`（自己的设备和命令队列，64 × 64），经 crate 内部的入口开始记录（不要窗口句柄），按 GPUI 的两种顺序各画若干帧（`presentDrawable:` 加 `commit`；`commit`、`waitUntilScheduled` 加 `present`），每帧之前调用 `frame_started`。每帧都有 `started` 和 `completed`，`problems` 干净；去掉 `frame_started` 时为 `unmatched`。离屏的 layer 不显示，测试不检查 `presented`。实现 PR 先确认离屏的 layer 上连续取 drawable 不阻塞（`nextDrawable` 要等已提交的 drawable 回收），并且 CI 的虚拟机（`VirtualMac2,1`）上有 Metal 设备、`GPUEndTime` 不为 0；任何一项不成立时，这项检查移到 example，不在 CI 上跳过了事。
   - 替换在进程内一直有效。nextest 让每个测试在自己的进程里运行；用 `cargo test` 在同一个进程里运行时，测试也不依赖彼此的顺序。
   - `frame_record_off_the_main_thread_is_an_error`：测试线程不是主线程，`record` 为 `NotMainThread`。
-- 真实窗口：`crates/platform/examples/frame_hooks.rs`（`Cargo.toml` 里 `required-features = ["bench-hooks"]`），手工运行 `cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks`（要窗口服务器会话；`just check` 的 clippy 带 `--all-features`，所以编译它，CI 不运行）。它在主线程上建 `NSApplication` 和一个以 `CAMetalLayer` 为 backing layer 的窗口，先调用 `on_first_presented`，再由 CVDisplayLink 驱动 120 帧，按 GPUI 的顺序画，每帧先调用 `frame_started`。检查：首帧回调到达，时刻晚于 `process::start_time(本进程)`；`problems` 干净；相邻 `started` 的间隔的中位数与 `refresh` 相差不超过 10%。它打印 `on_first_presented` 的耗时和每帧的开销。全部成立时退出码为 0。
+- 真实窗口：`crates/platform/examples/frame_hooks.rs`（`Cargo.toml` 里 `required-features = ["bench-hooks"]`），手工运行 `cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks`（要窗口服务器会话；`just check` 的 clippy 带 `--all-features`，所以编译它，CI 不运行）。它在主线程上建 `NSApplication` 和一个以 `CAMetalLayer` 为 backing layer 的窗口，先调用 `on_first_presented`，再由 CVDisplayLink 驱动 120 帧，按 GPUI 的顺序画，每帧先调用 `frame_started`。检查：首帧回调到达，时刻晚于 `process::start_time(本进程)`，打印它的来源（锁屏时为 `handler`）；`problems` 干净；相邻 `started` 的间隔的中位数与 `refresh` 相差不超过 10%。它打印 `on_first_presented` 的耗时和每帧的开销。全部成立时退出码为 0。
 - 经真实 GPUI 的检查在 bench 里：第 4 步的空窗口基线（B1），以及帧时间的预算改为生效时的帧基准（B2）。
 
 ## Metal binary archive
@@ -1774,6 +1805,16 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - 示例的窗口阶段在本机没有通过：屏幕是锁定的，300 帧都取到了 drawable，显示回调也都被调用（临时的计数确认），但每个 `presentedTime` 都是 0（没有显示），首帧回调没有到达，示例以 panic 退出（退出码 101）。「到达的时刻晚于进程的启动时刻、不晚于现在」没有在真实窗口上验证；换算（`frame_clock_*`）和「0 不触发、大于 0 只触发一次」（`hook_deliver_*`）由测试覆盖。离屏的 `CAMetalLayer` 也不显示（`presentedTime` 为 0），所以没有测试在离屏的层上检查回调到达。
   - 没有验证的：本机没有 Linux 目标，其他平台的分支只由 Linux CI 编译和运行；没有在 CI 的虚拟机（`VirtualMac2,1`）上运行，离屏测试在没有 Metal 设备的机器上直接返回；没有经真实 GPUI 的窗口（bench 第 4 步的空窗口基线）。
 
+- 没有 `presentedTime` 时的回退和来源（[ADR 0052](../adr/0052.md)，[#7](https://github.com/SoloJiang/lectern-app/issues/7)）在 macOS（Apple M5 Pro，Mac17,9，macOS 27.0.1）上，屏幕锁定（`CGSSessionScreenIsLocked` 为 1）：
+  - `just test -p lectern-platform`：197 个测试通过。`hook_deliver_calls_the_callback_once_for_a_shown_drawable` 换成两个：`hook_deliver_gives_a_shown_drawable_its_presented_time_once`、`hook_deliver_without_a_presented_time_gives_the_handler_time_once`（0、-1、NaN、负无穷各一次）；其余 195 个结果不变。不带 feature 的 `cargo nextest run -p lectern-platform frame_ hook_` 12 个通过。
+  - `cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks` 连续三次退出码都为 0（B1 时这一步在本机以 panic 退出）：`on_first_presented` 的耗时（11 个冷进程的最小值、中位数、最大值）依次为 10.8、13.2、29.1 µs，10.5、11.5、16.7 µs，10.4、11.6、16.7 µs；首帧回调在进程启动后 394.4、85.3、84.2 ms 到达（第一次的文件缓存是冷的），来源都是 `handler`，都在第一个 drawable 上。「到达的时刻晚于进程的启动时刻、不晚于现在」这次在真实窗口上成立。
+  - `just check`、`just deny` 通过；`git diff origin/main -- Cargo.lock` 为空。
+  - 没有验证的：没有在不锁屏、给 `presentedTime` 的实体 Mac 上运行，`Presented` 的来源只由 `hook_deliver_*` 覆盖，实体 Mac 上的结果由判定机器注册之后的检查给出（[ADR 0052](../adr/0052.md)，[CI 设计「判定机器」](ci.md#判定机器)）；托管 runner 上的结果随 bench 第 4 步（#269）的 CI 运行得到。
+- `Fallback`（[ADR 0052](../adr/0052.md) 决策 1 的修订），同一台 Mac，2026-10-26，屏幕没有锁定、窗口可见：
+  - 改之前：`frame_hooks` 的首帧来源为 `handler`，只画了 1 个 drawable（窗口被全屏的应用挡住时）。窗口可见时，诊断版的空窗口（40c5468 的 `LECTERN_BENCH_DIAG=natural`）画了 3 个 drawable，显示回调 2 个，其中 1 个为 0（窗口显示之前那个），另一个有时刻，距进程启动约 410 ms；不经方法替换的 `present_check` 的 `Buffer` 路径 120 帧里 119 帧有时刻，只有第一帧为 0。所以取第一个回调的规则在判定机器上每次都得到 `handler`。
+  - 改之后：`LECTERN_BENCH_JUDGE=1` 下（`Fallback::Wait`）`frame_hooks` 的来源为 `presented`，在第 4 个 drawable 上；不设时（`Fallback::HandlerTime`）为 `handler`，与改之前相同。`cargo nextest run -p lectern-platform --all-features -E 'test(/frame|hook/)'` 17 个通过，新增 `hook_deliver_waits_for_a_shown_drawable_without_the_handler_time`。
+  - 没有验证的：`presentsWithTransaction` 路径（GPUI 的 `displayLayer`、窗口变为 key 时用它）在窗口可见时是否给时刻；那次 `present_check` 窗口不可见，120 帧都是 0。判定机器的第一次检查（CI 设计「判定机器」第 8 步）会看到。
+
 ## 与设计的差异
 
 - `Walk` 在 `fstatat` 的结果与之前那次打开的错误矛盾时重做这一级，最多 8 次（见「Walk」）。设计写的是直接返回 `Io(原来的错误)`：目录与符号链接来回交换时，这种做法偶尔会让 `race_swap_never_escapes` 得到 `Io`，而这个测试只允许三种结果。重做不改变「不读到根目录之外」，只让并发替换时的结果与某一时刻的状态一致。
@@ -1819,3 +1860,4 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - 首帧回调 panic 会终止进程（系统回调的 `extern "C"` 边界）。回调不应 panic，函数文档写了这一点。
   - 增加了设计没有列出的测试：`hook_mismatch_installs_nothing`（类、选择器、类型编码各错一次，安装前后的状态相同）、`hook_deliver_calls_the_callback_once_for_a_shown_drawable`（把「读到 `presentedTime` 之后」的部分抽成 `deliver`，用本地的槽测）、`frame_hook_passes_drawables_through_on_an_offscreen_layer`（替换装上之后，离屏的层连续取 8 个 drawable，说明不阻塞、不丢）。这些测试共用进程里的登记，经一把锁轮流运行，`cargo test` 与 nextest 的结果相同。设计「测试」里的 `frame_hooks_on_an_offscreen_layer` 和 `frame_record_off_the_main_thread_is_an_error` 随 `record`（B2）加入。
   - `examples/frame_hooks.rs` 是 B1 的范围：测安装耗时、首帧回调（窗口里用 `CAMetalLayer`，`presentDrawable:` 加 `commit` 画帧，主 run loop 里等回调），没有 CVDisplayLink 和 120 帧的检查（B2）。安装耗时在 11 个冷子进程里测，按中位数判定 100 µs，不按单次：单个冷进程的第一次调用偶尔因页错误明显更慢。
+- 首帧回调改为 `FnOnce(PresentedAt)`，新增 `TimeSource`，`presentedTime` 不大于 0 时取显示回调运行的时刻（[ADR 0052](../adr/0052.md)）。之后加入 `Fallback`：这条回退只在 `Fallback::HandlerTime` 下（托管 runner），判定机器用 `Fallback::Wait`，等第一个大于 0 的时刻，因为 GPUI 的第一个 drawable 在实体机上也为 0（「实际验证」）。原设计跳过这些 drawable，等第一个大于 0 的；托管的 CI runner 从不给 `presentedTime`（ADR 0052「背景」），bench 第 4 步的基线因此没有样本。「接口」「首帧」「性能」「已知限制」「测试」已改，`FrameTimes::presented`（B2，尚未实现）按同一规则改为 `Option<PresentedAt>`。B1 的 `hook_deliver_calls_the_callback_once_for_a_shown_drawable` 拆成两个 `hook_deliver_*`，见「测试」。

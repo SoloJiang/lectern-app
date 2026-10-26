@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # By hand, for the judge job on a chosen branch (docs/design/ci.md「判定机器」).
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -75,7 +77,9 @@ jobs:
         run: cargo build --locked -p lectern-app
 
   # The performance budgets, judged on Apple Silicon, in parallel with the
-  # job above (docs/design/ci.md「任务」).
+  # job above (docs/design/ci.md「任务」). This runner never gives a
+  # presentedTime, so the budgets that end at the first frame are only
+  # recorded here; the judge job below judges them (ADR 0052).
   macos-bench:
     name: Benchmarks (macOS arm64)
     runs-on: macos-15
@@ -110,3 +114,63 @@ jobs:
           name: lectern-bench-report
           path: target/lectern-bench/report.json
           if-no-files-found: warn
+
+  # The budgets that end at the first frame, judged on the self-hosted
+  # physical Mac (ADR 0052, docs/design/ci.md「判定机器」). The repository is
+  # public, so the runner runs only code on main, or a branch of this
+  # repository that a person with write access chose (workflow_dispatch),
+  # never a pull request's code by itself. The job runs only once the repository
+  # variable says the runner is registered. It fetches no tools (the
+  # toolchain and just are installed read-only on the machine), keeps its
+  # homes and temporary files under RUNNER_TEMP, has a read-only token and
+  # no secrets, pins its actions to commits, and cleans the workspace before
+  # and after; the runner's job-completed hook ends every process it started.
+  judge:
+    name: Judge (physical Mac)
+    if: >-
+      vars.LECTERN_JUDGE_RUNNER == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, macOS, ARM64, lectern-judge]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      RUSTUP_HOME: /opt/lectern-judge/rustup
+      RUSTUP_AUTO_INSTALL: '0'
+    steps:
+      # RUNNER_TEMP is emptied at the start and end of each job.
+      - name: Use per-job homes and the read-only tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/home" "$RUNNER_TEMP/cargo" "$RUNNER_TEMP/tmp"
+          {
+            echo "HOME=$RUNNER_TEMP/home"
+            echo "CARGO_HOME=$RUNNER_TEMP/cargo"
+            echo "TMPDIR=$RUNNER_TEMP/tmp"
+          } >> "$GITHUB_ENV"
+          echo /opt/lectern-judge/cargo/bin >> "$GITHUB_PATH"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          clean: true
+      # Fails instead of installing: a missing tool is the machine's setup.
+      - name: Check the pre-installed tools
+        run: |
+          rustc --version
+          just --version
+          xcrun metal --version
+      - name: Judge the budgets that end at the first frame
+        env:
+          LECTERN_BENCH_JUDGE: '1'
+        run: just bench baseline/ app/cold_start
+      - name: Upload the judging report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lectern-bench-judge-report
+          path: target/lectern-bench/report.json
+          if-no-files-found: warn
+      # The job's processes are ended by the runner's job-completed hook
+      # (scripts/judge-runner/job-completed.sh), which no workflow can skip.
+      - name: Clean the workspace
+        if: always()
+        run: git clean -ffdx && git reset --hard
