@@ -1,4 +1,4 @@
-//! The real-window check of `frame::on_first_presented`
+//! The real-window check of `frame::on_first_presented` and `frame::record`
 //! (docs/design/platform.md「帧的时刻」「测试」). AppKit windows live on the
 //! main thread and Rust's test harness never runs a test there, so the check
 //! is an example whose `main` is the main thread. It needs a window server
@@ -10,9 +10,7 @@
 //! cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks
 //! ```
 //!
-//! This step checks the first-frame callback only; the 120 frames driven by
-//! a CVDisplayLink and the recording checks come with `frame::record`. The
-//! example:
+//! The example:
 //!
 //! 1. times `on_first_presented` in 11 cold child processes (it must take
 //!    100 µs or less at the median; the first call of a process also pays
@@ -23,7 +21,14 @@
 //!    the order GPUI's display link path uses (`nextDrawable`,
 //!    `presentDrawable:`, `commit`) while it runs the main run loop;
 //! 3. waits for the callback and checks its time is after this process
-//!    started and not after now; it prints the time's source.
+//!    started and not after now; it prints the time's source;
+//! 4. draws 120 frames driven by a CVDisplayLink of its own, without
+//!    recording, then 120 more while `frame::record` records, calling
+//!    `frame_started` before each; checks that `problems` is clean, every
+//!    frame is in the recording, and the median gap between adjacent
+//!    `started` is within 10% of `refresh`; and prints the per-frame cost of
+//!    recording (the median drawing time with and without it, and of
+//!    `frame_started` alone) and the medians of the frame's phases.
 //!
 //! It exits 0 when every check holds and panics otherwise. The numbers go to
 //! stdout through `io::Write`: the workspace's print lints cover examples
@@ -47,9 +52,16 @@ mod real {
     use std::sync::mpsc;
     use std::time::{Duration, Instant, SystemTime};
 
+    use std::ptr::NonNull;
+
     use lectern_platform::HookError;
-    use lectern_platform::frame::{Fallback, PresentedAt, on_first_presented};
+    use lectern_platform::frame::{
+        Fallback, FrameRecording, PresentedAt, TimeSource, on_first_presented, record,
+    };
     use lectern_platform::process::start_time;
+    use raw_window_handle::{
+        AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
+    };
 
     type Id = *mut c_void;
     type Sel = *const c_void;
@@ -60,6 +72,13 @@ mod real {
     const INSTALL_RUNS: usize = 11;
     /// How long to draw frames before giving up on the callback.
     const FRAMES: u32 = 300;
+    /// Frames drawn without and with the recording.
+    const RECORDED: usize = 120;
+    /// The largest difference between the median `started` gap and the
+    /// refresh period.
+    const REFRESH_TOLERANCE: f64 = 0.10;
+    /// How long a display link tick may take to come.
+    const TICK_TIMEOUT: Duration = Duration::from_millis(200);
 
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -97,6 +116,29 @@ mod real {
     #[link(name = "Metal", kind = "framework")]
     unsafe extern "C" {
         fn MTLCreateSystemDefaultDevice() -> Id;
+    }
+
+    #[link(name = "CoreVideo", kind = "framework")]
+    unsafe extern "C" {
+        fn CVDisplayLinkCreateWithCGDisplay(display: u32, link: *mut *mut c_void) -> i32;
+        fn CVDisplayLinkSetOutputCallback(
+            link: *mut c_void,
+            callback: unsafe extern "C" fn(
+                *mut c_void,
+                *const c_void,
+                *const c_void,
+                u64,
+                *mut u64,
+                *mut c_void,
+            ) -> i32,
+            context: *mut c_void,
+        ) -> i32;
+        fn CVDisplayLinkStart(link: *mut c_void) -> i32;
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGMainDisplayID() -> u32;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -164,13 +206,114 @@ mod real {
         }
     }
 
-    /// The window with a layer-hosting view backed by `layer`, shown.
+    /// The view of a layer-hosting window, as `record` takes it.
+    struct View(NonNull<c_void>);
+
+    impl HasWindowHandle for View {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            let raw = RawWindowHandle::AppKit(AppKitWindowHandle::new(self.0));
+            // SAFETY: the view lives until the process ends.
+            Ok(unsafe { WindowHandle::borrow_raw(raw) })
+        }
+    }
+
+    /// The display link's callback: one tick to the main thread. The
+    /// context is a leaked `SyncSender`.
+    unsafe extern "C" fn on_tick(
+        _link: *mut c_void,
+        _now: *const c_void,
+        _output: *const c_void,
+        _flags_in: u64,
+        _flags_out: *mut u64,
+        context: *mut c_void,
+    ) -> i32 {
+        // SAFETY: the context is the leaked sender of `ticks`.
+        let sender = unsafe { &*context.cast::<mpsc::SyncSender<()>>() };
+        // A full channel is a tick the main thread had no time for.
+        let _ = sender.try_send(());
+        0
+    }
+
+    /// A display link on the main display and the channel its ticks come
+    /// on; it runs until the process ends.
+    fn ticks() -> mpsc::Receiver<()> {
+        let (sender, receiver) = mpsc::sync_channel::<()>(1);
+        let context: *mut mpsc::SyncSender<()> = Box::into_raw(Box::new(sender));
+        let mut link: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `link` is written on success; the callback and the context
+        // live for the process.
+        unsafe {
+            assert_eq!(
+                CVDisplayLinkCreateWithCGDisplay(CGMainDisplayID(), &mut link),
+                0
+            );
+            assert_eq!(
+                CVDisplayLinkSetOutputCallback(link, on_tick, context.cast()),
+                0
+            );
+            assert_eq!(CVDisplayLinkStart(link), 0);
+        }
+        // Never stopped: the process ends after the last frame.
+        receiver
+    }
+
+    /// The median of durations (sorted here).
+    fn median_of(mut values: Vec<Duration>) -> Duration {
+        values.sort();
+        values[values.len() / 2]
+    }
+
+    fn micros(duration: Duration) -> f64 {
+        duration.as_secs_f64() * 1e6
+    }
+
+    /// The medians of a recording's phases, and the counts of the
+    /// presented sources.
+    fn report(recording: &FrameRecording) {
+        let gap = |later: std::time::SystemTime, earlier: std::time::SystemTime| {
+            later.duration_since(earlier).unwrap_or_default()
+        };
+        let frames = &recording.frames;
+        let queued = median_of(frames.iter().map(|f| gap(f.started, f.requested)).collect());
+        let gpu = median_of(frames.iter().map(|f| gap(f.completed, f.started)).collect());
+        let shown: Vec<Duration> = frames
+            .iter()
+            .filter_map(|f| f.presented.map(|p| gap(p.time, f.completed)))
+            .collect();
+        let count = |source| {
+            frames
+                .iter()
+                .filter(|f| f.presented.is_some_and(|p| p.source == source))
+                .count()
+        };
+        say(&format!(
+            "recorded_frames {} without_tick {} presented {} handler {} none {}",
+            frames.len(),
+            recording.problems.without_tick,
+            count(TimeSource::Presented),
+            count(TimeSource::Handler),
+            frames.iter().filter(|f| f.presented.is_none()).count()
+        ));
+        say(&format!(
+            "median_us requested_to_started {:.1} started_to_completed {:.1} completed_to_presented {}",
+            micros(queued),
+            micros(gpu),
+            if shown.is_empty() {
+                "none".to_owned()
+            } else {
+                format!("{:.1}", micros(median_of(shown)))
+            }
+        ));
+    }
+
+    /// The window with a layer-hosting view backed by `layer`, shown, and
+    /// its view.
     ///
     /// # Safety
     ///
     /// The main thread, after `NSApplication` exists; `layer` is a live
     /// layer.
-    unsafe fn show_window(layer: Id) -> Id {
+    unsafe fn show_window(layer: Id) -> (Id, Id) {
         // SAFETY: the classes are loaded and the selectors are those of
         // AppKit with the signatures cast here; `NSRect` is four doubles,
         // passed as the ABI passes the struct.
@@ -201,7 +344,7 @@ mod real {
             send_bool(view, sel(c"setWantsLayer:"), true);
             send1(window, sel(c"setContentView:"), view);
             send1(window, sel(c"makeKeyAndOrderFront:"), std::ptr::null_mut());
-            window
+            (window, view)
         }
     }
 
@@ -226,6 +369,32 @@ mod real {
             }
             objc_autoreleasePoolPop(pool);
             drawn
+        }
+    }
+
+    /// `draw_frame`, timed in two parts: `nextDrawable` (which also waits
+    /// for a free drawable), and the command buffer through `commit`. None
+    /// when no drawable came.
+    ///
+    /// # Safety
+    ///
+    /// As `draw_frame`.
+    unsafe fn draw_timed(layer: Id, queue: Id) -> Option<(Duration, Duration)> {
+        // SAFETY: as `draw_frame`.
+        unsafe {
+            let pool = objc_autoreleasePoolPush();
+            let started = Instant::now();
+            let drawable = send0(layer, sel(c"nextDrawable"));
+            let next = started.elapsed();
+            let times = (!drawable.is_null()).then(|| {
+                let started = Instant::now();
+                let buffer = send0(queue, sel(c"commandBuffer"));
+                send1(buffer, sel(c"presentDrawable:"), drawable);
+                send0(buffer, sel(c"commit"));
+                (next, started.elapsed())
+            });
+            objc_autoreleasePoolPop(pool);
+            times
         }
     }
 
@@ -303,7 +472,7 @@ mod real {
         // 2. A window and frames.
         // SAFETY: the main thread; the classes are loaded; the selectors
         // are those of AppKit and Metal with the signatures cast here.
-        let (layer, queue) = unsafe {
+        let (layer, queue, view) = unsafe {
             let app = send0(class(c"NSApplication"), sel(c"sharedApplication"));
             assert!(!app.is_null(), "NSApplication");
             let set_policy: unsafe extern "C" fn(Id, Sel, i64) -> u8 =
@@ -327,9 +496,9 @@ mod real {
             );
             let queue = send0(device, sel(c"newCommandQueue"));
             assert!(!queue.is_null(), "newCommandQueue");
-            let _window = show_window(layer);
+            let (_window, view) = show_window(layer);
             send_bool(app, sel(c"activateIgnoringOtherApps:"), true);
-            (layer, queue)
+            (layer, queue, View(NonNull::new(view).expect("view")))
         };
 
         // 3. Draw until the callback arrives.
@@ -377,5 +546,77 @@ mod real {
         ));
         say(&format!("first_presented_source {}", source.as_str()));
         say(&format!("drawables {drawn}"));
+
+        // 5. Frames on the display link, without and with the recording.
+        let ticks = ticks();
+        let next_tick = || {
+            ticks
+                .recv_timeout(TICK_TIMEOUT)
+                .expect("a display link tick");
+        };
+        let mut plain = (Vec::with_capacity(RECORDED), Vec::with_capacity(RECORDED));
+        for _ in 0..RECORDED {
+            next_tick();
+            // SAFETY: the main thread; `layer` and `queue` are live.
+            let (next, commit) = unsafe { draw_timed(layer, queue) }.expect("a drawable");
+            plain.0.push(next);
+            plain.1.push(commit);
+            // SAFETY: the default mode; handles what is pending, no wait.
+            unsafe {
+                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1);
+            }
+        }
+        let recorder = record(&view).expect("record");
+        let refresh = recorder.refresh();
+        let mut recorded = (Vec::with_capacity(RECORDED), Vec::with_capacity(RECORDED));
+        let mut marks = Vec::with_capacity(RECORDED);
+        for _ in 0..RECORDED {
+            next_tick();
+            let started = Instant::now();
+            recorder.frame_started();
+            marks.push(started.elapsed());
+            // SAFETY: the main thread; `layer` and `queue` are live.
+            let (next, commit) = unsafe { draw_timed(layer, queue) }.expect("a drawable");
+            recorded.0.push(next);
+            recorded.1.push(commit);
+            // SAFETY: as above.
+            unsafe {
+                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1);
+            }
+        }
+        let recording = recorder.stop().wait(Duration::from_secs(1));
+        say(&format!("refresh_ms {:.3}", refresh.as_secs_f64() * 1e3));
+        say(&format!(
+            "per_frame_median_us next_drawable {:.1} recorded {:.1}; commit {:.1} recorded {:.1}; frame_started {:.2}",
+            micros(median_of(plain.0)),
+            micros(median_of(recorded.0)),
+            micros(median_of(plain.1)),
+            micros(median_of(recorded.1)),
+            micros(median_of(marks))
+        ));
+        report(&recording);
+        assert!(recording.problems.is_clean(), "{:?}", recording.problems);
+        assert_eq!(recording.frames.len(), RECORDED, "{:?}", recording.problems);
+        let gaps: Vec<Duration> = recording
+            .frames
+            .windows(2)
+            .map(|pair| {
+                pair[1]
+                    .started
+                    .duration_since(pair[0].started)
+                    .unwrap_or_default()
+            })
+            .collect();
+        let gap = median_of(gaps);
+        say(&format!(
+            "median_started_gap_ms {:.3}",
+            gap.as_secs_f64() * 1e3
+        ));
+        let off = (gap.as_secs_f64() - refresh.as_secs_f64()).abs() / refresh.as_secs_f64();
+        assert!(
+            off <= REFRESH_TOLERANCE,
+            "the median started gap {gap:?} is {:.1}% off the refresh {refresh:?}",
+            off * 100.0
+        );
     }
 }

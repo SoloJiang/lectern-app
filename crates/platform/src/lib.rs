@@ -4,8 +4,9 @@
 //! the physical footprint, creation time and children of a process, the
 //! machine description and the thread QoS for lectern-bench ([`process`],
 //! [`host`], [`thread`]),
-//! the first frame's time and the error of the measurement build's method
-//! replacements ([`frame`], [`HookError`]; behind the `bench-hooks` feature),
+//! the first frame's time, the per-frame recording and the error of the
+//! measurement build's method replacements ([`frame`], [`HookError`]; behind
+//! the `bench-hooks` feature),
 //! the CPU time of a thread ([`ThreadCpuClock`]),
 //! the app data and log directories ([`dirs::app_data`], [`dirs::logs`]),
 //! the OS version for log file headers ([`system::os_version`]),
