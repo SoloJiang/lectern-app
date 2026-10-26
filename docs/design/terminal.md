@@ -642,7 +642,7 @@ agent 的程序直接启动，不经 shell：程序名和参数是固定的 argv
 | `terminal/idle_footprint` | ≤ 4 MB | 子进程：一个终端，120×40，输出 4 KiB 后生成一帧，常驻增量 |
 | `terminal/scrollback_footprint` | ≤ 24 MB | 子进程：输出 10,000 行、每行 120 列带颜色，生成一帧，常驻增量 |
 | `plugin/terminal/resident` | < 1 MB | 进程级，两次启动之差（[bench 设计「进程级基准」](bench.md#进程级基准)），没有打开的终端 |
-| `plugin/terminal/activate` | kernel 的默认条目（< 1 ms） | 进程级插件基准实现之前在 `TestKernel` 里取四段耗时，同 `plugin/review/activate` |
+| `plugin/terminal/activate` | kernel 的默认条目（< 1 ms） | 由进程级的 `plugin/*/activate` 测量（bench 第 5 步；之前 `plugin/review/activate` 在 `TestKernel` 里取四段耗时） |
 
 滚动缓冲 10,000 行的单位按 libghostty-vt 的文档是行；实现时如果测出它是字节，按 `terminal/scrollback_footprint` 的份额换算上限，份额不变。
 

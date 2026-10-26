@@ -1159,7 +1159,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 
 一次链的计算：每步一次 `line_diff`（300 行的文件 < 0.1 ms）加一次 `load`（< 1 ms），一个文件 5 步约 3 ms，其中 `load` 占大头。所以缓存键只用轮次索引，命中时不 `load`。
 
-`bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增，夹具由 `TestRepo` 和 `testing::FakeSessions` 生成，`Driven` 驱动；`plugin/review/activate` 在进程级插件基准（bench 第 5 步）之前在进程内由 `TestKernel` 测量，之后改为 `Process`：
+`bench`（[#7](https://github.com/SoloJiang/lectern-app/issues/7)）新增，夹具由 `TestRepo` 和 `testing::FakeSessions` 生成，`Driven` 驱动；`plugin/review/activate` 在进程级插件基准（bench 第 5 步）之前在进程内由 `TestKernel` 测量，第 5 步起是 `Process`（进程级的 `plugin/*/activate`，`closure+self:review` 的一次启动里 kernel 记下的四段耗时之和）：
 
 | ID | 统计量与预算 |
 |---|---|
@@ -1171,7 +1171,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 | `review/attribute_session_50` | 只记录（其余 49 个文件的归因合计） |
 | `review/rows_first` | 中位数 < 3 ms（第一个文件的 `Prepare` 到 `Prepared`，hunk 缓存已热） |
 | `review/refresh_one` | 中位数 < 20 ms（`Driven` 上 agent 追加一轮并改写第一个改动文件：路径批次和 `SessionsChanged` 到第一份同时显示新一轮和新内容的快照；不含 fs_watch 的合并窗口） |
-| `plugin/review/activate` | 中位数 < 1 ms（`TestKernel` 下 kernel 记下的四段耗时之和，激活没有任务也没有文件） |
+| `plugin/review/activate` | 中位数 < 1 ms（kernel 记下的四段耗时之和；激活没有任务也没有文件由 `plugin_provides_review_and_activation_does_nothing` 验证） |
 | `review/mark_seen_5000` | 中位数 < 0.2 ms |
 | `review/chain_3000_lines` | 只记录（3000 行的文件、40 次 `Replace`，含 `line_diff`，不含 `load`） |
 | `review/log_load_16k` | 中位数 < 30 ms（16 000 条记录、约 5.3 MiB 的日志整份读入并建索引，后台） |
@@ -1283,7 +1283,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
    - `rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 没有结果：本 crate 只在标注日志里直接访问文件系统，工作区经 `git` 读取。
 4. **插件、监听与刷新**（前置 A、B、C 与第 3 步；不依赖 `app`）：`plugin = true`、`ReviewPlugin`、`dyn Review`、fs_watch 与 `SessionsChanged` 的刷新、关闭后释放。
    - `plugin_*` 测试通过；`python3 scripts/check_architecture.py` 通过：本 crate 不依赖其他插件 crate、不依赖 GPUI，只有 `app` 和 tool 层依赖它。
-   - `review/refresh_one` 在预算内；`plugin/review/activate` < 1 ms（进程内由 `TestKernel` 测量，进程级的测量随 bench 第 5 步）。
+   - `review/refresh_one` 在预算内；`plugin/review/activate` < 1 ms（原来在进程内由 `TestKernel` 测量，bench 第 5 步起是进程级的测量）。
    - `rg 'eprintln!|util::log' crates/review/src --glob '!**/tests*'` 和 `rg -n 'std::fs' crates/review/src --glob '!**/log*' --glob '!**/tests*' --glob '!**/testing*'` 仍没有结果。
 5. **规则简报与项目主页的概览**（前置 G）：简报规则、`register_brief_rules` 与提供者的请求和对账、概览（计数比较、声明、会话外的改动数、进度）。
    - `brief_*`、`overview_*` 测试通过；`overview_capped` 检查 4001 个改动路径时只保留计数。
@@ -1525,7 +1525,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **概览与简报规则（第 5 步）。** `overview` 返回 None，`watch_overview` 返回一个什么也不做的 `OverviewInterest`，`register_brief_rules` 返回一个什么也不做的登记，提供者不保存也不调用。
 - **日志多了两条 debug 记录**（上文「日志与诊断」已加）：`refresh requested`（在审阅的作用域里写出，sink 在 fs_watch 的线程上，本来没有作用域）和 `review released`。没有新的 info 以上的记录，也没有新的字段携带内容或路径。
 - **测试用的设施。** `ReviewPlugin::with_wall_clock`（引擎的时刻，14 天窗口按它算；测试的会话是固定日期的）、`with_repository_config_only`（同 `project`）；`engine::tests` 的夹具函数（`Fx`、`session`、`turn`…）改为 `pub(crate)`，`plugin_*` 复用；`Driven::refresh`、`Driven::sessions_changed` 与 `SessionFixture::agent_step` 给 `review/refresh_one`。「`data_dir` 的访问计数」没有做成计数：标注日志的目录在第一次写入才创建，所以测试检查它在后台任务运行之前不存在。「`cache` 的 `ui_thread` 检查」用 `Config::ui_thread` 设为测试线程，任务放到另一个线程运行。
-- **`plugin/review/activate` 在进程内测量。** 进程级的 `plugin/*/activate` 要 `app` 装配，还没有；与 `plugin/usage/activate` 相同，`TestKernel` 下取 kernel 的四段耗时，bench 的目标规则（`budgets_belong_to_the_documented_targets`、bench 设计「基准目标」）为它加了例外，随第 5 步改为 `Process`。`review/refresh_one` 在 `budgets.rs` 里是生效的，`Time` 目标。
+- **`plugin/review/activate` 在进程内测量。** 进程级的 `plugin/*/activate` 要 `app` 装配，还没有；与 `plugin/usage/activate` 相同，`TestKernel` 下取 kernel 的四段耗时，bench 的目标规则（`budgets_belong_to_the_documented_targets`、bench 设计「基准目标」）为它加了例外，随第 5 步改为 `Process`（已改，进程内的 `TestKernel` 基准随之删除）。`review/refresh_one` 在 `budgets.rs` 里是生效的，`Time` 目标。
 - 去掉了 `lib.rs` 里为「没有插件时没人调用引擎」加的 `allow(dead_code)`；`ReadReport::error` 只有测试读，字段上加了带理由的 `allow`。
 
 ### 第 5 步（概览）
@@ -1542,7 +1542,7 @@ Prepare ─▶ [Interactive] texts / 回放 ─▶ rows、inline_changes ─▶ 
 - **`drifted` 的摘要**按审阅的顺序排步（这个会话最前，其余按最后活动从新到旧），与审阅的 `who.order` 一致；同一时间戳的步在别的审阅对象下顺序可能不同，那时未命中、为 None（允许）。文件级的链（`FileOnly`）不算 Drifted。
 - **每轮把 `Change` 转成 `FileChange`（`lectern_git::file_change_of`，[#212](https://github.com/SoloJiang/lectern-app/pull/212)），不保留 `ChangeList`**：`SeenKey`、噪声和敏感规则要 `services` 的类型；转换只在一轮里，不进常驻。
 - **`critical`** 只算不需要逐行来源的规则：`Sensitive` 的关键种类，加上有删除时的一条 `Deleted`；噪声文件不计。
-- **`plugin/review/activate` 仍在进程内测量**（bench 第 5 步未实现）。
+- **`plugin/review/activate` 原来在进程内测量**（bench 第 5 步起是进程级，见 [bench 设计「与设计的差异」](bench.md#与设计的差异)）。
 - **`review/resident_100k_bytes` 的形状是 index-only 的**（与 `project/resident_100k_bytes` 相同，不写 10 万个文件）：计数比较列出全部路径为缺失、超过 4000，概览被 cap；测的是 cap 之后的常驻。cloudprint 形状整个写出，20 个会话各改一个文件。基准扣掉 `Driven` 空闲时的字节和同一比较在引擎外再做一次的字节。
 - **测试设施。** `Driven::watch_overview`、`overview`、`overview_refresh`（一个 `full` 触发）、`overview_count`、`has_overview_state`、`project`、`main_worktree`；`FakeProjects::set_active`（快照的 `active`，默认主 worktree）；bench 的 `fixtures/review_repo.rs`。
 

@@ -252,7 +252,12 @@ const fn on_judging_machine(budget: Budget) -> Budget {
 }
 
 const ACTIVE: State = State::Active;
-const STEP_5: State = State::Planned("bench 第 5 步");
+/// `plugin/project/resident_*` need a project open in a launch whose plugin
+/// set has `project` but not `workspace`, which is the plugin that opens it;
+/// the selection `closure+self:project` cannot do that (bench design
+/// 「与设计的差异」, step 5).
+const PROJECT_OPEN: State =
+    State::Planned("bench（打开项目的方式，见设计「与设计的差异」第 5 步）");
 
 use Target::{Memory, Package, Process, Time};
 
@@ -269,21 +274,21 @@ pub static BUDGETS: &[Budget] = &[
             max(Limit::TimeAtMost(ms(30))),
         ],
         ADR_0017_DECISION,
-        STEP_5,
+        ACTIVE,
         Process,
     )),
     on_judging_machine(top(
         "app/cold_start_purged",
         RECORD,
         ADR_0017_IMPACT,
-        STEP_5,
+        ACTIVE,
         Process,
     )),
     top(
         "app/idle_empty",
         &[median(Limit::BytesBelow(60 * MB))],
         ADR_0017_DECISION,
-        STEP_5,
+        ACTIVE,
         Process,
     ),
     top(
@@ -520,7 +525,7 @@ pub static BUDGETS: &[Budget] = &[
         "app/unclassified_children",
         RECORD,
         ADR_0018_IMPACT,
-        STEP_5,
+        ACTIVE,
         Process,
     ),
     on_judging_machine(top(
@@ -542,25 +547,26 @@ pub static BUDGETS: &[Budget] = &[
         "plugin/*/activate",
         &[median(Limit::TimeBelow(ms(1)))],
         KERNEL,
-        STEP_5,
+        ACTIVE,
         Process,
     ),
     share(
         "plugin/after_first_frame",
         &[median(Limit::TimeBelow(ms(5)))],
         KERNEL,
-        STEP_5,
+        ACTIVE,
         Process,
     ),
-    share("plugin/*/resident", RECORD, KERNEL, STEP_5, Process),
+    share("plugin/*/resident", RECORD, KERNEL, ACTIVE, Process),
     // `phys_footprint` of two launches (kernel「性能」), with the app's
-    // measurement build; until then `project/resident_*_bytes` measures the
+    // measurement build, once a project can be opened in them
+    // (`PROJECT_OPEN`); until then `project/resident_*_bytes` measures the
     // same in live bytes, in process.
     share(
         "plugin/project/resident_cloudprint",
         &[median(Limit::BytesBelow(2 * MB))],
         PROJECT,
-        STEP_5,
+        PROJECT_OPEN,
         Process,
     ),
     // 12 MB before the file list carried blob OIDs; 100k × 32 bytes (a
@@ -569,7 +575,7 @@ pub static BUDGETS: &[Budget] = &[
         "plugin/project/resident_100k",
         &[median(Limit::BytesBelow(16 * MB))],
         PROJECT,
-        STEP_5,
+        PROJECT_OPEN,
         Process,
     ),
     share(
@@ -1829,14 +1835,14 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Memory,
     ),
-    // In process until the process-level plugin benchmarks (step 5): the
-    // kernel's four timings under a `TestKernel`.
+    // The kernel's four timings of a launch whose plugin set is `review` and
+    // its closure (the process-level `plugin/*/activate`, bench step 5).
     share(
         "plugin/review/activate",
         &[median(Limit::TimeBelow(ms(1)))],
         KERNEL,
         ACTIVE,
-        Time,
+        Process,
     ),
     // ---- end review ----
     // ---- usage (usage design, step 1) ----
@@ -1912,14 +1918,14 @@ pub static BUDGETS: &[Budget] = &[
         ACTIVE,
         Memory,
     ),
-    // In process until the process-level plugin benchmarks (step 5): the
-    // kernel's four timings under a `TestKernel`.
+    // The kernel's four timings of a launch whose plugin set is `usage` and
+    // its closure (the process-level `plugin/*/activate`, bench step 5).
     share(
         "plugin/usage/activate",
         &[median(Limit::TimeBelow(ms(1)))],
         KERNEL,
         ACTIVE,
-        Time,
+        Process,
     ),
     // ---- end usage ----
     // ---- logging (logging design, step 1) ----
@@ -2158,7 +2164,9 @@ pub fn fmt_bytes(b: u64) -> String {
 }
 
 pub fn fmt_bytes_f(b: f64) -> String {
-    if b >= MB as f64 {
+    if b >= crate::process::NEVER_QUIESCENT as f64 {
+        "no quiescence".to_owned()
+    } else if b >= MB as f64 {
         format!("{} MB", fmt_number(b / MB as f64))
     } else if b >= 1024.0 {
         format!("{} KB", fmt_number(b / 1024.0))

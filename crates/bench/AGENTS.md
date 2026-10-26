@@ -28,7 +28,8 @@ LECTERN_BENCH_JUDGE=1 just bench baseline/   # 只在判定机器上：首帧要
 
 - 判定机器的条目（`Budget::judging_machine`：`app/cold_start`、`app/cold_start_purged`、`baseline/*`）在没有 `LECTERN_BENCH_JUDGE=1` 的测量运行里只记录。本机屏幕锁定时首帧的来源是 `handler`，设了这个变量就是错误，不是判定结果（[bench 设计「平台与噪声」](../../docs/design/bench.md#平台与噪声)）。
 
-- 基准目标：`benches/time.rs`（按被测 crate 分模块，在 `benches/time/` 下）、`benches/memory.rs`（注册 `CountingAlloc`）、`benches/process.rs`（只在 macOS 运行；`baseline/*` 启动 `examples/empty_window.rs`，`just bench` 构建它并设置 `LECTERN_BENCH_BASELINE`）。新增基准时在预算表里把对应条目改为 `Active`，否则运行器在开始前以 2 退出。
+- 基准目标：`benches/time.rs`（按被测 crate 分模块，在 `benches/time/` 下）、`benches/memory.rs`（注册 `CountingAlloc`）、`benches/process.rs`（只在 macOS 运行；`baseline/*` 启动 `examples/empty_window.rs`，`app/*` 和 `plugin/*` 启动带 `bench-probe` 的 `lectern`；`just bench` 构建这两个程序并设置 `LECTERN_BENCH_BASELINE`、`LECTERN_BENCH_APP`）。新增基准时在预算表里把对应条目改为 `Active`，否则运行器在开始前以 2 退出。
+- 基准按 ID 前缀对应预算，前缀最长的基准产出那条预算（`plugin` 产出 `plugin/*/activate`、`plugin/*/resident` 和 `plugin/<id>/activate`，`plugin/after_first_frame` 产出自己的）。产出 `plugin/<id>/…` 的基准用 `Ctx::report_plugins` 把插件列表交给报告，合并据此展开 `plugin/*`。
 - 每个目标写自己的 `target/lectern-bench/report-<target>.json`，`lectern-bench-report merge` 合并成 `report.json` 并决定 `just bench` 的退出码。报告列出每项的实测值、预算和出处；CI 的 macOS 任务判定预算，Linux 任务只做冒烟。
-- 进程调度（`src/process.rs`）的测试用脚本化的假 `Launcher` / `ProcessInfo` 和假探针，不启动真实程序；`tests/purge.rs` 把假的 `sudo` 放在这条命令的 `PATH` 最前面。探针（`src/probe.rs`）的测试用真实的 `Kernel` 和测试插件。
+- 进程调度（`src/process.rs`）的测试用脚本化的假 `Launcher` / `ProcessInfo` 和假探针，不启动真实程序（空闲内存、`app/unclassified_children`、`plugin/after_first_frame`、插件的一对启动都在这里，`benches/process.rs` 只把结果变成 `Measured`）；`tests/purge.rs` 把假的 `sudo` 放在这条命令的 `PATH` 最前面。探针（`src/probe.rs`）的测试用真实的 `Kernel` 和测试插件。
 - 夹具由被测 crate 的 `testing` 在运行时生成（如 `cloudprint` 形状的合成仓库），不提交大型样例项目；`tests/fixtures/` 只放本 crate 自己的小样本。
