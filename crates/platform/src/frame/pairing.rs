@@ -173,6 +173,9 @@ impl Store {
             self.next_slot.store(SLOTS as u32, Ordering::Relaxed);
             return None;
         };
+        // A handler of an older recording that still holds this slot finds
+        // no generation of its own from here on.
+        slot.generation.store(0, Ordering::Release);
         slot.started.store(current, Ordering::Relaxed);
         slot.previous
             .store(self.previous.load(Ordering::Relaxed), Ordering::Relaxed);
