@@ -1800,7 +1800,7 @@ C. Metal binary archive 的严格模式：不做（[ADR 0049](../adr/0049.md)，
   - `just test -p lectern-platform`：197 个测试通过。`hook_deliver_calls_the_callback_once_for_a_shown_drawable` 换成两个：`hook_deliver_gives_a_shown_drawable_its_presented_time_once`、`hook_deliver_without_a_presented_time_gives_the_handler_time_once`（0、-1、NaN、负无穷各一次）；其余 195 个结果不变。不带 feature 的 `cargo nextest run -p lectern-platform frame_ hook_` 12 个通过。
   - `cargo run --release -p lectern-platform --features bench-hooks --example frame_hooks` 连续三次退出码都为 0（B1 时这一步在本机以 panic 退出）：`on_first_presented` 的耗时（11 个冷进程的最小值、中位数、最大值）依次为 10.8、13.2、29.1 µs，10.5、11.5、16.7 µs，10.4、11.6、16.7 µs；首帧回调在进程启动后 394.4、85.3、84.2 ms 到达（第一次的文件缓存是冷的），来源都是 `handler`，都在第一个 drawable 上。「到达的时刻晚于进程的启动时刻、不晚于现在」这次在真实窗口上成立。
   - `just check`、`just deny` 通过；`git diff origin/main -- Cargo.lock` 为空。
-  - 没有验证的：没有在不锁屏、给 `presentedTime` 的实体 Mac 上运行，`Presented` 的来源只由 `hook_deliver_*` 覆盖；托管 runner 上的结果随 bench 第 4 步（#269）的 CI 运行得到。
+  - 没有验证的：没有在不锁屏、给 `presentedTime` 的实体 Mac 上运行，`Presented` 的来源只由 `hook_deliver_*` 覆盖，实体 Mac 上的结果由判定机器注册之后的检查给出（[ADR 0052](../adr/0052.md)，[CI 设计「判定机器」](ci.md#判定机器)）；托管 runner 上的结果随 bench 第 4 步（#269）的 CI 运行得到。
 
 ## 与设计的差异
 
