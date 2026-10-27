@@ -26,9 +26,9 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 
 | 画板 | 屏幕 | 要点 |
 |---|---|---|
-| 01 | Welcome | 仿 Xcode 欢迎窗口：左侧应用名、Open Folder（⌘O）/ Clone、语言选择；右侧最近项目，以及从 Claude Code 与 Codex 历史里发现、尚未打开过的文件夹 |
-| 02 | Overview | 侧栏：Overview、Sessions、Packages、Worktrees / Files / Merge Requests，底部 Usage 入口（本项目最近 7 天的 token 和最紧张的额度条）。主区：大标题一句话说明待审数量，下面是分组列表 Needs Review（每行：agent 圆点、标题、状态与信号两行灰字、已看进度环）、Outside Any Session、Recently Done |
-| 03 | Review（可交互原型） | 顶部会话简报：规则生成的「值得先看」，Analyze 的进行中、可取消与结果状态，本会话改到的分支用量；按轮次的改动叙事；文件头圆形勾选；行内审阅意见；Drifted 提示；右侧检查器（Files / Conversation）；点符号滑出上下文面板（Callers / Tests / History）；底部浮条发送审阅意见 |
+| 01 | Welcome | 仿 Xcode 欢迎窗口：左侧是应用图标、应用名和一行版本说明，下面是 Open Folder（⌘O）和 Clone 两张操作卡片（Clone 在第一版是否出现见 [welcome 设计「未决问题」](welcome.md#未决问题)），底部是带「Language」标签的语言弹出菜单；右侧是侧栏材质上的平铺列表：最近项目，以及从 Claude Code 与 Codex 历史里发现、尚未打开过的文件夹 |
+| 02 | Overview | 侧栏：Overview、Sessions（最近的几个会话，其余折叠成「N more」）、Packages（子项目名和改动数）、Project 区（Worktrees / Files / Merge Requests，各带图标，有数量的带数量），底部 Usage 卡片（本项目最近 7 天的 token 和最紧张的额度条）。主区：大标题一句话说明待审数量，下面一句次要文字说明运行中的 agent 数和会话外的改动数；然后是三个分组列表：Needs Review（每行：agent 圆点、标题、两行灰字、已看进度环加 `已看/总数` 和一个 ›；第一行是 agent · 分支 · 时间 · 状态，第二行是信号）、Outside Any Session（改动所在的分支、前几个文件名和一个 Review 按钮）、Recently Done（只有标题和结果，没有圆点、进度环和信号） |
+| 03 | Review（可交互原型） | 阅读栏顶部是会话标题（Title 1 层级）和一行统计（轮数、文件数与包数、增删行数），下面是会话简报：规则生成的「值得先看」，Analyze 的进行中、可取消与结果状态，本会话改到的分支用量；然后按轮次的改动叙事，每轮的标题行带时间、文件数和 token，prompt 与 agent 说明用不同的文字层级；每个文件是一张卡片，头部是圆形勾选、路径、增删行数和 Open File，下面是 diff；行内审阅意见；Drifted 提示；右侧检查器（Files / Conversation 分段控件，Files 页显示已看进度和文件列表）；点符号滑出上下文面板（Callers / Tests / History）；底部胶囊形浮条发送审阅意见。工具栏右侧是「隐藏纯格式改动」开关和 Mark Reviewed（V） |
 | 04 | Worktrees | 分组列表 Active / Idle，每行显示分支的累计 token（有 MR 时为 MR 用量）；右侧检查器显示分支用量，对比所选 worktree 与 main，并提示与其他 worktree 是否有文件重叠 |
 | 05 | Usage | 额度卡片（Codex 来自日志，Claude Code 来自 statusline）；每日 token 柱状图；当前项目：项目合计、按分支明细（P3 起按 MR，未开 MR 的分支一并列出；「不属于任何 MR」单独一行）和按模型明细（普通文件夹没有分支明细，按模型明细照常显示）；所有项目：各项目合计与占比，加上「其他」一行（还没有打开对应项目的用量）；标为「路径已不存在」的项目行有「合并到…」操作（行尾按钮与右键菜单），在弹出的列表里选择现在的项目，确认后以前的用量并入它，合并过的行显示「已合并」并可以撤销；同一路径上身份无法确定、暂列为临时项目的行（根提交或主远端地址变了，又没有代码平台的仓库 ID）有「是同一个项目」和「是新项目」两个确认操作，同样可以撤销；7D / 14D / 30D；只显示 token，不显示费用 |
 | 06 | Merge Request（P3） | MR 的累计 token，编写与审阅分开，按会话列出明细；PR 里 pulls.review 的共享分析标为「可能过期」，只用来给文件分组，未验证作者的分析折叠；按共享分析分组的文件列表和审阅入口 |
@@ -38,12 +38,12 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 | 区域 | 规格 |
 |---|---|
 | Welcome | 没有打开项目时出现，820pt 宽的独立窗口 |
-| Sidebar | 半透明（vibrancy），248pt；Overview 常驻，审阅时隐藏 |
-| Toolbar | 52pt，标题 + 副标题；右侧最多 3 个控件；审阅时左侧是返回按钮（⌘[） |
-| Content | 阅读栏最宽 760pt，居中，从上往下读 |
-| Inspector | 300pt，分段控件切换 Files / Conversation（⌥⌘I 显示 / 隐藏） |
-| Panel | 上下文面板浮在检查器上方，圆角 14pt，带阴影，不加遮罩 |
-| Floating bar | 只在审阅时出现，贴底居中：审阅意见数、Looks Good、发送 |
+| Sidebar | 半透明（vibrancy），248pt，占满窗口高度；顶部一行与工具栏同高，留给窗口控件；Overview 常驻，审阅时隐藏。行高 28pt，选中行是圆角 6pt 的淡填充，两侧内缩；分区小标题（Subheadline 层级，半粗）与上一区隔开 |
+| Toolbar | 52pt，半透明材质，下沿 0.5pt 分隔线；从侧栏右边起横跨内容区和检查器，没有侧栏时横跨整个窗口（窗口控件在它里面），所以检查器在工具栏下面；标题（Headline 层级）+ 副标题（Subheadline 层级，次要色）；右侧最多 3 个控件；审阅时左侧是返回按钮（⌘[）。返回、检查器开关、侧栏开关都是不带文字的图标按钮 |
+| Content | 阅读栏最宽 760pt，居中，从上往下读；背景是页面底色，分组和卡片是它上面的白色块（见「视觉」）。画布的 02 画板画了 820pt，与 Flows 画板和本表不一致，以 760pt 为准 |
+| Inspector | 300pt，侧栏材质，内边距 14pt；顶部是撑满宽度的分段控件，切换 Files / Conversation（⌥⌘I 显示 / 隐藏） |
+| Panel | 上下文面板浮在检查器上方，检查器隐藏时占它的位置，300pt，圆角 14pt，带阴影，不加遮罩。画布画的是 420pt 宽、离顶部工具栏、右边和底边各 8pt；产品负责人 2026-10-23 决定占检查器的位置（[workspace 设计「未决问题」](workspace.md#未决问题)），以 300pt 为准 |
+| Floating bar | 只在审阅时出现，贴底居中的胶囊：审阅意见数、Looks Good（次要按钮）、发送（主色按钮，⌘↩）。胶囊用半透明材质和阴影，不带边框；已看进度不在浮条里，在检查器的 Files 页 |
 
 ## 快捷键
 
@@ -96,12 +96,36 @@ Lectern 以审阅为中心：打开项目，先看 agent 改了什么。入口�
 
 | 项 | 规格 |
 |---|---|
-| 字体 | SF Pro（正文 13pt，标题 22 / 26pt，大标题 40pt），代码 SF Mono 12pt，中文回退苹方 |
+| 字体 | SF Pro，中文回退苹方；字号用 macOS 的文字样式（下表），不自定其他字号；代码 SF Mono 12pt |
 | 颜色 | 系统语义色（label、secondaryLabel、separator、controlBackground 等）；强调色跟随系统设置；浅色 / 深色跟随系统，不做自有主题 |
-| agent 标识 | 8pt 圆点：Claude Code 橙（浅 `#D9790A` / 深 `#C77A1A`），Codex 靛（浅 `#5856D6` / 深 `#6260D8`），两种模式都通过色觉辨识校验 |
-| 分组 | 圆角 12pt 的分组列表，0.5pt 分隔线；状态用圆点或一行次要文字表达，不用彩色标签块 |
+| agent 标识 | 8pt 圆点（卡片、侧栏、Welcome 都是 8pt）：Claude Code 橙（浅 `#D9790A` / 深 `#C77A1A`），Codex 靛（浅 `#5856D6` / 深 `#6260D8`），两种模式都通过色觉辨识校验 |
+| 分组 | 圆角 12pt 的分组列表（卡片）放在页面底色（`under_page_background`）上，卡片用分组色（`control_background`）和 0.5pt 描边（`separator`），所以卡片和页面有边界；行之间是 0.5pt 分隔线，从文字起点开始；状态用圆点或一行次要文字表达（状态词可以用语义色的文字），不用彩色标签块 |
 | Diff | 增删行用系统绿 / 红的淡底色，并带 `+` / `−` 符号，不只靠颜色区分 |
-| 控件 | 只用系统控件：分段控件、开关、圆形勾选、按钮（高 24–30pt） |
+| 控件 | 只用系统控件：分段控件、开关、圆形勾选、按钮（高 24–30pt）。一个区域里至多一个主色（强调色填充）按钮；工具栏里的控件是 28pt 的图标按钮或次要按钮，不用文字链接代替图标 |
+
+文字样式（macOS 人机界面指南的层级；`ui` 的 `TextRole` 按此列出，名字和字重由 [ui 设计](ui.md)定）：
+
+| 样式 | 字号 | 用在 |
+|---|---|---|
+| Large Title | 26pt，粗体 | 屏幕的大标题：项目主页的一句话标题、Welcome 的应用名 |
+| Title 1 | 22pt，粗体 | 审阅页阅读栏顶部的会话标题 |
+| Title 2 | 17pt，中等 | 审阅里每一轮的 prompt |
+| Title 3 | 15pt | 大标题下面的一句说明（次要色）、上下文面板的标题（半粗） |
+| Headline | 13pt，半粗 | 工具栏标题、分组标题、卡片和行的标题 |
+| Body | 13pt | 正文、侧栏和列表里的普通文字 |
+| Callout | 12pt | 行里的次要文字、统计行、按钮旁的说明 |
+| Subheadline | 11pt | 工具栏副标题、侧栏分区小标题（半粗）、检查器里的 `Turn N` |
+| Footnote | 10pt | 备注（目前没有用处） |
+
+画布用的字号按下面映射到样式：22px 是 Title 1；17px、字重 500 是 Title 2；15px 是 Title 3；13px 半粗是 Headline；12px 是 Callout；11px 是 Subheadline。画布上不是系统字号的两处：Welcome 的应用名 30px 取 Large Title（26pt）；审阅里 agent 说明的 14px 离 Body 与 Title 3 各差 1pt，取 Body（次要色）。
+
+画布内部不一致、本文做了取舍的地方：
+
+- **阅读栏宽度**：Overview 画板 820pt，Flows 画板和 Review 画板 760pt。取 760pt。
+- **大标题字号**：Flows 画板的说明文字写「大标题 40」，Overview 画板的大标题画的是 26px，Welcome 画的是 30px。40pt 不是系统字号，取 Large Title 的 26pt。
+- **agent 圆点**：Overview 画板的会话卡片画了 10px，侧栏和 Welcome 画了 8px。取 8pt。
+- **上下文面板**：Review 画板画了 420pt、内缩 8pt。取已记录的产品决定，300pt（见上表 Panel）。
+- **简报条目的标记**：Review 画板画了 16px 的彩色图标，Flows 画板写「状态用一个小圆点或一行灰字」。取圆点（[review_view 设计「界面」](review_view.md#界面)）。
 
 ## 动效
 

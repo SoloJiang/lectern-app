@@ -34,7 +34,7 @@
 | 依赖 | 用途 | 选用理由 |
 |---|---|---|
 | `gpui` | 视图、`list` 与 `ListState`（变高的虚拟列表）、Action、`cx.spawn` 的前台任务 | 已锁定（[ADR 0016](../adr/0016.md)） |
-| `lectern-ui` | 颜色、`TextRole`、`MonoMetrics`、`code_style`、`motion`、`Transition`、控件（`CircleCheck`、`Progress`、`Segmented`、`Button`、`AgentDot`、`GroupedList`、`Row`、`Skeleton`、`Expander`）、`Text`、`semantic`、`contrib` 的载荷类型 | 视图层的公共库（[ADR 0015](../adr/0015.md)） |
+| `lectern-ui` | 颜色、`TextRole`、`MonoMetrics`、`code_style`、`motion`、`Transition`、控件（`CircleCheck`、`Progress`、`Button`、浮条容器、开关、`AgentDot`、`GroupedList`、`Row`、`Skeleton`、`Expander`）、`Text`、`semantic`、`contrib` 的载荷类型 | 视图层的公共库（[ADR 0015](../adr/0015.md)） |
 | `lectern-i18n` | `keys::review::*`、`Args`、`relative_time`、`count_compact` | [ADR 0013](../adr/0013.md) |
 | `lectern-kernel`、`lectern-services` | `Plugin`、`PluginHandle`、`ServiceRef`；使用 `dyn Contributions`、`dyn Review`、`dyn SessionSource`、`dyn Reader`、`dyn CodeIntel`、`dyn Usage` 和它们的数据类型 | 架构规则 7（[ADR 0025](../adr/0025.md)）：插件之间只经 `services` |
 | `lectern-syntax` | `Languages`、`Lang`、`highlight::window`、`WindowSpans`、`Token` | 非插件的领域库，视图层可以依赖；高亮不另写一份 |
@@ -95,8 +95,8 @@ pub struct ReviewScreen {
     model: Entity<ReviewModel>,
     list: ListState,              // 叙事列表（gpui `list`：变高、虚拟，只排版可见项）
     focus: FocusHandle,
-    mode_slider: Transition,      // 统一 / 双栏分段控件的滑块
-    progress: Transition,         // 浮条里的已看进度条
+    mode_slider: Transition,      // 统一 / 双栏分段控件的滑块（#283 之后切换在 View 菜单里，没有滑块，实现时删）
+    progress: Transition,         // Files 页的已看进度条（#283 之前在浮条里）
     milestone_reported: bool,
 }
 
@@ -320,26 +320,44 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 ## 界面
 
 - 屏幕与层：审阅屏幕占内容区，`ScreenLayout { sidebar: Hidden, back_button: true, reading_column: true, inspector: true, floating_bar: true }`（[workspace 设计「数据结构」](workspace.md#数据结构)的区域表）。常驻层：简报、叙事、浮条；按需层：检查器的 Files 页（Progress）与 Conversation 页、上下文面板；收起层经 ⇧⌘O 进入阅读视图。双栏视图需要整个内容区（「对其他 crate 的要求」A）。
-- 工具栏（`ui::contrib::Screen::toolbar`）：标题是会话标题（`SessionSummary::title`，没有时 `review-title-untitled`；`Outside` 为 `review-title-outside`，`Range` 为 `review-title-range`），副标题是 `review-progress`（`已看 2/6`）；右侧控件至多 3 个：统一 / 双栏的 `Segmented`、Refresh（发 `Refresh`）、检查器开关由 `workspace` 画。
-- `ui` 的控件与动效原语：颜色经 `colors(window, cx)`，文字经 `Text` 与 `TextRole`，代码行 `TextRole::Code` 加 `mono_metrics` 的格宽与行高，`code_style` 着色；`CircleCheck`（步标题与 Progress 行）、`Progress`（浮条，`ProgressShape::Bar`）、`Segmented`、`Button`、`AgentDot`（轮次标题与子 agent 行）、`GroupedList` 与 `Row`（Progress 列表）、`Skeleton`、`Expander`（展开 `Fold` 时下方内容下移）；动效：`CHECK_FILL`、`CHECK_STROKE`、`PROGRESS`、`SCROLL_NEXT`（V 之后的滚动，`ListState::scroll_to` 的目标由 `Transition` 逐帧给出）、`ARRIVE`（新一轮到达时 `Turn` 项从下方 8pt 淡入）、`SEGMENT`、`HOVER_IN` / `HOVER_OUT`、`EXPAND_HEIGHT` / `EXPAND_FADE`；减弱动态效果由 `Motion::effective` 处理。进入会话的 `ENTER_SESSION` 弹簧动画由 `project_home` 的行标题在 `Push` 前后完成（它拥有那段文字），本 crate 的内容按 `ARRIVE` 淡入。本 crate 不写任何颜色值、字体和时长（验收用 `rg` 检查）。
-- diff 行：增删行用 `diff_added_background` / `diff_removed_background` 的淡底色加 `+` / `−` 符号（[交互规范「视觉」](interaction.md#视觉)），行号栏 `secondary_label`，词级差异叠加 `diff_*_inline_background`；双栏时左右各占一半，分隔线 0.5pt `separator`，超出宽度的行在行内裁剪、整个文件可横向滚动（同一个文件的行共用一个横向偏移）。
+- 工具栏（`ui::contrib::Screen::toolbar`，容器由 `workspace` 画，横跨整个窗口宽，检查器在它下面；以设计画布的 Review 画板为准，[#283](https://github.com/SoloJiang/lectern-app/issues/283)）：左边是 `workspace` 的返回图标按钮；标题（Headline 层级）是会话标题（`SessionSummary::title`，没有时 `review-title-untitled`；`Outside` 为 `review-title-outside`，`Range` 为 `review-title-range`）；副标题（Subheadline 层级，次要色）会话审阅是「agent 名 · 分支 · N 轮」（agent 名同卡片，分支是会话所在 worktree 的分支，轮数用 `review-stats-turns`，用 ` · ` 连接，缺哪项省略哪项），`Outside` 与 `Range` 是「分支 · `review-files-changed`」。原来副标题里的已看进度去掉，进度在检查器的 Files 页。右边的控件由本屏幕给出，至多 2 个，加上 `workspace` 画的检查器开关一共不超过 3 个：
+  - 「隐藏纯格式改动」开关（`review-hide-formatting` 的标签加一个开关）：忽略纯格式变化的结构化 diff 是 [#21](https://github.com/SoloJiang/lectern-app/issues/21)，`ui` 的开关控件也还没有（[ui 设计](ui.md)只定义了开关的动效常量），两者都有之前不画。
+  - Mark Reviewed 按钮（次要样式，标签 `review-mark-reviewed`，后面跟次要色的键提示 V）：触发 `review::MarkSeenAndNext`。
+  - 原来在这里的统一 / 双栏分段控件和 Refresh 不再占工具栏：Action（`review::ToggleDiffMode`、`review::Refresh`）和键值保留，入口改到应用菜单栏的 View 菜单（`app` 设计的应用菜单现在只有四项，加 View 菜单是 `app` 的要求，见「对其他 crate 的要求」G）；在那之前只能经 Action 触发。画布没有给这两个操作留位置，这是需要产品确认的取舍（见「未决问题」5）。
+- `ui` 的控件与动效原语：颜色经 `colors(window, cx)`，文字经 `Text` 与 `TextRole`（层级见[交互规范「视觉」](interaction.md#视觉)的文字样式表，下文只写层级名），代码行 `TextRole::Code` 加 `mono_metrics` 的格宽与行高，`code_style` 着色；`CircleCheck`（文件卡片头与 Files 页的行）、`Progress`（Files 页的进度条，`ProgressShape::Bar`）、`Button`、`AgentDot`（子 agent 行）、`GroupedList` 与 `Row`（文件卡片、折叠的文件行）、`Skeleton`、`Expander`（展开 `Fold` 时下方内容下移）；浮条的胶囊容器、分段控件（检查器的页签）、开关来自 `ui`（见「对其他 crate 的要求」I）；动效：`CHECK_FILL`、`CHECK_STROKE`、`PROGRESS`、`SCROLL_NEXT`（V 之后的滚动，`ListState::scroll_to` 的目标由 `Transition` 逐帧给出）、`ARRIVE`（新一轮到达时 `Turn` 项从下方 8pt 淡入）、`SEGMENT`、`HOVER_IN` / `HOVER_OUT`、`EXPAND_HEIGHT` / `EXPAND_FADE`；减弱动态效果由 `Motion::effective` 处理。进入会话的 `ENTER_SESSION` 弹簧动画由 `project_home` 的行标题在 `Push` 前后完成（它拥有那段文字），本 crate 的内容按 `ARRIVE` 淡入。本 crate 不写任何颜色值、字体和时长（验收用 `rg` 检查）。
+- diff 行：增删行用 `diff_added_background` / `diff_removed_background` 的淡底色加 `+` / `−` 符号（[交互规范「视觉」](interaction.md#视觉)），符号栏里 `+` 用绿色、`−` 用红色；两个行号栏右对齐、用三级次要色，和符号栏、代码各占固定宽度；行高比字号高（画布是 12pt 的字配 20pt 的行高，由 `mono_metrics` 给出，不在这里写数值）；词级差异叠加 `diff_*_inline_background`；双栏时左右各占一半，分隔线 0.5pt `separator`，超出宽度的行在行内裁剪、整个文件可横向滚动（同一个文件的行共用一个横向偏移）。选中的行保留增删的淡底色，左边加一条 2pt 的强调色竖条，行号换成强调色；行尾出现一个圆形的 + 按钮（加审阅意见，归 [#22](https://github.com/SoloJiang/lectern-app/issues/22)，那之前不画）。
+- 阅读栏（背景是页面底色，卡片带描边，[交互规范「视觉」](interaction.md#视觉)；宽度 760pt）从上到下，每一块是 `Item` 的一种：
+  - 标题区（新的 `Item::Header`，会话审阅和规则分组视图都有）：标题（Title 1 层级，粗体；文字同工具栏标题），下面一行统计（Body 层级，次要色），用 ` · ` 连接：轮数（`review-stats-turns`，规则分组视图没有）、文件数（`review-stats-files`；有包数时用 `review-stats-files-packages`）、增删行数（`review-added` 绿色、`review-removed` 红色，取 `ChangeTotals::added` / `removed`）。包数（涉及几个子项目）要 `review` 的快照提供（「对其他 crate 的要求」H），没有时只写文件数。
+  - 简报（没有卡片）：标题行 `review-brief-title`，旁边次要文字 `review-brief-source`，右边是 Analyze 的按钮（`review-analyze-with`，点名分析用的 agent）或进行中 / 重新分析的状态（下面「简报」一节写了状态）；条目前的标记是 8pt 圆点，不用画布 Review 画板里的 16pt 图标（[交互规范「视觉」](interaction.md#视觉)：状态用圆点）；条目末尾的 See impact 链接打开上下文面板，要 `context_drawer`（[#20](https://github.com/SoloJiang/lectern-app/issues/20)），没有它时不画；分支用量行前有分支图标。Analyze 进行中的说明和进度条、结果卡片的内容归 [#66](https://github.com/SoloJiang/lectern-app/issues/66)，这里只留出位置：说明在条目列表下面，结果卡片在同一位置。
+  - 轮次：每轮之间一条 0.5pt 分隔线。展开的轮次：标题行是 `Turn N`（Headline 层级，次要色）和一段次要文字（Callout 层级）「开始时间（时:分）· 文件数 · token」，用 ` · ` 连接（`review-turn-files`、`review-turn-tokens`；token 要交接插件，没有时省略）；没有 agent 圆点。prompt 用 Title 2 层级、主文字色，没有引用块的左边线；agent 说明用 Body 层级、次要文字色，保留换行。折叠的轮次是一行：展开箭头、`Turn N`（半粗）、prompt 的预览、右端次要文字（没有改动是 `review-turn-none`，否则是 `review-turn-files`）；点一下展开，再点收起。哪些轮次默认折叠见「未决问题」3。
+  - 文件卡片：一个文件（会话审阅里是一轮里的一步，规则分组视图里是最终改动的一个文件）一张卡片，头部和 diff 在同一个圆角卡片里，头部与 diff 之间一条 0.5pt 分隔线。头部：`CircleCheck`、路径（`Code` 层级的等宽字）、增删行数（`review-added` / `review-removed`）、右端一个朴素的 Open File 文字按钮（`review-open-file`，后面跟次要色的键提示 ⇧⌘O；没有交接插件时置灰）。diff 里的折叠行（`Fold`）与代码文字左对齐，次要色。同一轮里的文件可以折叠成一行（`CircleCheck`、路径、增删行数、›），展开就是上面的卡片。画布把第一个文件画成展开的、后面两个画成折叠行；这是原型的状态，不是规则，默认见「未决问题」6。
+  - Drifted 提示：diff 里无法对齐的改动块之前画一行警示色（橙）的字，带图标：`review-drift-note`（「Drifted — you edited these lines at 14:02, after the session.」）和一个 Compare 链接（`review-compare`）。编辑时间要 `review` 提供；没有时用 `review-drift-note-untimed`。Compare 的界面还没有设计，没有它时不画链接。原来的 2pt 竖条和「Drifted」标签去掉。规则分组视图的 hunk 标题（`review-hunk-turn`、`review-hunk-other-session`）保留：那里一个文件的改动可能来自几轮、几个会话。会话审阅的每一步已经在某一轮之下，hunk 不再画归因标题（是否保留见「未决问题」7）。
+  - 审阅意见的输入框（点行尾的 + 展开）、行内的意见：归 [#22](https://github.com/SoloJiang/lectern-app/issues/22)；展开动画 `EXPAND_HEIGHT` / `EXPAND_FADE` 已有。
+- 检查器：页签是撑满宽度的分段控件（`Segmented`），画布是 Files / Conversation 两项；本 crate 登记 Files 页（`InspectorTab`，标签 `review-progress-title`，值改成 Files），Conversation 页归 `conversation`（[#23](https://github.com/SoloJiang/lectern-app/issues/23)）。Files 页：顶上一行「已看 2/6」（`review-files-reviewed`）和右端的百分比（`review-files-percent`），下面一条细进度条（`Progress::Bar`，增长动画 `PROGRESS`）；再下面是文件列表，每行：`CircleCheck`、短名（路径的最后一段，列表里有重名时加上上一级目录）、右端次要色的 `Turn N`（该文件最早被改动的那一轮，规则分组视图里没有）；选中的行用淡灰填充（不是强调色），两侧内缩、圆角，没有分隔线；噪声组和折叠的文件不变。选中行的辅助文字 `review-reviewing` 去掉（画布没有）。
+- 浮条：贴底居中的胶囊，宽度由内容决定。从左到右：审阅意见数（`review-comments`，半粗）、Looks Good（次要按钮）、发送（强调色按钮，`review-send-to`，后面跟键提示 ⌘↩）。#22 之前意见数总是 0，发送置灰；全部已看（`progress.seen == total`）时 Looks Good 换成不可点的 `review-all-reviewed`。已看进度不在浮条里（在检查器的 Files 页），原来浮条上的进度条和「n/m reviewed」去掉。胶囊容器（材质、阴影、半径）由 `ui` 的浮条容器给出，位置由 `workspace` 留出（[workspace 设计「界面」](workspace.md#界面)），内容由本 crate 画。
 - 加载：`ui::loading_phase(now - opened_at)`：`Nothing` 时内容区空白（工具栏已显示标题）；`Skeleton` 时简报与前两轮的位置各一块 `Skeleton`；`Progress` 时一行 `review-loading` 加取消（`dispatch(Pop)`）。
 - Fluent 键（`crates/i18n/locales/{en,zh-CN}/review.ftl`，前 5 个已存在）：
 
   | 键 | en | zh-CN | 用途 |
   |---|---|---|---|
-  | `review-looks-good`（`.tooltip`） | Looks good（Mark every file as reviewed） | 看起来没问题（将所有文件标记为已看） | 浮条按钮 |
-  | `review-progress` | { $reviewed }/{ $total } reviewed | 已看 { $reviewed }/{ $total } | 副标题、浮条、Progress 标题 |
+  | `review-looks-good`（`.tooltip`） | Looks Good（Mark every file as reviewed） | 看起来没问题（将所有文件标记为已看） | 浮条按钮 |
+  | `review-progress` | { $reviewed }/{ $total } reviewed | 已看 { $reviewed }/{ $total } | 进度条的无障碍名称（不再画在副标题和浮条上） |
+  | `review-files-reviewed` | { $reviewed } of { $total } reviewed | 已看 { $reviewed }/{ $total } | Files 页顶上一行 |
+  | `review-files-percent` | { $percent }% | { $percent }% | Files 页右端的百分比 |
   | `review-files-changed` | { $count } file(s) changed | { $count } 个文件有改动 | 规则分组视图的标题 |
-  | `review-comments` | No comments / { $count } comment(s) | 没有审阅意见 / { $count } 条审阅意见 | 浮条（#22 之前总是 0） |
+  | `review-comments` | { $count -> [0] No review notes [one] { $count } review note *[other] { $count } review notes } | { $count -> [0] 没有审阅意见 *[other] { $count } 条审阅意见 } | 浮条（#22 之前总是 0；键名不变，值从「comment」改成「review note」） |
   | `review-reviewing` | Reviewing { $path } | 正在审阅 { $path } | Progress 列表选中行的辅助文字 |
   | `review-title-untitled` | Untitled session | 未命名会话 | 工具栏标题 |
   | `review-title-outside` | Outside any session | 会话外的改动 | 工具栏标题 |
   | `review-title-range` | Changes against { $base } | 相对 { $base } 的改动 | 工具栏标题（`$base` 是引用名或提交，原样） |
-  | `review-send` | Send | 发送 | 浮条按钮（#22 之前不可用） |
+  | `review-send` | Send | 发送 | 没有 agent 名时的发送按钮（#22 之前不可用） |
+  | `review-send-to` | Send to { $agent } | 发送给 { $agent } | 浮条的发送按钮（`$agent` 是产品名，原样；#22 之前不可用） |
+  | `review-mark-reviewed` | Mark Reviewed | 标记为已看 | 工具栏按钮 |
+  | `review-hide-formatting` | Hide formatting | 隐藏格式改动 | 工具栏开关的标签（#21 之后） |
+  | `review-formatting-hidden` | { $count } formatting-only lines hidden | 已隐藏 { $count } 行纯格式改动 | 文件行 / 卡片头的次要文字（#21 之后） |
   | `review-all-reviewed` | All reviewed | 全部已看 | 浮条，`progress.seen == total` 时 |
-  | `review-mode-unified` / `review-mode-side-by-side` | Unified / Side by side | 统一 / 双栏 | 分段控件 |
-  | `review-refresh`（`.tooltip`） | Refresh（Compare the working tree again） | 刷新（重新比较工作区） | 工具栏控件 |
+  | `review-mode-unified` / `review-mode-side-by-side` | Unified / Side by side | 统一 / 双栏 | View 菜单项 |
+  | `review-refresh`（`.tooltip`） | Refresh（Compare the working tree again） | 刷新（重新比较工作区） | View 菜单项 |
   | `review-loading` | Preparing the review… | 正在准备审阅… | 超过 1 s 的加载态 |
   | `review-cancel` | Cancel | 取消 | 加载态、Analyze |
   | `review-brief-title` | Worth a look first | 值得先看 | 简报标题 |
@@ -364,7 +382,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review-brief-usage-row` | { $branch } · { $tokens } tokens · { $percent }% this session | { $branch } · { $tokens } token · 本会话占 { $percent }% | 用量行 |
   | `review-brief-usage-shared` | shared with { $count } other MR(s) | 与另外 { $count } 个 MR 共用 | `shared` |
   | `review-brief-usage-unassigned` | Not on any branch | 不属于任何分支 | `RowKey::Unassigned` |
-  | `review-analyze` | Analyze | 分析 | 按钮 |
+  | `review-analyze` | Analyze | 分析 | 没有 agent 名时的按钮（有名字时用 `review-analyze-with`） |
   | `review-analyze-unavailable` | Analyze isn't available: { $reason } | 无法分析：{ $reason } | 悬停（原因原样） |
   | `review-analyze-running` | Analyzing… | 正在分析… | `Running` |
   | `review-analyze-stale` | Based on an earlier version | 基于较早的版本 | `Done { stale: true }` |
@@ -380,7 +398,11 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review-turn` | Turn { $ordinal } | 第 { $ordinal } 轮 | 轮次标题 |
   | `review-turn-tokens` | { $tokens } tokens | { $tokens } token | 轮次标题的 token |
   | `review-turn-running` | Running… | 进行中… | `ended_at` 为 None |
-  | `review-step-counts` | +{ $added } −{ $removed } | +{ $added } −{ $removed } | 步标题 |
+  | `review-added` | +{ $count } | +{ $count } | 增加的行数（绿色，卡片头与标题区统计各用一次） |
+  | `review-removed` | −{ $count } | −{ $count } | 删除的行数（红色）。原来的 `review-step-counts` 拆成这两个：一个字符串里的两段不能各有颜色 |
+  | `review-stats-turns` | { $count -> [one] { $count } turn *[other] { $count } turns } | { $count } 轮 | 标题区的统计、工具栏副标题 |
+  | `review-stats-files` | { $count -> [one] { $count } file *[other] { $count } files } | { $count } 个文件 | 标题区的统计 |
+  | `review-stats-files-packages` | { $files -> [one] { $files } file *[other] { $files } files } in { $packages -> [one] { $packages } package *[other] { $packages } packages } | { $files } 个文件，涉及 { $packages } 个包 | 标题区的统计（有包数时） |
   | `review-step-partial` | Part of this edit didn't apply | 这次改动有一部分没有应用上 | `Alignment::Partial` |
   | `review-step-unaligned` | Shown as recorded; it doesn't match the working tree | 按记录显示，与工作区对不上 | `Alignment::Unaligned` |
   | `review-step-survival-partly` / `-none` | Partly overwritten since / Overwritten since | 之后被部分覆盖 / 之后被覆盖 | `Survival` |
@@ -400,14 +422,21 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review-mark-seen`（`.tooltip`） | Mark as reviewed (V) | 标记为已看（V） | 圆形勾选 |
   | `review-mark-unseen`（`.tooltip`） | Mark as not reviewed | 标记为未看 | 圆形勾选 |
   | `review-seen-changed` | Changed { $when } after you reviewed it | 看过之后在{ $when }又被改过 | `ChangedSinceSeen`（`$when` 是 `relative_time`） |
-  | `review-progress-title` | Progress | 进度 | 检查器页的标题（`InspectorTab::label`） |
+  | `review-progress-title` | Files | 文件 | 检查器页的标签（`InspectorTab::label`；键名不变，值从「Progress」改成「Files」） |
   | `review-progress-empty` | No review open | 没有打开的审阅 | 没有审阅屏幕时 |
   | `review-progress-noise` | Folded files | 已折叠的文件 | Progress 里噪声组的标题 |
   | `review-failed-missing` | This session or its worktree no longer exists. | 这个会话或它的 worktree 已不存在。 | `ReviewError::Missing` |
   | `review-failed-not-in-project` | This session doesn't belong to an open project. | 这个会话不属于已打开的项目。 | `NotInOpenProject` |
   | `review-failed-changes` | Lectern can't compare this worktree: { $reason } | Lectern 无法比较这个 worktree：{ $reason } | `Changes(…)`（`$reason` 是错误种类的键的文字） |
   | `review-error-unsupported` / `-no-merge-base` / `-too-many-entries` / `-io` / `-cancelled` | unsupported repository format / no merge base / too many entries / read error / cancelled | 仓库格式不支持 / 没有 merge-base / 条目过多 / 读取出错 / 已取消 | `ChangeError` 的种类，作 `$reason` |
-  | `review-open-file`（`.tooltip`） | Open file (⇧⌘O) | 打开文件（⇧⌘O） | 步标题的按钮 |
+  | `review-open-file` | Open File | 打开文件 | 卡片头的按钮（键提示 ⇧⌘O 由键绑定给出，不写进字符串） |
+  | `review-drift-note` | Drifted — you edited these lines at { $time }, after the session. | 已漂移：你在 { $time } 改过这些行，晚于会话。 | 无法对齐的改动块之前的一行 |
+  | `review-drift-note-untimed` | Drifted — these lines changed after the session. | 已漂移：这些行在会话之后又变了。 | 同上，没有编辑时间时 |
+  | `review-compare` | Compare | 比较 | Drifted 提示行末的链接（比较界面有设计之后才画） |
+  | `review-brief-source` | from local rules | 来自本地规则 | 简报标题旁 |
+  | `review-analyze-with` | Analyze with { $agent } | 用 { $agent } 分析 | Analyze 按钮（`$agent` 是产品名，原样） |
+  | `review-turn-files` | { $count -> [one] { $count } file *[other] { $count } files } | { $count } 个文件 | 轮次标题与折叠行的次要文字 |
+  | `review-turn-none` | no changes | 没有改动 | 折叠行的次要文字 |
   | `review-back` | Back | 返回 | 失败态的按钮 |
 
   路径、命令、工具名、分支名、会话标题、prompt 与说明都经 `Text::verbatim` 或 `Args::str` 原样显示，不翻译（ADR 0013）。复数的 en 写法在 .ftl 里用 `{ $count -> [one] … *[other] … }`，表里简写为 `(s)`。
@@ -421,7 +450,9 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review.brief.usage[<branch>]` | `ListItem` | `attrs`：`tokens`、`percent`、`shared` |
   | `review.brief.analyze` | `Button` | `disabled`；`attrs`：`state` |
   | `review.notice[<kind>]` | `Text` | `Label::key` |
-  | `review.mode` / `review.mode.tab[unified]` / `[side-by-side]` | `TabBar` / `Tab` | `selected` |
+  | `review.toolbar.mark-reviewed` | `Button` | `disabled` |
+  | `review.toolbar.hide-formatting` | `Toggle` | `checked`；#21 之前不出现 |
+  | `review.header` | `Group` | 标题区；`attrs`：`turns`、`files`、`packages`、`added`、`removed` |
   | `review.narrative` | `List` | `attrs`：`items`（总数）、`visible`（可见范围）、`mode` |
   | `review.earlier` | `Group` | `expanded` |
   | `review.turn[<session>:<ordinal>]` | `Group` | `Label::text` 是轮次标题；`attrs`：`tokens`、`after_last_seen`、`running` |
@@ -441,7 +472,6 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
   | `review.progress.item[<path>]` | `ListItem` | `Label::text` 是路径；`selected`；`attrs`：`seen`（`unseen` / `seen` / `changed`）、`group`、`noise` |
   | `review.progress.item[<path>].check` | `Toggle` | `checked` |
   | `review.bar` | `Group` | 浮条（在 `workspace.bar` 之下） |
-  | `review.bar.progress` | `Progress` | `fraction` |
   | `review.bar.comments` | `Text` | `Label::key` = `review-comments` |
   | `review.bar.looks-good`、`review.bar.send` | `Button` | `disabled` |
   | `review.failed` | `Text` | `Label::key` 是失败的键 |
@@ -476,7 +506,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 
   | `Contribution` | `id` | `order` | 载荷 |
   |---|---|---|---|
-  | `Screen(ScreenLayout { sidebar: Hidden, back_button: true, reading_column: true, inspector: true, floating_bar: true })` | `review`（`screens::REVIEW`） | 0 | `ui::contrib::Screen { build, toolbar }`：`build` 对 `Target::Review(t)` 建 `ReviewScreen`，其他 `Target` 记 warn、返回只显示 `review-failed-missing` 的视图；`toolbar` 每帧给标题、副标题和 ≤ 2 个控件 |
+  | `Screen(ScreenLayout { sidebar: Hidden, back_button: true, reading_column: true, inspector: true, floating_bar: true })` | `review`（`screens::REVIEW`） | 0 | `ui::contrib::Screen { build, toolbar }`：`build` 对 `Target::Review(t)` 建 `ReviewScreen`，其他 `Target` 记 warn、返回只显示 `review-failed-missing` 的视图；`toolbar` 每帧给标题、副标题和 ≤ 2 个控件（检查器开关由 `workspace` 画，合起来 ≤ 3） |
   | `InspectorTab` | `files` | 0 | `ui::contrib::InspectorTab { label: review-progress-title, build }`：建 `ProgressTab` |
   | `KeyBindings` | `review` | 0 | 上表里有键的 Action |
 
@@ -491,7 +521,7 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 | `LoadState::Loading` | 按 `loading_phase`：100 ms 内空白，之后骨架，1 s 后 `review-loading` 与取消；`Ready` 到达时骨架换成内容（`ARRIVE`） |
 | `Failed(Missing)`、`Failed(NotInOpenProject)`、`Failed(Changes(e))` | 内容区一行说明（对应的 `review-failed-*`，`Changes` 带错误种类）和 `review-back`；浮条隐藏；记 warn |
 | `Degraded::UnrecognizedSession` | 规则分组视图；`review-notice-unrecognized`；没有轮次、说明和归因标签 |
-| `Degraded::FolderProject` | 只有轮次与按日志原文的改动（`Tool` 行）；`review-notice-folder`；Progress 页显示 `review-progress-empty`；浮条只有意见数 |
+| `Degraded::FolderProject` | 只有轮次与按日志原文的改动（`Tool` 行）；`review-notice-folder`；Progress 页显示 `review-progress-empty`；浮条只有意见数、Looks Good 和发送 |
 | `BaseHow::CurrentHead` | `review-notice-base-current-head` |
 | `unclaimed > 0`、`invalid_paths` 非空 | 对应的 `Notice` 行 |
 | 归因 `Pending` | 不显示标签（见「归因、Drifted 与 Pending」） |
@@ -588,13 +618,20 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - **D. `bench`**：预算表加 `review_view/items_5000`、`review_view/scroll_5000`；`app/open_diff` 的夹具与场景按「性能」。
 - **E. `code_intel`**（随 review 设计的前置条件 F，不阻塞）：两条 `BriefRules` 规则的 `rule` 名与 `args` 的参数名定下后，本 crate 的静态表加两行、`review.ftl` 加两个键。
 - **F. `ui`**（#214 的设计加两个字段，随它的第 1 步或之后一个小 PR）：`Palette` 加 `diff_added_inline_background`、`diff_removed_inline_background`：词级差异的底色，`system(Green)` / `system(Red)` 按浅色 28%、深色 36% 的透明度叠在 `control_background` 上（比 `diff_*_background` 深一档），内置表与系统色两条路径都给出，`palette_builtin_*` 里一并检查对比度。本 crate 第 2 步之前合并。已实现：[#238](https://github.com/SoloJiang/lectern-app/pull/238)。
+- **G. `app`**（为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 新增）：应用菜单加一个 View 菜单，放统一 / 双栏（`review::ToggleDiffMode`）和刷新（`review::Refresh`）两项，没有审阅屏幕时置灰；菜单项的文字用 `review-mode-*`、`review-refresh`。
+- **H. `review`**（同上，不阻塞）：`ReviewSnapshot` 带涉及的子项目数（标题区「in 2 packages」）、每个无法对齐的改动块的编辑时间（Drifted 提示）。没有时标题区只写文件数，Drifted 提示用 `review-drift-note-untimed`。
+- **I. `ui`**（为 #283 新增）：撑满宽度的分段控件（检查器页签）、胶囊形的浮条容器、开关（#21 之后）、轮次折叠行 / 文件折叠行用的展开箭头；名字和接口由 `ui` 设计定。
 
 ## 未决问题
 
-1. **默认用统一视图还是双栏。** 阅读栏 760pt 放不下双栏（每侧约 45 格），双栏要离开阅读栏（「对其他 crate 的要求」A）。选项：(a) 默认统一，双栏是工具栏上的切换，切换时内容区变宽；(b) 默认双栏。默认 (a)：审阅按轮次从上往下读，统一视图与叙事同宽；切换后本次运行记住（不跨次保存）。
+1. **默认用统一视图还是双栏。** 阅读栏 760pt 放不下双栏（每侧约 45 格），双栏要离开阅读栏（「对其他 crate 的要求」A）。选项：(a) 默认统一，双栏是 View 菜单里的切换，切换时内容区变宽；(b) 默认双栏。默认 (a)：审阅按轮次从上往下读，统一视图与叙事同宽；切换后本次运行记住（不跨次保存）。
 2. **Looks good 之后留在审阅页还是回到项目主页。** 交互规范写「全部标记已看，进入提交或开 MR」，P1 没有提交。选项：(a) 留在审阅页，浮条显示「全部已看」，⌘[ 返回；(b) 自动 `PopToBase`。默认 (a)。
-3. **再次进入会话时，最近一次已看之前的轮次是否折叠。** 交互规范「回到第 3 步只看新轮次」。选项：(a) `after_last_seen` 为 false 的轮次折叠成一行「之前的 n 轮」，可展开，列表滚到第一个新轮次；(b) 不折叠，只滚到第一个新轮次。默认 (a)；没有已看记录时不折叠。
+3. **再次进入会话时，最近一次已看之前的轮次是否折叠。** 交互规范「回到第 3 步只看新轮次」。选项：(a) `after_last_seen` 为 false 的轮次折叠成一行「之前的 n 轮」，可展开，列表滚到第一个新轮次；(b) 不折叠，只滚到第一个新轮次。默认 (a)；没有已看记录时不折叠。画布另外把「没有改动」的轮次和一个有 2 个文件的轮次画成单行折叠（展开箭头 + `Turn N` + prompt 预览 + 备注），所以每一轮都能手动折叠 / 展开；默认状态仍按这一条；没有改动的轮次要不要也默认折叠，画布没有说，需要产品确认。
 4. **agent 说明按纯文本还是 Markdown 显示。** 选项：(a) 纯文本、保留换行、等宽的代码块不识别；(b) 渲染 Markdown（标题、列表、代码块）。默认 (a)，Markdown 渲染另开 issue。
+
+5. **统一 / 双栏的切换和 Refresh 放在哪里。** 画布的 Review 工具栏只有「隐藏格式改动」开关和 Mark Reviewed（加上检查器开关就到了「最多 3 个控件」），没有给统一 / 双栏和 Refresh 留位置。选项：(a) 放进应用菜单栏的 View 菜单，工具栏只有画布上的控件；(b) 保留工具栏上的分段控件，Mark Reviewed 换位置；(c) 工具栏放一个「…」菜单。默认 (a)：画布为准，菜单是 macOS 放这类开关的地方；缺点是双栏不容易被发现。需要产品确认。
+6. **文件卡片默认展开还是折叠。** 画布把一轮里第一个文件画成展开、其余画成一行。选项：(a) 全部展开（现在的行为，J / K 在改动块之间移动，不用先展开）；(b) 只展开第一个，其余折叠，展开后再读。默认 (a)：折叠会让 J / K 和 V 多一步；折叠行只用于用户自己收起的文件。需要产品确认。
+7. **会话审阅里 hunk 的归因标题（Turn N、另外 n 个会话）还要不要。** 画布的文件卡片里没有这一行，Drifted 是一行警示色的字。会话审阅的每一步已经在某一轮之下，归因标题是重复的；规则分组视图（会话外的改动、比较范围）里一个文件的改动可能来自几轮、几个会话，那里需要。默认：会话审阅里去掉，规则分组视图里保留。需要产品确认。
 
 技术问题都已在上文决定。
 
@@ -672,6 +709,20 @@ usage（executor）─▶ UsageEvent::Changed ─▶ Job::Usage ─▶ [主线�
 - 没有验证：真实窗口里双栏的版面（每半宽的裁剪、分隔线、行号栏）、负的 `margin-left` 做的横向偏移在真实字体下的外观、触控板横向抖动、`on_scroll_wheel` 与列表自己的纵向滚动同时存在时的手感；高亮 8 ms 的预算在真实文件上够不够（`#[gpui::test]` 的示例只有 4 行）；`Segmented` 滑块的动画（测试只验证终态）；折叠展开的 `Expander` 动画没有做。以上随第 3 步在 macOS 上手动运行发布构建时检查。
 
 ## 与设计的差异
+
+### 为 #283 修订「界面」
+
+「界面」按设计画布的 Review 画板重写（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，`Refs`），实现随后的 PR 跟随本文。改了的决定（旧 → 新）：
+
+- **工具栏**：副标题「已看 2/6」→「agent · 分支 · N 轮」；右侧的统一 / 双栏分段控件和 Refresh → 「隐藏格式改动」开关（#21 和 `ui` 的开关之后）和 Mark Reviewed；返回和检查器开关是图标按钮；容器横跨整个窗口宽。统一 / 双栏和 Refresh 移到 View 菜单（「未决问题」5，需要确认）。
+- **阅读栏**：新增标题区（会话标题 + 统计行）；轮次标题从「agent 圆点 + 序号 + 相对时间」→「序号 + 开始时间 · 文件数 · token」；prompt 从带左边线的次要色引用块 → Title 2 层级的主文字；agent 说明从主文字色 → 次要色；每个文件从平铺的标题行 + diff → 一张卡片（头部 + diff）；diff 的符号栏分色、行高加大；hunk 归因标题只留在规则分组视图；Drifted 从竖条 + 标签 → 一行警示色的字；选中行保留增删底色并加竖条。
+- **折叠**：只有早先已看的轮次折叠 → 每一轮都能折叠成一行（没有改动的轮次是否默认折叠，见「未决问题」3）。
+- **检查器**：居中的文字页签 → 撑满宽度的分段控件；页签「Progress」→「Files」；标题「n/m reviewed」→「已看 n/m」加百分比和细进度条；选中行从强调色 → 淡灰填充；行尾加 `Turn N`。
+- **浮条**：进度条 + 「n/m reviewed」+ 意见数 + 置灰的 Send + 强调色的 Looks good → 胶囊：意见数 + Looks Good（次要）+ Send to {agent}（强调色）；进度只在检查器里。
+- **Analyze 按钮**：「Analyze」→「Analyze with {agent}」，放在简报标题行的右端。
+- **阅读栏宽度**仍是 760pt，**简报条目的标记**仍是圆点，**上下文面板**仍是 300pt（产品决定），这三处画布内部有矛盾或与已记录的决定冲突，取舍见[交互规范「视觉」](interaction.md#视觉)。
+- **键**：`review-step-counts` 拆成 `review-added`、`review-removed`；`review-comments`、`review-progress-title`、`review-looks-good`、`review-open-file`、`review-progress` 改值或改用途；加 `review-send-to`、`review-mark-reviewed`、`review-files-reviewed` 等（见键表）。.ftl 文件由实现 PR 改。
+- **探针**：去掉 `review.mode*` 和 `review.bar.progress`，加 `review.header`、`review.toolbar.*`。
 
 ### 第 3 步
 

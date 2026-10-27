@@ -360,13 +360,13 @@ pub struct WindowState {
 
 | 区域 | 规格（[交互规范「窗口结构」](interaction.md#窗口结构)） | 层 | 内容来源 |
 |---|---|---|---|
-| Sidebar | 248pt，vibrancy；当前侧栏面板 | 常驻（项目侧栏）/ 按需（Files 等替换面板） | `SidebarPanel` 贡献；项目侧栏里的条目来自 `SidebarEntry` 贡献 |
-| Toolbar | 52pt；标题 + 副标题；左侧返回按钮（有 `back_button` 的屏幕）；右侧至多 3 个控件 | 常驻 | 本 crate 画容器和返回按钮；标题、副标题、右侧控件由当前屏幕经 `ui::contrib::Screen::toolbar` 提供（下节） |
+| Sidebar | 248pt，vibrancy，占满窗口高度，顶部一行（与工具栏同高）留给窗口控件；当前侧栏面板 | 常驻（项目侧栏）/ 按需（Files 等替换面板） | `SidebarPanel` 贡献；项目侧栏里的条目来自 `SidebarEntry` 贡献 |
+| Toolbar | 52pt，半透明材质，下沿 0.5pt 分隔线；从侧栏右边起横跨内容区和检查器（没有侧栏时横跨整个窗口宽，窗口控件在它里面，检查器在它下面）；标题 + 副标题；左侧是图标按钮：返回（有 `back_button` 的屏幕）或侧栏开关（有侧栏的屏幕）；右侧至多 3 个控件，检查器开关（图标按钮）算其中一个 | 常驻 | 本 crate 画容器和三个图标按钮（返回、侧栏开关、检查器开关，都不带文字）；标题、副标题、其余右侧控件由当前屏幕经 `ui::contrib::Screen::toolbar` 提供（下节） |
 | Content | 居中 760pt 阅读栏（`reading_column`）或整个内容区 | 常驻 / 收起（阅读视图） | 栈顶 `Screen` |
-| Inspector | 300pt；分段控件切换页 | 按需（⌥⌘I） | `InspectorTab` 贡献 |
-| Panel | 浮在检查器上方，圆角 14pt，阴影，不加遮罩 | 按需（Space 打开，Esc 关闭） | `Panel` 贡献 |
+| Inspector | 300pt，侧栏材质；顶部撑满宽度的分段控件切换页 | 按需（⌥⌘I） | `InspectorTab` 贡献 |
+| Panel | 浮在检查器上方，检查器隐藏时占它的位置，300pt（设计画布画的是 420pt 宽、内缩 8pt，产品负责人 2026-10-23 的决定按 300pt，见「未决问题」3），圆角 14pt，阴影，不加遮罩 | 按需（Space 打开，Esc 关闭） | `Panel` 贡献 |
 | Overlay | 窗口中央 | 按需（⌘K） | `Overlay` 贡献 |
-| Floating bar | 贴底居中 | 常驻（只在审阅） | 审阅屏幕的视图自己画，本 crate 只留出区域 |
+| Floating bar | 贴底居中的胶囊 | 常驻（只在审阅） | 本 crate 留出并摆放区域（在内容区底部居中，离底边留白，滚动内容在它下面）；胶囊容器（材质、阴影、半径）是 `ui` 的浮条容器，内容由审阅屏幕的视图画 |
 
 没有项目时整个窗口是 Welcome 屏幕：没有侧栏、工具栏、检查器（`ScreenLayout` 全部关闭），窗口 820 × 520 pt（app 设计「界面」）。打开项目后窗口切到项目的 frame autosave 名（「对其他 crate 的要求」），默认 1180 × 760 pt。
 
@@ -468,14 +468,15 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 ## 界面
 
-- 屏幕与层：见「区域与三层」。本 crate 画的只有区域的容器、工具栏的返回按钮、检查器的分段控件和一次性提示；其余都是贡献的视图。
+- 屏幕与层：见「区域与三层」。本 crate 画的只有区域的容器、工具栏左右的图标按钮（返回、侧栏开关、检查器开关：`Button` 的图标形态加 `Icon::Back`、`Icon::Sidebar`、`Icon::Inspector`，不带文字，辅助名见键表）、检查器顶部撑满宽度的分段控件、浮条区域和一次性提示；其余都是贡献的视图。布局以设计画布为准（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，取舍见[交互规范「视觉」](interaction.md#视觉)）：侧栏占满窗口高度，工具栏在它右边横跨内容区和检查器；没有侧栏的屏幕（审阅）工具栏横跨整个窗口宽，窗口控件在工具栏里，检查器在工具栏下面。侧栏开关（画布上有）的命令和 Action 还没有设计，要由 workspace 的一个设计 PR 补上；在那之前工具栏不画这个按钮。
 - `ui` 的控件与动效原语（名字以 `ui` 设计为准，[#214](https://github.com/SoloJiang/lectern-app/issues/214)）：颜色经 `lectern_ui::colors(cx)`，文字经 `Text` 与 `TextRole`，分段控件 `Segmented`，按钮 `Button`；动效用 `motion::{PANEL_OPEN, PANEL_CLOSE, SEGMENT, HOVER_IN, HOVER_OUT}` 和可打断的 `Transition`（面板偏移、透明度），减弱动态效果由 `motion::reduced(cx)` 给出淡入淡出、时长减半的版本。侧栏、工具栏、检查器、面板、覆盖层、浮条的容器本身由本 crate 画（`ui` 只给数值和控件）：侧栏用窗口的 `Blurred` 材质（app 设计「界面」），不自定义材质。本 crate 不写任何颜色值、字体和动画参数（验收用 `rg` 检查）。
 - Fluent 键（`crates/i18n/locales/{en,zh-CN}/workspace.ftl`）：
 
   | 键 | en | zh-CN | 用途 |
   |---|---|---|---|
-  | `workspace-back` | Back | 返回 | 工具栏返回按钮的辅助名 |
-  | `workspace-inspector-toggle` | Inspector | 检查器 | 工具栏右侧控件的辅助名 |
+  | `workspace-back` | Back | 返回 | 工具栏返回图标按钮的辅助名与提示（不画文字） |
+  | `workspace-sidebar-toggle` | Sidebar | 侧栏 | 工具栏侧栏开关的辅助名与提示 |
+  | `workspace-inspector-toggle` | Inspector | 检查器 | 工具栏检查器开关的辅助名与提示 |
   | `workspace-command-failed` | This command isn't available right now. | 这个命令现在不可用。 | 代理 Action 激活失败或没有处理函数时的一次性提示 |
   | `workspace-screen-missing` | Nothing to show here yet. | 这里还没有内容。 | 基底屏幕没有注册时内容区的一行次要文字 |
 
@@ -489,6 +490,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
   | `workspace.sidebar.panel[<id>]` | `Group` | — |
   | `workspace.toolbar` | `Toolbar` | `screen`（当前屏幕 ID）、`depth`（栈深度） |
   | `workspace.toolbar.back` | `Button` | — |
+  | `workspace.toolbar.sidebar` | `Toggle` | `State::checked` = 侧栏是否显示；没有侧栏的屏幕上不出现，命令设计之前不出现 |
   | `workspace.toolbar.inspector` | `Toggle` | `State::checked` = 检查器是否显示 |
   | `workspace.content` | `Group` | `base`（`welcome` / `project`）、`column`（`reading` / `full`） |
   | `workspace.content.screen[<id>]` | `Group` | `index`（栈里的位置，基底为 0） |
@@ -591,7 +593,7 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 
 1. **一个窗口还是每个项目一个窗口。** [交互规范「快捷键」](interaction.md#快捷键)写 ⌘O「打开文件夹（新窗口）」，「窗口结构」写 Welcome 是「独立窗口」。`Projects` 已支持同时打开多个项目，但多窗口要把 `ProjectEvent` 按窗口路由、探针的语义树按窗口导出、frame autosave 按窗口命名。默认（本文按它写）：第一版一个窗口；没有项目时它是 Welcome，打开项目后同一个窗口换成项目窗口（frame autosave 名随之切换，所以两种状态各有自己的大小和位置）；已有项目时 ⌘O 先问离开守卫，通过后在同一个窗口里换项目；多窗口留给后续 issue，导航状态已按窗口保存。另一个选项：从第一版就每个项目一个窗口，Welcome 单独一个窗口，⌘O 总是开新窗口。
 2. **启动时恢复上次的项目，还是总是先显示 Welcome。** 默认：恢复（Xcode、大多数文档类应用的做法；`Projects::open` 立即返回，Welcome 只闪现到 `Opened` 到达，项目主页 < 100 ms 可用）；上次停在 Welcome 时显示 Welcome。另一个选项：总是 Welcome，由用户选最近项目。
-3. **上下文面板在哪里打开。** 交互规范写「浮在检查器上方」；检查器隐藏时面板贴右侧滑入，占检查器的位置（300pt）。默认按这个写；另一个选项是面板打开时自动显示检查器。
+3. **上下文面板在哪里打开。** 交互规范写「浮在检查器上方」；检查器隐藏时面板贴右侧滑入，占检查器的位置（300pt）。默认按这个写；另一个选项是面板打开时自动显示检查器。设计画布（#283）画的是 420pt 宽、离顶部工具栏、右边和底边各 8pt 的面板，浮在检查器上方；产品负责人的决定是 300pt，占检查器的位置，不内缩，这里不改，画布的尺寸不采用。
 
 ## 已知限制
 
@@ -695,6 +697,17 @@ executor 线程：ProjectEvent::Opened ─▶ 监听（workspace）─▶ [主�
 - 没有做（「验收」第 3 步的手动项）：发布构建（临时 `HOME`）首次启动是 820 × 520 的 Welcome、没有 `workspace` 的记录早于 `first frame drawn`、移动窗口后重启位置保留、打开文件夹后重启回到项目主页（`screen changed` 的 `to` 为 `project-home`）；这一条还要 `welcome` 和 `project_home` 的屏幕装配（见「与设计的差异」第 3 步）。`app/cold_start`（bench 第 5 步之后判定）和空闲内存（与 40 MB 比较增加不超过 1 MB）也没有测。第 2 步留下的 `on_next_frame` 驱动的 `Tick`、里程碑的 `presented`、`RecordStop::AnimationsSettled`、面板滑入、窗口关闭后点 Dock 图标重开，同样要在真实窗口里手动检查。
 
 ## 与设计的差异
+
+### 为 #283 修订「界面」
+
+「区域与三层」和「界面」按设计画布修订（[#283](https://github.com/SoloJiang/lectern-app/issues/283)，`Refs`），实现随后的 PR 跟随本文。改了的决定（旧 → 新）：
+
+- **工具栏**：只在内容区上方 → 在侧栏右边横跨内容区和检查器，没有侧栏的屏幕横跨整个窗口宽（检查器因此在工具栏下面，原来检查器一直到窗口顶）；侧栏占满窗口高度。
+- **工具栏的按钮**：返回和检查器开关从带文字的可点击元素 → 不带文字的图标按钮（「与设计的差异」第 3 步已经计划这样做，这里写进「界面」）；工具栏左边的侧栏开关（画布上有）在「界面」里留了位置，它的命令还没有设计，之前不画。
+- **检查器**：顶部是撑满宽度的分段控件，用侧栏材质。
+- **浮条**：区域贴底居中不变；容器改成胶囊（`ui` 的浮条容器），内容仍由审阅屏幕画（[review_view 设计「界面」](review_view.md#界面)）。
+- **上下文面板**：仍是 300pt、占检查器的位置（2026-10-23 的产品决定）；画布的 420pt 与内缩 8pt 不采用，已写在「未决问题」3 和[交互规范「窗口结构」](interaction.md#窗口结构)。
+- **键**：加 `workspace-sidebar-toggle`；`workspace-back`、`workspace-inspector-toggle` 的用途改为图标按钮的辅助名与提示。.ftl 文件由实现 PR 改。
 
 ### `SetReadingColumn`（review_view 前置条件 A）
 
