@@ -921,7 +921,8 @@ fn report_merge_shards_subcommand_names_the_targets() {
     use crate::merge::target_names;
     assert_eq!(target_names("code-intel").unwrap(), ["time", "memory"]);
     assert_eq!(target_names("process").unwrap(), ["process"]);
+    assert_eq!(target_names("git").unwrap(), ["time", "memory"]);
     assert_eq!(target_names("rest").unwrap(), ["time", "memory"]);
     let error = target_names("nope").unwrap_err();
-    assert!(error.contains("code-intel, process, rest"), "{error}");
+    assert!(error.contains("code-intel, process, git, rest"), "{error}");
 }

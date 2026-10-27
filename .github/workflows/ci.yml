@@ -92,7 +92,7 @@ jobs:
       fail-fast: false
       matrix:
         # The names in crates/bench/src/shards.rs.
-        shard: [code-intel, process, rest]
+        shard: [code-intel, process, git, rest]
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain from rust-toolchain.toml

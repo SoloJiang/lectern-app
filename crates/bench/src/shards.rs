@@ -32,6 +32,11 @@ pub static SHARDS: &[Shard] = &[
         prefixes: &[],
     },
     Shard {
+        name: "git",
+        targets: &[Target::Time, Target::Memory],
+        prefixes: &["git/"],
+    },
+    Shard {
         name: "rest",
         targets: &[Target::Time, Target::Memory],
         prefixes: &[],

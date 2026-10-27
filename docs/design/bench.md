@@ -611,7 +611,7 @@ pub static SHARDS: &[Shard];
 pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 ```
 
-- 第一版三个分片，按顺序：`code-intel`（目标 `time`、`memory`，前缀 `code_intel/` 和 `plugin/code-intel/`：后者是 `memory` 目标的 `plugin/code-intel/resident_*`，`resident_100k` 用同一个 10 万文件的夹具）、`process`（目标 `process`，没有前缀：这个目标的全部预算，含 `plugin/*/…`、`app/*`、`baseline/*`、`lsp/*`）、`rest`（目标 `time`、`memory`，没有前缀）。分片由预算的目标和 ID 决定，不由展开后的 ID 决定：`plugin/*/activate` 展开成的 `plugin/code-intel/activate` 仍在 `process` 分片。`Package` 的预算（`app/bundle_size`、`app/dmg_size`）不属于任何分片，合并时照旧按有没有 `report-package.json` 处理。划分按报告里每个基准的耗时调整，不需要新的 ADR。
+- 四个分片，按顺序：`code-intel`（目标 `time`、`memory`，前缀 `code_intel/` 和 `plugin/code-intel/`：后者是 `memory` 目标的 `plugin/code-intel/resident_*`，`resident_100k` 用同一个 10 万文件的夹具）、`process`（目标 `process`，没有前缀：这个目标的全部预算，含 `plugin/*/…`、`app/*`、`baseline/*`、`lsp/*`）、`git`（目标 `time`、`memory`，前缀 `git/`）、`rest`（目标 `time`、`memory`，没有前缀）。第一版只有 `code-intel`、`process`、`rest` 三片；PR 上第二次运行（缓存已建立）`rest` 任务 12 分 32 秒，超过 12 分钟，其中 `git/` 的运行占 157 s（`time` 108 s、`memory` 49 s），于是拆成单独的一片（「实际验证」第 6 步）。分片由预算的目标和 ID 决定，不由展开后的 ID 决定：`plugin/*/activate` 展开成的 `plugin/code-intel/activate` 仍在 `process` 分片。`Package` 的预算（`app/bundle_size`、`app/dmg_size`）不属于任何分片，合并时照旧按有没有 `report-package.json` 处理。划分按报告里每个基准的耗时调整，不需要新的 ADR。
 - 关键约束：`process` 目标的每条预算都在同一个分片里，插件列表和语言服务器列表来自这一份报告。
 - 运行器的参数 `--shard <名字>`：不属于这个分片的预算记为 `sharded`（原因写明所在的分片），不运行；过滤参数照常在分片之内生效，`sharded` 先于 `filtered` 和 `planned`，所以别的分片的预算在这里不会是 `filtered` 或 `planned`。名字不在表里、或缺少名字时开始前退出，退出码 2，不写报告。带 `--shard` 的每份 `report-<target>.json` 另有顶层的 `shard`（分片名，不带时省略），文本表的标题以 `, shard <名字>` 结尾。
 - `lectern-bench-report shard <名字>` 打印这个分片的基准目标（每行一个），`just bench --shard` 据此传 `--bench`；名字不在表里时退出码 2。
@@ -1215,7 +1215,10 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - 三个分片各运行一次，再合并（本机上的 CI 流程）：`just bench --shard code-intel code_intel/yield`、`just bench --shard rest agents/`、`just bench --shard process app/idle_empty`，退出码都是 0；每次运行之后把 `target/lectern-bench/report-*.json` 复制到各自的目录（配方开头会删除旧的报告），然后 `lectern-bench-report merge <输出目录> <三个目录>` 退出码 0：249 条预算各出现一次（`ok` 9、`skipped` 2 即未打包的两条、`filtered` 238），`errors` 为空，`shards` 列出三个分片和各自的 `host`，`benches` 的 9 项都带分片名。`process` 分片构建了 `empty_window` 和测量用的 `lectern`，另两个分片没有构建它们。
 - 失败的路径：`just bench --shard nope` 和 `just bench --shard` 在构建之前退出码 2；只合并 `process` 和 `rest` 两个目录时退出码 2，47 条错误，每条写明缺少分片 `code-intel` 的报告（如「code_intel/yield_stop 在全部报告里都是 sharded：缺少分片 code-intel 的报告」）。
 - `.github/workflows/ci.yml` 能被 Ruby 的 YAML 解析器读入（`jobs` 里是 `checks`、`macos`、`macos-bench-shard`、`macos-bench`、`judge`）；本机没有 `actionlint`，工作流本身没有运行。
-- CI 上的数字（每个分片任务的时长、`Benchmarks (macOS arm64)` 合并任务的结束时间、两次连续的 PR 运行）来自这个 PR 的 CI 运行，合并前补在这里。
+- CI 上的数字（托管的 `macos-15` runner；任务时长从 runner 开始执行算起，不含排队）：
+  - 第一次运行 40477449625（三片，分片的缓存是空的，依赖全部重新编译）：`rest` 17 分 13 秒、`code-intel` 17 分 17 秒、`process` 19 分 18 秒，合并 43 秒；从第一个分片开始到合并结束 20 分 4 秒。
+  - 第二次运行 40522083050（三片，缓存完全命中）：`code-intel` 10 分 2 秒（基准一步 553 s）、`process` 10 分 4 秒（545 s）、`rest` 12 分 32 秒（707 s，其中构建 3 分 51 秒、运行约 7 分 47 秒）、合并 41 秒。`rest` 超过 12 分钟的目标；`rest` 的报告里运行时间 441 s，`git/` 占 157 s（`time` 108 s、`memory` 49 s），所以拆出 `git` 分片（「分片」）。这次 `rest` 任务排队 8 分钟才开始，从第一个分片开始到合并结束 21 分 29 秒；排队取决于同时可用的 macOS runner 数，不是分片本身的时长（ADR 0053「已知限制」）。
+  - 四片之后的运行：待补。
 
 ## 与设计的差异
 
