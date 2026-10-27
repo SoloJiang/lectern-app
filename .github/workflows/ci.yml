@@ -138,7 +138,8 @@ jobs:
   macos-bench:
     name: Benchmarks (macOS arm64)
     needs: macos-bench-shard
-    if: always()
+    # Not always(): a run cancelled by a newer push has nothing to merge.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

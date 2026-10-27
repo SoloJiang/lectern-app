@@ -926,7 +926,7 @@ bench *args:
 CI：
 
 - Linux 任务在 Doctests 之后增加一步 `just bench`。目标耗时 2 分钟以内（大部分编译产物与测试步骤共用）。
-- macOS 上的基准按分片运行（[ADR 0053](../adr/0053.md)，[CI 设计「任务」](ci.md#任务)）：每个分片一个 `Benchmarks shard (<名字>)` 任务，与 `Build and test (macOS arm64)` 并行，运行 `just bench --shard <名字>`，上传自己的 `target/lectern-bench/report-*.json`（`if: always()`）。`Benchmarks (macOS arm64)` 在全部分片结束后运行（`if: always()`），下载各分片的报告到各自的目录，运行 `lectern-bench-report merge`，判定预算、写任务摘要和注释，上传合并后的 `report.json`；它在 Linux runner 上运行。目标：从第一个分片开始到合并结束 ≤ 15 分钟，最长的分片 ≤ 12 分钟；超过时先按最慢的基准重新划分分片或增加分片，不减少 ADR 规定的次数和时长（冷启动 20 次、静止后等 5 秒）和样本数。这些任务不设 `LECTERN_BENCH_JUDGE`，判定机器的条目在这里只记录。
+- macOS 上的基准按分片运行（[ADR 0053](../adr/0053.md)，[CI 设计「任务」](ci.md#任务)）：每个分片一个 `Benchmarks shard (<名字>)` 任务，与 `Build and test (macOS arm64)` 并行，运行 `just bench --shard <名字>`，上传自己的 `target/lectern-bench/report-*.json`（`if: always()`）。`Benchmarks (macOS arm64)` 在全部分片结束后运行（`if: ${{ !cancelled() }}`：分片失败时也运行，被新的推送取消的运行不运行），下载各分片的报告到各自的目录，运行 `lectern-bench-report merge`，判定预算、写任务摘要和注释，上传合并后的 `report.json`；它在 Linux runner 上运行。目标：从第一个分片开始到合并结束 ≤ 15 分钟，最长的分片 ≤ 12 分钟；超过时先按最慢的基准重新划分分片或增加分片，不减少 ADR 规定的次数和时长（冷启动 20 次、静止后等 5 秒）和样本数。这些任务不设 `LECTERN_BENCH_JUDGE`，判定机器的条目在这里只记录。
 - 判定机器上的 `Judge (physical Mac)` 不分片，设置 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`（过滤按子串匹配，后者也选中 `app/cold_start_purged`），上传 `report.json`。它只在 push 到 `main` 和手动触发时运行，不是 PR 的必需检查；runner 注册之前跳过（[CI 设计「判定机器」](ci.md#判定机器)，ADR 0052）。
 
 ## 夹具与 `test-support`
