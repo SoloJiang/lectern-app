@@ -1,6 +1,6 @@
 # review_view 设计
 
-状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配已实现一半：`review-view` 已装配，`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装（[app 设计「review_view 的装配」](app.md#review_view-的装配)）；`app/open_diff`、帧基准尚未实现。
+状态：实现中。「验收」第 1 步（插件、屏幕、叙事与统一视图、简报、Progress、快捷键、探针节点）和第 2 步（高亮、交接插件、双栏、折叠展开、Analyze 命令）已实现；第 3 步的 `app` 装配已实现一半：`review-view` 已装配，`review-view-handoff` 等 `dyn Reader`、`dyn CodeIntel` 有提供者后再装（[app 设计「review_view 的装配」](app.md#review_view-的装配)）；`app/open_diff`、帧基准尚未实现。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，已实现的部分要随之修改，见「与设计的差异」。
 
 对应 issue [#15](https://github.com/SoloJiang/lectern-app/issues/15)（审阅视图的视图部分；领域部分见 [review 设计](review.md)）。`review_view` 是审阅屏幕：顶部的会话简报、按轮次的改动叙事、每个文件的 diff（统一与双栏，[#14](https://github.com/SoloJiang/lectern-app/issues/14)）、检查器里的 Progress 列表、底部浮条，以及 J / K / V 等快捷键（[交互规范「核心闭环」](interaction.md#核心闭环)第 3、4 步、[「屏幕」](interaction.md#屏幕)03 画板、[ADR 0012](../adr/0012.md)）。它只读 `dyn Review` 的快照、展示行和正文，只发 `ReviewCommand`；由 `workspace` 承载（[workspace 设计](workspace.md)）。
 

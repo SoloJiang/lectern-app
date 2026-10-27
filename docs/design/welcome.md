@@ -1,6 +1,6 @@
 # welcome 设计
 
-状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。
+状态：实现中。「验收」第 1 步（插件、模型、最近项目的存储、发现列表的归并，不依赖 GPUI 的部分，[#240](https://github.com/SoloJiang/lectern-app/pull/240)）和第 2 步（视图、Action、语言选择、语义树，`Closes #29`）已实现，见「实际验证」「与设计的差异」；前置条件 A（[#237](https://github.com/SoloJiang/lectern-app/pull/237)）、B（[#243](https://github.com/SoloJiang/lectern-app/pull/243)）已合并，C（`app` 装配，[app 设计「welcome 的装配」](app.md#welcome-的装配)）在 `app` 的 PR 里实现，该 PR 合并后第 2 步的「验收」项除手动运行外都已满足。「界面」已为 [#283](https://github.com/SoloJiang/lectern-app/issues/283) 按设计画布修订，已实现的部分要随之修改，见「与设计的差异」。
 
 对应 issue [#29](https://github.com/SoloJiang/lectern-app/issues/29)。`welcome` 是没有打开项目时的屏幕（[交互规范「屏幕」](interaction.md#屏幕)画板 01，[ADR 0012](../adr/0012.md)）：左侧是应用图标、应用名、Open Folder（⌘O）和语言选择，右侧是最近项目，以及从 Claude Code 与 Codex 的会话历史里发现、还没有打开过的文件夹。它作为一个屏幕贡献给 [workspace](workspace.md)（`Screen(WELCOME)`），由 `workspace` 在没有项目时显示；打开项目、读会话目录、画窗口容器都不在这里。
 
