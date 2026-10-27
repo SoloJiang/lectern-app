@@ -10,6 +10,7 @@ use std::time::Instant;
 use crate::budgets::{Budget, State, Target, is_prefix, lookup};
 use crate::ctx::{Ctx, Fixtures, SampleConfig};
 use crate::report::{self, BenchTime, Entry, Host, Report, Status};
+use crate::shards::{Shard, shard_in};
 use crate::stats::evaluate;
 use crate::{Bench, Measured, Mode, Value};
 
@@ -34,6 +35,8 @@ pub(crate) struct Options<'a> {
     /// The judging machine ([`judge_from_env`], ADR 0052): the budgets for
     /// it are judged; elsewhere a measure run records them.
     pub judge: bool,
+    /// The shard table `--shard <name>` picks from ([`crate::shards::SHARDS`]).
+    pub shards: &'a [Shard],
 }
 
 /// The environment variable that names the judging machine (ADR 0052).
@@ -68,25 +71,33 @@ pub(crate) struct Run<'a> {
 struct Args {
     mode: Mode,
     list: bool,
+    /// `--shard <name>`: only this shard's budgets run (「分片」).
+    shard: Option<String>,
     filters: Vec<String>,
 }
 
-fn parse(args: &[String]) -> Args {
+fn parse(args: &[String]) -> Result<Args, String> {
     let mut parsed = Args {
         mode: Mode::Smoke,
         list: false,
+        shard: None,
         filters: Vec::new(),
     };
-    for arg in args {
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--bench" => parsed.mode = Mode::Measure,
             "--list" => parsed.list = true,
+            "--shard" => match args.next() {
+                Some(name) => parsed.shard = Some(name.clone()),
+                None => return Err("--shard needs a shard name".to_owned()),
+            },
             // Other flags (libtest's, passed through by cargo) do not apply.
             flag if flag.starts_with('-') => {}
             filter => parsed.filters.push(filter.to_owned()),
         }
     }
-    parsed
+    Ok(parsed)
 }
 
 impl Args {
@@ -96,7 +107,24 @@ impl Args {
 }
 
 pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
-    let args = parse(&options.args);
+    let args = match parse(&options.args) {
+        Ok(args) => args,
+        Err(message) => return usage_error(&message),
+    };
+    // An unknown shard name stops the run before anything starts.
+    let shard: Option<&Shard> = match &args.shard {
+        None => None,
+        Some(name) => match options.shards.iter().find(|s| s.name == name) {
+            Some(shard) => Some(shard),
+            None => {
+                let known: Vec<&str> = options.shards.iter().map(|s| s.name).collect();
+                return usage_error(&format!(
+                    "unknown shard {name:?}, the shards are: {}",
+                    known.join(", ")
+                ));
+            }
+        },
+    };
     let own: Vec<&'a Budget> = options
         .budgets
         .iter()
@@ -117,6 +145,7 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         judge: options.judge,
         host: options.host.clone(),
         commit: options.commit.clone(),
+        shard: shard.map(|s| s.name.to_owned()),
         entries: Vec::new(),
         errors: Vec::new(),
         plugins: Vec::new(),
@@ -131,10 +160,20 @@ pub(crate) fn run<'a>(options: &Options<'a>, benches: &[Bench]) -> Run<'a> {
         ));
     }
 
-    // Entries that need no run: filtered, then planned.
+    // Entries that need no run: another shard's, then filtered, then
+    // planned. `sharded` comes first: the merge drops it and expects the
+    // owning shard's report to have the one real entry.
     let mut pending: Vec<&'a Budget> = Vec::new();
     for budget in &own {
-        if !args.selects(budget.id) {
+        let owner = shard_in(options.shards, budget).map(|s| s.name);
+        if let Some(shard) = shard
+            && owner != Some(shard.name)
+        {
+            let reason = owner.map(|name| format!("在分片 {name}"));
+            report
+                .entries
+                .push(Entry::new(budget, Status::Sharded, reason));
+        } else if !args.selects(budget.id) {
             report
                 .entries
                 .push(Entry::new(budget, Status::Filtered, None));
@@ -562,20 +601,30 @@ fn attempt(
     }
 }
 
+/// A bad command line: exit 2 and no report, so the merge misses this
+/// target too.
+fn usage_error<'a>(message: &str) -> Run<'a> {
+    Run {
+        exit: 2,
+        report: None,
+        text: format!("lectern-bench: {message}\n"),
+    }
+}
+
 fn finish<'a>(options: &Options<'a>, report: Report<'a>) -> Run<'a> {
     let exit = exit_code(&report);
     let json = report.to_json();
     let results = json["results"].as_array().cloned().unwrap_or_default();
-    let text = report::text_table(
-        &report::title(
-            options.target.name(),
-            report.mode.name(),
-            report.gated,
-            report.judge,
-        ),
-        &results,
-        &report.errors,
+    let mut title = report::title(
+        options.target.name(),
+        report.mode.name(),
+        report.gated,
+        report.judge,
     );
+    if let Some(shard) = &report.shard {
+        title.push_str(&format!(", shard {shard}"));
+    }
+    let text = report::text_table(&title, &results, &report.errors);
     Run {
         exit,
         report: Some(report),

@@ -27,6 +27,7 @@ pub mod process;
 mod report;
 pub mod rounds;
 mod runner;
+pub mod shards;
 mod stats;
 pub mod wire;
 
@@ -182,8 +183,10 @@ impl<E: std::error::Error> From<E> for BenchError {
 /// and exits with 2 when that fails.
 ///
 /// Arguments: `--bench` (passed by `cargo bench`) selects measure mode,
-/// otherwise smoke; `--list` lists the target's budgets; anything else is a
-/// substring filter on IDs. Checks the benchmarks against the budget table,
+/// otherwise smoke; `--list` lists the target's budgets; `--shard <name>`
+/// limits the run to one shard's budgets ([`shards`], the others are
+/// `sharded`; an unknown name exits with 2 before anything runs); anything
+/// else is a substring filter on IDs. Checks the benchmarks against the budget table,
 /// runs them in ID order, prints the table, writes the report and returns
 /// the exit code.
 ///
@@ -223,8 +226,14 @@ pub fn main(target: Target, tmp_dir: &str, benches: &[Bench]) -> ExitCode {
         host: report::Host::current(),
         commit: std::env::var("GITHUB_SHA").ok(),
         judge,
+        shards: shards::SHARDS,
     };
     let run = runner::run(&options, benches);
+    if run.exit == 2 && run.report.is_none() {
+        // A bad command line, not a table.
+        eprint!("{}", run.text);
+        return ExitCode::from(2);
+    }
     print!("{}", run.text);
     if let Some(report) = &run.report
         && let Err(error) = report::write(&options.report_dir, target, report)

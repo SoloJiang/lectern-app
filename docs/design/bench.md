@@ -1,6 +1,6 @@
 # bench 设计
 
-状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4 步（探针、进程调度与空窗口基线）已实现，依赖 [ADR 0051](../adr/0051.md)，首帧的时刻和判定的机器按 [ADR 0052](../adr/0052.md)（drawable 没有 `presentedTime` 时取显示回调运行的时刻，结果注明来源；首帧要真正显示的条目只在判定机器上判定，见「平台与噪声」），托管 runner 上空窗口基线的记录已写进「实际验证」和 ADR 0017，判定机器的基线在 runner 注册之后补上；第 5 步的 5a（`app` 的测量构建，[#273](https://github.com/SoloJiang/lectern-app/pull/273)）和 5b（`bench` 的 `app/*`、`plugin/*` 进程级基准）已实现，但 5b 的 `plugin/project/resident_*` 没有做（打开项目的方式未定，见「与设计的差异」第 5 步和 [#275](https://github.com/SoloJiang/lectern-app/issues/275)），判定机器的 `app/cold_start` 判定在 runner 注册之后才有；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。CI 上的分片（[ADR 0053](../adr/0053.md)，[#279](https://github.com/SoloJiang/lectern-app/issues/279)，「分片」「`just bench` 与 CI」）已接受，尚未实现。
+状态：实现中。第 1 步（运行器、预算表与迁移，[#83](https://github.com/SoloJiang/lectern-app/pull/83)）和第 3 步（插件集合的闭包与裁剪，[#98](https://github.com/SoloJiang/lectern-app/pull/98)）已实现；第 2 步（`platform` 的进程、主机信息与线程 QoS，[platform 设计「验收」](platform.md#验收)的 A 部分）已实现；第 4 步（探针、进程调度与空窗口基线）已实现，依赖 [ADR 0051](../adr/0051.md)，首帧的时刻和判定的机器按 [ADR 0052](../adr/0052.md)（drawable 没有 `presentedTime` 时取显示回调运行的时刻，结果注明来源；首帧要真正显示的条目只在判定机器上判定，见「平台与噪声」），托管 runner 上空窗口基线的记录已写进「实际验证」和 ADR 0017，判定机器的基线在 runner 注册之后补上；第 5 步的 5a（`app` 的测量构建，[#273](https://github.com/SoloJiang/lectern-app/pull/273)）和 5b（`bench` 的 `app/*`、`plugin/*` 进程级基准）已实现，但 5b 的 `plugin/project/resident_*` 没有做（打开项目的方式未定，见「与设计的差异」第 5 步和 [#275](https://github.com/SoloJiang/lectern-app/issues/275)），判定机器的 `app/cold_start` 判定在 runner 注册之后才有；第 4、5 步要的 `platform` 接口已在 [platform 设计](platform.md)里补充（[ADR 0048](../adr/0048.md)）。按总时长封顶的采样、共享夹具和每个基准的耗时（[ADR 0036](../adr/0036.md)）已实现，见「平台与噪声」「实际验证」。时间盒截断的轮次计为不合格的样本（[ADR 0043](../adr/0043.md)）已实现，见「时间盒截断的轮次」「实际验证」。CI 上的分片（[ADR 0053](../adr/0053.md)，[#279](https://github.com/SoloJiang/lectern-app/issues/279)，「分片」「`just bench` 与 CI」）已实现，CI 上的时长待 PR 的运行补上（「实际验证」）。
 
 对应 issue [#7](https://github.com/SoloJiang/lectern-app/issues/7)；安装包体积检查 [#38](https://github.com/SoloJiang/lectern-app/issues/38) 复用本 crate 的运行器和预算表。`bench` 测量[性能预算](tech-research.md#性能预算)、[ADR 0017](../adr/0017.md)、[ADR 0018](../adr/0018.md) 和各 crate 设计文档「性能」一节里的每一项，打印实测值与预算，在 Apple 芯片的 macOS 上超标即以非 0 退出码让 CI 失败。
 
@@ -613,10 +613,10 @@ pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 
 - 第一版三个分片，按顺序：`code-intel`（目标 `time`、`memory`，前缀 `code_intel/` 和 `plugin/code-intel/`：后者是 `memory` 目标的 `plugin/code-intel/resident_*`，`resident_100k` 用同一个 10 万文件的夹具）、`process`（目标 `process`，没有前缀：这个目标的全部预算，含 `plugin/*/…`、`app/*`、`baseline/*`、`lsp/*`）、`rest`（目标 `time`、`memory`，没有前缀）。分片由预算的目标和 ID 决定，不由展开后的 ID 决定：`plugin/*/activate` 展开成的 `plugin/code-intel/activate` 仍在 `process` 分片。`Package` 的预算（`app/bundle_size`、`app/dmg_size`）不属于任何分片，合并时照旧按有没有 `report-package.json` 处理。划分按报告里每个基准的耗时调整，不需要新的 ADR。
 - 关键约束：`process` 目标的每条预算都在同一个分片里，插件列表和语言服务器列表来自这一份报告。
-- 运行器的参数 `--shard <名字>`：不属于这个分片的预算记为 `sharded`，不运行；过滤参数照常在分片之内生效。名字不在表里时开始前退出，退出码 2。
-- `lectern-bench-report shard <名字>` 打印这个分片的基准目标（每行一个），`just bench --shard` 据此传 `--bench`。
-- 合并：`lectern-bench-report merge <目录>...` 读每个目录里存在的 `report-<target>.json`。每个基准目标至少要有一份报告。对每个应有的 ID，去掉状态为 `sharded` 的出现后恰好剩一次；全部是 `sharded`、剩下零次或多次都是错误。插件列表和语言服务器列表取自唯一一份没有把 `process` 目标记为 `sharded` 的 `report-process.json`。各份报告的 `mode`、`gated`、`judge` 必须相同；`host` 取第一份，合并后的 `shards` 列出每个分片的名字和它的 `host`。只给一个目录、报告里没有 `sharded` 时，结果与原来相同。
-- 报告的 `benches` 每项加上 `shard`（不带 `--shard` 时省略），最慢的 10 个的 notice 写出分片名，超过时间目标时据此重新划分。
+- 运行器的参数 `--shard <名字>`：不属于这个分片的预算记为 `sharded`（原因写明所在的分片），不运行；过滤参数照常在分片之内生效，`sharded` 先于 `filtered` 和 `planned`，所以别的分片的预算在这里不会是 `filtered` 或 `planned`。名字不在表里、或缺少名字时开始前退出，退出码 2，不写报告。带 `--shard` 的每份 `report-<target>.json` 另有顶层的 `shard`（分片名，不带时省略），文本表的标题以 `, shard <名字>` 结尾。
+- `lectern-bench-report shard <名字>` 打印这个分片的基准目标（每行一个），`just bench --shard` 据此传 `--bench`；名字不在表里时退出码 2。
+- 合并：`lectern-bench-report merge <目录>...` 读每个目录里存在的 `report-<target>.json`。每个基准目标至少要有一份报告。对每个应有的 ID，去掉状态为 `sharded` 的出现后恰好剩一次；全部是 `sharded`、剩下零次或多次都是错误。插件列表和语言服务器列表取自唯一一份没有把 `process` 目标记为 `sharded` 的 `report-process.json`。各份报告的 `mode`、`gated`、`judge` 必须相同；`host` 取第一份（按目录的顺序，目录里按 time、memory、process），合并后的 `shards` 列出每个分片的名字和它的第一份报告的 `host`（没有报告带 `shard` 时不写这个键）。合并后的 `report.json` 写进第一个目录，所以 CI 把 `target/lectern-bench` 放在最前面。错误信息里的报告名在给了几个目录时带上目录。只给一个目录、报告里没有 `sharded` 时，结果与原来相同。
+- 合并后的 `benches` 每项加上 `shard`（取自它所在报告的 `shard`，没有时省略），最慢的 10 个的 notice 和摘要写出分片名（`<ID> (<target>, <分片>): <秒> s`），超过时间目标时据此重新划分。缺少分片的报告时，每条应在那里的预算各报一个错误，写明缺少哪个分片。
 
 ## 数据流与线程
 
@@ -918,7 +918,7 @@ bench *args:
 - `--no-fail-fast` 让一个目标超标后其余目标照常运行。cargo 对失败的目标统一返回 101，所以退出码不取 cargo 的，而取 `lectern-bench-report` 的。
 
 - 其余参数是 ID 过滤，如 `just bench agents/`。
-- `just bench --shard <名字> [过滤]`（只在 macOS 上）：用 `lectern-bench-report shard <名字>` 取这个分片的目标，只构建这些目标用的程序（`process` 分片才构建 `empty_window` 和测量用的 `lectern`），`cargo bench` 带对应的 `--bench` 和 `-- --shard <名字>`，结束后不合并，退出码 0 表示报告已写好；合并由 CI 的合并任务做。不带 `--shard` 时与上面的配方相同，一次运行全部预算再合并。
+- `just bench --shard <名字> [过滤]`（只在 macOS 上）：用 `lectern-bench-report shard <名字>` 取这个分片的目标，只构建这些目标用的程序（`process` 分片才构建 `empty_window` 和测量用的 `lectern`），`cargo bench` 带对应的 `--bench` 和 `-- --shard <名字>`，结束后不合并，退出码 0 表示报告已写好（分片的某个目标没有写出报告时退出码 2）；合并由 CI 的合并任务做。`--shard` 在 Linux 上退出码 2，分片只在 macOS 上运行。不带 `--shard` 时与上面的配方相同，一次运行全部预算再合并。
 - `cargo bench` 使用 `bench` profile（继承 `release`：thin LTO、`codegen-units = 1`），与预算要求的发布构建一致。测量用的 `lectern` 与发布构建的差别只有 `bench-probe`；安装包体积测量用不带它的构建。
 - 冒烟用 `test` profile，和 `just test` 共用依赖的编译产物。nextest 不运行 `harness = false` 的目标，所以冒烟另由 `just bench` 运行。
 - `just ci` 在两个平台上都调用 `just bench`（Linux 上是冒烟）。
@@ -1207,6 +1207,16 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 
 在 CI 里（[CI 设计「任务」「判定机器」](ci.md#任务)，[ADR 0052](../adr/0052.md)）：托管 runner 上的 `Benchmarks (macOS arm64)` 不设 `LECTERN_BENCH_JUDGE`，`app/cold_start`、`app/cold_start_purged` 和 `baseline/*` 记为 `record`（首帧的来源是 `handler`，数字只会偏大，不会让任务失败），判定 `app/idle_empty`、`plugin/*/activate`、`plugin/after_first_frame`；`plugin/*/resident` 只记录。`Judge (physical Mac)` 设 `LECTERN_BENCH_JUDGE=1`，运行 `just bench baseline/ app/cold_start`：`app/cold_start` 判定，来源为 `handler` 是错误；按本机的数字，20 次都会超过 20 ms，任务失败。它只在 push 到 `main` 和手动触发时运行，不是 PR 的必需检查，处理方式按 ADR 0017「影响」由产品负责人决定。
 
+
+第 6 步（分片，`bench` 和 CI，[#279](https://github.com/SoloJiang/lectern-app/issues/279)），在 macOS 上运行：Apple M5 Pro（Mac17,9，15 核），macOS 27.0.1。
+
+- `just test -p lectern-bench`：179 个通过，跳过 6 个。新增 `shards_*` 5 个、`runner_shard_*` 4 个、`report_merge_shards_*` 9 个；原有的测试和快照没有改动（`report_*` 的快照不变，`Report` 多了 `shard` 字段，没有时不写）。
+- 不带 `--shard` 的结果与分片前相同：同一条命令 `just bench agents/ app/idle_empty`，在分片前的提交（设计 PR 的 `53a714a`）和本提交上各运行一次，`report.json` 和三份 `report-<target>.json` 的键、每条预算的 ID、状态、预算、出处、原因、报告级错误、`mode`、`gated`、`judge` 完全相同（比较脚本不在仓库里；实测值和耗时当然不同）；没有 `shards` 键，`benches` 里没有 `shard`。没有运行完整的 `just bench`（[ADR 0053](../adr/0053.md) 记的 CI 上不分片的运行是 27.4 分钟）：上面这条同时覆盖 `time`、`memory`、`process` 三个目标。
+- 三个分片各运行一次，再合并（本机上的 CI 流程）：`just bench --shard code-intel code_intel/yield`、`just bench --shard rest agents/`、`just bench --shard process app/idle_empty`，退出码都是 0；每次运行之后把 `target/lectern-bench/report-*.json` 复制到各自的目录（配方开头会删除旧的报告），然后 `lectern-bench-report merge <输出目录> <三个目录>` 退出码 0：249 条预算各出现一次（`ok` 9、`skipped` 2 即未打包的两条、`filtered` 238），`errors` 为空，`shards` 列出三个分片和各自的 `host`，`benches` 的 9 项都带分片名。`process` 分片构建了 `empty_window` 和测量用的 `lectern`，另两个分片没有构建它们。
+- 失败的路径：`just bench --shard nope` 和 `just bench --shard` 在构建之前退出码 2；只合并 `process` 和 `rest` 两个目录时退出码 2，47 条错误，每条写明缺少分片 `code-intel` 的报告（如「code_intel/yield_stop 在全部报告里都是 sharded：缺少分片 code-intel 的报告」）。
+- `.github/workflows/ci.yml` 能被 Ruby 的 YAML 解析器读入（`jobs` 里是 `checks`、`macos`、`macos-bench-shard`、`macos-bench`、`judge`）；本机没有 `actionlint`，工作流本身没有运行。
+- CI 上的数字（每个分片任务的时长、`Benchmarks (macOS arm64)` 合并任务的结束时间、两次连续的 PR 运行）来自这个 PR 的 CI 运行，合并前补在这里。
+
 ## 与设计的差异
 
 第 1 步：
@@ -1271,3 +1281,12 @@ CI 提速（[ADR 0036](../adr/0036.md)，`Refs #7`），同一类 Linux 虚拟�
 - **冒烟模式**：macOS 上没有设置 `LECTERN_BENCH_APP` 时 `app/*`、`plugin/*` 是 `skipped`，设了就各启动最少的次数（冷启动 1 次，不预热；空闲内存 1 次；每个插件 1 对），静止后的等待缩短为 200 ms；`app/cold_start_purged` 在冒烟模式下是 `skipped`，不运行 `sudo -n purge`。
 - **`app/idle_empty` 的三次启动逐个运行，不是 3 个同时**：同时运行 3 个 `lectern` 时（窗口在同一个位置，互相遮住），发 `Quit` 之后进程超过 10 秒不退出的占约三分之一（本机 54 次启动里 18 次超过 12 秒被结束，另有两次分别在 8.75 秒和 11 秒后退出）；一次一个时，14 次都在 0.05 秒内退出，第 5 步的其余基准（冷启动 22 次、插件 22 次启动等）也没有出现。进程挂住时的 `sample` 显示：内核、executor、日志的线程都已结束（退出线程已经做完），主线程停在运行循环里，还没有执行 `quit.rs` 里最后以 `cx.quit()` 结束的 10 ms 定时器循环；没有退出的进程在 8 到 11 秒后自己退出。原因没有查到底，怀疑被遮住的窗口所在的进程的定时器被系统推迟；这在 `app` 一侧（`quit.rs` 靠定时器轮询退出线程，而不是由退出线程唤醒主线程），没有改。第 4 步托管 runner 上那次运行里 `baseline/empty_window_idle` 的三个窗口同时运行时没有出现（`empty_window` 的 `Quit` 直接 `cx.quit()`，没有这个定时器循环）。这是第一次运行 `just bench` 时 `app/idle_empty` 记为 `error`「10s 内没有等到 Quit 之后的退出」的原因。
 - 分片（设计阶段的修改，[ADR 0053](../adr/0053.md)）：macOS 的基准原来在一个 `Benchmarks (macOS arm64)` 任务里运行，超过时间目标时先减少端到端基准和 `app/idle_empty` 的启动次数。第 5 步之后这个任务是 27.4 分钟，减少启动次数只省约 11 秒，所以改为按分片在几个并行任务里运行，再由一个任务合并判定；样本数和预算不变，原来的后备方案删除。
+
+第 6 步（分片）：
+
+- **每份 `report-<target>.json` 多了顶层的 `shard`**（带 `--shard` 时，分片名）：合并要在没有基准运行的分片里也知道每份报告属于哪个分片（`shards` 列表、`benches` 的 `shard`），不能从 `benches` 的项里取，它可能是空的。设计「分片」没有写这个字段，已补上。
+- **`merge` 把 `report.json` 写进第一个目录**：设计只写了 `merge <目录>...`，没有说合并后的报告写在哪里。CI 把 `target/lectern-bench` 放在最前面，上传的路径与原来一样；只给一个目录时不变。
+- 下载分片报告用 `actions/download-artifact` 的 `pattern: bench-shard-*`，每个分片在 `target/lectern-bench/shards/bench-shard-<名字>/` 里：某个分片没有上传报告时，按名字逐个下载会让下载这一步失败；用 `pattern` 则由合并任务报告缺少了什么。
+- `just bench --shard` 在分片的某个目标没有写出报告时退出码 2：设计只写了「退出码 0 表示报告已写好」，没有写没写好时怎么办；这样编译失败或崩溃的分片在自己的任务上就是红的，而不只是在合并任务里。
+- `--shard` 在 Linux 上退出码 2（一行说明）：设计写的是「只在 macOS 上」，没有写其他平台的行为。
+- 运行器的 `Options` 多了 `shards`（分片表），测试用假的分片表；`shard_of` 是对 `SHARDS` 的一层。

@@ -21,6 +21,8 @@ pub(crate) enum Status {
     Record,
     Planned,
     Filtered,
+    /// The budget belongs to another shard (`--shard`, 「分片」): not run.
+    Sharded,
     Smoke,
     Skipped,
     Error,
@@ -34,6 +36,7 @@ impl Status {
             Status::Record => "record",
             Status::Planned => "planned",
             Status::Filtered => "filtered",
+            Status::Sharded => "sharded",
             Status::Smoke => "smoke",
             Status::Skipped => "skipped",
             Status::Error => "error",
@@ -120,6 +123,9 @@ pub(crate) struct Report<'a> {
     pub judge: bool,
     pub host: Host,
     pub commit: Option<String>,
+    /// The shard this run was limited to (`--shard`); None runs every
+    /// budget of the target.
+    pub shard: Option<String>,
     pub entries: Vec<Entry<'a>>,
     /// Problems that belong to no budget: extra benchmarks or results.
     pub errors: Vec<String>,
@@ -151,6 +157,9 @@ impl Report<'_> {
         out.insert("judge".into(), json!(self.judge));
         out.insert("host".into(), self.host.to_json());
         out.insert("commit".into(), json!(self.commit));
+        if let Some(shard) = &self.shard {
+            out.insert("shard".into(), json!(shard));
+        }
         if self.target == Target::Process {
             out.insert("plugins".into(), json!(self.plugins));
             out.insert("language_servers".into(), json!(self.language_servers));

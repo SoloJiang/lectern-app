@@ -77,5 +77,6 @@ fn options<'a>(budgets: &'a [Budget], target: Target, args: &[&str], dir: &Path)
         host: host(),
         commit: None,
         judge: false,
+        shards: &[],
     }
 }

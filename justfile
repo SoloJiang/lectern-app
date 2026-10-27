@@ -49,13 +49,54 @@ doctest:
 
 # Performance budget benchmarks: gated on Apple silicon macOS, a smoke run
 # elsewhere. `--measure` samples on Linux too (reported, not gated); other
-# arguments filter IDs, e.g. `just bench agents/`. See docs/design/bench.md.
+# arguments filter IDs, e.g. `just bench agents/`. On macOS,
+# `--shard <name>` runs one CI shard (code-intel, process or rest) and writes
+# its reports without merging them: CI merges the shards' reports.
+# See docs/design/bench.md.
 bench *args:
     #!/usr/bin/env bash
     set -euo pipefail
     rm -f target/lectern-bench/report-*.json target/lectern-bench/report.json
+    report=(cargo run -q --locked -p lectern-bench --bin lectern-bench-report --)
     if [[ "$(uname -s)" == Darwin ]]; then
         if [[ "${1-}" == --measure ]]; then shift; fi
+        if [[ "${1-}" == --shard ]]; then
+            shard="${2-}"
+            if [[ -z "$shard" ]]; then
+                echo "just bench: --shard needs a shard name" >&2
+                exit 2
+            fi
+            shift 2
+            # The shard's benchmark targets, one per line; an unknown name
+            # fails here, before anything is built.
+            targets="$("${report[@]}" shard "$shard")"
+            bench_args=()
+            build_process=false
+            for target in $targets; do
+                bench_args+=(--bench "$target")
+                if [[ "$target" == process ]]; then build_process=true; fi
+            done
+            if [[ "$build_process" == true ]]; then
+                # The empty GPUI window of the baseline/* benchmarks.
+                cargo build --release --locked -p lectern-bench --all-features --example empty_window
+                # The measurement build of lectern (the release build plus the
+                # probe) of the app/* and plugin/* benchmarks.
+                cargo build --release --locked -p lectern-app --features bench-probe
+                export LECTERN_BENCH_BASELINE="$PWD/target/release/examples/empty_window"
+                export LECTERN_BENCH_APP="$PWD/target/release/lectern"
+            fi
+            cargo bench --locked --no-fail-fast -p lectern-bench --all-features "${bench_args[@]}" -- --shard "$shard" "$@" || true
+            # A shard does not judge: the merge does. It succeeds once its
+            # reports are written; a target that failed to build or crashed
+            # leaves none.
+            for target in $targets; do
+                if [[ ! -f "target/lectern-bench/report-$target.json" ]]; then
+                    echo "just bench: no report-$target.json: the $target benchmark target failed to build or crashed" >&2
+                    exit 2
+                fi
+            done
+            exit 0
+        fi
         # The empty GPUI window of the baseline/* benchmarks.
         cargo build --release --locked -p lectern-bench --all-features --example empty_window
         # The measurement build of lectern (the release build plus the probe)
@@ -64,6 +105,9 @@ bench *args:
         export LECTERN_BENCH_BASELINE="$PWD/target/release/examples/empty_window"
         export LECTERN_BENCH_APP="$PWD/target/release/lectern"
         cargo bench --locked --no-fail-fast -p lectern-bench --all-features -- "$@" || true
+    elif [[ "${1-}" == --shard ]]; then
+        echo "just bench: --shard runs only on macOS" >&2
+        exit 2
     elif [[ "${1-}" == --measure ]]; then
         shift
         cargo bench --locked --no-fail-fast -p lectern-bench --all-features -- "$@" || true
@@ -71,7 +115,7 @@ bench *args:
         cargo test --locked --no-fail-fast -p lectern-bench --all-features --benches -- "$@" || true
     fi
     # The merged report decides the result: a target that failed to build or crashed leaves no report.
-    cargo run -q --locked -p lectern-bench --bin lectern-bench-report -- merge target/lectern-bench
+    "${report[@]}" merge target/lectern-bench
 
 # A UI probe session runs in the background (docs/design/ui_probe.md): a debug
 # build with the `ui-probe` feature, a temporary HOME and a private probe

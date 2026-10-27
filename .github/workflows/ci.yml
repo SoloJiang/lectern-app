@@ -58,8 +58,8 @@ jobs:
         run: xcrun metal --version >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
       - uses: Swatinem/rust-cache@v2
         with:
-          # Debug builds only; the benchmarks job caches its release build
-          # under its own key, so neither evicts the other.
+          # Debug builds only; each benchmarks shard caches its release build
+          # under its own key, so none evicts another.
           key: test
       - uses: taiki-e/install-action@v2
         with:
@@ -76,13 +76,23 @@ jobs:
       - name: Build app
         run: cargo build --locked -p lectern-app
 
-  # The performance budgets, judged on Apple Silicon, in parallel with the
-  # job above (docs/design/ci.md「任务」). This runner never gives a
-  # presentedTime, so the budgets that end at the first frame are only
-  # recorded here; the judge job below judges them (ADR 0052).
-  macos-bench:
-    name: Benchmarks (macOS arm64)
+  # The performance budgets run in parallel shards on Apple Silicon, in
+  # parallel with the job above (docs/design/ci.md「任务」, ADR 0053). A shard
+  # runs only its own budgets and uploads its reports; it does not judge, so
+  # it succeeds once the reports are written. The job after this one merges
+  # them. The runner never gives a presentedTime, so the budgets that end at
+  # the first frame are only recorded; the judge job below judges them
+  # (ADR 0052).
+  macos-bench-shard:
+    name: Benchmarks shard (${{ matrix.shard }})
     runs-on: macos-15
+    strategy:
+      # One shard failing to build must not cancel the others: the merge job
+      # then names what is missing.
+      fail-fast: false
+      matrix:
+        # The names in crates/bench/src/shards.rs.
+        shard: [code-intel, process, rest]
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain from rust-toolchain.toml
@@ -92,15 +102,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # A full key match is never saved again. When the justfile's bench
-          # recipe adds a build (each has its own dependency features), bump
-          # this key, or that build recompiles its dependencies on every run.
-          # The first run after a bump starts with no cache.
-          key: bench-2
+          # recipe adds a build to a shard (each has its own dependency
+          # features), bump the number, or that build recompiles its
+          # dependencies on every run. The first run after a bump starts with
+          # no cache.
+          key: bench-${{ matrix.shard }}-1
       # The benchmarks' kept fixtures (ADR 0039): this key decides how often
       # the restore hits. Each fixture checks its contents against the
       # current writer before use; the source hash is a second guard that
-      # also covers changes the sampled check cannot see.
+      # also covers changes the sampled check cannot see. Only the
+      # code-intel shard generates them.
       - name: Restore the benchmarks' kept fixtures
+        if: matrix.shard == 'code-intel'
         uses: actions/cache@v4
         with:
           path: target/lectern-bench/fixtures
@@ -108,9 +121,44 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - name: Performance budget benchmarks
-        run: just bench
-      # The report is uploaded even when a budget is exceeded.
+      - name: Performance budget benchmarks (shard)
+        run: just bench --shard ${{ matrix.shard }}
+      # The reports are uploaded even when a benchmark target failed.
+      - name: Upload the shard's reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-shard-${{ matrix.shard }}
+          path: target/lectern-bench/report-*.json
+          if-no-files-found: warn
+
+  # Merges the shards' reports and judges the budgets. It reads only JSON,
+  # so it runs on Linux, and it runs when a shard failed too: the merge says
+  # what is missing. Its name stays the required check's name.
+  macos-bench:
+    name: Benchmarks (macOS arm64)
+    needs: macos-bench-shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench-report
+      # One directory per shard: target/lectern-bench/shards/bench-shard-<name>.
+      - name: Download the shards' reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bench-shard-*
+          path: target/lectern-bench/shards
+      # The merged report is written into the first directory. The summary
+      # and the annotations are the merge's (docs/design/bench.md「报告」).
+      - name: Merge and judge the performance budgets
+        run: |
+          mkdir -p target/lectern-bench/shards
+          cargo run -q --locked -p lectern-bench --bin lectern-bench-report -- merge target/lectern-bench target/lectern-bench/shards/*/
       - name: Upload the benchmark report
         if: always()
         uses: actions/upload-artifact@v4

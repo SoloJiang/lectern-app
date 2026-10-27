@@ -895,3 +895,209 @@ fn runner_without_a_plugin_list_wildcard_budgets_stay_whole() {
     assert_eq!(status(&run, "plugin/*/activate").status, Status::Filtered);
     assert_eq!(status(&run, "plugin/after_first_frame").status, Status::Ok);
 }
+
+use crate::shards::Shard;
+
+/// Two shards of the fake table: `first` has the `fake/` budgets, `second`
+/// the rest of the `Time` target.
+static SHARD_TABLE: &[Shard] = &[
+    Shard {
+        name: "first",
+        targets: &[Target::Time],
+        prefixes: &["fake/"],
+    },
+    Shard {
+        name: "second",
+        targets: &[Target::Time],
+        prefixes: &[],
+    },
+];
+
+static SHARD_BUDGETS: &[Budget] = &[
+    budget("fake/a", UNDER_1_MS, State::Active, Target::Time),
+    budget("fake/b", UNDER_1_MS, State::Active, Target::Time),
+    budget(
+        "fake/later",
+        UNDER_1_MS,
+        State::Planned("test"),
+        Target::Time,
+    ),
+    budget("other/c", UNDER_1_MS, State::Active, Target::Time),
+    budget(
+        "other/later",
+        UNDER_1_MS,
+        State::Planned("test"),
+        Target::Time,
+    ),
+];
+
+static SHARD_CALLS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+static SHARD_SERIAL: Mutex<()> = Mutex::new(());
+
+/// The tests share [`SHARD_CALLS`]: one at a time, also under `cargo test`.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SHARD_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn shard_a(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    SHARD_CALLS.lock().unwrap().push("fake/a");
+    Ok(vec![Measured::new("fake/a", time(0))])
+}
+
+fn shard_b(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    SHARD_CALLS.lock().unwrap().push("fake/b");
+    Ok(vec![Measured::new("fake/b", time(0))])
+}
+
+fn shard_c(_: &mut Ctx) -> Result<Vec<Measured>, BenchError> {
+    SHARD_CALLS.lock().unwrap().push("other/c");
+    Ok(vec![Measured::new("other/c", time(0))])
+}
+
+const SHARD_BENCHES: [Bench; 3] = [
+    Bench {
+        id: "fake/a",
+        run: shard_a,
+    },
+    Bench {
+        id: "fake/b",
+        run: shard_b,
+    },
+    Bench {
+        id: "other/c",
+        run: shard_c,
+    },
+];
+
+fn shard_run<'a>(args: &[&str], dir: &std::path::Path) -> Run<'a> {
+    SHARD_CALLS.lock().unwrap().clear();
+    let options = Options {
+        shards: SHARD_TABLE,
+        ..options(SHARD_BUDGETS, Target::Time, args, dir)
+    };
+    run(&options, &SHARD_BENCHES)
+}
+
+fn statuses_of(run: &Run<'_>) -> Vec<(String, Status)> {
+    run.report
+        .as_ref()
+        .unwrap()
+        .entries
+        .iter()
+        .map(|e| (e.id.clone(), e.status))
+        .collect()
+}
+
+#[test]
+fn runner_shard_runs_only_its_own_budgets_and_marks_the_others_sharded() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let run_first = shard_run(&["--shard", "first"], dir.path());
+    assert_eq!(run_first.exit, 0, "{}", run_first.text);
+    assert_eq!(*SHARD_CALLS.lock().unwrap(), ["fake/a", "fake/b"]);
+    assert_eq!(
+        statuses_of(&run_first),
+        [
+            ("fake/a".to_owned(), Status::Smoke),
+            ("fake/b".to_owned(), Status::Smoke),
+            ("fake/later".to_owned(), Status::Planned),
+            ("other/c".to_owned(), Status::Sharded),
+            // Planned in another shard is `sharded`, not `planned`.
+            ("other/later".to_owned(), Status::Sharded),
+        ]
+    );
+    assert_eq!(
+        status(&run_first, "other/c").reason.as_deref(),
+        Some("在分片 second")
+    );
+    let json = run_first.report.as_ref().unwrap().to_json();
+    assert_eq!(json["shard"], "first");
+    assert!(run_first.text.contains("shard first"), "{}", run_first.text);
+    assert!(run_first.text.contains("sharded"), "{}", run_first.text);
+    // The benchmark times are only those that ran.
+    let timed: Vec<&str> = run_first
+        .report
+        .as_ref()
+        .unwrap()
+        .benches
+        .iter()
+        .map(|b| b.id.as_str())
+        .collect();
+    assert_eq!(timed, ["fake/a", "fake/b"]);
+
+    let run_second = shard_run(&["--shard", "second"], dir.path());
+    assert_eq!(run_second.exit, 0, "{}", run_second.text);
+    assert_eq!(*SHARD_CALLS.lock().unwrap(), ["other/c"]);
+    assert_eq!(
+        statuses_of(&run_second),
+        [
+            ("fake/a".to_owned(), Status::Sharded),
+            ("fake/b".to_owned(), Status::Sharded),
+            ("fake/later".to_owned(), Status::Sharded),
+            ("other/c".to_owned(), Status::Smoke),
+            ("other/later".to_owned(), Status::Planned),
+        ]
+    );
+}
+
+#[test]
+fn runner_shard_filters_apply_inside_the_shard() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let run = shard_run(&["--shard", "first", "fake/a"], dir.path());
+    assert_eq!(run.exit, 0, "{}", run.text);
+    assert_eq!(*SHARD_CALLS.lock().unwrap(), ["fake/a"]);
+    assert_eq!(
+        statuses_of(&run),
+        [
+            ("fake/a".to_owned(), Status::Smoke),
+            // In the shard, left out by the filter.
+            ("fake/b".to_owned(), Status::Filtered),
+            ("fake/later".to_owned(), Status::Filtered),
+            // Not in the shard: `sharded` whatever the filter says.
+            ("other/c".to_owned(), Status::Sharded),
+            ("other/later".to_owned(), Status::Sharded),
+        ]
+    );
+}
+
+#[test]
+fn runner_shard_without_the_option_runs_everything() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let run = shard_run(&[], dir.path());
+    assert_eq!(run.exit, 0, "{}", run.text);
+    assert_eq!(
+        *SHARD_CALLS.lock().unwrap(),
+        ["fake/a", "fake/b", "other/c"]
+    );
+    assert!(
+        statuses_of(&run)
+            .iter()
+            .all(|(_, status)| *status != Status::Sharded)
+    );
+    assert!(run.report.unwrap().to_json().get("shard").is_none());
+}
+
+#[test]
+fn runner_shard_an_unknown_name_stops_before_anything_runs() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let run = shard_run(&["--shard", "nope"], dir.path());
+    assert_eq!(run.exit, 2);
+    assert!(
+        run.report.is_none(),
+        "no report for a run that did not start"
+    );
+    assert!(
+        run.text.contains("nope") && run.text.contains("first, second"),
+        "{}",
+        run.text
+    );
+    assert!(SHARD_CALLS.lock().unwrap().is_empty());
+    // The option needs its value.
+    let run = shard_run(&["--shard"], dir.path());
+    assert_eq!(run.exit, 2);
+    assert!(run.report.is_none());
+    assert!(SHARD_CALLS.lock().unwrap().is_empty());
+}

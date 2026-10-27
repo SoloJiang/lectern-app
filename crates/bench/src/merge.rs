@@ -1,6 +1,7 @@
-//! `lectern-bench-report merge`: merges the targets' reports into
-//! `report.json` and decides `just bench`'s exit code
-//! (docs/design/bench.md「报告」).
+//! `lectern-bench-report`: `merge` merges the targets' reports (of one run,
+//! or of the shards of one run) into `report.json` and decides `just
+//! bench`'s exit code; `shard` names a shard's benchmark targets
+//! (docs/design/bench.md「报告」「分片」).
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -11,8 +12,9 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::budgets::{BUDGETS, Budget, Target};
 use crate::report::{self, VERSION};
+use crate::shards;
 
-const USAGE: &str = "usage: lectern-bench-report merge [--require package] <dir>";
+const USAGE: &str = "usage: lectern-bench-report merge [--require package] <dir>...\n       lectern-bench-report shard <name>";
 
 /// The error for a judging run in which none of the judging machine's
 /// entries ran (ADR 0052).
@@ -25,12 +27,16 @@ pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
-    if command != "merge" {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
+    match command.as_str() {
+        "merge" => {}
+        "shard" => return shard_targets(rest),
+        _ => {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
     }
     let mut require_package = false;
-    let mut dir = None;
+    let mut dirs = Vec::new();
     let mut rest = rest.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -41,19 +47,19 @@ pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
                     return ExitCode::from(2);
                 }
             },
-            path if dir.is_none() && !path.starts_with('-') => dir = Some(PathBuf::from(path)),
+            path if !path.starts_with('-') => dirs.push(PathBuf::from(path)),
             _ => {
                 eprintln!("{USAGE}");
                 return ExitCode::from(2);
             }
         }
     }
-    let Some(dir) = dir else {
+    if dirs.is_empty() {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
-    };
+    }
     let merged = merge(
-        &dir,
+        &dirs,
         BUDGETS,
         require_package,
         std::env::var("GITHUB_SHA").ok(),
@@ -68,7 +74,8 @@ pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
         }
     }
     let text = serde_json::to_string_pretty(&merged.report).unwrap_or_default();
-    if let Err(error) = std::fs::write(dir.join("report.json"), text + "\n") {
+    // The merged report goes into the first directory.
+    if let Err(error) = std::fs::write(dirs[0].join("report.json"), text + "\n") {
         eprintln!("lectern-bench-report: could not write report.json: {error}");
         return ExitCode::from(2);
     }
@@ -83,6 +90,39 @@ pub fn main(args: impl IntoIterator<Item = String>) -> ExitCode {
         }
     }
     ExitCode::from(merged.exit)
+}
+
+/// `shard <name>`: the shard's benchmark targets, one per line, for `just
+/// bench --shard`.
+fn shard_targets(args: &[String]) -> ExitCode {
+    let [name] = args else {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    };
+    match target_names(name) {
+        Ok(names) => {
+            for name in names {
+                println!("{name}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(message) => {
+            eprintln!("lectern-bench-report: {message}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// The benchmark target names of the shard `name`.
+pub(crate) fn target_names(name: &str) -> Result<Vec<&'static str>, String> {
+    let Some(shard) = shards::by_name(name) else {
+        let known: Vec<&str> = shards::SHARDS.iter().map(|s| s.name).collect();
+        return Err(format!(
+            "unknown shard {name:?}, the shards are: {}",
+            known.join(", ")
+        ));
+    };
+    Ok(shard.targets.iter().map(|t| t.name()).collect())
 }
 
 /// GitHub keeps at most 10 annotations of each level (error, warning,
@@ -126,7 +166,7 @@ pub(crate) fn notices(report: &Json) -> Vec<String> {
 /// How many benchmarks the slowest-benchmarks notice and summary list.
 const SLOWEST: usize = 10;
 
-/// `<id> (<target>): <seconds> s` for the slowest benchmarks of the merged
+/// `<id> (<target>[, <shard>]): <seconds> s` for the slowest benchmarks of the merged
 /// report, slowest first, after a line with the total; None without wall
 /// times.
 pub(crate) fn slowest(report: &Json) -> Option<Vec<String>> {
@@ -140,8 +180,12 @@ pub(crate) fn slowest(report: &Json) -> Option<Vec<String>> {
         } else {
             ""
         };
+        // Which shard it ran in, to rearrange the shards by it (「分片」).
+        let shard = b["shard"]
+            .as_str()
+            .map_or_else(String::new, |shard| format!(", {shard}"));
         format!(
-            "{} ({}): {:.1} s{retried}",
+            "{} ({}{shard}): {:.1} s{retried}",
             b["id"].as_str().unwrap_or_default(),
             b["target"].as_str().unwrap_or_default(),
             seconds(b)
@@ -248,11 +292,35 @@ pub(crate) struct Merged {
 /// One target's report as read from disk.
 struct Read {
     target: Target,
+    /// The report's name in messages: the file name, with its directory when
+    /// several directories are merged.
+    label: String,
     json: Json,
 }
 
-fn read(dir: &Path, target: Target) -> Result<Option<Read>, String> {
+impl Read {
+    /// The shard the report was limited to (`--shard`), if any.
+    fn shard(&self) -> Option<&str> {
+        self.json["shard"].as_str()
+    }
+
+    /// A process report that ran its budgets: no entry is `sharded`.
+    fn ran_everything(&self) -> bool {
+        !self.json["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|r| r["status"].as_str() == Some("sharded"))
+    }
+}
+
+fn read(dir: &Path, target: Target, several: bool) -> Result<Option<Read>, String> {
     let path = dir.join(report::file_name(target));
+    let label = if several {
+        path.display().to_string()
+    } else {
+        report::file_name(target)
+    };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -270,7 +338,11 @@ fn read(dir: &Path, target: Target) -> Result<Option<Read>, String> {
             target.name()
         ));
     }
-    Ok(Some(Read { target, json }))
+    Ok(Some(Read {
+        target,
+        label,
+        json,
+    }))
 }
 
 fn strings(json: &Json) -> Vec<String> {
@@ -333,35 +405,54 @@ fn placeholder(id: &str, budget: &Budget, status: &str, reason: &str) -> Json {
     })
 }
 
+/// Merges the reports in `dirs` (one directory of a plain run, or one per
+/// shard). Per ID, the occurrences whose status is `sharded` are dropped
+/// and exactly one must be left (「分片」).
 pub(crate) fn merge(
-    dir: &Path,
+    dirs: &[PathBuf],
     budgets: &[Budget],
     require_package: bool,
     commit: Option<String>,
 ) -> Merged {
     let mut errors: Vec<String> = Vec::new();
+    let several = dirs.len() > 1;
+    // Directory by directory, so the first report is the first directory's.
     let mut reports: Vec<Read> = Vec::new();
-    for target in Target::ALL {
-        match read(dir, target) {
-            Ok(Some(r)) => reports.push(r),
-            Ok(None) if target == Target::Package => {
-                if require_package {
-                    errors.push(format!(
-                        "缺少 {}（带 --require package 时必须有）",
-                        report::file_name(target)
-                    ));
+    let mut unreadable: Vec<Target> = Vec::new();
+    for dir in dirs {
+        for target in Target::ALL {
+            match read(dir, target, several) {
+                Ok(Some(r)) => reports.push(r),
+                Ok(None) => {}
+                Err(error) => {
+                    errors.push(error);
+                    unreadable.push(target);
                 }
             }
-            Ok(None) => errors.push(format!(
+        }
+    }
+    // Every target needs at least one report in some directory.
+    for target in Target::ALL {
+        if reports.iter().any(|r| r.target == target) || unreadable.contains(&target) {
+            continue;
+        }
+        if target == Target::Package {
+            if require_package {
+                errors.push(format!(
+                    "缺少 {}（带 --require package 时必须有）",
+                    report::file_name(target)
+                ));
+            }
+        } else {
+            errors.push(format!(
                 "缺少 {}：这个目标没有编译成功或中途崩溃",
                 report::file_name(target)
-            )),
-            Err(error) => errors.push(error),
+            ));
         }
     }
     let has_package = reports.iter().any(|r| r.target == Target::Package);
 
-    // Mode and gating must agree across the benchmark targets.
+    // Mode and gating must agree across the benchmark reports.
     let benchmarked: Vec<&Read> = reports
         .iter()
         .filter(|r| r.target != Target::Package)
@@ -385,7 +476,7 @@ pub(crate) fn merge(
         {
             errors.push(format!(
                 "{} 的 mode、gated 或 judge 与其他报告不同",
-                report::file_name(r.target)
+                r.label
             ));
         }
     }
@@ -393,34 +484,52 @@ pub(crate) fn merge(
         .first()
         .map(|r| r.json["host"].clone())
         .unwrap_or(Json::Null);
+    // The shards of the run, each with the host of its first report.
+    let mut shard_hosts: Vec<Json> = Vec::new();
+    for r in &reports {
+        if let Some(name) = r.shard()
+            && !shard_hosts.iter().any(|s| s["name"] == json!(name))
+        {
+            shard_hosts.push(json!({ "name": name, "host": r.json["host"] }));
+        }
+    }
 
-    let process = reports.iter().find(|r| r.target == Target::Process);
+    // The lists come from the one `process` report that ran its budgets;
+    // the shards' other `process` reports (there are none in the shard
+    // table) would have them `sharded`.
+    let process = reports
+        .iter()
+        .find(|r| r.target == Target::Process && r.ran_everything());
     let plugins = process.map_or_else(Vec::new, |r| strings(&r.json["plugins"]));
     let language_servers = process.map_or_else(Vec::new, |r| strings(&r.json["language_servers"]));
 
     // Every result, by ID, with the report it came from.
-    let mut found: BTreeMap<String, Vec<(Target, Json)>> = BTreeMap::new();
-    for r in &reports {
+    let mut found: BTreeMap<String, Vec<(usize, Json)>> = BTreeMap::new();
+    for (index, r) in reports.iter().enumerate() {
         for error in strings(&r.json["errors"]) {
-            errors.push(format!("{}：{error}", report::file_name(r.target)));
+            errors.push(format!("{}：{error}", r.label));
         }
         for result in r.json["results"].as_array().into_iter().flatten() {
             let id = result["id"].as_str().unwrap_or("").to_owned();
-            found
-                .entry(id)
-                .or_default()
-                .push((r.target, result.clone()));
+            found.entry(id).or_default().push((index, result.clone()));
         }
     }
+    let sharded_run = reports.iter().any(|r| r.shard().is_some());
 
     let mut results = Vec::new();
     // On the judging machine at least one of its entries must have run: a
     // filter or plan that leaves none judges nothing (ADR 0052).
     let mut judged_here = false;
     for (id, budget) in expected(budgets, &plugins, &language_servers) {
-        let occurrences = found.remove(&id).unwrap_or_default();
+        let all = found.remove(&id).unwrap_or_default();
+        // The shard's other budgets are `sharded` in a report; the one
+        // real entry is in the report of the shard that owns it.
+        let live: Vec<&(usize, Json)> = all
+            .iter()
+            .filter(|(_, result)| result["status"].as_str() != Some("sharded"))
+            .collect();
         if budget.judging_machine
-            && occurrences.iter().any(|(_, result)| {
+            && live.iter().any(|(_, result)| {
                 matches!(
                     result["status"].as_str(),
                     Some("ok" | "over" | "record" | "error")
@@ -429,27 +538,46 @@ pub(crate) fn merge(
         {
             judged_here = true;
         }
-        match occurrences.as_slice() {
-            [] if budget.target == Target::Package && !has_package => {
+        match live.as_slice() {
+            [] if all.is_empty() && budget.target == Target::Package && !has_package => {
                 results.push(placeholder(&id, budget, "skipped", "未打包"));
             }
             [] => {
-                errors.push(format!("{id} 不在 {} 里", report::file_name(budget.target)));
-                results.push(placeholder(&id, budget, "error", "报告里缺少这一项"));
+                let owner = shards::shard_of(budget)
+                    .filter(|_| sharded_run || !all.is_empty())
+                    .map(|shard| format!("：缺少分片 {} 的报告", shard.name));
+                let owner = owner.unwrap_or_default();
+                if all.is_empty() {
+                    errors.push(format!(
+                        "{id} 不在 {} 里{owner}",
+                        report::file_name(budget.target)
+                    ));
+                    results.push(placeholder(&id, budget, "error", "报告里缺少这一项"));
+                } else {
+                    errors.push(format!("{id} 在全部报告里都是 sharded{owner}"));
+                    results.push(placeholder(
+                        &id,
+                        budget,
+                        "error",
+                        "在全部报告里都是 sharded",
+                    ));
+                }
             }
-            [(target, result)] if *target == budget.target => results.push(result.clone()),
-            [(target, result)] => {
+            [(index, result)] if reports[*index].target == budget.target => {
+                results.push(result.clone());
+            }
+            [(index, result)] => {
                 errors.push(format!(
                     "{id} 出现在 {}，应在 {}",
-                    report::file_name(*target),
+                    reports[*index].label,
                     report::file_name(budget.target)
                 ));
                 results.push(result.clone());
             }
             [(_, result), ..] => {
-                let files: Vec<String> = occurrences
+                let files: Vec<&str> = live
                     .iter()
-                    .map(|(t, _)| report::file_name(*t))
+                    .map(|(index, _)| reports[*index].label.as_str())
                     .collect();
                 errors.push(format!("{id} 出现了多次：{}", files.join("、")));
                 results.push(result.clone());
@@ -457,10 +585,13 @@ pub(crate) fn merge(
         }
     }
     for (id, occurrences) in found {
-        for (target, _) in occurrences {
+        for (index, result) in occurrences {
+            if result["status"].as_str() == Some("sharded") {
+                continue;
+            }
             errors.push(format!(
                 "{} 里的 {id} 不在预算表里（或插件、语言服务器列表里没有它）",
-                report::file_name(target)
+                reports[index].label
             ));
         }
     }
@@ -475,12 +606,16 @@ pub(crate) fn merge(
     } else {
         0
     };
-    // Every benchmark's wall time, slowest first, with its target.
+    // Every benchmark's wall time, slowest first, with its target (and its
+    // shard).
     let mut benches: Vec<Json> = Vec::new();
     for r in &reports {
         for bench in r.json["benches"].as_array().into_iter().flatten() {
             let mut bench = bench.clone();
             bench["target"] = json!(r.target.name());
+            if let Some(shard) = r.shard() {
+                bench["shard"] = json!(shard);
+            }
             benches.push(bench);
         }
     }
@@ -505,6 +640,9 @@ pub(crate) fn merge(
     out.insert("gated".into(), json!(gated));
     out.insert("judge".into(), json!(judge));
     out.insert("host".into(), host);
+    if !shard_hosts.is_empty() {
+        out.insert("shards".into(), Json::Array(shard_hosts));
+    }
     out.insert("commit".into(), json!(commit));
     out.insert("results".into(), Json::Array(results));
     out.insert("errors".into(), json!(errors));

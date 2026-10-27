@@ -94,6 +94,7 @@ fn fake_report() -> Report<'static> {
         judge: false,
         host: host(),
         commit: Some("0123abc".into()),
+        shard: None,
         entries: vec![
             // Over budget, then within it on the retry.
             entry(
