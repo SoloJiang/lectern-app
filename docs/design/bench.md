@@ -597,20 +597,22 @@ CI 把预算分成几个分片，每个分片在一个 macOS 任务里运行，�
 // lectern_bench::shards（默认编译）
 pub struct Shard {
     pub name: &'static str,
-    /// 这个分片的 ID 前缀；空表示其余所有预算（只有最后一个分片可以为空）。
-    pub prefixes: &'static [&'static str],
-    /// 这个分片要运行的基准目标；`just bench --shard` 只构建和运行它们。
+    /// 这个分片的基准目标；`just bench --shard` 只构建和运行它们。
     pub targets: &'static [Target],
+    /// 这些目标里属于本分片的 ID 前缀；空表示这些目标里其余的预算。
+    pub prefixes: &'static [&'static str],
 }
 
 pub static SHARDS: &[Shard];
 
-/// 一条预算所在的分片：第一个有前缀匹配它的分片，都不匹配时是最后一个。
-pub fn shard_of(id: &str) -> &'static Shard;
+/// 一条预算（展开 `*` 之前）所在的分片：按表的顺序，第一个 `targets` 含
+/// `budget.target`、且 `prefixes` 为空或有一个是 `budget.id` 前缀的分片。
+/// `Package` 的预算不属于任何分片，为 None。
+pub fn shard_of(budget: &Budget) -> Option<&'static Shard>;
 ```
 
-- 第一版三个分片：`code-intel`（前缀 `code_intel/`，目标 `time`、`memory`）、`process`（`process` 目标的全部预算：`app/`、`plugin/`、`baseline/`、`lsp/`，目标 `process`）、`rest`（其余，目标 `time`、`memory`）。划分按报告里每个基准的耗时调整，不需要新的 ADR。
-- 关键约束：`process` 目标的每条预算都在同一个分片里，插件列表和语言服务器列表来自这一份报告。分片的 `targets` 必须包含它每条预算的 `Budget::target`。
+- 第一版三个分片，按顺序：`code-intel`（目标 `time`、`memory`，前缀 `code_intel/` 和 `plugin/code-intel/`：后者是 `memory` 目标的 `plugin/code-intel/resident_*`，`resident_100k` 用同一个 10 万文件的夹具）、`process`（目标 `process`，没有前缀：这个目标的全部预算，含 `plugin/*/…`、`app/*`、`baseline/*`、`lsp/*`）、`rest`（目标 `time`、`memory`，没有前缀）。分片由预算的目标和 ID 决定，不由展开后的 ID 决定：`plugin/*/activate` 展开成的 `plugin/code-intel/activate` 仍在 `process` 分片。`Package` 的预算（`app/bundle_size`、`app/dmg_size`）不属于任何分片，合并时照旧按有没有 `report-package.json` 处理。划分按报告里每个基准的耗时调整，不需要新的 ADR。
+- 关键约束：`process` 目标的每条预算都在同一个分片里，插件列表和语言服务器列表来自这一份报告。
 - 运行器的参数 `--shard <名字>`：不属于这个分片的预算记为 `sharded`，不运行；过滤参数照常在分片之内生效。名字不在表里时开始前退出，退出码 2。
 - `lectern-bench-report shard <名字>` 打印这个分片的基准目标（每行一个），`just bench --shard` 据此传 `--bench`。
 - 合并：`lectern-bench-report merge <目录>...` 读每个目录里存在的 `report-<target>.json`。每个基准目标至少要有一份报告。对每个应有的 ID，去掉状态为 `sharded` 的出现后恰好剩一次；全部是 `sharded`、剩下零次或多次都是错误。插件列表和语言服务器列表取自唯一一份没有把 `process` 目标记为 `sharded` 的 `report-process.json`。各份报告的 `mode`、`gated`、`judge` 必须相同；`host` 取第一份，合并后的 `shards` 列出每个分片的名字和它的 `host`。只给一个目录、报告里没有 `sharded` 时，结果与原来相同。
@@ -985,7 +987,7 @@ CI：
 - 报告：`report_*` 用 insta 快照固定一组假结果的文本表、JSON 和 Markdown 摘要；每个目标只写自己的 `report-<target>.json`。
 - 插件基准的运行器规则：`runner_the_longest_prefix_owns_…`（`plugin` 和 `plugin/after_first_frame` 两个基准，后者的预算归后者；`Ctx::report_plugins` 的列表进报告）、`runner_filtered_plugin_budgets_expand_…`（被过滤的 `plugin/*/…` 按列表逐个记为 `filtered`，有自己预算的插件不展开）、`runner_without_a_plugin_list_…`（没有列表时带 `*` 的条目保持一条）。
 - 合并：`report_merge_*` 验证三份报告（有 `report-package.json` 时四份）合并后每条预算恰好一次；没有 `report-package.json` 时 `Package` 的条目记为 `skipped`，带 `--require package` 时退出码 2；`lsp/*/resident` 按语言服务器列表展开；带 `*` 的条目按插件列表展开，列表为空时条目本身出现一次，不为空时某个插件缺少展开项即出错；缺一份报告、某条预算缺失、重复或出现在错误的目标里时退出码 2；合并后的退出码取超标与出错的最严重者；被过滤的条目记为 `filtered` 不算缺失；`::error` 注释最多 10 条；`record` 结果按组输出 `::notice`，`smoke`、`planned`、`ok` 不输出，组数超过 10 时第 10 条合并剩下的组、不丢结果；判定机器的报告合并后保留 `judge` 和标题，一份报告的 `judge` 与其他的不同时退出码 2，没有 `judge` 的报告按 false 算；`judge` 为 true 而判定机器的条目都是 `filtered`、`planned` 或 `skipped` 时退出码 2，有一条是 `ok` 或 `record` 时通过，`judge` 为 false 时不检查。
-- 分片：`shards_*` 检查每条 `Active` 和 `Planned` 的预算恰好属于一个分片、只有最后一个分片的前缀为空、`process` 目标的预算都在同一个分片里、每个分片的 `targets` 含它每条预算的目标；`runner_shard_*` 验证 `--shard` 把其他分片的预算记为 `sharded` 且不运行、未知的分片名开始前退出；`report_merge_shards_*` 验证几个分片目录合并后每条预算恰好一次、全部是 `sharded` 或两个分片都运行了同一条时退出码 2、缺少某个目标的全部报告时退出码 2、插件列表取自 `process` 分片、`benches` 带分片名。
+- 分片：`shards_*` 检查目标为 `time`、`memory`、`process` 的每条 `Active` 和 `Planned` 预算恰好属于一个分片、`Package` 的预算不属于任何分片、`process` 目标的预算都在同一个分片里、`plugin/code-intel/resident_*` 在 `code-intel` 分片；`runner_shard_*` 验证 `--shard` 把其他分片的预算记为 `sharded` 且不运行、未知的分片名开始前退出；`report_merge_shards_*` 验证几个分片目录合并后每条预算恰好一次、全部是 `sharded` 或两个分片都运行了同一条时退出码 2、缺少某个目标的全部报告时退出码 2、插件列表取自 `process` 分片、`benches` 带分片名。
 - 计数分配器：`alloc_*` 分配并保留 1 MiB 后 `live` 增加 1 MiB，释放后回到原值，`peak` 记录峰值（在单独的测试二进制里注册分配器）。
 - 报告协议：`wire_*` 对每种消息编码后解码相等，含带空格、`%`、换行和非 UTF-8 字节的路径；缺字段、未知消息名、坏的百分号编码返回错误。
 - 进程调度：`process_*` 用脚本化的 `Launcher` / `ProcessInfo`：冷启动 2 次预热不计入、20 次样本；`Busy` 让 5 秒等待重新开始；采样前后代数不同时重采；30 秒不静止记为 `over`；不连 socket、提前退出、不响应 `Quit` 记为出错；`process_deadline_*`：假探针对 `Open` 不回 `Milestone`、对 `Scroll` 不回 `Frames`、不发 `Ready`、不应答 `Epoch` 时，运行器在各自的期限（测试里缩短）后结束进程组并记为 `error`，原因写明等的消息；插件基准里假探针发 `PluginFailed` 时立即记为 `error`、不等期限；插件两次启动的差值与激活耗时的取法（进程插件的进程组计入差值）；激活条件为 `[Workspace(..), AfterFirstFrame]` 的插件计入 `plugin/after_first_frame`；预热启动以 3 退出时记为出错；探针报告 `hook <名字>`、`frames <…>` 时记为出错，探针连上、写下 `Error` 并立刻退出时，运行器先看 socket 再看进程（`process_a_probe_that_exits_at_once_is_still_heard`）；`time_with_setup` 每个样本调用一次 `setup`；进程组展开到孙进程、中途退出的后代被跳过、同一 pid 不重复计入、`plugin/process_total` 取自 `ActivateAll` 那次启动、是全部进程插件组之和（`Command` / `Manual` / `Workspace` 激活的进程插件都计入），`app/idle_empty` 不产出它；语言服务器组记为 `lsp/<id>/resident` 并计入 `lsp/total`，没有语言服务器时 `lsp/*/resident` 为 `skipped`、`lsp/total` 为 0（这两项和 `plugin/process_total` 还是计划中，没有基准，测试随各自的 PR）；第 5 步的 `process_idle_footprints_*`（三次启动各取一次采样，不静止的启动单独返回）、`process_plugin_*`（一对启动的 `LECTERN_BENCH_PLUGINS`、差值、进程插件的进程组计入、语言服务器组和其他种类不计入、差为负时 `resident` 为 0、超标时再测两对且逐个启动、状态不是 `Active` 或四段耗时不全或应答里没有这个插件时出错、所选插件 `Failed` 时立即出错、不静止时出错）、`process_after_first_frame_*`（只加激活条件含 `AfterFirstFrame` 的插件，其余不检查；3 次启动逐个运行）、`process_plugin_list_*`（完整 profile、有效静止样本）、`process_unclassified_children_*`（已报告的进程插件和语言服务器的进程组不计，`Other` 和没有报告的计；没有子进程时为 0）；帧判定：60 Hz 下间隔 16.7 ms、工作时间 5 ms 时通过；一帧工作时间 9 ms 时超标；`requested` 之后主线程阻塞 20 ms、`started` 间隔达到两个周期时超标；120 Hz 下与「最大间隔 ≤ 8.3 ms」的结论一致；内存类并发不超过 3、计时类不并发；判定机器上（`Scheduler::judging`）来源为 `handler` 的首帧让会话出错、向进程组发 `SIGKILL`，冷启动在第一次启动后停止，来源为 `presented` 时照常取样。
